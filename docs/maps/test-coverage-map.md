@@ -312,6 +312,7 @@
 | `miniKlineCardContract.test.ts` | 20 tests | MiniKlineCard 组件源码契约（无 fitContent、setVisibleLogicalRange、autoscaleInfoProvider、ResizeObserver、requestAnimationFrame、五周期按钮、A 股配色、闭包根治 16-20）（CHANGE-20260715-003 → CHANGE-20260715-006） |
 | `smcRendering.test.ts` | 40 tests | SMC 渲染纯函数（映射/区间求交/OB 选择/价格候选）+ Canvas mock 行为测试（CHANGE-20260716-001） |
 | `detailSourceLoadingContract.test.ts` | 9 tests | 详情页来源列表 loading 占位契约（sourceListLoading 字段、loading 占位渲染、列表渲染条件排除 loading、header 显示、CSS 存在、handleNavigateToStock 显式传 source/strategy、URL 完整性、不使用 useMarketStocks、上一只/下一只保留 returnTo）（CHANGE-20260715-004） |
+| `sourceListStabilityContract.test.ts` | 10 tests | 详情页来源列表切股稳定性反闪烁合同（禁止页面级 isLoading/!data 早退、tv-detail-layout 始终挂载、aside 容器禁止 key={symbol}、列表项保持 key={s.symbol}、渲染条件不依赖 instrumentQuery、instrumentLoading/inst 派生、顶部信息栏条件化、备忘录按钮 disabled、metaParts 条件化）（CHANGE-20260725-002） |
 | `indicatorManifest.test.ts` | 15 tests | CHART_LAYER_MANIFEST 用户文案 + SMC 图层（CHANGE-20260715-001 扩展 3 用例） |
 | `test_market_data_ssot_architecture.py` | 5 tests | MDAS SSOT 架构守护 AST 测试：禁止业务层导入 repository 私有行情查询/复权/旧 get_bars、禁止业务层自行 resample 周/月、仅 MDAS 可导入 kline_aggregator（CHANGE-20260717-002） |
 | `test_bars.py`（CHANGE-20260717-002 扩展） | 现有用例 + 新增 | MDAS v2 契约 + adjustment_as_of 截断 + 不信任 bar 自带 adj_factor 列 + qfq 唯一出口 |

@@ -269,76 +269,27 @@ export default function StockDetailPage() {
     })
   }, [detailActions, instrumentId, showToast])
 
-  // 股票信息加载中
-  if (researchData.instrumentQuery.isLoading) {
-    return (
-      <div
-        className="tv-content"
-        data-testid="stock-detail-capture"
-        data-render-ready="false"
-        ref={containerRef}
-      >
-        <div className="tv-symbol-bar">
-          <div className="tv-symbol-left">
-            <button className="icon-btn tv-back" onClick={handleBack} title="返回">←</button>
-            <div>
-              <div className="tv-symbol-title">
-                <span>加载中...</span>
-                <span className="tv-code">{symbol || ''}</span>
-              </div>
-              <div className="tv-symbol-meta">正在获取股票数据</div>
-            </div>
-          </div>
-        </div>
-        <div className="tv-workspace">
-          <section className="tv-chart-column">
-            <div className="tv-chart-loading">行情数据加载中...</div>
-          </section>
-        </div>
-      </div>
-    )
-  }
-
-  // 股票不存在或查询出错
-  if (!researchData.instrumentQuery.data) {
-    return (
-      <div
-        className="tv-content"
-        data-testid="stock-detail-capture"
-        data-render-ready="false"
-        ref={containerRef}
-      >
-        <div className="tv-symbol-bar">
-          <div className="tv-symbol-left">
-            <button className="icon-btn tv-back" onClick={handleBack} title="返回">←</button>
-            <div>
-              <div className="tv-symbol-title">
-                <span>未找到股票</span>
-                <span className="tv-code">{symbol || ''}</span>
-              </div>
-              <div className="tv-symbol-meta">
-                {researchData.instrumentQuery.isError ? '股票信息查询失败，请稍后重试' : '请检查股票代码是否正确'}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
+  // [FIX source-list-flicker] 删除页面级 isLoading / !data early return：
+  // 早期实现将 instrumentQuery.isLoading 作为整个页面的 loading 早退条件，
+  // 导致切股时 tv-detail-layout 和 tv-source-list 被卸载，数据返回后重新挂载 → 闪烁。
+  // 现在改为：tv-detail-layout 和来源列表始终挂载；loading/error 仅影响右侧详情和顶部信息栏。
+  // 来源列表属于 Persistent Source Context，不属于 selected instrument loading（合同 §1）。
+  const instrumentLoading = researchData.instrumentQuery.isLoading
+  const instrumentError = researchData.instrumentQuery.isError
   const inst = researchData.instrumentQuery.data
   const { priceSummary, quoteStatus, barsStatus } = researchData
   // [P0-7] quote 从 chartSnapshot 派生（详情页唯一行情真源，禁止调用 /quote）
   const quote = researchData.quote
 
   // [QuoteTrust] - 元信息：市场 · 人民币 · 行情状态 · update_time · K线状态
-  const metaParts = [
+  // [FIX source-list-flicker] inst 可能为 undefined（loading/error），metaParts 条件化构造
+  const metaParts = inst ? [
     MARKET_LABELS[inst.market] || inst.market,
     '人民币',
     quoteStatus.label,
     quote?.update_time ? `更新 ${formatShanghaiTimeShort(quote.update_time)}` : null,
     barsStatus ? barsStatus.label : null,
-  ].filter(Boolean)
+  ].filter(Boolean) : []
 
   // 右栏状态观察面板（Atomic Fact Contract V1: 点击「显示状态观察」打开右侧 overlay Drawer，
   // 不压缩主 K 线；与 /market 共用 useStockContext query key）
@@ -363,19 +314,39 @@ export default function StockDetailPage() {
   return (
     <div className="tv-content" ref={containerRef}>
       {/* ===== 股票信息栏 ===== */}
+      {/* [FIX source-list-flicker] 顶部信息栏条件化渲染 loading/error/success，
+          但 tv-detail-layout 和来源列表始终挂载（不在本早退条件内） */}
       <div className="tv-symbol-bar">
         <div className="tv-symbol-left">
           <button className="icon-btn tv-back" onClick={handleBack} title="返回">←</button>
           <div>
             <div className="tv-symbol-title">
-              <span>{inst.name}</span>
-              <span className="tv-code">{inst.symbol}</span>
-              <span className="status-pill ok">{sourceBadge}</span>
+              {/* [FIX source-list-flicker] 新数据返回前不得显示上一只股票的名称（合同 §4/§5） */}
+              {inst ? (
+                <>
+                  <span>{inst.name}</span>
+                  <span className="tv-code">{inst.symbol}</span>
+                  <span className="status-pill ok">{sourceBadge}</span>
+                </>
+              ) : instrumentLoading ? (
+                <>
+                  <span>加载中...</span>
+                  <span className="tv-code">{symbol || ''}</span>
+                </>
+              ) : (
+                <>
+                  <span>未找到股票</span>
+                  <span className="tv-code">{symbol || ''}</span>
+                </>
+              )}
             </div>
-            <div className="tv-symbol-meta">{metaParts.join(' · ')}</div>
+            <div className="tv-symbol-meta">
+              {inst ? metaParts.join(' · ') : instrumentLoading ? '正在获取股票数据' : instrumentError ? '股票信息查询失败，请稍后重试' : '请检查股票代码是否正确'}
+            </div>
           </div>
         </div>
         {/* 报价条：现价/涨跌/开盘/最高/最低/成交额/总市值/流通市值（CHANGE-20260713-010） */}
+        {/* [FIX source-list-flicker] inst 未就绪时 priceSummary 全 null，StockQuoteStrip 自然显示占位 */}
         <StockQuoteStrip priceSummary={priceSummary} />
         {/* 操作：加入/移出自选、切换、全屏（截图模式隐藏全部按钮） */}
         {!isCaptureMode && (
@@ -396,7 +367,7 @@ export default function StockDetailPage() {
             <button className="btn small" onClick={handleFullscreen}>
               {isFullscreen ? '退出全屏' : '全屏查看'}
             </button>
-            <button className="btn small" onClick={() => detailActions.setMemoOpen(true)}>
+            <button className="btn small" onClick={() => detailActions.setMemoOpen(true)} disabled={!instrumentId}>
               备忘录
             </button>
             <button
@@ -415,7 +386,7 @@ export default function StockDetailPage() {
         <div className="modal-backdrop open" onClick={() => detailActions.setMemoOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 500 }}>
             <div className="modal-head">
-              <h3>备忘录 - {inst.name}</h3>
+              <h3>备忘录 - {inst?.name ?? symbol ?? ''}</h3>
               <button className="icon-btn" onClick={() => detailActions.setMemoOpen(false)}>×</button>
             </div>
             <div className="modal-body">
@@ -465,7 +436,7 @@ export default function StockDetailPage() {
         >
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 500 }}>
             <div className="modal-head">
-              <h3>发送到飞书 - {inst.name}</h3>
+              <h3>发送到飞书 - {inst?.name ?? symbol ?? ''}</h3>
               <button
                 className="icon-btn"
                 onClick={feishu.handleCloseFeishu}
