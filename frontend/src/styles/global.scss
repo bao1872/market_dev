@@ -1223,6 +1223,8 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 // ===== 详情页布局（PRD §6.2 左栏来源列表 + 工作区）=====
 // CHANGE-20260716-006: flex → grid，右侧 minmax(0,1fr) 防止子元素撑宽
 .tv-detail-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); width: 100%; min-width: 0; flex: 1; min-height: 0; }
+// [P0-1] 无来源列表时（direct 访问 / capture 模式）切换单列，防止工作区落入 200px 列
+.tv-detail-layout.no-source-list { grid-template-columns: minmax(0, 1fr); }
 .tv-detail-layout > .tv-workspace { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
 // 统一图表区宽度契约，禁止 Canvas 或子层撑宽
 .strategy-chart-wrap, .tv-chart-column, .tv-canvas-wrap { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }

@@ -214,14 +214,21 @@ export default function StockDetailPage() {
   // 详情页专属飞书投递
   const feishu = useStockDetailFeishu({ instrumentId })
 
-  // 来源徽章：根据 sourceListKind 显示"行情来源/自选来源/选股结果"
-  // P0-4: 不能从 market 进入却显示"自选监控"
+  // 来源徽章：根据 origin 显示"行情来源/自选来源/选股结果/直接访问"
+  // P0-2: direct 访问不得显示"自选来源"，必须独立显示"直接访问"
   // CHANGE-20260713-009: sourceListKind=market → "行情来源"（来自 /market?scope=market）
   // sourceListKind=watchlist + source=selection → "选股结果"（来自 /screener）
-  // sourceListKind=watchlist + source=watchlist → "自选来源"（来自 /market?scope=watchlist 或直接访问）
-  const sourceBadge = detailActions.sourceListKind === 'market'
-    ? '行情来源'
-    : (source === 'selection' ? '选股结果' : '自选来源')
+  // sourceListKind=watchlist + source=watchlist → "自选来源"（来自 /market?scope=watchlist）
+  // origin=direct → "直接访问"（深链/书签/通知，无来源列表）
+  const sourceBadge = sourceCtxV2.origin === 'direct'
+    ? '直接访问'
+    : detailActions.sourceListKind === 'market'
+      ? '行情来源'
+      : (source === 'selection' ? '选股结果' : '自选来源')
+
+  // [P0-1] 是否显示左栏来源列表：capture 模式和 direct 访问时不显示
+  // direct 访问无来源上下文，左栏隐藏，布局切换单列
+  const showSourceList = !isCaptureMode && sourceCtxV2.origin !== 'direct'
 
   /** 统一返回按钮：优先使用 URL returnTo 参数，其次导航 state，否则按 source fallback */
   const handleBack = useCallback(() => {
@@ -321,7 +328,8 @@ export default function StockDetailPage() {
 
   const inst = researchData.instrumentQuery.data
   const { priceSummary, quoteStatus, barsStatus } = researchData
-  const quote = researchData.quoteQuery.data
+  // [P0-7] quote 从 chartSnapshot 派生（详情页唯一行情真源，禁止调用 /quote）
+  const quote = researchData.quote
 
   // [QuoteTrust] - 元信息：市场 · 人民币 · 行情状态 · update_time · K线状态
   const metaParts = [
@@ -579,8 +587,8 @@ export default function StockDetailPage() {
           - returnTo 缺失或非市场搜索时回退到「自选列表」 */}
       {/* CHANGE-20260715-004: 来源列表加载中显示 loading 占位，避免空白后突然出现列表 */}
       {/* CHANGE-20260715-005: 尊重显式 source；拆分 loading/error/empty/invalid 状态 */}
-      <div className="tv-detail-layout">
-        {!isCaptureMode && detailActions.sourceListLoading && (
+      <div className={clsx('tv-detail-layout', !showSourceList && 'no-source-list')}>
+        {showSourceList && detailActions.sourceListLoading && (
           <aside
             className="tv-source-list tv-source-list-loading"
             data-testid="detail-source-list-loading"
@@ -591,7 +599,7 @@ export default function StockDetailPage() {
             <div className="tv-source-list-placeholder">加载中…</div>
           </aside>
         )}
-        {!isCaptureMode && !detailActions.sourceListLoading && detailActions.sourceListError && (
+        {showSourceList && !detailActions.sourceListLoading && detailActions.sourceListError && (
           <aside
             className="tv-source-list tv-source-list-error"
             data-testid="detail-source-list-error"
@@ -602,7 +610,7 @@ export default function StockDetailPage() {
             <div className="tv-source-list-placeholder">来源数据加载失败</div>
           </aside>
         )}
-        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && detailActions.sourceContextInvalid && (
+        {showSourceList && !detailActions.sourceListLoading && !detailActions.sourceListError && detailActions.sourceContextInvalid && (
           <aside
             className="tv-source-list tv-source-list-invalid"
             data-testid="detail-source-list-invalid"
@@ -611,7 +619,7 @@ export default function StockDetailPage() {
             <div className="tv-source-list-placeholder">来源上下文失效</div>
           </aside>
         )}
-        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && detailActions.sourceListEmpty && (
+        {showSourceList && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && detailActions.sourceListEmpty && (
           <aside
             className="tv-source-list tv-source-list-empty"
             data-testid="detail-source-list-empty"
@@ -624,7 +632,7 @@ export default function StockDetailPage() {
             </div>
           </aside>
         )}
-        {!isCaptureMode && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && !detailActions.sourceListEmpty && detailActions.sourceStocks.length > 0 && (
+        {showSourceList && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && !detailActions.sourceListEmpty && detailActions.sourceStocks.length > 0 && (
           <aside
             className="tv-source-list"
             data-testid="detail-source-list"

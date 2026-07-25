@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -305,6 +306,12 @@ class PytdxAdapter(Exchange):
         self._api: TdxHq_API | None = None
         self.max_retries = max_retries
         self.retry_delay: float = retry_delay
+        # [P0-5] I/O 锁：覆盖所有底层读取与重连。
+        # 单例 adapter 在 asyncio.to_thread 调用方并发时，TdxHq_API 的 connect/disconnect/
+        # _fetch_bars 共享同一 socket，必须串行；锁必须在 adapter 内部，不得只在调用方加局部锁。
+        # [P0-7] 使用 RLock（可重入）：防止 _fetch_with_retry 持锁后内部意外调用 connect/
+        # disconnect 导致自锁。当前实现无嵌套获取，但 RLock 提供防御性安全。
+        self._io_lock: threading.RLock = threading.RLock()
 
     def __enter__(self) -> PytdxAdapter:
         self.connect()
@@ -326,31 +333,35 @@ class PytdxAdapter(Exchange):
         Raises:
             RuntimeError: 所有服务器连接均失败时抛出，包含最近 5 条错误信息。
         """
-        last_errors: list[str] = []
-        for host, port in self._servers:
-            try:
-                api = TdxHq_API(raise_exception=True, auto_retry=True)
-                if api.connect(host, port, time_out=5):
-                    logger.info("pytdx 连接成功：%s:%d", host, port)
-                    self._api = api
-                    return
-            except TdxConnectionError as exc:
-                last_errors.append(f"{host}:{port} TdxConnectionError: {exc}")
-            except Exception as exc:
-                last_errors.append(f"{host}:{port} {type(exc).__name__}: {exc}")
+        # [P0-5] I/O 锁覆盖 connect：防止并发调用方同时建连导致 _api 状态错乱
+        with self._io_lock:
+            last_errors: list[str] = []
+            for host, port in self._servers:
+                try:
+                    api = TdxHq_API(raise_exception=True, auto_retry=True)
+                    if api.connect(host, port, time_out=5):
+                        logger.info("pytdx 连接成功：%s:%d", host, port)
+                        self._api = api
+                        return
+                except TdxConnectionError as exc:
+                    last_errors.append(f"{host}:{port} TdxConnectionError: {exc}")
+                except Exception as exc:
+                    last_errors.append(f"{host}:{port} {type(exc).__name__}: {exc}")
 
-        err_summary = "; ".join(last_errors[-5:])
-        raise RuntimeError(f"pytdx 连接失败（尝试 {len(self._servers)} 个服务器）：{err_summary}")
+            err_summary = "; ".join(last_errors[-5:])
+            raise RuntimeError(f"pytdx 连接失败（尝试 {len(self._servers)} 个服务器）：{err_summary}")
 
     def disconnect(self) -> None:
         """断开连接，忽略断开时的异常（仅资源释放，不影响主流程）。"""
-        if self._api is not None:
-            try:
-                self._api.disconnect()
-            except Exception as exc:
-                logger.warning("pytdx 断开连接时出现异常（已忽略）：%s", exc)
-            finally:
-                self._api = None
+        # [P0-5] I/O 锁覆盖 disconnect：防止与 _fetch_with_retry 并发访问 _api
+        with self._io_lock:
+            if self._api is not None:
+                try:
+                    self._api.disconnect()
+                except Exception as exc:
+                    logger.warning("pytdx 断开连接时出现异常（已忽略）：%s", exc)
+                finally:
+                    self._api = None
 
     def get_security_list(self, market: str, max_count: int | None = None) -> pd.DataFrame:
         """拉取指定市场的全部股票列表（参考 chanlun-pro all_stocks() 设计）。
@@ -379,7 +390,9 @@ class PytdxAdapter(Exchange):
 
         # 获取市场证券总数（参考 chanlun-pro：client.get_security_count(market)）
         try:
-            total_count = self.api.get_security_count(market_code)
+            # [P0-5] I/O 锁覆盖 self.api.* 调用
+            with self._io_lock:
+                total_count = self.api.get_security_count(market_code)
         except Exception as exc:
             raise RuntimeError(
                 f"pytdx get_security_count 失败：market={market}(code={market_code}), error={exc}"
@@ -398,7 +411,9 @@ class PytdxAdapter(Exchange):
         for i in range(pages):
             start = i * SECURITY_LIST_PAGE_SIZE
             try:
-                data = self.api.get_security_list(market_code, start)
+                # [P0-5] I/O 锁覆盖 self.api.* 调用
+                with self._io_lock:
+                    data = self.api.get_security_list(market_code, start)
             except Exception as exc:
                 raise RuntimeError(
                     f"pytdx get_security_list 拉取失败：market={market}(code={market_code}), "
@@ -1073,7 +1088,9 @@ class PytdxAdapter(Exchange):
             try:
                 if self._api is None:
                     self.connect()
-                raw = self.api.get_xdxr_info(market, symbol)
+                # [P0-5] I/O 锁覆盖 self.api.* 调用
+                with self._io_lock:
+                    raw = self.api.get_xdxr_info(market, symbol)
                 if not raw:
                     return pd.DataFrame()
                 df = pd.DataFrame(raw)
@@ -1122,7 +1139,9 @@ class PytdxAdapter(Exchange):
             try:
                 if self._api is None:
                     self.connect()
-                raw = self.api.get_finance_info(market, symbol)
+                # [P0-5] I/O 锁覆盖 self.api.* 调用
+                with self._io_lock:
+                    raw = self.api.get_finance_info(market, symbol)
                 if raw is None or not raw:
                     return None
                 # raw 是 OrderedDict
@@ -1174,20 +1193,26 @@ class PytdxAdapter(Exchange):
         Raises:
             RuntimeError: 重试 max_retries 次后仍失败（不吞没异常）
         """
+        # [P0-5] I/O 锁覆盖 _fetch_with_retry：单例 adapter 在 asyncio.to_thread 并发调用时
+        # 必须串行访问 TdxHq_API（共享 socket）；connect/disconnect 已各自持锁，但
+        # threading.Lock 不可重入，故内部调用前先释放外层锁，由内部方法各自持锁。
+        # 这里持锁范围：连接检查 + _fetch_bars 调用（原子），失败重连通过 disconnect+connect 各自持锁。
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                # 确保已连接
+                # 确保已连接（connect 内部持锁，这里不重复持锁）
                 if self._api is None:
                     self.connect()
-                return self._fetch_bars(symbol, period, count)
+                # 持锁调用 _fetch_bars，防止并发请求污染 socket 状态
+                with self._io_lock:
+                    return self._fetch_bars(symbol, period, count)
             except RuntimeError as exc:
                 last_exc = exc
                 logger.warning(
                     "pytdx 拉取失败 attempt=%d/%d symbol=%s: %s",
                     attempt, self.max_retries, symbol, exc,
                 )
-                # 重连前断开旧连接
+                # 重连前断开旧连接（disconnect 内部持锁，这里不重复持锁）
                 self.disconnect()
             except Exception as exc:
                 # 未预期异常：补充上下文后 raise（禁止吞没）

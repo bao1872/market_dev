@@ -1808,6 +1808,29 @@ export interface ChartSnapshotResponse {
   snapshot_time: string
   render_frame: CaptureRenderFrame
   timeframe: string
+  // [P0-7] 详情页唯一行情真源扩展字段（CHANGE-20260724-003）
+  // 详情页不得同时以 /quote 和 /chart-snapshot 作为行情真源；
+  // 顶部价格、K线和指标必须来自同一快照、同一 as_of
+  quote: {
+    current_price: number
+    open: number
+    high: number
+    low: number
+    close: number
+    volume: number
+    prev_close: number | null
+    change_pct: number
+    update_time: string
+    is_realtime: boolean
+  } | null
+  market_session: string
+  as_of: string
+  actual_latest_bar_time: string | null
+  expected_latest_bar_time: string
+  freshness_state: 'fresh' | 'partial' | 'stale' | 'unavailable'
+  data_source: string
+  is_partial: boolean
+  degraded_reason: string | null
 }
 
 /**

@@ -791,6 +791,26 @@ export function useChartSnapshot(
     staleTime: STALE_WATCHLIST,
     refetchInterval: options?.refetchInterval ?? (() => isInTradingHours() ? 30000 : false),
     refetchIntervalInBackground: false,
+    // [P0-8] hidden 恢复时立即刷新（React Query 默认 refetchOnWindowFocus=true）
+    refetchOnWindowFocus: true,
+  })
+}
+
+/**
+ * [P0-8] 响应式市场状态 hook — 用于详情页行情快照的市场阶段响应式依赖。
+ *
+ * 开盘、午休结束、hidden 恢复、切股和切周期时立即 invalidate 并刷新。
+ * - 轮询 /market/status 每 15s 一次（比 AppShell 30s 更密集，确保阶段切换及时感知）
+ * - 返回 market_session 字段，供调用方 useEffect 监听变化触发 invalidateQueries
+ * - staleTime=10s 避免过度请求
+ */
+export function useMarketSessionReactive() {
+  return useQuery({
+    queryKey: ['market-status', 'reactive'],
+    queryFn: () => api.getMarketStatus(),
+    staleTime: 10000,
+    refetchInterval: 15000,
+    refetchIntervalInBackground: true, // 后台也轮询，确保阶段切换及时感知
   })
 }
 

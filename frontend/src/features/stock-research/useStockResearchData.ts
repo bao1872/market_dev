@@ -16,11 +16,12 @@
 // 外部仍以 barsQuery/indicatorsQuery 形式消费（保持 StockResearchWorkspace 兼容），实际数据源为同一 chartSnapshotQuery。
 // render_frame.matched=false 时 isRenderReady=false（与 Capture 同款合同）。
 import { useEffect, useMemo, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   useInstrumentBySymbol,
   useChartSnapshot,
   useInstrumentEvents,
-  useRealtimeQuote,
+  useMarketSessionReactive,
 } from '@/hooks/useApi'
 import { mapBarsToBarData } from '@/utils/chart'
 import type { ChartEvent } from '@/components/StrategyChart'
@@ -91,7 +92,8 @@ export interface StockResearchData {
   indicatorsQuery: DerivedChartQuery<IndicatorResponse>
   // chartSnapshot 原始 query（含 render_frame，供 StockResearchWorkspace 校验截图就绪状态）
   chartSnapshotQuery: ReturnType<typeof useChartSnapshot>
-  quoteQuery: ReturnType<typeof useRealtimeQuote>
+  // [P0-7] quoteQuery 已删除：详情页不得同时以 /quote 和 /chart-snapshot 作为行情真源
+  // quote 从 chartSnapshotQuery.data.quote 派生（同一 as_of，同一快照）
   eventsQuery: ReturnType<typeof useInstrumentEvents>
   // 组装后的数据
   baseBars: ReturnType<typeof mapBarsToBarData>
@@ -106,9 +108,26 @@ export interface StockResearchData {
   barsStatus: BarsStatus | null
   // 截图模式就绪状态（由父组件传入 isCaptureMode 时使用）
   isRenderReady: boolean
+  // [P0-7] quote 从 chartSnapshot 派生（详情页唯一行情真源）
+  // 包含 update_time/is_realtime 等元信息，供 StockDetailPage 顶部行情条展示
+  // 类型与 ChartSnapshotResponse.quote 对齐（可为 null，当 page_df 为空时）
+  quote: {
+    current_price: number
+    open: number
+    high: number
+    low: number
+    close: number
+    volume: number
+    prev_close: number | null
+    change_pct: number
+    update_time: string
+    is_realtime: boolean
+  } | null | undefined
 }
 
 export function useStockResearchData({ symbol, timeframe, includeSmc = false }: StockResearchDataParams): StockResearchData {
+  const queryClient = useQueryClient()
+
   // 1. 按 symbol 查询 instrument（获取 instrumentId）
   const instrumentQuery = useInstrumentBySymbol(symbol ?? '')
   const instrumentId = instrumentQuery.data?.id
@@ -126,6 +145,40 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     abortRef.current = new AbortController()
   }, [timeframe])
 
+  // [P0-8] 响应式市场状态：开盘、午休结束、hidden 恢复、切股和切周期时立即 invalidate 并刷新
+  // market_session 变化时（如 PRE_OPEN → MORNING_SESSION → LUNCH_BREAK → AFTERNOON_SESSION）
+  // 立即 invalidate chart-snapshot，触发 refetch 获取最新行情
+  // [P0-10] visibilitychange：页面从 hidden → visible 时立即刷新一次（不进入 invalidate 循环）
+  const marketStatusQuery = useMarketSessionReactive()
+  const prevMarketSessionRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const currentSession = marketStatusQuery.data?.market_session
+    if (currentSession === undefined) return
+    if (prevMarketSessionRef.current !== undefined && prevMarketSessionRef.current !== currentSession) {
+      // 市场阶段切换：invalidate chart-snapshot（当前 instrumentId 的所有周期）
+      queryClient.invalidateQueries({
+        queryKey: ['chart-snapshot', 'v1', instrumentId],
+        exact: false,
+      })
+    }
+    prevMarketSessionRef.current = currentSession
+  }, [marketStatusQuery.data?.market_session, instrumentId, queryClient])
+
+  // [P0-10] 页面可见性恢复：hidden → visible 时只触发一次 invalidate
+  // 使用 document.visibilityState 防止重复触发；effect 依赖 instrumentId 确保切股时重置
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        queryClient.invalidateQueries({
+          queryKey: ['chart-snapshot', 'v1', instrumentId],
+          exact: false,
+        })
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [instrumentId, queryClient])
+
   // 2. [PRD V2.0 §4.2 SNAP-01] 一次 chart-snapshot 原子请求：bars + indicators + render_frame
   //   禁止 Bars/Indicators 两次独立实时请求；后端基于同一 MDAS DataFrame 生成 display_frame。
   //   includeSmc=true 时透传 include_smc=1，后端按需计算 SMC（默认 False 跳过，0 CPU 消耗）。
@@ -136,7 +189,8 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     bars: barsCount,
     ...(includeSmc ? { include_smc: 1 } : {}),
   })
-  const quoteQuery = useRealtimeQuote(instrumentId)
+  // [P0-7] useRealtimeQuote 已删除：详情页不得同时以 /quote 和 /chart-snapshot 作为行情真源
+  // quote 从 chartSnapshotQuery.data.quote 派生（同一 as_of，同一快照）
   const eventsQuery = useInstrumentEvents(instrumentId, { limit: 100 })
 
   // 3. [PRD V2.0 §4.2] 从 chartSnapshotQuery 派生兼容的 barsQuery / indicatorsQuery
@@ -199,23 +253,27 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     }))
   }, [eventsQuery.data])
 
-  // 6. 行情摘要（优先使用实时报价，降级到 safeBarsData 最后一根 bar）
-  const quote = quoteQuery.data
+  // [P0-7] 行情摘要：从 chartSnapshot.quote 派生（详情页唯一行情真源）
+  // 禁止详情页调用 /quote；顶部价格、K线和指标必须来自同一快照、同一 as_of
+  const quote = snapshotTimeframeMatches ? snapshotData?.quote : undefined
   const lastBar = safeBarsData?.items?.[safeBarsData.items.length - 1] || null
   const prevBar = safeBarsData?.items?.[safeBarsData.items.length - 2] || null
   const currentPrice = quote?.current_price ?? lastBar?.close ?? null
   const openPrice = quote?.open ?? lastBar?.open ?? null
   const highPrice = quote?.high ?? lastBar?.high ?? null
   const lowPrice = quote?.low ?? lastBar?.low ?? null
-  const amountValue = quote?.amount ?? lastBar?.amount ?? null
+  // [P0-7] chart-snapshot quote 不含 amount 字段，直接从 lastBar 取
+  const amountValue = lastBar?.amount ?? null
   const changePercent = quote?.change_pct ?? (lastBar && prevBar
     ? ((lastBar.close - prevBar.close) / prevBar.close * 100)
     : null)
   const isUp = changePercent !== null ? changePercent >= 0 : true
   // CHANGE-20260713-010: 市值字段来自 quote（DB 无股本数据时为 null）
-  const totalMarketCap = quote?.total_market_cap ?? null
-  const floatMarketCap = quote?.float_market_cap ?? null
-  const marketCapAsOf = quote?.market_cap_as_of ?? null
+  // [P0-7] chart-snapshot 不返回市值字段（避免污染快照），市值仍走 /quote 接口
+  // 但详情页不调用 /quote，故市值为 null（其他页面可继续使用 /quote）
+  const totalMarketCap = null
+  const floatMarketCap = null
+  const marketCapAsOf = null
 
   const priceSummary: PriceSummary = useMemo(() => ({
     currentPrice,
@@ -230,18 +288,31 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     marketCapAsOf,
   }), [currentPrice, openPrice, highPrice, lowPrice, amountValue, changePercent, isUp, totalMarketCap, floatMarketCap, marketCapAsOf])
 
-  // 7. 行情状态标签（非实时非降级时统一显示"行情回退"，禁止所有非 1d 周期显示"日线回退"）
+  // [P0-7] 行情状态标签：基于 chartSnapshot.freshness_state（详情页唯一行情真源）
+  // 删除泛化回退文案，使用：实时行情 / 当期未完成 / 最近收盘 / 数据延迟 / 行情不可用
+  const freshnessState = snapshotTimeframeMatches ? snapshotData?.freshness_state : undefined
   const quoteStatus: QuoteStatus = useMemo(() => {
-    if (!quote) return { label: '加载中', badgeClass: 'status-pill neutral' }
-    if (quote.degraded) return { label: '行情降级', badgeClass: 'status-pill warn' }
-    if (quote.is_realtime && quote.source === 'pytdx' && quote.freshness_seconds <= 60) {
-      return { label: '实时行情', badgeClass: 'status-pill ok' }
+    if (!safeBarsData && chartSnapshotQuery.isLoading) {
+      return { label: '加载中', badgeClass: 'status-pill neutral' }
     }
-    if (quote.source === 'daily_fallback') {
-      return { label: '行情回退', badgeClass: 'status-pill neutral' }
+    switch (freshnessState) {
+      case 'partial':
+        return { label: '当期未完成', badgeClass: 'status-pill ok' }
+      case 'fresh':
+        // fresh 且 is_partial=false 表示最近收盘（非交易时段）或 DB 完整数据
+        return { label: '最近收盘', badgeClass: 'status-pill ok' }
+      case 'stale':
+        return { label: '数据延迟', badgeClass: 'status-pill warn' }
+      case 'unavailable':
+        return { label: '行情不可用', badgeClass: 'status-pill warn' }
+      default:
+        // 交易时段 is_realtime=true 覆盖 fresh/partial 为"实时行情"
+        if (quote?.is_realtime) {
+          return { label: '实时行情', badgeClass: 'status-pill ok' }
+        }
+        return { label: '加载中', badgeClass: 'status-pill neutral' }
     }
-    return { label: '数据延迟', badgeClass: 'status-pill warn' }
-  }, [quote])
+  }, [freshnessState, quote, safeBarsData, chartSnapshotQuery.isLoading])
 
   const barsStatus: BarsStatus | null = useMemo(() => {
     if (barsQuery.isLoading || !safeBarsData) return null
@@ -271,7 +342,7 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     barsQuery,
     indicatorsQuery,
     chartSnapshotQuery,
-    quoteQuery,
+    // [P0-7] quoteQuery 已删除：详情页不得同时以 /quote 和 /chart-snapshot 作为行情真源
     eventsQuery,
     baseBars,
     displayBars,
@@ -284,5 +355,7 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     quoteStatus,
     barsStatus,
     isRenderReady,
+    // [P0-7] quote 从 chartSnapshot 派生（详情页唯一行情真源）
+    quote,
   }
 }

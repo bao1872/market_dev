@@ -15,6 +15,7 @@ import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 import { getEventLabel } from '@/constants/userFacingLabels'
 import { formatShanghaiTime } from '@/utils/datetime'
+import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNavigation'
 
 // ===== 类型定义 =====
 
@@ -323,7 +324,7 @@ export default function MessagesPage() {
             : primary?.symbol || primary?.name || '-'
 
       // 根据消息类型决定查看跳转目标
-      // [Messages] - 描述: 单只股票消息进入 /stock/:symbol?event_id=...&returnTo=/messages
+      // [Messages] - 描述: 单只股票消息进入详情页，originScope=direct（来自消息，无来源列表）
       // selection_composite 进入 /market（保留筛选来源）
       let navigateTarget = ''
       if (m.message_type === 'selection_composite') {
@@ -331,10 +332,15 @@ export default function MessagesPage() {
       } else if (m.message_type === 'system' || m.message_type === 'SYSTEM_ALERT') {
         navigateTarget = '/settings'
       } else if (instrumentCount === 1 && primary?.symbol) {
-        const params = new URLSearchParams()
-        if (m.source_id) params.set('event_id', m.source_id)
-        params.set('returnTo', '/messages')
-        navigateTarget = `/stock/${primary.symbol}?${params.toString()}`
+        // P0-3: 统一使用 buildStockDetailUrl，禁止手拼 /stock/:symbol
+        // event_id 不属于来源上下文，作为附加 query 参数追加
+        const baseUrl = buildStockDetailUrl(primary.symbol, {
+          originScope: 'direct',
+          returnTo: '/messages',
+        })
+        navigateTarget = m.source_id
+          ? `${baseUrl}&event_id=${encodeURIComponent(m.source_id)}`
+          : baseUrl
       }
 
       return {
@@ -622,11 +628,16 @@ export default function MessagesPage() {
                         className="btn small"
                         onClick={() => {
                           setInstrumentDrawerOpen(false)
-                          // [Messages] - 描述: 抽屉内单只标的跳转到个股详情，携带 event_id + returnTo=/messages
-                          const params = new URLSearchParams()
-                          if (drawerEventId) params.set('event_id', drawerEventId)
-                          params.set('returnTo', '/messages')
-                          navigate(`/stock/${inst.symbol}?${params.toString()}`)
+                          // [Messages] - 描述: 抽屉内单只标的跳转到个股详情
+                          // P0-3: 统一使用 buildStockDetailUrl（originScope=direct），event_id 作为附加 query
+                          const baseUrl = buildStockDetailUrl(inst.symbol!, {
+                            originScope: 'direct',
+                            returnTo: '/messages',
+                          })
+                          const target = drawerEventId
+                            ? `${baseUrl}&event_id=${encodeURIComponent(drawerEventId)}`
+                            : baseUrl
+                          navigate(target)
                         }}
                       >
                         查看
