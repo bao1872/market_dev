@@ -186,15 +186,19 @@ class UserCapabilityGrant(Base):
 
 if __name__ == "__main__":
     # 自测入口：验证 ORM 模型映射（无副作用，不连接数据库）
+    from sqlalchemy import Table
+
     for cls in (InviteCodeCapability, UserCapabilityGrant):
         cols = [c.name for c in cls.__table__.columns]
         print(f"{cls.__name__} table={cls.__tablename__} columns={cols}")
     # 验证约束
-    icc_constraints = [c.name for c in InviteCodeCapability.__table__.constraints]
+    icc_table: Table = InviteCodeCapability.__table__  # type: ignore[assignment]
+    icc_constraints = [c.name for c in icc_table.constraints]
     assert "uq_invite_code_capability" in icc_constraints
     assert "ck_invite_code_capability_key" in icc_constraints
     assert "ck_invite_code_capability_limit" in icc_constraints
-    ucg_constraints = [c.name for c in UserCapabilityGrant.__table__.constraints]
+    ucg_table: Table = UserCapabilityGrant.__table__  # type: ignore[assignment]
+    ucg_constraints = [c.name for c in ucg_table.constraints]
     assert "uq_grant_source_capability" in ucg_constraints
     assert "ck_grant_capability_key" in ucg_constraints
     assert "ck_grant_expires_after_starts" in ucg_constraints
