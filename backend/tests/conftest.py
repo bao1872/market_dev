@@ -280,7 +280,12 @@ async def instrument_factory(db_session: AsyncSession) -> AsyncFactory[Instrumen
 
 @pytest_asyncio.fixture
 async def subscription_factory(db_session: AsyncSession) -> AsyncFactory[Subscription]:
-    """创建测试订阅记录，entitlement_snapshot 从 plans 表查询构造。"""
+    """创建测试订阅记录，entitlement_snapshot 从 plans 表查询构造。
+
+    [V2.1 桥接] 同时创建 capability grants（legacy_subscription 来源），
+    模拟 Phase I backfill：active subscription → watchlist_management + market_screening。
+    watchlist_management.limit_value = plan.monitor_limit。
+    """
     async def _create_subscription(
         user_id: uuid.UUID,
         plan_code: str = "observe_20",
@@ -290,6 +295,11 @@ async def subscription_factory(db_session: AsyncSession) -> AsyncFactory[Subscri
         source: str = "invite",
         **kwargs,
     ) -> Subscription:
+        from app.constants.capability_keys import (
+            MARKET_SCREENING,
+            WATCHLIST_MANAGEMENT,
+        )
+        from app.models.capability_grant import UserCapabilityGrant
         from app.services.plan_service import get_plan
 
         plan = await get_plan(db_session, plan_code)
@@ -301,8 +311,13 @@ async def subscription_factory(db_session: AsyncSession) -> AsyncFactory[Subscri
         }
 
         now = datetime.now(UTC)
-        starts_at = starts_at or now - timedelta(days=1)
-        expires_at = expires_at or now + timedelta(days=30)
+        # [V2.1] 确保 starts_at < expires_at，避免 ck_grant_expires_after_starts 违约
+        # 测试可能传入过期 expires_at，此时 starts_at 必须更早
+        if expires_at is not None and starts_at is None:
+            starts_at = expires_at - timedelta(days=1)
+        else:
+            starts_at = starts_at or now - timedelta(days=1)
+            expires_at = expires_at or now + timedelta(days=30)
 
         subscription = Subscription(
             user_id=user_id,
@@ -316,6 +331,31 @@ async def subscription_factory(db_session: AsyncSession) -> AsyncFactory[Subscri
         )
         db_session.add(subscription)
         await db_session.flush()
+
+        # [V2.1 桥接] 创建 capability grants，有效期与 subscription 对齐
+        wl_grant = UserCapabilityGrant(
+            user_id=user_id,
+            capability_key=WATCHLIST_MANAGEMENT,
+            limit_value=int(plan.monitor_limit),
+            source_type="legacy_subscription",
+            source_id=str(subscription.id),
+            starts_at=starts_at,
+            expires_at=expires_at,
+            revoked_at=None,
+        )
+        mkt_grant = UserCapabilityGrant(
+            user_id=user_id,
+            capability_key=MARKET_SCREENING,
+            limit_value=None,
+            source_type="legacy_subscription",
+            source_id=str(subscription.id),
+            starts_at=starts_at,
+            expires_at=expires_at,
+            revoked_at=None,
+        )
+        db_session.add(wl_grant)
+        db_session.add(mkt_grant)
+        await db_session.flush()
         return subscription
 
     return _create_subscription
@@ -327,11 +367,16 @@ async def make_user_eligible(
     role_factory: AsyncFactory[Role],
     subscription_factory: AsyncFactory[Subscription],
 ) -> AsyncFactory[User]:
-    """为用户添加 member 角色 + active subscription，使其有资格进入监控 universe。
+    """为用户添加 member 角色 + active subscription + V2.1 capability grants。
 
     [eligible_user_service] - 资格条件：active member + 有效 subscription
+    [V2.1] 权限真源：watchlist_management + market_screening capability grants
     用于需要通过 Worker 资格检查的测试场景（outbox_relay / delivery_worker /
     event_recipient_service / monitor_batch_service）。
+
+    V2.1 迁移期：测试 fixture 模拟 Phase I backfill（active subscription →
+    watchlist_management + market_screening grants），使旧测试在新权限模型下
+    继续工作。watchlist_management.limit_value 取 plan.monitor_limit。
     """
     async def _make_eligible(
         user: User,
@@ -342,6 +387,8 @@ async def make_user_eligible(
         role = await role_factory(name="member")
         db_session.add(UserRole(user_id=user.id, role_id=role.id))
         await db_session.flush()
+        # [V2.1] subscription_factory 已同时创建 capability grants（legacy_subscription 来源）
+        # watchlist_management.limit_value = plan.monitor_limit，有效期与 subscription 对齐
         await subscription_factory(user_id=user.id, plan_code=plan_code)
         return user
 

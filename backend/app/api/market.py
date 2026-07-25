@@ -144,8 +144,12 @@ from uuid import UUID  # noqa: E402
 
 from fastapi import HTTPException  # noqa: E402
 
+from app.constants.capability_keys import MARKET_SCREENING, WATCHLIST_MANAGEMENT  # noqa: E402
 from app.schemas.market_stocks import MarketBoardsResponse, MarketStocksResponse  # noqa: E402
-from app.services.access_control_service import AccessContext, require_authenticated  # noqa: E402
+from app.services.capability_service import (  # noqa: E402
+    CapabilityAccessContext,
+    require_any_capability,
+)
 from app.services.market_stocks_service import get_market_stocks  # noqa: E402
 
 # Phase 4: state 筛选合法值（up=上行, down=下行, sideways=震荡）
@@ -169,9 +173,17 @@ async def list_market_stocks(
         description="状态筛选（Phase 4 实现）：up=上行, down=下行, sideways=震荡",
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    # [V2.1] 基础行情列表：watchlist_management OR market_screening（PRD §10.2）
+    # scope=watchlist 时额外要求 watchlist_management（下方运行时校验）
+    ctx: CapabilityAccessContext = Depends(
+        require_any_capability([WATCHLIST_MANAGEMENT, MARKET_SCREENING])
+    ),
 ) -> MarketStocksResponse:
     """查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
+
+    [V2.1 权限] PRD §10.2：
+    - 基础行情列表要求 watchlist_management OR market_screening
+    - scope=watchlist 时额外要求 watchlist_management（运行时校验）
 
     返回每行页面所需全部字段（价格/涨跌幅/DSA状态/事件/自选），不再追加单股请求。
     scope=watchlist 在数据库查询阶段关联当前用户自选（INNER JOIN）。
@@ -180,6 +192,20 @@ async def list_market_stocks(
     无匹配股票时返回空列表（不报错）。
     sort 白名单：name, symbol, change_pct, dsa_state, latest_event_time。
     """
+    # [V2.1] scope=watchlist 时额外要求 watchlist_management（admin 豁免）
+    normalized_scope = "watchlist" if scope == "watchlist" else "market"
+    if normalized_scope == "watchlist" and not ctx.is_admin:
+        cap = ctx.capabilities.get(WATCHLIST_MANAGEMENT)
+        if cap is None or not cap.active:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "reason_code": "CAPABILITY_REQUIRED",
+                    "message": "需要能力: watchlist_management",
+                    "capability_key": WATCHLIST_MANAGEMENT,
+                },
+            )
+
     # Phase 4: state 参数校验（合法值：up/down/sideways；空字符串视为 None）
     normalized_state = state or None
     if normalized_state is not None and normalized_state not in _VALID_STATE_FILTERS:
@@ -188,8 +214,6 @@ async def list_market_stocks(
             detail=f"Invalid state value: {state}; must be one of: up, down, sideways",
         )
 
-    # 规范化 scope
-    normalized_scope = "watchlist" if scope == "watchlist" else "market"
     try:
         return await get_market_stocks(
             db=db,
@@ -218,11 +242,17 @@ async def list_market_boards(
         description="板块类型过滤：industry | concept（不传返回全部）",
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    # [V2.1] /market/boards 属于基础行情列表筛选数据，与 /market/stocks 同权限
+    # 要求 watchlist_management OR market_screening（PRD §10.2）
+    _ctx: CapabilityAccessContext = Depends(
+        require_any_capability([WATCHLIST_MANAGEMENT, MARKET_SCREENING])
+    ),
 ) -> MarketBoardsResponse:
     """板块目录只读 API（C9），供前端行业/概念筛选下拉/自动完成使用。
 
     从 market_boards 表读取板块目录，qstock 同步前返回空列表（不报错）。
+
+    [V2.1 权限] PRD §10.2：与 /market/stocks 同权限（watchlist OR market）。
     """
     if type is not None and type not in ("industry", "concept"):
         raise HTTPException(

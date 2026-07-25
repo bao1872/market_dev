@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capability_keys import MARKET_SCREENING
 from app.core.deps import get_db
 from app.models.instrument import Instrument
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
@@ -43,7 +44,6 @@ from app.schemas.stock_state import (
 )
 from app.services.access_control_service import (
     AccessContext,
-    require_active_subscription,
     require_admin,
 )
 from app.services.atomic_fact_contract_service import (
@@ -57,13 +57,17 @@ from app.services.atomic_fact_contract_service import (
     compute_product_observations,
     compute_recent_changes,
 )
+from app.services.capability_service import (
+    CapabilityAccessContext,
+    require_capability,
+)
 
 # [CHANGE-20260719-001 §五-D] 使用生产者 _SCHEMA_VERSION 替代本地硬编码 = 1
 # CHANGE-20260718-007 §4.4.1 修复了 watchlist.py / market_stocks_service.py 的硬编码，
 # 但遗漏了 stock_context.py 的本地 _SCHEMA_VERSION = 1（查询 StockFeatureSnapshotRun.schema_version）。
 # 生产写入 schema_version=3（feature_snapshot_service._SCHEMA_VERSION），
 # 本地 = 1 会导致 _find_latest_succeeded_run 查不到生产 run。此处统一从生产者 import。
-from app.services.feature_snapshot_service import _SCHEMA_VERSION
+from app.services.feature_snapshot_service import _SCHEMA_VERSION  # noqa: I001
 
 logger = logging.getLogger("api.stock_context")
 
@@ -600,7 +604,8 @@ async def get_stock_context(
     symbol: str,
     as_of: date | None = Query(None, description="截止日期 ISO（如 2026-07-10），默认最新"),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    # [V2.1] /stocks/{symbol}/context 属于个股详情，要求 market_screening（PRD §10.2）
+    ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> AtomicFactsContextResponse:
     """获取个股原子事实上下文（只读，需登录 + 有效订阅）。
 

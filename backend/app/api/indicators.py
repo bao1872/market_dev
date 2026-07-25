@@ -42,10 +42,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capability_keys import MARKET_SCREENING
 from app.core.deps import get_db
 from app.models.bar import BarDaily
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.services import indicator_cache
+from app.services.capability_service import (
+    CapabilityAccessContext,
+    require_capability,
+)
 from app.services.indicator_display_frame import DisplayWindowSpec
 from app.services.indicator_service import compute_all_indicators
 
@@ -153,6 +158,8 @@ async def get_indicators(
     completed_only: bool = Query(False, description="只返回已完成 bar（True 时强制 include_realtime=False）"),
     adjustment_as_of: date | None = Query(None, description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日，禁止未来除权事件泄漏）"),
     db: AsyncSession = Depends(get_db),
+    # [V2.1] /indicators 属于个股详情行情，要求 market_screening（PRD §10.2）
+    _ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
     *,
     response: Response,
 ) -> dict[str, Any]:

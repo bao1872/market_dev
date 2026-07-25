@@ -48,7 +48,11 @@ from app.models.event_recipient import StrategyEventRecipient
 from app.models.strategy_event import StrategyEvent
 from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
-from app.schemas.access import AccessProfileResponse
+from app.schemas.access import (
+    AccessProfileResponse,
+    CapabilityStatusResponse,
+    WatchlistLimitInfoResponse,
+)
 from app.schemas.invitation import InviteCodeRenew
 from app.schemas.subscription import MembershipResponse, RenewSuccessResponse
 from app.schemas.user import (
@@ -65,6 +69,7 @@ from app.services.access_control_service import (
     get_access_context,
     require_authenticated,
 )
+from app.services.capability_service import get_capability_access_context
 from app.services.subscription_service import (
     _ensure_aware,
     get_renewal_count,
@@ -483,25 +488,51 @@ async def get_my_membership(
 @router.get("/me/access", response_model=AccessProfileResponse)
 async def get_my_access(
     ctx: AccessContext = Depends(require_authenticated),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
 ) -> AccessProfileResponse:
-    """获取当前用户的完整权限上下文 AccessContext（11 个字段）。
+    """获取当前用户完整权限上下文（V1 11 字段 + V2.1 capabilities/limits）。
 
-    返回字段：user_id, account_status, roles, is_admin, is_member,
-    subscription_active, plan_code, plan_display_name, expires_at, features, limits。
+    V1 字段（过渡期保留，PRD §15.3）：user_id, account_status, roles, is_admin,
+    is_member, subscription_active, plan_code, plan_display_name, expires_at,
+    features, limits。
 
-    端点只读：不写 DB，通过 require_authenticated 依赖复用 get_access_context 唯一真源。
-    admin 路径 subscription_active=True（豁免），plan_code=None；
-    member 过期订阅仍保留 plan_code/plan_display_name/features/limits（前端降级提示）。
+    V2.1 字段（权限真源，PRD §9）：capabilities（三能力状态）, watchlist_limits
+    （自选额度信息）。
+
+    端点只读：不写 DB，V1 由 require_authenticated 复用 get_access_context，
+    V2.1 由 get_capability_access_context 统一计算。
     不要求 require_active_subscription：已登录但订阅过期也应返回上下文（前端刷新校验用）。
 
     Args:
-        ctx: 权限上下文（由 require_authenticated 注入，链式复用 get_access_context）
+        ctx: V1 权限上下文（由 require_authenticated 注入）
+        db: 异步数据库会话
+        user: 当前 active 用户
 
     Returns:
-        AccessProfileResponse（11 个字段，与 AccessContext 对齐）
+        AccessProfileResponse（V1 + V2.1 字段）
     """
-    # [Auth] - 描述: require_authenticated 已通过链式依赖复用 get_access_context 唯一真源
+    # V2.1: 获取 capability 权限上下文（权限真源）
+    cap_ctx = await get_capability_access_context(db, user)
+
+    # 构造 V2.1 capabilities 响应
+    capabilities_response: dict[str, CapabilityStatusResponse] = {}
+    for key, cap_status in cap_ctx.capabilities.items():
+        capabilities_response[key] = CapabilityStatusResponse(
+            active=cap_status.active,
+            expires_at=cap_status.expires_at,
+        )
+
+    # 构造 V2.1 watchlist_limits 响应
+    watchlist_limits_response = WatchlistLimitInfoResponse(
+        watchlist_stock_limit=cap_ctx.limits.watchlist_stock_limit,
+        watchlist_current_count=cap_ctx.limits.watchlist_current_count,
+        watchlist_over_limit=cap_ctx.limits.watchlist_over_limit,
+        is_admin_unlimited=cap_ctx.limits.is_admin_unlimited,
+    )
+
     return AccessProfileResponse(
+        # V1 字段（过渡期保留）
         user_id=ctx.user_id,
         account_status=ctx.account_status,
         roles=ctx.roles,
@@ -513,6 +544,9 @@ async def get_my_access(
         expires_at=ctx.expires_at,
         features=ctx.features,
         limits=ctx.limits,
+        # V2.1 字段（权限真源）
+        capabilities=capabilities_response,
+        watchlist_limits=watchlist_limits_response,
     )
 
 

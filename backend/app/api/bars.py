@@ -44,6 +44,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capability_keys import MARKET_SCREENING
 from app.constants.indicator_contract import INDICATOR_BARS
 from app.core.deps import get_db, require_roles
 from app.core.pytdx_adapter import get_pytdx_adapter
@@ -53,6 +54,10 @@ from app.core.time import now_shanghai
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.schemas.bar import BarListResponse, BarResponse, QuoteResponse
 from app.services.calendar_service import is_trading_day_async
+from app.services.capability_service import (
+    CapabilityAccessContext,
+    require_capability,
+)
 from app.services.indicator_display_frame import (
     DisplayWindowSpec,
     build_display_frame,
@@ -445,6 +450,8 @@ async def get_bars(
     completed_only: bool = Query(False, description="只返回已完成 bar（True 时强制 include_realtime=False）"),
     adjustment_as_of: date | None = Query(None, description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日，禁止未来除权事件泄漏）"),
     session: AsyncSession = Depends(get_db),
+    # [V2.1] /bars 属于个股详情行情，要求 market_screening（PRD §10.2）
+    _ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
     *,
     response: Response,
 ) -> BarListResponse:
@@ -669,6 +676,8 @@ async def get_bars(
 async def get_instrument_quote(
     instrument_id: uuid.UUID,
     session: AsyncSession = Depends(get_db),
+    # [V2.1] /quote 属于个股详情行情，要求 market_screening（PRD §10.2）
+    _ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> QuoteResponse:
     """获取标的实时报价，明确返回数据来源、实时性、新鲜度与降级状态。
 

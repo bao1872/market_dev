@@ -42,8 +42,9 @@ from app.services.subscription_service import (
 )
 from tests.conftest import make_asgi_transport
 
-# AccessContext 11 个字段（与 access_control_service.AccessContext 对齐）
+# AccessContext V1 11 字段 + V2.1 capabilities/watchlist_limits（PRD §15.3 + §9）
 _EXPECTED_ACCESS_FIELDS = {
+    # V1 字段（过渡期保留）
     "user_id",
     "account_status",
     "roles",
@@ -55,6 +56,9 @@ _EXPECTED_ACCESS_FIELDS = {
     "expires_at",
     "features",
     "limits",
+    # V2.1 字段（权限真源）
+    "capabilities",
+    "watchlist_limits",
 }
 
 
@@ -271,7 +275,7 @@ async def test_me_access_member_no_subscription(
 async def test_me_access_returns_all_11_fields(
     access_client: tuple[AsyncClient, AsyncSession],
 ) -> None:
-    """响应 JSON 包含全部 11 个 AccessContext 字段（字段集合精确匹配）。"""
+    """响应 JSON 包含全部 V1 11 + V2.1 2 = 13 个字段（字段集合精确匹配）。"""
     client, db = access_client
     admin = await _create_admin(db)
     await db.flush()
@@ -284,7 +288,7 @@ async def test_me_access_returns_all_11_fields(
         f"字段集合不匹配，缺失: {_EXPECTED_ACCESS_FIELDS - set(data.keys())}，"
         f"多余: {set(data.keys()) - _EXPECTED_ACCESS_FIELDS}"
     )
-    assert len(data.keys()) == 11
+    assert len(data.keys()) == 13
 
 
 @pytest.mark.asyncio

@@ -57,10 +57,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.bars import _df_to_responses
+from app.constants.capability_keys import MARKET_SCREENING
 from app.core.deps import get_db
 from app.core.time import now_shanghai
 from app.schemas.bar import BarListResponse
 from app.services.calendar_service import is_trading_day_async
+from app.services.capability_service import (
+    CapabilityAccessContext,
+    require_capability,
+)
 from app.services.chart_snapshot_service import ChartSnapshotService
 from app.services.market_data_aggregation_service import (
     _call_expected_last_completed_daily_bar,
@@ -282,9 +287,11 @@ async def get_chart_snapshot(
     ),
     adjustment_as_of: date | None = Query(
         None,
-        description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日）",
+        description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日，禁止未来除权事件泄漏）",
     ),
     db: AsyncSession = Depends(get_db),
+    # [V2.1] /chart-snapshot 属于个股详情行情，要求 market_screening（PRD §10.2）
+    _ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
     *,
     response: Response,
 ) -> dict[str, Any]:

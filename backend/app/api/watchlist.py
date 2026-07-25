@@ -2,16 +2,17 @@
 
 端点：
 - GET /watchlist: 当前用户自选列表（user_id 由认证上下文注入）
-- POST /watchlist: 加入自选（使用 AccessContext 统一权限模型校验订阅与额度）
+- POST /watchlist: 加入自选（V2.1 capability 权限模型校验能力与额度）
 - DELETE /watchlist/{instrument_id}: 移除自选（软删除：active=false + removed_at）
 - GET /watchlist/monitor-status: 自选股+监控状态聚合查询
 
+[V2.1 权限] PRD §10.2 + §10.3：
+- 所有自选端点要求 watchlist_management capability（admin 自动豁免）
+- 额度从 CapabilityAccessContext.limits.watchlist_stock_limit 读取（PRD §7.1 max 规则）
+- 超限返回 409 reason_code=WATCHLIST_LIMIT_REACHED
+
 设计说明：
 - user_id 由认证上下文注入，不接受请求体传入（V1.1 安全约束）
-- POST /watchlist 使用 AccessContext 统一权限模型：
-  - require_active_subscription: 需有效订阅（admin 豁免），过期/无订阅返回 403
-  - require_quota("monitor_limit"): 返回额度值（admin=None 无限制；member=int 限额）
-  - 不再自行查询 Subscription 表或判断 admin 角色（单一事实源原则）
 - 加入自选即参与当前启用的监控方案（universe_service 聚合 active=true 记录）
 - 移除采用软删除（active=false + removed_at），保留历史，支持重新加入
 - (user_id, instrument_id) 唯一约束：重复加入返回 409 Conflict
@@ -21,11 +22,11 @@
   - 不再走 MonitorState.payload 或 MonitorSnapshotService 实时 fallback
   - MonitorEvaluation 仅用于展示评估状态（evaluation_status/retry_count/error_code）
 
-套餐权限（plans 表，通过 AccessContext 统一读取）：
-- POST /watchlist 及恢复软删除前校验 active count < monitor_limit
-- 超限返回 409 {"detail": "监控数量已达上限 N"}
-- admin（monitor_limit=None）绕过监控数量限制
-- 过期订阅或无订阅返回 403（由 require_active_subscription 校验）
+自选额度（V2.1，PRD §7.1）：
+- POST /watchlist 及恢复软删除前校验 active count < watchlist_stock_limit
+- 超限返回 409 WATCHLIST_LIMIT_REACHED
+- admin（watchlist_stock_limit=None + is_admin_unlimited=True）绕过额度限制
+- 无 watchlist_management 能力返回 403 CAPABILITY_REQUIRED（由 require_capability 校验）
 - 降级后已有数量超过额度不删除，只禁止新增
 """
 
@@ -41,6 +42,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capability_keys import WATCHLIST_MANAGEMENT
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.core.route_utils import get_route_paths
 from app.core.time import now_shanghai, shanghai_business_date
@@ -58,15 +60,15 @@ from app.schemas.watchlist import (
     WatchlistMonitorStatusItem,
     WatchlistMonitorStatusResponse,
 )
-from app.services.access_control_service import (
-    AccessContext,
-    require_active_subscription,
-    require_quota,
-)
 from app.services.calendar_service import (
     get_most_recent_trading_day_async,
     get_previous_trading_day_async,
     is_trading_day_async,
+)
+from app.services.capability_service import (
+    REASON_WATCHLIST_LIMIT_REACHED,
+    CapabilityAccessContext,
+    require_capability,
 )
 
 # [CHANGE-20260718-007] - 修复 watchlist API 读取 snapshot 时 schema_version 硬编码 == 1
@@ -99,19 +101,21 @@ async def _check_limit_if_needed(
 ) -> None:
     """校验用户监控数量额度，超限抛 409（admin 跳过）。
 
-    使用 AccessContext 统一权限模型：
-    - monitor_limit is None（admin）：跳过额度检查
-    - monitor_limit is not None（member）：查询 active count，超限返回 409
+    [V2.1] 使用 CapabilityAccessContext 统一权限模型：
+    - monitor_limit is None（admin unlimited 或无 watchlist 能力）：跳过额度检查
+      （无 watchlist 能力的用户已被 require_capability 拦截在路由层）
+    - monitor_limit is not None（普通用户）：查询 active count，超限返回 409
 
-    订阅有效性由 require_active_subscription 依赖在路由层校验，本函数只负责额度比较。
+    能力校验由 require_capability(WATCHLIST_MANAGEMENT) 在路由层完成，
+    本函数只负责额度比较。
 
     Args:
         db: 异步数据库会话
         user_id: 用户 ID
-        monitor_limit: 额度值（admin=None 无限制；member=int 限额）
+        monitor_limit: 额度值（admin=None 无限制；普通用户=int 限额）
 
     Raises:
-        HTTPException 409: 监控数量已达上限
+        HTTPException 409: 监控数量已达上限（reason_code=WATCHLIST_LIMIT_REACHED）
     """
     if monitor_limit is None:
         return  # admin 无限制
@@ -129,7 +133,12 @@ async def _check_limit_if_needed(
     if active_count >= monitor_limit:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"监控数量已达上限 {monitor_limit}",
+            detail={
+                "reason_code": REASON_WATCHLIST_LIMIT_REACHED,
+                "message": f"监控数量已达上限 {monitor_limit}",
+                "current_count": active_count,
+                "limit": monitor_limit,
+            },
         )
 
 
@@ -181,10 +190,12 @@ async def _resolve_expected_snapshot_trade_date(
 @router.get("", response_model=WatchlistListResponse)
 async def list_watchlist(
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    # [V2.1] 自选列表要求 watchlist_management（PRD §10.2）
+    ctx: CapabilityAccessContext = Depends(require_capability(WATCHLIST_MANAGEMENT)),
 ) -> WatchlistListResponse:
     """查询当前用户的自选列表（仅 active=true）。
 
+    [V2.1 权限] PRD §10.2：自选列表要求 watchlist_management。
     user_id 由权限上下文注入，不接受查询参数传入。
     """
     stmt = (
@@ -207,26 +218,29 @@ async def list_watchlist(
 async def add_to_watchlist(
     payload: WatchlistAddRequest,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    monitor_limit: int | None = Depends(require_quota("monitor_limit")),
+    # [V2.1] 自选添加要求 watchlist_management（PRD §10.2）
+    # 额度从 ctx.limits.watchlist_stock_limit 读取（PRD §7.1 max 规则）
+    ctx: CapabilityAccessContext = Depends(require_capability(WATCHLIST_MANAGEMENT)),
 ) -> WatchlistItemResponse:
-    """加入自选 - 使用 AccessContext 统一权限模型校验订阅与额度。
+    """加入自选 - V2.1 capability 权限模型校验能力与额度。
 
-    权限链：
-    - require_active_subscription: 需有效订阅（admin 豁免），过期/无订阅返回 403
-    - require_quota("monitor_limit"): 返回额度值（admin=None 无限制；member=int 限额）
+    [V2.1 权限] PRD §10.2 + §10.3：
+    - require_capability(WATCHLIST_MANAGEMENT): 需 watchlist_management 能力（admin 豁免）
+    - 额度从 ctx.limits.watchlist_stock_limit 读取（PRD §7.1 max 规则）
 
     user_id 由权限上下文注入（不接受 body 中的 user_id）。
     若已存在软删除记录，则恢复 active=true 并清空 removed_at（重新加入）。
     若已存在 active 记录，返回 409 Conflict。
 
-    套餐额度：
+    套餐额度（V2.1）：
     - 恢复软删除记录前校验额度（恢复后 active 数量 +1）
     - 新建记录前校验额度
-    - admin（monitor_limit=None）绕过额度限制
-    - 超限返回 409 {"detail": "监控数量已达上限 N"}
+    - admin（watchlist_stock_limit=None + is_admin_unlimited=True）绕过额度限制
+    - 超限返回 409 WATCHLIST_LIMIT_REACHED
     """
     user_id = UUID(ctx.user_id)
+    # [V2.1] 从 CapabilityAccessContext 读取有效额度（PRD §7.1）
+    monitor_limit = ctx.limits.watchlist_stock_limit
 
     # 校验股票存在
     inst_stmt = select(Instrument).where(Instrument.id == payload.instrument_id)
@@ -288,7 +302,8 @@ async def add_to_watchlist(
 @router.get("/monitor-status", response_model=WatchlistMonitorStatusResponse)
 async def get_watchlist_monitor_status(
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    # [V2.1] 自选监控状态要求 watchlist_management（PRD §10.2）
+    ctx: CapabilityAccessContext = Depends(require_capability(WATCHLIST_MANAGEMENT)),
 ) -> WatchlistMonitorStatusResponse:
     """查询当前用户自选股+监控状态聚合数据。
 
@@ -532,10 +547,12 @@ async def get_watchlist_monitor_status(
 async def remove_from_watchlist(
     instrument_id: UUID,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    # [V2.1] 自选删除要求 watchlist_management（PRD §10.2）
+    ctx: CapabilityAccessContext = Depends(require_capability(WATCHLIST_MANAGEMENT)),
 ) -> None:
     """移除自选（软删除：active=false + removed_at）。
 
+    [V2.1 权限] PRD §10.2：自选删除要求 watchlist_management。
     user_id 由权限上下文注入。
     不存在或已移除返回 404。
     """

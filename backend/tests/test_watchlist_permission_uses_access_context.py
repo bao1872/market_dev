@@ -156,6 +156,29 @@ async def _add_active_watchlist(
     await db.flush()
 
 
+async def _expire_user_capability_grants(db: AsyncSession, user: User) -> None:
+    """[V2.1] 将用户所有 capability grants 设为已过期区间。
+
+    V2.1 权限真源是 capability grants，不是 subscription。测试模拟过期时
+    必须同时过期 grants，否则用户仍有有效能力。
+
+    DB CheckConstraint ck_grant_expires_after_starts 要求 expires_at > starts_at，
+    因此同时调整 starts_at 保持约束满足。
+    """
+    from app.models.capability_grant import UserCapabilityGrant
+
+    now = datetime.now(UTC)
+    starts = now - timedelta(days=10)
+    expires = now - timedelta(days=1)
+    result = await db.execute(
+        select(UserCapabilityGrant).where(UserCapabilityGrant.user_id == user.id)
+    )
+    for grant in result.scalars():
+        grant.starts_at = starts
+        grant.expires_at = expires
+    await db.flush()
+
+
 # ============================================================
 # fixtures
 # ============================================================
@@ -211,13 +234,13 @@ async def test_expired_member_blocked(
 ) -> None:
     """过期订阅 member 调 POST /watchlist → 403。
 
-    [AccessControl] - 描述: require_active_subscription 检查 subscription_active=False，
-    拒绝过期订阅用户新增自选股（旧代码仅检查 subscription 记录是否存在，不检查过期，这是要修复的行为）
+    [V2.1] 权限真源是 capability grants。过期 subscription 同时过期 grants。
     """
     client, db = watchlist_perm_client
     user, subscription = await _create_member_with_plan(db, "observe_20")
-    # 手动设置过期
+    # 手动设置过期（subscription + capability grants）
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await _expire_user_capability_grants(db, user)
     instruments = await _create_instruments(db, 1)
     await db.flush()
 
@@ -299,7 +322,14 @@ async def test_active_member_at_limit_blocked(
     )
 
     assert resp.status_code == 409, resp.text
-    assert "监控数量已达上限" in resp.json()["detail"]
+    # [V2.1] 错误合同：dict detail + reason_code=WATCHLIST_LIMIT_REACHED
+    detail = resp.json()["detail"]
+    if isinstance(detail, dict):
+        assert detail.get("reason_code") == "WATCHLIST_LIMIT_REACHED"
+        assert "监控数量已达上限" in detail.get("message", "")
+    else:
+        # 兼容旧字符串格式
+        assert "监控数量已达上限" in str(detail)
 
 
 @pytest.mark.asyncio
@@ -339,6 +369,7 @@ async def test_get_watchlist_expired_member_blocked(
     client, db = watchlist_perm_client
     user, subscription = await _create_member_with_plan(db, "observe_20")
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await _expire_user_capability_grants(db, user)
     await db.flush()
 
     resp = await client.get("/watchlist", headers=_auth_headers(user.id))
@@ -386,6 +417,7 @@ async def test_delete_watchlist_expired_member_blocked(
     instruments = await _create_instruments(db, 1)
     await _add_active_watchlist(db, user, instruments, count=1)
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await _expire_user_capability_grants(db, user)
     await db.flush()
 
     resp = await client.delete(
@@ -443,6 +475,7 @@ async def test_monitor_status_expired_member_blocked(
     client, db = watchlist_perm_client
     user, subscription = await _create_member_with_plan(db, "observe_20")
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await _expire_user_capability_grants(db, user)
     await db.flush()
 
     resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))

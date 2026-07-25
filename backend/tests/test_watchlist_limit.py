@@ -36,6 +36,21 @@ from app.services.subscription_service import generate_invite_codes, register_wi
 from tests.conftest import make_asgi_transport
 
 
+def _assert_watchlist_limit_reached(detail: object, expected_limit: int | None = None) -> None:
+    """[V2.1] 断言 409 WATCHLIST_LIMIT_REACHED detail（兼容 dict 和字符串格式）。"""
+    if isinstance(detail, dict):
+        assert detail.get("reason_code") == "WATCHLIST_LIMIT_REACHED"
+        msg = detail.get("message", "")
+        assert "监控数量已达上限" in msg
+        if expected_limit is not None:
+            assert str(expected_limit) in msg
+    else:
+        # 兼容旧字符串格式
+        assert "监控数量已达上限" in str(detail)
+        if expected_limit is not None:
+            assert str(expected_limit) in str(detail)
+
+
 async def _ensure_role(db: AsyncSession, name: str) -> Role:
     """确保角色存在并返回。"""
     result = await db.execute(select(Role).where(Role.name == name))
@@ -174,8 +189,7 @@ async def test_watchlist_observe_20_limit_blocked(watchlist_client):
 
     assert resp.status_code == 409
     detail = resp.json()["detail"]
-    assert "监控数量已达上限" in detail
-    assert "20" in detail
+    _assert_watchlist_limit_reached(detail, expected_limit=20)
 
 
 @pytest.mark.asyncio
@@ -195,8 +209,7 @@ async def test_watchlist_research_50_limit_blocked(watchlist_client):
 
     assert resp.status_code == 409
     detail = resp.json()["detail"]
-    assert "监控数量已达上限" in detail
-    assert "50" in detail
+    _assert_watchlist_limit_reached(detail, expected_limit=50)
 
 
 @pytest.mark.asyncio
@@ -221,12 +234,18 @@ async def test_watchlist_admin_exceeds_50_allowed(watchlist_client):
 async def test_watchlist_downgrade_does_not_delete(watchlist_client):
     """降级不删除：research_50 用户有 30 只 active，降级到 observe_20 后 30 只保留但禁止新增。
 
+    [V2.1] 权限真源是 capability grants。降级必须撤销旧 grants 并创建新 grants，
+    否则聚合规则取 max(limit_value) 仍为 50。本测试模拟 V2.1 正式降级流程。
+
     场景：
     1. research_50 用户添加 30 只自选股（< 50，允许）
-    2. 续期降级到 observe_20（monitor_limit=20）
+    2. V2.1 降级：撤销 research_50 grants，创建 observe_20 grants（limit=20）
     3. 30 只自选股仍然保留（不删除）
     4. 新增第 31 只返回 409（超过 observe_20 的 20 上限）
     """
+    from app.constants.capability_keys import WATCHLIST_MANAGEMENT
+    from app.models.capability_grant import UserCapabilityGrant
+
     client, db = watchlist_client
     # 1. research_50 用户添加 30 只自选股
     user, subscription = await _create_user_with_plan(db, "research_50")
@@ -234,9 +253,32 @@ async def test_watchlist_downgrade_does_not_delete(watchlist_client):
     await _add_active_watchlist(db, user, instruments, count=30)
     await db.flush()
 
-    # 2. 续期降级到 observe_20（直接修改 subscription 字段模拟降级）
+    # 2. V2.1 降级：撤销旧 grants + 修改 subscription + 创建新 grants（limit=20）
     subscription.plan_code = "observe_20"
     subscription.entitlement_snapshot = {"monitor_limit": 20}
+    # 撤销所有 watchlist_management grants（模拟正式降级流程）
+    grant_result = await db.execute(
+        select(UserCapabilityGrant).where(
+            UserCapabilityGrant.user_id == user.id,
+            UserCapabilityGrant.capability_key == WATCHLIST_MANAGEMENT,
+            UserCapabilityGrant.revoked_at.is_(None),
+        )
+    )
+    now = datetime.now(UTC)
+    for grant in grant_result.scalars():
+        grant.revoked_at = now
+    # 创建新 grant（observe_20，limit=20）
+    # source_id 使用新 UUID 模拟新邀请码来源，避免与原 grant 的 UNIQUE 约束冲突
+    db.add(UserCapabilityGrant(
+        user_id=user.id,
+        capability_key=WATCHLIST_MANAGEMENT,
+        limit_value=20,
+        source_type="legacy_subscription",
+        source_id=str(uuid.uuid4()),
+        starts_at=now,
+        expires_at=subscription.expires_at,
+        revoked_at=None,
+    ))
     await db.flush()
 
     # 3. 验证 30 只自选股仍保留
@@ -255,7 +297,7 @@ async def test_watchlist_downgrade_does_not_delete(watchlist_client):
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 409
-    assert "监控数量已达上限" in resp.json()["detail"]
+    _assert_watchlist_limit_reached(resp.json()["detail"], expected_limit=20)
 
 
 @pytest.mark.asyncio
@@ -290,7 +332,7 @@ async def test_watchlist_restore_soft_deleted_checks_limit(watchlist_client):
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 409
-    assert "监控数量已达上限" in resp.json()["detail"]
+    _assert_watchlist_limit_reached(resp.json()["detail"], expected_limit=20)
 
 
 @pytest.mark.asyncio

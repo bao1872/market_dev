@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capability_keys import MARKET_SCREENING
 from app.constants.strategy_keys import DSA_SELECTOR
 from app.core.deps import get_db, require_roles
 from app.core.route_utils import get_route_paths
@@ -50,10 +51,9 @@ from app.schemas.strategy_run import (
     StrategyRunResponse,
     TriggerRunRequest,
 )
-from app.services.access_control_service import (
-    AccessContext,
-    require_active_subscription,
-    require_feature,
+from app.services.capability_service import (
+    CapabilityAccessContext,
+    require_capability,
 )
 from app.services.excel_export_service import (
     MAX_EXPORT_ROWS,
@@ -439,16 +439,14 @@ async def list_published_runs(
     limit: int = Query(30, ge=1, le=100, description="返回上限"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
-    _ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    # [V2.1] DSA/选股结果要求 market_screening（PRD §10.2）
+    _ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> StrategyRunListResponse:
-    """查询已发布的运行批次（需有效订阅 + trend_selection feature）。
+    """查询已发布的运行批次（需 market_screening 能力）。
 
     只返回 status='published' 的 run，按 trade_date 降序。
 
-    权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    [V2.1 权限] PRD §10.2：DSA/趋势选股结果要求 market_screening（admin 自动豁免）。
 
     Args:
         strategy_key: 策略 key
@@ -519,14 +517,12 @@ async def query_strategy_results(
     limit: int = Query(100, ge=1, le=500, description="返回上限"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
-    _ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    # [V2.1] DSA/选股结果要求 market_screening（PRD §10.2）
+    _ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> StrategyResultListResponse:
     """查询策略结果（用户端，绑定 published run）。
 
-    权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    [V2.1 权限] PRD §10.2：DSA/趋势选股结果要求 market_screening（admin 自动豁免）。
 
     流程：
     1. 查找 strategy_key 最新 released 版本
@@ -654,16 +650,14 @@ async def list_run_results(
     page: int = Query(1, ge=1, description="页码（从 1 开始）"),
     page_size: int = Query(50, ge=1, le=500, description="每页条数"),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    # [V2.1] DSA/选股结果要求 market_screening（PRD §10.2）
+    ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> StrategyResultListResponse:
     """查询运行结果（分页+筛选+排序，需 published）。
 
     通过 selector_query_service 统一查询，返回 source_total 和 filtered_total。
 
-    权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    [V2.1 权限] PRD §10.2：DSA/趋势选股结果要求 market_screening（admin 自动豁免）。
 
     Args:
         run_id: 运行 ID
@@ -809,14 +803,12 @@ async def get_run_result_detail(
     run_id: uuid.UUID,
     result_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    # [V2.1] DSA/选股结果要求 market_screening（PRD §10.2）
+    _ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> StrategyResultResponse:
     """获取单个结果详情。
 
-    权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    [V2.1 权限] PRD §10.2：DSA/趋势选股结果要求 market_screening（admin 自动豁免）。
 
     Args:
         run_id: 运行 ID（用于验证归属）
@@ -853,15 +845,16 @@ async def export_run_results(
     run_id: uuid.UUID,
     request: ExportRequest,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    # [V2.1] DSA/选股结果要求 market_screening（PRD §10.2）
+    ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> Response:
     """导出已发布运行结果为 .xlsx。
 
     复用 query_published_selector_results 的筛选/排序构造器（禁止第二套逻辑）。
     上限 MAX_EXPORT_ROWS=10000，超过返回 422。
     文件不写永久目录，响应结束即释放。
-    权限：需有效订阅 + trend_selection feature（admin 豁免）。
+
+    [V2.1 权限] PRD §10.2：DSA/趋势选股结果要求 market_screening（admin 自动豁免）。
 
     Args:
         run_id: 运行 ID（必须已发布）

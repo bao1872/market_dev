@@ -44,8 +44,13 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capability_keys import (
+    MARKET_SCREENING,
+    WATCHLIST_MANAGEMENT,
+)
 from app.constants.plan_codes import DEFAULT_PLAN_CODE
 from app.core.security import get_password_hash
+from app.models.capability_grant import UserCapabilityGrant
 from app.models.invitation import InviteCode, InviteRedemption
 from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
@@ -71,6 +76,53 @@ _INVITE_CODE_GROUPS = 4
 _INVITE_CODE_GROUP_LEN = 4
 # 订阅默认天数（旧字段 grant_days，保留兼容性；新逻辑优先使用 grant_months）
 _DEFAULT_GRANT_DAYS = 30
+
+
+async def _create_legacy_capability_grants(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    subscription_id: uuid.UUID,
+    plan_monitor_limit: int,
+    starts_at: datetime,
+    expires_at: datetime,
+) -> None:
+    """V1 → V2.1 桥接：为 V1 subscription 创建对应的 capability grants。
+
+    PRD §15.3 过渡期：V1 register/renew 路径继续创建 subscription，
+    同时创建 V2.1 capability grants 保持权限模型一致。
+
+    - watchlist_management: limit_value = plan.monitor_limit
+    - market_screening: 无额度
+    - source_type = "legacy_subscription"，source_id = subscription_id
+    - 有效期与 subscription 对齐
+
+    幂等：调用方需保证同一 subscription 不重复调用（UNIQUE 约束兜底）。
+    """
+    wl_grant = UserCapabilityGrant(
+        user_id=user_id,
+        capability_key=WATCHLIST_MANAGEMENT,
+        limit_value=int(plan_monitor_limit),
+        source_type="legacy_subscription",
+        source_id=str(subscription_id),
+        starts_at=starts_at,
+        expires_at=expires_at,
+        revoked_at=None,
+    )
+    mkt_grant = UserCapabilityGrant(
+        user_id=user_id,
+        capability_key=MARKET_SCREENING,
+        limit_value=None,
+        source_type="legacy_subscription",
+        source_id=str(subscription_id),
+        starts_at=starts_at,
+        expires_at=expires_at,
+        revoked_at=None,
+    )
+    db.add(wl_grant)
+    db.add(mkt_grant)
+    await db.flush()
+
+
 # 默认 grant_months（管理员未指定时，1 个月 = 30 天近似）
 _DEFAULT_GRANT_MONTHS = 1
 
@@ -306,6 +358,18 @@ async def register_with_invite_code(
         updated_at=now,
     )
     db.add(subscription)
+    await db.flush()  # 获取 subscription.id
+
+    # [V2.1 桥接] 为 V1 注册路径创建 capability grants（PRD §15.3 过渡期）
+    # watchlist_management.limit_value = plan.monitor_limit
+    await _create_legacy_capability_grants(
+        db=db,
+        user_id=user.id,
+        subscription_id=subscription.id,
+        plan_monitor_limit=int(plan.monitor_limit),
+        starts_at=now,
+        expires_at=expires_at,
+    )
 
     # 6. 更新邀请码状态
     invite.status = "used"
@@ -440,6 +504,18 @@ async def renew_with_invite_code(
     )
     db.add(redemption)
     await db.flush()
+
+    # [V2.1 桥接] 为 V1 续期路径创建新的 capability grants（PRD §15.3 过渡期）
+    # V2.1 聚合规则：多 grant 取最晚 expires_at，因此新建 grant 自动延长权限
+    # source_id 使用 invite.id（区别于 subscription_id）避免 UNIQUE 冲突
+    await _create_legacy_capability_grants(
+        db=db,
+        user_id=user_id,
+        subscription_id=invite.id,  # 使用 invite.id 作为 source_id 避免与注册时 grant 冲突
+        plan_monitor_limit=int(plan.monitor_limit),
+        starts_at=now,
+        expires_at=new_expires_at,
+    )
 
     assert subscription is not None  # 新建或续期分支均保证 subscription 非空
     return subscription, old_expires_at, new_expires_at

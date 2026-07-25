@@ -6,9 +6,8 @@
 - PATCH /me/table-view-presets/{id}: 更新 preset（name/config/is_default）
 - DELETE /me/table-view-presets/{id}: 删除 preset
 
-权限：
-- require_active_subscription: 需有效订阅（admin 豁免）
-- require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+[V2.1 权限] PRD §10.2：
+- 所有端点要求 market_screening capability（admin 自动豁免）
 - 与 /strategies/{key}/published-runs 权限矩阵一致
 
 业务规则：
@@ -28,6 +27,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.capability_keys import MARKET_SCREENING
 from app.db import get_db
 from app.models.table_view_preset import UserTableViewPreset
 from app.schemas.table_view_preset import (
@@ -37,10 +37,9 @@ from app.schemas.table_view_preset import (
     TableViewPresetPatch,
     TableViewPresetResponse,
 )
-from app.services.access_control_service import (
-    AccessContext,
-    require_active_subscription,
-    require_feature,
+from app.services.capability_service import (
+    CapabilityAccessContext,
+    require_capability,
 )
 
 router = APIRouter(tags=["me"])
@@ -56,8 +55,7 @@ async def list_my_table_view_presets(
         default=None, max_length=64, description="策略 key（可选过滤）"
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> TableViewPresetListResponse:
     """查询当前用户的 preset 列表（按 table_id + strategy_key 过滤）。
 
@@ -104,8 +102,7 @@ async def list_my_table_view_presets(
 async def create_my_table_view_preset(
     payload: TableViewPresetCreate,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> TableViewPresetResponse:
     """创建 preset。
 
@@ -208,8 +205,7 @@ async def update_my_table_view_preset(
     preset_id: uuid.UUID,
     payload: TableViewPresetPatch,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> TableViewPresetResponse:
     """更新 preset（name/config/is_default，user_id/table_id/strategy_key 不可改）。
 
@@ -294,8 +290,7 @@ async def update_my_table_view_preset(
 async def delete_my_table_view_preset(
     preset_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: CapabilityAccessContext = Depends(require_capability(MARKET_SCREENING)),
 ) -> None:
     """删除 preset。
 
