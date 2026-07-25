@@ -37,8 +37,10 @@ from app.constants.capability_keys import (
     MAX_WATCHLIST_STOCK_LIMIT,
     WATCHLIST_MANAGEMENT,
 )
-from app.models.capability_grant import InviteCodeCapability
-from app.models.invitation import InviteCode
+from app.models.capability_grant import InviteCodeCapability, UserCapabilityGrant
+from app.models.invitation import InviteCode, InviteRedemption
+from app.services.capability_calendar import add_calendar_months_asiashanghai
+from app.services.capability_service import invalidate_access_context_cache
 from app.services.subscription_service import hash_invite_code
 
 __all__ = [
@@ -48,6 +50,7 @@ __all__ = [
     "revoke_invite_code_v2",
     "get_invite_code_with_capabilities",
     "derive_invite_code_status_v2",
+    "redeem_invite_code_with_capabilities",
     "INVITE_CODE_CHARS",
     "INVITE_CODE_GROUPS",
     "INVITE_CODE_GROUP_LEN",
@@ -334,6 +337,167 @@ async def revoke_invite_code_v2(
     invite.revoked_at = datetime.now(UTC)
     await db.flush()
     return invite
+
+
+async def redeem_invite_code_with_capabilities(
+    db: AsyncSession,
+    raw_invite_code: str,
+    user_id: uuid.UUID,
+    usage_type: str = "renewal",
+) -> tuple[InviteCode, list[UserCapabilityGrant], list[InviteCodeCapability]]:
+    """兑换邀请码（V2.1，原子事务，PRD §6.2 + §7）。
+
+    流程：
+    1. 哈希邀请码并查找（SELECT ... FOR UPDATE 行锁防止并发一码多用）
+    2. 校验状态为 available（revoked_at IS NULL AND redeemed_at IS NULL）
+    3. 查询邀请码能力配置
+    4. 对每项能力创建 UserCapabilityGrant（PRD §7 独立续期）：
+       - 查询用户在该能力上当前最晚有效 expires_at（含已过期）
+       - base = max(now, current_latest_expires_at)
+       - starts_at = now
+       - expires_at = add_calendar_months_asiashanghai(base, duration_months)
+       - source_type = "invite_code"
+       - source_id = invite.id（字符串化）
+    5. 更新邀请码 redeemed_by_user_id / redeemed_at
+    6. 写 InviteRedemption 记录（new_expires_at 取本次所有 grant 中最晚值）
+    7. 失效用户 AccessContext 缓存
+
+    并发安全：with_for_update() 在 PostgreSQL 生成 SELECT ... FOR UPDATE，
+    第二个并发请求会阻塞直到第一个事务提交，然后读到 redeemed_at IS NOT NULL 失败。
+
+    PRD §6.2 单码单次 + 用户可兑换多码：
+    - 单码 redeemed_at IS NOT NULL 后不可再兑换
+    - 用户可兑换多码，每次兑换创建新 grant（不删除旧 grant）
+    - 同能力多 grant 时取最晚 expires_at（PRD §7）
+
+    Args:
+        db: 异步数据库会话
+        raw_invite_code: 邀请码明文
+        user_id: 兑换用户 ID
+        usage_type: 兑换用途（registration/renewal，默认 renewal）
+
+    Returns:
+        (InviteCode, list[UserCapabilityGrant], list[InviteCodeCapability]) 元组
+
+    Raises:
+        ValueError: 邀请码无效/已兑换/已撤销
+    """
+    if usage_type not in ("registration", "renewal"):
+        raise ValueError(f"usage_type 必须是 registration/renewal，当前={usage_type!r}")
+
+    # 1. 哈希邀请码并查找（FOR UPDATE 行锁防止并发一码多用）
+    code_hash = hash_invite_code(raw_invite_code)
+    invite_stmt = (
+        select(InviteCode)
+        .where(InviteCode.code_hash == code_hash)
+        .with_for_update()
+    )
+    invite_result = await db.execute(invite_stmt)
+    invite = invite_result.scalar_one_or_none()
+
+    if invite is None:
+        raise ValueError("邀请码无效")
+
+    # 2. 校验状态为 available
+    status_v2 = derive_invite_code_status_v2(invite)
+    if status_v2 == "revoked":
+        raise ValueError("邀请码已被撤销")
+    if status_v2 == "redeemed":
+        raise ValueError("邀请码已被兑换")
+    if status_v2 != "available":
+        raise ValueError(f"邀请码状态非法: {status_v2}")
+
+    # 3. 查询能力配置
+    cap_stmt = (
+        select(InviteCodeCapability)
+        .where(InviteCodeCapability.invite_code_id == invite.id)
+        .order_by(InviteCodeCapability.capability_key)
+    )
+    cap_result = await db.execute(cap_stmt)
+    capabilities = list(cap_result.scalars().all())
+    if not capabilities:
+        raise ValueError(f"邀请码 {invite.id} 无能力配置（数据异常）")
+
+    # 4. 创建 UserCapabilityGrant（每项能力一个 grant）
+    # [PRD §7] 每项能力独立计算 base = max(now, 该能力当前最晚有效 expires_at)
+    # 一次查询获取用户在该邀请码所有能力上的最晚 expires_at（含已过期，max(now,...) 自然处理）
+    now = datetime.now(UTC)
+    capability_keys = [cap.capability_key for cap in capabilities]
+    latest_stmt = (
+        select(
+            UserCapabilityGrant.capability_key,
+            func.max(UserCapabilityGrant.expires_at).label("latest_expires_at"),
+        )
+        .where(
+            UserCapabilityGrant.user_id == user_id,
+            UserCapabilityGrant.revoked_at.is_(None),
+            UserCapabilityGrant.capability_key.in_(capability_keys),
+        )
+        .group_by(UserCapabilityGrant.capability_key)
+    )
+    latest_result = await db.execute(latest_stmt)
+    latest_per_cap: dict[str, datetime] = {
+        row.capability_key: row.latest_expires_at for row in latest_result.all()
+    }
+
+    grants: list[UserCapabilityGrant] = []
+    latest_new_expires_at: datetime | None = None
+    for cap in capabilities:
+        current_latest = latest_per_cap.get(cap.capability_key)
+        if current_latest is not None:
+            # DB DateTime 可能返回 naive，统一归一化为 UTC aware
+            if current_latest.tzinfo is None:
+                current_latest = current_latest.replace(tzinfo=UTC)
+            base = max(now, current_latest)
+        else:
+            base = now
+        new_expires_at = add_calendar_months_asiashanghai(
+            base, invite.duration_months  # type: ignore[arg-type]
+        )
+        grant = UserCapabilityGrant(
+            user_id=user_id,
+            capability_key=cap.capability_key,
+            limit_value=cap.limit_value,
+            source_type="invite_code",
+            source_id=str(invite.id),
+            starts_at=now,
+            expires_at=new_expires_at,
+            revoked_at=None,
+            created_by=None,
+        )
+        db.add(grant)
+        grants.append(grant)
+        if latest_new_expires_at is None or new_expires_at > latest_new_expires_at:
+            latest_new_expires_at = new_expires_at
+
+    # 5. 更新邀请码 redeemed_by_user_id / redeemed_at
+    invite.redeemed_by_user_id = user_id
+    invite.redeemed_at = now
+    invite.usage_type = usage_type
+    # 同步旧字段（V1 兼容）
+    invite.used_by = user_id
+    invite.used_at = now
+    invite.status = "used"
+
+    # 6. 写 InviteRedemption 记录
+    # [PRD §7] new_expires_at 取本次兑换所有 grant 中最晚的 expires_at（多项能力独立续期）
+    # old_expires_at 保留 None（V2.1 grant 独立管理，不再追踪单一旧 expires_at）
+    redemption = InviteRedemption(
+        invite_code_id=invite.id,
+        user_id=user_id,
+        usage_type=usage_type,
+        old_expires_at=None,
+        new_expires_at=latest_new_expires_at,  # type: ignore[arg-type]
+        redeemed_at=now,
+    )
+    db.add(redemption)
+
+    await db.flush()
+
+    # 7. 失效用户 AccessContext 缓存
+    invalidate_access_context_cache(str(user_id))
+
+    return invite, grants, capabilities
 
 
 if __name__ == "__main__":
