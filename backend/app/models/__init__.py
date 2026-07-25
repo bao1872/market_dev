@@ -16,6 +16,7 @@ V1.1 各阶段模型统一继承 Base：
 - Phase4.5: AccessAuditLog（访问审计日志表 access_audit_logs，记录 admin 关键操作）
 - Research: ResearchFeatureMatrixRun/Row（研究特征矩阵轻量宽表，按月分批回补）
 - ViewPresets: UserTableViewPreset（用户表格视图配置，保存筛选/排序/列设置）
+- CapabilityV2: InviteCodeCapability/UserCapabilityGrant（V2.1 邀请码模块化授权，三能力独立 grant）
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from app.models.bar import BarDaily, BarMinute
 from app.models.base import Base
 from app.models.beta_application import BetaApplication
 from app.models.calendar import TradingCalendar
+from app.models.capability_grant import InviteCodeCapability, UserCapabilityGrant
 from app.models.capture_job import CaptureJob
 from app.models.config import ConfigDefinition
 from app.models.event_recipient import StrategyEventRecipient
@@ -73,6 +75,7 @@ __all__ = [
     "BetaApplication",
     "CaptureJob",
     "ConfigDefinition",
+    "InviteCodeCapability",
     "Instrument",
     "InviteCode",
     "InviteRedemption",
@@ -108,6 +111,7 @@ __all__ = [
     "User",
     "UserRole",
     "UserTableViewPreset",
+    "UserCapabilityGrant",
     "UserWatchlistItem",
     "WorkerHeartbeat",
 ]

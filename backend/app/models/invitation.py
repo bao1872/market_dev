@@ -108,12 +108,37 @@ class InviteCode(Base):
     usage_type: Mapped[str | None] = mapped_column(
         String(16), nullable=True, comment="兑换用途：registration/renewal（未使用时为 NULL）"
     )
+    # [PRD V2.1 §8.1] 新增字段：duration_months / revoked_at / redeemed_by_user_id / redeemed_at
+    # 与旧字段 grant_months/used_by/used_at 并存，新代码优先使用新字段
+    # 邀请码状态由新字段推导：available / redeemed / revoked
+    duration_months: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="授权月数（替代 grant_months，按日历月计算；>0；新代码使用此字段）",
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="邀请码撤销时间（NULL=未撤销；新代码用此字段推导 revoked 状态）",
+    )
+    redeemed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+        comment="兑换用户 ID（NULL=未兑换；与 used_by 并存，新代码使用此字段）",
+    )
+    redeemed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="兑换时间（NULL=未兑换；与 used_at 并存，新代码使用此字段）",
+    )
 
     def __repr__(self) -> str:
         return (
             f"<InviteCode(id={self.id!r}, status={self.status!r}, "
             f"plan_code={self.plan_code!r}, grant_months={self.grant_months!r}, "
-            f"grant_days={self.grant_days!r})>"
+            f"duration_months={self.duration_months!r}, "
+            f"revoked_at={self.revoked_at!r}, redeemed_at={self.redeemed_at!r})>"
         )
 
 
@@ -178,4 +203,9 @@ if __name__ == "__main__":
     assert "plan_code" in [c.name for c in InviteCode.__table__.columns]
     assert "monitor_limit" in [c.name for c in InviteCode.__table__.columns]
     assert "grant_months" in [c.name for c in InviteCode.__table__.columns]
+    # [PRD V2.1 §8.1] 验证新字段已添加
+    assert "duration_months" in [c.name for c in InviteCode.__table__.columns]
+    assert "revoked_at" in [c.name for c in InviteCode.__table__.columns]
+    assert "redeemed_by_user_id" in [c.name for c in InviteCode.__table__.columns]
+    assert "redeemed_at" in [c.name for c in InviteCode.__table__.columns]
     print("OK")
