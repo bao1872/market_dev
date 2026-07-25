@@ -47,8 +47,10 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from datetime import date
+from datetime import date, datetime
+from datetime import time as dt_time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -63,7 +65,14 @@ from app.services.chart_snapshot_service import ChartSnapshotService
 from app.services.market_data_aggregation_service import (
     _call_expected_last_completed_daily_bar,
 )
-from app.services.market_status_service import compute_market_session
+from app.services.market_status_service import (
+    MARKET_SESSION_CLOSED,
+    MARKET_SESSION_LUNCH,
+    MARKET_SESSION_NON_TRADING_DAY,
+    MARKET_SESSION_PRE_OPEN,
+    TRADING_SESSIONS,
+    compute_market_session,
+)
 
 logger = logging.getLogger("api.chart_snapshot")
 
@@ -77,22 +86,90 @@ _ALLOWED_ADJ = {"qfq", "none"}
 # [P0-7] freshness_state 枚举（详情页唯一行情真源新鲜度状态）
 # fresh       = 正常数据（db 或 hybrid，无降级，非 partial）
 # partial     = 实时尾部存在（is_partial=True，无降级）
-# stale       = 交易时段实时目标周期返回空（degraded + realtime_empty reason）
+# stale       = 交易时段实时目标周期返回空（actual < expected in trading hours）
 # unavailable = 行情不可用（degraded + 其他原因，或数据完全为空）
 _FRESHNESS_FRESH = "fresh"
 _FRESHNESS_PARTIAL = "partial"
 _FRESHNESS_STALE = "stale"
 _FRESHNESS_UNAVAILABLE = "unavailable"
 
+# 上海时区（chart_snapshot 内部 expected/actual 比较）
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _compute_expected_latest_bar_time(
+    now: datetime,
+    timeframe: str,
+    market_session: str,
+    last_completed_daily_date: date,
+) -> datetime:
+    """[CHANGE-20260724-004] 按周期和市场阶段计算 expected_latest_bar_time。
+
+    合同：当前周期本应存在的最新已完成 bar 时间（tz-aware Asia/Shanghai）。
+
+    - 1d/1w/1mo: 最近已完成日线交易日 15:00
+    - 非交易日 / 盘前: 上一交易日收盘 15:00
+    - 收盘后: 今日收盘 15:00
+    - 15m 盘中: 向下取整到 15m 边界；午休为 11:15
+    - 1h 盘中: 按 A 股 1h bar 完成时间（10:30/11:30/14:00/15:00）
+    """
+    # 1d/1w/1mo: 期望 = 最近已完成日线交易日 15:00
+    if timeframe in ("1d", "1w", "1mo"):
+        return datetime.combine(last_completed_daily_date, dt_time(15, 0), tzinfo=_SHANGHAI_TZ)
+
+    # 非交易日 / 盘前：期望 = 上一交易日收盘
+    if market_session in (MARKET_SESSION_NON_TRADING_DAY, MARKET_SESSION_PRE_OPEN):
+        return datetime.combine(last_completed_daily_date, dt_time(15, 0), tzinfo=_SHANGHAI_TZ)
+
+    # 收盘后：期望 = 今日收盘
+    if market_session == MARKET_SESSION_CLOSED:
+        return datetime.combine(now.date(), dt_time(15, 0), tzinfo=_SHANGHAI_TZ)
+
+    # 盘中交易时段（MORNING / LUNCH / AFTERNOON）
+    if timeframe == "15m":
+        # 午休：上午最后一根 15m bar = 11:15
+        if market_session == MARKET_SESSION_LUNCH:
+            return datetime.combine(now.date(), dt_time(11, 15), tzinfo=_SHANGHAI_TZ)
+        # 交易时段：向下取整到 15m 边界（当前已完成 bar 时间）
+        minute = (now.minute // 15) * 15
+        return datetime.combine(now.date(), dt_time(now.hour, minute), tzinfo=_SHANGHAI_TZ)
+
+    if timeframe == "1h":
+        # 午休：上午最后一根 1h bar = 11:30
+        if market_session == MARKET_SESSION_LUNCH:
+            return datetime.combine(now.date(), dt_time(11, 30), tzinfo=_SHANGHAI_TZ)
+        # 1h bar 完成时间：10:30, 11:30, 14:00, 15:00
+        h, m = now.hour, now.minute
+        if h < 10 or (h == 10 and m < 30):
+            # 09:30-10:30 第一根 1h 未完成 → 期望上一交易日收盘
+            return datetime.combine(last_completed_daily_date, dt_time(15, 0), tzinfo=_SHANGHAI_TZ)
+        if h < 11 or (h == 11 and m < 30):
+            # 10:30-11:30 已完成 10:30
+            return datetime.combine(now.date(), dt_time(10, 30), tzinfo=_SHANGHAI_TZ)
+        if h < 14:
+            # 11:30-14:00 已完成 11:30
+            return datetime.combine(now.date(), dt_time(11, 30), tzinfo=_SHANGHAI_TZ)
+        if h < 15:
+            # 14:00-15:00 已完成 14:00
+            return datetime.combine(now.date(), dt_time(14, 0), tzinfo=_SHANGHAI_TZ)
+        return datetime.combine(now.date(), dt_time(15, 0), tzinfo=_SHANGHAI_TZ)
+
+    # fallback：返回当前时间
+    return now.astimezone(_SHANGHAI_TZ) if now.tzinfo else now.replace(tzinfo=_SHANGHAI_TZ)
+
 
 def _compute_freshness_state(
     bars_result: Any,
     page_df: pd.DataFrame,
+    actual_latest_bar_time: datetime | None,
+    expected_latest_bar_time: datetime | None,
+    market_session: str,
 ) -> str:
-    """[P0-7] 从 BarAggregationResult 计算 freshness_state。
+    """[P0-7] 真实比较 actual vs expected 计算 freshness_state。
 
     禁止静默返回普通 db 状态：交易时段实时返回空时必须标记 stale。
     [CHANGE-20260724-004] latest_daily_quote 缺失时标记 unavailable。
+    [CHANGE-20260724-004] actual < expected 在交易时段 → stale；其他时段 → unavailable。
     """
     if page_df.empty:
         return _FRESHNESS_UNAVAILABLE
@@ -104,6 +181,13 @@ def _compute_freshness_state(
         if "realtime_" in reason and "_empty_in_trading_hours" in reason:
             return _FRESHNESS_STALE
         return _FRESHNESS_UNAVAILABLE
+    # [CHANGE-20260724-004] 真实比较 actual vs expected
+    if actual_latest_bar_time is not None and expected_latest_bar_time is not None:
+        if actual_latest_bar_time < expected_latest_bar_time:
+            # 交易时段实时目标缺失 → stale；非交易时段 → unavailable
+            if market_session in TRADING_SESSIONS:
+                return _FRESHNESS_STALE
+            return _FRESHNESS_UNAVAILABLE
     if bars_result.is_partial:
         return _FRESHNESS_PARTIAL
     return _FRESHNESS_FRESH
@@ -281,31 +365,51 @@ async def get_chart_snapshot(
     # [P0-7] 派生 quote + freshness_state + market_session + 时间字段
     # 详情页不得同时以 /quote 和 /chart-snapshot 作为行情真源
     quote = _derive_quote_from_bars(snapshot_result.page_df, bars_result, timeframe)
-    freshness_state = _compute_freshness_state(bars_result, snapshot_result.page_df)
 
-    # market_session：当前市场阶段
-    is_trading_day = await is_trading_day_async(db, now_shanghai().date())
-    market_session = compute_market_session(now_shanghai(), is_trading_day)
+    # market_session：当前市场阶段（freshness_state 与 expected_latest_bar_time 都需要）
+    now_sh = now_shanghai()
+    is_trading_day = await is_trading_day_async(db, now_sh.date())
+    market_session = compute_market_session(now_sh, is_trading_day)
 
     # actual_latest_bar_time：实际最新 bar 时间（含 partial/realtime）
-    actual_latest_bar_time: Any = None
+    actual_latest_bar_time_raw: datetime | None = None
     if bars_result.last_live_bar_time is not None:
-        actual_latest_bar_time = bars_result.last_live_bar_time
+        actual_latest_bar_time_raw = bars_result.last_live_bar_time
     elif bars_result.last_persisted_bar_time is not None:
-        actual_latest_bar_time = bars_result.last_persisted_bar_time
-    if hasattr(actual_latest_bar_time, "isoformat"):
-        actual_latest_bar_time = actual_latest_bar_time.isoformat()
+        actual_latest_bar_time_raw = bars_result.last_persisted_bar_time
+    # 统一为 tz-aware datetime 用于比较
+    actual_for_compare: datetime | None = None
+    if actual_latest_bar_time_raw is not None:
+        if isinstance(actual_latest_bar_time_raw, pd.Timestamp):
+            actual_for_compare = actual_latest_bar_time_raw.to_pydatetime()
+        else:
+            actual_for_compare = actual_latest_bar_time_raw
+        if actual_for_compare.tzinfo is None:
+            actual_for_compare = actual_for_compare.replace(tzinfo=_SHANGHAI_TZ)
 
-    # expected_latest_bar_time：当前周期本应存在的最新 bar 时间
-    # 日线使用 _call_expected_last_completed_daily_bar；其他周期简化为 now_shanghai
-    expected_latest_bar_time: Any
-    if timeframe == "1d":
-        expected_dt = await _call_expected_last_completed_daily_bar(
-            db, now_shanghai()
-        )
-        expected_latest_bar_time = expected_dt.isoformat()
-    else:
-        expected_latest_bar_time = now_shanghai().isoformat()
+    # expected_latest_bar_time：按周期和市场阶段计算（不再简单写成 now）
+    last_completed_daily = await _call_expected_last_completed_daily_bar(db, now_sh)
+    expected_dt = _compute_expected_latest_bar_time(
+        now=now_sh,
+        timeframe=timeframe,
+        market_session=market_session,
+        last_completed_daily_date=last_completed_daily,
+    )
+
+    # freshness_state：真实比较 actual vs expected
+    freshness_state = _compute_freshness_state(
+        bars_result=bars_result,
+        page_df=snapshot_result.page_df,
+        actual_latest_bar_time=actual_for_compare,
+        expected_latest_bar_time=expected_dt,
+        market_session=market_session,
+    )
+
+    # 序列化 actual/expected 为 ISO 字符串
+    actual_latest_bar_time: Any = (
+        actual_for_compare.isoformat() if actual_for_compare is not None else None
+    )
+    expected_latest_bar_time: Any = expected_dt.isoformat()
 
     # completed_through 转换为 tz-aware datetime（BarListResponse 需要 datetime 对象）
     _completed_through = bars_result.completed_through

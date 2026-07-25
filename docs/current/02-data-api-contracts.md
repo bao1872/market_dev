@@ -14,23 +14,25 @@
 
 partial 实时 Bar 不写入完成 Bar 表，只存在于请求快照或短缓存。
 
-### 个股详情 K线实时契约
+### 个股详情 K线实时契约（CHANGE-20260724-004 单一真源收口）
 
-- `/quote` 实时 **只代表顶部行情卡片实时**，不等价于 K线实时；
-- `/bars?timeframe=1d&include_realtime=true` 是个股详情 1d K线实时的唯一后端契约；
-- 交易时段（`MORNING_SESSION`/`AFTERNOON_SESSION`）内，`/bars?timeframe=1d&include_realtime=true` 必须返回今日 partial daily bar：
+- 个股详情页行情唯一真源为 `/chart-snapshot`（扩展 ChartSnapshot 响应），**禁止详情页同时调用 `/quote` 和 `/chart-snapshot` 作为行情来源**；顶部价格、K线、指标均来自同一 snapshot 的同一 `as_of`；
+- `/chart-snapshot` 响应中的 `latest_daily_quote` 字段提供当日日线 OHLC（与展示周期无关），前端 quote 卡片从此字段派生；
+- `/quote` 端点保留用于非详情页场景（如自选监控），**不得用于个股详情页**；
+- 交易时段（`MORNING_SESSION`/`AFTERNOON_SESSION`）内，`/chart-snapshot` 必须返回今日 partial daily bar：
   - `data_source=hybrid`
   - `is_partial=true`
   - `last_live_bar_time` 非空
   - 最后一根 bar 日期为今日
-  - close 来自最新已完成 1m bar；
-- `MarketDataAggregationService` 调用 `pytdx_adapter.get_minute_bars` 拉取 live 1m 时，`start_time` 与 `end_time` 必须同为 `Asia/Shanghai` aware datetime，禁止 naive/aware 混用；`pytdx_adapter.get_minute_bars` 内部将 aware 输入按 `Asia/Shanghai` 解释后转为 naive，再与 pytdx 返回的 naive `datetime` 列比较过滤；该 live 1m 能力是 `/bars` 实时展示与 `worker-monitor` 的共同依赖，但各自业务链路保持分离；
+  - 1d partial daily bar 来自 Pytdx 原生日线（`fetch_today_daily_bars`），**禁止从 1m 聚合合成 1d**；
+- 各周期实时尾部数据源（CHANGE-20260724-004）：1d=Pytdx 原生日线；15m=Pytdx 原生 15m；1h=Pytdx 原生 60m；1w/1mo=先合并今日 partial daily 再聚合；**禁止生产链路使用 1m→15m、1m→60m、1m→1d 聚合**；
+- `MarketDataAggregationService` 调用 `pytdx_adapter` 拉取实时数据时，`start_time` 与 `end_time` 必须同为 `Asia/Shanghai` aware datetime，禁止 naive/aware 混用；Pytdx I/O 锁必须在 Adapter 内部，覆盖所有底层读取和重连；
 - 1d partial daily bar 仅作为页面响应快照，不写入完成 Bar 库表；
-- 收盘后或非交易时段，`/bars?timeframe=1d` 不得伪装实时：
+- 收盘后或非交易时段，`/chart-snapshot` 不得伪装实时：
   - `is_partial=false`
   - 最后一根为完整日线
-  - `/quote` 可为 `daily_fallback`；
-- 前端 `mergeRealtimeQuoteIntoBars()` 只能作为兜底视觉增强：当且仅当后端 `/bars` 未返回 `is_partial=true` 时才允许合并 quote；**后端已返回 partial bar 时，前端不得用 quote 覆盖**；不参与指标计算，不写入库。
+  - `freshness_state` 反映实际 vs 期望 bar 时间对比（`fresh`/`stale`/`unavailable`）；
+- **禁止前端 quote→bar 兜底**：前端不得使用 `mergeRealtimeQuoteIntoBars()` 或任何 quote 数据覆盖 bar；K线数据只来自 `/chart-snapshot` 的 `bars` 字段。
 
 ### 1.1 MDAS v2 行情读取契约（CHANGE-20260717-002）
 
@@ -741,6 +743,8 @@ V1.10 位置语义说明：
 
 `GET /api/v1/instruments/{instrument_id}/quote` 返回标的实时报价，必须明确暴露数据来源、实时性、新鲜度与降级状态。
 
+**适用范围（CHANGE-20260724-004）**：本端点保留用于非详情页场景（如自选监控、行情摘要）；**个股详情页禁止调用本端点**，详情页行情唯一真源为 `/chart-snapshot` 的 `latest_daily_quote` 字段（详见"个股详情 K线实时契约"）。
+
 响应字段：
 
 | 字段 | 类型 | 说明 |
@@ -783,7 +787,7 @@ Bar 列表响应在分页字段之外补充以下诊断字段：
 |---|---|---|
 | `data_source` | string | 数据来源，如 `bars_daily`、`bars_15min` 等 |
 | `as_of` | string \| null | 数据截止时间（ISO8601） |
-| `is_partial` | bool | 是否包含未完成 bar；`timeframe=1d` 时代表后端已合成 partial daily bar |
+| `is_partial` | bool | 是否包含未完成 bar；`timeframe=1d` 时代表后端已合并今日 partial daily bar（来自 Pytdx 原生日线，非 1m 聚合） |
 | `last_live_bar_time` | string \| null | 最新 live bar 时间；仅当 `is_partial=true` 时非空 |
 | `freshness_seconds` | float | 数据新鲜度（秒） |
 | `degraded` | bool | 是否降级 |

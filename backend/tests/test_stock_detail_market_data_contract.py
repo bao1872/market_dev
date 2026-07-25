@@ -1005,7 +1005,14 @@ async def test_16_weekly_quote_unavailable_no_fallback(
     assert quote is None, "latest_daily_quote 缺失时 1w quote 必须为 None（禁止从 1w page_df 兜底）"
 
     # freshness 必须为 unavailable
-    freshness = _compute_freshness_state(bars_result, weekly_df)
+    # [CHANGE-20260724-004] _compute_freshness_state 新签名需 actual/expected/market_session
+    freshness = _compute_freshness_state(
+        bars_result=bars_result,
+        page_df=weekly_df,
+        actual_latest_bar_time=pd.Timestamp("2026-07-21"),
+        expected_latest_bar_time=pd.Timestamp("2026-07-21 15:00"),
+        market_session="MARKET_CLOSED",
+    )
     assert freshness == "unavailable", (
         f"latest_daily_quote 缺失时 freshness 应为 unavailable，实际={freshness}"
     )

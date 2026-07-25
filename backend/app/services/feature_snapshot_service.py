@@ -94,7 +94,7 @@ logger = logging.getLogger(__name__)
 
 # 常量
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-_SCHEMA_VERSION = 4  # [CHANGE-20260721-001] 3→4: node_cluster 字段增加 availability/degraded_reason，StockContext 据此区分 5 态（NO_PUBLISHED_RUN/SNAPSHOT_MISSING/NODE_PROFILE_EMPTY/NODE_15M_MISSING/NODE_COMPUTE_FAILED）。旧 schema_version=3 快照不可见，符合"旧新结果不可混用"。
+_SCHEMA_VERSION = 5  # [CHANGE-20260724-003] v4→v5 方案 A：Phase 8A 端到端链路收口（15m readiness + 跨 worker fencing + 两阶段幂等发布 + 6 步状态机）；旧 schema_version=4 快照不可见，符合"旧新结果不可混用"。部署后等待首次 v5 盘后运行成功，成功前 watchlist_ready=False。
 _PRIMARY_LOOKBACK = 500  # 日线回看天数（与 structural_factor_service 对齐）
 _SECONDARY_LOOKBACK = 500  # 15m 回看天数
 _BB_WIN = 20

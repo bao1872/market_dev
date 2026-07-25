@@ -18,6 +18,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIVE_ROOT="/opt/panji-live"
+ENV_FILE="${ENV_FILE:-/etc/market-dev/market.env}"
 SKIP_STOP=false
 
 # 解析参数
@@ -41,9 +42,15 @@ if [[ ! -f "$REPO_ROOT/backend/alembic.ini" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "ERROR: ENV_FILE=$ENV_FILE 不存在" >&2
+  exit 1
+fi
+
 # 获取当前 git SHA
 RUNTIME_SHA="$(cd "$REPO_ROOT" && git rev-parse HEAD)"
 echo "[sync] RUNTIME_SHA=$RUNTIME_SHA"
+echo "[sync] ENV_FILE=$ENV_FILE"
 
 # 创建目标目录
 mkdir -p "$LIVE_ROOT/backend" "$LIVE_ROOT/frontend"
@@ -52,7 +59,7 @@ mkdir -p "$LIVE_ROOT/backend" "$LIVE_ROOT/frontend"
 if [[ "$SKIP_STOP" == "false" ]]; then
   echo "[sync] 停止应用容器..."
   cd "$REPO_ROOT"
-  docker compose -f docker-compose.prod.yml -f docker-compose.live.yml \
+  docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml -f docker-compose.live.yml \
     stop backend worker-bars-scheduler worker-strategy-scheduler \
     worker-calendar worker-monitor worker-strategy-batch \
     worker-outbox worker-delivery worker-after-close \
@@ -86,6 +93,9 @@ if [[ -d "$REPO_ROOT/frontend/dist" ]]; then
   rsync -a --delete \
     --exclude='.gitkeep' \
     "$REPO_ROOT/frontend/dist/" "$LIVE_ROOT/frontend/dist/"
+  # 确保 capture 静态目录存在（前端 nginx 嵌套挂载点）
+  mkdir -p "$LIVE_ROOT/frontend/dist/static/captures"
+  echo "[sync] 确保目录存在: $LIVE_ROOT/frontend/dist/static/captures"
 else
   echo "[sync] WARN: frontend/dist 不存在，跳过前端同步"
 fi
@@ -98,7 +108,7 @@ echo "[sync] RUNTIME_SHA 已写入 $LIVE_ROOT/RUNTIME_SHA"
 if [[ "$SKIP_STOP" == "false" ]]; then
   echo "[sync] 重启应用容器..."
   cd "$REPO_ROOT"
-  docker compose -f docker-compose.prod.yml -f docker-compose.live.yml \
+  docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml -f docker-compose.live.yml \
     up -d backend worker-bars-scheduler worker-strategy-scheduler \
     worker-calendar worker-monitor worker-strategy-batch \
     worker-outbox worker-delivery worker-after-close \

@@ -5,65 +5,98 @@
 # 只读挂载到容器内，实现代码热更新而无需重建镜像。
 #
 # 用法:
-#   docker compose -f docker-compose.prod.yml -f docker-compose.live.yml up -d
+#   docker compose --env-file /etc/market-dev/market.env \
+#     -f docker-compose.prod.yml -f docker-compose.live.yml up -d
 #
-# 挂载矩阵（docker-compose override 自动合并 prod 的 volume）:
+# 挂载矩阵（使用 !override 覆盖 prod 的 volumes）:
 #   backend + 所有 Python worker + capture worker:
 #     /opt/panji-live/backend/app         → /app/app           (ro)
 #     /opt/panji-live/backend/alembic     → /app/alembic       (ro)
 #     /opt/panji-live/backend/alembic.ini → /app/alembic.ini   (ro)
 #     /opt/panji-live/RUNTIME_SHA         → /app/RUNTIME_SHA   (ro)
+#     /etc/market-dev/config.production.py → /app/config.production.py (ro)
+#   backend 额外:
+#     ./doc                                → /doc               (ro)
 #   frontend:
 #     /opt/panji-live/frontend/dist       → /usr/share/nginx/html (ro)
 #     capture_static                      → /usr/share/nginx/html/static/captures (ro, 嵌套)
 #
-# 约束:
+# 关键约束:
 # - 所有挂载为只读 (:ro)，容器不得写入运行时文件
 # - 不修改 docker-compose.prod.yml
+# - config.production.py 挂到 /app/config.production.py（不嵌套到 /app/app），
+#   避免与 /app/app 只读父挂载冲突；通过 environment 覆盖 CONFIG_FILE
 # - 依赖/Dockerfile 变化仍需重建镜像
 
+# 共享 Live Mount volumes（所有 Python 服务 + capture worker）
 x-live-python-volumes: &live-python-volumes
-  volumes:
+  volumes: !override
     - /opt/panji-live/backend/app:/app/app:ro
     - /opt/panji-live/backend/alembic:/app/alembic:ro
     - /opt/panji-live/backend/alembic.ini:/app/alembic.ini:ro
     - /opt/panji-live/RUNTIME_SHA:/app/RUNTIME_SHA:ro
+    - /etc/market-dev/config.production.py:/app/config.production.py:ro
+
+# 共享 Live Mount environment（覆盖 CONFIG_FILE 指向新挂载点）
+x-live-python-env: &live-python-env
+  environment:
+    CONFIG_FILE: /app/config.production.py
 
 services:
   backend:
     <<: *live-python-volumes
+    <<: *live-python-env
+    volumes: !override
+      - ./doc:/doc:ro
+      - /opt/panji-live/backend/app:/app/app:ro
+      - /opt/panji-live/backend/alembic:/app/alembic:ro
+      - /opt/panji-live/backend/alembic.ini:/app/alembic.ini:ro
+      - /opt/panji-live/RUNTIME_SHA:/app/RUNTIME_SHA:ro
+      - /etc/market-dev/config.production.py:/app/config.production.py:ro
+    environment:
+      CONFIG_FILE: /app/config.production.py
 
   worker-bars-scheduler:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-strategy-scheduler:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-calendar:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-monitor:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-strategy-batch:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-outbox:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-delivery:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-after-close:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-watchdog:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   worker-capture:
     <<: *live-python-volumes
+    <<: *live-python-env
 
   frontend:
-    volumes:
+    volumes: !override
       - /opt/panji-live/frontend/dist:/usr/share/nginx/html:ro
       - capture_static:/usr/share/nginx/html/static/captures:ro

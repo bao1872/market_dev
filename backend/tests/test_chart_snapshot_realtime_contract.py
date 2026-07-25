@@ -50,9 +50,14 @@ _FRONTEND_SRC = Path(__file__).resolve().parents[2] / "frontend" / "src"
 # 合成行情数据生成
 # =============================================================================
 def _build_daily_bars(n_bars: int = 260, seed: int = 42) -> pd.DataFrame:
-    """生成确定性日线 bars（>= 250 满足展示窗口）。"""
+    """生成确定性日线 bars（>= 250 满足展示窗口）。
+
+    [CHANGE-20260724-004] 修正 pandas 3.0 兼容：end 必须为工作日，
+    否则 pd.date_range(freq="B") 会跳过周末导致返回 periods-1 个日期。
+    2026-07-17 为周五，2026-07-18 为周六。
+    """
     rng = np.random.default_rng(seed)
-    dates = pd.date_range(end="2026-07-18", periods=n_bars, freq="B")
+    dates = pd.date_range(end="2026-07-17", periods=n_bars, freq="B")
     returns = rng.uniform(-0.02, 0.02, size=n_bars)
     close = 10.0 * np.cumprod(1 + returns)
     df = pd.DataFrame({
