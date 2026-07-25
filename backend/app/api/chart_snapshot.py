@@ -92,8 +92,12 @@ def _compute_freshness_state(
     """[P0-7] 从 BarAggregationResult 计算 freshness_state。
 
     禁止静默返回普通 db 状态：交易时段实时返回空时必须标记 stale。
+    [CHANGE-20260724-004] latest_daily_quote 缺失时标记 unavailable。
     """
     if page_df.empty:
+        return _FRESHNESS_UNAVAILABLE
+    # [CHANGE-20260724-004] quote 真源缺失 → unavailable（禁止从 page_df 兜底）
+    if getattr(bars_result, "latest_daily_quote", None) is None:
         return _FRESHNESS_UNAVAILABLE
     if bars_result.degraded:
         reason = bars_result.degraded_reason or ""
@@ -110,49 +114,26 @@ def _derive_quote_from_bars(
     bars_result: Any,
     timeframe: str,
 ) -> dict[str, Any] | None:
-    """[P0-7] 从 snapshot 的 bars DataFrame 派生 quote（详情页唯一行情真源）。
+    """[CHANGE-20260724-004] 从 bars_result.latest_daily_quote 派生 quote。
 
-    禁止详情页同时以 /quote 和 /chart-snapshot 作为行情真源。
-    quote 从同一 snapshot 的最新 bar 派生，保证 as_of 一致。
-
-    [P0-5] 顶部 quote 与展示周期解耦：
-    - 1d/15m/1h/1m：从 page_df 最后一根 bar 派生 OHLC + prev_close + change_pct
-    - 1w/1mo：current_price 取最新 bar close（含当日数据）；open/high/low/volume/
-      prev_close/change_pct 设为 None——聚合 bar 的 OHLC 是整周/月值，不是当日值，
-      禁止用作当日行情。前端在 1w/1mo 时只显示 current_price。
+    合同：
+    - 所有周期（1d/15m/1h/1w/1mo）quote 唯一真源为 latest_daily_quote
+    - latest_daily_quote 由 MDAS 单次读取派生，禁止第二次行情请求
+    - 缺失时返回 None（quote=null），freshness 标记 unavailable
+    - 不得从 1w/1mo page_df 派生日行情
+    - 所有周期返回 current/open/high/low/prev_close/change_pct/volume/amount
 
     Returns:
-        quote dict；空数据时返回 None
+        quote dict；latest_daily_quote 缺失时返回 None
     """
-    if page_df.empty:
+    ldq = getattr(bars_result, "latest_daily_quote", None)
+    if not ldq:
         return None
 
-    latest = page_df.iloc[-1]
-    current_price = float(latest["close"])
-
-    # [P0-5] 1w/1mo 不使用聚合 bar 的 OHLC/prev_close/change_pct
-    # 仅 current_price（最新 close）有效，其他字段为 None
-    if timeframe in ("1w", "1mo"):
-        open_price: float | None = None
-        high_price: float | None = None
-        low_price: float | None = None
-        volume: float | None = None
-        prev_close: float | None = None
-        change_pct: float | None = None
-    else:
-        open_price = float(latest["open"])
-        high_price = float(latest["high"])
-        low_price = float(latest["low"])
-        volume = float(latest["volume"])
-        # prev_close：倒数第二根 bar 的 close（如果有）
-        prev_close = None
-        if len(page_df) >= 2:
-            prev_close = float(page_df.iloc[-2]["close"])
-        # change_pct 计算
-        if prev_close is None or prev_close == 0:
-            change_pct = 0.0
-        else:
-            change_pct = (current_price - prev_close) / prev_close * 100
+    _close = ldq.get("close")
+    if _close is None:
+        return None
+    current_price = float(_close)
 
     # update_time：优先 last_live_bar_time，回退 last_persisted_bar_time
     update_time: Any
@@ -162,19 +143,19 @@ def _derive_quote_from_bars(
         update_time = bars_result.last_persisted_bar_time
     else:
         update_time = bars_result.as_of
-
     if hasattr(update_time, "isoformat"):
         update_time = update_time.isoformat()
 
     return {
         "current_price": round(current_price, 4),
-        "open": round(open_price, 4) if open_price is not None else None,
-        "high": round(high_price, 4) if high_price is not None else None,
-        "low": round(low_price, 4) if low_price is not None else None,
+        "open": round(float(ldq["open"]), 4) if ldq.get("open") is not None else None,
+        "high": round(float(ldq["high"]), 4) if ldq.get("high") is not None else None,
+        "low": round(float(ldq["low"]), 4) if ldq.get("low") is not None else None,
         "close": round(current_price, 4),
-        "volume": round(volume, 2) if volume is not None else None,
-        "prev_close": round(prev_close, 4) if prev_close is not None else None,
-        "change_pct": round(change_pct, 2) if change_pct is not None else None,
+        "volume": round(float(ldq["volume"]), 2) if ldq.get("volume") is not None else None,
+        "amount": round(float(ldq["amount"]), 2) if ldq.get("amount") is not None else None,
+        "prev_close": round(float(ldq["prev_close"]), 4) if ldq.get("prev_close") is not None else None,
+        "change_pct": round(float(ldq["change_pct"]), 2) if ldq.get("change_pct") is not None else None,
         "update_time": update_time,
         "is_realtime": bars_result.is_partial,
     }
@@ -387,6 +368,8 @@ async def get_chart_snapshot(
         "indicators": indicators_response,
         # [P0-7] 详情页唯一行情真源：quote 从同一 snapshot 派生，禁止详情页调用 /quote
         "quote": quote,
+        # [CHANGE-20260724-004] 暴露 latest_daily_quote 供前端/测试断言当日行情事实
+        "latest_daily_quote": bars_result.latest_daily_quote,
         "market_session": market_session,
         "as_of": bars_result.as_of.isoformat() if hasattr(bars_result.as_of, "isoformat") else bars_result.as_of,
         "actual_latest_bar_time": actual_latest_bar_time,

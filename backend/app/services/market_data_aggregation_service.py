@@ -155,6 +155,10 @@ class BarAggregationResult:
     # [CP-V3-A2] 迭代回补诊断字段
     backfill_rounds: int = 0
     coverage_reason: str = ""
+    # [CHANGE-20260724-004] 当日行情事实（quote 与展示周期解耦）
+    # 无论 timeframe 是 1d/15m/1h/1w/1mo，latest_daily_quote 始终包含当日日线 OHLC
+    # 前端 quote 卡片从此字段派生，不使用展示周期 bar 的 OHLC
+    latest_daily_quote: dict | None = None
 
 
 # ===== 交易时间判断 =====
@@ -1070,6 +1074,9 @@ class MarketDataAggregationService:
         backfill_rounds = 0
         intraday_history_exhausted = False
         coverage_reason = "daily_no_backfill"
+        # [CHANGE-20260724-004] daily_df 默认空 DataFrame，供 latest_daily_quote 在
+        # intraday 路径安全引用（daily 分支会覆盖此值）
+        daily_df = pd.DataFrame()
 
         # ============================================================
         # 日线 / 周线 / 月线
@@ -1302,6 +1309,11 @@ class MarketDataAggregationService:
         # [CP-V3-A] 记录 limit 截取前的原始数量（用于 history_exhausted 判定）
         pre_limit_count = len(bars_df) if not bars_df.empty else 0
 
+        # [CHANGE-20260724-004] 保存 limit 截断前的完整 DataFrame
+        # 用于 latest_daily_quote 聚合（1m/15m/1h 按交易日聚合当日 OHLC）
+        # 禁止为 quote 增加第二次 MDAS/Pytdx/Repository 行情读取
+        bars_df_full = bars_df
+
         # [mdas] - limit / warmup 截取（在 hash 计算前，保证相同 limit 下 hash 稳定）
         warmup_bars_full: pd.DataFrame | None = None
         if warmup_bars > 0 and not bars_df.empty:
@@ -1339,6 +1351,91 @@ class MarketDataAggregationService:
         else:
             history_exhausted = intraday_history_exhausted
 
+        # [CHANGE-20260724-004] latest_daily_quote: 当日行情事实
+        # quote 与展示周期完全解耦——单次 MDAS 读取，禁止第二次 Pytdx/Repository 查询
+        # - 1d: bars_df_full 即合并今日 partial 后的日线，直接取末根
+        # - 1w/1mo: daily_df 已合并今日 partial daily（聚合前），取末根日线
+        # - 1m/15m/1h: 从 bars_df_full 按最新交易日聚合 open/high/low/close/volume/amount
+        # 缺失时返回 None，前端 quote=null 且 freshness=unavailable
+        latest_daily_quote: dict | None = None
+        try:
+            if timeframe in ("1w", "1mo"):
+                # 1w/1mo: 使用聚合前 daily_df（已含今日 partial + qfq）
+                _qdf = daily_df
+                if _qdf is not None and not _qdf.empty:
+                    _latest = _qdf.iloc[-1]
+                    _prev_close = (
+                        float(_qdf.iloc[-2]["close"])
+                        if len(_qdf) >= 2 else None
+                    )
+                    _cp = float(_latest["close"])
+                    latest_daily_quote = {
+                        "open": float(_latest["open"]),
+                        "high": float(_latest["high"]),
+                        "low": float(_latest["low"]),
+                        "close": _cp,
+                        "volume": float(_latest["volume"]),
+                        "amount": float(_latest["amount"]) if "amount" in _qdf.columns else 0.0,
+                        "prev_close": _prev_close,
+                        "change_pct": (
+                            (_cp - _prev_close) / _prev_close * 100
+                            if _prev_close and _prev_close != 0 else 0.0
+                        ),
+                    }
+            elif timeframe == "1d":
+                # 1d: bars_df_full 是合并 partial daily 后的日线 DataFrame
+                _qdf = bars_df_full
+                if _qdf is not None and not _qdf.empty:
+                    _latest = _qdf.iloc[-1]
+                    _prev_close = (
+                        float(_qdf.iloc[-2]["close"])
+                        if len(_qdf) >= 2 else None
+                    )
+                    _cp = float(_latest["close"])
+                    latest_daily_quote = {
+                        "open": float(_latest["open"]),
+                        "high": float(_latest["high"]),
+                        "low": float(_latest["low"]),
+                        "close": _cp,
+                        "volume": float(_latest["volume"]),
+                        "amount": float(_latest["amount"]) if "amount" in _qdf.columns else 0.0,
+                        "prev_close": _prev_close,
+                        "change_pct": (
+                            (_cp - _prev_close) / _prev_close * 100
+                            if _prev_close and _prev_close != 0 else 0.0
+                        ),
+                    }
+            else:
+                # 1m/15m/1h: 从已加载的目标周期 bars_df_full 按最新交易日聚合
+                # 禁止调用 fetch_today_daily_bars / _query_daily_bars
+                if bars_df_full is not None and not bars_df_full.empty:
+                    _latest_date = bars_df_full.index[-1].date()
+                    _today_mask = bars_df_full.index.date == _latest_date
+                    _today_bars = bars_df_full[_today_mask]
+                    if not _today_bars.empty:
+                        _prev_bars = bars_df_full[~_today_mask]
+                        _prev_close = (
+                            float(_prev_bars.iloc[-1]["close"])
+                            if not _prev_bars.empty else None
+                        )
+                        _cp = float(_today_bars.iloc[-1]["close"])
+                        latest_daily_quote = {
+                            "open": float(_today_bars.iloc[0]["open"]),
+                            "high": float(_today_bars["high"].max()),
+                            "low": float(_today_bars["low"].min()),
+                            "close": _cp,
+                            "volume": float(_today_bars["volume"].sum()),
+                            "amount": float(_today_bars["amount"].sum()) if "amount" in _today_bars.columns else 0.0,
+                            "prev_close": _prev_close,
+                            "change_pct": (
+                                (_cp - _prev_close) / _prev_close * 100
+                                if _prev_close and _prev_close != 0 else 0.0
+                            ),
+                        }
+        except Exception as exc:
+            logger.warning("latest_daily_quote 聚合失败: %s", exc)
+            latest_daily_quote = None
+
         result = BarAggregationResult(
             bars=bars_df,
             data_source=data_source,
@@ -1363,6 +1460,8 @@ class MarketDataAggregationService:
             # [CP-V3-A2] 迭代回补诊断字段
             backfill_rounds=backfill_rounds,
             coverage_reason=coverage_reason,
+            # [CHANGE-20260724-004] 当日行情事实（quote 唯一真源）
+            latest_daily_quote=latest_daily_quote,
         )
 
         _cache_set(cache_key, result)

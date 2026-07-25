@@ -108,7 +108,14 @@ async def readiness() -> JSONResponse:
 
 @router.get("/version")
 async def version() -> JSONResponse:
-    """版本信息端点，返回构建版本与数据库迁移版本（无需认证）。"""
+    """版本信息端点，返回构建版本与数据库迁移版本（无需认证）。
+
+    [CHANGE-20260724-004] Live Mount 支持：
+    - runtime_git_sha: 优先读取 /app/RUNTIME_SHA（Live Mount 同步的运行时 SHA）
+    - image_git_sha: 镜像构建时注入的 GIT_SHA 环境变量
+    - deployment_mode: "live"（RUNTIME_SHA 存在）或 "image"（仅镜像）
+    - 兼容旧镜像：RUNTIME_SHA 不存在时 runtime_git_sha=image_git_sha
+    """
     alembic_revision = "unknown"
     try:
         async with AsyncSessionLocal() as db:
@@ -119,13 +126,37 @@ async def version() -> JSONResponse:
     except Exception:
         logger.exception("查询 alembic_version 失败")
 
+    # [CHANGE-20260724-004] Live Mount runtime SHA
+    runtime_sha_path = Path("/app/RUNTIME_SHA")
+    runtime_git_sha = "unknown"
+    runtime_sha_file_exists = False
+    try:
+        if runtime_sha_path.is_file():
+            runtime_git_sha = runtime_sha_path.read_text(encoding="utf-8").strip()
+            runtime_sha_file_exists = True
+    except Exception:
+        logger.warning("读取 RUNTIME_SHA 失败", exc_info=True)
+
+    image_git_sha = os.environ.get("GIT_SHA", "unknown")
+
+    # 兼容：RUNTIME_SHA 不存在时 runtime_git_sha 回退到 image_git_sha
+    if not runtime_sha_file_exists:
+        runtime_git_sha = image_git_sha
+
+    deployment_mode = "live" if runtime_sha_file_exists else "image"
+
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
-            "git_sha": os.environ.get("GIT_SHA", "unknown"),
+            # 兼容旧字段
+            "git_sha": runtime_git_sha,
             "build_time": os.environ.get("BUILD_TIME", "unknown"),
             "app_version": "1.1.0",
             "alembic_revision": alembic_revision,
+            # [CHANGE-20260724-004] Live Mount 新增字段
+            "runtime_git_sha": runtime_git_sha,
+            "image_git_sha": image_git_sha,
+            "deployment_mode": deployment_mode,
         },
     )
 

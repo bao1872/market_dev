@@ -1,6 +1,6 @@
 """个股详情布局与行情唯一真源修复 — 定向回归测试。
 
-验证 CHANGE-20260724-003 周期合同：
+验证 CHANGE-20260724-003 周期合同 + CHANGE-20260724-004 quote 解耦：
 1. 15m 调用原生 15m 且不调用 1m 聚合
 2. 60m 调用原生 60m
 3. 1d 调用 Pytdx 原生日线
@@ -8,9 +8,15 @@
 5. 同时间戳实时覆盖 DB
 6. completed_only 强制 include_realtime=False
 7. 实时空结果标记 stale（degraded + realtime_empty reason）
-8. chart_snapshot quote 与展示周期解耦（1w/1mo 的 OHLC 为 None）
+8. chart_snapshot quote 从 latest_daily_quote 派生（CHANGE-20260724-004）
 9. PytdxAdapter 双线程串行且无死锁（RLock）
 10. include_realtime=False 不调用任何 fetch_* 函数
+11. 1d/1w/1mo quote 来自聚合前 daily_df
+12. 1m/15m/1h quote 由已有目标周期 DataFrame 聚合
+13. 各周期 quote 字段一致
+14. spy 断言无额外 daily Pytdx/Repository 读取
+15. include_realtime=False 无额外读取
+16. 周/月 quote 不可用时不得使用周/月 OHLC 兜底
 """
 
 from __future__ import annotations
@@ -513,18 +519,20 @@ async def test_realtime_empty_marks_stale(
 
 
 # ============================================================
-# 测试 8: chart_snapshot quote 与展示周期解耦
+# 测试 8: chart_snapshot quote 从 latest_daily_quote 派生（CHANGE-20260724-004）
 # ============================================================
 
 
-def test_quote_decoupled_from_display_timeframe() -> None:
-    """[P0-5] 1w/1mo 时 quote 的 open/high/low/volume/prev_close/change_pct 为 None。
+def test_quote_derived_from_latest_daily_quote() -> None:
+    """[CHANGE-20260724-004] quote 唯一真源为 latest_daily_quote。
 
-    禁止使用聚合 bar 的 OHLC 作为当日行情。current_price 仍从最新 close 派生。
+    - latest_daily_quote 存在时：所有周期返回完整 OHLC 字段
+    - latest_daily_quote 缺失时：返回 None（禁止从 page_df 兜底）
+    - 1w/1mo 不得使用聚合 bar 的 OHLC 作为当日行情
     """
     from app.api.chart_snapshot import _derive_quote_from_bars
 
-    # 构造 1w bars（2 根周线）
+    # 构造 1w bars（2 根周线）——这些不应影响 quote
     weekly_df = pd.DataFrame({
         "open": [10.0, 11.0], "high": [12.0, 13.0],
         "low": [9.0, 10.5], "close": [11.0, 12.5],
@@ -534,37 +542,53 @@ def test_quote_decoupled_from_display_timeframe() -> None:
     }, index=pd.DatetimeIndex(["2026-07-14", "2026-07-21"]))
     weekly_df.index.name = "trade_date"
 
-    # 构造 mock bars_result
+    # 构造 mock bars_result，含 latest_daily_quote（当日日线事实）
     bars_result = MagicMock()
     bars_result.is_partial = True
     bars_result.last_live_bar_time = pd.Timestamp("2026-07-24 15:00")
     bars_result.last_persisted_bar_time = None
     bars_result.as_of = pd.Timestamp("2026-07-24 15:00")
+    bars_result.latest_daily_quote = {
+        "open": 9.8, "high": 10.5, "low": 9.6, "close": 10.2,
+        "volume": 500000.0, "amount": 5000000.0,
+        "prev_close": 10.0, "change_pct": 2.0,
+    }
 
-    # 1w quote：current_price 有效，其他为 None
+    # 1w quote：所有字段从 latest_daily_quote 派生，不从周线 bar 派生
     quote_weekly = _derive_quote_from_bars(weekly_df, bars_result, "1w")
     assert quote_weekly is not None
-    assert quote_weekly["current_price"] == 12.5, "1w current_price 取最新 close"
-    assert quote_weekly["open"] is None, "1w open 必须为 None（聚合值非当日）"
-    assert quote_weekly["high"] is None, "1w high 必须为 None"
-    assert quote_weekly["low"] is None, "1w low 必须为 None"
-    assert quote_weekly["volume"] is None, "1w volume 必须为 None"
-    assert quote_weekly["prev_close"] is None, "1w prev_close 必须为 None"
-    assert quote_weekly["change_pct"] is None, "1w change_pct 必须为 None"
+    assert quote_weekly["current_price"] == 10.2, "current_price 从 latest_daily_quote.close"
+    assert quote_weekly["open"] == 9.8, "open 从 latest_daily_quote"
+    assert quote_weekly["high"] == 10.5
+    assert quote_weekly["low"] == 9.6
+    assert quote_weekly["volume"] == 500000.0
+    assert quote_weekly["amount"] == 5000000.0
+    assert quote_weekly["prev_close"] == 10.0
+    assert quote_weekly["change_pct"] == 2.0
     assert quote_weekly["is_realtime"] is True
+    # 关键：不得使用周线 bar 的 OHLC（11.0/13.0 等）
+    assert quote_weekly["open"] != 11.0, "禁止从 1w page_df 派生 open"
+    assert quote_weekly["high"] != 13.0, "禁止从 1w page_df 派生 high"
 
-    # 1mo quote：同上
+    # 1mo quote：同 1w
     quote_monthly = _derive_quote_from_bars(weekly_df, bars_result, "1mo")
-    assert quote_monthly["open"] is None
-    assert quote_monthly["high"] is None
+    assert quote_monthly["current_price"] == 10.2
+    assert quote_monthly["open"] == 9.8
 
-    # 1d quote：所有字段有效
+    # 1d quote：同样从 latest_daily_quote 派生
     quote_daily = _derive_quote_from_bars(weekly_df, bars_result, "1d")
-    assert quote_daily["current_price"] == 12.5
-    assert quote_daily["open"] == 11.0, "1d open 从最新 bar 派生"
-    assert quote_daily["high"] == 13.0
-    assert quote_daily["prev_close"] == 11.0, "1d prev_close 从倒数第二根 bar 派生"
-    assert quote_daily["change_pct"] is not None
+    assert quote_daily["current_price"] == 10.2
+    assert quote_daily["open"] == 9.8
+
+    # latest_daily_quote 缺失时：返回 None（禁止兜底）
+    bars_result_no_quote = MagicMock()
+    bars_result_no_quote.latest_daily_quote = None
+    bars_result_no_quote.is_partial = False
+    bars_result_no_quote.last_live_bar_time = None
+    bars_result_no_quote.last_persisted_bar_time = pd.Timestamp("2026-07-22")
+    bars_result_no_quote.as_of = pd.Timestamp("2026-07-24")
+    quote_none = _derive_quote_from_bars(weekly_df, bars_result_no_quote, "1w")
+    assert quote_none is None, "latest_daily_quote 缺失时 quote 必须为 None"
 
 
 # ============================================================
@@ -702,3 +726,286 @@ async def test_include_realtime_false_no_fetch_calls(
     assert "minute" not in fetch_calls
     assert "15min" not in fetch_calls
     assert "60min" not in fetch_calls
+
+
+# ============================================================
+# CHANGE-20260724-004 定向测试 11-16: latest_daily_quote 合同
+# ============================================================
+
+
+async def test_11_1d_1w_1mo_quote_from_pre_aggregation_daily_df(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[测试1] 1d/1w/1mo 的 latest_daily_quote 来自聚合前的 daily_df。
+
+    1d: bars_df_full 即合并 partial 后的日线
+    1w/1mo: daily_df 已合并今日 partial（聚合前）
+    """
+    service = mdas.MarketDataAggregationService()
+    # DB 日线含今日
+    db_df = _build_daily_bars(["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-24"])
+    today_close = float(db_df.iloc[-1]["close"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    _mock_expected_daily(monkeypatch, date(2026, 7, 23))
+    _mock_trading_hours(monkeypatch, trading=False)  # 盘后，不触发 partial 合并
+    _mock_redis_miss(monkeypatch)
+    _mock_symbol_and_listing(monkeypatch)
+    _mock_adj_factors_empty(monkeypatch)
+    monkeypatch.setattr(
+        mdas, "fetch_daily_bars",
+        lambda *a, **kw: _async_return(pd.DataFrame()),
+    )
+    monkeypatch.setattr(
+        mdas, "fetch_today_daily_bars",
+        lambda *a, **kw: _async_return(pd.DataFrame()),
+    )
+
+    for tf in ("1d", "1w", "1mo"):
+        result = await service.get_bars(
+            _mock_session(), TEST_INSTRUMENT_ID,
+            timeframe=tf, adj="none", include_realtime=False,
+        )
+        assert result.latest_daily_quote is not None, f"{tf}: latest_daily_quote 不应为 None"
+        ldq = result.latest_daily_quote
+        assert ldq["close"] == today_close, (
+            f"{tf}: latest_daily_quote.close={ldq['close']} 应等于日线末根 close={today_close}"
+        )
+        assert "open" in ldq and ldq["open"] is not None
+        assert "high" in ldq and ldq["high"] is not None
+        assert "low" in ldq and ldq["low"] is not None
+        assert "volume" in ldq
+        assert "amount" in ldq
+        assert "prev_close" in ldq
+        assert "change_pct" in ldq
+
+
+async def test_12_1m_15m_1h_quote_aggregated_from_target_period_df(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[测试2] 1m/15m/1h 的 latest_daily_quote 从已加载目标周期 DataFrame 聚合。
+
+    构造 15m bars 跨两日，验证 latest_daily_quote 反映最后交易日的 OHLC 聚合。
+    """
+    service = mdas.MarketDataAggregationService()
+    # 15m bars：2026-07-23 下午 + 2026-07-24 全天
+    bars_day1 = _build_15min_bars("2026-07-23 13:00", periods=8)  # 4h
+    bars_day2 = _build_15min_bars("2026-07-24 09:30", periods=16)  # 4h
+    all_bars = pd.concat([bars_day1, bars_day2])
+
+    monkeypatch.setattr(
+        mdas, "_query_15min_bars",
+        lambda *a, **kw: _async_return(all_bars.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_fetch_intraday_with_backfill",
+        lambda *a, **kw: _async_return((all_bars.copy(), 1, False, "no_limit")),
+    )
+    _mock_trading_hours(monkeypatch, trading=False)  # 盘后
+    _mock_redis_miss(monkeypatch)
+    _mock_symbol_and_listing(monkeypatch)
+    _mock_expected_daily(monkeypatch, date(2026, 7, 23))
+    _mock_adj_factors_empty(monkeypatch)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID,
+        timeframe="15m", adj="none", include_realtime=False,
+    )
+
+    assert result.latest_daily_quote is not None
+    ldq = result.latest_daily_quote
+    day2_bars = all_bars[all_bars.index.date == pd.Timestamp("2026-07-24").date()]
+    assert ldq["open"] == float(day2_bars.iloc[0]["open"]), "open = 当日首根 open"
+    assert ldq["high"] == float(day2_bars["high"].max()), "high = 当日最高"
+    assert ldq["low"] == float(day2_bars["low"].min()), "low = 当日最低"
+    assert ldq["close"] == float(day2_bars.iloc[-1]["close"]), "close = 当日末根 close"
+    assert ldq["volume"] == float(day2_bars["volume"].sum()), "volume = 当日成交量之和"
+    # prev_close = 上一交易日末根 close
+    day1_bars = all_bars[all_bars.index.date == pd.Timestamp("2026-07-23").date()]
+    assert ldq["prev_close"] == float(day1_bars.iloc[-1]["close"]), "prev_close = 上一交易日末根 close"
+
+
+async def test_13_all_timeframes_quote_fields_consistent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[测试3] 各周期 latest_daily_quote 字段一致（同一组键）。
+
+    所有周期返回相同的键集合：open/high/low/close/volume/amount/prev_close/change_pct
+    """
+    service = mdas.MarketDataAggregationService()
+    db_daily = _build_daily_bars(["2026-07-20", "2026-07-21", "2026-07-22"])
+    db_15m = _build_15min_bars("2026-07-22 09:30", periods=16)
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_daily.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_query_15min_bars",
+        lambda *a, **kw: _async_return(db_15m.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_fetch_intraday_with_backfill",
+        lambda *a, **kw: _async_return((db_15m.copy(), 1, False, "no_limit")),
+    )
+    _mock_trading_hours(monkeypatch, trading=False)
+    _mock_redis_miss(monkeypatch)
+    _mock_symbol_and_listing(monkeypatch)
+    _mock_expected_daily(monkeypatch, date(2026, 7, 22))
+    _mock_adj_factors_empty(monkeypatch)
+    monkeypatch.setattr(
+        mdas, "fetch_daily_bars",
+        lambda *a, **kw: _async_return(pd.DataFrame()),
+    )
+
+    expected_keys = {"open", "high", "low", "close", "volume", "amount", "prev_close", "change_pct"}
+    for tf in ("1d", "1w", "1mo", "15m"):
+        result = await service.get_bars(
+            _mock_session(), TEST_INSTRUMENT_ID,
+            timeframe=tf, adj="none", include_realtime=False,
+        )
+        assert result.latest_daily_quote is not None, f"{tf}: latest_daily_quote 不应为 None"
+        actual_keys = set(result.latest_daily_quote.keys())
+        assert actual_keys == expected_keys, (
+            f"{tf}: latest_daily_quote 键不一致，期望={expected_keys}，实际={actual_keys}"
+        )
+
+
+async def test_14_no_extra_daily_reads_for_intraday_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[测试4] 15m/1h/1m quote 不得触发额外 daily Pytdx/Repository 读取。
+
+    spy fetch_today_daily_bars 和 _query_daily_bars，断言 15m 路径不调用它们用于 quote。
+    """
+    service = mdas.MarketDataAggregationService()
+    db_15m = _build_15min_bars("2026-07-24 09:30", periods=250)
+
+    monkeypatch.setattr(
+        mdas, "_fetch_intraday_with_backfill",
+        lambda *a, **kw: _async_return((db_15m.copy(), 1, False, "no_limit")),
+    )
+    _mock_trading_hours(monkeypatch, trading=False)
+    _mock_redis_miss(monkeypatch)
+    _mock_symbol_and_listing(monkeypatch)
+    _mock_expected_daily(monkeypatch, date(2026, 7, 23))
+    _mock_adj_factors_empty(monkeypatch)
+
+    daily_call_count = {"query_daily": 0, "today_daily": 0, "fetch_daily": 0}
+
+    async def _spy_query_daily(*a, **kw):
+        daily_call_count["query_daily"] += 1
+        return pd.DataFrame()
+
+    async def _spy_today_daily(*a, **kw):
+        daily_call_count["today_daily"] += 1
+        return pd.DataFrame()
+
+    async def _spy_fetch_daily(*a, **kw):
+        daily_call_count["fetch_daily"] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr(mdas, "_query_daily_bars", _spy_query_daily)
+    monkeypatch.setattr(mdas, "fetch_today_daily_bars", _spy_today_daily)
+    monkeypatch.setattr(mdas, "fetch_daily_bars", _spy_fetch_daily)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID,
+        timeframe="15m", adj="none", include_realtime=False,
+    )
+
+    # 15m 盘后路径不应调用任何 daily 查询（quote 从 15m bars 聚合）
+    assert daily_call_count["query_daily"] == 0, (
+        f"15m 不得调用 _query_daily_bars 用于 quote，实际调用 {daily_call_count['query_daily']} 次"
+    )
+    assert daily_call_count["today_daily"] == 0, (
+        f"15m 不得调用 fetch_today_daily_bars 用于 quote，实际调用 {daily_call_count['today_daily']} 次"
+    )
+    assert daily_call_count["fetch_daily"] == 0, (
+        f"15m 不得调用 fetch_daily_bars 用于 quote，实际调用 {daily_call_count['fetch_daily']} 次"
+    )
+    # latest_daily_quote 仍应有值（从 15m bars 聚合）
+    assert result.latest_daily_quote is not None, "15m 应从 bars 聚合出 latest_daily_quote"
+
+
+async def test_15_include_realtime_false_no_extra_daily_for_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[测试5] include_realtime=False 时 latest_daily_quote 不得产生额外日线查询。
+
+    1d 盘后路径：daily_df 已有数据，latest_daily_quote 从 daily_df 派生，不额外查询。
+    """
+    service = mdas.MarketDataAggregationService()
+    db_daily = _build_daily_bars(["2026-07-20", "2026-07-21", "2026-07-22"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_daily.copy()),
+    )
+    _mock_expected_daily(monkeypatch, date(2026, 7, 22))
+    _mock_trading_hours(monkeypatch, trading=False)
+    _mock_redis_miss(monkeypatch)
+    _mock_symbol_and_listing(monkeypatch)
+    _mock_adj_factors_empty(monkeypatch)
+
+    extra_calls = {"today_daily": 0, "fetch_daily": 0}
+
+    async def _spy_today(*a, **kw):
+        extra_calls["today_daily"] += 1
+        return pd.DataFrame()
+
+    async def _spy_fetch(*a, **kw):
+        extra_calls["fetch_daily"] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr(mdas, "fetch_today_daily_bars", _spy_today)
+    monkeypatch.setattr(mdas, "fetch_daily_bars", _spy_fetch)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID,
+        timeframe="1d", adj="none", include_realtime=False,
+    )
+
+    assert extra_calls["today_daily"] == 0, "include_realtime=False 不得调用 fetch_today_daily_bars"
+    assert extra_calls["fetch_daily"] == 0, "include_realtime=False 不得调用 fetch_daily_bars"
+    assert result.latest_daily_quote is not None, "1d 盘后应从 daily_df 派生 latest_daily_quote"
+    assert result.latest_daily_quote["close"] == float(db_daily.iloc[-1]["close"])
+
+
+async def test_16_weekly_quote_unavailable_no_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[测试6] 1w quote 不可用时不得使用 1w OHLC 兜底。
+
+    构造 daily_df 为空 + 1w bars 有数据，验证 latest_daily_quote=None
+    且 _derive_quote_from_bars 返回 None（禁止从 1w page_df 派生）。
+    """
+    from app.api.chart_snapshot import _compute_freshness_state, _derive_quote_from_bars
+
+    # 1w bars 有数据，但 latest_daily_quote 为 None
+    weekly_df = pd.DataFrame({
+        "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5],
+        "volume": [100000.0], "amount": [1000000.0],
+    }, index=pd.DatetimeIndex(["2026-07-21"]))
+
+    bars_result = MagicMock()
+    bars_result.latest_daily_quote = None
+    bars_result.is_partial = False
+    bars_result.degraded = False
+    bars_result.degraded_reason = None
+    bars_result.last_live_bar_time = None
+    bars_result.last_persisted_bar_time = pd.Timestamp("2026-07-21")
+    bars_result.as_of = pd.Timestamp("2026-07-24")
+
+    # quote 必须为 None
+    quote = _derive_quote_from_bars(weekly_df, bars_result, "1w")
+    assert quote is None, "latest_daily_quote 缺失时 1w quote 必须为 None（禁止从 1w page_df 兜底）"
+
+    # freshness 必须为 unavailable
+    freshness = _compute_freshness_state(bars_result, weekly_df)
+    assert freshness == "unavailable", (
+        f"latest_daily_quote 缺失时 freshness 应为 unavailable，实际={freshness}"
+    )
