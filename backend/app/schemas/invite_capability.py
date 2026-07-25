@@ -153,6 +153,38 @@ class InviteCodeV2ListResponse(BaseModel):
     offset: int = Field(..., description="分页偏移")
 
 
+class RedeemV2Request(BaseModel):
+    """V2.1 邀请码兑换请求（PRD §6.2 + §7）。
+
+    已认证用户提交邀请码明文，后端原子兑换并按能力创建 grant。
+    """
+
+    invite_code: str = Field(..., min_length=8, description="邀请码明文")
+
+
+class RedeemV2GrantItem(BaseModel):
+    """兑换后创建的 grant 项。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    capability_key: str = Field(..., description="能力键")
+    limit_value: int | None = Field(None, description="自选额度（仅 watchlist_management）")
+    starts_at: datetime = Field(..., description="生效时间")
+    expires_at: datetime = Field(..., description="到期时间（exclusive）")
+
+
+class RedeemV2Response(BaseModel):
+    """V2.1 邀请码兑换响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invite_code_id: UUID = Field(..., description="邀请码 ID")
+    redeemed_at: datetime = Field(..., description="兑换时间")
+    grants: list[RedeemV2GrantItem] = Field(
+        default_factory=list, description="本次兑换创建的 grant 列表"
+    )
+
+
 if __name__ == "__main__":
     # [InviteCapabilitySchema] - 描述: 自测入口，验证 schema 字段与校验
     print(f"InviteCodeCapabilityItem fields={list(InviteCodeCapabilityItem.model_fields.keys())}")

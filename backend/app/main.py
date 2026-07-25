@@ -52,6 +52,7 @@ from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
 from app.api.plans import router as plans_router
 from app.api.public_beta import router as public_beta_router
+from app.api.redeem_v2 import router as redeem_v2_router
 from app.api.stock_context import admin_router as stock_context_admin_router
 from app.api.stock_context import stock_router as stock_context_router
 from app.api.stock_detail_feishu import router as stock_detail_feishu_router
@@ -143,6 +144,8 @@ app = FastAPI(
 app.include_router(health_router)
 # 认证路由（R2：登录/刷新/当前用户）
 app.include_router(auth_router)
+# V2.1 邀请码兑换路由（已认证用户兑换 V2.1 邀请码，按能力创建 grant）
+app.include_router(redeem_v2_router)
 # 当前用户权益路由（plans 表：套餐/监控上限/已使用/剩余/到期日）
 app.include_router(me_router)
 # 当前用户表格视图配置路由（保存筛选/排序/列设置）
