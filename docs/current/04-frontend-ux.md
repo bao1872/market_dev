@@ -308,7 +308,7 @@ Node Cluster 算法
 
 ### 指标原理页替换（CHANGE-20260724-002）
 
-- **`/portal/pages/data.html` 替换为新版**：以 `ref/panji_indicator_principles_demo.html` 为内容和交互真源，保留门户公共导航/site.css/site.js/相对链接，主体使用独立作用域 `.indicator-principles-page`。
+- **`/portal/pages/data.html` 替换为新版**：以 `ref/panji_indicator_principles_demo.html` 为内容和交互参考源（人工阅读），保留门户公共导航/site.css/site.js/相对链接，主体使用独立作用域 `.indicator-principles-page`。
 - **筹码共识完整解释流程**（6 步）：原始输入 → 映射价格 → 形成分布 → 识别聚集 → 提取共识 → 观察位置。
 - **价格结构完整解释流程**（5 步）：原始路径 → 候选拐点 → 过滤噪声 → 标注关系（HH/HL/LH/LL）→ 两种情景（结构延续/结构失效）。
 - **交互**：上一步/下一步/步骤直接选择/可选自动播放（默认不自动播放），移动端正常显示，不依赖外部 CDN。

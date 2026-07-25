@@ -106,8 +106,16 @@ Capture Token 只能访问 Capture API；不能访问普通用户 API；不能�
 
 MDAS 必须实现 count-aware 回补：daily required_count=250、15m required_count=4000、completed_only=True、include_realtime=False、adj=qfq、统一 adjustment_as_of；实际返回少于 required_count 时自动向前扩展，直到达到 required_count、到达真实上市历史起点或安全边界；必须返回 `history_exhausted: bool` 区分"DB 历史不足"与"系统未取满"（CP-V3-A2）。
 
-### 13. Atomic Chart Snapshot 单 MDAS 读取
+### 13. Atomic Chart Snapshot 单 MDAS 读取 + quote 唯一真源
 Atomic Snapshot 必须使用单次 MDAS 读取，直接将 DataFrame/CanonicalInput 传递给指标计算；**禁止在单次请求中进行第二次市场数据读取**；Redis 仅缓存最终 Snapshot 响应（CP-16）。前端只请求 chart-snapshot；独立的 Bars/Indicators 请求不恢复。
+
+[CHANGE-20260724-004] ChartSnapshot 是个股详情页 quote 的唯一真源。`BarAggregationResult.latest_daily_quote` 字段在单次 MDAS 读取内派生当日行情事实：
+- 1d/1w/1mo：从聚合前的 `daily_df`（已合并今日 partial daily + qfq）取末根日线 OHLC
+- 1m/15m/1h：从已加载的目标周期 `bars_df_full`（limit 截断前）按最新交易日聚合 open/high/low/close/volume/amount
+- **禁止为 quote 增加第二次 Pytdx/Repository/MDAS 行情读取**（`fetch_today_daily_bars`/`_query_daily_bars` 不得用于 quote 派生）
+- `latest_daily_quote` 缺失时 `quote=null` 且 `freshness_state=unavailable`；禁止从 1w/1mo page_df 派生日行情兜底
+- 所有周期返回 `current/open/high/low/prev_close/change_pct/volume/amount`，业务语义不随展示周期变化
+- 前端不得恢复 `useRealtimeQuote` 或独立 `/quote` 请求
 
 ### 14. SMC FVG 完全排除 + 严格 time-key
 Fair Value Gap 不计算、不返回、不缓存、不渲染，也不暴露 FVG 开关；生产计算路径不包含 FVG 函数或状态；输出结构中不存在 FVG 相关键、事件或 box。FVG 验收为输出级别断言（CHANGE-20260715-001 ~ 002）。
@@ -123,8 +131,14 @@ Atomic Fact Contract V1 的 Core 14 项不可修改；产品观察扩展不进�
 ### 17. 三链五周期一致性
 详情链 `/stock/:symbol` 切换 1d/15m/1h/1w/1mo 时，Node Cluster `profile_hash`/`daily_source_hash`/`bars_15m_source_hash` 必须完全一致（图表 bars frame hash 允许不同）；Atomic Facts 中的"筹码共识价"与详情页 Node Cluster 必须消费同一个 Canonical 结果（`node_cluster_engine.compute_node_cluster_profile` 唯一入口，三链同核）（CHANGE-20260721-001）。
 
-### 18. 个股详情 K 线实时契约
-`/quote` 实时只代表顶部行情卡片实时，不等价于 K 线实时。交易时段内，`/bars?timeframe=1d&include_realtime=true` 必须返回今日 partial daily bar（`data_source=hybrid`、`is_partial=true`、`last_live_bar_time` 非空、最后一根 bar 日期为今日、close 来自最新已完成 1m bar）。收盘后或非交易时段不得伪装实时（`is_partial=false`、1d 最后一根应为完整日线、quote 可为 `daily_fallback`）。Exchange→MDAS→ChartSnapshot→Canvas 是唯一 K 线链；**禁止前端 `mergeRealtimeQuoteIntoBars()` 或任何 quote→bar 兜底**（CP-V3-D2 修正）。
+### 18. 个股详情行情唯一真源（ChartSnapshot）
+[CHANGE-20260724-004] 个股详情页行情唯一真源为 `/api/v1/instruments/{id}/chart-snapshot`。**禁止详情页同时调用 `/quote` 和 `/chart-snapshot`**；禁止恢复前端 `useRealtimeQuote` 或 `mergeRealtimeQuoteIntoBars()`。
+
+- **quote 派生**: quote 从同一 snapshot 的 `latest_daily_quote` 派生，保证 `as_of` 一致；所有周期（1d/15m/1h/1w/1mo）返回完整 OHLC + prev_close + change_pct + volume + amount
+- **K 线实时**: 交易时段内 `include_realtime=true` 返回 partial bar（`data_source=hybrid`、`is_partial=true`、`last_live_bar_time` 非空）；收盘后不得伪装实时
+- **盘后边界**: 盘后 MFCS 回归必须使用 `include_realtime=False`，不得产生新增日线查询（`latest_daily_quote` 从已有 `daily_df`/`bars_df_full` 派生）
+- **数据周期合同**: 1d=DB 日线+Pytdx 日线；15m=DB 15m+Pytdx 原生 15m；1h=DB 60m+Pytdx 原生 60m；1w=合并日线→周线；1mo=合并日线→月线。禁止 1m→15m/1m→60m/1m→1d 聚合
+- **来源区分**: `market`/`watchlist`/`direct` 必须显式区分；market/watchlist 双列布局（`200px minmax(0,1fr)`），direct 单列布局（`minmax(0,1fr)`）
 
 ### 19. 板块同步降级保护（pywencai 唯一数据源）
 pywencai（`wencai_board_provider.py`）为唯一板块分类源；`/market/boards` 只读数据库 + Redis 状态，不在用户 API 请求链访问问财；`backend/Dockerfile` 必须安装 `nodejs`；盘后 worker 唯一同步入口是 `after_close_orchestrator.py` 的 `syncing_boards` 步骤；`BOARD_SYNC_ENABLED` 默认 `false`；`mode=dsa_only` 跳过该步骤。不得增加 akshare、代理、IP 绕过、东方财富混用或新常驻 worker（CHANGE-20260713-006 / PR #77）。
@@ -132,10 +146,25 @@ pywencai（`wencai_board_provider.py`）为唯一板块分类源；`/market/boar
 ### 20. 文档目录与 CI 门禁
 `tools/check_docs_consistency.py` 必须通过；规则包括：MANIFEST 存在且含实现核对基线（40 位 SHA 且为 HEAD 祖先）、baseline 必须在 HEAD 的最近 50 个 commit 内、docs/current/*.md 与 docs/maps/*.md 存在、本地 Markdown 链接有效、无"待填写"占位符、feishu_webhook 不得回退为当前方案、open-decisions 不得把 Webhook vs Platform App 写回 OPEN、CHANGE 引用必须可达、ref/ 隔离文本扫描。CI 必须失败若代码 SHA 变化后未同步 current/contracts/CHANGE/MANIFEST baseline。
 
-### 21. 提交安全
-禁止 `git add -A` / `git add .` / `git add -u`；必须精确 `git add <file>`。不得提交：`.vscode/settings.json`、`.traeignore`、`node_modules/`、`.venv/`、`__pycache__/`、`*.py[cod]`、`.mypy_cache/`、`.pytest_cache/`、`.ruff_cache/`、`.coverage`、`coverage.xml`、`dist/`、`build/`、`*.log`、`*.csv`、`*.parquet`。长命令（mypy 冷启动、大批量测试）必须用后台日志方式：`nohup bash -lc '<command>' > /tmp/<name>.log 2>&1 &`。未经用户明确授权禁止删除：数据库卷、运行中容器、postgres/redis 数据目录、node_modules、.venv、.git、源码、生产数据。
+### 21. 提交安全与执行模式
+禁止 `git add -A` / `git add .` / `git add -u`；必须精确 `git add <file>`。不得提交：`.vscode/settings.json`、`.traeignore`、`node_modules/`、`.venv/`、`__pycache__/`、`*.py[cod]`、`.mypy_cache/`、`.pytest_cache/`、`.ruff_cache/`、`.coverage`、`coverage.xml`、`dist/`、`build/`、`*.log`、`*.csv`、`*.parquet`。未经用户明确授权禁止删除：数据库卷、运行中容器、postgres/redis 数据目录、node_modules、.venv、.git、源码、生产数据。
 
-### 22. 因子版本追踪与 auto-resume
+**继续执行模式**（CHANGE-20260724-004）：当任务 checkpoint 匹配时，不重复审计和规划，直接从断点继续。断线恢复校验仅检查：分支/HEAD/未提交文件/冲突标记/编译/diff check，通过后立即继续当前任务。禁止在继续模式下重新规划已完成步骤或全仓审计。
+
+**前台串行执行**（CHANGE-20260724-004）：默认前台串行执行测试和检查命令。禁止强制 `nohup` 后台测试；仅当单条命令预计超过 5 分钟且用户明确同意时才可使用后台日志方式。测试组之间必须串行，禁止并行构建或并行测试。
+
+### 22. Live Mount 部署规则（CHANGE-20260724-004）
+Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实现代码热更新而无需重建镜像。
+
+- **固定运行目录**: `/opt/panji-live/{backend/app,backend/alembic,backend/alembic.ini,frontend/dist,RUNTIME_SHA}`
+- **叠加配置**: `docker-compose.prod.yml` + `docker-compose.live.yml`；不修改 prod 配置
+- **挂载权限**: 所有挂载为只读 (`:ro`)；backend + 所有 Python worker + capture worker 挂载 app/alembic/alembic.ini/RUNTIME_SHA；frontend 挂载 dist（保留 capture_static 嵌套挂载）
+- **同步脚本**: `scripts/sync_live_runtime.sh` 使用 `rsync --delete`，只复制运行必需文件（排除 .git/docs/tests/node_modules/缓存）；同步期间先停止应用容器
+- **部署脚本**: `scripts/deploy_live_runtime.sh` 编排完整流程（前端构建→同步→config 校验→alembic→force-recreate）
+- **适用范围**: 纯 Python/前端代码变更用 Live Mount；依赖/Dockerfile/基础镜像变化必须重建镜像
+- **版本端点**: `/version` 返回 `runtime_git_sha`（RUNTIME_SHA 文件）、`image_git_sha`（GIT_SHA 环境变量）、`deployment_mode`（live/image）；验证部署时 `runtime_git_sha` 必须等于 main HEAD
+
+### 23. 因子版本追踪与 auto-resume
 成功因子重建后必须调用 `stamp_factor_reconciliation_version` 写入 `factor_algorithm_version`/`factor_reconciliation_version`/`factor_reconciled_at`；盘后流程通过 `find_stale_version_instruments` 识别版本过期的影响集。`after_close_orchestrator` 任务支持 auto-resume：`interrupted` → `resume_queued`（`attempt_no` 递增，max=3），`lease_epoch` fencing 防止旧 worker 写入，`last_completed_step` 支持断点恢复（CP-V3-D）。
 
 ---

@@ -4,10 +4,19 @@
 
 ## 2026-07-24
 
+- CHANGE-20260724-004: 个股详情行情唯一真源 + Live Mount 部署（quote/latest_daily_quote 解耦 + /version runtime SHA + docker-compose.live.yml + sync/deploy 脚本）
+- CHANGE-20260724-003: Phase 8A 端到端链路正确性收口 — 调度入口幂等 + 15m readiness + 跨 worker fencing + 两阶段幂等发布 + v4→v5 方案 A + 死代码删除
 - CHANGE-20260724-002: 指标原理页替换 + 全部盘中监控截图增加二维码入口（data.html 新版动画 + MobileIndicatorStage 二维码页脚 + indicator-principles-qr.png）
 - CHANGE-20260724-001: 门户二维码更新 — 替换为用户提供的新二维码 PNG（wechat-qr.jpg → wechat-qr.png，860×860 PNG）
 
-- CHANGE-20260724-002: 盘迹统一特征计算与事件新鲜度 V1 — 状态机收敛 + compute-once + event freshness 层 + v5 schema（Phase 7 文档/合同/记忆对齐）
+- CHANGE-20260724-004 详细:
+  - **quote 与展示周期完全解耦**: MDAS `BarAggregationResult` 新增 `latest_daily_quote` 字段；1d/1w/1mo 从聚合前 `daily_df` 派生当日 OHLC；1m/15m/1h 从已加载目标周期 `bars_df_full` 按最新交易日聚合；单次 MDAS 读取，禁止第二次 Pytdx/Repository 查询
+  - **chart_snapshot 移除 page_df 回退**: `latest_daily_quote` 缺失时 quote=null 且 freshness=unavailable；不得从 1w/1mo page_df 派生日行情
+  - **/version 运行时端点**: 优先读取 `/app/RUNTIME_SHA`；返回 `runtime_git_sha`/`image_git_sha`/`deployment_mode`；兼容旧镜像环境变量
+  - **Live Mount 部署**: `docker-compose.live.yml` 叠加只读挂载；`scripts/sync_live_runtime.sh`（rsync --delete 同步运行必需文件）；`scripts/deploy_live_runtime.sh`（完整部署编排）；固定运行目录 `/opt/panji-live/`
+  - **测试**: 6 项新增定向测试（quote 来源、字段一致、无额外读取、不可用不兜底）+ 修改测试 8 适配新合同
+
+- CHANGE-20260724-003 详细:
   - **盘后状态机收敛**：旧的 `creating_dsa` / `waiting_dsa_worker` / `quality_gate` / `feature_snapshot` 四个处理阶段收敛为 `computing_features`；当前外部状态序列 `queued → refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → succeeded`；`computing_features` 内部 checkpoint `prepare_inputs → continuous_factors → event_freshness → combined_quality_gate`；旧 enum 保留供历史 run 兼容读取（historical/legacy compatibility），新 run 不再生成旧步骤名
   - **compute-once 注入**：盘后日线 DSA 只算一次，`compute_structural_features_adapter` 支持 `precomputed_dsa_bundle`，同时写 StrategyResult 和 snapshot `dsa_segment`；`_compute_smc_freshness_factors` 接收 `precomputed_smc_dto` 不再内部调 `compute_smc_adapter`
   - **event_freshness_payload 独立层**：SMC freshness 从 `structural_payload.smc_freshness` 迁出到 `event_freshness_payload.daily_structure.smc`；新增 swing anchor（6 类）/ OB formation（4 项）/ DSA switch（1 项）；批量查询 `strategy_events`（DISTINCT ON / 窗口函数）禁止 N+1
