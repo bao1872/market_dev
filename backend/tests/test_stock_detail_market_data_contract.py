@@ -1006,12 +1006,14 @@ async def test_16_weekly_quote_unavailable_no_fallback(
 
     # freshness 必须为 unavailable
     # [CHANGE-20260724-004] _compute_freshness_state 新签名需 actual/expected/market_session
+    # [CHANGE-20260725-001] 新增 timeframe 参数（1w 按日期比较）
     freshness = _compute_freshness_state(
         bars_result=bars_result,
         page_df=weekly_df,
         actual_latest_bar_time=pd.Timestamp("2026-07-21"),
         expected_latest_bar_time=pd.Timestamp("2026-07-21 15:00"),
         market_session="MARKET_CLOSED",
+        timeframe="1w",
     )
     assert freshness == "unavailable", (
         f"latest_daily_quote 缺失时 freshness 应为 unavailable，实际={freshness}"

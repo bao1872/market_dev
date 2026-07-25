@@ -2,6 +2,10 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-25
+
+- CHANGE-20260725-001: freshness_state 日级周期（1d/1w/1mo）actual vs expected 日期比较修正（日级 bar 时间戳为 00:00，按日期比较避免误判 unavailable）
+
 ## 2026-07-24
 
 - CHANGE-20260724-004: 个股详情行情唯一真源 + Live Mount 部署（quote/latest_daily_quote 解耦 + /version runtime SHA + docker-compose.live.yml + sync/deploy 脚本）

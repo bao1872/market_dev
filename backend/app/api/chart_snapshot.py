@@ -164,12 +164,15 @@ def _compute_freshness_state(
     actual_latest_bar_time: datetime | None,
     expected_latest_bar_time: datetime | None,
     market_session: str,
+    timeframe: str,
 ) -> str:
     """[P0-7] 真实比较 actual vs expected 计算 freshness_state。
 
     禁止静默返回普通 db 状态：交易时段实时返回空时必须标记 stale。
     [CHANGE-20260724-004] latest_daily_quote 缺失时标记 unavailable。
     [CHANGE-20260724-004] actual < expected 在交易时段 → stale；其他时段 → unavailable。
+    [CHANGE-20260725-001] 日级周期（1d/1w/1mo）bar 时间戳为当日 00:00，
+        expected 为 15:00；按日期比较避免误判 unavailable。
     """
     if page_df.empty:
         return _FRESHNESS_UNAVAILABLE
@@ -183,7 +186,13 @@ def _compute_freshness_state(
         return _FRESHNESS_UNAVAILABLE
     # [CHANGE-20260724-004] 真实比较 actual vs expected
     if actual_latest_bar_time is not None and expected_latest_bar_time is not None:
-        if actual_latest_bar_time < expected_latest_bar_time:
+        # [CHANGE-20260725-001] 日级周期 bar 时间戳为当日 00:00，按日期比较
+        if timeframe in ("1d", "1w", "1mo"):
+            stale = actual_latest_bar_time.date() < expected_latest_bar_time.date()
+        else:
+            # 日内周期（15m/1h）按精确时间比较
+            stale = actual_latest_bar_time < expected_latest_bar_time
+        if stale:
             # 交易时段实时目标缺失 → stale；非交易时段 → unavailable
             if market_session in TRADING_SESSIONS:
                 return _FRESHNESS_STALE
@@ -403,6 +412,7 @@ async def get_chart_snapshot(
         actual_latest_bar_time=actual_for_compare,
         expected_latest_bar_time=expected_dt,
         market_session=market_session,
+        timeframe=timeframe,
     )
 
     # 序列化 actual/expected 为 ISO 字符串

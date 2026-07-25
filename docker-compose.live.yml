@@ -27,9 +27,12 @@
 # - config.production.py 挂到 /app/config.production.py（不嵌套到 /app/app），
 #   避免与 /app/app 只读父挂载冲突；通过 environment 覆盖 CONFIG_FILE
 # - 依赖/Dockerfile 变化仍需重建镜像
+# - YAML 不允许同一 mapping 有多个 << merge key，故合并为单一 anchor
 
-# 共享 Live Mount volumes（所有 Python 服务 + capture worker）
-x-live-python-volumes: &live-python-volumes
+# 共享 Live Mount 配置（所有 Python 服务 + capture worker）
+x-live-python: &live-python
+  environment:
+    CONFIG_FILE: /app/config.production.py
   volumes: !override
     - /opt/panji-live/backend/app:/app/app:ro
     - /opt/panji-live/backend/alembic:/app/alembic:ro
@@ -37,15 +40,10 @@ x-live-python-volumes: &live-python-volumes
     - /opt/panji-live/RUNTIME_SHA:/app/RUNTIME_SHA:ro
     - /etc/market-dev/config.production.py:/app/config.production.py:ro
 
-# 共享 Live Mount environment（覆盖 CONFIG_FILE 指向新挂载点）
-x-live-python-env: &live-python-env
-  environment:
-    CONFIG_FILE: /app/config.production.py
-
 services:
   backend:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
+    # backend 额外保留 ./doc 挂载，需用 !override 重新声明完整 volumes 列表
     volumes: !override
       - ./doc:/doc:ro
       - /opt/panji-live/backend/app:/app/app:ro
@@ -53,48 +51,36 @@ services:
       - /opt/panji-live/backend/alembic.ini:/app/alembic.ini:ro
       - /opt/panji-live/RUNTIME_SHA:/app/RUNTIME_SHA:ro
       - /etc/market-dev/config.production.py:/app/config.production.py:ro
-    environment:
-      CONFIG_FILE: /app/config.production.py
 
   worker-bars-scheduler:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-strategy-scheduler:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-calendar:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-monitor:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-strategy-batch:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-outbox:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-delivery:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-after-close:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-watchdog:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   worker-capture:
-    <<: *live-python-volumes
-    <<: *live-python-env
+    <<: *live-python
 
   frontend:
     volumes: !override
