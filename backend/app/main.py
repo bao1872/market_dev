@@ -34,6 +34,7 @@ from fastapi import FastAPI, Request
 from app.api import metrics as metrics_api
 from app.api.admin_after_close import router as admin_after_close_router
 from app.api.admin_beta_applications import router as admin_beta_applications_router
+from app.api.admin_invite_capability import router as admin_invite_capability_v2_router
 from app.api.admin_subscription import router as admin_subscription_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
@@ -174,6 +175,8 @@ app.include_router(notifications_router)
 # 配置注册表管理路由（R6，需 admin 角色）
 # 订阅与邀请码管理路由（V1.6，需 admin 角色）
 app.include_router(admin_subscription_router)
+# V2.1 邀请码能力配置管理路由（需 admin 角色）
+app.include_router(admin_invite_capability_v2_router)
 # 内测申请管理后台路由（Task 4，需 admin 角色）
 app.include_router(admin_beta_applications_router)
 # 盘后编排管理路由（Task 2.3，需 admin 角色）
