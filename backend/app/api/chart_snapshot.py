@@ -58,7 +58,12 @@ from app.api.bars import _df_to_responses
 from app.core.deps import get_db
 from app.core.time import now_shanghai
 from app.schemas.bar import BarListResponse
+from app.services.calendar_service import is_trading_day_async
 from app.services.chart_snapshot_service import ChartSnapshotService
+from app.services.market_data_aggregation_service import (
+    _call_expected_last_completed_daily_bar,
+)
+from app.services.market_status_service import compute_market_session
 
 logger = logging.getLogger("api.chart_snapshot")
 
@@ -67,6 +72,112 @@ router = APIRouter(prefix="/api/v1", tags=["chart-snapshot"])
 # 支持的周期与复权方式（与 bars/indicators API 对齐）
 _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}
 _ALLOWED_ADJ = {"qfq", "none"}
+
+
+# [P0-7] freshness_state 枚举（详情页唯一行情真源新鲜度状态）
+# fresh       = 正常数据（db 或 hybrid，无降级，非 partial）
+# partial     = 实时尾部存在（is_partial=True，无降级）
+# stale       = 交易时段实时目标周期返回空（degraded + realtime_empty reason）
+# unavailable = 行情不可用（degraded + 其他原因，或数据完全为空）
+_FRESHNESS_FRESH = "fresh"
+_FRESHNESS_PARTIAL = "partial"
+_FRESHNESS_STALE = "stale"
+_FRESHNESS_UNAVAILABLE = "unavailable"
+
+
+def _compute_freshness_state(
+    bars_result: Any,
+    page_df: pd.DataFrame,
+) -> str:
+    """[P0-7] 从 BarAggregationResult 计算 freshness_state。
+
+    禁止静默返回普通 db 状态：交易时段实时返回空时必须标记 stale。
+    """
+    if page_df.empty:
+        return _FRESHNESS_UNAVAILABLE
+    if bars_result.degraded:
+        reason = bars_result.degraded_reason or ""
+        if "realtime_" in reason and "_empty_in_trading_hours" in reason:
+            return _FRESHNESS_STALE
+        return _FRESHNESS_UNAVAILABLE
+    if bars_result.is_partial:
+        return _FRESHNESS_PARTIAL
+    return _FRESHNESS_FRESH
+
+
+def _derive_quote_from_bars(
+    page_df: pd.DataFrame,
+    bars_result: Any,
+    timeframe: str,
+) -> dict[str, Any] | None:
+    """[P0-7] 从 snapshot 的 bars DataFrame 派生 quote（详情页唯一行情真源）。
+
+    禁止详情页同时以 /quote 和 /chart-snapshot 作为行情真源。
+    quote 从同一 snapshot 的最新 bar 派生，保证 as_of 一致。
+
+    [P0-5] 顶部 quote 与展示周期解耦：
+    - 1d/15m/1h/1m：从 page_df 最后一根 bar 派生 OHLC + prev_close + change_pct
+    - 1w/1mo：current_price 取最新 bar close（含当日数据）；open/high/low/volume/
+      prev_close/change_pct 设为 None——聚合 bar 的 OHLC 是整周/月值，不是当日值，
+      禁止用作当日行情。前端在 1w/1mo 时只显示 current_price。
+
+    Returns:
+        quote dict；空数据时返回 None
+    """
+    if page_df.empty:
+        return None
+
+    latest = page_df.iloc[-1]
+    current_price = float(latest["close"])
+
+    # [P0-5] 1w/1mo 不使用聚合 bar 的 OHLC/prev_close/change_pct
+    # 仅 current_price（最新 close）有效，其他字段为 None
+    if timeframe in ("1w", "1mo"):
+        open_price: float | None = None
+        high_price: float | None = None
+        low_price: float | None = None
+        volume: float | None = None
+        prev_close: float | None = None
+        change_pct: float | None = None
+    else:
+        open_price = float(latest["open"])
+        high_price = float(latest["high"])
+        low_price = float(latest["low"])
+        volume = float(latest["volume"])
+        # prev_close：倒数第二根 bar 的 close（如果有）
+        prev_close = None
+        if len(page_df) >= 2:
+            prev_close = float(page_df.iloc[-2]["close"])
+        # change_pct 计算
+        if prev_close is None or prev_close == 0:
+            change_pct = 0.0
+        else:
+            change_pct = (current_price - prev_close) / prev_close * 100
+
+    # update_time：优先 last_live_bar_time，回退 last_persisted_bar_time
+    update_time: Any
+    if bars_result.last_live_bar_time is not None:
+        update_time = bars_result.last_live_bar_time
+    elif bars_result.last_persisted_bar_time is not None:
+        update_time = bars_result.last_persisted_bar_time
+    else:
+        update_time = bars_result.as_of
+
+    if hasattr(update_time, "isoformat"):
+        update_time = update_time.isoformat()
+
+    return {
+        "current_price": round(current_price, 4),
+        "open": round(open_price, 4) if open_price is not None else None,
+        "high": round(high_price, 4) if high_price is not None else None,
+        "low": round(low_price, 4) if low_price is not None else None,
+        "close": round(current_price, 4),
+        "volume": round(volume, 2) if volume is not None else None,
+        "prev_close": round(prev_close, 4) if prev_close is not None else None,
+        "change_pct": round(change_pct, 2) if change_pct is not None else None,
+        "update_time": update_time,
+        "is_realtime": bars_result.is_partial,
+    }
 
 
 @router.get(
@@ -186,6 +297,35 @@ async def get_chart_snapshot(
     indicators_response = snapshot_result.indicators
     render_frame = snapshot_result.render_frame
 
+    # [P0-7] 派生 quote + freshness_state + market_session + 时间字段
+    # 详情页不得同时以 /quote 和 /chart-snapshot 作为行情真源
+    quote = _derive_quote_from_bars(snapshot_result.page_df, bars_result, timeframe)
+    freshness_state = _compute_freshness_state(bars_result, snapshot_result.page_df)
+
+    # market_session：当前市场阶段
+    is_trading_day = await is_trading_day_async(db, now_shanghai().date())
+    market_session = compute_market_session(now_shanghai(), is_trading_day)
+
+    # actual_latest_bar_time：实际最新 bar 时间（含 partial/realtime）
+    actual_latest_bar_time: Any = None
+    if bars_result.last_live_bar_time is not None:
+        actual_latest_bar_time = bars_result.last_live_bar_time
+    elif bars_result.last_persisted_bar_time is not None:
+        actual_latest_bar_time = bars_result.last_persisted_bar_time
+    if hasattr(actual_latest_bar_time, "isoformat"):
+        actual_latest_bar_time = actual_latest_bar_time.isoformat()
+
+    # expected_latest_bar_time：当前周期本应存在的最新 bar 时间
+    # 日线使用 _call_expected_last_completed_daily_bar；其他周期简化为 now_shanghai
+    expected_latest_bar_time: Any
+    if timeframe == "1d":
+        expected_dt = await _call_expected_last_completed_daily_bar(
+            db, now_shanghai()
+        )
+        expected_latest_bar_time = expected_dt.isoformat()
+    else:
+        expected_latest_bar_time = now_shanghai().isoformat()
+
     # completed_through 转换为 tz-aware datetime（BarListResponse 需要 datetime 对象）
     _completed_through = bars_result.completed_through
     if _completed_through is not None and isinstance(_completed_through, pd.Timestamp):
@@ -245,6 +385,16 @@ async def get_chart_snapshot(
     return {
         "bars": bars_response.model_dump(mode="json"),
         "indicators": indicators_response,
+        # [P0-7] 详情页唯一行情真源：quote 从同一 snapshot 派生，禁止详情页调用 /quote
+        "quote": quote,
+        "market_session": market_session,
+        "as_of": bars_result.as_of.isoformat() if hasattr(bars_result.as_of, "isoformat") else bars_result.as_of,
+        "actual_latest_bar_time": actual_latest_bar_time,
+        "expected_latest_bar_time": expected_latest_bar_time,
+        "freshness_state": freshness_state,
+        "data_source": bars_result.data_source,
+        "is_partial": bars_result.is_partial,
+        "degraded_reason": bars_result.degraded_reason,
         "snapshot_time": now_shanghai().isoformat(),
         "render_frame": render_frame,
         "timeframe": timeframe,

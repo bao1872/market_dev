@@ -89,12 +89,25 @@ async def test_partial_daily_bar_during_trading_session(
     monkeypatch,
     _reset_cache,
 ):
-    """交易时段 1d bars 含 partial daily bar。"""
+    """交易时段 1d bars 含 partial daily bar（Pytdx 原生日线）。
+
+    [CHANGE-20260724-003] 1d 实时尾部使用 Pytdx 原生日线，禁止从 1m 聚合。
+    """
     instrument = await instrument_factory(symbol="600519", market="SH", status="active")
     today = date(2026, 7, 6)
 
     daily_df = _build_daily_df(today, count=3)
-    minute_df = _build_minute_df(today, count=5)
+    # 构造今日 partial daily bar（Pytdx 原生日线返回值）
+    today_daily_df = pd.DataFrame({
+        "open": [9.95],
+        "high": [10.3],
+        "low": [9.9],
+        "close": [10.15],
+        "volume": [5000.0],
+        "amount": [50000.0],
+        "adj_factor": [1.0],
+    }, index=pd.DatetimeIndex([pd.Timestamp(today)]))
+    today_daily_df.index.name = "trade_date"
 
     monkeypatch.setattr(mdas, "_query_daily_bars", AsyncMock(return_value=daily_df))
     monkeypatch.setattr(mdas, "fetch_daily_bars", AsyncMock(return_value=pd.DataFrame()))
@@ -104,7 +117,7 @@ async def test_partial_daily_bar_during_trading_session(
         "compute_market_session",
         lambda _now, _is_trading: mdas.MARKET_SESSION_MORNING,
     )
-    monkeypatch.setattr(mdas, "fetch_minute_bars", AsyncMock(return_value=minute_df))
+    monkeypatch.setattr(mdas, "fetch_today_daily_bars", AsyncMock(return_value=today_daily_df))
 
     # 固定 now 为交易时段内 10:00
     fixed_now = datetime.combine(today, datetime.min.time().replace(hour=10, minute=0))
@@ -124,13 +137,12 @@ async def test_partial_daily_bar_during_trading_session(
     assert result.last_live_bar_time is not None
     assert not result.bars.empty
     last_bar = result.bars.iloc[-1]
-    # MDAS 会剔除最后一根可能未完成的 1m bar 后再聚合 partial daily
-    completed_minute_df = minute_df.iloc[:-1]
-    assert float(last_bar["open"]) == pytest.approx(completed_minute_df["open"].iloc[0])
-    assert float(last_bar["close"]) == pytest.approx(completed_minute_df["close"].iloc[-1])
-    assert float(last_bar["high"]) == pytest.approx(float(completed_minute_df["high"].max()))
-    assert float(last_bar["low"]) == pytest.approx(float(completed_minute_df["low"].min()))
-    assert float(last_bar["volume"]) == pytest.approx(float(completed_minute_df["volume"].sum()))
+    # [CHANGE-20260724-003] partial daily 直接来自 Pytdx 原生日线，不经过 1m 聚合
+    assert float(last_bar["open"]) == pytest.approx(9.95)
+    assert float(last_bar["close"]) == pytest.approx(10.15)
+    assert float(last_bar["high"]) == pytest.approx(10.3)
+    assert float(last_bar["low"]) == pytest.approx(9.9)
+    assert float(last_bar["volume"]) == pytest.approx(5000.0)
 
 
 @pytest.mark.asyncio
@@ -172,13 +184,17 @@ async def test_no_partial_daily_bar_outside_trading_session(
 
 
 @pytest.mark.asyncio
-async def test_partial_daily_fetch_minute_bars_uses_aware_datetime(
+async def test_partial_daily_fetch_today_daily_uses_correct_date(
     db_session: AsyncSession,
     instrument_factory,
     monkeypatch,
     _reset_cache,
 ):
-    """1d partial daily 拉取实时 1m 时，start/end 必须同为 aware datetime。"""
+    """1d partial daily 拉取今日日线时，today 参数必须为正确的上海交易日 date。
+
+    [CHANGE-20260724-003] 1d 实时尾部使用 fetch_today_daily_bars(session, instrument_id, today)，
+    禁止从 1m 聚合。today 参数由 now_shanghai().date() 派生，确保上海时区对齐。
+    """
     instrument = await instrument_factory(symbol="600519", market="SH", status="active")
     today = date(2026, 7, 6)
 
@@ -199,17 +215,22 @@ async def test_partial_daily_fetch_minute_bars_uses_aware_datetime(
 
     captured: dict[str, Any] = {}
 
-    async def _capture_fetch_minute_bars(
+    async def _capture_fetch_today_daily(
         _session: AsyncSession,
         _instrument_id: uuid.UUID,
-        start_time: datetime,
-        end_time: datetime,
+        today_param: date,
     ) -> pd.DataFrame:
-        captured["start_time"] = start_time
-        captured["end_time"] = end_time
-        return _build_minute_df(today, count=5)
+        captured["today"] = today_param
+        # 返回今日 partial daily bar
+        today_df = pd.DataFrame({
+            "open": [9.95], "high": [10.3], "low": [9.9],
+            "close": [10.15], "volume": [5000.0],
+            "amount": [50000.0], "adj_factor": [1.0],
+        }, index=pd.DatetimeIndex([pd.Timestamp(today_param)]))
+        today_df.index.name = "trade_date"
+        return today_df
 
-    monkeypatch.setattr(mdas, "fetch_minute_bars", _capture_fetch_minute_bars)
+    monkeypatch.setattr(mdas, "fetch_today_daily_bars", _capture_fetch_today_daily)
 
     await MarketDataAggregationService().get_bars(
         session=db_session,
@@ -219,13 +240,11 @@ async def test_partial_daily_fetch_minute_bars_uses_aware_datetime(
         include_realtime=True,
     )
 
-    assert "start_time" in captured, f"未捕获到 start_time，captured={captured}"
-    assert "end_time" in captured, f"未捕获到 end_time，captured={captured}"
-    assert captured["start_time"].tzinfo is not None
-    assert captured["end_time"].tzinfo is not None
-    # [mdas-timezone] - 必须能正常相减，不触发 offset-naive/offset-aware 异常
-    delta = captured["end_time"] - captured["start_time"]
-    assert delta.total_seconds() > 0
+    assert "today" in captured, f"未捕获到 today 参数，captured={captured}"
+    assert captured["today"] == today, (
+        f"today 参数应为 {today}，实际：{captured['today']}"
+    )
+    assert isinstance(captured["today"], date), "today 参数必须为 date 类型"
 
 
 @pytest.mark.asyncio

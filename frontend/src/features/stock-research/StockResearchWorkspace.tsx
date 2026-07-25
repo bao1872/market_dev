@@ -128,17 +128,17 @@ export function StockResearchWorkspace({
     events,
     indicators,
     instrumentQuery,
-    quoteQuery,
+    // [P0-7] quoteQuery 已删除：详情页 quote 从 chartSnapshot 派生
     barsQuery,
     indicatorsQuery,
     isBarsLoading,
     isRenderReady,
     quoteStatus,
     barsStatus,
+    quote,
   } = data
 
   const inst = instrumentQuery.data
-  const quote = quoteQuery.data
 
   // 截图模式：飞书图层就绪校验（bb_upper + visual_segments 非空数组）
   const feishuLayersReady = isCaptureMode
@@ -265,9 +265,7 @@ export function StockResearchWorkspace({
             <div className="tv-chart-status">
               <span className={quoteStatus.badgeClass}>{quoteStatus.label}</span>
               {quote?.update_time && <span>quote更新: {formatShanghaiTimeShort(quote.update_time)}</span>}
-              {quote?.freshness_seconds !== undefined && (
-                <span>新鲜度: {quote.freshness_seconds.toFixed(1)}s</span>
-              )}
+              {/* [P0-7] freshness_seconds 已移除（chart-snapshot 不返回该字段，使用 freshness_state 替代） */}
               {barsStatus && (
                 <span title={barsStatus.reason ?? undefined}>
                   {barsStatus.label}

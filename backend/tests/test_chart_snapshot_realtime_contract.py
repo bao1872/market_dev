@@ -580,7 +580,7 @@ def fake_exchange(monkeypatch: pytest.MonkeyPatch) -> dict:
     """Fake Exchange → 真实 MDAS。
 
     mock MDAS 模块数据获取层（DB query + pytdx fetch + calendar + cache），
-    fetch_minute_bars 为 Fake Exchange，T0/T1 切换实时 1m。
+    T0/T1 切换原生周期实时 bar（CHANGE-20260724-003：禁止 1m 聚合）。
     """
     from app.services import market_data_aggregation_service as mdas_mod
     from app.services.market_status_service import MARKET_SESSION_MORNING
@@ -598,33 +598,39 @@ def fake_exchange(monkeypatch: pytest.MonkeyPatch) -> dict:
     m15_baseline = _build_15m_bars(4000, seed=43)
     h1_baseline = _build_1h_bars(260, seed=44)
 
-    # Fake Exchange 实时 1m（今日 9:30/9:31/9:32，naive datetime 与 baseline 一致）
-    # T0 返回 2 根 [9:30, 9:31]，T1 返回 3 根 [9:30, 9:31, 9:32]
-    # 1d 路径剔除最后根未完成 1m：T0=[9:30]，T1=[9:30,9:31] → partial daily 变化
-    # intraday 路径不剔除：T0=[9:30,9:31]，T1=[9:30,9:31,9:32] → partial 变化
-    _ohlc = [
-        (9.95, 10.1, 9.9, 10.0, 1000.0),   # 9:30
-        (10.0, 10.3, 10.0, 10.2, 1500.0),  # 9:31
-        (10.2, 10.2, 10.0, 10.1, 800.0),   # 9:32 (T1 末根，1d 剔除)
-    ]
+    # [CHANGE-20260724-003] Fake Exchange 原生周期实时 bar
+    # T0: close=10.0, volume=1000；T1: close=10.2, volume=1500
+    # 验证 MDAS partial bar 末根 close/volume 随 T0→T1 变化
+    _native_ohlc = {
+        0: (9.95, 10.1, 9.9, 10.0, 1000.0),   # T0
+        1: (9.95, 10.3, 9.9, 10.2, 1500.0),   # T1（close/volume 变化）
+    }
 
-    def _make_live_1m(tick: int) -> pd.DataFrame:
-        n = 2 + tick  # T0=2, T1=3
-        base = pd.Timestamp(f"{today.isoformat()} 09:30:00")
-        times = [base + pd.Timedelta(minutes=i) for i in range(n)]
-        rows = []
-        for i in range(n):
-            o, h, low, c, v = _ohlc[i]
-            rows.append({
-                "open": o, "high": h, "low": low, "close": c,
-                "volume": v, "amount": v * 10, "adj_factor": 1.0,
-            })
-        return pd.DataFrame(rows, index=pd.DatetimeIndex(times, name="datetime"))
+    def _make_native_bar(tick: int, bar_time: pd.Timestamp) -> pd.DataFrame:
+        o, h, low, c, v = _native_ohlc.get(tick, _native_ohlc[0])
+        return pd.DataFrame({
+            "open": [o], "high": [h], "low": [low], "close": [c],
+            "volume": [v], "amount": [v * 10], "adj_factor": [1.0],
+        }, index=pd.DatetimeIndex([bar_time], name="trade_date"))
 
     state = {"tick": 0}
 
+    async def _fake_fetch_today_daily_bars(session, instrument_id, today_param):
+        bar_time = pd.Timestamp(today_param)
+        return _make_native_bar(state["tick"], bar_time)
+
+    async def _fake_fetch_15min_bars(session, instrument_id, count=16):
+        bar_time = pd.Timestamp(f"{today.isoformat()} 09:45:00")
+        return _make_native_bar(state["tick"], bar_time)
+
+    async def _fake_fetch_60min_bars(session, instrument_id, count=4):
+        bar_time = pd.Timestamp(f"{today.isoformat()} 10:00:00")
+        return _make_native_bar(state["tick"], bar_time)
+
     async def _fake_fetch_minute_bars(session, instrument_id, start, end):
-        return _make_live_1m(state["tick"])
+        # 1m 路径保留（供 1m timeframe 使用，1d/15m/1h 不再调用）
+        bar_time = pd.Timestamp(f"{today.isoformat()} 09:30:00")
+        return _make_native_bar(state["tick"], bar_time)
 
     async def _fake_query_daily_bars(session, instrument_id, start, end):
         return daily_baseline.copy()
@@ -662,6 +668,9 @@ def fake_exchange(monkeypatch: pytest.MonkeyPatch) -> dict:
 
     monkeypatch.setattr(mdas_mod, "_query_daily_bars", _fake_query_daily_bars)
     monkeypatch.setattr(mdas_mod, "_fetch_intraday_with_backfill", _fake_fetch_intraday)
+    monkeypatch.setattr(mdas_mod, "fetch_today_daily_bars", _fake_fetch_today_daily_bars)
+    monkeypatch.setattr(mdas_mod, "fetch_15min_bars", _fake_fetch_15min_bars)
+    monkeypatch.setattr(mdas_mod, "fetch_60min_bars", _fake_fetch_60min_bars)
     monkeypatch.setattr(mdas_mod, "fetch_minute_bars", _fake_fetch_minute_bars)
     monkeypatch.setattr(mdas_mod, "fetch_daily_bars", _fake_fetch_daily_bars)
     monkeypatch.setattr(mdas_mod, "_call_expected_last_completed_daily_bar", _fake_expected_last_completed)

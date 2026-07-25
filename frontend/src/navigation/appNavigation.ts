@@ -30,6 +30,10 @@ export const APP_ROUTES = {
 } as const
 
 // 个股详情路由（动态 symbol）
+// @deprecated 不要调用此函数手拼 /stock/:symbol。详情入口必须使用
+//   `@/features/stock-research/stockDetailNavigation` 的 buildStockDetailUrl，
+//   并显式传入 originScope（market|watchlist|direct）以固定来源上下文。
+// 保留此函数仅为向后兼容；无生产调用方。
 export function stockRoute(symbol: string): string {
   return `/stock/${symbol}`
 }

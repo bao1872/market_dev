@@ -474,6 +474,149 @@ async def fetch_minute_bars(
     return raw_df
 
 
+# [P0-4] 原生周期 Pytdx 拉取（冻结行情周期合同）
+# 唯一允许的生产链：
+#   1m  = DB 1m  + Pytdx 1m
+#   15m = DB 15m + Pytdx 原生 15m
+#   1h  = DB 60m + Pytdx 原生 60m
+#   1d  = DB 日线 + Pytdx 日线
+#   1w/1mo = 合并完成的日线序列 → 周线/月线
+# 禁止生产展示链使用 1m→15m / 1m→60m / 1m→1d 聚合（CHANGE-20260724-003）
+
+
+async def fetch_15min_bars(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    count: int = 16,
+) -> pd.DataFrame:
+    """从 Pytdx 拉取原生 15 分钟线数据（实时尾部补尾，不写库）。
+
+    [P0-4] 冻结行情周期合同：15m 实时尾部必须使用 Pytdx 原生 15m，
+    禁止从 1m 聚合（CHANGE-20260724-003）。
+
+    Args:
+        session: 异步 DB 会话
+        instrument_id: 标的 UUID
+        count: 拉取条数（默认 16 = 1 交易日 15m bar 数）
+
+    Returns:
+        DataFrame indexed by trade_time，columns=[open,high,low,close,volume,amount,adj_factor]
+        空数据时返回空 DataFrame
+    """
+    symbol = await _get_symbol(session, instrument_id)
+    if symbol is None:
+        logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
+        return pd.DataFrame()
+
+    adapter = get_pytdx_adapter()
+    try:
+        raw_df = await asyncio.to_thread(adapter.get_15min_bars, symbol, count)
+    except Exception as exc:
+        logger.warning("Pytdx 拉取原生 15m 失败 instrument_id=%s: %s", instrument_id, exc)
+        raise
+
+    if raw_df.empty:
+        return raw_df
+
+    raw_df = raw_df.copy()
+    raw_df = raw_df.set_index("datetime")
+    raw_df.index.name = "trade_time"
+    if "adj_factor" not in raw_df.columns:
+        raw_df["adj_factor"] = 1.0
+    return raw_df
+
+
+async def fetch_60min_bars(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    count: int = 4,
+) -> pd.DataFrame:
+    """从 Pytdx 拉取原生 60 分钟线数据（实时尾部补尾，不写库）。
+
+    [P0-4] 冻结行情周期合同：1h 实时尾部必须使用 Pytdx 原生 60m，
+    禁止从 1m 聚合（CHANGE-20260724-003）。
+
+    Args:
+        session: 异步 DB 会话
+        instrument_id: 标的 UUID
+        count: 拉取条数（默认 4 = 1 交易日 60m bar 数）
+
+    Returns:
+        DataFrame indexed by trade_time，columns=[open,high,low,close,volume,amount,adj_factor]
+        空数据时返回空 DataFrame
+    """
+    symbol = await _get_symbol(session, instrument_id)
+    if symbol is None:
+        logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
+        return pd.DataFrame()
+
+    adapter = get_pytdx_adapter()
+    try:
+        raw_df = await asyncio.to_thread(adapter.get_60min_bars, symbol, count)
+    except Exception as exc:
+        logger.warning("Pytdx 拉取原生 60m 失败 instrument_id=%s: %s", instrument_id, exc)
+        raise
+
+    if raw_df.empty:
+        return raw_df
+
+    raw_df = raw_df.copy()
+    raw_df = raw_df.set_index("datetime")
+    raw_df.index.name = "trade_time"
+    if "adj_factor" not in raw_df.columns:
+        raw_df["adj_factor"] = 1.0
+    return raw_df
+
+
+async def fetch_today_daily_bars(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    today: date,
+) -> pd.DataFrame:
+    """从 Pytdx 拉取今日日线（partial daily，实时尾部补尾，不写库）。
+
+    [P0-4] 冻结行情周期合同：1d 实时尾部必须使用 Pytdx 原生日线，
+    禁止从 1m 聚合（CHANGE-20260724-003）。
+
+    Pytdx 日线在交易时段内为 partial bar（随实时成交更新 OHLCV），
+    收盘后为完整日线。与 DB 日线按 trade_date 去重时保留 Pytdx 版本（最新）。
+
+    Args:
+        session: 异步 DB 会话
+        instrument_id: 标的 UUID
+        today: 今日日期（上海时区）
+
+    Returns:
+        DataFrame indexed by trade_date，columns=[open,high,low,close,volume,amount,adj_factor]
+        空数据时返回空 DataFrame
+    """
+    symbol = await _get_symbol(session, instrument_id)
+    if symbol is None:
+        logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
+        return pd.DataFrame()
+
+    adapter = get_pytdx_adapter()
+    try:
+        raw_df = await asyncio.to_thread(
+            adapter.get_daily_bars, symbol, today, today
+        )
+    except Exception as exc:
+        logger.warning("Pytdx 拉取今日日线条失败 instrument_id=%s: %s", instrument_id, exc)
+        raise
+
+    if raw_df.empty:
+        return raw_df
+
+    raw_df = raw_df.copy()
+    raw_df = raw_df.set_index("datetime")
+    # 规范化到午夜，与 DB 日线表 trade_date 对齐
+    raw_df.index = raw_df.index.normalize()
+    raw_df.index.name = "trade_date"
+    if "adj_factor" not in raw_df.columns:
+        raw_df["adj_factor"] = 1.0
+    return raw_df
+
+
 # ===== 数据合并与聚合 =====
 
 
@@ -491,7 +634,13 @@ def _merge_bars(existing: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
 
 
 def _aggregate_minute_to_target(minute_df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """将 1 分钟线聚合为 15m/1h。"""
+    """[非生产工具] 将 1 分钟线聚合为 15m/1h。
+
+    [P0-4] 冻结行情周期合同后，生产链禁止使用 1m→15m / 1m→60m 聚合
+    （CHANGE-20260724-003）。此函数仅保留为非生产工具（__main__ 自测、
+    研究脚本），无生产调用方。生产链请使用 fetch_15min_bars / fetch_60min_bars
+    拉 Pytdx 原生周期。
+    """
     freq = _TARGET_FREQ[timeframe]
     agg = minute_df.resample(freq, closed="left", label="left").agg({
         "open": "first",
@@ -510,7 +659,12 @@ def _aggregate_minute_to_daily(
     minute_df: pd.DataFrame,
     adj_factor: float | None = None,
 ) -> pd.DataFrame:
-    """将当日 1 分钟线聚合成一根 partial daily bar。
+    """[非生产工具] 将当日 1 分钟线聚合成一根 partial daily bar。
+
+    [P0-4] 冻结行情周期合同后，生产链禁止使用 1m→1d 聚合
+    （CHANGE-20260724-003）。此函数仅保留为非生产工具（__main__ 自测、
+    研究脚本），无生产调用方。生产链请使用 fetch_today_daily_bars 拉
+    Pytdx 原生日线。
 
     规则：
     - open = 第一根 1m open
@@ -942,7 +1096,41 @@ class MarketDataAggregationService:
                     degraded_reason = f"pytdx daily fallback failed: {exc}"
                     data_source = "degraded"
 
+            # [P0-2] 1w/1mo 必须先合并今日 partial daily 再聚合（CHANGE-20260724-003）
+            # 执行顺序：DB 日线 + Pytdx 回补日线 → 合并今日 partial daily → qfq 一次 → 聚合 1w/1mo
+            # 不得先聚合后补今日，否则周/月线永远缺少当日数据。
+            # 1d 的 partial daily 在 _finalize_bars 之后单独补（避免被 _filter_unfinished_daily_bars 误删）。
+            if timeframe in ("1w", "1mo") and include_realtime and _is_trading_hours(now):
+                try:
+                    is_trading_day = await is_trading_day_async(session, now.date())
+                    session_name = compute_market_session(now, is_trading_day)
+                    if session_name in (MARKET_SESSION_MORNING, MARKET_SESSION_AFTERNOON):
+                        partial_daily = await fetch_today_daily_bars(
+                            session, instrument_id, now.date()
+                        )
+                        if not partial_daily.empty:
+                            daily_df = _merge_bars(daily_df, partial_daily)
+                            if data_source == "db":
+                                data_source = "hybrid"
+                            is_partial = True
+                            last_live_bar_time = pd.Timestamp(partial_daily.index[-1])
+                        else:
+                            # [P0-6] 实时日线本应存在但返回空 → stale
+                            degraded = True
+                            degraded_reason = "realtime_1d_empty_in_trading_hours"
+                            if data_source != "degraded":
+                                data_source = "degraded"
+                except Exception as exc:
+                    logger.warning(
+                        "1w/1mo partial daily 合并失败 instrument_id=%s: %s",
+                        instrument_id, exc,
+                    )
+                    degraded = True
+                    degraded_reason = f"pytdx partial daily failed: {exc}"
+                    data_source = "degraded"
+
             # [mdas] - qfq 应用在合成前（"日线完成复权后再聚合"）
+            # 含 1w/1mo 已合并的今日 partial daily，统一复权一次
             if adj == "qfq" and not daily_df.empty and not factor_df.empty:
                 try:
                     daily_df = _adj_service.apply_qfq(
@@ -954,6 +1142,7 @@ class MarketDataAggregationService:
                     data_source = "degraded"
 
             # [mdas] - 周线/月线从已复权日线合成（委托 kline_aggregator）
+            # 此时 daily_df 已包含今日 partial daily 并完成 qfq，聚合后的当前 1w/1mo bar 包含当日数据
             if timeframe == "1w":
                 bars_df = aggregate_kline(daily_df, "1w") if not daily_df.empty else daily_df
             elif timeframe == "1mo":
@@ -1001,25 +1190,38 @@ class MarketDataAggregationService:
                 last_persisted_bar_time = pd.Timestamp(bars_df.index[-1])
 
             if include_realtime and _is_trading_hours(now):
-                # [mdas-timezone] - live_start/live_end 必须同为 Asia/Shanghai aware datetime
-                now_cst = now if now.tzinfo else now.replace(tzinfo=SHANGHAI_TZ)
-                live_start = now_cst.replace(hour=9, minute=30, second=0, microsecond=0)
-                live_end = now_cst
+                # [P0-4] 冻结行情周期合同：15m/1h 实时尾部使用 Pytdx 原生周期，
+                # 禁止从 1m 聚合（CHANGE-20260724-003）
                 try:
-                    live_1m = await fetch_minute_bars(
-                        session, instrument_id, live_start, live_end
-                    )
-                    if not live_1m.empty:
-                        if timeframe == "1m":
-                            live_agg = live_1m
-                        else:
-                            live_agg = _aggregate_minute_to_target(live_1m, timeframe)
-                        if not live_agg.empty:
-                            bars_df = _merge_bars(bars_df, live_agg)
-                            if data_source == "db":
-                                data_source = "hybrid"
-                            is_partial = True
-                            last_live_bar_time = pd.Timestamp(live_agg.index[-1])
+                    if timeframe == "1m":
+                        # 1m 仍使用原生 1m 拉取（带时间范围）
+                        now_cst = now if now.tzinfo else now.replace(tzinfo=SHANGHAI_TZ)
+                        live_start = now_cst.replace(hour=9, minute=30, second=0, microsecond=0)
+                        live_end = now_cst
+                        live_agg = await fetch_minute_bars(
+                            session, instrument_id, live_start, live_end
+                        )
+                    elif timeframe == "15m":
+                        # 15m 使用 Pytdx 原生 15m（按 count 拉取今日 bar）
+                        live_agg = await fetch_15min_bars(session, instrument_id, count=16)
+                    else:  # 1h
+                        # 1h 使用 Pytdx 原生 60m（按 count 拉取今日 bar）
+                        live_agg = await fetch_60min_bars(session, instrument_id, count=4)
+
+                    if not live_agg.empty:
+                        # 按时间戳合并：实时尾部覆盖 DB 同时间戳 bar
+                        bars_df = _merge_bars(bars_df, live_agg)
+                        if data_source == "db":
+                            data_source = "hybrid"
+                        is_partial = True
+                        last_live_bar_time = pd.Timestamp(live_agg.index[-1])
+                    else:
+                        # [P0-6] 实时目标周期按当前市场阶段本应存在但返回空 → stale
+                        # 禁止静默返回普通 db 状态
+                        degraded = True
+                        degraded_reason = f"realtime_{timeframe}_empty_in_trading_hours"
+                        if data_source != "degraded":
+                            data_source = "degraded"
                 except Exception as exc:
                     degraded = True
                     degraded_reason = f"pytdx realtime fallback failed: {exc}"
@@ -1046,45 +1248,45 @@ class MarketDataAggregationService:
         elif bars_df.empty:
             last_live_bar_time = None
 
-        # [mdas] - 1d 交易时段合成今日 partial daily bar（不写库，仅响应）
+        # [P0-4] 1d 交易时段合成今日 partial daily bar（不写库，仅响应）
         # 放在 _finalize_bars 之后，避免被过滤未完成日线逻辑误删
+        # [P0-4] 冻结行情周期合同：1d 实时尾部使用 Pytdx 原生日线，
+        # 禁止从 1m 聚合（CHANGE-20260724-003）
         if timeframe == "1d" and include_realtime:
             try:
                 is_trading_day = await is_trading_day_async(session, now.date())
                 session_name = compute_market_session(now, is_trading_day)
                 if session_name in (MARKET_SESSION_MORNING, MARKET_SESSION_AFTERNOON):
-                    # [mdas-timezone] - live_start/live_end 必须同为 Asia/Shanghai aware datetime
-                    now_cst = now if now.tzinfo else now.replace(tzinfo=SHANGHAI_TZ)
-                    live_start = now_cst.replace(hour=9, minute=30, second=0, microsecond=0)
-                    live_end = now_cst
-                    live_1m = await fetch_minute_bars(
-                        session, instrument_id, live_start, live_end
+                    # 使用 Pytdx 原生日线拉取今日 partial daily
+                    partial_daily = await fetch_today_daily_bars(
+                        session, instrument_id, now.date()
                     )
-                    if not live_1m.empty:
-                        # 只使用已完成 1m bar：剔除最后一根可能未完成的 bar
-                        if len(live_1m) > 1:
-                            live_1m = live_1m.iloc[:-1]
-                        # [mdas] - partial daily 先合成 raw（factor=1.0），再统一走 apply_qfq
+                    if not partial_daily.empty:
+                        # [mdas] - partial daily 统一走 apply_qfq
                         # 保证 partial bar 与复权后的历史日线连续（"复权一次"原则）
-                        partial_daily = _aggregate_minute_to_daily(live_1m, 1.0)
-                        if not partial_daily.empty:
-                            if adj == "qfq" and not factor_df.empty:
-                                try:
-                                    partial_daily = _adj_service.apply_qfq(
-                                        partial_daily, factor_df,
-                                        as_of=adjustment_as_of, intraday=False,
-                                    )
-                                except Exception as exc:
-                                    logger.warning(
-                                        "partial daily qfq 失败 instrument_id=%s: %s",
-                                        instrument_id, exc,
-                                    )
-                            bars_df = _merge_bars(bars_df, partial_daily)
-                            if data_source == "db":
-                                data_source = "hybrid"
-                            is_partial = True
-                            # last_live_bar_time 保留完整 datetime，便于前端展示精确到分钟
-                            last_live_bar_time = pd.Timestamp(live_1m.index[-1])
+                        if adj == "qfq" and not factor_df.empty:
+                            try:
+                                partial_daily = _adj_service.apply_qfq(
+                                    partial_daily, factor_df,
+                                    as_of=adjustment_as_of, intraday=False,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "partial daily qfq 失败 instrument_id=%s: %s",
+                                    instrument_id, exc,
+                                )
+                        bars_df = _merge_bars(bars_df, partial_daily)
+                        if data_source == "db":
+                            data_source = "hybrid"
+                        is_partial = True
+                        # last_live_bar_time 保留完整 datetime，便于前端展示精确到分钟
+                        last_live_bar_time = pd.Timestamp(partial_daily.index[-1])
+                    else:
+                        # [P0-6] 实时日线本应存在但返回空 → stale
+                        degraded = True
+                        degraded_reason = "realtime_1d_empty_in_trading_hours"
+                        if data_source != "degraded":
+                            data_source = "degraded"
             except Exception as exc:
                 logger.warning(
                     "1d partial daily 合成失败 instrument_id=%s: %s",

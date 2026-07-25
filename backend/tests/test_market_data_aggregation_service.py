@@ -384,7 +384,10 @@ async def test_non_trading_hours_skips_realtime(monkeypatch: pytest.MonkeyPatch)
 
 
 async def test_intraday_15m_aggregates_live_partial_bar(monkeypatch: pytest.MonkeyPatch) -> None:
-    """交易时段请求 15m，服务从 1m 聚合出当前 partial bar。"""
+    """交易时段请求 15m，服务从 Pytdx 原生 15m 补出当前 partial bar。
+
+    [CHANGE-20260724-003] 15m 实时尾部必须使用 Pytdx 原生 15m，禁止从 1m 聚合。
+    """
     service = mdas.MarketDataAggregationService()
     # DB 已有一个历史 15m bar（09:30）
     db_15m = pd.DataFrame({
@@ -397,15 +400,27 @@ async def test_intraday_15m_aggregates_live_partial_bar(monkeypatch: pytest.Monk
         "adj_factor": [1.0],
     }, index=pd.to_datetime(["2026-06-18 09:30:00"]))
     db_15m.index.name = "trade_time"
-    # 1m 数据覆盖 09:45 新周期（未完成）
-    live_1m = _build_minute_bars("2026-06-18 09:45:00", periods=5)
+    # 原生 15m 实时 bar（09:45，未完成周期）
+    live_15m = _build_15m_bars("2026-06-18 09:45:00", periods=1)
 
-    monkeypatch.setattr(mdas, "_query_15min_bars", lambda *a, **kw: _async_return(db_15m.copy()))
-    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: True)
+    # Mock _fetch_intraday_with_backfill 避免依赖 _get_listing_date
     monkeypatch.setattr(
-        mdas, "fetch_minute_bars",
-        lambda *a, **kw: _async_return(live_1m.copy()),
+        mdas, "_fetch_intraday_with_backfill",
+        lambda *a, **kw: _async_return((db_15m.copy(), 1, False, "no_limit")),
     )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: True)
+    monkeypatch.setattr(mdas, "_cache_get", lambda *a, **kw: None)
+    monkeypatch.setattr(mdas, "_cache_set", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        mdas, "fetch_15min_bars",
+        lambda *a, **kw: _async_return(live_15m.copy()),
+    )
+    # 确保 1m 聚合路径不被触发
+    from unittest.mock import MagicMock
+    _mock_adj = MagicMock()
+    _mock_adj.get_factor_series = lambda *a, **kw: _async_return(pd.DataFrame())
+    _mock_adj.apply_qfq = lambda df, factor_df, **kw: df
+    monkeypatch.setattr(mdas, "AdjustmentFactorService", lambda: _mock_adj)
 
     result = await service.get_bars(
         _mock_session(), TEST_INSTRUMENT_ID, timeframe="15m", adj="none",
