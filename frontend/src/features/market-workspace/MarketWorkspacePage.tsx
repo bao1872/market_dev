@@ -23,6 +23,11 @@ import {
   useMarketBoards,
 } from '@/hooks/useApi'
 import { useAuthStore } from '@/store/auth'
+import {
+  canAccessWatchlist,
+  formatWatchlistQuota,
+  isWatchlistOverLimit,
+} from '@/auth/capabilityAccess'
 import { useToast } from '@/store/toast'
 import { apiClient } from '@/api/client'
 import type { StrategyResultQueryParams } from '@/api/endpoints'
@@ -56,6 +61,11 @@ export default function MarketWorkspacePage() {
   const toast = useToast.getState()
   // 批次信息仅管理员可见（使用真实 is_admin，非 role store 视图切换）
   const isAdmin = useAuthStore((s) => s.user?.is_admin === true)
+  // [V2.1] capability-based watchlist scope + quota（PRD §9, §10）
+  const currentUser = useAuthStore((s) => s.user)
+  const showWatchlistScope = canAccessWatchlist(currentUser)
+  const watchlistQuota = formatWatchlistQuota(currentUser)
+  const watchlistOverLimit = isWatchlistOverLimit(currentUser)
 
   // 从 URL 解析状态（仅 scope + selected；sort/filters/page 由 StrategyDataTable 管理）
   const urlState = useMemo(() => decodeMarketWorkspaceUrl(searchParams), [searchParams])
@@ -488,6 +498,9 @@ export default function MarketWorkspacePage() {
         concept={concept}
         onConceptChange={handleConceptChange}
         boards={boards}
+        showWatchlistScope={showWatchlistScope}
+        watchlistQuota={watchlistQuota}
+        watchlistOverLimit={watchlistOverLimit}
       />
       <div className={styles.tableArea}>
         <div className={styles.tableWrapper}>

@@ -47,6 +47,9 @@ export interface AccessProfile {
   expires_at: string | null
   features: string[]
   limits: Record<string, number>
+  // V2.1 字段（权限真源，PRD §9）：由 /me/access 返回，前端权限/导航/额度 UI 唯一来源
+  capabilities: Record<CapabilityKey, CapabilityStatus>
+  watchlist_limits: WatchlistLimitInfo
 }
 
 // [Auth] - 描述: 登录响应 - 含 4 个 token 字段 + 10 个 AccessProfile 字段（对齐后端 LoginResponse）

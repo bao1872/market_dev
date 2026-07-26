@@ -9,6 +9,8 @@ import { getMarketStatus, type MarketStatus } from '@/api/endpoints'
 import { setCachedMarketStatus } from '@/hooks/useApi'
 import { formatShanghaiTimeShort } from '@/utils/datetime'
 import { USER_NAV_ITEMS } from '@/navigation/appNavigation'
+import { useAuthStore } from '@/store/auth'
+import { getVisibleUserNavItems } from '@/auth/capabilityAccess'
 import BrandLogo from '@/components/BrandLogo'
 import AccountMenu from '@/components/AccountMenu'
 import clsx from 'clsx'
@@ -19,6 +21,9 @@ import styles from './UserAppShell.module.scss'
 export default function UserAppShell({ children }: { children?: ReactNode }) {
   // 市场状态轮询（30s）- 同步更新模块级缓存供 isInTradingHours() 使用
   const [marketStatus, setMarketStatus] = useState<MarketStatus | null>(null)
+  // [V2.1] 当前用户用于导航项过滤（基于 capabilities，PRD §9, §10）
+  const user = useAuthStore((s) => s.user)
+  const visibleNavItems = getVisibleUserNavItems(user, USER_NAV_ITEMS)
   useEffect(() => {
     const fetchStatus = async () => {
       try {
@@ -51,7 +56,7 @@ export default function UserAppShell({ children }: { children?: ReactNode }) {
             <BrandLogo variant="sidebar" />
           </NavLink>
           <nav className={styles.nav} aria-label="主导航">
-            {USER_NAV_ITEMS.map((item) => (
+            {visibleNavItems.map((item) => (
               <NavLink
                 key={item.path}
                 to={item.path}

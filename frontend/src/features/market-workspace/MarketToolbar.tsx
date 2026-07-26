@@ -36,6 +36,12 @@ interface MarketToolbarProps {
     | undefined
   // placeholder（缺省时使用默认文案）
   searchPlaceholder?: string
+  // [V2.1] 是否显示自选 scope 按钮（需要 watchlist_management capability）
+  showWatchlistScope?: boolean
+  // [V2.1] 自选额度描述文案（scope=watchlist 时显示）
+  watchlistQuota?: string
+  // [V2.1] 自选是否超限（用于 UI 高亮）
+  watchlistOverLimit?: boolean
 }
 
 export function MarketToolbar({
@@ -49,6 +55,9 @@ export function MarketToolbar({
   onConceptChange,
   boards,
   searchPlaceholder = '搜索股票代码/名称/拼音首字母',
+  showWatchlistScope = true,
+  watchlistQuota,
+  watchlistOverLimit = false,
 }: MarketToolbarProps) {
   // 顶部搜索框本地输入（与 industry/concept 不同，搜索框仍保留本地 state）
   const [keywordInput, setKeywordInput] = useState(keyword)
@@ -92,13 +101,29 @@ export function MarketToolbar({
         >
           行情
         </button>
-        <button
-          className={clsx(styles.scopeTab, scope === 'watchlist' && styles.scopeTabActive)}
-          onClick={() => onScopeChange('watchlist')}
-          aria-label="自选"
-        >
-          自选
-        </button>
+        {showWatchlistScope && (
+          <button
+            className={clsx(styles.scopeTab, scope === 'watchlist' && styles.scopeTabActive)}
+            onClick={() => onScopeChange('watchlist')}
+            aria-label="自选"
+          >
+            自选
+          </button>
+        )}
+        {/* [V2.1] 自选额度展示：scope=watchlist 且有额度文案时显示 */}
+        {showWatchlistScope && scope === 'watchlist' && watchlistQuota && (
+          <span
+            className={clsx('watchlist-quota', watchlistOverLimit && 'watchlist-quota-over')}
+            style={{
+              marginLeft: 8,
+              fontSize: 12,
+              color: watchlistOverLimit ? '#F87171' : '#9CA3AF',
+            }}
+            data-testid="watchlist-quota"
+          >
+            {watchlistQuota}
+          </span>
+        )}
       </div>
       <input
         type="search"

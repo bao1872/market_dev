@@ -87,6 +87,9 @@ export default function SubscriptionExpiredPage() {
               expires_at: access.expires_at,
               features: access.features,
               limits: access.limits,
+              // [V2.1] 同步 capabilities + watchlist_limits（/me/access 为权限真源）
+              capabilities: access.capabilities,
+              watchlist_limits: access.watchlist_limits,
             }
             useAuthStore.getState().setUser(updated)
           })

@@ -7,6 +7,7 @@ import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import type { AuthUser } from '@/store/auth'
+import { DEFAULT_V21_FIELDS } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { useLogin, useRegister } from '@/hooks/useApi'
 import { getMe, getMyAccess } from '@/api/endpoints'
@@ -72,6 +73,8 @@ export default function LoginPage() {
       // 让 axios 拦截器能从 storage 读取 token
       useAuthStore.getState().login(data.access_token, null, data.refresh_token, keepLogin)
       // [Auth] - 描述: 直接使用 login 响应的 AccessProfile 字段构造 AuthUser（避免再调 getMe）
+      // [V2.1] LoginResponse 不含 V2.1 字段，先用 DEFAULT_V21_FIELDS 占位，
+      // 随后 revalidateAccess() 从 /me/access 拉取真实 capabilities/watchlist_limits 覆盖
       const user: AuthUser = {
         id: '', // login 响应不含 user_id，由后续 getMe 或 /me/access 补全；路由守卫仅依赖 is_admin/subscription_active
         name: '',
@@ -84,6 +87,7 @@ export default function LoginPage() {
         expires_at: data.expires_at,
         features: data.features,
         limits: data.limits,
+        ...DEFAULT_V21_FIELDS,
       }
       // 异步补全 user.id/email/name（不阻塞跳转，路由守卫不依赖这些字段）
       getMe()
@@ -99,6 +103,9 @@ export default function LoginPage() {
           // getMe 失败不阻塞跳转，权限上下文已由 login 响应提供
         })
       useAuthStore.getState().setUser(user)
+      // [V2.1] 异步拉取 /me/access 同步 V2.1 capabilities + watchlist_limits（不阻塞跳转）
+      // 路由守卫在首次渲染时若 V2.1 为默认值，会显示 loading 等待 revalidate 完成后再判定
+      void useAuthStore.getState().revalidateAccess()
       useToast.getState().show('登录成功', '已进入盘迹')
       // [Auth] - 描述: 使用后端返回的 next_route 跳转（权威路由分发，前端不再本地判断会员到期状态）
       navigate(data.next_route)
@@ -191,6 +198,9 @@ export default function LoginPage() {
         expires_at: access.expires_at,
         features: access.features,
         limits: access.limits,
+        // [V2.1] AccessProfile 已含 V2.1 字段，直接透传（/me/access 为权限真源）
+        capabilities: access.capabilities,
+        watchlist_limits: access.watchlist_limits,
       }
       // 异步补全 email/name（不阻塞跳转）
       getMe()

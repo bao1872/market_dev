@@ -8,10 +8,16 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
 import { apiClient } from '../api/client'
+import type {
+  CapabilityKey,
+  CapabilityStatus,
+  WatchlistLimitInfo,
+} from '../api/endpoints'
 
 // [Auth] - 描述: AuthUser 当前用户身份 + AccessProfile 权限上下文（对齐后端 LoginResponse 字段）
 // 替代旧 role: 'admin' | 'member' 单值，改用 is_admin + roles[] + subscription_active 等
 // 唯一真源为后端 get_access_context，前端不在本地计算权限
+// [V2.1] 新增 capabilities + watchlist_limits（PRD §9，前端权限/导航/额度 UI 唯一来源）
 export interface AuthUser {
   id: string
   name: string  // = email（兼容 AppShell 头像首字母抽取）
@@ -24,6 +30,30 @@ export interface AuthUser {
   expires_at: string | null
   features: string[]
   limits: Record<string, number>
+  // V2.1 字段（权限真源，PRD §9）：由 /me/access 同步，前端导航/路由/额度 UI 唯一来源
+  capabilities: Record<CapabilityKey, CapabilityStatus>
+  watchlist_limits: WatchlistLimitInfo
+}
+
+// [V2.1] 默认 V2.1 权限字段（restrictive：所有能力 inactive，额度 0）
+// 登录响应（LoginResponse）不含 V2.1 字段，构造 AuthUser 时先用此默认值，
+// 随后 revalidateAccess() 从 /me/access 拉取真实 V2.1 字段覆盖。
+// 失败时保持 restrictive（安全：用户无权限直到 /me/access 成功）。
+export const DEFAULT_V21_FIELDS: {
+  capabilities: Record<CapabilityKey, CapabilityStatus>
+  watchlist_limits: WatchlistLimitInfo
+} = {
+  capabilities: {
+    watchlist_management: { active: false, expires_at: null },
+    market_screening: { active: false, expires_at: null },
+    review_management: { active: false, expires_at: null },
+  },
+  watchlist_limits: {
+    watchlist_stock_limit: null,
+    watchlist_current_count: 0,
+    watchlist_over_limit: false,
+    is_admin_unlimited: false,
+  },
 }
 
 // token 在 storage 中的 key（client.ts 拦截器读取这两个 key）
@@ -77,7 +107,7 @@ function clearTokenPair(): void {
   localStorage.removeItem(REFRESH_TOKEN_KEY)
 }
 
-// [Auth] - 描述: AccessContextResponse 后端 /me/access 响应类型（对齐 AccessProfileResponse 11 字段）
+// [Auth] - 描述: AccessContextResponse 后端 /me/access 响应类型（对齐 AccessProfileResponse V1 + V2.1 字段）
 // 用于 revalidateAccess 刷新前端权限上下文，避免重复定义（与 endpoints.ts AccessProfile 同源）
 interface AccessContextResponse {
   user_id: string
@@ -91,6 +121,9 @@ interface AccessContextResponse {
   expires_at: string | null
   features: string[]
   limits: Record<string, number>
+  // V2.1 字段（权限真源，PRD §9）
+  capabilities: Record<CapabilityKey, CapabilityStatus>
+  watchlist_limits: WatchlistLimitInfo
 }
 
 interface AuthState {
@@ -158,6 +191,7 @@ export const useAuthStore = create<AuthState>()(
         try {
           const { data } = await apiClient.get<AccessContextResponse>('/me/access')
           // [Auth] - 描述: 用最新 AccessContext 更新 AuthUser 权限字段（防止 persist 的 subscription_active 过期）
+          // [V2.1] 同步 capabilities + watchlist_limits（前端导航/路由/额度 UI 唯一来源）
           const updated: AuthUser = {
             ...user,
             is_admin: data.is_admin,
@@ -168,6 +202,8 @@ export const useAuthStore = create<AuthState>()(
             expires_at: data.expires_at,
             features: data.features,
             limits: data.limits,
+            capabilities: data.capabilities,
+            watchlist_limits: data.watchlist_limits,
           }
           set({ user: updated, accessLoading: false })
           // [Auth] - 描述: 后端返回 subscription_active=false 且非 admin → 跳转续期页（canonical /subscription-expired）

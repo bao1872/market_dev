@@ -10,6 +10,8 @@
 import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Navigate, Outlet, type RouteObject, useParams } from 'react-router-dom'
 import { useAuthStore, ACCESS_TOKEN_KEY } from './store/auth'
+import type { AuthUser } from './store/auth'
+import { canAccessMarket, canAccessStockDetail, canAccessReplay } from './auth/capabilityAccess'
 import UserAppShell from './layouts/UserAppShell'
 import AdminAppShell from './layouts/AdminAppShell'
 import { legacyRedirectEntries, DEFAULT_ENTRY } from './navigation/appNavigation'
@@ -62,20 +64,32 @@ function ProtectedLayout() {
   return <Outlet />
 }
 
-// [Auth] - 描述: SubscriberRoute 订阅守卫 - 非有效订阅用户重定向到 /subscription-expired（canonical）
-// admin 用户豁免（is_admin=true 直接通过，不强制订阅）
-// 用于 /market /replay /stock/:symbol 等需有效订阅的核心业务路由
-function SubscriberRoute() {
+// [V2.1] CapabilityRoute - 基于 V2.1 capabilities 的路由守卫（PRD §9, §10）
+// 前端只消费 /me/access 返回的 capabilities + watchlist_limits，不从旧 features/monitor_limit 推导。
+// accessLoading 期间显示 loading，避免 revalidateAccess 未返回时提前判定 false。
+// 后端仍为最终 403 边界：手工 URL 访问无权限页面时，前端重定向到 /no-permission，后端 API 仍返回 403。
+function CapabilityRoute({ check }: { check: (user: AuthUser | null) => boolean }) {
   const user = useAuthStore((s) => s.user)
-  // admin 豁免：管理员无需有效订阅即可访问所有页面
-  if (user?.is_admin) {
-    return <Outlet />
+  const accessLoading = useAuthStore((s) => s.accessLoading)
+  // access revalidation 进行中且 user 为 null 或 V2.1 字段未填充时等待
+  if (accessLoading) {
+    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
   }
-  // 非订阅用户重定向到续期页
-  if (!user?.subscription_active) {
-    return <Navigate to="/subscription-expired" replace />
+  if (!check(user)) {
+    return <Navigate to="/no-permission" replace />
   }
   return <Outlet />
+}
+
+// [V2.1] 无权限提示页（手工 URL 访问无权限路由时展示）
+function ForbiddenPage() {
+  return (
+    <div style={{ minHeight: '100vh', background: '#0A0F14', color: '#E5E7EB', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
+      <h1 style={{ fontSize: 24, margin: 0 }}>无权限访问</h1>
+      <p style={{ margin: 0, color: '#9CA3AF' }}>当前账号未开通该功能权限</p>
+      <a href="/market" style={{ color: '#3B82F6' }}>返回行情</a>
+    </div>
+  )
 }
 
 // [Auth] - 描述: AdminRoute 管理员守卫 - 使用 is_admin 字段判断（替代旧 user.role）
@@ -126,13 +140,25 @@ export const routeConfig: RouteObject[] = [
       {
         element: <UserAppShell />,
         children: [
-          // 需有效订阅的核心业务页面（SubscriberRoute 守卫）
+          // [V2.1] 基于 capability 的业务路由守卫（PRD §9, §10）
+          // /market: watchlist_management 或 market_screening 任一即可
           {
-            element: <SubscriberRoute />,
+            element: <CapabilityRoute check={canAccessMarket} />,
             children: [
               { path: '/market', element: <MarketWorkspacePage /> },
-              { path: '/replay', element: <ReplayPage /> },
+            ],
+          },
+          // /stock/:symbol + /replay: 需要 market_screening（详情/DSA/K线/复盘）
+          {
+            element: <CapabilityRoute check={canAccessStockDetail} />,
+            children: [
               { path: '/stock/:symbol', element: <StockDetailPage /> },
+            ],
+          },
+          {
+            element: <CapabilityRoute check={canAccessReplay} />,
+            children: [
+              { path: '/replay', element: <ReplayPage /> },
             ],
           },
           // 不强制订阅的辅助页面（仅认证即可）
@@ -167,6 +193,8 @@ export const routeConfig: RouteObject[] = [
       ...redirectRoutes,
       // [Phase4] 旧管理员调试动态路由重定向
       { path: '/admin/stock-debug/:symbol', element: <OldStockDebugRedirect /> },
+      // [V2.1] 无权限提示页（手工 URL 访问无权限路由时由 CapabilityRoute 重定向到此）
+      { path: '/no-permission', element: <ForbiddenPage /> },
     ],
   },
   // 兜底：未匹配路由重定向到默认入口（替换旧 /overview）
