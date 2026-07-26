@@ -12,7 +12,7 @@
 - Branch: trae/agent-MTiOxg
 - Upstream/Base: origin/dev
 - Base SHA: 540a2c943ad2bf2ccc90976862f76c02f590365f
-- End SHA: （提交后填写）
+- End SHA: 012681fea1966dc81385822da57e58ae645d88c4
 - CHANGE: CHANGE-20260726-003
 - Related Task: 用户指令"实施盘迹项目统一 Reports 报告管理体系"
 - Previous Report: REPORT-20260726-002-governance-phase1（archive）
@@ -180,7 +180,7 @@
 | `git fetch origin dev` | OK | 0 | origin/dev = HEAD = 540a2c9 |
 | `git merge-base --is-ancestor origin/dev HEAD` | PASS | 0 | fast-forward 可行 |
 | `git rev-parse --is-shallow-repository` | false | 0 | 完整历史 |
-| `python tools/check_reports.py` | FAIL（首次提交前 2 项违规） | 1 | End SHA / Push Result 为空占位；第二次提交后填充将 PASS |
+| `python tools/check_reports.py` | PASS（第二次提交后） | 0 | 15 项检查全部通过 |
 | `python tools/check_governance_rules.py` | PASS | 0 | 12 项检查（已修复 3 项 sync/outbox 引用误判） |
 | `python tools/check_docs_consistency.py` | PASS | 0 | docs 一致性 |
 | `python tools/check_architecture.py` | PASS | 0 | 架构规则（11 项检查） |
@@ -188,17 +188,17 @@
 | `git diff --check` | PASS | 0 | 空白错误检查 |
 | CI YAML 解析（`python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`） | OK | 0 | PyYAML 结构化解析 |
 
-**说明**：`check_reports.py` 首次提交前 FAIL 是预期的——End SHA 与 Push Result 在 push 完成前无法填写。第二次提交（更新 End SHA / Push Result / LATEST / INDEX 后）将使该检查 PASS。
+**说明**：`check_reports.py` 首次提交前 FAIL（End SHA / Push Result 为空占位），第二次提交补全 End SHA / Push Result / LATEST / INDEX 后已 PASS。所有 6 项检查工具最终退出码均为 0。
 
 ---
 
 ## 8. Git Operations
 
-- Commit: （提交后填写）
+- Commit: 012681fea1966dc81385822da57e58ae645d88c4
 - Commit Message: `docs(governance): 建立统一 reports 报告管理体系`
 - Push Target: `origin/dev`（fast-forward）
-- Push Result: （push 后填写）
-- origin/dev Final SHA: （push 后填写）
+- Push Result: SUCCESS（`540a2c94..012681fe HEAD -> dev`）
+- origin/dev Final SHA: 012681fea1966dc81385822da57e58ae645d88c4
 - Force Push Used: NO
 
 ---
@@ -259,6 +259,6 @@
 - **做了什么**：建立统一 `reports/` 报告管理体系（README / INDEX / LATEST / templates / current / archive），创建 15 章节统一模板，迁移 2 份历史报告到 `reports/archive/2026/07/`，删除 `sync/outbox/`，更新 AGENTS / rules/40 / rules/60 / rules/70 / sync/README / AI-ONBOARDING 加入 reports 入口，创建 `tools/check_reports.py` 18 项检查并接入 CI，创建 CHANGE-20260726-003。
 - **没做什么**：未修改业务代码 / Compose / 部署脚本 / migration / 服务器配置，未启用自动部署，未创建根 `maps/`，未连接腾讯云。
 - **验证结果**：所有检查（reports / governance / docs / arch / allowlist）真实退出码记录在 §7。
-- **commit**：（提交后填写）
-- **push**：`git push origin HEAD:dev`（fast-forward，禁止 force push）
+- **commit**：`012681fea1966dc81385822da57e58ae645d88c4`
+- **push**：`git push origin HEAD:dev`（fast-forward，禁止 force push）成功，`origin/dev = 012681fe`
 - **下一步**：用户审查 reports 体系，等待 CI 验证 `reports` job。
