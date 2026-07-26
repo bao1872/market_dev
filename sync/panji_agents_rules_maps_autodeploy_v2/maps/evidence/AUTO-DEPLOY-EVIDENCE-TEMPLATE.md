@@ -1,0 +1,22 @@
+# Auto Deploy Evidence
+
+- Date:
+- GitHub run:
+- Push SHA:
+- Previous runtime SHA:
+- Target SHA:
+- Mode:
+- Changed files:
+- Blocked reason:
+- Services:
+- Migration:
+- `/version`:
+- Health:
+- Frontend:
+- Containers:
+- Logs:
+- Disk:
+- Memory:
+- Business acceptance:
+- Result:
+- Rollback:

@@ -1,0 +1,91 @@
+[D] .github
+  [D] workflows
+    [F] deploy-dev.yml
+[F] AGENTS.md
+[F] IMPLEMENTATION-CHECKLIST.md
+[F] README.md
+[D] maps
+  [F] MANIFEST.md
+  [F] README.md
+  [D] archive
+    [F] README.md
+  [D] changes
+    [F] CHANGELOG.md
+    [D] records
+      [F] CHANGE-TEMPLATE.md
+  [D] code
+    [F] README.md
+    [F] backend-module-map.md
+    [F] database-model-map.md
+    [F] deployment-runtime-map.md
+    [F] frontend-route-map.md
+    [F] indicator-computation-map.md
+    [F] notification-flow-map.md
+    [F] test-coverage-map.md
+    [F] worker-job-map.md
+  [D] current
+    [F] 00-product-business.md
+    [F] 01-system-architecture.md
+    [F] 02-data-api-access.md
+    [F] 03-jobs-integrations-operations.md
+    [F] 04-frontend-ux.md
+    [F] 05-testing-acceptance.md
+    [F] 06-research-feature-matrix.md
+    [F] 07-atomic-fact-contract-v1.md
+    [F] 08-indicator-contracts.md
+    [F] 09-development-deployment-workflow.md
+    [F] ALIGNMENT.md
+    [F] INDEX.md
+    [F] OPEN-DECISIONS.md
+  [D] decisions
+    [F] ADR-0003-DEV-PUSH-AUTO-DEPLOY.md
+    [F] ADR-0004-THREE-SERVER-DIRECTORIES.md
+    [F] ADR-TEMPLATE.md
+  [D] evidence
+    [F] AUTO-DEPLOY-EVIDENCE-TEMPLATE.md
+    [F] README.md
+  [D] migration
+    [F] DOCS-TO-MAPS.md
+  [D] restore
+    [F] RESTORE-CHECKLIST.md
+  [D] runbooks
+    [F] AUTO-DEPLOY-DEV.md
+    [F] INCIDENT.md
+    [F] MANUAL-DEPLOY.md
+    [F] MIGRATION.md
+    [F] ROLLBACK.md
+    [F] SERVER-INITIALIZATION.md
+    [F] TRAE-CN-MODES.md
+    [F] TRAE-WORK.md
+  [D] work
+    [F] ACTIVE.md
+    [F] IMPLEMENTATION-PLAN-AUTO-DEPLOY.md
+    [F] TRAE-CN-IMPLEMENTATION-INSTRUCTION.md
+    [D] templates
+      [F] CN-TO-WORK.md
+      [F] MANUAL-DEPLOY-REQUEST.md
+      [F] TASK-CHECKPOINT.md
+      [F] WORK-TO-CN.md
+[D] rules
+  [F] 00-core-governance.md
+  [F] 10-product-domain-invariants.md
+  [F] 20-market-data-indicators.md
+  [F] 30-access-security.md
+  [F] 40-testing-quality.md
+  [F] 50-git-development-flow.md
+  [F] 60-trae-work.md
+  [F] 70-trae-cn.md
+  [F] 80-auto-deployment-data-safety.md
+  [F] 85-server-directory-boundaries.md
+  [F] 90-deprecated-forbidden.md
+  [F] README.md
+[D] scripts
+  [D] deploy
+    [F] authorized_keys.example
+    [F] classify_deployment.py
+    [F] panji-deploy-dev.sh
+    [F] panji-deploy-gateway.sh
+    [F] panji-verify-runtime.sh
+    [F] sudoers.example
+[D] tools
+  [F] check_knowledge_system.py

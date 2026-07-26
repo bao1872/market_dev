@@ -1,0 +1,1 @@
+restrict,command="/usr/local/sbin/panji-deploy-gateway" ssh-ed25519 REPLACE_WITH_GITHUB_ACTIONS_DEPLOY_PUBLIC_KEY panji-github-actions
