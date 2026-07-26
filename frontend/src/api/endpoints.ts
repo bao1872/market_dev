@@ -3239,3 +3239,124 @@ export async function getAdminStockDebug(
   )
   return data
 }
+
+// ============================================================================
+// V2.1 邀请码能力配置（PRD §6 + §8.1）
+// ============================================================================
+// 与 V1 InviteCode/InviteCodeCreateRequest 并存，不替换 V1 类型。
+// V2.1 使用 capabilities + duration_months，V1 使用 plan_code + grant_months。
+
+/** V2.1 能力键（与后端 app.constants.capability_keys 严格对应） */
+export const CAPABILITY_KEYS = [
+  'watchlist_management',
+  'market_screening',
+  'review_management',
+] as const
+export type CapabilityKey = (typeof CAPABILITY_KEYS)[number]
+
+/** V2.1 能力配置项（PRD §6.4） */
+export interface InviteCodeCapabilityItem {
+  capability_key: CapabilityKey
+  /** 自选额度（仅 watchlist_management 必须正整数；其他能力必须 null） */
+  limit_value: number | null
+}
+
+/** V2.1 邀请码创建请求（PRD §6） */
+export interface InviteCodeV2CreateRequest {
+  count?: number
+  duration_months: number
+  capabilities: InviteCodeCapabilityItem[]
+  note?: string
+}
+
+/** V2.1 邀请码创建响应（含明文，仅生成时返回） */
+export interface InviteCodeV2Response {
+  id: string
+  code: string
+  duration_months: number
+  capabilities: InviteCodeCapabilityItem[]
+  note: string | null
+  created_at: string
+}
+
+/** V2.1 邀请码列表项（不含明文，含状态推导 + 能力配置） */
+export interface InviteCodeV2ListItem {
+  id: string
+  status: 'available' | 'redeemed' | 'revoked'
+  duration_months: number
+  capabilities: InviteCodeCapabilityItem[]
+  note: string | null
+  created_by: string
+  created_at: string
+  redeemed_by_user_id: string | null
+  redeemed_at: string | null
+  revoked_at: string | null
+}
+
+/** V2.1 邀请码列表响应（分页） */
+export interface InviteCodeV2ListResponse {
+  items: InviteCodeV2ListItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** V2.1 创建邀请码（带能力配置） */
+export async function createInviteCodesV2(
+  payload: InviteCodeV2CreateRequest,
+): Promise<InviteCodeV2Response[]> {
+  const { data } = await apiClient.post<InviteCodeV2Response[]>(
+    '/admin/v2/invite-codes',
+    payload,
+  )
+  return data
+}
+
+/** V2.1 查询邀请码列表（含能力配置 + 状态推导） */
+export async function getInviteCodesV2(params?: {
+  status?: 'available' | 'redeemed' | 'revoked'
+  limit?: number
+  offset?: number
+}): Promise<InviteCodeV2ListResponse> {
+  const { data } = await apiClient.get<InviteCodeV2ListResponse>(
+    '/admin/v2/invite-codes',
+    { params },
+  )
+  return data
+}
+
+/** V2.1 撤销邀请码（仅 available 状态可撤销） */
+export async function revokeInviteCodeV2(
+  inviteCodeId: string,
+): Promise<InviteCodeV2ListItem> {
+  const { data } = await apiClient.post<InviteCodeV2ListItem>(
+    `/admin/v2/invite-codes/${inviteCodeId}/revoke`,
+  )
+  return data
+}
+
+// ============================================================================
+// V2.1 AccessContext（PRD §9，前端用户端权限模型）
+// ============================================================================
+
+/** V2.1 单项能力状态 */
+export interface CapabilityStatus {
+  active: boolean
+  expires_at: string | null
+}
+
+/** V2.1 自选额度信息 */
+export interface WatchlistLimitInfo {
+  watchlist_stock_limit: number | null
+  watchlist_current_count: number
+  watchlist_over_limit: boolean
+  is_admin_unlimited: boolean
+}
+
+/** V2.1 AccessContext（PRD §9） */
+export interface CapabilityAccessContext {
+  user_id: string
+  is_admin: boolean
+  capabilities: Record<CapabilityKey, CapabilityStatus>
+  limits: WatchlistLimitInfo
+}

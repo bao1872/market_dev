@@ -1451,3 +1451,54 @@ export type {
   AdminAtomicFactDebugItem,
   StockContextDataQuality,
 } from '../api/endpoints'
+export type {
+  CapabilityKey,
+  InviteCodeCapabilityItem,
+  InviteCodeV2CreateRequest,
+  InviteCodeV2Response,
+  InviteCodeV2ListItem,
+  InviteCodeV2ListResponse,
+  CapabilityStatus,
+  WatchlistLimitInfo,
+  CapabilityAccessContext,
+} from '../api/endpoints'
+
+// ============================================================================
+// V2.1 邀请码能力配置 hooks（PRD §6 + §8.1）
+// ============================================================================
+
+/** V2.1 查询邀请码列表（含能力配置 + 状态推导） */
+export function useInviteCodesV2(params?: {
+  status?: 'available' | 'redeemed' | 'revoked'
+  limit?: number
+  offset?: number
+}) {
+  return useQuery({
+    queryKey: ['admin', 'invite-codes-v2', params],
+    queryFn: () => api.getInviteCodesV2(params),
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** V2.1 创建邀请码变更 */
+export function useCreateInviteCodesV2() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: api.InviteCodeV2CreateRequest) =>
+      api.createInviteCodesV2(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'invite-codes-v2'] })
+    },
+  })
+}
+
+/** V2.1 撤销邀请码变更 */
+export function useRevokeInviteCodeV2() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (inviteCodeId: string) => api.revokeInviteCodeV2(inviteCodeId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'invite-codes-v2'] })
+    },
+  })
+}
