@@ -176,6 +176,15 @@ def test_is_placeholder_recognizes_known_values() -> None:
     assert not cr.is_placeholder("postgresql://user:pass@host")
 
 
+def test_is_placeholder_treats_bare_punctuation_as_placeholder() -> None:
+    """值为单纯引号/反引号/标点时（如 secret=` 后跟中文）视为占位，不误报。"""
+    assert cr.is_placeholder('"')
+    assert cr.is_placeholder("`")
+    assert cr.is_placeholder("'")
+    assert cr.is_placeholder("`\"")
+    assert cr.is_placeholder("")
+
+
 def test_is_empty_or_placeholder() -> None:
     assert cr.is_empty_or_placeholder("")
     assert cr.is_empty_or_placeholder("（提交后填写）")

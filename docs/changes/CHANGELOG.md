@@ -4,10 +4,10 @@
 
 ## 2026-07-26
 
-- CHANGE-20260726-004: docs(governance) Reports 报告体系收口修正（SHA 语义三字段 Base/Implementation/Report Published Through；统一"15 个检查组"描述；修复 secret 检测区分真实赋值与说明文字；强化 SHA 一致性检查 40hex/commit/祖先/LATEST/INDEX；新增 tools/tests/test_check_reports.py 69 自测；reports CI job 增加 fetch-depth:0；无业务/API/DB/Worker/前端/部署行为变化；自动部署仍 PLANNED）
+- CHANGE-20260726-004: docs(governance) Reports 报告体系收口修正（SHA 语义三字段 Base/Implementation/Report Published Through；统一"15 个检查组"描述；修复 secret 检测区分真实赋值与说明文字；强化 SHA 一致性检查 40hex/commit/祖先/LATEST/INDEX；新增 tools/tests/test_check_reports.py 70 自测；reports CI job 增加 fetch-depth:0；无业务/API/DB/Worker/前端/部署行为变化；自动部署仍 PLANNED）
   - SHA 三字段语义：Base SHA（任务开始时 origin/dev commit）/ Implementation SHA（完成任务主体内容的 commit）/ Report Published Through SHA（报告内容和元数据已覆盖到的已知 commit）；报告文件不能可靠记录包含其自身的最终 commit SHA；禁止通过不断创建"补 SHA commit"追求自引用一致
   - tools/check_reports.py：检查组 13 重写，覆盖三 SHA 存在/40 位十六进制/commit 有效性（git cat-file -e）/祖先关系（git merge-base --is-ancestor）/Push Result 非空/LATEST 与报告一致/INDEX Implementation SHA 列存在且一致；ASSIGN_RE 正则要求等号后跟 ASCII 值，避免"禁止保存 password=" 等中文说明文字误报；SECRET_PLACEHOLDERS 占位值白名单（<redacted>/REDACTED/***/example/placeholder 等）；PEM 私钥标记无条件 FAIL
-  - tools/tests/test_check_reports.py：69 测试用例（真实秘密赋值 FAIL / PEM 私钥标记 FAIL / 占位值 PASS / 说明文字 PASS / SHA 字段提取 / SHA 格式校验 / 辅助函数 / 端到端报告检查）
+  - tools/tests/test_check_reports.py：70 测试用例（真实秘密赋值 FAIL / PEM 私钥标记 FAIL / 占位值 PASS / 说明文字 PASS / SHA 字段提取 / SHA 格式校验 / 辅助函数 / 端到端报告检查）
   - .github/workflows/ci.yml：reports job 增加 fetch-depth: 0（完整历史用于 SHA 祖先检查，其他 job 不变）
   - 文档同步修正：reports/README.md / reports/templates/TASK-REPORT-TEMPLATE.md / reports/LATEST.md / reports/INDEX.md（Commit 列 → Implementation SHA）/ reports/current/REPORT-20260726-003-reports-governance.md / rules/40-testing-quality.md（第 9/12 条）/ docs/changes/records/CHANGE-20260726-003.md / docs/changes/CHANGELOG.md（CHANGE-003 条目）
   - Known Gaps：自动部署 PLANNED；Capability V2 未引入；根 maps/ 未创建（Phase 3 评估）；secret 检测当前仅覆盖 password/token/secret/database_url 四类 key + PEM 私钥标记，未覆盖 api_key 等扩展 key

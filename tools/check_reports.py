@@ -108,6 +108,9 @@ def is_placeholder(value: str) -> bool:
     v = value.strip().strip("\"'`").strip()
     # 去掉行尾标点（如句号、逗号）
     v = v.rstrip(".,;:")
+    # 剥离引号/反引号后为空（如 value 仅为 " 或 ` 或 '）视为占位
+    if not v:
+        return True
     return v.lower() in SECRET_PLACEHOLDERS
 
 

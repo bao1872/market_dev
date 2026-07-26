@@ -12,8 +12,8 @@
 - Branch: trae/agent-MTiOxg
 - Upstream/Base: origin/dev
 - Base SHA: d99a5befd0a43e90e78d8134dbdbbfde2d0338bb
-- Implementation SHA: （第一次提交后填写）
-- Report Published Through SHA: （第一次提交后填写）
+- Implementation SHA: ef33f7c5d897f1c0f4f7b412a7afd6e70f7acb9c
+- Report Published Through SHA: ef33f7c5d897f1c0f4f7b412a7afd6e70f7acb9c
 - CHANGE: CHANGE-20260726-004
 - Related Task: 用户指令"执行 Reports 报告体系收口修正"
 - Previous Report: REPORT-20260726-003-reports-governance
@@ -27,7 +27,7 @@
 
 1. 修正报告 SHA 语义：停止使用含义模糊的单一 End SHA，统一采用 Base SHA / Implementation SHA / Report Published Through SHA 三字段；
 2. 统一检查项数量：tools/check_reports.py 实际为 15 个检查组，部分报告文字写成 18 项，需统一修正；
-3. 修复秘密检测：必须阻断 password=abc / token=abc / secret=abc / DATABASE_URL=postgresql://... / -----BEGIN PRIVATE KEY----- 等真实赋值，同时不能因说明文字（禁止保存 password= / 检查 token= / 示例 secret=<redacted> / PRIVATE KEY 属于禁止内容）误报；
+3. 修复秘密检测：必须阻断 `password` / `token` / `secret` / `database_url` 等字段后跟真实非占位值的赋值，以及 PEM 私钥起始标记；同时不能因说明文字（如"禁止保存 password=" / "检查 token=" / "示例 secret=<redacted>" / "PRIVATE KEY 属于禁止内容"）误报；
 4. 强化 SHA 一致性检查：三 SHA 必须 40 位十六进制、为有效 commit、满足祖先关系、LATEST 与报告一致、INDEX 列名改为 Implementation SHA；
 5. CI reports job 增加 fetch-depth: 0 用于 SHA 祖先检查；
 6. 创建本轮报告与 CHANGE。
@@ -95,7 +95,7 @@
     - 新增 `git_cat_file_exists()` / `git_is_ancestor()` / `extract_sha_field()` 辅助函数；
     - 重写检查组 13 `check_report_sha_and_push_result()`：覆盖三 SHA 存在性、40 位十六进制、commit 有效性、祖先关系、Push Result 非空、LATEST 与报告一致、INDEX Implementation SHA 列存在且一致；
     - 模块 docstring 改为"15 个检查组"；
-11. 新增 `tools/tests/test_check_reports.py`：69 个测试用例，覆盖真实秘密赋值 FAIL、PEM 私钥标记 FAIL、占位值 PASS、说明文字 PASS、SHA 字段提取、SHA 格式校验、辅助函数、端到端报告检查；
+11. 新增 `tools/tests/test_check_reports.py`：70 个测试用例，覆盖真实秘密赋值 FAIL、PEM 私钥标记 FAIL、占位值 PASS、说明文字 PASS、SHA 字段提取、SHA 格式校验、辅助函数、端到端报告检查；
 12. 修正 `.github/workflows/ci.yml`：reports job 增加 `fetch-depth: 0`（其他 job 不变）；
 13. 运行所有检查工具验证 PASS；
 14. 创建本轮报告 `reports/current/REPORT-20260726-004-reports-hardening.md`（本文件）；
@@ -112,7 +112,7 @@
 | File | Action | Purpose |
 |---|---|---|
 | `tools/check_reports.py` | Modified | 三字段 SHA 校验 + secret 检测修复 + 15 检查组 |
-| `tools/tests/test_check_reports.py` | Created | secret 检测与 SHA 校验自测（69 用例） |
+| `tools/tests/test_check_reports.py` | Created | secret 检测与 SHA 校验自测（70 用例） |
 | `reports/templates/TASK-REPORT-TEMPLATE.md` | Modified | End SHA → 三字段；Git Operations 双 commit |
 | `reports/README.md` | Modified | LATEST/INDEX/必须包含字段改三字段 + 语义定义 |
 | `reports/LATEST.md` | Modified | 三字段 + 指向 REPORT-004 + 15 个检查组 |
@@ -162,7 +162,7 @@
 | `python tools/check_docs_consistency.py` | PASS | 0 | docs 一致性（MANIFEST baseline 086ebce） |
 | `python tools/check_architecture.py` | PASS | 0 | 架构规则 |
 | `python tools/check_test_allowlist.py` | PASS | 0 | 测试 allowlist |
-| `python -m pytest tools/tests/test_check_reports.py -q` | PASS | 0 | 69 passed |
+| `python -m pytest tools/tests/test_check_reports.py -q` | PASS | 0 | 70 passed |
 | `ruff check tools/check_reports.py tools/tests/test_check_reports.py` | PASS | 0 | 无 lint 错误 |
 | `git diff --check` | PASS | 0 | 空白错误检查 |
 
@@ -172,13 +172,13 @@
 
 ## 8. Git Operations
 
-- Implementation Commit: （第一次提交后填写）
-- Metadata Commit: （第二次提交后填写）
+- Implementation Commit: ef33f7c5d897f1c0f4f7b412a7afd6e70f7acb9c
+- Metadata Commit: （本 commit，由 staged 元数据补全构成）
 - Commit Message: `docs(governance): reports 体系收口修正 — 三字段 SHA / 15 检查组 / secret 检测 / SHA 一致性`
-- Push Target: `origin/dev`（fast-forward）
-- Push Result: （push 后填写）
-- origin/dev After Implementation Push: （push 后填写）
-- origin/dev After Metadata Push: （push 后填写）
+- Push Target: `origin/dev`（fast-forward，Implementation + Metadata 双 commit 一同 push）
+- Push Result: READY — Implementation + Metadata 双 commit 待 fast-forward push 到 origin/dev；实际 push 输出与最终 HEAD 由 TRAE 简短回复与下一份报告 Starting State 记录
+- origin/dev After Implementation Push: 未单独 push（与 Metadata Commit 一同 push；因 Implementation Commit 单独提交时报告 SHA 仍为占位，不能单独 push 触发 CI）
+- origin/dev After Metadata Push: （见 TRAE 简短回复与下一份报告 Starting State）
 - Force Push Used: NO
 
 ---
@@ -229,9 +229,9 @@
 
 ## 14. Final Summary
 
-- **做了什么**：修正 reports 体系 SHA 语义为三字段（Base / Implementation / Report Published Through），统一检查项数量描述为"15 个检查组"，修复 secret 检测逻辑（区分真实赋值与说明文字，新增占位值白名单，PEM 私钥标记无条件 FAIL），强化 SHA 一致性检查（40hex / commit 有效性 / 祖先关系 / LATEST 一致 / INDEX Implementation SHA 列），新增 69 个自测用例，为 reports CI job 增加 `fetch-depth: 0`。
+- **做了什么**：修正 reports 体系 SHA 语义为三字段（Base / Implementation / Report Published Through），统一检查项数量描述为"15 个检查组"，修复 secret 检测逻辑（区分真实赋值与说明文字，新增占位值白名单，PEM 私钥标记无条件 FAIL），强化 SHA 一致性检查（40hex / commit 有效性 / 祖先关系 / LATEST 一致 / INDEX Implementation SHA 列），新增 70 个自测用例，为 reports CI job 增加 `fetch-depth: 0`。
 - **没做什么**：未修改业务代码 / Compose / 部署脚本 / migration / 服务器配置，未启用自动部署，未创建根 `maps/`，未开展 Phase 3。
-- **验证结果**：check_reports（15 组）/ governance / docs / arch / allowlist 全 PASS；69 测试 PASS；ruff PASS。
-- **commit**：（提交后填写）
-- **push**：（push 后填写）
+- **验证结果**：check_reports（15 组）/ governance / docs / arch / allowlist 全 PASS；70 测试 PASS；ruff PASS。
+- **commit**：Implementation SHA `ef33f7c5d897f1c0f4f7b412a7afd6e70f7acb9c`；Metadata Commit 见 TRAE 简短回复
+- **push**：`git push origin HEAD:dev`（fast-forward，禁止 force push）；实际结果由 TRAE 简短回复与下一份报告 Starting State 记录
 - **下一步**：用户审查，等待 CI 验证 reports job。
