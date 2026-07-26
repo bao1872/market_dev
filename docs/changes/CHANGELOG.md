@@ -2,6 +2,14 @@
 
 本文件只做索引。每次代码、配置、测试、部署或当前设计变化，都必须使用独立分支并在 `records/` 下建立独立记录。
 
+## 2026-07-26
+
+- CHANGE-20260726-001: docs(governance) Phase 1 — 建立根 rules/ 并行规则体系（11 份规则文件 + README + AGENTS-MIGRATION-MAP；从 AGENTS.md 提取 46 条章节/硬规则级条款；AGENTS.md 仍是最高权威；不修改业务代码/部署/CI；PLANNED 内容标记未生效）
+  - 新增 rules/：00-core-governance / 10-product-domain-invariants / 20-market-data-indicators / 30-access-security / 40-testing-quality / 50-git-development-flow / 60-trae-work（PLANNED）/ 70-trae-cn（PLANNED）/ 80-deployment-data-safety / 85-server-directory-boundaries（PLANNED）/ 90-deprecated-forbidden / README / AGENTS-MIGRATION-MAP
+  - 不采用 sync 草案中与 AGENTS 冲突的内容（事实源优先级第 3 位、Capability V2、自动部署已启用等）
+  - 不采用 Phase 0 审计报告"docs/governance/rules/"过渡层建议：正式目标就是仓库根 rules/
+  - AGENTS.md 不修改、不精简、不重写；docs/ 不移动；不启用 GitHub Actions；不修改 Compose/部署脚本
+
 ## 2026-07-25
 
 - CHANGE-20260725-003: fix(detail) 左栏来源列表可见性修复 — missing_origin invalid + reason 显示
