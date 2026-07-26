@@ -4,6 +4,11 @@
 
 ## 2026-07-25
 
+- CHANGE-20260725-003: fix(detail) 左栏来源列表可见性修复 — missing_origin invalid + reason 显示
+  - fix: resolveDetailSourceContextV2 缺 originScope 时不再默认 direct，改为 missing_origin invalid（合同5：只有显式 direct 才单列）
+  - feat: invalid 占位显示具体 reason（data-invalid-reason + INVALID_REASON_LABELS）
+  - chore: V1 resolveDetailSourceContext / resolveStockDetailOrigin 标记 @deprecated，V2 为唯一真源
+  - test: 新增 sourceListVisibilityContract.test.ts（31 项合同测试）
 - CHANGE-20260725-002: 个股详情左侧来源列表切股闪烁修复 — 删除页面级 instrumentQuery.isLoading/!data 早退，tv-detail-layout 和 tv-source-list 始终挂载，loading/error 仅影响右侧详情和顶部信息栏
 - CHANGE-20260725-001: freshness_state 日级周期（1d/1w/1mo）actual vs expected 日期比较修正（日级 bar 时间戳为 00:00，按日期比较避免误判 unavailable）
 

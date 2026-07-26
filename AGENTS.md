@@ -140,6 +140,7 @@ Atomic Fact Contract V1 的 Core 14 项不可修改；产品观察扩展不进�
 - **数据周期合同**: 1d=DB 日线+Pytdx 日线；15m=DB 15m+Pytdx 原生 15m；1h=DB 60m+Pytdx 原生 60m；1w=合并日线→周线；1mo=合并日线→月线。禁止 1m→15m/1m→60m/1m→1d 聚合
 - **来源区分**: `market`/`watchlist`/`direct` 必须显式区分；market/watchlist 双列布局（`200px minmax(0,1fr)`），direct 单列布局（`minmax(0,1fr)`）
 - **来源列表稳定性**: symbol 切换只更新 active 行和右侧详情；禁止页面级 loading 卸载/清空来源列表（CHANGE-20260725-002）
+- **来源列表可见性（missing_origin invalid）**: symbol 切换只更新 active 行和右侧详情；禁止页面级 loading 卸载/清空来源列表。缺 originScope 时显示 missing_origin invalid 占位，不静默单列；只有显式 direct 才使用单列（CHANGE-20260725-003）
 
 ### 19. 板块同步降级保护（pywencai 唯一数据源）
 pywencai（`wencai_board_provider.py`）为唯一板块分类源；`/market/boards` 只读数据库 + Redis 状态，不在用户 API 请求链访问问财；`backend/Dockerfile` 必须安装 `nodejs`；盘后 worker 唯一同步入口是 `after_close_orchestrator.py` 的 `syncing_boards` 步骤；`BOARD_SYNC_ENABLED` 默认 `false`；`mode=dsa_only` 跳过该步骤。不得增加 akshare、代理、IP 绕过、东方财富混用或新常驻 worker（CHANGE-20260713-006 / PR #77）。

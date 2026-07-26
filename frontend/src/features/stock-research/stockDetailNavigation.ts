@@ -131,13 +131,17 @@ function scopeFromReturnTo(returnTo: string | null | undefined): 'market' | 'wat
 }
 
 /**
- * 解析详情页来源 originScope（唯一真源）。
+ * 解析详情页来源 originScope（V1 兼容，已弃用）。
  *
- * 优先级：
+ * @deprecated 使用 `detailSourceContext.ts` 的 `resolveDetailSourceContextV2` 代替。
+ *   V2 为唯一真源，支持 missing_origin invalid 状态；本函数保留仅为向后兼容旧测试。
+ *   生产代码（StockDetailPage / useStockDetailActions）已迁移至 V2。
+ *
+ * 优先级（V1 旧逻辑，与 V2 不一致）：
  *   1. 显式 originScope 参数（最高优先级，不被 returnTo.scope 覆盖）
  *      支持三值：market|watchlist|direct（[PRD V2.0 §4.4]）
  *   2. 旧 URL 无 originScope 时兼容解析 returnTo.scope
- *   3. 无任何来源的直接 URL 默认 watchlist（向后兼容）
+ *   3. 无任何来源的直接 URL 默认 watchlist（V1 旧行为；V2 改为 missing_origin invalid）
  *
  * 冲突检测：
  *   originScope=market|watchlist 存在且 returnTo.scope 也存在但不同 → contextMismatch=true
