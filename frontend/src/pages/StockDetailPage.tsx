@@ -38,6 +38,17 @@ import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNaviga
 // key 由 stableContextId 生成（不含 selectedSymbol，切股时不变），避免不同来源上下文串扰
 const SOURCE_LIST_SCROLL_KEY_PREFIX = 'panji:detail-source-scroll:v2'
 
+// [FIX source-context-visible] invalid 占位 reason → 中文文案（合同5：必须显示明确 reason）
+const INVALID_REASON_LABELS: Record<string, string> = {
+  none: '来源上下文失效',
+  context_mismatch: '来源上下文冲突（origin 与 returnTo.scope 不一致）',
+  missing_run_id: '来源上下文失效（缺 sourceRunId）',
+  missing_canonical_query: '来源上下文失效（缺 canonicalQuery）',
+  canonical_query_parse_failed: '来源上下文失效（canonicalQuery 解析失败）',
+  universe_mismatch: '来源上下文失效（universe 与 origin 不匹配）',
+  missing_origin: '来源上下文缺失（请从行情或自选列表进入）',
+}
+
 export default function StockDetailPage() {
   const { symbol } = useParams<{ symbol: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -585,9 +596,14 @@ export default function StockDetailPage() {
           <aside
             className="tv-source-list tv-source-list-invalid"
             data-testid="detail-source-list-invalid"
+            data-invalid-reason={sourceCtxV2.invalidReason}
           >
-            <div className="tv-source-list-header">行情来源</div>
-            <div className="tv-source-list-placeholder">来源上下文失效</div>
+            <div className="tv-source-list-header">
+              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+            </div>
+            <div className="tv-source-list-placeholder">
+              {INVALID_REASON_LABELS[sourceCtxV2.invalidReason] ?? '来源上下文失效'}
+            </div>
           </aside>
         )}
         {showSourceList && !detailActions.sourceListLoading && !detailActions.sourceListError && !detailActions.sourceContextInvalid && detailActions.sourceListEmpty && (

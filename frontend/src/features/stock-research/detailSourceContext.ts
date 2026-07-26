@@ -67,17 +67,20 @@ export interface DetailSourceContext {
 }
 
 /**
- * 详情页来源上下文统一解析（唯一真源）。
+ * 详情页来源上下文统一解析（V1，已弃用）。
  *
- * StockDetailPage 和 useStockDetailActions 只消费此函数的返回值，禁止各自推导。
+ * @deprecated 使用 `resolveDetailSourceContextV2` 代替。
+ *   V2 为唯一真源，支持 sourceRunId + canonicalQuery + missing_origin invalid。
+ *   生产代码（StockDetailPage / useStockDetailActions）已迁移至 V2。
+ *   本函数保留仅为向后兼容 marketWorkspaceUrlState re-export 和旧测试。
  *
- * 优先级（CHANGE-20260716-006）：
+ * 优先级（V1 旧逻辑，与 V2 不一致）：
  *   1. 显式 originScope（最高优先级，不被 returnTo.scope 覆盖）
  *      market  → source=selection, strategy=dsa_selector
  *      watchlist → source=watchlist, strategy=watchlist_monitor
  *      direct → source=watchlist, strategy=watchlist_monitor（无来源列表）
  *   2. 无显式 originScope 时兼容解析有效 /market returnTo.scope（旧链接回退）
- *   3. 无任何来源 → 默认 watchlist
+ *   3. 无任何来源 → 默认 watchlist（V1 旧行为；V2 改为 missing_origin invalid）
  *
  * 冲突检测：
  *   originScope=market|watchlist 存在且 returnTo.scope 也存在但不同 → sourceContextInvalid=true
@@ -156,6 +159,7 @@ export type DetailSourceInvalidReason =
   | 'missing_canonical_query'
   | 'canonical_query_parse_failed'
   | 'universe_mismatch'
+  | 'missing_origin'
 
 export interface DetailSourceContextV2 {
   origin: OriginScope
@@ -194,14 +198,17 @@ function parseCanonicalQuery(raw: string | null): [StrategyResultQuery | null, b
  * origin 解析优先级：
  *   1. 显式 originScope（market|watchlist|direct）
  *   2. 无显式 originScope + 有效 /market returnTo → 按 returnTo.scope 推导（兼容旧 /market 链接）
- *   3. 无显式 originScope + 无 /market returnTo → direct（V2：不再默认 watchlist，避免伪造来源）
+ *   3. 无显式 originScope + 无 /market returnTo → origin=watchlist + invalid(missing_origin)
+ *      （合同5：只有显式 direct 才使用单列；上下文缺失时显示 invalid 占位，不静默隐藏）
  *
- * 失效规则（仅 market/watchlist，direct 永不失效）：
- *   - origin 与 returnTo.scope 冲突 → context_mismatch
- *   - 缺 sourceRunId → missing_run_id
+ * 失效规则：
+ *   - 缺 originScope 且无 /market returnTo → missing_origin（origin=watchlist 占位，显示 invalid）
+ *   - origin=market|watchlist 与 returnTo.scope 冲突 → context_mismatch
+ *   - origin=market|watchlist 缺 sourceRunId → missing_run_id
  *   - canonicalQuery JSON 解析失败 → canonical_query_parse_failed
  *   - 缺 canonicalQuery → missing_canonical_query
  *   - canonicalQuery.universe 与 origin 不匹配 → universe_mismatch
+ *   - direct 永不失效（显式 direct 无左栏，单列布局）
  *
  * stableContextId：origin+sourceRunId+canonicalQueryRaw（不含 selectedSymbol，不含 returnTo，切股不变）。
  */
@@ -216,6 +223,10 @@ export function resolveDetailSourceContextV2(
   // 1. 解析 origin
   let origin: OriginScope
   let contextMismatch = false
+  // [FIX source-context-visible] 缺 originScope 且无 /market returnTo 时不再默认 direct，
+  //   而是标记为 missing_origin invalid（origin=watchlist 占位以显示 invalid 占位）。
+  //   合同5：只有显式 direct 才使用单列；上下文缺失必须显示 invalid 及 reason。
+  let missingOrigin = false
   if (originScopeRaw === 'market' || originScopeRaw === 'watchlist' || originScopeRaw === 'direct') {
     origin = originScopeRaw
     // 冲突检测：origin 非 direct 且 returnTo.scope 存在但不一致
@@ -228,17 +239,23 @@ export function resolveDetailSourceContextV2(
     // 无显式 originScope，从 /market returnTo 推导（兼容旧 /market 链接）
     origin = marketContext.scope === 'market' ? 'market' : 'watchlist'
   } else {
-    // 无 originScope 且无 /market returnTo → direct（V2：不默认 watchlist，避免伪造来源）
-    origin = 'direct'
+    // 无 originScope 且无 /market returnTo → origin=watchlist 占位 + missing_origin invalid
+    // 不再默认 direct（合同5：只有显式 direct 才使用单列，上下文缺失显示 invalid 占位）
+    origin = 'watchlist'
+    missingOrigin = true
   }
 
   // 2. 解析 canonicalQuery
   const [canonicalQuery, cqParseFailed] = parseCanonicalQuery(canonicalQueryRaw)
 
-  // 3. 判定失效（仅 market/watchlist；direct 永不失效）
+  // 3. 判定失效
   let sourceContextInvalid = false
   let invalidReason: DetailSourceInvalidReason = 'none'
-  if (origin === 'market' || origin === 'watchlist') {
+  if (missingOrigin) {
+    // 上下文缺失：无 originScope 且无 /market returnTo（origin=watchlist 占位）
+    sourceContextInvalid = true
+    invalidReason = 'missing_origin'
+  } else if (origin === 'market' || origin === 'watchlist') {
     if (contextMismatch) {
       sourceContextInvalid = true
       invalidReason = 'context_mismatch'

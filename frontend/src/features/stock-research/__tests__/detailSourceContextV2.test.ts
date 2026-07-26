@@ -4,8 +4,8 @@
 // 覆盖 V2 根因修复合同：
 //   1. buildStockDetailUrl 编码 sourceRunId + cq（入口快照载体）
 //   2. computeStableContextIdV2 不含 selectedSymbol（切股不变）
-//   3. resolveDetailSourceContextV2 origin 解析优先级（显式 originScope > /market returnTo.scope > direct）
-//   4. resolveDetailSourceContextV2 失效规则（market/watchlist 缺 runId/cq/universe不匹配/冲突；direct 永不失效）
+//   3. resolveDetailSourceContextV2 origin 解析优先级（显式 originScope > /market returnTo.scope > missing_origin invalid）
+//   4. resolveDetailSourceContextV2 失效规则（missing_origin/market/watchlist 缺 runId/cq/universe不匹配/冲突；显式 direct 永不失效）
 //   5. buildMarketReturnToUrl 与 decodeMarketListContext 互逆（完整筛选/排序/分页往返）
 //
 // 禁止（V2 硬规则）：
@@ -122,18 +122,19 @@ test('V2-3c: 无显式 originScope + /market returnTo scope=watchlist → 推导
   assert.equal(ctx.sourceContextInvalid, false)
 })
 
-test('V2-3d: 无显式 originScope + 非 /market returnTo（如 /messages）→ direct（不伪造行情来源）', () => {
+test('V2-3d: 无显式 originScope + 非 /market returnTo（如 /messages）→ missing_origin invalid（合同5：不静默单列）', () => {
   const ctx = resolveDetailSourceContextV2(null, '/messages', null, null)
-  assert.equal(ctx.origin, 'direct', '/messages returnTo → direct（不默认 watchlist）')
-  assert.equal(ctx.sourceContextInvalid, false, 'direct 永不失效')
+  // [FIX source-context-visible] 旧版默认 direct 会静默隐藏左栏；新版显示 invalid 占位
+  assert.equal(ctx.sourceContextInvalid, true, '缺 originScope + 非 /market returnTo → invalid')
+  assert.equal(ctx.invalidReason, 'missing_origin')
   assert.equal(ctx.sourceRunId, null)
   assert.equal(ctx.canonicalQuery, null)
 })
 
-test('V2-3e: 无显式 originScope + 无 returnTo → direct（直接访问不伪造行情来源）', () => {
+test('V2-3e: 无显式 originScope + 无 returnTo → missing_origin invalid（合同5：只有显式 direct 才单列）', () => {
   const ctx = resolveDetailSourceContextV2(null, null, null, null)
-  assert.equal(ctx.origin, 'direct')
-  assert.equal(ctx.sourceContextInvalid, false)
+  assert.equal(ctx.sourceContextInvalid, true, '缺 originScope + 无 returnTo → invalid')
+  assert.equal(ctx.invalidReason, 'missing_origin')
 })
 
 test('V2-3f: 显式 originScope=direct → direct，不校验 sourceRunId/cq', () => {
