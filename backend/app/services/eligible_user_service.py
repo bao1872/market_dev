@@ -185,10 +185,12 @@ async def filter_eligible_recipients(
 async def is_user_eligible_for_monitor(db: AsyncSession, user_id: UUID) -> bool:
     """检查单个用户是否有资格进入监控 universe（含 admin）。
 
-    监控场景资格条件：
+    [V2.1] 监控资格基于 watchlist_management capability（PRD §10.2）：
     - User.status = 'active'
-    - (有 member 角色 AND 无 admin 角色 AND Subscription 有效)
-      OR (有 admin 角色)
+    - (有 admin 角色) OR (有 active watchlist_management grant)
+
+    委托给 capability_service.filter_users_with_capability（单一真源），
+    禁止复制 grant 查询逻辑。
 
     Args:
         db: 异步会话
@@ -197,32 +199,11 @@ async def is_user_eligible_for_monitor(db: AsyncSession, user_id: UUID) -> bool:
     Returns:
         True 表示有资格，False 表示无资格
     """
-    member_eligible = (
-        select(User.id)
-        .join(Subscription, Subscription.user_id == User.id)
-        .where(
-            User.id == user_id,
-            User.status == "active",
-            Subscription.status == "active",
-            Subscription.starts_at <= func.now(),
-            Subscription.expires_at > func.now(),
-            _member_role_exists(),
-            _admin_role_absent(),
-        )
-        .limit(1)
-    )
-    admin_eligible = (
-        select(User.id)
-        .where(
-            User.id == user_id,
-            User.status == "active",
-            _admin_role_exists(),
-        )
-        .limit(1)
-    )
-    stmt = member_eligible.union(admin_eligible)
-    result = await db.execute(stmt)
-    return result.first() is not None
+    from app.constants.capability_keys import WATCHLIST_MANAGEMENT
+    from app.services.capability_service import filter_users_with_capability
+
+    eligible = await filter_users_with_capability(db, [user_id], WATCHLIST_MANAGEMENT)
+    return len(eligible) > 0
 
 
 async def filter_monitor_eligible_recipients(
@@ -230,10 +211,12 @@ async def filter_monitor_eligible_recipients(
 ) -> list[UUID]:
     """批量过滤监控场景有资格的用户 ID（admin 放行）。
 
-    监控场景资格条件：
+    [V2.1] 监控资格基于 watchlist_management capability（PRD §10.2）：
     - User.status = 'active'
-    - (有 member 角色 AND 无 admin 角色 AND Subscription 有效)
-      OR (有 admin 角色)
+    - (有 admin 角色) OR (有 active watchlist_management grant)
+
+    委托给 capability_service.filter_users_with_capability（单一真源），
+    禁止复制 grant 查询逻辑。
 
     Args:
         db: 异步会话
@@ -242,35 +225,10 @@ async def filter_monitor_eligible_recipients(
     Returns:
         有资格的用户 ID 列表（输入为空时返回空列表）
     """
-    if not user_ids:
-        return []
+    from app.constants.capability_keys import WATCHLIST_MANAGEMENT
+    from app.services.capability_service import filter_users_with_capability
 
-    member_eligible = (
-        select(User.id)
-        .distinct()
-        .join(Subscription, Subscription.user_id == User.id)
-        .where(
-            User.id.in_(user_ids),
-            User.status == "active",
-            Subscription.status == "active",
-            Subscription.starts_at <= func.now(),
-            Subscription.expires_at > func.now(),
-            _member_role_exists(),
-            _admin_role_absent(),
-        )
-    )
-    admin_eligible = (
-        select(User.id)
-        .distinct()
-        .where(
-            User.id.in_(user_ids),
-            User.status == "active",
-            _admin_role_exists(),
-        )
-    )
-    stmt = member_eligible.union(admin_eligible)
-    result = await db.execute(stmt)
-    return [row[0] for row in result.all()]
+    return await filter_users_with_capability(db, user_ids, WATCHLIST_MANAGEMENT)
 
 
 if __name__ == "__main__":

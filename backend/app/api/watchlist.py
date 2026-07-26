@@ -52,6 +52,7 @@ from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
+from app.models.user import User
 from app.models.watchlist import UserWatchlistItem
 from app.schemas.watchlist import (
     WatchlistAddRequest,
@@ -250,6 +251,12 @@ async def add_to_watchlist(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"未找到 instrument_id={payload.instrument_id} 的股票",
         )
+
+    # [V2.1 F1] 并发安全：锁定用户行，防止两个并发请求同时通过额度检查
+    # SELECT FOR UPDATE 保证同一用户的并发 POST 串行化执行
+    # admin（monitor_limit=None）也加锁，保证去重检查的原子性
+    user_lock_stmt = select(User).where(User.id == user_id).with_for_update()
+    await db.execute(user_lock_stmt)
 
     # 查询是否已有记录（含软删除）
     stmt = select(UserWatchlistItem).where(

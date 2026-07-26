@@ -320,9 +320,12 @@ class MonitorBatchService:
         过滤条件：
         1. 仅取 active=True 的自选记录（排除已软删除的）
         2. 排除指数类标的（symbol 以 '000' 开头且 market=SH，或以 '399' 开头且 market=SZ）
-        3. [eligible_user_service] 仅保留监控有资格用户：
-           - active member + 有效 subscription
-           - 或 active admin（管理员需要接收自己自选股的监控通知）
+        3. [V2.1 eligible_user_service] 仅保留监控有资格用户：
+           - User.status='active' AND (admin 角色 OR active watchlist_management grant)
+           - 委托给 capability_service.filter_users_with_capability（单一真源）
+        4. [V2.1 PRD §7.1] 每用户只取前 N 只（ORDER BY created_at ASC, id ASC）：
+           - admin: unlimited（全部参与监控）
+           - member: 前 effective_limit 只参与监控，超出额度不进入 universe
 
         Returns:
             (instrument_ids, instrument_user_map, instrument_extra_info) 三元组:
@@ -330,29 +333,56 @@ class MonitorBatchService:
             - instrument_user_map: {instrument_id: [user_id, ...], ...} 标的与用户映射（通知用）
             - instrument_extra_info: {instrument_id: {priority, weighted_score, ...}, ...} 附加信息
         """
-        from app.services.eligible_user_service import filter_monitor_eligible_recipients
+        from app.constants.capability_keys import WATCHLIST_MANAGEMENT
+        from app.services.capability_service import (
+            filter_users_with_capability,
+            get_watchlist_limits_for_users,
+        )
 
+        # 1. 查询所有 active 自选记录（按 user_id + created_at ASC + id ASC 排序，用于额度截断）
         stmt = (
             select(
                 UserWatchlistItem.instrument_id,
                 UserWatchlistItem.user_id,
+                UserWatchlistItem.created_at,
+                UserWatchlistItem.id,
             )
             .where(UserWatchlistItem.active.is_(True))
+            .order_by(UserWatchlistItem.user_id, UserWatchlistItem.created_at.asc(), UserWatchlistItem.id.asc())
         )
         result = await db.execute(stmt)
-        rows = [(row[0], row[1]) for row in result.all()]
+        all_rows = [(row[0], row[1]) for row in result.all()]
 
-        # [eligible_user_service] - 批量过滤监控有资格用户
-        # 普通会员需要 active subscription；管理员无需 subscription 也可进入监控 universe
-        all_user_ids = list({row[1] for row in rows})
-        if all_user_ids:
-            eligible_user_ids = set(await filter_monitor_eligible_recipients(db, all_user_ids))
-            rows = [
-                (inst_id, uid) for inst_id, uid in rows
-                if uid in eligible_user_ids
-            ]
+        if not all_rows:
+            return [], {}, {}
 
-        # 收集所有 instrument_id，批量查询排除指数
+        # 2. [V2.1] 批量过滤监控有资格用户（capability_service 单一真源）
+        all_user_ids = list({uid for _, uid in all_rows})
+        eligible_user_ids = set(
+            await filter_users_with_capability(db, all_user_ids, WATCHLIST_MANAGEMENT)
+        )
+
+        # 3. [V2.1] 批量获取有资格用户的有效额度
+        eligible_user_list = list(eligible_user_ids)
+        user_limits = await get_watchlist_limits_for_users(db, eligible_user_list)
+
+        # 4. 按用户分组并应用额度截断（前 N 只 by created_at ASC, id ASC）
+        # rows 已按 user_id, created_at ASC, id ASC 排序
+        user_item_counts: dict[uuid.UUID, int] = {}
+        rows: list[tuple[uuid.UUID, uuid.UUID]] = []
+        for inst_id, uid in all_rows:
+            if uid not in eligible_user_ids:
+                continue
+            limit = user_limits.get(uid)
+            if limit is not None:  # 非 admin，有额度限制
+                count = user_item_counts.get(uid, 0)
+                if count >= limit:
+                    continue  # 超出额度，不参与监控
+                user_item_counts[uid] = count + 1
+            # admin (limit=None) 或额度内：加入
+            rows.append((inst_id, uid))
+
+        # 5. 收集所有 instrument_id，批量查询排除指数
         instrument_ids_set = {row[0] for row in rows}
         index_ids: set[uuid.UUID] = set()
         if instrument_ids_set:

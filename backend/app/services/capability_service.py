@@ -54,6 +54,8 @@ __all__ = [
     "get_capability_access_context",
     "has_capability",
     "get_effective_watchlist_limit",
+    "filter_users_with_capability",
+    "get_watchlist_limits_for_users",
     "require_capability",
     "require_any_capability",
     "invalidate_access_context_cache",
@@ -355,6 +357,156 @@ async def get_effective_watchlist_limit(
     if not watchlist_limits:
         return None
     return max(watchlist_limits)
+
+
+async def filter_users_with_capability(
+    db: AsyncSession,
+    user_ids: list[uuid.UUID],
+    capability_key: str,
+    now: datetime | None = None,
+) -> list[uuid.UUID]:
+    """批量过滤拥有指定能力的用户 ID（PRD §10.1，Worker 资格唯一入口）。
+
+    资格条件：
+    - User.status = 'active'
+    - (有 admin 角色) OR (有 active grant 且 capability_key 匹配)
+
+    单条 SQL JOIN + EXISTS 子查询，向量化批量查询（无 N+1）。
+    Worker（EligibleUserService / monitor_batch / delivery）必须调用本函数，
+    禁止复制 grant 查询逻辑。
+
+    Args:
+        db: 异步数据库会话
+        user_ids: 待过滤的用户 ID 列表
+        capability_key: 能力键（必须在 ALL_CAPABILITY_KEYS 中）
+        now: 当前时间（None=datetime.now(timezone.utc)）
+
+    Returns:
+        有能力的用户 ID 列表（输入为空时返回空列表）
+
+    Raises:
+        ValueError: capability_key 不在 ALL_CAPABILITY_KEYS 中
+    """
+    if capability_key not in ALL_CAPABILITY_KEYS:
+        raise ValueError(
+            f"capability_key 必须在 {ALL_CAPABILITY_KEYS} 中，当前={capability_key!r}"
+        )
+    if not user_ids:
+        return []
+    now = now if now is not None else datetime.now(UTC)
+
+    from sqlalchemy import exists as sa_exists
+
+    from app.models.user import Role, UserRole
+
+    # admin EXISTS 子查询
+    admin_exists = (
+        select(UserRole.user_id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(UserRole.user_id == User.id, Role.name == "admin")
+    )
+    # capability grant EXISTS 子查询
+    grant_exists = (
+        select(UserCapabilityGrant.id)
+        .where(
+            UserCapabilityGrant.user_id == User.id,
+            UserCapabilityGrant.capability_key == capability_key,
+            UserCapabilityGrant.revoked_at.is_(None),
+            UserCapabilityGrant.starts_at <= now,
+            UserCapabilityGrant.expires_at > now,
+        )
+    )
+
+    stmt = (
+        select(User.id)
+        .where(
+            User.id.in_(user_ids),
+            User.status == "active",
+            (sa_exists(admin_exists) | sa_exists(grant_exists)),
+        )
+    )
+    result = await db.execute(stmt)
+    return [row[0] for row in result.all()]
+
+
+async def get_watchlist_limits_for_users(
+    db: AsyncSession,
+    user_ids: list[uuid.UUID],
+    now: datetime | None = None,
+) -> dict[uuid.UUID, int | None]:
+    """批量获取用户的有效自选额度（PRD §7.1 max 规则，Worker 用）。
+
+    Args:
+        db: 异步数据库会话
+        user_ids: 用户 ID 列表
+        now: 当前时间（None=datetime.now(timezone.utc)）
+
+    Returns:
+        {user_id: limit} where:
+        - limit = None: admin（unlimited）或无 watchlist_management 权限
+        - limit = int: 当前有效 watchlist_management grant 的 limit_value 最大值
+    """
+    if not user_ids:
+        return {}
+    now = now if now is not None else datetime.now(UTC)
+
+    from app.models.user import Role, UserRole
+
+    # 1. 获取 admin 用户（limit=None）
+    admin_stmt = (
+        select(User.id)
+        .where(
+            User.id.in_(user_ids),
+            User.status == "active",
+        )
+    )
+    admin_result = await db.execute(admin_stmt)
+    all_users = {row[0] for row in admin_result.all()}
+
+    # 查询 admin 角色
+    admin_role_stmt = (
+        select(UserRole.user_id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(
+            UserRole.user_id.in_(user_ids),
+            Role.name == "admin",
+        )
+    )
+    admin_role_result = await db.execute(admin_role_stmt)
+    admin_users = {row[0] for row in admin_role_result.all()}
+
+    # 2. 查询非 admin 用户的有效 watchlist_management grant limit
+    non_admin_user_ids = all_users - admin_users
+    limits: dict[uuid.UUID, int | None] = {}
+
+    # admin 用户: limit=None（unlimited）
+    for uid in admin_users:
+        limits[uid] = None
+
+    # 非 admin 用户: 查询 grant max(limit_value)
+    if non_admin_user_ids:
+        grant_stmt = (
+            select(
+                UserCapabilityGrant.user_id,
+                func.max(UserCapabilityGrant.limit_value).label("effective_limit"),
+            )
+            .where(
+                UserCapabilityGrant.user_id.in_(non_admin_user_ids),
+                UserCapabilityGrant.capability_key == WATCHLIST_MANAGEMENT,
+                UserCapabilityGrant.revoked_at.is_(None),
+                UserCapabilityGrant.starts_at <= now,
+                UserCapabilityGrant.expires_at > now,
+                UserCapabilityGrant.limit_value.is_not(None),
+            )
+            .group_by(UserCapabilityGrant.user_id)
+        )
+        grant_result = await db.execute(grant_stmt)
+        grant_map = {row[0]: int(row[1]) for row in grant_result.all()}
+
+        for uid in non_admin_user_ids:
+            limits[uid] = grant_map.get(uid)  # None if no active grant
+
+    return limits
 
 
 # ---------------------------------------------------------------------------
