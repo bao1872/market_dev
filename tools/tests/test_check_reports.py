@@ -24,7 +24,9 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+# ruff: isort: off
 import check_reports as cr  # noqa: E402
+# ruff: isort: on
 
 
 # ──────────────────────────────────────────────────────────────
