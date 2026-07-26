@@ -1,8 +1,9 @@
 # AGENTS.md 条款迁移映射表
 
-> Phase 1 并行验证状态：**生效中（并行）**
-> 建立 CHANGE：CHANGE-20260726-001
-> 当前根 `AGENTS.md` 仍是最高正式权威；本表只描述映射关系，不修改 `AGENTS.md`。
+> Phase 2 已激活：**rules/ 正式生效，AGENTS.md 已重构为入口与路由器**
+> 建立 CHANGE：CHANGE-20260726-001（Phase 1 建立并提取）
+> 激活 CHANGE：CHANGE-20260726-002（Phase 2 AGENTS 精简 + rules 正式生效）
+> 本表描述 AGENTS 章节 → rules 的映射关系。Phase 2 后 AGENTS.md 已变为入口与路由器，详细规则在 `rules/`。
 
 ## 标记语义
 

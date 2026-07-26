@@ -1,11 +1,11 @@
 # 85 服务器目录边界
 
-> 来源：AGENTS.md §七.22（Live Mount 运行目录）+ 提议（三目录职责）
-> 状态：**PLANNED**（三目录职责提议中；`/opt/panji-live` 部分已在 `AGENTS.md` §七.22 确立）
+> 来源：AGENTS.md §七.22（Live Mount 运行目录）+ 目标合同（三目录职责）
+> 状态：目标合同（Phase 2 激活）；`/opt/panji-deploy` 部分为 PLANNED，未实现
 
-> Phase 1 注：本文件为未来阶段提议。当前 `AGENTS.md` §七.22 仅明确 `/opt/panji-live` 运行目录；`/root/web_dev` 开发目录与 `/opt/panji-deploy` 干净部署目录为提议，尚未在 `AGENTS.md` 确立。
+> 本文件作为目标合同生效。`/opt/panji-live` 运行目录部分已在 `AGENTS.md` §七.22 确立并当前使用；`/root/web_dev` 开发目录当前使用；`/opt/panji-deploy` 干净部署目录为 PLANNED，当前未实现，不得描述为已存在。
 
-## 三目录职责（PLANNED）
+## 三目录职责
 
 | 目录 | 职责 | 状态 |
 |---|---|---|
@@ -23,7 +23,7 @@
 
 ## /opt/panji-deploy（PLANNED）
 
-> 提议中，当前未实现。
+> PLANNED，当前未实现。不得描述为已存在。
 
 - 自动部署干净目录；
 - detached checkout，只保留目标 commit；
@@ -41,9 +41,7 @@
 - 所有挂载为只读 (`:ro`)；
 - 不产生业务代码。
 
-## 腾讯云单实例约束（PLANNED）
-
-> 提议中，尚未在 `AGENTS.md` 确立。
+## 腾讯云单实例约束（目标合同）
 
 - 腾讯云只运行一套应用和一套核心数据库；
 - 不并行运行 main 与 dev 两套服务；
@@ -51,7 +49,7 @@
 
 ## 自动部署目录流（PLANNED）
 
-> 提议中，当前未实现。
+> PLANNED，当前未实现。自动部署未启用。
 
 ```
 GitHub commit

@@ -9,6 +9,15 @@
   - 不采用 sync 草案中与 AGENTS 冲突的内容（事实源优先级第 3 位、Capability V2、自动部署已启用等）
   - 不采用 Phase 0 审计报告"docs/governance/rules/"过渡层建议：正式目标就是仓库根 rules/
   - AGENTS.md 不修改、不精简、不重写；docs/ 不移动；不启用 GitHub Actions；不修改 Compose/部署脚本
+- CHANGE-20260726-002: docs(governance) Phase 2 — 激活 rules/ 并重构 AGENTS 为入口与路由器（AGENTS.md 212→159 行；rules/ 正式生效；修正 TRAE Work 真实分支模型 trae/agent-* + HEAD:dev fast-forward；新增 tools/check_governance_rules.py 12 项治理检查并接入 CI governance-rules job；新增 sync/README.md 中转站边界；docs/AI-ONBOARDING.md 读取顺序纳入 rules/；不创建根 maps/；不修改业务代码/Compose/部署脚本；自动部署仍 PLANNED）
+  - AGENTS.md：重构为入口 + 规则路由器 + 最高安全边界；新增 §八 TRAE Work 分支模型（trae/agent-* 内部分支、origin/dev 基线、git push origin HEAD:dev fast-forward、禁止 force push、origin/dev 前进时停止并询问用户）；保留用户指令最高优先 / CURRENT-WIP-PLANNED 边界 / 必读顺序 / 完成报告格式 / 数据库与 Docker 与 migration 高风险禁止项 / Work Preview 不等于腾讯云验收 / 权限不明先询问
+  - rules/：README/00/50/60/70/80/85/AGENTS-MIGRATION-MAP 全部标记 Phase 2 激活；60-trae-work.md 状态由 PLANNED 改为生效并写入真实分支机制；70-trae-cn.md 状态由 PLANNED 改为生效；85-server-directory-boundaries.md 标为目标合同（/opt/panji-deploy 仍 PLANNED）
+  - tools/check_governance_rules.py：12 项检查（必需 rules 文件存在 / AGENTS 引用 rules/README / AGENTS 对每份正式 rules 有入口 / AGENTS ≤300 行 / AGENTS-MIGRATION-MAP 覆盖 §一-§十一和 §七.1-23 / rules/README 不再声称未生效 / 不出现错误事实（Work 可切分支、Work 固定 dev、自动部署已启用、/opt/panji-deploy 已存在、Capability V2 已 CURRENT）/ 无待填写占位符 / rules Markdown 链接有效 / sync/ 不被运行时真源引用 / 60-trae-work.md 含 trae/agent- + origin/dev + git push origin HEAD:dev + 禁止 force push / 自动部署仍 PLANNED）
+  - .github/workflows/ci.yml：新增 governance-rules job（actions/checkout@v4 + setup-python 3.12 + pip install -e backend[dev] + python tools/check_governance_rules.py）；不删除/不放宽现有 CI 步骤；不使用 continue-on-error
+  - sync/README.md：明确 sync/ 是本地/Work/CN 之间临时中转站；非正式真源；运行时不依赖；禁止保存密码/Token/SSH 私钥/数据库连接/数据备份；默认报告直接在对话输出纯文本；除非用户明确要求不再创建 sync/outbox/*.md
+  - docs/AI-ONBOARDING.md：读取顺序纳入 rules/README.md + 对应 rules/*.md；明确根 maps/ 未创建；sync/ 非正式真源
+  - 一致性：rules/ 内容全部从 AGENTS.md 提取，AGENTS.md 仍是最高权威；rules/ 与 sync 草案冲突项（事实源优先级第 3 位、Capability V2、自动部署已启用、/opt/panji-deploy 已存在）一律按 AGENTS 现状保留 PLANNED
+  - Known Gaps：自动部署 PLANNED；/opt/panji-deploy 未实现；Capability V2 未引入；forced-command SSH 未配置；GitHub 部署 secrets 未配置；Phase 3 maps/ 迁移未启动
 
 ## 2026-07-25
 

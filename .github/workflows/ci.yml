@@ -72,6 +72,24 @@ jobs:
       - name: Run test allowlist checks
         run: python tools/check_test_allowlist.py
 
+  governance-rules:
+    name: Governance Rules
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install backend dependencies
+        run: pip install -e "backend[dev]"
+      - name: Run governance rules checks
+        run: python tools/check_governance_rules.py
+
   ruff-new-files:
     name: Ruff New Files
     runs-on: ubuntu-latest

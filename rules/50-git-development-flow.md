@@ -1,7 +1,7 @@
 # 50 Git 与开发流程
 
 > 来源：AGENTS.md §九、§七.21、§六.9
-> 状态：并行验证
+> 状态：生效（Phase 2 激活）
 
 ## 分支模型
 
@@ -95,12 +95,14 @@ PR 必须说明：
 - 仅当单条命令预计超过 5 分钟且用户明确同意时才可使用后台日志方式；
 - 测试组之间必须串行，禁止并行构建或并行测试。
 
-## 角色与执行边界（PLANNED）
+## 角色与执行边界
 
-> 提议中，尚未在 `AGENTS.md` 确立。详见 `60-trae-work.md` 与 `70-trae-cn.md`。
+> 详见 `60-trae-work.md` 与 `70-trae-cn.md`。
 
-- TRAE Work 固定在 dev 分支开发；
+- TRAE Work 使用系统生成的 `trae/agent-*` 内部分支，**不固定直接工作在 dev 分支**，**不允许切换分支**；
+- 完成后使用 `git push origin HEAD:dev` 以 fast-forward 方式推送到远程 dev；
+- 只允许 fast-forward；禁止 force push；
+- 若 `origin/dev` 已前进、不是当前 HEAD 祖先，必须停止并报告；
 - TRAE CN 保留开发、测试、部署、验收和运维全部能力；
-- 临时分支只由本地或 TRAE CN 按需使用；
-- dev 是日常开发和未来自动部署线；
+- dev 是日常开发基线和未来自动部署线（自动部署本身为 PLANNED）；
 - main 是阶段性稳定锚点。

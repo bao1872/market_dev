@@ -22,7 +22,12 @@
 
 ## 3. 新任务开始前必须读
 
+读取顺序：
+
 ```text
+AGENTS.md
+rules/README.md
+对应 rules/*.md
 docs/current/MANIFEST.md
 docs/current/00-product-business.md
 docs/current/01-system-architecture.md
@@ -48,6 +53,16 @@ docs/current/02-data-api-contracts.md
 docs/maps/database-model-map.md
 docs/maps/test-coverage-map.md
 ```
+
+如果任务涉及变更历史或运维操作，再读：
+
+```text
+docs/changes/CHANGELOG.md
+docs/changes/records/CHANGE-*.md
+docs/runbooks/*.md
+```
+
+注：根 `maps/` 当前未创建，不要引用不存在的根 `maps/`。`sync/` 是临时中转站，不是正式真源。
 
 ## 4. 修改前必须回答
 

@@ -1,9 +1,7 @@
 # 70 TRAE CN 角色多模式
 
-> 来源：提议（基于 AGENTS.md §九 分支模型 + §七.10-11 部署数据安全 + §七.22 Live Mount）
-> 状态：**PLANNED**（尚未在 `AGENTS.md` 确立）
-
-> Phase 1 注：本文件为未来阶段提议。当前 `AGENTS.md` 未明确区分 TRAE Work 与 TRAE CN 角色。本阶段不强制执行，不描述为已生效。
+> 来源：AGENTS.md §九（TRAE CN 能力边界）+ §七.10-11 部署数据安全 + §七.22 Live Mount
+> 状态：生效（Phase 2 激活）
 
 ## 角色定义
 
@@ -46,9 +44,9 @@ CN 可按需切换以下模式：
 - 不 force push 已共享分支；
 - 不批量 `git add`。
 
-## 目录职责（PLANNED）
+## 目录职责
 
-> 提议中，详见 `85-server-directory-boundaries.md`。
+> 详见 `85-server-directory-boundaries.md`。
 
 - 开发目录：`/root/web_dev`；
 - 自动部署干净目录：`/opt/panji-deploy`（PLANNED，当前未实现）；

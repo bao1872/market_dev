@@ -1,7 +1,7 @@
 # 00 核心治理
 
-> 来源：AGENTS.md §一、§三、§四 + 提议
-> 状态：并行验证（§一/§三/§四 部分）；PLANNED（分层、单一代码源、时间和因果 提议部分）
+> 来源：AGENTS.md §一、§三、§四
+> 状态：生效（Phase 2 激活）
 
 ## 修改闭环
 
@@ -26,7 +26,7 @@
 
 archive 和旧聊天不能覆盖 current。
 
-> Phase 1 注：本优先级与 `AGENTS.md` §三完全一致。`sync/` 草案提议将 `rules/` 提到第 3 位，但本阶段不采用，保留 `docs/current/MANIFEST.md` 第 3 位。
+> 注：`sync/` 草案曾提议将 `rules/` 提到第 3 位，未采用，保留 `docs/current/MANIFEST.md` 第 3 位。
 
 ## 修改前最小报告
 
@@ -46,9 +46,7 @@ Trae 动手前必须输出：
 
 发现冲突先列出，不得直接编码。
 
-## 分层原则（PLANNED）
-
-> 提议中，尚未在 `AGENTS.md` 确立。
+## 分层原则
 
 - API：认证、参数、响应；
 - Service：业务状态、事务、资格、幂等；
@@ -57,17 +55,13 @@ Trae 动手前必须输出：
 - Adapter：外部系统；
 - 前端：ViewModel 与展示，不重算后端业务。
 
-## 单一代码源（PLANNED）
-
-> 提议中，尚未在 `AGENTS.md` 确立。
+## 单一代码源
 
 - 所有正式修改必须提交 GitHub；
 - 服务器运行目录不产生业务代码；
-- 自动部署只部署 GitHub commit。
+- 自动部署只部署 GitHub commit（自动部署本身为 PLANNED，未实现）。
 
-## 时间和因果（PLANNED）
-
-> 提议中，尚未在 `AGENTS.md` 确立。
+## 时间和因果
 
 - 业务时间 Asia/Shanghai；
 - 历史和盘后必须 point-in-time；

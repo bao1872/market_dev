@@ -1,9 +1,9 @@
-# 盘迹项目开发与文档一致性规则 v3
+# 盘迹项目 AGENTS（入口与规则路由器）
 
 适用项目：`market_dev` / 盘迹 PanJi
 核心目标：防止 AI/Trae 在新对话、新机器、新分支中误解当前系统，防止已确认业务逻辑被旧代码、旧文档或旧记忆还原。
 
-> 完整变更历史见 `docs/changes/CHANGELOG.md` 与 `docs/changes/records/CHANGE-*.md`。
+> 本文件是项目入口、规则路由器和最高安全边界。详细业务和技术规则在 `rules/`，当前项目事实在 `docs/current/`，代码地图在 `docs/maps/`，变更历史在 `docs/changes/`。
 
 ---
 
@@ -13,165 +13,126 @@
 
 完成标准（六者对齐）：代码实现 = 当前设计文档 = 系统地图 = API/数据契约 = 测试验证 = 部署配置。六者缺一不可。
 
+用户当前明确指令优先级最高。能力或权限范围不明确时，必须先询问用户，不得自行假设。
+
 ---
 
-## 二、必读入口
+## 二、状态边界
 
-任何 Trae/Codex/ChatGPT 任务开始前必须先读取：`docs/AI-ONBOARDING.md`、`docs/current/MANIFEST.md`、`docs/RESTORE-CHECKLIST.md`、`AGENTS.md`（本文件）。
+- **CURRENT**：当前生产/正式生效的事实与规则。`docs/current/` 与已激活的 `rules/` 条款属于 CURRENT。
+- **WIP**：进行中的开发工作，未达到 CURRENT。必须在 CHANGE 与分支中明确标记。
+- **PLANNED**：未来阶段提议，尚未实施，不得描述为已生效。包括自动部署、`/opt/panji-deploy`、forced-command SSH、GitHub 部署 secrets、Capability V2、尚未在腾讯云建设的目录和脚本。
+
+---
+
+## 三、必读顺序
+
+任何任务开始前必须按以下顺序读取：
+
+1. `AGENTS.md`（本文件）；
+2. `rules/README.md` + 对应 `rules/*.md`；
+3. `docs/current/MANIFEST.md` + 对应 `docs/current/*.md`；
+4. 对应 `docs/maps/*.md`；
+5. 对应 `docs/changes/records/CHANGE-*.md`；
+6. 对应 `docs/runbooks/*.md`（运维任务时）。
 
 `docs/` 顶级目录只允许：`current/` `maps/` `changes/` `archive/` `contracts/` `decisions/` `runbooks/` `acceptance/` `evidence/` `work/`（`docs/` 根 `.md` 文件不受限）。
 
----
-
-## 三、事实源优先级
-
-冲突时判断顺序（前者覆盖后者）：1.用户当前明确要求 → 2.当前 main 代码 → 3.docs/current/MANIFEST.md → 4.docs/current/*.md → 5.docs/maps/*.md → 6.最新 docs/changes/records/*.md → 7.测试与 CI 结果 → 8.生产只读验证结果 → 9.archive 历史文档 → 10.旧聊天记忆。archive 和旧聊天不能覆盖 current。
+`sync/` 是临时中转站，不是正式真源，不得作为运行时依赖。
 
 ---
 
-## 四、修改流程
+## 四、事实源优先级
 
-Trae 动手前必须输出：任务目标 / 分支和 base commit / 已读 docs/current 与 docs/maps / 当前代码入口（前端/API/Service/Repository/Worker）/ 涉及数据表 / 测试覆盖规则 / 文档与代码是否一致 / 本次准备修改什么 / 明确不修改什么 / 预计更新哪些 docs/current 与 docs/maps / 预计新增哪个 CHANGE。发现冲突先列出，不得直接编码。
+冲突时判断顺序（前者覆盖后者）：
 
----
+1. 用户当前明确要求；
+2. 当前 main 代码；
+3. `docs/current/MANIFEST.md`；
+4. `docs/current/*.md`；
+5. `docs/maps/*.md`；
+6. 最新 `docs/changes/records/*.md`；
+7. 测试与 CI 结果；
+8. 生产只读验证结果；
+9. archive 历史文档；
+10. 旧聊天记忆。
 
-## 五、CHANGE 规则
-
-每次修改必须新增 `docs/changes/records/CHANGE-YYYYMMDD-NNN.md` 并更新 `docs/changes/CHANGELOG.md`。CHANGE 必填字段：变更编号、任务名称、需求出处、修改前/后行为、影响模块、修改文件、文档更新、测试证据、Git 分支、Git Commit、数据库迁移、配置变化、风险、遗留问题。不存在"小改不用 CHANGE"。`tools/check_docs_consistency.py` 规则 12 强制校验 CHANGE 引用可达性。
-
----
-
-## 六、禁止行为
-
-```
-1.  未读 AI-ONBOARDING 和 MANIFEST 就修改；
-2.  根据旧 docs/current/00-18 或 archive 修改当前系统；
-3.  根据旧聊天记忆覆盖 current；
-4.  只改代码不改文档 / 只改 current 不改 CHANGE / 改代码结构不更新 maps；
-5.  复制旧实现形成第二条路径 / 在前端重新实现后端业务规则；
-6.  删除测试以适配错误实现 / 修改 API 不检查前端调用 / 修改数据模型不检查 migration；
-7.  修改 Worker 不检查幂等、心跳、重试 / 修改权限不检查用户隔离；
-8.  把 Mock E2E 说成真实生产 E2E / 把 OPEN 问题写成最终结论 / 把临时实验写成永久规则；
-9.  直接修改 main / force push 已共享分支 / 为通过检查削弱 check_docs_consistency.py；
-10. 未经许可修改生产环境账户密码；
-11. 生产代码/测试/工具/构建脚本在运行时 import/open/read/glob `ref/` 目录（详见 §七.8）；
-12. `git add -A` / `git add .` / `git add -u` 批量暂存（必须精确 `git add <file>`）。
-```
+archive 和旧聊天不能覆盖 current。
 
 ---
 
-## 七、盘迹硬规则
+## 五、修改流程
 
-### 1. 产品边界
-盘迹是 A 股研究、全市场特征计算、自选股盘中监控和消息投递平台。不做：自动交易、券商账户连接、资金管理、收益承诺、单一指标买卖信号、普通用户修改生产算法参数。
-
-### 2. 策略规则
-当前生产只保留 `dsa_selector` 与 `watchlist_monitor`。多策略组合已废弃，不得从旧代码或旧文档恢复。
-
-### 3. DSA 规则
-DSA 对全市场 computable universe 计算特征；不得在计算阶段按方向、强弱、matched、用户筛选提前删除股票。发布必须满足严格完整性门禁；`partial_failed` 不得发布。
-
-### 4. 自选和监控
-有效会员添加自选后自动进入盘中监控；不创建 MonitoringPlan。到期用户保留历史数据，但不能读取、修改、监控或产生新投递。
-
-### 5. Node Cluster 固定契约
-`1d=250 根日线`、`15m=250*16=4000 根`、`1m=2 根已完成 Bar`。图表显示数量、指标输出数量、Node 内部输入数量必须分离。**禁止修改 250/4000/2 固定参数**；禁止飞书舞台 90 bar 展示参数进入任何指标计算逻辑（CHANGE-20260720-001）。
-
-### 6. 飞书
-唯一接入方式：`feishu_platform_app`。禁止恢复 `feishu_webhook` / `FEISHU_WEBHOOK` / 独立管理员飞书 App / 独立管理员接收人配置。管理员内测申请通知必须复用管理员用户自己的 active `feishu_platform_app` NotificationChannel。
-
-盘中监控触发只依赖**最新已完成 1m bar**（`source_bar_time` 来自最新已完成 1m bar，剔除最后一根可能未完成的 bar）；飞书盘中截图业务默认 `timeframe=1d`，实时性由 Capture Snapshot `1d + include_realtime=True` 的 partial daily 合成保证；修截图/清晰度/缓存不得改变 `watchlist_monitor` 事件计算口径（`monitor_batch_service` 计算输入 `bars_daily` / `bars_15min` 必须 `include_realtime=False`）。
-
-### 7. Capture Token
-Capture Token 只能访问 Capture API；不能访问普通用户 API；不能污染普通 Access Token。
-
-### 8. ref/ 彻底隔离
-`ref/` 目录下所有文件（含 `ref/smc_user_source.pine`、`ref/smc_user_export.pine`、`ref/smc.py`、`ref/盘迹品牌视觉资产包_v1.0/`）仅供人工阅读参考，**禁止作为运行依赖**。生产代码、测试、工具、构建脚本在运行时不得 `import`/`open`/`read`/`glob` `ref/` 目录下任何文件（CHANGE-20260718-004）。
-
-`AGENTS.md` / `docs/current/*.md` / `docs/maps/*.md` 不得把 `ref/` 文件称为"真源"、"合同"、"fixture 生成器"或"运行依赖"；应称为"参考源（人工阅读）"。算法真源必须是生产代码（如 `smc_pine_core.py`、`node_cluster_engine.py`、`indicator_contract.py`、`indicator_semantics.py`）。SMC Pine parity 测试只读取 `backend/tests/fixtures/smc_pine/*.csv`，**禁止从 DB 重新取 bar** 或依赖 `ref/` 导出脚本。
-
-### 9. Migration
-不得修改已发布历史 migration；只允许新增前向 migration；修改 migration 必须有 upgrade/downgrade/upgrade 验证。
-
-### 10. 测试期部署不备份数据库
-测试期部署默认不备份数据库；除非用户明确说"先备份数据库"，否则禁止 `pg_dump`/大体积备份，禁止写入 `/root/backups` 或 `/root/web_dev/backups`。当前物理机磁盘紧张，优先节省硬盘。
-
-### 11. Docker 镜像保护
-`node:20-alpine` 是受保护基础镜像，拉取很慢。禁止主动删除 `node:20-alpine`；禁止 `docker image prune -a`；除非明确升级 Node 版本或镜像损坏，否则不要删除 `node:20-alpine`。普通清理只允许 `docker builder prune -f`、`docker image prune -f`、`docker container prune -f`。
-
-### 12. MDAS 唯一行情读取出口（SSOT）
-`MarketDataAggregationService.get_bars` 是后端唯一行情读取出口。业务/API/indicator/SMC/strategy_batch/feature_snapshot/structural_factor/temporal_feature/monitor/capture/chart_bars 全部经 MDAS；禁止业务层直接调用 `bar_repository` 的私有 `_query_*`/`_get_adj_factor_df`/`apply_adj_factor*` 或旧 `bar_repository.get_bars`（CHANGE-20260717-002）。
-
-原始 bar 始终保持不复权落库；qfq 只在 MDAS 出口统一应用一次；不信任 bar 自带 `adj_factor` 列。`adjustment_as_of` point-in-time 截断：`qfq_price = raw_price × factor(bar_date) / factor(as_of)`，as_of 之后的除权事件不得泄漏到历史回算中。盘后顺序门禁：原始日线刷新 → 公司行为/factor 重建成功 → 覆盖率门禁/DSA → snapshot 发布。因子未完成时不得创建 DSA 或发布 snapshot。
-
-MDAS 必须实现 count-aware 回补：daily required_count=250、15m required_count=4000、completed_only=True、include_realtime=False、adj=qfq、统一 adjustment_as_of；实际返回少于 required_count 时自动向前扩展，直到达到 required_count、到达真实上市历史起点或安全边界；必须返回 `history_exhausted: bool` 区分"DB 历史不足"与"系统未取满"（CP-V3-A2）。
-
-### 13. Atomic Chart Snapshot 单 MDAS 读取 + quote 唯一真源
-Atomic Snapshot 必须使用单次 MDAS 读取，直接将 DataFrame/CanonicalInput 传递给指标计算；**禁止在单次请求中进行第二次市场数据读取**；Redis 仅缓存最终 Snapshot 响应（CP-16）。前端只请求 chart-snapshot；独立的 Bars/Indicators 请求不恢复。
-
-[CHANGE-20260724-004] ChartSnapshot 是个股详情页 quote 的唯一真源。`BarAggregationResult.latest_daily_quote` 字段在单次 MDAS 读取内派生当日行情事实：
-- 1d/1w/1mo：从聚合前的 `daily_df`（已合并今日 partial daily + qfq）取末根日线 OHLC
-- 1m/15m/1h：从已加载的目标周期 `bars_df_full`（limit 截断前）按最新交易日聚合 open/high/low/close/volume/amount
-- **禁止为 quote 增加第二次 Pytdx/Repository/MDAS 行情读取**（`fetch_today_daily_bars`/`_query_daily_bars` 不得用于 quote 派生）
-- `latest_daily_quote` 缺失时 `quote=null` 且 `freshness_state=unavailable`；禁止从 1w/1mo page_df 派生日行情兜底
-- 所有周期返回 `current/open/high/low/prev_close/change_pct/volume/amount`，业务语义不随展示周期变化
-- 前端不得恢复 `useRealtimeQuote` 或独立 `/quote` 请求
-
-### 14. SMC FVG 完全排除 + 严格 time-key
-Fair Value Gap 不计算、不返回、不缓存、不渲染，也不暴露 FVG 开关；生产计算路径不包含 FVG 函数或状态；输出结构中不存在 FVG 相关键、事件或 box。FVG 验收为输出级别断言（CHANGE-20260715-001 ~ 002）。
-
-SMC 渲染必须使用严格 time-key 匹配：`strictTimeKey=true` 时 time 缺失→`missing_time`+skip，time 匹配失败→`match_failed`+skip，**禁止 index fallback**；events 和 EQH/EQL 使用 OR 逻辑（anchor/confirmed 任一匹配即渲染，两者都缺失才 skip）；详情链和 Capture（90-bar 舞台）共用同一 SMC 坐标映射核心，只允许 font/lineWidth/lane 差异（CP-V3-C2）。
-
-### 15. Canonical 四链统一调度
-详情/盘后/盘中/Capture 四条调用链必须通过 `CanonicalComputationService`（`backend/app/services/canonical_computation_service.py`）调度已注册算法；禁止生产模块直接 `import` kernel 绕过注册表；四链只能做适配（节奏/去重/TTL/截图），基础指标值必须来自同一 Kernel；相同输入（instrument + timeframe + as_of + source_bar_hash + adj_factor_hash）必须得到相同 `result_hash`（5 维度确定性）（CHANGE-20260718-006）。
-
-### 16. AFC Core 14 不可改
-Atomic Fact Contract V1 的 Core 14 项不可修改；产品观察扩展不进入 `core`/`auxiliary`/`availability`，不影响 14/14 统计；worker 持久化链保持不变；schema_version bump 保证旧快照不可见（CHANGE-20260716-005 / 006）。
-
-### 17. 三链五周期一致性
-详情链 `/stock/:symbol` 切换 1d/15m/1h/1w/1mo 时，Node Cluster `profile_hash`/`daily_source_hash`/`bars_15m_source_hash` 必须完全一致（图表 bars frame hash 允许不同）；Atomic Facts 中的"筹码共识价"与详情页 Node Cluster 必须消费同一个 Canonical 结果（`node_cluster_engine.compute_node_cluster_profile` 唯一入口，三链同核）（CHANGE-20260721-001）。
-
-### 18. 个股详情行情唯一真源（ChartSnapshot）
-[CHANGE-20260724-004] 个股详情页行情唯一真源为 `/api/v1/instruments/{id}/chart-snapshot`。**禁止详情页同时调用 `/quote` 和 `/chart-snapshot`**；禁止恢复前端 `useRealtimeQuote` 或 `mergeRealtimeQuoteIntoBars()`。
-
-- **quote 派生**: quote 从同一 snapshot 的 `latest_daily_quote` 派生，保证 `as_of` 一致；所有周期（1d/15m/1h/1w/1mo）返回完整 OHLC + prev_close + change_pct + volume + amount
-- **K 线实时**: 交易时段内 `include_realtime=true` 返回 partial bar（`data_source=hybrid`、`is_partial=true`、`last_live_bar_time` 非空）；收盘后不得伪装实时
-- **盘后边界**: 盘后 MFCS 回归必须使用 `include_realtime=False`，不得产生新增日线查询（`latest_daily_quote` 从已有 `daily_df`/`bars_df_full` 派生）
-- **数据周期合同**: 1d=DB 日线+Pytdx 日线；15m=DB 15m+Pytdx 原生 15m；1h=DB 60m+Pytdx 原生 60m；1w=合并日线→周线；1mo=合并日线→月线。禁止 1m→15m/1m→60m/1m→1d 聚合
-- **来源区分**: `market`/`watchlist`/`direct` 必须显式区分；market/watchlist 双列布局（`200px minmax(0,1fr)`），direct 单列布局（`minmax(0,1fr)`）
-- **来源列表稳定性**: symbol 切换只更新 active 行和右侧详情；禁止页面级 loading 卸载/清空来源列表（CHANGE-20260725-002）
-- **来源列表可见性（missing_origin invalid）**: symbol 切换只更新 active 行和右侧详情；禁止页面级 loading 卸载/清空来源列表。缺 originScope 时显示 missing_origin invalid 占位，不静默单列；只有显式 direct 才使用单列（CHANGE-20260725-003）
-
-### 19. 板块同步降级保护（pywencai 唯一数据源）
-pywencai（`wencai_board_provider.py`）为唯一板块分类源；`/market/boards` 只读数据库 + Redis 状态，不在用户 API 请求链访问问财；`backend/Dockerfile` 必须安装 `nodejs`；盘后 worker 唯一同步入口是 `after_close_orchestrator.py` 的 `syncing_boards` 步骤；`BOARD_SYNC_ENABLED` 默认 `false`；`mode=dsa_only` 跳过该步骤。不得增加 akshare、代理、IP 绕过、东方财富混用或新常驻 worker（CHANGE-20260713-006 / PR #77）。
-
-### 20. 文档目录与 CI 门禁
-`tools/check_docs_consistency.py` 必须通过；规则包括：MANIFEST 存在且含实现核对基线（40 位 SHA 且为 HEAD 祖先）、baseline 必须在 HEAD 的最近 50 个 commit 内、docs/current/*.md 与 docs/maps/*.md 存在、本地 Markdown 链接有效、无"待填写"占位符、feishu_webhook 不得回退为当前方案、open-decisions 不得把 Webhook vs Platform App 写回 OPEN、CHANGE 引用必须可达、ref/ 隔离文本扫描。CI 必须失败若代码 SHA 变化后未同步 current/contracts/CHANGE/MANIFEST baseline。
-
-### 21. 提交安全与执行模式
-禁止 `git add -A` / `git add .` / `git add -u`；必须精确 `git add <file>`。不得提交：`.vscode/settings.json`、`.traeignore`、`node_modules/`、`.venv/`、`__pycache__/`、`*.py[cod]`、`.mypy_cache/`、`.pytest_cache/`、`.ruff_cache/`、`.coverage`、`coverage.xml`、`dist/`、`build/`、`*.log`、`*.csv`、`*.parquet`。未经用户明确授权禁止删除：数据库卷、运行中容器、postgres/redis 数据目录、node_modules、.venv、.git、源码、生产数据。
-
-**继续执行模式**（CHANGE-20260724-004）：当任务 checkpoint 匹配时，不重复审计和规划，直接从断点继续。断线恢复校验仅检查：分支/HEAD/未提交文件/冲突标记/编译/diff check，通过后立即继续当前任务。禁止在继续模式下重新规划已完成步骤或全仓审计。
-
-**前台串行执行**（CHANGE-20260724-004）：默认前台串行执行测试和检查命令。禁止强制 `nohup` 后台测试；仅当单条命令预计超过 5 分钟且用户明确同意时才可使用后台日志方式。测试组之间必须串行，禁止并行构建或并行测试。
-
-### 22. Live Mount 部署规则（CHANGE-20260724-004）
-Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实现代码热更新而无需重建镜像。
-
-- **固定运行目录**: `/opt/panji-live/{backend/app,backend/alembic,backend/alembic.ini,frontend/dist,RUNTIME_SHA}`
-- **叠加配置**: `docker-compose.prod.yml` + `docker-compose.live.yml`；不修改 prod 配置
-- **挂载权限**: 所有挂载为只读 (`:ro`)；backend + 所有 Python worker + capture worker 挂载 app/alembic/alembic.ini/RUNTIME_SHA；frontend 挂载 dist（保留 capture_static 嵌套挂载）
-- **同步脚本**: `scripts/sync_live_runtime.sh` 使用 `rsync --delete`，只复制运行必需文件（排除 .git/docs/tests/node_modules/缓存）；同步期间先停止应用容器
-- **部署脚本**: `scripts/deploy_live_runtime.sh` 编排完整流程（前端构建→同步→config 校验→alembic→force-recreate）
-- **适用范围**: 纯 Python/前端代码变更用 Live Mount；依赖/Dockerfile/基础镜像变化必须重建镜像
-- **版本端点**: `/version` 返回 `runtime_git_sha`（RUNTIME_SHA 文件）、`image_git_sha`（GIT_SHA 环境变量）、`deployment_mode`（live/image）；验证部署时 `runtime_git_sha` 必须等于 main HEAD
-
-### 23. 因子版本追踪与 auto-resume
-成功因子重建后必须调用 `stamp_factor_reconciliation_version` 写入 `factor_algorithm_version`/`factor_reconciliation_version`/`factor_reconciled_at`；盘后流程通过 `find_stale_version_instruments` 识别版本过期的影响集。`after_close_orchestrator` 任务支持 auto-resume：`interrupted` → `resume_queued`（`attempt_no` 递增，max=3），`lease_epoch` fencing 防止旧 worker 写入，`last_completed_step` 支持断点恢复（CP-V3-D）。
+Trae 动手前必须输出：任务目标 / 分支和 base commit / 已读 docs/current 与 docs/maps / 当前代码入口（前端/API/Service/Repository/Worker）/ 涉及数据表 / 测试覆盖规则 / 文档与代码是否一致 / 本次准备修改什么 / 明确不修改什么 / 预计更新哪些 docs/current 与 docs/maps / 预计新增哪个 CHANGE。发现冲突先列出，不得直接编码。详见 `rules/00-core-governance.md`。
 
 ---
 
-## 八、质量门禁
+## 六、CHANGE 规则
+
+每次修改必须新增 `docs/changes/records/CHANGE-YYYYMMDD-NNN.md` 并更新 `docs/changes/CHANGELOG.md`。不存在"小改不用 CHANGE"。必填字段与规则见 `rules/40-testing-quality.md`。`tools/check_docs_consistency.py` 规则 12 强制校验 CHANGE 引用可达性。
+
+---
+
+## 七、规则索引（rules/）
+
+详细强制规则按主题拆分在 `rules/`：
+
+| 文件 | 主题 |
+|---|---|
+| `rules/00-core-governance.md` | 事实源优先级、修改闭环、修改前最小报告 |
+| `rules/10-product-domain-invariants.md` | 产品边界、策略、DSA、自选与监控、飞书 |
+| `rules/20-market-data-indicators.md` | MDAS、复权、Node Cluster、SMC、AFC、Canonical、ChartSnapshot、板块同步、因子版本 |
+| `rules/30-access-security.md` | Capture Token、权限隔离、生产秘密 |
+| `rules/40-testing-quality.md` | CHANGE 必填、CI 门禁、质量门禁、测试纪律、ref 隔离测试 |
+| `rules/50-git-development-flow.md` | 分支、PR、提交安全、执行模式、继续执行 |
+| `rules/60-trae-work.md` | TRAE Work 角色边界与分支模型 |
+| `rules/70-trae-cn.md` | TRAE CN 多模式职责 |
+| `rules/80-deployment-data-safety.md` | Migration、不备份、Docker 镜像保护、Live Mount |
+| `rules/85-server-directory-boundaries.md` | 三目录职责（PLANNED 部分） |
+| `rules/90-deprecated-forbidden.md` | 禁止行为清单、废弃项、禁止恢复项 |
+| `rules/AGENTS-MIGRATION-MAP.md` | AGENTS 章节 → rules 映射表 |
+
+---
+
+## 八、TRAE Work 分支模型
+
+TRAE Work 使用系统生成的 `trae/agent-*` 内部分支工作，**不固定直接工作在 dev 分支**，**不允许切换分支**。
+
+- `origin/dev` 是统一开发基线；
+- 开始任务时必须 `git fetch origin dev` 并确认 `origin/dev` 是当前 HEAD 的祖先（`git merge-base --is-ancestor origin/dev HEAD` 退出码为 0）；
+- 若 `origin/dev` 已前进、不是当前 HEAD 祖先，必须停止并报告，不得自行 merge、rebase 或覆盖；
+- 完成后使用 `git push origin HEAD:dev` 以 fast-forward 方式推送当前 HEAD 到远程 dev；
+- **只允许 fast-forward；禁止 force push**；
+- 禁止 `git add -A` / `git add .` / `git add -u`；必须精确 `git add <file>`。
+
+详见 `rules/60-trae-work.md`。
+
+---
+
+## 九、TRAE CN 能力边界
+
+TRAE CN 保留开发、测试、部署、验收和运维能力，可按需切换模式（开发/测试/观察/手动部署/排障/紧急修复）。对 TRAE Work、TRAE CN 权限范围不确定时先询问用户。详见 `rules/70-trae-cn.md`。
+
+---
+
+## 十、最高风险禁止项
+
+以下为不可放松的最高安全边界（详见 `rules/90-deprecated-forbidden.md` 与 `rules/80-deployment-data-safety.md`）：
+
+- 不删除数据库卷、不执行 `docker compose down -v`；
+- 不执行 `docker image prune -a`，不主动删除 `node:20-alpine`；
+- 不修改已发布历史 migration；
+- 不泄露秘密（Token、SSH 私钥、数据库连接、密码）；
+- 不把 Work Preview 当腾讯云真实验收；
+- 不绕过 `check_docs_consistency.py` / `check_architecture.py` / `check_test_allowlist.py` / `check_governance_rules.py`；
+- 不为通过检查扩大 ignore、批量 noqa、批量 `type: ignore` 或关闭检查；
+- 不 `force push` 已共享分支；
+- 生产代码/测试/工具/构建脚本运行时不 `import`/`open`/`read`/`glob` `ref/` 目录；
+- 不恢复 `feishu_webhook` / 多策略组合 / SMC FVG / 个股详情行情双源。
+
+---
+
+## 十一、质量门禁
 
 ```
 Ruff   新增/修改 Python 文件零错误；历史债务由 tools/quality_baselines/ruff.json 管控
@@ -179,34 +140,20 @@ Mypy   新增 backend/app Python 生产文件零错误；历史债务由 tools/q
 Docs   python tools/check_docs_consistency.py
 Arch   python tools/check_architecture.py
 Allow  python tools/check_test_allowlist.py
+Gov    python tools/check_governance_rules.py
 Sync   python tools/update_docs.py --check
 ```
 
-禁止通过全局 ignore、批量 noqa、扩大 exclude、批量 `type: ignore` 或关闭检查掩盖新增问题。前端：`tsc --noEmit`、`npm run lint`、`npm run build`、`npm run test:contract`、`npm run test:e2e`。
+前端：`tsc --noEmit`、`npm run lint`、`npm run build`、`npm run test:contract`、`npm run test:e2e`。
 
 ---
 
-## 九、分支与 PR
-
-每个变更使用独立分支：`fix/<topic>` `feat/<topic>` `docs/<topic>` `refactor/<topic>` `chore/<topic>` `experiment/<topic>`。禁止直接改 main。PR 必须说明：当前系统原来如何运行、本次为什么修改、修改了哪些代码/docs/current/docs/maps、新增哪个 CHANGE、是否改变 API/数据模型/Worker 或第三方集成、测试结果、是否仍有 Known Gap、是否需要生产验证。
-
----
-
-## 十、完成报告格式
+## 十二、完成报告格式
 
 当前分支 / Base Commit / Head Commit；一、修改前理解（产品行为/系统地图/代码入口/文档依据/冲突）；二、实际修改（代码/docs/current/docs/maps/docs/changes/tools/测试）；三、一致性检查（current/maps/CHANGE/CHANGELOG/archive 是否更新）；四、验证（执行命令/测试结果/CI 状态）；五、剩余问题（Known Gap/OPEN/需要生产验证）。
 
 ---
 
-## 十一、变更历史索引
+## 十三、变更历史索引
 
 完整变更历史见 `docs/changes/CHANGELOG.md`（按日期顺序的简短摘要）与 `docs/changes/records/CHANGE-YYYYMMDD-NNN.md`（每条变更的完整记录）。任何对历史变更的疑问必须查阅对应 record，不得凭旧聊天记忆或 archive 推断。
-
-近期关键变更（仅列编号，详见 records）：
-
-- CHANGE-20260713-005 ~ 010：行情列表 DSA SSOT、品牌视觉 V1.0、行业/概念筛选、市值与 Excel 导出
-- CHANGE-20260715-001 ~ 006：SMC 智能资金指标、Pine parity core、MiniKline viewport 重写
-- CHANGE-20260717-002：MDAS SSOT 与复权唯一出口
-- CHANGE-20260718-002 ~ 006：docs 顶层目录规范、Docker 构建性能、ref/ 隔离、全算法族 SSOT
-- CHANGE-20260720-001：日线 SMC 盘中监控、Canonical 四链 re-export 接入
-- CHANGE-20260721-001 ~ 002：FR-11 缓存精确失效、nodeAvailability 5 态、Display Frame Contract V2
