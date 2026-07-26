@@ -1,13 +1,14 @@
 # Latest Report
 
-- Report: REPORT-20260726-003-reports-governance
-- Title: 建立统一 reports 报告管理体系
+- Report: REPORT-20260726-004-reports-hardening
+- Title: Reports 报告体系收口修正
 - Status: COMPLETED
 - Created: 2026-07-26 (Asia/Shanghai)
 - Environment: TRAE Work
 - Branch: trae/agent-MTiOxg
-- Base SHA: 540a2c943ad2bf2ccc90976862f76c02f590365f
-- End SHA: 012681fea1966dc81385822da57e58ae645d88c4
-- Path: reports/current/REPORT-20260726-003-reports-governance.md
-- CHANGE: CHANGE-20260726-003
-- Summary: 建立 reports/ 长期报告管理体系，迁移 sync/outbox 历史报告，新增 tools/check_reports.py 18 项检查并接入 CI；无运行时行为变化；自动部署仍 PLANNED。
+- Base SHA: d99a5befd0a43e90e78d8134dbdbbfde2d0338bb
+- Implementation SHA: （第一次提交后填写）
+- Report Published Through SHA: （第一次提交后填写）
+- Path: reports/current/REPORT-20260726-004-reports-hardening.md
+- CHANGE: CHANGE-20260726-004
+- Summary: 修正 reports 体系 SHA 语义为三字段（Base/Implementation/Report Published Through），统一"15 个检查组"描述，修复 secret 检测逻辑（区分真实赋值与说明文字），强化 SHA 一致性检查（40hex/commit/祖先/LATEST/INDEX），新增 69 自测，reports CI job 增加 fetch-depth:0。

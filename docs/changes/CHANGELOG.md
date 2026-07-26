@@ -4,21 +4,28 @@
 
 ## 2026-07-26
 
-- CHANGE-20260726-003: docs(governance) 建立统一 reports 报告管理体系（reports/README + INDEX + LATEST + templates + current + archive；15 章节统一模板；迁移 sync/outbox 2 份历史报告到 reports/archive/2026/07/ 并删除 sync/outbox/；新增 tools/check_reports.py 15 项检查并接入 CI reports job；AGENTS/rules/40/rules/60/rules/70/sync/README/AI-ONBOARDING 加入 reports 入口；reports/ 不是产品/架构/业务事实真源；无业务/API/DB/Worker/前端/部署行为变化；自动部署仍 PLANNED）
+- CHANGE-20260726-004: docs(governance) Reports 报告体系收口修正（SHA 语义三字段 Base/Implementation/Report Published Through；统一"15 个检查组"描述；修复 secret 检测区分真实赋值与说明文字；强化 SHA 一致性检查 40hex/commit/祖先/LATEST/INDEX；新增 tools/tests/test_check_reports.py 69 自测；reports CI job 增加 fetch-depth:0；无业务/API/DB/Worker/前端/部署行为变化；自动部署仍 PLANNED）
+  - SHA 三字段语义：Base SHA（任务开始时 origin/dev commit）/ Implementation SHA（完成任务主体内容的 commit）/ Report Published Through SHA（报告内容和元数据已覆盖到的已知 commit）；报告文件不能可靠记录包含其自身的最终 commit SHA；禁止通过不断创建"补 SHA commit"追求自引用一致
+  - tools/check_reports.py：检查组 13 重写，覆盖三 SHA 存在/40 位十六进制/commit 有效性（git cat-file -e）/祖先关系（git merge-base --is-ancestor）/Push Result 非空/LATEST 与报告一致/INDEX Implementation SHA 列存在且一致；ASSIGN_RE 正则要求等号后跟 ASCII 值，避免"禁止保存 password=" 等中文说明文字误报；SECRET_PLACEHOLDERS 占位值白名单（<redacted>/REDACTED/***/example/placeholder 等）；PEM 私钥标记无条件 FAIL
+  - tools/tests/test_check_reports.py：69 测试用例（真实秘密赋值 FAIL / PEM 私钥标记 FAIL / 占位值 PASS / 说明文字 PASS / SHA 字段提取 / SHA 格式校验 / 辅助函数 / 端到端报告检查）
+  - .github/workflows/ci.yml：reports job 增加 fetch-depth: 0（完整历史用于 SHA 祖先检查，其他 job 不变）
+  - 文档同步修正：reports/README.md / reports/templates/TASK-REPORT-TEMPLATE.md / reports/LATEST.md / reports/INDEX.md（Commit 列 → Implementation SHA）/ reports/current/REPORT-20260726-003-reports-governance.md / rules/40-testing-quality.md（第 9/12 条）/ docs/changes/records/CHANGE-20260726-003.md / docs/changes/CHANGELOG.md（CHANGE-003 条目）
+  - Known Gaps：自动部署 PLANNED；Capability V2 未引入；根 maps/ 未创建（Phase 3 评估）；secret 检测当前仅覆盖 password/token/secret/database_url 四类 key + PEM 私钥标记，未覆盖 api_key 等扩展 key
+- CHANGE-20260726-003: docs(governance) 建立统一 reports 报告管理体系（reports/README + INDEX + LATEST + templates + current + archive；15 章节统一模板；迁移 sync/outbox 2 份历史报告到 reports/archive/2026/07/ 并删除 sync/outbox/；新增 tools/check_reports.py 15 个检查组并接入 CI reports job；AGENTS/rules/40/rules/60/rules/70/sync/README/AI-ONBOARDING 加入 reports 入口；reports/ 不是产品/架构/业务事实真源；无业务/API/DB/Worker/前端/部署行为变化；自动部署仍 PLANNED）
   - reports/ 体系：README（10 节管理规则）/ INDEX（按日期倒序）/ LATEST（AI 读取最新任务状态入口）/ templates/TASK-REPORT-TEMPLATE.md（固定 15 章节）/ current/ / archive/YYYY/MM/
   - 报告命名：REPORT-YYYYMMDD-NNN-任务短名称.md（Asia/Shanghai 日期，三位流水号）
   - 报告状态：COMPLETED / PARTIAL / BLOCKED / FAILED / SUPERSEDED（不允许含糊状态）
   - 对话输出规则：TRAE 对话只输出简短摘要 + 报告路径 + commit SHA + push 结果 + blocker；不再输出几百行完整报告；不再创建 sync/outbox/*.md
   - 历史报告迁移：sync/outbox/project-governance-audit.md → reports/archive/2026/07/REPORT-20260726-001-governance-audit.md（git mv + Legacy Report Metadata）；sync/outbox/project-governance-phase1.md → reports/archive/2026/07/REPORT-20260726-002-governance-phase1.md（同）；sync/outbox/ 已删除
-  - tools/check_reports.py：15 项检查（必需文件存在 / LATEST Path 存在 / LATEST Report ID 一致 / INDEX 含 LATEST / INDEX 无重复 ID / 报告命名 / 15 章节 / 状态允许值 / 不含秘密 / sync/outbox 无 Markdown 报告 / AGENTS 引用 LATEST / rules/40 引用 reports/README / Push Result 与 End SHA 非空 / Deployment Status 章节 / Database and Migration 章节）；历史报告因 Legacy Metadata 跳过模板章节强检查
-  - .github/workflows/ci.yml：新增 reports job（actions/checkout@v4 + setup-python 3.12 + pip install -e backend[dev] + python tools/check_reports.py）；不删除/不放宽现有 CI 步骤；不使用 continue-on-error
+  - tools/check_reports.py：15 个检查组（必需文件存在 / LATEST Path 存在 / LATEST Report ID 一致 / INDEX 含 LATEST / INDEX 无重复 ID / 报告命名 / 15 章节 / 状态允许值 / 不含秘密 / sync/outbox 无 Markdown 报告 / AGENTS 引用 LATEST / rules/40 引用 reports/README / Push Result 与 Implementation SHA 非空 / Deployment Status 章节 / Database and Migration 章节）；历史报告因 Legacy Metadata 跳过模板章节强检查
+  - .github/workflows/ci.yml：新增 reports job（actions/checkout@v4 fetch-depth:0 + setup-python 3.12 + pip install -e backend[dev] + python tools/check_reports.py）；不删除/不放宽现有 CI 步骤；不使用 continue-on-error
   - AGENTS.md：必读顺序纳入 reports/LATEST.md；最高风险禁止项加入 check_reports.py；质量门禁加入 Reports；完成报告格式引用 reports/
   - rules/40-testing-quality.md：新增 Reports 报告体系主归属规则（12 条要点）；其他文件只建立入口引用
   - rules/60-trae-work.md / rules/70-trae-cn.md：新增 reports 输出规则
   - sync/README.md：删除"使用 outbox 保存长期报告"描述，新增 reports 迁移说明
   - docs/AI-ONBOARDING.md：读取顺序纳入 reports/LATEST.md；明确 reports/ 不是产品/架构/业务事实真源
   - 一致性：reports/ 内容是执行报告和验证证据，不是事实真源；正式事实仍属于 AGENTS.md / rules/ / docs/current/ / docs/maps/ / docs/changes/ / 真实代码和测试
-  - Known Gaps：自动部署 PLANNED；/opt/panji-deploy 未实现；Capability V2 未引入；根 maps/ 未创建（Phase 3 评估）；本轮实施报告 End SHA 与 Push Result 需两次提交完成
+  - Known Gaps：自动部署 PLANNED；/opt/panji-deploy 未实现；Capability V2 未引入；根 maps/ 未创建（Phase 3 评估）；本轮实施报告 Implementation SHA 与 Push Result 需两次提交完成
 - CHANGE-20260726-001: docs(governance) Phase 1 — 建立根 rules/ 并行规则体系（11 份规则文件 + README + AGENTS-MIGRATION-MAP；从 AGENTS.md 提取 46 条章节/硬规则级条款；AGENTS.md 仍是最高权威；不修改业务代码/部署/CI；PLANNED 内容标记未生效）
   - 新增 rules/：00-core-governance / 10-product-domain-invariants / 20-market-data-indicators / 30-access-security / 40-testing-quality / 50-git-development-flow / 60-trae-work（PLANNED）/ 70-trae-cn（PLANNED）/ 80-deployment-data-safety / 85-server-directory-boundaries（PLANNED）/ 90-deprecated-forbidden / README / AGENTS-MIGRATION-MAP
   - 不采用 sync 草案中与 AGENTS 冲突的内容（事实源优先级第 3 位、Capability V2、自动部署已启用等）

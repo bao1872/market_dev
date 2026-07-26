@@ -100,10 +100,19 @@ reports/archive/YYYY/MM/
 - 工作环境；
 - 分支；
 - Base SHA；
-- End SHA；
+- Implementation SHA；
+- Report Published Through SHA；
 - 完整报告相对路径；
 - 对应 CHANGE；
 - 一句话结论。
+
+SHA 字段语义：
+
+- **Base SHA**：任务开始时基于的 `origin/dev` commit；
+- **Implementation SHA**：完成任务主体内容的 commit；
+- **Report Published Through SHA**：报告内容和元数据已覆盖到的已知 commit（不要求等于包含报告文件的最终 commit）。
+
+报告文件不能可靠记录包含其自身的最终 commit SHA；禁止通过不断创建"补 SHA commit"追求自引用一致。Git 最终实际 HEAD 由任务完成后的 TRAE 简短回复和下一份报告 Starting State 记录。
 
 示例：
 
@@ -117,7 +126,8 @@ reports/archive/YYYY/MM/
 - Environment: TRAE Work
 - Branch: trae/agent-xxxx
 - Base SHA: abc1234
-- End SHA: def5678
+- Implementation SHA: def5678
+- Report Published Through SHA: def5678
 - Path: reports/current/REPORT-20260726-002-governance-phase2.md
 - CHANGE: CHANGE-20260726-003
 - Summary: rules 已正式生效，自动部署仍为 PLANNED。
@@ -134,7 +144,7 @@ reports/archive/YYYY/MM/
 每份报告只占一行：
 
 ```
-| Report ID | Date | Type | Status | Title | Environment | Commit | Path |
+| Report ID | Date | Type | Status | Title | Environment | Implementation SHA | Path |
 ```
 
 要求：
@@ -143,7 +153,9 @@ reports/archive/YYYY/MM/
 - 不复制完整报告内容；
 - 不删除历史索引；
 - 报告归档后更新 Path；
-- 同一个 Report ID 不允许重复。
+- 同一个 Report ID 不允许重复；
+- `Implementation SHA` 列必须与报告 `## 0. Report Metadata` 中的 `Implementation SHA` 字段一致；
+- 历史报告（`SUPERSEDED` / legacy）的 `Implementation SHA` 列可填写 `(legacy)`。
 
 ---
 
@@ -203,9 +215,11 @@ TRAE 完成任务后，对话中只输出：
 13. Next Recommended Action
 14. Final Summary
 
-每次报告必须包含 Base SHA、End SHA、检查结果、Git、部署、数据库和 Known Gaps。
+每次报告必须包含 Base SHA、Implementation SHA、Report Published Through SHA、检查结果、Git、部署、数据库和 Known Gaps。
 
 未提交、未 push 的报告不能描述为远程可读取。
+
+报告文件不能可靠记录包含其自身的最终 commit SHA。`Report Published Through SHA` 只表示报告内容和元数据已覆盖到的已知 commit，不要求等于包含报告文件的最终 commit。禁止通过不断创建"补 SHA commit"追求自引用一致。
 
 ---
 

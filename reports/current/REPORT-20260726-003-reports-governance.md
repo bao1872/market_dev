@@ -12,7 +12,8 @@
 - Branch: trae/agent-MTiOxg
 - Upstream/Base: origin/dev
 - Base SHA: 540a2c943ad2bf2ccc90976862f76c02f590365f
-- End SHA: 012681fea1966dc81385822da57e58ae645d88c4
+- Implementation SHA: 012681fea1966dc81385822da57e58ae645d88c4
+- Report Published Through SHA: d99a5befd0a43e90e78d8134dbdbbfde2d0338bb
 - CHANGE: CHANGE-20260726-003
 - Related Task: 用户指令"实施盘迹项目统一 Reports 报告管理体系"
 - Previous Report: REPORT-20260726-002-governance-phase1（archive）
@@ -49,7 +50,7 @@
 5. 创建本轮实施报告 `reports/current/REPORT-20260726-003-reports-governance.md`；
 6. 更新 `reports/LATEST.md` 和 `reports/INDEX.md`；
 7. 更新 `AGENTS.md` / `rules/40-testing-quality.md` / `rules/60-trae-work.md` / `rules/70-trae-cn.md` / `sync/README.md` / `docs/AI-ONBOARDING.md`，加入 reports 体系入口；
-8. 创建 `tools/check_reports.py`（18 项检查）；
+8. 创建 `tools/check_reports.py`（15 个检查组）；
 9. 接入 CI（新增 `reports` 检查 job）；
 10. 创建 CHANGE record 并更新 `docs/changes/CHANGELOG.md`；
 11. 运行所有检查并记录真实退出码；
@@ -109,7 +110,7 @@
 15. 更新 `rules/60-trae-work.md`：新增 reports 输出规则；
 16. 更新 `rules/70-trae-cn.md`：新增 reports 输出规则；
 17. 更新 `docs/AI-ONBOARDING.md`：读取顺序纳入 reports/LATEST.md；
-18. 创建 `tools/check_reports.py`（18 项检查）；
+18. 创建 `tools/check_reports.py`（15 个检查组）；
 19. 更新 `.github/workflows/ci.yml`：新增 `reports` 检查 job；
 20. 创建 `docs/changes/records/CHANGE-20260726-003.md`；
 21. 更新 `docs/changes/CHANGELOG.md`；
@@ -138,7 +139,7 @@
 | `rules/70-trae-cn.md` | Modified | 新增 reports 输出规则 |
 | `sync/README.md` | Modified | 删除 outbox 描述，新增 reports 迁移说明 |
 | `docs/AI-ONBOARDING.md` | Modified | 读取顺序纳入 reports/LATEST.md |
-| `tools/check_reports.py` | Created | reports 体系检查器（18 项检查） |
+| `tools/check_reports.py` | Created | reports 体系检查器（15 个检查组） |
 | `.github/workflows/ci.yml` | Modified | 新增 `reports` 检查 job |
 | `docs/changes/records/CHANGE-20260726-003.md` | Created | CHANGE 记录 |
 | `docs/changes/CHANGELOG.md` | Modified | 新增 CHANGE-20260726-003 索引 |
@@ -165,7 +166,7 @@
 - `reports/README.md` 管理规则（10 节）；
 - `reports/LATEST.md` 是 AI 读取最新任务状态入口；
 - `reports/INDEX.md` 是历史报告索引；
-- `tools/check_reports.py` 18 项检查；
+- `tools/check_reports.py` 15 个检查组；
 - CI 新增 `reports` 检查 job；
 - AGENTS / rules/40 / rules/60 / rules/70 / sync/README / AI-ONBOARDING 引用 `reports/`。
 
@@ -180,7 +181,7 @@
 | `git fetch origin dev` | OK | 0 | origin/dev = HEAD = 540a2c9 |
 | `git merge-base --is-ancestor origin/dev HEAD` | PASS | 0 | fast-forward 可行 |
 | `git rev-parse --is-shallow-repository` | false | 0 | 完整历史 |
-| `python tools/check_reports.py` | PASS（第二次提交后） | 0 | 15 项检查全部通过 |
+| `python tools/check_reports.py` | PASS（第二次提交后） | 0 | 15 个检查组全部通过 |
 | `python tools/check_governance_rules.py` | PASS | 0 | 12 项检查（已修复 3 项 sync/outbox 引用误判） |
 | `python tools/check_docs_consistency.py` | PASS | 0 | docs 一致性 |
 | `python tools/check_architecture.py` | PASS | 0 | 架构规则（11 项检查） |
@@ -188,17 +189,19 @@
 | `git diff --check` | PASS | 0 | 空白错误检查 |
 | CI YAML 解析（`python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`） | OK | 0 | PyYAML 结构化解析 |
 
-**说明**：`check_reports.py` 首次提交前 FAIL（End SHA / Push Result 为空占位），第二次提交补全 End SHA / Push Result / LATEST / INDEX 后已 PASS。所有 6 项检查工具最终退出码均为 0。
+**说明**：`check_reports.py` 首次提交前 FAIL（Implementation SHA / Push Result 为空占位），第二次提交补全 Implementation SHA / Push Result / LATEST / INDEX 后已 PASS。所有 6 项检查工具最终退出码均为 0。
 
 ---
 
 ## 8. Git Operations
 
-- Commit: 012681fea1966dc81385822da57e58ae645d88c4
+- Implementation Commit: 012681fea1966dc81385822da57e58ae645d88c4
+- Metadata Commit: d99a5befd0a43e90e78d8134dbdbbfde2d0338bb
 - Commit Message: `docs(governance): 建立统一 reports 报告管理体系`
 - Push Target: `origin/dev`（fast-forward）
-- Push Result: SUCCESS（`540a2c94..012681fe HEAD -> dev`）
-- origin/dev Final SHA: 012681fea1966dc81385822da57e58ae645d88c4
+- Push Result: SUCCESS（Implementation: `540a2c94..012681fe HEAD -> dev`；Metadata: `012681fe..d99a5bef HEAD -> dev`）
+- origin/dev After Implementation Push: 012681fea1966dc81385822da57e58ae645d88c4
+- origin/dev After Metadata Push: d99a5befd0a43e90e78d8134dbdbbfde2d0338bb
 - Force Push Used: NO
 
 ---
@@ -256,9 +259,9 @@
 
 ## 14. Final Summary
 
-- **做了什么**：建立统一 `reports/` 报告管理体系（README / INDEX / LATEST / templates / current / archive），创建 15 章节统一模板，迁移 2 份历史报告到 `reports/archive/2026/07/`，删除 `sync/outbox/`，更新 AGENTS / rules/40 / rules/60 / rules/70 / sync/README / AI-ONBOARDING 加入 reports 入口，创建 `tools/check_reports.py` 18 项检查并接入 CI，创建 CHANGE-20260726-003。
+- **做了什么**：建立统一 `reports/` 报告管理体系（README / INDEX / LATEST / templates / current / archive），创建 15 章节统一模板，迁移 2 份历史报告到 `reports/archive/2026/07/`，删除 `sync/outbox/`，更新 AGENTS / rules/40 / rules/60 / rules/70 / sync/README / AI-ONBOARDING 加入 reports 入口，创建 `tools/check_reports.py` 15 个检查组并接入 CI，创建 CHANGE-20260726-003。
 - **没做什么**：未修改业务代码 / Compose / 部署脚本 / migration / 服务器配置，未启用自动部署，未创建根 `maps/`，未连接腾讯云。
 - **验证结果**：所有检查（reports / governance / docs / arch / allowlist）真实退出码记录在 §7。
-- **commit**：`012681fea1966dc81385822da57e58ae645d88c4`
-- **push**：`git push origin HEAD:dev`（fast-forward，禁止 force push）成功，`origin/dev = 012681fe`
+- **commit**：Implementation SHA `012681fea1966dc81385822da57e58ae645d88c4`；Metadata Commit `d99a5befd0a43e90e78d8134dbdbbfde2d0338bb`
+- **push**：`git push origin HEAD:dev`（fast-forward，禁止 force push）成功；`origin/dev` After Metadata Push = `d99a5bef`
 - **下一步**：用户审查 reports 体系，等待 CI 验证 `reports` job。

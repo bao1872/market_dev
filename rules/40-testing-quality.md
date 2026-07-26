@@ -81,10 +81,10 @@ Sync    python tools/update_docs.py --check
 6. `sync/` 仅用于临时中转；
 7. `reports/` 不是产品和架构事实真源；
 8. 每次报告必须使用 `reports/templates/TASK-REPORT-TEMPLATE.md` 模板（固定 15 章节）；
-9. 每次报告必须包含 Base SHA、End SHA、检查结果、Git、部署、数据库和 Known Gaps；
+9. 每次报告必须包含 Base SHA、Implementation SHA、Report Published Through SHA、检查结果、Git、部署、数据库和 Known Gaps；
 10. 未提交、未 push 的报告不能描述为远程可读取；
 11. 用户要求"查看最新 TRAE 报告"时，优先读取 `reports/LATEST.md`；
-12. `tools/check_reports.py` 强制校验 18 项规则。
+12. `tools/check_reports.py` 强制校验 15 个检查组（覆盖 SHA 完整性、秘密检测、模板章节、状态、命名等约束）。
 
 ## 测试纪律
 

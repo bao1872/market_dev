@@ -15,7 +15,8 @@
 - Branch:
 - Upstream/Base:
 - Base SHA:
-- End SHA:
+- Implementation SHA:
+- Report Published Through SHA:
 - CHANGE:
 - Related Task:
 - Previous Report:
@@ -91,11 +92,12 @@
 
 ## 8. Git Operations
 
-- Commit:
-- Commit Message:
+- Implementation Commit:
+- Metadata Commit:
 - Push Target:
 - Push Result:
-- origin/dev Final SHA:
+- origin/dev After Implementation Push:
+- origin/dev After Metadata Push:
 - Force Push Used: NO
 
 ---
