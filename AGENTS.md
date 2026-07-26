@@ -31,14 +31,17 @@
 
 1. `AGENTS.md`（本文件）；
 2. `rules/README.md` + 对应 `rules/*.md`；
-3. `docs/current/MANIFEST.md` + 对应 `docs/current/*.md`；
-4. 对应 `docs/maps/*.md`；
-5. 对应 `docs/changes/records/CHANGE-*.md`；
-6. 对应 `docs/runbooks/*.md`（运维任务时）。
+3. `reports/LATEST.md`（最新任务状态入口，详见 `reports/README.md`）；
+4. `docs/current/MANIFEST.md` + 对应 `docs/current/*.md`；
+5. 对应 `docs/maps/*.md`；
+6. 对应 `docs/changes/records/CHANGE-*.md`；
+7. 对应 `docs/runbooks/*.md`（运维任务时）。
 
 `docs/` 顶级目录只允许：`current/` `maps/` `changes/` `archive/` `contracts/` `decisions/` `runbooks/` `acceptance/` `evidence/` `work/`（`docs/` 根 `.md` 文件不受限）。
 
 `sync/` 是临时中转站，不是正式真源，不得作为运行时依赖。
+
+`reports/` 是长期可读取的执行报告和验证证据目录，**不是产品、架构或业务事实真源**；正式事实仍属于 `AGENTS.md` / `rules/` / `docs/current/` / `docs/maps/` / `docs/changes/` / 真实代码和测试。
 
 ---
 
@@ -124,7 +127,7 @@ TRAE CN 保留开发、测试、部署、验收和运维能力，可按需切换
 - 不修改已发布历史 migration；
 - 不泄露秘密（Token、SSH 私钥、数据库连接、密码）；
 - 不把 Work Preview 当腾讯云真实验收；
-- 不绕过 `check_docs_consistency.py` / `check_architecture.py` / `check_test_allowlist.py` / `check_governance_rules.py`；
+- 不绕过 `check_docs_consistency.py` / `check_architecture.py` / `check_test_allowlist.py` / `check_governance_rules.py` / `check_reports.py`；
 - 不为通过检查扩大 ignore、批量 noqa、批量 `type: ignore` 或关闭检查；
 - 不 `force push` 已共享分支；
 - 生产代码/测试/工具/构建脚本运行时不 `import`/`open`/`read`/`glob` `ref/` 目录；
@@ -135,13 +138,14 @@ TRAE CN 保留开发、测试、部署、验收和运维能力，可按需切换
 ## 十一、质量门禁
 
 ```
-Ruff   新增/修改 Python 文件零错误；历史债务由 tools/quality_baselines/ruff.json 管控
-Mypy   新增 backend/app Python 生产文件零错误；历史债务由 tools/quality_baselines/mypy.json 管控
-Docs   python tools/check_docs_consistency.py
-Arch   python tools/check_architecture.py
-Allow  python tools/check_test_allowlist.py
-Gov    python tools/check_governance_rules.py
-Sync   python tools/update_docs.py --check
+Ruff    新增/修改 Python 文件零错误；历史债务由 tools/quality_baselines/ruff.json 管控
+Mypy    新增 backend/app Python 生产文件零错误；历史债务由 tools/quality_baselines/mypy.json 管控
+Docs    python tools/check_docs_consistency.py
+Arch    python tools/check_architecture.py
+Allow   python tools/check_test_allowlist.py
+Gov     python tools/check_governance_rules.py
+Reports python tools/check_reports.py
+Sync    python tools/update_docs.py --check
 ```
 
 前端：`tsc --noEmit`、`npm run lint`、`npm run build`、`npm run test:contract`、`npm run test:e2e`。
@@ -150,7 +154,9 @@ Sync   python tools/update_docs.py --check
 
 ## 十二、完成报告格式
 
-当前分支 / Base Commit / Head Commit；一、修改前理解（产品行为/系统地图/代码入口/文档依据/冲突）；二、实际修改（代码/docs/current/docs/maps/docs/changes/tools/测试）；三、一致性检查（current/maps/CHANGE/CHANGELOG/archive 是否更新）；四、验证（执行命令/测试结果/CI 状态）；五、剩余问题（Known Gap/OPEN/需要生产验证）。
+完整任务报告必须写入 `reports/current/REPORT-YYYYMMDD-NNN-任务短名称.md`（使用 `reports/templates/TASK-REPORT-TEMPLATE.md` 模板，固定 15 章节），并更新 `reports/LATEST.md` 与 `reports/INDEX.md`。TRAE 对话中只输出简短摘要、报告路径、commit SHA、push 结果和 blocker。
+
+报告内容：当前分支 / Base Commit / Head Commit；一、修改前理解（产品行为/系统地图/代码入口/文档依据/冲突）；二、实际修改（代码/docs/current/docs/maps/docs/changes/tools/测试）；三、一致性检查（current/maps/CHANGE/CHANGELOG/archive 是否更新）；四、验证（执行命令/测试结果/CI 状态）；五、剩余问题（Known Gap/OPEN/需要生产验证）。详细规则见 `reports/README.md` 与 `rules/40-testing-quality.md`。
 
 ---
 

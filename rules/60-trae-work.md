@@ -31,6 +31,13 @@ TRAE Work 是日常开发执行角色，使用系统生成的 `trae/agent-*` 内
 - 修改后更新 `docs/current` 与 `docs/maps` 保持六者对齐；
 - 推送前确认 `git merge-base --is-ancestor origin/dev HEAD` 退出码为 0。
 
+## 报告输出（详见 `rules/40-testing-quality.md` 与 `reports/README.md`）
+
+- 完整任务报告写入 `reports/current/REPORT-YYYYMMDD-NNN-任务短名称.md`（使用 `reports/templates/TASK-REPORT-TEMPLATE.md` 模板）；
+- 更新 `reports/LATEST.md` 与 `reports/INDEX.md`；
+- TRAE 对话只输出简短摘要 + 报告路径 + commit SHA + push 结果 + blocker；
+- 不再向 `sync/outbox/` 写入报告（`sync/` 仅为临时中转站，不作为运行时真源）。
+
 ## 禁止做
 
 - 不切换分支（`git checkout` / `git switch` 到其他分支）；

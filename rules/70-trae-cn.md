@@ -31,6 +31,13 @@ CN 可按需切换以下模式：
 - migration 保持手动门禁；
 - 任何不可逆 migration 必须在 PR 描述中明确标注并提供 downgrade 步骤。
 
+## 报告输出（详见 `rules/40-testing-quality.md` 与 `reports/README.md`）
+
+- CN 完成的开发、测试、部署、验收和运维任务报告写入 `reports/current/REPORT-YYYYMMDD-NNN-任务短名称.md`；
+- 更新 `reports/LATEST.md` 与 `reports/INDEX.md`；
+- 对话只输出简短摘要 + 报告路径 + commit SHA + push 结果 + blocker；
+- 不再向 `sync/outbox/` 写入报告（`sync/` 仅为临时中转站，不作为运行时真源）。
+
 ## 禁止做
 
 - 不在用户 API 请求链访问问财（板块同步降级保护）；

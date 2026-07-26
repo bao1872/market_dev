@@ -28,6 +28,7 @@
 AGENTS.md
 rules/README.md
 对应 rules/*.md
+reports/LATEST.md（最新任务状态入口）
 docs/current/MANIFEST.md
 docs/current/00-product-business.md
 docs/current/01-system-architecture.md
@@ -62,7 +63,7 @@ docs/changes/records/CHANGE-*.md
 docs/runbooks/*.md
 ```
 
-注：根 `maps/` 当前未创建，不要引用不存在的根 `maps/`。`sync/` 是临时中转站，不是正式真源。
+注：根 `maps/` 当前未创建，不要引用不存在的根 `maps/`。`sync/` 是临时中转站，不是正式真源。`reports/` 是长期可读取的执行报告和验证证据目录，但不是产品、架构或业务事实真源；用户要求"查看最新 TRAE 报告"时，优先读取 `reports/LATEST.md`。
 
 ## 4. 修改前必须回答
 

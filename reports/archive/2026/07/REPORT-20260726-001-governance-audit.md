@@ -9,6 +9,21 @@
 
 ---
 
+## Legacy Report Metadata
+
+- Report ID: REPORT-20260726-001-governance-audit
+- Status: SUPERSEDED
+- Report Type: governance-audit
+- Environment: TRAE Work
+- Created At: 2026-07-26 (Asia/Shanghai)
+- Original Path: sync/outbox/project-governance-audit.md
+- Migrated To: reports/archive/2026/07/REPORT-20260726-001-governance-audit.md
+- Migration Date: 2026-07-26 (Asia/Shanghai)
+- Migration CHANGE: CHANGE-20260726-003
+- Note: 本报告在 reports/ 体系建立前生成，原保存于 sync/outbox/。迁移后内容未改写，仅增加本 Legacy Report Metadata。原始内容中关于"工作分支 dev（固定）"的描述已被 Phase 2 修正为 TRAE Work 真实模型（trae/agent-* + HEAD:dev fast-forward）。
+
+---
+
 ## 1. 当前分支、HEAD、工作区状态
 
 | 项 | 值 |

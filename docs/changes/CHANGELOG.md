@@ -4,6 +4,21 @@
 
 ## 2026-07-26
 
+- CHANGE-20260726-003: docs(governance) 建立统一 reports 报告管理体系（reports/README + INDEX + LATEST + templates + current + archive；15 章节统一模板；迁移 sync/outbox 2 份历史报告到 reports/archive/2026/07/ 并删除 sync/outbox/；新增 tools/check_reports.py 15 项检查并接入 CI reports job；AGENTS/rules/40/rules/60/rules/70/sync/README/AI-ONBOARDING 加入 reports 入口；reports/ 不是产品/架构/业务事实真源；无业务/API/DB/Worker/前端/部署行为变化；自动部署仍 PLANNED）
+  - reports/ 体系：README（10 节管理规则）/ INDEX（按日期倒序）/ LATEST（AI 读取最新任务状态入口）/ templates/TASK-REPORT-TEMPLATE.md（固定 15 章节）/ current/ / archive/YYYY/MM/
+  - 报告命名：REPORT-YYYYMMDD-NNN-任务短名称.md（Asia/Shanghai 日期，三位流水号）
+  - 报告状态：COMPLETED / PARTIAL / BLOCKED / FAILED / SUPERSEDED（不允许含糊状态）
+  - 对话输出规则：TRAE 对话只输出简短摘要 + 报告路径 + commit SHA + push 结果 + blocker；不再输出几百行完整报告；不再创建 sync/outbox/*.md
+  - 历史报告迁移：sync/outbox/project-governance-audit.md → reports/archive/2026/07/REPORT-20260726-001-governance-audit.md（git mv + Legacy Report Metadata）；sync/outbox/project-governance-phase1.md → reports/archive/2026/07/REPORT-20260726-002-governance-phase1.md（同）；sync/outbox/ 已删除
+  - tools/check_reports.py：15 项检查（必需文件存在 / LATEST Path 存在 / LATEST Report ID 一致 / INDEX 含 LATEST / INDEX 无重复 ID / 报告命名 / 15 章节 / 状态允许值 / 不含秘密 / sync/outbox 无 Markdown 报告 / AGENTS 引用 LATEST / rules/40 引用 reports/README / Push Result 与 End SHA 非空 / Deployment Status 章节 / Database and Migration 章节）；历史报告因 Legacy Metadata 跳过模板章节强检查
+  - .github/workflows/ci.yml：新增 reports job（actions/checkout@v4 + setup-python 3.12 + pip install -e backend[dev] + python tools/check_reports.py）；不删除/不放宽现有 CI 步骤；不使用 continue-on-error
+  - AGENTS.md：必读顺序纳入 reports/LATEST.md；最高风险禁止项加入 check_reports.py；质量门禁加入 Reports；完成报告格式引用 reports/
+  - rules/40-testing-quality.md：新增 Reports 报告体系主归属规则（12 条要点）；其他文件只建立入口引用
+  - rules/60-trae-work.md / rules/70-trae-cn.md：新增 reports 输出规则
+  - sync/README.md：删除"使用 outbox 保存长期报告"描述，新增 reports 迁移说明
+  - docs/AI-ONBOARDING.md：读取顺序纳入 reports/LATEST.md；明确 reports/ 不是产品/架构/业务事实真源
+  - 一致性：reports/ 内容是执行报告和验证证据，不是事实真源；正式事实仍属于 AGENTS.md / rules/ / docs/current/ / docs/maps/ / docs/changes/ / 真实代码和测试
+  - Known Gaps：自动部署 PLANNED；/opt/panji-deploy 未实现；Capability V2 未引入；根 maps/ 未创建（Phase 3 评估）；本轮实施报告 End SHA 与 Push Result 需两次提交完成
 - CHANGE-20260726-001: docs(governance) Phase 1 — 建立根 rules/ 并行规则体系（11 份规则文件 + README + AGENTS-MIGRATION-MAP；从 AGENTS.md 提取 46 条章节/硬规则级条款；AGENTS.md 仍是最高权威；不修改业务代码/部署/CI；PLANNED 内容标记未生效）
   - 新增 rules/：00-core-governance / 10-product-domain-invariants / 20-market-data-indicators / 30-access-security / 40-testing-quality / 50-git-development-flow / 60-trae-work（PLANNED）/ 70-trae-cn（PLANNED）/ 80-deployment-data-safety / 85-server-directory-boundaries（PLANNED）/ 90-deprecated-forbidden / README / AGENTS-MIGRATION-MAP
   - 不采用 sync 草案中与 AGENTS 冲突的内容（事实源优先级第 3 位、Capability V2、自动部署已启用等）

@@ -7,8 +7,9 @@
 `sync/` 是本地、TRAE Work、TRAE CN 之间的临时中转站，用于：
 
 - 跨会话传递任务材料；
-- 草案与结构建议（如 `panji_agents_rules_maps_autodeploy_v2/`）；
-- 阶段性报告（如 `outbox/`）。
+- 草案与结构建议（如 `panji_agents_rules_maps_autodeploy_v2/`）。
+
+`sync/` 不再保存长期报告。长期报告统一写入 `reports/`（详见 `reports/README.md`）。
 
 ## 边界
 
@@ -16,12 +17,16 @@
 - 正式代码和文档不得运行时依赖 `sync/`；
 - `sync/` 不被 `backend/`、`frontend/`、`scripts/`、Compose、`AGENTS.md`、`rules/`、`docs/current/`、`docs/maps/` 作为运行时真源引用；
 - 禁止在 `sync/` 保存密码、Token、SSH 私钥、数据库连接和数据备份；
-- 默认报告直接在 TRAE 对话中输出完整纯文本；
-- 除非用户明确要求，不再创建 `sync/outbox/*.md` 报告文件。
+- **不再创建 `sync/outbox/*.md` 报告文件**（已于 2026-07-26 迁移到 `reports/archive/2026/07/` 并删除 `sync/outbox/`）。
 
-## 历史报告
+## 历史报告迁移
 
-已经提交的历史报告（如 `outbox/project-governance-audit.md`、`outbox/project-governance-phase1.md`）保留作为历史记录，本轮不重写。
+原 `sync/outbox/project-governance-audit.md` 与 `sync/outbox/project-governance-phase1.md` 已于 2026-07-26（CHANGE-20260726-003）迁移至：
+
+- `reports/archive/2026/07/REPORT-20260726-001-governance-audit.md`
+- `reports/archive/2026/07/REPORT-20260726-002-governance-phase1.md`
+
+`sync/outbox/` 已删除。后续长期报告统一写入 `reports/current/`，详见 `reports/README.md`。
 
 ## 清理
 
