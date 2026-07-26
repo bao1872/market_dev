@@ -4,6 +4,7 @@
 
 ## 2026-07-25
 
+- CHANGE-20260725-003: 权限管理 V2.1 — Capability 矩阵 + 邀请码 V2 + 自选额度并发 + 前端 CapabilityRoute（Phase D-J 全套：capability grant 数据模型 migration 068 + 三能力矩阵 + 邀请码 V2 /admin/v2/invite-codes + /auth/redeem-v2 + watchlist SELECT FOR UPDATE 行锁 + 前端 CapabilityRoute + 旧数据迁移脚本 + docs/current/02/04 + maps + AGENTS §4）
 - CHANGE-20260725-002: 个股详情左侧来源列表切股闪烁修复 — 删除页面级 instrumentQuery.isLoading/!data 早退，tv-detail-layout 和 tv-source-list 始终挂载，loading/error 仅影响右侧详情和顶部信息栏
 - CHANGE-20260725-001: freshness_state 日级周期（1d/1w/1mo）actual vs expected 日期比较修正（日级 bar 时间戳为 00:00，按日期比较避免误判 unavailable）
 

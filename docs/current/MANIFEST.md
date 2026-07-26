@@ -1,13 +1,13 @@
 # Current Docs Manifest
 
 > 文档状态：CURRENT DESIGN BASELINE
-> 实现核对基线：`086ebce593ac19ea49f5a4ce2f21e8c77af5ec80`
+> 实现核对基线：`c8026c57fb664bfed2baea2f42e987492ee543b9`
 > v2 文档包生成基线：`2c4ad509d1a371048cbc3a4c5738e861dbb9f423`
 > 原 current docs 历史基线：`ddca659b8c9d64b6a414da0b4bbd6f80f704aef1`（归档参考，不参与一致性检查）
 > 设计基线日期：2026-07-05
 > 当前事实源：代码 + 已合并 PR + 生产只读审计 + 项目负责人确认
 > 注意：该文件是 v2 唯一基线头；其他 current 文档不再重复基线字段。
-> [CHANGE-20260724-004] baseline 同步到集成分支 HEAD `086ebce`，满足规则 16 新鲜度窗口（≤50 commit）。
+> [CHANGE-20260725-003] baseline 同步到权限分支 HEAD `c8026c5`（Phase I 完成），满足规则 16 新鲜度窗口（≤50 commit）。
 
 ## 1. 文档状态定义
 

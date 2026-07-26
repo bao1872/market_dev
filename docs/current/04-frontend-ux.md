@@ -24,9 +24,10 @@ Node Cluster 算法
 | `/subscription-expired` | Authenticated | — | 续期 |
 | `/membership-expired` | Redirect | — | 兼容跳转 |
 | `/capture/stock/:symbol` | Capture Token | **无壳层** | 截图专用页面 |
-| `/market` | Subscriber/Admin | UserAppShell | 行情工作区（工具栏 + `StrategyDataTable`（DSA 列表）+ 可收起 `AtomicFactsPanel`（小 K 线下状态观察），**无 K 线**，`MarketWorkspacePage`） |
+| `/market` | **CapabilityRoute(canAccessMarket)** | UserAppShell | 行情工作区（工具栏 + `StrategyDataTable`（DSA 列表）+ 可收起 `AtomicFactsPanel`（小 K 线下状态观察），**无 K 线**，`MarketWorkspacePage`）；V2.1：`watchlist_management` 或 `market_screening` 任一即可进入；`watchlist-only` 用户只能用 watchlist scope（无 market scope 按钮），`market-only` 用户无自选 scope 按钮 |
 | `/screener` | Redirect | — | 兼容重定向 → `/market` |
-| `/stock/:symbol` | Subscriber/Admin | UserAppShell | **唯一** K 线详情入口（`StockDetailPage`） |
+| `/stock/:symbol` | **CapabilityRoute(canAccessStockDetail)** | UserAppShell | **唯一** K 线详情入口（`StockDetailPage`）；V2.1：需要 `market_screening` capability（详情/DSA/K 线），`watchlist-only` 用户被前端重定向到 `/no-permission`，后端 403 为最终边界 |
+| `/replay` | **CapabilityRoute(canAccessReplay)** | UserAppShell | 复盘页（`ReplayPage`）；V2.1：需要 `market_screening` capability |
 | `/messages` | Authenticated | UserAppShell | 历史消息 |
 | `/settings` | Authenticated | UserAppShell | 账户和通知渠道 |
 | `/admin/*` | Admin | AdminAppShell | 管理页面（含 `/admin/overview`、`/admin/users`、`/admin/jobs`、`/admin/beta-applications`、`/admin/after-close`、`/admin/stock-debug/:symbol`）；`/admin/strategies` 已废弃为 redirect-only → `/admin/after-close`（无页面加载） |
@@ -41,6 +42,7 @@ Node Cluster 算法
 - `ProtectedLayout` 只负责认证和 access profile，不再固定渲染同一壳层；`UserAppShell`/`AdminAppShell` 由各自路由组在 `ProtectedLayout` 之下作为 layout element 挂载。**AdminRoute 权限真源（CHANGE-20260713-007）**：`AdminRoute` 以 `user.is_admin` 为唯一权限真源（不依赖任何其他角色/字段判断），`accessLoading` 状态防止 auth hydration 未完成时提前判定 false（刷新页面后 access store 重新拉取 `/me/access` 期间显示 loading，避免 access 未就绪时被误判为非 admin 重定向到 `/market`）；权限真源只来自后端 `users.is_admin` 字段，禁止前端臆造或缓存 admin 状态。
 - `/capture/stock/:symbol` 位于两套壳层之外，只使用 `captureClient`。
 - 导航/路由常量集中于 `frontend/src/navigation/appNavigation.ts`，避免路径散落。
+- **V2.1 CapabilityRoute（CHANGE-20260725-003）**：`/market`、`/stock/:symbol`、`/replay` 改用 `CapabilityRoute` 守卫，前端只消费 `/me/access` 返回的 `capabilities`（`watchlist_management`/`market_screening`/`review_management`）+ `watchlist_limits`，**禁止从旧 `features`/`monitor_limit` 重新推导模块权限**；`accessLoading` 期间显示 loading 占位，避免 revalidateAccess 未返回时提前判定 false；无权限时重定向到 `/no-permission`，后端 403 仍为最终边界；review_management 未上线时只保存权限，不创建假页面；`UserAppShell` 一级导航通过 `getVisibleUserNavItems` 按 capability 过滤（`watchlist-only` 只看到行情，无复盘）。
 
 ### 2.2 兼容重定向
 

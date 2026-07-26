@@ -120,6 +120,25 @@ strategy_run_items.reason_code 标准编码：
 
 后端权限不能只靠前端隐藏。所有私有资源从 JWT 获取 user_id。
 
+### 2.1 V2.1 Capability 权限模型（CHANGE-20260725-003）
+
+V2.1 在 V1 subscription 之上叠加细粒度 capability grant，三能力组合独立计费、独立日历月到期：
+
+| 能力 key | 语义 | 路由/入口 |
+|---|---|---|
+| `watchlist_management` | 自选股 + 盘中监控 | `/market`（watchlist scope）、`POST /watchlist`、监控资格 |
+| `market_screening` | 个股详情 + K 线 + DSA + 复盘 | `/stock/:symbol`、`/replay`、indicators、structural-factors、temporal-features、strategy-runs results、me_table_view_presets |
+| `review_management` | 复盘管理（**未上线**，只保存权限，不创建假页面） | 预留 |
+
+- **数据模型**：`user_capability_grants`（migration 068）记录每个用户每项能力的 active grant，独立 `starts_at`/`expires_at`/`revoked_at`/`limit_value`/`source_type`/`source_id`；`(user_id, capability_key, source_type, source_id)` 唯一约束防重复。
+- **聚合**：`CapabilityService.aggregate_user_capabilities` 跨多 grant 取并集；同能力多 grant 的 `limit_value` 取 `max`（PRD §7.1）；日历月到期由 `capability_calendar.compute_calendar_month_expires_at` 计算（不与 subscription 绑定）。
+- **AccessContext 真源**：`GET /me/access` 返回 `capabilities`（三能力状态 active/expires_at，admin 全 active）+ `watchlist_limits`（`watchlist_stock_limit`/`watchlist_current_count`/`watchlist_over_limit`）+ 兼容字段 `subscription_active`/`plan_code`/`features`；前端 `/me/access` 是 V2.1 权限模型唯一入口，**不从旧 `features`/`monitor_limit` 推导模块权限**。
+- **邀请码 V2**：`POST /admin/v2/invite-codes`（带 capabilities 配置创建，admin only）+ `POST /auth/redeem-v2`（每能力独立创建/续期 grant，独立日历月到期）；与 V1 `/admin/invite-codes` + `/auth/redeem` 共存，V1 仍绑定 subscription。
+- **后端 enforcement**：`require_capability(WATCHLIST_MANAGEMENT)` 守卫 watchlist 写操作；`require_active_subscription` 守卫详情/DSA/K 线/复盘；admin 豁免；无 capability 返回 403 `reason_code=CAPABILITY_REQUIRED`；watchlist 超限返回 409 `reason_code=WATCHLIST_LIMIT_REACHED`。
+- **并发额度**：`POST /watchlist` 在额度校验前 `SELECT User FOR UPDATE` 行锁，保证同一用户并发请求串行化；超限拒绝。
+- **旧数据迁移**：`backend/scripts/migrate_legacy_subscriptions_to_capabilities.py` 幂等回填 active subscription 为 3 个 capability grant（dry-run/execute/verify 三模式）。
+- **token 失效**：`users.status` 状态机（active/disabled/pending）在每个请求 `get_current_active_user` 和 refresh 时检查；disabled 账户所有 access/refresh token 立即失效（系统当前无 token_version/jti 黑名单，status 是唯一细粒度撤销机制）。
+
 ## 3. API 契约概要
 
 | 能力 | 端点/路由组 | 关键规则 |
@@ -131,7 +150,7 @@ strategy_run_items.reason_code 标准编码：
 | 监控 | `/monitor-states`, `/strategy-events` | 只处理完成 Bar，按用户资格过滤；monitor_event 在 `delivery_worker.py` 投递前再次用 `is_user_eligible_for_monitor` 复核，active admin 放行，disabled admin / 无订阅普通用户排除 |
 | 个股上下文 | `/stocks/{symbol}/context` | Atomic Fact Contract V1 只读事实层（替换旧 `StockState`/`StateEventDTO` 普通用户表达层）；返回 `contractVersion/meta/asOf/core/auxiliary/availability/recentChanges/dataQuality`；**CHANGE-20260716-006**：新增顶层 `productObservations` 字段（产品观察扩展，独立于冻结 Core 14）+ `recentChanges` 改为只比较最新交易日与前一发布交易日（`_find_recent_published_snapshots` limit 10→2）+ 响应新增 `latestChangesFrom`（前一发布交易日）/`latestChangesAsOf`（最新发布交易日）字段，删除 30 条上限；`meta` 含 `payloadVersion`/`researchFreezeVersion`/`presentationVersion` 三版本字段（**前端禁止硬编码 V4.13，必须从 `meta.researchFreezeVersion` 读取**）；Core 严格 14（趋势4+动量4+结构5+成交1），Auxiliary 10 默认隐藏（**10 个 Aux 中仅 8 个可展开，T3/T6/V1 永不出现**），Rejected 1（V1 累计成交量比永不进入 payload）；V3/T5 阈值未确认时仅显示比值 +「分类未启用」；T3/T6 `feature_flag` 默认关闭；时区 `Asia/Shanghai`；`as_of` 语义为**截止日期**（查 `trade_date <= as_of`，按 `trade_date`/`published_at`/`finished_at` 倒序取最新 1 条；周末和无批次日期返回之前最近发布状态，禁止未来）；GET 零数据库写入；`recentChanges` 为相邻已发布快照对 14 个 Core 事实的只读对比（非 V4.13 Core Fact），按每个 Fact 的 presentation `valuePrecision` 量化 |
 | 通知 | `/messages`, `/notification-channels` | 用户只能操作自己的消息和渠道 |
-| 自选 | `/watchlist` | active subscription + monitor_limit |
+| 自选 | `/watchlist` | V2.1：写操作 `require_capability(WATCHLIST_MANAGEMENT)`，admin 豁免；额度从 `CapabilityAccessContext.limits.watchlist_stock_limit`（多 grant 取 max）；`POST /watchlist` 在额度校验前 `SELECT User FOR UPDATE` 行锁，并发请求串行化；超限 409 `reason_code=WATCHLIST_LIMIT_REACHED`；无 capability 403 `reason_code=CAPABILITY_REQUIRED`（CHANGE-20260725-003） |
 | 表格视图配置 | `/me/table-view-presets` | 用户表格视图配置 CRUD；JWT user_id 隔离；active subscription + trend_selection feature（admin 豁免）；config 仅允许 keyword/sort/filters/hiddenColumns/pageSize；每 user+table_id+strategy_key 最多 20 个；`(user_id, table_id, strategy_key, name)` 唯一约束用两个 partial unique index 实现（strategy_key IS NOT NULL / IS NULL 分离，解决 NULL!=NULL 问题）；is_default 同维度互斥；**写操作（POST/PATCH/DELETE）必须在返回前 `await db.commit()`，异常分支 `rollback` 后 re-raise，禁止吞异常；写后读跨请求必须可见** |
 | 个股详情分享 | `/stock-detail-feishu` | target_channel_id 支持手动指定渠道 |
 | Capture | `/api/v1/capture/*` | 只接受 Capture Token |

@@ -74,6 +74,8 @@ DSA 对全市场 computable universe 计算特征；不得在计算阶段按方�
 ### 4. 自选和监控
 有效会员添加自选后自动进入盘中监控；不创建 MonitoringPlan。到期用户保留历史数据，但不能读取、修改、监控或产生新投递。
 
+**V2.1 Capability 权限模型（CHANGE-20260725-003）**：在 V1 subscription 之上叠加细粒度 capability grant，三能力独立计费、独立日历月到期：`watchlist_management`（自选+监控）、`market_screening`（详情/DSA/K线/复盘）、`review_management`（预留，未上线只保存权限不创建假页面）。`/me/access` 是 V2.1 权限模型唯一入口，返回 `capabilities` + `watchlist_limits` + 兼容字段；**前端禁止从旧 `features`/`monitor_limit` 推导模块权限**，只消费 `/me/access` 的 V2.1 字段；`/market`、`/stock/:symbol`、`/replay` 使用 `CapabilityRoute` 守卫，无权限重定向到 `/no-permission`，后端 403 仍为最终边界。`POST /watchlist` 在额度校验前 `SELECT User FOR UPDATE` 行锁，保证同一用户并发请求串行化；超限 409 `reason_code=WATCHLIST_LIMIT_REACHED`；无 capability 403 `reason_code=CAPABILITY_REQUIRED`。`watchlist-only` 用户可进入 `/market` 但只能用 watchlist scope（无 market scope 按钮），不能打开详情/DSA/K线；`market-only` 用户可看详情和复盘，但无自选 scope 按钮、scope 和盘中监控。邀请码 V2：`POST /admin/v2/invite-codes`（带 capabilities 配置）+ `POST /auth/redeem-v2`（每能力独立 grant），与 V1 共存。token 撤销依赖 `users.status` 状态机（无 token_version/jti 黑名单），disabled 账户所有 access/refresh token 立即失效。
+
 ### 5. Node Cluster 固定契约
 `1d=250 根日线`、`15m=250*16=4000 根`、`1m=2 根已完成 Bar`。图表显示数量、指标输出数量、Node 内部输入数量必须分离。**禁止修改 250/4000/2 固定参数**；禁止飞书舞台 90 bar 展示参数进入任何指标计算逻辑（CHANGE-20260720-001）。
 
