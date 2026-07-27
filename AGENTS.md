@@ -1,165 +1,483 @@
-# 盘迹项目 AGENTS（入口与规则路由器）
+1. 文档定位
 
-适用项目：`market_dev` / 盘迹 PanJi
-核心目标：防止 AI/Trae 在新对话、新机器、新分支中误解当前系统，防止已确认业务逻辑被旧代码、旧文档或旧记忆还原。
+本文件是供 AI 代理、IDE 助手和自动化开发工具在本仓库中工作时遵循的长期工作协议。
 
-> 本文件是项目入口、规则路由器和最高安全边界。详细业务和技术规则在 `rules/`，当前项目事实在 `docs/current/`，代码地图在 `docs/maps/`，变更历史在 `docs/changes/`。
+它只负责定义：
 
----
+如何定位权威信息；
 
-## 一、最高原则
+如何判断任务类型；
 
-任何修改必须形成闭环：读取文档入口 → 理解系统地图 → 核对真实代码 → 建立 CHANGE → 明确修改/不修改范围 → 修改代码/文档/测试 → 运行一致性检查 → PR → 人工 Review 后合并。
+不同任务应走哪条开发路径；
 
-完成标准（六者对齐）：代码实现 = 当前设计文档 = 系统地图 = API/数据契约 = 测试验证 = 部署配置。六者缺一不可。
+什么时候需要更新项目文档；
 
-用户当前明确指令优先级最高。能力或权限范围不明确时，必须先询问用户，不得自行假设。
+如何验证修改；
 
----
+哪些边界在未获得明确授权前不得跨越。
 
-## 二、状态边界
+它不是 PRD、架构文档、实现地图、项目状态报告或操作手册。
 
-- **CURRENT**：当前生产/正式生效的事实与规则。`docs/current/` 与已激活的 `rules/` 条款属于 CURRENT。
-- **WIP**：进行中的开发工作，未达到 CURRENT。必须在 CHANGE 与分支中明确标记。
-- **PLANNED**：未来阶段提议，尚未实施，不得描述为已生效。包括自动部署、`/opt/panji-deploy`、forced-command SSH、GitHub 部署 secrets、Capability V2、尚未在腾讯云建设的目录和脚本。
+项目具体需求、实现细节、运行结构、部署方式、数据模型和指标定义，必须维护在各自对应的文档中。
 
----
+2. 文档体系
 
-## 三、必读顺序
+仓库采用以下文档分层：
 
-任何任务开始前必须按以下顺序读取：
+位置
 
-1. `AGENTS.md`（本文件）；
-2. `rules/README.md` + 对应 `rules/*.md`；
-3. `reports/LATEST.md`（最新任务状态入口，详见 `reports/README.md`）；
-4. `docs/current/MANIFEST.md` + 对应 `docs/current/*.md`；
-5. 对应 `docs/maps/*.md`；
-6. 对应 `docs/changes/records/CHANGE-*.md`；
-7. 对应 `docs/runbooks/*.md`（运维任务时）。
+职责
 
-`docs/` 顶级目录只允许：`current/` `maps/` `changes/` `archive/` `contracts/` `decisions/` `runbooks/` `acceptance/` `evidence/` `work/`（`docs/` 根 `.md` 文件不受限）。
+AGENTS.md
 
-`sync/` 是临时中转站，不是正式真源，不得作为运行时依赖。
+稳定的任务路由和工作协议
 
-`reports/` 是长期可读取的执行报告和验证证据目录，**不是产品、架构或业务事实真源**；正式事实仍属于 `AGENTS.md` / `rules/` / `docs/current/` / `docs/maps/` / `docs/changes/` / 真实代码和测试。
+rules/
 
----
+项目相关的开发原则和硬约束
 
-## 四、事实源优先级
+docs/prd/
 
-冲突时判断顺序（前者覆盖后者）：
+已确认的需求和目标行为
 
-1. 用户当前明确要求；
-2. 当前 main 代码；
-3. `docs/current/MANIFEST.md`；
-4. `docs/current/*.md`；
-5. `docs/maps/*.md`；
-6. 最新 `docs/changes/records/*.md`；
-7. 测试与 CI 结果；
-8. 生产只读验证结果；
-9. archive 历史文档；
-10. 旧聊天记忆。
+docs/maps/
 
-archive 和旧聊天不能覆盖 current。
+已核验的当前实现和项目记忆
 
----
+docs/changes/
 
-## 五、修改流程
+重要变化及其原因
 
-Trae 动手前必须输出：任务目标 / 分支和 base commit / 已读 docs/current 与 docs/maps / 当前代码入口（前端/API/Service/Repository/Worker）/ 涉及数据表 / 测试覆盖规则 / 文档与代码是否一致 / 本次准备修改什么 / 明确不修改什么 / 预计更新哪些 docs/current 与 docs/maps / 预计新增哪个 CHANGE。发现冲突先列出，不得直接编码。详见 `rules/00-core-governance.md`。
+docs/runbooks/
 
----
+可重复执行的操作步骤
 
-## 六、CHANGE 规则
+Git 历史
 
-每次修改必须新增 `docs/changes/records/CHANGE-YYYYMMDD-NNN.md` 并更新 `docs/changes/CHANGELOG.md`。不存在"小改不用 CHANGE"。必填字段与规则见 `rules/40-testing-quality.md`。`tools/check_docs_consistency.py` 规则 12 强制校验 CHANGE 引用可达性。
+普通代码修改、小 Bug 和具体开发历史
 
----
+2.1 PRD
 
-## 七、规则索引（rules/）
+PRD 回答：
 
-详细强制规则按主题拆分在 `rules/`：
+系统在正确状态下应该怎样工作？
 
-| 文件 | 主题 |
-|---|---|
-| `rules/00-core-governance.md` | 事实源优先级、修改闭环、修改前最小报告 |
-| `rules/10-product-domain-invariants.md` | 产品边界、策略、DSA、自选与监控、飞书 |
-| `rules/20-market-data-indicators.md` | MDAS、复权、Node Cluster、SMC、AFC、Canonical、ChartSnapshot、板块同步、因子版本 |
-| `rules/30-access-security.md` | Capture Token、权限隔离、生产秘密 |
-| `rules/40-testing-quality.md` | CHANGE 必填、CI 门禁、质量门禁、测试纪律、ref 隔离测试 |
-| `rules/50-git-development-flow.md` | 分支、PR、提交安全、执行模式、继续执行 |
-| `rules/60-trae-work.md` | TRAE Work 角色边界与分支模型 |
-| `rules/70-trae-cn.md` | TRAE CN 多模式职责 |
-| `rules/80-deployment-data-safety.md` | Migration、不备份、Docker 镜像保护、Live Mount |
-| `rules/85-server-directory-boundaries.md` | 三目录职责（PLANNED 部分） |
-| `rules/90-deprecated-forbidden.md` | 禁止行为清单、废弃项、禁止恢复项 |
-| `rules/AGENTS-MIGRATION-MAP.md` | AGENTS 章节 → rules 映射表 |
+PRD 可以包含：
 
----
+产品行为；
 
-## 八、TRAE Work 分支模型
+业务规则；
 
-TRAE Work 使用系统生成的 `trae/agent-*` 内部分支工作，**不固定直接工作在 dev 分支**，**不允许切换分支**。
+输入与输出；
 
-- `origin/dev` 是统一开发基线；
-- 开始任务时必须 `git fetch origin dev` 并确认 `origin/dev` 是当前 HEAD 的祖先（`git merge-base --is-ancestor origin/dev HEAD` 退出码为 0）；
-- 若 `origin/dev` 已前进、不是当前 HEAD 祖先，必须停止并报告，不得自行 merge、rebase 或覆盖；
-- 完成后使用 `git push origin HEAD:dev` 以 fast-forward 方式推送当前 HEAD 到远程 dev；
-- **只允许 fast-forward；禁止 force push**；
-- 禁止 `git add -A` / `git add .` / `git add -u`；必须精确 `git add <file>`。
+数据要求；
 
-详见 `rules/60-trae-work.md`。
+用户交互；
 
----
+边界条件；
 
-## 九、TRAE CN 能力边界
+验收标准；
 
-TRAE CN 保留开发、测试、部署、验收和运维能力，可按需切换模式（开发/测试/观察/手动部署/排障/紧急修复）。对 TRAE Work、TRAE CN 权限范围不确定时先询问用户。详见 `rules/70-trae-cn.md`。
+已确认的设计决策。
 
----
+除非需求已经被明确修改，否则不得用现有实现反向改写已经确认的需求。
 
-## 十、最高风险禁止项
+2.2 Maps
 
-以下为不可放松的最高安全边界（详见 `rules/90-deprecated-forbidden.md` 与 `rules/80-deployment-data-safety.md`）：
+Maps 是项目记忆层，回答：
 
-- 不删除数据库卷、不执行 `docker compose down -v`；
-- 不执行 `docker image prune -a`，不主动删除 `node:20-alpine`；
-- 不修改已发布历史 migration；
-- 不泄露秘密（Token、SSH 私钥、数据库连接、密码）；
-- 不把 Work Preview 当腾讯云真实验收；
-- 不绕过 `check_docs_consistency.py` / `check_architecture.py` / `check_test_allowlist.py` / `check_governance_rules.py` / `check_reports.py`；
-- 不为通过检查扩大 ignore、批量 noqa、批量 `type: ignore` 或关闭检查；
-- 不 `force push` 已共享分支；
-- 生产代码/测试/工具/构建脚本运行时不 `import`/`open`/`read`/`glob` `ref/` 目录；
-- 不恢复 `feishu_webhook` / 多策略组合 / SMC FVG / 个股详情行情双源。
+当前系统实际上是怎样实现的，修改时应该从哪里进入？
 
----
+Maps 可以包含：
 
-## 十一、质量门禁
+代码入口；
 
-```
-Ruff    新增/修改 Python 文件零错误；历史债务由 tools/quality_baselines/ruff.json 管控
-Mypy    新增 backend/app Python 生产文件零错误；历史债务由 tools/quality_baselines/mypy.json 管控
-Docs    python tools/check_docs_consistency.py
-Arch    python tools/check_architecture.py
-Allow   python tools/check_test_allowlist.py
-Gov     python tools/check_governance_rules.py
-Reports python tools/check_reports.py
-Sync    python tools/update_docs.py --check
-```
+模块职责；
 
-前端：`tsc --noEmit`、`npm run lint`、`npm run build`、`npm run test:contract`、`npm run test:e2e`。
+数据流；
 
----
+存储关系；
 
-## 十二、完成报告格式
+任务与 Worker 关系；
 
-完整任务报告必须写入 `reports/current/REPORT-YYYYMMDD-NNN-任务短名称.md`（使用 `reports/templates/TASK-REPORT-TEMPLATE.md` 模板，固定 15 章节），并更新 `reports/LATEST.md` 与 `reports/INDEX.md`。TRAE 对话中只输出简短摘要、报告路径、commit SHA、push 结果和 blocker。
+API 与前端关系；
 
-报告内容：当前分支 / Base Commit / Head Commit；一、修改前理解（产品行为/系统地图/代码入口/文档依据/冲突）；二、实际修改（代码/docs/current/docs/maps/docs/changes/tools/测试）；三、一致性检查（current/maps/CHANGE/CHANGELOG/archive 是否更新）；四、验证（执行命令/测试结果/CI 状态）；五、剩余问题（Known Gap/OPEN/需要生产验证）。详细规则见 `reports/README.md` 与 `rules/40-testing-quality.md`。
+验证入口；
 
----
+当前已知缺口；
 
-## 十三、变更历史索引
+已废弃路径。
 
-完整变更历史见 `docs/changes/CHANGELOG.md`（按日期顺序的简短摘要）与 `docs/changes/records/CHANGE-YYYYMMDD-NNN.md`（每条变更的完整记录）。任何对历史变更的疑问必须查阅对应 record，不得凭旧聊天记忆或 archive 推断。
+Maps 必须描述已经核验的当前实现。
+
+计划中的工作不得被写成已经完成的事实。
+
+2.3 Changes
+
+Changes 用于记录重要演化：
+
+改了什么；
+
+为什么改；
+
+修改前后的关键差异；
+
+哪些行为、契约、结构或运行方式受到影响。
+
+普通小修通常由 Git 历史记录即可。
+
+2.4 Runbooks
+
+Runbooks 用于记录可重复执行的操作步骤。
+
+它们只说明如何执行某项操作，不重新定义产品行为或实现架构。
+
+3. 事实源
+
+使用以下判断边界：
+
+PRD 是目标行为的权威来源；
+
+代码、数据、日志和运行状态是当前执行事实的权威来源；
+
+Maps 用于总结已核验的当前实现，并应与真实代码保持一致；
+
+Changes 用于解释重要历史演化；
+
+Runbooks 用于描述当前操作流程。
+
+当文档之间出现冲突时：
+
+先判断问题涉及的是目标行为还是当前实现；
+
+查看对应的权威来源；
+
+必要时通过代码或运行证据进行核验；
+
+修正文档，而不是自行猜测。
+
+不得把假设、计划或未验证结果表述为事实。
+
+4. 最小读取路径
+
+默认不要阅读全部文档。
+
+开始任务前，只读取当前任务真正需要的内容：
+
+AGENTS.md；
+
+rules/ 中与任务相关的规则；
+
+与任务相关的 PRD；
+
+与任务相关的 Maps；
+
+当历史背景确实重要时，查看最近相关 Change；
+
+为完成核验所需的真实代码、数据、日志或运行状态。
+
+当实现可以直接核验时，不得只依赖旧描述推测当前状态。
+
+5. 任务路由
+
+修改代码前，先判断任务属于哪一类。
+
+5.1 新需求或行为变化
+
+当任务符合以下任一情况时，使用本路径：
+
+新增能力；
+
+改变预期行为；
+
+改变契约或数据定义；
+
+改变主要流程或交互；
+
+改变验收标准；
+
+发现预期行为从未被明确规定。
+
+工作流程：
+
+更新相关 PRD；
+
+明确目标、范围、边界和验收标准；
+
+开发实现；
+
+使用最小有效范围进行验证；
+
+实现通过验证后，更新相关 Maps；
+
+当行为、契约、结构或运行方式发生实质变化时，记录重要 Change；
+
+提交聚焦本任务的修改。
+
+原则：
+
+PRD 在开发前记录意图，Maps 在开发后记录已验证事实。
+
+5.2 小 Bug
+
+当任务同时满足以下条件时，使用本路径：
+
+预期行为已经明确；
+
+不改变需求或契约；
+
+问题范围局部；
+
+可以直接验证修复效果。
+
+工作流程：
+
+复现 Bug；
+
+确认预期行为；
+
+找到根因；
+
+做最小必要修复；
+
+进行最小有效验证；
+
+提交聚焦本问题的修改。
+
+普通小 Bug 默认：
+
+不更新 PRD；
+
+除非实现关系发生变化，否则不更新 Maps；
+
+除非修复具有重要长期价值，否则不单独记录 Change；
+
+不顺带做无关重构；
+
+不运行无关的大范围测试；
+
+不为了形式增加流程或文档。
+
+如果预期行为本身不明确，必须把任务重新归类为“新需求或行为变化”。
+
+5.3 探索性实验
+
+适用于尚未确认的想法、备选实现、参数比较或技术可行性测试。
+
+工作流程：
+
+明确实验问题和判断标准；
+
+进行最小可用实验；
+
+评估结果；
+
+放弃该方案，或决定正式采用。
+
+未确认的实验阶段不更新正式 PRD 和 Maps。
+
+决定采用后，再进入“新需求或行为变化”路径。
+
+5.4 不改变行为的重构
+
+适用于外部行为保持不变的代码调整。
+
+工作流程：
+
+确认必须保持不变的行为；
+
+仅重构相关实现；
+
+验证受影响行为；
+
+如果代码入口、职责、依赖或数据流发生变化，更新 Maps；
+
+只有结构变化具有实质影响时才记录 Change。
+
+目标行为未变化时，不修改 PRD。
+
+5.5 数据修复或历史回填
+
+当数据违反现有规则时：
+
+确认正确的数据规则；
+
+明确影响范围；
+
+修复或回填数据；
+
+验证结果和重复执行行为；
+
+只有当修复明显改变实现记忆或项目历史时，才更新 Maps 或 Changes。
+
+如果变化的是数据规则本身，则使用“新需求或行为变化”路径。
+
+5.6 故障或紧急恢复
+
+当运行系统或关键流程发生故障时：
+
+确认故障事实和影响；
+
+优先恢复必要能力；
+
+定位根因；
+
+实现并验证修复；
+
+只有当事故暴露出实质性的实现、历史或操作变化时，才更新 Maps、Changes 或 Runbooks。
+
+不得因为先补文档而延误紧急恢复。
+
+6. 文档更新规则
+
+在以下情况下更新 PRD：
+
+目标行为发生变化；
+
+新需求被确认；
+
+验收标准变化；
+
+原需求未定义或存在歧义；
+
+契约或数据定义变化。
+
+在以下情况下更新 Maps：
+
+代码入口变化；
+
+模块职责变化；
+
+依赖关系或数据流变化；
+
+存储关系变化；
+
+任务或 Worker 关系变化；
+
+API 与前端关系变化；
+
+旧 Map 会导致后续开发从错误位置开始，或误解系统结构。
+
+在以下情况下更新 Changes：
+
+重要业务规则变化；
+
+重要契约变化；
+
+主要实现结构变化；
+
+重要流程变化；
+
+重大数据修复或兼容性变化。
+
+在以下情况下更新 Runbooks：
+
+可重复执行的操作步骤发生变化。
+
+不得为了让任务显得更完整，而更新与任务无关的文档。
+
+7. 工作原则
+
+7.1 先复现，再修改
+
+当问题可以被复现或核验时，不得仅凭直觉修改代码。
+
+7.2 优先解决根因
+
+避免通过堆叠特殊分支、重复逻辑或静默兜底来掩盖真实问题。
+
+7.3 最小必要修改
+
+修改范围应聚焦当前任务。
+
+没有明确理由时，不扩大任务范围。
+
+7.4 流程与风险匹配
+
+局部问题使用轻量流程。
+
+只有当需求、契约、结构、数据或运行方式真正受到影响时，才扩大文档和验证范围。
+
+7.5 最小有效验证
+
+验证范围应足以证明受影响行为正确，并覆盖最直接的回归风险。
+
+不得默认运行全系统测试、大范围重建或与当前修改无关的验证。
+
+7.6 如实保留不确定性
+
+未知、未验证、部分完成、阻塞和失败状态必须明确标记。
+
+没有证据时，不得声称代码、测试、部署、数据修复或运行行为已经成功。
+
+7.7 文档必须有用
+
+文档的目的，是降低未来理解和调试成本。
+
+不得让文档维护本身成为主要开发任务。
+
+7.8 避免过早抽象
+
+没有明确现实需求时，不得主动引入：
+
+新框架；
+
+新层级；
+
+通用抽象；
+
+治理系统；
+
+文档体系；
+
+额外流程。
+
+7.9 提交保持聚焦
+
+一个提交应尽量对应一个明确问题，或一组紧密相关的修改，并能够说明验证结果。
+
+8. 基础安全边界
+
+未经明确授权，不得：
+
+执行影响范围不明确的破坏性操作；
+
+删除持久化数据或资源的唯一副本；
+
+暴露或提交密钥、凭据或私钥；
+
+使用强制推送覆盖共享历史；
+
+静默改变已确认需求；
+
+用虚假的成功状态掩盖失败；
+
+新增未经确认的文档层或治理层；
+
+在处理局部任务时进行大范围无关修改。
+
+项目特定的高风险操作和环境约束，应记录在 rules/ 或对应 Runbook 中。
+
+9. 完成标准
+
+任务完成时，应满足：
+
+目标或问题已经明确；
+
+已确认相关根因或实现路径；
+
+修改范围与任务相匹配；
+
+受影响行为已得到有效验证；
+
+未验证结果没有被描述为事实；
+
+按上述规则完成必要的 PRD、Maps、Changes 或 Runbook 更新；
+
+提交内容保持聚焦。
+
+完成不以修改文件数量或创建文档数量衡量。
+
+完成的判断标准是：
+
+需求已经实现，或问题已经解决，并且相关行为得到了有效验证。

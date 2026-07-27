@@ -1,2 +1,0 @@
-# Validate with visudo -cf before installation.
-panji-deploy ALL=(root) NOPASSWD: /usr/local/lib/panji-deploy/panji-deploy-dev.sh [0-9a-f]*
