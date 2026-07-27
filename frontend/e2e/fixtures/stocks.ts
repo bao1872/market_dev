@@ -430,6 +430,7 @@ export function buildStrategyRunResults(symbol: string) {
 }
 
 // Access profile fixture（认证后的访问上下文）
+// [Phase 5B-2 PRD60 PA-01] capabilities 字段：三类独立权限（CapabilityRoute 守卫依赖）
 export const FIXTURE_ACCESS_PROFILE = {
   user_id: 'fixture-user',
   account_status: 'active',
@@ -442,6 +443,11 @@ export const FIXTURE_ACCESS_PROFILE = {
   expires_at: '2025-12-31T00:00:00Z',
   features: ['market', 'stock_detail', 'capture'],
   limits: { watchlist: 100, strategies: 10 },
+  capabilities: {
+    self_selection: { active: true, expires_at: null, watchlist_limit: 100 },
+    market_data: { active: true, expires_at: null, watchlist_limit: null },
+    research_replay: { active: true, expires_at: null, watchlist_limit: null },
+  },
 }
 
 // User fixture
@@ -453,6 +459,74 @@ export const FIXTURE_USER = {
   roles: ['member'],
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
+}
+
+// [Phase 5B-2] First Pyramid fixture（与 FirstPyramidSnapshot 接口字段对齐，camelCase）
+// 防止 E2E 默认 mock 返回 {items:[],total:0} 导致 FirstPyramidPanel.dim.events 为 undefined
+export function buildFirstPyramidSnapshot(symbol: string) {
+  const inst = FIXTURE_INSTRUMENTS[symbol] ?? FIXTURE_INSTRUMENTS['000001']
+  const buildDim = (
+    name: 'trend' | 'structure' | 'momentum' | 'chip_consensus',
+    available: boolean,
+    statusText: string,
+    events: unknown[] = [],
+  ) => ({
+    name,
+    available,
+    continuousFactors: {},
+    events,
+    statusText,
+    evidence: {},
+  })
+  return {
+    symbol: inst.symbol,
+    tradeDate: '2024-06-01',
+    orderedDimensions: ['trend', 'structure', 'momentum', 'chip_consensus'],
+    trend: buildDim('trend', true, '上升趋势', [
+      {
+        type: 'DSA',
+        direction: 'up',
+        occurredAt: '2024-05-28T00:00:00Z',
+        barIndex: 100,
+        price: 11.2,
+        freshnessBars: 3,
+      },
+    ]),
+    structure: buildDim('structure', true, 'BOS 确认', [
+      {
+        type: 'BOS',
+        direction: 'up',
+        occurredAt: '2024-05-30T00:00:00Z',
+        barIndex: 102,
+        price: 11.45,
+        freshnessBars: 2,
+      },
+    ]),
+    momentum: buildDim('momentum', true, '带宽扩张', [
+      {
+        type: 'SQZMOM',
+        direction: 'up',
+        occurredAt: '2024-05-29T00:00:00Z',
+        barIndex: 101,
+        price: 11.32,
+        freshnessBars: 3,
+      },
+    ]),
+    chipConsensus: buildDim('chip_consensus', true, '筹码峰上沿突破', [
+      {
+        type: 'PEAK_CROSS',
+        direction: 'up',
+        occurredAt: '2024-05-27T00:00:00Z',
+        barIndex: 99,
+        price: 11.1,
+        freshnessBars: 4,
+      },
+    ]),
+    statusText: '趋势/结构/动量/筹码 四维共振',
+    inputHash: 'fixture-input-hash-0001',
+    parameterHash: 'fixture-param-hash-0001',
+    algorithmVersion: '1.0.0',
+  }
 }
 
 // Strategies fixture

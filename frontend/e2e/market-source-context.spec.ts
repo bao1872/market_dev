@@ -63,7 +63,16 @@ test.describe('行情筛选来源上下文', () => {
       '[data-testid="next-stock"], button:has-text("下一只"), button:has-text("下一个"), [aria-label="下一只"]',
     ).first()
 
-    if (await nextButton.isVisible().catch(() => false)) {
+    // 同时检查 visible 和 enabled：
+    // - visible: 按钮已渲染（页面加载完成）
+    // - enabled: sourceStocks 已加载且当前股票在列表中（canNavigate=true）
+    // 缺少 sourceRunId/cq 参数时 sourceContextInvalid=true，按钮始终 disabled，
+    // 此时走 fallback 分支（手动跳转），同样验证 URL 保留 market 来源。
+    const isClickable =
+      (await nextButton.isVisible().catch(() => false)) &&
+      (await nextButton.isEnabled().catch(() => false))
+
+    if (isClickable) {
       await nextButton.click()
       await page.waitForTimeout(1000)
 
@@ -73,7 +82,7 @@ test.describe('行情筛选来源上下文', () => {
       expect(page.url()).toContain('source=selection')
       expect(page.url()).not.toContain('source=watchlist')
     } else {
-      // 如果没有下一只按钮，手动跳转下一只股票
+      // 如果没有下一只按钮或按钮 disabled，手动跳转下一只股票
       await page.goto('/stock/000002?returnTo=%2Fmarket%3Fscope%3Dmarket&originScope=market&source=selection&strategy=dsa_selector')
       await page.waitForTimeout(1000)
       expect(page.url()).toContain('originScope=market')

@@ -39,7 +39,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.constants.indicator_contract import DSA_LOOKBACK
+from app.constants.indicator_contract import DSA_LOOKBACK, NODE_CLUSTER_PRIMARY_BARS
 from app.schemas.first_pyramid import (
     FIRST_PYRAMID_ALGORITHM_VERSION,
     ORDERED_DIMENSIONS,
@@ -76,7 +76,7 @@ _FIRST_PYRAMID_PARAMS: dict[str, Any] = {
     "smc_default_params": SMC_DEFAULT_PARAMS,
     "bollinger_config": {"bb_win": 20, "bb_k": 2.0},
     "sqzmom_config": {"length": 20, "mult": 2.0, "lengthKC": 20, "multKC": 1.5, "useTrueRange": True},
-    "node_cluster_required_daily_bars": 250,
+    "node_cluster_required_daily_bars": NODE_CLUSTER_PRIMARY_BARS,
 }
 
 # 必选维度的最小 bar 数（前三维）

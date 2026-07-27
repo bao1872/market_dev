@@ -33,7 +33,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-import check_docs_consistency as cdc  # noqa: E402
+import check_docs_consistency as cdc
 
 # 测试用合法 SHA（40 位 hex，非真实提交，通过 mock 通过 git 校验）
 VALID_SHA = "a" * 40
@@ -41,15 +41,16 @@ ALT_SHA = "b" * 40
 
 
 def _manifest_content(sha: str = VALID_SHA) -> str:
-    """生成合法的 v2 MANIFEST.md 内容（含全局基线字段）。"""
+    """生成合法的 baseline 文档内容（含全局基线字段）。
+
+    [eaffb11 文档重构] baseline 字段从 docs/current/MANIFEST.md 迁移到
+    docs/maps/00-system-overview.md 的"核验提交"字段。
+    """
     return (
-        "# Current Docs Manifest\n\n"
-        "> 文档状态：CURRENT DESIGN BASELINE  \n"
-        f"> 实现核对基线：`{sha}`  \n"
-        "> 设计基线日期：2026-07-03  \n"
-        "> 注意：该文件是 v2 唯一基线头；其他 current 文档不再重复基线字段。\n\n"
-        "## 1. 文档状态定义\n\n"
-        "| 状态 | 含义 |\n|---|---|\n| CURRENT | 当前确认采用的设计 |\n"
+        "# 系统全貌 Map\n\n"
+        f"核验提交：`{sha}`（测试 mock）\n"
+        "> 本文件基于真实代码、数据、日志或运行结果填写。\n\n"
+        "## 1. 当前实现摘要\n\n测试占位。\n"
     )
 
 
@@ -65,11 +66,16 @@ def _setup_docs(
 ) -> Path:
     """在 tmp_path 下创建 v2 docs 结构并注入模块路径变量。
 
+    [eaffb11 文档重构] docs/current/ 替换为 docs/prd/；
+    MANIFEST baseline 改在 docs/maps/00-system-overview.md；
+    CHANGE records 在 docs/changes/records/ 或 docs/changes/YYYY/；
+    CHANGELOG.md 替换为 docs/changes/INDEX.md。
+
     Args:
         tmp_path: 临时目录
         monkeypatch: pytest monkeypatch
-        manifest: docs/current/MANIFEST.md 内容；None 则不创建
-        current_docs: {文件名: 内容} 字典，创建 docs/current/ 下的其他文档
+        manifest: docs/maps/00-system-overview.md 内容（含 baseline 字段）；None 则不创建
+        current_docs: {文件名: 内容} 字典，创建 docs/prd/ 下的文档
         maps_docs: {文件名: 内容} 字典，创建 docs/maps/ 下的文档
         archive_docs: {文件名: 内容} 字典，创建 docs/archive/current-legacy-20260703/ 下的文档
         readme: docs/README.md 内容
@@ -77,27 +83,31 @@ def _setup_docs(
 
     Returns:
         tmp_path（作为 REPO_ROOT）
-
-    说明：自动创建规则 13/15 要求的必需文件（08-indicator-calculation-contracts.md、
-    indicator-computation-map.md、CHANGE-20260718-004.md、CHANGELOG.md），
-    使 "passes" 场景在新规则下仍返回 rc==0。
     """
     docs_dir = tmp_path / "docs"
-    current_dir = docs_dir / "current"
+    # [eaffb11] docs/current/ 替换为 docs/prd/
+    current_dir = docs_dir / "prd"
     maps_dir = docs_dir / "maps"
     archive_dir = docs_dir / "archive" / "current-legacy-20260703"
     changes_dir = docs_dir / "changes"
     records_dir = changes_dir / "records"
+    changes_year_dir = changes_dir / "2026"
     current_dir.mkdir(parents=True, exist_ok=True)
     maps_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
     records_dir.mkdir(parents=True, exist_ok=True)
+    changes_year_dir.mkdir(parents=True, exist_ok=True)
 
     if readme is not None:
         (docs_dir / "README.md").write_text(readme, encoding="utf-8")
 
+    # [eaffb11] baseline 写入 docs/maps/00-system-overview.md
+    manifest_path = maps_dir / "00-system-overview.md"
     if manifest is not None:
-        (current_dir / "MANIFEST.md").write_text(manifest, encoding="utf-8")
+        manifest_path.write_text(manifest, encoding="utf-8")
+    else:
+        # 默认创建一个合法的 baseline 文件
+        manifest_path.write_text(_manifest_content(VALID_SHA), encoding="utf-8")
 
     if current_docs:
         for name, content in current_docs.items():
@@ -114,40 +124,42 @@ def _setup_docs(
     if agents is not None:
         (tmp_path / "AGENTS.md").write_text(agents, encoding="utf-8")
 
-    # 规则 13 必需新文档（若测试未显式提供则创建最小内容）
-    _required_current = "08-indicator-calculation-contracts.md"
-    _required_maps = "indicator-computation-map.md"
-    if not (current_dir / _required_current).exists():
-        (current_dir / _required_current).write_text(
-            "# 指标计算合同\n\nNode Cluster 语义合同（测试占位）。\n",
+    # [eaffb11] 规则 13 必需新文档改为 docs/prd/20-quant-model.md 和 docs/maps/20-quant-model.md
+    _required_prd = "20-quant-model.md"
+    _required_maps = "20-quant-model.md"
+    if not (current_dir / _required_prd).exists():
+        (current_dir / _required_prd).write_text(
+            "# 量化模型 PRD\n\n测试占位。\n",
             encoding="utf-8",
         )
     if not (maps_dir / _required_maps).exists():
         (maps_dir / _required_maps).write_text(
-            "# 指标计算地图\n\n三链指标计算入口地图（测试占位）。\n",
+            "# 量化模型 Map\n\n测试占位。\n",
             encoding="utf-8",
         )
 
-    # 规则 15 必需 CHANGE 记录 + CHANGELOG 引用
-    _change_id = "CHANGE-20260718-004"
-    _record_file = records_dir / f"{_change_id}.md"
-    if not _record_file.exists():
-        _record_file.write_text(
-            f"# {_change_id}\n\nNode Cluster 合同 + ref 隔离（测试占位）。\n",
+    # [eaffb11] 规则 15 必需 CHANGE 记录改为 CHANGE-20260726-001
+    _change_id = "CHANGE-20260726-001"
+    _record_file_new = changes_year_dir / f"{_change_id}-documentation-governance.md"
+    if not _record_file_new.exists():
+        _record_file_new.write_text(
+            f"# {_change_id}\n\n文档体系重构（测试占位）。\n",
             encoding="utf-8",
         )
-    _changelog = changes_dir / "CHANGELOG.md"
-    if not _changelog.exists():
-        _changelog.write_text(
-            f"# CHANGELOG\n\n- {_change_id}: Node Cluster 合同 + ref 隔离。\n",
+    # [eaffb11] CHANGELOG.md 替换为 INDEX.md
+    _index_file = changes_dir / "INDEX.md"
+    if not _index_file.exists():
+        _index_file.write_text(
+            f"# Change Index\n\n| Change ID | 日期 | 标题 |\n|---|---|---|\n"
+            f"| {_change_id} | 2026-07-26 | 文档体系重构 |\n",
             encoding="utf-8",
         )
 
-    # 注入模块路径变量（v2 新增 MANIFEST_FILE 与 MAPS_DIR）
+    # 注入模块路径变量
     monkeypatch.setattr(cdc, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(cdc, "DOCS_DIR", docs_dir)
     monkeypatch.setattr(cdc, "CURRENT_DIR", current_dir)
-    monkeypatch.setattr(cdc, "MANIFEST_FILE", current_dir / "MANIFEST.md")
+    monkeypatch.setattr(cdc, "MANIFEST_FILE", manifest_path)
     monkeypatch.setattr(cdc, "MAPS_DIR", maps_dir)
     monkeypatch.setattr(cdc, "ARCHIVE_DIR", archive_dir.parent)
     monkeypatch.setattr(cdc, "AGENTS_FILE", tmp_path / "AGENTS.md")

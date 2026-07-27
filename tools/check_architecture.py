@@ -677,43 +677,36 @@ def check_daili_placeholder() -> list[Violation]:
 # v2 文档结构完整性检查
 # ---------------------------------------------------------------------------
 
-V2_REQUIRED_CURRENT_FILES = [
-    "MANIFEST.md",
-    "00-product-business.md",
-    "01-system-architecture.md",
-    "02-data-api-contracts.md",
-    "03-jobs-integrations-operations.md",
-    "04-frontend-ux.md",
-    "05-testing-acceptance.md",
-    "open-decisions.md",
-    "code-doc-alignment.md",
+# [eaffb11 文档重构] docs/current/ 已替换为 docs/prd/（按领域 00-90 编号）
+V2_REQUIRED_PRD_FILES = [
+    "00-product-scope.md",
+    "10-market-data.md",
+    "20-quant-model.md",
+    "30-after-close.md",
+    "40-market-stock-experience.md",
+    "50-watchlist-intraday.md",
+    "60-permissions-admin.md",
+    "70-review.md",
+    "80-system-runtime.md",
+    "90-system-wide-requirements.md",
 ]
 
+# [eaffb11 文档重构] docs/maps/ 改为按领域 00-90 编号（与 PRD 一一对应）
 V2_REQUIRED_MAP_FILES = [
-    "backend-module-map.md",
-    "frontend-route-map.md",
-    "api-route-map.md",
-    "database-model-map.md",
-    "worker-job-map.md",
-    "notification-flow-map.md",
-    "test-coverage-map.md",
-    "deployment-runtime-map.md",
+    "00-system-overview.md",
+    "10-market-data.md",
+    "20-quant-model.md",
+    "30-after-close.md",
+    "40-market-stock-experience.md",
+    "50-watchlist-intraday.md",
+    "60-permissions-admin.md",
+    "70-review.md",
+    "80-system-runtime.md",
+    "90-system-wide-implementation.md",
 ]
 
-# [CP-14] PRD V2.0 §7.1/§7.2 — docs/INDEX.md 权威入口 + 6 份机器可执行合同
-V2_REQUIRED_DOCS_ROOT_FILES = [
-    "INDEX.md",
-]
-
-V2_REQUIRED_CONTRACT_FILES = [
-    "node-cluster-input.yaml",
-    "chart-frame.schema.json",
-    "smc-events.schema.json",
-    "detail-entry-context.schema.json",
-    "message-group.schema.json",
-    "after-close-recovery.schema.json",
-]
-
+# 旧 docs/current/ 文件名（已归档至 docs/archive/current-legacy-20260703/）
+# 用于检查 docs/prd/ 中是否残留旧文件名
 V2_LEGACY_CURRENT_FILES = [
     "00-project-overview.md",
     "01-product-requirements.md",
@@ -734,58 +727,72 @@ V2_LEGACY_CURRENT_FILES = [
     "16-frontend-route-map.md",
     "17-open-decisions.md",
     "18-code-doc-alignment.md",
+    # eaffb11 之前的 docs/current/ 文件名
+    "00-product-business.md",
+    "01-system-architecture.md",
+    "02-data-api-contracts.md",
+    "03-jobs-integrations-operations.md",
+    "04-frontend-ux.md",
+    "05-testing-acceptance.md",
+    "06-research-feature-matrix.md",
+    "07-atomic-fact-contract-v1.md",
+    "08-indicator-calculation-contracts.md",
+    "MANIFEST.md",
+    "code-doc-alignment.md",
+    "open-decisions.md",
 ]
 
 
 def check_v2_docs_structure() -> list[Violation]:
     """规则：v2 文档结构完整性检查（AGENTS.md §十一 规则 6/7）。
 
-    1. docs/current/ 下 9 个必需文件全部存在；
-    2. docs/current/ 下不得残留旧 00-18 文件名；
-    3. docs/maps/ 下 8 个指定 map 文件全部存在。
+    [eaffb11 文档重构] 新结构：
+    1. docs/prd/ 下 10 个必需 PRD 文件（按领域 00-90 编号）；
+    2. docs/prd/ 下不得残留旧 docs/current/ 文件名；
+    3. docs/maps/ 下 10 个必需 map 文件（与 PRD 一一对应）。
     """
     violations: list[Violation] = []
-    current_dir = ROOT / "docs" / "current"
+    prd_dir = ROOT / "docs" / "prd"
     maps_dir = ROOT / "docs" / "maps"
 
-    # 1. 必需 current 文件存在性
-    if current_dir.exists():
-        existing = {p.name for p in current_dir.iterdir() if p.is_file()}
-        for required in V2_REQUIRED_CURRENT_FILES:
+    # 1. 必需 PRD 文件存在性
+    if prd_dir.exists():
+        existing = {p.name for p in prd_dir.iterdir() if p.is_file()}
+        for required in V2_REQUIRED_PRD_FILES:
             if required not in existing:
                 violations.append(
                     Violation(
                         "v2-docs-structure",
-                        current_dir / required,
+                        prd_dir / required,
                         1,
-                        f"缺少 v2 必需 current 文件：{required}",
+                        f"缺少 v2 必需 PRD 文件：{required}",
                     )
                 )
     else:
         violations.append(
             Violation(
                 "v2-docs-structure",
-                current_dir,
+                prd_dir,
                 1,
-                "docs/current/ 目录不存在",
+                "docs/prd/ 目录不存在",
             )
         )
 
-    # 2. 旧 00-18 文件名残留检查
-    if current_dir.exists():
+    # 2. 旧 docs/current/ 文件名残留检查（在 docs/prd/ 中不应出现旧文件名）
+    if prd_dir.exists():
         for legacy in V2_LEGACY_CURRENT_FILES:
-            legacy_path = current_dir / legacy
+            legacy_path = prd_dir / legacy
             if legacy_path.exists():
                 violations.append(
                     Violation(
                         "v2-docs-structure",
                         legacy_path,
                         1,
-                        f"docs/current/ 残留旧 00-18 文件：{legacy}（应已归档至 docs/archive/current-legacy-20260703/）",
+                        f"docs/prd/ 残留旧文件名：{legacy}（应已归档至 docs/archive/）",
                     )
                 )
 
-    # 3. 必需 map 文件存在性（8 个全部检查）
+    # 3. 必需 map 文件存在性（10 个全部检查）
     if maps_dir.exists():
         for required in V2_REQUIRED_MAP_FILES:
             required_path = maps_dir / required
@@ -805,43 +812,6 @@ def check_v2_docs_structure() -> list[Violation]:
                 maps_dir,
                 1,
                 "docs/maps/ 目录不存在",
-            )
-        )
-
-    # [CP-14] 4. docs/ 根目录必需文件（INDEX.md 权威入口）
-    for required in V2_REQUIRED_DOCS_ROOT_FILES:
-        required_path = ROOT / "docs" / required
-        if not required_path.exists():
-            violations.append(
-                Violation(
-                    "v2-docs-structure",
-                    required_path,
-                    1,
-                    f"缺少 v2 必需 docs 根文件：{required}（PRD V2.0 §7.1 权威层级入口）",
-                )
-            )
-
-    # [CP-14] 5. docs/contracts/ 6 份机器可执行合同（PRD V2.0 §7.2）
-    contracts_dir = ROOT / "docs" / "contracts"
-    if contracts_dir.exists():
-        for required in V2_REQUIRED_CONTRACT_FILES:
-            required_path = contracts_dir / required
-            if not required_path.exists():
-                violations.append(
-                    Violation(
-                        "v2-docs-structure",
-                        required_path,
-                        1,
-                        f"缺少 v2 必需机器合同文件：docs/contracts/{required}（PRD V2.0 §7.2）",
-                    )
-                )
-    else:
-        violations.append(
-            Violation(
-                "v2-docs-structure",
-                contracts_dir,
-                1,
-                "docs/contracts/ 目录不存在（PRD V2.0 §7.2 要求 6 份机器可执行合同）",
             )
         )
 

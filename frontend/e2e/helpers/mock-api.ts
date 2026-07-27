@@ -23,6 +23,7 @@ import {
   buildChartSnapshot,
   buildCaptureSnapshot,
   buildStrategyRunResults,
+  buildFirstPyramidSnapshot,
 } from '../fixtures/stocks'
 
 export interface MockApiCall {
@@ -62,6 +63,13 @@ export async function injectAuthState(page: Page, opts: { captureMode?: boolean 
       features: ['market', 'stock_detail', 'capture'],
       limits: { watchlist: 100, strategies: 10 },
       expires_at: '2025-12-31T00:00:00Z',
+      // [Phase 5B-2 PRD60 PA-01] capabilities：CapabilityRoute 守卫依赖
+      // 缺失会导致 /stock/:symbol 等路由重定向到 /forbidden，E2E URL 断言失败
+      capabilities: {
+        self_selection: { active: true, expires_at: null, watchlist_limit: 100 },
+        market_data: { active: true, expires_at: null, watchlist_limit: null },
+        research_replay: { active: true, expires_at: null, watchlist_limit: null },
+      },
     }
     if (captureMode) {
       localStorage.setItem('capture_token', token)
@@ -194,6 +202,15 @@ export async function setupMockApi(
       const indicatorView = includeSmc ? 'smc' : defaultIndicatorView
       const snapshot = buildChartSnapshot(symbol, timeframe, indicatorView)
       return route.fulfill({ status: 200, json: snapshot })
+    }
+
+    // === First Pyramid（详情页四维状态面板） ===
+    // 后端路径：/api/v1/stocks/{symbol}/first-pyramid
+    // 必须先于默认 200 空响应匹配，否则 FirstPyramidPanel 会因 dim.events undefined 抛错
+    if (url.includes('/first-pyramid')) {
+      const m = url.match(/\/stocks\/([^/?]+)\/first-pyramid/)
+      const symbol = m?.[1] ?? '000001'
+      return route.fulfill({ status: 200, json: buildFirstPyramidSnapshot(symbol) })
     }
 
     // === Capture Snapshot ===
