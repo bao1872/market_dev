@@ -85,7 +85,7 @@
 | 服务器 experiment 归档 | **[Phase 5A]** 服务器原 `experiment`（tip `623ad87`，含 16 个 V2.1 唯一提交）已归档为 annotated tag `archive/server-experiment-wip-20260727`（tag object `40fb4ab2`），tag 已推送 origin 并用 `git ls-remote` 验证；服务器删除分叉的本地 `experiment` 后按 `origin/experiment` 重新创建 tracking 分支 |
 | 非保留分支 | 本地/origin 非 main/dev/experiment 分支已删除；已创建 6 个 `archive/*-YYYYMMDD` annotated tag 保存唯一提交（Phase 4 的 5 个 + Phase 5A 的 `archive/server-experiment-wip-20260727`） |
 | 服务器分支 | `/root/web_dev` 当前检出 `main`，工作区干净；服务器本地保留 `main`/`dev`/`experiment`，均与 origin 对齐 |
-| ref/sync 仓库清理 | **[Phase 5B-0]** `dev`/`experiment` 已通过 `git rm --cached ref/smc_user_source.pine` + `git rm sync/README.md` 退出跟踪；`origin/dev`、`origin/experiment` 树中 `git ls-tree -r` 无 `ref/`/`sync/`；本地 `ref/` 实体保留；`sync/` 已从本地删除；`.gitignore` 加入 `/ref/` 与 `/sync/` |
+| ref/sync 仓库清理 | **[Phase 5B-0]** `dev`/`experiment` 已通过 `git rm --cached ref/smc_user_source.pine` + 退出跟踪 sync 目录入口（不作为运行时依赖）；`origin/dev`、`origin/experiment` 树中 `git ls-tree -r` 无 `ref/`/`sync/`；本地 `ref/` 实体保留；`sync/` 已从本地删除；`.gitignore` 加入 `/ref/` 与 `/sync/` |
 | CI 防误推 | **[Phase 5B-0]** `.github/workflows/ci.yml` governance-rules job 新增显式检查 `git ls-files ref sync` 必须为空；`backend/tests/test_ref_isolation.py` 守护 `git ls-files ref/` 与 `git ls-files sync/` 均为空；双重防护确保未来误推被 CI 拒绝 |
 | main PR 状态 | **[Phase 5B-0]** origin/main 仍含 `ref/smc_user_source.pine`，需通过 dev → main PR 合并清理；本轮不创建/合并 PR，等待用户授权 |
 | main 自动部署 | 代码已准备，链路未启用；`.github/workflows/deploy-production.yml` 监听 `workflow_run`（CI success on main）和 `workflow_dispatch`；SSH 调用 `/usr/local/bin/panji-deploy.sh` |
