@@ -125,7 +125,8 @@ if __name__ == "__main__":
     }
     assert cols == expected, f"UserCapability 列不匹配: {cols ^ expected}"
     # 唯一约束
-    uqs = [c.name for c in UserCapability.__table__.constraints if c.name == "uq_user_capabilities_user_capability"]
+    table_constraints = getattr(UserCapability.__table__, "constraints", [])
+    uqs = [c.name for c in table_constraints if c.name == "uq_user_capabilities_user_capability"]
     assert len(uqs) == 1, "缺少 (user_id, capability) 唯一约束"
     print(f"UserCapability columns={sorted(cols)}")
     print("OK: UserCapability 模型表结构验证通过")

@@ -103,24 +103,27 @@ class AccessContext(BaseModel):
 
 def _infer_capabilities_from_plan(
     plan_code: str | None,
+    plan_monitor_limit: int | None,
     expires_at: datetime | None,
     subscription_active: bool,
 ) -> dict[str, dict[str, Any]]:
     """从 plan_code 推断 capabilities（兼容期 fallback，旧用户无 user_capabilities 行）。
 
     PRD60 权限矩阵：
-    - observe_20 → self_selection(limit=20) + market_data
-    - research_50 → self_selection(limit=50) + market_data + research_replay
+    - observe_20 → self_selection + market_data（watchlist_limit 从 plans 表读取）
+    - research_50 → self_selection + market_data + research_replay
     - 其他 → 空（无 capability）
+
+    watchlist_limit 从 plan.monitor_limit 读取，避免硬编码套餐数值。
     """
     if plan_code == "observe_20":
         return {
-            "self_selection": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": 20},
+            "self_selection": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
             "market_data": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
         }
     if plan_code == "research_50":
         return {
-            "self_selection": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": 50},
+            "self_selection": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
             "market_data": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
             "research_replay": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
         }
@@ -218,6 +221,10 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
     cap_result = await db.execute(cap_stmt)
     cap_rows = cap_result.scalars().all()
 
+    # [PlanService] - 描述: 复用 plan_service.get_plan 读取套餐定义（唯一真源）
+    # 提前到 capability 推断之前，便于 fallback 读取 monitor_limit（避免硬编码套餐数值）
+    plan = await get_plan(db, plan_code)
+
     if cap_rows:
         # 优先使用 user_capabilities 表（per-capability 独立 expires_at）
         now_utc = datetime.now(cap_rows[0].expires_at.tzinfo) if cap_rows[0].expires_at.tzinfo else datetime.now()
@@ -231,10 +238,11 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             }
     else:
         # Fallback: 从 plan_code 推断（兼容期，旧用户无 user_capabilities 行）
-        capabilities = _infer_capabilities_from_plan(plan_code, expires_at, subscription_active)
+        # watchlist_limit 从 plan.monitor_limit 读取，避免硬编码套餐数值
+        capabilities = _infer_capabilities_from_plan(
+            plan_code, plan.monitor_limit if plan else None, expires_at, subscription_active
+        )
 
-    # [PlanService] - 描述: 复用 plan_service.get_plan 读取套餐定义（唯一真源）
-    plan = await get_plan(db, plan_code)
     return AccessContext(
         user_id=str(user.id),
         account_status=user.status,

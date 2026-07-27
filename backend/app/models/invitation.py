@@ -86,7 +86,8 @@ class InviteCode(Base):
         comment="兑换后增加的自然月数（优先于 grant_days，用 relativedelta 计算）",
     )
     # [Phase 5B-2 PRD60 PA-20] 邀请码 capability 组合（新邀请码优先使用，旧邀请码 fallback 到 plan_code）
-    # 格式: [{"capability": "self_selection", "months": 1, "watchlist_limit": 20}, ...]
+    # 格式: [{"capability": "self_selection", "months": 1, "watchlist_limit": <int>}, ...]
+    # watchlist_limit 由管理员创建邀请码时指定（仅 self_selection），数值不硬编码
     # 为 NULL 时回退到 plan_code/monitor_limit/grant_months 旧逻辑
     capabilities: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSONB(astext_type=Text(), none_as_null=True),
