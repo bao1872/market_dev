@@ -67,7 +67,19 @@ IDE 不是运行环境。TRAE CN 或其他 IDE 只是开发和操作工具。
 
 `main` 分支经 PR 合并且 CI 通过后，应自动部署到腾讯云稳定运行服务器。
 
-本轮只记录目标，不实现部署 workflow。部署实现包括 SSH、Docker Compose 拉取、健康检查和回滚等，在后续阶段建设。
+自动部署必须满足：
+
+- 接收精确 commit SHA，且该 SHA 必须属于 `origin/main`；
+- 部署串行执行（`flock` 锁），不取消进行中的部署；
+- 远程 `/root/web_dev` 工作区不干净或当前分支不是 `main` 时拒绝部署；
+- CI 门禁通过后才触发部署；
+- 部署后检查端口 80、`/health`、`/health/ready`、`/version` 的 `runtime_git_sha`、关键容器和 Scheduler 单实例；
+- 失败时回滚代码和应用容器，但不回滚数据库、不自动执行 Alembic migration；
+- 普通代码变更使用 Live Mount，不重建镜像；依赖 / Dockerfile / Compose 核心变化时重建镜像；
+- 纯文档 / 治理 / 部署脚本变更跳过应用部署；
+- 永不执行 `docker compose down -v`，不删除 / 重建 PostgreSQL 和 Redis Volume。
+
+当前状态：部署脚本 `scripts/deploy/panji-deploy.sh` 与 GitHub Actions workflow `.github/workflows/deploy-production.yml` 已准备，但服务器侧入口与 GitHub Secrets 尚未启用，因此自动部署链路尚未激活。
 
 ## 3. PostgreSQL
 
@@ -97,6 +109,10 @@ IDE 不是运行环境。TRAE CN 或其他 IDE 只是开发和操作工具。
 - 锁；
 - 缓存；
 - 临时运行状态。
+
+### SR-31.1 本地 Redis DB15 正式保留
+
+远程 Redis 配置 `databases=16`，DB15 存在且 `DBSIZE=0`；生产 `docker-compose.prod.yml`、生产脚本和生产业务代码均使用 DB 0，未引用 DB15；无其他项目用途记录。因此 DB15 正式保留为本地开发临时状态隔离库。
 
 ### SR-32 本地 Redis 安全启动
 

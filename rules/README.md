@@ -8,9 +8,11 @@
 
 - `AGENTS.md` 是项目入口、规则路由器和最高安全边界。
 - `rules/` 是详细强制规则的正式位置，已正式生效。
-- `AGENTS.md` 与 `rules/` 共同构成项目强制规则体系；当两者出现冲突时，以 `AGENTS.md` 第十节"最高风险禁止项"为最高边界，其余以更具体的一方为准。
-- `docs/current/` 仍是当前项目事实源；`docs/maps/` 仍是代码地图源。
-- `sync/` 不是正式真源，仅作为临时中转站与结构建议参考输入，不得作为运行时依赖。
+- `AGENTS.md` 与 `rules/` 共同构成项目强制规则体系；当两者出现冲突时，以 `AGENTS.md` 第八节"基础安全边界"为最高边界，其余以更具体的一方为准。
+- `docs/prd/` 是已确认需求和目标行为的事实源。
+- `docs/maps/` 是已核验当前实现和项目记忆的事实源。
+- `docs/current/` 已随 Phase 2 文档重构删除，不再作为事实源。
+- `sync/` 不是正式真源，已随 Phase 2 文档重构删除；不得作为运行时依赖。
 
 ## 内容来源
 
@@ -18,11 +20,9 @@
 
 1. 用户当前明确要求；
 2. 当前根 `AGENTS.md`（入口与路由器）；
-3. 当前 `docs/current/MANIFEST.md` 与 `docs/current/*`；
-4. 当前代码、测试与部署合同；
-5. `sync/panji_agents_rules_maps_autodeploy_v2/rules/` 草案（结构与建议）。
-
-`sync/` 草案只提供结构与建议，不得覆盖当前真实合同。冲突时采用当前正式合同，并在 `AGENTS-MIGRATION-MAP.md` 与 CHANGE 记录中标注。
+3. 当前 `docs/prd/*`、目标行为 PRD；
+4. 当前 `docs/maps/*`、已核验实现；
+5. 当前代码、测试与部署合同。
 
 ## 文件索引
 
@@ -68,8 +68,8 @@
 ## 与现有文档的关系
 
 - `AGENTS.md`：项目入口、规则路由器、最高安全边界。
-- `docs/current/`：当前项目事实源。
-- `docs/maps/`：代码地图源。
-- `docs/changes/`：历史变更记录源。
-- `docs/runbooks/`：操作手册源。
-- 根 `maps/`：当前不创建（未来阶段评估）。
+- `docs/prd/`：已确认需求和目标行为的事实源。
+- `docs/maps/`：已核验当前实现和项目记忆的事实源。
+- `docs/changes/`：重要历史变更记录源。
+- `docs/runbooks/`：可重复操作步骤源。
+- Git 历史：普通代码修改、小 Bug 和具体开发历史。

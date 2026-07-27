@@ -1,10 +1,10 @@
 # 系统运行体系 Map
 
-核验状态：已基于本地原生启动核验（第一阶段）
-最后核验日期：2026-07-26
+核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）
+最后核验日期：2026-07-27
 核验分支：dev
-核验提交：06bf5109b07a966207e7203e2b2ba12c7e12388d
-核验范围：本地原生 Backend / Frontend 启动、共享 PostgreSQL / Redis 连接、Scheduler / Worker 默认关闭
+核验提交：79f5965633e2e636075626572a198fbbd707c43f（本地）；远程 origin/main=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf
+核验范围：本地原生 Backend / Frontend 启动、共享 PostgreSQL / Redis 连接、Scheduler / Worker 默认关闭；远程只读审计（Git/Compose/容器/Redis/健康检查）
 对应 PRD：`../prd/80-system-runtime.md`
 事实所有权：本地原生进程、远程 Docker Compose、Git、配置、数据库、Redis、Scheduler、CI 和部署事实
 
@@ -23,14 +23,16 @@
 | SR-32 本地 Redis 安全启动 | `backend/app/config.py` `_resolve_redis_url` / `_validate_redis_url` | 已核验 | 单元测试 `test_config_validation.py` 通过 |
 | SR-40 至 SR-43 Scheduler、Worker 和手动入口 | `backend/app/worker.py` 手动入口；Backend 不启动 Scheduler；本地 lifespan 跳过维护写入 | 已核验 | 进程列表无 scheduler/worker；后端日志无 seed/calendar/recovery；lifespan 测试通过 |
 | SR-50 至 SR-52 代码、配置和承载边界 | 同一套代码；配置通过 `.env` / `CONFIG_FILE` / `config.local.py` 差异化 | 已核验 | 本地与远程共用 `app.main:app` 和 `frontend/src` |
-| SR-60 至 SR-62 部署、Volume 和 Nginx | 远程 `docker-compose.prod.yml` 保留；本地不启动 Nginx 容器 | 未核验 | 本阶段只读不修改远程 |
+| SR-14 稳定版本自动部署 | `.github/workflows/deploy-production.yml` + `scripts/deploy/panji-deploy.sh` 已准备；服务器侧 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件、GitHub Secrets 尚未启用 | 代码已准备 / 链路未启用 | workflow 与脚本存在；远程无安装；未触发真实部署 |
+| SR-31.1 本地 Redis DB15 正式保留 | 远程 Redis `databases=16`，DB15 存在且 `DBSIZE=0`；生产 Compose、生产脚本、业务代码均使用 DB 0，未引用 DB15 | 已确认 | 远程 `CONFIG GET databases` / `INFO keyspace` / `SELECT 15 DBSIZE`；仓库 grep 未在 prod 引用 /15 |
+| SR-60 至 SR-62 部署、Volume 和 Nginx | 远程 `docker-compose.prod.yml` 保留；`trading-postgresdata`、`trading-redisdata`、`trading-capture-static` Volume 存在；Nginx 监听 80 | 已核验（只读） | 远程 docker ps / docker volume ls / curl :80 |
 
 ## 2. 运行位置
 
 | 位置 | 代码目录 | 分支/SHA | 承载方式 | 主要用途 | 自动 Scheduler |
 |---|---|---|---|---|---|
-| 本地 | `/Users/zhenbao/Desktop/coding/market_dev` | `dev` / `405d3ee` | 原生 Python 3.11 venv + Uvicorn；Node.js + Vite | 开发和手动调试 | 关闭 |
-| 远程 | `/root/web_dev` | `main`/稳定 SHA 待核验 | Docker Compose | 稳定运行 | 应开启，未核验 |
+| 本地 | `/Users/zhenbao/Desktop/coding/market_dev` | `dev` / `79f5965` | 原生 Python 3.11 venv + Uvicorn；Node.js + Vite | 开发和手动调试 | 关闭 |
+| 远程 | `/root/web_dev` | 当前检出 `refactor/invite-capability-access-v2` / `0f17e7d`；运行版本对应 `origin/main` `13a0ef3`；工作区不干净 | Docker Compose | 稳定运行 | 已运行（bars/strategy/calendar scheduler 各 1 实例） |
 
 ### 远程服务器身份
 
@@ -40,8 +42,10 @@
 | 权威公网 IP | `43.136.118.82` |
 | 项目 SSH 别名 | `panji-prod`（定义于 `~/.ssh/config`，HostName 必须为 `43.136.118.82`） |
 | 远程代码目录 | `/root/web_dev` |
-| 生产 Compose | `docker-compose.prod.yml` |
-| 自动部署状态 | 未实施；当前 `main` 合并不触发自动部署，需手动 SSH 部署 |
+| 生产 Compose | `docker-compose.prod.yml` + `docker-compose.live.yml`（Live Mount） |
+| CI Workflow | `.github/workflows/ci.yml`，名称为 `CI`；`dev` push / PR 到 `main` 触发；当前任务包含架构规则、文档一致性、测试白名单、治理规则、Reports、Ruff、Mypy、Alembic、PostgreSQL 集成测试、前端 TSC/Lint/Build/Contract/E2E |
+| 自动部署代码 | 已准备：`.github/workflows/deploy-production.yml`、`scripts/deploy/panji-deploy.sh`；支持精确 SHA、`--dry-run`、`flock` 串行、健康检查、失败回滚 |
+| 自动部署状态 | 未启用；服务器侧 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件、GitHub Secrets 尚未配置；本轮未触发任何真实部署 |
 
 > 涉及远程服务器、数据库、Redis、路径和端口时，必须先读取本节。聊天记忆和本机任意 SSH 别名（如 `55-server`）不能作为权威来源。`55-server` 解析到 `120.234.137.109`，不是盘迹生产服务器，禁止用于盘迹操作。
 
@@ -75,11 +79,11 @@
 
 | 项目 | 当前事实 |
 |---|---|
-| `dev` | 本地当前分支；已跟踪 `origin/dev`；本地领先 3 个提交（`a817595`、`eaffb11`、`405d3ee`） |
-| `main` | 远程稳定分支，最新 SHA 未核验 |
+| `dev` | 本地当前分支；已跟踪 `origin/dev`；本地领先 4 个提交（`a817595`、`eaffb11`、`405d3ee`、`79f5965`） |
+| `main` | 远程稳定分支；`origin/main` SHA = `13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf`；当前运行版本一致 |
 | dev push | 本阶段未 push；按 PRD 应只触发 CI，不自动部署 |
-| main 自动部署 | 未实施；PRD 目标为 `main` 经 PR 合并且 CI 通过后自动部署腾讯云，本轮只写目标不实现 workflow |
-| CI gate | 未核验 |
+| main 自动部署 | 代码已准备，链路未启用；`.github/workflows/deploy-production.yml` 监听 `workflow_run`（CI success on main）和 `workflow_dispatch`；SSH 调用 `/usr/local/bin/panji-deploy.sh` |
+| CI gate | 已核验配置：`.github/workflows/ci.yml` 存在，名称为 `CI`，与 workflow_run 引用一致 |
 
 ## 5. PostgreSQL
 
@@ -98,26 +102,36 @@
 |---|---|---|
 | 实例 | 同一共享实例 | 同一共享实例 |
 | 承载 | 不在本地启动容器 | Docker 容器 `trading-redis` |
-| 逻辑 DB | DB 15（临时使用，尚未正式保留） | DB 0 |
-| 队列 | 未启动 Worker，无队列写入 | 未核验 |
-| 锁 | 未使用 | 未核验 |
-| 缓存 | 未启用 | 未核验 |
+| 逻辑 DB | DB 15（已正式保留给本地开发临时状态） | DB 0 |
+| 队列 | 未启动 Worker，无队列写入 | DB0 keys=5300（含队列/锁/缓存/临时状态） |
+| 锁 | 未使用 | DB0 内 |
+| 缓存 | 未启用 | DB0 内 |
 
-> DB 15 为第二阶段本地开发临时选定的隔离逻辑库，尚未获得项目层面的正式保留依据。在未确认前，不得启动任何 Worker。
+> DB 15 正式保留依据：远程 Redis 配置 `databases=16`；DB15 存在且 `DBSIZE=0`；`docker-compose.prod.yml`、生产脚本、生产业务代码均使用 DB 0，未引用 DB15；无其他项目用途记录。本地 `.env.example`、测试和 `scripts/deploy/` 等仍不指向 DB15。Worker 启动前仍需确认 `REDIS_URL` 以 `/15` 结尾。
 
 ## 7. 远程 Docker Compose 服务
 
 本节只记录腾讯云远程稳定运行，不作为本地启动依据。
 
-| 服务 | Compose 定义 | 依赖 | 端口 | Volume |
-|---|---|---|---|---|
-| frontend | `docker-compose.prod.yml` | 待核验 | 待核验 | 待核验 |
-| backend | `docker-compose.prod.yml` | 待核验 | 待核验 | 待核验 |
-| scheduler | `docker-compose.prod.yml` | 待核验 | - | 待核验 |
-| workers | `docker-compose.prod.yml` | 待核验 | - | 待核验 |
-| nginx | `docker-compose.prod.yml` | frontend/backend | 80 | 待核验 |
-| PostgreSQL | `docker-compose.prod.yml` | - | 5432 | 核心数据 |
-| Redis | `docker-compose.prod.yml` | - | 6379 | 持久化待核验 |
+| 服务 | 容器名 | Compose 定义 | 依赖 | 端口 | Volume / 备注 |
+|---|---|---|---|---|---|
+| nginx + 前端 | `trading-frontend` | `docker-compose.prod.yml` | backend | `0.0.0.0:80->80/tcp` | `capture_static` 挂载到 `/usr/share/nginx/html/static/captures` |
+| backend | `trading-backend` | `docker-compose.prod.yml` | redis, postgres | `0.0.0.0:8000->8000/tcp` | `./doc:/doc:ro`；`/etc/market-dev/config.production.py:/app/app/config.production.py:ro` |
+| bars scheduler | `trading-worker-bars-scheduler` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=bars_scheduler` |
+| strategy scheduler | `trading-worker-strategy-scheduler` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=strategy_scheduler` |
+| calendar scheduler | `trading-worker-calendar` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=calendar_scheduler` |
+| monitor | `trading-worker-monitor` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=monitor_scheduler` |
+| strategy batch | `trading-worker-strategy-batch` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=strategy_batch` |
+| outbox | `trading-worker-outbox` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=outbox` |
+| delivery | `trading-worker-delivery` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=delivery` |
+| after-close orchestrator | `trading-worker-after-close` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=after_close_orchestrator` |
+| watchdog | `trading-worker-watchdog` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=watchdog` |
+| capture | `trading-worker-capture` | `docker-compose.prod.yml` | redis, postgres | `0.0.0.0:8001->8001/tcp` | 独立 Dockerfile.capture；healthcheck 健康 |
+| PostgreSQL | `trading-postgres` | `docker-compose.prod.yml` | - | `5432/tcp` | `trading-postgresdata`；healthcheck 健康 |
+| PostgreSQL (test) | `trading-postgres-test` | `docker-compose.prod.yml` | - | `0.0.0.0:5433->5432/tcp` | 持久化卷待核验 |
+| Redis | `trading-redis` | `docker-compose.prod.yml` | - | `6379/tcp` | `trading-redisdata`；`appendonly yes`；healthcheck 健康 |
+
+> 远程 Compose 文件默认 `REDIS_URL=redis://redis:6379/0`，所有生产服务共用 DB 0。`docker-compose.live.yml` 叠加后将 `/opt/panji-live` 的运行时代码只读挂载到 Python 服务与 capture worker，实现代码热更新而不重建镜像。
 
 ## 8. 代码和承载边界
 
@@ -149,19 +163,24 @@
 
 ### 远程
 
-- 容器对应 SHA：未核验
-- 前端和后端是否为同一稳定版本：未核验
-- 端口 80 页面：未核验
-- Scheduler 是否运行：未核验
-- Worker 是否消费远程 Redis DB：未核验
-- 数据服务未被误重建：未操作远程
+- 容器对应 SHA：`/version` 返回 `runtime_git_sha=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf`，与 `origin/main` 一致
+- 当前检出分支：`refactor/invite-capability-access-v2`，HEAD `0f17e7d`，工作区存在未提交修改；运行版本仍为 `origin/main` 的 `13a0ef3`
+- 端口 80 页面：HTTP 200
+- `/health`：`{"status":"ok","service":"trading-platform","version":"1.1.0"}`
+- `/health/ready`：`{"status":"ready"}`
+- `/version`：`deployment_mode=live`，`alembic_revision=067_scheduler_job_runs_lease_epoch_attempt_no`
+- Scheduler 是否运行：`trading-worker-bars-scheduler`、`trading-worker-strategy-scheduler`、`trading-worker-calendar` 各 1 实例
+- Worker 是否消费远程 Redis DB：生产服务均配置 `REDIS_URL=redis://redis:6379/0`，DB0 当前 keys=5300
+- 数据服务未被误重建：未执行 down / volume 删除；`trading-postgresdata`、`trading-redisdata` 存在
 
 ## 10. 已知偏差与风险
 
 - 本地 `docker-compose.yml` 仍保留 redis 服务，虽然 `Makefile` 已标记 `up/down` 废弃，但文件本身仍可能误导新开发者。本轮按任务要求不删除，仅标记“非本地开发入口”。
-- 本地 Redis DB 15 为临时使用，尚未获得项目层面正式保留依据；在确认前不得启动 Worker。
+- 本地 Redis DB 15 已正式保留为本地开发临时状态隔离库，但 Worker 启动前仍需确认 `REDIS_URL` 以 `/15` 结尾。
 - 本地与远程共享 PostgreSQL，开发中的破坏性操作需要额外注意；当前未做权限只读限制。
-- 远程运行细节（Compose 服务、Scheduler、Worker、Nginx、Volume）本阶段未核验。
+- 远程 `/root/web_dev` 当前检出的不是 `main`（而是 `refactor/invite-capability-access-v2`），且工作区不干净；运行版本与 `origin/main` 一致，但 deploy 脚本在启用后会因“工作区不干净 / 非 main 分支”而拒绝部署，需要先人工清理。
+- 自动部署代码已准备但尚未启用：服务器侧缺少 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件和 GitHub Secrets；`.github/workflows/deploy-production.yml` 尚未合并到 `main`，因此不会触发真实部署。
+- 远程 PostgreSQL test 容器 (`trading-postgres-test`) 映射 5433 端口，其用途和持久化策略尚未核验。
 
 ## 11. 更新触发条件
 

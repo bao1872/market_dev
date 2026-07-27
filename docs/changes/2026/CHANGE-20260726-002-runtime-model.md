@@ -22,7 +22,8 @@
 - 本地基线提交 `a817595 chore: align local runtime setup with native Python/Node.js`
 - 本地基线提交 `eaffb11 docs: restructure docs and rules layout`
 - 第二阶段提交 `405d3ee chore(runtime): phase 2 local runtime safety hardening`
-- 第二阶段最终收口提交（本轮）：修正 SSH 身份为 `panji-prod`（43.136.118.82），从项目引用中移除错误的 `55-server`，更新 Maps/Runbook/AGENTS
+- 第二阶段最终收口提交：修正 SSH 身份为 `panji-prod`（43.136.118.82），从项目引用中移除错误的 `55-server`，更新 Maps/Runbook/AGENTS
+- 第三阶段提交（本轮）：`79f5965` 之后的 Phase 3 工作，包含文档治理、DB15 保留审计、远程只读审计、自动部署代码、安全 dry-run 与文档更新
 
 替代：
 
@@ -89,6 +90,43 @@
 - `main` 用于远程稳定版本；
 - 腾讯云继续通过 Docker Compose 运行后端、前端、Worker、Scheduler、PostgreSQL、Redis、Nginx 等正式服务；
 - 远程保持每日盘后自动运行和手动补跑能力。
+
+### 文档治理（Phase 3）
+
+- `rules/README.md` 移除对已删除的 `docs/current/` 和 `sync/` 的引用，明确事实源为 `AGENTS.md`、`rules/`、`docs/prd/`、`docs/maps/`、`docs/changes/`、`docs/runbooks/`；
+- 不修改其他 Rules 和业务 PRD。
+
+### Redis DB15 正式保留（Phase 3）
+
+- 远程 Redis 配置 `databases=16`，DB15 存在且 `DBSIZE=0`；
+- 生产 `docker-compose.prod.yml`、生产脚本和生产业务代码均使用 DB 0，未引用 DB15；
+- 无其他项目用途记录；
+- PRD80 新增 SR-31.1，正式将 DB15 保留为本地开发临时状态隔离库；
+- 本地 Worker 启动前仍需确认 `REDIS_URL` 以 `/15` 结尾。
+
+### 自动部署代码（Phase 3）
+
+- 新建 `scripts/deploy/panji-deploy.sh`：
+  - 接收精确 SHA，支持 `--dry-run`；
+  - `flock` 串行锁；
+  - 验证 SHA 属于 `origin/main`；
+  - 工作区不干净或非 `main` 分支即失败；
+  - 记录 `previous`/`last-good` SHA；
+  - Compose config 校验；
+  - 按变更范围分类（docs-only 跳过、frontend、backend + shared workers、image 重建、all）；
+  - 永不执行 `docker compose down -v`，不删除 / 重建 PostgreSQL / Redis Volume；
+  - 不自动执行 Alembic migration；
+  - 部署后检查端口 80、`/health`、`/health/ready`、`/version` runtime SHA、关键容器、Scheduler 单实例；
+  - 失败回滚代码和应用容器，不回滚数据库。
+- 新建 `.github/workflows/deploy-production.yml`：
+  - 仅在 CI 成功且分支为 `main` 时自动触发，或手动 `workflow_dispatch`；
+  - 最小 `permissions: contents: read`；
+  - `concurrency` 串行且不取消进行中任务；
+  - 使用 `production` environment；
+  - SSH 调用远程固定脚本并传 SHA；
+  - 不保存数据库 / JWT secret。
+- 新建 `docs/runbooks/production-deployment.md`，记录 Secrets 名称、服务器安装清单、启用、手动部署、dry-run、回滚、验证和故障排查，不含密钥值。
+- 当前状态：代码已准备，服务器侧入口与 GitHub Secrets 尚未启用，自动部署链路未激活。
 
 ### 代码与配置
 
@@ -172,10 +210,10 @@
 仍待处理：
 
 - `docker-compose.yml` 本地文件仍保留 redis 服务，建议在确认无调用方后删除或重命名；
-- 远程稳定 SHA、Compose 服务、Scheduler / Worker 运行状态待下一阶段核验；
-- DB 15 为临时使用，需项目层面确认是否正式保留；
-- `main` 自动部署 workflow 待后续阶段实施（PRD SR-14 已记录目标）；
-- `rules/README.md` 仍引用已删除的 `docs/current/` 作为事实源，需在后续文档治理中修正。
+- 远程 `/root/web_dev` 当前检出的不是 `main` 且工作区不干净，启用自动部署前需人工清理并切换到 `main`；
+- 自动部署代码已准备但尚未启用：需配置 GitHub Secrets、在服务器安装 `/usr/local/bin/panji-deploy.sh`、锁文件和 state 文件、将 workflow 合并到 `main`；
+- 远程 PostgreSQL test 容器 (`trading-postgres-test`) 的用途和持久化策略待核验；
+- 完整本地盘后运行尚未验证。
 
 ## 8. 验证与证据
 
@@ -197,15 +235,22 @@
 | 远程 Docker Compose 运行 | 腾讯云 | 未验证 | 未操作远程 |
 | 远程每日盘后运行 | 腾讯云 | 未验证 | 未操作远程 |
 | 两端复用同一业务代码 | 代码审计 | 已验证 | 本地与远程共用 `app.main:app`、`frontend/src`、`app.worker.py` |
+| 文档治理：rules/README 引用修复 | 文档审计 | 已验证 | `docs/current/` 和 `sync/` 引用已移除；只指向 AGENTS/rules/docs/prd/maps/changes/runbooks |
+| Redis DB15 正式保留 | 远程只读审计 | 已确认 | `CONFIG GET databases=16`；`SELECT 15 DBSIZE=0`；生产 Compose/脚本/代码使用 DB 0；未引用 /15 |
+| 远程部署现状 | 远程只读审计 | 已核验 | 当前运行 `origin/main` SHA `13a0ef3`；所有 trading-* 容器运行；健康检查 200；Scheduler 各 1 实例 |
+| 自动部署脚本语法 | 本地测试 | 通过 | `bash -n scripts/deploy/panji-deploy.sh` |
+| 自动部署脚本 fixture | 本地测试 | 通过 | `scripts/deploy/panji-deploy.sh` 对 docs/frontend/backend/image 变更分类正确 |
+| 部署 workflow YAML | 本地解析 | 通过 | Python `yaml.safe_load` 成功 |
+| 远程 dry-run | 腾讯云 | 完成 | 脚本复制到 `/tmp/panji-deploy.sh`，对 `13a0ef3` 执行 `--dry-run`，输出计划命令和影响范围，未 checkout/build/restart |
 
 ## 9. 文档更新
 
 | 文档 | 更新内容 |
 |---|---|
-| PRD | `prd/80-system-runtime.md` 增加 SR-32 本地 Redis 安全启动、SR-43 本地启动默认不写入共享库 |
-| Maps | `maps/80-system-runtime.md`、`maps/technical/codebase-modules.md`、`maps/technical/data-storage.md` 已按实际运行结果更新 |
-| Runbooks | 新建 `runbooks/README.md`、`runbooks/local-development.md` |
-| Rules | 未修改 |
+| PRD | `prd/80-system-runtime.md` 增加 SR-14 自动部署详细要求、SR-31.1 本地 Redis DB15 正式保留；完善 SR-32/SR-43 |
+| Maps | `maps/80-system-runtime.md` 补充远程只读审计事实、CI、Compose 服务表、自动部署代码状态、DB15 证据；`maps/technical/codebase-modules.md` 记录 workflow 与部署脚本入口 |
+| Runbooks | 新建 `runbooks/local-development.md`；Phase 3 新建 `runbooks/production-deployment.md` |
+| Rules | `rules/README.md` 修复对已删除 `docs/current/` 和 `sync/` 的引用，明确事实源 |
 
 ## 10. 回滚方案
 
@@ -223,9 +268,9 @@
 ## 11. 遗留问题与风险
 
 - 本地 `docker-compose.yml` 仍存在，可能误导开发者；
-- 远程运行细节（Compose 服务、Scheduler、Worker、Nginx、Volume）未核验；
+- 远程 `/root/web_dev` 当前分支不是 `main` 且工作区不干净，启用自动部署前必须人工清理；
+- 自动部署代码尚未启用，配置 GitHub Secrets 和服务器入口后仍需首次 dry-run；
 - 本地与远程共享 PostgreSQL，开发中需避免破坏性操作；
-- DB 15 为临时使用，需项目层面确认是否正式保留；
 - 完整本地盘后运行尚未验证。
 
 ## 12. 后续变化
@@ -235,6 +280,7 @@
 下一阶段建议：
 
 1. 删除或重命名本地 `docker-compose.yml`（确认无调用方后）；
-2. 修改 `backend/app/config.py` 本地 Redis 默认值为 DB 15 或强制要求显式配置；
-3. 远程运行核验：容器 SHA、Compose 服务、Scheduler / Worker 状态；
-4. 验证指定 Worker 在本地 DB 15 下运行不进入远程队列。
+2. 在服务器安装并启用 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件和 GitHub Secrets；
+3. 将 `.github/workflows/deploy-production.yml` 通过 PR 合并到 `main`；
+4. 首次使用 `workflow_dispatch` 对 `main` HEAD 执行 dry-run；
+5. 验证指定 Worker 在本地 DB 15 下运行不进入远程队列。

@@ -15,6 +15,8 @@
 | 测试 `backend/tests/`、前端 contract tests | 后端 pytest 集成测试、前端 Node.js contract tests | `backend/tests/`；`frontend/scripts/contract-tests/` | 生产运行状态 |
 | `docs/` | PRD、Maps、Changes、Runbooks | - | 代码事实源 |
 | `rules/` | 代码规则与约束 | - | 产品需求 |
+| `.github/workflows/` | GitHub Actions CI / 部署 workflow | `ci.yml`、`deploy-production.yml` | 不应包含应用 secret 明文 |
+| `scripts/deploy/` | 生产环境自动部署脚本 | `scripts/deploy/panji-deploy.sh` | 不应在本地开发流程中被调用 |
 
 ## 2. 模块责任表
 
@@ -24,6 +26,8 @@
 | 数据访问 | `backend/app/db.py` | 异步 SQLAlchemy engine、session factory、FastAPI `get_db` | Service / API / Worker | `DATABASE_URL` | 已核验 |
 | Redis Client | `redis.asyncio.from_url(settings.redis_url)` | 队列、锁、缓存 | Worker / Service | `REDIS_URL` | 已核验 |
 | SSH 隧道 | `scripts/local/ssh-tunnel.sh` | 本地开发连接远程 PostgreSQL / Redis 的可重复隧道 | 开发者手动调用 | `~/.ssh/config` Host 别名 | 已核验 |
+| 生产部署脚本 | `scripts/deploy/panji-deploy.sh` | 接收精确 SHA，验证 origin/main，按变更范围 Live Mount / 重建镜像部署，记录 previous/last-good，失败回滚 | GitHub Actions / 管理员手动 SSH 调用 | git、docker compose、flock、rsync、curl、npm/node | 代码已准备 / 未启用 |
+| 生产部署 workflow | `.github/workflows/deploy-production.yml` | CI 通过后通过 SSH 调用远程部署脚本；支持手动 workflow_dispatch | GitHub Actions | secrets.PANJI_PROD_HOST/USER/SSH_KEY | 代码已准备 / 未启用 |
 | 指标计算 | `backend/app/services/`、`backend/app/strategy_assets/algorithms/` | 纯计算与业务编排 | Worker / Service / API | 行情数据、数据库 | 未深入核验 |
 | 发布 | `backend/app/services/after_close_pipeline_service.py` | 正式 run 切换 | Orchestrator | DB | 未核验 |
 | 权限 | `backend/app/core/`、JWT / 依赖注入 | 后端授权 | API | 用户数据 | 未深入核验 |
@@ -53,6 +57,8 @@
 | 配置 | `backend/app/config.py:get_settings()` | 直接 `os.environ.get` 读取启动级配置（运行时配置除外） |
 | DB Session | `backend/app/db.py:AsyncSessionLocal`、`get_db()` | 直接新建 engine |
 | Redis Client | `redis.asyncio.from_url(get_settings().redis_url)` | 硬编码 Redis URL 或 DB |
+| 生产部署脚本 | `scripts/deploy/panji-deploy.sh` | 服务器本地其他入口或手动复制 |
+| 生产部署 workflow | `.github/workflows/deploy-production.yml` | 其他分支或未经 CI 的触发器 |
 | 时间转换 | `backend/app/core/time.py`（待核验） | 未核验 |
 | 股票标识 | `backend/app/models/instrument.py`（待核验） | 未核验 |
 | 正式结果读取 | `backend/app/services/after_close_pipeline_service.py`（待核验） | 未核验 |
