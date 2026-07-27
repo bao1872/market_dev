@@ -7,7 +7,8 @@ docs/
 ├── README.md
 ├── prd/
 ├── maps/
-└── changes/
+├── changes/
+└── runbooks/
 ```
 
 当前文档体系负责：
@@ -17,6 +18,7 @@ docs/
 | `prd/` | 系统应该怎样工作 |
 | `maps/` | 系统现在实际上怎样实现 |
 | `changes/` | 为什么从原状态变化为当前状态 |
+| `runbooks/` | 可重复执行的操作步骤 |
 
 代码实现规则位于仓库根目录的 `rules/`，AI/IDE 工作协议位于 `AGENTS.md`。
 
@@ -59,9 +61,16 @@ PRD 与 Maps 使用相同编号对齐：
 | 运行体系 | `prd/80-system-runtime.md` | `maps/80-system-runtime.md` |
 | 跨系统要求 | `prd/90-system-wide-requirements.md` | `maps/90-system-wide-implementation.md` |
 
-## 4. 当前状态
+## 4. Runbooks
+
+可重复操作步骤：
+
+- [本地开发环境启动与停止](runbooks/local-development.md)
+
+## 5. 当前状态
 
 - PRD 包含已经确认的目标以及仍需确认的草案。
 - Maps 统一以真实代码和运行证据为准；尚未核验的内容明确标为待重建或未核验。
 - Changes 只记录重要变化，不作为普通开发流水账。
+- Runbooks 记录当前可重复执行的操作步骤。
 - 不再使用 `docs/current/` 作为另一套事实源。

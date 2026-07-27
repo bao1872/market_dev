@@ -128,6 +128,33 @@ def _resolve_database_url() -> str:
     )
 
 
+def _resolve_redis_url() -> str:
+    """解析 Redis 连接串。
+
+    优先级：
+    1. 环境变量 REDIS_URL
+    2. CONFIG_FILE 指向的配置文件
+    3. config.local.py / config.test.py
+
+    Returns:
+        str: redis:// 格式的连接串
+
+    Raises:
+        MissingRequiredSettingError: 所有来源都未提供时抛出
+    """
+    env_url = os.environ.get("REDIS_URL")
+    if env_url:
+        return env_url
+    file_url = _load_py_config().get("REDIS_URL")
+    if file_url:
+        return file_url
+    raise MissingRequiredSettingError(
+        "REDIS_URL 未设置。请通过环境变量、CONFIG_FILE 配置文件、"
+        "config.local.py 或 config.test.py 提供，"
+        "例如 redis://host:port/db"
+    )
+
+
 def _resolve_board_sync_enabled() -> bool:
     """解析板块同步开关（CHANGE-20260716-007，PR #77 收口严格解析）。
 
@@ -244,6 +271,35 @@ def _validate_database_url(url: str, app_env: str) -> None:
             )
 
 
+def _validate_redis_url(url: str, app_env: str) -> None:
+    """启动硬校验 REDIS_URL 安全性。
+
+    校验规则：
+    - development: REDIS_URL 必须显式设置，且逻辑 DB 不得为 0
+      （DB 0 为远程生产队列，本地开发必须使用独立逻辑 DB）
+    - 解析失败时阻止启动
+
+    Raises:
+        InvalidDatabaseURLError: 校验失败时抛出，阻止应用启动
+    """
+    env = (app_env or "").lower()
+    if env != "development":
+        return
+    try:
+        parsed = urlparse(url)
+        db_str = parsed.path.lstrip("/") or "0"
+        db = int(db_str)
+    except Exception as exc:
+        raise InvalidDatabaseURLError(
+            f"开发环境 REDIS_URL 无法解析逻辑 DB: {url}"
+        ) from exc
+    if db == 0:
+        raise InvalidDatabaseURLError(
+            "拒绝启动：开发环境 REDIS_URL 指向 Redis DB 0（远程生产队列）。"
+            "请在 REDIS_URL 中指定独立逻辑 DB，例如 redis://host:port/15"
+        )
+
+
 def _validate_worker_urls(frontend_base_url: str, capture_worker_url: str, app_env: str) -> None:
     """启动硬校验截图相关地址：生产环境禁止默认 localhost 连接其他容器。
 
@@ -336,7 +392,7 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = Field(
-        default_factory=lambda: _load_py_config().get("REDIS_URL", "redis://localhost:6379/0"),
+        default_factory=_resolve_redis_url,
         description="Redis 连接串",
     )
 
@@ -421,6 +477,7 @@ def get_settings() -> Settings:
     """
     s = Settings()
     _validate_database_url(s.database_url, s.app_env)
+    _validate_redis_url(s.redis_url, s.app_env)
     _validate_security_settings(s)
     _validate_worker_urls(s.frontend_base_url, s.capture_worker_url, s.app_env)
     # [启动日志] - 描述: 打印截图相关生效地址与脱敏数据库 URL，便于排查容器间互访问题

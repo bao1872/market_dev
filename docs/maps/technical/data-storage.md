@@ -38,8 +38,10 @@
 
 | 逻辑 DB | 运行位置 | Key 类别 | TTL | 写入者 | 读取者 |
 |---|---|---|---|---|---|
-| DB 15 | 本地 | 本地健康检查键、潜在本地队列/锁/缓存 | 短 TTL / 待明确 | 本地进程 | 本地进程 |
+| DB 15 | 本地（临时） | 本地健康检查键、潜在本地队列/锁/缓存 | 短 TTL / 待明确 | 本地进程 | 本地进程 |
 | DB 0 | 远程 | 远程队列、锁、缓存 | 待核验 | 远程 Worker / Scheduler | 远程 Worker / Scheduler |
+
+> DB 15 为第二阶段本地开发临时选定的隔离逻辑库，尚未正式保留。`backend/app/config.py` 已禁止 development 环境使用 DB 0 启动。
 
 ## 4. Key 与队列
 
@@ -64,7 +66,6 @@
 ## 6. 高风险点
 
 - 本地与远程共享 PostgreSQL，本地开发中的 DELETE/UPDATE 可能影响远程数据；
-- `backend/app/config.py` 中 Redis URL 默认回退到 `redis://localhost:6379/0`，若本地 `.env` 缺失可能进入远程 DB 0；
 - 本地 `docker-compose.yml` 仍保留 redis 服务，存在误导风险；
-- 后端 lifespan 自动执行策略种子和日历刷新，启动即写入 PostgreSQL；
-- 当前未做本地只读权限限制。
+- 当前未做本地只读权限限制；
+- DB 15 为临时使用，若后续被其他用途占用可能导致本地状态冲突。

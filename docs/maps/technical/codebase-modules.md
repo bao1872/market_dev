@@ -20,9 +20,10 @@
 
 | 模块 | 路径 | 职责 | 调用方 | 依赖 | 状态 |
 |---|---|---|---|---|---|
-| 配置 | `backend/app/config.py` | 统一启动级配置加载、硬校验、脱敏日志 | 全局 `get_settings()` | 环境变量、`CONFIG_FILE`、`config.local.py` / `config.test.py`、`.env` | 已核验 |
+| 配置 | `backend/app/config.py` | 统一启动级配置加载、硬校验、脱敏日志；development 缺失 DATABASE_URL/REDIS_URL 或 Redis DB 0 时 fail-closed | 全局 `get_settings()` | 环境变量、`CONFIG_FILE`、`config.local.py` / `config.test.py`、`.env` | 已核验 |
 | 数据访问 | `backend/app/db.py` | 异步 SQLAlchemy engine、session factory、FastAPI `get_db` | Service / API / Worker | `DATABASE_URL` | 已核验 |
 | Redis Client | `redis.asyncio.from_url(settings.redis_url)` | 队列、锁、缓存 | Worker / Service | `REDIS_URL` | 已核验 |
+| SSH 隧道 | `scripts/local/ssh-tunnel.sh` | 本地开发连接远程 PostgreSQL / Redis 的可重复隧道 | 开发者手动调用 | `~/.ssh/config` Host 别名 | 已核验 |
 | 指标计算 | `backend/app/services/`、`backend/app/strategy_assets/algorithms/` | 纯计算与业务编排 | Worker / Service / API | 行情数据、数据库 | 未深入核验 |
 | 发布 | `backend/app/services/after_close_pipeline_service.py` | 正式 run 切换 | Orchestrator | DB | 未核验 |
 | 权限 | `backend/app/core/`、JWT / 依赖注入 | 后端授权 | API | 用户数据 | 未深入核验 |

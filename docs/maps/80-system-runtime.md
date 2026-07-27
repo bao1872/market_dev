@@ -14,13 +14,14 @@
 
 | PRD 条款 | 当前实现入口 | 状态 | 验证证据 |
 |---|---|---|---|
-| SR-01 本地使用原生进程 | `Makefile` 的 `backend` / `frontend` 目标；`backend/app/main.py`；`frontend/vite.config.ts` | 已核验 | Backend PID 33035 / Frontend PID 33725；curl /health 返回 200 |
+| SR-01 本地使用原生进程 | `Makefile` 的 `backend` / `frontend` 目标；`backend/app/main.py`；`frontend/vite.config.ts` | 已核验 | Backend PID / Frontend PID；curl /health 返回 200 |
 | SR-02 不依赖 Docker 本地启动 | `Makefile` 的 `up` / `down` 已改为废弃警告；`docker-compose.yml` 仅存 Redis 服务且未被本地 dev 流程引用 | 已核验 | 未执行 `docker compose up`；本地无盘迹容器 |
 | SR-03 共享 PostgreSQL | `backend/.env` DATABASE_URL → 127.0.0.1:15432 → 腾讯云 Docker 内 `trading-postgres:5432/bz_stock` | 已核验 | SELECT 1 / current_database() / version() / 表存在性查询成功 |
-| SR-10 至 SR-13 Git、CI 和版本 | `dev` 已创建；本地落后 `origin/dev` 8 个提交；未做 push | 部分核验 | `git status --branch` |
+| SR-10 至 SR-13 Git、CI 和版本 | `dev` 已创建；本地基于 `origin/dev` rebase 后领先 2 个提交；未做 push | 已核验 | `git status --branch` |
 | SR-20 至 SR-22 PostgreSQL 连接和 Schema | `backend/app/db.py`；`backend/app/config.py` DATABASE_URL 解析；PostgreSQL 16.14 | 已核验 | 健康接口 /version 返回 alembic_revision |
-| SR-30 至 SR-32 Redis DB 和队列 | `backend/app/config.py` REDIS_URL；本地 DB 15；远程 DB 0 | 已核验 | PING / INFO server / DBSIZE=0 / 健康 key 写入删除成功 |
-| SR-40 至 SR-42 Scheduler、Worker 和手动入口 | `backend/app/worker.py` 手动入口；Backend 不启动 Scheduler；Worker 不自动启动 | 已核验 | 进程列表无 scheduler/worker；后端日志无 scheduler 启动 |
+| SR-30 至 SR-33 Redis DB 和队列 | `backend/app/config.py` REDIS_URL；本地 DB 15（临时）；远程 DB 0 | 已核验 | PING / DBSIZE=0；DB 0 启动被 `config.py` 拒绝 |
+| SR-32 本地 Redis 安全启动 | `backend/app/config.py` `_resolve_redis_url` / `_validate_redis_url` | 已核验 | 单元测试 `test_config_validation.py` 通过 |
+| SR-40 至 SR-43 Scheduler、Worker 和手动入口 | `backend/app/worker.py` 手动入口；Backend 不启动 Scheduler；本地 lifespan 跳过维护写入 | 已核验 | 进程列表无 scheduler/worker；后端日志无 seed/calendar/recovery；lifespan 测试通过 |
 | SR-50 至 SR-52 代码、配置和承载边界 | 同一套代码；配置通过 `.env` / `CONFIG_FILE` / `config.local.py` 差异化 | 已核验 | 本地与远程共用 `app.main:app` 和 `frontend/src` |
 | SR-60 至 SR-62 部署、Volume 和 Nginx | 远程 `docker-compose.prod.yml` 保留；本地不启动 Nginx 容器 | 未核验 | 本阶段只读不修改远程 |
 
@@ -44,6 +45,7 @@
 | Scheduler | 不应自动启动 | 无自动启动入口；Scheduler 逻辑在 `app.worker` 各类型中按需运行 | `WORKER_TYPE` 显式指定 | - | 否 | 已核验 |
 | PostgreSQL | 直接连接共享实例 | 不在本地启动 | `backend/.env` DATABASE_URL → 127.0.0.1:15432 | 15432（SSH 隧道） | - | 已核验 |
 | Redis | 直接连接共享实例的本地专用逻辑 DB | 不在本地启动 | `backend/.env` REDIS_URL → 127.0.0.1:16379/15 | 16379（SSH 隧道） | - | 已核验 |
+| SSH 隧道 | 本地脚本手动启动/停止 | `scripts/local/ssh-tunnel.sh` via `make tunnel` | `~/.ssh/config` Host 别名（默认 55-server） | 15432/16379 | 否 | 已核验 |
 
 需要重点核验：
 
@@ -75,7 +77,7 @@
 | 远程容器配置 | 通过 `/etc/market-dev/market.env` 和 `docker-compose.prod.yml` 配置，未修改 |
 | 本地权限 | 用户 `bz` 可读写；本阶段只执行 SELECT |
 | Schema 管理 | Alembic 已存在；本阶段未执行 Migration |
-| 核心数据保护 | 未执行 DELETE/UPDATE/TRUNCATE/DROP；启动时 lifespan 自动执行策略种子和日历刷新（幂等写操作） |
+| 核心数据保护 | 未执行 DELETE/UPDATE/TRUNCATE/DROP；development 环境 lifespan 已跳过策略种子、日历刷新和僵尸任务恢复 |
 
 ## 6. Redis
 
@@ -83,10 +85,12 @@
 |---|---|---|
 | 实例 | 同一共享实例 | 同一共享实例 |
 | 承载 | 不在本地启动容器 | Docker 容器 `trading-redis` |
-| 逻辑 DB | DB 15 | DB 0 |
+| 逻辑 DB | DB 15（临时使用，尚未正式保留） | DB 0 |
 | 队列 | 未启动 Worker，无队列写入 | 未核验 |
 | 锁 | 未使用 | 未核验 |
 | 缓存 | 未启用 | 未核验 |
+
+> DB 15 为第二阶段本地开发临时选定的隔离逻辑库，尚未获得项目层面的正式保留依据。在未确认前，不得启动任何 Worker。
 
 ## 7. 远程 Docker Compose 服务
 
@@ -120,13 +124,15 @@
 
 ### 本地
 
-- 后端原生进程及端口：PID 33035，0.0.0.0:8000
-- 前端 Vite 进程及端口：PID 33725，0.0.0.0:8008
+- 后端原生进程及端口：0.0.0.0:8000
+- 前端 Vite 进程及端口：0.0.0.0:8008
 - 前端访问后端：`/api/health` 代理返回 `{"status":"ok"}`
 - PostgreSQL 连接：SELECT 1 / current_database=bz_stock / version=PostgreSQL 16.14 / 10 张表存在
-- Redis 本地逻辑 DB：DB 15，DBSIZE=0，健康 key 写入删除正常
+- Redis 本地逻辑 DB：DB 15（临时），DBSIZE=0
 - Scheduler 未自动启动：无 scheduler 进程，后端日志无 scheduler 启动
+- 本地 lifespan 未执行 seed/calendar/recovery（development 环境跳过）
 - 未启动任何本地 Docker 应用服务：未执行 `docker compose up`
+- `/version` deployment_mode 返回 `native-development`
 
 ### 远程
 
@@ -139,11 +145,10 @@
 
 ## 10. 已知偏差与风险
 
-- `backend/app/main.py` lifespan 在启动时会自动执行 `seed_strategies`、`seed_calendar_from_mootdx` 和 `recover_stale_scheduler_job_runs`，会写入 PostgreSQL；这些写操作是幂等的，但本阶段任务要求“禁止 Migration、建表和写入”存在局部张力。已记录为偏差。
-- 本地 `docker-compose.yml` 仍保留 redis 服务，虽然 `Makefile` 已标记 `up/down` 废弃，但文件本身仍可能误导新开发者。建议在确认无调用方后删除或重命名为 `docker-compose.deprecated.yml`。
-- `backend/app/config.py` 中 `redis_url` 的 Python 配置回退默认值为 `redis://localhost:6379/0`；当环境变量和 `config.local.py` 均不存在时会回退到 DB 0。本地通过 `.env` 显式设置 DB 15 已规避，但默认值本身对本地开发有误导风险。
+- 本地 `docker-compose.yml` 仍保留 redis 服务，虽然 `Makefile` 已标记 `up/down` 废弃，但文件本身仍可能误导新开发者。本轮按任务要求不删除，仅标记“非本地开发入口”。
+- 本地 Redis DB 15 为临时使用，尚未获得项目层面正式保留依据；在确认前不得启动 Worker。
 - 本地与远程共享 PostgreSQL，开发中的破坏性操作需要额外注意；当前未做权限只读限制。
-- 远程运行细节（Compose 服务、Scheduler、Worker、Nginx、Volume）本阶段未核验， remains for next phase.
+- 远程运行细节（Compose 服务、Scheduler、Worker、Nginx、Volume）本阶段未核验。
 
 ## 11. 更新触发条件
 

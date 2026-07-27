@@ -19,7 +19,9 @@
 
 相关提交或 PR：
 
-- 未提交；工作区修改包含 `Makefile`、`backend/.env.example`、`backend/README.md`，新增未跟踪 `backend/.env`
+- 本地基线提交 `a817595 chore: align local runtime setup with native Python/Node.js`
+- 本地基线提交 `eaffb11 docs: restructure docs and rules layout`
+- 第二阶段工作区修改包含 `backend/app/config.py`、`backend/app/main.py`、`backend/app/api/health.py`、`backend/tests/test_config_validation.py`、`backend/tests/test_main_lifespan.py`、`Makefile`、`backend/README.md`、`scripts/local/ssh-tunnel.sh` 及多项文档更新
 
 替代：
 
@@ -156,32 +158,38 @@
 
 已处理：
 
-- `Makefile`：`dev` / `backend` / `frontend` 改为原生进程；`up` / `down` 标记废弃并给出警告；
+- `Makefile`：`dev` / `backend` / `frontend` 改为原生进程；`up` / `down` 标记废弃并给出警告；新增 `tunnel` / `tunnel-status` / `tunnel-stop`；
 - `backend/.env.example`：明确本地 Redis 必须使用独立逻辑 DB（如 `/15`）；
-- `backend/README.md`：移除 `make up` 引导，改为原生启动说明；
-- `backend/.env`：本地 gitignored 配置，DATABASE_URL 指向隧道端口 15432，REDIS_URL 指向隧道端口 16379/15。
+- `backend/README.md`：移除 `make up` 引导，改为原生启动说明，增加隧道和 DB 0 校验说明；
+- `backend/.env`：本地 gitignored 配置，DATABASE_URL 指向隧道端口 15432，REDIS_URL 指向隧道端口 16379/15；
+- `backend/app/config.py`：development 环境缺失 DATABASE_URL / REDIS_URL 时启动失败；Redis DB 0 时启动失败；禁止回退 localhost 默认数据库或 `redis://localhost:6379/0`；production 行为不变；
+- `backend/app/main.py`：development 环境 lifespan 默认跳过 `recover_stale_scheduler_job_runs`、`seed_strategies`、`seed_calendar_from_mootdx`；
+- `backend/app/api/health.py`：本地原生启动时 `/version` 返回 `deployment_mode=native-development`；
+- `scripts/local/ssh-tunnel.sh`：新建可重复 SSH 隧道脚本，使用 `~/.ssh/config` Host 别名，动态获取容器 IP，端口占用即失败；
+- 测试：`backend/tests/test_config_validation.py` 增加 Redis URL fail-closed 测试；`backend/tests/test_main_lifespan.py` 增加 development 跳过维护写入测试。
 
 仍待处理：
 
 - `docker-compose.yml` 本地文件仍保留 redis 服务，建议在确认无调用方后删除或重命名；
-- `backend/app/config.py` 中 Redis URL 默认回退到 `redis://localhost:6379/0`，本地开发若未配 `.env` 会进入远程 DB 0，建议后续将本地默认值改为 `/15` 或强制报错；
-- 远程稳定 SHA、Compose 服务、Scheduler、Worker 运行状态待下一阶段核验。
+- 远程稳定 SHA、Compose 服务、Scheduler / Worker 运行状态待下一阶段核验；
+- DB 15 为临时使用，需项目层面确认是否正式保留。
 
 ## 8. 验证与证据
 
 | 验证项 | 范围 | 结果 | 证据 |
 |---|---|---|---|
-| dev 已创建并推送 | Git | 已确认 | `git branch --show-current=dev`，跟踪 `origin/dev` |
-| 本地 Backend 原生启动 | 本地 | 已验证 | PID 33035，监听 0.0.0.0:8000；curl /health 返回 200 |
-| 本地 Frontend 原生启动 | 本地 | 已验证 | PID 33725，监听 0.0.0.0:8008；首页和 /market 返回 HTML |
+| dev 已创建并 rebase origin/dev | Git | 已确认 | `git branch --show-current=dev`，基于 `origin/dev` 领先 2 个提交 |
+| 本地 Backend 原生启动 | 本地 | 已验证 | 监听 0.0.0.0:8000；curl /health 返回 200 |
+| 本地 Frontend 原生启动 | 本地 | 已验证 | 监听 0.0.0.0:8008；首页和 /market 返回 HTML |
 | 本地不依赖 Docker | 本地 | 已验证 | 未执行 `docker compose up`；本地无盘迹容器 |
 | 本地不启动 PostgreSQL/Redis 容器 | 本地 | 已验证 | 通过 SSH 隧道连接远程容器 |
 | PostgreSQL 共享 | 配置与运行 | 已验证 | SELECT 1 / current_database=bz_stock / version=PostgreSQL 16.14 |
-| Redis 逻辑 DB 隔离 | 本地/远程 | 已验证 | 本地 DB 15 DBSIZE=0；远程使用 DB 0（由服务器配置确认） |
+| Redis 逻辑 DB 隔离 | 本地/远程 | 已验证 | 本地 DB 15（临时）DBSIZE=0；DB 0 启动被 `config.py` 拒绝 |
 | 本地 Scheduler 关闭 | 本地 | 已验证 | 无 scheduler 进程；后端日志无 scheduler 启动 |
 | 本地 Worker 未启动 | 本地 | 已验证 | 无 worker 进程 |
 | 前端访问后端 | 本地 | 已验证 | `/api/health` 代理返回 `{"status":"ok"}` |
-| 配置硬校验 | 单元测试 | 通过 | `test_config_validation.py` 21/21 passed |
+| 配置 fail-closed | 单元测试 | 通过 | `test_config_validation.py` 通过 |
+| lifespan 本地无写入 | 单元测试 | 通过 | `test_main_lifespan.py` 通过 |
 | 本地完整盘后手动运行 | 本地 | 未验证 | 未启动 Worker / Orchestrator |
 | 远程 Docker Compose 运行 | 腾讯云 | 未验证 | 未操作远程 |
 | 远程每日盘后运行 | 腾讯云 | 未验证 | 未操作远程 |
@@ -191,9 +199,9 @@
 
 | 文档 | 更新内容 |
 |---|---|
-| PRD | 未修改；发现冲突只报告 |
+| PRD | `prd/80-system-runtime.md` 增加 SR-32 本地 Redis 安全启动、SR-43 本地启动默认不写入共享库 |
 | Maps | `maps/80-system-runtime.md`、`maps/technical/codebase-modules.md`、`maps/technical/data-storage.md` 已按实际运行结果更新 |
-| Runbooks | 未创建 |
+| Runbooks | 新建 `runbooks/README.md`、`runbooks/local-development.md` |
 | Rules | 未修改 |
 
 ## 10. 回滚方案
@@ -211,11 +219,10 @@
 
 ## 11. 遗留问题与风险
 
-- `backend/app/main.py` lifespan 启动时自动写入 PostgreSQL（策略种子、日历刷新、僵尸任务恢复），与“禁止写入”要求存在局部张力；
 - 本地 `docker-compose.yml` 仍存在，可能误导开发者；
-- `backend/app/config.py` Redis URL 默认回退到 DB 0，本地开发若漏配 `.env` 会进入远程队列；
 - 远程运行细节（Compose 服务、Scheduler、Worker、Nginx、Volume）未核验；
 - 本地与远程共享 PostgreSQL，开发中需避免破坏性操作；
+- DB 15 为临时使用，需项目层面确认是否正式保留；
 - 完整本地盘后运行尚未验证。
 
 ## 12. 后续变化

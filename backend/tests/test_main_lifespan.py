@@ -67,6 +67,17 @@ async def _no_op_seed_calendar(db, year=None, force=False, commit=True):
     return 0
 
 
+class _FakeDevelopmentSettings:
+    """模拟 development 环境 Settings。"""
+
+    app_env = "development"
+
+
+def _fake_get_settings_development():
+    """返回 development 环境设置。"""
+    return _FakeDevelopmentSettings()
+
+
 async def _create_stale_job(db_session, *, job_name: str = "test_lifespan_job") -> SchedulerJobRun:
     """创建一个 lease 过期的 running 任务（heartbeat 也超时）。"""
     test_now = datetime.now(_TZ)
@@ -147,6 +158,57 @@ async def test_lifespan_recovery_failure_does_not_block_startup(db_session) -> N
     assert yield_reached, (
         "恢复函数抛异常时 lifespan 应仍能到达 yield（不阻塞启动）"
     )
+
+
+@pytest.mark.asyncio
+async def test_lifespan_skips_maintenance_writes_in_development() -> None:
+    """development 环境 lifespan 跳过共享数据库维护写入。
+
+    验证：
+    - check_strategy_assets 被调用（只读，所有环境执行）
+    - recover_stale_scheduler_job_runs 不被调用
+    - seed_strategies 不被调用
+    - seed_calendar_from_mootdx 不被调用
+    """
+    from app.main import lifespan
+
+    check_called = False
+    recovery_called = False
+    seed_called = False
+    calendar_called = False
+
+    def tracking_check_strategy_assets() -> None:
+        nonlocal check_called
+        check_called = True
+
+    async def tracking_recovery(db):
+        nonlocal recovery_called
+        recovery_called = True
+        return 0
+
+    async def tracking_seed_strategies(db, release=False):
+        nonlocal seed_called
+        seed_called = True
+        return []
+
+    async def tracking_seed_calendar(db, year=None, force=False):
+        nonlocal calendar_called
+        calendar_called = True
+        return 0
+
+    with patch("app.main.AsyncSessionLocal", _FakeSessionLocal(None)), \
+         patch("app.config.get_settings", _fake_get_settings_development), \
+         patch("app.api.health.check_strategy_assets", tracking_check_strategy_assets), \
+         patch("app.services.scheduler_job_run_recovery_service.recover_stale_scheduler_job_runs", tracking_recovery), \
+         patch("app.services.strategy_seed.seed_strategies", tracking_seed_strategies), \
+         patch("app.services.calendar_seed.seed_calendar_from_mootdx", tracking_seed_calendar):
+        async with lifespan(FastAPI()):
+            pass
+
+    assert check_called, "development 环境也应调用 check_strategy_assets"
+    assert not recovery_called, "development 环境不得调用 recover_stale_scheduler_job_runs"
+    assert not seed_called, "development 环境不得调用 seed_strategies"
+    assert not calendar_called, "development 环境不得调用 seed_calendar_from_mootdx"
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # V1.1 交易平台 - 开发命令
 # 用法: make <target>
 
-.PHONY: dev backend frontend migrate migrate-new test lint up down docker-build docker-up docker-down worker
+.PHONY: dev backend frontend tunnel tunnel-status tunnel-stop migrate migrate-new test lint up down docker-build docker-up docker-down worker
 
 # 启动全栈开发环境：原生 Python / Node.js 进程，不依赖 Docker
 # 前置条件：已配置 backend/.env 中的 DATABASE_URL 与 REDIS_URL
@@ -16,6 +16,19 @@ backend:
 # 启动前端开发服务器
 frontend:
 	cd frontend && npm run dev
+
+# 启动本地开发 SSH 隧道（PostgreSQL 15432 / Redis 16379）
+# 依赖：~/.ssh/config 中已配置 Host 别名（默认 55-server）
+tunnel:
+	scripts/local/ssh-tunnel.sh start
+
+# 检查 SSH 隧道状态
+tunnel-status:
+	scripts/local/ssh-tunnel.sh status
+
+# 停止本地开发 SSH 隧道
+tunnel-stop:
+	scripts/local/ssh-tunnel.sh stop
 
 # 执行数据库迁移到最新版本
 migrate:

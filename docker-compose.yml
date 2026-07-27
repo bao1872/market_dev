@@ -1,4 +1,7 @@
-# V1.1 交易平台 - 本地开发环境
+# [DEPRECATED_FOR_LOCAL_DEV] 本文件不再是本地开发入口。
+# 本地开发使用原生 Python / Node.js 进程，通过 scripts/local/ssh-tunnel.sh 连接远程共享服务。
+# 本文件当前仅保留 Redis 服务定义，供历史参考；如需调整请确认无调用方后再删除或重命名。
+# V1.1 交易平台 - 本地开发环境（已废弃）
 # Redis 7（PostgreSQL 使用物理机实例，不再创建容器）
 services:
   redis:

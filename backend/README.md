@@ -19,14 +19,21 @@ cp backend/.env.example backend/.env
 cd backend
 pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 3. 启动后端开发服务器（原生 Python 进程，不依赖 Docker）
+# 3. 启动 SSH 隧道（PostgreSQL -> 127.0.0.1:15432，Redis -> 127.0.0.1:16379）
+# 前提：~/.ssh/config 已配置 Host 别名（默认 55-server）
+make tunnel
+
+# 4. 启动后端开发服务器（原生 Python 进程，不依赖 Docker）
 make backend
 
-# 4. 运行测试
+# 5. 运行测试
 make test
 ```
 
-注意：本地开发不执行 `make up`，不启动本地 PostgreSQL / Redis 容器。
+注意：
+- 本地开发不执行 `make up`，不启动本地 PostgreSQL / Redis 容器。
+- 本地开发 Redis 必须使用独立逻辑 DB（如 `/15`），`backend/app/config.py` 会在启动时校验 DB 0 并拒绝启动。
+- 本地 development 环境启动时跳过共享数据库维护写入（策略种子、日历刷新、僵尸任务恢复）。
 
 ## 目录结构
 
