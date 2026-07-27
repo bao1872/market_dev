@@ -311,10 +311,12 @@ def test_non_trading_hours_skips_pytdx_realtime(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_trading_hours_calls_pytdx_and_merges(monkeypatch: pytest.MonkeyPatch) -> None:
-    """测试 5: 交易时段内调用 Pytdx 实时 1m 并成功合并，X-Data-Source: hybrid。
+    """测试 5: 交易时段内调用 Pytdx 原生 15m 并成功合并，X-Data-Source: hybrid。
 
-    场景：DB 有 15min 数据 + 交易时段内 + include_realtime=True + Pytdx 返回 1m 数据。
-    预期：fetch_minute_bars 被调用，X-Data-Source: hybrid，bars 数量增加。
+    场景：DB 有 15min 数据 + 交易时段内 + include_realtime=True + Pytdx 返回 15m 数据。
+    预期：fetch_15min_bars 被调用，X-Data-Source: hybrid，bars 数量增加。
+
+    [CHANGE-20260724-003] 15m/1h 实时尾部改用 Pytdx 原生周期，不再从 1m 聚合。
     """
     _override_get_db(symbol="000001")
     _disable_mdas_cache(monkeypatch)
@@ -322,16 +324,25 @@ def test_trading_hours_calls_pytdx_and_merges(monkeypatch: pytest.MonkeyPatch) -
         async def mock_query_15min(*args, **kwargs):
             return _build_intraday_bars()
 
-        fetch_minute_called = {"called": False}
+        fetch_15min_called = {"called": False}
 
-        async def mock_fetch_minute(*args, **kwargs):
-            fetch_minute_called["called"] = True
-            return _build_live_1m_bars()
+        async def mock_fetch_15min(*args, **kwargs):
+            fetch_15min_called["called"] = True
+            # 返回单根 15m bar（10:00-10:15），与 DB 的 09:30/09:45 不重叠
+            return pd.DataFrame({
+                "open": [10.6],
+                "high": [10.9],
+                "low": [10.5],
+                "close": [10.8],
+                "volume": [110000.0],
+                "amount": [1183000.0],
+                "adj_factor": [1.0],
+            }, index=pd.to_datetime(["2026-06-18 10:00:00"]))
 
         monkeypatch.setattr(mdas, "_query_15min_bars", mock_query_15min)
         # [测试] - 交易时段：_is_trading_hours 返回 True
         monkeypatch.setattr(mdas, "_is_trading_hours", lambda now=None: True)
-        monkeypatch.setattr(mdas, "fetch_minute_bars", mock_fetch_minute)
+        monkeypatch.setattr(mdas, "fetch_15min_bars", mock_fetch_15min)
 
         client = TestClient(app)
         response = client.get(
@@ -341,9 +352,9 @@ def test_trading_hours_calls_pytdx_and_merges(monkeypatch: pytest.MonkeyPatch) -
 
         assert response.status_code == 200
         assert response.headers["X-Data-Source"] == "hybrid"
-        assert fetch_minute_called["called"] is True
+        assert fetch_15min_called["called"] is True
         data = response.json()
-        # [mdas] - DB 2 根 15m (09:30, 09:45) + 1m 聚合为 1 根 15m (10:00) = 3 根
+        # [mdas] - DB 2 根 15m (09:30, 09:45) + Pytdx 原生 1 根 15m (10:00) = 3 根
         assert data["total"] == 3
     finally:
         _restore_get_db()
