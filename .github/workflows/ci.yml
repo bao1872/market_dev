@@ -80,7 +80,7 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
-      - name: [Phase 5B-0] Verify ref/ and sync/ are not tracked
+      - name: "[Phase 5B-0] Verify ref/ and sync/ are not tracked"
         run: |
           tracked=$(git ls-files ref sync)
           if [ -n "$tracked" ]; then
