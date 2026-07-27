@@ -2,18 +2,47 @@
 
 提供：
 - InviteCodeRenew: 续期请求（invite_code）
-- InviteCodeCreate: 邀请码生成请求（数量/备注/套餐）
+- InviteCodeCreate: 邀请码生成请求（数量/备注/套餐/capability 组合）
 - InviteCodeResponse: 邀请码响应（含明文，仅生成时返回）
 - InviteCodeListItem: 邀请码列表项（不含明文）
 - InviteRedemptionResponse: 兑换记录响应
+- CapabilityGrant: 单个 capability 授权配置（PRD60 PA-20）
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# PRD60 PA-01: 三类独立 capability 固定值（与 user_capability.ALL_CAPABILITIES 对齐）
+_VALID_CAPABILITIES = {"self_selection", "market_data", "research_replay"}
+
+
+class CapabilityGrant(BaseModel):
+    """单个 capability 授权配置（PRD60 PA-20）。
+
+    邀请码生成时，管理员可指定 capability 组合：
+    - capability: 权限类型（self_selection/market_data/research_replay）
+    - months: 自然月有效期（PA-03）
+    - watchlist_limit: 自选数量上限（仅 self_selection 必填，PA-02）
+    """
+
+    capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
+    months: int = Field(default=1, ge=1, le=36, description="自然月有效期（1-36）")
+    watchlist_limit: int | None = Field(None, ge=1, le=500, description="自选数量上限（仅 self_selection 必填）")
+
+    @model_validator(mode="after")
+    def _validate_capability(self) -> CapabilityGrant:
+        if self.capability not in _VALID_CAPABILITIES:
+            raise ValueError(f"无效 capability: {self.capability}，允许: {_VALID_CAPABILITIES}")
+        if self.capability == "self_selection" and self.watchlist_limit is None:
+            raise ValueError("self_selection capability 必须指定 watchlist_limit（PA-02）")
+        if self.capability != "self_selection" and self.watchlist_limit is not None:
+            raise ValueError(f"{self.capability} 不支持 watchlist_limit（仅 self_selection）")
+        return self
 
 
 class InviteCodeRenew(BaseModel):
@@ -23,22 +52,31 @@ class InviteCodeRenew(BaseModel):
 
 
 class InviteCodeCreate(BaseModel):
-    """邀请码生成请求 - 绑定 plan_code/grant_months。
+    """邀请码生成请求 - 支持 capability 组合（PRD60 PA-20）或旧 plan_code 兼容。
 
-    plan_code 默认 observe_20，grant_months 默认 1（保持向后兼容）。
+    两种模式：
+    1. 新模式（PA-20）：提供 capabilities 列表，每个 capability 独立授权与有效期
+    2. 旧模式（兼容）：提供 plan_code + grant_months，从 plans 表读取 monitor_limit
+
+    capabilities 优先于 plan_code；两者都为默认值时使用旧模式（observe_20 + 1 月）。
     """
 
     count: int = Field(default=1, ge=1, le=100, description="生成数量（1-100）")
     note: str | None = Field(default=None, max_length=200, description="批次备注")
     plan_code: str = Field(
         default="observe_20",
-        description="套餐代码 observe_20/research_50",
+        description="套餐代码 observe_20/research_50（旧模式，capabilities 为空时使用）",
     )
     grant_months: int = Field(
         default=1,
         ge=1,
         le=36,
-        description="兑换后增加的自然月数（1-36）",
+        description="兑换后增加的自然月数（旧模式，1-36）",
+    )
+    # [Phase 5B-2 PRD60 PA-20] capability 组合（新模式）
+    capabilities: list[CapabilityGrant] | None = Field(
+        default=None,
+        description="capability 组合（PA-20）；提供时优先于 plan_code",
     )
 
 
@@ -53,6 +91,7 @@ class InviteCodeResponse(BaseModel):
     plan_code: str | None = Field(None, description="套餐代码 observe_20/research_50")
     monitor_limit: int | None = Field(None, description="监控数量上限快照")
     grant_months: int | None = Field(None, description="兑换后增加的自然月数")
+    capabilities: list[dict[str, Any]] | None = Field(None, description="capability 组合（PA-20）")
     note: str | None = Field(None, description="批次备注")
     created_at: datetime = Field(..., description="创建时间")
 
@@ -68,6 +107,7 @@ class InviteCodeListItem(BaseModel):
     plan_code: str | None = Field(None, description="套餐代码 observe_20/research_50")
     monitor_limit: int | None = Field(None, description="监控数量上限快照")
     grant_months: int | None = Field(None, description="兑换后增加的自然月数")
+    capabilities: list[dict[str, Any]] | None = Field(None, description="capability 组合（PA-20）")
     note: str | None = Field(None, description="批次备注")
     created_by: UUID = Field(..., description="创建者 user_id")
     created_at: datetime = Field(..., description="创建时间")

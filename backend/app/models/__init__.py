@@ -62,6 +62,7 @@ from app.models.strategy_run import (
 from app.models.subscription import Subscription
 from app.models.table_view_preset import UserTableViewPreset
 from app.models.user import Role, User, UserRole
+from app.models.user_capability import UserCapability
 from app.models.watchlist import UserWatchlistItem
 from app.models.worker_heartbeat import WorkerHeartbeat
 
@@ -107,6 +108,7 @@ __all__ = [
     "TradingCalendar",
     "User",
     "UserRole",
+    "UserCapability",
     "UserTableViewPreset",
     "UserWatchlistItem",
     "WorkerHeartbeat",

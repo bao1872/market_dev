@@ -87,6 +87,8 @@ export default function SubscriptionExpiredPage() {
               expires_at: access.expires_at,
               features: access.features,
               limits: access.limits,
+              // [Phase 5B-2 PRD60 PA-01] 续期后从 /me/access 刷新 capabilities
+              capabilities: access.capabilities ?? {},
             }
             useAuthStore.getState().setUser(updated)
           })

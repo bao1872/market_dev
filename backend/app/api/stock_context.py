@@ -43,8 +43,8 @@ from app.schemas.stock_state import (
 )
 from app.services.access_control_service import (
     AccessContext,
-    require_active_subscription,
     require_admin,
+    require_capability,
 )
 from app.services.atomic_fact_contract_service import (
     AFC_PAYLOAD_VERSION,
@@ -600,7 +600,7 @@ async def get_stock_context(
     symbol: str,
     as_of: date | None = Query(None, description="截止日期 ISO（如 2026-07-10），默认最新"),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    ctx: AccessContext = Depends(require_capability("market_data")),
 ) -> AtomicFactsContextResponse:
     """获取个股原子事实上下文（只读，需登录 + 有效订阅）。
 
@@ -643,3 +643,100 @@ async def get_admin_stock_debug(
     _ = ctx
     result = await _build_stock_context(db, symbol, as_of, include_raw=True)
     return AdminStockDebugResponse(**result)
+
+
+# =============================================================================
+# [Phase 5B-2] 第一金字塔统一快照接口：GET /api/v1/stocks/{symbol}/first-pyramid
+# =============================================================================
+
+
+@stock_router.get("/{symbol}/first-pyramid")
+async def get_first_pyramid(
+    symbol: str,
+    as_of: date | None = Query(None, description="截止日期 ISO（如 2026-07-10），默认最新"),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_capability("market_data")),
+) -> dict[str, Any]:
+    """获取个股第一金字塔统一快照（趋势→结构→动量→筹码共识）。
+
+    [Phase 5B-2] PRD20 QM-01~QM-43、QM-60~QM-62 统一编排入口。
+    - 调用 compute_first_pyramid_snapshot（SSOT，不复制算法）
+    - 固定维度顺序：trend/structure/momentum/chip_consensus
+    - 前三维必选，chip_consensus 可选（无有效峰时为 null）
+    - 同一 OHLCV + 参数 → 同一 inputHash/parameterHash（跨入口一致性）
+
+    权限：require_active_subscription（admin 豁免，member 需有效订阅）。
+    数据：只读，从最新已发布 snapshot 或实时 bars 计算，不写库。
+    """
+    from fastapi import HTTPException, status
+
+    from app.services.first_pyramid_service import compute_first_pyramid_snapshot
+    from app.services.market_data_aggregation_service import MarketDataAggregationService
+
+    _ = ctx  # 权限守卫，不直接使用
+
+    instrument = await _get_instrument_by_symbol(db, symbol)
+
+    # 优先从已发布 snapshot 读取（如果 summary_payload 含 first_pyramid）
+    if as_of is not None:
+        run = await _find_run_by_trade_date(db, as_of)
+    else:
+        run = await _find_latest_succeeded_run(db)
+    if run is not None:
+        snapshot, _ = await _get_snapshot_for_instrument(db, instrument.id, run)
+        if snapshot is not None:
+            _summary = snapshot.summary_payload
+            stored_fp = (
+                _summary.get("first_pyramid")
+                if isinstance(_summary, dict)
+                else None
+            )
+            if isinstance(stored_fp, dict) and stored_fp.get("inputHash"):
+                return stored_fp
+
+    # Fallback：从 bars 实时计算（只读，不写库）
+    mdas = MarketDataAggregationService()
+    try:
+        bars_result = await mdas.get_bars(
+            session=db,
+            instrument_id=instrument.id,
+            timeframe="1d",
+            adj="qfq",
+            include_realtime=False,
+            completed_only=True,
+            limit=250,
+        )
+    except Exception as exc:
+        logger.warning("第一金字塔 bars 获取失败 symbol=%s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"行情数据暂不可用: {exc}",
+        ) from exc
+
+    bars_df = bars_result.bars
+    if bars_df is None or bars_df.empty or len(bars_df) < 60:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"行情数据不足（需 >=60 根日线，实际 {len(bars_df) if bars_df is not None else 0} 根）",
+        )
+
+    trade_date = as_of or bars_df.index[-1].date()
+    try:
+        snapshot_pyramid = compute_first_pyramid_snapshot(
+            bars=bars_df,
+            symbol=symbol,
+            trade_date=trade_date.isoformat(),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"第一金字塔计算失败: {exc}",
+        ) from exc
+    except Exception as exc:
+        logger.exception("第一金字塔计算异常 symbol=%s", symbol)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="第一金字塔计算内部错误",
+        ) from exc
+
+    return snapshot_pyramid.to_dict()

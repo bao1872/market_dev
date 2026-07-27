@@ -84,6 +84,8 @@ export default function LoginPage() {
         expires_at: data.expires_at,
         features: data.features,
         limits: data.limits,
+        // [Phase 5B-2 PRD60] login 响应不含 capabilities，默认空对象，由 revalidateAccess 填充
+        capabilities: {},
       }
       // 异步补全 user.id/email/name（不阻塞跳转，路由守卫不依赖这些字段）
       getMe()
@@ -191,6 +193,8 @@ export default function LoginPage() {
         expires_at: access.expires_at,
         features: access.features,
         limits: access.limits,
+        // [Phase 5B-2 PRD60 PA-01] 注册后从 /me/access 获取 capabilities
+        capabilities: access.capabilities ?? {},
       }
       // 异步补全 email/name（不阻塞跳转）
       getMe()

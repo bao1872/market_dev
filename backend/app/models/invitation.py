@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -83,6 +84,14 @@ class InviteCode(Base):
         Integer,
         nullable=True,
         comment="兑换后增加的自然月数（优先于 grant_days，用 relativedelta 计算）",
+    )
+    # [Phase 5B-2 PRD60 PA-20] 邀请码 capability 组合（新邀请码优先使用，旧邀请码 fallback 到 plan_code）
+    # 格式: [{"capability": "self_selection", "months": 1, "watchlist_limit": 20}, ...]
+    # 为 NULL 时回退到 plan_code/monitor_limit/grant_months 旧逻辑
+    capabilities: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB(astext_type=Text(), none_as_null=True),
+        nullable=True,
+        comment="capability 组合（PA-20）；NULL 时 fallback 到 plan_code 旧逻辑",
     )
     note: Mapped[str | None] = mapped_column(
         Text(), nullable=True, comment="批次备注"

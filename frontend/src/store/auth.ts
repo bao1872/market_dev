@@ -12,6 +12,13 @@ import { apiClient } from '../api/client'
 // [Auth] - 描述: AuthUser 当前用户身份 + AccessProfile 权限上下文（对齐后端 LoginResponse 字段）
 // 替代旧 role: 'admin' | 'member' 单值，改用 is_admin + roles[] + subscription_active 等
 // 唯一真源为后端 get_access_context，前端不在本地计算权限
+// [Phase 5B-2 PRD60 PA-01] 新增 capabilities 字段（三类独立权限状态，由 /me/access 刷新）
+export interface CapabilityInfo {
+  active: boolean
+  expires_at: string | null
+  watchlist_limit: number | null
+}
+
 export interface AuthUser {
   id: string
   name: string  // = email（兼容 AppShell 头像首字母抽取）
@@ -24,6 +31,9 @@ export interface AuthUser {
   expires_at: string | null
   features: string[]
   limits: Record<string, number>
+  // [Phase 5B-2 PRD60 PA-01] 三类独立权限状态（self_selection/market_data/research_replay）
+  // 登录时默认空对象，由 revalidateAccess 调用 /me/access 后填充
+  capabilities: Record<string, CapabilityInfo>
 }
 
 // token 在 storage 中的 key（client.ts 拦截器读取这两个 key）
@@ -77,8 +87,9 @@ function clearTokenPair(): void {
   localStorage.removeItem(REFRESH_TOKEN_KEY)
 }
 
-// [Auth] - 描述: AccessContextResponse 后端 /me/access 响应类型（对齐 AccessProfileResponse 11 字段）
+// [Auth] - 描述: AccessContextResponse 后端 /me/access 响应类型（对齐 AccessProfileResponse 12 字段）
 // 用于 revalidateAccess 刷新前端权限上下文，避免重复定义（与 endpoints.ts AccessProfile 同源）
+// [Phase 5B-2 PRD60 PA-01] 新增 capabilities 字段
 interface AccessContextResponse {
   user_id: string
   account_status: string
@@ -91,6 +102,7 @@ interface AccessContextResponse {
   expires_at: string | null
   features: string[]
   limits: Record<string, number>
+  capabilities: Record<string, CapabilityInfo>
 }
 
 interface AuthState {
@@ -168,6 +180,8 @@ export const useAuthStore = create<AuthState>()(
             expires_at: data.expires_at,
             features: data.features,
             limits: data.limits,
+            // [Phase 5B-2 PRD60 PA-01] 同步三类独立权限状态
+            capabilities: data.capabilities ?? {},
           }
           set({ user: updated, accessLoading: false })
           // [Auth] - 描述: 后端返回 subscription_active=false 且非 admin → 跳转续期页（canonical /subscription-expired）

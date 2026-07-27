@@ -60,7 +60,7 @@ from app.schemas.watchlist import (
 )
 from app.services.access_control_service import (
     AccessContext,
-    require_active_subscription,
+    require_capability,
     require_quota,
 )
 from app.services.calendar_service import (
@@ -181,7 +181,7 @@ async def _resolve_expected_snapshot_trade_date(
 @router.get("", response_model=WatchlistListResponse)
 async def list_watchlist(
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
 ) -> WatchlistListResponse:
     """查询当前用户的自选列表（仅 active=true）。
 
@@ -207,7 +207,7 @@ async def list_watchlist(
 async def add_to_watchlist(
     payload: WatchlistAddRequest,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
     monitor_limit: int | None = Depends(require_quota("monitor_limit")),
 ) -> WatchlistItemResponse:
     """加入自选 - 使用 AccessContext 统一权限模型校验订阅与额度。
@@ -288,7 +288,7 @@ async def add_to_watchlist(
 @router.get("/monitor-status", response_model=WatchlistMonitorStatusResponse)
 async def get_watchlist_monitor_status(
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
 ) -> WatchlistMonitorStatusResponse:
     """查询当前用户自选股+监控状态聚合数据。
 
@@ -532,7 +532,7 @@ async def get_watchlist_monitor_status(
 async def remove_from_watchlist(
     instrument_id: UUID,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
 ) -> None:
     """移除自选（软删除：active=false + removed_at）。
 
