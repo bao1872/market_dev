@@ -1,9 +1,9 @@
 # 系统运行体系 Map
 
-核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）；Phase 4 完成 Git 分支治理与 PRD20/30 代码对齐审计；Phase 5A 完成分支一致性补验与 AC-04 修复；Phase 5B-0 完成 ref/sync 仓库清理、CI 防误推、本地完整原生运行与趋势入口锁定
+核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）；Phase 4 完成 Git 分支治理与 PRD20/30 代码对齐审计；Phase 5A 完成分支一致性补验与 AC-04 修复；Phase 5B-0 完成 ref/sync 仓库清理、CI 防误推、本地完整原生运行与趋势入口锁定；Phase 5B-2 完成部署脚本修复与静态测试
 最后核验日期：2026-07-27
 核验分支：dev
-核验提交：c730876（Phase 5B-0 ref/sync 清理）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`；Phase 5B-0 详见 `docs/changes/2026/CHANGE-20260727-003-repo-boundary-local-runtime.md`；远程 origin/main=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf
+核验提交：c730876（Phase 5B-0 ref/sync 清理）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`；Phase 5B-0 详见 `docs/changes/2026/CHANGE-20260727-003-repo-boundary-local-runtime.md`；Phase 5B-2 详见 `docs/changes/2026/CHANGE-20260727-005-phase-5b-2-capabilities-deploy.md`；远程 origin/main=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf
 核验范围：本地原生 Backend / Frontend 启动、共享 PostgreSQL / Redis 连接、Scheduler / Worker 默认关闭；远程只读审计（Git/Compose/容器/Redis/健康检查）；本地/origin/服务器分支治理与一致性补验；PRD20/PRD30 代码对齐审计；AC-04 日线 readiness 修复与 P0 Redis 隔离复核
 对应 PRD：`../prd/80-system-runtime.md`
 事实所有权：本地原生进程、远程 Docker Compose、Git、配置、数据库、Redis、Scheduler、CI 和部署事实
@@ -201,3 +201,29 @@
 - PostgreSQL 或 Redis 连接关系变化；
 - Scheduler、Worker 或队列隔离变化；
 - CI、部署或稳定版本识别方式变化。
+
+## 12. Phase 5B-2 部署脚本修复（已核验）
+
+Phase 5B-2 修复 `scripts/deploy/panji-deploy.sh` 的若干偏差并新增静态测试。部署工作流（`.github/workflows/deploy-production.yml`）本身不变：仍监听 `workflow_run`（CI success on main）+ `workflow_dispatch`，SSH 到 `panji-prod` 调用 `/usr/local/bin/panji-deploy.sh`。链路启用状态不变（未启用）。
+
+### 12.1 脚本修复点（已核验）
+
+| 修复项 | 位置 | 变化 |
+|---|---|---|
+| `git fetch origin main` | `panji-deploy.sh:115` | SHA 校验前先 fetch，避免本地 origin 引用过期 |
+| calendar 容器名 | `panji-deploy.sh:429` | `trading-worker-calendar`（非 `trading-worker-calendar-scheduler`） |
+| 部署后切回 main | `panji-deploy.sh:488,507` | `git checkout main`，避免 detached HEAD |
+| dry-run 措辞 | `panji-deploy.sh:369-371` | 使用"计划验证"而非"健康检查"（dry-run 不执行真实健康检查） |
+| state 目录初始化 | `panji-deploy.sh:93-97` | `STATE_FILE` 父目录不存在时 `mkdir -p` 创建 |
+
+### 12.2 静态测试（已核验）
+
+- 文件：`scripts/deploy/panji-deploy.test.sh`
+- 测试数：16 项静态断言（bash 语法、关键函数存在、calendar 容器名、dry-run 措辞、git fetch、checkout main、state 目录、不碰 postgres/redis、flock 锁、SHA 验证等）
+- 运行：`bash scripts/deploy/panji-deploy.test.sh`
+
+### 12.3 不变项
+
+- 部署工作流不变：`workflow_run` on CI success + `workflow_dispatch`，SSH 到 `panji-prod`
+- 自动部署链路启用状态不变：服务器侧 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件、GitHub Secrets 尚未配置
+- 不 down -v、不删除 PostgreSQL/Redis Volume、不自动 migration 的约束不变

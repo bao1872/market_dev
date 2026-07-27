@@ -357,8 +357,8 @@ async def test_require_feature_admin_exempt(db_session: AsyncSession) -> None:
 # ============================================================
 
 
-def test_access_context_has_all_11_fields() -> None:
-    """AccessContext 必须包含全部 11 个字段。"""
+def test_access_context_has_all_12_fields() -> None:
+    """AccessContext 必须包含全部 12 个字段（Phase 5B-2 新增 capabilities）。"""
     expected_fields = {
         "user_id",
         "account_status",
@@ -371,13 +371,14 @@ def test_access_context_has_all_11_fields() -> None:
         "expires_at",
         "features",
         "limits",
+        "capabilities",
     }
     actual_fields = set(AccessContext.model_fields.keys())
     assert actual_fields == expected_fields, (
         f"AccessContext 字段不匹配，缺失: {expected_fields - actual_fields}，"
         f"多余: {actual_fields - expected_fields}"
     )
-    assert len(actual_fields) == 11
+    assert len(actual_fields) == 12
 
 
 # ============================================================

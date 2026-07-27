@@ -129,3 +129,15 @@ completed → published
 ## 9. 更新触发条件
 
 任何 Scheduler、任务阶段、状态、Worker、run、发布或补跑变化都必须更新本 Map。
+
+## 10. Phase 5B-2 影响说明
+
+**核验状态：未核验（Phase 5B-2）**
+
+Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`require_capability`、前端 `CapabilityRoute`）不影响盘后链路：
+
+- after-close orchestrator / Worker / admin API 路由保持不变；
+- capability 检查不施加于 after-close 编排与发布路径（admin 豁免，且 after-close 走 admin API 或 scheduler 触发）；
+- 本轮未对盘后链路做运行时核验，仅静态确认路由与依赖未改动。
+
+如后续对 after-close admin API 增加 capability 守卫，需重新核验并更新本节。

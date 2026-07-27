@@ -1,15 +1,15 @@
 # 权限与管理后台 Map
 
-核验状态：已核验（Phase 5B-1 代码级差异审计）
+核验状态：已核验（Phase 5B-1 代码级差异审计）；Phase 5B-2 PA-01 capability 模型/Schema/API 已核验，测试矩阵部分实现
 最后核验日期：2026-07-27
 核验分支：dev
-核验提交：54c601e（基线）
-核验范围：用户/角色/订阅/邀请码模型 + access_control_service + API 依赖 + 前端 capability 字段
+核验提交：54c601e（Phase 5B-1 基线）；Phase 5B-2 新增见 §11
+核验范围：用户/角色/订阅/邀请码模型 + access_control_service + API 依赖 + 前端 capability 字段；Phase 5B-2 新增 UserCapability 模型 / require_capability / CapabilityRoute
 对应 PRD：`../prd/60-permissions-admin.md`
 事实所有权：认证、邀请码、权限数据结构、前后端检查和管理入口
 
-> 本文件基于 Phase 5B-1 代码级审计。仅 admin token 通过不能写"权限符合预期"。
-> 本轮未修改权限业务代码，仅审计并重建 Maps。下一阶段实现方案见 §10。
+> Phase 5B-1 基线：仅 admin token 通过不能写"权限符合预期"；本轮未修改权限业务代码，仅审计并重建 Maps。
+> Phase 5B-2 增量：实施 §10 候选方案中的 PA-01 独立 capability 授权（见 §11）。
 
 ## 1. PRD 实现映射
 
@@ -144,7 +144,9 @@ Phase 5B-1 审计发现的偏差（未修复，记录待下一阶段处理）：
 
 ## 10. 下一阶段权限实现方案（Phase 5B-2+ 候选）
 
-**本轮不实施，仅记录方案**：
+> Phase 5B-2 已实施 §10.1 / §10.4 / §10.5 / §10.6（见 §11）。§10.2 per-capability expires_at 已实现；§10.3 watchlist_limit 字段已实现（self_selection 行）；§10.7 测试矩阵部分实现；§10.8 migration 顺序执行中。
+
+**Phase 5B-1 仅记录方案，Phase 5B-2 已落地部分**：
 
 ### 10.1 Capability Grants 表
 新增 `user_capabilities` 表：
@@ -195,3 +197,69 @@ def require_capability(capability: str) -> Callable:
 4. 弃用 `Subscription.entitlement_snapshot.features`（保留兼容期）
 5. 前端引入 `CapabilityRoute`
 6. 移除 `monitor_limit`，统一 `watchlist_limit`
+
+## 11. Phase 5B-2 PRD60 PA-01 独立 capability 授权（已核验）
+
+Phase 5B-2 落地 §10 候选方案中的 PA-01 三类独立 capability 授权。本节为 Phase 5B-2 增量事实，已通过代码级核验。
+
+### 11.1 三类独立 capability
+
+| capability 常量 | 值 | 对应 PRD60 能力 | API 守卫路由 |
+|---|---|---|---|
+| `CAPABILITY_SELF_SELECTION` | `self_selection` | 自选管理（含盘中监控+行情列表可见，PA-10） | `/market` |
+| `CAPABILITY_MARKET_DATA` | `market_data` | 行情管理（个股详情，PA-11/PA-13） | `/stock/:symbol` |
+| `CAPABILITY_RESEARCH_REPLAY` | `research_replay` | 复盘管理（PA-12） | `/replay` |
+
+定义入口：`backend/app/models/user_capability.py`（`ALL_CAPABILITIES` 元组）。
+
+### 11.2 UserCapability 模型（已核验）
+
+- 表：`user_capabilities`（`backend/app/models/user_capability.py`）
+- 唯一约束：`uq_user_capabilities_user_capability`（user_id, capability）
+- 字段：`id` / `user_id` / `capability` / `watchlist_limit`（仅 self_selection 使用，PA-02）/ `granted_at` / `expires_at`（per-capability 独立自然月，PA-03）/ `source`（invite_code/admin_grant/migration）/ `granted_by` / `created_at`
+- Migration：`068_user_capabilities.py`（建表 + 从现有有效订阅回填）、`069_invite_code_capabilities.py`（邀请码 capabilities JSONB）
+
+### 11.3 require_capability 后端依赖（已核验）
+
+- 入口：`backend/app/services/access_control_service.py:413 require_capability(capability)`
+- 行为：检查 `ctx.capabilities` 是否含指定 capability 且 active；admin 自动豁免（所有 capability active=True）
+- 替代：`require_feature`（旧 feature 检查仍保留兼容期）
+- 调用点：`market.py`（market_data）、`stock_context.py`（market_data）、`watchlist.py`（self_selection）
+
+### 11.4 邀请码 capabilities JSONB（PA-20，已核验）
+
+- 字段：`InviteCode.capabilities`（JSONB，`backend/app/models/invitation.py:91`，`none_as_null=True`）
+- 格式：capability 组合数组，兑换时为每个 capability 创建独立 `user_capabilities` 行
+- Migration：`069_invite_code_capabilities.py`
+
+### 11.5 前端 CapabilityRoute（已核验）
+
+- 守卫类型：`routeStructure.ts` 中 `GuardType` 新增 `'capability'`，替代旧 `'subscriber'`
+- 路由守卫映射（`frontend/src/navigation/routeStructure.ts`）：
+  - `/market` → capability 守卫（self_selection）
+  - `/stock/:symbol` → capability 守卫（market_data）
+  - `/replay` → capability 守卫（research_replay）
+- 403 页面：`/forbidden`（ForbiddenPage，已登录但缺少指定 capability 时渲染，不跳转）
+- 兼容重定向保留：`/overview`→`/market`、`/watchlist`→`/market?scope=watchlist`、`/screener`→`/market`
+
+### 11.6 Fallback 推断（兼容期，已核验）
+
+用户在 `user_capabilities` 表无记录时，按 `plan_code` 推断 capability（`068_user_capabilities.py` 回填逻辑，运行时同样适用）：
+
+| plan_code | 推断 capability |
+|---|---|
+| `observe_20` | `self_selection`(watchlist_limit=20) + `market_data` |
+| `research_50` | `self_selection`(watchlist_limit=50) + `market_data` + `research_replay` |
+
+旧 `Subscription` / `plan_code` / `entitlement_snapshot` 保留兼容期，新读取优先、旧数据 fallback。
+
+### 11.7 核验状态汇总
+
+| 项目 | 状态 |
+|---|---|
+| UserCapability 模型 / Schema | 已核验 |
+| require_capability API 依赖 | 已核验 |
+| InviteCode.capabilities JSONB | 已核验 |
+| CapabilityRoute 前端守卫 | 已核验 |
+| Fallback 推断逻辑 | 已核验 |
+| 角色组合测试矩阵（§10.7） | 部分实现 |
