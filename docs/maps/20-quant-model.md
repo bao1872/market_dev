@@ -1,9 +1,9 @@
 # 量化模型 Map
 
-核验状态：已基于代码审计更新（Phase 4）；Phase 5A 修正 AC-04 引用；Phase 5B-0 修正 ref/ 跟踪状态、趋势入口审计、平均成交量字段归属
+核验状态：已基于代码审计更新（Phase 4）；Phase 5A 修正 AC-04 引用；Phase 5B-0 修正 ref/ 跟踪状态、趋势入口审计、平均成交量字段归属；Phase 5B-1 完成第一金字塔统一契约与趋势段内成交量迁移
 最后核验日期：2026-07-27
 核验分支：dev
-核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A/5B-0 修复见对应 Change 文档
+核验提交：54c601e（Phase 5B-1 基线）
 事实所有权：趋势、结构、动量、筹码和板块模型的权威代码、输入、输出和调用方
 
 > 本文件必须基于真实代码、数据、日志或运行结果填写。不得根据 PRD 推测实现已经存在。
@@ -50,7 +50,7 @@
 | 趋势段长度 | `dsa_dir_bars`（line 439，count × dir_vals，按 group_id 累计） |
 | 涨跌幅 | `change_pct`（line 451，`close.pct_change() * 100`，百分比） |
 | 平均成交量（直接输出） | `avg_amount_20d`（line 453，`amount.rolling(20).mean()`，20日平均成交额）；`vol_zscore`（line 376-377，成交量 z-score） |
-| 段内成交量（派生） | `current_segment_volume_sum` / `current_vs_prev_volume_ratio` 由 `structural_factor_service.py:873-945` 基于 DSA group_id 派生，**非** dsa_selector 直接输出 |
+| 段内成交量（SSOT 直接输出） | [Phase 5B-1] `current_segment_volume_sum/mean`、`prev_segment_volume_sum`、`current_vs_prev_volume_ratio/amount_ratio` 由 `dsa_selector.py:compute_dsa_history` 基于 group_id 直接输出（line 381-407）；`_history_row_to_metrics` 导出（line 555-563）。**单一所有权**：禁止 `structural_factor_service.py` 重复派生。 |
 | VWAP 偏离 | `dsa_vwap_dev_pct`（line 451，`(close - vwap) / vwap * 100`）；`offset_rate/offset_mean/offset_std/offset_percentile/offset_variance_rate` |
 | VWAP 收益 | `vwap_ret_avg/vwap_ret_total/vwap_ret_5/vwap_ret_10/vwap_ret_20`（line 343-364，按 group_id 计算） |
 | 交叉事件 | `_detect_cross_events`（line 183-250）输出 vwap/rope 上下穿计数与最近日期，按 DSA 趋势区间累计 |
@@ -64,14 +64,15 @@
 | 验证入口 | `test_dsa_selector.py`、`test_dsa_publish_validation.py`、`test_dsa_visual_segments.py`、`test_dsa_bundle_consistency.py`、`test_dsa_factor_visual_separation.py`、`test_dsa_visual_segments_time_format.py` |
 | 与 SMC 边界 | DSA 负责趋势段（regime_value/dsa_dir_bars/visual_segments）；SMC `compute_smc_pine` 仅输出 events(BOS/CHoCH)/order_blocks/equal_highs_lows/trailing/swing_bias/pivots，**不维护等价趋势段**。无重复定义。 |
 
-### Phase 5B-1 趋势修改清单（下一轮，本轮不修改算法）
+### Phase 5B-1 趋势修改清单（已实施 2026-07-27）
 
-本轮审计仅发现文档描述偏差，未发现算法实现缺陷。下一轮如需修改趋势相关逻辑，应聚焦以下精确位置：
+本轮 Phase 5B-1 已完成以下修改（详见 `docs/changes/2026/CHANGE-20260727-004-first-pyramid-local-root.md`）：
 
-1. **如需调整趋势段方向判定阈值**：修改 `dsa_selector.py:68` 常量 `MIN_DIR_BARS = 50`（当前硬编码），并通过 `dsa_selector.yaml` 暴露为可配置参数；同步更新 `compute_dsa_history` line 284 读取逻辑。
-2. **如需补充段内成交量到 SSOT**：当前 `current_segment_volume_sum` / `current_vs_prev_volume_ratio` 在 `structural_factor_service.py:873-945` 派生，与 DSA group_id 计算耦合。如要纳入 SSOT，应在 `compute_dsa_history` line 434-473 的 result DataFrame 中新增 `current_segment_volume_sum` 列（基于 group_id + volume.rolling），并在 `_history_row_to_metrics` line 484-530 中导出；最小测试：扩展 `test_dsa_bundle_consistency.py` 验证新字段非空。
-3. **如需趋势与板块聚合联动**：当前 `market_stocks_service.py` 仅展示个股字段，无基于 DSA regime_value 的板块趋势聚合。Phase 5B-1 应在 `maps/20-quant-model.md §7` 标记的 QM-50/QM-51 缺口处新增 `board_factor_aggregation_service.py`，输入 `strategy_results.payload.regime_value` + `market_board_memberships`，输出板块趋势分布；最小测试：单板块聚合返回 `bullish_count/bearish_count/neutral_count`。
-4. **如需研究路径统一**：`research/feature_computer.py:293` 当前直接调用 `compute_dsa_history`，应改为 `compute_dsa_bundle` 以获取完整图表字段；非阻塞，可在下次 research 模块维护时统一。
+1. **段内成交量迁移至 SSOT**：✅ 已完成。`dsa_selector.py:compute_dsa_history` 新增 `current_segment_volume_sum/mean`、`current_segment_amount_sum/mean`、`prev_segment_volume_sum/amount_sum`、`current_vs_prev_volume_ratio/amount_ratio`，基于 group_id 直接计算；`_history_row_to_metrics` 同步导出。`structural_factor_service.py` 不再重复派生（单一所有权）。
+2. **第一金字塔统一契约**：✅ 已完成。新增 `app/schemas/first_pyramid.py`（DTO）+ `app/services/first_pyramid_service.py`（编排入口），固定顺序 trend→structure→momentum→chip_consensus，前三维必选，chip_consensus 可选。
+3. **MIN_DIR_BARS 参数化**：保留为代码常量（`dsa_selector.py:68`），通过 `_FIRST_PYRAMID_PARAMS` 进入 `parameterHash`，禁止页面动态组合。
+4. **板块/指数第二金字塔**：本轮不实施 QM-50/QM-51（保留为已知缺口）。
+5. **研究路径统一**：`research/feature_computer.py` 仍直接调用 `compute_dsa_history`，非阻塞，保留为下次维护项。
 
 ## 4. 结构
 
@@ -134,6 +135,25 @@
 - ~~P1：`after_close_orchestrator.py` 的 `checking_coverage` 仍检查 15m 覆盖率~~ **[Phase 5A 已关闭]** 详见 `maps/30-after-close.md` §7。
 - P1：SMC 结构成交量信息未在 SMC 核心内显式保留，依赖结构面板的成交参与组补充。
 - ~~P3：`ref/交易/` 下存在大量实验/参考脚本~~ **[Phase 5B-0 已关闭]** `ref/` 已完全退出 git 跟踪（.gitignore `/ref/`）；`test_ref_isolation.py` 守护 `git ls-files ref/` 为空；CI 增加显式 ref/sync 跟踪检查。
+
+## 9.5 第一金字塔统一契约（Phase 5B-1 实施 2026-07-27）
+
+| 项目 | 当前事实 |
+|---|---|
+| 权威 DTO | `backend/app/schemas/first_pyramid.py:FirstPyramidSnapshot`（固定 ordered_dimensions = trend/structure/momentum/chip_consensus） |
+| 编排服务 | `backend/app/services/first_pyramid_service.py:compute_first_pyramid_snapshot`（SSOT 入口，不实现算法） |
+| 趋势维度 | 调用 `compute_dsa_bundle`；输出 regime_value/dsa_dir_bars/段内成交量（SSOT 迁移后） |
+| 结构维度 | 调用 `compute_smc_pine`；输出 BOS/CHoCH/OB_ENTRY/EQH/EQL 事件 + swing_bias |
+| 动量维度 | 调用 `compute_bollinger_features` + `compute_sqzmom_lb`；输出 squeeze 状态/BB 带宽/SQZ_OFF/MOMENTUM_DIFFUSION 事件 |
+| 筹码共识 | 调用 `compute_node_cluster_profile`；无有效峰时返回 None，不阻塞前三维 |
+| 跨入口一致性 | 同 OHLCV + 参数 → 同 inputHash/parameterHash/snapshot；测试 `test_first_pyramid_contract.py` 验证 |
+| 状态文本顺序 | trend→structure→momentum→chip_consensus（修正历史 trend→momentum→structure→volume 错误顺序） |
+| 必选维度校验 | 前三维任一 available=False 抛 ValueError，不得静默伪造 |
+| 参数 hash | `_FIRST_PYRAMID_PARAMS` 包含 DSA_LOOKBACK/MIN_DIR_BARS/SMC_DEFAULT_PARAMS/BBcfg/sqzmom 配置，禁止页面动态组合 |
+| 验证入口 | `backend/tests/test_first_pyramid_contract.py`（38 测试，覆盖 DTO/跨入口/不变量/golden/QM 映射） |
+| 算法版本 | `FIRST_PYRAMID_ALGORITHM_VERSION = "1.0.0-phase-5b-1"`（契约或算法变更时递增） |
+
+**注**：本服务为纯编排层，不复制四套算法。单股详情、批量、行情列表、盘后 compute 必须复用此入口。
 
 ## 10. 更新触发条件
 

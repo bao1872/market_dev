@@ -144,7 +144,7 @@ ps aux | grep -E 'scheduler|worker|celery' | grep -v grep
 | 管理员 | `/admin`、`/admin/users`、`/admin/beta-applications`、`/admin/after-close/pipeline`、`/admin/jobs`、`/admin/strategies`、`/admin/stocks/:symbol/debug`、`/admin/audit-logs`、`/admin/members`、`/admin/message-deliveries` | `/admin/system-overview`、`/admin/users`、`/admin/beta-applications`、`/admin/after-close/pipeline/latest`、`/admin/scheduler-job-runs`、`/admin/worker-heartbeats`、`/api/v1/admin/stocks/{symbol}/debug`、`/admin/audit-logs`、`/admin/members`、`/admin/message-deliveries` |
 | 重定向 | `/overview`、`/watchlist`、`/screener`、`/admin/strategies`、`/admin/stock-debug/:symbol`、`*` | SPA 客户端重定向 |
 
-**已知限制**：本地 Vite 无 Nginx 前置，访问 `/` 时 `LandingPage` 组件 `window.location.replace('/')` 会触发无限刷新；可通过直接访问 `/login` 或 `/market` 绕过；生产环境由 Nginx 精确分流，不受影响。
+**[Phase 5B-1 已修复]**：本地 Vite 下 `/` 已修复为一次性跳转 `/portal/index.html`（`LandingPage.tsx` DEV 模式 `window.location.replace('/portal/index.html')`），不再无限刷新；生产环境由 Nginx 精确分流，行为不变；若生产 Nginx 误配置进入 SPA，显示稳定入口链接（不跳转当前 URL）。测试：`node --test frontend/src/pages/__tests__/landingPageRoot.test.mjs`（7 测试）。
 
 **记录内容**：每个路由的页面加载状态、主要 API 成功/失败、数据展示、权限正确性、阻塞原因。详细结果记录在 `docs/maps/40-market-stock-experience.md` / `50-watchlist-intraday.md` / `60-permissions-admin.md` 的前端验证章节。
 

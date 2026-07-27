@@ -378,6 +378,33 @@ def compute_dsa_history(
     amount = df["amount"].astype(float)
     avg_amount_20d = amount.rolling(window=20, min_periods=1).mean()
 
+    # [Phase 5B-1] 段内成交量迁移：将原 structural_factor_service.py:873-945 的派生
+    # 迁回 DSA SSOT。基于 group_id 计算"当前段累计"与"前一段总量"，避免外部
+    # 模块通过 visual_segments time-string 匹配重复派生（单一所有权）。
+    # PRD20 QM-12：每段趋势至少记录平均成交量及与前段的变化关系。
+    current_segment_volume_sum = volume.groupby(group_id).cumsum()
+    current_segment_amount_sum = amount.groupby(group_id).cumsum()
+    # 前一段总量：取每个 group 的总量，shift(1) 对齐到下一个 group 的所有 bar
+    # 对每个 group，prev_total = 上一个 group 的 total，对该 group 所有 bar 都一样
+    _grp_volume_totals = volume.groupby(group_id).sum()
+    _grp_amount_totals = amount.groupby(group_id).sum()
+    # 构造 group_id → prev_total 映射
+    _prev_vol_by_gid = _grp_volume_totals.shift(1).fillna(0.0)
+    _prev_amt_by_gid = _grp_amount_totals.shift(1).fillna(0.0)
+    prev_segment_volume_sum = group_id.map(_prev_vol_by_gid).astype(float)
+    prev_segment_amount_sum = group_id.map(_prev_amt_by_gid).astype(float)
+    # 当前段 vs 前一段比例（前段为 0 时为 NaN）
+    with np.errstate(divide="ignore", invalid="ignore"):
+        current_vs_prev_volume_ratio = (
+            current_segment_volume_sum / prev_segment_volume_sum.replace(0.0, np.nan)
+        )
+        current_vs_prev_amount_ratio = (
+            current_segment_amount_sum / prev_segment_amount_sum.replace(0.0, np.nan)
+        )
+    # 当前段平均成交量（累计 / 段内 bar 数 count）
+    current_segment_volume_mean = current_segment_volume_sum / count.replace(0, np.nan)
+    current_segment_amount_mean = current_segment_amount_sum / count.replace(0, np.nan)
+
     # 8. ATR Rope 与方向占比
     rope_dir1_pct = pd.Series(np.nan, index=df.index, dtype=float)
     rope_dir0_pct = pd.Series(np.nan, index=df.index, dtype=float)
@@ -451,6 +478,15 @@ def compute_dsa_history(
             "change_pct": change_pct,
             "vol_zscore": vol_zscore,
             "avg_amount_20d": avg_amount_20d,
+            # [Phase 5B-1] 段内成交量（迁回 DSA SSOT，禁止外部重复派生）
+            "current_segment_volume_sum": current_segment_volume_sum,
+            "current_segment_amount_sum": current_segment_amount_sum,
+            "current_segment_volume_mean": current_segment_volume_mean,
+            "current_segment_amount_mean": current_segment_amount_mean,
+            "prev_segment_volume_sum": prev_segment_volume_sum,
+            "prev_segment_amount_sum": prev_segment_amount_sum,
+            "current_vs_prev_volume_ratio": current_vs_prev_volume_ratio,
+            "current_vs_prev_amount_ratio": current_vs_prev_amount_ratio,
             "rope_dir1_pct": rope_dir1_pct,
             "rope_dir0_pct": rope_dir0_pct,
             "rope_dir_neg1_pct": rope_dir_neg1_pct,
@@ -516,6 +552,15 @@ def _history_row_to_metrics(row: pd.Series) -> dict[str, Any]:
         "dsa_vwap_dev_pct": _safe_float(row["dsa_vwap_dev_pct"]),
         "vol_zscore": _safe_float(row["vol_zscore"]),
         "avg_amount_20d": _safe_float(row["avg_amount_20d"]),
+        # [Phase 5B-1] 段内成交量（SSOT 输出，禁止外部重复派生）
+        "current_segment_volume_sum": _safe_float(row["current_segment_volume_sum"]),
+        "current_segment_amount_sum": _safe_float(row["current_segment_amount_sum"]),
+        "current_segment_volume_mean": _safe_float(row["current_segment_volume_mean"]),
+        "current_segment_amount_mean": _safe_float(row["current_segment_amount_mean"]),
+        "prev_segment_volume_sum": _safe_float(row["prev_segment_volume_sum"]),
+        "prev_segment_amount_sum": _safe_float(row["prev_segment_amount_sum"]),
+        "current_vs_prev_volume_ratio": _safe_float(row["current_vs_prev_volume_ratio"]),
+        "current_vs_prev_amount_ratio": _safe_float(row["current_vs_prev_amount_ratio"]),
         "rope_cross_up_date": _safe_date(row["rope_cross_up_date"]),
         "rope_cross_down_date": _safe_date(row["rope_cross_down_date"]),
         "rope_cross_up_price": _safe_float(row["rope_cross_up_price"]),
