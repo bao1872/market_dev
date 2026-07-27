@@ -461,6 +461,74 @@ export const FIXTURE_USER = {
   updated_at: '2024-01-01T00:00:00Z',
 }
 
+// [Phase 5B-2] First Pyramid fixture（与 FirstPyramidSnapshot 接口字段对齐，camelCase）
+// 防止 E2E 默认 mock 返回 {items:[],total:0} 导致 FirstPyramidPanel.dim.events 为 undefined
+export function buildFirstPyramidSnapshot(symbol: string) {
+  const inst = FIXTURE_INSTRUMENTS[symbol] ?? FIXTURE_INSTRUMENTS['000001']
+  const buildDim = (
+    name: 'trend' | 'structure' | 'momentum' | 'chip_consensus',
+    available: boolean,
+    statusText: string,
+    events: unknown[] = [],
+  ) => ({
+    name,
+    available,
+    continuousFactors: {},
+    events,
+    statusText,
+    evidence: {},
+  })
+  return {
+    symbol: inst.symbol,
+    tradeDate: '2024-06-01',
+    orderedDimensions: ['trend', 'structure', 'momentum', 'chip_consensus'],
+    trend: buildDim('trend', true, '上升趋势', [
+      {
+        type: 'DSA',
+        direction: 'up',
+        occurredAt: '2024-05-28T00:00:00Z',
+        barIndex: 100,
+        price: 11.2,
+        freshnessBars: 3,
+      },
+    ]),
+    structure: buildDim('structure', true, 'BOS 确认', [
+      {
+        type: 'BOS',
+        direction: 'up',
+        occurredAt: '2024-05-30T00:00:00Z',
+        barIndex: 102,
+        price: 11.45,
+        freshnessBars: 2,
+      },
+    ]),
+    momentum: buildDim('momentum', true, '带宽扩张', [
+      {
+        type: 'SQZMOM',
+        direction: 'up',
+        occurredAt: '2024-05-29T00:00:00Z',
+        barIndex: 101,
+        price: 11.32,
+        freshnessBars: 3,
+      },
+    ]),
+    chipConsensus: buildDim('chip_consensus', true, '筹码峰上沿突破', [
+      {
+        type: 'PEAK_CROSS',
+        direction: 'up',
+        occurredAt: '2024-05-27T00:00:00Z',
+        barIndex: 99,
+        price: 11.1,
+        freshnessBars: 4,
+      },
+    ]),
+    statusText: '趋势/结构/动量/筹码 四维共振',
+    inputHash: 'fixture-input-hash-0001',
+    parameterHash: 'fixture-param-hash-0001',
+    algorithmVersion: '1.0.0',
+  }
+}
+
 // Strategies fixture
 export const FIXTURE_STRATEGIES = {
   items: [

@@ -26,15 +26,16 @@ function EventItem({ event }: { event: PyramidEvent }) {
   const parts: string[] = [event.type]
   if (event.direction) parts.push(formatDirection(event.direction))
   if (event.occurredAt) parts.push(event.occurredAt)
-  if (event.price !== null) parts.push(`价 ${event.price}`)
-  parts.push(`新鲜度 ${event.freshnessBars} 根`)
+  if (event.price !== null && event.price !== undefined) parts.push(`价 ${event.price}`)
+  parts.push(`新鲜度 ${event.freshnessBars ?? 0} 根`)
   return <div className="fp-event-item">{parts.join(' · ')}</div>
 }
 
 /** 单维度卡片 */
 function DimensionCard({ dim, optional }: { dim: DimensionResult; optional?: boolean }) {
   const label = DIMENSION_LABEL[dim.name] ?? dim.name
-  const latestEvents = dim.events.slice(-3).reverse()
+  // 防御性 null 检查：dim.events 可能为 undefined（后端返回异常或 mock 数据不完整时）
+  const latestEvents = Array.isArray(dim.events) ? dim.events.slice(-3).reverse() : []
   return (
     <div className={`fp-dim-card${optional ? ' optional' : ''}`}>
       <div className="fp-dim-header">

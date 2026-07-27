@@ -23,6 +23,7 @@ import {
   buildChartSnapshot,
   buildCaptureSnapshot,
   buildStrategyRunResults,
+  buildFirstPyramidSnapshot,
 } from '../fixtures/stocks'
 
 export interface MockApiCall {
@@ -201,6 +202,15 @@ export async function setupMockApi(
       const indicatorView = includeSmc ? 'smc' : defaultIndicatorView
       const snapshot = buildChartSnapshot(symbol, timeframe, indicatorView)
       return route.fulfill({ status: 200, json: snapshot })
+    }
+
+    // === First Pyramid（详情页四维状态面板） ===
+    // 后端路径：/api/v1/stocks/{symbol}/first-pyramid
+    // 必须先于默认 200 空响应匹配，否则 FirstPyramidPanel 会因 dim.events undefined 抛错
+    if (url.includes('/first-pyramid')) {
+      const m = url.match(/\/stocks\/([^/?]+)\/first-pyramid/)
+      const symbol = m?.[1] ?? '000001'
+      return route.fulfill({ status: 200, json: buildFirstPyramidSnapshot(symbol) })
     }
 
     // === Capture Snapshot ===
