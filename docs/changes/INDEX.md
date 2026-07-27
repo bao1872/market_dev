@@ -13,9 +13,17 @@
 | CHANGE-20260726-001 | 2026-07-26 | 文档体系重构 | architecture | 文档治理 | 进行中 | PRD/Maps 全局 | 全局 |
 | CHANGE-20260726-002 | 2026-07-26 | 本地与远程运行模型 | runtime | 运行体系 | 进行中 | SR-01～SR-62 | `maps/80-system-runtime.md` |
 | CHANGE-20260726-003 | 2026-07-26 | 权限模型拆分 | behavior | 权限 | 进行中 | PA-01～PA-31 | `maps/60-permissions-admin.md` |
+| CHANGE-20260726-004 | 2026-07-26 | （历史记录，已并入 001） | architecture | 文档治理 | superseded | — | — |
+| CHANGE-20260727-001 | 2026-07-27 | 分支治理 | runtime | 运行体系 | 进行中 | SR-01～SR-62 | `maps/80-system-runtime.md` |
+| CHANGE-20260727-002 | 2026-07-27 | 盘后日线 readiness 修复 | behavior | 盘后 | 进行中 | AC-04 | `maps/30-after-close.md` |
+| CHANGE-20260727-003 | 2026-07-27 | 仓库边界与本地运行 | runtime | 运行体系 | 进行中 | SR-01～SR-62 | `maps/80-system-runtime.md` |
+| CHANGE-20260727-004 | 2026-07-27 | 第一金字塔本地根路由 | behavior | 量化模型 | 进行中 | QM-01～QM-43 | `maps/20-quant-model.md` |
+| CHANGE-20260727-005 | 2026-07-27 | Phase 5B-2 权限模型与部署脚本 | behavior | 权限/部署 | 进行中 | PA-01～PA-31 | `maps/60-permissions-admin.md`、`maps/80-system-runtime.md` |
 
 ## 3. 状态说明
 
-以上初始 Change 记录的是已经确认的重要方向。
+以上 Change 记录的是已经确认的重要方向。
 
 在代码、数据和运行状态完成核验前，不得改为“已完成”。
+
+已被后续 Change 取代的历史记录标记为 `superseded`，保留以供追溯。

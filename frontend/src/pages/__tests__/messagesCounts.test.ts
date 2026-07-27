@@ -86,14 +86,17 @@ test('单只股票消息跳转 /stock/:symbol?event_id=...&returnTo=/messages', 
     src.includes('/stock/'),
     '单只股票消息必须跳转到 /stock/:symbol',
   )
-  assert.ok(
-    src.includes("params.set('returnTo', '/messages')"),
-    '跳转必须携带 returnTo=/messages',
-  )
-  assert.ok(
-    src.includes("params.set('event_id'"),
-    '跳转必须携带 event_id 参数',
-  )
+  // 接受两种实现：直接 params.set 或通过 buildStockDetailUrl 传递 returnTo
+  // buildStockDetailUrl 内部调用 params.set('returnTo', opts.returnTo)
+  const hasReturnTo =
+    src.includes("params.set('returnTo', '/messages')") ||
+    src.includes("returnTo: '/messages'")
+  assert.ok(hasReturnTo, '跳转必须携带 returnTo=/messages')
+  // event_id 可通过 params.set 或字符串拼接传递
+  const hasEventId =
+    src.includes("params.set('event_id'") ||
+    src.includes('event_id=')
+  assert.ok(hasEventId, '跳转必须携带 event_id 参数')
   // 不应跳转到旧 /market?symbol=
   assert.ok(
     !src.includes('/market?symbol='),

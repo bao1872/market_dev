@@ -54,17 +54,22 @@ from pathlib import Path
 # 模块级路径（可被测试 monkeypatch 注入）
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_DIR = REPO_ROOT / "docs"
-CURRENT_DIR = DOCS_DIR / "current"
-MANIFEST_FILE = CURRENT_DIR / "MANIFEST.md"
+# [eaffb11 文档重构] docs/current/ 已替换为 docs/prd/（按领域 00-90 编号）
+# 现以 docs/prd/ 作为 PRD 事实源入口
+CURRENT_DIR = DOCS_DIR / "prd"
+# [eaffb11 文档重构] docs/current/MANIFEST.md 已删除；
+# baseline SHA 改从 docs/maps/00-system-overview.md 的"核验提交"字段读取
+MANIFEST_FILE = DOCS_DIR / "maps" / "00-system-overview.md"
 MAPS_DIR = DOCS_DIR / "maps"
 ARCHIVE_DIR = DOCS_DIR / "archive"
 AGENTS_FILE = REPO_ROOT / "AGENTS.md"
 
-# 同时识别英文 `Last verified code baseline` 和中文 `实现核对基线`，要求 40 位 hex
+# 同时识别英文 `Last verified code baseline`、中文 `实现核对基线` 和 `核验提交`，要求 40 位 hex
 # 兼容 ASCII `:` 和中文全角 `：`
 # 允许可选反引号包围 SHA（v2 MANIFEST 使用 `sha` 格式）
+# [eaffb11] 新增 `核验提交` 以匹配 docs/maps/00-system-overview.md 字段
 BASELINE_RE = re.compile(
-    r"(?:Last verified code baseline|实现核对基线)[:：]\s*`?([0-9a-fA-F]{40})`?"
+    r"(?:Last verified code baseline|实现核对基线|核验提交)[:：]\s*`?([0-9a-fA-F]{40})`?"
 )
 
 # Webhook 回归检测：feishu_webhook 出现在 current 文档时，若行内包含以下删除语境关键词则豁免
@@ -89,8 +94,10 @@ FEISHU_WEBHOOK_RE = re.compile(r"feishu_webhook")
 # AGENTS v2 文档结构规范：docs 顶层允许的目录（PRD V2.0 §7.1 权威层级入口）。
 # docs/ 根 .md 文件（如 README.md、INDEX.md）不受限，只约束子目录。
 # [CP-14] 扩展为 PRD V2.0 §7.1 定义的完整目录集：contracts/decisions/runbooks/acceptance/evidence/work
+# [eaffb11 文档重构] current/ 已替换为 prd/；保留 current 以兼容历史 archive 引用
 ALLOWED_TOP_LEVEL_DIRS = {
     "current", "maps", "changes", "archive",  # 历史 v2 目录
+    "prd",  # [eaffb11] 新 PRD 事实源目录（替代 current/）
     "contracts", "decisions", "runbooks", "acceptance", "evidence", "work",  # CP-14 新增
 }
 
@@ -130,11 +137,13 @@ REF_WINDOW_BEFORE = 60
 REF_WINDOW_AFTER = 80
 REF_PROHIBITED_TERM_WINDOW = 40
 
-# 规则 15：必需 CHANGE 记录（CHANGE-20260718-004）
-# CHANGE-20260718-004.md 必须存在且被 CHANGELOG.md 引用。
+# 规则 15：必需 CHANGE 记录（CHANGE-20260718-004 → CHANGE-20260726-001）
+# [eaffb11 文档重构] 原 CHANGE-20260718-004 已被 eaffb11 重构取代，
+# 其语义（Node Cluster 合同 + ref 隔离 + 文档治理）由 CHANGE-20260726-001 承载。
+# 改为要求 CHANGE-20260726-001（文档体系重构）存在且被 INDEX.md 引用。
 # 路径在 check_required_change_documented() 内从 DOCS_DIR 派生，
 # 以支持测试 monkeypatch 注入临时路径。
-REQUIRED_CHANGE_ID = "CHANGE-20260718-004"
+REQUIRED_CHANGE_ID = "CHANGE-20260726-001"
 
 # 规则 16：MANIFEST baseline 新鲜度窗口（CP-19 / CHANGE-20260722-001）
 # baseline SHA 必须在 HEAD 的最近 N 个 commit 内，防止 baseline 严重落后。
@@ -414,7 +423,12 @@ def check_change_references(doc_files: list[Path]) -> list[str]:
     """规则 12：校验 CHANGE 引用存在性（CHANGE-20260718-002）。
 
     扫描所有 doc_files 中 `CHANGE-YYYYMMDD-NNN` 引用，
-    验证 docs/changes/records/CHANGE-YYYYMMDD-NNN.md 文件存在。
+    验证对应 CHANGE record 文件存在。
+
+    [eaffb11 文档重构] CHANGE record 存储位置：
+    - 旧路径：docs/changes/records/CHANGE-YYYYMMDD-NNN.md
+    - 新路径：docs/changes/YYYY/CHANGE-YYYYMMDD-NNN-描述.md
+    两种格式都接受，任一存在即视为引用可达。
 
     历史引用（指向已被删除/未创建的 record）会被检出。
     跳过 archive/ 目录（历史快照，不要求引用可达）。
@@ -423,6 +437,7 @@ def check_change_references(doc_files: list[Path]) -> list[str]:
     """
     errors: list[str] = []
     records_dir = DOCS_DIR / "changes" / "records"
+    changes_root = DOCS_DIR / "changes"
     for doc_path in doc_files:
         # archive 历史快照不参与 CHANGE 引用可达性检查
         try:
@@ -438,8 +453,21 @@ def check_change_references(doc_files: list[Path]) -> list[str]:
             if ref_id in seen_in_doc:
                 continue
             seen_in_doc.add(ref_id)
-            target = records_dir / f"{ref_id}.md"
-            if not target.exists():
+            # 旧路径：docs/changes/records/CHANGE-YYYYMMDD-NNN.md
+            target_old = records_dir / f"{ref_id}.md"
+            # 新路径：docs/changes/YYYY/CHANGE-YYYYMMDD-NNN-*.md
+            year = match.group(1)[:4]
+            year_dir = changes_root / year
+            target_new = None
+            if year_dir.exists():
+                # 匹配 CHANGE-YYYYMMDD-NNN-任意描述.md
+                prefix = f"{ref_id}-"
+                candidates = [
+                    p for p in year_dir.glob(f"{prefix}*.md") if p.is_file()
+                ]
+                if candidates:
+                    target_new = candidates[0]
+            if not target_old.exists() and target_new is None:
                 errors.append(
                     f"引用了不存在的 CHANGE record: {ref_id} "
                     f"(在 {doc_path.relative_to(REPO_ROOT)})"
@@ -496,18 +524,22 @@ def check_required_new_docs_exist() -> list[str]:
     """规则 13：必需新文档必须存在（CHANGE-20260718-004）。
 
     要求：
-    - docs/current/08-indicator-calculation-contracts.md（Node Cluster 合同）
+    - docs/prd/08-indicator-calculation-contracts.md（Node Cluster 合同）
     - docs/maps/indicator-computation-map.md（指标计算地图）
 
-    这两份文档是 CHANGE-20260718-004 的核心交付物，必须在 Section 4 创建。
+    [eaffb11 文档重构] 文档位置从 docs/current/ 迁移到 docs/prd/。
+    由于 PRD 已按领域 00-90 重新编号，原 08-indicator-calculation-contracts.md
+    的内容现由 docs/prd/20-quant-model.md（量化模型 PRD）覆盖；
+    指标计算 Map 由 docs/maps/20-quant-model.md 覆盖。
+    本规则改为验证 docs/prd/20-quant-model.md 和 docs/maps/20-quant-model.md 存在。
 
     路径从 CURRENT_DIR/MAPS_DIR 派生（支持测试 monkeypatch）。
     """
     errors: list[str] = []
-    # 第一个文件在 current/，第二个在 maps/
+    # [eaffb11] 08-indicator-calculation-contracts.md 内容并入 20-quant-model.md
     required_paths = (
-        CURRENT_DIR / REQUIRED_NEW_DOC_NAMES[0],
-        MAPS_DIR / REQUIRED_NEW_DOC_NAMES[1],
+        CURRENT_DIR / "20-quant-model.md",
+        MAPS_DIR / "20-quant-model.md",
     )
     for doc_path in required_paths:
         if not doc_path.exists():
@@ -516,7 +548,8 @@ def check_required_new_docs_exist() -> list[str]:
             except ValueError:
                 rel = doc_path
             errors.append(
-                f"缺少必需文档: {rel}（CHANGE-20260718-004 要求）"
+                f"缺少必需文档: {rel}（CHANGE-20260718-004 要求，"
+                f"eaffb11 后由 20-quant-model.md 承载）"
             )
     return errors
 
@@ -554,36 +587,49 @@ def check_current_docs_no_ref_dependency() -> list[str]:
 
 
 def check_required_change_documented() -> list[str]:
-    """规则 15：必需 CHANGE 记录必须存在且被 CHANGELOG 引用（CHANGE-20260718-004）。
+    """规则 15：必需 CHANGE 记录必须存在且被 CHANGELOG/INDEX 引用（CHANGE-20260718-004）。
+
+    [eaffb11 文档重构] CHANGELOG.md 已被 docs/changes/INDEX.md 替代。
+    CHANGE record 也从 docs/changes/records/ 迁移到 docs/changes/YYYY/。
 
     要求：
-    - docs/changes/records/CHANGE-20260718-004.md 必须存在
-    - docs/changes/CHANGELOG.md 必须引用 CHANGE-20260718-004
+    - CHANGE-20260718-004 的 record 文件必须存在
+      （旧路径 docs/changes/records/CHANGE-20260718-004.md
+       或新路径 docs/changes/2026/CHANGE-20260718-004-*.md）
+    - docs/changes/INDEX.md 必须引用 CHANGE-20260718-004
 
-    CHANGE-20260718-004 是本次 Node Cluster 合同 + ref 隔离的核心变更记录，
-    必须在 Section 4.7 创建并加入 CHANGELOG。
+    CHANGE-20260718-004 是本次 Node Cluster 合同 + ref 隔离的核心变更记录。
 
     路径从 DOCS_DIR 派生（支持测试 monkeypatch 注入临时路径）。
     """
     errors: list[str] = []
     records_dir = DOCS_DIR / "changes" / "records"
-    record_path = records_dir / f"{REQUIRED_CHANGE_ID}.md"
-    changelog_path = DOCS_DIR / "changes" / "CHANGELOG.md"
+    year_dir = DOCS_DIR / "changes" / "2026"
+    # 旧路径
+    record_path_old = records_dir / f"{REQUIRED_CHANGE_ID}.md"
+    # 新路径：CHANGE-20260718-004-任意描述.md
+    record_path_new = None
+    if year_dir.exists():
+        candidates = [
+            p for p in year_dir.glob(f"{REQUIRED_CHANGE_ID}-*.md") if p.is_file()
+        ]
+        if candidates:
+            record_path_new = candidates[0]
 
-    if not record_path.exists():
-        try:
-            rel = record_path.relative_to(REPO_ROOT)
-        except ValueError:
-            rel = record_path
+    if not record_path_old.exists() and record_path_new is None:
         errors.append(
-            f"缺少必需 CHANGE record: {rel}（CHANGE-20260718-004 要求）"
+            f"缺少必需 CHANGE record: {REQUIRED_CHANGE_ID}"
+            f"（既不在 docs/changes/records/，也不在 docs/changes/2026/）"
         )
+
+    # [eaffb11] CHANGELOG.md 替换为 INDEX.md
+    changelog_path = DOCS_DIR / "changes" / "INDEX.md"
     if changelog_path.exists():
         changelog_content = changelog_path.read_text(encoding="utf-8")
         if REQUIRED_CHANGE_ID not in changelog_content:
             errors.append(
-                f"CHANGELOG.md 未引用 {REQUIRED_CHANGE_ID}"
-                f"（CHANGE-20260718-004 要求记录在 CHANGELOG）"
+                f"docs/changes/INDEX.md 未引用 {REQUIRED_CHANGE_ID}"
+                f"（CHANGE-20260718-004 要求记录在 INDEX）"
             )
     else:
         try:
@@ -591,13 +637,16 @@ def check_required_change_documented() -> list[str]:
         except ValueError:
             rel = changelog_path
         errors.append(
-            f"缺少 CHANGELOG 文件: {rel}"
+            f"缺少 CHANGELOG/INDEX 文件: {rel}"
         )
     return errors
 
 
 def check_manifest_baseline() -> tuple[list[str], str | None]:
-    """v2 规则 1-4：检查 docs/current/MANIFEST.md 的全局基线字段。
+    """v2 规则 1-4：检查全局基线 SHA 字段。
+
+    [eaffb11 文档重构] 原 docs/current/MANIFEST.md 已删除；
+    baseline SHA 改从 docs/maps/00-system-overview.md 的"核验提交"字段读取。
 
     Returns:
         (errors, baseline_sha)：错误列表与解析到的 baseline SHA（无则为 None）
@@ -605,15 +654,17 @@ def check_manifest_baseline() -> tuple[list[str], str | None]:
     errors: list[str] = []
 
     if not MANIFEST_FILE.exists():
-        errors.append(f"缺少 MANIFEST 文件: {MANIFEST_FILE.relative_to(REPO_ROOT)}")
+        errors.append(f"缺少 baseline 文件: {MANIFEST_FILE.relative_to(REPO_ROOT)}")
         return errors, None
 
     content = MANIFEST_FILE.read_text(encoding="utf-8")
     shas = extract_baselines(content)
 
-    # 规则 1：MANIFEST 必须有 实现核对基线 字段
+    # 规则 1：必须有 实现核对基线/核验提交 字段
     if not shas:
-        errors.append("MANIFEST.md 缺少 实现核对基线 字段")
+        errors.append(
+            f"{MANIFEST_FILE.relative_to(REPO_ROOT)} 缺少 实现核对基线/核验提交 字段"
+        )
         return errors, None
 
     # 规则 2：SHA 格式校验
@@ -641,16 +692,16 @@ def main() -> int:
 
     # === 第一阶段：MANIFEST 集中基线检查（v2 规则 1-4）===
     print(f"检查文档目录: {DOCS_DIR.relative_to(REPO_ROOT)}")
-    print(f"MANIFEST 文件: {MANIFEST_FILE.relative_to(REPO_ROOT)}\n")
+    print(f"baseline 文件: {MANIFEST_FILE.relative_to(REPO_ROOT)}\n")
 
     manifest_errors, baseline_sha = check_manifest_baseline()
     if manifest_errors:
         all_errors.extend([f"MANIFEST: {e}" for e in manifest_errors])
-        print("[FAIL] docs/current/MANIFEST.md")
+        print(f"[FAIL] {MANIFEST_FILE.relative_to(REPO_ROOT)}")
         for e in manifest_errors:
             print(f"       - {e}")
     else:
-        print("[PASS] docs/current/MANIFEST.md")
+        print(f"[PASS] {MANIFEST_FILE.relative_to(REPO_ROOT)}")
     print(f"       MANIFEST baseline: {baseline_sha or '(未解析)'}")
 
     # === 第一阶段补充：docs 顶层目录结构检查（v2 规则 11，CHANGE-20260718-002）===
@@ -662,7 +713,7 @@ def main() -> int:
         for e in tld_errors:
             print(f"       - {e}")
     else:
-        print("[PASS] docs/ 顶层目录结构（仅 current/maps/changes/archive）")
+        print("[PASS] docs/ 顶层目录结构（允许 prd/maps/changes/archive 等）")
 
     # === 第二阶段：current 文档回归检查（webhook + open-decisions）===
     current_docs = collect_current_docs()

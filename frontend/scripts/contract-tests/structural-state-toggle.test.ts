@@ -303,8 +303,9 @@ test('test_capture_mode_no_side_column', () => {
   )
 
   // 源码必须包含 data-testid="stock-detail-capture"（加载/错误状态 + chartColumnProps）
+  // 接受单引号或双引号形式（JSX 对象字面量可用任一引号）
   assert.ok(
-    src.includes('data-testid="stock-detail-capture"'),
+    /data-testid=["']stock-detail-capture["']/.test(src),
     'StockDetailPage 必须设置 data-testid="stock-detail-capture"（capture worker 通过该选择器截图）',
   )
 

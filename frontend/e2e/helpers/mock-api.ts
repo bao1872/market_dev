@@ -62,6 +62,13 @@ export async function injectAuthState(page: Page, opts: { captureMode?: boolean 
       features: ['market', 'stock_detail', 'capture'],
       limits: { watchlist: 100, strategies: 10 },
       expires_at: '2025-12-31T00:00:00Z',
+      // [Phase 5B-2 PRD60 PA-01] capabilities：CapabilityRoute 守卫依赖
+      // 缺失会导致 /stock/:symbol 等路由重定向到 /forbidden，E2E URL 断言失败
+      capabilities: {
+        self_selection: { active: true, expires_at: null, watchlist_limit: 100 },
+        market_data: { active: true, expires_at: null, watchlist_limit: null },
+        research_replay: { active: true, expires_at: null, watchlist_limit: null },
+      },
     }
     if (captureMode) {
       localStorage.setItem('capture_token', token)

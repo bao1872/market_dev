@@ -430,6 +430,7 @@ export function buildStrategyRunResults(symbol: string) {
 }
 
 // Access profile fixture（认证后的访问上下文）
+// [Phase 5B-2 PRD60 PA-01] capabilities 字段：三类独立权限（CapabilityRoute 守卫依赖）
 export const FIXTURE_ACCESS_PROFILE = {
   user_id: 'fixture-user',
   account_status: 'active',
@@ -442,6 +443,11 @@ export const FIXTURE_ACCESS_PROFILE = {
   expires_at: '2025-12-31T00:00:00Z',
   features: ['market', 'stock_detail', 'capture'],
   limits: { watchlist: 100, strategies: 10 },
+  capabilities: {
+    self_selection: { active: true, expires_at: null, watchlist_limit: 100 },
+    market_data: { active: true, expires_at: null, watchlist_limit: null },
+    research_replay: { active: true, expires_at: null, watchlist_limit: null },
+  },
 }
 
 // User fixture
