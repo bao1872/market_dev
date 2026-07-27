@@ -21,7 +21,8 @@
 
 - 本地基线提交 `a817595 chore: align local runtime setup with native Python/Node.js`
 - 本地基线提交 `eaffb11 docs: restructure docs and rules layout`
-- 第二阶段工作区修改包含 `backend/app/config.py`、`backend/app/main.py`、`backend/app/api/health.py`、`backend/tests/test_config_validation.py`、`backend/tests/test_main_lifespan.py`、`Makefile`、`backend/README.md`、`scripts/local/ssh-tunnel.sh` 及多项文档更新
+- 第二阶段提交 `405d3ee chore(runtime): phase 2 local runtime safety hardening`
+- 第二阶段最终收口提交（本轮）：修正 SSH 身份为 `panji-prod`（43.136.118.82），从项目引用中移除错误的 `55-server`，更新 Maps/Runbook/AGENTS
 
 替代：
 
@@ -172,7 +173,9 @@
 
 - `docker-compose.yml` 本地文件仍保留 redis 服务，建议在确认无调用方后删除或重命名；
 - 远程稳定 SHA、Compose 服务、Scheduler / Worker 运行状态待下一阶段核验；
-- DB 15 为临时使用，需项目层面确认是否正式保留。
+- DB 15 为临时使用，需项目层面确认是否正式保留；
+- `main` 自动部署 workflow 待后续阶段实施（PRD SR-14 已记录目标）；
+- `rules/README.md` 仍引用已删除的 `docs/current/` 作为事实源，需在后续文档治理中修正。
 
 ## 8. 验证与证据
 

@@ -7,15 +7,17 @@
 #   scripts/local/ssh-tunnel.sh stop    # 停止隧道
 #
 # 约束:
-# - 必须使用 ~/.ssh/config 中定义的 Host 别名，禁止命令行明文密码。
+# - 必须使用 ~/.ssh/config 中定义的 Host 别名 panji-prod，禁止命令行明文密码。
 # - 使用默认 host key 校验（不得设置 StrictHostKeyChecking=no）。
 # - 每次 start 只远程只读获取容器当前 IP，再建隧道。
+# - 启动前校验 ssh -G 解析出的 HostName 必须是 43.136.118.82（盘迹腾讯云稳定服务器）。
 # - 隧道 PID 写入 /tmp，不保存任何密钥。
 # - 15432/16379 任一被占用即失败，避免误连其他服务。
 
 set -euo pipefail
 
-SSH_HOST="${PANJI_SSH_HOST:-55-server}"
+SSH_HOST="${PANJI_SSH_HOST:-panji-prod}"
+EXPECTED_HOSTNAME="43.136.118.82"
 POSTGRES_REMOTE_PORT=5432
 REDIS_REMOTE_PORT=6379
 POSTGRES_LOCAL_PORT=15432
@@ -58,14 +60,28 @@ get_container_ips() {
     '
 }
 
+verify_ssh_host() {
+    # 校验 SSH Host 别名解析出的 HostName 必须是盘迹腾讯云稳定服务器。
+    local resolved
+    resolved="$(ssh -G "${SSH_HOST}" 2>/dev/null | awk '/^hostname /{print $2; exit}')"
+    if [[ "${resolved}" != "${EXPECTED_HOSTNAME}" ]]; then
+        fail "SSH Host '${SSH_HOST}' 解析为 '${resolved}'，期望 '${EXPECTED_HOSTNAME}'。请检查 ~/.ssh/config 中的 Host panji-prod 配置。"
+    fi
+    log "SSH Host 校验通过: ${SSH_HOST} -> ${resolved}"
+}
+
 start_tunnel() {
     log "使用 SSH Host 别名: ${SSH_HOST}"
 
+    verify_ssh_host
     check_port_free "${POSTGRES_LOCAL_PORT}"
     check_port_free "${REDIS_LOCAL_PORT}"
 
     log "远程只读获取容器 IP ..."
-    mapfile -t ips < <(get_container_ips)
+    local ips=()
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] && ips+=("${line}")
+    done < <(get_container_ips)
 
     if [[ ${#ips[@]} -lt 2 ]]; then
         fail "无法从远程获取 trading-postgres / trading-redis 容器 IP"
@@ -210,7 +226,7 @@ main() {
             ;;
         *)
             echo "用法: $0 {start|stop|status}"
-            echo "环境变量: PANJI_SSH_HOST（默认 55-server，取自 ~/.ssh/config）"
+            echo "环境变量: PANJI_SSH_HOST（默认 panji-prod，取自 ~/.ssh/config）"
             exit 1
             ;;
     esac

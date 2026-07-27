@@ -29,8 +29,21 @@
 
 | 位置 | 代码目录 | 分支/SHA | 承载方式 | 主要用途 | 自动 Scheduler |
 |---|---|---|---|---|---|
-| 本地 | `/Users/zhenbao/Desktop/coding/market_dev` | `dev` / `06bf510` | 原生 Python 3.11 venv + Uvicorn；Node.js + Vite | 开发和手动调试 | 关闭 |
-| 远程 | `/root/web_dev`（用户报告） | `main`/稳定 SHA 待核验 | Docker Compose | 稳定运行 | 应开启，未核验 |
+| 本地 | `/Users/zhenbao/Desktop/coding/market_dev` | `dev` / `405d3ee` | 原生 Python 3.11 venv + Uvicorn；Node.js + Vite | 开发和手动调试 | 关闭 |
+| 远程 | `/root/web_dev` | `main`/稳定 SHA 待核验 | Docker Compose | 稳定运行 | 应开启，未核验 |
+
+### 远程服务器身份
+
+| 项目 | 值 |
+|---|---|
+| 角色 | 腾讯云稳定运行服务器 |
+| 权威公网 IP | `43.136.118.82` |
+| 项目 SSH 别名 | `panji-prod`（定义于 `~/.ssh/config`，HostName 必须为 `43.136.118.82`） |
+| 远程代码目录 | `/root/web_dev` |
+| 生产 Compose | `docker-compose.prod.yml` |
+| 自动部署状态 | 未实施；当前 `main` 合并不触发自动部署，需手动 SSH 部署 |
+
+> 涉及远程服务器、数据库、Redis、路径和端口时，必须先读取本节。聊天记忆和本机任意 SSH 别名（如 `55-server`）不能作为权威来源。`55-server` 解析到 `120.234.137.109`，不是盘迹生产服务器，禁止用于盘迹操作。
 
 ## 3. 本地原生开发进程
 
@@ -45,7 +58,7 @@
 | Scheduler | 不应自动启动 | 无自动启动入口；Scheduler 逻辑在 `app.worker` 各类型中按需运行 | `WORKER_TYPE` 显式指定 | - | 否 | 已核验 |
 | PostgreSQL | 直接连接共享实例 | 不在本地启动 | `backend/.env` DATABASE_URL → 127.0.0.1:15432 | 15432（SSH 隧道） | - | 已核验 |
 | Redis | 直接连接共享实例的本地专用逻辑 DB | 不在本地启动 | `backend/.env` REDIS_URL → 127.0.0.1:16379/15 | 16379（SSH 隧道） | - | 已核验 |
-| SSH 隧道 | 本地脚本手动启动/停止 | `scripts/local/ssh-tunnel.sh` via `make tunnel` | `~/.ssh/config` Host 别名（默认 55-server） | 15432/16379 | 否 | 已核验 |
+| SSH 隧道 | 本地脚本手动启动/停止 | `scripts/local/ssh-tunnel.sh` via `make tunnel` | `~/.ssh/config` Host 别名 `panji-prod`（HostName 43.136.118.82） | 15432/16379 | 否 | 已核验 |
 
 需要重点核验：
 
@@ -62,10 +75,10 @@
 
 | 项目 | 当前事实 |
 |---|---|
-| `dev` | 本地当前分支；已跟踪 `origin/dev`；本地落后 8 个提交 |
+| `dev` | 本地当前分支；已跟踪 `origin/dev`；本地领先 3 个提交（`a817595`、`eaffb11`、`405d3ee`） |
 | `main` | 远程稳定分支，最新 SHA 未核验 |
 | dev push | 本阶段未 push；按 PRD 应只触发 CI，不自动部署 |
-| 自动部署 | 未核验 |
+| main 自动部署 | 未实施；PRD 目标为 `main` 经 PR 合并且 CI 通过后自动部署腾讯云，本轮只写目标不实现 workflow |
 | CI gate | 未核验 |
 
 ## 5. PostgreSQL

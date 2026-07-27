@@ -18,7 +18,7 @@ frontend:
 	cd frontend && npm run dev
 
 # 启动本地开发 SSH 隧道（PostgreSQL 15432 / Redis 16379）
-# 依赖：~/.ssh/config 中已配置 Host 别名（默认 55-server）
+# 依赖：~/.ssh/config 中已配置 Host panji-prod（HostName 43.136.118.82）
 tunnel:
 	scripts/local/ssh-tunnel.sh start
 

@@ -20,7 +20,7 @@ cd backend
 pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 3. 启动 SSH 隧道（PostgreSQL -> 127.0.0.1:15432，Redis -> 127.0.0.1:16379）
-# 前提：~/.ssh/config 已配置 Host 别名（默认 55-server）
+# 前提：~/.ssh/config 已配置 Host panji-prod（HostName 43.136.118.82）
 make tunnel
 
 # 4. 启动后端开发服务器（原生 Python 进程，不依赖 Docker）
