@@ -1420,6 +1420,25 @@ export function useStockContext(
   })
 }
 
+/**
+ * [Phase 5B-2] 查询第一金字塔统一快照（/api/v1/stocks/{symbol}/first-pyramid）。
+ * - 固定维度顺序：trend → structure → momentum → chip_consensus
+ * - 前三维必选，chip_consensus 可选（无有效峰时为 null）
+ * - 优先从已发布 snapshot 读取，否则从 bars 实时计算（后端只读，不写库）
+ */
+export function useFirstPyramid(
+  symbol: string | undefined,
+  params?: { as_of?: string },
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: ['first-pyramid', symbol, params ?? null],
+    queryFn: ({ signal }) => api.getFirstPyramid(symbol!, params, { signal }),
+    enabled: !!symbol && (options?.enabled ?? true),
+    staleTime: STALE_REALTIME,
+  })
+}
+
 /** 查询管理员 StockDebug（/api/v1/admin/stocks/{symbol}/debug，含原始 payload） */
 export function useAdminStockDebug(
   symbol: string | undefined,

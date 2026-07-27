@@ -30,6 +30,8 @@ from app.schemas.first_pyramid import (
 )
 from app.services.first_pyramid_service import compute_first_pyramid_snapshot
 
+
+
 # =============================================================================
 # Fixture builders（人工构造，golden 期望由公式确定，不从实现自我生成）
 # =============================================================================
