@@ -88,8 +88,11 @@ function CapabilityRoute({ capability }: { capability: string }) {
   const user = useAuthStore((s) => s.user)
   const accessLoading = useAuthStore((s) => s.accessLoading)
 
-  // capabilities 尚未加载时等待（防止 login 后 capabilities={} 被误判为无权限）
-  if (accessLoading) {
+  // 仅在 capabilities 尚未加载时显示 loading（首次登录或刷新后无持久化状态）
+  // 已有持久化 capabilities 时不阻塞渲染，避免页面重载时 loading 闪烁导致 E2E 选择器失配；
+  // revalidateAccess 仍会异步刷新权限，若过期后会在 /me/access 响应后跳转 /subscription-expired
+  const hasCapability = !!user?.capabilities?.[capability]
+  if (accessLoading && !hasCapability) {
     return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
   }
 
