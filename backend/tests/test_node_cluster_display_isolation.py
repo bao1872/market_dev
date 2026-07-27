@@ -414,6 +414,7 @@ def test_node_cluster_input_provider_signature_rejects_display() -> None:
     静态验证：确保展示参数无法通过签名传入。
     """
     import inspect
+
     from app.services.node_cluster_input_provider import NodeClusterInputProvider
 
     sig = inspect.signature(NodeClusterInputProvider.get_inputs)
@@ -506,8 +507,8 @@ async def test_four_entry_call_matrix(
     # 断言：MDAS 调用日志中，Node 查询（limit=250 或 4000）使用 completed_only=True
     # 注意：SMC 也有 completed_only=True 的 deterministic 查询，但 SMC 不传 limit=250/4000
     # 因此用 limit 区分 Node Cluster Provider 查询
-    NODE_LIMITS = {250, 4000}
-    node_queries = [q for q in mdas_log if q.get("limit") in NODE_LIMITS]
+    node_limits = {250, 4000}
+    node_queries = [q for q in mdas_log if q.get("limit") in node_limits]
     assert len(node_queries) >= 4, (
         f"应有至少 4 次 Node 查询（2 入口 × 2 timeframe），实际 {len(node_queries)}\n"
         f"完整日志: {mdas_log}"
