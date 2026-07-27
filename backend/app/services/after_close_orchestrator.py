@@ -1274,48 +1274,33 @@ async def execute_after_close_run(
                     )
                     return
 
-                # [Phase8A] checking_coverage 步骤：验证日线 + 15m 覆盖率就绪
-                # 不得把日线 coverage 当作 15m 测试；15m 不完整时不得进入 computing_features
+                # [AC-04 / Phase 5A] checking_coverage 步骤：仅验证日线覆盖率就绪
+                # PRD30 AC-04：盘后编排 readiness 只依赖目标交易日日线数据，
+                # 15m 缺失不得阻塞 after-close run。15m intraday readiness 工具
+                # 保留在 BarsCoverageService 供其他链路使用，after-close 不再调用。
                 async with AsyncSessionLocal() as db:
                     job_run = await _get_job_run_or_raise(db, job_run_id)
                     await _update_orchestrator_status(
                         db=db,
                         job_run=job_run,
                         status=AfterCloseRunStatus.CHECKING_COVERAGE,
-                        message=f"开始检查覆盖率: trade_date={trade_date}",
+                        message=f"开始检查日线覆盖率: trade_date={trade_date}",
                     )
                     await db.commit()
 
-                # 1. 日线覆盖率检查（从 batch_result 读取，refreshing_daily 已计算）
+                # 日线覆盖率检查（从 batch_result 读取，refreshing_daily 已计算）
                 daily_coverage_ok = (
                     batch_result.daily_coverage is not None
                     and batch_result.daily_coverage >= 0.9
                 )
-                # 2. 15m 覆盖率 + 最后 bar 时间检查（独立查询 bars_15min）
-                from app.services.bars_coverage_service import BarsCoverageService
-                async with AsyncSessionLocal() as db:
-                    intraday_result = await BarsCoverageService.compute_intraday_coverage(
-                        db, trade_date,
-                    )
 
-                if not daily_coverage_ok or not intraday_result["ready"]:
-                    # [Phase8A] 覆盖率不足 → 标记 failed（不是 succeeded），不创建 DSA
-                    fail_reasons: list[str] = []
-                    if not daily_coverage_ok:
-                        fail_reasons.append(
-                            f"daily_coverage={batch_result.daily_coverage} < 0.9"
-                        )
-                    if not intraday_result["ready"]:
-                        fail_reasons.append(
-                            f"intraday not ready: "
-                            f"complete_ratio={intraday_result['complete_ratio_raw']}, "
-                            f"complete_to_close={intraday_result['complete_to_close_count']}/"
-                            f"{intraday_result['eligible_count']}, "
-                            f"latest_bar={intraday_result['latest_latest_bar']}, "
-                            f"cutoff={intraday_result['cutoff_time']}"
-                        )
+                if not daily_coverage_ok:
+                    # [AC-04] 日线覆盖率不足 → 标记 failed（不是 succeeded），不创建 DSA
+                    fail_reasons: list[str] = [
+                        f"daily_coverage={batch_result.daily_coverage} < 0.9"
+                    ]
                     fail_message = (
-                        f"覆盖率检查未通过，不创建 DSA: {', '.join(fail_reasons)}"
+                        f"日线覆盖率检查未通过，不创建 DSA: {', '.join(fail_reasons)}"
                     )
                     async with AsyncSessionLocal() as db:
                         job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -1326,11 +1311,6 @@ async def execute_after_close_run(
                             message=fail_message,
                             payload={
                                 "daily_coverage": batch_result.daily_coverage,
-                                "intraday_complete_ratio": intraday_result["complete_ratio_raw"],
-                                "intraday_complete_to_close": intraday_result["complete_to_close_count"],
-                                "intraday_eligible": intraday_result["eligible_count"],
-                                "intraday_latest_bar": intraday_result["latest_latest_bar"],
-                                "intraday_cutoff": intraday_result["cutoff_time"],
                                 "fail_reasons": fail_reasons,
                             },
                         )
@@ -1342,20 +1322,15 @@ async def execute_after_close_run(
                         )
                         await db.commit()
                     logger.warning(
-                        "[AfterClose] [Phase8A] 覆盖率检查未通过，编排失败: "
+                        "[AfterClose] [AC-04] 日线覆盖率检查未通过，编排失败: "
                         "job_run_id=%s, %s",
                         job_run_id, fail_message,
                     )
                     return
 
                 logger.info(
-                    "[AfterClose] [Phase8A] 覆盖率检查通过: daily=%.1f%%, "
-                    "intraday_complete=%.1f%% (%d/%d), latest_bar=%s",
+                    "[AfterClose] [AC-04] 日线覆盖率检查通过: daily=%.1f%%",
                     (batch_result.daily_coverage or 0) * 100,
-                    intraday_result["complete_ratio_raw"] * 100,
-                    intraday_result["complete_to_close_count"],
-                    intraday_result["eligible_count"],
-                    intraday_result["latest_latest_bar"],
                 )
 
                 # [Phase8A] trigger_dsa=False 且覆盖率达标：在 computing_features 前创建 DSA run

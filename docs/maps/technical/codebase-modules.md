@@ -1,8 +1,8 @@
 # 代码库模块 Map
 
-核验状态：已基于本地原生启动核验（第一阶段）
-最后核验日期：2026-07-26
-核验提交：06bf5109b07a966207e7203e2b2ba12c7e12388d
+核验状态：已基于本地原生启动核验（第一阶段）；Phase 5A 补充 after-close readiness 权威入口
+最后核验日期：2026-07-27
+核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`
 事实所有权：仓库目录、模块职责、依赖边界和公共入口
 
 ## 1. 顶层目录
@@ -57,6 +57,7 @@
 | 配置 | `backend/app/config.py:get_settings()` | 直接 `os.environ.get` 读取启动级配置（运行时配置除外） |
 | DB Session | `backend/app/db.py:AsyncSessionLocal`、`get_db()` | 直接新建 engine |
 | Redis Client | `redis.asyncio.from_url(get_settings().redis_url)` | 硬编码 Redis URL 或 DB |
+| after-close readiness | `backend/app/services/after_close_orchestrator.py:execute_after_close_run` 中 `checking_coverage` 步骤（仅日线覆盖率 >= 0.9；Phase 5A 移除 15m 阻塞） | 在 after-close 链路中重复实现 15m 覆盖率检查或绕过 `execute_after_close_run` 自行检查 readiness；15m intraday 工具 `BarsCoverageService.compute_intraday_coverage` 保留供其他链路使用 |
 | 生产部署脚本 | `scripts/deploy/panji-deploy.sh` | 服务器本地其他入口或手动复制 |
 | 生产部署 workflow | `.github/workflows/deploy-production.yml` | 其他分支或未经 CI 的触发器 |
 | 时间转换 | `backend/app/core/time.py`（待核验） | 未核验 |

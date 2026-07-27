@@ -1,11 +1,11 @@
 # 系统全貌 Map
 
-核验状态：待重建  
-最后核验日期：待填写  
-核验分支：待填写  
-核验提交：待填写  
-核验范围：尚未基于最新代码完整核验  
-对应 PRD：`../prd/00-product-scope.md`  
+核验状态：高风险偏差索引已基于 Phase 5A 核验更新（P0 Redis 隔离、P1 AC-04 已关闭）；其余组件待重建
+最后核验日期：2026-07-27
+核验分支：dev
+核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`
+核验范围：高风险偏差索引（§6）基于 Phase 5A 核验；其余组件关系待基于最新 dev 完整核验
+对应 PRD：`../prd/00-product-scope.md`
 事实所有权：系统组件、主要用户路径、盘中与盘后主流程、领域 Map 导航
 
 > 本文件必须基于真实代码、数据、日志或运行结果填写。不得根据 PRD 推测实现已经存在。
@@ -75,13 +75,15 @@ flowchart LR
 | 领域 | 偏差 | 等级 | 详情位置 |
 |---|---|---|---|
 | 量化模型 | QM-50/QM-51 板块与指数层聚合尚未实现 | P2 | `maps/20-quant-model.md` §7 |
-| 盘后任务 | AC-04 与实现冲突：`checking_coverage` 仍强制检查 15m 覆盖率 | P1 | `maps/30-after-close.md` §7 |
-| 盘后任务 | 本地调试若误连远程 Redis DB 0 可能消费正式队列/发布正式结果 | P0 | `maps/30-after-close.md` §7 |
+| ~~盘后任务~~ | ~~AC-04 与实现冲突：`checking_coverage` 仍强制检查 15m 覆盖率~~ **[Phase 5A 已关闭]** P1 | - | `maps/30-after-close.md` §7 |
+| ~~盘后任务~~ | ~~本地调试若误连远程 Redis DB 0 可能消费正式队列/发布正式结果~~ **[Phase 5A 已关闭]** P0 | - | `maps/30-after-close.md` §7 |
 | 量化模型 | SMC 核心未显式保留成交量信息，依赖结构面板成交参与组 | P1 | `maps/20-quant-model.md` §9 |
 | 运行体系 | 本地 `docker-compose.yml` 仍保留 redis 服务，可能误导新开发者 | P3 | `maps/80-system-runtime.md` §10 |
 | 运行体系 | 自动部署代码已准备但链路未启用 | P2 | `maps/80-system-runtime.md` §10 |
 
 > 以上索引不复制详细内容。具体证据、代码路径和状态以对应 Map 为准。
+>
+> **[Phase 5A]** P0 Redis 隔离风险和 P1 AC-04 日线 readiness 冲突已关闭并核验。剩余高风险：P1 SMC 成交量信息（待 Phase 5B+ 处理）、P2 QM-50/QM-51 板块/指数聚合、P2 自动部署链路启用。
 
 ## 7. 已废弃路径
 
