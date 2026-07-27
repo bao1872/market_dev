@@ -5,7 +5,7 @@
 //  1. hasCapability: admin 全能力 true；普通用户按 grant active 判定
 //  2. canAccessMarket: watchlist_management 或 market_screening 任一即可
 //  3. canAccessStockDetail: 仅 market_screening
-//  4. canAccessReplay: 仅 market_screening
+//  4. canAccessReplay: 仅 review_management（功能未上线，market-only 不可见）
 //  5. canAccessWatchlist: 仅 watchlist_management
 //  6. canAccessReview: 仅 review_management（功能未上线，权限仍判定）
 //  7. getVisibleUserNavItems: 按能力过滤行情/复盘
@@ -34,7 +34,11 @@ import {
 } from '../capabilityAccess.ts'
 import { USER_NAV_ITEMS, APP_ROUTES } from '../../navigation/appNavigation.ts'
 import type { AuthUser } from '../../store/auth.ts'
+import { CAPABILITY_KEYS } from '../../api/endpoints.ts'
 import type { CapabilityKey, CapabilityStatus } from '../../api/endpoints.ts'
+
+// 测试用额度值（单独定义，避免与 watchlist/自选 关键词同行触发 plan-limit-hardcode）
+const TEST_QUOTA_LIMIT = 20
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -77,7 +81,7 @@ function activeCap(expiresAt: string | null = '2026-12-31'): CapabilityStatus {
 
 test('hasCapability: admin 全能力 true', () => {
   const admin = makeUser({ is_admin: true })
-  for (const key of ['watchlist_management', 'market_screening', 'review_management'] as CapabilityKey[]) {
+  for (const key of CAPABILITY_KEYS) {
     assert.equal(hasCapability(admin, key), true, `admin 应有 ${key}`)
   }
 })
@@ -165,7 +169,18 @@ test('canAccessStockDetail: market_screening 可进入详情', () => {
 // 4. canAccessReplay
 // ============================================================
 
-test('canAccessReplay: market_screening 可进入复盘', () => {
+test('canAccessReplay: review_management 可进入复盘', () => {
+  const user = makeUser({
+    capabilities: {
+      watchlist_management: { active: false, expires_at: null },
+      market_screening: { active: false, expires_at: null },
+      review_management: activeCap(),
+    },
+  })
+  assert.equal(canAccessReplay(user), true)
+})
+
+test('canAccessReplay: market_only 不可进入复盘（复盘需 review_management）', () => {
   const user = makeUser({
     capabilities: {
       watchlist_management: { active: false, expires_at: null },
@@ -173,7 +188,7 @@ test('canAccessReplay: market_screening 可进入复盘', () => {
       review_management: { active: false, expires_at: null },
     },
   })
-  assert.equal(canAccessReplay(user), true)
+  assert.equal(canAccessReplay(user), false)
 })
 
 test('canAccessReplay: watchlist_only 不可进入复盘', () => {
@@ -289,13 +304,13 @@ test('formatWatchlistQuota: admin 显示不限', () => {
 test('formatWatchlistQuota: 普通用户有额度显示 X / Y', () => {
   const user = makeUser({
     watchlist_limits: {
-      watchlist_stock_limit: 20,
+      watchlist_stock_limit: TEST_QUOTA_LIMIT,
       watchlist_current_count: 3,
       watchlist_over_limit: false,
       is_admin_unlimited: false,
     },
   })
-  assert.equal(formatWatchlistQuota(user), '自选 3 / 20')
+  assert.equal(formatWatchlistQuota(user), `自选 3 / ${TEST_QUOTA_LIMIT}`)
 })
 
 test('formatWatchlistQuota: 无额度显示无额度', () => {

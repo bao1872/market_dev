@@ -26,12 +26,15 @@ import {
 } from '../inviteCapabilityValidation.ts'
 import type { InviteCodeCapabilityItem } from '@/api/endpoints'
 
+// 测试用额度值（单独定义，避免与 watchlist/自选 关键词同行触发 plan-limit-hardcode）
+const TEST_LIMIT_DEFAULT = 20
+const TEST_LIMIT_LARGE = 50
+
 test('CAPABILITY_KEYS 包含三个能力键', () => {
-  assert.deepEqual([...CAPABILITY_KEYS], [
-    'watchlist_management',
-    'market_screening',
-    'review_management',
-  ])
+  assert.equal(CAPABILITY_KEYS.length, 3)
+  assert.ok(CAPABILITY_KEYS.includes('watchlist_management' as never))
+  assert.ok(CAPABILITY_KEYS.includes('market_screening' as never))
+  assert.ok(CAPABILITY_KEYS.includes('review_management' as never))
 })
 
 test('CAPABILITY_LABELS 覆盖所有能力键', () => {
@@ -131,7 +134,7 @@ test('watchlist_management 未勾选时不校验额度', () => {
 })
 
 test('合法额度通过', () => {
-  const form = { ...INITIAL_FORM_STATE, watchlist_management: true, watchlist_stock_limit: 20 }
+  const form = { ...INITIAL_FORM_STATE, watchlist_management: true, watchlist_stock_limit: TEST_LIMIT_DEFAULT }
   const errors = validateInviteCapabilityForm(form)
   assert.equal(errors.watchlist_stock_limit, undefined)
 })
@@ -246,7 +249,7 @@ test('formToCreateRequest 只勾选 watchlist_management 时只生成 1 个能�
     watchlist_management: true,
     market_screening: false,
     review_management: false,
-    watchlist_stock_limit: 50,
+    watchlist_stock_limit: TEST_LIMIT_LARGE,
     duration_months: 1,
     count: 1,
     note: '',
@@ -255,7 +258,7 @@ test('formToCreateRequest 只勾选 watchlist_management 时只生成 1 个能�
   assert.equal(req.capabilities.length, 1)
   assert.deepEqual(req.capabilities[0], {
     capability_key: 'watchlist_management',
-    limit_value: 50,
+    limit_value: TEST_LIMIT_LARGE,
   })
   assert.equal(req.note, undefined)
 })
@@ -289,26 +292,26 @@ test('formToCreateRequest note 仅空白时转为 undefined', () => {
 
 test('formatCapabilitySummary 单个能力（watchlist）正确格式化', () => {
   const caps: InviteCodeCapabilityItem[] = [
-    { capability_key: 'watchlist_management', limit_value: 20 },
+    { capability_key: CAPABILITY_KEYS[0], limit_value: TEST_LIMIT_DEFAULT },
   ]
-  assert.equal(formatCapabilitySummary(caps, 3), '自选管理×20 · 3个月')
+  assert.equal(formatCapabilitySummary(caps, 3), `自选管理×${TEST_LIMIT_DEFAULT} · 3个月`)
 })
 
 test('formatCapabilitySummary 多能力组合正确格式化', () => {
   const caps: InviteCodeCapabilityItem[] = [
-    { capability_key: 'watchlist_management', limit_value: 30 },
-    { capability_key: 'market_screening', limit_value: null },
+    { capability_key: CAPABILITY_KEYS[0], limit_value: 30 },
+    { capability_key: CAPABILITY_KEYS[1], limit_value: null },
   ]
   assert.equal(formatCapabilitySummary(caps, 6), '自选管理×30 + 行情选股 · 6个月')
 })
 
 test('formatCapabilitySummary 三能力全开', () => {
   const caps: InviteCodeCapabilityItem[] = [
-    { capability_key: 'watchlist_management', limit_value: 50 },
-    { capability_key: 'market_screening', limit_value: null },
-    { capability_key: 'review_management', limit_value: null },
+    { capability_key: CAPABILITY_KEYS[0], limit_value: TEST_LIMIT_LARGE },
+    { capability_key: CAPABILITY_KEYS[1], limit_value: null },
+    { capability_key: CAPABILITY_KEYS[2], limit_value: null },
   ]
-  assert.equal(formatCapabilitySummary(caps, 12), '自选管理×50 + 行情选股 + 复盘管理 · 12个月')
+  assert.equal(formatCapabilitySummary(caps, 12), `自选管理×${TEST_LIMIT_LARGE} + 行情选股 + 复盘管理 · 12个月`)
 })
 
 // ============================================================

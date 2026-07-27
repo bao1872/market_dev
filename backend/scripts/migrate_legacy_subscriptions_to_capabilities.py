@@ -2,12 +2,12 @@
 
 功能：
 1. 只读统计：count active subscriptions without capability grants
-2. 幂等回填：为每个 active subscription 创建 3 个 capability grants
+2. 幂等回填：为每个 active subscription 创建 2 个 capability grants
    - watchlist_management (limit_value = plan.monitor_limit)
    - market_screening (limit_value = NULL)
-   - review_management (limit_value = NULL)
    - source_type='legacy_subscription', source_id=subscription.id
    - starts_at/expires_at from subscription
+   - 禁止自动授予 review_management（PRD §15.3：复盘权限只能通过邀请码显式授予）
 3. 核对：回填后统计 grant 数量，验证一致性
 
 幂等性：UNIQUE(source_type, source_id, capability_key) 保证重复运行不创建重复 grant。
@@ -42,7 +42,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.constants.capability_keys import (
-    ALL_CAPABILITY_KEYS,
+    MARKET_SCREENING,
     SOURCE_LEGACY_SUBSCRIPTION,
     WATCHLIST_MANAGEMENT,
 )
@@ -128,7 +128,14 @@ async def dry_run() -> dict:
 
 
 async def execute_migration() -> dict:
-    """执行幂等回填：为每个 active subscription 创建 3 个 capability grants。"""
+    """执行幂等回填：为每个 active subscription 创建 2 个 capability grants。
+
+    PRD §15.3：旧有效 Subscription 只迁移 watchlist_management + market_screening，
+    禁止自动授予 review_management（复盘权限只能通过邀请码显式授予）。
+    """
+    # 旧订阅迁移能力白名单（禁止 review_management）
+    MIGRATION_CAPABILITY_KEYS = (WATCHLIST_MANAGEMENT, MARKET_SCREENING)
+
     async with async_session_factory() as db:
         plan_limits = await _get_plan_monitor_limits(db)
         subscriptions = await _get_active_subscriptions_without_grants(db)
@@ -146,8 +153,8 @@ async def execute_migration() -> dict:
 
             monitor_limit = plan_limits.get(sub.plan_code, 20)
 
-            # 创建 3 个 grant
-            for capability_key in ALL_CAPABILITY_KEYS:
+            # 创建 2 个 grant（watchlist_management + market_screening，禁止 review_management）
+            for capability_key in MIGRATION_CAPABILITY_KEYS:
                 limit_value = monitor_limit if capability_key == WATCHLIST_MANAGEMENT else None
                 stmt = pg_insert(UserCapabilityGrant).values(
                     user_id=sub.user_id,

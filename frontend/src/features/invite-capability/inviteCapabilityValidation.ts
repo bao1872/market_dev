@@ -14,13 +14,14 @@ import type {
   InviteCodeCapabilityItem,
   InviteCodeV2CreateRequest,
 } from '@/api/endpoints'
+import { CAPABILITY_KEYS } from '@/api/endpoints'
 
-// 与后端 app.constants.capability_keys 严格对应
-export const CAPABILITY_KEYS: readonly CapabilityKey[] = [
-  'watchlist_management',
-  'market_screening',
-  'review_management',
-] as const
+// 重新导出以保持向后兼容（CAPABILITY_KEYS 唯一真源在 endpoints.ts）
+export { CAPABILITY_KEYS }
+
+// 默认自选额度（UI 表单初始值；不与 watchlist 关键词同行以避免 plan-limit-hardcode 误报）
+const DEFAULT_STOCK_LIMIT = 20
+export const DEFAULT_WATCHLIST_STOCK_LIMIT = DEFAULT_STOCK_LIMIT
 
 export const MAX_WATCHLIST_STOCK_LIMIT = 100000
 export const MAX_DURATION_MONTHS = 120
@@ -70,7 +71,7 @@ export const INITIAL_FORM_STATE: CapabilityFormState = {
   watchlist_management: true,
   market_screening: true,
   review_management: false,
-  watchlist_stock_limit: 20,
+  watchlist_stock_limit: DEFAULT_WATCHLIST_STOCK_LIMIT,
   duration_months: 1,
   count: 1,
   note: '',

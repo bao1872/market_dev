@@ -31,9 +31,11 @@ export function canAccessStockDetail(user: AuthUser | null): boolean {
   return hasCapability(user, 'market_screening')
 }
 
-/** /replay 复盘：需要 market_screening（复盘依赖选股数据） */
+/** /replay 复盘：需要 review_management（PRD §9：复盘权限独立于行情选股）
+ * 注：复盘功能未上线，market-only 用户不得显示/访问复盘入口。
+ */
 export function canAccessReplay(user: AuthUser | null): boolean {
-  return hasCapability(user, 'market_screening')
+  return hasCapability(user, 'review_management')
 }
 
 /** 自选 scope/按钮：需要 watchlist_management */
@@ -54,7 +56,7 @@ export function getVisibleUserNavItems(
   return allItems.filter((item) => {
     // 行情：watchlist_management 或 market_screening 任一即可
     if (item.path === APP_ROUTES.market) return canAccessMarket(user)
-    // 复盘：需要 market_screening
+    // 复盘：需要 review_management（功能未上线，market-only 不可见）
     if (item.path === APP_ROUTES.replay) return canAccessReplay(user)
     // 其他默认可见（如设置/消息由调用方单独判断）
     return true

@@ -16,6 +16,7 @@ import { useState, useCallback, useMemo } from 'react'
 import {
   CAPABILITY_KEYS,
   CAPABILITY_LABELS,
+  DEFAULT_WATCHLIST_STOCK_LIMIT,
   INITIAL_FORM_STATE,
   MAX_DURATION_MONTHS,
   MAX_INVITE_COUNT,
@@ -69,7 +70,7 @@ export function InviteCapabilityForm({
         }
         // 重新勾选 watchlist_management 时恢复默认值
         if (key === 'watchlist_management' && !prev.watchlist_management) {
-          next.watchlist_stock_limit = 20
+          next.watchlist_stock_limit = DEFAULT_WATCHLIST_STOCK_LIMIT
         }
         return next
       })

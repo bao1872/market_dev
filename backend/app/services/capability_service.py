@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.capability_keys import (
     ALL_CAPABILITY_KEYS,
+    MARKET_SCREENING,
     WATCHLIST_MANAGEMENT,
 )
 from app.core.deps import _get_user_roles, get_current_active_user
@@ -689,7 +690,8 @@ if __name__ == "__main__":
     # 工厂函数返回可调用依赖
     dep = require_capability("watchlist_management")
     assert callable(dep)
-    any_dep = require_any_capability(["watchlist_management", "market_screening"])
+    _market_access_keys = [WATCHLIST_MANAGEMENT, MARKET_SCREENING]
+    any_dep = require_any_capability(_market_access_keys)
     assert callable(any_dep)
 
     # 非法 capability_key 拒绝
