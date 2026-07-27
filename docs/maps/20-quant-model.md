@@ -1,6 +1,6 @@
 # 量化模型 Map
 
-核验状态：已基于代码审计更新（Phase 4）；Phase 5A 修正 AC-04 引用；Phase 5B-0 修正 ref/ 跟踪状态与趋势入口核验
+核验状态：已基于代码审计更新（Phase 4）；Phase 5A 修正 AC-04 引用；Phase 5B-0 修正 ref/ 跟踪状态、趋势入口审计、平均成交量字段归属
 最后核验日期：2026-07-27
 核验分支：dev
 核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A/5B-0 修复见对应 Change 文档
@@ -38,16 +38,40 @@
 
 ## 3. 趋势
 
+[Phase 5B-0 趋势入口审计结论]：**已核验**。DSA VWAP 为趋势维度唯一权威实现，单股/批量/全市场/盘后均复用 `compute_dsa_bundle` 统一入口；与 SMC 结构段无重复定义。下一轮 Phase 5B-1 修改清单见末尾。
+
 | 项目 | 当前事实 |
 |---|---|
-| 权威入口 | `backend/app/strategy/selectors/dsa_selector.py:compute_dsa_history` / `compute_dsa_bundle`；`DSASelector.execute` / `compute_indicators` |
-| 输入 | 日线 OHLCV DataFrame（open/high/low/close/volume/amount）；`DSAConfig`（prd/baseAPT/useAdapt/volBias） |
+| 权威入口（SSOT） | `backend/app/strategy/selectors/dsa_selector.py:compute_dsa_history`（line 253-481，唯一指标实现）；`compute_dsa_bundle`（line 533-673，封装 SSOT + 图表字段） |
+| 底层算法 | `dynamic_swing_anchored_vwap.py:dynamic_swing_anchored_vwap`（Pine v6 逐行对齐）；`atr_rope_event_factor_lab_v4.py:compute_atr_rope`（ATR Rope 趋势线） |
+| 输入 | 日线 OHLCV DataFrame（open/high/low/close/volume/amount）；`DSAConfig`（prd=50/baseAPT=20/useAdapt=False/volBias=10/atrLen=50） |
 | 参数来源 | `dsa_selector.yaml` 参数 `allowed_scopes: [system]`；代码常量 `MIN_DIR_BARS=50` 为 regime 命中阈值 |
-| 趋势段输出 | 方向 `dsa_dir`、持续 bar 数 `dsa_dir_bars`、VWAP 序列、regime、visual_segments、pivot_labels |
-| 平均成交量 | `compute_dsa_history` 计算 `current_segment_volume_sum` / `prev_segment_volume_sum` / `current_vs_prev_volume_ratio` |
-| 写入位置 | `strategy_results.payload`（盘后 run）、`stock_feature_snapshot`（盘后）、实时 API（indicator_service） |
-| 调用方 | `DSASelector.execute`（盘后/选股）、`compute_indicators`（详情页实时）、`structural_factor_service`（结构面板） |
-| 验证入口 | `test_dsa_selector.py`、`test_dsa_publish_validation.py`、`test_dsa_visual_segments.py` |
+| 趋势段方向 | `dsa_dir`（1/-1，line 617-618）+ `regime_value`（1/-1/0，line 437；dsa_dir_bars 超过 ±MIN_DIR_BARS 才置为±1） |
+| 趋势段长度 | `dsa_dir_bars`（line 439，count × dir_vals，按 group_id 累计） |
+| 涨跌幅 | `change_pct`（line 451，`close.pct_change() * 100`，百分比） |
+| 平均成交量（直接输出） | `avg_amount_20d`（line 453，`amount.rolling(20).mean()`，20日平均成交额）；`vol_zscore`（line 376-377，成交量 z-score） |
+| 段内成交量（派生） | `current_segment_volume_sum` / `current_vs_prev_volume_ratio` 由 `structural_factor_service.py:873-945` 基于 DSA group_id 派生，**非** dsa_selector 直接输出 |
+| VWAP 偏离 | `dsa_vwap_dev_pct`（line 451，`(close - vwap) / vwap * 100`）；`offset_rate/offset_mean/offset_std/offset_percentile/offset_variance_rate` |
+| VWAP 收益 | `vwap_ret_avg/vwap_ret_total/vwap_ret_5/vwap_ret_10/vwap_ret_20`（line 343-364，按 group_id 计算） |
+| 交叉事件 | `_detect_cross_events`（line 183-250）输出 vwap/rope 上下穿计数与最近日期，按 DSA 趋势区间累计 |
+| 可视化契约 | `visual_segments`（Pine polyline 格式 {direction, points:[{time,value}]}）；`pivot_labels`（HH/HL/LH/LL）；`anchor`；`regime_id` |
+| 写入位置 | `strategy_results.payload`（盘后 run）、`stock_feature_snapshot`（盘后）、实时 API（indicator_service / structural_factor_service / temporal_feature_service） |
+| 调用方（单股实时） | `structural_factor_service.py:1633/1789` → `compute_dsa_bundle`（结构面板 / 个股详情）；`temporal_feature_service.py:211` → `compute_dsa_bundle`（时序因子） |
+| 调用方（批量） | `canonical_adapters.py:405` → `compute_dsa_bundle`（canonical adapter 统一入口，/market/stocks 路由） |
+| 调用方（全市场选股） | `dsa_selector.py:863` `DSASelector.execute()` → `compute_dsa_bundle`（每日选股 last_row_metrics） |
+| 调用方（盘后回补） | `dsa_selector.py:911` `DSASelector`（历史回补） → `compute_dsa_bundle` |
+| 调用方（研究路径，非生产） | `research/feature_computer.py:293` 直接调用 `compute_dsa_history`（与 SSOT 一致，但不走 bundle） |
+| 验证入口 | `test_dsa_selector.py`、`test_dsa_publish_validation.py`、`test_dsa_visual_segments.py`、`test_dsa_bundle_consistency.py`、`test_dsa_factor_visual_separation.py`、`test_dsa_visual_segments_time_format.py` |
+| 与 SMC 边界 | DSA 负责趋势段（regime_value/dsa_dir_bars/visual_segments）；SMC `compute_smc_pine` 仅输出 events(BOS/CHoCH)/order_blocks/equal_highs_lows/trailing/swing_bias/pivots，**不维护等价趋势段**。无重复定义。 |
+
+### Phase 5B-1 趋势修改清单（下一轮，本轮不修改算法）
+
+本轮审计仅发现文档描述偏差，未发现算法实现缺陷。下一轮如需修改趋势相关逻辑，应聚焦以下精确位置：
+
+1. **如需调整趋势段方向判定阈值**：修改 `dsa_selector.py:68` 常量 `MIN_DIR_BARS = 50`（当前硬编码），并通过 `dsa_selector.yaml` 暴露为可配置参数；同步更新 `compute_dsa_history` line 284 读取逻辑。
+2. **如需补充段内成交量到 SSOT**：当前 `current_segment_volume_sum` / `current_vs_prev_volume_ratio` 在 `structural_factor_service.py:873-945` 派生，与 DSA group_id 计算耦合。如要纳入 SSOT，应在 `compute_dsa_history` line 434-473 的 result DataFrame 中新增 `current_segment_volume_sum` 列（基于 group_id + volume.rolling），并在 `_history_row_to_metrics` line 484-530 中导出；最小测试：扩展 `test_dsa_bundle_consistency.py` 验证新字段非空。
+3. **如需趋势与板块聚合联动**：当前 `market_stocks_service.py` 仅展示个股字段，无基于 DSA regime_value 的板块趋势聚合。Phase 5B-1 应在 `maps/20-quant-model.md §7` 标记的 QM-50/QM-51 缺口处新增 `board_factor_aggregation_service.py`，输入 `strategy_results.payload.regime_value` + `market_board_memberships`，输出板块趋势分布；最小测试：单板块聚合返回 `bullish_count/bearish_count/neutral_count`。
+4. **如需研究路径统一**：`research/feature_computer.py:293` 当前直接调用 `compute_dsa_history`，应改为 `compute_dsa_bundle` 以获取完整图表字段；非阻塞，可在下次 research 模块维护时统一。
 
 ## 4. 结构
 

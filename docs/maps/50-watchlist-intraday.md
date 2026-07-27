@@ -65,3 +65,11 @@
 - 自选排序在不同页面曾出现跳变；
 - 盘中和自选权限是否完全统一需核验；
 - 自选数量是否由后端强制执行需核验。
+
+## 7. 前端验证结果（Phase 5B-0）
+
+**验证环境**：本地原生 Backend (port 8000) + Frontend (port 8008) + SSH 隧道；admin token；2026-07-27。
+
+自选与盘中监控相关路由在本轮通过 `/overview` → 自选入口与 `/market` → 行情列表的 SPA 客户端重定向验证。`/watchlist` 路由本身为重定向目标（HTTP 200，SPA 客户端跳转），未发现运行时错误。
+
+详细路由验证表见 `docs/maps/40-market-stock-experience.md` §8 与 `docs/maps/80-system-runtime.md` §10。本轮未对自选排序在不同页面间的一致性、自选数量后端强制执行做深度核验（保留为已知偏差）。

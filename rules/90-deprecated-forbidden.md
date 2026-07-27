@@ -45,6 +45,19 @@
 - 应称为"参考源（人工阅读）"；
 - SMC Pine parity 测试禁止从 DB 重新取 bar 或依赖 `ref/` 导出脚本。
 
+### ref/sync git 跟踪禁止（Phase 5B-0）
+
+`ref/` 与 `sync/` 不得进入 Git 仓库（所有活跃分支）。
+
+- `ref/` 是本地参考资料（第三方项目 + 实验归档），保留本地实体但停止 Git 跟踪；
+- `sync/` 是废弃临时中转站，从 Git 与本地同时删除；
+- `.gitignore` 必须包含 `/ref/` 与 `/sync/` 两条根锚定规则；
+- CI 必须显式检查 `git ls-files ref sync` 输出为空（`.github/workflows/ci.yml` governance-rules job）；
+- `backend/tests/test_ref_isolation.py` 必须守护 `git ls-files ref/` 与 `git ls-files sync/` 均为空；
+- 不得用 `git add -f` 强制添加 `ref/` 或 `sync/` 下任何文件；
+- 不得把 `ref/` 描述为正式模块、正式实现入口或正式数据源；
+- 例外：`archive/*` 标签中的历史提交不重写，仍保留旧版跟踪记录（只读历史）。
+
 ### SMC FVG（AGENTS §七.14）
 
 Fair Value Gap 已完全排除。

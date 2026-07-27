@@ -1,9 +1,9 @@
 # 系统运行体系 Map
 
-核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）；Phase 4 完成 Git 分支治理与 PRD20/30 代码对齐审计；Phase 5A 完成分支一致性补验与 AC-04 修复
+核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）；Phase 4 完成 Git 分支治理与 PRD20/30 代码对齐审计；Phase 5A 完成分支一致性补验与 AC-04 修复；Phase 5B-0 完成 ref/sync 仓库清理、CI 防误推、本地完整原生运行与趋势入口锁定
 最后核验日期：2026-07-27
 核验分支：dev
-核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`；远程 origin/main=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf
+核验提交：c730876（Phase 5B-0 ref/sync 清理）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`；Phase 5B-0 详见 `docs/changes/2026/CHANGE-20260727-003-repo-boundary-local-runtime.md`；远程 origin/main=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf
 核验范围：本地原生 Backend / Frontend 启动、共享 PostgreSQL / Redis 连接、Scheduler / Worker 默认关闭；远程只读审计（Git/Compose/容器/Redis/健康检查）；本地/origin/服务器分支治理与一致性补验；PRD20/PRD30 代码对齐审计；AC-04 日线 readiness 修复与 P0 Redis 隔离复核
 对应 PRD：`../prd/80-system-runtime.md`
 事实所有权：本地原生进程、远程 Docker Compose、Git、配置、数据库、Redis、Scheduler、CI 和部署事实
@@ -79,13 +79,15 @@
 
 | 项目 | 当前事实 |
 |---|---|
-| `dev` | 本地当前分支；已跟踪 `origin/dev`；本地与 origin 一致（SHA `72dcd6c`，Phase 5A 将在本轮提交后领先 1 个提交） |
-| `main` | 远程稳定分支；`origin/main` SHA = `13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf`；本地 `main` 同步；服务器 `/root/web_dev` 检出 `main` 工作区干净；当前运行版本一致 |
-| `experiment` | **[Phase 5A 一致性补验]** 本地、origin、服务器三处 `experiment` SHA 已对齐为 `069ebcc`；本地已设置 upstream 跟踪 `origin/experiment` |
+| `dev` | 本地当前分支；已跟踪 `origin/dev`；本地与 origin 一致（Phase 5B-0 提交 `c730876` ref/sync 清理，已 push origin/dev） |
+| `main` | 远程稳定分支；`origin/main` SHA = `13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf`；本地 `main` 同步；服务器 `/root/web_dev` 检出 `main` 工作区干净；当前运行版本一致；**origin/main 仍含 `ref/smc_user_source.pine`**（Phase 5B-0 清理待 PR 合并） |
+| `experiment` | **[Phase 5A 一致性补验]** 本地、origin、服务器三处 `experiment` SHA 已对齐；Phase 5B-0 cherry-pick `c730876` 为 `38df3af` 并 push origin/experiment；本地与 origin 一致 |
 | 服务器 experiment 归档 | **[Phase 5A]** 服务器原 `experiment`（tip `623ad87`，含 16 个 V2.1 唯一提交）已归档为 annotated tag `archive/server-experiment-wip-20260727`（tag object `40fb4ab2`），tag 已推送 origin 并用 `git ls-remote` 验证；服务器删除分叉的本地 `experiment` 后按 `origin/experiment` 重新创建 tracking 分支 |
 | 非保留分支 | 本地/origin 非 main/dev/experiment 分支已删除；已创建 6 个 `archive/*-YYYYMMDD` annotated tag 保存唯一提交（Phase 4 的 5 个 + Phase 5A 的 `archive/server-experiment-wip-20260727`） |
 | 服务器分支 | `/root/web_dev` 当前检出 `main`，工作区干净；服务器本地保留 `main`/`dev`/`experiment`，均与 origin 对齐 |
-| dev push | Phase 5A 将 push `dev`（可 fast-forward）；不 push `main`/`experiment`；按 PRD 只触发 CI，不自动部署 |
+| ref/sync 仓库清理 | **[Phase 5B-0]** `dev`/`experiment` 已通过 `git rm --cached ref/smc_user_source.pine` + `git rm sync/README.md` 退出跟踪；`origin/dev`、`origin/experiment` 树中 `git ls-tree -r` 无 `ref/`/`sync/`；本地 `ref/` 实体保留；`sync/` 已从本地删除；`.gitignore` 加入 `/ref/` 与 `/sync/` |
+| CI 防误推 | **[Phase 5B-0]** `.github/workflows/ci.yml` governance-rules job 新增显式检查 `git ls-files ref sync` 必须为空；`backend/tests/test_ref_isolation.py` 守护 `git ls-files ref/` 与 `git ls-files sync/` 均为空；双重防护确保未来误推被 CI 拒绝 |
+| main PR 状态 | **[Phase 5B-0]** origin/main 仍含 `ref/smc_user_source.pine`，需通过 dev → main PR 合并清理；本轮不创建/合并 PR，等待用户授权 |
 | main 自动部署 | 代码已准备，链路未启用；`.github/workflows/deploy-production.yml` 监听 `workflow_run`（CI success on main）和 `workflow_dispatch`；SSH 调用 `/usr/local/bin/panji-deploy.sh` |
 | CI gate | 已核验配置：`.github/workflows/ci.yml` 存在，名称为 `CI`，与 workflow_run 引用一致 |
 
@@ -179,12 +181,15 @@
 
 ## 10. 已知偏差与风险
 
-- 本地 `docker-compose.yml` 仍保留 redis 服务，虽然 `Makefile` 已标记 `up/down` 废弃，但文件本身仍可能误导新开发者。本轮按任务要求不删除，仅标记“非本地开发入口”。
+- 本地 `docker-compose.yml` 仍保留 redis 服务，虽然 `Makefile` 已标记 `up/down` 废弃，但文件本身仍可能误导新开发者。本轮按任务要求不删除，仅标记"非本地开发入口"。
 - 本地 Redis DB 15 已正式保留为本地开发临时状态隔离库，但 Worker 启动前仍需确认 `REDIS_URL` 以 `/15` 结尾。
 - 本地与远程共享 PostgreSQL，开发中的破坏性操作需要额外注意；当前未做权限只读限制。
 - 远程 `/root/web_dev` 已切换为 `main`，工作区干净，满足自动部署脚本的 workspace 检查；但自动部署代码尚未启用。
 - 自动部署代码已准备但尚未启用：服务器侧缺少 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件和 GitHub Secrets；`.github/workflows/deploy-production.yml` 尚未合并到 `main`，因此不会触发真实部署。
 - 远程 PostgreSQL test 容器 (`trading-postgres-test`) 映射 5433 端口，其用途和持久化策略尚未核验。
+- **[Phase 5B-0]** `origin/main` 仍含 `ref/smc_user_source.pine`，需通过 dev → main PR 合并清理；PR 合并前 main 分支不满足 SR-15。
+- **[Phase 5B-0]** 本地 Vite 开发服务器无 Nginx 前置，访问 `/` 时 `LandingPage` 组件 `window.location.replace('/')` 会触发无限刷新；已知本地开发限制，可通过直接访问 `/login` 或 `/market` 绕过；生产环境由 Nginx 精确分流，不受影响。
+- **[Phase 5B-0]** 本地完整路由验证已完成（admin token），覆盖公共门户、登录后首页、行情列表、个股详情、自选/盘中监控、管理员权限相关页面及实际路由重定向；详细结果见 `docs/maps/40-market-stock-experience.md` / `50-watchlist-intraday.md` / `60-permissions-admin.md` 的前端验证章节。
 
 ## 11. 更新触发条件
 

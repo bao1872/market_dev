@@ -80,10 +80,15 @@ flowchart LR
 | 量化模型 | SMC 核心未显式保留成交量信息，依赖结构面板成交参与组 | P1 | `maps/20-quant-model.md` §9 |
 | 运行体系 | 本地 `docker-compose.yml` 仍保留 redis 服务，可能误导新开发者 | P3 | `maps/80-system-runtime.md` §10 |
 | 运行体系 | 自动部署代码已准备但链路未启用 | P2 | `maps/80-system-runtime.md` §10 |
+| ~~运行体系~~ | ~~`ref/` 目录下实验/参考脚本存在风险~~ **[Phase 5B-0 已关闭]** P3 | - | `maps/20-quant-model.md` §9；`maps/80-system-runtime.md` §4 |
+| 运行体系 | `origin/main` 仍含 `ref/smc_user_source.pine`，待 PR 合并清理 | P3 | `maps/80-system-runtime.md` §10 |
+| 运行体系 | 本地 Vite 无 Nginx，`/` 路由无限刷新 | P3 | `maps/80-system-runtime.md` §10 |
 
 > 以上索引不复制详细内容。具体证据、代码路径和状态以对应 Map 为准。
 >
-> **[Phase 5A]** P0 Redis 隔离风险和 P1 AC-04 日线 readiness 冲突已关闭并核验。剩余高风险：P1 SMC 成交量信息（待 Phase 5B+ 处理）、P2 QM-50/QM-51 板块/指数聚合、P2 自动部署链路启用。
+> **[Phase 5A]** P0 Redis 隔离风险和 P1 AC-04 日线 readiness 冲突已关闭并核验。
+>
+> **[Phase 5B-0]** ref/sync 仓库清理、CI 防误推、本地完整原生运行验证、第一金字塔趋势入口锁定已完成。剩余高风险：P1 SMC 成交量信息（待 Phase 5B+ 处理）、P2 QM-50/QM-51 板块/指数聚合、P2 自动部署链路启用、P3 origin/main ref 清理 PR。
 
 ## 7. 已废弃路径
 

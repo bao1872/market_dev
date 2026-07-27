@@ -84,3 +84,24 @@
 ## 7. 验证入口
 
 以用户真实交互路径验证，不使用 IDE 截图代替行为核验。
+
+## 8. 前端验证结果（Phase 5B-0）
+
+**验证环境**：本地原生 Backend (port 8000) + Frontend (port 8008) + SSH 隧道（panji-prod 43.136.118.82）；admin token 认证；2026-07-27。
+
+**验证方式**：HTTP 状态码 + API 响应 + 浏览器运行错误（不安装浏览器自动化依赖，不以截图为唯一证据）。
+
+| 路由 | 页面加载 | 主要 API | 数据展示 | 权限 | 阻塞原因 |
+|---|---|---|---|---|---|
+| `/` | 失败（无限刷新） | - | - | 公开 | 本地 Vite 无 Nginx 前置，`LandingPage` `window.location.replace('/')` 触发循环；生产环境 Nginx 精确分流不受影响 |
+| `/login` | OK | - | 登录表单 | 公开 | - |
+| `/market` | OK | `/market/stocks` 200、`/market/boards` 200、`/market/status` 200 | 行情列表 | 需登录 | - |
+| `/replay` | OK | `/strategies` 200 | 策略列表 | 需订阅 | - |
+| `/stock/000001` | OK | `/api/v1/stocks/000001/context` 200、`/api/v1/instruments/{id}/bars` 200、`/indicators` 200、`/structural-factors` 200、`/temporal-features` 200、`/quote` 200、`/chart-snapshot` 200 | 个股详情 + K 线 + 指标 | 需订阅 | - |
+| `/settings` | OK | `/me` 200、`/me/access` 200、`/me/membership` 404（admin 无订阅） | 用户设置 | 需登录 | - |
+| `/messages` | OK | `/messages` 200、`/messages/unread-count` 200 | 消息列表 | 需登录 | - |
+| `/admin/stocks/000001/debug` | OK | `/api/v1/admin/stocks/000001/debug` 200 | 调试面板 | 管理员 | - |
+
+**重定向路由**（SPA 客户端重定向，HTTP 200）：`/overview`、`/watchlist`、`/screener`、`/admin/strategies`、`/admin/stock-debug/:symbol`、通配符 `*`。
+
+**结论**：除 `/` 受本地 Vite 限制外，所有用户级和管理员路由均正常加载，主要 API 返回 200，数据展示正确，权限模型符合预期。详细 API 响应记录在 `docs/maps/80-system-runtime.md` §9。

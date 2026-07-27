@@ -1,8 +1,8 @@
 # 代码库模块 Map
 
-核验状态：已基于本地原生启动核验（第一阶段）；Phase 5A 补充 after-close readiness 权威入口
+核验状态：已基于本地原生启动核验（第一阶段）；Phase 5A 补充 after-close readiness 权威入口；Phase 5B-0 补充 ref/sync 非模块声明与趋势计算权威入口
 最后核验日期：2026-07-27
-核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`
+核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`；Phase 5B-0 详见 `docs/changes/2026/CHANGE-20260727-003-repo-boundary-local-runtime.md`
 事实所有权：仓库目录、模块职责、依赖边界和公共入口
 
 ## 1. 顶层目录
@@ -17,6 +17,8 @@
 | `rules/` | 代码规则与约束 | - | 产品需求 |
 | `.github/workflows/` | GitHub Actions CI / 部署 workflow | `ci.yml`、`deploy-production.yml` | 不应包含应用 secret 明文 |
 | `scripts/deploy/` | 生产环境自动部署脚本 | `scripts/deploy/panji-deploy.sh` | 不应在本地开发流程中被调用 |
+| `ref/`（本地参考） | **[Phase 5B-0] 非模块**：本地参考资料（第三方项目源码、用户原创 Pine、实验归档脚本），仅供人工阅读；已退出 Git 跟踪（`.gitignore /ref/`）；不参与运行时依赖 | 无 | 任何运行时 import / open / read / glob；任何 Git 跟踪 |
+| `sync/`（已废弃） | **[Phase 5B-0] 非模块**：废弃临时中转站，已从 Git 与本地删除（`.gitignore /sync/`）；不作为正式真源 | 无 | 任何引用、跟踪或恢复 |
 
 ## 2. 模块责任表
 
@@ -63,3 +65,4 @@
 | 时间转换 | `backend/app/core/time.py`（待核验） | 未核验 |
 | 股票标识 | `backend/app/models/instrument.py`（待核验） | 未核验 |
 | 正式结果读取 | `backend/app/services/after_close_pipeline_service.py`（待核验） | 未核验 |
+| DSA 趋势计算 | **[Phase 5B-0]** `backend/app/strategy/selectors/dsa_selector.py:compute_dsa_history`（SSOT 唯一指标实现）+ `compute_dsa_bundle`（封装 SSOT + 图表字段，统一调用入口） | 直接调用 `dynamic_swing_anchored_vwap` 绕过 bundle（研究路径 `research/feature_computer.py` 除外）；复制 DSA 公式形成第二条路径；把 `current_segment_volume_sum` 等派生字段误认为 dsa_selector 直接输出（实际在 `structural_factor_service.py:873-945` 派生） |

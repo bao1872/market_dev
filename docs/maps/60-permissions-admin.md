@@ -77,3 +77,22 @@
 - 行情管理是否错误包含自选或盘中；
 - 自选数量是否只是前端限制；
 - 自然月有效期语义是否统一。
+
+## 8. 前端验证结果（Phase 5B-0）
+
+**验证环境**：本地原生 Backend (port 8000) + Frontend (port 8008) + SSH 隧道；admin token；2026-07-27。
+
+| 管理员路由 | 页面加载 | 主要 API | 数据展示 | 权限 |
+|---|---|---|---|---|
+| `/admin` | OK | `/admin/system-overview` 200 | 系统概览 | 管理员 |
+| `/admin/users` | OK | `/admin/users` 200 | 用户列表 | 管理员 |
+| `/admin/beta-applications` | OK | `/admin/beta-applications` 200、`/admin/beta-applications/stats` 200 | Beta 申请列表 | 管理员 |
+| `/admin/after-close/pipeline` | OK（需参数） | `/admin/after-close/pipeline` 422（需 trade_date）、`/admin/after-close/pipeline/latest` 200 | 盘后流水线 | 管理员 |
+| `/admin/jobs` | OK | `/admin/scheduler-job-runs` 200、`/admin/worker-heartbeats` 200 | 任务运行历史 | 管理员 |
+| `/admin/strategies` | OK（POST only） | `/admin/strategies` 405（GET 不允许，POST only） | 策略管理 | 管理员 |
+| `/admin/stocks/000001/debug` | OK | `/api/v1/admin/stocks/000001/debug` 200 | 调试面板 | 管理员 |
+| `/admin/audit-logs` | OK | `/admin/audit-logs` 200 | 审计日志 | 管理员 |
+| `/admin/members` | OK | `/admin/members` 200 | 会员管理 | 管理员 |
+| `/admin/message-deliveries` | OK | `/admin/message-deliveries` 200 | 消息投递 | 管理员 |
+
+**结论**：所有管理员路由均通过 admin token 验证，权限模型符合预期。`/admin/after-close/pipeline` 返回 422 是参数校验预期行为（需 `trade_date`），`/admin/strategies` 返回 405 是 POST-only 路由预期行为，均非阻塞。本轮未对仅自选管理、行情管理等细分权限角色做深度核验（保留为已知偏差）。

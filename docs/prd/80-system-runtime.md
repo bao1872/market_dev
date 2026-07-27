@@ -93,6 +93,17 @@ IDE 不是运行环境。TRAE CN 或其他 IDE 只是开发和操作工具。
 
 当前状态：部署脚本 `scripts/deploy/panji-deploy.sh` 与 GitHub Actions workflow `.github/workflows/deploy-production.yml` 已准备，但服务器侧入口与 GitHub Secrets 尚未启用，因此自动部署链路尚未激活。
 
+### SR-15 本地参考/传输目录不得进入仓库
+
+本地参考资料与废弃中转目录不得进入 Git 仓库的所有活跃分支（`main`/`dev`/`experiment`）：
+
+- `ref/` 是本地参考资料（第三方项目源码、用户原创 Pine、实验归档脚本），保留本地实体但不得被 Git 跟踪；
+- `sync/` 是已废弃的临时中转目录，不得在 Git 或本地存在；
+- `.gitignore` 必须包含 `/ref/` 与 `/sync/` 根锚定规则；
+- CI 必须显式检查 `git ls-files ref sync` 输出为空；
+- 架构守护测试 `test_ref_isolation.py` 必须守护两条目录均无跟踪文件；
+- 例外：`archive/*` 注解标签中的历史提交不重写，保留旧版跟踪记录作为只读历史。
+
 ## 3. PostgreSQL
 
 ### SR-20 共享数据库

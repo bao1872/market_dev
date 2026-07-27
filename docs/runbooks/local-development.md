@@ -118,6 +118,36 @@ ps aux | grep -E 'scheduler|worker|celery' | grep -v grep
 
 应无盘迹相关 Scheduler 或 Worker 进程。
 
+### 全路由验证（Phase 5B-0 起）
+
+本地完整原生运行验证应覆盖前端所有实际路由。路由清单从 `frontend/src/App.tsx` 的 `routeConfig` 导出读取，不猜测路径。
+
+**前置条件**：
+
+- Backend / Frontend / SSH 隧道已启动并通过健康检查；
+- 持有现有合法全权限管理员账号的 JWT token（通过 `/api/v1/auth/login` 获取）；
+- 禁止绕过认证、修改权限模型或创建硬编码管理员。
+
+**验证方式**：
+
+- HTTP 状态码（curl）；
+- 主要 API 响应（curl + jq）；
+- 前端页面运行错误（浏览器 console，但不安装浏览器自动化依赖）；
+- 不以截图作为唯一证据。
+
+**覆盖范围**（基于 `App.tsx` routeConfig）：
+
+| 类别 | 路由 | 主要 API |
+|---|---|---|
+| 公开 | `/`、`/login`、`/subscription-expired`、`/membership-expired`、`/capture/stock/:symbol` | - |
+| 用户级 | `/market`、`/replay`、`/stock/:symbol`、`/settings`、`/messages` | `/market/stocks`、`/market/boards`、`/market/status`、`/strategies`、`/api/v1/stocks/{symbol}/context`、`/api/v1/instruments/{id}/bars`、`/indicators`、`/structural-factors`、`/temporal-features`、`/quote`、`/chart-snapshot`、`/me`、`/me/access`、`/messages` |
+| 管理员 | `/admin`、`/admin/users`、`/admin/beta-applications`、`/admin/after-close/pipeline`、`/admin/jobs`、`/admin/strategies`、`/admin/stocks/:symbol/debug`、`/admin/audit-logs`、`/admin/members`、`/admin/message-deliveries` | `/admin/system-overview`、`/admin/users`、`/admin/beta-applications`、`/admin/after-close/pipeline/latest`、`/admin/scheduler-job-runs`、`/admin/worker-heartbeats`、`/api/v1/admin/stocks/{symbol}/debug`、`/admin/audit-logs`、`/admin/members`、`/admin/message-deliveries` |
+| 重定向 | `/overview`、`/watchlist`、`/screener`、`/admin/strategies`、`/admin/stock-debug/:symbol`、`*` | SPA 客户端重定向 |
+
+**已知限制**：本地 Vite 无 Nginx 前置，访问 `/` 时 `LandingPage` 组件 `window.location.replace('/')` 会触发无限刷新；可通过直接访问 `/login` 或 `/market` 绕过；生产环境由 Nginx 精确分流，不受影响。
+
+**记录内容**：每个路由的页面加载状态、主要 API 成功/失败、数据展示、权限正确性、阻塞原因。详细结果记录在 `docs/maps/40-market-stock-experience.md` / `50-watchlist-intraday.md` / `60-permissions-admin.md` 的前端验证章节。
+
 ## 停止流程
 
 ### 停止 Frontend
