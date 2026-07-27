@@ -70,9 +70,18 @@ flowchart LR
 
 该图是结构占位。真实服务名、方向和中间层必须核验后更新。
 
-## 6. 与 PRD 的已知偏差
+## 6. 与 PRD 的已知偏差（高风险索引）
 
-待逐个领域核验。
+| 领域 | 偏差 | 等级 | 详情位置 |
+|---|---|---|---|
+| 量化模型 | QM-50/QM-51 板块与指数层聚合尚未实现 | P2 | `maps/20-quant-model.md` §7 |
+| 盘后任务 | AC-04 与实现冲突：`checking_coverage` 仍强制检查 15m 覆盖率 | P1 | `maps/30-after-close.md` §7 |
+| 盘后任务 | 本地调试若误连远程 Redis DB 0 可能消费正式队列/发布正式结果 | P0 | `maps/30-after-close.md` §7 |
+| 量化模型 | SMC 核心未显式保留成交量信息，依赖结构面板成交参与组 | P1 | `maps/20-quant-model.md` §9 |
+| 运行体系 | 本地 `docker-compose.yml` 仍保留 redis 服务，可能误导新开发者 | P3 | `maps/80-system-runtime.md` §10 |
+| 运行体系 | 自动部署代码已准备但链路未启用 | P2 | `maps/80-system-runtime.md` §10 |
+
+> 以上索引不复制详细内容。具体证据、代码路径和状态以对应 Map 为准。
 
 ## 7. 已废弃路径
 

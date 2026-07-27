@@ -1,10 +1,10 @@
 # 系统运行体系 Map
 
-核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）
+核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）；Phase 4 完成 Git 分支治理与 PRD20/30 代码对齐审计
 最后核验日期：2026-07-27
 核验分支：dev
-核验提交：79f5965633e2e636075626572a198fbbd707c43f（本地）；远程 origin/main=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf
-核验范围：本地原生 Backend / Frontend 启动、共享 PostgreSQL / Redis 连接、Scheduler / Worker 默认关闭；远程只读审计（Git/Compose/容器/Redis/健康检查）
+核验提交：069ebcca207f75c68abbf3c320e29fdb0d9c3bf2（本地 Phase 4）；远程 origin/main=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf
+核验范围：本地原生 Backend / Frontend 启动、共享 PostgreSQL / Redis 连接、Scheduler / Worker 默认关闭；远程只读审计（Git/Compose/容器/Redis/健康检查）；本地/origin/服务器分支治理；PRD20/PRD30 代码对齐审计
 对应 PRD：`../prd/80-system-runtime.md`
 事实所有权：本地原生进程、远程 Docker Compose、Git、配置、数据库、Redis、Scheduler、CI 和部署事实
 
@@ -31,8 +31,8 @@
 
 | 位置 | 代码目录 | 分支/SHA | 承载方式 | 主要用途 | 自动 Scheduler |
 |---|---|---|---|---|---|
-| 本地 | `/Users/zhenbao/Desktop/coding/market_dev` | `dev` / `79f5965` | 原生 Python 3.11 venv + Uvicorn；Node.js + Vite | 开发和手动调试 | 关闭 |
-| 远程 | `/root/web_dev` | 当前检出 `refactor/invite-capability-access-v2` / `0f17e7d`；运行版本对应 `origin/main` `13a0ef3`；工作区不干净 | Docker Compose | 稳定运行 | 已运行（bars/strategy/calendar scheduler 各 1 实例） |
+| 本地 | `/Users/zhenbao/Desktop/coding/market_dev` | `dev` / `069ebcc`；本地另有 `main`、`experiment` | 原生 Python 3.11 venv + Uvicorn；Node.js + Vite | 开发和手动调试 | 关闭 |
+| 远程 | `/root/web_dev` | 已切换并清理为 `main` / `13a0ef3`，工作区干净；运行版本对应 `origin/main` `13a0ef3` | Docker Compose | 稳定运行 | 已运行（bars/strategy/calendar scheduler 各 1 实例） |
 
 ### 远程服务器身份
 
@@ -79,9 +79,12 @@
 
 | 项目 | 当前事实 |
 |---|---|
-| `dev` | 本地当前分支；已跟踪 `origin/dev`；本地领先 4 个提交（`a817595`、`eaffb11`、`405d3ee`、`79f5965`） |
+| `dev` | 本地当前分支；已跟踪 `origin/dev`；本地领先 5 个提交（含 Phase 4 审计与文档更新） |
 | `main` | 远程稳定分支；`origin/main` SHA = `13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf`；当前运行版本一致 |
-| dev push | 本阶段未 push；按 PRD 应只触发 CI，不自动部署 |
+| `experiment` | 本地分支；从 `dev` 创建；用于保存未确认实验和未完成代码；未推送 origin |
+| 非保留分支 | 本地/origin 非 main/dev/experiment 分支已删除；已创建 5 个 `archive/*-YYYYMMDD` annotated tag 保存唯一提交 |
+| 服务器分支 | `/root/web_dev` 当前检出 `main`，工作区干净；服务器本地与 origin 仅保留 `main`/`dev` |
+| dev push | Phase 4 将 push `dev`（可 fast-forward）和 `experiment`；按 PRD 只触发 CI，不自动部署 |
 | main 自动部署 | 代码已准备，链路未启用；`.github/workflows/deploy-production.yml` 监听 `workflow_run`（CI success on main）和 `workflow_dispatch`；SSH 调用 `/usr/local/bin/panji-deploy.sh` |
 | CI gate | 已核验配置：`.github/workflows/ci.yml` 存在，名称为 `CI`，与 workflow_run 引用一致 |
 
@@ -164,7 +167,7 @@
 ### 远程
 
 - 容器对应 SHA：`/version` 返回 `runtime_git_sha=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf`，与 `origin/main` 一致
-- 当前检出分支：`refactor/invite-capability-access-v2`，HEAD `0f17e7d`，工作区存在未提交修改；运行版本仍为 `origin/main` 的 `13a0ef3`
+- 当前检出分支：`main`，HEAD `13a0ef3`，工作区干净；运行版本与 `origin/main` 的 `13a0ef3` 一致
 - 端口 80 页面：HTTP 200
 - `/health`：`{"status":"ok","service":"trading-platform","version":"1.1.0"}`
 - `/health/ready`：`{"status":"ready"}`
@@ -178,7 +181,7 @@
 - 本地 `docker-compose.yml` 仍保留 redis 服务，虽然 `Makefile` 已标记 `up/down` 废弃，但文件本身仍可能误导新开发者。本轮按任务要求不删除，仅标记“非本地开发入口”。
 - 本地 Redis DB 15 已正式保留为本地开发临时状态隔离库，但 Worker 启动前仍需确认 `REDIS_URL` 以 `/15` 结尾。
 - 本地与远程共享 PostgreSQL，开发中的破坏性操作需要额外注意；当前未做权限只读限制。
-- 远程 `/root/web_dev` 当前检出的不是 `main`（而是 `refactor/invite-capability-access-v2`），且工作区不干净；运行版本与 `origin/main` 一致，但 deploy 脚本在启用后会因“工作区不干净 / 非 main 分支”而拒绝部署，需要先人工清理。
+- 远程 `/root/web_dev` 已切换为 `main`，工作区干净，满足自动部署脚本的 workspace 检查；但自动部署代码尚未启用。
 - 自动部署代码已准备但尚未启用：服务器侧缺少 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件和 GitHub Secrets；`.github/workflows/deploy-production.yml` 尚未合并到 `main`，因此不会触发真实部署。
 - 远程 PostgreSQL test 容器 (`trading-postgres-test`) 映射 5433 端口，其用途和持久化策略尚未核验。
 
