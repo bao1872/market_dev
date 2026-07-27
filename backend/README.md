@@ -12,22 +12,21 @@
 ## 快速开始
 
 ```bash
-# 1. 启动 PostgreSQL + Redis
-make up
+# 1. 复制环境变量模板并填写共享 PostgreSQL / Redis 连接（本地开发不启动 Docker 数据服务）
+cp backend/.env.example backend/.env
 
 # 2. 安装依赖（清华源）
 cd backend
 pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 3. 执行数据库迁移
-make migrate
-
-# 4. 启动后端开发服务器
+# 3. 启动后端开发服务器（原生 Python 进程，不依赖 Docker）
 make backend
 
-# 5. 运行测试
+# 4. 运行测试
 make test
 ```
+
+注意：本地开发不执行 `make up`，不启动本地 PostgreSQL / Redis 容器。
 
 ## 目录结构
 
