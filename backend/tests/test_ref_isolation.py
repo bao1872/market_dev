@@ -342,17 +342,18 @@ def test_docs_current_no_ref_runtime_dependency() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 测试 4：git ls-files ref/ 不得包含 smc_user_export.pine
+# 测试 4：git ls-files ref/ 必须为空（Phase 5B-0：ref/ 完全停止跟踪）
 # ---------------------------------------------------------------------------
 
 
-def test_no_smc_user_export_in_git() -> None:
-    """git ls-files ref/ 不得包含 ref/smc_user_export.pine。
+def test_no_ref_tracked_in_git() -> None:
+    """git ls-files ref/ 必须为空。
 
-    CHANGE-20260718-004 已 `git rm --cached ref/smc_user_export.pine`，
-    该文件不再纳入 git 跟踪（.gitignore 的 ref/ 规则自动忽略）。
-    ref/smc_user_source.pine（用户原创 Pine 源码，SHA256 0bd3d2ad，843 行）
-    保留 git 跟踪（clause 46 明确要求，git add -f 例外）。
+    [Phase 5B-0] ref/ 是本地参考资料，不是正式业务代码。
+    GitHub 所有活跃分支不得跟踪 ref/。
+    旧版（CHANGE-20260718-004 ~ Phase 5A）曾保留 ref/smc_user_source.pine 跟踪，
+    Phase 5B-0 已 `git rm --cached ref/smc_user_source.pine`，ref/ 完全退出跟踪。
+    .gitignore 的 /ref/ 规则自动忽略新增文件。
     """
     result = subprocess.run(
         ["git", "ls-files", "ref/"],
@@ -369,17 +370,37 @@ def test_no_smc_user_export_in_git() -> None:
         raise AssertionError(pytest_fail_msg)
 
     tracked_files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    forbidden = "ref/smc_user_export.pine"
-    assert forbidden not in tracked_files, (
-        f"违反 ref/ 隔离（AGENTS clause 59(3)）：{forbidden} 仍在 git 跟踪中。"
-        f"CHANGE-20260718-004 已 git rm --cached。当前 git ls-files ref/ = {tracked_files}"
+    assert not tracked_files, (
+        f"违反 ref/ 隔离（Phase 5B-0）：ref/ 不得被 git 跟踪。"
+        f"当前 git ls-files ref/ = {tracked_files}"
     )
 
-    # 正向断言：ref/smc_user_source.pine 必须保留 git 跟踪
-    required = "ref/smc_user_source.pine"
-    assert required in tracked_files, (
-        f"违反 AGENTS clause 46：{required} 必须保留 git 跟踪（git add -f 例外），"
-        f"当前 git ls-files ref/ = {tracked_files}"
+
+def test_no_sync_tracked_in_git() -> None:
+    """git ls-files sync/ 必须为空。
+
+    [Phase 5B-0] sync/ 是废弃临时中转站，不是正式真源。
+    GitHub 所有活跃分支不得跟踪 sync/。
+    旧版 sync/README.md 已 `git rm`，.gitignore 的 /sync/ 规则自动忽略新增文件。
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "sync/"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest_fail_msg = (
+            f"git ls-files sync/ 失败 (returncode={result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+        raise AssertionError(pytest_fail_msg)
+
+    tracked_files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert not tracked_files, (
+        f"违反 sync/ 隔离（Phase 5B-0）：sync/ 不得被 git 跟踪。"
+        f"当前 git ls-files sync/ = {tracked_files}"
     )
 
 

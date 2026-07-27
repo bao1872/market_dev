@@ -1,4 +1,4 @@
-"""SMC Pine 确定性测试 — 验证核心逻辑与 Pine 真源对齐。
+"""SMC Pine 确定性测试 — 验证核心逻辑与 Pine 参考源对齐。
 
 [CHANGE-20260717-001 Pine parity] 新增确定性测试，不依赖 TV CSV fixture，
 使用合成 OHLC 数据验证 SMC 核心逻辑的 Pine 语义正确性。
@@ -13,7 +13,8 @@
 7. execution gate（internal/swing 门控）
 8. EQ 几何（两端点 prev_level/level，anchor → second_pivot 区间）
 
-Pine 真源：ref/smc_user_source.pine（SHA256 0bd3d2ad，843 行，不可变）
+Pine 参考源（人工阅读）：用户原创 Pine 源码（原 ref/smc_user_source.pine，SHA256 0bd3d2ad，843 行，不可变）。
+[Phase 5B-0] 该文件已 `git rm --cached` 退出 git 跟踪，仅保留为本地参考；本测试不运行时读取该文件。
 """
 
 from __future__ import annotations

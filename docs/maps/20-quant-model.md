@@ -1,9 +1,9 @@
 # 量化模型 Map
 
-核验状态：已基于代码审计更新（Phase 4）
+核验状态：已基于代码审计更新（Phase 4）；Phase 5A 修正 AC-04 引用；Phase 5B-0 修正 ref/ 跟踪状态与趋势入口核验
 最后核验日期：2026-07-27
 核验分支：dev
-核验提交：069ebcca207f75c68abbf3c320e29fdb0d9c3bf2
+核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A/5B-0 修复见对应 Change 文档
 事实所有权：趋势、结构、动量、筹码和板块模型的权威代码、输入、输出和调用方
 
 > 本文件必须基于真实代码、数据、日志或运行结果填写。不得根据 PRD 推测实现已经存在。
@@ -27,7 +27,7 @@
 | QM-10~QM-13 趋势 | `dsa_selector.py:compute_dsa_history` / `compute_dsa_bundle`；底层 `dynamic_swing_anchored_vwap.py`；趋势事件 `strategy/events/detectors/trend_events.py` | 已实现并核验 | `test_dsa_selector.py` / `test_dsa_publish_validation.py` / `test_dsa_visual_segments.py` |
 | QM-13 趋势与 SMC 边界 | DSA 负责长周期方向（dir/segment）；SMC 只输出 BOS/CHoCH/EQH/EQL/OB，不维护等价趋势段 | 已实现并核验 | `smc_pine_core.py` 无趋势段逻辑；`dsa_selector.py` 无 BOS/CHoCH |
 | QM-20~QM-23 结构 | `smc_pine_core.py:compute_smc_pine` → 事件/OB/pivots/trailing；`smc_indicator.py` 薄包装；`smc_monitor.py` 盘中监控 | 已实现并核验 | `test_smc_pine_deterministic.py` / `test_smc_indicator.py` / `test_smc_monitor_five_event_types.py` |
-| QM-23 Pine 对齐 | `smc_pine_core.py` 默认参数逐项匹配 Pine；`ref/smc_user_source.pine` SHA256 0bd3d2ad 为真源 | 已实现并核验 | `test_smc_pine_deterministic.py` 注释 |
+| QM-23 Pine 对齐 | `smc_pine_core.py` 默认参数逐项匹配 Pine；用户原创 Pine 参考源（原 `ref/smc_user_source.pine`，SHA256 0bd3d2ad，人工阅读）。[Phase 5B-0] 该文件已 `git rm --cached` 退出 git 跟踪，仅保留为本地参考 | 已实现并核验 | `test_smc_pine_deterministic.py` 注释；`test_smc_tv_parity.py` fixture 对齐 |
 | QM-30~QM-33 动量 | `bollinger_features_plotly.py:bollinger`；`sqzmom_lb.py:compute_sqzmom_lb`；`structural_factor_service.py` 第 4 组；`bollinger_monitor.py` 事件 | 已实现并核验 | `test_stock_detail_feishu.py` / `test_monitor_rhythm_regression.py` / `test_indicator_view.py` |
 | QM-40~QM-43 筹码共识 | `node_cluster_engine.py:compute_node_cluster_profile`；`volume_node_monitor.py` 事件；`build_node_regions` 为四链统一 DTO | 已实现并核验 | `test_node_cluster_engine.py` / `test_node_cluster_architecture.py` / `test_node_cluster_contract.py` |
 | QM-42 禁止 VAH/VAL 替代 | `node_cluster_engine.py` `value_area_filters_peaks = False`；架构守护测试禁止业务模块直接调用底层 VP | 已实现并核验 | `test_node_cluster_architecture.py` |
@@ -58,7 +58,7 @@
 | OB 和进入事件 | `internal_order_blocks` / `swing_order_blocks`，含 mitigation；`smc_monitor.py` 五类触碰事件 |
 | 连续高点/低点 | `equal_highs_lows`（EQH/EQL）事件 |
 | 成交量信息 | SMC 本身不包含独立成交量过滤；结构面板通过 `structural_factor_service` 第 5 组成交参与补充 |
-| Pine 对齐位置 | `smc_pine_core.py` 实现 Pine 语义原语；`ref/smc_user_source.pine` 为真源；FVG 完全排除 |
+| Pine 对齐位置 | `smc_pine_core.py` 实现 Pine 语义原语；用户原创 Pine 参考源（原 `ref/smc_user_source.pine`，人工阅读）；[Phase 5B-0] 该文件已 `git rm --cached` 退出 git 跟踪，仅保留为本地参考；FVG 完全排除 |
 | 写入位置 | SMC 事件进入 `strategy_events` / `monitor` 状态；结构因子进入 `stock_feature_snapshot` |
 
 ## 5. 动量
@@ -107,9 +107,9 @@
 ## 9. 已知偏差与风险
 
 - P2：QM-50/QM-51 板块/指数层聚合尚未实现，市场列表仅展示个股字段。
-- P1：`after_close_orchestrator.py` 的 `checking_coverage` 仍检查 15m 覆盖率，与 AC-04“不再以 15m 为主计算要求”存在局部冲突（详见 `maps/30-after-close.md`）。
+- ~~P1：`after_close_orchestrator.py` 的 `checking_coverage` 仍检查 15m 覆盖率~~ **[Phase 5A 已关闭]** 详见 `maps/30-after-close.md` §7。
 - P1：SMC 结构成交量信息未在 SMC 核心内显式保留，依赖结构面板的成交参与组补充。
-- P3：`ref/交易/` 下存在大量实验/参考脚本，需与 `backend/app/` 生产路径保持隔离；架构守护测试 `test_ref_isolation.py` 已部分覆盖。
+- ~~P3：`ref/交易/` 下存在大量实验/参考脚本~~ **[Phase 5B-0 已关闭]** `ref/` 已完全退出 git 跟踪（.gitignore `/ref/`）；`test_ref_isolation.py` 守护 `git ls-files ref/` 为空；CI 增加显式 ref/sync 跟踪检查。
 
 ## 10. 更新触发条件
 

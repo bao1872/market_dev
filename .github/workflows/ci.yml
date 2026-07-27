@@ -80,6 +80,15 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
+      - name: [Phase 5B-0] Verify ref/ and sync/ are not tracked
+        run: |
+          tracked=$(git ls-files ref sync)
+          if [ -n "$tracked" ]; then
+            echo "ERROR: ref/ or sync/ files are tracked in git:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo "OK: ref/ and sync/ are not tracked"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

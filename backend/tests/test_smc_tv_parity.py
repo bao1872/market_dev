@@ -25,9 +25,9 @@
 - 不得写"Pine 完全对齐"，只能声明"默认结构检测子集对齐"
 
 Fixture 路径：backend/tests/fixtures/smc_pine/smc_tv_<symbol>_<tf>.csv
-TV CSV 由 ref/smc_user_export.pine（派生导出副本）末尾隐藏 plot 导出。
-注意：ref/smc_user_source.pine 是用户原创 Pine 真源（SHA256 0bd3d2ad，843 行，不可变），
-      导出功能在派生文件 ref/smc_user_export.pine 中，不得修改真源。
+TV CSV 由用户原创 Pine 源码的派生导出副本末尾隐藏 plot 导出。
+注意：用户原创 Pine 参考源（人工阅读，原 ref/smc_user_source.pine，SHA256 0bd3d2ad，843 行，不可变），
+      [Phase 5B-0] 该文件已 `git rm --cached` 退出 git 跟踪，仅保留为本地参考；本测试不运行时读取该文件。
 """
 
 from __future__ import annotations
@@ -836,7 +836,8 @@ def test_pine_to_core_to_adapter_to_render_chain(tv_csv_path: Path | None) -> No
 def test_smc_default_params_match_pine():
     """[CHANGE-20260718-001] 验证 DEFAULT_PARAMS 逐项匹配 Pine L72-131 默认值。
 
-    Pine 真源：ref/smc_user_source.pine（SHA256 0bd3d2ad，843 行，不可变）
+    Pine 参考源（人工阅读）：用户原创 Pine 源码（原 ref/smc_user_source.pine，SHA256 0bd3d2ad，843 行，不可变）。
+    [Phase 5B-0] 该文件已 `git rm --cached` 退出 git 跟踪，仅保留为本地参考。
     逐项断言每个参数与 Pine input() 默认值一致。
     """
     from app.strategy_assets.algorithms.features.smc_pine_core import DEFAULT_PARAMS

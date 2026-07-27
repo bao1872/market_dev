@@ -1,9 +1,10 @@
 """SMC Pine 语义核心模块 — 唯一纯函数核心。
 
-本模块实现用户 Pine SMC 源码（`ref/smc_user_source.pine`，SHA256 0bd3d2ad，843 行，
-用户原创并授权盘迹商业项目使用）的 Pine 语义原语，作为生产服务和测试参考的唯一调用入口。
-用户 Pine 文件为 SMC 算法唯一真源；禁止维护两套近似算法；禁止读取或引用任何
-第三方 LuxAlgo Pine 源码。
+本模块实现用户 Pine SMC 源码的 Pine 语义原语，作为生产服务和测试参考的唯一调用入口。
+用户 Pine 文件（原 `ref/smc_user_source.pine`，SHA256 0bd3d2ad，843 行，用户原创并授权
+盘迹商业项目使用）为 SMC 算法唯一参考源（人工阅读）；[Phase 5B-0] 该文件已 `git rm --cached`
+退出 git 跟踪，仅保留为本地参考（.gitignore /ref/），本模块不运行时读取该文件。
+禁止维护两套近似算法；禁止读取或引用任何第三方 LuxAlgo Pine 源码。
 
 Pine 语义原语实现：
     - ta.rma(src, length): Wilder's Running Moving Average
