@@ -289,7 +289,7 @@ def check_sync_not_runtime_dependency() -> list[Violation]:
     runtime_ref_re = re.compile(
         r"(?:import\s+|from\s+|require\(\s*['\"]|open\(\s*['\"]|read_text\(\s*['\"]|read\(\s*['\"]|Path\(\s*['\"])(sync/[A-Za-z_][A-Za-z0-9_./-]*)"
     )
-    for label, directory in sync_runtime_indicators:
+    for _label, directory in sync_runtime_indicators:
         if not directory.exists():
             continue
         for p in directory.rglob("*"):
