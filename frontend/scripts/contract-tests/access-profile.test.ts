@@ -6,7 +6,7 @@
 // 3. LoginResponse 不再含 membership_expired 字段（已被 subscription_active 替代）
 // 4. AuthUser 不再使用 role: 'admin' | 'member'，改用 is_admin/roles/subscription_active 等
 // 5. App.tsx AdminRoute 使用 is_admin 而非 user.role
-// 6. App.tsx 存在 SubscriberRoute 守卫（检查 subscription_active，admin 豁免）
+// 6. App.tsx 存在 CapabilityRoute 守卫（检查 capabilities，admin 豁免）[Phase 5B-2 PA-01]
 // 7. LoginPage.tsx 不再引用 membership_expired
 // 8. LoginPage.tsx 使用 next_route 跳转（对齐后端返回）
 // 9. LoginPage.tsx 无 expired@quant.local 演示提示
@@ -146,32 +146,33 @@ test('App.tsx AdminRoute 使用 is_admin 而非 user.role', () => {
   )
 })
 
-// ===== 6. App.tsx 存在 SubscriberRoute 守卫（检查 subscription_active，admin 豁免） =====
-test('App.tsx 存在 SubscriberRoute 守卫检查 subscription_active', () => {
+// ===== 6. App.tsx 存在 CapabilityRoute 守卫（检查 capabilities，admin 豁免） =====
+// [Phase 5B-2 PRD60 PA-01] SubscriberRoute 已被 CapabilityRoute 替代
+test('App.tsx 存在 CapabilityRoute 守卫检查 capabilities', () => {
   const src = readSource(APP_TSX_PATH)
-  // [Auth] - 描述: 必须定义 SubscriberRoute 函数
+  // [Auth] - 描述: 必须定义 CapabilityRoute 函数
   assert.ok(
-    /function\s+SubscriberRoute\s*\(\s*\)\s*\{/.test(src),
-    'App.tsx 必须定义 SubscriberRoute 守卫函数',
+    /function\s+CapabilityRoute\s*\(\s*\{[^}]*\}\s*:\s*\{[^}]*\}\s*\)\s*\{/.test(src),
+    'App.tsx 必须定义 CapabilityRoute 守卫函数',
   )
-  // [Auth] - 描述: SubscriberRoute 函数体必须检查 subscription_active
-  const subscriberRouteMatch = src.match(
-    /function\s+SubscriberRoute\s*\(\s*\)\s*\{([\s\S]*?)\n\}/,
+  // [Auth] - 描述: CapabilityRoute 函数体必须检查 capabilities
+  const capabilityRouteMatch = src.match(
+    /function\s+CapabilityRoute\s*\([^)]*\)\s*\{([\s\S]*?)\n\}/,
   )
-  assert.ok(subscriberRouteMatch, 'App.tsx 必须定义 SubscriberRoute 函数体')
+  assert.ok(capabilityRouteMatch, 'App.tsx 必须定义 CapabilityRoute 函数体')
   assert.ok(
-    /subscription_active/.test(subscriberRouteMatch[1]),
-    'SubscriberRoute 函数体必须检查 subscription_active 字段',
+    /capabilities/.test(capabilityRouteMatch[1]),
+    'CapabilityRoute 函数体必须检查 capabilities 字段',
   )
-  // [Auth] - 描述: admin 用户豁免（is_admin=true 直接通过，不强制订阅）
+  // [Auth] - 描述: admin 用户豁免（is_admin=true 直接通过）
   assert.ok(
-    /is_admin/.test(subscriberRouteMatch[1]),
-    'SubscriberRoute 函数体必须包含 is_admin 豁免逻辑（admin 直接通过）',
+    /is_admin/.test(capabilityRouteMatch[1]),
+    'CapabilityRoute 函数体必须包含 is_admin 豁免逻辑（admin 直接通过）',
   )
-  // [Auth] - 描述: 非订阅用户重定向到 /subscription-expired（canonical）
+  // [Auth] - 描述: 无权限用户重定向到 /forbidden（403 页面）
   assert.ok(
-    /\/subscription-expired/.test(subscriberRouteMatch[1]),
-    'SubscriberRoute 函数体必须将非订阅用户重定向到 /subscription-expired',
+    /\/forbidden/.test(capabilityRouteMatch[1]),
+    'CapabilityRoute 函数体必须将无权限用户重定向到 /forbidden',
   )
 })
 

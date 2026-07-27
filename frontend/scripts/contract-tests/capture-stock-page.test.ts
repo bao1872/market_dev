@@ -132,7 +132,7 @@ test('App.tsx 中 /capture/stock/:symbol 与公开路由 /login 同级缩进（�
     captureIndent,
     loginIndent,
     `/capture/stock/:symbol 缩进（${captureIndent} 空格）必须与公开路由 /login（${loginIndent} 空格）相同，` +
-      '确保不在 ProtectedLayout / SubscriberRoute 守卫下',
+      '确保不在 ProtectedLayout / CapabilityRoute 守卫下',
   )
 })
 
