@@ -17,12 +17,14 @@
 - get_settings() 测试用 monkeypatch 设置环境变量 + cache_clear()
 """
 import pytest
+from pydantic_settings import SettingsConfigDict
 
 from app.config import (
     InvalidDatabaseURLError,
     MissingRequiredSettingError,
     _load_py_config,
     _validate_database_url,
+    _validate_redis_url,
     get_settings,
 )
 
@@ -108,6 +110,43 @@ class TestValidateDatabaseUrlDirect:
 
 
 # ---------------------------------------------------------------------------
+# _validate_redis_url 直接调用测试
+# ---------------------------------------------------------------------------
+
+
+class TestValidateRedisUrlDirect:
+    """直接调用 _validate_redis_url 的单元测试。"""
+
+    def test_development_db0_rejected(self):
+        """开发环境 Redis DB 0 必须拒绝。"""
+        with pytest.raises(InvalidDatabaseURLError, match="DB 0"):
+            _validate_redis_url("redis://localhost:6379/0", "development")
+
+    def test_development_implicit_db0_rejected(self):
+        """开发环境 Redis URL 未显式指定 DB（隐式 DB 0）必须拒绝。"""
+        with pytest.raises(InvalidDatabaseURLError, match="DB 0"):
+            _validate_redis_url("redis://localhost:6379", "development")
+
+    def test_development_db15_passes(self):
+        """开发环境 Redis DB 15 通过。"""
+        _validate_redis_url("redis://localhost:6379/15", "development")
+
+    def test_development_localhost_default_rejected(self):
+        """开发环境默认 localhost:6379/0 必须拒绝。"""
+        with pytest.raises(InvalidDatabaseURLError, match="DB 0"):
+            _validate_redis_url("redis://localhost:6379/0", "development")
+
+    def test_non_development_db0_ignored(self):
+        """非开发环境（如 production）DB 0 不触发拒绝。"""
+        _validate_redis_url("redis://redis:6379/0", "production")
+
+    def test_malformed_url_rejected(self):
+        """Redis URL 无法解析时拒绝启动。"""
+        with pytest.raises(InvalidDatabaseURLError, match="无法解析"):
+            _validate_redis_url("not-a-redis-url", "development")
+
+
+# ---------------------------------------------------------------------------
 # get_settings() 集成校验测试（启动硬校验入口）
 # ---------------------------------------------------------------------------
 
@@ -132,6 +171,7 @@ class TestGetSettingsValidation:
     def test_sqlite_url_blocks_startup(self, monkeypatch, reset_settings_cache):
         """sqlite URL 必须阻止 get_settings() 返回（启动失败）。"""
         monkeypatch.setenv("DATABASE_URL", "sqlite:///./test.db")
+        monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/15")
         monkeypatch.setenv("APP_ENV", "development")
         with pytest.raises(InvalidDatabaseURLError, match="sqlite"):
             get_settings()
@@ -143,6 +183,7 @@ class TestGetSettingsValidation:
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock_test"
         )
+        monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/15")
         monkeypatch.setenv("APP_ENV", "development")
         with pytest.raises(InvalidDatabaseURLError, match="不得连测试库"):
             get_settings()
@@ -154,6 +195,7 @@ class TestGetSettingsValidation:
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock_test"
         )
+        monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
         monkeypatch.setenv("APP_ENV", "production")
         with pytest.raises(InvalidDatabaseURLError, match="不得连测试库"):
             get_settings()
@@ -165,6 +207,7 @@ class TestGetSettingsValidation:
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
         )
+        monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
         monkeypatch.setenv("APP_ENV", "test")
         with pytest.raises(InvalidDatabaseURLError, match="必须含 _test"):
             get_settings()
@@ -172,14 +215,50 @@ class TestGetSettingsValidation:
     def test_dev_bz_stock_starts_successfully(
         self, monkeypatch, reset_settings_cache
     ):
-        """开发环境 + bz_stock 库正常启动。"""
+        """开发环境 + bz_stock 库 + Redis DB 15 正常启动。"""
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
         )
+        monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/15")
         monkeypatch.setenv("APP_ENV", "development")
         s = get_settings()
         assert "bz_stock" in s.database_url
         assert "_test" not in s.database_url
+        assert s.redis_url.endswith("/15")
+
+    def test_dev_redis_db0_blocks_startup(
+        self, monkeypatch, reset_settings_cache
+    ):
+        """开发环境 Redis DB 0 必须阻止启动。"""
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
+        )
+        monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+        monkeypatch.setenv("APP_ENV", "development")
+        with pytest.raises(InvalidDatabaseURLError, match="DB 0"):
+            get_settings()
+
+    def test_dev_redis_missing_blocks_startup(
+        self, monkeypatch, reset_settings_cache
+    ):
+        """开发环境未配置 REDIS_URL 时启动失败。"""
+        monkeypatch.setenv(
+            "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
+        )
+        monkeypatch.delenv("REDIS_URL", raising=False)
+        monkeypatch.setenv("APP_ENV", "development")
+        # 禁用 .env 文件加载，使 REDIS_URL 完全未配置
+        monkeypatch.setattr(
+            "app.config.Settings.model_config",
+            SettingsConfigDict(
+                env_file=None,
+                env_file_encoding="utf-8",
+                case_sensitive=False,
+                extra="ignore",
+            ),
+        )
+        with pytest.raises(MissingRequiredSettingError, match="REDIS_URL"):
+            get_settings()
 
     def test_test_env_with_test_suffix_starts_successfully(
         self, monkeypatch, reset_settings_cache
@@ -188,6 +267,7 @@ class TestGetSettingsValidation:
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock_test"
         )
+        monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
         monkeypatch.setenv("APP_ENV", "test")
         s = get_settings()
         assert "_test" in s.database_url
@@ -199,6 +279,7 @@ class TestGetSettingsValidation:
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
         )
+        monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.setenv("JWT_SECRET", "strong-jwt-secret-for-tests")
         monkeypatch.setenv("SECRET_MASTER_KEY", "strong-master-key-for-tests")
@@ -214,6 +295,7 @@ class TestGetSettingsValidation:
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
         )
+        monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.setenv("JWT_SECRET", "change-me")
         monkeypatch.setenv("SECRET_MASTER_KEY", "strong-master-key-for-tests")
@@ -227,6 +309,7 @@ class TestGetSettingsValidation:
         monkeypatch.setenv(
             "DATABASE_URL", "postgresql+psycopg://u:p@h:5432/bz_stock"
         )
+        monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.setenv("JWT_SECRET", "strong-jwt-secret-for-tests")
         monkeypatch.setenv("SECRET_MASTER_KEY", "replace-in-development-only")

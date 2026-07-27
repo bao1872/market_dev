@@ -7,6 +7,7 @@
 - require_active_subscription: 要求有效订阅（管理员豁免）
 - require_feature: 要求具备指定 feature（管理员豁免）
 - require_quota: 返回限额值供调用方比较（管理员返回 None 表示无限制）
+- require_capability: 要求具备指定 capability（PRD60 PA-01，管理员豁免）
 
 设计原则：
 - 禁止各 API 自行拼接 role、subscription、expires_at，统一从 AccessContext 读取
@@ -17,11 +18,14 @@
 - get_access_context 是只读操作（不写 DB），可在登录路径使用
 - 复用 plan_service.get_plan 与 subscription_service.get_effective_subscription_status，
   不重复实现套餐查询与订阅状态判定逻辑
+- [Phase 5B-2 PRD60] capabilities 字段优先从 user_capabilities 表读取，
+  旧用户（无 user_capabilities 行）fallback 到 plan_code 推断（兼容期）
 
 业务规则（permission-matrix.md 设计）：
 - observe_20 / research_50 套餐字段（monitor_limit/notification_channel_limit/message_retention_days/features）
   以 plans 表记录为准，由 Alembic 048 迁移初始化
 - 过期订阅仍记录原 plan_code/plan_display_name（便于前端展示降级提示），但 subscription_active=False
+- [PRD60 PA-01] 三类独立 capability: self_selection / market_data / research_replay
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from app.core.deps import _get_user_roles, get_current_active_user
 from app.db import get_db
 from app.models.subscription import Subscription
 from app.models.user import User
+from app.models.user_capability import ALL_CAPABILITIES, UserCapability
 from app.services.plan_service import get_plan
 from app.services.subscription_service import get_effective_subscription_status
 
@@ -50,6 +55,7 @@ __all__ = [
     "require_active_subscription",
     "require_feature",
     "require_quota",
+    "require_capability",
 ]
 
 
@@ -88,6 +94,40 @@ class AccessContext(BaseModel):
     expires_at: datetime | None = None
     features: list[str] = Field(default_factory=list)
     limits: dict = Field(default_factory=dict)
+    # [Phase 5B-2 PRD60 PA-01] 三类独立 capability 状态
+    # 格式: {"self_selection": {"active": bool, "expires_at": datetime|None, "watchlist_limit": int|None}, ...}
+    # admin: 所有 capability active=True
+    # 旧用户（无 user_capabilities 行）: fallback 到 plan_code 推断
+    capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+def _infer_capabilities_from_plan(
+    plan_code: str | None,
+    plan_monitor_limit: int | None,
+    expires_at: datetime | None,
+    subscription_active: bool,
+) -> dict[str, dict[str, Any]]:
+    """从 plan_code 推断 capabilities（兼容期 fallback，旧用户无 user_capabilities 行）。
+
+    PRD60 权限矩阵：
+    - observe_20 → self_selection + market_data（watchlist_limit 从 plans 表读取）
+    - research_50 → self_selection + market_data + research_replay
+    - 其他 → 空（无 capability）
+
+    watchlist_limit 从 plan.monitor_limit 读取，避免硬编码套餐数值。
+    """
+    if plan_code == "observe_20":
+        return {
+            "self_selection": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
+            "market_data": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+        }
+    if plan_code == "research_50":
+        return {
+            "self_selection": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
+            "market_data": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+            "research_replay": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+        }
+    return {}
 
 
 async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
@@ -129,6 +169,7 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             expires_at=None,
             features=[],
             limits={},
+            capabilities={cap: {"active": True, "expires_at": None, "watchlist_limit": None} for cap in ALL_CAPABILITIES},
         )
 
     # [AccessControl] - 描述: member 路径查询订阅有效状态（只读，复用 subscription_service）
@@ -149,6 +190,7 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             expires_at=None,
             features=[],
             limits={},
+            capabilities={},
         )
 
     # [AccessControl] - 描述: 有订阅记录（active 或 expired）查询 plan_code 并读取 plans 表
@@ -171,10 +213,36 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             expires_at=expires_at,
             features=[],
             limits={},
+            capabilities={},
         )
 
+    # [Phase 5B-2 PRD60 PA-01] 查询 user_capabilities 表（优先于 plan_code 推断）
+    cap_stmt = select(UserCapability).where(UserCapability.user_id == user.id)
+    cap_result = await db.execute(cap_stmt)
+    cap_rows = cap_result.scalars().all()
+
     # [PlanService] - 描述: 复用 plan_service.get_plan 读取套餐定义（唯一真源）
+    # 提前到 capability 推断之前，便于 fallback 读取 monitor_limit（避免硬编码套餐数值）
     plan = await get_plan(db, plan_code)
+
+    if cap_rows:
+        # 优先使用 user_capabilities 表（per-capability 独立 expires_at）
+        now_utc = datetime.now(cap_rows[0].expires_at.tzinfo) if cap_rows[0].expires_at.tzinfo else datetime.now()
+        capabilities: dict[str, dict[str, Any]] = {}
+        for row in cap_rows:
+            cap_active = row.expires_at > now_utc if row.expires_at else False
+            capabilities[row.capability] = {
+                "active": cap_active,
+                "expires_at": row.expires_at,
+                "watchlist_limit": row.watchlist_limit,
+            }
+    else:
+        # Fallback: 从 plan_code 推断（兼容期，旧用户无 user_capabilities 行）
+        # watchlist_limit 从 plan.monitor_limit 读取，避免硬编码套餐数值
+        capabilities = _infer_capabilities_from_plan(
+            plan_code, plan.monitor_limit if plan else None, expires_at, subscription_active
+        )
+
     return AccessContext(
         user_id=str(user.id),
         account_status=user.status,
@@ -191,6 +259,7 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             "notification_channel_limit": int(plan.notification_channel_limit),
             "message_retention_days": int(plan.message_retention_days),
         },
+        capabilities=capabilities,
     )
 
 
@@ -349,6 +418,47 @@ def require_quota(quota_name: str) -> Callable[..., Coroutine[Any, Any, int | No
     return _get_quota
 
 
+def require_capability(capability: str) -> Callable[..., Coroutine[Any, Any, AccessContext]]:
+    """Capability 检查依赖工厂（PRD60 PA-01，admin 豁免）。
+
+    返回一个 FastAPI 依赖函数，检查 ctx.capabilities 是否包含指定 capability 且 active。
+    admin 自动豁免（所有 capability active=True）。
+
+    三类独立权限（PRD60 PA-01）：
+    - self_selection: 自选管理（含盘中监控+行情列表可见，PA-10）
+    - market_data: 行情管理（个股详情，PA-11/PA-13）
+    - research_replay: 复盘管理（PA-12）
+
+    用法：
+        @router.get("/stock/{symbol}")
+        async def get_stock(ctx: AccessContext = Depends(require_capability("market_data"))): ...
+
+    Args:
+        capability: 权限类型（self_selection/market_data/research_replay）
+
+    Returns:
+        FastAPI 依赖函数，校验通过返回原 ctx，否则 403
+    """
+    if not capability:
+        raise ValueError("require_capability 需要非空 capability")
+
+    async def _check_capability(
+        ctx: AccessContext = Depends(require_authenticated),
+    ) -> AccessContext:
+        """检查 ctx 是否具备指定 capability 且 active（admin 豁免）。"""
+        if ctx.is_admin:
+            return ctx
+        cap_info = ctx.capabilities.get(capability)
+        if cap_info is None or not cap_info.get("active"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"需要权限: {capability}",
+            )
+        return ctx
+
+    return _check_capability
+
+
 if __name__ == "__main__":
     # [AccessControl] - 描述: 自测入口，验证函数签名与 AccessContext 字段（不连接数据库）
     assert callable(get_access_context)
@@ -357,15 +467,16 @@ if __name__ == "__main__":
     assert callable(require_active_subscription)
     assert callable(require_feature)
     assert callable(require_quota)
+    assert callable(require_capability)
 
-    # AccessContext 11 个字段
+    # AccessContext 12 个字段（Phase 5B-2 新增 capabilities）
     expected_fields = {
         "user_id", "account_status", "roles", "is_admin", "is_member",
         "subscription_active", "plan_code", "plan_display_name",
-        "expires_at", "features", "limits",
+        "expires_at", "features", "limits", "capabilities",
     }
     assert set(AccessContext.model_fields.keys()) == expected_fields
-    assert len(AccessContext.model_fields) == 11
+    assert len(AccessContext.model_fields) == 12
 
     # 工厂函数返回可调用依赖
     feature_dep = require_feature("trend_selection")

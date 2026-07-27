@@ -2,9 +2,9 @@
 // 用法：node --experimental-strip-types --test src/navigation/__tests__/routeStructure.test.ts
 //
 // 覆盖（PRD V1.0 阶段一路由与壳层）：
-//   1. Capture 路由位于 ProtectedLayout 之外（无 protected/subscriber/admin 守卫祖先）
-//   2. /market /replay /stock/:symbol 经过 UserAppShell + SubscriberRoute
-//   3. /messages /settings 经过 UserAppShell 但不经过 SubscriberRoute
+//   1. Capture 路由位于 ProtectedLayout 之外（无 protected/capability/admin 守卫祖先）
+//   2. /market /replay /stock/:symbol 经过 UserAppShell + CapabilityRoute
+//   3. /messages /settings 经过 UserAppShell 但不经过 CapabilityRoute
 //   4. /admin/* 经过 AdminRoute + AdminAppShell
 //   5. /overview /watchlist /screener 为兼容重定向
 //   6. 兜底重定向到 /market
@@ -23,9 +23,9 @@ test('Capture 路由位于 ProtectedLayout 之外（无 protected 守卫祖先�
   const result = findRouteNode(ROUTE_STRUCTURE, '/capture/stock/:symbol')
   assert.ok(result, 'Capture 路由必须存在')
   assert.equal(result.node.guard, 'capture')
-  // 祖先链中不应有 protected/subscriber/admin 守卫
+  // 祖先链中不应有 protected/capability/admin 守卫
   assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/capture/stock/:symbol', 'protected'))
-  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/capture/stock/:symbol', 'subscriber'))
+  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/capture/stock/:symbol', 'capability'))
   assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/capture/stock/:symbol', 'admin'))
 })
 
@@ -34,14 +34,14 @@ test('Capture 路由不渲染任何壳层（user/admin 均不在祖先链）', (
   assert.ok(!hasShellInChain(ROUTE_STRUCTURE, '/capture/stock/:symbol', 'admin'))
 })
 
-test('/market 经过 UserAppShell + SubscriberRoute', () => {
+test('/market 经过 UserAppShell + CapabilityRoute', () => {
   assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/market', 'user'))
-  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/market', 'subscriber'))
+  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/market', 'capability'))
 })
 
-test('/replay 经过 UserAppShell + SubscriberRoute', () => {
+test('/replay 经过 UserAppShell + CapabilityRoute', () => {
   assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/replay', 'user'))
-  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/replay', 'subscriber'))
+  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/replay', 'capability'))
 })
 
 test('/screener 为兼容重定向（不再为独立页面）', () => {
@@ -49,26 +49,26 @@ test('/screener 为兼容重定向（不再为独立页面）', () => {
   assert.ok(screener, '/screener 重定向路由必须存在')
   assert.equal(screener.node.guard, 'redirect')
   assert.equal(screener.node.redirectTo, '/market')
-  // /screener 不再经过用户壳层或订阅守卫
+  // /screener 不再经过用户壳层或 capability 守卫
   assert.ok(!hasShellInChain(ROUTE_STRUCTURE, '/screener', 'user'))
-  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/screener', 'subscriber'))
+  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/screener', 'capability'))
 })
 
-test('/stock/:symbol 经过 UserAppShell + SubscriberRoute', () => {
+test('/stock/:symbol 经过 UserAppShell + CapabilityRoute', () => {
   assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/stock/:symbol', 'user'))
-  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/stock/:symbol', 'subscriber'))
+  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/stock/:symbol', 'capability'))
 })
 
-test('/messages 经过 UserAppShell 但不经过 SubscriberRoute', () => {
+test('/messages 经过 UserAppShell 但不经过 CapabilityRoute', () => {
   assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/messages', 'user'))
   assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/messages', 'protected'))
-  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/messages', 'subscriber'))
+  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/messages', 'capability'))
 })
 
-test('/settings 经过 UserAppShell 但不经过 SubscriberRoute', () => {
+test('/settings 经过 UserAppShell 但不经过 CapabilityRoute', () => {
   assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/settings', 'user'))
   assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/settings', 'protected'))
-  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/settings', 'subscriber'))
+  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/settings', 'capability'))
 })
 
 test('/admin/* 经过 AdminRoute + AdminAppShell', () => {
@@ -126,7 +126,7 @@ test('/stock/:symbol 是详情页（非重定向），不是 /market 的别名',
   assert.ok(!stock.node.redirectTo, '/stock/:symbol 不得有 redirectTo')
 })
 
-test('/market 不是详情页（guard=subscriber，shell=user，无 redirectTo）', () => {
+test('/market 不是详情页（guard=capability，shell=user，无 redirectTo）', () => {
   const market = findRouteNode(ROUTE_STRUCTURE, '/market')
   assert.ok(market)
   assert.notEqual(market.node.guard, 'redirect')

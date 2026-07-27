@@ -3,7 +3,8 @@
 // 本文件只描述路由 path 和守卫/shell 标记，不包含页面组件。
 
 // 守卫/壳层标记（用于测试断言，不参与运行时渲染）
-export type GuardType = 'public' | 'protected' | 'subscriber' | 'admin' | 'capture' | 'redirect'
+// [Phase 5B-2 PRD60 PA-01] 'capability' 替代 'subscriber'（三类独立权限守卫）
+export type GuardType = 'public' | 'protected' | 'capability' | 'admin' | 'capture' | 'redirect'
 export type ShellType = 'none' | 'user' | 'admin'
 
 export interface RouteNode {
@@ -21,6 +22,8 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
   { path: '/login', guard: 'public', shell: 'none' },
   { path: '/subscription-expired', guard: 'public', shell: 'none' },
   { path: '/membership-expired', guard: 'redirect', shell: 'none', redirectTo: '/subscription-expired' },
+  // [Phase 5B-2 PRD60 PA-01] 403 页面 - 已登录但缺少指定 capability
+  { path: '/forbidden', guard: 'public', shell: 'none' },
   // Capture 路由：位于所有守卫和壳层之外
   { path: '/capture/stock/:symbol', guard: 'capture', shell: 'none' },
   // ProtectedLayout 组
@@ -33,14 +36,29 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
         guard: 'protected',
         shell: 'user',
         children: [
-          // SubscriberRoute 组
+          // [Phase 5B-2 PRD60 PA-01] 三类独立 capability 守卫（替代旧 SubscriberRoute）
+          // CapabilityRoute: self_selection
           {
-            guard: 'subscriber',
+            guard: 'capability',
             shell: 'user',
             children: [
-              { path: '/market', guard: 'subscriber', shell: 'user' },
-              { path: '/replay', guard: 'subscriber', shell: 'user' },
-              { path: '/stock/:symbol', guard: 'subscriber', shell: 'user' },
+              { path: '/market', guard: 'capability', shell: 'user' },
+            ],
+          },
+          // CapabilityRoute: market_data
+          {
+            guard: 'capability',
+            shell: 'user',
+            children: [
+              { path: '/stock/:symbol', guard: 'capability', shell: 'user' },
+            ],
+          },
+          // CapabilityRoute: research_replay
+          {
+            guard: 'capability',
+            shell: 'user',
+            children: [
+              { path: '/replay', guard: 'capability', shell: 'user' },
             ],
           },
           // 仅认证（不强制订阅）

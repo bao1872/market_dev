@@ -1020,6 +1020,98 @@ button { cursor: pointer; }
 .toast-title { font-weight: 650; font-size: 12px; }
 .toast-msg { font-size: 12px; color: v.$color-muted; margin-top: 4px; }
 
+// ===== First Pyramid Panel (Phase 5B-2) =====
+.fp-panel {
+  background: #151a23;
+  border: 1px solid v.$color-border;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-top: 12px;
+}
+.fp-panel.fp-loading,
+.fp-panel.fp-error {
+  .fp-status { color: v.$color-muted; font-size: 12px; margin-top: 4px; }
+}
+.fp-panel.fp-error .fp-status { color: #ff6b6b; }
+.fp-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.fp-title { font-weight: 650; font-size: 13px; color: #e5e8ef; }
+.fp-trade-date {
+  font-size: 11px;
+  color: v.$color-muted;
+  padding: 2px 6px;
+  background: #1b2130;
+  border-radius: 4px;
+}
+.fp-algo-version {
+  font-size: 10px;
+  color: v.$color-muted;
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+.fp-summary {
+  font-size: 12px;
+  color: #c8cdd8;
+  margin-bottom: 10px;
+  padding: 6px 8px;
+  background: #1b2130;
+  border-radius: 4px;
+  border-left: 3px solid #4f79ff;
+}
+.fp-dimensions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.fp-dim-card {
+  background: #1b2130;
+  border: 1px solid #2a3142;
+  border-radius: 6px;
+  padding: 8px 10px;
+  &.optional { opacity: 0.75; }
+}
+.fp-dim-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.fp-dim-name { font-size: 12px; font-weight: 600; color: #d5dae3; }
+.fp-dim-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  &.ok { background: rgba(63, 185, 80, .15); color: #3fb950; }
+  &.na { background: rgba(139, 148, 158, .15); color: #8b949e; }
+}
+.fp-dim-status { font-size: 11px; color: #aeb5c4; line-height: 1.4; }
+.fp-dim-events { margin-top: 6px; border-top: 1px solid #2a3142; padding-top: 4px; }
+.fp-event-item {
+  font-size: 10px;
+  color: v.$color-muted;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fp-footer {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #2a3142;
+}
+.fp-hash {
+  font-size: 10px;
+  color: v.$color-muted;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
 // ===== V1.1 Multi-Strategy Extensions =====
 .strategy-switcher { display: flex; gap: 8px; flex-wrap: wrap; }
 

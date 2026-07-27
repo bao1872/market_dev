@@ -38,7 +38,7 @@ import hashlib
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import func, select
@@ -160,31 +160,48 @@ async def generate_invite_codes(
     note: str | None = None,
     plan_code: str = DEFAULT_PLAN_CODE,
     grant_months: int = _DEFAULT_GRANT_MONTHS,
+    capabilities: list[dict[str, Any]] | None = None,
 ) -> list[tuple[InviteCode, str]]:
-    """生成邀请码（批量，绑定 plan_code/grant_months）。
+    """生成邀请码（批量，支持 capability 组合或 plan_code 兼容）。
 
-    从 plans 表读取 monitor_limit 快照写入邀请码，作为不可变的套餐快照。
-    grant_months 用于注册/续期时按自然月计算到期日。
+    两种模式：
+    1. 新模式（PA-20）：提供 capabilities 列表，存储到 InviteCode.capabilities JSONB
+    2. 旧模式（兼容）：capabilities=None，从 plans 表读取 monitor_limit 快照
 
     Args:
         db: 异步数据库会话
         count: 生成数量
         created_by: 创建者 user_id（管理员）
         note: 批次备注
-        plan_code: 套餐代码（observe_20/research_50），默认 observe_20
-        grant_months: 兑换后增加的自然月数，默认 1
+        plan_code: 套餐代码（旧模式），默认 observe_20
+        grant_months: 兑换后增加的自然月数（旧模式），默认 1
+        capabilities: capability 组合（PA-20 新模式）；提供时优先于 plan_code
 
     Returns:
         list of (InviteCode ORM 对象, 明文邀请码) 元组
 
     Raises:
-        ValueError: plan_code 不在 plans 表中，或 grant_months 非法
+        ValueError: plan_code 不在 plans 表中，或 grant_months 非法，或 capabilities 非法
     """
     if grant_months < 1:
         raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
 
-    # [PlanService] - 描述: 从 plans 表查询 monitor_limit，未知 plan_code 抛 ValueError
+    # 旧模式：从 plans 表查询 monitor_limit
     monitor_limit = await get_monitor_limit_async(db, plan_code)
+
+    # 新模式：capabilities 序列化为 JSONB 兼容格式
+    capabilities_json: list[dict[str, Any]] | None = None
+    if capabilities is not None:
+        if not isinstance(capabilities, list) or len(capabilities) == 0:
+            raise ValueError("capabilities 必须是非空列表")
+        # 验证每个 capability 配置
+        for cap in capabilities:
+            cap_name = cap.get("capability")
+            if cap_name not in ("self_selection", "market_data", "research_replay"):
+                raise ValueError(f"无效 capability: {cap_name}")
+            if cap_name == "self_selection" and cap.get("watchlist_limit") is None:
+                raise ValueError("self_selection 必须指定 watchlist_limit")
+        capabilities_json = capabilities
 
     results: list[tuple[InviteCode, str]] = []
     for _ in range(count):
@@ -197,6 +214,7 @@ async def generate_invite_codes(
             plan_code=plan_code,
             monitor_limit=monitor_limit,
             grant_months=grant_months,
+            capabilities=capabilities_json,
             note=note,
             created_by=created_by,
         )
@@ -204,6 +222,60 @@ async def generate_invite_codes(
         results.append((invite, raw_code))
     await db.flush()
     return results
+
+
+async def _grant_capabilities_from_invite(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    invite_code: InviteCode,
+) -> None:
+    """从邀请码创建/更新 user_capabilities 行（PRD60 PA-20 新模式）。
+
+    如果 invite_code.capabilities 不为 None，为每个 capability 创建独立授权行。
+    如果为 None（旧模式），不创建（fallback 到 plan_code 推断，兼容期）。
+
+    per-capability 独立 expires_at（PA-03 自然月）：
+    - 从兑换时间 + months 计算，不继承 Subscription.expires_at
+    - 已有该 capability 时取较晚的 expires_at（不降权）
+    """
+    if invite_code.capabilities is None:
+        return  # 旧模式，不创建 user_capabilities
+
+    from app.models.user_capability import UserCapability
+
+    now_utc = datetime.now(UTC)
+    for cap_config in invite_code.capabilities:
+        cap_name = cap_config.get("capability")
+        cap_months = cap_config.get("months", 1)
+        cap_watchlist_limit = cap_config.get("watchlist_limit")
+        cap_expires_at = now_utc + relativedelta(months=cap_months)
+
+        # 查询是否已有该 capability
+        existing = await db.execute(
+            select(UserCapability).where(
+                UserCapability.user_id == user_id,
+                UserCapability.capability == cap_name,
+            )
+        )
+        existing_row = existing.scalar_one_or_none()
+        if existing_row:
+            # 已有：取较晚的 expires_at（不降权），更新 watchlist_limit
+            existing_row.expires_at = max(existing_row.expires_at, cap_expires_at)
+            if cap_watchlist_limit is not None:
+                existing_row.watchlist_limit = cap_watchlist_limit
+        else:
+            # 新建
+            new_cap = UserCapability(
+                user_id=user_id,
+                capability=cap_name,
+                watchlist_limit=cap_watchlist_limit,
+                granted_at=now_utc,
+                expires_at=cap_expires_at,
+                source="invite_code",
+                granted_by=None,
+            )
+            db.add(new_cap)
+    await db.flush()
 
 
 async def register_with_invite_code(
@@ -323,6 +395,10 @@ async def register_with_invite_code(
         redeemed_at=now,
     )
     db.add(redemption)
+
+    # [Phase 5B-2 PRD60 PA-20] 从邀请码创建 user_capabilities（新模式）
+    await _grant_capabilities_from_invite(db, user.id, invite)
+
     await db.flush()
 
     return user, subscription
@@ -439,6 +515,10 @@ async def renew_with_invite_code(
         redeemed_at=now,
     )
     db.add(redemption)
+
+    # [Phase 5B-2 PRD60 PA-20] 从邀请码创建/更新 user_capabilities（新模式）
+    await _grant_capabilities_from_invite(db, user_id, invite)
+
     await db.flush()
 
     assert subscription is not None  # 新建或续期分支均保证 subscription 非空

@@ -150,6 +150,11 @@ async def create_invite_codes(
         HTTPException 400: plan_code 未知或 grant_months 非法
     """
     try:
+        # [Phase 5B-2 PRD60 PA-20] capabilities 优先于 plan_code
+        capabilities_json = None
+        if payload.capabilities is not None:
+            capabilities_json = [cap.model_dump() for cap in payload.capabilities]
+
         results = await generate_invite_codes(
             db=db,
             count=payload.count,
@@ -157,6 +162,7 @@ async def create_invite_codes(
             note=payload.note,
             plan_code=payload.plan_code,
             grant_months=payload.grant_months,
+            capabilities=capabilities_json,
         )
     except ValueError as e:
         raise HTTPException(

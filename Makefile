@@ -1,21 +1,34 @@
 # V1.1 交易平台 - 开发命令
 # 用法: make <target>
 
-.PHONY: dev backend frontend migrate migrate-new test lint up down docker-build docker-up docker-down worker
+.PHONY: dev backend frontend tunnel tunnel-status tunnel-stop migrate migrate-new test lint up down docker-build docker-up docker-down worker
 
-# 启动全栈开发环境：docker-compose + 后端 + 前端（后台）
+# 启动全栈开发环境：原生 Python / Node.js 进程，不依赖 Docker
+# 前置条件：已配置 backend/.env 中的 DATABASE_URL 与 REDIS_URL
 dev:
-	$(MAKE) up
 	$(MAKE) backend &
 	$(MAKE) frontend &
 
-# 启动后端开发服务器
+# 启动后端开发服务器（原生 Python 进程，监听 0.0.0.0:8000）
 backend:
-	cd backend && uvicorn app.main:app --reload --port 8000
+	cd backend && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # 启动前端开发服务器
 frontend:
 	cd frontend && npm run dev
+
+# 启动本地开发 SSH 隧道（PostgreSQL 15432 / Redis 16379）
+# 依赖：~/.ssh/config 中已配置 Host panji-prod（HostName 43.136.118.82）
+tunnel:
+	scripts/local/ssh-tunnel.sh start
+
+# 检查 SSH 隧道状态
+tunnel-status:
+	scripts/local/ssh-tunnel.sh status
+
+# 停止本地开发 SSH 隧道
+tunnel-stop:
+	scripts/local/ssh-tunnel.sh stop
 
 # 执行数据库迁移到最新版本
 migrate:
@@ -33,13 +46,15 @@ test:
 lint:
 	cd backend && ruff check . && mypy app
 
-# 启动 PostgreSQL + Redis
+# [废弃] 本地不再通过 Docker Compose 启动 PostgreSQL / Redis 服务。
+# 本地开发直接连接已确认的共享 PostgreSQL 与 Redis 实例，并通过 REDIS_URL 中的逻辑 DB 隔离运行状态。
+# 如需调试本地 Redis 容器（已废弃），可手动执行：docker-compose up -d redis
 up:
-	docker-compose up -d
+	@echo "警告：本地开发已不使用 Docker Compose 启动服务。请直接运行 make backend / make frontend。"
 
-# 停止 PostgreSQL + Redis
+# [废弃] 停止本地 PostgreSQL + Redis 容器
 down:
-	docker-compose down
+	@echo "警告：本地开发已不使用 Docker Compose 启动服务。"
 
 # ===== Docker 生产环境命令 =====
 

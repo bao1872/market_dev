@@ -32,9 +32,16 @@ function getUserIdHeader(): Record<string, string> {
 // Auth 领域类型
 // ============================================================
 
-// [Auth] - 描述: AccessProfile 当前用户完整权限上下文（11 字段，对齐后端 AccessProfileResponse）
+// [Auth] - 描述: AccessProfile 当前用户完整权限上下文（12 字段，对齐后端 AccessProfileResponse）
 // 与 backend/app/schemas/access.py AccessProfileResponse 字段语义完全一致
 // 唯一真源为 backend/app/services/access_control_service.get_access_context
+// [Phase 5B-2 PRD60 PA-01] 新增 capabilities 字段（三类独立权限状态）
+export interface CapabilityInfo {
+  active: boolean
+  expires_at: string | null
+  watchlist_limit: number | null
+}
+
 export interface AccessProfile {
   user_id: string
   account_status: string
@@ -47,6 +54,7 @@ export interface AccessProfile {
   expires_at: string | null
   features: string[]
   limits: Record<string, number>
+  capabilities: Record<string, CapabilityInfo>
 }
 
 // [Auth] - 描述: 登录响应 - 含 4 个 token 字段 + 10 个 AccessProfile 字段（对齐后端 LoginResponse）
@@ -3178,6 +3186,40 @@ export interface AtomicFactsContextResponse {
   dataQuality: StockContextDataQuality
 }
 
+// [Phase 5B-2] 第一金字塔统一快照类型（与后端 FirstPyramidSnapshot DTO 对齐）
+export interface PyramidEvent {
+  type: string
+  direction: string | null
+  occurredAt: string | null
+  barIndex: number | null
+  price: number | null
+  freshnessBars: number
+  extra?: Record<string, unknown>
+}
+
+export interface DimensionResult {
+  name: string
+  available: boolean
+  continuousFactors: Record<string, unknown>
+  events: PyramidEvent[]
+  statusText: string
+  evidence: Record<string, unknown>
+}
+
+export interface FirstPyramidSnapshot {
+  symbol: string
+  tradeDate: string
+  orderedDimensions: string[]
+  trend: DimensionResult
+  structure: DimensionResult
+  momentum: DimensionResult
+  chipConsensus: DimensionResult | null
+  statusText: string
+  inputHash: string
+  parameterHash: string
+  algorithmVersion: string
+}
+
 /** AdminAtomicFactDebugItem - 管理员调试：单事实可追溯信息（保留内部 ID / 路径） */
 export interface AdminAtomicFactDebugItem {
   factId: string
@@ -3218,6 +3260,24 @@ export async function getStockContext(
 ): Promise<AtomicFactsContextResponse> {
   const { data } = await apiClient.get<AtomicFactsContextResponse>(
     `/api/v1/stocks/${symbol}/context`,
+    { params, signal: options?.signal },
+  )
+  return data
+}
+
+/**
+ * [Phase 5B-2] 第一金字塔统一快照（趋势→结构→动量→筹码共识）。
+ * GET /api/v1/stocks/{symbol}/first-pyramid?as_of=YYYY-MM-DD
+ * 返回 FirstPyramidSnapshot（固定维度顺序，前三维必选，chip_consensus 可选）。
+ * 前端展示顺序：trend → structure → momentum → chip_consensus。
+ */
+export async function getFirstPyramid(
+  symbol: string,
+  params?: { as_of?: string },
+  options?: { signal?: AbortSignal },
+): Promise<FirstPyramidSnapshot> {
+  const { data } = await apiClient.get<FirstPyramidSnapshot>(
+    `/api/v1/stocks/${symbol}/first-pyramid`,
     { params, signal: options?.signal },
   )
   return data

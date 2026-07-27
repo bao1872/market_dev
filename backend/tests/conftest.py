@@ -144,7 +144,15 @@ def _run_alembic_upgrade():
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def init_test_db():
-    """在测试 session 开始前对测试库应用 Alembic 迁移。"""
+    """在测试 session 开始前对测试库应用 Alembic 迁移。
+
+    [Phase 5A] 设置 SKIP_ALEMBIC_UPGRADE=1 可跳过迁移，用于运行纯 mock 测试
+    （不连接数据库/Redis）。满足"不运行 Migration"约束下执行 readiness/config 测试。
+    """
+    if os.environ.get("SKIP_ALEMBIC_UPGRADE", "") == "1":
+        yield
+        await test_async_engine.dispose()
+        return
     await asyncio.to_thread(_run_alembic_upgrade)
     yield
     await test_async_engine.dispose()

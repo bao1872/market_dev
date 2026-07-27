@@ -1,212 +1,485 @@
-# 盘迹项目开发与文档一致性规则 v3
+1. 文档定位
 
-适用项目：`market_dev` / 盘迹 PanJi
-核心目标：防止 AI/Trae 在新对话、新机器、新分支中误解当前系统，防止已确认业务逻辑被旧代码、旧文档或旧记忆还原。
+本文件是供 AI 代理、IDE 助手和自动化开发工具在本仓库中工作时遵循的长期工作协议。
 
-> 完整变更历史见 `docs/changes/CHANGELOG.md` 与 `docs/changes/records/CHANGE-*.md`。
+它只负责定义：
 
----
+如何定位权威信息；
 
-## 一、最高原则
+如何判断任务类型；
 
-任何修改必须形成闭环：读取文档入口 → 理解系统地图 → 核对真实代码 → 建立 CHANGE → 明确修改/不修改范围 → 修改代码/文档/测试 → 运行一致性检查 → PR → 人工 Review 后合并。
+不同任务应走哪条开发路径；
 
-完成标准（六者对齐）：代码实现 = 当前设计文档 = 系统地图 = API/数据契约 = 测试验证 = 部署配置。六者缺一不可。
+什么时候需要更新项目文档；
 
----
+如何验证修改；
 
-## 二、必读入口
+哪些边界在未获得明确授权前不得跨越。
 
-任何 Trae/Codex/ChatGPT 任务开始前必须先读取：`docs/AI-ONBOARDING.md`、`docs/current/MANIFEST.md`、`docs/RESTORE-CHECKLIST.md`、`AGENTS.md`（本文件）。
+它不是 PRD、架构文档、实现地图、项目状态报告或操作手册。
 
-`docs/` 顶级目录只允许：`current/` `maps/` `changes/` `archive/` `contracts/` `decisions/` `runbooks/` `acceptance/` `evidence/` `work/`（`docs/` 根 `.md` 文件不受限）。
+项目具体需求、实现细节、运行结构、部署方式、数据模型和指标定义，必须维护在各自对应的文档中。
 
----
+2. 文档体系
 
-## 三、事实源优先级
+仓库采用以下文档分层：
 
-冲突时判断顺序（前者覆盖后者）：1.用户当前明确要求 → 2.当前 main 代码 → 3.docs/current/MANIFEST.md → 4.docs/current/*.md → 5.docs/maps/*.md → 6.最新 docs/changes/records/*.md → 7.测试与 CI 结果 → 8.生产只读验证结果 → 9.archive 历史文档 → 10.旧聊天记忆。archive 和旧聊天不能覆盖 current。
+位置
 
----
+职责
 
-## 四、修改流程
+AGENTS.md
 
-Trae 动手前必须输出：任务目标 / 分支和 base commit / 已读 docs/current 与 docs/maps / 当前代码入口（前端/API/Service/Repository/Worker）/ 涉及数据表 / 测试覆盖规则 / 文档与代码是否一致 / 本次准备修改什么 / 明确不修改什么 / 预计更新哪些 docs/current 与 docs/maps / 预计新增哪个 CHANGE。发现冲突先列出，不得直接编码。
+稳定的任务路由和工作协议
 
----
+rules/
 
-## 五、CHANGE 规则
+项目相关的开发原则和硬约束
 
-每次修改必须新增 `docs/changes/records/CHANGE-YYYYMMDD-NNN.md` 并更新 `docs/changes/CHANGELOG.md`。CHANGE 必填字段：变更编号、任务名称、需求出处、修改前/后行为、影响模块、修改文件、文档更新、测试证据、Git 分支、Git Commit、数据库迁移、配置变化、风险、遗留问题。不存在"小改不用 CHANGE"。`tools/check_docs_consistency.py` 规则 12 强制校验 CHANGE 引用可达性。
+docs/prd/
 
----
+已确认的需求和目标行为
 
-## 六、禁止行为
+docs/maps/
 
-```
-1.  未读 AI-ONBOARDING 和 MANIFEST 就修改；
-2.  根据旧 docs/current/00-18 或 archive 修改当前系统；
-3.  根据旧聊天记忆覆盖 current；
-4.  只改代码不改文档 / 只改 current 不改 CHANGE / 改代码结构不更新 maps；
-5.  复制旧实现形成第二条路径 / 在前端重新实现后端业务规则；
-6.  删除测试以适配错误实现 / 修改 API 不检查前端调用 / 修改数据模型不检查 migration；
-7.  修改 Worker 不检查幂等、心跳、重试 / 修改权限不检查用户隔离；
-8.  把 Mock E2E 说成真实生产 E2E / 把 OPEN 问题写成最终结论 / 把临时实验写成永久规则；
-9.  直接修改 main / force push 已共享分支 / 为通过检查削弱 check_docs_consistency.py；
-10. 未经许可修改生产环境账户密码；
-11. 生产代码/测试/工具/构建脚本在运行时 import/open/read/glob `ref/` 目录（详见 §七.8）；
-12. `git add -A` / `git add .` / `git add -u` 批量暂存（必须精确 `git add <file>`）。
-```
+已核验的当前实现和项目记忆
 
----
+docs/changes/
 
-## 七、盘迹硬规则
+重要变化及其原因
 
-### 1. 产品边界
-盘迹是 A 股研究、全市场特征计算、自选股盘中监控和消息投递平台。不做：自动交易、券商账户连接、资金管理、收益承诺、单一指标买卖信号、普通用户修改生产算法参数。
+docs/runbooks/
 
-### 2. 策略规则
-当前生产只保留 `dsa_selector` 与 `watchlist_monitor`。多策略组合已废弃，不得从旧代码或旧文档恢复。
+可重复执行的操作步骤
 
-### 3. DSA 规则
-DSA 对全市场 computable universe 计算特征；不得在计算阶段按方向、强弱、matched、用户筛选提前删除股票。发布必须满足严格完整性门禁；`partial_failed` 不得发布。
+Git 历史
 
-### 4. 自选和监控
-有效会员添加自选后自动进入盘中监控；不创建 MonitoringPlan。到期用户保留历史数据，但不能读取、修改、监控或产生新投递。
+普通代码修改、小 Bug 和具体开发历史
 
-### 5. Node Cluster 固定契约
-`1d=250 根日线`、`15m=250*16=4000 根`、`1m=2 根已完成 Bar`。图表显示数量、指标输出数量、Node 内部输入数量必须分离。**禁止修改 250/4000/2 固定参数**；禁止飞书舞台 90 bar 展示参数进入任何指标计算逻辑（CHANGE-20260720-001）。
+2.1 PRD
 
-### 6. 飞书
-唯一接入方式：`feishu_platform_app`。禁止恢复 `feishu_webhook` / `FEISHU_WEBHOOK` / 独立管理员飞书 App / 独立管理员接收人配置。管理员内测申请通知必须复用管理员用户自己的 active `feishu_platform_app` NotificationChannel。
+PRD 回答：
 
-盘中监控触发只依赖**最新已完成 1m bar**（`source_bar_time` 来自最新已完成 1m bar，剔除最后一根可能未完成的 bar）；飞书盘中截图业务默认 `timeframe=1d`，实时性由 Capture Snapshot `1d + include_realtime=True` 的 partial daily 合成保证；修截图/清晰度/缓存不得改变 `watchlist_monitor` 事件计算口径（`monitor_batch_service` 计算输入 `bars_daily` / `bars_15min` 必须 `include_realtime=False`）。
+系统在正确状态下应该怎样工作？
 
-### 7. Capture Token
-Capture Token 只能访问 Capture API；不能访问普通用户 API；不能污染普通 Access Token。
+PRD 可以包含：
 
-### 8. ref/ 彻底隔离
-`ref/` 目录下所有文件（含 `ref/smc_user_source.pine`、`ref/smc_user_export.pine`、`ref/smc.py`、`ref/盘迹品牌视觉资产包_v1.0/`）仅供人工阅读参考，**禁止作为运行依赖**。生产代码、测试、工具、构建脚本在运行时不得 `import`/`open`/`read`/`glob` `ref/` 目录下任何文件（CHANGE-20260718-004）。
+产品行为；
 
-`AGENTS.md` / `docs/current/*.md` / `docs/maps/*.md` 不得把 `ref/` 文件称为"真源"、"合同"、"fixture 生成器"或"运行依赖"；应称为"参考源（人工阅读）"。算法真源必须是生产代码（如 `smc_pine_core.py`、`node_cluster_engine.py`、`indicator_contract.py`、`indicator_semantics.py`）。SMC Pine parity 测试只读取 `backend/tests/fixtures/smc_pine/*.csv`，**禁止从 DB 重新取 bar** 或依赖 `ref/` 导出脚本。
+业务规则；
 
-### 9. Migration
-不得修改已发布历史 migration；只允许新增前向 migration；修改 migration 必须有 upgrade/downgrade/upgrade 验证。
+输入与输出；
 
-### 10. 测试期部署不备份数据库
-测试期部署默认不备份数据库；除非用户明确说"先备份数据库"，否则禁止 `pg_dump`/大体积备份，禁止写入 `/root/backups` 或 `/root/web_dev/backups`。当前物理机磁盘紧张，优先节省硬盘。
+数据要求；
 
-### 11. Docker 镜像保护
-`node:20-alpine` 是受保护基础镜像，拉取很慢。禁止主动删除 `node:20-alpine`；禁止 `docker image prune -a`；除非明确升级 Node 版本或镜像损坏，否则不要删除 `node:20-alpine`。普通清理只允许 `docker builder prune -f`、`docker image prune -f`、`docker container prune -f`。
+用户交互；
 
-### 12. MDAS 唯一行情读取出口（SSOT）
-`MarketDataAggregationService.get_bars` 是后端唯一行情读取出口。业务/API/indicator/SMC/strategy_batch/feature_snapshot/structural_factor/temporal_feature/monitor/capture/chart_bars 全部经 MDAS；禁止业务层直接调用 `bar_repository` 的私有 `_query_*`/`_get_adj_factor_df`/`apply_adj_factor*` 或旧 `bar_repository.get_bars`（CHANGE-20260717-002）。
+边界条件；
 
-原始 bar 始终保持不复权落库；qfq 只在 MDAS 出口统一应用一次；不信任 bar 自带 `adj_factor` 列。`adjustment_as_of` point-in-time 截断：`qfq_price = raw_price × factor(bar_date) / factor(as_of)`，as_of 之后的除权事件不得泄漏到历史回算中。盘后顺序门禁：原始日线刷新 → 公司行为/factor 重建成功 → 覆盖率门禁/DSA → snapshot 发布。因子未完成时不得创建 DSA 或发布 snapshot。
+验收标准；
 
-MDAS 必须实现 count-aware 回补：daily required_count=250、15m required_count=4000、completed_only=True、include_realtime=False、adj=qfq、统一 adjustment_as_of；实际返回少于 required_count 时自动向前扩展，直到达到 required_count、到达真实上市历史起点或安全边界；必须返回 `history_exhausted: bool` 区分"DB 历史不足"与"系统未取满"（CP-V3-A2）。
+已确认的设计决策。
 
-### 13. Atomic Chart Snapshot 单 MDAS 读取 + quote 唯一真源
-Atomic Snapshot 必须使用单次 MDAS 读取，直接将 DataFrame/CanonicalInput 传递给指标计算；**禁止在单次请求中进行第二次市场数据读取**；Redis 仅缓存最终 Snapshot 响应（CP-16）。前端只请求 chart-snapshot；独立的 Bars/Indicators 请求不恢复。
+除非需求已经被明确修改，否则不得用现有实现反向改写已经确认的需求。
 
-[CHANGE-20260724-004] ChartSnapshot 是个股详情页 quote 的唯一真源。`BarAggregationResult.latest_daily_quote` 字段在单次 MDAS 读取内派生当日行情事实：
-- 1d/1w/1mo：从聚合前的 `daily_df`（已合并今日 partial daily + qfq）取末根日线 OHLC
-- 1m/15m/1h：从已加载的目标周期 `bars_df_full`（limit 截断前）按最新交易日聚合 open/high/low/close/volume/amount
-- **禁止为 quote 增加第二次 Pytdx/Repository/MDAS 行情读取**（`fetch_today_daily_bars`/`_query_daily_bars` 不得用于 quote 派生）
-- `latest_daily_quote` 缺失时 `quote=null` 且 `freshness_state=unavailable`；禁止从 1w/1mo page_df 派生日行情兜底
-- 所有周期返回 `current/open/high/low/prev_close/change_pct/volume/amount`，业务语义不随展示周期变化
-- 前端不得恢复 `useRealtimeQuote` 或独立 `/quote` 请求
+2.2 Maps
 
-### 14. SMC FVG 完全排除 + 严格 time-key
-Fair Value Gap 不计算、不返回、不缓存、不渲染，也不暴露 FVG 开关；生产计算路径不包含 FVG 函数或状态；输出结构中不存在 FVG 相关键、事件或 box。FVG 验收为输出级别断言（CHANGE-20260715-001 ~ 002）。
+Maps 是项目记忆层，回答：
 
-SMC 渲染必须使用严格 time-key 匹配：`strictTimeKey=true` 时 time 缺失→`missing_time`+skip，time 匹配失败→`match_failed`+skip，**禁止 index fallback**；events 和 EQH/EQL 使用 OR 逻辑（anchor/confirmed 任一匹配即渲染，两者都缺失才 skip）；详情链和 Capture（90-bar 舞台）共用同一 SMC 坐标映射核心，只允许 font/lineWidth/lane 差异（CP-V3-C2）。
+当前系统实际上是怎样实现的，修改时应该从哪里进入？
 
-### 15. Canonical 四链统一调度
-详情/盘后/盘中/Capture 四条调用链必须通过 `CanonicalComputationService`（`backend/app/services/canonical_computation_service.py`）调度已注册算法；禁止生产模块直接 `import` kernel 绕过注册表；四链只能做适配（节奏/去重/TTL/截图），基础指标值必须来自同一 Kernel；相同输入（instrument + timeframe + as_of + source_bar_hash + adj_factor_hash）必须得到相同 `result_hash`（5 维度确定性）（CHANGE-20260718-006）。
+Maps 可以包含：
 
-### 16. AFC Core 14 不可改
-Atomic Fact Contract V1 的 Core 14 项不可修改；产品观察扩展不进入 `core`/`auxiliary`/`availability`，不影响 14/14 统计；worker 持久化链保持不变；schema_version bump 保证旧快照不可见（CHANGE-20260716-005 / 006）。
+代码入口；
 
-### 17. 三链五周期一致性
-详情链 `/stock/:symbol` 切换 1d/15m/1h/1w/1mo 时，Node Cluster `profile_hash`/`daily_source_hash`/`bars_15m_source_hash` 必须完全一致（图表 bars frame hash 允许不同）；Atomic Facts 中的"筹码共识价"与详情页 Node Cluster 必须消费同一个 Canonical 结果（`node_cluster_engine.compute_node_cluster_profile` 唯一入口，三链同核）（CHANGE-20260721-001）。
+模块职责；
 
-### 18. 个股详情行情唯一真源（ChartSnapshot）
-[CHANGE-20260724-004] 个股详情页行情唯一真源为 `/api/v1/instruments/{id}/chart-snapshot`。**禁止详情页同时调用 `/quote` 和 `/chart-snapshot`**；禁止恢复前端 `useRealtimeQuote` 或 `mergeRealtimeQuoteIntoBars()`。
+数据流；
 
-- **quote 派生**: quote 从同一 snapshot 的 `latest_daily_quote` 派生，保证 `as_of` 一致；所有周期（1d/15m/1h/1w/1mo）返回完整 OHLC + prev_close + change_pct + volume + amount
-- **K 线实时**: 交易时段内 `include_realtime=true` 返回 partial bar（`data_source=hybrid`、`is_partial=true`、`last_live_bar_time` 非空）；收盘后不得伪装实时
-- **盘后边界**: 盘后 MFCS 回归必须使用 `include_realtime=False`，不得产生新增日线查询（`latest_daily_quote` 从已有 `daily_df`/`bars_df_full` 派生）
-- **数据周期合同**: 1d=DB 日线+Pytdx 日线；15m=DB 15m+Pytdx 原生 15m；1h=DB 60m+Pytdx 原生 60m；1w=合并日线→周线；1mo=合并日线→月线。禁止 1m→15m/1m→60m/1m→1d 聚合
-- **来源区分**: `market`/`watchlist`/`direct` 必须显式区分；market/watchlist 双列布局（`200px minmax(0,1fr)`），direct 单列布局（`minmax(0,1fr)`）
-- **来源列表稳定性**: symbol 切换只更新 active 行和右侧详情；禁止页面级 loading 卸载/清空来源列表（CHANGE-20260725-002）
-- **来源列表可见性（missing_origin invalid）**: symbol 切换只更新 active 行和右侧详情；禁止页面级 loading 卸载/清空来源列表。缺 originScope 时显示 missing_origin invalid 占位，不静默单列；只有显式 direct 才使用单列（CHANGE-20260725-003）
+存储关系；
 
-### 19. 板块同步降级保护（pywencai 唯一数据源）
-pywencai（`wencai_board_provider.py`）为唯一板块分类源；`/market/boards` 只读数据库 + Redis 状态，不在用户 API 请求链访问问财；`backend/Dockerfile` 必须安装 `nodejs`；盘后 worker 唯一同步入口是 `after_close_orchestrator.py` 的 `syncing_boards` 步骤；`BOARD_SYNC_ENABLED` 默认 `false`；`mode=dsa_only` 跳过该步骤。不得增加 akshare、代理、IP 绕过、东方财富混用或新常驻 worker（CHANGE-20260713-006 / PR #77）。
+任务与 Worker 关系；
 
-### 20. 文档目录与 CI 门禁
-`tools/check_docs_consistency.py` 必须通过；规则包括：MANIFEST 存在且含实现核对基线（40 位 SHA 且为 HEAD 祖先）、baseline 必须在 HEAD 的最近 50 个 commit 内、docs/current/*.md 与 docs/maps/*.md 存在、本地 Markdown 链接有效、无"待填写"占位符、feishu_webhook 不得回退为当前方案、open-decisions 不得把 Webhook vs Platform App 写回 OPEN、CHANGE 引用必须可达、ref/ 隔离文本扫描。CI 必须失败若代码 SHA 变化后未同步 current/contracts/CHANGE/MANIFEST baseline。
+API 与前端关系；
 
-### 21. 提交安全与执行模式
-禁止 `git add -A` / `git add .` / `git add -u`；必须精确 `git add <file>`。不得提交：`.vscode/settings.json`、`.traeignore`、`node_modules/`、`.venv/`、`__pycache__/`、`*.py[cod]`、`.mypy_cache/`、`.pytest_cache/`、`.ruff_cache/`、`.coverage`、`coverage.xml`、`dist/`、`build/`、`*.log`、`*.csv`、`*.parquet`。未经用户明确授权禁止删除：数据库卷、运行中容器、postgres/redis 数据目录、node_modules、.venv、.git、源码、生产数据。
+验证入口；
 
-**继续执行模式**（CHANGE-20260724-004）：当任务 checkpoint 匹配时，不重复审计和规划，直接从断点继续。断线恢复校验仅检查：分支/HEAD/未提交文件/冲突标记/编译/diff check，通过后立即继续当前任务。禁止在继续模式下重新规划已完成步骤或全仓审计。
+当前已知缺口；
 
-**前台串行执行**（CHANGE-20260724-004）：默认前台串行执行测试和检查命令。禁止强制 `nohup` 后台测试；仅当单条命令预计超过 5 分钟且用户明确同意时才可使用后台日志方式。测试组之间必须串行，禁止并行构建或并行测试。
+已废弃路径。
 
-### 22. Live Mount 部署规则（CHANGE-20260724-004）
-Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实现代码热更新而无需重建镜像。
+Maps 必须描述已经核验的当前实现。
 
-- **固定运行目录**: `/opt/panji-live/{backend/app,backend/alembic,backend/alembic.ini,frontend/dist,RUNTIME_SHA}`
-- **叠加配置**: `docker-compose.prod.yml` + `docker-compose.live.yml`；不修改 prod 配置
-- **挂载权限**: 所有挂载为只读 (`:ro`)；backend + 所有 Python worker + capture worker 挂载 app/alembic/alembic.ini/RUNTIME_SHA；frontend 挂载 dist（保留 capture_static 嵌套挂载）
-- **同步脚本**: `scripts/sync_live_runtime.sh` 使用 `rsync --delete`，只复制运行必需文件（排除 .git/docs/tests/node_modules/缓存）；同步期间先停止应用容器
-- **部署脚本**: `scripts/deploy_live_runtime.sh` 编排完整流程（前端构建→同步→config 校验→alembic→force-recreate）
-- **适用范围**: 纯 Python/前端代码变更用 Live Mount；依赖/Dockerfile/基础镜像变化必须重建镜像
-- **版本端点**: `/version` 返回 `runtime_git_sha`（RUNTIME_SHA 文件）、`image_git_sha`（GIT_SHA 环境变量）、`deployment_mode`（live/image）；验证部署时 `runtime_git_sha` 必须等于 main HEAD
+计划中的工作不得被写成已经完成的事实。
 
-### 23. 因子版本追踪与 auto-resume
-成功因子重建后必须调用 `stamp_factor_reconciliation_version` 写入 `factor_algorithm_version`/`factor_reconciliation_version`/`factor_reconciled_at`；盘后流程通过 `find_stale_version_instruments` 识别版本过期的影响集。`after_close_orchestrator` 任务支持 auto-resume：`interrupted` → `resume_queued`（`attempt_no` 递增，max=3），`lease_epoch` fencing 防止旧 worker 写入，`last_completed_step` 支持断点恢复（CP-V3-D）。
+2.3 Changes
 
----
+Changes 用于记录重要演化：
 
-## 八、质量门禁
+改了什么；
 
-```
-Ruff   新增/修改 Python 文件零错误；历史债务由 tools/quality_baselines/ruff.json 管控
-Mypy   新增 backend/app Python 生产文件零错误；历史债务由 tools/quality_baselines/mypy.json 管控
-Docs   python tools/check_docs_consistency.py
-Arch   python tools/check_architecture.py
-Allow  python tools/check_test_allowlist.py
-Sync   python tools/update_docs.py --check
-```
+为什么改；
 
-禁止通过全局 ignore、批量 noqa、扩大 exclude、批量 `type: ignore` 或关闭检查掩盖新增问题。前端：`tsc --noEmit`、`npm run lint`、`npm run build`、`npm run test:contract`、`npm run test:e2e`。
+修改前后的关键差异；
 
----
+哪些行为、契约、结构或运行方式受到影响。
 
-## 九、分支与 PR
+普通小修通常由 Git 历史记录即可。
 
-每个变更使用独立分支：`fix/<topic>` `feat/<topic>` `docs/<topic>` `refactor/<topic>` `chore/<topic>` `experiment/<topic>`。禁止直接改 main。PR 必须说明：当前系统原来如何运行、本次为什么修改、修改了哪些代码/docs/current/docs/maps、新增哪个 CHANGE、是否改变 API/数据模型/Worker 或第三方集成、测试结果、是否仍有 Known Gap、是否需要生产验证。
+2.4 Runbooks
 
----
+Runbooks 用于记录可重复执行的操作步骤。
 
-## 十、完成报告格式
+它们只说明如何执行某项操作，不重新定义产品行为或实现架构。
 
-当前分支 / Base Commit / Head Commit；一、修改前理解（产品行为/系统地图/代码入口/文档依据/冲突）；二、实际修改（代码/docs/current/docs/maps/docs/changes/tools/测试）；三、一致性检查（current/maps/CHANGE/CHANGELOG/archive 是否更新）；四、验证（执行命令/测试结果/CI 状态）；五、剩余问题（Known Gap/OPEN/需要生产验证）。
+3. 事实源
 
----
+使用以下判断边界：
 
-## 十一、变更历史索引
+PRD 是目标行为的权威来源；
 
-完整变更历史见 `docs/changes/CHANGELOG.md`（按日期顺序的简短摘要）与 `docs/changes/records/CHANGE-YYYYMMDD-NNN.md`（每条变更的完整记录）。任何对历史变更的疑问必须查阅对应 record，不得凭旧聊天记忆或 archive 推断。
+代码、数据、日志和运行状态是当前执行事实的权威来源；
 
-近期关键变更（仅列编号，详见 records）：
+Maps 用于总结已核验的当前实现，并应与真实代码保持一致；
 
-- CHANGE-20260713-005 ~ 010：行情列表 DSA SSOT、品牌视觉 V1.0、行业/概念筛选、市值与 Excel 导出
-- CHANGE-20260715-001 ~ 006：SMC 智能资金指标、Pine parity core、MiniKline viewport 重写
-- CHANGE-20260717-002：MDAS SSOT 与复权唯一出口
-- CHANGE-20260718-002 ~ 006：docs 顶层目录规范、Docker 构建性能、ref/ 隔离、全算法族 SSOT
-- CHANGE-20260720-001：日线 SMC 盘中监控、Canonical 四链 re-export 接入
-- CHANGE-20260721-001 ~ 002：FR-11 缓存精确失效、nodeAvailability 5 态、Display Frame Contract V2
+Changes 用于解释重要历史演化；
+
+Runbooks 用于描述当前操作流程。
+
+当文档之间出现冲突时：
+
+先判断问题涉及的是目标行为还是当前实现；
+
+查看对应的权威来源；
+
+必要时通过代码或运行证据进行核验；
+
+修正文档，而不是自行猜测。
+
+不得把假设、计划或未验证结果表述为事实。
+
+涉及远程服务器、数据库、Redis、路径和端口时，必须先读取对应 Map（如 `docs/maps/80-system-runtime.md`）获取权威身份和连接信息；聊天记忆和本机任意 SSH 别名不能作为权威来源。
+
+4. 最小读取路径
+
+默认不要阅读全部文档。
+
+开始任务前，只读取当前任务真正需要的内容：
+
+AGENTS.md；
+
+rules/ 中与任务相关的规则；
+
+与任务相关的 PRD；
+
+与任务相关的 Maps；
+
+当历史背景确实重要时，查看最近相关 Change；
+
+为完成核验所需的真实代码、数据、日志或运行状态。
+
+当实现可以直接核验时，不得只依赖旧描述推测当前状态。
+
+5. 任务路由
+
+修改代码前，先判断任务属于哪一类。
+
+5.1 新需求或行为变化
+
+当任务符合以下任一情况时，使用本路径：
+
+新增能力；
+
+改变预期行为；
+
+改变契约或数据定义；
+
+改变主要流程或交互；
+
+改变验收标准；
+
+发现预期行为从未被明确规定。
+
+工作流程：
+
+更新相关 PRD；
+
+明确目标、范围、边界和验收标准；
+
+开发实现；
+
+使用最小有效范围进行验证；
+
+实现通过验证后，更新相关 Maps；
+
+当行为、契约、结构或运行方式发生实质变化时，记录重要 Change；
+
+提交聚焦本任务的修改。
+
+原则：
+
+PRD 在开发前记录意图，Maps 在开发后记录已验证事实。
+
+5.2 小 Bug
+
+当任务同时满足以下条件时，使用本路径：
+
+预期行为已经明确；
+
+不改变需求或契约；
+
+问题范围局部；
+
+可以直接验证修复效果。
+
+工作流程：
+
+复现 Bug；
+
+确认预期行为；
+
+找到根因；
+
+做最小必要修复；
+
+进行最小有效验证；
+
+提交聚焦本问题的修改。
+
+普通小 Bug 默认：
+
+不更新 PRD；
+
+除非实现关系发生变化，否则不更新 Maps；
+
+除非修复具有重要长期价值，否则不单独记录 Change；
+
+不顺带做无关重构；
+
+不运行无关的大范围测试；
+
+不为了形式增加流程或文档。
+
+如果预期行为本身不明确，必须把任务重新归类为“新需求或行为变化”。
+
+5.3 探索性实验
+
+适用于尚未确认的想法、备选实现、参数比较或技术可行性测试。
+
+工作流程：
+
+明确实验问题和判断标准；
+
+进行最小可用实验；
+
+评估结果；
+
+放弃该方案，或决定正式采用。
+
+未确认的实验阶段不更新正式 PRD 和 Maps。
+
+决定采用后，再进入“新需求或行为变化”路径。
+
+5.4 不改变行为的重构
+
+适用于外部行为保持不变的代码调整。
+
+工作流程：
+
+确认必须保持不变的行为；
+
+仅重构相关实现；
+
+验证受影响行为；
+
+如果代码入口、职责、依赖或数据流发生变化，更新 Maps；
+
+只有结构变化具有实质影响时才记录 Change。
+
+目标行为未变化时，不修改 PRD。
+
+5.5 数据修复或历史回填
+
+当数据违反现有规则时：
+
+确认正确的数据规则；
+
+明确影响范围；
+
+修复或回填数据；
+
+验证结果和重复执行行为；
+
+只有当修复明显改变实现记忆或项目历史时，才更新 Maps 或 Changes。
+
+如果变化的是数据规则本身，则使用“新需求或行为变化”路径。
+
+5.6 故障或紧急恢复
+
+当运行系统或关键流程发生故障时：
+
+确认故障事实和影响；
+
+优先恢复必要能力；
+
+定位根因；
+
+实现并验证修复；
+
+只有当事故暴露出实质性的实现、历史或操作变化时，才更新 Maps、Changes 或 Runbooks。
+
+不得因为先补文档而延误紧急恢复。
+
+6. 文档更新规则
+
+在以下情况下更新 PRD：
+
+目标行为发生变化；
+
+新需求被确认；
+
+验收标准变化；
+
+原需求未定义或存在歧义；
+
+契约或数据定义变化。
+
+在以下情况下更新 Maps：
+
+代码入口变化；
+
+模块职责变化；
+
+依赖关系或数据流变化；
+
+存储关系变化；
+
+任务或 Worker 关系变化；
+
+API 与前端关系变化；
+
+旧 Map 会导致后续开发从错误位置开始，或误解系统结构。
+
+在以下情况下更新 Changes：
+
+重要业务规则变化；
+
+重要契约变化；
+
+主要实现结构变化；
+
+重要流程变化；
+
+重大数据修复或兼容性变化。
+
+在以下情况下更新 Runbooks：
+
+可重复执行的操作步骤发生变化。
+
+不得为了让任务显得更完整，而更新与任务无关的文档。
+
+7. 工作原则
+
+7.1 先复现，再修改
+
+当问题可以被复现或核验时，不得仅凭直觉修改代码。
+
+7.2 优先解决根因
+
+避免通过堆叠特殊分支、重复逻辑或静默兜底来掩盖真实问题。
+
+7.3 最小必要修改
+
+修改范围应聚焦当前任务。
+
+没有明确理由时，不扩大任务范围。
+
+7.4 流程与风险匹配
+
+局部问题使用轻量流程。
+
+只有当需求、契约、结构、数据或运行方式真正受到影响时，才扩大文档和验证范围。
+
+7.5 最小有效验证
+
+验证范围应足以证明受影响行为正确，并覆盖最直接的回归风险。
+
+不得默认运行全系统测试、大范围重建或与当前修改无关的验证。
+
+7.6 如实保留不确定性
+
+未知、未验证、部分完成、阻塞和失败状态必须明确标记。
+
+没有证据时，不得声称代码、测试、部署、数据修复或运行行为已经成功。
+
+7.7 文档必须有用
+
+文档的目的，是降低未来理解和调试成本。
+
+不得让文档维护本身成为主要开发任务。
+
+7.8 避免过早抽象
+
+没有明确现实需求时，不得主动引入：
+
+新框架；
+
+新层级；
+
+通用抽象；
+
+治理系统；
+
+文档体系；
+
+额外流程。
+
+7.9 提交保持聚焦
+
+一个提交应尽量对应一个明确问题，或一组紧密相关的修改，并能够说明验证结果。
+
+8. 基础安全边界
+
+未经明确授权，不得：
+
+执行影响范围不明确的破坏性操作；
+
+删除持久化数据或资源的唯一副本；
+
+暴露或提交密钥、凭据或私钥；
+
+使用强制推送覆盖共享历史；
+
+静默改变已确认需求；
+
+用虚假的成功状态掩盖失败；
+
+新增未经确认的文档层或治理层；
+
+在处理局部任务时进行大范围无关修改。
+
+项目特定的高风险操作和环境约束，应记录在 rules/ 或对应 Runbook 中。
+
+9. 完成标准
+
+任务完成时，应满足：
+
+目标或问题已经明确；
+
+已确认相关根因或实现路径；
+
+修改范围与任务相匹配；
+
+受影响行为已得到有效验证；
+
+未验证结果没有被描述为事实；
+
+按上述规则完成必要的 PRD、Maps、Changes 或 Runbook 更新；
+
+提交内容保持聚焦。
+
+完成不以修改文件数量或创建文档数量衡量。
+
+完成的判断标准是：
+
+需求已经实现，或问题已经解决，并且相关行为得到了有效验证。

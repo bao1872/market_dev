@@ -2509,5 +2509,287 @@ async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# [AC-04 / Phase 5A] 盘后编排 readiness 仅依赖日线，15m 缺失不得阻塞
+# PRD30 AC-04：盘后编排 readiness 只检查目标交易日日线数据
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ac04_daily_ready_15m_missing_allows_proceed() -> None:
+    """[AC-04] 日线就绪 + 15m 缺失 → 允许进入下一阶段。
+
+    场景：
+    - refresh_all_instruments 返回 dsa_run_id=None（需 checking_coverage）
+    - daily_coverage=0.95（>= 0.9，日线就绪）
+    - compute_intraday_coverage 被 spy 监控（若被调用说明 15m 仍阻塞）
+
+    预期：
+    - 编排通过 checking_coverage 步骤
+    - 创建 DSA run 并最终 succeeded
+    - compute_intraday_coverage 不应被调用（15m 不再阻塞 after-close run）
+
+    纯 mock 测试：不连接共享数据库或 Redis。
+    """
+    job_run_id = uuid.uuid4()
+    dsa_run_id = uuid.uuid4()
+
+    # 用 MagicMock 模拟 SchedulerJobRun（可变属性）
+    job_run = MagicMock()
+    job_run.id = job_run_id
+    job_run.status = "running"
+    job_run.metadata_json = json.dumps({
+        "orchestrator_status": "queued",
+        "trade_date": "2026-06-25",
+    }, ensure_ascii=False)
+    job_run.error_message = None
+    job_run.finished_at = None
+
+    # 用 MagicMock 模拟 DSA StrategyRun
+    dsa_strategy_run = MagicMock()
+    dsa_strategy_run.id = dsa_run_id
+    dsa_strategy_run.status = "completed"
+
+    # 模拟 AsyncSessionLocal：async with 返回 mock session
+    mock_session = MagicMock()
+    mock_session.get = AsyncMock(side_effect=lambda model, id, *a, **kw: {
+        (SchedulerJobRun, job_run_id): job_run,
+        (StrategyRun, dsa_run_id): dsa_strategy_run,
+    }.get((model, id)))
+    mock_session.flush = AsyncMock()
+    mock_session.commit = AsyncMock()
+    mock_session.add = MagicMock()
+    mock_session.execute = AsyncMock()
+    mock_session.rollback = AsyncMock()
+    mock_session.close = AsyncMock()
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return mock_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    # dsa_run_id=None 触发 checking_coverage 步骤；daily_coverage=0.95 通过日线检查
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = None  # 关键：触发 checking_coverage
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_dsa_run = MagicMock()
+    fake_dsa_run.id = dsa_run_id
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    # 关键：用 spy 监控 compute_intraday_coverage 是否被调用
+    intraday_spy = AsyncMock()
+    intraday_spy.return_value = {"ready": False}  # 模拟 15m 缺失
+
+    fake_snapshot_run = MagicMock()
+    fake_snapshot_run.id = uuid.uuid4()
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch.object(
+        StrategyBatchService, "create_batch_run",
+        new=AsyncMock(return_value=fake_dsa_run),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.bars_coverage_service.BarsCoverageService.compute_intraday_coverage",
+        new=intraday_spy,
+    ), patch(
+        "app.services.after_close_orchestrator._job_run_heartbeat_loop",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=AsyncMock(return_value={"event_count": 0}),
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ), patch(
+        "app.services.after_close_orchestrator.create_snapshot_run",
+        new=AsyncMock(return_value=fake_snapshot_run),
+    ), patch(
+        "app.services.after_close_orchestrator.finish_snapshot_run",
+        new=AsyncMock(),
+    ), patch(
+        "app.services.after_close_orchestrator.repair_stale_after_close_snapshot_runs",
+        new=AsyncMock(return_value=0),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run_id,
+            trade_date=date(2026, 6, 25),
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # [AC-04] 关键断言：15m intraday coverage 不应被调用
+    assert not intraday_spy.called, (
+        "[AC-04] after-close run 不应调用 compute_intraday_coverage，"
+        "15m 缺失不得阻塞盘后编排"
+    )
+
+    # 编排应成功（日线就绪允许进入下一阶段）
+    assert job_run.status == "succeeded", (
+        f"[AC-04] 日线就绪 + 15m 缺失时应 succeeded，实际={job_run.status}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ac04_daily_missing_blocks() -> None:
+    """[AC-04] 日线未就绪 → 阻塞 after-close run。
+
+    场景：
+    - refresh_all_instruments 返回 dsa_run_id=None（需 checking_coverage）
+    - daily_coverage=0.5（< 0.9，日线未就绪）
+
+    预期：
+    - 编排在 checking_coverage 步骤失败
+    - job_run.status == "failed"
+    - error_message 含"日线覆盖率"
+    - 不创建 DSA run
+
+    纯 mock 测试：不连接共享数据库或 Redis。
+    """
+    job_run_id = uuid.uuid4()
+
+    job_run = MagicMock()
+    job_run.id = job_run_id
+    job_run.status = "running"
+    job_run.metadata_json = json.dumps({
+        "orchestrator_status": "queued",
+        "trade_date": "2026-06-25",
+    }, ensure_ascii=False)
+    job_run.error_message = None
+    job_run.finished_at = None
+
+    mock_session = MagicMock()
+    mock_session.get = AsyncMock(side_effect=lambda model, id, *a, **kw: job_run if model is SchedulerJobRun and id == job_run_id else None)
+    mock_session.flush = AsyncMock()
+    mock_session.commit = AsyncMock()
+    mock_session.add = MagicMock()
+    mock_session.execute = AsyncMock()
+    mock_session.rollback = AsyncMock()
+    mock_session.close = AsyncMock()
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return mock_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    # dsa_run_id=None 触发 checking_coverage；daily_coverage=0.5 不达标
+    fake_batch_result = BatchResult(total=100, succeeded=50)
+    fake_batch_result.dsa_run_id = None
+    fake_batch_result.daily_coverage = 0.5
+
+    create_batch_run_spy = AsyncMock()
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch.object(
+        StrategyBatchService, "create_batch_run",
+        new=create_batch_run_spy,
+    ), patch(
+        "app.services.after_close_orchestrator._job_run_heartbeat_loop",
+        new=AsyncMock(),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run_id,
+            trade_date=date(2026, 6, 25),
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # [AC-04] 日线未就绪必须阻塞
+    assert job_run.status == "failed", (
+        f"[AC-04] 日线未就绪时应 failed，实际={job_run.status}"
+    )
+    assert job_run.error_message is not None and "日线覆盖率" in job_run.error_message, (
+        f"[AC-04] error_message 应含'日线覆盖率'，实际={job_run.error_message}"
+    )
+    # 不应创建 DSA run
+    assert not create_batch_run_spy.called, (
+        "[AC-04] 日线未就绪时不应创建 DSA run"
+    )
+
+
+def test_ac04_no_intraday_readiness_in_after_close_source() -> None:
+    """[AC-04] 静态核验：after_close_orchestrator 源码不再调用 15m intraday readiness。
+
+    防止回归：确保 after-close 链路不再 import 或调用 compute_intraday_coverage。
+    其他模块（如 system_overview）仍可使用 intraday readiness，本测试只约束 after-close。
+    使用 AST 检查真实调用，避免注释/文档字符串误报。
+    """
+    import ast
+    import inspect
+
+    from app import worker as worker_mod
+    from app.services import after_close_orchestrator as acm
+
+    # AST 检查：after_close_orchestrator 不得调用 compute_intraday_coverage
+    source = inspect.getsource(acm)
+    tree = ast.parse(source)
+
+    intraday_calls = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            # 检测 func.attr 形式（如 BarsCoverageService.compute_intraday_coverage）
+            if isinstance(node.func, ast.Attribute):
+                if node.func.attr == "compute_intraday_coverage":
+                    intraday_calls.append(node.lineno)
+            # 检测直接名称调用
+            if isinstance(node.func, ast.Name):
+                if node.func.id == "compute_intraday_coverage":
+                    intraday_calls.append(node.lineno)
+
+    assert not intraday_calls, (
+        f"[AC-04] after_close_orchestrator 不得调用 compute_intraday_coverage，"
+        f"发现调用行号: {intraday_calls}，15m readiness 已从 after-close 链路移除"
+    )
+
+    # AST 检查：worker 入口必须复用 execute_after_close_run
+    worker_source = inspect.getsource(worker_mod)
+    worker_tree = ast.parse(worker_source)
+    worker_calls_execute = False
+    for node in ast.walk(worker_tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "execute_after_close_run":
+                worker_calls_execute = True
+                break
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "execute_after_close_run":
+                worker_calls_execute = True
+                break
+
+    assert worker_calls_execute, (
+        "[AC-04] Worker 必须复用 execute_after_close_run 作为唯一 readiness 入口"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

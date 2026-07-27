@@ -72,61 +72,75 @@ async def lifespan(app: FastAPI):
 
     幂等设计：seed_strategies 内部检查已存在的策略/版本并跳过，
     重复启动不会重复创建。
+
+    [本地开发] - development 环境默认跳过所有共享数据库维护写入
+    （僵尸任务恢复、策略种子、日历刷新），避免本地启动意外修改远程数据。
+    production 和其他环境保持原有行为。
     """
     from app.api.health import check_strategy_assets
-    from app.services.scheduler_job_run_recovery_service import (
-        recover_stale_scheduler_job_runs,
-    )
-    from app.services.strategy_seed import seed_strategies
+    from app.config import get_settings
 
-    # [Recovery] - API Backend 启动时清理上次崩溃残留的 running 任务
-    # 放在 seed_strategies 之前：先清理僵尸，再种种子
-    # 异常不阻塞启动（恢复失败仅记录日志，不影响 API 服务可用性）
-    try:
-        async with AsyncSessionLocal() as db:
-            recovered = await recover_stale_scheduler_job_runs(db)
-            await db.commit()
-            if recovered > 0:
-                logger.info("[Recovery] API Backend 启动恢复: %d 个过期任务", recovered)
-    except Exception as e:
-        logger.error("[Recovery] API Backend 启动恢复失败（不影响启动）: %s", e)
+    settings = get_settings()
+    is_development = settings.app_env.lower() == "development"
 
-    # [策略资产] - 启动时检查策略资产文件完整性
+    if not is_development:
+        from app.services.scheduler_job_run_recovery_service import (
+            recover_stale_scheduler_job_runs,
+        )
+        from app.services.strategy_seed import seed_strategies
+
+        # [Recovery] - API Backend 启动时清理上次崩溃残留的 running 任务
+        # 放在 seed_strategies 之前：先清理僵尸，再种种子
+        # 异常不阻塞启动（恢复失败仅记录日志，不影响 API 服务可用性）
+        try:
+            async with AsyncSessionLocal() as db:
+                recovered = await recover_stale_scheduler_job_runs(db)
+                await db.commit()
+                if recovered > 0:
+                    logger.info("[Recovery] API Backend 启动恢复: %d 个过期任务", recovered)
+        except Exception as e:
+            logger.error("[Recovery] API Backend 启动恢复失败（不影响启动）: %s", e)
+
+    # [策略资产] - 启动时检查策略资产文件完整性（只读，所有环境执行）
     check_strategy_assets()
 
-    try:
-        async with AsyncSessionLocal() as db:
-            results = await seed_strategies(db, release=True)
-            for strategy_key, version, status in results:
-                logger.info(
-                    "种子策略已注册: %s v%s -> %s",
-                    strategy_key, version, status,
-                )
-    except RuntimeError as e:
-        # [策略种子] - 必需策略无 released 版本，标记就绪失败
-        logger.error("种子数据初始化失败（就绪检查将失败）: %s", e)
-        from app.api.health import mark_seed_failed
-        mark_seed_failed(str(e))
-    except Exception as e:
-        # [策略种子] - 其他异常也标记就绪失败
-        logger.error("种子数据初始化失败（就绪检查将失败）: %s", e)
-        from app.api.health import mark_seed_failed
-        mark_seed_failed(str(e))
+    if not is_development:
+        from app.services.strategy_seed import seed_strategies
 
-    try:
+        try:
+            async with AsyncSessionLocal() as db:
+                results = await seed_strategies(db, release=True)
+                for strategy_key, version, status in results:
+                    logger.info(
+                        "种子策略已注册: %s v%s -> %s",
+                        strategy_key, version, status,
+                    )
+        except RuntimeError as e:
+            # [策略种子] - 必需策略无 released 版本，标记就绪失败
+            logger.error("种子数据初始化失败（就绪检查将失败）: %s", e)
+            from app.api.health import mark_seed_failed
+            mark_seed_failed(str(e))
+        except Exception as e:
+            # [策略种子] - 其他异常也标记就绪失败
+            logger.error("种子数据初始化失败（就绪检查将失败）: %s", e)
+            from app.api.health import mark_seed_failed
+            mark_seed_failed(str(e))
+
+    if not is_development:
         from app.core.time import shanghai_business_date
         from app.services.calendar_seed import seed_calendar_from_mootdx
 
-        async with AsyncSessionLocal() as db:
-            today = shanghai_business_date()
-            total_count = 0
-            for year in (today.year, today.year + 1):
-                count = await seed_calendar_from_mootdx(db, year=year, force=False)
-                total_count += count
-                logger.info("启动时日历刷新完成: year=%d, %d 条记录更新", year, count)
-            logger.info("启动时日历刷新总计: %d 条记录更新", total_count)
-    except Exception as e:
-        logger.error("启动时日历刷新失败（不影响启动）: %s", e)
+        try:
+            async with AsyncSessionLocal() as db:
+                today = shanghai_business_date()
+                total_count = 0
+                for year in (today.year, today.year + 1):
+                    count = await seed_calendar_from_mootdx(db, year=year, force=False)
+                    total_count += count
+                    logger.info("启动时日历刷新完成: year=%d, %d 条记录更新", year, count)
+                logger.info("启动时日历刷新总计: %d 条记录更新", total_count)
+        except Exception as e:
+            logger.error("启动时日历刷新失败（不影响启动）: %s", e)
 
     yield
 

@@ -143,7 +143,12 @@ async def version() -> JSONResponse:
     if not runtime_sha_file_exists:
         runtime_git_sha = image_git_sha
 
-    deployment_mode = "live" if runtime_sha_file_exists else "image"
+    if runtime_sha_file_exists:
+        deployment_mode = "live"
+    elif image_git_sha != "unknown":
+        deployment_mode = "image"
+    else:
+        deployment_mode = "native-development"
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,

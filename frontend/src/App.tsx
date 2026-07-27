@@ -61,21 +61,8 @@ function ProtectedLayout() {
   return <Outlet />
 }
 
-// [Auth] - 描述: SubscriberRoute 订阅守卫 - 非有效订阅用户重定向到 /subscription-expired（canonical）
-// admin 用户豁免（is_admin=true 直接通过，不强制订阅）
-// 用于 /market /replay /stock/:symbol 等需有效订阅的核心业务路由
-function SubscriberRoute() {
-  const user = useAuthStore((s) => s.user)
-  // admin 豁免：管理员无需有效订阅即可访问所有页面
-  if (user?.is_admin) {
-    return <Outlet />
-  }
-  // 非订阅用户重定向到续期页
-  if (!user?.subscription_active) {
-    return <Navigate to="/subscription-expired" replace />
-  }
-  return <Outlet />
-}
+// [Phase 5B-2 PRD60 PA-01] 旧 SubscriberRoute 已被 CapabilityRoute 替代
+// 三类独立 capability 守卫已替代统一订阅检查（self_selection/market_data/research_replay）
 
 // [Auth] - 描述: AdminRoute 管理员守卫 - 使用 is_admin 字段判断（替代旧 user.role）
 // 非 admin 用户重定向到默认入口 /market（替换旧 /overview）
@@ -91,6 +78,45 @@ function AdminRoute() {
     return <Navigate to="/market" replace />
   }
   return <Outlet />
+}
+
+// [Phase 5B-2 PRD60 PA-01] CapabilityRoute - 三类独立权限守卫
+// capability: 'self_selection' | 'market_data' | 'research_replay'
+// admin 豁免；accessLoading 期间显示 loading（等待 /me/access 返回 capabilities）
+// 无权限时跳转到 /forbidden 页面（区分于 /subscription-expired 的"订阅过期"语义）
+function CapabilityRoute({ capability }: { capability: string }) {
+  const user = useAuthStore((s) => s.user)
+  const accessLoading = useAuthStore((s) => s.accessLoading)
+
+  // capabilities 尚未加载时等待（防止 login 后 capabilities={} 被误判为无权限）
+  if (accessLoading) {
+    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
+  }
+
+  // admin 豁免：所有 capability 默认 active=True
+  if (user?.is_admin) {
+    return <Outlet />
+  }
+
+  // 检查 capability 是否存在且 active
+  const cap = user?.capabilities?.[capability]
+  if (!cap?.active) {
+    return <Navigate to="/forbidden" replace />
+  }
+
+  return <Outlet />
+}
+
+// [Phase 5B-2 PRD60 PA-01] 简易 403 页面 - 用户已登录但缺少指定 capability
+function ForbiddenPage() {
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0A0F14', color: '#E0E0E0' }}>
+      <div style={{ textAlign: 'center' }}>
+        <h1 style={{ fontSize: '48px', margin: '0 0 16px' }}>403</h1>
+        <p style={{ fontSize: '16px', opacity: 0.7 }}>权限不足，当前账号未开通此功能</p>
+      </div>
+    </div>
+  )
 }
 
 // 旧路由兼容重定向（/overview → /market，/watchlist → /market?scope=watchlist，/screener → /market）
@@ -113,6 +139,8 @@ export const routeConfig: RouteObject[] = [
   // [Auth] - 描述: /subscription-expired 为 canonical 路由，/membership-expired 重定向到此（向后兼容）
   { path: '/subscription-expired', element: <SubscriptionExpiredPage /> },
   { path: '/membership-expired', element: <Navigate to="/subscription-expired" replace /> },
+  // [Phase 5B-2 PRD60 PA-01] 403 页面 - 已登录但缺少指定 capability
+  { path: '/forbidden', element: <ForbiddenPage /> },
   // [capture-mode] 专用 Capture 路由（不经过 ProtectedLayout/SubscriberRoute/UserAppShell/AdminAppShell，只使用 captureClient）
   // capture worker 通过 /capture/stock/:symbol?capture=feishu&token=xxx 访问，避免加载 watchlist/memo/events
   // Capture token 只在 CaptureStockPage 内部处理，ProtectedLayout 不再解析 capture 参数或操作 localStorage
@@ -125,13 +153,26 @@ export const routeConfig: RouteObject[] = [
       {
         element: <UserAppShell />,
         children: [
-          // 需有效订阅的核心业务页面（SubscriberRoute 守卫）
+          // [Phase 5B-2 PRD60 PA-01] 三类独立 capability 守卫（替代旧 SubscriberRoute）
+          // self_selection: 自选管理+盘中监控+行情列表可见（/market）
           {
-            element: <SubscriberRoute />,
+            element: <CapabilityRoute capability="self_selection" />,
             children: [
               { path: '/market', element: <MarketWorkspacePage /> },
-              { path: '/replay', element: <ReplayPage /> },
+            ],
+          },
+          // market_data: 行情数据+个股详情（/stock/:symbol）
+          {
+            element: <CapabilityRoute capability="market_data" />,
+            children: [
               { path: '/stock/:symbol', element: <StockDetailPage /> },
+            ],
+          },
+          // research_replay: 复盘入口（/replay）
+          {
+            element: <CapabilityRoute capability="research_replay" />,
+            children: [
+              { path: '/replay', element: <ReplayPage /> },
             ],
           },
           // 不强制订阅的辅助页面（仅认证即可）
