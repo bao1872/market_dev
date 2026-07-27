@@ -89,6 +89,14 @@ check_prerequisites() {
     command -v rsync >/dev/null 2>&1 || fail "缺少 rsync"
     command -v curl >/dev/null 2>&1 || fail "缺少 curl"
 
+    # [Phase 5B-2] 确保 state 文件目录存在（state 初始化）
+    local state_dir
+    state_dir="$(dirname "${STATE_FILE}")"
+    if [[ ! -d "${state_dir}" ]]; then
+        mkdir -p "${state_dir}" || fail "无法创建 state 目录: ${state_dir}"
+        log "已创建 state 目录: ${state_dir}"
+    fi
+
     # 验证 SSH Host 别名/身份（如通过别名调用）
     if [[ -n "${PANJI_SSH_HOST:-}" ]]; then
         local resolved
@@ -101,6 +109,10 @@ validate_sha() {
     log "验证 SHA: ${TARGET_SHA}"
 
     cd "${REPO_ROOT}"
+
+    # [Phase 5B-2] 部署前必须 fetch origin main，避免使用 stale refs
+    log "拉取 origin/main 最新引用..."
+    git fetch origin main --no-tags 2>&1 | sed 's/^/  /' || fail "git fetch origin main 失败"
 
     # 必须是完整或短 SHA，且能被解析
     if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
@@ -354,12 +366,13 @@ deploy_scope() {
 }
 
 health_check() {
-    log "健康检查..."
-
+    # [Phase 5B-2] dry-run 模式下只做计划验证，不称健康检查
     if [[ "${DRY_RUN}" == "true" ]]; then
-        log "[dry-run] 将检查: port 80, /health, /health/ready, /version runtime_git_sha, 关键容器"
+        log "[dry-run] 计划验证: 将检查 port 80, /health, /health/ready, /version runtime_git_sha, 关键容器, Scheduler 单实例"
         return 0
     fi
+
+    log "健康检查..."
 
     local max_wait=60
     local waited=0
@@ -413,7 +426,7 @@ health_check() {
     log "关键容器检查通过"
 
     # Scheduler 单实例检查（每个 scheduler 类型只应有一个容器在运行）
-    local scheduler_names=(trading-worker-bars-scheduler trading-worker-strategy-scheduler trading-worker-calendar-scheduler)
+    local scheduler_names=(trading-worker-bars-scheduler trading-worker-strategy-scheduler trading-worker-calendar)
     for s in "${scheduler_names[@]}"; do
         local count
         count="$(docker ps --format '{{.Names}}' | grep -cx "${s}" || true)"
@@ -470,6 +483,9 @@ main() {
         if [[ "${CHANGE_SCOPE}" == "none" || "${CHANGE_SCOPE}" == "docs" ]]; then
             checkout_target
             save_state "${TARGET_SHA}"
+            # [Phase 5B-2] 部署后切回 main 分支，避免 detached HEAD
+            cd "${REPO_ROOT}"
+            git checkout main 2>/dev/null || log "警告: 切回 main 分支失败"
             log "部署完成（无应用变更）"
             exit 0
         fi
@@ -485,6 +501,11 @@ main() {
         fi
 
         save_state "${TARGET_SHA}"
+
+        # [Phase 5B-2] 部署后切回 main 分支，避免 detached HEAD
+        cd "${REPO_ROOT}"
+        run_cmd git checkout main 2>/dev/null || log "警告: 切回 main 分支失败，仓库可能处于 detached HEAD"
+
         log "部署成功: ${TARGET_SHA}"
 
     ) 200>"${LOCK_FILE}"
