@@ -341,19 +341,52 @@ test('MiniKlineCard 不显示指标/成交量/Node/事件标记/工具栏', () =
   )
 })
 
-test('MarketRightPanel 顺序：MiniKlineCard 顶部 + AtomicFactsPanel 底部', () => {
+test('MarketRightPanel 挂载状态契约（resolveMarketRightPanelState 行为测试）', async () => {
+  // CHANGE-20260728-007: 从源码字符串测试迁移为行为测试。
+  // 新契约：MiniKlineCard → FirstPyramidPanel → 更多观察 → AtomicFactsPanel（仅 moreOpen=true）。
+  const { resolveMarketRightPanelState } = await import('../marketRightPanelState.ts')
+
+  // symbol=null：只显示小K线空态，不挂载第一金字塔和 AtomicFactsPanel
+  const nullState = resolveMarketRightPanelState(null, false)
+  assert.equal(nullState.showPyramid, false, 'symbol=null 不挂载第一金字塔')
+  assert.equal(nullState.showMoreObservation, false, 'symbol=null 不渲染更多观察入口')
+  assert.equal(nullState.showAtomicFacts, false, 'symbol=null 不挂载 AtomicFactsPanel')
+
+  // symbol=null 且 moreOpen=true：仍不挂载任何面板（symbol 是前置条件）
+  const nullOpenState = resolveMarketRightPanelState(null, true)
+  assert.equal(nullOpenState.showPyramid, false)
+  assert.equal(nullOpenState.showAtomicFacts, false, 'symbol=null 即使 moreOpen=true 也不挂载 AtomicFactsPanel')
+
+  // symbol 存在、moreOpen=false：显示第一金字塔，不挂载 AtomicFactsPanel
+  const symbolState = resolveMarketRightPanelState('600519', false)
+  assert.equal(symbolState.showPyramid, true, 'symbol 存在挂载第一金字塔')
+  assert.equal(symbolState.showMoreObservation, true, 'symbol 存在渲染更多观察入口')
+  assert.equal(symbolState.showAtomicFacts, false, 'moreOpen=false 不挂载 AtomicFactsPanel')
+
+  // symbol 存在、moreOpen=true：挂载一次 AtomicFactsPanel
+  const openState = resolveMarketRightPanelState('600519', true)
+  assert.equal(openState.showPyramid, true)
+  assert.equal(openState.showMoreObservation, true)
+  assert.equal(openState.showAtomicFacts, true, 'moreOpen=true 挂载 AtomicFactsPanel')
+
+  // sectionOrder 符合确认后的 UI 顺序
+  assert.deepEqual(
+    [...openState.sectionOrder],
+    ['mini-kline', 'first-pyramid', 'more-observation'],
+    'sectionOrder 必须为 [mini-kline, first-pyramid, more-observation]',
+  )
+})
+
+test('MarketRightPanel 必须消费 resolveMarketRightPanelState 纯函数', () => {
   const src = readSource(MARKET_RIGHT_PANEL_PATH)
   assert.ok(
-    src.includes('MiniKlineCard') && src.includes('AtomicFactsPanel'),
-    'MarketRightPanel 必须组合 MiniKlineCard 和 AtomicFactsPanel',
+    src.includes('resolveMarketRightPanelState'),
+    'MarketRightPanel 必须从 ./marketRightPanelState 导入并调用 resolveMarketRightPanelState',
   )
-  // MiniKlineCard 在 AtomicFactsPanel 之前（顶部）
-  const miniIdx = src.indexOf('MiniKlineCard')
-  const eventIdx = src.indexOf('AtomicFactsPanel')
-  assert.ok(miniIdx > 0 && eventIdx > 0, 'MarketRightPanel 必须引用 MiniKlineCard 和 AtomicFactsPanel')
+  // 禁止内联三元表达式复制挂载逻辑
   assert.ok(
-    miniIdx < eventIdx,
-    'MarketRightPanel 中 MiniKlineCard 必须在 AtomicFactsPanel 之前（顶部）',
+    !/symbol\s*&&\s*<AtomicFactsPanel/.test(src),
+    'MarketRightPanel 禁止内联 symbol && <AtomicFactsPanel>（必须由 resolveMarketRightPanelState 推导）',
   )
 })
 
@@ -490,7 +523,7 @@ test('useMiniKlineData React Query 缓存命中（queryKey 含 instrumentId + ti
   )
 })
 
-test('MarketRightPanel 面板收起时不挂载（父组件控制 0 请求）', () => {
+test('MarketRightPanel 接受 symbol prop（父组件控制挂载与否）', () => {
   const src = readSource(MARKET_RIGHT_PANEL_PATH)
   // 父组件不挂载本组件 → 0 bars/context 请求
   // 组件本身只接受 symbol prop，不自行判断是否渲染
@@ -498,11 +531,8 @@ test('MarketRightPanel 面板收起时不挂载（父组件控制 0 请求）', 
     src.includes('interface MarketRightPanelProps') && src.includes('symbol: string | null'),
     'MarketRightPanel 必须接受 symbol prop（由父组件控制挂载与否）',
   )
-  // symbol 为 null 时 MiniKlineCard 显示提示，AtomicFactsPanel 不渲染（不发起 context 请求）
-  assert.ok(
-    /symbol\s*&&\s*<AtomicFactsPanel/.test(src),
-    'MarketRightPanel 必须在 symbol 为 null 时不渲染 AtomicFactsPanel（0 context 请求）',
-  )
+  // symbol 为 null 时不挂载 AtomicFactsPanel：由 resolveMarketRightPanelState 推导
+  // （行为已在 resolveMarketRightPanelState 行为测试中覆盖，此处只验证 prop 契约）
 })
 
 // =================================================================

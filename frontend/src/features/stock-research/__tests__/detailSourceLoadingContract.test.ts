@@ -104,7 +104,7 @@ test('CHANGE-005-5: StockDetailPage 列表渲染条件排除所有非正常状�
 test('CHANGE-005-6: 来源徽标文案行为正确（computeSourceBadge 纯函数）', async () => {
   // 行为测试：验证 computeSourceBadge 在各 origin + invalid 组合下返回正确文案
   // 不依赖源码字符串匹配，直接测试函数行为
-  const { computeSourceBadge } = await import('../stockDetailNavigation')
+  const { computeSourceBadge } = await import('../stockDetailNavigation.ts')
   assert.equal(computeSourceBadge('market', false), '行情来源')
   assert.equal(computeSourceBadge('watchlist', false), '自选来源')
   assert.equal(computeSourceBadge('direct', false), '直接访问')

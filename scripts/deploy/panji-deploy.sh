@@ -325,7 +325,7 @@ deploy_scope() {
             build_frontend
             sync_live_mount
             compose_config_check
-            recreate_services frontend
+            recreate_services frontend goaccess
             ;;
         backend)
             build_frontend
@@ -344,7 +344,7 @@ deploy_scope() {
             compose_config_check
             # 镜像重建后全量 up -d，但不重建 postgres/redis
             run_cmd ${COMPOSE_CMD} up -d --force-recreate --remove-orphans \
-                backend frontend \
+                backend frontend goaccess \
                 worker-bars-scheduler worker-strategy-scheduler worker-calendar \
                 worker-monitor worker-strategy-batch worker-outbox worker-delivery \
                 worker-after-close worker-watchdog worker-capture
@@ -354,7 +354,7 @@ deploy_scope() {
             sync_live_mount
             compose_config_check
             recreate_services \
-                backend frontend \
+                backend frontend goaccess \
                 worker-bars-scheduler worker-strategy-scheduler worker-calendar \
                 worker-monitor worker-strategy-batch worker-outbox worker-delivery \
                 worker-after-close worker-watchdog worker-capture
@@ -436,6 +436,55 @@ health_check() {
         fi
     done
     log "Scheduler 单实例检查通过"
+
+    # GoAccess 非破坏性检查（失败报告具体错误，不让整个部署无限等待）
+    check_goaccess_health
+
+    return 0
+}
+
+check_goaccess_health() {
+    log "GoAccess 健康检查..."
+
+    # 1. trading-goaccess 容器必须 running
+    if ! docker ps --format '{{.Names}}' | grep -qx "trading-goaccess"; then
+        log "GoAccess 容器 trading-goaccess 未运行（非阻塞，报告后继续）"
+        return 0
+    fi
+    log "trading-goaccess 容器运行中"
+
+    # 2. frontend 容器内 /var/log/nginx/access.log 必须存在
+    if ! docker exec trading-frontend test -f /var/log/nginx/access.log 2>/dev/null; then
+        log "GoAccess 检查: trading-frontend:/var/log/nginx/access.log 不存在（非阻塞）"
+        return 0
+    fi
+    log "frontend access.log 存在"
+
+    # 3. backend 容器内 /srv/goaccess 目录必须存在（挂载点）
+    if ! docker exec trading-backend test -d /srv/goaccess 2>/dev/null; then
+        log "GoAccess 检查: trading-backend:/srv/goaccess 目录不存在（非阻塞）"
+        return 0
+    fi
+    log "backend /srv/goaccess 目录存在"
+
+    # 4. report.json 允许首次启动后最多等待 300 秒生成
+    local report_max_wait=300
+    local report_waited=0
+    while [[ ${report_waited} -lt ${report_max_wait} ]]; do
+        if docker exec trading-backend test -f /srv/goaccess/report.json 2>/dev/null; then
+            log "GoAccess report.json 已生成（等待 ${report_waited}s）"
+            return 0
+        fi
+        sleep 10
+        report_waited=$((report_waited + 10))
+        if [[ $((report_waited % 60)) -eq 0 ]]; then
+            log "等待 GoAccess report.json 生成... (${report_waited}/${report_max_wait})"
+        fi
+    done
+
+    # report.json 未生成：输出 goaccess 最近日志辅助排查，但不让部署失败
+    log "GoAccess report.json 在 ${report_max_wait}s 内未生成（非阻塞，检查 goaccess 日志）"
+    docker logs --tail 30 trading-goaccess 2>&1 | sed 's/^/  goaccess: /' || true
 
     return 0
 }
