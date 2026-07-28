@@ -103,8 +103,12 @@ test('CHANGE-005-5: StockDetailPage 列表渲染条件排除所有非正常状�
 
 test('CHANGE-005-6: loading 占位显示来源类型 header', () => {
   const src = readSource(STOCK_DETAIL_PAGE)
-  const matches = src.match(/sourceListKind === 'market' \? '行情来源' : '自选来源'/g)
-  assert.ok(matches && matches.length >= 2, 'loading 占位和列表都需显示 header')
+  // [Gate1] 改用 sourceBadge 变量（基于 sourceCtxV2.origin 统一推导，更精确）
+  // 接受旧版 sourceListKind 内联表达式或新版 sourceBadge 变量引用
+  const oldPatternMatches = src.match(/sourceListKind === 'market' \? '行情来源' : '自选来源'/g)
+  const newPatternMatches = src.match(/\{sourceBadge\}/g)
+  const totalMatches = (oldPatternMatches?.length ?? 0) + (newPatternMatches?.length ?? 0)
+  assert.ok(totalMatches >= 2, 'loading 占位和列表都需显示 header（sourceListKind 内联或 sourceBadge 变量）')
 })
 
 test('CHANGE-005-7: CSS .tv-source-list-placeholder 存在', () => {
