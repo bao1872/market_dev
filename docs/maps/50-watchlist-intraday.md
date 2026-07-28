@@ -1,11 +1,11 @@
 # 自选与盘中监控 Map
 
-核验状态：待重建
-最后核验日期：未核验
+核验状态：部分核验（§4.1 图片捕获链路已核验，其余待核验）
+最后核验日期：2026-07-28（§4.1）
 核验分支：未核验
-核验提交：未核验
-核验范围：尚未基于最新代码完整核验  
-对应 PRD：`../prd/50-watchlist-intraday.md`  
+核验提交：c8da6c2（基线）+ 本地未提交修改（CHANGE-20260728-001）
+核验范围：§4.1 图片捕获链路基于代码+测试核验；其余待核验
+对应 PRD：`../prd/50-watchlist-intraday.md`
 事实所有权：自选存储、排序、盘中任务、异常消息、转发和权限入口
 
 > 本文件必须基于真实代码、数据、日志或运行结果填写。不得根据 PRD 推测实现已经存在。
@@ -44,15 +44,44 @@
 
 ## 4. 盘中监控
 
-待核验：
+### 4.1 图片捕获链路（2026-07-28 核验，基于 CHANGE-20260728-001）
+
+权威入口：`backend/app/services/monitor_batch_service.py::_send_chart_images_via_outbox`
+
+截图粒度：每个唯一 `(instrument_id, event_id)`，非每股票一次。
+
+```text
+monitor_batch_service
+→ 按 instrument 分组事件
+→ per event 遍历：
+    → is_supported_event_type(event_type, payload) 检查映射
+       ├─ 已支持：解析 indicator_view（BOS/CHoCH/EQH/EQL/OB → smc）
+       └─ 未支持：写 CaptureJob(status=failed, error_code=UNSUPPORTED_INDICATOR_VIEW)，跳过
+    → 构建 focus_event、生成 capture token
+    → capture_run_id = f"monitor-{inst_id}-{event.id}-{indicator_view}"
+    → 输出文件名含 event.id 与 indicator_view
+    → 创建 CaptureJob(status=pending)
+    → 调用 capture worker（同事件多用户只截图 1 次）
+    → 每个有资格用户创建 image Outbox
+    → 失败隔离：单事件失败只记 CaptureJob，不阻塞其他事件
+```
+
+幂等键：`user_id + instrument_id + event_id + indicator_view`
+- 同事件重试不重复
+- 不同事件即使同一分钟也不互相去重
+
+事件类型 → indicator_view 映射：`backend/app/constants/indicator_view.py::EVENT_TYPE_TO_INDICATOR_VIEW`
+- BOS/CHoCH/EQH/EQL/OB first touch → smc
+- 未知类型 → UNSUPPORTED_INDICATOR_VIEW（显式跳过，不回退 node_cluster）
+
+### 4.2 待核验
 
 - 触发器；
 - 数据周期；
 - 自选对象生成；
 - 异常规则；
-- 消息内容；
+- 消息内容（文本链路）；
 - Feishu 或其他转发；
-- 去重；
 - 频率；
 - 盘中与盘后状态隔离。
 

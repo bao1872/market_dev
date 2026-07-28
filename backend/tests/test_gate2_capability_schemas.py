@@ -455,6 +455,264 @@ class TestPermissionMatrix:
         assert limit is None  # admin 无限制
 
 
+# ============================================================
+# DB 集成测试：服务层 grant/revoke/get 行为（Gate2 真实补验）
+# ============================================================
+
+
+class TestCapabilityServiceIntegration:
+    """[Gate2 真实补验] 服务层 grant/revoke/get 行为测试（依赖 DB，事务回滚隔离）。
+
+    覆盖：
+    - grant_capability_to_user：新建 capability 行
+    - grant_capability_to_user：已有 capability 取较晚 expires_at（不降权）
+    - revoke_capability_from_user：硬删除行
+    - get_user_capabilities：返回三类 capability 状态
+    - 邀请码三权限组合：InviteCode.capabilities JSONB 写入与读取
+    - 过期：expires_at < now → active=False
+    - admin：grant_by 记录管理员 ID
+    - 仅行情/仅自选/仅复盘：三类独立授予
+    """
+
+    @pytest.mark.asyncio
+    async def test_grant_new_self_selection_capability(
+        self, db_session, user_factory,
+    ) -> None:
+        """授予新 self_selection capability：创建行，source=admin_grant。"""
+        from app.services.subscription_service import grant_capability_to_user
+
+        user = await user_factory()
+        admin = await user_factory(roles=["admin"])
+
+        result = await grant_capability_to_user(
+            db=db_session,
+            user_id=user.id,
+            capability="self_selection",
+            months=1,
+            watchlist_limit=20,
+            granted_by=admin.id,
+        )
+
+        assert result["active"] is True
+        assert result["watchlist_limit"] == 20
+        assert result["expires_at"] is not None
+        # 验证 DB 行存在
+        from app.models.user_capability import UserCapability
+        from sqlalchemy import select
+        stmt = select(UserCapability).where(
+            UserCapability.user_id == user.id,
+            UserCapability.capability == "self_selection",
+        )
+        row = (await db_session.execute(stmt)).scalar_one_or_none()
+        assert row is not None
+        assert row.source == "admin_grant"
+        assert row.granted_by == admin.id
+        assert row.watchlist_limit == 20
+
+    @pytest.mark.asyncio
+    async def test_grant_existing_takes_later_expires(
+        self, db_session, user_factory,
+    ) -> None:
+        """已有 capability：取较晚 expires_at（不降权）。"""
+        from datetime import timedelta
+        from app.models.user_capability import UserCapability
+        from app.services.subscription_service import grant_capability_to_user
+
+        user = await user_factory()
+        admin = await user_factory(roles=["admin"])
+
+        # 第一次授予 1 个月
+        await grant_capability_to_user(
+            db=db_session, user_id=user.id, capability="market_data",
+            months=1, watchlist_limit=None, granted_by=admin.id,
+        )
+        # 查询第一次的 expires_at
+        from sqlalchemy import select
+        stmt = select(UserCapability).where(
+            UserCapability.user_id == user.id,
+            UserCapability.capability == "market_data",
+        )
+        first_row = (await db_session.execute(stmt)).scalar_one()
+        first_expires = first_row.expires_at
+
+        # 第二次授予 3 个月（应取较晚的 expires_at）
+        result = await grant_capability_to_user(
+            db=db_session, user_id=user.id, capability="market_data",
+            months=3, watchlist_limit=None, granted_by=admin.id,
+        )
+        # 较晚的 expires_at（3 个月后 > 1 个月后）
+        assert result["expires_at"] > first_expires
+        # 仍只有一行
+        rows = (await db_session.execute(stmt)).scalars().all()
+        assert len(rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_revoke_capability_removes_row(
+        self, db_session, user_factory,
+    ) -> None:
+        """revoke 硬删除 user_capabilities 行。"""
+        from app.models.user_capability import UserCapability
+        from app.services.subscription_service import (
+            grant_capability_to_user,
+            revoke_capability_from_user,
+        )
+        from sqlalchemy import select
+
+        user = await user_factory()
+        admin = await user_factory(roles=["admin"])
+
+        await grant_capability_to_user(
+            db=db_session, user_id=user.id, capability="research_replay",
+            months=1, watchlist_limit=None, granted_by=admin.id,
+        )
+        # 确认行存在
+        stmt = select(UserCapability).where(
+            UserCapability.user_id == user.id,
+            UserCapability.capability == "research_replay",
+        )
+        assert (await db_session.execute(stmt)).scalar_one_or_none() is not None
+
+        # 撤销
+        removed = await revoke_capability_from_user(
+            db=db_session, user_id=user.id, capability="research_replay",
+        )
+        assert removed is True
+        # 行已删除
+        assert (await db_session.execute(stmt)).scalar_one_or_none() is None
+
+    @pytest.mark.asyncio
+    async def test_get_user_capabilities_returns_all_three(
+        self, db_session, user_factory,
+    ) -> None:
+        """get_user_capabilities 返回已授予的 capability 状态（无行的不返回）。"""
+        from app.services.subscription_service import (
+            get_user_capabilities,
+            grant_capability_to_user,
+        )
+
+        user = await user_factory()
+        admin = await user_factory(roles=["admin"])
+
+        # 仅授予 self_selection
+        await grant_capability_to_user(
+            db=db_session, user_id=user.id, capability="self_selection",
+            months=1, watchlist_limit=30, granted_by=admin.id,
+        )
+
+        caps = await get_user_capabilities(db_session, user.id)
+        # 仅返回已授予的（无行的不返回，由调用方 fallback 到 plan_code 推断）
+        assert "self_selection" in caps
+        assert "market_data" not in caps
+        assert "research_replay" not in caps
+        # self_selection active
+        assert caps["self_selection"]["active"] is True
+        assert caps["self_selection"]["watchlist_limit"] == 30
+
+    @pytest.mark.asyncio
+    async def test_expired_capability_not_active(
+        self, db_session, user_factory,
+    ) -> None:
+        """过期 capability active=False（expires_at < now）。"""
+        from app.models.user_capability import UserCapability
+        from app.services.subscription_service import get_user_capabilities
+
+        user = await user_factory()
+
+        # 直接构造过期行（绕过 grant 服务层的 now + months 计算）
+        expired_at = datetime.now(UTC) - timedelta(days=1)
+        db_row = UserCapability(
+            user_id=user.id,
+            capability="market_data",
+            watchlist_limit=None,
+            granted_at=datetime.now(UTC) - timedelta(days=30),
+            expires_at=expired_at,
+            source="admin_grant",
+        )
+        db_session.add(db_row)
+        await db_session.flush()
+
+        caps = await get_user_capabilities(db_session, user.id)
+        assert caps["market_data"]["active"] is False
+        assert caps["market_data"]["expires_at"] == expired_at
+
+    @pytest.mark.asyncio
+    async def test_grant_three_capabilities_independently(
+        self, db_session, user_factory,
+    ) -> None:
+        """三类 capability 独立授予（仅行情/仅自选/仅复盘 各自独立）。"""
+        from app.services.subscription_service import (
+            get_user_capabilities,
+            grant_capability_to_user,
+        )
+
+        user = await user_factory()
+        admin = await user_factory(roles=["admin"])
+
+        # 分别授予三类
+        await grant_capability_to_user(
+            db=db_session, user_id=user.id, capability="self_selection",
+            months=1, watchlist_limit=20, granted_by=admin.id,
+        )
+        await grant_capability_to_user(
+            db=db_session, user_id=user.id, capability="market_data",
+            months=2, watchlist_limit=None, granted_by=admin.id,
+        )
+        await grant_capability_to_user(
+            db=db_session, user_id=user.id, capability="research_replay",
+            months=3, watchlist_limit=None, granted_by=admin.id,
+        )
+
+        caps = await get_user_capabilities(db_session, user.id)
+        assert caps["self_selection"]["active"] is True
+        assert caps["market_data"]["active"] is True
+        assert caps["research_replay"]["active"] is True
+        # watchlist_limit 仅 self_selection 有值
+        assert caps["self_selection"]["watchlist_limit"] == 20
+        assert caps["market_data"]["watchlist_limit"] is None
+        assert caps["research_replay"]["watchlist_limit"] is None
+        # expires_at 各自独立
+        assert caps["self_selection"]["expires_at"] != caps["market_data"]["expires_at"]
+
+    @pytest.mark.asyncio
+    async def test_invite_code_capabilities_jsonb_roundtrip(
+        self, db_session, user_factory,
+    ) -> None:
+        """邀请码 capabilities JSONB 写入与读取（PA-20 三权限组合）。"""
+        import hashlib
+        from app.models.invitation import InviteCode
+        from app.schemas.invitation import CapabilityGrant
+        from sqlalchemy import select
+
+        admin = await user_factory(roles=["admin"])
+
+        # 构造三权限组合邀请码（明文不存储，仅 code_hash）
+        plain_code = f"TEST-{uuid.uuid4().hex[:8]}"
+        code_hash = hashlib.sha256(plain_code.encode()).hexdigest()
+
+        caps = [
+            CapabilityGrant(capability="self_selection", months=1, watchlist_limit=20),
+            CapabilityGrant(capability="market_data", months=1),
+            CapabilityGrant(capability="research_replay", months=1),
+        ]
+        invite = InviteCode(
+            code_hash=code_hash,
+            status="unused",
+            grant_months=1,
+            capabilities=[c.model_dump() for c in caps],
+            created_by=admin.id,
+        )
+        db_session.add(invite)
+        await db_session.flush()
+
+        # 读取回来
+        stmt = select(InviteCode).where(InviteCode.code_hash == code_hash)
+        loaded = (await db_session.execute(stmt)).scalar_one()
+        assert loaded.capabilities is not None
+        assert len(loaded.capabilities) == 3
+        cap_types = {c["capability"] for c in loaded.capabilities}
+        assert cap_types == {"self_selection", "market_data", "research_replay"}
+
+
 if __name__ == "__main__":
     # 自测入口：直接运行 pytest
     pytest.main([__file__, "-v", "--tb=short"])

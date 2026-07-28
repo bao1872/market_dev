@@ -38,7 +38,11 @@ from app.constants.capture import (
     CAPTURE_SCOPE_STOCK_DETAIL,
     FEISHU_CAPTURE_TIMEFRAME,
 )
-from app.constants.indicator_view import resolve_indicator_view
+from app.constants.indicator_view import (
+    UNSUPPORTED_INDICATOR_VIEW,
+    is_supported_event_type,
+    resolve_indicator_view,
+)
 from app.constants.strategy_keys import WATCHLIST_MONITOR
 from app.constants.user_facing_labels import get_event_label, get_field_label
 from app.core.time import format_shanghai_datetime
@@ -1497,15 +1501,20 @@ class MonitorBatchService:
         instrument_user_map: dict[uuid.UUID, list[uuid.UUID]],
         message_group_id: str,
     ) -> None:
-        """为每只触发股票调用 capture worker 截图，并通过 Outbox 统一投递图片。
+        """为每个触发事件调用 capture worker 截图，并通过 Outbox 统一投递图片。
+
+        [Gate3 图片修复] 截图粒度从"每股票一张"改为"每事件一张"：
+        - 遍历 (instrument_id, event) 而非仅 instrument_id
+        - 每个事件独立解析 indicator_view、构建 focus_event、生成 capture token
+        - 每个事件独立调用 capture worker、写 CaptureJob、写 image Outbox
+        - 单事件截图失败不阻塞其他事件（失败隔离）
+        - 同一事件多用户只截图一次，随后为每个用户创建 image Outbox
+        - 未知事件类型显式跳过（UNSUPPORTED_INDICATOR_VIEW），不回退 node_cluster
 
         [飞书两段式投递] - 图片段：
         - 调用 worker-capture HTTP 服务获取个股详情页截图的本地静态 URL
-        - 不再本地渲染 PNG + base64 编码到 Outbox（避免 Outbox 膨胀）
         - image_url 由 capture worker 返回，delivery_worker 通过 _fetch_image_bytes 拉取
         - 与 text Outbox 共享同一 message_group_id
-
-        截图失败不阻塞通知流程。
 
         Args:
             db: 异步会话
@@ -1530,170 +1539,190 @@ class MonitorBatchService:
                 continue
             symbol, stock_name = info
 
-            # 取首个事件作为截图上下文
-            first_event = events[0] if events else None
-            if first_event is None:
+            user_ids = instrument_user_map.get(inst_id, [])
+            if not user_ids:
                 continue
 
-            try:
-                # 获取该标的的用户列表（取首个用户生成 capture token）
-                user_ids = instrument_user_map.get(inst_id, [])
-                if not user_ids:
-                    continue
-
-                # [CHANGE-20260720-003 §三] 从事件类型 + payload 自动映射 indicator_view
-                # 监控自动发送时不需要用户选择，由 event_type → indicator_view 映射决定
-                first_payload = first_event.payload if isinstance(
-                    first_event.payload, dict
-                ) else None
-                indicator_view = resolve_indicator_view(
-                    first_event.event_type, first_payload
-                )
-
-                # [Task 2] focus_event 贯穿链路：从 first_event.payload 提取 focus 字段
-                #   传递到 capture worker → capture API → 前端 StrategyChart，
-                #   前端据此突出本次触发事件，淡化其他历史结构。
-                #   字段来源：smc_monitor._build_event_draft 写入 payload
-                focus_event_info: dict[str, Any] = {
-                    "focus_event_id": str(first_event.id),
-                    "focus_event_type": first_event.event_type,
-                }
-                if first_payload is not None:
-                    for k in ("anchor_time", "confirmed_time", "level",
-                              "bar_high", "bar_low", "bias", "internal",
-                              "bullish", "eqhl_type", "second_pivot_time"):
-                        v = first_payload.get(k)
-                        if v is not None:
-                            focus_event_info[k] = v
-
-                # [飞书两段式投递] - 生成短期 capture token
-                # 必须携带 scope/instrument_id/user_id，否则 capture API 会 401/403
-                token = create_capture_token(
-                    subject=str(user_ids[0]),
-                    event_id=str(first_event.id),
-                    expires_delta=timedelta(seconds=capture_token_ttl),
-                    scope=CAPTURE_SCOPE_STOCK_DETAIL,
-                    instrument_id=str(inst_id),
-                    user_id=str(user_ids[0]),
-                )
-
-                # 调用 capture worker 截图
-                # [screenshot-cache] - 传入 instrument_id 与 chart_version 启用缓存（任务 6.1）
-                # 同一 event+instrument+chart_version 在 TTL 600s 内复用截图，避免重试时重复截图
-                # [CHANGE-20260720-003 §三] output_filename 含 indicator_view，
-                # 缓存键由 capture_stock_chart 内部按 indicator_view 维度区分
-                capture_payload = {
-                    "symbol": symbol,
-                    "event_id": str(first_event.id),
-                    "token": token,
-                    "frontend_base_url": frontend_base_url,
-                    "output_filename": f"monitor-{inst_id}-{first_event.id}-{indicator_view}",
-                    "instrument_id": str(inst_id),
-                    "chart_version": "v1",
-                    # [Feishu] - 飞书盘中截图业务默认 1d（日线）：实时性由 Capture Snapshot
-                    # 1d + include_realtime=True 的 partial daily 合成保证，不依赖 15m。
-                    "timeframe": FEISHU_CAPTURE_TIMEFRAME,
-                    "capture_run_id": f"monitor-{inst_id}-{first_event.id}-{indicator_view}",
-                    "source_bar_time": first_event.event_time.isoformat(),
-                    "disable_cache": True,
-                    # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
-                    "indicator_view": indicator_view,
-                    # [Task 2] focus_event 透传到前端 URL query
-                    "focus_event": focus_event_info,
-                }
+            # [Gate3 图片修复] 每个事件独立处理（失败隔离）
+            # - 不再只取 events[0]；同一标的可触发多个结构事件，每个事件都应有自己的图片
+            # - 单事件截图失败只记录该 CaptureJob，不阻塞文本及其他事件图片
+            # - 同一事件多用户只截图一次，随后为每个有资格用户创建 image Outbox
+            for event in events:
                 try:
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        capture_resp = await client.post(
-                            f"{capture_worker_url.rstrip('/')}/capture",
-                            json=capture_payload,
-                        )
-                        capture_resp.raise_for_status()
-                        capture_data = capture_resp.json()
-                except Exception as exc:
-                    # advice.md: 截图失败不吞掉，写 capture_jobs 记录（支持重试 + 管理员可见）
-                    logger.warning(
-                        "capture worker 截图失败: symbol=%s event_id=%s: %s",
-                        symbol, first_event.id, exc,
-                    )
-                    db.add(CaptureJob(
-                        event_id=first_event.id,
-                        instrument_id=inst_id,
-                        user_id=user_ids[0],
-                        message_group_id=message_group_id,
-                        indicator_view=indicator_view,
-                        status=CAPTURE_STATUS_FAILED,
-                        attempt_count=1,
-                        error_code="CAPTURE_REQUEST_FAILED",
-                        error_message=str(exc)[:500],
-                        finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
-                    ))
-                    await db.commit()
-                    continue
+                    event_payload = event.payload if isinstance(
+                        event.payload, dict
+                    ) else None
 
-                image_url = capture_data.get("image_url")
-                if not image_url:
-                    # advice.md: 未返回 image_url 也写 capture_jobs 记录
-                    logger.warning(
-                        "capture worker 未返回 image_url: symbol=%s", symbol,
-                    )
-                    db.add(CaptureJob(
-                        event_id=first_event.id,
-                        instrument_id=inst_id,
-                        user_id=user_ids[0],
-                        message_group_id=message_group_id,
-                        indicator_view=indicator_view,
-                        status=CAPTURE_STATUS_FAILED,
-                        attempt_count=1,
-                        error_code="NO_IMAGE_URL",
-                        error_message="capture worker 未返回 image_url",
-                        finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
-                    ))
-                    await db.commit()
-                    continue
-
-                # 截图成功：写 capture_jobs 记录（status=succeeded，便于审计 + 管理员页面展示）
-                db.add(CaptureJob(
-                    event_id=first_event.id,
-                    instrument_id=inst_id,
-                    user_id=user_ids[0],
-                    message_group_id=message_group_id,
-                    indicator_view=indicator_view,
-                    status=CAPTURE_STATUS_SUCCEEDED,
-                    attempt_count=1,
-                    image_url=image_url,
-                    finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
-                ))
-
-                # 为每个用户创建图片通知消息并写入 Outbox
-                for uid in user_ids:
-                    try:
-                        message = await self._create_chart_image_message(
-                            db, uid, inst_id, symbol, stock_name, events,
-                        )
-                        await write_outbox(
-                            db=db,
-                            event_type="notification.message.created",
-                            payload={
-                                "message_id": str(message.id),
-                                "user_id": str(uid),
-                                "delivery_type": "image",
-                                "image_url": image_url,
-                                "message_group_id": message_group_id,
-                            },
-                            aggregate_type="notification_message",
-                            aggregate_id=message.id,
-                        )
+                    # [Gate3] 未知事件类型显式跳过，不回退 node_cluster 生成错误图片
+                    if not is_supported_event_type(event.event_type, event_payload):
                         logger.info(
-                            "图片 Outbox 已写入: symbol=%s user_id=%s image_url=%s",
-                            symbol, uid, image_url,
+                            "跳过未映射事件类型: symbol=%s event_id=%s event_type=%s",
+                            symbol, event.id, event.event_type,
                         )
+                        db.add(CaptureJob(
+                            event_id=event.id,
+                            instrument_id=inst_id,
+                            user_id=user_ids[0],
+                            message_group_id=message_group_id,
+                            indicator_view=None,
+                            status=CAPTURE_STATUS_FAILED,
+                            attempt_count=1,
+                            error_code=UNSUPPORTED_INDICATOR_VIEW,
+                            error_message=f"未映射事件类型: {event.event_type}",
+                            finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+                        ))
+                        await db.commit()
+                        continue
+
+                    # [CHANGE-20260720-003 §三] 从事件类型 + payload 自动映射 indicator_view
+                    indicator_view = resolve_indicator_view(
+                        event.event_type, event_payload
+                    )
+
+                    # [Task 2] focus_event 贯穿链路：从 event.payload 提取 focus 字段
+                    #   字段来源：smc_monitor._build_event_draft 写入 payload
+                    focus_event_info: dict[str, Any] = {
+                        "focus_event_id": str(event.id),
+                        "focus_event_type": event.event_type,
+                    }
+                    if event_payload is not None:
+                        for k in ("anchor_time", "confirmed_time", "level",
+                                  "bar_high", "bar_low", "bias", "internal",
+                                  "bullish", "eqhl_type", "second_pivot_time"):
+                            v = event_payload.get(k)
+                            if v is not None:
+                                focus_event_info[k] = v
+
+                    # [Gate3] 每事件唯一 capture_run_id/output_filename：
+                    # 必须含 event_id + indicator_view，避免同分钟多事件互相去重
+                    event_run_suffix = f"{inst_id}-{event.id}-{indicator_view}"
+
+                    # [飞书两段式投递] - 生成短期 capture token（携带 event_id）
+                    token = create_capture_token(
+                        subject=str(user_ids[0]),
+                        event_id=str(event.id),
+                        expires_delta=timedelta(seconds=capture_token_ttl),
+                        scope=CAPTURE_SCOPE_STOCK_DETAIL,
+                        instrument_id=str(inst_id),
+                        user_id=str(user_ids[0]),
+                    )
+
+                    capture_payload = {
+                        "symbol": symbol,
+                        "event_id": str(event.id),
+                        "token": token,
+                        "frontend_base_url": frontend_base_url,
+                        "output_filename": f"monitor-{event_run_suffix}",
+                        "instrument_id": str(inst_id),
+                        "chart_version": "v1",
+                        # [Feishu] - 飞书盘中截图业务默认 1d（日线）
+                        "timeframe": FEISHU_CAPTURE_TIMEFRAME,
+                        "capture_run_id": f"monitor-{event_run_suffix}",
+                        "source_bar_time": event.event_time.isoformat(),
+                        "disable_cache": True,
+                        "indicator_view": indicator_view,
+                        "focus_event": focus_event_info,
+                    }
+                    try:
+                        async with httpx.AsyncClient(timeout=60.0) as client:
+                            capture_resp = await client.post(
+                                f"{capture_worker_url.rstrip('/')}/capture",
+                                json=capture_payload,
+                            )
+                            capture_resp.raise_for_status()
+                            capture_data = capture_resp.json()
                     except Exception as exc:
+                        # advice.md: 截图失败不吞掉，写 capture_jobs 记录（支持重试 + 管理员可见）
                         logger.warning(
-                            "图片 Outbox 写入失败: symbol=%s user_id=%s: %s",
-                            symbol, uid, exc,
+                            "capture worker 截图失败: symbol=%s event_id=%s: %s",
+                            symbol, event.id, exc,
                         )
-            except Exception as exc:
-                logger.warning("截图/推送失败: %s: %s", symbol, exc)
+                        db.add(CaptureJob(
+                            event_id=event.id,
+                            instrument_id=inst_id,
+                            user_id=user_ids[0],
+                            message_group_id=message_group_id,
+                            indicator_view=indicator_view,
+                            status=CAPTURE_STATUS_FAILED,
+                            attempt_count=1,
+                            error_code="CAPTURE_REQUEST_FAILED",
+                            error_message=str(exc)[:500],
+                            finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+                        ))
+                        await db.commit()
+                        continue
+
+                    image_url = capture_data.get("image_url")
+                    if not image_url:
+                        logger.warning(
+                            "capture worker 未返回 image_url: symbol=%s event_id=%s",
+                            symbol, event.id,
+                        )
+                        db.add(CaptureJob(
+                            event_id=event.id,
+                            instrument_id=inst_id,
+                            user_id=user_ids[0],
+                            message_group_id=message_group_id,
+                            indicator_view=indicator_view,
+                            status=CAPTURE_STATUS_FAILED,
+                            attempt_count=1,
+                            error_code="NO_IMAGE_URL",
+                            error_message="capture worker 未返回 image_url",
+                            finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+                        ))
+                        await db.commit()
+                        continue
+
+                    # 截图成功：写 capture_jobs 记录（status=succeeded，便于审计 + 管理员页面展示）
+                    db.add(CaptureJob(
+                        event_id=event.id,
+                        instrument_id=inst_id,
+                        user_id=user_ids[0],
+                        message_group_id=message_group_id,
+                        indicator_view=indicator_view,
+                        status=CAPTURE_STATUS_SUCCEEDED,
+                        attempt_count=1,
+                        image_url=image_url,
+                        finished_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+                    ))
+
+                    # [Gate3] 同一事件多用户只截图一次，随后为每个用户创建 image Outbox
+                    for uid in user_ids:
+                        try:
+                            message = await self._create_chart_image_message(
+                                db, uid, inst_id, symbol, stock_name, event,
+                                indicator_view,
+                            )
+                            await write_outbox(
+                                db=db,
+                                event_type="notification.message.created",
+                                payload={
+                                    "message_id": str(message.id),
+                                    "user_id": str(uid),
+                                    "delivery_type": "image",
+                                    "image_url": image_url,
+                                    "message_group_id": message_group_id,
+                                },
+                                aggregate_type="notification_message",
+                                aggregate_id=message.id,
+                            )
+                            logger.info(
+                                "图片 Outbox 已写入: symbol=%s event_id=%s "
+                                "user_id=%s image_url=%s",
+                                symbol, event.id, uid, image_url,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "图片 Outbox 写入失败: symbol=%s event_id=%s "
+                                "user_id=%s: %s",
+                                symbol, event.id, uid, exc,
+                            )
+                except Exception as exc:
+                    # [Gate3] 单事件失败不阻塞其他事件
+                    logger.warning(
+                        "事件截图/推送失败（不阻塞其他事件）: symbol=%s event_id=%s: %s",
+                        symbol, getattr(event, "id", "?"), exc,
+                    )
 
     async def _create_chart_image_message(
         self,
@@ -1702,9 +1731,16 @@ class MonitorBatchService:
         instrument_id: uuid.UUID,
         symbol: str,
         stock_name: str,
-        events: list[StrategyEvent],
+        event: StrategyEvent,
+        indicator_view: str,
     ) -> Any:
-        """为单只股票图片创建通知消息（幂等）。
+        """为单个事件图片创建通知消息（幂等）。
+
+        [Gate3 图片修复] 幂等键必须包含 event_id + indicator_view：
+        - 同一事件重试不重复创建消息
+        - 不同事件即使同一分钟也不互相去重
+        - 同一事件不同 indicator_view 不会冲突（理论上同一事件只对应一个 indicator_view，
+          但加上该字段可防御 payload 显式指定 indicator_view 与 event_type 默认映射不一致的场景）
 
         Args:
             db: 异步会话
@@ -1712,22 +1748,25 @@ class MonitorBatchService:
             instrument_id: 标的 ID
             symbol: 股票代码
             stock_name: 股票名称
-            events: 触发事件列表
+            event: 触发事件（单个）
+            indicator_view: 该事件对应的 indicator_view（node_cluster/bollinger/smc）
 
         Returns:
             NotificationMessage 对象
         """
-        event_type = events[0].event_type if events else "monitor_chart"
+        event_type = event.event_type
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
             template_key="monitor_event",
             template_version="1.1.0",
-            title=f"监控图表｜{stock_name}",
+            title=f"监控图表｜{stock_name}｜{event_type}",
             summary=f"{symbol} 触发 {event_type}，详见附图",
             resource_refs={
                 "instrument_id": str(instrument_id),
                 "symbol": symbol,
                 "event_type": event_type,
+                "event_id": str(event.id),
+                "indicator_view": indicator_view,
             },
             data_time=format_shanghai_datetime(),
             primary_instrument={
@@ -1737,13 +1776,17 @@ class MonitorBatchService:
             },
             event_summary=f"{symbol} {event_type}",
         )
+        # [Gate3] 幂等键含 event_id + indicator_view：
+        # 不再使用 user_id:instrument_id:minute，避免同分钟多事件互相去重
         return await create_message(
             db=db,
             user_id=user_id,
             message_dto=dto,
             source_type="monitor_chart",
             source_id=instrument_id,
-            idempotency_key=f"monitor-chart:{user_id}:{instrument_id}:{datetime.now(UTC).strftime('%Y%m%d%H%M')}",
+            idempotency_key=(
+                f"monitor-chart:{user_id}:{instrument_id}:{event.id}:{indicator_view}"
+            ),
         )
 
     async def _render_instrument_chart(

@@ -1,14 +1,14 @@
-# CHANGE-20260727-006：Gate 2 PRD60 权限闭环（require_any_capability + 邀请码三勾选 + per-capability 管理 + UI gating）
+# CHANGE-20260727-006：Gate 2 PRD60 权限代码（require_any_capability + 邀请码三勾选 + per-capability 管理 + UI gating）
 
-状态：已完成（代码+测试+lint 已核验；三进程真实页面验证因 swap 阈值延后）
-日期：2026-07-27
+状态：进行中（代码+单元测试+DB 集成测试已通过；三进程真实运行验证未完成）
+日期：2026-07-27（2026-07-28 补验 DB 集成测试）
 类型：behavior
 对应 PRD：`docs/prd/60-permissions-admin.md`
 对应 Map：`docs/maps/60-permissions-admin.md` §12
 
 ## 1. 变更摘要
 
-Gate 2 在 Phase 5B-2 capability 模型（CHANGE-20260727-005）基础上完成 PRD60 权限产品闭环：
+Gate 2 在 Phase 5B-2 capability 模型（CHANGE-20260727-005）基础上完成权限代码改造（非"闭环"，真实运行验证待补）：
 
 1. **`require_any_capability`**：`/market` 路由允许 `self_selection` 或 `market_data` 任一进入（PA-10/PA-11）。
 2. **`require_watchlist_limit`**：watchlist 数量上限优先从 `self_selection` capability 取值，不再从 legacy plan limits 取值（PA-02）。
@@ -63,8 +63,10 @@ Phase 5B-2 落地了 `UserCapability` 模型与 `require_capability` 单一权�
 
 ### 3.5 测试
 
-- 新增 `backend/tests/test_gate2_capability_schemas.py`（35 tests，纯单元测试不依赖 DB）
+- `backend/tests/test_gate2_capability_schemas.py`（35 tests，纯单元测试不依赖 DB）
 - 覆盖：schema 校验、`require_any_capability` 权限矩阵、`require_watchlist_limit` 来源优先级、邀请码 capability 组合
+- 2026-07-28 补加 `TestCapabilityServiceIntegration`（7 tests，DB 集成测试，事务回滚隔离）
+  - 覆盖：`grant_capability_to_user` 新建/已有取较晚 expires_at、`revoke_capability_from_user` 硬删除、`get_user_capabilities` 三类状态、邀请码 capabilities JSONB 往返、过期 active=False、admin grant_by 记录、三类独立授予
 
 ## 4. 权限矩阵
 
@@ -88,12 +90,15 @@ Phase 5B-2 落地了 `UserCapability` 模型与 `require_capability` 单一权�
 - Ruff：通过（0 errors）
 - TSC：通过（0 errors）
 - ESLint：通过（0 errors，4 pre-existing warnings）
-- pytest：35/35 通过
-- 三进程真实页面/API 验证：未执行（swap 较起点 +1071MB 超阈值，按约束停止重任务）
+- pytest：42/42 通过
+  - 35 项纯 schema/单元测试（不依赖 DB）
+  - 7 项 DB 集成测试（`TestCapabilityServiceIntegration`，事务回滚隔离，2026-07-28 补验）
+- 三进程真实页面/API 验证：未执行（macOS 资源判定已纠正为 Memory Pressure 主导；延后至三进程联调）
 
 ## 7. 未完成项（延后）
 
+- Gate 1 来源上下文真实路由/页面验证
+- Gate 2 权限真实 API/UI 验收（邀请码弹窗、用户抽屉、直接 API 403、仅行情/仅自选菜单）
 - Gate 3：第一金字塔完整契约与右侧 UI
 - Gate 4：盘后编排容错 / 15:05 调度
 - Gate 5：Worker 心跳展示 / GoAccess 管理员访客分析
-- 三进程真实页面/API 验证（swap 阈值解除后补做）

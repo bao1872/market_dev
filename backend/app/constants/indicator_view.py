@@ -7,6 +7,8 @@ CaptureJob / 输出文件名 / 缓存键 / 幂等键 / 状态查询 / 前端 URL
 - smc: 结构（SmcMonitor）
 
 禁止三类指标叠在同一张图：每张截图只渲染一个 indicator_view 对应的图层。
+
+[Gate3 图片修复] 未知事件类型不再回退 node_cluster，改为显式 UNSUPPORTED 跳过。
 """
 
 from __future__ import annotations
@@ -21,6 +23,9 @@ INDICATOR_VIEW_VALUES: tuple[str, ...] = ("node_cluster", "bollinger", "smc")
 
 # 默认值（事件类型未识别时使用，避免 capture 链路 None 渗透）
 DEFAULT_INDICATOR_VIEW: str = "node_cluster"
+
+# [Gate3] 未映射事件类型的错误码（不再回退 node_cluster 生成错误图片）
+UNSUPPORTED_INDICATOR_VIEW: str = "UNSUPPORTED_INDICATOR_VIEW"
 
 # 事件类型 → indicator_view 映射（监控自动发送时使用）
 # 监控事件写入 StrategyEvent.payload["indicator_view"]，capture 链路从 payload 读取，
@@ -89,6 +94,26 @@ def resolve_indicator_view(
 def is_valid_indicator_view(value: str | None) -> bool:
     """校验是否为合法 indicator_view。"""
     return value in INDICATOR_VIEW_VALUES
+
+
+def is_supported_event_type(event_type: str, payload: dict[str, object] | None = None) -> bool:
+    """[Gate3] 检查事件类型是否有已映射的 indicator_view。
+
+    未知事件类型不再回退 node_cluster 生成错误图片，而是显式跳过。
+    payload 中显式指定 indicator_view 时视为已支持。
+
+    Args:
+        event_type: 事件类型
+        payload: 可能含 indicator_view 字段
+
+    Returns:
+        True: 有明确 indicator_view 映射；False: 未映射，应跳过
+    """
+    if payload is not None:
+        iv = payload.get("indicator_view")
+        if isinstance(iv, str) and iv in INDICATOR_VIEW_VALUES:
+            return True
+    return event_type in EVENT_TYPE_TO_INDICATOR_VIEW
 
 
 if __name__ == "__main__":
