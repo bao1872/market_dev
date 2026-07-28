@@ -5,7 +5,7 @@
 // 焦点管理：打开后聚焦关闭按钮、焦点 trap（Tab/Shift+Tab 限制在抽屉内）、
 //   关闭后恢复打开前焦点、body 滚动锁定。
 // 关闭方式：Escape / 点击遮罩 / 关闭按钮；role=dialog aria-modal 完整。
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AtomicFactsPanel } from './AtomicFactsPanel'
 import { FirstPyramidPanel } from '@/features/stock-research/FirstPyramidPanel'
 import styles from './AtomicFactsPanel.module.scss'
@@ -30,6 +30,8 @@ export function AtomicFactsDrawer({ symbol, open, onClose }: AtomicFactsDrawerPr
   const drawerRef = useRef<HTMLElement>(null)
   const closeBtnRef = useRef<HTMLButtonElement>(null)
   const previouslyFocused = useRef<HTMLElement | null>(null)
+  // P0 修复：更多状态观察默认收起，收起时不挂载 AtomicFactsPanel，请求为 0
+  const [moreOpen, setMoreOpen] = useState(false)
 
   // 打开时：记录当前焦点、聚焦关闭按钮、锁定 body 滚动
   useEffect(() => {
@@ -116,10 +118,17 @@ export function AtomicFactsDrawer({ symbol, open, onClose }: AtomicFactsDrawerPr
         </button>
         <div className={styles.drawerBody}>
           <FirstPyramidPanel symbol={symbol} variant="detail" />
-          <details className={styles.moreObservation}>
-            <summary>更多状态观察</summary>
-            <AtomicFactsPanel symbol={symbol} variant="expanded" />
-          </details>
+          <div className={styles.moreObservation}>
+            <button
+              type="button"
+              className={styles.moreObservationToggle}
+              onClick={() => setMoreOpen((v) => !v)}
+              aria-expanded={moreOpen}
+            >
+              {moreOpen ? '▼ 更多状态观察' : '▶ 更多状态观察'}
+            </button>
+            {moreOpen && <AtomicFactsPanel symbol={symbol} variant="expanded" />}
+          </div>
         </div>
       </aside>
     </div>

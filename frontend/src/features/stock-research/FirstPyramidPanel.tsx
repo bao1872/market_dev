@@ -45,9 +45,10 @@ function SummaryGrid({ vm }: { vm: FirstPyramidVM }) {
     { label: '趋势', dir: vm.trend.direction, text: directionLabel(vm.trend.direction) },
     { label: '结构', dir: vm.structure.swingDirection, text: directionLabel(vm.structure.swingDirection) },
     { label: '动量', dir: vm.momentum.direction, text: vm.momentum.squeezeOn ? '挤压' : '释放' },
+    // P0 修复：筹码 available 不映射为偏多方向，使用中性 direction=0
     {
       label: '筹码',
-      dir: vm.chipConsensus && vm.chipConsensus.available ? 1 : 0,
+      dir: 0,
       text: vm.chipConsensus && vm.chipConsensus.available ? '可用' : '可选',
     },
   ]
@@ -74,42 +75,65 @@ function VolumeWaterLevel({ vm }: { vm: FirstPyramidVM['volumeWaterLevel'] }) {
       </div>
     )
   }
-  const pct20 = vm.percentile20 ?? 0
-  const pct200 = vm.percentile200 ?? 0
+  // P0 修复：20日/200日分别判断 null，null 显示"样本不足"，不用 ?? 0
   return (
     <div className={styles.volumeBar}>
       <span className={styles.volumeLabel}>量能水位</span>
       <div className={styles.volumeTrackGroup}>
-        <div className={styles.volumeTrack}>
-          <span className={styles.volumeTrackLabel}>20日</span>
-          <div
-            className={styles.volumeScale}
-            style={{ '--vol-pct': `${Math.min(100, Math.max(0, pct20))}%` } as React.CSSProperties}
-          >
-            <div className={styles.volumeFill} />
-          </div>
-          <span className={styles.volumePct}>{pct20.toFixed(0)}</span>
-          {vm.zscore20 !== null && (
-            <span className={styles.volumeZscore}>z={vm.zscore20.toFixed(2)}</span>
-          )}
-        </div>
-        <div className={styles.volumeTrack}>
-          <span className={styles.volumeTrackLabel}>200日</span>
-          <div
-            className={styles.volumeScale}
-            style={{ '--vol-pct': `${Math.min(100, Math.max(0, pct200))}%` } as React.CSSProperties}
-          >
-            <div className={`${styles.volumeFill} ${styles.long}`} />
-          </div>
-          <span className={styles.volumePct}>{pct200.toFixed(0)}</span>
-          {vm.zscore200 !== null && (
-            <span className={styles.volumeZscore}>z={vm.zscore200.toFixed(2)}</span>
-          )}
-        </div>
+        <VolumeTrack
+          label="20日"
+          percentile={vm.percentile20}
+          zscore={vm.zscore20}
+          longTerm={false}
+        />
+        <VolumeTrack
+          label="200日"
+          percentile={vm.percentile200}
+          zscore={vm.zscore200}
+          longTerm={true}
+        />
       </div>
       <span className={`${styles.badge} ${styles[volumeBadgeClass(vm.badge)]}`}>
         {vm.badge ?? '未知'}
       </span>
+    </div>
+  )
+}
+
+/** 单条量能水位轨道：percentile 为 null 时显示"样本不足" */
+function VolumeTrack({
+  label,
+  percentile,
+  zscore,
+  longTerm,
+}: {
+  label: string
+  percentile: number | null
+  zscore: number | null
+  longTerm: boolean
+}) {
+  if (percentile === null) {
+    return (
+      <div className={styles.volumeTrack}>
+        <span className={styles.volumeTrackLabel}>{label}</span>
+        <span className={styles.volumeNa}>样本不足</span>
+      </div>
+    )
+  }
+  const pctClamped = Math.min(100, Math.max(0, percentile))
+  return (
+    <div className={styles.volumeTrack}>
+      <span className={styles.volumeTrackLabel}>{label}</span>
+      <div
+        className={styles.volumeScale}
+        style={{ '--vol-pct': `${pctClamped}%` } as React.CSSProperties}
+      >
+        <div className={`${styles.volumeFill} ${longTerm ? styles.long : ''}`} />
+      </div>
+      <span className={styles.volumePct}>{percentile.toFixed(0)}</span>
+      {zscore !== null && (
+        <span className={styles.volumeZscore}>z={zscore.toFixed(2)}</span>
+      )}
     </div>
   )
 }
@@ -217,23 +241,35 @@ function MomentumStateCard({ vm }: { vm: FirstPyramidVM['momentum'] }) {
           {vm.available ? '可用' : '无数据'}
         </span>
       </div>
+      {/* P0 修复：方向由 sqzmom_val 决定，挤压状态单独显示 */}
       <div className={`${styles.summaryDir} ${styles[directionClass(vm.direction)]}`}>
-        {vm.squeezeOn ? '挤压中' : '已释放'}
+        {directionLabel(vm.direction)}
       </div>
-      {vm.releaseVsSqueezeRatio !== null && (
-        <div className={styles.dimVolDetail}>
+      <div className={styles.dimVolDetail}>
+        <span>{vm.squeezeOn ? '挤压中' : '已释放'}</span>
+        {vm.sqzmomVal !== null && (
+          <span className={styles.volRatio}>
+            动量值 {vm.sqzmomVal.toFixed(4)}
+          </span>
+        )}
+        {vm.bbWidth !== null && (
+          <span className={styles.volRatio}>
+            BB 带宽 {vm.bbWidth.toFixed(4)}
+          </span>
+        )}
+        {vm.releaseVsSqueezeRatio !== null && (
           <span className={styles.volRatio}>
             释放/挤压 {vm.releaseVsSqueezeRatio.toFixed(2)}x
           </span>
-          {vm.volDivergence && (
-            <span className={`${styles.badge} ${styles[volumeBadgeClass(
-              vm.volDivergence === '放量释放' ? '放量' : '缩量',
-            )]}`}>
-              {vm.volDivergence}
-            </span>
-          )}
-        </div>
-      )}
+        )}
+        {vm.volDivergence && (
+          <span className={`${styles.badge} ${styles[volumeBadgeClass(
+            vm.volDivergence === '放量释放' ? '放量' : '缩量',
+          )]}`}>
+            {vm.volDivergence}
+          </span>
+        )}
+      </div>
     </div>
   )
 }
@@ -258,6 +294,12 @@ function ChipConsensusCard({ vm }: { vm: FirstPyramidVM['chipConsensus'] | null 
           {vm.available ? '可用' : '无数据'}
         </span>
       </div>
+      {/* P0 修复：筹码不伪造方向，显示真实价格相对 POC 位置 */}
+      {vm.positionLabel && (
+        <div className={`${styles.summaryDir} ${styles['dir-neutral']}`}>
+          {vm.positionLabel}
+        </div>
+      )}
       <div className={styles.dimStatus} title={vm.statusText}>
         {vm.statusText}
       </div>

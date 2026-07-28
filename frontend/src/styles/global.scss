@@ -1021,17 +1021,22 @@ button { cursor: pointer; }
 .toast-msg { font-size: 12px; color: v.$color-muted; margin-top: 4px; }
 
 // [Round 2026-07-28-3] First Pyramid 样式已迁移到 FirstPyramidPanel.module.scss
-// /market 右栏"更多观察"折叠区域样式保留在全局（MarketRightPanel 未使用 CSS Module）
+// [P0 修复] /market 右栏"更多观察"使用 button 控制展开，收起时不挂载 AtomicFactsPanel
 .market-more-observation {
   margin-top: 8px;
-  & > summary {
-    cursor: pointer;
-    font-size: 11px;
-    color: v.$color-muted;
-    padding: 4px 8px;
-    user-select: none;
-    &:hover { color: #c8cdd8; }
-  }
+}
+
+.more-observation-toggle {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: v.$color-muted;
+  padding: 4px 8px;
+  user-select: none;
+  width: 100%;
+  text-align: left;
+  &:hover { color: #c8cdd8; }
 }
 
 // ===== V1.1 Multi-Strategy Extensions =====

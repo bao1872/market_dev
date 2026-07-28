@@ -53,6 +53,10 @@ export interface MomentumVM {
   statusText: string
   squeezeOn: boolean
   direction: Direction
+  /** SQZMOM 直方图值（>0 偏多，<0 偏空，null=缺失） */
+  sqzmomVal: number | null
+  /** BB 带宽（null=缺失） */
+  bbWidth: number | null
   releaseVsSqueezeRatio: number | null
   volDivergence: string | null
 }
@@ -60,6 +64,8 @@ export interface MomentumVM {
 export interface ChipConsensusVM {
   available: boolean
   statusText: string
+  /** 价格相对 POC 位置标签（null=无 POC 或不可用） */
+  positionLabel: string | null
 }
 
 export interface FirstPyramidVM {
@@ -169,15 +175,19 @@ function buildStructureEvent(e: PyramidEvent): StructureEventVM {
 function buildTrend(dim: DimensionResult): TrendVM {
   const cf = dim.continuousFactors
   const regimeValue = asNumber(cf['regime_value'])
-  const continuousBars = asNumber(cf['continuous_bars'])
+  // 持续根数读取 dsa_dir_bars（后端实际字段名）
+  const continuousBars = asNumber(cf['dsa_dir_bars'])
   const ratio = asNumber(cf['current_vs_prev_volume_ratio'])
+  // P0 修复：后端无独立"趋势变化新鲜度"字段，不得用 continuous_bars 充当
+  // 有独立字段时再读取，否则留空
+  const trendChangeFreshness = asNumber(cf['trend_change_freshness_bars'])
   return {
     available: dim.available,
     statusText: dim.statusText,
     direction: directionFromSign(regimeValue),
     continuousBars: continuousBars,
     currentVsPrevVolumeRatio: ratio,
-    freshnessLabel: FRESHNESS_LABEL(continuousBars),
+    freshnessLabel: FRESHNESS_LABEL(trendChangeFreshness),
   }
 }
 
@@ -198,14 +208,19 @@ function buildStructure(dim: DimensionResult, maxEvents: number): StructureVM {
 function buildMomentum(dim: DimensionResult): MomentumVM {
   const cf = dim.continuousFactors
   const squeezeOn = asBool(cf['squeeze_on']) ?? false
+  const sqzmomVal = asNumber(cf['sqzmom_val'])
+  const bbWidth = asNumber(cf['bb_width'])
   const releaseRatio = asNumber(cf['release_vs_squeeze_volume_ratio'])
   const volDiv = asString(cf['vol_divergence'])
+  // P0 修复：动量方向由 sqzmom_val 符号决定，不得用 squeeze_on 推断
+  // sqzmom_val > 0 → 偏多；< 0 → 偏空；null 或 0 → 中性
   return {
     available: dim.available,
     statusText: dim.statusText,
     squeezeOn,
-    // squeeze_on=false 视为释放（动量向上）；true 视为挤压中（无方向）
-    direction: squeezeOn ? 0 : 1,
+    direction: directionFromSign(sqzmomVal),
+    sqzmomVal,
+    bbWidth,
     releaseVsSqueezeRatio: releaseRatio,
     volDivergence: volDiv,
   }
@@ -213,9 +228,20 @@ function buildMomentum(dim: DimensionResult): MomentumVM {
 
 function buildChipConsensus(dim: DimensionResult | null): ChipConsensusVM | null {
   if (!dim) return null
+  const cf = dim.continuousFactors
+  const pocPrice = asNumber(cf['poc_price'])
+  const lastClose = asNumber(cf['last_close'])
+  // P0 修复：筹码 available 不等于偏多；显示真实价格相对 POC 位置或中性"可用"
+  let positionLabel: string | null = null
+  if (pocPrice !== null && lastClose !== null) {
+    if (lastClose > pocPrice) positionLabel = '价格在 POC 上方'
+    else if (lastClose < pocPrice) positionLabel = '价格在 POC 下方'
+    else positionLabel = '价格贴合 POC'
+  }
   return {
     available: dim.available,
     statusText: dim.statusText,
+    positionLabel,
   }
 }
 
