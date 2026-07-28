@@ -959,7 +959,7 @@ async def grant_capability_endpoint(
     - 已有该 capability：取较晚的 expires_at（不降权），如提供 watchlist_limit 则更新
     - 无该 capability：新建行，source='admin_grant'，granted_by=管理员 ID
     - self_selection 必须提供 watchlist_limit（PA-02）
-    - expires_at 按 months 自然月计算（PA-03）
+    - expires_at 按 months × 30 天计算（PA-03，30 天周期）
 
     旧 plan_code fallback 仅兼容无 cap 行用户，不覆盖已有独立授权。
     """

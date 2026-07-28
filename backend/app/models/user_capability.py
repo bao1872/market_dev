@@ -10,7 +10,7 @@
 - 三类独立 capability: self_selection / market_data / research_replay
 - 每个 capability 独立授予/撤销/过期，admin 豁免所有检查
 - self_selection 携带 watchlist_limit（管理员自定义，PA-02）
-- expires_at 按自然月计算（PA-03），per-capability 独立
+- expires_at 按 30 天周期计算（PA-03，1 = 30 天），per-capability 独立
 - 旧 Subscription/plan_code 保留兼容期（新读取优先、旧数据 fallback）
 - source: invite_code（邀请码兑换）/ admin_grant（管理员直接授予）/ migration（回填）
 """
@@ -45,7 +45,7 @@ class UserCapability(Base):
     - capability: 权限类型（self_selection/market_data/research_replay）
     - watchlist_limit: 自选数量上限（仅 self_selection 使用，PA-02；其他 capability 为 NULL）
     - granted_at: 授予时间
-    - expires_at: 过期时间（per-capability 独立自然月，PA-03）
+    - expires_at: 过期时间（per-capability 独立 30 天周期，PA-03）
     - source: 来源（invite_code/admin_grant/migration）
     - granted_by: 授予人 user_id（admin_grant 时记录，invite_code/migration 为 NULL）
     - created_at: 记录创建时间
@@ -89,7 +89,7 @@ class UserCapability(Base):
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        comment="过期时间（per-capability 独立自然月，PA-03）",
+        comment="过期时间（per-capability 独立 30 天周期，PA-03）",
     )
     source: Mapped[str] = mapped_column(
         String(32),

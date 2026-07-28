@@ -507,3 +507,86 @@ class TestPRD20QMMapping:
         assert snap.trend.statusText
         assert snap.structure.statusText
         assert snap.momentum.statusText
+
+
+# =============================================================================
+# 8. [Round 2026-07-28 第一金字塔定稿] 结构级别 swing/internal 测试
+# =============================================================================
+
+
+class TestStructureLevelFinalization:
+    """第一金字塔定稿：结构维度同时输出 swing_direction（主要）和 internal_direction（短线）。
+
+    要求：
+    - continuousFactors 必含 swing_direction 和 internal_direction（取值 1/-1/0）
+    - BOS/CHoCH/OB_ENTRY 事件的 extra.structure_level 必须为 'swing' 或 'internal'
+    - EQH/EQL 事件的 extra.structure_level 必须为 None（禁止推测）
+    - statusText 必须同时体现 Swing 和 Internal 方向
+    """
+
+    def test_structure_outputs_swing_and_internal_direction(self, up_bars):
+        """结构维度 continuousFactors 必须同时输出 swing_direction 和 internal_direction。"""
+        snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
+        cf = snap.structure.continuousFactors
+        assert "swing_direction" in cf, "结构维度必须输出 swing_direction（主要结构）"
+        assert "internal_direction" in cf, "结构维度必须输出 internal_direction（短线结构）"
+        # 取值必须为 1 / -1 / 0
+        assert cf["swing_direction"] in (1, -1, 0), f"swing_direction 取值非法: {cf['swing_direction']}"
+        assert cf["internal_direction"] in (1, -1, 0), f"internal_direction 取值非法: {cf['internal_direction']}"
+        # swing_bias 兼容字段保留
+        assert cf["swing_bias"] == cf["swing_direction"], "swing_bias 与 swing_direction 必须一致"
+
+    def test_bos_choch_events_have_structure_level(self, up_bars):
+        """BOS/CHoCH 事件必须标注 structure_level 为 'swing' 或 'internal'。"""
+        snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
+        bos_choch_events = [e for e in snap.structure.events if e.type in ("BOS", "CHoCH")]
+        # 100 根上涨行情应至少产生一个 BOS/CHoCH
+        assert bos_choch_events, "上涨行情 100 根应至少产生一个 BOS/CHoCH 事件"
+        for evt in bos_choch_events:
+            assert evt.extra is not None, f"{evt.type} 事件 extra 不能为 None"
+            level = evt.extra.get("structure_level")
+            assert level in ("swing", "internal"), (
+                f"{evt.type} 事件 structure_level 必须为 'swing'/'internal', 实际: {level}"
+            )
+
+    def test_ob_entry_events_have_structure_level(self, up_bars):
+        """OB_ENTRY 事件必须标注 structure_level 为 'swing' 或 'internal'。"""
+        snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
+        ob_events = [e for e in snap.structure.events if e.type == "OB_ENTRY"]
+        for evt in ob_events:
+            assert evt.extra is not None, "OB_ENTRY 事件 extra 不能为 None"
+            level = evt.extra.get("structure_level")
+            assert level in ("swing", "internal"), (
+                f"OB_ENTRY 事件 structure_level 必须为 'swing'/'internal', 实际: {level}"
+            )
+
+    def test_eqh_eql_events_have_null_structure_level(self, up_bars):
+        """EQH/EQL 事件 structure_level 必须为 None（禁止推测）。"""
+        snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
+        eq_events = [e for e in snap.structure.events if e.type in ("EQH", "EQL", "EQH_EQL")]
+        for evt in eq_events:
+            assert evt.extra is not None, f"{evt.type} 事件 extra 不能为 None"
+            level = evt.extra.get("structure_level")
+            assert level is None, (
+                f"{evt.type} 事件 structure_level 必须为 None（不属于 swing/internal）, 实际: {level}"
+            )
+
+    def test_status_text_includes_swing_and_internal(self, up_bars):
+        """结构维度 statusText 必须同时体现 Swing 和 Internal 方向。"""
+        snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
+        st = snap.structure.statusText
+        assert "Swing" in st, f"statusText 必须包含 Swing 方向, 实际: {st}"
+        assert "Internal" in st, f"statusText 必须包含 Internal 方向, 实际: {st}"
+
+    def test_internal_direction_independent_from_swing(self, up_bars, down_bars):
+        """internal_direction 与 swing_direction 独立输出（不互相覆盖）。"""
+        snap_up = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
+        snap_down = compute_first_pyramid_snapshot(down_bars, symbol="TEST.DOWN")
+        # 两个字段都存在且独立
+        for snap in (snap_up, snap_down):
+            cf = snap.structure.continuousFactors
+            assert "swing_direction" in cf
+            assert "internal_direction" in cf
+            # 两个字段必须分别存在（不是同一个字段的两份拷贝）
+            assert cf["swing_direction"] in (1, -1, 0)
+            assert cf["internal_direction"] in (1, -1, 0)

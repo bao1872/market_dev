@@ -4,7 +4,7 @@
 - generate_invite_codes: 生成邀请码（单个/批量，绑定 plan_code/grant_months）
 - hash_invite_code: 邀请码哈希（SHA256）
 - register_with_invite_code: 邀请码注册（原子操作，写入套餐快照到 Subscription）
-- renew_with_invite_code: 邀请码续期（更新套餐，按自然月顺延到期日）
+- renew_with_invite_code: 邀请码续期（更新套餐，按 30 天周期顺延到期日）
 - get_subscription_status: 查询订阅记录（纯只读，返回 Subscription 对象）
 - get_effective_subscription_status: 只读查询订阅有效状态（active/expired/none）
 - revoke_invite_code: 作废邀请码
@@ -14,12 +14,12 @@
 
 业务规则（plans 表套餐权限）：
 - 生成邀请码：从 plans 表读取 monitor_limit 快照，写入 plan_code/monitor_limit/grant_months
-- 注册：创建 Subscription（source='invite'），到期日按 grant_months 自然月计算
-- 续期（未到期）：从当前到期日顺延 grant_months 个自然月，同时更新 plan_code/entitlement_snapshot
-- 续期（已到期）：从兑换当天计算 grant_months 个自然月
+- 注册：创建 Subscription（source='invite'），到期日按 grant_months × 30 天计算
+- 续期（未到期）：从当前到期日顺延 grant_months × 30 天，同时更新 plan_code/entitlement_snapshot
+- 续期（已到期）：从兑换当天计算 grant_months × 30 天
 - 邀请码为一次性，status: unused → used / revoked
 - 邀请码明文不存储，仅存 SHA256 哈希
-- grant_months 优先用于自然月计算（dateutil.relativedelta），grant_days 保留兼容性
+- grant_months 按 30 天周期计算（1 个月 = 30 天，N 个月 = N×30 天），grant_days 保留兼容性
 
 Phase 8 调整：
 - status 不持久化 'expired'：到期由 get_effective_subscription_status 实时计算
@@ -40,7 +40,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from dateutil.relativedelta import relativedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,17 +75,17 @@ _DEFAULT_GRANT_MONTHS = 1
 
 
 def _compute_expires_at_from_months(base: datetime, grant_months: int | None) -> datetime:
-    """按 grant_months 自然月计算到期时间。
+    """按 grant_months × 30 天计算到期时间（固定 30 天周期）。
 
     Args:
         base: 基准时间
-        grant_months: 自然月数
+        grant_months: 30 天周期数（1 = 30 天，2 = 60 天）
 
     Returns:
         到期时间（时区感知）
     """
     if grant_months is not None and grant_months > 0:
-        return base + relativedelta(months=grant_months)
+        return base + timedelta(days=30 * grant_months)
     # 兼容旧逻辑（未提供 grant_months 时回退 30 天）
     return base + timedelta(days=_DEFAULT_GRANT_DAYS)
 
@@ -94,8 +93,8 @@ def _compute_expires_at_from_months(base: datetime, grant_months: int | None) ->
 def _compute_expires_at(base: datetime, invite: InviteCode) -> datetime:
     """根据邀请码的 grant_months 或 grant_days 计算到期时间。
 
-    优先使用 grant_months（自然月，用 relativedelta），兼容旧邀请码的 grant_days（天数）。
-    自然月计算：1月31日 + 1月 = 2月28日（非闰年），避免 30 天近似的跨月错误。
+    优先使用 grant_months（30 天周期），兼容旧邀请码的 grant_days（天数）。
+    30 天周期：1 个月 = 30 天，2 个月 = 60 天，跨月/跨年按天数计算。
 
     Args:
         base: 基准时间（注册时为 now，续期未到期时为 old_expires_at）
@@ -174,7 +173,7 @@ async def generate_invite_codes(
         created_by: 创建者 user_id（管理员）
         note: 批次备注
         plan_code: 套餐代码（旧模式），默认 observe_20
-        grant_months: 兑换后增加的自然月数（旧模式），默认 1
+        grant_months: 兑换后增加的 30 天周期数（旧模式），默认 1
         capabilities: capability 组合（PA-20 新模式）；提供时优先于 plan_code
 
     Returns:
@@ -234,8 +233,8 @@ async def _grant_capabilities_from_invite(
     如果 invite_code.capabilities 不为 None，为每个 capability 创建独立授权行。
     如果为 None（旧模式），不创建（fallback 到 plan_code 推断，兼容期）。
 
-    per-capability 独立 expires_at（PA-03 自然月）：
-    - 从兑换时间 + months 计算，不继承 Subscription.expires_at
+    per-capability 独立 expires_at（PA-03 30 天周期）：
+    - 从兑换时间 + months × 30 天计算，不继承 Subscription.expires_at
     - 已有该 capability 时取较晚的 expires_at（不降权）
     """
     if invite_code.capabilities is None:
@@ -248,7 +247,7 @@ async def _grant_capabilities_from_invite(
         cap_name = cap_config.get("capability")
         cap_months = cap_config.get("months", 1)
         cap_watchlist_limit = cap_config.get("watchlist_limit")
-        cap_expires_at = now_utc + relativedelta(months=cap_months)
+        cap_expires_at = now_utc + timedelta(days=30 * cap_months)
 
         # 查询是否已有该 capability
         existing = await db.execute(
@@ -361,7 +360,7 @@ async def register_with_invite_code(
         await db.flush()
     db.add(UserRole(user_id=user.id, role_id=member_role.id))
 
-    # 5. 创建订阅记录（按 grant_months 自然月计算到期日，写入套餐快照到 entitlement_snapshot）
+    # 5. 创建订阅记录（按 grant_months × 30 天计算到期日，写入套餐快照到 entitlement_snapshot）
     expires_at = _compute_expires_at(now, invite)
     # [PlanService] - 描述: 从 plans 表查询套餐构造 entitlement_snapshot 快照
     plan = await get_plan_async(db, invite.plan_code or DEFAULT_PLAN_CODE)
@@ -409,11 +408,11 @@ async def renew_with_invite_code(
     user_id: uuid.UUID,
     raw_invite_code: str,
 ) -> tuple[Subscription, datetime | None, datetime]:
-    """邀请码续期 - 同时更新套餐（plan_code/entitlement_snapshot）和按自然月顺延到期日。
+    """邀请码续期 - 同时更新套餐（plan_code/entitlement_snapshot）和按 30 天周期顺延到期日。
 
     业务规则：
-    - 未到期续期：从当前到期日顺延 grant_months 个自然月
-    - 已到期续期：从兑换当天计算 grant_months 个自然月
+    - 未到期续期：从当前到期日顺延 grant_months × 30 天
+    - 已到期续期：从兑换当天计算 grant_months × 30 天
     - 无 subscription 用户：视为首次开通，从当天计算到期日并新建 subscription
     - 续期时更新 subscription.plan_code/entitlement_snapshot 为邀请码的套餐快照
     - 兼容旧邀请码（grant_months 为 NULL 时回退 grant_days 天数计算）
@@ -456,7 +455,7 @@ async def renew_with_invite_code(
     subscription = subscription_result.scalar_one_or_none()
     is_new_subscription = subscription is None
 
-    # 3. 计算新的到期时间（按 grant_months 自然月，兼容旧 grant_days）
+    # 3. 计算新的到期时间（按 grant_months × 30 天，兼容旧 grant_days）
     # old_expires_at 归一化为时区感知，确保与 new_expires_at（基于 now=UTC）一致，
     # 避免 API 响应中 old/new 一个 naive 一个 aware 导致前端解析失败
     now = datetime.now(UTC)
@@ -607,13 +606,13 @@ async def grant_subscription_to_user(
     - 管理员（admin 角色）不绑定套餐，禁止授予
     - 用户已存在 subscription 时失败（避免覆盖）
     - 从 plans 表读取 entitlement_snapshot 快照
-    - 到期日按 grant_months 自然月计算
+    - 到期日按 grant_months × 30 天计算
 
     Args:
         db: 异步数据库会话
         user_id: 被授权用户 ID
         plan_code: 套餐代码
-        grant_months: 授予自然月数
+        grant_months: 授予 30 天周期数
         actor_user_id: 操作管理员 ID（可选）
 
     Returns:
@@ -666,17 +665,17 @@ async def renew_subscription(
     grant_months: int,
     actor_user_id: uuid.UUID | None = None,
 ) -> tuple[Subscription, datetime, datetime]:
-    """管理员为用户续期订阅（按自然月顺延或从当前时间重新计算）。
+    """管理员为用户续期订阅（按 30 天周期顺延或从当前时间重新计算）。
 
     业务规则：
-    - 未到期：从当前 expires_at 顺延 grant_months 个自然月
-    - 已到期：从当前时间重新计算 grant_months 个自然月
+    - 未到期：从当前 expires_at 顺延 grant_months × 30 天
+    - 已到期：从当前时间重新计算 grant_months × 30 天
     - 管理员（admin 角色）不续期
 
     Args:
         db: 异步数据库会话
         user_id: 用户 ID
-        grant_months: 续期自然月数
+        grant_months: 续期 30 天周期数
         actor_user_id: 操作管理员 ID（可选）
 
     Returns:
@@ -771,7 +770,7 @@ async def change_subscription_plan(
         db: 异步数据库会话
         user_id: 用户 ID
         plan_code: 目标套餐代码
-        grant_months: 授予/续期自然月数
+        grant_months: 授予/续期 30 天周期数
         actor_user_id: 操作管理员 ID（可选）
 
     Returns:
@@ -1058,13 +1057,13 @@ async def grant_capability_to_user(
     行为：
     - 已有该 capability：取较晚的 expires_at（不降权），如提供 watchlist_limit 则更新
     - 无该 capability：新建行，source='admin_grant'，granted_by=管理员 ID
-    - expires_at 按 grant_months 自然月计算（PA-03），从 now 起
+    - expires_at 按 30 天周期计算（PA-03，months × 30 天），从 now 起
 
     Args:
         db: 异步数据库会话
         user_id: 目标用户 ID
         capability: 权限类型 self_selection/market_data/research_replay
-        months: 自然月有效期（1-36）
+        months: 30 天周期有效期（1-36，1 = 30 天）
         watchlist_limit: 自选数量上限（仅 self_selection 必填）
         granted_by: 管理员 user_id
 
@@ -1086,7 +1085,7 @@ async def grant_capability_to_user(
         raise ValueError(f"months 必须在 1-36 之间，当前: {months}")
 
     now_utc = datetime.now(UTC)
-    new_expires_at = now_utc + relativedelta(months=months)
+    new_expires_at = now_utc + timedelta(days=30 * months)
 
     # 查询是否已有该 capability
     existing = await db.execute(

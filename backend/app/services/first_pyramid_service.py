@@ -321,24 +321,36 @@ def _build_structure_dimension(
     order_blocks = smc_result.get("order_blocks", []) or []
     equal_highs_lows = smc_result.get("equal_highs_lows", []) or []
     swing_bias = int(smc_result.get("swing_bias", 0) or 0)
+    # [Round 2026-07-28 第一金字塔定稿] 同时输出 internal_direction（短线结构方向）
+    internal_bias = int(smc_result.get("internal_bias", 0) or 0)
 
     # 离散事件：BOS / CHoCH
     pyramid_events: list[PyramidEvent] = []
     for evt in events_raw:
         evt_type = evt.get("type", "")  # "BOS" / "CHoCH"
-        direction_raw = evt.get("direction")
+        # [Round 2026-07-28] SMC 事件用 bullish(bool)/bias(1/-1) 表达方向，
+        # 兼容旧 direction 字段；定稿要求 BOS/CHoCH 必须保存 bullish/bearish
         direction = None
-        if direction_raw == 1 or direction_raw == "bullish":
+        if evt.get("bullish") is True or evt.get("bias") == 1:
             direction = "up"
-        elif direction_raw == -1 or direction_raw == "bearish":
+        elif evt.get("bullish") is False or evt.get("bias") == -1:
             direction = "down"
+        else:
+            direction_raw = evt.get("direction")
+            if direction_raw in (1, "bullish", "up"):
+                direction = "up"
+            elif direction_raw in (-1, "bearish", "down"):
+                direction = "down"
         occurred_at = _safe_iso_date(evt.get("confirmed_time") or evt.get("time"))
         bar_index = evt.get("confirmed_index") or evt.get("barIndex")
-        price = _safe_float(evt.get("broken_level") or evt.get("price"))
+        price = _safe_float(evt.get("level") or evt.get("broken_level") or evt.get("price"))
         # 新鲜度 = 最后 bar 索引 - 事件确认索引
         fresh = max(0, int(last_bar_index - int(bar_index))) if bar_index is not None else 0
         # Gate1：事件 bar 的 VolumeContext
         evt_vc, evt_badge = _event_vc(vc_series, int(bar_index) if bar_index is not None else None)
+        # [Round 2026-07-28] BOS/CHoCH 必须标注 structure_level: swing/internal
+        is_internal = bool(evt.get("internal", False))
+        structure_level = "internal" if is_internal else "swing"
         pyramid_events.append(
             PyramidEvent(
                 type=str(evt_type),
@@ -349,26 +361,46 @@ def _build_structure_dimension(
                 freshnessBars=fresh,
                 volumeContext=evt_vc,
                 volumeBadge=evt_badge,
-                extra={"anchor_index": evt.get("anchor_index")},
+                extra={
+                    "anchor_index": evt.get("anchor_index"),
+                    "structure_level": structure_level,
+                },
             )
         )
 
     # 进入 OB 事件：价格由区外进入区域（非区域存在）
+    # [Round 2026-07-28] SMC OB 输出 dict 字段为 internal/bias/bar_high/bar_low/mitigated，
+    # 不再有 is_active/direction/high/low；按真实字段提取
     for ob in order_blocks:
-        if not ob.get("is_active", False):
+        # active = 未被 mitigated（mitigated=False 表示仍活跃）
+        if ob.get("mitigated", False):
             continue
         ob_type = "OB_ENTRY"
-        ob_direction_raw = ob.get("direction", ob.get("type"))
-        direction = None
-        if ob_direction_raw in (1, "bullish", "demand"):
+        # 方向：bias(1/-1) 或 bullish(bool)
+        ob_bias = ob.get("bias")
+        if ob_bias == 1 or ob.get("bullish") is True:
             direction = "up"
-        elif ob_direction_raw in (-1, "bearish", "supply"):
+        elif ob_bias == -1 or ob.get("bullish") is False:
             direction = "down"
+        else:
+            ob_direction_raw = ob.get("direction", ob.get("type"))
+            if ob_direction_raw in (1, "bullish", "demand", "up"):
+                direction = "up"
+            elif ob_direction_raw in (-1, "bearish", "supply", "down"):
+                direction = "down"
+            else:
+                direction = None
         occurred_at = _safe_iso_date(ob.get("mitigation_time") or ob.get("confirmed_time"))
         bar_index = ob.get("mitigation_index") or ob.get("confirmed_index")
-        price = _safe_float(ob.get("mitigation_price") or ob.get("high") or ob.get("low"))
+        # OB 区域价格：bar_high/bar_low（SMC 输出字段名）
+        ob_high = _safe_float(ob.get("bar_high") or ob.get("high"))
+        ob_low = _safe_float(ob.get("bar_low") or ob.get("low"))
+        price = _safe_float(ob.get("mitigation_price")) or ob_high or ob_low
         fresh = max(0, int(last_bar_index - int(bar_index))) if bar_index is not None else 0
         evt_vc, evt_badge = _event_vc(vc_series, int(bar_index) if bar_index is not None else None)
+        # [Round 2026-07-28] OB 必须标注 structure_level: swing/internal
+        ob_internal = bool(ob.get("internal", False))
+        ob_level = "internal" if ob_internal else "swing"
         pyramid_events.append(
             PyramidEvent(
                 type=ob_type,
@@ -380,8 +412,9 @@ def _build_structure_dimension(
                 volumeContext=evt_vc,
                 volumeBadge=evt_badge,
                 extra={
-                    "ob_high": _safe_float(ob.get("high")),
-                    "ob_low": _safe_float(ob.get("low")),
+                    "ob_high": ob_high,
+                    "ob_low": ob_low,
+                    "structure_level": ob_level,
                 },
             )
         )
@@ -399,6 +432,7 @@ def _build_structure_dimension(
         price = _safe_float(eq.get("second_pivot_price") or eq.get("price"))
         fresh = max(0, int(last_bar_index - int(bar_index))) if bar_index is not None else 0
         evt_vc, evt_badge = _event_vc(vc_series, int(bar_index) if bar_index is not None else None)
+        # [Round 2026-07-28] EQH/EQL 不属于 swing/internal，structure_level=null（禁止推测）
         pyramid_events.append(
             PyramidEvent(
                 type=str(eq_type),
@@ -409,6 +443,7 @@ def _build_structure_dimension(
                 freshnessBars=fresh,
                 volumeContext=evt_vc,
                 volumeBadge=evt_badge,
+                extra={"structure_level": None},
             )
         )
 
@@ -421,6 +456,10 @@ def _build_structure_dimension(
 
     continuous_factors = {
         "swing_bias": swing_bias,
+        # [Round 2026-07-28 第一金字塔定稿] swing_direction（主要结构）/ internal_direction（短线结构）
+        # 取值：1=bullish, -1=bearish, 0=未形成；与 swing_bias 同义，命名对齐定稿
+        "swing_direction": swing_bias,
+        "internal_direction": internal_bias,
         "active_ob_count": sum(1 for ob in order_blocks if ob.get("is_active", False)),
         "trailing_top": _safe_float(smc_result.get("trailing", {}).get("top")),
         "trailing_bottom": _safe_float(smc_result.get("trailing", {}).get("bottom")),
@@ -428,12 +467,13 @@ def _build_structure_dimension(
 
     # 状态文本
     bias_text = {1: "Swing 偏多", -1: "Swing 偏空", 0: "Swing 未定"}.get(swing_bias, "Swing 未定")
+    internal_text = {1: "Internal 偏多", -1: "Internal 偏空", 0: "Internal 未定"}.get(internal_bias, "Internal 未定")
     last_event_text = ""
     if pyramid_events:
         last_evt = pyramid_events[-1]
         last_event_text = f"；最近 {last_evt.type}（{last_evt.direction or '-'}, 新鲜度 {last_evt.freshnessBars}）"
 
-    status_text = bias_text + last_event_text
+    status_text = bias_text + "；" + internal_text + last_event_text
 
     evidence = {
         "n_pivots": len(smc_result.get("pivots", []) or []),

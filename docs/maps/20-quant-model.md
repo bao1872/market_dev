@@ -62,7 +62,7 @@
 | 调用方（盘后回补） | `dsa_selector.py:911` `DSASelector`（历史回补） → `compute_dsa_bundle` |
 | 调用方（研究路径，非生产） | `research/feature_computer.py:293` 直接调用 `compute_dsa_history`（与 SSOT 一致，但不走 bundle） |
 | 验证入口 | `test_dsa_selector.py`、`test_dsa_publish_validation.py`、`test_dsa_visual_segments.py`、`test_dsa_bundle_consistency.py`、`test_dsa_factor_visual_separation.py`、`test_dsa_visual_segments_time_format.py` |
-| 与 SMC 边界 | DSA 负责趋势段（regime_value/dsa_dir_bars/visual_segments）；SMC `compute_smc_pine` 仅输出 events(BOS/CHoCH)/order_blocks/equal_highs_lows/trailing/swing_bias/pivots，**不维护等价趋势段**。无重复定义。 |
+| 与 SMC 边界 | DSA 负责趋势段（regime_value/dsa_dir_bars/visual_segments）；SMC `compute_smc_pine` 仅输出 events(BOS/CHoCH)/order_blocks/equal_highs_lows/trailing/swing_bias/internal_bias/pivots，**不维护等价趋势段**。无重复定义。[Round 2026-07-28] SMC 同时输出 `swing_bias`（主要结构方向）与 `internal_bias`（短线结构方向），二者独立。 |
 
 ### Phase 5B-1 趋势修改清单（已实施 2026-07-27）
 
@@ -79,9 +79,10 @@
 | 项目 | 当前事实 |
 |---|---|
 | 权威入口 | `backend/app/strategy_assets/algorithms/features/smc_pine_core.py:compute_smc_pine` |
-| BOS/CHoCH | `display_structure` 方法输出 events（type=BOS/CHoCH），anchor/confirmed 因果契约 |
-| OB 和进入事件 | `internal_order_blocks` / `swing_order_blocks`，含 mitigation；`smc_monitor.py` 五类触碰事件 |
-| 连续高点/低点 | `equal_highs_lows`（EQH/EQL）事件 |
+| BOS/CHoCH | `display_structure` 方法输出 events（type=BOS/CHoCH），anchor/confirmed 因果契约；事件 dict 含 `internal: bool` 字段标识 swing/internal 级别。[Round 2026-07-28] 第一金字塔 `_build_structure_dimension` 将其映射为 `extra.structure_level = "swing" \| "internal"` |
+| OB 和进入事件 | `internal_order_blocks` / `swing_order_blocks`，含 mitigation；`smc_monitor.py` 五类触碰事件；OB 输出 dict 含 `internal: bool`，第一金字塔映射为 `extra.structure_level` |
+| 连续高点/低点 | `equal_highs_lows`（EQH/EQL）事件；不属于 swing/internal，第一金字塔 `extra.structure_level = null`（禁止推测） |
+| 结构方向 | `swing_bias`（主要结构，1/-1/0）+ `internal_bias`（短线结构，1/-1/0）；第一金字塔同时输出 `swing_direction`/`internal_direction`（与 bias 同义，命名对齐定稿） |
 | 成交量信息 | SMC 本身不包含独立成交量过滤；结构面板通过 `structural_factor_service` 第 5 组成交参与补充 |
 | Pine 对齐位置 | `smc_pine_core.py` 实现 Pine 语义原语；用户原创 Pine 参考源（原 `ref/smc_user_source.pine`，人工阅读）；[Phase 5B-0] 该文件已 `git rm --cached` 退出 git 跟踪，仅保留为本地参考；FVG 完全排除 |
 | 写入位置 | SMC 事件进入 `strategy_events` / `monitor` 状态；结构因子进入 `stock_feature_snapshot` |

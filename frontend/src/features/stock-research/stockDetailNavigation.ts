@@ -172,6 +172,25 @@ export function resolveStockDetailOrigin(
   return { originScope: 'watchlist', contextMismatch: false }
 }
 
+/**
+ * 计算来源徽标文案（纯函数，可测试）。
+ *
+ * 规则：
+ * - 上下文失效 → '来源失效'
+ * - direct → '直接访问'
+ * - market → '行情来源'
+ * - watchlist → '自选来源'
+ */
+export function computeSourceBadge(
+  origin: OriginScope,
+  contextInvalid: boolean,
+): string {
+  if (contextInvalid) return '来源失效'
+  if (origin === 'direct') return '直接访问'
+  if (origin === 'market') return '行情来源'
+  return '自选来源'
+}
+
 // ===== [PRD V2.0 §4.4] DetailEntryContext 唯一对象 =====
 
 /**

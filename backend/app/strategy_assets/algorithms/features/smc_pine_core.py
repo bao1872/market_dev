@@ -930,6 +930,7 @@ def compute_smc_pine(
                 "last_bottom_time": None,
             },
             "swing_bias": 0,
+            "internal_bias": 0,
             "pivots": [],
             "time": [],
             "params": actual_params,
@@ -955,6 +956,9 @@ def compute_smc_pine(
         # 前端规则：bias===-1 → Strong High（否则 Weak High）；bias===1 → Strong Low（否则 Weak Low）
         # 禁止根据 trailing 时间、close 位置或最后一个可见事件重新推断
         "swing_bias": state.swing_trend.bias,
+        # [Round 2026-07-28 第一金字塔定稿] 同时输出 internal_bias（短线结构方向）
+        # 取值同 swing_bias：1=bullish, -1=bearish, 0=未形成
+        "internal_bias": state.internal_trend.bias,
         "pivots": state.pivots,
         "time": list(times),
         "params": actual_params,

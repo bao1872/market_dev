@@ -33,7 +33,7 @@ import { resolveBackPath } from './detailNavigation'
 import { useToast } from '@/store/toast'
 import { changePctColorClass, fmtChange } from '@/features/trend-selection'
 import { resolveDetailSourceContextV2 } from '@/features/stock-research/detailSourceContext'
-import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNavigation'
+import { buildStockDetailUrl, computeSourceBadge } from '@/features/stock-research/stockDetailNavigation'
 
 // [DetailSourceContextV2] 左栏来源列表滚动位置 sessionStorage key 前缀
 // key 由 stableContextId 生成（不含 selectedSymbol，切股时不变），避免不同来源上下文串扰
@@ -235,13 +235,7 @@ export default function StockDetailPage() {
   // invalid → "来源失效"（不显示"自选来源"，避免误导）
   // direct → "直接访问"（不映射为 watchlist）
   // market → "行情来源"；watchlist → "自选来源"
-  const sourceBadge = sourceContextInvalid
-    ? '来源失效'
-    : sourceCtxV2.origin === 'direct'
-      ? '直接访问'
-      : sourceCtxV2.origin === 'market'
-        ? '行情来源'
-        : '自选来源'
+  const sourceBadge = computeSourceBadge(sourceCtxV2.origin, sourceContextInvalid)
 
   // [P0-1] 是否显示左栏来源列表：capture 模式和 direct 访问时不显示
   // direct 访问无来源上下文，左栏隐藏，布局切换单列

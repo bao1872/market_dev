@@ -8,7 +8,7 @@
 
 表结构：
 - invite_codes: 邀请码表（code_hash 唯一，status unused/used/revoked，
-  plan_code/monitor_limit 快照，grant_months 自然月，grant_days 兼容旧逻辑）
+  plan_code/monitor_limit 快照，grant_months 30 天周期，grant_days 兼容旧逻辑）
 - invite_redemptions: 邀请码兑换记录（invite_code_id + user_id，记录 old/new expires_at）
 
 设计要点：
@@ -17,7 +17,7 @@
 - 兑换记录保留 old_expires_at 和 new_expires_at，支持审计追踪
 - 管理员停用账户（users.status=disabled）与订阅到期（subscriptions.status=expired）是两个独立状态
 - plan_code/monitor_limit 为套餐快照，从 plans 表查询（app.services.plan_service.get_plan）
-- grant_months 优先用于自然月计算（dateutil.relativedelta），grant_days 保留兼容性
+- grant_months 按 30 天周期计算（1 = 30 天，N = N×30 天），grant_days 保留兼容性
 - Phase 2 Task 2.2：Membership 模型已删除，订阅数据迁移到 subscriptions 表 + Subscription 模型
   （见 app/models/subscription.py）
 """
@@ -49,7 +49,7 @@ class InviteCode(Base):
     套餐字段（044_plan_contract_fields 迁移新增）：
     - plan_code: 套餐代码（observe_20/research_50），生成时从 plans 表选定
     - monitor_limit: 监控上限快照（从 plans 表读取，写入邀请码作为不可变快照）
-    - grant_months: 兑换后增加的自然月数（替代 grant_days 的 30 天近似）
+    - grant_months: 兑换后增加的 30 天周期数（1 = 30 天，N = N×30 天）
     - grant_days: 保留兼容性（旧邀请码=30，新代码优先使用 grant_months）
     """
 
@@ -83,7 +83,7 @@ class InviteCode(Base):
     grant_months: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
-        comment="兑换后增加的自然月数（优先于 grant_days，用 relativedelta 计算）",
+        comment="兑换后增加的 30 天周期数（1 = 30 天，N = N×30 天）",
     )
     # [Phase 5B-2 PRD60 PA-20] 邀请码 capability 组合（新邀请码优先使用，旧邀请码 fallback 到 plan_code）
     # 格式: [{"capability": "self_selection", "months": 1, "watchlist_limit": <int>}, ...]

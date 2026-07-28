@@ -17,7 +17,7 @@
 |---|---|---|---|
 | PA-01 三类独立权限 | `Subscription.entitlement_snapshot` JSONB | 部分实现 | 套餐绑定，非独立 capability grants |
 | PA-02 自选数量 | `entitlement_snapshot.monitor_limit` | 已实现 | `subscription.py:77` InviteCode.monitor_limit；`access_control_service.py:308 require_quota` |
-| PA-03 自然月有效期 | `Subscription.expires_at` (datetime) | 部分实现 | 单一 expires_at，无 per-capability expiry |
+| PA-03 30 天周期有效期 | `Subscription.expires_at` (datetime)；`subscription_service._compute_expires_at_from_months` 按 `grant_months × 30 天` 计算 | 已实现 | 单一 expires_at，无 per-capability expiry；30 天周期=固定 30×月数天，不按自然月 |
 | PA-10~13 权限矩阵 | `require_feature(feature_name)` 装饰器 | 部分实现 | `access_control_service.py:272`；按套餐 feature 检查，非 capability |
 | PA-20~21 邀请码流程 | `InviteCode` 模型 + `InviteRedemption` | 已实现 | `invitation.py:37`；plan_code 快照，无 capability 组合 |
 | PA-30~31 管理后台 | `/admin/*` 路由 + `require_admin` | 已实现 | `access_control_service.py:216 require_admin` |
@@ -159,7 +159,7 @@ Phase 5B-1 审计发现的偏差（未修复，记录待下一阶段处理）：
 ### 10.2 独立 expires_at
 - 每个 capability 有独立 `expires_at`
 - 邀请码可指定 capability 组合与各自有效期
-- 自然月计算用 `relativedelta(months=+N)`，与 `grant_months` 对齐
+- 自然月计算已改为固定 30 天周期：`timedelta(days=30 * grant_months)`，与 `grant_months` 对齐（1 周期=30 天，N 周期=N×30 天）
 
 ### 10.3 watchlist_limit 独立字段
 - `user_capabilities` 表新增 `watchlist_limit` 列（per-capability）
@@ -300,7 +300,7 @@ Gate 2 在 Phase 5B-2 capability 模型基础上完成权限代码改造（非"�
 
 - 取消"套餐类型"作为主入口，改为三项勾选：`self_selection` / `market_data` / `research_replay`
 - 选择 `self_selection` 时 `watchlist_limit` 必填（管理员自由输入 1-500）
-- 统一 `grant_months` 按自然月（1-36）
+- 统一 `grant_months` 按 30 天周期（1-36 周期，1 周期=30 天）
 - 旧 `plan_code` 模式仍兼容（无 capabilities 时 fallback）
 
 ### 12.5 前端 UI gating（新增，代码+TSC/ESLint 通过，真实 UI 未核验）

@@ -222,7 +222,7 @@ export default function AdminUsersPage() {
   const [capResearchReplay, setCapResearchReplay] = useState(false)
   // self_selection 必填：watchlist_limit（管理员自由输入，1-500）
   const [capWatchlistLimit, setCapWatchlistLimit] = useState(OBSERVE_PLAN_DEFAULT)
-  // 统一 grant_months 按自然月（PA-03）
+  // 统一 grant_months 按 30 天周期（PA-03，1 = 30 天）
   const [generateGrantMonths, setGenerateGrantMonths] = useState(1)
   const [generatedCodes, setGeneratedCodes] = useState<InviteCode[]>([])
 
@@ -369,7 +369,7 @@ export default function AdminUsersPage() {
   /** [Gate2 PRD60 PA-20] 生成邀请码 - 提交 capabilities 组合 + grant_months/count/note
    * 取消"套餐类型"作为主入口，改为三勾选 self_selection/market_data/research_replay
    * 选择 self_selection 时 watchlist_limit 必填且管理员自由输入
-   * 统一 grant_months 按自然月（PA-03）
+   * 统一 grant_months 按 30 天周期（PA-03，1 = 30 天）
    * 至少需要选择一个 capability
    */
   const handleGenerate = useCallback(() => {
@@ -731,7 +731,7 @@ export default function AdminUsersPage() {
         dataType: 'number',
         sortable: true,
         filterable: false,
-        render: (row) => (row.grant_months != null ? `${row.grant_months} 个月` : '—'),
+        render: (row) => (row.grant_months != null ? `${row.grant_months} × 30天` : '—'),
         sortValue: (row) => row.grant_months ?? 0,
       },
       {

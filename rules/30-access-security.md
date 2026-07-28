@@ -21,6 +21,10 @@ Capture Token 只能访问 Capture API。
 
 未经用户明确授权，禁止修改生产环境账户密码。
 
+## 受保护 Owner 账户
+
+`8752028@qq.com` 为项目 Owner 账户，任何环境中禁止修改或删除其 email、password_hash、status、角色、权限和订阅，除非用户在当前任务中明确指定字段并授权。清理测试数据前必须先排除此邮箱。
+
 ## 生产秘密边界（PLANNED）
 
 > 提议中，尚未在 `AGENTS.md` 确立。

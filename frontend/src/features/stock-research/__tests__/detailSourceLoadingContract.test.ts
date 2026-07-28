@@ -101,14 +101,16 @@ test('CHANGE-005-5: StockDetailPage 列表渲染条件排除所有非正常状�
   assert.ok(/!detailActions\.sourceListLoading && !detailActions\.sourceListError && !detailActions\.sourceContextInvalid && !detailActions\.sourceListEmpty && detailActions\.sourceStocks\.length > 0/.test(src), '列表渲染条件必须排除 loading/error/invalid/empty')
 })
 
-test('CHANGE-005-6: loading 占位显示来源类型 header', () => {
-  const src = readSource(STOCK_DETAIL_PAGE)
-  // [Gate1] 改用 sourceBadge 变量（基于 sourceCtxV2.origin 统一推导，更精确）
-  // 接受旧版 sourceListKind 内联表达式或新版 sourceBadge 变量引用
-  const oldPatternMatches = src.match(/sourceListKind === 'market' \? '行情来源' : '自选来源'/g)
-  const newPatternMatches = src.match(/\{sourceBadge\}/g)
-  const totalMatches = (oldPatternMatches?.length ?? 0) + (newPatternMatches?.length ?? 0)
-  assert.ok(totalMatches >= 2, 'loading 占位和列表都需显示 header（sourceListKind 内联或 sourceBadge 变量）')
+test('CHANGE-005-6: 来源徽标文案行为正确（computeSourceBadge 纯函数）', async () => {
+  // 行为测试：验证 computeSourceBadge 在各 origin + invalid 组合下返回正确文案
+  // 不依赖源码字符串匹配，直接测试函数行为
+  const { computeSourceBadge } = await import('../stockDetailNavigation')
+  assert.equal(computeSourceBadge('market', false), '行情来源')
+  assert.equal(computeSourceBadge('watchlist', false), '自选来源')
+  assert.equal(computeSourceBadge('direct', false), '直接访问')
+  assert.equal(computeSourceBadge('market', true), '来源失效')
+  assert.equal(computeSourceBadge('watchlist', true), '来源失效')
+  assert.equal(computeSourceBadge('direct', true), '来源失效')
 })
 
 test('CHANGE-005-7: CSS .tv-source-list-placeholder 存在', () => {
