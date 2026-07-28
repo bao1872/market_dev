@@ -659,6 +659,105 @@ async def test_execute_feature_snapshot_success_creates_succeeded_run(db_session
 
 
 @pytest.mark.asyncio
+async def test_compute_for_trade_date_not_passed_dsa_run_id_kwarg(db_session) -> None:
+    """[BUGFIX] 验证 compute_for_trade_date 不接收 dsa_run_id / strategy_version_id kwargs。
+
+    根因：orchestrator 曾传入 dsa_run_id + strategy_version_id 给
+    compute_for_trade_date()，但该函数签名只接受 progress_callback + source_run_id，
+    导致 TypeError: got an unexpected keyword argument 'dsa_run_id'。
+
+    本测试设置 strategy_version_id 非 None + DSA 未完成（dsa_already_completed=False），
+    即曾触发 bug 的条件，验证修复后不再传无效 kwargs。
+    StrategyResult 写入由 strategy_batch_service.write_results 完成，不依赖此 kwarg。
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="running")
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    # 用 MagicMock 包裹 AsyncMock 以捕获 call args
+    compute_spy = AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0})
+
+    target_trade_date = date(2026, 6, 25)
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=compute_spy,
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=target_trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # 验证 compute_for_trade_date 被调用
+    assert compute_spy.called, "compute_for_trade_date 应被调用"
+
+    # 验证不传 dsa_run_id / strategy_version_id（函数签名不接受的 kwargs）
+    call_kwargs = compute_spy.call_args.kwargs
+    assert "dsa_run_id" not in call_kwargs, (
+        f"compute_for_trade_date 不应接收 dsa_run_id kwarg，实际调用 kwargs: {call_kwargs}"
+    )
+    assert "strategy_version_id" not in call_kwargs, (
+        f"compute_for_trade_date 不应接收 strategy_version_id kwarg，实际调用 kwargs: {call_kwargs}"
+    )
+    # 验证仍正确传递 progress_callback + source_run_id
+    assert "progress_callback" in call_kwargs, "应传递 progress_callback"
+    assert "source_run_id" in call_kwargs, "应传递 source_run_id"
+
+
+@pytest.mark.asyncio
 async def test_execute_feature_snapshot_failure_creates_failed_run(db_session) -> None:
     """[Phase7 测试 7] after_close feature_snapshot 失败写 run.status='failed' 且不 publishing。
 

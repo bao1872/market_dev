@@ -1430,14 +1430,12 @@ async def execute_after_close_run(
                 )
                 await db.commit()
 
-            # 2.2 inline claim DSA run（防止 worker 领取）+ 获取 strategy_version_id
+            # 2.2 inline claim DSA run（防止 worker 领取）
             # [Phase8A] DSA run 通过 claim_for_worker 创建时已是 status=running + worker_id，
             # 无需再次 claim；仅在 status=queued 时执行 legacy inline claim（断点恢复场景）
             dsa_already_completed = False
-            strategy_version_id: uuid.UUID | None = None
             async with AsyncSessionLocal() as db:
                 dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
-                strategy_version_id = dsa_run.strategy_version_id
                 if dsa_run.status == "queued":
                     # Legacy/断点恢复：inline claim，防止 DSA worker 领取
                     dsa_run.status = "running"
@@ -1600,15 +1598,15 @@ async def execute_after_close_run(
                         job_run_id, worker_id
                     )
                     async with AsyncSessionLocal() as db:
-                        # Phase 5: 传 dsa_run_id 让 MFCS 同时写 StrategyResult（DSA=1）
-                        # 如果 DSA run 已完成（worker 已写），不传 dsa_run_id（避免 DSA=2）
+                        # [BUGFIX] compute_for_trade_date 只接受 progress_callback + source_run_id，
+                        # 不接受 dsa_run_id / strategy_version_id。
+                        # StrategyResult 由 strategy_batch_service.write_results 写入（DSA batch run 期间），
+                        # 不依赖 MFCS 传参。原 Phase 5 注释描述的"传 dsa_run_id 让 MFCS 同时写
+                        # StrategyResult"从未实现，且实际写入路径在 batch_service。
                         mfcs_kwargs: dict[str, Any] = {
                             "progress_callback": progress_callback,
                             "source_run_id": snapshot_run_id,
                         }
-                        if not dsa_already_completed and strategy_version_id is not None:
-                            mfcs_kwargs["dsa_run_id"] = dsa_run_id
-                            mfcs_kwargs["strategy_version_id"] = strategy_version_id
 
                         snapshot_result = await compute_for_trade_date(
                             db, trade_date, cached_instrument_ids, **mfcs_kwargs,
