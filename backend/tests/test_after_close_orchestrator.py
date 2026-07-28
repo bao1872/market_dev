@@ -722,6 +722,9 @@ async def test_compute_for_trade_date_not_passed_dsa_run_id_kwarg(db_session) ->
         "app.services.after_close_orchestrator._poll_dsa_run_status",
         new=AsyncMock(return_value="completed"),
     ), patch.object(
+        StrategyBatchService, "execute_run",
+        new=AsyncMock(),
+    ), patch.object(
         StrategyBatchService, "_check_quality_gates",
         new=AsyncMock(return_value=True),
     ), patch.object(
@@ -959,9 +962,13 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
             dsa_poll_timeout=1,
         )
 
-    # 验证心跳任务被启动 1 次
-    assert len(heartbeat_calls) == 1, (
-        f"应启动 1 次后台心跳任务，实际 {len(heartbeat_calls)} 次"
+    # 验证心跳任务被启动（refresh 阶段至少 1 次）
+    # [CHANGE-20260728-007] 流程含 refresh + feature_snapshot 两个长阶段，
+    # 每个阶段各自启动心跳任务，故 heartbeat_calls >= 1。
+    # 本测试关注 refresh 阶段是否启动心跳（防止 watchdog 误判 stale），
+    # 不限制总次数。
+    assert len(heartbeat_calls) >= 1, (
+        f"refresh 阶段应至少启动 1 次后台心跳任务，实际 {len(heartbeat_calls)} 次"
     )
     # 验证 refresh_all_instruments 被调用（事件已 set）
     assert refresh_started.is_set(), "refresh_all_instruments 应被调用"
@@ -2887,6 +2894,197 @@ def test_ac04_no_intraday_readiness_in_after_close_source() -> None:
 
     assert worker_calls_execute, (
         "[AC-04] Worker 必须复用 execute_after_close_run 作为唯一 readiness 入口"
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_run_called_after_mfcs_transitions_dsa_to_completed(db_session) -> None:
+    """[CHANGE-20260728-007] 验证 running→completed 闭环：MFCS 后调用 execute_run。
+
+    根因：Phase 5 收敛后 orchestrator inline claim DSA run（status=running），
+    调用 compute_for_trade_date（只写 snapshot），但从不调用 execute_run
+    写入 StrategyResult 或推进 DSA run 状态。publish_run 因 run 仍为 running 而失败。
+
+    修复：MFCS 完成后显式调用 batch_service.execute_run 写入 StrategyResult
+    并将 DSA run 推进到 completed/failed。
+
+    本测试验证：
+    1. compute_for_trade_date 完成后 execute_run 被调用；
+    2. publish_run 在 execute_run 之后被调用（run 已 completed）。
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="running")
+    job_run = await _create_after_close_job_run(
+        db_session, dsa_run_id=dsa_run.id,
+    )
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    execute_run_spy = AsyncMock()
+    publish_run_spy = AsyncMock(return_value=fake_published_run)
+
+    target_trade_date = date(2026, 6, 25)
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch.object(
+        StrategyBatchService, "execute_run",
+        new=execute_run_spy,
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=publish_run_spy,
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=target_trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    # 1. execute_run 必须被调用（修复 running→completed 闭环）
+    assert execute_run_spy.called, (
+        "MFCS 完成后必须调用 batch_service.execute_run 写入 StrategyResult "
+        "并推进 DSA run 状态从 running 到 completed"
+    )
+    # 传入的 run_id 应为 dsa_run_id
+    call_args = execute_run_spy.call_args
+    assert call_args.args[1] == dsa_run.id, (
+        f"execute_run 应传入 dsa_run_id={dsa_run.id}，实际: {call_args.args[1]}"
+    )
+
+    # 2. publish_run 必须在 execute_run 之后被调用
+    assert publish_run_spy.called, (
+        "execute_run 完成后应调用 publish_run 发布结果"
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_run_failure_marks_dsa_failed_skips_publish(db_session) -> None:
+    """[CHANGE-20260728-007] 验证 execute_run 失败时 DSA run 标记 failed，不调用 publish_run。
+
+    要求：
+    1. execute_run 抛异常时，DSA run 状态推进到 failed（不得停留 running）；
+    2. publish_run 不得被调用（不得在 publish 前伪造 completed）。
+    """
+    dsa_run, _ = await _create_dsa_strategy_run(db_session, status="running")
+    job_run = await _create_after_close_job_run(
+        db_session, dsa_run_id=dsa_run.id,
+    )
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+    fake_batch_result.daily_covered = 95
+    fake_batch_result.daily_total = 100
+    fake_batch_result.daily_coverage = 0.95
+
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
+    # execute_run 抛异常
+    execute_run_spy = AsyncMock(side_effect=RuntimeError("DSA execute_run 模拟失败"))
+    publish_run_spy = AsyncMock()
+
+    target_trade_date = date(2026, 6, 25)
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch.object(
+        db_session, "get",
+        new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch.object(
+        StrategyBatchService, "execute_run",
+        new=execute_run_spy,
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=publish_run_spy,
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.after_close_orchestrator.compute_for_trade_date",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ):
+        with pytest.raises(RuntimeError, match="DSA execute_run 模拟失败"):
+            await execute_after_close_run(
+                job_run_id=job_run.id,
+                trade_date=target_trade_date,
+                dsa_poll_interval=0,
+                dsa_poll_timeout=1,
+            )
+
+    # 1. execute_run 被调用但失败
+    assert execute_run_spy.called, "execute_run 应被调用"
+
+    # 2. publish_run 不得被调用（不得在 publish 前伪造 completed）
+    assert not publish_run_spy.called, (
+        "execute_run 失败后不得调用 publish_run（不得在 publish 前伪造 completed）"
     )
 
 

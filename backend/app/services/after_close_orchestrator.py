@@ -1612,6 +1612,40 @@ async def execute_after_close_run(
                             db, trade_date, cached_instrument_ids, **mfcs_kwargs,
                         )
                         await db.commit()
+
+                    # [CHANGE-20260728-007] 修复 running→completed 闭环：
+                    # MFCS 只写入 snapshot，不写入 StrategyResult，也不推进 DSA run 状态。
+                    # 在 MFCS 完成后显式调用 execute_run 写入 StrategyResult 并完成状态机。
+                    # 不得在 publish 前伪造 completed；异常路径必须写 failed。
+                    if not dsa_already_completed and dsa_run_id is not None:
+                        logger.info(
+                            "[AfterClose] 开始执行 DSA 策略（写入 StrategyResult + 推进状态）: "
+                            "dsa_run_id=%s", dsa_run_id,
+                        )
+                        try:
+                            async with AsyncSessionLocal() as db:
+                                await batch_service.execute_run(
+                                    db, dsa_run_id, job_run_id=job_run_id,
+                                )
+                                await db.commit()
+                        except Exception as dsa_exec_exc:
+                            logger.error(
+                                "[AfterClose] DSA execute_run 失败: dsa_run_id=%s, error=%s",
+                                dsa_run_id, dsa_exec_exc, exc_info=True,
+                            )
+                            # 异常路径必须写 failed（不得在 publish 前伪造 completed）
+                            async with AsyncSessionLocal() as db:
+                                dsa_run = await db.get(StrategyRun, dsa_run_id)
+                                if dsa_run is not None and dsa_run.status not in (
+                                    "completed", "failed", "partial_failed", "published"
+                                ):
+                                    dsa_run.status = "failed"
+                                    dsa_run.error_message = (
+                                        f"execute_run 失败: {dsa_exec_exc}"[:500]
+                                    )
+                                    dsa_run.finished_at = datetime.now(UTC)
+                                    await db.commit()
+                            raise
                 except RuntimeError as snapshot_exc:
                     # [Blocker2] 失败比例超阈值：snapshot session 已自动 rollback 半成品行。
                     snapshot_error = snapshot_exc
@@ -1664,45 +1698,48 @@ async def execute_after_close_run(
             # continuous + event freshness 已在 compute_for_trade_date 内部检查：
             # - failure_rate > threshold → RuntimeError（continuous 门禁）
             # - require_event_freshness=True → ValueError（event freshness 门禁）
-            # 这里检查 DSA 质量门禁（仅在 MFCS 写了 DSA results 时）
-            if not dsa_already_completed and snapshot_result and snapshot_result.get("dsa_succeeded", 0) > 0:
+            # 这里检查 DSA 质量门禁（仅在 DSA run 已 completed 且有成功结果时）
+            # [CHANGE-20260728-007] 原条件 snapshot_result.get("dsa_succeeded") 永远为 0
+            # （MFCS 不返回此字段），改为检查实际 DSA run 状态 + succeeded_count
+            if not dsa_already_completed and dsa_run_id is not None:
                 async with AsyncSessionLocal() as db:
                     job_run = await _get_job_run_or_raise(db, job_run_id)
                     dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
 
-                    result_count = await strategy_result_repository.count_by_run(
-                        db, dsa_run_id
-                    )
-                    quality_passed = await batch_service._check_quality_gates(
-                        dsa_run, result_count=result_count, db=db
-                    )
-                    await _update_orchestrator_status(
-                        db=db,
-                        job_run=job_run,
-                        status=AfterCloseRunStatus.COMPUTING_FEATURES,
-                        message=(
-                            f"组合质量门禁{'通过' if quality_passed else '未通过'}: "
-                            f"dsa_run_id={dsa_run_id}, "
-                            f"succeeded={dsa_run.succeeded_count}, "
-                            f"total={dsa_run.total_instruments}, "
-                            f"failed={dsa_run.failed_count}"
-                        ),
-                        dsa_run_id=dsa_run_id,
-                        payload={
-                            "quality_passed": quality_passed,
-                            "succeeded_count": dsa_run.succeeded_count,
-                            "total_instruments": dsa_run.total_instruments,
-                            "failed_count": dsa_run.failed_count,
-                            "snapshot_count": snapshot_result.get("snapshot_count", 0) if snapshot_result else 0,
-                        },
-                    )
-                    await db.commit()
-
-                    if not quality_passed:
-                        raise RuntimeError(
-                            f"组合质量门禁未通过: dsa_run_id={dsa_run_id}, "
-                            f"status={dsa_run.status}"
+                    if dsa_run.status == "completed" and (dsa_run.succeeded_count or 0) > 0:
+                        result_count = await strategy_result_repository.count_by_run(
+                            db, dsa_run_id
                         )
+                        quality_passed = await batch_service._check_quality_gates(
+                            dsa_run, result_count=result_count, db=db
+                        )
+                        await _update_orchestrator_status(
+                            db=db,
+                            job_run=job_run,
+                            status=AfterCloseRunStatus.COMPUTING_FEATURES,
+                            message=(
+                                f"组合质量门禁{'通过' if quality_passed else '未通过'}: "
+                                f"dsa_run_id={dsa_run_id}, "
+                                f"succeeded={dsa_run.succeeded_count}, "
+                                f"total={dsa_run.total_instruments}, "
+                                f"failed={dsa_run.failed_count}"
+                            ),
+                            dsa_run_id=dsa_run_id,
+                            payload={
+                                "quality_passed": quality_passed,
+                                "succeeded_count": dsa_run.succeeded_count,
+                                "total_instruments": dsa_run.total_instruments,
+                                "failed_count": dsa_run.failed_count,
+                                "snapshot_count": snapshot_result.get("snapshot_count", 0) if snapshot_result else 0,
+                            },
+                        )
+                        await db.commit()
+
+                        if not quality_passed:
+                            raise RuntimeError(
+                                f"组合质量门禁未通过: dsa_run_id={dsa_run_id}, "
+                                f"status={dsa_run.status}"
+                            )
 
             # 2.7 computing_features 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
