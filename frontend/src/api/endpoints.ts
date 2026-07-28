@@ -2532,6 +2532,7 @@ export interface WorkerHeartbeatItem {
   started_at: string
   heartbeat_at: string
   status: string // running/idle/stopped
+  stopped_at: string | null // Gate4: Worker 停止时间（null=运行中或历史记录无此字段）
   current_job_id: string | null
   build_sha: string | null
   metadata_json: string | null
@@ -2566,6 +2567,45 @@ export async function getWorkerHeartbeats(params?: {
 /** 获取系统概览（admin） */
 export async function getAdminSystemOverview(): Promise<SystemOverview> {
   const { data } = await apiClient.get<SystemOverview>('/admin/system-overview')
+  return data
+}
+
+// ============================================================
+// ===== [Gate5] GoAccess 访问统计 =====
+// ============================================================
+
+/** [Gate5] 访问统计指标项 */
+export interface VisitorMetricItem {
+  label: string
+  count: number
+  percentage: number | null
+}
+
+/** [Gate5] 访问汇总（单时间窗口） */
+export interface VisitorSummary {
+  pv: number
+  uv: number
+  top_pages: VisitorMetricItem[]
+  top_referrers: VisitorMetricItem[]
+  status_codes: VisitorMetricItem[]
+  devices: VisitorMetricItem[]
+  browsers: VisitorMetricItem[]
+  hourly_trend: VisitorMetricItem[]
+}
+
+/** [Gate5] /admin/visitors 响应体 */
+export interface VisitorReport {
+  today: VisitorSummary
+  seven_days: VisitorSummary
+  thirty_days: VisitorSummary
+  generated_at: string | null
+  data_source: 'goaccess_json' | 'empty' | 'error'
+  error_message: string | null
+}
+
+/** [Gate5] 查询访问统计报告（admin only） */
+export async function getAdminVisitors(): Promise<VisitorReport> {
+  const { data } = await apiClient.get<VisitorReport>('/admin/visitors')
   return data
 }
 
@@ -3254,7 +3294,23 @@ export interface AtomicFactsContextResponse {
   dataQuality: StockContextDataQuality
 }
 
-// [Phase 5B-2] 第一金字塔统一快照类型（与后端 FirstPyramidSnapshot DTO 对齐）
+// [Phase 5B-2 + Gate1] 第一金字塔统一快照类型（与后端 FirstPyramidSnapshot DTO 对齐）
+export interface VolumeContextSchema {
+  volume: number | null
+  amount: number | null
+  turnoverRate: number | null
+  volumeMa20: number | null
+  volumeMa200: number | null
+  volumeRatio20: number | null
+  volumeRatio200: number | null
+  volumePercentile20: number | null
+  volumePercentile200: number | null
+  volumeZscore20: number | null
+  volumeZscore200: number | null
+  readiness: boolean
+  badge: string | null
+}
+
 export interface PyramidEvent {
   type: string
   direction: string | null
@@ -3262,6 +3318,8 @@ export interface PyramidEvent {
   barIndex: number | null
   price: number | null
   freshnessBars: number
+  volumeContext?: VolumeContextSchema | null
+  volumeBadge?: string | null
   extra?: Record<string, unknown>
 }
 
@@ -3272,6 +3330,7 @@ export interface DimensionResult {
   events: PyramidEvent[]
   statusText: string
   evidence: Record<string, unknown>
+  volumeContext?: VolumeContextSchema | null
 }
 
 export interface FirstPyramidSnapshot {
@@ -3283,6 +3342,7 @@ export interface FirstPyramidSnapshot {
   momentum: DimensionResult
   chipConsensus: DimensionResult | null
   statusText: string
+  volumeContext?: VolumeContextSchema | null
   inputHash: string
   parameterHash: string
   algorithmVersion: string

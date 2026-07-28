@@ -34,6 +34,7 @@ class WorkerHeartbeatItem(BaseModel):
     started_at: datetime
     heartbeat_at: datetime
     status: str  # running/idle/stopped
+    stopped_at: datetime | None = None  # Gate4: Worker 停止时间（None=运行中或历史无此字段）
     current_job_id: str | None = None
     build_sha: str | None = None
     metadata_json: str | None = None

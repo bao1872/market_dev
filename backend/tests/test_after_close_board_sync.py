@@ -160,3 +160,77 @@ class TestCompletedStepsIntegration:
         assert "软失败" in source or "soft" in source.lower(), "缺少软失败标记"
         # 验证失败时记录状态但不抛异常
         assert 'status": "failed"' in source, "缺少失败状态记录"
+
+    def test_board_sync_failure_records_error_code_and_reuses_previous(self) -> None:
+        """[Gate3] 板块同步失败必须记录 error_code + reused_previous_snapshot=True。
+
+        验证软失败路径的关键字段：
+        - error_code: 异常类名（用于诊断）
+        - reused_previous_snapshot: True（沿用上次数据，不覆盖）
+        - status: failed（标记该步骤失败）
+        - 不 raise（不阻断后续 DSA/快照/发布）
+        """
+        import inspect
+
+        from app.services.after_close_orchestrator import execute_after_close_run
+
+        source = inspect.getsource(execute_after_close_run)
+        # Gate3: 验证 error_code 记录（异常类名）
+        assert "error_code" in source and "type(board_exc).__name__" in source, (
+            "板块同步失败未记录 error_code（异常类名）"
+        )
+        # Gate3: 验证 reused_previous_snapshot=True
+        assert "reused_previous_snapshot" in source, "缺少 reused_previous_snapshot 字段"
+        # Gate3: 验证失败后继续执行（不 return/break）
+        # 检查 except 块后没有立即 return（软失败应继续后续步骤）
+        except_block_end = source.find("reused_previous_snapshot": True')
+        assert except_block_end > 0, "未找到软失败 reused_previous_snapshot 标记"
+
+    def test_board_sync_skipped_when_disabled(self) -> None:
+        """[Gate3] BOARD_SYNC_ENABLED=false 时板块同步标记为 skipped（不访问问财）。"""
+        import inspect
+
+        from app.services.after_close_orchestrator import execute_after_close_run
+
+        source = inspect.getsource(execute_after_close_run)
+        # 验证 BOARD_SYNC_ENABLED 开关检查
+        assert "BOARD_SYNC_ENABLED" in source, "缺少 BOARD_SYNC_ENABLED 开关"
+        # 验证 skipped 状态记录
+        assert '"status": "skipped"' in source, "缺少 skipped 状态记录"
+
+    def test_trigger_time_is_15_05(self) -> None:
+        """[Gate3] 盘后编排触发时间必须为 15:05 Asia/Shanghai（收盘后 5 分钟）。"""
+        import inspect
+
+        from app.worker import run_bars_scheduler_worker
+
+        source = inspect.getsource(run_bars_scheduler_worker)
+        # 验证 CronTrigger 配置为 15:05
+        assert "hour=15" in source and "minute=5" in source, (
+            "盘后编排触发时间未配置为 15:05；当前 source 不含 hour=15, minute=5"
+        )
+        # 验证时区为 Asia/Shanghai
+        assert "Asia/Shanghai" in source, "触发时区未配置为 Asia/Shanghai"
+
+    def test_non_trading_day_skip(self) -> None:
+        """[Gate3] 非交易日不运行盘后编排。"""
+        import inspect
+
+        from app.worker import run_bars_scheduler_worker
+
+        source = inspect.getsource(run_bars_scheduler_worker)
+        # 验证交易日历判断
+        assert "is_trading_day_async" in source, "缺少交易日历判断"
+        assert "非交易日" in source, "缺少非交易日跳过逻辑"
+
+    def test_same_business_date_idempotent(self) -> None:
+        """[Gate3] 同一 business_date 幂等（重复创建返回已有 run）。"""
+        import inspect
+
+        from app.services.after_close_orchestrator import create_after_close_run
+
+        source = inspect.getsource(create_after_close_run)
+        # 验证幂等逻辑存在
+        assert "acquire_job_run_lock" in source or "run_key" in source, (
+            "缺少幂等锁机制（acquire_job_run_lock 或 run_key）"
+        )

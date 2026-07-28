@@ -35,6 +35,7 @@ from app.api import metrics as metrics_api
 from app.api.admin_after_close import router as admin_after_close_router
 from app.api.admin_beta_applications import router as admin_beta_applications_router
 from app.api.admin_subscription import router as admin_subscription_router
+from app.api.admin_visitors import router as admin_visitors_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
 from app.api.calendar import router as calendar_router
@@ -192,6 +193,8 @@ app.include_router(admin_subscription_router)
 app.include_router(admin_beta_applications_router)
 # 盘后编排管理路由（Task 2.3，需 admin 角色）
 app.include_router(admin_after_close_router)
+# [Gate5] 访问统计路由（GoAccess 报告，需 admin 角色）
+app.include_router(admin_visitors_router)
 # 用户自选股路由（W1）
 app.include_router(watchlist_router)
 # 个股备忘录路由

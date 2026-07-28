@@ -21,6 +21,7 @@
 | CHANGE-20260727-005 | 2026-07-27 | Phase 5B-2 权限模型与部署脚本 | behavior | 权限/部署 | 进行中 | PA-01～PA-31 | `maps/60-permissions-admin.md`、`maps/80-system-runtime.md` |
 | CHANGE-20260727-006 | 2026-07-27 | Gate 2 权限代码（require_any_capability + 邀请码三勾选 + UI gating） | behavior | 权限 | 进行中（代码+单元测试+DB 集成测试通过，真实运行未核验） | PA-01/PA-02/PA-10/PA-11/PA-13/PA-20 | `maps/60-permissions-admin.md` §12 |
 | CHANGE-20260728-001 | 2026-07-28 | 盘中结构事件图片按事件独立截图（修复"有文字无图片"） | bugfix | 盘中监控 | 进行中（代码+测试通过，真实盘中运行未核验） | WI-12 | `maps/50-watchlist-intraday.md` §4 |
+| CHANGE-20260728-002 | 2026-07-28 | 盘迹一轮收口（Gate 1/3/4/5 代码+验证） | architecture | 量化模型/盘后/管理后台 | 进行中（代码+源码级验证通过，Gate2 真实验收+运行时受本地约束阻塞） | PRD20/PRD30/PRD60 | `maps/20-quant-model.md`、`maps/30-after-close.md`、`maps/60-permissions-admin.md`、`maps/80-system-runtime.md` |
 
 ## 3. 状态说明
 

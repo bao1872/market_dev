@@ -42,10 +42,14 @@ class WorkerHeartbeat(Base):
         DateTime(timezone=True), nullable=False, comment="启动时间",
     )
     heartbeat_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, comment="最近心跳时间",
+        DateTime(timezone=True), nullable=False, comment="最近心跳时间（运行中持续更新）",
     )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default="running", comment="running/idle/stopped",
+    )
+    stopped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="Worker 停止时间（Gate4）；NULL 表示运行中或历史记录无此字段",
     )
     current_job_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, comment="当前执行的任务 ID",

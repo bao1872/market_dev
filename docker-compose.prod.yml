@@ -85,6 +85,8 @@ services:
     volumes:
       - ./doc:/doc:ro
       - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
+      # [Gate5] 挂载 GoAccess 报告卷（只读），backend 读取 /srv/goaccess/report.json
+      - goaccess_reports:/srv/goaccess:ro
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   # ===== 行情调度 Worker =====
@@ -386,8 +388,49 @@ services:
       - backend
     volumes:
       - capture_static:/usr/share/nginx/html/static/captures:ro
+      # [Gate5] GoAccess 共享日志卷：nginx 写入 access.log，goaccess 容器只读挂载
+      - nginx_logs:/var/log/nginx
     ports:
       - "80:80"
+
+  # ===== [Gate5] GoAccess 访问统计服务 =====
+  # 职责：周期性解析 nginx access.log，输出 JSON 报告到共享卷供 backend 读取
+  # 安全：
+  # - nginx access.log 已通过 log_format 过滤敏感 query 参数（token/jwt/password/key）
+  # - GoAccess 配置 anonymize-ip=true，IP 保留前 3 段末段为 0
+  # - 报告输出到共享卷，不暴露端口（仅 backend 容器内访问）
+  # - 日志轮转：json-file 50m × 5 = 250MB 上限
+  goaccess:
+    image: allin1/goaccess:1.7.2
+    container_name: trading-goaccess
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      TZ: Asia/Shanghai
+    depends_on:
+      - frontend
+    volumes:
+      # 只读挂载 nginx 日志卷（GoAccess 只读解析，不修改日志）
+      - nginx_logs:/var/log/nginx:ro
+      # 输出 JSON 报告到共享卷，backend 读取
+      - goaccess_reports:/srv/goaccess
+    # 每 5 分钟生成一次 JSON 报告（--output-format=json 一次性输出，cron 驱动周期更新）
+    # 实时 HTML 报告也可通过 --real-time-html 启用，但本任务只需 JSON
+    command: >
+      sh -c "
+        while true; do
+          goaccess /var/log/nginx/access.log
+            --log-format=COMBINED
+            --anonymize-ip
+            --keep-last=30
+            --json-output
+            --output /srv/goaccess/report.json
+            --no-html
+            2>/srv/goaccess/goaccess-error.log || true;
+          echo \"[$(date '+%Y-%m-%d %H:%M:%S')] GoAccess report regenerated\" >> /srv/goaccess/cron.log;
+          sleep 300;
+        done
+      "
 
 volumes:
   postgresdata:
@@ -396,3 +439,8 @@ volumes:
     name: trading-redisdata
   capture_static:
     name: trading-capture-static
+  # [Gate5] GoAccess 共享卷
+  nginx_logs:
+    name: trading-nginx-logs
+  goaccess_reports:
+    name: trading-goaccess-reports

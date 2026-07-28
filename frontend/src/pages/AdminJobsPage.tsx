@@ -115,6 +115,13 @@ interface WorkerHeartbeatRow {
   health_text: string
   heartbeat_at: string
   heartbeat_age: string
+  // Gate4: 智能时间显示
+  // - running/idle: "距上次心跳 Xs"（基于 heartbeat_age_seconds）
+  // - stopped: "已停止于 YYYY-MM-DD HH:MM:SS"（基于 stopped_at，回退 heartbeat_at）
+  time_display: string
+  time_display_title: string // 鼠标悬停完整时间
+  stopped_at: string // ISO 或空字符串
+  is_latest_instance: boolean // Gate4: 是否为该 worker_name 的最新实例（用于折叠历史重复）
   build_sha: string
   current_job_id: string
   started_at: string
@@ -306,15 +313,44 @@ export default function AdminJobsPage() {
 
   // ===== 派生数据：转换为 WorkerHeartbeatRow =====
   // [AdminJobsPage] - 描述: health_state 由后端计算，前端只做 pill 颜色映射
+  // [Gate4] - 描述: 智能时间显示 + 历史实例折叠
+  // - running/idle: 显示 "距上次心跳 Xs"
+  // - stopped: 显示 "已停止于 YYYY-MM-DD HH:MM:SS"（基于 stopped_at，回退 heartbeat_at）
+  // - 折叠逻辑：默认只显示每个 worker_name 的最新实例；切换 showAllInstances 显示全部历史
+  const [showAllWorkerInstances, setShowAllWorkerInstances] = useState(false)
   const workerHeartbeatRows: WorkerHeartbeatRow[] = useMemo(() => {
     const items = workerHeartbeatsQuery.data?.items ?? []
-    return items.map((hb) => {
+    // 后端已按 worker_name ASC, started_at DESC 排序，同 worker_name 第一条即最新实例
+    const latestByName = new Map<string, boolean>()
+    const mapped = items.map((hb) => {
       const healthPillClass =
         hb.health_state === 'fresh' ? 'ok' :
         hb.health_state === 'stale' ? 'warn' : 'bad'
       const healthText =
         hb.health_state === 'fresh' ? '健康' :
         hb.health_state === 'stale' ? '迟滞' : '停止'
+
+      // Gate4: 标记同 worker_name 的最新实例（第一条）
+      if (!latestByName.has(hb.worker_name)) {
+        latestByName.set(hb.worker_name, true)
+      }
+      const isLatestInstance = latestByName.get(hb.worker_name) === true
+      // 已记录过最新实例后，下一条同 worker_name 的标记为 false
+      if (isLatestInstance) {
+        latestByName.set(hb.worker_name, false)
+      }
+
+      // Gate4: 智能时间显示
+      const isStopped = hb.status === 'stopped'
+      const stoppedAtStr = hb.stopped_at ? formatShanghaiTime(hb.stopped_at) : ''
+      const heartbeatAtStr = formatShanghaiTime(hb.heartbeat_at)
+      const timeDisplay = isStopped
+        ? `已停止于 ${stoppedAtStr || heartbeatAtStr}` // 回退到 heartbeat_at（历史无 stopped_at 字段）
+        : `距上次心跳 ${hb.heartbeat_age_seconds}s`
+      const timeDisplayTitle = isStopped
+        ? `停止时间: ${stoppedAtStr || heartbeatAtStr}\n最后心跳: ${heartbeatAtStr}`
+        : `最后心跳: ${heartbeatAtStr}`
+
       return {
         worker_name: hb.worker_name,
         worker_name_cn: JOB_NAME_CN_MAP[hb.worker_name] ?? hb.worker_name,
@@ -325,15 +361,24 @@ export default function AdminJobsPage() {
         health_state: hb.health_state,
         health_pill_class: healthPillClass,
         health_text: healthText,
-        heartbeat_at: formatShanghaiTime(hb.heartbeat_at),
+        heartbeat_at: heartbeatAtStr,
         heartbeat_age: `${hb.heartbeat_age_seconds}s`,
+        time_display: timeDisplay,
+        time_display_title: timeDisplayTitle,
+        stopped_at: stoppedAtStr,
+        is_latest_instance: isLatestInstance,
         build_sha: hb.build_sha ?? '-',
         current_job_id: hb.current_job_id ?? '-',
         started_at: formatShanghaiTime(hb.started_at),
         raw: hb,
       }
     })
-  }, [workerHeartbeatsQuery.data])
+    // Gate4: 默认折叠历史重复实例（只显示每个 worker_name 的最新实例）
+    if (showAllWorkerInstances) {
+      return mapped
+    }
+    return mapped.filter((row) => row.is_latest_instance)
+  }, [workerHeartbeatsQuery.data, showAllWorkerInstances])
 
   // ===== KPI 计算 =====
   // [AdminJobsPage] - 描述: 运行中任务仅统计 status==='running'，不含 interrupted/warn 等其他状态
@@ -676,6 +721,10 @@ export default function AdminJobsPage() {
   )
 
   // ===== 列定义：Worker 心跳表 =====
+  // [Gate4] - 描述: 列改造
+  // - 新增 "启动时间" 列（started_at）
+  // - "心跳时间"+"心跳年龄" 合并为 "时间状态" 列（running 显示距上次心跳，stopped 显示已停止于）
+  // - 实例 ID 列改为只显示 PID 部分，避免过长
   const workerHeartbeatColumns: DataTableColumn<WorkerHeartbeatRow>[] = useMemo(
     () => [
       {
@@ -736,22 +785,24 @@ export default function AdminJobsPage() {
         ),
       },
       {
-        key: 'heartbeat_at',
-        title: '心跳时间',
+        key: 'started_at',
+        title: '启动时间',
         dataType: 'datetime',
         sortable: true,
         filterable: false,
-        sortValue: (row) => row.heartbeat_at,
-        render: (row) => <span className="num">{row.heartbeat_at}</span>,
+        sortValue: (row) => row.started_at,
+        render: (row) => <span className="num">{row.started_at}</span>,
       },
       {
-        key: 'heartbeat_age',
-        title: '心跳年龄',
+        key: 'time_display',
+        title: '时间状态',
         dataType: 'text',
         sortable: true,
         filterable: false,
-        sortValue: (row) => row.heartbeat_age,
-        render: (row) => <span className="num">{row.heartbeat_age}</span>,
+        sortValue: (row) => row.time_display,
+        render: (row) => (
+          <span className="num" title={row.time_display_title}>{row.time_display}</span>
+        ),
       },
       {
         key: 'build_sha',
@@ -912,12 +963,23 @@ export default function AdminJobsPage() {
           <div className="card-head">
             <div>
               <div className="card-title">Worker 心跳</div>
-              <div className="card-sub">worker_heartbeats 表实时视图，区分 fresh / stale / stopped</div>
+              <div className="card-sub">
+                worker_heartbeats 表实时视图，区分 fresh / stale / stopped
+                [Gate4] 显示 started_at / last_heartbeat / stopped_at；默认只显示每个 Worker 的最新实例
+              </div>
             </div>
             <div className="chip-row">
               <span className="chip green">健康</span>
               <span className="chip orange">迟滞</span>
               <span className="chip red">停止</span>
+              <button
+                type="button"
+                className={`btn ${showAllWorkerInstances ? 'secondary' : 'primary'}`}
+                onClick={() => setShowAllWorkerInstances((v) => !v)}
+                title="切换显示所有历史实例 / 仅最新实例"
+              >
+                {showAllWorkerInstances ? '仅显示最新实例' : '显示全部历史实例'}
+              </button>
             </div>
           </div>
           <StrategyDataTable

@@ -122,7 +122,7 @@ async def _heartbeat_loop(worker_name: str, interval: int = 60) -> None:
         except Exception as e:
             logger.warning("心跳更新失败 %s: %s", worker_name, e)
 
-    # 退出时标记 stopped
+    # 退出时标记 stopped（Gate4: 写入 stopped_at，不再覆盖 heartbeat_at）
     try:
         async with AsyncSessionLocal() as db:
             stmt = select(WorkerHeartbeat).where(
@@ -133,7 +133,7 @@ async def _heartbeat_loop(worker_name: str, interval: int = 60) -> None:
             hb = result.scalar_one_or_none()
             if hb is not None:
                 hb.status = "stopped"
-                hb.heartbeat_at = datetime.now(UTC)
+                hb.stopped_at = datetime.now(UTC)  # Gate4: 停止时间单独记录，heartbeat_at 保留最后一次心跳
                 await db.commit()
     except Exception as e:
         logger.warning("心跳退出标记失败 %s: %s", worker_name, e)
@@ -426,13 +426,14 @@ async def run_bars_scheduler_worker() -> None:
         logger.exception("Bars Scheduler 启动恢复异常: %s", exc)
 
     async def scheduled_bars_refresh() -> None:
-        """[Phase8A] 定时任务：每日 16:00 创建/复用盘后编排任务。
+        """[Phase8A] 定时任务：每日 15:05 创建/复用盘后编排任务。
 
-        Phase8A 变更：16:00 不再直接刷新行情和触发 DSA，而是创建 after-close run。
+        Phase8A 变更：15:05 不再直接刷新行情和触发 DSA，而是创建 after-close run。
         行情刷新、DSA 创建、特征计算、发布等全部由 after-close orchestrator 统一编排，
         避免双路径（bars_scheduler 直接触发 DSA vs orchestrator 内部创建 DSA）造成的
         重复执行和 race condition。
 
+        [Gate3] 触发时间从 16:00 改为 15:05 Asia/Shanghai（收盘后 5 分钟）。
         幂等：create_after_close_run 内部基于 run_key 去重，18:30 兜底重复调用安全。
         """
         from datetime import date as date_cls
@@ -450,31 +451,31 @@ async def run_bars_scheduler_worker() -> None:
             logger.info("非交易日 %s，跳过盘后编排创建", trade_date)
             return
 
-        logger.info("交易日 %s，16:00 创建/复用盘后编排任务", trade_date)
+        logger.info("交易日 %s，15:05 创建/复用盘后编排任务", trade_date)
         try:
             async with AsyncSessionLocal() as db:
                 job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
                 if is_new:
                     logger.info(
-                        "[BarsScheduler] 16:00 已创建盘后编排任务: run_id=%s, trade_date=%s",
+                        "[BarsScheduler] 15:05 已创建盘后编排任务: run_id=%s, trade_date=%s",
                         job_run.id, trade_date,
                     )
                 else:
                     logger.info(
-                        "[BarsScheduler] 16:00 盘后编排任务已存在（幂等）: "
+                        "[BarsScheduler] 15:05 盘后编排任务已存在（幂等）: "
                         "run_id=%s, trade_date=%s, status=%s",
                         job_run.id, trade_date, job_run.status,
                     )
         except Exception as exc:
             logger.exception(
-                "[BarsScheduler] 16:00 创建盘后编排任务失败: trade_date=%s, error=%s",
+                "[BarsScheduler] 15:05 创建盘后编排任务失败: trade_date=%s, error=%s",
                 trade_date, exc,
             )
 
-    # 每日 16:00 触发（含非交易日，由内部交易日历判断是否执行）
+    # [Gate3] 每日 15:05 Asia/Shanghai 触发（收盘后 5 分钟；含非交易日，由内部交易日历判断是否执行）
     scheduler.add_job(
         scheduled_bars_refresh,
-        CronTrigger(day_of_week="mon-sun", hour=16, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
+        CronTrigger(day_of_week="mon-sun", hour=15, minute=5, timezone=ZoneInfo("Asia/Shanghai")),
         id="bars_refresh_daily",
         replace_existing=True,
     )
@@ -1251,19 +1252,20 @@ async def mark_stale_worker_heartbeats(
 
     heartbeat_cutoff = now - timedelta(seconds=threshold_seconds)
 
-    # [WorkerHeartbeat] - 原子 UPDATE：status running -> stopped
+    # [WorkerHeartbeat] - 原子 UPDATE：status running -> stopped（Gate4: 同步写入 stopped_at）
     # 使用 RETURNING + fetchall() + len() 计数（与 recover_stale_scheduler_job_runs 模式一致），
     # 避免 mypy 对 Result.rowcount 的 attr-defined 误报
     update_sql = text(
         """
         UPDATE worker_heartbeats
-        SET status = 'stopped'
+        SET status = 'stopped',
+            stopped_at = :now
         WHERE status = 'running'
             AND heartbeat_at < :heartbeat_cutoff
         RETURNING worker_name
         """
     )
-    result = await db.execute(update_sql, {"heartbeat_cutoff": heartbeat_cutoff})
+    result = await db.execute(update_sql, {"heartbeat_cutoff": heartbeat_cutoff, "now": now})
     marked_rows = result.fetchall()
     marked_count = len(marked_rows)
 

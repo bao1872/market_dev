@@ -236,6 +236,7 @@ def build_summary_payload(
     trade_date: date,
     source_bar_time: str | None = None,
     extra: dict[str, Any] | None = None,
+    first_pyramid: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """从 structural/temporal payload 抽取前端列表用摘要。
 
@@ -249,6 +250,7 @@ def build_summary_payload(
         trade_date: 业务交易日
         source_bar_time: 数据源截止时间（ISO 字符串）
         extra: 额外字段（current_price, change_pct, bb_upper/mid/lower 等）
+        first_pyramid: 第一金字塔统一快照 dict（Gate1 持久化；None 表示未计算或数据不足）
 
     Returns:
         前端列表用摘要 dict，包含 _source='feature_snapshot'
@@ -293,6 +295,8 @@ def build_summary_payload(
         "_source": "feature_snapshot",
         # Atomic Fact Contract V1（仅新快照写入；旧已发布快照受 upsert WHERE 保护不覆盖）
         "atomic_fact_contract_v1": build_persisted_afc_payload(structural_payload, temporal_payload),
+        # Gate1: 第一金字塔统一快照持久化（None 表示数据不足未计算；不静默省略）
+        "first_pyramid": first_pyramid,
     }
 
 
@@ -595,10 +599,30 @@ async def compute_feature_snapshot_for_date(
         else (source_primary.isoformat() if source_primary else None)
     )
 
+    # Gate1: 第一金字塔统一快照计算（数据不足时为 None，不阻断主流程）
+    first_pyramid_dict: dict[str, Any] | None = None
+    try:
+        from app.services.first_pyramid_service import compute_first_pyramid_snapshot
+        if df_1d is not None and not df_1d.empty and len(df_1d) >= 60:
+            symbol_for_pyramid = str(instrument_id)  # API 侧会用 symbol 查；此处用 instrument_id 占位
+            fp_snapshot = compute_first_pyramid_snapshot(
+                bars=df_1d,
+                symbol=symbol_for_pyramid,
+                trade_date=trade_date.isoformat(),
+            )
+            first_pyramid_dict = fp_snapshot.to_dict()
+    except Exception as exc:
+        logger.warning(
+            "第一金字塔计算失败 instrument_id=%s trade_date=%s: %s",
+            instrument_id, trade_date, exc,
+        )
+        first_pyramid_dict = None  # 显式 None；不阻断 snapshot 主流程
+
     # 构造 summary_payload
     summary_payload = build_summary_payload(
         structural_payload, temporal_payload, trade_date,
         source_bar_time=source_bar_time_str, extra=extra,
+        first_pyramid=first_pyramid_dict,
     )
 
     return StockFeatureSnapshot(

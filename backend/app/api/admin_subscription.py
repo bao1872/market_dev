@@ -479,6 +479,7 @@ async def get_worker_heartbeats(
                 started_at=r.started_at,
                 heartbeat_at=r.heartbeat_at,
                 status=r.status,
+                stopped_at=getattr(r, "stopped_at", None),  # Gate4: 停止时间（None=运行中或历史无此字段）
                 current_job_id=r.current_job_id,
                 build_sha=r.build_sha,
                 metadata_json=r.metadata_json,

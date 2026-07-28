@@ -46,11 +46,19 @@ from app.schemas.first_pyramid import (
     DimensionResult,
     FirstPyramidSnapshot,
     PyramidEvent,
+    VolumeContextSchema,
 )
 from app.services.node_cluster_engine import (
     NodeClusterProfileResult,
     compute_node_cluster_profile,
     detect_crossover_signals,
+)
+from app.services.volume_context import (
+    VolumeContextData,
+    compute_volume_context_series,
+    extract_last_volume_context,
+    extract_volume_context_at,
+    volume_badge,
 )
 from app.strategy.selectors.dsa_selector import MIN_DIR_BARS, compute_dsa_bundle
 from app.strategy_assets.algorithms.features.bollinger_features_plotly import (
@@ -105,6 +113,37 @@ def _safe_iso_date(v: Any) -> str | None:
         return None
 
 
+def _vc_to_schema(vc: VolumeContextData | None) -> VolumeContextSchema | None:
+    """将 VolumeContextData 转为 VolumeContextSchema（前端 JSON 契约）。"""
+    if vc is None:
+        return None
+    return VolumeContextSchema(
+        volume=vc.volume,
+        amount=vc.amount,
+        turnoverRate=vc.turnover_rate,
+        volumeMa20=vc.volume_ma_20,
+        volumeMa200=vc.volume_ma_200,
+        volumeRatio20=vc.volume_ratio_20,
+        volumeRatio200=vc.volume_ratio_200,
+        volumePercentile20=vc.volume_percentile_20,
+        volumePercentile200=vc.volume_percentile_200,
+        volumeZscore20=vc.volume_zscore_20,
+        volumeZscore200=vc.volume_zscore_200,
+        readiness=vc.readiness,
+        badge=volume_badge(vc),
+    )
+
+
+def _event_vc(
+    vc_series: pd.DataFrame | None, bar_index: int | None
+) -> tuple[VolumeContextSchema | None, str | None]:
+    """提取事件 bar 的 VolumeContext Schema 和徽标。"""
+    if vc_series is None or vc_series.empty or bar_index is None:
+        return None, None
+    vc = extract_volume_context_at(vc_series, bar_index)
+    return _vc_to_schema(vc), volume_badge(vc) if vc else None
+
+
 def _compute_input_hash(bars: pd.DataFrame) -> str:
     """计算 OHLCV 输入 hash（同输入 → 同 hash，跨入口一致性基础）。"""
     if bars is None or bars.empty:
@@ -145,10 +184,15 @@ def _compute_parameter_hash() -> str:
 # =============================================================================
 
 
-def _build_trend_dimension(dsa_bundle: dict[str, Any], n_bars: int) -> DimensionResult:
+def _build_trend_dimension(
+    dsa_bundle: dict[str, Any],
+    n_bars: int,
+    vc_series: pd.DataFrame | None = None,
+) -> DimensionResult:
     """从 DSA bundle 构建趋势维度结果。
 
     DSA bundle 由 compute_dsa_bundle 产生，含 last_row_metrics（标量指标）。
+    Gate1：集成统一 VolumeContext（20/200 日分位、zscore、徽标）。
     """
     metrics = dsa_bundle.get("last_row_metrics", {}) or {}
     if not metrics:
@@ -169,16 +213,47 @@ def _build_trend_dimension(dsa_bundle: dict[str, Any], n_bars: int) -> Dimension
     current_vs_prev_vol = _safe_float(metrics.get("current_vs_prev_volume_ratio"))
     current_vs_prev_amt = _safe_float(metrics.get("current_vs_prev_amount_ratio"))
 
+    # Gate1：统一 VolumeContext
+    last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
+    vc_schema = _vc_to_schema(last_vc)
+
+    # 趋势段信息（Gate1 补充）
+    segment_start_time = _safe_iso_date(metrics.get("segment_start_time") or metrics.get("anchor_time"))
+    segment_end_time = _safe_iso_date(metrics.get("segment_end_time"))
+    segment_start_price = _safe_float(metrics.get("segment_start_price"))
+    segment_end_price = _safe_float(metrics.get("segment_end_price"))
+    segment_bars = int(metrics.get("segment_bars", dsa_dir_bars) or dsa_dir_bars)
+    segment_change_pct = _safe_float(metrics.get("segment_change_pct"))
+    segment_slope = _safe_float(metrics.get("segment_slope"))
+    current_price_vs_dsa_vwap = dsa_vwap_dev_pct
+
     continuous_factors: dict[str, Any] = {
         "regime_value": regime_value,
         "dsa_dir_bars": dsa_dir_bars,
         "dsa_vwap_dev_pct": dsa_vwap_dev_pct,
+        # 趋势段信息（Gate1）
+        "segment_start_time": segment_start_time,
+        "segment_end_time": segment_end_time,
+        "segment_start_price": segment_start_price,
+        "segment_end_price": segment_end_price,
+        "segment_bars": segment_bars,
+        "segment_change_pct": segment_change_pct,
+        "segment_slope": segment_slope,
+        "current_price_vs_dsa_vwap": current_price_vs_dsa_vwap,
+        # 段内成交量
         "current_segment_volume_mean": current_seg_vol_mean,
         "current_segment_amount_mean": current_seg_amt_mean,
         "prev_segment_volume_sum": prev_seg_vol_sum,
         "prev_segment_amount_sum": prev_seg_amt_sum,
         "current_vs_prev_volume_ratio": current_vs_prev_vol,
         "current_vs_prev_amount_ratio": current_vs_prev_amt,
+        # 统一 VolumeContext 字段（Gate1，扁平化便于前端直接取用）
+        "volume_ratio_20": last_vc.volume_ratio_20 if last_vc else None,
+        "volume_ratio_200": last_vc.volume_ratio_200 if last_vc else None,
+        "volume_percentile_20": last_vc.volume_percentile_20 if last_vc else None,
+        "volume_percentile_200": last_vc.volume_percentile_200 if last_vc else None,
+        "volume_zscore_20": last_vc.volume_zscore_20 if last_vc else None,
+        "volume_zscore_200": last_vc.volume_zscore_200 if last_vc else None,
         "trend_strength": _safe_float(metrics.get("trend_strength")),
         "vwap_ret_total": _safe_float(metrics.get("vwap_ret_total")),
     }
@@ -201,13 +276,18 @@ def _build_trend_dimension(dsa_bundle: dict[str, Any], n_bars: int) -> Dimension
             else:
                 vol_text = "；当前段量能持平"
 
-    status_text = regime_text + vol_text
+    # Gate1：量能徽标
+    vc_badge = volume_badge(last_vc) if last_vc else "未知"
+    vc_text = f"；量能{vc_badge}" if last_vc and last_vc.readiness else ""
+
+    status_text = regime_text + vol_text + vc_text
 
     evidence = {
         "anchor_time": _safe_iso_date(metrics.get("anchor_time")),
         "min_dir_bars": MIN_DIR_BARS,
         "lookback": DSA_LOOKBACK,
         "n_bars_input": n_bars,
+        "volume_readiness": last_vc.readiness if last_vc else False,
     }
 
     return DimensionResult(
@@ -217,6 +297,7 @@ def _build_trend_dimension(dsa_bundle: dict[str, Any], n_bars: int) -> Dimension
         events=[],  # DSA 是连续因子，无离散事件
         statusText=status_text,
         evidence=evidence,
+        volumeContext=vc_schema,
     )
 
 
@@ -226,11 +307,15 @@ def _build_trend_dimension(dsa_bundle: dict[str, Any], n_bars: int) -> Dimension
 
 
 def _build_structure_dimension(
-    smc_result: dict[str, Any], n_bars: int, last_bar_index: int
+    smc_result: dict[str, Any],
+    n_bars: int,
+    last_bar_index: int,
+    vc_series: pd.DataFrame | None = None,
 ) -> DimensionResult:
     """从 SMC Pine core 结果构建结构维度。
 
     输出 BOS、CHoCH、进入 OB、连续高低点事件；禁止 FVG。
+    Gate1：每个事件附加事件 bar 的 VolumeContext 和量能徽标。
     """
     events_raw = smc_result.get("events", []) or []
     order_blocks = smc_result.get("order_blocks", []) or []
@@ -252,6 +337,8 @@ def _build_structure_dimension(
         price = _safe_float(evt.get("broken_level") or evt.get("price"))
         # 新鲜度 = 最后 bar 索引 - 事件确认索引
         fresh = max(0, int(last_bar_index - int(bar_index))) if bar_index is not None else 0
+        # Gate1：事件 bar 的 VolumeContext
+        evt_vc, evt_badge = _event_vc(vc_series, int(bar_index) if bar_index is not None else None)
         pyramid_events.append(
             PyramidEvent(
                 type=str(evt_type),
@@ -260,12 +347,13 @@ def _build_structure_dimension(
                 barIndex=int(bar_index) if bar_index is not None else None,
                 price=price,
                 freshnessBars=fresh,
+                volumeContext=evt_vc,
+                volumeBadge=evt_badge,
                 extra={"anchor_index": evt.get("anchor_index")},
             )
         )
 
     # 进入 OB 事件：价格由区外进入区域（非区域存在）
-    # SMC Pine core 已通过 mitigation 字段标识；只保留 is_active 且最近被进入的 OB
     for ob in order_blocks:
         if not ob.get("is_active", False):
             continue
@@ -280,6 +368,7 @@ def _build_structure_dimension(
         bar_index = ob.get("mitigation_index") or ob.get("confirmed_index")
         price = _safe_float(ob.get("mitigation_price") or ob.get("high") or ob.get("low"))
         fresh = max(0, int(last_bar_index - int(bar_index))) if bar_index is not None else 0
+        evt_vc, evt_badge = _event_vc(vc_series, int(bar_index) if bar_index is not None else None)
         pyramid_events.append(
             PyramidEvent(
                 type=ob_type,
@@ -288,6 +377,8 @@ def _build_structure_dimension(
                 barIndex=int(bar_index) if bar_index is not None else None,
                 price=price,
                 freshnessBars=fresh,
+                volumeContext=evt_vc,
+                volumeBadge=evt_badge,
                 extra={
                     "ob_high": _safe_float(ob.get("high")),
                     "ob_low": _safe_float(ob.get("low")),
@@ -307,6 +398,7 @@ def _build_structure_dimension(
         bar_index = eq.get("confirmed_index")
         price = _safe_float(eq.get("second_pivot_price") or eq.get("price"))
         fresh = max(0, int(last_bar_index - int(bar_index))) if bar_index is not None else 0
+        evt_vc, evt_badge = _event_vc(vc_series, int(bar_index) if bar_index is not None else None)
         pyramid_events.append(
             PyramidEvent(
                 type=str(eq_type),
@@ -315,11 +407,17 @@ def _build_structure_dimension(
                 barIndex=int(bar_index) if bar_index is not None else None,
                 price=price,
                 freshnessBars=fresh,
+                volumeContext=evt_vc,
+                volumeBadge=evt_badge,
             )
         )
 
     # 按时间升序
     pyramid_events.sort(key=lambda e: (e.barIndex if e.barIndex is not None else 0))
+
+    # Gate1：当前 bar 的 VolumeContext
+    last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
+    vc_schema = _vc_to_schema(last_vc)
 
     continuous_factors = {
         "swing_bias": swing_bias,
@@ -343,6 +441,7 @@ def _build_structure_dimension(
         "n_equal_highs_lows": len(equal_highs_lows),
         "smc_params": smc_result.get("params", {}),
         "n_bars_input": n_bars,
+        "volume_readiness": last_vc.readiness if last_vc else False,
     }
 
     return DimensionResult(
@@ -352,6 +451,7 @@ def _build_structure_dimension(
         events=pyramid_events,
         statusText=status_text,
         evidence=evidence,
+        volumeContext=vc_schema,
     )
 
 
@@ -361,11 +461,17 @@ def _build_structure_dimension(
 
 
 def _build_momentum_dimension(
-    bb_df: pd.DataFrame, sqzmom_result: dict[str, Any], n_bars: int, last_bar_index: int
+    bb_df: pd.DataFrame,
+    sqzmom_result: dict[str, Any],
+    n_bars: int,
+    last_bar_index: int,
+    vc_series: pd.DataFrame | None = None,
+    bars: pd.DataFrame | None = None,
 ) -> DimensionResult:
     """从 Bollinger + SQZMOM 结果构建动量维度。
 
     输出 squeeze 状态、带宽、扩张/扩散事件、相对前期变化、匹配成交量和事件新鲜度。
+    Gate1：集成统一 VolumeContext + 挤压期平均量 + 缩量挤压/放量释放判断。
     """
     if bb_df is None or bb_df.empty:
         raise ValueError("动量维度必选，但 Bollinger 结果为空")
@@ -483,7 +589,57 @@ def _build_momentum_dimension(
 
     bw_text = f"；BB 带宽 {bb_width:.4f}" if bb_width is not None else ""
 
-    status_text = squeeze_text + mom_dir_text + bw_text
+    # Gate1：挤压期平均量 + 缩量挤压/放量释放
+    squeeze_period_vol_mean: float | None = None
+    release_vs_squeeze_vol_ratio: float | None = None
+    vol_divergence: str | None = None  # "缩量挤压" / "放量释放" / "量价背离" / None
+    if bars is not None and sqz_on_list:
+        # 找到最近的连续 squeeze on 区间
+        sqz_end = len(sqz_on_list) - 1
+        sqz_start = sqz_end
+        for i in range(sqz_end, -1, -1):
+            if sqz_on_list[i]:
+                sqz_start = i
+            else:
+                break
+        if sqz_end > sqz_start:
+            vol_series = bars["volume"].astype(float) if "volume" in bars.columns else None
+            if vol_series is not None:
+                squeeze_vols = vol_series.iloc[sqz_start:sqz_end + 1].dropna()
+                if len(squeeze_vols) > 0:
+                    squeeze_period_vol_mean = _safe_float(squeeze_vols.mean())
+                    # 释放期量 / 挤压期均量
+                    if sqz_end + 1 < len(vol_series):
+                        release_vol = _safe_float(vol_series.iloc[sqz_end + 1])
+                        if squeeze_period_vol_mean and squeeze_period_vol_mean > 0:
+                            release_vs_squeeze_vol_ratio = _safe_float(
+                                release_vol / squeeze_period_vol_mean
+                            )
+                    # 判断量价关系
+                    if last_sqz_on and squeeze_period_vol_mean is not None:
+                        last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
+                        if last_vc and last_vc.readiness and last_vc.volume_percentile_20 is not None:
+                            if last_vc.volume_percentile_20 < 20:
+                                vol_divergence = "缩量挤压"
+                    if last_sqz_off and release_vs_squeeze_vol_ratio is not None:
+                        if release_vs_squeeze_vol_ratio > 1.5:
+                            vol_divergence = "放量释放"
+
+    # Gate1：统一 VolumeContext
+    last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
+    vc_schema = _vc_to_schema(last_vc)
+    vc_badge = volume_badge(last_vc) if last_vc else "未知"
+    vc_text = f"；量能{vc_badge}" if last_vc and last_vc.readiness else ""
+    div_text = f"；{vol_divergence}" if vol_divergence else ""
+
+    status_text = squeeze_text + mom_dir_text + bw_text + vc_text + div_text
+
+    # Gate1：为事件附加 VolumeContext
+    for evt in events:
+        if evt.barIndex is not None:
+            evt_vc, evt_badge = _event_vc(vc_series, evt.barIndex)
+            evt.volumeContext = evt_vc
+            evt.volumeBadge = evt_badge
 
     continuous_factors = {
         "squeeze_on": last_sqz_on,
@@ -496,6 +652,16 @@ def _build_momentum_dimension(
         "bb_upper": bb_upper,
         "bb_middle": bb_middle,
         "bb_lower": bb_lower,
+        # Gate1：量能字段
+        "squeeze_period_volume_mean": squeeze_period_vol_mean,
+        "release_vs_squeeze_volume_ratio": release_vs_squeeze_vol_ratio,
+        "vol_divergence": vol_divergence,
+        "volume_ratio_20": last_vc.volume_ratio_20 if last_vc else None,
+        "volume_ratio_200": last_vc.volume_ratio_200 if last_vc else None,
+        "volume_percentile_20": last_vc.volume_percentile_20 if last_vc else None,
+        "volume_percentile_200": last_vc.volume_percentile_200 if last_vc else None,
+        "volume_zscore_20": last_vc.volume_zscore_20 if last_vc else None,
+        "volume_zscore_200": last_vc.volume_zscore_200 if last_vc else None,
     }
 
     evidence = {
@@ -503,6 +669,7 @@ def _build_momentum_dimension(
         "bb_mult": _FIRST_PYRAMID_PARAMS["bollinger_config"]["bb_k"],
         "sqzmom_params": _FIRST_PYRAMID_PARAMS["sqzmom_config"],
         "n_bars_input": n_bars,
+        "volume_readiness": last_vc.readiness if last_vc else False,
     }
 
     return DimensionResult(
@@ -512,6 +679,7 @@ def _build_momentum_dimension(
         events=events,
         statusText=status_text,
         evidence=evidence,
+        volumeContext=vc_schema,
     )
 
 
@@ -674,13 +842,18 @@ def compute_first_pyramid_snapshot(
     n_bars = len(bars)
     last_bar_index = n_bars - 1
 
+    # Gate1：统一 VolumeContext（计算一次，趋势/结构/动量复用）
+    vc_series = compute_volume_context_series(bars)
+    last_vc = extract_last_volume_context(vc_series)
+    vc_schema = _vc_to_schema(last_vc)
+
     # 1. 趋势维度（DSA SSOT）
     dsa_config_dict: dict[str, Any] = {
         "min_dir_bars": MIN_DIR_BARS,
         "lookback": DSA_LOOKBACK,
     }
     dsa_bundle = compute_dsa_bundle(bars, dsa_config_dict)
-    trend_dim = _build_trend_dimension(dsa_bundle, n_bars)
+    trend_dim = _build_trend_dimension(dsa_bundle, n_bars, vc_series)
 
     # 2. 结构维度（SMC Pine core）
     opens = bars["open"].astype(float).tolist()
@@ -689,7 +862,7 @@ def compute_first_pyramid_snapshot(
     closes = bars["close"].astype(float).tolist()
     times = [d.isoformat() for d in bars.index]
     smc_result = compute_smc_pine(opens, highs, lows, closes, times, params=None)
-    structure_dim = _build_structure_dimension(smc_result, n_bars, last_bar_index)
+    structure_dim = _build_structure_dimension(smc_result, n_bars, last_bar_index, vc_series)
 
     # 3. 动量维度（Bollinger + SQZMOM）
     bb_cfg = BBcfg(
@@ -704,7 +877,9 @@ def compute_first_pyramid_snapshot(
         closes=np.array(closes, dtype=float),
         params=_FIRST_PYRAMID_PARAMS["sqzmom_config"],
     )
-    momentum_dim = _build_momentum_dimension(bb_df, sqzmom_result, n_bars, last_bar_index)
+    momentum_dim = _build_momentum_dimension(
+        bb_df, sqzmom_result, n_bars, last_bar_index, vc_series, bars
+    )
 
     # 4. 筹码共识维度（Node Cluster，可选）
     chip_dim: DimensionResult | None = None
@@ -736,6 +911,7 @@ def compute_first_pyramid_snapshot(
         momentum=momentum_dim,
         chipConsensus=chip_dim,
         statusText=aggregate_status,
+        volumeContext=vc_schema,
         inputHash=input_hash,
         parameterHash=parameter_hash,
     )

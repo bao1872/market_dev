@@ -641,6 +641,17 @@ export function useWorkerHeartbeats(params?: {
   })
 }
 
+/** [Gate5] 查询访问统计报告（admin only，5 分钟刷新一次） */
+export function useAdminVisitors() {
+  return useQuery({
+    queryKey: ['admin', 'visitors'],
+    queryFn: api.getAdminVisitors,
+    staleTime: 5 * 60 * 1000, // 5 分钟
+    refetchInterval: 5 * 60 * 1000,
+    refetchIntervalInBackground: false,
+  })
+}
+
 /** 加入自选变更（自动失效 watchlist + monitor-status 缓存） */
 export function useAddToWatchlist() {
   const queryClient = useQueryClient()
