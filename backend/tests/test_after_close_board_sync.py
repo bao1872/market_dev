@@ -183,7 +183,7 @@ class TestCompletedStepsIntegration:
         assert "reused_previous_snapshot" in source, "缺少 reused_previous_snapshot 字段"
         # Gate3: 验证失败后继续执行（不 return/break）
         # 检查 except 块后没有立即 return（软失败应继续后续步骤）
-        except_block_end = source.find("reused_previous_snapshot": True')
+        except_block_end = source.find('"reused_previous_snapshot": True')
         assert except_block_end > 0, "未找到软失败 reused_previous_snapshot 标记"
 
     def test_board_sync_skipped_when_disabled(self) -> None:

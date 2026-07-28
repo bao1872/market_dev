@@ -124,9 +124,18 @@ export function useStockDetailActions({
   const hasValidSourceContext =
     !sourceContextInvalid && (origin === 'market' || origin === 'watchlist') && !!sourceRunId && !!canonicalQuery
 
+  // [FIX max-update-depth] 稳定化 canonicalQuery 引用，避免 resolveDetailSourceContextV2 每次返回新对象
+  //   导致 useStrategyRunResults 的 params 引用变化（虽然 React Query hashKey 做深比较，但稳定引用更安全）
+  //   依赖 canonicalQueryRaw（入口时刻 URL 字符串，切股时不变），确保同来源上下文内 queryKey 稳定
+  const stableCanonicalQuery = useMemo(
+    () => (hasValidSourceContext ? (canonicalQuery as StrategyResultQueryParams) : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [hasValidSourceContext, canonicalQueryRaw, sourceRunId],
+  )
+
   const sourceResultsQuery = useStrategyRunResults(
     hasValidSourceContext ? sourceRunId! : undefined,
-    hasValidSourceContext ? (canonicalQuery as StrategyResultQueryParams) : undefined,
+    stableCanonicalQuery,
   )
 
   // 来源列表行数据（StrategyResult → TrendSelectionRow → SourceStockItem）

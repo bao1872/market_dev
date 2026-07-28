@@ -190,6 +190,10 @@ export default function StockDetailPage() {
   }, [sourceListScrollKey, symbol])
 
   // 新股票渲染后恢复 scrollTop（仅在活动行不可见时 scrollIntoView）
+  // [FIX max-update-depth] 依赖改用 sourceStocks.length（原始值，引用稳定）替代数组本身，
+  //   避免因 useMemo 返回新数组引用导致 effect 反复触发（数组引用每次 render 变化 → effect 循环）。
+  //   length 变化足以覆盖"数据到达/列表更新"场景；切股内同长度不触发也无妨（scrollTop 已由 symbol 变化恢复）。
+  const sourceStocksCount = detailActions.sourceStocks.length
   useEffect(() => {
     const el = sourceListRef.current
     if (!el) return
@@ -221,7 +225,7 @@ export default function StockDetailPage() {
         }
       }
     }
-  }, [sourceListScrollKey, symbol, detailActions.sourceStocks])
+  }, [sourceListScrollKey, symbol, sourceStocksCount])
 
   // 详情页专属飞书投递
   const feishu = useStockDetailFeishu({ instrumentId })
