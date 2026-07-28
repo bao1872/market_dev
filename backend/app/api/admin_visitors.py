@@ -110,7 +110,7 @@ def _parse_goaccess_json(raw: dict) -> VisitorReport:
             if not isinstance(item, dict):
                 continue
             label = str(item.get("data", item.get("label", "")))
-            count = int(item.get("hits", item.get("count", 0)))
+            count = int(item.get("hits") or item.get("count") or 0)
             percentage = item.get("percent")
             result.append(
                 VisitorMetricItem(

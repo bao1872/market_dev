@@ -497,8 +497,9 @@ class TestCapabilityServiceIntegration:
         assert result["watchlist_limit"] == 20
         assert result["expires_at"] is not None
         # 验证 DB 行存在
-        from app.models.user_capability import UserCapability
         from sqlalchemy import select
+
+        from app.models.user_capability import UserCapability
         stmt = select(UserCapability).where(
             UserCapability.user_id == user.id,
             UserCapability.capability == "self_selection",
@@ -514,7 +515,6 @@ class TestCapabilityServiceIntegration:
         self, db_session, user_factory,
     ) -> None:
         """已有 capability：取较晚 expires_at（不降权）。"""
-        from datetime import timedelta
         from app.models.user_capability import UserCapability
         from app.services.subscription_service import grant_capability_to_user
 
@@ -551,12 +551,13 @@ class TestCapabilityServiceIntegration:
         self, db_session, user_factory,
     ) -> None:
         """revoke 硬删除 user_capabilities 行。"""
+        from sqlalchemy import select
+
         from app.models.user_capability import UserCapability
         from app.services.subscription_service import (
             grant_capability_to_user,
             revoke_capability_from_user,
         )
-        from sqlalchemy import select
 
         user = await user_factory()
         admin = await user_factory(roles=["admin"])
@@ -679,9 +680,11 @@ class TestCapabilityServiceIntegration:
     ) -> None:
         """邀请码 capabilities JSONB 写入与读取（PA-20 三权限组合）。"""
         import hashlib
+
+        from sqlalchemy import select
+
         from app.models.invitation import InviteCode
         from app.schemas.invitation import CapabilityGrant
-        from sqlalchemy import select
 
         admin = await user_factory(roles=["admin"])
 

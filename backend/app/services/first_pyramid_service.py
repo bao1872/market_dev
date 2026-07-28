@@ -611,7 +611,7 @@ def _build_momentum_dimension(
                     # 释放期量 / 挤压期均量
                     if sqz_end + 1 < len(vol_series):
                         release_vol = _safe_float(vol_series.iloc[sqz_end + 1])
-                        if squeeze_period_vol_mean and squeeze_period_vol_mean > 0:
+                        if release_vol is not None and squeeze_period_vol_mean and squeeze_period_vol_mean > 0:
                             release_vs_squeeze_vol_ratio = _safe_float(
                                 release_vol / squeeze_period_vol_mean
                             )

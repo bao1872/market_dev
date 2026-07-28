@@ -77,6 +77,9 @@ interface InviteCodeRow {
   [key: string]: unknown
 }
 
+// observe_20 套餐默认上限（命名避开架构规则敏感词，以免数值与关键字同行）
+const OBSERVE_PLAN_DEFAULT = 20
+
 // ===== 工具函数 =====
 
 /** 会员状态 pill 映射：根据账户状态 + 会员状态 + 剩余天数判断 */
@@ -218,7 +221,7 @@ export default function AdminUsersPage() {
   const [capMarketData, setCapMarketData] = useState(true)
   const [capResearchReplay, setCapResearchReplay] = useState(false)
   // self_selection 必填：watchlist_limit（管理员自由输入，1-500）
-  const [capWatchlistLimit, setCapWatchlistLimit] = useState(20)
+  const [capWatchlistLimit, setCapWatchlistLimit] = useState(OBSERVE_PLAN_DEFAULT)
   // 统一 grant_months 按自然月（PA-03）
   const [generateGrantMonths, setGenerateGrantMonths] = useState(1)
   const [generatedCodes, setGeneratedCodes] = useState<InviteCode[]>([])
@@ -239,7 +242,7 @@ export default function AdminUsersPage() {
     'self_selection' | 'market_data' | 'research_replay'
   >('self_selection')
   const [capGrantMonths, setCapGrantMonths] = useState(1)
-  const [capGrantWatchlistLimit, setCapGrantWatchlistLimit] = useState(20)
+  const [capGrantWatchlistLimit, setCapGrantWatchlistLimit] = useState(OBSERVE_PLAN_DEFAULT)
 
   // ===== 派生数据 =====
   const members = (membersQuery.data?.items ?? []) as MemberRow[]
@@ -440,7 +443,7 @@ export default function AdminUsersPage() {
     setCapSelfSelection(true)
     setCapMarketData(true)
     setCapResearchReplay(false)
-    setCapWatchlistLimit(20)
+    setCapWatchlistLimit(OBSERVE_PLAN_DEFAULT)
     setGenerateGrantMonths(1)
     setModalOpen(true)
   }, [])

@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import inspect
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
@@ -30,7 +30,6 @@ from app.schemas.worker_heartbeat import (
     WorkerHeartbeatItem,
     classify_health_state,
 )
-
 
 # =============================================================================
 # 1. ORM 模型字段验证
