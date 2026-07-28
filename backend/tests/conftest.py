@@ -65,59 +65,64 @@ def make_asgi_transport(app: FastAPI) -> httpx.ASGITransport:
 
 _APP_ENV = os.environ.get("APP_ENV", "").lower()
 _TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
+# 纯单元测试跳过 DB 初始化（不连接任何数据库）
+_PURE_UNIT = os.environ.get("PURE_UNIT_TEST", "").lower() in ("1", "true", "yes")
 
-if _APP_ENV != "test":
-    raise RuntimeError(
-        f"测试必须在 APP_ENV=test 下运行，当前 APP_ENV={_APP_ENV!r}。"
-        "请使用：APP_ENV=test TEST_DATABASE_URL=postgresql://... pytest tests/"
-    )
+if not _PURE_UNIT:
+    if _APP_ENV != "test":
+        raise RuntimeError(
+            f"测试必须在 APP_ENV=test 下运行，当前 APP_ENV={_APP_ENV!r}。"
+            "请使用：APP_ENV=test TEST_DATABASE_URL=postgresql://... pytest tests/"
+            "；纯单元测试可设置 PURE_UNIT_TEST=1 跳过 DB 检查。"
+        )
 
-if not _TEST_DATABASE_URL:
-    raise RuntimeError(
-        "TEST_DATABASE_URL 环境变量未设置。"
-        "示例：TEST_DATABASE_URL=postgresql://user:pass@host:port/dbname_test"
-    )
+    if not _TEST_DATABASE_URL:
+        raise RuntimeError(
+            "TEST_DATABASE_URL 环境变量未设置。"
+            "示例：TEST_DATABASE_URL=postgresql://user:pass@host:port/dbname_test"
+        )
 
 # [测试配置] - 描述: 校验数据库 URL scheme 与测试库命名
-_parsed = urlparse(_TEST_DATABASE_URL)
-_ALLOWED_SCHEMES = {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
-if _parsed.scheme not in _ALLOWED_SCHEMES:
-    raise RuntimeError(
-        f"TEST_DATABASE_URL scheme 必须是 postgresql / postgresql+psycopg / postgresql+asyncpg，"
-        f"当前={_parsed.scheme!r}"
+if not _PURE_UNIT:
+    _parsed = urlparse(_TEST_DATABASE_URL)
+    _ALLOWED_SCHEMES = {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
+    if _parsed.scheme not in _ALLOWED_SCHEMES:
+        raise RuntimeError(
+            f"TEST_DATABASE_URL scheme 必须是 postgresql / postgresql+psycopg / postgresql+asyncpg，"
+            f"当前={_parsed.scheme!r}"
+        )
+
+    _db_name = (_parsed.path or "").lstrip("/")
+    if "_test" not in _db_name:
+        raise RuntimeError(
+            f"TEST_DATABASE_URL 必须指向测试库（库名含 _test），当前库名={_db_name!r}"
+        )
+
+    # [测试配置] - 描述: 同步 DATABASE_URL 与 TEST_DATABASE_URL，确保 app.db 与测试引擎连接同一库
+    os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
+
+    # 统一转换为 asyncpg 驱动格式
+    _TEST_ASYNC_URL = _TEST_DATABASE_URL.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace(
+        "postgresql://", "postgresql+asyncpg://"
     )
 
-_db_name = (_parsed.path or "").lstrip("/")
-if "_test" not in _db_name:
-    raise RuntimeError(
-        f"TEST_DATABASE_URL 必须指向测试库（库名含 _test），当前库名={_db_name!r}"
+    # 测试专用 engine / session factory
+    # [测试] - 描述: test_async_engine 与 TestAsyncSessionLocal 保留供需要独立 session 的测试导入使用
+    test_async_engine = create_async_engine(
+        _TEST_ASYNC_URL,
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10,
     )
-
-# [测试配置] - 描述: 同步 DATABASE_URL 与 TEST_DATABASE_URL，确保 app.db 与测试引擎连接同一库
-os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
-
-# 统一转换为 asyncpg 驱动格式
-_TEST_ASYNC_URL = _TEST_DATABASE_URL.replace(
-    "postgresql+psycopg://", "postgresql+asyncpg://"
-).replace(
-    "postgresql://", "postgresql+asyncpg://"
-)
-
-# 测试专用 engine / session factory
-# [测试] - 描述: test_async_engine 与 TestAsyncSessionLocal 保留供需要独立 session 的测试导入使用
-test_async_engine = create_async_engine(
-    _TEST_ASYNC_URL,
-    echo=False,
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
-)
-TestAsyncSessionLocal = async_sessionmaker(
-    bind=test_async_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autoflush=False,
-)
+    TestAsyncSessionLocal = async_sessionmaker(
+        bind=test_async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
 
 
 def _run_alembic_upgrade():
@@ -148,7 +153,11 @@ async def init_test_db():
 
     [Phase 5A] 设置 SKIP_ALEMBIC_UPGRADE=1 可跳过迁移，用于运行纯 mock 测试
     （不连接数据库/Redis）。满足"不运行 Migration"约束下执行 readiness/config 测试。
+    [Round 2026-07-28] PURE_UNIT_TEST=1 时完全跳过 DB 初始化（纯单元测试不连接数据库）。
     """
+    if _PURE_UNIT:
+        yield
+        return
     if os.environ.get("SKIP_ALEMBIC_UPGRADE", "") == "1":
         yield
         await test_async_engine.dispose()

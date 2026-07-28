@@ -2,6 +2,15 @@
 
 本 Runbook 描述如何在本地以原生进程启动盘迹 Backend 和 Frontend，并通过 SSH 隧道安全连接远程共享 PostgreSQL / Redis。
 
+## 核心数据架构规则（2026-07-28 起）
+
+- **本地固定连接正式数据源**：PostgreSQL=`bz_stock`，Redis 使用 `backend/.env` 中的正式运行配置（本地隔离 DB）。
+- **永久禁止本地连接持久测试库**（如 `bz_stock_test`）；不得创建新的持久测试数据库。
+- **本地与服务器隔离边界是进程，不是数据复制**：本地只启动 Backend、Frontend、Capture 和 SSH Tunnel；Scheduler、正式 Worker、盘后编排和全市场任务必须为 0。
+- **本地写入均为真实业务写入**：禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道；禁止清库、批量更新、Migration、删除正式数据。
+- **8752028@qq.com 为受保护 Owner 账户**：禁止修改其密码、邮箱、状态、角色、权限、订阅和业务数据。
+- **未来 CI 数据库测试只能使用 CI 临时数据库**，不得使用持久 `bz_stock_test`。
+
 ## 前置条件
 
 - Python 3.11+ 虚拟环境 `backend/.venv` 已创建，依赖已安装。
@@ -11,10 +20,11 @@
 - 不得使用 `55-server`（解析到 `120.234.137.109`，不是盘迹生产服务器）。
 - `backend/.env` 已按 `backend/.env.example` 配置：
   - `APP_ENV=development`
-  - `DATABASE_URL=postgresql+psycopg://***@127.0.0.1:15432/bz_stock`
-  - `REDIS_URL=redis://127.0.0.1:16379/15`
+  - `DATABASE_URL=postgresql+psycopg://***@127.0.0.1:15432/bz_stock`（正式库）
+  - `REDIS_URL=redis://127.0.0.1:16379/15`（本地隔离 DB，避免进入远程生产队列）
 
 > 注意：不要把真实密码写入仓库跟踪文件。`backend/.env` 已被 `.gitignore` 排除。
+> 禁止创建 `backend/.env.test` 或任何指向 `bz_stock_test` 的本地配置。
 
 ## 启动流程
 
@@ -230,7 +240,10 @@ ssh -G panji-prod | grep hostname
 ## 安全边界
 
 - 本地开发不启动 Docker 或 Docker Compose 盘迹服务。
+- **本地固定连接 `bz_stock` 正式库**；禁止连接 `bz_stock_test` 或创建新的持久测试库。
 - 不执行 Alembic migration、CREATE TABLE、TRUNCATE 或其他破坏性 SQL。
-- 不启动 Scheduler 或 Worker，除非明确需要调试盘后链路。
-- DB 15 为临时隔离库，尚未正式保留；在确认前不要启动 Worker。
-- 不要把 `backend/.env` 或任何含密码/完整连接串的文件提交到 Git。
+- **禁止本地启动 Scheduler、正式 Worker、盘后编排或全市场任务**；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
+- 禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道。
+- **8752028@qq.com 为受保护 Owner 账户**：禁止修改其密码、邮箱、状态、角色、权限、订阅和业务数据。
+- 不得在命令、日志、浏览器自动化或报告中写入 Owner 真实密码；TRAE 不得自动登录 Owner 账户，登录由用户手工完成。
+- Redis DB 15 为本地隔离逻辑 DB，避免进入远程生产队列；不要把 `backend/.env` 或任何含密码/完整连接串的文件提交到 Git。

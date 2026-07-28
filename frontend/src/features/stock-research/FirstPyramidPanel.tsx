@@ -18,11 +18,39 @@ const DIMENSION_LABEL: Record<string, string> = {
   chip_consensus: '筹码共识',
 }
 
+/** 事件类型中文映射 */
+const EVENT_TYPE_LABEL: Record<string, string> = {
+  BOS: '结构突破',
+  CHoCH: '结构转折',
+  OB_ENTRY: '进入订单区域',
+  EQH: '连续高点',
+  EQL: '连续低点',
+}
+
 /** 格式化事件方向为中文 */
 function formatDirection(dir: string | null): string {
   if (dir === 'up') return '上行'
   if (dir === 'down') return '下行'
   return '—'
+}
+
+/** 格式化事件类型为中文 */
+function formatEventType(type: string): string {
+  return EVENT_TYPE_LABEL[type] ?? type
+}
+
+/** 格式化结构级别为中文（仅 swing/internal 有值，EQH/EQL 为 null 不显示） */
+function formatStructureLevel(level: unknown): string | null {
+  if (level === 'swing') return '主要级别'
+  if (level === 'internal') return '短线级别'
+  return null
+}
+
+/** 格式化结构方向为中文 */
+function formatStructureDirection(dir: unknown): string {
+  if (dir === 1) return '偏多'
+  if (dir === -1) return '偏空'
+  return '未形成'
 }
 
 /** 量能徽标颜色 */
@@ -85,10 +113,12 @@ function VolumeWaterLevelBar({ vc }: { vc: VolumeContextSchema | null | undefine
   )
 }
 
-/** 渲染单个事件（含量能徽标） */
+/** 渲染单个事件（含量能徽标 + 结构级别） */
 function EventItem({ event }: { event: PyramidEvent }) {
-  const parts: string[] = [event.type]
+  const parts: string[] = [formatEventType(event.type)]
   if (event.direction) parts.push(formatDirection(event.direction))
+  const levelLabel = formatStructureLevel(event.extra?.structure_level)
+  if (levelLabel) parts.push(levelLabel)
   if (event.occurredAt) parts.push(event.occurredAt)
   if (event.price !== null && event.price !== undefined) parts.push(`价 ${event.price}`)
   parts.push(`新鲜度 ${event.freshnessBars ?? 0} 根`)
@@ -117,6 +147,10 @@ function DimensionCard({ dim, optional }: { dim: DimensionResult; optional?: boo
   const squeezeVolMean = cf.squeeze_period_volume_mean as number | undefined
   const releaseVsSqueeze = cf.release_vs_squeeze_volume_ratio as number | undefined
 
+  // 结构卡：主要/短线结构方向
+  const swingDir = cf.swing_direction
+  const internalDir = cf.internal_direction
+
   return (
     <div className={`fp-dim-card${optional ? ' optional' : ''}`}>
       <div className="fp-dim-header">
@@ -126,6 +160,14 @@ function DimensionCard({ dim, optional }: { dim: DimensionResult; optional?: boo
         </span>
       </div>
       <div className="fp-dim-status">{dim.statusText}</div>
+
+      {/* 结构卡：主要/短线结构方向 */}
+      {dim.name === 'structure' && (
+        <div className="fp-dim-structure-dir">
+          <span className="fp-structure-label">主要结构：{formatStructureDirection(swingDir)}</span>
+          <span className="fp-structure-label">短线结构：{formatStructureDirection(internalDir)}</span>
+        </div>
+      )}
 
       {/* 趋势卡：段均量比 */}
       {dim.name === 'trend' && segVolMean !== undefined && segVolMean !== null && (

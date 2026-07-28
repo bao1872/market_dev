@@ -854,7 +854,20 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         nextParams.delete(key)
       }
     }
-    setSearchParams(nextParams, { replace: true })
+    // [Round 2026-07-28] 防止 searchParams → setSearchParams → searchParams 无限循环：
+    // 仅在 managed keys 实际变化时才 setSearchParams
+    let changed = false
+    for (const key of managedKeys) {
+      const oldVal = searchParams.get(key)
+      const newVal = nextParams.get(key)
+      if (oldVal !== newVal) {
+        changed = true
+        break
+      }
+    }
+    if (changed) {
+      setSearchParams(nextParams, { replace: true })
+    }
   }, [sortColumn, sortDirection, page, pageSize, columns, searchParams, setSearchParams, initialPageSize, effectiveKeyword, filters])
 
   // ===== 服务端查询回调 =====

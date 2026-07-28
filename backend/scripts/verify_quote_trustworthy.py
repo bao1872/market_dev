@@ -1,12 +1,10 @@
-"""本地验证 /api/v1/instruments/{id}/quote 的可信化字段。
+"""验证 /api/v1/instruments/{id}/quote 的可信化字段。
 
-用法：
-    cd /root/web_dev/backend
-    APP_ENV=test DATABASE_URL=postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test \
-        REDIS_URL=redis://localhost:6379/1 python scripts/verify_quote_trustworthy.py
+仅用于 CI 临时数据库或一次性验证，禁止连接持久 bz_stock_test 或正式 bz_stock。
+调用方必须显式设置 DATABASE_URL 指向 CI 临时数据库。
 
 行为：
-1. 在测试库创建临时 instrument + 当日日线 bar。
+1. 在数据库创建临时 instrument + 当日日线 bar。
 2. 调用 /quote（当前若为非交易时段，预期 source=daily_fallback, degraded=false）。
 3. Monkeypatch 交易时段与 pytdx 返回值，再次调用 /quote
    （预期 source=pytdx, is_realtime=true, degraded=false）。
@@ -27,9 +25,9 @@ from pathlib import Path
 backend_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(backend_dir))
 
+if not os.environ.get("DATABASE_URL"):
+    raise RuntimeError("DATABASE_URL 未设置；本脚本仅用于 CI 临时数据库，禁止默认连接任何持久库")
 os.environ.setdefault("APP_ENV", "test")
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://bz:bz@localhost:5433/bz_stock_test")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
 
 import httpx
 from sqlalchemy import text

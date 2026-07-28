@@ -23,6 +23,7 @@
 | CHANGE-20260728-001 | 2026-07-28 | 盘中结构事件图片按事件独立截图（修复"有文字无图片"） | bugfix | 盘中监控 | 进行中（代码+测试通过，真实盘中运行未核验） | WI-12 | `maps/50-watchlist-intraday.md` §4 |
 | CHANGE-20260728-002 | 2026-07-28 | 盘迹一轮收口（Gate 1/3/4/5 代码+验证） | architecture | 量化模型/盘后/管理后台 | 进行中（代码+源码级验证通过，Gate2 真实验收+运行时受本地约束阻塞） | PRD20/PRD30/PRD60 | `maps/20-quant-model.md`、`maps/30-after-close.md`、`maps/60-permissions-admin.md`、`maps/80-system-runtime.md` |
 | CHANGE-20260728-003 | 2026-07-28 | 本地登录恢复 + 邀请码 30 天周期 + 第一金字塔定稿 | behavior | 权限/量化模型/安全 | 进行中（代码+目标测试通过，浏览器验收待启动服务） | PA-03/QM-01~QM-43/QM-60~QM-62 | `maps/60-permissions-admin.md`、`maps/20-quant-model.md` |
+| CHANGE-20260728-004 | 2026-07-28 | 本地数据架构纠正 + 永久禁用测试库 + de7fbcb 遗留修复 | architecture+bugfix | 运行体系/权限/量化模型/安全 | 进行中（代码+目标测试通过，浏览器真实链路验收待完成） | SR-03/SR-40/PA-03/QM-01~QM-43 | `maps/80-system-runtime.md`、`maps/60-permissions-admin.md`、`maps/20-quant-model.md` |
 
 ## 3. 状态说明
 

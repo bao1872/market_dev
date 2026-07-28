@@ -187,6 +187,10 @@
 - 新增未经确认的文档层或治理层；
 - 在处理局部任务时进行大范围无关修改。
 - 修改或删除 `8752028@qq.com`（受保护 Owner 账户）的 email、password_hash、status、角色、权限或订阅；清理测试数据前必须先排除此邮箱。
+- 本地开发连接持久测试数据库（如 `bz_stock_test`）；本地 Backend 必须连接正式 `bz_stock` 数据源，隔离边界为进程而非数据复制。
+- 本地启动 Scheduler、正式 Worker、盘后编排或全市场任务；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
+- 在本地创建测试用户、测试邀请码、测试权限、测试快照或测试通知渠道；本地写入均为真实业务写入。
+- 在命令、日志、浏览器自动化或报告中写入 Owner 真实密码；TRAE 不得自动登录 Owner 账户。
 
 项目特定的高风险操作和环境约束，应记录在 `rules/` 或对应 Runbook 中。
 

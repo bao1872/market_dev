@@ -1,7 +1,7 @@
 # 系统运行体系 Map
 
-核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）；Phase 4 完成 Git 分支治理与 PRD20/30 代码对齐审计；Phase 5A 完成分支一致性补验与 AC-04 修复；Phase 5B-0 完成 ref/sync 仓库清理、CI 防误推、本地完整原生运行与趋势入口锁定；Phase 5B-2 完成部署脚本修复与静态测试
-最后核验日期：2026-07-27
+核验状态：已基于本地原生启动核验（第一阶段），并基于远程只读审计补充腾讯云运行事实（第三阶段）；Phase 4 完成 Git 分支治理与 PRD20/30 代码对齐审计；Phase 5A 完成分支一致性补验与 AC-04 修复；Phase 5B-0 完成 ref/sync 仓库清理、CI 防误推、本地完整原生运行与趋势入口锁定；Phase 5B-2 完成部署脚本修复与静态测试；2026-07-28 完成本地数据架构纠正（永久禁用 bz_stock_test，固定连接 bz_stock 正式库）
+最后核验日期：2026-07-28
 核验分支：dev
 核验提交：c730876（Phase 5B-0 ref/sync 清理）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`；Phase 5B-0 详见 `docs/changes/2026/CHANGE-20260727-003-repo-boundary-local-runtime.md`；Phase 5B-2 详见 `docs/changes/2026/CHANGE-20260727-005-phase-5b-2-capabilities-deploy.md`；远程 origin/main=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf
 核验范围：本地原生 Backend / Frontend 启动、共享 PostgreSQL / Redis 连接、Scheduler / Worker 默认关闭；远程只读审计（Git/Compose/容器/Redis/健康检查）；本地/origin/服务器分支治理与一致性补验；PRD20/PRD30 代码对齐审计；AC-04 日线 readiness 修复与 P0 Redis 隔离复核
@@ -16,7 +16,7 @@
 |---|---|---|---|
 | SR-01 本地使用原生进程 | `Makefile` 的 `backend` / `frontend` 目标；`backend/app/main.py`；`frontend/vite.config.ts` | 已核验 | Backend PID / Frontend PID；curl /health 返回 200 |
 | SR-02 不依赖 Docker 本地启动 | `Makefile` 的 `up` / `down` 已改为废弃警告；`docker-compose.yml` 仅存 Redis 服务且未被本地 dev 流程引用 | 已核验 | 未执行 `docker compose up`；本地无盘迹容器 |
-| SR-03 共享 PostgreSQL | `backend/.env` DATABASE_URL → 127.0.0.1:15432 → 腾讯云 Docker 内 `trading-postgres:5432/bz_stock` | 已核验 | SELECT 1 / current_database() / version() / 表存在性查询成功 |
+| SR-03 共享 PostgreSQL | `backend/.env` DATABASE_URL → 127.0.0.1:15432 → 腾讯云 Docker 内 `trading-postgres:5432/bz_stock`；**本地固定连接 `bz_stock` 正式库，永久禁止 `bz_stock_test`** | 已核验 | SELECT current_database()=bz_stock；instruments=8272 |
 | SR-10 至 SR-13 Git、CI 和版本 | `dev` 已创建；本地基于 `origin/dev` rebase 后领先 2 个提交；未做 push | 已核验 | `git status --branch` |
 | SR-20 至 SR-22 PostgreSQL 连接和 Schema | `backend/app/db.py`；`backend/app/config.py` DATABASE_URL 解析；PostgreSQL 16.14 | 已核验 | 健康接口 /version 返回 alembic_revision |
 | SR-30 至 SR-33 Redis DB 和队列 | `backend/app/config.py` REDIS_URL；本地 DB 15（临时）；远程 DB 0 | 已核验 | PING / DBSIZE=0；DB 0 启动被 `config.py` 拒绝 |

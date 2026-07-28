@@ -243,7 +243,7 @@ class TestEndToEnd:
         # 整体 statusText 应该按 trend | structure | momentum 顺序拼接
         # 至少包含关键词
         assert "DSA" in snap.statusText or "趋势" in snap.statusText
-        assert "Swing" in snap.statusText or "BOS" in snap.statusText
+        assert "主要结构" in snap.statusText or "BOS" in snap.statusText
         assert "Squeeze" in snap.statusText
 
 
@@ -572,11 +572,11 @@ class TestStructureLevelFinalization:
             )
 
     def test_status_text_includes_swing_and_internal(self, up_bars):
-        """结构维度 statusText 必须同时体现 Swing 和 Internal 方向。"""
+        """结构维度 statusText 必须同时体现主要结构和短线结构方向。"""
         snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
         st = snap.structure.statusText
-        assert "Swing" in st, f"statusText 必须包含 Swing 方向, 实际: {st}"
-        assert "Internal" in st, f"statusText 必须包含 Internal 方向, 实际: {st}"
+        assert "主要结构" in st, f"statusText 必须包含主要结构方向, 实际: {st}"
+        assert "短线结构" in st, f"statusText 必须包含短线结构方向, 实际: {st}"
 
     def test_internal_direction_independent_from_swing(self, up_bars, down_bars):
         """internal_direction 与 swing_direction 独立输出（不互相覆盖）。"""

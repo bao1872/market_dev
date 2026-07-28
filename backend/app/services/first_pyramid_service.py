@@ -460,14 +460,14 @@ def _build_structure_dimension(
         # 取值：1=bullish, -1=bearish, 0=未形成；与 swing_bias 同义，命名对齐定稿
         "swing_direction": swing_bias,
         "internal_direction": internal_bias,
-        "active_ob_count": sum(1 for ob in order_blocks if ob.get("is_active", False)),
+        "active_ob_count": sum(1 for ob in order_blocks if not ob.get("mitigated", False)),
         "trailing_top": _safe_float(smc_result.get("trailing", {}).get("top")),
         "trailing_bottom": _safe_float(smc_result.get("trailing", {}).get("bottom")),
     }
 
-    # 状态文本
-    bias_text = {1: "Swing 偏多", -1: "Swing 偏空", 0: "Swing 未定"}.get(swing_bias, "Swing 未定")
-    internal_text = {1: "Internal 偏多", -1: "Internal 偏空", 0: "Internal 未定"}.get(internal_bias, "Internal 未定")
+    # 状态文本（纯中文：主要结构/短线结构）
+    bias_text = {1: "主要结构偏多", -1: "主要结构偏空", 0: "主要结构未形成"}.get(swing_bias, "主要结构未形成")
+    internal_text = {1: "短线结构偏多", -1: "短线结构偏空", 0: "短线结构未形成"}.get(internal_bias, "短线结构未形成")
     last_event_text = ""
     if pyramid_events:
         last_evt = pyramid_events[-1]

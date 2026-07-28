@@ -94,6 +94,9 @@ def _compute_expires_at(base: datetime, invite: InviteCode) -> datetime:
     """根据邀请码的 grant_months 或 grant_days 计算到期时间。
 
     优先使用 grant_months（30 天周期），兼容旧邀请码的 grant_days（天数）。
+    - grant_months 为正数：使用 30 × grant_months 天
+    - grant_months 为空且 grant_days 为正数：使用原 grant_days 天
+    - 两者都无效：默认 30 天
     30 天周期：1 个月 = 30 天，2 个月 = 60 天，跨月/跨年按天数计算。
 
     Args:
@@ -103,7 +106,11 @@ def _compute_expires_at(base: datetime, invite: InviteCode) -> datetime:
     Returns:
         到期时间（时区感知）
     """
-    return _compute_expires_at_from_months(base, invite.grant_months)
+    if invite.grant_months is not None and invite.grant_months > 0:
+        return _compute_expires_at_from_months(base, invite.grant_months)
+    if invite.grant_days is not None and invite.grant_days > 0:
+        return base + timedelta(days=invite.grant_days)
+    return base + timedelta(days=_DEFAULT_GRANT_DAYS)
 
 
 def _generate_invite_code() -> str:

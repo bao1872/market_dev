@@ -144,14 +144,15 @@
 | 权威 DTO | `backend/app/schemas/first_pyramid.py:FirstPyramidSnapshot`（固定 ordered_dimensions = trend/structure/momentum/chip_consensus） |
 | 编排服务 | `backend/app/services/first_pyramid_service.py:compute_first_pyramid_snapshot`（SSOT 入口，不实现算法） |
 | 趋势维度 | 调用 `compute_dsa_bundle`；输出 regime_value/dsa_dir_bars/段内成交量（SSOT 迁移后） |
-| 结构维度 | 调用 `compute_smc_pine`；输出 BOS/CHoCH/OB_ENTRY/EQH/EQL 事件 + swing_bias |
+| 结构维度 | 调用 `compute_smc_pine`；输出 BOS/CHoCH/OB_ENTRY/EQH/EQL 事件 + swing_bias（主要结构方向）+ internal_bias（短线结构方向）；[Round 2026-07-28] `active_ob_count` 按 `not mitigated` 统计（不再读 `is_active`）；`statusText` 使用纯中文"主要结构偏多/偏空/未形成"+"短线结构偏多/偏空/未形成" |
 | 动量维度 | 调用 `compute_bollinger_features` + `compute_sqzmom_lb`；输出 squeeze 状态/BB 带宽/SQZ_OFF/MOMENTUM_DIFFUSION 事件 |
-| 筹码共识 | 调用 `compute_node_cluster_profile`；无有效峰时返回 None，不阻塞前三维 |
+| 筹码共识 | 调用 `compute_node_cluster_profile`；无有效峰时返回 None，不阻塞前三维；**可选层，不得用 VAH/VAL 过滤或替代主要筹码峰** |
 | 跨入口一致性 | 同 OHLCV + 参数 → 同 inputHash/parameterHash/snapshot；测试 `test_first_pyramid_contract.py` 验证 |
 | 状态文本顺序 | trend→structure→momentum→chip_consensus（修正历史 trend→momentum→structure→volume 错误顺序） |
+| 事件级别契约 | BOS/CHoCH/OB_ENTRY 事件 `extra.structure_level = "swing"（主要级别）\| "internal"（短线级别）`；EQH/EQL 事件 `structure_level = null`（不显示虚构级别）；前端 FirstPyramidPanel 显示中文事件名（结构突破/结构转折/进入订单区域/连续高点/连续低点） |
 | 必选维度校验 | 前三维任一 available=False 抛 ValueError，不得静默伪造 |
 | 参数 hash | `_FIRST_PYRAMID_PARAMS` 包含 DSA_LOOKBACK/MIN_DIR_BARS/SMC_DEFAULT_PARAMS/BBcfg/sqzmom 配置，禁止页面动态组合 |
-| 验证入口 | `backend/tests/test_first_pyramid_contract.py`（38 测试，覆盖 DTO/跨入口/不变量/golden/QM 映射） |
+| 验证入口 | `backend/tests/test_first_pyramid_contract.py`（覆盖 DTO/跨入口/不变量/golden/QM 映射；纯单元测试可设 `PURE_UNIT_TEST=1` 跳过 DB） |
 | 算法版本 | `FIRST_PYRAMID_ALGORITHM_VERSION = "1.0.0-phase-5b-1"`（契约或算法变更时递增） |
 
 **注**：本服务为纯编排层，不复制四套算法。单股详情、批量、行情列表、盘后 compute 必须复用此入口。
