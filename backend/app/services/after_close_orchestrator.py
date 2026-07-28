@@ -1635,15 +1635,17 @@ async def execute_after_close_run(
                             )
                             # 异常路径必须写 failed（不得在 publish 前伪造 completed）
                             async with AsyncSessionLocal() as db:
-                                dsa_run = await db.get(StrategyRun, dsa_run_id)
-                                if dsa_run is not None and dsa_run.status not in (
+                                dsa_run_on_failure = await db.get(
+                                    StrategyRun, dsa_run_id,
+                                )
+                                if dsa_run_on_failure is not None and dsa_run_on_failure.status not in (
                                     "completed", "failed", "partial_failed", "published"
                                 ):
-                                    dsa_run.status = "failed"
-                                    dsa_run.error_message = (
+                                    dsa_run_on_failure.status = "failed"
+                                    dsa_run_on_failure.error_message = (
                                         f"execute_run 失败: {dsa_exec_exc}"[:500]
                                     )
-                                    dsa_run.finished_at = datetime.now(UTC)
+                                    dsa_run_on_failure.finished_at = datetime.now(UTC)
                                     await db.commit()
                             raise
                 except RuntimeError as snapshot_exc:
