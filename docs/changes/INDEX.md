@@ -25,6 +25,7 @@
 | CHANGE-20260728-003 | 2026-07-28 | 本地登录恢复 + 邀请码 30 天周期 + 第一金字塔定稿 | behavior | 权限/量化模型/安全 | 进行中（代码+目标测试通过，浏览器验收待启动服务） | PA-03/QM-01~QM-43/QM-60~QM-62 | `maps/60-permissions-admin.md`、`maps/20-quant-model.md` |
 | CHANGE-20260728-004 | 2026-07-28 | 本地数据架构纠正 + 永久禁用测试库 + de7fbcb 遗留修复 | architecture+bugfix | 运行体系/权限/量化模型/安全 | 进行中（代码+目标测试通过，浏览器真实链路验收待完成） | SR-03/SR-40/PA-03/QM-01~QM-43 | `maps/80-system-runtime.md`、`maps/60-permissions-admin.md`、`maps/20-quant-model.md` |
 | CHANGE-20260728-005 | 2026-07-28 | 第一金字塔双页面 UI 落地 + 邀请码前端纠正 + 生产盘后/GoAccess 只读诊断 | behavior+incident | 量化模型前端/权限前端/盘后编排/访问统计 | 进行中（代码+TSC+ESLint通过，浏览器验收待用户手工） | PRD40/QM-01~QM-43/PA-03/PRD30 | `maps/40-market-stock-experience.md`、`maps/30-after-close.md`、`maps/60-permissions-admin.md`、`maps/80-system-runtime.md` |
+| CHANGE-20260728-006 | 2026-07-28 | 第一金字塔视觉重构 + 小K线裁切修复 + 一级导航调整 | behavior+architecture | 量化模型前端/行情体验/权限前端 | 进行中（代码+TSC+ESLint通过，浏览器验收待用户手工） | PRD40/QM-01~QM-43/PA-10/PA-12 | `maps/40-market-stock-experience.md`、`maps/20-quant-model.md`、`maps/60-permissions-admin.md` |
 
 ## 3. 状态说明
 

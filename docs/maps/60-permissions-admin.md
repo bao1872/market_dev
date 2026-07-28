@@ -303,13 +303,19 @@ Gate 2 在 Phase 5B-2 capability 模型基础上完成权限代码改造（非"�
 - 统一 `grant_months` 按 30 天周期（1-36 周期，1 周期=30 天）
 - 旧 `plan_code` 模式仍兼容（无 capabilities 时 fallback）
 
-### 12.5 前端 UI gating（新增，代码+TSC/ESLint 通过，真实 UI 未核验）
+### 12.5 前端 UI gating（CHANGE-20260728-006 更新一级导航可见性）
 
+- `UserAppShell.tsx`：顶栏一级导航固定为「行情｜自选｜复盘」
+  - 行情：所有可进入 `/market` 的用户可见
+  - 自选：仅 admin 或 `self_selection` active 可见（无权限时从导航移除）
+  - 复盘：仅 admin 或 `research_replay` active 可见（无权限时从导航移除）
+  - active 判定不依赖 NavLink pathname，使用 `resolveActiveNav(pathname, searchParams, itemPath)`
 - `MarketWorkspacePage.tsx`：
   - `canAccessStockDetail`（market_data 或 admin）= false 时，股票名渲染为纯文本（无按钮/箭头）
-  - `canAccessWatchlist`（self_selection 或 admin）= false 时，隐藏自选 scope 按钮 + 移除操作列
   - 无自选权限时强制 scope=market（禁止 URL 直接访问 watchlist scope）
-- `MarketToolbar.tsx`：`canAccessWatchlist` prop 控制"自选"scope 按钮可见性
+- `MarketToolbar.tsx`（CHANGE-20260728-006 重构）：
+  - 彻底删除 `scopeTabs/scope/onScopeChange/canAccessWatchlist` 相关 UI 和 Props
+  - 只保留股票搜索、行业、概念筛选；行情和自选下均完整显示同一 Toolbar
 
 ### 12.6 权限矩阵（35 单元测试通过，非真实 API 集成）
 

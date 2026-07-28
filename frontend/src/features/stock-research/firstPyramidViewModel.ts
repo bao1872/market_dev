@@ -38,6 +38,12 @@ export interface TrendVM {
   continuousBars: number | null
   currentVsPrevVolumeRatio: number | null
   freshnessLabel: string
+  /** 距 DSA VWAP 偏离百分比（null=缺失） */
+  vwapDeviationPct: number | null
+  /** 当前段量比（与 currentVsPrevVolumeRatio 同字段，语义保留） */
+  segmentVolumeRatio: number | null
+  /** 趋势强度标签（null=缺失） */
+  trendStrength: string | null
 }
 
 export interface StructureVM {
@@ -55,8 +61,14 @@ export interface MomentumVM {
   direction: Direction
   /** SQZMOM 直方图值（>0 偏多，<0 偏空，null=缺失） */
   sqzmomVal: number | null
+  /** SQZMOM 前值（用于计算变化方向） */
+  sqzmomPrev: number | null
   /** BB 带宽（null=缺失） */
   bbWidth: number | null
+  /** BB 位置 0~1（0=下轨，0.5=中轨，1=上轨，null=缺失） */
+  bbPosition: number | null
+  /** 动量变化标签（增强/减弱/转多/转空/持平） */
+  momentumChangeLabel: string | null
   releaseVsSqueezeRatio: number | null
   volDivergence: string | null
 }
@@ -66,6 +78,14 @@ export interface ChipConsensusVM {
   statusText: string
   /** 价格相对 POC 位置标签（null=无 POC 或不可用） */
   positionLabel: string | null
+  /** POC 价格（null=无有效 POC） */
+  pocPrice: number | null
+  /** 最新收盘价（null=缺失） */
+  lastClose: number | null
+  /** 距 POC 偏离百分比（null=无 POC 或收盘价） */
+  distancePct: number | null
+  /** 筹码峰数量（null=缺失） */
+  nPeakNodes: number | null
 }
 
 export interface FirstPyramidVM {
@@ -179,8 +199,9 @@ function buildTrend(dim: DimensionResult): TrendVM {
   const continuousBars = asNumber(cf['dsa_dir_bars'])
   const ratio = asNumber(cf['current_vs_prev_volume_ratio'])
   // P0 修复：后端无独立"趋势变化新鲜度"字段，不得用 continuous_bars 充当
-  // 有独立字段时再读取，否则留空
   const trendChangeFreshness = asNumber(cf['trend_change_freshness_bars'])
+  const vwapDevPct = asNumber(cf['dsa_vwap_dev_pct'])
+  const strength = asString(cf['trend_strength'])
   return {
     available: dim.available,
     statusText: dim.statusText,
@@ -188,6 +209,9 @@ function buildTrend(dim: DimensionResult): TrendVM {
     continuousBars: continuousBars,
     currentVsPrevVolumeRatio: ratio,
     freshnessLabel: FRESHNESS_LABEL(trendChangeFreshness),
+    vwapDeviationPct: vwapDevPct,
+    segmentVolumeRatio: ratio,
+    trendStrength: strength,
   }
 }
 
@@ -209,21 +233,41 @@ function buildMomentum(dim: DimensionResult): MomentumVM {
   const cf = dim.continuousFactors
   const squeezeOn = asBool(cf['squeeze_on']) ?? false
   const sqzmomVal = asNumber(cf['sqzmom_val'])
+  const sqzmomPrev = asNumber(cf['sqzmom_val_prev'])
   const bbWidth = asNumber(cf['bb_width'])
+  const bbPosition = asNumber(cf['bb_position'])
   const releaseRatio = asNumber(cf['release_vs_squeeze_volume_ratio'])
   const volDiv = asString(cf['vol_divergence'])
   // P0 修复：动量方向由 sqzmom_val 符号决定，不得用 squeeze_on 推断
-  // sqzmom_val > 0 → 偏多；< 0 → 偏空；null 或 0 → 中性
   return {
     available: dim.available,
     statusText: dim.statusText,
     squeezeOn,
     direction: directionFromSign(sqzmomVal),
     sqzmomVal,
+    sqzmomPrev,
     bbWidth,
+    bbPosition,
+    momentumChangeLabel: computeMomentumChangeLabel(sqzmomVal, sqzmomPrev),
     releaseVsSqueezeRatio: releaseRatio,
     volDivergence: volDiv,
   }
+}
+
+/** 比较当前与前值，生成动量变化标签 */
+function computeMomentumChangeLabel(
+  curr: number | null,
+  prev: number | null,
+): string | null {
+  if (curr === null || prev === null) return null
+  if (prev === 0) return curr > 0 ? '转多' : curr < 0 ? '转空' : '持平'
+  // 符号翻转
+  if (prev > 0 && curr < 0) return '转空'
+  if (prev < 0 && curr > 0) return '转多'
+  // 同符号
+  if (Math.abs(curr) > Math.abs(prev)) return '增强'
+  if (Math.abs(curr) < Math.abs(prev)) return '减弱'
+  return '持平'
 }
 
 function buildChipConsensus(dim: DimensionResult | null): ChipConsensusVM | null {
@@ -231,17 +275,24 @@ function buildChipConsensus(dim: DimensionResult | null): ChipConsensusVM | null
   const cf = dim.continuousFactors
   const pocPrice = asNumber(cf['poc_price'])
   const lastClose = asNumber(cf['last_close'])
+  const nPeakNodes = asNumber(cf['n_peak_nodes'])
   // P0 修复：筹码 available 不等于偏多；显示真实价格相对 POC 位置或中性"可用"
   let positionLabel: string | null = null
+  let distancePct: number | null = null
   if (pocPrice !== null && lastClose !== null) {
-    if (lastClose > pocPrice) positionLabel = '价格在 POC 上方'
-    else if (lastClose < pocPrice) positionLabel = '价格在 POC 下方'
-    else positionLabel = '价格贴合 POC'
+    if (lastClose > pocPrice) positionLabel = 'POC上方'
+    else if (lastClose < pocPrice) positionLabel = 'POC下方'
+    else positionLabel = '贴合POC'
+    distancePct = ((lastClose - pocPrice) / pocPrice) * 100
   }
   return {
     available: dim.available,
     statusText: dim.statusText,
     positionLabel,
+    pocPrice,
+    lastClose,
+    distancePct,
+    nPeakNodes,
   }
 }
 

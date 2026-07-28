@@ -52,7 +52,46 @@
 | 来源列表 | 待核验 | 待核验 | 上下文导航 |
 | 状态提示 | 待核验 | 待核验 | loading/empty/error 等 |
 
-## 4.1 第一金字塔双页面落点（CHANGE-20260728-005）
+## 4.1 一级导航（CHANGE-20260728-006）
+
+普通用户一级导航固定为「行情｜自选｜复盘」，承载于 `UserAppShell` 顶栏。
+
+| 导航项 | 链接 | 权限 | 备注 |
+|---|---|---|---|
+| 行情 | `/market`（scope != watchlist） | 可进入 `/market` 的用户 | 默认入口 |
+| 自选 | `/market?scope=watchlist` | admin 或 `self_selection` active | 复用 `MarketWorkspacePage`，不新建 WatchlistPage |
+| 复盘 | `/replay` | admin 或 `research_replay` active | 后端权限守卫不变 |
+
+实现要点：
+
+- 真源：`frontend/src/navigation/appNavigation.ts` 导出 `USER_NAV_ITEMS`、`WATCHLIST_NAV_PATH`、`resolveActiveNav`、`buildScopeSwitchUrl`。
+- `UserAppShell.tsx` 不依赖 `NavLink` 的 pathname 判断两个 `/market` 入口，使用 `resolveActiveNav(pathname, searchParams, itemPath)` 自定义 active：
+  - `/market` 且 `scope != watchlist` → 行情 active
+  - `/market` 且 `scope == watchlist` → 自选 active
+  - `/replay` → 复盘 active
+- 点击行情/自选时通过 `buildScopeSwitchUrl(currentParams, newScope)` 保留 `keyword/industry/concept/sort/dir/filters/page_size`，更新 `scope`，删除 `selected`，将 `page` 重置为 1。
+- `MarketToolbar.tsx` 彻底删除 `scopeTabs/scope/onScopeChange/canAccessWatchlist` 相关 UI 和 Props，只保留股票搜索、行业、概念筛选。行情和自选下均完整显示同一 Toolbar。
+
+## 4.2 右栏布局（CHANGE-20260728-006）
+
+`MarketRightPanel.tsx` + `MarketRightPanel.module.scss` 固定为「小K线固定区 + 状态滚动区」两段 Flexbox 布局，防止小K线被压缩。
+
+DOM 结构：
+
+```
+.panel (flex column, height:100%, overflow:hidden)
+├── .klineFixed (flex:0 0 230px, height:230px, overflow:visible)
+│   └── <MiniKlineCard symbol={symbol}/>
+└── .stateScroll (flex:1 1 auto, min-height:0, overflow-y:auto)
+    ├── <FirstPyramidPanel symbol variant="compact"/>  (symbol 存在时)
+    └── .moreObservation                                    (symbol 存在时)
+        ├── toggle 按钮（▶/▼ 更多观察）
+        └── <AtomicFactsPanel symbol variant="compact"/>  (moreOpen=true 时才挂载)
+```
+
+`global.scss` 同步修正 `.mini-kline-card`（flex:0 0 auto, flex-shrink:0, height/min-height:230px, overflow:visible）、`.mini-kline-tabs`（flex:0 0 26px）、`.mini-kline-chart`（flex:0 0 190px, height:190px），保证 15m/60m/日/周/月按钮及图表底部时间轴完整可见，下方第一金字塔不压缩小K线。
+
+## 4.3 第一金字塔双页面落点
 
 | 落点 | 组件 | variant | 路径 |
 |---|---|---|---|
@@ -61,16 +100,101 @@
 
 - 共享组件：`frontend/src/features/stock-research/FirstPyramidPanel.tsx`
 - ViewModel：`frontend/src/features/stock-research/firstPyramidViewModel.ts`（DTO→VM 类型安全转换，禁止解析 statusText 推断多空）
-- 样式：`frontend/src/features/stock-research/FirstPyramidPanel.module.scss`（从 global.scss 迁移）
+- 样式：`frontend/src/features/stock-research/FirstPyramidPanel.module.scss`
 - API：`GET /api/v1/stocks/{symbol}/first-pyramid`（共用 React Query 缓存，不重复请求）
-- `/market` 右栏布局顺序：MiniKlineCard（顶部，保留）→ compact 第一金字塔 → "更多观察"（AtomicFactsPanel 默认收起）
-- `/stock/:symbol` Drawer 布局：detail 第一金字塔 → "更多状态观察"（AtomicFactsPanel expanded 默认收起）
 - StockDetailPage 底部不再渲染独立 FirstPyramidPanel（全页只有一个实例）
-- compact：顶部 2x2 摘要网格 + 量能水位 + 四维卡片，事件最多 3 条
-- detail：全宽摘要 + 量能水位 + 四维卡片（结构卡跨两列），事件最多 5 条
-- 禁止显示：algorithmVersion / inputHash / parameterHash / Swing / Internal / up / down 字面
-- 禁止显示原始 volume 大整数，仅显示 ratio
-- A 股语义：偏多=红，偏空=绿，中性=muted，量能强调=品牌莹感绿
+
+## 4.4 第一金字塔视觉字段合同（CHANGE-20260728-006 重构）
+
+compact 与 detail 复用同一组 VisualCard，不复制业务判断。compact 单列纵向；detail 两列（趋势/动量），结构跨两列，事件最多 5 条。
+
+### 4.4.1 compact DOM 结构
+
+```
+.panel.compact
+├── Header (标题 + tradeDate)
+├── StateRibbon (1 行 4 个紧凑状态标签，高度 28px)
+├── VolumeWaterLevel (20日/200日两条分位轨道)
+└── .dimensionsCompact (单列)
+    ├── TrendVisualCard
+    ├── StructureVisualCard
+    ├── MomentumVisualCard
+    └── ChipVisualCard
+```
+
+### 4.4.2 禁止显示
+
+- compact 禁止渲染 `PyramidSummaryStrip(statusText)`；`statusText` 只保留在 DTO，不进入 compact DOM。
+- 任何模式禁止向普通用户显示 `DSA/Swing/Internal/CHoCH/Squeeze/dir_bars/Node/algorithmVersion/inputHash/parameterHash` 等内部英文与 Hash。
+- 禁止显示原始 volume 大整数，仅显示 ratio。
+- 不得使用 VAH/VAL 替代 POC。
+
+### 4.4.3 StateRibbon 字段
+
+一行 4 个紧凑状态标签，字号 11px、单行、省略、title 提供完整中文。
+
+| 标签 | 字段来源 | 取值 |
+|---|---|---|
+| 趋势 | `vm.trend.direction` | 偏多/偏空/未确认 |
+| 结构 | `vm.structure.swingDirection` | 主要结构方向 |
+| 动量 | `vm.momentum.squeezeOn + direction` | 挤压/释放 + 方向图标 |
+| 筹码 | `vm.chipConsensus.positionLabel` | POC上方/下方/贴合/可选 |
+
+### 4.4.4 趋势卡（TrendVisualCard）
+
+| 元素 | 字段来源 | 显示规则 |
+|---|---|---|
+| 标题方向箭头 | `vm.trend.direction` | 1=↑偏多, -1=↓偏空, 0=→未确认 |
+| 方向轨道 marker | `vm.trend.direction` | 偏空=0%, 未确认=50%, 偏多=100% |
+| 持续N根 | `dsa_dir_bars` → `continuousBars` | null 不显示 |
+| 距 DSA VWAP | `dsa_vwap_dev_pct` → `vwapDeviationPct` | null 不显示，不补 0 |
+| 当前段量比 | `current_vs_prev_volume_ratio` → `segmentVolumeRatio` | 0~2x 映射到 0~100%，超出 2x 封顶；右侧保留真实倍率 |
+| 趋势强度 | `trend_strength` → `trendStrength` | null 不显示 |
+
+### 4.4.5 结构卡（StructureVisualCard）
+
+第一行两个独立状态块：[主要结构方向] [短线结构方向]；下方最多 3 个事件（compact）/ 5 个事件（detail），每个事件一行独立 chips，禁止 join 为长字符串。
+
+| chip | 字段来源 | 显示规则 |
+|---|---|---|
+| 事件名称 | `EVENT_TYPE_LABEL` | BOS=结构突破, CHoCH=结构转折, OB_ENTRY=进入订单区域, EQH=连续高点, EQL=连续低点 |
+| 级别 | `extra.structure_level` | swing=主要级别, internal=短线级别；EQH/EQL 为空时不显示级别 chip |
+| 方向 | `event.direction` | up=上行, down=下行 |
+| 新鲜度 | `freshnessBars` | 今日/1根前/N根前；detail 额外显示 occurredAt 与 price |
+| 量能徽标 | `event.volumeBadge` | 放量/缩量/正常 |
+
+### 4.4.6 动量卡（MomentumVisualCard）
+
+| 元素 | 字段来源 | 显示规则 |
+|---|---|---|
+| 状态 chip | `squeeze_on` | 挤压中/已释放 |
+| 方向 chip | `sqzmom_val` 符号 → `direction` | 偏多/偏空/中性 |
+| BB 位置轨道 | `bb_position` → `bbPosition` | 0=下轨, 0.5=中轨, 1=上轨；marker 限制 0~1 |
+| 动量变化 | `sqzmom_val` vs `sqzmom_val_prev` → `momentumChangeLabel` | 增强/减弱/转多/转空/持平 |
+| 量价标签 | `vol_divergence` → `volDivergence` | 直接显示 |
+| 原始值 | `sqzmom_val/bb_width/release_vs_squeeze_volume_ratio` | 仅 detail 模式小字显示，compact 不显示 |
+
+### 4.4.7 筹码卡（ChipVisualCard）
+
+| 元素 | 字段来源 | 显示规则 |
+|---|---|---|
+| POC 中心位置轨道 | `poc_price`/`last_close` | 中心为 POC；当前价 marker 按 ±10% 范围映射并 clamp |
+| 距离百分比 | `distancePct = (lastClose - pocPrice) / pocPrice * 100` | 真实显示 |
+| 峰数量 | `n_peak_nodes` → `nPeakNodes` | 真实显示 |
+| 空态 | `pocPrice == null` | 灰色「可选维度 · 暂无有效筹码峰」 |
+
+### 4.4.8 量能水位
+
+20日/200日两条分位轨道。单项 null 时该行显示「样本不足」，不整块消失或填 0。百分位显示「72%」格式（不是裸数字）。badge 显示「放量/缩量/正常」。
+
+### 4.4.9 compact 尺寸与颜色
+
+- 外边距 0；padding 10px；卡片单列；gap 8px；卡片 padding 9px 10px；圆角 6px；标题 12px；正文 11px。
+- A 股颜色：偏多红、偏空绿、中性灰；品牌莹感绿只用于量能、轨道和选中状态。禁止四块大面积彩色背景。
+
+## 4.5 第一金字塔历史落点（CHANGE-20260728-005，已被 006 部分重构）
+
+- 历史实现曾包含 2x2 SummaryGrid、PyramidSummaryStrip、原始 volume 大整数；CHANGE-20260728-006 已删除并替换为 VisualCard + 轨道 + chip 设计。
 
 ## 5. 状态所有权
 

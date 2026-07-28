@@ -1020,24 +1020,7 @@ button { cursor: pointer; }
 .toast-title { font-weight: 650; font-size: 12px; }
 .toast-msg { font-size: 12px; color: v.$color-muted; margin-top: 4px; }
 
-// [Round 2026-07-28-3] First Pyramid 样式已迁移到 FirstPyramidPanel.module.scss
-// [P0 修复] /market 右栏"更多观察"使用 button 控制展开，收起时不挂载 AtomicFactsPanel
-.market-more-observation {
-  margin-top: 8px;
-}
-
-.more-observation-toggle {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  font-size: 11px;
-  color: v.$color-muted;
-  padding: 4px 8px;
-  user-select: none;
-  width: 100%;
-  text-align: left;
-  &:hover { color: #c8cdd8; }
-}
+// [Round 2026-07-28-4] /market 右栏"更多观察"样式已迁移到 MarketRightPanel.module.scss
 
 // ===== V1.1 Multi-Strategy Extensions =====
 .strategy-switcher { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -1262,9 +1245,10 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 
 // ===== Mini K 线卡片（右栏五周期小图）CHANGE-20260714-001 =====
 // 紧凑 segmented control：深色背景、统一高度、1px 边框；active 莹感绿文字/边框/轻底色
-// 340px 右栏不裁切：强制 width/max-width:100%、min-width:0、box-sizing、overflow:hidden
+// 340px 右栏不裁切：强制 width/max-width:100%、min-width:0、box-sizing
 // [CHANGE-20260716-001] MiniKline CSS 重做（PROMPT.md §四.5）：
 //   tabs 五等分全宽 grid；chart 明确 height:190px；card 无多余空白
+// [Round 2026-07-28-4] P0修复：小K线固定不收缩，overflow:visible 防止裁切时间轴
 .mini-kline-card {
   display: flex;
   flex-direction: column;
@@ -1274,12 +1258,17 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  overflow: hidden;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  height: 230px;
+  min-height: 230px;
+  overflow: visible;
 }
 .mini-kline-tabs {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   width: 100%;
+  flex: 0 0 26px;
   border: 1px solid v.$color-border;
   border-radius: 7px;
   overflow: hidden;
@@ -1310,6 +1299,7 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  flex: 0 0 190px;
   height: 190px;
   box-sizing: border-box;
   overflow: hidden;

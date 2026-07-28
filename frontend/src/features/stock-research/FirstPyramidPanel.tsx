@@ -1,17 +1,14 @@
-// [Round 2026-07-28-3] 第一金字塔统一快照面板
-// 调用 GET /api/v1/stocks/{symbol}/first-pyramid，展示趋势→结构→动量→筹码共识四维状态。
-// 双 variant 共用同一 React Query 缓存：
-//   - compact：/market 右栏，紧凑摘要为主，事件最多3条
-//   - detail：/stock 详情 Drawer，全宽，事件最多5条，显示日期/价格
+// [Round 2026-07-28-4] 第一金字塔视觉重构
+// compact: 单列纵向，StateRibbon + 量能水位 + 四维VisualCard
+// detail: 两列布局，结构跨两列，事件最多5条
 // 严格禁止：
-//   - 显示 algorithmVersion/inputHash/parameterHash
-//   - 显示 Swing/Internal/up/down 字面
-//   - 显示原始 volume 大整数（仅显示 ratio）
-//   - 解析 statusText 推断多空或事件类型（必须读 continuousFactors 结构化字段）
+//   - compact 渲染 PyramidSummaryStrip(statusText)
+//   - 显示 DSA/Swing/Internal/CHoCH/Squeeze/dir_bars/Node 等内部英文
+//   - 解析 statusText 推断多空或事件类型
 //   - 内联 style 堆积（全部进入 CSS Module）
 import { useFirstPyramid } from '@/hooks/useApi'
 import { buildFirstPyramidVM, directionClass, directionLabel, volumeBadgeClass } from './firstPyramidViewModel'
-import type { Direction, FirstPyramidVM, StructureEventVM } from './firstPyramidViewModel'
+import type { FirstPyramidVM, StructureEventVM } from './firstPyramidViewModel'
 import styles from './FirstPyramidPanel.module.scss'
 
 interface FirstPyramidPanelProps {
@@ -20,7 +17,7 @@ interface FirstPyramidPanelProps {
   className?: string
 }
 
-// ===== 内部展示组件（按 instruction.md 命名） =====
+// ===== 内部展示组件 =====
 
 function PyramidHeader({ tradeDate }: { tradeDate: string }) {
   return (
@@ -31,37 +28,26 @@ function PyramidHeader({ tradeDate }: { tradeDate: string }) {
   )
 }
 
-function PyramidSummaryStrip({ statusText }: { statusText: string }) {
+/** compact 顶部一行4个状态标签（高度28px） */
+function StateRibbon({ vm }: { vm: FirstPyramidVM }) {
+  const trendLabel = directionLabel(vm.trend.direction)
+  const structLabel = directionLabel(vm.structure.swingDirection)
+  const momentumLabel = `${vm.momentum.squeezeOn ? '挤压' : '释放'}`
+  const chipLabel = vm.chipConsensus?.positionLabel ?? (vm.chipConsensus ? '可用' : '可选')
   return (
-    <div className={styles.summary} title={statusText}>
-      {statusText}
-    </div>
-  )
-}
-
-/** compact 顶部 2x2 摘要网格：趋势｜结构 / 动量｜筹码 */
-function SummaryGrid({ vm }: { vm: FirstPyramidVM }) {
-  const cells: Array<{ label: string; dir: Direction; text: string }> = [
-    { label: '趋势', dir: vm.trend.direction, text: directionLabel(vm.trend.direction) },
-    { label: '结构', dir: vm.structure.swingDirection, text: directionLabel(vm.structure.swingDirection) },
-    { label: '动量', dir: vm.momentum.direction, text: vm.momentum.squeezeOn ? '挤压' : '释放' },
-    // P0 修复：筹码 available 不映射为偏多方向，使用中性 direction=0
-    {
-      label: '筹码',
-      dir: 0,
-      text: vm.chipConsensus && vm.chipConsensus.available ? '可用' : '可选',
-    },
-  ]
-  return (
-    <div className={styles.summaryGrid}>
-      {cells.map((c) => (
-        <div key={c.label} className={styles.summaryCell}>
-          <span className={styles.summaryLabel}>{c.label}</span>
-          <span className={`${styles.summaryDir} ${styles[directionClass(c.dir)]}`}>
-            {c.text}
-          </span>
-        </div>
-      ))}
+    <div className={styles.stateRibbon}>
+      <span className={`${styles.ribbonTag} ${styles[directionClass(vm.trend.direction)]}`} title={`趋势${trendLabel}`}>
+        趋势·{trendLabel}
+      </span>
+      <span className={`${styles.ribbonTag} ${styles[directionClass(vm.structure.swingDirection)]}`} title={`主要结构${structLabel}`}>
+        结构·{structLabel}
+      </span>
+      <span className={`${styles.ribbonTag} ${styles[directionClass(vm.momentum.direction)]}`} title={`动量${momentumLabel}`}>
+        动量·{momentumLabel}
+      </span>
+      <span className={`${styles.ribbonTag} ${styles['dir-neutral']}`} title={`筹码${chipLabel}`}>
+        筹码·{chipLabel}
+      </span>
     </div>
   )
 }
@@ -75,23 +61,12 @@ function VolumeWaterLevel({ vm }: { vm: FirstPyramidVM['volumeWaterLevel'] }) {
       </div>
     )
   }
-  // P0 修复：20日/200日分别判断 null，null 显示"样本不足"，不用 ?? 0
   return (
     <div className={styles.volumeBar}>
-      <span className={styles.volumeLabel}>量能水位</span>
+      <span className={styles.volumeLabel}>量能</span>
       <div className={styles.volumeTrackGroup}>
-        <VolumeTrack
-          label="20日"
-          percentile={vm.percentile20}
-          zscore={vm.zscore20}
-          longTerm={false}
-        />
-        <VolumeTrack
-          label="200日"
-          percentile={vm.percentile200}
-          zscore={vm.zscore200}
-          longTerm={true}
-        />
+        <VolumeTrack label="20日" percentile={vm.percentile20} zscore={vm.zscore20} longTerm={false} />
+        <VolumeTrack label="200日" percentile={vm.percentile200} zscore={vm.zscore200} longTerm={true} />
       </div>
       <span className={`${styles.badge} ${styles[volumeBadgeClass(vm.badge)]}`}>
         {vm.badge ?? '未知'}
@@ -100,12 +75,8 @@ function VolumeWaterLevel({ vm }: { vm: FirstPyramidVM['volumeWaterLevel'] }) {
   )
 }
 
-/** 单条量能水位轨道：percentile 为 null 时显示"样本不足" */
 function VolumeTrack({
-  label,
-  percentile,
-  zscore,
-  longTerm,
+  label, percentile, zscore, longTerm,
 }: {
   label: string
   percentile: number | null
@@ -130,7 +101,7 @@ function VolumeTrack({
       >
         <div className={`${styles.volumeFill} ${longTerm ? styles.long : ''}`} />
       </div>
-      <span className={styles.volumePct}>{percentile.toFixed(0)}</span>
+      <span className={styles.volumePct}>{percentile.toFixed(0)}%</span>
       {zscore !== null && (
         <span className={styles.volumeZscore}>z={zscore.toFixed(2)}</span>
       )}
@@ -138,38 +109,63 @@ function VolumeTrack({
   )
 }
 
-function TrendStateCard({ vm }: { vm: FirstPyramidVM['trend'] }) {
+/** 趋势卡：方向轨道 + 指标行 */
+function TrendVisualCard({ vm, variant }: { vm: FirstPyramidVM['trend']; variant: 'compact' | 'detail' }) {
+  // 方向轨道 marker 位置：偏空=0%, 未确认=50%, 偏多=100%
+  const markerPct = vm.direction === 1 ? '100%' : vm.direction === -1 ? '0%' : '50%'
+  // 量比轨道：0~2x 映射到 0~100%
+  const volRatioPct = vm.segmentVolumeRatio !== null
+    ? `${Math.min(100, Math.max(0, (vm.segmentVolumeRatio / 2) * 100))}%`
+    : null
   return (
     <div className={`${styles.dimCard} ${styles.dimTrend}`}>
       <div className={styles.dimHeader}>
         <span className={styles.dimName}>趋势</span>
-        <span className={`${styles.dimBadge} ${vm.available ? styles.ok : styles.na}`}>
-          {vm.available ? '可用' : '无数据'}
+        <span className={`${styles.dimArrow} ${styles[directionClass(vm.direction)]}`}>
+          {vm.direction === 1 ? '↑' : vm.direction === -1 ? '↓' : '→'}
         </span>
       </div>
-      <div className={`${styles.summaryDir} ${styles[directionClass(vm.direction)]}`}>
-        {directionLabel(vm.direction)}
-      </div>
-      {vm.continuousBars !== null && (
-        <div className={styles.dimVolDetail}>
-          <span>持续 {vm.continuousBars}根</span>
-          {vm.currentVsPrevVolumeRatio !== null && (
-            <span className={styles.volRatio}>
-              量比 {vm.currentVsPrevVolumeRatio.toFixed(2)}x
-            </span>
-          )}
-          {vm.freshnessLabel && (
-            <span className={styles.freshness}>{vm.freshnessLabel}</span>
-          )}
+      {/* 方向轨道 */}
+      <div className={styles.directionTrack}>
+        <span className={styles.trackEnd}>偏空</span>
+        <div className={styles.trackBar}>
+          <div className={styles.trackFill} />
+          <div className={styles.trackMarker} style={{ left: markerPct }} />
         </div>
+        <span className={styles.trackEnd}>偏多</span>
+      </div>
+      {/* 指标行 */}
+      <div className={styles.metricRow}>
+        {vm.continuousBars !== null && (
+          <span className={styles.metric}>持续 <b>{vm.continuousBars}</b>根</span>
+        )}
+        {vm.vwapDeviationPct !== null && (
+          <span className={styles.metric}>距VWAP <b>{vm.vwapDeviationPct.toFixed(2)}%</b></span>
+        )}
+        {vm.trendStrength && (
+          <span className={styles.metric}>{vm.trendStrength}</span>
+        )}
+      </div>
+      {/* 量比轨道 */}
+      {volRatioPct && vm.segmentVolumeRatio !== null && (
+        <div className={styles.ratioTrack}>
+          <span className={styles.ratioLabel}>段量比</span>
+          <div className={styles.ratioBar}>
+            <div className={styles.ratioFill} style={{ width: volRatioPct } as React.CSSProperties} />
+          </div>
+          <span className={styles.ratioValue}>{vm.segmentVolumeRatio.toFixed(2)}x</span>
+        </div>
+      )}
+      {variant === 'detail' && vm.freshnessLabel && (
+        <span className={styles.freshness}>{vm.freshnessLabel}</span>
       )}
     </div>
   )
 }
 
-function StructureStateCard({
-  vm,
-  variant,
+/** 结构卡：两个状态块 + 事件chips */
+function StructureVisualCard({
+  vm, variant,
 }: {
   vm: FirstPyramidVM['structure']
   variant: 'compact' | 'detail'
@@ -178,130 +174,170 @@ function StructureStateCard({
     <div className={`${styles.dimCard} ${styles.dimStructure} ${variant === 'detail' ? styles.structureFull : ''}`}>
       <div className={styles.dimHeader}>
         <span className={styles.dimName}>结构</span>
-        <span className={`${styles.dimBadge} ${vm.available ? styles.ok : styles.na}`}>
-          {vm.available ? '可用' : '无数据'}
-        </span>
       </div>
-      <div className={styles.dimStructureDir}>
-        <span className={styles.structureLabel}>
-          主要结构：
-          <span className={styles[directionClass(vm.swingDirection)]}>
+      {/* 两个独立状态块 */}
+      <div className={styles.structBlocks}>
+        <div className={styles.structBlock}>
+          <span className={styles.structBlockLabel}>主要结构</span>
+          <span className={`${styles.structBlockDir} ${styles[directionClass(vm.swingDirection)]}`}>
             {directionLabel(vm.swingDirection)}
           </span>
-        </span>
-        <span className={styles.structureLabel}>
-          短线结构：
-          <span className={styles[directionClass(vm.internalDirection)]}>
+        </div>
+        <div className={styles.structBlock}>
+          <span className={styles.structBlockLabel}>短线结构</span>
+          <span className={`${styles.structBlockDir} ${styles[directionClass(vm.internalDirection)]}`}>
             {directionLabel(vm.internalDirection)}
           </span>
-        </span>
+        </div>
       </div>
-      {vm.events.length > 0 && <StructureEventList events={vm.events} variant={variant} />}
+      {/* 事件 chips */}
+      {vm.events.length > 0 && (
+        <div className={styles.eventTimeline}>
+          {vm.events.map((e, i) => (
+            <StructureEventChips key={`${e.typeLabel}-${i}`} event={e} variant={variant} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
-function StructureEventList({
-  events,
-  variant,
+/** 单个事件的独立 chips（不 join 为长字符串） */
+function StructureEventChips({
+  event, variant,
 }: {
-  events: StructureEventVM[]
+  event: StructureEventVM
   variant: 'compact' | 'detail'
 }) {
   return (
-    <div className={styles.dimEvents}>
-      {events.map((e, i) => {
-        const parts: string[] = [e.typeLabel]
-        if (e.directionLabel && e.directionLabel !== '—') parts.push(e.directionLabel)
-        if (e.levelLabel) parts.push(e.levelLabel)
-        if (e.freshnessLabel) parts.push(e.freshnessLabel)
-        if (variant === 'detail' && e.occurredAt) parts.push(e.occurredAt)
-        if (variant === 'detail' && e.price !== null) parts.push(`价 ${e.price}`)
-        return (
-          <div className={styles.eventItem} key={`${e.typeLabel}-${i}`}>
-            <span className={styles.eventText}>{parts.join(' · ')}</span>
-            {e.volumeBadge && (
-              <span className={`${styles.badge} ${styles[volumeBadgeClass(e.volumeBadge)]}`}>
-                {e.volumeBadge}
-              </span>
-            )}
-          </div>
-        )
-      })}
+    <div className={styles.eventRow}>
+      <span className={styles.eventChip}>{event.typeLabel}</span>
+      {event.levelLabel && (
+        <span className={styles.eventChipSub}>{event.levelLabel}</span>
+      )}
+      {event.directionLabel && event.directionLabel !== '—' && (
+        <span className={`${styles.eventChipSub} ${styles[directionClass(
+          event.directionLabel === '上行' ? 1 : event.directionLabel === '下行' ? -1 : 0,
+        )]}`}>
+          {event.directionLabel}
+        </span>
+      )}
+      {event.freshnessLabel && (
+        <span className={styles.eventChipTime}>{event.freshnessLabel}</span>
+      )}
+      {variant === 'detail' && event.occurredAt && (
+        <span className={styles.eventChipTime}>{event.occurredAt}</span>
+      )}
+      {variant === 'detail' && event.price !== null && (
+        <span className={styles.eventChipTime}>价{event.price}</span>
+      )}
+      {event.volumeBadge && (
+        <span className={`${styles.badge} ${styles[volumeBadgeClass(event.volumeBadge)]}`}>
+          {event.volumeBadge}
+        </span>
+      )}
     </div>
   )
 }
 
-function MomentumStateCard({ vm }: { vm: FirstPyramidVM['momentum'] }) {
+/** 动量卡：状态 + 方向 + BB位置轨道 + 变化 + 量价 */
+function MomentumVisualCard({ vm, variant }: { vm: FirstPyramidVM['momentum']; variant: 'compact' | 'detail' }) {
+  const bbPos = vm.bbPosition !== null ? Math.min(1, Math.max(0, vm.bbPosition)) : null
+  const bbPct = bbPos !== null ? `${bbPos * 100}%` : null
   return (
     <div className={`${styles.dimCard} ${styles.dimMomentum}`}>
       <div className={styles.dimHeader}>
         <span className={styles.dimName}>动量</span>
-        <span className={`${styles.dimBadge} ${vm.available ? styles.ok : styles.na}`}>
-          {vm.available ? '可用' : '无数据'}
+      </div>
+      {/* 状态 + 方向 chips */}
+      <div className={styles.momentumChips}>
+        <span className={styles.eventChip}>
+          {vm.squeezeOn ? '挤压中' : '已释放'}
         </span>
-      </div>
-      {/* P0 修复：方向由 sqzmom_val 决定，挤压状态单独显示 */}
-      <div className={`${styles.summaryDir} ${styles[directionClass(vm.direction)]}`}>
-        {directionLabel(vm.direction)}
-      </div>
-      <div className={styles.dimVolDetail}>
-        <span>{vm.squeezeOn ? '挤压中' : '已释放'}</span>
-        {vm.sqzmomVal !== null && (
-          <span className={styles.volRatio}>
-            动量值 {vm.sqzmomVal.toFixed(4)}
-          </span>
-        )}
-        {vm.bbWidth !== null && (
-          <span className={styles.volRatio}>
-            BB 带宽 {vm.bbWidth.toFixed(4)}
-          </span>
-        )}
-        {vm.releaseVsSqueezeRatio !== null && (
-          <span className={styles.volRatio}>
-            释放/挤压 {vm.releaseVsSqueezeRatio.toFixed(2)}x
-          </span>
-        )}
-        {vm.volDivergence && (
-          <span className={`${styles.badge} ${styles[volumeBadgeClass(
-            vm.volDivergence === '放量释放' ? '放量' : '缩量',
-          )]}`}>
-            {vm.volDivergence}
-          </span>
+        <span className={`${styles.eventChipSub} ${styles[directionClass(vm.direction)]}`}>
+          {directionLabel(vm.direction)}
+        </span>
+        {vm.momentumChangeLabel && (
+          <span className={styles.eventChipSub}>{vm.momentumChangeLabel}</span>
         )}
       </div>
+      {/* BB 位置轨道 */}
+      {bbPct && (
+        <div className={styles.bbTrack}>
+          <span className={styles.bbLabel}>BB位置</span>
+          <div className={styles.bbBar}>
+            <span className={styles.bbMark} style={{ left: '0%' }}>下轨</span>
+            <span className={styles.bbMark} style={{ left: '50%' }}>中轨</span>
+            <span className={styles.bbMark} style={{ left: '100%' }}>上轨</span>
+            <div className={styles.bbMarker} style={{ left: bbPct } as React.CSSProperties} />
+          </div>
+        </div>
+      )}
+      {/* 量价标签 */}
+      {vm.volDivergence && (
+        <span className={`${styles.badge} ${styles[volumeBadgeClass(
+          vm.volDivergence === '放量释放' ? '放量' : '缩量',
+        )]}`}>
+          {vm.volDivergence}
+        </span>
+      )}
+      {/* detail 模式才显示原始值 */}
+      {variant === 'detail' && (
+        <div className={styles.detailMetrics}>
+          {vm.sqzmomVal !== null && (
+            <span className={styles.metric}>动量值 <b>{vm.sqzmomVal.toFixed(4)}</b></span>
+          )}
+          {vm.bbWidth !== null && (
+            <span className={styles.metric}>BB带宽 <b>{vm.bbWidth.toFixed(4)}</b></span>
+          )}
+          {vm.releaseVsSqueezeRatio !== null && (
+            <span className={styles.metric}>释放/挤压 <b>{vm.releaseVsSqueezeRatio.toFixed(2)}x</b></span>
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
-function ChipConsensusCard({ vm }: { vm: FirstPyramidVM['chipConsensus'] | null }) {
-  if (!vm) {
+/** 筹码卡：POC位置轨道 + 距离% + 峰数量 */
+function ChipVisualCard({ vm }: { vm: FirstPyramidVM['chipConsensus'] | null }) {
+  if (!vm || !vm.available || vm.pocPrice === null) {
     return (
       <div className={`${styles.dimCard} ${styles.dimChip} ${styles.optional}`}>
         <div className={styles.dimHeader}>
           <span className={styles.dimName}>筹码共识</span>
-          <span className={`${styles.dimBadge} ${styles.na}`}>可选维度</span>
         </div>
-        <div className={styles.dimEmpty}>暂无有效筹码峰</div>
+        <div className={styles.dimEmpty}>可选维度 · 暂无有效筹码峰</div>
       </div>
     )
   }
+  // POC 位置轨道：±10% 范围映射，clamp 到 0~100%
+  const distPct = vm.distancePct
+  const markerPct = distPct !== null
+    ? `${Math.min(100, Math.max(0, 50 + (distPct / 10) * 50))}%`
+    : '50%'
   return (
     <div className={`${styles.dimCard} ${styles.dimChip} ${styles.optional}`}>
       <div className={styles.dimHeader}>
         <span className={styles.dimName}>筹码共识</span>
-        <span className={`${styles.dimBadge} ${vm.available ? styles.ok : styles.na}`}>
-          {vm.available ? '可用' : '无数据'}
-        </span>
       </div>
-      {/* P0 修复：筹码不伪造方向，显示真实价格相对 POC 位置 */}
-      {vm.positionLabel && (
-        <div className={`${styles.summaryDir} ${styles['dir-neutral']}`}>
-          {vm.positionLabel}
+      {/* POC 位置轨道 */}
+      <div className={styles.pocTrack}>
+        <span className={styles.pocLabel}>低位</span>
+        <div className={styles.pocBar}>
+          <div className={styles.pocCenter} title={`POC: ${vm.pocPrice}`} />
+          <div className={styles.pocMarker} style={{ left: markerPct } as React.CSSProperties} title={`当前价: ${vm.lastClose ?? '-'}`} />
         </div>
-      )}
-      <div className={styles.dimStatus} title={vm.statusText}>
-        {vm.statusText}
+        <span className={styles.pocLabel}>高位</span>
+      </div>
+      {/* 距离% + 峰数量 */}
+      <div className={styles.metricRow}>
+        {distPct !== null && (
+          <span className={styles.metric}>距POC <b>{distPct.toFixed(2)}%</b></span>
+        )}
+        {vm.nPeakNodes !== null && (
+          <span className={styles.metric}>峰数 <b>{vm.nPeakNodes}</b></span>
+        )}
       </div>
     </div>
   )
@@ -312,7 +348,6 @@ function ChipConsensusCard({ vm }: { vm: FirstPyramidVM['chipConsensus'] | null 
 export function FirstPyramidPanel({ symbol, variant = 'detail', className }: FirstPyramidPanelProps) {
   const { data, isLoading, error } = useFirstPyramid(symbol)
 
-  // 切换股票时：只有 data.symbol === symbol 才显示，禁止短暂显示上一只股票状态
   if (data && data.symbol !== symbol) {
     return (
       <div className={`${styles.loading} ${className ?? ''}`}>
@@ -350,14 +385,14 @@ export function FirstPyramidPanel({ symbol, variant = 'detail', className }: Fir
   return (
     <div className={`${styles.panel} ${variantClass} ${className ?? ''}`}>
       <PyramidHeader tradeDate={vm.tradeDate} />
-      <PyramidSummaryStrip statusText={vm.statusText} />
-      {variant === 'compact' && <SummaryGrid vm={vm} />}
+      {/* compact 不渲染 statusText；detail 也不渲染聚合 statusText */}
+      <StateRibbon vm={vm} />
       <VolumeWaterLevel vm={vm.volumeWaterLevel} />
-      <div className={styles.dimensions}>
-        <TrendStateCard vm={vm.trend} />
-        <StructureStateCard vm={vm.structure} variant={variant} />
-        <MomentumStateCard vm={vm.momentum} />
-        <ChipConsensusCard vm={vm.chipConsensus} />
+      <div className={variant === 'compact' ? styles.dimensionsCompact : styles.dimensionsDetail}>
+        <TrendVisualCard vm={vm.trend} variant={variant} />
+        <StructureVisualCard vm={vm.structure} variant={variant} />
+        <MomentumVisualCard vm={vm.momentum} variant={variant} />
+        <ChipVisualCard vm={vm.chipConsensus} />
       </div>
     </div>
   )

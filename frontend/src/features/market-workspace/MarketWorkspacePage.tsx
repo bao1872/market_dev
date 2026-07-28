@@ -36,7 +36,6 @@ import type { ExportContext } from '@/components/StrategyDataTable'
 import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNavigation'
 import {
   decodeMarketWorkspaceUrl,
-  changeMarketScope,
   buildStrategyResultQueryParams,
   buildMarketReturnToUrl,
   convertFiltersToMetricFilters,
@@ -341,37 +340,6 @@ export default function MarketWorkspacePage() {
     [resultsQuery.data?.items],
   )
 
-  // 通用 URL 更新函数（仅更新 scope + selected，保留 StrategyDataTable 管理的 sort/filters/page 等）
-  const updateUrl = useCallback(
-    (newState: { scope: MarketScope; selected: string | null; industry?: string | null; concept?: string | null }) => {
-      const params = new URLSearchParams(searchParams)
-      // 更新 scope + selected
-      params.set('scope', newState.scope)
-      if (newState.selected) {
-        params.set('selected', newState.selected)
-      } else {
-        params.delete('selected')
-      }
-      // 行业/概念（可选，不传时保留原值）
-      if (newState.industry !== undefined) {
-        if (newState.industry) {
-          params.set('industry', newState.industry)
-        } else {
-          params.delete('industry')
-        }
-      }
-      if (newState.concept !== undefined) {
-        if (newState.concept) {
-          params.set('concept', newState.concept)
-        } else {
-          params.delete('concept')
-        }
-      }
-      setSearchParams(params, { replace: false })
-    },
-    [searchParams, setSearchParams],
-  )
-
   // 行业/概念变更：更新 URL + 重置 page=1（CHANGE-20260713-006）
   const handleIndustryChange = useCallback(
     (newIndustry: string) => {
@@ -398,15 +366,6 @@ export default function MarketWorkspacePage() {
       setSearchParams(params, { replace: false })
     },
     [searchParams, setSearchParams],
-  )
-
-  // 切换 scope：清除 selected，保留 sort/filters/page（由 StrategyDataTable 管理）
-  const handleScopeChange = useCallback(
-    (newScope: MarketScope) => {
-      const next = changeMarketScope(urlState, newScope)
-      updateUrl(next)
-    },
-    [urlState, updateUrl],
   )
 
   // 单击行非链接区域：更新 selected（保留 scope + StrategyDataTable 的 URL 状态）
@@ -495,8 +454,6 @@ export default function MarketWorkspacePage() {
   return (
     <div className={styles.marketPage}>
       <MarketToolbar
-        scope={scope}
-        onScopeChange={handleScopeChange}
         keyword={keyword}
         onKeywordChange={handleKeywordChange}
         industry={industry}
@@ -504,7 +461,6 @@ export default function MarketWorkspacePage() {
         concept={concept}
         onConceptChange={handleConceptChange}
         boards={boards}
-        canAccessWatchlist={canAccessWatchlist}
       />
       <div className={styles.tableArea}>
         <div className={styles.tableWrapper}>

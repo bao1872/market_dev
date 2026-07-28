@@ -52,11 +52,66 @@ export interface AppNavItem {
   label: string
 }
 
-// 普通用户一级导航（行情 + 复盘；消息/设置不在此处）
+// 普通用户一级导航（行情 + 自选 + 复盘；消息/设置不在此处）
+// [Round 2026-07-28-4] 自选升级为一级导航，复用 /market?scope=watchlist
 export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情' },
+  { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选' },
   { path: APP_ROUTES.replay, label: '复盘' },
 ]
+
+/** 自选导航 path（用于权限判断和 active 匹配） */
+export const WATCHLIST_NAV_PATH = `${APP_ROUTES.market}?scope=watchlist`
+
+/**
+ * 判断导航项是否 active（不依赖 NavLink pathname，支持 /market 双入口）
+ * - /market 且 scope != watchlist → 行情 active
+ * - /market 且 scope == watchlist → 自选 active
+ * - /replay → 复盘 active
+ */
+export function resolveActiveNav(
+  pathname: string,
+  search: URLSearchParams | string,
+  itemPath: string,
+): boolean {
+  const params = typeof search === 'string' ? new URLSearchParams(search) : search
+  const scope = params.get('scope')
+  if (itemPath === APP_ROUTES.market) {
+    // 行情：/market 且 scope 不是 watchlist
+    return pathname === APP_ROUTES.market && scope !== 'watchlist'
+  }
+  if (itemPath === WATCHLIST_NAV_PATH) {
+    // 自选：/market 且 scope=watchlist
+    return pathname === APP_ROUTES.market && scope === 'watchlist'
+  }
+  // 其他项：pathname 精确匹配
+  return pathname === itemPath
+}
+
+/**
+ * 构建切换 scope 的 URL（保留 keyword/industry/concept/sort/dir/filters/page_size）
+ * - 更新 scope
+ * - 删除 selected
+ * - page 重置为 1
+ */
+export function buildScopeSwitchUrl(
+  currentParams: URLSearchParams | string,
+  newScope: 'market' | 'watchlist',
+): string {
+  const params = new URLSearchParams(
+    typeof currentParams === 'string' ? currentParams : currentParams.toString(),
+  )
+  if (newScope === 'watchlist') {
+    params.set('scope', 'watchlist')
+  } else {
+    // scope=market 时删除 scope 参数（默认即为 market）
+    params.delete('scope')
+  }
+  params.delete('selected')
+  params.set('page', '1')
+  const qs = params.toString()
+  return qs ? `${APP_ROUTES.market}?${qs}` : APP_ROUTES.market
+}
 
 // 管理员控制台导航（仅 AdminAppShell 侧栏使用）
 // P1: 移除"策略目录"（多策略组合已废弃，只保留 dsa_selector + watchlist_monitor）

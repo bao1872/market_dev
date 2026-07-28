@@ -1,6 +1,6 @@
-// [MarketToolbar] - 描述: 行情页顶部工具栏（scope 分段按钮 + 搜索 + 行业/概念筛选）
-// PRD §6.1：行情/自选分段按钮；搜索是 /market 唯一全文搜索入口（单一 keyword 状态真源）。
-// 工具栏层级：scope → 搜索 → 行业 → 概念（CHANGE-20260713-006）。
+// [MarketToolbar] - 描述: 行情页顶部工具栏（搜索 + 行业/概念筛选）
+// [Round 2026-07-28-4] 移除 scope 分段按钮（行情/自选切换已上移到一级导航）
+// 工具栏层级：搜索 → 行业 → 概念（CHANGE-20260713-006）
 // 筛选/排序/分页由 StrategyDataTable 内置 UI 承载（URL 状态由 screenerUrlState 管理）。
 //
 // CHANGE-20260716-007：行业/概念筛选改用 BoardFilterCombobox（替换原生 datalist）
@@ -12,15 +12,11 @@
 // boards.available=false 时禁用输入，文案"板块数据暂不可用"；
 // boards.stale=true 时显示"沿用上次板块数据"提示，控件仍可用。
 import { useState, useEffect, useMemo } from 'react'
-import clsx from 'clsx'
-import type { MarketScope } from './marketWorkspaceUrlState'
 import type { MarketBoardItem } from '@/api/endpoints'
 import { BoardFilterCombobox } from './BoardFilterCombobox'
 import styles from './MarketWorkspace.module.scss'
 
 interface MarketToolbarProps {
-  scope: MarketScope
-  onScopeChange: (scope: MarketScope) => void
   // 顶部搜索框受控 keyword（单一真源，由 MarketWorkspacePage 持有并同步到 URL）
   keyword: string
   onKeywordChange: (keyword: string) => void
@@ -36,14 +32,9 @@ interface MarketToolbarProps {
     | undefined
   // placeholder（缺省时使用默认文案）
   searchPlaceholder?: string
-  // [Gate2 PRD60 PA-11] 是否可访问自选（self_selection capability 或 admin）
-  // false 时隐藏"自选"scope 按钮（仅 market_data 用户不显示自选入口）
-  canAccessWatchlist?: boolean
 }
 
 export function MarketToolbar({
-  scope,
-  onScopeChange,
   keyword,
   onKeywordChange,
   industry,
@@ -52,7 +43,6 @@ export function MarketToolbar({
   onConceptChange,
   boards,
   searchPlaceholder = '搜索股票代码/名称/拼音首字母',
-  canAccessWatchlist = true,
 }: MarketToolbarProps) {
   // 顶部搜索框本地输入（与 industry/concept 不同，搜索框仍保留本地 state）
   const [keywordInput, setKeywordInput] = useState(keyword)
@@ -88,24 +78,6 @@ export function MarketToolbar({
 
   return (
     <div className={styles.toolbar}>
-      <div className={styles.scopeTabs}>
-        <button
-          className={clsx(styles.scopeTab, scope === 'market' && styles.scopeTabActive)}
-          onClick={() => onScopeChange('market')}
-          aria-label="行情"
-        >
-          行情
-        </button>
-        {canAccessWatchlist && (
-          <button
-            className={clsx(styles.scopeTab, scope === 'watchlist' && styles.scopeTabActive)}
-            onClick={() => onScopeChange('watchlist')}
-            aria-label="自选"
-          >
-            自选
-          </button>
-        )}
-      </div>
       <input
         type="search"
         className={styles.searchInput}

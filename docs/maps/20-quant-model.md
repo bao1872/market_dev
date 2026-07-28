@@ -157,6 +157,36 @@
 
 **注**：本服务为纯编排层，不复制四套算法。单股详情、批量、行情列表、盘后 compute 必须复用此入口。
 
+## 9.6 第一金字塔前端视觉字段来源（CHANGE-20260728-006）
+
+前端 ViewModel `frontend/src/features/stock-research/firstPyramidViewModel.ts` 只做 DTO → 展示模型转换，禁止重新计算量化指标或解析 statusText 推断多空。
+
+| 视觉字段 | ViewModel 字段 | DTO/continuousFactors 来源 | 说明 |
+|---|---|---|---|
+| 趋势方向 | `trend.direction` | `regime_value` 符号 | 1=偏多, -1=偏空, 0=未确认 |
+| 持续根数 | `trend.continuousBars` | `dsa_dir_bars` | null 不显示，不补 0 |
+| 距 DSA VWAP | `trend.vwapDeviationPct` | `dsa_vwap_dev_pct` | null 不显示 |
+| 段内量比 | `trend.segmentVolumeRatio` | `current_vs_prev_volume_ratio` | 0~2x 映射到 0~100% |
+| 趋势强度 | `trend.trendStrength` | `trend_strength` | null 不显示 |
+| 主要结构方向 | `structure.swingDirection` | `swing_direction` | 1/-1/0 |
+| 短线结构方向 | `structure.internalDirection` | `internal_direction` | 1/-1/0 |
+| 事件类型 | `event.typeLabel` | `event.type` 经 `EVENT_TYPE_LABEL` 映射 | BOS/CHoCH/OB_ENTRY/EQH/EQL |
+| 事件级别 | `event.levelLabel` | `extra.structure_level` | swing=主要级别, internal=短线级别; EQH/EQL 为 null |
+| 事件方向 | `event.directionLabel` | `event.direction` | up=上行, down=下行 |
+| 事件新鲜度 | `event.freshnessLabel` | `freshnessBars` | 今日/1根前/N根前 |
+| 动量挤压状态 | `momentum.squeezeOn` | `squeeze_on` | 挤压中/已释放 |
+| 动量方向 | `momentum.direction` | `sqzmom_val` 符号 | 1/-1/0 |
+| BB 位置 | `momentum.bbPosition` | `bb_position` | 0~1，0=下轨, 0.5=中轨, 1=上轨 |
+| 动量变化 | `momentum.momentumChangeLabel` | `sqzmom_val` vs `sqzmom_val_prev` | 增强/减弱/转多/转空/持平 |
+| 量价分歧 | `momentum.volDivergence` | `vol_divergence` | 直接显示 |
+| POC 价格 | `chipConsensus.pocPrice` | `poc_price` | null 显示空态 |
+| 距 POC % | `chipConsensus.distancePct` | `(last_close - poc_price) / poc_price * 100` | ViewModel 计算 |
+| 筹码峰数 | `chipConsensus.nPeakNodes` | `n_peak_nodes` | 真实显示 |
+| 量能水位 20日 | `volumeWaterLevel.percentile20` | `volumeContext.volumePercentile20` | null 显示「样本不足」 |
+| 量能水位 200日 | `volumeWaterLevel.percentile200` | `volumeContext.volumePercentile200` | null 显示「样本不足」 |
+
+**禁止**：前端解析 `statusText` 推断多空；用 VAH/VAL 替代 POC；显示原始 volume 大整数；向普通用户暴露 `DSA/Swing/Internal/CHoCH/Squeeze/dir_bars/Node` 等内部英文。
+
 ## 10. 更新触发条件
 
 - 指标入口、参数源、输出 Schema 或写入位置变化；

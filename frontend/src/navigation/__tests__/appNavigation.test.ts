@@ -23,9 +23,9 @@ import {
   legacyRedirectEntries,
 } from '../appNavigation.ts'
 
-test('用户一级导航仅含行情与复盘，不含消息/设置', () => {
+test('用户一级导航含行情/自选/复盘，不含消息/设置', () => {
   const paths = USER_NAV_ITEMS.map((i) => i.path)
-  assert.deepStrictEqual(paths, ['/market', '/replay'])
+  assert.deepStrictEqual(paths, ['/market', '/market?scope=watchlist', '/replay'])
   assert.ok(!paths.includes('/messages'))
   assert.ok(!paths.includes('/settings'))
   assert.ok(!paths.includes('/overview'))
