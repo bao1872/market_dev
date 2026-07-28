@@ -837,7 +837,7 @@ export default function AdminUsersPage() {
       parts.push('复盘研究')
     }
     const capText = parts.length > 0 ? parts.join(' + ') : '未选择权限'
-    return `${capText} · 有效期${generateGrantMonths}个月（自然月）`
+    return `${capText} · 有效期${generateGrantMonths}周期（每周期30天）`
   }, [capSelfSelection, capMarketData, capResearchReplay, capWatchlistLimit, generateGrantMonths])
 
   // ===== 渲染 =====
@@ -848,7 +848,7 @@ export default function AdminUsersPage() {
         <div>
           <h1 className="page-title">会员与邀请码</h1>
           <div className="page-desc">
-            邀请码绑定套餐（观察版/研究版）与有效期月数，用于注册或续期，兑换后按套餐开通自选额度
+            邀请码绑定套餐（观察版/研究版）与有效期周期（每周期30天），用于注册或续期，兑换后按套餐开通自选额度
           </div>
         </div>
         <div className="actions">
@@ -1217,7 +1217,7 @@ export default function AdminUsersPage() {
                             </select>
                           </div>
                           <div className="form-row">
-                            <label className="form-label">有效期月数（自然月）</label>
+                            <label className="form-label">有效期周期（每周期30天）</label>
                             <input
                               className="input"
                               type="number"
@@ -1433,7 +1433,7 @@ export default function AdminUsersPage() {
                   </div>
                 )}
                 <div className="form-row">
-                  <label className="form-label">有效期月数（自然月）</label>
+                  <label className="form-label">有效期周期（每周期30天）</label>
                   <input
                     className="input"
                     type="number"
@@ -1447,7 +1447,7 @@ export default function AdminUsersPage() {
                       }
                     }}
                   />
-                  <small className="form-hint">PA-03：按自然月计算，per-capability 独立</small>
+                  <small className="form-hint">PA-03：1周期=30天，按N×30天计算</small>
                 </div>
                 <div className="form-row">
                   <label className="form-label">生成数量</label>

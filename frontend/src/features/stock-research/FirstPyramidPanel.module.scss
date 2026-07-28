@@ -1,0 +1,366 @@
+// [Round 2026-07-28-3] 第一金字塔样式
+// 全部 fp-* 样式从 global.scss 迁移到本 CSS Module
+// A股语义：偏多=红($color-up)，偏空=绿($color-down)，中性=muted
+// 量能强调与选中=品牌莹感绿($color-brand)
+// 卡片背景使用同一 panel 色；通过左侧 2px 维度标识区分
+@use '../../styles/variables.scss' as v;
+
+// ===== Panel 容器 =====
+.panel {
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 8px;
+  padding: 14px;
+  margin-top: 12px;
+  color: v.$color-text;
+  font-family: v.$font-sans;
+  font-size: 13px;
+}
+
+.loading,
+.error {
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 8px;
+  padding: 14px;
+  margin-top: 12px;
+  color: v.$color-text;
+  font-family: v.$font-sans;
+  font-size: 13px;
+  .status { color: v.$color-muted; font-size: 12px; margin-top: 4px; }
+}
+.error .status { color: v.$color-up; }
+
+// ===== Header =====
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.title {
+  font-weight: 650;
+  font-size: 14px;
+  color: v.$color-text;
+}
+
+.tradeDate {
+  font-size: 11px;
+  color: v.$color-muted;
+  padding: 2px 6px;
+  background: v.$color-panel-3;
+  border-radius: 4px;
+}
+
+// ===== 综合摘要条 =====
+.summary {
+  font-size: 13px;
+  color: v.$color-text;
+  margin-bottom: 10px;
+  padding: 6px 8px;
+  background: v.$color-panel-3;
+  border-radius: 4px;
+  border-left: 3px solid v.$color-info;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.4;
+}
+
+// ===== 四状态摘要 2x2 网格（compact 顶部）=====
+.summaryGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.summaryCell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 4px 10px;
+  background: v.$color-panel-3;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 6px;
+}
+
+.summaryLabel {
+  font-size: 12px;
+  color: v.$color-muted;
+}
+
+.summaryDir {
+  font-size: 12px;
+  font-weight: 600;
+  &.dir-up { color: v.$color-up; }       // A股上涨红
+  &.dir-down { color: v.$color-down; }   // A股下跌绿
+  &.dir-neutral { color: v.$color-muted; }
+}
+
+// ===== 量能水位条 =====
+.volumeBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 10px;
+  background: v.$color-panel-3;
+  border-radius: 4px;
+  font-size: 11px;
+
+  &.na {
+    color: v.$color-muted;
+    justify-content: center;
+  }
+}
+
+.volumeLabel {
+  color: v.$color-muted;
+  flex-shrink: 0;
+}
+
+.volumeNa {
+  color: v.$color-text-dim;
+  font-style: italic;
+}
+
+.volumeTrackGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.volumeTrack {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.volumeTrackLabel {
+  color: v.$color-muted;
+  font-size: 10px;
+  width: 28px;
+  flex-shrink: 0;
+}
+
+.volumeScale {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  min-width: 40px;
+}
+
+// 量能填充宽度由 --vol-pct CSS 变量驱动（避免内联 style 堆积）
+.volumeFill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  background: v.$color-brand;
+  border-radius: 999px;
+  width: var(--vol-pct, 0%);
+  &.long { background: v.$color-brand-hover; }
+}
+
+.volumePct {
+  color: v.$color-text;
+  font-size: 10px;
+  font-family: v.$font-mono;
+  width: 24px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.volumeZscore {
+  color: v.$color-muted;
+  font-size: 10px;
+  font-family: v.$font-mono;
+  flex-shrink: 0;
+}
+
+// 量能徽标
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  &.vol-up { color: v.$color-up; border-color: rgba(255, 77, 79, 0.35); background: rgba(255, 77, 79, 0.08); }
+  &.vol-down { color: v.$color-down; border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.08); }
+  &.vol-normal { color: v.$color-muted; border-color: v.$color-border; }
+  &.vol-unknown { color: v.$color-text-dim; border-color: v.$color-border-soft; }
+}
+
+// ===== 四维卡片网格 =====
+.dimensions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.dimCard {
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border-soft;
+  border-left: 2px solid v.$color-border;
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  &.optional { opacity: 0.75; }
+  // 四维左侧 2px 标识色（仅使用现有 token，不硬编码）
+  &.dimTrend { border-left-color: v.$color-info; }
+  &.dimStructure { border-left-color: v.$color-purple; }
+  &.dimMomentum { border-left-color: v.$color-brand; }
+  &.dimChip { border-left-color: v.$color-warning; }
+}
+
+.dimHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dimName {
+  font-size: 12px;
+  font-weight: 600;
+  color: v.$color-text;
+}
+
+.dimBadge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  &.ok { background: rgba(34, 197, 94, 0.15); color: v.$color-down; }
+  &.na { background: rgba(152, 161, 179, 0.15); color: v.$color-muted; }
+}
+
+.dimStatus {
+  font-size: 11px;
+  color: v.$color-muted;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.dimStructureDir {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: v.$color-text;
+}
+
+.structureLabel {
+  color: v.$color-muted;
+  & > span {
+    margin-left: 2px;
+    &.dir-up { color: v.$color-up; font-weight: 600; }
+    &.dir-down { color: v.$color-down; font-weight: 600; }
+    &.dir-neutral { color: v.$color-muted; }
+  }
+}
+
+.dimEmpty {
+  color: v.$color-muted;
+  font-style: italic;
+  font-size: 11px;
+}
+
+// 趋势卡：段均量比（不显示原始大整数）
+.dimVolDetail {
+  font-size: 11px;
+  color: v.$color-muted;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.volRatio {
+  color: v.$color-text;
+  font-family: v.$font-mono;
+  font-size: 11px;
+}
+
+.freshness {
+  color: v.$color-text-dim;
+  font-size: 10px;
+  font-family: v.$font-mono;
+}
+
+// ===== 结构事件列表 =====
+.dimEvents {
+  margin-top: 4px;
+  border-top: 1px solid v.$color-border-soft;
+  padding-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.eventItem {
+  font-size: 10px;
+  color: v.$color-muted;
+  font-family: v.$font-mono;
+  line-height: 1.5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.eventText {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// detail 模式结构卡跨两列
+.structureFull {
+  grid-column: 1 / -1;
+}
+
+// ===== compact 变体 =====
+.compact {
+  padding: 10px;
+  margin-top: 8px;
+  font-size: 12px;
+
+  .header { margin-bottom: 4px; }
+  .title { font-size: 13px; }
+  .summary {
+    font-size: 12px;
+    margin-bottom: 6px;
+    padding: 4px 6px;
+    max-height: 38px;
+  }
+  .dimensions { gap: 6px; }
+  .dimCard { padding: 6px 8px; }
+  .dimStatus { font-size: 10px; }
+  .dimEvents { padding-top: 3px; }
+  .eventItem { font-size: 9px; }
+}
+
+// ===== detail 变体 =====
+.detail {
+  .dimensions {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .dimCard { padding: 10px 12px; }
+}

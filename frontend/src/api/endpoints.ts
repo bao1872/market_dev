@@ -961,14 +961,14 @@ export interface InviteCodeCreateRequest {
 /** [Gate2 PRD60 PA-20] 单个 capability 授权配置（与 backend CapabilityGrant 对齐） */
 export interface CapabilityGrantInput {
   capability: 'self_selection' | 'market_data' | 'research_replay'
-  months: number  // 自然月有效期（1-36）
+  months: number  // 有效期周期数（1周期=30天，1-36）
   watchlist_limit?: number  // 仅 self_selection 必填（1-500）
 }
 
 /** [Gate2 PRD60] 管理员直接授予用户 capability 请求 */
 export interface GrantCapabilityRequest {
   capability: 'self_selection' | 'market_data' | 'research_replay'
-  months: number  // 自然月有效期
+  months: number  // 有效期周期数（1周期=30天）
   watchlist_limit?: number  // 仅 self_selection 必填
 }
 

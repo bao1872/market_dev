@@ -15,7 +15,6 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
 import { AtomicFactsDrawer } from '@/features/research-context/AtomicFactsDrawer'
-import { FirstPyramidPanel } from '@/features/stock-research/FirstPyramidPanel'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
 import { StockQuoteStrip } from '@/features/stock-research/StockQuoteStrip'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
@@ -666,8 +665,6 @@ export default function StockDetailPage() {
       </div>
       {/* 状态观察 Drawer（overlay，不压缩 K 线；开闭由 eventPanelCollapsed 控制） */}
       {eventStatePanel}
-      {/* [Phase 5B-2] 第一金字塔统一快照面板（capture 模式隐藏） */}
-      {!isCaptureMode && symbol && <FirstPyramidPanel symbol={symbol} />}
     </div>
   )
 }

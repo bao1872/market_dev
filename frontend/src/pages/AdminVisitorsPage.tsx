@@ -179,37 +179,37 @@ export default function AdminVisitorsPage() {
         </div>
       )}
 
-      {/* Error 状态 */}
+      {/* 统一空态：合并 API error / report empty / report error 三种情况 */}
       {visitorsQuery.isError && (
         <div className="card section-gap">
-          <div className="empty-state error">
-            访问统计数据加载失败：{visitorsQuery.error?.message || '未知错误'}
-          </div>
-        </div>
-      )}
-
-      {/* Empty / Error 数据源状态 */}
-      {report && report.data_source === 'empty' && (
-        <div className="card section-gap">
           <div className="empty-state">
-            GoAccess 报告未生成
-            {report.error_message && (
-              <div className="hint">{report.error_message}</div>
-            )}
+            {import.meta.env.DEV
+              ? '本地不生成访问统计'
+              : '访问统计服务异常'}
             <div className="hint">
-              生产环境请确认 goaccess 容器已启动；本地开发无 GoAccess 数据
+              {import.meta.env.DEV
+                ? '本地开发环境不运行 GoAccess 容器，请在生产环境查看访问统计。'
+                : `生产环境请联系管理员确认 goaccess 容器已启动。${visitorsQuery.error?.message ? `（${visitorsQuery.error.message}）` : ''}`}
             </div>
           </div>
         </div>
       )}
 
-      {report && report.data_source === 'error' && (
+      {report && (report.data_source === 'empty' || report.data_source === 'error') && (
         <div className="card section-gap">
-          <div className="empty-state error">
-            GoAccess 报告读取异常
-            {report.error_message && (
-              <div className="hint">{report.error_message}</div>
-            )}
+          <div className="empty-state">
+            {import.meta.env.DEV
+              ? '本地不生成访问统计'
+              : report.data_source === 'error'
+                ? '访问统计服务异常'
+                : '访问统计报告未生成'}
+            <div className="hint">
+              {import.meta.env.DEV
+                ? '本地开发环境不运行 GoAccess 容器，请在生产环境查看访问统计。'
+                : report.error_message
+                  ? report.error_message
+                  : '生产环境请确认 goaccess 容器已启动且 Nginx access.log 卷已正确挂载。'}
+            </div>
           </div>
         </div>
       )}

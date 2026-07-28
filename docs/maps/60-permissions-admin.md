@@ -152,7 +152,7 @@ Phase 5B-1 审计发现的偏差（未修复，记录待下一阶段处理）：
 新增 `user_capabilities` 表：
 - `user_id` (FK users)
 - `capability` (ENUM: self_selection / market_data / research_replay)
-- `granted_at`, `expires_at` (per-capability 独立自然月有效期)
+- `granted_at`, `expires_at` (per-capability 独立有效期，1 周期=30 天)
 - `source` (invite_code / admin_grant)
 - `granted_by` (admin user_id)
 
@@ -216,7 +216,7 @@ Phase 5B-2 落地 §10 候选方案中的 PA-01 三类独立 capability 授权�
 
 - 表：`user_capabilities`（`backend/app/models/user_capability.py`）
 - 唯一约束：`uq_user_capabilities_user_capability`（user_id, capability）
-- 字段：`id` / `user_id` / `capability` / `watchlist_limit`（仅 self_selection 使用，PA-02）/ `granted_at` / `expires_at`（per-capability 独立自然月，PA-03）/ `source`（invite_code/admin_grant/migration）/ `granted_by` / `created_at`
+- 字段：`id` / `user_id` / `capability` / `watchlist_limit`（仅 self_selection 使用，PA-02）/ `granted_at` / `expires_at`（per-capability 独立有效期，1 周期=30 天，PA-03）/ `source`（invite_code/admin_grant/migration）/ `granted_by` / `created_at`
 - Migration：`068_user_capabilities.py`（建表 + 从现有有效订阅回填）、`069_invite_code_capabilities.py`（邀请码 capabilities JSONB）
 
 ### 11.3 require_capability 后端依赖（已核验）

@@ -7,6 +7,7 @@
 // 关闭方式：Escape / 点击遮罩 / 关闭按钮；role=dialog aria-modal 完整。
 import { useCallback, useEffect, useRef } from 'react'
 import { AtomicFactsPanel } from './AtomicFactsPanel'
+import { FirstPyramidPanel } from '@/features/stock-research/FirstPyramidPanel'
 import styles from './AtomicFactsPanel.module.scss'
 
 interface AtomicFactsDrawerProps {
@@ -101,7 +102,7 @@ export function AtomicFactsDrawer({ symbol, open, onClose }: AtomicFactsDrawerPr
         className={styles.drawer}
         role="dialog"
         aria-modal="true"
-        aria-label="个股状态观察"
+        aria-label="第一金字塔与个股状态观察"
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -114,7 +115,11 @@ export function AtomicFactsDrawer({ symbol, open, onClose }: AtomicFactsDrawerPr
           ×
         </button>
         <div className={styles.drawerBody}>
-          <AtomicFactsPanel symbol={symbol} variant="expanded" />
+          <FirstPyramidPanel symbol={symbol} variant="detail" />
+          <details className={styles.moreObservation}>
+            <summary>更多状态观察</summary>
+            <AtomicFactsPanel symbol={symbol} variant="expanded" />
+          </details>
         </div>
       </aside>
     </div>

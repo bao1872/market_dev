@@ -52,6 +52,26 @@
 | 来源列表 | 待核验 | 待核验 | 上下文导航 |
 | 状态提示 | 待核验 | 待核验 | loading/empty/error 等 |
 
+## 4.1 第一金字塔双页面落点（CHANGE-20260728-005）
+
+| 落点 | 组件 | variant | 路径 |
+|---|---|---|---|
+| `/market` 右栏 | `FirstPyramidPanel` | `compact` | `frontend/src/features/market-workspace/MarketRightPanel.tsx` |
+| `/stock/:symbol` Drawer | `FirstPyramidPanel` | `detail` | `frontend/src/features/research-context/AtomicFactsDrawer.tsx` |
+
+- 共享组件：`frontend/src/features/stock-research/FirstPyramidPanel.tsx`
+- ViewModel：`frontend/src/features/stock-research/firstPyramidViewModel.ts`（DTO→VM 类型安全转换，禁止解析 statusText 推断多空）
+- 样式：`frontend/src/features/stock-research/FirstPyramidPanel.module.scss`（从 global.scss 迁移）
+- API：`GET /api/v1/stocks/{symbol}/first-pyramid`（共用 React Query 缓存，不重复请求）
+- `/market` 右栏布局顺序：MiniKlineCard（顶部，保留）→ compact 第一金字塔 → "更多观察"（AtomicFactsPanel 默认收起）
+- `/stock/:symbol` Drawer 布局：detail 第一金字塔 → "更多状态观察"（AtomicFactsPanel expanded 默认收起）
+- StockDetailPage 底部不再渲染独立 FirstPyramidPanel（全页只有一个实例）
+- compact：顶部 2x2 摘要网格 + 量能水位 + 四维卡片，事件最多 3 条
+- detail：全宽摘要 + 量能水位 + 四维卡片（结构卡跨两列），事件最多 5 条
+- 禁止显示：algorithmVersion / inputHash / parameterHash / Swing / Internal / up / down 字面
+- 禁止显示原始 volume 大整数，仅显示 ratio
+- A 股语义：偏多=红，偏空=绿，中性=muted，量能强调=品牌莹感绿
+
 ## 5. 状态所有权
 
 重点核验：

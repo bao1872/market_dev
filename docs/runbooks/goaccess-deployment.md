@@ -137,6 +137,30 @@ docker exec trading-backend cat /srv/goaccess/goaccess-error.log
 - 确认请求头包含 `Authorization: Bearer <TOKEN>`
 - 确认 token 对应用户角色为 `admin`（`user_roles.role = 'admin'`）
 
+### 容器从未部署的诊断（CHANGE-20260728-005）
+
+当 `data_source="empty"` 且常规排查无效时，按以下顺序确认容器是否实际部署：
+
+```bash
+# 1. 检查 goaccess 容器是否存在（包括已退出的）
+docker ps -a --filter name=goaccess --format '{{.Names}}\t{{.Status}}\t{{.CreatedAt}}'
+# 若输出为空 → 容器从未创建
+
+# 2. 检查共享卷是否存在
+docker volume ls --filter name=goaccess --filter name=nginx_logs
+# 若输出为空 → 卷从未声明
+
+# 3. 检查 frontend 容器内 access.log 是否为持久文件
+docker exec trading-frontend ls -la /var/log/nginx/access.log
+# 若为符号链接到 /dev/stdout → Nginx 日志走 Docker 日志驱动，未写入共享卷
+
+# 4. 检查 backend 容器是否挂载了 reports 卷
+docker exec trading-backend ls -la /srv/goaccess/
+# 若目录不存在 → backend 未挂载 goaccess_reports 卷
+```
+
+**2026-07-28 诊断结论**：生产服务器 `trading-goaccess` 容器和 `trading-goaccess-reports` 卷均不存在；`trading-frontend` 的 `/var/log/nginx/access.log` 是符号链接到 `/dev/stdout`，即使启动 goaccess 容器也无法读取日志。需先修复 Nginx 日志输出到共享卷，再启动 goaccess 容器。
+
 ## 本地开发
 
 本地开发**不**启动 GoAccess 容器（用户硬约束：不 Docker）。
