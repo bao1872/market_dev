@@ -29,16 +29,24 @@ export interface MarketWorkspaceUrlState {
   preset: 'none' | null
 }
 
-export const DEFAULT_MARKET_SCOPE: MarketScope = 'watchlist'
+export const DEFAULT_MARKET_SCOPE: MarketScope = 'market'
 export const DEFAULT_PAGE = 1
 export const DEFAULT_PAGE_SIZE = 50
 export const MAX_PAGE_SIZE = 100
+
+/**
+ * 唯一 scope 归一化函数：仅 'watchlist' 返回 watchlist，其余（含 null/undefined/非法值）返回 market。
+ * decodeMarketWorkspaceUrl 和 decodeMarketListContext 必须共用此函数，禁止各写三元表达式。
+ */
+export function normalizeMarketScope(raw: string | null | undefined): MarketScope {
+  return raw === 'watchlist' ? 'watchlist' : 'market'
+}
 
 // 从 URLSearchParams 解析工作区状态（仅 scope + selected + industry/concept + preset；
 // sort/filters/page 由 StrategyDataTable 管理）
 export function decodeMarketWorkspaceUrl(params: URLSearchParams): MarketWorkspaceUrlState {
   const rawScope = params.get('scope')
-  const scope: MarketScope = rawScope === 'market' ? 'market' : 'watchlist'
+  const scope: MarketScope = normalizeMarketScope(rawScope)
   const selected = params.get('selected') ?? null
   const industry = params.get('industry') ?? null
   const concept = params.get('concept') ?? null
@@ -213,7 +221,7 @@ export function decodeMarketListContext(
   const qs = safe.split('?')[1]
   const params = new URLSearchParams(qs)
   const rawScope = params.get('scope')
-  const scope: MarketScope = rawScope === 'market' ? 'market' : 'watchlist'
+  const scope: MarketScope = normalizeMarketScope(rawScope)
   const keyword = params.get('keyword')
   const industry = params.get('industry')
   const concept = params.get('concept')

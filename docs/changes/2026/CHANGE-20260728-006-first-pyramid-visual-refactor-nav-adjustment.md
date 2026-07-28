@@ -18,7 +18,7 @@
 
 相关提交或 PR：
 
-- 本轮 commit（待填写 SHA）
+- 908f920（dev 分支，已 push origin/dev）
 
 替代：
 

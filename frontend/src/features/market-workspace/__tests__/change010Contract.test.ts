@@ -567,10 +567,10 @@ test('MarketWorkspacePage handleNavigateToStock returnTo V2 从 buildMarketRetur
 
 test('decodeMarketListContext 任意合法 /market URL 都识别为 market context', () => {
   const src = readSource(URL_STATE_PATH)
-  // scope=market 和 scope=watchlist 都解析
+  // scope 归一化通过 normalizeMarketScope 统一处理（CHANGE-20260728-006）
   assert.ok(
-    src.includes("rawScope === 'market' ? 'market' : 'watchlist'"),
-    'decodeMarketListContext 必须支持 scope=market 和 scope=watchlist',
+    src.includes('normalizeMarketScope'),
+    'decodeMarketListContext 必须使用 normalizeMarketScope 统一归一化 scope',
   )
   // 不要求 keyword/page/sort 存在
   assert.ok(

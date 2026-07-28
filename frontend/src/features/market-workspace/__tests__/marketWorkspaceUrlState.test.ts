@@ -30,9 +30,10 @@ import {
   type MarketListContext,
 } from '../marketWorkspaceUrlState.ts'
 
-test('decode 默认值（无参数时 scope=watchlist, selected=null）', () => {
+test('decode 默认值（无参数时 scope=market, selected=null）', () => {
   const state = decodeMarketWorkspaceUrl(new URLSearchParams())
   assert.equal(state.scope, DEFAULT_MARKET_SCOPE)
+  assert.equal(state.scope, 'market')
   assert.equal(state.selected, null)
 })
 
@@ -173,11 +174,11 @@ test('CHANGE-009-2: scope=market → universe=all；scope=watchlist → universe
   const watchlistQuery = buildStrategyResultQueryParams(watchlistCtx!)
   assert.equal(watchlistQuery.universe, 'watchlist')
 
-  // 无 scope 参数默认 watchlist
+  // 无 scope 参数默认 market（CHANGE-20260728-006 修复：原默认 watchlist 导致行情入口被误判为自选）
   const defaultCtx = decodeMarketListContext('/market')
-  assert.equal(defaultCtx!.scope, 'watchlist')
+  assert.equal(defaultCtx!.scope, 'market')
   const defaultQuery = buildStrategyResultQueryParams(defaultCtx!)
-  assert.equal(defaultQuery.universe, 'watchlist')
+  assert.equal(defaultQuery.universe, 'all')
 })
 
 test('CHANGE-009-3: 仅含 industry/concept 的 /market URL 也识别为 market context', () => {
