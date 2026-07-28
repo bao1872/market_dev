@@ -4,8 +4,7 @@
 1. SYNCING_BOARDS 状态存在于 AfterCloseRunStatus 枚举
 2. _completed_steps 包含 syncing_boards 在正确顺序位置
 3. _resolve_instruments_for_board_sync 正确解析 symbol → instrument_id
-4. dsa_only 模式跳过 syncing_boards
-5. BOARD_SYNC_ENABLED=false 时 syncing_boards 标记为 skipped
+4. BOARD_SYNC_ENABLED=false 时 syncing_boards 标记为 skipped
 
 注：完整编排流程测试需要大量 mock，此处聚焦于关键集成点。
 """
@@ -125,16 +124,6 @@ class TestCompletedStepsIntegration:
         assert refreshing_pos < syncing_pos < waiting_pos, (
             "_completed_steps 顺序错误: syncing_boards 不在 refreshing_daily 和 waiting_dsa_worker 之间"
         )
-
-    def test_dsa_only_skips_syncing_boards(self) -> None:
-        """dsa_only 模式应跳过 syncing_boards。"""
-        import inspect
-
-        from app.services.after_close_orchestrator import execute_after_close_run
-
-        source = inspect.getsource(execute_after_close_run)
-        # dsa_only 模式应包含 syncing_boards 在 completed 集合中
-        assert '"syncing_boards"' in source, "dsa_only 模式未处理 syncing_boards"
 
     def test_board_sync_step_exists(self) -> None:
         """编排函数中必须包含 syncing_boards 步骤的执行代码。"""

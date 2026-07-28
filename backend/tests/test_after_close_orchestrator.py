@@ -975,64 +975,6 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
 
 
 @pytest.mark.asyncio
-async def test_update_orchestrator_status_preserves_mode_field(db_session) -> None:
-    """[TDD-RED] - 验证 _update_orchestrator_status 保留 mode 字段。
-
-    场景：dsa_only 任务已有 metadata.mode='dsa_only'，调用 _update_orchestrator_status
-    切换状态后，mode 字段应保留（与 last_completed_step 同等对待）。
-
-    根因：原实现 _update_orchestrator_status 只保留 last_completed_step，
-    每次 state 切换都会丢失 mode 字段，导致 worker 无法识别 dsa_only 模式，
-    重新走了 refreshing_daily 步骤。
-
-    given: job_run.metadata_json 含 mode='dsa_only' + last_completed_step='daily_ready'
-    when: 调用 _update_orchestrator_status(status=QUEUED)
-    then: 新 metadata_json 仍含 mode='dsa_only' + last_completed_step='daily_ready'
-    """
-    from app.services.after_close_orchestrator import (
-        AfterCloseRunStatus,
-        _update_orchestrator_status,
-    )
-
-    # 准备：创建已有 mode=dsa_only 的 job_run
-    job_run = await _create_after_close_job_run(
-        db_session,
-        status="interrupted",
-        orchestrator_status="interrupted",
-    )
-    # 手动设置含 mode 字段的 metadata
-    job_run.metadata_json = json.dumps({
-        "orchestrator_status": "interrupted",
-        "trade_date": "2026-06-25",
-        "mode": "dsa_only",
-        "last_completed_step": "daily_ready",
-    }, ensure_ascii=False)
-    await db_session.flush()
-
-    # 执行：调用 _update_orchestrator_status 切换到 QUEUED（模拟 resume）
-    await _update_orchestrator_status(
-        db=db_session,
-        job_run=job_run,
-        status=AfterCloseRunStatus.QUEUED,
-        message="[resume] 从断点恢复",
-    )
-    await db_session.flush()
-
-    # 验证：mode 字段应保留
-    assert job_run.metadata_json is not None
-    meta = json.loads(job_run.metadata_json)
-    assert meta["orchestrator_status"] == "queued", (
-        f"orchestrator_status 应为 queued，实际 {meta.get('orchestrator_status')}"
-    )
-    assert meta.get("mode") == "dsa_only", (
-        f"mode 字段应保留为 'dsa_only'，实际 metadata={meta}（根因：_update_orchestrator_status 丢失 mode 字段）"
-    )
-    assert meta.get("last_completed_step") == "daily_ready", (
-        f"last_completed_step 应保留，实际 {meta.get('last_completed_step')}"
-    )
-
-
-@pytest.mark.asyncio
 async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
     """[Heartbeat] feature_snapshot 阶段应启动后台心跳任务，防止租约过期。
 

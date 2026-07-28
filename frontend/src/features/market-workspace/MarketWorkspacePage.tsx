@@ -21,11 +21,12 @@ import {
   useAddToWatchlist,
   useRemoveFromWatchlist,
   useMarketBoards,
+  useMarketStocks,
 } from '@/hooks/useApi'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { apiClient } from '@/api/client'
-import type { StrategyResultQueryParams } from '@/api/endpoints'
+import type { MarketStocksQueryParams, StrategyResultQueryParams } from '@/api/endpoints'
 import {
   adaptStrategyResultToTrendRow,
   getTrendSelectionColumns,
@@ -43,6 +44,10 @@ import {
   type MarketScope,
   type MarketListContext,
 } from './marketWorkspaceUrlState'
+import {
+  getFirstPyramidColumns,
+  getDefaultHiddenFpKeys,
+} from './firstPyramidColumns'
 import styles from './MarketWorkspace.module.scss'
 
 // DSA 生产策略 key（AGENTS §12.2：当前生产只保留 dsa_selector）
@@ -334,10 +339,42 @@ export default function MarketWorkspacePage() {
   const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
   const totalResults = resultsQuery.data?.total ?? 0
 
-  // 行数据：StrategyResult → TrendSelectionRow
+  // [PRD §三 列表视图第一金字塔全量字段] 并行调用 /market/stocks 批量获取 first_pyramid
+  // 与 useStrategyRunResults 同 scope/page/page_size，按 instrument_id 合并到行；不逐行请求
+  const marketStocksParams: MarketStocksQueryParams = useMemo(
+    () => ({
+      scope,
+      query: keyword || undefined,
+      page: query.page,
+      page_size: query.pageSize,
+      sort: query.sort ? `${query.sort.key}:${query.sort.direction}` : undefined,
+      industry: industry || undefined,
+      concept: concept || undefined,
+    }),
+    [scope, keyword, query.page, query.pageSize, query.sort, industry, concept],
+  )
+  const marketStocksQuery = useMarketStocks(marketStocksParams, {
+    enabled: !!resultsQuery.data,
+  })
+
+  // 构建 instrument_id → first_pyramid 映射（单次合并，禁止 N+1）
+  const firstPyramidMap = useMemo(() => {
+    const m = new Map<string, Record<string, unknown> | null>()
+    for (const ms of marketStocksQuery.data?.items ?? []) {
+      m.set(ms.instrument_id, ms.first_pyramid)
+    }
+    return m
+  }, [marketStocksQuery.data?.items])
+
+  // 行数据：StrategyResult → TrendSelectionRow，合并 first_pyramid
   const rows: TrendSelectionRow[] = useMemo(
-    () => (resultsQuery.data?.items ?? []).map((r) => adaptStrategyResultToTrendRow(r)),
-    [resultsQuery.data?.items],
+    () => (resultsQuery.data?.items ?? []).map((r) => {
+      const row = adaptStrategyResultToTrendRow(r)
+      // 合并第一金字塔扁平化字段（无匹配时为 null，列显示 "—"）
+      row.firstPyramid = firstPyramidMap.get(row.instrumentId) ?? null
+      return row
+    }),
+    [resultsQuery.data?.items, firstPyramidMap],
   )
 
   // 行业/概念变更：更新 URL + 重置 page=1（CHANGE-20260713-006）
@@ -416,23 +453,33 @@ export default function MarketWorkspacePage() {
     setKeyword(newKeyword)
   }, [])
 
-  // 列定义：DSA 列（复用 features/trend-selection 共享模块）
+  // 列定义：DSA 列（复用 features/trend-selection 共享模块） + 99 个第一金字塔列
   // [Gate2 PRD60 PA-10/11/13] capability 决定回调传递：
   // - canAccessStockDetail=false（仅 self_selection）：不传 onNavigateToStock，股票名渲染为纯文本
   // - canAccessWatchlist=false（仅 market_data）：不传 onToggleWatchlist，操作列返回 null
+  //
+  // [PRD §三 列表视图第一金字塔全量字段] 在基础列后追加 99 个 fp_ 列，操作列固定末尾。
+  // 99 列默认通过 defaultHiddenColumns 隐藏非核心键；列设置面板可显隐/拖拽排序。
   const columns: DataTableColumn<TrendSelectionRow>[] = useMemo(
     () => {
-      const allColumns = getTrendSelectionColumns({
+      const baseColumns = getTrendSelectionColumns({
         onNavigateToStock: canAccessStockDetail ? handleNavigateToStock : undefined,
         onToggleWatchlist: canAccessWatchlist ? handleToggleWatchlist : undefined,
         watchlistInstrumentIds,
         watchlistPendingIds,
       })
+      // 拆分基础列与操作列，确保 fp_ 列插入在中间，操作列固定末尾
+      const actionCol = baseColumns.find((c) => c.isAction)
+      const nonActionBaseCols = baseColumns.filter((c) => !c.isAction)
+      const fpCols = getFirstPyramidColumns()
+      const merged = actionCol
+        ? [...nonActionBaseCols, ...fpCols, actionCol]
+        : [...nonActionBaseCols, ...fpCols]
       // [Gate2 PRD60 PA-11] 仅 market_data 用户：无自选权限时移除操作列（避免空列占用宽度）
       if (!canAccessWatchlist) {
-        return allColumns.filter((col) => col.key !== 'action')
+        return merged.filter((col) => col.key !== 'action')
       }
-      return allColumns
+      return merged
     },
     [handleNavigateToStock, handleToggleWatchlist, watchlistInstrumentIds, watchlistPendingIds, canAccessStockDetail, canAccessWatchlist],
   )
@@ -513,6 +560,8 @@ export default function MarketWorkspacePage() {
             strategyKey={DSA_STRATEGY_KEY}
             activeRunId={activeRunId}
             columns={columns}
+            // [PRD §三] 默认隐藏 79 个非核心 fp_ 列；preset 应用后由 preset.hiddenColumns 覆盖
+            defaultHiddenColumns={getDefaultHiddenFpKeys()}
             rows={rows}
             rowKey={(row) => row.symbol === '-' ? row.instrumentId : row.symbol}
             total={totalResults}

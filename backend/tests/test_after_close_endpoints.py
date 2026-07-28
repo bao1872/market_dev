@@ -1,10 +1,11 @@
-"""Phase 6: 盘后编排 API 端点测试 - dsa-only + resume 入口。
+"""Phase 6: 盘后编排 API 端点测试 - force?restart_from=daily_ready + resume 入口。
 
 覆盖 4 个场景：
-1. test_dsa_only_insufficient_coverage_returns_409:
-   当日无日线数据，调用 dsa-only，返 409 + reason=DATA_COVERAGE_INSUFFICIENT
-2. test_dsa_only_sufficient_coverage_creates_queued_task:
-   插入足够的日线数据（覆盖率 ≥ 90%），调用 dsa-only，返 201 + status=queued + metadata.mode=dsa_only
+1. test_force_restart_from_daily_ready_insufficient_coverage_returns_409:
+   当日无日线数据，调用 force?restart_from=daily_ready，返 409 + reason=DATA_COVERAGE_INSUFFICIENT
+2. test_force_restart_from_daily_ready_sufficient_coverage_resets_queued:
+   插入足够的日线数据（覆盖率 ≥ 90%），调用 force?restart_from=daily_ready，
+   返 200 + status=queued + metadata.last_completed_step=refreshing_daily
 3. test_resume_non_failed_returns_400:
    任务 status=running，调用 resume，返 400
 4. test_resume_failed_resets_queued_preserves_checkpoint:
@@ -181,92 +182,101 @@ async def _create_after_close_job_run(
 
 
 # ============================================================
-# Task 6.1: POST /admin/after-close-runs/dsa-only
+# Task 6.1: POST /admin/after-close-runs/{id}/force?restart_from=daily_ready
+# [CHANGE-20260728-008] 原 dsa-only 独立端点已删除，功能并入 force + restart_from
 # ============================================================
 
 
-class TestDsaOnlyEndpoint:
-    """POST /admin/after-close-runs/dsa-only 端点测试。"""
+class TestForceRestartFromDailyReady:
+    """POST /admin/after-close-runs/{id}/force?restart_from=daily_ready 端点测试。
+
+    替代原 TestDsaOnlyEndpoint：从 DSA 阶段重算（跳过日线刷新，需覆盖率≥90%）。
+    """
 
     @pytest.mark.asyncio
-    async def test_dsa_only_insufficient_coverage_returns_409(
+    async def test_force_restart_from_daily_ready_insufficient_coverage_returns_409(
         self, db_session, admin_user
     ) -> None:
-        """场景 1：当日无日线数据，调用 dsa-only，返 409 + reason=DATA_COVERAGE_INSUFFICIENT。
+        """场景 1：当日无日线数据，调用 force?restart_from=daily_ready，返 409。
 
         given: 数据库中有 10 个活跃股票，但 bars_daily 当日无数据（覆盖率 0%）
-        when: POST /admin/after-close-runs/dsa-only { trade_date: "2099-01-01" }
+        when: POST /admin/after-close-runs/{id}/force?restart_from=daily_ready
         then: 响应 409，body.detail.reason == "DATA_COVERAGE_INSUFFICIENT"
-
-        [测试隔离] - 描述: 使用未来日期 2099-01-01 绕过历史日期校验，
-        专门验证覆盖率不足场景；历史日期场景见 test_dsa_only_historical_date_returns_422。
         """
         _override_get_db(db_session)
-        # 准备：10 个活跃股票，无日线数据
+        # 准备：创建一个已存在的 after_close 任务 + 10 个活跃股票，无日线数据
+        job_run = await _create_after_close_job_run(
+            db_session, status="succeeded", orchestrator_status="succeeded",
+        )
         await _create_active_instruments(db_session, count=10)
         await db_session.flush()
 
-        trade_date = "2099-01-01"
         with patch(
             "app.core.time.shanghai_business_date", return_value=date(2099, 1, 1)
         ):
             transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
-                    "/admin/after-close-runs/dsa-only",
+                    f"/admin/after-close-runs/{job_run.id}/force",
                     headers=_auth_headers(admin_user.id),
-                    json={"trade_date": trade_date},
+                    params={"restart_from": "daily_ready"},
                 )
 
         assert response.status_code == 409, f"响应体: {response.text}"
         detail = response.json()["detail"]
         assert detail["reason"] == "DATA_COVERAGE_INSUFFICIENT"
-        assert detail["trade_date"] == trade_date
         assert detail["threshold"] == 0.9
         assert "daily_coverage" in detail
         assert detail["daily_coverage"] < 0.9
 
     @pytest.mark.asyncio
-    async def test_dsa_only_historical_date_returns_422(
+    async def test_force_restart_from_daily_ready_invalid_value_returns_400(
         self, db_session, admin_user
     ) -> None:
-        """场景 1.1：dsa-only 传入历史日期，应直接 422，避免误触发历史回补。
-
-        given: 管理员调用 dsa-only，trade_date 为昨天
-        when: POST /admin/after-close-runs/dsa-only { trade_date: "2026-06-25" }
-        then: 响应 422，detail 含 "dsa-only 拒绝历史日期"
-        """
+        """场景 1.1：restart_from 传入非法值，应返 400。"""
         _override_get_db(db_session)
+        job_run = await _create_after_close_job_run(
+            db_session, status="succeeded", orchestrator_status="succeeded",
+        )
+        await db_session.flush()
 
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                "/admin/after-close-runs/dsa-only",
+                f"/admin/after-close-runs/{job_run.id}/force",
                 headers=_auth_headers(admin_user.id),
-                json={"trade_date": "2026-06-25"},
+                params={"restart_from": "invalid_step"},
             )
 
-        assert response.status_code == 422, f"响应体: {response.text}"
-        assert "dsa-only 拒绝历史日期" in response.json()["detail"]
+        assert response.status_code == 400, f"响应体: {response.text}"
+        assert "restart_from" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_dsa_only_sufficient_coverage_creates_queued_task(
+    async def test_force_restart_from_daily_ready_sufficient_coverage_resets_queued(
         self, db_session, admin_user
     ) -> None:
-        """场景 2：覆盖率 ≥ 90%，调用 dsa-only，返 201 + status=queued + metadata.mode=dsa_only。
+        """场景 2：覆盖率 ≥ 90%，调用 force?restart_from=daily_ready，返 200 + queued。
 
         given: 数据库中 N 个活跃股票，为全部活跃股票插入当日日线数据（覆盖率 100%）
-        when: POST /admin/after-close-runs/dsa-only { trade_date: "2099-01-01" }
+        when: POST /admin/after-close-runs/{id}/force?restart_from=daily_ready
         then:
-          - 响应 201
+          - 响应 200
           - body.status == "queued"
-          - 数据库中 job_run.metadata_json 含 mode='dsa_only' + last_completed_step='daily_ready'
-
-        [测试隔离] - 描述: 使用独特未来日期 2099-01-01 避免 bars_daily 表中
-        其他测试遗留数据干扰；为所有 active instruments 插入该日 bars 确保覆盖率 100%。
+          - 数据库中 metadata 含 last_completed_step='refreshing_daily'
+          - metadata 中不含 dsa_run_id（已清除）
         """
         _override_get_db(db_session)
         trade_date = date(2099, 1, 1)
+
+        # 创建一个已完成的 after_close 任务（带旧 dsa_run_id 便于验证清除）
+        job_run = await _create_after_close_job_run(
+            db_session, status="succeeded", orchestrator_status="succeeded",
+        )
+        # 注入旧 dsa_run_id 模拟历史 dsa_only 记录
+        meta = json.loads(job_run.metadata_json or "{}")
+        meta["dsa_run_id"] = str(uuid.uuid4())
+        meta["trade_date"] = trade_date.isoformat()
+        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
 
         # 为所有现有 active instruments 插入当日 bars_daily
         result = await db_session.execute(
@@ -299,27 +309,25 @@ class TestDsaOnlyEndpoint:
                 transport=transport, base_url="http://test"
             ) as client:
                 response = await client.post(
-                    "/admin/after-close-runs/dsa-only",
+                    f"/admin/after-close-runs/{job_run.id}/force",
                     headers=_auth_headers(admin_user.id),
-                    json={"trade_date": trade_date.isoformat()},
+                    params={"restart_from": "daily_ready"},
                 )
 
-        assert response.status_code == 201, f"响应体: {response.text}"
+        assert response.status_code == 200, f"响应体: {response.text}"
         data = response.json()
         assert data["status"] == "queued"
         assert data["orchestrator_status"] == "queued"
-        assert data["trade_date"] == trade_date.isoformat()
-        job_run_id = data["job_run_id"]
 
-        # 验证数据库中 metadata 含 mode=dsa_only + last_completed_step=daily_ready
-        job_run = await db_session.get(SchedulerJobRun, uuid.UUID(job_run_id))
-        assert job_run is not None
-        assert job_run.metadata_json is not None
-        meta = json.loads(job_run.metadata_json)
-        assert meta["mode"] == "dsa_only"
-        assert meta["last_completed_step"] == "daily_ready"
+        # 验证数据库中 metadata
+        updated = await db_session.get(SchedulerJobRun, job_run.id)
+        assert updated is not None
+        assert updated.metadata_json is not None
+        meta = json.loads(updated.metadata_json)
+        assert meta["last_completed_step"] == "refreshing_daily"
         assert meta["orchestrator_status"] == "queued"
-        assert meta["trade_date"] == trade_date.isoformat()
+        # dsa_run_id 应被清除
+        assert "dsa_run_id" not in meta, f"dsa_run_id 应被清除，实际 metadata={meta}"
 
 
 # ============================================================
@@ -744,7 +752,7 @@ class TestCreateAfterCloseRunEndpoint:
 
 
 # ============================================================
-# DSA 历史日期拒绝校验（strategy_runs + after_close 双端点）
+# DSA 历史日期拒绝校验（strategy_runs 端点）
 # ============================================================
 
 
@@ -753,7 +761,6 @@ class TestDsaHistoricalDateRejection:
 
     覆盖：
     - POST /admin/strategies/{strategy_key}/run（dsa_selector）
-    - POST /admin/after-close-runs/dsa-only
     """
 
     @pytest.mark.asyncio

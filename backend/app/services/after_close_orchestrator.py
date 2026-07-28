@@ -20,7 +20,7 @@
 queued → refreshing_daily → syncing_boards → checking_coverage → creating_dsa
   → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → succeeded
 任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
-syncing_boards 在 BOARD_SYNC_ENABLED=false / 非交易日 / dsa_only 模式时跳过
+syncing_boards 在 BOARD_SYNC_ENABLED=false / 非交易日时跳过
 
 禁异常吞没：所有异常补充上下文后 re-raise 或写入 ERROR 事件后标记 failed。
 """
@@ -1030,15 +1030,9 @@ async def execute_after_close_run(
             )
             return
 
-        # [Phase6] - dsa_only 模式：跳过日线刷新和板块同步（覆盖率已由 API 层校验）
-        # 避免人工 DSA 重跑访问问财
-        mode = meta.get("mode")
-        if mode == "dsa_only":
-            completed = completed | {"refreshing_daily", "syncing_boards"}
-            logger.info(
-                "[AfterClose] dsa_only 模式: 强制跳过 refreshing_daily + syncing_boards: job_run_id=%s",
-                job_run_id,
-            )
+        # [CHANGE-20260728-008] 原 dsa_only 模式已删除，
+        # 改为通过 force?restart_from=daily_ready 设置 last_completed_step="refreshing_daily"，
+        # 由 _completed_steps 自然跳过 refreshing_daily，后续步骤正常执行。
 
         skip_refresh = "refreshing_daily" in completed
         skip_board_sync = "syncing_boards" in completed
@@ -1094,7 +1088,7 @@ async def execute_after_close_run(
 
             # ---- 步骤 2: syncing_boards（软失败，不阻断主流程）----
             # 板块与 DSA 独立，在日线刷新后、DSA 未触发提前结束之前执行
-            # 非交易日跳过；dsa_only 模式已在上文 skip_board_sync=True
+            # 非交易日跳过；断点恢复时 skip_board_sync 由 last_completed_step 决定
             if not skip_board_sync and batch_result.skip_reason != "NON_TRADING_DAY":
                 from app.config import get_settings
                 from app.services.board_sync_service import (
@@ -1368,46 +1362,40 @@ async def execute_after_close_run(
 
         else:
             # [Phase5] - 断点恢复跳过日线刷新，dsa_run_id 从 metadata 读取
-            # [Phase6] - dsa_only 模式：跳过日线刷新，直接创建 DSA run（覆盖率已由 API 层校验）
-            mode = meta.get("mode")
+            # [CHANGE-20260728-008] 原 dsa_only 模式已删除。
+            # 当 skip_refresh=True 且 dsa_run_id=None 时（如 force?restart_from=daily_ready），
+            # 直接创建 DSA run（覆盖率已由 API 层校验）。
             if dsa_run_id is None:
-                if mode == "dsa_only":
-                    # [Phase6] - dsa_only 模式：直接调用 create_batch_run 创建 DSA run
-                    from app.constants.strategy_keys import DSA_SELECTOR
-                    logger.info(
-                        "[AfterClose] dsa_only 模式: 跳过日线刷新，直接创建 DSA run: "
-                        "job_run_id=%s, trade_date=%s",
-                        job_run_id, trade_date,
+                from app.constants.strategy_keys import DSA_SELECTOR
+                logger.info(
+                    "[AfterClose] 跳过日线刷新，直接创建 DSA run: "
+                    "job_run_id=%s, trade_date=%s, last_completed_step=%s",
+                    job_run_id, trade_date, last_completed_step,
+                )
+                async with AsyncSessionLocal() as db:
+                    dsa_run = await batch_service.create_batch_run(
+                        db=db,
+                        strategy_key=DSA_SELECTOR,
+                        trade_date=trade_date,
+                        run_type="scheduled",
+                        claim_for_worker=f"orchestrator:{worker_id}",
                     )
-                    async with AsyncSessionLocal() as db:
-                        dsa_run = await batch_service.create_batch_run(
-                            db=db,
-                            strategy_key=DSA_SELECTOR,
-                            trade_date=trade_date,
-                            run_type="scheduled",
-                            claim_for_worker=f"orchestrator:{worker_id}",
-                        )
-                        await db.commit()
-                        dsa_run_id = dsa_run.id
-                        # 更新 metadata 记录 dsa_run_id
-                        job_run = await _get_job_run_or_raise(db, job_run_id)
-                        await _update_orchestrator_status(
-                            db=db,
-                            job_run=job_run,
-                            status=AfterCloseRunStatus.REFRESHING_DAILY,
-                            message=f"dsa_only 模式: 已创建 DSA run: dsa_run_id={dsa_run_id}",
-                            dsa_run_id=dsa_run_id,
-                            payload={"mode": "dsa_only", "dsa_run_id": str(dsa_run_id)},
-                        )
-                        await _update_heartbeat_and_step(
-                            db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
-                        )
-                        await db.commit()
-                else:
-                    raise ValueError(
-                        f"断点恢复: last_completed_step={last_completed_step} "
-                        f"但 metadata 缺少 dsa_run_id: job_run_id={job_run_id}"
+                    await db.commit()
+                    dsa_run_id = dsa_run.id
+                    # 更新 metadata 记录 dsa_run_id
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    await _update_orchestrator_status(
+                        db=db,
+                        job_run=job_run,
+                        status=AfterCloseRunStatus.REFRESHING_DAILY,
+                        message=f"已创建 DSA run（跳过日线刷新）: dsa_run_id={dsa_run_id}",
+                        dsa_run_id=dsa_run_id,
+                        payload={"dsa_run_id": str(dsa_run_id)},
                     )
+                    await _update_heartbeat_and_step(
+                        db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
+                    )
+                    await db.commit()
 
         # ---- 步骤 2: computing_features (Phase 5: 收敛 waiting_dsa_worker + quality_gate + feature_snapshot) ----
         # [CHANGE-20260724-002 Phase 5] scheduled after-close DSA 接入 MFCS 统一计算服务：

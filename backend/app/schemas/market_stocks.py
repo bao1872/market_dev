@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -38,6 +39,10 @@ class MarketStockRow(BaseModel):
     latest_event_title: str | None = Field(None, description="最近客观事件标题（兼容保留，固定 null；事件在 EventStatePanel 按需加载）")
     latest_event_time: str | None = Field(None, description="最近客观事件时间 ISO（兼容保留，固定 null）")
     is_watchlisted: bool = Field(False, description="是否在当前用户自选中")
+    first_pyramid: dict[str, Any] | None = Field(
+        None,
+        description="第一金字塔扁平化字段（99 个 fp_ 键）；None 表示无快照",
+    )
 
 
 class MarketStocksResponse(BaseModel):

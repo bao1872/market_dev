@@ -109,3 +109,41 @@ Sync    python tools/update_docs.py --check
 ## Migration 测试纪律
 
 修改 migration 必须有 upgrade / downgrade / upgrade 验证。详见 `80-deployment-data-safety.md`。
+
+## 持久测试数据库禁用（CHANGE-20260728-007）
+
+> 来源：AGENTS.md §8 基础安全边界
+> 状态：硬约束
+
+### 禁止范围
+
+- 本地 Mac、开发服务器、腾讯云**创建或复用**持久测试数据库（如 `bz_stock_test`）。
+- 本地测试连接正式库 `bz_stock` 或任何持久测试库。
+- 把 CI 临时 Postgres 容器改为长期库。
+- 保留 `.env.test`、`TEST_DATABASE_URL` 持久配置、SSH 测试库隧道说明、conftest 持久测试引擎或 Alembic 自动迁移到本地 Mac。
+- 保留任何会自动创建或复用 `bz_stock_test` 的脚本。
+
+### 唯一例外
+
+CI（GitHub Actions）job 级临时 Postgres 容器，job 结束自动销毁。
+CI 工作流中 `POSTGRES_DB: bz_stock_test` 仅作为容器内临时数据库名，不持久化。
+
+### 本地测试规则
+
+- 本地测试只能纯单元/mock。
+- 必须设置 `PURE_UNIT_TEST=1` 跳过 DB 初始化。
+- `backend/tests/conftest.py` 通过 `GITHUB_ACTIONS=true` 或显式 `PANJI_CI_DB_TEST=1` 识别 CI 环境。
+- 非 CI 环境且未设置 `PURE_UNIT_TEST=1` 时，conftest 加载即失败。
+
+### CI 临时库规则
+
+- CI 工作流使用 job 级 `postgres:16` 容器，job 结束自动销毁。
+- `TEST_DATABASE_URL` 由 CI 工作流注入，指向 `localhost:5432/bz_stock_test`（容器内）。
+- 不得在 CI 之外保留 `TEST_DATABASE_URL` 环境变量。
+- 数据库集成测试（使用 `db_session` fixture）只在 CI 运行；本地不运行。
+
+### 新增测试规则
+
+- 新增测试优先写成纯单元测试（不连接数据库）。
+- 必须连接数据库的集成测试，必须使用 `db_session` fixture，并在 CI 临时库运行。
+- 不得在本地 Mac 创建持久测试库以运行集成测试。

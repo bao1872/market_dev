@@ -1,7 +1,7 @@
 """统一行情覆盖率服务。
 
 设计原则：
-- dsa-only、系统概览、bars_scheduler 必须调用本服务，禁止复制 SQL；
+- 系统概览、bars_scheduler、after-close force?restart_from=daily_ready 必须调用本服务，禁止复制 SQL；
 - trade_date 缺省时使用 shanghai_business_date()（Asia/Shanghai，非服务器本地 date.today()）；
 - 分子：bars_daily 表中 trade_date 当日不同 instrument_id 数（JOIN instruments + stock_symbol_sql_filter，
   排除指数/基金/ETF 残留数据）；

@@ -3,16 +3,15 @@
 // 用法：
 // 1. 在 AdminIndexPage 中嵌入，数据来自 useAdminSystemOverview().after_close_pipeline
 // 2. 摘要展示：状态 pill / 业务日期 / 编排阶段 / watchlist_ready / Worker 心跳
-// 3. 操作按钮（4 个独立入口）：
+// 3. 操作按钮：
 //    - 更新今日日线并计算选股（POST /admin/after-close-runs，原 create）
-//    - 仅重算今日选股（POST /admin/after-close-runs/dsa-only，要求覆盖率 ≥ 90%）
+//    - 从DSA重算（POST /admin/after-close-runs/{id}/force?restart_from=daily_ready，需覆盖率≥90%）
 //    - 从失败步骤继续（POST /admin/after-close-runs/{id}/resume，仅失败状态显示）
 //    - 强制执行（POST /admin/after-close-runs/{id}/force，二次确认）
 // 4. 进入详情页链接 → /admin/after-close（8 步骤时间线 + 数据新鲜度 + 运行列表 + 事件抽屉）
 //
 // 依赖 hooks：
 // - useCreateAfterCloseRun：创建盘后编排（POST /admin/after-close-runs）
-// - useDsaOnlyRun：仅重算今日 DSA（POST /admin/after-close-runs/dsa-only）
 // - useRetryAfterCloseRun：重试失败任务（POST /admin/after-close-runs/{id}/retry）
 // - useResumeAfterCloseRun：从失败步骤继续（POST /admin/after-close-runs/{id}/resume）
 // - useForceAfterCloseRun：强制重新执行（POST /admin/after-close-runs/{id}/force）
@@ -22,7 +21,6 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   useCreateAfterCloseRun,
-  useDsaOnlyRun,
   useRetryAfterCloseRun,
   useResumeAfterCloseRun,
   useForceAfterCloseRun,
@@ -62,7 +60,7 @@ function statusLabel(status: string | undefined): string {
 
 // [AfterClose] - 创建盘后编排 409 detail → 人类可读消息（透明化真实失败原因）
 // 后端 409 来源：NON_TRADING_DAY（非交易日）/ DUPLICATE_RUN（同日已有 queued/running 任务）/
-// DATA_COVERAGE_INSUFFICIENT（覆盖率不足，dsa-only 复用此 formatter）
+// DATA_COVERAGE_INSUFFICIENT（覆盖率不足，从DSA重算复用此 formatter）
 function formatAfterCloseCreate409Message(detail: unknown): string {
   if (typeof detail === 'string') return detail
   if (detail && typeof detail === 'object') {
@@ -108,7 +106,6 @@ export function AfterClosePipelineCard({
 }: AfterClosePipelineCardProps) {
   const toast = useToast.getState()
   const createMutation = useCreateAfterCloseRun()
-  const dsaOnlyMutation = useDsaOnlyRun()
   const retryMutation = useRetryAfterCloseRun()
   const resumeMutation = useResumeAfterCloseRun()
   const forceMutation = useForceAfterCloseRun()
@@ -150,23 +147,6 @@ export function AfterClosePipelineCard({
     }
   }
 
-  const handleDsaOnly = async () => {
-    const date = tradeDate || shanghaiBusinessDate()
-    try {
-      const result = await dsaOnlyMutation.mutateAsync(date)
-      toast.show('DSA 重算已创建', result.message)
-    } catch (err: unknown) {
-      const axiosErr = err as { response?: { status?: number; data?: { detail?: unknown } } }
-      const respStatus = axiosErr.response?.status
-      const detail = axiosErr.response?.data?.detail
-      if (respStatus === 409) {
-        toast.show('DSA 重算失败', formatAfterCloseCreate409Message(detail))
-      } else {
-        toast.show('DSA 重算失败', '请稍后重试')
-      }
-    }
-  }
-
   const handleRetry = async () => {
     if (!jobRunId) return
     try {
@@ -197,10 +177,32 @@ export function AfterClosePipelineCard({
     }
     setConfirmingForce(false)
     try {
-      const result = await forceMutation.mutateAsync(jobRunId)
+      const result = await forceMutation.mutateAsync({ runId: jobRunId })
       toast.show('强制执行已启动', result.message)
     } catch {
       toast.show('强制执行失败', '请稍后重试')
+    }
+  }
+
+  // [CHANGE-20260728-008] 从 DSA 阶段重算（替代原 dsa-only 独立端点）
+  // 调用 force?restart_from=daily_ready，跳过日线刷新，需覆盖率≥90%
+  const handleForceFromDsa = async () => {
+    if (!jobRunId) return
+    try {
+      const result = await forceMutation.mutateAsync({
+        runId: jobRunId,
+        restartFrom: 'daily_ready',
+      })
+      toast.show('DSA 重算已启动', result.message)
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: { detail?: unknown } } }
+      const respStatus = axiosErr.response?.status
+      const detail = axiosErr.response?.data?.detail
+      if (respStatus === 409) {
+        toast.show('DSA 重算失败', formatAfterCloseCreate409Message(detail))
+      } else {
+        toast.show('DSA 重算失败', '请稍后重试')
+      }
     }
   }
 
@@ -228,11 +230,11 @@ export function AfterClosePipelineCard({
           </button>
           <button
             className="btn small"
-            onClick={handleDsaOnly}
-            disabled={dsaOnlyMutation.isPending}
-            title="仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%）"
+            onClick={handleForceFromDsa}
+            disabled={forceMutation.isPending || !canForce}
+            title="从 DSA 阶段重算（跳过日线刷新，需当日覆盖率≥90%）"
           >
-            {dsaOnlyMutation.isPending ? '重算中…' : '仅重算选股'}
+            {forceMutation.isPending ? '重算中…' : '从DSA重算'}
           </button>
           {canResume && (
             <button

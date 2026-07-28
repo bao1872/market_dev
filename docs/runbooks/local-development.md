@@ -5,11 +5,12 @@
 ## 核心数据架构规则（2026-07-28 起）
 
 - **本地固定连接正式数据源**：PostgreSQL=`bz_stock`，Redis 使用 `backend/.env` 中的正式运行配置（本地隔离 DB）。
-- **永久禁止本地连接持久测试库**（如 `bz_stock_test`）；不得创建新的持久测试数据库。
+- **永久禁止本地 Mac / 开发服务器 / 腾讯云创建或复用持久测试库**（如 `bz_stock_test`）；`bz_stock_test` 已于 2026-07-28 DROP，不得重建。
 - **本地与服务器隔离边界是进程，不是数据复制**：本地只启动 Backend、Frontend、Capture 和 SSH Tunnel；Scheduler、正式 Worker、盘后编排和全市场任务必须为 0。
 - **本地写入均为真实业务写入**：禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道；禁止清库、批量更新、Migration、删除正式数据。
 - **8752028@qq.com 为受保护 Owner 账户**：禁止修改其密码、邮箱、状态、角色、权限、订阅和业务数据。
-- **未来 CI 数据库测试只能使用 CI 临时数据库**，不得使用持久 `bz_stock_test`。
+- **本地测试只能纯单元/mock**：必须设置 `PURE_UNIT_TEST=1`；禁止连接正式库 `bz_stock` 或任何持久测试库。
+- **数据库集成测试只在 CI 临时 Postgres 容器中运行**（job 结束自动销毁，唯一例外）；`backend/tests/conftest.py` 通过 `GITHUB_ACTIONS=true` 或显式 `PANJI_CI_DB_TEST=1` 识别 CI 环境，非 CI 必须 `PURE_UNIT_TEST=1`。详见 `rules/40-testing-quality.md`。
 
 ## 前置条件
 

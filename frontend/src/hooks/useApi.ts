@@ -1213,11 +1213,13 @@ export function useCreateAfterCloseRun() {
   })
 }
 
-/** [Phase6] 仅重算今日 DSA 变更（要求当日日线覆盖率 ≥ 90%） */
-export function useDsaOnlyRun() {
+/** 强制重新执行盘后编排变更。
+ * 支持可选 restartFrom="daily_ready"：从 DSA 阶段重算（跳过日线刷新，需覆盖率≥90%）。 */
+export function useForceAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (tradeDate: string) => api.createDsaOnlyRun(tradeDate),
+    mutationFn: (args: { runId: string; restartFrom?: 'daily_ready' }) =>
+      api.forceAfterCloseRun(args.runId, args.restartFrom),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
@@ -1247,18 +1249,6 @@ export function useResumeAfterCloseRun() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
       queryClient.invalidateQueries({ queryKey: ['after-close-pipeline'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
-    },
-  })
-}
-
-/** 强制重新执行盘后编排变更 */
-export function useForceAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (runId: string) => api.forceAfterCloseRun(runId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
     },
   })

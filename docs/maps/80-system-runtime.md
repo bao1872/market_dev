@@ -17,6 +17,7 @@
 | SR-01 本地使用原生进程 | `Makefile` 的 `backend` / `frontend` 目标；`backend/app/main.py`；`frontend/vite.config.ts` | 已核验 | Backend PID / Frontend PID；curl /health 返回 200 |
 | SR-02 不依赖 Docker 本地启动 | `Makefile` 的 `up` / `down` 已改为废弃警告；`docker-compose.yml` 仅存 Redis 服务且未被本地 dev 流程引用 | 已核验 | 未执行 `docker compose up`；本地无盘迹容器 |
 | SR-03 共享 PostgreSQL | `backend/.env` DATABASE_URL → 127.0.0.1:15432 → 腾讯云 Docker 内 `trading-postgres:5432/bz_stock`；**本地固定连接 `bz_stock` 正式库，永久禁止 `bz_stock_test`** | 已核验 | SELECT current_database()=bz_stock；instruments=8272 |
+| SR-03a 持久测试库已删除 | `bz_stock_test` 已于 2026-07-28 DROP；本地 Mac / 开发服务器 / 腾讯云禁止创建或复用持久测试库；本地测试只能 `PURE_UNIT_TEST=1`；DB 集成测试只在 CI 临时容器运行（`GITHUB_ACTIONS=true` 或 `PANJI_CI_DB_TEST=1` 识别） | 已核验 | pg_database 中无 bz_stock_test；conftest.py CI 守卫生效 |
 | SR-10 至 SR-13 Git、CI 和版本 | `dev` 已创建；本地基于 `origin/dev` rebase 后领先 2 个提交；未做 push | 已核验 | `git status --branch` |
 | SR-20 至 SR-22 PostgreSQL 连接和 Schema | `backend/app/db.py`；`backend/app/config.py` DATABASE_URL 解析；PostgreSQL 16.14 | 已核验 | 健康接口 /version 返回 alembic_revision |
 | SR-30 至 SR-33 Redis DB 和队列 | `backend/app/config.py` REDIS_URL；本地 DB 15（临时）；远程 DB 0 | 已核验 | PING / DBSIZE=0；DB 0 启动被 `config.py` 拒绝 |

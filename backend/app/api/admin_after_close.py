@@ -2,11 +2,11 @@
 
 端点：
 - POST /admin/after-close-runs: 创建并异步执行盘后编排（日线刷新→DSA→质量门禁→发布）
-- POST /admin/after-close-runs/dsa-only: [Phase6] 仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%）
 - GET /admin/after-close-runs/{run_id}: 查询盘后编排状态（含事件时间线）
 - POST /admin/after-close-runs/{run_id}/retry: 重试失败的盘后编排
 - POST /admin/after-close-runs/{run_id}/resume: [Phase6] 从失败步骤继续（保留断点检查点）
 - POST /admin/after-close-runs/{run_id}/force: 强制重新执行盘后编排（非 failed 状态也可触发）
+  支持 restart_from="daily_ready" 参数：从 DSA 阶段重算（跳过日线刷新，需覆盖率≥90%）
 - GET /admin/job-runs/{run_id}/events: 查询任意任务的执行事件时间线
 
 权限：
@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -163,172 +164,14 @@ async def create_after_close_run_endpoint(
     )
 
 
-# [Phase6] - dsa-only 覆盖率门槛：当日日线覆盖率 ≥ 90% 才允许跳过日线刷新
-_DSA_ONLY_COVERAGE_THRESHOLD = 0.9
+# [CHANGE-20260728-008] 原 /admin/after-close-runs/dsa-only 独立端点已删除，
+# 功能并入 /admin/after-close-runs/{run_id}/force?restart_from=daily_ready。
+# 系统只允许 job_name=after_close_orchestrator、run_type=full，
+# 正常任务从 refreshing_daily 开始，不创建 dsa_only 类型。
 
-
-@router.post(
-    "/after-close-runs/dsa-only",
-    response_model=AfterCloseRunCreateResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_dsa_only_run_endpoint(
-    payload: AfterCloseRunCreateRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(require_roles("admin")),
-) -> AfterCloseRunCreateResponse:
-    """[Phase6] 仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%）。
-
-    流程：
-    1. 解析 trade_date
-    2. 调用 compute_daily_coverage 查询当日日线覆盖率（口径与
-       BarsSchedulerService._check_daily_coverage_and_trigger_dsa 对齐：
-       bars_daily.trade_date + instruments.status='active'）
-    3. 覆盖率 < 90% 返 409 + reason=DATA_COVERAGE_INSUFFICIENT
-    4. 覆盖率达标：调用 create_after_close_run 创建 queued 任务
-    5. 在 metadata 中设置 mode='dsa_only' + last_completed_step='daily_ready'
-       （Worker 领取后跳过 refresh_daily，直接 create_batch_run）
-    6. 返回 queued 任务
-
-    [Phase6] - 描述: 与 create_after_close_run_endpoint 的区别：
-    - 不重复拉行情（要求行情已就绪）
-    - metadata 标记 mode='dsa_only' 供 Worker 识别
-    - 覆盖率不足时返 409 而非创建任务
-
-    Args:
-        payload: 创建请求（含 trade_date）
-        db: 异步数据库会话
-        current_user: 当前管理员
-
-    Returns:
-        创建响应（含 job_run_id 和初始状态）
-
-    Raises:
-        HTTPException 409: 当日日线覆盖率不足
-    """
-    from app.core.time import shanghai_business_date
-    from app.services.after_close_orchestrator import (
-        _parse_metadata,
-        _update_orchestrator_status,
-    )
-    from app.services.bars_coverage_service import BarsCoverageService
-
-    requested_date = _parse_trade_date(payload.trade_date)
-    today = shanghai_business_date()
-
-    # [AfterClose] - 描述: dsa-only 仅重算今日，拒绝未来日期
-    if requested_date > today:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"dsa-only 拒绝未来日期: trade_date={requested_date.isoformat()}",
-        )
-
-    # [AfterClose] - 描述: dsa-only 仅重算今日，拒绝历史日期
-    if requested_date < today:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"dsa-only 拒绝历史日期: trade_date={requested_date.isoformat()}",
-        )
-
-    # [Bugfix] - 描述: dsa-only 与系统概览覆盖率口径对齐
-    # 原逻辑：用前端传入的 trade_date（=today）精确匹配，今日未回补时覆盖率 0%
-    # 修复：若请求日期当日无数据，fallback 到最新已落盘交易日（与系统概览一致）
-    latest_available = await BarsCoverageService.get_latest_trade_date(db)
-    if latest_available is not None and requested_date > latest_available:
-        # 请求日期 > 最新可用日（今日未回补），用最新可用日
-        trade_date = latest_available
-        logger.info(
-            "[dsa-only] 请求日期 %s 当日无数据，fallback 到最新可用日 %s",
-            requested_date, trade_date,
-        )
-    else:
-        trade_date = requested_date
-
-    # [Phase6] - 计算当日日线覆盖率（纯查询，不触发 DSA）
-    coverage_result = await BarsCoverageService.compute_daily_coverage(db, trade_date)
-    covered = coverage_result["covered"]
-    total = coverage_result["total"]
-    coverage = coverage_result["coverage"]
-    coverage_raw = coverage_result["coverage_raw"]
-    # 覆盖率门禁使用原始值，避免四舍五入边缘误判
-    if coverage_raw < _DSA_ONLY_COVERAGE_THRESHOLD:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "reason": "DATA_COVERAGE_INSUFFICIENT",
-                "trade_date": coverage_result["trade_date"],
-                "requested_trade_date": requested_date.isoformat(),
-                "daily_coverage": coverage,
-                "daily_covered": covered,
-                "daily_total": total,
-                "threshold": _DSA_ONLY_COVERAGE_THRESHOLD,
-                "source": coverage_result["source"],
-                "message": f"当日日线覆盖率不足: {coverage:.1%} < {_DSA_ONLY_COVERAGE_THRESHOLD:.0%}",
-            },
-        )
-
-    # [Phase6] - 覆盖率达标，创建 queued 任务
-    job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
-    if not is_new:
-        # 同日已有任务，复用 create 端点的 409 语义（含 error_code=DUPLICATE_RUN）
-        meta = _parse_metadata(job_run)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": "DUPLICATE_RUN",
-                "after_close_run_id": str(job_run.id),
-                "status": job_run.status,
-                "orchestrator_status": meta.get("orchestrator_status", "unknown"),
-                "trade_date": trade_date.isoformat(),
-                "started_at": (
-                    job_run.started_at.isoformat() if job_run.started_at else None
-                ),
-                "heartbeat_at": (
-                    job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None
-                ),
-                "last_completed_step": meta.get("last_completed_step"),
-                "message": f"当天已有盘后任务正在运行: trade_date={trade_date}",
-            },
-        )
-
-    # [Phase6] - 在 metadata 中追加 mode='dsa_only' + last_completed_step='daily_ready'
-    # Worker 领取后应识别 mode=dsa_only 跳过 refresh_daily 直接 create_batch_run
-    await _update_orchestrator_status(
-        db=db,
-        job_run=job_run,
-        status=AfterCloseRunStatus.QUEUED,
-        message=(
-            f"[dsa-only] 仅重算今日 DSA: trade_date={trade_date}, "
-            f"coverage={coverage:.1%} ({covered}/{total})"
-        ),
-        payload={
-            "mode": "dsa_only",
-            "daily_coverage": coverage,
-            "daily_covered": covered,
-            "daily_total": total,
-        },
-        extra={
-            "mode": "dsa_only",
-            "last_completed_step": "daily_ready",
-        },
-    )
-    await db.commit()
-
-    logger.info(
-        "[Phase6] dsa-only 任务已创建: run_id=%s, trade_date=%s, coverage=%.1f%%",
-        job_run.id, trade_date, coverage * 100,
-    )
-
-    return AfterCloseRunCreateResponse(
-        job_run_id=str(job_run.id),
-        status=job_run.status,
-        orchestrator_status=AfterCloseRunStatus.QUEUED.value,
-        trade_date=trade_date.isoformat(),
-        message=(
-            f"[dsa-only] 仅重算今日 DSA 已创建: trade_date={trade_date}, "
-            f"coverage={coverage:.1%}"
-        ),
-    )
+# [CHANGE-20260728-008] force?restart_from=daily_ready 的合法取值与覆盖率门槛
+_RESTART_FROM_VALID_VALUES = {"daily_ready"}
+_RESTART_FROM_COVERAGE_THRESHOLD = 0.9
 
 
 @router.get(
@@ -663,6 +506,10 @@ async def resume_after_close_run_endpoint(
 )
 async def force_advance_after_close_endpoint(
     run_id: UUID,
+    restart_from: str | None = Query(
+        default=None,
+        description="从指定步骤重新执行（目前仅支持 'daily_ready'，跳过日线刷新，需覆盖率≥90%）",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> AfterCloseRunCreateResponse:
@@ -673,13 +520,24 @@ async def force_advance_after_close_endpoint(
     与 retry 的区别：force 不校验状态，任何状态都可强制重新执行。
     适用于任务卡在 running 状态但实际无 Worker 执行的场景。
 
+    restart_from 参数（统一替代原 dsa-only 独立端点）：
+    - restart_from="daily_ready"：跳过日线刷新，从 DSA 阶段开始重算。
+      要求当日日线覆盖率 ≥ 90%，否则返 409。
+      仍执行 syncing_boards → computing_dsa → computing_features → publishing 全链路，
+      不跳过特征/快照/发布。
+    - 不传 restart_from：从头执行（默认行为）。
+
     流程：
     1. 加载 job_run，校验为编排任务
-    2. 重置 status=queued, error_message=None（由 Worker 领取）
-    3. 更新 orchestrator_status=queued
+    2. 若 restart_from="daily_ready"：校验覆盖率 ≥ 90%
+    3. 重置 status=queued, error_message=None（由 Worker 领取）
+    4. 更新 orchestrator_status=queued
+    5. 若 restart_from="daily_ready"：设置 last_completed_step="refreshing_daily"，
+       清除旧 dsa_run_id（Worker 会创建新 DSA run）
 
     Args:
         run_id: 编排任务 ID
+        restart_from: 从指定步骤重新执行（"daily_ready" 跳过日线刷新）
         db: 异步数据库会话
         current_user: 当前管理员
 
@@ -688,7 +546,8 @@ async def force_advance_after_close_endpoint(
 
     Raises:
         HTTPException 404: 任务不存在
-        HTTPException 400: 任务非盘后编排
+        HTTPException 400: 任务非盘后编排或 restart_from 值非法
+        HTTPException 409: restart_from="daily_ready" 但覆盖率不足
     """
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -699,6 +558,16 @@ async def force_advance_after_close_endpoint(
         _parse_metadata,
         _update_orchestrator_status,
     )
+
+    # 校验 restart_from 取值
+    if restart_from is not None and restart_from not in _RESTART_FROM_VALID_VALUES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"restart_from 仅支持 {_RESTART_FROM_VALID_VALUES}，"
+                f"当前值: {restart_from}"
+            ),
+        )
 
     job_run = await db.get(SchedulerJobRun, run_id)
     if job_run is None:
@@ -720,6 +589,41 @@ async def force_advance_after_close_endpoint(
             detail=f"metadata_json 中缺少 trade_date: job_run_id={run_id}",
         )
 
+    # restart_from="daily_ready"：校验覆盖率 ≥ 90%
+    coverage_info: dict[str, Any] | None = None
+    if restart_from == "daily_ready":
+        from datetime import date as date_cls
+
+        from app.services.bars_coverage_service import BarsCoverageService
+
+        trade_date = date_cls.fromisoformat(trade_date_str)
+        coverage_result = await BarsCoverageService.compute_daily_coverage(
+            db, trade_date,
+        )
+        coverage_raw = coverage_result["coverage_raw"]
+        if coverage_raw < _RESTART_FROM_COVERAGE_THRESHOLD:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "reason": "DATA_COVERAGE_INSUFFICIENT",
+                    "trade_date": coverage_result["trade_date"],
+                    "daily_coverage": coverage_result["coverage"],
+                    "daily_covered": coverage_result["covered"],
+                    "daily_total": coverage_result["total"],
+                    "threshold": _RESTART_FROM_COVERAGE_THRESHOLD,
+                    "message": (
+                        f"restart_from=daily_ready 覆盖率不足: "
+                        f"{coverage_result['coverage']:.1%} < "
+                        f"{_RESTART_FROM_COVERAGE_THRESHOLD:.0%}"
+                    ),
+                },
+            )
+        coverage_info = {
+            "daily_coverage": coverage_result["coverage"],
+            "daily_covered": coverage_result["covered"],
+            "daily_total": coverage_result["total"],
+        }
+
     # [Phase5] - 重置为 queued（不是 running），由独立 Worker 领取执行
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     job_run.status = "queued"
@@ -730,12 +634,38 @@ async def force_advance_after_close_endpoint(
     job_run.heartbeat_at = now
     job_run.lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
 
+    # restart_from="daily_ready"：设置 last_completed_step + 清除旧 dsa_run_id
+    extra: dict[str, Any] = {}
+    if restart_from == "daily_ready":
+        extra["last_completed_step"] = "refreshing_daily"
+        extra["restart_from"] = "daily_ready"
+        # 清除旧 mode（如果历史是 dsa_only）
+        extra["mode"] = None
+
+    message = f"管理员强制重新执行: job_run_id={run_id}"
+    if restart_from == "daily_ready":
+        assert coverage_info is not None  # 由上方覆盖率校验保证
+        message = (
+            f"管理员从 DSA 阶段重算: job_run_id={run_id}, "
+            f"coverage={coverage_info['daily_coverage']:.1%}"
+        )
+
     await _update_orchestrator_status(
         db=db,
         job_run=job_run,
         status=AfterCloseRunStatus.QUEUED,
-        message=f"管理员强制重新执行: job_run_id={run_id}",
+        message=message,
+        extra=extra if extra else None,
+        payload={"restart_from": restart_from} if restart_from else None,
     )
+
+    # restart_from="daily_ready"：清除旧 dsa_run_id（_update_orchestrator_status 不支持清除，
+    # 需在调用后直接修改 metadata）
+    if restart_from == "daily_ready":
+        meta_after = _parse_metadata(job_run)
+        meta_after.pop("dsa_run_id", None)
+        job_run.metadata_json = json.dumps(meta_after, ensure_ascii=False)
+
     await db.commit()
 
     # [Phase5] - 不再 _kick_off_async_execution，由独立 Worker 领取 queued 任务
@@ -745,7 +675,10 @@ async def force_advance_after_close_endpoint(
         status=job_run.status,
         orchestrator_status=AfterCloseRunStatus.QUEUED.value,
         trade_date=trade_date_str,
-        message=f"盘后编排已强制重新执行: job_run_id={job_run.id}",
+        message=(
+            f"盘后编排已从{'DSA阶段' if restart_from == 'daily_ready' else '头'}"
+            f"强制重新执行: job_run_id={job_run.id}"
+        ),
     )
 
 
@@ -894,7 +827,7 @@ if __name__ == "__main__":
     # 验证必要端点存在
     paths = set(get_route_paths(router.routes))
     assert "/admin/after-close-runs" in paths, "缺少 POST /admin/after-close-runs"
-    assert "/admin/after-close-runs/dsa-only" in paths, "缺少 dsa-only 端点"
+    assert "/admin/after-close-runs/dsa-only" not in paths, "dsa-only 端点应已删除"
     assert "/admin/after-close-runs/{run_id}" in paths, "缺少 GET /admin/after-close-runs/{run_id}"
     assert "/admin/after-close-runs/{run_id}/retry" in paths, "缺少 retry 端点"
     assert "/admin/after-close-runs/{run_id}/resume" in paths, "缺少 resume 端点"

@@ -12,7 +12,7 @@
 
 - 远程自动触发：bars_scheduler Worker 每日 16:00（上海时区）调用 `create_after_close_run`，交易日历判断后创建 SchedulerJobRun。
 - 本地不自动调度：backend lifespan 不启动 Scheduler；Scheduler/Worker 必须显式设置 `WORKER_TYPE` 启动。
-- 手动入口：`admin_after_close.py` 提供创建、DSA-only 创建、查询、重试、恢复 API；`backend/scripts/trigger_dsa_batch_small.py` 为脚本入口。
+- 手动入口：`admin_after_close.py` 提供创建、查询、重试、恢复、force（含 `restart_from="daily_ready"` 从 DSA 阶段重算）API；`backend/scripts/trigger_dsa_batch_small.py` 为脚本入口。
 - 编排任务以 `SchedulerJobRun`（job_name="after_close_orchestrator"）记录，状态机：queued → refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → succeeded；异常 → failed；可被 watchdog 中断后自动 resume_queued。
 - readiness：checking_coverage 步骤仅检查日线覆盖率 >= 0.9（Phase 5A 移除 15m 阻塞，符合 PRD30 AC-04）；日线不足则标记 failed，15m 缺失不再阻塞 after-close run。
 - run 隔离：`create_after_close_run` 使用 run_key = `after_close_orchestrator:{trade_date}` 去重；同一 trade_date 同时只能有一个活跃（queued/running/resume_queued）任务。
@@ -48,7 +48,7 @@
 | 类型 | 路径 | 符号 | 职责 |
 |---|---|---|---|
 | 自动触发 | `backend/app/worker.py` | `scheduled_bars_refresh` | bars_scheduler Worker 每日 16:00 创建 after_close run |
-| 手动运行 | `backend/app/api/admin_after_close.py` | `create_after_close_run_endpoint` / `create_dsa_only_run_endpoint` / `retry_after_close_run_endpoint` | 管理员创建/重试 |
+| 手动运行 | `backend/app/api/admin_after_close.py` | `create_after_close_run_endpoint` / `force_after_close_run_endpoint`（含 `restart_from="daily_ready"`）/ `retry_after_close_run_endpoint` | 管理员创建/重试/从DSA阶段重算 |
 | readiness | `backend/app/services/after_close_orchestrator.py` | `execute_after_close_run` 中 checking_coverage | 仅日线覆盖率检查（Phase 5A：15m intraday 工具保留在 `BarsCoverageService` 但 after-close 不再调用） |
 | Orchestrator | `backend/app/services/after_close_orchestrator.py` | `execute_after_close_run` | 阶段编排与断点恢复 |
 | Worker | `backend/app/worker.py` | `run_after_close_orchestrator_worker` / `_after_close_poll_once` | 任务领取与执行 |
@@ -122,7 +122,7 @@ completed → published
 ## 8. 验证入口
 
 - 单股：未运行核验；
-- 指定股票池：`create_dsa_only_run_endpoint` 支持指定 symbols；
+- 指定股票池：`force_after_close_run_endpoint` 支持 `restart_from="daily_ready"` + 指定 symbols（从 DSA 阶段重算，替代原 dsa-only 端点）；
 - 全市场：默认 after_close_orchestrator 全市场；
 - 重复执行：`create_after_close_run` run_key 去重 + `publish_run` 幂等；
 - Worker 超时和重领：`recover_stale_scheduler_job_runs` + `auto_resume_interrupted_after_close_runs`；

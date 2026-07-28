@@ -85,6 +85,16 @@
 
 不再使用的盘后自动触发入口应删除，不长期保留重复编排路径。
 
+### AC-16 统一盘后编排（CHANGE-20260728-008）
+
+系统只允许 `job_name=after_close_orchestrator`、`run_type=full` 一种盘后任务类型。不得存在 `dsa_only` 独立端点、独立 `mode` 分支或独立 `run_type`。
+
+"从 DSA 阶段重算"通过现有 `force` 端点 + `restart_from="daily_ready"` 参数实现，仍是同一 `after_close` 任务，不创建 `dsa_only` 类型，不跳过后续特征/快照/发布步骤。仅 admin 可用；必须先验证日线覆盖率 ≥ 90%。
+
+状态链：`queued→running→refreshing_daily→syncing_boards→checking_coverage→computing_features→publishing→succeeded`；`StrategyRun` 状态链：`running→completed→published`，异常 → `failed`。不得在发布前伪造 `completed`。
+
+对已有旧 `dsa_only` queued/running 记录只读识别；生产执行前通过正式 cancel/interrupted/retry 服务处理，禁止 DELETE 或直接改 metadata。
+
 ## 3. 验收标准
 
 - 远程交易日任务可自动运行。
@@ -92,4 +102,6 @@
 - 单股、股票池和全市场使用同一核心链路。
 - 未校验 run 不会成为正式发布结果。
 - 重复执行不会产生无法解释的重复发布。
-- Map 对 AC-01 至 AC-15 给出实现状态、入口和验证证据。
+- 系统不存在 `dsa_only` 独立端点、独立 mode 分支或独立 run_type。
+- `restart_from="daily_ready"` 从 DSA 阶段重算，仍执行完整后续链路。
+- Map 对 AC-01 至 AC-16 给出实现状态、入口和验证证据。

@@ -176,7 +176,7 @@ pywencai（`wencai_board_provider`）为唯一板块分类源。
 - 后端镜像构建文件必须安装 `nodejs`；
 - 盘后 worker 唯一同步入口是 `after_close_orchestrator` 的 `syncing_boards` 步骤；
 - `BOARD_SYNC_ENABLED` 默认 `false`；
-- `mode=dsa_only` 跳过该步骤；
+- `restart_from="daily_ready"` 跳过日线刷新，从 DSA 阶段重算（仍执行板块同步，由 `syncing_boards` 步骤控制）；
 - 不得增加 akshare、代理、IP 绕过、东方财富混用或新常驻 worker。
 
 ## 因子版本追踪与 auto-resume

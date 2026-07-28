@@ -72,10 +72,23 @@
 
 “筹码共识价暂不可用”等状态不得被空值静默替代。
 
+### MX-20 列表视图第一金字塔全量字段（CHANGE-20260728-008）
+
+行情列表 API 对当前分页 `instrument_ids` 一次批量读取最近完成交易日的 published+full 快照，复用 `summary_payload.first_pyramid`，单次合并，禁止 N+1；无最近日快照返回 null 和 source 状态，不即时逐股计算。
+
+后端唯一扁平化函数（`first_pyramid_flatten.flatten_first_pyramid`）和前端唯一 ColumnRegistry（`firstPyramidColumns.tsx`）必须覆盖 99 个 `fp_` 键，分为 8 组：快照 7 / 趋势 18 / 结构 8 / 结构事件 21 / 动量 13 / 动量事件 9 / 筹码 10 / 量能 13。所有键必须可选，不能少、不能改名。
+
+列设置按分组展示；99 列全部可显示、隐藏、拖拽排序。复用现有 `TableViewPreset` 的 `hiddenColumns`/`columnOrder` 保存，不新建配置表。保存、刷新、重新登录后顺序和显隐恢复；旧配置缺新字段时兼容。
+
+默认只打开基础列 + 约 20 个核心金字塔列，其余默认隐藏。null 统一显示"—"，不得补 0；方向用中文标签和 A 股颜色；分位/BB 位置用小轨道；事件显示最近一次。
+
+`inputHash`、`parameterHash`、`algorithmVersion`、`profile_hash`、`evidence`、`barIndex` 不进入普通列。
+
 ## 3. 验收标准
 
 - 筛选后进入详情再返回，列表筛选和排序保持一致。
 - 行情列表与详情来源列表的自选排序一致。
 - 图层开关由单一权威清单控制。
 - 权限不足时不泄露详情数据。
+- 列表 API 批量读取快照，无 N+1；99 个 `fp_` 字段全部可选、可显隐、可排序、可保存。
 - Map 能指向路由、Store、组件、API 和状态拥有者。

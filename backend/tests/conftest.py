@@ -1,15 +1,17 @@
 """共享测试 fixtures - pytest 集成测试基础设施。
 
 提供：
-- 测试库连接校验（APP_ENV / TEST_DATABASE_URL）
+- 测试库连接校验（APP_ENV / TEST_DATABASE_URL / CI）
 - 测试专用 async_engine / TestAsyncSessionLocal
 - async DB session fixture（savepoint 模式，被测代码调用 commit 也不污染数据库）
 - 测试数据工厂 fixtures（用户、角色、订阅、邀请码、标的、策略、运行）
 - HTTP 客户端 fixture（自动覆盖 get_db）
 
-约束：
-- 禁止在 APP_ENV != test 时连接测试库。
-- TEST_DATABASE_URL 必须指向 *_test 数据库。
+约束（CHANGE-20260728-007 永久测试库禁用）：
+- 本地 Mac、开发服务器、腾讯云禁止创建或复用持久测试数据库（如 bz_stock_test）。
+- 本地测试只能纯单元/mock，禁止连接正式库 bz_stock 或任何持久测试库。
+- 数据库集成测试只在 CI 临时 Postgres 容器中运行（job 结束自动销毁，唯一例外）。
+- 因此：非 CI 环境必须设置 PURE_UNIT_TEST=1；CI 环境需 APP_ENV=test + TEST_DATABASE_URL。
 """
 from __future__ import annotations
 
@@ -67,8 +69,22 @@ _APP_ENV = os.environ.get("APP_ENV", "").lower()
 _TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 # 纯单元测试跳过 DB 初始化（不连接任何数据库）
 _PURE_UNIT = os.environ.get("PURE_UNIT_TEST", "").lower() in ("1", "true", "yes")
+# CI 环境标识：仅 GitHub Actions 设置 GITHUB_ACTIONS=true；CI=true 可能被本地 IDE 误设
+# 显式 PANJI_CI_DB_TEST=1 用于其他 CI 系统的 opt-in（必须配合临时 Postgres 容器）
+_CI_ENV = (
+    os.environ.get("GITHUB_ACTIONS", "").lower() in ("1", "true", "yes")
+    or os.environ.get("PANJI_CI_DB_TEST", "").lower() in ("1", "true", "yes")
+)
 
 if not _PURE_UNIT:
+    # [CHANGE-20260728-007] 非 CI 环境禁止 DB 集成测试，避免本地 Mac 复用持久测试库
+    if not _CI_ENV:
+        raise RuntimeError(
+            "数据库集成测试只在 CI 临时 Postgres 容器中运行（禁止本地 Mac / 开发服务器 / 腾讯云复用持久测试库）。\n"
+            "本地运行测试请设置：PURE_UNIT_TEST=1 pytest tests/test_xxx.py\n"
+            "如确实需要在 CI 之外运行集成测试，请使用一次性临时 Postgres 容器并设置 PANJI_CI_DB_TEST=1。"
+        )
+
     if _APP_ENV != "test":
         raise RuntimeError(
             f"测试必须在 APP_ENV=test 下运行，当前 APP_ENV={_APP_ENV!r}。"

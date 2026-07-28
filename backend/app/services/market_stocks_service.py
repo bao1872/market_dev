@@ -28,6 +28,7 @@ import logging
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, Integer, case, cast, func, literal, or_, select
@@ -54,6 +55,7 @@ from app.services.board_sync_service import get_instrument_boards_batch
 # _SCHEMA_VERSION 从 1→2→3 升级后，生产写入 schema_version=3，
 # 消费查询必须用同一常量，否则新快照读不到、as_of 永远为 None。
 from app.services.feature_snapshot_service import _SCHEMA_VERSION
+from app.services.first_pyramid_flatten import flatten_first_pyramid
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 logger = logging.getLogger("market_stocks_service")
@@ -475,12 +477,16 @@ async def get_market_stocks(
             latest, _ = existing
             price_map[inst_id] = (latest, close_val)
 
-    # ===== Query 4: 最新 feature snapshot（批量） =====
+    # ===== Query 4: 最新 feature snapshot（批量，含 first_pyramid） =====
+    # [PRD §三 列表视图第一金字塔全量字段] summary_payload.first_pyramid 已在盘后写入，
+    # 此处批量读取后扁平化为 99 个 fp_ 键，禁止 N+1 逐股请求。
     snap_subq = (
         select(
             StockFeatureSnapshot.instrument_id,
             StockFeatureSnapshot.summary_payload,
             StockFeatureSnapshot.created_at,
+            StockFeatureSnapshot.trade_date,
+            StockFeatureSnapshot.source_run_id,
             func.row_number()
             .over(
                 partition_by=StockFeatureSnapshot.instrument_id,
@@ -498,18 +504,47 @@ async def get_market_stocks(
     snap_stmt = select(snap_subq).where(snap_subq.c.rn == 1)
     snap_result = await db.execute(snap_stmt)
 
-    state_map: dict[UUID, tuple[str | None, str | None]] = {}
+    state_map: dict[UUID, tuple[str | None, str | None, dict[str, Any] | None]] = {}
+    # 全局最新 trade_date 用于判断快照过期（来自 Query 7 的预查询）
+    # 此处先用 None 占位，实际过期判定在组装响应阶段对比 price_as_of_date
     for snap_row in snap_result:
         payload = snap_row.summary_payload or {}
         dsa_state = _map_dsa_state(payload.get("daily_developing_swing_dir"))
         structure_state = payload.get("cost_position_zone")
+        # 第一金字塔扁平化：summary_payload.first_pyramid 是嵌套 dict
+        first_pyramid_raw = payload.get("first_pyramid")
+        flat_fp: dict[str, Any] | None = None
+        if first_pyramid_raw is not None:
+            # is_stale 由调用方在组装响应时通过 trade_date 对比 price_as_of 判定；
+            # 此处先用 False 占位，组装阶段修正
+            flat_fp = flatten_first_pyramid(
+                first_pyramid_raw,
+                calculated_at=to_shanghai_iso(snap_row.created_at)
+                if snap_row.created_at
+                else None,
+                run_id=str(snap_row.source_run_id) if snap_row.source_run_id else None,
+                is_stale=False,
+            )
         state_map[snap_row.instrument_id] = (
             dsa_state,
             str(structure_state) if structure_state else None,
+            flat_fp,
         )
 
     # ===== Query 5: 板块归属（批量，industry/concepts） =====
     boards_map = await get_instrument_boards_batch(db, instrument_ids)
+
+    # ===== Query 6/7/8: 全局 as_of（提前到组装前，供 first_pyramid.is_stale 判定） =====
+    boards_as_of_dt: datetime | None = await db.scalar(
+        select(func.max(MarketBoard.updatedAt))
+    )
+    price_as_of_date: date | None = await db.scalar(select(func.max(BarDaily.trade_date)))
+    state_as_of_dt: datetime | None = await db.scalar(
+        select(func.max(StockFeatureSnapshot.created_at)).where(
+            # [CHANGE-20260718-007] 使用 _SCHEMA_VERSION，禁止硬编码
+            StockFeatureSnapshot.schema_version == _SCHEMA_VERSION
+        )
+    )
 
     # ===== 组装响应 =====
     items: list[MarketStockRow] = []
@@ -521,7 +556,22 @@ async def get_market_stocks(
         if latest_price is not None and prev_close is not None and prev_close != 0:
             change_pct = round((latest_price - prev_close) / prev_close * 100, 2)
 
-        dsa_state, structure_state = state_map.get(inst_id, (None, None))
+        dsa_state, structure_state, flat_fp = state_map.get(
+            inst_id, (None, None, None)
+        )
+
+        # 修正 first_pyramid.is_stale：快照 trade_date 早于全局最新日线 trade_date 即视为过期
+        if flat_fp is not None and price_as_of_date is not None:
+            snap_td_str = flat_fp.get("fp_trade_date")
+            if snap_td_str:
+                try:
+                    snap_td = (
+                        snap_td_str if isinstance(snap_td_str, date) else date.fromisoformat(str(snap_td_str)[:10])
+                    )
+                    flat_fp["fp_is_stale"] = snap_td < price_as_of_date
+                except (TypeError, ValueError):
+                    # 日期解析失败，保留默认 False（保守不标过期）
+                    pass
 
         # 板块归属：industry 取首个行业，concepts 取全部概念
         inst_boards = boards_map.get(inst_id, [])
@@ -544,24 +594,9 @@ async def get_market_stocks(
                 latest_event_title=None,
                 latest_event_time=None,
                 is_watchlisted=base.is_watchlisted,
+                first_pyramid=flat_fp,
             )
         )
-
-    # ===== Query 6: boards_as_of — 最近一次板块同步时间 =====
-    boards_as_of_dt: datetime | None = await db.scalar(
-        select(func.max(MarketBoard.updatedAt))
-    )
-
-    # ===== Query 7: price_as_of — 全局最新日线 trade_date（不随分页变化） =====
-    price_as_of_date: date | None = await db.scalar(select(func.max(BarDaily.trade_date)))
-
-    # ===== Query 8: state_as_of — 全局最新特征快照 created_at（不随分页变化） =====
-    state_as_of_dt: datetime | None = await db.scalar(
-        select(func.max(StockFeatureSnapshot.created_at)).where(
-            # [CHANGE-20260718-007] 使用 _SCHEMA_VERSION，禁止硬编码
-            StockFeatureSnapshot.schema_version == _SCHEMA_VERSION
-        )
-    )
 
     return MarketStocksResponse(
         items=items,

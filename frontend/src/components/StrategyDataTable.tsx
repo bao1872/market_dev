@@ -88,6 +88,9 @@ export interface DataTableProps<Row> {
   tableClassName?: string
   // [Presets] - 描述: 策略 key（提供时启用视图配置保存/应用功能）
   strategyKey?: string | null
+  // [PRD §三 列表视图第一金字塔全量字段] 默认隐藏列 key 集合
+  // 仅在无 preset 加载时作为初始 hiddenColumns；preset 应用后由 preset.hiddenColumns 覆盖
+  defaultHiddenColumns?: string[]
   // [StickyHeader] - 描述: 表头 sticky 模式
   // - container: 在 .table-scroll 局部滚动容器内吸附（默认，兼容历史行为）
   // - viewport: 在页面滚动时吸附到 topbar 下方（趋势选股页使用）
@@ -450,6 +453,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     initialPageSize = 10,
     tableClassName,
     strategyKey,
+    // [PRD §三 列表视图第一金字塔全量字段] 默认隐藏列 key 集合
+    // 仅在无 preset 加载时生效；preset 应用后由 preset.hiddenColumns 覆盖
+    defaultHiddenColumns,
     stickyHeaderMode = 'container',
     onRowClick,
     activeRowKey,
@@ -476,7 +482,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
   const effectiveKeyword = externalKeyword !== undefined ? externalKeyword : globalQuery
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(initialPageSize)
-  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set())
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(
+    () => new Set(defaultHiddenColumns ?? []),
+  )
   const [columnOrder, setColumnOrder] = useState<string[] | null>(null)
   const [filterPopover, setFilterPopover] = useState<{
     columnIndex: number

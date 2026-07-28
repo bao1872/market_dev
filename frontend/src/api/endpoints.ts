@@ -1935,6 +1935,12 @@ export interface MarketStockRow {
   latest_event_title: string | null
   latest_event_time: string | null
   is_watchlisted: boolean
+  /**
+   * 第一金字塔扁平化字段（99 个 fp_ 键），来自 summary_payload.first_pyramid。
+   * None 表示无最近完成交易日快照；前端显示 "—"，不即时计算。
+   * 键分组：快照7 / 趋势18 / 结构8 / 结构事件21 / 动量13 / 动量事件9 / 筹码10 / 量能13。
+   */
+  first_pyramid: Record<string, unknown> | null
 }
 
 /** 行情列表分页响应（对齐后端 MarketStocksResponse） */
@@ -2698,13 +2704,16 @@ export async function createAfterCloseRun(
   return data
 }
 
-/** [Phase6] 仅重算今日 DSA（要求当日日线覆盖率 ≥ 90%） */
-export async function createDsaOnlyRun(
-  tradeDate: string,
+/** 强制重新执行盘后编排（非 failed 状态也可触发） */
+export async function forceAfterCloseRun(
+  runId: string,
+  restartFrom?: 'daily_ready',
 ): Promise<AfterCloseRunCreateResponse> {
+  const params = restartFrom ? { restart_from: restartFrom } : undefined
   const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    '/admin/after-close-runs/dsa-only',
-    { trade_date: tradeDate },
+    `/admin/after-close-runs/${runId}/force`,
+    undefined,
+    { params },
   )
   return data
 }
@@ -2725,16 +2734,6 @@ export async function resumeAfterCloseRun(
 ): Promise<AfterCloseRunCreateResponse> {
   const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
     `/admin/after-close-runs/${runId}/resume`,
-  )
-  return data
-}
-
-/** 强制重新执行盘后编排（非 failed 状态也可触发） */
-export async function forceAfterCloseRun(
-  runId: string,
-): Promise<AfterCloseRunCreateResponse> {
-  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    `/admin/after-close-runs/${runId}/force`,
   )
   return data
 }
