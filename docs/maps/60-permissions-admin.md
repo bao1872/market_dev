@@ -263,3 +263,78 @@ Phase 5B-2 落地 §10 候选方案中的 PA-01 三类独立 capability 授权�
 | CapabilityRoute 前端守卫 | 已核验 |
 | Fallback 推断逻辑 | 已核验 |
 | 角色组合测试矩阵（§10.7） | 部分实现 |
+
+## 12. Gate 2 PRD60 权限闭环增量（已核验，2026-07-27）
+
+Gate 2 在 Phase 5B-2 capability 模型基础上完成产品闭环：`require_any_capability` 任一检查、`require_watchlist_limit` 来源切换、邀请码三勾选 UI、管理员 per-capability 管理、前端 UI gating。
+
+### 12.1 require_any_capability（新增，已核验）
+
+- 入口：`backend/app/services/access_control_service.py require_any_capability(*capabilities)`
+- 行为：检查 `ctx.capabilities` 是否含任一指定 capability 且 active；admin 自动豁免
+- 用途：`/market` 路由允许 `self_selection` 或 `market_data` 任一进入（PA-10/PA-11）
+- 调用点：`market.py list_market_stocks`（替换原 `require_capability("self_selection")`）
+- 前端对应：`App.tsx CapabilityAnyRoute` 组件（`/market` 路由守卫）
+
+### 12.2 require_watchlist_limit（新增，已核验）
+
+- 入口：`backend/app/services/access_control_service.py require_watchlist_limit()`
+- 行为：返回 watchlist_limit 限额值，优先级：
+  1. admin → `None`（无限制）
+  2. `self_selection` capability active → 取 `capability.watchlist_limit`（PA-02）
+  3. 无 capability 行 → fallback 到 `ctx.limits["monitor_limit"]`（兼容期）
+  4. 都无 → 403
+- 替代：旧 `require_quota("monitor_limit")`（不再直接从 legacy plan limits 取值）
+- 调用点：`watchlist.py add_to_watchlist`（POST /watchlist）
+
+### 12.3 管理员 per-capability 管理 API（新增，已核验）
+
+- `GET /admin/users/{user_id}/capabilities`：查询用户三类 capability 状态
+- `POST /admin/users/{user_id}/capabilities`：授予/修改 capability（取较晚 expires_at 不降权）
+- `DELETE /admin/users/{user_id}/capabilities/{capability}`：撤销 capability
+- Service 层：`subscription_service.py grant_capability_to_user / revoke_capability_from_user`
+- Schema：`GrantCapabilityRequest`（capability + months + watchlist_limit）、`UserCapabilitiesResponse`
+- 前端：`AdminUsersPage.tsx` 用户抽屉"权限"tab（查看/授予/撤销/续期）
+
+### 12.4 邀请码弹窗三勾选 UI（新增，已核验）
+
+- 取消"套餐类型"作为主入口，改为三项勾选：`self_selection` / `market_data` / `research_replay`
+- 选择 `self_selection` 时 `watchlist_limit` 必填（管理员自由输入 1-500）
+- 统一 `grant_months` 按自然月（1-36）
+- 旧 `plan_code` 模式仍兼容（无 capabilities 时 fallback）
+
+### 12.5 前端 UI gating（新增，已核验）
+
+- `MarketWorkspacePage.tsx`：
+  - `canAccessStockDetail`（market_data 或 admin）= false 时，股票名渲染为纯文本（无按钮/箭头）
+  - `canAccessWatchlist`（self_selection 或 admin）= false 时，隐藏自选 scope 按钮 + 移除操作列
+  - 无自选权限时强制 scope=market（禁止 URL 直接访问 watchlist scope）
+- `MarketToolbar.tsx`：`canAccessWatchlist` prop 控制"自选"scope 按钮可见性
+
+### 12.6 权限矩阵（已核验，35 单元测试通过）
+
+| Capability | /market | /stock/:symbol | /watchlist | /replay |
+|---|---|---|---|---|
+| self_selection only | YES（列表+自选+盘中） | 403（按钮禁用） | YES | 403 |
+| market_data only | YES（列表+详情） | YES | 403（隐藏） | 403 |
+| research_replay only | 403 | 403 | 403 | YES |
+| all three | YES | YES | YES | YES |
+| admin | YES | YES | YES | YES |
+| none | 403 | 403 | 403 | 403 |
+
+测试文件：`backend/tests/test_gate2_capability_schemas.py`（35 tests，纯单元测试不依赖 DB）
+
+### 12.7 Gate 2 核验状态
+
+| 项目 | 状态 |
+|---|---|
+| require_any_capability 后端依赖 | 已核验 |
+| require_watchlist_limit 后端依赖 | 已核验 |
+| /market API 权限切换 | 已核验 |
+| /watchlist API watchlist_limit 来源切换 | 已核验 |
+| 管理员 per-capability 管理 API | 已核验 |
+| 邀请码三勾选 UI | 已核验 |
+| 前端 UI gating（详情按钮/自选隐藏） | 已核验 |
+| 权限矩阵单元测试（35 项） | 已核验 |
+| Ruff / TSC / ESLint | 已核验 |
+| 三进程真实页面/API 验证 | 未核验（swap 阈值，延后） |

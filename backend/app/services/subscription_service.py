@@ -1013,6 +1013,185 @@ async def get_redemptions_by_user(
     return list(result.scalars().all())
 
 
+# ===== [Gate2 PRD60 PA-20] Capability 管理（管理员直接授予/撤销/修改）=====
+
+
+async def get_user_capabilities(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+) -> dict[str, dict[str, Any]]:
+    """查询用户 capabilities（per-capability 独立 expires_at/watchlist_limit）。
+
+    返回结构与 AccessContext.capabilities 对齐：
+        {"self_selection": {"active": bool, "expires_at": datetime|None, "watchlist_limit": int|None}, ...}
+
+    无 user_capabilities 行时返回空 dict（由调用方 fallback 到 plan_code 推断）。
+    """
+    from app.models.user_capability import UserCapability
+
+    stmt = select(UserCapability).where(UserCapability.user_id == user_id)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    now_utc = datetime.now(UTC)
+    capabilities: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        cap_active = row.expires_at > now_utc if row.expires_at else False
+        capabilities[row.capability] = {
+            "active": cap_active,
+            "expires_at": row.expires_at,
+            "watchlist_limit": row.watchlist_limit,
+        }
+    return capabilities
+
+
+async def grant_capability_to_user(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    capability: str,
+    months: int,
+    watchlist_limit: int | None,
+    granted_by: uuid.UUID,
+) -> dict[str, Any]:
+    """管理员直接授予/修改用户 capability（PRD60 PA-20）。
+
+    行为：
+    - 已有该 capability：取较晚的 expires_at（不降权），如提供 watchlist_limit 则更新
+    - 无该 capability：新建行，source='admin_grant'，granted_by=管理员 ID
+    - expires_at 按 grant_months 自然月计算（PA-03），从 now 起
+
+    Args:
+        db: 异步数据库会话
+        user_id: 目标用户 ID
+        capability: 权限类型 self_selection/market_data/research_replay
+        months: 自然月有效期（1-36）
+        watchlist_limit: 自选数量上限（仅 self_selection 必填）
+        granted_by: 管理员 user_id
+
+    Returns:
+        更新后的 capability 状态 dict（与 AccessContext.capabilities[cap] 对齐）
+
+    Raises:
+        ValueError: capability 非法或 self_selection 未提供 watchlist_limit
+    """
+    from app.models.user_capability import ALL_CAPABILITIES, UserCapability
+
+    if capability not in ALL_CAPABILITIES:
+        raise ValueError(f"无效 capability: {capability}，允许: {ALL_CAPABILITIES}")
+    if capability == "self_selection" and watchlist_limit is None:
+        raise ValueError("self_selection capability 必须指定 watchlist_limit（PA-02）")
+    if capability != "self_selection" and watchlist_limit is not None:
+        raise ValueError(f"{capability} 不支持 watchlist_limit（仅 self_selection）")
+    if months < 1 or months > 36:
+        raise ValueError(f"months 必须在 1-36 之间，当前: {months}")
+
+    now_utc = datetime.now(UTC)
+    new_expires_at = now_utc + relativedelta(months=months)
+
+    # 查询是否已有该 capability
+    existing = await db.execute(
+        select(UserCapability).where(
+            UserCapability.user_id == user_id,
+            UserCapability.capability == capability,
+        )
+    )
+    existing_row = existing.scalar_one_or_none()
+
+    if existing_row:
+        # 已有：取较晚的 expires_at（不降权），更新 watchlist_limit
+        existing_row.expires_at = max(existing_row.expires_at, new_expires_at)
+        if watchlist_limit is not None:
+            existing_row.watchlist_limit = watchlist_limit
+        existing_row.granted_by = granted_by
+        existing_row.source = "admin_grant"
+        await db.flush()
+        row = existing_row
+    else:
+        # 新建
+        new_cap = UserCapability(
+            user_id=user_id,
+            capability=capability,
+            watchlist_limit=watchlist_limit,
+            granted_at=now_utc,
+            expires_at=new_expires_at,
+            source="admin_grant",
+            granted_by=granted_by,
+        )
+        db.add(new_cap)
+        await db.flush()
+        row = new_cap
+
+    cap_active = row.expires_at > now_utc if row.expires_at else False
+    return {
+        "active": cap_active,
+        "expires_at": row.expires_at,
+        "watchlist_limit": row.watchlist_limit,
+    }
+
+
+async def revoke_capability_from_user(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    capability: str,
+) -> bool:
+    """管理员撤销用户 capability（PRD60 PA-20）。
+
+    行为：硬删除 user_capabilities 行（撤销即失去该 capability）。
+    旧 plan_code fallback 仍可能为用户提供该 capability（兼容期），
+    若需完全禁止，管理员应同时调整 subscription 状态。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 目标用户 ID
+        capability: 权限类型 self_selection/market_data/research_replay
+
+    Returns:
+        True 如果删除了行；False 如果原本就没有该 capability 行
+
+    Raises:
+        ValueError: capability 非法
+    """
+    from app.models.user_capability import ALL_CAPABILITIES, UserCapability
+
+    if capability not in ALL_CAPABILITIES:
+        raise ValueError(f"无效 capability: {capability}，允许: {ALL_CAPABILITIES}")
+
+    existing = await db.execute(
+        select(UserCapability).where(
+            UserCapability.user_id == user_id,
+            UserCapability.capability == capability,
+        )
+    )
+    existing_row = existing.scalar_one_or_none()
+    if existing_row is None:
+        return False
+
+    await db.delete(existing_row)
+    await db.flush()
+    return True
+
+
+async def list_subscribers_with_capabilities(
+    db: AsyncSession,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """查询订阅账户列表（含 capabilities，PRD60 PA-01）。
+
+    在 list_subscribers 基础上追加 capabilities 字段，避免修改原函数签名。
+    """
+    members, total = await list_subscribers(db=db, limit=limit, offset=offset)
+    for member in members:
+        user_id = member["user_id"]
+        if isinstance(user_id, str):
+            try:
+                user_id = uuid.UUID(user_id)
+            except ValueError:
+                pass
+        member["capabilities"] = await get_user_capabilities(db, user_id)
+    return members, total
+
+
 if __name__ == "__main__":
     # 自测入口：验证邀请码生成与哈希
     code = _generate_invite_code()

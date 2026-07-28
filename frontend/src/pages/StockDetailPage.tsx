@@ -226,17 +226,18 @@ export default function StockDetailPage() {
   // 详情页专属飞书投递
   const feishu = useStockDetailFeishu({ instrumentId })
 
-  // 来源徽章：根据 origin 显示"行情来源/自选来源/选股结果/直接访问"
-  // P0-2: direct 访问不得显示"自选来源"，必须独立显示"直接访问"
-  // CHANGE-20260713-009: sourceListKind=market → "行情来源"（来自 /market?scope=market）
-  // sourceListKind=watchlist + source=selection → "选股结果"（来自 /screener）
-  // sourceListKind=watchlist + source=watchlist → "自选来源"（来自 /market?scope=watchlist）
-  // origin=direct → "直接访问"（深链/书签/通知，无来源列表）
-  const sourceBadge = sourceCtxV2.origin === 'direct'
-    ? '直接访问'
-    : detailActions.sourceListKind === 'market'
-      ? '行情来源'
-      : (source === 'selection' ? '选股结果' : '自选来源')
+  // [Gate1] 来源徽章：基于 sourceCtxV2.origin（URL 唯一真源）+ sourceContextInvalid
+  // 禁止 detailActions.sourceListKind 二次推导（曾导致 missing_origin 时误显示"自选来源"）
+  // invalid → "来源失效"（不显示"自选来源"，避免误导）
+  // direct → "直接访问"（不映射为 watchlist）
+  // market → "行情来源"；watchlist → "自选来源"
+  const sourceBadge = sourceContextInvalid
+    ? '来源失效'
+    : sourceCtxV2.origin === 'direct'
+      ? '直接访问'
+      : sourceCtxV2.origin === 'market'
+        ? '行情来源'
+        : '自选来源'
 
   // [P0-1] 是否显示左栏来源列表：capture 模式和 direct 访问时不显示
   // direct 访问无来源上下文，左栏隐藏，布局切换单列
@@ -577,7 +578,7 @@ export default function StockDetailPage() {
             data-testid="detail-source-list-loading"
           >
             <div className="tv-source-list-header">
-              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+              {sourceBadge}
             </div>
             <div className="tv-source-list-placeholder">加载中…</div>
           </aside>
@@ -588,7 +589,7 @@ export default function StockDetailPage() {
             data-testid="detail-source-list-error"
           >
             <div className="tv-source-list-header">
-              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+              {sourceBadge}
             </div>
             <div className="tv-source-list-placeholder">来源数据加载失败</div>
           </aside>
@@ -600,7 +601,7 @@ export default function StockDetailPage() {
             data-invalid-reason={sourceCtxV2.invalidReason}
           >
             <div className="tv-source-list-header">
-              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+              {sourceBadge}
             </div>
             <div className="tv-source-list-placeholder">
               {INVALID_REASON_LABELS[sourceCtxV2.invalidReason] ?? '来源上下文失效'}
@@ -613,10 +614,10 @@ export default function StockDetailPage() {
             data-testid="detail-source-list-empty"
           >
             <div className="tv-source-list-header">
-              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+              {sourceBadge}
             </div>
             <div className="tv-source-list-placeholder">
-              {detailActions.sourceListKind === 'market' ? '暂无选股结果' : '暂无自选股票'}
+              {sourceCtxV2.origin === 'market' ? '暂无选股结果' : '暂无自选股票'}
             </div>
           </aside>
         )}
@@ -627,7 +628,7 @@ export default function StockDetailPage() {
             ref={sourceListRef}
           >
             <div className="tv-source-list-header">
-              {detailActions.sourceListKind === 'market' ? '行情来源' : '自选来源'}
+              {sourceBadge}
             </div>
             {detailActions.sourceStocks.map((s) => (
               <div

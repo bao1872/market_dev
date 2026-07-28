@@ -147,8 +147,8 @@ from fastapi import HTTPException  # noqa: E402
 from app.schemas.market_stocks import MarketBoardsResponse, MarketStocksResponse  # noqa: E402
 from app.services.access_control_service import (  # noqa: E402
     AccessContext,
+    require_any_capability,
     require_authenticated,
-    require_capability,
 )
 from app.services.market_stocks_service import get_market_stocks  # noqa: E402
 
@@ -173,7 +173,7 @@ async def list_market_stocks(
         description="状态筛选（Phase 4 实现）：up=上行, down=下行, sideways=震荡",
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability("self_selection")),
+    ctx: AccessContext = Depends(require_any_capability("self_selection", "market_data")),
 ) -> MarketStocksResponse:
     """查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
 

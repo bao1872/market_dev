@@ -36,6 +36,9 @@ interface MarketToolbarProps {
     | undefined
   // placeholder（缺省时使用默认文案）
   searchPlaceholder?: string
+  // [Gate2 PRD60 PA-11] 是否可访问自选（self_selection capability 或 admin）
+  // false 时隐藏"自选"scope 按钮（仅 market_data 用户不显示自选入口）
+  canAccessWatchlist?: boolean
 }
 
 export function MarketToolbar({
@@ -49,6 +52,7 @@ export function MarketToolbar({
   onConceptChange,
   boards,
   searchPlaceholder = '搜索股票代码/名称/拼音首字母',
+  canAccessWatchlist = true,
 }: MarketToolbarProps) {
   // 顶部搜索框本地输入（与 industry/concept 不同，搜索框仍保留本地 state）
   const [keywordInput, setKeywordInput] = useState(keyword)
@@ -92,13 +96,15 @@ export function MarketToolbar({
         >
           行情
         </button>
-        <button
-          className={clsx(styles.scopeTab, scope === 'watchlist' && styles.scopeTabActive)}
-          onClick={() => onScopeChange('watchlist')}
-          aria-label="自选"
-        >
-          自选
-        </button>
+        {canAccessWatchlist && (
+          <button
+            className={clsx(styles.scopeTab, scope === 'watchlist' && styles.scopeTabActive)}
+            onClick={() => onScopeChange('watchlist')}
+            aria-label="自选"
+          >
+            自选
+          </button>
+        )}
       </div>
       <input
         type="search"

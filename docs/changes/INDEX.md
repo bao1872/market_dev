@@ -19,6 +19,7 @@
 | CHANGE-20260727-003 | 2026-07-27 | 仓库边界与本地运行 | runtime | 运行体系 | 进行中 | SR-01～SR-62 | `maps/80-system-runtime.md` |
 | CHANGE-20260727-004 | 2026-07-27 | 第一金字塔本地根路由 | behavior | 量化模型 | 进行中 | QM-01～QM-43 | `maps/20-quant-model.md` |
 | CHANGE-20260727-005 | 2026-07-27 | Phase 5B-2 权限模型与部署脚本 | behavior | 权限/部署 | 进行中 | PA-01～PA-31 | `maps/60-permissions-admin.md`、`maps/80-system-runtime.md` |
+| CHANGE-20260727-006 | 2026-07-27 | Gate 2 权限闭环（require_any_capability + 邀请码三勾选 + UI gating） | behavior | 权限 | 已完成（代码+测试+lint） | PA-01/PA-02/PA-10/PA-11/PA-13/PA-20 | `maps/60-permissions-admin.md` §12 |
 
 ## 3. 状态说明
 

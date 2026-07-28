@@ -5,6 +5,8 @@
   路径保留 V1.6 遗留命名，语义等价于 Subscription 状态响应
 - RenewSuccessResponse: 邀请码续期成功响应（membership_status 为 V1.6 遗留字段名）
 - MemberListItem: 管理员订阅账户列表项（membership_status 为 V1.6 遗留字段名）
+- GrantCapabilityRequest: 管理员直接授予/修改用户 capability 请求（PRD60 PA-20，Gate2）
+- CapabilityInfoResponse: 单个 capability 状态响应（active/expires_at/watchlist_limit）
 """
 
 from __future__ import annotations
@@ -12,7 +14,10 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# [Gate2 PRD60 PA-01] 三类独立 capability 固定值（与 user_capability.ALL_CAPABILITIES 对齐）
+_VALID_CAPABILITIES = {"self_selection", "market_data", "research_replay"}
 
 
 class MembershipResponse(BaseModel):
@@ -37,6 +42,20 @@ class RenewSuccessResponse(BaseModel):
     remaining_days: int = Field(..., description="剩余天数")
 
 
+class CapabilityInfoResponse(BaseModel):
+    """[Gate2 PRD60] 单个 capability 状态响应（与 AccessContext.capabilities 对齐）。
+
+    字段语义：
+    - active: 是否有效（expires_at > now）
+    - expires_at: 过期时间（per-capability 独立自然月，PA-03）
+    - watchlist_limit: 自选数量上限（仅 self_selection 使用；其他 capability 为 null）
+    """
+
+    active: bool = Field(..., description="是否有效")
+    expires_at: datetime | None = Field(None, description="过期时间")
+    watchlist_limit: int | None = Field(None, description="自选数量上限（仅 self_selection）")
+
+
 class MemberListItem(BaseModel):
     """订阅账户列表项。"""
 
@@ -51,6 +70,12 @@ class MemberListItem(BaseModel):
     remaining_days: int | None = Field(None, description="剩余天数")
     renewal_count: int = Field(..., description="累计续期次数")
     created_at: datetime = Field(..., description="用户创建时间")
+    # [Gate2 PRD60 PA-01] 三类独立 capability 状态（per-capability 独立 expires_at）
+    # 旧用户无 user_capabilities 行时为空 dict（fallback 到 plan_code 推断）
+    capabilities: dict[str, CapabilityInfoResponse] = Field(
+        default_factory=dict,
+        description="三类独立 capability 状态",
+    )
 
 
 class GrantSubscriptionRequest(BaseModel):
@@ -71,6 +96,71 @@ class ChangePlanRequest(BaseModel):
 
     plan_code: str = Field(..., description="目标套餐代码 observe_20/research_50")
     grant_months: int = Field(..., ge=1, le=36, description="授予/续期自然月数（1-36）")
+
+
+class GrantCapabilityRequest(BaseModel):
+    """[Gate2 PRD60 PA-20] 管理员直接授予/修改用户 capability 请求。
+
+    管理员可通过用户抽屉直接授予或修改 capability：
+    - capability: 权限类型（self_selection/market_data/research_replay）
+    - months: 自然月有效期（PA-03）
+    - watchlist_limit: 自选数量上限（仅 self_selection 必填，PA-02）
+
+    已有该 capability 时取较晚的 expires_at（不降权），并更新 watchlist_limit（如提供）。
+    """
+
+    capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
+    months: int = Field(default=1, ge=1, le=36, description="自然月有效期（1-36）")
+    watchlist_limit: int | None = Field(
+        None, ge=1, le=500, description="自选数量上限（仅 self_selection 必填，1-500）"
+    )
+
+    @model_validator(mode="after")
+    def _validate_capability(self) -> GrantCapabilityRequest:
+        if self.capability not in _VALID_CAPABILITIES:
+            raise ValueError(f"无效 capability: {self.capability}，允许: {_VALID_CAPABILITIES}")
+        if self.capability == "self_selection" and self.watchlist_limit is None:
+            raise ValueError("self_selection capability 必须指定 watchlist_limit（PA-02）")
+        if self.capability != "self_selection" and self.watchlist_limit is not None:
+            raise ValueError(f"{self.capability} 不支持 watchlist_limit（仅 self_selection）")
+        return self
+
+
+class UserCapabilitiesResponse(BaseModel):
+    """[Gate2 PRD60] 用户 capability 列表响应（管理员查看/授予/撤销后返回最新状态）。"""
+
+    user_id: UUID = Field(..., description="用户 ID")
+    capabilities: dict[str, CapabilityInfoResponse] = Field(
+        default_factory=dict,
+        description="三类独立 capability 状态",
+    )
+
+
+class RevokeCapabilityRequest(BaseModel):
+    """[Gate2 PRD60] 管理员撤销用户 capability 请求。"""
+
+    capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
+
+    @model_validator(mode="after")
+    def _validate_capability(self) -> RevokeCapabilityRequest:
+        if self.capability not in _VALID_CAPABILITIES:
+            raise ValueError(f"无效 capability: {self.capability}，允许: {_VALID_CAPABILITIES}")
+        return self
+
+
+# Schema 注册
+__all__ = [
+    "MembershipResponse",
+    "RenewSuccessResponse",
+    "CapabilityInfoResponse",
+    "MemberListItem",
+    "GrantSubscriptionRequest",
+    "RenewSubscriptionRequest",
+    "ChangePlanRequest",
+    "GrantCapabilityRequest",
+    "UserCapabilitiesResponse",
+    "RevokeCapabilityRequest",
+]
 
 
 class SubscriptionResponse(BaseModel):

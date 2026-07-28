@@ -777,6 +777,8 @@ export interface InviteCode {
   grant_months: number | null
   note: string | null
   created_at: string
+  /** [Gate2 PRD60 PA-20] capability 组合（新模式，可能为 null 表示旧模式） */
+  capabilities?: CapabilityGrantInput[] | null
 }
 
 /** 邀请码列表项（不含明文）+ 套餐快照 */
@@ -793,6 +795,8 @@ export interface InviteCodeListItem {
   used_by: string | null
   used_at: string | null
   usage_type: string | null
+  /** [Gate2 PRD60 PA-20] capability 组合（新模式，可能为 null 表示旧模式） */
+  capabilities?: CapabilityGrantInput[] | null
 }
 
 /** 邀请码列表响应 */
@@ -825,6 +829,8 @@ export interface MemberListItem {
   remaining_days: number | null
   renewal_count: number
   created_at: string
+  /** [Gate2 PRD60] 三类独立权限状态（与 AccessContext.capabilities 对齐） */
+  capabilities?: Record<string, UserCapabilityInfo>
 }
 
 /** 会员账户列表响应 */
@@ -948,6 +954,29 @@ export interface InviteCodeCreateRequest {
   note?: string
   plan_code?: PlanCode
   grant_months?: number
+  /** [Gate2 PRD60 PA-20] capability 组合（新模式）；提供时优先于 plan_code */
+  capabilities?: CapabilityGrantInput[]
+}
+
+/** [Gate2 PRD60 PA-20] 单个 capability 授权配置（与 backend CapabilityGrant 对齐） */
+export interface CapabilityGrantInput {
+  capability: 'self_selection' | 'market_data' | 'research_replay'
+  months: number  // 自然月有效期（1-36）
+  watchlist_limit?: number  // 仅 self_selection 必填（1-500）
+}
+
+/** [Gate2 PRD60] 管理员直接授予用户 capability 请求 */
+export interface GrantCapabilityRequest {
+  capability: 'self_selection' | 'market_data' | 'research_replay'
+  months: number  // 自然月有效期
+  watchlist_limit?: number  // 仅 self_selection 必填
+}
+
+/** [Gate2 PRD60] 用户 capability 信息（与 backend AccessContext.capabilities 对齐） */
+export interface UserCapabilityInfo {
+  active: boolean
+  expires_at: string | null
+  watchlist_limit: number | null
 }
 
 /** 管理员授予用户套餐请求 */
@@ -2090,6 +2119,45 @@ export async function adminChangeSubscriptionPlan(
   const { data } = await apiClient.post<SubscriptionResponse>(
     `/admin/users/${userId}/subscriptions/change-plan`,
     payload,
+  )
+  return data
+}
+
+/** [Gate2 PRD60] 用户 capabilities 响应 */
+export interface UserCapabilitiesResponse {
+  user_id: string
+  capabilities: Record<string, UserCapabilityInfo>
+}
+
+/** [Gate2 PRD60] 查询用户 capabilities（三类独立权限状态） */
+export async function getUserCapabilities(
+  userId: string,
+): Promise<UserCapabilitiesResponse> {
+  const { data } = await apiClient.get<UserCapabilitiesResponse>(
+    `/admin/users/${userId}/capabilities`,
+  )
+  return data
+}
+
+/** [Gate2 PRD60 PA-20] 管理员直接授予/修改用户 capability */
+export async function adminGrantCapability(
+  userId: string,
+  payload: GrantCapabilityRequest,
+): Promise<UserCapabilitiesResponse> {
+  const { data } = await apiClient.post<UserCapabilitiesResponse>(
+    `/admin/users/${userId}/capabilities`,
+    payload,
+  )
+  return data
+}
+
+/** [Gate2 PRD60 PA-20] 管理员撤销用户 capability */
+export async function adminRevokeCapability(
+  userId: string,
+  capability: 'self_selection' | 'market_data' | 'research_replay',
+): Promise<UserCapabilitiesResponse> {
+  const { data } = await apiClient.delete<UserCapabilitiesResponse>(
+    `/admin/users/${userId}/capabilities/${capability}`,
   )
   return data
 }

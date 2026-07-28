@@ -110,6 +110,33 @@ function CapabilityRoute({ capability }: { capability: string }) {
   return <Outlet />
 }
 
+// [Gate2 PRD60] CapabilityAnyRoute - 任一 capability 通过即放行
+// 用于 /market 等需要多种权限类型任一即可访问的路由
+// 如 /market 允许 self_selection（自选管理）或 market_data（行情管理）任一进入
+function CapabilityAnyRoute({ capabilities }: { capabilities: string[] }) {
+  const user = useAuthStore((s) => s.user)
+  const accessLoading = useAuthStore((s) => s.accessLoading)
+
+  const hasAny = capabilities.some((cap) => !!user?.capabilities?.[cap])
+  if (accessLoading && !hasAny) {
+    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
+  }
+
+  if (user?.is_admin) {
+    return <Outlet />
+  }
+
+  const hasActive = capabilities.some((cap) => {
+    const c = user?.capabilities?.[cap]
+    return c?.active
+  })
+  if (!hasActive) {
+    return <Navigate to="/forbidden" replace />
+  }
+
+  return <Outlet />
+}
+
 // [Phase 5B-2 PRD60 PA-01] 简易 403 页面 - 用户已登录但缺少指定 capability
 function ForbiddenPage() {
   return (
@@ -156,10 +183,11 @@ export const routeConfig: RouteObject[] = [
       {
         element: <UserAppShell />,
         children: [
-          // [Phase 5B-2 PRD60 PA-01] 三类独立 capability 守卫（替代旧 SubscriberRoute）
-          // self_selection: 自选管理+盘中监控+行情列表可见（/market）
+          // [Gate2 PRD60] /market 允许 self_selection 或 market_data 任一进入
+          // 仅 self_selection 用户可看行情列表+自选+盘中，但详情按钮禁用（API 403）
+          // 仅 market_data 用户可看行情+详情，但隐藏自选/盘中入口
           {
-            element: <CapabilityRoute capability="self_selection" />,
+            element: <CapabilityAnyRoute capabilities={['self_selection', 'market_data']} />,
             children: [
               { path: '/market', element: <MarketWorkspacePage /> },
             ],

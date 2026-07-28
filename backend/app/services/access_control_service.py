@@ -56,6 +56,8 @@ __all__ = [
     "require_feature",
     "require_quota",
     "require_capability",
+    "require_any_capability",
+    "require_watchlist_limit",
 ]
 
 
@@ -457,6 +459,104 @@ def require_capability(capability: str) -> Callable[..., Coroutine[Any, Any, Acc
         return ctx
 
     return _check_capability
+
+
+def require_any_capability(*capabilities: str) -> Callable[..., Coroutine[Any, Any, AccessContext]]:
+    """Capability 任一检查依赖工厂（PRD60 PA-01，admin 豁免）。
+
+    返回一个 FastAPI 依赖函数，检查 ctx.capabilities 是否包含任一指定 capability 且 active。
+    admin 自动豁免（所有 capability active=True）。
+
+    用途（PRD60 权限矩阵）：
+    - /market 路由允许 self_selection 或 market_data 任一进入
+      （仅 self_selection 用户可看行情列表+自选+盘中，但详情按钮禁用；
+       仅 market_data 用户可看行情+详情，但隐藏自选/盘中）
+
+    用法：
+        @router.get("/market")
+        async def list_market(ctx: AccessContext = Depends(require_any_capability("self_selection", "market_data"))): ...
+
+    Args:
+        capabilities: 权限类型列表（至少一个，self_selection/market_data/research_replay）
+
+    Returns:
+        FastAPI 依赖函数，校验通过返回原 ctx，否则 403
+
+    Raises:
+        ValueError: 未传入任何 capability
+    """
+    if not capabilities:
+        raise ValueError("require_any_capability 需要至少一个 capability")
+
+    async def _check_any_capability(
+        ctx: AccessContext = Depends(require_authenticated),
+    ) -> AccessContext:
+        """检查 ctx 是否具备任一指定 capability 且 active（admin 豁免）。"""
+        if ctx.is_admin:
+            return ctx
+        for cap in capabilities:
+            cap_info = ctx.capabilities.get(cap)
+            if cap_info is not None and cap_info.get("active"):
+                return ctx
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"需要以下权限之一: {', '.join(capabilities)}",
+        )
+
+    return _check_any_capability
+
+
+def require_watchlist_limit() -> Callable[..., Coroutine[Any, Any, int | None]]:
+    """[Gate2 PRD60 PA-02] 自选数量上限依赖（优先从 capability 取值）。
+
+    返回一个 FastAPI 依赖函数，返回 watchlist_limit 限额值：
+    - admin：返回 None（无限制）
+    - 有 self_selection capability 且 active：返回 capability 的 watchlist_limit
+    - 无 capability 行（旧用户 fallback）：返回 ctx.limits["monitor_limit"]（兼容期）
+    - 都无：返回 403
+
+    替代旧 require_quota("monitor_limit")，因为 watchlist_limit 现在从
+    self_selection capability 取值，不再从 legacy plan limits 取值（PRD60 PA-02）。
+
+    用法：
+        @router.post("/watchlist")
+        async def add_watchlist(
+            ctx: AccessContext = Depends(require_capability("self_selection")),
+            watchlist_limit: int | None = Depends(require_watchlist_limit()),
+        ): ...
+    """
+
+    async def _get_watchlist_limit(
+        ctx: AccessContext = Depends(require_authenticated),
+    ) -> int | None:
+        """返回 watchlist_limit（admin=None 无限制；member=int 限额；缺失=403）。"""
+        # admin 豁免，返回 None 表示无限制
+        if ctx.is_admin:
+            return None
+
+        # [Gate2 PRD60 PA-02] 优先从 self_selection capability 取值
+        cap_info = ctx.capabilities.get("self_selection")
+        if cap_info is not None and cap_info.get("active"):
+            limit = cap_info.get("watchlist_limit")
+            if limit is not None:
+                return int(limit)
+            # capability active 但 watchlist_limit 为 None（理论不应发生，admin_grant 时校验）
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="self_selection capability 缺少 watchlist_limit 配置",
+            )
+
+        # Fallback: 旧用户无 user_capabilities 行，从 plan limits 读取（兼容期）
+        if "monitor_limit" in ctx.limits:
+            return int(ctx.limits["monitor_limit"])
+
+        # 无 capability 且无 plan limits：拒绝
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无有效自选额度（缺少 self_selection capability 或 plan limits）",
+        )
+
+    return _get_watchlist_limit
 
 
 if __name__ == "__main__":

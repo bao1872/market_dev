@@ -38,6 +38,7 @@ import type {
   GrantSubscriptionRequest,
   RenewSubscriptionRequest,
   ChangePlanRequest,
+  GrantCapabilityRequest,
   PaginationParams,
   StructuralFactorQueryParams,
   TemporalFeaturesQueryParams,
@@ -1004,6 +1005,52 @@ export function useAdminChangeSubscriptionPlan() {
     }) => api.adminChangeSubscriptionPlan(userId, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** [Gate2 PRD60] 查询用户 capabilities（三类独立权限状态） */
+export function useUserCapabilities(userId: string | undefined, enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['admin', 'users', userId, 'capabilities'],
+    queryFn: () => api.getUserCapabilities(userId!),
+    enabled: !!userId && enabled,
+    staleTime: STALE_REALTIME,
+  })
+}
+
+/** [Gate2 PRD60 PA-20] 管理员直接授予/修改用户 capability */
+export function useAdminGrantCapability() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      userId,
+      payload,
+    }: {
+      userId: string
+      payload: GrantCapabilityRequest
+    }) => api.adminGrantCapability(userId, payload),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users', variables.userId, 'capabilities'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** [Gate2 PRD60 PA-20] 管理员撤销用户 capability */
+export function useAdminRevokeCapability() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      userId,
+      capability,
+    }: {
+      userId: string
+      capability: 'self_selection' | 'market_data' | 'research_replay'
+    }) => api.adminRevokeCapability(userId, capability),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users', variables.userId, 'capabilities'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
     },
   })

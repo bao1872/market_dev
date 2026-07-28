@@ -15,7 +15,7 @@
 // - useCreateInviteCodes：生成邀请码
 // - useRevokeInviteCode：作废邀请码
 
-import { useState, useMemo, useCallback, useEffect } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import clsx from 'clsx'
 import { useToast } from '@/store/toast'
 import {
@@ -29,6 +29,9 @@ import {
   useAdminDisableUser,
   useAdminChangeSubscriptionPlan,
   useAdminAuditLogs,
+  useUserCapabilities,
+  useAdminGrantCapability,
+  useAdminRevokeCapability,
 } from '@/hooks/useApi'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
@@ -37,6 +40,8 @@ import {
   type PlanCode,
   type PlanResponse,
   type AuditLogListItem,
+  type CapabilityGrantInput,
+  type GrantCapabilityRequest,
 } from '@/api/endpoints'
 
 // ===== 类型定义（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>）=====
@@ -199,29 +204,42 @@ export default function AdminUsersPage() {
   )
 
   const plans = plansQuery.data ?? []
-  const firstPlanCode = plans[0]?.plan_code ?? ''
   // 抽屉表单编辑状态
   const [accountStatusEdit, setAccountStatusEdit] = useState('有效')
   const [membershipStatusEdit, setMembershipStatusEdit] = useState('有效')
   const [expiresAtEdit, setExpiresAtEdit] = useState('')
   const [planCodeEdit, setPlanCodeEdit] = useState<PlanCode>('')
-  // 生成邀请码弹窗
+  // 生成邀请码弹窗 - [Gate2 PRD60 PA-20] 改为 capability 三勾选模式
   const [modalOpen, setModalOpen] = useState(false)
   const [generateCount, setGenerateCount] = useState(1)
   const [generateNote, setGenerateNote] = useState('朋友内测')
-  const [generatePlanCode, setGeneratePlanCode] = useState<PlanCode>('')
+  // capability 三勾选：self_selection/market_data/research_replay
+  const [capSelfSelection, setCapSelfSelection] = useState(true)
+  const [capMarketData, setCapMarketData] = useState(true)
+  const [capResearchReplay, setCapResearchReplay] = useState(false)
+  // self_selection 必填：watchlist_limit（管理员自由输入，1-500）
+  const [capWatchlistLimit, setCapWatchlistLimit] = useState(20)
+  // 统一 grant_months 按自然月（PA-03）
   const [generateGrantMonths, setGenerateGrantMonths] = useState(1)
   const [generatedCodes, setGeneratedCodes] = useState<InviteCode[]>([])
 
-  // 套餐加载后，默认选中第一个 plan_code（仅在未选择时）
-  useEffect(() => {
-    if (!generatePlanCode && firstPlanCode) {
-      setGeneratePlanCode(firstPlanCode)
-    }
-  }, [firstPlanCode, generatePlanCode])
-
   // 用户兑换记录（抽屉打开时按选中用户查询）
   const redemptionsQuery = useMemberRedemptions(selectedMember?.user_id)
+
+  // [Gate2 PRD60] 用户 capability 管理 hooks
+  const userCapabilitiesQuery = useUserCapabilities(
+    selectedMember?.user_id,
+    !!selectedMember,
+  )
+  const grantCapabilityMut = useAdminGrantCapability()
+  const revokeCapabilityMut = useAdminRevokeCapability()
+
+  // 抽屉内 capability 编辑表单状态（per-capability 独立）
+  const [capGrantCapability, setCapGrantCapability] = useState<
+    'self_selection' | 'market_data' | 'research_replay'
+  >('self_selection')
+  const [capGrantMonths, setCapGrantMonths] = useState(1)
+  const [capGrantWatchlistLimit, setCapGrantWatchlistLimit] = useState(20)
 
   // ===== 派生数据 =====
   const members = (membersQuery.data?.items ?? []) as MemberRow[]
@@ -345,14 +363,50 @@ export default function AdminUsersPage() {
     [revokeInviteCode, toast],
   )
 
-  /** 生成邀请码 - 提交 plan_code/grant_months/count/note（monitor_limit 由后端按 plan_code 计算） */
+  /** [Gate2 PRD60 PA-20] 生成邀请码 - 提交 capabilities 组合 + grant_months/count/note
+   * 取消"套餐类型"作为主入口，改为三勾选 self_selection/market_data/research_replay
+   * 选择 self_selection 时 watchlist_limit 必填且管理员自由输入
+   * 统一 grant_months 按自然月（PA-03）
+   * 至少需要选择一个 capability
+   */
   const handleGenerate = useCallback(() => {
+    // 构造 capabilities 列表（顺序：self_selection → market_data → research_replay）
+    const capabilities: CapabilityGrantInput[] = []
+    if (capSelfSelection) {
+      capabilities.push({
+        capability: 'self_selection',
+        months: generateGrantMonths,
+        watchlist_limit: capWatchlistLimit,
+      })
+    }
+    if (capMarketData) {
+      capabilities.push({
+        capability: 'market_data',
+        months: generateGrantMonths,
+      })
+    }
+    if (capResearchReplay) {
+      capabilities.push({
+        capability: 'research_replay',
+        months: generateGrantMonths,
+      })
+    }
+
+    if (capabilities.length === 0) {
+      toast.show('校验失败', '至少选择一项权限（自选管理/行情数据/复盘研究）')
+      return
+    }
+    if (capSelfSelection && (!capWatchlistLimit || capWatchlistLimit < 1 || capWatchlistLimit > 500)) {
+      toast.show('校验失败', '自选管理需填写自选数量上限（1-500）')
+      return
+    }
+
     createInviteCodes.mutate(
       {
         count: generateCount,
         note: generateNote,
-        plan_code: generatePlanCode,
-        grant_months: generateGrantMonths,
+        grant_months: generateGrantMonths, // 旧字段保留兼容（capabilities 优先）
+        capabilities,
       },
       {
         onSuccess: (codes) => {
@@ -370,20 +424,26 @@ export default function AdminUsersPage() {
     createInviteCodes,
     generateCount,
     generateNote,
-    generatePlanCode,
     generateGrantMonths,
+    capSelfSelection,
+    capMarketData,
+    capResearchReplay,
+    capWatchlistLimit,
     toast,
   ])
 
-  /** 打开生成弹窗，重置状态 */
+  /** 打开生成弹窗，重置状态 - [Gate2] 默认勾选 self_selection+market_data */
   const handleOpenModal = useCallback(() => {
     setGeneratedCodes([])
     setGenerateCount(1)
     setGenerateNote('朋友内测')
-    setGeneratePlanCode(firstPlanCode || '')
+    setCapSelfSelection(true)
+    setCapMarketData(true)
+    setCapResearchReplay(false)
+    setCapWatchlistLimit(20)
     setGenerateGrantMonths(1)
     setModalOpen(true)
-  }, [firstPlanCode])
+  }, [])
 
   /** 关闭生成弹窗 */
   const handleCloseModal = useCallback(() => {
@@ -447,6 +507,60 @@ export default function AdminUsersPage() {
       )
     },
     [selectedMember, changePlan, plans, toast],
+  )
+
+  // [Gate2 PRD60 PA-20] 授予/修改用户 capability（per-capability 独立 expires_at）
+  const handleGrantCapability = useCallback(() => {
+    if (!selectedMember) return
+    // self_selection 必填 watchlist_limit
+    if (capGrantCapability === 'self_selection' && (!capGrantWatchlistLimit || capGrantWatchlistLimit < 1 || capGrantWatchlistLimit > 500)) {
+      toast.show('校验失败', '自选管理需填写自选数量上限（1-500）')
+      return
+    }
+    const payload: GrantCapabilityRequest = {
+      capability: capGrantCapability,
+      months: capGrantMonths,
+      ...(capGrantCapability === 'self_selection' ? { watchlist_limit: capGrantWatchlistLimit } : {}),
+    }
+    grantCapabilityMut.mutate(
+      { userId: selectedMember.user_id, payload },
+      {
+        onSuccess: (resp) => {
+          const capInfo = resp.capabilities[capGrantCapability]
+          const expireStr = capInfo?.expires_at ? formatDate(capInfo.expires_at) : '—'
+          toast.show('权限已授予', `${capGrantCapability} 已更新，到期 ${expireStr}`)
+        },
+        onError: (err: unknown) => {
+          const axiosErr = err as { response?: { data?: { detail?: string } } }
+          const message = axiosErr.response?.data?.detail ?? '权限授予失败'
+          toast.show('授予失败', message)
+        },
+      },
+    )
+  }, [selectedMember, capGrantCapability, capGrantMonths, capGrantWatchlistLimit, grantCapabilityMut, toast])
+
+  // [Gate2 PRD60 PA-20] 撤销用户 capability
+  const handleRevokeCapability = useCallback(
+    (
+      capability: 'self_selection' | 'market_data' | 'research_replay',
+    ) => {
+      if (!selectedMember) return
+      if (!window.confirm(`确认撤销 ${capability} 权限？撤销后用户将失去该权限。`)) return
+      revokeCapabilityMut.mutate(
+        { userId: selectedMember.user_id, capability },
+        {
+          onSuccess: () => {
+            toast.show('权限已撤销', `${capability} 已撤销`)
+          },
+          onError: (err: unknown) => {
+            const axiosErr = err as { response?: { data?: { detail?: string } } }
+            const message = axiosErr.response?.data?.detail ?? '权限撤销失败'
+            toast.show('撤销失败', message)
+          },
+        },
+      )
+    },
+    [selectedMember, revokeCapabilityMut, toast],
   )
 
   // ===== 会员表列定义 =====
@@ -707,13 +821,21 @@ export default function AdminUsersPage() {
   // ===== 兑换记录时间线 =====
   const redemptions = redemptionsQuery.data ?? []
 
-  // 生成邀请码弹窗权益预览：从 plans 查询当前选中套餐的展示名与 monitor_limit
+  // [Gate2 PRD60 PA-20] 邀请码权益预览：基于勾选的 capability 组合
   const benefitPreview = useMemo(() => {
-    const contract = plans.find((p) => p.plan_code === generatePlanCode)
-    const name = contract?.display_name ?? '—'
-    const limit = contract?.monitor_limit ?? '—'
-    return `${name} · 最多${limit}只自选股 · 有效期${generateGrantMonths}个月`
-  }, [generatePlanCode, generateGrantMonths, plans])
+    const parts: string[] = []
+    if (capSelfSelection) {
+      parts.push(`自选管理（${capWatchlistLimit}只上限）`)
+    }
+    if (capMarketData) {
+      parts.push('行情数据')
+    }
+    if (capResearchReplay) {
+      parts.push('复盘研究')
+    }
+    const capText = parts.length > 0 ? parts.join(' + ') : '未选择权限'
+    return `${capText} · 有效期${generateGrantMonths}个月（自然月）`
+  }, [capSelfSelection, capMarketData, capResearchReplay, capWatchlistLimit, generateGrantMonths])
 
   // ===== 渲染 =====
   return (
@@ -936,13 +1058,19 @@ export default function AdminUsersPage() {
                 </div>
               </div>
 
-              {/* 抽屉内三 tab */}
+              {/* 抽屉内四 tab - [Gate2] 新增"权限"tab 用于 per-capability 管理 */}
               <div className="tabs drawer-tabs">
                 <div
                   className={clsx('tab', drawerTab === 'profile' && 'active')}
                   onClick={() => setDrawerTab('profile')}
                 >
                   账户
+                </div>
+                <div
+                  className={clsx('tab', drawerTab === 'capabilities' && 'active')}
+                  onClick={() => setDrawerTab('capabilities')}
+                >
+                  权限
                 </div>
                 <div
                   className={clsx('tab', drawerTab === 'membership' && 'active')}
@@ -1013,6 +1141,130 @@ export default function AdminUsersPage() {
                   <div className="notice drawer-notice">
                     手工修改到期日仅用于异常修正；正常注册和续期必须通过邀请码兑换记录完成。
                   </div>
+                </div>
+              )}
+
+              {/* [Gate2 PRD60 PA-20] 权限 tab - per-capability grant/revoke/modify */}
+              {drawerTab === 'capabilities' && (
+                <div className="tab-panel active drawer-tab-panel">
+                  {userCapabilitiesQuery.isLoading && (
+                    <div className="empty">加载权限状态中…</div>
+                  )}
+                  {userCapabilitiesQuery.isError && (
+                    <div className="empty">
+                      权限状态加载失败：
+                      {(userCapabilitiesQuery.error as Error)?.message ?? '未知错误'}
+                    </div>
+                  )}
+                  {!userCapabilitiesQuery.isLoading && !userCapabilitiesQuery.isError && (
+                    <>
+                      {/* 当前权限状态列表 */}
+                      <div className="cap-status-list">
+                        {(['self_selection', 'market_data', 'research_replay'] as const).map((cap) => {
+                          const capInfo = userCapabilitiesQuery.data?.capabilities[cap]
+                          const hasCap = !!capInfo
+                          const isActive = capInfo?.active === true
+                          return (
+                            <div key={cap} className={`cap-status-item ${isActive ? 'active' : hasCap ? 'expired' : 'none'}`}>
+                              <div className="cap-status-head">
+                                <b>{cap}</b>
+                                {hasCap ? (
+                                  <span className={`status-pill ${isActive ? 'ok' : 'off'}`}>
+                                    {isActive ? '有效' : '已过期'}
+                                  </span>
+                                ) : (
+                                  <span className="status-pill off">未授权</span>
+                                )}
+                              </div>
+                              {hasCap && (
+                                <div className="cap-status-meta">
+                                  <small>到期：{formatDate(capInfo?.expires_at ?? null)}</small>
+                                  {cap === 'self_selection' && (
+                                    <small>自选上限：{capInfo?.watchlist_limit ?? '—'} 只</small>
+                                  )}
+                                </div>
+                              )}
+                              {hasCap && (
+                                <button
+                                  className="btn small danger"
+                                  onClick={() => handleRevokeCapability(cap)}
+                                  disabled={revokeCapabilityMut.isPending}
+                                >
+                                  撤销
+                                </button>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+
+                      {/* 授予/修改 capability 表单 */}
+                      <div className="cap-grant-form">
+                        <div className="form-grid">
+                          <div className="form-row">
+                            <label className="form-label">权限类型</label>
+                            <select
+                              className="select"
+                              value={capGrantCapability}
+                              onChange={(e) => setCapGrantCapability(e.target.value as typeof capGrantCapability)}
+                            >
+                              <option value="self_selection">自选管理（self_selection）</option>
+                              <option value="market_data">行情数据（market_data）</option>
+                              <option value="research_replay">复盘研究（research_replay）</option>
+                            </select>
+                          </div>
+                          <div className="form-row">
+                            <label className="form-label">有效期月数（自然月）</label>
+                            <input
+                              className="input"
+                              type="number"
+                              min={1}
+                              max={36}
+                              value={capGrantMonths}
+                              onChange={(e) => {
+                                const v = Number(e.target.value)
+                                if (Number.isFinite(v)) {
+                                  setCapGrantMonths(Math.min(36, Math.max(1, Math.trunc(v))))
+                                }
+                              }}
+                            />
+                          </div>
+                          {capGrantCapability === 'self_selection' && (
+                            <div className="form-row">
+                              <label className="form-label">
+                                自选数量上限 <span className="required-mark">*</span>
+                              </label>
+                              <input
+                                className="input"
+                                type="number"
+                                min={1}
+                                max={500}
+                                value={capGrantWatchlistLimit}
+                                onChange={(e) => {
+                                  const v = Number(e.target.value)
+                                  if (Number.isFinite(v)) {
+                                    setCapGrantWatchlistLimit(Math.min(500, Math.max(1, Math.trunc(v))))
+                                  }
+                                }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          className="btn primary"
+                          onClick={handleGrantCapability}
+                          disabled={grantCapabilityMut.isPending}
+                        >
+                          {grantCapabilityMut.isPending ? '处理中...' : '授予/续期'}
+                        </button>
+                      </div>
+
+                      <div className="notice drawer-notice">
+                        已有该 capability 时取较晚的 expires_at（不降权），并更新 watchlist_limit（如提供）。
+                        旧 plan_code fallback 仅兼容无 cap 行用户，不覆盖已有独立授权。
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -1098,7 +1350,7 @@ export default function AdminUsersPage() {
         </div>
       )}
 
-      {/* 生成邀请码弹窗 generateInviteModal */}
+      {/* 生成邀请码弹窗 generateInviteModal - [Gate2 PRD60 PA-20] 三勾选模式 */}
       {modalOpen && (
         <div className="modal-backdrop open" onClick={handleCloseModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1106,7 +1358,7 @@ export default function AdminUsersPage() {
               <div>
                 <b>生成邀请码</b>
                 <div className="card-sub">
-                  选择套餐与有效期，兑换后按套餐开通自选额度与会员月数
+                  勾选权限组合与有效期，兑换后按 capability 独立授权（PA-20）
                 </div>
               </div>
               <button className="icon-btn" onClick={handleCloseModal}>
@@ -1116,23 +1368,69 @@ export default function AdminUsersPage() {
 
             <div className="modal-body">
               <div className="form-grid">
-                <div className="form-row">
-                  <label className="form-label">套餐类型</label>
-                  <select
-                    className="select"
-                    value={generatePlanCode}
-                    onChange={(e) => setGeneratePlanCode(e.target.value as PlanCode)}
-                    disabled={plansQuery.isLoading || plans.length === 0}
-                  >
-                    {plans.map((p) => (
-                      <option key={p.plan_code} value={p.plan_code}>
-                        {p.display_name}（最多{p.monitor_limit}只自选股）
-                      </option>
-                    ))}
-                  </select>
+                {/* [Gate2] 取消"套餐类型"主入口，改为三勾选 capability */}
+                <div className="form-row full">
+                  <label className="form-label">权限组合（至少选择一项）</label>
+                  <div className="capability-checkbox-group">
+                    <label className="capability-checkbox-item">
+                      <input
+                        type="checkbox"
+                        checked={capSelfSelection}
+                        onChange={(e) => setCapSelfSelection(e.target.checked)}
+                      />
+                      <span>
+                        <b>自选管理</b>
+                        <small>self_selection · 行情列表/自选/盘中监控</small>
+                      </span>
+                    </label>
+                    <label className="capability-checkbox-item">
+                      <input
+                        type="checkbox"
+                        checked={capMarketData}
+                        onChange={(e) => setCapMarketData(e.target.checked)}
+                      />
+                      <span>
+                        <b>行情数据</b>
+                        <small>market_data · 行情列表/个股详情</small>
+                      </span>
+                    </label>
+                    <label className="capability-checkbox-item">
+                      <input
+                        type="checkbox"
+                        checked={capResearchReplay}
+                        onChange={(e) => setCapResearchReplay(e.target.checked)}
+                      />
+                      <span>
+                        <b>复盘研究</b>
+                        <small>research_replay · 复盘入口</small>
+                      </span>
+                    </label>
+                  </div>
                 </div>
+                {/* self_selection 选中时必填 watchlist_limit（管理员自由输入，1-500） */}
+                {capSelfSelection && (
+                  <div className="form-row">
+                    <label className="form-label">
+                      自选数量上限 <span className="required-mark">*</span>
+                    </label>
+                    <input
+                      className="input"
+                      type="number"
+                      min={1}
+                      max={500}
+                      value={capWatchlistLimit}
+                      onChange={(e) => {
+                        const v = Number(e.target.value)
+                        if (Number.isFinite(v)) {
+                          setCapWatchlistLimit(Math.min(500, Math.max(1, Math.trunc(v))))
+                        }
+                      }}
+                    />
+                    <small className="form-hint">PA-02：self_selection 必填（1-500）</small>
+                  </div>
+                )}
                 <div className="form-row">
-                  <label className="form-label">有效期月数</label>
+                  <label className="form-label">有效期月数（自然月）</label>
                   <input
                     className="input"
                     type="number"
@@ -1146,6 +1444,7 @@ export default function AdminUsersPage() {
                       }
                     }}
                   />
+                  <small className="form-hint">PA-03：按自然月计算，per-capability 独立</small>
                 </div>
                 <div className="form-row">
                   <label className="form-label">生成数量</label>
@@ -1176,7 +1475,7 @@ export default function AdminUsersPage() {
               </div>
 
               <div className="notice modal-notice">
-                邀请码不绑定具体用户。兑换成功后立即标记为已使用，并记录注册/续期用途、使用者与时间。最大自选股数量由后端按套餐计算。
+                邀请码不绑定具体用户。兑换成功后按勾选的 capability 独立授权（per-capability 独立 expires_at）。旧 plan_code 字段保留兼容性，capabilities 优先。
               </div>
 
               {/* 生成后显示新码 */}

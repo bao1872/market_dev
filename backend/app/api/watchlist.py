@@ -61,7 +61,7 @@ from app.schemas.watchlist import (
 from app.services.access_control_service import (
     AccessContext,
     require_capability,
-    require_quota,
+    require_watchlist_limit,
 )
 from app.services.calendar_service import (
     get_most_recent_trading_day_async,
@@ -208,13 +208,18 @@ async def add_to_watchlist(
     payload: WatchlistAddRequest,
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_capability("self_selection")),
-    monitor_limit: int | None = Depends(require_quota("monitor_limit")),
+    monitor_limit: int | None = Depends(require_watchlist_limit()),
 ) -> WatchlistItemResponse:
     """加入自选 - 使用 AccessContext 统一权限模型校验订阅与额度。
 
+    [Gate2 PRD60 PA-02] watchlist_limit 来源切换：
+    - 优先从 self_selection capability 取值（require_watchlist_limit）
+    - 旧用户无 user_capabilities 行时 fallback 到 plan limits（兼容期）
+    - 不再直接从 legacy limits 取值
+
     权限链：
-    - require_active_subscription: 需有效订阅（admin 豁免），过期/无订阅返回 403
-    - require_quota("monitor_limit"): 返回额度值（admin=None 无限制；member=int 限额）
+    - require_capability("self_selection"): 需具备自选管理权限（admin 豁免）
+    - require_watchlist_limit(): 返回额度值（admin=None 无限制；member=int 限额）
 
     user_id 由权限上下文注入（不接受 body 中的 user_id）。
     若已存在软删除记录，则恢复 active=true 并清空 removed_at（重新加入）。

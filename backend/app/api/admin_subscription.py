@@ -45,11 +45,13 @@ from app.schemas.scheduler_job_run import (
 )
 from app.schemas.subscription import (
     ChangePlanRequest,
+    GrantCapabilityRequest,
     GrantSubscriptionRequest,
     MemberListItem,
     RenewSubscriptionRequest,
     SubscriptionRenewResponse,
     SubscriptionResponse,
+    UserCapabilitiesResponse,
 )
 from app.schemas.system_overview import SystemOverviewResponse
 from app.schemas.user import UserResponse
@@ -64,10 +66,13 @@ from app.services.subscription_service import (
     change_subscription_plan,
     generate_invite_codes,
     get_redemptions_by_user,
+    get_user_capabilities,
+    grant_capability_to_user,
     grant_subscription_to_user,
     list_invite_codes,
-    list_subscribers,
+    list_subscribers_with_capabilities,
     renew_subscription,
+    revoke_capability_from_user,
     revoke_invite_code,
     revoke_subscription,
 )
@@ -321,7 +326,10 @@ async def get_members(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> dict:
-    """查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数；MemberListItem 为 V1.6 遗留命名）。
+    """查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数/capabilities；MemberListItem 为 V1.6 遗留命名）。
+
+    [Gate2 PRD60 PA-01] capabilities 字段包含三类独立权限状态（per-capability 独立 expires_at）。
+    旧用户无 user_capabilities 行时为空 dict（fallback 到 plan_code 推断）。
 
     Args:
         limit: 分页大小
@@ -331,7 +339,7 @@ async def get_members(
     Returns:
         {items: MemberListItem[], total: int, limit: int, offset: int}
     """
-    members, total = await list_subscribers(db=db, limit=limit, offset=offset)
+    members, total = await list_subscribers_with_capabilities(db=db, limit=limit, offset=offset)
     return {
         "items": [MemberListItem(**m) for m in members],
         "total": total,
@@ -907,6 +915,139 @@ async def change_subscription_plan_endpoint(
     await db.commit()
 
     return SubscriptionResponse.model_validate(subscription)
+
+
+# ============================================================
+# [Gate2 PRD60 PA-20] Capability 管理端点（管理员直接授予/撤销/查看）
+# ============================================================
+
+
+@router.get(
+    "/users/{user_id}/capabilities",
+    response_model=UserCapabilitiesResponse,
+)
+async def get_user_capabilities_endpoint(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> UserCapabilitiesResponse:
+    """[Gate2 PRD60] 查询用户 capabilities（三类独立权限状态）。
+
+    返回 per-capability 独立的 active/expires_at/watchlist_limit。
+    旧用户无 user_capabilities 行时返回空 dict（fallback 到 plan_code 推断）。
+    """
+    # 校验用户存在
+    await _fetch_user_or_404(db, user_id)
+    capabilities = await get_user_capabilities(db, user_id)
+    return UserCapabilitiesResponse(user_id=user_id, capabilities=capabilities)
+
+
+@router.post(
+    "/users/{user_id}/capabilities",
+    response_model=UserCapabilitiesResponse,
+)
+async def grant_capability_endpoint(
+    user_id: UUID,
+    payload: GrantCapabilityRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> UserCapabilitiesResponse:
+    """[Gate2 PRD60 PA-20] 管理员直接授予/修改用户 capability。
+
+    行为：
+    - 已有该 capability：取较晚的 expires_at（不降权），如提供 watchlist_limit 则更新
+    - 无该 capability：新建行，source='admin_grant'，granted_by=管理员 ID
+    - self_selection 必须提供 watchlist_limit（PA-02）
+    - expires_at 按 months 自然月计算（PA-03）
+
+    旧 plan_code fallback 仅兼容无 cap 行用户，不覆盖已有独立授权。
+    """
+    # 校验用户存在
+    await _fetch_user_or_404(db, user_id)
+
+    try:
+        await grant_capability_to_user(
+            db=db,
+            user_id=user_id,
+            capability=payload.capability,
+            months=payload.months,
+            watchlist_limit=payload.watchlist_limit,
+            granted_by=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    await write_audit_log(
+        db=db,
+        actor_user_id=current_user.id,
+        action="user.grant_capability",
+        target_type="user_capability",
+        target_id=str(user_id),
+        after_data={
+            "capability": payload.capability,
+            "months": payload.months,
+            "watchlist_limit": payload.watchlist_limit,
+        },
+    )
+
+    # 返回该用户所有 capabilities（含刚授予的）
+    capabilities = await get_user_capabilities(db, user_id)
+    await db.commit()
+
+    return UserCapabilitiesResponse(user_id=user_id, capabilities=capabilities)
+
+
+@router.delete(
+    "/users/{user_id}/capabilities/{capability}",
+    response_model=UserCapabilitiesResponse,
+)
+async def revoke_capability_endpoint(
+    user_id: UUID,
+    capability: str,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> UserCapabilitiesResponse:
+    """[Gate2 PRD60 PA-20] 管理员撤销用户 capability。
+
+    硬删除 user_capabilities 行。旧 plan_code fallback 仍可能为用户提供该 capability（兼容期）。
+    若需完全禁止，管理员应同时调整 subscription 状态。
+    """
+    # 校验用户存在
+    await _fetch_user_or_404(db, user_id)
+
+    # 校验 capability 合法性
+    valid_caps = {"self_selection", "market_data", "research_replay"}
+    if capability not in valid_caps:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"无效 capability: {capability}，允许: {valid_caps}",
+        )
+
+    try:
+        await revoke_capability_from_user(db=db, user_id=user_id, capability=capability)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    await write_audit_log(
+        db=db,
+        actor_user_id=current_user.id,
+        action="user.revoke_capability",
+        target_type="user_capability",
+        target_id=str(user_id),
+        after_data={"capability": capability},
+    )
+
+    # 返回该用户剩余 capabilities
+    capabilities = await get_user_capabilities(db, user_id)
+    await db.commit()
+
+    return UserCapabilitiesResponse(user_id=user_id, capabilities=capabilities)
 
 
 # ============================================================

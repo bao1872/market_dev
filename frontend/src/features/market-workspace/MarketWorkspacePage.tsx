@@ -56,10 +56,19 @@ export default function MarketWorkspacePage() {
   const toast = useToast.getState()
   // 批次信息仅管理员可见（使用真实 is_admin，非 role store 视图切换）
   const isAdmin = useAuthStore((s) => s.user?.is_admin === true)
+  // [Gate2 PRD60 PA-10/11/13] 三类独立 capability 决定 UI 可见性
+  // Hooks 必须无条件调用（不能与 isAdmin 短路），再在普通 JS 层做 || 合并
+  const hasMarketData = useAuthStore((s) => !!s.user?.capabilities?.market_data?.active)
+  const hasSelfSelection = useAuthStore((s) => !!s.user?.capabilities?.self_selection?.active)
+  // - canAccessStockDetail: market_data capability（详情按钮可点击；false 时股票名仅展示文本）
+  // - canAccessWatchlist: self_selection capability（显示自选 scope + 自选操作列；false 时隐藏）
+  const canAccessStockDetail = isAdmin || hasMarketData
+  const canAccessWatchlist = isAdmin || hasSelfSelection
 
   // 从 URL 解析状态（仅 scope + selected；sort/filters/page 由 StrategyDataTable 管理）
   const urlState = useMemo(() => decodeMarketWorkspaceUrl(searchParams), [searchParams])
-  const scope: MarketScope = urlState.scope
+  // [Gate2 PRD60 PA-11] 无自选权限时强制 scope=market（禁止 watchlist scope）
+  const scope: MarketScope = (!canAccessWatchlist && urlState.scope === 'watchlist') ? 'market' : urlState.scope
   const selected = urlState.selected
 
   // 顶部搜索框 keyword（单一真源，通过 externalKeyword 注入表格）
@@ -449,17 +458,24 @@ export default function MarketWorkspacePage() {
   }, [])
 
   // 列定义：DSA 列（复用 features/trend-selection 共享模块）
-  // onNavigateToStock: 股票名称链接进入详情
-  // onToggleWatchlist + watchlistInstrumentIds + watchlistPendingIds: 自选操作列
+  // [Gate2 PRD60 PA-10/11/13] capability 决定回调传递：
+  // - canAccessStockDetail=false（仅 self_selection）：不传 onNavigateToStock，股票名渲染为纯文本
+  // - canAccessWatchlist=false（仅 market_data）：不传 onToggleWatchlist，操作列返回 null
   const columns: DataTableColumn<TrendSelectionRow>[] = useMemo(
-    () =>
-      getTrendSelectionColumns({
-        onNavigateToStock: handleNavigateToStock,
-        onToggleWatchlist: handleToggleWatchlist,
+    () => {
+      const allColumns = getTrendSelectionColumns({
+        onNavigateToStock: canAccessStockDetail ? handleNavigateToStock : undefined,
+        onToggleWatchlist: canAccessWatchlist ? handleToggleWatchlist : undefined,
         watchlistInstrumentIds,
         watchlistPendingIds,
-      }),
-    [handleNavigateToStock, handleToggleWatchlist, watchlistInstrumentIds, watchlistPendingIds],
+      })
+      // [Gate2 PRD60 PA-11] 仅 market_data 用户：无自选权限时移除操作列（避免空列占用宽度）
+      if (!canAccessWatchlist) {
+        return allColumns.filter((col) => col.key !== 'action')
+      }
+      return allColumns
+    },
+    [handleNavigateToStock, handleToggleWatchlist, watchlistInstrumentIds, watchlistPendingIds, canAccessStockDetail, canAccessWatchlist],
   )
 
   // 批次元数据（调试信息：仅 admin 可见）
@@ -488,6 +504,7 @@ export default function MarketWorkspacePage() {
         concept={concept}
         onConceptChange={handleConceptChange}
         boards={boards}
+        canAccessWatchlist={canAccessWatchlist}
       />
       <div className={styles.tableArea}>
         <div className={styles.tableWrapper}>
