@@ -32,8 +32,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision: str = "071_chip_consensus_snapshots"
 down_revision: str | None = "070_worker_heartbeat_stopped_at"
