@@ -1,0 +1,6 @@
+#!/bin/sh
+# [CHANGE-20260729-005 五.4 P0 修复] 真正可执行的周期脚本
+# 旧实现把 logrotate-nginx.conf 配置文件复制到 /etc/periodic/15min/，
+# busybox crond 会尝试以 sh 执行它，但因配置文件不是合法 sh 脚本而静默失败。
+# 本脚本只调用 logrotate 读取配置文件，符合 busybox crond 对 periodic 脚本的约定。
+exec /usr/sbin/logrotate /etc/logrotate.d/nginx

@@ -101,13 +101,20 @@ assert len(FP_ALL_KEYS) == 99, f"FP_ALL_KEYS 应为 99 键，实际 {len(FP_ALL_
 # [CHANGE-20260729-005] 99字段全部真实支持筛选排序
 # =============================================================================
 # 数据源类型（source）决定查询时从哪里取值：
-#   "flat"    → summary_payload.first_pyramid_flat.<fp_key>（扁平对象，写入时生成）
-#   "chip"    → stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key>（独立筹码表）
-#   "column"  → StockFeatureSnapshot 真实列（trade_date/source_run_id/created_at）
-#   "literal" → 常量（如 fp_data_source 固定为 "feature_snapshot"）
+#   "flat"     → summary_payload.first_pyramid_flat.<fp_key>（扁平对象，写入时生成）
+#   "chip"     → stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key>（独立筹码表）
+#   "column"   → StockFeatureSnapshot 真实列（trade_date/source_run_id/created_at）
+#   "literal"  → 常量（如 fp_data_source 固定为 "feature_snapshot"）
+#   "computed" → SQL 计算字段（如 fp_is_stale/fp_chip_available 动态判定）
 #
-# 二.4 要求：筹码字段不得从 review-core 的 first_pyramid.chipConsensus 读取；
-#           改为关联 stock_chip_consensus_snapshots 表（chip_flat 扁平对象）。
+# [P0 收口 2026-07-29] 二.2/二.3/二.4 要求：
+# - fp_trade_date 改用 snapshot.trade_date 真实列（不再读 first_pyramid.tradeDate）
+# - fp_is_stale 改为 computed：latest_snap.trade_date < MAX(bars_daily.trade_date)
+#   数据库筛选/排序/页面展示必须同口径
+# - fp_chip_available 改为 computed：只在存在与当前 core 严格匹配（五元组）
+#   且 chip 维度 available=true 的 succeeded 记录时为 true，不从 review-core.chipConsensus 读取
+# - 筹码字段（10 个）不得从 review-core 的 first_pyramid.chipConsensus 读取；
+#   改为关联 stock_chip_consensus_snapshots 表（chip_flat 扁平对象）。
 #
 # 所有 99 字段均有 queryable source，禁止因 json_path 为空返回 422。
 # =============================================================================
@@ -124,6 +131,11 @@ _SOURCE_FLAT = "flat"
 _SOURCE_CHIP = "chip"
 _SOURCE_COLUMN = "column"
 _SOURCE_LITERAL = "literal"
+_SOURCE_COMPUTED = "computed"
+
+# computed 字段子类型
+_COMPUTED_IS_STALE = "is_stale"
+_COMPUTED_CHIP_AVAILABLE = "chip_available"
 
 # 默认操作符按 data_type 推导
 _DEFAULT_OPS: dict[str, frozenset[str]] = {
@@ -202,21 +214,52 @@ def _spec_literal(
     }
 
 
+def _spec_computed(
+    fp_key: str,
+    data_type: str,
+    computed_kind: str,
+    *,
+    operators: set[str] | None = None,
+) -> dict[str, Any]:
+    """computed 源：SQL 计算字段（如 fp_is_stale, fp_chip_available）。
+
+    [P0 收口 2026-07-29] 不读取存储值，由 SQL 表达式动态计算：
+    - is_stale: latest_snap.trade_date < MAX(bars_daily.trade_date)
+    - chip_available: chip 严格五元组匹配 AND chip_payload.chip.available=true
+    """
+    return {
+        "fp_key": fp_key,
+        "data_type": data_type,
+        "source": _SOURCE_COMPUTED,
+        "computed_kind": computed_kind,
+        "operators": frozenset(operators) if operators else _DEFAULT_OPS[data_type],
+    }
+
+
 # 99 字段规格表（与 FP_ALL_KEYS 严格一一对应）
-# [CHANGE-20260729-005] 全部 99 字段均有 queryable source，支持服务端 filter/sort
+# [P0 收口 2026-07-29] 全部 99 字段均有 queryable source，支持服务端 filter/sort
 # - 84 非 chip 字段：source=flat（从 summary_payload.first_pyramid_flat.<fp_key> 读取）
 # - 10 chip 字段：source=chip（从 stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key> 读取）
-# - 5 元数据字段：source=column 或 literal（fp_calculated_at/fp_run_id 用真实列，fp_data_source 用常量）
+# - 3 元数据字段：source=column（trade_date/created_at/source_run_id 真实列）
+# - 2 动态计算字段：source=computed（fp_is_stale, fp_chip_available）
+# - 1 常量字段：source=literal（fp_data_source="feature_snapshot"）
 FP_QUERY_FIELD_SPECS: dict[str, dict[str, Any]] = {
     # ===== 快照 (7) =====
-    "fp_trade_date": _spec_flat("fp_trade_date", "datetime"),
+    # [P0 收口 2026-07-29 二.2] fp_trade_date 改用 snapshot.trade_date 真实列
+    "fp_trade_date": _spec_column("fp_trade_date", "datetime", "trade_date"),
     "fp_data_source": _spec_literal("fp_data_source", "text", "feature_snapshot", operators={"eq", "empty", "not_empty"}),
-    "fp_is_stale": _spec_flat("fp_is_stale", "boolean"),
+    # [P0-6 修复] fp_is_stale 改为 computed：snap.trade_date < MAX(bar_daily.trade_date)
+    # 数据库筛选/排序/页面展示同口径
+    "fp_is_stale": _spec_computed("fp_is_stale", "boolean", _COMPUTED_IS_STALE),
     "fp_calculated_at": _spec_column("fp_calculated_at", "datetime", "created_at"),
     "fp_run_id": _spec_column("fp_run_id", "text", "source_run_id", operators={"eq", "empty", "not_empty"}),
     "fp_summary": _spec_flat("fp_summary", "text", operators={"contains", "not_contains", "empty", "not_empty"}),
-    # fp_chip_available 是快照元数据（非筹码数据字段），从 flat 读取；10 个筹码数据字段才用 source=chip
-    "fp_chip_available": _spec_flat("fp_chip_available", "boolean", operators={"eq", "empty", "not_empty"}),
+    # [P0-4 修复] fp_chip_available 改为 computed：只在存在严格匹配（五元组）
+    # 且 chip 维度 available=true 的 succeeded 记录时为 true
+    "fp_chip_available": _spec_computed(
+        "fp_chip_available", "boolean", _COMPUTED_CHIP_AVAILABLE,
+        operators={"eq", "empty", "not_empty"},
+    ),
 
     # ===== 趋势 (18) =====
     "fp_trend_direction": _spec_flat("fp_trend_direction", "enum"),
@@ -565,7 +608,10 @@ def flatten_first_pyramid(
     result["fp_calculated_at"] = calculated_at
     result["fp_run_id"] = str(run_id) if run_id is not None else None
     result["fp_summary"] = first_pyramid.get("statusText")
-    result["fp_chip_available"] = first_pyramid.get("chipConsensus") is not None
+    # [P0-4 修复 2026-07-29 二.4] fp_chip_available 改为 computed 表达式
+    # 不再从 review-core 的 chipConsensus 读取，由调用方（list/detail 服务）按
+    # 严格五元组匹配的 chip 表记录存在性 + chip_payload.chip.available=true 计算
+    # 此处保留 None 默认值，禁止从 chipConsensus 推断
 
     # ===== 趋势 (18) =====
     trend = first_pyramid.get("trend") or {}

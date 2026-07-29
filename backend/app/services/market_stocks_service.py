@@ -36,6 +36,7 @@ from sqlalchemy import (
     ColumnElement,
     Float,
     Integer,
+    Text,
     case,
     cast,
     func,
@@ -43,6 +44,7 @@ from sqlalchemy import (
     or_,
     select,
     true,
+    tuple_,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,6 +58,7 @@ from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
 from app.models.watchlist import UserWatchlistItem
 from app.repositories.board_filter_helper import build_board_filter_conditions
+from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
 from app.schemas.market_stocks import (
     MarketBoardItem,
     MarketBoardsResponse,
@@ -69,6 +72,7 @@ from app.services.board_sync_service import get_instrument_boards_batch
 # 消费查询必须用同一常量，否则新快照读不到、as_of 永远为 None。
 from app.services.feature_snapshot_service import _SCHEMA_VERSION
 from app.services.first_pyramid_flatten import (
+    FP_CHIP_KEYS,
     FP_QUERY_FIELD_SPECS,
     FpFilterSpec,
     FpSortSpec,
@@ -218,6 +222,7 @@ def _build_order_by(
     fp_sort_spec: FpSortSpec | None = None,
     snap_subq: Any | None = None,
     chip_subq: Any | None = None,
+    max_trade_date_subq: Any | None = None,
 ) -> list[ColumnElement]:
     """构建 ORDER BY 列表。
 
@@ -233,7 +238,9 @@ def _build_order_by(
 
     # fp_sort 优先于 sort（第一金字塔专用排序）
     if fp_sort_spec is not None:
-        fp_sort_expr = _build_fp_sort_expression(fp_sort_spec, snap_subq, chip_subq)
+        fp_sort_expr = _build_fp_sort_expression(
+            fp_sort_spec, snap_subq, chip_subq, max_trade_date_subq,
+        )
         order_col = (
             fp_sort_expr.desc().nullslast() if fp_sort_spec.direction == "desc"
             else fp_sort_expr.asc().nullslast()
@@ -350,19 +357,34 @@ def _parse_fp_sort(fp_sort: str | None) -> FpSortSpec | None:
 # =============================================================================
 
 def _needs_snap_lateral(fp_filter_specs: list[FpFilterSpec], fp_sort_spec: FpSortSpec | None) -> bool:
-    """判断是否需要 snapshot LATERAL JOIN（有 flat/column source 字段参与筛选或排序）。"""
+    """判断是否需要 snapshot LATERAL JOIN（有 flat/column/computed source 字段参与筛选或排序）。"""
     keys = [f.fp_key for f in fp_filter_specs]
     if fp_sort_spec:
         keys.append(fp_sort_spec.fp_key)
-    return any(FP_QUERY_FIELD_SPECS[k]["source"] in ("flat", "column") for k in keys)
+    return any(
+        FP_QUERY_FIELD_SPECS[k]["source"] in ("flat", "column", "computed")
+        for k in keys
+    )
 
 
 def _needs_chip_lateral(fp_filter_specs: list[FpFilterSpec], fp_sort_spec: FpSortSpec | None) -> bool:
-    """判断是否需要 chip LATERAL JOIN（有 chip source 字段参与筛选或排序）。"""
+    """判断是否需要 chip LATERAL JOIN。
+
+    [P0-2 修复] chip LATERAL 必须严格五元组匹配，且以下任一条件成立时才构建：
+    - chip source 字段参与 filter/sort
+    - fp_chip_available computed 字段参与 filter/sort（需 chip 存在性判定）
+    """
     keys = [f.fp_key for f in fp_filter_specs]
     if fp_sort_spec:
         keys.append(fp_sort_spec.fp_key)
-    return any(FP_QUERY_FIELD_SPECS[k]["source"] == "chip" for k in keys)
+    for k in keys:
+        spec = FP_QUERY_FIELD_SPECS[k]
+        if spec["source"] == "chip":
+            return True
+        if (spec["source"] == "computed"
+                and spec.get("computed_kind") == "chip_available"):
+            return True
+    return False
 
 
 def _build_snap_lateral():
@@ -386,8 +408,20 @@ def _build_snap_lateral():
     )
 
 
-def _build_chip_lateral():
-    """构建最新 succeeded chip 的 LATERAL 子查询。"""
+def _build_chip_lateral(snap_subq: Any):
+    """构建严格五元组匹配的 chip LATERAL 子查询。
+
+    [P0-2 修复 2026-07-29] 禁止仅按股票取最新 chip。必须严格匹配：
+        instrument_id == Instrument.id
+        AND trade_date == latest_snap.trade_date
+        AND core_run_id == latest_snap.source_run_id
+        AND algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION
+        AND status == 'succeeded'
+    仅匹配最新 core 快照同交易日、同 run 的 succeeded chip，禁止挂旧 run chip。
+
+    Args:
+        snap_subq: latest_snap LATERAL 子查询（已加入 FROM 后可被引用）
+    """
     return (
         select(
             StockChipConsensusSnapshot.id,
@@ -401,25 +435,40 @@ def _build_chip_lateral():
         .where(
             StockChipConsensusSnapshot.instrument_id == Instrument.id,
             StockChipConsensusSnapshot.status == "succeeded",
+            StockChipConsensusSnapshot.algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION,
+            # 五元组严格匹配（trade_date + core_run_id 必须与 latest_snap 一致）
+            StockChipConsensusSnapshot.trade_date == snap_subq.c.trade_date,
+            StockChipConsensusSnapshot.core_run_id == snap_subq.c.source_run_id,
         )
-        .order_by(StockChipConsensusSnapshot.trade_date.desc())
+        .order_by(StockChipConsensusSnapshot.created_at.desc())
         .limit(1)
         .lateral("latest_chip")
     )
+
+
+def _build_max_trade_date_subquery():
+    """构建 MAX(bar_daily.trade_date) 标量子查询，用于 fp_is_stale 计算。
+
+    [P0-6 修复 2026-07-29] 不再使用 flat 中存储的 is_stale 占位值，
+    改为 SQL 表达式：latest_snap.trade_date < MAX(bar_daily.trade_date)。
+    """
+    return select(func.max(BarDaily.trade_date)).scalar_subquery()
 
 
 def _build_fp_value_expr(
     fp_key: str,
     snap_subq: Any | None = None,
     chip_subq: Any | None = None,
+    max_trade_date_subq: Any | None = None,
 ) -> ColumnElement:
     """构建 fp 字段取值表达式（基于 LATERAL JOIN 列引用）。
 
-    [CHANGE-20260729-005] 根据 source 类型从不同位置取值：
-    - flat: snap_subq.c.summary_payload["first_pyramid_flat"][fp_key]
-    - chip: chip_subq.c.chip_payload["chip_flat"][fp_key]
-    - column: snap_subq.c.<column_name>
-    - literal: literal(value)
+    [P0 收口 2026-07-29] 根据 source 类型从不同位置取值：
+    - flat: snap_subq.c.summary_payload["first_pyramid_flat"][fp_key]（JSON 路径）
+    - chip: chip_subq.c.chip_payload["chip_flat"][fp_key]（JSON 路径）
+    - column: snap_subq.c.<column_name>（真实列，禁止 .astext）
+    - literal: literal(value)（常量表达式）
+    - computed: 动态 SQL 表达式（is_stale / chip_available）
     """
     spec = FP_QUERY_FIELD_SPECS[fp_key]
     source = spec["source"]
@@ -438,34 +487,77 @@ def _build_fp_value_expr(
         return getattr(snap_subq.c, spec["column"])
     elif source == "literal":
         return literal(spec["literal_value"])
+    elif source == "computed":
+        computed_kind = spec["computed_kind"]
+        if computed_kind == "is_stale":
+            # [P0-6] snap.trade_date < MAX(bar_daily.trade_date)
+            if snap_subq is None or max_trade_date_subq is None:
+                raise ValueError(
+                    f"fp_key '{fp_key}' (computed=is_stale) requires snap LATERAL JOIN + max_trade_date_subquery"
+                )
+            return snap_subq.c.trade_date < max_trade_date_subq
+        elif computed_kind == "chip_available":
+            # [P0-4] chip 存在（严格五元组匹配）AND chip_payload.chip.available=true
+            if chip_subq is None:
+                # 无 chip JOIN 时固定返回 False（无匹配可能）
+                return literal(False)
+            return (chip_subq.c.id.isnot(None)) & (
+                chip_subq.c.chip_payload["chip"]["available"].astext == "true"
+            )
+        else:
+            raise ValueError(f"Unknown computed_kind '{computed_kind}' for fp_key '{fp_key}'")
     else:
         raise ValueError(f"Unknown source '{source}' for fp_key '{fp_key}'")
 
 
-def _cast_fp_value(expr: ColumnElement, data_type: str) -> ColumnElement:
-    """按 data_type 转换 JSON 取值为可比较类型。
+def _cast_fp_value(expr: ColumnElement, data_type: str, source: str) -> ColumnElement:
+    """按 data_type 和 source 转换为可比较/可排序类型。
 
-    [CHANGE-20260729-005 二.6] 布尔字段 cast 为 Boolean，禁止 text 与 bool 比较。
+    [P0-1 修复 2026-07-29] 严格按 source 分别处理：
+    - flat/chip: JSON 路径取值，先 .astext 再 cast 到目标类型
+    - column: 真实列，已具备类型；text 类型（如 UUID）cast 为 Text；datetime/number 直接使用
+    - literal: literal() 已带类型，直接使用
+    - computed: 表达式已带类型（boolean），直接使用
+    禁止对 column/literal/computed 调用 .astext（会破坏 PostgreSQL 类型推断）。
     """
-    if data_type in ("number", "percent"):
-        return cast(expr, Float)
-    if data_type == "boolean":
-        return cast(expr, Boolean)
-    return expr.astext
+    if source in ("flat", "chip"):
+        # JSON 路径取值 → astext → cast 到目标类型
+        if data_type in ("number", "percent"):
+            return cast(expr.astext, Float)
+        if data_type == "boolean":
+            return cast(expr.astext, Boolean)
+        # text / datetime / enum：astext 返回字符串
+        return expr.astext
+    if source == "column":
+        # 真实列已具备类型
+        if data_type == "text":
+            # UUID 列需 cast 为 Text 以便字符串比较
+            return cast(expr, Text)
+        # datetime / number / boolean：直接使用列
+        return expr
+    if source == "literal":
+        # literal(value) 已具备类型，直接使用
+        return expr
+    if source == "computed":
+        # computed 表达式已具备类型（boolean 等），直接使用
+        return expr
+    return expr
 
 
 def _build_fp_filter_conditions(
     fp_filters: list[FpFilterSpec],
     snap_subq: Any | None = None,
     chip_subq: Any | None = None,
+    max_trade_date_subq: Any | None = None,
 ) -> list[ColumnElement[bool]]:
     """构建 fp 筛选 WHERE 条件列表（基于 LATERAL JOIN 列引用）。"""
     conditions: list[ColumnElement[bool]] = []
     for f in fp_filters:
         spec = FP_QUERY_FIELD_SPECS[f.fp_key]
         data_type = spec["data_type"]
-        raw_expr = _build_fp_value_expr(f.fp_key, snap_subq, chip_subq)
-        typed_expr = _cast_fp_value(raw_expr, data_type)
+        source = spec["source"]
+        raw_expr = _build_fp_value_expr(f.fp_key, snap_subq, chip_subq, max_trade_date_subq)
+        typed_expr = _cast_fp_value(raw_expr, data_type, source)
 
         if f.operator == "empty":
             conditions.append(raw_expr.is_(None))
@@ -505,11 +597,12 @@ def _build_fp_sort_expression(
     fp_sort_spec: FpSortSpec,
     snap_subq: Any | None = None,
     chip_subq: Any | None = None,
+    max_trade_date_subq: Any | None = None,
 ) -> ColumnElement:
     """构建 fp 排序表达式（基于 LATERAL JOIN 列引用）。"""
-    raw_expr = _build_fp_value_expr(fp_sort_spec.fp_key, snap_subq, chip_subq)
+    raw_expr = _build_fp_value_expr(fp_sort_spec.fp_key, snap_subq, chip_subq, max_trade_date_subq)
     spec = FP_QUERY_FIELD_SPECS[fp_sort_spec.fp_key]
-    typed_expr = _cast_fp_value(raw_expr, spec["data_type"])
+    typed_expr = _cast_fp_value(raw_expr, spec["data_type"], spec["source"])
     return typed_expr
 
 
@@ -562,10 +655,19 @@ async def get_market_stocks(
     offset = (page - 1) * page_size
 
     # [CHANGE-20260729-005 二.7] 按需构建 LATERAL JOIN（最新 snapshot + chip 单次关联）
-    snap_subq = _build_snap_lateral() if _needs_snap_lateral(fp_filter_specs, fp_sort_spec) else None
-    chip_subq = _build_chip_lateral() if _needs_chip_lateral(fp_filter_specs, fp_sort_spec) else None
+    # [P0 修复 2026-07-29] chip LATERAL 依赖 snap LATERAL（引用 snap.trade_date/source_run_id），
+    # 因此 needs_chip=True 时必须也构建 snap LATERAL；max_trade_date_subq 用于 is_stale computed。
+    needs_snap = _needs_snap_lateral(fp_filter_specs, fp_sort_spec) or _needs_chip_lateral(
+        fp_filter_specs, fp_sort_spec,
+    )
+    needs_chip = _needs_chip_lateral(fp_filter_specs, fp_sort_spec)
+    snap_subq = _build_snap_lateral() if needs_snap else None
+    chip_subq = _build_chip_lateral(snap_subq) if needs_chip else None
+    max_trade_date_subq = _build_max_trade_date_subquery() if needs_snap else None
     # fp_filter_conditions 依赖 LATERAL JOIN 列引用，必须在 subq 创建后构建
-    fp_filter_conditions = _build_fp_filter_conditions(fp_filter_specs, snap_subq, chip_subq)
+    fp_filter_conditions = _build_fp_filter_conditions(
+        fp_filter_specs, snap_subq, chip_subq, max_trade_date_subq,
+    )
 
     # ===== Query 1: instruments + is_watchlisted + 分页 =====
     if scope == "watchlist":
@@ -621,6 +723,7 @@ async def get_market_stocks(
     order_by_cols = _build_order_by(
         sort_spec, has_query=bool(query), rank_expr=rank_expr,
         fp_sort_spec=fp_sort_spec, snap_subq=snap_subq, chip_subq=chip_subq,
+        max_trade_date_subq=max_trade_date_subq,
     )
     base_stmt = base_stmt.order_by(*order_by_cols)
 
@@ -770,7 +873,7 @@ async def get_market_stocks(
     snap_stmt = select(snap_subq).where(snap_subq.c.rn == 1)
     snap_result = await db.execute(snap_stmt)
 
-    state_map: dict[UUID, tuple[str | None, str | None, dict[str, Any] | None]] = {}
+    state_map: dict[UUID, tuple[str | None, str | None, dict[str, Any] | None, date | None, UUID | None]] = {}
     # 全局最新 trade_date 用于判断快照过期（来自 Query 7 的预查询）
     # 此处先用 None 占位，实际过期判定在组装响应阶段对比 price_as_of_date
     for snap_row in snap_result:
@@ -791,11 +894,56 @@ async def get_market_stocks(
                 run_id=str(snap_row.source_run_id) if snap_row.source_run_id else None,
                 is_stale=False,
             )
+            # [P0-2 修复 2026-07-29 二.2] fp_trade_date 改用 snapshot.trade_date 真实列
+            # （不读 first_pyramid.tradeDate，确保 DB 筛选/排序与响应同口径）
+            if snap_row.trade_date is not None:
+                flat_fp["fp_trade_date"] = snap_row.trade_date.isoformat()
         state_map[snap_row.instrument_id] = (
             dsa_state,
             str(structure_state) if structure_state else None,
             flat_fp,
+            snap_row.trade_date,
+            snap_row.source_run_id,
         )
+
+    # ===== Query 4b: 严格五元组匹配的 chip 记录批量查询（禁止 N+1） =====
+    # [P0-2 修复 2026-07-29 二.5/二.6] chip 必须按以下五元组严格匹配 latest_snap：
+    #   instrument_id, trade_date=latest_snap.trade_date,
+    #   core_run_id=latest_snap.source_run_id,
+    #   algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION, status=succeeded
+    # 禁止仅按股票取最新 chip（会挂旧 run 的 chip）。
+    # 使用 LATERAL JOIN 一次性获取每只股票匹配的 chip（最多 1 条）。
+    chip_map: dict[UUID, dict[str, Any] | None] = dict.fromkeys(instrument_ids)
+    # 仅对有 snap 且 source_run_id 非空的 instrument 查询 chip
+    snap_for_chip = [
+        (iid, snap_data[3], snap_data[4])
+        for iid, snap_data in state_map.items()
+        if snap_data[3] is not None and snap_data[4] is not None
+    ]
+    if snap_for_chip:
+        # 构造 VALUES 子查询：(instrument_id, trade_date, source_run_id) 元组列表
+        chip_stmt = (
+            select(
+                StockChipConsensusSnapshot.instrument_id,
+                StockChipConsensusSnapshot.chip_payload,
+                StockChipConsensusSnapshot.status,
+            )
+            .where(
+                StockChipConsensusSnapshot.status == "succeeded",
+                StockChipConsensusSnapshot.algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION,
+                # 五元组严格匹配：使用 tuple IN 一次查询所有 (instrument_id, trade_date, core_run_id) 组合
+                tuple_(
+                    StockChipConsensusSnapshot.instrument_id,
+                    StockChipConsensusSnapshot.trade_date,
+                    StockChipConsensusSnapshot.core_run_id,
+                ).in_([
+                    (iid, td, rid) for iid, td, rid in snap_for_chip
+                ]),
+            )
+        )
+        chip_result = await db.execute(chip_stmt)
+        for chip_row in chip_result:
+            chip_map[chip_row.instrument_id] = chip_row.chip_payload
 
     # ===== Query 5: 板块归属（批量，industry/concepts） =====
     boards_map = await get_instrument_boards_batch(db, instrument_ids)
@@ -822,22 +970,43 @@ async def get_market_stocks(
         if latest_price is not None and prev_close is not None and prev_close != 0:
             change_pct = round((latest_price - prev_close) / prev_close * 100, 2)
 
-        dsa_state, structure_state, flat_fp = state_map.get(
-            inst_id, (None, None, None)
+        dsa_state, structure_state, flat_fp, snap_td, snap_run_id = state_map.get(
+            inst_id, (None, None, None, None, None)
         )
 
         # 修正 first_pyramid.is_stale：快照 trade_date 早于全局最新日线 trade_date 即视为过期
-        if flat_fp is not None and price_as_of_date is not None:
-            snap_td_str = flat_fp.get("fp_trade_date")
-            if snap_td_str:
-                try:
-                    snap_td = (
-                        snap_td_str if isinstance(snap_td_str, date) else date.fromisoformat(str(snap_td_str)[:10])
-                    )
-                    flat_fp["fp_is_stale"] = snap_td < price_as_of_date
-                except (TypeError, ValueError):
-                    # 日期解析失败，保留默认 False（保守不标过期）
-                    pass
+        # [P0-6 修复 2026-07-29 二.3] 与数据库筛选/排序同口径
+        # （snap.trade_date < MAX(bar_daily.trade_date)）
+        if flat_fp is not None:
+            if snap_td is not None and price_as_of_date is not None:
+                flat_fp["fp_is_stale"] = snap_td < price_as_of_date
+            else:
+                flat_fp["fp_is_stale"] = False
+
+        # [P0-3 修复 2026-07-29 二.6] 合并 matched chip 的 chip_flat 到 first_pyramid
+        # 保证用于 filter/sort 的数据与返回 first_pyramid 中的 10 个 chip 字段完全一致
+        # [P0-4 修复 2026-07-29 二.4] fp_chip_available 改为 computed 表达式：
+        # 只在存在严格匹配（五元组）且 chip_payload.chip.available=true 的 succeeded 记录时为 True
+        if flat_fp is not None:
+            chip_payload = chip_map.get(inst_id)
+            if chip_payload is not None:
+                chip_flat = chip_payload.get("chip_flat") or {}
+                chip_dim = chip_payload.get("chip")
+                chip_available = bool(
+                    chip_dim is not None
+                    and isinstance(chip_dim, dict)
+                    and chip_dim.get("available") is True
+                )
+                # 用 matched chip 的 chip_flat 覆盖 10 个 chip 字段
+                for k in FP_CHIP_KEYS:
+                    if k in chip_flat:
+                        flat_fp[k] = chip_flat[k]
+                flat_fp["fp_chip_available"] = chip_available
+            else:
+                # 无匹配 chip：所有 chip 字段保持 None，fp_chip_available=False
+                for k in FP_CHIP_KEYS:
+                    flat_fp[k] = None
+                flat_fp["fp_chip_available"] = False
 
         # 板块归属：industry 取首个行业，concepts 取全部概念
         inst_boards = boards_map.get(inst_id, [])

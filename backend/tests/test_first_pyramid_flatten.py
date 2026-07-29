@@ -208,7 +208,9 @@ class TestFlattenComplete:
         assert result["fp_calculated_at"] == "2026-07-25T15:00:00+08:00"
         assert result["fp_run_id"] == "run-abc"
         assert result["fp_summary"] == "趋势上行，结构共振"
-        assert result["fp_chip_available"] is True
+        # [P0-4 修复 2026-07-29 二.4] fp_chip_available 改为 computed，flatten 不再设置
+        # 由调用方（list/detail 服务）按严格五元组 chip 表存在性 + chip.available=true 计算
+        assert result["fp_chip_available"] is None
 
     def test_trend_fields(self, complete_first_pyramid: dict) -> None:
         result = flatten_first_pyramid(complete_first_pyramid)
@@ -386,7 +388,8 @@ class TestFlattenEdgeCases:
         result = flatten_first_pyramid({"chipConsensus": None})
         assert result["fp_chip_state"] is None
         assert result["fp_poc_price"] is None
-        assert result["fp_chip_available"] is False  # chipConsensus is None → False
+        # [P0-4 修复 2026-07-29 二.4] fp_chip_available 改为 computed，flatten 不再设置
+        assert result["fp_chip_available"] is None
 
     def test_volume_context_null_returns_none_for_volume_fields(self) -> None:
         """volumeContext=None 时量能字段全为 None。"""
@@ -431,7 +434,8 @@ class TestFpQueryFieldSpecs:
             assert spec["data_type"] in {
                 "text", "number", "percent", "datetime", "boolean", "enum",
             }
-            assert spec["source"] in {"flat", "chip", "column", "literal"}
+            # [P0 收口 2026-07-29] 新增 computed source 类型（is_stale/chip_available 动态计算）
+            assert spec["source"] in {"flat", "chip", "column", "literal", "computed"}
             assert isinstance(spec["operators"], frozenset)
             assert len(spec["operators"]) > 0
 
@@ -457,16 +461,26 @@ class TestFpQueryFieldSpecs:
             assert FP_QUERY_FIELD_SPECS[key]["source"] == "chip"
 
     def test_column_source_fields(self) -> None:
-        """fp_calculated_at/fp_run_id 使用真实列。"""
+        """fp_calculated_at/fp_run_id/fp_trade_date 使用真实列。"""
         assert FP_QUERY_FIELD_SPECS["fp_calculated_at"]["source"] == "column"
         assert FP_QUERY_FIELD_SPECS["fp_calculated_at"]["column"] == "created_at"
         assert FP_QUERY_FIELD_SPECS["fp_run_id"]["source"] == "column"
         assert FP_QUERY_FIELD_SPECS["fp_run_id"]["column"] == "source_run_id"
+        # [P0-2 修复 2026-07-29 二.2] fp_trade_date 改用 snapshot.trade_date 真实列
+        assert FP_QUERY_FIELD_SPECS["fp_trade_date"]["source"] == "column"
+        assert FP_QUERY_FIELD_SPECS["fp_trade_date"]["column"] == "trade_date"
 
     def test_literal_source_fields(self) -> None:
         """fp_data_source 使用常量。"""
         assert FP_QUERY_FIELD_SPECS["fp_data_source"]["source"] == "literal"
         assert FP_QUERY_FIELD_SPECS["fp_data_source"]["literal_value"] == "feature_snapshot"
+
+    def test_computed_source_fields(self) -> None:
+        """[P0 收口 2026-07-29] fp_is_stale/fp_chip_available 使用 computed 表达式。"""
+        assert FP_QUERY_FIELD_SPECS["fp_is_stale"]["source"] == "computed"
+        assert FP_QUERY_FIELD_SPECS["fp_is_stale"]["computed_kind"] == "is_stale"
+        assert FP_QUERY_FIELD_SPECS["fp_chip_available"]["source"] == "computed"
+        assert FP_QUERY_FIELD_SPECS["fp_chip_available"]["computed_kind"] == "chip_available"
 
     def test_operator_mapping_by_data_type(self) -> None:
         """按 data_type 抽样校验操作符映射。"""

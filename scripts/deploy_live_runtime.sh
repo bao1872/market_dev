@@ -38,6 +38,8 @@ echo "[deploy] REPO_ROOT=$REPO_ROOT"
 
 # 1. 前端本地构建（默认执行，--skip-frontend-build 才跳过）
 # 不因旧 dist 存在而跳过，保证部署最新前端代码
+# [P0 修复 2026-07-29 四.4] 检测 frontend Dockerfile/entrypoint/logrotate 变化：
+# 这些文件变化影响 runtime 镜像，必须重新 docker build；--no-build 会假装应用镜像变化
 if [[ "$SKIP_FRONTEND_BUILD" == "false" ]]; then
   echo "[deploy] 本地构建前端 dist..."
   cd "$REPO_ROOT/frontend"
@@ -51,6 +53,40 @@ if [[ "$SKIP_FRONTEND_BUILD" == "false" ]]; then
   echo "[deploy] 前端构建完成"
 else
   echo "[deploy] --skip-frontend-build 已指定，跳过前端构建"
+fi
+
+# [P0 修复 2026-07-29 四.4] 检测 runtime 镜像相关文件变化
+# frontend/Dockerfile / docker-entrypoint.sh / logrotate-nginx.* 影响 runtime 镜像层，
+# --no-build deploy 会假装这些变化已应用，导致容器仍跑旧镜像。
+# 这些文件变化时必须提示用户运行完整 build（./scripts/build_live_runtime.sh）。
+_RUNTIME_FILES=(
+  frontend/Dockerfile
+  frontend/docker-entrypoint.sh
+  frontend/logrotate-nginx.conf
+  frontend/logrotate-nginx-script
+  frontend/nginx.conf
+)
+_CHANGED_FILES=()
+for _f in "${_RUNTIME_FILES[@]}"; do
+  _reason=""
+  # 1) 工作区有未提交修改
+  if ! git diff --quiet -- "$_f" 2>/dev/null; then
+    _reason="working tree"
+  # 2) HEAD 提交相对 HEAD~1 修改了该文件（首次提交无 HEAD~1 时跳过）
+  elif git rev-parse --verify HEAD~1 >/dev/null 2>&1 \
+       && ! git diff --quiet HEAD~1 HEAD -- "$_f" 2>/dev/null; then
+    _reason="HEAD commit"
+  fi
+  if [[ -n "$_reason" ]]; then
+    _CHANGED_FILES+=("$_f ($_reason)")
+  fi
+done
+if [[ ${#_CHANGED_FILES[@]} -gt 0 ]]; then
+  echo "[deploy] ERROR: 检测到 runtime 镜像相关文件变化:" >&2
+  printf '  - %s\n' "${_CHANGED_FILES[@]}" >&2
+  echo "[deploy] 这些变化影响 frontend runtime 镜像，--no-build 部署不会重建镜像。" >&2
+  echo "[deploy] 请先运行: ./scripts/build_live_runtime.sh 重新构建镜像" >&2
+  exit 1
 fi
 
 # 2. compose config 校验

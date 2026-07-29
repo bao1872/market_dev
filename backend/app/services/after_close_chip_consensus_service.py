@@ -321,8 +321,11 @@ async def execute_after_close_chip_consensus(
                 )
 
                 # 幂等 upsert
-                chip_dict = chip_result.to_dict() if hasattr(chip_result, "to_dict") else dict(chip_result)
-                # [CHANGE-20260729-005 二.4] 写入 chip_flat 扁平对象（10 个 chip fp_ 键）
+                # [P0-5 修复 2026-07-29 三.1] 统一使用 model_dump(by_alias=False)，禁止 dict(pydantic_model)
+                # 原因：dict(pydantic_model) 在 Pydantic v2 已废弃，且无法保证字段别名一致性
+                chip_dict = chip_result.model_dump(by_alias=False)
+                # [P0-5 修复 2026-07-29 三.2] 用 model_dump 后的 chip 字典调用 flatten_chip_fields
+                # 写入 chip_flat 扁平对象（10 个 chip fp_ 键）
                 # 供 /market/stocks 服务端 filter/sort 从 chip_payload.chip_flat.<fp_key> 读取
                 chip_dict["chip_flat"] = flatten_chip_fields(chip_dict.get("chip"))
                 await _upsert_chip_snapshot(

@@ -48,10 +48,14 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 # [CHANGE-20260729-005 五.4] 安装 logrotate + 配置 access.log 轮转
 # 问题：Docker json-file 只轮转容器 stdout/stderr，命名卷 nginx_logs 内的 access.log 无轮转
 # 方案：在 nginx 容器内运行 logrotate（轻量，apk 包约 500KB），不新增常驻 sidecar
+# [P0 修复 2026-07-29 四.2] 配置文件与周期脚本必须分离：
+# - /etc/logrotate.d/nginx 是 logrotate 配置（非可执行 sh 脚本）
+# - /etc/periodic/15min/logrotate-nginx 是可执行 sh 脚本，调用 logrotate 读取配置
+# 旧实现把 conf 复制为周期脚本，busybox crond 以 sh 执行会静默失败
 RUN apk add --no-cache logrotate
 COPY logrotate-nginx.conf /etc/logrotate.d/nginx
 # crond 每 15 分钟检查一次（busybox cron 目录），logrotate 内部按 daily+maxsize 决定是否轮转
-COPY logrotate-nginx.conf /etc/periodic/15min/logrotate-nginx
+COPY logrotate-nginx-script /etc/periodic/15min/logrotate-nginx
 RUN chmod +x /etc/periodic/15min/logrotate-nginx
 
 # 复制构建产物到 nginx 静态资源目录
