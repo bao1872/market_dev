@@ -1945,8 +1945,18 @@ export interface MarketStockRow {
   data_run_id: string | null
   /** 第一金字塔必选维度是否就绪（趋势/结构/动量均有权威字段非空） */
   factor_ready: boolean | null
-  /** 因子错误代码（如 insufficient_history / compute_failed） */
+  /**
+   * 因子错误代码：
+   * - INSUFFICIENT_DAILY_BARS（日线不足，非失败）
+   * - COMPUTE_FAILED（程序异常）
+   * - no_snapshot / trend_missing / structure_missing / momentum_missing
+   * 无错误时为 null
+   */
   factor_error: string | null
+  /** 实际日线数（仅 INSUFFICIENT_DAILY_BARS/COMPUTE_FAILED 时有值） */
+  factor_actual_bars: number | null
+  /** 最低要求日线数（=60，仅 INSUFFICIENT_DAILY_BARS/COMPUTE_FAILED 时有值） */
+  factor_required_bars: number | null
   /**
    * 筹码共识结构化状态：{status, reason_code, actual_bars, required_bars, reason_text, computed_at}。
    * 无 chip 记录时为 null。

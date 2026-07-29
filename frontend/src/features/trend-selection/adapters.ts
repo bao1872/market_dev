@@ -157,6 +157,8 @@ export function adaptMarketStockToTrendRow(ms: MarketStockRow): TrendSelectionRo
     dataRunId: ms.data_run_id,
     factorReady: ms.factor_ready,
     factorError: ms.factor_error,
+    factorActualBars: ms.factor_actual_bars,
+    factorRequiredBars: ms.factor_required_bars,
     chipStatus: ms.chip_status,
     latestPrice: ms.latest_price,
     dsaState: ms.dsa_state,

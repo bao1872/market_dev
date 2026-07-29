@@ -110,29 +110,45 @@ _FP_MOMENTUM_KEYS = ("fp_sqzmom_value", "fp_momentum_direction", "fp_squeeze_sta
 # [CHANGE-20260729-009] chip 最低 15m bar 门槛（与 after_close_chip_consensus_service._CHIP_MIN_15M_BARS 一致）
 _CHIP_MIN_15M_BARS = 500
 
+# [CHANGE-20260729-009] 第一金字塔最低日线门槛（与 first_pyramid_service._MIN_BARS_FOR_REQUIRED_DIMS 一致）
+_MIN_DAILY_BARS_FOR_FACTOR = 60
 
-def _compute_factor_ready(flat_fp: dict[str, Any] | None) -> tuple[bool | None, str | None]:
+
+def _compute_factor_ready(
+    flat_fp: dict[str, Any] | None,
+    daily_bar_count: int | None = None,
+) -> tuple[bool | None, str | None, int | None, int | None]:
     """判断第一金字塔必选维度是否就绪。
 
+    Args:
+        flat_fp: 扁平化的 first_pyramid dict（None 表示无快照或 first_pyramid 为 null）
+        daily_bar_count: 该股票实际日线数（仅 flat_fp=None 时用于区分原因）
+
     Returns:
-        (factor_ready, factor_error)
-        - flat_fp 为 None: (False, "no_snapshot")
-        - 任一维度权威字段全为 None: (False, "dimensions_missing")
-        - 全部维度就绪: (True, None)
+        (factor_ready, factor_error, actual_bars, required_bars)
+        - flat_fp 为 None + daily_bars < 60: (False, "INSUFFICIENT_DAILY_BARS", actual, 60)
+        - flat_fp 为 None + daily_bars >= 60: (False, "COMPUTE_FAILED", actual, 60)
+        - flat_fp 为 None + daily_bars 未知: (False, "no_snapshot", None, None)
+        - 任一维度权威字段全为 None: (False, "<dim>_missing", None, None)
+        - 全部维度就绪: (True, None, None, None)
     """
     if flat_fp is None:
-        return False, "no_snapshot"
+        if daily_bar_count is not None:
+            if daily_bar_count < _MIN_DAILY_BARS_FOR_FACTOR:
+                return False, "INSUFFICIENT_DAILY_BARS", daily_bar_count, _MIN_DAILY_BARS_FOR_FACTOR
+            return False, "COMPUTE_FAILED", daily_bar_count, _MIN_DAILY_BARS_FOR_FACTOR
+        return False, "no_snapshot", None, None
 
     def _any_non_none(keys: tuple[str, ...]) -> bool:
         return any(flat_fp.get(k) is not None for k in keys)
 
     if not _any_non_none(_FP_TREND_KEYS):
-        return False, "trend_missing"
+        return False, "trend_missing", None, None
     if not _any_non_none(_FP_STRUCTURE_KEYS):
-        return False, "structure_missing"
+        return False, "structure_missing", None, None
     if not _any_non_none(_FP_MOMENTUM_KEYS):
-        return False, "momentum_missing"
-    return True, None
+        return False, "momentum_missing", None, None
+    return True, None, None, None
 
 
 def _build_chip_status_struct(
@@ -1100,6 +1116,26 @@ async def get_market_stocks(
     except Exception:
         logger.warning("[MarketStocks] 查询 DSA payload 失败，payload 字段将为 None", exc_info=True)
 
+    # ===== Query 4d: 日线计数（仅 flat_fp=None 的股票，用于区分 INSUFFICIENT_DAILY_BARS vs COMPUTE_FAILED） =====
+    # [CHANGE-20260729-009] 109 只新股 first_pyramid=null，需返回 actual_bars/required_bars 结构化原因
+    daily_bar_count_map: dict[UUID, int] = {}
+    instruments_needing_bar_count = [
+        iid for iid in instrument_ids
+        if state_map.get(iid, (None, None, None, None, None))[2] is None
+    ]
+    if instruments_needing_bar_count:
+        bar_count_stmt = (
+            select(
+                BarDaily.instrument_id,
+                func.count().label("cnt"),
+            )
+            .where(BarDaily.instrument_id.in_(instruments_needing_bar_count))
+            .group_by(BarDaily.instrument_id)
+        )
+        bar_count_result = await db.execute(bar_count_stmt)
+        for row in bar_count_result:
+            daily_bar_count_map[row.instrument_id] = row.cnt
+
     # ===== Query 5: 板块归属（批量，industry/concepts） =====
     boards_map = await get_instrument_boards_batch(db, instrument_ids)
 
@@ -1168,7 +1204,11 @@ async def get_market_stocks(
                 flat_fp["fp_chip_available"] = False
 
         # [CHANGE-20260729-009] 计算 factor_ready/factor_error + 填充 data_run_id/payload/chip_status
-        factor_ready, factor_error = _compute_factor_ready(flat_fp)
+        # flat_fp=None 时查询日线计数以区分 INSUFFICIENT_DAILY_BARS vs COMPUTE_FAILED
+        daily_count = daily_bar_count_map.get(inst_id) if flat_fp is None else None
+        factor_ready, factor_error, factor_actual_bars, factor_required_bars = (
+            _compute_factor_ready(flat_fp, daily_count)
+        )
         dsa_payload = dsa_payload_map.get(inst_id)
 
         # 板块归属：industry 取首个行业，concepts 取全部概念
@@ -1197,6 +1237,8 @@ async def get_market_stocks(
                 data_run_id=snap_run_id,
                 factor_ready=factor_ready,
                 factor_error=factor_error,
+                factor_actual_bars=factor_actual_bars,
+                factor_required_bars=factor_required_bars,
                 chip_status=chip_status_struct,
             )
         )

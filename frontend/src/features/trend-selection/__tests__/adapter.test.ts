@@ -11,7 +11,8 @@ import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
 import { adaptStrategyResultToTrendRow } from '../adapters.ts'
-import type { StrategyResult } from '@/api/endpoints'
+import { adaptMarketStockToTrendRow } from '../adapters.ts'
+import type { StrategyResult, MarketStockRow } from '@/api/endpoints'
 
 // ===== 辅助：构造测试行 =====
 function makeSucceededRow(): StrategyResult {
@@ -106,4 +107,103 @@ test('adaptStrategyResultToTrendRow: watched 基于 instrumentId 匹配', () => 
   assert.equal(succeededRow.watched, true, 'inst-001 应在 watchedIds 中')
   assert.equal(skippedRow.watched, false, 'inst-002 不应在 watchedIds 中')
   assert.equal(failedRow.watched, true, 'inst-003 应在 watchedIds 中')
+})
+
+// ===== [CHANGE-20260729-009] adaptMarketStockToTrendRow 测试 =====
+
+function makeMarketStockRow(overrides: Partial<MarketStockRow> = {}): MarketStockRow {
+  return {
+    instrument_id: 'inst-001',
+    symbol: '000001',
+    name: '平安银行',
+    latest_price: 12.5,
+    change_pct: 2.3,
+    industry: '银行',
+    concepts: ['金融科技'],
+    dsa_state: '上行',
+    structure_state: '成本区间上方',
+    latest_event_title: null,
+    latest_event_time: null,
+    is_watchlisted: true,
+    first_pyramid: { fp_trend_direction: 'up', fp_sqzmom_value: 0.5 },
+    payload: { dsa_dir_bars: 40, offset_mean: 0.01 },
+    data_run_id: 'run-abc',
+    factor_ready: true,
+    factor_error: null,
+    factor_actual_bars: null,
+    factor_required_bars: null,
+    chip_status: {
+      status: 'succeeded',
+      reason_code: null,
+      actual_bars: null,
+      required_bars: null,
+      reason_text: '已计算',
+      computed_at: '2026-07-29T15:00:00+08:00',
+    },
+    ...overrides,
+  }
+}
+
+// ===== 5. 正常 MarketStockRow 转换 =====
+test('adaptMarketStockToTrendRow: 正常行保留全部字段', () => {
+  const row = adaptMarketStockToTrendRow(makeMarketStockRow())
+  assert.equal(row.instrumentId, 'inst-001')
+  assert.equal(row.symbol, '000001')
+  assert.equal(row.name, '平安银行')
+  assert.equal(row.watched, true, 'is_watchlisted 应映射为 watched')
+  assert.deepEqual(row.payload, { dsa_dir_bars: 40, offset_mean: 0.01 })
+  assert.deepEqual(row.firstPyramid, { fp_trend_direction: 'up', fp_sqzmom_value: 0.5 })
+  assert.equal(row.dataRunId, 'run-abc')
+  assert.equal(row.factorReady, true)
+  assert.equal(row.factorError, null)
+  assert.equal(row.latestChangePct, 2.3)
+  assert.equal(row.dsaState, '上行')
+  assert.equal(row.industry, '银行')
+  assert.deepEqual(row.concepts, ['金融科技'])
+})
+
+// ===== 6. null first_pyramid + INSUFFICIENT_DAILY_BARS =====
+test('adaptMarketStockToTrendRow: 新股数据不足场景', () => {
+  const row = adaptMarketStockToTrendRow(makeMarketStockRow({
+    first_pyramid: null,
+    factor_ready: false,
+    factor_error: 'INSUFFICIENT_DAILY_BARS',
+    factor_actual_bars: 45,
+    factor_required_bars: 60,
+    is_watchlisted: false,
+    payload: null,
+  }))
+  assert.equal(row.firstPyramid, null)
+  assert.equal(row.factorReady, false)
+  assert.equal(row.factorError, 'INSUFFICIENT_DAILY_BARS')
+  assert.equal(row.factorActualBars, 45)
+  assert.equal(row.factorRequiredBars, 60)
+  assert.equal(row.watched, false)
+  assert.deepEqual(row.payload, {}, 'null payload 应为空对象')
+})
+
+// ===== 7. chip_status skipped + M15_BARS_INSUFFICIENT =====
+test('adaptMarketStockToTrendRow: chip 状态为 M15_BARS_INSUFFICIENT', () => {
+  const row = adaptMarketStockToTrendRow(makeMarketStockRow({
+    chip_status: {
+      status: 'skipped',
+      reason_code: 'M15_BARS_INSUFFICIENT',
+      actual_bars: 354,
+      required_bars: 500,
+      reason_text: '15 分钟数据不足（354 根，需 ≥500）',
+      computed_at: null,
+    },
+  }))
+  assert.equal(row.chipStatus.status, 'skipped')
+  assert.equal(row.chipStatus.reason_code, 'M15_BARS_INSUFFICIENT')
+  assert.equal(row.chipStatus.actual_bars, 354)
+  assert.equal(row.chipStatus.required_bars, 500)
+  assert.equal(row.chipStatus.reason_text, '15 分钟数据不足（354 根，需 ≥500）')
+})
+
+// ===== 8. resultId 使用 instrument_id（MarketStockRow 无 resultId） =====
+test('adaptMarketStockToTrendRow: resultId = instrument_id', () => {
+  const row = adaptMarketStockToTrendRow(makeMarketStockRow())
+  assert.equal(row.resultId, 'inst-001', 'resultId 应等于 instrument_id')
+  assert.equal(row.market, '', 'MarketStockRow 不含 market，应为空字符串')
 })

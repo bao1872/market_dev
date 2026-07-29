@@ -62,7 +62,20 @@ class MarketStockRow(BaseModel):
     )
     factor_error: str | None = Field(
         None,
-        description="因子错误代码（如 insufficient_history / compute_failed）；无错误时为 None",
+        description=(
+            "因子错误代码："
+            "INSUFFICIENT_DAILY_BARS（日线不足，非失败）/ COMPUTE_FAILED（程序异常）/ "
+            "no_snapshot / trend_missing / structure_missing / momentum_missing；"
+            "无错误时为 None"
+        ),
+    )
+    factor_actual_bars: int | None = Field(
+        None,
+        description="实际日线数（仅 INSUFFICIENT_DAILY_BARS/COMPUTE_FAILED 时有值）",
+    )
+    factor_required_bars: int | None = Field(
+        None,
+        description="最低要求日线数（=60，仅 INSUFFICIENT_DAILY_BARS/COMPUTE_FAILED 时有值）",
     )
     chip_status: dict[str, Any] | None = Field(
         None,
