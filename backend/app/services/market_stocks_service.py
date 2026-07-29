@@ -56,6 +56,7 @@ from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
+from app.models.strategy_run import StrategyResult, StrategyRun
 from app.models.watchlist import UserWatchlistItem
 from app.repositories.board_filter_helper import build_board_filter_conditions
 from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
@@ -97,6 +98,90 @@ _FP_FILTER_OPERATORS = {
     "contains", "not_contains", "eq", "gt", "gte", "lt", "lte",
     "between", "empty", "not_empty",
 }
+
+# [CHANGE-20260729-009] DSA 策略 key（用于查询已发布 dsa_selector run 的 payload）
+_DSA_STRATEGY_KEY = "dsa_selector"
+
+# [CHANGE-20260729-009] 第一金字塔必选维度权威字段（任一非空即维度就绪）
+_FP_TREND_KEYS = ("fp_trend_direction", "fp_trend_bars")
+_FP_STRUCTURE_KEYS = ("fp_swing_direction", "fp_structure_alignment")
+_FP_MOMENTUM_KEYS = ("fp_sqzmom_value", "fp_momentum_direction", "fp_squeeze_state")
+
+# [CHANGE-20260729-009] chip 最低 15m bar 门槛（与 after_close_chip_consensus_service._CHIP_MIN_15M_BARS 一致）
+_CHIP_MIN_15M_BARS = 500
+
+
+def _compute_factor_ready(flat_fp: dict[str, Any] | None) -> tuple[bool | None, str | None]:
+    """判断第一金字塔必选维度是否就绪。
+
+    Returns:
+        (factor_ready, factor_error)
+        - flat_fp 为 None: (False, "no_snapshot")
+        - 任一维度权威字段全为 None: (False, "dimensions_missing")
+        - 全部维度就绪: (True, None)
+    """
+    if flat_fp is None:
+        return False, "no_snapshot"
+
+    def _any_non_none(keys: tuple[str, ...]) -> bool:
+        return any(flat_fp.get(k) is not None for k in keys)
+
+    if not _any_non_none(_FP_TREND_KEYS):
+        return False, "trend_missing"
+    if not _any_non_none(_FP_STRUCTURE_KEYS):
+        return False, "structure_missing"
+    if not _any_non_none(_FP_MOMENTUM_KEYS):
+        return False, "momentum_missing"
+    return True, None
+
+
+def _build_chip_status_struct(
+    chip_row: Any | None,
+) -> dict[str, Any] | None:
+    """从 chip 记录构建结构化状态 dict。
+
+    Args:
+        chip_row: 包含 status, chip_payload, error_message, created_at 的 NamedTuple，或 None
+
+    Returns:
+        {status, reason_code, actual_bars, required_bars, reason_text, computed_at} 或 None
+    """
+    if chip_row is None:
+        return None
+
+    status = chip_row.status
+    payload = chip_row.chip_payload or {}
+    error_message = chip_row.error_message
+
+    # reason_code: 优先从 payload.reason 取，fallback 到 error_message 解析
+    reason_code = payload.get("reason") if isinstance(payload, dict) else None
+    if reason_code is None and error_message:
+        # error_message 形如 "15m bars insufficient: 354 < 500"
+        reason_code = "M15_BARS_INSUFFICIENT" if "15m" in error_message.lower() else "CHIP_ERROR"
+
+    actual_bars = payload.get("actual_bars") if isinstance(payload, dict) else None
+
+    # reason_text: 人类可读描述
+    if status == "succeeded":
+        reason_text = "已计算"
+    elif status == "skipped":
+        if reason_code == "M15_BARS_INSUFFICIENT":
+            reason_text = f"15 分钟数据不足（{actual_bars} 根，需 ≥{_CHIP_MIN_15M_BARS}）"
+        else:
+            reason_text = error_message or "已跳过"
+    elif status == "failed":
+        reason_text = error_message or "计算失败"
+    else:
+        reason_text = error_message or status
+
+    return {
+        "status": status,
+        "reason_code": reason_code,
+        "actual_bars": actual_bars,
+        "required_bars": _CHIP_MIN_15M_BARS if status != "succeeded" else None,
+        "reason_text": reason_text,
+        "computed_at": to_shanghai_iso(chip_row.created_at) if chip_row.created_at else None,
+    }
 
 
 @dataclass(frozen=True)
@@ -945,10 +1030,12 @@ async def get_market_stocks(
     # [P0-2 修复 2026-07-29 二.5/二.6] chip 必须按以下五元组严格匹配 latest_snap：
     #   instrument_id, trade_date=latest_snap.trade_date,
     #   core_run_id=latest_snap.source_run_id,
-    #   algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION, status=succeeded
-    # 禁止仅按股票取最新 chip（会挂旧 run 的 chip）。
-    # 使用 LATERAL JOIN 一次性获取每只股票匹配的 chip（最多 1 条）。
-    chip_map: dict[UUID, dict[str, Any] | None] = dict.fromkeys(instrument_ids)
+    #   algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION
+    # [CHANGE-20260729-009] 移除 status=="succeeded" 过滤，改为查询任意状态 chip：
+    #   - succeeded: 合并 chip_flat 到 first_pyramid（原逻辑）
+    #   - skipped/failed: 构建 chip_status 结构化状态（M15_BARS_INSUFFICIENT 等）
+    # 唯一约束 (instrument_id, trade_date, core_run_id, algorithm_version) 保证每股最多 1 条。
+    chip_map: dict[UUID, Any | None] = dict.fromkeys(instrument_ids)
     # 仅对有 snap 且 source_run_id 非空的 instrument 查询 chip
     snap_for_chip = [
         (iid, snap_data[3], snap_data[4])
@@ -956,17 +1043,18 @@ async def get_market_stocks(
         if snap_data[3] is not None and snap_data[4] is not None
     ]
     if snap_for_chip:
-        # 构造 VALUES 子查询：(instrument_id, trade_date, source_run_id) 元组列表
         chip_stmt = (
             select(
                 StockChipConsensusSnapshot.instrument_id,
                 StockChipConsensusSnapshot.chip_payload,
                 StockChipConsensusSnapshot.status,
+                StockChipConsensusSnapshot.error_message,
+                StockChipConsensusSnapshot.created_at,
             )
             .where(
-                StockChipConsensusSnapshot.status == "succeeded",
                 StockChipConsensusSnapshot.algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION,
-                # 五元组严格匹配：使用 tuple IN 一次查询所有 (instrument_id, trade_date, core_run_id) 组合
+                # 四元组严格匹配（algorithm_version 已在 WHERE 中）：
+                # (instrument_id, trade_date, core_run_id)
                 tuple_(
                     StockChipConsensusSnapshot.instrument_id,
                     StockChipConsensusSnapshot.trade_date,
@@ -978,7 +1066,39 @@ async def get_market_stocks(
         )
         chip_result = await db.execute(chip_stmt)
         for chip_row in chip_result:
-            chip_map[chip_row.instrument_id] = chip_row.chip_payload
+            chip_map[chip_row.instrument_id] = chip_row
+
+    # ===== Query 4c: DSA 策略结果 payload（批量，用于 DSA 列展示） =====
+    # [CHANGE-20260729-009] /market/stocks 作为列表唯一数据源，
+    # 需返回原 DSA 字段（dsa_dir_bars/vwap_ret_avg 等）。
+    # 从最新已发布 dsa_selector run 的 strategy_results 表批量读取 payload。
+    dsa_payload_map: dict[UUID, dict[str, Any]] = {}
+    try:
+        latest_dsa_run_id: UUID | None = await db.scalar(
+            select(StrategyRun.id)
+            .where(
+                StrategyRun.strategy_key == _DSA_STRATEGY_KEY,
+                StrategyRun.status == "published",
+            )
+            .order_by(StrategyRun.trade_date.desc())
+            .limit(1)
+        )
+        if latest_dsa_run_id is not None and instrument_ids:
+            dsa_stmt = (
+                select(
+                    StrategyResult.instrument_id,
+                    StrategyResult.payload,
+                )
+                .where(
+                    StrategyResult.run_id == latest_dsa_run_id,
+                    StrategyResult.instrument_id.in_(instrument_ids),
+                )
+            )
+            dsa_result = await db.execute(dsa_stmt)
+            for dsa_row in dsa_result:
+                dsa_payload_map[dsa_row.instrument_id] = dsa_row.payload or {}
+    except Exception:
+        logger.warning("[MarketStocks] 查询 DSA payload 失败，payload 字段将为 None", exc_info=True)
 
     # ===== Query 5: 板块归属（批量，industry/concepts） =====
     boards_map = await get_instrument_boards_batch(db, instrument_ids)
@@ -1022,11 +1142,15 @@ async def get_market_stocks(
         # 保证用于 filter/sort 的数据与返回 first_pyramid 中的 10 个 chip 字段完全一致
         # [P0-4 修复 2026-07-29 二.4] fp_chip_available 改为 computed 表达式：
         # 只在存在严格匹配（五元组）且 chip_payload.chip.available=true 的 succeeded 记录时为 True
+        # [CHANGE-20260729-009] chip_map 现存储完整 chip row（含 status/error_message/created_at），
+        # 仅 succeeded 状态才合并 chip_flat；任意状态都构建 chip_status 结构化状态。
+        chip_row = chip_map.get(inst_id)
+        chip_status_struct: dict[str, Any] | None = _build_chip_status_struct(chip_row)
         if flat_fp is not None:
-            chip_payload = chip_map.get(inst_id)
-            if chip_payload is not None:
-                chip_flat = chip_payload.get("chip_flat") or {}
-                chip_dim = chip_payload.get("chip")
+            if chip_row is not None and chip_row.status == "succeeded":
+                chip_payload = chip_row.chip_payload
+                chip_flat = chip_payload.get("chip_flat") or {} if isinstance(chip_payload, dict) else {}
+                chip_dim = chip_payload.get("chip") if isinstance(chip_payload, dict) else None
                 chip_available = bool(
                     chip_dim is not None
                     and isinstance(chip_dim, dict)
@@ -1038,10 +1162,14 @@ async def get_market_stocks(
                         flat_fp[k] = chip_flat[k]
                 flat_fp["fp_chip_available"] = chip_available
             else:
-                # 无匹配 chip：所有 chip 字段保持 None，fp_chip_available=False
+                # 无匹配 chip 或非 succeeded：所有 chip 字段保持 None，fp_chip_available=False
                 for k in FP_CHIP_KEYS:
                     flat_fp[k] = None
                 flat_fp["fp_chip_available"] = False
+
+        # [CHANGE-20260729-009] 计算 factor_ready/factor_error + 填充 data_run_id/payload/chip_status
+        factor_ready, factor_error = _compute_factor_ready(flat_fp)
+        dsa_payload = dsa_payload_map.get(inst_id)
 
         # 板块归属：industry 取首个行业，concepts 取全部概念
         inst_boards = boards_map.get(inst_id, [])
@@ -1065,6 +1193,11 @@ async def get_market_stocks(
                 latest_event_time=None,
                 is_watchlisted=base.is_watchlisted,
                 first_pyramid=flat_fp,
+                payload=dsa_payload,
+                data_run_id=snap_run_id,
+                factor_ready=factor_ready,
+                factor_error=factor_error,
+                chip_status=chip_status_struct,
             )
         )
 

@@ -4,6 +4,7 @@
 export type { TrendSelectionRow } from './types'
 export {
   adaptStrategyResultToTrendRow,
+  adaptMarketStockToTrendRow,
   pickPayload,
   toNum,
   fmtNum,

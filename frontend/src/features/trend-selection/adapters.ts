@@ -1,7 +1,7 @@
 // [趋势选股] - 数据适配层
 // 职责：将后端 StrategyResult 转换为统一 TrendSelectionRow，并提供列渲染所需的工具函数
 // 唯一性：DSA 字段候选 key 列表在此处统一维护，禁止散落在 IndexPage/ScreenerPage
-import type { StrategyResult } from '@/api/endpoints'
+import type { StrategyResult, MarketStockRow } from '@/api/endpoints'
 import type { TrendSelectionRow } from './types.ts'
 
 // [趋势选股] - 描述: DSA 字段候选 key 列表（统一维护，禁止散落在各页面）
@@ -121,5 +121,47 @@ export function adaptStrategyResultToTrendRow(
     watched: watchedIds ? watchedIds.has(result.instrument_id) : false,
     latestChangePct: result.latest_change_pct ?? null,
     latestChangeTradeDate: result.latest_change_trade_date ?? null,
+  }
+}
+
+/**
+ * [CHANGE-20260729-009] 将 MarketStockRow 转换为 TrendSelectionRow。
+ *
+ * /market/stocks 作为列表唯一数据源后，不再使用 useStrategyRunResults 双分页合并。
+ * MarketStockRow 已包含 DSA payload + first_pyramid + chip_status + data_run_id 等全字段。
+ *
+ * 映射：
+ * - instrument_id → instrumentId
+ * - symbol/name → symbol/name
+ * - payload → row.payload ?? {}（DSA 列通过 pickPayload 读取）
+ * - is_watchlisted → watched
+ * - change_pct → latestChangePct（来自 bars_daily 最新两根日线）
+ * - first_pyramid → firstPyramid（自定义字段，供 99 列渲染）
+ * - data_run_id/factor_ready/factor_error/chip_status → 透传为自定义字段
+ *
+ * @param ms 后端 MarketStockRow
+ */
+export function adaptMarketStockToTrendRow(ms: MarketStockRow): TrendSelectionRow {
+  return {
+    resultId: ms.instrument_id, // MarketStockRow 无 resultId，用 instrument_id 作 rowKey
+    instrumentId: ms.instrument_id,
+    symbol: ms.symbol ?? '-',
+    name: ms.name ?? '-',
+    market: '', // MarketStockRow 不含 market 字段（列表无需展示市场后缀）
+    payload: ms.payload ?? {},
+    watched: ms.is_watchlisted ?? false,
+    latestChangePct: ms.change_pct ?? null,
+    latestChangeTradeDate: null, // MarketStockRow 不返回 trade_date for change_pct
+    // 自定义字段（TrendSelectionRow 支持 [key: string]: unknown）
+    firstPyramid: ms.first_pyramid,
+    dataRunId: ms.data_run_id,
+    factorReady: ms.factor_ready,
+    factorError: ms.factor_error,
+    chipStatus: ms.chip_status,
+    latestPrice: ms.latest_price,
+    dsaState: ms.dsa_state,
+    structureState: ms.structure_state,
+    industry: ms.industry,
+    concepts: ms.concepts,
   }
 }

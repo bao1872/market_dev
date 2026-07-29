@@ -25,7 +25,12 @@ from pydantic import BaseModel, Field
 
 
 class MarketStockRow(BaseModel):
-    """行情列表单行 - 包含页面展示所需的全部字段。"""
+    """行情列表单行 - 包含页面展示所需的全部字段。
+
+    [CHANGE-20260729-009] 统一数据源：/market/stocks 作为列表唯一数据源，
+    返回股票基础信息 + DSA payload + 99 个 fp 字段 + watchlist 状态 +
+    data_run_id + factor_ready/error + chip_status 结构化状态。
+    """
 
     instrument_id: UUID = Field(..., description="股票 ID")
     symbol: str = Field(..., description="股票代码")
@@ -42,6 +47,30 @@ class MarketStockRow(BaseModel):
     first_pyramid: dict[str, Any] | None = Field(
         None,
         description="第一金字塔扁平化字段（99 个 fp_ 键）；None 表示无快照",
+    )
+    payload: dict[str, Any] | None = Field(
+        None,
+        description="DSA 策略结果 payload（含 dsa_dir_bars/vwap_ret_avg 等原 DSA 字段）；无匹配时为 None",
+    )
+    data_run_id: UUID | None = Field(
+        None,
+        description="快照所属 run ID（已发布 stock_core pointer.data_run_id）；无 pointer 时为 None",
+    )
+    factor_ready: bool | None = Field(
+        None,
+        description="第一金字塔必选维度是否就绪（趋势/结构/动量均有权威字段非空）",
+    )
+    factor_error: str | None = Field(
+        None,
+        description="因子错误代码（如 insufficient_history / compute_failed）；无错误时为 None",
+    )
+    chip_status: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "筹码共识结构化状态："
+            "{status, reason_code, actual_bars, required_bars, reason_text, computed_at}；"
+            "无 chip 记录时为 None"
+        ),
     )
 
 

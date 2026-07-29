@@ -46,30 +46,76 @@ export interface TrendSelectionColumnOptions {
   watchlistInstrumentIds?: Set<string>
   onToggleWatchlist?: (row: TrendSelectionRow, add: boolean) => void
   watchlistPendingIds?: Set<string>
+  /**
+   * [CHANGE-20260729-009] 股票名称旁内联 +/- 自选按钮（22×22）。
+   * - true: renderStock 在名称右侧渲染 +/- 按钮，且不返回独立 action 列
+   * - false/省略: 保持原有独立 action 列行为（其他复用页面不受影响）
+   */
+  inlineWatchlistToggle?: boolean
 }
 
-/** 股票列渲染（复用）：第一行=名称（可点击按钮），第二行=代码·市场 */
-function renderStock(row: TrendSelectionRow, onNavigate?: (row: TrendSelectionRow) => void): ReactNode {
+/** 股票列渲染（复用）：第一行=名称（可点击按钮）+/- 自选按钮，第二行=代码·市场 */
+function renderStock(
+  row: TrendSelectionRow,
+  onNavigate?: (row: TrendSelectionRow) => void,
+  inlineWatchlist?: {
+    watched: boolean
+    pending: boolean
+    onToggle: (row: TrendSelectionRow, add: boolean) => void
+  },
+): ReactNode {
   const { name, symbol, market } = getStockDisplay(row)
   return (
-    <div>
-      <div className="symbol">
-        {onNavigate ? (
-          <button
-            type="button"
-            className="stock-name-btn"
-            onClick={(e) => { e.stopPropagation(); onNavigate(row) }}
-            aria-label={`查看${name}详情`}
-          >
-            {name}
-            <span className="stock-name-arrow" aria-hidden="true">›</span>
-          </button>
-        ) : name}
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="symbol">
+          {onNavigate ? (
+            <button
+              type="button"
+              className="stock-name-btn"
+              onClick={(e) => { e.stopPropagation(); onNavigate(row) }}
+              aria-label={`查看${name}详情`}
+            >
+              {name}
+              <span className="stock-name-arrow" aria-hidden="true">›</span>
+            </button>
+          ) : name}
+        </div>
+        <div className="symbol-sub">
+          {symbol}
+          {market ? ` · ${market}` : ''}
+        </div>
       </div>
-      <div className="symbol-sub">
-        {symbol}
-        {market ? ` · ${market}` : ''}
-      </div>
+      {inlineWatchlist && (
+        <button
+          type="button"
+          className="btn inline-watchlist-btn"
+          onClick={(e) => {
+            e.stopPropagation()
+            inlineWatchlist.onToggle(row, !inlineWatchlist.watched)
+          }}
+          disabled={inlineWatchlist.pending}
+          aria-label={inlineWatchlist.watched ? '移除自选' : '加入自选'}
+          aria-pressed={inlineWatchlist.watched}
+          title={inlineWatchlist.watched ? '移除自选' : '加入自选'}
+          style={{
+            width: 22,
+            height: 22,
+            minWidth: 22,
+            padding: 0,
+            border: '1px solid #2a3042',
+            borderRadius: 4,
+            background: inlineWatchlist.watched ? '#1f6feb' : 'transparent',
+            color: inlineWatchlist.watched ? '#fff' : '#8ea0b7',
+            fontSize: 14,
+            lineHeight: '20px',
+            cursor: inlineWatchlist.pending ? 'wait' : 'pointer',
+            flexShrink: 0,
+          }}
+        >
+          {inlineWatchlist.pending ? '…' : (inlineWatchlist.watched ? '−' : '+')}
+        </button>
+      )}
     </div>
   )
 }
@@ -95,7 +141,28 @@ function renderDirBars(row: TrendSelectionRow): ReactNode {
 export function getTrendSelectionColumns(
   options: TrendSelectionColumnOptions = {},
 ): DataTableColumn<TrendSelectionRow>[] {
-  const { onAddToWatchlist, onDetail, addPending = false, onNavigateToStock, watchlistInstrumentIds, onToggleWatchlist, watchlistPendingIds } = options
+  const {
+    onAddToWatchlist,
+    onDetail,
+    addPending = false,
+    onNavigateToStock,
+    watchlistInstrumentIds,
+    onToggleWatchlist,
+    watchlistPendingIds,
+    inlineWatchlistToggle = false,
+  } = options
+
+  // [CHANGE-20260729-009] inlineWatchlistToggle=true 时，股票名称旁渲染 +/- 按钮，
+  // 且不返回独立 action 列（/market 专用）。其他页面不受影响。
+  const buildInlineWatchlist = (row: TrendSelectionRow) => {
+    if (!inlineWatchlistToggle || !onToggleWatchlist) return undefined
+    const instrumentId = row.instrumentId
+    return {
+      watched: watchlistInstrumentIds?.has(instrumentId) ?? false,
+      pending: watchlistPendingIds?.has(instrumentId) ?? false,
+      onToggle: onToggleWatchlist,
+    }
+  }
 
   const columns: DataTableColumn<TrendSelectionRow>[] = [
     {
@@ -104,10 +171,10 @@ export function getTrendSelectionColumns(
       dataType: 'text',
       sortable: true,
       filterable: true,
-      width: 150,
+      width: inlineWatchlistToggle ? 170 : 150,
       sortValue: (row) => getStockDisplay(row).name,
       filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
-      render: (row) => renderStock(row, onNavigateToStock),
+      render: (row) => renderStock(row, onNavigateToStock, buildInlineWatchlist(row)),
       // CHANGE-20260714-001: stock 列改用普通筛选（contains/not_contains/eq）
       // 与顶部 keyword 搜索独立（顶部 keyword 负责 symbol/name/pinyin 正向搜索）
     },
@@ -329,6 +396,12 @@ export function getTrendSelectionColumns(
       },
     },
   ]
+
+  // [CHANGE-20260729-009] inlineWatchlistToggle=true 时移除独立 action 列
+  // （+/- 按钮已内联到股票名称旁，/market 专用；其他页面不受影响）
+  if (inlineWatchlistToggle) {
+    return columns.filter((c) => c.key !== 'action')
+  }
 
   return columns
 }

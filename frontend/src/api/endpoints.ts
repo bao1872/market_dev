@@ -1936,6 +1936,29 @@ export interface MarketStockRow {
    * 键分组：快照7 / 趋势18 / 结构8 / 结构事件21 / 动量13 / 动量事件9 / 筹码10 / 量能13。
    */
   first_pyramid: Record<string, unknown> | null
+  /**
+   * [CHANGE-20260729-009] DSA 策略结果 payload（含 dsa_dir_bars/vwap_ret_avg 等原 DSA 字段）。
+   * 无匹配时为 null；DSA 列通过 pickPayload 读取此字段。
+   */
+  payload: Record<string, unknown> | null
+  /** 快照所属 run ID（已发布 stock_core pointer.data_run_id） */
+  data_run_id: string | null
+  /** 第一金字塔必选维度是否就绪（趋势/结构/动量均有权威字段非空） */
+  factor_ready: boolean | null
+  /** 因子错误代码（如 insufficient_history / compute_failed） */
+  factor_error: string | null
+  /**
+   * 筹码共识结构化状态：{status, reason_code, actual_bars, required_bars, reason_text, computed_at}。
+   * 无 chip 记录时为 null。
+   */
+  chip_status: {
+    status: string
+    reason_code: string | null
+    actual_bars: number | null
+    required_bars: number | null
+    reason_text: string | null
+    computed_at: string | null
+  } | null
 }
 
 /** 行情列表分页响应（对齐后端 MarketStocksResponse） */

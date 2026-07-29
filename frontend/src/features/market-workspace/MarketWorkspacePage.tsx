@@ -1,12 +1,15 @@
-// [MarketWorkspacePage] - 描述: 行情页（DSA 已发布结果列表 + 可收起右栏）
+// [MarketWorkspacePage] - 描述: 行情页（/market/stocks 统一数据源 + 可收起右栏）
 // PRD §6.1 + AGENTS §12.2：/market 是 published DSA 结果的统一筛选入口。
-// 数据流：usePublishedRuns(dsa_selector) → useStrategyRunResults(universe=all|watchlist) → adaptStrategyResultToTrendRow → StrategyDataTable + getTrendSelectionColumns
+// [CHANGE-20260729-009] 数据流：useMarketStocks(scope=all|watchlist) → adaptMarketStockToTrendRow → StrategyDataTable + getTrendSelectionColumns(inlineWatchlistToggle=true)
+//   旧双分页架构（useStrategyRunResults + useMarketStocks 按 instrument_id 合并）已删除。
+//   usePublishedRuns 仅用于导出 activeRunId（导出仍走 /strategy-runs/{run_id}/results/export）。
 // 明确禁止：不得挂载 StockResearchWorkspace、StrategyChart 或任何K线。
 // URL 状态：scope/selected 由本页管理；sort/dir/keyword/filters/page/page_size 由 StrategyDataTable 内置 screenerUrlState 管理。
 // 顶部搜索框是 /market 唯一全文搜索入口（searchable=false 关闭表格内置搜索），keyword 通过 externalKeyword 受控注入。
 // 右栏默认收起，收起时不挂载 EventStatePanel、不请求 context。
 // 单击非链接区域更新 selected 并刷新右栏；股票名称链接进入 /stock/:symbol?returnTo=...。
-// 自选操作列：单次 useWatchlist 请求按 instrument_id 建 Set；加入/移除复用 useAddToWatchlist/useRemoveFromWatchlist；按 instrument_id 维护 pending 防重复点击。
+// 自选操作：股票名称旁 22×22 +/- 内联按钮（inlineWatchlistToggle）；单次 useWatchlist 请求按 instrument_id 建 Set；
+//   加入/移除复用 useAddToWatchlist/useRemoveFromWatchlist；按 instrument_id 维护 pending 防重复点击。
 // 批次信息（数据日期/批次/状态）属调试信息：普通用户 DOM 中完全不渲染；仅 admin 可见，默认折叠为"批次信息"，展开后显示。
 import { useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
@@ -16,7 +19,6 @@ import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn, DataTableQuery } from '@/components/StrategyDataTable'
 import {
   usePublishedRuns,
-  useStrategyRunResults,
   useWatchlist,
   useAddToWatchlist,
   useRemoveFromWatchlist,
@@ -28,7 +30,7 @@ import { useToast } from '@/store/toast'
 import { apiClient } from '@/api/client'
 import type { MarketStocksQueryParams, StrategyResultQueryParams } from '@/api/endpoints'
 import {
-  adaptStrategyResultToTrendRow,
+  adaptMarketStockToTrendRow,
   getTrendSelectionColumns,
   getStockDisplay,
   type TrendSelectionRow,
@@ -337,12 +339,11 @@ export default function MarketWorkspacePage() {
     [marketListCtx],
   )
 
-  const resultsQuery = useStrategyRunResults(activeRunId || undefined, resultParams)
-  const totalResults = resultsQuery.data?.total ?? 0
-
-  // [PRD §三 列表视图第一金字塔全量字段] 并行调用 /market/stocks 批量获取 first_pyramid
-  // 与 useStrategyRunResults 同 scope/page/page_size，按 instrument_id 合并到行；不逐行请求
-  // [CHANGE-20260729-004 P0-1] fp_filter/fp_sort 从 query.filters/query.sort 分离 fp_ 前缀项
+  // [CHANGE-20260729-009] /market/stocks 作为列表唯一数据源（删除双分页合并架构）。
+  // 不再使用 useStrategyRunResults + useMarketStocks 双分页按 instrument_id 合并。
+  // /market/stocks 返回全部字段：股票基础信息 + DSA payload + 99 个 fp 字段 + watchlist 状态 +
+  // data_run_id + factor_ready/error + chip_status 结构化状态。
+  // usePublishedRuns 仅用于导出 activeRunId（导出仍走 /strategy-runs/{run_id}/results/export）。
   const marketStocksParams: MarketStocksQueryParams = useMemo(
     () => ({
       scope,
@@ -358,29 +359,14 @@ export default function MarketWorkspacePage() {
     }),
     [scope, keyword, query.page, query.pageSize, query.sort, query.filters, industry, concept],
   )
-  const marketStocksQuery = useMarketStocks(marketStocksParams, {
-    enabled: !!resultsQuery.data,
-  })
+  const marketStocksQuery = useMarketStocks(marketStocksParams)
 
-  // 构建 instrument_id → first_pyramid 映射（单次合并，禁止 N+1）
-  const firstPyramidMap = useMemo(() => {
-    const m = new Map<string, Record<string, unknown> | null>()
-    for (const ms of marketStocksQuery.data?.items ?? []) {
-      m.set(ms.instrument_id, ms.first_pyramid)
-    }
-    return m
-  }, [marketStocksQuery.data?.items])
-
-  // 行数据：StrategyResult → TrendSelectionRow，合并 first_pyramid
+  // 行数据：MarketStockRow → TrendSelectionRow（单次转换，包含 first_pyramid/payload/chip_status）
   const rows: TrendSelectionRow[] = useMemo(
-    () => (resultsQuery.data?.items ?? []).map((r) => {
-      const row = adaptStrategyResultToTrendRow(r)
-      // 合并第一金字塔扁平化字段（无匹配时为 null，列显示 "—"）
-      row.firstPyramid = firstPyramidMap.get(row.instrumentId) ?? null
-      return row
-    }),
-    [resultsQuery.data?.items, firstPyramidMap],
+    () => (marketStocksQuery.data?.items ?? []).map((ms) => adaptMarketStockToTrendRow(ms)),
+    [marketStocksQuery.data?.items],
   )
+  const totalResults = marketStocksQuery.data?.total ?? 0
 
   // 行业/概念变更：更新 URL + 重置 page=1（CHANGE-20260713-006）
   const handleIndustryChange = useCallback(
@@ -467,13 +453,16 @@ export default function MarketWorkspacePage() {
   // 99 列默认通过 defaultHiddenColumns 隐藏非核心键；列设置面板可显隐/拖拽排序。
   const columns: DataTableColumn<TrendSelectionRow>[] = useMemo(
     () => {
+      // [CHANGE-20260729-009] inlineWatchlistToggle=true：
+      // 股票名称旁渲染 +/- 按钮，getTrendSelectionColumns 已自动移除 action 列。
       const baseColumns = getTrendSelectionColumns({
         onNavigateToStock: canAccessStockDetail ? handleNavigateToStock : undefined,
         onToggleWatchlist: canAccessWatchlist ? handleToggleWatchlist : undefined,
         watchlistInstrumentIds,
         watchlistPendingIds,
+        inlineWatchlistToggle: canAccessWatchlist,
       })
-      // 拆分基础列与操作列，确保 fp_ 列插入在中间，操作列固定末尾
+      // inlineWatchlistToggle=true 时无 action 列；false 时拆分后追加 fp_ 列 + action 末尾
       const actionCol = baseColumns.find((c) => c.isAction)
       const nonActionBaseCols = baseColumns.filter((c) => !c.isAction)
       const fpCols = getFirstPyramidColumns()
@@ -572,9 +561,9 @@ export default function MarketWorkspacePage() {
             total={totalResults}
             serverSide
             onQueryChange={handleQueryChange}
-            loading={resultsQuery.isLoading || runsQuery.isLoading}
-            error={resultsQuery.isError ? '运行结果加载失败' : runsQuery.isError ? '运行批次加载失败' : null}
-            emptyText={resultsQuery.isError ? '运行结果加载失败' : '本批次无选股结果'}
+            loading={marketStocksQuery.isLoading || runsQuery.isLoading}
+            error={marketStocksQuery.isError ? '行情列表加载失败' : runsQuery.isError ? '运行批次加载失败' : null}
+            emptyText={marketStocksQuery.isError ? '行情列表加载失败' : '本页无数据'}
             initialPageSize={PAGE_SIZE}
             tableClassName="compact-table"
             stickyHeaderMode="container"
