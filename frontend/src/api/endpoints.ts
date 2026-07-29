@@ -520,15 +520,6 @@ export type IndicatorView = 'node_cluster' | 'bollinger' | 'smc' | 'structure_no
 // 新业务固定使用的视图常量
 export const FEISHU_CAPTURE_VIEW = 'structure_node' as const
 
-/** POST /instruments/{instrument_id}/send-feishu 请求体
- * [CHANGE-20260728-010] 历史兼容字段，前端已不再选择 indicator_view。
- * 后端兼容接收但忽略此值，固定使用 FEISHU_CAPTURE_VIEW='structure_node'。
- */
-export interface SendFeishuRequest {
-  /** [历史兼容] 旧版字段，新业务已忽略。后端固定使用 structure_node。 */
-  indicator_view?: IndicatorView
-}
-
 /** POST /instruments/{instrument_id}/send-feishu 响应 - 创建异步投递任务 */
 export interface StockDetailFeishuCreateResponse {
   test_run_id: string
@@ -1481,15 +1472,14 @@ export async function testNotificationChannelLatestEvent(channelId: string): Pro
 
 // [StockDetailFeishu] - 描述: 创建异步投递任务（Outbox 链路），返回 test_run_id 供轮询
 // [CHANGE-20260728-010] 前端不再选择 indicator_view，固定发送空 body（后端使用 structure_node）。
-// 旧 payload 参数保留仅为兼容历史调用，新业务应直接调用 sendStockDetailFeishu(instrumentId)。
+// [CHANGE-20260728-010 P0] 移除无效 payload 参数（旧实现 payload ? {} : {} 无意义）。
 export async function sendStockDetailFeishu(
   instrumentId: string,
-  payload?: SendFeishuRequest,
 ): Promise<StockDetailFeishuCreateResponse> {
   const { data } = await apiClient.post<StockDetailFeishuCreateResponse>(
     `/instruments/${instrumentId}/send-feishu`,
     // [CHANGE-20260728-010] 不再透传 indicator_view，后端固定使用 FEISHU_CAPTURE_VIEW
-    payload ? {} : {},
+    {},
   )
   return data
 }

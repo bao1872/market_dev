@@ -87,7 +87,8 @@ monitor_batch_service
 - `indicator_view` 固定为 `FEISHU_CAPTURE_VIEW='structure_node'`（不再按事件类型映射 smc/node_cluster/bollinger）
 - 图层固定：`node + smc + volume`，`boll=false`
 - 后端 `/capture/stocks/{id}/snapshot` 强制 `include_smc=True`
-- combined Ready = `nodeReady && smcContractReady`（SMC 数组允许为空）
+- combined Ready = `nodeReady && smcContractReady`（events/order_blocks 为数组允许为空；swing_bias 为 number 1/-1/0）
+- 纯函数实现位置：`frontend/src/features/stock-research/captureReady.ts`（[P0 补丁 2026-07-29] 提取，可独立单元测试）
 - 截图调用方 timeout=120s（`CAPTURE_HTTP_TIMEOUT_SECONDS`）
 
 幂等键：`user_id + instrument_id + event_id + indicator_view`

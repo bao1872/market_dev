@@ -53,11 +53,12 @@ class CaptureJob(Base):
         Text, nullable=False, comment="消息组 ID（关联 card/image Outbox）"
     )
     # [CHANGE-20260720-003 §三] 贯穿全链的 indicator_view
-    # 一张截图只渲染一个指标视图（node_cluster|bollinger|smc），禁止混合指标叠图。
+    # [CHANGE-20260728-010] 新业务固定写入 structure_node（结构 + 筹码共识组合视图）
+    # 历史值：node_cluster / bollinger / smc 仅用于旧数据回读兼容，不再作为新业务写入路径
     # nullable=True 兼容历史数据；新写入必须填充。
     indicator_view: Mapped[str | None] = mapped_column(
         Text, nullable=True,
-        comment="指标视图 node_cluster|bollinger|smc（历史数据为 NULL）",
+        comment="指标视图 node_cluster|bollinger|smc(历史)|structure_node(新业务)",
     )
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default=CAPTURE_STATUS_PENDING,

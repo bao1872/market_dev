@@ -1,14 +1,14 @@
 # Latest Report
 
-- Report: REPORT-20260726-004-reports-hardening
-- Title: Reports 报告体系收口修正
-- Status: COMPLETED
-- Created: 2026-07-26 (Asia/Shanghai)
-- Environment: TRAE Work
-- Branch: trae/agent-MTiOxg
-- Base SHA: d99a5befd0a43e90e78d8134dbdbbfde2d0338bb
-- Implementation SHA: ef33f7c5d897f1c0f4f7b412a7afd6e70f7acb9c
-- Report Published Through SHA: ef33f7c5d897f1c0f4f7b412a7afd6e70f7acb9c
-- Path: reports/current/REPORT-20260726-004-reports-hardening.md
-- CHANGE: CHANGE-20260726-004
-- Summary: 修正 reports 体系 SHA 语义为三字段（Base/Implementation/Report Published Through），统一"15 个检查组"描述，修复 secret 检测逻辑（区分真实赋值与说明文字），强化 SHA 一致性检查（40hex/commit/祖先/LATEST/INDEX），新增 70 自测，reports CI job 增加 fetch-depth:0。
+- Report: REPORT-20260729-001-change-20260728-010-p0-fix
+- Title: CHANGE-20260728-010 P0 修复与本地验证收口
+- Status: PARTIAL
+- Created: 2026-07-29 (America/New_York)
+- Environment: TRAE CN (Local Native)
+- Branch: dev
+- Base SHA: 85c5b171a0e1f7c5740484f4a25997fa82edb2d8
+- Implementation SHA: (待 push 后填写)
+- Report Published Through SHA: (待 push 后填写)
+- Path: reports/current/REPORT-20260729-001-change-20260728-010-p0-fix.md
+- CHANGE: CHANGE-20260728-010
+- Summary: 修复 P0 类型判断错误（swing_bias 当数组处理导致组合截图永远无法 Ready）；提取纯函数 captureReady.ts；简化 sendStockDetailFeishu；更新 CaptureJob 注释；新增 13 个前端单元测试；对齐 CHANGE/Maps 文档；浏览器真实链路验收 BLOCKED。

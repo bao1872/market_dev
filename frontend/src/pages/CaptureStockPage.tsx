@@ -34,11 +34,12 @@ import { FEISHU_CAPTURE_VIEW } from '@/api/endpoints'
 import StrategyChart from '@/components/StrategyChart'
 import MobileIndicatorStage from '@/components/MobileIndicatorStage'
 import type { ChartViewport } from '@/components/chartViewport'
-import type { CaptureSnapshotResponse, IndicatorResponse, IndicatorView } from '@/api/endpoints'
+import type { CaptureSnapshotResponse, IndicatorView } from '@/api/endpoints'
 import { resolveStrategy } from '@/lib/strategy-manifest'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { mapBarsToBarData } from '@/utils/chart'
 import { DEFAULT_TIMEFRAME } from '@/features/stock-research/stockResearchTypes'
+import { computeCombinedReady } from '@/features/stock-research/captureReady'
 
 // [MobileIndicatorStage] 图表区域高度常量
 // 几何推导（与 global.scss 中 .mobile-stage-chart-card / .mobile-stage-chart-viewport 对齐）：
@@ -199,11 +200,13 @@ export default function CaptureStockPage() {
   //   - 用户可点击"重试"按钮触发 snapshotQuery.refetch()
   //
   // [CHANGE-20260728-010] combined Ready = nodeReady && smcContractReady
-  //   - nodeReady: data.node_cluster 含 100 行 profile + node_regions_hash + node_regions
-  //   - smcContractReady: data.smc DTO 结构存在（events/order_blocks/swing_bias 等数组）
-  //     SMC 数组允许为空（无事件时 SMC 结构仍需存在，避免前端永久 loading）
-  //   - 旧 bollinger 分支已移除（不再作为 Ready 条件）
-  //   - 旧 smc 单独 Ready 合并到 combined Ready：不再单独检查 algorithm_version
+//   - 纯函数实现位于 src/features/stock-research/captureReady.ts（可独立单元测试）
+//   - nodeReady: data.node_cluster 含 100 行 profile + node_regions_hash + node_regions
+//   - smcContractReady: data.smc DTO 结构存在（events/order_blocks 数组 + swing_bias 为 number）
+//     SMC 数组允许为空（无事件时 SMC 结构仍需存在，避免前端永久 loading）
+//   - P0 根因：旧实现错误要求 Array.isArray(swing_bias)，但 swing_bias 是 number(1/-1/0)，
+//     导致组合截图永远无法 Ready，Capture Worker 超时
+//   - 旧 bollinger 分支已移除（不再作为 Ready 条件）
   const renderFrame = snapshot?.render_frame
   const isFrameMatched = renderFrame?.matched === true
   const hasBaseData = !!barsResponse?.items?.length && !!indicatorsResponse
@@ -350,59 +353,4 @@ export default function CaptureStockPage() {
       )}
     </MobileIndicatorStage>
   )
-}
-
-/**
- * [CHANGE-20260728-010] combined Ready = nodeReady && smcContractReady
- *
- * - nodeReady: data.node_cluster 含 profile_rows + node_regions_hash + node_regions
- *   （兼容 watchlist_monitor / volume_node_monitor 旧命名空间回读）
- * - smcContractReady: data.smc DTO 结构存在（events/order_blocks/swing_bias 等核心数组字段）
- *   SMC 数组允许为空（无事件时 SMC 结构仍需存在，避免前端永久 loading）
- *
- * 旧 indicator_view 分支（node_cluster/bollinger/smc）已合并为组合视图检查；
- * bollinger 不再作为 Ready 条件（BB 不进入飞书截图）。
- *
- * 基础 Ready（bars 存在 + indicators 存在 + frame matched）由调用方检查，
- * 本函数只检查组合视图的额外条件。
- */
-function computeCombinedReady(indicators: IndicatorResponse | undefined): boolean {
-  if (!indicators?.data) return false
-  const data = indicators.data as Record<string, unknown>
-
-  // ===== Node Ready =====
-  // 兼容旧命名空间：node_cluster > watchlist_monitor > volume_node_monitor
-  const vn = (data['node_cluster'] ?? data['watchlist_monitor'] ?? data['volume_node_monitor']) as
-    | Record<string, unknown>
-    | undefined
-  if (!vn) return false
-  const profileRows = vn.profile_rows
-  const nodeRegionsHash = vn.node_regions_hash
-  const profileHash = vn.profile_hash
-  const nodeRegions = vn.node_regions
-  const hasHash =
-    (typeof nodeRegionsHash === 'string' && nodeRegionsHash.length > 0) ||
-    (typeof profileHash === 'string' && profileHash.length > 0)
-  const nodeReady =
-    Array.isArray(profileRows) && profileRows.length > 0 &&
-    hasHash &&
-    Array.isArray(nodeRegions)
-  if (!nodeReady) return false
-
-  // ===== SMC Contract Ready =====
-  // DTO 结构必须存在；数组允许为空（无事件时不能导致永久 loading）
-  // 实际 API 返回扁平结构：events/order_blocks/equal_highs_lows/trailing/swing_bias/pivots/params/view
-  const smc = data['smc'] as Record<string, unknown> | undefined
-  if (!smc) return false
-  // 核心字段必须为数组类型（即使为空也代表 SMC 结构已就绪）
-  const events = smc.events
-  const orderBlocks = smc.order_blocks
-  const swingBias = smc.swing_bias
-  const params = smc.params
-  const hasSmcStructure =
-    Array.isArray(events) &&
-    Array.isArray(orderBlocks) &&
-    Array.isArray(swingBias) &&
-    typeof params === 'object' && params !== null
-  return hasSmcStructure
 }

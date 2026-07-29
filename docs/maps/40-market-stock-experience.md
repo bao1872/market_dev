@@ -257,9 +257,15 @@ Capture 页面链路：
 - 前端固定 `indicatorView = FEISHU_CAPTURE_VIEW`（'structure_node'）
 - Capture query 透传 `indicator_view=structure_node`，后端忽略该参数渲染逻辑（仅用于缓存键维度）
 - 图层固定使用 `FEISHU_CAPTURE_LAYER_PRESET`（node=true, smc=true, boll=false）
-- combined Ready = `nodeReady && smcContractReady`（`computeCombinedReady`）
-- SMC DTO 结构必须存在（events/order_blocks/swing_bias 为数组，允许为空）
-- module-label 显示 "结构 + 筮码共识"（`INDICATOR_VIEW_LABELS['structure_node']`）
+- combined Ready = `nodeReady && smcContractReady`（纯函数 `computeCombinedReady`，位于 `frontend/src/features/stock-research/captureReady.ts`）
+- SMC DTO 结构必须存在（events/order_blocks 为数组允许为空；swing_bias 为有限 number，1/-1/0）
+- module-label 显示 "结构 + 筹码共识"（`INDICATOR_VIEW_LABELS['structure_node']`）
+
+[CHANGE-20260728-010 P0 修复补丁（2026-07-29）]
+- 根因：旧 `computeCombinedReady` 错误要求 `Array.isArray(swing_bias)`，但 `swing_bias` 是 number(1/-1/0)，
+  导致组合截图永远无法 Ready，Capture Worker 30s 超时返回 502。
+- 修复：提取为独立纯函数 `captureReady.ts`，修正 swing_bias 类型判断为 `typeof === 'number' && Number.isFinite`。
+- 同时简化 `sendStockDetailFeishu`：删除无效 `payload` 参数，固定 POST `{}`。
 
 ## 7. 验证入口
 

@@ -4,6 +4,7 @@
 
 | Report ID | Date | Type | Status | Title | Environment | Implementation SHA | Path |
 |---|---|---|---|---|---|---|---|
+| REPORT-20260729-001-change-20260728-010-p0-fix | 2026-07-29 | bugfix | PARTIAL | CHANGE-20260728-010 P0 修复与本地验证收口 | TRAE CN (Local Native) | (待 push 后填写) | reports/current/REPORT-20260729-001-change-20260728-010-p0-fix.md |
 | REPORT-20260726-004-reports-hardening | 2026-07-26 | governance | COMPLETED | Reports 报告体系收口修正 | TRAE Work | ef33f7c5d897f1c0f4f7b412a7afd6e70f7acb9c | reports/current/REPORT-20260726-004-reports-hardening.md |
 | REPORT-20260726-003-reports-governance | 2026-07-26 | governance | COMPLETED | 建立统一 reports 报告管理体系 | TRAE Work | 012681fea1966dc81385822da57e58ae645d88c4 | reports/current/REPORT-20260726-003-reports-governance.md |
 | REPORT-20260726-002-governance-phase1 | 2026-07-26 | governance-phase | SUPERSEDED | 盘迹项目治理 Phase 1 报告 | TRAE Work | (legacy) | reports/archive/2026/07/REPORT-20260726-002-governance-phase1.md |
