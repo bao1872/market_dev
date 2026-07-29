@@ -4,13 +4,17 @@
 - 每个 (instrument_id, trade_date, core_run_id, algorithm_version) 组合保存一份
   point-in-time 筹码共识快照。
 - chip_payload 保存 ChipConsensusResult.to_dict() 完整输出。
-- core_run_id 关联主 after_close 主 run（不反改主 run）。
+- core_run_id 关联 StockFeatureSnapshotRun.id（核心数据版本，不指向 SchedulerJobRun.id）。
 - chip_hash 独立于 core inputHash（daily + 15m bars 的 hash）。
 
 设计说明（[CHANGE-20260729-003] 核心与筹码解耦 - P0-10）：
 - 主 run 成功后由独立 after_close_chip_consensus job 异步写入
 - chip 失败/部分成功不反改主 run 状态（写 metadata.chip_status=partial）
 - 失败重试只覆盖失败 instrument，不重算成功项
+
+[CHANGE-20260729-007 ID 合同修复 2026-07-29]：
+- core_run_id FK 从 scheduler_job_runs.id 修正为 stock_feature_snapshot_runs.id
+- 与 after_close_orchestrator 传入的 snapshot_run_id 一致
 
 模块自测：
     python -m app.models.stock_chip_consensus_snapshot
@@ -57,9 +61,9 @@ class StockChipConsensusSnapshot(Base):
     )
     core_run_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("scheduler_job_runs.id"),
+        ForeignKey("stock_feature_snapshot_runs.id"),
         nullable=False,
-        comment="关联主 after_close run id（不反改主 run）",
+        comment="关联 StockFeatureSnapshotRun.id（核心数据版本，不指向 SchedulerJobRun.id）",
     )
     algorithm_version: Mapped[str] = mapped_column(
         Text(),

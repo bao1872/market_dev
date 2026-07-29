@@ -36,7 +36,6 @@ from app.models.factor_publication import (
     SCOPE_TYPE_MARKET,
     FactorPublication,
 )
-from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.models.stock_feature_snapshot_run_item import (
     ITEM_FAILED,
@@ -248,18 +247,38 @@ async def publish_market_aggregation(
 ) -> FactorPublication:
     """切换 market_aggregation publication pointer。
 
-    前置条件：source_core_run_id 必须是已发布的 stock_core run。
-    聚合失败只重跑聚合，不回滚核心。
+    前置条件（[CHANGE-20260729-007] 严格校验）：
+    - source_core_run_id 必须等于该日期已发布的 stock_core pointer.data_run_id
+    - 聚合失败只重跑聚合，不回滚核心
 
     Args:
         session: 异步 DB 会话
         trade_date: 业务交易日
-        source_core_run_id: 源 stock_core snapshot_run_id
+        source_core_run_id: 源 stock_core snapshot_run_id（必须匹配已发布 pointer）
         aggregation_run_id: 聚合 run ID（可指向 SchedulerJobRun 或独立表）
         algorithm_version: 算法版本
         metadata: 额外元数据
+
+    Raises:
+        ValueError: source_core_run_id 与已发布 stock_core pointer 不匹配
     """
     import json
+
+    # [CHANGE-20260729-007] 严格校验：source_core_run_id 必须是已发布的 stock_core run
+    published_core_run_id = await get_published_snapshot_run_id(
+        session, trade_date, publication_kind=PUBLICATION_KIND_STOCK_CORE,
+    )
+    if published_core_run_id is None:
+        raise ValueError(
+            f"market_aggregation 发布失败: trade_date={trade_date} 无已发布 stock_core pointer，"
+            f"必须先发布 stock_core"
+        )
+    if published_core_run_id != source_core_run_id:
+        raise ValueError(
+            f"market_aggregation 发布失败: source_core_run_id={source_core_run_id} "
+            f"与已发布 stock_core pointer={published_core_run_id} 不匹配，"
+            f"禁止聚合基于未发布或旧版本 core run"
+        )
 
     now = datetime.now(UTC)
     meta_str = json.dumps(metadata, ensure_ascii=False) if metadata else None
@@ -304,21 +323,66 @@ async def publish_market_aggregation(
     return pub  # type: ignore[return-value]
 
 
+async def compute_history_coverage(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+) -> float | None:
+    """从 DB 统计 history_run 的覆盖率。
+
+    [CHANGE-20260729-007] coverage 必须由 DB 统计，不接受调用方任意传值。
+
+    覆盖率 = succeeded_count / expected_count
+    expected_count = history_run.expected_count
+
+    Returns:
+        覆盖率（0.0-1.0），history_run 不存在返回 None
+    """
+    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
+
+    history_run = await session.get(FirstPyramidHistoryRun, history_run_id)
+    if history_run is None:
+        return None
+
+    expected = history_run.expected_count or 0
+    if expected == 0:
+        return 0.0
+
+    succeeded = history_run.succeeded_count or 0
+    return succeeded / expected
+
+
 async def publish_history_cross_section(
     session: AsyncSession,
     trade_date: date,
     history_run_id: uuid.UUID,
     algorithm_version: str,
-    coverage: float,
     *,
+    coverage: float | None = None,
     threshold: float = HISTORY_CROSS_SECTION_MIN_COVERAGE,
     metadata: dict[str, Any] | None = None,
 ) -> FactorPublication:
     """切换 history_cross_section publication pointer（历史横截面发布）。
 
+    [CHANGE-20260729-007] coverage 必须由 DB 统计（compute_history_coverage），
+    不接受调用方任意传值。如传入 coverage 则仅用于门禁检查，
+    实际写入的 coverage_ratio 以 DB 统计为准。
+
     前置条件：history_run 覆盖率达到门禁。
     """
     import json
+
+    # [CHANGE-20260729-007] 从 DB 统计 coverage，不接受调用方任意传值
+    db_coverage = await compute_history_coverage(session, history_run_id)
+    if db_coverage is None:
+        raise ValueError(
+            f"history_cross_section 发布失败: history_run_id={history_run_id} 不存在"
+        )
+    if coverage is not None and abs(coverage - db_coverage) > 0.001:
+        logger.warning(
+            "[Publication] history coverage 不一致: caller=%.4f, db=%.4f, 以 DB 为准",
+            coverage, db_coverage,
+        )
+    coverage = db_coverage
 
     if coverage < threshold:
         raise CoverageBelowThresholdError(coverage, threshold, history_run_id)
@@ -449,17 +513,16 @@ async def is_stale_snapshot(
 ) -> bool:
     """判断快照是否过期：snapshot trade_date < MAX(bars_daily.trade_date)。
 
-    用于 is_stale computed 字段（与 market_stocks_service 口径一致）。
-    """
-    from app.models.instrument import Instrument
+    [CHANGE-20260729-007 修复] 真源改为 bars_daily.max(trade_date)，
+    不再使用 StockFeatureSnapshot.max(trade_date)（后者是快照自身日期，不是行情真源）。
+    与 market_stocks_service._build_max_trade_date_subquery 口径一致。
 
-    # 查找该 instrument 在 bars_daily 中的最新 trade_date
-    # 简化实现：通过 snapshot_run 的 trade_date 与当前最新交易日比较
-    max_date_stmt = (
-        select(func.max(StockFeatureSnapshot.trade_date))
-        .join(Instrument, StockFeatureSnapshot.instrument_id == Instrument.id)
-        .where(Instrument.status == "active")
-    )
+    用于 is_stale computed 字段。
+    """
+    from app.models.bar import BarDaily
+
+    # 真源：bars_daily 表中所有股票的最新 trade_date
+    max_date_stmt = select(func.max(BarDaily.trade_date))
     result = await session.execute(max_date_stmt)
     max_trade_date = result.scalar_one_or_none()
 

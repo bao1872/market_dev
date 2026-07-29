@@ -141,3 +141,11 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - `history_run_id`（FirstPyramidHistoryRun.id）：历史回补版本；
 - `chip.core_run_id` 必须等于 `snapshot_run_id`，不得指向 `SchedulerJobRun.id`；
 - `FactorPublication.data_run_id` 指向 `snapshot_run_id` 或 `history_run_id`。
+
+### publication pointer 一致性（CHANGE-20260729-007 补充）
+
+- `factor_publications.trade_date` 必须为 NOT NULL；禁止用可空列配普通唯一约束制造多个 NULL "latest pointer"；
+- `publish_market_aggregation` 必须验证 `source_core_run_id` 等于该日期已发布 `stock_core` pointer 的 `data_run_id`，不匹配抛错；
+- `publish_history_cross_section` 的 coverage 必须由 DB 统计（`compute_history_coverage`），不接受调用方任意传值；
+- `is_stale` 真源为 `bars_daily.max(trade_date)`，不是 `StockFeatureSnapshot.max(trade_date)`；
+- 读取端（stock_context / market_stocks / watchlist）优先读 publication pointer，无 pointer 时兼容回退 `published_at IS NOT NULL`；有 pointer 后禁止混读不同 run。

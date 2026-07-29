@@ -171,12 +171,17 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 
 **关键变更**：`after_close_orchestrator.py` 中 `create_after_close_chip_consensus_job(core_run_id=snapshot_run_id)` 不再传 `job_run_id`。
 
+**[CHANGE-20260729-007 ID 合同修复]**：
+- 071 migration FK 已修正：`stock_chip_consensus_snapshots.core_run_id` FK 从 `scheduler_job_runs.id` → `stock_feature_snapshot_runs.id`（与 orchestrator 传入值一致）
+- 073 migration `factor_publications.trade_date` 已改为 NOT NULL（避免普通唯一约束允许多 NULL 产生重复 pointer）
+- ORM 同步：`StockChipConsensusSnapshot.core_run_id` / `FactorPublication.trade_date`
+
 ### 11.3 新增服务
 
 | 服务 | 模块 | 核心函数 |
 |---|---|---|
 | Run Item | `app.services.snapshot_run_item_service` | `create_run_items` / `claim_items`（UPDATE...RETURNING + FOR UPDATE SKIP LOCKED）/ `mark_item_succeeded/failed/skipped`（lease_epoch fencing）/ `get_run_progress` / `get_resume_items` / `recover_stale_running_items` |
-| 分层发布 | `app.services.factor_publication_service` | `compute_coverage` / `publish_stock_core`（门禁 0.98 + on_conflict_do_update 原子切换）/ `publish_market_aggregation` / `publish_history_cross_section` / `get_publication` / `get_published_snapshot_run_id`（无 pointer 回退 published_at） |
+| 分层发布 | `app.services.factor_publication_service` | `compute_coverage` / `publish_stock_core`（门禁 0.98 + on_conflict_do_update 原子切换）/ `publish_market_aggregation`（**[007]** 严格校验 source_core_run_id 匹配已发布 stock_core pointer）/ `publish_history_cross_section`（**[007]** coverage 由 `compute_history_coverage` 从 DB 统计）/ `get_publication` / `get_published_snapshot_run_id`（无 pointer 回退 published_at）/ `is_stale_snapshot`（**[007]** 真源改为 `bars_daily.max(trade_date)`） |
 
 ### 11.4 关键设计
 
@@ -185,12 +190,16 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 3. **coverage 门禁**：`CORE_PUBLICATION_MIN_COVERAGE = 0.98`，低于抛 `CoverageBelowThresholdError`
 4. **原子指针切换**：`pg_insert(...).on_conflict_do_update(constraint="uq_factor_publications_scope_date_kind")`
 5. **兼容回退**：`get_published_snapshot_run_id` 优先读 publication pointer，无 pointer 时回退 `published_at IS NOT NULL`
+6. **[007] 读取端接入 pointer**：`stock_context.py` 的 `_find_latest_succeeded_run` / `_find_run_by_trade_date` 优先读 `factor_publications`（stock_core kind），无 pointer 时回退 `published_at IS NOT NULL`
 
 ### 11.5 当前限制
 
-- Worker 未集成 run item（保持 legacy 模式）
+- **Worker 未集成 run item**：`after_close_orchestrator` 仍调 `compute_review_core_batch_for_trade_date` 批量计算，未调 `claim_items` / `mark_item_succeeded` / `publish_stock_core`
+- **market_stocks LATERAL 未接入 pointer**：`_build_snap_lateral()` 仍按 instrument 取最新 snapshot，未过滤 published run（性能关键查询，需单独 PR）
+- **历史回补未接入 run/item**：`backfill_first_pyramid_history_batch` 仍返回 dict 无持久化
 - 管理状态 API 未实现（service 层已就绪）
 - 历史回补 CLI 未实现
-- chip.core_run_id FK 仍指向 scheduler_job_runs（071 遗留，未来 migration 修复）
+- 事件 outbox 未实现
+- PG 集成测试 6 项待 CI（`PURE_UNIT_TEST=1` 时 SKIP）
 
-详见 `docs/changes/2026/CHANGE-20260729-006-incremental-checkpoint-layered-publication.md`。
+详见 `docs/changes/2026/CHANGE-20260729-006-incremental-checkpoint-layered-publication.md` 和 `docs/changes/2026/CHANGE-20260729-007-incremental-publish-real-integration-id-contract-fix.md`。

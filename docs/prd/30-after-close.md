@@ -105,3 +105,33 @@
 - 系统不存在 `dsa_only` 独立端点、独立 mode 分支或独立 run_type。
 - `restart_from="daily_ready"` 从 DSA 阶段重算，仍执行完整后续链路。
 - Map 对 AC-01 至 AC-16 给出实现状态、入口和验证证据。
+
+## 4. 增量发布架构需求（CHANGE-20260729-006/007）
+
+### AC-08：单股事务与检查点
+- 计算/事务/检查点粒度为"单股×阶段"；batch 只控制吞吐和内存，不是完成或发布边界。
+- 结果 commit 成功后才标记 item succeeded；单股失败只回滚该股票，不回滚其他已成功股票。
+- 恢复只处理 pending、可重试 failed、lease 过期 running；成功且 hash/version 相同不重算。
+
+### AC-09：分层发布指针
+- `factor_publications` 按交易日+kind 维护发布指针，`data_run_id` 指向覆盖率门禁通过的不可变 run。
+- `CORE_PUBLICATION_MIN_COVERAGE = 0.98`，低于门禁拒绝发布。
+- 发布只做小事务原子切换指针，不复制结果数据；不得修改已发布 run。
+- `trade_date` 必须为 NOT NULL（禁止普通唯一约束允许多 NULL 产生重复 pointer）。
+- `publish_market_aggregation` 必须验证 `source_core_run_id` 等于该日期已发布 stock_core pointer。
+- `publish_history_cross_section` 的 coverage 必须由 DB 统计，不接受调用方任意传值。
+- pointer 不得倒退到旧 run。
+
+### AC-10：读取端统一接入 pointer
+- 用户市场列表、筛选排序、个股详情默认只读取 stock_core pointer 指向的 run。
+- 无 pointer 时兼容回退到 `published_at IS NOT NULL`（旧数据）；有 pointer 后严禁混读不同 run。
+- 个股暂存结果可在管理端查看；详情若展示未正式发布结果，必须返回 `is_provisional=true`、`data_run_id` 和 `calculation_status`。
+- `is_stale` 真源为 `bars_daily.max(trade_date)`，不是 `StockFeatureSnapshot.max(trade_date)`。
+
+### AC-14：独立任务与核心保护
+- 市场聚合、事件、chip、通知为独立任务，失败只重试自身，不反改核心。
+- 主编排在 core pointer 发布后即可标记 `core_published` 并允许复盘。
+- 最终状态可为 `completed_with_errors`，但不得因 optional 失败反改 core。
+- chip.core_run_id = snapshot_run_id（不指向 SchedulerJobRun.id）。
+- chip 严格按 instrument_id + trade_date + snapshot_run_id + algorithm_version + status=succeeded 匹配。
+

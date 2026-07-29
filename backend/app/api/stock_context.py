@@ -101,9 +101,33 @@ async def _find_latest_succeeded_run(
 ) -> StockFeatureSnapshotRun | None:
     """查找最新的 succeeded + published + full scope 的 snapshot run。
 
+    [CHANGE-20260729-007] 优先读 factor_publications pointer（stock_core kind），
+    无 pointer 时回退到 published_at IS NOT NULL（兼容旧数据）。
+
     P0-3: 确定性排序 — trade_date DESC, published_at DESC, finished_at DESC
     确保同日多 run 时选择最新发布的批次。
     """
+    # [CHANGE-20260729-007] 优先读 publication pointer
+    from app.models.factor_publication import (
+        PUBLICATION_KIND_STOCK_CORE,
+        FactorPublication,
+    )
+
+    pub_stmt = (
+        select(FactorPublication)
+        .where(FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE)
+        .order_by(desc(FactorPublication.published_at))
+        .limit(1)
+    )
+    pub_result = await session.execute(pub_stmt)
+    pub = pub_result.scalar_one_or_none()
+    if pub is not None:
+        run = await session.get(StockFeatureSnapshotRun, pub.data_run_id)
+        if run is not None and run.schema_version == schema_version:
+            return run
+        # pointer 指向的 run 不存在或 schema 不匹配，回退到旧逻辑
+
+    # 回退：published_at IS NOT NULL（兼容无 pointer 的旧数据）
     stmt = (
         select(StockFeatureSnapshotRun)
         .where(
@@ -130,11 +154,38 @@ async def _find_run_by_trade_date(
 ) -> StockFeatureSnapshotRun | None:
     """按 as_of 截止日期查找 succeeded+published+full run。
 
+    [CHANGE-20260729-007] 优先读 factor_publications pointer（stock_core kind），
+    匹配 trade_date <= as_of 的最新 pointer，无 pointer 时回退到旧逻辑。
+
     as_of 为截止日期语义（非当天精确匹配）：
     - 查 `trade_date <= as_of`，按 trade_date DESC, published_at DESC, finished_at DESC
       取最新 1 条；
     - 周末/节假日/无批次日期返回该日期之前最近一次已发布状态（而非空态）。
     """
+    # [CHANGE-20260729-007] 优先读 publication pointer (trade_date <= as_of)
+    from app.models.factor_publication import (
+        PUBLICATION_KIND_STOCK_CORE,
+        FactorPublication,
+    )
+
+    pub_stmt = (
+        select(FactorPublication)
+        .where(
+            FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
+            FactorPublication.trade_date <= trade_date,
+        )
+        .order_by(desc(FactorPublication.trade_date))
+        .limit(1)
+    )
+    pub_result = await session.execute(pub_stmt)
+    pub = pub_result.scalar_one_or_none()
+    if pub is not None:
+        run = await session.get(StockFeatureSnapshotRun, pub.data_run_id)
+        if run is not None and run.schema_version == schema_version:
+            return run
+        # pointer 指向的 run 不存在或 schema 不匹配，回退到旧逻辑
+
+    # 回退：published_at IS NOT NULL（兼容无 pointer 的旧数据）
     stmt = (
         select(StockFeatureSnapshotRun)
         .where(

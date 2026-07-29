@@ -197,6 +197,21 @@ compact 与 detail 复用同一组 VisualCard，不复制业务判断。compact 
 
 - 历史实现曾包含 2x2 SummaryGrid、PyramidSummaryStrip、原始 volume 大整数；CHANGE-20260728-006 已删除并替换为 VisualCard + 轨道 + chip 设计。
 
+## 4.6 个股详情自选按钮位置（CHANGE-20260729-007）
+
+| 位置 | 实现 | 触发条件 |
+|---|---|---|
+| 顶部 `.actions` | **已删除**大号"加入/移出自选"按钮 | 全部场景 |
+| 左栏活动行 | `WatchlistToggleButton`（`.tv-watchlist-toggle-mini` 22×22px） | `s.symbol === 当前 symbol` |
+| 顶部股票名称旁 | `WatchlistToggleButton` fallback | direct 访问 / 来源失效 / 当前股不在 sourceStocks |
+
+- 组件入口：`frontend/src/pages/StockDetailPage.tsx` 内 `WatchlistToggleButton`
+- 样式：`frontend/src/styles/global.scss`（`.tv-source-name-row` + `.tv-watchlist-toggle-mini`，+ 品牌青绿 `#2dd4bf`，− 弱红 `#f87171`）
+- 复用：`detailActions.handleToggleWatchlist`，不新增 API
+- capture 模式（`capture=feishu`）全部隐藏自选按钮
+- 无障碍：`type=button`、`title`、`aria-label`、`aria-pressed`、`aria-busy`；`onClick` 使用 `stopPropagation` 避免切股
+- pending/disabled：`addWatchlistPending || removeWatchlistPending || !instrumentId`
+
 ## 5. 状态所有权
 
 重点核验：

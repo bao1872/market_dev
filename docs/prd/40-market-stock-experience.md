@@ -110,3 +110,29 @@
 ### MX-33 普通详情页图层工具栏不在本轮范围
 
 普通个股详情页布林带图层工具栏不在本轮删除范围，继续保留 Bollinger 图层开关。本轮仅删除“飞书分享弹窗”与“监控自动截图”链路中的 Bollinger 视图。
+
+## 5. 个股详情自选按钮位置（CHANGE-20260729-007）
+
+### MX-40 删除顶部大号自选按钮
+
+个股详情页顶部 `.actions` 区域不再包含"加入/移出自选"大号按钮；该区域只保留上一只/下一只/全屏等操作。
+
+### MX-41 紧凑自选按钮（22×22px）
+
+在左侧来源列表当前活动股票行（`s.symbol === 当前 symbol`），股票名称右侧放置 22×22 紧凑按钮：
+- 未自选显示"+"（品牌青绿色 `#2dd4bf`）
+- 已自选显示"−"（弱红色 `#f87171`）
+- 复用现有 `handleToggleWatchlist`，不新增 API
+- `onClick` 必须 `stopPropagation`，避免触发切股
+- `disabled` 覆盖无 instrumentId 及 add/remove pending 状态
+- 完整无障碍属性：`type=button`、`title`、`aria-label`、`aria-pressed`、`aria-busy`
+- 使用 `.tv-source-name-row` 和 `.tv-watchlist-toggle-mini`，名称保持 ellipsis
+- 不改变左栏宽度和行高
+
+### MX-42 Direct 访问 fallback 按钮
+
+direct 访问、来源失效或当前股票不在 sourceStocks 时，为避免功能消失，在顶部股票名称旁显示同款紧凑按钮作为 fallback。capture 模式全部隐藏自选按钮。
+
+### MX-43 自选移除后留在当前详情
+
+加入/移除后依赖现有 watchlist/monitor-status 缓存失效，页面不跳转；自选来源移除当前股后仍留在当前详情，按钮切回"+"。

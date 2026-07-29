@@ -428,8 +428,8 @@ def upgrade() -> None:
         sa.Column(
             "trade_date",
             sa.Date(),
-            nullable=True,
-            comment="业务交易日（market 级必填，instrument 级可为空表示 latest）",
+            nullable=False,
+            comment="业务交易日（所有 publication 都按交易日，禁止 NULL 避免普通唯一约束允许多 NULL）",
         ),
         sa.Column(
             "publication_kind",

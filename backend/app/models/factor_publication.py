@@ -80,9 +80,9 @@ class FactorPublication(Base):
         Text(), nullable=False,
         comment="范围键：market 全市场 / instrument_id 单股",
     )
-    trade_date: Mapped[date | None] = mapped_column(
-        Date(), nullable=True,
-        comment="业务交易日（market 级必填，instrument 级可为空表示 latest）",
+    trade_date: Mapped[date] = mapped_column(
+        Date(), nullable=False,
+        comment="业务交易日（所有 publication 都按交易日，禁止 NULL 避免普通唯一约束允许多 NULL）",
     )
     publication_kind: Mapped[str] = mapped_column(
         Text(), nullable=False,

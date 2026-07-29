@@ -13,8 +13,14 @@ Create Date: 2026-07-29
 设计说明：
 - chip_payload 保存 ChipConsensusResult.to_dict() 完整输出
 - chip_hash 独立于 core inputHash（daily+15m bars 的 hash）
-- core_run_id 关联主 after_close 主 run（不反改主 run）
+- core_run_id 关联 StockFeatureSnapshotRun.id（核心数据版本，不指向 SchedulerJobRun.id）
 - 失败重试只覆盖失败 instrument，不重算成功项
+
+[CHANGE-20260729-007 ID 合同修复 2026-07-29]：
+- core_run_id FK 从 scheduler_job_runs.id 修正为 stock_feature_snapshot_runs.id
+- 证据：071-073 从未进入持久环境（本地禁止 alembic upgrade；CI 临时 Postgres 容器
+  job 结束销毁；生产服务器未部署）。因此可修正未部署迁移，无需新增 074。
+- after_close_orchestrator 已传 core_run_id=snapshot_run_id（5152766），FK 必须匹配。
 
 非破坏性：
 - 纯新增表，不修改/删除现有列
@@ -69,9 +75,9 @@ def upgrade() -> None:
         sa.Column(
             "core_run_id",
             UUID(as_uuid=True),
-            sa.ForeignKey("scheduler_job_runs.id"),
+            sa.ForeignKey("stock_feature_snapshot_runs.id"),
             nullable=False,
-            comment="关联主 after_close run id（不反改主 run）",
+            comment="关联 StockFeatureSnapshotRun.id（核心数据版本，不指向 SchedulerJobRun.id）",
         ),
         sa.Column(
             "algorithm_version",

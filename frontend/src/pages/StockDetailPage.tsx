@@ -49,6 +49,36 @@ const INVALID_REASON_LABELS: Record<string, string> = {
   missing_origin: '来源上下文缺失（请从行情或自选列表进入）',
 }
 
+// [CHANGE-20260729-007] 紧凑自选切换按钮（22×22px）
+// +：品牌青绿色（未自选）；−：弱红色（已自选）
+// 用于左栏活动行 + direct fallback
+interface WatchlistToggleButtonProps {
+  inWatchlist: boolean
+  pending: boolean
+  disabled?: boolean
+  onClick: () => void
+}
+
+function WatchlistToggleButton({ inWatchlist, pending, disabled, onClick }: WatchlistToggleButtonProps) {
+  return (
+    <button
+      type="button"
+      className={clsx('tv-watchlist-toggle-mini', inWatchlist ? 'is-added' : 'is-add')}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick()
+      }}
+      disabled={disabled || pending}
+      title={inWatchlist ? '移出自选' : '加入自选'}
+      aria-label={inWatchlist ? '移出自选' : '加入自选'}
+      aria-pressed={inWatchlist}
+      aria-busy={pending}
+    >
+      {inWatchlist ? '−' : '+'}
+    </button>
+  )
+}
+
 export default function StockDetailPage() {
   const { symbol } = useParams<{ symbol: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -337,6 +367,20 @@ export default function StockDetailPage() {
                   <span>{inst.name}</span>
                   <span className="tv-code">{inst.symbol}</span>
                   <span className="status-pill ok">{sourceBadge}</span>
+                  {/* [CHANGE-20260729-007] Direct / 来源失效 fallback 自选按钮 */}
+                  {(() => {
+                    const inSourceList = detailActions.sourceStocks.some(s => s.symbol === symbol)
+                    const sourceListVisible = showSourceList && !sourceContextInvalid && detailActions.sourceStocks.length > 0
+                    const showFallback = !sourceListVisible || !inSourceList
+                    return showFallback ? (
+                      <WatchlistToggleButton
+                        inWatchlist={detailActions.inWatchlist}
+                        pending={detailActions.addWatchlistPending || detailActions.removeWatchlistPending}
+                        disabled={!instrumentId}
+                        onClick={detailActions.handleToggleWatchlist}
+                      />
+                    ) : null
+                  })()}
                 </>
               ) : instrumentLoading ? (
                 <>
@@ -358,16 +402,10 @@ export default function StockDetailPage() {
         {/* 报价条：现价/涨跌/开盘/最高/最低/成交额/总市值/流通市值（CHANGE-20260713-010） */}
         {/* [FIX source-list-flicker] inst 未就绪时 priceSummary 全 null，StockQuoteStrip 自然显示占位 */}
         <StockQuoteStrip priceSummary={priceSummary} />
-        {/* 操作：加入/移出自选、切换、全屏（截图模式隐藏全部按钮） */}
+        {/* 操作：切换、全屏（截图模式隐藏全部按钮） */}
+        {/* [CHANGE-20260729-007] 自选按钮微缩到左栏活动行 + direct fallback */}
         {!isCaptureMode && (
           <div className="actions">
-            <button
-              className={clsx('btn', detailActions.inWatchlist ? 'danger' : 'primary')}
-              onClick={detailActions.handleToggleWatchlist}
-              disabled={!instrumentId || detailActions.addWatchlistPending || detailActions.removeWatchlistPending}
-            >
-              {detailActions.inWatchlist ? '移出自选' : '加入自选'}
-            </button>
             <button className="btn small" onClick={() => detailActions.navigateToStock(-1)} disabled={!detailActions.canNavigate}>
               上一只
             </button>
@@ -591,7 +629,18 @@ export default function StockDetailPage() {
                 className={clsx('tv-source-list-item', s.symbol === symbol && 'active')}
                 onClick={() => navigate(buildStockDetailUrl(s.symbol, { originScope: sourceCtxV2.origin, returnTo: returnToParam, timeframe, sourceRunId: sourceCtxV2.sourceRunId, canonicalQuery: sourceCtxV2.canonicalQueryRaw }))}
               >
-                <span className="tv-source-name">{s.name}</span>
+                <div className="tv-source-name-row">
+                  <span className="tv-source-name">{s.name}</span>
+                  {/* [CHANGE-20260729-007] 活动行紧凑自选按钮 */}
+                  {s.symbol === symbol && (
+                    <WatchlistToggleButton
+                      inWatchlist={detailActions.inWatchlist}
+                      pending={detailActions.addWatchlistPending || detailActions.removeWatchlistPending}
+                      disabled={!instrumentId}
+                      onClick={detailActions.handleToggleWatchlist}
+                    />
+                  )}
+                </div>
                 <div className="tv-source-meta">
                   <span className="tv-source-symbol">{s.symbol}</span>
                   {/* CHANGE-20260714-001: 右侧显示最近交易日涨跌幅（两位小数，A股红涨绿跌） */}
