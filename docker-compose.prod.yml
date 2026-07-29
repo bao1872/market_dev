@@ -399,7 +399,8 @@ services:
   # - nginx access.log 已通过 log_format 过滤敏感 query 参数（token/jwt/password/key）
   # - GoAccess 配置 anonymize-ip=true，IP 保留前 3 段末段为 0
   # - 报告输出到共享卷，不暴露端口（仅 backend 容器内访问）
-  # - 日志轮转：json-file 50m × 5 = 250MB 上限
+  # - [CHANGE-20260729-005 五.4] 日志轮转由 frontend 容器内 logrotate 处理
+  #   （命名卷 nginx_logs 的 access.log 不受 Docker json-file 驱动轮转）
   goaccess:
     image: allin1/goaccess:1.7.2
     container_name: trading-goaccess
@@ -414,6 +415,21 @@ services:
       - nginx_logs:/var/log/nginx:ro
       # 输出 JSON 报告到共享卷，backend 读取
       - goaccess_reports:/srv/goaccess
+    # [CHANGE-20260729-005 五.5] 健康检查：容器运行 + access.log 存在 + report.json 可解析 + 未过期
+    # report.json 每 5 分钟生成一次，10 分钟未更新视为过期（留 5 分钟容差）
+    # 仅用 shell 工具（goaccess 镜像无 python）：检查文件存在 + 非空 + JSON 起始字符 + 修改时间
+    healthcheck:
+      test: >
+        sh -c "
+          test -f /var/log/nginx/access.log &&
+          test -s /srv/goaccess/report.json &&
+          head -c 1 /srv/goaccess/report.json | grep -q '{' &&
+          find /srv/goaccess/report.json -mmin -10 | grep -q report.json
+        "
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
     # 每 5 分钟生成一次 JSON 报告（--output-format=json 一次性输出，cron 驱动周期更新）
     # 实时 HTML 报告也可通过 --real-time-html 启用，但本任务只需 JSON
     command: >

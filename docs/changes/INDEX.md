@@ -30,6 +30,7 @@
 | CHANGE-20260728-010 | 2026-07-28 | 盘中监控双类别 + 飞书固定组合图 | behavior+architecture | 盘中监控/飞书截图/行情体验 | 进行中（P0 补丁已合入 2026-07-29：swing_bias 类型修复+sendStockDetailFeishu 简化+captureReady 纯函数；浏览器真实链路验收待用户手工） | WI-02/WI-12/MX-30 | `maps/50-watchlist-intraday.md`、`maps/40-market-stock-experience.md`、`maps/20-quant-model.md` |
 | CHANGE-20260729-003 | 2026-07-29 | 第一金字塔历史SSOT、筛选器原子特征与盘后核心/筹码解耦 | architecture+behavior+bugfix | 量化模型/盘后编排/筛选器 | 进行中（代码+目标纯单元测试+Ruff 通过；浏览器验收待手工；chip 持久化 migration 为下一阶段唯一 blocker） | QM-01~QM-43/QM-60~QM-62/AC-04 | `maps/20-quant-model.md`、`maps/30-after-close.md` |
 | CHANGE-20260729-004 | 2026-07-29 | 第一金字塔 99 字段服务端筛选排序 + 筹码共识结构化 chipStatus | behavior+architecture | 行情体验/量化模型 | 进行中（代码+目标测试+TSC+ESLint 通过，浏览器真实链路验收待用户手工） | MX-20/QM-01~QM-43 | `maps/40-market-stock-experience.md`、`maps/20-quant-model.md` |
+| CHANGE-20260729-005 | 2026-07-29 | 99字段真实筛选排序修复 + GoAccess logrotate/healthcheck + 部署脚本补 goaccess | bugfix+architecture | 行情体验/量化模型/运维 | 进行中（代码+纯单元测试61+Ruff+TSC+ESLint 通过；CI 待查询；浏览器验收待手工） | MX-20/QM-01~QM-43 | `maps/40-market-stock-experience.md`、`maps/20-quant-model.md`、`maps/80-system-runtime.md` |
 
 ## 3. 状态说明
 

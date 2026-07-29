@@ -45,8 +45,23 @@ FROM nginx:alpine@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e
 # 复制自定义 nginx 配置（API 反向代理 + SPA 路由回退）
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
+# [CHANGE-20260729-005 五.4] 安装 logrotate + 配置 access.log 轮转
+# 问题：Docker json-file 只轮转容器 stdout/stderr，命名卷 nginx_logs 内的 access.log 无轮转
+# 方案：在 nginx 容器内运行 logrotate（轻量，apk 包约 500KB），不新增常驻 sidecar
+RUN apk add --no-cache logrotate
+COPY logrotate-nginx.conf /etc/logrotate.d/nginx
+# crond 每 15 分钟检查一次（busybox cron 目录），logrotate 内部按 daily+maxsize 决定是否轮转
+COPY logrotate-nginx.conf /etc/periodic/15min/logrotate-nginx
+RUN chmod +x /etc/periodic/15min/logrotate-nginx
+
 # 复制构建产物到 nginx 静态资源目录
 # [CHANGE-20260718-007] 删除 nginx 默认欢迎页，确保 /usr/share/nginx/html 只含 SPA 产物。
 # 生产入口固定 80:80，默认 nginx index.html 不得残留（P0 部署合同）。
 RUN rm -rf /usr/share/nginx/html/*
 COPY --from=builder /app/dist/ /usr/share/nginx/html/
+
+# [CHANGE-20260729-005 五.4] 自定义入口：启动 crond + nginx
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+ENTRYPOINT ["/docker-entrypoint.sh"]

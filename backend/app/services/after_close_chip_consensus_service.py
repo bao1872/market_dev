@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
+from app.services.first_pyramid_flatten import flatten_chip_fields
 from app.services.idempotency_service import acquire_job_run_lock
 
 logger = logging.getLogger(__name__)
@@ -321,6 +322,9 @@ async def execute_after_close_chip_consensus(
 
                 # 幂等 upsert
                 chip_dict = chip_result.to_dict() if hasattr(chip_result, "to_dict") else dict(chip_result)
+                # [CHANGE-20260729-005 二.4] 写入 chip_flat 扁平对象（10 个 chip fp_ 键）
+                # 供 /market/stocks 服务端 filter/sort 从 chip_payload.chip_flat.<fp_key> 读取
+                chip_dict["chip_flat"] = flatten_chip_fields(chip_dict.get("chip"))
                 await _upsert_chip_snapshot(
                     instrument_id=instrument_id,
                     trade_date=trade_date,

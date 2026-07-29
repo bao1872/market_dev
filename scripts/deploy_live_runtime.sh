@@ -102,11 +102,12 @@ fi
 
 # 6. recreate 全部应用容器
 echo "[deploy] === force-recreate 全部应用容器 ==="
+# [CHANGE-20260729-005 五.3] 补充 goaccess 到部署范围（原缺失导致 GoAccess 容器从未创建）
 $COMPOSE_CMD up -d --force-recreate --no-build \
   backend worker-bars-scheduler worker-strategy-scheduler \
   worker-calendar worker-monitor worker-strategy-batch \
   worker-outbox worker-delivery worker-after-close \
-  worker-watchdog worker-capture frontend
+  worker-watchdog worker-capture frontend goaccess
 
 echo "[deploy] === Live Mount 部署完成 ==="
 echo "[deploy] 验证: curl http://localhost:8000/version"

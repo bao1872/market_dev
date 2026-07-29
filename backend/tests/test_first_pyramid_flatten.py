@@ -19,17 +19,21 @@ import pytest
 
 from app.services.first_pyramid_flatten import (
     FP_ALL_KEYS,
+    FP_CHIP_KEYS,
     FP_FIELD_GROUPS,
     FP_QUERY_FIELD_SPECS,
     FP_SERVER_FILTERABLE_KEYS,
     FP_SERVER_SORTABLE_KEYS,
-    flatten_first_pyramid,
-)
-from app.services.market_stocks_service import (
     FpFilterSpec,
     FpSortSpec,
-    _parse_fp_filter,
-    _parse_fp_sort,
+    flatten_chip_fields,
+    flatten_first_pyramid,
+)
+from app.services.first_pyramid_flatten import (
+    parse_fp_filter as _parse_fp_filter,
+)
+from app.services.first_pyramid_flatten import (
+    parse_fp_sort as _parse_fp_sort,
 )
 
 
@@ -111,16 +115,19 @@ class TestFlattenComplete:
                     "dsa_vwap_dev_pct": 2.34,
                     "segment_change_pct": 5.6,
                     "segment_slope": 0.12,
+                    "regime_strength": 0.85,
                     "trend_strength": 0.8,
                     "segment_start_time": "2026-07-01",
                     "segment_end_time": "2026-07-25",
                     "segment_start_price": 9.8,
                     "segment_end_price": 10.8,
                     "segment_bars": 18,
-                    "current_vs_prev_volume_ratio": 1.5,
-                    "current_vs_prev_amount_ratio": 1.4,
+                    "current_vs_prev_volume_mean_ratio": 1.5,
+                    "current_vs_prev_amount_mean_ratio": 1.4,
                     "current_segment_volume_mean": 1000000.0,
                     "current_segment_amount_mean": 10000000.0,
+                    "prev_segment_volume_mean": 4800000.0,
+                    "prev_segment_amount_mean": 48000000.0,
                     "prev_segment_volume_sum": 5000000.0,
                     "prev_segment_amount_sum": 50000000.0,
                     "vwap_ret_total": 3.2,
@@ -210,18 +217,21 @@ class TestFlattenComplete:
         assert result["fp_dsa_vwap_dev_pct"] == 2.34
         assert result["fp_segment_change_pct"] == 5.6
         assert result["fp_segment_slope"] == 0.12
-        assert result["fp_trend_strength"] == 0.8
+        # [CHANGE-20260729-005 二.5] 优先 regime_strength（0.85），非 trend_strength（0.8）
+        assert result["fp_trend_strength"] == 0.85
         assert result["fp_segment_start_date"] == "2026-07-01"
         assert result["fp_segment_end_date"] == "2026-07-25"
         assert result["fp_segment_start_price"] == 9.8
         assert result["fp_segment_end_price"] == 10.8
         assert result["fp_segment_bars"] == 18
+        # [二.5] mean/mean ratio（非废弃 sum/sum）
         assert result["fp_segment_volume_ratio"] == 1.5
         assert result["fp_segment_amount_ratio"] == 1.4
         assert result["fp_segment_avg_volume"] == 1000000.0
         assert result["fp_segment_avg_amount"] == 10000000.0
-        assert result["fp_prev_segment_volume"] == 5000000.0
-        assert result["fp_prev_segment_amount"] == 50000000.0
+        # prev_segment 使用 mean 字段（非废弃 sum 字段）
+        assert result["fp_prev_segment_volume"] == 4800000.0
+        assert result["fp_prev_segment_amount"] == 48000000.0
         assert result["fp_vwap_ret_total"] == 3.2
 
     def test_structure_fields(self, complete_first_pyramid: dict) -> None:
@@ -414,59 +424,67 @@ class TestFpQueryFieldSpecs:
         assert set(FP_QUERY_FIELD_SPECS.keys()) == set(FP_ALL_KEYS)
         assert len(FP_QUERY_FIELD_SPECS) == 99
 
-    def test_each_spec_has_required_fields(self) -> None:
-        """每个 spec 必须包含 fp_key / data_type / json_path / operators。"""
+    def test_each_spec_has_source_and_operators(self) -> None:
+        """[CHANGE-20260729-005] 每个 spec 必须包含 fp_key / data_type / source / operators。"""
         for key, spec in FP_QUERY_FIELD_SPECS.items():
             assert spec["fp_key"] == key
             assert spec["data_type"] in {
                 "text", "number", "percent", "datetime", "boolean", "enum",
             }
-            assert isinstance(spec["json_path"], tuple)
+            assert spec["source"] in {"flat", "chip", "column", "literal"}
             assert isinstance(spec["operators"], frozenset)
             assert len(spec["operators"]) > 0
 
-    def test_filterable_keys_have_json_path(self) -> None:
-        """支持服务端筛选的字段必须有 JSON 路径。"""
-        for key in FP_SERVER_FILTERABLE_KEYS:
-            assert FP_QUERY_FIELD_SPECS[key]["json_path"], (
-                f"filterable key {key} 缺少 json_path"
-            )
+    def test_all_99_keys_are_filterable_and_sortable(self) -> None:
+        """[二.2/二.3] 全部 99 字段均支持服务端 filter/sort（含计算字段和事件字段）。"""
+        assert len(FP_SERVER_FILTERABLE_KEYS) == 99
+        assert len(FP_SERVER_SORTABLE_KEYS) == 99
+        # 计算字段也可筛选（通过 flat 对象）
+        assert "fp_structure_alignment" in FP_SERVER_FILTERABLE_KEYS
+        assert "fp_distance_to_trailing_top_pct" in FP_SERVER_SORTABLE_KEYS
+        # 列表事件字段也可筛选（通过 flat 对象）
+        assert "fp_structure_event_type" in FP_SERVER_FILTERABLE_KEYS
+        assert "fp_latest_bos_direction" in FP_SERVER_SORTABLE_KEYS
 
     def test_sortable_equals_filterable(self) -> None:
-        """可排序集合 == 可筛选集合（基于 JSON 路径）。"""
         assert FP_SERVER_SORTABLE_KEYS == FP_SERVER_FILTERABLE_KEYS
+
+    def test_chip_fields_use_chip_source(self) -> None:
+        """[二.4] 筹码字段 source=chip（从独立 chip 表读取）。"""
+        from app.services.first_pyramid_flatten import FP_CHIP_KEYS
+        assert len(FP_CHIP_KEYS) == 10
+        for key in FP_CHIP_KEYS:
+            assert FP_QUERY_FIELD_SPECS[key]["source"] == "chip"
+
+    def test_column_source_fields(self) -> None:
+        """fp_calculated_at/fp_run_id 使用真实列。"""
+        assert FP_QUERY_FIELD_SPECS["fp_calculated_at"]["source"] == "column"
+        assert FP_QUERY_FIELD_SPECS["fp_calculated_at"]["column"] == "created_at"
+        assert FP_QUERY_FIELD_SPECS["fp_run_id"]["source"] == "column"
+        assert FP_QUERY_FIELD_SPECS["fp_run_id"]["column"] == "source_run_id"
+
+    def test_literal_source_fields(self) -> None:
+        """fp_data_source 使用常量。"""
+        assert FP_QUERY_FIELD_SPECS["fp_data_source"]["source"] == "literal"
+        assert FP_QUERY_FIELD_SPECS["fp_data_source"]["literal_value"] == "feature_snapshot"
 
     def test_operator_mapping_by_data_type(self) -> None:
         """按 data_type 抽样校验操作符映射。"""
-        # number 支持 gt/gte/lt/lte/eq/between/empty/not_empty
         num_spec = FP_QUERY_FIELD_SPECS["fp_trend_bars"]
         assert num_spec["data_type"] == "number"
         assert {"gt", "gte", "lt", "lte", "eq", "between", "empty", "not_empty"} <= num_spec["operators"]
-        # text 支持 contains/not_contains/empty/not_empty（fp_summary 显式不含 eq）
         text_spec = FP_QUERY_FIELD_SPECS["fp_summary"]
         assert text_spec["data_type"] == "text"
         assert {"contains", "not_contains", "empty", "not_empty"} <= text_spec["operators"]
-        # datetime 支持 gte/gt/lt/lte/between/empty/not_empty
         dt_spec = FP_QUERY_FIELD_SPECS["fp_trade_date"]
         assert dt_spec["data_type"] == "datetime"
         assert {"gte", "gt", "lt", "lte", "between", "empty", "not_empty"} <= dt_spec["operators"]
-        # boolean 仅 eq/empty/not_empty
         bool_spec = FP_QUERY_FIELD_SPECS["fp_volume_ready"]
         assert bool_spec["data_type"] == "boolean"
         assert bool_spec["operators"] == frozenset({"eq", "empty", "not_empty"})
-        # enum 仅 eq/empty/not_empty
         enum_spec = FP_QUERY_FIELD_SPECS["fp_trend_direction"]
         assert enum_spec["data_type"] == "enum"
         assert enum_spec["operators"] == frozenset({"eq", "empty", "not_empty"})
-
-    def test_computed_and_event_fields_excluded_from_server(self) -> None:
-        """计算字段和列表事件字段无 json_path，不能服务端筛选/排序。"""
-        # 计算字段
-        assert "fp_structure_alignment" not in FP_SERVER_FILTERABLE_KEYS
-        assert "fp_distance_to_trailing_top_pct" not in FP_SERVER_SORTABLE_KEYS
-        # 列表事件字段
-        assert "fp_structure_event_type" not in FP_SERVER_FILTERABLE_KEYS
-        assert "fp_latest_bos_direction" not in FP_SERVER_SORTABLE_KEYS
 
 
 class TestParseFpFilter:
@@ -504,10 +522,19 @@ class TestParseFpFilter:
         with pytest.raises(ValueError, match="Not in FP_QUERY_FIELD_SPECS"):
             _parse_fp_filter("fp_nonexistent:gt:5")
 
-    def test_computed_field_raises(self) -> None:
-        """计算字段无 json_path，服务端拒绝。"""
-        with pytest.raises(ValueError, match="not server-filterable"):
-            _parse_fp_filter("fp_structure_alignment:gt:0")
+    def test_computed_field_now_filterable(self) -> None:
+        """[CHANGE-20260729-005 二.3] 计算字段通过 flat 对象支持筛选，不再拒绝。"""
+        specs = _parse_fp_filter("fp_structure_alignment:eq:共振")
+        assert len(specs) == 1
+        assert specs[0].fp_key == "fp_structure_alignment"
+        assert specs[0].operator == "eq"
+        assert specs[0].value == "共振"
+
+    def test_event_field_now_filterable(self) -> None:
+        """[二.3] 事件字段通过 flat 对象支持筛选。"""
+        specs = _parse_fp_filter("fp_latest_bos_direction:eq:up")
+        assert len(specs) == 1
+        assert specs[0].fp_key == "fp_latest_bos_direction"
 
     def test_invalid_operator_raises(self) -> None:
         with pytest.raises(ValueError, match="Invalid operator"):
@@ -537,10 +564,96 @@ class TestParseFpSort:
         with pytest.raises(ValueError, match="Not in FP_QUERY_FIELD_SPECS"):
             _parse_fp_sort("fp_nonexistent:asc")
 
-    def test_computed_field_raises(self) -> None:
-        with pytest.raises(ValueError, match="not server-sortable"):
-            _parse_fp_sort("fp_structure_alignment:asc")
+    def test_computed_field_now_sortable(self) -> None:
+        """[CHANGE-20260729-005] 计算字段通过 flat 对象支持排序。"""
+        result = _parse_fp_sort("fp_structure_alignment:asc")
+        assert result is not None
+        assert result.fp_key == "fp_structure_alignment"
+        assert result.direction == "asc"
 
     def test_invalid_direction_raises(self) -> None:
         with pytest.raises(ValueError, match="Invalid fp_sort direction"):
             _parse_fp_sort("fp_trend_bars:up")
+
+
+# =============================================================================
+# [CHANGE-20260729-005 二.4] flatten_chip_fields 单元测试
+# 筹码字段独立存储：写入 chip_payload.chip_flat，查询从独立 chip 表读取
+# =============================================================================
+
+
+class TestFlattenChipFields:
+    """flatten_chip_fields：将筹码维度扁平化为 10 个 chip fp_ 键。"""
+
+    def test_none_returns_10_none_values(self) -> None:
+        """None 输入返回 10 个 chip 键，值全为 None。"""
+        result = flatten_chip_fields(None)
+        assert len(result) == len(FP_CHIP_KEYS)
+        assert set(result.keys()) == set(FP_CHIP_KEYS)
+        assert all(v is None for v in result.values())
+
+    @pytest.fixture
+    def chip_dimension(self) -> dict:
+        """构造筹码维度输入（DimensionResult.to_dict() 格式）。"""
+        return {
+            "statusText": "筹码峰稳定",
+            "continuousFactors": {
+                "poc_price": 10.5,
+                "last_close": 10.8,
+                "n_peak_nodes": 3,
+                "vah_price": 11.0,
+                "val_price": 10.0,
+            },
+            "events": [
+                {
+                    "type": "NODE_CROSSOVER",
+                    "direction": "up",
+                    "freshnessBars": 5,
+                    "price": 10.6,
+                }
+            ],
+        }
+
+    def test_chip_fields_mapped(self, chip_dimension: dict) -> None:
+        """完整筹码维度输入返回正确映射的 10 个 chip 键。"""
+        result = flatten_chip_fields(chip_dimension)
+        assert len(result) == len(FP_CHIP_KEYS)
+        assert set(result.keys()) == set(FP_CHIP_KEYS)
+        # 非筹码键不应出现
+        assert "fp_trade_date" not in result
+        assert "fp_trend_direction" not in result
+        assert "fp_volume_badge" not in result
+        # 筹码字段映射正确
+        assert result["fp_chip_state"] == "筹码峰稳定"
+        assert result["fp_poc_price"] == 10.5
+        assert result["fp_peak_node_count"] == 3
+        assert result["fp_vah_price"] == 11.0
+        assert result["fp_val_price"] == 10.0
+        assert result["fp_node_event_type"] == "NODE_CROSSOVER"
+        assert result["fp_node_event_direction"] == "up"
+        assert result["fp_node_event_freshness"] == 5
+        assert result["fp_node_event_price"] == 10.6
+        # poc_distance_pct = (last_close - poc_price) / poc_price * 100
+        assert result["fp_poc_distance_pct"] == round((10.8 - 10.5) / 10.5 * 100, 2)
+
+    def test_empty_dict_returns_10_none(self) -> None:
+        """空 dict 输入返回 10 个 chip 键，值全为 None。"""
+        result = flatten_chip_fields({})
+        assert len(result) == len(FP_CHIP_KEYS)
+        assert all(v is None for v in result.values())
+
+    def test_partial_chip_preserves_10_keys(self, chip_dimension: dict) -> None:
+        """部分字段输入仍返回 10 个 chip 键。"""
+        del chip_dimension["events"]
+        result = flatten_chip_fields(chip_dimension)
+        assert len(result) == len(FP_CHIP_KEYS)
+        # 事件字段为 None，但其他筹码字段有值
+        assert result["fp_node_event_type"] is None
+        assert result["fp_poc_price"] == 10.5
+
+    def test_chip_keys_count_is_10(self) -> None:
+        """[二.4] 筹码字段恰好 10 个（source=chip）。"""
+        assert len(FP_CHIP_KEYS) == 10
+        # 校验全部 chip 键都在筹码分组中
+        chip_group_keys = set(FP_FIELD_GROUPS["筹码"])
+        assert set(FP_CHIP_KEYS) == chip_group_keys

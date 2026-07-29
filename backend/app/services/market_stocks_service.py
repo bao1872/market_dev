@@ -31,7 +31,19 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Float, Integer, case, cast, func, literal, or_, select
+from sqlalchemy import (
+    Boolean,
+    ColumnElement,
+    Float,
+    Integer,
+    case,
+    cast,
+    func,
+    literal,
+    or_,
+    select,
+    true,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import to_shanghai_iso
@@ -39,6 +51,7 @@ from app.models.bar import BarDaily
 from app.models.instrument import Instrument
 from app.models.market_board import MarketBoard
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
 from app.models.watchlist import UserWatchlistItem
@@ -57,7 +70,15 @@ from app.services.board_sync_service import get_instrument_boards_batch
 from app.services.feature_snapshot_service import _SCHEMA_VERSION
 from app.services.first_pyramid_flatten import (
     FP_QUERY_FIELD_SPECS,
+    FpFilterSpec,
+    FpSortSpec,
     flatten_first_pyramid,
+)
+from app.services.first_pyramid_flatten import (
+    parse_fp_filter as _parse_fp_filter_impl,
+)
+from app.services.first_pyramid_flatten import (
+    parse_fp_sort as _parse_fp_sort_impl,
 )
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
@@ -67,12 +88,11 @@ logger = logging.getLogger("market_stocks_service")
 _SORTABLE_FIELDS = {"name", "symbol", "change_pct", "dsa_state", "latest_event_time"}
 _SORT_DIRECTIONS = {"asc", "desc"}
 
-# [CHANGE-20260729-004 P0-1] fp_filter/fp_sort 操作符合法值
+# [CHANGE-20260729-004 P0-1] fp_filter/fp_sort 操作符合法值（保留供校验引用）
 _FP_FILTER_OPERATORS = {
     "contains", "not_contains", "eq", "gt", "gte", "lt", "lte",
     "between", "empty", "not_empty",
 }
-_FP_SORT_DIRECTIONS = {"asc", "desc"}
 
 
 @dataclass(frozen=True)
@@ -196,6 +216,8 @@ def _build_order_by(
     has_query: bool,
     rank_expr: ColumnElement[int],
     fp_sort_spec: FpSortSpec | None = None,
+    snap_subq: Any | None = None,
+    chip_subq: Any | None = None,
 ) -> list[ColumnElement]:
     """构建 ORDER BY 列表。
 
@@ -203,7 +225,7 @@ def _build_order_by(
     - 无 sort_spec 且无 fp_sort_spec：默认 symbol asc。
     - name/symbol：直接使用 Instrument 列。
     - change_pct/dsa_state/latest_event_time：使用标量子查询表达式。
-    - fp_sort（第一金字塔字段）：使用 JSON 路径标量子查询。
+    - fp_sort（第一金字塔字段）：使用 LATERAL JOIN 列引用。
     - 所有非首序都追加 Instrument.symbol 作为第二排序键，NULLS LAST。
     """
     if has_query:
@@ -211,7 +233,7 @@ def _build_order_by(
 
     # fp_sort 优先于 sort（第一金字塔专用排序）
     if fp_sort_spec is not None:
-        fp_sort_expr = _build_fp_sort_expression(fp_sort_spec)
+        fp_sort_expr = _build_fp_sort_expression(fp_sort_spec, snap_subq, chip_subq)
         order_col = (
             fp_sort_expr.desc().nullslast() if fp_sort_spec.direction == "desc"
             else fp_sort_expr.asc().nullslast()
@@ -302,231 +324,147 @@ def _build_board_filter_conditions(
 # =============================================================================
 # [CHANGE-20260729-004 P0-1] 第一金字塔 fp_filter/fp_sort 解析与构建
 # =============================================================================
+# 解析逻辑已移至 first_pyramid_flatten 模块（纯函数，无 DB 依赖），
+# 此处保留 thin wrapper 以兼容现有调用方（API 层 import _parse_fp_filter/_parse_fp_sort）。
 # URL 编码格式：
 #   fp_filter=key1:op1:val1[;val2];key2:op2:val2
 #   fp_sort=key:direction
-# 解析后通过标量子查询从 StockFeatureSnapshot.summary_payload.first_pyramid JSON 路径取值
 # 排序和筛选均在分页前完成；asc/desc 均 NULLS LAST，第二排序键固定为 Instrument.symbol
 # =============================================================================
 
-
-@dataclass(frozen=True)
-class FpFilterSpec:
-    """单个 fp 筛选条件（已通过白名单校验）。"""
-
-    fp_key: str
-    operator: str
-    value: str | None  # empty/not_empty 时为 None
-    value2: str | None  # between 时的上界
-
-
-@dataclass(frozen=True)
-class FpSortSpec:
-    """fp 排序规格（已通过白名单校验）。"""
-
-    fp_key: str
-    direction: str  # asc | desc
+# FpFilterSpec / FpSortSpec 从 first_pyramid_flatten 导入（见文件顶部）
 
 
 def _parse_fp_filter(fp_filter: str | None) -> list[FpFilterSpec]:
-    """解析 fp_filter 字符串为 FpFilterSpec 列表。
-
-    格式：fp_filter=key1:op1:val1[;val2];key2:op2:val2
-    - 多个条件用 `;` 分隔
-    - 每个条件 `key:op:value`，between 用 `key:between:val1;val2`
-    - empty/not_empty 操作符无需 value（`key:empty:`）
-    - 非法 key/operator 抛 ValueError（由 API 层转 422）
-
-    Args:
-        fp_filter: 原始字符串，None 或空字符串返回空列表
-
-    Returns:
-        FpFilterSpec 列表（已校验白名单）
-    """
-    if not fp_filter:
-        return []
-
-    specs: list[FpFilterSpec] = []
-    # 按 `;` 分割为多个条件；between 的两个值在单个条件内再按 `;` 分割
-    # 约定：between 的格式为 `key:between:val1;val2`，所以 between 条件后必有 2 个 value
-    # 为简化解析：先按 `;` 分割，遇到 between 时合并下一个 token 作为 value2
-    tokens = fp_filter.split(";")
-    i = 0
-    while i < len(tokens):
-        token = tokens[i].strip()
-        if not token:
-            i += 1
-            continue
-        parts = token.split(":", maxsplit=2)
-        if len(parts) < 2:
-            raise ValueError(
-                f"Invalid fp_filter token '{token}': expected 'key:op[:value]'"
-            )
-        fp_key = parts[0].strip()
-        operator = parts[1].strip()
-        value = parts[2] if len(parts) > 2 else None
-
-        # 白名单校验
-        if fp_key not in FP_QUERY_FIELD_SPECS:
-            raise ValueError(
-                f"Invalid fp_filter key '{fp_key}'. Not in FP_QUERY_FIELD_SPECS."
-            )
-        spec = FP_QUERY_FIELD_SPECS[fp_key]
-        # 事件/计算字段无 json_path，服务端拒绝
-        if not spec["json_path"]:
-            raise ValueError(
-                f"fp_filter key '{fp_key}' is not server-filterable "
-                f"(no JSON path; computed or list-event field)."
-            )
-        if operator not in spec["operators"]:
-            raise ValueError(
-                f"Invalid operator '{operator}' for fp key '{fp_key}' "
-                f"(data_type={spec['data_type']}). "
-                f"Allowed: {sorted(spec['operators'])}"
-            )
-
-        # between 需要 value2
-        value2: str | None = None
-        if operator == "between":
-            if value is None:
-                raise ValueError(
-                    f"fp_filter 'between' requires value; got '{token}'"
-                )
-            # 下一个 token 作为 value2
-            i += 1
-            if i >= len(tokens):
-                raise ValueError(
-                    f"fp_filter 'between' for '{fp_key}' missing second value"
-                )
-            value2 = tokens[i].strip()
-            if not value2:
-                raise ValueError(
-                    f"fp_filter 'between' for '{fp_key}' missing second value"
-                )
-        # empty/not_empty 不需要 value
-        elif operator in ("empty", "not_empty"):
-            value = None
-        elif value is None or value == "":
-            raise ValueError(
-                f"fp_filter operator '{operator}' requires value; got '{token}'"
-            )
-
-        specs.append(FpFilterSpec(fp_key=fp_key, operator=operator, value=value, value2=value2))
-        i += 1
-
-    return specs
+    """[CHANGE-20260729-005] 委托 first_pyramid_flatten.parse_fp_filter。"""
+    return _parse_fp_filter_impl(fp_filter)
 
 
 def _parse_fp_sort(fp_sort: str | None) -> FpSortSpec | None:
-    """解析 fp_sort 字符串为 FpSortSpec。
+    """[CHANGE-20260729-005] 委托 first_pyramid_flatten.parse_fp_sort。"""
+    return _parse_fp_sort_impl(fp_sort)
 
-    格式：fp_sort=key:direction
-    - direction: asc | desc
-    - 非法 key/direction 抛 ValueError
 
-    Args:
-        fp_sort: 原始字符串，None 或空返回 None
+# =============================================================================
+# [CHANGE-20260729-005 二.7] LATERAL JOIN：最新 snapshot + chip 单次关联
+# =============================================================================
 
-    Returns:
-        FpSortSpec 或 None
-    """
-    if not fp_sort:
-        return None
+def _needs_snap_lateral(fp_filter_specs: list[FpFilterSpec], fp_sort_spec: FpSortSpec | None) -> bool:
+    """判断是否需要 snapshot LATERAL JOIN（有 flat/column source 字段参与筛选或排序）。"""
+    keys = [f.fp_key for f in fp_filter_specs]
+    if fp_sort_spec:
+        keys.append(fp_sort_spec.fp_key)
+    return any(FP_QUERY_FIELD_SPECS[k]["source"] in ("flat", "column") for k in keys)
 
-    parts = fp_sort.split(":")
-    if len(parts) != 2:
-        raise ValueError(f"Invalid fp_sort '{fp_sort}': expected 'key:direction'")
-    fp_key = parts[0].strip()
-    direction = parts[1].strip().lower()
 
-    if fp_key not in FP_QUERY_FIELD_SPECS:
-        raise ValueError(
-            f"Invalid fp_sort key '{fp_key}'. Not in FP_QUERY_FIELD_SPECS."
+def _needs_chip_lateral(fp_filter_specs: list[FpFilterSpec], fp_sort_spec: FpSortSpec | None) -> bool:
+    """判断是否需要 chip LATERAL JOIN（有 chip source 字段参与筛选或排序）。"""
+    keys = [f.fp_key for f in fp_filter_specs]
+    if fp_sort_spec:
+        keys.append(fp_sort_spec.fp_key)
+    return any(FP_QUERY_FIELD_SPECS[k]["source"] == "chip" for k in keys)
+
+
+def _build_snap_lateral():
+    """构建最新 snapshot 的 LATERAL 子查询（每个 instrument 一行最新快照）。"""
+    return (
+        select(
+            StockFeatureSnapshot.id,
+            StockFeatureSnapshot.instrument_id,
+            StockFeatureSnapshot.trade_date,
+            StockFeatureSnapshot.source_run_id,
+            StockFeatureSnapshot.created_at,
+            StockFeatureSnapshot.summary_payload,
         )
-    spec = FP_QUERY_FIELD_SPECS[fp_key]
-    if not spec["json_path"]:
-        raise ValueError(
-            f"fp_sort key '{fp_key}' is not server-sortable "
-            f"(no JSON path; computed or list-event field)."
-        )
-    if direction not in _FP_SORT_DIRECTIONS:
-        raise ValueError(
-            f"Invalid fp_sort direction '{direction}'. Allowed: asc, desc"
-        )
-
-    return FpSortSpec(fp_key=fp_key, direction=direction)
-
-
-def _fp_json_value_expr(fp_key: str) -> ColumnElement:
-    """构建从 StockFeatureSnapshot.summary_payload.first_pyramid 取 JSON 路径值的标量子查询。
-
-    子查询取每个 instrument 的最新一行 snapshot（按 trade_date desc, limit 1），
-    从 summary_payload -> 'first_pyramid' -> path1 -> path2 -> ... 取值。
-
-    Args:
-        fp_key: 必须在 FP_SERVER_FILTERABLE_KEYS 中
-
-    Returns:
-        标量子查询表达式，可直接用于 WHERE/ORDER BY
-    """
-    spec = FP_QUERY_FIELD_SPECS[fp_key]
-    json_path = spec["json_path"]
-    if not json_path:
-        raise ValueError(f"fp_key '{fp_key}' has no JSON path")
-
-    # 构建 SQLAlchemy JSON 路径：summary_payload['first_pyramid']['path1']['path2']...
-    # 使用 astext 取为 text，便于后续 cast
-    expr = StockFeatureSnapshot.summary_payload["first_pyramid"]
-    for path_seg in json_path:
-        expr = expr[path_seg]
-
-    subq = (
-        select(expr)
         .where(
             StockFeatureSnapshot.instrument_id == Instrument.id,
             StockFeatureSnapshot.schema_version == _SCHEMA_VERSION,
         )
         .order_by(StockFeatureSnapshot.trade_date.desc())
         .limit(1)
-        .scalar_subquery()
+        .lateral("latest_snap")
     )
-    return subq
+
+
+def _build_chip_lateral():
+    """构建最新 succeeded chip 的 LATERAL 子查询。"""
+    return (
+        select(
+            StockChipConsensusSnapshot.id,
+            StockChipConsensusSnapshot.instrument_id,
+            StockChipConsensusSnapshot.trade_date,
+            StockChipConsensusSnapshot.core_run_id,
+            StockChipConsensusSnapshot.chip_payload,
+            StockChipConsensusSnapshot.status,
+            StockChipConsensusSnapshot.created_at,
+        )
+        .where(
+            StockChipConsensusSnapshot.instrument_id == Instrument.id,
+            StockChipConsensusSnapshot.status == "succeeded",
+        )
+        .order_by(StockChipConsensusSnapshot.trade_date.desc())
+        .limit(1)
+        .lateral("latest_chip")
+    )
+
+
+def _build_fp_value_expr(
+    fp_key: str,
+    snap_subq: Any | None = None,
+    chip_subq: Any | None = None,
+) -> ColumnElement:
+    """构建 fp 字段取值表达式（基于 LATERAL JOIN 列引用）。
+
+    [CHANGE-20260729-005] 根据 source 类型从不同位置取值：
+    - flat: snap_subq.c.summary_payload["first_pyramid_flat"][fp_key]
+    - chip: chip_subq.c.chip_payload["chip_flat"][fp_key]
+    - column: snap_subq.c.<column_name>
+    - literal: literal(value)
+    """
+    spec = FP_QUERY_FIELD_SPECS[fp_key]
+    source = spec["source"]
+
+    if source == "flat":
+        if snap_subq is None:
+            raise ValueError(f"fp_key '{fp_key}' (source=flat) requires snap LATERAL JOIN")
+        return snap_subq.c.summary_payload["first_pyramid_flat"][fp_key]
+    elif source == "chip":
+        if chip_subq is None:
+            raise ValueError(f"fp_key '{fp_key}' (source=chip) requires chip LATERAL JOIN")
+        return chip_subq.c.chip_payload["chip_flat"][fp_key]
+    elif source == "column":
+        if snap_subq is None:
+            raise ValueError(f"fp_key '{fp_key}' (source=column) requires snap LATERAL JOIN")
+        return getattr(snap_subq.c, spec["column"])
+    elif source == "literal":
+        return literal(spec["literal_value"])
+    else:
+        raise ValueError(f"Unknown source '{source}' for fp_key '{fp_key}'")
 
 
 def _cast_fp_value(expr: ColumnElement, data_type: str) -> ColumnElement:
     """按 data_type 转换 JSON 取值为可比较类型。
 
-    PostgreSQL JSON 取值默认为 text，需 cast：
-    - number/percent → Float
-    - datetime → 取 text 字符串前 10 位（YYYY-MM-DD）按字典序比较
-    - text/enum/boolean → text
+    [CHANGE-20260729-005 二.6] 布尔字段 cast 为 Boolean，禁止 text 与 bool 比较。
     """
     if data_type in ("number", "percent"):
         return cast(expr, Float)
+    if data_type == "boolean":
+        return cast(expr, Boolean)
     return expr.astext
 
 
-def _build_fp_filter_conditions(fp_filters: list[FpFilterSpec]) -> list[ColumnElement[bool]]:
-    """构建 fp 筛选 WHERE 条件列表。
-
-    每个 filter 基于标量子查询取 JSON 值，按 operator 构建条件：
-    - gt/gte/lt/lte/eq: 数值/文本比较
-    - between: value <= expr <= value2
-    - contains/not_contains: ilike
-    - empty: expr IS NULL
-    - not_empty: expr IS NOT NULL
-
-    Args:
-        fp_filters: 已校验的 FpFilterSpec 列表
-
-    Returns:
-        WHERE 条件列表，外层用 AND 连接
-    """
+def _build_fp_filter_conditions(
+    fp_filters: list[FpFilterSpec],
+    snap_subq: Any | None = None,
+    chip_subq: Any | None = None,
+) -> list[ColumnElement[bool]]:
+    """构建 fp 筛选 WHERE 条件列表（基于 LATERAL JOIN 列引用）。"""
     conditions: list[ColumnElement[bool]] = []
     for f in fp_filters:
         spec = FP_QUERY_FIELD_SPECS[f.fp_key]
         data_type = spec["data_type"]
-        raw_expr = _fp_json_value_expr(f.fp_key)
+        raw_expr = _build_fp_value_expr(f.fp_key, snap_subq, chip_subq)
         typed_expr = _cast_fp_value(raw_expr, data_type)
 
         if f.operator == "empty":
@@ -563,16 +501,13 @@ def _build_fp_filter_conditions(fp_filters: list[FpFilterSpec]) -> list[ColumnEl
     return conditions
 
 
-def _build_fp_sort_expression(fp_sort_spec: FpSortSpec) -> ColumnElement:
-    """构建 fp 排序标量表达式（已校验白名单）。
-
-    Args:
-        fp_sort_spec: 已校验的 FpSortSpec
-
-    Returns:
-        排序表达式，外层追加 NULLS LAST 和第二排序键
-    """
-    raw_expr = _fp_json_value_expr(fp_sort_spec.fp_key)
+def _build_fp_sort_expression(
+    fp_sort_spec: FpSortSpec,
+    snap_subq: Any | None = None,
+    chip_subq: Any | None = None,
+) -> ColumnElement:
+    """构建 fp 排序表达式（基于 LATERAL JOIN 列引用）。"""
+    raw_expr = _build_fp_value_expr(fp_sort_spec.fp_key, snap_subq, chip_subq)
     spec = FP_QUERY_FIELD_SPECS[fp_sort_spec.fp_key]
     typed_expr = _cast_fp_value(raw_expr, spec["data_type"])
     return typed_expr
@@ -624,12 +559,16 @@ async def get_market_stocks(
     # [CHANGE-20260729-004 P0-1] 解析 fp_filter/fp_sort（非法值抛 ValueError → 422）
     fp_filter_specs = _parse_fp_filter(fp_filter)
     fp_sort_spec = _parse_fp_sort(fp_sort)
-    fp_filter_conditions = _build_fp_filter_conditions(fp_filter_specs)
     offset = (page - 1) * page_size
+
+    # [CHANGE-20260729-005 二.7] 按需构建 LATERAL JOIN（最新 snapshot + chip 单次关联）
+    snap_subq = _build_snap_lateral() if _needs_snap_lateral(fp_filter_specs, fp_sort_spec) else None
+    chip_subq = _build_chip_lateral() if _needs_chip_lateral(fp_filter_specs, fp_sort_spec) else None
+    # fp_filter_conditions 依赖 LATERAL JOIN 列引用，必须在 subq 创建后构建
+    fp_filter_conditions = _build_fp_filter_conditions(fp_filter_specs, snap_subq, chip_subq)
 
     # ===== Query 1: instruments + is_watchlisted + 分页 =====
     if scope == "watchlist":
-        # watchlist scope: INNER JOIN，仅返回当前用户 active 自选
         base_stmt = (
             select(
                 Instrument.id,
@@ -647,17 +586,7 @@ async def get_market_stocks(
                 ),
             )
         )
-        for cond in search_conditions:
-            base_stmt = base_stmt.where(cond)
-        if state_cond is not None:
-            base_stmt = base_stmt.where(state_cond)
-        for cond in board_conditions:
-            base_stmt = base_stmt.where(cond)
-        # [P0-1] fp_filter 条件在分页前应用
-        for cond in fp_filter_conditions:
-            base_stmt = base_stmt.where(cond)
     else:
-        # market scope: 全市场 A 股，EXISTS 标记自选
         watched_exists = (
             select(1)
             .where(
@@ -674,20 +603,24 @@ async def get_market_stocks(
             Instrument.market,
             watched_exists.label("is_watchlisted"),
         )
-        for cond in search_conditions:
-            base_stmt = base_stmt.where(cond)
-        if state_cond is not None:
-            base_stmt = base_stmt.where(state_cond)
-        for cond in board_conditions:
-            base_stmt = base_stmt.where(cond)
-        # [P0-1] fp_filter 条件在分页前应用
-        for cond in fp_filter_conditions:
-            base_stmt = base_stmt.where(cond)
+    # [二.7] 添加 LATERAL JOIN（在 WHERE 之前，供 filter/sort 引用）
+    if snap_subq is not None:
+        base_stmt = base_stmt.outerjoin(snap_subq, true())
+    if chip_subq is not None:
+        base_stmt = base_stmt.outerjoin(chip_subq, true())
 
-    # 排序：有搜索关键词时按命中优先级，否则按 sort 参数（默认 symbol asc）
-    # [P0-1] fp_sort 优先于 sort
+    for cond in search_conditions:
+        base_stmt = base_stmt.where(cond)
+    if state_cond is not None:
+        base_stmt = base_stmt.where(state_cond)
+    for cond in board_conditions:
+        base_stmt = base_stmt.where(cond)
+    for cond in fp_filter_conditions:
+        base_stmt = base_stmt.where(cond)
+
     order_by_cols = _build_order_by(
-        sort_spec, has_query=bool(query), rank_expr=rank_expr, fp_sort_spec=fp_sort_spec,
+        sort_spec, has_query=bool(query), rank_expr=rank_expr,
+        fp_sort_spec=fp_sort_spec, snap_subq=snap_subq, chip_subq=chip_subq,
     )
     base_stmt = base_stmt.order_by(*order_by_cols)
 
@@ -697,11 +630,10 @@ async def get_market_stocks(
 
     # 空页边界：page 超出总页数时 base_rows 为空，但仍需返回真实 total 和全局 as_of
     if not base_rows:
-        # 仍执行 count 查询获取真实 total
-        count_stmt_empty = select(func.count()).select_from(Instrument)
+        count_stmt_empty = select(func.count(Instrument.id)).select_from(Instrument)
         if scope == "watchlist":
             count_stmt_empty = (
-                select(func.count())
+                select(func.count(Instrument.id))
                 .select_from(Instrument)
                 .join(
                     UserWatchlistItem,
@@ -712,22 +644,23 @@ async def get_market_stocks(
                     ),
                 )
             )
+        if snap_subq is not None:
+            count_stmt_empty = count_stmt_empty.outerjoin(snap_subq, true())
+        if chip_subq is not None:
+            count_stmt_empty = count_stmt_empty.outerjoin(chip_subq, true())
         for cond in search_conditions:
             count_stmt_empty = count_stmt_empty.where(cond)
         for cond in board_conditions:
             count_stmt_empty = count_stmt_empty.where(cond)
         if state_cond is not None:
             count_stmt_empty = count_stmt_empty.where(state_cond)
-        # [P0-1] fp_filter 条件同样应用到 count 查询
         for cond in fp_filter_conditions:
             count_stmt_empty = count_stmt_empty.where(cond)
         real_total = await db.scalar(count_stmt_empty) or 0
 
-        # 全局 as_of 标量查询（不随分页变化）
         empty_price_as_of = await db.scalar(select(func.max(BarDaily.trade_date)))
         empty_state_as_of = await db.scalar(
             select(func.max(StockFeatureSnapshot.created_at)).where(
-                # [CHANGE-20260718-007] 使用 _SCHEMA_VERSION，禁止硬编码
                 StockFeatureSnapshot.schema_version == _SCHEMA_VERSION
             )
         )
@@ -749,10 +682,10 @@ async def get_market_stocks(
     id_to_row = {row.id: row for row in base_rows}
 
     # ===== Query 2: count =====
-    count_stmt = select(func.count()).select_from(Instrument)
+    count_stmt = select(func.count(Instrument.id)).select_from(Instrument)
     if scope == "watchlist":
         count_stmt = (
-            select(func.count())
+            select(func.count(Instrument.id))
             .select_from(Instrument)
             .join(
                 UserWatchlistItem,
@@ -763,13 +696,16 @@ async def get_market_stocks(
                 ),
             )
         )
+    if snap_subq is not None:
+        count_stmt = count_stmt.outerjoin(snap_subq, true())
+    if chip_subq is not None:
+        count_stmt = count_stmt.outerjoin(chip_subq, true())
     for cond in search_conditions:
         count_stmt = count_stmt.where(cond)
     if state_cond is not None:
         count_stmt = count_stmt.where(state_cond)
     for cond in board_conditions:
         count_stmt = count_stmt.where(cond)
-    # [P0-1] fp_filter 条件同样应用到 count 查询
     for cond in fp_filter_conditions:
         count_stmt = count_stmt.where(cond)
     count_result = await db.execute(count_stmt)

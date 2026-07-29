@@ -91,12 +91,13 @@ docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm \
 
 # [deploy] - 描述: 启动应用服务（CORE_ONLY 模式仅启动核心服务，含策略与盘后编排链路）
 # CORE_ONLY=1：postgres/redis 已在上方 up -d 启动，此处只 force-recreate 应用容器
-# force-recreate 范围：backend/frontend/worker-bars-scheduler/worker-strategy-batch/worker-strategy-scheduler/worker-calendar/worker-after-close
+# force-recreate 范围：backend/frontend/goaccess/worker-bars-scheduler/worker-strategy-batch/worker-strategy-scheduler/worker-calendar/worker-after-close
 # 不重建：capture/monitor/outbox/delivery（按需单独启动）
+# [CHANGE-20260729-005 五.3] goaccess 依赖 frontend，轻量报告服务，纳入核心部署范围
 if [ "${CORE_ONLY:-0}" = "1" ]; then
   echo "=== 启动核心应用服务（force-recreate，不含 postgres/redis） ==="
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --no-build --force-recreate \
-    backend frontend \
+    backend frontend goaccess \
     worker-bars-scheduler worker-strategy-batch worker-strategy-scheduler worker-calendar worker-after-close
 else
   echo "=== 启动全部服务 ==="

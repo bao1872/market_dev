@@ -70,6 +70,7 @@ from app.services.canonical_adapters import (
     profile_to_dict,
 )
 from app.services.canonical_computation_service import CanonicalComputationService
+from app.services.first_pyramid_flatten import flatten_first_pyramid
 from app.services.node_cluster_input_provider import NodeClusterInputProvider
 
 
@@ -301,6 +302,9 @@ def build_summary_payload(
         "atomic_fact_contract_v1": build_persisted_afc_payload(structural_payload, temporal_payload),
         # Gate1: 第一金字塔统一快照持久化（None 表示数据不足未计算；不静默省略）
         "first_pyramid": first_pyramid,
+        # [CHANGE-20260729-005 二.2] 扁平化 99 字段对象，供服务端 filter/sort 统一读取
+        # 包含全部 99 个 fp_ 键；chip 字段在 core 写入时可能为 None（chip 异步写入独立表）
+        "first_pyramid_flat": flatten_first_pyramid(first_pyramid),
     }
 
 
