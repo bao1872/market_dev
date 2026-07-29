@@ -214,13 +214,17 @@ class TestEndToEnd:
         assert snap.momentum.available is True
 
     def test_trend_dimension_has_segment_volume(self, up_bars):
-        """Phase 5B-1：趋势维度必须输出段内成交量指标（SSOT 迁移验证）。"""
+        """Phase 5B-1：趋势维度必须输出段内成交量指标（SSOT 迁移验证）。
+
+        [CHANGE-20260729-002] 字段重命名：current_vs_prev_volume_ratio →
+        current_vs_prev_volume_mean_ratio（mean/mean 权威口径）。
+        """
         snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
         cf = snap.trend.continuousFactors
         assert "current_segment_volume_mean" in cf
         assert "current_segment_amount_mean" in cf
         assert "prev_segment_volume_sum" in cf
-        assert "current_vs_prev_volume_ratio" in cf
+        assert "current_vs_prev_volume_mean_ratio" in cf
 
     def test_structure_dimension_has_events_with_freshness(self, up_bars):
         snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
@@ -472,12 +476,16 @@ class TestPRD20QMMapping:
         assert snap.momentum.available
 
     def test_qm12_trend_segment_volume(self, up_bars):
-        """QM-12：每段趋势至少记录平均成交量及与前段的变化关系。"""
+        """QM-12：每段趋势至少记录平均成交量及与前段的变化关系。
+
+        [CHANGE-20260729-002] 字段重命名：current_vs_prev_volume_ratio →
+        current_vs_prev_volume_mean_ratio（mean/mean 权威口径）。
+        """
         snap = compute_first_pyramid_snapshot(up_bars, symbol="TEST.UP")
         cf = snap.trend.continuousFactors
         assert "current_segment_volume_mean" in cf
         assert "prev_segment_volume_sum" in cf
-        assert "current_vs_prev_volume_ratio" in cf
+        assert "current_vs_prev_volume_mean_ratio" in cf
 
     def test_qm40_chip_consensus_optional(self, up_bars):
         """QM-40：筹码共识可选（chipConsensus 可为 None 或 DimensionResult）。"""

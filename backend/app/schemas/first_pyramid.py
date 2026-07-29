@@ -185,6 +185,84 @@ class FirstPyramidSnapshot(BaseModel):
         return self.model_dump(by_alias=False)
 
 
+# =============================================================================
+# [CHANGE-20260729-003 核心与筹码解耦] 拆分中间 DTO
+# =============================================================================
+
+# Core 算法版本（不含 Node Cluster 参数，仅含 trend/structure/momentum）
+FIRST_PYRAMID_CORE_ALGORITHM_VERSION = "1.0.0-core-split"
+
+# Chip 算法版本（独立版本，关联 Node Cluster engine 版本）
+CHIP_CONSENSUS_ALGORITHM_VERSION = "1.0.0-chip-split"
+
+
+class FirstPyramidCoreSnapshot(BaseModel):
+    """第一金字塔核心快照（趋势/结构/动量；不含筹码共识）。
+
+    [CHANGE-20260729-003] 盘后 review core 关键路径使用本结构，禁止 Node Cluster
+    和 15m Node 输入。core 的 inputHash/parameterHash 排除 Node 参数。
+
+    - trend/structure/momentum 必选维度，任一 available=False 必须抛 ValueError
+    - chip_consensus 由独立路径 compute_chip_consensus_snapshot 计算
+    - assemble_first_pyramid_view(core, chip) 组合为完整 FirstPyramidSnapshot
+    """
+
+    symbol: str = Field(..., description="股票代码")
+    tradeDate: str = Field(..., description="交易日（ISO YYYY-MM-DD）")
+    trend: DimensionResult = Field(..., description="趋势维度（必选）")
+    structure: DimensionResult = Field(..., description="结构维度（必选）")
+    momentum: DimensionResult = Field(..., description="动量维度（必选）")
+    volumeContext: VolumeContextSchema | None = Field(
+        None, description="共享量能上下文（Gate1）"
+    )
+    inputHash: str = Field(..., description="OHLCV 输入 hash（不含 Node 参数）")
+    parameterHash: str = Field(
+        ..., description="核心参数 hash（排除 Node Cluster 参数）"
+    )
+    algorithmVersion: str = Field(
+        default=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        description="核心算法版本（不含 chip）",
+    )
+    nBars: int = Field(..., description="输入 bar 数")
+    lastBarIndex: int = Field(..., description="最后一根 bar 的索引（0-based）")
+
+    @model_validator(mode="after")
+    def _check_required_dimensions(self) -> FirstPyramidCoreSnapshot:
+        for name, dim in (
+            ("trend", self.trend),
+            ("structure", self.structure),
+            ("momentum", self.momentum),
+        ):
+            if not dim.available:
+                raise ValueError(
+                    f"必选维度 {name} 不可缺失（available=False）；"
+                    f"调用方必须传入足够数据，不得静默伪造"
+                )
+        return self
+
+
+class ChipConsensusResult(BaseModel):
+    """筹码共识计算结果（独立于 core）。
+
+    [CHANGE-20260729-003] chip 使用独立 version/hash/run 关联。
+    可独立失败/重试，绝不反改主 run 或重算 core。
+    """
+
+    chip: DimensionResult | None = Field(
+        None, description="筹码共识维度；无有效峰或数据不足时为 None"
+    )
+    chipHash: str = Field(..., description="chip 输入 hash（daily+15m bars）")
+    algorithmVersion: str = Field(
+        default=CHIP_CONSENSUS_ALGORITHM_VERSION,
+        description="chip 算法版本（关联 Node Cluster engine 版本）",
+    )
+    dailyBarsCount: int = Field(0, description="输入日线 bar 数")
+    bars15mCount: int = Field(0, description="输入 15m bar 数")
+    error: str | None = Field(
+        None, description="计算失败原因（chip 失败不阻塞 core）"
+    )
+
+
 # 模块自测：构造最小合法 snapshot
 if __name__ == "__main__":
     evt = PyramidEvent(

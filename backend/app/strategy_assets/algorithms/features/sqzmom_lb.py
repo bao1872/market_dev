@@ -446,6 +446,179 @@ def compute_sqzmom_lb(
     }
 
 
+# =============================================================================
+# [CHANGE-20260729-002] 动量历史派生层：逐 bar 状态 + SQZ_RELEASE 事件
+# =============================================================================
+
+
+def build_momentum_history(
+    sqzmom_result: dict[str, Any],
+    volume_series: list[float] | np.ndarray | None = None,
+    *,
+    times: list[str] | None = None,
+) -> dict[str, Any]:
+    """从 SQZMOM 计算结果构建逐 bar 动量历史 + 不可变事件流。
+
+    本函数不重新实现 SQZMOM 算法，只消费 compute_sqzmom_lb 的输出做派生：
+    - daily_state：每 bar 的 volatility_phase / momentum_direction / momentum_change / sqzmom_delta
+    - sqz_release_events：SQZ_RELEASE 事件（波动释放，方向按当日 SQZMOM 值正/负/0）
+    - momentum_zero_cross_events：动量零轴穿越事件
+    - release_volume_ratio：释放量能比（连续挤压区间均量 / 当日量）
+
+    触发条件（PRD ref/instruction.md §三.4）：
+        SQZ_RELEASE 在 sqzOn[t-1] == True 且 sqzOff[t] == True 时生成；
+        direction 按 val[t] 正/负/0 映射 up/down/null；
+        release_volume_ratio 仅在触发时计算：从 t-1 向前取连续 sqzOn 区间均量，
+        再与 t 日 volume 比较。
+
+    Args:
+        sqzmom_result: compute_sqzmom_lb 的返回 dict
+        volume_series: 成交量序列（与 sqzmom_result 等长），用于计算释放量能比
+        times: ISO 时间字符串列表（与 sqzmom_result 等长），用于事件 occurredAt
+
+    Returns:
+        dict 包含：
+        - daily_state: list[dict] 每 bar 状态
+        - sqz_release_events: list[dict] SQZ_RELEASE 事件
+        - momentum_zero_cross_events: list[dict] 零轴穿越事件
+    """
+    val_list = sqzmom_result.get("val", []) or []
+    sqz_on_list = sqzmom_result.get("sqzOn", []) or []
+    sqz_off_list = sqzmom_result.get("sqzOff", []) or []
+
+    n = len(val_list)
+    vol_arr = (
+        np.asarray(volume_series, dtype=float)
+        if volume_series is not None
+        else None
+    )
+
+    daily_state: list[dict[str, Any]] = []
+    sqz_release_events: list[dict[str, Any]] = []
+    momentum_zero_cross_events: list[dict[str, Any]] = []
+
+    for i in range(n):
+        v = val_list[i]
+        v_prev = val_list[i - 1] if i > 0 else None
+        # volatility_phase
+        if sqz_on_list[i]:
+            phase = "squeeze_on"
+        elif sqz_off_list[i]:
+            phase = "squeeze_off"
+        else:
+            phase = "no_squeeze"
+        # momentum_direction（按当日 SQZMOM 值正/负/0）
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            direction = "null"
+        elif v > 0:
+            direction = "up"
+        elif v < 0:
+            direction = "down"
+        else:
+            direction = "null"
+        # momentum_change + sqzmom_delta
+        if v is None or v_prev is None or (
+            isinstance(v, float) and np.isnan(v)
+        ) or (
+            isinstance(v_prev, float) and np.isnan(v_prev)
+        ):
+            delta = None
+            change = "unknown"
+        else:
+            delta = float(v) - float(v_prev)
+            if delta > 0:
+                change = "increasing"
+            elif delta < 0:
+                change = "decreasing"
+            else:
+                change = "flat"
+
+        daily_state.append({
+            "bar_index": i,
+            "time": times[i] if times else None,
+            "volatility_phase": phase,
+            "momentum_direction": direction,
+            "momentum_change": change,
+            "sqzmom_delta": delta,
+            "sqzmom_val": float(v) if v is not None and not (
+                isinstance(v, float) and np.isnan(v)
+            ) else None,
+        })
+
+        # SQZ_RELEASE 事件：sqzOn[t-1] 且 sqzOff[t]
+        if i > 0 and sqz_on_list[i - 1] and sqz_off_list[i]:
+            # 从 t-1 向前取连续 sqzOn 区间
+            squeeze_start = i - 1
+            while squeeze_start > 0 and sqz_on_list[squeeze_start - 1]:
+                squeeze_start -= 1
+            # squeeze 区间 [squeeze_start, i-1]，长度 = i - squeeze_start
+            squeeze_len = i - squeeze_start
+            # 释放量能比 = squeeze 区间均量 / 当日量
+            release_vol_ratio = None
+            if vol_arr is not None and squeeze_len > 0:
+                squeeze_vols = vol_arr[squeeze_start:i]
+                valid_vols = squeeze_vols[~np.isnan(squeeze_vols)]
+                if len(valid_vols) > 0 and vol_arr[i] > 0:
+                    squeeze_mean = float(np.mean(valid_vols))
+                    release_vol_ratio = squeeze_mean / float(vol_arr[i])
+
+            # 方向按当日 val
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                release_dir = "null"
+            elif v > 0:
+                release_dir = "up"
+            elif v < 0:
+                release_dir = "down"
+            else:
+                release_dir = "null"
+
+            sqz_release_events.append({
+                "type": "SQZ_RELEASE",
+                "bar_index": i,
+                "time": times[i] if times else None,
+                "direction": release_dir,
+                "squeeze_start_index": squeeze_start,
+                "squeeze_length": squeeze_len,
+                "release_volume_ratio": release_vol_ratio,
+                "sqzmom_val": float(v) if v is not None and not (
+                    isinstance(v, float) and np.isnan(v)
+                ) else None,
+            })
+
+        # 动量零轴穿越事件
+        if i > 0:
+            prev_v = val_list[i - 1]
+            cur_v = val_list[i]
+            # 排除 NaN
+            def _safe(x: Any) -> float | None:
+                if x is None or (isinstance(x, float) and np.isnan(x)):
+                    return None
+                return float(x)
+            pv = _safe(prev_v)
+            cv = _safe(cur_v)
+            if pv is not None and cv is not None:
+                if pv <= 0 and cv > 0:
+                    cross_type = "ZERO_CROSS_UP"
+                elif pv >= 0 and cv < 0:
+                    cross_type = "ZERO_CROSS_DOWN"
+                else:
+                    cross_type = None
+                if cross_type:
+                    momentum_zero_cross_events.append({
+                        "type": cross_type,
+                        "bar_index": i,
+                        "time": times[i] if times else None,
+                        "from_val": pv,
+                        "to_val": cv,
+                    })
+
+    return {
+        "daily_state": daily_state,
+        "sqz_release_events": sqz_release_events,
+        "momentum_zero_cross_events": momentum_zero_cross_events,
+    }
+
+
 # ===== 模块自测入口 =====
 if __name__ == "__main__":
     # 自测入口：验证模块加载和函数签名（不连 DB/网络）

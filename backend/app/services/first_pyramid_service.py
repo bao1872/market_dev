@@ -41,9 +41,13 @@ import pandas as pd
 
 from app.constants.indicator_contract import DSA_LOOKBACK, NODE_CLUSTER_PRIMARY_BARS
 from app.schemas.first_pyramid import (
+    CHIP_CONSENSUS_ALGORITHM_VERSION,
     FIRST_PYRAMID_ALGORITHM_VERSION,
+    FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
     ORDERED_DIMENSIONS,
+    ChipConsensusResult,
     DimensionResult,
+    FirstPyramidCoreSnapshot,
     FirstPyramidSnapshot,
     PyramidEvent,
     VolumeContextSchema,
@@ -73,7 +77,10 @@ from app.strategy_assets.algorithms.features.smc_pine_core import (
 from app.strategy_assets.algorithms.features.smc_pine_core import (
     compute_smc_pine,
 )
-from app.strategy_assets.algorithms.features.sqzmom_lb import compute_sqzmom_lb
+from app.strategy_assets.algorithms.features.sqzmom_lb import (
+    build_momentum_history,
+    compute_sqzmom_lb,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +92,16 @@ _FIRST_PYRAMID_PARAMS: dict[str, Any] = {
     "bollinger_config": {"bb_win": 20, "bb_k": 2.0},
     "sqzmom_config": {"length": 20, "mult": 2.0, "lengthKC": 20, "multKC": 1.5, "useTrueRange": True},
     "node_cluster_required_daily_bars": NODE_CLUSTER_PRIMARY_BARS,
+}
+
+# [CHANGE-20260729-003 核心与筹码解耦] Core 专用参数（排除 Node Cluster 参数）
+# 用于 compute_first_pyramid_core_snapshot 的 parameterHash，禁止包含 Node 参数
+_FIRST_PYRAMID_CORE_PARAMS: dict[str, Any] = {
+    "dsa_lookback": DSA_LOOKBACK,
+    "dsa_min_dir_bars": MIN_DIR_BARS,
+    "smc_default_params": SMC_DEFAULT_PARAMS,
+    "bollinger_config": {"bb_win": 20, "bb_k": 2.0},
+    "sqzmom_config": {"length": 20, "mult": 2.0, "lengthKC": 20, "multKC": 1.5, "useTrueRange": True},
 }
 
 # 必选维度的最小 bar 数（前三维）
@@ -179,6 +196,54 @@ def _compute_parameter_hash() -> str:
         return "sha256:error"
 
 
+def _compute_core_parameter_hash() -> str:
+    """[CHANGE-20260729-003] 计算 core 参数 hash（排除 Node Cluster 参数）。
+
+    core 的 parameterHash 只包含 trend/structure/momentum 算法参数，
+    禁止包含 Node Cluster 参数（node_cluster_required_daily_bars）。
+    """
+    try:
+        content = json.dumps(
+            {
+                "algorithm_version": FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+                "required_dimensions": ["trend", "structure", "momentum"],
+                "params": _FIRST_PYRAMID_CORE_PARAMS,
+            },
+            sort_keys=True,
+            default=str,
+        )
+        return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    except Exception as exc:
+        logger.warning("core_parameter_hash 计算失败: %s", exc)
+        return "sha256:error"
+
+
+def _compute_chip_hash(
+    daily_bars: pd.DataFrame | None,
+    bars_15m: pd.DataFrame | None,
+) -> str:
+    """[CHANGE-20260729-003] 计算 chip 输入 hash（daily + 15m bars）。
+
+    chip hash 独立于 core inputHash，关联独立 chip run。
+    """
+    parts: list[str] = []
+    for label, b in (("daily", daily_bars), ("15m", bars_15m)):
+        if b is None or b.empty:
+            parts.append(f"{label}:empty")
+            continue
+        cols = [c for c in ("open", "high", "low", "close", "volume") if c in b.columns]
+        if not cols:
+            parts.append(f"{label}:no_ohlcv")
+            continue
+        try:
+            idx_str = pd.Series(b.index.astype(str)).str.cat(sep=",")
+            vals_str = b[cols].astype(str).agg(",".join, axis=1).str.cat(sep="|")
+            parts.append(f"{len(b)}:{hashlib.sha256((idx_str + '#' + vals_str).encode('utf-8')).hexdigest()[:8]}")
+        except Exception:
+            parts.append(f"{len(b)}:error")
+    return "sha256:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
 # =============================================================================
 # 趋势维度（DSA SSOT）
 # =============================================================================
@@ -205,13 +270,17 @@ def _build_trend_dimension(
     dsa_dir_bars = int(metrics.get("dsa_dir_bars", 0) or 0)
     dsa_vwap_dev_pct = _safe_float(metrics.get("dsa_vwap_dev_pct"))
 
-    # 段内成交量（Phase 5B-1 迁回 DSA SSOT）
+    # 段内成交量（Phase 5B-1 迁回 DSA SSOT；CHANGE-20260729-002 改 mean/mean 口径）
     current_seg_vol_mean = _safe_float(metrics.get("current_segment_volume_mean"))
     current_seg_amt_mean = _safe_float(metrics.get("current_segment_amount_mean"))
+    prev_seg_vol_mean = _safe_float(metrics.get("prev_segment_volume_mean"))
+    prev_seg_amt_mean = _safe_float(metrics.get("prev_segment_amount_mean"))
+    # [权威口径] mean/mean ratio（旧 sum/sum 字段保留兼容但禁止消费）
+    current_vs_prev_vol = _safe_float(metrics.get("current_vs_prev_volume_mean_ratio"))
+    current_vs_prev_amt = _safe_float(metrics.get("current_vs_prev_amount_mean_ratio"))
+    # deprecated sum/sum 字段（保留兼容，前端如需要可读，但不得用于新筛选逻辑）
     prev_seg_vol_sum = _safe_float(metrics.get("prev_segment_volume_sum"))
     prev_seg_amt_sum = _safe_float(metrics.get("prev_segment_amount_sum"))
-    current_vs_prev_vol = _safe_float(metrics.get("current_vs_prev_volume_ratio"))
-    current_vs_prev_amt = _safe_float(metrics.get("current_vs_prev_amount_ratio"))
 
     # Gate1：统一 VolumeContext
     last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
@@ -240,13 +309,16 @@ def _build_trend_dimension(
         "segment_change_pct": segment_change_pct,
         "segment_slope": segment_slope,
         "current_price_vs_dsa_vwap": current_price_vs_dsa_vwap,
-        # 段内成交量
+        # 段内成交量（[CHANGE-20260729-002] mean/mean 权威口径 + deprecated sum/sum 兼容）
         "current_segment_volume_mean": current_seg_vol_mean,
         "current_segment_amount_mean": current_seg_amt_mean,
+        "prev_segment_volume_mean": prev_seg_vol_mean,
+        "prev_segment_amount_mean": prev_seg_amt_mean,
+        "current_vs_prev_volume_mean_ratio": current_vs_prev_vol,
+        "current_vs_prev_amount_mean_ratio": current_vs_prev_amt,
+        # deprecated 字段保留兼容，禁止新逻辑消费
         "prev_segment_volume_sum": prev_seg_vol_sum,
         "prev_segment_amount_sum": prev_seg_amt_sum,
-        "current_vs_prev_volume_ratio": current_vs_prev_vol,
-        "current_vs_prev_amount_ratio": current_vs_prev_amt,
         # 统一 VolumeContext 字段（Gate1，扁平化便于前端直接取用）
         "volume_ratio_20": last_vc.volume_ratio_20 if last_vc else None,
         "volume_ratio_200": last_vc.volume_ratio_200 if last_vc else None,
@@ -254,7 +326,11 @@ def _build_trend_dimension(
         "volume_percentile_200": last_vc.volume_percentile_200 if last_vc else None,
         "volume_zscore_20": last_vc.volume_zscore_20 if last_vc else None,
         "volume_zscore_200": last_vc.volume_zscore_200 if last_vc else None,
-        "trend_strength": _safe_float(metrics.get("trend_strength")),
+        "trend_strength": _safe_float(metrics.get("trend_strength")),  # deprecated 别名
+        # [CHANGE-20260729-002] 权威字段名 regime_strength（DSA SSOT 输出），
+        # 旧代码误读不存在的 trend_strength 字段导致静默 None，已修正。
+        "regime_strength": _safe_float(metrics.get("regime_strength")),
+        "trend_transition": metrics.get("trend_transition", "NONE"),
         "vwap_ret_total": _safe_float(metrics.get("vwap_ret_total")),
     }
 
@@ -267,14 +343,14 @@ def _build_trend_dimension(
         regime_text = f"DSA 方向未确认，dir_bars={dsa_dir_bars}"
 
     vol_text = ""
-    if current_seg_vol_mean is not None and prev_seg_vol_sum is not None and prev_seg_vol_sum > 0:
-        if current_vs_prev_vol is not None:
-            if current_vs_prev_vol > 1.2:
-                vol_text = "；当前段放量"
-            elif current_vs_prev_vol < 0.8:
-                vol_text = "；当前段缩量"
-            else:
-                vol_text = "；当前段量能持平"
+    # [CHANGE-20260729-002] 使用 mean/mean ratio（权威口径）
+    if current_vs_prev_vol is not None:
+        if current_vs_prev_vol > 1.2:
+            vol_text = "；当前段放量"
+        elif current_vs_prev_vol < 0.8:
+            vol_text = "；当前段缩量"
+        else:
+            vol_text = "；当前段量能持平"
 
     # Gate1：量能徽标
     vc_badge = volume_badge(last_vc) if last_vc else "未知"
@@ -320,6 +396,8 @@ def _build_structure_dimension(
     events_raw = smc_result.get("events", []) or []
     order_blocks = smc_result.get("order_blocks", []) or []
     equal_highs_lows = smc_result.get("equal_highs_lows", []) or []
+    # [CHANGE-20260729-002] 消费 SMC 权威输出的 OB 生命周期事件，不再派生 OB_ENTRY
+    ob_lifecycle_events = smc_result.get("ob_lifecycle_events", []) or []
     swing_bias = int(smc_result.get("swing_bias", 0) or 0)
     # [Round 2026-07-28 第一金字塔定稿] 同时输出 internal_direction（短线结构方向）
     internal_bias = int(smc_result.get("internal_bias", 0) or 0)
@@ -368,42 +446,66 @@ def _build_structure_dimension(
             )
         )
 
-    # 进入 OB 事件：价格由区外进入区域（非区域存在）
-    # [Round 2026-07-28] SMC OB 输出 dict 字段为 internal/bias/bar_high/bar_low/mitigated，
-    # 不再有 is_active/direction/high/low；按真实字段提取
-    for ob in order_blocks:
-        # active = 未被 mitigated（mitigated=False 表示仍活跃）
-        if ob.get("mitigated", False):
-            continue
-        ob_type = "OB_ENTRY"
-        # 方向：bias(1/-1) 或 bullish(bool)
-        ob_bias = ob.get("bias")
-        if ob_bias == 1 or ob.get("bullish") is True:
+    # [CHANGE-20260729-002] 消费 SMC 权威 OB 生命周期事件（OB_CREATED/ENTERED/MITIGATED）
+    # 删除"活跃OB = OB_ENTRY"派生，统一从 SMC ob_lifecycle_events 输出。
+    # 字段：type/internal/bias/anchor_index/anchor_time/confirmed_index/confirmed_time/
+    #       bar_high/bar_low/structure_level/[enter_index/enter_time/mitigated_index/mitigated_time]
+    for ob_evt in ob_lifecycle_events:
+        evt_type = ob_evt.get("type", "")
+        # 方向：bias(1/-1) → up/down
+        ob_bias = ob_evt.get("bias")
+        if ob_bias == 1:
             direction = "up"
-        elif ob_bias == -1 or ob.get("bullish") is False:
+        elif ob_bias == -1:
             direction = "down"
         else:
-            ob_direction_raw = ob.get("direction", ob.get("type"))
-            if ob_direction_raw in (1, "bullish", "demand", "up"):
-                direction = "up"
-            elif ob_direction_raw in (-1, "bearish", "supply", "down"):
-                direction = "down"
-            else:
-                direction = None
-        occurred_at = _safe_iso_date(ob.get("mitigation_time") or ob.get("confirmed_time"))
-        bar_index = ob.get("mitigation_index") or ob.get("confirmed_index")
-        # OB 区域价格：bar_high/bar_low（SMC 输出字段名）
-        ob_high = _safe_float(ob.get("bar_high") or ob.get("high"))
-        ob_low = _safe_float(ob.get("bar_low") or ob.get("low"))
-        price = _safe_float(ob.get("mitigation_price")) or ob_high or ob_low
+            direction = None
+        # 事件发生 bar：CREATED 用 confirmed_index；ENTERED 用 enter_index；MITIGATED 用 mitigated_index
+        bar_index = (
+            ob_evt.get("enter_index")
+            or ob_evt.get("mitigated_index")
+            or ob_evt.get("confirmed_index")
+        )
+        occurred_at = _safe_iso_date(
+            ob_evt.get("enter_time")
+            or ob_evt.get("mitigated_time")
+            or ob_evt.get("confirmed_time")
+        )
+        ob_high = _safe_float(ob_evt.get("bar_high"))
+        ob_low = _safe_float(ob_evt.get("bar_low"))
+        # 价格：CREATED 用 anchor 端点；ENTERED/MITIGATED 用对应 bar 的 high/low（无则用 OB 边界）
+        if evt_type == "OB_CREATED":
+            price = ob_high if ob_bias == 1 else ob_low
+        else:
+            price = ob_high if ob_bias == 1 else ob_low
         fresh = max(0, int(last_bar_index - int(bar_index))) if bar_index is not None else 0
-        evt_vc, evt_badge = _event_vc(vc_series, int(bar_index) if bar_index is not None else None)
-        # [Round 2026-07-28] OB 必须标注 structure_level: swing/internal
-        ob_internal = bool(ob.get("internal", False))
+        evt_vc, evt_badge = _event_vc(
+            vc_series, int(bar_index) if bar_index is not None else None
+        )
+        ob_internal = bool(ob_evt.get("internal", False))
         ob_level = "internal" if ob_internal else "swing"
+        extra: dict[str, Any] = {
+            "ob_high": ob_high,
+            "ob_low": ob_low,
+            "structure_level": ob_level,
+            "anchor_index": ob_evt.get("anchor_index"),
+            "anchor_time": _safe_iso_date(ob_evt.get("anchor_time")),
+            "confirmed_index": ob_evt.get("confirmed_index"),
+            "confirmed_time": _safe_iso_date(ob_evt.get("confirmed_time")),
+        }
+        # ENTERED/MITIGATED 额外携带生命周期时点
+        if evt_type == "OB_ENTERED":
+            extra["enter_index"] = ob_evt.get("enter_index")
+            extra["enter_time"] = _safe_iso_date(ob_evt.get("enter_time"))
+        elif evt_type == "OB_MITIGATED":
+            extra["mitigated_index"] = ob_evt.get("mitigated_index")
+            extra["mitigated_time"] = _safe_iso_date(ob_evt.get("mitigated_time"))
+            extra["entered_before_mitigation"] = ob_evt.get("entered_before_mitigation", False)
+            extra["enter_index"] = ob_evt.get("enter_index")
+            extra["enter_time"] = _safe_iso_date(ob_evt.get("enter_time"))
         pyramid_events.append(
             PyramidEvent(
-                type=ob_type,
+                type=str(evt_type),
                 direction=direction,
                 occurredAt=occurred_at,
                 barIndex=int(bar_index) if bar_index is not None else None,
@@ -411,11 +513,7 @@ def _build_structure_dimension(
                 freshnessBars=fresh,
                 volumeContext=evt_vc,
                 volumeBadge=evt_badge,
-                extra={
-                    "ob_high": ob_high,
-                    "ob_low": ob_low,
-                    "structure_level": ob_level,
-                },
+                extra=extra,
             )
         )
 
@@ -836,35 +934,33 @@ def _build_aggregate_status_text(
 
 
 # =============================================================================
-# 主入口
+# 主入口（拆分：core / chip / assemble）
 # =============================================================================
 
 
-def compute_first_pyramid_snapshot(
+def compute_first_pyramid_core_snapshot(
     bars: pd.DataFrame,
     symbol: str,
     trade_date: str | None = None,
-    bars_15m: pd.DataFrame | None = None,
-) -> FirstPyramidSnapshot:
-    """计算第一金字塔统一快照（SSOT 编排入口）。
+) -> FirstPyramidCoreSnapshot:
+    """[CHANGE-20260729-003] 计算第一金字塔核心快照（trend/structure/momentum）。
 
-    单股详情、批量、行情列表、盘后 compute 必须复用此函数。
-    本函数不实现算法，只编排现有权威实现。
+    盘后 review core 关键路径使用本函数，禁止 Node Cluster 和 15m Node 输入。
+    core 的 inputHash/parameterHash 排除 Node 参数，与 chip 解耦。
 
     Args:
         bars: 日线 OHLCV DataFrame（DatetimeIndex，含 open/high/low/close/volume/amount）
         symbol: 股票代码
         trade_date: 交易日（ISO YYYY-MM-DD）；为 None 时取 bars 最后一根 bar 的日期
-        bars_15m: 15 分钟 bars（可选；筹码共识维度用）
 
     Returns:
-        FirstPyramidSnapshot
+        FirstPyramidCoreSnapshot（不含 chip_consensus）
 
     Raises:
         ValueError: 前三维（trend/structure/momentum）任一缺失或数据不足
     """
     if bars is None or bars.empty:
-        raise ValueError("bars 为空，无法计算第一金字塔快照")
+        raise ValueError("bars 为空，无法计算第一金字塔核心快照")
     if len(bars) < _MIN_BARS_FOR_REQUIRED_DIMS:
         raise ValueError(
             f"bars 长度 {len(bars)} 不足（需 >= {_MIN_BARS_FOR_REQUIRED_DIMS}），"
@@ -875,7 +971,6 @@ def compute_first_pyramid_snapshot(
         bars = bars.copy()
         bars.index = pd.to_datetime(bars.index)
 
-    # trade_date 默认取最后一根 bar 的日期
     if trade_date is None:
         trade_date = bars.index[-1].date().isoformat()
 
@@ -921,40 +1016,523 @@ def compute_first_pyramid_snapshot(
         bb_df, sqzmom_result, n_bars, last_bar_index, vc_series, bars
     )
 
-    # 4. 筹码共识维度（Node Cluster，可选）
-    chip_dim: DimensionResult | None = None
-    try:
-        profile = compute_node_cluster_profile(
-            daily_bars=bars,
-            bars_15m=bars_15m,
-            adjustment_as_of=trade_date,
-        )
-        chip_dim = _build_chip_consensus_dimension(profile, bars, n_bars, last_bar_index)
-    except Exception as exc:
-        logger.info("Node Cluster 计算失败，chip_consensus 设为 None: %s", exc)
-        chip_dim = None
-
-    # 5. 聚合状态文本
-    aggregate_status = _build_aggregate_status_text(
-        trend_dim, structure_dim, momentum_dim, chip_dim
-    )
-
-    # 6. 输入与参数 hash
+    # 4. core hash（排除 Node 参数）
     input_hash = _compute_input_hash(bars)
-    parameter_hash = _compute_parameter_hash()
+    parameter_hash = _compute_core_parameter_hash()
 
-    return FirstPyramidSnapshot(
+    return FirstPyramidCoreSnapshot(
         symbol=symbol,
         tradeDate=trade_date,
         trend=trend_dim,
         structure=structure_dim,
         momentum=momentum_dim,
-        chipConsensus=chip_dim,
-        statusText=aggregate_status,
         volumeContext=vc_schema,
         inputHash=input_hash,
         parameterHash=parameter_hash,
+        nBars=n_bars,
+        lastBarIndex=last_bar_index,
     )
+
+
+def compute_chip_consensus_snapshot(
+    daily_bars: pd.DataFrame,
+    bars_15m: pd.DataFrame | None = None,
+    trade_date: str | None = None,
+    *,
+    n_bars: int | None = None,
+    last_bar_index: int | None = None,
+) -> ChipConsensusResult:
+    """[CHANGE-20260729-003] 计算筹码共识快照（独立于 core）。
+
+    chip 使用独立 version/hash/run 关联。可独立失败/重试，
+    绝不反改主 run 或重算 core。
+
+    Args:
+        daily_bars: 日线 OHLCV DataFrame
+        bars_15m: 15 分钟 bars（可选）
+        trade_date: 交易日（用于 adjustment_as_of）
+        n_bars: core 的 nBars（用于 evidence）
+        last_bar_index: core 的 lastBarIndex（用于 evidence）
+
+    Returns:
+        ChipConsensusResult（chip 可为 None；error 字段记录失败原因）
+    """
+    chip_hash = _compute_chip_hash(daily_bars, bars_15m)
+    if daily_bars is None or daily_bars.empty:
+        return ChipConsensusResult(
+            chip=None,
+            chipHash=chip_hash,
+            dailyBarsCount=0,
+            bars15mCount=0 if bars_15m is None else len(bars_15m),
+            error="daily_bars 为空",
+        )
+
+    try:
+        profile = compute_node_cluster_profile(
+            daily_bars=daily_bars,
+            bars_15m=bars_15m,
+            adjustment_as_of=trade_date,
+        )
+        chip_dim = _build_chip_consensus_dimension(
+            profile,
+            daily_bars,
+            n_bars or len(daily_bars),
+            last_bar_index if last_bar_index is not None else len(daily_bars) - 1,
+        )
+        return ChipConsensusResult(
+            chip=chip_dim,
+            chipHash=chip_hash,
+            dailyBarsCount=len(daily_bars),
+            bars15mCount=0 if bars_15m is None else len(bars_15m),
+        )
+    except Exception as exc:
+        logger.info("Node Cluster 计算失败，chip 设为 None: %s", exc)
+        return ChipConsensusResult(
+            chip=None,
+            chipHash=chip_hash,
+            dailyBarsCount=len(daily_bars),
+            bars15mCount=0 if bars_15m is None else len(bars_15m),
+            error=str(exc),
+        )
+
+
+def assemble_first_pyramid_view(
+    core: FirstPyramidCoreSnapshot,
+    chip: ChipConsensusResult | None,
+) -> FirstPyramidSnapshot:
+    """[CHANGE-20260729-003] 组合核心快照与筹码快照为完整第一金字塔视图。
+
+    保留必要兼容包装：组装后的 FirstPyramidSnapshot 使用 core 的 inputHash/parameterHash
+    （含 chip 时升级为完整版本），chip 失败时仍可返回完整 core 视图。
+
+    Args:
+        core: 核心快照（trend/structure/momentum）
+        chip: 筹码快照（可为 None 或含 error）
+
+    Returns:
+        FirstPyramidSnapshot（chip_consensus 为 None 时不阻塞）
+    """
+    chip_dim = chip.chip if chip is not None else None
+    aggregate_status = _build_aggregate_status_text(
+        core.trend, core.structure, core.momentum, chip_dim
+    )
+    # 组装视图使用完整 parameterHash（含 Node 参数，向后兼容）
+    parameter_hash = _compute_parameter_hash()
+
+    return FirstPyramidSnapshot(
+        symbol=core.symbol,
+        tradeDate=core.tradeDate,
+        trend=core.trend,
+        structure=core.structure,
+        momentum=core.momentum,
+        chipConsensus=chip_dim,
+        statusText=aggregate_status,
+        volumeContext=core.volumeContext,
+        inputHash=core.inputHash,
+        parameterHash=parameter_hash,
+    )
+
+
+def compute_first_pyramid_snapshot(
+    bars: pd.DataFrame,
+    symbol: str,
+    trade_date: str | None = None,
+    bars_15m: pd.DataFrame | None = None,
+) -> FirstPyramidSnapshot:
+    """计算第一金字塔统一快照（SSOT 编排入口；向后兼容包装）。
+
+    [CHANGE-20260729-003] 内部拆分为：
+        1. compute_first_pyramid_core_snapshot（core，不含 Node）
+        2. compute_chip_consensus_snapshot（chip，独立 hash/version）
+        3. assemble_first_pyramid_view（组装为完整视图）
+
+    单股详情、批量、行情列表、盘后 compute 必须复用此函数（或拆分后的子函数）。
+    本函数不实现算法，只编排现有权威实现。
+
+    Args:
+        bars: 日线 OHLCV DataFrame（DatetimeIndex，含 open/high/low/close/volume/amount）
+        symbol: 股票代码
+        trade_date: 交易日（ISO YYYY-MM-DD）；为 None 时取 bars 最后一根 bar 的日期
+        bars_15m: 15 分钟 bars（可选；筹码共识维度用）
+
+    Returns:
+        FirstPyramidSnapshot
+
+    Raises:
+        ValueError: 前三维（trend/structure/momentum）任一缺失或数据不足
+    """
+    # 1. core 快照（不含 Node Cluster）
+    core = compute_first_pyramid_core_snapshot(bars, symbol, trade_date)
+
+    # 2. chip 快照（独立路径，失败不阻塞 core）
+    chip = compute_chip_consensus_snapshot(
+        daily_bars=bars,
+        bars_15m=bars_15m,
+        trade_date=core.tradeDate,
+        n_bars=core.nBars,
+        last_bar_index=core.lastBarIndex,
+    )
+
+    # 3. 组装完整视图
+    return assemble_first_pyramid_view(core, chip)
+
+
+# =============================================================================
+# 历史 SSOT：compute_first_pyramid_history
+# =============================================================================
+
+
+def compute_first_pyramid_history(
+    bars: pd.DataFrame,
+    symbol: str = "HISTORY",
+    output_bars: int = 250,
+    include_chip: bool = False,
+    bars_15m: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    """[CHANGE-20260729-003] 第一金字塔历史 SSOT 一次计算。
+
+    单股完整可用日线一次输入，一次计算 DSA/SMC/Bollinger/SQZMOM/VolumeContext，
+    输出最近 N 个有效日的 daily state 及不可变 events。
+
+    约束（ref/instruction.md §五）：
+        - 禁止循环 N 次调用 snapshot；本函数一次计算所有指标 series
+        - 历史 DSA 用 lookback=None（完整历史，不截断）
+        - 当前 snapshot 的 250-bar 合同保持不变（compute_first_pyramid_snapshot 仍用 DSA_LOOKBACK）
+        - 默认 include_chip=False；本轮不读取/写入全市场历史数据
+
+    Args:
+        bars: 单股完整可用日线 OHLCV DataFrame（DatetimeIndex）
+        symbol: 股票代码（用于 meta）
+        output_bars: 输出最近 N 个有效日的 daily state（默认 250）
+        include_chip: 是否同时计算 chip_consensus（默认 False）
+        bars_15m: 15 分钟 bars（仅 include_chip=True 时使用）
+
+    Returns:
+        dict 包含:
+        - daily_state: list[dict] 最近 N 个有效日的状态
+            字段: bar_index/time/trend_transition/regime_value/regime_strength/
+                  dsa_dir_bars/dsa_vwap_dev_pct/
+                  swing_bias/internal_bias/active_internal_ob_count/active_swing_ob_count/
+                  volatility_phase/momentum_direction/momentum_change/sqzmom_delta/
+                  volume_ratio_20/volume_percentile_20/volume_zscore_20/
+                  core_factor_ready/history_sufficient/valid_for_market_aggregation/invalid_reason
+        - events: list[dict] 不可变事件流（仅最近 output_bars 范围内）
+            类型: BOS/CHoCH/OB_CREATED/OB_ENTERED/OB_MITIGATED/EQH/EQL/SQZ_RELEASE/ZERO_CROSS_*
+        - meta: dict 元数据
+            symbol/output_bars/n_input/n_output/input_hash/parameter_hash_core/
+            algorithm_version_core/include_chip/chip_hash(若 include_chip)
+        - chip: ChipConsensusResult | None（仅 include_chip=True）
+    """
+    if bars is None or bars.empty:
+        return {
+            "daily_state": [],
+            "events": [],
+            "meta": {
+                "symbol": symbol,
+                "output_bars": output_bars,
+                "n_input": 0,
+                "n_output": 0,
+                "error": "bars 为空",
+            },
+            "chip": None,
+        }
+
+    if not isinstance(bars.index, pd.DatetimeIndex):
+        bars = bars.copy()
+        bars.index = pd.to_datetime(bars.index)
+
+    n_input = len(bars)
+    # 数据不足直接返回空
+    if n_input < _MIN_BARS_FOR_REQUIRED_DIMS:
+        return {
+            "daily_state": [],
+            "events": [],
+            "meta": {
+                "symbol": symbol,
+                "output_bars": output_bars,
+                "n_input": n_input,
+                "n_output": 0,
+                "error": f"bars 长度 {n_input} 不足（需 >= {_MIN_BARS_FOR_REQUIRED_DIMS}）",
+            },
+            "chip": None,
+        }
+
+    # ===== 一次计算所有指标 series（lookback=None，完整历史）=====
+    # 1. DSA history（lookback=None，不截断）
+    dsa_config_history: dict[str, Any] = {
+        "min_dir_bars": MIN_DIR_BARS,
+        "lookback": None,  # 历史用完整数据
+    }
+    dsa_bundle = compute_dsa_bundle(bars, dsa_config_history)
+    factor_per_bar = dsa_bundle.get("factor_per_bar")
+    if factor_per_bar is None or factor_per_bar.empty:
+        return {
+            "daily_state": [],
+            "events": [],
+            "meta": {
+                "symbol": symbol,
+                "output_bars": output_bars,
+                "n_input": n_input,
+                "n_output": 0,
+                "error": "DSA factor_per_bar 为空",
+            },
+            "chip": None,
+        }
+
+    # 2. SMC（emit_timeline=True 获取逐 bar 状态）
+    opens = bars["open"].astype(float).tolist()
+    highs = bars["high"].astype(float).tolist()
+    lows = bars["low"].astype(float).tolist()
+    closes = bars["close"].astype(float).tolist()
+    times = [d.isoformat() for d in bars.index]
+    smc_result = compute_smc_pine(
+        opens, highs, lows, closes, times, params=None, emit_timeline=True
+    )
+    smc_timeline = smc_result.get("state_timeline") or []
+    ob_lifecycle_events = smc_result.get("ob_lifecycle_events") or []
+    smc_events = smc_result.get("events") or []
+    equal_highs_lows = smc_result.get("equal_highs_lows") or []
+
+    # 3. SQZMOM（history 路径用 build_momentum_history，不需要 bb_df）
+    sqzmom_result = compute_sqzmom_lb(
+        opens=np.array(opens, dtype=float),
+        highs=np.array(highs, dtype=float),
+        lows=np.array(lows, dtype=float),
+        closes=np.array(closes, dtype=float),
+        params=_FIRST_PYRAMID_PARAMS["sqzmom_config"],
+    )
+    # 使用 build_momentum_history 获取逐 bar 动量状态 + SQZ_RELEASE 事件
+    volume_series = bars["volume"].astype(float).tolist()
+    momentum_history = build_momentum_history(
+        sqzmom_result, volume_series=volume_series, times=times
+    )
+    momentum_daily = momentum_history.get("daily_state") or []
+    sqz_release_events = momentum_history.get("sqz_release_events") or []
+    zero_cross_events = momentum_history.get("momentum_zero_cross_events") or []
+
+    # 4. VolumeContext series
+    vc_series = compute_volume_context_series(bars)
+
+    # ===== 组装 daily_state（最近 output_bars 根）=====
+    n_total = len(factor_per_bar)
+    start_idx = max(0, n_total - output_bars)
+    daily_state: list[dict[str, Any]] = []
+
+    # SMC timeline 按 bar_index 索引
+    smc_timeline_by_idx = {t["bar_index"]: t for t in smc_timeline}
+    momentum_daily_by_idx = {d["bar_index"]: d for d in momentum_daily}
+
+    for i in range(start_idx, n_total):
+        row = factor_per_bar.iloc[i]
+        bar_idx = i
+        bar_time = times[i] if i < len(times) else None
+
+        # DSA 字段
+        trend_transition = (
+            str(row.get("trend_transition", "NONE"))
+            if pd.notna(row.get("trend_transition"))
+            else "NONE"
+        )
+        regime_value = int(row["regime_value"]) if pd.notna(row.get("regime_value")) else 0
+        regime_strength = _safe_float(row.get("regime_strength"))
+        dsa_dir_bars = int(row["dsa_dir_bars"]) if pd.notna(row.get("dsa_dir_bars")) else 0
+        dsa_vwap_dev_pct = _safe_float(row.get("dsa_vwap_dev_pct"))
+
+        # SMC 字段（从 timeline 读取；timeline 缺失时取最后已知值）
+        smc_t = smc_timeline_by_idx.get(bar_idx, {})
+        swing_bias = int(smc_t.get("swing_bias", 0))
+        internal_bias = int(smc_t.get("internal_bias", 0))
+        active_internal_ob_count = int(smc_t.get("active_internal_ob_count", 0))
+        active_swing_ob_count = int(smc_t.get("active_swing_ob_count", 0))
+
+        # 动量字段（从 momentum_daily 读取）
+        m_daily = momentum_daily_by_idx.get(bar_idx, {})
+        volatility_phase = m_daily.get("volatility_phase", "no_squeeze")
+        momentum_direction = m_daily.get("momentum_direction", "null")
+        momentum_change = m_daily.get("momentum_change", "unknown")
+        sqzmom_delta = m_daily.get("sqzmom_delta")
+
+        # VolumeContext 字段（从 vc_series 读取）
+        vol_ratio_20 = vol_pct_20 = vol_zscore_20 = None
+        if vc_series is not None and not vc_series.empty and i < len(vc_series):
+            vc_row = vc_series.iloc[i]
+            vol_ratio_20 = _safe_float(vc_row.get("volume_ratio_20"))
+            vol_pct_20 = _safe_float(vc_row.get("volume_percentile_20"))
+            vol_zscore_20 = _safe_float(vc_row.get("volume_zscore_20"))
+
+        # 聚合有效性（只依赖趋势/结构/动量和日线完整性）
+        # core_factor_ready: 三大维度因子均有效（非 None）
+        core_factor_ready = (
+            regime_strength is not None
+            and dsa_vwap_dev_pct is not None
+            and volatility_phase is not None
+            and momentum_direction is not None
+        )
+        # history_sufficient: bar 数 >= 60（最小必选维度要求）
+        history_sufficient = n_input >= _MIN_BARS_FOR_REQUIRED_DIMS
+        # valid_for_market_aggregation: 当前 bar 有效且不处于 warmup
+        valid_for_market_aggregation = core_factor_ready and history_sufficient and i >= 60
+        invalid_reason: str | None = None
+        if not valid_for_market_aggregation:
+            if not core_factor_ready:
+                invalid_reason = "core_factor_not_ready"
+            elif not history_sufficient:
+                invalid_reason = "history_insufficient"
+            elif i < 60:
+                invalid_reason = "warmup_period"
+
+        daily_state.append({
+            "bar_index": bar_idx,
+            "time": bar_time,
+            # 趋势原子特征
+            "trend_transition": trend_transition,
+            "regime_value": regime_value,
+            "regime_strength": regime_strength,
+            "dsa_dir_bars": dsa_dir_bars,
+            "dsa_vwap_dev_pct": dsa_vwap_dev_pct,
+            # SMC 原子特征
+            "swing_bias": swing_bias,
+            "internal_bias": internal_bias,
+            "active_internal_ob_count": active_internal_ob_count,
+            "active_swing_ob_count": active_swing_ob_count,
+            # 动量原子特征
+            "volatility_phase": volatility_phase,
+            "momentum_direction": momentum_direction,
+            "momentum_change": momentum_change,
+            "sqzmom_delta": sqzmom_delta,
+            # VolumeContext 摘要
+            "volume_ratio_20": vol_ratio_20,
+            "volume_percentile_20": vol_pct_20,
+            "volume_zscore_20": vol_zscore_20,
+            # 聚合有效性（不依赖筹码）
+            "core_factor_ready": core_factor_ready,
+            "history_sufficient": history_sufficient,
+            "valid_for_market_aggregation": valid_for_market_aggregation,
+            "invalid_reason": invalid_reason,
+        })
+
+    # ===== 收集最近 output_bars 范围内的事件（不可变）=====
+    events: list[dict[str, Any]] = []
+
+    # SMC BOS/CHoCH 事件
+    for evt in smc_events:
+        evt_idx = evt.get("confirmed_index")
+        if evt_idx is not None and start_idx <= evt_idx < n_total:
+            events.append({
+                "type": evt.get("type", ""),
+                "bar_index": int(evt_idx),
+                "time": evt.get("confirmed_time"),
+                "direction": "up" if evt.get("bullish") else "down" if evt.get("bullish") is False else None,
+                "internal": bool(evt.get("internal", False)),
+                "anchor_index": evt.get("anchor_index"),
+                "level": _safe_float(evt.get("level")),
+            })
+
+    # OB 生命周期事件
+    for ob_evt in ob_lifecycle_events:
+        # CREATED/ENTERED/MITIGATED 分别用不同 index 字段定位
+        evt_type = ob_evt.get("type", "")
+        if evt_type == "OB_CREATED":
+            evt_idx = ob_evt.get("confirmed_index")
+        elif evt_type == "OB_ENTERED":
+            evt_idx = ob_evt.get("enter_index")
+        elif evt_type == "OB_MITIGATED":
+            evt_idx = ob_evt.get("mitigated_index")
+        else:
+            evt_idx = None
+        if evt_idx is not None and start_idx <= evt_idx < n_total:
+            events.append({
+                "type": evt_type,
+                "bar_index": int(evt_idx),
+                "time": ob_evt.get("enter_time") or ob_evt.get("mitigated_time") or ob_evt.get("confirmed_time"),
+                "direction": "up" if ob_evt.get("bias") == 1 else "down" if ob_evt.get("bias") == -1 else None,
+                "internal": bool(ob_evt.get("internal", False)),
+                "anchor_index": ob_evt.get("anchor_index"),
+                "bar_high": _safe_float(ob_evt.get("bar_high")),
+                "bar_low": _safe_float(ob_evt.get("bar_low")),
+                "structure_level": ob_evt.get("structure_level"),
+            })
+
+    # EQH/EQL 事件
+    for eq in equal_highs_lows:
+        evt_idx = eq.get("confirmed_index")
+        if evt_idx is not None and start_idx <= evt_idx < n_total:
+            events.append({
+                "type": eq.get("type", ""),
+                "bar_index": int(evt_idx),
+                "time": eq.get("confirmed_time"),
+                "direction": "up" if eq.get("type") == "EQH" else "down" if eq.get("type") == "EQL" else None,
+                "anchor_index": eq.get("anchor_index"),
+                "level": _safe_float(eq.get("level")),
+            })
+
+    # SQZ_RELEASE 事件
+    for sqz_evt in sqz_release_events:
+        evt_idx = sqz_evt.get("bar_index")
+        if evt_idx is not None and start_idx <= evt_idx < n_total:
+            events.append({
+                "type": "SQZ_RELEASE",
+                "bar_index": int(evt_idx),
+                "time": sqz_evt.get("time"),
+                "direction": sqz_evt.get("direction"),
+                "squeeze_start_index": sqz_evt.get("squeeze_start_index"),
+                "squeeze_length": sqz_evt.get("squeeze_length"),
+                "release_volume_ratio": sqz_evt.get("release_volume_ratio"),
+            })
+
+    # 动量零轴穿越事件
+    for zc_evt in zero_cross_events:
+        evt_idx = zc_evt.get("bar_index")
+        if evt_idx is not None and start_idx <= evt_idx < n_total:
+            events.append({
+                "type": zc_evt.get("type", ""),
+                "bar_index": int(evt_idx),
+                "time": zc_evt.get("time"),
+                "from_val": zc_evt.get("from_val"),
+                "to_val": zc_evt.get("to_val"),
+            })
+
+    # 事件按 bar_index 升序排序
+    events.sort(key=lambda e: e.get("bar_index", 0))
+
+    # ===== meta =====
+    input_hash = _compute_input_hash(bars)
+    parameter_hash_core = _compute_core_parameter_hash()
+
+    meta: dict[str, Any] = {
+        "symbol": symbol,
+        "output_bars": output_bars,
+        "n_input": n_input,
+        "n_output": len(daily_state),
+        "start_bar_index": start_idx,
+        "end_bar_index": n_total - 1,
+        "input_hash": input_hash,
+        "parameter_hash_core": parameter_hash_core,
+        "algorithm_version_core": FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        "include_chip": include_chip,
+    }
+
+    # ===== 可选 chip 计算（默认 False）=====
+    chip_result: ChipConsensusResult | None = None
+    if include_chip:
+        trade_date = bars.index[-1].date().isoformat()
+        chip_result = compute_chip_consensus_snapshot(
+            daily_bars=bars,
+            bars_15m=bars_15m,
+            trade_date=trade_date,
+            n_bars=n_input,
+            last_bar_index=n_input - 1,
+        )
+        meta["chip_hash"] = chip_result.chipHash
+        meta["chip_algorithm_version"] = CHIP_CONSENSUS_ALGORITHM_VERSION
+        meta["chip_error"] = chip_result.error
+
+    return {
+        "daily_state": daily_state,
+        "events": events,
+        "meta": meta,
+        "chip": chip_result,
+    }
 
 
 # 模块自测

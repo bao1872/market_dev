@@ -251,6 +251,10 @@ class _OrderBlock:
     anchor_index/anchor_time: OB bar 位置（parsed_index）
     confirmed_index/confirmed_time: 触发 OB 创建的 BOS/CHoCH bar 位置
     mitigated/mitigated_index/mitigated_time: mitigation 信息（一旦 mitigated=True 不可变）
+    [CHANGE-20260729-002 OB 生命周期] entered/enter_index/enter_time:
+        OB_ENTERED 事件：OB 确认后、mitigation 前，前一根 bar [low,high] 与
+        OB 区域 [bar_low,bar_high] 无重叠，当前 bar [low,high] 首次重叠。
+        一旦 entered=True 不可变（生命周期单次触发）。
     """
     bar_high: float
     bar_low: float
@@ -262,6 +266,10 @@ class _OrderBlock:
     mitigated: bool = False
     mitigated_index: int | None = None
     mitigated_time: str | None = None
+    # [CHANGE-20260729-002] OB_ENTERED 生命周期状态
+    entered: bool = False
+    enter_index: int | None = None
+    enter_time: str | None = None
 
 
 # ===== 状态机 =====
@@ -282,6 +290,7 @@ class _SMCPineState:
         closes: list[float],
         times: list[str],
         params: dict[str, Any],
+        emit_timeline: bool = False,
     ) -> None:
         self.opens = opens
         self.highs = highs
@@ -290,6 +299,8 @@ class _SMCPineState:
         self.times = times
         self.params = params
         self.n = len(closes)
+        # [CHANGE-20260729-002] emit_timeline=True 时输出逐 bar state_timeline
+        self._emit_timeline = emit_timeline
 
         # Pine 语义波动率指标
         self.tr = pine_true_range(highs, lows, closes)
@@ -326,6 +337,11 @@ class _SMCPineState:
         self.equal_highs_lows: list[dict[str, Any]] = []
         self.pivots: list[dict[str, Any]] = []
         self.order_blocks_output: list[dict[str, Any]] = []
+        # [CHANGE-20260729-002] OB 生命周期事件（独立于 Pine BOS/CHoCH 事件）
+        # 三状态：OB_CREATED / OB_ENTERED / OB_MITIGATED，单次触发不可变
+        self.ob_lifecycle_events: list[dict[str, Any]] = []
+        # state_timeline：emit_timeline=True 时填充，每 bar 一条记录
+        self.state_timeline: list[dict[str, Any]] = []
 
         # leg 状态缓存
         self.leg_states: dict[tuple[str, int], dict[int, int]] = {}
@@ -706,6 +722,19 @@ class _SMCPineState:
         if len(target) >= 100:
             target.pop()
         target.insert(0, ob)
+        # [CHANGE-20260729-002] OB_CREATED 生命周期事件（单次触发，不可变）
+        self.ob_lifecycle_events.append({
+            "type": "OB_CREATED",
+            "internal": internal,
+            "bias": bias,
+            "anchor_index": parsed_index,
+            "anchor_time": self.times[parsed_index],
+            "confirmed_index": current_i,
+            "confirmed_time": self.times[current_i],
+            "bar_high": ob.bar_high,
+            "bar_low": ob.bar_low,
+            "structure_level": "internal" if internal else "swing",
+        })
         # [CHANGE-20260717-001 Pine parity] order_blocks_output 也保持 newest-first
         # Pine array.unshift 语义：最新 OB 在数组头部，前端 slice(0,5) 取最新 5 个
         # 旧实现用 append（oldest-first），前端 slice(0,5) 取最旧 5 个，违反 Pine 语义
@@ -721,6 +750,10 @@ class _SMCPineState:
             "mitigated": False,
             "mitigated_index": None,
             "mitigated_time": None,
+            # [CHANGE-20260729-002] OB_ENTERED 生命周期字段（order_blocks_output 同步）
+            "entered": False,
+            "enter_index": None,
+            "enter_time": None,
             "_ob_ref": id(ob),
         })
 
@@ -728,6 +761,7 @@ class _SMCPineState:
         """OB mitigation（Pine 语义）。
 
         mitigation.confirmed = i (穿越 bar)。
+        [CHANGE-20260729-002] 同时 emit OB_MITIGATED 生命周期事件（不可变）。
         """
         obs = self.internal_order_blocks if internal else self.swing_order_blocks
         mitigation_src_high = (
@@ -749,6 +783,24 @@ class _SMCPineState:
                 ob.mitigated = True
                 ob.mitigated_index = i
                 ob.mitigated_time = self.times[i]
+                # [CHANGE-20260729-002] OB_MITIGATED 生命周期事件
+                self.ob_lifecycle_events.append({
+                    "type": "OB_MITIGATED",
+                    "internal": internal,
+                    "bias": ob.bias,
+                    "anchor_index": ob.bar_index,
+                    "anchor_time": ob.bar_time,
+                    "confirmed_index": ob.confirmed_index,
+                    "confirmed_time": ob.confirmed_time,
+                    "mitigated_index": i,
+                    "mitigated_time": self.times[i],
+                    "bar_high": ob.bar_high,
+                    "bar_low": ob.bar_low,
+                    "structure_level": "internal" if internal else "swing",
+                    "entered_before_mitigation": ob.entered,
+                    "enter_index": ob.enter_index,
+                    "enter_time": ob.enter_time,
+                })
                 for out in self.order_blocks_output:
                     if out.get("_ob_ref") == id(ob):
                         out["mitigated"] = True
@@ -762,6 +814,67 @@ class _SMCPineState:
             self.internal_order_blocks = kept
         else:
             self.swing_order_blocks = kept
+
+    def check_ob_entered(self, i: int, internal: bool = False) -> None:
+        """[CHANGE-20260729-002] OB_ENTERED 生命周期检测（独立于 Pine 事件）。
+
+        触发条件（全部满足）：
+        1. OB 已 confirmed（store_order_block 已创建），未 mitigated；
+        2. OB 尚未 entered（首次触发，单次不可变）；
+        3. 前一根 bar [low[i-1], high[i-1]] 与 OB 区域 [bar_low, bar_high] 无重叠；
+        4. 当前 bar [low[i], high[i]] 与 OB 区域 [bar_low, bar_high] 首次重叠。
+
+        重叠定义：两区间 [a1,a2] 与 [b1,b2] 重叠 ⇔ a1 <= b2 AND b1 <= a2。
+        无重叠 ⇔ a1 > b2 OR a2 < b1。
+
+        在主循环中于 delete_order_blocks 之前调用，确保 ENTERED 在 MITIGATED 之前触发。
+        i < 1 时跳过（无前一根 bar）。
+        """
+        if i < 1:
+            return
+        obs = self.internal_order_blocks if internal else self.swing_order_blocks
+        prev_low = self.lows[i - 1]
+        prev_high = self.highs[i - 1]
+        cur_low = self.lows[i]
+        cur_high = self.highs[i]
+        structure_level = "internal" if internal else "swing"
+
+        for ob in obs:
+            if ob.entered or ob.mitigated:
+                continue
+            # 前一根 bar 与 OB 区域无重叠
+            prev_no_overlap = (prev_low > ob.bar_high) or (prev_high < ob.bar_low)
+            if not prev_no_overlap:
+                continue
+            # 当前 bar 与 OB 区域首次重叠
+            cur_overlap = (cur_low <= ob.bar_high) and (cur_high >= ob.bar_low)
+            if not cur_overlap:
+                continue
+            # 触发 OB_ENTERED
+            ob.entered = True
+            ob.enter_index = i
+            ob.enter_time = self.times[i]
+            self.ob_lifecycle_events.append({
+                "type": "OB_ENTERED",
+                "internal": internal,
+                "bias": ob.bias,
+                "anchor_index": ob.bar_index,
+                "anchor_time": ob.bar_time,
+                "confirmed_index": ob.confirmed_index,
+                "confirmed_time": ob.confirmed_time,
+                "enter_index": i,
+                "enter_time": self.times[i],
+                "bar_high": ob.bar_high,
+                "bar_low": ob.bar_low,
+                "structure_level": structure_level,
+            })
+            # 同步 order_blocks_output
+            for out in self.order_blocks_output:
+                if out.get("_ob_ref") == id(ob):
+                    out["entered"] = True
+                    out["enter_index"] = i
+                    out["enter_time"] = self.times[i]
+                    break
 
     # ----- Trailing Strong/Weak -----
 
@@ -862,12 +975,31 @@ class _SMCPineState:
             if swing_gate:
                 self.display_structure(i, False, prev_levels)
 
+            # [CHANGE-20260729-002] OB_ENTERED 检测（在 mitigation 之前）
+            # 必须在 store_order_block 之后（OB 已创建）、delete_order_blocks 之前
+            # （ENTERED 优先于 MITIGATED 触发，避免同 bar 丢失 ENTERED 事件）
+            if show_internal_order_blocks:
+                self.check_ob_entered(i, True)
+            if show_swing_order_blocks:
+                self.check_ob_entered(i, False)
+
             # 7. internal OB mitigation
             if show_internal_order_blocks:
                 self.delete_order_blocks(i, True)
             # 8. swing OB mitigation
             if show_swing_order_blocks:
                 self.delete_order_blocks(i, False)
+
+            # [CHANGE-20260729-002] state_timeline：emit_timeline=True 时记录每 bar 状态
+            if self._emit_timeline:
+                self.state_timeline.append({
+                    "bar_index": i,
+                    "time": self.times[i],
+                    "swing_bias": self.swing_trend.bias,
+                    "internal_bias": self.internal_trend.bias,
+                    "active_internal_ob_count": len(self.internal_order_blocks),
+                    "active_swing_ob_count": len(self.swing_order_blocks),
+                })
 
         # 清理内部字段
         for out in self.order_blocks_output:
@@ -884,6 +1016,8 @@ def compute_smc_pine(
     closes: list[float],
     times: list[str],
     params: dict[str, Any] | None = None,
+    *,
+    emit_timeline: bool = False,
 ) -> dict[str, Any]:
     """计算 SMC 指标（Pine 语义核心），完全排除 FVG。
 
@@ -894,6 +1028,9 @@ def compute_smc_pine(
         closes: 收盘价序列
         times: ISO 格式时间字符串列表（与价格序列等长）
         params: 可选参数覆盖（默认使用 DEFAULT_PARAMS）
+        emit_timeline: 若为 True，额外输出 state_timeline（每 bar 的 swing_bias /
+            internal_bias / active_internal_ob_count / active_swing_ob_count）。
+            默认 False，避免在仅需要最后状态的调用方产生开销。
 
     Returns:
         dict 包含：
@@ -904,6 +1041,11 @@ def compute_smc_pine(
         - pivots: list[dict] 所有 pivot 信息
         - time: list[str] 与输入对齐的时间字符串列表
         - params: dict 实际使用的参数
+        - swing_bias: int 最后 bar 的 swing bias
+        - internal_bias: int 最后 bar 的 internal bias
+        - ob_lifecycle_events: list[dict] OB_CREATED/OB_ENTERED/OB_MITIGATED 事件
+          （[CHANGE-20260729-002] 独立于 Pine BOS/CHoCH 事件，单次触发不可变）
+        - state_timeline: list[dict] 仅 emit_timeline=True 时存在；每 bar 一条记录
 
     Raises:
         ValueError: 输入长度不一致或为空
@@ -934,12 +1076,14 @@ def compute_smc_pine(
             "pivots": [],
             "time": [],
             "params": actual_params,
+            "ob_lifecycle_events": [],
+            "state_timeline": [] if emit_timeline else None,
         }
 
-    state = _SMCPineState(opens, highs, lows, closes, times, actual_params)
+    state = _SMCPineState(opens, highs, lows, closes, times, actual_params, emit_timeline)
     state.run()
 
-    return {
+    result: dict[str, Any] = {
         "events": state.events,
         "order_blocks": state.order_blocks_output,
         "equal_highs_lows": state.equal_highs_lows,
@@ -962,4 +1106,9 @@ def compute_smc_pine(
         "pivots": state.pivots,
         "time": list(times),
         "params": actual_params,
+        # [CHANGE-20260729-002] OB 生命周期事件（OB_CREATED/ENTERED/MITIGATED）
+        "ob_lifecycle_events": state.ob_lifecycle_events,
     }
+    if emit_timeline:
+        result["state_timeline"] = state.state_timeline
+    return result

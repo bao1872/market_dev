@@ -199,3 +199,35 @@ pywencai（`wencai_board_provider`）为唯一板块分类源。
 - `after_close_orchestrator` 任务支持 auto-resume：`interrupted` → `resume_queued`（`attempt_no` 递增，max=3）；
 - `lease_epoch` fencing 防止旧 worker 写入；
 - `last_completed_step` 支持断点恢复。
+
+## 第一金字塔历史 SSOT 与核心/筹码解耦（CHANGE-20260729-003）
+
+### 历史点时安全
+
+- `compute_first_pyramid_history` 必须一次计算所有指标 series，禁止循环 N 次调用 snapshot；
+- 历史 DSA 用 `lookback=None`（完整历史，不截断）；当前 snapshot 的 250-bar 合同保持不变；
+- `rope_dir1_pct` 必须段内 expanding 计数，禁止完整 group 统计回填过去（未来数据泄漏）；
+- 截断后重算前 N 行必须与全量结果前 N 行一致（前缀不变性）。
+
+### anchor/confirmed/event 分离
+
+- SMC OB 生命周期输出为不可变的 `OB_CREATED` / `OB_ENTERED` / `OB_MITIGATED` 三状态，单次触发不可变；
+- `OB_ENTERED` 仅在 OB 确认后、mitigation 前，由前一 bar 与区域无重叠到当前 bar high-low 首次重叠触发；
+- 保留 anchor/confirmed/event、bias、structure_level 和上下界；删除"活跃 OB = OB_ENTRY"派生；
+- `emit_timeline=True` 输出逐 bar state_timeline（swing_bias / internal_bias / active_*_ob_count），默认 False。
+
+### review core 不得依赖 Node/15m
+
+- 盘后 review core 关键路径使用 `compute_first_pyramid_core_snapshot`，禁止 Node Cluster 和 15m Node 输入；
+- `compute_review_core_for_trade_date` 为 daily-core only 路径，不得用单周期 VP 伪装筹码；
+- core 的 version/parameterHash/inputHash 排除 Node 参数；
+- 现有非盘后调用（`compute_feature_snapshot_for_date`）保持兼容，不受影响。
+
+### chip 不得阻塞发布
+
+- 核心发布成功即标记主 run succeeded 并可复盘；
+- 发布后只创建独立 `after_close_chip_consensus` job，不 await、不加入主 run 成功门禁；
+- chip 任务可失败/部分成功/单独重试，绝不反改主 run 或重算 core；
+- chip 使用独立 version/hash/run 关联；
+- chip 持久化 migration 为下一阶段唯一 blocker，禁止用 Redis 冒充持久化、禁止未经验证新增 migration。
+

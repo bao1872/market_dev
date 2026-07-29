@@ -642,6 +642,224 @@ async def compute_feature_snapshot_for_date(
     )
 
 
+# =============================================================================
+# [CHANGE-20260729-003] 盘后 review core 计算路径（daily-core only）
+# =============================================================================
+
+
+async def compute_review_core_for_trade_date(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    trade_date: date,
+    primary_timeframe: str = "1d",
+    adj: str = "qfq",
+    *,
+    primary_bars: pd.DataFrame | None = None,
+    source_run_id: uuid.UUID | None = None,
+    _diag_sink: dict[str, Any] | None = None,
+) -> StockFeatureSnapshot:
+    """[CHANGE-20260729-003] 盘后 review core 计算路径（daily-core only）。
+
+    与 compute_feature_snapshot_for_date 的关键差异（PRD20 盘后核心/筹码解耦）：
+    - **禁止 Node Cluster 调用**：不调用 NodeClusterInputProvider，不调用 node_cluster adapter
+    - **禁止 15m secondary 输入**：不获取 15m bars，不调用 15m structural_features
+    - **使用 compute_first_pyramid_core_snapshot**：first_pyramid 只含 trend/structure/momentum，
+      chip_consensus=None（chip 由独立 after_close_chip_consensus job 异步计算）
+    - **不得用单周期 VP 伪装筹码**：primary 的 cost_position 仍由 structural_features adapter
+      计算（single-period VP，仅用于节点价格水位），但 first_pyramid.chipConsensus 显式为 None；
+      primary_payload.node_cluster 写入 `review_core_no_chip` 标记，禁止下游误读为筹码共识
+
+    现有非盘后调用（compute_feature_snapshot_for_date）保持兼容，不受影响。
+
+    Args:
+        session: 异步 DB 会话
+        instrument_id: 标的 UUID
+        trade_date: 业务交易日
+        primary_timeframe: 主周期（默认 1d）
+        adj: 复权方式（默认 qfq）
+        primary_bars: 预加载的日线 bars（可选，不传则从 DB 获取）
+        source_run_id: 关联的 snapshot run id
+        _diag_sink: 诊断信息收集 dict
+
+    Returns:
+        StockFeatureSnapshot ORM 对象（未写入 DB）
+        - summary_payload.first_pyramid 仅含 core 字段（无 chipConsensus）
+        - summary_payload._review_core = True（标记 review core 路径）
+        - degraded_reasons 含 "review_core: chip_consensus deferred"
+    """
+    degraded_reasons: list[str] = ["review_core: chip_consensus deferred to async after_close_chip_consensus job"]
+    warmup_notes: list[str] = []
+
+    # 获取日线 K 线（如果未预加载）
+    primary_adj_factor_hash: str | None = None
+    primary_source_bar_hash: str | None = None
+    if primary_bars is None:
+        primary_bars, primary_diag = await _fetch_bars_from_db(
+            session, instrument_id, primary_timeframe, adj, trade_date,
+        )
+        if _diag_sink is not None and primary_diag:
+            _diag_sink.update(primary_diag)
+        primary_adj_factor_hash = primary_diag.get("adj_factor_hash") if primary_diag else None
+        primary_source_bar_hash = primary_diag.get("source_bar_hash") if primary_diag else None
+
+    # point-in-time 截断（仅日线）
+    df_1d = _truncate_bars_to_trade_date(primary_bars, trade_date, primary_timeframe)
+
+    # 数据不足检查
+    if df_1d is None:
+        degraded_reasons.append(f"{primary_timeframe}: no bars <= {trade_date}")
+    elif len(df_1d) < 60:
+        degraded_reasons.append(
+            f"{primary_timeframe}: insufficient bars ({len(df_1d)} < 60)"
+        )
+
+    # [CHANGE-20260729-003] 禁止 Node Cluster：precomputed_node_cluster=None
+    # structural_features adapter 内部会回退到单周期 VP 计算 cost_position
+    # （仅用于节点价格水位，不作为筹码共识）
+    primary_canonical = await CanonicalComputationService.compute(
+        algorithm_id="structural_features",
+        instrument_id=instrument_id,
+        as_of=trade_date.isoformat(),
+        source_bar_hash=primary_source_bar_hash,
+        adj_factor_hash=primary_adj_factor_hash,
+        bars=df_1d if df_1d is not None else pd.DataFrame(),
+        timeframe=primary_timeframe,
+        precomputed_node_cluster=None,  # [CHANGE-20260729-003] 禁止 Node Cluster
+    )
+    primary_factors = primary_canonical.payload
+    degraded_reasons.extend(primary_factors.pop("degraded_reasons", []))
+    warmup_notes.extend(primary_factors.pop("warmup_notes", []))
+
+    # C6: MACD 紧凑状态
+    primary_factors["macd_state"] = await _compute_macd_state(
+        df_1d, instrument_id, trade_date, primary_source_bar_hash, primary_adj_factor_hash,
+    )
+
+    # temporal features：daily_context 用 primary，m15_response 为空（无 15m 输入）
+    daily_context = _compute_daily_context(
+        primary_factors, df_1d, degraded_reasons, warmup_notes
+    )
+    # [CHANGE-20260729-003] review core 禁止 15m 输入：m15_response 为空 dict
+    empty_m15_response: dict[str, Any] = {}
+    derived_relation = _compute_derived_relation(
+        daily_context, empty_m15_response, degraded_reasons
+    )
+
+    # current_price（用于 price_state 兜底）
+    current_price_for_state: float | None = None
+    if df_1d is not None and not df_1d.empty:
+        try:
+            current_price_for_state = float(df_1d["close"].iloc[-1])
+        except (IndexError, ValueError, KeyError):
+            current_price_for_state = None
+
+    # primary_payload：node_cluster 字段写 review_core_no_chip 标记
+    # 禁止用单周期 VP 伪装筹码（cost_position 保留用于节点水位，但不写入 chip_consensus）
+    primary_payload: dict[str, Any] = {**primary_factors}
+    primary_payload["node_cluster"] = {
+        "availability": "review_core_no_chip",
+        "degraded_reason": "review_core: Node Cluster deferred to async chip_consensus job",
+        "profile_hash": None,
+        "poc_price": None,
+        "vah_price": None,
+        "val_price": None,
+        "daily_source_hash": None,
+        "bars_15m_source_hash": None,
+        "algorithm_version": None,
+        "output_schema_version": None,
+        "contract_fingerprint": None,
+        "daily_bars_count": len(df_1d) if df_1d is not None else 0,
+        "bars_15m_count": 0,
+        "profile_rows": [],
+        "peak_rows": [],
+        "all_peak_prices": [],
+        "price_state": {
+            "current_price": current_price_for_state,
+            "position_0_1": None,
+            "upper_node_ref": None,
+            "lower_node_ref": None,
+            "poc_node_ref": None,
+            "last_touched_node_ref": None,
+        },
+    }
+
+    structural_payload: dict[str, Any] = {
+        "primary": {primary_timeframe: primary_payload},
+        "secondary": {},  # [CHANGE-20260729-003] review core 禁止 15m
+        "relation": derived_relation,
+        "meta": {
+            "degraded_reasons": degraded_reasons,
+            "warmup_notes": warmup_notes,
+        },
+    }
+
+    temporal_payload: dict[str, Any] = {
+        "daily_context": daily_context,
+        "m15_response": empty_m15_response,
+        "derived_relation": derived_relation,
+        "meta": {
+            "degraded_reasons": degraded_reasons,
+            "warmup_notes": warmup_notes,
+        },
+    }
+
+    extra = await _extract_extra_fields(
+        df_1d, instrument_id, trade_date, primary_source_bar_hash, primary_adj_factor_hash,
+    )
+
+    source_primary = _normalize_primary_bar_time(df_1d, trade_date)
+    source_bar_time_str = source_primary.isoformat() if source_primary else None
+
+    # [CHANGE-20260729-003] review core：使用 compute_first_pyramid_core_snapshot
+    # first_pyramid 只含 trend/structure/momentum，chip_consensus=None
+    first_pyramid_dict: dict[str, Any] | None = None
+    try:
+        from app.services.first_pyramid_service import (
+            compute_first_pyramid_core_snapshot,
+        )
+        if df_1d is not None and not df_1d.empty and len(df_1d) >= 60:
+            symbol_for_pyramid = str(instrument_id)
+            fp_core = compute_first_pyramid_core_snapshot(
+                bars=df_1d,
+                symbol=symbol_for_pyramid,
+                trade_date=trade_date.isoformat(),
+            )
+            # core snapshot 序列化：chip_consensus 显式为 None
+            first_pyramid_dict = fp_core.model_dump(by_alias=False)
+            first_pyramid_dict["chipConsensus"] = None
+            first_pyramid_dict["_review_core"] = True
+    except Exception as exc:
+        logger.warning(
+            "review core 第一金字塔计算失败 instrument_id=%s trade_date=%s: %s",
+            instrument_id, trade_date, exc,
+        )
+        first_pyramid_dict = None
+
+    summary_payload = build_summary_payload(
+        structural_payload, temporal_payload, trade_date,
+        source_bar_time=source_bar_time_str, extra=extra,
+        first_pyramid=first_pyramid_dict,
+    )
+    # 标记 review core 路径（供下游区分）
+    summary_payload["_review_core"] = True
+
+    return StockFeatureSnapshot(
+        instrument_id=instrument_id,
+        trade_date=trade_date,
+        primary_timeframe=primary_timeframe,
+        secondary_timeframe="15m",  # 保留字段以兼容 StockFeatureSnapshot 模型；实际未计算
+        adj=adj,
+        schema_version=_SCHEMA_VERSION,
+        source_run_id=source_run_id,
+        source_primary_bar_time=source_primary,
+        source_secondary_bar_time=None,  # review core 无 15m
+        structural_payload=structural_payload,
+        temporal_payload=temporal_payload,
+        summary_payload=summary_payload,
+        degraded_reasons=degraded_reasons,
+    )
+
+
 async def _fetch_bars_from_db(
     session: AsyncSession,
     instrument_id: uuid.UUID,

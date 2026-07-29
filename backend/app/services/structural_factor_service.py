@@ -782,7 +782,11 @@ def _compute_dsa_segment_factors(
         "segment_slope_abs_ratio": None,
         "segment_duration_ratio": None,
         "segment_efficiency_delta": None,
-        "current_vs_prev_volume_ratio": None,
+        "current_vs_prev_volume_ratio": None,  # deprecated sum/sum
+        # [CHANGE-20260729-002] 权威口径：mean/mean ratio（消费 DSA SSOT，禁止重复派生）
+        "current_segment_volume_mean": None,
+        "prev_segment_volume_mean": None,
+        "current_vs_prev_volume_mean_ratio": None,
         "current_segment_return_per_volume": None,
         "prev_segment_return_per_volume": None,
         "return_per_volume_ratio": None,
@@ -916,45 +920,67 @@ def _compute_dsa_segment_factors(
                     if prev_path_sum > 0:
                         result["prev_dsa_segment_efficiency_0_1"] = float(prev_net / prev_path_sum)
 
-                # prev volume sum
+                # prev volume sum（保留兼容；权威口径在下方从 factor_per_bar 读取）
                 prev_seg_volumes = volumes[prev_start_idx:prev_end_idx + 1] if volumes is not None else None
                 if prev_seg_volumes is not None:
                     result["prev_segment_volume_sum"] = float(np.nansum(prev_seg_volumes))
 
-        # ========== 段间对比字段 ==========
-        cur_ret = result["current_dsa_segment_return_pct"]
-        prev_ret = result["prev_dsa_segment_return_pct"]
-        cur_slope_atr = result["current_dsa_segment_slope_atr_per_bar"]
-        prev_slope_atr = result["prev_dsa_segment_slope_atr_per_bar"]
-        cur_age = result["current_dsa_segment_age_bars"]
-        prev_age = result["prev_dsa_segment_age_bars"]
-        cur_eff = result["current_dsa_segment_efficiency_0_1"]
-        prev_eff = result["prev_dsa_segment_efficiency_0_1"]
-        cur_vol_sum = result["current_segment_volume_sum"]
-        prev_vol_sum = result["prev_segment_volume_sum"]
+    # [CHANGE-20260729-002 量能口径修正] 段间量能字段从 DSA SSOT factor_per_bar 读取，
+    # 禁止再用 visual_segments 复制计算（单一所有权）。
+    # visual_segments 仅用于段定位/起止价格；量能字段（mean/ratio）一律来自 DSA。
+    _last_row = factor_per_bar.iloc[-1]
+    if "current_segment_volume_mean" in factor_per_bar.columns:
+        _val = _last_row.get("current_segment_volume_mean")
+        if pd.notna(_val):
+            result["current_segment_volume_mean"] = float(_val)
+    if "prev_segment_volume_mean" in factor_per_bar.columns:
+        _val = _last_row.get("prev_segment_volume_mean")
+        if pd.notna(_val):
+            result["prev_segment_volume_mean"] = float(_val)
+    if "current_vs_prev_volume_mean_ratio" in factor_per_bar.columns:
+        _val = _last_row.get("current_vs_prev_volume_mean_ratio")
+        if pd.notna(_val):
+            result["current_vs_prev_volume_mean_ratio"] = float(_val)
+    # deprecated sum/sum ratio（保留兼容，禁止新逻辑消费）
+    if "current_vs_prev_volume_ratio" in factor_per_bar.columns:
+        _val = _last_row.get("current_vs_prev_volume_ratio")
+        if pd.notna(_val):
+            result["current_vs_prev_volume_ratio"] = float(_val)
 
-        if cur_ret is not None and prev_ret is not None and abs(prev_ret) > 0:
-            result["segment_return_abs_ratio"] = float(abs(cur_ret) / abs(prev_ret))
-        if cur_slope_atr is not None and prev_slope_atr is not None and abs(prev_slope_atr) > 0:
-            result["segment_slope_abs_ratio"] = float(abs(cur_slope_atr) / abs(prev_slope_atr))
-        if cur_age is not None and prev_age is not None and prev_age > 0:
-            result["segment_duration_ratio"] = float(cur_age / prev_age)
-        if cur_eff is not None and prev_eff is not None:
-            result["segment_efficiency_delta"] = float(cur_eff - prev_eff)
-        if cur_vol_sum is not None and prev_vol_sum is not None and prev_vol_sum > 0:
-            result["current_vs_prev_volume_ratio"] = float(cur_vol_sum / prev_vol_sum)
+    # ========== 段间对比字段 ==========
+    cur_ret = result["current_dsa_segment_return_pct"]
+    prev_ret = result["prev_dsa_segment_return_pct"]
+    cur_slope_atr = result["current_dsa_segment_slope_atr_per_bar"]
+    prev_slope_atr = result["prev_dsa_segment_slope_atr_per_bar"]
+    cur_age = result["current_dsa_segment_age_bars"]
+    prev_age = result["prev_dsa_segment_age_bars"]
+    cur_eff = result["current_dsa_segment_efficiency_0_1"]
+    prev_eff = result["prev_dsa_segment_efficiency_0_1"]
+    cur_vol_sum = result["current_segment_volume_sum"]
+    prev_vol_sum = result["prev_segment_volume_sum"]
 
-        # return per volume
-        cur_rpv = cur_ret / cur_vol_sum if (cur_ret is not None and cur_vol_sum and cur_vol_sum > 0) else None
-        prev_rpv = prev_ret / prev_vol_sum if (prev_ret is not None and prev_vol_sum and prev_vol_sum > 0) else None
-        if cur_rpv is not None:
-            result["current_segment_return_per_volume"] = float(cur_rpv)
-        if prev_rpv is not None:
-            result["prev_segment_return_per_volume"] = float(prev_rpv)
-        if cur_rpv is not None and prev_rpv is not None and abs(prev_rpv) > 0:
-            result["return_per_volume_ratio"] = float(cur_rpv / prev_rpv)
-        if cur_ret is not None and abs(cur_ret) > 0 and cur_vol_sum is not None and cur_vol_sum > 0:
-            result["volume_per_1pct_return"] = float(cur_vol_sum / abs(cur_ret * 100))
+    if cur_ret is not None and prev_ret is not None and abs(prev_ret) > 0:
+        result["segment_return_abs_ratio"] = float(abs(cur_ret) / abs(prev_ret))
+    if cur_slope_atr is not None and prev_slope_atr is not None and abs(prev_slope_atr) > 0:
+        result["segment_slope_abs_ratio"] = float(abs(cur_slope_atr) / abs(prev_slope_atr))
+    if cur_age is not None and prev_age is not None and prev_age > 0:
+        result["segment_duration_ratio"] = float(cur_age / prev_age)
+    if cur_eff is not None and prev_eff is not None:
+        result["segment_efficiency_delta"] = float(cur_eff - prev_eff)
+    if cur_vol_sum is not None and prev_vol_sum is not None and prev_vol_sum > 0:
+        result["current_vs_prev_volume_ratio"] = float(cur_vol_sum / prev_vol_sum)
+
+    # return per volume
+    cur_rpv = cur_ret / cur_vol_sum if (cur_ret is not None and cur_vol_sum and cur_vol_sum > 0) else None
+    prev_rpv = prev_ret / prev_vol_sum if (prev_ret is not None and prev_vol_sum and prev_vol_sum > 0) else None
+    if cur_rpv is not None:
+        result["current_segment_return_per_volume"] = float(cur_rpv)
+    if prev_rpv is not None:
+        result["prev_segment_return_per_volume"] = float(prev_rpv)
+    if cur_rpv is not None and prev_rpv is not None and abs(prev_rpv) > 0:
+        result["return_per_volume_ratio"] = float(cur_rpv / prev_rpv)
+    if cur_ret is not None and abs(cur_ret) > 0 and cur_vol_sum is not None and cur_vol_sum > 0:
+        result["volume_per_1pct_return"] = float(cur_vol_sum / abs(cur_ret * 100))
 
     return result
 

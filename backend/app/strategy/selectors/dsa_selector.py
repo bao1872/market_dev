@@ -307,6 +307,34 @@ def compute_dsa_history(
     regime[dsa_bars > min_dir_bars] = 1
     regime[dsa_bars < -min_dir_bars] = -1
 
+    # [CHANGE-20260729-002 筛选器原子特征] trend_transition 逐 bar 状态
+    # 仅依赖 DSA 因果字段（dir_vals/regime/group_id），无未来泄漏。
+    # 语义：UP_CONFIRMED/DOWN_CONFIRMED=regime 已确认；UP_BROKEN/DOWN_BROKEN=方向刚翻转
+    # 但 regime 尚未确认；UP_TO_DOWN/DOWN_TO_UP=方向翻转且前一段 regime 已确认；
+    # NONE=regime 未确认且无翻转。
+    trend_transition = pd.Series("NONE", index=df.index, dtype=object)
+    # 翻转点：dir_vals 与前一根不同；第一根不是翻转
+    _flip_mask = dir_vals != dir_vals.shift(1)
+    _flip_mask.iloc[0] = False
+    # 已确认状态
+    trend_transition[regime == 1] = "UP_CONFIRMED"
+    trend_transition[regime == -1] = "DOWN_CONFIRMED"
+    # 翻转点覆盖：根据前一段 regime 是否已确认 + 当前方向
+    _prev_regime = regime.shift(1).fillna(0).astype(int)
+    _cur_dir = dir_vals
+    # UP_TO_DOWN：前段 regime==1（已确认上行），当前 dir 变为 -1
+    _up_to_down = _flip_mask & (_prev_regime == 1) & (_cur_dir == -1)
+    # DOWN_TO_UP：前段 regime==-1（已确认下行），当前 dir 变为 1
+    _down_to_up = _flip_mask & (_prev_regime == -1) & (_cur_dir == 1)
+    # UP_BROKEN：当前 dir 翻转为 -1，前段未确认为上行
+    _up_broken = _flip_mask & (_cur_dir == -1) & (~_up_to_down) & (regime != -1)
+    # DOWN_BROKEN：当前 dir 翻转为 1，前段未确认为下行
+    _down_broken = _flip_mask & (_cur_dir == 1) & (~_down_to_up) & (regime != 1)
+    trend_transition[_up_to_down] = "UP_TO_DOWN"
+    trend_transition[_down_to_up] = "DOWN_TO_UP"
+    trend_transition[_up_broken] = "UP_BROKEN"
+    trend_transition[_down_broken] = "DOWN_BROKEN"
+
     vwap_vals = vwap_series.astype(float)
     vwap_start = vwap_vals.groupby(group_id).transform("first")
     trend_strength = pd.Series(0.0, index=df.index)
@@ -378,34 +406,55 @@ def compute_dsa_history(
     amount = df["amount"].astype(float)
     avg_amount_20d = amount.rolling(window=20, min_periods=1).mean()
 
-    # [Phase 5B-1] 段内成交量迁移：将原 structural_factor_service.py:873-945 的派生
-    # 迁回 DSA SSOT。基于 group_id 计算"当前段累计"与"前一段总量"，避免外部
-    # 模块通过 visual_segments time-string 匹配重复派生（单一所有权）。
+    # [Phase 5B-1 + CHANGE-20260729-002 量能口径修正] 段内成交量迁移至 DSA SSOT。
     # PRD20 QM-12：每段趋势至少记录平均成交量及与前段的变化关系。
-    current_segment_volume_sum = volume.groupby(group_id).cumsum()
-    current_segment_amount_sum = amount.groupby(group_id).cumsum()
-    # 前一段总量：取每个 group 的总量，shift(1) 对齐到下一个 group 的所有 bar
-    # 对每个 group，prev_total = 上一个 group 的 total，对该 group 所有 bar 都一样
+    # 量能口径修正：废弃"当前段累计量 / 前一段总量"（口径不一致），
+    # 改为"当前段截至当日均量 / 上一完整段均量"（mean/mean，同口径）。
+    # 旧 sum/sum 字段保留兼容但标记 deprecated；下游应消费 *_mean_ratio 字段。
+    current_segment_volume_sum = volume.groupby(group_id).cumsum()  # deprecated 兼容
+    current_segment_amount_sum = amount.groupby(group_id).cumsum()  # deprecated 兼容
+    # 当前段截至当日均量 = 当前段累计量 / 段内截至当日 bar 数（count 已为 cumcount+1）
+    current_segment_volume_mean = current_segment_volume_sum / count.replace(0, np.nan)
+    current_segment_amount_mean = current_segment_amount_sum / count.replace(0, np.nan)
+
+    # 上一完整段：总量、bar 数、均值（每个 group 内所有 bar 取相同值）
     _grp_volume_totals = volume.groupby(group_id).sum()
     _grp_amount_totals = amount.groupby(group_id).sum()
-    # 构造 group_id → prev_total 映射
-    _prev_vol_by_gid = _grp_volume_totals.shift(1).fillna(0.0)
-    _prev_amt_by_gid = _grp_amount_totals.shift(1).fillna(0.0)
-    prev_segment_volume_sum = group_id.map(_prev_vol_by_gid).astype(float)
-    prev_segment_amount_sum = group_id.map(_prev_amt_by_gid).astype(float)
-    # 当前段 vs 前一段比例（前段为 0 时为 NaN）
+    _grp_counts = group_id.groupby(group_id).count()  # 每个 group 的总 bar 数
+    _prev_vol_total_by_gid = _grp_volume_totals.shift(1).fillna(0.0)
+    _prev_amt_total_by_gid = _grp_amount_totals.shift(1).fillna(0.0)
+    _prev_count_by_gid = _grp_counts.shift(1).fillna(0)
+    prev_segment_volume_sum = group_id.map(_prev_vol_total_by_gid).astype(float)  # deprecated
+    prev_segment_amount_sum = group_id.map(_prev_amt_total_by_gid).astype(float)  # deprecated
+    prev_segment_count = group_id.map(_prev_count_by_gid).astype(float)
+    # 上一完整段均量 = 上一段总量 / 上一段 bar 数
+    prev_segment_volume_mean = (
+        prev_segment_volume_sum / prev_segment_count.replace(0, np.nan)
+    )
+    prev_segment_amount_mean = (
+        prev_segment_amount_sum / prev_segment_count.replace(0, np.nan)
+    )
+
+    # [权威口径] 当前段均量 / 上一完整段均量（mean/mean，同口径）
     with np.errstate(divide="ignore", invalid="ignore"):
+        current_vs_prev_volume_mean_ratio = (
+            current_segment_volume_mean / prev_segment_volume_mean.replace(0.0, np.nan)
+        )
+        current_vs_prev_amount_mean_ratio = (
+            current_segment_amount_mean / prev_segment_amount_mean.replace(0.0, np.nan)
+        )
+        # deprecated：旧 sum/sum 口径，保留兼容但下游禁止消费
         current_vs_prev_volume_ratio = (
             current_segment_volume_sum / prev_segment_volume_sum.replace(0.0, np.nan)
         )
         current_vs_prev_amount_ratio = (
             current_segment_amount_sum / prev_segment_amount_sum.replace(0.0, np.nan)
         )
-    # 当前段平均成交量（累计 / 段内 bar 数 count）
-    current_segment_volume_mean = current_segment_volume_sum / count.replace(0, np.nan)
-    current_segment_amount_mean = current_segment_amount_sum / count.replace(0, np.nan)
 
     # 8. ATR Rope 与方向占比
+    # [CHANGE-20260729-002 前缀不变性] Rope 方向占比必须使用段内 expanding 计数
+    # （截至当日累计 / 段内截至当日有效 bar 数），禁止完整 group 统计回填过去。
+    # 前缀不变性：bar[t] 的 rope_dir*_pct 只依赖 bar[0..t]，不依赖 bar[t+1..]。
     rope_dir1_pct = pd.Series(np.nan, index=df.index, dtype=float)
     rope_dir0_pct = pd.Series(np.nan, index=df.index, dtype=float)
     rope_dir_neg1_pct = pd.Series(np.nan, index=df.index, dtype=float)
@@ -419,13 +468,16 @@ def compute_dsa_history(
             atr_rope_dir = atr_rope_df["atr_rope_dir"]
             atr_rope_rope = atr_rope_df["atr_rope_rope"]
 
-            # 按 DSA 趋势区间统计 ATR Rope dir 占比
-            for _gid, grp in atr_rope_dir.groupby(group_id):
-                total = len(grp)
-                if total > 0:
-                    rope_dir1_pct.loc[grp.index] = float((grp == 1).sum()) / total * 100.0
-                    rope_dir0_pct.loc[grp.index] = float((grp == 0).sum()) / total * 100.0
-                    rope_dir_neg1_pct.loc[grp.index] = float((grp == -1).sum()) / total * 100.0
+            # [权威口径] 段内 expanding 计数（前缀不变，无未来泄漏）
+            # 截至当日累计该方向次数 / 段内截至当日有效 bar 数
+            dir1_cum = (atr_rope_dir == 1).groupby(group_id).cumsum()
+            dir0_cum = (atr_rope_dir == 0).groupby(group_id).cumsum()
+            dir_neg1_cum = (atr_rope_dir == -1).groupby(group_id).cumsum()
+            seg_valid_count = atr_rope_dir.notna().groupby(group_id).cumsum()
+            safe_seg_count = seg_valid_count.replace(0, np.nan)
+            rope_dir1_pct = (dir1_cum / safe_seg_count) * 100.0
+            rope_dir0_pct = (dir0_cum / safe_seg_count) * 100.0
+            rope_dir_neg1_pct = (dir_neg1_cum / safe_seg_count) * 100.0
 
             low = df["low"].astype(float)
             valid_touch = atr_rope_rope.notna() & low.notna()
@@ -464,6 +516,7 @@ def compute_dsa_history(
             "regime_value": regime,
             "regime_strength": trend_strength,
             "dsa_dir_bars": dsa_bars,
+            "trend_transition": trend_transition,
             "offset_rate": offset_rate,
             "offset_mean": offset_mean,
             "offset_std": offset_std,
@@ -478,13 +531,20 @@ def compute_dsa_history(
             "change_pct": change_pct,
             "vol_zscore": vol_zscore,
             "avg_amount_20d": avg_amount_20d,
-            # [Phase 5B-1] 段内成交量（迁回 DSA SSOT，禁止外部重复派生）
-            "current_segment_volume_sum": current_segment_volume_sum,
-            "current_segment_amount_sum": current_segment_amount_sum,
+            # [Phase 5B-1 + CHANGE-20260729-002] 段内成交量（SSOT 输出，禁止外部重复派生）
+            # deprecated sum-based 字段保留兼容；新 mean-based 字段为权威口径
+            "current_segment_volume_sum": current_segment_volume_sum,  # deprecated
+            "current_segment_amount_sum": current_segment_amount_sum,  # deprecated
             "current_segment_volume_mean": current_segment_volume_mean,
             "current_segment_amount_mean": current_segment_amount_mean,
-            "prev_segment_volume_sum": prev_segment_volume_sum,
-            "prev_segment_amount_sum": prev_segment_amount_sum,
+            "prev_segment_volume_sum": prev_segment_volume_sum,  # deprecated
+            "prev_segment_amount_sum": prev_segment_amount_sum,  # deprecated
+            "prev_segment_volume_mean": prev_segment_volume_mean,
+            "prev_segment_amount_mean": prev_segment_amount_mean,
+            # [权威口径] mean/mean ratio
+            "current_vs_prev_volume_mean_ratio": current_vs_prev_volume_mean_ratio,
+            "current_vs_prev_amount_mean_ratio": current_vs_prev_amount_mean_ratio,
+            # deprecated sum/sum ratio（保留兼容，下游禁止消费）
             "current_vs_prev_volume_ratio": current_vs_prev_volume_ratio,
             "current_vs_prev_amount_ratio": current_vs_prev_amount_ratio,
             "rope_dir1_pct": rope_dir1_pct,
@@ -531,6 +591,7 @@ def _history_row_to_metrics(row: pd.Series) -> dict[str, Any]:
         # 扩展字段（用于详情展示和筛选）
         "regime_value": int(row["regime_value"]) if pd.notna(row["regime_value"]) else 0,
         "regime_strength": _safe_float(row["regime_strength"]),
+        "trend_transition": str(row["trend_transition"]) if pd.notna(row["trend_transition"]) else "NONE",
         "offset_rate": _safe_float(row["offset_rate"]),
         "change_pct": _safe_float(row["change_pct"]),
         "touch_rope": bool(row["touch_rope"]) if pd.notna(row["touch_rope"]) else False,
@@ -552,13 +613,24 @@ def _history_row_to_metrics(row: pd.Series) -> dict[str, Any]:
         "dsa_vwap_dev_pct": _safe_float(row["dsa_vwap_dev_pct"]),
         "vol_zscore": _safe_float(row["vol_zscore"]),
         "avg_amount_20d": _safe_float(row["avg_amount_20d"]),
-        # [Phase 5B-1] 段内成交量（SSOT 输出，禁止外部重复派生）
-        "current_segment_volume_sum": _safe_float(row["current_segment_volume_sum"]),
-        "current_segment_amount_sum": _safe_float(row["current_segment_amount_sum"]),
+        # [Phase 5B-1 + CHANGE-20260729-002] 段内成交量（SSOT 输出，禁止外部重复派生）
+        # deprecated sum-based 字段保留兼容；新 mean-based 字段为权威口径
+        "current_segment_volume_sum": _safe_float(row["current_segment_volume_sum"]),  # deprecated
+        "current_segment_amount_sum": _safe_float(row["current_segment_amount_sum"]),  # deprecated
         "current_segment_volume_mean": _safe_float(row["current_segment_volume_mean"]),
         "current_segment_amount_mean": _safe_float(row["current_segment_amount_mean"]),
-        "prev_segment_volume_sum": _safe_float(row["prev_segment_volume_sum"]),
-        "prev_segment_amount_sum": _safe_float(row["prev_segment_amount_sum"]),
+        "prev_segment_volume_sum": _safe_float(row["prev_segment_volume_sum"]),  # deprecated
+        "prev_segment_amount_sum": _safe_float(row["prev_segment_amount_sum"]),  # deprecated
+        "prev_segment_volume_mean": _safe_float(row["prev_segment_volume_mean"]),
+        "prev_segment_amount_mean": _safe_float(row["prev_segment_amount_mean"]),
+        # [权威口径] mean/mean ratio
+        "current_vs_prev_volume_mean_ratio": _safe_float(
+            row["current_vs_prev_volume_mean_ratio"]
+        ),
+        "current_vs_prev_amount_mean_ratio": _safe_float(
+            row["current_vs_prev_amount_mean_ratio"]
+        ),
+        # deprecated sum/sum ratio（保留兼容，下游禁止消费）
         "current_vs_prev_volume_ratio": _safe_float(row["current_vs_prev_volume_ratio"]),
         "current_vs_prev_amount_ratio": _safe_float(row["current_vs_prev_amount_ratio"]),
         "rope_cross_up_date": _safe_date(row["rope_cross_up_date"]),

@@ -231,6 +231,8 @@ class TestDsaBundleLastRowConsistency:
             "rope_cross_down_date",
         }
         bool_keys = {"touch_rope", "touch_vwap"}
+        # [CHANGE-20260729-002] trend_transition 为字符串枚举字段，非数值
+        string_keys = {"trend_transition"}
 
         for key, val in metrics.items():
             if key in date_keys:
@@ -246,6 +248,13 @@ class TestDsaBundleLastRowConsistency:
                 raw = last_row[key]
                 expected = bool(raw) if pd.notna(raw) else False
                 assert val == expected, f"布尔字段 {key} 不一致: {val} vs {expected}"
+                continue
+            if key in string_keys:
+                # 字符串字段：直接比较（per_bar 可能是 NaN 或字符串）
+                raw = last_row[key]
+                if val is None or (isinstance(raw, float) and pd.isna(raw)):
+                    continue  # 跳过 None/NaN 比较
+                assert val == raw, f"字符串字段 {key} 不一致: {val!r} vs {raw!r}"
                 continue
             if key not in last_row.index:
                 # last_close 等额外字段不在 per_bar 中，跳过
