@@ -8,23 +8,22 @@ set -e
 # GoAccess 容器挂载 nginx_logs 卷读不到文件。
 rm -f /var/log/nginx/access.log /var/log/nginx/error.log
 
-# [CHANGE-20260729-009] Umami tracking script 注入（仅 production + UMAMI_WEBSITE_ID 非空）
-# - 开发/capture 模式不注入（不统计）
-# - 注入位置：index.html 的 </head> 前
-# - script src=/umami/script.js 由 nginx 反向代理到 umami:3000
-# - data-website-id 由 market.env 的 UMAMI_WEBSITE_ID 提供
-INDEX_HTML=/usr/share/nginx/html/index.html
-if [ -n "$UMAMI_WEBSITE_ID" ] && [ -f "$INDEX_HTML" ]; then
-  if ! grep -q "umami/script.js" "$INDEX_HTML"; then
-    # 用 sed 在 </head> 前插入 script tag（兼容 BusyBox sed）
-    SCRIPT_TAG="<script async src=\"/umami/script.js\" data-website-id=\"$UMAMI_WEBSITE_ID\"></script>"
-    sed "s|</head>|  $SCRIPT_TAG\n</head>|" "$INDEX_HTML" > "$INDEX_HTML.tmp" && mv "$INDEX_HTML.tmp" "$INDEX_HTML"
-    echo "[entrypoint] Umami tracking script injected (website_id=$UMAMI_WEBSITE_ID)"
+# [CHANGE-20260729-009] Umami tracking script 注入（nginx sub_filter 模式）
+# - 不修改 dist/index.html（Live Mount 模式下 dist 只读挂载，无法写入）
+# - 用 sed 把 nginx.conf 中的 ${UMAMI_WEBSITE_ID} 占位符替换为实际值
+# - 替换后写入 /etc/nginx/conf.d/default.conf（镜像内置文件可写）
+# - UMAMI_WEBSITE_ID 为空时占位符替换为空字符串，sub_filter 仍注入但 data-website-id 为空
+NGINX_CONF=/etc/nginx/conf.d/default.conf
+if [ -f "$NGINX_CONF" ]; then
+  # 转义 / 避免与 sed 分隔符冲突（website_id 是 UUID 含 -，不含 /，可直接替换）
+  sed -i "s|\${UMAMI_WEBSITE_ID}|${UMAMI_WEBSITE_ID:-}|g" "$NGINX_CONF"
+  if [ -n "$UMAMI_WEBSITE_ID" ]; then
+    echo "[entrypoint] Umami tracking script enabled (website_id=$UMAMI_WEBSITE_ID)"
   else
-    echo "[entrypoint] Umami tracking script already exists, skip injection"
+    echo "[entrypoint] UMAMI_WEBSITE_ID empty, Umami script will use empty data-website-id"
   fi
 else
-  echo "[entrypoint] UMAMI_WEBSITE_ID empty or index.html missing, skip Umami injection"
+  echo "[entrypoint] WARN: $NGINX_CONF not found, skip Umami injection"
 fi
 
 # 启动 busybox crond（后台），负责定时执行 /etc/periodic/15min/logrotate-nginx
