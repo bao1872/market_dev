@@ -867,7 +867,7 @@ async def compute_review_core_for_trade_date(
 async def compute_review_core_batch_for_trade_date(
     session: AsyncSession,
     trade_date: date,
-    instrument_ids: Sequence[uuid.UUID],
+    instrument_ids: Sequence[uuid.UUID] | None,
     *,
     batch_size: int = 20,
     failure_threshold: float = 0.3,
@@ -909,6 +909,8 @@ async def compute_review_core_batch_for_trade_date(
     Raises:
         RuntimeError: 失败比例超过 failure_threshold（caller 应 rollback）
     """
+    if instrument_ids is None:
+        instrument_ids = []
     total = len(instrument_ids)
     snapshot_count = 0
     failed_count = 0
