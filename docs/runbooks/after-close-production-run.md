@@ -105,3 +105,114 @@ ssh panji-prod "curl -s -X POST -H 'Authorization: Bearer <admin_token>' -H 'Con
 - 禁止 DELETE 历史 `dsa_only` 记录；通过正式 cancel/interrupted/retry 服务处理。
 - 禁止关闭或重启 worker 容器以"重置"任务。
 - 禁止启动 nohup 临时脚本轮询任务状态。
+
+## 增量发布 canary / migration / resume 命令（CHANGE-20260729-008）
+
+### 1. Migration（生产首次应用 071-073）
+
+```bash
+# 前提：服务器已部署包含 071-073 迁移的代码
+# 检查当前 alembic 版本
+ssh panji-prod "docker exec trading-backend alembic current"
+
+# 执行迁移（070 → 071 → 072 → 073）
+ssh panji-prod "docker exec trading-backend alembic upgrade head"
+
+# 验证迁移后版本
+ssh panji-prod "docker exec trading-backend alembic current"
+# 期望: 073_incremental_factor_publication (head)
+
+# 验证新表存在
+ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \
+  \"SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN (
+    'stock_chip_consensus_snapshots','stock_feature_snapshot_run_items',
+    'first_pyramid_history_runs','first_pyramid_history_run_items','factor_publications'
+  );\""
+```
+
+### 2. History 回补 canary（5 只含深科技）
+
+```bash
+# dry-run 验证
+ssh panji-prod "docker exec trading-backend python -m scripts.first_pyramid_history_backfill_cli --canary --dry-run"
+
+# 执行 canary（5 只 × 250 日，DB-only，include_chip=false）
+ssh panji-prod "docker exec trading-backend python -m scripts.first_pyramid_history_backfill_cli --canary"
+
+# 验证 canary 结果
+ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \
+  \"SELECT status, succeeded_count, failed_count, expected_count FROM first_pyramid_history_runs ORDER BY started_at DESC LIMIT 1;\""
+```
+
+### 3. History 回补扩大（25 只）
+
+```bash
+ssh panji-prod "docker exec trading-backend python -m scripts.first_pyramid_history_backfill_cli --limit 25"
+```
+
+### 4. History 全市场回补（持久化运行）
+
+```bash
+# 后台运行（nohup 确保持久化，SSH 断开不中断）
+ssh panji-prod 'docker exec -d trading-backend bash -c "nohup python -m scripts.first_pyramid_history_backfill_cli --all --batch-size 25 > /tmp/history-fullmarket.log 2>&1"'
+
+# 查询进度
+ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \
+  \"SELECT status, succeeded_count, failed_count, skipped_count, expected_count,
+    ROUND(100.0 * succeeded_count / NULLIF(expected_count, 0), 1) AS pct
+   FROM first_pyramid_history_runs ORDER BY started_at DESC LIMIT 1;\""
+
+# 查询 item 级进度
+ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \
+  \"SELECT status, COUNT(*) FROM first_pyramid_history_run_items
+   WHERE history_run_id='<RUN_ID>' GROUP BY status;\""
+
+# 查看日志
+ssh panji-prod "docker exec trading-backend tail -50 /tmp/history-fullmarket.log"
+```
+
+### 5. History resume（续跑未完成的 run）
+
+```bash
+ssh panji-prod "docker exec trading-backend python -m scripts.first_pyramid_history_backfill_cli --resume --history-run-id <RUN_ID>"
+```
+
+### 6. 指定股票回补
+
+```bash
+ssh panji-prod "docker exec trading-backend python -m scripts.first_pyramid_history_backfill_cli --symbols 000001,000021,600519"
+```
+
+### 7. 增量发布状态查询（管理 API）
+
+```bash
+# 综合状态（需 admin token）
+ssh panji-prod "curl -s -H 'Authorization: Bearer <admin_token>' http://localhost:8000/admin/incremental-publish/status | python -m json.tool"
+
+# core run 进度
+ssh panji-prod "curl -s -H 'Authorization: Bearer <admin_token>' http://localhost:8000/admin/incremental-publish/core/runs/<SNAPSHOT_RUN_ID>/progress | python -m json.tool"
+
+# history run 进度
+ssh panji-prod "curl -s -H 'Authorization: Bearer <admin_token>' http://localhost:8000/admin/incremental-publish/history/runs/<HISTORY_RUN_ID>/progress | python -m json.tool"
+
+# pointer 列表
+ssh panji-prod "curl -s -H 'Authorization: Bearer <admin_token>' http://localhost:8000/admin/incremental-publish/pointers | python -m json.tool"
+```
+
+### 8. 完整部署流程（build + migrate + canary）
+
+```bash
+# 1. 部署代码（完整 build）
+ssh panji-prod "/usr/local/bin/panji-deploy.sh <SHA>"
+
+# 2. 如果 deploy 因 health check race condition 失败但容器已启动：
+#    手动 sync + 重启
+ssh panji-prod "cd /root/web_dev && git fetch origin main && git reset --hard <SHA> && bash scripts/sync_live_runtime.sh"
+
+# 3. 执行迁移
+ssh panji-prod "docker exec trading-backend alembic upgrade head"
+
+# 4. 验证
+ssh panji-prod "curl -s http://127.0.0.1:8000/version | python -m json.tool"
+# 期望: runtime_git_sha=<SHA>, alembic_revision=073_incremental_factor_publication
+```

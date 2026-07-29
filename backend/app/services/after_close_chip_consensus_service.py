@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -62,6 +62,9 @@ _CHIP_LEASE_SECONDS = 3600  # 1 小时
 
 # 批量大小（与主 after_close 保持一致）
 _CHIP_BATCH_SIZE = 25
+
+# [CHANGE-20260729-008] 15m bars 最低数量门槛（不足则标记 skipped，如深科技 000021 仅 338 根）
+_CHIP_MIN_15M_BARS = 500
 
 # chip 内部状态（写入 metadata.chip_status，不修改 SchedulerJobRun.status）
 CHIP_STATUS_QUEUED = "queued"
@@ -293,8 +296,13 @@ async def execute_after_close_chip_consensus(
 
     succeeded_count = 0
     failed_count = 0
+    skipped_count = 0
     failed_instruments: list[dict[str, Any]] = []
+    skipped_instruments: list[dict[str, Any]] = []
     total_count = len(instrument_ids)
+
+    # [CHANGE-20260729-008] 15m 数据不足的股票标记 skipped 而非 failed
+    # （使用模块级常量 _CHIP_MIN_15M_BARS）
 
     # 分批处理
     for batch_start in range(0, total_count, batch_size):
@@ -311,6 +319,29 @@ async def execute_after_close_chip_consensus(
                         "instrument_id": str(instrument_id),
                         "error": "daily bars 为空",
                     })
+                    continue
+
+                # [CHANGE-20260729-008] 15m bars 不足时标记 skipped（如深科技 000021 仅 338 根）
+                if bars_15m is None or bars_15m.empty or len(bars_15m) < _CHIP_MIN_15M_BARS:
+                    skipped_count += 1
+                    actual_15m = len(bars_15m) if bars_15m is not None else 0
+                    skipped_instruments.append({
+                        "instrument_id": str(instrument_id),
+                        "reason": f"M15_BARS_INSUFFICIENT: {actual_15m} < {_CHIP_MIN_15M_BARS}",
+                    })
+                    # 写入 skipped 记录（便于查询）
+                    try:
+                        await _upsert_chip_snapshot(
+                            instrument_id=instrument_id,
+                            trade_date=trade_date,
+                            core_run_id=core_run_id,
+                            chip_hash="skipped",
+                            chip_payload={"reason": "M15_BARS_INSUFFICIENT", "actual_bars": actual_15m},
+                            status="skipped",
+                            error_message=f"15m bars insufficient: {actual_15m} < {_CHIP_MIN_15M_BARS}",
+                        )
+                    except Exception:
+                        pass  # skipped 记录失败不阻塞
                     continue
 
                 # 计算 chip consensus（独立于 core）
@@ -359,9 +390,9 @@ async def execute_after_close_chip_consensus(
                     pass  # 失败记录失败不阻塞
 
     # 统计状态
-    if failed_count == 0:
+    if failed_count == 0 and skipped_count == 0:
         status = "succeeded"
-    elif succeeded_count == 0:
+    elif succeeded_count == 0 and skipped_count == 0:
         status = "failed"
     else:
         status = "partial"
@@ -369,9 +400,11 @@ async def execute_after_close_chip_consensus(
     result_summary = {
         "succeeded_count": succeeded_count,
         "failed_count": failed_count,
+        "skipped_count": skipped_count,
         "total_count": total_count,
         "status": status,
         "failed_instruments": failed_instruments,
+        "skipped_instruments": skipped_instruments,
     }
 
     # 更新 job_run metadata（chip_status 写 metadata，不修改 SchedulerJobRun.status）
@@ -386,8 +419,8 @@ async def execute_after_close_chip_consensus(
 
     logger.info(
         "[ChipConsensus] 任务完成: job_run_id=%s, status=%s, "
-        "succeeded=%d, failed=%d, total=%d",
-        job_run_id, status, succeeded_count, failed_count, total_count,
+        "succeeded=%d, failed=%d, skipped=%d, total=%d",
+        job_run_id, status, succeeded_count, failed_count, skipped_count, total_count,
     )
 
     if _diag_sink is not None:
@@ -407,22 +440,38 @@ async def _fetch_chip_bars(
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """获取 chip 计算所需的 daily + 15m bars（point-in-time <= trade_date）。
 
-    本函数为薄包装，调用 market_data_service.get_bars_for_instrument。
-    断点：依赖 market_data_service 的真实接口，本地纯单元测试时由调用方注入 mock。
+    [CHANGE-20260729-008] 修复：原引用不存在的 market_data_service.get_bars_for_instrument，
+    改为直接从 DB 查询（_query_daily_bars / _query_15min_bars），与 history 回补保持一致。
+
+    Args:
+        instrument_id: 股票 ID
+        trade_date: 交易日（point-in-time，只取 <= trade_date 的 bars）
+
+    Returns:
+        (daily_bars, bars_15m)：任一为空/None 表示数据不足
     """
+    from app.db import AsyncSessionLocal
+    from app.repositories.bar_repository import _query_15min_bars, _query_daily_bars
+
+    daily_start = trade_date - timedelta(days=500)
+    # 15m bars: 4000 根约 42 个交易日（每天 16 根），取 60 天
+    bars_15m_start = datetime.combine(trade_date - timedelta(days=60), datetime.min.time())
+    bars_15m_end = datetime.combine(trade_date, datetime.max.time())
+
     try:
-        from app.services.market_data_service import get_bars_for_instrument
-        daily_bars = await get_bars_for_instrument(
-            instrument_id, timeframe="1d", adj="qfq",
-            as_of=trade_date.isoformat(), lookback=500,
-        )
-        bars_15m = await get_bars_for_instrument(
-            instrument_id, timeframe="15m", adj="qfq",
-            as_of=trade_date.isoformat(), lookback=4000,
-        )
+        async with AsyncSessionLocal() as db:
+            daily_bars = await _query_daily_bars(
+                db, instrument_id, daily_start, trade_date,
+            )
+            bars_15m = await _query_15min_bars(
+                db, instrument_id, bars_15m_start, bars_15m_end, limit=4000,
+            )
         return daily_bars, bars_15m
-    except ImportError:
-        logger.warning("[ChipConsensus] market_data_service 不可用，返回空 bars")
+    except Exception as exc:
+        logger.warning(
+            "[ChipConsensus] _fetch_chip_bars 失败: instrument_id=%s, error=%s",
+            instrument_id, exc,
+        )
         return None, None
 
 
