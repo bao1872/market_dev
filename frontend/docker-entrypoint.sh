@@ -3,6 +3,11 @@
 # crond 运行 logrotate（每小时检查一次，由 logrotate.conf 的 daily/maxsize 双触发决定是否轮转）
 set -e
 
+# [GoAccess 修复 2026-07-30] 删除 nginx:alpine 默认软链 /var/log/nginx/access.log -> /dev/stdout
+# 否则即使 nginx.conf 配置 access_log /var/log/nginx/access.log main; 实际仍写到 stdout，
+# GoAccess 容器挂载 nginx_logs 卷读不到文件。
+rm -f /var/log/nginx/access.log /var/log/nginx/error.log
+
 # 启动 busybox crond（后台），负责定时执行 /etc/periodic/15min/logrotate-nginx
 # crond 日志输出到 stderr，由 Docker json-file 收集
 crond -b -l 8
