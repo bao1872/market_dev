@@ -1926,6 +1926,12 @@ async def execute_after_close_run(
         # chip job 由独立 Worker 领取执行；创建失败只记录 warn，不反改主 run succeeded。
         # 不得 await chip 执行（chip 执行由独立 after_close_chip_consensus Worker 完成）。
         # chip 失败/部分成功通过 metadata.chip_status=partial 记录，主 status 保持 succeeded。
+        #
+        # [CHANGE-20260729-006 ID 合同统一] chip.core_run_id 必须指向 snapshot_run_id
+        # （StockFeatureSnapshotRun.id，数据版本），不再指向 job_run_id
+        # （SchedulerJobRun.id，任务追踪）。
+        # 查询严格匹配：instrument_id + trade_date + snapshot_run_id +
+        # algorithm_version + status=succeeded。
         _expected_chip_count = (
             len(cached_instrument_ids)
             if cached_instrument_ids is not None
@@ -1936,7 +1942,7 @@ async def execute_after_close_run(
                 chip_job, chip_is_new = await create_after_close_chip_consensus_job(
                     db=db,
                     trade_date=trade_date,
-                    core_run_id=job_run_id,
+                    core_run_id=snapshot_run_id,
                     scope="all_a_share",
                     expected_count=_expected_chip_count,
                 )
@@ -1944,21 +1950,21 @@ async def execute_after_close_run(
             if chip_job is not None:
                 logger.info(
                     "[AfterClose] chip consensus job 已创建（独立 Worker 异步执行）: "
-                    "chip_run_id=%s, is_new=%s, core_run_id=%s, expected_count=%s",
-                    chip_job.id, chip_is_new, job_run_id, _expected_chip_count,
+                    "chip_run_id=%s, is_new=%s, snapshot_run_id=%s, expected_count=%s",
+                    chip_job.id, chip_is_new, snapshot_run_id, _expected_chip_count,
                 )
             else:
                 logger.warning(
                     "[AfterClose] chip consensus job 创建返回 None（软失败，主 run 仍 succeeded）: "
-                    "trade_date=%s, core_run_id=%s",
-                    trade_date, job_run_id,
+                    "trade_date=%s, snapshot_run_id=%s",
+                    trade_date, snapshot_run_id,
                 )
         except Exception as chip_exc:
             # [P0-7] 软失败：创建失败只记录 warn，不反改主 run，不抛异常
             logger.warning(
                 "[AfterClose] 创建 chip consensus job 失败（软失败，不影响主 run succeeded）: "
-                "trade_date=%s, core_run_id=%s, error=%s",
-                trade_date, job_run_id, chip_exc, exc_info=True,
+                "trade_date=%s, snapshot_run_id=%s, error=%s",
+                trade_date, snapshot_run_id, chip_exc, exc_info=True,
             )
 
         logger.info(

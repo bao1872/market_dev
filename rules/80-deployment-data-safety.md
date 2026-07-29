@@ -99,3 +99,45 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 自动部署不自动回滚 migration；
 - 自动部署不读取数据库秘密；
 - 自动部署只部署 GitHub commit。
+
+## 分层发布与增量检查点纪律
+
+> 来源：CHANGE-20260729-006
+> 状态：生效（2026-07-29）
+
+### batch 不是发布边界
+
+- batch_size 只控制吞吐和内存，不是完成或发布边界；
+- 计算/事务/检查点粒度为"单股×阶段"；
+- 单股结果 commit 成功后才标记 item succeeded；
+- 单股失败只回滚该股票，不得回滚其他已成功股票；
+- 禁止 N 股共用一个大事务。
+
+### checkpoint 必须在 commit 后写
+
+- `stock_feature_snapshot_run_items.status=succeeded` 必须在该股结果 commit 成功后写入；
+- 禁止"先标 succeeded 再 commit"的顺序，避免 commit 失败导致 item 与数据不一致；
+- lease_epoch fencing 用于防止旧 Worker 覆盖新 Worker 的状态。
+
+### optional 任务不得反改 core
+
+- chip / aggregation / events / 通知等 optional 任务失败，只重试自身，不回滚核心；
+- 主编排在 core pointer 发布后即可标记 `core_published` 并允许复盘；
+- 最终状态可为 `completed_with_errors`，但不得因 optional 失败反改 core。
+
+### publication 只指向覆盖门禁通过的不可变 run
+
+- `factor_publications` 的 `data_run_id` 必须指向覆盖率门禁通过的不可变 run；
+- `CORE_PUBLICATION_MIN_COVERAGE = 0.98`，低于门禁拒绝发布；
+- 发布只做小事务原子切换指针，不复制结果数据；
+- 不得修改已发布 run；重算生成新 run，新 run 通过门禁后切换 pointer；
+- 不同 run 的数据禁止混合；
+- 无 publication pointer 时，读请求可兼容回退到 `published_at IS NOT NULL`。
+
+### ID 合同：禁止一列双义
+
+- `orchestrator_job_run_id`（SchedulerJobRun.id）：任务追踪，纯 metadata；
+- `snapshot_run_id`（StockFeatureSnapshotRun.id）：当日核心数据版本；
+- `history_run_id`（FirstPyramidHistoryRun.id）：历史回补版本；
+- `chip.core_run_id` 必须等于 `snapshot_run_id`，不得指向 `SchedulerJobRun.id`；
+- `FactorPublication.data_run_id` 指向 `snapshot_run_id` 或 `history_run_id`。

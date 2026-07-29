@@ -145,3 +145,52 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - 本轮未对盘后链路做运行时核验，仅静态确认路由与依赖未改动。
 
 如后续对 after-close admin API 增加 capability 守卫，需重新核验并更新本节。
+
+## 11. 增量检查点与分层发布（CHANGE-20260729-006）
+
+**核验状态：未运行核验（2026-07-29 新增）**
+
+本轮引入"单股×阶段"为最小计算/事务/检查点粒度，新增 4 张表和 2 个服务。**未集成到现有 Worker**，本轮只提供 service 层，现有 Worker 保持 legacy 模式。
+
+### 11.1 新增表（migration 073）
+
+| 表 | 唯一键 | 职责 |
+|---|---|---|
+| `stock_feature_snapshot_run_items` | `(snapshot_run_id, instrument_id, phase)` | 单股×阶段检查点 |
+| `first_pyramid_history_runs` | `id` | 历史回补 run 级追踪 |
+| `first_pyramid_history_run_items` | `(history_run_id, instrument_id)` | 历史回补单股 item |
+| `factor_publications` | `(scope_type, scope_key, trade_date, publication_kind)` | 分层发布指针 |
+
+### 11.2 ID 合同统一
+
+| ID | 含义 | 写入位置 |
+|---|---|---|
+| `orchestrator_job_run_id` | `SchedulerJobRun.id`（任务追踪） | `FirstPyramidHistoryRun.scheduler_job_run_id`（nullable metadata） |
+| `snapshot_run_id` | `StockFeatureSnapshotRun.id`（当日核心数据版本） | `RunItem.snapshot_run_id` / `StockChipConsensusSnapshot.core_run_id` / `FactorPublication.data_run_id` |
+| `history_run_id` | `FirstPyramidHistoryRun.id`（历史回补版本） | `FactorPublication.data_run_id`（kind=history_cross_section） |
+
+**关键变更**：`after_close_orchestrator.py` 中 `create_after_close_chip_consensus_job(core_run_id=snapshot_run_id)` 不再传 `job_run_id`。
+
+### 11.3 新增服务
+
+| 服务 | 模块 | 核心函数 |
+|---|---|---|
+| Run Item | `app.services.snapshot_run_item_service` | `create_run_items` / `claim_items`（UPDATE...RETURNING + FOR UPDATE SKIP LOCKED）/ `mark_item_succeeded/failed/skipped`（lease_epoch fencing）/ `get_run_progress` / `get_resume_items` / `recover_stale_running_items` |
+| 分层发布 | `app.services.factor_publication_service` | `compute_coverage` / `publish_stock_core`（门禁 0.98 + on_conflict_do_update 原子切换）/ `publish_market_aggregation` / `publish_history_cross_section` / `get_publication` / `get_published_snapshot_run_id`（无 pointer 回退 published_at） |
+
+### 11.4 关键设计
+
+1. **claim 原子性**：`UPDATE ... WHERE status IN ('pending','failed','running'+lease过期) ... FOR UPDATE SKIP LOCKED RETURNING`
+2. **lease_epoch fencing**：`mark_item_*` 支持 `lease_epoch` 参数，旧 Worker 写入被拒绝
+3. **coverage 门禁**：`CORE_PUBLICATION_MIN_COVERAGE = 0.98`，低于抛 `CoverageBelowThresholdError`
+4. **原子指针切换**：`pg_insert(...).on_conflict_do_update(constraint="uq_factor_publications_scope_date_kind")`
+5. **兼容回退**：`get_published_snapshot_run_id` 优先读 publication pointer，无 pointer 时回退 `published_at IS NOT NULL`
+
+### 11.5 当前限制
+
+- Worker 未集成 run item（保持 legacy 模式）
+- 管理状态 API 未实现（service 层已就绪）
+- 历史回补 CLI 未实现
+- chip.core_run_id FK 仍指向 scheduler_job_runs（071 遗留，未来 migration 修复）
+
+详见 `docs/changes/2026/CHANGE-20260729-006-incremental-checkpoint-layered-publication.md`。
