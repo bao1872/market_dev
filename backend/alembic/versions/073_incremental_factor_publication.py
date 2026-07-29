@@ -353,6 +353,25 @@ def upgrade() -> None:
             comment="输入 bars hash",
         ),
         sa.Column(
+            "worker_instance_id",
+            sa.String(64),
+            nullable=True,
+            comment="Worker 实例标识 hostname:pid",
+        ),
+        sa.Column(
+            "lease_epoch",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="租约代际，Worker 领取时递增，写操作校验防 fencing",
+        ),
+        sa.Column(
+            "lease_expires_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+            comment="租约过期时间",
+        ),
+        sa.Column(
             "daily_state_count",
             sa.Integer(),
             nullable=True,
@@ -369,6 +388,18 @@ def upgrade() -> None:
             sa.Text(),
             nullable=True,
             comment="失败原因",
+        ),
+        sa.Column(
+            "started_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+            comment="实际开始时间",
+        ),
+        sa.Column(
+            "heartbeat_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+            comment="心跳时间",
         ),
         sa.Column(
             "completed_at",
@@ -400,6 +431,11 @@ def upgrade() -> None:
             "ix_history_run_items_run_status",
             "history_run_id",
             "status",
+        ),
+        sa.Index(
+            "ix_history_run_items_lease_expires",
+            "lease_expires_at",
+            postgresql_where=sa.text("status = 'running'"),
         ),
     )
 

@@ -33,6 +33,7 @@
 | CHANGE-20260729-005 | 2026-07-29 | 99字段真实筛选排序修复 + GoAccess logrotate/healthcheck + 部署脚本补 goaccess | bugfix+architecture | 行情体验/量化模型/运维 | 进行中（代码+纯单元测试61+Ruff+TSC+ESLint 通过；CI 待查询；浏览器验收待手工） | MX-20/QM-01~QM-43 | `maps/40-market-stock-experience.md`、`maps/20-quant-model.md`、`maps/80-system-runtime.md` |
 | CHANGE-20260729-006 | 2026-07-29 | 盘后编排与历史回补增量检查点/分层发布重构 | architecture+behavior+contract | 盘后编排/历史回补/分层发布 | 进行中（代码+目标纯单元测试27+Ruff 通过；PG 集成测试待 CI；浏览器验收待手工） | AC-08/09/10/14/QM-01~QM-43 | `maps/30-after-close.md`、`maps/20-quant-model.md` |
 | CHANGE-20260729-007 | 2026-07-29 | 增量发布真实接入收口 + ID 合同修复 + 个股自选按钮微缩 | architecture+bugfix+contract+UI | 盘后编排/分层发布/ID 合同/个股详情 | PARTIAL（071 FK 修复+073 NOT NULL+is_stale 真源+stock_context pointer 接入+UI 微缩；纯单元27+Ruff+TSC+ESLint 通过；浏览器验收 AUTH_WALL_BLOCKED；Worker/market_stocks/history 真实接入未完成） | AC-08/09/10/14/MX-40~MX-43 | `maps/30-after-close.md`、`maps/40-market-stock-experience.md` |
+| CHANGE-20260729-008 | 2026-07-29 | 增量发布最终收口：Worker 接入 run items + market_stocks pointer + history DB-only CLI + 管理 API + 聚合独立 job | architecture+contract | 盘后编排/分层发布/历史回补/管理后台 | 进行中（代码闭环完成+纯单元27+Ruff+TSC+ESLint 通过；PG 集成待 CI；待 dev→main→部署→canary→全量回补） | AC-08/09/10/14/MX-20/MX-40~MX-43 | `maps/30-after-close.md`、`maps/40-market-stock-experience.md` |
 
 ## 3. 状态说明
 

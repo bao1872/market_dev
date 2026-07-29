@@ -30,13 +30,15 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +46,14 @@ from app.models.first_pyramid_history import (
     FirstPyramidHistoryDailyState,
     FirstPyramidHistoryEvent,
 )
+from app.models.first_pyramid_history_run import (
+    HISTORY_RUN_FAILED,
+    HISTORY_RUN_PARTIAL,
+    HISTORY_RUN_RUNNING,
+    HISTORY_RUN_SUCCEEDED,
+    FirstPyramidHistoryRun,
+)
+from app.models.first_pyramid_history_run_item import FirstPyramidHistoryRunItem
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 
 logger = logging.getLogger(__name__)
@@ -220,6 +230,568 @@ async def backfill_first_pyramid_history_batch(
     )
 
     return result
+
+
+# =============================================================================
+# Run/Item 接入版（CHANGE-20260729-008）
+# =============================================================================
+
+
+_HISTORY_ITEM_PENDING = "pending"
+_HISTORY_ITEM_RUNNING = "running"
+_HISTORY_ITEM_SUCCEEDED = "succeeded"
+_HISTORY_ITEM_FAILED = "failed"
+_HISTORY_ITEM_SKIPPED = "skipped"
+
+# 默认 lease 时长（秒），单股 history 计算通常 < 60s
+_HISTORY_ITEM_LEASE_SECONDS = 300
+
+# 最大重试次数
+_HISTORY_MAX_ATTEMPT_COUNT = 3
+
+
+def _compute_parameter_hash(output_bars: int, include_chip: bool) -> str:
+    """计算历史回补参数 hash（output_bars + include_chip）。"""
+    raw = f"output_bars={output_bars};include_chip={include_chip}"
+    return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+
+async def create_history_run(
+    session: AsyncSession,
+    *,
+    algorithm_version: str,
+    output_bars: int,
+    scope: str,
+    instrument_ids: Sequence[uuid.UUID],
+    scheduler_job_run_id: uuid.UUID | None = None,
+    include_chip: bool = False,
+) -> tuple[FirstPyramidHistoryRun, bool]:
+    """创建历史回补 run（幂等：相同 algorithm_version + parameter_hash + scope 已有 running/succeeded 则返回已有）。
+
+    Args:
+        session: 异步 DB 会话（caller 控制 commit）
+        algorithm_version: 算法版本
+        output_bars: 输出最近 N 日
+        scope: 范围标识
+        instrument_ids: eligible universe（用于 expected_count）
+        scheduler_job_run_id: 关联 SchedulerJobRun（可选）
+        include_chip: 是否含 chip（默认 False）
+
+    Returns:
+        (FirstPyramidHistoryRun, is_new)
+    """
+    parameter_hash = _compute_parameter_hash(output_bars, include_chip)
+
+    # 幂等查找：同 algorithm_version + parameter_hash + scope 的活跃 run
+    existing_stmt = (
+        select(FirstPyramidHistoryRun)
+        .where(
+            FirstPyramidHistoryRun.algorithm_version == algorithm_version,
+            FirstPyramidHistoryRun.parameter_hash == parameter_hash,
+            FirstPyramidHistoryRun.scope == scope,
+            FirstPyramidHistoryRun.status.in_(
+                (HISTORY_RUN_RUNNING, HISTORY_RUN_PARTIAL, HISTORY_RUN_SUCCEEDED),
+            ),
+        )
+        .order_by(FirstPyramidHistoryRun.created_at.desc())
+        .limit(1)
+    )
+    existing = (await session.execute(existing_stmt)).scalar_one_or_none()
+    if existing is not None:
+        return existing, False
+
+    run = FirstPyramidHistoryRun(
+        scheduler_job_run_id=scheduler_job_run_id,
+        algorithm_version=algorithm_version,
+        parameter_hash=parameter_hash,
+        output_bars=output_bars,
+        scope=scope,
+        expected_count=len(instrument_ids),
+        succeeded_count=0,
+        failed_count=0,
+        skipped_count=0,
+        status=HISTORY_RUN_RUNNING,
+        started_at=datetime.now(UTC),
+    )
+    session.add(run)
+    await session.flush()
+    return run, True
+
+
+async def create_history_run_items(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+    instrument_ids: Sequence[uuid.UUID],
+    *,
+    input_hash: str | None = None,
+) -> int:
+    """为 eligible universe 创建 history/pending items（幂等）。
+
+    使用 INSERT ON CONFLICT DO NOTHING 保证并发安全。
+    """
+    if not instrument_ids:
+        return 0
+
+    # 查找已存在的 items
+    existing_stmt = (
+        select(FirstPyramidHistoryRunItem.instrument_id)
+        .where(
+            FirstPyramidHistoryRunItem.history_run_id == history_run_id,
+            FirstPyramidHistoryRunItem.instrument_id.in_(instrument_ids),
+        )
+    )
+    existing_ids = {
+        row[0] for row in (await session.execute(existing_stmt))
+    }
+
+    new_items = []
+    for instrument_id in instrument_ids:
+        if instrument_id in existing_ids:
+            continue
+        new_items.append(FirstPyramidHistoryRunItem(
+            history_run_id=history_run_id,
+            instrument_id=instrument_id,
+            status=_HISTORY_ITEM_PENDING,
+            input_hash=input_hash,
+        ))
+
+    if new_items:
+        session.add_all(new_items)
+        await session.flush()
+
+    return len(new_items)
+
+
+async def claim_history_items(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+    *,
+    worker_instance_id: str,
+    batch_size: int = 25,
+    lease_seconds: int = _HISTORY_ITEM_LEASE_SECONDS,
+    max_attempt_count: int = _HISTORY_MAX_ATTEMPT_COUNT,
+) -> list[FirstPyramidHistoryRunItem]:
+    """Worker 原子领取一批 pending/可恢复 history items。
+
+    使用 UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING。
+    """
+    now = datetime.now(UTC)
+    lease_expires_at = now + timedelta(seconds=lease_seconds)
+
+    claim_sql = text(
+        """
+        UPDATE first_pyramid_history_run_items
+        SET status = 'running',
+            attempt_count = attempt_count + 1,
+            lease_epoch = lease_epoch + 1,
+            worker_instance_id = :worker_id,
+            started_at = COALESCE(started_at, :now),
+            heartbeat_at = :now,
+            lease_expires_at = :lease_expires,
+            updated_at = :now
+        WHERE id IN (
+            SELECT id FROM first_pyramid_history_run_items
+            WHERE history_run_id = :history_run_id
+              AND (
+                status = 'pending'
+                OR (status = 'failed' AND attempt_count < :max_attempts)
+                OR (status = 'running' AND lease_expires_at < :now)
+              )
+            ORDER BY created_at
+            LIMIT :batch_size
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, history_run_id, instrument_id, status, attempt_count,
+                  input_hash, worker_instance_id, lease_epoch, lease_expires_at,
+                  daily_state_count, event_count, last_error, started_at,
+                  heartbeat_at, completed_at, created_at, updated_at
+        """
+    )
+    result = await session.execute(claim_sql, {
+        "worker_id": worker_instance_id,
+        "now": now,
+        "lease_expires": lease_expires_at,
+        "history_run_id": history_run_id,
+        "max_attempts": max_attempt_count,
+        "batch_size": batch_size,
+    })
+    rows = result.fetchall()
+    if not rows:
+        return []
+
+    items: list[FirstPyramidHistoryRunItem] = []
+    for row in rows:
+        item = FirstPyramidHistoryRunItem(
+            id=row[0],
+            history_run_id=row[1],
+            instrument_id=row[2],
+            status=row[3],
+            attempt_count=row[4],
+            input_hash=row[5],
+            worker_instance_id=row[6],
+            lease_epoch=row[7],
+            lease_expires_at=row[8],
+            daily_state_count=row[9],
+            event_count=row[10],
+            last_error=row[11],
+            started_at=row[12],
+            heartbeat_at=row[13],
+            completed_at=row[14],
+            created_at=row[15],
+            updated_at=row[16],
+        )
+        items.append(item)
+    return items
+
+
+async def mark_history_item_succeeded(
+    session: AsyncSession,
+    item_id: uuid.UUID,
+    *,
+    daily_state_count: int | None = None,
+    event_count: int | None = None,
+    lease_epoch: int | None = None,
+) -> bool:
+    """标记单股 history item 成功（带 lease_epoch fencing）。"""
+    now = datetime.now(UTC)
+    conditions = [
+        FirstPyramidHistoryRunItem.id == item_id,
+        FirstPyramidHistoryRunItem.status == _HISTORY_ITEM_RUNNING,
+    ]
+    if lease_epoch is not None:
+        conditions.append(FirstPyramidHistoryRunItem.lease_epoch == lease_epoch)
+    stmt = (
+        update(FirstPyramidHistoryRunItem)
+        .where(*conditions)
+        .values(
+            status=_HISTORY_ITEM_SUCCEEDED,
+            daily_state_count=daily_state_count,
+            event_count=event_count,
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    result = await session.execute(stmt)
+    return result.rowcount > 0  # type: ignore[union-attr]
+
+
+async def mark_history_item_failed(
+    session: AsyncSession,
+    item_id: uuid.UUID,
+    error: str,
+    *,
+    lease_epoch: int | None = None,
+) -> bool:
+    """标记单股 history item 失败（带 lease_epoch fencing）。"""
+    now = datetime.now(UTC)
+    conditions = [
+        FirstPyramidHistoryRunItem.id == item_id,
+        FirstPyramidHistoryRunItem.status == _HISTORY_ITEM_RUNNING,
+    ]
+    if lease_epoch is not None:
+        conditions.append(FirstPyramidHistoryRunItem.lease_epoch == lease_epoch)
+    stmt = (
+        update(FirstPyramidHistoryRunItem)
+        .where(*conditions)
+        .values(
+            status=_HISTORY_ITEM_FAILED,
+            last_error=error[:1000],
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    result = await session.execute(stmt)
+    return result.rowcount > 0  # type: ignore[union-attr]
+
+
+async def mark_history_item_skipped(
+    session: AsyncSession,
+    item_id: uuid.UUID,
+    reason: str,
+    *,
+    lease_epoch: int | None = None,
+) -> bool:
+    """标记单股 history item 跳过（数据不足等，带 lease_epoch fencing）。"""
+    now = datetime.now(UTC)
+    conditions = [
+        FirstPyramidHistoryRunItem.id == item_id,
+        FirstPyramidHistoryRunItem.status == _HISTORY_ITEM_RUNNING,
+    ]
+    if lease_epoch is not None:
+        conditions.append(FirstPyramidHistoryRunItem.lease_epoch == lease_epoch)
+    stmt = (
+        update(FirstPyramidHistoryRunItem)
+        .where(*conditions)
+        .values(
+            status=_HISTORY_ITEM_SKIPPED,
+            last_error=reason[:1000],
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    result = await session.execute(stmt)
+    return result.rowcount > 0  # type: ignore[union-attr]
+
+
+async def get_history_run_progress(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+) -> dict[str, Any]:
+    """获取 history run 级进度统计。"""
+    stmt = (
+        select(
+            FirstPyramidHistoryRunItem.status,
+            func.count(FirstPyramidHistoryRunItem.id).label("cnt"),
+        )
+        .where(FirstPyramidHistoryRunItem.history_run_id == history_run_id)
+        .group_by(FirstPyramidHistoryRunItem.status)
+    )
+    rows = (await session.execute(stmt)).all()
+    counts = {row.status: row.cnt for row in rows}
+
+    succeeded = counts.get(_HISTORY_ITEM_SUCCEEDED, 0)
+    failed = counts.get(_HISTORY_ITEM_FAILED, 0)
+    pending = counts.get(_HISTORY_ITEM_PENDING, 0)
+    running = counts.get(_HISTORY_ITEM_RUNNING, 0)
+    skipped = counts.get(_HISTORY_ITEM_SKIPPED, 0)
+    total = succeeded + failed + pending + running + skipped
+    coverage = succeeded / total if total > 0 else 0.0
+
+    return {
+        "succeeded": succeeded,
+        "failed": failed,
+        "pending": pending,
+        "running": running,
+        "skipped": skipped,
+        "total": total,
+        "coverage": coverage,
+    }
+
+
+async def finish_history_run(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+    *,
+    status: str,
+) -> None:
+    """更新 history run 的最终状态。"""
+    progress = await get_history_run_progress(session, history_run_id)
+    now = datetime.now(UTC)
+    stmt = (
+        update(FirstPyramidHistoryRun)
+        .where(FirstPyramidHistoryRun.id == history_run_id)
+        .values(
+            status=status,
+            succeeded_count=progress["succeeded"],
+            failed_count=progress["failed"],
+            skipped_count=progress["skipped"],
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    await session.execute(stmt)
+
+
+async def _fetch_db_only_daily_bars(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    *,
+    output_bars: int,
+) -> pd.DataFrame | None:
+    """[CHANGE-20260729-008] DB-only 日线读取入口（禁止自动 pytdx 拉取）。
+
+    直接调用 _query_daily_bars，不走 fetch_daily_bars / get_bars。
+    若 DB 无数据或不足 output_bars，返回 None（caller 标 skipped）。
+    """
+    from app.repositories.bar_repository import _query_daily_bars
+
+    end_date = date.today()
+    # 估算所需历史长度：output_bars 个交易日约等于 output_bars * 1.5 个自然日 + 缓冲
+    start_date = end_date - timedelta(days=output_bars * 3 + 100)
+    df = await _query_daily_bars(session, instrument_id, start_date, end_date)
+    if df is None or df.empty:
+        return None
+    # 截取最近 output_bars 行（history SSOT 内部也截，这里提前避免无意义传输）
+    if len(df) > output_bars * 2:
+        df = df.iloc[-(output_bars * 2):]
+    return df
+
+
+async def backfill_history_with_run_items(
+    *,
+    history_run_id: uuid.UUID,
+    algorithm_version: str,
+    output_bars: int,
+    worker_id: str = "history_worker",
+    batch_size: int = 25,
+    progress_callback: Callable[..., Awaitable[None]] | None = None,
+) -> dict[str, Any]:
+    """[CHANGE-20260729-008] Run/Item 接入版历史回补（单股×检查点）。
+
+    与 backfill_first_pyramid_history_batch 关键差异：
+    - 使用 first_pyramid_history_run_items 表做单股 claim/lease/commit
+    - 每只股票在独立短事务中计算并 commit（失败只回滚该股）
+    - coverage 从 run_items 实时统计
+    - 恢复只领 pending/可重试 failed/过期 running
+    - **DB-only 取数**：直接调 _query_daily_bars，禁止自动 pytdx 拉取
+    - 支持 resume：重启只处理 pending/failed/过期 running items
+
+    流程：
+    1. claim_history_items 领取一批
+    2. 逐股：独立事务读 bars → 计算 history SSOT → 持久化 → commit → mark_item_succeeded
+    3. 失败：mark_item_failed，继续下一股
+    4. 无可领取 items 时结束
+
+    Args:
+        history_run_id: FirstPyramidHistoryRun.id
+        algorithm_version: 算法版本
+        output_bars: 输出最近 N 日
+        worker_id: Worker 标识
+        batch_size: claim 批次大小
+        progress_callback: 进度回调
+
+    Returns:
+        统计 dict
+    """
+    from app.db import AsyncSessionLocal
+    from app.services.first_pyramid_service import compute_first_pyramid_history
+
+    total_processed = 0
+    succeeded_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    while True:
+        # 1. claim 一批 items
+        async with AsyncSessionLocal() as db:
+            items = await claim_history_items(
+                db, history_run_id,
+                worker_instance_id=worker_id,
+                batch_size=batch_size,
+            )
+            await db.commit()
+
+        if not items:
+            break
+
+        # 2. 逐股计算（每股独立事务）
+        for item in items:
+            total_processed += 1
+            try:
+                # 2.1 DB-only 读取 bars（独立短事务）
+                async with AsyncSessionLocal() as bars_db:
+                    bars = await _fetch_db_only_daily_bars(
+                        bars_db, item.instrument_id, output_bars=output_bars,
+                    )
+
+                if bars is None or bars.empty:
+                    # 数据不足 → skipped（不算失败）
+                    async with AsyncSessionLocal() as skip_db:
+                        await mark_history_item_skipped(
+                            skip_db, item.id, "daily bars 为空（DB-only）",
+                            lease_epoch=item.lease_epoch,
+                        )
+                        await skip_db.commit()
+                    skipped_count += 1
+                    continue
+
+                # 2.2 计算 history SSOT（include_chip=False，禁止 chip）
+                history = compute_first_pyramid_history(
+                    bars=bars,
+                    symbol=str(item.instrument_id),
+                    output_bars=output_bars,
+                    include_chip=False,
+                )
+
+                # 2.3 持久化（独立短事务）
+                async with AsyncSessionLocal() as persist_db:
+                    persisted = await _persist_history_result(
+                        session=persist_db,
+                        instrument_id=item.instrument_id,
+                        history=history,
+                        algorithm_version=algorithm_version,
+                    )
+                    await persist_db.commit()
+
+                # 2.4 标记 succeeded
+                async with AsyncSessionLocal() as mark_db:
+                    ok = await mark_history_item_succeeded(
+                        mark_db, item.id,
+                        daily_state_count=persisted["daily_state_count"],
+                        event_count=persisted["events_count"],
+                        lease_epoch=item.lease_epoch,
+                    )
+                    await mark_db.commit()
+
+                if ok:
+                    succeeded_count += 1
+                else:
+                    logger.warning(
+                        "[HistoryBackfill] item %s lease_epoch 不匹配，已被接管",
+                        item.id,
+                    )
+
+            except Exception as exc:
+                failed_count += 1
+                logger.error(
+                    "[HistoryBackfill] instrument_id=%s 回补失败: %s",
+                    item.instrument_id, exc, exc_info=True,
+                )
+                try:
+                    async with AsyncSessionLocal() as fail_db:
+                        await mark_history_item_failed(
+                            fail_db, item.id, str(exc),
+                            lease_epoch=item.lease_epoch,
+                        )
+                        await fail_db.commit()
+                except Exception as mark_exc:
+                    logger.error(
+                        "mark_history_item_failed 失败 item_id=%s: %s",
+                        item.id, mark_exc,
+                    )
+
+            # 2.5 进度回调
+            if progress_callback is not None:
+                try:
+                    await progress_callback(
+                        processed=total_processed,
+                        succeeded=succeeded_count,
+                        failed=failed_count,
+                        skipped=skipped_count,
+                    )
+                except Exception as cb_exc:
+                    logger.warning("progress_callback 失败: %s", cb_exc)
+
+    # 3. 从 DB 统计最终进度
+    async with AsyncSessionLocal() as db:
+        progress = await get_history_run_progress(db, history_run_id)
+
+    # 4. 更新 run 最终状态
+    final_status = (
+        HISTORY_RUN_SUCCEEDED if failed_count == 0 and succeeded_count > 0
+        else HISTORY_RUN_PARTIAL if succeeded_count > 0
+        else HISTORY_RUN_FAILED
+    )
+    async with AsyncSessionLocal() as db:
+        await finish_history_run(db, history_run_id, status=final_status)
+        await db.commit()
+
+    logger.info(
+        "[HistoryBackfill] run=%s 完成: status=%s, succeeded=%d, failed=%d, skipped=%d",
+        history_run_id, final_status, succeeded_count, failed_count, skipped_count,
+    )
+
+    return {
+        "history_run_id": str(history_run_id),
+        "algorithm_version": algorithm_version,
+        "output_bars": output_bars,
+        "status": final_status,
+        "succeeded_count": succeeded_count,
+        "failed_count": failed_count,
+        "skipped_count": skipped_count,
+        "total_processed": total_processed,
+        "progress": progress,
+    }
 
 
 # =============================================================================

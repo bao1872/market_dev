@@ -387,9 +387,17 @@ def _needs_chip_lateral(fp_filter_specs: list[FpFilterSpec], fp_sort_spec: FpSor
     return False
 
 
-def _build_snap_lateral():
-    """构建最新 snapshot 的 LATERAL 子查询（每个 instrument 一行最新快照）。"""
-    return (
+def _build_snap_lateral(*, snapshot_run_id: UUID | None = None):
+    """构建最新 snapshot 的 LATERAL 子查询（每个 instrument 一行最新快照）。
+
+    [CHANGE-20260729-008] 优先绑定 publication pointer.data_run_id：
+    - snapshot_run_id 非 None：只读取该 run 的 snapshot（统一发布版本，禁止跨 run 混读）
+    - snapshot_run_id 为 None：回退到每股 latest（仅在 DB 无 pointer 时兼容）
+
+    Args:
+        snapshot_run_id: 已发布 stock_core pointer.data_run_id（None 时回退 latest）
+    """
+    stmt = (
         select(
             StockFeatureSnapshot.id,
             StockFeatureSnapshot.instrument_id,
@@ -402,10 +410,16 @@ def _build_snap_lateral():
             StockFeatureSnapshot.instrument_id == Instrument.id,
             StockFeatureSnapshot.schema_version == _SCHEMA_VERSION,
         )
-        .order_by(StockFeatureSnapshot.trade_date.desc())
-        .limit(1)
-        .lateral("latest_snap")
     )
+    if snapshot_run_id is not None:
+        # 严格绑定已发布 run：禁止跨 run 混读
+        stmt = stmt.where(StockFeatureSnapshot.source_run_id == snapshot_run_id)
+        # 同一 run 内每股仅一行，无需 order_by/limit；保留 limit(1) 防御重复
+        stmt = stmt.limit(1)
+    else:
+        # 兼容回退：无 pointer 时按每股 latest
+        stmt = stmt.order_by(StockFeatureSnapshot.trade_date.desc()).limit(1)
+    return stmt.lateral("latest_snap")
 
 
 def _build_chip_lateral(snap_subq: Any):
@@ -661,7 +675,28 @@ async def get_market_stocks(
         fp_filter_specs, fp_sort_spec,
     )
     needs_chip = _needs_chip_lateral(fp_filter_specs, fp_sort_spec)
-    snap_subq = _build_snap_lateral() if needs_snap else None
+
+    # [CHANGE-20260729-008] 优先读取已发布 stock_core pointer.data_run_id
+    # 存在 pointer 时严格绑定该 run，禁止跨 run 混读；无 pointer 时回退每股 latest
+    from app.services.factor_publication_service import (
+        PUBLICATION_KIND_STOCK_CORE,
+        SCOPE_TYPE_MARKET,
+        get_publication,
+    )
+
+    published_core_run_id: UUID | None = None
+    if needs_snap:
+        pub = await get_publication(
+            db,
+            scope_type=SCOPE_TYPE_MARKET,
+            scope_key="market",
+            trade_date=None,  # 取最新 pointer，不限定 trade_date
+            publication_kind=PUBLICATION_KIND_STOCK_CORE,
+        )
+        if pub is not None:
+            published_core_run_id = pub.data_run_id
+
+    snap_subq = _build_snap_lateral(snapshot_run_id=published_core_run_id) if needs_snap else None
     chip_subq = _build_chip_lateral(snap_subq) if needs_chip else None
     max_trade_date_subq = _build_max_trade_date_subquery() if needs_snap else None
     # fp_filter_conditions 依赖 LATERAL JOIN 列引用，必须在 subq 创建后构建

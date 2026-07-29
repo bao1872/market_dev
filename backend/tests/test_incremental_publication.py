@@ -165,10 +165,12 @@ class TestORMModels:
             FirstPyramidHistoryRunItem,
         )
         cols = {c.name for c in FirstPyramidHistoryRunItem.__table__.columns}
+        # [CHANGE-20260729-008] 新增 worker/lease fencing 字段
         expected = {
             "id", "history_run_id", "instrument_id", "status", "attempt_count",
-            "input_hash", "daily_state_count", "event_count", "last_error",
-            "completed_at", "created_at", "updated_at",
+            "input_hash", "worker_instance_id", "lease_epoch", "lease_expires_at",
+            "daily_state_count", "event_count", "last_error", "started_at",
+            "heartbeat_at", "completed_at", "created_at", "updated_at",
         }
         assert expected == cols
 

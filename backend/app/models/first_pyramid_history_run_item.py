@@ -10,7 +10,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +42,11 @@ class FirstPyramidHistoryRunItem(Base):
             name="uq_history_run_items_run_instr",
         ),
         Index("ix_history_run_items_run_status", "history_run_id", "status"),
+        Index(
+            "ix_history_run_items_lease_expires",
+            "lease_expires_at",
+            postgresql_where=text("status = 'running'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -58,6 +73,16 @@ class FirstPyramidHistoryRunItem(Base):
     input_hash: Mapped[str | None] = mapped_column(
         Text(), nullable=True, comment="输入 bars hash",
     )
+    worker_instance_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="Worker 实例标识 hostname:pid",
+    )
+    lease_epoch: Mapped[int] = mapped_column(
+        Integer(), nullable=False, server_default=text("0"),
+        comment="租约代际，Worker 领取时递增，写操作校验防 fencing",
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="租约过期时间",
+    )
     daily_state_count: Mapped[int | None] = mapped_column(
         Integer(), nullable=True, comment="写入的 daily_state 行数",
     )
@@ -66,6 +91,12 @@ class FirstPyramidHistoryRunItem(Base):
     )
     last_error: Mapped[str | None] = mapped_column(
         Text(), nullable=True, comment="失败原因",
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="实际开始时间",
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="心跳时间",
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="完成时间",
@@ -90,8 +121,9 @@ if __name__ == "__main__":
     cols = FirstPyramidHistoryRunItem.__table__.columns
     expected = {
         "id", "history_run_id", "instrument_id", "status", "attempt_count",
-        "input_hash", "daily_state_count", "event_count", "last_error",
-        "completed_at", "created_at", "updated_at",
+        "input_hash", "worker_instance_id", "lease_epoch", "lease_expires_at",
+        "daily_state_count", "event_count", "last_error", "started_at",
+        "heartbeat_at", "completed_at", "created_at", "updated_at",
     }
     actual = {c.name for c in cols}
     assert expected == actual, f"字段不匹配: {expected ^ actual}"

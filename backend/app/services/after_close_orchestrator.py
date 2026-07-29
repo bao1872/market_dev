@@ -52,7 +52,6 @@ from app.services.after_close_chip_consensus_service import (
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
     PublishedSnapshotRunExistsError,
-    compute_review_core_batch_for_trade_date,
     create_snapshot_run,
     finish_snapshot_run,
     get_active_a_share_instruments,
@@ -1591,28 +1590,22 @@ async def execute_after_close_run(
                     progress_callback = _build_feature_snapshot_progress_callback(
                         job_run_id, worker_id
                     )
-                    async with AsyncSessionLocal() as db:
-                        # [P0-6 修复 2026-07-29] 主链切换到 review core 批量入口（daily-core only）。
-                        # 旧 compute_for_trade_date 调用 compute_feature_snapshot_for_date，
-                        # 会触发 Node Cluster + 15m secondary，与 PRD20 盘后核心/筹码解耦违背。
-                        # 新入口 compute_review_core_batch_for_trade_date 调用
-                        # compute_review_core_for_trade_date，禁止 Node/15m，chip_consensus=None。
-                        # chip 共识由独立 after_close_chip_consensus job 异步执行（主 run succeeded 后创建）。
-                        #
-                        # [BUGFIX] 批量入口只接受 progress_callback + source_run_id,
-                        # 不接受 dsa_run_id / strategy_version_id。
-                        # StrategyResult 由 strategy_batch_service.write_results 写入（DSA batch run 期间），
-                        # 不依赖 MFCS 传参。原 Phase 5 注释描述的"传 dsa_run_id 让 MFCS 同时写
-                        # StrategyResult"从未实现，且实际写入路径在 batch_service。
-                        mfcs_kwargs: dict[str, Any] = {
-                            "progress_callback": progress_callback,
-                            "source_run_id": snapshot_run_id,
-                        }
+                    # [CHANGE-20260729-008] 主链切换到 run_items 单股检查点版。
+                    # 每只股票在独立短事务中计算并 commit，失败只回滚该股；
+                    # coverage 从 run_items 实时统计；达标后由 caller 调 publish_stock_core 切 pointer。
+                    # 旧 compute_review_core_batch_for_trade_date 共享 session 批量模式保留为 fallback。
+                    from app.services.feature_snapshot_service import (
+                        compute_review_core_with_run_items,
+                    )
 
-                        snapshot_result = await compute_review_core_batch_for_trade_date(
-                            db, trade_date, cached_instrument_ids, **mfcs_kwargs,
-                        )
-                        await db.commit()
+                    snapshot_result = await compute_review_core_with_run_items(
+                        trade_date=trade_date,
+                        instrument_ids=cached_instrument_ids or [],
+                        snapshot_run_id=snapshot_run_id,
+                        worker_id=worker_id or "orchestrator",
+                        lease_epoch=lease_epoch,
+                        progress_callback=progress_callback,
+                    )
 
                     # [CHANGE-20260728-007] 修复 running→completed 闭环：
                     # MFCS 只写入 snapshot，不写入 StrategyResult，也不推进 DSA run 状态。

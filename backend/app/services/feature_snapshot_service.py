@@ -986,6 +986,200 @@ async def compute_review_core_batch_for_trade_date(
     }
 
 
+async def compute_review_core_with_run_items(
+    trade_date: date,
+    instrument_ids: Sequence[uuid.UUID],
+    snapshot_run_id: uuid.UUID,
+    *,
+    worker_id: str = "orchestrator",
+    lease_epoch: int | None = None,
+    batch_size: int = 25,
+    failure_threshold: float = 0.3,
+    progress_callback: Callable[..., Awaitable[None]] | None = None,
+    algorithm_version: str = "v1",
+    input_hash: str | None = None,
+) -> dict[str, Any]:
+    """[CHANGE-20260729-008] 单股×阶段检查点版 review core 计算。
+
+    与 compute_review_core_batch_for_trade_date 关键差异：
+    - 使用 stock_feature_snapshot_run_items 表做单股 claim/lease/commit
+    - 每只股票在独立短事务中计算并 commit（失败只回滚该股）
+    - coverage 从 run_items 实时统计（不靠调用方传值）
+    - 成功且 hash/version 相同不重算（create_run_items 幂等 + succeeded 跳过）
+    - 恢复只领 pending/可重试 failed/过期 running
+
+    流程：
+    1. create_run_items（幂等 INSERT ON CONFLICT DO NOTHING）
+    2. 循环 claim_items → 逐股计算（独立事务）→ mark_item_succeeded/failed
+    3. 返回统计 + run_diag
+
+    不在此函数内调用 publish_stock_core（由 caller 在 coverage 达标后调用）。
+
+    Args:
+        trade_date: 交易日
+        instrument_ids: eligible universe
+        snapshot_run_id: StockFeatureSnapshotRun.id
+        worker_id: Worker 标识
+        lease_epoch: lease_epoch for fencing
+        batch_size: claim 批次大小
+        failure_threshold: 整体失败比例阈值
+        progress_callback: 进度回调
+        algorithm_version: 算法版本
+        input_hash: 输入 hash
+
+    Returns:
+        统计 dict（含 snapshot_count/failed_count/skipped_count/coverage 等）
+    """
+    from app.db import AsyncSessionLocal
+    from app.services.snapshot_run_item_service import (
+        claim_items,
+        create_run_items,
+        get_run_progress,
+        mark_item_failed,
+        mark_item_succeeded,
+    )
+
+    # 1. 创建 run items（幂等）
+    async with AsyncSessionLocal() as db:
+        created = await create_run_items(
+            db, snapshot_run_id, instrument_ids,
+            input_hash=input_hash,
+        )
+        await db.commit()
+        if created > 0:
+            logger.info(
+                "[RunItems] 创建 %d 个 core/pending items: snapshot_run_id=%s",
+                created, snapshot_run_id,
+            )
+
+    # 2. 循环 claim → compute → commit → mark
+    snapshot_count = 0
+    failed_count = 0
+    skipped_count = 0
+    total = len(instrument_ids)
+    run_diag: dict[str, Any] = {}
+
+    while True:
+        # 2.1 claim 一批 items（独立 session）
+        async with AsyncSessionLocal() as db:
+            items = await claim_items(
+                db, snapshot_run_id,
+                worker_instance_id=worker_id,
+                batch_size=batch_size,
+            )
+            await db.commit()
+
+        if not items:
+            break  # 无可领取 items，完成
+
+        # 2.2 逐股计算（每股独立事务）
+        for item in items:
+            try:
+                # 计算在事务外（长事务避免锁竞争）
+                async with AsyncSessionLocal() as compute_db:
+                    snapshot = await compute_review_core_for_trade_date(
+                        compute_db,
+                        item.instrument_id,
+                        trade_date,
+                        source_run_id=snapshot_run_id,
+                        _diag_sink=run_diag,
+                    )
+                    await upsert_snapshot(compute_db, snapshot)
+                    await compute_db.commit()
+
+                # 标记 succeeded（独立短事务 + lease_epoch fencing）
+                async with AsyncSessionLocal() as mark_db:
+                    ok = await mark_item_succeeded(
+                        mark_db, item.id,
+                        result_count=1,
+                        lease_epoch=item.lease_epoch,
+                    )
+                    await mark_db.commit()
+
+                if ok:
+                    snapshot_count += 1
+                else:
+                    # lease_epoch 不匹配，被其他 Worker 接管
+                    logger.warning(
+                        "[RunItems] item %s lease_epoch 不匹配，跳过（已被接管）",
+                        item.id,
+                    )
+
+            except Exception as exc:
+                failed_count += 1
+                logger.error(
+                    "review_core 单股计算失败 instrument_id=%s trade_date=%s: %s",
+                    item.instrument_id, trade_date, exc, exc_info=True,
+                )
+                # 标记 failed（独立事务）
+                try:
+                    async with AsyncSessionLocal() as fail_db:
+                        await mark_item_failed(
+                            fail_db, item.id,
+                            error=str(exc),
+                            lease_epoch=item.lease_epoch,
+                        )
+                        await fail_db.commit()
+                except Exception as mark_exc:
+                    logger.error(
+                        "mark_item_failed 失败 item_id=%s: %s",
+                        item.id, mark_exc,
+                    )
+
+        # 2.3 进度回调
+        if progress_callback is not None:
+            try:
+                await progress_callback(
+                    processed=snapshot_count + failed_count + skipped_count,
+                    total=total,
+                    snapshot_count=snapshot_count,
+                    failed_count=failed_count,
+                )
+            except Exception as exc:
+                logger.warning("progress_callback 失败: %s", exc)
+
+    # 3. 从 DB 统计最终 coverage
+    async with AsyncSessionLocal() as db:
+        progress = await get_run_progress(db, snapshot_run_id)
+
+    coverage = progress.get("coverage", 0.0)
+    succeeded = progress.get("succeeded", 0)
+    failed = progress.get("failed", 0)
+    skipped = progress.get("skipped", 0)
+
+    # 4. 检查失败阈值（基于 items 统计，不是局部计数器）
+    if total > 0:
+        # 用 DB 统计的 failed 率
+        failure_rate = failed / total if total > 0 else 0.0
+        if failure_rate > failure_threshold:
+            raise RuntimeError(
+                f"review_core snapshot 失败比例 {failure_rate:.1%} 超过阈值 "
+                f"{failure_threshold:.0%} (failed={failed}, total={total})"
+            )
+
+    logger.info(
+        "[RunItems] review_core_with_run_items 完成: trade_date=%s, "
+        "succeeded=%d, failed=%d, skipped=%d, coverage=%.4f",
+        trade_date, succeeded, failed, skipped, coverage,
+    )
+
+    return {
+        "snapshot_count": succeeded,
+        "failed_count": failed,
+        "skipped_count": skipped,
+        "coverage": coverage,
+        "schema_version": _SCHEMA_VERSION,
+        "trade_date": trade_date.isoformat(),
+        "source_bar_hash": run_diag.get("source_bar_hash"),
+        "adj_factor_hash": run_diag.get("adj_factor_hash"),
+        "market_data_contract_version": run_diag.get("market_data_contract_version"),
+        "completed_through": run_diag.get("completed_through"),
+        "adjustment_as_of": run_diag.get("adjustment_as_of"),
+        "_review_core": True,
+        "_uses_run_items": True,
+    }
+
+
 async def _fetch_bars_from_db(
     session: AsyncSession,
     instrument_id: uuid.UUID,

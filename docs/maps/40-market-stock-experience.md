@@ -25,7 +25,7 @@
 | MX-13 | 中文标签待核验 | 部分实现 | 未核验 |
 | MX-14 | 管理调试路由待核验 | 部分已知 | 未核验 |
 | MX-15 | 页面状态待核验 | 未核验 | 未核验 |
-| MX-20 列表视图第一金字塔全量字段 | `backend/app/services/first_pyramid_flatten.py`（99 键扁平化函数）；`backend/app/services/market_stocks_service.py`（批量读取快照，无 N+1）；`backend/app/schemas/market_stocks.py`（`MarketStockRow.first_pyramid`）；`frontend/src/features/market-workspace/firstPyramidColumns.tsx`（ColumnRegistry 99 列）；`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`（集成 `useMarketStocks`）；`frontend/src/components/StrategyDataTable.tsx`（`defaultHiddenColumns` prop）；复用 `TableViewPreset` 保存显隐与顺序 | 已实现未运行核验 | 31 个纯单元测试通过（`test_first_pyramid_flatten.py`）；TSC+ESLint 通过；浏览器真实链路验收待部署后执行 |
+| MX-20 列表视图第一金字塔全量字段 | `backend/app/services/first_pyramid_flatten.py`（99 键扁平化函数）；`backend/app/services/market_stocks_service.py`（批量读取快照，无 N+1；**[CHANGE-008]** `_build_snap_lateral(snapshot_run_id=...)` 严格绑定已发布 `factor_publications` 的 `data_run_id`，无 pointer 时回退每股 latest）；`backend/app/schemas/market_stocks.py`（`MarketStockRow.first_pyramid`）；`frontend/src/features/market-workspace/firstPyramidColumns.tsx`（ColumnRegistry 99 列）；`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`（集成 `useMarketStocks`）；`frontend/src/components/StrategyDataTable.tsx`（`defaultHiddenColumns` prop）；复用 `TableViewPreset` 保存显隐与顺序 | 已实现未运行核验 | 31 个纯单元测试通过（`test_first_pyramid_flatten.py`）；TSC+ESLint 通过；浏览器真实链路验收待部署后执行 |
 
 ## 2. 路由
 

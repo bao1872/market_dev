@@ -192,14 +192,22 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 5. **兼容回退**：`get_published_snapshot_run_id` 优先读 publication pointer，无 pointer 时回退 `published_at IS NOT NULL`
 6. **[007] 读取端接入 pointer**：`stock_context.py` 的 `_find_latest_succeeded_run` / `_find_run_by_trade_date` 优先读 `factor_publications`（stock_core kind），无 pointer 时回退 `published_at IS NOT NULL`
 
-### 11.5 当前限制
+### 11.5 当前限制（CHANGE-008 后状态）
 
-- **Worker 未集成 run item**：`after_close_orchestrator` 仍调 `compute_review_core_batch_for_trade_date` 批量计算，未调 `claim_items` / `mark_item_succeeded` / `publish_stock_core`
-- **market_stocks LATERAL 未接入 pointer**：`_build_snap_lateral()` 仍按 instrument 取最新 snapshot，未过滤 published run（性能关键查询，需单独 PR）
-- **历史回补未接入 run/item**：`backfill_first_pyramid_history_batch` 仍返回 dict 无持久化
-- 管理状态 API 未实现（service 层已就绪）
-- 历史回补 CLI 未实现
-- 事件 outbox 未实现
-- PG 集成测试 6 项待 CI（`PURE_UNIT_TEST=1` 时 SKIP）
+**[CHANGE-20260729-008 代码闭环已完成的项]**：
 
-详见 `docs/changes/2026/CHANGE-20260729-006-incremental-checkpoint-layered-publication.md` 和 `docs/changes/2026/CHANGE-20260729-007-incremental-publish-real-integration-id-contract-fix.md`。
+- ✅ **Worker 已接入 run item**：`after_close_orchestrator` 主链切换到 `feature_snapshot_service.compute_review_core_with_run_items`，调用 `create_run_items` / `claim_items` / `mark_item_succeeded` / `mark_item_failed`，单股独立 AsyncSession + lease_epoch fencing
+- ✅ **market_stocks LATERAL 已接入 pointer**：`_build_snap_lateral(snapshot_run_id=...)` 严格过滤 `source_run_id == pointer.data_run_id`；`get_market_stocks` 先读 publication pointer 再构建 LATERAL；无 pointer 时回退每股 latest（兼容历史数据）
+- ✅ **历史回补已接入 run/item**：`backfill_history_with_run_items` + `create_history_run` / `claim_history_items` / `mark_history_item_*` / `finish_history_run`，单股独立事务，DB-only 取数
+- ✅ **管理状态 API 已实现**：`app.api.admin_incremental_publish`，提供 `/status` / `/core/runs` / `/core/runs/{id}/progress` / `/history/runs` / `/history/runs/{id}/progress` / `/pointers`
+- ✅ **历史回补 CLI 已实现**：`scripts/first_pyramid_history_backfill_cli.py`，支持 `--canary` / `--limit` / `--all` / `--symbols` / `--resume` / `--dry-run` / `--output-bars` / `--algorithm-version`
+- ✅ **市场聚合独立 job**：`market_factor_aggregation_service.run_market_factor_aggregation`，读取 stock_core pointer 后切 market_aggregation pointer，失败只重跑聚合
+- ✅ **事件 outbox 模型支持**：`StockFeatureSnapshotRunItem.phase='event_outbox'` 已定义，实际事件写入由 `stock_state_event` 表（稳定唯一键幂等）承载
+
+**[本轮仍待验证的项]**：
+
+- PG 集成测试 6 项待 CI（`PURE_UNIT_TEST=1` 时 SKIP，需 CI 临时 PG 容器）
+- 生产部署后真实 canary 验证待执行
+- 全市场 history 回补待执行
+
+详见 `docs/changes/2026/CHANGE-20260729-008-incremental-publish-full-closure.md`。
