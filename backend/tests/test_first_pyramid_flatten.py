@@ -20,7 +20,16 @@ import pytest
 from app.services.first_pyramid_flatten import (
     FP_ALL_KEYS,
     FP_FIELD_GROUPS,
+    FP_QUERY_FIELD_SPECS,
+    FP_SERVER_FILTERABLE_KEYS,
+    FP_SERVER_SORTABLE_KEYS,
     flatten_first_pyramid,
+)
+from app.services.market_stocks_service import (
+    FpFilterSpec,
+    FpSortSpec,
+    _parse_fp_filter,
+    _parse_fp_sort,
 )
 
 
@@ -389,3 +398,149 @@ class TestNoExtraFields:
             }
         )
         assert set(result.keys()) == set(FP_ALL_KEYS)
+
+
+# =============================================================================
+# [CHANGE-20260729-004 P0-1] FP_QUERY_FIELD_SPECS / fp_filter / fp_sort 单元测试
+# 用少量代表字段测试注册表全量能力，不为 99 列各写一套重复测试
+# =============================================================================
+
+
+class TestFpQueryFieldSpecs:
+    """FP_QUERY_FIELD_SPECS 规格表完整性。"""
+
+    def test_specs_cover_all_99_keys(self) -> None:
+        """规格表必须恰好覆盖 FP_ALL_KEYS 的全部 99 键。"""
+        assert set(FP_QUERY_FIELD_SPECS.keys()) == set(FP_ALL_KEYS)
+        assert len(FP_QUERY_FIELD_SPECS) == 99
+
+    def test_each_spec_has_required_fields(self) -> None:
+        """每个 spec 必须包含 fp_key / data_type / json_path / operators。"""
+        for key, spec in FP_QUERY_FIELD_SPECS.items():
+            assert spec["fp_key"] == key
+            assert spec["data_type"] in {
+                "text", "number", "percent", "datetime", "boolean", "enum",
+            }
+            assert isinstance(spec["json_path"], tuple)
+            assert isinstance(spec["operators"], frozenset)
+            assert len(spec["operators"]) > 0
+
+    def test_filterable_keys_have_json_path(self) -> None:
+        """支持服务端筛选的字段必须有 JSON 路径。"""
+        for key in FP_SERVER_FILTERABLE_KEYS:
+            assert FP_QUERY_FIELD_SPECS[key]["json_path"], (
+                f"filterable key {key} 缺少 json_path"
+            )
+
+    def test_sortable_equals_filterable(self) -> None:
+        """可排序集合 == 可筛选集合（基于 JSON 路径）。"""
+        assert FP_SERVER_SORTABLE_KEYS == FP_SERVER_FILTERABLE_KEYS
+
+    def test_operator_mapping_by_data_type(self) -> None:
+        """按 data_type 抽样校验操作符映射。"""
+        # number 支持 gt/gte/lt/lte/eq/between/empty/not_empty
+        num_spec = FP_QUERY_FIELD_SPECS["fp_trend_bars"]
+        assert num_spec["data_type"] == "number"
+        assert {"gt", "gte", "lt", "lte", "eq", "between", "empty", "not_empty"} <= num_spec["operators"]
+        # text 支持 contains/not_contains/empty/not_empty（fp_summary 显式不含 eq）
+        text_spec = FP_QUERY_FIELD_SPECS["fp_summary"]
+        assert text_spec["data_type"] == "text"
+        assert {"contains", "not_contains", "empty", "not_empty"} <= text_spec["operators"]
+        # datetime 支持 gte/gt/lt/lte/between/empty/not_empty
+        dt_spec = FP_QUERY_FIELD_SPECS["fp_trade_date"]
+        assert dt_spec["data_type"] == "datetime"
+        assert {"gte", "gt", "lt", "lte", "between", "empty", "not_empty"} <= dt_spec["operators"]
+        # boolean 仅 eq/empty/not_empty
+        bool_spec = FP_QUERY_FIELD_SPECS["fp_volume_ready"]
+        assert bool_spec["data_type"] == "boolean"
+        assert bool_spec["operators"] == frozenset({"eq", "empty", "not_empty"})
+        # enum 仅 eq/empty/not_empty
+        enum_spec = FP_QUERY_FIELD_SPECS["fp_trend_direction"]
+        assert enum_spec["data_type"] == "enum"
+        assert enum_spec["operators"] == frozenset({"eq", "empty", "not_empty"})
+
+    def test_computed_and_event_fields_excluded_from_server(self) -> None:
+        """计算字段和列表事件字段无 json_path，不能服务端筛选/排序。"""
+        # 计算字段
+        assert "fp_structure_alignment" not in FP_SERVER_FILTERABLE_KEYS
+        assert "fp_distance_to_trailing_top_pct" not in FP_SERVER_SORTABLE_KEYS
+        # 列表事件字段
+        assert "fp_structure_event_type" not in FP_SERVER_FILTERABLE_KEYS
+        assert "fp_latest_bos_direction" not in FP_SERVER_SORTABLE_KEYS
+
+
+class TestParseFpFilter:
+    """_parse_fp_filter 解析 + 白名单校验。"""
+
+    def test_none_and_empty_return_empty(self) -> None:
+        assert _parse_fp_filter(None) == []
+        assert _parse_fp_filter("") == []
+
+    def test_single_number_filter(self) -> None:
+        specs = _parse_fp_filter("fp_trend_bars:gt:5")
+        assert specs == [FpFilterSpec(fp_key="fp_trend_bars", operator="gt", value="5", value2=None)]
+
+    def test_between_filter(self) -> None:
+        specs = _parse_fp_filter("fp_trend_bars:between:1;10")
+        assert specs == [
+            FpFilterSpec(fp_key="fp_trend_bars", operator="between", value="1", value2="10")
+        ]
+
+    def test_text_contains_filter(self) -> None:
+        specs = _parse_fp_filter("fp_summary:contains:上行")
+        assert specs == [FpFilterSpec(fp_key="fp_summary", operator="contains", value="上行", value2=None)]
+
+    def test_empty_operator(self) -> None:
+        specs = _parse_fp_filter("fp_summary:empty:")
+        assert specs == [FpFilterSpec(fp_key="fp_summary", operator="empty", value=None, value2=None)]
+
+    def test_multiple_filters_semicolon(self) -> None:
+        specs = _parse_fp_filter("fp_trend_bars:gt:5;fp_volume:lt:1000000")
+        assert len(specs) == 2
+        assert specs[0].fp_key == "fp_trend_bars"
+        assert specs[1].fp_key == "fp_volume"
+
+    def test_invalid_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="Not in FP_QUERY_FIELD_SPECS"):
+            _parse_fp_filter("fp_nonexistent:gt:5")
+
+    def test_computed_field_raises(self) -> None:
+        """计算字段无 json_path，服务端拒绝。"""
+        with pytest.raises(ValueError, match="not server-filterable"):
+            _parse_fp_filter("fp_structure_alignment:gt:0")
+
+    def test_invalid_operator_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid operator"):
+            _parse_fp_filter("fp_trend_bars:contains:5")
+
+    def test_between_missing_second_value_raises(self) -> None:
+        with pytest.raises(ValueError, match="missing second value"):
+            _parse_fp_filter("fp_trend_bars:between:1")
+
+    def test_value_required_for_non_empty_op(self) -> None:
+        with pytest.raises(ValueError, match="requires value"):
+            _parse_fp_filter("fp_trend_bars:gt:")
+
+
+class TestParseFpSort:
+    """_parse_fp_sort 解析 + 白名单校验。"""
+
+    def test_none_and_empty_return_none(self) -> None:
+        assert _parse_fp_sort(None) is None
+        assert _parse_fp_sort("") is None
+
+    def test_valid_sort(self) -> None:
+        result = _parse_fp_sort("fp_trend_bars:desc")
+        assert result == FpSortSpec(fp_key="fp_trend_bars", direction="desc")
+
+    def test_invalid_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="Not in FP_QUERY_FIELD_SPECS"):
+            _parse_fp_sort("fp_nonexistent:asc")
+
+    def test_computed_field_raises(self) -> None:
+        with pytest.raises(ValueError, match="not server-sortable"):
+            _parse_fp_sort("fp_structure_alignment:asc")
+
+    def test_invalid_direction_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid fp_sort direction"):
+            _parse_fp_sort("fp_trend_bars:up")

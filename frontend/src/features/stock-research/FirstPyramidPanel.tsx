@@ -7,6 +7,7 @@
 //   - 解析 statusText 推断多空或事件类型
 //   - 内联 style 堆积（全部进入 CSS Module）
 import { useFirstPyramid } from '@/hooks/useApi'
+import type { ChipStatus } from '@/api/endpoints'
 import { buildFirstPyramidVM, directionClass, directionLabel, volumeBadgeClass } from './firstPyramidViewModel'
 import type { FirstPyramidVM, StructureEventVM } from './firstPyramidViewModel'
 import styles from './FirstPyramidPanel.module.scss'
@@ -299,15 +300,26 @@ function MomentumVisualCard({ vm, variant }: { vm: FirstPyramidVM['momentum']; v
   )
 }
 
-/** 筹码卡：POC位置轨道 + 距离% + 峰数量 */
-function ChipVisualCard({ vm }: { vm: FirstPyramidVM['chipConsensus'] | null }) {
+/** 筹码卡：POC位置轨道 + 距离% + 峰数量
+ * [CHANGE-20260729-004 P0-2] 当筹码不可用时，显示 chipStatus.reasonText 真实原因，
+ * 不再统一显示"暂无有效筹码峰"。
+ */
+function ChipVisualCard({
+  vm,
+  chipStatus,
+}: {
+  vm: FirstPyramidVM['chipConsensus'] | null
+  chipStatus: ChipStatus | null
+}) {
   if (!vm || !vm.available || vm.pocPrice === null) {
+    // 不可用时展示结构化原因（来自 chipStatus），缺省才退回中性文案
+    const fallbackText = chipStatus?.reasonText ?? '可选维度 · 暂无有效筹码峰'
     return (
       <div className={`${styles.dimCard} ${styles.dimChip} ${styles.optional}`}>
         <div className={styles.dimHeader}>
           <span className={styles.dimName}>筹码共识</span>
         </div>
-        <div className={styles.dimEmpty}>可选维度 · 暂无有效筹码峰</div>
+        <div className={styles.dimEmpty}>{fallbackText}</div>
       </div>
     )
   }
@@ -392,7 +404,7 @@ export function FirstPyramidPanel({ symbol, variant = 'detail', className }: Fir
         <TrendVisualCard vm={vm.trend} variant={variant} />
         <StructureVisualCard vm={vm.structure} variant={variant} />
         <MomentumVisualCard vm={vm.momentum} variant={variant} />
-        <ChipVisualCard vm={vm.chipConsensus} />
+        <ChipVisualCard vm={vm.chipConsensus} chipStatus={vm.chipStatus} />
       </div>
     </div>
   )

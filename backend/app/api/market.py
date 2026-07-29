@@ -172,6 +172,21 @@ async def list_market_stocks(
         None,
         description="状态筛选（Phase 4 实现）：up=上行, down=下行, sideways=震荡",
     ),
+    fp_filter: str | None = Query(
+        None,
+        description=(
+            "[CHANGE-20260729-004] 第一金字塔字段服务端筛选，"
+            "格式 key:op:val[;val2];key2:op2:val2。"
+            "支持字段见 FP_QUERY_FIELD_SPECS；非法字段/操作符返回 422"
+        ),
+    ),
+    fp_sort: str | None = Query(
+        None,
+        description=(
+            "[CHANGE-20260729-004] 第一金字塔字段服务端排序，"
+            "格式 key:direction。支持字段见 FP_QUERY_FIELD_SPECS"
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_any_capability("self_selection", "market_data")),
 ) -> MarketStocksResponse:
@@ -181,7 +196,8 @@ async def list_market_stocks(
     scope=watchlist 在数据库查询阶段关联当前用户自选（INNER JOIN）。
     state 参数已实现（Phase 4）：up/down/sideways。
     industry/concept 参数已实现（PRD §7.5 qstock 同步后）：通过 market_boards 表筛选。
-    无匹配股票时返回空列表（不报错）。
+    [CHANGE-20260729-004] fp_filter/fp_sort：通过 JSON 路径标量子查询在分页前完成第一金字塔字段筛选/排序；
+    所有排序均 NULLS LAST，第二排序键固定为 Instrument.symbol 保证翻页稳定。
     sort 白名单：name, symbol, change_pct, dsa_state, latest_event_time。
     """
     # Phase 4: state 参数校验（合法值：up/down/sideways；空字符串视为 None）
@@ -206,9 +222,11 @@ async def list_market_stocks(
             state=normalized_state,
             industry=industry or None,
             concept=concept or None,
+            fp_filter=fp_filter or None,
+            fp_sort=fp_sort or None,
         )
     except ValueError as exc:
-        # 排序参数校验失败 → 422
+        # 排序/筛选参数校验失败 → 422
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

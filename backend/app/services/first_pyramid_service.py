@@ -39,13 +39,18 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.constants.indicator_contract import DSA_LOOKBACK, NODE_CLUSTER_PRIMARY_BARS
+from app.constants.indicator_contract import (
+    DSA_LOOKBACK,
+    NODE_CLUSTER_LOW_BARS,
+    NODE_CLUSTER_PRIMARY_BARS,
+)
 from app.schemas.first_pyramid import (
     CHIP_CONSENSUS_ALGORITHM_VERSION,
     FIRST_PYRAMID_ALGORITHM_VERSION,
     FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
     ORDERED_DIMENSIONS,
     ChipConsensusResult,
+    ChipStatus,
     DimensionResult,
     FirstPyramidCoreSnapshot,
     FirstPyramidSnapshot,
@@ -1105,6 +1110,9 @@ def assemble_first_pyramid_view(
     保留必要兼容包装：组装后的 FirstPyramidSnapshot 使用 core 的 inputHash/parameterHash
     （含 chip 时升级为完整版本），chip 失败时仍可返回完整 core 视图。
 
+    [CHANGE-20260729-004 P0-2] 同步构建 chipStatus 结构化状态（替代统一"暂不可用"），
+    前端可读取 reasonCode/reasonText 显示真实原因（如 M15_BARS_INSUFFICIENT + 实际数量）。
+
     Args:
         core: 核心快照（trend/structure/momentum）
         chip: 筹码快照（可为 None 或含 error）
@@ -1118,6 +1126,7 @@ def assemble_first_pyramid_view(
     )
     # 组装视图使用完整 parameterHash（含 Node 参数，向后兼容）
     parameter_hash = _compute_parameter_hash()
+    chip_status = _build_chip_status(chip)
 
     return FirstPyramidSnapshot(
         symbol=core.symbol,
@@ -1126,10 +1135,107 @@ def assemble_first_pyramid_view(
         structure=core.structure,
         momentum=core.momentum,
         chipConsensus=chip_dim,
+        chipStatus=chip_status,
         statusText=aggregate_status,
         volumeContext=core.volumeContext,
         inputHash=core.inputHash,
         parameterHash=parameter_hash,
+    )
+
+
+# =============================================================================
+# [CHANGE-20260729-004 P0-2] chipStatus 构建辅助
+# =============================================================================
+
+
+def _build_chip_status(chip: ChipConsensusResult | None) -> ChipStatus:
+    """从 ChipConsensusResult 构建结构化 ChipStatus。
+
+    优先级：
+    1. chip is None → pending（chip job 未运行或未完成）
+    2. chip.error 非空 → 解析错误码（M15_BARS_INSUFFICIENT / DAILY_BARS_INSUFFICIENT /
+       CHIP_JOB_FAILED / NO_VALID_PEAK）
+    3. chip.chip is None → NO_VALID_PEAK
+    4. chip.chip.available=True → ready
+
+    Args:
+        chip: ChipConsensusResult 或 None
+
+    Returns:
+        ChipStatus（state/reasonCode/reasonText/computedAt）
+    """
+    if chip is None:
+        return ChipStatus(
+            state="pending",
+            reasonCode="CHIP_JOB_PENDING",
+            reasonText="筹码共识计算尚未运行",
+            computedAt=None,
+        )
+
+    # 已有 chip 结果，根据 error 和 chip 内容判断
+    if chip.error:
+        # 解析 error 字符串映射到稳定 reasonCode
+        err_lower = chip.error.lower()
+        if "insufficient_daily" in err_lower or "daily_bars" in err_lower:
+            return ChipStatus(
+                state="unavailable",
+                reasonCode="DAILY_BARS_INSUFFICIENT",
+                reasonText=f"日线数据不足（{chip.dailyBarsCount} 根，需 ≥10）",
+                computedAt=None,
+            )
+        if (
+            "input_contract_violation" in err_lower
+            or "insufficient_15m" in err_lower
+            or "missing_15m" in err_lower
+            or "m15" in err_lower
+        ):
+            return ChipStatus(
+                state="unavailable",
+                reasonCode="M15_BARS_INSUFFICIENT",
+                reasonText=(
+                    f"15 分钟数据不足（{chip.bars15mCount} 根，需 ≥{NODE_CLUSTER_LOW_BARS}）"
+                ),
+                computedAt=None,
+            )
+        if "profile_empty" in err_lower or "no_valid_peak" in err_lower:
+            return ChipStatus(
+                state="unavailable",
+                reasonCode="NO_VALID_PEAK",
+                reasonText="Node Cluster 未生成有效筹码峰",
+                computedAt=None,
+            )
+        # 其他异常
+        return ChipStatus(
+            state="failed",
+            reasonCode="CHIP_JOB_FAILED",
+            reasonText=f"筹码计算失败：{chip.error[:200]}",
+            computedAt=None,
+        )
+
+    # 无 error 但 chip 为 None：未生成有效峰
+    if chip.chip is None:
+        return ChipStatus(
+            state="unavailable",
+            reasonCode="NO_VALID_PEAK",
+            reasonText="Node Cluster 运行完成但无有效筹码峰",
+            computedAt=None,
+        )
+
+    # chip 可用
+    if chip.chip.available:
+        return ChipStatus(
+            state="ready",
+            reasonCode=None,
+            reasonText=None,
+            computedAt=None,
+        )
+
+    # chip 存在但 available=False：归入 NO_VALID_PEAK
+    return ChipStatus(
+        state="unavailable",
+        reasonCode="NO_VALID_PEAK",
+        reasonText="Node Cluster 标记 unavailable 但未提供 error",
+        computedAt=None,
     )
 
 

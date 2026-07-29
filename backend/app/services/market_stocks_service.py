@@ -31,7 +31,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Integer, case, cast, func, literal, or_, select
+from sqlalchemy import ColumnElement, Float, Integer, case, cast, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import to_shanghai_iso
@@ -55,7 +55,10 @@ from app.services.board_sync_service import get_instrument_boards_batch
 # _SCHEMA_VERSION 从 1→2→3 升级后，生产写入 schema_version=3，
 # 消费查询必须用同一常量，否则新快照读不到、as_of 永远为 None。
 from app.services.feature_snapshot_service import _SCHEMA_VERSION
-from app.services.first_pyramid_flatten import flatten_first_pyramid
+from app.services.first_pyramid_flatten import (
+    FP_QUERY_FIELD_SPECS,
+    flatten_first_pyramid,
+)
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 logger = logging.getLogger("market_stocks_service")
@@ -63,6 +66,13 @@ logger = logging.getLogger("market_stocks_service")
 # 排序字段白名单（防止 SQL 注入）
 _SORTABLE_FIELDS = {"name", "symbol", "change_pct", "dsa_state", "latest_event_time"}
 _SORT_DIRECTIONS = {"asc", "desc"}
+
+# [CHANGE-20260729-004 P0-1] fp_filter/fp_sort 操作符合法值
+_FP_FILTER_OPERATORS = {
+    "contains", "not_contains", "eq", "gt", "gte", "lt", "lte",
+    "between", "empty", "not_empty",
+}
+_FP_SORT_DIRECTIONS = {"asc", "desc"}
 
 
 @dataclass(frozen=True)
@@ -185,16 +195,28 @@ def _build_order_by(
     sort_spec: SortSpec | None,
     has_query: bool,
     rank_expr: ColumnElement[int],
+    fp_sort_spec: FpSortSpec | None = None,
 ) -> list[ColumnElement]:
     """构建 ORDER BY 列表。
 
-    - 搜索模式（has_query=True）：按命中优先级排序，忽略 sort_spec。
-    - 无 sort_spec：默认 symbol asc。
+    - 搜索模式（has_query=True）：按命中优先级排序，忽略 sort_spec/fp_sort_spec。
+    - 无 sort_spec 且无 fp_sort_spec：默认 symbol asc。
     - name/symbol：直接使用 Instrument 列。
     - change_pct/dsa_state/latest_event_time：使用标量子查询表达式。
+    - fp_sort（第一金字塔字段）：使用 JSON 路径标量子查询。
+    - 所有非首序都追加 Instrument.symbol 作为第二排序键，NULLS LAST。
     """
     if has_query:
         return [rank_expr, Instrument.symbol.asc()]
+
+    # fp_sort 优先于 sort（第一金字塔专用排序）
+    if fp_sort_spec is not None:
+        fp_sort_expr = _build_fp_sort_expression(fp_sort_spec)
+        order_col = (
+            fp_sort_expr.desc().nullslast() if fp_sort_spec.direction == "desc"
+            else fp_sort_expr.asc().nullslast()
+        )
+        return [order_col, Instrument.symbol.asc()]
 
     if sort_spec is None:
         return [Instrument.symbol.asc()]
@@ -277,6 +299,285 @@ def _build_board_filter_conditions(
     return build_board_filter_conditions(Instrument.id, industry, concept)
 
 
+# =============================================================================
+# [CHANGE-20260729-004 P0-1] 第一金字塔 fp_filter/fp_sort 解析与构建
+# =============================================================================
+# URL 编码格式：
+#   fp_filter=key1:op1:val1[;val2];key2:op2:val2
+#   fp_sort=key:direction
+# 解析后通过标量子查询从 StockFeatureSnapshot.summary_payload.first_pyramid JSON 路径取值
+# 排序和筛选均在分页前完成；asc/desc 均 NULLS LAST，第二排序键固定为 Instrument.symbol
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class FpFilterSpec:
+    """单个 fp 筛选条件（已通过白名单校验）。"""
+
+    fp_key: str
+    operator: str
+    value: str | None  # empty/not_empty 时为 None
+    value2: str | None  # between 时的上界
+
+
+@dataclass(frozen=True)
+class FpSortSpec:
+    """fp 排序规格（已通过白名单校验）。"""
+
+    fp_key: str
+    direction: str  # asc | desc
+
+
+def _parse_fp_filter(fp_filter: str | None) -> list[FpFilterSpec]:
+    """解析 fp_filter 字符串为 FpFilterSpec 列表。
+
+    格式：fp_filter=key1:op1:val1[;val2];key2:op2:val2
+    - 多个条件用 `;` 分隔
+    - 每个条件 `key:op:value`，between 用 `key:between:val1;val2`
+    - empty/not_empty 操作符无需 value（`key:empty:`）
+    - 非法 key/operator 抛 ValueError（由 API 层转 422）
+
+    Args:
+        fp_filter: 原始字符串，None 或空字符串返回空列表
+
+    Returns:
+        FpFilterSpec 列表（已校验白名单）
+    """
+    if not fp_filter:
+        return []
+
+    specs: list[FpFilterSpec] = []
+    # 按 `;` 分割为多个条件；between 的两个值在单个条件内再按 `;` 分割
+    # 约定：between 的格式为 `key:between:val1;val2`，所以 between 条件后必有 2 个 value
+    # 为简化解析：先按 `;` 分割，遇到 between 时合并下一个 token 作为 value2
+    tokens = fp_filter.split(";")
+    i = 0
+    while i < len(tokens):
+        token = tokens[i].strip()
+        if not token:
+            i += 1
+            continue
+        parts = token.split(":", maxsplit=2)
+        if len(parts) < 2:
+            raise ValueError(
+                f"Invalid fp_filter token '{token}': expected 'key:op[:value]'"
+            )
+        fp_key = parts[0].strip()
+        operator = parts[1].strip()
+        value = parts[2] if len(parts) > 2 else None
+
+        # 白名单校验
+        if fp_key not in FP_QUERY_FIELD_SPECS:
+            raise ValueError(
+                f"Invalid fp_filter key '{fp_key}'. Not in FP_QUERY_FIELD_SPECS."
+            )
+        spec = FP_QUERY_FIELD_SPECS[fp_key]
+        # 事件/计算字段无 json_path，服务端拒绝
+        if not spec["json_path"]:
+            raise ValueError(
+                f"fp_filter key '{fp_key}' is not server-filterable "
+                f"(no JSON path; computed or list-event field)."
+            )
+        if operator not in spec["operators"]:
+            raise ValueError(
+                f"Invalid operator '{operator}' for fp key '{fp_key}' "
+                f"(data_type={spec['data_type']}). "
+                f"Allowed: {sorted(spec['operators'])}"
+            )
+
+        # between 需要 value2
+        value2: str | None = None
+        if operator == "between":
+            if value is None:
+                raise ValueError(
+                    f"fp_filter 'between' requires value; got '{token}'"
+                )
+            # 下一个 token 作为 value2
+            i += 1
+            if i >= len(tokens):
+                raise ValueError(
+                    f"fp_filter 'between' for '{fp_key}' missing second value"
+                )
+            value2 = tokens[i].strip()
+            if not value2:
+                raise ValueError(
+                    f"fp_filter 'between' for '{fp_key}' missing second value"
+                )
+        # empty/not_empty 不需要 value
+        elif operator in ("empty", "not_empty"):
+            value = None
+        elif value is None or value == "":
+            raise ValueError(
+                f"fp_filter operator '{operator}' requires value; got '{token}'"
+            )
+
+        specs.append(FpFilterSpec(fp_key=fp_key, operator=operator, value=value, value2=value2))
+        i += 1
+
+    return specs
+
+
+def _parse_fp_sort(fp_sort: str | None) -> FpSortSpec | None:
+    """解析 fp_sort 字符串为 FpSortSpec。
+
+    格式：fp_sort=key:direction
+    - direction: asc | desc
+    - 非法 key/direction 抛 ValueError
+
+    Args:
+        fp_sort: 原始字符串，None 或空返回 None
+
+    Returns:
+        FpSortSpec 或 None
+    """
+    if not fp_sort:
+        return None
+
+    parts = fp_sort.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid fp_sort '{fp_sort}': expected 'key:direction'")
+    fp_key = parts[0].strip()
+    direction = parts[1].strip().lower()
+
+    if fp_key not in FP_QUERY_FIELD_SPECS:
+        raise ValueError(
+            f"Invalid fp_sort key '{fp_key}'. Not in FP_QUERY_FIELD_SPECS."
+        )
+    spec = FP_QUERY_FIELD_SPECS[fp_key]
+    if not spec["json_path"]:
+        raise ValueError(
+            f"fp_sort key '{fp_key}' is not server-sortable "
+            f"(no JSON path; computed or list-event field)."
+        )
+    if direction not in _FP_SORT_DIRECTIONS:
+        raise ValueError(
+            f"Invalid fp_sort direction '{direction}'. Allowed: asc, desc"
+        )
+
+    return FpSortSpec(fp_key=fp_key, direction=direction)
+
+
+def _fp_json_value_expr(fp_key: str) -> ColumnElement:
+    """构建从 StockFeatureSnapshot.summary_payload.first_pyramid 取 JSON 路径值的标量子查询。
+
+    子查询取每个 instrument 的最新一行 snapshot（按 trade_date desc, limit 1），
+    从 summary_payload -> 'first_pyramid' -> path1 -> path2 -> ... 取值。
+
+    Args:
+        fp_key: 必须在 FP_SERVER_FILTERABLE_KEYS 中
+
+    Returns:
+        标量子查询表达式，可直接用于 WHERE/ORDER BY
+    """
+    spec = FP_QUERY_FIELD_SPECS[fp_key]
+    json_path = spec["json_path"]
+    if not json_path:
+        raise ValueError(f"fp_key '{fp_key}' has no JSON path")
+
+    # 构建 SQLAlchemy JSON 路径：summary_payload['first_pyramid']['path1']['path2']...
+    # 使用 astext 取为 text，便于后续 cast
+    expr = StockFeatureSnapshot.summary_payload["first_pyramid"]
+    for path_seg in json_path:
+        expr = expr[path_seg]
+
+    subq = (
+        select(expr)
+        .where(
+            StockFeatureSnapshot.instrument_id == Instrument.id,
+            StockFeatureSnapshot.schema_version == _SCHEMA_VERSION,
+        )
+        .order_by(StockFeatureSnapshot.trade_date.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    return subq
+
+
+def _cast_fp_value(expr: ColumnElement, data_type: str) -> ColumnElement:
+    """按 data_type 转换 JSON 取值为可比较类型。
+
+    PostgreSQL JSON 取值默认为 text，需 cast：
+    - number/percent → Float
+    - datetime → 取 text 字符串前 10 位（YYYY-MM-DD）按字典序比较
+    - text/enum/boolean → text
+    """
+    if data_type in ("number", "percent"):
+        return cast(expr, Float)
+    return expr.astext
+
+
+def _build_fp_filter_conditions(fp_filters: list[FpFilterSpec]) -> list[ColumnElement[bool]]:
+    """构建 fp 筛选 WHERE 条件列表。
+
+    每个 filter 基于标量子查询取 JSON 值，按 operator 构建条件：
+    - gt/gte/lt/lte/eq: 数值/文本比较
+    - between: value <= expr <= value2
+    - contains/not_contains: ilike
+    - empty: expr IS NULL
+    - not_empty: expr IS NOT NULL
+
+    Args:
+        fp_filters: 已校验的 FpFilterSpec 列表
+
+    Returns:
+        WHERE 条件列表，外层用 AND 连接
+    """
+    conditions: list[ColumnElement[bool]] = []
+    for f in fp_filters:
+        spec = FP_QUERY_FIELD_SPECS[f.fp_key]
+        data_type = spec["data_type"]
+        raw_expr = _fp_json_value_expr(f.fp_key)
+        typed_expr = _cast_fp_value(raw_expr, data_type)
+
+        if f.operator == "empty":
+            conditions.append(raw_expr.is_(None))
+        elif f.operator == "not_empty":
+            conditions.append(raw_expr.isnot(None))
+        elif f.operator == "eq":
+            if data_type in ("number", "percent"):
+                conditions.append(typed_expr == float(f.value))  # type: ignore[arg-type]
+            elif data_type == "boolean":
+                conditions.append(typed_expr == (str(f.value).lower() in ("true", "1", "yes")))  # type: ignore[arg-type]
+            else:
+                conditions.append(typed_expr == f.value)  # type: ignore[arg-type]
+        elif f.operator in ("gt", "gte", "lt", "lte"):
+            op_func = {
+                "gt": lambda a, b: a > b,
+                "gte": lambda a, b: a >= b,
+                "lt": lambda a, b: a < b,
+                "lte": lambda a, b: a <= b,
+            }[f.operator]
+            if data_type in ("number", "percent"):
+                conditions.append(op_func(typed_expr, float(f.value)))  # type: ignore[arg-type]
+            else:
+                conditions.append(op_func(typed_expr, f.value))  # type: ignore[arg-type]
+        elif f.operator == "between":
+            if data_type in ("number", "percent"):
+                conditions.append(typed_expr.between(float(f.value), float(f.value2)))  # type: ignore[arg-type]
+            else:
+                conditions.append(typed_expr.between(f.value, f.value2))  # type: ignore[arg-type]
+        elif f.operator == "contains":
+            conditions.append(typed_expr.ilike(f"%{f.value}%"))  # type: ignore[arg-type]
+        elif f.operator == "not_contains":
+            conditions.append(~typed_expr.ilike(f"%{f.value}%"))  # type: ignore[arg-type]
+    return conditions
+
+
+def _build_fp_sort_expression(fp_sort_spec: FpSortSpec) -> ColumnElement:
+    """构建 fp 排序标量表达式（已校验白名单）。
+
+    Args:
+        fp_sort_spec: 已校验的 FpSortSpec
+
+    Returns:
+        排序表达式，外层追加 NULLS LAST 和第二排序键
+    """
+    raw_expr = _fp_json_value_expr(fp_sort_spec.fp_key)
+    spec = FP_QUERY_FIELD_SPECS[fp_sort_spec.fp_key]
+    typed_expr = _cast_fp_value(raw_expr, spec["data_type"])
+    return typed_expr
+
+
 async def get_market_stocks(
     db: AsyncSession,
     user_id: UUID,
@@ -288,8 +589,16 @@ async def get_market_stocks(
     state: str | None = None,
     industry: str | None = None,
     concept: str | None = None,
+    fp_filter: str | None = None,
+    fp_sort: str | None = None,
 ) -> MarketStocksResponse:
     """查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
+
+    [CHANGE-20260729-004 P0-1] 新增 fp_filter/fp_sort：
+    - fp_filter: 第一金字塔字段服务端筛选，格式 key:op:val[;val2];key2:op2:val2
+    - fp_sort: 第一金字塔字段服务端排序，格式 key:direction
+    - 排序和筛选均通过 JSON 路径标量子查询，在分页前完成
+    - asc/desc 均 NULLS LAST，第二排序键固定为 Instrument.symbol
 
     Args:
         db: 异步数据库会话
@@ -302,6 +611,8 @@ async def get_market_stocks(
         state: 状态筛选（Phase 4）：up/down/sideways
         industry: 行业筛选（板块名称，qstock 同步后可用）
         concept: 概念筛选（板块名称，qstock 同步后可用）
+        fp_filter: 第一金字塔字段服务端筛选字符串
+        fp_sort: 第一金字塔字段服务端排序字符串
 
     Returns:
         MarketStocksResponse 分页响应
@@ -310,6 +621,10 @@ async def get_market_stocks(
     sort_spec = _parse_sort(sort)
     state_cond = _build_state_filter(state)
     board_conditions = _build_board_filter_conditions(industry, concept)
+    # [CHANGE-20260729-004 P0-1] 解析 fp_filter/fp_sort（非法值抛 ValueError → 422）
+    fp_filter_specs = _parse_fp_filter(fp_filter)
+    fp_sort_spec = _parse_fp_sort(fp_sort)
+    fp_filter_conditions = _build_fp_filter_conditions(fp_filter_specs)
     offset = (page - 1) * page_size
 
     # ===== Query 1: instruments + is_watchlisted + 分页 =====
@@ -338,6 +653,9 @@ async def get_market_stocks(
             base_stmt = base_stmt.where(state_cond)
         for cond in board_conditions:
             base_stmt = base_stmt.where(cond)
+        # [P0-1] fp_filter 条件在分页前应用
+        for cond in fp_filter_conditions:
+            base_stmt = base_stmt.where(cond)
     else:
         # market scope: 全市场 A 股，EXISTS 标记自选
         watched_exists = (
@@ -362,9 +680,15 @@ async def get_market_stocks(
             base_stmt = base_stmt.where(state_cond)
         for cond in board_conditions:
             base_stmt = base_stmt.where(cond)
+        # [P0-1] fp_filter 条件在分页前应用
+        for cond in fp_filter_conditions:
+            base_stmt = base_stmt.where(cond)
 
     # 排序：有搜索关键词时按命中优先级，否则按 sort 参数（默认 symbol asc）
-    order_by_cols = _build_order_by(sort_spec, has_query=bool(query), rank_expr=rank_expr)
+    # [P0-1] fp_sort 优先于 sort
+    order_by_cols = _build_order_by(
+        sort_spec, has_query=bool(query), rank_expr=rank_expr, fp_sort_spec=fp_sort_spec,
+    )
     base_stmt = base_stmt.order_by(*order_by_cols)
 
     base_stmt = base_stmt.offset(offset).limit(page_size)
@@ -394,6 +718,9 @@ async def get_market_stocks(
             count_stmt_empty = count_stmt_empty.where(cond)
         if state_cond is not None:
             count_stmt_empty = count_stmt_empty.where(state_cond)
+        # [P0-1] fp_filter 条件同样应用到 count 查询
+        for cond in fp_filter_conditions:
+            count_stmt_empty = count_stmt_empty.where(cond)
         real_total = await db.scalar(count_stmt_empty) or 0
 
         # 全局 as_of 标量查询（不随分页变化）
@@ -441,6 +768,9 @@ async def get_market_stocks(
     if state_cond is not None:
         count_stmt = count_stmt.where(state_cond)
     for cond in board_conditions:
+        count_stmt = count_stmt.where(cond)
+    # [P0-1] fp_filter 条件同样应用到 count 查询
+    for cond in fp_filter_conditions:
         count_stmt = count_stmt.where(cond)
     count_result = await db.execute(count_stmt)
     total = count_result.scalar_one()

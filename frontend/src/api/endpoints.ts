@@ -1959,12 +1959,18 @@ export interface MarketStocksQueryParams {
   industry?: string
   concept?: string
   state?: string
+  // [CHANGE-20260729-004 P0-1] 第一金字塔字段服务端筛选/排序
+  // fp_filter: key:op:val[;val2];key2:op2:val2（按 ; 分割多条件，between 用 val1;val2）
+  // fp_sort: key:direction
+  fp_filter?: string
+  fp_sort?: string
 }
 
 /**
  * 查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
- * GET /market/stocks?scope&query&page&page_size&sort&industry&concept&state
+ * GET /market/stocks?scope&query&page&page_size&sort&industry&concept&state&fp_filter&fp_sort
  * 每行一次返回页面所需全部字段（价格/涨跌幅/DSA状态/事件/自选）。
+ * [CHANGE-20260729-004] fp_filter/fp_sort 通过 JSON 路径标量子查询在分页前完成第一金字塔字段筛选/排序。
  */
 export async function getMarketStocks(
   params: MarketStocksQueryParams,
@@ -3335,11 +3341,21 @@ export interface FirstPyramidSnapshot {
   structure: DimensionResult
   momentum: DimensionResult
   chipConsensus: DimensionResult | null
+  // [CHANGE-20260729-004 P0-2] 筹码共识结构化状态（替代统一"暂不可用"文案）
+  chipStatus?: ChipStatus | null
   statusText: string
   volumeContext?: VolumeContextSchema | null
   inputHash: string
   parameterHash: string
   algorithmVersion: string
+}
+
+/** [CHANGE-20260729-004 P0-2] 筹码共识结构化状态 */
+export interface ChipStatus {
+  state: 'ready' | 'pending' | 'failed' | 'unavailable' | 'stale'
+  reasonCode: string | null
+  reasonText: string | null
+  computedAt: string | null
 }
 
 /** AdminAtomicFactDebugItem - 管理员调试：单事实可追溯信息（保留内部 ID / 路径） */

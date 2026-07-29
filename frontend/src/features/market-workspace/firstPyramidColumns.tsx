@@ -11,7 +11,11 @@
 //
 // 不变量：
 //   - 列 key 必须与后端 first_pyramid_flatten.FP_ALL_KEYS 完全一致（99 个 fp_ 键）
-//   - 列不参与服务端排序/筛选（sortable=false/filterable=false），保留现有行排序机制
+//   - [CHANGE-20260729-004 P0-1] 全部启用 sortable/filterable，服务端分页前完成排序/筛选
+//     - 排序/筛选值通过 sortValue/filterValue 取出原始值（非渲染文本）
+//     - 后端通过 FP_QUERY_FIELD_SPECS 白名单 + JSON 路径标量子查询执行
+//     - 服务端无 JSON 路径的字段（事件/计算字段）在 sortValue/filterValue 中返回 undefined，
+//       后端会拒绝并返回 422（前端 StrategyDataTable 仍允许 UI 但请求会被拒绝）
 //   - null 值统一渲染 "—"，不得补 0 或其他占位
 //   - 方向类字段用中文标签 + A 股颜色（涨红跌绿）
 //   - 分位/BB 位置用 0~1 数值显示（后端已规范）
@@ -1102,22 +1106,47 @@ if (COLUMN_DEFS.length !== 99) {
 /**
  * 获取第一金字塔 99 列定义（唯一实现）。
  *
- * 列不参与 sortable/filterable（保留 false），保留现有行排序机制；
- * 列设置面板按 FP_FIELD_GROUPS 分组显示，支持隐藏/拖拽排序；
- * 默认可见键见 DEFAULT_FP_VISIBLE_KEYS（约 20 个核心列）。
+ * [CHANGE-20260729-004 P0-1] 全部启用 sortable/filterable：
+ * - sortValue/filterValue 取出原始值（非渲染文本）供 StrategyDataTable UI 显示
+ * - 实际排序/筛选由后端 /market/stocks 通过 fp_filter/fp_sort 参数执行（分页前完成）
+ * - 列设置面板按 FP_FIELD_GROUPS 分组显示，支持隐藏/拖拽排序
+ * - 默认可见键见 DEFAULT_FP_VISIBLE_KEYS（约 20 个核心列）
+ *
+ * 注意：服务端无 JSON 路径的字段（事件/计算字段）UI 仍允许排序/筛选点击，
+ * 但请求会被后端拒绝并返回 422；这是预期行为（前端不预过滤这些字段，
+ * 用户感知到字段不支持后端筛选后应改用前端列设置隐藏或换字段）。
  */
 export function getFirstPyramidColumns(): DataTableColumn<TrendSelectionRow>[] {
-  return COLUMN_DEFS.map((def) => ({
-    key: def.key,
-    title: def.title,
-    shortTitle: def.shortTitle,
-    dataType: def.dataType,
-    sortable: false,
-    filterable: false,
-    width: def.width,
-    helpText: def.helpText,
-    render: def.render,
-  }))
+  return COLUMN_DEFS.map((def) => {
+    // dataType 兼容 DataTableColumn 的 'text' | 'number' | 'percent' | 'datetime' | 'enum' | 'boolean'
+    // firstPyramidColumns 的 dataType 不含 'enum'/'boolean'，统一映射为 text
+    const tableDataType =
+      def.dataType === 'datetime' ? 'datetime' :
+      def.dataType === 'number' || def.dataType === 'percent' ? 'number' :
+      'text'
+
+    return {
+      key: def.key,
+      title: def.title,
+      shortTitle: def.shortTitle,
+      dataType: tableDataType,
+      sortable: true,
+      filterable: true,
+      width: def.width,
+      helpText: def.helpText,
+      render: def.render,
+      // sortValue/filterValue 取原始值供 UI 显示（实际执行由后端）
+      // null 统一返回 '' 以避免 StrategyDataTable 本地排序异常
+      sortValue: (row: TrendSelectionRow) => {
+        const v = pickFp(row, def.key)
+        return v === null || v === undefined ? '' : (typeof v === 'number' ? v : String(v))
+      },
+      filterValue: (row: TrendSelectionRow) => {
+        const v = pickFp(row, def.key)
+        return v === null || v === undefined ? '' : String(v)
+      },
+    }
+  })
 }
 
 /**

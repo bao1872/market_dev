@@ -48,6 +48,7 @@ import {
   getFirstPyramidColumns,
   getDefaultHiddenFpKeys,
 } from './firstPyramidColumns'
+import { serializeFpFilters, serializeFpSort } from './firstPyramidQuerySerializer'
 import styles from './MarketWorkspace.module.scss'
 
 // DSA 生产策略 key（AGENTS §12.2：当前生产只保留 dsa_selector）
@@ -341,6 +342,7 @@ export default function MarketWorkspacePage() {
 
   // [PRD §三 列表视图第一金字塔全量字段] 并行调用 /market/stocks 批量获取 first_pyramid
   // 与 useStrategyRunResults 同 scope/page/page_size，按 instrument_id 合并到行；不逐行请求
+  // [CHANGE-20260729-004 P0-1] fp_filter/fp_sort 从 query.filters/query.sort 分离 fp_ 前缀项
   const marketStocksParams: MarketStocksQueryParams = useMemo(
     () => ({
       scope,
@@ -350,8 +352,11 @@ export default function MarketWorkspacePage() {
       sort: query.sort ? `${query.sort.key}:${query.sort.direction}` : undefined,
       industry: industry || undefined,
       concept: concept || undefined,
+      // [P0-1] 第一金字塔字段服务端筛选/排序
+      fp_filter: serializeFpFilters(query.filters),
+      fp_sort: serializeFpSort(query.sort),
     }),
-    [scope, keyword, query.page, query.pageSize, query.sort, industry, concept],
+    [scope, keyword, query.page, query.pageSize, query.sort, query.filters, industry, concept],
   )
   const marketStocksQuery = useMarketStocks(marketStocksParams, {
     enabled: !!resultsQuery.data,

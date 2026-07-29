@@ -3,6 +3,7 @@
 // 禁止：重新计算量化指标；解析 statusText 推断多空或事件类型。
 // 优先读取 continuousFactors 中的结构化字段；缺少字段时不显示，不猜测。
 import type {
+  ChipStatus,
   DimensionResult,
   FirstPyramidSnapshot,
   PyramidEvent,
@@ -97,6 +98,8 @@ export interface FirstPyramidVM {
   structure: StructureVM
   momentum: MomentumVM
   chipConsensus: ChipConsensusVM | null
+  /** [CHANGE-20260729-004 P0-2] 筹码共识结构化状态（替代统一"暂不可用"文案） */
+  chipStatus: ChipStatus | null
 }
 
 // ===== 类型安全字段提取 =====
@@ -316,6 +319,7 @@ export function buildFirstPyramidVM(
     structure: buildStructure(data.structure, maxEvents),
     momentum: buildMomentum(data.momentum),
     chipConsensus: buildChipConsensus(data.chipConsensus),
+    chipStatus: data.chipStatus ?? null,
   }
 }
 

@@ -150,6 +150,13 @@ class FirstPyramidSnapshot(BaseModel):
     chipConsensus: DimensionResult | None = Field(
         None, description="筹码共识维度（可选；无有效峰时为 None）"
     )
+    chipStatus: ChipStatus | None = Field(
+        None,
+        description=(
+            "[CHANGE-20260729-004 P0-2] 筹码共识结构化状态"
+            "（ready/pending/failed/unavailable/stale + reasonCode/reasonText/computedAt）"
+        ),
+    )
     statusText: str = Field(..., description="金字塔聚合中文状态描述")
     volumeContext: VolumeContextSchema | None = Field(
         None, description="共享量能上下文（Gate1，前端量能水位条数据源）"
@@ -263,6 +270,69 @@ class ChipConsensusResult(BaseModel):
     bars15mCount: int = Field(0, description="输入 15m bar 数")
     error: str | None = Field(
         None, description="计算失败原因（chip 失败不阻塞 core）"
+    )
+
+
+# =============================================================================
+# [CHANGE-20260729-004 P0-2] 结构化 chipStatus DTO
+# =============================================================================
+# 替代页面统一显示"暂不可用"：前端读取 chipStatus.reasonCode/reasonText 展示真实原因
+# 至少区分：CHIP_JOB_PENDING / CHIP_JOB_FAILED / DAILY_BARS_INSUFFICIENT /
+#           M15_BARS_INSUFFICIENT / NO_VALID_PEAK / CORE_RUN_MISMATCH / STALE_RESULT
+# =============================================================================
+
+
+# chipStatus.state 合法值
+CHIP_STATUS_STATES: frozenset[str] = frozenset({
+    "ready",       # chipConsensus.available=True 且有有效峰
+    "pending",     # chip job 仍在计算中（盘后异步未完成）
+    "failed",      # chip job 执行失败（异常）
+    "unavailable",  # 数据不足或 Node Cluster 不可用
+    "stale",       # chip 结果与当前 core_run_id 不匹配或过期
+})
+
+# chipStatus.reasonCode 合法值（与 NODE_* 区分：chip_* 用于第一金字塔 DTO）
+CHIP_STATUS_REASON_CODES: frozenset[str] = frozenset({
+    "CHIP_JOB_PENDING",         # chip job 异步未完成
+    "CHIP_JOB_FAILED",          # chip job 执行异常
+    "DAILY_BARS_INSUFFICIENT",  # 日线 bars 不足（<10）
+    "M15_BARS_INSUFFICIENT",     # 15m bars 不足（<4000 或 INPUT_CONTRACT_VIOLATION）
+    "NO_VALID_PEAK",            # Node Cluster 运行完成但无有效峰（PROFILE_EMPTY）
+    "CORE_RUN_MISMATCH",        # chip 与 core 的 run_id 不匹配（旧 chip 残留）
+    "STALE_RESULT",             # chip 结果 trade_date 早于 core trade_date
+})
+
+
+class ChipStatus(BaseModel):
+    """[CHANGE-20260729-004 P0-2] 筹码共识结构化状态（替代统一"暂不可用"文案）。
+
+    前端读取 reasonCode/reasonText 展示真实原因，state 用于决定渲染样式：
+    - ready: 显示完整 chipConsensus（POC/峰数/距离）
+    - pending: 显示"筹码计算中"
+    - failed: 显示"筹码计算失败" + reasonText
+    - unavailable: 显示"筹码数据不足" + reasonText（含缺失周期和数量）
+    - stale: 显示"筹码结果已过期，等待重新计算"
+    """
+
+    state: str = Field(
+        ...,
+        description="筹码共识状态：ready/pending/failed/unavailable/stale",
+    )
+    reasonCode: str | None = Field(
+        None,
+        description=(
+            "稳定状态码（机器可读）：CHIP_JOB_PENDING / CHIP_JOB_FAILED / "
+            "DAILY_BARS_INSUFFICIENT / M15_BARS_INSUFFICIENT / NO_VALID_PEAK / "
+            "CORE_RUN_MISMATCH / STALE_RESULT"
+        ),
+    )
+    reasonText: str | None = Field(
+        None,
+        description="人类可读原因（含实际数据数量与边界，便于诊断）",
+    )
+    computedAt: str | None = Field(
+        None,
+        description="chip 计算时间 ISO（来自 chip job 完成时间）",
     )
 
 

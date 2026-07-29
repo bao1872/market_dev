@@ -329,7 +329,7 @@ def _build_node_availability(
 
     # 映射 degraded_reason → 稳定 reasonCode
     # degraded_reason 可能值：INSUFFICIENT_DAILY_BARS / MISSING_15M_BARS / PROFILE_EMPTY
-    # / COMPUTE_FAILED: <exc> / None
+    # / COMPUTE_FAILED: <exc> / INPUT_CONTRACT_VIOLATION / INSUFFICIENT_15M_HISTORY / None
     def _map_reason_code(
         avail: str | None, degraded: str | None,
     ) -> str | None:
@@ -341,6 +341,10 @@ def _build_node_availability(
             return "NODE_INSUFFICIENT_DAILY_BARS"
         if degraded == "MISSING_15M_BARS":
             return "NODE_15M_MISSING"
+        # [CHANGE-20260729-004 P0-2] 15m 不足（DB 有但未取满 4000）→ 单独 reasonCode
+        # 之前误归入 NODE_COMPUTE_FAILED，导致前端显示"暂不可用"而非真实原因
+        if degraded in ("INPUT_CONTRACT_VIOLATION", "INSUFFICIENT_15M_HISTORY"):
+            return "NODE_15M_INSUFFICIENT"
         if degraded == "PROFILE_EMPTY":
             return "NODE_PROFILE_EMPTY"
         if degraded.startswith("COMPUTE_FAILED"):
