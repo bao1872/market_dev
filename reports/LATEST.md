@@ -1,14 +1,14 @@
 # Latest Report
 
-- Report: REPORT-20260729-001-change-20260728-010-p0-fix
-- Title: CHANGE-20260728-010 P0 修复与本地验证收口
+- Report: REPORT-20260729-002-change-20260729-003-first-pyramid-history-ssot
+- Title: CHANGE-20260729-003 第一金字塔历史SSOT、筛选器原子特征与盘后核心/筹码解耦
 - Status: PARTIAL
 - Created: 2026-07-29 (America/New_York)
 - Environment: TRAE CN (Local Native)
 - Branch: dev
-- Base SHA: 85c5b171a0e1f7c5740484f4a25997fa82edb2d8
-- Implementation SHA: 71e1cc5e364ce91e913954ed93df042ca3fbb054
-- Report Published Through SHA: 71e1cc5e364ce91e913954ed93df042ca3fbb054
-- Path: reports/current/REPORT-20260729-001-change-20260728-010-p0-fix.md
-- CHANGE: CHANGE-20260728-010
-- Summary: 修复 P0 类型判断错误（swing_bias 当数组处理导致组合截图永远无法 Ready）；提取纯函数 captureReady.ts；简化 sendStockDetailFeishu；更新 CaptureJob 注释；新增 13 个前端单元测试；对齐 CHANGE/Maps 文档；浏览器真实链路验收 BLOCKED。
+- Base SHA: e5eb40e9b5dc0d50a45b812dfb000d4c14ce447c
+- Implementation SHA: 20fff8800d7c8cd3ad8ffe837acdb2b6e15c8b08
+- Report Published Through SHA: 20fff8800d7c8cd3ad8ffe837acdb2b6e15c8b08
+- Path: reports/current/REPORT-20260729-002-change-20260729-003-first-pyramid-history-ssot.md
+- CHANGE: CHANGE-20260729-003
+- Summary: 修复 DSA 量能/Rope 占比/SMC OB 生命周期/SQZ_RELEASE 方向/regime_strength 五项派生逻辑；新增筛选器所需个股原子输出；新增 compute_first_pyramid_history 历史 SSOT；拆分 core/chip 并新增盘后 review core 路径与独立 chip job 接口；26 项纯单元测试全过；chip 持久化 migration 为下一阶段唯一 blocker。
