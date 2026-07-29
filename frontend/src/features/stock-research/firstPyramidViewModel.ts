@@ -135,6 +135,10 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   BOS: '结构突破',
   CHoCH: '结构转折',
   OB_ENTRY: '进入订单区域',
+  // [P0-3 修复 2026-07-29] OB 生命周期三状态中文映射
+  OB_CREATED: '订单块形成',
+  OB_ENTERED: '首次回踩订单块',
+  OB_MITIGATED: '订单块失效',
   EQH: '连续高点',
   EQL: '连续低点',
 }
@@ -197,11 +201,13 @@ function buildTrend(dim: DimensionResult): TrendVM {
   const regimeValue = asNumber(cf['regime_value'])
   // 持续根数读取 dsa_dir_bars（后端实际字段名）
   const continuousBars = asNumber(cf['dsa_dir_bars'])
-  const ratio = asNumber(cf['current_vs_prev_volume_ratio'])
+  // [P0-2 修复 2026-07-29] 后端字段重命名为 current_vs_prev_volume_mean_ratio（mean/mean 权威口径）
+  const ratio = asNumber(cf['current_vs_prev_volume_mean_ratio']) ?? asNumber(cf['current_vs_prev_volume_ratio'])
   // P0 修复：后端无独立"趋势变化新鲜度"字段，不得用 continuous_bars 充当
   const trendChangeFreshness = asNumber(cf['trend_change_freshness_bars'])
   const vwapDevPct = asNumber(cf['dsa_vwap_dev_pct'])
-  const strength = asString(cf['trend_strength'])
+  // [P0-2 修复 2026-07-29] 后端字段为 regime_strength（DSA SSOT），旧 trend_strength 不存在
+  const strength = asString(cf['regime_strength'])
   return {
     available: dim.available,
     statusText: dim.statusText,

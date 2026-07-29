@@ -41,7 +41,10 @@ REQUIRED_DIMENSIONS: tuple[str, ...] = ("trend", "structure", "momentum")
 OPTIONAL_DIMENSIONS: tuple[str, ...] = ("chip_consensus",)
 
 # 算法版本（每次算法或契约变更时递增）
-FIRST_PYRAMID_ALGORITHM_VERSION = "1.1.0-gate1-volume-context"
+# [P0-5 修复 2026-07-29] 升级版本：DSA mean/mean、SMC OB 三事件、SQZ_RELEASE 方向、
+# regime_strength 修正、history 逐 bar readiness、core/chip 拆分
+# 旧版本 "1.1.0-gate1-volume-context" 快照不可混用
+FIRST_PYRAMID_ALGORITHM_VERSION = "2.0.0-20260729-history-ssot"
 
 
 class VolumeContextSchema(BaseModel):

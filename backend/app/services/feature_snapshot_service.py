@@ -94,7 +94,11 @@ logger = logging.getLogger(__name__)
 
 # 常量
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-_SCHEMA_VERSION = 5  # [CHANGE-20260724-003] v4→v5 方案 A：Phase 8A 端到端链路收口（15m readiness + 跨 worker fencing + 两阶段幂等发布 + 6 步状态机）；旧 schema_version=4 快照不可见，符合"旧新结果不可混用"。部署后等待首次 v5 盘后运行成功，成功前 watchlist_ready=False。
+# [P0-5 修复 2026-07-29] v5→v6：盘后 review core daily-only 路径接入、core/chip 解耦、
+# first_pyramid 字段重命名（current_vs_prev_volume_mean_ratio）、SMC OB 三事件、
+# SQZ_RELEASE 方向修复、regime_strength 修正、history 逐 bar readiness
+# 旧 v5 快照与新 v6 语义不可混用；部署后等待首次 v6 盘后运行成功，成功前 watchlist_ready=False
+_SCHEMA_VERSION = 6
 _PRIMARY_LOOKBACK = 500  # 日线回看天数（与 structural_factor_service 对齐）
 _SECONDARY_LOOKBACK = 500  # 15m 回看天数
 _BB_WIN = 20
@@ -858,6 +862,122 @@ async def compute_review_core_for_trade_date(
         summary_payload=summary_payload,
         degraded_reasons=degraded_reasons,
     )
+
+
+async def compute_review_core_batch_for_trade_date(
+    session: AsyncSession,
+    trade_date: date,
+    instrument_ids: Sequence[uuid.UUID],
+    *,
+    batch_size: int = 20,
+    failure_threshold: float = 0.3,
+    progress_callback: Callable[..., Awaitable[None]] | None = None,
+    source_run_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """[P0-6 修复 2026-07-29] 盘后 review core 批量计算入口（daily-core only）。
+
+    主链：日线 → daily-core 状态/事件 → 质量门禁 → 发布 → 主 run succeeded。
+    禁止 Node Cluster 调用与 15m secondary 输入，所有 instrument 通过
+    `compute_review_core_for_trade_date` 计算（chip_consensus=None 显式标记）。
+    chip 共识由独立 after_close_chip_consensus job 异步执行，不在此函数内调用。
+
+    与 `compute_for_trade_date` 关键差异：
+    - 调用 `compute_review_core_for_trade_date` 而非 `compute_feature_snapshot_for_date`
+    - 不触发 Node Cluster / 15m secondary
+    - first_pyramid.chipConsensus 显式 None（chip 延后到异步 job）
+    - summary_payload._review_core = True（供下游区分 review core 路径）
+
+    事务边界（与 compute_for_trade_date 对齐）：
+    - 本函数只 upsert（flush）+ 返回统计，不调用 session.commit()
+    - 失败比例超 failure_threshold 时抛 RuntimeError，由 caller 决定 rollback
+    - caller（after_close_orchestrator）负责成功 commit / 超阈值 rollback
+
+    Args:
+        session: 异步 DB 会话
+        trade_date: 交易日
+        instrument_ids: 标的 ID 列表
+        batch_size: 每批 instrument 数（默认 20）
+        failure_threshold: 失败比例阈值（默认 0.3）
+        progress_callback: 进度回调，接收 processed/total/snapshot_count/failed_count
+        source_run_id: 关联的 snapshot run ID
+
+    Returns:
+        统计信息 dict：snapshot_count, failed_count, schema_version, trade_date,
+        source_bar_hash, adj_factor_hash, market_data_contract_version,
+        completed_through, adjustment_as_of
+
+    Raises:
+        RuntimeError: 失败比例超过 failure_threshold（caller 应 rollback）
+    """
+    total = len(instrument_ids)
+    snapshot_count = 0
+    failed_count = 0
+    # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
+    run_diag: dict[str, Any] = {}
+
+    for i in range(0, total, batch_size):
+        batch = instrument_ids[i : i + batch_size]
+        for instrument_id in batch:
+            try:
+                snapshot = await compute_review_core_for_trade_date(
+                    session,
+                    instrument_id,
+                    trade_date,
+                    source_run_id=source_run_id,
+                    _diag_sink=run_diag,
+                )
+                await upsert_snapshot(session, snapshot)
+                snapshot_count += 1
+            except Exception as exc:
+                failed_count += 1
+                logger.error(
+                    "review_core snapshot 计算失败 instrument_id=%s trade_date=%s: %s",
+                    instrument_id, trade_date, exc, exc_info=True,
+                )
+
+        # [Heartbeat] 每批完成后回调进度，供长任务更新心跳/lease 与 metadata
+        if progress_callback is not None:
+            try:
+                await progress_callback(
+                    processed=min(i + len(batch), total),
+                    total=total,
+                    snapshot_count=snapshot_count,
+                    failed_count=failed_count,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "progress_callback 失败 trade_date=%s: %s",
+                    trade_date, exc,
+                )
+
+    # 检查失败阈值（不 commit，由 caller 决定 commit/rollback）
+    if total > 0:
+        failure_rate = failed_count / total
+        if failure_rate > failure_threshold:
+            raise RuntimeError(
+                f"review_core snapshot 失败比例 {failure_rate:.1%} 超过阈值 "
+                f"{failure_threshold:.0%} (failed={failed_count}, total={total})"
+            )
+
+    logger.info(
+        "review_core 批量完成 trade_date=%s snapshot_count=%d failed_count=%d",
+        trade_date, snapshot_count, failed_count,
+    )
+
+    return {
+        "snapshot_count": snapshot_count,
+        "failed_count": failed_count,
+        "schema_version": _SCHEMA_VERSION,
+        "trade_date": trade_date.isoformat(),
+        # [CHANGE-20260717-002 SSOT] run 级行情诊断（供 finish_snapshot_run 落库）
+        "source_bar_hash": run_diag.get("source_bar_hash"),
+        "adj_factor_hash": run_diag.get("adj_factor_hash"),
+        "market_data_contract_version": run_diag.get("market_data_contract_version"),
+        "completed_through": run_diag.get("completed_through"),
+        "adjustment_as_of": run_diag.get("adjustment_as_of"),
+        # [P0-6] 标记 review core 路径（供下游区分）
+        "_review_core": True,
+    }
 
 
 async def _fetch_bars_from_db(

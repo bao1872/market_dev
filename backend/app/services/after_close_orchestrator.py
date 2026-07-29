@@ -46,10 +46,13 @@ from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
+from app.services.after_close_chip_consensus_service import (
+    create_after_close_chip_consensus_job,
+)
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
     PublishedSnapshotRunExistsError,
-    compute_for_trade_date,
+    compute_review_core_batch_for_trade_date,
     create_snapshot_run,
     finish_snapshot_run,
     get_active_a_share_instruments,
@@ -948,6 +951,9 @@ async def execute_after_close_run(
     snapshot_run_id: uuid.UUID | None = None
     snapshot_error: Exception | None = None
     snapshot_result: dict[str, Any] | None = None
+    # [P0-7 修复 2026-07-29] cached_instrument_ids 初始化为 None，
+    # 断点恢复 skip_computing=True 时仍可安全访问（chip job 创建时用于 expected_count）
+    cached_instrument_ids: list[uuid.UUID] | None = None
 
     try:
         # [Phase5] - 读取断点恢复信息：last_completed_step + dsa_run_id + snapshot_run_id
@@ -1586,7 +1592,14 @@ async def execute_after_close_run(
                         job_run_id, worker_id
                     )
                     async with AsyncSessionLocal() as db:
-                        # [BUGFIX] compute_for_trade_date 只接受 progress_callback + source_run_id，
+                        # [P0-6 修复 2026-07-29] 主链切换到 review core 批量入口（daily-core only）。
+                        # 旧 compute_for_trade_date 调用 compute_feature_snapshot_for_date，
+                        # 会触发 Node Cluster + 15m secondary，与 PRD20 盘后核心/筹码解耦违背。
+                        # 新入口 compute_review_core_batch_for_trade_date 调用
+                        # compute_review_core_for_trade_date，禁止 Node/15m，chip_consensus=None。
+                        # chip 共识由独立 after_close_chip_consensus job 异步执行（主 run succeeded 后创建）。
+                        #
+                        # [BUGFIX] 批量入口只接受 progress_callback + source_run_id,
                         # 不接受 dsa_run_id / strategy_version_id。
                         # StrategyResult 由 strategy_batch_service.write_results 写入（DSA batch run 期间），
                         # 不依赖 MFCS 传参。原 Phase 5 注释描述的"传 dsa_run_id 让 MFCS 同时写
@@ -1596,7 +1609,7 @@ async def execute_after_close_run(
                             "source_run_id": snapshot_run_id,
                         }
 
-                        snapshot_result = await compute_for_trade_date(
+                        snapshot_result = await compute_review_core_batch_for_trade_date(
                             db, trade_date, cached_instrument_ids, **mfcs_kwargs,
                         )
                         await db.commit()
@@ -1908,6 +1921,45 @@ async def execute_after_close_run(
                 db, job_run, "succeeded", worker_id,
             )
             await db.commit()
+
+        # [P0-7 修复 2026-07-29] 主 run 成功后软失败创建 chip consensus job
+        # chip job 由独立 Worker 领取执行；创建失败只记录 warn，不反改主 run succeeded。
+        # 不得 await chip 执行（chip 执行由独立 after_close_chip_consensus Worker 完成）。
+        # chip 失败/部分成功通过 metadata.chip_status=partial 记录，主 status 保持 succeeded。
+        _expected_chip_count = (
+            len(cached_instrument_ids)
+            if cached_instrument_ids is not None
+            else None
+        )
+        try:
+            async with AsyncSessionLocal() as db:
+                chip_job, chip_is_new = await create_after_close_chip_consensus_job(
+                    db=db,
+                    trade_date=trade_date,
+                    core_run_id=job_run_id,
+                    scope="all_a_share",
+                    expected_count=_expected_chip_count,
+                )
+                await db.commit()
+            if chip_job is not None:
+                logger.info(
+                    "[AfterClose] chip consensus job 已创建（独立 Worker 异步执行）: "
+                    "chip_run_id=%s, is_new=%s, core_run_id=%s, expected_count=%s",
+                    chip_job.id, chip_is_new, job_run_id, _expected_chip_count,
+                )
+            else:
+                logger.warning(
+                    "[AfterClose] chip consensus job 创建返回 None（软失败，主 run 仍 succeeded）: "
+                    "trade_date=%s, core_run_id=%s",
+                    trade_date, job_run_id,
+                )
+        except Exception as chip_exc:
+            # [P0-7] 软失败：创建失败只记录 warn，不反改主 run，不抛异常
+            logger.warning(
+                "[AfterClose] 创建 chip consensus job 失败（软失败，不影响主 run succeeded）: "
+                "trade_date=%s, core_run_id=%s, error=%s",
+                trade_date, job_run_id, chip_exc, exc_info=True,
+            )
 
         logger.info(
             "[AfterClose] 盘后编排成功完成: job_run_id=%s, dsa_run_id=%s",

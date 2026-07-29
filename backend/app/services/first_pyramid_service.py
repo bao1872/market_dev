@@ -1360,25 +1360,46 @@ def compute_first_pyramid_history(
             vol_pct_20 = _safe_float(vc_row.get("volume_percentile_20"))
             vol_zscore_20 = _safe_float(vc_row.get("volume_zscore_20"))
 
-        # 聚合有效性（只依赖趋势/结构/动量和日线完整性）
-        # core_factor_ready: 三大维度因子均有效（非 None）
-        core_factor_ready = (
-            regime_strength is not None
-            and dsa_vwap_dev_pct is not None
-            and volatility_phase is not None
+        # [P0-1 修复 2026-07-29] 聚合有效性逐 bar 判定（禁止用完整 n_input 判断过去日期）
+        # available_bars = i + 1（截至当前 bar 的可用 bar 数，含当前 bar）
+        available_bars = i + 1
+
+        # 各维度独立 readiness（禁止依赖筹码，禁止用默认字符串充当 ready）
+        # trend_ready: DSA regime_strength 非 None 且 regime_value 非 None
+        trend_ready = regime_strength is not None and regime_value is not None
+        # structure_ready: SMC timeline 真实存在（非空字典）且 swing_bias/internal_bias 为有效数值
+        #   禁止默认字符串 'null'/'unknown' 充当 ready
+        smc_timeline_valid = bool(smc_t) and "swing_bias" in smc_t
+        structure_ready = smc_timeline_valid
+        # momentum_ready: volatility_phase/momentum_direction 真实有效
+        #   禁止默认 'no_squeeze'/'null'/'unknown' 充当 ready
+        momentum_ready = (
+            volatility_phase is not None
+            and volatility_phase not in ("no_squeeze", "null", "unknown", "")
             and momentum_direction is not None
+            and momentum_direction not in ("null", "unknown", "")
         )
-        # history_sufficient: bar 数 >= 60（最小必选维度要求）
-        history_sufficient = n_input >= _MIN_BARS_FOR_REQUIRED_DIMS
+        # volume20_ready: 20日量能上下文可用
+        volume20_ready = vol_ratio_20 is not None and vol_pct_20 is not None
+        # volume200_ready: 当前 i 足够支持 200 日均量（i+1 >= 200）
+        #   实际 vol_ratio_200 由 vc_series 计算时已判定；此处用 i+1 >= 200 作为最低门槛
+        volume200_ready = available_bars >= 200
+
+        # history_sufficient: 截至当前 bar 的可用 bar 数 >= 60（最小必选维度要求）
+        history_sufficient = available_bars >= _MIN_BARS_FOR_REQUIRED_DIMS
+        # core_factor_ready: 三大维度因子均有效（非 None，非默认字符串）
+        core_factor_ready = trend_ready and structure_ready and momentum_ready
         # valid_for_market_aggregation: 当前 bar 有效且不处于 warmup
-        valid_for_market_aggregation = core_factor_ready and history_sufficient and i >= 60
+        valid_for_market_aggregation = (
+            core_factor_ready and history_sufficient and available_bars >= _MIN_BARS_FOR_REQUIRED_DIMS
+        )
         invalid_reason: str | None = None
         if not valid_for_market_aggregation:
             if not core_factor_ready:
                 invalid_reason = "core_factor_not_ready"
             elif not history_sufficient:
                 invalid_reason = "history_insufficient"
-            elif i < 60:
+            elif available_bars < _MIN_BARS_FOR_REQUIRED_DIMS:
                 invalid_reason = "warmup_period"
 
         daily_state.append({
@@ -1404,6 +1425,13 @@ def compute_first_pyramid_history(
             "volume_ratio_20": vol_ratio_20,
             "volume_percentile_20": vol_pct_20,
             "volume_zscore_20": vol_zscore_20,
+            # [P0-1] 逐 bar readiness 细分（禁止依赖筹码，禁止用完整 n_input 判断过去日期）
+            "available_bars": available_bars,
+            "trend_ready": trend_ready,
+            "structure_ready": structure_ready,
+            "momentum_ready": momentum_ready,
+            "volume20_ready": volume20_ready,
+            "volume200_ready": volume200_ready,
             # 聚合有效性（不依赖筹码）
             "core_factor_ready": core_factor_ready,
             "history_sufficient": history_sufficient,

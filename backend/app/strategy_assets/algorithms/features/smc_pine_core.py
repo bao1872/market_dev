@@ -816,13 +816,14 @@ class _SMCPineState:
             self.swing_order_blocks = kept
 
     def check_ob_entered(self, i: int, internal: bool = False) -> None:
-        """[CHANGE-20260729-002] OB_ENTERED 生命周期检测（独立于 Pine 事件）。
+        """[CHANGE-20260729-002 OB_ENTERED 生命周期] OB_ENTERED 生命周期检测。
 
         触发条件（全部满足）：
         1. OB 已 confirmed（store_order_block 已创建），未 mitigated；
         2. OB 尚未 entered（首次触发，单次不可变）；
-        3. 前一根 bar [low[i-1], high[i-1]] 与 OB 区域 [bar_low, bar_high] 无重叠；
-        4. 当前 bar [low[i], high[i]] 与 OB 区域 [bar_low, bar_high] 首次重叠。
+        3. **[P0-4 修复 2026-07-29]** `i > ob.confirmed_index`（确认 bar 不得同时 CREATED+ENTERED）；
+        4. 前一根 bar [low[i-1], high[i-1]] 与 OB 区域 [bar_low, bar_high] 无重叠；
+        5. 当前 bar [low[i], high[i]] 与 OB 区域 [bar_low, bar_high] 首次重叠。
 
         重叠定义：两区间 [a1,a2] 与 [b1,b2] 重叠 ⇔ a1 <= b2 AND b1 <= a2。
         无重叠 ⇔ a1 > b2 OR a2 < b1。
@@ -841,6 +842,10 @@ class _SMCPineState:
 
         for ob in obs:
             if ob.entered or ob.mitigated:
+                continue
+            # [P0-4] 确认 bar 不得同时 CREATED+ENTERED
+            # 只允许 i > confirmed_index（确认 bar 的后续 bar 才可能 ENTERED）
+            if i <= ob.confirmed_index:
                 continue
             # 前一根 bar 与 OB 区域无重叠
             prev_no_overlap = (prev_low > ob.bar_high) or (prev_high < ob.bar_low)

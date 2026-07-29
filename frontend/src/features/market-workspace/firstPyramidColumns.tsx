@@ -494,7 +494,7 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: '事件',
     dataType: 'text',
     width: 90,
-    helpText: '最近一次结构事件类型（BOS/CHoCH/OB_ENTRY/EQH/EQL）',
+    helpText: '最近一次结构事件类型（BOS/CHoCH/OB_CREATED/OB_ENTERED/OB_MITIGATED/EQH/EQL）',
     render: (row) => fmtText(pickFp(row, 'fp_structure_event_type')),
   },
   {
@@ -611,7 +611,7 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: 'OB向',
     dataType: 'text',
     width: 80,
-    helpText: '最近一次 OB_ENTRY 事件方向',
+    helpText: '最近一次 OB 生命周期事件方向（OB_CREATED/OB_ENTERED/OB_MITIGATED）',
     render: (row) => fmtDirection(pickFp(row, 'fp_latest_ob_direction')),
   },
   {
@@ -620,7 +620,7 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: 'OB鲜',
     dataType: 'number',
     width: 80,
-    helpText: '最近 OB_ENTRY 距今 bar 数',
+    helpText: '最近 OB 生命周期事件距今 bar 数',
     render: (row) => fmtNum(pickFp(row, 'fp_latest_ob_freshness'), 0),
   },
   {

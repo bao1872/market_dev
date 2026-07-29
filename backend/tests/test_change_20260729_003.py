@@ -460,25 +460,80 @@ class TestCoreDoesNotCallNodeCluster:
 
 
 class TestMainRunDoesNotWaitForChip:
-    """验证 chip consensus job 接口合同：execute 抛 NotImplementedError（下一阶段实现）。"""
+    """[P0-7/10 修复 2026-07-29] 验证 chip consensus job 接口合同。
 
-    def test_chip_execute_raises_not_implemented(self):
-        """execute_after_close_chip_consensus 抛 NotImplementedError（不阻塞主 run）。"""
+    新合同（替换原"execute 抛 NotImplementedError"）：
+    1. execute_after_close_chip_consensus 已实现（P0-10），由独立 Worker 领取执行
+    2. after_close_orchestrator 主 run 只调用 create_after_close_chip_consensus_job（创建 queued 任务）
+    3. after_close_orchestrator 不导入/调用 execute_after_close_chip_consensus（不 await 执行）
+    4. chip 失败/部分成功通过 metadata.chip_status=partial 记录，主 status 保持 succeeded
+    """
+
+    def test_orchestrator_only_imports_create_not_execute(self):
+        """after_close_orchestrator 只导入 create_after_close_chip_consensus_job，
+        不导入 execute_after_close_chip_consensus（主 run 不等待 chip 执行）。
+        """
+        import inspect
+
+        from app.services import after_close_orchestrator as orch
+
+        # 验证 orchestrator 导入 create 函数
+        assert hasattr(orch, "create_after_close_chip_consensus_job"), (
+            "orchestrator 必须导入 create_after_close_chip_consensus_job"
+        )
+        # 验证 orchestrator 不导入 execute 函数（主 run 不等待 chip 执行）
+        assert not hasattr(orch, "execute_after_close_chip_consensus"), (
+            "orchestrator 不得导入 execute_after_close_chip_consensus（主 run 不等待 chip）"
+        )
+
+        # 验证 execute_after_close_run 函数源码不引用 execute_after_close_chip_consensus
+        source = inspect.getsource(orch.execute_after_close_run)
+        assert "execute_after_close_chip_consensus" not in source, (
+            "execute_after_close_run 不得调用 execute_after_close_chip_consensus"
+        )
+        assert "create_after_close_chip_consensus_job" in source, (
+            "execute_after_close_run 必须在 succeeded 后调用 create_after_close_chip_consensus_job"
+        )
+
+    def test_chip_execute_is_implemented(self):
+        """[P0-10] execute_after_close_chip_consensus 已实现，不再抛 NotImplementedError。
+
+        空输入时应返回 succeeded 状态（无 instrument 需要处理），不抛异常。
+        metadata 更新通过 mock 隔离 DB（PURE_UNIT_TEST 模式不连接数据库）。
+        """
         import asyncio
         import uuid as uuid_mod
         from datetime import date as date_mod
+        from unittest.mock import patch
 
         from app.services.after_close_chip_consensus_service import (
             execute_after_close_chip_consensus,
         )
 
-        coro = execute_after_close_chip_consensus(
-            job_run_id=uuid_mod.uuid4(),
-            trade_date=date_mod(2026, 7, 29),
-            core_run_id=uuid_mod.uuid4(),
+        # mock _update_job_run_metadata 避免连接 DB（PURE_UNIT_TEST 模式）
+        async def _mock_update_metadata(**kwargs):
+            pass
+
+        with patch(
+            "app.services.after_close_chip_consensus_service._update_job_run_metadata",
+            new=_mock_update_metadata,
+        ):
+            # 空输入 - 应返回 succeeded 状态，不抛 NotImplementedError
+            result = asyncio.run(
+                execute_after_close_chip_consensus(
+                    job_run_id=uuid_mod.uuid4(),
+                    trade_date=date_mod(2026, 7, 29),
+                    core_run_id=uuid_mod.uuid4(),
+                    instrument_ids=[],
+                )
+            )
+        # 空列表应返回 succeeded（无 instrument 需要处理）
+        assert result["status"] == "succeeded", (
+            f"execute 空输入应返回 succeeded，实际: {result['status']}"
         )
-        with pytest.raises(NotImplementedError):
-            asyncio.run(coro)
+        assert result["total_count"] == 0
+        assert result["succeeded_count"] == 0
+        assert result["failed_count"] == 0
 
     def test_chip_job_name_is_independent(self):
         """chip job 名称与 after_close_orchestrator 区分。"""

@@ -1133,10 +1133,10 @@ async def test_compute_snapshot_writes_node_cluster_available_state() -> None:
             primary_bars=daily, secondary_bars=bars_15m,
         )
 
-    # schema_version 必须 bump 到 5
-    # [CHANGE-20260724-003] v4→v5 方案 A：Phase 8A 端到端链路收口
-    assert _SCHEMA_VERSION == 5
-    assert snapshot.schema_version == 5
+    # schema_version 必须 bump 到 6
+    # [P0-5 修复 2026-07-29] v5→v6：盘后 review core daily-only 路径接入、core/chip 解耦
+    assert _SCHEMA_VERSION == 6
+    assert snapshot.schema_version == 6
 
     sp = snapshot.structural_payload
     nc = sp["primary"]["1d"].get("node_cluster")

@@ -102,7 +102,7 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
       { label: '斜率绝对比', key: 'segment_slope_abs_ratio', format: (v) => fmt(v, 3) },
       { label: '持续时长比', key: 'segment_duration_ratio', format: (v) => fmt(v, 3) },
       { label: '效率差值', key: 'segment_efficiency_delta', format: (v) => fmt(v, 4) },
-      { label: '当前/前段量比', key: 'current_vs_prev_volume_ratio', format: (v) => fmt(v, 3) },
+      { label: '当前/前段量比', key: 'current_vs_prev_volume_mean_ratio', format: (v) => fmt(v, 3) },
       { label: '当前段收益/量', key: 'current_segment_return_per_volume', format: (v) => fmt(v, 8) },
       { label: '前段收益/量', key: 'prev_segment_return_per_volume', format: (v) => fmt(v, 8) },
       { label: '收益/量比', key: 'return_per_volume_ratio', format: (v) => fmt(v, 3) },
@@ -198,7 +198,7 @@ const CARDS: Array<{ title: string; group: FactorGroup; rows: FactorRow[] }> = [
       // V1.8 段级成交量字段（从 dsa_segment 共享）
       { label: '当前段成交量', key: 'current_segment_volume_sum', format: fmtInt },
       { label: '前段成交量', key: 'prev_segment_volume_sum', format: fmtInt },
-      { label: '当前/前段量比', key: 'current_vs_prev_volume_ratio', format: (v) => fmt(v, 3) },
+      { label: '当前/前段量比', key: 'current_vs_prev_volume_mean_ratio', format: (v) => fmt(v, 3) },
       { label: '当前段收益/量', key: 'current_segment_return_per_volume', format: (v) => fmt(v, 8) },
       { label: '前段收益/量', key: 'prev_segment_return_per_volume', format: (v) => fmt(v, 8) },
       { label: '收益/量比', key: 'return_per_volume_ratio', format: (v) => fmt(v, 3) },

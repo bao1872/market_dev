@@ -176,7 +176,7 @@ test('Panel includes V1.8 core fields in CARDS', () => {
     'current_segment_volume_sum',
     'prev_dsa_segment_dir',
     'segment_return_abs_ratio',
-    'current_vs_prev_volume_ratio',
+    'current_vs_prev_volume_mean_ratio',
     'return_per_volume_ratio',
     // Cost position V1.8
     'price_vs_poc_atr',

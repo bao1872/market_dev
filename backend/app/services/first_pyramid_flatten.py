@@ -259,7 +259,11 @@ def flatten_first_pyramid(
         result["fp_latest_choch_freshness"] = choch_evt.get("freshnessBars")
         result["fp_latest_choch_level"] = (choch_evt.get("extra") or {}).get("structure_level")
 
-    ob_evt = _latest_event_by_type(struct_events, {"OB_ENTRY"})
+    # [P0-3 修复 2026-07-29] SMC OB 生命周期改为 OB_CREATED/OB_ENTERED/OB_MITIGATED 三事件
+    # 旧 OB_ENTRY 已废弃，保留读取仅为历史快照兼容
+    ob_evt = _latest_event_by_type(
+        struct_events, {"OB_CREATED", "OB_ENTERED", "OB_MITIGATED", "OB_ENTRY"},
+    )
     if ob_evt:
         result["fp_latest_ob_direction"] = ob_evt.get("direction")
         result["fp_latest_ob_freshness"] = ob_evt.get("freshnessBars")
