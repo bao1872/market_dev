@@ -36,11 +36,11 @@ CHANGE-20260729-004 声称"99 字段全部可筛选排序"，实际存在 5 个�
 
 | 数据源类型 | source | 读取位置 | 字段数 |
 |---|---|---|---|
-| 扁平对象 | flat | `summary_payload.first_pyramid_flat.<fp_key>` | 83 |
+| 扁平对象（含事件） | flat | `summary_payload.first_pyramid_flat.<fp_key>` | 86（含结构事件21+动量事件9=30） |
 | 独立筹码表 | chip | `stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key>` | 10 |
 | 真实列 | column | `StockFeatureSnapshot.created_at` / `source_run_id` | 2 |
 | 常量 | literal | 固定 `"feature_snapshot"` | 1 |
-| 事件字段 | flat | （写入时扁平化到 flat 对象） | 30 (含结构事件21+动量事件9) |
+| 合计 | — | — | 99 |
 
 全部 99 字段均有 queryable source，`FP_SERVER_FILTERABLE_KEYS == FP_SERVER_SORTABLE_KEYS == 99`。
 
