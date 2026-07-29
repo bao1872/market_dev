@@ -4,12 +4,12 @@
 //   <MobileIndicatorStage
 //     stockName="京东方A"
 //     stockSymbol="000725"
-//     indicatorView="smc"
+//     indicatorView="structure_node"
 //     currentPrice={4.32}
 //     changePercent={2.18}
 //     chartDate="2026-07-20"
 //   >
-//     <StrategyChart isCaptureMode indicatorView="smc" ... />
+//     <StrategyChart isCaptureMode indicatorView="structure_node" ... />
 //   </MobileIndicatorStage>
 //
 // 设计参考：ref/panji_short_video_integrated_studio_v1_15_event_flash_fix
@@ -26,7 +26,8 @@
 //      （后端 snapshot 已按 adjustment_as_of 截止；前端只展示，不重算）
 //   5. 三行风险提示常驻底部，与 panji stage-risk-notice 一致
 //
-// [CHANGE-20260720-Phase4 §四] 配合 advice.md v6：每张截图只渲染一个 indicator_view 对应的图层
+// [CHANGE-20260728-010] 固定组合视图：indicatorView 固定为 'structure_node'，
+//   module-label 显示"结构 + 筹码共识"。不再按事件类型切换 indicator_view。
 
 import type { ReactNode } from 'react'
 import type { IndicatorView } from '../api/endpoints'
@@ -38,7 +39,9 @@ export interface MobileIndicatorStageProps {
   stockName: string
   /** 股票代码（如 "000725"） */
   stockSymbol: string
-  /** 指标视图（决定 module-label 文案与色相） */
+  /** [CHANGE-20260728-010] 指标视图：固定为 'structure_node'（结构 + 筹码共识组合视图）。
+   *    仅用于 module-label 显示与 data-indicator-view 属性，不再决定图层切换。
+   *    旧值 node_cluster|bollinger|smc 由 CaptureStockPage 屏蔽，不再传入。 */
   indicatorView: IndicatorView
   /** 现价；缺失时显示 "—" */
   currentPrice: number | null

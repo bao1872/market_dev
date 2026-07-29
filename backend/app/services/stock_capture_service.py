@@ -140,10 +140,11 @@ def _build_cache_key(
         event_id + instrument_id + chart_version
         + tf={timeframe} + sbt={source_bar_time}
         + run={capture_run_id} + dsf={device_scale_factor}
-    [CHANGE-20260720-003 §三] 新增 indicator_view 维度：
+    [CHANGE-20260720-003 §三] indicator_view 维度：
         + iv={indicator_view}
-    不同指标视图（node_cluster|bollinger|smc）天然区分缓存，禁止不同指标复用旧图。
-    source_bar_time/capture_run_id/indicator_view 变化即视为新图，禁止跨时间点/跨视图复用。
+    [CHANGE-20260728-010] 新业务固定 indicator_view='structure_node'，
+    旧值 node_cluster|bollinger|smc 仅作历史回读兼容（缓存键仍按传入值区分，
+    避免新旧业务复用同一缓存）。
     """
     parts = [str(event_id), str(instrument_id), str(chart_version)]
     if timeframe is not None:
@@ -229,8 +230,9 @@ async def capture_stock_chart(
         capture_run_id: 本次截图运行 ID（扩展缓存 key，防旧图）
         disable_cache: True 时跳过读缓存但允许写新缓存（飞书实时截图默认 True）
         viewport_width/height/device_scale_factor: 高清渲染参数（默认 env 1920x1200 dsf=2）
-        indicator_view: 指标视图 node_cluster|bollinger|smc（扩展缓存 key + URL 参数，
-            [CHANGE-20260720-003 §三] 一张图只渲染一个指标视图，禁止混合指标叠图）
+        indicator_view: [历史兼容] 指标视图。新业务固定传 FEISHU_CAPTURE_VIEW='structure_node'，
+            旧值 node_cluster|bollinger|smc 仅用于扩展缓存 key + URL 参数兼容，
+            不再影响前端渲染图层（前端固定按组合视图渲染）。
         focus_event: [Task 2] 监控触发事件信息 dict（focus_event_id/type/anchor_time/
             confirmed_time/level/zone 等）。透传到 Capture URL query，前端 StrategyChart
             据此突出本次触发事件，淡化其他历史结构。
@@ -314,7 +316,8 @@ async def capture_stock_chart(
     if capture_run_id is not None:
         url += f"&capture_run_id={capture_run_id}"
     if indicator_view is not None:
-        # [CHANGE-20260720-003 §三] 前端按 indicator_view 切换图层组合
+        # [CHANGE-20260728-010] 前端固定按组合视图渲染，indicator_view URL 参数
+        # 仅作历史兼容（前端不再据此切换图层）。新业务固定传 'structure_node'。
         url += f"&indicator_view={indicator_view}"
     # [Task 2] focus_event 透传到 Capture URL query
     #   前端 CaptureStockPage 读取后传入 StrategyChart.focusEventId/focusEventType,

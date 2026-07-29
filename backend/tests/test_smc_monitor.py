@@ -1097,7 +1097,11 @@ class TestWatchlistMonitorNamespaces:
     async def test_calculate_state_namespaces(
         self, daily_bars: pd.DataFrame
     ) -> None:
-        """WatchlistMonitor.calculate_state 返回命名空间 bb/node_cluster/smc/market/degraded。"""
+        """WatchlistMonitor.calculate_state 返回命名空间 node_cluster/smc/market/degraded。
+
+        [CHANGE-20260728-010] BB 已移除：state 只含 node_cluster/smc/market/degraded 四个命名空间。
+        state_version 升级到 3（旧 v2 含 bb 命名空间，仅作历史回读兼容）。
+        """
         monitor = WatchlistMonitor()
         version = _make_mock_version()
         await monitor.initialize(version)
@@ -1106,35 +1110,37 @@ class TestWatchlistMonitorNamespaces:
         ctx = _make_context(daily_bars, bars_minute)
         state = await monitor.calculate_state(ctx)
 
-        # 命名空间键
-        assert "bb" in state.state
+        # 命名空间键（BB 已移除，不再出现在 state 中）
+        assert "bb" not in state.state
         assert "node_cluster" in state.state
         assert "smc" in state.state
         assert "market" in state.state
         assert "degraded" in state.state
 
         # 命名空间内字段
-        assert "bb_upper" in state.state["bb"]
         assert "upper_node" in state.state["node_cluster"]
         assert "smc_confirmed_bos" in state.state["smc"]
         assert "current_price" in state.state["market"]
         assert "previous_close" in state.state["market"]
         assert "change_pct" in state.state["market"]
 
-        # degraded 结构
+        # degraded 结构（BB 已移除，只含 node_cluster/smc）
         degraded = state.state["degraded"]
-        assert "bb" in degraded
         assert "node_cluster" in degraded
         assert "smc" in degraded
+        assert "bb" not in degraded
 
-        # state_version 升级到 2
-        assert state.state_version == 2
+        # state_version 升级到 3（CHANGE-20260728-010）
+        assert state.state_version == 3
 
     @pytest.mark.asyncio
     async def test_calculate_state_flat_compat(
         self, daily_bars: pd.DataFrame
     ) -> None:
-        """WatchlistMonitor.calculate_state 同时保留顶层平铺字段（兼容旧读取）。"""
+        """WatchlistMonitor.calculate_state 同时保留顶层平铺字段（兼容旧读取）。
+
+        [CHANGE-20260728-010] BB 平铺字段已移除；只保留 node_cluster/smc 顶层平铺。
+        """
         monitor = WatchlistMonitor()
         version = _make_mock_version()
         await monitor.initialize(version)
@@ -1144,7 +1150,8 @@ class TestWatchlistMonitorNamespaces:
         state = await monitor.calculate_state(ctx)
 
         # 顶层平铺字段（兼容旧 _extract_sub_state）
-        assert "bb_upper" in state.state
+        # BB 字段已移除：bb_upper/bb_mid/bb_lower 不再出现
+        assert "bb_upper" not in state.state
         assert "upper_node" in state.state
         assert "smc_confirmed_bos" in state.state
         assert "smc_currently_touched" in state.state
@@ -1156,12 +1163,15 @@ class TestWatchlistMonitorNamespaces:
     async def test_calculate_state_smc_degraded_on_short_daily(
         self
     ) -> None:
-        """日线数据不足时 SMC 标记 degraded，但 BB 不受影响。"""
+        """日线数据不足时 SMC 标记 degraded，node_cluster 不受影响。
+
+        [CHANGE-20260728-010] BB 已移除，不再检查 bb degraded 状态。
+        """
         monitor = WatchlistMonitor()
         version = _make_mock_version()
         await monitor.initialize(version)
 
-        # 50 根日线（满足 BB 的 25 根要求，不满足 SMC 的 250 根要求）
+        # 50 根日线（满足 node_cluster 的 25 根要求，不满足 SMC 的 250 根要求）
         short_bars = _generate_daily_bars(n_bars=50)
         bars_minute = _make_minute_bars(prev_close=10.0, cur_close=10.5)
         ctx = _make_context(short_bars, bars_minute)
@@ -1169,50 +1179,56 @@ class TestWatchlistMonitorNamespaces:
 
         # SMC 应标记 degraded（< 250 根）
         assert state.state["degraded"]["smc"] is True
-        # BB 不应 degraded（>= 25 根）
-        assert state.state["degraded"]["bb"] is False
+        # node_cluster 不应 degraded（>= 25 根）
+        assert state.state["degraded"]["node_cluster"] is False
+        # BB degraded 键已移除
+        assert "bb" not in state.state["degraded"]
 
     @pytest.mark.asyncio
     async def test_extract_sub_state_namespace_priority(self) -> None:
-        """_extract_sub_state 优先读取命名空间。"""
+        """_extract_sub_state 优先读取命名空间。
+
+        [CHANGE-20260728-010] BB 已移除，改用 node_cluster 验证命名空间优先级。
+        """
         from uuid import uuid4
 
         test_state = MonitorState(
             instrument_id=uuid4(),
             strategy_version_id=uuid4(),
             state={
-                "bb": {"bb_upper": 99.9, "current_price": 50.0},
-                "bb_upper": 11.1,  # 顶层平铺（应被命名空间覆盖）
+                "node_cluster": {"upper_node": {"price_mid": 99.9}, "current_price": 50.0},
+                "upper_node": {"price_mid": 11.1},  # 顶层平铺（应被命名空间覆盖）
             },
-            state_version=2,
+            state_version=3,
             updated_at=datetime.now(UTC),
         )
-        bb_sub = WatchlistMonitor._extract_sub_state(test_state, "bb")
-        assert bb_sub.state["bb_upper"] == 99.9  # 命名空间优先
+        nc_sub = WatchlistMonitor._extract_sub_state(test_state, "node_cluster")
+        assert nc_sub.state["upper_node"]["price_mid"] == 99.9  # 命名空间优先
 
     @pytest.mark.asyncio
     async def test_extract_sub_state_flat_fallback(self) -> None:
-        """_extract_sub_state 无命名空间时 fallback 到顶层平铺（兼容旧 state）。"""
+        """_extract_sub_state 无命名空间时 fallback 到顶层平铺（兼容旧 state）。
+
+        [CHANGE-20260728-010] BB 已移除，改用 node_cluster 验证 fallback 逻辑。
+        """
         from uuid import uuid4
 
         old_state = MonitorState(
             instrument_id=uuid4(),
             strategy_version_id=uuid4(),
             state={
-                "bb_upper": 11.1,
-                "bb_mid": 10.0,
-                "bb_lower": 8.9,
+                "upper_node": {"price_mid": 11.1, "price_low": 10.8, "price_high": 11.4},
+                "lower_node": {"price_mid": 9.0},
                 "current_price": 10.5,
-                "prev_close": 10.3,
-                "bb_width": 0.22,
-                "bb_pos": 0.75,
+                "previous_close": 10.3,
+                "position_0_1": 0.5,
             },
             state_version=1,
             updated_at=datetime.now(UTC),
         )
-        bb_sub = WatchlistMonitor._extract_sub_state(old_state, "bb")
-        assert bb_sub.state["bb_upper"] == 11.1
-        assert bb_sub.state["current_price"] == 10.5
+        nc_sub = WatchlistMonitor._extract_sub_state(old_state, "node_cluster")
+        assert nc_sub.state["upper_node"]["price_mid"] == 11.1
+        assert nc_sub.state["current_price"] == 10.5
 
     @pytest.mark.asyncio
     async def test_detect_events_returns_combined_events(

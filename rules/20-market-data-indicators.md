@@ -91,6 +91,19 @@ SMC 渲染必须使用严格 time-key 匹配：
 - events 和 EQH/EQL 使用 OR 逻辑（anchor/confirmed 任一匹配即渲染，两者都缺失才 skip）；
 - 详情链和 Capture（90-bar 舞台）共用同一 SMC 坐标映射核心，只允许 font/lineWidth/lane 差异。
 
+## 飞书 Capture 固定组合图合同（CHANGE-20260728-010）
+
+旧"每张截图只渲染一个指标视图"规则（advice.md v6）已被新组合视图合同取代。
+
+- 飞书截图固定使用组合视图 `FEISHU_CAPTURE_VIEW='structure_node'`（结构 + 筹码共识）。
+- 图层固定：`node + smc + volume`，`boll=false`；其余 `trend/macd/sqzmom/breakout=false`。
+- 后端 `/capture/stocks/{id}/snapshot` 强制 `include_smc=True`，始终返回 Node 数据 + SMC DTO 结构。
+- combined Ready = `nodeReady && smcContractReady`：Node 数据完整 + SMC DTO 结构存在（SMC 数组允许为空，无事件时不阻塞）。
+- 旧 `node_cluster`/`bollinger`/`smc` 三套独立 preset 标记 `_legacy`，仅供历史 URL 参数回读兼容；新业务不再写入。
+- 事件类型 → 监控事件类别映射用于文字与统计归类，不再决定截图图层：
+  - 结构（EVENT_CATEGORY_STRUCTURE）：SMC BOS/CHoCH/EQH/EQL/OB first touch
+  - 筹码共识（EVENT_CATEGORY_NODE_CONSENSUS）：node_cluster_touch
+
 ## Canonical 四链统一调度
 
 详情/盘后/盘中/Capture 四条调用链必须通过 `CanonicalComputationService` 调度已注册算法。

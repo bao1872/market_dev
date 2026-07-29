@@ -39,8 +39,12 @@ class TestIndicatorViewConstants:
     """共享枚举常量值校验。"""
 
     def test_indicator_view_values_tuple(self) -> None:
-        """INDICATOR_VIEW_VALUES 应为 3 个固定值的 tuple。"""
-        assert INDICATOR_VIEW_VALUES == ("node_cluster", "bollinger", "smc")
+        """INDICATOR_VIEW_VALUES 应为 4 个固定值的 tuple。
+
+        [CHANGE-20260728-010] 新增 'structure_node'（结构 + 筹码共识组合视图），
+        旧 3 值（node_cluster/bollinger/smc）保留为历史回读兼容。
+        """
+        assert INDICATOR_VIEW_VALUES == ("node_cluster", "bollinger", "smc", "structure_node")
         assert isinstance(INDICATOR_VIEW_VALUES, tuple)
 
     def test_default_indicator_view_is_node_cluster(self) -> None:
@@ -49,11 +53,12 @@ class TestIndicatorViewConstants:
         assert DEFAULT_INDICATOR_VIEW in INDICATOR_VIEW_VALUES
 
     def test_indicator_view_labels_complete(self) -> None:
-        """INDICATOR_VIEW_LABELS 应覆盖全部 3 个视图，文案非空。"""
+        """INDICATOR_VIEW_LABELS 应覆盖全部 4 个视图，文案非空。"""
         assert set(INDICATOR_VIEW_LABELS.keys()) == set(INDICATOR_VIEW_VALUES)
         assert INDICATOR_VIEW_LABELS["node_cluster"] == "筹码共识价"
         assert INDICATOR_VIEW_LABELS["bollinger"] == "布林带"
         assert INDICATOR_VIEW_LABELS["smc"] == "结构"
+        assert INDICATOR_VIEW_LABELS["structure_node"] == "结构 + 筹码共识"
         for view, label in INDICATOR_VIEW_LABELS.items():
             assert isinstance(label, str) and label, f"视图 {view} 文案不应为空"
 
@@ -183,12 +188,22 @@ class TestIsValidIndicatorView:
 
 
 class TestCapturePresets:
-    """FEISHU_CAPTURE_PRESETS 三套 Preset 完整性校验。"""
+    """FEISHU_CAPTURE_PRESETS Preset 完整性校验。
+
+    [CHANGE-20260728-010] 新业务固定使用 'structure_node' 组合视图（结构 + 筹码共识），
+    旧 3 套独立 preset（node_cluster/bollinger/smc）标记为 _legacy 保留历史回读兼容。
+    """
 
     def test_three_presets_exist(self) -> None:
-        """应有 3 套 Preset：node_cluster / bollinger / smc。"""
+        """应有 4 套 Preset：structure_node（新业务）+ node_cluster/bollinger/smc（历史兼容）。"""
         assert set(FEISHU_CAPTURE_PRESETS.keys()) == set(INDICATOR_VIEW_VALUES)
-        assert len(FEISHU_CAPTURE_PRESETS) == 3
+        assert len(FEISHU_CAPTURE_PRESETS) == 4
+        # 新业务 preset 不应标记为 _legacy
+        assert FEISHU_CAPTURE_PRESETS["structure_node"].get("_legacy") is not True
+        # 旧 preset 应标记为 _legacy
+        assert FEISHU_CAPTURE_PRESETS["node_cluster"].get("_legacy") is True
+        assert FEISHU_CAPTURE_PRESETS["bollinger"].get("_legacy") is True
+        assert FEISHU_CAPTURE_PRESETS["smc"].get("_legacy") is True
 
     @pytest.mark.parametrize("view", INDICATOR_VIEW_VALUES)
     def test_preset_required_fields(self, view: str) -> None:

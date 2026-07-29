@@ -459,53 +459,11 @@ export default function StockDetailPage() {
                 点击发送将把当前个股详情（含备忘录）推送到您已启用的飞书渠道。
               </p>
 
-              {/* [CHANGE-20260720-003 §四] 指标视图三单选项：一张图/一段文案只描述一个指标 */}
-              <div className="feishu-indicator-view-group" role="radiogroup" aria-label="指标视图">
-                <label
-                  className={`feishu-indicator-view-option${
-                    feishu.selectedIndicatorView === 'node_cluster' ? ' active' : ''
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="feishu-indicator-view"
-                    value="node_cluster"
-                    checked={feishu.selectedIndicatorView === 'node_cluster'}
-                    onChange={() => feishu.setSelectedIndicatorView('node_cluster')}
-                    disabled={feishu.sendFeishuPending || feishu.feishuPolling}
-                  />
-                  <span className="feishu-indicator-view-label">筹码共识价</span>
-                </label>
-                <label
-                  className={`feishu-indicator-view-option${
-                    feishu.selectedIndicatorView === 'bollinger' ? ' active' : ''
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="feishu-indicator-view"
-                    value="bollinger"
-                    checked={feishu.selectedIndicatorView === 'bollinger'}
-                    onChange={() => feishu.setSelectedIndicatorView('bollinger')}
-                    disabled={feishu.sendFeishuPending || feishu.feishuPolling}
-                  />
-                  <span className="feishu-indicator-view-label">布林带</span>
-                </label>
-                <label
-                  className={`feishu-indicator-view-option${
-                    feishu.selectedIndicatorView === 'smc' ? ' active' : ''
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="feishu-indicator-view"
-                    value="smc"
-                    checked={feishu.selectedIndicatorView === 'smc'}
-                    onChange={() => feishu.setSelectedIndicatorView('smc')}
-                    disabled={feishu.sendFeishuPending || feishu.feishuPolling}
-                  />
-                  <span className="feishu-indicator-view-label">结构</span>
-                </label>
+              {/* [CHANGE-20260728-010] 移除指标视图三单选项，固定发送"结构 + 筹码共识"组合图 */}
+              <div className="feishu-indicator-view-info">
+                <span className="feishu-indicator-view-label">
+                  将发送：结构 + 筹码共识组合图（含日线 SMC 结构与成交量节点）
+                </span>
               </div>
 
               {(feishu.feishuResult || feishu.feishuStatus || feishu.feishuPolling) && (

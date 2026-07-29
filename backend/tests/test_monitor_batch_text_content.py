@@ -53,7 +53,10 @@ class TestBuildMergedCardDtoTextContent:
     """验证 _build_merged_card_dto 输出 text_content 字段。"""
 
     def test_text_content_contains_overview_and_details(self) -> None:
-        """text_content 应包含概览行 + 股票标题 + 信号详情 + 数据时间。"""
+        """text_content 应包含概览行 + 股票标题 + 信号详情 + 数据时间。
+
+        [CHANGE-20260728-010] 概览行改为 "结构 X｜筹码共识 Y"（旧 "密集区" 语义已替换）。
+        """
         inst_id = uuid4()
         event = _make_event(inst_id)
         service = MonitorBatchService()
@@ -64,15 +67,16 @@ class TestBuildMergedCardDtoTextContent:
             instrument_info_cache={inst_id: ("688362", "甬矽电子")},
             change_pct_map={inst_id: 0.03},
             strategy_key="watchlist_monitor",
-            strategy_name="BB+节点监控",
+            strategy_name="结构+筹码共识监控",
         )
 
         # text_content 不能为空
         assert dto.text_content, "text_content 不应为空"
-        # 应包含概览行 - [advice.md 第二节] 通俗化后用 "密集区" 而非 "节点"
+        # 应包含概览行 - [CHANGE-20260728-010] 新口径：结构 X｜筹码共识 Y
         assert "自选股 24 只" in dto.text_content
         assert "触发 1 只" in dto.text_content
-        assert "密集区 1" in dto.text_content
+        assert "结构 0" in dto.text_content
+        assert "筹码共识 1" in dto.text_content
         # 应包含股票标题（带名称和代码）
         assert "甬矽电子" in dto.text_content
         assert "688362" in dto.text_content

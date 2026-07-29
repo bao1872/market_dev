@@ -39,8 +39,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.capture import (
+    CAPTURE_HTTP_TIMEOUT_SECONDS,
     CAPTURE_SCOPE_STOCK_DETAIL,
     FEISHU_CAPTURE_TIMEFRAME,
+    FEISHU_CAPTURE_VIEW,
 )
 from app.core.security import create_capture_token
 from app.core.time import format_shanghai_datetime, now_utc, to_shanghai_iso
@@ -124,10 +126,12 @@ async def send_stock_detail_to_feishu(
     7. capture worker HTTP 截图 → create_message + write_outbox(image)
     8. 返回 test_run_id/message_group_id/message_id/status
 
-    [CHANGE-20260720-003 §四] indicator_view 贯穿详情页手动分享链路：
-    - None: 向后兼容，全字段文案 + 默认截图图层（无 indicator_view URL 参数）
-    - "node_cluster" | "bollinger" | "smc": 文字卡片只展示该指标对应字段，
-      截图 URL 加 &indicator_view=... 切换图层组合，缓存键加 iv=... 维度
+    [CHANGE-20260728-010] 固定组合视图：
+    - 前端不再选择 indicator_view，后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'
+    - 旧请求体携带的 indicator_view 字段兼容接收但忽略（不再影响渲染/文字）
+    - 文字只展示结构 + 筹码共识字段（无 BB 字段）
+    - 截图 URL 固定携带 indicator_view=structure_node，缓存键加 iv=structure_node
+    - 截图调用方 timeout=CAPTURE_HTTP_TIMEOUT_SECONDS（120s > Capture 渲染最大 90s）
 
     Args:
         db: 异步会话
@@ -136,7 +140,7 @@ async def send_stock_detail_to_feishu(
         frontend_base_url: 前端 base URL（截图服务访问）
         capture_worker_url: 截图 Worker HTTP 服务地址
         capture_token_ttl_seconds: capture token 有效期（秒）
-        indicator_view: 指标视图 node_cluster|bollinger|smc；None 表示全字段（向后兼容）
+        indicator_view: [历史兼容] 旧字段，新业务已忽略，固定使用 FEISHU_CAPTURE_VIEW
 
     Returns:
         dict 含 test_run_id / message_group_id / message_id / image_message_id /
@@ -153,6 +157,14 @@ async def send_stock_detail_to_feishu(
         StockDetailFeishuError: 快照/文本Outbox 失败（携带 error_code/failed_step）
         NotificationServiceError: 其他消息创建失败
     """
+    # [CHANGE-20260728-010] 固定组合视图：忽略入参 indicator_view
+    # 旧请求体携带的 indicator_view 字段兼容接收但忽略（前端不再选择）
+    if indicator_view is not None and indicator_view != FEISHU_CAPTURE_VIEW:
+        logger.info(
+            "[StockDetailFeishu] 旧 indicator_view=%s 已忽略，固定使用 %s",
+            indicator_view, FEISHU_CAPTURE_VIEW,
+        )
+    resolved_indicator_view = FEISHU_CAPTURE_VIEW
     total_start = time.time()
     snapshot_ms = 0.0
     text_outbox_ms = 0.0
@@ -219,9 +231,7 @@ async def send_stock_detail_to_feishu(
         event_type=_EVENT_TYPE_STOCK_SNAPSHOT_SHARE,
         event_time=event_time,
         current_price=snapshot.current_price,
-        bb_upper=snapshot.range_upper,
-        bb_mid=snapshot.range_center,
-        bb_lower=snapshot.range_lower,
+        # [CHANGE-20260728-010] BB 字段不再传入（structure_node 视图不展示 BB）
         upper_node=snapshot.upper_volume_zone,
         lower_node=snapshot.lower_volume_zone,
         poc_price=snapshot.most_traded_price,
@@ -234,8 +244,8 @@ async def send_stock_detail_to_feishu(
             "share": True,
         },
         memo=memo_content,
-        # [CHANGE-20260720-003 §四] 按 indicator_view 拆分文字卡片内容，一张图/一段文案只描述一个指标
-        indicator_view=indicator_view,
+        # [CHANGE-20260728-010] 固定使用 FEISHU_CAPTURE_VIEW（结构+筹码共识组合视图）
+        indicator_view=resolved_indicator_view,
     )
 
     # 6. 复用 create_message 创建文本消息 + 写入文本 Outbox
@@ -299,10 +309,11 @@ async def send_stock_detail_to_feishu(
             "event_id": str(instrument_id),
             "token": token,
             "frontend_base_url": frontend_base_url,
-            # [CHANGE-20260720-003 §四] output_filename 含 indicator_view 防止不同指标复用旧图
+            # [CHANGE-20260728-010] output_filename 固定含 structure_node
+            # 防止新旧业务复用同一缓存文件
             "output_filename": (
                 f"stock-detail-{instrument_id}-{test_run_id}"
-                + (f"-{indicator_view}" if indicator_view else "")
+                f"-{resolved_indicator_view}"
             ),
             "instrument_id": str(instrument_id),
             "chart_version": "v1",
@@ -312,11 +323,12 @@ async def send_stock_detail_to_feishu(
             "capture_run_id": str(test_run_id),
             "source_bar_time": snapshot.as_of.isoformat(),
             "disable_cache": True,
-            # [CHANGE-20260720-003 §四] 透传 indicator_view 到 capture worker
-            # 截图页面按 indicator_view 切换图层组合，缓存键加 iv={indicator_view} 维度
-            **({"indicator_view": indicator_view} if indicator_view else {}),
+            # [CHANGE-20260728-010] 固定透传 indicator_view=structure_node 到 capture worker
+            # 缓存键加 iv=structure_node 维度，前端固定按组合视图渲染
+            "indicator_view": resolved_indicator_view,
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        # [CHANGE-20260728-010] 截图调用方 timeout=120s（> Capture 渲染最大 90s）
+        async with httpx.AsyncClient(timeout=CAPTURE_HTTP_TIMEOUT_SECONDS) as client:
             capture_resp = await client.post(
                 f"{capture_worker_url.rstrip('/')}/capture",
                 json=capture_payload,
@@ -360,9 +372,9 @@ async def send_stock_detail_to_feishu(
             "test_run_id": str(test_run_id),
             "image_url": image_url,
         }
-        # [CHANGE-20260720-003 §四] 图片消息 resource_refs 携带 indicator_view 贯穿状态查询链路
-        if indicator_view:
-            image_resource_refs["indicator_view"] = indicator_view
+        # [CHANGE-20260728-010] 图片消息 resource_refs 固定携带 indicator_view=structure_node
+        # 贯穿状态查询链路，便于历史数据区分新旧业务
+        image_resource_refs["indicator_view"] = resolved_indicator_view
         image_dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
             template_key="monitor_event",
@@ -437,8 +449,9 @@ async def send_stock_detail_to_feishu(
                 image_url=image_url,
                 error_code=error_code_local,
                 error_message=error_message_local,
-                # [CHANGE-20260720-003 §四] CaptureJob 记录 indicator_view 便于状态查询区分
-                indicator_view=indicator_view,
+                # [CHANGE-20260728-010] CaptureJob 固定记录 indicator_view=structure_node
+                # 便于状态查询区分新旧业务
+                indicator_view=resolved_indicator_view,
             )
         )
         logger.warning(

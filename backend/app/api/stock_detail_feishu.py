@@ -5,7 +5,7 @@ capture worker / Outbox / MessageDelivery），走正式 Outbox 异步链路。
 
 端点：
 - POST /instruments/{instrument_id}/send-feishu
-    请求体: {"indicator_view": "node_cluster" | "bollinger" | "smc"}（可选，默认 None 全字段）
+    请求体: {} (CHANGE-20260728-010 后固定组合视图，不再接受 indicator_view 选择)
     响应: {"test_run_id", "message_group_id", "message_id", "image_message_id", "status"}
 - GET /stock-detail-feishu/{test_run_id}/status
     响应: {"test_run_id", "message_group_id", "card_status", "image_status",
@@ -83,32 +83,33 @@ class SendFeishuResponse(BaseModel):
 
 
 class SendFeishuRequest(BaseModel):
-    """发送飞书请求体 - 指标视图选择（PROMPT.md §四）。
+    """发送飞书请求体 - [CHANGE-20260728-010] 固定组合视图，前端无选择器。
 
-    [CHANGE-20260720-003 §四] 详情页手动发送飞书时，用户从弹窗三单选项中选择指标视图：
-    - node_cluster: 筹码共识价（默认）
-    - bollinger: 布林带
-    - smc: 结构
+    [历史兼容] 旧版请求体携带 indicator_view 字段（node_cluster|bollinger|smc），
+    新版前端已移除该选择器，固定发送"结构 + 筹码共识"组合图。
+    后端兼容接收旧字段但忽略其值，强制使用 FEISHU_CAPTURE_VIEW='structure_node'。
 
-    后端透传到：
-    - build_monitor_event_text：文字卡片按 indicator_view 拆分字段
-    - capture_payload：截图 URL 加 &indicator_view=... 切换图层组合
-    - CaptureJob：记录 indicator_view 便于状态查询区分
-    - 图片消息 resource_refs：携带 indicator_view 贯穿状态查询链路
-
-    默认 None 时为全字段（向后兼容旧调用），但前端弹窗始终显式选择一个值。
+    新业务不再透传 indicator_view 到 capture/文字组件：
+    - build_monitor_event_text：固定按 structure_node 视图拼装文字（结构 + 筹码共识，无 BB）
+    - capture_payload：固定透传 indicator_view=structure_node
+    - CaptureJob：固定记录 indicator_view=structure_node
+    - 图片消息 resource_refs：固定携带 indicator_view=structure_node
     """
 
     indicator_view: str | None = Field(
         default=None,
         description=(
-            "指标视图：node_cluster（筹码共识价）| bollinger（布林带）| smc（结构）；"
-            "None 表示全字段（向后兼容）"
+            "[历史兼容] 旧版字段，新版前端已移除选择器。"
+            "后端忽略此值，固定使用 FEISHU_CAPTURE_VIEW='structure_node'。"
         ),
     )
 
     def normalized_indicator_view(self) -> str | None:
-        """校验并归一化 indicator_view，非法值返回 None。"""
+        """[历史兼容] 校验并归一化 indicator_view，非法值返回 None。
+
+        新业务不再调用此方法（后端固定使用 FEISHU_CAPTURE_VIEW）。
+        保留仅为兼容旧客户端测试与历史数据回读校验。
+        """
         if self.indicator_view is None:
             return None
         if self.indicator_view in INDICATOR_VIEW_VALUES:
@@ -185,20 +186,23 @@ async def send_stock_detail_feishu_endpoint(
     4. write_outbox（事务性发件箱，outbox_relay 同款）
     5. capture worker HTTP（截图，test_channel_latest_event 同款）
 
-    [CHANGE-20260720-003 §四] 请求体携带 indicator_view：
-    - None: 全字段文案 + 默认截图图层（向后兼容）
-    - "node_cluster" | "bollinger" | "smc": 文字卡片只展示该指标对应字段，
-      截图 URL 加 &indicator_view=... 切换图层组合，缓存键加 iv=... 维度
+    [CHANGE-20260728-010] 固定组合视图：
+    - 请求体 indicator_view 字段已废弃为历史兼容（前端不再选择）
+    - 后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'（结构+筹码共识组合视图）
+    - 文字只展示结构 + 筹码共识字段（无 BB 字段）
+    - 截图 URL 固定携带 indicator_view=structure_node，缓存键加 iv=structure_node
 
     后端自动查找当前用户唯一 active Feishu 渠道；无渠道时返回 404。
     返回 test_run_id/message_group_id/message_id，客户端可通过
     GET /stock-detail-feishu/{test_run_id}/status 查询投递状态。
     """
     settings = get_settings()
-    # [CHANGE-20260720-003 §四] 归一化 indicator_view，非法值降级为 None（向后兼容）
-    indicator_view: str | None = None
-    if payload is not None:
-        indicator_view = payload.normalized_indicator_view()
+    # [CHANGE-20260728-010] 不再透传 indicator_view 到 service
+    # service 内部固定使用 FEISHU_CAPTURE_VIEW，旧字段兼容接收但忽略
+    # 保留 payload 参数仅为兼容旧客户端 POST 请求体不报错
+    if payload is not None and payload.indicator_view is not None:
+        # 历史客户端仍可能 POST indicator_view，记录日志便于观察迁移情况
+        pass
 
     try:
         result = await send_stock_detail_to_feishu(
@@ -208,7 +212,7 @@ async def send_stock_detail_feishu_endpoint(
             frontend_base_url=settings.frontend_base_url,
             capture_worker_url=settings.capture_worker_url,
             capture_token_ttl_seconds=settings.jwt_capture_ttl_seconds,
-            indicator_view=indicator_view,
+            # 不再透传 indicator_view：service 内部固定使用 FEISHU_CAPTURE_VIEW
         )
     except InstrumentNotFoundError as e:
         # [StockDetailFeishu] - 个股不存在返回 404（三字段结构）
@@ -332,19 +336,23 @@ if __name__ == "__main__":
     }, f"三字段结构不匹配: {detail}"
     print(f"_error_detail={detail} OK")
 
-    # [CHANGE-20260720-003 §四] 验证 SendFeishuRequest body schema
+    # [CHANGE-20260728-010] 验证 SendFeishuRequest body schema（历史兼容字段）
     req_none = SendFeishuRequest()
     assert req_none.indicator_view is None, "默认应为 None"
     assert req_none.normalized_indicator_view() is None, "None 归一化为 None"
+    # 旧值仍可解析（历史兼容）
     req_nc = SendFeishuRequest(indicator_view="node_cluster")
     assert req_nc.normalized_indicator_view() == "node_cluster"
     req_bb = SendFeishuRequest(indicator_view="bollinger")
     assert req_bb.normalized_indicator_view() == "bollinger"
     req_smc = SendFeishuRequest(indicator_view="smc")
     assert req_smc.normalized_indicator_view() == "smc"
+    # 新业务固定值 structure_node 也可解析（虽不再由前端选择）
+    req_sn = SendFeishuRequest(indicator_view="structure_node")
+    assert req_sn.normalized_indicator_view() == "structure_node"
     # 非法值降级为 None（向后兼容）
     req_invalid = SendFeishuRequest(indicator_view="invalid_view")
     assert req_invalid.normalized_indicator_view() is None, "非法值应降级为 None"
-    print("SendFeishuRequest body schema OK")
+    print("SendFeishuRequest body schema OK (含 structure_node 兼容)")
 
     print("OK")

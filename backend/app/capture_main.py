@@ -128,11 +128,17 @@ class CaptureRequest(BaseModel):
     device_scale_factor: int | None = Field(
         None, description="设备像素比（覆盖 env CAPTURE_DEVICE_SCALE_FACTOR，默认 2，严禁 4）"
     )
-    # [CHANGE-20260720-003 §三] 指标视图：node_cluster|bollinger|smc
-    # 一张图只渲染一个指标视图，禁止混合指标叠图；前端按此参数切换图层组合。
+    # [CHANGE-20260728-010] indicator_view 已废弃为历史兼容参数
+    # 新业务固定使用 FEISHU_CAPTURE_VIEW='structure_node'（结构+筹码共识组合视图），
+    # 由调用方（monitor_batch_service / stock_detail_feishu_service）固定传入。
+    # 旧值 node_cluster|bollinger|smc 仅作历史回读兼容，不再影响渲染逻辑。
+    # 缓存键仍按传入值区分（避免新旧业务复用同一缓存）。
     indicator_view: str | None = Field(
         None,
-        description="指标视图 node_cluster|bollinger|smc（扩展缓存 key + URL 参数）",
+        description=(
+            "[历史兼容] 指标视图。新业务固定传 'structure_node'。"
+            "旧值 node_cluster|bollinger|smc 仅用于扩展缓存 key，不再影响渲染图层。"
+        ),
     )
     # [Task 2] focus_event 透传：监控事件触发时携带 focus_event_id/type/anchor_time/
     # confirmed_time/level/zone 等字段，前端据此突出本次触发事件，淡化其他历史结构

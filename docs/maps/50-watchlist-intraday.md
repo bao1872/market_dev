@@ -44,7 +44,24 @@
 
 ## 4. 盘中监控
 
-### 4.1 图片捕获链路（2026-07-28 核验，基于 CHANGE-20260728-001）
+### 4.1 监控事件类别（CHANGE-20260728-010）
+
+`watchlist_monitor` 只保留两类触发事件：
+
+- **结构（EVENT_CATEGORY_STRUCTURE）**：SMC BOS/CHoCH/EQH/EQL/OB first touch
+- **筹码共识（EVENT_CATEGORY_NODE_CONSENSUS）**：node_cluster_touch
+
+布林带（Bollinger）不再触发盘中监控事件；Bollinger 算法本体保留供盘后与个股详情页图层使用。
+
+state schema version=3（CHANGE-20260728-010）：
+- 命名空间：`node_cluster` / `smc` / `market` / `degraded`（移除 `bb`）
+- 旧 v1/v2 state 含 bb 字段仅历史回读，新业务不再生成
+- SMC 子状态显式回写 namespace + 顶层，保证 episode 连续
+
+事件类别映射入口：`backend/app/constants/indicator_view.py::EVENT_TYPE_TO_CATEGORY`
+- 仅用于文字与统计归类（结构 X｜筹码共识 Y），不再决定截图图层
+
+### 4.2 图片捕获链路（CHANGE-20260728-001 + CHANGE-20260728-010）
 
 权威入口：`backend/app/services/monitor_batch_service.py::_send_chart_images_via_outbox`
 
@@ -54,27 +71,37 @@
 monitor_batch_service
 → 按 instrument 分组事件
 → per event 遍历：
-    → is_supported_event_type(event_type, payload) 检查映射
-       ├─ 已支持：解析 indicator_view（BOS/CHoCH/EQH/EQL/OB → smc）
+    → is_supported_event_type(event_type, payload) 检查
+       ├─ 已支持：结构 / 筹码共识事件
        └─ 未支持：写 CaptureJob(status=failed, error_code=UNSUPPORTED_INDICATOR_VIEW)，跳过
     → 构建 focus_event、生成 capture token
     → capture_run_id = f"monitor-{inst_id}-{event.id}-{indicator_view}"
     → 输出文件名含 event.id 与 indicator_view
-    → 创建 CaptureJob(status=pending)
+    → 创建 CaptureJob(status=pending, indicator_view=FEISHU_CAPTURE_VIEW)
     → 调用 capture worker（同事件多用户只截图 1 次）
     → 每个有资格用户创建 image Outbox
     → 失败隔离：单事件失败只记 CaptureJob，不阻塞其他事件
 ```
 
+[CHANGE-20260728-010] 截图固定组合视图：
+- `indicator_view` 固定为 `FEISHU_CAPTURE_VIEW='structure_node'`（不再按事件类型映射 smc/node_cluster/bollinger）
+- 图层固定：`node + smc + volume`，`boll=false`
+- 后端 `/capture/stocks/{id}/snapshot` 强制 `include_smc=True`
+- combined Ready = `nodeReady && smcContractReady`（SMC 数组允许为空）
+- 截图调用方 timeout=120s（`CAPTURE_HTTP_TIMEOUT_SECONDS`）
+
 幂等键：`user_id + instrument_id + event_id + indicator_view`
 - 同事件重试不重复
 - 不同事件即使同一分钟也不互相去重
+- 新业务 indicator_view 固定为 structure_node，幂等键维度仍保留以区分新旧业务
 
-事件类型 → indicator_view 映射：`backend/app/constants/indicator_view.py::EVENT_TYPE_TO_INDICATOR_VIEW`
-- BOS/CHoCH/EQH/EQL/OB first touch → smc
+事件类型 → indicator_view 历史映射（仅供旧数据回读）：`backend/app/constants/indicator_view.py::EVENT_TYPE_TO_INDICATOR_VIEW`
+- BOS/CHoCH/EQH/EQL/OB first touch → smc（历史值）
+- node_cluster_touch → node_cluster（历史值）
+- bb_*_touch → bollinger（历史值，新业务不再触发）
 - 未知类型 → UNSUPPORTED_INDICATOR_VIEW（显式跳过，不回退 node_cluster）
 
-### 4.2 待核验
+### 4.3 待核验
 
 - 触发器；
 - 数据周期；

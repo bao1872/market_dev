@@ -1,6 +1,6 @@
 // [Capture] - 描述: 专用 Capture 页面 - 截图模式专用，不经过 ProtectedLayout/AppShell
 //
-// 用法：路由 /capture/stock/:symbol?capture=feishu&token=xxx&instrument_id=xxx&indicator_view=smc
+// 用法：路由 /capture/stock/:symbol?capture=feishu&token=xxx&instrument_id=xxx
 //
 // 设计要点（修复 C.7 调查发现的 30s 截图超时根因）：
 // 1. 不经过 ProtectedLayout / SubscriberRoute / AppShell（避免认证守卫与全局布局副作用）
@@ -16,16 +16,21 @@
 // [CHANGE-20260720-Phase4 §四] 移动舞台改造：
 //   - 旧版 1920×1200 PC 布局 → 新版 1440×2560 9:16 移动舞台（MobileIndicatorStage）
 //   - 视觉参考：ref/panji_short_video_integrated_studio_v1_15_event_flash_fix
-//   - URL 新增 indicator_view=node_cluster|bollinger|smc 参数
-//     · 携带时使用 INDICATOR_VIEW_LAYER_PRESETS（每张图只渲染一个指标视图）
-//     · 缺失时回退到 FEISHU_CAPTURE_LAYERS（向后兼容旧 capture URL）
-//   - indicatorView 通过 props 传递给 StrategyChart（替代旧版 isCaptureMode 强制 5 层）
+//
+// [CHANGE-20260728-010] 固定组合视图（结构 + 筹码共识）：
+//   - 不再从 URL indicator_view 参数决定单指标视图；旧 URL 携带的 node_cluster/bollinger/smc
+//     仅作历史兼容读取，不再影响图层渲染。
+//   - 固定使用 FEISHU_CAPTURE_VIEW='structure_node'（结构 + 筹码共识组合视图）。
+//   - 图层固定：node=true（profile/poc/peak_node/trigger_node）+ smc=true（BOS/CHoCH/OB/EQH/EQL）
+//     + volume=true；boll=false；其余 macd/sqzmom/breakout/trend=false。
+//   - combined Ready = nodeReady && smcContractReady（SMC 数组允许为空，避免永久 loading）。
 
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { captureClient } from '@/api/client'
 import { CAPTURE_TOKEN_KEY } from '@/store/auth'
+import { FEISHU_CAPTURE_VIEW } from '@/api/endpoints'
 import StrategyChart from '@/components/StrategyChart'
 import MobileIndicatorStage from '@/components/MobileIndicatorStage'
 import type { ChartViewport } from '@/components/chartViewport'
@@ -33,14 +38,7 @@ import type { CaptureSnapshotResponse, IndicatorResponse, IndicatorView } from '
 import { resolveStrategy } from '@/lib/strategy-manifest'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import { mapBarsToBarData } from '@/utils/chart'
-import {
-  normalizeIndicatorView,
-  DEFAULT_TIMEFRAME,
-} from '@/features/stock-research/stockResearchTypes'
-
-// 默认 indicator_view（与后端 DEFAULT_INDICATOR_VIEW 对齐）
-// 当 URL 未携带 indicator_view 参数时使用，保证新版本截图链路始终产出"单一指标视图"
-const DEFAULT_CAPTURE_INDICATOR_VIEW: IndicatorView = 'node_cluster'
+import { DEFAULT_TIMEFRAME } from '@/features/stock-research/stockResearchTypes'
 
 // [MobileIndicatorStage] 图表区域高度常量
 // 几何推导（与 global.scss 中 .mobile-stage-chart-card / .mobile-stage-chart-viewport 对齐）：
@@ -87,15 +85,12 @@ export default function CaptureStockPage() {
     setViewportByTimeframe((prev) => ({ ...prev, [timeframe]: vp }))
   }, [timeframe])
 
-  // [CHANGE-20260720-Phase4 §四] 解析 indicator_view URL 参数
-  //   - 合法值：node_cluster | bollinger | smc（与后端 INDICATOR_VIEW_VALUES 对齐）
-  //   - 非法或缺失：回退到 DEFAULT_CAPTURE_INDICATOR_VIEW（node_cluster）
-  //   - 透传到 StrategyChart prop，影响图层预设；同时作为 MobileIndicatorStage 的 module-label 文案
-  const indicatorView: IndicatorView = useMemo(() => {
-    const raw = searchParams.get('indicator_view')
-    const normalized = normalizeIndicatorView(raw)
-    return normalized ?? DEFAULT_CAPTURE_INDICATOR_VIEW
-  }, [searchParams])
+  // [CHANGE-20260728-010] 固定组合视图：忽略 URL indicator_view 参数
+  //   - 新业务唯一写入值：FEISHU_CAPTURE_VIEW='structure_node'（结构 + 筹码共识组合视图）
+  //   - 旧 URL 携带的 node_cluster|bollinger|smc 仅作历史兼容读取，不再影响图层渲染
+  //   - 该值固定透传给 StrategyChart 和 MobileIndicatorStage，用于 module-label 显示与 data-indicator-view 属性
+  //   - 后端 snapshot API 也忽略该参数，固定按 structure_node 组合视图渲染（include_smc=true）
+  const indicatorView: IndicatorView = FEISHU_CAPTURE_VIEW
 
   // [Task 2] focus_event 解析：从 URL query 读取监控触发事件信息
   //   字段：focus_event_id / focus_event_type / anchor_time / confirmed_time /
@@ -137,6 +132,8 @@ export default function CaptureStockPage() {
 
   // [Capture] - 描述: 截图模式唯一业务数据请求
   // 通过 Capture Token 访问专用 Snapshot API，不调用普通业务端点
+  // [CHANGE-20260728-010] indicator_view 固定传 'structure_node'，后端忽略该参数，
+  //   固定按组合视图渲染（include_smc=true，Node 数据完整 + SMC DTO 结构存在）。
   const snapshotQuery = useQuery({
     queryKey: ['capture', 'snapshot', instrumentId, indicatorView],
     queryFn: async () => {
@@ -146,9 +143,9 @@ export default function CaptureStockPage() {
         {
           params: {
             timeframe,
-            // [CHANGE-20260720-Phase4] 透传 indicator_view 到后端 snapshot
-            //   后端可基于此参数决定 include_smc 等计算开关（smc 视图需要 include_smc=true）
-            //   也可用于缓存键维度（iv=smc）与 CaptureJob 元数据记录
+            // [CHANGE-20260728-010] 透传固定 indicator_view='structure_node' 到后端 snapshot
+            //   后端忽略该参数的渲染逻辑，固定 include_smc=true；该值仅用于缓存键维度（iv=structure_node）
+            //   和 CaptureJob 元数据记录，与后端 FEISHU_CAPTURE_VIEW 对齐
             indicator_view: indicatorView,
             ...(sourceBarTime ? { source_bar_time: sourceBarTime } : {}),
             // 截图链路固定强制实时计算，跳过 Redis 指标缓存，不复用旧指标
@@ -201,14 +198,16 @@ export default function CaptureStockPage() {
   //   - mismatch 时显示两端 count/time/hash/as_of 差异，便于运维定位
   //   - 用户可点击"重试"按钮触发 snapshotQuery.refetch()
   //
-  // [PROMPT.md §5.3.5 V2 类型特定 Ready] 不同 indicator_view 有额外 Ready 条件：
-  //   - node_cluster: 100 行 profile + profile_hash + node_regions
-  //   - bollinger: 三轨（upper/middle/lower）+ frame matched
-  //   - smc: DTO 存在 + 版本正确 + frame matched
+  // [CHANGE-20260728-010] combined Ready = nodeReady && smcContractReady
+  //   - nodeReady: data.node_cluster 含 100 行 profile + node_regions_hash + node_regions
+  //   - smcContractReady: data.smc DTO 结构存在（events/order_blocks/swing_bias 等数组）
+  //     SMC 数组允许为空（无事件时 SMC 结构仍需存在，避免前端永久 loading）
+  //   - 旧 bollinger 分支已移除（不再作为 Ready 条件）
+  //   - 旧 smc 单独 Ready 合并到 combined Ready：不再单独检查 algorithm_version
   const renderFrame = snapshot?.render_frame
   const isFrameMatched = renderFrame?.matched === true
   const hasBaseData = !!barsResponse?.items?.length && !!indicatorsResponse
-  const isTypeReady = computeTypeSpecificReady(indicatorView, indicatorsResponse)
+  const isTypeReady = computeCombinedReady(indicatorsResponse)
   const isRenderReady = hasBaseData && isFrameMatched && isTypeReady
 
   // [PROMPT.md §5.3.3 V2] 发送时间：后端 snapshot_time（UTC ISO），由 MobileIndicatorStage 转 Asia/Shanghai
@@ -354,87 +353,56 @@ export default function CaptureStockPage() {
 }
 
 /**
- * [PROMPT.md §5.3.5 V2 类型特定 Ready] 不同 indicator_view 的额外 Ready 条件。
+ * [CHANGE-20260728-010] combined Ready = nodeReady && smcContractReady
  *
- * - node_cluster: data.node_cluster 含 100 行 profile + profile_hash + node_regions
- * - bollinger: data.bb_monitor 含三轨（upper/middle/lower 非空数组）
- * - smc: data.smc 含 DTO + algorithm_version
+ * - nodeReady: data.node_cluster 含 profile_rows + node_regions_hash + node_regions
+ *   （兼容 watchlist_monitor / volume_node_monitor 旧命名空间回读）
+ * - smcContractReady: data.smc DTO 结构存在（events/order_blocks/swing_bias 等核心数组字段）
+ *   SMC 数组允许为空（无事件时 SMC 结构仍需存在，避免前端永久 loading）
+ *
+ * 旧 indicator_view 分支（node_cluster/bollinger/smc）已合并为组合视图检查；
+ * bollinger 不再作为 Ready 条件（BB 不进入飞书截图）。
  *
  * 基础 Ready（bars 存在 + indicators 存在 + frame matched）由调用方检查，
- * 本函数只检查类型特定条件。
+ * 本函数只检查组合视图的额外条件。
  */
-function computeTypeSpecificReady(
-  indicatorView: IndicatorView,
-  indicators: IndicatorResponse | undefined,
-): boolean {
+function computeCombinedReady(indicators: IndicatorResponse | undefined): boolean {
   if (!indicators?.data) return false
   const data = indicators.data as Record<string, unknown>
 
-  if (indicatorView === 'node_cluster') {
-    // [PROMPT.md §5.3.5] Node: 100 行 profile + profile_hash + node_regions
-    // [V2 fix] 实际 API 返回 `node_regions_hash`（profile_to_dict 序列化的 hash 字段名），
-    //   旧版前端误用 `profile_hash`，导致 data-render-ready 永远 false，capture 30s 超时。
-    //   同时兼容 `profile_hash`（保留向后兼容，若未来 DTO 添加该字段则同样识别）。
-    const vn = (data['node_cluster'] ?? data['watchlist_monitor'] ?? data['volume_node_monitor']) as
-      | Record<string, unknown>
-      | undefined
-    if (!vn) return false
-    const profileRows = vn.profile_rows
-    const nodeRegionsHash = vn.node_regions_hash
-    const profileHash = vn.profile_hash
-    const nodeRegions = vn.node_regions
-    const hasHash =
-      (typeof nodeRegionsHash === 'string' && nodeRegionsHash.length > 0) ||
-      (typeof profileHash === 'string' && profileHash.length > 0)
-    return (
-      Array.isArray(profileRows) && profileRows.length > 0 &&
-      hasHash &&
-      Array.isArray(nodeRegions)
-    )
-  }
+  // ===== Node Ready =====
+  // 兼容旧命名空间：node_cluster > watchlist_monitor > volume_node_monitor
+  const vn = (data['node_cluster'] ?? data['watchlist_monitor'] ?? data['volume_node_monitor']) as
+    | Record<string, unknown>
+    | undefined
+  if (!vn) return false
+  const profileRows = vn.profile_rows
+  const nodeRegionsHash = vn.node_regions_hash
+  const profileHash = vn.profile_hash
+  const nodeRegions = vn.node_regions
+  const hasHash =
+    (typeof nodeRegionsHash === 'string' && nodeRegionsHash.length > 0) ||
+    (typeof profileHash === 'string' && profileHash.length > 0)
+  const nodeReady =
+    Array.isArray(profileRows) && profileRows.length > 0 &&
+    hasHash &&
+    Array.isArray(nodeRegions)
+  if (!nodeReady) return false
 
-  if (indicatorView === 'bollinger') {
-    // [PROMPT.md §5.3.5] BB: 三轨（upper/middle/lower）非空
-    // [V2 fix] 实际 API 在 `watchlist_monitor` 中返回 `bb_upper/bb_mid/bb_lower` 数组
-    //   （BollingerBandsMonitor 计算结果挂在 watchlist_monitor 命名空间下），
-    //   不存在独立的 `bb_monitor`/`bollinger` 顶层键。
-    //   旧版前端只查 `bb_monitor`/`bollinger`，导致 bollinger 视图永远 not ready。
-    const bb = (data['bb_monitor'] ?? data['bollinger']) as Record<string, unknown> | undefined
-    const wm = data['watchlist_monitor'] as Record<string, unknown> | undefined
-    const upper = bb?.upper ?? wm?.bb_upper
-    const middle = bb?.middle ?? wm?.bb_mid
-    const lower = bb?.lower ?? wm?.bb_lower
-    return (
-      Array.isArray(upper) && (upper as unknown[]).length > 0 &&
-      Array.isArray(middle) && (middle as unknown[]).length > 0 &&
-      Array.isArray(lower) && (lower as unknown[]).length > 0
-    )
-  }
-
-  if (indicatorView === 'smc') {
-    // [PROMPT.md §5.3.5] SMC: DTO 存在 + 版本正确 + render_frame matched
-    // [V2 fix] 实际 API 返回扁平结构：`events`/`order_blocks`/`equal_highs_lows`/`trailing`/
-    //   `swing_bias`/`pivots`/`params`/`view`，不存在 `dto` 包装层，也不存在顶层
-    //   `algorithm_version`/`bos`/`choch` 键。
-    //   BOS/CHoCH 事件位于 `events` 数组中（按 event_type 区分），order_blocks 数组
-    //   表示已检测到的 OB 区。算法版本可在 `params.algorithm_version` 或 `view.algorithm_version`
-    //   中查找（若存在），但 Ready 条件只要求核心数据结构非空即可（与 node_cluster 一致）。
-    const smc = data['smc'] as Record<string, unknown> | undefined
-    if (!smc) return false
-    const events = smc.events
-    const orderBlocks = smc.order_blocks
-    const params = smc.params as Record<string, unknown> | undefined
-    const view = smc.view as Record<string, unknown> | undefined
-    const algorithmVersion =
-      (params?.algorithm_version as string | undefined) ??
-      (view?.algorithm_version as string | undefined) ??
-      (smc.algorithm_version as string | undefined)
-    const hasCoreData =
-      (Array.isArray(events) && (events as unknown[]).length > 0) ||
-      (Array.isArray(orderBlocks) && (orderBlocks as unknown[]).length > 0)
-    // algorithm_version 可选（部分 SMC 实现未返回该字段，只要有核心数据即视为 Ready）
-    return hasCoreData || (typeof algorithmVersion === 'string' && algorithmVersion.length > 0)
-  }
-
-  return true
+  // ===== SMC Contract Ready =====
+  // DTO 结构必须存在；数组允许为空（无事件时不能导致永久 loading）
+  // 实际 API 返回扁平结构：events/order_blocks/equal_highs_lows/trailing/swing_bias/pivots/params/view
+  const smc = data['smc'] as Record<string, unknown> | undefined
+  if (!smc) return false
+  // 核心字段必须为数组类型（即使为空也代表 SMC 结构已就绪）
+  const events = smc.events
+  const orderBlocks = smc.order_blocks
+  const swingBias = smc.swing_bias
+  const params = smc.params
+  const hasSmcStructure =
+    Array.isArray(events) &&
+    Array.isArray(orderBlocks) &&
+    Array.isArray(swingBias) &&
+    typeof params === 'object' && params !== null
+  return hasSmcStructure
 }

@@ -1,15 +1,14 @@
 // [useStockDetailFeishu] - 描述: StockDetailPage 飞书异步投递 hook
 // 负责 POST 创建截图任务 → 1s 轮询至 success/failed 或 30s 超时 → interval/timeout 清理。
 // 保持飞书默认 1d 截图契约，不改 Capture API。
-// [CHANGE-20260720-003 §四] 新增 selectedIndicatorView 状态 + handleSendFeishu(indicatorView) 参数，
-// 用户在弹窗中三选一（筹码共识价/布林带/结构），透传到后端影响文字卡片字段与截图图层。
+// [CHANGE-20260728-010] 移除 selectedIndicatorView 状态与三选一弹窗，
+// 固定发送"结构 + 筹码共识"组合图（后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'）。
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { sendStockDetailFeishu, getStockDetailFeishuStatus } from '@/api/endpoints'
 import type {
   StockDetailFeishuCreateResponse,
   StockDetailFeishuStatusResponse,
-  IndicatorView,
 } from '@/api/endpoints'
 import { useToast } from '@/store/toast'
 
@@ -24,17 +23,11 @@ export interface StockDetailFeishu {
   feishuStatus: StockDetailFeishuStatusResponse | null
   feishuPolling: boolean
   sendFeishuPending: boolean
-  // [CHANGE-20260720-003 §四] 指标视图选择状态（默认筹码共识价）
-  selectedIndicatorView: IndicatorView
-  setSelectedIndicatorView: (view: IndicatorView) => void
   stopFeishuPolling: () => void
   handleSendFeishu: () => void
   handleOpenFeishu: () => void
   handleCloseFeishu: () => void
 }
-
-// [CHANGE-20260720-003 §四] 默认指标视图：筹码共识价（与后端 DEFAULT_INDICATOR_VIEW 对齐）
-const DEFAULT_INDICATOR_VIEW: IndicatorView = 'node_cluster'
 
 export function useStockDetailFeishu({ instrumentId }: StockDetailFeishuParams): StockDetailFeishu {
   const showToast = useToast((s) => s.show)
@@ -43,20 +36,16 @@ export function useStockDetailFeishu({ instrumentId }: StockDetailFeishuParams):
   const [feishuResult, setFeishuResult] = useState<StockDetailFeishuCreateResponse | null>(null)
   const [feishuStatus, setFeishuStatus] = useState<StockDetailFeishuStatusResponse | null>(null)
   const [feishuPolling, setFeishuPolling] = useState(false)
-  // [CHANGE-20260720-003 §四] 指标视图状态：弹窗三单选项的当前选择
-  const [selectedIndicatorView, setSelectedIndicatorView] = useState<IndicatorView>(
-    DEFAULT_INDICATOR_VIEW,
-  )
   const feishuPollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const feishuPollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const sendFeishuMutation = useMutation<
     StockDetailFeishuCreateResponse,
     Error,
-    { instrId: string; indicatorView: IndicatorView }
+    { instrId: string }
   >({
-    mutationFn: ({ instrId, indicatorView }) =>
-      sendStockDetailFeishu(instrId, { indicator_view: indicatorView }),
+    // [CHANGE-20260728-010] 不再透传 indicator_view，后端固定使用 FEISHU_CAPTURE_VIEW
+    mutationFn: ({ instrId }) => sendStockDetailFeishu(instrId),
   })
 
   // 清理轮询定时器（卸载 / 关闭模态框 / 轮询结束均需调用）
@@ -78,15 +67,14 @@ export function useStockDetailFeishu({ instrumentId }: StockDetailFeishuParams):
   }, [stopFeishuPolling])
 
   // POST 创建异步任务 → toast 提示入队 → 1s 轮询至 success/failed 或 30s 超时
-  // [CHANGE-20260720-003 §四] 读取当前 selectedIndicatorView 透传到后端
+  // [CHANGE-20260728-010] 固定组合视图，前端不再选择 indicator_view
   const handleSendFeishu = useCallback(() => {
     if (!instrumentId) return
-    const indicatorView = selectedIndicatorView
     setFeishuResult(null)
     setFeishuStatus(null)
     stopFeishuPolling()
     sendFeishuMutation.mutate(
-      { instrId: instrumentId, indicatorView },
+      { instrId: instrumentId },
       {
         onSuccess: (res) => {
           setFeishuResult(res)
@@ -133,7 +121,7 @@ export function useStockDetailFeishu({ instrumentId }: StockDetailFeishuParams):
         onError: () => showToast('发送失败', '请重试'),
       },
     )
-  }, [instrumentId, selectedIndicatorView, sendFeishuMutation, stopFeishuPolling, showToast])
+  }, [instrumentId, sendFeishuMutation, stopFeishuPolling, showToast])
 
   const handleOpenFeishu = useCallback(() => {
     stopFeishuPolling()
@@ -156,8 +144,6 @@ export function useStockDetailFeishu({ instrumentId }: StockDetailFeishuParams):
     feishuStatus,
     feishuPolling,
     sendFeishuPending: sendFeishuMutation.isPending,
-    selectedIndicatorView,
-    setSelectedIndicatorView,
     stopFeishuPolling,
     handleSendFeishu,
     handleOpenFeishu,

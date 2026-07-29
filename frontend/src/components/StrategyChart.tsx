@@ -127,15 +127,14 @@ export interface StrategyChartProps {
   //   未传入时回退到 MAX_VISIBLE_BARS（250）；传入 90 时飞书舞台只显示最近 90 根
   //   不影响底层数据拉取总长度，也不影响详情页用户缩放逻辑
   defaultVisibleBars?: number
-  // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYERS 且不可关闭，不读写 localStorage
+  // [feishu-capture] - 描述: 飞书截图模式，强制开启 FEISHU_CAPTURE_LAYER_PRESET 且不可关闭，不读写 localStorage
   isCaptureMode?: boolean
-  // [CHANGE-20260720-Phase4 §四] indicator_view 选择（仅 capture 模式生效）
-  //   携带时使用 INDICATOR_VIEW_LAYER_PRESETS 替代 FEISHU_CAPTURE_LAYERS，
-  //   保证"每张截图只渲染一个指标视图"（advice.md v6 + 后端 INDICATOR_VIEW_VALUES）。
-  //   - node_cluster: Node + Profile + POC（筹码共识价）
-  //   - bollinger: BB（布林带）
-  //   - smc: SMC 结构（BOS/CHoCH/OB/EQH/EQL/trailing）
-  //   未传入时回退到 FEISHU_CAPTURE_LAYERS（向后兼容旧 capture URL）。
+  // [CHANGE-20260728-010] indicatorView（仅 capture 模式生效）
+  //   新业务固定为 FEISHU_CAPTURE_VIEW='structure_node'（结构 + 筹码共识组合视图）。
+  //   CaptureStockPage 始终传入 'structure_node'，对应 FEISHU_CAPTURE_LAYER_PRESET：
+  //     node=true + smc=true + volume=true + boll=false
+  //   旧 URL 携带的 node_cluster|bollinger|smc 已忽略（CaptureStockPage 不再解析）。
+  //   仅用于 module-label 显示与 data-indicator-view 属性，不再决定图层切换。
   indicatorView?: IndicatorView | null
   // [PROMPT.md §5.3.4 V2] Canvas 字体/线宽/几何集中缩放密度。
   //   - 'desktop'（默认）：保持现有 8-11px 字号 / 1-1.5px 线宽，PC 端浏览体验不变
@@ -2793,13 +2792,11 @@ export function StrategyChart({
   // 父组件 StockResearchWorkspace 持有唯一 ChartLayerVisibility state 并传入；
   // 截图模式时不传（undefined），由此处派生 forced layers（不读写 localStorage）。
   const effectiveLayers: LayerVisibility = useMemo(() => {
-    // [feishu-capture] - 描述: 截图模式强制开启 FEISHU_CAPTURE_LAYERS，忽略用户偏好
-    //   advice.md v6 第 2 条：dsa/bb/profile/node/poc 必须开启
-    //
-    // [CHANGE-20260720-Phase4 §四] 当 indicatorView 提供时，优先使用
-    //   INDICATOR_VIEW_LAYER_PRESETS（每张图只渲染一个指标视图），
-    //   替代 FEISHU_CAPTURE_LAYERS（同时开 5 层，与新语义冲突）。
-    //   未提供 indicatorView 时回退到 FEISHU_CAPTURE_LAYERS（向后兼容）。
+    // [CHANGE-20260728-010] 截图模式：固定使用 FEISHU_CAPTURE_LAYER_PRESET（结构 + 筹码共识组合视图）
+    //   - CaptureStockPage 始终传入 indicatorView='structure_node'，对应 INDICATOR_VIEW_LAYER_PRESETS['structure_node']
+    //   - 该 preset 已等于 FEISHU_CAPTURE_LAYER_PRESET：node=true + smc=true + volume=true + boll=false
+    //   - 旧 FEISHU_CAPTURE_LAYERS 兜底分支保留仅为向后兼容（不应被触发，CaptureStockPage 始终传 indicatorView）
+    //   - 旧 indicator_view=node_cluster|bollinger|smc 已不再传入，不再切换单指标视图
     if (isCaptureMode) {
       if (indicatorView) {
         return chartLayerVisibilityToInternal(
@@ -2807,6 +2804,7 @@ export function StrategyChart({
           source,
         )
       }
+      // [向后兼容] 无 indicatorView 时回退到旧 5 层兜底（不应被新链路触发）
       const forced = getDefaultLayers(strategyId)
       FEISHU_CAPTURE_LAYERS.forEach(layerId => {
         forced[layerId as keyof LayerVisibility] = true

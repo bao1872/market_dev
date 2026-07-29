@@ -113,22 +113,38 @@ export function chartLayersForSource(
   return manifest.filter((e) => !e.selectionOnly || source === 'selection')
 }
 
-// ===== [CHANGE-20260720-Phase4 §四] indicator_view → ChartLayerVisibility 预设 =====
-// 三类监控独立飞书图片（PROMPT.md §四 + advice.md v6）：
-//   node_cluster → 筹码共识价（Node + Profile + POC）
-//   bollinger    → 布林带（BB）
-//   smc          → 结构（BOS/CHoCH/OB/EQH/EQL/trailing）
+// ===== [CHANGE-20260728-010] 新业务固定组合 Capture Preset（结构 + 筹码共识）=====
+// 历史 INDICATOR_VIEW_LAYER_PRESETS（node_cluster / bollinger / smc 三套独立视图）
+// 已被新组合 preset 替代。旧 preset 保留读取兼容（历史 URL 参数仍可解析）。
 //
-// 每张截图只渲染一个 indicator_view 对应的图层，禁止三类指标叠在同一张图。
-// Capture URL 携带 &indicator_view=... 时，StrategyChart 在 isCaptureMode 下使用
-// 此预设替代 FEISHU_CAPTURE_LAYERS（FEISHU_CAPTURE_LAYERS 同时开启 5 个图层，
-// 与"每张图只渲染一个指标"语义冲突）。
+// 新业务固定使用 FEISHU_CAPTURE_VIEW='structure_node'：
+//   - node=true（筹码共识图层：profile/poc/peak_node/trigger_node）
+//   - smc=true（结构图层：bos/choch/ob/eqh_eql/strong_weak/trigger_entity）
+//   - volume=true（基础图层）
+//   - boll=false（布林带不再进入飞书截图）
+//   - trend/macd/sqzmom/breakout=false（监控截图无关）
 //
-// 设计原则：
-//   - 主图基线（K 线 + 成交量）始终开启，保证可读性
-//   - trend(breakout/selection) 在监控截图场景无关，关闭
-//   - macd/sqzmom 副图在移动舞台副图区域不渲染，关闭（节省垂直空间给主图）
+// combined Ready = nodeReady && smcContractReady
+// SMC 数组允许为空（无事件时 SMC 结构仍需存在，避免前端永久 loading）
+
+// [CHANGE-20260728-010] 新业务唯一 Capture Preset - 结构 + 筹码共识组合视图
+export const FEISHU_CAPTURE_LAYER_PRESET: ChartLayerVisibility = {
+  trend: false,
+  node: true,
+  boll: false,
+  volume: true,
+  macd: false,
+  sqzmom: false,
+  breakout: false,
+  smc: true,
+}
+
+// ===== [历史兼容] 旧三套 indicator_view → ChartLayerVisibility 预设 =====
+// 仅供历史 URL 参数回读兼容，新业务直接使用 FEISHU_CAPTURE_LAYER_PRESET。
 export const INDICATOR_VIEW_LAYER_PRESETS: Record<IndicatorView, ChartLayerVisibility> = {
+  // [CHANGE-20260728-010] 新业务固定组合视图（结构 + 筹码共识，无 BB）
+  structure_node: FEISHU_CAPTURE_LAYER_PRESET,
+  // [历史兼容] 旧三套独立视图，仅供历史 URL 参数回读
   // 筹码共识价：成交量分布 + 节点区间 + POC
   node_cluster: {
     trend: false,
@@ -166,13 +182,16 @@ export const INDICATOR_VIEW_LAYER_PRESETS: Record<IndicatorView, ChartLayerVisib
 
 // indicator_view 用户可见文案（与后端 INDICATOR_VIEW_LABELS 对齐）
 export const INDICATOR_VIEW_LABELS: Record<IndicatorView, string> = {
+  structure_node: '结构 + 筹码共识',
   node_cluster: '筹码共识价',
   bollinger: '布林带',
   smc: '结构',
 }
 
-// 合法 indicator_view 集合（前端校验 URL 参数用）
-export const INDICATOR_VIEW_VALUES: readonly IndicatorView[] = ['node_cluster', 'bollinger', 'smc'] as const
+// 合法 indicator_view 集合（前端校验 URL 参数用，含新组合值 structure_node）
+export const INDICATOR_VIEW_VALUES: readonly IndicatorView[] = [
+  'node_cluster', 'bollinger', 'smc', 'structure_node',
+] as const
 
 // 校验 indicator_view URL 参数；非法或缺失时返回 null（由调用方决定回退策略）
 export function normalizeIndicatorView(raw: string | null): IndicatorView | null {
@@ -183,6 +202,7 @@ export function normalizeIndicatorView(raw: string | null): IndicatorView | null
 }
 
 // 获取 indicator_view 对应的 ChartLayerVisibility 预设
+// [CHANGE-20260728-010] 新业务应直接使用 FEISHU_CAPTURE_LAYER_PRESET 常量
 export function getIndicatorViewLayerPreset(view: IndicatorView): ChartLayerVisibility {
   return INDICATOR_VIEW_LAYER_PRESETS[view]
 }

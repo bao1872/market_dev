@@ -307,8 +307,11 @@ def build_monitor_event_text(
     [CHANGE-20260720-003 §三/§四] indicator_view 拆分：
     - None / "node_cluster" / 默认：保留全部字段（向后兼容旧调用）
     - "node_cluster": 现价 + upper_node + lower_node + poc + position
-    - "bollinger": 现价 + bb_upper + bb_mid + bb_lower
+    - "bollinger": 现价 + bb_upper + bb_mid + bb_lower（历史兼容，新业务不再触发）
     - "smc": 现价 + smc_bos_level + smc_choch_level + smc_ob_zone + smc_swing_bias
+    - "structure_node": [CHANGE-20260728-010] 现价 + node_cluster 字段 + SMC 字段（无 BB）
+      新业务固定使用此视图：事件文字只描述实际触发事件类型（结构或筹码共识），
+      但文字字段同时展示结构 + 筹码共识两类指标，与图片解耦。
     文字卡片和图片都只能描述所选指标，禁止混合指标。
 
     模板（默认全字段）：
@@ -332,17 +335,18 @@ def build_monitor_event_text(
         event_type: 事件类型（如 bb_upper_touch）
         event_time: 事件时间 ISO8601（仅用于提取 HH:MM 作为触发时间）
         current_price: 现价
-        bb_upper / bb_mid / bb_lower: BB 三轨
+        bb_upper / bb_mid / bb_lower: BB 三轨（历史兼容，新业务 structure_node 视图不展示）
         upper_node / lower_node: 上下节点
         poc_price: POC 价格
         position_0_1: 节点位置 0~1
         resource_refs: 资源引用（instrument_id/symbol/event_id 等）
         memo: 个股备忘录内容（非空时追加到文本末尾）
-        indicator_view: 指标视图 node_cluster|bollinger|smc；None 表示全字段（向后兼容）
-        smc_bos_level: SMC BOS level（indicator_view="smc" 时使用）
-        smc_choch_level: SMC CHoCH level（indicator_view="smc" 时使用）
-        smc_ob_high / smc_ob_low: SMC OB zone 高低点（indicator_view="smc" 时使用）
-        smc_swing_bias: SMC 主趋势方向 1/-1/0（indicator_view="smc" 时使用）
+        indicator_view: 指标视图 node_cluster|bollinger|smc|structure_node；
+            None 表示全字段（向后兼容）；新业务固定使用 "structure_node"
+        smc_bos_level: SMC BOS level（indicator_view="smc" 或 "structure_node" 时使用）
+        smc_choch_level: SMC CHoCH level（同上）
+        smc_ob_high / smc_ob_low: SMC OB zone 高低点（同上）
+        smc_swing_bias: SMC 主趋势方向 1/-1/0（同上）
 
     Returns:
         NotificationMessageDTO（text_content 字段填充纯文本）
@@ -381,10 +385,12 @@ def build_monitor_event_text(
         return "震荡"
 
     # [CHANGE-20260720-003 §三/§四] 文字卡片只描述所选指标，禁止混合
+    # [CHANGE-20260728-010] 新增 "structure_node" 视图：node_cluster + SMC 字段（无 BB）
     # - None: 全字段（向后兼容旧调用，不指定 view 时展示所有指标）
     # - node_cluster: 现价 + upper_node + lower_node + poc + position
-    # - bollinger: 现价 + bb_upper + bb_mid + bb_lower
+    # - bollinger: 现价 + bb_upper + bb_mid + bb_lower（历史兼容，新业务不再触发）
     # - smc: 现价 + smc_bos_level + smc_choch_level + smc_ob_zone + smc_swing_bias
+    # - structure_node: 现价 + node_cluster 字段 + SMC 字段（新业务固定视图，无 BB）
     text_lines = [
         "【自选监控触发】",
         f"{stock_name} {symbol}",
@@ -412,6 +418,7 @@ def build_monitor_event_text(
             f"{get_field_label('position')}：{_fmt_pos(position_0_1)}",
         ])
     elif indicator_view == "bollinger":
+        # [CHANGE-20260728-010] 历史兼容：新业务不再触发 BB 事件
         text_lines.extend([
             f"{get_field_label('bb_upper')}：{_fmt(bb_upper)}",
             f"{get_field_label('bb_mid')}：{_fmt(bb_mid)}",
@@ -425,6 +432,27 @@ def build_monitor_event_text(
             else "-"
         )
         text_lines.extend([
+            f"{get_field_label('smc_bos_level')}：{_fmt(smc_bos_level)}",
+            f"{get_field_label('smc_choch_level')}：{_fmt(smc_choch_level)}",
+            f"{get_field_label('smc_ob_zone')}：{ob_zone}",
+            f"{get_field_label('smc_swing_bias')}：{_fmt_bias(smc_swing_bias)}",
+        ])
+    elif indicator_view == "structure_node":
+        # [CHANGE-20260728-010] 新业务固定组合视图：结构 + 筹码共识（无 BB）
+        # 事件文字只描述实际触发事件类型（event_label 决定），但字段同时展示两类指标
+        # 与图片解耦：图片也是组合视图，但文字可以独立看懂
+        ob_zone = (
+            f"{_fmt(smc_ob_low)} ~ {_fmt(smc_ob_high)}"
+            if smc_ob_low is not None or smc_ob_high is not None
+            else "-"
+        )
+        # 筹码共识字段
+        text_lines.extend([
+            f"{get_field_label('upper_node')}：{_fmt(upper_node)}",
+            f"{get_field_label('lower_node')}：{_fmt(lower_node)}",
+            f"{get_field_label('poc')}：{_fmt(poc_price)}",
+            f"{get_field_label('position')}：{_fmt_pos(position_0_1)}",
+            # 结构图层
             f"{get_field_label('smc_bos_level')}：{_fmt(smc_bos_level)}",
             f"{get_field_label('smc_choch_level')}：{_fmt(smc_choch_level)}",
             f"{get_field_label('smc_ob_zone')}：{ob_zone}",
@@ -524,6 +552,54 @@ if __name__ == "__main__":
     assert "数据时间" not in dto_text.text_content
     assert "更新时间" not in dto_text.text_content
     print("  纯文本消息字段验证通过 ✓")
+
+    # [CHANGE-20260728-010] 测试新业务固定组合视图 structure_node（结构+筹码共识，无 BB）
+    print("测试监控事件纯文本消息 (structure_node 组合视图):")
+    dto_sn = build_monitor_event_text(
+        stock_name="鼎阳科技",
+        symbol="688112",
+        event_type="smc_bos_retest",
+        event_time="2026-06-18T14:48:00+08:00",
+        current_price=71.13,
+        bb_upper=79.12,  # 应不展示（BB 历史兼容字段）
+        bb_mid=71.20,
+        bb_lower=63.28,
+        upper_node=77.25,
+        lower_node=70.04,
+        poc_price=38.78,
+        position_0_1=0.80,
+        resource_refs={"instrument_id": "688112.SH", "event_id": "evt-001"},
+        indicator_view="structure_node",
+        smc_bos_level=70.50,
+        smc_choch_level=68.20,
+        smc_ob_high=72.00,
+        smc_ob_low=70.00,
+        smc_swing_bias=1,
+    )
+    print(f"  title={dto_sn.title}")
+    print(f"  text_content:\n{dto_sn.text_content}")
+    assert dto_sn.text_content is not None
+    assert "【自选监控触发】" in dto_sn.text_content
+    assert "触发时间：14:48" in dto_sn.text_content
+    assert "现价：71.13" in dto_sn.text_content
+    # 筹码共识字段应展示
+    assert "上方成交密集区：77.25" in dto_sn.text_content
+    assert "下方成交密集区：70.04" in dto_sn.text_content
+    assert "最密集成交价：38.78" in dto_sn.text_content
+    assert "当前区间位置：0.80" in dto_sn.text_content
+    # 结构图层字段应展示
+    assert "70.50" in dto_sn.text_content  # smc_bos_level
+    assert "68.20" in dto_sn.text_content  # smc_choch_level
+    assert "70.00 ~ 72.00" in dto_sn.text_content  # smc_ob_zone
+    assert "上行" in dto_sn.text_content  # smc_swing_bias=1 → 上行
+    # BB 字段不应展示（新业务 structure_node 视图）
+    assert "79.12" not in dto_sn.text_content, "structure_node 视图不应展示 BB 字段"
+    assert "71.20" not in dto_sn.text_content or "71.20" == "71.13", (
+        "structure_node 视图不应展示 bb_mid"
+    )
+    # resource_refs 应携带 indicator_view=structure_node
+    assert dto_sn.resource_refs.get("indicator_view") == "structure_node"
+    print("  structure_node 组合视图字段验证通过 ✓")
 
     print("测试系统告警消息:")
     dto2 = build_system_alert(

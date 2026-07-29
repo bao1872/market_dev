@@ -511,15 +511,21 @@ export type ShareDeliveryStatus =
   | 'dead'
   | 'not_created'
 
-// [CHANGE-20260720-003 §四] 指标视图共享枚举（与后端 app.constants.indicator_view 对齐）
-// 详情页手动发送飞书时，用户从弹窗三单选项中选择指标视图：
-// - node_cluster: 筹码共识价
-// - bollinger: 布林带
-// - smc: 结构
-export type IndicatorView = 'node_cluster' | 'bollinger' | 'smc'
+// [CHANGE-20260728-010] 指标视图共享枚举（与后端 app.constants.indicator_view 对齐）
+// 历史值：node_cluster / bollinger / smc（仅历史回读兼容）
+// 新业务固定值：structure_node（结构 + 筹码共识组合视图）
+// 前端不再展示选择器，固定发送 structure_node 组合图
+export type IndicatorView = 'node_cluster' | 'bollinger' | 'smc' | 'structure_node'
 
-/** POST /instruments/{instrument_id}/send-feishu 请求体 - 指标视图选择 */
+// 新业务固定使用的视图常量
+export const FEISHU_CAPTURE_VIEW = 'structure_node' as const
+
+/** POST /instruments/{instrument_id}/send-feishu 请求体
+ * [CHANGE-20260728-010] 历史兼容字段，前端已不再选择 indicator_view。
+ * 后端兼容接收但忽略此值，固定使用 FEISHU_CAPTURE_VIEW='structure_node'。
+ */
 export interface SendFeishuRequest {
+  /** [历史兼容] 旧版字段，新业务已忽略。后端固定使用 structure_node。 */
   indicator_view?: IndicatorView
 }
 
@@ -1474,17 +1480,16 @@ export async function testNotificationChannelLatestEvent(channelId: string): Pro
 }
 
 // [StockDetailFeishu] - 描述: 创建异步投递任务（Outbox 链路），返回 test_run_id 供轮询
-// [CHANGE-20260720-003 §四] body 携带 indicator_view 透传到后端，影响：
-// - 文字卡片：按 indicator_view 拆分字段（一张图/一段文案只描述一个指标）
-// - 截图：URL 加 &indicator_view=... 切换图层组合，缓存键加 iv=... 维度
-// - CaptureJob：记录 indicator_view 便于状态查询区分
+// [CHANGE-20260728-010] 前端不再选择 indicator_view，固定发送空 body（后端使用 structure_node）。
+// 旧 payload 参数保留仅为兼容历史调用，新业务应直接调用 sendStockDetailFeishu(instrumentId)。
 export async function sendStockDetailFeishu(
   instrumentId: string,
   payload?: SendFeishuRequest,
 ): Promise<StockDetailFeishuCreateResponse> {
   const { data } = await apiClient.post<StockDetailFeishuCreateResponse>(
     `/instruments/${instrumentId}/send-feishu`,
-    payload ?? {},
+    // [CHANGE-20260728-010] 不再透传 indicator_view，后端固定使用 FEISHU_CAPTURE_VIEW
+    payload ? {} : {},
   )
   return data
 }

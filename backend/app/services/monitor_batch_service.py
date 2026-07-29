@@ -35,16 +35,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import indicator_contract
 from app.constants.capture import (
+    CAPTURE_HTTP_TIMEOUT_SECONDS,
     CAPTURE_SCOPE_STOCK_DETAIL,
     FEISHU_CAPTURE_TIMEFRAME,
+    FEISHU_CAPTURE_VIEW,
 )
 from app.constants.indicator_view import (
+    EVENT_CATEGORY_NODE_CONSENSUS,
+    EVENT_CATEGORY_STRUCTURE,
     UNSUPPORTED_INDICATOR_VIEW,
+    get_event_category,
     is_supported_event_type,
-    resolve_indicator_view,
 )
 from app.constants.strategy_keys import WATCHLIST_MONITOR
-from app.constants.user_facing_labels import get_event_label, get_field_label
+from app.constants.user_facing_labels import get_event_label
 from app.core.time import format_shanghai_datetime
 from app.models.capture_job import (
     CAPTURE_STATUS_FAILED,
@@ -119,10 +123,8 @@ _CST = ZoneInfo("Asia/Shanghai")
 # emoji 与文案分离：emoji 仅在此处维护，文案由 get_event_label 提供
 # [CHANGE-20260720-002 §二] 新增 SMC 三类事件 emoji/severity
 # [Task 2] 补齐 EQH/EQL 两类事件 emoji/severity（五类 SMC 全覆盖）
+# [CHANGE-20260728-010] 移除 BB 事件 emoji/severity（布林带不再触发盘中监控）
 _EVENT_EMOJI: dict[str, str] = {
-    "bb_upper_touch": "🔴",
-    "bb_mid_touch": "🟠",
-    "bb_lower_touch": "🟢",
     "node_cluster_touch": "🟣",
     "smc_bos_retest": "🔵",
     "smc_choch_retest": "🟦",
@@ -133,9 +135,6 @@ _EVENT_EMOJI: dict[str, str] = {
 
 # 事件类型 → 严重级别
 _EVENT_SEVERITY: dict[str, str] = {
-    "bb_upper_touch": "danger",
-    "bb_mid_touch": "warn",
-    "bb_lower_touch": "info",
     "node_cluster_touch": "warn",
     "smc_bos_retest": "warn",
     "smc_choch_retest": "danger",
@@ -1076,16 +1075,25 @@ class MonitorBatchService:
         change_pct_map: dict[uuid.UUID, float] | None = None,
         instrument_extra_info: dict[uuid.UUID, dict] | None = None,
         strategy_key: str = WATCHLIST_MONITOR,
-        strategy_name: str = "BB+节点监控",
+        strategy_name: str = "结构+筹码共识监控",
         user_id: uuid.UUID | None = None,
         memo_map: dict[tuple[uuid.UUID, uuid.UUID], str] | None = None,
     ) -> Any:
-        """按旧版 monitoring.py 的 generate_monitoring_card() 格式构建合并通知 DTO。
+        """构建合并通知 DTO（结构 + 筹码共识双类别）。
+
+        [CHANGE-20260728-010] 重构事件类别处理：
+        - 概览改为 "自选股N只｜触发M只｜结构X｜筹码共识Y"
+        - SMC 五类归为结构，node_cluster_touch 归为筹码共识
+        - 按 event.id 防御去重（同一事件不重复出现）
+        - 卡片只出现一次概览；text_content 由"概览 + 详情 + 数据时间"组成
+        - SMC 详情显示结构位、内部/摆动、方向、形成时间等可用字段，
+          避免两条不同结构显示成完全相同文字
+        - BB 相关统计/快照/上下文已移除（布林带不再触发盘中监控）
 
         卡片结构：
-        1. Header: "BB+节点监控 HH:MM"（北京时间），颜色由最严重事件级别决定
-        2. 概览行: "自选股 N 只 | 触发 M 只\\n上轨 X | 中轨 Y | 下轨 Z | 节点 W"
-        3. 逐股票详情（用 hr 分隔）: 股票标题 + hype_logic + 止损预测 + 信号详情 + BB上下文 + BB快照 + 备忘录
+        1. Header: "{strategy_name} HH:MM"（北京时间），颜色由最严重事件级别决定
+        2. 概览行（仅一次）: "自选股 N 只｜触发 M 只｜结构 X｜筹码共识 Y"
+        3. 逐股票详情（用 hr 分隔）: 股票标题 + hype_logic + 止损预测 + 信号详情 + 备忘录
         4. 数据时间 note: 事件触发时间（北京时间）
 
         [advice.md 第七节] - 备忘录闭环：
@@ -1107,6 +1115,16 @@ class MonitorBatchService:
         """
         from app.schemas.notification import NotificationMessageDTO
 
+        # [CHANGE-20260728-010] 按 event.id 防御去重（同一事件不重复出现）
+        seen_event_ids: set[uuid.UUID] = set()
+        deduped_events: list[_StrategyEventLike] = []
+        for ev in user_events:
+            if ev.id in seen_event_ids:
+                continue
+            seen_event_ids.add(ev.id)
+            deduped_events.append(ev)
+        user_events = deduped_events
+
         # 按标的分组
         instrument_events: dict[uuid.UUID, list[_StrategyEventLike]] = {}
         for ev in user_events:
@@ -1121,14 +1139,15 @@ class MonitorBatchService:
             if _SEVERITY_ORDER.get(sev, 0) > _SEVERITY_ORDER.get(max_sev, 0):
                 max_sev = sev
 
-        # 概览统计
-        trigger_counts: dict[str, int] = {
-            "bb_upper_touch": 0, "bb_mid_touch": 0,
-            "bb_lower_touch": 0, "node_cluster_touch": 0,
-        }
+        # [CHANGE-20260728-010] 概览统计：结构 X｜筹码共识 Y
+        structure_count = 0
+        node_consensus_count = 0
         for ev in user_events:
-            if ev.event_type in trigger_counts:
-                trigger_counts[ev.event_type] += 1
+            category = get_event_category(ev.event_type)
+            if category == EVENT_CATEGORY_STRUCTURE:
+                structure_count += 1
+            elif category == EVENT_CATEGORY_NODE_CONSENSUS:
+                node_consensus_count += 1
 
         # 卡片标题时间：最早事件的触发时间（北京时间），不使用当前时间
         earliest_event = min(user_events, key=lambda e: e.event_time)
@@ -1137,13 +1156,11 @@ class MonitorBatchService:
 
         elements: list[dict[str, Any]] = []
 
-        # 概览行 - [advice.md 第二节] 通俗化：上轨/中轨/下轨/节点 → 波动上沿/价格中枢/波动下沿/密集区
+        # 概览行（仅一次） - [CHANGE-20260728-010] 结构/筹码共识双类别
+        # 使用全角分隔符 ｜ 与半角 | 混合保持可读性
         overview = (
-            f"自选股 {total_instruments} 只 | 触发 {triggered_count} 只\n"
-            f"{get_field_label('bb_upper_short')} {trigger_counts['bb_upper_touch']} | "
-            f"{get_field_label('bb_mid_short')} {trigger_counts['bb_mid_touch']} | "
-            f"{get_field_label('bb_lower_short')} {trigger_counts['bb_lower_touch']} | "
-            f"{get_field_label('node_cluster_short')} {trigger_counts['node_cluster_touch']}"
+            f"自选股 {total_instruments} 只｜触发 {triggered_count} 只｜"
+            f"结构 {structure_count}｜筹码共识 {node_consensus_count}"
         )
         elements.append({"tag": "markdown", "content": overview})
 
@@ -1199,14 +1216,14 @@ class MonitorBatchService:
                     pred_lines.append(f"  买入(分类): {pred_buy_cls:.3f}")
                 elements.append({"tag": "markdown", "content": "\n".join(pred_lines)})
 
-            # 信号详情 - [advice.md 第二节] 事件文案/边界标签/BB上下文均改用 user_facing_labels
+            # 信号详情 - [CHANGE-20260728-010] 文字只描述实际触发事件
+            # SMC 事件显示结构位、内部/摆动、方向、形成时间等可用字段
+            # node_cluster_touch 显示成交密集区边界
             for ev in events:
                 emoji = _EVENT_EMOJI.get(ev.event_type, "📌")
                 event_label = get_event_label(ev.event_type)
                 payload = ev.payload or {}
                 current_price = payload.get("price") or payload.get("current_price")
-                boundary = payload.get("boundary")
-                dev_pct = payload.get("dev_pct")
 
                 sig_lines = [f"{emoji} {event_label}"]
                 # 触发时间（北京时间）
@@ -1216,52 +1233,40 @@ class MonitorBatchService:
                 if current_price is not None:
                     sig_lines.append(f"  现价: {current_price:.2f}")
 
-                if boundary is not None:
-                    # 边界标签通俗化：上轨/中轨/下轨/节点 → 近期波动上沿/中枢/下沿/成交密集区
-                    boundary_label_map = {
-                        "bb_upper_touch": get_field_label("bb_upper"),
-                        "bb_mid_touch": get_field_label("bb_mid"),
-                        "bb_lower_touch": get_field_label("bb_lower"),
-                        "node_cluster_touch": "成交密集区",
-                    }
-                    boundary_label = boundary_label_map.get(ev.event_type, "边界")
-                    dev_str = f"{dev_pct:+.2f}%" if dev_pct is not None else "-"
-                    sig_lines.append(
-                        f"  {boundary_label}: {boundary:.2f}  偏离: {dev_str}"
-                    )
-
-                # BB上下文（仅BB事件）- 标签通俗化：上轨/中轨/下轨 → 近期波动上沿/中枢/下沿
-                if ev.event_type in ("bb_upper_touch", "bb_mid_touch", "bb_lower_touch"):
-                    bb_upper = payload.get("bb_upper")
-                    bb_mid = payload.get("bb_mid")
-                    bb_lower = payload.get("bb_lower")
-                    if bb_upper is not None:
-                        sig_lines.append(f"  {get_field_label('bb_upper')}: {bb_upper:.2f}")
-                    if bb_mid is not None:
-                        sig_lines.append(f"  {get_field_label('bb_mid')}: {bb_mid:.2f}")
-                    if bb_lower is not None:
-                        sig_lines.append(f"  {get_field_label('bb_lower')}: {bb_lower:.2f}")
+                category = get_event_category(ev.event_type)
+                if category == EVENT_CATEGORY_STRUCTURE:
+                    # SMC 结构事件：显示结构位、内部/摆动、方向、形成时间等可用字段
+                    level = payload.get("level")
+                    if level is not None:
+                        sig_lines.append(f"  结构位: {level:.2f}")
+                    internal = payload.get("internal")
+                    if internal is not None:
+                        sig_lines.append(f"  内部结构: {'是' if internal else '否'}")
+                    bias = payload.get("bias")
+                    if bias is not None:
+                        bias_str = "上行" if bias == 1 else ("下行" if bias == -1 else "震荡")
+                        sig_lines.append(f"  方向: {bias_str}")
+                    bullish = payload.get("bullish")
+                    if bullish is not None:
+                        sig_lines.append(f"  偏多: {'是' if bullish else '否'}")
+                    eqhl_type = payload.get("eqhl_type")
+                    if eqhl_type is not None:
+                        sig_lines.append(f"  EQH/EQL 类型: {eqhl_type}")
+                    confirmed_time = payload.get("confirmed_time")
+                    if confirmed_time is not None:
+                        sig_lines.append(f"  形成时间: {confirmed_time}")
+                    anchor_time = payload.get("anchor_time")
+                    if anchor_time is not None and confirmed_time is None:
+                        sig_lines.append(f"  形成时间: {anchor_time}")
+                elif category == EVENT_CATEGORY_NODE_CONSENSUS:
+                    # 筹码共识事件：显示成交密集区边界与偏离
+                    boundary = payload.get("boundary")
+                    dev_pct = payload.get("dev_pct")
+                    if boundary is not None:
+                        dev_str = f"{dev_pct:+.2f}%" if dev_pct is not None else "-"
+                        sig_lines.append(f"  成交密集区: {boundary:.2f}  偏离: {dev_str}")
 
                 elements.append({"tag": "markdown", "content": "\n".join(sig_lines)})
-
-            # BB快照 - [advice.md 第二节] 通俗化：BB上/中/下 → 近期波动上沿/中枢/下沿；宽度/位置 → 带宽/当前区间位置
-            snapshot = events[0].snapshot if events else {}
-            bb_snap = snapshot.get("bb_snapshot") if snapshot else None
-            if bb_snap:
-                snap_upper = bb_snap.get("bb_upper")
-                snap_mid = bb_snap.get("bb_mid")
-                snap_lower = bb_snap.get("bb_lower")
-                snap_lines = [
-                    f"  {get_field_label('bb_upper')}: {snap_upper:.2f}  "
-                    f"{get_field_label('bb_mid')}: {snap_mid:.2f}  "
-                    f"{get_field_label('bb_lower')}: {snap_lower:.2f}"
-                ]
-                bb_width = bb_snap.get("bb_width")
-                if bb_width is not None:
-                    snap_lines.append(
-                        f"  带宽: {bb_width:.4f}  {get_field_label('position')}: {bb_snap.get('bb_pos', '-')}"
-                    )
-                elements.append({"tag": "markdown", "content": "\n".join(snap_lines)})
 
             # [advice.md 第七节] - 备忘录闭环：每股详情末尾追加备忘录（按 user_id 隔离）
             if user_id is not None and memo_map:
@@ -1282,13 +1287,10 @@ class MonitorBatchService:
         primary_symbol, primary_name = instrument_info_cache.get(
             primary_inst_id, (str(primary_inst_id)[:8], ""),
         )
-        # [advice.md 第二节] - event_summary/summary 通俗化：上轨/中轨/下轨/节点 → 波动上沿/价格中枢/波动下沿/密集区
+        # [CHANGE-20260728-010] event_summary/summary：结构/筹码共识双类别
         event_summary = (
-            f"触发 {triggered_count} 只 | "
-            f"{get_field_label('bb_upper_short')} {trigger_counts['bb_upper_touch']} | "
-            f"{get_field_label('bb_mid_short')} {trigger_counts['bb_mid_touch']} | "
-            f"{get_field_label('bb_lower_short')} {trigger_counts['bb_lower_touch']} | "
-            f"{get_field_label('node_cluster_short')} {trigger_counts['node_cluster_touch']}"
+            f"触发 {triggered_count} 只｜"
+            f"结构 {structure_count}｜筹码共识 {node_consensus_count}"
         )
 
         # 构建 DTO
@@ -1297,18 +1299,22 @@ class MonitorBatchService:
         # 不填则飞书只收到 summary 单行，丢失逐股票详情
         from app.services.message_builder import elements_to_text
 
+        # [CHANGE-20260728-010] summary 与 items 不再重复概览：
+        # - summary 字段作为飞书消息列表预览（"自选股 N｜触发 M｜结构 X｜筹码共识 Y"）
+        # - items[0] 是卡片内概览（同 summary 语义）
+        # - text_content 由 elements_to_text 拼接（含概览 + 详情 + 数据时间）
+        # 两者语义一致但不重复输出：summary 是字段，items[0] 是卡片元素，text_content 是文本段
+        summary_text = (
+            f"自选股 {total_instruments} 只｜触发 {triggered_count} 只｜"
+            f"结构 {structure_count}｜筹码共识 {node_consensus_count}"
+        )
+
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
             template_key="monitor_merged_event",
-            template_version="2.0.0",
+            template_version="2.1.0",  # [CHANGE-20260728-010] 升级模板版本
             title=f"{strategy_name} {header_time}",
-            summary=(
-                f"自选股 {total_instruments} 只 | 触发 {triggered_count} 只 | "
-                f"{get_field_label('bb_upper_short')} {trigger_counts['bb_upper_touch']} | "
-                f"{get_field_label('bb_mid_short')} {trigger_counts['bb_mid_touch']} | "
-                f"{get_field_label('bb_lower_short')} {trigger_counts['bb_lower_touch']} | "
-                f"{get_field_label('node_cluster_short')} {trigger_counts['node_cluster_touch']}"
-            ),
+            summary=summary_text,
             facts=[],
             timeline=[],
             items=elements,
@@ -1373,7 +1379,7 @@ class MonitorBatchService:
 
         # 查询策略定义获取 strategy_key / display_name
         strategy_key = WATCHLIST_MONITOR
-        strategy_name = "BB+节点监控"
+        strategy_name = "结构+筹码共识监控"
         if strategy_version is not None:
             definition = await db.get(StrategyDefinition, strategy_version.strategy_definition_id)
             if definition is not None:
@@ -1503,13 +1509,21 @@ class MonitorBatchService:
     ) -> None:
         """为每个触发事件调用 capture worker 截图，并通过 Outbox 统一投递图片。
 
+        [CHANGE-20260728-010] 截图视图固定为组合值 FEISHU_CAPTURE_VIEW：
+        - 任一结构事件或筹码共识事件触发时，截图固定同时展示“结构 + 筹码共识”
+        - 事件类别只决定 focus_event 与文字内容，不再决定截图图层组合
+        - 不再调用 resolve_indicator_view 解析事件专属视图
+
         [Gate3 图片修复] 截图粒度从"每股票一张"改为"每事件一张"：
         - 遍历 (instrument_id, event) 而非仅 instrument_id
-        - 每个事件独立解析 indicator_view、构建 focus_event、生成 capture token
+        - 每个事件独立构建 focus_event、生成 capture token
         - 每个事件独立调用 capture worker、写 CaptureJob、写 image Outbox
         - 单事件截图失败不阻塞其他事件（失败隔离）
         - 同一事件多用户只截图一次，随后为每个用户创建 image Outbox
         - 未知事件类型显式跳过（UNSUPPORTED_INDICATOR_VIEW），不回退 node_cluster
+
+        [CHANGE-20260728-010] 截图调用方 timeout 对齐 Capture 渲染最大 90 秒，
+        固定使用 CAPTURE_HTTP_TIMEOUT_SECONDS=120 秒。
 
         [飞书两段式投递] - 图片段：
         - 调用 worker-capture HTTP 服务获取个股详情页截图的本地静态 URL
@@ -1574,10 +1588,9 @@ class MonitorBatchService:
                         await db.commit()
                         continue
 
-                    # [CHANGE-20260720-003 §三] 从事件类型 + payload 自动映射 indicator_view
-                    indicator_view = resolve_indicator_view(
-                        event.event_type, event_payload
-                    )
+                    # [CHANGE-20260728-010] 截图视图固定为组合值 FEISHU_CAPTURE_VIEW
+                    # 不再调用 resolve_indicator_view 解析事件专属视图
+                    indicator_view = FEISHU_CAPTURE_VIEW
 
                     # [Task 2] focus_event 贯穿链路：从 event.payload 提取 focus 字段
                     #   字段来源：smc_monitor._build_event_draft 写入 payload
@@ -1620,11 +1633,13 @@ class MonitorBatchService:
                         "capture_run_id": f"monitor-{event_run_suffix}",
                         "source_bar_time": event.event_time.isoformat(),
                         "disable_cache": True,
+                        # [CHANGE-20260728-010] 固定组合视图，不再按事件类型切换
                         "indicator_view": indicator_view,
                         "focus_event": focus_event_info,
                     }
                     try:
-                        async with httpx.AsyncClient(timeout=60.0) as client:
+                        # [CHANGE-20260728-010] timeout 对齐 Capture 渲染最大 90 秒
+                        async with httpx.AsyncClient(timeout=CAPTURE_HTTP_TIMEOUT_SECONDS) as client:
                             capture_resp = await client.post(
                                 f"{capture_worker_url.rstrip('/')}/capture",
                                 json=capture_payload,
@@ -1736,6 +1751,9 @@ class MonitorBatchService:
     ) -> Any:
         """为单个事件图片创建通知消息（幂等）。
 
+        [CHANGE-20260728-010] indicator_view 固定为 FEISHU_CAPTURE_VIEW；
+        仍保留参数签名以兼容调用方，但实际传入值恒为 "structure_node"。
+
         [Gate3 图片修复] 幂等键必须包含 event_id + indicator_view：
         - 同一事件重试不重复创建消息
         - 不同事件即使同一分钟也不互相去重
@@ -1749,7 +1767,7 @@ class MonitorBatchService:
             symbol: 股票代码
             stock_name: 股票名称
             event: 触发事件（单个）
-            indicator_view: 该事件对应的 indicator_view（node_cluster/bollinger/smc）
+            indicator_view: 该事件对应的 indicator_view（固定 FEISHU_CAPTURE_VIEW）
 
         Returns:
             NotificationMessage 对象
@@ -1758,7 +1776,7 @@ class MonitorBatchService:
         dto = NotificationMessageDTO(
             message_type="MONITOR_EVENT",
             template_key="monitor_event",
-            template_version="1.1.0",
+            template_version="1.2.0",  # [CHANGE-20260728-010] 升级模板版本
             title=f"监控图表｜{stock_name}｜{event_type}",
             summary=f"{symbol} 触发 {event_type}，详见附图",
             resource_refs={
@@ -2025,14 +2043,13 @@ if __name__ == "__main__":
     inst_id_2 = uuid.UUID("22222222-2222-2222-2222-222222222222")
     ev_time = datetime(2026, 6, 23, 10, 30, 0, tzinfo=UTC)
 
+    # [CHANGE-20260728-010] 测试事件改用结构 + 筹码共识两类
     fake_events = [
         _FakeEvent(
-            "bb_upper_touch", inst_id_1,
-            {"price": 25.50, "boundary": 24.80, "dev_pct": 2.82,
-             "bb_upper": 24.80, "bb_mid": 22.00, "bb_lower": 19.20},
+            "smc_bos_retest", inst_id_1,
+            {"price": 25.50, "level": 24.80, "bias": 1, "internal": False,
+             "confirmed_time": "2026-06-23 09:30"},
             ev_time,
-            {"bb_snapshot": {"bb_upper": 24.80, "bb_mid": 22.00, "bb_lower": 19.20,
-                             "bb_width": 0.2245, "bb_pos": 0.85}},
         ),
         _FakeEvent(
             "node_cluster_touch", inst_id_2,
@@ -2048,9 +2065,12 @@ if __name__ == "__main__":
     dto = service._build_merged_card_dto(fake_events, 5, info_cache)
     assert dto.message_type == "MONITOR_EVENT"
     assert dto.template_key == "monitor_merged_event"
-    assert "BB+节点监控" in dto.title
+    assert "结构+筹码共识监控" in dto.title
     assert "自选股 5 只" in dto.summary
     assert "触发 2 只" in dto.summary
+    # [CHANGE-20260728-010] 概览含结构与筹码共识计数
+    assert "结构 1" in dto.summary
+    assert "筹码共识 1" in dto.summary
     assert len(dto.items) > 0
     # 验证概览行
     assert dto.items[0]["tag"] == "markdown"
@@ -2102,15 +2122,28 @@ if __name__ == "__main__":
     assert "卖出(回归): 0.876" in pred_item["content"]
     print(f"_build_merged_card_dto (含extra_info): title={dto2.title} items_count={len(dto2.items)} ✓")
 
-    # 5. 验证常量映射 - [advice.md 第二节] 文案已迁移至 user_facing_labels
-    assert _EVENT_EMOJI["bb_upper_touch"] == "🔴"
-    # 事件文案来自 user_facing_labels（"布林中轨穿越" → "价格回到近期价格中枢"）
-    assert get_event_label("bb_mid_touch") == "价格回到近期价格中枢"
-    assert get_event_label("bb_upper_touch") == "价格触及近期波动上沿"
+    # 5. 验证常量映射 - [CHANGE-20260728-010] BB 已移除，仅保留结构 + 筹码共识两类
+    assert _EVENT_EMOJI["node_cluster_touch"] == "🟣"
+    assert _EVENT_EMOJI["smc_bos_retest"] == "🔵"
+    assert _EVENT_EMOJI["smc_choch_retest"] == "🟦"
+    assert _EVENT_EMOJI["smc_order_block_first_touch"] == "🔶"
+    # BB 事件 emoji 已移除
+    assert "bb_upper_touch" not in _EVENT_EMOJI
+    assert "bb_mid_touch" not in _EVENT_EMOJI
+    assert "bb_lower_touch" not in _EVENT_EMOJI
+    assert "bb_upper_touch" not in _EVENT_SEVERITY
+    # 事件类别映射
+    assert get_event_category("smc_bos_retest") == EVENT_CATEGORY_STRUCTURE
+    assert get_event_category("node_cluster_touch") == EVENT_CATEGORY_NODE_CONSENSUS
+    assert get_event_category("bb_upper_touch") is None
+    # 事件文案来自 user_facing_labels
     assert get_event_label("node_cluster_touch") == "价格触及成交密集区"
-    assert _EVENT_SEVERITY["bb_lower_touch"] == "info"
+    assert _EVENT_SEVERITY["smc_choch_retest"] == "danger"
     assert _SEVERITY_TEMPLATE["danger"] == "red"
     assert _SEVERITY_ORDER["warn"] == 2
-    print("常量映射 ✓")
+    # [CHANGE-20260728-010] 截图常量
+    assert FEISHU_CAPTURE_VIEW == "structure_node"
+    assert CAPTURE_HTTP_TIMEOUT_SECONDS == 120
+    print("常量映射 ✓（结构 + 筹码共识双类别）")
 
     print("OK")

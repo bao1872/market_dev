@@ -1,32 +1,37 @@
-"""自选股监控 - 统一监控算法（BB + VN + SMC 薄包装）。
+"""自选股监控 - 结构 + 筹码共识 双类别监控（薄包装）。
 
-[CHANGE-20260720-002 §二] WatchlistMonitor 扩展为 BB + VN + SMC 三合一薄包装。
+[CHANGE-20260728-010] WatchlistMonitor 仅保留 SMC + VolumeNode 两类触发。
+布林带（Bollinger）不再参与盘中事件计算、状态合并、事件统计与通知文案。
+Bollinger 算法本体、盘后 Bollinger 计算、个股详情页布林带图层工具栏不在本文件禁止范围。
 
-唯一监控算法，内部委托 BollingerMonitor、VolumeNodeMonitor、SmcMonitor：
-- calculate_state(): 分别调用三个子 monitor，合并 state 字典到命名空间 bb/node_cluster/smc/market；
-  并补充 previous_close/change_pct；单个子 monitor 失败只标记该项 degraded，不阻断其他两项。
-- detect_events(): 分别调用三个子 monitor，合并事件列表；
-  单个子 monitor 失败只记录错误，不阻断其他两项。
-- compute_indicators(): 分别调用三个子 monitor，合并指标字典。
+唯一监控算法，内部委托 VolumeNodeMonitor、SmcMonitor：
+- calculate_state(): 分别调用两个子 monitor，合并 state 字典到命名空间
+  node_cluster/smc/market；并补充 previous_close/change_pct；单个子 monitor 失败
+  只标记该项 degraded，不阻断其他项。
+- detect_events(): 分别调用两个子 monitor，合并事件列表；
+  单个子 monitor 失败只记录错误，不阻断其他项。
+- compute_indicators(): 分别调用两个子 monitor，合并指标字典。
 
-这不是新算法，而是对现有 BB/VN/SMC 监控的薄包装（thin wrapper），
-保证逻辑唯一性：所有计算逻辑仍在 BollingerMonitor/VolumeNodeMonitor/SmcMonitor 中。
 SMC 通过 Canonical SMC Adapter（compute_smc_adapter）调用，继续排除 FVG。
 
-MonitorState 命名空间升级（PROMPT.md §二.4）：
-- state["bb"]: BB 子 monitor 状态（bb_upper/bb_mid/bb_lower/current_price/prev_close/bb_width/bb_pos）
+MonitorState 命名空间（state schema v3）：
 - state["node_cluster"]: VN 子 monitor 状态（current_price/upper_node/lower_node/
   position_0_1/poc_price/last_touched_node）
 - state["smc"]: SMC 子 monitor 状态（smc_confirmed_bos/smc_confirmed_choch/
   smc_equal_highs_lows/smc_active_obs/smc_current_price/smc_currently_touched/
-  smc_swing_bias/smc_trailing/smc_availability/smc_degraded_reason）
+  smc_swing_bias/smc_trailing/smc_availability/smc_degraded_reason/
+  smc_episode_tracker）
 - state["market"]: 市场数据（current_price/previous_close/change_pct）
-- state["degraded"]: {"bb": bool, "node_cluster": bool, "smc": bool}
-- state["smc_episode_tracker"]: SMC episode 跟踪（detect_events 直接 mutate）
-兼容旧平铺状态：所有 bb_*/upper_node/lower_node 等键同时保留在 state 顶层。
+- state["degraded"]: {"node_cluster": bool, "smc": bool}
+兼容旧平铺状态：所有 node_cluster/smc 字段同时保留在 state 顶层。
 旧 _extract_sub_state 读取时优先命名空间，fallback 顶层平铺。
+兼容旧 state["bb"]：仅做读取兼容，不再生成 bb 状态。
 
-[自选股涨跌幅] - 描述: previous_close/change_pct 在合并 BB+VN+SMC state 后计算
+[SMC episode 连续性修复] detect_events 完成后，将 SMC 子状态（含
+smc_episode_tracker）显式回写到父 curr_state.state["smc"] 和顶层平铺，
+保证下一轮 detect_events 收到完整的 episode 状态。
+
+[自选股涨跌幅] - 描述: previous_close/change_pct 在合并 VN+SMC state 后计算
 - current_price 取 merged_state["current_price"]（VN 已写入）
 - previous_close = context.trade_date 之前最近一个交易日 close（前复权）
 - change_pct = (current_price - previous_close) / previous_close * 100
@@ -45,7 +50,6 @@ from uuid import UUID
 import pandas as pd
 
 from app.models.strategy import StrategyVersion
-from app.strategy.monitors.bollinger_monitor import BollingerMonitor
 from app.strategy.monitors.smc_monitor import SmcMonitor
 from app.strategy.monitors.volume_node_monitor import VolumeNodeMonitor
 from app.strategy.runtime import (
@@ -58,17 +62,12 @@ from app.strategy.runtime import (
 logger = logging.getLogger("strategy.monitors.watchlist_monitor")
 
 # 子 monitor 命名空间键
-NAMESPACE_BB = "bb"
 NAMESPACE_NODE_CLUSTER = "node_cluster"
 NAMESPACE_SMC = "smc"
 NAMESPACE_MARKET = "market"
 NAMESPACE_DEGRADED = "degraded"
-
-# BB 字段集合（用于 _extract_sub_state 兼容旧平铺）
-_BB_KEYS = {
-    "bb_upper", "bb_mid", "bb_lower", "current_price",
-    "prev_close", "bb_width", "bb_pos",
-}
+# [CHANGE-20260728-010] BB 命名空间仅做历史读取兼容，不再生成
+NAMESPACE_BB_LEGACY = "bb"
 
 # VN 字段集合
 _VN_KEYS = {
@@ -76,7 +75,7 @@ _VN_KEYS = {
     "position_0_1", "poc_price", "last_touched_node",
 }
 
-# SMC 字段集合
+# SMC 字段集合（含 smc_episode_tracker 用于显式回写）
 _SMC_KEYS = {
     "smc_confirmed_bos", "smc_confirmed_choch", "smc_equal_highs_lows",
     "smc_active_obs", "smc_current_price", "smc_currently_touched",
@@ -87,27 +86,29 @@ _SMC_KEYS = {
 # 市场字段集合
 _MARKET_KEYS = {"current_price", "previous_close", "change_pct"}
 
+# State schema 版本：v3 = 移除 BB 委托，仅保留 VN + SMC（CHANGE-20260728-010）
+STATE_VERSION = 3
+
 
 class WatchlistMonitor(StrategyRuntime):
-    """自选股监控 - 统一监控算法（BB + VN + SMC 薄包装）。
+    """自选股监控 - 结构 + 筹码共识 双类别监控（薄包装）。
 
-    内部持有 BollingerMonitor、VolumeNodeMonitor、SmcMonitor 实例，
+    内部持有 VolumeNodeMonitor、SmcMonitor 实例，
     将 calculate_state/detect_events/compute_indicators 委托给子 monitor，
     合并结果后返回。
 
-    单个子 monitor 失败只标记该项 degraded，不阻断其他两项。
+    单个子 monitor 失败只标记该项 degraded，不阻断其他项。
 
     生命周期：
     1. StrategyLoader.load(version) 创建实例
     2. initialize(version) 创建子 monitor 实例并分别初始化
-    3. calculate_state(context) 合并 BB + VN + SMC 状态到命名空间
-    4. detect_events(context, prev, curr) 合并 BB + VN + SMC 事件
+    3. calculate_state(context) 合并 VN + SMC 状态到命名空间
+    4. detect_events(context, prev, curr) 合并 VN + SMC 事件
     """
 
     kind = "monitor"
 
     def __init__(self) -> None:
-        self._bb: BollingerMonitor = BollingerMonitor()
         self._vn: VolumeNodeMonitor = VolumeNodeMonitor()
         self._smc: SmcMonitor = SmcMonitor()
         self._strategy_version_id: UUID | None = None
@@ -115,19 +116,18 @@ class WatchlistMonitor(StrategyRuntime):
     async def initialize(self, version: StrategyVersion) -> None:
         """创建子 monitor 实例并分别初始化。
 
-        将同一个 StrategyVersion 传递给三个子 monitor，
+        将同一个 StrategyVersion 传递给两个子 monitor，
         各自从 manifest 中提取所需参数。
 
         Args:
             version: 策略版本 ORM 对象
         """
         self._strategy_version_id = version.id
-        await self._bb.initialize(version)
         await self._vn.initialize(version)
         await self._smc.initialize(version)
         logger.info(
-            "WatchlistMonitor 初始化完成: bb_win=%d, bb_k=%.1f, lookback=%d, smc=enabled",
-            self._bb._bb_win, self._bb._bb_k, self._vn._lookback,
+            "WatchlistMonitor 初始化完成: lookback=%d, smc=enabled (BB 已移除)",
+            self._vn._lookback,
         )
 
     async def execute(self, context: MarketDataContext) -> Any:  # type: ignore[override]
@@ -137,18 +137,16 @@ class WatchlistMonitor(StrategyRuntime):
         )
 
     async def calculate_state(self, context: MarketDataContext) -> MonitorState:
-        """合并 BB + VN + SMC 子 monitor 的状态到命名空间，并补充 previous_close/change_pct。
+        """合并 VN + SMC 子 monitor 的状态到命名空间，并补充 previous_close/change_pct。
 
-        分别调用 BollingerMonitor.calculate_state()、VolumeNodeMonitor.calculate_state()、
-        SmcMonitor.calculate_state()。单个子 monitor 失败只标记该项 degraded，不阻断其他两项。
+        分别调用 VolumeNodeMonitor.calculate_state()、SmcMonitor.calculate_state()。
+        单个子 monitor 失败只标记该项 degraded，不阻断其他项。
 
         命名空间结构：
-        - state["bb"]: BB 字段
         - state["node_cluster"]: VN 字段
         - state["smc"]: SMC 字段
         - state["market"]: current_price/previous_close/change_pct
-        - state["degraded"]: {"bb": bool, "node_cluster": bool, "smc": bool}
-        - state["smc_episode_tracker"]: SMC episode 跟踪（顶层，detect_events mutate）
+        - state["degraded"]: {"node_cluster": bool, "smc": bool}
 
         兼容旧平铺：所有子 monitor 字段同时保留在 state 顶层。
 
@@ -166,25 +164,11 @@ class WatchlistMonitor(StrategyRuntime):
             合并后的监控状态（命名空间 + 平铺兼容 + degraded 标记）
         """
         # 子 monitor 状态分别计算，单个失败不影响其他
-        bb_state_dict: dict[str, Any] = {}
         vn_state_dict: dict[str, Any] = {}
         smc_state_dict: dict[str, Any] = {}
-        bb_degraded = False
         vn_degraded = False
         smc_degraded = False
         bar_time = None
-
-        # BB
-        try:
-            bb_state = await self._bb.calculate_state(context)
-            bb_state_dict = dict(bb_state.state)
-            bar_time = bar_time or bb_state.updated_at
-        except Exception as exc:
-            bb_degraded = True
-            logger.warning(
-                "BollingerMonitor.calculate_state 失败（标记 degraded，不阻断其他）: %s",
-                exc,
-            )
 
         # VN
         try:
@@ -211,8 +195,7 @@ class WatchlistMonitor(StrategyRuntime):
             )
 
         # 合并平铺 state（兼容旧读取）
-        # VN 的 current_price 覆盖 BB 的（两者语义相同）
-        merged_flat: dict[str, Any] = {**bb_state_dict, **vn_state_dict, **smc_state_dict}
+        merged_flat: dict[str, Any] = {**vn_state_dict, **smc_state_dict}
 
         # [自选股涨跌幅] - 在合并 state 后补充 previous_close + change_pct
         current_price = merged_flat.get("current_price") or merged_flat.get("smc_current_price")
@@ -227,9 +210,6 @@ class WatchlistMonitor(StrategyRuntime):
         merged_flat["change_pct"] = change_pct
 
         # 命名空间（new 结构）
-        merged_flat[NAMESPACE_BB] = {
-            k: v for k, v in bb_state_dict.items() if k in _BB_KEYS
-        }
         merged_flat[NAMESPACE_NODE_CLUSTER] = {
             k: v for k, v in vn_state_dict.items() if k in _VN_KEYS
         }
@@ -238,7 +218,6 @@ class WatchlistMonitor(StrategyRuntime):
         }
         merged_flat[NAMESPACE_MARKET] = market_state
         merged_flat[NAMESPACE_DEGRADED] = {
-            NAMESPACE_BB: bb_degraded,
             NAMESPACE_NODE_CLUSTER: vn_degraded,
             NAMESPACE_SMC: smc_degraded,
         }
@@ -247,7 +226,7 @@ class WatchlistMonitor(StrategyRuntime):
             instrument_id=context.instrument_id,
             strategy_version_id=self._strategy_version_id,  # type: ignore[arg-type]
             state=merged_flat,
-            state_version=2,  # 升级到 v2：命名空间 + degraded
+            state_version=STATE_VERSION,
             updated_at=bar_time,
         )
 
@@ -306,29 +285,26 @@ class WatchlistMonitor(StrategyRuntime):
         prev_state: MonitorState | None,
         curr_state: MonitorState,
     ) -> list[StrategyEventDraft]:
-        """合并 BB + VN + SMC 子 monitor 的事件。
+        """合并 VN + SMC 子 monitor 的事件，并显式回写 SMC 子状态到父 curr_state。
 
-        分别调用三个子 monitor 的 detect_events，合并事件列表。
-        单个子 monitor 失败只记录错误，不阻断其他两项。
+        分别调用两个子 monitor 的 detect_events，合并事件列表。
+        单个子 monitor 失败只记录错误，不阻断其他项。
+
+        [SMC episode 连续性修复] SMC 子状态通过 _extract_sub_state 提取后传入
+        SmcMonitor.detect_events，过程中子 monitor 可能 mutate smc_episode_tracker。
+        detect_events 完成后，将 SMC 子状态（含 smc_episode_tracker）显式回写到
+        父 curr_state.state["smc"] 命名空间和顶层平铺，保证下一轮 detect_events
+        收到完整的 episode 状态，避免 episode 断裂。
 
         Args:
             context: 市场数据上下文
             prev_state: 前一状态
-            curr_state: 当前状态
+            curr_state: 当前状态（将被 mutate 以回写 SMC 子状态）
 
         Returns:
             合并后的事件草稿列表
         """
         events: list[StrategyEventDraft] = []
-
-        # BB 事件检测
-        try:
-            bb_prev = self._extract_sub_state(prev_state, NAMESPACE_BB) if prev_state else None
-            bb_curr = self._extract_sub_state(curr_state, NAMESPACE_BB)
-            bb_events = await self._bb.detect_events(context, bb_prev, bb_curr)
-            events.extend(bb_events)
-        except Exception as exc:
-            logger.warning("BollingerMonitor.detect_events 失败（不阻断其他）: %s", exc)
 
         # VN 事件检测
         try:
@@ -350,10 +326,43 @@ class WatchlistMonitor(StrategyRuntime):
             smc_curr = self._extract_sub_state(curr_state, NAMESPACE_SMC)
             smc_events = await self._smc.detect_events(context, smc_prev, smc_curr)
             events.extend(smc_events)
+
+            # [SMC episode 连续性修复] 显式回写 SMC 子状态到父 curr_state
+            # 包含 smc_episode_tracker 的最新值，避免子状态复制导致 episode 丢失
+            self._writeback_smc_substate(curr_state, smc_curr.state)
         except Exception as exc:
             logger.warning("SmcMonitor.detect_events 失败（不阻断其他）: %s", exc)
 
         return events
+
+    @staticmethod
+    def _writeback_smc_substate(
+        parent_state: MonitorState,
+        smc_sub_state: dict[str, Any],
+    ) -> None:
+        """显式回写 SMC 子状态到父 curr_state。
+
+        [SMC episode 连续性修复] detect_events 调用 _extract_sub_state 会复制
+        子状态到新的 MonitorState，SMC detect_events 在该副本上 mutate
+        smc_episode_tracker；副本的变更不会自动反映到父 curr_state。
+        本方法将 SMC 子状态（含 smc_episode_tracker）显式回写到：
+        - parent_state.state["smc"]（命名空间）
+        - parent_state.state 顶层平铺（兼容旧读取）
+
+        Args:
+            parent_state: 父 curr_state（将被 mutate）
+            smc_sub_state: SMC 子 monitor detect_events 后的子状态字典
+        """
+        if not smc_sub_state:
+            return
+        # 回写命名空间
+        parent_state.state[NAMESPACE_SMC] = {
+            k: v for k, v in smc_sub_state.items() if k in _SMC_KEYS
+        }
+        # 回写顶层平铺（兼容旧读取）
+        for key in _SMC_KEYS:
+            if key in smc_sub_state:
+                parent_state.state[key] = smc_sub_state[key]
 
     @staticmethod
     def _extract_sub_state(
@@ -361,29 +370,38 @@ class WatchlistMonitor(StrategyRuntime):
     ) -> MonitorState:
         """从合并状态中提取子 monitor 状态。
 
-        优先从命名空间读取（state.state["bb"]/["node_cluster"]/["smc"]），
-        fallback 到顶层平铺（兼容旧 state schema v1）。
+        优先从命名空间读取（state.state["node_cluster"]/["smc"]），
+        fallback 到顶层平铺（兼容旧 state schema v1/v2）。
 
-        BB 字段: bb_upper/bb_mid/bb_lower/current_price/prev_close/bb_width/bb_pos
         VN 字段: current_price/upper_node/lower_node/position_0_1/poc_price/last_touched_node
         SMC 字段: smc_confirmed_bos/smc_confirmed_choch/smc_equal_highs_lows/
                   smc_active_obs/smc_current_price/smc_currently_touched/
                   smc_swing_bias/smc_trailing/smc_availability/smc_degraded_reason/
                   smc_episode_tracker
 
+        [CHANGE-20260728-010] sub="bb" 仅做历史读取兼容（不再生成 bb 状态），
+        返回空状态字典，调用方应跳过 BB 事件检测。
+
         Args:
             state: 合并后的 MonitorState
-            sub: "bb" / "node_cluster" / "smc"
+            sub: "node_cluster" / "smc" / "bb"（legacy 兼容）
 
         Returns:
             包含子 monitor 字段的 MonitorState
         """
-        if sub == NAMESPACE_BB:
-            keys = _BB_KEYS
-        elif sub == NAMESPACE_NODE_CLUSTER:
+        if sub == NAMESPACE_NODE_CLUSTER:
             keys = _VN_KEYS
         elif sub == NAMESPACE_SMC:
             keys = _SMC_KEYS
+        elif sub == NAMESPACE_BB_LEGACY:
+            # BB 仅历史读取兼容，返回空状态（不再生成 bb 状态）
+            return MonitorState(
+                instrument_id=state.instrument_id,
+                strategy_version_id=state.strategy_version_id,
+                state={},
+                state_version=state.state_version,
+                updated_at=state.updated_at,
+            )
         else:
             keys = set()
 
@@ -398,7 +416,7 @@ class WatchlistMonitor(StrategyRuntime):
                 updated_at=state.updated_at,
             )
 
-        # Fallback: 从顶层平铺读取（兼容旧 state schema v1）
+        # Fallback: 从顶层平铺读取（兼容旧 state schema v1/v2）
         sub_state = {k: v for k, v in state.state.items() if k in keys}
         return MonitorState(
             instrument_id=state.instrument_id,
@@ -409,9 +427,9 @@ class WatchlistMonitor(StrategyRuntime):
         )
 
     async def compute_indicators(self, context: MarketDataContext) -> dict[str, Any]:
-        """合并 BB + VN + SMC 子 monitor 的图表指标。
+        """合并 VN + SMC 子 monitor 的图表指标。
 
-        单个子 monitor 失败只记录错误，不阻断其他两项。
+        单个子 monitor 失败只记录错误，不阻断其他项。
 
         Args:
             context: 市场数据上下文
@@ -420,13 +438,6 @@ class WatchlistMonitor(StrategyRuntime):
             合并后的指标字典
         """
         result: dict[str, Any] = {}
-
-        # BB
-        try:
-            bb_indicators = await self._bb.compute_indicators(context)
-            result.update(bb_indicators)
-        except Exception as exc:
-            logger.warning("BollingerMonitor.compute_indicators 失败（不阻断其他）: %s", exc)
 
         # VN
         try:
@@ -438,7 +449,7 @@ class WatchlistMonitor(StrategyRuntime):
         # SMC
         try:
             smc_indicators = await self._smc.compute_indicators(context)
-            # SMC 指标放在 "smc" 命名空间下，避免与 BB/VN 字段冲突
+            # SMC 指标放在 "smc" 命名空间下，避免与 VN 字段冲突
             result[NAMESPACE_SMC] = smc_indicators
         except Exception as exc:
             logger.warning("SmcMonitor.compute_indicators 失败（不阻断其他）: %s", exc)
@@ -455,12 +466,16 @@ if __name__ == "__main__":
     assert issubclass(WatchlistMonitor, StrategyRuntime)
     print("WatchlistMonitor 继承 StrategyRuntime ✓")
 
-    # 验证子 monitor 创建
+    # 验证子 monitor 创建（仅 VN + SMC，不再有 BB）
     monitor = WatchlistMonitor()
-    assert isinstance(monitor._bb, BollingerMonitor)
     assert isinstance(monitor._vn, VolumeNodeMonitor)
     assert isinstance(monitor._smc, SmcMonitor)
-    print("子 monitor BollingerMonitor + VolumeNodeMonitor + SmcMonitor 创建 ✓")
+    assert not hasattr(monitor, "_bb"), "WatchlistMonitor 不应再持有 BollingerMonitor"
+    print("子 monitor VolumeNodeMonitor + SmcMonitor 创建 ✓（BB 已移除）")
+
+    # 验证 state schema 版本
+    assert STATE_VERSION == 3, f"STATE_VERSION 应为 3，实际 {STATE_VERSION}"
+    print(f"STATE_VERSION={STATE_VERSION} ✓")
 
     # 验证 _extract_sub_state（命名空间优先）
     from datetime import UTC, datetime
@@ -471,11 +486,6 @@ if __name__ == "__main__":
         strategy_version_id=uuid4(),
         state={
             # 命名空间
-            "bb": {
-                "bb_upper": 10.0, "bb_mid": 9.0, "bb_lower": 8.0,
-                "current_price": 9.5, "prev_close": 9.3,
-                "bb_width": 0.22, "bb_pos": 0.75,
-            },
             "node_cluster": {
                 "current_price": 9.5,
                 "upper_node": {"price_mid": 10.5},
@@ -494,59 +504,85 @@ if __name__ == "__main__":
                 "smc_trailing": {},
                 "smc_availability": "available",
                 "smc_degraded_reason": None,
-                "smc_episode_tracker": {},
+                "smc_episode_tracker": {"BOS:100:10.0": {"state": "watching"}},
             },
             "market": {
                 "current_price": 9.5,
                 "previous_close": 9.3,
                 "change_pct": 2.15,
             },
-            "degraded": {"bb": False, "node_cluster": False, "smc": False},
+            "degraded": {"node_cluster": False, "smc": False},
             # 顶层平铺兼容
-            "bb_upper": 10.0, "current_price": 9.5,
+            "current_price": 9.5,
             "upper_node": {"price_mid": 10.5},
             "smc_currently_touched": {"BOS:100:10.0": False},
         },
-        state_version=2,
+        state_version=3,
         updated_at=datetime.now(UTC),
     )
 
-    bb_sub = WatchlistMonitor._extract_sub_state(test_state, "bb")
-    assert "bb_upper" in bb_sub.state
-    assert bb_sub.state["bb_upper"] == 10.0
-    assert "upper_node" not in bb_sub.state
-    print("_extract_sub_state(bb) 命名空间优先 ✓")
-
     vn_sub = WatchlistMonitor._extract_sub_state(test_state, "node_cluster")
     assert "upper_node" in vn_sub.state
-    assert "bb_upper" not in vn_sub.state
+    assert "smc_confirmed_bos" not in vn_sub.state
     print("_extract_sub_state(node_cluster) 命名空间优先 ✓")
 
     smc_sub = WatchlistMonitor._extract_sub_state(test_state, "smc")
     assert "smc_confirmed_bos" in smc_sub.state
     assert "smc_currently_touched" in smc_sub.state
-    assert "bb_upper" not in smc_sub.state
+    assert "smc_episode_tracker" in smc_sub.state
+    assert "upper_node" not in smc_sub.state
     print("_extract_sub_state(smc) 命名空间优先 ✓")
 
-    # 验证 fallback：无命名空间时从顶层平铺读取（兼容旧 state schema v1）
+    # [CHANGE-20260728-010] BB 仅历史读取兼容，返回空状态
+    bb_sub = WatchlistMonitor._extract_sub_state(test_state, "bb")
+    assert bb_sub.state == {}
+    print("_extract_sub_state(bb) 历史兼容返回空 ✓")
+
+    # 验证 _writeback_smc_substate 回写 episode_tracker
+    parent_state = MonitorState(
+        instrument_id=uuid4(),
+        strategy_version_id=uuid4(),
+        state={
+            "smc": {"smc_episode_tracker": {"old": True}},
+            "smc_episode_tracker": {"old": True},
+        },
+        state_version=3,
+        updated_at=datetime.now(UTC),
+    )
+    new_smc_sub = {
+        "smc_confirmed_bos": [{"anchor_index": 200, "level": 11.0}],
+        "smc_episode_tracker": {"new": True},
+        "smc_swing_bias": -1,
+    }
+    WatchlistMonitor._writeback_smc_substate(parent_state, new_smc_sub)
+    assert parent_state.state["smc"]["smc_episode_tracker"] == {"new": True}
+    assert parent_state.state["smc_episode_tracker"] == {"new": True}
+    assert parent_state.state["smc"]["smc_confirmed_bos"] == [{"anchor_index": 200, "level": 11.0}]
+    assert parent_state.state["smc_swing_bias"] == -1
+    print("_writeback_smc_substate 回写 episode_tracker ✓")
+
+    # 验证 fallback：无命名空间时从顶层平铺读取（兼容旧 state schema v1/v2）
     old_state = MonitorState(
         instrument_id=uuid4(),
         strategy_version_id=uuid4(),
         state={
-            "bb_upper": 10.0, "bb_mid": 9.0, "bb_lower": 8.0,
-            "current_price": 9.5, "prev_close": 9.3,
-            "bb_width": 0.22, "bb_pos": 0.75,
             "upper_node": {"price_mid": 10.5},
             "lower_node": {"price_mid": 8.5},
             "position_0_1": 0.5, "poc_price": None,
             "last_touched_node": None,
+            "current_price": 9.5,
+            "smc_confirmed_bos": [{"anchor_index": 100, "level": 10.0}],
+            "smc_episode_tracker": {"legacy": True},
         },
-        state_version=1,
+        state_version=2,
         updated_at=datetime.now(UTC),
     )
-    bb_sub_old = WatchlistMonitor._extract_sub_state(old_state, "bb")
-    assert "bb_upper" in bb_sub_old.state
-    assert bb_sub_old.state["bb_upper"] == 10.0
-    print("_extract_sub_state(bb) fallback 平铺兼容 ✓")
+    vn_sub_old = WatchlistMonitor._extract_sub_state(old_state, "node_cluster")
+    assert "upper_node" in vn_sub_old.state
+    print("_extract_sub_state(node_cluster) fallback 平铺兼容 ✓")
+    smc_sub_old = WatchlistMonitor._extract_sub_state(old_state, "smc")
+    assert "smc_confirmed_bos" in smc_sub_old.state
+    assert "smc_episode_tracker" in smc_sub_old.state
+    print("_extract_sub_state(smc) fallback 平铺兼容 ✓")
 
     print("OK")

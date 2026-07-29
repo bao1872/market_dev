@@ -34,10 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.bars import _df_to_responses
 from app.constants.indicator_contract import CHART_BARS_COUNT, INDICATOR_BARS
-from app.constants.indicator_view import (
-    DEFAULT_INDICATOR_VIEW,
-    is_valid_indicator_view,
-)
+from app.constants.indicator_view import FEISHU_CAPTURE_VIEW
 from app.core.deps import get_capture_token_payload, get_db
 from app.models.instrument import Instrument
 from app.repositories.strategy_event_repository import query_events
@@ -76,9 +73,9 @@ async def get_capture_snapshot(
     indicator_view: str | None = Query(
         None,
         description=(
-            "指标视图：node_cluster|bollinger|smc（CHANGE-20260720-Phase4 §四）。"
-            "携带时：smc 视图触发 include_smc=True；缓存键维度 iv=...；"
-            "CaptureJob 元数据记录。缺失回退到 DEFAULT_INDICATOR_VIEW。"
+            "[CHANGE-20260728-010] 历史兼容参数，新业务已忽略。"
+            "新链路固定使用 FEISHU_CAPTURE_VIEW='structure_node'（结构+筹码共识组合视图），"
+            "始终 include_smc=True。旧 URL 携带的 node_cluster|bollinger|smc 值不再影响渲染。"
         ),
     ),
 ) -> dict[str, Any]:
@@ -96,12 +93,11 @@ async def get_capture_snapshot(
     - compute_all_indicators：策略指标（与 /indicators API 同款）
     - query_events：策略事件（与 /instruments/{id}/events 同款）
 
-    [CHANGE-20260720-Phase4 §四] indicator_view 参数：
-    - 合法值 node_cluster|bollinger|smc（与 app.constants.indicator_view 对齐）
-    - 非法或缺失时回退到 DEFAULT_INDICATOR_VIEW（node_cluster）
-    - indicator_view=smc 时设置 include_smc=True，触发 SMC 算法计算
-      （BOS/CHoCH/OB/EQH/EQL/trailing），其他视图不消耗 SMC CPU
-    - 返回值包含 indicator_view 字段，便于前端校验与 CaptureJob 元数据记录
+    [CHANGE-20260728-010] 固定组合视图：
+    - indicator_view URL 参数已废弃，新业务固定使用 FEISHU_CAPTURE_VIEW='structure_node'
+    - 始终 include_smc=True：组合视图必须同时返回 Node 数据与 SMC DTO 结构
+    - SMC DTO 数组允许为空（无事件时 SMC 结构仍需存在，避免前端永久 loading）
+    - 返回值 indicator_view 字段固定为 'structure_node'，供前端校验与 CaptureJob 元数据
 
     Returns:
         dict 含 instrument/bars/indicators/events/snapshot_time/indicator_view
@@ -124,15 +120,18 @@ async def get_capture_snapshot(
             detail=f"不支持的周期: {timeframe}, 允许: {sorted(_CAPTURE_ALLOWED_TIMEFRAMES)}",
         )
 
-    # [CHANGE-20260720-Phase4 §四] indicator_view 校验 + 回退
-    #   - URL 携带非法值时回退到 DEFAULT_INDICATOR_VIEW（不抛 400，保证截图链路鲁棒）
-    #   - 缺失时同样回退（前端默认 node_cluster，与 DEFAULT_INDICATOR_VIEW 对齐）
-    resolved_indicator_view = (
-        indicator_view if is_valid_indicator_view(indicator_view) else DEFAULT_INDICATOR_VIEW
-    )
-    # indicator_view=smc 时需要计算 SMC 指标（BOS/CHoCH/OB/EQH/EQL/trailing）
-    # 其他视图 include_smc=False（0 SMC CPU 消耗，符合"按需计算"约束）
-    include_smc = resolved_indicator_view == "smc"
+    # [CHANGE-20260728-010] 固定组合视图：忽略 URL indicator_view 参数
+    #   - 新业务唯一写入 FEISHU_CAPTURE_VIEW='structure_node'
+    #   - 始终 include_smc=True：组合视图需同时返回 Node 数据与 SMC DTO 结构
+    #   - SMC DTO 数组允许为空（无事件时 SMC 结构仍需存在，避免前端永久 loading）
+    #   - 旧 URL 参数仅作历史兼容读取，不再影响渲染逻辑
+    if indicator_view is not None and indicator_view != FEISHU_CAPTURE_VIEW:
+        logger.info(
+            "[Capture] 历史 indicator_view=%s 已忽略，固定使用 %s",
+            indicator_view, FEISHU_CAPTURE_VIEW,
+        )
+    resolved_indicator_view = FEISHU_CAPTURE_VIEW
+    include_smc = True  # 组合视图硬规则：始终计算 SMC 指标
 
     bars_limit = INDICATOR_BARS.get(timeframe, CHART_BARS_COUNT)
     # 截图场景始终使用实时聚合（include_realtime=True 为硬规则），保证 K线为当前盘中数据
@@ -259,9 +258,9 @@ async def get_capture_snapshot(
             "total": len(event_items),
         },
         "snapshot_time": datetime.now(UTC).isoformat(),
-        # [CHANGE-20260720-Phase4 §四] 透出 indicator_view 供前端校验与 CaptureJob 元数据记录
-        #   - resolved_indicator_view：经校验后的合法值（非法/缺失回退到 DEFAULT_INDICATOR_VIEW）
-        #   - include_smc：是否触发了 SMC 计算（仅 smc 视图为 True）
+        # [CHANGE-20260728-010] 透出固定 indicator_view 供前端校验与 CaptureJob 元数据记录
+        #   - resolved_indicator_view：固定 FEISHU_CAPTURE_VIEW='structure_node'
+        #   - include_smc：始终 True（组合视图合同：Node 数据完整 + SMC DTO 结构存在）
         "indicator_view": resolved_indicator_view,
         "include_smc": include_smc,
         # [PROMPT.md §二 V2 render_frame.matched] 服务端校验后的 frame match 状态
@@ -299,6 +298,12 @@ if __name__ == "__main__":
     assert _CAPTURE_ADJ == "qfq"
     assert CHART_BARS_COUNT == 250, f"CHART_BARS_COUNT 应为 250，实际 {CHART_BARS_COUNT}"
     print(f"常量: timeframe={_CAPTURE_TIMEFRAME} adj={_CAPTURE_ADJ} bars={CHART_BARS_COUNT}")
+
+    # [CHANGE-20260728-010] 验证固定组合视图常量
+    assert FEISHU_CAPTURE_VIEW == "structure_node", (
+        f"FEISHU_CAPTURE_VIEW 应为 'structure_node'，实际 {FEISHU_CAPTURE_VIEW}"
+    )
+    print(f"FEISHU_CAPTURE_VIEW={FEISHU_CAPTURE_VIEW}")
 
     # [CP-V3-B] DisplayWindowSpec / build_display_frame / is_display_frame_match
     # 已下沉到 ChartSnapshotService 内部，capture 端点不再直接引用

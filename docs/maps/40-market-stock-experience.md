@@ -226,6 +226,41 @@ compact 与 detail 复用同一组 VisualCard，不复制业务判断。compact 
 - 图层是否全部由统一清单控制；
 - `?debug=1` 是否彻底移除。
 
+## 6.1 飞书发送链路（CHANGE-20260728-010）
+
+个股详情"发送到飞书"链路：
+
+- 入口组件：`frontend/src/pages/StockDetailPage.tsx`（弹窗）
+- Hook：`frontend/src/features/stock-research/useStockDetailFeishu.ts`
+- API 函数：`sendStockDetailFeishu`（`frontend/src/api/endpoints.ts`）
+- 后端路由：`POST /instruments/{instrument_id}/send-feishu`（`backend/app/api/stock_detail_feishu.py`）
+- 服务层：`backend/app/services/stock_detail_feishu_service.py`
+
+[CHANGE-20260728-010] 固定组合图合同：
+
+- 弹窗无指标选择器（移除 node_cluster/bollinger/smc 三选一 radio）
+- 文案固定显示"将发送：结构 + 筹码共识组合图（含日线 SMC 结构与成交量节点）"
+- 请求体不携带 `indicator_view`（旧字段兼容接收但忽略）
+- 后端强制使用 `FEISHU_CAPTURE_VIEW='structure_node'`
+- 截图调用方 timeout=120s（`CAPTURE_HTTP_TIMEOUT_SECONDS`）
+- 文字消息使用 `build_monitor_event_text(indicator_view='structure_node')`，含 node + smc 字段（无 BB 字段）
+
+Capture 页面链路：
+
+- 入口：`frontend/src/pages/CaptureStockPage.tsx`（路由 `/capture/stock/:symbol`）
+- 舞台组件：`frontend/src/components/MobileIndicatorStage.tsx`
+- 图表组件：`frontend/src/components/StrategyChart.tsx`（`isCaptureMode=true`）
+- 后端 API：`GET /capture/stocks/{instrument_id}/snapshot`（`backend/app/api/capture.py`）
+
+[CHANGE-20260728-010] Capture 固定组合视图：
+
+- 前端固定 `indicatorView = FEISHU_CAPTURE_VIEW`（'structure_node'）
+- Capture query 透传 `indicator_view=structure_node`，后端忽略该参数渲染逻辑（仅用于缓存键维度）
+- 图层固定使用 `FEISHU_CAPTURE_LAYER_PRESET`（node=true, smc=true, boll=false）
+- combined Ready = `nodeReady && smcContractReady`（`computeCombinedReady`）
+- SMC DTO 结构必须存在（events/order_blocks/swing_bias 为数组，允许为空）
+- module-label 显示 "结构 + 筮码共识"（`INDICATOR_VIEW_LABELS['structure_node']`）
+
 ## 7. 验证入口
 
 以用户真实交互路径验证，不使用 IDE 截图代替行为核验。
