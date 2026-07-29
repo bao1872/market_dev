@@ -194,11 +194,14 @@ test('adaptMarketStockToTrendRow: chip 状态为 M15_BARS_INSUFFICIENT', () => {
       computed_at: null,
     },
   }))
-  assert.equal(row.chipStatus.status, 'skipped')
-  assert.equal(row.chipStatus.reason_code, 'M15_BARS_INSUFFICIENT')
-  assert.equal(row.chipStatus.actual_bars, 354)
-  assert.equal(row.chipStatus.required_bars, 500)
-  assert.equal(row.chipStatus.reason_text, '15 分钟数据不足（354 根，需 ≥500）')
+  // chipStatus 是 unknown 自定义字段，需断言为 MarketStockRow['chip_status'] 类型
+  const chipStatus = row.chipStatus as MarketStockRow['chip_status']
+  assert.ok(chipStatus, 'chipStatus 应非空')
+  assert.equal(chipStatus!.status, 'skipped')
+  assert.equal(chipStatus!.reason_code, 'M15_BARS_INSUFFICIENT')
+  assert.equal(chipStatus!.actual_bars, 354)
+  assert.equal(chipStatus!.required_bars, 500)
+  assert.equal(chipStatus!.reason_text, '15 分钟数据不足（354 根，需 ≥500）')
 })
 
 // ===== 8. resultId 使用 instrument_id（MarketStockRow 无 resultId） =====

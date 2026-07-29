@@ -1189,11 +1189,18 @@ def _build_chip_status(chip: ChipConsensusResult | None) -> ChipStatus:
             or "missing_15m" in err_lower
             or "m15" in err_lower
         ):
+            # [CHANGE-20260729-009] 两个 15m 门槛：
+            # - _CHIP_MIN_15M_BARS=500：批量服务最低门槛（after_close_chip_consensus_service）
+            # - NODE_CLUSTER_LOW_BARS=4000：Node Cluster 完整质量门槛（250日×16根/日）
+            # 个股详情实时计算使用 Node Cluster 完整质量门槛（4000）；
+            # 批量服务使用 500 作为最低可行门槛（degraded）。
             return ChipStatus(
                 state="unavailable",
                 reasonCode="M15_BARS_INSUFFICIENT",
                 reasonText=(
-                    f"15 分钟数据不足（{chip.bars15mCount} 根，需 ≥{NODE_CLUSTER_LOW_BARS}）"
+                    f"15 分钟数据不足（{chip.bars15mCount} 根，"
+                    f"完整质量需 ≥{NODE_CLUSTER_LOW_BARS}，"
+                    f"批量降级门槛 ≥500）"
                 ),
                 computedAt=None,
             )

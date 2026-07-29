@@ -384,6 +384,10 @@ services:
     logging: *default-logging
     environment:
       TZ: Asia/Shanghai
+      # [CHANGE-20260729-009] Umami tracking script 注入控制
+      # - 非空时 docker-entrypoint.sh 向 index.html 注入 <script src="/umami/script.js">
+      # - 空时跳过注入（dev/capture 模式不统计）
+      UMAMI_WEBSITE_ID: ${UMAMI_WEBSITE_ID:-}
     depends_on:
       - backend
     volumes:
@@ -393,60 +397,33 @@ services:
     ports:
       - "80:80"
 
-  # ===== [Gate5] GoAccess 访问统计服务 =====
-  # 职责：周期性解析 nginx access.log，输出 JSON 报告到共享卷供 backend 读取
-  # 安全：
-  # - nginx access.log 已通过 log_format 过滤敏感 query 参数（token/jwt/password/key）
-  # - GoAccess 配置 anonymize-ip=true，IP 保留前 3 段末段为 0
-  # - 报告输出到共享卷，不暴露端口（仅 backend 容器内访问）
-  # - [CHANGE-20260729-005 五.4] 日志轮转由 frontend 容器内 logrotate 处理
-  #   （命名卷 nginx_logs 的 access.log 不受 Docker json-file 驱动轮转）
-  goaccess:
-    image: allin1/goaccess:1.7.2
-    container_name: trading-goaccess
+  # ===== [CHANGE-20260729-009] Umami 访客分析服务（替代 GoAccess） =====
+  # 职责：访客分析、pageview、来源统计、设备/浏览器分析
+  # 设计：
+  # - 复用现有 trading-postgres 容器，独立 umami 数据库和用户（与 bz_stock 隔离）
+  # - env_file 引用 /etc/market-dev/umami.env（含 DATABASE_URL + APP_SECRET）
+  # - 仅内部网络访问，不暴露公网端口（通过 frontend nginx /umami/ 反向代理）
+  # - 前端 production 注入 tracking script（docker-entrypoint.sh 控制）
+  # - 开发/capture 模式不注入（不统计）
+  # - 保留 nginx access.log 和轮转（logrotate-nginx），不再依赖 GoAccess 解析 access.log
+  umami:
+    image: docker.umami.is/umami-software/umami:3.2
+    container_name: trading-umami
     restart: unless-stopped
     logging: *default-logging
-    environment:
-      TZ: Asia/Shanghai
+    env_file:
+      - /etc/market-dev/umami.env
     depends_on:
-      - frontend
+      postgres:
+        condition: service_healthy
     volumes:
-      # 只读挂载 nginx 日志卷（GoAccess 只读解析，不修改日志）
-      - nginx_logs:/var/log/nginx:ro
-      # 输出 JSON 报告到共享卷，backend 读取
-      - goaccess_reports:/srv/goaccess
-    # [CHANGE-20260729-005 五.5] 健康检查：容器运行 + access.log 存在 + report.json 可解析 + 未过期
-    # report.json 每 5 分钟生成一次，10 分钟未更新视为过期（留 5 分钟容差）
-    # 仅用 shell 工具（goaccess 镜像无 python）：检查文件存在 + 非空 + JSON 起始字符 + 修改时间
-    healthcheck:
-      test: >
-        sh -c "
-          test -f /var/log/nginx/access.log &&
-          test -s /srv/goaccess/report.json &&
-          head -c 1 /srv/goaccess/report.json | grep -q '{' &&
-          find /srv/goaccess/report.json -mmin -10 | grep -q report.json
-        "
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 300s
-    # 每 5 分钟生成一次 JSON 报告（--output-format=json 一次性输出，cron 驱动周期更新）
-    # 实时 HTML 报告也可通过 --real-time-html 启用，但本任务只需 JSON
-    command: >
-      sh -c "
-        while true; do
-          goaccess /var/log/nginx/access.log
-            --log-format=COMBINED
-            --anonymize-ip
-            --keep-last=30
-            --json-output
-            --output /srv/goaccess/report.json
-            --no-html
-            2>/srv/goaccess/goaccess-error.log || true;
-          echo \"[$(date '+%Y-%m-%d %H:%M:%S')] GoAccess report regenerated\" >> /srv/goaccess/cron.log;
-          sleep 300;
-        done
-      "
+      - umami_data:/app/data
+    networks:
+      - default
+
+  # [CHANGE-20260729-009] GoAccess 服务已移除：访客分析改用 Umami
+  # 保留 nginx access.log 和 logrotate 轮转（由 frontend 容器内 crond 处理）
+  # goaccess_reports volume 暂保留供回滚，后续可清理
 
 volumes:
   postgresdata:
@@ -455,8 +432,12 @@ volumes:
     name: trading-redisdata
   capture_static:
     name: trading-capture-static
-  # [Gate5] GoAccess 共享卷
+  # [Gate5] Nginx access.log 共享卷（frontend 写，原 goaccess 读；现在保留供未来诊断）
   nginx_logs:
     name: trading-nginx-logs
+  # [CHANGE-20260729-009] GoAccess reports volume 暂保留供回滚
   goaccess_reports:
     name: trading-goaccess-reports
+  # [CHANGE-20260729-009] Umami 数据卷（暂存上传/会话，主数据在 Postgres umami 库）
+  umami_data:
+    name: trading-umami-data
