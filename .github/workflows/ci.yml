@@ -99,26 +99,6 @@ jobs:
       - name: Run governance rules checks
         run: python tools/check_governance_rules.py
 
-  reports:
-    name: Reports System
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # 完整历史用于 SHA 祖先检查
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: backend/pyproject.toml
-      - name: Install backend dependencies
-        run: pip install -e "backend[dev]"
-      - name: Run reports system checks
-        run: python tools/check_reports.py
-
   ruff-new-files:
     name: Ruff New Files
     runs-on: ubuntu-latest

@@ -31,12 +31,11 @@ CN 可按需切换以下模式：
 - migration 保持手动门禁；
 - 任何不可逆 migration 必须在 PR 描述中明确标注并提供 downgrade 步骤。
 
-## 报告输出（详见 `rules/40-testing-quality.md` 与 `reports/README.md`）
+## 报告与对话输出（2026-07-29 收口）
 
-- CN 完成的开发、测试、部署、验收和运维任务报告写入 `reports/current/REPORT-YYYYMMDD-NNN-任务短名称.md`；
-- 更新 `reports/LATEST.md` 与 `reports/INDEX.md`；
-- 对话只输出简短摘要 + 报告路径 + commit SHA + push 结果 + blocker；
-- 不再向 `sync/outbox/` 写入报告（`sync/` 仅为临时中转站，不作为运行时真源）。
+> 详见 `rules/40-testing-quality.md`。
+> 硬规则：禁止新建未经用户确认的报告/治理目录；TRAE 完整过程只在对话输出，不写入仓库；
+> 普通Bug由Git历史记录，只有重要行为变化才写一个CHANGE。历史 `reports/` 目录已删除。
 
 ## 禁止做
 

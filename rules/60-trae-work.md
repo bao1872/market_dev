@@ -28,15 +28,14 @@ TRAE Work 是日常开发执行角色，使用系统生成的 `trae/agent-*` 内
 - 修改前输出修改前最小报告（见 `00-core-governance.md`）；
 - 修改后运行质量门禁（见 `40-testing-quality.md`）；
 - 修改后新增 CHANGE 记录并更新 CHANGELOG；
-- 修改后更新 `docs/current` 与 `docs/maps` 保持六者对齐；
+- 修改后更新 `docs/maps`（`docs/current` 已标记 legacy 只读，不再要求同步）；
 - 推送前确认 `git merge-base --is-ancestor origin/dev HEAD` 退出码为 0。
 
-## 报告输出（详见 `rules/40-testing-quality.md` 与 `reports/README.md`）
+## 报告与对话输出（2026-07-29 收口）
 
-- 完整任务报告写入 `reports/current/REPORT-YYYYMMDD-NNN-任务短名称.md`（使用 `reports/templates/TASK-REPORT-TEMPLATE.md` 模板）；
-- 更新 `reports/LATEST.md` 与 `reports/INDEX.md`；
-- TRAE 对话只输出简短摘要 + 报告路径 + commit SHA + push 结果 + blocker；
-- 不再向 `sync/outbox/` 写入报告（`sync/` 仅为临时中转站，不作为运行时真源）。
+> 详见 `rules/40-testing-quality.md`。
+> 硬规则：禁止新建未经用户确认的报告/治理目录；TRAE 完整过程只在对话输出，不写入仓库；
+> 普通Bug由Git历史记录，只有重要行为变化才写一个CHANGE。历史 `reports/` 目录已删除。
 
 ## 禁止做
 

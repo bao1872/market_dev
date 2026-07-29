@@ -22,7 +22,7 @@ PR 必须说明：
 
 - 当前系统原来如何运行；
 - 本次为什么修改；
-- 修改了哪些代码 / docs/current / docs/maps；
+- 修改了哪些代码 / docs/maps（`docs/current` 已标记 legacy 只读，不再要求同步）；
 - 新增哪个 CHANGE；
 - 是否改变 API / 数据模型 / Worker 或第三方集成；
 - 测试结果；

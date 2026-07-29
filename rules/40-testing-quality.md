@@ -53,8 +53,6 @@ Docs    python tools/check_docs_consistency.py
 Arch    python tools/check_architecture.py
 Allow   python tools/check_test_allowlist.py
 Gov     python tools/check_governance_rules.py
-Reports python tools/check_reports.py
-Sync    python tools/update_docs.py --check
 ```
 
 禁止通过全局 ignore、批量 noqa、扩大 exclude、批量 `type: ignore` 或关闭检查掩盖新增问题。
@@ -67,24 +65,14 @@ Sync    python tools/update_docs.py --check
 - `npm run test:contract`；
 - `npm run test:e2e`。
 
-## Reports 报告体系（主归属）
+## 报告与对话输出（2026-07-29 收口）
 
-`reports/` 是长期可读取的执行报告和验证证据目录。**主归属规则在本文件**，其他文件只建立入口引用。
+> 硬规则：禁止新建未经用户确认的报告/治理目录（如 `reports/`）。
+> TRAE 完整过程只在对话输出，不写入仓库；普通 Bug 由 Git 历史记录，只有重要行为变化才写一个 CHANGE。
+> `docs/current/` 标记为 legacy 只读，本轮起不得新增或修改其中文件，后续另行迁移；
+> CI 与规则中不再要求"代码变更必须同步 docs/current"。
 
-详细规则见 `reports/README.md`（10 节）。要点：
-
-1. 所有需要长期保留的 TRAE 完整报告写入 `reports/current/REPORT-YYYYMMDD-NNN-任务短名称.md`；
-2. TRAE 对话只输出简短摘要 + 报告路径 + commit SHA + push 结果 + blocker；
-3. `reports/LATEST.md` 是 AI 读取最新任务状态的固定入口；
-4. `reports/INDEX.md` 是历史报告索引（按日期倒序）；
-5. 不再向 `sync/outbox/` 写入报告（`sync/` 仅为临时中转站，不作为运行时真源）；
-6. `sync/` 仅用于临时中转；
-7. `reports/` 不是产品和架构事实真源；
-8. 每次报告必须使用 `reports/templates/TASK-REPORT-TEMPLATE.md` 模板（固定 15 章节）；
-9. 每次报告必须包含 Base SHA、Implementation SHA、Report Published Through SHA、检查结果、Git、部署、数据库和 Known Gaps；
-10. 未提交、未 push 的报告不能描述为远程可读取；
-11. 用户要求"查看最新 TRAE 报告"时，优先读取 `reports/LATEST.md`；
-12. `tools/check_reports.py` 强制校验 15 个检查组（覆盖 SHA 完整性、秘密检测、模板章节、状态、命名等约束）。
+历史 `reports/` 目录已删除（见 CHANGE-20260729-004 配套提交），`tools/check_reports.py` 与 CI `Reports System` job 一并移除。
 
 ## 测试纪律
 

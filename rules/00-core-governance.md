@@ -15,18 +15,19 @@
 
 1. 用户当前明确要求；
 2. 当前 main 代码；
-3. `docs/current/MANIFEST.md`；
-4. `docs/current/*.md`；
-5. `docs/maps/*.md`；
-6. 最新 `docs/changes/records/*.md`；
-7. 测试与 CI 结果；
-8. 生产只读验证结果；
-9. archive 历史文档；
-10. 旧聊天记忆。
+3. `docs/prd/*.md`（已确认需求与目标行为）；
+4. `docs/maps/*.md`（已核验当前实现）；
+5. 最新 `docs/changes/records/*.md`；
+6. 测试与 CI 结果；
+7. 生产只读验证结果；
+8. archive 历史文档；
+9. 旧聊天记忆。
 
 archive 和旧聊天不能覆盖 current。
 
-> 注：`sync/` 草案曾提议将 `rules/` 提到第 3 位，未采用，保留 `docs/current/MANIFEST.md` 第 3 位。
+> 注（2026-07-29 收口）：`docs/current/` 已标记为 legacy 只读，不再作为事实源优先级入口；
+> 事实源以 `docs/prd/` 与 `docs/maps/` 为准。后续 `docs/current/` 将另行迁移。
+> 历史 `reports/` 目录已删除，不再作为读取入口。
 
 ## 修改前最小报告
 
@@ -34,14 +35,14 @@ Trae 动手前必须输出：
 
 - 任务目标；
 - 分支和 base commit；
-- 已读 `docs/current` 与 `docs/maps`；
+- 已读 `docs/prd` 与 `docs/maps`（`docs/current` 已 legacy 只读，不再要求读取）；
 - 当前代码入口（前端/API/Service/Repository/Worker）；
 - 涉及数据表；
 - 测试覆盖规则；
 - 文档与代码是否一致；
 - 本次准备修改什么；
 - 明确不修改什么；
-- 预计更新哪些 `docs/current` 与 `docs/maps`；
+- 预计更新哪些 `docs/maps`；
 - 预计新增哪个 CHANGE。
 
 发现冲突先列出，不得直接编码。
