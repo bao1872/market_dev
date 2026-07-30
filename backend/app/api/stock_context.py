@@ -733,7 +733,10 @@ async def get_first_pyramid(
 
     from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
     from app.services.chip_status_resolver import resolve_chip_status
-    from app.services.first_pyramid_service import compute_first_pyramid_snapshot
+    from app.services.first_pyramid_service import (
+        compute_first_pyramid_snapshot,
+        serialize_first_pyramid_for_instrument,
+    )
     from app.services.market_data_aggregation_service import MarketDataAggregationService
 
     _ = ctx  # 权限守卫，不直接使用
@@ -801,7 +804,9 @@ async def get_first_pyramid(
 
                 # [CHANGE-20260730-010] 注入 chipStatus（camelCase，与列表 API 一致）
                 stored_fp["chipStatus"] = chip_status.model_dump(by_alias=False)
-                return stored_fp
+                # [P0-symbol合同 2026-07-30] 统一使用 adapter 校验/覆盖公共 symbol
+                # 旧已发布快照可能含 UUID；新快照已修复。adapter deep copy 不修改 ORM JSON
+                return serialize_first_pyramid_for_instrument(stored_fp, symbol)
 
     # Fallback：从 bars 实时计算（只读，不写库）
     mdas = MarketDataAggregationService()

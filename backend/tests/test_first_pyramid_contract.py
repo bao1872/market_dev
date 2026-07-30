@@ -598,3 +598,112 @@ class TestStructureLevelFinalization:
             # 两个字段必须分别存在（不是同一个字段的两份拷贝）
             assert cf["swing_direction"] in (1, -1, 0)
             assert cf["internal_direction"] in (1, -1, 0)
+
+
+# =============================================================================
+# 6. P0 symbol 合同 adapter 测试（2026-07-30）
+# =============================================================================
+
+
+class TestSerializeFirstPyramidSymbolAdapter:
+    """[P0 2026-07-30] 公共 symbol 合同：必须是规范化 6 位股票代码，禁止 UUID。
+
+    覆盖场景：
+    - 旧快照 payload.symbol 为 UUID → adapter 必须返回规范化 symbol，并附 _legacy_symbol_repaired=True
+    - 旧快照 payload.symbol 为 None → adapter 必须填充规范化 symbol
+    - payload.symbol 已是规范化 symbol → adapter 不修改，不附 _legacy_symbol_repaired
+    - adapter 不得原地修改源 dict（deep copy）
+    - symbol 含 .SZ/.SH 后缀 → adapter 截取前 6 位数字
+    - payload 非 dict / symbol 为空 → 原样返回
+    """
+
+    def test_legacy_uuid_symbol_replaced_with_normalized(self):
+        """旧快照 symbol=UUID，adapter 返回 6 位代码并标记 _legacy_symbol_repaired。"""
+        from app.services.first_pyramid_service import (
+            serialize_first_pyramid_for_instrument,
+        )
+
+        legacy_uuid = "550e8400-e29b-41d4-a716-446655440000"
+        payload = {
+            "symbol": legacy_uuid,
+            "trend": {"available": True},
+            "structure": {"available": True},
+        }
+        result = serialize_first_pyramid_for_instrument(payload, "300369")
+        assert result["symbol"] == "300369"
+        assert result["_legacy_symbol_repaired"] is True
+        # 源 dict 未被修改
+        assert payload["symbol"] == legacy_uuid
+        # 其他字段保留
+        assert result["trend"] == {"available": True}
+
+    def test_none_symbol_filled_with_normalized(self):
+        """payload.symbol=None 时 adapter 必须填充规范化 symbol。"""
+        from app.services.first_pyramid_service import (
+            serialize_first_pyramid_for_instrument,
+        )
+
+        payload = {"symbol": None, "trend": {}}
+        result = serialize_first_pyramid_for_instrument(payload, "000021")
+        assert result["symbol"] == "000021"
+        assert result["_legacy_symbol_repaired"] is True
+
+    def test_already_normalized_symbol_not_modified(self):
+        """payload.symbol 已是规范化 symbol，adapter 不修改、不附 _legacy_symbol_repaired。"""
+        from app.services.first_pyramid_service import (
+            serialize_first_pyramid_for_instrument,
+        )
+
+        payload = {"symbol": "300369", "trend": {}}
+        result = serialize_first_pyramid_for_instrument(payload, "300369")
+        assert result["symbol"] == "300369"
+        assert "_legacy_symbol_repaired" not in result
+
+    def test_symbol_with_suffix_normalized(self):
+        """symbol 含 .SZ/.SH 后缀时，adapter 截取前 6 位数字。"""
+        from app.services.first_pyramid_service import (
+            serialize_first_pyramid_for_instrument,
+        )
+
+        payload = {"symbol": "550e8400-e29b-41d4-a716-446655440000"}
+        result = serialize_first_pyramid_for_instrument(payload, "300369.SZ")
+        assert result["symbol"] == "300369"
+
+    def test_source_dict_not_mutated(self):
+        """adapter 必须深拷贝，不得原地修改源 dict。"""
+        from app.services.first_pyramid_service import (
+            serialize_first_pyramid_for_instrument,
+        )
+
+        legacy_uuid = "550e8400-e29b-41d4-a716-446655440000"
+        nested = {"available": True, "events": [1, 2, 3]}
+        payload = {"symbol": legacy_uuid, "trend": nested}
+        result = serialize_first_pyramid_for_instrument(payload, "300369")
+        # 源 dict 完全未变
+        assert payload["symbol"] == legacy_uuid
+        assert payload["trend"] == nested
+        # 修改 result 不影响 payload
+        result["trend"]["available"] = False
+        assert payload["trend"]["available"] is True
+
+    def test_non_dict_payload_returned_as_is(self):
+        """payload 非 dict 时原样返回。"""
+        from app.services.first_pyramid_service import (
+            serialize_first_pyramid_for_instrument,
+        )
+
+        assert serialize_first_pyramid_for_instrument(None, "300369") is None
+        assert serialize_first_pyramid_for_instrument([], "300369") == []
+        assert serialize_first_pyramid_for_instrument("string", "300369") == "string"
+
+    def test_empty_symbol_returns_payload_unchanged(self):
+        """symbol 为空时原样返回 payload。"""
+        from app.services.first_pyramid_service import (
+            serialize_first_pyramid_for_instrument,
+        )
+
+        payload = {"symbol": "300369"}
+        result = serialize_first_pyramid_for_instrument(payload, "")
+        assert result == payload
+        result = serialize_first_pyramid_for_instrument(payload, None)
+        assert result == payload

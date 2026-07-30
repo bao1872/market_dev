@@ -44,6 +44,11 @@
 - 本地只允许 --dry-run 运行
 - 修复只写 raw OHLCV，不写 qfq 价格
 - 不修改 074 等已有迁移
+
+[P0-CLI语义 2026-07-30] 三种模式语义：
+- --dry-run：零持久写（不创建 run/items，只解析 symbols 打印计划）
+- --scan：允许写审计 run/items（记录扫描结果），但不改 bars
+- --repair：才修改行情数据（写 raw OHLCV，幂等 upsert）
 """
 from __future__ import annotations
 
@@ -168,7 +173,41 @@ async def _run(args: argparse.Namespace) -> int:
         try:
             results: dict = {}
 
-            # 扫描阶段
+            # [P0-CLI语义 2026-07-30] dry-run 零持久写：不创建 run/items
+            if args.dry_run:
+                # 解析 symbols 列表
+                if args.canary:
+                    resolved_symbols = _CANARY_SYMBOLS.split(",")
+                elif symbols:
+                    resolved_symbols = [s.strip() for s in symbols.split(",") if s.strip()]
+                else:
+                    # 查询全部活跃 A 股 symbols（只读）
+                    from sqlalchemy import text as sa_text
+                    sym_result = await db.execute(
+                        sa_text("SELECT symbol FROM instruments WHERE status='active' AND symbol ~ '^[036]' ORDER BY symbol")
+                    )
+                    resolved_symbols = [r[0] for r in sym_result]
+                if limit:
+                    resolved_symbols = resolved_symbols[:limit]
+                print(
+                    f"[DRY-RUN] 计划扫描 {len(resolved_symbols)} 只股票 "
+                    f"(timeframe={args.timeframe}, range={start_date}~{end_date}):"
+                )
+                for s in resolved_symbols[:20]:
+                    print(f"  - {s}")
+                if len(resolved_symbols) > 20:
+                    print(f"  ... 共 {len(resolved_symbols)} 只")
+                results["dry_run"] = {
+                    "dry_run": True,
+                    "timeframe": args.timeframe,
+                    "range": [start_date.isoformat(), end_date.isoformat()],
+                    "symbols_count": len(resolved_symbols),
+                    "symbols_sample": resolved_symbols[:5],
+                }
+                print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
+                return 0
+
+            # 扫描阶段（非 dry-run）
             if args.scan or args.scan_and_repair:
                 # 创建或解析 run
                 if args.resume:
@@ -194,51 +233,17 @@ async def _run(args: argparse.Namespace) -> int:
                         repair_mode=args.scan_and_repair,
                     )
 
-                # dry-run 模式只打印计划
-                if args.dry_run:
-                    # 查询 pending items（限制 limit）
-                    from sqlalchemy import select
+                # 实际执行扫描（--scan 允许写审计 run/items，不改 bars）
+                scan_summary = await MarketDataQualityService.execute_scan(
+                    db,
+                    run_id=run.id,
+                    batch_size=scan_batch,
+                    dry_run=False,
+                )
+                await db.commit()
+                results["scan"] = scan_summary
 
-                    from app.models.market_data_quality import (
-                        MarketDataQualityItem,
-                    )
-                    stmt = (
-                        select(MarketDataQualityItem.symbol)
-                        .where(MarketDataQualityItem.run_id == run.id)
-                        .where(MarketDataQualityItem.status == "pending")
-                        .order_by(MarketDataQualityItem.symbol)
-                    )
-                    if limit:
-                        stmt = stmt.limit(limit)
-                    pending_result = await db.execute(stmt)
-                    pending_symbols = [r[0] for r in pending_result.all()]
-                    print(
-                        f"[DRY-RUN] 计划扫描 {len(pending_symbols)} 只股票 "
-                        f"(timeframe={args.timeframe}, range={start_date}~{end_date}):"
-                    )
-                    for s in pending_symbols[:20]:
-                        print(f"  - {s}")
-                    if len(pending_symbols) > 20:
-                        print(f"  ... 共 {len(pending_symbols)} 只")
-                    results["scan"] = {
-                        "dry_run": True,
-                        "run_id": str(run.id),
-                        "run_key": run.run_key,
-                        "total_instruments": run.total_instruments,
-                        "pending_count": len(pending_symbols),
-                    }
-                else:
-                    # 实际执行扫描
-                    scan_summary = await MarketDataQualityService.execute_scan(
-                        db,
-                        run_id=run.id,
-                        batch_size=scan_batch,
-                        dry_run=False,
-                    )
-                    await db.commit()
-                    results["scan"] = scan_summary
-
-            # 修复阶段
+            # 修复阶段（非 dry-run；dry-run 已在前面统一返回）
             if args.repair or args.scan_and_repair:
                 # 修复需要先有 run
                 if args.scan_and_repair:
@@ -257,29 +262,16 @@ async def _run(args: argparse.Namespace) -> int:
                     )
                     run_id = run.id
 
-                if args.dry_run:
-                    repair_summary = await MarketDataQualityService.execute_repair(
+                repair_summary = (
+                    await MarketDataQualityService.execute_repair(
                         db,
                         run_id=run_id,
                         batch_size=repair_batch,
-                        dry_run=True,
+                        dry_run=False,
                     )
-                    results["repair"] = repair_summary
-                    print(
-                        f"[DRY-RUN] 计划修复 {repair_summary['total_candidates']} "
-                        f"只 DB_MISSING 股票"
-                    )
-                else:
-                    repair_summary = (
-                        await MarketDataQualityService.execute_repair(
-                            db,
-                            run_id=run_id,
-                            batch_size=repair_batch,
-                            dry_run=False,
-                        )
-                    )
-                    await db.commit()
-                    results["repair"] = repair_summary
+                )
+                await db.commit()
+                results["repair"] = repair_summary
 
             # 输出结果
             print(json.dumps(results, ensure_ascii=False, indent=2, default=str))

@@ -48,6 +48,7 @@ from app.models.stock_feature_snapshot_run import (
     STATUS_SUCCEEDED,
     StockFeatureSnapshotRun,
 )
+from app.repositories.bar_repository import _get_symbol
 from app.services.atomic_fact_contract_service import build_persisted_afc_payload
 
 # [CHANGE-20260718-004 Node Cluster engine] 盘后链一次调用 engine 计算 Node Cluster Profile，
@@ -324,6 +325,7 @@ async def compute_feature_snapshot_for_date(
     primary_bars: pd.DataFrame | None = None,
     secondary_bars: pd.DataFrame | None = None,
     source_run_id: uuid.UUID | None = None,
+    instrument_symbol: str | None = None,
     _diag_sink: dict[str, Any] | None = None,
 ) -> StockFeatureSnapshot:
     """为指定 instrument + trade_date 计算 point-in-time 特征快照。
@@ -338,6 +340,10 @@ async def compute_feature_snapshot_for_date(
     - 15m bars 只用 <= trade_date 当日
     - 禁止使用 trade_date 之后数据
 
+    [P0-symbol合同 2026-07-30] 第一金字塔公共 symbol 必须是规范化6位股票代码。
+    调用方应通过 instrument_symbol 显式传入；未传时本函数查询一次 instruments.symbol。
+    禁止继续用 str(instrument_id) 作为 first_pyramid.symbol。
+
     Args:
         session: 异步 DB 会话
         instrument_id: 标的 UUID
@@ -347,6 +353,8 @@ async def compute_feature_snapshot_for_date(
         adj: 复权方式（默认 qfq）
         primary_bars: 预加载的日线 bars（可选，不传则从 DB 获取）
         secondary_bars: 预加载的 15m bars（可选，不传则从 DB 获取）
+        instrument_symbol: 规范化股票代码（如 '300369'）；未传则按 instrument_id 查询一次
+        _diag_sink: 诊断信息收集 dict
 
     Returns:
         StockFeatureSnapshot ORM 对象（未写入 DB）
@@ -612,7 +620,21 @@ async def compute_feature_snapshot_for_date(
     try:
         from app.services.first_pyramid_service import compute_first_pyramid_snapshot
         if df_1d is not None and not df_1d.empty and len(df_1d) >= 60:
-            symbol_for_pyramid = str(instrument_id)  # API 侧会用 symbol 查；此处用 instrument_id 占位
+            # [P0-symbol合同 2026-07-30] 公共 symbol 必须是规范化6位股票代码
+            # 优先使用调用方传入的 instrument_symbol；未传则按 instrument_id 查询一次
+            if instrument_symbol is None:
+                instrument_symbol = await _get_symbol(session, instrument_id)
+            if instrument_symbol is None:
+                # 查询失败时回退到 str(instrument_id) 并记录诊断；不阻断主流程
+                # 但生产路径不应走到这里（上游已校验 instrument 存在）
+                logger.warning(
+                    "compute_feature_snapshot_for_date instrument_symbol 查询失败，回退 UUID: "
+                    "instrument_id=%s trade_date=%s",
+                    instrument_id, trade_date,
+                )
+                symbol_for_pyramid = str(instrument_id)
+            else:
+                symbol_for_pyramid = instrument_symbol
             fp_snapshot = compute_first_pyramid_snapshot(
                 bars=df_1d,
                 symbol=symbol_for_pyramid,
@@ -664,6 +686,7 @@ async def compute_review_core_for_trade_date(
     *,
     primary_bars: pd.DataFrame | None = None,
     source_run_id: uuid.UUID | None = None,
+    instrument_symbol: str | None = None,
     _diag_sink: dict[str, Any] | None = None,
 ) -> StockFeatureSnapshot:
     """[CHANGE-20260729-003] 盘后 review core 计算路径（daily-core only）。
@@ -826,7 +849,18 @@ async def compute_review_core_for_trade_date(
             compute_first_pyramid_core_snapshot,
         )
         if df_1d is not None and not df_1d.empty and len(df_1d) >= 60:
-            symbol_for_pyramid = str(instrument_id)
+            # [P0-symbol合同 2026-07-30] 公共 symbol 必须是规范化6位股票代码
+            if instrument_symbol is None:
+                instrument_symbol = await _get_symbol(session, instrument_id)
+            if instrument_symbol is None:
+                logger.warning(
+                    "compute_review_core_for_trade_date instrument_symbol 查询失败，回退 UUID: "
+                    "instrument_id=%s trade_date=%s",
+                    instrument_id, trade_date,
+                )
+                symbol_for_pyramid = str(instrument_id)
+            else:
+                symbol_for_pyramid = instrument_symbol
             fp_core = compute_first_pyramid_core_snapshot(
                 bars=df_1d,
                 symbol=symbol_for_pyramid,
@@ -920,6 +954,14 @@ async def compute_review_core_batch_for_trade_date(
     failed_count = 0
     # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
     run_diag: dict[str, Any] = {}
+    # [P0-symbol合同 2026-07-30] 一次查询 instrument_id → symbol 映射，避免 N 次 DB 查询
+    symbol_map: dict[uuid.UUID, str | None] = {}
+    if total > 0:
+        sym_rows = await session.execute(
+            text("SELECT id, symbol FROM instruments WHERE id = ANY(:ids)"),
+            {"ids": list(instrument_ids)},
+        )
+        symbol_map = {row[0]: row[1] for row in sym_rows}
 
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
@@ -930,6 +972,7 @@ async def compute_review_core_batch_for_trade_date(
                     instrument_id,
                     trade_date,
                     source_run_id=source_run_id,
+                    instrument_symbol=symbol_map.get(instrument_id),
                     _diag_sink=run_diag,
                 )
                 await upsert_snapshot(session, snapshot)
@@ -1072,6 +1115,16 @@ async def compute_review_core_with_run_items(
         if not items:
             break  # 无可领取 items，完成
 
+        # [P0-symbol合同 2026-07-30] 批量查询本批 items 的 instrument_id → symbol 映射
+        async with AsyncSessionLocal() as sym_db:
+            sym_rows = await sym_db.execute(
+                text("SELECT id, symbol FROM instruments WHERE id = ANY(:ids)"),
+                {"ids": [item.instrument_id for item in items]},
+            )
+            batch_symbol_map: dict[uuid.UUID, str | None] = {
+                row[0]: row[1] for row in sym_rows
+            }
+
         # 2.2 逐股计算（每股独立事务）
         for item in items:
             try:
@@ -1082,6 +1135,7 @@ async def compute_review_core_with_run_items(
                         item.instrument_id,
                         trade_date,
                         source_run_id=snapshot_run_id,
+                        instrument_symbol=batch_symbol_map.get(item.instrument_id),
                         _diag_sink=run_diag,
                     )
                     await upsert_snapshot(compute_db, snapshot)
@@ -1470,6 +1524,14 @@ async def compute_for_trade_date(
     failed_count = 0
     # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
     run_diag: dict[str, Any] = {}
+    # [P0-symbol合同 2026-07-30] 一次查询 instrument_id → symbol 映射，避免 N 次 DB 查询
+    symbol_map: dict[uuid.UUID, str | None] = {}
+    if total > 0:
+        sym_rows = await session.execute(
+            text("SELECT id, symbol FROM instruments WHERE id = ANY(:ids)"),
+            {"ids": list(instrument_ids)},
+        )
+        symbol_map = {row[0]: row[1] for row in sym_rows}
 
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
@@ -1478,6 +1540,7 @@ async def compute_for_trade_date(
                 snapshot = await compute_feature_snapshot_for_date(
                     session, instrument_id, trade_date,
                     source_run_id=source_run_id,
+                    instrument_symbol=symbol_map.get(instrument_id),
                     _diag_sink=run_diag,
                 )
                 await upsert_snapshot(session, snapshot)

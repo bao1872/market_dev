@@ -1711,3 +1711,63 @@ if __name__ == "__main__":
         import traceback
 
         traceback.print_exc()
+
+
+# =============================================================================
+# [P0-symbol合同 2026-07-30] 公共 symbol 规范化 adapter
+# =============================================================================
+
+
+def serialize_first_pyramid_for_instrument(
+    payload: dict[str, Any],
+    symbol: str,
+) -> dict[str, Any]:
+    """第一金字塔公共 symbol 规范化 adapter。
+
+    [P0-symbol合同 2026-07-30] 根因修复：
+    - 旧生产路径 compute_feature_snapshot_for_date / compute_review_core_for_trade_date
+      曾把 str(instrument_id) 写入 FirstPyramidSnapshot.symbol，API 原样返回，
+      前端比较 300369 与 UUID 失败。
+    - 新写入数据已修复（instrument_symbol 参数），但旧已发布快照可能仍含 UUID。
+    - 本 adapter 在 API 返回前统一校验/覆盖公共 symbol 为规范化股票代码。
+
+    规则：
+    - symbol 必须是非空字符串（规范化6位A股代码，如 '300369'）
+    - payload.symbol 为 UUID 时：覆盖为 symbol，附 legacy_symbol_repaired=True 诊断
+    - payload.symbol 为空/缺失时：覆盖为 symbol
+    - payload.symbol 已等于 symbol：原样返回
+    - 禁止原地修改输入 payload（deep copy）
+
+    Args:
+        payload: 第一金字塔 dict（来自 snapshot.summary_payload["first_pyramid"] 或实时计算）
+        symbol: 规范化股票代码（来自 instruments.symbol）
+
+    Returns:
+        新 dict，symbol 字段已规范化；附 legacy_symbol_repaired 诊断（仅在修复时）
+    """
+    import copy
+    import re
+
+    if not isinstance(payload, dict):
+        return payload
+    if not symbol or not isinstance(symbol, str):
+        # symbol 无效，原样返回（上游应保证非空）
+        return payload
+
+    # 规范化 symbol：去除可能的 .SZ/.SH 后缀，保留6位数字
+    normalized = symbol.strip()
+    # A股代码格式：6位数字（可能含后缀如 300369.SZ）
+    m = re.match(r"^(\d{6})", normalized)
+    if m:
+        normalized = m.group(1)
+
+    result = copy.deepcopy(payload)
+    current = result.get("symbol")
+    # 判断是否为 UUID（36字符含连字符）或与 normalized 不一致
+    uuid_like = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+    if not current or uuid_like.match(str(current)) or str(current) != normalized:
+        result["symbol"] = normalized
+        # 附诊断标记（不修改ORM JSON，只在此返回 dict 中）
+        result["_legacy_symbol_repaired"] = True
+    return result
+

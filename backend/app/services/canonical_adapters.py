@@ -541,6 +541,7 @@ async def compute_snapshot_derived_adapter(
     primary_bars: pd.DataFrame | None = None,
     secondary_bars: pd.DataFrame | None = None,
     source_run_id: uuid.UUID | None = None,
+    instrument_symbol: str | None = None,
     _diag_sink: dict[str, Any] | None = None,
 ) -> Any:
     """Snapshot Derived Features 统一 adapter — wraps feature_snapshot_service.compute_feature_snapshot_for_date。
@@ -580,6 +581,7 @@ async def compute_snapshot_derived_adapter(
         primary_bars=primary_bars,
         secondary_bars=secondary_bars,
         source_run_id=source_run_id,
+        instrument_symbol=instrument_symbol,
         _diag_sink=_diag_sink,
     )
 
