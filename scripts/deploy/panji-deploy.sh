@@ -351,7 +351,7 @@ deploy_scope() {
             build_frontend
             sync_live_mount
             compose_config_check
-            recreate_services frontend goaccess
+            recreate_services frontend
             ;;
         backend)
             build_frontend
@@ -370,8 +370,9 @@ deploy_scope() {
             build_frontend
             compose_config_check
             # 镜像重建后全量 up -d（不叠加 live.yml，不覆盖 baked-in 代码）
+            # [P0 2026-07-30] 移除 goaccess（已被 Umami 替代，docker-compose.prod.yml 无此服务）
             run_cmd ${COMPOSE_CMD_NO_LIVE} up -d --force-recreate --remove-orphans \
-                backend frontend goaccess \
+                backend frontend \
                 worker-bars-scheduler worker-strategy-scheduler worker-calendar \
                 worker-monitor worker-strategy-batch worker-outbox worker-delivery \
                 worker-after-close worker-watchdog worker-capture
@@ -381,7 +382,7 @@ deploy_scope() {
             sync_live_mount
             compose_config_check
             recreate_services \
-                backend frontend goaccess \
+                backend frontend \
                 worker-bars-scheduler worker-strategy-scheduler worker-calendar \
                 worker-monitor worker-strategy-batch worker-outbox worker-delivery \
                 worker-after-close worker-watchdog worker-capture
