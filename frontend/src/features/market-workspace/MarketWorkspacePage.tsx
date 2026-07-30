@@ -50,7 +50,7 @@ import {
   getFirstPyramidColumns,
   getDefaultHiddenFpKeys,
 } from './firstPyramidColumns'
-import { serializeFpFilters, serializeFpSort } from './firstPyramidQuerySerializer'
+import { serializeFpFilters, serializeFpSort, isFpKey } from './firstPyramidQuerySerializer'
 import styles from './MarketWorkspace.module.scss'
 
 // DSA 生产策略 key（AGENTS §12.2：当前生产只保留 dsa_selector）
@@ -340,23 +340,25 @@ export default function MarketWorkspacePage() {
   )
 
   // [CHANGE-20260729-009] /market/stocks 作为列表唯一数据源（删除双分页合并架构）。
-  // 不再使用 useStrategyRunResults + useMarketStocks 双分页按 instrument_id 合并。
-  // /market/stocks 返回全部字段：股票基础信息 + DSA payload + 99 个 fp 字段 + watchlist 状态 +
-  // data_run_id + factor_ready/error + chip_status 结构化状态。
-  // usePublishedRuns 仅用于导出 activeRunId（导出仍走 /strategy-runs/{run_id}/results/export）。
+  // [CHANGE-20260730-012] 字段注册表：基础字段→sort，fp_*→fp_sort。禁止同时发送 sort 和 fp_sort。
   const marketStocksParams: MarketStocksQueryParams = useMemo(
-    () => ({
-      scope,
-      query: keyword || undefined,
-      page: query.page,
-      page_size: query.pageSize,
-      sort: query.sort ? `${query.sort.key}:${query.sort.direction}` : undefined,
-      industry: industry || undefined,
-      concept: concept || undefined,
-      // [P0-1] 第一金字塔字段服务端筛选/排序
-      fp_filter: serializeFpFilters(query.filters),
-      fp_sort: serializeFpSort(query.sort),
-    }),
+    () => {
+      const sortKey = query.sort?.key
+      const isFpField = sortKey ? isFpKey(sortKey) : false
+      return {
+        scope,
+        query: keyword || undefined,
+        page: query.page,
+        page_size: query.pageSize,
+        // 基础字段→sort；fp_* 字段不发送 sort（只走 fp_sort）
+        sort: query.sort && !isFpField ? `${query.sort.key}:${query.sort.direction}` : undefined,
+        industry: industry || undefined,
+        concept: concept || undefined,
+        // fp_* 字段→fp_sort；基础字段不发送 fp_sort
+        fp_filter: serializeFpFilters(query.filters),
+        fp_sort: serializeFpSort(query.sort),
+      }
+    },
     [scope, keyword, query.page, query.pageSize, query.sort, query.filters, industry, concept],
   )
   const marketStocksQuery = useMarketStocks(marketStocksParams)
@@ -562,8 +564,22 @@ export default function MarketWorkspacePage() {
             serverSide
             onQueryChange={handleQueryChange}
             loading={marketStocksQuery.isLoading || runsQuery.isLoading}
-            error={marketStocksQuery.isError ? '行情列表加载失败' : runsQuery.isError ? '运行批次加载失败' : null}
-            emptyText={marketStocksQuery.isError ? '行情列表加载失败' : '本页无数据'}
+            // [CHANGE-20260730-012] 显示后端 422 detail 和 500 request_id，不再统一"行情列表加载失败"
+            error={marketStocksQuery.isError
+              ? (() => {
+                  const err = marketStocksQuery.error as { response?: { status?: number; data?: { detail?: string }; headers?: { get: (k: string) => string | null } } }
+                  const status = err?.response?.status
+                  if (status === 422) {
+                    return `筛选/排序参数无效：${err?.response?.data?.detail ?? '未知错误'}`
+                  }
+                  if (status === 500) {
+                    const reqId = err?.response?.headers?.get('x-request-id')
+                    return `服务器错误${reqId ? `（request_id=${reqId}）` : ''}`
+                  }
+                  return `行情列表加载失败：${err?.response?.status ?? '网络错误'}`
+                })()
+              : runsQuery.isError ? '运行批次加载失败' : null}
+            emptyText={marketStocksQuery.isError ? '行情列表加载失败，请检查筛选/排序参数' : '本页无数据'}
             initialPageSize={PAGE_SIZE}
             tableClassName="compact-table"
             stickyHeaderMode="container"

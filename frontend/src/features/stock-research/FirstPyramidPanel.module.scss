@@ -30,6 +30,17 @@
   .status { color: v.$color-muted; font-size: 12px; margin-top: 4px; }
 }
 .error .status { color: v.$color-up; }
+.retryBtn {
+  margin-top: 8px;
+  padding: 4px 12px;
+  border: 1px solid v.$color-border;
+  border-radius: 4px;
+  background: transparent;
+  color: v.$color-text;
+  font-size: 12px;
+  cursor: pointer;
+  &:hover { border-color: v.$color-brand; }
+}
 
 // ===== Header =====
 .header {

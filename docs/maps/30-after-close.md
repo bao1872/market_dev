@@ -305,3 +305,45 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - Admin 可触发 Canary（每类型 5 个）和全量计算
 - 列表显示覆盖率徽标、状态、过期、已发布
 - 详情显示 4 维分布（趋势/结构/动量/量能）+ 结构事件率 + payload JSON
+
+## 复盘 pointer 与 run 关系
+
+**核验状态：待实现（复盘模块尚未开发）**
+对应 PRD：`../prd/30-after-close.md` §复盘编排 + `../prd/70-review.md` §11
+
+> 复盘发布链路尚未实现。以下为 PRD 定义的目标合同，当前 `after_close_orchestrator` 编排止于 board_analysis 发布，不包含 review 步骤。
+
+### pointer 存储
+
+`factor_publications` 表承载复盘发布指针：
+
+| 字段 | 值 |
+|---|---|
+| `publication_kind` | `review` |
+| `scope_type` | `market` |
+| `scope_key` | `trade_date`（如 `2026-07-29`） |
+| `data_run_id` | `market_review_run.id` |
+
+### run 与输入 pointer 关系
+
+- `market_review_run.source_core_run_id` 必须指向当前已发布的 `stock_core` pointer 的 `data_run_id`；
+- `market_review_run.source_board_run_id` 必须指向当前已发布的 `market_aggregation`（board）pointer 的 `data_run_id`；
+- 两者均必须为当前正式 pointer，不得指向已过期或被替换的旧 run。
+
+### pointer 切换语义
+
+- 切换 review pointer 是原子操作（`on_conflict_do_update`），不复制结果数据；
+- 旧 review run 保留可查询，新 pointer 只切换读取入口；
+- pointer 不得倒退到旧 run。
+
+### 覆盖率门禁
+
+- market 范围必须 ready 才能发布 review pointer；
+- 发布前检查整套 Review 门禁（见 PRD §11.1）。
+
+### 当前实现状态
+
+- `after_close_orchestrator` 不包含 review 编排步骤；
+- 无 `review_orchestrator` 服务；
+- `factor_publications` 当前无 `publication_kind=review` 记录；
+- 待 Phase 1-2 实现后更新本节核验状态。

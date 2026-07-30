@@ -413,3 +413,46 @@ Capture 页面链路：
 **重定向路由**（SPA 客户端重定向，HTTP 200）：`/overview`、`/watchlist`、`/screener`、`/admin/strategies`、`/admin/stock-debug/:symbol`、通配符 `*`。
 
 **结论**：除 `/` 受本地 Vite 限制外，所有用户级和管理员路由均正常加载，主要 API 返回 200，数据展示正确，权限模型符合预期。详细 API 响应记录在 `docs/maps/80-system-runtime.md` §9。
+
+## Review 跳转合同
+
+**核验状态：待实现（复盘模块尚未开发）**
+对应 PRD：`../prd/70-review.md` §16；对应 Map：`../maps/70-review.md`
+
+> 复盘页（`/review`）尚未实现。以下为 PRD §16 定义的跳转合同，`/market` 与 `/stock` 当前尚未接收 review 跳转参数。
+
+### /review → /market 跳转
+
+复盘页阶段四"个股验证"的"查看全部"操作跳转 `/market`，传递标准筛选参数：
+
+| 参数 | 说明 |
+|---|---|
+| `reviewSignalId` | 来源信号 ID |
+| `tradeDate` | 复盘交易日 |
+| `sourceCoreRunId` | 来源 core run（确保读取同一版本数据） |
+| `boardId` | 关联板块 ID |
+| `firstPyramidFilters` | 第一金字塔筛选条件（标准格式） |
+| `sort` | 排序参数 |
+
+### /review → /stock/:symbol 跳转
+
+复盘页打开个股详情时跳转 `/stock/:symbol`，只传上下文参数：
+
+| 参数 | 说明 |
+|---|---|
+| `from` | 固定 `review`（标识来源） |
+| `signalId` | 来源信号 ID |
+| `boardId` | 关联板块 ID |
+| `tradeDate` | 复盘交易日 |
+
+### 边界规则
+
+- `/market` 和 `/stock` **不计算** review 专属逻辑（P/Q/U/C/V、筛选器、归因），只接收上下文参数用于展示来源标识和预筛；
+- `/boards/analysis` 保留为板块原始分析和管理/研究入口；Review 阶段三复用其可抽取组件（BoardMetricsSummary / BoardDistributionPanel / BoardEventDistribution），不复制业务逻辑；
+- 复盘页**不得**重新实现 99 字段列设置和导出，这些能力由 `/market` 承担。
+
+### 当前实现状态
+
+- `/market` 和 `/stock` 当前未解析上述 review 参数；
+- `/boards/analysis` 已实现（BoardAnalysisPage.tsx），可作为 Review 阶段三组件来源；
+- 待 Phase 3 实现后更新本节核验状态。

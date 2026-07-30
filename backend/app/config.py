@@ -464,6 +464,16 @@ class Settings(BaseSettings):
         description="板块同步开关：false 时盘后编排跳过 syncing_boards",
     )
 
+    # [盘中监控1秒] - 事件判定Worker轮询间隔（秒）
+    # 只控制 monitor_scheduler 的事件判定周期和前端 monitor-status 刷新；
+    # Bars/Indicators/ChartSnapshot 不受此配置影响。
+    # DSA/SMC/Node 重算由 monitor_evaluations 表的 exactly-once 去重保证：
+    # 新 1m bar 完成才重算，否则跳过（return early）。
+    intraday_monitor_poll_seconds: int = Field(
+        default_factory=lambda: _load_py_config().get("INTRADAY_MONITOR_POLL_SECONDS", 1),
+        description="盘中监控轮询间隔（秒），默认1秒",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

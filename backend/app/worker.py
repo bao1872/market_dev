@@ -34,6 +34,7 @@ import os
 import signal
 import socket
 from datetime import UTC, datetime, time, timedelta
+from time import monotonic as _time_monotonic
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -898,19 +899,24 @@ async def _find_or_create_monitor_session_job_run(
 
 
 async def run_monitor_scheduler_worker() -> None:
-    """监控调度 Worker：交易时段内每 30 秒执行一轮监控。
+    """监控调度 Worker：交易时段内每 INTRADAY_MONITOR_POLL_SECONDS 秒执行一轮监控。
+
+    [盘中监控1秒] - cycle_interval 由 config.intraday_monitor_poll_seconds 控制（默认1秒）
+    DSA/SMC/Node 重算由 monitor_evaluations 表 exactly-once 去重保证：
+    新 1m bar 完成才重算，否则跳过（return early）。
+    上一周期未完成则跳过，不重入。
 
     使用 APScheduler AsyncIOScheduler + 交易时段判断：
-    - 交易日 9:30-11:30：每 30 秒执行一轮（同一 session 只创建一条 SchedulerJobRun）
+    - 交易日 9:30-11:30：每 poll_seconds 秒执行一轮（同一 session 只创建一条 SchedulerJobRun）
     - 午休 11:30-13:00：暂停
-    - 交易日 13:00-15:00：每 30 秒执行一轮（同一 session 只创建一条 SchedulerJobRun）
+    - 交易日 13:00-15:00：每 poll_seconds 秒执行一轮（同一 session 只创建一条 SchedulerJobRun）
     - 非交易日：不执行
 
     调用 MonitorBatchService.execute_monitor_cycle() 执行单轮监控。
 
     设计说明：
     - 不使用 CronTrigger（需要精确到秒级的循环控制）
-    - 使用 while 循环 + asyncio.sleep(30) 实现交易时段内循环
+    - 使用 while 循环 + asyncio.sleep(poll_seconds) 实现交易时段内循环
     - 交易日检查：复用 services/calendar_service.is_trading_day()
     - 午休暂停：11:30-13:00 期间 sleep 等待
     - session 聚合：每个上午/下午只创建一条 SchedulerJobRun，session 内更新
@@ -919,12 +925,14 @@ async def run_monitor_scheduler_worker() -> None:
     """
     from datetime import time as time_cls
 
+    from app.config import get_settings
     from app.services.monitor_batch_service import MonitorBatchService
 
     _hb_task = asyncio.create_task(_heartbeat_loop("monitor_scheduler"))
     service = MonitorBatchService()
-    cycle_interval = 30  # 秒
+    cycle_interval = get_settings().intraday_monitor_poll_seconds  # [盘中监控1秒] 默认1秒
     session_finish_margin = timedelta(seconds=cycle_interval + 5)
+    _cycle_running = False  # 防重入标志
 
     # [eval_recovery] 启动时恢复过期租约的 PENDING 评估
     async with AsyncSessionLocal() as db:
@@ -949,7 +957,10 @@ async def run_monitor_scheduler_worker() -> None:
     )
 
     # 启动成功飞书通知
-    await _notify_monitor_status("监控服务已启动", "交易时段 9:30-11:30 / 13:00-15:00\n每 30 秒执行一轮监控")
+    await _notify_monitor_status(
+        "监控服务已启动",
+        f"交易时段 9:30-11:30 / 13:00-15:00\n每 {cycle_interval} 秒执行一轮监控",
+    )
 
     while not _shutdown:
         job_run = None
@@ -997,6 +1008,12 @@ async def run_monitor_scheduler_worker() -> None:
             business_date = str(now.date())
 
             # 交易时段内，执行监控周期
+            # [盘中监控1秒] - 防重入：上一周期未完成则跳过
+            if _cycle_running:
+                logger.debug("monitor_scheduler 上一周期未完成，跳过本轮")
+                await asyncio.sleep(cycle_interval)
+                continue
+
             async with AsyncSessionLocal() as db:
                 job_run = await _find_or_create_monitor_session_job_run(
                     db, now, business_date, session_label,
@@ -1025,27 +1042,36 @@ async def run_monitor_scheduler_worker() -> None:
                         "monitor_scheduler 复用 session job_run_id=%s", job_run.id,
                     )
                 cycle_succeeded = False
+                _cycle_running = True  # [盘中监控1秒] 设置防重入标志
+                _cycle_start_ts = _time_monotonic()
                 try:
                     result = await service.execute_monitor_cycle(db)
                     await db.commit()
                     cycle_succeeded = True
+                    _cycle_latency = _time_monotonic() - _cycle_start_ts
                     if result.total_events_written > 0:
                         logger.info(
-                            "监控周期完成: session=%s instruments=%d events=%d notifications=%d",
+                            "监控周期完成: session=%s instruments=%d events=%d "
+                            "notifications=%d latency=%.3fs skip=0",
                             session_label,
                             result.total_instruments,
                             result.total_events_written,
                             result.total_notifications_created,
+                            _cycle_latency,
                         )
                     else:
                         logger.debug(
-                            "监控周期完成: session=%s instruments=%d events=0",
+                            "监控周期完成: session=%s instruments=%d events=0 "
+                            "latency=%.3fs",
                             session_label,
                             result.total_instruments,
+                            _cycle_latency,
                         )
                 except Exception as exc:
                     logger.exception("Monitor Scheduler 周期异常: %s", exc)
                     await db.rollback()
+                finally:
+                    _cycle_running = False  # [盘中监控1秒] 清除防重入标志
 
                 # 更新 session 级统计与心跳
                 now = datetime.now(ZoneInfo("Asia/Shanghai"))

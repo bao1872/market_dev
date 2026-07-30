@@ -183,6 +183,8 @@ services:
       CAPTURE_WORKER_URL: ${CAPTURE_WORKER_URL:-http://worker-capture:8001}
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/app/config.production.py
+      # [盘中监控1秒] - 事件判定Worker轮询间隔，默认1秒
+      INTRADAY_MONITOR_POLL_SECONDS: ${INTRADAY_MONITOR_POLL_SECONDS:-1}
     depends_on:
       redis:
         condition: service_healthy

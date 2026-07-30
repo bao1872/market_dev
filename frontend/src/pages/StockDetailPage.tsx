@@ -14,7 +14,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import clsx from 'clsx'
-import { AtomicFactsDrawer } from '@/features/research-context/AtomicFactsDrawer'
+// [CHANGE-20260730-012] FirstPyramidPanel detail 替代 AtomicFactsDrawer
+import { FirstPyramidPanel } from '@/features/stock-research/FirstPyramidPanel'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
 import { StockQuoteStrip } from '@/features/stock-research/StockQuoteStrip'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
@@ -102,35 +103,15 @@ export default function StockDetailPage() {
     sourceRunIdParam,
     canonicalQueryParam,
   )
-  // V1 兼容派生：source/strategy 供 loadChartLayerVisibility / AtomicFactsDrawer 使用
+  // V1 兼容派生：source/strategy 供 loadChartLayerVisibility 使用
   // V2 origin 为来源唯一真源，source/strategy 由 origin 推导
   const source = sourceCtxV2.origin === 'market' ? 'selection' : 'watchlist'
   const strategy = sourceCtxV2.origin === 'market' ? 'dsa_selector' : 'watchlist_monitor'
   const sourceContextInvalid = sourceCtxV2.sourceContextInvalid
   const isCaptureMode = searchParams.get('capture') === 'feishu'
-  // [结构状态隐藏开关] - hideStructuralState=1 / capture=1 / capture=feishu 强制隐藏面板
-  const hideStructuralStateParam =
-    searchParams.get('hideStructuralState') === '1' ||
-    searchParams.get('capture') === '1' ||
-    isCaptureMode
-
-  // [事件面板开关] - 首次默认收起，localStorage 持久化用户选择；capture 强制隐藏
-  // P0-4: showStructuralState → eventPanelCollapsed（语义：true=收起）
-  // localStorage key: panji:event-panel:v1
-  const [eventPanelCollapsed, setEventPanelCollapsed] = useState<boolean>(() => {
-    if (hideStructuralStateParam) return true
-    const saved = localStorage.getItem('panji:event-panel:v1')
-    return saved === null ? true : saved === 'collapsed'
-  })
-  const toggleEventPanel = useCallback(() => {
-    if (hideStructuralStateParam) return
-    setEventPanelCollapsed(prev => {
-      const next = !prev
-      localStorage.setItem('panji:event-panel:v1', next ? 'collapsed' : 'expanded')
-      return next
-    })
-  }, [hideStructuralStateParam])
-  const shouldShowPanel = !eventPanelCollapsed && !hideStructuralStateParam
+  // [CHANGE-20260730-012] 删除 AtomicFactsDrawer/eventPanelCollapsed/localStorage 旧开关
+  // 右侧唯一状态面板为 FirstPyramidPanel detail，capture 时隐藏
+  const showFirstPyramidDetail = !isCaptureMode && !!symbol
 
   // timeframe：从 URL 解析（单一真源），工具栏切换写回 URL
   const timeframe: DisplayTimeframe = normalizeDisplayTimeframe(searchParams.get('timeframe'))
@@ -331,24 +312,10 @@ export default function StockDetailPage() {
     barsStatus ? barsStatus.label : null,
   ].filter(Boolean) : []
 
-  // 右栏状态观察面板（Atomic Fact Contract V1: 点击「显示状态观察」打开右侧 overlay Drawer，
-  // 不压缩主 K 线；与 /market 共用 useStockContext query key）
-  const eventStatePanel = shouldShowPanel && symbol ? (
-    <AtomicFactsDrawer symbol={symbol} open onClose={toggleEventPanel} />
-  ) : null
-
-  // 状态观察面板开关 toolbar（渲染在图表上方）
-  const structuralToolbar = !hideStructuralStateParam && symbol ? (
-    <div className="structural-state-toolbar">
-      <button
-        type="button"
-        className="structural-state-toggle-btn"
-        onClick={toggleEventPanel}
-        aria-label="切换状态观察面板"
-      >
-        {eventPanelCollapsed ? '显示状态观察' : '隐藏状态观察'}
-      </button>
-    </div>
+  // [CHANGE-20260730-012] 右侧唯一状态面板为 FirstPyramidPanel detail
+  // 删除 AtomicFactsDrawer overlay 和 structuralToolbar 开关
+  const firstPyramidDetailPanel = showFirstPyramidDetail && symbol ? (
+    <FirstPyramidPanel symbol={symbol} variant="detail" />
   ) : null
 
   return (
@@ -662,16 +629,13 @@ export default function StockDetailPage() {
           source={source}
           strategyKey={strategy}
           isCaptureMode={isCaptureMode}
-          rightPanelCollapsed={!(shouldShowPanel && !!symbol)}
-          toolbar={structuralToolbar}
-          rightPanel={null}
-          showRightPanel={false}
+          rightPanelCollapsed={!showFirstPyramidDetail}
+          rightPanel={firstPyramidDetailPanel}
+          showRightPanel={showFirstPyramidDetail}
           chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
           onSmcToggle={handleSmcToggle}
         />
       </div>
-      {/* 状态观察 Drawer（overlay，不压缩 K 线；开闭由 eventPanelCollapsed 控制） */}
-      {eventStatePanel}
     </div>
   )
 }

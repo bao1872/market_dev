@@ -196,3 +196,51 @@ V1 输入仅趋势、结构、动量、量能、结构事件和权威行业/概�
 4. CLI：`scripts/first_pyramid_history_backfill_cli.py` 之外的 `backend/scripts/board_analysis_cli.py`
    - `--canary`（每类型 5 个）/ `--all` / `--type` / `--limit` / `--trade-date` / `--publish` / `--no-publish` / `--dry-run`
 
+## 复盘编排 (Review Orchestration)
+
+> 对应 PRD：`70-review.md` §11；对应 Map：`../maps/30-after-close.md` §复盘 pointer 与 run 关系。
+> 复盘编排是盘后链路 stock_core → board_analysis 之后的独立阶段，尚未实现。
+
+### RV-AC-01 触发条件
+
+当 `stock_core` pointer 和 `board_analysis` pointer 均已发布后，创建 `market_review_run`。两个输入 pointer 缺一不可。
+
+### RV-AC-02 编排顺序
+
+```text
+stock_core published
+→ board_analysis published
+→ create market_review_run
+→ compute level-1 scope metrics（market / major_index / style / industry_l1）
+→ evaluate filters（A/B/C 三类偏差筛选器）
+→ compute level-2 attribution（仅对命中信号的父范围下钻）
+→ map representative instruments
+→ evaluate active trackings
+→ quality gate
+→ publish review pointer
+```
+
+### RV-AC-03 隔离与恢复
+
+- 每个 scope 独立 item、短事务、可恢复；
+- 一个 scope 失败不回滚其他 scope；
+- 重启只处理 pending / 可重试 failed / 过期 running；
+- 相同输入 hash 和版本的 succeeded item 不得重算；
+- 信号和归因幂等；
+- pointer 切换失败只重试发布，不重算。
+
+### RV-AC-04 发布门禁
+
+单 scope：
+
+- underlying coverage >= 0.95；
+- P/Q/U/C/V 必要组件状态可用。
+
+整套 Review：
+
+- market 范围必须 ready；
+- 配置的主要指数和风格范围必须 ready；
+- 一级行业 ready 比例达到配置门槛；
+- signal evaluation 无系统性异常；
+- `source_core_run_id` 和 `source_board_run_id` 均指向当前正式 pointer。
+

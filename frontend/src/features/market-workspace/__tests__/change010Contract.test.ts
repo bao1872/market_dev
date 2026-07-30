@@ -342,38 +342,23 @@ test('MiniKlineCard 不显示指标/成交量/Node/事件标记/工具栏', () =
 })
 
 test('MarketRightPanel 挂载状态契约（resolveMarketRightPanelState 行为测试）', async () => {
-  // CHANGE-20260728-007: 从源码字符串测试迁移为行为测试。
-  // 新契约：MiniKlineCard → FirstPyramidPanel → 更多观察 → AtomicFactsPanel（仅 moreOpen=true）。
+  // [CHANGE-20260730-012] 简化：只保留 MiniKlineCard + FirstPyramidPanel compact
+  // 删除 AtomicFactsPanel / moreObservation / moreOpen
   const { resolveMarketRightPanelState } = await import('../marketRightPanelState.ts')
 
-  // symbol=null：只显示小K线空态，不挂载第一金字塔和 AtomicFactsPanel
-  const nullState = resolveMarketRightPanelState(null, false)
+  // symbol=null：只显示小K线空态，不挂载第一金字塔
+  const nullState = resolveMarketRightPanelState(null)
   assert.equal(nullState.showPyramid, false, 'symbol=null 不挂载第一金字塔')
-  assert.equal(nullState.showMoreObservation, false, 'symbol=null 不渲染更多观察入口')
-  assert.equal(nullState.showAtomicFacts, false, 'symbol=null 不挂载 AtomicFactsPanel')
 
-  // symbol=null 且 moreOpen=true：仍不挂载任何面板（symbol 是前置条件）
-  const nullOpenState = resolveMarketRightPanelState(null, true)
-  assert.equal(nullOpenState.showPyramid, false)
-  assert.equal(nullOpenState.showAtomicFacts, false, 'symbol=null 即使 moreOpen=true 也不挂载 AtomicFactsPanel')
-
-  // symbol 存在、moreOpen=false：显示第一金字塔，不挂载 AtomicFactsPanel
-  const symbolState = resolveMarketRightPanelState('600519', false)
+  // symbol 存在：显示第一金字塔 compact
+  const symbolState = resolveMarketRightPanelState('600519')
   assert.equal(symbolState.showPyramid, true, 'symbol 存在挂载第一金字塔')
-  assert.equal(symbolState.showMoreObservation, true, 'symbol 存在渲染更多观察入口')
-  assert.equal(symbolState.showAtomicFacts, false, 'moreOpen=false 不挂载 AtomicFactsPanel')
 
-  // symbol 存在、moreOpen=true：挂载一次 AtomicFactsPanel
-  const openState = resolveMarketRightPanelState('600519', true)
-  assert.equal(openState.showPyramid, true)
-  assert.equal(openState.showMoreObservation, true)
-  assert.equal(openState.showAtomicFacts, true, 'moreOpen=true 挂载 AtomicFactsPanel')
-
-  // sectionOrder 符合确认后的 UI 顺序
+  // sectionOrder 符合简化后的 UI 顺序
   assert.deepEqual(
-    [...openState.sectionOrder],
-    ['mini-kline', 'first-pyramid', 'more-observation'],
-    'sectionOrder 必须为 [mini-kline, first-pyramid, more-observation]',
+    [...symbolState.sectionOrder],
+    ['mini-kline', 'first-pyramid'],
+    'sectionOrder 必须为 [mini-kline, first-pyramid]',
   )
 })
 

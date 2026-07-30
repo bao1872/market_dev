@@ -391,13 +391,20 @@ function ChipVisualCard({
 // ===== 主组件 =====
 
 export function FirstPyramidPanel({ symbol, variant = 'detail', className }: FirstPyramidPanelProps) {
-  const { data, isLoading, error } = useFirstPyramid(symbol)
+  const { data, isLoading, error, refetch } = useFirstPyramid(symbol)
 
+  // [CHANGE-20260730-012] symbol 不一致不得无限显示加载中
+  // 显示请求/响应标识错误 + 一次重试
   if (data && data.symbol !== symbol) {
     return (
-      <div className={`${styles.loading} ${className ?? ''}`}>
+      <div className={`${styles.error} ${className ?? ''}`}>
         <div className={styles.title}>第一金字塔</div>
-        <div className={styles.status}>加载中...</div>
+        <div className={styles.status}>
+          标识不匹配（请求={symbol}, 响应={data.symbol}）
+        </div>
+        <button type="button" onClick={() => refetch()} className={styles.retryBtn}>
+          重试
+        </button>
       </div>
     )
   }

@@ -270,3 +270,61 @@ ssh panji-prod 'docker exec trading-postgres psql -U bz_stock -d bz_stock -c "
 - `coverage_ratio >= 0.95` 才写入 `factor_publications` pointer
 - 不足时保存 `partial` 结果但不发布（可重复计算，幂等）
 - 退市股（`Instrument.status != 'active'`）不参与聚合，不进入 `eligible_count`
+
+## Review canary / resume / publish
+
+**状态：尚未实现（复盘模块待开发）**
+对应 PRD：`../prd/70-review.md` §11/§12.6/§19.4；对应 Map：`../maps/70-review.md`
+
+> 以下为复盘模块计划的操作步骤，当前 `/api/v1/admin/review/*` 路由不存在。待 Phase 1-2 实现后可用。
+
+### 前置条件
+
+- `stock_core` pointer 已发布（盘后核心计算完成）；
+- `board_analysis` pointer 已发布（板块分析 V1 完成且 coverage >= 0.95）；
+- review migration（建议 `075_market_review_workbench.py`）已应用。
+
+### 1. Canary（小范围验证）
+
+PRD §19.4 固定 canary 范围：全市场 + 2 个主要指数 + 2 个风格范围 + 5 个一级行业。
+
+```bash
+ssh panji-prod "curl -s -X POST -H 'Authorization: Bearer <admin_token>' -H 'Content-Type: application/json' -H 'X-Idempotency-Key: <unique_key>' http://localhost:8000/api/v1/admin/review/runs -d '{\"trade_date\":\"<YYYY-MM-DD>\",\"scope\":\"canary\"}' | python -m json.tool"
+```
+
+验证项（PRD §19.4）：
+
+- P/Q/U/C/V 值可复算；
+- 至少一条正向和一条风险信号；
+- 下钻路径和成员归因一致；
+- `/market` 与 `/stock` 跳转正确；
+- 次日 tracking 状态可重复计算。
+
+### 2. Resume（恢复未完成 run）
+
+仅处理 pending / 可重试 failed / 过期 running 的 item，不重算已 succeeded 且 input_hash + version 一致的 item。
+
+```bash
+ssh panji-prod "curl -s -X POST -H 'Authorization: Bearer <admin_token>' -H 'X-Idempotency-Key: <unique_key>' http://localhost:8000/api/v1/admin/review/runs/<run_id>/resume | python -m json.tool"
+```
+
+### 3. Publish（发布 pointer）
+
+原子切换 review pointer，不重算。发布前检查整套门禁（PRD §11.1）。
+
+```bash
+ssh panji-prod "curl -s -X POST -H 'Authorization: Bearer <admin_token>' -H 'X-Idempotency-Key: <unique_key>' http://localhost:8000/api/v1/admin/review/runs/<run_id>/publish | python -m json.tool"
+```
+
+### 4. 状态查询
+
+```bash
+ssh panji-prod "curl -s -H 'Authorization: Bearer <admin_token>' http://localhost:8000/api/v1/admin/review/runs/<run_id>/status | python -m json.tool"
+```
+
+### 安全边界
+
+- 所有写操作（create / resume / publish）必须携带幂等键（`X-Idempotency-Key`）；
+- pointer 切换失败只重试发布，不重算；
+- 不得直接修改 `market_review_runs` 或 `factor_publications` 表的 metadata；
+- 不得绕过发布门禁强制发布 partial 结果。

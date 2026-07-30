@@ -17,6 +17,7 @@ import type { ResearchSource, DisplayTimeframe } from './stockResearchTypes'
 import { ALLOWED_TIMEFRAMES, type ChartLayerKey, type ChartLayerVisibility } from './stockResearchTypes'
 import { IndicatorToolbar } from './IndicatorToolbar'
 import { loadChartLayerVisibility, saveChartLayerVisibility } from './indicatorPreferences'
+import { computeCombinedReady } from './captureReady'
 import clsx from 'clsx'
 import type { StockResearchData } from './useStockResearchData'
 
@@ -140,23 +141,10 @@ export function StockResearchWorkspace({
 
   const inst = instrumentQuery.data
 
-  // 截图模式：飞书图层就绪校验（bb_upper + visual_segments 非空数组）
+  // [截图就绪合同] 统一使用 computeCombinedReady（structure_node 组合视图）
+  // 删除 bb_upper 及旧 Bollinger 依赖；CaptureStockPage、StockDetail capture 模式共用同一 resolver
   const feishuLayersReady = isCaptureMode
-    ? (() => {
-        const indicatorData = indicatorsQuery.data?.data
-        if (!indicatorData) return false
-        const watchlist = indicatorData.watchlist_monitor as
-          | Record<string, (number | string | null)[]>
-          | undefined
-        if (!watchlist) return false
-        const bbUpper = watchlist.bb_upper
-        if (!Array.isArray(bbUpper) || bbUpper.length === 0) return false
-        const dsaSelector = indicatorData.dsa_selector
-        if (!dsaSelector || typeof dsaSelector !== 'object') return false
-        const segments = (dsaSelector as { visual_segments?: unknown[] }).visual_segments
-        if (!Array.isArray(segments)) return false
-        return true
-      })()
+    ? computeCombinedReady(indicatorsQuery.data)
     : true
 
   const captureRenderReady = isCaptureMode && isRenderReady && feishuLayersReady

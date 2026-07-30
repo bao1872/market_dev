@@ -597,13 +597,13 @@ export function useWatchlist() {
   })
 }
 
-/** 查询自选股+监控状态聚合数据（交易时段 30s 自动刷新） */
+/** 查询自选股+监控状态聚合数据（交易时段 1s 自动刷新，[盘中监控1秒]） */
 export function useWatchlistMonitorStatus(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ['watchlist', 'monitor-status'],
     queryFn: api.getWatchlistMonitorStatus,
     staleTime: STALE_REALTIME,
-    refetchInterval: () => isInTradingHours() ? 30000 : false,
+    refetchInterval: () => isInTradingHours() ? 1000 : false,
     enabled: options?.enabled ?? true,
   })
 }
@@ -1533,7 +1533,8 @@ export function useStockContext(
  * [Phase 5B-2] 查询第一金字塔统一快照（/api/v1/stocks/{symbol}/first-pyramid）。
  * - 固定维度顺序：trend → structure → momentum → chip_consensus
  * - 前三维必选，chip_consensus 可选（无有效峰时为 null）
- * - 优先从已发布 snapshot 读取，否则从 bars 实时计算（后端只读，不写库）
+ * - [CHANGE-20260730-012] 只读已发布 stock_core 快照；无快照返回结构化 unavailable
+ * - retry=1 避免无限重试；明确 loading/error/empty 状态
  */
 export function useFirstPyramid(
   symbol: string | undefined,
@@ -1545,6 +1546,7 @@ export function useFirstPyramid(
     queryFn: ({ signal }) => api.getFirstPyramid(symbol!, params, { signal }),
     enabled: !!symbol && (options?.enabled ?? true),
     staleTime: STALE_REALTIME,
+    retry: 1,
   })
 }
 

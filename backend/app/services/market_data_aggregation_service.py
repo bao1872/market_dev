@@ -87,7 +87,9 @@ _REDIS_CACHE_PREFIX: str = "mdas"
 #   语义修正（intraday: 基于 _fetch_intraday_with_backfill 真实 earliest bar 判定，
 #   不再"单次查询 < limit 即 True"）。bump v3→v4 自动隔离旧缓存（旧 v3 缓存的
 #   history_exhausted 语义不准确，必须失效）
-_MARKET_DATA_CONTRACT_VERSION: str = "v4"
+# [CHANGE-20260730-P0] v4→v5：修复 Redis 序列化遗漏 latest_daily_quote
+# 旧 v4 缓存因 cache_key 含 contract_version，自动失效；无需全局 flush
+_MARKET_DATA_CONTRACT_VERSION: str = "v5"
 
 # [mdas] - 描述: 1m → 15m/1h 聚合频率映射
 _TARGET_FREQ: dict[str, str] = {"15m": "15min", "1h": "60min"}
@@ -851,6 +853,9 @@ def _serialize_result(result: BarAggregationResult) -> str:
         # [CP-V3-A2] 迭代回补诊断字段
         "backfill_rounds": result.backfill_rounds,
         "coverage_reason": result.coverage_reason,
+        # [CHANGE-20260730-P0] 修复：序列化 latest_daily_quote（v5 契约）
+        # 旧 v4 缓存因版本不匹配自动失效；新缓存完整保留 latest_daily_quote
+        "latest_daily_quote": result.latest_daily_quote,
     }
     return json.dumps(payload)
 
@@ -932,6 +937,9 @@ def _deserialize_result(raw: str) -> BarAggregationResult | None:
             # [CP-V3-A2] 迭代回补诊断字段（向后兼容：旧缓存无这些字段时用默认值）
             backfill_rounds=payload.get("backfill_rounds", 0),
             coverage_reason=payload.get("coverage_reason", ""),
+            # [CHANGE-20260730-P0] 修复：反序列化 latest_daily_quote（v5 契约）
+            # 旧 v4 缓存因 cache_key 版本不匹配不会命中；新缓存 latest_daily_quote 完整保留
+            latest_daily_quote=payload.get("latest_daily_quote"),
         )
     except Exception as exc:
         logger.warning("MDAS 缓存反序列化失败: %s", exc)
@@ -1552,9 +1560,9 @@ if __name__ == "__main__":
     assert params == expected_params, f"get_bars 参数不匹配: {params}"
     print(f"get_bars params={params} ✓")
 
-    # 6. 验证 v2 契约新字段默认值
-    assert result.market_data_contract_version == "v2", \
-        f"contract_version 应为 v2, got {result.market_data_contract_version}"
+    # 6. 验证契约版本字段默认值（CHANGE-20260730-P0：v5 契约）
+    assert result.market_data_contract_version == _MARKET_DATA_CONTRACT_VERSION, \
+        f"contract_version 应为 {_MARKET_DATA_CONTRACT_VERSION!r}, got {result.market_data_contract_version}"
     assert result.source_bar_hash == "", \
         f"source_bar_hash 默认应为空串, got {result.source_bar_hash!r}"
     assert result.adj_factor_hash == "", \
@@ -1565,7 +1573,7 @@ if __name__ == "__main__":
         f"completed_through 默认应为 None, got {result.completed_through!r}"
     assert result.warmup_bars_full is None, \
         f"warmup_bars_full 默认应为 None, got {result.warmup_bars_full!r}"
-    print("v2 契约新字段默认值 ✓")
+    print(f"契约字段默认值 ✓ (version={_MARKET_DATA_CONTRACT_VERSION})")
 
     # 7. 验证 _compute_adj_factor_hash
     factor_df = pd.DataFrame({
@@ -1577,12 +1585,38 @@ if __name__ == "__main__":
     assert _compute_adj_factor_hash(pd.DataFrame()) == "", "空因子 hash 应为空串"
     print(f"_compute_adj_factor_hash ✓ (hash={h})")
 
-    # 8. 验证 _cache_key 含契约版本（11 参数）
+    # 8. [CHANGE-20260730-P0] 验证 latest_daily_quote 序列化/反序列化完整保留
+    result_with_quote = BarAggregationResult(
+        bars=sample_df,
+        data_source="db",
+        as_of=now_shanghai(),
+        is_partial=False,
+        last_persisted_bar_time=pd.Timestamp("2026-06-18"),
+        last_live_bar_time=None,
+        freshness_seconds=0.0,
+        degraded=False,
+        degraded_reason=None,
+        latest_daily_quote={
+            "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2,
+            "volume": 100000.0, "amount": 1000000.0,
+            "prev_close": 9.9, "change_pct": 3.03,
+        },
+    )
+    serialized_q = _serialize_result(result_with_quote)
+    restored_q = _deserialize_result(serialized_q)
+    assert restored_q is not None
+    assert restored_q.latest_daily_quote == result_with_quote.latest_daily_quote, \
+        "latest_daily_quote 在 Redis 序列化/反序列化后必须完整保留"
+    print("latest_daily_quote 序列化/反序列化 ✓")
+
+    # 9. 验证 _cache_key 含契约版本（11 参数）
     ck = _cache_key(
         uuid.UUID("00000000-0000-0000-0000-000000000001"), "1d", "qfq", True, False,
         None, None, 4000, 1000, None,
     )
-    assert ":v2" in ck, f"缓存键应含契约版本后缀, got {ck}"
-    print("_cache_key 含 v2 契约版本 ✓")
+    expected_suffix = f":{_MARKET_DATA_CONTRACT_VERSION}"
+    assert ck.endswith(expected_suffix), \
+        f"缓存键应含契约版本后缀 {expected_suffix!r}, got {ck}"
+    print(f"_cache_key 含契约版本 ✓ (suffix={expected_suffix})")
 
     print("OK")
