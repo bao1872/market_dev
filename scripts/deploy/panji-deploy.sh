@@ -326,6 +326,20 @@ build_images() {
     export GIT_SHA="${TARGET_SHA:0:7}"
     export BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     run_cmd docker compose --env-file "${ENV_FILE}" -f docker-compose.prod.yml build backend frontend worker-capture
+
+    # [P0 2026-07-30] 同步更新 market.env 的 GIT_SHA，避免 docker compose --env-file 覆盖 shell export
+    # 导致 up -d 时使用旧镜像 tag（deployment_mode=image 必须保证 image=runtime SHA）
+    if [[ "${DRY_RUN}" == "false" ]]; then
+        if grep -q "^GIT_SHA=" "${ENV_FILE}"; then
+            sed -i "s/^GIT_SHA=.*/GIT_SHA=${TARGET_SHA:0:7}/" "${ENV_FILE}"
+            log "已更新 ${ENV_FILE} GIT_SHA=${TARGET_SHA:0:7}"
+        else
+            echo "GIT_SHA=${TARGET_SHA:0:7}" >> "${ENV_FILE}"
+            log "已追加 ${ENV_FILE} GIT_SHA=${TARGET_SHA:0:7}"
+        fi
+    else
+        log "[dry-run] 将更新 ${ENV_FILE} GIT_SHA=${TARGET_SHA:0:7}"
+    fi
 }
 
 deploy_scope() {

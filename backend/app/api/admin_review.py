@@ -46,7 +46,7 @@ from app.services.review_orchestrator_service import (
 )
 from app.services.review_publication_service import (
     ReviewPublishBlockError,
-    publish_run,
+    publish_review,
 )
 
 logger = logging.getLogger("api.admin_review")
@@ -238,12 +238,12 @@ async def publish_review_run(
         )
 
     try:
-        publication, blockers = await publish_run(db, run, force=payload.force)
+        publication = await publish_review(db, run, force=payload.force)
         await db.commit()
         await db.refresh(run)
         logger.info(
-            "[Admin] review run 发布成功: run_id=%s publication_id=%s blockers=%s",
-            run_id, publication.id, blockers,
+            "[Admin] review run 发布成功: run_id=%s publication_id=%s",
+            run_id, publication.id,
         )
     except ReviewPublishBlockError as exc:
         await db.rollback()
