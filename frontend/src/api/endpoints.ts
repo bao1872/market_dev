@@ -2051,6 +2051,53 @@ export async function getMarketBoards(
 
 
 // ============================================================
+// ===== [CHANGE-20260730-013] Market Filter Specs 端点 =====
+// ============================================================
+
+/** 第一金字塔字段 data_type 枚举（与后端 FP_QUERY_FIELD_SPECS 对齐） */
+export type FpDataType = 'text' | 'enum' | 'boolean' | 'number' | 'percent' | 'datetime' | 'multi_enum'
+
+/** 第一金字塔字段 input_control 枚举 */
+export type FpInputControl =
+  | 'text_input'
+  | 'single_select'
+  | 'multi_select'
+  | 'number_input'
+  | 'date_picker'
+  | 'boolean_toggle'
+
+/** 第一金字塔字段 value_normalizer 枚举 */
+export type FpValueNormalizer = 'trim' | 'upper' | 'lower' | 'none'
+
+/** 单个 fp 字段的筛选元数据（对齐后端 serialize_fp_query_field_specs 输出） */
+export interface FpFieldSpec {
+  fp_key: string
+  data_type: FpDataType
+  operators: string[]
+  enum_values: string[]
+  input_control: FpInputControl
+  value_normalizer: FpValueNormalizer
+}
+
+/** 全部 99 字段的筛选元数据（key 为 fp_key） */
+export type FpFieldSpecs = Record<string, FpFieldSpec>
+
+/**
+ * 获取第一金字塔 99 字段的筛选元数据。
+ * GET /market/filter-specs
+ * [CHANGE-20260730-013] 前端筛选器根据 data_type/operators/enum_values/input_control
+ * 动态生成类型化控件（enum 用下拉、datetime 用日期选择器等）。
+ * 普通用户即可读取（不需要 admin）。
+ */
+export async function getMarketFilterSpecs(
+  options?: { signal?: AbortSignal },
+): Promise<FpFieldSpecs> {
+  const { data } = await apiClient.get<FpFieldSpecs>('/market/filter-specs', { signal: options?.signal })
+  return data
+}
+
+
+// ============================================================
 // ===== Admin Membership 端点 =====
 // ============================================================
 

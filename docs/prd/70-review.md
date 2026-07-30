@@ -1227,6 +1227,87 @@ tracking、daily evaluation、过去发现、自选映射、事件演化。
 
 使用历史Review Run验证筛选器稳定性；阈值变化升级filter_version，不覆盖旧信号。
 
+## 23. P0 强化条款（review-1.1.0）
+
+> 本章节为 review-1.1.0 算法版本（CHANGE-20260730-014）追加的强制条款，是对 §7（P/Q/U/C/V 指标合同）、§11（任务编排与发布）、§6（范围定义与两级扫描）的补强。本章节条款优先级高于历史 §7/§11 的所有冲突描述。
+
+### 23.1 历史原始组件 bootstrap 合同
+
+每个历史日的聚合组件必须按 point-in-time 语义重建，禁止使用未来成员或未来因子：
+
+- **成员 point-in-time**：每个历史日必须使用当日有效成员关系（行业归属、概念归属、指数成分、风格池定义）；当日已退市或尚未上市的股票不得进入当日 eligible_count 与 ready_count。
+- **因子 point-in-time**：每个历史日必须使用当日已发布的 `stock_core` 快照对应的扁平化 99 字段；禁止使用后续版本回填的因子覆盖历史日。
+- **rawValue 先行**：每个历史日必须先写入组件 `rawValue`（原始值、方向、分母、字段来源、权重）；`normalizedValue`、`delta1d`、`delta5d`、`historyPercentile120d`、`crossSectionPercentile` 在未达到 60 个有效观测前必须为 `null`。
+- **观测计数**：`historyObservationCount` 必须真实反映已保存的 rawValue 数量，不得用 eligible_count 或 ready_count 代替。
+- **聚合顺序**：达到 60 个观测后才允许计算 `normalizedValue`、P/Q/U/C/V 的 `value`，以及 1d/5d 变化与历史分位；未达到门槛的组件必须以 `status=insufficient_history` 暴露，不得补 0、不得补均值、不得用前值填充。
+
+### 23.2 至少 60 日才允许生成 P/Q/U/C/V
+
+- 任意 P/Q/U/C/V 聚合变量的 `value` 与 `historyPercentile120d` 必须在累计达到 60 个有效历史观测后才能生成；不足 60 日时 `status=insufficient_history`，且 `value` / `normalizedValue` / `historyPercentile120d` / `delta1d` / `delta5d` 必须为 `null`。
+- `status=insufficient_history` 不得伪造分位，不得使用样本外分位、不得使用 cross-section 分位替代历史分位。
+- `delta1d` / `delta5d` 必须基于 `normalizedValue` 计算；`normalizedValue` 为 `null` 时 `delta*` 也必须为 `null`。
+- 该合同同时适用于 market、major_index、style、industry_l1 第一级范围，以及 industry_l2 / industry_l3 / concept / instrument 第二级范围。
+
+### 23.3 canary 不得切正式 market_review pointer
+
+- canary review run 必须以 `scope=canary` 显式声明，且只能通过 admin 端 provisional 入口查看，不得写入 `factor_publications`（`publication_kind=market_review`）。
+- canary run 的 `status` 可以为 `published`（仅表示 run 内部计算完成），但 `factor_publications` 表中不得存在对应 `data_run_id` 指针；普通用户 `/api/v1/review/*` 端点读取的 pointer 不得切到 canary run。
+- canary run 的结果可由 admin 通过 `include_partial=true` 或显式 `run_id` 查看，但必须返回 `is_provisional=true` 标记，避免与正式发布结果混淆。
+- 上一轮 canary run（`run_id=3e1db415-2266-4cc5-9453-d8561d799b43`，`trade_date=2026-07-29`，`force=True`，`signal_count=0`）保留为审计记录，不修改历史数据；该 run 已写入 `factor_publications`，后续 review-1.1.0 修复后必须通过新 run 切换 pointer，不得复用该 run 重发。
+
+### 23.4 完整第一级范围合同
+
+第一级扫描必须完整覆盖以下四类范围，缺一不可：
+
+```
+market
+major_index
+style
+industry_l1
+```
+
+合同要求：
+
+- **market**：全市场有效 A 股，必须使用当日 active 股票，`eligible_count` 不得小于 4500（A 股正常交易日）；
+- **major_index**：必须覆盖配置的全部主要指数成分（不少于 2 个），每个指数成分来源以版本化服务为准；
+- **style**：必须覆盖配置的全部风格池（不少于 2 个），不得只算部分风格；
+- **industry_l1**：必须覆盖全部一级行业（不少于 25 个），不得只算 canary 子集。
+
+`scope_key` 命名规范：
+
+- `market`：`scope_key="market"`（固定）；
+- `major_index`：`scope_key=<index_code>`（指数代码，不含空格）；
+- `style`：`scope_key=<style_code>`（风格代码，不含空格）；
+- `industry_l1`：`scope_key=<board_id>`（统一使用 `board_id`，禁止混用 `industry_name`、`industry_code`、`board_name`）。
+
+`industry_l1` 的 `scope_key` 必须与 `board_analysis_snapshots.board_id` 对齐，便于 Review 阶段三归因直接 JOIN 板块分析结果，禁止出现 `scope_key=electronics` 与 `scope_key=<uuid>` 混用的情况。
+
+### 23.5 禁止 force 发布不可用数据
+
+`review_publication_service.publish_review(db, run, force=False)` 必须严格执行以下门禁；`force=True` 仅允许 admin 在内部调试时使用，且不得写入 `factor_publications`：
+
+整套 Review 发布门禁（force=False 时强制校验）：
+
+1. **market P/Q/U/C/V value 非空**：market 范围的 P / Q / U / C / V 五项 `value` 必须全部非 `null` 且 `status=ready`；任一为 `null` 或 `status=insufficient_history` 拒绝发布。
+2. **source_board_run_id 一致**：`market_review_runs.source_board_run_id` 必须等于当日已发布的 `market_aggregation`（`publication_kind=market_aggregation`、`scope_type=board`）pointer 的 `data_run_id`；不一致拒绝发布。
+3. **source_core_run_id 一致**：`market_review_runs.source_core_run_id` 必须等于当日已发布的 `stock_core` pointer 的 `data_run_id`；不一致拒绝发布。
+4. **无 failed signals**：`market_review_signals` 中不得存在 `status=failed` 的记录；存在 failed signal 拒绝发布。
+5. **无 failed run_items**：`market_review_run_items` 中不得存在 `status=failed` 的记录（`skipped` 允许，但必须记录原因）。
+6. **coverage_ratio >= 0.95**：market 范围 `coverage_ratio >= 0.95`，且 `industry_l1` ready 比例达到配置门槛。
+
+force=True 时跳过 1-6 门禁，但必须：
+
+- 不得写入 `factor_publications`（仅 admin 内部查看）；
+- 必须在 run.metadata_json 中记录 `force_published=true` 与跳过的具体门禁；
+- 必须返回 `is_provisional=true` 标记；
+- 该 run 永远不得作为普通用户读取入口的正式 pointer。
+
+### 23.6 history_maps 读取合同
+
+- `metric_engine` 读取历史基线时必须从 `market_review_scope_snapshots` 读取同 `scope_type + scope_key` 的历史记录，禁止从 `board_analysis_snapshots` 或 `factor_publications` 直接拼装。
+- 首次运行（无历史数据）时，所有 component `status=insufficient_history`，`historyObservationCount=0`；不得使用 `None` 作为 `status`，也不得用空对象替代。
+- `metric_engine` 中 `history is None` 必须显式映射为 `status=insufficient_history`，禁止抛 `AttributeError` 或被 `try/except` 静默吞掉。
+
 ## 最终原则
 
 - 筛选器是发现引擎；

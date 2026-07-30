@@ -113,7 +113,9 @@ test('右栏收起触发图表 resize', () => {
 test('StockDetailPage 传递 rightPanelCollapsed', () => {
   const src = readSrc(DETAIL_PATH)
   assert.ok(src.includes('rightPanelCollapsed'), 'should pass rightPanelCollapsed')
-  assert.ok(src.includes('shouldShowPanel'), 'should compute from shouldShowPanel')
+  // [P0 2026-07-30] showFirstPyramidDetail 已拆分为 firstPyramidAvailable + firstPyramidCollapsed
+  assert.ok(src.includes('firstPyramidAvailable'), 'should compute firstPyramidAvailable')
+  assert.ok(src.includes('showRightPanel'), 'should pass showRightPanel')
 })
 
 // ===== 11. StockDetailPage 渲染左栏来源列表 =====

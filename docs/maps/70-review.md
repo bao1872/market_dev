@@ -1,10 +1,11 @@
 # 复盘模块 Map
 
-核验状态：已实现（V1，trade_date=2026-07-29 canary 已发布）
+核验状态：已实现 V1（review-1.0.0 canary 已发布）；review-1.1.0 P0 修复已落代码（main SHA 54fe3a2），待生产 SSH 可达后核验
 最后核验日期：2026-07-30
-核验分支：main (SHA 9aea736)
-核验范围：基于真实代码、数据库、运行状态核验复盘模块实现状态
-对应 PRD：`../prd/70-review.md`
+核验分支：main
+核验提交：9aea736（review-1.0.0 完整实现 + canary 发布）→ 54fe3a2（review-1.1.0 P0 数据链修复）
+核验范围：基于真实代码、数据库、运行状态核验复盘模块实现状态；review-1.1.0 修复仅静态核验
+对应 PRD：`../prd/70-review.md`（含 §23 P0 强化条款）
 事实所有权：复盘模块当前实现状态、已存在入口、数据/API 合同摘要
 
 ## 1. PRD 实现映射
@@ -198,3 +199,54 @@
 ## 10. 更新触发条件
 
 当 review 表结构、API 合同、前端组件、编排链路、发布门禁或权限模型发生变化时必须更新本 Map。
+
+## 11. review-1.1.0 P0 数据链修复（CHANGE-20260730-014）
+
+**核验状态：代码已合入 main (SHA 54fe3a2)，待生产 SSH 可达后核验 canary review run**
+
+### 11.1 算法版本升级
+
+- `algorithm_version`：`review-1.0.0` → `review-1.1.0`
+- `filter_version`：保持 `filters-1.0.0`（本轮未改筛选器阈值，仅修数据链）
+- 已发布 review-1.0.0 run（`3e1db415-2266-4cc5-9453-d8561d799b43`）保留为审计记录，不修改历史数据；review-1.1.0 必须通过新 run 切换 `factor_publications` pointer，不得复用旧 run 重发。
+
+### 11.2 已修复项
+
+| 修复项 | 修复前 | 修复后 | 代码入口 |
+|---|---|---|---|
+| history_maps 传递 | `metric_engine` 调用 `compute_metrics` 时未传入历史 scope_snapshots，导致分位计算使用空集合 | `review_orchestrator_service.compute_run` 在调用 metric_engine 前显式构造 `history_maps`（按 `scope_type + scope_key` 从 `market_review_scope_snapshots` 读取），并传入 `compute_metrics` | `backend/app/services/review_orchestrator_service.py` / `backend/app/domain/review/metric_engine.py` |
+| `industry_l1` scope_key 统一 board_id | 早期 `scope_key` 混用 `industry_name`（如 `electronics`）与 `board_id`（UUID），导致归因 JOIN 失败、history_maps 错配 | 所有第一级 scope 的 `scope_key` 统一为 `board_id`（industry_l1）/ `index_code`（major_index）/ `style_code`（style）/ `"market"`（market） | `backend/app/services/review_scope_service.py` |
+| `major_index` / `style` 范围补全 | canary run 只覆盖 market + 6 个 industry_l1，major_index 和 style 完全缺失 | 第一级范围合同强制覆盖 market + major_index（≥2）+ style（≥2）+ industry_l1（≥25），canary 不得只算部分类型 | `backend/app/services/review_scope_service.py:list_scope_snapshots` |
+| `metric_engine` history is None → insufficient_history | 历史基线为空（首次运行）时 `history` 参数为 `None`，metric_engine 直接访问 `history[...]` 抛 `AttributeError`，被上层 `try/except` 静默吞掉，返回 `status=None` | `metric_engine` 显式判空，`history is None` 或 `len(history) < 60` 时返回 `status=insufficient_history`，`value/normalizedValue/historyPercentile120d/delta1d/delta5d` 全部为 `null` | `backend/app/domain/review/metric_engine.py` |
+| 发布门禁强化（value 非空 + source_board_run_id + failed signals） | `publish_review(force=False)` 仅检查 coverage_ratio 与 run_items.status，未校验 market P/Q/U/C/V value 非空、未校验 source_board_run_id 与当日 board pointer 一致、未校验 signals 无 failed | 新增 6 项门禁：①market P/Q/U/C/V 五项 value 非空且 status=ready；②source_board_run_id 等于当日 market_aggregation pointer.data_run_id；③source_core_run_id 等于当日 stock_core pointer.data_run_id；④market_review_signals 无 status=failed；⑤market_review_run_items 无 status=failed；⑥coverage_ratio >= 0.95 + industry_l1 ready 比例门槛 | `backend/app/services/review_publication_service.py:publish_review` |
+
+### 11.3 当前限制
+
+- **服务器 SSH 不可达**：本轮 review-1.1.0 修复仅完成代码静态核验（main SHA 54fe3a2），canary review run 重跑与生产数据验收未完成，待 SSH 可达后由 admin 手工触发新 run 并核验 §11.2 全部修复项。
+- **history_maps 数据源**：`history_maps` 从 `market_review_scope_snapshots` 读取同 `scope_type + scope_key` 的历史记录；首次运行无历史数据时，所有 component `status=insufficient_history`，`historyObservationCount=0`；review-1.1.0 修复后首次 run 不会伪造分位，但生产环境需要持续运行 ≥60 个交易日才能产生有效 P/Q/U/C/V value。
+- **`force=True` 路径**：review-1.0.0 canary run 使用 `force=True` 发布，已写入 `factor_publications`；review-1.1.0 后 `force=True` 仅允许 admin 内部查看（`is_provisional=true`），不得写入 `factor_publications`，但旧记录保留为审计记录不删除。
+
+### 11.4 上一轮 canary run 审计保留
+
+| 字段 | 值 |
+|---|---|
+| `run_id` | `3e1db415-2266-4cc5-9453-d8561d799b43` |
+| `trade_date` | `2026-07-29` |
+| `algorithm_version` | `review-1.0.0` |
+| `status` | `published`（force=True） |
+| `signal_count` | `0` |
+| `coverage_ratio` | `1.0` |
+| `expected_scope_count` / `succeeded` / `failed` | `6` / `6` / `0` |
+| `factor_publications.publication_id` | `c01afda0-547a-4656-a688-0ea4705d625b` |
+
+该 run 保留为审计记录，不修改历史数据；review-1.1.0 修复后必须通过新 run 切换 `factor_publications` pointer，不得复用该 run 重发。
+
+### 11.5 下一轮核验清单（待 SSH 可达后执行）
+
+1. 应用 review-1.1.0 代码到生产（`panji-deploy.sh 54fe3a2`）；
+2. 确认 `stock_core` 与 `market_aggregation` pointer 已发布当日；
+3. 创建 review-1.1.0 canary review run（`scope=canary`），确认 `history_maps` 传入、`scope_key` 统一 board_id、major_index/style 范围补全；
+4. 核验首次运行 component `status=insufficient_history` 且 `historyObservationCount=0`，不伪造分位；
+5. 核验 `force=False` 时若 market P/Q/U/C/V value 为 null 则拒绝发布；
+6. 核验 `force=True` 时 run 不写入 `factor_publications`，返回 `is_provisional=true`；
+7. 上一轮 canary run（3e1db415）保留可查询，不被覆盖。

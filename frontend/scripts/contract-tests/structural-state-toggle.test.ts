@@ -1,24 +1,16 @@
-// [事件状态面板开关] - 描述: StockDetailPage 状态观察开关契约测试
+// [第一金字塔可折叠] - 描述: StockDetailPage 第一金字塔折叠/展开契约测试
 // 用法：node --experimental-strip-types --test scripts/contract-tests/structural-state-toggle.test.ts
-// 覆盖：
-// 1. 面板首次默认收起（P0-4: eventPanelCollapsed 默认 true；localStorage 持久化用户选择）
-// 2. 开关按钮默认渲染（非截图模式 + symbol 存在时）
-// 3. localStorage 持久化用户选择（panji:event-panel:v1）
-// 4. hideStructuralState=1 强制隐藏按钮和面板
-// 5. capture=1 强制隐藏按钮和面板
-// 6. capture=feishu 强制隐藏（保留现有 isCaptureMode 逻辑）
-// 7. 强制隐藏时禁用 toggle 按钮（early return）
-// 8. toggle 按钮在 tv-chart-column 内部（定位上下文）
-// 9. 按钮文案动态切换（显示状态观察 / 隐藏状态观察）
-// 10. shouldShowPanel=true 时渲染状态观察组件
-// 11. shouldShowPanel=true 时渲染 AtomicFactsDrawer（overlay drawer 架构）
-// 12. Temporal Features 卡片在 StockStructuralStatePanel 内（useTemporalFeatures 引用）
 //
-// [CP-17 架构演化对齐] 原 EventStatePanel（内联 panel 压缩 K 线）已演化为 AtomicFactsDrawer
-// （overlay drawer 不压缩 K 线），按钮文案从「显示/隐藏事件状态」改为「显示/隐藏状态观察」
-// 以匹配 Atomic Fact Contract V1 术语。测试断言更新为新组件名与文案，但核心行为契约保留：
-// toggle 按钮控制 drawer 可见性、文案随 eventPanelCollapsed 动态切换、shouldShowPanel=true 时
-// 渲染状态观察组件。
+// [P0 2026-07-30] 原 eventPanelCollapsed/AtomicFactsDrawer 已在 CHANGE-20260730-012 删除。
+// 本测试更新为验证新的第一金字塔可折叠契约：
+//   1. 拆分 firstPyramidAvailable（是否有资格显示）和 firstPyramidCollapsed（用户折叠偏好）
+//   2. firstPyramidAvailable = !isCaptureMode && !!symbol
+//   3. firstPyramidCollapsed 持久化到 panji:first-pyramid-detail-collapsed:v1，默认展开（false）
+//   4. capture 模式完全隐藏（firstPyramidAvailable=false）
+//   5. showRightPanel/rightPanelCollapsed/onRightPanelCollapsedChange 传入 StockResearchWorkspace
+//   6. StockResearchWorkspace 在 onRightPanelCollapsedChange 提供时渲染收起/展开按钮
+//   7. 切股/刷新后保留用户折叠偏好（localStorage 持久化）
+//   8. 旧 AtomicFacts/eventPanelCollapsed 逻辑不得恢复
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -30,290 +22,157 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const FRONTEND_ROOT = join(__dirname, '..', '..')
 const PAGE_PATH = join(FRONTEND_ROOT, 'src', 'pages', 'StockDetailPage.tsx')
-const PANEL_PATH = join(FRONTEND_ROOT, 'src', 'components', 'StockStructuralStatePanel.tsx')
+const WORKSPACE_PATH = join(FRONTEND_ROOT, 'src', 'features', 'stock-research', 'StockResearchWorkspace.tsx')
+const PREF_PATH = join(FRONTEND_ROOT, 'src', 'features', 'stock-research', 'firstPyramidCollapsePreference.ts')
 
 function readSource(): string {
   return readFileSync(PAGE_PATH, 'utf-8')
 }
 
-function readPanelSource(): string {
-  return readFileSync(PANEL_PATH, 'utf-8')
+function readWorkspaceSource(): string {
+  return readFileSync(WORKSPACE_PATH, 'utf-8')
 }
 
-// ===== 1. 面板首次默认收起（P0-4） =====
-test('Panel is collapsed by default for first-time users (eventPanelCollapsed defaults to true)', () => {
-  const src = readSource()
+function readPrefSource(): string {
+  return readFileSync(PREF_PATH, 'utf-8')
+}
 
-  // 必须读取 localStorage panji:event-panel:v1
+// ===== 1. 拆分允许显示和用户折叠状态 =====
+test('firstPyramidAvailable = !isCaptureMode && !!symbol (decoupled from collapse state)', () => {
+  const src = readSource()
+  // 必须有 firstPyramidAvailable 变量（不再是 showFirstPyramidDetail）
+  assert.ok(src.includes('firstPyramidAvailable'), 'StockDetailPage 必须有 firstPyramidAvailable')
+  // 必须基于 isCaptureMode 和 symbol
   assert.ok(
-    /localStorage\.getItem\(\s*['"]panji:event-panel:v1['"]\s*\)/.test(src),
-    'StockDetailPage 必须读取 localStorage "panji:event-panel:v1"',
+    /firstPyramidAvailable\s*=\s*!isCaptureMode\s*&&\s*!!symbol/.test(src),
+    'firstPyramidAvailable = !isCaptureMode && !!symbol',
   )
-  // P0-4: 首次默认收起 — saved===null 时返回 true（收起）；有 saved 值时按 saved==='collapsed' 判断
+  // 旧 showFirstPyramidDetail 不得存在
+  assert.ok(!src.includes('showFirstPyramidDetail'), '旧 showFirstPyramidDetail 必须删除')
+})
+
+// ===== 2. firstPyramidCollapsed 状态 + localStorage 持久化 =====
+test('firstPyramidCollapsed persisted to panji:first-pyramid-detail-collapsed:v1', () => {
+  const src = readSource()
+  const prefSrc = readPrefSource()
+  // StockDetailPage 必须使用 loadFirstPyramidCollapsed/saveFirstPyramidCollapsed
+  assert.ok(src.includes('loadFirstPyramidCollapsed'), '必须 import loadFirstPyramidCollapsed')
+  assert.ok(src.includes('saveFirstPyramidCollapsed'), '必须 import saveFirstPyramidCollapsed')
+  // 持久化键
   assert.ok(
-    /saved\s*===\s*null\s*\?\s*true/.test(src),
-    'eventPanelCollapsed 首次（saved===null）默认 true（收起）',
+    prefSrc.includes('panji:first-pyramid-detail-collapsed:v1'),
+    '持久化键必须为 panji:first-pyramid-detail-collapsed:v1',
   )
+  // firstPyramidCollapsed state
   assert.ok(
-    /saved\s*===\s*['"]collapsed['"]/.test(src),
-    'eventPanelCollapsed 有 localStorage 值时按 saved==="collapsed" 判断',
+    /firstPyramidCollapsed/.test(src),
+    '必须有 firstPyramidCollapsed state',
   )
 })
 
-// ===== 2. 开关按钮默认渲染 =====
-test('Toggle button is rendered by default (non-capture mode + symbol)', () => {
-  const src = readSource()
-
-  // 必须含 toggle 按钮 className（V1: structural-state-toggle-btn）
+// ===== 3. 默认展开（false） =====
+test('Default state is expanded (false)', () => {
+  const prefSrc = readPrefSource()
+  // loadFirstPyramidCollapsed 无值时返回 false
   assert.ok(
-    /structural-state-toggle-btn/.test(src),
-    'StockDetailPage 必须含 "structural-state-toggle-btn" className 的开关按钮',
-  )
-  // [CP-17] 文案从「显示/隐藏事件状态」更新为「显示/隐藏状态观察」（Atomic Fact Contract V1 术语）
-  assert.ok(
-    /显示状态观察/.test(src) && /隐藏状态观察/.test(src),
-    'StockDetailPage 开关按钮必须含「显示状态观察」/「隐藏状态观察」文案',
-  )
-  // 必须在 !hideStructuralStateParam && symbol 时渲染按钮
-  assert.ok(
-    /!hideStructuralStateParam\s*&&\s*symbol/.test(src),
-    'StockDetailPage 必须在 !hideStructuralStateParam && symbol 时渲染 toggle 按钮',
+    /return false/.test(prefSrc),
+    'loadFirstPyramidCollapsed 默认返回 false（展开）',
   )
 })
 
-// ===== 3. localStorage 持久化用户选择 =====
-test('localStorage persists user choice via setItem', () => {
+// ===== 4. capture 模式完全隐藏 =====
+test('capture mode hides first pyramid panel (firstPyramidAvailable=false)', () => {
   const src = readSource()
-
-  // 必须 setItem 写入 localStorage panji:event-panel:v1
+  // firstPyramidAvailable 基于 !isCaptureMode
   assert.ok(
-    /localStorage\.setItem\(\s*['"]panji:event-panel:v1['"]/.test(src),
-    'StockDetailPage 必须通过 localStorage.setItem 持久化 "panji:event-panel:v1" 选择',
+    /!isCaptureMode/.test(src),
+    'firstPyramidAvailable 必须基于 !isCaptureMode',
   )
 })
 
-// ===== 4. hideStructuralState=1 强制隐藏 =====
-test('hideStructuralState=1 URL param forces hide', () => {
+// ===== 5. StockResearchWorkspace 接收三个新 props =====
+test('StockResearchWorkspace receives showRightPanel/rightPanelCollapsed/onRightPanelCollapsedChange', () => {
   const src = readSource()
-
-  // 必须检测 hideStructuralState 参数
+  // showRightPanel={firstPyramidAvailable}
   assert.ok(
-    /searchParams\.get\(\s*['"]hideStructuralState['"]\s*\)/.test(src),
-    'StockDetailPage 必须检测 URL 参数 "hideStructuralState"',
+    /showRightPanel=\{firstPyramidAvailable\}/.test(src),
+    'showRightPanel={firstPyramidAvailable}',
   )
-  // 必须与 '1' 比较
+  // rightPanelCollapsed={firstPyramidCollapsed}
   assert.ok(
-    /searchParams\.get\(\s*['"]hideStructuralState['"]\s*\)\s*===?\s*['"]1['"]/.test(src),
-    'hideStructuralState 必须与 "1" 严格比较触发强制隐藏',
+    /rightPanelCollapsed=\{firstPyramidCollapsed\}/.test(src),
+    'rightPanelCollapsed={firstPyramidCollapsed}',
+  )
+  // onRightPanelCollapsedChange={handleFirstPyramidCollapsedChange}
+  assert.ok(
+    /onRightPanelCollapsedChange=\{handleFirstPyramidCollapsedChange\}/.test(src),
+    'onRightPanelCollapsedChange={handleFirstPyramidCollapsedChange}',
   )
 })
 
-// ===== 5. capture=1 强制隐藏 =====
-test('capture=1 URL param forces hide', () => {
-  const src = readSource()
-
-  // 必须检测 capture 参数与 '1' 比较（与 feishu 截图模式区分）
+// ===== 6. StockResearchWorkspace 渲染收起/展开按钮 =====
+test('StockResearchWorkspace renders collapse/expand buttons when onRightPanelCollapsedChange provided', () => {
+  const wsSrc = readWorkspaceSource()
+  // 必须有 onRightPanelCollapsedChange prop
   assert.ok(
-    /searchParams\.get\(\s*['"]capture['"]\s*\)\s*===?\s*['"]1['"]/.test(src),
-    'StockDetailPage 必须检测 URL 参数 "capture" 与 "1" 严格比较触发强制隐藏',
+    wsSrc.includes('onRightPanelCollapsedChange'),
+    'StockResearchWorkspace 必须有 onRightPanelCollapsedChange prop',
+  )
+  // 必须有收起按钮 className
+  assert.ok(
+    wsSrc.includes('tv-side-collapse-btn'),
+    '必须有收起按钮 (tv-side-collapse-btn)',
+  )
+  // 必须有展开按钮 className
+  assert.ok(
+    wsSrc.includes('tv-side-expand-btn'),
+    '必须有展开按钮 (tv-side-expand-btn)',
+  )
+  // 折叠时展开按钮在 chart-column 显示
+  assert.ok(
+    /rightPanelCollapsed\s*&&\s*onRightPanelCollapsedChange/.test(wsSrc),
+    '折叠时显示展开按钮',
   )
 })
 
-// ===== 6. capture=feishu 强制隐藏（保留现有 isCaptureMode 逻辑）=====
-test('capture=feishu forces hide (preserves existing isCaptureMode)', () => {
-  const src = readSource()
-
-  // 现有 isCaptureMode 逻辑必须保持
+// ===== 7. capture 模式不显示折叠/展开按钮 =====
+test('capture mode does not render collapse/expand buttons', () => {
+  const wsSrc = readWorkspaceSource()
+  // 展开按钮条件必须包含 !isCaptureMode
   assert.ok(
-    /isCaptureMode\s*=\s*searchParams\.get\(\s*['"]capture['"]\s*\)\s*===?\s*['"]feishu['"]/.test(src),
-    'StockDetailPage 必须保留 isCaptureMode 逻辑（capture=feishu）',
-  )
-  // hideStructuralStateParam 必须包含 isCaptureMode 引用
-  assert.ok(
-    /hideStructuralStateParam\s*=\s*[\s\S]*isCaptureMode/.test(src),
-    'hideStructuralStateParam 必须引用 isCaptureMode（capture=feishu 也触发强制隐藏）',
+    /onRightPanelCollapsedChange\s*&&\s*!isCaptureMode/.test(wsSrc),
+    '展开按钮条件必须包含 !isCaptureMode',
   )
 })
 
-// ===== 7. 强制隐藏时禁用 toggle =====
-test('Force-hide disables toggle (early return in toggle callback)', () => {
+// ===== 8. 旧 AtomicFacts/eventPanelCollapsed 不得恢复 =====
+test('Old AtomicFacts/eventPanelCollapsed logic must not be restored', () => {
   const src = readSource()
-
-  // toggle 回调必须在 hideStructuralStateParam 为 true 时 early return
-  const toggleBlockMatch = src.match(/toggleEventPanel\s*=\s*useCallback\(\s*\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[hideStructuralStateParam\]\s*\)/)
-  assert.ok(toggleBlockMatch, 'StockDetailPage 必须含 toggleEventPanel useCallback 且依赖 hideStructuralStateParam')
-
-  const toggleBody = toggleBlockMatch![1]
+  // 不得有 eventPanelCollapsed 作为变量/状态（注释中提及可以）
   assert.ok(
-    /if\s*\(\s*hideStructuralStateParam\s*\)\s*return/.test(toggleBody),
-    'toggleEventPanel 回调必须在 hideStructuralStateParam=true 时 early return（强制隐藏时禁用 toggle）',
+    !/const\s+eventPanelCollapsed|let\s+eventPanelCollapsed|eventPanelCollapsed\s*=/.test(src),
+    '不得恢复 eventPanelCollapsed 作为变量',
   )
+  // 不得有 AtomicFactsDrawer 的 import 或 JSX
+  assert.ok(
+    !/import.*AtomicFactsDrawer|<AtomicFactsDrawer/.test(src),
+    '不得恢复 AtomicFactsDrawer 组件',
+  )
+  // 不得有旧 localStorage key panji:event-panel:v1 的实际调用
+  assert.ok(
+    !/localStorage\.(getItem|setItem)\(\s*['"]panji:event-panel:v1['"]/.test(src),
+    '不得恢复旧 localStorage key 实际调用',
+  )
+  // 不得有 structural-state-toggle-btn（旧开关按钮 className）
+  assert.ok(!/className.*structural-state-toggle-btn/.test(src), '不得恢复旧 structural-state-toggle-btn')
 })
 
-// ===== 8. toggle 按钮在 tv-chart-column 内部（定位上下文） =====
-// Phase 3 重构后，toggle 按钮作为 toolbar prop 传递给 StockResearchWorkspace，
-// StockResearchWorkspace 在 <section className="tv-chart-column"> 内部渲染 {toolbar}。
-// 本测试验证：
-//   1. StockDetailPage 定义含 structural-state-toggle-btn 的 toolbar 并传给 StockResearchWorkspace
-//   2. StockResearchWorkspace 在 tv-chart-column section 内部渲染 {toolbar}
-//   3. .tv-chart-column 有 position: relative（在 global.scss 中）
-test('Toggle button is inside tv-chart-column for stable absolute positioning', () => {
-  const src = readSource()
-
-  // StockDetailPage 必须定义含 structural-state-toggle-btn 的 toolbar 变量
-  const toggleIdx = src.indexOf('structural-state-toggle-btn')
-  assert.ok(toggleIdx > 0, 'StockDetailPage 必须含 structural-state-toggle-btn')
-
-  // toolbar 变量必须作为 toolbar prop 传给 StockResearchWorkspace
+// ===== 9. 无 onRightPanelCollapsedChange 时保持旧行为（兼容 AdminStockDebugPage） =====
+test('StockResearchWorkspace falls back to old behavior without onRightPanelCollapsedChange', () => {
+  const wsSrc = readWorkspaceSource()
+  // 必须有条件判断 onRightPanelCollapsedChange 是否提供
   assert.ok(
-    /toolbar=\{structuralToolbar\}/.test(src),
-    'StockDetailPage 必须将 structuralToolbar 作为 toolbar prop 传给 StockResearchWorkspace',
-  )
-
-  // StockResearchWorkspace 必须在 tv-chart-column section 内部渲染 {toolbar}
-  const workspacePath = join(FRONTEND_ROOT, 'src', 'features', 'stock-research', 'StockResearchWorkspace.tsx')
-  const workspaceSrc = readFileSync(workspacePath, 'utf-8')
-  const wsToggleIdx = workspaceSrc.indexOf('{toolbar}')
-  assert.ok(wsToggleIdx > 0, 'StockResearchWorkspace 必须渲染 {toolbar}')
-
-  const wsSectionOpenIdx = workspaceSrc.lastIndexOf('<section', wsToggleIdx)
-  assert.ok(wsSectionOpenIdx > 0, '{toolbar} 必须在 <section> 之后')
-
-  const wsSectionCloseIdx = workspaceSrc.indexOf('</section>', wsToggleIdx)
-  assert.ok(wsSectionCloseIdx > wsToggleIdx, '{toolbar} 必须在 </section> 之前')
-
-  // 确认该 section 含 tv-chart-column className
-  const sectionText = workspaceSrc.slice(wsSectionOpenIdx, wsToggleIdx)
-  assert.ok(
-    /className="tv-chart-column"/.test(sectionText),
-    '{toolbar} 所在的 section 必须含 className="tv-chart-column"',
-  )
-
-  // 同时确认 tv-chart-column 有 position: relative（在 global.scss 中）
-  const scssPath = join(FRONTEND_ROOT, 'src', 'styles', 'global.scss')
-  const scss = readFileSync(scssPath, 'utf-8')
-  const chartColRuleMatch = scss.match(/\.tv-chart-column\s*\{[^}]*position:\s*relative[^}]*\}/)
-  assert.ok(
-    chartColRuleMatch,
-    '.tv-chart-column 必须含 position: relative（作为 toggle 按钮的定位上下文）',
-  )
-})
-
-// ===== 9. 按钮文案动态切换（显示/隐藏状态观察） =====
-test('Toggle button label switches between "显示状态观察" and "隐藏状态观察"', () => {
-  const src = readSource()
-
-  // [CP-17] 文案更新为「显示状态观察」/「隐藏状态观察」（Atomic Fact Contract V1 术语）
-  // 必须含三元表达式：eventPanelCollapsed ? '显示状态观察' : '隐藏状态观察'
-  assert.ok(
-    /eventPanelCollapsed\s*\?\s*['"]显示状态观察['"]\s*:\s*['"]隐藏状态观察['"]/.test(src),
-    'StockDetailPage toggle 按钮文案必须根据 eventPanelCollapsed 动态切换（收起时显示"显示状态观察"，展开时显示"隐藏状态观察"）',
-  )
-})
-
-// ===== 10. shouldShowPanel 控制渲染（P0-4: 默认收起，用户展开后渲染）=====
-test('EventStatePanel is rendered when shouldShowPanel=!eventPanelCollapsed && !hideStructuralStateParam', () => {
-  const src = readSource()
-
-  // shouldShowPanel 必须基于 !eventPanelCollapsed && !hideStructuralStateParam
-  assert.ok(
-    /shouldShowPanel\s*=\s*!eventPanelCollapsed\s*&&\s*!hideStructuralStateParam/.test(src),
-    'StockDetailPage 必须有 shouldShowPanel = !eventPanelCollapsed && !hideStructuralStateParam',
-  )
-  // EventStatePanel 必须在 shouldShowPanel && symbol 时渲染
-  assert.ok(
-    /shouldShowPanel\s*&&\s*symbol/.test(src),
-    'EventStatePanel 必须在 shouldShowPanel && symbol 时渲染',
-  )
-})
-
-// ===== 11. shouldShowPanel=true 时渲染 AtomicFactsDrawer（overlay drawer 架构）=====
-test('AtomicFactsDrawer is rendered when shouldShowPanel=true', () => {
-  const src = readSource()
-
-  // [CP-17] 组件从 EventStatePanel（内联 panel）演化为 AtomicFactsDrawer（overlay drawer 不压缩 K 线）
-  // 必须导入 AtomicFactsDrawer
-  assert.ok(
-    /import\s*\{[^}]*AtomicFactsDrawer[^}]*\}\s*from\s*['"]@\/features\/research-context\/AtomicFactsDrawer['"]/.test(src),
-    'StockDetailPage 必须导入 AtomicFactsDrawer',
-  )
-  // 必须渲染 <AtomicFactsDrawer symbol={symbol} open onClose={...} />
-  // 接受 open 布尔简写或 open={...} 显式值两种形式
-  assert.ok(
-    /<AtomicFactsDrawer\s+symbol=\{symbol\}\s+open(?:=\{[^}]+\})?\s+onClose=\{[^}]+\}\s*\/>/.test(src),
-    'StockDetailPage 必须渲染 <AtomicFactsDrawer symbol={symbol} open onClose={...} />',
-  )
-})
-
-// ===== 12. Temporal Features 卡片在 StockStructuralStatePanel 内 =====
-test('TemporalFeaturesCard is rendered inside StockStructuralStatePanel (uses useTemporalFeatures)', () => {
-  const panelSrc = readPanelSource()
-
-  // StockStructuralStatePanel 必须导入 useTemporalFeatures
-  assert.ok(
-    /useTemporalFeatures/.test(panelSrc),
-    'StockStructuralStatePanel 必须导入并使用 useTemporalFeatures hook',
-  )
-  // 必须渲染 <TemporalFeaturesCard instrumentId={instrumentId} />
-  assert.ok(
-    /<TemporalFeaturesCard\s+instrumentId=\{instrumentId\}\s*\/>/.test(panelSrc),
-    'StockStructuralStatePanel 必须渲染 <TemporalFeaturesCard instrumentId={instrumentId} />',
-  )
-  // 必须含「时序特征 V1」文案
-  assert.ok(
-    /时序特征 V1/.test(panelSrc),
-    'StockStructuralStatePanel 必须含「时序特征 V1」折叠卡片标题',
-  )
-  // 必须含三个分组：daily_context / m15_response / derived_relation
-  assert.ok(/daily_context/.test(panelSrc), 'TemporalFeaturesCard 必须含 daily_context 分组')
-  assert.ok(/m15_response/.test(panelSrc), 'TemporalFeaturesCard 必须含 m15_response 分组')
-  assert.ok(/derived_relation/.test(panelSrc), 'TemporalFeaturesCard 必须含 derived_relation 分组')
-})
-
-// ===== 13. capture=feishu 隐藏结构面板（hideStructuralStateParam 含 isCaptureMode）=====
-test('test_capture_mode_hides_panel', () => {
-  const src = readSource()
-
-  // hideStructuralStateParam 必须包含 isCaptureMode 引用
-  // capture=feishu 时 isCaptureMode=true → hideStructuralStateParam=true → 面板强制隐藏
-  assert.ok(
-    /hideStructuralStateParam\s*=\s*[\s\S]*?isCaptureMode/.test(src),
-    'hideStructuralStateParam 必须包含 isCaptureMode（capture=feishu 触发结构面板隐藏）',
-  )
-
-  // shouldShowPanel 必须基于 !eventPanelCollapsed && !hideStructuralStateParam
-  // 当 isCaptureMode=true 时 hideStructuralStateParam=true，shouldShowPanel=false（面板不渲染）
-  assert.ok(
-    /shouldShowPanel\s*=\s*!eventPanelCollapsed\s*&&\s*!hideStructuralStateParam/.test(src),
-    'shouldShowPanel 必须基于 !eventPanelCollapsed && !hideStructuralStateParam（capture=feishu 时面板强制隐藏）',
-  )
-})
-
-// ===== 14. capture=feishu 无侧列（testid 落在 tv-chart-column，不在 tv-content）=====
-// Phase 3 重构后，主渲染路径的 testid 通过 chartColumnProps prop 传递给 StockResearchWorkspace，
-// StockResearchWorkspace 将其应用到 <section className="tv-chart-column"> 上。
-// 加载/错误状态仍在 StockDetailPage 中直接设置 testid。
-test('test_capture_mode_no_side_column', () => {
-  const src = readSource()
-
-  // StockDetailPage 必须通过 chartColumnProps 传递 data-testid="stock-detail-capture"
-  assert.ok(
-    /chartColumnProps=\{\{[\s]*['"]data-testid['"]:[\s]*['"]stock-detail-capture['"][\s]*\}\}/.test(src),
-    'StockDetailPage 主渲染路径必须通过 chartColumnProps 传递 data-testid="stock-detail-capture" 给 StockResearchWorkspace',
-  )
-
-  // 源码必须包含 data-testid="stock-detail-capture"（加载/错误状态 + chartColumnProps）
-  // 接受 JSX 属性形式（data-testid="..."）和对象字面量形式（'data-testid': '...'）
-  assert.ok(
-    /data-testid["']?\s*[:=]\s*["']stock-detail-capture["']/.test(src),
-    'StockDetailPage 必须设置 data-testid="stock-detail-capture"（capture worker 通过该选择器截图）',
-  )
-
-  // StockResearchWorkspace 必须将 chartColumnProps 的 data-testid 应用到 tv-chart-column section
-  const workspacePath = join(FRONTEND_ROOT, 'src', 'features', 'stock-research', 'StockResearchWorkspace.tsx')
-  const workspaceSrc = readFileSync(workspacePath, 'utf-8')
-  assert.ok(
-    /<section\s+className="tv-chart-column"[\s\S]{0,200}?data-testid=\{chartColumnProps\?\.\[['"]data-testid['"]\]\}/.test(workspaceSrc),
-    'StockResearchWorkspace 必须在 <section className="tv-chart-column"> 上应用 chartColumnProps 的 data-testid（capture worker 截图选择器落在图表列）',
+    /onRightPanelCollapsedChange\s*&&\s*!isCaptureMode\s*\?/.test(wsSrc),
+    '无 onRightPanelCollapsedChange 时回退到旧行为（直接渲染 rightPanel）',
   )
 })

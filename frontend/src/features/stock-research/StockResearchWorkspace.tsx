@@ -43,6 +43,10 @@ export interface StockResearchWorkspaceProps {
   rightPanel?: ReactNode
   // 是否显示右栏
   showRightPanel?: boolean
+  // [P0 2026-07-30] 右栏折叠状态变化回调（父组件持久化用户偏好）
+  onRightPanelCollapsedChange?: (collapsed: boolean) => void
+  // 右栏标题（用于折叠/展开按钮的 aria-label 和标题栏显示）
+  rightPanelTitle?: string
   // chart column 的额外 data 属性（如 data-testid, data-render-ready）
   chartColumnProps?: Record<string, string>
   // [CHANGE-011 SMC] - smc 开关变化回调（父组件用于触发 useStockResearchData 重新拉取 indicators）。
@@ -62,6 +66,8 @@ export function StockResearchWorkspace({
   toolbar,
   rightPanel,
   showRightPanel = false,
+  onRightPanelCollapsedChange,
+  rightPanelTitle = '第一金字塔',
   chartColumnProps,
   onSmcToggle,
 }: StockResearchWorkspaceProps) {
@@ -225,6 +231,19 @@ export function StockResearchWorkspace({
           <IndicatorToolbar visibility={layerVisibility} onToggle={handleLayerToggle} source={source} />
         )}
         {toolbar}
+        {/* [P0 2026-07-30] 第一金字塔折叠后显示展开按钮（capture 模式不显示） */}
+        {showRightPanel && rightPanelCollapsed && onRightPanelCollapsedChange && !isCaptureMode && (
+          <button
+            type="button"
+            className="tv-side-expand-btn"
+            onClick={() => onRightPanelCollapsedChange(false)}
+            aria-label={`展开${rightPanelTitle}`}
+            title={`展开${rightPanelTitle}`}
+          >
+            <span className="tv-side-expand-icon">◀</span>
+            <span className="tv-side-expand-text">{rightPanelTitle}</span>
+          </button>
+        )}
         {isBarsLoading ? (
           <div className="tv-chart-loading">行情数据加载中...</div>
         ) : (
@@ -266,7 +285,30 @@ export function StockResearchWorkspace({
           </>
         )}
       </section>
-      {showRightPanel && rightPanel}
+      {/* [P0 2026-07-30] 右栏：包裹 tv-side-column，展开时显示标题栏 + 收起按钮
+          折叠时 aside 由 hide-structural-state CSS 隐藏，展开按钮在 chart-column 显示
+          capture 模式或无 onRightPanelCollapsedChange 时保持旧行为（无标题栏） */}
+      {showRightPanel && rightPanel && (
+        onRightPanelCollapsedChange && !isCaptureMode ? (
+          <aside className="tv-side-column tv-side-column--collapsible">
+            <div className="tv-side-column-header">
+              <span className="tv-side-column-title">{rightPanelTitle}</span>
+              <button
+                type="button"
+                className="tv-side-collapse-btn"
+                onClick={() => onRightPanelCollapsedChange(true)}
+                aria-label={`收起${rightPanelTitle}`}
+                title={`收起${rightPanelTitle}`}
+              >
+                <span className="tv-side-collapse-icon">▶</span>
+              </button>
+            </div>
+            <div className="tv-side-column-body">{rightPanel}</div>
+          </aside>
+        ) : (
+          rightPanel
+        )
+      )}
     </div>
   )
 }

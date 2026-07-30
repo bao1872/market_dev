@@ -306,6 +306,110 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - 列表显示覆盖率徽标、状态、过期、已发布
 - 详情显示 4 维分布（趋势/结构/动量/量能）+ 结构事件率 + payload JSON
 
+## 12. 盘后任务中断恢复机制（CHANGE-20260730-014）
+
+**核验状态：代码已合入 main (SHA 54fe3a2)；review run timeline API 与 SIGTERM drain 已落代码，待生产 SSH 可达后核验**
+
+### 12.1 顶层 run heartbeat（30s fenced UPDATE）
+
+- `SchedulerJobRun` / `market_review_runs` 在 `running` 状态下，worker 每 30 秒执行一次 fenced UPDATE 刷新 `heartbeat_at`：
+  ```sql
+  UPDATE scheduler_job_runs
+  SET heartbeat_at = NOW()
+  WHERE id = :run_id
+    AND lease_epoch = :current_lease_epoch
+  RETURNING id;
+  ```
+- `lease_epoch` fencing：仅持有当前 `lease_epoch` 的 worker 才能成功刷新 heartbeat；旧 worker（已被 re-claim 抢占）的 UPDATE 影响 0 行，立即退出。
+- `heartbeat_at` 超时阈值默认 180 秒（6 个 heartbeat 周期）；超时后 watchdog 将 run 标记为 `interrupted`。
+
+### 12.2 item lease（14400s）+ fencing_epoch
+
+- 每个 `market_review_run_items` / `stock_feature_snapshot_run_items` 持有独立 lease：
+  - `lease_expires_at = NOW() + INTERVAL '14400 seconds'`（4 小时，覆盖单 scope 最长计算时间）；
+  - `lease_epoch` 在每次 `claim_items` 时递增；
+  - `mark_item_succeeded` / `mark_item_failed` / `mark_item_skipped` 必须携带 `lease_epoch`，旧 worker 写入被拒绝。
+- 超过 `lease_expires_at` 的 `running` item 可被下一个 worker `claim_items` 抢占，`lease_epoch` 递增；旧 worker 后续 `mark_item_*` 因 epoch 不匹配被静默拒绝。
+- `recover_stale_running_items`（位于 `snapshot_run_item_service`）扫描 `lease_expires_at < NOW()` 的 running items，重置为 `pending`；watchdog **当前不调用** 该函数（已知缺口，见 §12.7）。
+
+### 12.3 watchdog 恢复同一 run（最多 3 次）
+
+- `auto_resume_interrupted_after_close_runs`（位于 `scheduler_job_run_recovery_service`）扫描 `status=interrupted` 的 after_close run：
+  - 检查 `attempt_no`（metadata.heartbeat_recovery_count）；
+  - `attempt_no < 3` 时将 run 状态从 `interrupted` 切换为 `resume_queued`，等待 worker 领取；
+  - `attempt_no >= 3` 时不再自动恢复，标记为 `failed` 并通知 admin。
+- review orchestrator 使用相同模式：`market_review_runs.status=interrupted` 时由 watchdog 切换为 `resume_queued`，最多 3 次。
+- 恢复后 worker 重新领取 run，递增 `lease_epoch` 和 `attempt_no`，按 last_completed_step 断点恢复。
+
+### 12.4 SIGTERM drain
+
+worker 收到 SIGTERM 信号时的 drain 流程：
+
+1. **停止领取新 item**：worker 立即停止 `_after_close_poll_once` / `claim_items` 调用，不再领取新的 run 或 item；
+2. **完成当前 run 内正在执行的 item**：当前 item 继续执行直至 `mark_item_succeeded` / `mark_item_failed`，但不会超过 SIGTERM 后的 grace period；
+3. **刷新 run heartbeat 一次**：drain 完成后刷新最后一次 heartbeat，便于 watchdog 判断 run 是否需要恢复；
+4. **优雅退出**：worker 进程退出码 0；run 状态保持 `running`（heartbeat 未续期后由 watchdog 切换为 `interrupted` → `resume_queued`）。
+
+实现入口：
+
+- `backend/app/worker.py`：SIGTERM 信号处理器 + drain 标志；
+- `backend/app/services/after_close_orchestrator_service.py`：drain 标志检查点嵌入到主循环；
+- `backend/app/services/review_orchestrator_service.py`：review worker 共用同一 drain 模式。
+
+### 12.5 deploy.sh drain_after_close_worker()
+
+部署脚本 `deploy.sh` 在重启 worker 容器前调用 `drain_after_close_worker()`：
+
+1. 检查当前是否有活跃的 after_close 或 review run（`status IN ('queued', 'running', 'resume_queued')`）；
+2. **有活跃 run**：
+   - 向 worker 容器发送 SIGTERM（`docker kill -s TERM trading-worker`）；
+   - 等待 run 完成（最长 30 分钟，每 30 秒轮询一次 `status`）；
+   - run 完成或 watchdog 切换为 `interrupted` 后，允许重启容器；
+   - 超时未完成则**拒绝重启**，输出诊断信息（run_id、当前 step、heartbeat_at），由 admin 手工决策。
+3. **无活跃 run**：直接重启容器。
+4. 重启后由 watchdog 自动 resume `interrupted` 的 run（见 §12.3）。
+
+### 12.6 admin timeline API
+
+新增 `GET /api/v1/admin/review/runs/{run_id}/timeline`，用于诊断 review run 的执行时间线：
+
+返回结构（按时间排序的事件列表）：
+
+```json
+{
+  "run_id": "uuid",
+  "trade_date": "2026-07-29",
+  "algorithm_version": "review-1.1.0",
+  "status": "published",
+  "events": [
+    {
+      "event_id": "uuid",
+      "event_type": "run_created | run_started | scope_item_claimed | scope_item_succeeded | scope_item_failed | signal_emitted | publish_attempted | publish_succeeded | heartbeat_timeout | watchdog_resumed | sigterm_drain_started | sigterm_drain_completed",
+      "scope_type": "market | major_index | style | industry_l1 | null",
+      "scope_key": "string | null",
+      "phase": "metrics | signals | attribution | tracking | null",
+      "lease_epoch": 1,
+      "attempt_no": 0,
+      "occurred_at": "ISO8601",
+      "metadata": {}
+    }
+  ]
+}
+```
+
+实现入口：
+
+- 路由：`backend/app/api/admin_review.py`
+- 服务：`backend/app/services/review_orchestrator_service.py:get_run_timeline`
+- 权限：`require_admin`
+- 用途：诊断 heartbeat 超时、lease 抢占、watchdog 恢复、SIGTERM drain、scope item 失败模式等。
+
+### 12.7 已知缺口
+
+- **docker `stop_grace_period` 未配置**：`docker-compose.yml` 中 worker 容器未设置 `stop_grace_period`，默认 10 秒后 docker 发送 SIGKILL；SIGTERM drain 流程在 10 秒内无法完成长 item，导致 item 被强制中断。建议在 `docker-compose.yml` 中为 `trading-worker` 设置 `stop_grace_period: 1800s`（30 分钟，覆盖单 scope 最长计算时间）。
+- **watchdog 不调用 `recover_stale_running_items`**：`auto_resume_interrupted_after_close_runs` 在恢复 `interrupted` run 时只重置 run 级状态，不调用 `snapshot_run_item_service.recover_stale_running_items`；若 run 恢复时仍有 `running` 状态的 item（lease 未过期但 worker 已死），这些 item 会卡在 `running` 直到 lease 过期。建议在 watchdog 恢复 run 时同步调用 `recover_stale_running_items(run_id)`。
+- **review run 与 after_close run 的 watchdog 共用同一恢复服务**：当前 `auto_resume_interrupted_after_close_runs` 只扫描 `job_name=after_close_orchestrator` 的 run；review run 的 watchdog 恢复由独立的 `review_orchestrator_service` 实现，未来可能需要统一为通用 `run_recovery_service`，避免两套恢复逻辑。
+
 ## 复盘 pointer 与 run 关系
 
 **核验状态：待实现（复盘模块尚未开发）**

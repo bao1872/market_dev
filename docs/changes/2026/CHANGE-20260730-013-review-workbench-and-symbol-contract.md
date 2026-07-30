@@ -1,6 +1,7 @@
 # CHANGE-20260730-013：复盘工作台 V1 完整实现 + 第一金字塔 symbol 合同 P0 修复
 
 状态：进行中（代码+部署+canary 已发布；浏览器 UI 验收 PENDING 用户手工登录）
+【修正于 CHANGE-20260730-014】本 Change 中"完整实现"表述不准确，实际状态为：review-1.0.0 代码骨架已部署但数据验收失败——history 基线未接入（history_maps 未传入 metric_engine）、scope_key 合同错误（industry_l1 混用 industry_name 与 board_id）、force 发布不可用数据（canary run 使用 force=True 跳过门禁并写入 factor_publications）。review-1.1.0 P0 数据链修复见 CHANGE-20260730-014。
 日期：2026-07-30
 类型：architecture + behavior + contract + data
 领域：复盘模块 / 量化模型 / 行情体验 / 盘后编排 / 部署
@@ -43,7 +44,14 @@
 
 ## 1. 摘要
 
-在基线 bd1526e 上一次完成三件大事：（1）修复第一金字塔 symbol 公共合同（旧 UUID payload → 规范化 6 位股票代码 adapter）；（2）收完上一轮 PENDING：market_data_quality CLI 语义、全市场扫描与缺口修复、Review canary run；（3）完整实现复盘工作台 V1（migration 076 + 8 表 + 6 domain 引擎 + 6 services + 16 API 端点 + 18 前端文件 + 五阶段工作台）。已正式镜像部署到生产，alembic head=076，runtime=image=repo SHA=9aea736，canary run 已发布到 factor_publications。
+在基线 bd1526e 上一次完成三件大事：（1）修复第一金字塔 symbol 公共合同（旧 UUID payload → 规范化 6 位股票代码 adapter）；（2）收完上一轮 PENDING：market_data_quality CLI 语义、全市场扫描与缺口修复、Review canary run；（3）部署复盘工作台 V1 代码骨架（migration 076 + 8 表 + 6 domain 引擎 + 6 services + 16 API 端点 + 18 前端文件 + 五阶段工作台）。已正式镜像部署到生产，alembic head=076，runtime=image=repo SHA=9aea736，canary run 已发布到 factor_publications。
+
+> **【修正于 CHANGE-20260730-014】**：本 Change 原文使用"完整实现"表述，与实际状态不符。review-1.0.0 仅为代码骨架部署，数据验收失败：
+> - **history 基线未接入**：`review_orchestrator_service.compute_run` 调用 `metric_engine` 时未传入 `history_maps`，分位计算使用空集合；
+> - **scope_key 合同错误**：`industry_l1` 的 `scope_key` 混用 `industry_name`（如 `electronics`）与 `board_id`（UUID），归因 JOIN 失败、history_maps 错配；
+> - **force 发布不可用数据**：canary run 使用 `force=True` 跳过发布门禁，market P/Q/U/C/V value 为 null 时仍写入 `factor_publications`。
+>
+> review-1.1.0 P0 数据链修复见 CHANGE-20260730-014。
 
 ## 2. 背景与问题
 
@@ -83,7 +91,7 @@
 - `--scan`：允许写审计 run/items，但不改 bars
 - `--repair`：才修改行情数据（写 raw 未复权 OHLCV + 幂等 upsert + 重算 adj_factor）
 
-### 4.3 复盘工作台 V1 完整实现
+### 4.3 复盘工作台 V1 代码骨架已部署（数据验收失败，详见 §1 修正说明）
 
 #### 后端
 - migration `076_market_review_workbench.py`：8 表 + 唯一约束 + FK + 状态枚举 + 索引 + 幂等键
@@ -127,7 +135,7 @@
 - production: runtime=image=repo SHA=9aea736，15 个容器全部运行
 - /health/ready 返回 ready
 
-当前完整实现细节以 `maps/70-review.md` 为准。
+当前实现状态以 `maps/70-review.md` 为准（review-1.0.0 代码骨架已部署；review-1.1.0 P0 数据链修复见 CHANGE-20260730-014）。
 
 ## 6. 影响范围
 
@@ -222,4 +230,6 @@
 
 ## 12. 后续变化
 
-- 无（V1 已闭环，待生产持续运行验证）
+- review-1.0.0 仅代码骨架部署，数据验收失败（history 基线未接入、scope_key 合同错误、force 发布不可用数据），未闭环。
+- review-1.1.0 P0 数据链修复见 CHANGE-20260730-014（history_maps 传递、scope_key 统一 board_id、major_index/style 范围补全、metric_engine history None→insufficient_history、发布门禁强化）。
+- review-1.1.0 修复后仍需 ≥60 个交易日持续运行才能产生有效 P/Q/U/C/V value（PRD §23.2）。

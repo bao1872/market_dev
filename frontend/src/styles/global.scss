@@ -1149,6 +1149,8 @@ button { cursor: pointer; }
 .filter-between-inputs { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; .input { width: auto; flex: 1; margin-bottom: 0; } }
 .filter-between-sep { color: v.$color-muted; font-size: 12px; }
 .filter-pop-actions { display: flex; justify-content: flex-end; gap: 7px; }
+// [CHANGE-20260730-013] enum 多选提示（in/not_in 操作符展示可选值）
+.filter-enum-hint { font-size: 11px; color: v.$color-muted; margin: -4px 0 8px; line-height: 1.4; word-break: break-all; }
 .table-empty-row td { padding: 32px !important; }
 .table-empty-state { display: flex; flex-direction: column; align-items: center; gap: 5px; color: v.$color-muted; b { color: #ccd3df; font-weight: 650; } }
 
@@ -1371,6 +1373,35 @@ button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; te
 }
 .tv-chart-column { min-width: 0; background: #0d1118; position: relative; }
 .tv-side-column { min-width: 0; background: #0d1118; border-left: 1px solid v.$color-border; overflow-y: auto; max-height: v.$tv-workspace-min-height; }
+
+// [P0 2026-07-30] 第一金字塔可折叠：右栏标题栏 + 收起/展开按钮
+.tv-side-column--collapsible { display: flex; flex-direction: column; overflow: hidden; }
+.tv-side-column-header {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 36px; padding: 0 10px; flex-shrink: 0;
+  border-bottom: 1px solid v.$color-border; background: #11151d;
+}
+.tv-side-column-title { font-size: 13px; font-weight: 600; color: #c8d2e2; }
+.tv-side-collapse-btn {
+  width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid v.$color-border; border-radius: 3px; background: #1b2230; color: #aab4c8;
+  cursor: pointer; padding: 0; transition: background 0.15s, color 0.15s;
+  &:hover { background: #262c39; color: #fff; }
+}
+.tv-side-collapse-icon { font-size: 10px; line-height: 1; }
+.tv-side-column-body { flex: 1; min-height: 0; overflow-y: auto; }
+
+// 折叠后在 chart-column 显示的展开按钮
+.tv-side-expand-btn {
+  position: absolute; top: 48px; right: 8px; z-index: 5;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 8px; border: 1px solid v.$color-border; border-radius: 3px;
+  background: #1b2230; color: #aab4c8; cursor: pointer; font-size: 12px;
+  transition: background 0.15s, color 0.15s;
+  &:hover { background: #262c39; color: #fff; }
+}
+.tv-side-expand-icon { font-size: 10px; line-height: 1; }
+.tv-side-expand-text { white-space: nowrap; }
 .tv-trading-chart { height: v.$tv-chart-height; border: 0; border-radius: 0; }
 .tv-chart-toolbar { height: 42px; border-radius: 0; border-left: 0; border-right: 0; background: v.$color-panel; position: relative; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 0 8px; }
 .tv-chart-toolbar .chart-ohlc { min-width: 0; white-space: nowrap; overflow: hidden; }

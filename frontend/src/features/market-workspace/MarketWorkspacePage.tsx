@@ -24,6 +24,7 @@ import {
   useRemoveFromWatchlist,
   useMarketBoards,
   useMarketStocks,
+  useMarketFilterSpecs,
 } from '@/hooks/useApi'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
@@ -446,6 +447,12 @@ export default function MarketWorkspacePage() {
     setKeyword(newKeyword)
   }, [])
 
+  // [CHANGE-20260730-013] 拉取第一金字塔 99 字段筛选元数据（staleTime 24h，随部署更新）
+  // 用于 FilterPopover 按 data_type/input_control/enum_values 动态生成类型化控件：
+  // enum → 下拉单选/多选；boolean → true/false 下拉；datetime → 日期选择器；number → 数字输入
+  const filterSpecsQuery = useMarketFilterSpecs()
+  const filterSpecs = filterSpecsQuery.data ?? null
+
   // 列定义：DSA 列（复用 features/trend-selection 共享模块） + 99 个第一金字塔列
   // [Gate2 PRD60 PA-10/11/13] capability 决定回调传递：
   // - canAccessStockDetail=false（仅 self_selection）：不传 onNavigateToStock，股票名渲染为纯文本
@@ -453,6 +460,7 @@ export default function MarketWorkspacePage() {
   //
   // [PRD §三 列表视图第一金字塔全量字段] 在基础列后追加 99 个 fp_ 列，操作列固定末尾。
   // 99 列默认通过 defaultHiddenColumns 隐藏非核心键；列设置面板可显隐/拖拽排序。
+  // [CHANGE-20260730-013] 将 filterSpecs 注入 fp_ 列，启用类型化筛选器（enum 下拉、日期选择器等）
   const columns: DataTableColumn<TrendSelectionRow>[] = useMemo(
     () => {
       // [CHANGE-20260729-009] inlineWatchlistToggle=true：
@@ -467,7 +475,8 @@ export default function MarketWorkspacePage() {
       // inlineWatchlistToggle=true 时无 action 列；false 时拆分后追加 fp_ 列 + action 末尾
       const actionCol = baseColumns.find((c) => c.isAction)
       const nonActionBaseCols = baseColumns.filter((c) => !c.isAction)
-      const fpCols = getFirstPyramidColumns()
+      // [CHANGE-20260730-013] 传入 filterSpecs，每个 fp_ 列携带 filterSpec 元数据
+      const fpCols = getFirstPyramidColumns(filterSpecs)
       const merged = actionCol
         ? [...nonActionBaseCols, ...fpCols, actionCol]
         : [...nonActionBaseCols, ...fpCols]
@@ -477,7 +486,7 @@ export default function MarketWorkspacePage() {
       }
       return merged
     },
-    [handleNavigateToStock, handleToggleWatchlist, watchlistInstrumentIds, watchlistPendingIds, canAccessStockDetail, canAccessWatchlist],
+    [handleNavigateToStock, handleToggleWatchlist, watchlistInstrumentIds, watchlistPendingIds, canAccessStockDetail, canAccessWatchlist, filterSpecs],
   )
 
   // 批次元数据（调试信息：仅 admin 可见）

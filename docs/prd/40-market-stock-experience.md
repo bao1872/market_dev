@@ -136,3 +136,102 @@ direct 访问、来源失效或当前股票不在 sourceStocks 时，为避免�
 ### MX-43 自选移除后留在当前详情
 
 加入/移除后依赖现有 watchlist/monitor-status 缓存失效，页面不跳转；自选来源移除当前股后仍留在当前详情，按钮切回"+"。
+
+## 6. 第一金字塔折叠与类型化筛选（CHANGE-20260730-014）
+
+### MX-50 第一金字塔折叠交互（资格与偏好拆分）
+
+个股详情页第一金字塔 detail 区域的折叠状态必须按"资格（availability）+ 偏好（preference）"两段拆分，禁止用单一布尔值表达：
+
+- **`firstPyramidAvailable`（资格）**：只读，由后端返回。表示该股票当日是否存在已发布的 `stock_core` 快照且 99 字段中至少有一个非 `null`。`false` 时整个第一金字塔区域显示结构化 unavailable 状态（不复用"加载中"），用户折叠按钮不可用。
+- **`firstPyramidCollapsed`（偏好）**：用户可点击的折叠按钮，仅在 `firstPyramidAvailable=true` 时显示；默认展开（`false`）；状态写入 `localStorage` 键 `panji:first-pyramid-detail-collapsed:v1`，与用户当前选中的 symbol 解耦（一个全局偏好，不按股票保存）。
+- **持久键命名**：固定 `panji:first-pyramid-detail-collapsed:v1`；未来键结构变化必须升级版本号 `v2`，不就地覆盖旧键。
+- **`StockResearchWorkspace` 收起/展开按钮**：按钮位于第一金字塔 detail 区域顶部右侧，使用 `aria-expanded` 反映状态；点击不触发数据请求，只切换 DOM 折叠；折叠时仍保留顶部一行摘要（趋势/结构/动量/筹码 4 个 chip），便于一眼可见。
+- **capture 模式**：`capture=feishu` 时不渲染折叠按钮，强制展开（截图需要完整字段）。
+- **首次访问**：无 localStorage 记录时默认展开（`firstPyramidCollapsed=false`）；用户主动收起后，下次访问保持收起状态。
+- **`compact` 模式**：`/market` 右栏的 compact 第一金字塔不参与折叠交互，本条款仅适用于 detail 模式。
+
+### MX-51 类型化筛选操作符合同
+
+`/market` 列表 99 字段筛选必须按字段 `data_type` 严格匹配允许的 operators，禁止任意字段使用 `contains`：
+
+| data_type | 允许的 operators | 默认 operator | 值控件 |
+|---|---|---|---|
+| `text` | `eq` / `ne` / `contains` / `starts_with` / `ends_with` / `is_empty` / `is_not_empty` | `contains` | 文本输入框；`is_empty` / `is_not_empty` 不显示值控件 |
+| `enum` | `eq` / `ne` / `in` / `not_in` / `is_empty` / `is_not_empty` | `eq` | 下拉单选；`in` / `not_in` 切换为多选下拉；**禁止默认 `contains`** |
+| `boolean` | `eq` | `eq` | 三态开关（true / false / any）；`any` 表示不筛选 |
+| `number` | `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `between` / `is_null` / `is_not_null` | `eq` | 数字输入框；`between` 显示两个输入框 |
+| `percent` | `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `between` | `gte` | 数字输入框，0—100；后端按 0—1 浮点存储，前端显示按百分号 |
+| `datetime` | `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `between` / `is_null` / `is_not_null` | `gte` | 日期选择器；`between` 显示两个日期 |
+| `multi_enum` | `in` / `not_in` / `contains_any` / `contains_all` / `is_empty` / `is_not_empty` | `in` | 多选下拉；`contains_any` 表示任一命中、`contains_all` 表示全部命中 |
+
+合同约束：
+
+- 字段元数据 SSOT（`FP_QUERY_FIELD_SPECS`）必须为每个字段声明 `data_type` / `operators` / `enum_values` / `input_control`；前端不得自行推断 operators。
+- 前端筛选器组件按 `data_type` 渲染操作符下拉和值控件；用户切换 operator 时若当前值不兼容（如 `contains` → `eq`），必须清空值并提示。
+- `enum` 字段不得默认 `contains`；旧 URL 中 `enum+contains` 的迁移规则见 MX-53。
+- 后端 `/market/stocks` 接收 `(field, operator, value)` 三元组，按 `data_type` 校验 operator 合法性，非法组合返回 422 + 结构化 `detail`（见 MX-52）。
+- `is_empty` / `is_null` 等无值 operator 不接收 `value` 参数；后端必须显式拒绝带 `value` 的请求。
+
+### MX-52 字段元数据 API
+
+新增 `GET /api/v1/market/filter-specs`，返回 `/market` 列表所有可筛选字段的元数据，前端筛选器组件初始化时拉取：
+
+```json
+{
+  "version": "fp-query-specs-v1",
+  "fields": [
+    {
+      "field": "fp_trend_direction",
+      "label": "趋势方向",
+      "group": "trend",
+      "data_type": "enum",
+      "operators": ["eq", "ne", "in", "not_in", "is_empty", "is_not_empty"],
+      "default_operator": "eq",
+      "enum_values": [
+        {"value": 1, "label": "偏多"},
+        {"value": -1, "label": "偏空"},
+        {"value": 0, "label": "未确认"}
+      ],
+      "input_control": "single_select"
+    },
+    {
+      "field": "fp_volume_ratio_20d",
+      "label": "20日量比",
+      "group": "volume",
+      "data_type": "percent",
+      "operators": ["eq", "ne", "gt", "gte", "lt", "lte", "between"],
+      "default_operator": "gte",
+      "input_control": "number"
+    }
+  ]
+}
+```
+
+合同约束：
+
+- SSOT：`backend/app/config/fp_query_field_specs.py` 的 `FP_QUERY_FIELD_SPECS` 是字段元数据唯一来源；`/market/filter-specs` 直接序列化该 SSOT，禁止在 API 层或前端硬编码字段列表。
+- 版本化：`version` 字段反映 SSOT 版本；新增字段或修改 operators 必须升级版本号（如 `fp-query-specs-v2`），前端按版本缓存。
+- 权限：任何登录用户可读；不需要 admin。
+- 缓存：响应可由 Redis 缓存（key 含 version），TTL 默认 3600 秒；SSOT 升级版本号时旧缓存自然失效。
+
+### MX-53 旧 URL 筛选迁移规则
+
+历史 URL 中可能存在不符合 MX-51 类型化合同的筛选参数（如 `enum` 字段使用 `contains`）。前端解析 URL 时必须按以下规则迁移或提示：
+
+| 旧组合 | 迁移规则 | 用户提示 |
+|---|---|---|
+| `enum + contains` 且值精确匹配某个 `enum_values[].value` 或 `enum_values[].label` | 自动迁移为 `enum + eq`，使用匹配到的 `value` | 不提示（静默迁移） |
+| `enum + contains` 且值不匹配任何枚举值 | 不迁移，operator 保持 `contains` 但后端按 §MX-51 拒绝 | 顶部 banner 提示"字段 X 不支持模糊匹配，请从下拉选择有效值" |
+| `text + eq` 但值包含通配符（`*` / `?`） | 不迁移，提示用户改用 `contains` 或 `starts_with` | 顶部 banner 提示 |
+| `number + contains` | 非法组合，直接丢弃该筛选条件 | 顶部 banner 提示"字段 X 不支持文本匹配" |
+| `boolean + ne` | 不支持，迁移为 `boolean + eq` 并取反值 | 不提示（静默迁移） |
+| `percent + eq` 且值 > 100 或 < 0 | 不迁移，提示用户输入 0—100 范围 | 顶部 banner 提示 |
+| 缺失 operator（旧 URL 只有 `field=value`） | 按 `default_operator` 补齐 | 不提示（静默迁移） |
+
+合同约束：
+
+- 迁移发生在前端 URL hydration 阶段，迁移后立即更新 URL（`history.replaceState`），避免用户刷新后重复迁移。
+- 静默迁移不弹任何提示；非静默迁移必须显示 banner，且 banner 可被用户关闭。
+- 后端 `/market/stocks` 接收到非法组合时返回 422 + 结构化 `detail`（含 `field` / `operator` / `reason` / `allowed_operators`），前端按 `detail` 提示用户。
+- 迁移规则不写入后端；后端只校验最终接收到的 `(field, operator, value)` 三元组是否合法。

@@ -239,6 +239,19 @@ export function useMarketBoards(type?: 'industry' | 'concept') {
   })
 }
 
+/**
+ * [CHANGE-20260730-013] 查询第一金字塔 99 字段的筛选元数据。
+ * staleTime 24 小时（字段元数据变更频率极低，随部署更新）。
+ * 用于前端筛选器动态生成类型化控件（enum 下拉、datetime 日期选择器等）。
+ */
+export function useMarketFilterSpecs() {
+  return useQuery({
+    queryKey: ['market-filter-specs'],
+    queryFn: ({ signal }) => api.getMarketFilterSpecs({ signal }),
+    staleTime: 24 * 60 * 60 * 1000,
+  })
+}
+
 /** 按 ID 查询单个股票 */
 export function useInstrument(instrumentId: string | undefined) {
   return useQuery({

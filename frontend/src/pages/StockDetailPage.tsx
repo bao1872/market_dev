@@ -18,6 +18,10 @@ import clsx from 'clsx'
 import { FirstPyramidPanel } from '@/features/stock-research/FirstPyramidPanel'
 import { StockResearchWorkspace } from '@/features/stock-research/StockResearchWorkspace'
 import { StockQuoteStrip } from '@/features/stock-research/StockQuoteStrip'
+import {
+  loadFirstPyramidCollapsed,
+  saveFirstPyramidCollapsed,
+} from '@/features/stock-research/firstPyramidCollapsePreference'
 import { useStockResearchData } from '@/features/stock-research/useStockResearchData'
 import { useStockDetailActions } from '@/features/stock-research/useStockDetailActions'
 import { useStockDetailFeishu } from '@/features/stock-research/useStockDetailFeishu'
@@ -111,7 +115,17 @@ export default function StockDetailPage() {
   const isCaptureMode = searchParams.get('capture') === 'feishu'
   // [CHANGE-20260730-012] 删除 AtomicFactsDrawer/eventPanelCollapsed/localStorage 旧开关
   // 右侧唯一状态面板为 FirstPyramidPanel detail，capture 时隐藏
-  const showFirstPyramidDetail = !isCaptureMode && !!symbol
+  // [P0 2026-07-30] 拆分"允许显示"和"用户折叠状态"：
+  //   firstPyramidAvailable = 是否有资格显示（非 capture 且有 symbol）
+  //   firstPyramidCollapsed = 用户偏好（持久化到 localStorage，默认展开）
+  const firstPyramidAvailable = !isCaptureMode && !!symbol
+  const [firstPyramidCollapsed, setFirstPyramidCollapsed] = useState<boolean>(
+    loadFirstPyramidCollapsed,
+  )
+  const handleFirstPyramidCollapsedChange = useCallback((collapsed: boolean) => {
+    setFirstPyramidCollapsed(collapsed)
+    saveFirstPyramidCollapsed(collapsed)
+  }, [])
 
   // timeframe：从 URL 解析（单一真源），工具栏切换写回 URL
   const timeframe: DisplayTimeframe = normalizeDisplayTimeframe(searchParams.get('timeframe'))
@@ -314,7 +328,8 @@ export default function StockDetailPage() {
 
   // [CHANGE-20260730-012] 右侧唯一状态面板为 FirstPyramidPanel detail
   // 删除 AtomicFactsDrawer overlay 和 structuralToolbar 开关
-  const firstPyramidDetailPanel = showFirstPyramidDetail && symbol ? (
+  // [P0 2026-07-30] 面板渲染只依赖 firstPyramidAvailable，折叠状态由 StockResearchWorkspace 管理
+  const firstPyramidDetailPanel = firstPyramidAvailable && symbol ? (
     <FirstPyramidPanel symbol={symbol} variant="detail" />
   ) : null
 
@@ -629,9 +644,10 @@ export default function StockDetailPage() {
           source={source}
           strategyKey={strategy}
           isCaptureMode={isCaptureMode}
-          rightPanelCollapsed={!showFirstPyramidDetail}
+          rightPanelCollapsed={firstPyramidCollapsed}
           rightPanel={firstPyramidDetailPanel}
-          showRightPanel={showFirstPyramidDetail}
+          showRightPanel={firstPyramidAvailable}
+          onRightPanelCollapsedChange={handleFirstPyramidCollapsedChange}
           chartColumnProps={{ 'data-testid': 'stock-detail-capture' }}
           onSmcToggle={handleSmcToggle}
         />

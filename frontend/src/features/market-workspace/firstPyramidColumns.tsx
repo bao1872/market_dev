@@ -24,7 +24,8 @@
 // 数据来源：MarketStockRow.first_pyramid（来自 /market/stocks API 批量返回的 99 个 fp_ 键）
 
 import type { ReactNode } from 'react'
-import type { DataTableColumn } from '@/components/StrategyDataTable'
+import type { DataTableColumn, ColumnFilterSpec } from '@/components/StrategyDataTable'
+import type { FpFieldSpecs } from '@/api/endpoints'
 import type { TrendSelectionRow } from '@/features/trend-selection/types'
 
 // ===== 99 列 key 定义（与后端 FP_ALL_KEYS 一一对应）=====
@@ -1104,6 +1105,28 @@ if (COLUMN_DEFS.length !== 99) {
 // ===== 导出：唯一列定义函数 =====
 
 /**
+ * 将后端 FpFieldSpec 转为前端 ColumnFilterSpec（仅传递 FilterPopover 需要的字段）。
+ * [CHANGE-20260730-013] 类型化筛选器：filterSpec 存在时 FilterPopover 按 data_type/input_control
+ * 动态生成控件（enum 下拉、日期选择器、boolean 下拉、number 输入等），不再默认用 contains。
+ */
+function toColumnFilterSpec(spec: {
+  data_type: string
+  operators: string[]
+  enum_values: string[]
+  input_control: string
+  value_normalizer: string
+} | undefined): ColumnFilterSpec | undefined {
+  if (!spec) return undefined
+  return {
+    data_type: spec.data_type,
+    operators: spec.operators,
+    enum_values: spec.enum_values,
+    input_control: spec.input_control,
+    value_normalizer: spec.value_normalizer,
+  }
+}
+
+/**
  * 获取第一金字塔 99 列定义（唯一实现）。
  *
  * [CHANGE-20260729-004 P0-1] 全部启用 sortable/filterable：
@@ -1112,11 +1135,19 @@ if (COLUMN_DEFS.length !== 99) {
  * - 列设置面板按 FP_FIELD_GROUPS 分组显示，支持隐藏/拖拽排序
  * - 默认可见键见 DEFAULT_FP_VISIBLE_KEYS（约 20 个核心列）
  *
+ * [CHANGE-20260730-013] 类型化筛选器：
+ * - 传入 specs（来自 /market/filter-specs API）时，每个 fp_ 列携带 filterSpec 元数据
+ * - FilterPopover 根据 filterSpec.data_type/input_control/enum_values 动态生成控件：
+ *   enum → 下拉单选/多选；boolean → true/false 下拉；datetime → 日期选择器；number → 数字输入
+ * - 不传 specs 时回退到原有 dataType 默认操作符（向后兼容）
+ *
  * 注意：服务端无 JSON 路径的字段（事件/计算字段）UI 仍允许排序/筛选点击，
  * 但请求会被后端拒绝并返回 422；这是预期行为（前端不预过滤这些字段，
  * 用户感知到字段不支持后端筛选后应改用前端列设置隐藏或换字段）。
  */
-export function getFirstPyramidColumns(): DataTableColumn<TrendSelectionRow>[] {
+export function getFirstPyramidColumns(
+  specs?: FpFieldSpecs | null,
+): DataTableColumn<TrendSelectionRow>[] {
   return COLUMN_DEFS.map((def) => {
     // dataType 兼容 DataTableColumn 的 'text' | 'number' | 'percent' | 'datetime' | 'enum' | 'boolean'
     // firstPyramidColumns 的 dataType 不含 'enum'/'boolean'，统一映射为 text
@@ -1124,6 +1155,10 @@ export function getFirstPyramidColumns(): DataTableColumn<TrendSelectionRow>[] {
       def.dataType === 'datetime' ? 'datetime' :
       def.dataType === 'number' || def.dataType === 'percent' ? 'number' :
       'text'
+
+    // [CHANGE-20260730-013] 携带 filterSpec（来自 /market/filter-specs API）
+    // 存在时 FilterPopover 按 data_type/input_control/enum_values 动态生成控件
+    const filterSpec = toColumnFilterSpec(specs?.[def.key])
 
     return {
       key: def.key,
@@ -1135,6 +1170,7 @@ export function getFirstPyramidColumns(): DataTableColumn<TrendSelectionRow>[] {
       width: def.width,
       helpText: def.helpText,
       render: def.render,
+      filterSpec,
       // sortValue/filterValue 取原始值供 UI 显示（实际执行由后端）
       // null 统一返回 '' 以避免 StrategyDataTable 本地排序异常
       sortValue: (row: TrendSelectionRow) => {

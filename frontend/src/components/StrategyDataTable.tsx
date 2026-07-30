@@ -14,7 +14,34 @@ import type { TableViewPresetConfig } from '@/api/endpoints'
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
 export type DataType = 'text' | 'number' | 'percent' | 'datetime' | 'enum' | 'range'
 export type SortDirection = 'asc' | 'desc' | null
-export type FilterOperator = 'contains' | 'not_contains' | 'eq' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'empty' | 'not_empty'
+// [CHANGE-20260730-013] 扩展操作符类型，覆盖后端 SSOT 全部操作符合同：
+// text: contains/not_contains/eq/neq/empty/not_empty
+// enum: eq/neq/in/not_in/empty/not_empty
+// boolean: eq/empty/not_empty
+// number/percent: eq/neq/gt/gte/lt/lte/between/empty/not_empty
+// datetime: date_eq/before/after/between/empty/not_empty
+export type FilterOperator =
+  | 'contains' | 'not_contains' | 'eq' | 'neq'
+  | 'gt' | 'gte' | 'lt' | 'lte' | 'between'
+  | 'in' | 'not_in'
+  | 'date_eq' | 'before' | 'after'
+  | 'empty' | 'not_empty'
+
+// [CHANGE-20260730-013] 列级筛选元数据（来自 /market/filter-specs API）
+// 当 filterSpec 存在时，FilterPopover 优先使用其 operators/enum_values/input_control
+// 而非 dataType 默认值；用于按 data_type 动态生成类型化控件（enum 下拉、日期选择器等）
+export interface ColumnFilterSpec {
+  /** 后端 SSOT data_type（text/enum/boolean/number/percent/datetime/multi_enum） */
+  data_type: string
+  /** 允许的操作符列表（来自 FP_QUERY_FIELD_SPECS.<key>.operators） */
+  operators: string[]
+  /** 枚举值列表（enum/multi_enum 类型字段非空） */
+  enum_values: string[]
+  /** 输入控件类型（text_input/single_select/multi_select/number_input/date_picker/boolean_toggle） */
+  input_control: string
+  /** 值规范化器（trim/upper/lower/none） */
+  value_normalizer: string
+}
 
 export interface DataTableColumn<Row> {
   key: string
@@ -38,6 +65,9 @@ export interface DataTableColumn<Row> {
   shortTitle?: string
   // CHANGE-20260713-011: filterAlias 已移除——stock 列改用普通筛选（contains/not_contains/eq），
   // 与顶部 keyword 搜索独立（顶部 keyword 负责 symbol/name/pinyin 正向搜索）
+  // [CHANGE-20260730-013] 类型化筛选器元数据（来自 /market/filter-specs API）
+  // 存在时 FilterPopover 按 data_type/input_control/enum_values 动态生成控件
+  filterSpec?: ColumnFilterSpec
 }
 
 export interface DataTableFilter {
@@ -151,18 +181,49 @@ function operatorsForDataType(dataType: DataTableColumn<unknown>['dataType']): F
   }
 }
 
+// [CHANGE-20260730-013] 优先使用 filterSpec.operators（来自 /market/filter-specs API）
+// 当列携带 filterSpec 时按后端 SSOT 渲染操作符；否则回退到 dataType 默认值
+function getAvailableOperators(column: DataTableColumn<unknown>): FilterOperator[] {
+  if (column.filterSpec && column.filterSpec.operators.length > 0) {
+    return column.filterSpec.operators as FilterOperator[]
+  }
+  return operatorsForDataType(column.dataType)
+}
+
 // [StrategyDataTable] - 描述: 操作符下拉框中文标签
+// [CHANGE-20260730-013] 补全新操作符标签（neq/in/not_in/date_eq/before/after）
 const OPERATOR_LABELS: Record<FilterOperator, string> = {
   contains: '包含',
   not_contains: '不包含',
   eq: '等于',
+  neq: '不等于',
   gt: '大于',
   gte: '大于等于',
   lt: '小于',
   lte: '小于等于',
   between: '区间',
+  in: '属于',
+  not_in: '不属于',
+  date_eq: '日期等于',
+  before: '早于',
+  after: '晚于',
   empty: '为空',
   not_empty: '不为空',
+}
+
+// [CHANGE-20260730-013] 规范化筛选值（按 value_normalizer）
+function normalizeFilterValue(value: string, normalizer: string | undefined): string {
+  if (!value || !normalizer) return value
+  switch (normalizer) {
+    case 'trim':
+      return value.trim()
+    case 'upper':
+      return value.trim().toUpperCase()
+    case 'lower':
+      return value.trim().toLowerCase()
+    default:
+      return value
+  }
 }
 
 // 解析可比较值（对应原型 parseComparable）
@@ -184,6 +245,8 @@ function parseComparable(text: string): { type: 'number' | 'text'; value: number
 }
 
 // 筛选匹配逻辑
+// [CHANGE-20260730-013] 补全新操作符的客户端匹配（neq/in/not_in/date_eq/before/after）
+// 服务端模式下此函数不执行（由后端 SQL 处理）；仅用于客户端筛选模式（如非 serverSide 表格）
 function matchFilter(text: string, filter: DataTableFilter): boolean {
   const t = String(text).trim()
   const a = parseComparable(t)
@@ -197,6 +260,12 @@ function matchFilter(text: string, filter: DataTableFilter): boolean {
       return a.type === 'number' && b.type === 'number'
         ? a.value === b.value
         : t.toLocaleLowerCase('zh-CN') === String(filter.value).toLocaleLowerCase('zh-CN')
+    case 'neq':
+      // neq: 不等于值 OR 为空（与后端语义一致：显示所有不匹配的，包括 NULL）
+      if (!t) return true
+      return a.type === 'number' && b.type === 'number'
+        ? a.value !== b.value
+        : t.toLocaleLowerCase('zh-CN') !== String(filter.value).toLocaleLowerCase('zh-CN')
     case 'gt':
       // [StrategyDataTable] - 描述: 数值大于 value（仅数值语义，文本列不应出现 gt）
       return a.type === 'number' && b.type === 'number' && a.value > b.value
@@ -218,6 +287,30 @@ function matchFilter(text: string, filter: DataTableFilter): boolean {
         ? a.value >= b.value && a.value <= c.value
         : false
     }
+    case 'in': {
+      // in: 值在逗号分隔列表中
+      const values = String(filter.value || '')
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
+      return values.includes(t)
+    }
+    case 'not_in': {
+      // not_in: 值不在逗号分隔列表中 OR 为空（与后端语义一致）
+      if (!t) return true
+      const values = String(filter.value || '')
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
+      return !values.includes(t)
+    }
+    case 'date_eq':
+      // date_eq: 日期相等（字符串前 10 位匹配 YYYY-MM-DD）
+      return t.slice(0, 10) === String(filter.value || '').slice(0, 10)
+    case 'before':
+      return t < String(filter.value || '')
+    case 'after':
+      return t > String(filter.value || '')
     default: // contains
       return t.toLocaleLowerCase('zh-CN').includes(String(filter.value).toLocaleLowerCase('zh-CN'))
     case 'not_contains':
@@ -227,6 +320,13 @@ function matchFilter(text: string, filter: DataTableFilter): boolean {
 }
 
 // 列筛选弹窗
+// [CHANGE-20260730-013] 根据 filterSpec.data_type/input_control/enum_values 动态生成控件：
+// - enum/single_select + eq/neq → 下拉单选
+// - enum + in/not_in → 多选（逗号分隔文本 + datalist 提示）
+// - boolean/boolean_toggle + eq → true/false 下拉
+// - datetime/date_picker + date_eq/before/after/between → 日期输入
+// - number/percent/number_input → 数字输入
+// - text/text_input → 文本输入
 function FilterPopover({
   column,
   current,
@@ -242,10 +342,10 @@ function FilterPopover({
   onClear: () => void
   onClose: () => void
 }) {
-  // [StrategyDataTable] - 描述: 操作符默认值由字段类型决定，不再硬编码 contains
+  // [CHANGE-20260730-013] 优先使用 filterSpec.operators；回退到 dataType 默认
   const availableOps = useMemo(
-    () => operatorsForDataType(column.dataType),
-    [column.dataType],
+    () => getAvailableOperators(column),
+    [column],
   )
   const [operator, setOperator] = useState<FilterOperator>(
     current?.operator && availableOps.includes(current.operator)
@@ -256,6 +356,30 @@ function FilterPopover({
   const [value2, setValue2] = useState(String(current?.value2 || ''))
   const isEmptyOp = operator === 'empty' || operator === 'not_empty'
   const isBetween = operator === 'between'
+
+  // [CHANGE-20260730-013] 控件类型派生（基于 filterSpec）
+  const spec = column.filterSpec
+  const enumValues = spec?.enum_values ?? []
+  const inputControl = spec?.input_control ?? ''
+  const normalizer = spec?.value_normalizer
+  // enum 字段且操作符为 eq/neq 时使用下拉单选
+  const isEnumSingleSelect =
+    (inputControl === 'single_select' || enumValues.length > 0) &&
+    (operator === 'eq' || operator === 'neq')
+  // enum 字段且操作符为 in/not_in 时使用多选（逗号分隔）
+  const isEnumMultiSelect =
+    (inputControl === 'multi_select' || enumValues.length > 0) &&
+    (operator === 'in' || operator === 'not_in')
+  // boolean 字段使用 true/false 下拉
+  const isBooleanSelect = inputControl === 'boolean_toggle' && operator === 'eq'
+  // datetime 字段使用日期输入
+  const isDatePicker = inputControl === 'date_picker' ||
+    operator === 'date_eq' || operator === 'before' || operator === 'after'
+  // number/percent 字段使用数字输入
+  const isNumberInput = inputControl === 'number_input' ||
+    (spec && (spec.data_type === 'number' || spec.data_type === 'percent') &&
+      (operator === 'eq' || operator === 'neq' || operator === 'gt' ||
+       operator === 'gte' || operator === 'lt' || operator === 'lte'))
 
   // 定位弹窗
   const rect = anchor.getBoundingClientRect()
@@ -274,8 +398,9 @@ function FilterPopover({
   }, [anchor, onClose])
 
   const handleApply = () => {
-    const val = value.trim()
-    const val2 = value2.trim()
+    // [CHANGE-20260730-013] 应用 value_normalizer 规范化筛选值
+    const val = normalizeFilterValue(value, normalizer)
+    const val2 = normalizeFilterValue(value2, normalizer)
     // [StrategyDataTable] - 描述: between 需要两个值都非空，其余非空校验 value
     if (isBetween) {
       if (!val || !val2) {
@@ -292,21 +417,130 @@ function FilterPopover({
     onApply({ key: column.key, operator, value: val })
   }
 
-  return (
-    <div className="column-filter-popover" style={{ left, top }}>
-      <div className="filter-pop-title">筛选：{column.title}</div>
-      <select
-        className="select filter-operator"
-        value={operator}
-        onChange={(e) => setOperator(e.target.value as FilterOperator)}
-      >
-        {availableOps.map((op) => (
-          <option key={op} value={op}>
-            {OPERATOR_LABELS[op]}
-          </option>
-        ))}
-      </select>
-      {isBetween ? (
+  // [CHANGE-20260730-013] 渲染值输入控件（根据 data_type/input_control/operator）
+  const renderValueInput = () => {
+    if (isEmptyOp) {
+      return (
+        <input
+          className="input filter-value"
+          placeholder="（无需输入）"
+          value={value}
+          disabled
+          onChange={(e) => setValue(e.target.value)}
+        />
+      )
+    }
+
+    // enum 单选：下拉选择 enum_values
+    if (isEnumSingleSelect && enumValues.length > 0) {
+      return (
+        <select
+          className="select filter-value"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          autoFocus
+        >
+          <option value="">请选择</option>
+          {enumValues.map((v) => (
+            <option key={v} value={v}>{v}</option>
+          ))}
+        </select>
+      )
+    }
+
+    // boolean：true/false 下拉
+    if (isBooleanSelect) {
+      return (
+        <select
+          className="select filter-value"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          autoFocus
+        >
+          <option value="">请选择</option>
+          <option value="true">是 (true)</option>
+          <option value="false">否 (false)</option>
+        </select>
+      )
+    }
+
+    // enum 多选（in/not_in）：逗号分隔文本 + datalist 提示可选值
+    if (isEnumMultiSelect && enumValues.length > 0) {
+      return (
+        <div>
+          <input
+            className="input filter-value"
+            placeholder="多个值用逗号分隔"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            autoFocus
+            list={`filter-enum-list-${column.key}`}
+          />
+          <datalist id={`filter-enum-list-${column.key}`}>
+            {enumValues.map((v) => (
+              <option key={v} value={v} />
+            ))}
+          </datalist>
+          <div className="filter-enum-hint">
+            可选值：{enumValues.join(' / ')}
+          </div>
+        </div>
+      )
+    }
+
+    // 日期输入（date_eq/before/after/between）
+    if (isDatePicker) {
+      if (isBetween) {
+        return (
+          <div className="filter-between-inputs">
+            <input
+              className="input filter-value"
+              type="date"
+              placeholder="起始日期"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              autoFocus
+            />
+            <span className="filter-between-sep">~</span>
+            <input
+              className="input filter-value"
+              type="date"
+              placeholder="结束日期"
+              value={value2}
+              onChange={(e) => setValue2(e.target.value)}
+            />
+          </div>
+        )
+      }
+      return (
+        <input
+          className="input filter-value"
+          type="date"
+          placeholder="选择日期"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          autoFocus
+        />
+      )
+    }
+
+    // 数字输入
+    if (isNumberInput) {
+      return (
+        <input
+          className="input filter-value"
+          type="number"
+          placeholder="输入数值"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          autoFocus
+        />
+      )
+    }
+
+    // 数字类型 between（未携带 spec 时回退）
+    if (isBetween) {
+      return (
         <div className="filter-between-inputs">
           <input
             className="input filter-value"
@@ -323,16 +557,36 @@ function FilterPopover({
             onChange={(e) => setValue2(e.target.value)}
           />
         </div>
-      ) : (
-        <input
-          className="input filter-value"
-          placeholder="输入筛选值"
-          value={value}
-          disabled={isEmptyOp}
-          onChange={(e) => setValue(e.target.value)}
-          autoFocus
-        />
-      )}
+      )
+    }
+
+    // 默认：文本输入
+    return (
+      <input
+        className="input filter-value"
+        placeholder="输入筛选值"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        autoFocus
+      />
+    )
+  }
+
+  return (
+    <div className="column-filter-popover" style={{ left, top }}>
+      <div className="filter-pop-title">筛选：{column.title}</div>
+      <select
+        className="select filter-operator"
+        value={operator}
+        onChange={(e) => setOperator(e.target.value as FilterOperator)}
+      >
+        {availableOps.map((op) => (
+          <option key={op} value={op}>
+            {OPERATOR_LABELS[op]}
+          </option>
+        ))}
+      </select>
+      {renderValueInput()}
       <div className="filter-pop-actions">
         <button className="btn small filter-clear" onClick={onClear}>
           清除
@@ -535,7 +789,8 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       for (const f of state.filters) {
         const idx = columns.findIndex((c) => c.key === f.key)
         if (idx < 0) continue
-        const ops = operatorsForDataType(columns[idx].dataType)
+        // [CHANGE-20260730-013] 优先使用 filterSpec.operators 校验（支持新操作符 in/not_in/date_eq 等）
+        const ops = getAvailableOperators(columns[idx] as DataTableColumn<unknown>)
         if (!ops.includes(f.op as FilterOperator)) continue
         next[idx] = {
           key: f.key,
