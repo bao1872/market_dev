@@ -30,6 +30,11 @@ ENV_FILE="${PANJI_ENV_FILE:-/etc/market-dev/market.env}"
 STATE_FILE="${PANJI_STATE_FILE:-/etc/market-dev/.panji-deploy-state}"
 LOCK_FILE="${PANJI_LOCK_FILE:-/var/lock/panji-deploy.lock}"
 COMPOSE_CMD="docker compose --env-file ${ENV_FILE} -f docker-compose.prod.yml -f docker-compose.live.yml"
+# [P0 2026-07-30] 纯镜像部署：不叠加 live.yml，禁止 Live Mount 覆盖 baked-in 代码
+# 满足 AGENTS.md §8 "正式镜像部署，禁止Live Mount/docker cp/临时业务脚本，保证repo=image=runtime SHA"
+COMPOSE_CMD_NO_LIVE="docker compose --env-file ${ENV_FILE} -f docker-compose.prod.yml"
+# 强制镜像构建：PANJI_FORCE_IMAGE_BUILD=1 时无论变更范围都走 image scope
+FORCE_IMAGE_BUILD="${PANJI_FORCE_IMAGE_BUILD:-}"
 
 DRY_RUN=false
 TARGET_SHA=""
@@ -170,6 +175,13 @@ classify_changes() {
     log "分类变更范围..."
 
     cd "${REPO_ROOT}"
+
+    # [P0 2026-07-30] 强制镜像构建：PANJI_FORCE_IMAGE_BUILD=1 跳过分类，直接走 image scope
+    if [[ "${FORCE_IMAGE_BUILD}" == "1" || "${FORCE_IMAGE_BUILD}" == "true" ]]; then
+        log "PANJI_FORCE_IMAGE_BUILD=1，强制镜像构建（纯镜像部署，禁止 Live Mount）"
+        CHANGE_SCOPE="image"
+        return
+    fi
 
     if [[ -z "${PREVIOUS_SHA}" ]]; then
         log "无上一次部署记录，按全量 backend+frontend 处理"
@@ -338,12 +350,13 @@ deploy_scope() {
                 worker-after-close worker-watchdog worker-capture
             ;;
         image)
+            # [P0 2026-07-30] 纯镜像部署：构建镜像后不 sync_live_mount，
+            # 使用 docker-compose.prod.yml 单文件重建，保证 repo=image=runtime SHA
             build_images
             build_frontend
-            sync_live_mount
             compose_config_check
-            # 镜像重建后全量 up -d，但不重建 postgres/redis
-            run_cmd ${COMPOSE_CMD} up -d --force-recreate --remove-orphans \
+            # 镜像重建后全量 up -d（不叠加 live.yml，不覆盖 baked-in 代码）
+            run_cmd ${COMPOSE_CMD_NO_LIVE} up -d --force-recreate --remove-orphans \
                 backend frontend goaccess \
                 worker-bars-scheduler worker-strategy-scheduler worker-calendar \
                 worker-monitor worker-strategy-batch worker-outbox worker-delivery \
