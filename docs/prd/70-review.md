@@ -159,13 +159,13 @@ backend/scripts/
 
 ## 5. 数据模型
 
-若迁移074已经应用，使用下一可用前向迁移，建议：
+若迁移074、075已经应用，使用下一可用前向迁移：
 
 ```
-075_market_review_workbench.py
+076_market_review_workbench.py
 ```
 
-不得修改已应用的074。
+不得修改已应用的074（board_analysis_v1）与 075（market_data_quality）。
 
 ### 5.1 market_review_runs
 

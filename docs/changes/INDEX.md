@@ -36,6 +36,7 @@
 | CHANGE-20260729-008 | 2026-07-29 | 增量发布最终收口：Worker 接入 run items + market_stocks pointer + history DB-only CLI + 管理 API + 聚合独立 job | architecture+contract | 盘后编排/分层发布/历史回补/管理后台 | 进行中（代码闭环完成+纯单元27+Ruff+TSC+ESLint 通过；PG 集成待 CI；待 dev→main→部署→canary→全量回补） | AC-08/09/10/14/MX-20/MX-40~MX-43 | `maps/30-after-close.md`、`maps/40-market-stock-experience.md` |
 | CHANGE-20260729-009 | 2026-07-29 | 行情列表统一数据源 + 内联自选按钮 + 筹码原因 + History版本一致性 + Umami访客分析 | architecture+behavior+ops | 行情体验/量化模型/运维 | 进行中（代码+25+8 单元测试+Ruff+TSC+ESLint 通过；Umami 已部署运行；待 dev→main→生产部署验收） | MX-20/MX-40~MX-43/AC-04 | `maps/40-market-stock-experience.md`、`maps/30-after-close.md`、`maps/80-system-runtime.md` |
 | CHANGE-20260730-012 | 2026-07-30 | P0 收口—盘中监控1秒/结构图片/第一金字塔/列表排序/全市场行情扫描/实时K线修复/复盘基线 | behavior+contract+architecture+data | 盘中监控/行情体验/量化模型/盘后编排/复盘 | 进行中（代码+目标纯单元测试293+Ruff+TSC+ESLint 通过；PG 集成待 CI；浏览器验收待用户手工） | WI-02/WI-12/MX-20/QM-01~QM-43/AC-04/RV-01~RV-05 | `maps/50-watchlist-intraday.md`、`maps/40-market-stock-experience.md`、`maps/20-quant-model.md`、`maps/30-after-close.md`、`maps/70-review.md` |
+| CHANGE-20260730-013 | 2026-07-30 | 复盘工作台 V1 完整实现 + 第一金字塔 symbol 合同 P0 修复 | architecture+behavior+contract+data | 复盘模块/量化模型/行情体验/盘后编排/部署 | 进行中（代码+部署+canary 已发布；migration 076 已应用；adapter/chip_status/review run 验证通过；浏览器 UI 真实链路验收 PENDING 用户手工登录） | QM-01~QM-43/RV-01~RV-22/MX-20/MX-40~MX-43 | `maps/70-review.md`、`maps/20-quant-model.md`、`maps/40-market-stock-experience.md`、`maps/30-after-close.md`、`maps/80-system-runtime.md` |
 
 ## 3. 状态说明
 
