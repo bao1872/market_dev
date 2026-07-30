@@ -413,13 +413,15 @@ health_check() {
     log "/health/ready 通过"
 
     # /version runtime_git_sha
+    # [P0 2026-07-30] 纯镜像部署时 GIT_SHA 只有短 SHA（7 chars），比较前 7 位即可
+    # Live Mount 部署时 RUNTIME_SHA 文件含完整 SHA，短 SHA 比较仍然成立
     local runtime_sha
     runtime_sha="$(curl -sf http://127.0.0.1:8000/version 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("runtime_git_sha","unknown"))' 2>/dev/null || echo "unknown")"
-    if [[ "${runtime_sha}" != "${TARGET_SHA}" ]]; then
-        log "runtime_git_sha 不匹配: 期望 ${TARGET_SHA}, 实际 ${runtime_sha}"
+    if [[ "${runtime_sha:0:7}" != "${TARGET_SHA:0:7}" ]]; then
+        log "runtime_git_sha 不匹配: 期望 ${TARGET_SHA:0:7}, 实际 ${runtime_sha:0:7}"
         return 1
     fi
-    log "runtime_git_sha 验证通过: ${runtime_sha}"
+    log "runtime_git_sha 验证通过: ${runtime_sha:0:7}"
 
     # 端口 80
     if ! curl -sf http://127.0.0.1:80 >/dev/null 2>&1; then
