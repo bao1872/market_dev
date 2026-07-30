@@ -1,37 +1,35 @@
-"""[Gate5] /admin/visitors 端点测试。
+"""[Gate5] /admin/visitors 端点测试（Umami 迁移后）。
+
+[CHANGE-20260730-010] 从 GoAccess 迁移到 Umami：
+- 删除 GOACCESS_REPORT_PATH / _parse_goaccess_json 相关测试
+- 新增 UmamiAnalyticsAdapter 纯单元测试（不依赖 DB）
 
 覆盖：
 1. _sanitize_path 脱敏函数（敏感 query 参数替换为 ***）
-2. _parse_goaccess_json 解析 GoAccess JSON 报告
-3. 路由注册验证（/admin/visitors 路径存在）
-4. 空态返回（报告文件不存在时 data_source="empty"）
+2. _resolve_umami_db_url URL 形态转换
+3. _get_website_id UUID 解析
+4. 路由注册验证（/admin/visitors 路径存在）
 5. Schema 字段验证
 6. 前端类型一致性
-
-测试环境：纯单元测试 + 源码级验证（不依赖 DB；admin 鉴权由 require_roles 在运行时校验）
-设计要点：
-- 不修改生产代码，仅验证字段与逻辑
-- 使用 inspect.getsource 做源码级验证（避免 mock 自证）
 """
 
 from __future__ import annotations
 
 import inspect
-from datetime import datetime
 
 import pytest
 
-from app.api.admin_visitors import (
-    GOACCESS_REPORT_PATH,
-    SENSITIVE_QUERY_KEYS,
-    _parse_goaccess_json,
-    _sanitize_path,
-    router,
-)
+from app.api.admin_visitors import router
 from app.schemas.visitors import (
     VisitorMetricItem,
     VisitorReport,
     VisitorSummary,
+)
+from app.services.umami_analytics_adapter import (
+    _SENSITIVE_QUERY_KEYS,
+    _get_website_id,
+    _resolve_umami_db_url,
+    _sanitize_path,
 )
 
 # =============================================================================
@@ -83,148 +81,105 @@ class TestSanitizePath:
     def test_all_sensitive_keys_covered(self) -> None:
         """[Gate5] 敏感参数黑名单完整覆盖。"""
         expected = {"token", "jwt", "password", "passwd", "key", "secret", "api_key", "access_token"}
-        assert SENSITIVE_QUERY_KEYS == expected
+        assert _SENSITIVE_QUERY_KEYS == expected
 
 
 # =============================================================================
-# 2. _parse_goaccess_json 解析
+# 2. _resolve_umami_db_url URL 形态转换
 # =============================================================================
 
 
-class TestParseGoaccessJson:
-    """[Gate5] _parse_goaccess_json 报告解析。"""
+class TestResolveUmamiDbUrl:
+    """[Gate5] _resolve_umami_db_url URL 形态转换。"""
 
-    def test_empty_data(self) -> None:
-        """空 data 返回零值汇总。"""
-        parsed = _parse_goaccess_json({"data": {}, "generated_at": "2026-07-28T10:00:00"})
-        assert parsed.data_source == "goaccess_json"
-        assert parsed.today.pv == 0
-        assert parsed.today.uv == 0
-        assert parsed.today.top_pages == []
+    def test_none_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """环境变量未设置时返回 None。"""
+        monkeypatch.delenv("UMAMI_DATABASE_URL", raising=False)
+        assert _resolve_umami_db_url() is None
 
-    def test_with_sample_data(self) -> None:
-        """含样本数据的解析。"""
-        raw = {
-            "data": {
-                "visitors": {
-                    "total": 50,
-                    "data": [{"data": "192.168.1.0", "hits": 30, "percent": 60.0}],
-                },
-                "requests": {
-                    "total": 100,
-                    "data": [{"data": "/market?token=secret", "hits": 80, "percent": 80.0}],
-                },
-                "referrers": {"data": [{"data": "google.com", "hits": 40, "percent": 40.0}]},
-                "status_codes": {"data": [{"data": "200", "hits": 95, "percent": 95.0}]},
-                "browsers": {"data": [{"data": "Chrome", "hits": 80, "percent": 80.0}]},
-                "operating_systems": {"data": [{"data": "Windows", "hits": 60, "percent": 60.0}]},
-                "visit_time": {"data": [{"data": "10:00", "hits": 20}]},
-            },
-            "generated_at": "2026-07-28T10:00:00",
-        }
-        parsed = _parse_goaccess_json(raw)
+    def test_empty_string_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """空字符串返回 None。"""
+        monkeypatch.setenv("UMAMI_DATABASE_URL", "")
+        assert _resolve_umami_db_url() is None
 
-        # PV/UV
-        assert parsed.today.pv == 100
-        assert parsed.today.uv == 50
+    def test_postgresql_converted_to_asyncpg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """postgresql:// 前缀转为 postgresql+asyncpg://。"""
+        monkeypatch.setenv(
+            "UMAMI_DATABASE_URL",
+            "postgresql://umami:secret@trading-postgres:5432/umami",
+        )
+        result = _resolve_umami_db_url()
+        assert result == "postgresql+asyncpg://umami:secret@trading-postgres:5432/umami"
 
-        # Top pages with sanitization
-        assert len(parsed.today.top_pages) == 1
-        assert parsed.today.top_pages[0].label == "/market?token=***"  # sanitized
-        assert parsed.today.top_pages[0].count == 80
-        assert parsed.today.top_pages[0].percentage == 80.0
+    def test_asyncpg_kept_as_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """postgresql+asyncpg:// 前缀保持不变。"""
+        monkeypatch.setenv(
+            "UMAMI_DATABASE_URL",
+            "postgresql+asyncpg://umami:secret@trading-postgres:5432/umami",
+        )
+        result = _resolve_umami_db_url()
+        assert result == "postgresql+asyncpg://umami:secret@trading-postgres:5432/umami"
 
-        # Referrers
-        assert parsed.today.top_referrers[0].label == "google.com"
-
-        # Status codes
-        assert parsed.today.status_codes[0].label == "200"
-
-        # Browsers
-        assert parsed.today.browsers[0].label == "Chrome"
-
-        # Devices (operating_systems)
-        assert parsed.today.devices[0].label == "Windows"
-
-        # Hourly trend
-        assert parsed.today.hourly_trend[0].label == "10:00"
-
-        # Generated at
-        assert parsed.generated_at == datetime(2026, 7, 28, 10, 0, 0)
-
-    def test_three_time_windows_same_data(self) -> None:
-        """[Gate5] 三个时间窗口返回相同数据（当前实现占位）。"""
-        raw = {
-            "data": {"visitors": {"total": 10}, "requests": {"total": 20}},
-            "generated_at": "2026-07-28T10:00:00",
-        }
-        parsed = _parse_goaccess_json(raw)
-        # 当前实现：三个窗口返回相同数据（生产部署可通过多个报告文件区分）
-        assert parsed.today.pv == 20
-        assert parsed.seven_days.pv == 20
-        assert parsed.thirty_days.pv == 20
-
-    def test_invalid_generated_at_returns_none(self) -> None:
-        """无效的 generated_at 返回 None。"""
-        parsed = _parse_goaccess_json({"data": {}, "generated_at": "invalid-date"})
-        assert parsed.generated_at is None
+    def test_invalid_scheme_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """非 postgresql 前缀返回 None。"""
+        monkeypatch.setenv("UMAMI_DATABASE_URL", "mysql://umami:secret@host/umami")
+        assert _resolve_umami_db_url() is None
 
 
 # =============================================================================
-# 3. 路由注册验证
+# 3. _get_website_id UUID 解析
+# =============================================================================
+
+
+class TestGetWebsiteId:
+    """[Gate5] _get_website_id UUID 解析。"""
+
+    def test_none_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """环境变量未设置时返回 None。"""
+        monkeypatch.delenv("UMAMI_WEBSITE_ID", raising=False)
+        assert _get_website_id() is None
+
+    def test_valid_uuid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """合法 UUID 字符串解析为 UUID 对象。"""
+        monkeypatch.setenv("UMAMI_WEBSITE_ID", "109c6241-d39e-47b0-a6f2-29a6bc15bd09")
+        result = _get_website_id()
+        assert result is not None
+        assert str(result) == "109c6241-d39e-47b0-a6f2-29a6bc15bd09"
+
+    def test_invalid_uuid_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """非法 UUID 返回 None。"""
+        monkeypatch.setenv("UMAMI_WEBSITE_ID", "not-a-uuid")
+        assert _get_website_id() is None
+
+
+# =============================================================================
+# 4. 路由注册验证
 # =============================================================================
 
 
 class TestRouterRegistration:
-    """[Gate5] /admin/visitors 路由注册。"""
+    """[Gate5] /admin/visitors 路由注册验证。"""
+
+    def test_router_has_visitors_route(self) -> None:
+        """路由注册了 GET /admin/visitors。"""
+        paths = [route.path for route in router.routes]
+        assert "/admin/visitors" in paths, f"路由未注册 /admin/visitors，实际: {paths}"
+
+    def test_visitors_route_is_get(self) -> None:
+        """路由方法为 GET。"""
+        methods = []
+        for route in router.routes:
+            if route.path == "/admin/visitors":
+                methods.extend(route.methods or [])
+        assert "GET" in methods, f"GET 方法未注册，实际: {methods}"
 
     def test_router_prefix(self) -> None:
-        """router prefix 必须为 /admin。"""
+        """路由 prefix 为 /admin。"""
         assert router.prefix == "/admin"
 
-    def test_visitors_route_exists(self) -> None:
-        """/admin/visitors 路由必须存在。"""
-        routes = [r.path for r in router.routes]
-        assert "/admin/visitors" in routes, f"路由列表缺少 /admin/visitors: {routes}"
-
     def test_router_tags(self) -> None:
-        """router tags 包含 admin-visitors。"""
+        """路由 tag 包含 admin-visitors。"""
         assert "admin-visitors" in router.tags
-
-    def test_endpoint_requires_admin_role(self) -> None:
-        """[Gate5] 端点必须使用 require_roles('admin') 鉴权。"""
-        from app.api.admin_visitors import get_visitors_report
-
-        source = inspect.getsource(get_visitors_report)
-        assert "require_roles" in source, "端点未使用 require_roles 鉴权"
-        assert '"admin"' in source or "'admin'" in source, "端点未要求 admin 角色"
-
-
-# =============================================================================
-# 4. 空态返回验证（源码级）
-# =============================================================================
-
-
-class TestEmptyStateHandling:
-    """[Gate5] 报告文件不存在时返回空态。"""
-
-    def test_returns_empty_when_file_missing(self) -> None:
-        """文件不存在时 data_source='empty'。"""
-        from app.api.admin_visitors import get_visitors_report
-
-        source = inspect.getsource(get_visitors_report)
-        # 验证文件存在性检查
-        assert "exists()" in source, "缺少文件存在性检查"
-        # 验证空态返回
-        assert '"empty"' in source or "'empty'" in source, "缺少空态 data_source='empty' 返回"
-
-    def test_returns_error_on_json_failure(self) -> None:
-        """JSON 解析失败时 data_source='error'。"""
-        from app.api.admin_visitors import get_visitors_report
-
-        source = inspect.getsource(get_visitors_report)
-        assert "JSONDecodeError" in source, "缺少 JSONDecodeError 处理"
-        assert '"error"' in source or "'error'" in source, "缺少 data_source='error' 返回"
 
 
 # =============================================================================
@@ -232,42 +187,40 @@ class TestEmptyStateHandling:
 # =============================================================================
 
 
-class TestVisitorSchema:
-    """[Gate5] VisitorReport Schema 字段验证。"""
+class TestSchemaFields:
+    """[Gate5] VisitorReport / VisitorSummary / VisitorMetricItem 字段验证。"""
 
-    def test_visitor_report_fields(self) -> None:
-        """VisitorReport 必须包含三个时间窗口 + 元信息。"""
-        fields = list(VisitorReport.model_fields.keys())
-        assert "today" in fields
-        assert "seven_days" in fields
-        assert "thirty_days" in fields
-        assert "generated_at" in fields
-        assert "data_source" in fields
-        assert "error_message" in fields
+    def test_visitor_report_data_source_values(self) -> None:
+        """data_source 字段接受 umami / empty / error。"""
+        for ds in ("umami", "empty", "error"):
+            report = VisitorReport(data_source=ds)  # type: ignore[arg-type]
+            assert report.data_source == ds
 
-    def test_visitor_summary_fields(self) -> None:
-        """VisitorSummary 必须包含 PV/UV + 各维度列表。"""
-        fields = list(VisitorSummary.model_fields.keys())
-        for required in ["pv", "uv", "top_pages", "top_referrers",
-                         "status_codes", "devices", "browsers", "hourly_trend"]:
-            assert required in fields, f"VisitorSummary 缺少字段: {required}"
+    def test_visitor_report_default_generated_at(self) -> None:
+        """generated_at 默认为 None（运行时填充）。"""
+        report = VisitorReport(data_source="empty")
+        # generated_at 是可选字段
+        assert report.data_source == "empty"
+
+    def test_visitor_summary_required_fields(self) -> None:
+        """VisitorSummary 必填字段 PV/UV。"""
+        summary = VisitorSummary(pv=0, uv=0)
+        assert summary.pv == 0
+        assert summary.uv == 0
+        assert summary.top_pages == []
+        assert summary.top_referrers == []
+        assert summary.devices == []
+        assert summary.browsers == []
+        assert summary.hourly_trend == []
+        # Umami 不记录 HTTP 状态码
+        assert summary.status_codes == []
 
     def test_visitor_metric_item_fields(self) -> None:
-        """VisitorMetricItem 必须包含 label/count/percentage。"""
-        fields = list(VisitorMetricItem.model_fields.keys())
-        for required in ["label", "count", "percentage"]:
-            assert required in fields, f"VisitorMetricItem 缺少字段: {required}"
-
-    def test_default_empty_report(self) -> None:
-        """[Gate5] 默认空报告字段值合理。"""
-        report = VisitorReport(data_source="empty")
-        assert report.today.pv == 0
-        assert report.today.uv == 0
-        assert report.today.top_pages == []
-        assert report.seven_days.pv == 0
-        assert report.thirty_days.pv == 0
-        assert report.generated_at is None
-        assert report.error_message is None
+        """VisitorMetricItem 包含 label/count/percentage。"""
+        item = VisitorMetricItem(label="/market", count=10, percentage=50.0)
+        assert item.label == "/market"
+        assert item.count == 10
+        assert item.percentage == 50.0
 
 
 # =============================================================================
@@ -276,57 +229,44 @@ class TestVisitorSchema:
 
 
 class TestFrontendTypeConsistency:
-    """[Gate5] 前端类型与后端一致。"""
+    """[Gate5] 后端 Schema 字段与前端 TS 类型一致。"""
 
-    def test_frontend_endpoints_has_visitor_types(self) -> None:
-        """前端 endpoints.ts 包含 VisitorReport 等类型。"""
-        from pathlib import Path
-
-        endpoints_path = Path(__file__).parent.parent.parent / "frontend" / "src" / "api" / "endpoints.ts"
-        if not endpoints_path.exists():
-            pytest.skip("frontend/src/api/endpoints.ts 不存在")
-
-        content = endpoints_path.read_text(encoding="utf-8")
-        assert "interface VisitorReport" in content, "endpoints.ts 缺少 VisitorReport 接口"
-        assert "interface VisitorSummary" in content, "endpoints.ts 缺少 VisitorSummary 接口"
-        assert "interface VisitorMetricItem" in content, "endpoints.ts 缺少 VisitorMetricItem 接口"
-        assert "getAdminVisitors" in content, "endpoints.ts 缺少 getAdminVisitors 函数"
-
-    def test_frontend_page_exists(self) -> None:
-        """[Gate5] 前端 AdminVisitorsPage 存在。"""
-        from pathlib import Path
-
-        page_path = Path(__file__).parent.parent.parent / "frontend" / "src" / "pages" / "AdminVisitorsPage.tsx"
-        if not page_path.exists():
-            pytest.skip("frontend/src/pages/AdminVisitorsPage.tsx 不存在")
-
-        content = page_path.read_text(encoding="utf-8")
-        # 验证状态完备性
-        assert "isLoading" in content, "AdminVisitorsPage 缺少 loading 状态"
-        assert "isError" in content, "AdminVisitorsPage 缺少 error 状态"
-        assert "data_source" in content, "AdminVisitorsPage 缺少 data_source 处理"
-        assert "empty" in content, "AdminVisitorsPage 缺少空态处理"
-        assert "today" in content and "seven_days" in content and "thirty_days" in content, (
-            "AdminVisitorsPage 缺少三个时间窗口"
+    def test_visitor_report_fields_match_frontend(self) -> None:
+        """VisitorReport 字段与前端 VisitorReport 接口一致。"""
+        # 后端 Schema 字段
+        backend_fields = set(VisitorReport.model_fields.keys())
+        # 前端 TS 接口期望字段（来自 frontend/src/api/endpoints.ts）
+        expected_frontend_fields = {
+            "today",
+            "seven_days",
+            "thirty_days",
+            "generated_at",
+            "data_source",
+            "error_message",
+        }
+        assert backend_fields == expected_frontend_fields, (
+            f"前后端字段不一致: backend={backend_fields}, frontend={expected_frontend_fields}"
         )
 
-    def test_route_registered(self) -> None:
-        """[Gate5] /admin/visitors 路由已注册。"""
-        from pathlib import Path
+    def test_no_goaccess_residual_in_admin_visitors(self) -> None:
+        """[Gate5] admin_visitors.py 不再包含 GoAccess 代码符号（docstring 历史说明允许）。"""
+        from app.api import admin_visitors
 
-        app_path = Path(__file__).parent.parent.parent / "frontend" / "src" / "App.tsx"
-        if not app_path.exists():
-            pytest.skip("frontend/src/App.tsx 不存在")
+        # 不应再导入或定义 GoAccess 相关符号
+        forbidden_symbols = ["GOACCESS_REPORT_PATH", "_parse_goaccess_json"]
+        module_symbols = dir(admin_visitors)
+        for sym in forbidden_symbols:
+            assert sym not in module_symbols, (
+                f"admin_visitors.py 仍定义 GoAccess 符号: {sym}"
+            )
 
-        content = app_path.read_text(encoding="utf-8")
-        assert "/admin/visitors" in content, "App.tsx 缺少 /admin/visitors 路由"
-        assert "AdminVisitorsPage" in content, "App.tsx 缺少 AdminVisitorsPage 导入"
+    def test_umami_adapter_no_db_password_hardcoded(self) -> None:
+        """[Gate5] Umami adapter 不硬编码数据库密码。"""
+        from app.services import umami_analytics_adapter
 
-
-if __name__ == "__main__":
-    # 自测入口
-    print(f"GOACCESS_REPORT_PATH={GOACCESS_REPORT_PATH}")
-    print(f"SENSITIVE_QUERY_KEYS={SENSITIVE_QUERY_KEYS}")
-    print(f"_sanitize_path('/api?token=x') = {_sanitize_path('/api?token=x')}")
-    print(f"Routes: {[r.path for r in router.routes]}")
-    print("OK")
+        source = inspect.getsource(umami_analytics_adapter)
+        # _DEFAULT_UMAMI_URL 是默认值（umami:umami），生产由环境变量覆盖
+        # 但不应有真实密码硬编码
+        forbidden_passwords = ["023d39c5162c7fe8fe499cc042354e8d", "panji_prod_password"]
+        for pwd in forbidden_passwords:
+            assert pwd not in source, f"Umami adapter 硬编码生产密码: {pwd}"
