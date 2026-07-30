@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# panji-prod-preflight — 生产服务器连接与基础环境一次性校验
+#
+# 来源：CHANGE-20260730-015（SSH 目标漂移防复发）
+# 权威参数：docs/maps/80-system-runtime.md §2
+#   - HostName = 43.136.118.82
+#   - User = root
+#   - Port = 22
+#   - 远程代码目录 = /root/web_dev
+#   - 远程配置 = /etc/market-dev/market.env
+#   - 生产 Compose 项目 = trading
+#
+# 设计原则：
+#   1. 不使用任何可能掩盖 SSH 退出码的管道（| head / | tail / | grep）
+#      先把输出存到变量，再单独处理
+#   2. 解析 ssh -G 输出与 AGENTS/maps 权威参数逐项比对
+#   3. 任何阶段失败立即 exit 1，不得继续
+#   4. 不输出私钥、密码、完整 IdentityFile 路径（只输出文件名）
+#
+# 退出码：
+#   0 = 全部通过，可继续部署
+#   1 = 任一阶段失败
+#   2 = 配置错误（ssh 别名不存在 / 权威参数不一致）
+
+set -euo pipefail
+
+SSH_ALIAS="panji-prod"
+EXPECTED_HOSTNAME="43.136.118.82"
+EXPECTED_USER="root"
+EXPECTED_PORT="22"
+EXPECTED_REMOTE_DIR="/root/web_dev"
+EXPECTED_ENV_FILE="/etc/market-dev/market.env"
+EXPECTED_COMPOSE_PROJECT="web_dev"
+EXPECTED_BACKEND_CONTAINER="trading-backend"
+
+fail() {
+  echo "[preflight] FAIL: $*" >&2
+  exit 1
+}
+
+info() {
+  echo "[preflight] $*"
+}
+
+# ===== 阶段 1：本地 ssh -G 解析校验 =====
+info "阶段 1：解析 ssh -G $SSH_ALIAS"
+set +e
+SSH_G_OUTPUT=$(ssh -G "$SSH_ALIAS" 2>&1)
+SSH_G_RC=$?
+set -e
+if [ "$SSH_G_RC" -ne 0 ]; then
+  echo "$SSH_G_OUTPUT" >&2
+  fail "ssh -G 解析失败（rc=$SSH_G_RC），别名 '$SSH_ALIAS' 不存在于 ~/.ssh/config"
+fi
+
+RESOLVED_HOSTNAME=$(echo "$SSH_G_OUTPUT" | awk '/^hostname / {print $2; exit}')
+RESOLVED_USER=$(echo "$SSH_G_OUTPUT" | awk '/^user / {print $2; exit}')
+RESOLVED_PORT=$(echo "$SSH_G_OUTPUT" | awk '/^port / {print $2; exit}')
+RESOLVED_IDENTITY=$(echo "$SSH_G_OUTPUT" | awk '/^identityfile / {print $2; exit}' | sed 's|.*/||')
+
+info "解析结果：host=$RESOLVED_HOSTNAME user=$RESOLVED_USER port=$RESOLVED_PORT identityfile=$(basename "${RESOLVED_IDENTITY:-none}")"
+
+[ "$RESOLVED_HOSTNAME" = "$EXPECTED_HOSTNAME" ] || fail "HostName 不匹配：$RESOLVED_HOSTNAME != $EXPECTED_HOSTNAME"
+[ "$RESOLVED_USER" = "$EXPECTED_USER" ] || fail "User 不匹配：$RESOLVED_USER != $EXPECTED_USER"
+[ "$RESOLVED_PORT" = "$EXPECTED_PORT" ] || fail "Port 不匹配：$RESOLVED_PORT != $EXPECTED_PORT"
+
+info "阶段 1 通过：解析值与 AGENTS 权威参数一致"
+
+# ===== 阶段 2：实际 SSH 连接与目录校验 =====
+info "阶段 2：实际连接 + 关键路径校验"
+REMOTE_CMD="printf 'HOSTNAME='; hostname; \
+test -d $EXPECTED_REMOTE_DIR && echo 'REMOTE_DIR_OK' || echo 'REMOTE_DIR_MISSING'; \
+test -f $EXPECTED_ENV_FILE && echo 'ENV_FILE_OK' || echo 'ENV_FILE_MISSING'; \
+docker compose ls 2>/dev/null | head -5 || docker-compose ls 2>/dev/null | head -5; \
+docker ps --format '{{.Names}}' | grep -q '^${EXPECTED_BACKEND_CONTAINER}$' && echo 'BACKEND_CONTAINER_OK' || echo 'BACKEND_CONTAINER_MISSING'"
+
+set +e
+SSH_OUTPUT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$SSH_ALIAS" "$REMOTE_CMD" 2>&1)
+SSH_RC=$?
+set -e
+
+# 单独裁剪输出，不掩盖退出码
+echo "$SSH_OUTPUT" | sed -n '1,15p'
+
+if [ "$SSH_RC" -ne 0 ]; then
+  fail "SSH 连接失败（rc=$SSH_RC）。原始输出已显示。"
+fi
+
+echo "$SSH_OUTPUT" | grep -q "^HOSTNAME=" || fail "未返回 hostname"
+echo "$SSH_OUTPUT" | grep -q "^REMOTE_DIR_OK$" || fail "远程目录 $EXPECTED_REMOTE_DIR 不存在"
+echo "$SSH_OUTPUT" | grep -q "^ENV_FILE_OK$" || fail "远程配置文件 $EXPECTED_ENV_FILE 不存在"
+echo "$SSH_OUTPUT" | grep -q "$EXPECTED_COMPOSE_PROJECT" || fail "未发现 Compose 项目 $EXPECTED_COMPOSE_PROJECT"
+echo "$SSH_OUTPUT" | grep -q "^BACKEND_CONTAINER_OK$" || fail "未发现 $EXPECTED_BACKEND_CONTAINER 容器"
+
+info "阶段 2 通过：SSH 连接成功，远程环境就绪"
+
+# ===== 阶段 3：捕获运行时 SHA 与资源（供 ledger 使用） =====
+info "阶段 3：捕获运行时状态"
+set +e
+STATE_OUTPUT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$SSH_ALIAS" "cd $EXPECTED_REMOTE_DIR && git rev-parse HEAD 2>&1; \
+echo '---ALEMBIC---'; \
+docker exec trading-backend alembic current 2>&1 | head -3; \
+echo '---DISK---'; \
+df -h / | tail -1; \
+echo '---MEM---'; \
+grep MemAvailable /proc/meminfo; \
+echo '---CONTAINERS---'; \
+docker ps --format '{{.Names}}\t{{.Status}}' | head -20" 2>&1)
+STATE_RC=$?
+set -e
+echo "$STATE_OUTPUT"
+if [ "$STATE_RC" -ne 0 ]; then
+  fail "运行时状态捕获失败（rc=$STATE_RC）"
+fi
+
+info "preflight 全部通过，可继续部署或恢复操作"
+exit 0

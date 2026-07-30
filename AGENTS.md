@@ -193,6 +193,7 @@
 - 本地启动 Scheduler、正式 Worker、盘后编排或全市场任务；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
 - 在本地创建测试用户、测试邀请码、测试权限、测试快照或测试通知渠道；本地写入均为真实业务写入。
 - 在命令、日志、浏览器自动化或报告中写入 Owner 真实密码；TRAE 不得自动登录 Owner 账户。
+- 使用 `panji-server`/`55-server`/原始 IP 或任何非 `panji-prod` 别名访问盘迹生产服务器；生产 SSH 入口唯一为 `scripts/ops/panji-prod-ssh`，部署前必须运行 `scripts/ops/panji-prod-preflight`（详见 `rules/80-deployment-data-safety.md` "生产服务器 SSH SSOT"）。
 
 项目特定的高风险操作和环境约束，应记录在 `rules/` 或对应 Runbook 中。
 

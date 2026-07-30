@@ -100,6 +100,26 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 自动部署不读取数据库秘密；
 - 自动部署只部署 GitHub commit。
 
+## 生产服务器 SSH SSOT（CHANGE-20260730-015）
+
+> 来源：CHANGE-20260730-015（SSH 目标漂移防复发）
+> 状态：生效（2026-07-30）
+
+### 唯一允许的入口
+
+- 生产服务器只能通过仓库脚本 `scripts/ops/panji-prod-ssh` 访问，该脚本固定使用别名 `panji-prod`；
+- 权威参数定义在 `docs/maps/80-system-runtime.md` §2：HostName=`43.136.118.82`、User=`root`、Port=`22`、远程目录=`/root/web_dev`；
+- 部署/恢复/审计前必须先运行 `scripts/ops/panji-prod-preflight` 校验 ssh -G 解析值、远程目录、`/etc/market-dev/market.env`、Compose 项目和 `trading-backend` 容器；
+- preflight 通过后本轮不得重复检查 SSH，除非连接实际中断。
+
+### 禁止行为
+
+- 禁止使用 `root@panji-server`、`55-server`、原始 IP 或任何 `~/.ssh/config` 中其他 Host 作为盘迹生产入口；
+- 禁止 Compact/子代理恢复后重新发现服务器入口，必须读取 `/tmp/trae_review_*_ledger.md` 继续工作；
+- 禁止使用可能掩盖 SSH 退出码的管道（如 `ssh ... | head`、`| tail`、`| grep`），必须先 `SSH_OUTPUT=$(ssh ...); SSH_RC=$?` 再单独裁剪输出；
+- 禁止把私钥、密码或完整 IdentityFile 路径写入脚本/日志/CHANGE；
+- `~/.ssh/config` 中 `55-server` 已加 `DEPRECATED-PANJI-DO-NOT-USE` 注释，不得删除该别名（保留历史运维），但盘迹操作禁止使用。
+
 ## 分层发布与增量检查点纪律
 
 > 来源：CHANGE-20260729-006

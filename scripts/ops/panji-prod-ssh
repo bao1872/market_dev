@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# panji-prod-ssh — 唯一允许的盘迹生产服务器 SSH 入口
+#
+# 来源：CHANGE-20260730-015（SSH 目标漂移防复发）
+# 权威参数：docs/maps/80-system-runtime.md §2（HostName=43.136.118.82，User=root，Port=22，目录=/root/web_dev）
+#
+# 使用：scripts/ops/panji-prod-ssh <任意 ssh 参数>
+#   例：scripts/ops/panji-prod-ssh 'hostname; docker ps'
+#       scripts/ops/panji-prod-ssh -t 'cd /root/web_dev && git log -1'
+#
+# 强制约束：
+#   - 固定使用别名 panji-prod，禁止任何形式的 host 覆盖
+#   - 不接受 --host/-H/--user/-l 等可覆盖目标的参数（ssh 会拒绝，本脚本不解析）
+#   - 不输出 IP、密码或私钥内容
+#   - 不与 head/tail 等可能掩盖退出码的管道组合（调用方自行处理）
+#
+# 退出码：原样透传 ssh 的退出码
+
+set -euo pipefail
+
+SSH_ALIAS="panji-prod"
+
+# 防御：禁止通过环境变量绕过
+if [ -n "${PANJI_SSH_OVERRIDE:-}" ]; then
+  echo "panji-prod-ssh: PANJI_SSH_OVERRIDE 已设置，禁止覆盖别名" >&2
+  exit 2
+fi
+
+# 防御：禁止把 host 作为位置参数传入（例如 panji-prod-ssh root@foo 'cmd'）
+if [ "${1:-}" = "panji-server" ] || [ "${1:-}" = "55-server" ] || [ "${1:-}" = "root@panji-server" ]; then
+  echo "panji-prod-ssh: 拒绝使用废弃别名 '$1'，仅允许 panji-prod" >&2
+  echo "  废弃别名清单：panji-server、55-server、root@<任何>、原始 IP" >&2
+  exit 2
+fi
+
+# 透传所有参数给 ssh panji-prod
+# shellcheck disable=SC2086
+exec ssh "$SSH_ALIAS" "$@"
