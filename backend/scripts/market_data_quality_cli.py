@@ -101,7 +101,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-dry-run", dest="dry_run", action="store_false",
                    help="实际执行写入（默认禁用，需显式开启）")
     p.add_argument("--resume", action="store_true",
-                   help="继续已有 run（不存在则新建）")
+                   help="继续已有 run（必须显式提供 --run-id）")
+    p.add_argument("--run-id", type=str, default=None,
+                   help="指定 run_id（--resume 必填；--repair 单独使用时为 scan run_id）")
     p.add_argument("--limit", type=int, default=None,
                    help="最大标的数（canary 默认 5）")
 
@@ -210,14 +212,17 @@ async def _run(args: argparse.Namespace) -> int:
             # 扫描阶段（非 dry-run）
             if args.scan or args.scan_and_repair:
                 # 创建或解析 run
+                # [P0 2026-07-30] --resume 必须显式提供 run_id，禁止隐式匹配
                 if args.resume:
-                    run = await MarketDataQualityService.resolve_run(
-                        db,
-                        timeframe=args.timeframe,
-                        start_date=start_date,
-                        end_date=end_date,
-                        repair_mode=args.scan_and_repair,
+                    if not args.run_id:
+                        logger.error("--resume 必须显式提供 --run-id")
+                        return 2
+                    run = await MarketDataQualityService.get_run_by_id(
+                        db, run_id=args.run_id,
                     )
+                    if run is None:
+                        logger.error("run_id=%s 不存在", args.run_id)
+                        return 2
                     logger.info(
                         "[MDQ CLI] resume run_id=%s status=%s total=%d "
                         "succeeded=%d failed=%d",
@@ -225,12 +230,27 @@ async def _run(args: argparse.Namespace) -> int:
                         run.succeeded_count, run.failed_count,
                     )
                 else:
+                    # [P0 2026-07-30] 在 create_run 前应用 symbols/limit 条件
                     run = await MarketDataQualityService.create_run(
                         db,
                         timeframe=args.timeframe,
                         start_date=start_date,
                         end_date=end_date,
                         repair_mode=args.scan_and_repair,
+                        symbols=symbols,
+                        limit=limit,
+                    )
+                    # 断言 canary item 数 ≤ 配置值
+                    if symbols and limit and run.total_instruments > limit:
+                        logger.error(
+                            "[MDQ CLI] canary items %d > limit %d（条件未生效）",
+                            run.total_instruments, limit,
+                        )
+                        await db.rollback()
+                        return 2
+                    logger.info(
+                        "[MDQ CLI] created run_id=%s total=%d",
+                        run.id, run.total_instruments,
                     )
 
                 # 实际执行扫描（--scan 允许写审计 run/items，不改 bars）
@@ -242,6 +262,7 @@ async def _run(args: argparse.Namespace) -> int:
                 )
                 await db.commit()
                 results["scan"] = scan_summary
+                # run.id 在下方 repair 阶段作为 source_scan_run_id 使用
 
             # 修复阶段（非 dry-run；dry-run 已在前面统一返回）
             if args.repair or args.scan_and_repair:
@@ -249,17 +270,18 @@ async def _run(args: argparse.Namespace) -> int:
                 if args.scan_and_repair:
                     run_id = run.id
                 else:
-                    # --repair 单独使用，需要 resume 已有 run
-                    if not args.resume:
-                        logger.error("--repair 单独使用必须配合 --resume")
+                    # --repair 单独使用，必须配合 --resume <scan_run_id>
+                    if not args.resume or not args.run_id:
+                        logger.error(
+                            "--repair 单独使用必须配合 --resume <scan_run_id>",
+                        )
                         return 2
-                    run = await MarketDataQualityService.resolve_run(
-                        db,
-                        timeframe=args.timeframe,
-                        start_date=start_date,
-                        end_date=end_date,
-                        repair_mode=True,
+                    run = await MarketDataQualityService.get_run_by_id(
+                        db, run_id=args.run_id,
                     )
+                    if run is None:
+                        logger.error("run_id=%s 不存在", args.run_id)
+                        return 2
                     run_id = run.id
 
                 repair_summary = (
@@ -272,6 +294,34 @@ async def _run(args: argparse.Namespace) -> int:
                 )
                 await db.commit()
                 results["repair"] = repair_summary
+
+                # [P0 2026-07-30] repair 后必须创建新的 verification scan
+                # 禁止复用旧 run 得出结论
+                logger.info(
+                    "[MDQ CLI] repair 完成，启动 verification scan (source_scan_run_id=%s)",
+                    run_id,
+                )
+                verification_run = await MarketDataQualityService.create_run(
+                    db,
+                    timeframe=args.timeframe,
+                    start_date=start_date,
+                    end_date=end_date,
+                    repair_mode=False,
+                    symbols=symbols,
+                    limit=limit,
+                )
+                verification_summary = await MarketDataQualityService.execute_scan(
+                    db,
+                    run_id=verification_run.id,
+                    batch_size=scan_batch,
+                    dry_run=False,
+                )
+                await db.commit()
+                results["verification"] = {
+                    "verification_run_id": str(verification_run.id),
+                    "source_scan_run_id": str(run_id),
+                    "summary": verification_summary,
+                }
 
             # 输出结果
             print(json.dumps(results, ensure_ascii=False, indent=2, default=str))

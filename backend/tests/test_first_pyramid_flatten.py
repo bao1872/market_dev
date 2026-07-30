@@ -432,12 +432,21 @@ class TestFpQueryFieldSpecs:
         for key, spec in FP_QUERY_FIELD_SPECS.items():
             assert spec["fp_key"] == key
             assert spec["data_type"] in {
-                "text", "number", "percent", "datetime", "boolean", "enum",
+                "text", "number", "percent", "datetime", "boolean", "enum", "multi_enum",
             }
             # [P0 收口 2026-07-29] 新增 computed source 类型（is_stale/chip_available 动态计算）
             assert spec["source"] in {"flat", "chip", "column", "literal", "computed"}
             assert isinstance(spec["operators"], frozenset)
             assert len(spec["operators"]) > 0
+            # [CHANGE-20260730-013] 每个 spec 必须包含 input_control / value_normalizer
+            assert spec["input_control"] in {
+                "text_input", "single_select", "multi_select",
+                "number_input", "date_picker", "boolean_toggle",
+            }
+            assert spec["value_normalizer"] in {"trim", "upper", "lower", "none"}
+            # enum/multi_enum 必须有 enum_values（列表，可空表示待补）
+            if spec["data_type"] in ("enum", "multi_enum"):
+                assert isinstance(spec["enum_values"], list)
 
     def test_all_99_keys_are_filterable_and_sortable(self) -> None:
         """[二.2/二.3] 全部 99 字段均支持服务端 filter/sort（含计算字段和事件字段）。"""
@@ -483,22 +492,45 @@ class TestFpQueryFieldSpecs:
         assert FP_QUERY_FIELD_SPECS["fp_chip_available"]["computed_kind"] == "chip_available"
 
     def test_operator_mapping_by_data_type(self) -> None:
-        """按 data_type 抽样校验操作符映射。"""
+        """[CHANGE-20260730-013] 按 data_type 抽样校验操作符映射（新合同）。"""
         num_spec = FP_QUERY_FIELD_SPECS["fp_trend_bars"]
         assert num_spec["data_type"] == "number"
-        assert {"gt", "gte", "lt", "lte", "eq", "between", "empty", "not_empty"} <= num_spec["operators"]
+        assert {"eq", "neq", "gt", "gte", "lt", "lte", "between", "empty", "not_empty"} <= num_spec["operators"]
         text_spec = FP_QUERY_FIELD_SPECS["fp_summary"]
         assert text_spec["data_type"] == "text"
-        assert {"contains", "not_contains", "empty", "not_empty"} <= text_spec["operators"]
+        assert {"contains", "not_contains", "eq", "neq", "empty", "not_empty"} <= text_spec["operators"]
         dt_spec = FP_QUERY_FIELD_SPECS["fp_trade_date"]
         assert dt_spec["data_type"] == "datetime"
-        assert {"gte", "gt", "lt", "lte", "between", "empty", "not_empty"} <= dt_spec["operators"]
+        assert {"date_eq", "before", "after", "between", "empty", "not_empty"} <= dt_spec["operators"]
         bool_spec = FP_QUERY_FIELD_SPECS["fp_volume_ready"]
         assert bool_spec["data_type"] == "boolean"
         assert bool_spec["operators"] == frozenset({"eq", "empty", "not_empty"})
         enum_spec = FP_QUERY_FIELD_SPECS["fp_trend_direction"]
         assert enum_spec["data_type"] == "enum"
-        assert enum_spec["operators"] == frozenset({"eq", "empty", "not_empty"})
+        assert enum_spec["operators"] == frozenset({"eq", "neq", "in", "not_in", "empty", "not_empty"})
+
+    def test_enum_values_populated_for_event_fields(self) -> None:
+        """[CHANGE-20260730-013] 事件类型字段必须有 enum_values。"""
+        evt_spec = FP_QUERY_FIELD_SPECS["fp_structure_event_type"]
+        assert evt_spec["data_type"] == "enum"
+        assert "BOS" in evt_spec["enum_values"]
+        assert "CHoCH" in evt_spec["enum_values"]
+        assert "EQH" in evt_spec["enum_values"]
+        assert "EQL" in evt_spec["enum_values"]
+        # OB 生命周期事件
+        assert "OB_CREATED" in evt_spec["enum_values"]
+        assert "OB_ENTERED" in evt_spec["enum_values"]
+        assert "OB_MITIGATED" in evt_spec["enum_values"]
+
+    def test_input_control_mapping_by_data_type(self) -> None:
+        """[CHANGE-20260730-013] input_control 按 data_type 正确映射。"""
+        assert FP_QUERY_FIELD_SPECS["fp_summary"]["input_control"] == "text_input"
+        assert FP_QUERY_FIELD_SPECS["fp_trend_bars"]["input_control"] == "number_input"
+        assert FP_QUERY_FIELD_SPECS["fp_dsa_vwap_dev_pct"]["input_control"] == "number_input"
+        assert FP_QUERY_FIELD_SPECS["fp_trade_date"]["input_control"] == "date_picker"
+        assert FP_QUERY_FIELD_SPECS["fp_volume_ready"]["input_control"] == "boolean_toggle"
+        assert FP_QUERY_FIELD_SPECS["fp_trend_direction"]["input_control"] == "single_select"
+        assert FP_QUERY_FIELD_SPECS["fp_structure_event_type"]["input_control"] == "single_select"
 
 
 class TestParseFpFilter:
@@ -561,6 +593,110 @@ class TestParseFpFilter:
     def test_value_required_for_non_empty_op(self) -> None:
         with pytest.raises(ValueError, match="requires value"):
             _parse_fp_filter("fp_trend_bars:gt:")
+
+    # [CHANGE-20260730-013] 类型化筛选：enum 值校验 + 迁移 + 新操作符
+
+    def test_enum_eq_with_valid_value(self) -> None:
+        """enum:eq 配合合法枚举值。"""
+        specs = _parse_fp_filter("fp_structure_event_type:eq:BOS")
+        assert len(specs) == 1
+        assert specs[0].operator == "eq"
+        assert specs[0].value == "BOS"
+
+    def test_enum_eq_with_invalid_value_raises(self) -> None:
+        """enum:eq 配合非法枚举值 → ValueError。"""
+        with pytest.raises(ValueError, match="Invalid enum value"):
+            _parse_fp_filter("fp_structure_event_type:eq:NonExistent")
+
+    def test_enum_contains_migrates_to_eq_when_value_matches(self) -> None:
+        """旧 URL enum+contains 若值精确匹配枚举可迁移为 eq。"""
+        specs = _parse_fp_filter("fp_structure_event_type:contains:BOS")
+        assert len(specs) == 1
+        assert specs[0].operator == "eq"
+        assert specs[0].value == "BOS"
+
+    def test_enum_contains_with_non_matching_value_raises(self) -> None:
+        """旧 URL enum+contains 若值不匹配枚举 → 422（contains 不在 enum 允许操作符中）。"""
+        with pytest.raises(ValueError, match="Invalid operator"):
+            _parse_fp_filter("fp_structure_event_type:contains:NonExistent")
+
+    def test_enum_in_operator_with_valid_values(self) -> None:
+        """enum:in 配合逗号分隔的合法枚举值。"""
+        specs = _parse_fp_filter("fp_structure_event_type:in:BOS,CHoCH,EQH")
+        assert len(specs) == 1
+        assert specs[0].operator == "in"
+        assert specs[0].value == "BOS,CHoCH,EQH"
+
+    def test_enum_in_operator_with_invalid_value_raises(self) -> None:
+        """enum:in 配合非法枚举值 → ValueError。"""
+        with pytest.raises(ValueError, match="Invalid enum values"):
+            _parse_fp_filter("fp_structure_event_type:in:BOS,NonExistent")
+
+    def test_enum_neq_operator(self) -> None:
+        """enum:neq 配合合法枚举值。"""
+        specs = _parse_fp_filter("fp_structure_event_type:neq:BOS")
+        assert len(specs) == 1
+        assert specs[0].operator == "neq"
+        assert specs[0].value == "BOS"
+
+    def test_enum_not_in_operator(self) -> None:
+        """enum:not_in 配合逗号分隔的合法枚举值。"""
+        specs = _parse_fp_filter("fp_structure_event_type:not_in:BOS,CHoCH")
+        assert len(specs) == 1
+        assert specs[0].operator == "not_in"
+        assert specs[0].value == "BOS,CHoCH"
+
+    def test_datetime_date_eq_operator(self) -> None:
+        """datetime:date_eq 操作符合法。"""
+        specs = _parse_fp_filter("fp_trade_date:date_eq:2026-07-29")
+        assert len(specs) == 1
+        assert specs[0].operator == "date_eq"
+        assert specs[0].value == "2026-07-29"
+
+    def test_datetime_before_operator(self) -> None:
+        """datetime:before 操作符合法。"""
+        specs = _parse_fp_filter("fp_trade_date:before:2026-07-29")
+        assert len(specs) == 1
+        assert specs[0].operator == "before"
+
+    def test_datetime_after_operator(self) -> None:
+        """datetime:after 操作符合法。"""
+        specs = _parse_fp_filter("fp_trade_date:after:2026-07-29")
+        assert len(specs) == 1
+        assert specs[0].operator == "after"
+
+    def test_datetime_old_gte_operator_now_rejected(self) -> None:
+        """[CHANGE-20260730-013] datetime 不再支持 gte（旧合同），返回 422。"""
+        with pytest.raises(ValueError, match="Invalid operator"):
+            _parse_fp_filter("fp_trade_date:gte:2026-07-29")
+
+    def test_text_neq_operator(self) -> None:
+        """text:neq 操作符合法。"""
+        specs = _parse_fp_filter("fp_summary:neq:上行")
+        assert len(specs) == 1
+        assert specs[0].operator == "neq"
+
+    def test_number_neq_operator(self) -> None:
+        """number:neq 操作符合法。"""
+        specs = _parse_fp_filter("fp_trend_bars:neq:5")
+        assert len(specs) == 1
+        assert specs[0].operator == "neq"
+
+    def test_filter_validation_error_carries_structured_fields(self) -> None:
+        """FpFilterValidationError 携带 field/dataType/operator/allowed 字段。"""
+        from app.services.first_pyramid_flatten import FpFilterValidationError
+
+        with pytest.raises(FpFilterValidationError) as exc_info:
+            _parse_fp_filter("fp_structure_event_type:gt:5")
+        err = exc_info.value
+        assert err.field == "fp_structure_event_type"
+        assert err.data_type == "enum"
+        assert err.operator == "gt"
+        assert "eq" in err.allowed
+        assert "in" in err.allowed
+        detail = err.to_detail()
+        assert detail["field"] == "fp_structure_event_type"
+        assert detail["dataType"] == "enum"
 
 
 class TestParseFpSort:

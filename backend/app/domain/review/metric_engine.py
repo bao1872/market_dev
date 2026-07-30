@@ -707,9 +707,12 @@ def _build_component_payload(
     normalized = _normalize_component(raw_value, spec.direction, history or [])
 
     # status 判定
+    # [P0 2026-07-30] history is None（未传）也判为 insufficient_history，
+    # 否则 orchestrator 不传 history 时 component 错误标为 ready，
+    # 掩盖 P/Q/U/C/V normalizedValue=None 的真实根因
     if raw_value is None:
         status = STATUS_UNAVAILABLE
-    elif history is not None and len(history) < MIN_BASELINE_WINDOW:
+    elif history is None or len(history) < MIN_BASELINE_WINDOW:
         status = STATUS_INSUFFICIENT_HISTORY
     else:
         status = STATUS_READY

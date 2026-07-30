@@ -394,13 +394,21 @@ async def resolve_scope_members(
         return [inst_id], scope_key
 
     if scope_type in ("industry_l1", "industry_l2", "industry_l3", "concept", "major_index", "style"):
-        # 通过 market_boards 查询（industry_l1/l2/l3/concept）
+        # 通过 market_boards 查询
+        # [P0 2026-07-30] 统一使用 MarketBoard.id 作为内部范围主键（不再用 externalCode）
+        # orchestrator 写入 scope_key = str(board_id)，resolve 按 id 查询；API 另返回 externalCode
         from app.models.market_board import MarketBoard, MarketBoardMembership
+        try:
+            board_uuid = uuid.UUID(scope_key)
+        except ValueError as exc:
+            raise ScopeSnapshotError(
+                f"{scope_type} scope_key 非合法 UUID: {scope_key}",
+            ) from exc
         board_stmt = (
             select(MarketBoard)
             .where(
                 MarketBoard.type == _board_type_from_scope(scope_type),
-                MarketBoard.externalCode == scope_key,
+                MarketBoard.id == board_uuid,
             )
             .limit(1)
         )

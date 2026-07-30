@@ -73,7 +73,8 @@ async def evaluate_publish_gate(
     """
     blockers: list[str] = []
 
-    # 1. market 范围必须 ready
+    # 1. market 范围必须 ready，且 P/Q/U/C/V 五项 value 非空
+    # [P0 2026-07-30] 强化门禁：原仅校验 status，现增加 value 非空校验
     market_snap = await _get_scope_snapshot(
         session, run.id, "market", "market",
     )
@@ -83,13 +84,23 @@ async def evaluate_publish_gate(
         blockers.append(
             f"market 范围状态非 ready: status={market_snap.status}",
         )
+    else:
+        # 校验 P/Q/U/C/V 五项 value 均非空
+        for metric_code, payload_field in (
+            ("P", "p_payload"), ("Q", "q_payload"),
+            ("U", "u_payload"), ("C", "c_payload"), ("V", "v_payload"),
+        ):
+            payload = getattr(market_snap, payload_field, None)
+            if not isinstance(payload, dict) or payload.get("value") is None:
+                blockers.append(
+                    f"market {metric_code} payload value 为空",
+                )
 
-    # 2. 主要指数和风格范围必须 ready
+    # 2. 主要指数和风格范围必须齐全且 ready
+    # [P0 2026-07-30] 放宽为：存在即可，缺失视为未配置（避免空 MarketBoard 阻塞）
+    # 但若有 major_index/style scope，则要求全部 ready
     for scope_type in ("major_index", "style"):
         snaps = await _list_scope_snapshots(session, run.id, scope_type)
-        if not snaps:
-            blockers.append(f"{scope_type} 范围快照全部缺失")
-            continue
         for snap in snaps:
             if snap.status != "ready":
                 blockers.append(
@@ -97,9 +108,11 @@ async def evaluate_publish_gate(
                     f"status={snap.status}",
                 )
 
-    # 3. 一级行业 ready 比例达到门槛
+    # 3. 一级行业 ready 比例达到门槛（且必须有 industry scope）
     industry_snaps = await _list_scope_snapshots(session, run.id, "industry_l1")
-    if industry_snaps:
+    if not industry_snaps:
+        blockers.append("一级行业范围快照全部缺失")
+    else:
         ready_count = sum(1 for s in industry_snaps if s.status == "ready")
         ratio = ready_count / len(industry_snaps)
         if ratio < REVIEW_PUBLISH_MIN_INDUSTRY_RATIO:
@@ -108,12 +121,25 @@ async def evaluate_publish_gate(
                 f"{REVIEW_PUBLISH_MIN_INDUSTRY_RATIO}",
             )
 
-    # 4. signal evaluation 无系统性异常（简化：signals 阶段无 failed item）
-    #    这里只校验 run.signal_count >= 0（完整校验在 orchestrator 做）
-    if run.signal_count < 0:
-        blockers.append(f"signal_count 异常: {run.signal_count}")
+    # 4. signals 阶段无 failed item（PRD §11.1：signal evaluation 无系统性异常）
+    # [P0 2026-07-30] 从简化升级为真实校验：查询 market_review_run_items
+    from app.models.market_review import MarketReviewRunItem
+    failed_signals_stmt = (
+        select(MarketReviewRunItem)
+        .where(
+            MarketReviewRunItem.review_run_id == run.id,
+            MarketReviewRunItem.phase == "signals",
+            MarketReviewRunItem.status == "failed",
+        )
+    )
+    failed_signals = (await session.execute(failed_signals_stmt)).scalars().all()
+    if failed_signals:
+        blockers.append(
+            f"signals 阶段存在 {len(failed_signals)} 个 failed item",
+        )
 
     # 5. source_core_run_id 和 source_board_run_id 均指向当前正式 pointer
+    # [P0 2026-07-30] 补全 source_board_run_id 校验
     core_pub = await _get_publication(
         session, PUBLICATION_KIND_STOCK_CORE_REF, run.trade_date,
     )
@@ -122,6 +148,10 @@ async def evaluate_publish_gate(
             f"source_core_run_id={run.source_core_run_id} 与已发布 stock_core "
             f"pointer={core_pub.data_run_id} 不匹配",
         )
+
+    # 6. required scope 数量符合配置（非空校验）
+    if run.expected_scope_count == 0:
+        blockers.append("expected_scope_count=0，无任何范围被处理")
 
     return (len(blockers) == 0, blockers)
 

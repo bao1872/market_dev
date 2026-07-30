@@ -79,7 +79,10 @@ from app.services.review_tracking_service import evaluate_all_active_trackings
 logger = logging.getLogger("review_orchestrator_service")
 
 # 复盘算法版本（每次指标/契约变更时递增）
-REVIEW_ALGORITHM_VERSION = "review-1.0.0"
+# [P0 2026-07-30] 升级到 review-1.1.0：修复 scope_key/resolve_scope_members 不一致、
+# orchestrator 传递 history_maps/prev_values、metric_engine history is None 误判 ready、
+# major_index/style 范围补全、publication 门禁强化
+REVIEW_ALGORITHM_VERSION = "review-1.1.0"
 
 # 历史基线窗口（PRD §0、§7.1：默认 120，最低 60）
 DEFAULT_BASELINE_WINDOW = 120
@@ -528,6 +531,21 @@ async def _resolve_level1_scopes(
         ),
     )
 
+    # major_index 范围（PRD §6.1：配置中的主要指数，从 market_boards 读取）
+    # [P0 2026-07-30] 补全 major_index/style 范围，否则发布门禁永远 block
+    major_index_scopes = await _list_major_index_scopes(session)
+    if canary:
+        # canary 模式：限定 3 个指数
+        major_index_scopes = major_index_scopes[:3]
+    scopes.extend(major_index_scopes)
+
+    # style 范围（PRD §6.1：风格股票池）
+    style_scopes = await _list_style_scopes(session)
+    if canary:
+        # canary 模式：限定 2 个风格
+        style_scopes = style_scopes[:2]
+    scopes.extend(style_scopes)
+
     # industry_l1 范围（从 board_analysis_snapshot 读取当日已计算的板块）
     industry_scopes = await _list_industry_l1_scopes(
         session, run.trade_date, run.source_board_run_id,
@@ -582,12 +600,199 @@ async def _list_industry_l1_scopes(
         out.append(
             ScopeDefinition(
                 scope_type="industry_l1",
-                scope_key=snap.board_id.hex,  # 使用 board_id 作为 scope_key
+                # [P0 2026-07-30] scope_key 使用 str(board_id)，resolve_scope_members
+                # 按 MarketBoard.id 查询（与 _list_major_index_scopes 一致）
+                scope_key=str(snap.board_id),
                 scope_name=snap.board_name,
                 source_board_snapshot_id=snap.id,
             ),
         )
     return out
+
+
+async def _list_major_index_scopes(
+    session: AsyncSession,
+) -> list[ScopeDefinition]:
+    """从 market_boards 读取主要指数范围（PRD §6.1）。
+
+    使用 MarketBoard.id 作为 scope_key（与 industry_l1 一致）。
+    主要指数通过 type='major_index' 过滤；若不存在则返回空。
+    """
+    from app.models.market_board import MarketBoard
+    stmt = (
+        select(MarketBoard)
+        .where(MarketBoard.type == "major_index")
+        .order_by(MarketBoard.name.asc())
+    )
+    result = await session.execute(stmt)
+    out: list[ScopeDefinition] = []
+    for board in result.scalars():
+        out.append(
+            ScopeDefinition(
+                scope_type="major_index",
+                scope_key=str(board.id),
+                scope_name=board.name,
+            ),
+        )
+    return out
+
+
+async def _list_style_scopes(
+    session: AsyncSession,
+) -> list[ScopeDefinition]:
+    """从 market_boards 读取风格股票池范围（PRD §6.1）。
+
+    使用 MarketBoard.id 作为 scope_key。
+    风格通过 type='style' 过滤；若不存在则返回空。
+    """
+    from app.models.market_board import MarketBoard
+    stmt = (
+        select(MarketBoard)
+        .where(MarketBoard.type == "style")
+        .order_by(MarketBoard.name.asc())
+    )
+    result = await session.execute(stmt)
+    out: list[ScopeDefinition] = []
+    for board in result.scalars():
+        out.append(
+            ScopeDefinition(
+                scope_type="style",
+                scope_key=str(board.id),
+                scope_name=board.name,
+            ),
+        )
+    return out
+
+
+async def _build_scope_history(
+    session: AsyncSession,
+    *,
+    scope: ScopeDefinition,
+    trade_date: date,
+    source_core_run_id: uuid.UUID,
+    baseline_window: int,
+) -> tuple[
+    dict[str, dict[str, list[float]]] | None,
+    dict[str, float] | None,
+    dict[str, float] | None,
+]:
+    """从历史 market_review_scope_snapshots 构建历史序列（PRD §7.1）。
+
+    Args:
+        session: 异步 DB 会话
+        scope: 当前 scope 定义
+        trade_date: 当前交易日（排除当日，只用历史）
+        source_core_run_id: 当前 stock_core run_id（用于过滤同源）
+        baseline_window: 历史窗口长度（默认 120）
+
+    Returns:
+        (history_maps, prev_values, prev5d_values)
+        - history_maps: {metric_code: {component_name: [raw_value 序列]}}
+        - prev_values: {metric_code: value}（最近一交易日）
+        - prev5d_values: {metric_code: value}（最近第5交易日）
+
+    说明：
+    - 只读取已存在的历史 market_review_scope_snapshots，禁止用当前成员回填
+    - 无历史数据时返回 (None, None, None)，component status 将标为 insufficient_history
+    - 历史可能跨多个 algorithm_version，按 trade_date desc 取最近 baseline_window 个
+    """
+    from app.models.market_review import MarketReviewScopeSnapshot
+
+    stmt = (
+        select(
+            MarketReviewScopeSnapshot.trade_date,
+            MarketReviewScopeSnapshot.p_payload,
+            MarketReviewScopeSnapshot.q_payload,
+            MarketReviewScopeSnapshot.u_payload,
+            MarketReviewScopeSnapshot.c_payload,
+            MarketReviewScopeSnapshot.v_payload,
+        )
+        .where(
+            MarketReviewScopeSnapshot.scope_type == scope.scope_type,
+            MarketReviewScopeSnapshot.scope_key == scope.scope_key,
+            MarketReviewScopeSnapshot.trade_date < trade_date,
+        )
+        .order_by(MarketReviewScopeSnapshot.trade_date.desc())
+        .limit(baseline_window)
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return None, None, None
+
+    # 反向（旧到新）构建历史序列
+    rows_asc = list(reversed(rows))
+
+    metric_payloads = {
+        "P": "p_payload",
+        "Q": "q_payload",
+        "U": "u_payload",
+        "C": "c_payload",
+        "V": "v_payload",
+    }
+
+    history_maps: dict[str, dict[str, list[float]]] = {}
+    for metric_code, payload_field in metric_payloads.items():
+        comp_history: dict[str, list[float]] = {}
+        for row in rows_asc:
+            payload = row[1] if payload_field == "p_payload" else (
+                row[2] if payload_field == "q_payload" else (
+                    row[3] if payload_field == "u_payload" else (
+                        row[4] if payload_field == "c_payload" else row[5]
+                    )
+                )
+            )
+            if not isinstance(payload, dict):
+                continue
+            components = payload.get("components") or []
+            for comp in components:
+                if not isinstance(comp, dict):
+                    continue
+                name = comp.get("name")
+                raw_value = comp.get("rawValue")
+                if name is None or raw_value is None:
+                    continue
+                try:
+                    rv = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                comp_history.setdefault(name, []).append(rv)
+        if comp_history:
+            history_maps[metric_code] = comp_history
+
+    # prev_values：最近一个交易日的 value
+    prev_values: dict[str, float] = {}
+    prev5d_values: dict[str, float] = {}
+
+    for idx, row in enumerate(rows_asc):
+        # idx=0 是最旧，idx=-1 是最近
+        # prev_values 用最近一行；prev5d_values 用倒数第5行
+        if idx != len(rows_asc) - 1 and idx != len(rows_asc) - 5:
+            continue
+        target = prev_values if idx == len(rows_asc) - 1 else prev5d_values
+        for metric_code, payload_field in metric_payloads.items():
+            payload = row[1] if payload_field == "p_payload" else (
+                row[2] if payload_field == "q_payload" else (
+                    row[3] if payload_field == "u_payload" else (
+                        row[4] if payload_field == "c_payload" else row[5]
+                    )
+                )
+            )
+            if not isinstance(payload, dict):
+                continue
+            value = payload.get("value")
+            if value is None:
+                continue
+            try:
+                target[metric_code] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+    if not history_maps:
+        return None, None, None
+
+    return history_maps, (prev_values or None), (prev5d_values or None)
 
 
 async def _compute_scope_pipeline(
@@ -637,6 +842,22 @@ async def _compute_scope_pipeline(
         session, instrument_ids, run.source_core_run_id,
     )
 
+    # [P0 2026-07-30] 构建 history_maps/prev_values/prev5d_values
+    # PRD §7.1：历史基线默认 120 日、最低 60 日；先保存 rawValue，
+    # 达到 60 个观测后再计算 normalizedValue、P/Q/U/C/V、1d/5d 和分位。
+    # 禁止用当前成员回填全部历史或使用未来数据。
+    # 实现说明：
+    # - 从 market_review_scope_snapshots 读取历史已发布同 scope 的 raw_value 序列
+    # - 若无历史 review 数据（首次运行），history_maps=None，component status=insufficient_history
+    # - prev_values/prev5d_values 从最近 1/5 个交易日的 scope_snapshot 读取
+    history_maps, prev_values, prev5d_values = await _build_scope_history(
+        session,
+        scope=scope,
+        trade_date=run.trade_date,
+        source_core_run_id=run.source_core_run_id,
+        baseline_window=run.baseline_window,
+    )
+
     try:
         snapshot = await compute_scope_metrics(
             session,
@@ -645,6 +866,9 @@ async def _compute_scope_pipeline(
             scope=scope,
             flat_list=flat_list,
             eligible_count=len(instrument_ids),
+            history_maps=history_maps,
+            prev_values=prev_values,
+            prev5d_values=prev5d_values,
         )
     except ScopeSnapshotError as exc:
         await _upsert_run_item(

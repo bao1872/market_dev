@@ -22,9 +22,12 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.models.market_review import MarketReviewRun, MarketReviewRunItem
 from app.schemas.review import (
     ReviewRunCreateRequest,
     ReviewRunPublishRequest,
@@ -288,6 +291,121 @@ async def get_review_run_status(
         ],
         publishable=status_data["publishable"],
         publish_blockers=status_data["publish_blockers"],
+    )
+
+
+class ReviewRunTimelineResponse(BaseModel):
+    """review run 执行时间线摘要响应。
+
+    用于中断恢复诊断：聚合 market_review_runs + market_review_run_items，
+    返回最后心跳、当前 phase、item 计数、恢复次数、中断原因码。
+    """
+
+    run_id: str
+    trade_date: str
+    status: str
+    last_heartbeat: str | None
+    current_phase: str | None
+    counts: dict[str, int]
+    recovery_count: int
+    interruption_reason_code: str | None
+
+
+@router.get(
+    "/runs/{run_id}/timeline",
+    response_model=ReviewRunTimelineResponse,
+)
+async def get_review_run_timeline(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_admin),
+) -> ReviewRunTimelineResponse:
+    """[Admin] 查询 review run 执行时间线摘要（用于中断恢复诊断）。
+
+    从 market_review_runs + market_review_run_items 聚合：
+    - last_heartbeat: run 最后更新时间（market_review_runs.updated_at）
+    - current_phase: 当前活跃 phase（优先取 status=running 的 phase，
+      否则取最近 updated_at 的 phase）
+    - counts: {completed, failed, pending} item 状态计数
+      （completed=succeeded, pending=pending+running）
+    - recovery_count: max(attempt_count) 聚合
+    - interruption_reason_code: 从 run.metadata_json 中读取（如有）
+
+    Raises:
+        HTTPException 404: run 不存在
+    """
+    _ = ctx
+
+    # 查询 run（不存在返回 404）
+    run = await db.get(MarketReviewRun, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"run 不存在: run_id={run_id}",
+        )
+
+    # 聚合 run_items: status 计数 + max(attempt_count)
+    agg_stmt = (
+        select(
+            func.count()
+                .filter(MarketReviewRunItem.status == "succeeded")
+                .label("completed"),
+            func.count()
+                .filter(MarketReviewRunItem.status == "failed")
+                .label("failed"),
+            func.count()
+                .filter(MarketReviewRunItem.status.in_(("pending", "running")))
+                .label("pending"),
+            func.max(MarketReviewRunItem.attempt_count).label("max_attempt"),
+        )
+        .where(MarketReviewRunItem.review_run_id == run_id)
+    )
+    agg_result = await db.execute(agg_stmt)
+    agg_row = agg_result.one()
+
+    # current_phase: 优先取 running 状态的 phase（按 updated_at 倒序）
+    phase_stmt = (
+        select(MarketReviewRunItem.phase)
+        .where(
+            MarketReviewRunItem.review_run_id == run_id,
+            MarketReviewRunItem.status == "running",
+        )
+        .order_by(MarketReviewRunItem.updated_at.desc())
+        .limit(1)
+    )
+    phase_result = await db.execute(phase_stmt)
+    current_phase = phase_result.scalar_one_or_none()
+
+    if current_phase is None:
+        # 无 running item，取最近 updated_at 的 phase（任何状态）
+        recent_phase_stmt = (
+            select(MarketReviewRunItem.phase)
+            .where(MarketReviewRunItem.review_run_id == run_id)
+            .order_by(MarketReviewRunItem.updated_at.desc())
+            .limit(1)
+        )
+        recent_phase_result = await db.execute(recent_phase_stmt)
+        current_phase = recent_phase_result.scalar_one_or_none()
+
+    # interruption_reason_code: 从 metadata_json 中读取
+    meta = run.metadata_json or {}
+    interruption_reason_code = meta.get("interruption_reason_code")
+
+    return ReviewRunTimelineResponse(
+        run_id=str(run.id),
+        trade_date=run.trade_date.isoformat(),
+        status=run.status,
+        last_heartbeat=(
+            run.updated_at.isoformat() if run.updated_at else None
+        ),
+        current_phase=current_phase,
+        counts={
+            "completed": agg_row.completed or 0,
+            "failed": agg_row.failed or 0,
+            "pending": agg_row.pending or 0,
+        },
+        recovery_count=agg_row.max_attempt or 0,
+        interruption_reason_code=interruption_reason_code,
     )
 
 

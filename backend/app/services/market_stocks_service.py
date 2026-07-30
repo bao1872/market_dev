@@ -94,9 +94,13 @@ _SORTABLE_FIELDS = {"name", "symbol", "change_pct", "dsa_state", "latest_event_t
 _SORT_DIRECTIONS = {"asc", "desc"}
 
 # [CHANGE-20260729-004 P0-1] fp_filter/fp_sort 操作符合法值（保留供校验引用）
+# [CHANGE-20260730-013] 扩展操作符合同：neq/in/not_in/date_eq/before/after/has_any/has_all/not_has_any
 _FP_FILTER_OPERATORS = {
-    "contains", "not_contains", "eq", "gt", "gte", "lt", "lte",
+    "contains", "not_contains", "eq", "neq", "gt", "gte", "lt", "lte",
     "between", "empty", "not_empty",
+    "in", "not_in",
+    "date_eq", "before", "after",
+    "has_any", "has_all", "not_has_any",
 }
 
 # [CHANGE-20260729-009] DSA 策略 key（用于查询已发布 dsa_selector run 的 payload）
@@ -642,7 +646,16 @@ def _build_fp_filter_conditions(
     chip_subq: Any | None = None,
     max_trade_date_subq: Any | None = None,
 ) -> list[ColumnElement[bool]]:
-    """构建 fp 筛选 WHERE 条件列表（基于 LATERAL JOIN 列引用）。"""
+    """构建 fp 筛选 WHERE 条件列表（基于 LATERAL JOIN 列引用）。
+
+    [CHANGE-20260730-013] 支持新操作符合同：
+    - text: contains/not_contains/eq/neq/empty/not_empty
+    - enum: eq/neq/in/not_in/empty/not_empty
+    - boolean: eq/empty/not_empty
+    - number/percent: eq/neq/gt/gte/lt/lte/between/empty/not_empty
+    - datetime: date_eq/before/after/between/empty/not_empty
+    - multi_enum: has_any/has_all/not_has_any/empty/not_empty（未实现 SQL，无字段使用）
+    """
     conditions: list[ColumnElement[bool]] = []
     for f in fp_filters:
         spec = FP_QUERY_FIELD_SPECS[f.fp_key]
@@ -662,6 +675,14 @@ def _build_fp_filter_conditions(
                 conditions.append(typed_expr == (str(f.value).lower() in ("true", "1", "yes")))  # type: ignore[arg-type]
             else:
                 conditions.append(typed_expr == f.value)  # type: ignore[arg-type]
+        elif f.operator == "neq":
+            # neq: 不等于值 OR 为空（语义：显示所有不匹配的，包括 NULL）
+            if data_type in ("number", "percent"):
+                conditions.append(or_(typed_expr != float(f.value), typed_expr.is_(None)))  # type: ignore[arg-type]
+            elif data_type == "boolean":
+                conditions.append(or_(typed_expr != (str(f.value).lower() in ("true", "1", "yes")), typed_expr.is_(None)))  # type: ignore[arg-type]
+            else:
+                conditions.append(or_(typed_expr != f.value, typed_expr.is_(None)))  # type: ignore[arg-type]
         elif f.operator in ("gt", "gte", "lt", "lte"):
             op_func = {
                 "gt": lambda a, b: a > b,
@@ -678,6 +699,20 @@ def _build_fp_filter_conditions(
                 conditions.append(typed_expr.between(float(f.value), float(f.value2)))  # type: ignore[arg-type]
             else:
                 conditions.append(typed_expr.between(f.value, f.value2))  # type: ignore[arg-type]
+        elif f.operator == "date_eq":
+            # datetime 日期相等（字符串前 10 位匹配 YYYY-MM-DD）
+            conditions.append(func.substr(typed_expr, 1, 10) == f.value)  # type: ignore[arg-type]
+        elif f.operator == "before":
+            conditions.append(typed_expr < f.value)  # type: ignore[arg-type]
+        elif f.operator == "after":
+            conditions.append(typed_expr > f.value)  # type: ignore[arg-type]
+        elif f.operator == "in":
+            values = [v.strip() for v in str(f.value).split(",") if v.strip()]
+            conditions.append(typed_expr.in_(values))  # type: ignore[arg-type]
+        elif f.operator == "not_in":
+            # not_in: 不在列表中 OR 为空（语义：显示所有不匹配的，包括 NULL）
+            values = [v.strip() for v in str(f.value).split(",") if v.strip()]
+            conditions.append(or_(typed_expr.notin_(values), typed_expr.is_(None)))  # type: ignore[arg-type]
         elif f.operator == "contains":
             conditions.append(typed_expr.ilike(f"%{f.value}%"))  # type: ignore[arg-type]
         elif f.operator == "not_contains":

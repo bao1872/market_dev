@@ -119,12 +119,19 @@ assert len(FP_ALL_KEYS) == 99, f"FP_ALL_KEYS 应为 99 键，实际 {len(FP_ALL_
 # 所有 99 字段均有 queryable source，禁止因 json_path 为空返回 422。
 # =============================================================================
 
-# 操作符集合
-_OP_TEXT = {"contains", "not_contains", "eq", "empty", "not_empty"}
-_OP_NUMBER = {"gt", "gte", "lt", "lte", "eq", "between", "empty", "not_empty"}
-_OP_DATETIME = {"gte", "gt", "lt", "lte", "between", "empty", "not_empty"}
+# [CHANGE-20260730-013] 操作符合同（严格按 data_type）
+# text: contains, not_contains, eq, neq, empty, not_empty
+# enum: eq, neq, in, not_in, empty, not_empty
+# boolean: eq, empty, not_empty
+# number/percent: eq, neq, gt, gte, lt, lte, between, empty, not_empty
+# datetime: date_eq, before, after, between, empty, not_empty
+# multi_enum: has_any, has_all, not_has_any, empty, not_empty
+_OP_TEXT = {"contains", "not_contains", "eq", "neq", "empty", "not_empty"}
+_OP_NUMBER = {"eq", "neq", "gt", "gte", "lt", "lte", "between", "empty", "not_empty"}
+_OP_DATETIME = {"date_eq", "before", "after", "between", "empty", "not_empty"}
 _OP_BOOLEAN = {"eq", "empty", "not_empty"}
-_OP_ENUM = {"eq", "empty", "not_empty"}
+_OP_ENUM = {"eq", "neq", "in", "not_in", "empty", "not_empty"}
+_OP_MULTI_ENUM = {"has_any", "has_all", "not_has_any", "empty", "not_empty"}
 
 # 数据源类型
 _SOURCE_FLAT = "flat"
@@ -145,7 +152,46 @@ _DEFAULT_OPS: dict[str, frozenset[str]] = {
     "datetime": frozenset(_OP_DATETIME),
     "boolean": frozenset(_OP_BOOLEAN),
     "enum": frozenset(_OP_ENUM),
+    "multi_enum": frozenset(_OP_MULTI_ENUM),
 }
+
+# [CHANGE-20260730-013] input_control 按 data_type 推导
+_DEFAULT_INPUT_CONTROL: dict[str, str] = {
+    "text": "text_input",
+    "number": "number_input",
+    "percent": "number_input",
+    "datetime": "date_picker",
+    "boolean": "boolean_toggle",
+    "enum": "single_select",
+    "multi_enum": "multi_select",
+}
+
+# [CHANGE-20260730-013] value_normalizer 按 data_type 推导
+_DEFAULT_VALUE_NORMALIZER: dict[str, str] = {
+    "text": "trim",
+    "number": "none",
+    "percent": "none",
+    "datetime": "trim",
+    "boolean": "lower",
+    "enum": "none",
+    "multi_enum": "none",
+}
+
+# [CHANGE-20260730-013] 枚举值定义（从 first_pyramid_service.py / volume_context.py
+# / flatten_first_pyramid 实际产出代码中提取）
+_ENUM_VALUES_DIRECTION_LABEL = ["上行", "下行", "震荡"]
+_ENUM_VALUES_ALIGNMENT = ["共振", "背离"]
+_ENUM_VALUES_SQUEEZE_STATE = ["挤压中", "已释放", "无挤压"]
+_ENUM_VALUES_MOMENTUM_DIRECTION = ["扩张", "收缩"]
+_ENUM_VALUES_STRUCTURE_EVENT_TYPE = [
+    "BOS", "CHoCH", "OB_CREATED", "OB_ENTERED", "OB_MITIGATED", "EQH", "EQL",
+]
+_ENUM_VALUES_MOMENTUM_EVENT_TYPE = ["SQZ_OFF", "MOMENTUM_DIFFUSION"]
+_ENUM_VALUES_NODE_EVENT_TYPE = ["node_cluster_touch"]
+_ENUM_VALUES_EVENT_DIRECTION = ["up", "down"]
+_ENUM_VALUES_STRUCTURE_LEVEL = ["swing", "internal"]
+_ENUM_VALUES_VOLUME_BADGE = ["放量", "缩量", "正常", "未知"]
+_ENUM_VALUES_MOMENTUM_VOLUME_RELATION = ["共振", "背离"]
 
 
 def _spec_flat(
@@ -153,6 +199,7 @@ def _spec_flat(
     data_type: str,
     *,
     operators: set[str] | None = None,
+    enum_values: list[str] | None = None,
 ) -> dict[str, Any]:
     """flat 源：从 summary_payload.first_pyramid_flat.<fp_key> 读取。"""
     return {
@@ -161,6 +208,9 @@ def _spec_flat(
         "source": _SOURCE_FLAT,
         "json_path": ("first_pyramid_flat", fp_key),
         "operators": frozenset(operators) if operators else _DEFAULT_OPS[data_type],
+        "enum_values": list(enum_values) if enum_values else [],
+        "input_control": _DEFAULT_INPUT_CONTROL[data_type],
+        "value_normalizer": _DEFAULT_VALUE_NORMALIZER[data_type],
     }
 
 
@@ -169,6 +219,7 @@ def _spec_chip(
     data_type: str,
     *,
     operators: set[str] | None = None,
+    enum_values: list[str] | None = None,
 ) -> dict[str, Any]:
     """chip 源：从 stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key> 读取。"""
     return {
@@ -177,6 +228,9 @@ def _spec_chip(
         "source": _SOURCE_CHIP,
         "json_path": ("chip_flat", fp_key),  # 相对 chip_payload
         "operators": frozenset(operators) if operators else _DEFAULT_OPS[data_type],
+        "enum_values": list(enum_values) if enum_values else [],
+        "input_control": _DEFAULT_INPUT_CONTROL[data_type],
+        "value_normalizer": _DEFAULT_VALUE_NORMALIZER[data_type],
     }
 
 
@@ -186,6 +240,7 @@ def _spec_column(
     column: str,
     *,
     operators: set[str] | None = None,
+    enum_values: list[str] | None = None,
 ) -> dict[str, Any]:
     """column 源：从 StockFeatureSnapshot 真实列读取。"""
     return {
@@ -194,6 +249,9 @@ def _spec_column(
         "source": _SOURCE_COLUMN,
         "column": column,
         "operators": frozenset(operators) if operators else _DEFAULT_OPS[data_type],
+        "enum_values": list(enum_values) if enum_values else [],
+        "input_control": _DEFAULT_INPUT_CONTROL[data_type],
+        "value_normalizer": _DEFAULT_VALUE_NORMALIZER[data_type],
     }
 
 
@@ -203,6 +261,7 @@ def _spec_literal(
     value: Any,
     *,
     operators: set[str] | None = None,
+    enum_values: list[str] | None = None,
 ) -> dict[str, Any]:
     """literal 源：常量值。"""
     return {
@@ -211,6 +270,9 @@ def _spec_literal(
         "source": _SOURCE_LITERAL,
         "literal_value": value,
         "operators": frozenset(operators) if operators else _DEFAULT_OPS[data_type],
+        "enum_values": list(enum_values) if enum_values else [],
+        "input_control": _DEFAULT_INPUT_CONTROL[data_type],
+        "value_normalizer": _DEFAULT_VALUE_NORMALIZER[data_type],
     }
 
 
@@ -220,6 +282,7 @@ def _spec_computed(
     computed_kind: str,
     *,
     operators: set[str] | None = None,
+    enum_values: list[str] | None = None,
 ) -> dict[str, Any]:
     """computed 源：SQL 计算字段（如 fp_is_stale, fp_chip_available）。
 
@@ -233,6 +296,9 @@ def _spec_computed(
         "source": _SOURCE_COMPUTED,
         "computed_kind": computed_kind,
         "operators": frozenset(operators) if operators else _DEFAULT_OPS[data_type],
+        "enum_values": list(enum_values) if enum_values else [],
+        "input_control": _DEFAULT_INPUT_CONTROL[data_type],
+        "value_normalizer": _DEFAULT_VALUE_NORMALIZER[data_type],
     }
 
 
@@ -253,7 +319,7 @@ FP_QUERY_FIELD_SPECS: dict[str, dict[str, Any]] = {
     "fp_is_stale": _spec_computed("fp_is_stale", "boolean", _COMPUTED_IS_STALE),
     "fp_calculated_at": _spec_column("fp_calculated_at", "datetime", "created_at"),
     "fp_run_id": _spec_column("fp_run_id", "text", "source_run_id", operators={"eq", "empty", "not_empty"}),
-    "fp_summary": _spec_flat("fp_summary", "text", operators={"contains", "not_contains", "empty", "not_empty"}),
+    "fp_summary": _spec_flat("fp_summary", "text"),
     # [P0-4 修复] fp_chip_available 改为 computed：只在存在严格匹配（五元组）
     # 且 chip 维度 available=true 的 succeeded 记录时为 true
     "fp_chip_available": _spec_computed(
@@ -262,7 +328,7 @@ FP_QUERY_FIELD_SPECS: dict[str, dict[str, Any]] = {
     ),
 
     # ===== 趋势 (18) =====
-    "fp_trend_direction": _spec_flat("fp_trend_direction", "enum"),
+    "fp_trend_direction": _spec_flat("fp_trend_direction", "enum", enum_values=_ENUM_VALUES_DIRECTION_LABEL),
     "fp_trend_bars": _spec_flat("fp_trend_bars", "number"),
     "fp_dsa_vwap_dev_pct": _spec_flat("fp_dsa_vwap_dev_pct", "percent"),
     "fp_segment_change_pct": _spec_flat("fp_segment_change_pct", "percent"),
@@ -282,9 +348,9 @@ FP_QUERY_FIELD_SPECS: dict[str, dict[str, Any]] = {
     "fp_vwap_ret_total": _spec_flat("fp_vwap_ret_total", "percent"),
 
     # ===== 结构 (8) =====
-    "fp_swing_direction": _spec_flat("fp_swing_direction", "enum"),
-    "fp_internal_direction": _spec_flat("fp_internal_direction", "enum"),
-    "fp_structure_alignment": _spec_flat("fp_structure_alignment", "enum"),
+    "fp_swing_direction": _spec_flat("fp_swing_direction", "enum", enum_values=_ENUM_VALUES_DIRECTION_LABEL),
+    "fp_internal_direction": _spec_flat("fp_internal_direction", "enum", enum_values=_ENUM_VALUES_DIRECTION_LABEL),
+    "fp_structure_alignment": _spec_flat("fp_structure_alignment", "enum", enum_values=_ENUM_VALUES_ALIGNMENT),
     "fp_active_ob_count": _spec_flat("fp_active_ob_count", "number"),
     "fp_trailing_top": _spec_flat("fp_trailing_top", "number"),
     "fp_trailing_bottom": _spec_flat("fp_trailing_bottom", "number"),
@@ -292,20 +358,20 @@ FP_QUERY_FIELD_SPECS: dict[str, dict[str, Any]] = {
     "fp_distance_to_trailing_bottom_pct": _spec_flat("fp_distance_to_trailing_bottom_pct", "percent"),
 
     # ===== 结构事件 (21) - 全部从 flat 读取（写入时已扁平化）=====
-    "fp_structure_event_type": _spec_flat("fp_structure_event_type", "enum", operators={"eq", "empty", "not_empty"}),
-    "fp_structure_event_direction": _spec_flat("fp_structure_event_direction", "enum", operators={"eq", "empty", "not_empty"}),
-    "fp_structure_event_level": _spec_flat("fp_structure_event_level", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_structure_event_type": _spec_flat("fp_structure_event_type", "enum", enum_values=_ENUM_VALUES_STRUCTURE_EVENT_TYPE),
+    "fp_structure_event_direction": _spec_flat("fp_structure_event_direction", "enum", enum_values=_ENUM_VALUES_EVENT_DIRECTION),
+    "fp_structure_event_level": _spec_flat("fp_structure_event_level", "enum", enum_values=_ENUM_VALUES_STRUCTURE_LEVEL),
     "fp_structure_event_freshness": _spec_flat("fp_structure_event_freshness", "number"),
     "fp_structure_event_date": _spec_flat("fp_structure_event_date", "datetime"),
     "fp_structure_event_price": _spec_flat("fp_structure_event_price", "number"),
-    "fp_structure_event_volume_badge": _spec_flat("fp_structure_event_volume_badge", "enum", operators={"eq", "empty", "not_empty"}),
-    "fp_latest_bos_direction": _spec_flat("fp_latest_bos_direction", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_structure_event_volume_badge": _spec_flat("fp_structure_event_volume_badge", "enum", enum_values=_ENUM_VALUES_VOLUME_BADGE),
+    "fp_latest_bos_direction": _spec_flat("fp_latest_bos_direction", "enum", enum_values=_ENUM_VALUES_EVENT_DIRECTION),
     "fp_latest_bos_freshness": _spec_flat("fp_latest_bos_freshness", "number"),
-    "fp_latest_bos_level": _spec_flat("fp_latest_bos_level", "enum", operators={"eq", "empty", "not_empty"}),
-    "fp_latest_choch_direction": _spec_flat("fp_latest_choch_direction", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_latest_bos_level": _spec_flat("fp_latest_bos_level", "enum", enum_values=_ENUM_VALUES_STRUCTURE_LEVEL),
+    "fp_latest_choch_direction": _spec_flat("fp_latest_choch_direction", "enum", enum_values=_ENUM_VALUES_EVENT_DIRECTION),
     "fp_latest_choch_freshness": _spec_flat("fp_latest_choch_freshness", "number"),
-    "fp_latest_choch_level": _spec_flat("fp_latest_choch_level", "enum", operators={"eq", "empty", "not_empty"}),
-    "fp_latest_ob_direction": _spec_flat("fp_latest_ob_direction", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_latest_choch_level": _spec_flat("fp_latest_choch_level", "enum", enum_values=_ENUM_VALUES_STRUCTURE_LEVEL),
+    "fp_latest_ob_direction": _spec_flat("fp_latest_ob_direction", "enum", enum_values=_ENUM_VALUES_EVENT_DIRECTION),
     "fp_latest_ob_freshness": _spec_flat("fp_latest_ob_freshness", "number"),
     "fp_latest_ob_high": _spec_flat("fp_latest_ob_high", "number"),
     "fp_latest_ob_low": _spec_flat("fp_latest_ob_low", "number"),
@@ -315,8 +381,8 @@ FP_QUERY_FIELD_SPECS: dict[str, dict[str, Any]] = {
     "fp_latest_eql_price": _spec_flat("fp_latest_eql_price", "number"),
 
     # ===== 动量 (13) =====
-    "fp_momentum_direction": _spec_flat("fp_momentum_direction", "enum"),
-    "fp_squeeze_state": _spec_flat("fp_squeeze_state", "enum"),
+    "fp_momentum_direction": _spec_flat("fp_momentum_direction", "enum", enum_values=_ENUM_VALUES_MOMENTUM_DIRECTION),
+    "fp_squeeze_state": _spec_flat("fp_squeeze_state", "enum", enum_values=_ENUM_VALUES_SQUEEZE_STATE),
     "fp_momentum_change": _spec_flat("fp_momentum_change", "number"),
     "fp_sqzmom_value": _spec_flat("fp_sqzmom_value", "number"),
     "fp_sqzmom_prev": _spec_flat("fp_sqzmom_prev", "number"),
@@ -327,17 +393,17 @@ FP_QUERY_FIELD_SPECS: dict[str, dict[str, Any]] = {
     "fp_bb_lower": _spec_flat("fp_bb_lower", "number"),
     "fp_squeeze_avg_volume": _spec_flat("fp_squeeze_avg_volume", "number"),
     "fp_release_volume_ratio": _spec_flat("fp_release_volume_ratio", "number"),
-    "fp_momentum_volume_relation": _spec_flat("fp_momentum_volume_relation", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_momentum_volume_relation": _spec_flat("fp_momentum_volume_relation", "enum", enum_values=_ENUM_VALUES_MOMENTUM_VOLUME_RELATION),
 
     # ===== 动量事件 (9) - 全部从 flat 读取 =====
-    "fp_momentum_event_type": _spec_flat("fp_momentum_event_type", "enum", operators={"eq", "empty", "not_empty"}),
-    "fp_momentum_event_direction": _spec_flat("fp_momentum_event_direction", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_momentum_event_type": _spec_flat("fp_momentum_event_type", "enum", enum_values=_ENUM_VALUES_MOMENTUM_EVENT_TYPE),
+    "fp_momentum_event_direction": _spec_flat("fp_momentum_event_direction", "enum", enum_values=_ENUM_VALUES_EVENT_DIRECTION),
     "fp_momentum_event_freshness": _spec_flat("fp_momentum_event_freshness", "number"),
     "fp_momentum_event_date": _spec_flat("fp_momentum_event_date", "datetime"),
     "fp_momentum_event_price": _spec_flat("fp_momentum_event_price", "number"),
-    "fp_momentum_event_volume_badge": _spec_flat("fp_momentum_event_volume_badge", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_momentum_event_volume_badge": _spec_flat("fp_momentum_event_volume_badge", "enum", enum_values=_ENUM_VALUES_VOLUME_BADGE),
     "fp_latest_sqz_off_freshness": _spec_flat("fp_latest_sqz_off_freshness", "number"),
-    "fp_latest_diffusion_direction": _spec_flat("fp_latest_diffusion_direction", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_latest_diffusion_direction": _spec_flat("fp_latest_diffusion_direction", "enum", enum_values=_ENUM_VALUES_EVENT_DIRECTION),
     "fp_latest_diffusion_freshness": _spec_flat("fp_latest_diffusion_freshness", "number"),
 
     # ===== 筹码 (10) - 全部从独立 chip 表读取（二.4 要求）=====
@@ -347,13 +413,13 @@ FP_QUERY_FIELD_SPECS: dict[str, dict[str, Any]] = {
     "fp_peak_node_count": _spec_chip("fp_peak_node_count", "number"),
     "fp_vah_price": _spec_chip("fp_vah_price", "number"),
     "fp_val_price": _spec_chip("fp_val_price", "number"),
-    "fp_node_event_type": _spec_chip("fp_node_event_type", "enum", operators={"eq", "empty", "not_empty"}),
-    "fp_node_event_direction": _spec_chip("fp_node_event_direction", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_node_event_type": _spec_chip("fp_node_event_type", "enum", enum_values=_ENUM_VALUES_NODE_EVENT_TYPE),
+    "fp_node_event_direction": _spec_chip("fp_node_event_direction", "enum", enum_values=_ENUM_VALUES_EVENT_DIRECTION),
     "fp_node_event_freshness": _spec_chip("fp_node_event_freshness", "number"),
     "fp_node_event_price": _spec_chip("fp_node_event_price", "number"),
 
     # ===== 量能 (13) =====
-    "fp_volume_badge": _spec_flat("fp_volume_badge", "enum", operators={"eq", "empty", "not_empty"}),
+    "fp_volume_badge": _spec_flat("fp_volume_badge", "enum", enum_values=_ENUM_VALUES_VOLUME_BADGE),
     "fp_volume": _spec_flat("fp_volume", "number"),
     "fp_amount": _spec_flat("fp_amount", "number"),
     "fp_turnover_rate": _spec_flat("fp_turnover_rate", "percent"),
@@ -385,6 +451,28 @@ FP_CHIP_KEYS: frozenset[str] = frozenset(
 )
 
 
+def serialize_fp_query_field_specs() -> dict[str, dict[str, Any]]:
+    """将 FP_QUERY_FIELD_SPECS 序列化为 JSON 可序列化的 dict（供 API 返回）。
+
+    [CHANGE-20260730-013] 字段元数据 API 使用：
+    - frozenset → sorted list
+    - tuple → list
+    - 只返回前端需要的字段（data_type/operators/enum_values/input_control/value_normalizer）
+    - 不暴露内部字段（json_path/column/literal_value/computed_kind）
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for key, spec in FP_QUERY_FIELD_SPECS.items():
+        result[key] = {
+            "fp_key": spec["fp_key"],
+            "data_type": spec["data_type"],
+            "operators": sorted(spec["operators"]),
+            "enum_values": list(spec.get("enum_values", [])),
+            "input_control": spec["input_control"],
+            "value_normalizer": spec["value_normalizer"],
+        }
+    return result
+
+
 # =============================================================================
 # [CHANGE-20260729-005] fp_filter/fp_sort 解析（纯函数，无 DB 依赖）
 # 移入本模块以便纯单元测试无需触发 app.db 配置加载。
@@ -406,6 +494,43 @@ class FpFilterSpec:
     value2: str | None  # between 时的上界
 
 
+class FpFilterValidationError(ValueError):
+    """[CHANGE-20260730-013] fp 筛选校验失败，携带结构化字段供 API 返回 422 detail。
+
+    属性：
+        field: 失败的 fp_key
+        data_type: 该字段的 data_type
+        operator: 被拒绝的 operator
+        allowed: 允许的 operator 列表
+        message: 人类可读的错误描述
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        field: str,
+        data_type: str,
+        operator: str,
+        allowed: list[str],
+    ) -> None:
+        super().__init__(message)
+        self.field = field
+        self.data_type = data_type
+        self.operator = operator
+        self.allowed = allowed
+
+    def to_detail(self) -> dict[str, Any]:
+        """转换为 API 422 响应的 detail dict。"""
+        return {
+            "field": self.field,
+            "dataType": self.data_type,
+            "operator": self.operator,
+            "allowed": self.allowed,
+            "message": str(self.args[0]) if self.args else "",
+        }
+
+
 @dataclass(frozen=True)
 class FpSortSpec:
     """fp 排序规格（已通过白名单校验）。"""
@@ -424,6 +549,12 @@ def parse_fp_filter(fp_filter: str | None) -> list[FpFilterSpec]:
     - 非法 key/operator 抛 ValueError（由 API 层转 422）
 
     [CHANGE-20260729-005] 全部 99 字段均有 queryable source，不再因 json_path 为空拒绝。
+
+    [CHANGE-20260730-013] 类型化筛选：
+    - 根据 data_type 校验 operator 是否合法（操作符合同严格按类型）
+    - enum 字段值必须匹配 enum_values（in/not_in 校验每个值）
+    - 旧 URL 中 enum+contains 若值精确匹配枚举可迁移为 eq，否则返回 422
+    - in/not_in 用逗号分隔多值：key:in:val1,val2,val3
     """
     if not fp_filter:
         return []
@@ -450,11 +581,27 @@ def parse_fp_filter(fp_filter: str | None) -> list[FpFilterSpec]:
                 f"Invalid fp_filter key '{fp_key}'. Not in FP_QUERY_FIELD_SPECS."
             )
         spec = FP_QUERY_FIELD_SPECS[fp_key]
-        if operator not in spec["operators"]:
-            raise ValueError(
+        data_type = spec["data_type"]
+        allowed_ops = spec["operators"]
+
+        # [CHANGE-20260730-013] 旧 URL 兼容：enum+contains 若值精确匹配枚举则迁移为 eq
+        if (
+            operator == "contains"
+            and data_type in ("enum", "multi_enum")
+            and value is not None
+            and value in spec["enum_values"]
+        ):
+            operator = "eq"
+
+        if operator not in allowed_ops:
+            raise FpFilterValidationError(
                 f"Invalid operator '{operator}' for fp key '{fp_key}' "
-                f"(data_type={spec['data_type']}). "
-                f"Allowed: {sorted(spec['operators'])}"
+                f"(data_type={data_type}). "
+                f"Allowed: {sorted(allowed_ops)}",
+                field=fp_key,
+                data_type=data_type,
+                operator=operator,
+                allowed=sorted(allowed_ops),
             )
 
         value2: str | None = None
@@ -479,6 +626,34 @@ def parse_fp_filter(fp_filter: str | None) -> list[FpFilterSpec]:
             raise ValueError(
                 f"fp_filter operator '{operator}' requires value; got '{token}'"
             )
+
+        # [CHANGE-20260730-013] enum 值校验：eq/neq 值必须在 enum_values 中
+        if (
+            data_type in ("enum", "multi_enum")
+            and operator in ("eq", "neq")
+            and value is not None
+            and spec["enum_values"]
+            and value not in spec["enum_values"]
+        ):
+            raise ValueError(
+                f"Invalid enum value '{value}' for fp key '{fp_key}'. "
+                f"Allowed: {spec['enum_values']}"
+            )
+
+        # [CHANGE-20260730-013] in/not_in 每个值必须在 enum_values 中
+        if (
+            data_type in ("enum", "multi_enum")
+            and operator in ("in", "not_in")
+            and value is not None
+            and spec["enum_values"]
+        ):
+            items = [v.strip() for v in value.split(",") if v.strip()]
+            invalid = [v for v in items if v not in spec["enum_values"]]
+            if invalid:
+                raise ValueError(
+                    f"Invalid enum values {invalid} for fp key '{fp_key}'. "
+                    f"Allowed: {spec['enum_values']}"
+                )
 
         specs.append(FpFilterSpec(fp_key=fp_key, operator=operator, value=value, value2=value2))
         i += 1

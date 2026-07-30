@@ -1477,6 +1477,14 @@ async def run_after_close_orchestrator_worker() -> None:
     - execute_after_close_run 内部含断点恢复 + 心跳更新，Worker 仅负责领取和调度
     - 异常不退出：execute_after_close_run 内部标记 failed 后 re-raise，
       Worker 捕获仅记录日志，等待下次轮询
+
+    [SIGTERM drain] - 优雅退出（不强制中断当前 run）：
+    - SIGTERM/SIGINT 由 _handle_shutdown 设置 _shutdown=True（全局标志）
+    - 主循环在领取新任务前检查 _shutdown，若为 True 则不再领取新 item
+    - 当前正在执行的 execute_after_close_run 完成后才退出（同步 await，不强制中断）；
+      checkpoint（run status + heartbeat）由 execute_after_close_run 内部写入
+    - 完成后立即退出（不再 sleep），退出码 0（main 自然退出）
+    - 日志: "SIGTERM drain complete, finished current item"
     """
     _hb_task = asyncio.create_task(_heartbeat_loop("after_close_orchestrator"))
     logger.info(
@@ -1505,7 +1513,15 @@ async def run_after_close_orchestrator_worker() -> None:
             # _after_close_poll_once 内部已捕获 execute_after_close_run 异常，
             # 此处仅捕获领取阶段的意外异常
             logger.exception("[AfterCloseWorker] 轮询异常: %s", exc)
+        if _shutdown:
+            # [SIGTERM drain] 当前 run 已完成（或无任务），不再领取新 item
+            # checkpoint（run status + heartbeat）已由 execute_after_close_run 内部写入
+            logger.info("[AfterCloseWorker] SIGTERM drain: 不再领取新任务，准备退出")
+            break
         await asyncio.sleep(WORKER_INTERVAL)
+
+    # [SIGTERM drain complete] - 当前 item 已完成，worker 正常退出（退出码 0）
+    logger.info("[AfterCloseWorker] SIGTERM drain complete, finished current item")
 
 
 async def main() -> None:

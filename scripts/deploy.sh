@@ -89,6 +89,67 @@ docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm \
   -e CONFIG_FILE=/app/app/config.production.py \
   backend alembic upgrade head
 
+# [deploy drain] - 描述: 检查 worker-after-close 是否有活跃的 after_close run
+# 如果有，等待最多 300s（每 30s 检查一次），超时则退出（不强制重启），让用户手动决定
+# 活跃 run: scheduler_job_runs.job_name='after_close_orchestrator' AND status IN ('queued','running','resume_queued')
+# 通过 docker exec backend 容器查询数据库（backend 容器需在运行）
+drain_after_close_worker() {
+  local max_wait=300
+  local check_interval=30
+  local elapsed=0
+
+  # 获取 backend 容器 ID（用于 docker exec 查询数据库）
+  local backend_cid
+  backend_cid=$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q backend 2>/dev/null || true)
+
+  if [ -z "${backend_cid}" ]; then
+    echo "[deploy drain] backend 容器未运行，跳过 after-close drain 检查"
+    return 0
+  fi
+
+  echo "[deploy drain] 检查 worker-after-close 是否有活跃的 after_close run..."
+
+  while [ "${elapsed}" -lt "${max_wait}" ]; do
+    # 通过 docker exec backend 容器查询活跃 after_close run 数量
+    # 活跃: job_name='after_close_orchestrator' AND status IN ('queued','running','resume_queued')
+    local active_count
+    active_count=$(docker exec -i "${backend_cid}" python <<'PYEOF' 2>/dev/null || true
+import asyncio
+from sqlalchemy import text
+from app.db import AsyncSessionLocal
+async def _q():
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(text("SELECT COUNT(*) FROM scheduler_job_runs WHERE job_name='after_close_orchestrator' AND status IN ('queued','running','resume_queued')"))
+        return r.scalar() or 0
+print(asyncio.run(_q()))
+PYEOF
+)
+    active_count=$(echo "${active_count}" | tr -d '[:space:]')
+
+    if [ -z "${active_count}" ]; then
+      echo "[deploy drain] 警告: 无法查询 after_close run 状态（docker exec 失败），跳过 drain 检查"
+      return 0
+    fi
+
+    if [ "${active_count}" = "0" ]; then
+      echo "[deploy drain] 无活跃 after_close run，继续部署"
+      return 0
+    fi
+
+    echo "[deploy drain] 检测到 ${active_count} 个活跃 after_close run，等待 ${check_interval}s 后重试（${elapsed}/${max_wait}s）"
+    sleep "${check_interval}"
+    elapsed=$((elapsed + check_interval))
+  done
+
+  echo "[deploy drain] 错误: after_close run 仍活跃，已等待 ${max_wait}s 未完成"
+  echo "[deploy drain] 拒绝强制重启 worker-after-close，请手动确认后重试"
+  exit 1
+}
+
+# [deploy drain] - 在 force-recreate worker-after-close 之前调用 drain
+# 避免部署 force-recreate 中断正在执行的盘后流水线（refreshing_daily/computing_features 等）
+drain_after_close_worker
+
 # [deploy] - 描述: 启动应用服务（CORE_ONLY 模式仅启动核心服务，含策略与盘后编排链路）
 # CORE_ONLY=1：postgres/redis 已在上方 up -d 启动，此处只 force-recreate 应用容器
 # force-recreate 范围：backend/frontend/goaccess/worker-bars-scheduler/worker-strategy-batch/worker-strategy-scheduler/worker-calendar/worker-after-close

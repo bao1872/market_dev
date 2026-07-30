@@ -226,8 +226,30 @@ async def list_market_stocks(
             fp_sort=fp_sort or None,
         )
     except ValueError as exc:
-        # 排序/筛选参数校验失败 → 422
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # [CHANGE-20260730-013] 筛选/排序参数校验失败 → 422 结构化错误
+        from app.services.first_pyramid_flatten import FpFilterValidationError
+
+        if isinstance(exc, FpFilterValidationError):
+            detail = exc.to_detail()
+        else:
+            detail = {"message": str(exc)}
+        raise HTTPException(status_code=422, detail=detail) from exc
+
+
+# ===== [CHANGE-20260730-013] 字段元数据 API =====
+
+
+@router.get("/filter-specs")
+async def get_market_filter_specs(
+    ctx: AccessContext = Depends(require_authenticated),
+) -> dict:
+    """返回第一金字塔 99 字段的筛选元数据（含 operators/enum_values/input_control）。
+
+    普通用户即可读取（不需要 admin）；用于前端动态生成类型化筛选器控件。
+    """
+    from app.services.first_pyramid_flatten import serialize_fp_query_field_specs
+
+    return serialize_fp_query_field_specs()
 
 
 # ===== C9: 板块目录只读 API（行业/概念筛选下拉支持）=====

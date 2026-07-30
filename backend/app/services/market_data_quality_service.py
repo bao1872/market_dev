@@ -192,6 +192,8 @@ class MarketDataQualityService:
         start_date: date,
         end_date: date,
         repair_mode: bool = False,
+        symbols: list[str] | None = None,
+        limit: int | None = None,
     ) -> MarketDataQualityRun:
         """创建或复用扫描 run（幂等）。
 
@@ -205,6 +207,8 @@ class MarketDataQualityService:
             start_date: 起始日期（含）
             end_date: 结束日期（含）
             repair_mode: 是否启用修复模式
+            symbols: 限定股票列表（canary/debug 用，None=全市场）
+            limit: 限定股票数量上限（None=不限）
 
         Returns:
             MarketDataQualityRun（已持久化）
@@ -254,13 +258,29 @@ class MarketDataQualityService:
         await db.flush()  # 获取 run.id
 
         # 3. 查询活跃 A 股标的，预创建 pending items
-        instruments_result = await db.execute(
+        # [P0 2026-07-30] 在查询前应用 symbols/limit 条件，避免 --canary 创建 5293 items
+        stmt = (
             select(Instrument.id, Instrument.symbol)
             .where(Instrument.status == "active")
             .where(stock_symbol_sql_filter(Instrument))
-            .order_by(Instrument.symbol)
         )
+        if symbols:
+            # 限定股票列表
+            stmt = stmt.where(Instrument.symbol.in_(symbols))
+        stmt = stmt.order_by(Instrument.symbol)
+        if limit and limit > 0:
+            stmt = stmt.limit(limit)
+
+        instruments_result = await db.execute(stmt)
         rows = instruments_result.all()
+
+        # [P0 2026-07-30] 断言 canary item 数 ≤ 配置值（symbols/limit 生效校验）
+        if symbols and limit and len(rows) > limit:
+            logger.warning(
+                "[MDQ] 查询返回 %d 行，超过 limit=%d，将截断",
+                len(rows), limit,
+            )
+            rows = rows[:limit]
 
         items: list[MarketDataQualityItem] = []
         for instrument_id, symbol in rows:
@@ -308,6 +328,28 @@ class MarketDataQualityService:
             db, timeframe=timeframe, start_date=start_date,
             end_date=end_date, repair_mode=repair_mode,
         )
+
+    @staticmethod
+    async def get_run_by_id(
+        db: AsyncSession,
+        *,
+        run_id: str | uuid.UUID,
+    ) -> MarketDataQualityRun | None:
+        """根据 run_id 查询 MarketDataQualityRun（用于 --resume --run-id）。
+
+        Args:
+            db: 异步会话
+            run_id: run UUID（字符串或 uuid.UUID）
+
+        Returns:
+            MarketDataQualityRun 或 None（不存在）
+        """
+        # [P0 2026-07-30] CLI --resume 必须显式 --run-id，禁止隐式匹配 run_key
+        try:
+            run_uuid = uuid.UUID(str(run_id))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"run_id 非合法 UUID: {run_id}") from exc
+        return await db.get(MarketDataQualityRun, run_uuid)
 
     # =========================================================================
     # 纯函数：扫描逻辑（不连 DB，可单元测试）
