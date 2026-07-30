@@ -419,9 +419,19 @@ health_check() {
         return 1
     fi
 
-    # /health/ready
-    if ! curl -sf http://127.0.0.1:8000/health/ready >/dev/null 2>&1; then
-        log "/health/ready 未通过"
+    # /health/ready（需要等待 startup 完成，包括种子数据初始化）
+    waited=0
+    while [[ ${waited} -lt ${max_wait} ]]; do
+        if curl -sf http://127.0.0.1:8000/health/ready >/dev/null 2>&1; then
+            break
+        fi
+        log "等待 backend /health/ready... (${waited}/${max_wait})"
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    if [[ ${waited} -ge ${max_wait} ]]; then
+        log "/health/ready 未通过（等待 ${max_wait}s 超时）"
         return 1
     fi
     log "/health/ready 通过"
@@ -530,6 +540,12 @@ rollback() {
 
     cd "${REPO_ROOT}"
     run_cmd git checkout -f "${PREVIOUS_SHA}"
+
+    # [P0 2026-07-30] 回滚时恢复 market.env GIT_SHA 到 PREVIOUS_SHA
+    if [[ "${DRY_RUN}" == "false" ]] && grep -q "^GIT_SHA=" "${ENV_FILE}"; then
+        sed -i "s/^GIT_SHA=.*/GIT_SHA=${PREVIOUS_SHA:0:7}/" "${ENV_FILE}"
+        log "已恢复 ${ENV_FILE} GIT_SHA=${PREVIOUS_SHA:0:7}"
+    fi
 
     # 重新同步旧代码
     sync_live_mount
