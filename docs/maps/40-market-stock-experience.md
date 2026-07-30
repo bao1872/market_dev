@@ -263,22 +263,38 @@ class MarketStockRow(BaseModel):
 
 ### 4.7.3 `ChipStatus` 结构化合同
 
+**[CHANGE-20260730-010] 共享 `chip_status_resolver`（统一列表与详情 API）**
+
 ```python
 class ChipStatus(BaseModel):
-    status: str | None          # succeeded / skipped / failed / unavailable
-    reason_code: str | None    # M15_BARS_INSUFFICIENT / INSUFFICIENT_DAILY_BARS
-    reason_text: str | None    # 中文文案，可直接显示给用户
-    actual_bars: int | None    # 实际 15m 根数
-    required_bars: int | None  # 需要 15m 根数（500 最低 / 4000 完整）
-    computed_at: str | None    # ISO 时间戳
+    state: str | None          # ready / unavailable / failed / pending / stale (camelCase)
+    reasonCode: str | None    # M15_BARS_INSUFFICIENT / NO_VALID_PEAK / DAILY_BARS_INSUFFICIENT / CHIP_JOB_PENDING / CHIP_JOB_FAILED
+    reasonText: str | None    # 中文文案，可直接显示给用户
+    actualBars: int | None    # 实际 15m 根数
+    requiredBars: int | None  # 需要 15m 根数（500 最低）
+    fullQualityBars: int | None  # 完整质量门槛（4000）
+    computedAt: str | None    # ISO 时间戳（Shanghai tz）
 ```
 
-`_build_chip_status_struct` 实现：
+`chip_status_resolver.resolve_chip_status` 实现（共享给 `/market/stocks` 列表和 `/first-pyramid` 详情）：
 
-- 严格匹配 `(instrument_id, trade_date, core_run_id, algorithm_version, status=succeeded)`
-- 成功 → `status=succeeded + reason_text="已计算"`
-- 无记录/失败 → 调用 `first_pyramid_service.compute_chip_status_for_stock` 计算原因
-- 000021 实际值：`status=skipped + reason_code=M15_BARS_INSUFFICIENT + actual_bars=354 + required_bars=500`
+- 严格匹配 `(instrument_id, trade_date, core_run_id, algorithm_version)`，扫描所有 status 记录取最新一条
+- `status=succeeded + chip.available=True` → `state=ready`
+- `status=succeeded + chip.available=False` → `state=unavailable + reasonCode=NO_VALID_PEAK`
+- `status=skipped + reason=M15_BARS_INSUFFICIENT` → `state=unavailable + actualBars + requiredBars=500 + fullQualityBars=4000`
+- `status=skipped + reason=DAILY_BARS_INSUFFICIENT` → `state=unavailable + actualBars`
+- `status=failed` → `state=failed + reasonCode=CHIP_JOB_FAILED`
+- 无记录 → `state=pending + reasonCode=CHIP_JOB_PENDING + reasonText="筹码任务尚未执行"`
+- 000021 实际值：`state=unavailable + reasonCode=M15_BARS_INSUFFICIENT + actualBars=354 + requiredBars=500 + fullQualityBars=4000`
+
+`market_stocks_service._build_chip_status_struct` 调用 `_build_chip_status_from_row` 实现，输出 dict（`model_dump(by_alias=False)`）。
+`stock_context.py /first-pyramid` 路由调用 `resolve_chip_status` 注入 `stored_fp["chipStatus"]`，列表与详情 API 完全同口径。
+
+前端 `FirstPyramidPanel.tsx` 的 `ChipVisualCard`：
+- `state=unavailable + reasonCode=M15_BARS_INSUFFICIENT` → 显示 `actualBars / requiredBars / fullQualityBars` 三栏诊断
+- `state=pending` → "筹码任务尚未执行"
+- `state=failed` → "筹码计算失败" + reasonText
+- 其他 → 显示 reasonText（不再统一显示"暂无有效筹码峰"）
 
 ### 4.7.4 `factor_ready` 判定规则
 

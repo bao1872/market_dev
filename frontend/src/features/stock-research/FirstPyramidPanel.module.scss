@@ -224,6 +224,16 @@
   color: v.$color-text;
 }
 
+/* [CHANGE-20260730-010] chip_status 状态徽标（pending/failed/stale） */
+.dimBadge {
+  font-size: 11px;
+  font-weight: 500;
+  color: v.$color-muted;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.04);
+}
+
 .dimArrow {
   font-size: 14px;
   font-weight: 700;

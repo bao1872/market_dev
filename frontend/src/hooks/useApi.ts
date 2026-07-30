@@ -652,6 +652,67 @@ export function useAdminVisitors() {
   })
 }
 
+// [CHANGE-20260730-011] 板块分析 V1 hooks
+/** 查询板块分析列表 */
+export function useBoardAnalysisList(
+  params?: api.BoardAnalysisListParams,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: ['board-analysis', 'list', params],
+    queryFn: ({ signal }) => api.getBoardAnalysisList(params, { signal }),
+    staleTime: 60 * 1000, // 1 分钟
+    enabled: options?.enabled ?? true,
+  })
+}
+
+/** 查询单板块分析详情 */
+export function useBoardAnalysisDetail(
+  boardId: string | null,
+  params?: { trade_date?: string },
+) {
+  return useQuery({
+    queryKey: ['board-analysis', 'detail', boardId, params],
+    queryFn: ({ signal }) =>
+      api.getBoardAnalysisDetail(boardId!, params, { signal }),
+    enabled: !!boardId,
+    staleTime: 60 * 1000,
+  })
+}
+
+/** [Admin] 触发单板块分析计算 */
+export function useTriggerComputeBoard() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      boardId,
+      params,
+    }: {
+      boardId: string
+      params?: { trade_date?: string; publish?: boolean }
+    }) => api.triggerComputeBoard(boardId, params),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['board-analysis'] })
+    },
+  })
+}
+
+/** [Admin] 触发批量板块分析计算 */
+export function useTriggerComputeAllBoards() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (params?: {
+      trade_date?: string
+      board_type?: 'industry' | 'concept'
+      limit?: number
+      publish?: boolean
+    }) => api.triggerComputeAllBoards(params),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['board-analysis'] })
+    },
+  })
+}
+
 /** 加入自选变更（自动失效 watchlist + monitor-status 缓存） */
 export function useAddToWatchlist() {
   const queryClient = useQueryClient()

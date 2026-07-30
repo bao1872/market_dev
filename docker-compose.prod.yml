@@ -73,6 +73,9 @@ services:
       APP_ENV: production
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/app/config.production.py
+      # [CHANGE-20260730-010] Umami 访客分析：backend 通过独立只读连接查询 umami 数据库
+      UMAMI_DATABASE_URL: ${UMAMI_DATABASE_URL:-}
+      UMAMI_WEBSITE_ID: ${UMAMI_WEBSITE_ID:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -85,8 +88,7 @@ services:
     volumes:
       - ./doc:/doc:ro
       - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
-      # [Gate5] 挂载 GoAccess 报告卷（只读），backend 读取 /srv/goaccess/report.json
-      - goaccess_reports:/srv/goaccess:ro
+      # [CHANGE-20260730-010] goaccess_reports 挂载已移除：访问统计改用 Umami 数据库
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   # ===== 行情调度 Worker =====
@@ -432,12 +434,10 @@ volumes:
     name: trading-redisdata
   capture_static:
     name: trading-capture-static
-  # [Gate5] Nginx access.log 共享卷（frontend 写，原 goaccess 读；现在保留供未来诊断）
+  # [Gate5] Nginx access.log 共享卷（frontend 写，保留供运维诊断）
   nginx_logs:
     name: trading-nginx-logs
-  # [CHANGE-20260729-009] GoAccess reports volume 暂保留供回滚
-  goaccess_reports:
-    name: trading-goaccess-reports
+  # [CHANGE-20260730-010] goaccess_reports volume 已移除：访问统计改用 Umami 数据库
   # [CHANGE-20260729-009] Umami 数据卷（暂存上传/会话，主数据在 Postgres umami 库）
   umami_data:
     name: trading-umami-data

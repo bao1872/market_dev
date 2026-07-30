@@ -133,12 +133,13 @@ function makeMarketStockRow(overrides: Partial<MarketStockRow> = {}): MarketStoc
     factor_actual_bars: null,
     factor_required_bars: null,
     chip_status: {
-      status: 'succeeded',
-      reason_code: null,
-      actual_bars: null,
-      required_bars: null,
-      reason_text: '已计算',
-      computed_at: '2026-07-29T15:00:00+08:00',
+      state: 'ready',
+      reasonCode: null,
+      reasonText: '已计算',
+      computedAt: '2026-07-29T15:00:00+08:00',
+      actualBars: null,
+      requiredBars: null,
+      fullQualityBars: null,
     },
     ...overrides,
   }
@@ -182,26 +183,28 @@ test('adaptMarketStockToTrendRow: 新股数据不足场景', () => {
   assert.deepEqual(row.payload, {}, 'null payload 应为空对象')
 })
 
-// ===== 7. chip_status skipped + M15_BARS_INSUFFICIENT =====
+// ===== 7. chip_status unavailable + M15_BARS_INSUFFICIENT =====
 test('adaptMarketStockToTrendRow: chip 状态为 M15_BARS_INSUFFICIENT', () => {
   const row = adaptMarketStockToTrendRow(makeMarketStockRow({
     chip_status: {
-      status: 'skipped',
-      reason_code: 'M15_BARS_INSUFFICIENT',
-      actual_bars: 354,
-      required_bars: 500,
-      reason_text: '15 分钟数据不足（354 根，需 ≥500）',
-      computed_at: null,
+      state: 'unavailable',
+      reasonCode: 'M15_BARS_INSUFFICIENT',
+      reasonText: '15分钟数据不足（354根，需≥500；4000根为完整质量门槛）',
+      computedAt: null,
+      actualBars: 354,
+      requiredBars: 500,
+      fullQualityBars: 4000,
     },
   }))
   // chipStatus 是 unknown 自定义字段，需断言为 MarketStockRow['chip_status'] 类型
   const chipStatus = row.chipStatus as MarketStockRow['chip_status']
   assert.ok(chipStatus, 'chipStatus 应非空')
-  assert.equal(chipStatus!.status, 'skipped')
-  assert.equal(chipStatus!.reason_code, 'M15_BARS_INSUFFICIENT')
-  assert.equal(chipStatus!.actual_bars, 354)
-  assert.equal(chipStatus!.required_bars, 500)
-  assert.equal(chipStatus!.reason_text, '15 分钟数据不足（354 根，需 ≥500）')
+  assert.equal(chipStatus!.state, 'unavailable')
+  assert.equal(chipStatus!.reasonCode, 'M15_BARS_INSUFFICIENT')
+  assert.equal(chipStatus!.actualBars, 354)
+  assert.equal(chipStatus!.requiredBars, 500)
+  assert.equal(chipStatus!.fullQualityBars, 4000)
+  assert.equal(chipStatus!.reasonText, '15分钟数据不足（354根，需≥500；4000根为完整质量门槛）')
 })
 
 // ===== 8. resultId 使用 instrument_id（MarketStockRow 无 resultId） =====

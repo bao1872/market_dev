@@ -63,6 +63,8 @@ from app.api.strategy_runs import router as strategy_runs_router
 from app.api.structural_factors import router as structural_factors_router
 from app.api.temporal_features import router as temporal_features_router
 from app.api.watchlist import router as watchlist_router
+from app.api.board_analysis import admin_router as board_analysis_admin_router
+from app.api.board_analysis import board_router as board_analysis_router
 from app.db import AsyncSessionLocal
 
 logger = logging.getLogger("main")
@@ -211,6 +213,9 @@ app.include_router(temporal_features_router)
 # [Phase4] 个股状态上下文只读接口（用户 + 管理员调试，统一使用 symbol）
 app.include_router(stock_context_router)
 app.include_router(stock_context_admin_router)
+# [CHANGE-20260730-011] 板块分析 V1 路由（用户只读 + 管理员触发计算）
+app.include_router(board_analysis_router)
+app.include_router(board_analysis_admin_router)
 # 公开端点路由（内测申请，无需登录）
 app.include_router(public_beta_router)
 # 公开套餐列表路由（无需登录）

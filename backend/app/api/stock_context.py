@@ -731,8 +731,8 @@ async def get_first_pyramid(
     """
     from fastapi import HTTPException, status
 
-    from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
     from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
+    from app.services.chip_status_resolver import resolve_chip_status
     from app.services.first_pyramid_service import compute_first_pyramid_snapshot
     from app.services.market_data_aggregation_service import MarketDataAggregationService
 
@@ -755,33 +755,52 @@ async def get_first_pyramid(
                 else None
             )
             if isinstance(stored_fp, dict) and stored_fp.get("inputHash"):
-                # [P0-3 修复 2026-07-29 三.4] 用严格五元组匹配的 chip 覆盖 chipConsensus
-                # 与列表 API（market_stocks_service）使用同一五元组口径
-                chip_stmt = (
-                    select(StockChipConsensusSnapshot)
-                    .where(
-                        StockChipConsensusSnapshot.instrument_id == instrument.id,
-                        StockChipConsensusSnapshot.trade_date == run.trade_date,
-                        StockChipConsensusSnapshot.core_run_id == run.id,
-                        StockChipConsensusSnapshot.algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION,
-                        StockChipConsensusSnapshot.status == "succeeded",
-                    )
-                    .order_by(StockChipConsensusSnapshot.created_at.desc())
-                    .limit(1)
+                # [CHANGE-20260730-010] 使用共享 resolve_chip_status：
+                # - 严格五元组匹配（instrument_id + trade_date + core_run_id +
+                #   algorithm_version）扫描所有 status 记录
+                # - 与 /market/stocks 列表 API 完全同口径
+                # - 000021 深科技场景：返回 M15_BARS_INSUFFICIENT + actualBars=354
+                chip_status = await resolve_chip_status(
+                    session=db,
+                    instrument_id=instrument.id,
+                    trade_date=run.trade_date,
+                    snapshot_run_id=run.id,
+                    algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
                 )
-                chip_result = await db.execute(chip_stmt)
-                chip_row = chip_result.scalar_one_or_none()
-                if chip_row is not None and chip_row.chip_payload:
-                    chip_dim = chip_row.chip_payload.get("chip")
-                    if isinstance(chip_dim, dict):
-                        # 用 chip 表的 chip 维度覆盖 review-core 的 chipConsensus
-                        stored_fp["chipConsensus"] = chip_dim
+
+                # 仅当 chip_status.state == "ready" 时填充 chipConsensus
+                # 否则 chipConsensus=null，前端读取 chipStatus 显示原因
+                if chip_status.state == "ready":
+                    # 重新查询 succeeded 的 chip_payload 用于 chipConsensus
+                    from app.models.stock_chip_consensus_snapshot import (
+                        StockChipConsensusSnapshot,
+                    )
+
+                    chip_stmt = (
+                        select(StockChipConsensusSnapshot)
+                        .where(
+                            StockChipConsensusSnapshot.instrument_id == instrument.id,
+                            StockChipConsensusSnapshot.trade_date == run.trade_date,
+                            StockChipConsensusSnapshot.core_run_id == run.id,
+                            StockChipConsensusSnapshot.algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION,
+                            StockChipConsensusSnapshot.status == "succeeded",
+                        )
+                        .order_by(StockChipConsensusSnapshot.created_at.desc())
+                        .limit(1)
+                    )
+                    chip_result = await db.execute(chip_stmt)
+                    chip_row = chip_result.scalar_one_or_none()
+                    if chip_row is not None and chip_row.chip_payload:
+                        chip_dim = chip_row.chip_payload.get("chip")
+                        stored_fp["chipConsensus"] = chip_dim if isinstance(chip_dim, dict) else None
                     else:
-                        # chip 记录存在但无 chip 维度（如 PROFILE_EMPTY 失败）
                         stored_fp["chipConsensus"] = None
                 else:
-                    # 无匹配 chip：清空 chipConsensus（避免使用 review-core 的旧值）
+                    # chip 不可用：清空 chipConsensus，前端读 chipStatus 显示原因
                     stored_fp["chipConsensus"] = None
+
+                # [CHANGE-20260730-010] 注入 chipStatus（camelCase，与列表 API 一致）
+                stored_fp["chipStatus"] = chip_status.model_dump(by_alias=False)
                 return stored_fp
 
     # Fallback：从 bars 实时计算（只读，不写库）

@@ -154,50 +154,27 @@ def _compute_factor_ready(
 def _build_chip_status_struct(
     chip_row: Any | None,
 ) -> dict[str, Any] | None:
-    """从 chip 记录构建结构化状态 dict。
+    """[CHANGE-20260730-010] 从 chip 记录构建结构化状态 dict（共享 chip_status_resolver）。
 
     Args:
         chip_row: 包含 status, chip_payload, error_message, created_at 的 NamedTuple，或 None
 
     Returns:
-        {status, reason_code, actual_bars, required_bars, reason_text, computed_at} 或 None
+        camelCase ChipStatus dict（与 /first-pyramid 详情 API 完全一致）：
+        {state, reasonCode, reasonText, computedAt, actualBars, requiredBars, fullQualityBars}
+        或 None（chip_row=None 表示无 snap 关联，列表 API 返回 null）
+
+    注意：旧版本返回 snake_case {status, reason_code, actual_bars, required_bars,
+    reason_text, computed_at}，[CHANGE-20260730-010] 统一改为 camelCase，与详情 API 同口径。
     """
     if chip_row is None:
         return None
 
-    status = chip_row.status
-    payload = chip_row.chip_payload or {}
-    error_message = chip_row.error_message
+    # 延迟导入避免循环依赖（chip_status_resolver 不导入本模块的 _build_chip_status_struct）
+    from app.services.chip_status_resolver import _build_chip_status_from_row
 
-    # reason_code: 优先从 payload.reason 取，fallback 到 error_message 解析
-    reason_code = payload.get("reason") if isinstance(payload, dict) else None
-    if reason_code is None and error_message:
-        # error_message 形如 "15m bars insufficient: 354 < 500"
-        reason_code = "M15_BARS_INSUFFICIENT" if "15m" in error_message.lower() else "CHIP_ERROR"
-
-    actual_bars = payload.get("actual_bars") if isinstance(payload, dict) else None
-
-    # reason_text: 人类可读描述
-    if status == "succeeded":
-        reason_text = "已计算"
-    elif status == "skipped":
-        if reason_code == "M15_BARS_INSUFFICIENT":
-            reason_text = f"15 分钟数据不足（{actual_bars} 根，需 ≥{_CHIP_MIN_15M_BARS}）"
-        else:
-            reason_text = error_message or "已跳过"
-    elif status == "failed":
-        reason_text = error_message or "计算失败"
-    else:
-        reason_text = error_message or status
-
-    return {
-        "status": status,
-        "reason_code": reason_code,
-        "actual_bars": actual_bars,
-        "required_bars": _CHIP_MIN_15M_BARS if status != "succeeded" else None,
-        "reason_text": reason_text,
-        "computed_at": to_shanghai_iso(chip_row.created_at) if chip_row.created_at else None,
-    }
+    chip_status = _build_chip_status_from_row(chip_row)
+    return chip_status.model_dump(by_alias=False)
 
 
 @dataclass(frozen=True)
@@ -1180,8 +1157,21 @@ async def get_market_stocks(
         # 只在存在严格匹配（五元组）且 chip_payload.chip.available=true 的 succeeded 记录时为 True
         # [CHANGE-20260729-009] chip_map 现存储完整 chip row（含 status/error_message/created_at），
         # 仅 succeeded 状态才合并 chip_flat；任意状态都构建 chip_status 结构化状态。
+        # [CHANGE-20260730-010] chip_status 与 /first-pyramid 详情 API 完全同口径：
+        # - chip_row 存在：调用共享 _build_chip_status_from_row → camelCase ChipStatus
+        # - chip_row 为 None 但 flat_fp 存在（有 snap 但 chip job 未跑）：state=pending
+        # - chip_row 为 None 且 flat_fp 为 None（无 snap）：chip_status=None
         chip_row = chip_map.get(inst_id)
         chip_status_struct: dict[str, Any] | None = _build_chip_status_struct(chip_row)
+        if chip_status_struct is None and flat_fp is not None:
+            # 有快照但无 chip 记录：chip job 尚未执行（与详情 API resolve_chip_status 一致）
+            from app.schemas.first_pyramid import ChipStatus as _ChipStatusSchema
+            chip_status_struct = _ChipStatusSchema(
+                state="pending",
+                reasonCode="CHIP_JOB_PENDING",
+                reasonText="筹码任务尚未执行",
+                computedAt=None,
+            ).model_dump(by_alias=False)
         if flat_fp is not None:
             if chip_row is not None and chip_row.status == "succeeded":
                 chip_payload = chip_row.chip_payload

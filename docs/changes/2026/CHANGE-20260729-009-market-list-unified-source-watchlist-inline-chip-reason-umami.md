@@ -199,3 +199,14 @@
 
 - PG 集成测试待 CI 临时 Postgres 容器运行（`PURE_UNIT_TEST=1` 时 SKIP）
 - 浏览器 AUTH_WALL 受限，UI 视觉验收待生产部署后通过真实用户登录验证
+
+## 勘误（2026-07-30 由 CHANGE-20260730-011 修正）
+
+**CHANGE-009 中"Umami 访客分析替代 GoAccess"实际只完成了 Umami 容器部署和 nginx tracking script 注入，但 `/admin/visitors` API 与 `AdminVisitorsPage.tsx` 仍硬编码 GoAccess**，导致截图证明访问统计页面仍读取 GoAccess。具体遗漏：
+
+1. `backend/app/api/admin_visitors.py` 仍硬编码 `GOACCESS_REPORT_PATH="/srv/goaccess/report.json"`，解析 GoAccess JSON
+2. `backend/app/schemas/visitors.py` 的 `data_source` 仍返回 `goaccess_json` / `empty` / `error`
+3. `frontend/src/pages/AdminVisitorsPage.tsx` 标题仍为"访问统计"、描述"GoAccess 报告"，仅处理 `goaccess_json` 数据源
+4. `docker-compose.prod.yml` 已移除 GoAccess 容器，但后端未相应切换数据源
+
+CHANGE-20260730-011 修复了上述遗漏，新增 `UmamiAnalyticsAdapter` 通过独立只读连接查询 umami 数据库，重写 `admin_visitors.py` 和 `AdminVisitorsPage.tsx`，data_source 改为 `umami` / `empty` / `error`。详见 `docs/changes/2026/CHANGE-20260730-011-umami-page-migration-chip-status-board-v1.md`。

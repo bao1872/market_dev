@@ -80,9 +80,9 @@ class MarketStockRow(BaseModel):
     chip_status: dict[str, Any] | None = Field(
         None,
         description=(
-            "筹码共识结构化状态："
-            "{status, reason_code, actual_bars, required_bars, reason_text, computed_at}；"
-            "无 chip 记录时为 None"
+            "[CHANGE-20260730-010] 筹码共识结构化状态（camelCase，与 /first-pyramid 详情 API 同口径）："
+            "{state, reasonCode, reasonText, computedAt, actualBars, requiredBars, fullQualityBars}；"
+            "无 chip 记录且无快照时为 None；有快照但 chip job 未跑时 state=pending"
         ),
     )
 

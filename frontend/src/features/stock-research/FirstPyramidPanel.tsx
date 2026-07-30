@@ -301,8 +301,11 @@ function MomentumVisualCard({ vm, variant }: { vm: FirstPyramidVM['momentum']; v
 }
 
 /** 筹码卡：POC位置轨道 + 距离% + 峰数量
- * [CHANGE-20260729-004 P0-2] 当筹码不可用时，显示 chipStatus.reasonText 真实原因，
- * 不再统一显示"暂无有效筹码峰"。
+ * [CHANGE-20260729-004 P0-2 + CHANGE-20260730-010] 当筹码不可用时：
+ * - 显示 chipStatus.reasonText 真实原因（不再统一显示"暂无有效筹码峰"）
+ * - state=pending 显示"筹码任务尚未执行"
+ * - state=failed 显示"筹码计算失败"+ reasonText
+ * - state=unavailable + M15_BARS_INSUFFICIENT 显示 actualBars/requiredBars/fullQualityBars
  */
 function ChipVisualCard({
   vm,
@@ -314,12 +317,42 @@ function ChipVisualCard({
   if (!vm || !vm.available || vm.pocPrice === null) {
     // 不可用时展示结构化原因（来自 chipStatus），缺省才退回中性文案
     const fallbackText = chipStatus?.reasonText ?? '可选维度 · 暂无有效筹码峰'
+    const stateLabel = chipStatus?.state === 'pending'
+      ? '筹码任务尚未执行'
+      : chipStatus?.state === 'failed'
+        ? '筹码计算失败'
+        : chipStatus?.state === 'stale'
+          ? '筹码结果已过期'
+          : null
     return (
       <div className={`${styles.dimCard} ${styles.dimChip} ${styles.optional}`}>
         <div className={styles.dimHeader}>
           <span className={styles.dimName}>筹码共识</span>
+          {stateLabel && <span className={styles.dimBadge}>{stateLabel}</span>}
         </div>
         <div className={styles.dimEmpty}>{fallbackText}</div>
+        {/* [CHANGE-20260730-010] M15_BARS_INSUFFICIENT 时展示诊断字段 */}
+        {chipStatus?.reasonCode === 'M15_BARS_INSUFFICIENT'
+          && chipStatus.actualBars !== null
+          && chipStatus.actualBars !== undefined && (
+          <div className={styles.metricRow}>
+            <span className={styles.metric}>
+              实际 <b>{chipStatus.actualBars}</b> 根
+            </span>
+            {chipStatus.requiredBars !== null
+              && chipStatus.requiredBars !== undefined && (
+              <span className={styles.metric}>
+                最低 <b>{chipStatus.requiredBars}</b> 根
+              </span>
+            )}
+            {chipStatus.fullQualityBars !== null
+              && chipStatus.fullQualityBars !== undefined && (
+              <span className={styles.metric}>
+                完整门槛 <b>{chipStatus.fullQualityBars}</b> 根
+              </span>
+            )}
+          </div>
+        )}
       </div>
     )
   }

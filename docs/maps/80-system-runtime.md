@@ -162,6 +162,18 @@
 
 > GoAccess 容器和 `goaccess_reports` / `nginx_logs` 共享卷已从 `docker-compose.prod.yml` 中移除；`deploy_live_runtime.sh` 的容器启动列表也已移除 `goaccess` 改为 `umami`。
 
+**[CHANGE-20260730-010] `/admin/visitors` API 与前端页面真正迁移到 Umami（CHANGE-009 遗漏修复）**
+
+| 维度 | 修改前 | 修改后 |
+|---|---|---|
+| 后端 `admin_visitors.py` | 硬编码 GoAccess：`GOACCESS_REPORT_PATH=/srv/goaccess/report.json`，解析 GoAccess JSON | 调用 `UmamiAnalyticsAdapter.fetch_umami_report()`，独立只读连接查询 `umami` 数据库 |
+| 后端 Schema `visitors.py` | `data_source` 值为 `goaccess_json` / `empty` / `error` | `data_source` 值为 `umami` / `empty` / `error`，`generated_at` 为真实查询时间 |
+| 前端 `AdminVisitorsPage.tsx` | 标题"访问统计"，描述"GoAccess 报告"，错误指向 GoAccess | 标题"Umami 访客分析"，错误指向 Umami 服务，新增"打开详细分析"按钮跳转 `/umami/` |
+| Umami 凭据 | 仅部署容器 | backend 通过 `UMAMI_DATABASE_URL` 独立只读连接查询（不接触 Umami admin 密码） |
+| Nginx access.log | 保留 + logrotate（运维用） | 保留 + logrotate（运维用） |
+
+凭据位置：`/etc/market-dev/market.env` 的 `UMAMI_DATABASE_URL`（生产注入）和 `UMAMI_WEBSITE_ID`。前端不接触数据库密码。
+
 ## 8. 代码和承载边界
 
 本地原生进程与远程容器共同使用：

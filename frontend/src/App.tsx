@@ -16,6 +16,7 @@ import { legacyRedirectEntries, DEFAULT_ENTRY } from './navigation/appNavigation
 import LoginPage from './pages/LoginPage'
 import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
 import MarketWorkspacePage from './features/market-workspace/MarketWorkspacePage'
+import BoardAnalysisPage from './pages/BoardAnalysisPage'
 import ReplayPage from './pages/ReplayPage'
 import StockDetailPage from './pages/StockDetailPage'
 import CaptureStockPage from './pages/CaptureStockPage'
@@ -198,6 +199,9 @@ export const routeConfig: RouteObject[] = [
             element: <CapabilityRoute capability="market_data" />,
             children: [
               { path: '/stock/:symbol', element: <StockDetailPage /> },
+              // [CHANGE-20260730-011] 板块分析 V1 页面（任何 market_data 用户可读）
+              { path: '/boards', element: <BoardAnalysisPage /> },
+              { path: '/boards/:boardId', element: <BoardAnalysisPage /> },
             ],
           },
           // research_replay: 复盘入口（/replay）

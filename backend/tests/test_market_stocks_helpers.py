@@ -1,15 +1,16 @@
 """market_stocks_service 纯单元测试（不连接数据库）。
 
-测试内容（CHANGE-20260729-009）：
+测试内容（CHANGE-20260729-009 + CHANGE-20260730-010）：
 1. _compute_factor_ready：各种输入场景的返回值
    - flat_fp=None + daily_bar_count 不同值 → INSUFFICIENT_DAILY_BARS / COMPUTE_FAILED / no_snapshot
    - flat_fp 存在但维度缺失 → trend_missing / structure_missing / momentum_missing
    - 全部维度就绪 → (True, None, None, None)
-2. _build_chip_status_struct：各种 chip 状态的结构化输出
+2. _build_chip_status_struct：各种 chip 状态的结构化输出（camelCase，与详情 API 同口径）
    - None → None
-   - succeeded → status/reason_text 正确
-   - skipped + M15_BARS_INSUFFICIENT → reason_code/actual_bars/required_bars 正确
-   - failed → CHIP_ERROR
+   - succeeded + chip.available=True → state=ready
+   - succeeded + chip.available=False → state=unavailable, NO_VALID_PEAK
+   - skipped + M15_BARS_INSUFFICIENT → state=unavailable, actualBars/requiredBars/fullQualityBars
+   - failed → state=failed, CHIP_JOB_FAILED
 3. _MIN_DAILY_BARS_FOR_FACTOR / _CHIP_MIN_15M_BARS 常量值正确
 
 运行方式：
@@ -18,7 +19,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from app.services.market_stocks_service import (
@@ -30,7 +31,6 @@ from app.services.market_stocks_service import (
     _build_chip_status_struct,
     _compute_factor_ready,
 )
-
 
 # ===== _compute_factor_ready 测试 =====
 
@@ -187,21 +187,35 @@ def _make_chip_row(
 
 
 class TestBuildChipStatusStruct:
-    """_build_chip_status_struct 各种场景。"""
+    """_build_chip_status_struct 各种场景（[CHANGE-20260730-010] camelCase）。"""
 
     def test_none_returns_none(self):
         """chip_row=None → None。"""
         assert _build_chip_status_struct(None) is None
 
-    def test_succeeded(self):
-        """succeeded 状态 → status/reason_text 正确，required_bars=None。"""
-        row = _make_chip_row("succeeded", chip_payload={"consensus": 0.8})
+    def test_succeeded_with_available_chip(self):
+        """succeeded + chip.available=True → state=ready。"""
+        row = _make_chip_row(
+            "succeeded",
+            chip_payload={"chip": {"available": True, "poc_price": 10.5}},
+        )
         result = _build_chip_status_struct(row)
         assert result is not None
-        assert result["status"] == "succeeded"
-        assert result["reason_text"] == "已计算"
-        assert result["required_bars"] is None
-        assert result["reason_code"] is None
+        assert result["state"] == "ready"
+        assert result["reasonCode"] is None
+        assert result["reasonText"] == "已计算"
+        assert result["requiredBars"] is None
+
+    def test_succeeded_with_unavailable_chip(self):
+        """succeeded + chip.available=False → state=unavailable, NO_VALID_PEAK。"""
+        row = _make_chip_row(
+            "succeeded",
+            chip_payload={"chip": {"available": False}},
+        )
+        result = _build_chip_status_struct(row)
+        assert result is not None
+        assert result["state"] == "unavailable"
+        assert result["reasonCode"] == "NO_VALID_PEAK"
 
     def test_skipped_m15_insufficient_from_payload(self):
         """skipped + payload.reason=M15_BARS_INSUFFICIENT → 结构化状态。"""
@@ -212,12 +226,14 @@ class TestBuildChipStatusStruct:
         )
         result = _build_chip_status_struct(row)
         assert result is not None
-        assert result["status"] == "skipped"
-        assert result["reason_code"] == "M15_BARS_INSUFFICIENT"
-        assert result["actual_bars"] == 354
-        assert result["required_bars"] == _CHIP_MIN_15M_BARS
-        assert "15 分钟数据不足" in result["reason_text"]
-        assert "354" in result["reason_text"]
+        assert result["state"] == "unavailable"
+        assert result["reasonCode"] == "M15_BARS_INSUFFICIENT"
+        assert result["actualBars"] == 354
+        assert result["requiredBars"] == _CHIP_MIN_15M_BARS
+        assert result["fullQualityBars"] == 4000
+        assert "15分钟数据不足" in result["reasonText"]
+        assert "354" in result["reasonText"]
+        assert "4000" in result["reasonText"]
 
     def test_skipped_m15_insufficient_from_error_message(self):
         """skipped + 无 payload.reason 但 error_message 含 '15m' → 解析为 M15_BARS_INSUFFICIENT。"""
@@ -228,11 +244,11 @@ class TestBuildChipStatusStruct:
         )
         result = _build_chip_status_struct(row)
         assert result is not None
-        assert result["reason_code"] == "M15_BARS_INSUFFICIENT"
-        assert result["required_bars"] == _CHIP_MIN_15M_BARS
+        assert result["reasonCode"] == "M15_BARS_INSUFFICIENT"
+        assert result["requiredBars"] == _CHIP_MIN_15M_BARS
 
     def test_skipped_other_reason(self):
-        """skipped + 非 15m 原因 → 通用 skipped。"""
+        """skipped + 非 15m 原因 → 通用 unavailable + 原始 reasonCode。"""
         row = _make_chip_row(
             "skipped",
             chip_payload={"reason": "OTHER_REASON"},
@@ -240,12 +256,12 @@ class TestBuildChipStatusStruct:
         )
         result = _build_chip_status_struct(row)
         assert result is not None
-        assert result["status"] == "skipped"
-        assert result["reason_code"] == "OTHER_REASON"
-        assert result["reason_text"] == "some other reason"
+        assert result["state"] == "unavailable"
+        assert result["reasonCode"] == "OTHER_REASON"
+        assert result["reasonText"] == "some other reason"
 
     def test_failed(self):
-        """failed 状态 → CHIP_ERROR。"""
+        """failed 状态 → CHIP_JOB_FAILED。"""
         row = _make_chip_row(
             "failed",
             chip_payload=None,
@@ -253,35 +269,34 @@ class TestBuildChipStatusStruct:
         )
         result = _build_chip_status_struct(row)
         assert result is not None
-        assert result["status"] == "failed"
-        assert result["reason_code"] == "CHIP_ERROR"
-        assert result["reason_text"] == "compute error: division by zero"
-        assert result["required_bars"] == _CHIP_MIN_15M_BARS
+        assert result["state"] == "failed"
+        assert result["reasonCode"] == "CHIP_JOB_FAILED"
+        assert result["reasonText"] == "compute error: division by zero"
 
     def test_failed_no_error_message(self):
         """failed + 无 error_message → 通用失败文本。"""
         row = _make_chip_row("failed", chip_payload=None, error_message=None)
         result = _build_chip_status_struct(row)
         assert result is not None
-        assert result["status"] == "failed"
-        assert result["reason_text"] == "计算失败"
+        assert result["state"] == "failed"
+        assert result["reasonText"] == "计算失败"
 
     def test_created_at_conversion(self):
-        """created_at 正确转换为 ISO 字符串。"""
+        """created_at 正确转换为 ISO 字符串（computedAt）。"""
         dt = datetime(2026, 7, 29, 15, 30, 0, tzinfo=UTC)
-        row = _make_chip_row("succeeded", chip_payload={}, error_message=None, created_at=dt)
+        row = _make_chip_row("succeeded", chip_payload={"chip": {"available": True}}, error_message=None, created_at=dt)
         result = _build_chip_status_struct(row)
         assert result is not None
-        assert result["computed_at"] is not None
+        assert result["computedAt"] is not None
         # 应包含 2026-07-29 日期部分
-        assert "2026-07-29" in result["computed_at"]
+        assert "2026-07-29" in result["computedAt"]
 
     def test_no_created_at(self):
-        """created_at=None → computed_at=None。"""
-        row = _make_chip_row("succeeded", chip_payload={}, error_message=None, created_at=None)
+        """created_at=None → computedAt=None。"""
+        row = _make_chip_row("succeeded", chip_payload={"chip": {"available": True}}, error_message=None, created_at=None)
         result = _build_chip_status_struct(row)
         assert result is not None
-        assert result["computed_at"] is None
+        assert result["computedAt"] is None
 
 
 class TestChipMinBarsConstant:

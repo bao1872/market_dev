@@ -242,3 +242,66 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - 000021 15m bars=354，不满足 500 最低门槛 → `chip_status=skipped + reason_code=M15_BARS_INSUFFICIENT + actual_bars=354 + required_bars=500`
 - 错误消息明确两个门槛的用途，避免混淆
 - 不修改门槛值，只统一文档与文案
+
+### 11.8 板块分析 V1（CHANGE-20260730-011）
+
+**核验状态：已基于代码核验（2026-07-30）**
+
+#### 数据模型
+
+- 新增表 `board_analysis_snapshots`（migration `074_board_analysis_v1`）
+- 单表设计：每条记录既是 run 又是 snapshot，含 `status/started_at/finished_at` 字段
+- 唯一键 `(trade_date, board_id, algorithm_version)` 保证幂等
+- 复用 `factor_publications` 表发布指针：`publication_kind=market_aggregation`、`scope_type=board`、`scope_key=board_id::text`、`data_run_id=board_analysis_snapshot.id`
+
+#### 关键代码入口
+
+- ORM：`backend/app/models/board_analysis_snapshot.py`
+- Schema：`backend/app/schemas/board_analysis.py`（BoardAnalysisSnapshotDTO / ListResponse / DetailResponse）
+- Service：`backend/app/services/board_analysis_service.py`
+  - 常量：`BOARD_ANALYSIS_ALGORITHM_VERSION="board-v1-20260730"` / `BOARD_ANALYSIS_MIN_COVERAGE=0.95`
+  - 纯函数：`compute_board_payload(flat_list)` 计算分布指标
+  - 入口：`compute_board_analysis(session, board_id, trade_date, ...)` 单板块计算
+  - 批量：`compute_all_boards(session, trade_date, ...)` 行业+概念批量
+  - 发布：`publish_board_analysis(session, snapshot)` 写入 factor_publications 指针
+  - 查询：`list_board_analyses` / `get_board_analysis_detail` / `compute_is_stale` / `check_is_published`
+- API：`backend/app/api/board_analysis.py`
+  - 用户路由 `GET /api/v1/boards/analysis` 列表分页
+  - 用户路由 `GET /api/v1/boards/{board_id}/analysis` 单板块详情
+  - 管理路由 `POST /api/v1/admin/boards/{board_id}/analysis/compute` 触发单板块
+  - 管理路由 `POST /api/v1/admin/boards/analysis/compute-all` 批量触发（canary/全量）
+- CLI：`backend/scripts/board_analysis_cli.py`（`--canary` / `--all` / `--type` / `--limit` / `--trade-date` / `--publish` / `--no-publish` / `--dry-run`）
+
+#### 输入门禁（严格遵循 PRD §6 板块分析 V1）
+
+1. 必须存在已发布 `stock_core` pointer（否则拒绝计算）
+2. `source_core_run_id = factor_publications.data_run_id`（kind=stock_core）
+3. 从 `summary_payload.first_pyramid_flat` 提取 99 个 fp_ 字段
+4. 退市股（`Instrument.status != 'active'`）不参与聚合，不进入 eligible_count/missing_count
+5. 行业与概念分开计算，成员和股票因子必须同一 trade_date，禁止使用未来数据
+
+#### 指标 payload（7 大维度）
+
+- `trend_dist`：up/down/neutral 计数
+- `trend_strength`：avg/p25/p50/p75
+- `vwap_dev_pct`：avg/p25/p50/p75
+- `structure`：swing/alignment 分布 + avg_active_ob_count
+- `structure_events`：BOS/CHoCH/OB/EQH/EQL 计数与事件率（rate = 有事件数/ready_members）
+- `momentum`：positive/negative/neutral + squeeze/released/normal + enhancing/fading/flat + avg_sqzmom
+- `volume`：high/low/normal/unknown + avg_volume_ratio20/200 + 20/200 分位分布
+- `total_members` / `ready_members` / `missing_members`：成员汇总
+
+#### 发布门禁
+
+- `coverage_ratio = ready_count / eligible_count`（eligible = active 股票数，含数据不足）
+- `coverage_ratio >= 0.95` 才写入 `factor_publications` 指针
+- 不足时保存 `partial` 结果但不切 pointer（可重复计算，幂等）
+
+#### 前端入口
+
+- 路由 `/boards`（列表）+ `/boards/:boardId`（详情）：`frontend/src/pages/BoardAnalysisPage.tsx`
+- API 客户端：`frontend/src/api/endpoints.ts` 中的 `getBoardAnalysisList` / `getBoardAnalysisDetail` / `triggerComputeBoard` / `triggerComputeAllBoards`
+- Hooks：`useBoardAnalysisList` / `useBoardAnalysisDetail` / `useTriggerComputeBoard` / `useTriggerComputeAllBoards`
+- Admin 可触发 Canary（每类型 5 个）和全量计算
+- 列表显示覆盖率徽标、状态、过期、已发布
+- 详情显示 4 维分布（趋势/结构/动量/量能）+ 结构事件率 + payload JSON

@@ -135,3 +135,64 @@
 - chip.core_run_id = snapshot_run_id（不指向 SchedulerJobRun.id）。
 - chip 严格按 instrument_id + trade_date + snapshot_run_id + algorithm_version + status=succeeded 匹配。
 
+## 5. 板块分析 V1（CHANGE-20260730-011）
+
+### BA-01：定位与门禁
+
+板块分析 V1 是基于已发布 `stock_core` 数据的衍生分析，独立于 chip 共识。chip 是可选维度，不作为板块核心门禁。
+
+输入门禁：
+
+1. 必须存在已发布 `stock_core` pointer（否则拒绝计算）
+2. 只纳入 `published stock_core pointer` 同 run、`core_factor_ready=true`、`valid_for_market_aggregation=true` 的股票
+3. 退市股（`Instrument.status != 'active'`）不参与聚合，不进入 `eligible_count` / `missing_count`
+4. 数据不足股票进入 coverage 分母说明，但不参与有效统计
+5. 行业与概念分开计算；成员和股票因子必须同一 `trade_date`，禁止使用未来数据
+
+### BA-02：数据模型
+
+新增 `board_analysis_snapshots` 表（migration `074_board_analysis_v1`）：
+
+- 单表设计：每条记录既是 run 又是 snapshot（含 `status` / `started_at` / `finished_at`）
+- 唯一键 `(trade_date, board_id, algorithm_version)` 保证幂等
+- 复用 `factor_publications` 表发布指针：`publication_kind=market_aggregation`、`scope_type=board`、`scope_key=board_id::text`、`data_run_id=board_analysis_snapshot.id`
+- `algorithm_version="board-v1-20260730"`，`parameter_hash` 由算法版本+固定参数 SHA-256 截断
+- 失败的单板块不阻塞其他板块
+
+### BA-03：指标 payload（V1）
+
+V1 输入仅趋势、结构、动量、量能、结构事件和权威行业/概念成员关系。指标 payload 至少包括：
+
+- **趋势**：上/下/中性比例、平均 VWAP 偏离、强度分布（avg/p25/p50/p75）
+- **结构**：主要结构方向（swing up/down/neutral）、对齐状态（aligned/misaligned/neutral）、平均活跃 OB 数
+- **结构事件**：BOS/CHoCH/OB 方向计数、EQH/EQL presence、事件率（rate = 有事件数 / ready_members）
+- **动量**：正/负/中性比例、挤压/释放/正常、增强/减弱/flat 比例、平均 SQZMOM
+- **量能**：放量/缩量/正常/未知比例、20/200 日平均 volume_ratio、20/200 日分位分布（5 桶）
+- **汇总**：`total_members` / `ready_members` / `missing_members` / `missing_reasons`
+
+禁止使用不可解释的综合评分；排序只按单一公开指标或明确可配置权重。
+
+### BA-04：发布门禁
+
+- `coverage_ratio = ready_count / eligible_count`
+- `coverage >= 0.95` 才可正式发布（写入 `factor_publications` 指针）
+- 不足时保存 `partial` 结果但不切 pointer（可重复计算，幂等）
+- 发布只做小事务原子切换指针，不复制数据
+- pointer 不得倒退到旧 run
+
+### BA-05：API 与 UI
+
+- 用户路由 `GET /api/v1/boards/analysis` 列表分页（按 type / trade_date / sort 过滤）
+- 用户路由 `GET /api/v1/boards/{board_id}/analysis` 单板块详情（含完整 payload）
+- 管理路由 `POST /api/v1/admin/boards/{board_id}/analysis/compute` 单板块触发
+- 管理路由 `POST /api/v1/admin/boards/analysis/compute-all` 批量触发（canary/全量）
+- 前端 `/boards` 列表页 + `/boards/:boardId` 详情页；行业/概念切换、覆盖率、四维分布、事件清单；不做复杂动画
+
+### BA-06：Canary → 全量流程
+
+1. 先 5 个行业 + 5 个概念 canary，核对成员数和 SQL
+2. canary 通过后全量计算并发布 pointer
+3. 单板块失败不阻塞其他板块
+4. CLI：`scripts/first_pyramid_history_backfill_cli.py` 之外的 `backend/scripts/board_analysis_cli.py`
+   - `--canary`（每类型 5 个）/ `--all` / `--type` / `--limit` / `--trade-date` / `--publish` / `--no-publish` / `--dry-run`
+

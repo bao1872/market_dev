@@ -214,5 +214,59 @@ ssh panji-prod "docker exec trading-backend alembic upgrade head"
 
 # 4. 验证
 ssh panji-prod "curl -s http://127.0.0.1:8000/version | python -m json.tool"
-# 期望: runtime_git_sha=<SHA>, alembic_revision=073_incremental_factor_publication
+# 期望: runtime_git_sha=<SHA>, alembic_revision=074_board_analysis_v1
 ```
+
+### 9. 板块分析 V1 计算（CHANGE-20260730-011）
+
+**前置条件**：已发布 `stock_core` pointer（盘后核心计算完成并发布）。
+
+```bash
+# 9.1 Canary（每类型 5 个板块，行业 + 概念）
+ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli --canary --publish"
+# 期望输出：succeeded=10, failed=0, published>=10 (若 coverage >= 0.95)
+
+# 9.2 全量计算（行业 + 概念，所有板块）
+ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli --all --publish"
+# 期望输出：succeeded=N (所有板块), failed=0
+
+# 9.3 限定单一类型
+ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli --all --type industry --publish"
+ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli --all --type concept --publish"
+
+# 9.4 指定交易日（默认从最新 stock_core pointer 推断）
+ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli --all --trade-date 2026-07-29 --publish"
+
+# 9.5 Dry-run（只列出板块，不写入）
+ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli --canary --dry-run"
+
+# 9.6 只计算不发布（coverage 不足时保存 partial 但不切 pointer）
+ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli --all --no-publish"
+```
+
+**验证**（API + 数据库）：
+
+```bash
+# API 列表（需 admin token，任何登录用户可读）
+ssh panji-prod "curl -s 'http://127.0.0.1:8000/api/v1/boards/analysis?type=industry&page=1&page_size=5' -H 'Authorization: Bearer <token>' | python -m json.tool"
+
+# 数据库直查
+ssh panji-prod 'docker exec trading-postgres psql -U bz_stock -d bz_stock -c "
+  SELECT board_type, board_name, status, coverage_ratio, ready_count, eligible_count, missing_count
+  FROM board_analysis_snapshots
+  WHERE trade_date = (SELECT MAX(trade_date) FROM board_analysis_snapshots)
+  ORDER BY board_type, coverage_ratio DESC
+  LIMIT 10;"'
+
+# 发布指针
+ssh panji-prod 'docker exec trading-postgres psql -U bz_stock -d bz_stock -c "
+  SELECT scope_key, trade_date, coverage_ratio, algorithm_version, published_at
+  FROM factor_publications
+  WHERE scope_type = '\''board'\'' AND publication_kind = '\''market_aggregation'\''
+  ORDER BY trade_date DESC LIMIT 10;"'
+```
+
+**门禁**：
+- `coverage_ratio >= 0.95` 才写入 `factor_publications` pointer
+- 不足时保存 `partial` 结果但不发布（可重复计算，幂等）
+- 退市股（`Instrument.status != 'active'`）不参与聚合，不进入 `eligible_count`

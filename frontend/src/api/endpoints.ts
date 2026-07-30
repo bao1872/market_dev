@@ -1958,16 +1958,17 @@ export interface MarketStockRow {
   /** 最低要求日线数（=60，仅 INSUFFICIENT_DAILY_BARS/COMPUTE_FAILED 时有值） */
   factor_required_bars: number | null
   /**
-   * 筹码共识结构化状态：{status, reason_code, actual_bars, required_bars, reason_text, computed_at}。
-   * 无 chip 记录时为 null。
+   * [CHANGE-20260730-010] 筹码共识结构化状态（camelCase，与 /first-pyramid 详情 API 同口径）。
+   * 无 chip 记录且无快照时为 null；有快照但 chip job 未跑时 state=pending。
    */
   chip_status: {
-    status: string
-    reason_code: string | null
-    actual_bars: number | null
-    required_bars: number | null
-    reason_text: string | null
-    computed_at: string | null
+    state: 'ready' | 'pending' | 'failed' | 'unavailable' | 'stale'
+    reasonCode: string | null
+    reasonText: string | null
+    computedAt: string | null
+    actualBars?: number | null
+    requiredBars?: number | null
+    fullQualityBars?: number | null
   } | null
 }
 
@@ -2633,19 +2634,152 @@ export interface VisitorSummary {
   hourly_trend: VisitorMetricItem[]
 }
 
-/** [Gate5] /admin/visitors 响应体 */
+/** [CHANGE-20260730-010] /admin/visitors 响应体（Umami 数据源） */
 export interface VisitorReport {
   today: VisitorSummary
   seven_days: VisitorSummary
   thirty_days: VisitorSummary
   generated_at: string | null
-  data_source: 'goaccess_json' | 'empty' | 'error'
+  data_source: 'umami' | 'empty' | 'error'
   error_message: string | null
 }
 
 /** [Gate5] 查询访问统计报告（admin only） */
 export async function getAdminVisitors(): Promise<VisitorReport> {
   const { data } = await apiClient.get<VisitorReport>('/admin/visitors')
+  return data
+}
+
+// ============================================================
+// ===== [CHANGE-20260730-011] 板块分析 V1 端点 =====
+// ============================================================
+
+/** 板块分析快照 DTO（与后端 BoardAnalysisSnapshotDTO 对齐） */
+export interface BoardAnalysisSnapshotDTO {
+  id: string
+  trade_date: string
+  board_id: string
+  board_type: 'industry' | 'concept'
+  board_name: string
+  source_core_run_id: string
+  algorithm_version: string
+  parameter_hash: string
+  eligible_count: number
+  ready_count: number
+  coverage_ratio: number
+  missing_count: number
+  missing_reasons: Record<string, number>
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'partial'
+  payload: Record<string, unknown>
+  error_message: string | null
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+  is_stale: boolean
+  is_published: boolean
+}
+
+/** 板块分析列表响应 */
+export interface BoardAnalysisListResponse {
+  items: BoardAnalysisSnapshotDTO[]
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+}
+
+/** 板块分析详情响应 */
+export interface BoardAnalysisDetailResponse {
+  snapshot: BoardAnalysisSnapshotDTO
+}
+
+/** 板块分析列表查询参数 */
+export interface BoardAnalysisListParams {
+  type?: 'industry' | 'concept'
+  trade_date?: string
+  sort?: 'coverage_desc' | 'coverage_asc' | 'name_asc' | 'ready_desc'
+  page?: number
+  page_size?: number
+}
+
+/** 查询板块分析列表 */
+export async function getBoardAnalysisList(
+  params?: BoardAnalysisListParams,
+  options?: { signal?: AbortSignal },
+): Promise<BoardAnalysisListResponse> {
+  const { data } = await apiClient.get<BoardAnalysisListResponse>('/boards/analysis', {
+    params,
+    signal: options?.signal,
+  })
+  return data
+}
+
+/** 查询单板块分析详情 */
+export async function getBoardAnalysisDetail(
+  boardId: string,
+  params?: { trade_date?: string },
+  options?: { signal?: AbortSignal },
+): Promise<BoardAnalysisDetailResponse> {
+  const { data } = await apiClient.get<BoardAnalysisDetailResponse>(
+    `/boards/${boardId}/analysis`,
+    { params, signal: options?.signal },
+  )
+  return data
+}
+
+/** [Admin] 触发单板块分析计算 */
+export async function triggerComputeBoard(
+  boardId: string,
+  params?: { trade_date?: string; publish?: boolean },
+): Promise<{
+  board_id: string
+  trade_date: string
+  status: string
+  coverage_ratio: number
+  eligible_count: number
+  ready_count: number
+  published: boolean
+  snapshot_id: string
+}> {
+  const { data } = await apiClient.post(
+    `/admin/boards/${boardId}/analysis/compute`,
+    null,
+    { params },
+  )
+  return data
+}
+
+/** [Admin] 触发批量板块分析计算（canary + 全量） */
+export async function triggerComputeAllBoards(
+  params?: {
+    trade_date?: string
+    board_type?: 'industry' | 'concept'
+    limit?: number
+    publish?: boolean
+  },
+): Promise<{
+  trade_date: string
+  board_type_filter: string | null
+  succeeded: number
+  failed: number
+  published: number
+  coverage_below_threshold: number
+  details: Array<{
+    board_id: string
+    board_name: string
+    board_type: string
+    status: string
+    coverage: number
+    published: boolean
+  }>
+  errors: Array<{ board_id: string; board_name: string; error: string }>
+}> {
+  const { data } = await apiClient.post(
+    '/admin/boards/analysis/compute-all',
+    null,
+    { params },
+  )
   return data
 }
 
@@ -3383,12 +3517,16 @@ export interface FirstPyramidSnapshot {
   algorithmVersion: string
 }
 
-/** [CHANGE-20260729-004 P0-2] 筹码共识结构化状态 */
+/** [CHANGE-20260729-004 P0-2 + CHANGE-20260730-010] 筹码共识结构化状态 */
 export interface ChipStatus {
   state: 'ready' | 'pending' | 'failed' | 'unavailable' | 'stale'
   reasonCode: string | null
   reasonText: string | null
   computedAt: string | null
+  /** [CHANGE-20260730-010] 诊断字段：M15_BARS_INSUFFICIENT 时填充 */
+  actualBars?: number | null
+  requiredBars?: number | null
+  fullQualityBars?: number | null
 }
 
 /** AdminAtomicFactDebugItem - 管理员调试：单事实可追溯信息（保留内部 ID / 路径） */

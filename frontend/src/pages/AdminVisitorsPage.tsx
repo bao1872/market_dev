@@ -1,15 +1,16 @@
-// [Gate5] 访问统计页（admin only）
-// 对应后端：GET /admin/visitors（读取 GoAccess JSON 报告）
+// [CHANGE-20260730-010] 访问统计页（admin only）
+// 从 GoAccess 迁移到 Umami：
+// - 后端数据来源改为 Umami 数据库（umami_analytics_adapter）
+// - data_source 改为 umami / empty / error
+// - 标题和文案改为 "Umami 访客分析"
+// - 新增 "打开详细分析" 按钮跳转 /umami/
 //
 // 用法：
 // 1. 路由 /admin/visitors，受保护路由（ProtectedLayout + AdminRoute）
 // 2. 三个时间窗口：今日 / 7 日 / 30 日
-// 3. 每个窗口展示：PV/UV KPI + 热门页面 + 来源 + 状态码 + 设备/浏览器 + 时段趋势
+// 3. 每个窗口展示：PV/UV KPI + 热门页面 + 来源 + 设备/浏览器 + 时段趋势
 // 4. 状态完备：loading / empty / error / data
-// 5. IP 已匿名化（GoAccess --anonymize-ip），敏感 query 参数已脱敏（backend _sanitize_path）
-//
-// 依赖 hooks：
-// - useAdminVisitors：5 分钟轮询拉取 /admin/visitors
+// 5. 敏感 query 参数已脱敏（backend _sanitize_path）
 
 import { useState } from 'react'
 import { useAdminVisitors } from '@/hooks/useApi'
@@ -102,13 +103,6 @@ function SummarySection({ label, summary }: { label: string; summary: VisitorSum
         emptyText="暂无来源数据"
       />
 
-      {/* 状态码 */}
-      <MetricList
-        title="状态码分布"
-        items={summary.status_codes}
-        emptyText="暂无状态码数据"
-      />
-
       {/* 设备 */}
       <MetricList
         title="设备类型"
@@ -143,12 +137,21 @@ export default function AdminVisitorsPage() {
     <>
       <div className="page-head">
         <div>
-          <h1 className="page-title">访问统计</h1>
+          <h1 className="page-title">Umami 访客分析</h1>
           <div className="page-desc">
-            [Gate5] GoAccess 报告 · IP 已匿名化 · 敏感参数已脱敏 · 5 分钟刷新
+            [CHANGE-20260730-010] Umami 数据库 · 敏感参数已脱敏 · 5 分钟刷新
           </div>
         </div>
         <div className="actions">
+          <a
+            href="/umami/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn btn-secondary"
+            title="打开 Umami 详细分析面板"
+          >
+            打开详细分析
+          </a>
           {report?.generated_at && (
             <span className="chip" title="报告生成时间">
               生成于 {formatShanghaiTime(report.generated_at)}
@@ -185,11 +188,11 @@ export default function AdminVisitorsPage() {
           <div className="empty-state">
             {import.meta.env.DEV
               ? '本地不生成访问统计'
-              : '访问统计服务异常'}
+              : 'Umami 访客分析服务异常'}
             <div className="hint">
               {import.meta.env.DEV
-                ? '本地开发环境不运行 GoAccess 容器，请在生产环境查看访问统计。'
-                : `生产环境请联系管理员确认 goaccess 容器已启动。${visitorsQuery.error?.message ? `（${visitorsQuery.error.message}）` : ''}`}
+                ? '本地开发环境未配置 UMAMI_DATABASE_URL，请在生产环境查看访问统计。'
+                : `生产环境请联系管理员确认 Umami 容器已启动且 market.env 已配置 UMAMI_DATABASE_URL。${visitorsQuery.error?.message ? `（${visitorsQuery.error.message}）` : ''}`}
             </div>
           </div>
         </div>
@@ -201,21 +204,21 @@ export default function AdminVisitorsPage() {
             {import.meta.env.DEV
               ? '本地不生成访问统计'
               : report.data_source === 'error'
-                ? '访问统计服务异常'
-                : '访问统计报告未生成'}
+                ? 'Umami 访客分析服务异常'
+                : 'Umami 访客分析未启用'}
             <div className="hint">
               {import.meta.env.DEV
-                ? '本地开发环境不运行 GoAccess 容器，请在生产环境查看访问统计。'
+                ? '本地开发环境未配置 UMAMI_DATABASE_URL，请在生产环境查看访问统计。'
                 : report.error_message
                   ? report.error_message
-                  : '生产环境请确认 goaccess 容器已启动且 Nginx access.log 卷已正确挂载。'}
+                  : '生产环境请确认 Umami 容器已启动且 market.env 已配置 UMAMI_DATABASE_URL 和 UMAMI_WEBSITE_ID。'}
             </div>
           </div>
         </div>
       )}
 
       {/* 正常数据展示 */}
-      {report && report.data_source === 'goaccess_json' && (
+      {report && report.data_source === 'umami' && (
         <SummarySection
           label={WINDOW_LABELS[activeWindow]}
           summary={report[activeWindow]}

@@ -304,7 +304,13 @@ CHIP_STATUS_REASON_CODES: frozenset[str] = frozenset({
 
 
 class ChipStatus(BaseModel):
-    """[CHANGE-20260729-004 P0-2] 筹码共识结构化状态（替代统一"暂不可用"文案）。
+    """[CHANGE-20260729-004 P0-2 + CHANGE-20260730-010] 筹码共识结构化状态。
+
+    [CHANGE-20260730-010] 抽取为 /market/stocks 与 /first-pyramid 共享 schema：
+    - 列表 API 与详情 API 返回完全相同的 chipStatus 结构（camelCase）
+    - 新增 actualBars / requiredBars / fullQualityBars 诊断字段
+    - 000021 深科技场景：state=unavailable, reasonCode=M15_BARS_INSUFFICIENT,
+      actualBars=354, requiredBars=500, fullQualityBars=4000
 
     前端读取 reasonCode/reasonText 展示真实原因，state 用于决定渲染样式：
     - ready: 显示完整 chipConsensus（POC/峰数/距离）
@@ -333,6 +339,19 @@ class ChipStatus(BaseModel):
     computedAt: str | None = Field(
         None,
         description="chip 计算时间 ISO（来自 chip job 完成时间）",
+    )
+    # [CHANGE-20260730-010] 诊断字段：M15_BARS_INSUFFICIENT 时填充，便于前端精确展示
+    actualBars: int | None = Field(
+        None,
+        description="实际 15m bar 数（仅 M15_BARS_INSUFFICIENT 时填充）",
+    )
+    requiredBars: int | None = Field(
+        None,
+        description="最低要求 15m bar 数（=500，仅 M15_BARS_INSUFFICIENT 时填充）",
+    )
+    fullQualityBars: int | None = Field(
+        None,
+        description="完整质量门槛 15m bar 数（=4000，仅 M15_BARS_INSUFFICIENT 时填充）",
     )
 
 

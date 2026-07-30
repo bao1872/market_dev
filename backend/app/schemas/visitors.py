@@ -1,11 +1,13 @@
-"""[Gate5] 访问统计 Schema - GoAccess 报告聚合 DTO。
+"""[CHANGE-20260730-010] 访问统计 Schema - Umami 访客分析聚合 DTO。
 
-对应 docker-compose.prod.yml 中的 goaccess 服务生成的 JSON 报告。
-后端读取 /srv/goaccess/report.json 并按本 Schema 返回给前端。
+[CHANGE-20260730-010] 从 GoAccess 迁移到 Umami：
+- 数据来源改为 Umami 数据库（umami_analytics_adapter 查询）
+- 不再读取 /srv/goaccess/report.json
+- data_source 改为 umami / empty / error
 
 设计说明：
-- IP 已由 GoAccess 配置 anonymize-ip=true 匿名化（保留前 3 段，末段为 0）
-- 敏感 query 参数（token/jwt/password/key）由 nginx log_format 过滤后再写入 access.log
+- Umami 默认不存储完整 IP（session 表无 IP 字段），无需匿名化
+- 敏感 query 参数（token/jwt/password/key）由 _sanitize_path 脱敏
 - 本 Schema 仅做数据透传与字段命名规范化，不重新解析日志
 - 缺数据时返回 null（不静默省略），前端展示空态
 """
@@ -52,11 +54,11 @@ class VisitorReport(BaseModel):
 
     # 元信息
     generated_at: datetime | None = Field(
-        None, description="报告生成时间（GoAccess 输出时间）；None 表示无可用报告"
+        None, description="报告生成时间（查询 Umami 数据库时间）；None 表示无可用报告"
     )
     data_source: str = Field(
-        "goaccess_json",
-        description="数据来源：goaccess_json / empty / error",
+        "umami",
+        description="数据来源：umami / empty / error",
     )
     error_message: str | None = Field(
         None, description="data_source=error 时的错误说明；正常时为 None"
