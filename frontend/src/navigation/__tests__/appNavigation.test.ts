@@ -25,12 +25,13 @@ import {
 
 test('用户一级导航含行情/自选/复盘，不含消息/设置', () => {
   const paths = USER_NAV_ITEMS.map((i) => i.path)
-  assert.deepStrictEqual(paths, ['/market', '/market?scope=watchlist', '/replay'])
+  assert.deepStrictEqual(paths, ['/market', '/market?scope=watchlist', '/review'])
   assert.ok(!paths.includes('/messages'))
   assert.ok(!paths.includes('/settings'))
   assert.ok(!paths.includes('/overview'))
   assert.ok(!paths.includes('/watchlist'))
   assert.ok(!paths.includes('/screener'))
+  assert.ok(!paths.includes('/replay'))
 })
 
 test('管理后台入口仅管理员可见（账户菜单按 isAdmin 过滤）', () => {
@@ -49,10 +50,12 @@ test('管理后台入口仅管理员可见（账户菜单按 isAdmin 过滤）',
   assert.ok(adminEntry?.adminOnly === true)
 })
 
-test('旧路由兼容重定向：/overview → /market，/watchlist → /market?scope=watchlist，/screener → /market', () => {
+test('旧路由兼容重定向：/overview → /market，/watchlist → /market?scope=watchlist，/screener → /market，/replay → /review', () => {
   assert.equal(LEGACY_REDIRECTS['/overview'], '/market')
   assert.equal(LEGACY_REDIRECTS['/watchlist'], '/market?scope=watchlist')
   assert.equal(LEGACY_REDIRECTS['/screener'], '/market')
+  // 复盘占位路由 /replay → 正式工作台 /review
+  assert.equal(LEGACY_REDIRECTS['/replay'], '/review')
   // [Phase4] 旧管理员调试路由 → 新路由（前后端统一使用 symbol）
   assert.equal(LEGACY_REDIRECTS['/admin/stock-debug'], '/admin/stocks')
   const entries = legacyRedirectEntries()
@@ -60,6 +63,7 @@ test('旧路由兼容重定向：/overview → /market，/watchlist → /market?
     { path: '/overview', to: '/market' },
     { path: '/watchlist', to: '/market?scope=watchlist' },
     { path: '/screener', to: '/market' },
+    { path: '/replay', to: '/review' },
     { path: '/admin/stock-debug', to: '/admin/stocks' },
   ])
 })

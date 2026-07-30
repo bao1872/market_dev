@@ -1,0 +1,243 @@
+// [ReviewApi] - 描述: 复盘模块 API 调用函数（PRD §12）
+// 基于 axios apiClient（baseURL=/api，Vite 代理去掉 /api 前缀）
+// 后端 router prefix=/api/v1/review，调用时传完整 /api/v1/review/... 路径
+// 与 endpoints.ts 中 bars/indicators 等端点的路径约定一致
+//
+// 规则：
+// - 用户侧只读 DB，不触发计算
+// - 写操作（追踪）要求 idempotency_key
+// - 404/422/500 由调用方通过 extractReviewError 解析明确原因与 request_id
+import { apiClient } from '@/api/client'
+import type {
+  ReviewDatesResponse,
+  ReviewLatestResponse,
+  ReviewOverview,
+  ReviewScopeListResponse,
+  ReviewScopeListParams,
+  ReviewSignalListResponse,
+  ReviewSignalListParams,
+  ReviewSignal,
+  ReviewAttributionListResponse,
+  ReviewAttributionListParams,
+  ReviewInstrumentListResponse,
+  ReviewInstrumentListParams,
+  ReviewTrackingListResponse,
+  ReviewTrackingListParams,
+  ReviewTracking,
+  ReviewTrackingCreateRequest,
+  ReviewTrackingPatchRequest,
+  ReviewTrackingEvaluationListResponse,
+} from './types'
+
+// ============================================================
+// 错误解析（PRD §15：404/422/500 显示明确原因及 request_id）
+// ============================================================
+
+export interface ReviewApiError {
+  status: number | null
+  detail: string
+  requestId: string | null
+  message: string
+}
+
+/**
+ * 从 axios 错误中提取可展示的错误信息。
+ * - 404：资源不存在或未发布
+ * - 422：参数校验失败，附带后端 detail
+ * - 500：服务器错误，附带 x-request-id
+ */
+export function extractReviewError(err: unknown): ReviewApiError {
+  const e = err as {
+    response?: {
+      status?: number
+      data?: { detail?: string }
+      headers?: { get?: (k: string) => string | null; 'x-request-id'?: string }
+    }
+    message?: string
+  }
+  const status = e?.response?.status ?? null
+  const detail = e?.response?.data?.detail ?? ''
+  const requestId =
+    e?.response?.headers?.['x-request-id'] ??
+    (e?.response?.headers?.get ? e.response.headers.get('x-request-id') : null) ??
+    null
+  let message: string
+  if (status === 404) {
+    message = detail || '资源不存在或复盘尚未发布'
+  } else if (status === 422) {
+    message = `参数校验失败${detail ? `：${detail}` : ''}`
+  } else if (status === 500) {
+    message = `服务器错误${requestId ? `（request_id=${requestId}）` : ''}`
+  } else if (status === 403) {
+    message = '权限不足，当前账号无复盘权限'
+  } else if (status === 401) {
+    message = '登录已过期，请重新登录'
+  } else if (status) {
+    message = `请求失败（HTTP ${status}）${detail ? `：${detail}` : ''}`
+  } else {
+    message = e?.message || '网络错误，请稍后重试'
+  }
+  return { status, detail, requestId, message }
+}
+
+// ============================================================
+// 12.1 日期与总览
+// ============================================================
+
+/** GET /api/v1/review/dates — 已发布复盘交易日列表（降序） */
+export async function getReviewDates(): Promise<ReviewDatesResponse> {
+  const { data } = await apiClient.get<ReviewDatesResponse>('/api/v1/review/dates')
+  return data
+}
+
+/** GET /api/v1/review/latest — 最新已发布复盘 run 信息 */
+export async function getReviewLatest(): Promise<ReviewLatestResponse> {
+  const { data } = await apiClient.get<ReviewLatestResponse>('/api/v1/review/latest')
+  return data
+}
+
+/** GET /api/v1/review/{trade_date}/overview — 当日总览 */
+export async function getReviewOverview(
+  tradeDate: string,
+  includePartial = false,
+): Promise<ReviewOverview> {
+  const { data } = await apiClient.get<ReviewOverview>(
+    `/api/v1/review/${tradeDate}/overview`,
+    { params: { include_partial: includePartial } },
+  )
+  return data
+}
+
+// ============================================================
+// 12.2 市场扫描
+// ============================================================
+
+/** GET /api/v1/review/{trade_date}/scopes — 市场扫描（P/Q/U/C/V） */
+export async function getReviewScopes(
+  tradeDate: string,
+  params: ReviewScopeListParams = {},
+): Promise<ReviewScopeListResponse> {
+  const { data } = await apiClient.get<ReviewScopeListResponse>(
+    `/api/v1/review/${tradeDate}/scopes`,
+    { params },
+  )
+  return data
+}
+
+// ============================================================
+// 12.3 信号
+// ============================================================
+
+/** GET /api/v1/review/{trade_date}/signals — 信号列表 */
+export async function getReviewSignals(
+  tradeDate: string,
+  params: ReviewSignalListParams = {},
+): Promise<ReviewSignalListResponse> {
+  const { data } = await apiClient.get<ReviewSignalListResponse>(
+    `/api/v1/review/${tradeDate}/signals`,
+    { params },
+  )
+  return data
+}
+
+/** GET /api/v1/review/signals/{signal_id} — 单信号详情 */
+export async function getReviewSignal(
+  signalId: string,
+  includePartial = false,
+): Promise<ReviewSignal> {
+  const { data } = await apiClient.get<ReviewSignal>(
+    `/api/v1/review/signals/${signalId}`,
+    { params: { include_partial: includePartial } },
+  )
+  return data
+}
+
+// ============================================================
+// 12.4 归因与个股
+// ============================================================
+
+/** GET /api/v1/review/signals/{signal_id}/attributions — 子范围归因 */
+export async function getSignalAttributions(
+  signalId: string,
+  params: ReviewAttributionListParams = {},
+): Promise<ReviewAttributionListResponse> {
+  const { data } = await apiClient.get<ReviewAttributionListResponse>(
+    `/api/v1/review/signals/${signalId}/attributions`,
+    { params },
+  )
+  return data
+}
+
+/** GET /api/v1/review/signals/{signal_id}/instruments — 代表股票 */
+export async function getSignalInstruments(
+  signalId: string,
+  params: ReviewInstrumentListParams = {},
+): Promise<ReviewInstrumentListResponse> {
+  const { data } = await apiClient.get<ReviewInstrumentListResponse>(
+    `/api/v1/review/signals/${signalId}/instruments`,
+    { params },
+  )
+  return data
+}
+
+// ============================================================
+// 12.5 追踪
+// ============================================================
+
+/** GET /api/v1/review/trackings — 当前用户追踪列表 */
+export async function getReviewTrackings(
+  params: ReviewTrackingListParams = {},
+): Promise<ReviewTrackingListResponse> {
+  const { data } = await apiClient.get<ReviewTrackingListResponse>(
+    '/api/v1/review/trackings',
+    { params },
+  )
+  return data
+}
+
+/** POST /api/v1/review/trackings — 新增追踪（幂等） */
+export async function createReviewTracking(
+  payload: ReviewTrackingCreateRequest,
+): Promise<ReviewTracking> {
+  const { data } = await apiClient.post<ReviewTracking>(
+    '/api/v1/review/trackings',
+    payload,
+  )
+  return data
+}
+
+/** PATCH /api/v1/review/trackings/{id} — 修改追踪（幂等） */
+export async function updateReviewTracking(
+  trackingId: string,
+  payload: ReviewTrackingPatchRequest,
+): Promise<ReviewTracking> {
+  const { data } = await apiClient.patch<ReviewTracking>(
+    `/api/v1/review/trackings/${trackingId}`,
+    payload,
+  )
+  return data
+}
+
+/** DELETE /api/v1/review/trackings/{id} — 关闭追踪（不物理删除） */
+export async function closeReviewTracking(
+  trackingId: string,
+  idempotencyKey: string,
+): Promise<ReviewTracking> {
+  const { data } = await apiClient.delete<ReviewTracking>(
+    `/api/v1/review/trackings/${trackingId}`,
+    { params: { idempotency_key: idempotencyKey } },
+  )
+  return data
+}
+
+/** GET /api/v1/review/trackings/{id}/evaluations — 追踪逐日评估 */
+export async function getTrackingEvaluations(
+  trackingId: string,
+  params: { page?: number; page_size?: number } = {},
+): Promise<ReviewTrackingEvaluationListResponse> {
+  const { data } = await apiClient.get<ReviewTrackingEvaluationListResponse>(
+    `/api/v1/review/trackings/${trackingId}/evaluations`,
+    { params },
+  )
+  return data
+}

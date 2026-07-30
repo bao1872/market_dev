@@ -2,7 +2,7 @@
 // 公开路由：/（门户页，lazy 加载）, /login, /subscription-expired（canonical），/membership-expired（重定向）
 // 受保护路由：认证由 ProtectedLayout 负责（仅校验 auth + access profile，不再固定渲染同一壳层）
 // 布局壳拆分（PRD V1.0 阶段一）：
-//   UserAppShell   承载普通用户 /market /replay /stock/:symbol /messages /settings
+//   UserAppShell   承载普通用户 /market /review /stock/:symbol /messages /settings
 //   AdminAppShell  承载管理员 /admin/*（继续使用 AdminRoute 后端权限上下文）
 //   /capture/stock/:symbol 位于两套壳层之外（只使用 captureClient，不经过任何壳层）
 // SubscriberRoute：有效订阅或 admin 豁免，否则重定向到 /subscription-expired
@@ -17,7 +17,7 @@ import LoginPage from './pages/LoginPage'
 import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
 import MarketWorkspacePage from './features/market-workspace/MarketWorkspacePage'
 import BoardAnalysisPage from './pages/BoardAnalysisPage'
-import ReplayPage from './pages/ReplayPage'
+import ReviewPage from './pages/ReviewPage'
 import StockDetailPage from './pages/StockDetailPage'
 import CaptureStockPage from './pages/CaptureStockPage'
 import SettingsPage from './pages/SettingsPage'
@@ -204,11 +204,11 @@ export const routeConfig: RouteObject[] = [
               { path: '/boards/:boardId', element: <BoardAnalysisPage /> },
             ],
           },
-          // research_replay: 复盘入口（/replay）
+          // research_replay: 复盘入口（/review，PRD §3.1 主路由）
           {
             element: <CapabilityRoute capability="research_replay" />,
             children: [
-              { path: '/replay', element: <ReplayPage /> },
+              { path: '/review', element: <ReviewPage /> },
             ],
           },
           // 不强制订阅的辅助页面（仅认证即可）

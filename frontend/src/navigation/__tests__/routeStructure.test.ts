@@ -3,10 +3,10 @@
 //
 // 覆盖（PRD V1.0 阶段一路由与壳层）：
 //   1. Capture 路由位于 ProtectedLayout 之外（无 protected/capability/admin 守卫祖先）
-//   2. /market /replay /stock/:symbol 经过 UserAppShell + CapabilityRoute
+//   2. /market /review /stock/:symbol 经过 UserAppShell + CapabilityRoute
 //   3. /messages /settings 经过 UserAppShell 但不经过 CapabilityRoute
 //   4. /admin/* 经过 AdminRoute + AdminAppShell
-//   5. /overview /watchlist /screener 为兼容重定向
+//   5. /overview /watchlist /screener /replay 为兼容重定向
 //   6. 兜底重定向到 /market
 //   7. Capture 路由不渲染任何壳层（user/admin 均不在祖先链）
 
@@ -39,9 +39,9 @@ test('/market 经过 UserAppShell + CapabilityRoute', () => {
   assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/market', 'capability'))
 })
 
-test('/replay 经过 UserAppShell + CapabilityRoute', () => {
-  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/replay', 'user'))
-  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/replay', 'capability'))
+test('/review 经过 UserAppShell + CapabilityRoute', () => {
+  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/review', 'user'))
+  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/review', 'capability'))
 })
 
 test('/screener 为兼容重定向（不再为独立页面）', () => {
@@ -108,6 +108,16 @@ test('/overview 和 /watchlist 为兼容重定向', () => {
   assert.ok(watchlist)
   assert.equal(watchlist.node.guard, 'redirect')
   assert.equal(watchlist.node.redirectTo, '/market?scope=watchlist')
+})
+
+test('/replay 为兼容重定向到 /review（复盘占位路由已由正式工作台替代）', () => {
+  const replay = findRouteNode(ROUTE_STRUCTURE, '/replay')
+  assert.ok(replay, '/replay 重定向路由必须存在')
+  assert.equal(replay.node.guard, 'redirect')
+  assert.equal(replay.node.redirectTo, '/review')
+  // /replay 不再经过用户壳层或 capability 守卫
+  assert.ok(!hasShellInChain(ROUTE_STRUCTURE, '/replay', 'user'))
+  assert.ok(!hasGuardInChain(ROUTE_STRUCTURE, '/replay', 'capability'))
 })
 
 test('兜底路由重定向到 /market', () => {

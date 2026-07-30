@@ -1,0 +1,477 @@
+"""复盘范围扫描服务 - 一级与二级范围 scope snapshot（PRD §6、§7）。
+
+PRD §6 范围定义：
+- 第一级扫描：market / major_index / style / industry_l1
+- 第二级下钻（仅对命中信号的父范围扫描）：
+  industry_l2 / industry_l3 / concept / instrument
+- 下钻必须保留父子路径：market → style/index/industry_l1 → industry_l2/l3 or related concept → instrument
+
+输入：
+- 已发布 stock_core pointer（factor_publications.data_run_id）
+- 已发布 board_analysis pointer（用于行业/概念范围）
+- 第一金字塔历史基线（默认 120 个交易日，最低 60 日）
+
+输出：
+- MarketReviewScopeSnapshot ORM 记录（每个范围一条，含 P/Q/U/C/V payload）
+
+幂等：
+- 相同 (review_run_id, scope_type, scope_key) 不重算
+- coverage_ratio = ready_count / eligible_count
+
+模块自测：
+    PURE_UNIT_TEST=1 python -m app.services.review_scope_service
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import date
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.review.metric_engine import compute_all_metrics
+from app.domain.review.metric_registry import DEFAULT_REGISTRY
+from app.models.market_review import MarketReviewScopeSnapshot
+
+logger = logging.getLogger("review_scope_service")
+
+# 默认基线窗口（PRD §0、§7.1）
+DEFAULT_BASELINE_WINDOW = 120
+MIN_BASELINE_WINDOW = 60
+
+# 单 scope 发布门禁（PRD §11.1）
+SCOPE_PUBLISH_MIN_COVERAGE = 0.95
+
+# 第一级范围类型
+LEVEL1_SCOPE_TYPES: tuple[str, ...] = (
+    "market", "major_index", "style", "industry_l1",
+)
+# 第二级范围类型
+LEVEL2_SCOPE_TYPES: tuple[str, ...] = (
+    "industry_l2", "industry_l3", "concept", "instrument",
+)
+
+
+class ScopeSnapshotError(Exception):
+    """范围快照计算失败。"""
+
+    pass
+
+
+# =============================================================================
+# Scope 定义
+# =============================================================================
+
+
+class ScopeDefinition:
+    """单个范围定义（scope_type + scope_key + scope_name + 成员来源）。
+
+    成员来源由 service 层根据 scope_type 查询：
+    - market: 全部 active A 股
+    - major_index: 复用指数成分服务
+    - style: 复用风格股票池定义
+    - industry_l1/l2/l3: 复用行业板块成员关系
+    - concept: 复用概念板块成员关系
+    - instrument: 单只股票（下钻用）
+    """
+
+    def __init__(
+        self,
+        scope_type: str,
+        scope_key: str,
+        scope_name: str,
+        *,
+        parent_scope_type: str | None = None,
+        parent_scope_key: str | None = None,
+        source_board_snapshot_id: uuid.UUID | None = None,
+    ) -> None:
+        self.scope_type = scope_type
+        self.scope_key = scope_key
+        self.scope_name = scope_name
+        self.parent_scope_type = parent_scope_type
+        self.parent_scope_key = parent_scope_key
+        self.source_board_snapshot_id = source_board_snapshot_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scope_type": self.scope_type,
+            "scope_key": self.scope_key,
+            "scope_name": self.scope_name,
+            "parent_scope_type": self.parent_scope_type,
+            "parent_scope_key": self.parent_scope_key,
+            "source_board_snapshot_id": (
+                str(self.source_board_snapshot_id)
+                if self.source_board_snapshot_id else None
+            ),
+        }
+
+
+# =============================================================================
+# Scope snapshot upsert（幂等）
+# =============================================================================
+
+
+async def upsert_scope_snapshot(
+    session: AsyncSession,
+    review_run_id: uuid.UUID,
+    trade_date: date,
+    scope: ScopeDefinition,
+    *,
+    eligible_count: int,
+    ready_count: int,
+    coverage_ratio: float,
+    status: str,
+    p_payload: dict[str, Any] | None,
+    q_payload: dict[str, Any] | None,
+    u_payload: dict[str, Any] | None,
+    c_payload: dict[str, Any] | None,
+    v_payload: dict[str, Any] | None,
+    data_quality_json: dict[str, Any] | None = None,
+) -> MarketReviewScopeSnapshot:
+    """upsert scope snapshot 记录（幂等，唯一键 review_run_id+scope_type+scope_key）。"""
+    values = {
+        "review_run_id": review_run_id,
+        "trade_date": trade_date,
+        "scope_type": scope.scope_type,
+        "scope_key": scope.scope_key,
+        "scope_name": scope.scope_name,
+        "parent_scope_type": scope.parent_scope_type,
+        "parent_scope_key": scope.parent_scope_key,
+        "source_board_snapshot_id": scope.source_board_snapshot_id,
+        "eligible_count": eligible_count,
+        "ready_count": ready_count,
+        "coverage_ratio": Decimal(str(coverage_ratio)),
+        "status": status,
+        "p_payload": p_payload,
+        "q_payload": q_payload,
+        "u_payload": u_payload,
+        "c_payload": c_payload,
+        "v_payload": v_payload,
+        "data_quality_json": data_quality_json,
+    }
+
+    stmt = pg_insert(MarketReviewScopeSnapshot).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_review_scope_snapshots_run_scope",
+        set_={
+            "trade_date": stmt.excluded.trade_date,
+            "scope_name": stmt.excluded.scope_name,
+            "parent_scope_type": stmt.excluded.parent_scope_type,
+            "parent_scope_key": stmt.excluded.parent_scope_key,
+            "source_board_snapshot_id": stmt.excluded.source_board_snapshot_id,
+            "eligible_count": stmt.excluded.eligible_count,
+            "ready_count": stmt.excluded.ready_count,
+            "coverage_ratio": stmt.excluded.coverage_ratio,
+            "status": stmt.excluded.status,
+            "p_payload": stmt.excluded.p_payload,
+            "q_payload": stmt.excluded.q_payload,
+            "u_payload": stmt.excluded.u_payload,
+            "c_payload": stmt.excluded.c_payload,
+            "v_payload": stmt.excluded.v_payload,
+            "data_quality_json": stmt.excluded.data_quality_json,
+        },
+    )
+    await session.execute(stmt)
+    await session.flush()
+
+    # 读取 upsert 后的记录
+    return await get_scope_snapshot(
+        session, review_run_id, scope.scope_type, scope.scope_key,
+    )  # type: ignore[return-value]
+
+
+async def get_scope_snapshot(
+    session: AsyncSession,
+    review_run_id: uuid.UUID,
+    scope_type: str,
+    scope_key: str,
+) -> MarketReviewScopeSnapshot | None:
+    """读取单个 scope snapshot。"""
+    stmt = (
+        select(MarketReviewScopeSnapshot)
+        .where(
+            MarketReviewScopeSnapshot.review_run_id == review_run_id,
+            MarketReviewScopeSnapshot.scope_type == scope_type,
+            MarketReviewScopeSnapshot.scope_key == scope_key,
+        )
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def list_scope_snapshots(
+    session: AsyncSession,
+    review_run_id: uuid.UUID,
+    *,
+    scope_type: str | None = None,
+    parent_scope_type: str | None = None,
+    parent_scope_key: str | None = None,
+) -> list[MarketReviewScopeSnapshot]:
+    """列出 review run 的 scope snapshot（可按 scope_type / parent 过滤）。"""
+    stmt = select(MarketReviewScopeSnapshot).where(
+        MarketReviewScopeSnapshot.review_run_id == review_run_id,
+    )
+    if scope_type is not None:
+        stmt = stmt.where(MarketReviewScopeSnapshot.scope_type == scope_type)
+    if parent_scope_type is not None:
+        stmt = stmt.where(
+            MarketReviewScopeSnapshot.parent_scope_type == parent_scope_type,
+        )
+    if parent_scope_key is not None:
+        stmt = stmt.where(
+            MarketReviewScopeSnapshot.parent_scope_key == parent_scope_key,
+        )
+    result = await session.execute(stmt)
+    return list(result.scalars())
+
+
+# =============================================================================
+# Scope 指标计算
+# =============================================================================
+
+
+async def compute_scope_metrics(
+    session: AsyncSession,
+    review_run_id: uuid.UUID,
+    trade_date: date,
+    scope: ScopeDefinition,
+    flat_list: list[dict[str, Any]],
+    *,
+    eligible_count: int | None = None,
+    history_maps: dict[str, dict[str, list[float]]] | None = None,
+    prev_values: dict[str, float] | None = None,
+    prev5d_values: dict[str, float] | None = None,
+    cross_section_values: dict[str, list[float]] | None = None,
+) -> MarketReviewScopeSnapshot:
+    """计算单个范围的 P/Q/U/C/V 并 upsert scope snapshot。
+
+    Args:
+        session: 异步 DB 会话（caller 控制 commit）
+        review_run_id: 复盘 run ID
+        trade_date: 业务交易日
+        scope: 范围定义
+        flat_list: 成员 first_pyramid_flat 列表
+        eligible_count: 范围成员总数（None=取 len(flat_list)）
+        history_maps: 每个 metric 的历史序列 map（用于历史分位归一化）
+        prev_values: 前一交易日各 metric 的 value（用于 delta1d）
+        prev5d_values: 前 5 交易日各 metric 的 value（用于 delta5d）
+        cross_section_values: 当日所有 scope 的 value 序列（用于横截面分位）
+
+    Returns:
+        MarketReviewScopeSnapshot ORM 对象
+    """
+    if eligible_count is None:
+        eligible_count = len(flat_list)
+
+    # ready_count = 有 fp_trend_direction 的成员数
+    ready_count = sum(
+        1 for f in flat_list if f and f.get("fp_trend_direction") is not None
+    )
+
+    coverage_ratio = (
+        ready_count / eligible_count if eligible_count > 0 else 0.0
+    )
+
+    # 计算 P/Q/U/C/V
+    payloads = compute_all_metrics(
+        flat_list,
+        ready_count=ready_count,
+        history_maps=history_maps,
+        prev_values=prev_values,
+        prev5d_values=prev5d_values,
+        cross_section_values=cross_section_values,
+        registry=DEFAULT_REGISTRY,
+    )
+
+    # 状态判定（PRD §7.1：历史少于 60 日 status=insufficient_history）
+    statuses = [p.get("status") for p in payloads.values()]
+    if not flat_list:
+        status = "unavailable"
+    elif all(s == "ready" for s in statuses):
+        status = "ready"
+    elif any(s == "insufficient_history" for s in statuses):
+        status = "insufficient_history"
+    else:
+        status = "partial"
+
+    data_quality = {
+        "eligible_count": eligible_count,
+        "ready_count": ready_count,
+        "missing_count": eligible_count - ready_count,
+        "missing_reasons": _classify_missing_reasons(flat_list, eligible_count),
+    }
+
+    snapshot = await upsert_scope_snapshot(
+        session,
+        review_run_id,
+        trade_date,
+        scope,
+        eligible_count=eligible_count,
+        ready_count=ready_count,
+        coverage_ratio=coverage_ratio,
+        status=status,
+        p_payload=payloads.get("P"),
+        q_payload=payloads.get("Q"),
+        u_payload=payloads.get("U"),
+        c_payload=payloads.get("C"),
+        v_payload=payloads.get("V"),
+        data_quality_json=data_quality,
+    )
+
+    logger.info(
+        "[ReviewScope] %s/%s eligible=%d ready=%d coverage=%.4f status=%s",
+        scope.scope_type, scope.scope_name, eligible_count, ready_count,
+        coverage_ratio, status,
+    )
+    return snapshot
+
+
+def _classify_missing_reasons(
+    flat_list: list[dict[str, Any]], eligible_count: int,
+) -> dict[str, int]:
+    """分类成员缺失原因。"""
+    reasons: dict[str, int] = {}
+    ready = sum(
+        1 for f in flat_list if f and f.get("fp_trend_direction") is not None
+    )
+    missing = eligible_count - ready
+    if missing > 0:
+        # 简化：所有缺失归为 SNAPSHOT_MISSING 或 FP_TREND_MISSING
+        no_trend = sum(
+            1 for f in flat_list
+            if f and f.get("fp_trend_direction") is None
+        )
+        no_snapshot = eligible_count - len(flat_list)
+        if no_snapshot > 0:
+            reasons["SNAPSHOT_MISSING"] = no_snapshot
+        if no_trend > 0:
+            reasons["FP_TREND_MISSING"] = no_trend
+    return reasons
+
+
+# =============================================================================
+# 范围查询（service 层根据 scope_type 查询成员）
+# =============================================================================
+
+
+async def resolve_scope_members(
+    session: AsyncSession,
+    scope_type: str,
+    scope_key: str,
+) -> tuple[list[uuid.UUID], str]:
+    """解析范围的成员 instrument_id 列表与 scope_name。
+
+    根据 scope_type 路由到不同的成员来源：
+    - market: 全部 active 股票（scope_name="全市场"）
+    - major_index: 暂返回空（PRD §6.1 复用现有指数成分服务，需具体实现）
+    - style: 暂返回空（PRD §6.1 使用已有版本化风格股票池定义）
+    - industry_l1/l2/l3/concept: 通过 market_boards + market_board_memberships 查询
+    - instrument: 单只股票（scope_key 为 instrument_id）
+
+    Returns:
+        (instrument_ids, scope_name)
+    """
+    if scope_type == "market":
+        from app.models.instrument import Instrument
+        stmt = select(Instrument.id).where(Instrument.status == "active")
+        result = await session.execute(stmt)
+        return [row[0] for row in result], "全市场"
+
+    if scope_type == "instrument":
+        # 单只股票
+        try:
+            inst_id = uuid.UUID(scope_key)
+        except ValueError as exc:
+            raise ScopeSnapshotError(
+                f"instrument scope_key 非合法 UUID: {scope_key}",
+            ) from exc
+        return [inst_id], scope_key
+
+    if scope_type in ("industry_l1", "industry_l2", "industry_l3", "concept", "major_index", "style"):
+        # 通过 market_boards 查询（industry_l1/l2/l3/concept）
+        from app.models.market_board import MarketBoard, MarketBoardMembership
+        board_stmt = (
+            select(MarketBoard)
+            .where(
+                MarketBoard.type == _board_type_from_scope(scope_type),
+                MarketBoard.externalCode == scope_key,
+            )
+            .limit(1)
+        )
+        board = (await session.execute(board_stmt)).scalar_one_or_none()
+        if board is None:
+            return [], scope_key
+        member_stmt = select(MarketBoardMembership.instrumentId).where(
+            MarketBoardMembership.boardId == board.id,
+        )
+        result = await session.execute(member_stmt)
+        return [row[0] for row in result], board.name
+
+    return [], scope_key
+
+
+def _board_type_from_scope(scope_type: str) -> str:
+    """scope_type → market_boards.type 映射。"""
+    if scope_type in ("industry_l1", "industry_l2", "industry_l3"):
+        return "industry"
+    if scope_type == "concept":
+        return "concept"
+    return scope_type
+
+
+# =============================================================================
+# 批量获取成员 first_pyramid_flat
+# =============================================================================
+
+
+async def fetch_member_flat_list(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    source_core_run_id: uuid.UUID,
+) -> list[dict[str, Any]]:
+    """批量查询成员的 first_pyramid_flat（基于 stock_core snapshot run）。
+
+    Returns:
+        成员 flat 字典列表（缺失成员不在结果中），每条含 instrument_id
+    """
+    if not instrument_ids:
+        return []
+    from app.models.stock_feature_snapshot import StockFeatureSnapshot
+
+    stmt = (
+        select(
+            StockFeatureSnapshot.instrument_id,
+            StockFeatureSnapshot.summary_payload,
+        )
+        .where(
+            StockFeatureSnapshot.instrument_id.in_(instrument_ids),
+            StockFeatureSnapshot.source_run_id == source_core_run_id,
+        )
+    )
+    result = await session.execute(stmt)
+    out: list[dict[str, Any]] = []
+    for row in result:
+        instrument_id = row[0]
+        summary = row[1] or {}
+        if not isinstance(summary, dict):
+            continue
+        flat = summary.get("first_pyramid_flat")
+        if isinstance(flat, dict):
+            # 注入 instrument_id 用于归因
+            flat_with_id = dict(flat)
+            flat_with_id["_instrument_id"] = str(instrument_id)
+            out.append(flat_with_id)
+    return out
+
+
+if __name__ == "__main__":
+    print(f"LEVEL1_SCOPE_TYPES = {LEVEL1_SCOPE_TYPES}")
+    print(f"LEVEL2_SCOPE_TYPES = {LEVEL2_SCOPE_TYPES}")
+    print(f"SCOPE_PUBLISH_MIN_COVERAGE = {SCOPE_PUBLISH_MIN_COVERAGE}")
+    print("OK: review_scope_service imports verified")

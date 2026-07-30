@@ -1,18 +1,19 @@
 // [Navigation] - 描述: 单一导航/路由常量真源（避免路径散落在各页面）
 // PRD V1.0 阶段一（路由与壳层）确立：
 //   普通用户主入口 = /market（行情，渲染 MarketWorkspacePage）
-//   复盘占位路由 /replay（功能规划中，不伪造业务）
+//   复盘工作台 /review（PRD §3.1 主路由，渲染 ReviewPage）
 //   消息 /messages、设置 /settings 进入右上角账户菜单
 //   管理后台独立壳层 AdminAppShell，承载 /admin/*
 //   Capture 路由 /capture/stock/:symbol 位于两套壳层之外
 //   旧路由 /overview → /market、/watchlist → /market?scope=watchlist、/screener → /market 仅作兼容重定向
+//   旧复盘占位 /replay → /review（复盘模块上线后占位路由重定向到正式工作台）
 //   旧 WatchlistPage.tsx 和 IndexPage.tsx 已删除（统一行情工作区改造）
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行，便于路由契约测试。
 
 export const APP_ROUTES = {
   market: '/market',
   screener: '/screener',
-  replay: '/replay',
+  review: '/review',
   messages: '/messages',
   settings: '/settings',
   admin: '/admin',
@@ -57,7 +58,7 @@ export interface AppNavItem {
 export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情' },
   { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选' },
-  { path: APP_ROUTES.replay, label: '复盘' },
+  { path: APP_ROUTES.review, label: '复盘' },
 ]
 
 /** 自选导航 path（用于权限判断和 active 匹配） */
@@ -67,7 +68,7 @@ export const WATCHLIST_NAV_PATH = `${APP_ROUTES.market}?scope=watchlist`
  * 判断导航项是否 active（不依赖 NavLink pathname，支持 /market 双入口）
  * - /market 且 scope != watchlist → 行情 active
  * - /market 且 scope == watchlist → 自选 active
- * - /replay → 复盘 active
+ * - /review → 复盘 active
  */
 export function resolveActiveNav(
   pathname: string,
@@ -174,6 +175,8 @@ export const LEGACY_REDIRECTS: Record<string, string> = {
   '/overview': APP_ROUTES.market,
   '/watchlist': `${APP_ROUTES.market}?scope=watchlist`,
   '/screener': APP_ROUTES.market,
+  // 复盘占位路由 /replay → 正式工作台 /review（PRD §3.1）
+  '/replay': APP_ROUTES.review,
   // [Phase4] 旧管理员调试路由 → 新路由（前后端统一使用 symbol）
   '/admin/stock-debug': APP_ROUTES.adminStockDebug,
 }

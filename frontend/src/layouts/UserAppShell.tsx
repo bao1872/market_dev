@@ -1,5 +1,5 @@
 // [UserAppShell] - 描述: 普通用户布局壳（顶栏品牌 + 一级导航 + 账户菜单；无左侧栏）
-// 承载：/market（行情/自选，渲染 MarketWorkspacePage）、/replay（复盘占位）、/stock/:symbol、/messages、/settings
+// 承载：/market（行情/自选，渲染 MarketWorkspacePage）、/review（复盘工作台，渲染 ReviewPage）、/stock/:symbol、/messages、/settings
 // [Round 2026-07-28-4] 一级导航：行情｜自选｜复盘
 //   - 行情和自选都指向 /market，通过 scope=watchlist 区分
 //   - UserAppShell 不依赖 NavLink pathname 判断 active，使用 resolveActiveNav

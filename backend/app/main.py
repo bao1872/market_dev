@@ -35,10 +35,13 @@ from app.api import metrics as metrics_api
 from app.api.admin_after_close import router as admin_after_close_router
 from app.api.admin_beta_applications import router as admin_beta_applications_router
 from app.api.admin_incremental_publish import router as admin_incremental_publish_router
+from app.api.admin_review import router as admin_review_router
 from app.api.admin_subscription import router as admin_subscription_router
 from app.api.admin_visitors import router as admin_visitors_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
+from app.api.board_analysis import admin_router as board_analysis_admin_router
+from app.api.board_analysis import board_router as board_analysis_router
 from app.api.calendar import router as calendar_router
 from app.api.capture import router as capture_router
 from app.api.chart_snapshot import router as chart_snapshot_router
@@ -53,6 +56,7 @@ from app.api.monitor_states import router as monitor_states_router
 from app.api.notifications import router as notifications_router
 from app.api.plans import router as plans_router
 from app.api.public_beta import router as public_beta_router
+from app.api.review import router as review_router
 from app.api.stock_context import admin_router as stock_context_admin_router
 from app.api.stock_context import stock_router as stock_context_router
 from app.api.stock_detail_feishu import router as stock_detail_feishu_router
@@ -63,8 +67,6 @@ from app.api.strategy_runs import router as strategy_runs_router
 from app.api.structural_factors import router as structural_factors_router
 from app.api.temporal_features import router as temporal_features_router
 from app.api.watchlist import router as watchlist_router
-from app.api.board_analysis import admin_router as board_analysis_admin_router
-from app.api.board_analysis import board_router as board_analysis_router
 from app.db import AsyncSessionLocal
 
 logger = logging.getLogger("main")
@@ -216,6 +218,8 @@ app.include_router(stock_context_admin_router)
 # [CHANGE-20260730-011] 板块分析 V1 路由（用户只读 + 管理员触发计算）
 app.include_router(board_analysis_router)
 app.include_router(board_analysis_admin_router)
+app.include_router(review_router)
+app.include_router(admin_review_router)
 # 公开端点路由（内测申请，无需登录）
 app.include_router(public_beta_router)
 # 公开套餐列表路由（无需登录）

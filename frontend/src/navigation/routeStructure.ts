@@ -53,12 +53,12 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
               { path: '/stock/:symbol', guard: 'capability', shell: 'user' },
             ],
           },
-          // CapabilityRoute: research_replay
+          // CapabilityRoute: research_replay（PRD §3.1 主路由 /review）
           {
             guard: 'capability',
             shell: 'user',
             children: [
-              { path: '/replay', guard: 'capability', shell: 'user' },
+              { path: '/review', guard: 'capability', shell: 'user' },
             ],
           },
           // 仅认证（不强制订阅）
@@ -93,6 +93,8 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
       { path: '/overview', guard: 'redirect', shell: 'none', redirectTo: '/market' },
       { path: '/watchlist', guard: 'redirect', shell: 'none', redirectTo: '/market?scope=watchlist' },
       { path: '/screener', guard: 'redirect', shell: 'none', redirectTo: '/market' },
+      // 复盘占位路由 /replay → 正式工作台 /review
+      { path: '/replay', guard: 'redirect', shell: 'none', redirectTo: '/review' },
     ],
   },
   // 兜底

@@ -1,0 +1,302 @@
+"""复盘模块管理员 API 路由（PRD §12.6）。
+
+端点：
+- POST /api/v1/admin/review/runs: 创建 review run（并执行计算）
+- POST /api/v1/admin/review/runs/{id}/resume: 重启 run（处理 pending/failed）
+- POST /api/v1/admin/review/runs/{id}/publish: 发布 run
+- GET  /api/v1/admin/review/runs/{id}/status: 查询 run 状态（含 items + 发布门禁）
+
+权限（PRD §3.2）：
+- 所有端点需要 admin 身份（require_admin）
+
+设计要点：
+- 所有写操作要求 idempotency_key（PRD §12.6）
+- 失败返回 4xx/5xx，错误信息含原因
+- 不自动发布；publish 需要单独调用
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.deps import get_db
+from app.schemas.review import (
+    ReviewRunCreateRequest,
+    ReviewRunPublishRequest,
+    ReviewRunResponse,
+    ReviewRunResumeRequest,
+    ReviewRunStatusItemDTO,
+    ReviewRunStatusResponse,
+)
+from app.services.access_control_service import AccessContext, require_admin
+from app.services.review_orchestrator_service import (
+    DEFAULT_BASELINE_WINDOW,
+    REVIEW_ALGORITHM_VERSION,
+    ReviewOrchestratorError,
+    compute_run,
+    create_run,
+    get_run,
+    get_run_status,
+    resume_run,
+)
+from app.services.review_publication_service import (
+    ReviewPublishBlockError,
+    publish_run,
+)
+
+logger = logging.getLogger("api.admin_review")
+
+router = APIRouter(prefix="/api/v1/admin/review", tags=["admin-review"])
+
+
+def _run_to_response(run: Any) -> ReviewRunResponse:
+    """run ORM / dict → ReviewRunResponse。"""
+    if isinstance(run, dict):
+        return ReviewRunResponse(**run)
+    return ReviewRunResponse(
+        id=str(run.id),
+        trade_date=run.trade_date.isoformat(),
+        source_core_run_id=str(run.source_core_run_id),
+        source_board_run_id=str(run.source_board_run_id),
+        algorithm_version=run.algorithm_version,
+        filter_version=run.filter_version,
+        baseline_window=run.baseline_window,
+        status=run.status,
+        expected_scope_count=run.expected_scope_count,
+        succeeded_scope_count=run.succeeded_scope_count,
+        failed_scope_count=run.failed_scope_count,
+        signal_count=run.signal_count,
+        coverage_ratio=float(run.coverage_ratio) if run.coverage_ratio else None,
+        started_at=run.started_at.isoformat() if run.started_at else None,
+        completed_at=run.completed_at.isoformat() if run.completed_at else None,
+        published_at=run.published_at.isoformat() if run.published_at else None,
+        metadata=run.metadata_json or {},
+        created_at=run.created_at.isoformat() if run.created_at else "",
+        updated_at=run.updated_at.isoformat() if run.updated_at else "",
+    )
+
+
+@router.post(
+    "/runs",
+    response_model=ReviewRunResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_review_run(
+    payload: ReviewRunCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_admin),
+) -> ReviewRunResponse:
+    """[Admin] 创建 review run 并执行计算。
+
+    流程：
+    1. create_run（幂等：相同 trade_date+source_runs+版本复用）
+    2. compute_run（编排完整 pipeline：metrics → signals → attribution → tracking）
+    3. 返回 run 状态（不自动发布，需调用 publish 接口）
+
+    dry_run=True 时只校验输入，不执行计算。
+    """
+    _ = ctx
+    from datetime import date as date_cls
+
+    try:
+        trade_date = date_cls.fromisoformat(payload.trade_date)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"trade_date 格式错误（需 YYYY-MM-DD）: {payload.trade_date}",
+        ) from exc
+
+    # 解析可选 source_run_ids
+    source_core_run_id = (
+        uuid.UUID(payload.source_core_run_id) if payload.source_core_run_id else None
+    )
+    source_board_run_id = (
+        uuid.UUID(payload.source_board_run_id) if payload.source_board_run_id else None
+    )
+
+    try:
+        # 1. 创建或复用 run
+        run = await create_run(
+            db,
+            trade_date=trade_date,
+            source_core_run_id=source_core_run_id,
+            source_board_run_id=source_board_run_id,
+            algorithm_version=payload.algorithm_version,
+            filter_version=payload.filter_version,
+            baseline_window=payload.baseline_window,
+            canary=payload.canary,
+            symbols=payload.symbols,
+            dry_run=payload.dry_run,
+            idempotency_key=payload.idempotency_key,
+        )
+
+        if payload.dry_run:
+            # dry-run：不写 DB，返回非持久化的 run 概要
+            await db.rollback()
+            return _run_to_response(run)
+
+        await db.commit()
+        await db.refresh(run)
+
+        # 2. 执行计算
+        compute_result = await compute_run(
+            db,
+            run,
+            canary=payload.canary,
+            symbols=payload.symbols,
+        )
+        await db.commit()
+        await db.refresh(run)
+
+        logger.info(
+            "[Admin] review run 计算完成: run_id=%s result=%s",
+            run.id, compute_result,
+        )
+    except ReviewOrchestratorError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("[Admin] 创建 review run 失败")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"创建 review run 失败: {exc}",
+        ) from exc
+
+    return _run_to_response(run)
+
+
+@router.post(
+    "/runs/{run_id}/resume",
+    response_model=ReviewRunResponse,
+)
+async def resume_review_run(
+    run_id: uuid.UUID,
+    payload: ReviewRunResumeRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_admin),
+) -> ReviewRunResponse:
+    """[Admin] 重启 run（处理 pending / 可重试 failed / 过期 running）。"""
+    _ = ctx
+    run = await get_run(db, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"run 不存在: run_id={run_id}",
+        )
+
+    try:
+        result = await resume_run(db, run, only_pending=payload.only_pending)
+        await db.commit()
+        await db.refresh(run)
+        logger.info("[Admin] review run resume 完成: run_id=%s result=%s", run_id, result)
+    except ReviewOrchestratorError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("[Admin] resume review run 失败: run_id=%s", run_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"resume 失败: {exc}",
+        ) from exc
+
+    return _run_to_response(run)
+
+
+@router.post(
+    "/runs/{run_id}/publish",
+    response_model=ReviewRunResponse,
+)
+async def publish_review_run(
+    run_id: uuid.UUID,
+    payload: ReviewRunPublishRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_admin),
+) -> ReviewRunResponse:
+    """[Admin] 发布 review run（写入 factor_publications 指针）。
+
+    force=True 时跳过发布门禁（仅 admin 调试用）。
+    """
+    _ = ctx
+    run = await get_run(db, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"run 不存在: run_id={run_id}",
+        )
+
+    try:
+        publication, blockers = await publish_run(db, run, force=payload.force)
+        await db.commit()
+        await db.refresh(run)
+        logger.info(
+            "[Admin] review run 发布成功: run_id=%s publication_id=%s blockers=%s",
+            run_id, publication.id, blockers,
+        )
+    except ReviewPublishBlockError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"发布门禁失败: {'; '.join(exc.blockers)}",
+        ) from exc
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("[Admin] publish review run 失败: run_id=%s", run_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"publish 失败: {exc}",
+        ) from exc
+
+    return _run_to_response(run)
+
+
+@router.get(
+    "/runs/{run_id}/status",
+    response_model=ReviewRunStatusResponse,
+)
+async def get_review_run_status(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_admin),
+) -> ReviewRunStatusResponse:
+    """[Admin] 查询 run 状态（含 items + 发布门禁）。"""
+    _ = ctx
+    run = await get_run(db, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"run 不存在: run_id={run_id}",
+        )
+
+    status_data = await get_run_status(db, run)
+    return ReviewRunStatusResponse(
+        run=_run_to_response(run),
+        items=[
+            ReviewRunStatusItemDTO(**item) for item in status_data["items"]
+        ],
+        publishable=status_data["publishable"],
+        publish_blockers=status_data["publish_blockers"],
+    )
+
+
+if __name__ == "__main__":
+    paths = [r.path for r in router.routes]
+    print(f"router prefix: {router.prefix}")
+    print(f"端点数: {len(paths)}")
+    for p in paths:
+        print(f"  {p}")
+    # 验证常量导入
+    print(f"REVIEW_ALGORITHM_VERSION = {REVIEW_ALGORITHM_VERSION}")
+    print(f"DEFAULT_BASELINE_WINDOW = {DEFAULT_BASELINE_WINDOW}")
