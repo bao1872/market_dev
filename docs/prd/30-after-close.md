@@ -196,6 +196,34 @@ V1 输入仅趋势、结构、动量、量能、结构事件和权威行业/概�
 4. CLI：`scripts/first_pyramid_history_backfill_cli.py` 之外的 `backend/scripts/board_analysis_cli.py`
    - `--canary`（每类型 5 个）/ `--all` / `--type` / `--limit` / `--trade-date` / `--publish` / `--no-publish` / `--dry-run`
 
+## 6. 盘后阶段依赖与发布闭环（2026-07-30 补充）
+
+> 本节明确盘后链路各阶段的发布闭环和依赖合同。与 §4 增量发布架构需求、§5 板块分析 V1 叠加生效。
+
+### AC-17：stock_core 发布闭环
+
+- DSA StrategyRun 发布成功（`status=published`）且 snapshot run coverage 达标（`CORE_PUBLICATION_MIN_COVERAGE = 0.98`）后，after_close 编排必须显式调用 `factor_publication_service.publish_stock_core` 切换 `stock_core` publication pointer；
+- `publish_stock_core` 是 stock_core 正式发布的唯一入口，禁止跳过该步骤直接依赖 `published_at IS NOT NULL`；
+- pointer 切换失败只重试 `publish_stock_core`，不重新计算数据；
+- `stock_core` pointer 未发布前，下游 board aggregation / market aggregation / review 不得启动；
+- 失败恢复必须走 `dsa_recovery_service` 或 `publish_stock_core` 幂等重发，禁止裸 SQL 改状态（详见 `rules/80-deployment-data-safety.md` "手工恢复走正式 service/CLI"）。
+
+### AC-18：chip_consensus Worker
+
+- chip_consensus 任务在现有 after-close worker 容器内领取执行，**不新增常驻容器**；
+- worker 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取 `queued` / `resume_queued` 的 `after_close_chip_consensus` 任务，`lease_epoch` fencing 防止旧 worker 覆盖新 worker 状态；
+- 断点续算：`resume_queued` 任务只重试未成功 instrument，已 `succeeded` 的 instrument 不重算；
+- chip_consensus 失败只重试自身，不反改 core（`execute_after_close_chip_consensus` 内部已隔离）；
+- `auto_resume_interrupted_after_close_runs` 同时处理 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次。
+
+### AC-19：聚合依赖合同
+
+- board aggregation / market aggregation 必须在 `stock_core` pointer 发布成功后才能触发；
+- `run_market_factor_aggregation` 必须读取已发布 `stock_core` pointer，校验 `source_core_run_id` 等于该日期 `stock_core` pointer 的 `data_run_id`，不匹配抛错；
+- board_analysis 输入门禁要求存在已发布 `stock_core` pointer，否则拒绝计算；
+- 聚合失败只重跑聚合，**不影响已发布 stock_core**；
+- 聚合 pointer 不得倒退到旧 run；不足门禁时保存 `partial` 结果但不切 pointer。
+
 ## 复盘编排 (Review Orchestration)
 
 > 对应 PRD：`70-review.md` §11；对应 Map：`../maps/30-after-close.md` §复盘 pointer 与 run 关系。

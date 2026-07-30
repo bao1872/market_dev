@@ -156,8 +156,11 @@ async def recover_stale_scheduler_job_runs(
     return len(recovered_rows)
 
 
-# [PRD §4.3 JOB-01] - after_close_orchestrator 任务名（仅此 job 支持 auto-resume）
+# [PRD §4.3 JOB-01] - after_close_orchestrator 任务名（支持 auto-resume）
 _AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"
+
+# [P0-3 ref/instruction.md §二.3] - chip_consensus 任务名（同样支持 auto-resume + 断点续算）
+_CHIP_CONSENSUS_JOB_NAME = "after_close_chip_consensus"
 
 # [PRD §4.3 JOB-01] - 最大自动重试次数（超过则不再 auto-resume，需人工介入）
 _MAX_AUTO_RESUME_ATTEMPTS = 3
@@ -167,19 +170,23 @@ async def auto_resume_interrupted_after_close_runs(
     db: AsyncSession,
     now: datetime | None = None,
 ) -> int:
-    """[PRD §4.3 JOB-01] 自动将 interrupted 的 after_close_orchestrator 任务转为 resume_queued。
+    """[PRD §4.3 JOB-01] 自动将 interrupted 的盘后任务转为 resume_queued。
 
     状态闭环：queued → running → interrupted → resume_queued → running → succeeded/failed
 
+    [P0-3] 同时处理 after_close_orchestrator 和 after_close_chip_consensus 两类任务：
+    - after_close_orchestrator：断点恢复 via metadata.last_completed_step
+    - after_close_chip_consensus：断点续算 via get_pending_chip_instruments（跳过已 succeeded 的 instrument）
+
     此函数实现 interrupted → resume_queued 转换：
-    1. 查找 status='interrupted' 且 job_name='after_close_orchestrator' 的任务
+    1. 查找 status='interrupted' 且 job_name IN (after_close_orchestrator, after_close_chip_consensus) 的任务
     2. 过滤 attempt_no < _MAX_AUTO_RESUME_ATTEMPTS（超过上限不自动恢复，需人工介入）
     3. 原子 UPDATE：status → resume_queued, attempt_no + 1, error_code/message 清空
     4. 写 resume 事件（记录 attempt_no 和 last_completed_step）
 
-    Worker 领取 resume_queued 任务时（_after_close_poll_once）：
-    - 递增 lease_epoch（fencing）
-    - execute_after_close_run 读取 metadata.last_completed_step 跳过已成功阶段
+    Worker 领取 resume_queued 任务时：
+    - _after_close_poll_once：递增 lease_epoch（fencing）+ execute_after_close_run 读 last_completed_step 跳过已成功阶段
+    - _chip_consensus_poll_once：递增 lease_epoch（fencing）+ get_pending_chip_instruments 跳过已成功 instrument
 
     Args:
         db: 异步会话（不 commit，由调用方控制事务）
@@ -194,7 +201,8 @@ async def auto_resume_interrupted_after_close_runs(
     if now is None:
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
 
-    # [JOB-01] 原子 UPDATE：interrupted → resume_queued + attempt_no + 1
+    # [JOB-01 + P0-3] 原子 UPDATE：interrupted → resume_queued + attempt_no + 1
+    # 同时处理 after_close_orchestrator 和 after_close_chip_consensus 两类任务
     # WHERE attempt_no < _MAX_AUTO_RESUME_ATTEMPTS 限制最大重试次数
     update_sql = text(
         """
@@ -207,14 +215,15 @@ async def auto_resume_interrupted_after_close_runs(
             heartbeat_at = :now,
             updated_at = :now
         WHERE status = 'interrupted'
-            AND job_name = :job_name
+            AND job_name IN (:orchestrator_job, :chip_job)
             AND attempt_no < :max_attempts
-        RETURNING id, attempt_no, metadata_json
+        RETURNING id, attempt_no, metadata_json, job_name
         """
     )
     result = await db.execute(update_sql, {
         "now": now,
-        "job_name": _AFTER_CLOSE_JOB_NAME,
+        "orchestrator_job": _AFTER_CLOSE_JOB_NAME,
+        "chip_job": _CHIP_CONSENSUS_JOB_NAME,
         "max_attempts": _MAX_AUTO_RESUME_ATTEMPTS,
     })
     resumed_rows = result.fetchall()
@@ -226,8 +235,9 @@ async def auto_resume_interrupted_after_close_runs(
     for row in resumed_rows:
         job_run_id = row.id
         new_attempt_no = row.attempt_no
+        job_name = row.job_name
 
-        # 提取 last_completed_step（从 metadata_json）
+        # 提取 last_completed_step（从 metadata_json，仅 after_close_orchestrator 有）
         last_completed_step = None
         if row.metadata_json:
             try:
@@ -240,9 +250,10 @@ async def auto_resume_interrupted_after_close_runs(
             job_run_id=job_run_id,
             step="auto_resume",
             level="info",
-            message=f"自动恢复：interrupted → resume_queued (attempt_no={new_attempt_no})",
+            message=f"自动恢复：interrupted → resume_queued (job={job_name}, attempt_no={new_attempt_no})",
             payload={
                 "action": "interrupted_to_resume_queued",
+                "job_name": job_name,
                 "attempt_no": new_attempt_no,
                 "last_completed_step": last_completed_step,
                 "resumed_at": now.isoformat(),
@@ -252,7 +263,8 @@ async def auto_resume_interrupted_after_close_runs(
 
     await db.flush()
     logger.info(
-        "[Recovery] [JOB-01] 自动恢复 %d 个 interrupted 盘后任务 → resume_queued",
+        "[Recovery] [JOB-01] 自动恢复 %d 个 interrupted 盘后任务 → resume_queued "
+        "（含 after_close_orchestrator + after_close_chip_consensus）",
         len(resumed_rows),
     )
     return len(resumed_rows)
@@ -297,8 +309,10 @@ if __name__ == "__main__":
 
     # 验证 JOB-01 常量
     assert _AFTER_CLOSE_JOB_NAME == "after_close_orchestrator"
+    assert _CHIP_CONSENSUS_JOB_NAME == "after_close_chip_consensus"
     assert _MAX_AUTO_RESUME_ATTEMPTS == 3
     print(f"_AFTER_CLOSE_JOB_NAME={_AFTER_CLOSE_JOB_NAME} ✓")
+    print(f"_CHIP_CONSENSUS_JOB_NAME={_CHIP_CONSENSUS_JOB_NAME} ✓")
     print(f"_MAX_AUTO_RESUME_ATTEMPTS={_MAX_AUTO_RESUME_ATTEMPTS} ✓")
 
     print("OK")

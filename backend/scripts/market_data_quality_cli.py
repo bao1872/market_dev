@@ -111,7 +111,14 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_dates(args: argparse.Namespace) -> tuple[date, date]:
-    """解析起始/结束日期。"""
+    """解析起始/结束日期。
+
+    [P0-5 2026-07-30] end_date 默认使用 today，但 today 可能是非交易日/未收盘日。
+    实际的"最近已完成交易日"解析在异步上下文（_run）中通过
+    resolve_last_completed_trading_day 完成（CLI 入口同步，无法直接查 DB）。
+    本函数保留同步回退：若未显式提供 --end，返回 today，
+    后续 _run 会用 resolve_last_completed_trading_day 修正。
+    """
     today = date.today()
     if args.end:
         end_date = date.fromisoformat(args.end)
@@ -138,9 +145,32 @@ async def _run(args: argparse.Namespace) -> int:
     from app.db import AsyncSessionLocal
     from app.services.market_data_quality_service import (
         MarketDataQualityService,
+        resolve_last_completed_trading_day,
     )
 
     start_date, end_date = _resolve_dates(args)
+
+    # [P0-5 2026-07-30] 修正 end_date 为最近已完成交易日
+    # 当用户未显式 --end 时，今日可能是周末/节假日/未收盘日，
+    # 用 today 当 end_date 会把今日/未来日误判为 TAIL_GAP。
+    # 显式 --end 的用户视为知道自己在做什么（如重扫历史区间），不覆盖。
+    if not args.end:
+        async with AsyncSessionLocal() as _db:
+            resolved_end = await resolve_last_completed_trading_day(_db)
+        if resolved_end is None:
+            logger.warning(
+                "[MDQ CLI] 交易日历无数据，回退 end_date=%s", end_date,
+            )
+        else:
+            if resolved_end != end_date:
+                logger.info(
+                    "[MDQ CLI] end_date 修正: %s → %s (最近已完成交易日)",
+                    end_date, resolved_end,
+                )
+            end_date = resolved_end
+            # 修正 end_date 后重新校验 start_date（15m 默认从 90 天前可能反推）
+            if not args.start and args.timeframe == "15m":
+                start_date = end_date - timedelta(days=90)
 
     # canary 快捷模式
     if args.canary:
@@ -295,8 +325,10 @@ async def _run(args: argparse.Namespace) -> int:
                 await db.commit()
                 results["repair"] = repair_summary
 
-                # [P0 2026-07-30] repair 后必须创建新的 verification scan
+                # [P0-5 2026-07-30] repair 后必须创建新的 verification scan
                 # 禁止复用旧 run 得出结论
+                # run_key 必须包含 mode=verification + source_repair_run_id，
+                # 保证与 scan run 完全不同（run_id/items/结果均独立）
                 logger.info(
                     "[MDQ CLI] repair 完成，启动 verification scan (source_scan_run_id=%s)",
                     run_id,
@@ -309,6 +341,8 @@ async def _run(args: argparse.Namespace) -> int:
                     repair_mode=False,
                     symbols=symbols,
                     limit=limit,
+                    mode="verification",
+                    source_repair_run_id=run_id,
                 )
                 verification_summary = await MarketDataQualityService.execute_scan(
                     db,
@@ -320,6 +354,7 @@ async def _run(args: argparse.Namespace) -> int:
                 results["verification"] = {
                     "verification_run_id": str(verification_run.id),
                     "source_scan_run_id": str(run_id),
+                    "verification_run_key": verification_run.run_key,
                     "summary": verification_summary,
                 }
 

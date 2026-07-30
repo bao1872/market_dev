@@ -250,3 +250,49 @@
 5. 核验 `force=False` 时若 market P/Q/U/C/V value 为 null 则拒绝发布；
 6. 核验 `force=True` 时 run 不写入 `factor_publications`，返回 `is_provisional=true`；
 7. 上一轮 canary run（3e1db415）保留可查询，不被覆盖。
+
+## 12. 第二金字塔定义与冷启动（设计草案，未实现）
+
+> 本章节记录 PRD §24（草案补强）对应的设计状态。所有内容均为"未实现/设计草案"，待 PRD 确认后进入开发。
+
+### 12.1 第二金字塔实现状态
+
+| PRD 条款 | 当前实现状态 | 验证证据 |
+|---|---|---|
+| §24.1 第二金字塔维度（6 维） | 未实现 | 当前第二金字塔仅覆盖"趋势/结构/动量/内部分布"（见 PRD §14.5 描述），未实现状态分布/状态迁移/事件新鲜度/宽度/集中度/相对强度六维度 |
+| §24.2 行业与概念分别聚合 | 部分实现 | `board_analysis_snapshots` 已分别存储行业和概念，但第二金字塔六维度尚未实现 |
+| §24.3 P/Q/U/C/V 就绪状态（raw_ready/normalized_ready/insufficient_history/reason） | 未实现 | 当前 `metric_engine` 仅返回单一 `status` 字段（ready/insufficient_history），未拆分为四字段 |
+| §24.4 冷启动 bootstrap | 未实现 | 无 bootstrap 代码 |
+| §24.5 fp_segment_change_pct 禁止伪造 | 待核验 | 需核验当前 `fp_segment_change_pct` 空值处理 |
+
+### 12.2 冷启动缺口（已识别）
+
+当前实现存在以下冷启动缺口：
+
+- **metric_engine 要求 60+ 日历史**：`metric_engine` 在历史观测 < 60 时返回所有 P/Q/U/C/V `value=null`、`status=insufficient_history`；
+- **首次运行无历史数据**：`market_review_scope_snapshots` 首次运行时无历史记录，所有 component `historyObservationCount=0`，返回 `insufficient_history`；
+- **无 bootstrap 回填机制**：当前不存在从第一金字塔历史（约 250 日）回填第二金字塔历史观测的流程，导致新部署系统需累计 60 个交易日才能生成 normalized 值；
+- **发布门禁阻塞**：§23.5 发布门禁要求 market P/Q/U/C/V `value` 非空，冷启动期间因 `insufficient_history` 导致 `value=null`，系统无法通过 `force=False` 发布。
+
+### 12.3 P/Q/U/C/V 就绪状态当前行为
+
+当前 `metric_engine` 返回的就绪行为（基于 review-1.1.0 代码，main SHA 54fe3a2）：
+
+| 场景 | 当前返回 | PRD §24.3 目标 |
+|---|---|---|
+| 冷启动（0 历史观测） | `status=insufficient_history`, `value=null`, `historyObservationCount=0` | `raw_ready=true`, `normalized_ready=false`, `insufficient_history=true`, `reason="历史观测不足"` |
+| 历史不足（<60 观测） | `status=insufficient_history`, `value=null` | `raw_ready=true`, `normalized_ready=false`, `insufficient_history=true`, `reason="累计观测 N<60"` |
+| 历史充足（≥60 观测） | `status=ready`, `value=非空` | `raw_ready=true`, `normalized_ready=true`, `insufficient_history=false` |
+
+缺口：
+
+- 当前未拆分 `raw_ready` 与 `normalized_ready`；
+- 冷启动时 rawValue 是否已生成待核验（§23.1 要求 rawValue 先行，但 `metric_engine` 在 `history is None` 时直接返回 `insufficient_history`，可能未生成 rawValue）。
+
+### 12.4 后续步骤（待 PRD §24 确认）
+
+1. 确认 PRD §24 第二金字塔六维度定义；
+2. 设计并实现 bootstrap 回填流程（从第一金字塔历史回填第二金字塔历史观测）；
+3. 拆分 `metric_engine` 就绪状态为 `raw_ready/normalized_ready/insufficient_history/reason` 四字段；
+4. 调整发布门禁允许 `raw_ready=true && normalized_ready=false` 的 bootstrap 发布；
+5. 核验 `fp_segment_change_pct` 空值处理。

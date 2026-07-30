@@ -1846,6 +1846,130 @@ async def execute_after_close_run(
                             snapshot_run_id, _snapshot_count,
                         )
 
+            # [P0-1 stock_core publication closure] After snapshot run succeeds,
+            # explicitly publish stock_core pointer via factor_publication_service.
+            # Only after pointer is confirmed written and data_run_id equals
+            # snapshot_run_id, the publishing checkpoint is written.
+            # Idempotent: same run re-publish is a no-op.
+            # Different run pointer: NOT silently overwritten, event recorded.
+            _stock_core_published = False
+            if snapshot_run_id is not None and snapshot_error is None:
+                async with AsyncSessionLocal() as pub_db:
+                    from app.models.factor_publication import PUBLICATION_KIND_STOCK_CORE
+                    from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+                    from app.services.factor_publication_service import (
+                        CoverageBelowThresholdError,
+                        compute_coverage,
+                        get_publication,
+                        publish_stock_core,
+                    )
+
+                    existing_pub = await get_publication(
+                        pub_db,
+                        scope_type="market",
+                        scope_key="market",
+                        trade_date=trade_date,
+                        publication_kind=PUBLICATION_KIND_STOCK_CORE,
+                    )
+
+                    if existing_pub is not None and existing_pub.data_run_id == snapshot_run_id:
+                        logger.info(
+                            "[AfterClose] stock_core pointer already published for this run "
+                            "(idempotent): trade_date=%s, run_id=%s",
+                            trade_date, snapshot_run_id,
+                        )
+                        _stock_core_published = True
+                    elif existing_pub is not None and existing_pub.data_run_id != snapshot_run_id:
+                        logger.warning(
+                            "[AfterClose] stock_core pointer exists for different run: "
+                            "existing=%s, current=%s — NOT overwriting",
+                            existing_pub.data_run_id, snapshot_run_id,
+                        )
+                        await append_event(
+                            db=pub_db,
+                            job_run_id=job_run_id,
+                            step="publishing",
+                            level="warning",
+                            message=(
+                                f"stock_core pointer exists for different run: "
+                                f"existing={existing_pub.data_run_id}, "
+                                f"current={snapshot_run_id}"
+                            ),
+                            payload={
+                                "existing_data_run_id": str(existing_pub.data_run_id),
+                                "current_snapshot_run_id": str(snapshot_run_id),
+                            },
+                        )
+                        await pub_db.commit()
+                        _stock_core_published = True  # existing pointer is valid
+                    else:
+                        cov_data = await compute_coverage(pub_db, snapshot_run_id)
+                        try:
+                            pub = await publish_stock_core(
+                                session=pub_db,
+                                trade_date=trade_date,
+                                snapshot_run_id=snapshot_run_id,
+                                algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+                                coverage=cov_data["coverage"],
+                                metadata={
+                                    "source": "after_close_orchestrator",
+                                    "data_run_id": str(snapshot_run_id),
+                                    "coverage": cov_data["coverage"],
+                                },
+                            )
+                            await pub_db.commit()
+                            logger.info(
+                                "[AfterClose] stock_core pointer published: "
+                                "trade_date=%s, publication_id=%s, coverage=%.4f",
+                                trade_date, pub.id, cov_data["coverage"],
+                            )
+                            _stock_core_published = True
+                        except CoverageBelowThresholdError as cov_exc:
+                            await pub_db.rollback()
+                            logger.error(
+                                "[AfterClose] stock_core coverage below threshold: %s",
+                                cov_exc,
+                            )
+                            raise RuntimeError(
+                                f"stock_core publication failed: "
+                                f"coverage below threshold: {cov_exc}"
+                            ) from cov_exc
+
+            # [P0-4 aggregation dependency closure] After stock_core pointer is
+            # published, trigger board analysis / market aggregation.
+            # Aggregation binds same source_core_run_id; failure only reruns
+            # aggregation, does NOT reverse core. Main run status distinguishes
+            # core_published vs optional_failure.
+            _aggregation_status = "skipped"
+            if _stock_core_published and snapshot_run_id is not None:
+                try:
+                    from app.services.board_analysis_service import (
+                        compute_all_boards,
+                    )
+
+                    async with AsyncSessionLocal() as agg_db:
+                        agg_result = await compute_all_boards(
+                            agg_db,
+                            trade_date=trade_date,
+                            publish=True,
+                        )
+                        await agg_db.commit()
+                    _aggregation_status = "succeeded"
+                    logger.info(
+                        "[AfterClose] board aggregation 完成: trade_date=%s, "
+                        "published=%s",
+                        trade_date,
+                        agg_result.get("published", 0),
+                    )
+                except Exception as agg_exc:
+                    _aggregation_status = "failed"
+                    logger.warning(
+                        "[AfterClose] board aggregation 失败（optional，不影响 core）: "
+                        "trade_date=%s, error=%s",
+                        trade_date, agg_exc,
+                        exc_info=True,
+                    )
+
             # [Phase5] - publishing 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -1899,6 +2023,8 @@ async def execute_after_close_run(
                 f"盘后编排成功完成: dsa_run_id={dsa_run_id}"
                 + (f", published_at={published_run.published_at}"
                    if published_run is not None else "")
+                + f", stock_core_published={_stock_core_published}"
+                + f", aggregation_status={_aggregation_status}"
             )
             await _update_orchestrator_status(
                 db=db,
@@ -1906,7 +2032,11 @@ async def execute_after_close_run(
                 status=AfterCloseRunStatus.SUCCEEDED,
                 message=success_message,
                 dsa_run_id=dsa_run_id,
-                payload={"published_at": published_at_str},
+                payload={
+                    "published_at": published_at_str,
+                    "stock_core_published": _stock_core_published,
+                    "aggregation_status": _aggregation_status,
+                },
             )
             job_run.status = "succeeded"
             job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))

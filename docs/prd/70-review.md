@@ -1308,6 +1308,61 @@ force=True 时跳过 1-6 门禁，但必须：
 - 首次运行（无历史数据）时，所有 component `status=insufficient_history`，`historyObservationCount=0`；不得使用 `None` 作为 `status`，也不得用空对象替代。
 - `metric_engine` 中 `history is None` 必须显式映射为 `status=insufficient_history`，禁止抛 `AttributeError` 或被 `try/except` 静默吞掉。
 
+## 24. 第二金字塔定义与冷启动（草案补强）
+
+> 本章节为第二金字塔定义的草案补强，明确第二金字塔的维度、聚合口径、P/Q/U/C/V 就绪状态与冷启动 bootstrap 合同。本章节在确认为"已确认"后，优先级高于历史描述中与之冲突的部分（特别是冷启动发布行为）。
+
+### 24.1 第二金字塔维度
+
+第二金字塔（板块级分析层）定义以下六个维度：
+
+| 维度 | 说明 |
+|---|---|
+| 状态分布（state distribution） | 板块成员第一金字塔状态分布（趋势/结构/动量各状态的占比） |
+| 状态迁移（state migration） | 板块状态在时间轴上的迁移轨迹 |
+| 事件新鲜度（event freshness） | 板块新鲜结构/动量事件的覆盖与衰减 |
+| 宽度（breadth） | 参与成员比例 |
+| 集中度（concentration） | 贡献集中度 |
+| 相对强度（relative strength） | 板块相对市场/指数的强度 |
+
+第二金字塔不生成综合总分。
+
+### 24.2 行业与概念分别聚合
+
+- 行业（industry）和概念（concept）必须分别聚合（SEPARATELY），不得混合计算；
+- 行业聚合结果与概念聚合结果各自独立存储与发布；
+- 禁止把概念成员混入行业分母，反之亦然。
+
+### 24.3 P/Q/U/C/V 就绪状态合同
+
+每个 P/Q/U/C/V 聚合变量必须返回以下就绪状态字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `raw_ready` | bool | 原始组件值（rawValue）是否已就绪 |
+| `normalized_ready` | bool | 归一化值（value/percentile）是否已就绪（需累计 ≥60 个有效观测） |
+| `insufficient_history` | bool | 是否因历史不足无法归一化（与 `normalized_ready` 互斥） |
+| `reason` | string | 当 `normalized_ready=false` 或 `insufficient_history=true` 时的具体原因 |
+
+规范：
+
+- `raw_ready=true` 但 `normalized_ready=false` 时，可发布 rawValue，但 `value`/`historyPercentile120d`/`delta1d`/`delta5d` 必须为 `null`；
+- 该合同补强 §7.1 的 `status` 字段：`status=ready` 对应 `raw_ready=true && normalized_ready=true`；`status=insufficient_history` 对应 `insufficient_history=true`。
+
+### 24.4 冷启动 bootstrap
+
+- 系统不得强制要求"上线后累计 60 个交易日"才允许发布第二金字塔；
+- 必须提供可重复执行的 bootstrap 流程，从已有第一金字塔历史（约 250 个交易日）回填第二金字塔历史观测，生成满足发布门禁的最小历史；
+- bootstrap 生成的历史观测必须遵循 point-in-time 语义（使用当日有效成员关系与当日已发布因子），不得使用未来成员或未来因子；
+- bootstrap 不得伪造 normalized 值或历史分位；当回填后有效观测仍 < 60 时，对应维度 `insufficient_history=true`；
+- bootstrap 流程必须幂等且可重放，相同输入产生相同历史观测；
+- bootstrap 完成后必须在发布元数据中记录 `bootstrap=true` 与回填的观测数量。
+
+### 24.5 fp_segment_change_pct 禁止伪造
+
+- `fp_segment_change_pct`（第一金字塔分段变化百分比）在数据为空时必须返回 `null`，不得伪造为 0、均值或前值；
+- 该字段为空时必须在 `reason` 中明确记录"无可用分段数据"。
+
 ## 最终原则
 
 - 筛选器是发现引擎；

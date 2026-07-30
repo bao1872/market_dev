@@ -8,11 +8,13 @@
     WORKER_TYPE=strategy_scheduler python -m app.worker   # 运行选股策略调度 Worker（每日 18:30，兜底机制）
     WORKER_TYPE=calendar_scheduler python -m app.worker  # 运行日历调度 Worker（每日 02:00）
     WORKER_TYPE=monitor_scheduler python -m app.worker    # 运行监控调度 Worker（交易时段 9:30-15:00）
+    WORKER_TYPE=after_close_orchestrator python -m app.worker  # 运行盘后编排 Worker（断点恢复 + 心跳租约）
+    WORKER_TYPE=chip_consensus python -m app.worker   # 运行盘后筹码共识 Worker（[P0-3] 独立 poll + 断点续算）
     WORKER_TYPE=watchdog python -m app.worker          # 运行恢复看门狗（每 60s 清理僵尸任务）
     WORKER_TYPE=all python -m app.worker              # 同时运行全部（开发模式，含看门狗）
 
 环境变量：
-    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/calendar_scheduler/monitor_scheduler/after_close_orchestrator/watchdog/all，默认 all）
+    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/calendar_scheduler/monitor_scheduler/after_close_orchestrator/chip_consensus/watchdog/all，默认 all）
     WORKER_INTERVAL: 轮询间隔秒数（默认 5）
     WORKER_BATCH_SIZE: 单次轮询最大记录数（默认 100）
     WORKER_MAX_RETRY: 最大重试次数（默认 5）
@@ -23,6 +25,7 @@
 - 异常不吞：捕获后记录日志并等待下次轮询（避免单次失败导致 worker 退出）
 - Outbox Relay 不再直接投递渠道，而是为每个渠道创建 MessageDelivery 记录
 - Delivery Worker 负责实际渠道投递与失败重试
+- [P0-3] chip_consensus 与 after_close_orchestrator 可在同一容器运行（独立 WORKER_TYPE 分支）
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ import logging
 import os
 import signal
 import socket
+import uuid
 from datetime import UTC, datetime, time, timedelta
 from time import monotonic as _time_monotonic
 from zoneinfo import ZoneInfo
@@ -1524,6 +1528,238 @@ async def run_after_close_orchestrator_worker() -> None:
     logger.info("[AfterCloseWorker] SIGTERM drain complete, finished current item")
 
 
+async def _chip_consensus_poll_once() -> bool:
+    """[ChipConsensusWorker] - 单次轮询：领取并执行一个 queued/resume_queued chip consensus 任务。
+
+    使用 SELECT ... FOR UPDATE SKIP LOCKED 领取任务，多个 Worker 实例只有一个能领取。
+    领取后更新 status='running' + worker_instance_id + heartbeat + lease + lease_epoch（fencing）。
+    然后调用 execute_after_close_chip_consensus（含断点续算）。
+
+    [P0-3 ref/instruction.md §二.3] chip 任务有执行者：
+    - 在现有 after-close worker 容器内增加独立 poll 函数和 WORKER_TYPE 分支
+    - 不新增常驻容器
+    - 使用 FOR UPDATE SKIP LOCKED、lease_epoch、heartbeat、断点续算
+    - chip 失败不反改 core（execute_after_close_chip_consensus 内部已隔离）
+
+    断点续算：
+    - get_pending_chip_instruments 过滤已 succeeded 的 instrument
+    - resume_queued 任务只重试未成功项
+    - 部分成功写 metadata.chip_status=partial，主 status=succeeded
+
+    Returns:
+        True 如果领取到任务（无论执行成功与否），False 如果无 queued/resume_queued 任务
+    """
+    from datetime import date as date_cls
+
+    from sqlalchemy import select
+
+    from app.services.after_close_chip_consensus_service import (
+        _CHIP_LEASE_SECONDS,
+        CHIP_CONSENSUS_JOB_NAME,
+        execute_after_close_chip_consensus,
+        get_pending_chip_instruments,
+    )
+    from app.services.feature_snapshot_service import get_active_a_share_instruments
+
+    async with AsyncSessionLocal() as db:
+        # [ChipConsensusWorker] - FOR UPDATE SKIP LOCKED 领取一个 queued 或 resume_queued 任务
+        stmt = (
+            select(SchedulerJobRun)
+            .where(
+                SchedulerJobRun.job_name == CHIP_CONSENSUS_JOB_NAME,
+                SchedulerJobRun.status.in_(("queued", "resume_queued")),
+            )
+            .order_by(SchedulerJobRun.created_at)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        result = await db.execute(stmt)
+        job_run = result.scalar_one_or_none()
+
+        if job_run is None:
+            # 无 queued/resume_queued 任务，释放锁（rollback 释放 FOR UPDATE 锁）
+            await db.rollback()
+            return False
+
+        prev_status = job_run.status
+        is_resume = prev_status == "resume_queued"
+
+        # 领取任务：更新 status='running' + worker + heartbeat + lease + lease_epoch（fencing）
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        job_run.status = "running"
+        job_run.worker_instance_id = _WORKER_INSTANCE_ID
+        if job_run.started_at is None:
+            job_run.started_at = now
+        job_run.heartbeat_at = now
+        job_run.lease_expires_at = now + timedelta(seconds=_CHIP_LEASE_SECONDS)
+        job_run.lease_epoch = job_run.lease_epoch + 1  # fencing
+        await db.commit()
+
+        # 提取 metadata
+        meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+        trade_date_str = meta.get("trade_date")
+        core_run_id_str = meta.get("core_run_id")
+        job_run_id = job_run.id
+        current_lease_epoch = job_run.lease_epoch
+
+        logger.info(
+            "[ChipConsensusWorker] 领取任务: job_run_id=%s, prev_status=%s, "
+            "lease_epoch=%s, is_resume=%s",
+            job_run_id, prev_status, current_lease_epoch, is_resume,
+        )
+
+    if not trade_date_str or not core_run_id_str:
+        # 任务缺关键字段，立即标记 failed
+        logger.error(
+            "[ChipConsensusWorker] 任务缺少 trade_date/core_run_id，标记 failed: "
+            "job_run_id=%s", job_run_id,
+        )
+        async with AsyncSessionLocal() as db:
+            jr = await db.get(SchedulerJobRun, job_run_id)
+            if jr is not None:
+                now_fail = datetime.now(ZoneInfo("Asia/Shanghai"))
+                jr.status = "failed"
+                jr.finished_at = now_fail
+                jr.lease_expires_at = now_fail  # 释放 run_key
+                jr.error_message = "任务缺少 trade_date/core_run_id，无法执行 chip consensus"
+                from app.models.job_run_event import JobRunEvent
+                db.add(JobRunEvent(
+                    job_run_id=jr.id,
+                    step="claim",
+                    level="ERROR",
+                    message="任务缺少 trade_date/core_run_id，无法执行 chip consensus",
+                    payload={"reason": "missing_metadata"},
+                ))
+                await db.commit()
+        return True
+
+    trade_date = date_cls.fromisoformat(trade_date_str)
+    core_run_id = uuid.UUID(core_run_id_str)
+
+    # 获取活跃 A 股 instrument 列表
+    try:
+        async with AsyncSessionLocal() as db:
+            all_instrument_ids = await get_active_a_share_instruments(db)
+            # [断点续算] 过滤已 succeeded 的 instrument（resume_queued 只重试未成功项）
+            pending_instrument_ids = await get_pending_chip_instruments(
+                db,
+                trade_date=trade_date,
+                core_run_id=core_run_id,
+                all_instrument_ids=all_instrument_ids,
+            )
+    except Exception as exc:
+        logger.exception(
+            "[ChipConsensusWorker] 获取 instrument 列表失败: job_run_id=%s, error=%s",
+            job_run_id, exc,
+        )
+        async with AsyncSessionLocal() as db:
+            jr = await db.get(SchedulerJobRun, job_run_id)
+            if jr is not None:
+                now_fail = datetime.now(ZoneInfo("Asia/Shanghai"))
+                jr.status = "failed"
+                jr.finished_at = now_fail
+                jr.lease_expires_at = now_fail
+                jr.error_message = f"获取 instrument 列表失败: {exc}"[:500]
+                await db.commit()
+        return True
+
+    logger.info(
+        "[ChipConsensusWorker] 开始执行: job_run_id=%s, trade_date=%s, "
+        "core_run_id=%s, total_instruments=%d, pending=%d, is_resume=%s",
+        job_run_id, trade_date, core_run_id,
+        len(all_instrument_ids), len(pending_instrument_ids), is_resume,
+    )
+
+    # 执行 chip consensus（内部已隔离单股失败，chip 失败不反改 core）
+    try:
+        result = await execute_after_close_chip_consensus(
+            job_run_id=job_run_id,
+            trade_date=trade_date,
+            core_run_id=core_run_id,
+            instrument_ids=pending_instrument_ids,
+            worker_id=_WORKER_INSTANCE_ID,
+            lease_epoch=current_lease_epoch,
+        )
+        # execute_after_close_chip_consensus 内部已更新 job_run metadata.chip_status
+        # 和主 status（succeeded/failed）；partial 保持主 status 不变由 caller 处理
+        logger.info(
+            "[ChipConsensusWorker] 执行完成: job_run_id=%s, status=%s, "
+            "succeeded=%d, failed=%d, total=%d",
+            job_run_id, result.get("status"),
+            result.get("succeeded_count", 0),
+            result.get("failed_count", 0),
+            result.get("total_count", 0),
+        )
+    except Exception as exc:
+        logger.exception(
+            "[ChipConsensusWorker] 执行异常: job_run_id=%s, error=%s", job_run_id, exc,
+        )
+        # execute_after_close_chip_consensus 内部已处理单股失败，
+        # 此处仅捕获整体异常，标记 failed
+        async with AsyncSessionLocal() as db:
+            jr = await db.get(SchedulerJobRun, job_run_id)
+            if jr is not None:
+                now_fail = datetime.now(ZoneInfo("Asia/Shanghai"))
+                jr.status = "failed"
+                jr.finished_at = now_fail
+                jr.lease_expires_at = now_fail
+                jr.error_message = f"chip consensus 执行异常: {exc}"[:500]
+                await db.commit()
+
+    return True
+
+
+async def run_chip_consensus_worker() -> None:
+    """[ChipConsensusWorker] - 盘后筹码共识独立 Worker：领取 queued 任务并执行。
+
+    [P0-3 ref/instruction.md §二.3] chip 任务有执行者：
+    - 在现有 after-close worker 容器内增加独立 poll 函数和 WORKER_TYPE 分支
+    - 不新增常驻容器
+    - 使用 FOR UPDATE SKIP LOCKED、lease_epoch、heartbeat、断点续算
+    - chip 失败不反改 core
+
+    每个轮询周期：
+    1. 启动恢复（清理上次崩溃残留的 running 任务，由 watchdog 转为 interrupted → resume_queued）
+    2. _chip_consensus_poll_once 领取并执行一个 queued/resume_queued 任务
+    3. sleep WORKER_INTERVAL 后继续轮询
+
+    [SIGTERM drain] - 优雅退出（与 run_after_close_orchestrator_worker 一致）：
+    - SIGTERM/SIGINT 设置 _shutdown=True
+    - 主循环在领取新任务前检查 _shutdown
+    - 当前正在执行的 chip consensus 完成后才退出
+    """
+    _hb_task = asyncio.create_task(_heartbeat_loop("chip_consensus"))
+    logger.info(
+        "[ChipConsensusWorker] 启动（间隔=%ds）", WORKER_INTERVAL,
+    )
+
+    # 启动恢复：清理上次崩溃残留的 running 任务（由 watchdog 转为 interrupted → resume_queued）
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await recover_stale_scheduler_job_runs(db)
+            await db.commit()
+            if recovered > 0:
+                logger.info(
+                    "[ChipConsensusWorker] 启动恢复: %d 个过期任务", recovered,
+                )
+    except Exception as exc:
+        logger.exception("[ChipConsensusWorker] 启动恢复异常: %s", exc)
+
+    while not _shutdown:
+        try:
+            await _chip_consensus_poll_once()
+        except Exception as exc:
+            # _chip_consensus_poll_once 内部已捕获执行异常，
+            # 此处仅捕获领取阶段的意外异常
+            logger.exception("[ChipConsensusWorker] 轮询异常: %s", exc)
+        if _shutdown:
+            logger.info("[ChipConsensusWorker] SIGTERM drain: 不再领取新任务，准备退出")
+            break
+        await asyncio.sleep(WORKER_INTERVAL)
+
+    logger.info("[ChipConsensusWorker] SIGTERM drain complete, finished current item")
+
+
 async def main() -> None:
     """主入口：根据 WORKER_TYPE 启动对应的 worker。"""
     logging.basicConfig(
@@ -1563,6 +1799,11 @@ async def main() -> None:
     if WORKER_TYPE in ("after_close_orchestrator", "all"):
         tasks.append(asyncio.create_task(run_after_close_orchestrator_worker()))
 
+    # [P0-3 ref/instruction.md §二.3] - chip consensus 独立 Worker（同容器，独立 WORKER_TYPE 分支）
+    # 不新增常驻容器；使用 FOR UPDATE SKIP LOCKED、lease_epoch、heartbeat、断点续算
+    if WORKER_TYPE in ("chip_consensus", "after_close_orchestrator", "all"):
+        tasks.append(asyncio.create_task(run_chip_consensus_worker()))
+
     # [Recovery] - 看门狗：all 模式自动启动，或 WORKER_TYPE=watchdog 单独启动
     if WORKER_TYPE in ("watchdog", "all"):
         tasks.append(asyncio.create_task(_recovery_watchdog_loop()))
@@ -1582,7 +1823,7 @@ if __name__ == "__main__":
     print(f"WORKER_INTERVAL={WORKER_INTERVAL}")
     print(f"WORKER_BATCH_SIZE={WORKER_BATCH_SIZE}")
     print(f"WORKER_MAX_RETRY={WORKER_MAX_RETRY}")
-    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "after_close_orchestrator", "watchdog", "all"), \
+    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "after_close_orchestrator", "chip_consensus", "watchdog", "all"), \
         f"未知 WORKER_TYPE: {WORKER_TYPE}"
     # 验证 worker 函数可调用
     assert callable(run_outbox_relay), "run_outbox_relay 应可调用"
@@ -1593,6 +1834,7 @@ if __name__ == "__main__":
     assert callable(run_calendar_scheduler_worker), "run_calendar_scheduler_worker 应可调用"
     assert callable(run_monitor_scheduler_worker), "run_monitor_scheduler_worker 应可调用"
     assert callable(run_after_close_orchestrator_worker), "run_after_close_orchestrator_worker 应可调用"
+    assert callable(run_chip_consensus_worker), "run_chip_consensus_worker 应可调用"
     assert callable(_recovery_watchdog_loop), "_recovery_watchdog_loop 应可调用"
     print("OK: 配置验证通过")
     asyncio.run(main())

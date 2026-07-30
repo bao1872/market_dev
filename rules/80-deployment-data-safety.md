@@ -120,6 +120,44 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 禁止把私钥、密码或完整 IdentityFile 路径写入脚本/日志/CHANGE；
 - `~/.ssh/config` 中 `55-server` 已加 `DEPRECATED-PANJI-DO-NOT-USE` 注释，不得删除该别名（保留历史运维），但盘迹操作禁止使用。
 
+## 生产修改与部署版本合同（2026-07-30 收口）
+
+> 来源：闭环缺口防复发
+> 状态：生效（2026-07-30）
+> 与 `70-trae-cn.md` "闭环恢复与成功判定硬约束" 叠加生效。
+
+### 禁止 docker cp 和未审计 stdin 脚本
+
+- 禁止使用 `docker cp` 向生产容器写入文件、配置或代码补丁；
+- 禁止通过 `docker exec ... python -c "..."`、`docker exec ... psql -c "..."`、heredoc stdin 注入等未审计方式修改生产容器或生产数据；
+- 临时诊断只能用只读 `docker exec ... python -c "..."` 查询，禁止写入；
+- 任何对生产容器或数据的修改必须通过正式 service / CLI / migration / 部署脚本完成，并留 Git 历史 + 审计日志。
+
+### 手工恢复走正式 service/CLI
+
+- 手工恢复（DSA 失败、chip_consensus 卡住、stock_core pointer 缺失、聚合失败、Review 冷启动）必须走正式 service 或 CLI，并留审计记录：
+  - DSA 失败恢复：`dsa_recovery_service.recover_failed_dsa_run`（创建新 run，不修改原 run）
+  - Review 冷启动：`review_bootstrap_service.bootstrap_history(dry_run=False)`
+  - stock_core pointer 恢复：`factor_publication_service.publish_stock_core`（幂等重发）
+  - chip_consensus 恢复：worker 自动领取 `resume_queued`，使用 `FOR UPDATE SKIP LOCKED`
+- 禁止裸 SQL 直接改 `scheduler_job_runs` / `strategy_runs` / `factor_publications` / `market_review_runs` 等状态表；
+- 禁止 `/tmp` Python 脚本绕过 service 直接操作 ORM；
+- 禁止 DELETE 历史 `dsa_only` 记录或失败 run，必须通过正式 cancel/interrupted/retry 服务处理。
+
+### 部署版本合同
+
+- 构建成功后必须先原子更新 `/etc/market-dev/market.env` 中的 `GIT_SHA`，再执行 `docker compose` 重建：
+  - 更新方式：临时文件 + `mv` 原子替换，**禁止 `sed -i`**（`sed -i` 在某些环境下不是原子操作，且会破坏文件权限/SELinux 上下文）；
+  - 模板：`cp market.env market.env.tmp && { grep -v '^GIT_SHA=' market.env.tmp; echo "GIT_SHA=<SHA>"; } > market.env.tmp && mv market.env.tmp market.env`；
+  - `market.env` 更新成功后才能执行 `docker compose -f docker-compose.prod.yml up -d --force-recreate`。
+- 部署成功门禁必须**同时**验证以下四项一致，**`/health=200` 不能单独判成功**：
+  1. repo HEAD（`git -C /root/web_dev rev-parse HEAD`）= 目标 SHA；
+  2. image tag（`docker images` 中 `trading-backend:<SHA>` 存在）= 目标 SHA；
+  3. container env `GIT_SHA`（`docker inspect trading-backend` 的 env）= 目标 SHA；
+  4. `/version` runtime SHA（`curl /api/v1/version` 的 `runtime_git_sha` + `image_git_sha`）= 目标 SHA。
+- 四项任一不匹配即视为部署失败，必须回滚至上一已知良好 SHA，不得通过"重启容器"或"重新部署"掩盖不一致。
+- Live Mount 部署同样适用：`RUNTIME_SHA` 文件必须原子替换（temp file + `mv`），禁止 `sed -i`。
+
 ## 分层发布与增量检查点纪律
 
 > 来源：CHANGE-20260729-006

@@ -75,25 +75,40 @@ async def evaluate_publish_gate(
 
     # 1. market 范围必须 ready，且 P/Q/U/C/V 五项 value 非空
     # [P0 2026-07-30] 强化门禁：原仅校验 status，现增加 value 非空校验
+    # [P0-6 2026-07-30] 使用 readiness 字段报告 granular blocker：
+    #   - raw_ready=False → 上游 stock_core 字段缺失
+    #   - normalized_ready=False → 历史不足，提示运行 bootstrap
+    #   禁止 force publish：冷启动时必须先 bootstrap 补历史
     market_snap = await _get_scope_snapshot(
         session, run.id, "market", "market",
     )
     if market_snap is None:
         blockers.append("market 范围快照缺失")
-    elif market_snap.status != "ready":
-        blockers.append(
-            f"market 范围状态非 ready: status={market_snap.status}",
-        )
     else:
-        # 校验 P/Q/U/C/V 五项 value 均非空
         for metric_code, payload_field in (
             ("P", "p_payload"), ("Q", "q_payload"),
             ("U", "u_payload"), ("C", "c_payload"), ("V", "v_payload"),
         ):
             payload = getattr(market_snap, payload_field, None)
-            if not isinstance(payload, dict) or payload.get("value") is None:
+            if not isinstance(payload, dict):
+                blockers.append(f"market {metric_code} payload 缺失")
+                continue
+            readiness = payload.get("readiness") or {}
+            reason = readiness.get("reason")
+            if payload.get("value") is None:
+                # [P0-6] 报告 granular readiness reason（若有）
+                if reason:
+                    blockers.append(
+                        f"market {metric_code} value 为空: {reason}",
+                    )
+                else:
+                    blockers.append(
+                        f"market {metric_code} payload value 为空",
+                    )
+            elif readiness.get("normalized_ready") is False:
+                # value 存在但 normalized_ready=False（partial 场景）
                 blockers.append(
-                    f"market {metric_code} payload value 为空",
+                    f"market {metric_code} normalized_ready=False: {reason}",
                 )
 
     # 2. 主要指数和风格范围必须齐全且 ready

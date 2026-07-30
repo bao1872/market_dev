@@ -322,24 +322,65 @@ recreate_services() {
 build_images() {
     log "构建镜像（backend/frontend/worker-capture）..."
     cd "${REPO_ROOT}"
-    # 注入版本信息
+    # [P0-7 2026-07-30] 先原子更新 market.env，再构建，确保 build 和 up -d 使用同一 GIT_SHA
+    update_env_file
+    # 注入版本信息（shell export 作为 build-arg 备用，market.env 是 SSOT）
     export GIT_SHA="${TARGET_SHA:0:7}"
     export BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     run_cmd docker compose --env-file "${ENV_FILE}" -f docker-compose.prod.yml build backend frontend worker-capture
+}
 
-    # [P0 2026-07-30] 同步更新 market.env 的 GIT_SHA，避免 docker compose --env-file 覆盖 shell export
-    # 导致 up -d 时使用旧镜像 tag（deployment_mode=image 必须保证 image=runtime SHA）
-    if [[ "${DRY_RUN}" == "false" ]]; then
-        if grep -q "^GIT_SHA=" "${ENV_FILE}"; then
-            sed -i "s/^GIT_SHA=.*/GIT_SHA=${TARGET_SHA:0:7}/" "${ENV_FILE}"
-            log "已更新 ${ENV_FILE} GIT_SHA=${TARGET_SHA:0:7}"
-        else
-            echo "GIT_SHA=${TARGET_SHA:0:7}" >> "${ENV_FILE}"
-            log "已追加 ${ENV_FILE} GIT_SHA=${TARGET_SHA:0:7}"
-        fi
-    else
-        log "[dry-run] 将更新 ${ENV_FILE} GIT_SHA=${TARGET_SHA:0:7}"
+# [P0-7 2026-07-30] 原子更新 market.env 中的 GIT_SHA 和 BUILD_TIME
+# 禁止用 sed -i 直接修改（非原子，中途崩溃会损坏文件）
+# 使用 temp file + mv 原子替换
+update_env_file() {
+    log "原子更新 ${ENV_FILE} GIT_SHA/BUILD_TIME..."
+
+    local short_sha="${TARGET_SHA:0:7}"
+    local build_time
+    build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] 将更新 ${ENV_FILE}: GIT_SHA=${short_sha}, BUILD_TIME=${build_time}"
+        return 0
     fi
+
+    local tmp_file
+    tmp_file="$(mktemp "${ENV_FILE}.XXXXXX")" || fail "无法创建临时文件"
+
+    # 复制现有 env，替换/追加 GIT_SHA 和 BUILD_TIME
+    cp "${ENV_FILE}" "${tmp_file}"
+
+    # 使用 awk 原子替换（避免多次 sed 调用）
+    awk -v sha="${short_sha}" -v bt="${build_time}" '
+        /^GIT_SHA=/ { print "GIT_SHA=" sha; next }
+        /^BUILD_TIME=/ { print "BUILD_TIME=" bt; next }
+        { print }
+    ' "${tmp_file}" > "${tmp_file}.new" && mv "${tmp_file}.new" "${tmp_file}"
+
+    # 检查是否已存在（awk 不会追加不存在的行）
+    if ! grep -q "^GIT_SHA=" "${tmp_file}"; then
+        echo "GIT_SHA=${short_sha}" >> "${tmp_file}"
+    fi
+    if ! grep -q "^BUILD_TIME=" "${tmp_file}"; then
+        echo "BUILD_TIME=${build_time}" >> "${tmp_file}"
+    fi
+
+    # 原子替换（mv 在同一文件系统上是原子的）
+    mv "${tmp_file}" "${ENV_FILE}" || fail "无法原子替换 ${ENV_FILE}"
+
+    # 验证写入成功
+    local verified_sha verified_bt
+    verified_sha="$(grep "^GIT_SHA=" "${ENV_FILE}" | cut -d= -f2)"
+    verified_bt="$(grep "^BUILD_TIME=" "${ENV_FILE}" | cut -d= -f2)"
+    if [[ "${verified_sha}" != "${short_sha}" ]]; then
+        fail "market.env GIT_SHA 验证失败: 期望 ${short_sha}, 实际 ${verified_sha}"
+    fi
+    if [[ "${verified_bt}" != "${build_time}" ]]; then
+        fail "market.env BUILD_TIME 验证失败: 期望 ${build_time}, 实际 ${verified_bt}"
+    fi
+
+    log "已原子更新 ${ENV_FILE}: GIT_SHA=${verified_sha}, BUILD_TIME=${verified_bt}"
 }
 
 deploy_scope() {
@@ -348,12 +389,16 @@ deploy_scope() {
             log "无需应用变更，跳过部署"
             ;;
         frontend)
+            # [P0-7] 所有部署 scope 都先更新 market.env，确保 GIT_SHA 一致
+            update_env_file
             build_frontend
             sync_live_mount
             compose_config_check
             recreate_services frontend
             ;;
         backend)
+            # [P0-7] 所有部署 scope 都先更新 market.env，确保 GIT_SHA 一致
+            update_env_file
             build_frontend
             sync_live_mount
             compose_config_check
@@ -366,6 +411,7 @@ deploy_scope() {
         image)
             # [P0 2026-07-30] 纯镜像部署：构建镜像后不 sync_live_mount，
             # 使用 docker-compose.prod.yml 单文件重建，保证 repo=image=runtime SHA
+            # [P0-7] build_images 内部已调用 update_env_file（构建前原子更新）
             build_images
             build_frontend
             compose_config_check
@@ -378,6 +424,8 @@ deploy_scope() {
                 worker-after-close worker-watchdog worker-capture
             ;;
         all)
+            # [P0-7] 所有部署 scope 都先更新 market.env，确保 GIT_SHA 一致
+            update_env_file
             build_frontend
             sync_live_mount
             compose_config_check
@@ -397,6 +445,7 @@ health_check() {
     # [Phase 5B-2] dry-run 模式下只做计划验证，不称健康检查
     if [[ "${DRY_RUN}" == "true" ]]; then
         log "[dry-run] 计划验证: 将检查 port 80, /health, /health/ready, /version runtime_git_sha, 关键容器, Scheduler 单实例"
+        log "[dry-run] [P0-7] SHA gate: repo HEAD = image tag = container env GIT_SHA = /version runtime SHA"
         return 0
     fi
 
@@ -447,6 +496,35 @@ health_check() {
         return 1
     fi
     log "runtime_git_sha 验证通过: ${runtime_sha:0:7}"
+
+    # [P0-7 2026-07-30] SHA gate: 验证 image tag 和 container env GIT_SHA
+    # repo HEAD = image tag = container env = /version runtime SHA
+    # health=200 不能单独判成功，必须四重一致
+    local short_sha="${TARGET_SHA:0:7}"
+
+    # 验证 backend 容器 env GIT_SHA
+    local container_env_sha
+    container_env_sha="$(docker inspect trading-backend --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep "^GIT_SHA=" | cut -d= -f2 || echo "unknown")"
+    if [[ "${container_env_sha:0:7}" != "${short_sha}" ]]; then
+        log "容器 env GIT_SHA 不匹配: 期望 ${short_sha}, 实际 ${container_env_sha:0:7}"
+        return 1
+    fi
+    log "容器 env GIT_SHA 验证通过: ${container_env_sha:0:7}"
+
+    # 验证 backend 镜像 tag（纯镜像部署时镜像 tag 应包含 SHA）
+    local image_tag
+    image_tag="$(docker inspect trading-backend --format '{{.Config.Image}}' 2>/dev/null || echo "unknown")"
+    # 镜像 tag 可能是 "panji-backend:abc1234" 或 "panji-backend:latest"
+    # 只在纯镜像部署（CHANGE_SCOPE=image）时强制校验 tag 包含 SHA
+    if [[ "${CHANGE_SCOPE}" == "image" ]]; then
+        if [[ "${image_tag}" != *"${short_sha}"* ]]; then
+            log "镜像 tag 不包含 SHA: 期望含 ${short_sha}, 实际 ${image_tag}"
+            return 1
+        fi
+        log "镜像 tag 验证通过: ${image_tag}"
+    fi
+
+    log "[P0-7] SHA gate 通过: repo=${short_sha} env=${container_env_sha:0:7} runtime=${runtime_sha:0:7} image=${image_tag}"
 
     # 端口 80
     if ! curl -sf http://127.0.0.1:80 >/dev/null 2>&1; then
@@ -542,11 +620,12 @@ rollback() {
     cd "${REPO_ROOT}"
     run_cmd git checkout -f "${PREVIOUS_SHA}"
 
-    # [P0 2026-07-30] 回滚时恢复 market.env GIT_SHA 到 PREVIOUS_SHA
-    if [[ "${DRY_RUN}" == "false" ]] && grep -q "^GIT_SHA=" "${ENV_FILE}"; then
-        sed -i "s/^GIT_SHA=.*/GIT_SHA=${PREVIOUS_SHA:0:7}/" "${ENV_FILE}"
-        log "已恢复 ${ENV_FILE} GIT_SHA=${PREVIOUS_SHA:0:7}"
-    fi
+    # [P0-7 2026-07-30] 回滚时用 update_env_file 原子恢复 GIT_SHA（禁止 sed -i）
+    # 临时将 TARGET_SHA 设为 PREVIOUS_SHA 以复用 update_env_file
+    local saved_target_sha="${TARGET_SHA}"
+    TARGET_SHA="${PREVIOUS_SHA}"
+    update_env_file
+    TARGET_SHA="${saved_target_sha}"
 
     # 重新同步旧代码
     sync_live_mount

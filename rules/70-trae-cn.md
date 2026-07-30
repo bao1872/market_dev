@@ -82,6 +82,18 @@ CN 可按需切换以下模式：
 
 详见 `80-deployment-data-safety.md`。
 
+## 闭环恢复与成功判定硬约束（2026-07-30 收口）
+
+> 适用于一轮闭环、Compact 恢复和成功判定的硬约束。与上文"一轮闭环规则"叠加生效，冲突时以更严格一方为准。
+
+1. **禁止临时生产脚本代替永久代码修复**：禁止用 `/tmp` Python、裸 SQL、`docker cp`、stdin 注入等临时生产脚本替代正式代码修复。发现闭环缺口必须走"代码修复 + 正式测试（`backend/tests/` 或 `frontend/src/**/__tests__/`）"，不得用临时脚本补生产状态。已在生产用临时脚本补过的状态必须回滚或转正后才能视为闭环。
+2. **Compact 后只读 `/tmp/trae_panji_closure_ledger.md` 恢复上下文**：Compact（上下文压缩）发生后，只读取 `/tmp/trae_panji_closure_ledger.md` 恢复上下文，不得重新 `git status`、重读 instruction、重复扫描已确认内容或重新发现生产服务器入口（SSH 入口见 `rules/80-deployment-data-safety.md` "生产服务器 SSH SSOT"）。账本每完成一步立即更新状态、命令、结果和测试次数。该规则与上文"一轮闭环规则"中 `/tmp/trae_release_closure_ledger.md` 互斥：按当前正在执行的闭环目标读取对应账本，禁止交叉读取。
+3. **成功判定三要素**：成功判定必须同时具备 pointer、版本、真实数据证据：
+   - **pointer**：`factor_publications` 中对应 kind（`stock_core` / `market_aggregation` / `review` / `history_cross_section`）的 pointer 已切换至目标 run，且 `data_run_id` 指向本轮 run；
+   - **版本**：repo HEAD（GIT_SHA）、`algorithm_version`、image tag、container env `GIT_SHA` 一致，`/version` runtime SHA 等于 main HEAD；
+   - **真实数据证据**：DB 查询（pointer 行、`stock_feature_snapshot_run_items.status` 分布）或日志（worker heartbeat、publish 事件）证明发布已生效。
+   - 禁止凭"页面能打开"或"`/health` 返回 200"单独判成功；这两者只能作为辅助证据，不能替代 pointer + 版本 + 数据证据三要素。
+
 ## 页面验收要求（2026-07-30 补充）
 
 > 一轮闭环规则与 ledger 恢复规则见上文"一轮闭环规则"章节，此处仅补充页面验收要求。

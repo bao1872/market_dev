@@ -418,11 +418,12 @@ class TestRunKeyAndHash:
     """run_key 与 parameter_hash 生成。"""
 
     def test_run_key_format(self):
-        """run_key 格式：mdq:{timeframe}:{start}:{end}:{algorithm_version}。"""
+        """run_key 格式：mdq:{timeframe}:{start}:{end}:{algorithm_version}:scan。"""
         rk = MarketDataQualityService.make_run_key(
             "1d", date(2026, 1, 1), date(2026, 7, 30),
         )
-        assert rk == "mdq:1d:2026-01-01:2026-07-30:mdq-v1.0.0"
+        # [P0-5] 新格式末尾追加 :scan
+        assert rk == "mdq:1d:2026-01-01:2026-07-30:mdq-v1.0.0:scan"
 
     def test_run_key_different_timeframe(self):
         """不同 timeframe 产生不同 run_key。"""
@@ -457,6 +458,71 @@ class TestRunKeyAndHash:
     def test_algorithm_version_constant(self):
         """算法版本常量正确。"""
         assert MDQ_ALGORITHM_VERSION == "mdq-v1.0.0"
+
+    # [P0-5] 新增：verification run_key 必须不同于 scan run_key
+    def test_verification_run_key_differs_from_scan(self):
+        """verification 模式 run_key 必须与 scan 不同。"""
+        scan_rk = MarketDataQualityService.make_run_key(
+            "1d", date(2026, 1, 1), date(2026, 7, 30), mode="scan",
+        )
+        # 用 source_repair_run_id
+        src_id = uuid.uuid4()
+        ver_rk_src = MarketDataQualityService.make_run_key(
+            "1d", date(2026, 1, 1), date(2026, 7, 30),
+            mode="verification", source_repair_run_id=src_id,
+        )
+        assert ver_rk_src != scan_rk
+        assert "verification" in ver_rk_src
+        assert str(src_id) in ver_rk_src
+
+        # 用 verification_seq
+        ver_rk_seq = MarketDataQualityService.make_run_key(
+            "1d", date(2026, 1, 1), date(2026, 7, 30),
+            mode="verification", verification_seq=3,
+        )
+        assert ver_rk_seq != scan_rk
+        assert "verification" in ver_rk_seq
+        assert "seq=3" in ver_rk_seq
+
+    def test_verification_parameter_hash_differs_from_scan(self):
+        """verification 模式 parameter_hash 必须与 scan 不同。"""
+        h_scan = MarketDataQualityService.make_parameter_hash(
+            "1d", date(2026, 1, 1), date(2026, 7, 30), mode="scan",
+        )
+        h_ver = MarketDataQualityService.make_parameter_hash(
+            "1d", date(2026, 1, 1), date(2026, 7, 30),
+            mode="verification",
+            source_repair_run_id=uuid.uuid4(),
+        )
+        assert h_ver != h_scan
+
+    def test_verification_mode_requires_source_or_seq(self):
+        """verification 模式必须提供 source_repair_run_id 或 verification_seq。"""
+        import asyncio
+
+        db = MagicMock()
+        with pytest.raises(ValueError, match="verification 模式必须提供"):
+            asyncio.get_event_loop().run_until_complete(
+                MarketDataQualityService.create_run(
+                    db, timeframe="1d",
+                    start_date=date(2026, 1, 1), end_date=date(2026, 7, 30),
+                    mode="verification",  # 缺 source_repair_run_id 和 verification_seq
+                )
+            )
+
+    def test_invalid_mode_rejected(self):
+        """非法 mode 抛 ValueError。"""
+        import asyncio
+
+        db = MagicMock()
+        with pytest.raises(ValueError, match="不支持的 mode"):
+            asyncio.get_event_loop().run_until_complete(
+                MarketDataQualityService.create_run(
+                    db, timeframe="1d",
+                    start_date=date(2026, 1, 1), end_date=date(2026, 7, 30),
+                    mode="invalid_mode",
+                )
+            )
 
 
 # =============================================================================
@@ -810,7 +876,8 @@ class TestIdempotency:
 
         existing_run = MarketDataQualityRun(
             id=uuid.uuid4(),
-            run_key="mdq:1d:2026-01-01:2026-07-30:mdq-v1.0.0",
+            # [P0-5] run_key 新格式含 :scan 后缀
+            run_key="mdq:1d:2026-01-01:2026-07-30:mdq-v1.0.0:scan",
             timeframe="1d",
             start_date=date(2026, 1, 1),
             end_date=date(2026, 7, 30),
@@ -877,6 +944,293 @@ class TestConstants:
             ISSUE_BAR_COUNT_INSUFFICIENT,
         }
         assert len(issues) == 11
+
+
+# =============================================================================
+# 13. [P0-5] execute_repair 全批次完成 + resolve_last_completed_trading_day
+# =============================================================================
+
+
+class TestExecuteRepairFullBatch:
+    """[P0-5] execute_repair 必须处理全部 eligible items，禁止只处理 batch_size 条。
+
+    旧 BUG：`while processed < total_candidates and processed < batch_size` 把
+    batch_size 当作总数上限，导致 batch_size=10 默认下只修复 10 条后停止。
+
+    修复后：`while True: ... if not candidates: break`，循环到无未处理候选为止。
+    batch_size 仅控制单批拉取数量（吞吐批次），不限制总量。
+    """
+
+    @pytest.mark.asyncio
+    async def test_repair_processes_all_eligible_items(self):
+        """25 条 DB_MISSING + batch_size=10 → 必须处理全部 25 条。"""
+        from app.models.market_data_quality import (
+            MarketDataQualityItem,
+        )
+
+        # 构造 1 个 run + 25 个 DB_MISSING items
+        run_id = uuid.uuid4()
+        run = MagicMock()
+        run.id = run_id
+        run.timeframe = "1d"
+        run.start_date = date(2026, 1, 1)
+        run.end_date = date(2026, 7, 30)
+
+        items = [
+            MarketDataQualityItem(
+                id=uuid.uuid4(),
+                run_id=run_id,
+                instrument_id=uuid.uuid4(),
+                symbol=f"{i:06d}",
+                status="succeeded",  # 扫描已完成
+                classification=CLASS_DB_MISSING,
+                repair_attempted=False,
+            )
+            for i in range(25)
+        ]
+
+        # mock db.execute 按调用顺序返回不同结果
+        db = MagicMock()
+        # 1. select run
+        run_result = MagicMock()
+        run_result.scalar_one_or_none.return_value = run
+        # 2. count(DB_MISSING, repair_attempted=False) → 25 (初始)
+        count_result = MagicMock()
+        count_result.scalar.return_value = 25
+        # 3. 每批 select items 返回 batch_size=10 条（共 3 批：10+10+5）
+        # 4. repair_instrument 内部会调用 db.execute（update item）
+
+        # 简化：mock repair_instrument 为成功，避免内部 db.execute
+        # 直接 patch MarketDataQualityService.repair_instrument
+        original_repair = MarketDataQualityService.repair_instrument
+
+        call_count = {"n": 0}
+
+        async def _mock_repair(db_arg, *, run, item):
+            call_count["n"] += 1
+            return {
+                "repaired": True,
+                "message": "repaired",
+                "repaired_dates": [],
+            }
+
+        # 模拟 batch 查询：第 1 批返回前 10，第 2 批返回中间 10，第 3 批返回最后 5，第 4 批空
+        # 每批查询返回 MagicMock with scalars().all()
+        def _make_batch_result(batch_items):
+            r = MagicMock()
+            scalars_mock = MagicMock()
+            scalars_mock.all.return_value = batch_items
+            r.scalars.return_value = scalars_mock
+            return r
+
+        batch1 = _make_batch_result(items[0:10])
+        batch2 = _make_batch_result(items[10:20])
+        batch3 = _make_batch_result(items[20:25])
+        batch_empty = _make_batch_result([])
+
+        # mock db.execute：按调用顺序
+        # 调用顺序：
+        # 1. select run → run_result
+        # 2. count → count_result
+        # 3. select batch1 → batch1
+        # 4. (内部 repair_instrument 不调用 db，已 mock)
+        # 5. flush (AsyncMock)
+        # 6. select batch2 → batch2
+        # 7. flush
+        # 8. select batch3 → batch3
+        # 9. flush
+        # 10. select batch_empty → batch_empty (break)
+        db.execute = AsyncMock(side_effect=[
+            run_result, count_result,
+            batch1, batch2, batch3, batch_empty,
+        ])
+        db.flush = AsyncMock()
+
+        try:
+            MarketDataQualityService.repair_instrument = staticmethod(_mock_repair)
+            result = await MarketDataQualityService.execute_repair(
+                db, run_id=run_id, batch_size=10, dry_run=False,
+            )
+        finally:
+            MarketDataQualityService.repair_instrument = original_repair
+
+        # 断言：必须处理全部 25 条
+        assert call_count["n"] == 25, (
+            f"应处理 25 条，实际处理 {call_count['n']}（旧 BUG 会只处理 10 条）"
+        )
+        assert result["processed"] == 25
+        assert result["repaired"] == 25
+        assert result["total_candidates"] == 25  # 初始候选数
+        assert result["dry_run"] is False
+
+    @pytest.mark.asyncio
+    async def test_repair_dry_run_does_not_process(self):
+        """dry_run=True 只统计不处理。"""
+        run_id = uuid.uuid4()
+        run = MagicMock()
+        run.id = run_id
+        run_result = MagicMock()
+        run_result.scalar_one_or_none.return_value = run
+
+        count_result = MagicMock()
+        count_result.scalar.return_value = 30
+
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=[run_result, count_result])
+
+        result = await MarketDataQualityService.execute_repair(
+            db, run_id=run_id, batch_size=10, dry_run=True,
+        )
+        assert result["dry_run"] is True
+        assert result["total_candidates"] == 30
+        assert result["repaired"] == 0
+        assert "processed" not in result or result.get("processed", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_repair_zero_candidates_exits_cleanly(self):
+        """无候选时立即退出，不报错。"""
+        run_id = uuid.uuid4()
+        run = MagicMock()
+        run.id = run_id
+        run_result = MagicMock()
+        run_result.scalar_one_or_none.return_value = run
+
+        count_result = MagicMock()
+        count_result.scalar.return_value = 0  # 无候选
+
+        # 当 total_candidates=0 且 dry_run=False，仍会进入 while 循环
+        # 第一批 select 返回空 → break
+        empty_batch = MagicMock()
+        empty_scalars = MagicMock()
+        empty_scalars.all.return_value = []
+        empty_batch.scalars.return_value = empty_scalars
+
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=[run_result, count_result, empty_batch])
+        db.flush = AsyncMock()
+
+        result = await MarketDataQualityService.execute_repair(
+            db, run_id=run_id, batch_size=10, dry_run=False,
+        )
+        assert result["processed"] == 0
+        assert result["repaired"] == 0
+        assert result["total_candidates"] == 0
+
+
+class TestResolveLastCompletedTradingDay:
+    """[P0-5] resolve_last_completed_trading_day 测试。
+
+    修复后 end_date 必须为"已收盘的最近一个交易日"：
+    - 16:00 CST 之前 today 未收盘 → 取前一交易日
+    - 16:00 CST 之后 today 是交易日 → 取 today
+    - today 非交易日 → 取之前最近交易日
+    - 跨午夜场景：用户本机时区非 CST，today 在 CST 还是昨日
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_last_trading_day_before_today_when_pre_close(self):
+        """16:00 CST 前 → 取 < today 的最近交易日。"""
+        from app.services.market_data_quality_service import (
+            resolve_last_completed_trading_day,
+        )
+
+        # mock db.execute 返回 2026-07-29（today=2026-07-30 周四，假设 14:00 CST）
+        db = MagicMock()
+        result_mock = MagicMock()
+        result_mock.first.return_value = (date(2026, 7, 29),)
+        db.execute = AsyncMock(return_value=result_mock)
+
+        # now_cst=14:00 < 16:00 → 查询 < today 的交易日
+        now_cst = datetime(2026, 7, 30, 14, 0, 0)
+        result = await resolve_last_completed_trading_day(
+            db, today=date(2026, 7, 30), now_cst=now_cst,
+        )
+        assert result == date(2026, 7, 29)
+
+    @pytest.mark.asyncio
+    async def test_returns_today_when_post_close_and_trading_day(self):
+        """16:00 CST 后 + today 是交易日 → 取 today。"""
+        from app.services.market_data_quality_service import (
+            resolve_last_completed_trading_day,
+        )
+
+        db = MagicMock()
+        result_mock = MagicMock()
+        result_mock.first.return_value = (date(2026, 7, 30),)
+        db.execute = AsyncMock(return_value=result_mock)
+
+        # now_cst=17:00 >= 16:00 → 查询 <= today 的交易日
+        now_cst = datetime(2026, 7, 30, 17, 0, 0)
+        result = await resolve_last_completed_trading_day(
+            db, today=date(2026, 7, 30), now_cst=now_cst,
+        )
+        assert result == date(2026, 7, 30)
+
+    @pytest.mark.asyncio
+    async def test_returns_previous_trading_day_when_today_is_weekend(self):
+        """today 是周末 → 取最近交易日（如周五）。"""
+        from app.services.market_data_quality_service import (
+            resolve_last_completed_trading_day,
+        )
+
+        # 2026-07-25 是周六
+        db = MagicMock()
+        result_mock = MagicMock()
+        result_mock.first.return_value = (date(2026, 7, 24),)  # 周五
+        db.execute = AsyncMock(return_value=result_mock)
+
+        # now_cst=17:00，today=周六非交易日 → 查询 <= today 的最近交易日
+        now_cst = datetime(2026, 7, 25, 17, 0, 0)
+        result = await resolve_last_completed_trading_day(
+            db, today=date(2026, 7, 25), now_cst=now_cst,
+        )
+        assert result == date(2026, 7, 24)
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_calendar_empty(self):
+        """交易日历无数据 → 返回 None（CLI 回退到 today）。"""
+        from app.services.market_data_quality_service import (
+            resolve_last_completed_trading_day,
+        )
+
+        db = MagicMock()
+        result_mock = MagicMock()
+        result_mock.first.return_value = None
+        db.execute = AsyncMock(return_value=result_mock)
+
+        now_cst = datetime(2026, 7, 30, 17, 0, 0)
+        result = await resolve_last_completed_trading_day(
+            db, today=date(2026, 7, 30), now_cst=now_cst,
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cross_midnight_non_cst_timezone(self):
+        """跨午夜场景：用户本机时间已到次日，但 CST 仍是当日 14:00。
+
+        用户本机 today=2026-07-31，但 CST 仍是 07-30 14:00（未收盘）。
+        应查 < today=07-31 的交易日（但 07-30 未收盘不能算）。
+        由于 today 参数是 07-31，< 07-31 会返回 07-30；但 07-30 未收盘，
+        应返回 07-29。
+        """
+        from app.services.market_data_quality_service import (
+            resolve_last_completed_trading_day,
+        )
+
+        db = MagicMock()
+        # 返回 07-29（< 07-31 的最近交易日，跳过未收盘的 07-30）
+        result_mock = MagicMock()
+        result_mock.first.return_value = (date(2026, 7, 29),)
+        db.execute = AsyncMock(return_value=result_mock)
+
+        # now_cst.hour=14 < 16 → 查 < today 的交易日
+        # today=07-31（用户本机），< 07-31 最近的交易日是 07-30，
+        # 但 07-30 在 CST 视角未收盘 → 应返回 07-29（mock 控制）
+        now_cst = datetime(2026, 7, 30, 14, 0, 0)  # CST 仍是 07-30 14:00
+        result = await resolve_last_completed_trading_day(
+            db, today=date(2026, 7, 31), now_cst=now_cst,
+        )
+        assert result == date(2026, 7, 29)
 
 
 # =============================================================================

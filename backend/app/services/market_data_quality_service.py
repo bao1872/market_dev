@@ -58,6 +58,11 @@ MDQ_ALGORITHM_VERSION: str = "mdq-v1.0.0"
 MDQ_15M_MIN_BARS: int = 500
 MDQ_15M_FULL_BARS: int = 4000
 
+# [P0-5 2026-07-30] 默认 end_date 解析：以"最近已完成交易日"为基准，
+# 不得用 date.today()（可能为周末/节假日/未收盘日）。
+# 当 16:00 CST 之后才认为当日已收盘（CST 收盘 15:00 + 1h buffer）。
+_MDQ_MARKET_CLOSE_HOUR_CST: int = 16
+
 # Classification 枚举值（与迁移 comment 一致）
 CLASS_NOT_LISTED: str = "NOT_LISTED"
 CLASS_SUSPENDED: str = "SUSPENDED"
@@ -84,6 +89,70 @@ ISSUE_BAR_COUNT_INSUFFICIENT: str = "BAR_COUNT_INSUFFICIENT"
 # adj_factor 单调累积，正常情况下应递减（除权后老因子 < 1.0）或恒为 1.0
 # 跳变通常意味着 xdxr 事件未被正确处理或存量数据被错误覆盖
 FACTOR_JUMP_THRESHOLD: float = 0.30  # 30% 变化视为异常跳变
+
+
+# =============================================================================
+# 辅助函数：最近已完成交易日解析
+# =============================================================================
+
+
+async def resolve_last_completed_trading_day(
+    db: AsyncSession,
+    *,
+    today: date | None = None,
+    now_cst: datetime | None = None,
+    market_tz_name: str = "Asia/Shanghai",
+) -> date | None:
+    """[P0-5] 解析"最近已完成交易日"。
+
+    背景：
+    - 旧 CLI 用 `date.today()` 作为默认 end_date，但 today 可能是：
+      - 周末/节假日（无交易）
+      - 交易日但尚未收盘（当日 bar 不完整，会被误判为 TAIL_GAP）
+      - 用户本机时区非 Asia/Shanghai（today 在 CST 还没开始）
+    - 修复后 end_date 必须为"已收盘的最近一个交易日"：
+      - 当前 CST 时间 < 16:00 → 取 today 的前一个交易日
+      - 当前 CST 时间 >= 16:00 且 today 是交易日 → 取 today
+      - today 不是交易日 → 取 today 之前最近一个交易日
+
+    Args:
+        db: 异步会话
+        today: 用于测试注入的"今天"（默认按 Asia/Shanghai 当前日期）
+        now_cst: 用于测试注入的当前 CST 时间（默认 datetime.now(Asia/Shanghai)）
+        market_tz_name: 市场时区（默认 Asia/Shanghai）
+
+    Returns:
+        最近已收盘的交易日 date；若交易日历无数据返回 None
+    """
+    from zoneinfo import ZoneInfo
+
+    market_tz = ZoneInfo(market_tz_name)
+    if now_cst is None:
+        now_cst = datetime.now(market_tz)
+    if today is None:
+        today = now_cst.date()
+
+    # 16:00 CST 前视 today 为未收盘 → 取前一交易日
+    if now_cst.hour < _MDQ_MARKET_CLOSE_HOUR_CST:
+        # today 可能未收盘 → 查询 < today 的最近交易日
+        result = await db.execute(
+            select(TradingCalendar.trade_date)
+            .where(TradingCalendar.trade_date < today)
+            .where(TradingCalendar.is_trading_day.is_(True))
+            .order_by(TradingCalendar.trade_date.desc())
+            .limit(1)
+        )
+    else:
+        # today 已收盘（或为非交易日，由日历决定）→ 查询 <= today 的最近交易日
+        result = await db.execute(
+            select(TradingCalendar.trade_date)
+            .where(TradingCalendar.trade_date <= today)
+            .where(TradingCalendar.is_trading_day.is_(True))
+            .order_by(TradingCalendar.trade_date.desc())
+            .limit(1)
+        )
+    row = result.first()
+    return row[0] if row is not None else None
 
 
 # =============================================================================
@@ -148,18 +217,47 @@ class MarketDataQualityService:
     # run_key / parameter_hash 生成
     # =========================================================================
 
+    # [P0-5 2026-07-30] run mode 常量：
+    # - MODE_SCAN：初次扫描或独立扫描
+    # - MODE_VERIFICATION：repair 后的验证扫描，必须创建全新 run（禁止复用 scan run）
+    MDQ_MODE_SCAN: str = "scan"
+    MDQ_MODE_VERIFICATION: str = "verification"
+
     @staticmethod
     def make_run_key(
         timeframe: str, start_date: date, end_date: date,
         algorithm_version: str = MDQ_ALGORITHM_VERSION,
+        *,
+        mode: str = "scan",
+        source_repair_run_id: uuid.UUID | None = None,
+        verification_seq: int | None = None,
     ) -> str:
         """生成 run 幂等键。
 
-        格式：mdq:{timeframe}:{start}:{end}:{algorithm_version}
+        格式：
+        - scan 模式：mdq:{timeframe}:{start}:{end}:{algorithm_version}:scan
+        - verification 模式：
+          mdq:{timeframe}:{start}:{end}:{algorithm_version}:verification:src={run_id}:seq={n}
+
+        [P0-5] verification run 必须使用独立 run_key，禁止复用 scan run 的 run_key。
+        若 source_repair_run_id 未提供，则使用 verification_seq 作为去重键
+        （支持同一日历日多次验证）。
         """
+        if mode == MarketDataQualityService.MDQ_MODE_SCAN:
+            return (
+                f"mdq:{timeframe}:{start_date.isoformat()}:{end_date.isoformat()}:"
+                f"{algorithm_version}:scan"
+            )
+        # verification
+        if source_repair_run_id is not None:
+            return (
+                f"mdq:{timeframe}:{start_date.isoformat()}:{end_date.isoformat()}:"
+                f"{algorithm_version}:verification:src={source_repair_run_id}"
+            )
+        seq = verification_seq if verification_seq is not None else 0
         return (
             f"mdq:{timeframe}:{start_date.isoformat()}:{end_date.isoformat()}:"
-            f"{algorithm_version}"
+            f"{algorithm_version}:verification:seq={seq}"
         )
 
     @staticmethod
@@ -167,17 +265,28 @@ class MarketDataQualityService:
         timeframe: str, start_date: date, end_date: date,
         algorithm_version: str = MDQ_ALGORITHM_VERSION,
         repair_mode: bool = False,
+        *,
+        mode: str = "scan",
+        source_repair_run_id: uuid.UUID | None = None,
+        verification_seq: int | None = None,
     ) -> str:
         """生成参数 hash（含算法版本与固定参数）。
 
         用于跨入口一致性校验：相同参数应产生相同 hash。
+        verification 模式下 source_repair_run_id / verification_seq 参与 hash，
+        保证 scan 与 verification 的 parameter_hash 不同。
         """
         payload = (
             f"{algorithm_version}|{timeframe}|{start_date.isoformat()}|"
             f"{end_date.isoformat()}|repair={repair_mode}|"
             f"min15m={MDQ_15M_MIN_BARS}|full15m={MDQ_15M_FULL_BARS}|"
-            f"jump={FACTOR_JUMP_THRESHOLD}"
+            f"jump={FACTOR_JUMP_THRESHOLD}|mode={mode}"
         )
+        if mode == MarketDataQualityService.MDQ_MODE_VERIFICATION:
+            if source_repair_run_id is not None:
+                payload += f"|src={source_repair_run_id}"
+            elif verification_seq is not None:
+                payload += f"|seq={verification_seq}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
     # =========================================================================
@@ -194,12 +303,20 @@ class MarketDataQualityService:
         repair_mode: bool = False,
         symbols: list[str] | None = None,
         limit: int | None = None,
+        mode: str = "scan",
+        source_repair_run_id: uuid.UUID | None = None,
+        verification_seq: int | None = None,
     ) -> MarketDataQualityRun:
         """创建或复用扫描 run（幂等）。
 
         - 若已存在相同 run_key 且 status=succeeded 的 run，直接返回（幂等）
         - 否则新建 status=created 的 run，并预创建 pending items
         - total_instruments 来自 active A 股标的数（stock_symbol_sql_filter）
+
+        [P0-5] mode 参数：
+        - mode="scan"（默认）：创建扫描 run
+        - mode="verification"：创建验证 run（repair 后用），必须传入 source_repair_run_id
+          或 verification_seq 作为去重键，run_key 与 scan run 不同 → 禁止复用 scan run
 
         Args:
             db: 异步会话
@@ -209,18 +326,39 @@ class MarketDataQualityService:
             repair_mode: 是否启用修复模式
             symbols: 限定股票列表（canary/debug 用，None=全市场）
             limit: 限定股票数量上限（None=不限）
+            mode: run 模式（scan / verification）
+            source_repair_run_id: 验证模式下的源 repair run_id（用于 run_key 去重）
+            verification_seq: 验证序号（无 source_repair_run_id 时使用）
 
         Returns:
             MarketDataQualityRun（已持久化）
         """
         if timeframe not in ("1d", "15m"):
             raise ValueError(f"不支持的 timeframe: {timeframe}，仅支持 1d / 15m")
+        if mode not in (
+            MarketDataQualityService.MDQ_MODE_SCAN,
+            MarketDataQualityService.MDQ_MODE_VERIFICATION,
+        ):
+            raise ValueError(
+                f"不支持的 mode: {mode}，仅支持 scan / verification"
+            )
+        if mode == MarketDataQualityService.MDQ_MODE_VERIFICATION:
+            if source_repair_run_id is None and verification_seq is None:
+                raise ValueError(
+                    "verification 模式必须提供 source_repair_run_id 或 verification_seq"
+                )
 
         run_key = MarketDataQualityService.make_run_key(
             timeframe, start_date, end_date,
+            mode=mode,
+            source_repair_run_id=source_repair_run_id,
+            verification_seq=verification_seq,
         )
         parameter_hash = MarketDataQualityService.make_parameter_hash(
             timeframe, start_date, end_date, repair_mode=repair_mode,
+            mode=mode,
+            source_repair_run_id=source_repair_run_id,
+            verification_seq=verification_seq,
         )
 
         # 1. 检查是否已存在 succeeded run（幂等复用）
@@ -1273,14 +1411,20 @@ class MarketDataQualityService:
         - 每批 batch_size 条（默认 10，修复比扫描更重）
         - dry_run=True 时只统计不执行
 
+        [P0-5 修复 2026-07-30] batch_size 仅是吞吐批次大小（控制单批内存/网络压力），
+        不是总处理上限。循环必须处理到全部 eligible items 终态
+        （succeeded/failed/skipped），禁止只处理 10 条后结束。
+        旧实现 `while processed < total_candidates and processed < batch_size` 是 BUG，
+        会把 batch_size 当作总数上限，导致大批量 repair 中断。
+
         Args:
             db: 异步会话
             run_id: run ID
-            batch_size: 每批数量
+            batch_size: 每批数量（仅控制吞吐，不限制总量）
             dry_run: True 时只统计
 
         Returns:
-            {total_candidates, repaired, failed, skipped, dry_run}
+            {total_candidates, repaired, failed, skipped, processed, dry_run}
         """
         run_result = await db.execute(
             select(MarketDataQualityRun).where(MarketDataQualityRun.id == run_id)
@@ -1296,11 +1440,11 @@ class MarketDataQualityService:
             .where(MarketDataQualityItem.classification == CLASS_DB_MISSING)
             .where(MarketDataQualityItem.repair_attempted.is_(False))
         )
-        total_candidates = int(count_result.scalar() or 0)
+        total_candidates_initial = int(count_result.scalar() or 0)
 
         if dry_run:
             return {
-                "total_candidates": total_candidates,
+                "total_candidates": total_candidates_initial,
                 "repaired": 0,
                 "failed": 0,
                 "skipped": 0,
@@ -1312,18 +1456,21 @@ class MarketDataQualityService:
         skipped = 0
         processed = 0
 
-        while processed < total_candidates and processed < batch_size:
-            # 拉取一批候选
+        # [P0-5] 循环条件：仅以未处理候选数 > 0 为终止条件
+        # batch_size 仅控制单批拉取数量，不限制总量
+        while True:
+            # 拉取一批候选（最多 batch_size 条）
             candidates_result = await db.execute(
                 select(MarketDataQualityItem)
                 .where(MarketDataQualityItem.run_id == run_id)
                 .where(MarketDataQualityItem.classification == CLASS_DB_MISSING)
                 .where(MarketDataQualityItem.repair_attempted.is_(False))
                 .order_by(MarketDataQualityItem.symbol)
-                .limit(batch_size - processed)
+                .limit(batch_size)
             )
             candidates = candidates_result.scalars().all()
             if not candidates:
+                # 已无未处理候选 → 终止
                 break
 
             for item in candidates:
@@ -1354,13 +1501,14 @@ class MarketDataQualityService:
                     )
                     failed += 1
             await db.flush()
+            # 循环到全部 eligible items 终态（无未处理候选时下一轮 break）
 
         return {
-            "total_candidates": total_candidates,
+            "total_candidates": total_candidates_initial,  # 初始候选数（不变）
             "repaired": repaired,
             "failed": failed,
             "skipped": skipped,
-            "processed": processed,
+            "processed": processed,  # 实际处理数（应 = total_candidates_initial）
             "dry_run": False,
         }
 
@@ -1498,9 +1646,35 @@ if __name__ == "__main__":
     print("check_time_ordering ✓")
 
     # 7. make_run_key
+    # [P0-5] 新格式：scan 模式末尾追加 :scan，verification 模式含 :verification:src=...
     rk = MarketDataQualityService.make_run_key("1d", d(2026, 1, 1), d(2026, 7, 30))
-    assert rk == "mdq:1d:2026-01-01:2026-07-30:mdq-v1.0.0", f"run_key: {rk}"
-    print(f"make_run_key ✓ ({rk})")
+    assert rk == "mdq:1d:2026-01-01:2026-07-30:mdq-v1.0.0:scan", f"run_key: {rk}"
+    print(f"make_run_key (scan) ✓ ({rk})")
+
+    # [P0-5] verification run_key 与 scan 不同
+    src_run_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    rk_ver = MarketDataQualityService.make_run_key(
+        "1d", d(2026, 1, 1), d(2026, 7, 30),
+        mode="verification", source_repair_run_id=src_run_id,
+    )
+    assert rk_ver != rk, (
+        f"verification run_key 必须不同于 scan: scan={rk}, ver={rk_ver}"
+    )
+    assert "verification" in rk_ver, f"verification run_key 缺 verification 标识: {rk_ver}"
+    assert str(src_run_id) in rk_ver, (
+        f"verification run_key 缺 source_repair_run_id: {rk_ver}"
+    )
+    print(f"make_run_key (verification) ✓ ({rk_ver})")
+
+    # [P0-5] verification_seq 模式
+    rk_seq = MarketDataQualityService.make_run_key(
+        "1d", d(2026, 1, 1), d(2026, 7, 30),
+        mode="verification", verification_seq=2,
+    )
+    assert rk_seq != rk and rk_seq != rk_ver, (
+        f"verification_seq run_key 必须唯一: scan={rk}, ver_src={rk_ver}, ver_seq={rk_seq}"
+    )
+    print(f"make_run_key (verification_seq) ✓ ({rk_seq})")
 
     # 8. make_parameter_hash 确定性
     h1 = MarketDataQualityService.make_parameter_hash("1d", d(2026, 1, 1), d(2026, 7, 30))
@@ -1508,6 +1682,12 @@ if __name__ == "__main__":
     h3 = MarketDataQualityService.make_parameter_hash("15m", d(2026, 1, 1), d(2026, 7, 30))
     assert h1 == h2, "相同参数应产生相同 hash"
     assert h1 != h3, "不同参数应产生不同 hash"
-    print(f"make_parameter_hash ✓ ({h1})")
+    # [P0-5] verification 模式 hash 必须不同于 scan
+    h_ver = MarketDataQualityService.make_parameter_hash(
+        "1d", d(2026, 1, 1), d(2026, 7, 30),
+        mode="verification", source_repair_run_id=src_run_id,
+    )
+    assert h_ver != h1, "verification parameter_hash 必须不同于 scan"
+    print(f"make_parameter_hash ✓ ({h1}, ver={h_ver})")
 
     print("\n所有纯函数自测通过 ✓（未连接 DB）")

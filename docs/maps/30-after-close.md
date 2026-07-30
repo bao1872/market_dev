@@ -410,6 +410,61 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - **watchdog 不调用 `recover_stale_running_items`**：`auto_resume_interrupted_after_close_runs` 在恢复 `interrupted` run 时只重置 run 级状态，不调用 `snapshot_run_item_service.recover_stale_running_items`；若 run 恢复时仍有 `running` 状态的 item（lease 未过期但 worker 已死），这些 item 会卡在 `running` 直到 lease 过期。建议在 watchdog 恢复 run 时同步调用 `recover_stale_running_items(run_id)`。
 - **review run 与 after_close run 的 watchdog 共用同一恢复服务**：当前 `auto_resume_interrupted_after_close_runs` 只扫描 `job_name=after_close_orchestrator` 的 run；review run 的 watchdog 恢复由独立的 `review_orchestrator_service` 实现，未来可能需要统一为通用 `run_recovery_service`，避免两套恢复逻辑。
 
+## 13. 盘后阶段依赖与发布闭环实现（2026-07-30 核验）
+
+**核验状态：已基于代码核验（2026-07-30）**
+
+对应 PRD：`../prd/30-after-close.md` §6（AC-17 / AC-18 / AC-19）
+
+### 13.1 after_close_orchestrator publishing 阶段调用 publish_stock_core
+
+- `after_close_orchestrator.execute_after_close_run` 的 publishing 阶段在 snapshot run `succeeded` 后，显式调用 `factor_publication_service.publish_stock_core` 切换 `stock_core` publication pointer；
+- 实现位置：`backend/app/services/after_close_orchestrator.py:L1850-L1929`；
+- 流程：
+  1. `get_publication` 读取已有 pointer；
+  2. 已有 pointer 的 `data_run_id == snapshot_run_id` → 幂等复用，记录 info；
+  3. 已有 pointer 的 `data_run_id != snapshot_run_id` → 不覆盖，记录 warning + event；
+  4. 无 pointer → `compute_coverage` + `publish_stock_core`（`FIRST_PYRAMID_CORE_ALGORITHM_VERSION`），`CoverageBelowThresholdError` 时记录 error + event；
+- pointer 写入成功后才写 publishing checkpoint；
+- 调用使用独立 `AsyncSessionLocal()`（`pub_db`），与主 run session 隔离。
+
+### 13.2 dsa_recovery_service.py（失败 DSA 恢复）
+
+- 模块：`backend/app/services/dsa_recovery_service.py`；
+- 公开函数：`recover_failed_dsa_run(db, job_run_id, *, strategy_key="dsa_selector", run_type="scheduled") -> tuple[StrategyRun, bool]`；
+- 行为：
+  - DSA run 为 `completed`/`published` → 直接复用，返回 `(run, False)`；
+  - DSA run 为 `running` 且 lease 未过期 → 拒绝恢复；
+  - DSA run 为 `failed`/`partial_failed` → 通过 `create_batch_run` 创建新 run（自动递增 `attempt_no`），原子更新 orchestrator metadata 的 `dsa_run_id`，返回 `(new_run, True)`；
+  - 恢复次数上限 `_MAX_DSA_RECOVERY_COUNT = 5`，超过抛 `DSARecoveryError`；
+- 约束：原失败 run 保留审计，禁止直接改回 `queued`；管理 API/CLI 只能调用该 service，禁止裸 SQL；
+- 测试：`backend/tests/test_dsa_recovery_service.py`（10+ 用例覆盖复用/创建/lease 拒绝/超上限等）；
+- **CLI / admin API 尚未实现**：当前需通过 service 调用，待新增 `backend/scripts/dsa_recovery_cli.py` 或 admin 端点。
+
+### 13.3 worker.py chip_consensus 分支
+
+- 模块：`backend/app/worker.py::_chip_consensus_poll_once`（L1529-L1620）；
+- 行为：
+  - 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取 `job_name='after_close_chip_consensus'` 且 `status IN ('queued', 'resume_queued')` 的任务；
+  - 领取后更新 `status='running'` + `worker_instance_id` + `heartbeat_at` + `lease_expires_at` + `lease_epoch`（fencing）；
+  - 调用 `execute_after_close_chip_consensus`（含断点续算）；
+  - 断点续算：`get_pending_chip_instruments` 过滤已 `succeeded` 的 instrument，`resume_queued` 只重试未成功项；
+  - 部分成功写 `metadata.chip_status=partial`，主 `status=succeeded`；
+- **不新增常驻容器**：chip_consensus worker 在现有 after-close worker 容器内通过 `WORKER_TYPE` 分支执行；
+- watchdog：`auto_resume_interrupted_after_close_runs`（`scheduler_job_run_recovery_service.py:L169`）同时扫描 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次；
+- chip 创建：`after_close_orchestrator.py:L2066` 在主 run `succeeded` 后调用 `create_after_close_chip_consensus_job`（软失败，创建失败不反改主 run）。
+
+### 13.4 聚合依赖闭环：stock_core pointer → board aggregation
+
+- `market_factor_aggregation_service.run_market_factor_aggregation`（`backend/app/services/market_factor_aggregation_service.py:L33`）：
+  - 步骤 1 读取已发布 `stock_core` pointer（`get_publication`），无 pointer 抛 `ValueError`；
+  - 步骤 2 校验 `source_core_run_id` 等于 `stock_core` pointer 的 `data_run_id`；
+  - 步骤 3 调用 `publish_market_aggregation` 切换 `market_aggregation` pointer（含 source 校验）；
+- `board_analysis_service` 输入门禁：必须存在已发布 `stock_core` pointer，否则拒绝计算（PRD §5 BA-01）；
+- 聚合失败只重跑聚合，不影响已发布 `stock_core`；
+- 依赖顺序：`stock_core published` → `market_aggregation` / `board_analysis` 可触发 → `review` 可触发；
+- `after_close_orchestrator` 当前止于 stock_core + chip_consensus 创建，**market aggregation 和 board_analysis 不在主编排内自动触发**，需通过 CLI / admin API 单独触发（见 `docs/runbooks/after-close-production-run.md` §9）。
+
 ## 复盘 pointer 与 run 关系
 
 **核验状态：待实现（复盘模块尚未开发）**

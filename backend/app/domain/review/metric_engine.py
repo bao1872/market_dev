@@ -392,8 +392,18 @@ def _derive_leader_follower_common_confirm_ratio(
 
     简化定义：按 volume_ratio20 排序，前 20% 为龙头，中 60% 为二线，后 20% 为普通；
     若三组各自上涨比例均 >= 50%，返回 1.0，否则返回三组平均上涨比例。
+
+    [P0-6 2026-07-30] fp_segment_change_pct 全空时返回 None，禁止伪造 0.0。
+    无价格变化数据时无法判断方向确认，结果应为 None。
     """
     if not flat_list:
+        return None
+    # [P0-6] 前置检查：若全部成员 fp_segment_change_pct 为空，直接返回 None
+    has_any_change = any(
+        _safe_float(f.get("fp_segment_change_pct")) is not None
+        for f in flat_list
+    )
+    if not has_any_change:
         return None
     valid = [
         (f, _safe_float(f.get("fp_volume_ratio20")))
@@ -701,7 +711,14 @@ def _build_component_payload(
     *,
     history_map: dict[str, list[float]] | None = None,
 ) -> dict[str, Any]:
-    """构建单个 component 的 payload（PRD §7.1 components 元素）。"""
+    """构建单个 component 的 payload（PRD §7.1 components 元素）。
+
+    [P0-6 2026-07-30] 新增 readiness 字段，区分 raw_ready / normalized_ready：
+    - raw_ready: rawValue 已计算（上游字段有值）
+    - normalized_ready: normalizedValue 已计算（历史 >= MIN_BASELINE_WINDOW）
+    冷启动时 raw_ready=True 但 normalized_ready=False，
+    提示操作者运行 bootstrap 补历史而非伪造分位。
+    """
     raw_value = _compute_component_raw(spec, flat_list)
     history = (history_map or {}).get(spec.name) if history_map else None
     normalized = _normalize_component(raw_value, spec.direction, history or [])
@@ -717,6 +734,20 @@ def _build_component_payload(
     else:
         status = STATUS_READY
 
+    # [P0-6] granular readiness
+    raw_ready = raw_value is not None
+    normalized_ready = normalized is not None
+    if not raw_ready:
+        reason = f"upstream field '{spec.field_source}' returned None for all members"
+    elif not normalized_ready:
+        hist_len = len(history) if history else 0
+        reason = (
+            f"history insufficient: {hist_len} < {MIN_BASELINE_WINDOW} "
+            f"(run bootstrap to backfill from stock_core history)"
+        )
+    else:
+        reason = None
+
     coverage = (
         ready_count / max(1, len(flat_list)) if flat_list else 0.0
     )
@@ -731,6 +762,11 @@ def _build_component_payload(
         "weight": spec.weight,
         "coverage": coverage,
         "status": status,
+        "readiness": {
+            "raw_ready": raw_ready,
+            "normalized_ready": normalized_ready,
+            "reason": reason,
+        },
         "extra": (
             {"derive_fn": spec.derive_fn, "extra_fields": list(spec.extra_fields)}
             if spec.derive_fn else None
@@ -835,16 +871,58 @@ def compute_metric_payload(
     # 7. coverage
     coverage = ready_count / max(1, len(flat_list)) if flat_list else 0.0
 
-    # 8. status
-    if value is None:
+    # 8. status - [P0-6 2026-07-30] 修正冷启动状态判定
+    # 旧 BUG: value=None（因历史不足无法归一化）时直接判 UNAVAILABLE，
+    #         掩盖了"raw 数据可用但历史不足"的真实状态，导致 publish gate 报告
+    #         "value 为空"而非"历史不足，请运行 bootstrap"。
+    # 修复: 区分 raw_ready / normalized_ready，历史不足时标 insufficient_history。
+    comp_unavailable = sum(
+        1 for cp in component_payloads if cp["status"] == STATUS_UNAVAILABLE
+    )
+    comp_insufficient = sum(
+        1 for cp in component_payloads
+        if cp["status"] == STATUS_INSUFFICIENT_HISTORY
+    )
+    raw_ready = raw_value is not None
+    normalized_ready = value is not None
+
+    if not raw_ready:
+        # 所有 component rawValue 均为 None（上游数据缺失）
         status = STATUS_UNAVAILABLE
-    elif history_obs > 0 and history_obs < MIN_BASELINE_WINDOW:
+    elif not normalized_ready:
+        # raw 可用但无法归一化（历史不足）→ insufficient_history 而非 unavailable
         status = STATUS_INSUFFICIENT_HISTORY
-    elif any(cp["status"] == STATUS_UNAVAILABLE for cp in component_payloads):
-        # 部分 component 缺失但仍有可用值
+    elif comp_insufficient > 0 or comp_unavailable > 0:
+        # 部分归一化值可用，部分不可用或历史不足
         status = STATUS_PARTIAL
     else:
         status = STATUS_READY
+
+    # [P0-6] metric-level readiness（供 publish gate 和操作者诊断）
+    if not raw_ready:
+        readiness_reason = (
+            f"all {len(component_payloads)} components rawValue=None "
+            f"(upstream stock_core flat_list fields missing)"
+        )
+    elif not normalized_ready:
+        insufficient_comps = [
+            cp["name"] for cp in component_payloads
+            if cp["status"] == STATUS_INSUFFICIENT_HISTORY
+        ]
+        readiness_reason = (
+            f"history insufficient for normalization: "
+            f"{len(insufficient_comps)}/{len(component_payloads)} components "
+            f"need >= {MIN_BASELINE_WINDOW} observations "
+            f"(run review_bootstrap_service to backfill from stock_core history)"
+        )
+    elif comp_insufficient > 0 or comp_unavailable > 0:
+        readiness_reason = (
+            f"partial: {comp_unavailable} unavailable, "
+            f"{comp_insufficient} insufficient_history "
+            f"out of {len(component_payloads)} components"
+        )
+    else:
+        readiness_reason = None
 
     return {
         "value": value,
@@ -857,6 +935,14 @@ def compute_metric_payload(
         "components": component_payloads,
         "coverage": coverage,
         "status": status,
+        "readiness": {
+            "raw_ready": raw_ready,
+            "normalized_ready": normalized_ready,
+            "status": status,
+            "reason": readiness_reason,
+            "history_observations": history_obs,
+            "min_required": MIN_BASELINE_WINDOW,
+        },
     }
 
 
