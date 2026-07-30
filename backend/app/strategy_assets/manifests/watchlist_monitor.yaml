@@ -14,12 +14,7 @@ capabilities:
   supports_table_schema: true
   supports_chart_layers: true
   supports_backtest: true
-parameters:
-  # [CHANGE-20260728-010] BB 参数已移除（布林带不再触发盘中监控）
-  # VN 参数：Node Cluster lookback 由 indicator_contract.VP_LOOKBACK 唯一控制，
-  # 不在 manifest 暴露可编辑入口（advice.md v6 第4条参数固化）
-  # SMC 参数：由 smc_pine_core.DEFAULT_PARAMS 唯一控制（已逐项匹配 Pine），
-  # 不在 manifest 暴露可编辑入口
+parameters: []  # [CHANGE-20260728-010] BB 参数已移除；VN/SMC 参数固化在代码（advice.md v6 第4条）
 outputs:
   - key: current_price
     type: number
