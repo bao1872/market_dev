@@ -14,7 +14,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, Text
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -98,11 +98,11 @@ class BoardAnalysisSnapshot(Base):
         DateTime(timezone=True), nullable=True, comment="计算完成时间",
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default="now()", nullable=False,
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default="now()", nullable=False,
-        onupdate="now()",
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+        onupdate=func.now(),
     )
 
     def __repr__(self) -> str:
