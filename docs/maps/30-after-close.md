@@ -211,3 +211,34 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - 全市场 history 回补待执行
 
 详见 `docs/changes/2026/CHANGE-20260729-008-incremental-publish-full-closure.md`。
+
+### 11.6 History 版本一致性审计结论（CHANGE-20260729-009）
+
+**核验状态：已基于生产数据库只读审计确认（2026-07-29）**
+
+| 表 | 字段 | 实际值 | 期望值 | 结论 |
+|---|---|---|---|---|
+| `first_pyramid_history_runs` | `algorithm_version` | `1.0.0-core-split`（所有 run） | `1.0.0-core-split` | 一致 |
+| `first_pyramid_history_daily_state` | `algorithm_version` | `1.0.0-core-split`（1289176 行） | `1.0.0-core-split` | 一致 |
+| `factor_publications`（kind=history_cross_section） | `algorithm_version` | `1.0.0-core-split` | `1.0.0-core-split` | 一致 |
+
+数据完整性：
+
+- 5184 只股票数据完整，5118 只正好 250 行，66 只新股 <250 行（标记 `insufficient_history`，不算 failed）
+- `trend_ready` / `structure_ready` = 100%，`momentum_ready` = 99.79%
+- 000021 已有 250 行，无版本不一致
+
+**结论**：本轮无需执行 History repair run，所有版本一致。已发布 pointer `5e222b38` 与最新 Core `a546defb` 匹配，无需切换。
+
+### 11.7 15m 门槛澄清（CHANGE-20260729-009）
+
+`first_pyramid_service.py` 中两个 15m 门槛的权威定义：
+
+| 常量 | 值 | 用途 | 使用位置 |
+|---|---|---|---|
+| `_CHIP_MIN_15M_BARS` | `500` | 批量服务最低门槛（degraded） | `after_close_chip_consensus_service` 批量计算 |
+| `NODE_CLUSTER_LOW_BARS` | `4000` | Node Cluster 完整质量门槛（250日×16根/日） | 个股详情实时计算 `compute_chip_status_for_stock` |
+
+- 000021 15m bars=354，不满足 500 最低门槛 → `chip_status=skipped + reason_code=M15_BARS_INSUFFICIENT + actual_bars=354 + required_bars=500`
+- 错误消息明确两个门槛的用途，避免混淆
+- 不修改门槛值，只统一文档与文案

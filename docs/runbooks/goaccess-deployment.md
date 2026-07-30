@@ -1,5 +1,9 @@
 # GoAccess 访问统计部署 Runbook
 
+> **[CHANGE-20260729-009] SUPERSEDED**：本 Runbook 已被 `docs/runbooks/umami-deployment.md` 取代。
+> GoAccess 从未成功部署（生产诊断 2026-07-28：容器和卷均不存在，nginx access.log 软链到 `/dev/stdout`）。
+> 本文件保留为历史记录，不再作为部署依据。
+>
 > [Gate5] 生产环境部署 GoAccess + Nginx 日志解析 + /admin/visitors API。
 > 本地开发**不得**使用 Docker；仅在生产环境部署。
 

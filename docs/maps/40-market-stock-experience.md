@@ -25,7 +25,7 @@
 | MX-13 | 中文标签待核验 | 部分实现 | 未核验 |
 | MX-14 | 管理调试路由待核验 | 部分已知 | 未核验 |
 | MX-15 | 页面状态待核验 | 未核验 | 未核验 |
-| MX-20 列表视图第一金字塔全量字段 | `backend/app/services/first_pyramid_flatten.py`（99 键扁平化函数）；`backend/app/services/market_stocks_service.py`（批量读取快照，无 N+1；**[CHANGE-008]** `_build_snap_lateral(snapshot_run_id=...)` 严格绑定已发布 `factor_publications` 的 `data_run_id`，无 pointer 时回退每股 latest）；`backend/app/schemas/market_stocks.py`（`MarketStockRow.first_pyramid`）；`frontend/src/features/market-workspace/firstPyramidColumns.tsx`（ColumnRegistry 99 列）；`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`（集成 `useMarketStocks`）；`frontend/src/components/StrategyDataTable.tsx`（`defaultHiddenColumns` prop）；复用 `TableViewPreset` 保存显隐与顺序 | 已实现未运行核验 | 31 个纯单元测试通过（`test_first_pyramid_flatten.py`）；TSC+ESLint 通过；浏览器真实链路验收待部署后执行 |
+| MX-20 列表视图第一金字塔全量字段 | `backend/app/services/first_pyramid_flatten.py`（99 键扁平化函数）；`backend/app/services/market_stocks_service.py`（批量读取快照，无 N+1；**[CHANGE-008]** `_build_snap_lateral(snapshot_run_id=...)` 严格绑定已发布 `factor_publications` 的 `data_run_id`，无 pointer 时回退每股 latest；**[CHANGE-009]** 单一数据源，删除前端双分页合并架构，统一使用 `useMarketStocks`；`MarketStockRow` schema 扩展 `payload/data_run_id/factor_ready/factor_error/factor_actual_bars/factor_required_bars/chip_status` 字段；`_compute_factor_ready` 区分新股数据不足（`INSUFFICIENT_DAILY_BARS`）与程序异常；`_build_chip_status_struct` 从 `stock_chip_consensus_snapshots` 严格匹配返回结构化状态）；`backend/app/schemas/market_stocks.py`（`MarketStockRow.first_pyramid` + `ChipStatus`）；`frontend/src/features/market-workspace/firstPyramidColumns.tsx`（ColumnRegistry 99 列）；`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`（**[CHANGE-009]** 删除 `useStrategyRunResults`，仅使用 `useMarketStocks`）；`frontend/src/features/trend-selection/adapters.ts`（`adaptMarketStockToTrendRow` 全量字段映射）；`frontend/src/components/StrategyDataTable.tsx`（`defaultHiddenColumns` prop）；复用 `TableViewPreset` 保存显隐与顺序 | 已实现未运行核验 | 25 个后端纯单元测试通过（`test_market_stocks_helpers.py`）+ 8 个前端 adapter 测试（`adapter.test.ts`）；TSC+ESLint 通过；浏览器真实链路验收待生产部署后执行 |
 
 ## 2. 路由
 
@@ -211,6 +211,97 @@ compact 与 detail 复用同一组 VisualCard，不复制业务判断。compact 
 - capture 模式（`capture=feishu`）全部隐藏自选按钮
 - 无障碍：`type=button`、`title`、`aria-label`、`aria-pressed`、`aria-busy`；`onClick` 使用 `stopPropagation` 避免切股
 - pending/disabled：`addWatchlistPending || removeWatchlistPending || !instrumentId`
+
+## 4.7 行情列表单一数据源与内联自选按钮（CHANGE-20260729-009）
+
+**核验状态：未运行核验（2026-07-29 新增）**
+
+### 4.7.1 单一数据源架构
+
+`/market` 行情列表统一使用 `/market/stocks` 单一服务端分页接口，**禁止**前端再调用 `/strategies/runs/{run_id}/results` 双分页合并。
+
+| 入口 | 实现 | 说明 |
+|---|---|---|
+| 前端数据 hook | `useMarketStocks`（`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`） | 唯一数据源；删除 `useStrategyRunResults` |
+| 前端适配器 | `adaptMarketStockToTrendRow`（`frontend/src/features/trend-selection/adapters.ts`） | 直接将 `MarketStockRow` 转换为 `TrendSelectionRow`；不再合并两份数据 |
+| 后端 API | `GET /market/stocks`（`backend/app/api/market.py`） | 一次性返回页面所需全部字段 |
+| 后端服务 | `get_market_stocks`（`backend/app/services/market_stocks_service.py`） | LATERAL JOIN 一次取出 snapshot + chip + watchlist，避免 N+1 |
+
+### 4.7.2 `MarketStockRow` 完整字段合同
+
+```python
+class MarketStockRow(BaseModel):
+    # 基础
+    instrument_id: str
+    symbol: str
+    name: str
+    latest_price: float | None
+    change_pct: float | None
+    industry: str | None
+    concepts: list[str]
+    # DSA + 事件
+    dsa_state: str | None
+    structure_state: str | None
+    latest_event_title: str | None
+    latest_event_time: str | None
+    # 自选
+    is_watchlisted: bool
+    # 第一金字塔 99 字段
+    first_pyramid: dict | None
+    # DSA payload（与 first_pyramid 分离）
+    payload: dict | None
+    # 已发布数据版本
+    data_run_id: str | None
+    # 因子就绪状态
+    factor_ready: bool
+    factor_error: str | None        # INSUFFICIENT_DAILY_BARS / 程序异常
+    factor_actual_bars: int | None
+    factor_required_bars: int | None
+    # 筹码状态（结构化）
+    chip_status: ChipStatus | None
+```
+
+### 4.7.3 `ChipStatus` 结构化合同
+
+```python
+class ChipStatus(BaseModel):
+    status: str | None          # succeeded / skipped / failed / unavailable
+    reason_code: str | None    # M15_BARS_INSUFFICIENT / INSUFFICIENT_DAILY_BARS
+    reason_text: str | None    # 中文文案，可直接显示给用户
+    actual_bars: int | None    # 实际 15m 根数
+    required_bars: int | None  # 需要 15m 根数（500 最低 / 4000 完整）
+    computed_at: str | None    # ISO 时间戳
+```
+
+`_build_chip_status_struct` 实现：
+
+- 严格匹配 `(instrument_id, trade_date, core_run_id, algorithm_version, status=succeeded)`
+- 成功 → `status=succeeded + reason_text="已计算"`
+- 无记录/失败 → 调用 `first_pyramid_service.compute_chip_status_for_stock` 计算原因
+- 000021 实际值：`status=skipped + reason_code=M15_BARS_INSUFFICIENT + actual_bars=354 + required_bars=500`
+
+### 4.7.4 `factor_ready` 判定规则
+
+| 场景 | factor_ready | factor_error | 说明 |
+|---|---|---|---|
+| 趋势/结构/动量三维度 `available=true` | `true` | `null` | 正常 |
+| 任一维度 `available=false` + 日线<60 | `false` | `INSUFFICIENT_DAILY_BARS` | 新股数据不足，**不算 failed** |
+| 任一维度 `available=false` + 程序异常 | `false` | 程序异常错误信息 | 才算 failed |
+
+`factor_actual_bars` / `factor_required_bars` 始终填充（即使 factor_ready=true 也可显示）。
+
+### 4.7.5 行情列表内联自选按钮
+
+| 位置 | 实现 | 触发条件 |
+|---|---|---|
+| 股票名称列同行 | `WatchlistToggleButton`（22×22px） | 所有行 |
+| 独立 action 列 | **已删除** | 全部场景 |
+
+- 组件入口：`frontend/src/features/market-workspace/columns.tsx` 内 `WatchlistToggleButton`
+- 复用现有 `useAddWatchlist` / `useRemoveWatchlist` mutation、pending 状态、query invalidate
+- `stopPropagation` 防止触发行点击
+- 无障碍：`type=button` / `title` / `aria-label` / `aria-pressed` / `aria-busy`
+- 其他复用 `/market` 的页面（如 `/replay`）不受影响
 
 ## 5. 状态所有权
 

@@ -134,11 +134,33 @@
 | after-close orchestrator | `trading-worker-after-close` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=after_close_orchestrator` |
 | watchdog | `trading-worker-watchdog` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=watchdog` |
 | capture | `trading-worker-capture` | `docker-compose.prod.yml` | redis, postgres | `0.0.0.0:8001->8001/tcp` | 独立 Dockerfile.capture；healthcheck 健康 |
-| PostgreSQL | `trading-postgres` | `docker-compose.prod.yml` | - | `5432/tcp` | `trading-postgresdata`；healthcheck 健康 |
+| PostgreSQL | `trading-postgres` | `docker-compose.prod.yml` | - | `5432/tcp` | `trading-postgresdata`；healthcheck 健康；**[CHANGE-009]** 复用承载 umami 数据库（独立 user/schema） |
 | PostgreSQL (test) | `trading-postgres-test` | `docker-compose.prod.yml` | - | `0.0.0.0:5433->5432/tcp` | 持久化卷待核验 |
 | Redis | `trading-redis` | `docker-compose.prod.yml` | - | `6379/tcp` | `trading-redisdata`；`appendonly yes`；healthcheck 健康 |
+| Umami 访客分析 | `trading-umami` | `docker-compose.prod.yml` | postgres | - | **[CHANGE-009]** `image: docker.umami.is/umami-software/umami:3.2`；`env_file: /etc/market-dev/umami.env`；`umami_data` volume 持久化 `/app/data`；替代已移除的 GoAccess |
 
 > 远程 Compose 文件默认 `REDIS_URL=redis://redis:6379/0`，所有生产服务共用 DB 0。`docker-compose.live.yml` 叠加后将 `/opt/panji-live` 的运行时代码只读挂载到 Python 服务与 capture worker，实现代码热更新而不重建镜像。
+
+### 7.1 访客分析服务（CHANGE-20260729-009）
+
+**[CHANGE-009] Umami 替代 GoAccess**：GoAccess 从未成功部署（容器和卷均不存在，nginx access.log 是符号链接到 `/dev/stdout`），改用 Umami 作为访客分析服务。
+
+| 项 | 值 |
+|---|---|
+| 容器名 | `trading-umami` |
+| 镜像 | `docker.umami.is/umami-software/umami:3.2`（官方固定版本） |
+| 数据库 | 复用 `trading-postgres`，独立 `umami` 数据库和用户 |
+| 配置文件 | `/etc/market-dev/umami.env`（`DATABASE_URL` + `APP_SECRET` + `TZ=Asia/Shanghai`） |
+| Website ID | `109c6241-d39e-47b0-a6f2-29a6bc15bd09`（写入 `/etc/market-dev/market.env` 的 `UMAMI_WEBSITE_ID`） |
+| 数据持久化 | `trading-umami-data` volume（`/app/data`） |
+| Nginx 代理 | `location /umami/` 反向代理到 `umami:3000`，剥离 `/umami/` 前缀 |
+| Tracking script 注入 | nginx `sub_filter` 在 `</head>` 前动态注入 `<script async src="/umami/script.js" data-website-id="..."></script>` |
+| Live Mount 适配 | 通过 `docker-entrypoint.sh` 用 `sed` 替换 nginx.conf 中的 `${UMAMI_WEBSITE_ID}` 占位符（dist 只读挂载，无法直接修改 index.html） |
+| 开发/capture 模式 | 不注入 tracking script（docker-entrypoint.sh 通过 UMAMI_WEBSITE_ID 是否设置控制） |
+| nginx access.log | 保留 + logrotate 每 15 分钟检查轮转（不依赖 GoAccess） |
+| GoAccess runbook | `docs/runbooks/goaccess-deployment.md` 保留为历史记录，标注 superseded |
+
+> GoAccess 容器和 `goaccess_reports` / `nginx_logs` 共享卷已从 `docker-compose.prod.yml` 中移除；`deploy_live_runtime.sh` 的容器启动列表也已移除 `goaccess` 改为 `umami`。
 
 ## 8. 代码和承载边界
 
