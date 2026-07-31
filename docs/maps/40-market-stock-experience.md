@@ -263,7 +263,7 @@ class MarketStockRow(BaseModel):
 
 ### 4.7.3 `ChipStatus` 结构化合同
 
-**[CHANGE-20260730-010] 共享 `chip_status_resolver`（统一列表与详情 API）**
+**[CHANGE-20260729-004] 共享 `chip_status_resolver`（统一列表与详情 API）**
 
 ```python
 class ChipStatus(BaseModel):

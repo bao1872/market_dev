@@ -162,7 +162,7 @@
 
 > GoAccess 容器和 `goaccess_reports` / `nginx_logs` 共享卷已从 `docker-compose.prod.yml` 中移除；`deploy_live_runtime.sh` 的容器启动列表也已移除 `goaccess` 改为 `umami`。
 
-**[CHANGE-20260730-010] `/admin/visitors` API 与前端页面真正迁移到 Umami（CHANGE-009 遗漏修复）**
+**[CHANGE-20260730-011] `/admin/visitors` API 与前端页面真正迁移到 Umami（CHANGE-009 遗漏修复）**
 
 | 维度 | 修改前 | 修改后 |
 |---|---|---|

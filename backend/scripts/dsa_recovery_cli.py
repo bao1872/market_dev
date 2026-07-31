@@ -4,12 +4,15 @@
     cd /root/web_dev/backend && .venv/bin/python -m scripts.dsa_recovery_cli \\
         --job-run-id <uuid>
 
-    # dry-run：只检查状态，不创建新 run
-    .venv/bin/python -m scripts.dsa_recovery_cli --job-run-id <uuid> --dry-run
+    # 默认 dry-run：只检查状态，不创建新 run
+    .venv/bin/python -m scripts.dsa_recovery_cli --job-run-id <uuid>
+
+    # 实际执行恢复（需显式 --execute）
+    .venv/bin/python -m scripts.dsa_recovery_cli --job-run-id <uuid> --execute
 
 参数：
     --job-run-id: orchestrator SchedulerJobRun.id（必填）
-    --dry-run: 只检查 DSA run 状态，不创建新 run
+    --execute: 实际执行恢复（默认 dry-run，不写库）
 
 退出码：
     0: 恢复成功（或 dry-run 状态可恢复）
@@ -20,6 +23,7 @@
     - 禁止裸 SQL、/tmp Python、docker cp
     - 原失败 run 保留审计，只创建新 run
     - 管理员应急能力，需人工确认后执行
+    - [P0-3 2026-07-30] 默认 dry-run，只有显式 --execute 才写库
 """
 from __future__ import annotations
 
@@ -52,8 +56,9 @@ async def _run(args: argparse.Namespace) -> int:
         status = await get_dsa_recovery_status(db, job_run_id=job_run_id)
         print(json.dumps(status, indent=2, default=str))
 
-        if args.dry_run:
-            print("[dry-run] 未创建新 run", file=sys.stderr)
+        # [P0-3] 默认 dry-run，只有显式 --execute 才写库
+        if not args.execute:
+            print("[dry-run] 未创建新 run（使用 --execute 实际执行）", file=sys.stderr)
             return 0
 
         if not status.get("can_recover", False):
@@ -87,8 +92,8 @@ def main() -> None:
         help="orchestrator SchedulerJobRun.id (UUID)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
-        help="只检查状态，不创建新 run",
+        "--execute", action="store_true",
+        help="实际执行恢复（默认 dry-run，不写库）",
     )
     args = parser.parse_args()
 

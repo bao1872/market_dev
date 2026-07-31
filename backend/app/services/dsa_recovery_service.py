@@ -59,6 +59,8 @@ async def recover_failed_dsa_run(
     *,
     strategy_key: str = "dsa_selector",
     run_type: str = "scheduled",
+    worker_id: str | None = None,
+    lease_epoch: int | None = None,
 ) -> tuple[StrategyRun, bool]:
     """恢复失败的 DSA run（创建新 run，不修改原 run）。
 
@@ -70,11 +72,16 @@ async def recover_failed_dsa_run(
     5. 若 DSA run 为 failed/partial_failed → 创建新 run，更新 metadata
     6. 若恢复次数超过上限 → 抛 DSARecoveryError
 
+    [P0-3 2026-07-30 fencing] 新 run 创建时通过 claim_for_worker 绑定当前 orchestrator
+    worker，防止 generic strategy worker 抢走 recovery run。
+
     Args:
         db: 异步会话（caller 控制 commit）
         job_run_id: SchedulerJobRun.id（orchestrator job）
         strategy_key: 策略 key（默认 dsa_selector）
         run_type: 运行类型（默认 scheduled）
+        worker_id: 当前 orchestrator worker_id（用于 claim 新 run，防止 generic worker 抢占）
+        lease_epoch: 当前 orchestrator lease_epoch（用于 fencing）
 
     Returns:
         (new_dsa_run, is_new)：
@@ -158,15 +165,17 @@ async def recover_failed_dsa_run(
         )
 
     # 7. 创建新 DSA run（create_batch_run 自动处理 attempt_no 递增）
+    # [P0-3 2026-07-30] 使用当前 orchestrator worker_id claim，防止 generic worker 抢占
     from app.services.strategy_batch_service import StrategyBatchService
 
+    claim_worker = f"orchestrator:{worker_id}" if worker_id else f"orchestrator:recovery:{job_run_id}"
     batch_service = StrategyBatchService()
     new_dsa_run = await batch_service.create_batch_run(
         db,
         strategy_key=strategy_key,
         trade_date=trade_date,
         run_type=run_type,
-        claim_for_worker=f"orchestrator:recovery:{job_run_id}",
+        claim_for_worker=claim_worker,
     )
 
     # 8. 原子更新 orchestrator metadata

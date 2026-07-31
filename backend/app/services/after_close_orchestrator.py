@@ -1530,6 +1530,8 @@ async def execute_after_close_run(
                     try:
                         new_dsa_run, is_new = await recover_failed_dsa_run(
                             db, job_run_id=job_run_id,
+                            worker_id=worker_id,
+                            lease_epoch=lease_epoch,
                         )
                         await db.commit()
                         dsa_run_id = new_dsa_run.id
@@ -1821,67 +1823,13 @@ async def execute_after_close_run(
                             await db.commit()
                 raise
 
-            # [Phase8A 两阶段幂等发布] 阶段1成功 → 阶段2：将 snapshot run 标记 succeeded/published_at
-            if snapshot_run_id is not None and snapshot_error is None:
-                async with AsyncSessionLocal() as db:
-                    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
-                    run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
-                    if run_to_finish is not None and run_to_finish.status != "succeeded":
-                        # [P0-3] 断点从 last_completed_step='feature_snapshot' 恢复发布时，
-                        # snapshot_result 为 None（feature_snapshot 阶段已 skip）。
-                        # 此时必须从数据库读取该 run 实际 snapshot 数量，
-                        # 保留 run.expected_count/已有 failed_count，禁止写成 0 或 None。
-                        if snapshot_result is not None:
-                            _snapshot_count = snapshot_result.get("snapshot_count", 0)
-                            _failed_count = snapshot_result.get("failed_count", 0)
-                        else:
-                            from app.models.stock_feature_snapshot import StockFeatureSnapshot
-                            _count_stmt = select(func.count()).select_from(
-                                StockFeatureSnapshot
-                            ).where(
-                                StockFeatureSnapshot.source_run_id == snapshot_run_id,
-                            )
-                            _snapshot_count = (await db.execute(_count_stmt)).scalar() or 0
-                            _failed_count = (run_to_finish.expected_count or 0) - _snapshot_count
-                        # [CHANGE-20260717-002 SSOT] 提取 MDAS 诊断字段
-                        # snapshot_result is None（断点恢复）时 diag 为 None，
-                        # 不覆盖 run 已有值（finish_snapshot_run 内部 if not None 才写）
-                        _source_bar_hash = snapshot_result.get("source_bar_hash") if snapshot_result else None
-                        _adj_factor_hash = snapshot_result.get("adj_factor_hash") if snapshot_result else None
-                        _mdc_version = snapshot_result.get("market_data_contract_version") if snapshot_result else None
-                        _completed_through = snapshot_result.get("completed_through") if snapshot_result else None
-                        _adjustment_as_of = snapshot_result.get("adjustment_as_of") if snapshot_result else None
-                        await finish_snapshot_run(
-                            db, run_to_finish,
-                            status="succeeded",
-                            snapshot_count=_snapshot_count,
-                            failed_count=_failed_count,
-                            expected_count=run_to_finish.expected_count,
-                            metadata={
-                                "source": "after_close_orchestrator",
-                                "scope": "full",
-                            },
-                            # [CHANGE-20260717-002 SSOT] MDAS 诊断字段落库
-                            source_bar_hash=_source_bar_hash,
-                            adj_factor_hash=_adj_factor_hash,
-                            market_data_contract_version=_mdc_version,
-                            completed_through=_completed_through,
-                            adjustment_as_of=_adjustment_as_of,
-                        )
-                        await db.commit()
-                        logger.info(
-                            "[AfterClose] snapshot run 已标记 succeeded（DSA 发布后）: "
-                            "run_id=%s, snapshot_count=%s",
-                            snapshot_run_id, _snapshot_count,
-                        )
-
-            # [P0-1 stock_core publication closure] After snapshot run succeeds,
-            # explicitly publish stock_core pointer via factor_publication_service.
-            # Only after pointer is confirmed written and data_run_id equals
-            # snapshot_run_id, the publishing checkpoint is written.
-            # Idempotent: same run re-publish is a no-op.
-            # Different run pointer: NOT silently overwritten, event recorded.
+            # [P0-2 2026-07-30 visibility window fix] Publish stock_core pointer FIRST,
+            # then mark snapshot succeeded. This prevents the window where snapshot has
+            # published_at but pointer hasn't been written (API fallback could read
+            # unconfirmed snapshot). If pointer fails or points to different run,
+            # snapshot stays running (no published_at, not visible to consumers).
             _stock_core_published = False
+            _stock_core_superseded = False
             if snapshot_run_id is not None and snapshot_error is None:
                 async with AsyncSessionLocal() as pub_db:
                     from app.models.factor_publication import PUBLICATION_KIND_STOCK_CORE
@@ -1922,15 +1870,21 @@ async def execute_after_close_run(
                             message=(
                                 f"stock_core pointer exists for different run: "
                                 f"existing={existing_pub.data_run_id}, "
-                                f"current={snapshot_run_id}"
+                                f"current={snapshot_run_id} — current run is SUPERSEDED, "
+                                f"will NOT be marked published or aggregated"
                             ),
                             payload={
                                 "existing_data_run_id": str(existing_pub.data_run_id),
                                 "current_snapshot_run_id": str(snapshot_run_id),
+                                "superseded": True,
+                                "superseded_by_run_id": str(existing_pub.data_run_id),
                             },
                         )
                         await pub_db.commit()
-                        _stock_core_published = True  # existing pointer is valid
+                        # [P0-1 2026-07-30] pointer指向其他run → 当前run不得标记core_published
+                        # 禁止用旧pointer证明当前run发布成功；禁止基于当前run聚合
+                        _stock_core_published = False
+                        _stock_core_superseded = True
                     else:
                         cov_data = await compute_coverage(pub_db, snapshot_run_id)
                         try:
@@ -1963,6 +1917,78 @@ async def execute_after_close_run(
                                 f"stock_core publication failed: "
                                 f"coverage below threshold: {cov_exc}"
                             ) from cov_exc
+
+            # [Phase8A two-phase idempotent publish] Only mark snapshot succeeded
+            # AFTER pointer is confirmed. Superseded runs are NOT marked succeeded
+            # (no published_at → not visible to API consumers via fallback).
+            if _stock_core_published and snapshot_run_id is not None and snapshot_error is None:
+                async with AsyncSessionLocal() as db:
+                    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+                    run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
+                    if run_to_finish is not None and run_to_finish.status != "succeeded":
+                        # [P0-3] 断点从 last_completed_step='feature_snapshot' 恢复发布时，
+                        # snapshot_result 为 None（feature_snapshot 阶段已 skip）。
+                        # 此时必须从数据库读取该 run 实际 snapshot 数量，
+                        # 保留 run.expected_count/已有 failed_count，禁止写成 0 或 None。
+                        if snapshot_result is not None:
+                            _snapshot_count = snapshot_result.get("snapshot_count", 0)
+                            _failed_count = snapshot_result.get("failed_count", 0)
+                        else:
+                            from app.models.stock_feature_snapshot import StockFeatureSnapshot
+                            _count_stmt = select(func.count()).select_from(
+                                StockFeatureSnapshot
+                            ).where(
+                                StockFeatureSnapshot.source_run_id == snapshot_run_id,
+                            )
+                            _snapshot_count = (await db.execute(_count_stmt)).scalar() or 0
+                            _failed_count = (run_to_finish.expected_count or 0) - _snapshot_count
+                        _source_bar_hash = snapshot_result.get("source_bar_hash") if snapshot_result else None
+                        _adj_factor_hash = snapshot_result.get("adj_factor_hash") if snapshot_result else None
+                        _mdc_version = snapshot_result.get("market_data_contract_version") if snapshot_result else None
+                        _completed_through = snapshot_result.get("completed_through") if snapshot_result else None
+                        _adjustment_as_of = snapshot_result.get("adjustment_as_of") if snapshot_result else None
+                        await finish_snapshot_run(
+                            db, run_to_finish,
+                            status="succeeded",
+                            snapshot_count=_snapshot_count,
+                            failed_count=_failed_count,
+                            expected_count=run_to_finish.expected_count,
+                            metadata={
+                                "source": "after_close_orchestrator",
+                                "scope": "full",
+                            },
+                            source_bar_hash=_source_bar_hash,
+                            adj_factor_hash=_adj_factor_hash,
+                            market_data_contract_version=_mdc_version,
+                            completed_through=_completed_through,
+                            adjustment_as_of=_adjustment_as_of,
+                        )
+                        await db.commit()
+                        logger.info(
+                            "[AfterClose] snapshot run 已标记 succeeded（pointer 确认后）: "
+                            "run_id=%s, snapshot_count=%s",
+                            snapshot_run_id, _snapshot_count,
+                        )
+
+            # [P0-1] Superseded: snapshot NOT marked succeeded, aggregation skipped
+            if _stock_core_superseded and snapshot_run_id is not None:
+                async with AsyncSessionLocal() as db:
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    await append_event(
+                        db=db,
+                        job_run_id=job_run_id,
+                        step="publishing",
+                        level="warning",
+                        message=(
+                            f"Snapshot run {snapshot_run_id} SUPERSEDED by existing pointer. "
+                            f"Not marking succeeded. Aggregation skipped."
+                        ),
+                        payload={
+                            "snapshot_run_id": str(snapshot_run_id),
+                            "superseded": True,
+                        },
+                    )
+                    await db.commit()
 
             # [P0-4 aggregation dependency closure] After stock_core pointer is
             # published, trigger board analysis / market aggregation.

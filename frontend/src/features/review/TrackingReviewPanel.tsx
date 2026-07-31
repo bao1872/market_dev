@@ -24,6 +24,9 @@ const TRACKING_STATUS_META: Record<string, { label: string; cls: string }> = {
   closed: { label: '已关闭', cls: 'chipDefault' },
 }
 
+// [P0-CI 2026-07-30] 提取魔法数字为命名常量（architecture gate: 禁止 slice(0, N) 硬编码）
+const TRACKING_PREVIEW_LIMIT = 20
+
 const SUB_TABS: Array<{ value: TrackingTab; label: string }> = [
   { value: 'history', label: '过去发现' },
   { value: 'watchlist', label: '自选映射' },
@@ -211,7 +214,7 @@ export default function TrackingReviewPanel({
                   <div className={styles.metricUnavailable}>暂无自选股</div>
                 ) : (
                   <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13, color: '#98A1B3' }}>
-                    {watchlistItems.slice(0, 20).map((w) => (
+                    {watchlistItems.slice(0, TRACKING_PREVIEW_LIMIT).map((w) => (
                       <li key={w.instrument_id}>
                         {w.instrument_id.slice(0, 8)}
                       </li>
@@ -227,7 +230,7 @@ export default function TrackingReviewPanel({
                   <div className={styles.metricUnavailable}>今日未命中偏差筛选器</div>
                 ) : (
                   <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13, color: '#98A1B3' }}>
-                    {(signalsQuery.data?.items ?? []).slice(0, 20).map((s) => (
+                    {(signalsQuery.data?.items ?? []).slice(0, TRACKING_PREVIEW_LIMIT).map((s) => (
                       <li key={s.id}>
                         {s.scopeName}（{s.filterFamily}/{s.signalType}）
                       </li>

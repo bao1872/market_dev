@@ -335,16 +335,24 @@ build_images() {
 # 禁止用 sed -i 直接修改（非原子，中途崩溃会损坏文件）
 # 使用 temp file + mv 原子替换，保留原文件 owner/mode
 # 参数: $1 = deployment_mode (image 或 live)
+# [P0-4 2026-07-30] Live 模式不得修改 GIT_SHA（用于 docker-compose.prod.yml image tag）
+#   docker-compose.prod.yml 使用 image: market-dev-backend:${GIT_SHA}
+#   Live 模式不构建新镜像，如果把 GIT_SHA 改成新 SHA，Compose 找不到对应镜像
+#   Live 模式只更新 BUILD_TIME 和 DEPLOYMENT_MODE=live；RUNTIME_SHA 由 sync_live_mount 写入
 update_env_file() {
     local deployment_mode="${1:-image}"
-    log "原子更新 ${ENV_FILE} GIT_SHA/BUILD_TIME/DEPLOYMENT_MODE (mode=${deployment_mode})..."
+    log "原子更新 ${ENV_FILE} (mode=${deployment_mode})..."
 
     local short_sha="${TARGET_SHA:0:7}"
     local build_time
     build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        log "[dry-run] 将更新 ${ENV_FILE}: GIT_SHA=${short_sha}, BUILD_TIME=${build_time}, DEPLOYMENT_MODE=${deployment_mode}"
+        if [[ "${deployment_mode}" == "image" ]]; then
+            log "[dry-run] 将更新 ${ENV_FILE}: GIT_SHA=${short_sha}, BUILD_TIME=${build_time}, DEPLOYMENT_MODE=${deployment_mode}"
+        else
+            log "[dry-run] 将更新 ${ENV_FILE}: BUILD_TIME=${build_time}, DEPLOYMENT_MODE=${deployment_mode} (GIT_SHA 保持不变)"
+        fi
         return 0
     fi
 
@@ -358,21 +366,30 @@ update_env_file() {
     local tmp_file
     tmp_file="$(mktemp "${ENV_FILE}.XXXXXX")" || fail "无法创建临时文件"
 
-    # 复制现有 env，替换/追加 GIT_SHA / BUILD_TIME / DEPLOYMENT_MODE
+    # 复制现有 env
     cp "${ENV_FILE}" "${tmp_file}"
 
-    # 使用 awk 原子替换（避免多次 sed 调用）
-    awk -v sha="${short_sha}" -v bt="${build_time}" -v dm="${deployment_mode}" '
-        /^GIT_SHA=/ { print "GIT_SHA=" sha; next }
-        /^BUILD_TIME=/ { print "BUILD_TIME=" bt; next }
-        /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=" dm; next }
-        { print }
-    ' "${tmp_file}" > "${tmp_file}.new" && mv "${tmp_file}.new" "${tmp_file}"
-
-    # 检查是否已存在（awk 不会追加不存在的行）
-    if ! grep -q "^GIT_SHA=" "${tmp_file}"; then
-        echo "GIT_SHA=${short_sha}" >> "${tmp_file}"
+    # [P0-4] image 模式: 更新 GIT_SHA (镜像 tag); live 模式: 不更新 GIT_SHA
+    if [[ "${deployment_mode}" == "image" ]]; then
+        awk -v sha="${short_sha}" -v bt="${build_time}" -v dm="${deployment_mode}" '
+            /^GIT_SHA=/ { print "GIT_SHA=" sha; next }
+            /^BUILD_TIME=/ { print "BUILD_TIME=" bt; next }
+            /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=" dm; next }
+            { print }
+        ' "${tmp_file}" > "${tmp_file}.new" && mv "${tmp_file}.new" "${tmp_file}"
+        # 检查是否已存在
+        if ! grep -q "^GIT_SHA=" "${tmp_file}"; then
+            echo "GIT_SHA=${short_sha}" >> "${tmp_file}"
+        fi
+    else
+        # live 模式: 只更新 BUILD_TIME 和 DEPLOYMENT_MODE，不动 GIT_SHA
+        awk -v bt="${build_time}" -v dm="${deployment_mode}" '
+            /^BUILD_TIME=/ { print "BUILD_TIME=" bt; next }
+            /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=" dm; next }
+            { print }
+        ' "${tmp_file}" > "${tmp_file}.new" && mv "${tmp_file}.new" "${tmp_file}"
     fi
+
     if ! grep -q "^BUILD_TIME=" "${tmp_file}"; then
         echo "BUILD_TIME=${build_time}" >> "${tmp_file}"
     fi
@@ -388,13 +405,9 @@ update_env_file() {
     mv "${tmp_file}" "${ENV_FILE}" || fail "无法原子替换 ${ENV_FILE}"
 
     # 验证写入成功
-    local verified_sha verified_bt verified_dm
-    verified_sha="$(grep "^GIT_SHA=" "${ENV_FILE}" | cut -d= -f2)"
+    local verified_bt verified_dm
     verified_bt="$(grep "^BUILD_TIME=" "${ENV_FILE}" | cut -d= -f2)"
     verified_dm="$(grep "^DEPLOYMENT_MODE=" "${ENV_FILE}" | cut -d= -f2)"
-    if [[ "${verified_sha}" != "${short_sha}" ]]; then
-        fail "market.env GIT_SHA 验证失败: 期望 ${short_sha}, 实际 ${verified_sha}"
-    fi
     if [[ "${verified_bt}" != "${build_time}" ]]; then
         fail "market.env BUILD_TIME 验证失败: 期望 ${build_time}, 实际 ${verified_bt}"
     fi
@@ -402,7 +415,18 @@ update_env_file() {
         fail "market.env DEPLOYMENT_MODE 验证失败: 期望 ${deployment_mode}, 实际 ${verified_dm}"
     fi
 
-    log "已原子更新 ${ENV_FILE}: GIT_SHA=${verified_sha}, BUILD_TIME=${verified_bt}, DEPLOYMENT_MODE=${verified_dm}"
+    if [[ "${deployment_mode}" == "image" ]]; then
+        local verified_sha
+        verified_sha="$(grep "^GIT_SHA=" "${ENV_FILE}" | cut -d= -f2)"
+        if [[ "${verified_sha}" != "${short_sha}" ]]; then
+            fail "market.env GIT_SHA 验证失败: 期望 ${short_sha}, 实际 ${verified_sha}"
+        fi
+        log "已原子更新 ${ENV_FILE}: GIT_SHA=${verified_sha}, BUILD_TIME=${verified_bt}, DEPLOYMENT_MODE=${verified_dm}"
+    else
+        local existing_sha
+        existing_sha="$(grep "^GIT_SHA=" "${ENV_FILE}" | cut -d= -f2)"
+        log "已原子更新 ${ENV_FILE}: GIT_SHA=${existing_sha} (不变), BUILD_TIME=${verified_bt}, DEPLOYMENT_MODE=${verified_dm}"
+    fi
 }
 
 deploy_scope() {

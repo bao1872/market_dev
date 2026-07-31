@@ -240,6 +240,14 @@ async def bootstrap_single_date(
         "ready_count": ready_count,
         "coverage": coverage,
         "written": True,
+        # [P0-5 2026-07-30] P0 只 bootstrap market scope
+        # 行业/概念不回填：无历史板块成员快照，使用当前成员会产生存活偏差
+        "scope_limitations": {
+            "market": "bootstrapped",
+            "industry_l1": "membership_history_unavailable",
+            "industry_l2": "membership_history_unavailable",
+            "concept": "membership_history_unavailable",
+        },
     }
 
 
