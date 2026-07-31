@@ -421,6 +421,9 @@ jobs:
           done
       - name: Run pytest (includes Migration via conftest session fixture)
         # --junitxml + 解析后输出 ::error:: annotation，便于无 admin 权限下查看失败用例
+        # 修复：原 `python3 - <<'PY' < pytest.xml` 因 here-doc 与文件重定向冲突，
+        # Python 把 pytest.xml 当成脚本解析，annotation 永远不会发出。
+        # 改用 `-c` 内联脚本 + 独立 stdin 重定向。
         run: |
           set +e
           pytest --tb=short -v --junitxml=pytest.xml > pytest_output.txt 2>&1
@@ -428,21 +431,29 @@ jobs:
           cat pytest_output.txt
           # 解析 pytest.xml 提取失败用例，输出为 GitHub annotation（公开 API 可读）
           if [ "$pytest_exit" -ne 0 ] && [ -f pytest.xml ]; then
-            python3 - <<'PY' < pytest.xml
+            python3 -c "
           import sys, xml.etree.ElementTree as ET
           try:
-              tree = ET.parse(sys.stdin)
+              tree = ET.parse('pytest.xml')
               root = tree.getroot()
+              n_fail = 0
               for tc in root.iter('testcase'):
                   for child in tc:
                       if child.tag in ('failure', 'error'):
                           name = tc.get('name', '?')
                           classname = tc.get('classname', '?')
                           msg = (child.get('message') or child.text or '')[:500]
-                          print(f"::error file={classname},name={name}::{name}: {msg}")
+                          print(f'::error file={classname},title={name}::{name}: {msg}')
+                          n_fail += 1
+              if n_fail == 0:
+                  print('::error::pytest exited non-zero but no <failure>/<error> tags found in pytest.xml; check raw output above')
           except Exception as e:
-              print(f"::error::failed to parse pytest.xml: {e}")
-          PY
+              print(f'::error::failed to parse pytest.xml: {e}')
+          "
+            # 兜底：从 pytest_output.txt 提取 FAILED/ERROR 行
+            grep -E '^(FAILED|ERROR)' pytest_output.txt 2>/dev/null | while IFS= read -r line; do
+              echo "::error::$line"
+            done
           fi
           exit $pytest_exit
       - name: Upload pytest results
