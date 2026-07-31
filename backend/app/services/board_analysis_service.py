@@ -1110,7 +1110,8 @@ async def _compute_peer_metrics(
     strengths: list[float] = []
     for snap in rows:
         pl = snap.payload if isinstance(snap.payload, dict) else {}
-        ts = pl.get("trend_strength") if isinstance(pl.get("trend_strength"), dict) else {}
+        ts_raw = pl.get("trend_strength")
+        ts = ts_raw if isinstance(ts_raw, dict) else {}
         avg_ts = _safe_float(ts.get("avg"))
         if avg_ts is not None:
             strengths.append(avg_ts)

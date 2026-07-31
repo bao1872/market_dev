@@ -30,7 +30,7 @@ import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from sqlalchemy import func, select
@@ -1845,9 +1845,9 @@ if __name__ == "__main__":
         def __init__(self, adj_factor, close=None):
             self.adj_factor = adj_factor
             self.close = close
-    assert _detect_ex_right([_MockBar(Decimal("1.05")), _MockBar(Decimal("1.0"))]) is True
-    assert _detect_ex_right([_MockBar(Decimal("1.0")), _MockBar(Decimal("1.0"))]) is False
-    assert _detect_ex_right([_MockBar(Decimal("1.0"))]) is False
+    assert _detect_ex_right(cast(list[BarDaily], [_MockBar(Decimal("1.05")), _MockBar(Decimal("1.0"))])) is True
+    assert _detect_ex_right(cast(list[BarDaily], [_MockBar(Decimal("1.0")), _MockBar(Decimal("1.0"))])) is False
+    assert _detect_ex_right(cast(list[BarDaily], [_MockBar(Decimal("1.0"))])) is False
 
     # _determine_lifecycle_transition
     assert _determine_lifecycle_transition(
