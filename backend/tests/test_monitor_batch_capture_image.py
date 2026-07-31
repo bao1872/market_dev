@@ -26,13 +26,18 @@ from app.services.monitor_batch_service import MonitorBatchService
 
 
 def _make_event(instrument_id: UUID) -> StrategyEvent:
-    """构造最小 mock StrategyEvent（不依赖 DB）。"""
+    """构造最小 mock StrategyEvent（不依赖 DB）。
+
+    [CHANGE-20260728-010] 默认事件类型从 bb_upper_touch 改为 smc_bos_retest：
+    BB 事件已不再触发截图（is_supported_event_type 返回 False），
+    测试需要使用支持的事件类型才能走完整截图链路。
+    """
     return StrategyEvent(
         id=uuid4(),
         event_key=f"test-event-{uuid4().hex}",
         strategy_version_id=uuid4(),
         instrument_id=instrument_id,
-        event_type="bb_upper_touch",
+        event_type="smc_bos_retest",
         event_time=datetime(2026, 7, 7, 10, 30, tzinfo=UTC),
         schema_version=1,
         payload={"price": 100.0},
@@ -321,12 +326,12 @@ class TestMonitorBatchCaptureTimeframe:
 
 
 class TestMonitorBatchCaptureIndicatorView:
-    """[CHANGE-20260720-003 §三] 监控自动发送时 capture_payload 必须携带 indicator_view。
+    """[CHANGE-20260728-010] 监控自动发送时 capture_payload.indicator_view 固定为 structure_node。
 
-    监控事件自动发送时不要求用户选择，由 event_type → indicator_view 映射决定。
-    - bb_*_touch 事件 → bollinger
-    - node_cluster_touch 事件 → node_cluster
-    - smc_* 事件 → smc
+    [CHANGE-20260728-010] 截图视图统一为 FEISHU_CAPTURE_VIEW='structure_node'：
+    - 任一结构事件或筹码共识事件触发时，截图固定同时展示"结构 + 筹码共识"
+    - 事件类别只决定 focus_event 与文字内容，不再决定截图图层组合
+    - BB 事件已不再触发截图（is_supported_event_type 返回 False，显式跳过）
     capture_payload.indicator_view 贯穿：截图 URL / 缓存键 / output_filename / CaptureJob 记录。
     """
 
@@ -334,10 +339,24 @@ class TestMonitorBatchCaptureIndicatorView:
     async def test_capture_payload_includes_indicator_view_for_bb_event(
         self, db_session, test_user, test_instrument,
     ) -> None:
-        """bb_upper_touch 事件 → capture_payload.indicator_view == 'bollinger'。"""
+        """[CHANGE-20260728-010] bb_upper_touch 事件已不再触发截图（is_supported_event_type=False）。
+
+        BB 事件被显式跳过：不调用 capture worker，写入 CaptureJob FAILED + indicator_view=None。
+        """
         inst_id = test_instrument.id
         user_id = test_user.id
-        event = _make_event(inst_id)  # event_type=bb_upper_touch
+        # 显式构造 bb_upper_touch 事件（_make_event 默认已改为 smc_bos_retest）
+        event = StrategyEvent(
+            id=uuid4(),
+            event_key=f"test-event-{uuid4().hex}",
+            strategy_version_id=uuid4(),
+            instrument_id=inst_id,
+            event_type="bb_upper_touch",
+            event_time=datetime(2026, 7, 7, 10, 30, tzinfo=UTC),
+            schema_version=1,
+            payload={"price": 100.0},
+            snapshot={},
+        )
         group_id = str(uuid4())
 
         captured_payload: dict | None = None
@@ -368,33 +387,24 @@ class TestMonitorBatchCaptureIndicatorView:
                 message_group_id=group_id,
             )
 
-        assert captured_payload is not None
-        # [CHANGE-20260720-003 §三] bb_upper_touch 应映射到 bollinger
-        assert captured_payload["indicator_view"] == "bollinger"
-        # output_filename 应含 indicator_view 后缀，防止不同指标复用旧图
-        assert "bollinger" in captured_payload["output_filename"], (
-            f"output_filename 应含 'bollinger': {captured_payload['output_filename']}"
-        )
-        # capture_run_id 应含 indicator_view 维度
-        assert "bollinger" in captured_payload["capture_run_id"], (
-            f"capture_run_id 应含 'bollinger': {captured_payload['capture_run_id']}"
-        )
-
-        # CaptureJob 应记录 indicator_view
+        # [CHANGE-20260728-010] BB 事件不被支持：capture worker 不应被调用
+        assert captured_payload is None
+        # CaptureJob 应记录 FAILED + indicator_view=None（未映射事件类型）
         stmt = select(CaptureJob).where(CaptureJob.event_id == event.id)
         result = await db_session.execute(stmt)
         job = result.scalar_one_or_none()
         assert job is not None
-        assert job.indicator_view == "bollinger"
+        assert job.status == CAPTURE_STATUS_FAILED
+        assert job.indicator_view is None
 
     @pytest.mark.asyncio
     async def test_capture_payload_includes_indicator_view_for_node_event(
         self, db_session, test_user, test_instrument,
     ) -> None:
-        """node_cluster_touch 事件 → capture_payload.indicator_view == 'node_cluster'。"""
+        """[CHANGE-20260728-010] node_cluster_touch 事件 → indicator_view == 'structure_node'（统一组合视图）。"""
         inst_id = test_instrument.id
         user_id = test_user.id
-        # 直接构造 node_cluster_touch 事件（_make_event 默认是 bb_upper_touch）
+        # 直接构造 node_cluster_touch 事件
         event = StrategyEvent(
             id=uuid4(),
             event_key=f"test-event-{uuid4().hex}",
@@ -437,15 +447,16 @@ class TestMonitorBatchCaptureIndicatorView:
             )
 
         assert captured_payload is not None
-        assert captured_payload["indicator_view"] == "node_cluster"
-        assert "node_cluster" in captured_payload["output_filename"]
+        # [CHANGE-20260728-010] 所有支持的事件类型统一映射到 structure_node
+        assert captured_payload["indicator_view"] == "structure_node"
+        assert "structure_node" in captured_payload["output_filename"]
 
         # CaptureJob 应记录 indicator_view
         stmt = select(CaptureJob).where(CaptureJob.event_id == event.id)
         result = await db_session.execute(stmt)
         job = result.scalar_one_or_none()
         assert job is not None
-        assert job.indicator_view == "node_cluster"
+        assert job.indicator_view == "structure_node"
 
     @pytest.mark.asyncio
     async def test_capture_payload_includes_indicator_view_for_smc_event(
