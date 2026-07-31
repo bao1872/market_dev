@@ -1,12 +1,24 @@
 {
-  "baseline_commit": "9f2d665",
-  "total": 54,
-  "unique": 37,
+  "baseline_commit": "c5b83a5",
+  "total": 63,
+  "unique": 41,
   "diagnostics": [
     {
       "filename": "app/api/admin_incremental_publish.py",
       "error_code": "attr-defined",
       "message": "\"StockFeatureSnapshotRun\" has no attribute \"algorithm_version\"",
+      "count": 1
+    },
+    {
+      "filename": "app/api/admin_review.py",
+      "error_code": "attr-defined",
+      "message": "\"BaseRoute\" has no attribute \"path\"",
+      "count": 1
+    },
+    {
+      "filename": "app/api/review.py",
+      "error_code": "attr-defined",
+      "message": "\"BaseRoute\" has no attribute \"path\"",
       "count": 1
     },
     {
@@ -160,6 +172,12 @@
       "count": 2
     },
     {
+      "filename": "app/services/first_pyramid_history_service.py",
+      "error_code": "attr-defined",
+      "message": "\"Result[Any]\" has no attribute \"rowcount\"",
+      "count": 3
+    },
+    {
       "filename": "app/services/job_queue.py",
       "error_code": "misc",
       "message": "Incompatible types in \"await\" (actual type \"Awaitable[int] | int\", expected type \"Awaitable[Any]\")",
@@ -212,6 +230,12 @@
       "error_code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"MarketReviewRun | None\", variable has type \"MarketReviewRun\")",
       "count": 1
+    },
+    {
+      "filename": "app/services/snapshot_run_item_service.py",
+      "error_code": "attr-defined",
+      "message": "\"Result[Any]\" has no attribute \"rowcount\"",
+      "count": 4
     },
     {
       "filename": "app/worker.py",
