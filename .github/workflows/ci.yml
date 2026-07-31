@@ -420,8 +420,31 @@ jobs:
             sleep 1
           done
       - name: Run pytest (includes Migration via conftest session fixture)
-        # --junitxml 上传 artifact，便于无 admin 权限下下载查看具体失败用例
-        run: pytest --tb=long -v --junitxml=pytest.xml
+        # --junitxml + 解析后输出 ::error:: annotation，便于无 admin 权限下查看失败用例
+        run: |
+          set +e
+          pytest --tb=short -v --junitxml=pytest.xml > pytest_output.txt 2>&1
+          pytest_exit=$?
+          cat pytest_output.txt
+          # 解析 pytest.xml 提取失败用例，输出为 GitHub annotation（公开 API 可读）
+          if [ "$pytest_exit" -ne 0 ] && [ -f pytest.xml ]; then
+            python3 - <<'PY' < pytest.xml
+          import sys, xml.etree.ElementTree as ET
+          try:
+              tree = ET.parse(sys.stdin)
+              root = tree.getroot()
+              for tc in root.iter('testcase'):
+                  for child in tc:
+                      if child.tag in ('failure', 'error'):
+                          name = tc.get('name', '?')
+                          classname = tc.get('classname', '?')
+                          msg = (child.get('message') or child.text or '')[:500]
+                          print(f"::error file={classname},name={name}::{name}: {msg}")
+          except Exception as e:
+              print(f"::error::failed to parse pytest.xml: {e}")
+          PY
+          fi
+          exit $pytest_exit
       - name: Upload pytest results
         if: always()
         uses: actions/upload-artifact@v4
