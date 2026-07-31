@@ -286,6 +286,18 @@ _KNOWN_SEMANTIC_DIFFERENCES: set[tuple[str, str, int]] = {
     # Worker 心跳 stale 阈值（600 秒），用于判断 running Worker 是否失联，
     # 与 NODE_CLUSTER_EVENT_TTL_SECONDS=600（事件状态过期）业务规则不同
     ("app/schemas/worker_heartbeat.py", "WORKER_STALE_THRESHOLD_SECONDS", 600),
+    # 竞价采集 run 租约（600 秒）：auction_quote_capture 单次采集硬上限，
+    # 与 NODE_CLUSTER_EVENT_TTL_SECONDS=600（事件状态过期）业务规则不同（采集租约 vs 事件 TTL）
+    ("app/services/auction_quote_capture_service.py", "CAPTURE_RUN_LEASE_SECONDS", 600),
+    # 竞价开盘确认租约（600 秒）：auction open_confirmation 扫描租约，
+    # 与 NODE_CLUSTER_EVENT_TTL_SECONDS=600（事件状态过期）业务规则不同（扫描租约 vs 事件 TTL）
+    ("app/services/auction_scheduler_service.py", "AUCTION_OPEN_CONFIRMATION_LEASE_SECONDS", 600),
+    # 第一金字塔默认输出 bar 数（250 条）：回补输出天数，
+    # 与 DAILY_HISTORY_BARS=250（指标输入 bar 数）业务规则不同（输出 vs 输入）
+    ("app/services/first_pyramid_history_service.py", "_DEFAULT_OUTPUT_BARS", 250),
+    # 市场数据质量 15min 完整校验 bar 数（4000 条）：MDQ 全量校验输入，
+    # 与 NODE_CLUSTER_LOW_BARS=4000（Node Cluster 15m 输入根数）业务规则不同（校验 vs Node 输入）
+    ("app/services/market_data_quality_service.py", "MDQ_15M_FULL_BARS", 4000),
 }
 
 # 字典字面量已知例外：以下 (相对路径, 字面量值) 二元组属于"语义不同的同值用法"，

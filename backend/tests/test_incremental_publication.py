@@ -664,6 +664,12 @@ class TestPostgreSQLIntegration:
         await mark_item_succeeded(db_session, item_map[inst1.id].id, result_count=1)
         await db_session.commit()
 
+        # 模拟 worker1 中断：将 inst2 的 item lease 设为过期，使其可被 resume
+        # （get_resume_items 只返回 pending/failed 或 lease 过期的 running items）
+        inst2_item = item_map[inst2.id]
+        inst2_item.lease_expires_at = datetime.now(UTC) - timedelta(hours=1)
+        await db_session.commit()
+
         # 模拟中断恢复
         resume_items = await get_resume_items(db_session, run.id)
         # 只有第2股需要 resume（第1股已 succeeded）

@@ -502,7 +502,7 @@ class TestRunKeyAndHash:
 
         db = MagicMock()
         with pytest.raises(ValueError, match="verification 模式必须提供"):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 MarketDataQualityService.create_run(
                     db, timeframe="1d",
                     start_date=date(2026, 1, 1), end_date=date(2026, 7, 30),
@@ -516,7 +516,7 @@ class TestRunKeyAndHash:
 
         db = MagicMock()
         with pytest.raises(ValueError, match="不支持的 mode"):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 MarketDataQualityService.create_run(
                     db, timeframe="1d",
                     start_date=date(2026, 1, 1), end_date=date(2026, 7, 30),

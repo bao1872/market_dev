@@ -441,8 +441,9 @@ class TestCaptureSnapshot:
     ) -> None:
         """indicator_view=smc → compute_all_indicators 透传 include_smc=True。
 
-        阻断验收：smc 视图必须触发 SMC 算法计算（BOS/CHoCH/OB/EQH/EQL/trailing），
-        否则前端 SMC 图层无数据可渲染。
+        [CHANGE-20260728-010] 新链路固定 FEISHU_CAPTURE_VIEW='structure_node'，
+        始终 include_smc=True；URL indicator_view 参数仅作历史兼容读取，不影响渲染。
+        本测试验证 smc URL 仍触发 SMC 计算（新行为下 SMC 始终计算）。
         """
         client, db = capture_client
         from app.models.user import User
@@ -481,15 +482,20 @@ class TestCaptureSnapshot:
         assert snap_kwargs.get("include_smc") is True, \
             "indicator_view=smc 必须透传 include_smc=True"
 
-        # 响应必须包含 indicator_view 与 include_smc 字段
-        assert data["indicator_view"] == "smc"
+        # [CHANGE-20260728-010] 响应固定为 structure_node + include_smc=True
+        assert data["indicator_view"] == "structure_node"
         assert data["include_smc"] is True
 
     @pytest.mark.asyncio
     async def test_capture_snapshot_indicator_view_node_cluster_skips_smc(
         self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
     ) -> None:
-        """indicator_view=node_cluster → include_smc=False（不消耗 SMC CPU）。"""
+        """indicator_view=node_cluster → [CHANGE-20260728-010] 固定 include_smc=True。
+
+        历史行为：node_cluster 跳过 SMC 计算（include_smc=False）。
+        新行为（CHANGE-20260728-010）：URL indicator_view 已忽略，固定 structure_node + include_smc=True。
+        本测试保留以验证 node_cluster URL 不再触发跳过逻辑。
+        """
         client, db = capture_client
         from app.models.user import User
         user = User(
@@ -521,20 +527,24 @@ class TestCaptureSnapshot:
         assert resp.status_code == 200, f"响应体: {resp.text}"
         data = resp.json()
 
-        # [CP-V3-B] node_cluster 视图不应触发 SMC 计算（按需计算约束）
+        # [CHANGE-20260728-010] node_cluster URL 不再触发跳过，固定 include_smc=True
         assert spy_snapshot.await_count == 1
         snap_kwargs = spy_snapshot.call_args.kwargs
-        assert snap_kwargs.get("include_smc") is False, \
-            "indicator_view=node_cluster 必须透传 include_smc=False（按需计算）"
+        assert snap_kwargs.get("include_smc") is True, \
+            "indicator_view=node_cluster 现固定 include_smc=True（CHANGE-20260728-010）"
 
-        assert data["indicator_view"] == "node_cluster"
-        assert data["include_smc"] is False
+        assert data["indicator_view"] == "structure_node"
+        assert data["include_smc"] is True
 
     @pytest.mark.asyncio
     async def test_capture_snapshot_indicator_view_bollinger_skips_smc(
         self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
     ) -> None:
-        """indicator_view=bollinger → include_smc=False。"""
+        """indicator_view=bollinger → [CHANGE-20260728-010] 固定 include_smc=True。
+
+        历史行为：bollinger 跳过 SMC 计算（include_smc=False）。
+        新行为（CHANGE-20260728-010）：URL indicator_view 已忽略，固定 structure_node + include_smc=True。
+        """
         client, db = capture_client
         from app.models.user import User
         user = User(
@@ -568,17 +578,19 @@ class TestCaptureSnapshot:
 
         assert spy_snapshot.await_count == 1
         snap_kwargs = spy_snapshot.call_args.kwargs
-        assert snap_kwargs.get("include_smc") is False
+        assert snap_kwargs.get("include_smc") is True
 
-        assert data["indicator_view"] == "bollinger"
-        assert data["include_smc"] is False
+        assert data["indicator_view"] == "structure_node"
+        assert data["include_smc"] is True
 
     @pytest.mark.asyncio
     async def test_capture_snapshot_indicator_view_invalid_falls_back_to_default(
         self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
     ) -> None:
-        """indicator_view=invalid → 回退到 DEFAULT_INDICATOR_VIEW（node_cluster），不抛 400。
+        """indicator_view=invalid → [CHANGE-20260728-010] 固定 structure_node，不抛 400。
 
+        历史行为：非法值回退到 DEFAULT_INDICATOR_VIEW（node_cluster）。
+        新行为：URL indicator_view 已忽略，固定 structure_node + include_smc=True。
         阻断验收：截图链路必须鲁棒，非法值不阻塞截图（advice.md 第六节）。
         """
         client, db = capture_client
@@ -609,17 +621,19 @@ class TestCaptureSnapshot:
         assert resp.status_code == 200, f"响应体: {resp.text}"
         data = resp.json()
 
-        # 非法值回退到 DEFAULT_INDICATOR_VIEW（node_cluster）
-        assert data["indicator_view"] == "node_cluster"
-        assert data["include_smc"] is False
+        # [CHANGE-20260728-010] 非法值不再回退到 node_cluster，固定 structure_node
+        assert data["indicator_view"] == "structure_node"
+        assert data["include_smc"] is True
 
     @pytest.mark.asyncio
     async def test_capture_snapshot_indicator_view_missing_falls_back_to_default(
         self, capture_client: tuple[AsyncClient, AsyncSession], test_instrument,
     ) -> None:
-        """indicator_view 缺失 → 回退到 DEFAULT_INDICATOR_VIEW（node_cluster）。
+        """indicator_view 缺失 → [CHANGE-20260728-010] 固定 structure_node。
 
-        向后兼容：旧 capture URL 不携带 indicator_view 时，按默认视图渲染。
+        历史行为：缺失 indicator_view 回退到 DEFAULT_INDICATOR_VIEW（node_cluster）。
+        新行为：URL indicator_view 已忽略，固定 structure_node + include_smc=True。
+        向后兼容：旧 capture URL 不携带 indicator_view 时仍正常渲染。
         """
         client, db = capture_client
         from app.models.user import User
@@ -648,9 +662,9 @@ class TestCaptureSnapshot:
         assert resp.status_code == 200, f"响应体: {resp.text}"
         data = resp.json()
 
-        # 缺失 indicator_view 回退到 node_cluster（DEFAULT_INDICATOR_VIEW）
-        assert data["indicator_view"] == "node_cluster"
-        assert data["include_smc"] is False
+        # [CHANGE-20260728-010] 缺失 indicator_view 不再回退到 node_cluster，固定 structure_node
+        assert data["indicator_view"] == "structure_node"
+        assert data["include_smc"] is True
 
 
 if __name__ == "__main__":
