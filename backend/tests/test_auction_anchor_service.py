@@ -55,8 +55,8 @@ from app.services.auction_anchor_service import (
     _parse_iso_date,
     _safe_decimal,
     _safe_float,
-    generate_auction_anchors,
     generate_and_publish_auction_anchors,
+    generate_auction_anchors,
     publish_auction_anchors,
 )
 
@@ -1404,6 +1404,223 @@ class TestPublishAuctionAnchors:
 
         result = await publish_auction_anchors(db, snapshot_id)
         assert result is published
+
+
+# =============================================================================
+# 测试：generate_and_publish_auction_anchors 原子性（P0-1 统一入口）
+# =============================================================================
+
+
+class TestGenerateAndPublishAuctionAnchors:
+    """generate_and_publish_auction_anchors 原子性测试。
+
+    [P0-1 统一入口] 验证：盘后编排、Admin、恢复入口统一调用本函数。
+    - generate 成功 + publish 成功 → 返回 publication_id 和 status="succeeded"
+    - generate 返回 structure_only + publish 成功 → 返回 status="structure_only"
+    - generate 失败（snapshot_id=None 或 status=failed）→ 返回 status="failed"，不调用 publish
+    - publish 失败（AnchorCoverageLowError / AnchorVersionMismatchError）→ status="publish_failed"
+    - worker_id 和 lease_epoch 正确转发给 generate_auction_anchors
+    """
+
+    @pytest.mark.asyncio
+    async def test_generate_success_publish_success(self) -> None:
+        """生成成功 + 发布成功 → 返回 publication_id 和 status=succeeded。"""
+        snapshot_id = uuid.uuid4()
+        publication_id = uuid.uuid4()
+
+        db = AsyncMock()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.services.auction_anchor_service.generate_auction_anchors",
+                AsyncMock(return_value={
+                    "snapshot_id": snapshot_id,
+                    "status": "succeeded",
+                    "structure_count": 5,
+                    "chip_count": 3,
+                    "composite_count": 2,
+                    "eligible_count": 10,
+                    "coverage_ratio": 0.85,
+                    "error_message": None,
+                }),
+            )
+            mp.setattr(
+                "app.services.auction_anchor_service.publish_auction_anchors",
+                AsyncMock(return_value=SimpleNamespace(id=publication_id)),
+            )
+            result = await generate_and_publish_auction_anchors(
+                db, _TRADE_DATE, worker_id="w1", lease_epoch=1,
+            )
+
+        assert result["status"] == "succeeded"
+        assert result["snapshot_id"] == snapshot_id
+        assert result["publication_id"] == publication_id
+        assert result["structure_count"] == 5
+        assert result["chip_count"] == 3
+        assert result["composite_count"] == 2
+        assert result["eligible_count"] == 10
+        assert result["coverage_ratio"] == 0.85
+        assert result["error_message"] is None
+
+    @pytest.mark.asyncio
+    async def test_generate_structure_only_publish_success(self) -> None:
+        """chip 未完成 → status=structure_only，仍可发布（[P0-2] chip 软失败）。"""
+        snapshot_id = uuid.uuid4()
+        publication_id = uuid.uuid4()
+
+        db = AsyncMock()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.services.auction_anchor_service.generate_auction_anchors",
+                AsyncMock(return_value={
+                    "snapshot_id": snapshot_id,
+                    "status": "structure_only",
+                    "structure_count": 5,
+                    "chip_count": 0,
+                    "composite_count": 0,
+                    "eligible_count": 5,
+                    "coverage_ratio": 0.5,
+                    "error_message": None,
+                }),
+            )
+            mp.setattr(
+                "app.services.auction_anchor_service.publish_auction_anchors",
+                AsyncMock(return_value=SimpleNamespace(id=publication_id)),
+            )
+            result = await generate_and_publish_auction_anchors(
+                db, _TRADE_DATE,
+            )
+
+        assert result["status"] == "structure_only"
+        assert result["publication_id"] == publication_id
+        assert result["chip_count"] == 0
+        assert result["snapshot_id"] == snapshot_id
+
+    @pytest.mark.asyncio
+    async def test_generate_failed_no_publish_called(self) -> None:
+        """生成失败（snapshot_id=None 或 status=failed）→ 不调用 publish。"""
+        db = AsyncMock()
+        publish_mock = AsyncMock()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.services.auction_anchor_service.generate_auction_anchors",
+                AsyncMock(return_value={
+                    "snapshot_id": None,
+                    "status": "failed",
+                    "structure_count": 0,
+                    "chip_count": 0,
+                    "composite_count": 0,
+                    "eligible_count": 0,
+                    "coverage_ratio": 0.0,
+                    "error_message": "no published stock_core pointer",
+                }),
+            )
+            mp.setattr(
+                "app.services.auction_anchor_service.publish_auction_anchors",
+                publish_mock,
+            )
+            result = await generate_and_publish_auction_anchors(
+                db, _TRADE_DATE,
+            )
+
+        assert result["status"] == "failed"
+        assert result["snapshot_id"] is None
+        assert result["publication_id"] is None
+        assert "no published stock_core pointer" in (result["error_message"] or "")
+        # 关键：publish_auction_anchors 不应被调用
+        publish_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_publish_coverage_low_returns_publish_failed(self) -> None:
+        """publish_auction_anchors 抛 AnchorCoverageLowError → status=publish_failed。"""
+        snapshot_id = uuid.uuid4()
+
+        db = AsyncMock()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.services.auction_anchor_service.generate_auction_anchors",
+                AsyncMock(return_value={
+                    "snapshot_id": snapshot_id,
+                    "status": "succeeded",
+                    "structure_count": 5,
+                    "chip_count": 3,
+                    "composite_count": 2,
+                    "eligible_count": 10,
+                    "coverage_ratio": 0.0,
+                    "error_message": None,
+                }),
+            )
+            mp.setattr(
+                "app.services.auction_anchor_service.publish_auction_anchors",
+                AsyncMock(side_effect=AnchorCoverageLowError("coverage=0 below threshold")),
+            )
+            result = await generate_and_publish_auction_anchors(
+                db, _TRADE_DATE,
+            )
+
+        assert result["status"] == "publish_failed"
+        assert result["snapshot_id"] == snapshot_id
+        assert result["publication_id"] is None
+        assert "publish_failed" in (result["error_message"] or "")
+        assert "coverage=0" in (result["error_message"] or "")
+
+    @pytest.mark.asyncio
+    async def test_publish_version_mismatch_returns_publish_failed(self) -> None:
+        """publish_auction_anchors 抛 AnchorVersionMismatchError → status=publish_failed。
+
+        场景：chip 后来恢复成功后重建完整锚点，但 source_core_run_id 与已发布
+        stock_core pointer 不一致，必须原子失败而不静默覆盖。
+        """
+        snapshot_id = uuid.uuid4()
+
+        db = AsyncMock()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.services.auction_anchor_service.generate_auction_anchors",
+                AsyncMock(return_value={
+                    "snapshot_id": snapshot_id,
+                    "status": "succeeded",
+                    "structure_count": 1,
+                    "chip_count": 0,
+                    "composite_count": 0,
+                    "eligible_count": 1,
+                    "coverage_ratio": 0.1,
+                    "error_message": None,
+                }),
+            )
+            mp.setattr(
+                "app.services.auction_anchor_service.publish_auction_anchors",
+                AsyncMock(side_effect=AnchorVersionMismatchError("stale source run")),
+            )
+            result = await generate_and_publish_auction_anchors(
+                db, _TRADE_DATE,
+            )
+
+        assert result["status"] == "publish_failed"
+        assert result["publication_id"] is None
+        assert "stale source run" in (result["error_message"] or "")
+
+    @pytest.mark.asyncio
+    async def test_worker_id_and_lease_epoch_forwarded(self) -> None:
+        """worker_id 和 lease_epoch 正确转发给 generate_auction_anchors。"""
+        gen_mock = AsyncMock(return_value={
+            "snapshot_id": None, "status": "failed",
+            "structure_count": 0, "chip_count": 0,
+            "composite_count": 0, "eligible_count": 0,
+            "coverage_ratio": 0.0, "error_message": None,
+        })
+        db = AsyncMock()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "app.services.auction_anchor_service.generate_auction_anchors",
+                gen_mock,
+            )
+            await generate_and_publish_auction_anchors(
+                db, _TRADE_DATE, worker_id="worker-1", lease_epoch=42,
+            )
+
+        # 验证 worker_id 和 lease_epoch 被传递给 generate_auction_anchors
+        assert gen_mock.call_args.kwargs["worker_id"] == "worker-1"
+        assert gen_mock.call_args.kwargs["lease_epoch"] == 42
 
 
 # =============================================================================

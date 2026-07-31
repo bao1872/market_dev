@@ -101,11 +101,12 @@
 
 ## 6. 测试
 
-- 172个竞价纯单元测试通过（anchor 70 + scan 102）
+- 255个竞价纯单元测试本地通过（anchor 78 + scan 100 + aggregation 77）
 - 10个竞价前端合同测试通过（auctionContract.test.ts）
 - 27个导航/路由合同测试通过
-- PG集成测试15个（CI环境运行，0 skipped）
-- 覆盖：多OB不丢失、generate+publish原子性、chip完成后刷新、scan幂等/恢复、lifecycle多阶段（formed/confirmed/continued/weakened/failed/transformed/expired）、UUID/symbol前端合同、Scheduler 09:25/10:00触发窗口
+- PG集成测试15个（CI环境运行，0 skipped）— 覆盖 full_pipeline、idempotent publish、stale source run 拒绝、coverage=0 拒绝、chip_missing→structure_only、breakout confirmed/failed、lifecycle 更新等
+- 覆盖：多OB不丢失（TestMultiOBRetention）、generate+publish原子性（TestGenerateAndPublishAuctionAnchors：成功/structure_only/失败/publish_failed/版本不一致/worker_id转发）、chip完成后刷新、scan幂等/恢复、lifecycle多阶段（formed/confirmed/continued/weakened/failed/transformed/expired）、UUID/symbol前端合同、Scheduler 09:25/10:00触发窗口
+- 本地：ruff（auction 模块全部通过）、tsc --noEmit（0 错误）
 
 ## 7. 文档更新
 
