@@ -33,8 +33,10 @@ test.describe('SMC 标签渲染', () => {
     await page.waitForSelector('[data-render-ready="true"]', { timeout: 15_000 })
 
     // 验证舞台已渲染
+    // [CHANGE-20260728-010] 前端固定使用 structure_node 组合视图（node_cluster + smc），
+    // URL indicator_view=smc 仅作历史兼容，不再透传到 stage data-indicator-view 属性
     const stage = page.locator('[data-testid="stock-detail-capture"]')
-    await expect(stage).toHaveAttribute('data-indicator-view', 'smc')
+    await expect(stage).toHaveAttribute('data-indicator-view', 'structure_node')
     await expect(stage).toHaveAttribute('data-render-ready', 'true')
 
     // 等待 canvas 完成绘制（lightweight-charts 异步渲染）
