@@ -420,7 +420,15 @@ jobs:
             sleep 1
           done
       - name: Run pytest (includes Migration via conftest session fixture)
-        run: pytest --tb=short -q
+        # --junitxml 上传 artifact，便于无 admin 权限下下载查看具体失败用例
+        run: pytest --tb=long -v --junitxml=pytest.xml
+      - name: Upload pytest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-pg-results
+          path: backend/pytest.xml
+          retention-days: 7
 
   frontend-tsc:
     name: Frontend Type Check
