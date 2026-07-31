@@ -45,9 +45,9 @@ from app.services.auction_anchor_service import (
     AnchorSnapshotNotFoundError,
     AnchorSnapshotNotReadyError,
     AnchorVersionMismatchError,
+    _build_anchor_key,
     _build_composite_anchors,
     _compute_freshness,
-    _deduplicate_anchors,
     _extract_chip_anchors,
     _extract_structure_anchors,
     _filter_active_anchors,
@@ -56,6 +56,7 @@ from app.services.auction_anchor_service import (
     _safe_decimal,
     _safe_float,
     generate_auction_anchors,
+    generate_and_publish_auction_anchors,
     publish_auction_anchors,
 )
 
@@ -873,60 +874,93 @@ class TestBuildCompositeAnchors:
 
 
 # =============================================================================
-# 测试：去重与活跃锚点筛选
+# 测试：多 OB/BOS 保留与活跃锚点筛选
+# [P0-6 修复 2026-07-31] 不再按 (anchor_type, direction) 去重，
+# 改为保留全部有效锚点，通过 is_active/priority_rank 控制扫描范围。
 # =============================================================================
 
 
-class TestDeduplicateAnchors:
-    """_deduplicate_anchors 按 (anchor_type, direction) 去重。"""
+class TestMultiOBRetention:
+    """多 OB/BOS 保留：同方向同类型的多个锚点不被丢弃。"""
 
-    def test_keep_strongest(self) -> None:
-        """同 (type, direction) 保留 strength 最高。"""
+    def test_multiple_ob_same_direction_all_kept(self) -> None:
+        """同方向同类型（OB_CREATED, up）的多个锚点全部保留，不再被去重。"""
         items = [
             AuctionAnchorItemStub(
                 anchor_type="structure", direction="up",
-                center_price=Decimal("10.0"), strength=0.5, freshness="fresh",
+                anchor_key="ob_created_2026-07-25_b10",
+                center_price=Decimal("10.0"), strength=0.7, freshness="fresh",
             ),
             AuctionAnchorItemStub(
                 anchor_type="structure", direction="up",
-                center_price=Decimal("11.0"), strength=0.85, freshness="fresh",
+                anchor_key="ob_created_2026-07-26_b20",
+                center_price=Decimal("11.0"), strength=0.65, freshness="fresh",
+            ),
+            AuctionAnchorItemStub(
+                anchor_type="structure", direction="up",
+                anchor_key="ob_created_2026-07-27_b30",
+                center_price=Decimal("9.5"), strength=0.55, freshness="fresh",
             ),
         ]
-        deduped = _deduplicate_anchors(items)
-        assert len(deduped) == 1
-        assert deduped[0].strength == 0.85
+        # _filter_active_anchors 不应丢弃任何同方向同类型锚点（仅按 strength/freshness 排序）
+        result = _filter_active_anchors(items)
+        assert len(result) == 3, "多 OB 同方向应全部保留，不再被去重"
+        active = [r for r in result if r.is_active]
+        assert len(active) == 3
+        # priority_rank 按 strength 降序赋值
+        ranks = [r.priority_rank for r in active]
+        assert ranks == [1, 2, 3]
 
-    def test_same_strength_keep_fresher(self) -> None:
-        """strength 相同时保留 freshness 更新的（fresh < stale）。"""
+    def test_multiple_bos_same_direction_all_kept(self) -> None:
+        """同方向 BOS 多个触发线锚点全部保留。"""
         items = [
             AuctionAnchorItemStub(
-                anchor_type="chip", direction="down",
-                center_price=Decimal("10.0"), strength=0.7, freshness="stale",
+                anchor_type="structure", direction="up",
+                anchor_key="bos_2026-07-20",
+                center_price=Decimal("10.0"), strength=0.85, freshness="fresh",
             ),
             AuctionAnchorItemStub(
-                anchor_type="chip", direction="down",
-                center_price=Decimal("11.0"), strength=0.7, freshness="fresh",
+                anchor_type="structure", direction="up",
+                anchor_key="bos_2026-07-25",
+                center_price=Decimal("11.5"), strength=0.80, freshness="fresh",
             ),
         ]
-        deduped = _deduplicate_anchors(items)
-        assert len(deduped) == 1
-        assert deduped[0].freshness == "fresh"
+        result = _filter_active_anchors(items)
+        assert len(result) == 2, "多 BOS 同方向应全部保留"
+        assert all(r.is_active for r in result)
 
     def test_different_keys_kept(self) -> None:
-        """不同 (type, direction) 各自保留。"""
+        """不同 (type, direction) 各自保留（向后兼容）。"""
         items = [
             AuctionAnchorItemStub(
-                anchor_type="structure", direction="up", strength=0.5,
+                anchor_type="structure", direction="up",
+                anchor_key="bos_1", strength=0.5,
             ),
             AuctionAnchorItemStub(
-                anchor_type="structure", direction="down", strength=0.5,
+                anchor_type="structure", direction="down",
+                anchor_key="bos_2", strength=0.5,
             ),
             AuctionAnchorItemStub(
-                anchor_type="chip", direction="up", strength=0.5,
+                anchor_type="chip", direction="up",
+                anchor_key="poc", strength=0.5,
             ),
         ]
-        deduped = _deduplicate_anchors(items)
-        assert len(deduped) == 3
+        result = _filter_active_anchors(items)
+        assert len(result) == 3
+
+    def test_anchor_key_uniqueness(self) -> None:
+        """_build_anchor_key 保证 (snapshot_id, instrument_id, anchor_key) 唯一。"""
+        # 同 subtype 不同 occurredAt 生成不同 key
+        key1 = _build_anchor_key("ob_created", occurred_at="2026-07-25", bar_index=10)
+        key2 = _build_anchor_key("ob_created", occurred_at="2026-07-26", bar_index=20)
+        assert key1 != key2
+        assert key1 == "ob_created_2026-07-25_b10"
+        assert key2 == "ob_created_2026-07-26_b20"
+
+        # 同 occurredAt + bar_index 但 seq 不同时也唯一
+        key3 = _build_anchor_key("ob_created", occurred_at="2026-07-25", bar_index=10, seq=1)
+        assert key3 == "ob_created_2026-07-25_b10_n1"
+        assert key3 != key1
 
 
 class TestFilterActiveAnchors:
@@ -1002,6 +1036,8 @@ class TestMakeAnchorItem:
             trade_date=_TRADE_DATE,
             instrument_id=uuid.uuid4(),
             anchor_type="structure",
+            anchor_key="test_key",
+            source_kind="core",
             source_run_id=uuid.uuid4(),
             direction="up",
             lower_price=Decimal("10.0"),
@@ -1021,6 +1057,8 @@ class TestMakeAnchorItem:
             trade_date=_TRADE_DATE,
             instrument_id=uuid.uuid4(),
             anchor_type="structure",
+            anchor_key="test_key",
+            source_kind="core",
             source_run_id=uuid.uuid4(),
             direction="up",
             lower_price=Decimal("10.0"),
@@ -1038,6 +1076,8 @@ class TestMakeAnchorItem:
             trade_date=_TRADE_DATE,
             instrument_id=uuid.uuid4(),
             anchor_type="structure",
+            anchor_key="test_key",
+            source_kind="core",
             source_run_id=uuid.uuid4(),
             direction="up",
             lower_price=Decimal("10.0"),
@@ -1055,6 +1095,8 @@ class TestMakeAnchorItem:
             trade_date=_TRADE_DATE,
             instrument_id=uuid.uuid4(),
             anchor_type="structure",
+            anchor_key="test_key",
+            source_kind="core",
             source_run_id=uuid.uuid4(),
             direction="up",
             lower_price=Decimal("10.0"),
@@ -1372,8 +1414,10 @@ class TestPublishAuctionAnchors:
 class AuctionAnchorItemStub:
     """简化 AuctionAnchorItem mock，仅含被测字段。
 
-    用于测试 _build_composite_anchors / _deduplicate_anchors / _filter_active_anchors，
+    用于测试 _build_composite_anchors / _filter_active_anchors，
     避免构造完整 ORM 对象的负担。
+
+    [P0-6 修复 2026-07-31] 新增 anchor_key 字段，priority_rank 由 _filter_active_anchors 赋值。
     """
 
     def __init__(
@@ -1386,13 +1430,16 @@ class AuctionAnchorItemStub:
         strength: float = 0.7,
         freshness: str = "fresh",
         instrument_id: uuid.UUID | None = None,
+        anchor_key: str | None = None,
         structure_payload: dict | None = None,
         chip_payload: dict | None = None,
         is_active: bool = True,
+        priority_rank: int | None = None,
         reason_codes: list | None = None,
     ) -> None:
         self.id = uuid.uuid4()
         self.anchor_type = anchor_type
+        self.anchor_key = anchor_key or f"{anchor_type}_{self.id.hex[:8]}"
         self.direction = direction
         self.lower_price = lower_price if lower_price is not None else Decimal("10.0")
         self.upper_price = upper_price if upper_price is not None else Decimal("10.0")
@@ -1403,4 +1450,5 @@ class AuctionAnchorItemStub:
         self.structure_payload = structure_payload
         self.chip_payload = chip_payload
         self.is_active = is_active
+        self.priority_rank = priority_rank
         self.reason_codes = reason_codes or []

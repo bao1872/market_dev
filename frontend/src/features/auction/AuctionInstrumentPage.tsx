@@ -118,11 +118,21 @@ function lifecycleChipClass(lifecycle: string | null | undefined): string {
 }
 
 /** KPI 卡片 */
-function KpiCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function KpiCard({
+  label,
+  value,
+  sub,
+  valueClassName,
+}: {
+  label: string
+  value: string
+  sub?: string
+  valueClassName?: string
+}) {
   return (
     <div className={styles.kpiCard}>
       <div className={styles.kpiLabel}>{label}</div>
-      <div className={styles.kpiValue}>{value}</div>
+      <div className={`${styles.kpiValue} ${valueClassName ?? ''}`}>{value}</div>
       {sub && <div className={styles.kpiSub}>{sub}</div>}
     </div>
   )
@@ -236,6 +246,7 @@ function InstrumentResultBlock({ result }: { result: InstrumentResult }) {
               ? '—'
               : `${result.change_pct >= 0 ? '+' : ''}${result.change_pct.toFixed(2)}%`
           }
+          valueClassName={changeCls}
         />
         <KpiCard
           label="竞价金额"

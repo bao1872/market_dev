@@ -12,7 +12,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # 锚点
 # ---------------------------------------------------------------------------
@@ -25,6 +24,10 @@ class AnchorItemOut(BaseModel):
     snapshot_id: uuid.UUID
     trade_date: date
     instrument_id: uuid.UUID
+    # [P0-FE 2026-07-31] 个体识别字段：DTO 必须返回 symbol + name
+    # 解决旧合同只回 instrument_id（UUID）导致前端无法直接展示股票代码/名称的问题
+    symbol: str | None = Field(default=None, description="股票代码（如 000021）")
+    name: str | None = Field(default=None, description="股票名称（如 深科技）")
     anchor_type: str = Field(description="structure/chip/composite")
     direction: str = Field(description="up/down")
     lower_price: Decimal
@@ -111,6 +114,9 @@ class InstrumentResultOut(BaseModel):
     scan_run_id: uuid.UUID
     trade_date: date
     instrument_id: uuid.UUID
+    # [P0-FE 2026-07-31] 个体识别字段：DTO 必须返回 symbol + name
+    symbol: str | None = Field(default=None, description="股票代码（如 000021）")
+    name: str | None = Field(default=None, description="股票名称（如 深科技）")
     final_auction_price: Decimal | None = None
     prev_close: Decimal | None = None
     change_pct: float | None = None
@@ -184,6 +190,9 @@ class EventTrackingOut(BaseModel):
     scan_run_id: uuid.UUID
     trade_date: date
     instrument_id: uuid.UUID
+    # [P0-FE 2026-07-31] 个体识别字段：DTO 必须返回 symbol + name
+    symbol: str | None = Field(default=None, description="股票代码（如 000021）")
+    name: str | None = Field(default=None, description="股票名称（如 深科技）")
     event_type: str
     lifecycle: str
     anchor_id: uuid.UUID | None = None
@@ -242,4 +251,77 @@ class AuctionInstrumentPageData(BaseModel):
     anchors: list[AnchorItemOut] = Field(default_factory=list)
     result: InstrumentResultOut | None = None
     events: list[EventTrackingOut] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# 竞价事件回流（ReviewPage 第二金字塔 + 竞价事件回流面板）
+# ---------------------------------------------------------------------------
+
+
+class AuctionAnchorFreshnessBucket(BaseModel):
+    """锚点新鲜度分布桶（按 freshness 字段聚合）。"""
+
+    freshness: str = Field(description="today/3d/7d/30d/stale")
+    anchor_count: int
+    active_count: int
+
+
+class AuctionEventMigrationRow(BaseModel):
+    """事件迁移行：lifecycle 转换计数。"""
+
+    from_lifecycle: str | None = Field(
+        default=None,
+        description="前一生命周期（首次为 None）",
+    )
+    to_lifecycle: str
+    event_count: int
+    sample_instrument_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class AuctionBackflowData(BaseModel):
+    """`/review` 页第二金字塔 + 竞价事件回流数据。
+
+    回答四个问题（PRD §75 第二金字塔）：
+    - 分布：事件按 event_type / lifecycle 分布
+    - 迁移：confirmed→continued/weakened/failed/transformed/expired 的转换计数
+    - 新鲜度：锚点按 freshness 桶分布
+    - 集中度：top N 贡献度、HHI、龙头-中位数差距
+
+    与 review_overview 同 trade_date 关联，由 GET /api/v1/auction/backflow/{trade_date} 暴露。
+    数据来源：
+    - AuctionEventTracking（事件 + lifecycle）
+    - AuctionAnchorItem（新鲜度 + is_active）
+    - AuctionScopeResult（集中度 HHI、top3/5、leader_median_gap）
+    """
+
+    trade_date: date
+    algorithm_version: str
+    scan_run_id: uuid.UUID | None = None
+    anchor_publication_id: uuid.UUID | None = None
+    source_core_run_id: uuid.UUID | None = None
+    source_chip_run_id: uuid.UUID | None = None
+    # 分布
+    event_type_distribution: dict[str, int] = Field(
+        default_factory=dict,
+        description="event_type → count",
+    )
+    lifecycle_distribution: dict[str, int] = Field(
+        default_factory=dict,
+        description="lifecycle → count（含 formed/confirmed/continued/weakened/failed/transformed/expired）",
+    )
+    # 迁移
+    event_migrations: list[AuctionEventMigrationRow] = Field(default_factory=list)
+    # 新鲜度
+    anchor_freshness_buckets: list[AuctionAnchorFreshnessBucket] = Field(
+        default_factory=list,
+    )
+    # 集中度（市场 scope + top3 行业）
+    market_concentration: dict[str, Any] = Field(default_factory=dict)
+    top_industry_concentration: list[dict[str, Any]] = Field(default_factory=list)
+    # 事件回流（与 review 信号匹配的事件）
+    backflow_events: list[EventTrackingOut] = Field(
+        default_factory=list,
+        description="当日竞价事件，按 formed_at desc 排序，限 50 条",
+    )
     reason_codes: list[str] = Field(default_factory=list)

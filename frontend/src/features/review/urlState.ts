@@ -38,6 +38,7 @@ const STAGE_VALUES: ReadonlySet<string> = new Set([
   'attribution',
   'validation',
   'tracking',
+  'auction',
 ])
 
 const TRACKING_TAB_VALUES: ReadonlySet<string> = new Set([

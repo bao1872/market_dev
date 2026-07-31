@@ -14,6 +14,8 @@ export const APP_ROUTES = {
   market: '/market',
   screener: '/screener',
   review: '/review',
+  // [P0-FE 2026-07-31] 竞价分析入口（市场/板块/个股三级页面）
+  auction: '/auction',
   messages: '/messages',
   settings: '/settings',
   admin: '/admin',
@@ -53,12 +55,14 @@ export interface AppNavItem {
   label: string
 }
 
-// 普通用户一级导航（行情 + 自选 + 复盘；消息/设置不在此处）
+// 普通用户一级导航（行情 + 自选 + 复盘 + 竞价；消息/设置不在此处）
 // [Round 2026-07-28-4] 自选升级为一级导航，复用 /market?scope=watchlist
+// [P0-FE 2026-07-31] 竞价分析入口加入一级导航（市场/板块/个股三级页面，require_authenticated）
 export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情' },
   { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选' },
   { path: APP_ROUTES.review, label: '复盘' },
+  { path: APP_ROUTES.auction, label: '竞价' },
 ]
 
 /** 自选导航 path（用于权限判断和 active 匹配） */
@@ -69,6 +73,7 @@ export const WATCHLIST_NAV_PATH = `${APP_ROUTES.market}?scope=watchlist`
  * - /market 且 scope != watchlist → 行情 active
  * - /market 且 scope == watchlist → 自选 active
  * - /review → 复盘 active
+ * - /auction/* → 竞价 active（/auction、/auction/board/:id、/auction/stock/:symbol 都高亮）
  */
 export function resolveActiveNav(
   pathname: string,
@@ -84,6 +89,10 @@ export function resolveActiveNav(
   if (itemPath === WATCHLIST_NAV_PATH) {
     // 自选：/market 且 scope=watchlist
     return pathname === APP_ROUTES.market && scope === 'watchlist'
+  }
+  if (itemPath === APP_ROUTES.auction) {
+    // 竞价：/auction 及其子路径（/auction/board/:id、/auction/stock/:symbol）
+    return pathname === APP_ROUTES.auction || pathname.startsWith('/auction/')
   }
   // 其他项：pathname 精确匹配
   return pathname === itemPath

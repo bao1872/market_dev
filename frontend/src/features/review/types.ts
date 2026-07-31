@@ -348,7 +348,13 @@ export interface ReviewTrackingListParams {
 // ============================================================
 
 /** 五阶段标识（对应 URL stage 参数） */
-export type ReviewStage = 'scan' | 'signals' | 'attribution' | 'validation' | 'tracking'
+export type ReviewStage =
+  | 'scan'
+  | 'signals'
+  | 'attribution'
+  | 'validation'
+  | 'tracking'
+  | 'auction'
 
 /** 追踪复核子 Tab */
 export type TrackingTab = 'history' | 'watchlist' | 'events'

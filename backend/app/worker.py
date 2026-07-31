@@ -10,11 +10,12 @@
     WORKER_TYPE=monitor_scheduler python -m app.worker    # 运行监控调度 Worker（交易时段 9:30-15:00）
     WORKER_TYPE=after_close_orchestrator python -m app.worker  # 运行盘后编排 Worker（断点恢复 + 心跳租约）
     WORKER_TYPE=chip_consensus python -m app.worker   # 运行盘后筹码共识 Worker（[P0-3] 独立 poll + 断点续算）
+    WORKER_TYPE=auction_scheduler python -m app.worker  # [P0-3] 运行竞价分析调度 Worker（09:25/10:00 触发）
     WORKER_TYPE=watchdog python -m app.worker          # 运行恢复看门狗（每 60s 清理僵尸任务）
     WORKER_TYPE=all python -m app.worker              # 同时运行全部（开发模式，含看门狗）
 
 环境变量：
-    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/calendar_scheduler/monitor_scheduler/after_close_orchestrator/chip_consensus/watchdog/all，默认 all）
+    WORKER_TYPE: worker 类型（outbox/delivery/strategy_batch/bars_scheduler/strategy_scheduler/calendar_scheduler/monitor_scheduler/after_close_orchestrator/chip_consensus/auction_scheduler/watchdog/all，默认 all）
     WORKER_INTERVAL: 轮询间隔秒数（默认 5）
     WORKER_BATCH_SIZE: 单次轮询最大记录数（默认 100）
     WORKER_MAX_RETRY: 最大重试次数（默认 5）
@@ -1516,10 +1517,14 @@ async def run_after_close_orchestrator_worker() -> None:
             # 没有 core 任务时领取一个 chip consensus 任务
             claimed = await _after_close_poll_once()
             if not claimed:
-                await _chip_consensus_poll_once()
+                claimed = await _chip_consensus_poll_once()
+            # [P0-3 2026-07-31] 竞价调度也接入此 worker（24/7 轮询，覆盖 09:25/10:00 触发窗口）
+            # 不新建独立 auction_scheduler 容器，复用 after_close_orchestrator 容器
+            if not claimed:
+                await _auction_scheduler_poll_once()
         except Exception as exc:
-            # _after_close_poll_once / _chip_consensus_poll_once 内部已捕获执行异常，
-            # 此处仅捕获领取阶段的意外异常
+            # _after_close_poll_once / _chip_consensus_poll_once / _auction_scheduler_poll_once
+            # 内部已捕获执行异常，此处仅捕获领取阶段的意外异常
             logger.exception("[AfterCloseWorker] 轮询异常: %s", exc)
         if _shutdown:
             # [SIGTERM drain] 当前 run 已完成（或无任务），不再领取新 item
@@ -1764,6 +1769,220 @@ async def run_chip_consensus_worker() -> None:
     logger.info("[ChipConsensusWorker] SIGTERM drain complete, finished current item")
 
 
+# =============================================================================
+# [P0-3 修复 2026-07-31] Auction Scheduler Worker - 竞价分析调度
+# =============================================================================
+
+
+async def _auction_scheduler_poll_once() -> bool:
+    """[P0-3] Auction Scheduler 单次轮询：
+    1. 检查时间窗口：09:25:05 ± 30s → 创建 auction_final:{date}
+                      10:00:00 ± 30s → 创建 auction_open_confirmation:{date}
+    2. 领取一条 queued auction job 并执行（FOR UPDATE SKIP LOCKED）
+
+    Returns:
+        True 如果领取并执行了任务，False 如果无任务可执行
+    """
+    from datetime import date as date_cls
+
+    from app.services.auction_scheduler_service import (
+        AUCTION_FINAL_JOB_NAME,
+        AUCTION_OPEN_CONFIRMATION_JOB_NAME,
+        create_auction_final_job,
+        create_auction_open_confirmation_job,
+        execute_auction_open_confirmation_run,
+        execute_auction_scan_run,
+        get_queued_auction_job,
+        should_create_auction_final_job,
+        should_create_auction_open_confirmation_job,
+    )
+    from app.services.calendar_service import is_trading_day_async
+
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime.now(tz)
+
+    # 1. 时间窗口检查 - 仅在交易日创建任务
+    try:
+        async with AsyncSessionLocal() as db:
+            trading = await is_trading_day_async(db, now.date())
+
+        if trading:
+            # 09:25:05 ± 30s → 创建 auction_final job
+            if should_create_auction_final_job(now):
+                async with AsyncSessionLocal() as db:
+                    job_run, is_new = await create_auction_final_job(
+                        db, now.date(),
+                        worker_instance_id=_WORKER_INSTANCE_ID,
+                    )
+                    if is_new:
+                        logger.info(
+                            "[AuctionScheduler] 创建 auction_final job: run_id=%s, trade_date=%s",
+                            job_run.id if job_run else None, now.date(),
+                        )
+                    await db.commit()
+            # 10:00:00 ± 30s → 创建 auction_open_confirmation job
+            elif should_create_auction_open_confirmation_job(now):
+                async with AsyncSessionLocal() as db:
+                    job_run, is_new = await create_auction_open_confirmation_job(
+                        db, now.date(),
+                        worker_instance_id=_WORKER_INSTANCE_ID,
+                    )
+                    if is_new:
+                        logger.info(
+                            "[AuctionScheduler] 创建 auction_open_confirmation job: run_id=%s, trade_date=%s",
+                            job_run.id if job_run else None, now.date(),
+                        )
+                    await db.commit()
+    except Exception as exc:
+        logger.exception("[AuctionScheduler] 时间窗口检查/任务创建异常: %s", exc)
+
+    # 2. 领取一条 queued auction job
+    async with AsyncSessionLocal() as db:
+        job_run = await get_queued_auction_job(db)
+        if job_run is None:
+            await db.rollback()
+            return False
+
+        # 领取：更新 status='running' + worker + heartbeat + lease_epoch（fencing）
+        now_claim = datetime.now(tz)
+        job_run.status = "running"
+        job_run.worker_instance_id = _WORKER_INSTANCE_ID
+        if job_run.started_at is None:
+            job_run.started_at = now_claim
+        job_run.heartbeat_at = now_claim
+        # lease_expires_at 已在 create 时设置；fencing epoch 递增
+        job_run.lease_epoch = (job_run.lease_epoch or 0) + 1
+        await db.commit()
+
+        job_run_id = job_run.id
+        current_lease_epoch = job_run.lease_epoch
+        job_name = job_run.job_name
+        # 提取 metadata
+        meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+        trade_date_str = meta.get("trade_date")
+
+    if not trade_date_str:
+        # 缺关键 metadata，立即标记 failed
+        logger.error(
+            "[AuctionScheduler] 任务缺少 trade_date，标记 failed: job_run_id=%s",
+            job_run_id,
+        )
+        async with AsyncSessionLocal() as db:
+            jr = await db.get(SchedulerJobRun, job_run_id)
+            if jr is not None:
+                now_fail = datetime.now(tz)
+                jr.status = "failed"
+                jr.finished_at = now_fail
+                jr.lease_expires_at = now_fail
+                jr.error_message = "任务缺少 trade_date"
+                await db.commit()
+        return True
+
+    trade_date = date_cls.fromisoformat(trade_date_str)
+
+    logger.info(
+        "[AuctionScheduler] 领取任务: job_run_id=%s, job_name=%s, "
+        "trade_date=%s, lease_epoch=%s",
+        job_run_id, job_name, trade_date, current_lease_epoch,
+    )
+
+    # 执行任务
+    try:
+        if job_name == AUCTION_FINAL_JOB_NAME:
+            await execute_auction_scan_run(
+                job_run_id=job_run_id,
+                trade_date=trade_date,
+                worker_id=_WORKER_INSTANCE_ID,
+                lease_epoch=current_lease_epoch,
+            )
+        elif job_name == AUCTION_OPEN_CONFIRMATION_JOB_NAME:
+            await execute_auction_open_confirmation_run(
+                job_run_id=job_run_id,
+                trade_date=trade_date,
+                worker_id=_WORKER_INSTANCE_ID,
+                lease_epoch=current_lease_epoch,
+            )
+        else:
+            logger.error(
+                "[AuctionScheduler] 未知 job_name=%s，标记 failed: job_run_id=%s",
+                job_name, job_run_id,
+            )
+            async with AsyncSessionLocal() as db:
+                jr = await db.get(SchedulerJobRun, job_run_id)
+                if jr is not None:
+                    now_fail = datetime.now(tz)
+                    jr.status = "failed"
+                    jr.finished_at = now_fail
+                    jr.lease_expires_at = now_fail
+                    jr.error_message = f"未知 job_name: {job_name}"
+                    await db.commit()
+    except Exception as exc:
+        logger.exception(
+            "[AuctionScheduler] 执行异常: job_run_id=%s, error=%s", job_run_id, exc,
+        )
+        # execute_*_run 内部已标记 failed，此处仅记录
+
+    return True
+
+
+# [P0-3] Auction Scheduler 轮询间隔（从 auction_scheduler_service 导入，避免硬编码）
+_AUCTION_SCHEDULER_POLL_INTERVAL_VAL = 30  # 默认 30s；正式部署时由环境变量覆盖
+
+
+async def run_auction_scheduler_worker() -> None:
+    """[P0-3] Auction Scheduler Worker - 竞价分析调度独立 Worker。
+
+    [P0-3 ref/instruction.md §三.3] 接入现有 Scheduler/Worker，不新建容器：
+    - 新增 WORKER_TYPE=auction_scheduler 分支
+    - 使用 SchedulerJobRun、run_key、heartbeat、lease、fencing、retry 和恢复
+    - 不新增常驻容器（与 bars_scheduler/calendar_scheduler 同级）
+
+    每个轮询周期：
+    1. 检查时间窗口：09:25:05 ± 30s → 创建 auction_final:{date}
+                     10:00:00 ± 30s → 创建 auction_open_confirmation:{date}
+    2. _auction_scheduler_poll_once 领取并执行一条 queued auction job
+    3. sleep 后继续轮询
+
+    [SIGTERM drain] - 优雅退出（与 run_after_close_orchestrator_worker 一致）：
+    - SIGTERM/SIGINT 设置 _shutdown=True
+    - 主循环在领取新任务前检查 _shutdown
+    - 当前正在执行的 auction job 完成后才退出
+    """
+    from app.services.auction_scheduler_service import (
+        AUCTION_SCHEDULER_POLL_INTERVAL,
+    )
+
+    _hb_task = asyncio.create_task(_heartbeat_loop("auction_scheduler"))
+    logger.info(
+        "[AuctionScheduler] 启动（间隔=%ds，触发窗口 09:25:05/10:00:00 Asia/Shanghai）",
+        AUCTION_SCHEDULER_POLL_INTERVAL,
+    )
+
+    # 启动恢复：清理上次崩溃残留的 running 任务（由 watchdog 转为 interrupted）
+    try:
+        async with AsyncSessionLocal() as db:
+            recovered = await recover_stale_scheduler_job_runs(db)
+            await db.commit()
+            if recovered > 0:
+                logger.info(
+                    "[AuctionScheduler] 启动恢复: %d 个过期任务", recovered,
+                )
+    except Exception as exc:
+        logger.exception("[AuctionScheduler] 启动恢复异常: %s", exc)
+
+    while not _shutdown:
+        try:
+            await _auction_scheduler_poll_once()
+        except Exception as exc:
+            logger.exception("[AuctionScheduler] 轮询异常: %s", exc)
+        if _shutdown:
+            logger.info("[AuctionScheduler] SIGTERM drain: 不再领取新任务，准备退出")
+            break
+        await asyncio.sleep(AUCTION_SCHEDULER_POLL_INTERVAL)
+
+    logger.info("[AuctionScheduler] SIGTERM drain complete, finished current item")
+
+
 async def main() -> None:
     """主入口：根据 WORKER_TYPE 启动对应的 worker。"""
     logging.basicConfig(
@@ -1809,6 +2028,10 @@ async def main() -> None:
     if WORKER_TYPE == "chip_consensus":
         tasks.append(asyncio.create_task(run_chip_consensus_worker()))
 
+    # [P0-3 2026-07-31] Auction Scheduler Worker - 竞价分析调度（09:25/10:00 触发）
+    if WORKER_TYPE in ("auction_scheduler", "all"):
+        tasks.append(asyncio.create_task(run_auction_scheduler_worker()))
+
     # [Recovery] - 看门狗：all 模式自动启动，或 WORKER_TYPE=watchdog 单独启动
     if WORKER_TYPE in ("watchdog", "all"):
         tasks.append(asyncio.create_task(_recovery_watchdog_loop()))
@@ -1828,7 +2051,7 @@ if __name__ == "__main__":
     print(f"WORKER_INTERVAL={WORKER_INTERVAL}")
     print(f"WORKER_BATCH_SIZE={WORKER_BATCH_SIZE}")
     print(f"WORKER_MAX_RETRY={WORKER_MAX_RETRY}")
-    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "after_close_orchestrator", "chip_consensus", "watchdog", "all"), \
+    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "after_close_orchestrator", "chip_consensus", "auction_scheduler", "watchdog", "all"), \
         f"未知 WORKER_TYPE: {WORKER_TYPE}"
     # 验证 worker 函数可调用
     assert callable(run_outbox_relay), "run_outbox_relay 应可调用"
@@ -1840,6 +2063,7 @@ if __name__ == "__main__":
     assert callable(run_monitor_scheduler_worker), "run_monitor_scheduler_worker 应可调用"
     assert callable(run_after_close_orchestrator_worker), "run_after_close_orchestrator_worker 应可调用"
     assert callable(run_chip_consensus_worker), "run_chip_consensus_worker 应可调用"
+    assert callable(run_auction_scheduler_worker), "run_auction_scheduler_worker 应可调用"
     assert callable(_recovery_watchdog_loop), "_recovery_watchdog_loop 应可调用"
     print("OK: 配置验证通过")
     asyncio.run(main())

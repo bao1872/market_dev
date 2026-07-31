@@ -282,6 +282,23 @@
 .chipInfo    { background: rgba(56, 130, 246, 0.14); color: v.$color-info; }
 .chipBrand   { background: rgba(0, 246, 194, 0.14); color: v.$color-brand; }
 
+// [AuctionBackflowPanel] reason_codes 行内标签
+.reasonCodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.reasonCode {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  background: v.$color-border-soft;
+  color: v.$color-muted;
+}
+
 // ===== 数据表格 =====
 .table {
   width: 100%;

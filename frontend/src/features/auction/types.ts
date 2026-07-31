@@ -15,6 +15,10 @@ export interface AnchorItem {
   snapshot_id: string
   trade_date: string
   instrument_id: string
+  /** [P0-FE 2026-07-31] 股票代码（如 000021），导航使用 symbol 而非 UUID */
+  symbol: string | null
+  /** [P0-FE 2026-07-31] 股票名称（如 深科技） */
+  name: string | null
   /** 锚点类型：structure / chip / composite */
   anchor_type: string
   /** 方向：up / down */
@@ -106,6 +110,10 @@ export interface InstrumentResult {
   scan_run_id: string
   trade_date: string
   instrument_id: string
+  /** [P0-FE 2026-07-31] 股票代码（如 000021） */
+  symbol: string | null
+  /** [P0-FE 2026-07-31] 股票名称（如 深科技） */
+  name: string | null
   final_auction_price: string | null
   prev_close: string | null
   change_pct: number | null
@@ -187,8 +195,12 @@ export interface EventTracking {
   scan_run_id: string
   trade_date: string
   instrument_id: string
+  /** [P0-FE 2026-07-31] 股票代码（如 000021） */
+  symbol: string | null
+  /** [P0-FE 2026-07-31] 股票名称（如 深科技） */
+  name: string | null
   event_type: string
-  /** formed / confirmed / weakened / failed / expired */
+  /** formed / confirmed / continued / weakened / failed / transformed / expired */
   lifecycle: string
   anchor_id: string | null
   trigger_price: string | null
@@ -272,8 +284,10 @@ export const AUCTION_TYPE_LABELS: Record<string, string> = {
 export const EVENT_LIFECYCLE_LABELS: Record<string, string> = {
   formed: '形成',
   confirmed: '确认',
+  continued: '延续',
   weakened: '减弱',
   failed: '失效',
+  transformed: '转化',
   expired: '过期',
 }
 
@@ -283,4 +297,60 @@ export const PARTICIPATION_LABELS: Record<string, string> = {
   medium: '中',
   low: '低',
   none: '无',
+}
+
+// ============================================================
+// 竞价事件回流（ReviewPage 第二金字塔面板）
+// ============================================================
+
+/** 锚点新鲜度分布桶 */
+export interface AuctionAnchorFreshnessBucket {
+  freshness: string
+  anchor_count: number
+  active_count: number
+}
+
+/** 事件迁移行：lifecycle 转换计数 */
+export interface AuctionEventMigrationRow {
+  from_lifecycle: string | null
+  to_lifecycle: string
+  event_count: number
+  sample_instrument_ids: string[]
+}
+
+/** 集中度信息（市场或行业 scope） */
+export interface AuctionConcentrationInfo {
+  hhi?: number | null
+  top3_contribution?: number | null
+  top5_contribution?: number | null
+  leader_median_gap?: number | null
+  dispersion?: number | null
+  scope_id?: string | null
+  scope_name?: string | null
+  median_change_pct?: number | null
+}
+
+/** GET /api/v1/auction/backflow/{trade_date} 响应 — ReviewPage 第二金字塔数据 */
+export interface AuctionBackflowData {
+  trade_date: string
+  algorithm_version: string
+  scan_run_id: string | null
+  anchor_publication_id: string | null
+  source_core_run_id: string | null
+  source_chip_run_id: string | null
+  /** 分布：event_type → count */
+  event_type_distribution: Record<string, number>
+  /** 分布：lifecycle → count */
+  lifecycle_distribution: Record<string, number>
+  /** 迁移：lifecycle 转换计数 */
+  event_migrations: AuctionEventMigrationRow[]
+  /** 新鲜度：锚点按 freshness 桶分布 */
+  anchor_freshness_buckets: AuctionAnchorFreshnessBucket[]
+  /** 集中度：market scope */
+  market_concentration: AuctionConcentrationInfo
+  /** 集中度：top3 行业 */
+  top_industry_concentration: AuctionConcentrationInfo[]
+  /** 事件回流（与 review 信号匹配的事件） */
+  backflow_events: EventTracking[]
+  reason_codes: string[]
 }

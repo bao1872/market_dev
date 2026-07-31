@@ -423,6 +423,40 @@ async def execute_after_close_chip_consensus(
         job_run_id, status, succeeded_count, failed_count, skipped_count, total_count,
     )
 
+    # [P0-2 修复 2026-07-31] chip 完成回调：触发 auction_anchor 重建并原子切换 publication。
+    # - chip succeeded/partial → 重新生成完整锚点（含筹码维度），原子切换 publication
+    # - chip failed/全失败 → 主流程已生成 structure_only 并发布，此处不重复
+    # - 失败只记录 warn，不反改 chip job 状态（chip 是 source of truth，anchor 是 optional）
+    if status in ("succeeded", "partial"):
+        try:
+            from app.db import AsyncSessionLocal
+            from app.services.auction_anchor_service import (
+                generate_and_publish_auction_anchors,
+            )
+
+            async with AsyncSessionLocal() as anchor_db:
+                anchor_result = await generate_and_publish_auction_anchors(
+                    anchor_db,
+                    trade_date=trade_date,
+                    worker_id=f"chip_consensus:{job_run_id}",
+                )
+                await anchor_db.commit()
+            logger.info(
+                "[ChipConsensus] chip 完成后锚点重建+发布: trade_date=%s, "
+                "chip_status=%s, anchor_status=%s, publication_id=%s",
+                trade_date, status,
+                anchor_result.get("status"),
+                anchor_result.get("publication_id"),
+            )
+        except Exception as anchor_exc:
+            # 锚点重建失败不反改 chip job 状态（软失败）
+            logger.warning(
+                "[ChipConsensus] chip 完成后锚点重建失败（软失败，不影响 chip 状态）: "
+                "trade_date=%s, error=%s",
+                trade_date, anchor_exc,
+                exc_info=True,
+            )
+
     if _diag_sink is not None:
         _diag_sink.update(result_summary)
 

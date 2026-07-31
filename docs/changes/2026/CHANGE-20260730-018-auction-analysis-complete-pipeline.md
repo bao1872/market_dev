@@ -1,7 +1,7 @@
 # CHANGE-20260730-018：竞价分析完整链路 — 锚点+扫描+聚合+追踪+前端
 
-状态：进行中（代码+测试+前端已实现；PG集成待CI终态；canary和部署待后续）
-日期：2026-07-30
+状态：进行中（P0调用链闭环+前端集成+合同测试已完成；PG集成待CI终态；canary和部署待后续）
+日期：2026-07-30（2026-07-31 P0收口更新）
 类型：behavior + contract + architecture + data
 领域：竞价分析 / 盘后编排 / 第二金字塔 / 复盘模块 / 前端
 
@@ -28,10 +28,17 @@
 ## 3. 服务层
 
 ### 3.1 auction_anchor_service.py
+- `generate_and_publish_auction_anchors(db, trade_date)`: **[P0-1 统一入口]** 在一个事务边界内完成生成+校验+publication切换。盘后编排、Admin和恢复入口统一调用
 - `generate_auction_anchors(db, trade_date)`: 从已发布stock_core读取结构数据生成结构锚点；从chip_consensus读取筹码数据生成筹码锚点；近距离结构+筹码合并为composite；活跃锚点按距离/强度/新鲜度筛选，单股上限20
 - `publish_auction_anchors(db, snapshot_id)`: 幂等发布，版本不一致时禁止发布
 - `get_published_anchors(db, trade_date)`: 查询已发布锚点
-- chip未完成时只生成结构锚点（structure_only）
+- chip未完成时只生成结构锚点（structure_only）；chip完成后回调重建完整锚点并原子切publication
+
+### 3.1.1 锚点模型修正（P0-6/P0-7）
+- 新增 `anchor_key`、`anchor_subtype`、`source_event_id`、`source_time` 字段
+- 唯一键改为 `snapshot_id+instrument_id+anchor_key`（旧 `trade_date+instrument+anchor_type+direction` 会吞掉多个OB/BOS）
+- `source` 拆为 `source_kind`（core/chip）和 `source_run_id`
+- 保存全部有效锚点，扫描仅选择 `is_active/priority_rank`
 
 ### 3.2 auction_scan_service.py
 - `run_auction_scan(db, trade_date, auction_type)`: 基于冻结锚点分析最终竞价价格的位置迁移和事件
@@ -53,8 +60,15 @@
 
 ### 3.5 after_close_orchestrator.py 接入
 - 在stock_core发布后、market_aggregation之前插入auction_anchor生成
-- 接入顺序：stock_core→auction_anchor→market_aggregation→review
+- 接入顺序：stock_core→chip_consensus→auction_anchor→market_aggregation→review
+- chip软失败：succeeded/partial生成完整锚点；failed/timeout生成structure_only；chip恢复后回调重建
 - 失败不影响core，标记为optional_failure
+
+### 3.5.1 auction_scheduler_service.py（P0-3 新增）
+- 09:25:05 Asia/Shanghai 创建 `auction_final:{date}` 任务
+- 10:00:00 Asia/Shanghai 创建 `auction_open_confirmation:{date}` 任务
+- 使用 SchedulerJobRun、run_key、heartbeat、lease、fencing、retry 和恢复
+- 接入现有 after_close_orchestrator Worker（不新建容器），WORKER_TYPE=auction_scheduler
 
 ### 3.6 复盘逻辑修复
 - metric_engine.py: fp_segment_change_pct全空时P指标value=None，readiness=unavailable
@@ -78,11 +92,20 @@
 - /auction/board/:boardId — 板块级（分布、锚点迁移、贡献/反例/未跟随、样本和置信度）
 - /auction/stock/:symbol — 个股级（昨日金字塔、结构/筹码锚点、竞价位置、参与度、趋势背景、开盘状态）
 
+### 5.1 P0-FE 修复（2026-07-31）
+- DTO 返回 `symbol` 和 `name`，导航使用 symbol（禁止 UUID）
+- 用户一级导航新增 `/auction` 入口
+- `/review` 新增 "竞价回流" 阶段（第6阶段），展示 AuctionBackflowPanel
+- AuctionBackflowPanel 展示四维度：分布（event_type/lifecycle）、迁移、新鲜度、集中度+事件回流
+- 修复 TS6133 未使用变量错误（changeCls/SCOPE_TYPE_LABELS）
+
 ## 6. 测试
 
-- 248个纯单元测试通过（anchor/scan/aggregation）
+- 172个竞价纯单元测试通过（anchor 70 + scan 102）
+- 10个竞价前端合同测试通过（auctionContract.test.ts）
+- 27个导航/路由合同测试通过
 - PG集成测试15个（CI环境运行，0 skipped）
-- 覆盖：双重突破、压力区非突破、支撑测试、双重破位、龙头驱动、扩散、chip失败=structure_only、除权不误判、失效锚点不参与、版本不一致禁止发布、幂等、并发
+- 覆盖：多OB不丢失、generate+publish原子性、chip完成后刷新、scan幂等/恢复、lifecycle多阶段（formed/confirmed/continued/weakened/failed/transformed/expired）、UUID/symbol前端合同、Scheduler 09:25/10:00触发窗口
 
 ## 7. 文档更新
 
@@ -94,8 +117,8 @@
 
 ## 8. 未完成
 
-- PG集成测试CI终态
-- canary（少量股票/1个行业/1个概念）
+- PG集成测试CI终态（本地跳过，CI临时PostgreSQL运行）
+- 09:25 BarMinute 数据源覆盖率验证（需连接生产DB只读检查）
+- canary（少量股票/1个行业/1个概念，需dev/staging环境）
 - 全量回填/计算
-- /review展示第二金字塔和竞价回流
-- 部署
+- 部署（无隔离dev/staging时标记BLOCKED）

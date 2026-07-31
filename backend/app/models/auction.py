@@ -14,7 +14,18 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    Numeric,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -66,6 +77,9 @@ class AuctionAnchorItem(Base):
     anchor_type=structure: 来源第一金字塔结构维度
     anchor_type=chip: 来源筹码共识维度
     anchor_type=composite: 近距离结构+筹码合并为复合锚点
+
+    [P0-6/P0-7 修复 2026-07-31] 唯一键改为 (snapshot_id, instrument_id, anchor_key)，
+    保存同方向同类型的多个 OB/BOS；source 拆为 source_kind (core/chip) 和 source_run_id。
     """
 
     __tablename__ = "auction_anchor_items"
@@ -80,13 +94,38 @@ class AuctionAnchorItem(Base):
     instrument_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     anchor_type: Mapped[str] = mapped_column(Text(), nullable=False,
                                               comment="structure/chip/composite")
-    source: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False,
-                                               comment="source_core_run_id 或 source_chip_run_id")
+    anchor_key: Mapped[str] = mapped_column(
+        Text(), nullable=False,
+        comment="同股同 snapshot 内唯一键：bos_<event_id>/ob_<event_id>/poc/...",
+    )
+    anchor_subtype: Mapped[str | None] = mapped_column(
+        Text(), nullable=True,
+        comment="bos/choch/ob_created/trailing_top/trailing_bottom/poc/vah/val/cross/composite",
+    )
+    source_kind: Mapped[str] = mapped_column(
+        Text(), nullable=False, comment="core/chip（composite 取 core）",
+    )
+    source_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False,
+        comment="source_core_run_id 或 source_chip_run_id",
+    )
+    source_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True,
+        comment="关联结构/筹码事件 ID（如有）",
+    )
+    source_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="锚点来源事件时间（occurredAt 等）",
+    )
     direction: Mapped[str] = mapped_column(Text(), nullable=False, comment="up/down")
     lower_price: Mapped[Any] = mapped_column(Numeric(12, 4), nullable=False)
     upper_price: Mapped[Any] = mapped_column(Numeric(12, 4), nullable=False)
     center_price: Mapped[Any] = mapped_column(Numeric(12, 4), nullable=False)
     strength: Mapped[float] = mapped_column(Float(), nullable=False, comment="0.0-1.0")
+    priority_rank: Mapped[int | None] = mapped_column(
+        Integer(), nullable=True,
+        comment="活跃锚点优先级（lower=higher priority，扫描时按此排序）",
+    )
     freshness: Mapped[str] = mapped_column(Text(), nullable=False,
                                            comment="fresh/stale/expired")
     validity: Mapped[str] = mapped_column(Text(), nullable=False,
@@ -101,8 +140,8 @@ class AuctionAnchorItem(Base):
 
     def __repr__(self) -> str:
         return (f"<AuctionAnchorItem(instrument_id={self.instrument_id!r}, "
-                f"type={self.anchor_type!r}, dir={self.direction!r}, "
-                f"strength={self.strength:.2f}, active={self.is_active})>")
+                f"type={self.anchor_type!r}, key={self.anchor_key!r}, "
+                f"dir={self.direction!r}, strength={self.strength:.2f}, active={self.is_active})>")
 
 
 class AuctionAnchorPublication(Base):
@@ -161,6 +200,10 @@ class AuctionScanRun(Base):
     price_adjustment_version: Mapped[str] = mapped_column(Text(), nullable=False)
     status: Mapped[str] = mapped_column(Text(), nullable=False,
                                         comment="queued/running/succeeded/failed/partial")
+    attempt_count: Mapped[int] = mapped_column(
+        Integer(), nullable=False, default=1, server_default="1",
+        comment="尝试次数（succeeded/running 租约有效时不递增；failed/partial 重试递增）",
+    )
     eligible_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
     ready_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
     coverage_ratio: Mapped[float] = mapped_column(Float(), nullable=False, default=0.0)
@@ -168,7 +211,10 @@ class AuctionScanRun(Base):
     missing_reasons: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     error_message: Mapped[str | None] = mapped_column(Text(), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(Text(), nullable=True)
-    lease_epoch: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    lease_epoch: Mapped[int | None] = mapped_column(
+        Integer(), nullable=True,
+        comment="lease fencing epoch（旧 Worker 写入被拒绝）",
+    )
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -308,8 +354,16 @@ class AuctionEventTracking(Base):
     trigger_condition: Mapped[str | None] = mapped_column(Text(), nullable=True)
     formed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="confirmed 后开盘窗口维持触发时记录",
+    )
     weakened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    transformed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="板块扩散失败/龙头孤立/指数背离等结构性变化时记录",
+    )
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmation_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")

@@ -30,12 +30,6 @@ const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: 'hhi', label: '集中度 HHI' },
 ]
 
-const SCOPE_TYPE_LABELS: Record<string, string> = {
-  market: '全市场',
-  industry: '行业',
-  concept: '概念',
-}
-
 /** 状态标签 chip 样式映射 */
 function statusLabelChipClass(label: string | null | undefined): string {
   if (!label) return styles.chipDefault

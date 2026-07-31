@@ -1993,17 +1993,19 @@ async def execute_after_close_run(
             # [P0-4 aggregation dependency closure] After stock_core pointer is
             # published, trigger auction anchor generation then board analysis.
             # 接入顺序: stock_core → chip_consensus → auction_anchor → market_aggregation → review
-            # auction_anchor 在 chip_consensus 之前生成结构锚点（structure_only），
-            # chip 完成后可后续补充筹码锚点。
+            # [P0-1/P0-2 修复 2026-07-31] 主流程通过统一入口 generate_and_publish_auction_anchors
+            # 完成生成+发布。chip 未完成时生成 structure_only 并发布；chip 完成后由
+            # chip_consensus_service 回调重新生成完整锚点并原子切换 publication。
             _auction_anchor_status = "skipped"
+            _auction_publication_id: uuid.UUID | None = None
             if _stock_core_published and snapshot_run_id is not None:
                 try:
                     from app.services.auction_anchor_service import (
-                        generate_auction_anchors,
+                        generate_and_publish_auction_anchors,
                     )
 
                     async with AsyncSessionLocal() as anchor_db:
-                        anchor_result = await generate_auction_anchors(
+                        anchor_result = await generate_and_publish_auction_anchors(
                             anchor_db,
                             trade_date=trade_date,
                             worker_id=worker_id,
@@ -2011,11 +2013,13 @@ async def execute_after_close_run(
                         )
                         await anchor_db.commit()
                     _auction_anchor_status = anchor_result.get("status", "unknown")
+                    _auction_publication_id = anchor_result.get("publication_id")
                     logger.info(
-                        "[AfterClose] auction anchor 生成完成: trade_date=%s, "
-                        "status=%s, structure=%s, chip=%s, composite=%s",
+                        "[AfterClose] auction anchor 生成+发布完成: trade_date=%s, "
+                        "status=%s, publication_id=%s, structure=%s, chip=%s, composite=%s",
                         trade_date,
                         _auction_anchor_status,
+                        _auction_publication_id,
                         anchor_result.get("structure_count", 0),
                         anchor_result.get("chip_count", 0),
                         anchor_result.get("composite_count", 0),
@@ -2023,7 +2027,7 @@ async def execute_after_close_run(
                 except Exception as anchor_exc:
                     _auction_anchor_status = "failed"
                     logger.warning(
-                        "[AfterClose] auction anchor 生成失败（optional，不影响 core）: "
+                        "[AfterClose] auction anchor 生成+发布失败（optional，不影响 core）: "
                         "trade_date=%s, error=%s",
                         trade_date, anchor_exc,
                         exc_info=True,

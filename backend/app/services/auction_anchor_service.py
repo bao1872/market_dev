@@ -161,12 +161,53 @@ def _parse_iso_date(v: Any) -> date | None:
         return None
 
 
+def _parse_iso_datetime(v: Any) -> datetime | None:
+    """解析 ISO datetime 字符串为 datetime（用于 source_time）。"""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v
+    try:
+        s = str(v)
+        # 兼容 "2026-07-25" 和 "2026-07-25T14:15:00+08:00"
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        # 退化为日期
+        d = _parse_iso_date(v)
+        return datetime(d.year, d.month, d.day) if d is not None else None
+
+
+def _build_anchor_key(
+    subtype: str,
+    *,
+    occurred_at: Any = None,
+    bar_index: Any = None,
+    seq: int = 0,
+) -> str:
+    """构造同股同 snapshot 内唯一的 anchor_key。
+
+    约定：``<subtype>[_<occurredAt>][_b<barIndex>][_n<seq>]``
+    保证 (snapshot_id, instrument_id, anchor_key) 唯一，从而同方向同类型的多个
+    OB/BOS 都能保留。
+    """
+    parts: list[str] = [subtype]
+    if occurred_at is not None and str(occurred_at) != "":
+        parts.append(str(occurred_at))
+    if bar_index is not None:
+        parts.append(f"b{bar_index}")
+    if seq > 0:
+        parts.append(f"n{seq}")
+    return "_".join(parts)
+
+
 def _make_anchor_item(
     *,
     snapshot_id: uuid.UUID,
     trade_date: date,
     instrument_id: uuid.UUID,
     anchor_type: str,
+    anchor_key: str,
+    source_kind: str,
     source_run_id: uuid.UUID,
     direction: str,
     lower_price: Decimal,
@@ -175,25 +216,42 @@ def _make_anchor_item(
     strength: float,
     freshness: str,
     price_adjustment_version: str,
+    anchor_subtype: str | None = None,
+    source_event_id: uuid.UUID | None = None,
+    source_time: datetime | None = None,
+    priority_rank: int | None = None,
     structure_payload: dict[str, Any] | None = None,
     chip_payload: dict[str, Any] | None = None,
     distance_at_close: Decimal | None = None,
     reason_codes: list[str] | None = None,
     is_active: bool = True,
 ) -> AuctionAnchorItem:
-    """构建单个 AuctionAnchorItem（公用工厂）。"""
+    """构建单个 AuctionAnchorItem（公用工厂）。
+
+    [P0-6/P0-7 修复 2026-07-31]
+    - anchor_key/anchor_subtype 唯一标识同股同 snapshot 的多个同类型锚点
+    - source_kind (core/chip) + source_run_id 取代旧 source 字段
+    - source_event_id/source_time 关联来源事件（如结构/筹码事件 ID）
+    - priority_rank 由 _filter_active_anchors 统一赋值（活跃锚点排序）
+    """
     validity = "valid" if freshness != "expired" else "invalid"
     return AuctionAnchorItem(
         snapshot_id=snapshot_id,
         trade_date=trade_date,
         instrument_id=instrument_id,
         anchor_type=anchor_type,
-        source=source_run_id,
+        anchor_key=anchor_key,
+        anchor_subtype=anchor_subtype,
+        source_kind=source_kind,
+        source_run_id=source_run_id,
+        source_event_id=source_event_id,
+        source_time=source_time,
         direction=direction,
         lower_price=lower_price,
         upper_price=upper_price,
         center_price=center_price,
         strength=strength,
+        priority_rank=priority_rank,
         freshness=freshness,
         validity=validity,
         price_adjustment_version=price_adjustment_version,
@@ -224,11 +282,15 @@ def _extract_structure_anchors(
     缺失字段的锚点跳过并记录 reason_codes（在返回列表中不包含跳过的项；
     reason_codes 写入有效锚点以标注降级原因）。
 
+    [P0-6 修复 2026-07-31] 每个事件生成唯一 anchor_key（基于 occurredAt/barIndex），
+    保留同方向同类型的全部 OB/BOS，不再按 (anchor_type, direction) 去重。
+
     锚点类型：
-    - BOS 事件 → direction 价格触发线锚点
-    - CHoCH 事件 → direction 价格触发线锚点
-    - OB_CREATED 事件 → ob_high/ob_low 区间锚点
-    - trailing_top/bottom → 失效线锚点
+    - BOS 事件 → direction 价格触发线锚点（anchor_subtype=bos）
+    - CHoCH 事件 → direction 价格触发线锚点（anchor_subtype=choch）
+    - OB_CREATED 事件 → ob_high/ob_low 区间锚点（anchor_subtype=ob_created）
+    - trailing_top → 失效线锚点（anchor_subtype=trailing_top）
+    - trailing_bottom → 失效线锚点（anchor_subtype=trailing_bottom）
     """
     instrument_id = snapshot.instrument_id
     summary = snapshot.summary_payload or {}
@@ -239,6 +301,18 @@ def _extract_structure_anchors(
 
     items: list[AuctionAnchorItem] = []
     skip_reasons: list[str] = []
+    # 同 subtype 出现重复 key 时递增 seq，保证 anchor_key 唯一
+    key_counter: dict[str, int] = {}
+
+    def _unique_key(subtype: str, occurred_at: Any, bar_index: Any) -> str:
+        base = _build_anchor_key(subtype, occurred_at=occurred_at, bar_index=bar_index)
+        if base in key_counter:
+            key_counter[base] += 1
+            return _build_anchor_key(
+                subtype, occurred_at=occurred_at, bar_index=bar_index, seq=key_counter[base]
+            )
+        key_counter[base] = 0
+        return base
 
     for evt in events:
         evt_type = evt.get("type", "")
@@ -247,11 +321,23 @@ def _extract_structure_anchors(
             skip_reasons.append(f"{evt_type}:invalid_direction")
             continue
 
-        formed_at = _parse_iso_date(evt.get("occurredAt"))
+        occurred_at = evt.get("occurredAt")
+        bar_index = evt.get("barIndex")
+        formed_at = _parse_iso_date(occurred_at)
         freshness = _compute_freshness(formed_at, trade_date)
+        source_time = _parse_iso_datetime(occurred_at)
+        # 关联结构事件 ID（如 payload 携带则使用，否则 None）
+        source_event_id_raw = evt.get("event_id") or evt.get("id")
+        source_event_id: uuid.UUID | None = None
+        if source_event_id_raw is not None:
+            try:
+                source_event_id = uuid.UUID(str(source_event_id_raw))
+            except (ValueError, AttributeError):
+                source_event_id = None
         extra = evt.get("extra") or {}
 
         if evt_type in ("BOS", "CHoCH"):
+            subtype = "bos" if evt_type == "BOS" else "choch"
             # 触发线锚点：用事件 price 作为 center
             price = _safe_decimal(evt.get("price"))
             if price is None:
@@ -259,11 +345,12 @@ def _extract_structure_anchors(
                 continue
             strength = _STRENGTH_BOS if evt_type == "BOS" else _STRENGTH_CHOCH
             structure_level = extra.get("structure_level")
+            anchor_key = _unique_key(subtype, occurred_at, bar_index)
             payload = {
                 "event_type": evt_type,
                 "trigger_price": str(price),
-                "occurred_at": evt.get("occurredAt"),
-                "bar_index": evt.get("barIndex"),
+                "occurred_at": occurred_at,
+                "bar_index": bar_index,
                 "structure_level": structure_level,
                 "anchor_index": extra.get("anchor_index"),
             }
@@ -273,7 +360,12 @@ def _extract_structure_anchors(
                     trade_date=trade_date,
                     instrument_id=instrument_id,
                     anchor_type="structure",
+                    anchor_key=anchor_key,
+                    anchor_subtype=subtype,
+                    source_kind="core",
                     source_run_id=source_core_run_id,
+                    source_event_id=source_event_id,
+                    source_time=source_time,
                     direction=direction,
                     lower_price=price,
                     upper_price=price,
@@ -293,12 +385,13 @@ def _extract_structure_anchors(
                 continue
             center = (ob_high + ob_low) / 2
             structure_level = extra.get("structure_level")
+            anchor_key = _unique_key("ob_created", occurred_at, bar_index)
             payload = {
                 "event_type": "OB_CREATED",
                 "ob_high": str(ob_high),
                 "ob_low": str(ob_low),
-                "occurred_at": evt.get("occurredAt"),
-                "bar_index": evt.get("barIndex"),
+                "occurred_at": occurred_at,
+                "bar_index": bar_index,
                 "structure_level": structure_level,
                 "anchor_index": extra.get("anchor_index"),
             }
@@ -308,7 +401,12 @@ def _extract_structure_anchors(
                     trade_date=trade_date,
                     instrument_id=instrument_id,
                     anchor_type="structure",
+                    anchor_key=anchor_key,
+                    anchor_subtype="ob_created",
+                    source_kind="core",
                     source_run_id=source_core_run_id,
+                    source_event_id=source_event_id,
+                    source_time=source_time,
                     direction=direction,
                     lower_price=ob_low,
                     upper_price=ob_high,
@@ -330,6 +428,9 @@ def _extract_structure_anchors(
                 trade_date=trade_date,
                 instrument_id=instrument_id,
                 anchor_type="structure",
+                anchor_key="trailing_top",
+                anchor_subtype="trailing_top",
+                source_kind="core",
                 source_run_id=source_core_run_id,
                 direction="down",  # 上沿 → 阻力/空头失效线
                 lower_price=trailing_top,
@@ -348,6 +449,9 @@ def _extract_structure_anchors(
                 trade_date=trade_date,
                 instrument_id=instrument_id,
                 anchor_type="structure",
+                anchor_key="trailing_bottom",
+                anchor_subtype="trailing_bottom",
+                source_kind="core",
                 source_run_id=source_core_run_id,
                 direction="up",  # 下沿 → 支撑/多头失效线
                 lower_price=trailing_bottom,
@@ -384,6 +488,10 @@ def _extract_chip_anchors(
 
     数据源：chip_payload.chip.continuousFactors（POC/VAH/VAL）+ chip_payload.chip.events（cross）。
 
+    [P0-6/P0-7 修复 2026-07-31]
+    - 每个筹码锚点生成唯一 anchor_key（poc/vah/val/cross_<type>_<occurredAt>）
+    - source_kind="chip"，source_run_id=source_chip_run_id
+
     锚点类型：
     - POC（主峰）→ 中性方向锚点（direction 按 last_close vs poc 判断）
     - VAH（上共识区）→ 阻力方向 down
@@ -398,6 +506,7 @@ def _extract_chip_anchors(
 
     items: list[AuctionAnchorItem] = []
     skip_reasons: list[str] = []
+    cross_key_counter: dict[str, int] = {}
 
     last_close = _safe_decimal(continuous.get("last_close"))
 
@@ -414,6 +523,9 @@ def _extract_chip_anchors(
                 trade_date=trade_date,
                 instrument_id=instrument_id,
                 anchor_type="chip",
+                anchor_key="poc",
+                anchor_subtype="poc",
+                source_kind="chip",
                 source_run_id=source_chip_run_id,
                 direction=direction,
                 lower_price=poc,
@@ -441,6 +553,9 @@ def _extract_chip_anchors(
                 trade_date=trade_date,
                 instrument_id=instrument_id,
                 anchor_type="chip",
+                anchor_key="vah",
+                anchor_subtype="vah",
+                source_kind="chip",
                 source_run_id=source_chip_run_id,
                 direction="down",
                 lower_price=vah,
@@ -464,6 +579,9 @@ def _extract_chip_anchors(
                 trade_date=trade_date,
                 instrument_id=instrument_id,
                 anchor_type="chip",
+                anchor_key="val",
+                anchor_subtype="val",
+                source_kind="chip",
                 source_run_id=source_chip_run_id,
                 direction="up",
                 lower_price=val,
@@ -492,15 +610,35 @@ def _extract_chip_anchors(
             skip_reasons.append(f"chip:{evt_type}:missing_price")
             continue
         node_price = _safe_decimal(evt.get("node_price", evt.get("price")))
-        formed_at = _parse_iso_date(evt.get("occurredAt"))
+        occurred_at = evt.get("occurredAt")
+        bar_index = evt.get("barIndex")
+        formed_at = _parse_iso_date(occurred_at)
         freshness = _compute_freshness(formed_at, trade_date)
+        source_time = _parse_iso_datetime(occurred_at)
+        # cross 事件 anchor_key：cross_<evt_type>_<occurredAt>_<barIndex>，重复递增 seq
+        base_key = _build_anchor_key(
+            f"cross_{evt_type}", occurred_at=occurred_at, bar_index=bar_index,
+        )
+        if base_key in cross_key_counter:
+            cross_key_counter[base_key] += 1
+            anchor_key = _build_anchor_key(
+                f"cross_{evt_type}", occurred_at=occurred_at, bar_index=bar_index,
+                seq=cross_key_counter[base_key],
+            )
+        else:
+            cross_key_counter[base_key] = 0
+            anchor_key = base_key
         items.append(
             _make_anchor_item(
                 snapshot_id=snapshot_id,
                 trade_date=trade_date,
                 instrument_id=instrument_id,
                 anchor_type="chip",
+                anchor_key=anchor_key,
+                anchor_subtype="cross",
+                source_kind="chip",
                 source_run_id=source_chip_run_id,
+                source_time=source_time,
                 direction=direction,
                 lower_price=price,
                 upper_price=price,
@@ -512,7 +650,7 @@ def _extract_chip_anchors(
                     "kind": "cross_event",
                     "event_type": evt_type,
                     "node_price": str(node_price) if node_price is not None else None,
-                    "occurred_at": evt.get("occurredAt"),
+                    "occurred_at": occurred_at,
                 },
             )
         )
@@ -548,7 +686,10 @@ def _build_composite_anchors(
     - direction：优先取结构锚点 direction（如一致）
     - strength：_STRENGTH_COMPOSITE
     - freshness：取两者中较旧的（保守）
-    - source：source_core_run_id（结构为主）
+    - source_kind="core"（结构为主），source_run_id=source_core_run_id
+    - anchor_key：composite_<structure_key>_<chip_key>（保证唯一）
+
+    [P0-6/P0-7 修复 2026-07-31] 不再依赖旧 source 字段，composite 锚点也有 anchor_key。
     """
     if not structure_items or not chip_items:
         return []
@@ -556,6 +697,7 @@ def _build_composite_anchors(
     used_structure: set[int] = set()
     used_chip: set[int] = set()
     composite_items: list[AuctionAnchorItem] = []
+    comp_counter: dict[str, int] = {}
 
     for i, s_item in enumerate(structure_items):
         if i in used_structure:
@@ -587,12 +729,22 @@ def _build_composite_anchors(
                 else c_item.freshness
             )
             instrument_id = s_item.instrument_id
+            base_key = f"composite_{s_item.anchor_key}_{c_item.anchor_key}"
+            if base_key in comp_counter:
+                comp_counter[base_key] += 1
+                anchor_key = f"{base_key}_n{comp_counter[base_key]}"
+            else:
+                comp_counter[base_key] = 0
+                anchor_key = base_key
             composite_items.append(
                 _make_anchor_item(
                     snapshot_id=snapshot_id,
                     trade_date=trade_date,
                     instrument_id=instrument_id,
                     anchor_type="composite",
+                    anchor_key=anchor_key,
+                    anchor_subtype="composite",
+                    source_kind="core",
                     source_run_id=source_core_run_id,
                     direction=direction,
                     lower_price=lower,
@@ -604,12 +756,14 @@ def _build_composite_anchors(
                     structure_payload={
                         "merged_from": "structure",
                         "structure_center": str(s_center),
+                        "structure_key": s_item.anchor_key,
                         "structure_kind": (s_item.structure_payload or {}).get("kind")
                         or (s_item.structure_payload or {}).get("event_type"),
                     },
                     chip_payload={
                         "merged_from": "chip",
                         "chip_center": str(c_center),
+                        "chip_key": c_item.anchor_key,
                         "chip_kind": (c_item.chip_payload or {}).get("kind"),
                     },
                 )
@@ -626,41 +780,17 @@ def _build_composite_anchors(
 # =============================================================================
 
 
-def _deduplicate_anchors(items: list[AuctionAnchorItem]) -> list[AuctionAnchorItem]:
-    """按 (anchor_type, direction) 去重，保留最强锚点。
-
-    auction_anchor_items 唯一约束为 (trade_date, instrument_id, anchor_type, direction)，
-    故每个 (anchor_type, direction) 组合只能保留一个锚点。
-    保留规则：strength 最高 → freshness 最新 → center_price 最接近收盘价（暂不依赖）。
-    """
-    freshness_rank = {"fresh": 0, "stale": 1, "expired": 2}
-    best: dict[tuple[str, str], AuctionAnchorItem] = {}
-    for item in items:
-        key = (item.anchor_type, item.direction)
-        existing = best.get(key)
-        if existing is None:
-            best[key] = item
-            continue
-        # 比较：strength 降序，freshness 升序（fresh=0 最优）
-        if (
-            item.strength > existing.strength
-            or (
-                item.strength == existing.strength
-                and freshness_rank.get(item.freshness, 99)
-                < freshness_rank.get(existing.freshness, 99)
-            )
-        ):
-            best[key] = item
-    return list(best.values())
-
-
 def _filter_active_anchors(items: list[AuctionAnchorItem]) -> list[AuctionAnchorItem]:
     """按距离、强度、新鲜度筛选活跃锚点；单股上限 MAX_ACTIVE_ANCHORS_PER_INSTRUMENT。
+
+    [P0-6 修复 2026-07-31] 保留全部锚点（不再按 anchor_type+direction 去重），
+    仅通过 is_active + priority_rank 控制扫描范围。
 
     规则：
     - expired 锚点 is_active=False
     - strength < MIN_ACTIVE_STRENGTH 的锚点 is_active=False
     - 其余按 (strength desc, freshness asc) 排序，取前 MAX_ACTIVE_ANCHORS_PER_INSTRUMENT
+    - 活跃锚点赋 priority_rank（1..N，lower=higher priority），非活跃 None
     - 超出上限的锚点 is_active=False
     """
     freshness_rank = {"fresh": 0, "stale": 1, "expired": 2}
@@ -669,6 +799,7 @@ def _filter_active_anchors(items: list[AuctionAnchorItem]) -> list[AuctionAnchor
     for item in items:
         if item.freshness == "expired" or item.strength < MIN_ACTIVE_STRENGTH:
             item.is_active = False
+            item.priority_rank = None
 
     # 候选活跃锚点
     candidates = [it for it in items if it.is_active]
@@ -680,6 +811,12 @@ def _filter_active_anchors(items: list[AuctionAnchorItem]) -> list[AuctionAnchor
     if len(candidates) > MAX_ACTIVE_ANCHORS_PER_INSTRUMENT:
         for item in candidates[MAX_ACTIVE_ANCHORS_PER_INSTRUMENT:]:
             item.is_active = False
+            item.priority_rank = None
+        candidates = candidates[:MAX_ACTIVE_ANCHORS_PER_INSTRUMENT]
+
+    # 为活跃锚点赋 priority_rank（1..N）
+    for rank, item in enumerate(candidates, start=1):
+        item.priority_rank = rank
 
     return items
 
@@ -919,14 +1056,15 @@ async def generate_auction_anchors(
             )
             composite_total += len(composite_items)
 
-            # 合并 → 去重（唯一约束 trade_date+instrument_id+anchor_type+direction）
-            # → 筛选活跃锚点
+            # [P0-6 修复 2026-07-31] 不再按 (anchor_type, direction) 去重，
+            # 保留全部有效锚点；仅通过 _filter_active_anchors 赋 is_active/priority_rank。
             per_instrument_items = structure_items + chip_items + composite_items
-            per_instrument_items = _deduplicate_anchors(per_instrument_items)
             per_instrument_items = _filter_active_anchors(per_instrument_items)
             all_items.extend(per_instrument_items)
 
         # 6. 批量写入 items（使用 upsert 处理潜在冲突）
+        # [P0-6/P0-7] 唯一键改为 (snapshot_id, instrument_id, anchor_key)，
+        # 字段使用 anchor_key/source_kind/source_run_id 等新字段。
         if all_items:
             for item in all_items:
                 stmt = pg_insert(AuctionAnchorItem).values(
@@ -934,12 +1072,18 @@ async def generate_auction_anchors(
                     trade_date=item.trade_date,
                     instrument_id=item.instrument_id,
                     anchor_type=item.anchor_type,
-                    source=item.source,
+                    anchor_key=item.anchor_key,
+                    anchor_subtype=item.anchor_subtype,
+                    source_kind=item.source_kind,
+                    source_run_id=item.source_run_id,
+                    source_event_id=item.source_event_id,
+                    source_time=item.source_time,
                     direction=item.direction,
                     lower_price=item.lower_price,
                     upper_price=item.upper_price,
                     center_price=item.center_price,
                     strength=item.strength,
+                    priority_rank=item.priority_rank,
                     freshness=item.freshness,
                     validity=item.validity,
                     price_adjustment_version=item.price_adjustment_version,
@@ -950,13 +1094,19 @@ async def generate_auction_anchors(
                     reason_codes=item.reason_codes,
                 )
                 stmt = stmt.on_conflict_do_update(
-                    constraint="uq_auction_anchor_items_date_inst_type_dir",
+                    constraint="uq_auction_anchor_items_snap_inst_key",
                     set_={
-                        "source": stmt.excluded.source,
+                        "anchor_subtype": stmt.excluded.anchor_subtype,
+                        "source_kind": stmt.excluded.source_kind,
+                        "source_run_id": stmt.excluded.source_run_id,
+                        "source_event_id": stmt.excluded.source_event_id,
+                        "source_time": stmt.excluded.source_time,
+                        "direction": stmt.excluded.direction,
                         "lower_price": stmt.excluded.lower_price,
                         "upper_price": stmt.excluded.upper_price,
                         "center_price": stmt.excluded.center_price,
                         "strength": stmt.excluded.strength,
+                        "priority_rank": stmt.excluded.priority_rank,
                         "freshness": stmt.excluded.freshness,
                         "validity": stmt.excluded.validity,
                         "price_adjustment_version": stmt.excluded.price_adjustment_version,
@@ -1162,6 +1312,125 @@ async def publish_auction_anchors(
         snapshot.trade_date, snapshot_id, publication.id, snapshot.coverage_ratio,
     )
     return publication
+
+
+# =============================================================================
+# 统一入口：generate_and_publish_auction_anchors（P0-1）
+# =============================================================================
+
+
+class AnchorGenerationFailedError(ValueError):
+    """锚点生成未达到可发布状态（failed/未生成）。"""
+
+
+async def generate_and_publish_auction_anchors(
+    db: AsyncSession,
+    trade_date: date,
+    *,
+    worker_id: str | None = None,
+    lease_epoch: int | None = None,
+) -> dict[str, Any]:
+    """[P0-1 统一入口] 在一个事务边界内完成锚点生成 + 校验 + publication 切换。
+
+    盘后编排、Admin 接口和恢复入口统一调用本函数，禁止只 generate 不 publish。
+
+    流程：
+    1. generate_auction_anchors：生成 snapshot + items（status=succeeded/structure_only/failed）
+    2. 生成失败或无可发布 snapshot → 返回失败，不抛异常（由调用方决定是否软失败）
+    3. publish_auction_anchors：校验 + 原子切换 publication 指针
+    4. 发布失败 → 返回 publish_failed + reason，不回滚已生成 snapshot（保留审计）
+
+    原子性边界：调用方负责 commit。本函数内部使用 flush 保证 snapshot/publication
+    可在同一事务内对齐；调用方在成功时 commit、在异常时 rollback。
+
+    [P0-2] chip 软失败语义：
+    - chip succeeded/partial → 生成完整锚点（status=succeeded）
+    - chip failed/timeout/未完成 → status=structure_only
+    - chip 后来恢复成功 → 重新调用本函数生成完整锚点，publish_auction_anchors
+      通过 on_conflict_do_update 原子切换 publication 指针到新 snapshot，
+      旧 publication 由 superseded_by 记录（如需要可在 publish 中补充）。
+
+    Args:
+        db: 异步 DB 会话（调用方持有事务边界）
+        trade_date: 业务交易日
+        worker_id: Worker 标识
+        lease_epoch: 租约 epoch（用于 fencing）
+
+    Returns:
+        {
+            "snapshot_id": uuid.UUID | None,
+            "publication_id": uuid.UUID | None,
+            "status": str,  # succeeded/structure_only/failed/publish_failed
+            "structure_count": int,
+            "chip_count": int,
+            "composite_count": int,
+            "eligible_count": int,
+            "coverage_ratio": float,
+            "error_message": str | None,
+        }
+    """
+    gen_result = await generate_auction_anchors(
+        db, trade_date, worker_id=worker_id, lease_epoch=lease_epoch,
+    )
+    snapshot_id = gen_result.get("snapshot_id")
+    gen_status = gen_result.get("status")
+
+    # 生成失败：无可发布 snapshot
+    if snapshot_id is None or gen_status not in ("succeeded", "structure_only"):
+        return {
+            "snapshot_id": snapshot_id,
+            "publication_id": None,
+            "status": gen_status or "failed",
+            "structure_count": gen_result.get("structure_count", 0),
+            "chip_count": gen_result.get("chip_count", 0),
+            "composite_count": gen_result.get("composite_count", 0),
+            "eligible_count": gen_result.get("eligible_count", 0),
+            "coverage_ratio": gen_result.get("coverage_ratio", 0.0),
+            "error_message": gen_result.get("error_message"),
+        }
+
+    # 发布：原子切换 publication 指针
+    try:
+        publication = await publish_auction_anchors(db, snapshot_id)
+    except (
+        AnchorSnapshotNotFoundError,
+        AnchorSnapshotNotReadyError,
+        AnchorVersionMismatchError,
+        AnchorCoverageLowError,
+    ) as exc:
+        logger.warning(
+            "[AuctionAnchor] generate_and_publish 发布失败: trade_date=%s "
+            "snapshot_id=%s: %s",
+            trade_date, snapshot_id, exc,
+        )
+        return {
+            "snapshot_id": snapshot_id,
+            "publication_id": None,
+            "status": "publish_failed",
+            "structure_count": gen_result.get("structure_count", 0),
+            "chip_count": gen_result.get("chip_count", 0),
+            "composite_count": gen_result.get("composite_count", 0),
+            "eligible_count": gen_result.get("eligible_count", 0),
+            "coverage_ratio": gen_result.get("coverage_ratio", 0.0),
+            "error_message": f"publish_failed: {exc}",
+        }
+
+    logger.info(
+        "[AuctionAnchor] generate_and_publish 完成: trade_date=%s snapshot_id=%s "
+        "publication_id=%s status=%s",
+        trade_date, snapshot_id, publication.id, gen_status,
+    )
+    return {
+        "snapshot_id": snapshot_id,
+        "publication_id": publication.id,
+        "status": gen_status,
+        "structure_count": gen_result.get("structure_count", 0),
+        "chip_count": gen_result.get("chip_count", 0),
+        "composite_count": gen_result.get("composite_count", 0),
+        "eligible_count": gen_result.get("eligible_count", 0),
+        "coverage_ratio": gen_result.get("coverage_ratio", 0.0),
+        "error_message": None,
+    }
 
 
 # =============================================================================

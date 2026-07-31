@@ -72,6 +72,12 @@ def upgrade() -> None:
     op.create_index("ix_auction_anchor_snapshots_status", "auction_anchor_snapshots", ["status"])
 
     # 2. auction_anchor_items — 个股锚点
+    # [P0-6 修复 2026-07-31] 旧唯一键 (trade_date, instrument_id, anchor_type, direction) 会
+    # 吞掉同方向同类型的多个 OB/BOS。改为 (snapshot_id, instrument_id, anchor_key)，
+    # anchor_key 由来源事件 ID 或子类型+序号唯一标识，保存全部有效锚点，
+    # 扫描仅选择 is_active/priority_rank。
+    # [P0-7 修复 2026-07-31] source 拆为 source_kind (core/chip) 和 source_run_id，
+    # 不再用 UUID 字段同时表达锚点语义和运行版本。
     op.create_table(
         "auction_anchor_items",
         sa.Column("id", UUID(as_uuid=True), primary_key=True, nullable=False),
@@ -83,13 +89,25 @@ def upgrade() -> None:
                   comment="个股 instrument_id"),
         sa.Column("anchor_type", sa.Text(), nullable=False,
                   comment="structure/chip/composite"),
-        sa.Column("source", UUID(as_uuid=True), nullable=False,
-                  comment="source_core_run_id 或 source_chip_run_id"),
+        sa.Column("anchor_key", sa.Text(), nullable=False,
+                  comment="同股同 snapshot 内唯一键：bos_<event_id>/ob_<event_id>/poc/..."),
+        sa.Column("anchor_subtype", sa.Text(), nullable=True,
+                  comment="bos/choch/ob_created/trailing_top/trailing_bottom/poc/vah/val/cross/composite"),
+        sa.Column("source_kind", sa.Text(), nullable=False,
+                  comment="core/chip（composite 取 core）"),
+        sa.Column("source_run_id", UUID(as_uuid=True), nullable=False,
+                  comment="source_core_run_id 或 source_chip_run_id（不再混用 source 字段）"),
+        sa.Column("source_event_id", UUID(as_uuid=True), nullable=True,
+                  comment="关联结构/筹码事件 ID（如有）"),
+        sa.Column("source_time", sa.DateTime(timezone=True), nullable=True,
+                  comment="锚点来源事件时间（occurredAt 等）"),
         sa.Column("direction", sa.Text(), nullable=False, comment="up/down"),
         sa.Column("lower_price", sa.Numeric(12, 4), nullable=False),
         sa.Column("upper_price", sa.Numeric(12, 4), nullable=False),
         sa.Column("center_price", sa.Numeric(12, 4), nullable=False),
         sa.Column("strength", sa.Float(), nullable=False, comment="0.0-1.0"),
+        sa.Column("priority_rank", sa.Integer(), nullable=True,
+                  comment="活跃锚点优先级（lower=higher priority，扫描时按此排序）"),
         sa.Column("freshness", sa.Text(), nullable=False,
                   comment="fresh/stale/expired"),
         sa.Column("validity", sa.Text(), nullable=False,
@@ -104,13 +122,18 @@ def upgrade() -> None:
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("reason_codes", JSONB, nullable=False, server_default="[]"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.UniqueConstraint("trade_date", "instrument_id", "anchor_type", "direction",
-                            name="uq_auction_anchor_items_date_inst_type_dir"),
+        sa.UniqueConstraint("snapshot_id", "instrument_id", "anchor_key",
+                            name="uq_auction_anchor_items_snap_inst_key"),
     )
     op.create_index("ix_auction_anchor_items_trade_date", "auction_anchor_items", ["trade_date"])
     op.create_index("ix_auction_anchor_items_instrument", "auction_anchor_items", ["instrument_id"])
     op.create_index("ix_auction_anchor_items_snapshot", "auction_anchor_items", ["snapshot_id"])
     op.create_index("ix_auction_anchor_items_active", "auction_anchor_items", ["is_active"])
+    op.create_index(
+        "ix_auction_anchor_items_priority",
+        "auction_anchor_items",
+        ["snapshot_id", "instrument_id", "is_active", "priority_rank"],
+    )
 
     # 3. auction_anchor_publications — 锚点发布指针
     op.create_table(
@@ -133,6 +156,8 @@ def upgrade() -> None:
     op.create_index("ix_auction_anchor_pub_trade_date", "auction_anchor_publications", ["trade_date"])
 
     # 4. auction_scan_runs — 竞价扫描 run
+    # [P0-4 修复 2026-07-31] 新增 attempt_count 支持失败/部分成功重试（递增 attempt）；
+    # fencing_epoch 用于租约过期 fencing 恢复（旧 Worker 写入被拒绝）。
     op.create_table(
         "auction_scan_runs",
         sa.Column("id", UUID(as_uuid=True), primary_key=True, nullable=False),
@@ -149,6 +174,8 @@ def upgrade() -> None:
         sa.Column("price_adjustment_version", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False,
                   comment="queued/running/succeeded/failed/partial"),
+        sa.Column("attempt_count", sa.Integer(), nullable=False, server_default="1",
+                  comment="尝试次数（succeeded/running 租约有效时不递增；failed/partial 重试递增）"),
         sa.Column("eligible_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("ready_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("coverage_ratio", sa.Float(), nullable=False, server_default="0.0"),
@@ -156,7 +183,8 @@ def upgrade() -> None:
         sa.Column("missing_reasons", JSONB, nullable=False, server_default="{}"),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("worker_id", sa.Text(), nullable=True),
-        sa.Column("lease_epoch", sa.Integer(), nullable=True),
+        sa.Column("lease_epoch", sa.Integer(), nullable=True,
+                  comment="lease fencing epoch（旧 Worker 写入被拒绝）"),
         sa.Column("heartbeat_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
@@ -273,6 +301,10 @@ def upgrade() -> None:
     op.create_index("ix_auction_scope_res_status", "auction_scope_results", ["status_label"])
 
     # 7. auction_event_trackings — 竞价事件生命周期追踪
+    # [P0-5 修复 2026-07-31] 完整生命周期 formed/confirmed/continued/weakened/failed/transformed/expired。
+    # update_event_lifecycle 在 confirmed 后再次判断 continued（开盘后窗口维持触发）
+    # 或 weakened（回落至触发线之下）；并通过 AuctionScopeResult 判断板块扩散失败、
+    # 龙头孤立、指数与中位数背离 → 触发 transformed。
     op.create_table(
         "auction_event_trackings",
         sa.Column("id", UUID(as_uuid=True), primary_key=True, nullable=False),
@@ -291,8 +323,12 @@ def upgrade() -> None:
         sa.Column("trigger_condition", sa.Text(), nullable=True),
         sa.Column("formed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("confirmed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("continued_at", sa.DateTime(timezone=True), nullable=True,
+                  comment="confirmed 后开盘窗口维持触发时记录"),
         sa.Column("weakened_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("failed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("transformed_at", sa.DateTime(timezone=True), nullable=True,
+                  comment="板块扩散失败/龙头孤立/指数背离等结构性变化时记录"),
         sa.Column("expired_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("confirmation_data", JSONB, nullable=True),
         sa.Column("reason_codes", JSONB, nullable=False, server_default="[]"),

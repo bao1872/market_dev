@@ -12,6 +12,7 @@ import { useQuery } from '@tanstack/react-query'
 import { apiClient } from '@/api/client'
 import type {
   AnchorStatusResponse,
+  AuctionBackflowData,
   AuctionBoardPageData,
   AuctionInstrumentPageData,
   AuctionMarketPageData,
@@ -131,6 +132,20 @@ export async function getAuctionAnchors(
   return data
 }
 
+/** GET /api/v1/auction/backflow/{trade_date} — ReviewPage 第二金字塔+竞价事件回流数据 */
+export async function getAuctionBackflow(
+  tradeDate: string,
+  topEvents = 50,
+): Promise<AuctionBackflowData> {
+  const { data } = await apiClient.get<AuctionBackflowData>(
+    `/api/v1/auction/backflow/${tradeDate}`,
+    {
+      params: { top_events: topEvents },
+    },
+  )
+  return data
+}
+
 // ============================================================
 // React Query Key 工厂
 // ============================================================
@@ -146,6 +161,8 @@ export const auctionKeys = {
     [...auctionKeys.all, 'instrument', symbol, tradeDate ?? 'latest'] as const,
   anchors: (tradeDate: string) =>
     [...auctionKeys.all, 'anchors', tradeDate] as const,
+  backflow: (tradeDate: string, topEvents = 50) =>
+    [...auctionKeys.all, 'backflow', tradeDate, topEvents] as const,
 } as const
 
 // ============================================================
@@ -220,6 +237,27 @@ export function useAuctionAnchors(
   return useQuery({
     queryKey: tradeDate ? auctionKeys.anchors(tradeDate) : ['auction', 'anchors', 'disabled'],
     queryFn: () => getAuctionAnchors(tradeDate as string),
+    enabled: enabled && !!tradeDate,
+    staleTime: 60 * 1000,
+  })
+}
+
+/**
+ * 第二金字塔+竞价事件回流 hook（ReviewPage 调用）
+ * GET /api/v1/auction/backflow/{trade_date}
+ * - 返回分布/迁移/新鲜度/集中度四维度数据
+ * - 用于在 /review 页面展示竞价事件回流与第二金字塔可视化
+ */
+export function useAuctionBackflow(
+  tradeDate: string | null | undefined,
+  options: { topEvents?: number; enabled?: boolean } = {},
+) {
+  const { enabled = true, topEvents = 50 } = options
+  return useQuery({
+    queryKey: tradeDate
+      ? auctionKeys.backflow(tradeDate, topEvents)
+      : ['auction', 'backflow', 'disabled'],
+    queryFn: () => getAuctionBackflow(tradeDate as string, topEvents),
     enabled: enabled && !!tradeDate,
     staleTime: 60 * 1000,
   })

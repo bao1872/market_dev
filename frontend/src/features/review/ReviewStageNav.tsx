@@ -1,5 +1,5 @@
-// [ReviewStageNav] - 描述: 五阶段导航（PRD §14.2）
-// 1.市场扫描 2.筛选发现 3.板块归因 4.个股验证 5.追踪复核
+// [ReviewStageNav] - 描述: 六阶段导航（PRD §14.2 + PRD75 §3 竞价回流）
+// 1.市场扫描 2.筛选发现 3.板块归因 4.个股验证 5.追踪复核 6.竞价回流
 // 阶段共享同一上下文；切换阶段时更新 URL
 import type { ReviewStage } from './types'
 import styles from './review.module.scss'
@@ -15,6 +15,7 @@ const STAGES: Array<{ value: ReviewStage; label: string }> = [
   { value: 'attribution', label: '板块归因' },
   { value: 'validation', label: '个股验证' },
   { value: 'tracking', label: '追踪复核' },
+  { value: 'auction', label: '竞价回流' },
 ]
 
 export default function ReviewStageNav({ stage, onChange }: ReviewStageNavProps) {

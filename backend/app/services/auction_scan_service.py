@@ -42,6 +42,7 @@ from app.models.auction import (
     AuctionEventTracking,
     AuctionInstrumentResult,
     AuctionScanRun,
+    AuctionScopeResult,
 )
 from app.models.bar import BarDaily, BarMinute
 from app.models.instrument import Instrument
@@ -75,6 +76,25 @@ EX_RIGHT_ADJ_FACTOR_CHANGE_THRESHOLD = 0.001
 # 开盘窗口时间
 OPENING_TIME = time(9, 30)
 
+# [P0-4 修复 2026-07-31] 租约与 fencing 配置
+SCAN_RUN_LEASE_SECONDS = 1800  # 30 分钟（最终竞价扫描一般 5-10 分钟内完成）
+SCAN_RUN_HEARTBEAT_INTERVAL_SECONDS = 60
+# 租约过期判定：heartbeat_at距今超过此值则视为租约失效
+_LEASE_EXPIRED_SECONDS = 1800
+
+# [P0-5 修复 2026-07-31] 生命周期扩展：支持 confirmed → continued/weakened/failed/transformed/expired
+LIFECYCLE_TERMINAL_STATES = frozenset({"failed", "transformed", "expired"})
+LIFECYCLE_ACTIVE_STATES = frozenset({"formed", "confirmed", "continued", "weakened"})
+
+# 生命周期转换阈值
+CONFIRM_TO_WEAKEN_DROP_PCT = 0.02  # confirmed 后价格回落 2% 转为 weakened
+CONFIRM_TO_FAIL_DROP_PCT = 0.05  # confirmed 后价格回落 5% 转为 failed
+
+# 板块扩散失败/龙头孤立/指数背离判定阈值（[P0-5] 读取 AuctionScopeResult）
+_SECTOR_DISPERSION_FAIL_HHI = 0.5  # HHI > 0.5 视为集中度过高，扩散失败
+_LEADER_ISOLATION_GAP = 5.0  # 龙头中位数差距 > 5% 视为孤立
+_INDEX_DIVERGENCE_PCT = 1.0  # 指数与中位数涨跌幅偏离 > 1% 视为背离
+
 
 # =============================================================================
 # 异常
@@ -87,6 +107,14 @@ class AnchorNotPublishedError(ValueError):
 
 class AnchorExpiredError(ValueError):
     """锚点快照已过期，禁止扫描。"""
+
+
+class AuctionScanConflictError(ValueError):
+    """[P0-4] 同日 scan run 仍在运行且租约有效，拒绝重复执行。"""
+
+
+class AuctionScanAlreadySucceededError(ValueError):
+    """[P0-4] 同日 scan run 已成功，幂等拒绝重复执行（callers 可直接读取结果）。"""
 
 
 # =============================================================================
@@ -201,9 +229,9 @@ def _extract_ohlc_arrays(history: list[BarDaily]) -> tuple[np.ndarray, np.ndarra
     ]
     if not bars:
         return np.array([]), np.array([]), np.array([])
-    highs = np.array([float(b.high) for b in bars])
-    lows = np.array([float(b.low) for b in bars])
-    closes = np.array([float(b.close) for b in bars])
+    highs = np.array([float(b.high) for b in bars])  # type: ignore[arg-type]  # 已 filter None
+    lows = np.array([float(b.low) for b in bars])  # type: ignore[arg-type]  # 已 filter None
+    closes = np.array([float(b.close) for b in bars])  # type: ignore[arg-type]  # 已 filter None
     return highs, lows, closes
 
 
@@ -263,6 +291,164 @@ def _detect_limits(change_pct: float | None) -> tuple[bool, bool]:
     if change_pct is None:
         return False, False
     return change_pct >= LIMIT_UP_THRESHOLD, change_pct <= LIMIT_DOWN_THRESHOLD
+
+
+# =============================================================================
+# [P0-4] 租约与 fencing 辅助函数
+# =============================================================================
+
+
+def _is_lease_expired(
+    heartbeat_at: datetime | None,
+    *,
+    now: datetime | None = None,
+    expired_seconds: int = _LEASE_EXPIRED_SECONDS,
+) -> bool:
+    """判定租约是否已过期。
+
+    Args:
+        heartbeat_at: 上次心跳时间
+        now: 当前时间（None 取 datetime.now(UTC)）
+        expired_seconds: 过期阈值（秒）
+
+    Returns:
+        True 表示租约已过期，可被 fencing 接管
+    """
+    if heartbeat_at is None:
+        return True
+    current = now or datetime.now(UTC)
+    # 统一时区比较
+    if heartbeat_at.tzinfo is None:
+        heartbeat_at = heartbeat_at.replace(tzinfo=UTC)
+    delta = (current - heartbeat_at).total_seconds()
+    return delta > expired_seconds
+
+
+def _build_scan_run_summary(run: AuctionScanRun) -> dict[str, Any]:
+    """从现有 AuctionScanRun 构造幂等返回结果。"""
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "eligible_count": run.eligible_count,
+        "ready_count": run.ready_count,
+        "coverage_ratio": run.coverage_ratio,
+        "missing_count": run.missing_count,
+        "missing_reasons": dict(run.missing_reasons or {}),
+        "result_count": 0,  # 已有 run 不再重复查询 results
+        "event_count": 0,
+        "idempotent": True,
+        "attempt_count": run.attempt_count,
+    }
+
+
+async def _acquire_or_recover_scan_run(
+    db: AsyncSession,
+    trade_date: date,
+    auction_type: str,
+    *,
+    worker_id: str | None,
+    lease_epoch: int | None,
+    now: datetime | None = None,
+) -> AuctionScanRun | None:
+    """[P0-4] 幂等获取/恢复 AuctionScanRun。
+
+    合同：
+    - 同 (trade_date, auction_type, algorithm_version) 已 succeeded → 返回 None，
+      caller 直接返回已成功结果（不抛异常，由 caller 决定是否视为已成功）
+    - running 且租约有效 → 抛 AuctionScanConflictError 拒绝重复
+    - running 但租约过期 → fencing：原子更新 worker_id/lease_epoch/heartbeat_at，
+      返回原 run（保留 attempt_count 不变）
+    - failed/partial → 递增 attempt_count 并重置 running，返回原 run
+    - queued → 直接领取并置 running
+    - 不存在 → 创建新 run，返回新对象
+
+    Returns:
+        AuctionScanRun：可继续执行的 run（running 状态，attempt_count 已正确设置）；
+        None：已 succeeded，幂等返回
+    """
+    current_now = now or datetime.now(UTC)
+    new_lease_epoch = lease_epoch if lease_epoch is not None else int(current_now.timestamp())
+
+    # 查询现有 run（基于唯一键 trade_date + auction_type + algorithm_version）
+    existing_stmt = (
+        select(AuctionScanRun)
+        .where(
+            AuctionScanRun.trade_date == trade_date,
+            AuctionScanRun.auction_type == auction_type,
+            AuctionScanRun.algorithm_version == AUCTION_SCAN_ALGORITHM_VERSION,
+        )
+        .order_by(AuctionScanRun.created_at.desc())
+        .limit(1)
+    )
+    existing = (await db.execute(existing_stmt)).scalar_one_or_none()
+
+    if existing is None:
+        # 不存在，创建新 run（caller 后续填充 source_anchor_snapshot_id 等字段）
+        run = AuctionScanRun(
+            trade_date=trade_date,
+            auction_type=auction_type,
+            algorithm_version=AUCTION_SCAN_ALGORITHM_VERSION,
+            price_adjustment_version="pending",  # caller 后续填充
+            status="running",
+            attempt_count=1,
+            worker_id=worker_id,
+            lease_epoch=new_lease_epoch,
+            started_at=current_now,
+            heartbeat_at=current_now,
+        )
+        db.add(run)
+        await db.flush()
+        return run
+
+    # 已存在 — 根据状态处理
+    if existing.status == "succeeded":
+        logger.info(
+            "[AuctionScan] 幂等命中：已成功 run_id=%s trade_date=%s attempt=%d",
+            existing.id, trade_date, existing.attempt_count,
+        )
+        return None  # caller 应直接返回 _build_scan_run_summary(existing)
+
+    if existing.status == "running":
+        if not _is_lease_expired(existing.heartbeat_at, now=current_now):
+            # 租约仍有效，拒绝重复
+            raise AuctionScanConflictError(
+                f"trade_date={trade_date} auction_type={auction_type} "
+                f"run_id={existing.id} 仍在运行（worker={existing.worker_id}, "
+                f"lease_epoch={existing.lease_epoch}, heartbeat={existing.heartbeat_at}），"
+                f"拒绝重复执行"
+            )
+        # 租约过期 → fencing 接管（保留 attempt_count 不递增）
+        logger.warning(
+            "[AuctionScan] fencing 恢复过期 run_id=%s trade_date=%s "
+            "旧 worker=%s 旧 lease=%s 心跳=%s",
+            existing.id, trade_date, existing.worker_id,
+            existing.lease_epoch, existing.heartbeat_at,
+        )
+        existing.worker_id = worker_id
+        existing.lease_epoch = new_lease_epoch
+        existing.heartbeat_at = current_now
+        existing.started_at = current_now
+        # 保持 attempt_count 不变（fencing 不算新尝试，是恢复同一次）
+        existing.error_message = None
+        await db.flush()
+        return existing
+
+    # failed/partial → 重试，递增 attempt_count
+    new_attempt = existing.attempt_count + 1
+    logger.info(
+        "[AuctionScan] 重试 %s run_id=%s trade_date=%s new_attempt=%d",
+        existing.status, existing.id, trade_date, new_attempt,
+    )
+    existing.status = "running"
+    existing.attempt_count = new_attempt
+    existing.worker_id = worker_id
+    existing.lease_epoch = new_lease_epoch
+    existing.heartbeat_at = current_now
+    existing.started_at = current_now
+    existing.finished_at = None
+    existing.error_message = None
+    await db.flush()
+    return existing
 
 
 # =============================================================================
@@ -528,8 +714,12 @@ def _determine_lifecycle_transition(
 ) -> str:
     """根据开盘后价格判断事件生命周期转换。
 
+    [P0-5 修复 2026-07-31] 返回值扩展：
+    - formed/confirmed/weakened/failed（原有）
+    - continued：confirmed 事件在窗口末价仍维持触发条件（突破类）
+
     Returns:
-        new lifecycle: formed/confirmed/weakened/failed
+        new lifecycle: formed/confirmed/continued/weakened/failed
     """
     if opening_price is None or trigger_price is None:
         return "formed"
@@ -577,6 +767,113 @@ def _determine_lifecycle_transition(
     # inside_open / insufficient_participation / anchor_insufficient / anchor_expired
     # 无明确触发线，维持 formed
     return "formed"
+
+
+def _classify_continued_lifecycle(
+    current_lifecycle: str,
+    event_type: str,
+    opening_price: Decimal | None,
+    window_end_price: Decimal | None,
+    trigger_price: Decimal | None,
+) -> str | None:
+    """[P0-5] 根据 confirmed 状态与窗口末价判断是否升级为 continued。
+
+    合同：
+    - confirmed 突破类事件，窗口末价仍 >= trigger_price → continued（维持触发）
+    - confirmed 支撑确认，窗口末价仍 >= trigger_price → continued
+    - confirmed 阻力阻挡，窗口末价仍 <= trigger_price → continued
+    - 已 weakened/failed/transformed/expired 的事件不再升级
+
+    Returns:
+        新 lifecycle 或 None（不变）
+    """
+    if current_lifecycle != "confirmed":
+        return None
+    if window_end_price is None or trigger_price is None:
+        return None
+
+    end_f = float(window_end_price)
+    trig_f = float(trigger_price)
+    if trig_f == 0:
+        return None
+
+    breakout_events = ("dual_breakout", "structure_breakout", "chip_repricing")
+    if event_type in breakout_events:
+        if end_f >= trig_f:
+            return "continued"
+        # 窗口末回落至 trigger 下 2% 内 → 仍为 confirmed（不降级，但未达 continued）
+        if end_f >= trig_f * (1 - CONFIRM_TO_WEAKEN_DROP_PCT):
+            return None
+        return "weakened"
+
+    if event_type == "support_confirm":
+        if end_f >= trig_f:
+            return "continued"
+        if end_f >= trig_f * (1 - CONFIRM_TO_WEAKEN_DROP_PCT):
+            return None
+        return "weakened"
+
+    if event_type == "resistance_blocked":
+        if end_f <= trig_f:
+            return "continued"
+        if end_f <= trig_f * (1 + CONFIRM_TO_WEAKEN_DROP_PCT):
+            return None
+        return "weakened"
+
+    if event_type == "test_upper":
+        if end_f >= trig_f:
+            return "continued"
+        return None
+
+    if event_type == "test_lower":
+        if end_f <= trig_f:
+            return "continued"
+        return None
+
+    return None
+
+
+def _detect_structural_transformation(
+    scope: AuctionScopeResult | None,
+    *,
+    market_scope: AuctionScopeResult | None,
+    instrument_change_pct: float | None,
+) -> tuple[str | None, dict[str, Any]]:
+    """[P0-5] 检测结构性变化导致事件 transformed。
+
+    读取 AuctionScopeResult 判断：
+    1. 板块扩散失败：scope.hhi > _SECTOR_DISPERSION_FAIL_HHI
+    2. 龙头孤立：scope.leader_median_gap > _LEADER_ISOLATION_GAP
+    3. 指数与中位数背离：market_scope.median_change_pct 与 instrument_change_pct 偏离 > _INDEX_DIVERGENCE_PCT
+
+    Returns:
+        (transformation_reason, evidence_dict)；transformation_reason=None 表示未发生
+    """
+    evidence: dict[str, Any] = {}
+    if scope is not None:
+        if scope.hhi is not None and scope.hhi > _SECTOR_DISPERSION_FAIL_HHI:
+            evidence["hhi"] = scope.hhi
+            evidence["hhi_threshold"] = _SECTOR_DISPERSION_FAIL_HHI
+            return ("sector_dispersion_failed", evidence)
+        if scope.leader_median_gap is not None and scope.leader_median_gap > _LEADER_ISOLATION_GAP:
+            evidence["leader_median_gap"] = scope.leader_median_gap
+            evidence["gap_threshold"] = _LEADER_ISOLATION_GAP
+            return ("leader_isolation", evidence)
+
+    if (
+        market_scope is not None
+        and market_scope.median_change_pct is not None
+        and instrument_change_pct is not None
+    ):
+        divergence = abs(market_scope.median_change_pct - instrument_change_pct)
+        if divergence > _INDEX_DIVERGENCE_PCT:
+            evidence["market_median_change_pct"] = market_scope.median_change_pct
+            evidence["instrument_change_pct"] = instrument_change_pct
+            evidence["divergence"] = divergence
+            evidence["divergence_threshold"] = _INDEX_DIVERGENCE_PCT
+            return ("index_divergence", evidence)
+
+    return (None, evidence)
 
 
 # =============================================================================
@@ -823,22 +1120,32 @@ async def run_auction_scan(
 
     price_adjustment_version = snapshot.price_adjustment_version
 
-    # 3. 创建 AuctionScanRun
+    # 3. [P0-4] 幂等获取/恢复 AuctionScanRun（禁止直接 INSERT 触发唯一约束）
     now = datetime.now(UTC)
-    run = AuctionScanRun(
-        trade_date=trade_date,
-        auction_type=auction_type,
-        source_anchor_snapshot_id=snapshot_id,
-        source_anchor_publication_id=publication_id,
-        algorithm_version=AUCTION_SCAN_ALGORITHM_VERSION,
-        price_adjustment_version=price_adjustment_version,
-        status="running",
-        worker_id=worker_id,
-        lease_epoch=lease_epoch,
-        started_at=now,
-        heartbeat_at=now,
+    run = await _acquire_or_recover_scan_run(
+        db, trade_date, auction_type,
+        worker_id=worker_id, lease_epoch=lease_epoch, now=now,
     )
-    db.add(run)
+    if run is None:
+        # 同 (trade_date, auction_type, version) 已 succeeded — 幂等返回
+        existing_stmt = (
+            select(AuctionScanRun)
+            .where(
+                AuctionScanRun.trade_date == trade_date,
+                AuctionScanRun.auction_type == auction_type,
+                AuctionScanRun.algorithm_version == AUCTION_SCAN_ALGORITHM_VERSION,
+            )
+            .order_by(AuctionScanRun.created_at.desc())
+            .limit(1)
+        )
+        existing = (await db.execute(existing_stmt)).scalar_one()
+        return _build_scan_run_summary(existing)
+
+    # 填充 source_anchor_snapshot_id / publication_id / price_adjustment_version
+    run.source_anchor_snapshot_id = snapshot_id
+    run.source_anchor_publication_id = publication_id
+    run.price_adjustment_version = price_adjustment_version
+    run.heartbeat_at = now
     await db.flush()
     run_id = run.id
 
@@ -932,7 +1239,8 @@ async def run_auction_scan(
 
             # 相对 20 日竞价额中位数和分位
             history_auction_amounts = [
-                _safe_decimal(b.amount) for b in auction_history
+                amt for amt in (_safe_decimal(b.amount) for b in auction_history)
+                if amt is not None
             ]
             rel_vol_median, vol_median_components = _compute_relative_volume_median(
                 auction_amount, history_auction_amounts
@@ -1135,12 +1443,18 @@ async def update_event_lifecycle(
 ) -> dict[str, Any]:
     """开盘后验证更新事件生命周期。
 
+    [P0-5 修复 2026-07-31] 生命周期扩展：
+    - formed → confirmed/weakened/failed/expired（原有）
+    - confirmed → continued/weakened/failed（窗口末价维持或回落）
+    - 任意 → transformed（板块扩散失败/龙头孤立/指数背离）
+
     流程：
-    1. 查询 formed 状态的事件
+    1. 查询 formed/confirmed 状态的事件（terminal 状态不再更新）
     2. 获取开盘后窗口内的 BarMinute 数据
-    3. 判断 formed → confirmed/weakened/failed/expired
-    4. 识别：突破后回落、破位后收回、成交不足、龙头孤立、扩散失败、指数背离
-    5. 更新 AuctionEventTracking lifecycle 和时间戳
+    3. 判断 formed → confirmed/weakened/failed
+    4. 判断 confirmed → continued/weakened（窗口末价维持触发条件）
+    5. [P0-5] 读取 AuctionScopeResult 检测结构性变化 → transformed
+    6. 更新 AuctionEventTracking lifecycle 和时间戳
 
     Args:
         db: 异步 DB 会话
@@ -1158,12 +1472,12 @@ async def update_event_lifecycle(
     if run is None:
         raise ValueError(f"AuctionScanRun not found: {scan_run_id}")
 
-    # 查询 formed 状态事件
+    # 查询 formed/confirmed 状态事件（terminal 不再更新）
     stmt = (
         select(AuctionEventTracking)
         .where(
             AuctionEventTracking.scan_run_id == scan_run_id,
-            AuctionEventTracking.lifecycle == "formed",
+            AuctionEventTracking.lifecycle.in_(LIFECYCLE_ACTIVE_STATES),
         )
     )
     result = await db.execute(stmt)
@@ -1178,16 +1492,24 @@ async def update_event_lifecycle(
         db, instrument_ids, run.trade_date
     )
 
+    # [P0-5] 加载 AuctionScopeResult 用于结构性变化检测
+    # 1) market scope (scope_type=market, scope_id=NULL)
+    # 2) 各事件所属板块 scope（通过 instrument_id 反查 board_membership）
+    market_scope = await _get_market_scope_for_scan(db, scan_run_id)
+    board_scope_map = await _get_board_scopes_for_instruments(db, scan_run_id, instrument_ids)
+
+    # 加载 instrument_results 以获取 change_pct（用于指数背离检测）
+    inst_result_map = await _get_instrument_results_map(db, scan_run_id, instrument_ids)
+
     transitions: dict[str, int] = defaultdict(int)
     now = check_time or datetime.now(UTC)
 
     for event in events:
         bars = opening_bars_map.get(event.instrument_id, [])
         if not bars:
-            # 无开盘数据，维持 formed
+            # 无开盘数据，维持原状态
             continue
 
-        # 开盘价 = 第一根 bar 的 open；窗口末价 = 最后一根 bar 的 close
         opening_price = _safe_decimal(bars[0].open)
         window_end_price = _safe_decimal(bars[-1].close)
         window_volume = sum(
@@ -1195,43 +1517,68 @@ async def update_event_lifecycle(
         )
 
         trigger_price = _safe_decimal(event.trigger_price)
+        old_lifecycle = event.lifecycle
 
-        # 判断生命周期转换
+        # 1. 形态判断
         new_lifecycle = _determine_lifecycle_transition(
             event.event_type, opening_price, trigger_price
         )
 
-        # 开盘后回落检测：突破后窗口末价回落至触发线下方
-        if new_lifecycle == "confirmed" and window_end_price is not None and trigger_price is not None:
-            breakout_events = ("dual_breakout", "structure_breakout", "chip_repricing")
-            if event.event_type in breakout_events:
-                if float(window_end_price) < float(trigger_price):
-                    new_lifecycle = "weakened"
+        # 2. [P0-5] 若已是 confirmed，进一步判断 continued/weakened
+        if old_lifecycle == "confirmed":
+            continued_or_weakened = _classify_continued_lifecycle(
+                old_lifecycle, event.event_type,
+                opening_price, window_end_price, trigger_price,
+            )
+            if continued_or_weakened is not None:
+                new_lifecycle = continued_or_weakened
 
-        if new_lifecycle == event.lifecycle:
-            # 无变化
+        # 3. [P0-5] 结构性变化检测（transformation 优先级最高）
+        # 读取所属板块的 AuctionScopeResult
+        scope = board_scope_map.get(event.instrument_id)
+        inst_result = inst_result_map.get(event.instrument_id)
+        inst_change_pct = (
+            inst_result.change_pct if inst_result is not None else None
+        )
+        transformation_reason, transformation_evidence = _detect_structural_transformation(
+            scope, market_scope=market_scope, instrument_change_pct=inst_change_pct,
+        )
+        if transformation_reason is not None:
+            new_lifecycle = "transformed"
+
+        if new_lifecycle == old_lifecycle:
             continue
 
         event.lifecycle = new_lifecycle
         if new_lifecycle == "confirmed":
             event.confirmed_at = now
+        elif new_lifecycle == "continued":
+            event.continued_at = now
         elif new_lifecycle == "weakened":
             event.weakened_at = now
         elif new_lifecycle == "failed":
             event.failed_at = now
+        elif new_lifecycle == "transformed":
+            event.transformed_at = now
         elif new_lifecycle == "expired":
             event.expired_at = now
 
-        event.confirmation_data = {
+        confirmation_data: dict[str, Any] = {
             "opening_price": str(opening_price) if opening_price else None,
             "window_end_price": str(window_end_price) if window_end_price else None,
             "trigger_price": str(trigger_price) if trigger_price else None,
             "check_time": now.isoformat(),
             "window_volume": window_volume,
             "window_bars_count": len(bars),
+            "old_lifecycle": old_lifecycle,
+            "new_lifecycle": new_lifecycle,
         }
+        if transformation_reason is not None:
+            confirmation_data["transformation_reason"] = transformation_reason
+            confirmation_data["transformation_evidence"] = transformation_evidence
+        event.confirmation_data = confirmation_data
 
-        transitions[f"formed->{new_lifecycle}"] += 1
+        transitions[f"{old_lifecycle}->{new_lifecycle}"] += 1
 
     await db.flush()
 
@@ -1244,6 +1591,102 @@ async def update_event_lifecycle(
         "scan_run_id": scan_run_id,
         "total": len(events),
         "transitions": dict(transitions),
+    }
+
+
+# =============================================================================
+# [P0-5] AuctionScopeResult 辅助加载
+# =============================================================================
+
+
+async def _get_market_scope_for_scan(
+    db: AsyncSession,
+    scan_run_id: uuid.UUID,
+) -> AuctionScopeResult | None:
+    """查询指定 scan run 的市场级 AuctionScopeResult。"""
+    from app.models.auction import AuctionScopeResult
+
+    stmt = select(AuctionScopeResult).where(
+        AuctionScopeResult.scan_run_id == scan_run_id,
+        AuctionScopeResult.scope_type == "market",
+        AuctionScopeResult.scope_id.is_(None),
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _get_board_scopes_for_instruments(
+    db: AsyncSession,
+    scan_run_id: uuid.UUID,
+    instrument_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, AuctionScopeResult]:
+    """[P0-5] 查询 instruments 所属板块的 AuctionScopeResult。
+
+    Returns: dict[instrument_id, AuctionScopeResult]
+    """
+    if not instrument_ids:
+        return {}
+
+    from app.models.auction import AuctionScopeResult
+    from app.models.market_board import MarketBoardMembership
+
+    # 查询每个 instrument 所属的 board_id（取第一个 industry/concept 板块）
+    stmt = (
+        select(
+            MarketBoardMembership.instrumentId,
+            MarketBoardMembership.boardId,
+        )
+        .where(MarketBoardMembership.instrumentId.in_(instrument_ids))
+    )
+    rows = (await db.execute(stmt)).all()
+    if not rows:
+        return {}
+
+    instrument_to_board: dict[uuid.UUID, uuid.UUID] = {}
+    for inst_id, board_id in rows:
+        # 同一 instrument 可能属于多个 board，取第一个（粗粒度判定足够）
+        if inst_id not in instrument_to_board:
+            instrument_to_board[inst_id] = board_id
+
+    board_ids = list(set(instrument_to_board.values()))
+
+    # 查询这些 board 的 scope_result
+    scope_stmt = (
+        select(AuctionScopeResult)
+        .where(
+            AuctionScopeResult.scan_run_id == scan_run_id,
+            AuctionScopeResult.scope_id.in_(board_ids),
+        )
+    )
+    scope_by_board: dict[uuid.UUID, AuctionScopeResult] = {
+        s.scope_id: s for s in (await db.execute(scope_stmt)).scalars().all()
+        if s.scope_id is not None
+    }
+
+    return {
+        inst_id: scope_by_board[board_id]
+        for inst_id, board_id in instrument_to_board.items()
+        if board_id in scope_by_board
+    }
+
+
+async def _get_instrument_results_map(
+    db: AsyncSession,
+    scan_run_id: uuid.UUID,
+    instrument_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, AuctionInstrumentResult]:
+    """[P0-5] 查询指定 scan run 内的 instrument_results。"""
+    if not instrument_ids:
+        return {}
+    stmt = (
+        select(AuctionInstrumentResult)
+        .where(
+            AuctionInstrumentResult.scan_run_id == scan_run_id,
+            AuctionInstrumentResult.instrument_id.in_(instrument_ids),
+        )
+    )
+    return {
+        r.instrument_id: r
+        for r in (await db.execute(stmt)).scalars().all()
     }
 
 
@@ -1422,5 +1865,71 @@ if __name__ == "__main__":
     assert _determine_lifecycle_transition(
         "inside_open", Decimal("10.0"), Decimal("10.0")
     ) == "formed"
+
+    # [P0-4] _is_lease_expired
+    fresh = datetime.now(UTC) - timedelta(seconds=10)
+    old = datetime.now(UTC) - timedelta(seconds=3600)
+    assert _is_lease_expired(None) is True
+    assert _is_lease_expired(fresh) is False
+    assert _is_lease_expired(old) is True
+    # 时区无关检查（naive datetime 视为 UTC）
+    naive_fresh = datetime.utcnow() - timedelta(seconds=10)
+    assert _is_lease_expired(naive_fresh) is False
+
+    # [P0-5] _classify_continued_lifecycle
+    # confirmed 突破事件，窗口末价仍 >= trigger → continued
+    assert _classify_continued_lifecycle(
+        "confirmed", "dual_breakout",
+        Decimal("11.0"), Decimal("11.5"), Decimal("10.0"),
+    ) == "continued"
+    # confirmed 突破事件，窗口末回落 < 2% → None（仍为 confirmed）
+    assert _classify_continued_lifecycle(
+        "confirmed", "dual_breakout",
+        Decimal("11.0"), Decimal("9.85"), Decimal("10.0"),
+    ) is None
+    # confirmed 突破事件，窗口末回落 > 2% → weakened
+    assert _classify_continued_lifecycle(
+        "confirmed", "dual_breakout",
+        Decimal("11.0"), Decimal("9.5"), Decimal("10.0"),
+    ) == "weakened"
+    # 非 confirmed 状态不升级
+    assert _classify_continued_lifecycle(
+        "weakened", "dual_breakout",
+        Decimal("11.0"), Decimal("11.5"), Decimal("10.0"),
+    ) is None
+    # 阻力阻挡：confirmed 且窗口末仍 <= trigger → continued
+    assert _classify_continued_lifecycle(
+        "confirmed", "resistance_blocked",
+        Decimal("9.5"), Decimal("9.5"), Decimal("10.0"),
+    ) == "continued"
+
+    # [P0-5] _detect_structural_transformation
+    # 板块扩散失败：HHI > 阈值
+    class _MockScope:
+        def __init__(self, hhi=None, leader_median_gap=None, median_change_pct=None):
+            self.hhi = hhi
+            self.leader_median_gap = leader_median_gap
+            self.median_change_pct = median_change_pct
+    reason, _ev = _detect_structural_transformation(
+        _MockScope(hhi=0.7), market_scope=None, instrument_change_pct=None,
+    )
+    assert reason == "sector_dispersion_failed"
+    # 龙头孤立：leader_median_gap > 阈值
+    reason, _ev = _detect_structural_transformation(
+        _MockScope(leader_median_gap=8.0), market_scope=None, instrument_change_pct=None,
+    )
+    assert reason == "leader_isolation"
+    # 指数与中位数背离
+    reason, _ev = _detect_structural_transformation(
+        None, market_scope=_MockScope(median_change_pct=2.0), instrument_change_pct=-3.0,
+    )
+    assert reason == "index_divergence"
+    # 无结构性变化
+    reason, _ev = _detect_structural_transformation(
+        _MockScope(hhi=0.3, leader_median_gap=2.0),
+        market_scope=_MockScope(median_change_pct=2.0),
+        instrument_change_pct=2.5,
+    )
+    assert reason is None
 
     print("OK")

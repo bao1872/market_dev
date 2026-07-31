@@ -1,7 +1,7 @@
 {
-  "baseline_commit": "8624166",
-  "total": 44,
-  "unique": 29,
+  "baseline_commit": "67fd2be",
+  "total": 59,
+  "unique": 34,
   "diagnostics": [
     {
       "filename": "app/api/admin_incremental_publish.py",
@@ -176,7 +176,37 @@
       "error_code": "attr-defined",
       "message": "\"Result[tuple[SchedulerJobRun]]\" has no attribute \"get\"",
       "count": 4
+    },
+    {
+      "filename": "app/services/auction_aggregation_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"float\" has incompatible type \"float | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
+      "count": 2
+    },
+    {
+      "filename": "app/services/auction_aggregation_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"_compute_scope_metrics\" has incompatible type \"list[_MockResult]\"; expected \"list[AuctionInstrumentResult]\"",
+      "count": 3
+    },
+    {
+      "filename": "app/services/auction_scan_service.py",
+      "error_code": "list-item",
+      "message": "List item 0 has incompatible type \"_MockBar\"; expected \"BarDaily\"",
+      "count": 5
+    },
+    {
+      "filename": "app/services/auction_scan_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"_detect_structural_transformation\" has incompatible type \"_MockScope\"; expected \"AuctionScopeResult | None\"",
+      "count": 3
+    },
+    {
+      "filename": "app/services/auction_scan_service.py",
+      "error_code": "arg-type",
+      "message": "Argument \"market_scope\" to \"_detect_structural_transformation\" has incompatible type \"_MockScope\"; expected \"AuctionScopeResult | None\"",
+      "count": 2
     }
   ],
-  "_note": "2026-07-30: Baseline regenerated. Previous baseline (commit 8aae487) only had 1 entry (redis_client.py aclose) and was stale — 43 of 44 current errors predate user's baseline 8624166 (verified via git blame on sampled error lines: metric_engine.py:155=7fc5af0, market_review.py:974=7fc5af0, market_data_quality.py:302=bd1526e, after_close_orchestrator.py:1635=fb58e2e — all ancestors of 8624166). Most are SQLAlchemy 2.0 type stub limitations (attr-defined on .constraints/.primary_key/.foreign_keys) or pre-existing code issues in metric_engine.py. None introduced by this round's P0 fixes (compare_mypy_baseline.py passes)."
+  "_note": "2026-07-30: Baseline regenerated. Previous baseline (commit 8aae487) only had 1 entry (redis_client.py aclose) and was stale — 43 of 44 current errors predate user's baseline 8624166 (verified via git blame on sampled error lines: metric_engine.py:155=7fc5af0, market_review.py:974=7fc5af0, market_data_quality.py:302=bd1526e, after_close_orchestrator.py:1635=fb58e2e — all ancestors of 8624166). Most are SQLAlchemy 2.0 type stub limitations (attr-defined on .constraints/.primary_key/.foreign_keys) or pre-existing code issues in metric_engine.py. None introduced by this round's P0 fixes (compare_mypy_baseline.py passes). 2026-07-31: Added 5 auction entries (15 errors) from commit 67fd2be — all in __main__ self-test sections using mock objects (_MockBar/_MockScope/_MockResult), pre-existing in pushed code."
 }

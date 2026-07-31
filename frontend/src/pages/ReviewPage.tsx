@@ -23,6 +23,7 @@ import FilterDiscoveryPanel from '@/features/review/FilterDiscoveryPanel'
 import BoardAttributionPanel from '@/features/review/BoardAttributionPanel'
 import StockValidationPanel from '@/features/review/StockValidationPanel'
 import TrackingReviewPanel from '@/features/review/TrackingReviewPanel'
+import AuctionBackflowPanel from '@/features/review/AuctionBackflowPanel'
 import EvidenceDrawer, { type EvidenceTarget } from '@/features/review/EvidenceDrawer'
 import type { ReviewScopeMetrics, ReviewSignal, ReviewAttribution, ReviewInstrument, ReviewStage } from '@/features/review/types'
 import styles from '@/features/review/review.module.scss'
@@ -254,6 +255,9 @@ export default function ReviewPage() {
             showToast={showToast}
           />
         )
+      case 'auction':
+        // [P0-FE 2026-07-31] 第二金字塔 + 竞价事件回流（PRD75 §3）
+        return <AuctionBackflowPanel tradeDate={tradeDate} />
       default:
         return null
     }
