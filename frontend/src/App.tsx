@@ -33,9 +33,20 @@ import AdminVisitorsPage from './pages/AdminVisitorsPage'
 // 门户页 lazy 加载，避免门户动画代码进入业务页面首包
 const LandingPage = lazy(() => import('./pages/LandingPage'))
 
+// [Auction] - 竞价分析三级页面 lazy 加载（市场/板块/个股）
+// 受保护路由 require_authenticated，任何登录用户可读（GET /api/v1/auction/*）
+const AuctionMarketPage = lazy(() => import('./features/auction/AuctionMarketPage'))
+const AuctionBoardPage = lazy(() => import('./features/auction/AuctionBoardPage'))
+const AuctionInstrumentPage = lazy(() => import('./features/auction/AuctionInstrumentPage'))
+
 // 门户页加载占位
 function LandingFallback() {
   return <div style={{ minHeight: '100vh', background: '#030915' }} />
+}
+
+// [Auction] - 竞价页面 lazy 加载占位（与 UserAppShell 视觉对齐）
+function AuctionFallback() {
+  return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
 }
 
 // 受保护路由布局：仅负责认证与 access profile，不再渲染统一 AppShell
@@ -214,6 +225,32 @@ export const routeConfig: RouteObject[] = [
           // 不强制订阅的辅助页面（仅认证即可）
           { path: '/settings', element: <SettingsPage /> },
           { path: '/messages', element: <MessagesPage /> },
+          // [Auction] 竞价分析三级页面（require_authenticated，任何登录用户可读）
+          // 后端只读 DB，不触发计算；前端只展示、过滤和展开证据
+          {
+            path: '/auction',
+            element: (
+              <Suspense fallback={<AuctionFallback />}>
+                <AuctionMarketPage />
+              </Suspense>
+            ),
+          },
+          {
+            path: '/auction/board/:boardId',
+            element: (
+              <Suspense fallback={<AuctionFallback />}>
+                <AuctionBoardPage />
+              </Suspense>
+            ),
+          },
+          {
+            path: '/auction/stock/:symbol',
+            element: (
+              <Suspense fallback={<AuctionFallback />}>
+                <AuctionInstrumentPage />
+              </Suspense>
+            ),
+          },
         ],
       },
       // 管理员界面（AdminAppShell 独立布局）

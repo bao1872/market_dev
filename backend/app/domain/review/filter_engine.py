@@ -243,6 +243,180 @@ set_evaluator("eval_c3_synchronized_expansion", _eval_c3_synchronized_expansion)
 
 
 # =============================================================================
+# D 族评估器：第二金字塔维度偏差（PRD §24）
+#
+# 输入：context["pyramid_v2"]，来自 board_analysis_snapshots.payload["pyramid_v2"]
+# 结构：
+#   pyramid_v2 = {
+#       "state_transitions": {...},      # 状态迁移原始计数
+#       "freshness": {...},              # 事件新鲜度密度
+#       "diffusion": {                   # 扩散度（基于 state_transitions）
+#           "positive_migration_count": int,
+#           "negative_migration_count": int,
+#           "total_migration_count": int,
+#           "positive_ratio": {"numerator": int, "denominator": int},
+#           "negative_ratio": {"numerator": int, "denominator": int},
+#           "participation_coverage": {"numerator": int, "denominator": int},
+#       },
+#       "concentration": {               # 集中度
+#           "top3_contribution": {"numerator": float, "denominator": float},
+#           "top5_contribution": {"numerator": float, "denominator": float},
+#           "hhi": float,
+#           "leader_median_gap": float | None,
+#           ...
+#       },
+#       "dispersion": {...},
+#       "relative_strength": {
+#           "vs_market": {"ratio": float | None, "label": str | None, "diff": float | None},
+#           "vs_parent": {"ratio": float | None, "label": str | None, "diff": float | None},
+#           "equal_weight_diff": float | None,
+#       },
+#   }
+#
+# 无 pyramid_v2 数据时（market/major_index/style scope 无 board_analysis），
+# 所有 D 族评估器返回 False。
+# =============================================================================
+
+
+def _get_pyramid_v2(context: dict[str, Any]) -> dict[str, Any] | None:
+    """从 context 中安全提取 pyramid_v2 payload。"""
+    pv2 = context.get("pyramid_v2")
+    if not isinstance(pv2, dict):
+        return None
+    return pv2
+
+
+def _ratio_value(ratio_obj: Any) -> float | None:
+    """从 {numerator, denominator} 结构计算比值。"""
+    if not isinstance(ratio_obj, dict):
+        return None
+    num = _to_float(ratio_obj.get("numerator"))
+    den = _to_float(ratio_obj.get("denominator"))
+    if num is None or den is None or abs(den) < 1e-9:
+        return None
+    return num / den
+
+
+def _eval_d1_state_migration_positive(
+    filt: FilterDefinition, context: dict[str, Any],
+) -> bool:
+    """D1：正向状态迁移占优（PRD §24.1 状态迁移）。
+
+    positive_migration_count >= 5
+    positive_ratio >= 0.6
+    negative_migration_count <= positive_migration_count
+    """
+    pv2 = _get_pyramid_v2(context)
+    if pv2 is None:
+        return False
+    diffusion = pv2.get("diffusion") or {}
+    pos_count = _to_float(diffusion.get("positive_migration_count"))
+    neg_count = _to_float(diffusion.get("negative_migration_count"))
+    if pos_count is None or pos_count < 5:
+        return False
+    pos_ratio = _ratio_value(diffusion.get("positive_ratio"))
+    if pos_ratio is None or pos_ratio < 0.6:
+        return False
+    if neg_count is not None and neg_count > pos_count:
+        return False
+    return True
+
+
+def _eval_d2_event_freshness_high(
+    filt: FilterDefinition, context: dict[str, Any],
+) -> bool:
+    """D2：事件新鲜度高（PRD §24.1 事件新鲜度）。
+
+    decay_weighted_density >= 0.3
+    today_count >= 1 或 last_5d_count >= 3
+    """
+    pv2 = _get_pyramid_v2(context)
+    if pv2 is None:
+        return False
+    freshness = pv2.get("freshness") or {}
+    density = _to_float(freshness.get("decay_weighted_density"))
+    if density is None or density < 0.3:
+        return False
+    today = _to_float(freshness.get("today_count")) or 0.0
+    last_5d = _to_float(freshness.get("last_5d_count")) or 0.0
+    return today >= 1 or last_5d >= 3
+
+
+def _eval_d3_breadth_expansion(
+    filt: FilterDefinition, context: dict[str, Any],
+) -> bool:
+    """D3：宽度扩张（PRD §24.1 宽度/覆盖率）。
+
+    participation_coverage >= 0.3
+    total_migration_count >= 5
+    """
+    pv2 = _get_pyramid_v2(context)
+    if pv2 is None:
+        return False
+    diffusion = pv2.get("diffusion") or {}
+    coverage = _ratio_value(diffusion.get("participation_coverage"))
+    if coverage is None or coverage < 0.3:
+        return False
+    total = _to_float(diffusion.get("total_migration_count"))
+    if total is None or total < 5:
+        return False
+    return True
+
+
+def _eval_d4_concentration_high(
+    filt: FilterDefinition, context: dict[str, Any],
+) -> bool:
+    """D4：集中度高（PRD §24.1 集中度）。
+
+    hhi >= 0.1 或 top5_contribution >= 0.4
+    leader_median_gap > 0
+    """
+    pv2 = _get_pyramid_v2(context)
+    if pv2 is None:
+        return False
+    conc = pv2.get("concentration") or {}
+    hhi = _to_float(conc.get("hhi"))
+    top5 = _ratio_value(conc.get("top5_contribution"))
+    hhi_high = hhi is not None and hhi >= 0.1
+    top5_high = top5 is not None and top5 >= 0.4
+    if not (hhi_high or top5_high):
+        return False
+    gap = _to_float(conc.get("leader_median_gap"))
+    if gap is None or gap <= 0:
+        return False
+    return True
+
+
+def _eval_d5_relative_strength_strong(
+    filt: FilterDefinition, context: dict[str, Any],
+) -> bool:
+    """D5：相对强度强（PRD §24.1 相对强度）。
+
+    vs_market.ratio >= 1.1
+    equal_weight_diff > 0
+    """
+    pv2 = _get_pyramid_v2(context)
+    if pv2 is None:
+        return False
+    rs = pv2.get("relative_strength") or {}
+    vs_market = rs.get("vs_market") or {}
+    ratio = _to_float(vs_market.get("ratio"))
+    if ratio is None or ratio < 1.1:
+        return False
+    diff = _to_float(rs.get("equal_weight_diff"))
+    if diff is None or diff <= 0:
+        return False
+    return True
+
+
+set_evaluator("eval_d1_state_migration_positive", _eval_d1_state_migration_positive)
+set_evaluator("eval_d2_event_freshness_high", _eval_d2_event_freshness_high)
+set_evaluator("eval_d3_breadth_expansion", _eval_d3_breadth_expansion)
+set_evaluator("eval_d4_concentration_high", _eval_d4_concentration_high)
+set_evaluator("eval_d5_relative_strength_strong", _eval_d5_relative_strength_strong)
+
+
+# =============================================================================
 # 筛选器执行
 # =============================================================================
 
@@ -327,6 +501,25 @@ def build_signal_payloads(
         "filter_version": REVIEW_FILTER_VERSION,
         "components_evidence": _collect_components_evidence(context),
     }
+    # [P0-7] D 族信号附加 pyramid_v2 维度证据（PRD §24）
+    if filt.family == FilterFamily.D:
+        pv2 = _get_pyramid_v2(context)
+        if pv2 is not None:
+            evidence["pyramid_v2_evidence"] = {
+                "diffusion": pv2.get("diffusion"),
+                "freshness": {
+                    k: pv2.get("freshness", {}).get(k)
+                    for k in (
+                        "today_count", "last_5d_count", "last_10d_count",
+                        "decay_weighted_density",
+                    )
+                },
+                "concentration": {
+                    k: pv2.get("concentration", {}).get(k)
+                    for k in ("hhi", "leader_median_gap", "leader_symbol")
+                },
+                "relative_strength": pv2.get("relative_strength"),
+            }
 
     # rank_key（PRD §8.4）
     bias_pct = _pick_bias_history_pct(filt, context)
@@ -392,6 +585,16 @@ def _pick_bias_history_pct(
         if not valid:
             return None
         return max(abs(p - 50) for p in valid)
+    if filt.family == FilterFamily.D:
+        # D 族：第二金字塔无历史分位，用 relative_strength.vs_market.ratio 作为
+        # 偏差代理（>1 表示强于市场）；无 pyramid_v2 时返回 None。
+        pv2 = _get_pyramid_v2(context)
+        if pv2 is None:
+            return None
+        rs = pv2.get("relative_strength") or {}
+        vs_market = rs.get("vs_market") or {}
+        ratio = _to_float(vs_market.get("ratio"))
+        return ratio
     # C 类：取 V 或 U 的变化分位
     v_pct = _get_float(context, "_v_delta1d_history_pct")
     u_pct = _get_float(context, "_u_delta1d_history_pct")
@@ -412,6 +615,10 @@ def _pick_delta1d_pct(
         ]
         valid = [c for c in cands if c is not None]
         return min(valid) if valid else None  # B 类关注减速，取最小变化分位
+    if filt.family == FilterFamily.D:
+        # D 族：第二金字塔无当日变化分位概念，返回 None（rank_key 排序时
+        # 与其他 D 族信号同等对待）
+        return None
     # C 类
     cands = [
         _get_float(context, "_v_delta1d_history_pct"),
@@ -512,4 +719,55 @@ if __name__ == "__main__":
     assert payload["trigger_payload"]["signal_type"] == "surface_strong_internal_weak"
     assert payload["rank_key"]["scope_type_priority"] == 1
     print(f"OK: filter_engine hits={len(hits)} rank_key={payload['rank_key']}")
+
+    # [P0-7] D 族筛选器自测：pyramid_v2 维度偏差
+    ctx_d = {
+        "P": {"value": 50, "status": "ready", "components": []},
+        "Q": {"value": 50, "status": "ready", "components": []},
+        "U": {"value": 50, "status": "ready", "components": []},
+        "C": {"value": 50, "status": "ready", "components": []},
+        "V": {"value": 50, "status": "ready", "components": []},
+        "coverage": 0.98,
+        "pyramid_v2": {
+            "diffusion": {
+                "positive_migration_count": 8,
+                "negative_migration_count": 3,
+                "total_migration_count": 11,
+                "positive_ratio": {"numerator": 8, "denominator": 11},
+                "negative_ratio": {"numerator": 3, "denominator": 11},
+                "participation_coverage": {"numerator": 15, "denominator": 40},
+            },
+            "freshness": {
+                "today_count": 2,
+                "last_5d_count": 5,
+                "decay_weighted_density": 0.45,
+            },
+            "concentration": {
+                "hhi": 0.15,
+                "top5_contribution": {"numerator": 0.5, "denominator": 1.0},
+                "leader_median_gap": 3.5,
+                "leader_symbol": "000001",
+            },
+            "relative_strength": {
+                "vs_market": {"ratio": 1.25, "label": "strong", "diff": 0.15},
+                "equal_weight_diff": 0.15,
+            },
+        },
+    }
+    d_hits = evaluate_filters(ctx_d)
+    d_types = {f.signal_type for f in d_hits}
+    print(f"D-family hits: {d_types}")
+    assert "state_migration_positive" in d_types, "D1 应命中"
+    assert "event_freshness_high" in d_types, "D2 应命中"
+    assert "breadth_expansion" in d_types, "D3 应命中（coverage=0.375>=0.3, total=11>=5）"
+    assert "concentration_high" in d_types, "D4 应命中"
+    assert "relative_strength_strong" in d_types, "D5 应命中"
+
+    # 无 pyramid_v2 时 D 族不命中
+    ctx_no_pv2 = {"P": {}, "Q": {}, "U": {}, "C": {}, "V": {}, "coverage": 0.98}
+    d_hits_empty = evaluate_filters(ctx_no_pv2)
+    d_types_empty = {f.signal_type for f in d_hits_empty}
+    assert not any(f.family.value == "D" for f in d_hits_empty), "无 pyramid_v2 时 D 族不应命中"
+    print(f"OK: no-pyramid_v2 D-family hits: {d_types_empty}")
+
     print("OK: filter_engine verified")

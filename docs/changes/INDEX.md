@@ -41,6 +41,7 @@
 | CHANGE-20260730-015 | 2026-07-30 | SSH 目标漂移防复发治理 | architecture+governance | 部署运维/TRAE 工作协议/生产安全 | 生效（scripts/ops/panji-prod-ssh + panji-prod-preflight 已落库并实际验证通过；preflight 三阶段全部 OK） | 无（运维治理） | `maps/80-system-runtime.md` §2 |
 | CHANGE-20260730-016 | 2026-07-30 | 盘后链路 P0 永久收口 + 新模型合同冻结 | behavior+contract+architecture+data | 盘后编排/复盘模块/行情质量/量化模型/部署运维 | 进行中（代码+目标纯单元测试+Ruff 通过；PG 集成待 CI；本轮未部署、未 push main、未修改生产数据；canary 计算已完成静态核验但未改生产） | AC-04/AC-08~14/RV-01~RV-22/AA-01~AA-NN | `maps/30-after-close.md`、`maps/70-review.md`、`maps/75-auction-analysis.md`、`runbooks/after-close-recovery.md` |
 | CHANGE-20260730-017 | 2026-07-30 | 发布前真实闭环 — 状态机+部署合同+CI门禁+基线对齐 | behavior+contract+architecture+ci | 盘后编排/部署运维/复盘模块/CI 治理/测试基础设施 | 进行中（代码+测试+文档已 commit；PG 集成待 CI 终态；本轮未部署、未 push main、未修改生产数据） | AC-04/AC-08~14/RV-01~RV-22 | `maps/30-after-close.md`、`maps/70-review.md`、`maps/80-system-runtime.md`、`runbooks/after-close-recovery.md` |
+| CHANGE-20260730-018 | 2026-07-30 | 竞价分析完整链路 — 锚点+扫描+聚合+追踪+前端 | behavior+contract+architecture+data | 竞价分析/盘后编排/第二金字塔/复盘模块/前端 | 进行中（代码+测试+前端已实现；PG集成待CI；canary和部署待后续） | AU-01~AU-16/AC-01~AC-20/RV-01~RV-12 | `maps/75-auction-analysis.md`、`maps/30-after-close.md`、`maps/70-review.md` |
 
 ## 3. 状态说明
 

@@ -795,6 +795,42 @@ async def _build_scope_history(
     return history_maps, (prev_values or None), (prev5d_values or None)
 
 
+async def _fetch_pyramid_v2_for_scope(
+    session: AsyncSession,
+    scope: ScopeDefinition,
+) -> dict[str, Any] | None:
+    """[P0-7 2026-07-30] 从 board_analysis_snapshot 读取 pyramid_v2 维度数据。
+
+    industry/concept scope 通过 scope.source_board_snapshot_id 关联到
+    BoardAnalysisSnapshot，从中读取 payload["pyramid_v2"]。
+    其他 scope（market/major_index/style/instrument）无 board_analysis，
+    返回 None（D 族筛选器评估时 context 无 pyramid_v2，自动跳过）。
+
+    Args:
+        session: 异步 DB 会话
+        scope: 范围定义（需含 source_board_snapshot_id）
+
+    Returns:
+        pyramid_v2 payload dict 或 None
+    """
+    if scope.source_board_snapshot_id is None:
+        return None
+    stmt = (
+        select(BoardAnalysisSnapshot.payload)
+        .where(BoardAnalysisSnapshot.id == scope.source_board_snapshot_id)
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    if row is None:
+        return None
+    payload = row[0] if row[0] is not None else {}
+    if not isinstance(payload, dict):
+        return None
+    pv2 = payload.get("pyramid_v2")
+    return pv2 if isinstance(pv2, dict) else None
+
+
 async def _compute_scope_pipeline(
     session: AsyncSession,
     run: MarketReviewRun,
@@ -859,6 +895,11 @@ async def _compute_scope_pipeline(
     )
 
     try:
+        # [P0-7 2026-07-30] 获取 pyramid_v2 维度数据（PRD §24 D 族筛选器）
+        # industry/concept scope 通过 source_board_snapshot_id 关联到
+        # board_analysis_snapshot，从中读取 payload["pyramid_v2"]
+        pyramid_v2 = await _fetch_pyramid_v2_for_scope(session, scope)
+
         snapshot = await compute_scope_metrics(
             session,
             review_run_id=run.id,
@@ -869,6 +910,7 @@ async def _compute_scope_pipeline(
             history_maps=history_maps,
             prev_values=prev_values,
             prev5d_values=prev5d_values,
+            pyramid_v2_payload=pyramid_v2,
         )
     except ScopeSnapshotError as exc:
         await _upsert_run_item(

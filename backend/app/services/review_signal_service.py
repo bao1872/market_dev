@@ -81,7 +81,8 @@ def build_filter_context(
             _structure_breakdown_not_rising / _c_rising / _c_high_anomaly
 
     Returns:
-        context dict（含 P/Q/U/C/V payload + coverage + 历史分位注入字段）
+        context dict（含 P/Q/U/C/V payload + coverage + 历史分位注入字段 +
+            pyramid_v2 维度数据，供 D 族筛选器评估）
     """
     context: dict[str, Any] = {
         "P": snapshot.p_payload or {},
@@ -92,6 +93,12 @@ def build_filter_context(
         "coverage": float(snapshot.coverage_ratio),
         "ready_count": snapshot.ready_count,
     }
+    # [P0-7 2026-07-30] 注入 pyramid_v2 维度数据（PRD §24 D 族筛选器）
+    # pyramid_v2 存储在 scope snapshot 的 data_quality_json["pyramid_v2"] 中
+    dq = snapshot.data_quality_json or {}
+    pv2 = dq.get("pyramid_v2") if isinstance(dq, dict) else None
+    if isinstance(pv2, dict):
+        context["pyramid_v2"] = pv2
     if history_extras:
         for k, v in history_extras.items():
             context[k] = v

@@ -73,12 +73,14 @@ async def evaluate_publish_gate(
     """
     blockers: list[str] = []
 
-    # 1. market 范围必须 ready，且 P/Q/U/C/V 五项 value 非空
-    # [P0 2026-07-30] 强化门禁：原仅校验 status，现增加 value 非空校验
-    # [P0-6 2026-07-30] 使用 readiness 字段报告 granular blocker：
-    #   - raw_ready=False → 上游 stock_core 字段缺失
-    #   - normalized_ready=False → 历史不足，提示运行 bootstrap
-    #   禁止 force publish：冷启动时必须先 bootstrap 补历史
+    # 1. market 范围必须 ready，且 P/Q/U/C/V 五项 normalized_ready
+    # [P0-6 2026-07-30] readiness 四态区分（PRD §11.1）：
+    #   - unavailable: raw_ready=False（上游 stock_core 字段缺失）→ 阻塞
+    #   - insufficient_history: raw_ready=True, normalized_ready=False
+    #     （历史 <60 日）→ 阻塞，提示运行 bootstrap
+    #   - raw_ready（非发布态）: 同 insufficient_history，不发布但保留
+    #   - normalized_ready: raw_ready=True, normalized_ready=True → 可发布
+    # 禁止把 raw_ready 当作可发布：冷启动时必须先 bootstrap 补历史
     market_snap = await _get_scope_snapshot(
         session, run.id, "market", "market",
     )
@@ -95,21 +97,32 @@ async def evaluate_publish_gate(
                 continue
             readiness = payload.get("readiness") or {}
             reason = readiness.get("reason")
-            if payload.get("value") is None:
-                # [P0-6] 报告 granular readiness reason（若有）
-                if reason:
-                    blockers.append(
-                        f"market {metric_code} value 为空: {reason}",
-                    )
-                else:
-                    blockers.append(
-                        f"market {metric_code} payload value 为空",
-                    )
-            elif readiness.get("normalized_ready") is False:
-                # value 存在但 normalized_ready=False（partial 场景）
+            raw_ready = readiness.get("raw_ready")
+            normalized_ready = readiness.get("normalized_ready")
+            value = payload.get("value")
+
+            # 显式四态判定，不再把 raw_ready 当作可发布
+            if raw_ready is False:
+                # unavailable: 原始值缺失或数据不可用
                 blockers.append(
-                    f"market {metric_code} normalized_ready=False: {reason}",
+                    f"market {metric_code} unavailable: "
+                    f"raw_ready=False ({reason or '上游字段缺失'})",
                 )
+            elif raw_ready is True and normalized_ready is False:
+                # insufficient_history / raw_ready: 历史不足，不发布但保留
+                blockers.append(
+                    f"market {metric_code} insufficient_history: "
+                    f"raw_ready=True but normalized_ready=False "
+                    f"({reason or '历史 <60 日，需运行 bootstrap'})",
+                )
+            elif value is None:
+                # 安全兜底：readiness 字段缺失但 value 为空
+                blockers.append(
+                    f"market {metric_code} value 为空 "
+                    f"(readiness 缺失: raw_ready={raw_ready}, "
+                    f"normalized_ready={normalized_ready})",
+                )
+            # raw_ready=True, normalized_ready=True, value 非空 → 可发布，不阻塞
 
     # 2. 主要指数和风格范围必须齐全且 ready
     # [P0 2026-07-30] 放宽为：存在即可，缺失视为未配置（避免空 MarketBoard 阻塞）

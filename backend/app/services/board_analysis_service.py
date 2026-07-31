@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -37,6 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
 from app.models.factor_publication import FactorPublication
+from app.models.first_pyramid_history import (
+    FirstPyramidHistoryDailyState,
+    FirstPyramidHistoryEvent,
+)
+from app.models.instrument import Instrument
 from app.models.market_board import MarketBoard, MarketBoardMembership
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.services.factor_publication_service import (
@@ -398,6 +403,724 @@ def compute_board_payload(
 
 
 # =============================================================================
+# 第二金字塔 V2 指标（pyramid_v2）
+# =============================================================================
+#
+# 设计原则：
+# - 在现有 V1 payload 基础上扩展，新增指标统一放入 payload["pyramid_v2"]
+# - 保持 V1 指标与契约不变，仅做加法
+# - 所有比例同时返回 numerator/denominator，便于前端精确展示
+# - 行业(industry)与概念(concept)分别计算（每个 board 独立调用一次）
+# - 状态迁移/新鲜度依赖 FirstPyramidHistoryDailyState + FirstPyramidHistoryEvent
+#   （chip 维度不在第一金字塔历史回补范围内，include_chip=False，
+#    故 chip_cross 类指标默认 0，待 chip 历史独立回补后才有值）
+#
+# 维度衰减周期：趋势 5 日、结构 10 日、动量 5 日、筹码 20 日
+
+# 趋势方向中文标签（与 first_pyramid_flatten._direction_label 产出一致）
+_TREND_UP = "上行"
+_TREND_DOWN = "下行"
+
+# 事件类型 → 维度映射（衰减周期不同）
+_EVENT_DIMENSION_MAP: dict[str, str] = {
+    "CHoCH": "trend",
+    "BOS": "structure",
+    "OB_CREATED": "structure",
+    "OB_ENTERED": "structure",
+    "OB_MITIGATED": "structure",
+    "EQH": "structure",
+    "EQL": "structure",
+    "SQZ_RELEASE": "momentum",
+    "SQZ_OFF": "momentum",
+    "MOMENTUM_DIFFUSION": "momentum",
+    "node_cluster_touch": "chip",
+}
+
+# 各维度衰减窗口（日）
+_DIMENSION_WINDOW: dict[str, int] = {
+    "trend": 5,
+    "structure": 10,
+    "momentum": 5,
+    "chip": 20,
+}
+
+
+def _event_dimension(event_type: str | None) -> str:
+    """将事件类型映射到四维之一（trend/structure/momentum/chip）。"""
+    if not event_type:
+        return "structure"
+    if event_type in _EVENT_DIMENSION_MAP:
+        return _EVENT_DIMENSION_MAP[event_type]
+    if event_type.startswith("ZERO_CROSS"):
+        return "momentum"
+    if event_type.startswith("OB_"):
+        return "structure"
+    if event_type.startswith("NODE") or "node" in event_type.lower():
+        return "chip"
+    return "structure"
+
+
+def _change_magnitude(flat: dict[str, Any]) -> float:
+    """提取个股变化幅度（绝对值）。
+
+    优先级：|fp_trend_strength| > |fp_dsa_vwap_dev_pct| > 0。
+    """
+    ts = _safe_float(flat.get("fp_trend_strength"))
+    if ts is not None:
+        return abs(ts)
+    vd = _safe_float(flat.get("fp_dsa_vwap_dev_pct"))
+    if vd is not None:
+        return abs(vd)
+    return 0.0
+
+
+def _build_instrument_results(
+    valid_member_ids: list[uuid.UUID],
+    flat_map: dict[uuid.UUID, dict[str, Any]],
+    symbol_map: dict[uuid.UUID, str],
+) -> list[dict[str, Any]]:
+    """构建 per-instrument 结果列表（用于 V2 集中度/离散度/概念额外等）。
+
+    仅包含能取到 first_pyramid_flat 且 fp_trend_direction 非空的成员
+    （与 V1 ready 口径一致）。
+    """
+    results: list[dict[str, Any]] = []
+    for iid in valid_member_ids:
+        flat = flat_map.get(iid)
+        if not flat or not flat.get("fp_trend_direction"):
+            continue
+        results.append({
+            "instrument_id": iid,
+            "symbol": symbol_map.get(iid, str(iid)),
+            "flat": flat,
+            "change_magnitude": _change_magnitude(flat),
+        })
+    return results
+
+
+def _compute_scope_metrics(
+    instrument_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """从 instrument_results 计算板块自身汇总指标（用于相对强弱）。"""
+    if not instrument_results:
+        return {
+            "count": 0,
+            "avg_strength": None,
+            "avg_vwap_dev_pct": None,
+            "up_ratio": None,
+        }
+    strengths: list[float] = []
+    vwap_devs: list[float] = []
+    up = 0
+    for r in instrument_results:
+        ts = _safe_float(r["flat"].get("fp_trend_strength"))
+        if ts is not None:
+            strengths.append(ts)
+        vd = _safe_float(r["flat"].get("fp_dsa_vwap_dev_pct"))
+        if vd is not None:
+            vwap_devs.append(vd)
+        if r["flat"].get("fp_trend_direction") == _TREND_UP:
+            up += 1
+    n = len(instrument_results)
+    return {
+        "count": n,
+        "avg_strength": _avg(strengths),
+        "avg_vwap_dev_pct": _avg(vwap_devs),
+        "up_ratio": up / n if n > 0 else None,
+    }
+
+
+def _relative_label(ratio: float | None) -> str | None:
+    """相对强弱标签：>1.05 strong / <0.95 weak / 否则 neutral。"""
+    if ratio is None:
+        return None
+    if ratio > 1.05:
+        return "strong"
+    if ratio < 0.95:
+        return "weak"
+    return "neutral"
+
+
+# -----------------------------------------------------------------------------
+# 1. 状态迁移矩阵
+# -----------------------------------------------------------------------------
+
+
+async def _compute_state_transitions(
+    session: AsyncSession,
+    board_id: uuid.UUID,
+    trade_date: date,
+    instrument_ids: list[uuid.UUID],
+) -> dict[str, Any]:
+    """计算状态迁移矩阵（趋势修复/受损、BOS/CHoCH、挤压释放、筹码越区）。
+
+    数据来源：
+    - 趋势修复/受损：对比 prev/当日 FirstPyramidHistoryDailyState 的 regime_value
+    - BOS/CHoCH/SQZ_RELEASE：当日 FirstPyramidHistoryEvent 事件计数（按方向）
+    - 筹码越区：第一金字塔历史不含 chip，默认 0
+
+    所有比例同时返回 numerator/denominator。
+    """
+    out: dict[str, Any] = {
+        "trend_repair_count": 0,
+        "trend_damage_count": 0,
+        "bos_count": 0,
+        "bos_up_count": 0,
+        "bos_down_count": 0,
+        "choch_count": 0,
+        "choch_up_count": 0,
+        "choch_down_count": 0,
+        "squeeze_release_count": 0,
+        "chip_cross_up_count": 0,
+        "chip_cross_down_count": 0,
+        "migrated_instrument_count": 0,
+        "compared_count": 0,
+        "today_state_count": 0,
+        "total_instrument_ids": len(instrument_ids),
+        "trend_repair_ratio": {"numerator": 0, "denominator": 0},
+        "trend_damage_ratio": {"numerator": 0, "denominator": 0},
+        "bos_ratio": {"numerator": 0, "denominator": 0},
+        "choch_ratio": {"numerator": 0, "denominator": 0},
+        "squeeze_release_ratio": {"numerator": 0, "denominator": 0},
+        "chip_cross_up_ratio": {"numerator": 0, "denominator": 0},
+        "chip_cross_down_ratio": {"numerator": 0, "denominator": 0},
+        "migration_ratio": {"numerator": 0, "denominator": 0},
+    }
+    if not instrument_ids:
+        return out
+
+    # 1. 今日 daily_state
+    today_rows = (
+        await session.execute(
+            select(
+                FirstPyramidHistoryDailyState.instrument_id,
+                FirstPyramidHistoryDailyState.state_payload,
+            ).where(
+                FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+                FirstPyramidHistoryDailyState.trade_date == trade_date,
+            )
+        )
+    ).all()
+    today_states: dict[uuid.UUID, dict[str, Any]] = {}
+    for row in today_rows:
+        sp = row[1] if isinstance(row[1], dict) else {}
+        today_states[row[0]] = sp
+    out["today_state_count"] = len(today_states)
+
+    # 2. 前一交易日 = MAX(trade_date) < trade_date（跨 instrument）
+    prev_date = await session.scalar(
+        select(func.max(FirstPyramidHistoryDailyState.trade_date)).where(
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            FirstPyramidHistoryDailyState.trade_date < trade_date,
+        )
+    )
+    prev_states: dict[uuid.UUID, dict[str, Any]] = {}
+    if prev_date is not None:
+        prev_rows = (
+            await session.execute(
+                select(
+                    FirstPyramidHistoryDailyState.instrument_id,
+                    FirstPyramidHistoryDailyState.state_payload,
+                ).where(
+                    FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+                    FirstPyramidHistoryDailyState.trade_date == prev_date,
+                )
+            )
+        ).all()
+        for row in prev_rows:
+            sp = row[1] if isinstance(row[1], dict) else {}
+            prev_states[row[0]] = sp
+
+    # 3. 趋势修复/受损（regime_value 比较）
+    migrated: set[uuid.UUID] = set()
+    compared = 0
+    for iid, today_sp in today_states.items():
+        prev_sp = prev_states.get(iid)
+        if prev_sp is None:
+            continue
+        compared += 1
+        today_rv = _safe_int(today_sp.get("regime_value"))
+        prev_rv = _safe_int(prev_sp.get("regime_value"))
+        if today_rv is None or prev_rv is None:
+            continue
+        # 修复：今日上行且前日非上行
+        if today_rv > 0 and prev_rv <= 0:
+            out["trend_repair_count"] += 1
+            migrated.add(iid)
+        # 受损：今日下行且前日非下行
+        elif today_rv < 0 and prev_rv >= 0:
+            out["trend_damage_count"] += 1
+            migrated.add(iid)
+    out["compared_count"] = compared
+
+    # 4. 当日结构/动量事件（BOS/CHoCH/SQZ_RELEASE）按方向计数
+    date_prefix = f"{trade_date.isoformat()}%"
+    event_rows = (
+        await session.execute(
+            select(
+                FirstPyramidHistoryEvent.instrument_id,
+                FirstPyramidHistoryEvent.event_type,
+                FirstPyramidHistoryEvent.event_payload,
+            ).where(
+                FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
+                FirstPyramidHistoryEvent.event_time.isnot(None),
+                FirstPyramidHistoryEvent.event_time.like(date_prefix),
+            )
+        )
+    ).all()
+    for row in event_rows:
+        iid = row[0]
+        etype = row[1]
+        epayload = row[2] if isinstance(row[2], dict) else {}
+        direction = epayload.get("direction")
+        if etype == "BOS":
+            out["bos_count"] += 1
+            if direction == "up":
+                out["bos_up_count"] += 1
+            elif direction == "down":
+                out["bos_down_count"] += 1
+            migrated.add(iid)
+        elif etype == "CHoCH":
+            out["choch_count"] += 1
+            if direction == "up":
+                out["choch_up_count"] += 1
+            elif direction == "down":
+                out["choch_down_count"] += 1
+            migrated.add(iid)
+        elif etype == "SQZ_RELEASE":
+            out["squeeze_release_count"] += 1
+            migrated.add(iid)
+
+    out["migrated_instrument_count"] = len(migrated)
+    today_den = out["today_state_count"]
+    out["trend_repair_ratio"] = {
+        "numerator": out["trend_repair_count"], "denominator": compared,
+    }
+    out["trend_damage_ratio"] = {
+        "numerator": out["trend_damage_count"], "denominator": compared,
+    }
+    out["bos_ratio"] = {"numerator": out["bos_count"], "denominator": today_den}
+    out["choch_ratio"] = {"numerator": out["choch_count"], "denominator": today_den}
+    out["squeeze_release_ratio"] = {
+        "numerator": out["squeeze_release_count"], "denominator": today_den,
+    }
+    out["chip_cross_up_ratio"] = {"numerator": 0, "denominator": today_den}
+    out["chip_cross_down_ratio"] = {"numerator": 0, "denominator": today_den}
+    out["migration_ratio"] = {
+        "numerator": len(migrated), "denominator": compared,
+    }
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 2. 新鲜度密度
+# -----------------------------------------------------------------------------
+
+
+async def _compute_freshness_density(
+    session: AsyncSession,
+    board_id: uuid.UUID,
+    trade_date: date,
+    instrument_ids: list[uuid.UUID],
+) -> dict[str, Any]:
+    """计算当日/近N日/衰减加权的事件密度。
+
+    四维可使用不同衰减周期（趋势 5 日、结构 10 日、动量 5 日、筹码 20 日）。
+    事件窗口覆盖最大衰减周期 20 日；density = weighted_sum / instrument_count。
+    """
+    out: dict[str, Any] = {
+        "today_count": 0,
+        "last_5d_count": 0,
+        "last_10d_count": 0,
+        "last_20d_count": 0,
+        "instrument_count": len(instrument_ids),
+        "by_dimension": {
+            dim: {
+                "window_days": _DIMENSION_WINDOW[dim],
+                "event_count": 0,
+                "weighted_sum": 0.0,
+                "density": 0.0,
+            }
+            for dim in ("trend", "structure", "momentum", "chip")
+        },
+        "decay_weighted_density": 0.0,
+    }
+    if not instrument_ids:
+        return out
+
+    inst_count = len(instrument_ids)
+    start_iso = (trade_date - timedelta(days=20)).isoformat()
+    rows = (
+        await session.execute(
+            select(
+                FirstPyramidHistoryEvent.event_type,
+                FirstPyramidHistoryEvent.event_time,
+            ).where(
+                FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
+                FirstPyramidHistoryEvent.event_time.isnot(None),
+                FirstPyramidHistoryEvent.event_time >= start_iso,
+            )
+        )
+    ).all()
+
+    for etype, etime in rows:
+        if not etime:
+            continue
+        try:
+            ev_date = date.fromisoformat(etime[:10])
+        except ValueError:
+            continue
+        days_ago = (trade_date - ev_date).days
+        if days_ago < 0:
+            continue
+        out["last_20d_count"] += 1
+        if days_ago <= 5:
+            out["last_5d_count"] += 1
+        if days_ago <= 10:
+            out["last_10d_count"] += 1
+        if days_ago == 0:
+            out["today_count"] += 1
+        dim = _event_dimension(etype)
+        d = out["by_dimension"][dim]
+        d["event_count"] += 1
+        window = d["window_days"]
+        w = max(0.0, 1.0 - days_ago / window) if window > 0 else 1.0
+        d["weighted_sum"] = round(d["weighted_sum"] + w, 6)
+
+    total_weighted = 0.0
+    for d in out["by_dimension"].values():
+        d["density"] = (
+            round(d["weighted_sum"] / inst_count, 6) if inst_count > 0 else 0.0
+        )
+        total_weighted += d["weighted_sum"]
+    # 整体衰减加权密度：四维 weighted_sum 平均 / instrument_count
+    out["decay_weighted_density"] = (
+        round(total_weighted / 4 / inst_count, 6) if inst_count > 0 else 0.0
+    )
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 3. 扩散
+# -----------------------------------------------------------------------------
+
+
+def _compute_diffusion(state_transitions: dict[str, Any]) -> dict[str, Any]:
+    """基于状态迁移计算扩散度（正负迁移数量、比例、参与覆盖率）。"""
+    st = state_transitions or {}
+    positive = (
+        st.get("trend_repair_count", 0)
+        + st.get("bos_up_count", 0)
+        + st.get("choch_up_count", 0)
+        + st.get("squeeze_release_count", 0)
+        + st.get("chip_cross_up_count", 0)
+    )
+    negative = (
+        st.get("trend_damage_count", 0)
+        + st.get("bos_down_count", 0)
+        + st.get("choch_down_count", 0)
+        + st.get("chip_cross_down_count", 0)
+    )
+    total = positive + negative
+    migrated = st.get("migrated_instrument_count", 0)
+    compared = st.get("compared_count", 0)
+    return {
+        "positive_migration_count": positive,
+        "negative_migration_count": negative,
+        "total_migration_count": total,
+        "positive_ratio": {"numerator": positive, "denominator": total},
+        "negative_ratio": {"numerator": negative, "denominator": total},
+        "participation_coverage": {
+            "numerator": migrated,
+            "denominator": compared,
+        },
+    }
+
+
+# -----------------------------------------------------------------------------
+# 4. 集中度
+# -----------------------------------------------------------------------------
+
+
+def _compute_concentration(
+    instrument_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """计算 Top3/Top5 贡献度、HHI、龙头与中位数差。"""
+    valid = [r for r in instrument_results if r.get("change_magnitude") is not None]
+    mags = [r["change_magnitude"] for r in valid]
+    n = len(mags)
+    out: dict[str, Any] = {
+        "top3_contribution": {"numerator": 0.0, "denominator": 0.0},
+        "top5_contribution": {"numerator": 0.0, "denominator": 0.0},
+        "hhi": 0.0,
+        "leader_median_gap": None,
+        "leader_symbol": None,
+        "leader_magnitude": None,
+        "median_magnitude": None,
+        "count": n,
+    }
+    if n == 0:
+        return out
+
+    s = sorted(mags, reverse=True)
+    total = sum(s)
+    out["top3_contribution"] = {
+        "numerator": round(sum(s[:3]), 6), "denominator": round(total, 6),
+    }
+    out["top5_contribution"] = {
+        "numerator": round(sum(s[:5]), 6), "denominator": round(total, 6),
+    }
+    # HHI（归一化到 [0,1]：sum((share)^2)）
+    if total > 0:
+        out["hhi"] = round(sum((m / total) ** 2 for m in mags), 6)
+
+    leader = max(valid, key=lambda r: r["change_magnitude"])
+    out["leader_symbol"] = leader.get("symbol")
+    out["leader_magnitude"] = round(leader["change_magnitude"], 6)
+    med = _percentile(mags, 0.5)
+    out["median_magnitude"] = round(med, 6) if med is not None else None
+    out["leader_median_gap"] = round(
+        leader["change_magnitude"] - (med or 0.0), 6,
+    )
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 5. 内部离散度
+# -----------------------------------------------------------------------------
+
+
+def _compute_dispersion(
+    instrument_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """计算板块内部离散度（标准差/变异系数/分位差）。"""
+    mags = [r["change_magnitude"] for r in instrument_results if r.get("change_magnitude") is not None]
+    n = len(mags)
+    out: dict[str, Any] = {
+        "count": n,
+        "mean": None,
+        "std": None,
+        "cv": None,
+        "p25": None,
+        "p50": None,
+        "p75": None,
+        "iqr": None,
+        "min": None,
+        "max": None,
+        "range": None,
+    }
+    if n == 0:
+        return out
+
+    mean = sum(mags) / n
+    var = sum((m - mean) ** 2 for m in mags) / n  # 总体方差
+    std = var ** 0.5
+    p25 = _percentile(mags, 0.25)
+    p50 = _percentile(mags, 0.50)
+    p75 = _percentile(mags, 0.75)
+    mn, mx = min(mags), max(mags)
+    out["mean"] = round(mean, 6)
+    out["std"] = round(std, 6)
+    out["cv"] = round(std / mean, 6) if mean != 0 else None
+    out["p25"] = round(p25, 6) if p25 is not None else None
+    out["p50"] = round(p50, 6) if p50 is not None else None
+    out["p75"] = round(p75, 6) if p75 is not None else None
+    out["iqr"] = (
+        round(p75 - p25, 6)
+        if p75 is not None and p25 is not None else None
+    )
+    out["min"] = round(mn, 6)
+    out["max"] = round(mx, 6)
+    out["range"] = round(mx - mn, 6)
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 6. 相对强弱
+# -----------------------------------------------------------------------------
+
+
+def _compute_relative_strength(
+    scope_metrics: dict[str, Any],
+    market_metrics: dict[str, Any] | None,
+    parent_metrics: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """计算相对市场、相对上级行业（同类型 cohort）强弱。
+
+    market_metrics = 全市场 peer（all types）avg_strength
+    parent_metrics = 同类型 peer（industry/concept cohort）avg_strength
+    缺失 peer 时对应 ratio 为 None（如实标记不可比）。
+    """
+    out: dict[str, Any] = {
+        "vs_market": {"ratio": None, "label": None, "diff": None},
+        "vs_parent": {"ratio": None, "label": None, "diff": None},
+        "equal_weight_diff": None,
+        "scope": scope_metrics,
+        "market": market_metrics,
+        "parent": parent_metrics,
+    }
+    s = scope_metrics or {}
+    s_strength = _safe_float(s.get("avg_strength"))
+
+    if market_metrics is not None:
+        m_strength = _safe_float(market_metrics.get("avg_strength"))
+        if s_strength is not None and m_strength is not None and m_strength != 0:
+            r = s_strength / m_strength
+            out["vs_market"] = {
+                "ratio": round(r, 4),
+                "label": _relative_label(r),
+                "diff": round(s_strength - m_strength, 6),
+            }
+
+    if parent_metrics is not None:
+        p_strength = _safe_float(parent_metrics.get("avg_strength"))
+        if s_strength is not None and p_strength is not None and p_strength != 0:
+            r = s_strength / p_strength
+            out["vs_parent"] = {
+                "ratio": round(r, 4),
+                "label": _relative_label(r),
+                "diff": round(s_strength - p_strength, 6),
+            }
+
+    out["equal_weight_diff"] = out["vs_market"]["diff"]
+    return out
+
+
+# -----------------------------------------------------------------------------
+# 7. 概念额外（核心/边缘成员、置信度）
+# -----------------------------------------------------------------------------
+
+
+def _compute_concept_extras(
+    board_id: uuid.UUID,
+    instrument_results: list[dict[str, Any]],
+    total_members: int,
+) -> dict[str, Any]:
+    """计算核心/边缘成员、置信度。
+
+    核心成员 = 与板块方向一致且幅度超过中位数
+    边缘成员 = 方向不一致或幅度低于中位数
+    """
+    valid = [r for r in instrument_results if r.get("change_magnitude") is not None]
+    out: dict[str, Any] = {
+        "core_count": 0,
+        "peripheral_count": 0,
+        "core_coverage": {"numerator": 0, "denominator": total_members},
+        "confidence_level": "low",
+        "board_direction": None,
+        "median_magnitude": None,
+        "ready_count": len(valid),
+    }
+    if not valid:
+        return out
+
+    # 板块方向：fp_trend_direction 多数票（上行 vs 下行）
+    up = sum(1 for r in valid if r["flat"].get("fp_trend_direction") == _TREND_UP)
+    down = sum(1 for r in valid if r["flat"].get("fp_trend_direction") == _TREND_DOWN)
+    if up > down:
+        board_dir = _TREND_UP
+    elif down > up:
+        board_dir = _TREND_DOWN
+    else:
+        board_dir = None  # 平票 / 震荡为主
+    out["board_direction"] = board_dir
+
+    mags = [r["change_magnitude"] for r in valid]
+    med = _percentile(mags, 0.5)
+    out["median_magnitude"] = round(med, 6) if med is not None else None
+
+    core = 0
+    peripheral = 0
+    for r in valid:
+        aligned = (
+            board_dir is not None
+            and r["flat"].get("fp_trend_direction") == board_dir
+        )
+        strong = med is not None and r["change_magnitude"] > med
+        if aligned and strong:
+            core += 1
+        else:
+            peripheral += 1
+    out["core_count"] = core
+    out["peripheral_count"] = peripheral
+    out["core_coverage"] = {"numerator": core, "denominator": total_members}
+
+    cov = core / total_members if total_members > 0 else 0.0
+    if cov >= 0.5:
+        out["confidence_level"] = "high"
+    elif cov >= 0.3:
+        out["confidence_level"] = "medium"
+    else:
+        out["confidence_level"] = "low"
+    return out
+
+
+# -----------------------------------------------------------------------------
+# V2 辅助查询
+# -----------------------------------------------------------------------------
+
+
+async def _fetch_symbols(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, str]:
+    """批量查询 instrument_id → symbol 映射。"""
+    if not instrument_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(Instrument.id, Instrument.symbol).where(
+                Instrument.id.in_(instrument_ids),
+            )
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
+async def _compute_peer_metrics(
+    session: AsyncSession,
+    trade_date: date,
+    algorithm_version: str,
+    board_id: uuid.UUID,
+    board_type: str,
+    *,
+    by_type: bool,
+) -> dict[str, Any] | None:
+    """从同 trade_date 已持久化的 peer 快照计算市场/同类型 avg_strength。
+
+    market：by_type=False（全市场 peer）
+    parent：by_type=True（同类型 cohort peer）
+    无 peer 时返回 None（如实标记不可比）。
+
+    注：peer avg_strength 取自 V1 payload.trend_strength.avg（数值字段，
+    不受 fp 方向标签本地化影响）。
+    """
+    stmt = select(BoardAnalysisSnapshot).where(
+        BoardAnalysisSnapshot.trade_date == trade_date,
+        BoardAnalysisSnapshot.algorithm_version == algorithm_version,
+        BoardAnalysisSnapshot.status == "succeeded",
+        BoardAnalysisSnapshot.board_id != board_id,
+    )
+    if by_type:
+        stmt = stmt.where(BoardAnalysisSnapshot.board_type == board_type)
+    rows = (await session.execute(stmt)).scalars().all()
+    if not rows:
+        return None
+
+    strengths: list[float] = []
+    for snap in rows:
+        pl = snap.payload if isinstance(snap.payload, dict) else {}
+        ts = pl.get("trend_strength") if isinstance(pl.get("trend_strength"), dict) else {}
+        avg_ts = _safe_float(ts.get("avg"))
+        if avg_ts is not None:
+            strengths.append(avg_ts)
+    return {
+        "count": len(rows),
+        "avg_strength": _avg(strengths),
+    }
+
+
+# =============================================================================
 # 数据库查询
 # =============================================================================
 
@@ -515,6 +1238,7 @@ async def compute_board_analysis(
     if eligible_count == 0:
         # 空板块：直接写入空快照（避免后续 None 除零）
         payload = compute_board_payload([])
+        payload["pyramid_v2"] = {}
         snapshot = await _upsert_snapshot(
             session,
             board=board,
@@ -564,6 +1288,47 @@ async def compute_board_analysis(
 
     # 7. 计算指标 payload
     payload = compute_board_payload(flat_list)
+
+    # 7.1 第二金字塔 V2 指标（pyramid_v2）
+    #     保持 V1 指标不变，新增指标合并到 payload["pyramid_v2"] 子键下。
+    symbol_map = await _fetch_symbols(session, valid_member_ids)
+    instrument_results = _build_instrument_results(
+        valid_member_ids, flat_map, symbol_map,
+    )
+    ready_ids = [r["instrument_id"] for r in instrument_results]
+    state_transitions = await _compute_state_transitions(
+        session, board.id, trade_date, ready_ids,
+    )
+    freshness = await _compute_freshness_density(
+        session, board.id, trade_date, ready_ids,
+    )
+    diffusion = _compute_diffusion(state_transitions)
+    concentration = _compute_concentration(instrument_results)
+    dispersion = _compute_dispersion(instrument_results)
+    scope_metrics = _compute_scope_metrics(instrument_results)
+    market_metrics = await _compute_peer_metrics(
+        session, trade_date, algorithm_version,
+        board.id, board.type, by_type=False,
+    )
+    parent_metrics = await _compute_peer_metrics(
+        session, trade_date, algorithm_version,
+        board.id, board.type, by_type=True,
+    )
+    relative_strength = _compute_relative_strength(
+        scope_metrics, market_metrics, parent_metrics,
+    )
+    concept_extras = _compute_concept_extras(
+        board.id, instrument_results, eligible_count,
+    )
+    payload["pyramid_v2"] = {
+        "state_transitions": state_transitions,
+        "freshness": freshness,
+        "diffusion": diffusion,
+        "concentration": concentration,
+        "dispersion": dispersion,
+        "relative_strength": relative_strength,
+        "concept_extras": concept_extras,
+    }
 
     # eligible_count = 全部成员（含退市股），ready_count = 有效且 first_pyramid 完整的
     # 退市股不在 valid_member_ids 中，不进入 missing 计算

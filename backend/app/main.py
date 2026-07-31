@@ -38,6 +38,8 @@ from app.api.admin_incremental_publish import router as admin_incremental_publis
 from app.api.admin_review import router as admin_review_router
 from app.api.admin_subscription import router as admin_subscription_router
 from app.api.admin_visitors import router as admin_visitors_router
+from app.api.auction import admin_router as auction_admin_router
+from app.api.auction import router as auction_router
 from app.api.auth import router as auth_router
 from app.api.bars import router as bars_router
 from app.api.board_analysis import admin_router as board_analysis_admin_router
@@ -220,6 +222,9 @@ app.include_router(board_analysis_router)
 app.include_router(board_analysis_admin_router)
 app.include_router(review_router)
 app.include_router(admin_review_router)
+# 竞价分析路由（用户只读 + 管理员触发扫描/锚点生成）
+app.include_router(auction_router)
+app.include_router(auction_admin_router)
 # 公开端点路由（内测申请，无需登录）
 app.include_router(public_beta_router)
 # 公开套餐列表路由（无需登录）

@@ -615,7 +615,49 @@ V变化分位>=70
 C未处于异常高位或未继续上升
 ```
 
-### 8.4 信号排序
+### 8.4 D类：第二金字塔维度偏差
+
+> [P0-7 2026-07-30] 新增 D 族筛选器，对应 PRD §24 第二金字塔 6 维度。
+> D 族只在 industry/concept scope 评估（需 pyramid_v2 数据）；
+> market/major_index/style scope 无 board_analysis，D 族不命中。
+
+**D1 state_migration_positive**
+
+```
+positive_migration_count >= 5
+positive_ratio >= 0.6
+negative_migration_count <= positive_migration_count
+```
+
+**D2 event_freshness_high**
+
+```
+decay_weighted_density >= 0.3
+today_count >= 1 或 last_5d_count >= 3
+```
+
+**D3 breadth_expansion**
+
+```
+participation_coverage >= 0.3
+total_migration_count >= 5
+```
+
+**D4 concentration_high**
+
+```
+hhi >= 0.1 或 top5_contribution >= 0.4
+leader_median_gap > 0
+```
+
+**D5 relative_strength_strong**
+
+```
+vs_market.ratio >= 1.1
+equal_weight_diff > 0
+```
+
+### 8.5 信号排序
 
 不生成综合黑箱分。排序键依次为：
 

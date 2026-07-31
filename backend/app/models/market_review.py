@@ -513,7 +513,7 @@ class MarketReviewSignal(Base):
         Index("ix_review_signals_date_status", "trade_date", "status"),
         Index("ix_review_signals_scope", "scope_type", "scope_key"),
         CheckConstraint(
-            "filter_family IN ('A','B','C')",
+            "filter_family IN ('A','B','C','D')",
             name="review_signals_filter_family_check",
         ),
         CheckConstraint(

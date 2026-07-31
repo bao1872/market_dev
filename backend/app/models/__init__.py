@@ -21,6 +21,15 @@ V1.1 各阶段模型统一继承 Base：
 from __future__ import annotations
 
 from app.models.access_audit_log import AccessAuditLog
+from app.models.auction import (
+    AuctionAnchorItem,
+    AuctionAnchorPublication,
+    AuctionAnchorSnapshot,
+    AuctionEventTracking,
+    AuctionInstrumentResult,
+    AuctionScanRun,
+    AuctionScopeResult,
+)
 from app.models.bar import BarDaily, BarMinute
 from app.models.base import Base
 from app.models.beta_application import BetaApplication
@@ -68,6 +77,13 @@ from app.models.worker_heartbeat import WorkerHeartbeat
 
 __all__ = [
     "AccessAuditLog",
+    "AuctionAnchorItem",
+    "AuctionAnchorPublication",
+    "AuctionAnchorSnapshot",
+    "AuctionEventTracking",
+    "AuctionInstrumentResult",
+    "AuctionScanRun",
+    "AuctionScopeResult",
     "BarDaily",
     "BarMinute",
     "Base",

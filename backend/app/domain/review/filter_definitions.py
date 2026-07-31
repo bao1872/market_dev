@@ -34,7 +34,8 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 # 筛选器版本（配置变化必须升级；初始为 filters-1.0.0）
-REVIEW_FILTER_VERSION = "filters-1.0.0"
+# [P0-7 2026-07-30] 升级到 filters-1.1.0：新增 D 族（第二金字塔维度偏差筛选器）
+REVIEW_FILTER_VERSION = "filters-1.1.0"
 
 
 class FilterFamily(StrEnum):
@@ -43,6 +44,7 @@ class FilterFamily(StrEnum):
     A = "A"  # 表面表现与内部质量偏差
     B = "B"  # 当前状态与变化速度偏差
     C = "C"  # 成交、参与与集中度偏差
+    D = "D"  # 第二金字塔维度偏差（PRD §24：迁移/新鲜度/覆盖率/集中度/相对变化）
 
 
 class ComparisonOp(StrEnum):
@@ -395,6 +397,117 @@ FILTER_C3_SYNCHRONIZED_EXPANSION = FilterDefinition(
 )
 
 
+# =============================================================================
+# D 族：第二金字塔维度偏差筛选器（PRD §24）
+#
+# 输入上下文：context["pyramid_v2"]，来自 board_analysis_snapshots.payload["pyramid_v2"]
+# 维度（PRD §24.1）：
+# - 状态迁移（state migration）：pyramid_v2.state_transitions / pyramid_v2.diffusion
+# - 事件新鲜度（event freshness）：pyramid_v2.freshness
+# - 覆盖率/宽度（breadth）：pyramid_v2.diffusion.participation_coverage
+# - 集中度（concentration）：pyramid_v2.concentration
+# - 相对强度（relative strength）：pyramid_v2.relative_strength
+#
+# D 族筛选器只在 pyramid_v2 数据可用时评估；market/major_index/style 等
+# 无 board_analysis 的 scope 不命中 D 族（context 无 pyramid_v2 时评估器返回 False）。
+# =============================================================================
+
+# D1 state_migration_positive（PRD §24.1 状态迁移）
+FILTER_D1_STATE_MIGRATION_POSITIVE = FilterDefinition(
+    signal_type="state_migration_positive",
+    family=FilterFamily.D,
+    description=(
+        "D1：正向状态迁移占优。positive_migration_count >= 5，"
+        "positive_ratio >= 0.6，negative_migration_count <= positive_migration_count"
+    ),
+    evaluator="eval_d1_state_migration_positive",
+    confirmation_rule={
+        "description": "连续 2 个交易日命中",
+        "min_consecutive_days": 2,
+    },
+    invalidation_rule={
+        "description": "negative_migration_count > positive_migration_count",
+        "conditions": [],
+    },
+)
+
+# D2 event_freshness_high（PRD §24.1 事件新鲜度）
+FILTER_D2_EVENT_FRESHNESS_HIGH = FilterDefinition(
+    signal_type="event_freshness_high",
+    family=FilterFamily.D,
+    description=(
+        "D2：事件新鲜度高。decay_weighted_density >= 0.3，"
+        "today_count >= 1 或 last_5d_count >= 3"
+    ),
+    evaluator="eval_d2_event_freshness_high",
+    confirmation_rule={
+        "description": "连续 2 个交易日命中",
+        "min_consecutive_days": 2,
+    },
+    invalidation_rule={
+        "description": "decay_weighted_density < 0.1",
+        "conditions": [],
+    },
+)
+
+# D3 breadth_expansion（PRD §24.1 宽度/覆盖率）
+FILTER_D3_BREADTH_EXPANSION = FilterDefinition(
+    signal_type="breadth_expansion",
+    family=FilterFamily.D,
+    description=(
+        "D3：宽度扩张。participation_coverage >= 0.3，"
+        "total_migration_count >= 5"
+    ),
+    evaluator="eval_d3_breadth_expansion",
+    confirmation_rule={
+        "description": "连续 2 个交易日命中",
+        "min_consecutive_days": 2,
+    },
+    invalidation_rule={
+        "description": "participation_coverage < 0.1",
+        "conditions": [],
+    },
+)
+
+# D4 concentration_high（PRD §24.1 集中度）
+FILTER_D4_CONCENTRATION_HIGH = FilterDefinition(
+    signal_type="concentration_high",
+    family=FilterFamily.D,
+    description=(
+        "D4：集中度高。hhi >= 0.1 或 top5_contribution >= 0.4，"
+        "leader_median_gap > 0"
+    ),
+    evaluator="eval_d4_concentration_high",
+    confirmation_rule={
+        "description": "连续 3 个交易日命中",
+        "min_consecutive_days": 3,
+    },
+    invalidation_rule={
+        "description": "hhi < 0.05 且 top5_contribution < 0.2",
+        "conditions": [],
+    },
+)
+
+# D5 relative_strength_strong（PRD §24.1 相对强度）
+FILTER_D5_RELATIVE_STRENGTH_STRONG = FilterDefinition(
+    signal_type="relative_strength_strong",
+    family=FilterFamily.D,
+    description=(
+        "D5：相对强度强。vs_market.ratio >= 1.1，"
+        "equal_weight_diff > 0"
+    ),
+    evaluator="eval_d5_relative_strength_strong",
+    confirmation_rule={
+        "description": "连续 3 个交易日命中",
+        "min_consecutive_days": 3,
+    },
+    invalidation_rule={
+        "description": "vs_market.ratio < 1.0",
+        "conditions": [],
+    },
+)
+
+
 # 初始筛选器列表（按 PRD §8 顺序）
 DEFAULT_FILTERS: list[FilterDefinition] = [
     FILTER_A1_SURFACE_STRONG_INTERNAL_WEAK,
@@ -404,6 +517,12 @@ DEFAULT_FILTERS: list[FilterDefinition] = [
     FILTER_C1_VOLUME_WITHOUT_BREADTH,
     FILTER_C2_BREADTH_WITHOUT_VOLUME,
     FILTER_C3_SYNCHRONIZED_EXPANSION,
+    # [P0-7] D 族：第二金字塔维度偏差（PRD §24）
+    FILTER_D1_STATE_MIGRATION_POSITIVE,
+    FILTER_D2_EVENT_FRESHNESS_HIGH,
+    FILTER_D3_BREADTH_EXPANSION,
+    FILTER_D4_CONCENTRATION_HIGH,
+    FILTER_D5_RELATIVE_STRENGTH_STRONG,
 ]
 
 
@@ -511,9 +630,9 @@ def compare_rank_keys(a: dict[str, Any], b: dict[str, Any]) -> int:
 
 
 if __name__ == "__main__":
-    assert len(DEFAULT_FILTERS) == 7
+    assert len(DEFAULT_FILTERS) == 12  # A(2) + B(2) + C(3) + D(5)
     families = {f.family.value for f in DEFAULT_FILTERS}
-    assert families == {"A", "B", "C"}
+    assert families == {"A", "B", "C", "D"}
     print(f"OK: {len(DEFAULT_FILTERS)} filters loaded, families={families}")
     print(f"OK: filter_version={REVIEW_FILTER_VERSION}")
 

@@ -248,6 +248,7 @@ async def compute_scope_metrics(
     prev_values: dict[str, float] | None = None,
     prev5d_values: dict[str, float] | None = None,
     cross_section_values: dict[str, list[float]] | None = None,
+    pyramid_v2_payload: dict[str, Any] | None = None,
 ) -> MarketReviewScopeSnapshot:
     """计算单个范围的 P/Q/U/C/V 并 upsert scope snapshot。
 
@@ -262,6 +263,9 @@ async def compute_scope_metrics(
         prev_values: 前一交易日各 metric 的 value（用于 delta1d）
         prev5d_values: 前 5 交易日各 metric 的 value（用于 delta5d）
         cross_section_values: 当日所有 scope 的 value 序列（用于横截面分位）
+        pyramid_v2_payload: 第二金字塔维度数据（PRD §24，来自
+            board_analysis_snapshots.payload["pyramid_v2"]）；
+            industry/concept scope 由 orchestrator 注入，其他 scope 为 None
 
     Returns:
         MarketReviewScopeSnapshot ORM 对象
@@ -306,6 +310,11 @@ async def compute_scope_metrics(
         "missing_count": eligible_count - ready_count,
         "missing_reasons": _classify_missing_reasons(flat_list, eligible_count),
     }
+    # [P0-7 2026-07-30] 注入 pyramid_v2 维度数据（PRD §24 D 族筛选器）
+    # industry/concept scope 由 orchestrator 从 board_analysis_snapshots 读取并注入；
+    # 其他 scope pyramid_v2_payload=None，不写入 data_quality_json
+    if pyramid_v2_payload is not None:
+        data_quality["pyramid_v2"] = pyramid_v2_payload
 
     snapshot = await upsert_scope_snapshot(
         session,

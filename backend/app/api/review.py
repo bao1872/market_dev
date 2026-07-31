@@ -514,7 +514,7 @@ async def list_review_scopes(
 @router.get("/{trade_date}/signals", response_model=ReviewSignalListResponse)
 async def list_review_signals(
     trade_date: str,
-    filter_family: str | None = Query(None, description="筛选器族 A/B/C"),
+    filter_family: str | None = Query(None, description="筛选器族 A/B/C/D"),
     signal_type: str | None = Query(None, description="信号类型"),
     signal_status: str | None = Query(
         None, alias="status", description="生命周期状态",
@@ -538,10 +538,10 @@ async def list_review_signals(
     run = await _get_published_run(db, td, include_partial=include_partial)
 
     # 校验 filter_family
-    if filter_family is not None and filter_family not in ("A", "B", "C"):
+    if filter_family is not None and filter_family not in ("A", "B", "C", "D"):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid filter_family: {filter_family}; must be A/B/C",
+            detail=f"Invalid filter_family: {filter_family}; must be A/B/C/D",
         )
 
     signals, total = await list_signals(

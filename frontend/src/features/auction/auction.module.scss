@@ -1,0 +1,510 @@
+@use '../../styles/variables.scss' as v;
+
+// [Auction] - 描述: 竞价分析样式（市场/板块/个股三级页面）
+// 复用盘迹深石墨黑 + 莹感绿体系；A股红涨绿跌
+// 复用全局类（.card / .data-table / .chip / .btn 等，见 styles/global.scss）
+// 模块专用类：page 容器、metric grid、anchor list、event card、reason codes、breadcrumb
+
+// ===== 页面根容器 =====
+.auctionPage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+// ===== 顶部信息栏（trade_date / algorithm_version / publication_id / source run IDs / coverage） =====
+.metaBar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  font-size: 12px;
+  color: v.$color-muted;
+}
+
+.metaItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.metaLabel {
+  color: v.$color-text-dim;
+}
+
+.metaValue {
+  color: v.$color-text;
+  font-weight: 500;
+  font-family: v.$font-mono;
+}
+
+// 覆盖率条
+.coverageBar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.coverageTrack {
+  width: 64px;
+  height: 6px;
+  background: v.$color-border-soft;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.coverageFill {
+  height: 100%;
+  background: v.$color-brand;
+  border-radius: 3px;
+}
+
+// reason_codes 标签组
+.reasonCodes {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.reasonCode {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.12);
+  color: v.$color-warning;
+  font-size: 11px;
+  font-family: v.$font-mono;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+// ===== 工具行（筛选/排序）=====
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toolbarLabel {
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+.select {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 5px;
+  background: v.$color-bg;
+  border: 1px solid v.$color-border;
+  color: v.$color-text;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+
+  &:focus {
+    border-color: v.$color-brand;
+  }
+}
+
+// ===== KPI 网格（覆盖率/广度/参与度/集中度）=====
+.kpiGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.kpiCard {
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kpiLabel {
+  font-size: 11px;
+  color: v.$color-text-dim;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.kpiValue {
+  font-size: 20px;
+  font-weight: 700;
+  color: v.$color-text;
+  font-variant-numeric: tabular-nums;
+  font-family: v.$font-mono;
+}
+
+.kpiSub {
+  font-size: 11px;
+  color: v.$color-muted;
+}
+
+// ===== Scope 排行表（行业/概念排行）=====
+.scopeTable {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+
+  thead {
+    background: v.$color-panel-2;
+  }
+
+  th {
+    padding: 8px 10px;
+    text-align: left;
+    color: v.$color-muted;
+    font-weight: 600;
+    font-size: 11px;
+    border-bottom: 1px solid v.$color-border;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 8px 10px;
+    color: v.$color-text;
+    border-bottom: 1px solid v.$color-border-soft;
+    white-space: nowrap;
+  }
+
+  tbody tr {
+    cursor: pointer;
+    transition: background 0.08s;
+
+    &:hover {
+      background: v.$color-panel-2;
+    }
+  }
+}
+
+.numCell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: v.$font-mono;
+}
+
+// 涨跌幅颜色（A股红涨绿跌）
+.up { color: v.$color-up; }
+.down { color: v.$color-down; }
+.neutral { color: v.$color-muted; }
+
+// ===== 状态徽章 =====
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chipDefault { background: v.$color-border-soft; color: v.$color-muted; }
+.chipSuccess { background: rgba(34, 197, 94, 0.14); color: v.$color-down; }
+.chipWarning { background: rgba(245, 158, 11, 0.14); color: v.$color-warning; }
+.chipDanger  { background: rgba(255, 77, 79, 0.14); color: v.$color-up; }
+.chipInfo    { background: rgba(56, 130, 246, 0.14); color: v.$color-info; }
+.chipBrand   { background: rgba(0, 246, 194, 0.14); color: v.$color-brand; }
+
+// ===== 锚点列表 =====
+.anchorList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.anchorCard {
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.anchorHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.anchorType {
+  font-size: 13px;
+  font-weight: 650;
+  color: v.$color-text;
+}
+
+.anchorDirection {
+  font-size: 11px;
+  color: v.$color-text-dim;
+}
+
+.anchorPriceRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  font-size: 12px;
+}
+
+.anchorPriceItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  span {
+    color: v.$color-text-dim;
+    font-size: 11px;
+  }
+
+  b {
+    color: v.$color-text;
+    font-family: v.$font-mono;
+    font-weight: 600;
+  }
+}
+
+.anchorMeta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: v.$color-muted;
+}
+
+// ===== 事件卡片 =====
+.eventList {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 10px;
+}
+
+.eventCard {
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.12s;
+
+  &:hover {
+    border-color: v.$color-brand-deep;
+  }
+}
+
+.eventHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.eventType {
+  font-size: 13px;
+  font-weight: 650;
+  color: v.$color-text;
+}
+
+.eventMeta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: v.$color-muted;
+}
+
+.eventTrigger {
+  font-size: 11px;
+  color: v.$color-text-dim;
+  font-family: v.$font-mono;
+  background: v.$color-bg;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+// ===== 面包屑 =====
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+.breadcrumbItem {
+  color: v.$color-muted;
+  text-decoration: none;
+  cursor: pointer;
+
+  &:hover {
+    color: v.$color-brand;
+  }
+}
+
+.breadcrumbCurrent {
+  color: v.$color-text;
+  font-weight: 600;
+}
+
+.breadcrumbSep {
+  color: v.$color-text-dim;
+}
+
+// ===== 板块分布条（高平低开）=====
+.distBar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: v.$color-border-soft;
+  min-width: 120px;
+}
+
+.distSegUp { background: v.$color-up; }
+.distSegFlat { background: v.$color-text-dim; }
+.distSegDown { background: v.$color-down; }
+
+.distLegend {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: v.$color-muted;
+  margin-top: 4px;
+}
+
+.distLegendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  i {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    display: inline-block;
+  }
+}
+
+// ===== 状态：加载/空/错误 =====
+.stateBox {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px 24px;
+  text-align: center;
+}
+
+.stateTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: v.$color-text;
+}
+
+.stateDesc {
+  font-size: 13px;
+  color: v.$color-muted;
+  line-height: 1.6;
+  max-width: 420px;
+}
+
+.stateRequestId {
+  font-size: 12px;
+  color: v.$color-text-dim;
+  font-family: v.$font-mono;
+}
+
+// ===== 链接按钮 =====
+.linkBtn {
+  border: 0;
+  background: transparent;
+  color: v.$color-info;
+  padding: 0;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    outline: 2px solid v.$color-brand;
+    outline-offset: 2px;
+  }
+}
+
+// ===== 通用按钮 =====
+.btn {
+  padding: 5px 12px;
+  border: 1px solid v.$color-border;
+  background: v.$color-border-soft;
+  color: v.$color-text;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+
+  &:hover:not(:disabled) {
+    border-color: #46516b;
+    color: #fff;
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  &:focus-visible {
+    outline: 2px solid v.$color-brand;
+    outline-offset: 1px;
+  }
+}
+
+.btnPrimary {
+  border-color: v.$color-brand-deep;
+  background: rgba(0, 246, 194, 0.1);
+  color: v.$color-brand;
+}
+
+// ===== 段落标题 =====
+.sectionTitle {
+  font-size: 13px;
+  font-weight: 650;
+  color: v.$color-text;
+  padding: 8px 0;
+}
+
+// ===== 不可用数据 =====
+.metricUnavailable {
+  color: v.$color-text-dim;
+  font-size: 12px;
+  font-style: italic;
+}
+
+// ===== 响应式 =====
+@media (max-width: v.$bp-narrow) {
+  .kpiGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .eventList {
+    grid-template-columns: 1fr;
+  }
+}

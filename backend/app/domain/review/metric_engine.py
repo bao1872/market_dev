@@ -133,6 +133,29 @@ def _normalize_component(
     return _clamp(pct)
 
 
+# P 指标依赖 fp_segment_change_pct 的 component 名称集合
+# 如果 fp_segment_change_pct 全空，这些 component 无法计算
+_P_SEGMENT_CHANGE_COMPONENTS: frozenset[str] = frozenset({
+    "scope_return_1d",
+    "advance_ratio",
+    "trend_price_alignment_ratio",
+})
+
+
+def _has_segment_change_data(flat_list: list[dict[str, Any]]) -> bool:
+    """检查 flat_list 中是否至少有一个成员的 fp_segment_change_pct 非 None。
+
+    [P0-6 2026-07-30] P 指标核心依赖 fp_segment_change_pct：
+    - scope_return_1d / advance_ratio / trend_price_alignment_ratio 均依赖此字段
+    - 若全空，P 的 value 必须 None，readiness 标记为 unavailable
+    - 不得填 0 或伪造值
+    """
+    for f in flat_list:
+        if _safe_float(f.get("fp_segment_change_pct")) is not None:
+            return True
+    return False
+
+
 # =============================================================================
 # 派生 component 计算函数（对应 registry 中的 derive_fn）
 # =============================================================================
@@ -833,6 +856,17 @@ def compute_metric_payload(
     else:
         value = None
 
+    # [P0-6 2026-07-30] P 指标 fp_segment_change_pct 全空强制 unavailable
+    # PRD §7.2：P 的核心 component（scope_return_1d / advance_ratio /
+    # trend_price_alignment_ratio）均依赖 fp_segment_change_pct。
+    # 若该字段全空，即使 new_high_ratio / price_position_median 有值，
+    # P 的 value 也必须 None，readiness 标记为 unavailable，不得伪造。
+    p_segment_change_unavailable = (
+        metric_code == "P" and not _has_segment_change_data(flat_list)
+    )
+    if p_segment_change_unavailable:
+        value = None
+
     # 3. rawValue = 原始加权平均（归一化前）
     available_raws: list[tuple[float, float]] = []
     for cp in component_payloads:
@@ -886,7 +920,12 @@ def compute_metric_payload(
     raw_ready = raw_value is not None
     normalized_ready = value is not None
 
-    if not raw_ready:
+    # [P0-6] P 指标 fp_segment_change_pct 全空属于"上游关键数据缺失"，
+    # 即使部分 component（new_high_ratio/price_position_median）的 rawValue
+    # 非 None，P 的语义已无法成立 → UNAVAILABLE，优先级最高。
+    if p_segment_change_unavailable:
+        status = STATUS_UNAVAILABLE
+    elif not raw_ready:
         # 所有 component rawValue 均为 None（上游数据缺失）
         status = STATUS_UNAVAILABLE
     elif not normalized_ready:
@@ -899,7 +938,14 @@ def compute_metric_payload(
         status = STATUS_READY
 
     # [P0-6] metric-level readiness（供 publish gate 和操作者诊断）
-    if not raw_ready:
+    if p_segment_change_unavailable:
+        readiness_reason = (
+            "P metric unavailable: fp_segment_change_pct is None for all "
+            "members; core components (scope_return_1d / advance_ratio / "
+            "trend_price_alignment_ratio) cannot be computed (upstream "
+            "stock_core flat_list missing fp_segment_change_pct)"
+        )
+    elif not raw_ready:
         readiness_reason = (
             f"all {len(component_payloads)} components rawValue=None "
             f"(upstream stock_core flat_list fields missing)"
@@ -923,6 +969,12 @@ def compute_metric_payload(
         )
     else:
         readiness_reason = None
+
+    # [P0-6] p_segment_change_unavailable 时强制 raw_ready/normalized_ready=False，
+    # 使 publish gate 的 readiness 四态判定落入 unavailable 分支。
+    if p_segment_change_unavailable:
+        raw_ready = False
+        normalized_ready = False
 
     return {
         "value": value,
@@ -1013,4 +1065,23 @@ if __name__ == "__main__":
     assert payloads["P"]["status"] in (
         STATUS_READY, STATUS_INSUFFICIENT_HISTORY, STATUS_PARTIAL, STATUS_UNAVAILABLE,
     )
+
+    # [P0-6] P 指标 fp_segment_change_pct 全空 → unavailable
+    fake_flat_no_change = [
+        {**f, "fp_segment_change_pct": None} for f in fake_flat
+    ]
+    payloads_no_change = compute_all_metrics(fake_flat_no_change)
+    p_payload = payloads_no_change["P"]
+    print(
+        f"  P (no change_pct): value={p_payload['value']} "
+        f"status={p_payload['status']}"
+    )
+    assert p_payload["value"] is None, "P value 必须为 None"
+    assert p_payload["status"] == STATUS_UNAVAILABLE, "P status 必须为 unavailable"
+    readiness = p_payload.get("readiness") or {}
+    assert readiness.get("raw_ready") is False
+    assert readiness.get("normalized_ready") is False
+    assert "fp_segment_change_pct" in (readiness.get("reason") or "")
+    print("OK: P unavailable when fp_segment_change_pct all None")
+
     print("OK: metric_engine verified")

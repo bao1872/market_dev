@@ -1991,7 +1991,44 @@ async def execute_after_close_run(
                     await db.commit()
 
             # [P0-4 aggregation dependency closure] After stock_core pointer is
-            # published, trigger board analysis / market aggregation.
+            # published, trigger auction anchor generation then board analysis.
+            # 接入顺序: stock_core → chip_consensus → auction_anchor → market_aggregation → review
+            # auction_anchor 在 chip_consensus 之前生成结构锚点（structure_only），
+            # chip 完成后可后续补充筹码锚点。
+            _auction_anchor_status = "skipped"
+            if _stock_core_published and snapshot_run_id is not None:
+                try:
+                    from app.services.auction_anchor_service import (
+                        generate_auction_anchors,
+                    )
+
+                    async with AsyncSessionLocal() as anchor_db:
+                        anchor_result = await generate_auction_anchors(
+                            anchor_db,
+                            trade_date=trade_date,
+                            worker_id=worker_id,
+                            lease_epoch=lease_epoch,
+                        )
+                        await anchor_db.commit()
+                    _auction_anchor_status = anchor_result.get("status", "unknown")
+                    logger.info(
+                        "[AfterClose] auction anchor 生成完成: trade_date=%s, "
+                        "status=%s, structure=%s, chip=%s, composite=%s",
+                        trade_date,
+                        _auction_anchor_status,
+                        anchor_result.get("structure_count", 0),
+                        anchor_result.get("chip_count", 0),
+                        anchor_result.get("composite_count", 0),
+                    )
+                except Exception as anchor_exc:
+                    _auction_anchor_status = "failed"
+                    logger.warning(
+                        "[AfterClose] auction anchor 生成失败（optional，不影响 core）: "
+                        "trade_date=%s, error=%s",
+                        trade_date, anchor_exc,
+                        exc_info=True,
+                    )
+
             # Aggregation binds same source_core_run_id; failure only reruns
             # aggregation, does NOT reverse core. Main run status distinguishes
             # core_published vs optional_failure.
@@ -2079,6 +2116,7 @@ async def execute_after_close_run(
                 + (f", published_at={published_run.published_at}"
                    if published_run is not None else "")
                 + f", stock_core_published={_stock_core_published}"
+                + f", auction_anchor_status={_auction_anchor_status}"
                 + f", aggregation_status={_aggregation_status}"
             )
             await _update_orchestrator_status(
@@ -2090,6 +2128,7 @@ async def execute_after_close_run(
                 payload={
                     "published_at": published_at_str,
                     "stock_core_published": _stock_core_published,
+                    "auction_anchor_status": _auction_anchor_status,
                     "aggregation_status": _aggregation_status,
                 },
             )
