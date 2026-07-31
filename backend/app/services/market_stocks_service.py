@@ -543,12 +543,22 @@ def _build_chip_lateral(snap_subq: Any):
 
 
 def _build_max_trade_date_subquery():
-    """构建 MAX(bar_daily.trade_date) 标量子查询，用于 fp_is_stale 计算。
+    """构建 PER-INSTRUMENT MAX(bar_daily.trade_date) 相关标量子查询，用于 fp_is_stale 计算。
 
     [P0-6 修复 2026-07-29] 不再使用 flat 中存储的 is_stale 占位值，
     改为 SQL 表达式：latest_snap.trade_date < MAX(bar_daily.trade_date)。
+
+    [CHANGE-20260731-006] 修正为 PER-INSTRUMENT max（相关子查询）：
+    - 旧实现使用全局 MAX(bar_daily.trade_date)，导致任一股票有更新日线时，
+      所有股票的快照都被标记为 stale（即使该股票自身日线未更新）。
+    - 正确语义：snapshot trade_date < 该股票自身的 MAX(bar_daily.trade_date)。
+    - 与 _build_snap_lateral 同口径：通过 Instrument.id 相关引用实现 per-instrument。
     """
-    return select(func.max(BarDaily.trade_date)).scalar_subquery()
+    return (
+        select(func.max(BarDaily.trade_date))
+        .where(BarDaily.instrument_id == Instrument.id)
+        .scalar_subquery()
+    )
 
 
 def _build_fp_value_expr(
@@ -1155,6 +1165,8 @@ async def get_market_stocks(
     boards_as_of_dt: datetime | None = await db.scalar(
         select(func.max(MarketBoard.updatedAt))
     )
+    # price_as_of_date 是全局 MAX(bar_daily.trade_date)，用于响应 price_as_of 字段
+    # （"行情数据最新到哪天"——全市场口径，非单股）
     price_as_of_date: date | None = await db.scalar(select(func.max(BarDaily.trade_date)))
     state_as_of_dt: datetime | None = await db.scalar(
         select(func.max(StockFeatureSnapshot.created_at)).where(
@@ -1162,6 +1174,25 @@ async def get_market_stocks(
             StockFeatureSnapshot.schema_version == _SCHEMA_VERSION
         )
     )
+
+    # [CHANGE-20260731-006] PER-INSTRUMENT MAX(bar_daily.trade_date) 用于 is_stale 判定。
+    # 旧实现用全局 price_as_of_date 判 is_stale，导致任一股票有更新日线时所有快照都 stale。
+    # 正确语义：每只股票的快照只与自身的最新日线比较。与 DB 筛选口径一致（_build_max_trade_date_subquery 已改相关子查询）。
+    # 仅当存在快照时才查询（无快照则 is_stale 不计算，避免无谓 SQL）。
+    inst_max_bar_date_map: dict[UUID, date] = {}
+    has_snapshots = any(entry[2] is not None for entry in state_map.values())
+    if has_snapshots and instrument_ids:
+        inst_max_bar_stmt = (
+            select(
+                BarDaily.instrument_id,
+                func.max(BarDaily.trade_date).label("max_date"),
+            )
+            .where(BarDaily.instrument_id.in_(instrument_ids))
+            .group_by(BarDaily.instrument_id)
+        )
+        inst_max_bar_result = await db.execute(inst_max_bar_stmt)
+        for row in inst_max_bar_result:
+            inst_max_bar_date_map[row.instrument_id] = row.max_date
 
     # ===== 组装响应 =====
     items: list[MarketStockRow] = []
@@ -1177,12 +1208,13 @@ async def get_market_stocks(
             inst_id, (None, None, None, None, None)
         )
 
-        # 修正 first_pyramid.is_stale：快照 trade_date 早于全局最新日线 trade_date 即视为过期
-        # [P0-6 修复 2026-07-29 二.3] 与数据库筛选/排序同口径
-        # （snap.trade_date < MAX(bar_daily.trade_date)）
+        # [CHANGE-20260731-006] PER-INSTRUMENT is_stale：快照 trade_date 早于该股票自身最新日线 trade_date
+        # 旧实现用全局 price_as_of_date 判定，导致任一股票有更新日线时所有快照都 stale。
+        # 与 DB 筛选同口径（_build_max_trade_date_subquery 已改相关子查询）。
         if flat_fp is not None:
-            if snap_td is not None and price_as_of_date is not None:
-                flat_fp["fp_is_stale"] = snap_td < price_as_of_date
+            inst_max_bar = inst_max_bar_date_map.get(inst_id)
+            if snap_td is not None and inst_max_bar is not None:
+                flat_fp["fp_is_stale"] = snap_td < inst_max_bar
             else:
                 flat_fp["fp_is_stale"] = False
 
