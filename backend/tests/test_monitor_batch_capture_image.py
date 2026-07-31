@@ -462,7 +462,7 @@ class TestMonitorBatchCaptureIndicatorView:
     async def test_capture_payload_includes_indicator_view_for_smc_event(
         self, db_session, test_user, test_instrument,
     ) -> None:
-        """smc_bos_retest 事件 → capture_payload.indicator_view == 'smc'。"""
+        """[CHANGE-20260728-010] smc_bos_retest 事件 → indicator_view == 'structure_node'（统一组合视图）。"""
         inst_id = test_instrument.id
         user_id = test_user.id
         event = StrategyEvent(
@@ -473,7 +473,7 @@ class TestMonitorBatchCaptureIndicatorView:
             event_type="smc_bos_retest",
             event_time=datetime(2026, 7, 7, 10, 30, tzinfo=UTC),
             schema_version=1,
-            payload={"price": 100.0, "indicator_view": "smc"},
+            payload={"price": 100.0},
             snapshot={},
         )
         group_id = str(uuid4())
@@ -507,25 +507,25 @@ class TestMonitorBatchCaptureIndicatorView:
             )
 
         assert captured_payload is not None
-        # payload.indicator_view 优先；缺失时由 event_type=smc_bos_retest → smc 映射
-        assert captured_payload["indicator_view"] == "smc"
-        assert "smc" in captured_payload["output_filename"]
+        # [CHANGE-20260728-010] 所有支持事件类型统一映射到 structure_node
+        assert captured_payload["indicator_view"] == "structure_node"
+        assert "structure_node" in captured_payload["output_filename"]
 
         # CaptureJob 应记录 indicator_view
         stmt = select(CaptureJob).where(CaptureJob.event_id == event.id)
         result = await db_session.execute(stmt)
         job = result.scalar_one_or_none()
         assert job is not None
-        assert job.indicator_view == "smc"
+        assert job.indicator_view == "structure_node"
 
     @pytest.mark.asyncio
     async def test_capture_failure_records_indicator_view(
         self, db_session, test_user, test_instrument,
     ) -> None:
-        """截图失败时 CaptureJob 也应记录 indicator_view 便于状态查询区分。"""
+        """[CHANGE-20260728-010] 截图失败时 CaptureJob 也应记录 indicator_view=structure_node。"""
         inst_id = test_instrument.id
         user_id = test_user.id
-        event = _make_event(inst_id)  # event_type=bb_upper_touch → bollinger
+        event = _make_event(inst_id)  # event_type=smc_bos_retest → structure_node
         group_id = str(uuid4())
 
         mock_resp = MagicMock()
@@ -558,8 +558,8 @@ class TestMonitorBatchCaptureIndicatorView:
         job = result.scalar_one_or_none()
         assert job is not None
         assert job.status == CAPTURE_STATUS_FAILED
-        # 即使截图失败，CaptureJob 也应记录 indicator_view
-        assert job.indicator_view == "bollinger"
+        # [CHANGE-20260728-010] 即使截图失败，CaptureJob 也应记录 structure_node
+        assert job.indicator_view == "structure_node"
 
 
 class TestMonitorBatchCapturePerEvent:
@@ -588,7 +588,7 @@ class TestMonitorBatchCapturePerEvent:
         event_type: str,
         event_time: datetime | None = None,
     ) -> StrategyEvent:
-        """构造 SMC 事件（payload 显式指定 indicator_view='smc'）。"""
+        """[CHANGE-20260728-010] 构造 SMC 事件（payload 不再含 indicator_view，固定 structure_node）。"""
         return StrategyEvent(
             id=uuid4(),
             event_key=f"test-event-{uuid4().hex}",
@@ -597,7 +597,7 @@ class TestMonitorBatchCapturePerEvent:
             event_type=event_type,
             event_time=event_time or datetime(2026, 7, 27, 10, 30, tzinfo=UTC),
             schema_version=1,
-            payload={"price": 100.0, "indicator_view": "smc"},
+            payload={"price": 100.0},
             snapshot={},
         )
 
@@ -709,7 +709,7 @@ class TestMonitorBatchCapturePerEvent:
         jobs = list(result_jobs.scalars().all())
         assert len(jobs) == 5
         assert all(j.status == CAPTURE_STATUS_SUCCEEDED for j in jobs)
-        assert all(j.indicator_view == "smc" for j in jobs)
+        assert all(j.indicator_view == "structure_node" for j in jobs)
 
         # 5 个 image Outbox
         stmt_img = (
@@ -900,7 +900,7 @@ class TestMonitorBatchCapturePerEvent:
         )
         # 幂等键应含 event_id + indicator_view
         assert event.id.hex in messages[0].idempotency_key or str(event.id) in messages[0].idempotency_key
-        assert "smc" in messages[0].idempotency_key
+        assert "structure_node" in messages[0].idempotency_key
 
     @pytest.mark.asyncio
     async def test_same_minute_two_events_both_delivered(

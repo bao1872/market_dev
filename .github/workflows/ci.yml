@@ -286,6 +286,12 @@ jobs:
           exit 0
       - name: Compare with mypy baseline
         run: python tools/compare_mypy_baseline.py backend/mypy-report.jsonl tools/quality_baselines/mypy.json
+      - name: Upload mypy baseline report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mypy-baseline-report
+          path: backend/mypy-report.jsonl
 
   mypy-full-report:
     name: Mypy Full Repository Report

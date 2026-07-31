@@ -41,7 +41,7 @@ from app.services.after_close_orchestrator import (
     create_after_close_run,
 )
 from app.services.bars_scheduler_service import BatchResult
-from app.services.feature_snapshot_service import has_succeeded_snapshot_run
+from app.services.feature_snapshot_service import _SCHEMA_VERSION, has_succeeded_snapshot_run
 from app.services.strategy_batch_service import StrategyBatchService
 
 # =============================================================================
@@ -425,12 +425,17 @@ async def test_07_publish_run_idempotent_for_crash_recovery(db_session) -> None:
 
 @pytest.mark.asyncio
 async def test_08_watchlist_ready_only_for_published_succeeded_snapshot(db_session) -> None:
-    """watchlist_ready 仅基于 succeeded + published + full scope 的 v5 snapshot。
+    """watchlist_ready 仅基于 succeeded + published + full scope 的当前 schema snapshot。
 
     验证：
     - running 但未 published 的 snapshot run → watchlist_ready=False
     - succeeded 但未 published → watchlist_ready=False
     - succeeded + published + full scope → watchlist_ready=True
+
+    [CHANGE-20260728-010] 修复：原测试硬编码 schema_version=5，但生产代码
+    _SCHEMA_VERSION 已升级到 6（SQZ_RELEASE 方向修复、regime_strength 修正、
+    history 逐 bar readiness），导致场景 3 查询不匹配返回 False。
+    改为复用 _SCHEMA_VERSION 常量，避免未来 schema 升级时再次失配。
     """
     trade_date = date(2026, 6, 25)
 
@@ -439,7 +444,7 @@ async def test_08_watchlist_ready_only_for_published_succeeded_snapshot(db_sessi
         trade_date=trade_date,
         run_type=RUN_TYPE_AFTER_CLOSE,
         status=STATUS_RUNNING,
-        schema_version=5,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -459,7 +464,7 @@ async def test_08_watchlist_ready_only_for_published_succeeded_snapshot(db_sessi
         trade_date=trade_date,
         run_type=RUN_TYPE_AFTER_CLOSE,
         status=STATUS_SUCCEEDED,
-        schema_version=5,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
@@ -479,7 +484,7 @@ async def test_08_watchlist_ready_only_for_published_succeeded_snapshot(db_sessi
         trade_date=trade_date,
         run_type=RUN_TYPE_AFTER_CLOSE,
         status=STATUS_SUCCEEDED,
-        schema_version=5,
+        schema_version=_SCHEMA_VERSION,
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",

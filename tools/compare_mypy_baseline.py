@@ -108,12 +108,15 @@ def compare(
         print(f"\nNEW diagnostics not in baseline ({len(new_diags)}):")
         for (fn, code, msg), count in new_diags:
             print(f"  {fn}: {code} count={count} | {msg}")
+            # GitHub Actions annotation (visible via public check-runs API)
+            print(f"::error file={fn}::{code} count={count} | {msg}")
         passed = False
 
     if increased_diags:
         print(f"\nINCREASED diagnostics ({len(increased_diags)}):")
         for (fn, code, msg), base, cur in increased_diags:
             print(f"  {fn}: {code} {base}->{cur} | {msg}")
+            print(f"::error file={fn}::{code} {base}->{cur} | {msg}")
         passed = False
 
     if passed:

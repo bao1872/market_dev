@@ -524,12 +524,14 @@ class TestStockDetailFeishuCapturePayload:
 class TestStockDetailFeishuIndicatorView:
     """[CHANGE-20260720-003 §四] 详情页手动分享时 POST body 携带 indicator_view。
 
-    测试覆盖：
-    1. POST body {"indicator_view": "bollinger"} → capture_payload.indicator_view == "bollinger"
-    2. POST body {"indicator_view": "smc"} → output_filename 含 -smc 后缀
-    3. POST body {"indicator_view": "node_cluster"} → capture_payload.indicator_view == "node_cluster"
-    4. POST body {} → 向后兼容（capture_payload 不含 indicator_view 键）
-    5. POST body {"indicator_view": "invalid"} → 非法值降级为 None（向后兼容）
+    [CHANGE-20260728-010] 后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'，
+    POST body 中的旧 indicator_view 字段兼容接收但忽略，不再透传到 capture_payload。
+    测试覆盖（断言已更新为固定组合视图行为）：
+    1. POST body {"indicator_view": "bollinger"} → capture_payload.indicator_view == "structure_node"
+    2. POST body {"indicator_view": "smc"} → output_filename 含 -structure_node 后缀
+    3. POST body {"indicator_view": "node_cluster"} → capture_payload.indicator_view == "structure_node"
+    4. POST body {} → capture_payload 固定含 indicator_view=structure_node（向后兼容性变化）
+    5. POST body {"indicator_view": "invalid"} → capture_payload 固定为 structure_node（不再降级 None）
     6. 文字消息 text_content 按 indicator_view 拆分字段（bollinger 不含节点字段）
     """
 
@@ -537,7 +539,12 @@ class TestStockDetailFeishuIndicatorView:
     async def test_post_body_bollinger_propagates_to_capture_payload(
         self, db_session, test_instrument, user_with_feishu_channel,
     ) -> None:
-        """POST body {"indicator_view": "bollinger"} → capture_payload.indicator_view == "bollinger"。"""
+        """POST body {"indicator_view": "bollinger"} → capture_payload.indicator_view == "structure_node"。
+
+        [CHANGE-20260728-010] 后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'，
+        POST body 携带的旧 indicator_view 字段兼容接收但忽略，不再透传到 capture_payload。
+        测试意图保留：验证旧 bollinger 值不再影响 capture_payload，固定被 structure_node 覆盖。
+        """
         user, _ = user_with_feishu_channel
         _override_get_db(db_session)
 
@@ -584,10 +591,11 @@ class TestStockDetailFeishuIndicatorView:
             assert mock_client.post.call_args is not None
             captured_payload = mock_client.post.call_args.kwargs.get("json")
             assert captured_payload is not None
-            assert captured_payload.get("indicator_view") == "bollinger"
-            # output_filename 应含 -bollinger 后缀
-            assert "-bollinger" in captured_payload.get("output_filename", ""), (
-                f"output_filename 应含 '-bollinger': {captured_payload.get('output_filename')}"
+            # [CHANGE-20260728-010] 旧 bollinger 值不再透传，固定被 structure_node 覆盖
+            assert captured_payload.get("indicator_view") == "structure_node"
+            # output_filename 应含 -structure_node 后缀（固定组合视图）
+            assert "-structure_node" in captured_payload.get("output_filename", ""), (
+                f"output_filename 应含 '-structure_node': {captured_payload.get('output_filename')}"
             )
         finally:
             app.dependency_overrides.clear()
@@ -596,7 +604,12 @@ class TestStockDetailFeishuIndicatorView:
     async def test_post_body_smc_propagates_to_output_filename(
         self, db_session, test_instrument, user_with_feishu_channel,
     ) -> None:
-        """POST body {"indicator_view": "smc"} → output_filename 含 -smc 后缀。"""
+        """POST body {"indicator_view": "smc"} → output_filename 含 -structure_node 后缀。
+
+        [CHANGE-20260728-010] 后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'，
+        POST body 携带的旧 indicator_view 字段兼容接收但忽略，不再透传到 capture_payload。
+        测试意图保留：验证旧 smc 值不再影响 output_filename，固定被 structure_node 覆盖。
+        """
         user, _ = user_with_feishu_channel
         _override_get_db(db_session)
 
@@ -642,10 +655,11 @@ class TestStockDetailFeishuIndicatorView:
             assert mock_client.post.call_args is not None
             captured_payload = mock_client.post.call_args.kwargs.get("json")
             assert captured_payload is not None
-            assert captured_payload.get("indicator_view") == "smc"
-            # output_filename 应含 -smc 后缀
-            assert "-smc" in captured_payload.get("output_filename", ""), (
-                f"output_filename 应含 '-smc': {captured_payload.get('output_filename')}"
+            # [CHANGE-20260728-010] 旧 smc 值不再透传，固定被 structure_node 覆盖
+            assert captured_payload.get("indicator_view") == "structure_node"
+            # output_filename 应含 -structure_node 后缀（固定组合视图）
+            assert "-structure_node" in captured_payload.get("output_filename", ""), (
+                f"output_filename 应含 '-structure_node': {captured_payload.get('output_filename')}"
             )
         finally:
             app.dependency_overrides.clear()
@@ -654,7 +668,12 @@ class TestStockDetailFeishuIndicatorView:
     async def test_post_body_node_cluster_propagates_to_capture_payload(
         self, db_session, test_instrument, user_with_feishu_channel,
     ) -> None:
-        """POST body {"indicator_view": "node_cluster"} → capture_payload.indicator_view == "node_cluster"。"""
+        """POST body {"indicator_view": "node_cluster"} → capture_payload.indicator_view == "structure_node"。
+
+        [CHANGE-20260728-010] 后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'，
+        POST body 携带的旧 indicator_view 字段兼容接收但忽略，不再透传到 capture_payload。
+        测试意图保留：验证旧 node_cluster 值不再影响 capture_payload，固定被 structure_node 覆盖。
+        """
         user, _ = user_with_feishu_channel
         _override_get_db(db_session)
 
@@ -700,9 +719,10 @@ class TestStockDetailFeishuIndicatorView:
             assert mock_client.post.call_args is not None
             captured_payload = mock_client.post.call_args.kwargs.get("json")
             assert captured_payload is not None
-            assert captured_payload.get("indicator_view") == "node_cluster"
-            assert "-node_cluster" in captured_payload.get("output_filename", ""), (
-                f"output_filename 应含 '-node_cluster': {captured_payload.get('output_filename')}"
+            # [CHANGE-20260728-010] 旧 node_cluster 值不再透传，固定被 structure_node 覆盖
+            assert captured_payload.get("indicator_view") == "structure_node"
+            assert "-structure_node" in captured_payload.get("output_filename", ""), (
+                f"output_filename 应含 '-structure_node': {captured_payload.get('output_filename')}"
             )
         finally:
             app.dependency_overrides.clear()
@@ -711,7 +731,13 @@ class TestStockDetailFeishuIndicatorView:
     async def test_post_body_empty_backwards_compatible(
         self, db_session, test_instrument, user_with_feishu_channel,
     ) -> None:
-        """POST body {} → 向后兼容（capture_payload 不含 indicator_view 键）。"""
+        """POST body {} → capture_payload.indicator_view 固定为 structure_node。
+
+        [CHANGE-20260728-010] 后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'，
+        空 body 也会在 capture_payload 中固定透传 indicator_view=structure_node。
+        测试意图保留：验证空 body 的向后兼容性——不再缺失 indicator_view 键，
+        而是固定为组合视图值（与 monitor_batch_service 一致）。
+        """
         user, _ = user_with_feishu_channel
         _override_get_db(db_session)
 
@@ -757,12 +783,15 @@ class TestStockDetailFeishuIndicatorView:
             assert mock_client.post.call_args is not None
             captured_payload = mock_client.post.call_args.kwargs.get("json")
             assert captured_payload is not None
-            # 向后兼容：空 body 时 capture_payload 不应含 indicator_view 键
-            assert "indicator_view" not in captured_payload, (
-                f"空 body 不应在 capture_payload 中产生 indicator_view: {captured_payload}"
+            # [CHANGE-20260728-010] 空 body 也固定透传 indicator_view=structure_node
+            # （后端固定组合视图，不再因 body 为空而缺失 indicator_view 键）
+            assert captured_payload.get("indicator_view") == "structure_node", (
+                f"空 body 应固定透传 indicator_view=structure_node: {captured_payload}"
             )
-            # output_filename 也不应含 indicator_view 后缀
+            # output_filename 固定含 -structure_node 后缀（不再缺失 indicator_view 后缀）
             output_filename = captured_payload.get("output_filename", "")
+            assert "-structure_node" in output_filename
+            # 旧枚举值后缀不应出现
             assert "-bollinger" not in output_filename
             assert "-smc" not in output_filename
             assert "-node_cluster" not in output_filename
@@ -773,7 +802,13 @@ class TestStockDetailFeishuIndicatorView:
     async def test_post_body_invalid_indicator_view_falls_back_to_none(
         self, db_session, test_instrument, user_with_feishu_channel,
     ) -> None:
-        """POST body {"indicator_view": "invalid"} → 非法值降级为 None（向后兼容）。"""
+        """POST body {"indicator_view": "invalid"} → capture_payload.indicator_view 固定为 structure_node。
+
+        [CHANGE-20260728-010] 后端固定使用 FEISHU_CAPTURE_VIEW='structure_node'，
+        POST body 中的非法 indicator_view 值不再降级为 None（缺失键），
+        而是被固定的 structure_node 覆盖（与合法旧值、空 body 行为一致）。
+        测试意图保留：验证非法值不再透传到 capture_payload，固定被 structure_node 覆盖。
+        """
         user, _ = user_with_feishu_channel
         _override_get_db(db_session)
 
@@ -819,10 +854,13 @@ class TestStockDetailFeishuIndicatorView:
             assert mock_client.post.call_args is not None
             captured_payload = mock_client.post.call_args.kwargs.get("json")
             assert captured_payload is not None
-            # 非法值降级为 None（与空 body 行为一致，向后兼容）
-            assert "indicator_view" not in captured_payload, (
-                f"非法 indicator_view 不应透传到 capture_payload: {captured_payload}"
+            # [CHANGE-20260728-010] 非法值不再降级为 None（缺失键），
+            # 而是被固定的 structure_node 覆盖（不透传非法值）
+            assert captured_payload.get("indicator_view") == "structure_node", (
+                f"非法 indicator_view 应被 structure_node 覆盖，不应透传原值: {captured_payload}"
             )
+            # 非法值不应出现在 output_filename 中
+            assert "invalid_view" not in captured_payload.get("output_filename", "")
         finally:
             app.dependency_overrides.clear()
 
