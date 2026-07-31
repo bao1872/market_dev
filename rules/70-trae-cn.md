@@ -10,7 +10,16 @@ TRAE CN 是开发、测试、部署、验收和运维全能力执行角色。
 ## 一轮闭环规则（CHANGE-20260729-009 收口）
 
 - 用户在单轮指令中明确给出"完整闭环"目标和"阶段间不得询问继续"的约束时，所有阶段视为同一发布目标的子步骤，不得在阶段之间停下询问"是否继续"。
-- 硬阻塞仅限：可能破坏现有生产数据且无法通过代码/只读审计消除风险；权限或必要密钥确实缺失；修复后目标测试第二次仍失败；Mac 可用磁盘<12GiB 或内存压力红色；服务器可用磁盘<20GiB 或 MemAvailable<2.5GiB。某一外部事项阻塞时记录证据并继续完成其他事项，不得整体停止。
+- 硬阻塞仅限：可能破坏现有生产数据且无法通过代码/只读审计消除风险；权限或必要密钥确实缺失；修复后目标测试第二次仍失败；Mac 可用磁盘<12GiB 或 `memory_pressure` 红色；服务器可用磁盘<20GiB 或 MemAvailable<2.5GiB。某一外部事项阻塞时记录证据并继续完成其他事项，不得整体停止。
+
+### macOS 内存规则（2026-07-31 补充）
+
+- 本机为 MacBook Pro，**禁止按 Linux 方式使用"可用内存低于固定 GiB"或"Swap 超过固定百分比"判定 RED**。Swap 只记录，不作为阻塞依据。
+- 开始、重任务前后、结束记录 `memory_pressure`、`memory_pressure -Q`、`vm_stat`、`sysctl vm.swapusage`、Top 20 RSS 进程、`df -h /` 及 `.git/.pytest_cache/.ruff_cache/.mypy_cache/frontend/dist/tmp` 大小。
+- `memory_pressure` 绿色且稳定时允许单个目标测试、tsc 或 Vite；黄色时不启动全量测试/build/Docker，只做目标检查；红色时停止新重任务，结束本轮无用子进程并清理本轮临时文件。
+- `tsc --noEmit` 和目标合同测试在黄色时不得跳过；Vite build 可交 CI。
+- 禁止并行重任务、子智能体、npm install、依赖重装、git gc/stash/worktree、广域缓存清理、Docker volume 或基础镜像删除。
+- 使用 `-p no:cacheprovider`；只清理本轮可重建缓存；非源码磁盘净增长必须 ≤ 0。
 - Compact/上下文压缩发生后，只读取 `/tmp/trae_release_closure_ledger.md`（或同等位置的执行账本）继续工作，**禁止**重新 git status、重读 instruction、重复扫描已完成审计。账本必须每完成一步立即更新状态、命令、结果和测试次数。
 - Compact/子代理恢复后禁止重新发现生产服务器入口：必须读取账本 + `docs/maps/80-system-runtime.md` §2 权威参数，并通过 `scripts/ops/panji-prod-preflight` 校验后继续；禁止猜测 SSH 别名（如 `panji-server`/`55-server`），禁止读取 `~/.ssh/config` 重新选择 Host。详见 `rules/80-deployment-data-safety.md` "生产服务器 SSH SSOT"。
 - 已确认事实直接复用：代码级审计或 SQL 查询已确认的结论（数据版本一致性、字段空值根因、参数门槛定义等）在账本记录后不再重复验证。

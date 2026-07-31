@@ -506,3 +506,47 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - 无 `review_orchestrator` 服务；
 - `factor_publications` 当前无 `publication_kind=review` 记录；
 - 待 Phase 1-2 实现后更新本节核验状态。
+
+## 11. Auction Anchor 接入（[CHANGE-20260730-018]）
+
+### 编排顺序
+
+`after_close_orchestrator` 在 stock_core 发布后、market_aggregation 之前插入 auction_anchor 生成：
+
+```
+stock_core 发布 → chip_consensus 结果 → auction_anchor 生成发布 → market_aggregation → review
+```
+
+### 统一入口
+
+盘后编排、Admin、恢复入口统一调用 `generate_and_publish_auction_anchors`（`backend/app/services/auction_anchor_service.py`），在一个事务边界内完成锚点生成+校验+publication 切换。**禁止盘后只 generate 不 publish**。
+
+### Chip 软失败语义（[P0-2]）
+
+| chip 状态 | auction_anchor 行为 |
+|---|---|
+| succeeded/partial | status=succeeded，生成完整锚点（structure+chip+composite） |
+| failed/timeout/未完成 | status=structure_only，只生成结构锚点 |
+| chip 后来恢复成功 | 在 chip worker 完成回调中重新调用 `generate_and_publish_auction_anchors` 重建完整锚点，`publish_auction_anchors` 通过 `on_conflict_do_update` 原子切换 publication 指针到新 snapshot |
+
+失败不影响 core，标记为 `optional_failure`。
+
+### Scheduler 接入（[P0-3]）
+
+接入现有 after_close_orchestrator Worker（`WORKER_TYPE=auction_scheduler`），**不新建容器**：
+
+| 时间（Asia/Shanghai） | 任务 | run_key |
+|---|---|---|
+| 09:25:05 | `auction_final:{date}` — 扫描最终竞价 | `auction_final:{date}` |
+| 10:00:00 | `auction_open_confirmation:{date}` — 开盘后验证事件生命周期 | `auction_open_confirmation:{date}` |
+
+使用 SchedulerJobRun、run_key、heartbeat、lease、fencing、retry 和恢复机制（同 after_close_orchestrator 模式）。
+
+实现位置：`backend/app/services/auction_scheduler_service.py`，由 `worker.py` 在现有 poll loop 中按 WORKER_TYPE 分发。
+
+### 当前实现状态
+
+- `after_close_orchestrator.py` 已接入 `generate_and_publish_auction_anchors` 调用
+- `after_close_chip_consensus_service.py` 在 chip 完成回调中触发锚点重建
+- `auction_scheduler_service.py` 提供 09:25/10:00 任务创建与执行
+- 详见 `docs/maps/75-auction-analysis.md`

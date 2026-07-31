@@ -296,3 +296,40 @@
 3. 拆分 `metric_engine` 就绪状态为 `raw_ready/normalized_ready/insufficient_history/reason` 四字段；
 4. 调整发布门禁允许 `raw_ready=true && normalized_ready=false` 的 bootstrap 发布；
 5. 核验 `fp_segment_change_pct` 空值处理。
+
+## 13. 竞价事件回流（[CHANGE-20260730-018] / [P0-FE]）
+
+### `/review` 第6阶段：AuctionBackflowPanel
+
+`/review` 页面新增"竞价回流"阶段（第6阶段），展示 `AuctionBackflowPanel` 组件，提供第二金字塔 + 竞价事件回流五维度可视化。
+
+### 数据来源
+
+| 接口 | 路径 | 说明 |
+|---|---|---|
+| 后端 | `GET /api/v1/auction/backflow/{trade_date}` | 返回 `AuctionBackflowData` |
+| 前端 hook | `useAuctionBackflow(tradeDate, { topEvents })` | React Query 封装 |
+| 组件 | `frontend/src/features/review/AuctionBackflowPanel.tsx` | 五维度可视化 |
+
+### 五维度数据
+
+1. **分布**：`event_type_distribution`（12 类事件计数）+ `lifecycle_distribution`（formed/confirmed/continued/weakened/failed/transformed/expired 计数）
+2. **迁移**：`event_migrations`（事件 lifecycle 转换记录列表）
+3. **新鲜度**：`anchor_freshness_buckets`（fresh/stale/expired 锚点分布）
+4. **集中度**：`market_concentration`（HHI/Top3/Top5）+ `top_industry_concentration`（行业集中度排行）
+5. **事件回流**：`backflow_events`（按 formed_at 排序的事件列表，含 symbol/name/event_type/lifecycle/位置/参与度）
+
+### 导航
+
+事件行点击跳转 `/auction/stock/{symbol}`，**使用 symbol 禁止 UUID**。后端 DTO 通过 JOIN `Instrument` 表批量填充 `symbol` 和 `name` 字段。
+
+### 元数据
+
+返回的 `AuctionBackflowData` 含 `algorithm_version`、`scan_run_id`、`anchor_publication_id`、`source_core_run_id`、`source_chip_run_id`、`reason_codes`（如 `scan_run_not_found`）。
+
+### 当前实现状态
+
+- 后端：`backend/app/api/auction.py:get_auction_backflow` 已实现
+- 前端：`AuctionBackflowPanel.tsx` 已实现并集成到 `ReviewPage.tsx`
+- 合同测试：`frontend/scripts/contract-tests/auctionContract.test.ts` 10 项通过（含 symbol 导航、四维度展示、ReviewPage 集成）
+- 详见 `docs/maps/75-auction-analysis.md#5-前端`
