@@ -112,3 +112,32 @@ CN 可按需切换以下模式：
 - **Console 验收**：记录浏览器 Console 是否存在 error / warning，异常必须定位根因或明确标注为已知无关警告。
 - **Network 验收**：记录关键 API 请求的状态码与响应摘要（200/4xx/5xx），不得仅凭页面渲染成功推断 API 正常。
 - 页面和生产未验收前，不得在 ledger 或对话输出中写 COMPLETED。
+
+## CI 监控硬规则（2026-07-31 补充，[CHANGE-20260731-002]）
+
+> `git push` 不是任务完成。每次 Push 后必须监控该精确 SHA 直到 Workflow 终态。
+
+1. **Push 不是完成**：`git push origin dev` 成功不等于 CI 通过，必须持续监控。
+2. **精确 SHA 监控**：每次 Push 后必须监控该精确 commit SHA 直到 Workflow 运行至终态（success/failure）；不得用前一次 push 的 SHA 代替。
+3. **查询优先级**：
+   - GitHub 连接器（plugin 中的 GitHub app）
+   - 已认证 `gh` CLI（`gh run list --branch dev --json status,conclusion,headSha,databaseId`）
+   - 公开 GitHub REST API（`https://api.github.com/repos/{owner}/{repo}/actions/runs?head_sha={sha}`，无需认证）
+4. **`gh` 未认证不能成为停止监控理由**：必须降级到公开 REST API 读取 Run 和 Job 状态；公开 API 有速率限制但仍可读取。
+5. **轮询频率**：每 30–60 秒轮询一次；CI 远程监控是轻量 HTTP 操作，不受 macOS 黄色 Memory Pressure 和"本地测试最多两次"限制。
+6. **失败后修复**：
+   - 获取失败 Job/Step 的真实日志（优先 `gh run view <run_id> --log`，降级到公开 API 下载 logs）；
+   - 按真实日志修复代码，不得凭猜测修改；
+   - Push 新 SHA 后重新监控新 SHA 的 CI 终态。
+7. **PG Job 被 skipped 视为 CI 失败**：禁止写"PG未确认"后结束；`postgres-integration-tests` 为 skipped 时必须排查前置依赖并修复。
+8. **无法下载日志时**：仍必须报告已知失败 Job 名称和状态，并运行其准确本地等价命令（如 `PURE_UNIT_TEST=1 pytest tests/test_xxx.py`），不得把已知 failure 写成"CI不可见"。
+9. **最终报告必须列出全部 Job 状态和 CI Gate 结果**：
+   - 列出每个 Job 的 name 和 result（success/failure/skipped/cancelled）；
+   - 列出 CI Gate 的最终 conclusion（success/failure）；
+   - CI Gate=success 是部署前置条件，任何单个 Job 通过不能代替 CI Gate。
+10. **CI Gate 拓扑**（[CHANGE-20260731-002]）：
+    - `postgres-integration-tests` 独立运行，不再依赖 Ruff/Mypy；
+    - `alembic-cycle` 独立运行；
+    - `CI Gate` 是唯一阻断 Job，`if: always()`，needs 所有阻断 Job；
+    - `Ruff Full Repository Report` 和 `Mypy Full Repository Report` 为报告型任务，不纳入 CI Gate；
+    - 部署只认最终 SHA 的 `CI Gate=success`。
