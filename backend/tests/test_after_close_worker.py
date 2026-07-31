@@ -346,7 +346,8 @@ async def test_execute_with_checkpoint_skips_refresh_daily(db_session) -> None:
 
     fake_session_local = MagicMock(return_value=_FakeSessionContext())
 
-    # mock refresh_all_instruments（应未被调用）
+    # 占位返回值（断点恢复时 refresh_all_instruments 不应被调用，但需变量存在以构造 mock）
+    fake_batch_result = BatchResult(total=0, succeeded=0)
     mock_refresh = AsyncMock()
 
     # mock publish_run 返回的对象
