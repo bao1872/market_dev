@@ -341,8 +341,97 @@ def upgrade() -> None:
     op.create_index("ix_auction_event_track_instrument", "auction_event_trackings", ["instrument_id"])
     op.create_index("ix_auction_event_track_lifecycle", "auction_event_trackings", ["lifecycle"])
 
+    # 8. auction_quote_capture_runs — 竞价行情采集 run（[CHANGE-20260731-001] 数据源合同）
+    # 每次 09:25:05 触发创建一条 run，记录 expected/received/valid/coverage
+    op.create_table(
+        "auction_quote_capture_runs",
+        sa.Column("id", UUID(as_uuid=True), primary_key=True, nullable=False),
+        sa.Column("trade_date", sa.Date(), nullable=False, comment="业务交易日"),
+        sa.Column("source", sa.Text(), nullable=False,
+                  comment="数据源：mootdx/tushare（当前仅 mootdx）"),
+        sa.Column("test_namespace", sa.Text(), nullable=False,
+                  comment="隔离命名空间：production / auction_v1_canary_<date>_<sha>"),
+        sa.Column("status", sa.Text(), nullable=False,
+                  comment="running/succeeded/failed/partial"),
+        sa.Column("expected_count", sa.Integer(), nullable=False, server_default="0",
+                  comment="预期采集股票数"),
+        sa.Column("received_count", sa.Integer(), nullable=False, server_default="0",
+                  comment="实际收到报价数"),
+        sa.Column("valid_count", sa.Integer(), nullable=False, server_default="0",
+                  comment="有效报价数（quality_status=ok）"),
+        sa.Column("coverage", sa.Float(), nullable=False, server_default="0.0",
+                  comment="valid_count / expected_count"),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("heartbeat_at", sa.DateTime(timezone=True), nullable=True,
+                  comment="最近心跳时间，用于 fencing 判定僵尸 run"),
+        sa.Column("reason_codes", JSONB, nullable=False, server_default="[]"),
+        sa.Column("code_version", sa.Text(), nullable=True,
+                  comment="采集代码版本（git SHA 短码）"),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.UniqueConstraint("trade_date", "source", "test_namespace",
+                            name="uq_auction_quote_capture_date_src_ns"),
+    )
+    op.create_index("ix_auction_quote_capture_trade_date", "auction_quote_capture_runs", ["trade_date"])
+    op.create_index("ix_auction_quote_capture_namespace", "auction_quote_capture_runs", ["test_namespace"])
+
+    # 9. auction_final_quotes — 个股最终竞价报价（[CHANGE-20260731-001] 数据源合同）
+    # 09:25:05 后从 mootdx/pytdx 实时行情写入；scan_service 从此表读取，不再依赖 bars_minute
+    op.create_table(
+        "auction_final_quotes",
+        sa.Column("id", UUID(as_uuid=True), primary_key=True, nullable=False),
+        sa.Column("trade_date", sa.Date(), nullable=False, comment="业务交易日"),
+        sa.Column("instrument_id", UUID(as_uuid=True),
+                  sa.ForeignKey("instruments.id", ondelete="RESTRICT"),
+                  nullable=False, comment="个股 instrument_id"),
+        sa.Column("capture_run_id", UUID(as_uuid=True),
+                  sa.ForeignKey("auction_quote_capture_runs.id", ondelete="CASCADE"),
+                  nullable=False, comment="关联采集 run"),
+        sa.Column("test_namespace", sa.Text(), nullable=False,
+                  comment="隔离命名空间（与 capture_run 一致）"),
+        sa.Column("source", sa.Text(), nullable=False,
+                  comment="数据源：mootdx/tushare"),
+        sa.Column("source_server", sa.Text(), nullable=True,
+                  comment="行情服务器标识（pytdx server host:port）"),
+        sa.Column("source_time", sa.DateTime(timezone=True), nullable=True,
+                  comment="行情服务器返回的时间（servertime）"),
+        sa.Column("captured_at", sa.DateTime(timezone=True), server_default=sa.func.now(),
+                  nullable=False, comment="本地写入时间"),
+        sa.Column("final_price", sa.Numeric(12, 4), nullable=True,
+                  comment="最终竞价价（09:25 集合竞价匹配价）"),
+        sa.Column("prev_close", sa.Numeric(12, 4), nullable=True,
+                  comment="前收价（last_close）"),
+        sa.Column("volume", sa.BigInteger(), nullable=True,
+                  comment="竞价成交量（手，pytdx vol 字段）"),
+        sa.Column("amount", sa.Numeric(18, 2), nullable=True,
+                  comment="竞价成交额（元）"),
+        sa.Column("matched_volume", sa.BigInteger(), nullable=True,
+                  comment="匹配成交量（手，auction match volume）"),
+        sa.Column("unmatched_volume", sa.BigInteger(), nullable=True,
+                  comment="未匹配量（手，从 bid/ask 余额计算）"),
+        sa.Column("is_final", sa.Boolean(), nullable=False, server_default=sa.false(),
+                  comment="是否为最终集合竞价结果（09:25 后写入为 true）"),
+        sa.Column("quality_status", sa.Text(), nullable=False, server_default="'ok'",
+                  comment="ok/suspended/zero_volume/missing_field/api_error/limit_up/limit_down"),
+        sa.Column("reason_codes", JSONB, nullable=False, server_default="[]"),
+        sa.Column("raw_payload", JSONB, nullable=True,
+                  comment="原始行情数据（用于审计和回溯）"),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.UniqueConstraint("trade_date", "instrument_id", "source", "capture_run_id",
+                            name="uq_auction_final_quote_date_inst_src_run"),
+    )
+    op.create_index("ix_auction_final_quotes_trade_date_ns",
+                    "auction_final_quotes", ["trade_date", "test_namespace"])
+    op.create_index("ix_auction_final_quotes_capture_run",
+                    "auction_final_quotes", ["capture_run_id"])
+    op.create_index("ix_auction_final_quotes_inst_date",
+                    "auction_final_quotes", ["instrument_id", "trade_date"])
+
 
 def downgrade() -> None:
+    op.drop_table("auction_final_quotes")
+    op.drop_table("auction_quote_capture_runs")
     op.drop_table("auction_event_trackings")
     op.drop_table("auction_scope_results")
     op.drop_table("auction_instrument_results")

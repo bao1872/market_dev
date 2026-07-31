@@ -274,17 +274,22 @@ async def execute_auction_scan_run(
     *,
     worker_id: str | None = None,
     lease_epoch: int | None = None,
+    test_namespace: str | None = None,
+    expected_symbols: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """[P0-3] 执行 auction_final 任务：扫描全市场最终竞价。
+    """[P0-3] 执行 auction_final 任务：采集最终竞价 + 扫描全市场。
 
     流程：
-    1. 调用 run_auction_scan（auction_type=final）
-    2. 标记 SchedulerJobRun succeeded/failed
-    3. 不触发 aggregation（由 after_close_orchestrator 或独立流程触发）
+    1. 调用 capture_auction_final_quotes（09:25:05 后从 mootdx 采集并写入 auction_final_quotes）
+    2. 调用 run_auction_scan（auction_type=final，从 auction_final_quotes 读取）
+    3. 标记 SchedulerJobRun succeeded/failed
+    4. 不触发 aggregation（由 after_close_orchestrator 或独立流程触发）
 
     约束：
     - 锚点未发布 → AnchorNotPublishedError，标记 failed
     - AuctionScanConflictError → 标记 skipped（已有成功 run，无需重复）
+    - capture 失败但部分有效 → scan 仍可基于 partial 数据执行
+    - capture 完全失败（valid_count=0） → scan 标记 failed，不阻塞
     - 其他异常 → 标记 failed + error_message
 
     Args:
@@ -292,29 +297,63 @@ async def execute_auction_scan_run(
         trade_date: 业务交易日
         worker_id: Worker 标识
         lease_epoch: 租约 epoch
+        test_namespace: 隔离命名空间（None 使用 production；Canary 模式使用 auction_v1_canary_*）
+        expected_symbols: Canary 模式下的预期股票列表（None 表示全市场）
 
     Returns:
-        执行结果 dict（含 status、run_id、coverage 等）
+        执行结果 dict（含 status、run_id、coverage、capture_run_id 等）
     """
     from app.db import AsyncSessionLocal
+    from app.services.auction_quote_capture_service import (
+        PRODUCTION_NAMESPACE,
+        capture_auction_final_quotes,
+    )
     from app.services.auction_scan_service import (
         AuctionScanConflictError,
         run_auction_scan,
     )
 
+    namespace = test_namespace or PRODUCTION_NAMESPACE
+
     logger.info(
-        "[AuctionScheduler] 开始执行 auction_final: job_run_id=%s, trade_date=%s",
-        job_run_id, trade_date,
+        "[AuctionScheduler] 开始执行 auction_final: job_run_id=%s, trade_date=%s, "
+        "namespace=%s",
+        job_run_id, trade_date, namespace,
     )
 
     try:
         async with AsyncSessionLocal() as db:
+            # 1. 采集最终竞价报价（09:25:05 后写入 auction_final_quotes）
+            capture_result = await capture_auction_final_quotes(
+                db, trade_date,
+                test_namespace=namespace,
+                worker_id=worker_id,
+                expected_symbols=expected_symbols,
+            )
+            await db.commit()
+
+            logger.info(
+                "[AuctionScheduler] capture 完成: run_id=%s status=%s "
+                "expected=%d received=%d valid=%d coverage=%.4f",
+                capture_result.get("capture_run_id"),
+                capture_result.get("status"),
+                capture_result.get("expected_count"),
+                capture_result.get("received_count"),
+                capture_result.get("valid_count"),
+                capture_result.get("coverage"),
+            )
+
+            # 2. 基于采集结果执行扫描（scan 内部从 auction_final_quotes 读取）
             result = await run_auction_scan(
                 db, trade_date,
                 auction_type="final",
                 worker_id=worker_id,
                 lease_epoch=lease_epoch,
             )
+            # 附加 capture 信息到 scan 结果
+            result["capture_run_id"] = capture_result.get("capture_run_id")
+            result["capture_status"] = capture_result.get("status")
+            result["capture_coverage"] = capture_result.get("coverage")
             await db.commit()
 
         # 标记 SchedulerJobRun succeeded

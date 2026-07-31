@@ -2,10 +2,10 @@
 
 输入：
 - 已发布的 auction_anchor_publications（通过 get_published_anchors 获取）
-- 当日 BarMinute 9:25 数据（最终竞价价/量/额）
+- 当日 AuctionFinalQuote 数据（[CHANGE-20260731-001] 数据源合同，由 capture service 写入）
 - 前一日 BarDaily.close（prev_close）
 - 过去 20 个交易日的 BarDaily（ATR / 趋势背景）
-- 过去 20 个交易日的 BarMinute 9:25（竞价额中位数与分位）
+- 过去 20 个交易日的 AuctionFinalQuote（竞价额中位数与分位）
 
 输出：
 - AuctionScanRun（status=succeeded/failed/partial）
@@ -14,7 +14,7 @@
 
 约束：
 - 锚点未发布 → 抛 AnchorNotPublishedError
-- 9:25 bar 缺失 → 标记 missing，记录 reason_codes，仍写一条 result
+- AuctionFinalQuote 缺失 → 标记 missing，记录 reason_codes，仍写一条 result
 - 所有比例在 detail_payload 中同时返回分子和分母
 - 使用 async/await + AsyncSession
 - ATR 使用 app.strategy_assets.algorithms.features.atr_utils.compute_atr（Pine RMA）
@@ -33,7 +33,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auction import (
@@ -47,6 +47,10 @@ from app.models.auction import (
 from app.models.bar import BarDaily, BarMinute
 from app.models.instrument import Instrument
 from app.services.auction_anchor_service import get_published_anchors
+from app.services.auction_quote_capture_service import (
+    load_final_quotes_for_scan,
+    load_history_final_quotes,
+)
 from app.strategy_assets.algorithms.features.atr_utils import compute_atr
 
 logger = logging.getLogger(__name__)
@@ -891,33 +895,6 @@ async def _get_active_a_share_instruments(session: AsyncSession) -> list[Instrum
     return list(result.scalars().all())
 
 
-async def _load_final_auction_bars(
-    session: AsyncSession,
-    instrument_ids: list[uuid.UUID],
-    trade_date: date,
-) -> dict[uuid.UUID, BarMinute]:
-    """加载 trade_date 9:25 的 BarMinute（最终竞价数据）。
-
-    Returns: dict[instrument_id, BarMinute]
-    """
-    if not instrument_ids:
-        return {}
-
-    start_time = datetime.combine(trade_date, time(9, 25, 0))
-    end_time = datetime.combine(trade_date, time(9, 26, 0))
-
-    stmt = (
-        select(BarMinute)
-        .where(
-            BarMinute.instrument_id.in_(instrument_ids),
-            BarMinute.trade_time >= start_time,
-            BarMinute.trade_time < end_time,
-        )
-    )
-    result = await session.execute(stmt)
-    return {bar.instrument_id: bar for bar in result.scalars().all()}
-
-
 async def _load_history_daily_bars(
     session: AsyncSession,
     instrument_ids: list[uuid.UUID],
@@ -946,45 +923,6 @@ async def _load_history_daily_bars(
     )
     result = await session.execute(stmt)
     history_map: dict[uuid.UUID, list[BarDaily]] = {}
-    for bar in result.scalars().all():
-        history_map.setdefault(bar.instrument_id, []).append(bar)
-    return {iid: bars[:lookback] for iid, bars in history_map.items()}
-
-
-async def _load_history_auction_bars(
-    session: AsyncSession,
-    instrument_ids: list[uuid.UUID],
-    trade_date: date,
-    *,
-    lookback: int = HISTORY_LOOKBACK_DAYS,
-) -> dict[uuid.UUID, list[BarMinute]]:
-    """加载 trade_date 前 lookback 个交易日的 9:25 BarMinute（历史竞价额）。
-
-    Returns: dict[instrument_id, list[BarMinute]] 按交易时间降序（最新在前）
-    """
-    if not instrument_ids:
-        return {}
-
-    calendar_lookback = lookback * 2 + 5
-    start_date = trade_date - timedelta(days=calendar_lookback)
-
-    # 9:25 时间窗口：每日 [09:25:00, 09:26:00)
-    start_time = datetime.combine(start_date, time(9, 25, 0))
-    end_time = datetime.combine(trade_date, time(9, 26, 0))
-
-    stmt = (
-        select(BarMinute)
-        .where(
-            BarMinute.instrument_id.in_(instrument_ids),
-            BarMinute.trade_time >= start_time,
-            BarMinute.trade_time < end_time,
-            func.extract("hour", BarMinute.trade_time) == 9,
-            func.extract("minute", BarMinute.trade_time) == 25,
-        )
-        .order_by(BarMinute.instrument_id, BarMinute.trade_time.desc())
-    )
-    result = await session.execute(stmt)
-    history_map: dict[uuid.UUID, list[BarMinute]] = {}
     for bar in result.scalars().all():
         history_map.setdefault(bar.instrument_id, []).append(bar)
     return {iid: bars[:lookback] for iid, bars in history_map.items()}
@@ -1175,9 +1113,9 @@ async def run_auction_scan(
                 "event_count": 0,
             }
 
-        auction_bars = await _load_final_auction_bars(db, instrument_ids, trade_date)
+        auction_quotes = await load_final_quotes_for_scan(db, instrument_ids, trade_date)
         history_daily = await _load_history_daily_bars(db, instrument_ids, trade_date)
-        history_auction = await _load_history_auction_bars(db, instrument_ids, trade_date)
+        history_auction = await load_history_final_quotes(db, instrument_ids, trade_date)
         anchor_map = await _load_instrument_anchors(db, snapshot_id, instrument_ids)
 
         # 5. 遍历处理
@@ -1187,7 +1125,7 @@ async def run_auction_scan(
 
         for instrument in instruments:
             instrument_id = instrument.id
-            auction_bar = auction_bars.get(instrument_id)
+            auction_quote = auction_quotes.get(instrument_id)
             daily_history = history_daily.get(instrument_id, [])
             auction_history = history_auction.get(instrument_id, [])
             anchors = anchor_map.get(instrument_id, [])
@@ -1209,9 +1147,9 @@ async def run_auction_scan(
                 reason_codes.append("anchor_insufficient")
 
             # 竞价数据检查
-            if auction_bar is None:
-                reason_codes.append("auction_bar_missing")
-                missing_reasons["auction_bar_missing"] += 1
+            if auction_quote is None:
+                reason_codes.append("auction_quote_missing")
+                missing_reasons["auction_quote_missing"] += 1
                 results.append(AuctionInstrumentResult(
                     scan_run_id=run_id,
                     trade_date=trade_date,
@@ -1222,24 +1160,28 @@ async def run_auction_scan(
                 ))
                 continue
 
-            # prev_close（来自最近一日日线）
-            prev_close = daily_history[0].close if daily_history else None
+            # prev_close（来自最近一日日线；优先使用竞价报价中的 prev_close）
+            prev_close = (
+                _safe_decimal(auction_quote.prev_close)
+                if auction_quote.prev_close is not None
+                else (daily_history[0].close if daily_history else None)
+            )
             if prev_close is None:
                 reason_codes.append("prev_close_missing")
 
             # 涨跌幅
-            final_price = _safe_decimal(auction_bar.close)
+            final_price = _safe_decimal(auction_quote.final_price)
             change_pct, change_components = _compute_change_pct(final_price, prev_close)
 
             # 竞价量和额
             auction_volume = (
-                int(auction_bar.volume) if auction_bar.volume is not None else None
+                int(auction_quote.volume) if auction_quote.volume is not None else None
             )
-            auction_amount = _safe_decimal(auction_bar.amount)
+            auction_amount = _safe_decimal(auction_quote.amount)
 
             # 相对 20 日竞价额中位数和分位
             history_auction_amounts = [
-                amt for amt in (_safe_decimal(b.amount) for b in auction_history)
+                amt for amt in (_safe_decimal(q.amount) for q in auction_history)
                 if amt is not None
             ]
             rel_vol_median, vol_median_components = _compute_relative_volume_median(
@@ -1254,9 +1196,11 @@ async def run_auction_scan(
                 final_price, prev_close, daily_history
             )
 
-            # 状态标记
+            # 状态标记（quality_status 提供更精确的停牌/涨跌停信息）
             is_suspended = (
-                auction_bar.volume is None or auction_bar.volume == 0
+                auction_quote.quality_status == "suspended"
+                or auction_quote.volume is None
+                or auction_quote.volume == 0
             )
             is_limit_up, is_limit_down = _detect_limits(change_pct)
             is_ex_right = _detect_ex_right(daily_history)
@@ -1364,7 +1308,7 @@ async def run_auction_scan(
         # 7. 统计与状态
         eligible_count = len(instruments)
         valid_count = sum(
-            1 for r in results if "auction_bar_missing" not in r.reason_codes
+            1 for r in results if "auction_quote_missing" not in r.reason_codes
         )
         ready_count = sum(1 for r in results if r.event_type is not None)
         coverage_ratio = (

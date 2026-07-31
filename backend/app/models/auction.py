@@ -373,3 +373,84 @@ class AuctionEventTracking(Base):
     def __repr__(self) -> str:
         return (f"<AuctionEventTracking(instrument_id={self.instrument_id!r}, "
                 f"event={self.event_type!r}, lifecycle={self.lifecycle!r})>")
+
+
+class AuctionQuoteCaptureRun(Base):
+    """竞价行情采集 run（[CHANGE-20260731-001] 数据源合同）。
+
+    每次 09:25:05 触发创建一条 run，记录 expected/received/valid/coverage。
+    test_namespace 用于隔离 Canary 数据与正式生产数据。
+    """
+
+    __tablename__ = "auction_quote_capture_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    trade_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    source: Mapped[str] = mapped_column(Text(), nullable=False,
+                                        comment="mootdx/tushare")
+    test_namespace: Mapped[str] = mapped_column(Text(), nullable=False)
+    status: Mapped[str] = mapped_column(Text(), nullable=False,
+                                        comment="running/succeeded/failed/partial")
+    expected_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
+    received_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
+    valid_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
+    coverage: Mapped[float] = mapped_column(Float(), nullable=False, default=0.0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="最近心跳时间，用于 fencing 判定僵尸 run",
+    )
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    code_version: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, onupdate=func.now())
+
+    def __repr__(self) -> str:
+        return (f"<AuctionQuoteCaptureRun(trade_date={self.trade_date!r}, "
+                f"source={self.source!r}, status={self.status!r}, coverage={self.coverage})>")
+
+
+class AuctionFinalQuote(Base):
+    """个股最终竞价报价（[CHANGE-20260731-001] 数据源合同）。
+
+    09:25:05 后从 mootdx/pytdx 实时行情写入。
+    auction_scan_service 从此表读取，不再依赖 bars_minute。
+    """
+
+    __tablename__ = "auction_final_quotes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    trade_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    instrument_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("instruments.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    capture_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("auction_quote_capture_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    test_namespace: Mapped[str] = mapped_column(Text(), nullable=False)
+    source: Mapped[str] = mapped_column(Text(), nullable=False)
+    source_server: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    source_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    final_price: Mapped[Any | None] = mapped_column(Numeric(12, 4), nullable=True)
+    prev_close: Mapped[Any | None] = mapped_column(Numeric(12, 4), nullable=True)
+    volume: Mapped[int | None] = mapped_column(BigInteger(), nullable=True)
+    amount: Mapped[Any | None] = mapped_column(Numeric(18, 2), nullable=True)
+    matched_volume: Mapped[int | None] = mapped_column(BigInteger(), nullable=True)
+    unmatched_volume: Mapped[int | None] = mapped_column(BigInteger(), nullable=True)
+    is_final: Mapped[bool] = mapped_column(Boolean(), nullable=False, server_default="false")
+    quality_status: Mapped[str] = mapped_column(Text(), nullable=False, server_default="'ok'",
+                                                comment="ok/suspended/zero_volume/missing_field/api_error/limit_up/limit_down")
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (f"<AuctionFinalQuote(instrument_id={self.instrument_id!r}, "
+                f"trade_date={self.trade_date!r}, final_price={self.final_price}, "
+                f"quality={self.quality_status!r})>")
