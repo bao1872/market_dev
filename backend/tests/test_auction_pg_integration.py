@@ -33,6 +33,8 @@ from app.models.auction import (
     AuctionAnchorPublication,
     AuctionAnchorSnapshot,
     AuctionEventTracking,
+    AuctionFinalQuote,
+    AuctionQuoteCaptureRun,
     AuctionScopeResult,
 )
 from app.models.bar import BarDaily, BarMinute
@@ -247,60 +249,112 @@ async def _create_prev_daily_bar(
     return bar
 
 
-async def _create_final_auction_bar(
+async def _create_auction_capture_run(
+    db_session: AsyncSession,
+    *,
+    trade_date: date,
+    source: str = "mootdx",
+    test_namespace: str = "production",
+    status: str = "succeeded",
+    expected_count: int = 3,
+    received_count: int = 3,
+    valid_count: int = 3,
+) -> AuctionQuoteCaptureRun:
+    """创建竞价行情采集 CaptureRun（succeeded 状态）。
+
+    [CHANGE-20260731-001] scan_service 从 auction_final_quotes 读取，
+    不再依赖 BarMinute 9:25。测试 fixture 必须创建 CaptureRun + AuctionFinalQuote。
+    """
+    run = AuctionQuoteCaptureRun(
+        trade_date=trade_date,
+        source=source,
+        test_namespace=test_namespace,
+        status=status,
+        expected_count=expected_count,
+        received_count=received_count,
+        valid_count=valid_count,
+        coverage=valid_count / expected_count if expected_count > 0 else 0.0,
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+        heartbeat_at=datetime.now(UTC),
+        code_version="test",
+    )
+    db_session.add(run)
+    await db_session.flush()
+    return run
+
+
+async def _create_final_auction_quote(
     db_session: AsyncSession,
     *,
     instrument: Instrument,
     trade_date: date,
-    close: str = "10.50",
+    capture_run_id: uuid.UUID,
+    final_price: str = "10.50",
+    prev_close: str = "10.00",
     volume: int = 2000000,
     amount: str = "21000000",
-) -> BarMinute:
-    """创建 trade_date 9:25 BarMinute（最终竞价数据）。"""
-    auction_time = datetime.combine(trade_date, time(9, 25, 0))
-    bar = BarMinute(
+    quality_status: str = "ok",
+    test_namespace: str = "production",
+) -> AuctionFinalQuote:
+    """创建最终竞价报价（AuctionFinalQuote，[CHANGE-20260731-001] 数据源合同）。
+
+    替代旧 _create_final_auction_bar（BarMinute 9:25）。scan_service 从此表读取。
+    """
+    source_time = datetime.combine(trade_date, time(9, 25, 5), tzinfo=UTC)
+    quote = AuctionFinalQuote(
+        trade_date=trade_date,
         instrument_id=instrument.id,
-        trade_time=auction_time,
-        open=Decimal(close),
-        high=Decimal(close),
-        low=Decimal(close),
-        close=Decimal(close),
-        volume=Decimal(volume),
+        capture_run_id=capture_run_id,
+        test_namespace=test_namespace,
+        source="mootdx",
+        source_server="test_server",
+        source_time=source_time,
+        final_price=Decimal(final_price),
+        prev_close=Decimal(prev_close),
+        volume=volume,
         amount=Decimal(amount),
-        adj_factor=Decimal("1.0"),
+        matched_volume=volume,
+        unmatched_volume=0,
+        is_final=True,
+        quality_status=quality_status,
+        raw_payload={"test": True},
     )
-    db_session.add(bar)
+    db_session.add(quote)
     await db_session.flush()
-    return bar
+    return quote
 
 
-async def _create_history_auction_bars(
+async def _create_history_auction_quotes(
     db_session: AsyncSession,
     *,
-    instrument: Instrument,
+    instruments: list[Instrument],
     trade_date: date,
     count: int = 5,
-) -> list[BarMinute]:
-    """创建前 count 个交易日 9:25 BarMinute（历史竞价额用于中位数/分位计算）。"""
-    bars: list[BarMinute] = []
+) -> list[AuctionFinalQuote]:
+    """创建前 count 个交易日的 AuctionFinalQuote（历史竞价额用于中位数/分位计算）。
+
+    [CHANGE-20260731-001] 替代旧 _create_history_auction_bars（BarMinute 9:25）。
+    每个历史日期创建一个 CaptureRun + 每只股票一条 AuctionFinalQuote。
+    """
+    quotes: list[AuctionFinalQuote] = []
     for i in range(1, count + 1):
         d = trade_date - timedelta(days=i)
-        auction_time = datetime.combine(d, time(9, 25, 0))
-        bar = BarMinute(
-            instrument_id=instrument.id,
-            trade_time=auction_time,
-            open=Decimal("10.00"),
-            high=Decimal("10.00"),
-            low=Decimal("10.00"),
-            close=Decimal("10.00"),
-            volume=Decimal("1000000"),
-            amount=Decimal("10000000"),
-            adj_factor=Decimal("1.0"),
+        run = await _create_auction_capture_run(
+            db_session, trade_date=d,
+            expected_count=len(instruments),
+            received_count=len(instruments),
+            valid_count=len(instruments),
         )
-        db_session.add(bar)
-        bars.append(bar)
-    await db_session.flush()
-    return bars
+        for inst in instruments:
+            quote = await _create_final_auction_quote(
+                db_session, instrument=inst, trade_date=d,
+                capture_run_id=run.id,
+                final_price="10.00", prev_close="10.00",
+                volume=1000000, amount="10000000",
+            )
+            quotes.append(quote)
+    return quotes
 
 
 async def _create_board_with_members(
@@ -338,7 +392,11 @@ async def _setup_full_pipeline_fixtures(
     """构造完整链路所需前置数据。
 
     创建 3 个 A 股 instrument、1 个共享 core_run（market 级）、3 个 chip_snapshot、
-    stock_core 发布指针、前一日 BarDaily、最终竞价 BarMinute、历史竞价 BarMinute。
+    stock_core 发布指针、前一日 BarDaily、最终竞价 AuctionFinalQuote、历史竞价 AuctionFinalQuote。
+
+    [CHANGE-20260731-001] 竞价数据源改为 auction_final_quotes 表（替代 BarMinute 9:25）：
+    - 当日：1 个 CaptureRun + 3 条 AuctionFinalQuote
+    - 历史：5 个历史 CaptureRun + 每日 3 条 AuctionFinalQuote
 
     所有 StockFeatureSnapshot.source_run_id 共享同一 core_run_id（与生产一致：
     market 级 stock_core 发布指向单次 after_close run，所有 snapshot 归属该 run）。
@@ -367,6 +425,12 @@ async def _setup_full_pipeline_fixtures(
     db_session.add(core_run)
     await db_session.flush()
     core_run_id = core_run.id
+
+    # 2. 创建当日 CaptureRun（所有股票共享一个 run，与生产一致）
+    capture_run = await _create_auction_capture_run(
+        db_session, trade_date=_TRADE_DATE,
+        expected_count=3, received_count=3, valid_count=3,
+    )
 
     instruments = []
     for symbol in ["000001", "000002", "600001"]:
@@ -406,18 +470,21 @@ async def _setup_full_pipeline_fixtures(
                 trade_date=_TRADE_DATE - timedelta(days=i),
                 close="10.00",
             )
-        # 最终竞价 bar（高开 5%）
-        await _create_final_auction_bar(
-            db_session, instrument=inst, trade_date=_TRADE_DATE, close="10.50",
+        # [CHANGE-20260731-001] 最终竞价报价（高开 5%）— 替代旧 BarMinute 9:25
+        await _create_final_auction_quote(
+            db_session, instrument=inst, trade_date=_TRADE_DATE,
+            capture_run_id=capture_run.id,
+            final_price="10.50", prev_close="10.00",
         )
-        # 历史竞价 bars（中位数/分位计算）
-        await _create_history_auction_bars(
-            db_session, instrument=inst, trade_date=_TRADE_DATE, count=5,
-        )
+
+    # 3. 历史竞价报价（中位数/分位计算）— 替代旧 BarMinute 9:25 历史
+    await _create_history_auction_quotes(
+        db_session, instruments=instruments, trade_date=_TRADE_DATE, count=5,
+    )
 
     await db_session.flush()
 
-    # 2. market 级 stock_core 发布指针指向共享 core_run
+    # 4. market 级 stock_core 发布指针指向共享 core_run
     await _create_stock_core_publication(
         db_session, trade_date=_TRADE_DATE, core_run_id=core_run_id,
     )

@@ -240,6 +240,9 @@ export function buildSmcIndicators(barsCount: number, timeframe: string = '1d') 
       algorithm_version: '1.0.0',
       time: Array.from({ length: barsCount }, (_, i) => barTime(i)),
       swing_bias: 1,
+      // [CHANGE-20260728-010] params 字段是 computeCombinedReady 的必需字段
+      // 后端 smc_view_adapter.py 始终返回 params（非 null object）
+      params: { swing_length: 5, internal_length: 4, display_bars: barsCount },
       events: events.map((e) => ({
         type: e.type,
         bias: e.bias,
@@ -361,6 +364,9 @@ export function buildChartSnapshot(
 }
 
 // Capture Snapshot 响应（与 chart-snapshot 相似，但加 capture 元数据）
+// [CHANGE-20260728-010] Capture 固定组合视图：始终返回 node_cluster + smc 组合数据
+// 后端 API 忽略 indicator_view URL 参数，始终返回 structure_node 组合视图
+// 前端 computeCombinedReady 要求 node_cluster + smc 同时 Ready
 export function buildCaptureSnapshot(
   symbol: string,
   indicatorView: 'node_cluster' | 'bollinger' | 'smc',
@@ -371,15 +377,25 @@ export function buildCaptureSnapshot(
   include_smc: boolean
 } {
   const snap = buildChartSnapshot(symbol, timeframe, indicatorView, 250)
+  // 组合视图：合并 node_cluster + smc 数据（对齐后端 structure_node 合同）
+  const nodeClusterData = buildNodeClusterIndicators(symbol, 250)
+  const smcData = buildSmcIndicators(250, timeframe)
   return {
     ...snap,
+    indicators: {
+      ...snap.indicators,
+      // 合并 node_cluster + smc（computeCombinedReady 要求两者同时 Ready）
+      data: { ...nodeClusterData, ...smcData },
+      algorithm_id: 'structure_node',
+    },
     capture: {
       user_id: 'fixture-user',
       event_id: 'fixture-event-001',
       scope: 'feishu_capture',
     },
-    indicator_view: indicatorView,
-    include_smc: indicatorView === 'smc',
+    // 后端固定返回 'structure_node'，忽略 URL 参数
+    indicator_view: 'structure_node',
+    include_smc: true,
   }
 }
 

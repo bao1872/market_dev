@@ -448,10 +448,13 @@ export async function waitForRenderReady(page: Page, timeout = 15_000) {
   await page.waitForSelector('[data-render-ready="true"]', { timeout })
 }
 
-// 辅助：断言 capture 调用了指定 indicator_view
+// 辅助：断言 capture API 收到的 indicator_view 参数
+// [CHANGE-20260728-010] 前端固定发送 indicator_view=structure_node（组合视图），
+// 不再透传 URL 参数。旧 node_cluster/bollinger/smc URL 参数仅作历史兼容，
+// 不影响 API 请求和渲染。
 export function assertCaptureIndicatorView(
   calls: MockApiCall[],
-  expected: 'node_cluster' | 'bollinger' | 'smc',
+  expected: 'structure_node' | 'node_cluster' | 'bollinger' | 'smc',
 ): void {
   const captureCalls = calls.filter((c) => c.url.includes('/capture/stocks/'))
   if (captureCalls.length === 0) {
