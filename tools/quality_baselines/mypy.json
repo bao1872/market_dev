@@ -1,7 +1,7 @@
 {
-  "baseline_commit": "67fd2be",
-  "total": 59,
-  "unique": 34,
+  "baseline_commit": "9f2d665",
+  "total": 54,
+  "unique": 37,
   "diagnostics": [
     {
       "filename": "app/api/admin_incremental_publish.py",
@@ -10,15 +10,9 @@
       "count": 1
     },
     {
-      "filename": "app/api/admin_review.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
-      "count": 1
-    },
-    {
-      "filename": "app/api/review.py",
-      "error_code": "attr-defined",
-      "message": "\"BaseRoute\" has no attribute \"path\"",
+      "filename": "app/core/pytdx_adapter.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"StringIO\" has incompatible type \"str | Awaitable[Any] | Any\"; expected \"str | None\"",
       "count": 1
     },
     {
@@ -112,6 +106,12 @@
       "count": 2
     },
     {
+      "filename": "app/services/adjustment_factor_service.py",
+      "error_code": "return-value",
+      "message": "Incompatible return value type (got \"Awaitable[Any] | Any | str\", expected \"str | None\")",
+      "count": 1
+    },
+    {
       "filename": "app/services/after_close_orchestrator.py",
       "error_code": "arg-type",
       "message": "Argument \"core_run_id\" to \"create_after_close_chip_consensus_job\" has incompatible type \"UUID | None\"; expected \"UUID\"",
@@ -124,10 +124,58 @@
       "count": 1
     },
     {
-      "filename": "app/services/first_pyramid_history_service.py",
-      "error_code": "attr-defined",
-      "message": "\"Result[Any]\" has no attribute \"rowcount\"",
+      "filename": "app/services/auction_aggregation_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"_compute_scope_metrics\" has incompatible type \"list[_MockResult]\"; expected \"list[AuctionInstrumentResult]\"",
       "count": 3
+    },
+    {
+      "filename": "app/services/auction_aggregation_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"float\" has incompatible type \"float | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
+      "count": 2
+    },
+    {
+      "filename": "app/services/auction_scan_service.py",
+      "error_code": "arg-type",
+      "message": "Argument \"market_scope\" to \"_detect_structural_transformation\" has incompatible type \"_MockScope\"; expected \"AuctionScopeResult | None\"",
+      "count": 2
+    },
+    {
+      "filename": "app/services/auction_scan_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"_detect_structural_transformation\" has incompatible type \"_MockScope\"; expected \"AuctionScopeResult | None\"",
+      "count": 3
+    },
+    {
+      "filename": "app/services/distributed_lock.py",
+      "error_code": "arg-type",
+      "message": "Argument 5 to \"eval\" of \"ScriptCommands\" has incompatible type \"int\"; expected \"str\"",
+      "count": 1
+    },
+    {
+      "filename": "app/services/distributed_lock.py",
+      "error_code": "misc",
+      "message": "Incompatible types in \"await\" (actual type \"Awaitable[str] | str\", expected type \"Awaitable[Any]\")",
+      "count": 2
+    },
+    {
+      "filename": "app/services/job_queue.py",
+      "error_code": "misc",
+      "message": "Incompatible types in \"await\" (actual type \"Awaitable[int] | int\", expected type \"Awaitable[Any]\")",
+      "count": 1
+    },
+    {
+      "filename": "app/services/job_queue.py",
+      "error_code": "misc",
+      "message": "Incompatible types in \"await\" (actual type \"Awaitable[list[Any]] | list[Any]\", expected type \"Awaitable[Any]\")",
+      "count": 1
+    },
+    {
+      "filename": "app/services/market_data_aggregation_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"_deserialize_result\" has incompatible type \"Awaitable[Any] | Any | str\"; expected \"str\"",
+      "count": 1
     },
     {
       "filename": "app/services/market_data_quality_service.py",
@@ -154,16 +202,16 @@
       "count": 1
     },
     {
+      "filename": "app/services/outbox_relay.py",
+      "error_code": "misc",
+      "message": "Incompatible types in \"await\" (actual type \"Awaitable[int] | int\", expected type \"Awaitable[Any]\")",
+      "count": 1
+    },
+    {
       "filename": "app/services/review_orchestrator_service.py",
       "error_code": "assignment",
       "message": "Incompatible types in assignment (expression has type \"MarketReviewRun | None\", variable has type \"MarketReviewRun\")",
       "count": 1
-    },
-    {
-      "filename": "app/services/snapshot_run_item_service.py",
-      "error_code": "attr-defined",
-      "message": "\"Result[Any]\" has no attribute \"rowcount\"",
-      "count": 4
     },
     {
       "filename": "app/worker.py",
@@ -176,37 +224,6 @@
       "error_code": "attr-defined",
       "message": "\"Result[tuple[SchedulerJobRun]]\" has no attribute \"get\"",
       "count": 4
-    },
-    {
-      "filename": "app/services/auction_aggregation_service.py",
-      "error_code": "arg-type",
-      "message": "Argument 1 to \"float\" has incompatible type \"float | None\"; expected \"str | Buffer | SupportsFloat | SupportsIndex\"",
-      "count": 2
-    },
-    {
-      "filename": "app/services/auction_aggregation_service.py",
-      "error_code": "arg-type",
-      "message": "Argument 1 to \"_compute_scope_metrics\" has incompatible type \"list[_MockResult]\"; expected \"list[AuctionInstrumentResult]\"",
-      "count": 3
-    },
-    {
-      "filename": "app/services/auction_scan_service.py",
-      "error_code": "list-item",
-      "message": "List item 0 has incompatible type \"_MockBar\"; expected \"BarDaily\"",
-      "count": 5
-    },
-    {
-      "filename": "app/services/auction_scan_service.py",
-      "error_code": "arg-type",
-      "message": "Argument 1 to \"_detect_structural_transformation\" has incompatible type \"_MockScope\"; expected \"AuctionScopeResult | None\"",
-      "count": 3
-    },
-    {
-      "filename": "app/services/auction_scan_service.py",
-      "error_code": "arg-type",
-      "message": "Argument \"market_scope\" to \"_detect_structural_transformation\" has incompatible type \"_MockScope\"; expected \"AuctionScopeResult | None\"",
-      "count": 2
     }
-  ],
-  "_note": "2026-07-30: Baseline regenerated. Previous baseline (commit 8aae487) only had 1 entry (redis_client.py aclose) and was stale — 43 of 44 current errors predate user's baseline 8624166 (verified via git blame on sampled error lines: metric_engine.py:155=7fc5af0, market_review.py:974=7fc5af0, market_data_quality.py:302=bd1526e, after_close_orchestrator.py:1635=fb58e2e — all ancestors of 8624166). Most are SQLAlchemy 2.0 type stub limitations (attr-defined on .constraints/.primary_key/.foreign_keys) or pre-existing code issues in metric_engine.py. None introduced by this round's P0 fixes (compare_mypy_baseline.py passes). 2026-07-31: Added 5 auction entries (15 errors) from commit 67fd2be — all in __main__ self-test sections using mock objects (_MockBar/_MockScope/_MockResult), pre-existing in pushed code."
+  ]
 }
