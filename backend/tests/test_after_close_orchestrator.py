@@ -792,9 +792,11 @@ async def test_compute_for_trade_date_not_passed_dsa_run_id_kwarg(db_session) ->
     assert "strategy_version_id" not in call_kwargs, (
         f"compute_for_trade_date 不应接收 strategy_version_id kwarg，实际调用 kwargs: {call_kwargs}"
     )
-    # 验证仍正确传递 progress_callback + source_run_id
+    # 验证仍正确传递 progress_callback + snapshot_run_id
+    # [FIX 2026-07-31] orchestrator 调用 compute_review_core_with_run_items
+    # 传递的是 snapshot_run_id（不是 source_run_id），与函数签名一致
     assert "progress_callback" in call_kwargs, "应传递 progress_callback"
-    assert "source_run_id" in call_kwargs, "应传递 source_run_id"
+    assert "snapshot_run_id" in call_kwargs, "应传递 snapshot_run_id"
 
 
 @pytest.mark.asyncio
@@ -2552,6 +2554,15 @@ async def test_resume_from_feature_snapshot_reads_actual_count(db_session) -> No
     ), patch(
         "app.services.state_event_service.cleanup_old_events",
         new=AsyncMock(return_value={"deleted_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -2670,6 +2681,15 @@ async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
     ), patch(
         "app.services.after_close_orchestrator._job_run_heartbeat_loop",
         new=AsyncMock(),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -2815,6 +2835,18 @@ async def test_ac04_daily_ready_15m_missing_allows_proceed() -> None:
     ), patch(
         "app.services.after_close_orchestrator.repair_stale_after_close_snapshot_runs",
         new=AsyncMock(return_value=0),
+    ), patch(
+        "app.services.factor_publication_service.get_publication",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run_id,
@@ -3052,6 +3084,15 @@ async def test_execute_run_called_after_mfcs_transitions_dsa_to_completed(db_ses
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,

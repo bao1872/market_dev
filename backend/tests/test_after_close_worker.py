@@ -353,6 +353,20 @@ async def test_execute_with_checkpoint_skips_refresh_daily(db_session) -> None:
     fake_published_run = MagicMock()
     fake_published_run.published_at = datetime.now(_TZ)
 
+    # [FIX 2026-07-31] StockFeatureSnapshotRun 走真实 DB 查询，
+    # 避免内联 lambda 对未列出 model 返回 None 导致 "SnapshotRun not found"。
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
         new=fake_session_local,
@@ -360,12 +374,10 @@ async def test_execute_with_checkpoint_skips_refresh_daily(db_session) -> None:
         db_session, "commit", new=db_session.flush,
     ), patch.object(
         db_session, "get",
-        new=AsyncMock(side_effect=lambda model, id: {
-            (SchedulerJobRun, job_run.id): job_run,
-            (StrategyRun, dsa_run.id): dsa_run,
-        }.get((model, id))),
+        new=_fake_get,
     ), patch.object(
-        BarsSchedulerService, "refresh_all_instruments", new=mock_refresh,
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
     ), patch(
         "app.services.after_close_orchestrator._poll_dsa_run_status",
         new=AsyncMock(return_value="completed"),
@@ -375,6 +387,15 @@ async def test_execute_with_checkpoint_skips_refresh_daily(db_session) -> None:
     ), patch.object(
         StrategyBatchService, "publish_run",
         new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -466,6 +487,20 @@ async def test_execute_updates_heartbeat_each_step(db_session) -> None:
     fake_published_run = MagicMock()
     fake_published_run.published_at = datetime.now(_TZ)
 
+    # [FIX 2026-07-31] StockFeatureSnapshotRun 走真实 DB 查询，
+    # 避免内联 lambda 对未列出 model 返回 None 导致 "SnapshotRun not found"。
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
         new=fake_session_local,
@@ -473,10 +508,7 @@ async def test_execute_updates_heartbeat_each_step(db_session) -> None:
         db_session, "commit", new=db_session.flush,
     ), patch.object(
         db_session, "get",
-        new=AsyncMock(side_effect=lambda model, id: {
-            (SchedulerJobRun, job_run.id): job_run,
-            (StrategyRun, dsa_run.id): dsa_run,
-        }.get((model, id))),
+        new=_fake_get,
     ), patch.object(
         BarsSchedulerService, "refresh_all_instruments",
         new=AsyncMock(return_value=fake_batch_result),
@@ -489,6 +521,15 @@ async def test_execute_updates_heartbeat_each_step(db_session) -> None:
     ), patch.object(
         StrategyBatchService, "publish_run",
         new=AsyncMock(return_value=fake_published_run),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,

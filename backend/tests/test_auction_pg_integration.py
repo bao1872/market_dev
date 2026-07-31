@@ -419,7 +419,7 @@ async def _setup_full_pipeline_fixtures(
         started_at=datetime.now(UTC),
         finished_at=datetime.now(UTC),
         published_at=datetime.now(UTC),
-        adj_factor_hash="test_adj_hash_001",
+        adj_factor_hash="test_adj_hash_01",
         adjustment_as_of=_TRADE_DATE,
     )
     db_session.add(core_run)
