@@ -1268,7 +1268,7 @@ async def publish_auction_anchors(
     # 覆盖率校验
     if snapshot.coverage_ratio <= 0.0:
         raise AnchorCoverageLowError(
-            f"snapshot.coverage_ratio={snapshot.coverage_ratio}，无活跃锚点，拒绝发布"
+            f"覆盖率={snapshot.coverage_ratio}（snapshot.coverage_ratio），无活跃锚点，拒绝发布"
         )
 
     # 幂等 upsert publication
