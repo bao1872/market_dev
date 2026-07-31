@@ -933,19 +933,24 @@ def _compute_dsa_segment_factors(
         _val = _last_row.get("current_segment_volume_mean")
         if pd.notna(_val):
             result["current_segment_volume_mean"] = float(_val)
-    if "prev_segment_volume_mean" in factor_per_bar.columns:
-        _val = _last_row.get("prev_segment_volume_mean")
-        if pd.notna(_val):
-            result["prev_segment_volume_mean"] = float(_val)
-    if "current_vs_prev_volume_mean_ratio" in factor_per_bar.columns:
-        _val = _last_row.get("current_vs_prev_volume_mean_ratio")
-        if pd.notna(_val):
-            result["current_vs_prev_volume_mean_ratio"] = float(_val)
-    # deprecated sum/sum ratio（保留兼容，禁止新逻辑消费）
-    if "current_vs_prev_volume_ratio" in factor_per_bar.columns:
-        _val = _last_row.get("current_vs_prev_volume_ratio")
-        if pd.notna(_val):
-            result["current_vs_prev_volume_ratio"] = float(_val)
+    # [CHANGE-20260731-007] prev 段量能字段仅在 visual_segments >= 2 时从 factor_per_bar 读取；
+    # 之前未做段数检查，导致 test_dsa_segment_v18_prev_segment_null_when_only_one 失败：
+    # 测试只截断 visual_segments 但 factor_per_bar 仍含多段 prev 字段值，
+    # 使 current_vs_prev_volume_ratio 被错误填充而非 None。
+    if len(visual_segments) >= 2:
+        if "prev_segment_volume_mean" in factor_per_bar.columns:
+            _val = _last_row.get("prev_segment_volume_mean")
+            if pd.notna(_val):
+                result["prev_segment_volume_mean"] = float(_val)
+        if "current_vs_prev_volume_mean_ratio" in factor_per_bar.columns:
+            _val = _last_row.get("current_vs_prev_volume_mean_ratio")
+            if pd.notna(_val):
+                result["current_vs_prev_volume_mean_ratio"] = float(_val)
+        # deprecated sum/sum ratio（保留兼容，禁止新逻辑消费）
+        if "current_vs_prev_volume_ratio" in factor_per_bar.columns:
+            _val = _last_row.get("current_vs_prev_volume_ratio")
+            if pd.notna(_val):
+                result["current_vs_prev_volume_ratio"] = float(_val)
 
     # ========== 段间对比字段 ==========
     cur_ret = result["current_dsa_segment_return_pct"]

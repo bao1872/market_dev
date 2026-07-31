@@ -865,10 +865,16 @@ class TestStockDetailFeishuIndicatorView:
             app.dependency_overrides.clear()
 
     @pytest.mark.asyncio
-    async def test_post_body_bollinger_splits_text_content(
+    async def test_post_body_bollinger_ignores_bb_text(
         self, db_session, test_instrument, user_with_feishu_channel,
     ) -> None:
-        """POST body {"indicator_view": "bollinger"} → 文字消息只含 BB 字段，不含节点字段。"""
+        """[CHANGE-20260728-010] POST body {"indicator_view": "bollinger"} 被忽略，
+        文字消息固定使用 structure_node 视图（无 BB 字段，含节点字段）。
+
+        旧测试 test_post_body_bollinger_splits_text_content 断言 bollinger 文字只含 BB 字段，
+        但 [CHANGE-20260728-010] 已将后端固定为 FEISHU_CAPTURE_VIEW='structure_node'，
+        indicator_view 入参被忽略，文字模板使用 structure_node（无 BB，含节点）。
+        """
         user, _ = user_with_feishu_channel
         _override_get_db(db_session)
 
@@ -912,29 +918,29 @@ class TestStockDetailFeishuIndicatorView:
             assert response.status_code == 200, f"响应体: {response.text}"
             data = response.json()
 
-            # 查询文本消息 body 是否按 indicator_view 拆分
+            # 查询文本消息 body
             result = await db_session.execute(
                 select(NotificationMessage).where(NotificationMessage.id == data["message_id"])
             )
             message = result.scalar_one()
             text_content = message.body.get("text_content", "")
 
-            # 应包含 BB 字段
-            assert "近期波动上沿：27.00" in text_content, (
-                f"bollinger 文字应含 BB 上沿: {text_content}"
+            # [CHANGE-20260728-010] structure_node 视图：BB 字段不应出现在文字消息中
+            assert "近期波动上沿" not in text_content, (
+                f"structure_node 文字不应含 BB 上沿: {text_content}"
             )
-            assert "近期价格中枢：25.00" in text_content, (
-                f"bollinger 文字应含 BB 中枢: {text_content}"
+            assert "近期价格中枢" not in text_content, (
+                f"structure_node 文字不应含 BB 中枢: {text_content}"
             )
-            assert "近期波动下沿：23.00" in text_content, (
-                f"bollinger 文字应含 BB 下沿: {text_content}"
+            assert "近期波动下沿" not in text_content, (
+                f"structure_node 文字不应含 BB 下沿: {text_content}"
             )
-            # 不应包含节点字段
-            assert "上方成交密集区" not in text_content, (
-                f"bollinger 文字不应含节点字段: {text_content}"
+            # structure_node 视图应包含节点字段
+            assert "上方成交密集区" in text_content, (
+                f"structure_node 文字应含节点字段: {text_content}"
             )
-            assert "下方成交密集区" not in text_content
-            assert "最密集成交价" not in text_content
-            assert "当前区间位置" not in text_content
+            assert "下方成交密集区" in text_content
+            assert "最密集成交价" in text_content
+            assert "当前区间位置" in text_content
         finally:
             app.dependency_overrides.clear()

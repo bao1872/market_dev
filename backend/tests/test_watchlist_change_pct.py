@@ -280,19 +280,21 @@ async def test_negative_change_pct():
 
 
 @pytest.mark.asyncio
-async def test_merged_state_still_contains_bb_vn_fields():
-    """新增 previous_close/change_pct 后，原 BB+VN 字段不得丢失。"""
+async def test_merged_state_still_contains_vn_and_market_fields():
+    """[CHANGE-20260728-010] BB 子 monitor 已移除，merged_state 应保留 VN + market 字段。
+
+    旧测试 test_merged_state_still_contains_bb_vn_fields 断言 BB 字段在 merged_state，
+    但 [CHANGE-20260728-010] 已从 WatchlistMonitor 移除 BB 子 monitor，
+    calculate_state 只合并 VN + SMC + market 命名空间。
+    """
     today = date(2026, 6, 27)
     daily = _make_daily_bars(end_date=today, n_days=5, start_price=10.0, step=0.5)
     current_price = 12.0
     minute = _make_minute_bars(close_price=current_price, n_bars=2)
     context = _build_context(daily, minute, trade_date=today)
 
-    bb_state = {
-        "bb_upper": 13.0, "bb_mid": 11.0, "bb_lower": 9.0,
-        "current_price": current_price, "prev_close": 11.8,
-        "bb_width": 0.36, "bb_pos": 0.83,
-    }
+    # BB state 已不再被 WatchlistMonitor 消费（_bb 不再存在），传入空 dict 占位
+    bb_state: dict[str, object] = {}
     vn_state = {
         "current_price": current_price,
         "upper_node": {"price_mid": 12.5},
@@ -303,12 +305,13 @@ async def test_merged_state_still_contains_bb_vn_fields():
 
     state = await monitor.calculate_state(context)
 
-    # BB 字段保留
-    for k in ("bb_upper", "bb_mid", "bb_lower", "prev_close", "bb_width", "bb_pos"):
-        assert k in state.state, f"BB 字段 {k} 应保留在 merged_state"
+    # [CHANGE-20260728-010] BB 字段已从 merged_state 移除（不再断言 bb_*）
     # VN 字段保留
     for k in ("upper_node", "lower_node", "position_0_1"):
         assert k in state.state, f"VN 字段 {k} 应保留在 merged_state"
-    # 新增字段存在
+    # 新增 market 字段存在
     assert "previous_close" in state.state
     assert "change_pct" in state.state
+    # BB 字段不应再出现在 merged_state（验证移除生效）
+    for k in ("bb_upper", "bb_mid", "bb_lower", "bb_width", "bb_pos"):
+        assert k not in state.state, f"BB 字段 {k} 应已从 merged_state 移除"

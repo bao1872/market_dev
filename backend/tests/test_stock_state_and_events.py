@@ -1472,19 +1472,28 @@ async def test_p03_find_latest_succeeded_run_deterministic_order() -> None:
     async def mock_execute(stmt):
         captured_stmts.append(stmt)
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = run_b
+        # [CHANGE-20260729-007] _find_latest_succeeded_run 优先查 FactorPublication pointer，
+        # 该路径应返回 None（无 pointer）以走 fallback 查询 StockFeatureSnapshotRun。
+        # 通过 compiled SQL 区分两类查询：FactorPublication 查询含 "factor_publications"。
+        compiled = str(stmt)
+        if "factor_publications" in compiled:
+            mock_result.scalar_one_or_none.return_value = None
+        else:
+            mock_result.scalar_one_or_none.return_value = run_b
         return mock_result
     mock_session.execute = AsyncMock(side_effect=mock_execute)
 
     result = await _find_latest_succeeded_run(mock_session)
 
     assert result is run_b, "应选择 published_at 更新的 run_b"
-    assert len(captured_stmts) == 1
-    compiled = str(captured_stmts[0])
+    # [CHANGE-20260729-007] 两次 execute：FactorPublication pointer + StockFeatureSnapshotRun fallback
+    assert len(captured_stmts) == 2
+    # fallback 查询应包含完整 ORDER BY
+    fallback_compiled = str(captured_stmts[1])
     # 验证 ORDER BY 包含 trade_date, published_at, finished_at
-    assert "trade_date" in compiled
-    assert "published_at" in compiled
-    assert "finished_at" in compiled
+    assert "trade_date" in fallback_compiled
+    assert "published_at" in fallback_compiled
+    assert "finished_at" in fallback_compiled
 
 
 @pytest.mark.asyncio
@@ -1525,18 +1534,25 @@ async def test_p03_find_run_by_trade_date_deterministic_order() -> None:
     async def mock_execute(stmt):
         captured_stmts.append(stmt)
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = run_b
+        # [CHANGE-20260729-007] _find_run_by_trade_date 优先查 FactorPublication pointer，
+        # 该路径应返回 None（无 pointer）以走 fallback 查询 StockFeatureSnapshotRun。
+        compiled = str(stmt)
+        if "factor_publications" in compiled:
+            mock_result.scalar_one_or_none.return_value = None
+        else:
+            mock_result.scalar_one_or_none.return_value = run_b
         return mock_result
     mock_session.execute = AsyncMock(side_effect=mock_execute)
 
     result = await _find_run_by_trade_date(mock_session, date(2026, 7, 10))
 
     assert result is run_b
-    assert len(captured_stmts) == 1
-    compiled = str(captured_stmts[0])
+    # [CHANGE-20260729-007] 两次 execute：FactorPublication pointer + StockFeatureSnapshotRun fallback
+    assert len(captured_stmts) == 2
+    fallback_compiled = str(captured_stmts[1])
     # 验证 ORDER BY 包含 published_at, finished_at
-    assert "published_at" in compiled
-    assert "finished_at" in compiled
+    assert "published_at" in fallback_compiled
+    assert "finished_at" in fallback_compiled
 
 
 # =============================================================================
