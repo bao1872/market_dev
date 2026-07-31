@@ -222,17 +222,20 @@ test('CaptureStockPage 设置 data-render-ready 属性', () => {
 })
 
 // ===== 14. CaptureStockPage 的 isRenderReady 不依赖事件查询 =====
-// [PROMPT.md §二 V2 + §5.3.5 V2] isRenderReady 现在通过中间变量组合：
+// [PROMPT.md §二 V2 + §5.3.5 V2 + CHANGE-20260728-010] isRenderReady 现在通过中间变量组合：
 //   const hasBaseData = !!barsResponse?.items?.length && !!indicatorsResponse
 //   const isFrameMatched = renderFrame?.matched === true
-//   const isTypeReady = computeTypeSpecificReady(indicatorView, indicatorsResponse)
+//   const isTypeReady = computeCombinedReady(indicatorsResponse)
 //   const isRenderReady = hasBaseData && isFrameMatched && isTypeReady
+//
+// CHANGE-20260728-010: computeCombinedReady 替代旧 computeTypeSpecificReady，
+// 新业务固定 indicator_view=structure_node（node + smc 组合），不再按 indicatorView 分支。
 //
 // 校验策略：
 //   1. isRenderReady 表达式本身不得直接引用 eventsQuery（V1 不变）
 //   2. hasBaseData 行必须引用 barsResponse + indicatorsResponse（数据存在性门禁）
 //   3. isFrameMatched 行必须引用 render_frame.matched（V2 新增门禁）
-//   4. isTypeReady 行必须调用 computeTypeSpecificReady（V2 类型特定 Ready）
+//   4. isTypeReady 行必须调用 computeCombinedReady（CHANGE-20260728-010 组合 Ready）
 test('CaptureStockPage 的 isRenderReady 不依赖事件查询且包含 V2 frame+类型 Ready 门禁', () => {
   const src = readSource(CAPTURE_PAGE_PATH)
   // 提取 isRenderReady 赋值表达式
@@ -279,13 +282,13 @@ test('CaptureStockPage 的 isRenderReady 不依赖事件查询且包含 V2 frame
     `isFrameMatched 表达式必须引用 renderFrame.matched，实际: ${frameExpr}`,
   )
 
-  // 校验 isTypeReady 调用 computeTypeSpecificReady
+  // 校验 isTypeReady 调用 computeCombinedReady（CHANGE-20260728-010）
   const typeM = src.match(/const\s+isTypeReady\s*=\s*([^;\n]+)/)
   assert.ok(typeM, 'CaptureStockPage 必须定义 isTypeReady 变量')
   const typeExpr = typeM[1]
   assert.ok(
-    /computeTypeSpecificReady/.test(typeExpr),
-    `isTypeReady 表达式必须调用 computeTypeSpecificReady，实际: ${typeExpr}`,
+    /computeCombinedReady/.test(typeExpr),
+    `isTypeReady 表达式必须调用 computeCombinedReady，实际: ${typeExpr}`,
   )
 })
 
@@ -533,31 +536,27 @@ test('StrategyChart 源码不包含硬编码字号（必须经 scale.fonts.* 读
   )
 })
 
-// ===== 24. computeTypeSpecificReady 函数定义存在并按 indicatorView 分支 =====
-test('computeTypeSpecificReady 按 indicatorView (node_cluster/bollinger/smc) 分支检查', () => {
+// ===== 24. computeCombinedReady 导入并检查 Node + SMC 合同（CHANGE-20260728-010）=====
+// 旧 computeTypeSpecificReady(indicatorView, indicators) 按 node_cluster/bollinger/smc 分支，
+// 已被 CHANGE-20260728-010 替换为 computeCombinedReady(indicators)（固定 structure_node 组合视图）。
+// 新合同：nodeReady && smcContractReady，bollinger 不再作为 Ready 条件。
+test('computeCombinedReady 导入自 captureReady 模块并检查 Node + SMC 合同', () => {
   const src = readSource(CAPTURE_PAGE_PATH)
-  // 函数定义存在
-  const m = src.match(/function\s+computeTypeSpecificReady\s*\([\s\S]*?\)\s*:\s*boolean\s*\{([\s\S]*?)^}/m)
-  assert.ok(m, 'CaptureStockPage 必须定义 computeTypeSpecificReady 函数')
-  const body = m[1]
-
-  // node_cluster 分支：检查 profile_rows + profile_hash + node_regions
-  assert.ok(/indicatorView\s*===\s*['"]node_cluster['"]/.test(body),
-    'computeTypeSpecificReady 必须有 node_cluster 分支')
-  assert.ok(/profile_rows/.test(body), 'node_cluster 分支必须检查 profile_rows')
-  assert.ok(/profile_hash/.test(body), 'node_cluster 分支必须检查 profile_hash')
-  assert.ok(/node_regions/.test(body), 'node_cluster 分支必须检查 node_regions')
-
-  // bollinger 分支：检查 upper/middle/lower 三轨
-  assert.ok(/indicatorView\s*===\s*['"]bollinger['"]/.test(body),
-    'computeTypeSpecificReady 必须有 bollinger 分支')
-  assert.ok(/upper/.test(body) && /middle/.test(body) && /lower/.test(body),
-    'bollinger 分支必须检查 upper/middle/lower 三轨')
-
-  // smc 分支：检查 algorithm_version + DTO
-  assert.ok(/indicatorView\s*===\s*['"]smc['"]/.test(body),
-    'computeTypeSpecificReady 必须有 smc 分支')
-  assert.ok(/algorithm_version/.test(body), 'smc 分支必须检查 algorithm_version')
+  // 必须从 captureReady 模块导入 computeCombinedReady
+  assert.ok(
+    /import\s+\{[^}]*computeCombinedReady[^}]*}\s+from\s+['"]@\/features\/stock-research\/captureReady['"]/.test(src),
+    'CaptureStockPage 必须从 @/features/stock-research/captureReady 导入 computeCombinedReady',
+  )
+  // 必须调用 computeCombinedReady（而非旧 computeTypeSpecificReady）
+  assert.ok(
+    /computeCombinedReady\s*\(/.test(src),
+    'CaptureStockPage 必须调用 computeCombinedReady',
+  )
+  // 不得再定义旧 computeTypeSpecificReady 函数
+  assert.ok(
+    !/function\s+computeTypeSpecificReady/.test(src),
+    'CaptureStockPage 不得再定义旧 computeTypeSpecificReady 函数（CHANGE-20260728-010 已移除）',
+  )
 })
 
 // ===== 25. global.scss mobile-stage 字号符合 PROMPT.md §5.3.4 规范 =====
