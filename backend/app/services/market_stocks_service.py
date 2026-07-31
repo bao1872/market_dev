@@ -29,6 +29,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
+import typing as _typing
 from uuid import UUID
 
 from sqlalchemy import (
@@ -1191,8 +1192,10 @@ async def get_market_stocks(
             .group_by(BarDaily.instrument_id)
         )
         inst_max_bar_result = await db.execute(inst_max_bar_stmt)
-        for row in inst_max_bar_result:
-            inst_max_bar_date_map[row.instrument_id] = row.max_date
+        # [CHANGE-20260731-006] 使用独立循环变量名 bar_row 避免与上方 row (Row[tuple[UUID,int]])
+        # 的类型冲突；func.max(Date) 在 SQLAlchemy 类型系统中被推断为 int，需 cast 到 date。
+        for bar_row in inst_max_bar_result:
+            inst_max_bar_date_map[bar_row.instrument_id] = _typing.cast("date", bar_row.max_date)
 
     # ===== 组装响应 =====
     items: list[MarketStockRow] = []
