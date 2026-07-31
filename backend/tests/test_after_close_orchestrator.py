@@ -338,6 +338,19 @@ async def test_execute_writes_status_events(db_session) -> None:
     fake_published_run = MagicMock()
     fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
 
+    # [FixA] mock db.get：已知 ID 返回 mock 对象，StockFeatureSnapshotRun 走真实 DB 查询
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
         new=fake_session_local,
@@ -345,10 +358,7 @@ async def test_execute_writes_status_events(db_session) -> None:
         db_session, "commit", new=db_session.flush,
     ), patch.object(
         db_session, "get",
-        new=AsyncMock(side_effect=lambda model, id: {
-            (SchedulerJobRun, job_run.id): job_run,
-            (StrategyRun, dsa_run.id): dsa_run,
-        }.get((model, id))),
+        new=_fake_get,
     ), patch.object(
         BarsSchedulerService, "refresh_all_instruments",
         new=AsyncMock(return_value=fake_batch_result),
@@ -367,6 +377,15 @@ async def test_execute_writes_status_events(db_session) -> None:
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -634,6 +653,15 @@ async def test_execute_feature_snapshot_success_creates_succeeded_run(db_session
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -736,6 +764,15 @@ async def test_compute_for_trade_date_not_passed_dsa_run_id_kwarg(db_session) ->
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=compute_spy,
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -928,6 +965,19 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
         await _asyncio.sleep(0.05)
         return fake_batch_result
 
+    # [FixA] mock db.get：已知 ID 返回 mock 对象，StockFeatureSnapshotRun 走真实 DB 查询
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
         new=fake_session_local,
@@ -935,10 +985,7 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
         db_session, "commit", new=db_session.flush,
     ), patch.object(
         db_session, "get",
-        new=AsyncMock(side_effect=lambda model, id: {
-            (SchedulerJobRun, job_run.id): job_run,
-            (StrategyRun, dsa_run.id): dsa_run,
-        }.get((model, id))),
+        new=_fake_get,
     ), patch(
         "app.services.after_close_orchestrator._job_run_heartbeat_loop",
         new=_fake_heartbeat_loop,
@@ -957,6 +1004,15 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1023,6 +1079,19 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
         await _asyncio.sleep(0.05)
         return {"snapshot_count": 1, "failed_count": 0}
 
+    # [FixA] mock db.get：已知 ID 返回 mock 对象，StockFeatureSnapshotRun 走真实 DB 查询
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
         new=fake_session_local,
@@ -1030,10 +1099,7 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
         db_session, "commit", new=db_session.flush,
     ), patch.object(
         db_session, "get",
-        new=AsyncMock(side_effect=lambda model, id: {
-            (SchedulerJobRun, job_run.id): job_run,
-            (StrategyRun, dsa_run.id): dsa_run,
-        }.get((model, id))),
+        new=_fake_get,
     ), patch(
         "app.services.after_close_orchestrator._job_run_heartbeat_loop",
         new=_fake_heartbeat_loop,
@@ -1055,6 +1121,15 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=_fake_compute,
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1109,6 +1184,19 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
             )
         return {"snapshot_count": 999, "failed_count": 1}
 
+    # [FixA] mock db.get：已知 ID 返回 mock 对象，StockFeatureSnapshotRun 走真实 DB 查询
+    original_get = db_session.get
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        if model is StockFeatureSnapshotRun:
+            return await original_get(model, id, *args, **kwargs)
+        return None
+
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
         new=fake_session_local,
@@ -1116,10 +1204,7 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
         db_session, "commit", new=db_session.flush,
     ), patch.object(
         db_session, "get",
-        new=AsyncMock(side_effect=lambda model, id: {
-            (SchedulerJobRun, job_run.id): job_run,
-            (StrategyRun, dsa_run.id): dsa_run,
-        }.get((model, id))),
+        new=_fake_get,
     ), patch(
         "app.services.after_close_orchestrator._job_run_heartbeat_loop",
         new=AsyncMock(),
@@ -1141,6 +1226,15 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=_fake_compute,
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1505,6 +1599,15 @@ async def test_repair_clears_stuck_run_before_new_after_close(db_session) -> Non
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=new_job_run.id,
@@ -1589,6 +1692,15 @@ async def test_execute_calls_repair_at_start(db_session) -> None:
     ), patch(
         "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1779,6 +1891,15 @@ async def test_c5_publishing_success_generates_events_once(db_session) -> None:
     ), patch(
         "app.services.state_event_service.cleanup_old_events",
         new=AsyncMock(return_value={"deleted_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -2000,6 +2121,15 @@ async def test_p0_publish_success_finalizes_snapshot_run_succeeded(
     ), patch(
         "app.services.state_event_service.cleanup_old_events",
         new=AsyncMock(return_value={"deleted_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
