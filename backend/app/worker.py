@@ -1512,9 +1512,13 @@ async def run_after_close_orchestrator_worker() -> None:
 
     while not _shutdown:
         try:
-            await _after_close_poll_once()
+            # [P0-3 2026-07-30] 每轮优先领取 core orchestrator；
+            # 没有 core 任务时领取一个 chip consensus 任务
+            claimed = await _after_close_poll_once()
+            if not claimed:
+                await _chip_consensus_poll_once()
         except Exception as exc:
-            # _after_close_poll_once 内部已捕获 execute_after_close_run 异常，
+            # _after_close_poll_once / _chip_consensus_poll_once 内部已捕获执行异常，
             # 此处仅捕获领取阶段的意外异常
             logger.exception("[AfterCloseWorker] 轮询异常: %s", exc)
         if _shutdown:
@@ -1799,9 +1803,10 @@ async def main() -> None:
     if WORKER_TYPE in ("after_close_orchestrator", "all"):
         tasks.append(asyncio.create_task(run_after_close_orchestrator_worker()))
 
-    # [P0-3 ref/instruction.md §二.3] - chip consensus 独立 Worker（同容器，独立 WORKER_TYPE 分支）
-    # 不新增常驻容器；使用 FOR UPDATE SKIP LOCKED、lease_epoch、heartbeat、断点续算
-    if WORKER_TYPE in ("chip_consensus", "after_close_orchestrator", "all"):
+    # [P0-3 2026-07-30] chip consensus 已接入 run_after_close_orchestrator_worker（每轮优先 core，无 core 时领 chip）
+    # 仅 WORKER_TYPE=chip_consensus 时启动独立 chip worker（用于调试/独立部署）
+    # WORKER_TYPE=after_close_orchestrator 和 all 由 run_after_close_orchestrator_worker 统一处理
+    if WORKER_TYPE == "chip_consensus":
         tasks.append(asyncio.create_task(run_chip_consensus_worker()))
 
     # [Recovery] - 看门狗：all 模式自动启动，或 WORKER_TYPE=watchdog 单独启动

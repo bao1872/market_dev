@@ -38,7 +38,7 @@ from app.services.after_close_orchestrator import (
 logger = logging.getLogger("dsa_recovery_service")
 
 # DSA run 失败状态（需要创建新 run 恢复）
-_DSA_FAILED_STATUSES = frozenset({"failed", "partial_failed"})
+_DSA_FAILED_STATUSES = frozenset({"failed", "partial_failed", "max_retries_exceeded"})
 
 # DSA run 成功状态（直接复用，不需要恢复）
 _DSA_COMPLETED_STATUSES = frozenset({"completed", "published"})

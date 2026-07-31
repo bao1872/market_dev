@@ -323,38 +323,49 @@ build_images() {
     log "构建镜像（backend/frontend/worker-capture）..."
     cd "${REPO_ROOT}"
     # [P0-7 2026-07-30] 先原子更新 market.env，再构建，确保 build 和 up -d 使用同一 GIT_SHA
-    update_env_file
+    # image 模式: repo SHA = image tag = image_git_sha = runtime_git_sha
+    update_env_file image
     # 注入版本信息（shell export 作为 build-arg 备用，market.env 是 SSOT）
     export GIT_SHA="${TARGET_SHA:0:7}"
     export BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     run_cmd docker compose --env-file "${ENV_FILE}" -f docker-compose.prod.yml build backend frontend worker-capture
 }
 
-# [P0-7 2026-07-30] 原子更新 market.env 中的 GIT_SHA 和 BUILD_TIME
+# [P0-7 2026-07-30] 原子更新 market.env 中的 GIT_SHA / BUILD_TIME / DEPLOYMENT_MODE
 # 禁止用 sed -i 直接修改（非原子，中途崩溃会损坏文件）
-# 使用 temp file + mv 原子替换
+# 使用 temp file + mv 原子替换，保留原文件 owner/mode
+# 参数: $1 = deployment_mode (image 或 live)
 update_env_file() {
-    log "原子更新 ${ENV_FILE} GIT_SHA/BUILD_TIME..."
+    local deployment_mode="${1:-image}"
+    log "原子更新 ${ENV_FILE} GIT_SHA/BUILD_TIME/DEPLOYMENT_MODE (mode=${deployment_mode})..."
 
     local short_sha="${TARGET_SHA:0:7}"
     local build_time
     build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        log "[dry-run] 将更新 ${ENV_FILE}: GIT_SHA=${short_sha}, BUILD_TIME=${build_time}"
+        log "[dry-run] 将更新 ${ENV_FILE}: GIT_SHA=${short_sha}, BUILD_TIME=${build_time}, DEPLOYMENT_MODE=${deployment_mode}"
         return 0
     fi
 
+    # [P4 2026-07-30] 保存原文件 owner/mode，原子替换后恢复
+    local orig_owner orig_group orig_mode
+    orig_owner="$(stat -c '%u' "${ENV_FILE}" 2>/dev/null || echo "0")"
+    orig_group="$(stat -c '%g' "${ENV_FILE}" 2>/dev/null || echo "0")"
+    orig_mode="$(stat -c '%a' "${ENV_FILE}" 2>/dev/null || echo "600")"
+
+    # 临时文件必须与目标同目录（确保 mv 原子）
     local tmp_file
     tmp_file="$(mktemp "${ENV_FILE}.XXXXXX")" || fail "无法创建临时文件"
 
-    # 复制现有 env，替换/追加 GIT_SHA 和 BUILD_TIME
+    # 复制现有 env，替换/追加 GIT_SHA / BUILD_TIME / DEPLOYMENT_MODE
     cp "${ENV_FILE}" "${tmp_file}"
 
     # 使用 awk 原子替换（避免多次 sed 调用）
-    awk -v sha="${short_sha}" -v bt="${build_time}" '
+    awk -v sha="${short_sha}" -v bt="${build_time}" -v dm="${deployment_mode}" '
         /^GIT_SHA=/ { print "GIT_SHA=" sha; next }
         /^BUILD_TIME=/ { print "BUILD_TIME=" bt; next }
+        /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=" dm; next }
         { print }
     ' "${tmp_file}" > "${tmp_file}.new" && mv "${tmp_file}.new" "${tmp_file}"
 
@@ -365,22 +376,33 @@ update_env_file() {
     if ! grep -q "^BUILD_TIME=" "${tmp_file}"; then
         echo "BUILD_TIME=${build_time}" >> "${tmp_file}"
     fi
+    if ! grep -q "^DEPLOYMENT_MODE=" "${tmp_file}"; then
+        echo "DEPLOYMENT_MODE=${deployment_mode}" >> "${tmp_file}"
+    fi
+
+    # [P4] 恢复原文件 owner/mode（cp 会用默认 umask）
+    chmod "${orig_mode}" "${tmp_file}" 2>/dev/null || true
+    chown "${orig_owner}:${orig_group}" "${tmp_file}" 2>/dev/null || true
 
     # 原子替换（mv 在同一文件系统上是原子的）
     mv "${tmp_file}" "${ENV_FILE}" || fail "无法原子替换 ${ENV_FILE}"
 
     # 验证写入成功
-    local verified_sha verified_bt
+    local verified_sha verified_bt verified_dm
     verified_sha="$(grep "^GIT_SHA=" "${ENV_FILE}" | cut -d= -f2)"
     verified_bt="$(grep "^BUILD_TIME=" "${ENV_FILE}" | cut -d= -f2)"
+    verified_dm="$(grep "^DEPLOYMENT_MODE=" "${ENV_FILE}" | cut -d= -f2)"
     if [[ "${verified_sha}" != "${short_sha}" ]]; then
         fail "market.env GIT_SHA 验证失败: 期望 ${short_sha}, 实际 ${verified_sha}"
     fi
     if [[ "${verified_bt}" != "${build_time}" ]]; then
         fail "market.env BUILD_TIME 验证失败: 期望 ${build_time}, 实际 ${verified_bt}"
     fi
+    if [[ "${verified_dm}" != "${deployment_mode}" ]]; then
+        fail "market.env DEPLOYMENT_MODE 验证失败: 期望 ${deployment_mode}, 实际 ${verified_dm}"
+    fi
 
-    log "已原子更新 ${ENV_FILE}: GIT_SHA=${verified_sha}, BUILD_TIME=${verified_bt}"
+    log "已原子更新 ${ENV_FILE}: GIT_SHA=${verified_sha}, BUILD_TIME=${verified_bt}, DEPLOYMENT_MODE=${verified_dm}"
 }
 
 deploy_scope() {
@@ -389,16 +411,20 @@ deploy_scope() {
             log "无需应用变更，跳过部署"
             ;;
         frontend)
-            # [P0-7] 所有部署 scope 都先更新 market.env，确保 GIT_SHA 一致
-            update_env_file
+            # [P0-7 2026-07-30] Live Mount scope: DEPLOYMENT_MODE=live
+            # repo SHA = runtime_git_sha; image_git_sha 允许为旧镜像（不重建）
+            # market.env GIT_SHA = runtime SHA（非镜像 tag），不指向不存在镜像
+            update_env_file live
             build_frontend
             sync_live_mount
             compose_config_check
             recreate_services frontend
             ;;
         backend)
-            # [P0-7] 所有部署 scope 都先更新 market.env，确保 GIT_SHA 一致
-            update_env_file
+            # [P0-7 2026-07-30] Live Mount scope: DEPLOYMENT_MODE=live
+            # repo SHA = runtime_git_sha; image_git_sha 允许为旧镜像（不重建）
+            # market.env GIT_SHA = runtime SHA（非镜像 tag），不指向不存在镜像
+            update_env_file live
             build_frontend
             sync_live_mount
             compose_config_check
@@ -424,8 +450,10 @@ deploy_scope() {
                 worker-after-close worker-watchdog worker-capture
             ;;
         all)
-            # [P0-7] 所有部署 scope 都先更新 market.env，确保 GIT_SHA 一致
-            update_env_file
+            # [P0-7 2026-07-30] Live Mount scope: DEPLOYMENT_MODE=live
+            # repo SHA = runtime_git_sha; image_git_sha 允许为旧镜像（不重建）
+            # market.env GIT_SHA = runtime SHA（非镜像 tag），不指向不存在镜像
+            update_env_file live
             build_frontend
             sync_live_mount
             compose_config_check

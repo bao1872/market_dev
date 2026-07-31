@@ -1515,6 +1515,35 @@ async def execute_after_close_run(
                         "[AfterClose] DSA run 已完成（worker 已处理），跳过 DSA 写入: run_id=%s status=%s",
                         dsa_run_id, dsa_run.status,
                     )
+                elif dsa_run.status in ("failed", "partial_failed", "max_retries_exceeded"):
+                    # [P0-2 2026-07-30] DSA failed → 调用正式 recovery service 创建新 run
+                    # 禁止把失败 run 改回 queued；原失败 run 保留审计
+                    from app.services.dsa_recovery_service import (
+                        DSARecoveryError,
+                        recover_failed_dsa_run,
+                    )
+
+                    logger.warning(
+                        "[AfterClose] DSA run 失败（%s），调用 recovery service: run_id=%s",
+                        dsa_run.status, dsa_run_id,
+                    )
+                    try:
+                        new_dsa_run, is_new = await recover_failed_dsa_run(
+                            db, job_run_id=job_run_id,
+                        )
+                        await db.commit()
+                        dsa_run_id = new_dsa_run.id
+                        logger.info(
+                            "[AfterClose] DSA recovery 成功: old=%s, new=%s, "
+                            "attempt_no=%s, is_new=%s",
+                            dsa_run.id, new_dsa_run.id,
+                            new_dsa_run.attempt_no, is_new,
+                        )
+                    except DSARecoveryError as recovery_exc:
+                        logger.error(
+                            "[AfterClose] DSA recovery 失败: %s", recovery_exc,
+                        )
+                        raise
 
             # 2.3 创建 snapshot run（复用原 feature_snapshot 步骤的 run 生命周期逻辑）
             snapshot_already_published = False
