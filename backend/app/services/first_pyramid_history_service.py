@@ -598,22 +598,28 @@ async def _fetch_db_only_daily_bars(
     *,
     output_bars: int,
 ) -> pd.DataFrame | None:
-    """[CHANGE-20260729-008] DB-only 日线读取入口（禁止自动 pytdx 拉取）。
+    """[CHANGE-20260731-003] SSOT 合规：通过 MDAS 读取日线行情。
 
-    直接调用 _query_daily_bars，不走 fetch_daily_bars / get_bars。
-    若 DB 无数据或不足 output_bars，返回 None（caller 标 skipped）。
+    原实现直接调用 bar_repository._query_daily_bars 违反 SSOT 架构，
+    改为通过 MarketDataAggregationService (MDAS) 统一出口。
+    completed_only=True 保证只读取已完成 bar；include_realtime=False 禁用实时补充。
+    若 DB 无数据，MDAS 会按 SSOT 标准行为尝试回补；返回空时 caller 标 skipped。
     """
-    from app.repositories.bar_repository import _query_daily_bars
+    from app.services.market_data_aggregation_service import MarketDataAggregationService
 
-    end_date = date.today()
-    # 估算所需历史长度：output_bars 个交易日约等于 output_bars * 1.5 个自然日 + 缓冲
-    start_date = end_date - timedelta(days=output_bars * 3 + 100)
-    df = await _query_daily_bars(session, instrument_id, start_date, end_date)
+    mdas = MarketDataAggregationService()
+    agg = await mdas.get_bars(
+        session,
+        instrument_id,
+        timeframe="1d",
+        adj="qfq",
+        include_realtime=False,
+        completed_only=True,
+        limit=output_bars * 2,  # 留余量，history SSOT 内部会截取 output_bars
+    )
+    df = agg.bars
     if df is None or df.empty:
         return None
-    # 截取最近 output_bars 行（history SSOT 内部也截，这里提前避免无意义传输）
-    if len(df) > output_bars * 2:
-        df = df.iloc[-(output_bars * 2):]
     return df
 
 
@@ -804,24 +810,27 @@ async def _fetch_history_daily_bars(
 ) -> pd.DataFrame | None:
     """获取完整可用日线（point-in-time，qfq 复权，已完成 bar）。
 
-    本函数为薄包装，调用 bar_repository.get_bars。
-    断点：依赖 bar_repository 的真实接口，本地纯单元测试由 caller 注入 mock。
+    [CHANGE-20260731-003] SSOT 合规：通过 MarketDataAggregationService (MDAS) 读取行情，
+    不再调用 bar_repository.get_bars（已在 SSOT 黑名单中）。
+    断点：依赖 MDAS 真实接口，本地纯单元测试由 caller 注入 _fetch_bars_func mock。
     """
     try:
         from app.db import AsyncSessionLocal
-        from app.repositories.bar_repository import get_bars
+        from app.services.market_data_aggregation_service import MarketDataAggregationService
     except ImportError:
         logger.warning(
-            "[HistoryBackfill] bar_repository 或 AsyncSessionLocal 不可用，返回空 bars",
+            "[HistoryBackfill] MDAS 或 AsyncSessionLocal 不可用，返回空 bars",
         )
         return None
 
+    mdas = MarketDataAggregationService()
     async with AsyncSessionLocal() as db:
-        result = await get_bars(
+        result = await mdas.get_bars(
             db,
             instrument_id,
             timeframe="1d",
-            adjustment="qfq",
+            adj="qfq",
+            include_realtime=False,
             completed_only=True,
         )
         return result.bars

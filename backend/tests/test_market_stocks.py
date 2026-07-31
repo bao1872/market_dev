@@ -587,9 +587,9 @@ async def test_sql_query_count_fixed(
     assert len(set(query_counts.values())) == 1, (
         f"查询数量不一致: {query_counts}"
     )
-    # P0-3: 查询数量应为 8（删除 events 批量查询后）
-    # instruments + count + bars + snapshots + boards_as_of + boards_batch + price_as_of + state_as_of
-    expected_count = 8
+    # [CHANGE-20260731-005] 查询数量应为 9（CHANGE-20260729-009 新增 DSA latest_run_id 查询）
+    # instruments + count + bars + snapshots + dsa_latest_run_id + boards_batch + boards_as_of + price_as_of + state_as_of
+    expected_count = 9
     actual_count = list(query_counts.values())[0]
     assert actual_count == expected_count, (
         f"期望 {expected_count} 条 SQL，实际 {actual_count} 条。"
@@ -724,9 +724,9 @@ async def test_sql_query_count_fixed_with_filters(
         finally:
             event.remove(engine, "before_cursor_execute", _on_execute)
 
-        # P0-3: 删除 events 批量查询后，筛选场景期望 8 条 SQL
-        assert counter["select_count"] == 8, (
-            f"筛选场景 {scenario} 期望 8 条 SQL，实际 {counter['select_count']} 条"
+        # [CHANGE-20260731-005] 筛选场景期望 9 条 SQL（含 CHANGE-20260729-009 DSA latest_run_id 查询）
+        assert counter["select_count"] == 9, (
+            f"筛选场景 {scenario} 期望 9 条 SQL，实际 {counter['select_count']} 条"
         )
 
 

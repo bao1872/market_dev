@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -474,8 +474,8 @@ async def _fetch_chip_bars(
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """获取 chip 计算所需的 daily + 15m bars（point-in-time <= trade_date）。
 
-    [CHANGE-20260729-008] 修复：原引用不存在的 market_data_service.get_bars_for_instrument，
-    改为直接从 DB 查询（_query_daily_bars / _query_15min_bars），与 history 回补保持一致。
+    [CHANGE-20260731-003] SSOT 合规：通过 MarketDataAggregationService (MDAS) 读取行情，
+    不再直接导入 bar_repository 私有 _query_* 函数。MDAS 是行情读取唯一出口。
 
     Args:
         instrument_id: 股票 ID
@@ -485,21 +485,35 @@ async def _fetch_chip_bars(
         (daily_bars, bars_15m)：任一为空/None 表示数据不足
     """
     from app.db import AsyncSessionLocal
-    from app.repositories.bar_repository import _query_15min_bars, _query_daily_bars
+    from app.services.market_data_aggregation_service import MarketDataAggregationService
 
-    daily_start = trade_date - timedelta(days=500)
-    # 15m bars: 4000 根约 42 个交易日（每天 16 根），取 60 天
-    bars_15m_start = datetime.combine(trade_date - timedelta(days=60), datetime.min.time())
-    bars_15m_end = datetime.combine(trade_date, datetime.max.time())
+    mdas = MarketDataAggregationService()
 
     try:
         async with AsyncSessionLocal() as db:
-            daily_bars = await _query_daily_bars(
-                db, instrument_id, daily_start, trade_date,
+            # daily: completed qfq，end_date=trade_date 保证 point-in-time
+            daily_agg = await mdas.get_bars(
+                db,
+                instrument_id,
+                timeframe="1d",
+                adj="qfq",
+                include_realtime=False,
+                completed_only=True,
+                end_date=trade_date,
             )
-            bars_15m = await _query_15min_bars(
-                db, instrument_id, bars_15m_start, bars_15m_end, limit=4000,
+            # 15m: completed qfq，最近 4000 根（约 60 个交易日）
+            m15_agg = await mdas.get_bars(
+                db,
+                instrument_id,
+                timeframe="15m",
+                adj="qfq",
+                include_realtime=False,
+                completed_only=True,
+                end_date=trade_date,
+                limit=4000,
             )
+        daily_bars = daily_agg.bars if not daily_agg.bars.empty else None
+        bars_15m = m15_agg.bars if not m15_agg.bars.empty else None
         return daily_bars, bars_15m
     except Exception as exc:
         logger.warning(

@@ -54,7 +54,6 @@ from app.core.deps import get_current_active_user  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.bar import BarDaily  # noqa: E402
 from app.models.instrument import Instrument  # noqa: E402
-from app.models.scheduler_job_run import SchedulerJobRun  # noqa: E402
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot  # noqa: E402
 from app.models.stock_feature_snapshot import StockFeatureSnapshot  # noqa: E402
 from app.models.stock_feature_snapshot_run import (  # noqa: E402
@@ -189,31 +188,10 @@ async def chip_test_setup(
     inst3 = await instrument_factory(symbol="300750", name="宁德时代", market="SZ")
     await subscription_factory(user_id=user.id, plan_code="observe_20")
 
-    # 创建 SchedulerJobRun（chip 表 FK 指向 scheduler_job_runs）
-    core_run = SchedulerJobRun(
-        job_name="after_close_orchestrator",
-        business_date="2026-07-25",
-        run_key=f"after_close_orchestrator:2026-07-25-{uuid.uuid4().hex[:4]}",
-        status="succeeded",
-        started_at=datetime.now(UTC) - timedelta(hours=1),
-        finished_at=datetime.now(UTC),
-    )
-    db_session.add(core_run)
-    await db_session.flush()
-
-    # 旧 run（用于验证 chip 不匹配旧 core_run_id）
-    old_run = SchedulerJobRun(
-        job_name="after_close_orchestrator",
-        business_date="2026-07-24",
-        run_key=f"after_close_orchestrator:2026-07-24-{uuid.uuid4().hex[:4]}",
-        status="succeeded",
-        started_at=datetime.now(UTC) - timedelta(days=1, hours=1),
-        finished_at=datetime.now(UTC) - timedelta(days=1),
-    )
-    db_session.add(old_run)
-    await db_session.flush()
-
-    # 创建 StockFeatureSnapshotRun（snapshot.source_run_id FK）
+    # [CHANGE-20260731-004] 修复 chip_test_setup FK 违反：
+    # core_run_id FK 指向 stock_feature_snapshot_runs.id（CHANGE-20260729-007），
+    # 不再指向 scheduler_job_runs.id。原 fixture 误用 SchedulerJobRun 导致 FK 违反。
+    # snap_run: 当前 trade_date 的 StockFeatureSnapshotRun（chip 应匹配）
     snap_run = StockFeatureSnapshotRun(
         trade_date=date_cls(2026, 7, 25),
         schema_version=_SCHEMA_VERSION,
@@ -228,6 +206,23 @@ async def chip_test_setup(
         metadata_={"scope": "full"},
     )
     db_session.add(snap_run)
+    await db_session.flush()
+
+    # old_snap_run: 旧 trade_date 的 StockFeatureSnapshotRun（chip 不应匹配）
+    old_snap_run = StockFeatureSnapshotRun(
+        trade_date=date_cls(2026, 7, 24),
+        schema_version=_SCHEMA_VERSION,
+        primary_timeframe="1d",
+        secondary_timeframe="15m",
+        adj="qfq",
+        run_type="after_close",
+        status=STATUS_SUCCEEDED,
+        started_at=datetime.now(UTC) - timedelta(days=1, hours=1),
+        finished_at=datetime.now(UTC) - timedelta(days=1),
+        published_at=datetime.now(UTC) - timedelta(days=1),
+        metadata_={"scope": "full"},
+    )
+    db_session.add(old_snap_run)
     await db_session.flush()
 
     # ===== inst1: 最新 snapshot + matched chip（available=True） =====
@@ -255,7 +250,7 @@ async def chip_test_setup(
     chip1 = StockChipConsensusSnapshot(
         instrument_id=inst1.id,
         trade_date=date_cls(2026, 7, 25),
-        core_run_id=core_run.id,
+        core_run_id=snap_run.id,
         algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
         chip_hash=chip_payload1["chipHash"],
         chip_payload=chip_payload1,
@@ -288,7 +283,7 @@ async def chip_test_setup(
     chip2 = StockChipConsensusSnapshot(
         instrument_id=inst2.id,
         trade_date=date_cls(2026, 7, 25),
-        core_run_id=core_run.id,
+        core_run_id=snap_run.id,
         algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
         chip_hash=chip_payload2["chipHash"],
         chip_payload=chip_payload2,
@@ -322,7 +317,7 @@ async def chip_test_setup(
     chip3_old = StockChipConsensusSnapshot(
         instrument_id=inst3.id,
         trade_date=date_cls(2026, 7, 24),  # 旧 trade_date
-        core_run_id=core_run.id,
+        core_run_id=snap_run.id,
         algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
         chip_hash=chip_payload3["chipHash"],
         chip_payload=chip_payload3,
@@ -333,7 +328,7 @@ async def chip_test_setup(
     chip3_old_run = StockChipConsensusSnapshot(
         instrument_id=inst3.id,
         trade_date=date_cls(2026, 7, 25),
-        core_run_id=old_run.id,  # 旧 core_run_id → 不匹配 latest_snap.source_run_id
+        core_run_id=old_snap_run.id,  # 旧 snap_run → 不匹配 latest_snap.source_run_id
         algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
         chip_hash=chip_payload3["chipHash"],
         chip_payload=chip_payload3,
@@ -344,7 +339,7 @@ async def chip_test_setup(
     chip3_old_ver = StockChipConsensusSnapshot(
         instrument_id=inst3.id,
         trade_date=date_cls(2026, 7, 25),
-        core_run_id=core_run.id,
+        core_run_id=snap_run.id,
         algorithm_version="0.0.0-old-version",  # 旧 algorithm_version
         chip_hash=chip_payload3["chipHash"],
         chip_payload=chip_payload3,
@@ -379,7 +374,7 @@ async def chip_test_setup(
 
     app.dependency_overrides[get_current_active_user] = _get_user
 
-    yield client, user, [inst1, inst2, inst3], snap_run.id, core_run.id
+    yield client, user, [inst1, inst2, inst3], snap_run.id, snap_run.id
 
     app.dependency_overrides.pop(get_current_active_user, None)
 
