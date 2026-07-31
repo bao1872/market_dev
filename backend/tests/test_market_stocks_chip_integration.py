@@ -390,7 +390,7 @@ class TestMarketStocksChipIntegration:
         client, user, instruments, _, _ = chip_test_setup
         # filter: fp_trend_bars >= 5 → 只有 inst1(5) 和 inst3(8)
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_filter": "fp_trend_bars:gte:5", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -406,7 +406,7 @@ class TestMarketStocksChipIntegration:
         """场景1b: flat 事件字段 filter（fp_structure_event_type eq BOS）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_filter": "fp_structure_event_type:eq:BOS", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -420,7 +420,7 @@ class TestMarketStocksChipIntegration:
         """场景2: column 字段 calculated_at 排序。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_sort": "fp_calculated_at:asc", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -433,7 +433,7 @@ class TestMarketStocksChipIntegration:
         """场景2b: column 字段 run_id filter（eq）。"""
         client, user, instruments, run_id, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_filter": f"fp_run_id:eq:{run_id}", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -447,7 +447,7 @@ class TestMarketStocksChipIntegration:
         """场景3: literal data_source filter（eq feature_snapshot）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_filter": "fp_data_source:eq:feature_snapshot", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -461,7 +461,7 @@ class TestMarketStocksChipIntegration:
         """场景4: boolean fp_chip_available filter（eq true）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_filter": "fp_chip_available:eq:true", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -480,7 +480,7 @@ class TestMarketStocksChipIntegration:
         """场景5: computed is_stale filter（eq true）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_filter": "fp_is_stale:eq:true", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -497,7 +497,7 @@ class TestMarketStocksChipIntegration:
         """场景6: matched chip POC 排序（fp_poc_price desc）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_sort": "fp_poc_price:desc", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -517,7 +517,7 @@ class TestMarketStocksChipIntegration:
         client, user, instruments, _, _ = chip_test_setup
         # inst3 有 chip trade_date=2026-07-24（旧），不应匹配 latest_snap trade_date=2026-07-25
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={
                 "scope": "market",
                 "fp_filter": "fp_chip_available:eq:true",
@@ -541,7 +541,7 @@ class TestMarketStocksChipIntegration:
         client, user, instruments, _, _ = chip_test_setup
         # inst3 有 chip core_run_id=old_run.id（旧 run），不应匹配 latest_snap.source_run_id=snap_run.id
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={
                 "scope": "market",
                 "fp_filter": "fp_chip_available:eq:true",
@@ -563,7 +563,7 @@ class TestMarketStocksChipIntegration:
         client, user, instruments, _, _ = chip_test_setup
         # inst3 有 chip algorithm_version="0.0.0-old-version"，不应匹配
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={
                 "scope": "market",
                 "fp_filter": "fp_chip_available:eq:true",
@@ -585,7 +585,7 @@ class TestMarketStocksChipIntegration:
         client, user, instruments, _, _ = chip_test_setup
         # 按 fp_poc_price 排序，验证返回的 fp_poc_price 与排序值一致
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_sort": "fp_poc_price:desc", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -608,7 +608,7 @@ class TestMarketStocksChipIntegration:
         """场景9a: between 多条件 filter（fp_trend_bars between 4 and 6）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={
                 "scope": "market",
                 "fp_filter": "fp_trend_bars:between:4;6",
@@ -631,7 +631,7 @@ class TestMarketStocksChipIntegration:
         """场景9b: 多条件 filter（fp_trend_direction eq 上行 AND fp_trend_bars gte 5）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={
                 "scope": "market",
                 "fp_filter": "fp_trend_direction:eq:上行;fp_trend_bars:gte:5",
@@ -653,7 +653,7 @@ class TestMarketStocksChipIntegration:
         """场景9c: NULLS LAST 排序（fp_poc_price asc，None 排最后）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_sort": "fp_poc_price:asc", "page_size": 50},
         )
         assert resp.status_code == 200
@@ -676,11 +676,11 @@ class TestMarketStocksChipIntegration:
         """场景9d: 跨页 symbol 稳定（page_size=1，两页结果不重叠且 symbol 升序）。"""
         client, user, instruments, _, _ = chip_test_setup
         resp1 = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "page_size": 1, "page": 1},
         )
         resp2 = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "page_size": 1, "page": 2},
         )
         assert resp1.status_code == 200
@@ -699,7 +699,7 @@ class TestMarketStocksChipIntegration:
         """场景10: 非法字段 422。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "fp_filter": "fp_nonexistent_field:eq:foo", "page_size": 50},
         )
         assert resp.status_code == 422
@@ -710,7 +710,7 @@ class TestMarketStocksChipIntegration:
         """验证 first_pyramid_flat 恰好 99 键。"""
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
-            "/api/v1/market/stocks",
+            "/market/stocks",
             params={"scope": "market", "page_size": 50},
         )
         assert resp.status_code == 200
