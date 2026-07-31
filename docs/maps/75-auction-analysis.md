@@ -1,14 +1,16 @@
 # 竞价分析 Map
 
-核验状态：部分核验（代码已实现并本地测试通过；PG集成测试、09:25数据源覆盖率、canary、部署待后续）
+核验状态：部分核验（代码已实现并本地测试通过；09:25 数据源经生产只读审计确认 BLOCKED；CI 终态、staging 部署待后续）
 最后更新：2026-07-31
-核验分支：dev（HEAD=cde263d）
+核验分支：dev（HEAD=b89a3d3）
 对应 PRD：`../prd/75-auction-analysis.md`
 事实所有权：竞价分析层实现状态
 
 > [CHANGE-20260730-018] 已实现完整链路：锚点生成发布→扫描→聚合→事件追踪→前端三级页面+Review回流。
-> 本地：255 个 auction 单测通过、ruff 通过、tsc 0 错误、10 个前端合同测试通过、27 个导航合同测试通过。
-> 待核验：PG集成测试15个（CI临时PostgreSQL真实运行，0 skipped）、09:25 BarMinute 数据源覆盖率、canary、dev/staging部署。
+> [P0-3 2026-07-31] Scheduler 接入：`after_close_orchestrator` Worker 进程内启动 Auction co-process，生产入口无需 `WORKER_TYPE=auction_scheduler`。
+> [2026-07-31 数据审计] 生产 `bars_minute` 表为空（0 行），`bars_15min` 最早 09:45，无 09:25 数据源；auction 表尚未迁移至生产。标记 `AUCTION_DATA_SOURCE_BLOCKED`。
+> 本地：255 个 auction 单测 + 29 个 scheduler worker 单测通过、ruff 通过、mypy baseline 无新增、tsc 0 错误、10 个前端合同测试通过。
+> 待核验：CI 终态（gh 未认证，无法读取 Actions 日志）、staging 部署（无隔离环境）。
 
 ## 1. PRD 实现映射
 
@@ -81,7 +83,23 @@ Chip 软失败（[P0-2]）：
 - `execute_auction_scan_run(job_run_id, trade_date, *, worker_id, lease_epoch)`：执行 auction_final 任务
 - `execute_auction_open_confirmation_run(job_run_id, trade_date, *, worker_id, lease_epoch)`：执行 open_confirmation 任务
 - 使用 SchedulerJobRun、run_key、heartbeat、lease、fencing、retry 和恢复
-- 接入现有 after_close_orchestrator Worker（不新建容器），WORKER_TYPE=auction_scheduler
+
+### 3.4.1 Scheduler 生产运行拓扑（[P0-3 2026-07-31]）
+
+**生产入口**：`docker-compose.prod.yml` 的 `worker-after-close` 服务（`WORKER_TYPE=after_close_orchestrator`）。
+
+**Co-process 接入**（`backend/app/worker.py`）：
+- `run_after_close_orchestrator_worker()` 启动时通过 `asyncio.create_task(_run_auction_scheduler_co_process())` 启动同进程 Auction co-process
+- co-process 每 `AUCTION_SCHEDULER_POLL_INTERVAL`（30s）独立轮询：
+  1. 检查 09:25:05 / 10:00:00 Asia/Shanghai 触发窗口（含补偿窗口，同交易日每类任务只创建一次）
+  2. 领取 queued auction SchedulerJobRun 并执行
+- **不阻塞 core/chip**：Auction 轮询在独立 co-process 中，主循环只处理 core/chip 领取
+- **异常隔离**：co-process 内部 try/except 捕获轮询异常，不影响 after_close_orchestrator 主 Worker
+- **SIGTERM drain**：共享全局 `_shutdown` 标志；主 Worker `finally` 块 `await` co-process 退出（超时 35s 后 cancel）
+- **启动恢复**：co-process 启动时调用 `recover_stale_scheduler_job_runs(db)` 清理上次崩溃残留的 running 任务
+- **不新增容器**：复用 `worker-after-close` 容器，无 `auction_scheduler` 独立服务
+
+`WORKER_TYPE=auction_scheduler` 分支保留仅用于本地调试，**不是生产入口**。架构测试 `test_compose_worker_after_close_uses_after_close_orchestrator` 守护 Compose 配置。
 
 ### 3.5 after_close_orchestrator.py 接入
 - 在 stock_core 发布后、market_aggregation 之前插入 auction_anchor 生成
@@ -144,8 +162,35 @@ Chip 软失败（[P0-2]）：
 
 ## 7. 已知缺口与未完成
 
-- PG 集成测试 CI 终态未确认（本地跳过，CI 临时 PostgreSQL 运行）
-- 09:25 BarMinute 数据源覆盖率未验证（需连接生产 DB 只读检查）
+### 7.1 09:25 数据源（BLOCKED — 2026-07-31 生产只读审计）
+
+| 检查项 | 结果 |
+|---|---|
+| `bars_minute` 总行数 | **0**（空表） |
+| `bars_15min` 最早 trade_time | 09:45:00（无 09:25/09:30） |
+| `auction_*` 表 | **不存在**（生产运行 c56d991，Migration 077 在 dev 未部署） |
+| 最近 20 交易日 `bars_daily` | 5190-5193 股/日，close/volume/amount 100% 非空 |
+| 活跃 A 股（SH+SZ active） | 5196 只 |
+
+**结论**：`AUCTION_DATA_SOURCE_BLOCKED`。生产无 09:25 最终竞价数据源。`auction_scan_service` 依赖 `bars_minute` 的 09:25 记录，当前所有扫描会返回 `coverage=0`。
+
+**下一阶段方案**（不在本轮伪造数据）：
+- 建立 `auction_final_quotes` 表（trade_date + instrument_id + 09:25 close/volume/amount）
+- 接入现有行情 Provider 的最终竞价 DTO（Capture Worker 在 09:25:05 后写入）
+- 或扩展 `bars_minute` 写入 09:25 集合竞价 bar（需 Capture 层改造）
+- 数据合同：`auction_final_quotes` 必须包含 `is_final_auction=true` 标记，禁止用 09:30 第一根分钟线替代
+
+### 7.2 CI 终态（未确认）
+- gh CLI 未认证，无法读取 GitHub Actions 日志
+- 本地已通过：ruff、mypy baseline（无新增）、29 个 scheduler worker 单测、tsc
+- 待用户认证 gh 后确认 CI 全绿
+
+### 7.3 Staging 环境（不存在）
+- 生产服务器仅有单套容器（trading-* 命名，运行 c56d991）
+- 无隔离 dev/staging 容器、独立数据库或独立域名
+- 本地仅 Redis DB 15 队列隔离，无完整 staging
+
+### 7.4 其他待办
 - canary（少量股票/1行业/1概念，需 dev/staging 环境）
 - 全量回填/计算
 - 部署（无隔离 dev/staging 时标记 BLOCKED）

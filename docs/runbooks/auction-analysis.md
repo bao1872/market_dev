@@ -21,7 +21,29 @@
 | 09:25:05 | `auction_final:{date}` | `auction_final:{date}` | `create_auction_final_job` → `execute_auction_scan_run` |
 | 10:00:00 | `auction_open_confirmation:{date}` | `auction_open_confirmation:{date}` | `create_auction_open_confirmation_job` → `execute_auction_open_confirmation_run` |
 
-### 1.2 手动触发（admin API）
+**Scheduler 运行拓扑**（[P0-3 2026-07-31]）：
+- 生产入口：`docker-compose.prod.yml` 的 `worker-after-close` 服务（`WORKER_TYPE=after_close_orchestrator`）
+- `run_after_close_orchestrator_worker()` 启动时通过 `asyncio.create_task(_run_auction_scheduler_co_process())` 启动同进程 Auction co-process
+- co-process 每 30s（`AUCTION_SCHEDULER_POLL_INTERVAL`）独立轮询触发窗口和 queued auction jobs
+- **不阻塞 core/chip**：Auction 轮询在独立 co-process，主循环只处理 core/chip
+- **异常隔离**：co-process 异常不影响主 Worker
+- **SIGTERM**：共享 `_shutdown` 标志，主 Worker `finally` 块 await co-process 退出（超时 35s cancel）
+- `WORKER_TYPE=auction_scheduler` 仅用于本地调试，不是生产入口
+
+### 1.2 触发窗口与补偿
+
+时间判断使用 `Asia/Shanghai` 时区：
+
+| 任务 | 目标时间 | 补偿窗口 | 幂等 |
+|---|---|---|---|
+| `auction_final` | 09:25:05 | 09:25:05 ~ 09:29:59（同交易日只创建一次） | `run_key=auction_final:{date}` + `acquire_job_run_lock` |
+| `auction_open_confirmation` | 10:00:00 | 10:00:00 ~ 10:04:59（同交易日只创建一次） | `run_key=auction_open_confirmation:{date}` + `acquire_job_run_lock` |
+
+- Worker 错过精确秒数但在补偿窗口内 → 仍可创建任务
+- 同一交易日每类任务只创建一次（通过 `SchedulerJobRun.run_key` 唯一约束）
+- 非交易日（周末/节假日）不创建（通过 `is_trading_day(trade_date)` 判断）
+
+### 1.3 手动触发（admin API）
 
 ```bash
 # 1. 锚点生成+发布（统一入口，事务内完成）
@@ -95,13 +117,57 @@ curl https://<api>/api/v1/auction/anchors/2026-07-31 \
   -H "Authorization: Bearer <token>"
 ```
 
+### 2.4 Worker 重启恢复（[P0-3 2026-07-31]）
+
+**场景**：`worker-after-close` 容器重启（部署/OOM/崩溃），Auction co-process 中断。
+
+**行为**：
+1. 容器重启后 `run_after_close_orchestrator_worker()` 重新启动，自动创建新的 Auction co-process
+2. co-process 启动时调用 `recover_stale_scheduler_job_runs(db)`：清理 `running` 状态但租约过期的 SchedulerJobRun（标记为 `failed`，保留审计）
+3. 同 `run_key` 的 succeeded/running（租约有效）任务不会被重复创建（幂等）
+4. 若重启发生在 09:25:05 触发窗口的补偿窗口内（09:25:05 ~ 09:29:59），co-process 仍可创建当日任务
+5. fencing：旧 worker 的租约过期后，新 worker 通过 `lease_epoch` 递增原子接管
+
+### 2.5 09:25 数据源覆盖检查（只读）
+
+**目的**：确认生产 `bars_minute` 表是否有 09:25 最终竞价数据，决定是否可执行 auction_final 扫描。
+
+**检查命令**（通过 `scripts/ops/panji-prod-ssh` 只读查询，禁止修改生产数据）：
+```bash
+# 1. bars_minute 总行数与时间范围
+scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock -c \
+  "SELECT COUNT(*) AS total, MIN(trade_time), MAX(trade_time) FROM bars_minute;"'
+
+# 2. 最近 20 交易日 09:25 覆盖率
+scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock -c \
+  "SELECT DATE(trade_time) AS d, COUNT(DISTINCT instrument_id) AS stocks_0925, \
+   COUNT(*) FILTER (WHERE close IS NOT NULL) AS close_nn, \
+   COUNT(*) FILTER (WHERE volume IS NOT NULL) AS vol_nn, \
+   COUNT(*) FILTER (WHERE amount IS NOT NULL) AS amt_nn \
+   FROM bars_minute WHERE trade_time::time = '\''09:25:00'\'' \
+   AND trade_time >= CURRENT_DATE - INTERVAL '\''30 days'\'' \
+   GROUP BY d ORDER BY d DESC LIMIT 20;"'
+
+# 3. 对照活跃 A 股数量
+scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock -c \
+  "SELECT market, status, COUNT(*) FROM instruments GROUP BY market, status;"'
+```
+
+**判定规则**：
+- `bars_minute` 为空 或 09:25 覆盖率 < 90% → `AUCTION_DATA_SOURCE_BLOCKED`，禁止执行 auction_final 扫描
+- 09:25 记录的 `close`/`volume`/`amount` 非空率 < 95% → `AUCTION_DATA_SOURCE_BLOCKED`
+- 抽查 10 只股票确认 09:25 记录是最终集合竞价结果（非 09:30 第一根分钟线、非补写、非零成交占位）
+
+**2026-07-31 审计结果**：`bars_minute` 为空（0 行），标记 `AUCTION_DATA_SOURCE_BLOCKED`。详见 `docs/maps/75-auction-analysis.md` §7.1。
+
 ## 3. Canary（小批量验证）
 
 ### 3.1 前置条件
 
 - 已有 dev/staging 环境（**禁止把 dev 直接部署生产"看效果"**）
 - 应用 Migration 077/078
-- 已确认 09:25 BarMinute 数据源覆盖率（不足时禁止扫描，建立 `auction_final_quotes` 表或接入现有行情 Provider 的最终竞价 DTO）
+- 已确认 09:25 数据源覆盖率（按 §2.5 检查，不足时禁止扫描）
+- 已建立 `auction_final_quotes` 数据合同或接入现有行情 Provider 的最终竞价 DTO
 
 ### 3.2 Canary 样本
 
