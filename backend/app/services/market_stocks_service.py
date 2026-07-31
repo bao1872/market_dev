@@ -25,11 +25,11 @@ from __future__ import annotations
 
 import json
 import logging
+import typing as _typing
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
-import typing as _typing
 from uuid import UUID
 
 from sqlalchemy import (
