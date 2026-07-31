@@ -460,7 +460,7 @@ async def test_sort_invalid_field_returns_422(market_stocks_client) -> None:
         "/market/stocks", params={"scope": "market", "sort": "invalid_field:asc"}
     )
     assert response.status_code == 422
-    assert "Invalid sort field" in response.json()["detail"]
+    assert "Invalid sort field" in response.json()["detail"]["message"]
 
 
 @pytest.mark.asyncio
@@ -471,7 +471,7 @@ async def test_sort_invalid_direction_returns_422(market_stocks_client) -> None:
         "/market/stocks", params={"scope": "market", "sort": "symbol:up"}
     )
     assert response.status_code == 422
-    assert "Invalid sort direction" in response.json()["detail"]
+    assert "Invalid sort direction" in response.json()["detail"]["message"]
 
 
 @pytest.mark.asyncio

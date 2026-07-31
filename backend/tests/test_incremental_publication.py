@@ -666,8 +666,19 @@ class TestPostgreSQLIntegration:
 
         # 模拟 worker1 中断：将 inst2 的 item lease 设为过期，使其可被 resume
         # （get_resume_items 只返回 pending/failed 或 lease 过期的 running items）
-        inst2_item = item_map[inst2.id]
-        inst2_item.lease_expires_at = datetime.now(UTC) - timedelta(hours=1)
+        # 注意：claim_items 返回的对象是手动构造的（非 session 托管），
+        # 直接设属性不会持久化，必须用 UPDATE 语句。
+        from sqlalchemy import update
+
+        from app.models.stock_feature_snapshot_run_item import (
+            StockFeatureSnapshotRunItem,
+        )
+
+        await db_session.execute(
+            update(StockFeatureSnapshotRunItem)
+            .where(StockFeatureSnapshotRunItem.id == item_map[inst2.id].id)
+            .values(lease_expires_at=datetime.now(UTC) - timedelta(hours=1))
+        )
         await db_session.commit()
 
         # 模拟中断恢复
