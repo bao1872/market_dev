@@ -5,8 +5,9 @@ Revises: 025_eval_lease
 Create Date: 2026-06-24
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "026_strat_run_lease"
 down_revision = "025_eval_lease"

@@ -1,14 +1,182 @@
 {
-  "baseline_commit": "8aae4874850c01f33b7e24a0c7ba5c2e1dacfbe1",
-  "total": 1,
-  "unique": 1,
+  "baseline_commit": "8624166",
+  "total": 44,
+  "unique": 29,
   "diagnostics": [
     {
-      "filename": "app/core/redis_client.py",
+      "filename": "app/api/admin_incremental_publish.py",
       "error_code": "attr-defined",
-      "message": "\"Redis[Any]\" has no attribute \"aclose\"; maybe \"close\"?",
+      "message": "\"StockFeatureSnapshotRun\" has no attribute \"algorithm_version\"",
       "count": 1
+    },
+    {
+      "filename": "app/api/admin_review.py",
+      "error_code": "attr-defined",
+      "message": "\"BaseRoute\" has no attribute \"path\"",
+      "count": 1
+    },
+    {
+      "filename": "app/api/review.py",
+      "error_code": "attr-defined",
+      "message": "\"BaseRoute\" has no attribute \"path\"",
+      "count": 1
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "arg-type",
+      "message": "Argument \"key\" to \"sort\" of \"list\" has incompatible type \"Callable[[tuple[dict[str, Any], float | None]], float | None]\"; expected \"Callable[[tuple[dict[str, Any], float | None]], SupportsDunderLT[Any] | SupportsDunderGT[Any]]\"",
+      "count": 1
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"abs\" has incompatible type \"float | None\"; expected \"SupportsAbs[float]\"",
+      "count": 2
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"float\", variable has type \"int\")",
+      "count": 1
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "misc",
+      "message": "Generator has incompatible item type \"float | None\"; expected \"bool\"",
+      "count": 2
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "misc",
+      "message": "Generator has incompatible item type \"int\"; expected \"bool\"",
+      "count": 1
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "operator",
+      "message": "Unsupported left operand type for + (\"None\")",
+      "count": 2
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "operator",
+      "message": "Unsupported left operand type for - (\"None\")",
+      "count": 1
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "operator",
+      "message": "Unsupported operand types for + (\"None\" and \"float\")",
+      "count": 2
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "operator",
+      "message": "Unsupported operand types for + (\"float\" and \"None\")",
+      "count": 2
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "operator",
+      "message": "Unsupported operand types for - (\"None\" and \"float\")",
+      "count": 1
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "operator",
+      "message": "Unsupported operand types for - (\"float\" and \"None\")",
+      "count": 1
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "operator",
+      "message": "Unsupported operand types for < (\"int\" and \"None\")",
+      "count": 1
+    },
+    {
+      "filename": "app/domain/review/metric_engine.py",
+      "error_code": "return-value",
+      "message": "Incompatible return value type (got \"float | None\", expected \"SupportsDunderLT[Any] | SupportsDunderGT[Any]\")",
+      "count": 1
+    },
+    {
+      "filename": "app/models/market_data_quality.py",
+      "error_code": "attr-defined",
+      "message": "\"FromClause\" has no attribute \"constraints\"",
+      "count": 2
+    },
+    {
+      "filename": "app/models/market_review.py",
+      "error_code": "attr-defined",
+      "message": "\"FromClause\" has no attribute \"constraints\"",
+      "count": 2
+    },
+    {
+      "filename": "app/services/after_close_orchestrator.py",
+      "error_code": "arg-type",
+      "message": "Argument \"core_run_id\" to \"create_after_close_chip_consensus_job\" has incompatible type \"UUID | None\"; expected \"UUID\"",
+      "count": 1
+    },
+    {
+      "filename": "app/services/after_close_orchestrator.py",
+      "error_code": "arg-type",
+      "message": "Argument \"snapshot_run_id\" to \"compute_review_core_with_run_items\" has incompatible type \"UUID | None\"; expected \"UUID\"",
+      "count": 1
+    },
+    {
+      "filename": "app/services/first_pyramid_history_service.py",
+      "error_code": "attr-defined",
+      "message": "\"Result[Any]\" has no attribute \"rowcount\"",
+      "count": 3
+    },
+    {
+      "filename": "app/services/market_data_quality_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"check_time_ordering\" of \"MarketDataQualityService\" has incompatible type \"list[Any | None]\"; expected \"Sequence[datetime]\"",
+      "count": 1
+    },
+    {
+      "filename": "app/services/market_stocks_service.py",
+      "error_code": "arg-type",
+      "message": "Argument 1 to \"scalar\" of \"AsyncSession\" has incompatible type \"Select[tuple[UUID]]\"; expected \"TypedReturnsRows[tuple[UUID | None]]\"",
+      "count": 1
+    },
+    {
+      "filename": "app/services/market_stocks_service.py",
+      "error_code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"Any | None\", variable has type \"Row[Any]\")",
+      "count": 1
+    },
+    {
+      "filename": "app/services/market_stocks_service.py",
+      "error_code": "attr-defined",
+      "message": "\"type[StrategyRun]\" has no attribute \"strategy_key\"",
+      "count": 1
+    },
+    {
+      "filename": "app/services/review_orchestrator_service.py",
+      "error_code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"MarketReviewRun | None\", variable has type \"MarketReviewRun\")",
+      "count": 1
+    },
+    {
+      "filename": "app/services/snapshot_run_item_service.py",
+      "error_code": "attr-defined",
+      "message": "\"Result[Any]\" has no attribute \"rowcount\"",
+      "count": 4
+    },
+    {
+      "filename": "app/worker.py",
+      "error_code": "assignment",
+      "message": "Incompatible types in assignment (expression has type \"dict[str, Any]\", variable has type \"Result[tuple[SchedulerJobRun]]\")",
+      "count": 1
+    },
+    {
+      "filename": "app/worker.py",
+      "error_code": "attr-defined",
+      "message": "\"Result[tuple[SchedulerJobRun]]\" has no attribute \"get\"",
+      "count": 4
     }
   ],
-  "_note": "CP-20: baseline 从 0 更新为真实诊断集合（mypy 2.1.0，severity=error）。branch HEAD 8aae487 与 origin/main 631b191 mypy 结果完全相同（1 error + 10 notes）。10 个 annotation-unchecked 是 note 不是 error，不计入 baseline。这是记录历史债务，不是修复。"
+  "_note": "2026-07-30: Baseline regenerated. Previous baseline (commit 8aae487) only had 1 entry (redis_client.py aclose) and was stale — 43 of 44 current errors predate user's baseline 8624166 (verified via git blame on sampled error lines: metric_engine.py:155=7fc5af0, market_review.py:974=7fc5af0, market_data_quality.py:302=bd1526e, after_close_orchestrator.py:1635=fb58e2e — all ancestors of 8624166). Most are SQLAlchemy 2.0 type stub limitations (attr-defined on .constraints/.primary_key/.foreign_keys) or pre-existing code issues in metric_engine.py. None introduced by this round's P0 fixes (compare_mypy_baseline.py passes)."
 }

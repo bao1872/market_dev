@@ -40,6 +40,7 @@
 | CHANGE-20260730-014 | 2026-07-30 | P0 复盘数据链+行情缺口+盘后恢复+99字段筛选+第一金字塔折叠 | behavior+contract+architecture+data | 复盘模块/行情质量/盘后编排/行情体验/量化模型 | 进行中（代码已合入 main SHA 54fe3a2；review-1.1.0 修复仅静态核验，canary review run 重跑待生产 SSH 可达；浏览器 UI 真实链路验收 PENDING 用户手工登录） | RV-01~RV-22（§23 P0 强化条款）/MQ-01~MQ-40/MX-50~MX-53/AC-12~AC-14 | `maps/70-review.md`、`maps/30-after-close.md`、`maps/40-market-stock-experience.md`、`maps/10-market-data.md`、`prd/50-market-data-quality.md`、`runbooks/market-data-quality-scan-repair.md` |
 | CHANGE-20260730-015 | 2026-07-30 | SSH 目标漂移防复发治理 | architecture+governance | 部署运维/TRAE 工作协议/生产安全 | 生效（scripts/ops/panji-prod-ssh + panji-prod-preflight 已落库并实际验证通过；preflight 三阶段全部 OK） | 无（运维治理） | `maps/80-system-runtime.md` §2 |
 | CHANGE-20260730-016 | 2026-07-30 | 盘后链路 P0 永久收口 + 新模型合同冻结 | behavior+contract+architecture+data | 盘后编排/复盘模块/行情质量/量化模型/部署运维 | 进行中（代码+目标纯单元测试+Ruff 通过；PG 集成待 CI；本轮未部署、未 push main、未修改生产数据；canary 计算已完成静态核验但未改生产） | AC-04/AC-08~14/RV-01~RV-22/AA-01~AA-NN | `maps/30-after-close.md`、`maps/70-review.md`、`maps/75-auction-analysis.md`、`runbooks/after-close-recovery.md` |
+| CHANGE-20260730-017 | 2026-07-30 | 发布前真实闭环 — 状态机+部署合同+CI门禁+基线对齐 | behavior+contract+architecture+ci | 盘后编排/部署运维/复盘模块/CI 治理/测试基础设施 | 进行中（代码+测试+文档已 commit；PG 集成待 CI 终态；本轮未部署、未 push main、未修改生产数据） | AC-04/AC-08~14/RV-01~RV-22 | `maps/30-after-close.md`、`maps/70-review.md`、`maps/80-system-runtime.md`、`runbooks/after-close-recovery.md` |
 
 ## 3. 状态说明
 

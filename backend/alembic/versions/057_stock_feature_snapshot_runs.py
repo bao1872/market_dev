@@ -27,8 +27,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision: str = "057_stock_feature_snapshot_runs"
 down_revision: str | None = "056_stock_feature_snapshots"

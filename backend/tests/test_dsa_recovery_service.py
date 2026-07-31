@@ -547,3 +547,122 @@ async def test_get_dsa_recovery_status_completed_no_recover(db_session) -> None:
     assert status["dsa_run_status"] == "completed"
     assert status["can_recover"] is False
     assert "completed" in status["reason"]
+
+
+# ---------------------------------------------------------------------------
+# 测试 11: [P0-3 fencing] worker_id 传入 → claim_for_worker 绑定 orchestrator
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recover_failed_dsa_with_worker_id_claims_for_orchestrator(
+    db_session,
+) -> None:
+    """测试 11：传入 worker_id → 新 run 通过 claim_for_worker 绑定当前 orchestrator。
+
+    验证（ref/instruction.md §三.2 DSA recovery fencing）：
+    - create_batch_run 收到 claim_for_worker="orchestrator:<worker_id>"
+    - 新 run 在创建时即为 status=running + worker_id（generic worker 无法抢占）
+    - recovery 正常返回 (new_run, is_new=True)
+
+    注：通过 mock create_batch_run 验证 claim_for_worker 参数透传；
+    DB 层的 generic worker claim 互斥由 StrategyBatchService.create_batch_run
+    的 status=running + worker_id 内联 claim 保证（参见 strategy_batch_service.py
+    [Phase8A] 注释）。
+    """
+    old_dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="failed", error_code="runtime_error",
+    )
+    job_run = await _create_after_close_job_run(
+        db_session, dsa_run_id=old_dsa_run.id, recovery_count=0,
+    )
+
+    fake_new_run = StrategyRun(
+        id=uuid.uuid4(),
+        strategy_version_id=old_dsa_run.strategy_version_id,
+        run_type="scheduled",
+        trade_date=_TRADE_DATE,
+        status="running",  # claim_for_worker 模式下应为 running
+        worker_id="orchestrator:test-worker-1",
+        input_overrides={},
+        idempotency_key=f"fake_new:{uuid.uuid4().hex[:8]}",
+    )
+
+    with patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch(
+        "app.services.strategy_batch_service.StrategyBatchService.create_batch_run",
+        new=AsyncMock(return_value=fake_new_run),
+    ) as mock_create:
+        new_run, is_new = await recover_failed_dsa_run(
+            db_session,
+            job_run_id=job_run.id,
+            worker_id="test-worker-1",
+            lease_epoch=42,
+        )
+
+    # 验证 claim_for_worker 参数正确透传给 create_batch_run
+    assert mock_create.called, "create_batch_run 必须被调用"
+    _call_kwargs = mock_create.call_args.kwargs
+    assert _call_kwargs.get("claim_for_worker") == "orchestrator:test-worker-1", (
+        "claim_for_worker 必须为 'orchestrator:<worker_id>'，"
+        "防止 generic strategy worker 抢占 recovery run"
+    )
+
+    # 返回值校验
+    assert is_new is True
+    assert new_run.id == fake_new_run.id
+
+
+# ---------------------------------------------------------------------------
+# 测试 12: [P0-3 fencing] 无 worker_id → fallback claim（CLI/admin 路径）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recover_failed_dsa_without_worker_id_uses_recovery_fallback(
+    db_session,
+) -> None:
+    """测试 12：无 worker_id（CLI/admin 路径）→ claim_for_worker 使用 recovery fallback。
+
+    fallback claim_for_worker = "orchestrator:recovery:<job_run_id>"，仍归
+    orchestrator 命名空间（generic worker 不会 claim "orchestrator:*" 前缀的 run），
+    但不绑定特定 worker（适合管理员应急恢复场景）。
+    """
+    old_dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="failed", error_code="runtime_error",
+    )
+    job_run = await _create_after_close_job_run(
+        db_session, dsa_run_id=old_dsa_run.id, recovery_count=0,
+    )
+
+    fake_new_run = StrategyRun(
+        id=uuid.uuid4(),
+        strategy_version_id=old_dsa_run.strategy_version_id,
+        run_type="scheduled",
+        trade_date=_TRADE_DATE,
+        status="running",
+        worker_id=f"orchestrator:recovery:{job_run.id}",
+        input_overrides={},
+        idempotency_key=f"fake_new:{uuid.uuid4().hex[:8]}",
+    )
+
+    with patch.object(
+        db_session, "commit", new=db_session.flush,
+    ), patch(
+        "app.services.strategy_batch_service.StrategyBatchService.create_batch_run",
+        new=AsyncMock(return_value=fake_new_run),
+    ) as mock_create:
+        # 不传 worker_id（CLI 默认路径）
+        new_run, is_new = await recover_failed_dsa_run(
+            db_session, job_run_id=job_run.id,
+        )
+
+    _call_kwargs = mock_create.call_args.kwargs
+    expected_claim = f"orchestrator:recovery:{job_run.id}"
+    assert _call_kwargs.get("claim_for_worker") == expected_claim, (
+        f"无 worker_id 时 claim_for_worker 应为 '{expected_claim}'，"
+        "仍归 orchestrator 命名空间避免 generic worker 抢占"
+    )
+    assert is_new is True
+    assert new_run.id == fake_new_run.id

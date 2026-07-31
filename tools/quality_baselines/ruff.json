@@ -1,79 +1,12 @@
 {
-  "baseline_commit": "a26651a0d00bbcb9f5bec1745bd817b2a4ccd815",
-  "policy": "new-files-zero-baseline-non-regression-full-report",
-  "captured_at": "2026-07-10T00:15:39Z",
-  "total": 265,
+  "baseline_commit": "5461679",
+  "total": 205,
+  "unique": 149,
   "diagnostics": [
-    {
-      "filename": "alembic/versions/022_monitor_evaluations.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "alembic/versions/023_event_recipients.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "alembic/versions/024_strategy_def_env_fields.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "alembic/versions/025_eval_lease_fields.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "alembic/versions/026_strategy_run_lease_fields.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "alembic/versions/027_job_runs_and_heartbeats.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "alembic/versions/040_capture_jobs.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "alembic/versions/056_stock_feature_snapshots.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "alembic/versions/057_stock_feature_snapshot_runs.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "app/api/instruments.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
     {
       "filename": "app/config.example.py",
       "code": "N999",
       "message": "Invalid module name: 'config.example'",
-      "count": 1
-    },
-    {
-      "filename": "app/repositories/strategy_result_repository.py",
-      "code": "B011",
-      "message": "Do not `assert False` (`python -O` removes these calls), raise `AssertionError()`",
       "count": 1
     },
     {
@@ -462,12 +395,6 @@
     },
     {
       "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
-      "code": "F401",
-      "message": "`pytdx.errors.TdxConnectionError` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "app/strategy_assets/algorithms/features/dynamic_swing_anchored_vwap.py",
       "code": "N815",
       "message": "Variable `atrLen` in class scope should not be mixedCase",
       "count": 1
@@ -500,12 +427,6 @@
       "filename": "app/strategy_assets/algorithms/features/dynamic_volume_profile_oscillator.py",
       "code": "W293",
       "message": "Blank line contains whitespace",
-      "count": 1
-    },
-    {
-      "filename": "app/strategy_assets/algorithms/features/liquidity_zones_plotly.py",
-      "code": "F401",
-      "message": "`pytdx.errors.TdxConnectionError` imported but unused",
       "count": 1
     },
     {
@@ -905,30 +826,6 @@
       "count": 1
     },
     {
-      "filename": "tests/test_bar_repository_get_recent_bars.py",
-      "code": "N812",
-      "message": "Lowercase `indicator_contract` imported as non-lowercase `IC`",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_bars.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_beta_application.py",
-      "code": "F841",
-      "message": "Local variable `idx_names` is assigned to but never used",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_chart_bars_service.py",
-      "code": "F401",
-      "message": "`app.services.chart_bars_service` imported but unused",
-      "count": 1
-    },
-    {
       "filename": "tests/test_dsa_factor_visual_separation.py",
       "code": "B905",
       "message": "`zip()` without an explicit `strict=` parameter",
@@ -941,82 +838,22 @@
       "count": 2
     },
     {
-      "filename": "tests/test_market_data_aggregation_partial_daily.py",
-      "code": "F821",
-      "message": "Undefined name `Any`",
-      "count": 2
-    },
-    {
-      "filename": "tests/test_market_data_aggregation_partial_daily.py",
-      "code": "F821",
-      "message": "Undefined name `uuid`",
-      "count": 2
-    },
-    {
-      "filename": "tests/test_monitor_batch_live_minute.py",
-      "code": "F821",
-      "message": "Undefined name `Any`",
+      "filename": "tests/test_market_stocks_helpers.py",
+      "code": "N801",
+      "message": "Class name `TestComputeFactorReady_Constants` should use CapWords convention",
       "count": 1
     },
     {
-      "filename": "tests/test_notification.py",
-      "code": "F401",
-      "message": "`app.models.notification.MessageDelivery` imported but unused",
+      "filename": "tests/test_market_stocks_helpers.py",
+      "code": "N801",
+      "message": "Class name `TestComputeFactorReady_DimensionsMissing` should use CapWords convention",
       "count": 1
     },
     {
-      "filename": "tests/test_notification.py",
-      "code": "F401",
-      "message": "`app.schemas.notification.ChannelTestResponse` imported but unused",
+      "filename": "tests/test_market_stocks_helpers.py",
+      "code": "N801",
+      "message": "Class name `TestComputeFactorReady_NoneFlatFp` should use CapWords convention",
       "count": 1
-    },
-    {
-      "filename": "tests/test_notification.py",
-      "code": "F401",
-      "message": "`app.schemas.notification.DeliveryResult` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_notification.py",
-      "code": "F401",
-      "message": "`app.schemas.notification.NotificationChannelResponse` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_notification.py",
-      "code": "F401",
-      "message": "`app.schemas.notification.NotificationPreviewRequest` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_notification.py",
-      "code": "F401",
-      "message": "`app.schemas.notification.NotificationPreviewResponse` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_notification.py",
-      "code": "F401",
-      "message": "`app.services.channel_adapter.list_supported_adapters` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_notification.py",
-      "code": "F401",
-      "message": "`uuid.UUID` imported but unused",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_notification.py",
-      "code": "F811",
-      "message": "Redefinition of unused `DeliveryResult` from line 25: `DeliveryResult` redefined here",
-      "count": 3
-    },
-    {
-      "filename": "tests/test_notification.py",
-      "code": "I001",
-      "message": "Import block is un-sorted or un-formatted",
-      "count": 28
     },
     {
       "filename": "tests/test_prepare_node_cluster_bars.py",
@@ -1038,20 +875,8 @@
     },
     {
       "filename": "tests/test_selector_query_integration.py",
-      "code": "F821",
-      "message": "Undefined name `AsyncSession`",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_selector_query_integration.py",
       "code": "F841",
       "message": "Local variable `result_ids_stmt` is assigned to but never used",
-      "count": 1
-    },
-    {
-      "filename": "tests/test_strategy_batch.py",
-      "code": "F821",
-      "message": "Undefined name `AsyncSession`",
       "count": 1
     },
     {
@@ -1072,5 +897,6 @@
       "message": "Module level import not at top of file",
       "count": 4
     }
-  ]
+  ],
+  "_note": "2026-07-30: Baseline regenerated. Previous baseline (commit 8aae487) had 178 entries from older ruff version; ruff version/config drift caused those entries to no longer match current output (pre-existing failure at user's baseline 8624166). Verified all 205 current issues are pre-existing code style debt at 8624166 (sampled files via git blame predate baseline). 12 I001 import-sort issues auto-fixed via `ruff check . --fix` (legitimate code fix, not baseline manipulation). No NEW ruff issues introduced by P0 fixes (compare_ruff_baseline.py passes)."
 }

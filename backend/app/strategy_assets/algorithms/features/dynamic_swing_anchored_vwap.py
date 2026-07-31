@@ -41,7 +41,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 if TYPE_CHECKING:
-    from pytdx.errors import TdxConnectionError
     from pytdx.hq import TdxHq_API
 
 # 添加项目根目录到路径（支持直接运行脚本）

@@ -35,7 +35,6 @@ from datasource.pytdx_client import connect_pytdx
 from plotly.subplots import make_subplots
 
 if TYPE_CHECKING:
-    from pytdx.errors import TdxConnectionError
     from pytdx.hq import TdxHq_API
 
 # =========================

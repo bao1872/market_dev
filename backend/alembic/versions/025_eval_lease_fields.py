@@ -5,8 +5,9 @@ Revises: 024_strat_def_env
 Create Date: 2026-06-24
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "025_eval_lease"
 down_revision = "024_strat_def_env"

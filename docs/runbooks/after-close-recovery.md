@@ -23,12 +23,21 @@
 - 原失败 run 保留审计，**禁止把失败 run 直接改回 `queued`**；
 - 恢复次数上限 `_MAX_DSA_RECOVERY_COUNT = 5`，超过抛 `DSARecoveryError`。
 
-**调用方式**（通过正式 CLI / admin API；当前 CLI 尚未实现，需通过 `backend/scripts/` 下新增 CLI 包装调用，禁止 `docker exec ... python -c`）：
+**调用方式**（通过正式 CLI / admin API；DSA CLI 已实现，禁止 `docker exec ... python -c`）：
 
-```python
-# 在 backend/scripts/ 下新增 dsa_recovery_cli.py 后执行：
-# docker exec trading-backend python -m scripts.dsa_recovery_cli --job-run-id <job_run_id>
+```bash
+# [P0-3 2026-07-30] DSA Recovery CLI 默认 dry-run（只读状态），实际执行需显式 --execute
+# 只读检查（dry-run）：
+docker exec trading-backend python -m scripts.dsa_recovery_cli --job-run-id <job_run_id>
+
+# 实际执行恢复（写库）：
+docker exec trading-backend python -m scripts.dsa_recovery_cli --job-run-id <job_run_id> --execute
 ```
+
+**[P0-3 2026-07-30] fencing 约束**：
+- Orchestrator 调用 `recover_failed_dsa_run` 时传入 `worker_id` + `lease_epoch`，新 run 通过 `claim_for_worker=f"orchestrator:{worker_id}"` 绑定当前 orchestrator，generic strategy worker 无法抢占；
+- CLI/admin 路径不传 `worker_id`，fallback 使用 `claim_for_worker=f"orchestrator:recovery:{job_run_id}"`，仍归 orchestrator 命名空间；
+- 新 run 创建即 `status=running + worker_id`，避免 generic worker 通过 `claim_next_run` 抢走 recovery run。
 
 **禁止**：
 - 禁止裸 SQL `UPDATE strategy_runs SET status='queued' WHERE ...`；
@@ -91,6 +100,16 @@ ssh panji-prod 'docker exec trading-postgres psql -U bz -d bz_stock -c "
 - `pg_insert(...).on_conflict_do_update(constraint="uq_factor_publications_scope_date_kind")` 原子切换 pointer；
 - 幂等：相同 `trade_date` + `snapshot_run_id` 重复调用只更新 `published_at` 和 `coverage_ratio`，不产生重复行；
 - 指针更新失败只重试本函数，不重新计算数据。
+
+**[P0-1+P0-2 2026-07-30] 可见性窗口与 superseded 语义**：
+- Orchestrator 发布顺序修正为：pointer 发布 FIRST → snapshot `finish_snapshot_run(succeeded)` SECOND；
+- pointer 失败或指向其他 run 时，snapshot 保持 `running` 状态（无 `published_at`），API fallback 不可见，避免读到未确认数据；
+- 当 `existing_pub.data_run_id != 当前 snapshot_run_id` 时：
+  - 当前 run 标记为 `_stock_core_superseded=True`，**不得** 标记 `_stock_core_published=True`；
+  - **不得** 基于当前 run 聚合（market_aggregation / board_analysis）；
+  - 写 `suppressed/superseded` 结构化结果（event + payload.superseded=True + superseded_by_run_id）；
+  - snapshot 不被标记 `succeeded`（不写 `published_at`），保持 `running`；
+  - 禁止用旧 pointer 证明当前 run 发布成功。
 
 **调用方式**（通过正式 CLI / admin API；当前 CLI 尚未实现）：
 
