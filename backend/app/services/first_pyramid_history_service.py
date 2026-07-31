@@ -34,7 +34,7 @@ import hashlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pandas as pd
