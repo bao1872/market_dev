@@ -34,12 +34,19 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.domain.first_pyramid_semantics import (
+    Direction,
+    MomentumChange,
+    MomentumDirection,
+    VolumeBadge,
+)
 from app.domain.review.metric_registry import (
     DEFAULT_REGISTRY,
     MetricComponentSpec,
     MetricSpec,
     ReviewMetricComponentRegistry,
 )
+from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 
 logger = logging.getLogger("review.metric_engine")
 
@@ -206,11 +213,11 @@ def _derive_trend_price_alignment_ratio(
     aligned = 0
     for f in flat_list:
         chg = _safe_float(f.get("fp_segment_change_pct"))
-        td = f.get("fp_trend_direction")
+        td = FirstPyramidSemanticAdapter(f).trend
         if chg is None or td is None:
             continue
         ready += 1
-        if td == "up" and chg > 0:
+        if td is Direction.UP and chg > 0:
             aligned += 1
     if ready == 0:
         return None
@@ -276,8 +283,8 @@ def _derive_structure_net_event_rate(
     bull = 0
     bear = 0
     for f in flat_list:
-        td = f.get("fp_trend_direction")
-        if td is None:
+        semantics = FirstPyramidSemanticAdapter(f)
+        if semantics.trend is None:
             continue
         ready += 1
         for ev_field in (
@@ -285,10 +292,10 @@ def _derive_structure_net_event_rate(
             "fp_latest_choch_direction",
             "fp_latest_ob_direction",
         ):
-            d = f.get(ev_field)
-            if d == "up":
+            d = semantics.event_direction(ev_field)
+            if d is Direction.UP:
                 bull += 1
-            elif d == "down":
+            elif d is Direction.DOWN:
                 bear += 1
     if ready == 0:
         return None
@@ -307,13 +314,13 @@ def _derive_structure_breakdown_diffusion(
     ready = 0
     broken = 0
     for f in flat_list:
-        td = f.get("fp_trend_direction")
-        if td is None:
+        semantics = FirstPyramidSemanticAdapter(f)
+        if semantics.trend is None:
             continue
         ready += 1
-        bos_d = f.get("fp_latest_bos_direction")
-        choch_d = f.get("fp_latest_choch_direction")
-        if bos_d == "down" or choch_d == "down":
+        bos_d = semantics.event_direction("fp_latest_bos_direction")
+        choch_d = semantics.event_direction("fp_latest_choch_direction")
+        if bos_d is Direction.DOWN or choch_d is Direction.DOWN:
             broken += 1
     if ready == 0:
         return None
@@ -333,18 +340,18 @@ def _derive_multi_dim_improving_ratio(
     ready = 0
     multi = 0
     for f in flat_list:
-        td = f.get("fp_trend_direction")
-        if td is None:
+        semantics = FirstPyramidSemanticAdapter(f)
+        if semantics.trend is None:
             continue
         ready += 1
         score = 0
-        if f.get("fp_trend_direction") == "up":
+        if semantics.trend is Direction.UP:
             score += 1
-        if f.get("fp_swing_direction") == "up":
+        if semantics.swing is Direction.UP:
             score += 1
-        if f.get("fp_momentum_direction") == "up":
+        if semantics.momentum_direction is MomentumDirection.EXPANDING:
             score += 1
-        if f.get("fp_momentum_change") == "enhancing":
+        if semantics.momentum_change is MomentumChange.ENHANCING:
             score += 1
         if score >= 2:
             multi += 1
@@ -365,8 +372,7 @@ def _derive_fresh_structure_event_coverage(
     ready = 0
     has_event = 0
     for f in flat_list:
-        td = f.get("fp_trend_direction")
-        if td is None:
+        if FirstPyramidSemanticAdapter(f).trend is None:
             continue
         ready += 1
         if (
@@ -394,7 +400,7 @@ def _derive_non_head_participation_ratio(
         (f, _safe_float(f.get("fp_segment_change_pct")))
         for f in flat_list
         if _safe_float(f.get("fp_segment_change_pct")) is not None
-        and f.get("fp_trend_direction") is not None
+        and FirstPyramidSemanticAdapter(f).trend is not None
     ]
     if not valid:
         return None
@@ -432,7 +438,7 @@ def _derive_leader_follower_common_confirm_ratio(
         (f, _safe_float(f.get("fp_volume_ratio20")))
         for f in flat_list
         if _safe_float(f.get("fp_volume_ratio20")) is not None
-        and f.get("fp_trend_direction") is not None
+        and FirstPyramidSemanticAdapter(f).trend is not None
     ]
     if len(valid) < 5:
         return None
@@ -574,10 +580,11 @@ def _derive_volume_expansion_ratio(
     ready = 0
     high = 0
     for f in flat_list:
-        if f.get("fp_volume_badge") is None:
+        badge = FirstPyramidSemanticAdapter(f).volume_badge
+        if badge is None:
             continue
         ready += 1
-        if f.get("fp_volume_badge") == "放量":
+        if badge is VolumeBadge.HIGH:
             high += 1
     if ready == 0:
         return None

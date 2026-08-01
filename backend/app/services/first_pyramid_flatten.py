@@ -26,6 +26,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.domain.first_pyramid_semantics import (
+    MomentumDirection,
+    SqueezeState,
+    StructureAlignment,
+    alignment_display,
+    direction_display,
+    direction_from_regime,
+    momentum_direction_display,
+    squeeze_display,
+)
+
 # 99 个键的分组定义（用于前端 ColumnRegistry 和后端验证）
 FP_FIELD_GROUPS: dict[str, list[str]] = {
     "快照": [
@@ -712,14 +723,7 @@ def _safe_int(val: Any) -> int | None:
 
 def _direction_label(val: Any) -> str | None:
     """将方向数值映射为中文标签。"""
-    v = _safe_int(val)
-    if v is None:
-        return None
-    if v > 0:
-        return "上行"
-    if v < 0:
-        return "下行"
-    return "震荡"
+    return direction_display(direction_from_regime(val))
 
 
 def _latest_event_by_type(
@@ -742,7 +746,10 @@ def _structure_alignment(swing: Any, internal: Any) -> str | None:
         return None
     if s == 0 or i == 0:
         return None
-    return "共振" if s == i else "背离"
+    alignment = (
+        StructureAlignment.ALIGNED if s == i else StructureAlignment.DIVERGENT
+    )
+    return alignment_display(alignment)
 
 
 def _distance_pct(current: float | None, target: float | None) -> float | None:
@@ -889,17 +896,19 @@ def flatten_first_pyramid(
     mom_cf = momentum.get("continuousFactors") or {}
     sqz_val = _safe_float(mom_cf.get("sqzmom_val"))
     sqz_prev = _safe_float(mom_cf.get("sqzmom_val_prev"))
-    result["fp_momentum_direction"] = (
-        "扩张" if sqz_val is not None and sqz_val > 0
-        else "收缩" if sqz_val is not None and sqz_val < 0
+    momentum_direction = (
+        MomentumDirection.EXPANDING if sqz_val is not None and sqz_val > 0
+        else MomentumDirection.CONTRACTING if sqz_val is not None and sqz_val < 0
+        else MomentumDirection.FLAT if sqz_val == 0
         else None
     )
+    result["fp_momentum_direction"] = momentum_direction_display(momentum_direction)
     if mom_cf.get("squeeze_on"):
-        result["fp_squeeze_state"] = "挤压中"
+        result["fp_squeeze_state"] = squeeze_display(SqueezeState.SQUEEZE)
     elif mom_cf.get("squeeze_off"):
-        result["fp_squeeze_state"] = "已释放"
+        result["fp_squeeze_state"] = squeeze_display(SqueezeState.RELEASED)
     elif mom_cf.get("no_squeeze"):
-        result["fp_squeeze_state"] = "无挤压"
+        result["fp_squeeze_state"] = squeeze_display(SqueezeState.NORMAL)
     if sqz_val is not None and sqz_prev is not None:
         result["fp_momentum_change"] = round(sqz_val - sqz_prev, 6)
     result["fp_sqzmom_value"] = sqz_val

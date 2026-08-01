@@ -1461,8 +1461,8 @@ def compute_first_pyramid_history(
         # 动量字段（从 momentum_daily 读取）
         m_daily = momentum_daily_by_idx.get(bar_idx, {})
         volatility_phase = m_daily.get("volatility_phase", "no_squeeze")
-        momentum_direction = m_daily.get("momentum_direction", "null")
-        momentum_change = m_daily.get("momentum_change", "unknown")
+        momentum_direction = m_daily.get("momentum_direction")
+        momentum_change = m_daily.get("momentum_change")
         sqzmom_delta = m_daily.get("sqzmom_delta")
 
         # VolumeContext 字段（从 vc_series 读取）
@@ -1770,4 +1770,3 @@ def serialize_first_pyramid_for_instrument(
         # 附诊断标记（不修改ORM JSON，只在此返回 dict 中）
         result["_legacy_symbol_repaired"] = True
     return result
-

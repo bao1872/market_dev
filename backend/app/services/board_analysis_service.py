@@ -35,6 +35,14 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.first_pyramid_semantics import (
+    Direction,
+    MomentumChange,
+    MomentumDirection,
+    SqueezeState,
+    StructureAlignment,
+    VolumeBadge,
+)
 from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
 from app.models.factor_publication import FactorPublication
 from app.models.first_pyramid_history import (
@@ -49,6 +57,7 @@ from app.services.factor_publication_service import (
     get_publication,
     get_published_snapshot_run_id,
 )
+from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 
 logger = logging.getLogger("board_analysis_service")
 
@@ -214,16 +223,17 @@ def compute_board_payload(
             missing += 1
             continue
         # ready 判定：fp_trend_direction 必须非空
-        if not flat.get("fp_trend_direction"):
+        semantics = FirstPyramidSemanticAdapter(flat)
+        if semantics.trend is None:
             missing += 1
             continue
         ready += 1
 
         # === 趋势 ===
-        td = flat.get("fp_trend_direction")
-        if td == "up":
+        td = semantics.trend
+        if td is Direction.UP:
             trend_up += 1
-        elif td == "down":
+        elif td is Direction.DOWN:
             trend_down += 1
         else:
             trend_neutral += 1
@@ -236,18 +246,18 @@ def compute_board_payload(
             vwap_devs.append(vd)
 
         # === 结构 ===
-        sd = flat.get("fp_swing_direction")
-        if sd == "up":
+        sd = semantics.swing
+        if sd is Direction.UP:
             swing_up += 1
-        elif sd == "down":
+        elif sd is Direction.DOWN:
             swing_down += 1
         else:
             swing_neutral += 1
 
-        sa = flat.get("fp_structure_alignment")
-        if sa == "aligned":
+        sa = semantics.structure_alignment
+        if sa is StructureAlignment.ALIGNED:
             alignment_aligned += 1
-        elif sa == "misaligned":
+        elif sa is StructureAlignment.DIVERGENT:
             alignment_misaligned += 1
         else:
             alignment_neutral += 1
@@ -258,20 +268,20 @@ def compute_board_payload(
 
         # === 结构事件 ===
         # BOS 方向（最新一次 BOS）
-        bos_dir = flat.get("fp_latest_bos_direction")
-        if bos_dir == "up":
+        bos_dir = semantics.event_direction("fp_latest_bos_direction")
+        if bos_dir is Direction.UP:
             bos_up += 1
-        elif bos_dir == "down":
+        elif bos_dir is Direction.DOWN:
             bos_down += 1
-        choch_dir = flat.get("fp_latest_choch_direction")
-        if choch_dir == "up":
+        choch_dir = semantics.event_direction("fp_latest_choch_direction")
+        if choch_dir is Direction.UP:
             choch_up += 1
-        elif choch_dir == "down":
+        elif choch_dir is Direction.DOWN:
             choch_down += 1
-        ob_dir = flat.get("fp_latest_ob_direction")
-        if ob_dir == "up":
+        ob_dir = semantics.event_direction("fp_latest_ob_direction")
+        if ob_dir is Direction.UP:
             ob_up += 1
-        elif ob_dir == "down":
+        elif ob_dir is Direction.DOWN:
             ob_down += 1
 
         # EQH/EQL presence（freshness != null 表示存在）
@@ -281,25 +291,25 @@ def compute_board_payload(
             eql_present += 1
 
         # === 动量 ===
-        md = flat.get("fp_momentum_direction")
-        if md == "up":
+        md = semantics.momentum_direction
+        if md is MomentumDirection.EXPANDING:
             mom_pos += 1
-        elif md == "down":
+        elif md is MomentumDirection.CONTRACTING:
             mom_neg += 1
         else:
             mom_neu += 1
-        sqz_state = flat.get("fp_squeeze_state")
-        if sqz_state == "squeeze":
+        sqz_state = semantics.squeeze_state
+        if sqz_state is SqueezeState.SQUEEZE:
             squz += 1
-        elif sqz_state == "released":
+        elif sqz_state is SqueezeState.RELEASED:
             released += 1
-        elif sqz_state == "normal":
+        elif sqz_state is SqueezeState.NORMAL:
             normal += 1
 
-        mc = flat.get("fp_momentum_change")
-        if mc == "enhancing":
+        mc = semantics.momentum_change
+        if mc is MomentumChange.ENHANCING:
             enhancing += 1
-        elif mc == "fading":
+        elif mc is MomentumChange.WEAKENING:
             fading += 1
         else:
             mom_flat += 1
@@ -309,12 +319,12 @@ def compute_board_payload(
             sqzmom_values.append(sqz_val)
 
         # === 量能 ===
-        vb = flat.get("fp_volume_badge")
-        if vb == "放量":
+        vb = semantics.volume_badge
+        if vb is VolumeBadge.HIGH:
             vol_high += 1
-        elif vb == "缩量":
+        elif vb is VolumeBadge.LOW:
             vol_low += 1
-        elif vb == "正常":
+        elif vb is VolumeBadge.NORMAL:
             vol_normal += 1
         else:
             vol_unknown += 1
@@ -417,10 +427,6 @@ def compute_board_payload(
 #
 # 维度衰减周期：趋势 5 日、结构 10 日、动量 5 日、筹码 20 日
 
-# 趋势方向中文标签（与 first_pyramid_flatten._direction_label 产出一致）
-_TREND_UP = "上行"
-_TREND_DOWN = "下行"
-
 # 事件类型 → 维度映射（衰减周期不同）
 _EVENT_DIMENSION_MAP: dict[str, str] = {
     "CHoCH": "trend",
@@ -487,7 +493,7 @@ def _build_instrument_results(
     results: list[dict[str, Any]] = []
     for iid in valid_member_ids:
         flat = flat_map.get(iid)
-        if not flat or not flat.get("fp_trend_direction"):
+        if not flat or FirstPyramidSemanticAdapter(flat).trend is None:
             continue
         results.append({
             "instrument_id": iid,
@@ -519,7 +525,7 @@ def _compute_scope_metrics(
         vd = _safe_float(r["flat"].get("fp_dsa_vwap_dev_pct"))
         if vd is not None:
             vwap_devs.append(vd)
-        if r["flat"].get("fp_trend_direction") == _TREND_UP:
+        if FirstPyramidSemanticAdapter(r["flat"]).trend is Direction.UP:
             up += 1
     n = len(instrument_results)
     return {
@@ -1015,15 +1021,21 @@ def _compute_concept_extras(
         return out
 
     # 板块方向：fp_trend_direction 多数票（上行 vs 下行）
-    up = sum(1 for r in valid if r["flat"].get("fp_trend_direction") == _TREND_UP)
-    down = sum(1 for r in valid if r["flat"].get("fp_trend_direction") == _TREND_DOWN)
+    up = sum(
+        1 for r in valid
+        if FirstPyramidSemanticAdapter(r["flat"]).trend is Direction.UP
+    )
+    down = sum(
+        1 for r in valid
+        if FirstPyramidSemanticAdapter(r["flat"]).trend is Direction.DOWN
+    )
     if up > down:
-        board_dir = _TREND_UP
+        board_dir = Direction.UP
     elif down > up:
-        board_dir = _TREND_DOWN
+        board_dir = Direction.DOWN
     else:
         board_dir = None  # 平票 / 震荡为主
-    out["board_direction"] = board_dir
+    out["board_direction"] = board_dir.value if board_dir is not None else None
 
     mags = [r["change_magnitude"] for r in valid]
     med = _percentile(mags, 0.5)
@@ -1034,7 +1046,7 @@ def _compute_concept_extras(
     for r in valid:
         aligned = (
             board_dir is not None
-            and r["flat"].get("fp_trend_direction") == board_dir
+            and FirstPyramidSemanticAdapter(r["flat"]).trend is board_dir
         )
         strong = med is not None and r["change_magnitude"] > med
         if aligned and strong:
@@ -1279,7 +1291,7 @@ async def compute_board_analysis(
             missing_reasons["SNAPSHOT_MISSING"] = (
                 missing_reasons.get("SNAPSHOT_MISSING", 0) + 1
             )
-        elif not flat.get("fp_trend_direction"):
+        elif FirstPyramidSemanticAdapter(flat).trend is None:
             missing_count += 1
             missing_reasons["FP_TREND_MISSING"] = (
                 missing_reasons.get("FP_TREND_MISSING", 0) + 1

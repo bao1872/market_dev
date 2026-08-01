@@ -22,10 +22,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.domain.first_pyramid_semantics import Direction, MomentumChange, MomentumDirection
 from app.domain.review.metric_engine import (
     _safe_float,
     compute_all_metrics,
 )
+from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 
 # =============================================================================
 # 子范围贡献
@@ -190,12 +192,13 @@ def compute_instrument_contribution(
         out["P"] = None
 
     # Q 贡献：成员 trend/swing/momentum 三维对齐度
+    semantics = FirstPyramidSemanticAdapter(flat)
     score = 0
-    if flat.get("fp_trend_direction") == "up":
+    if semantics.trend is Direction.UP:
         score += 1
-    if flat.get("fp_swing_direction") == "up":
+    if semantics.swing is Direction.UP:
         score += 1
-    if flat.get("fp_momentum_direction") == "up":
+    if semantics.momentum_direction is MomentumDirection.EXPANDING:
         score += 1
     q_raw = _safe_float((parent_metrics.get("Q") or {}).get("rawValue"))
     if q_raw is not None:
@@ -205,13 +208,13 @@ def compute_instrument_contribution(
 
     # U 贡献：成员改善维度数 / 4 - 父范围 U.rawValue
     improving = 0
-    if flat.get("fp_trend_direction") == "up":
+    if semantics.trend is Direction.UP:
         improving += 1
-    if flat.get("fp_swing_direction") == "up":
+    if semantics.swing is Direction.UP:
         improving += 1
-    if flat.get("fp_momentum_direction") == "up":
+    if semantics.momentum_direction is MomentumDirection.EXPANDING:
         improving += 1
-    if flat.get("fp_momentum_change") == "enhancing":
+    if semantics.momentum_change is MomentumChange.ENHANCING:
         improving += 1
     u_raw = _safe_float((parent_metrics.get("U") or {}).get("rawValue"))
     if u_raw is not None:
@@ -257,13 +260,14 @@ def classify_instrument_board_role(
 
     # 排名百分比（0-100，越小越强）
     pct = rank_in_scope / total_ready * 100
+    trend = FirstPyramidSemanticAdapter(flat).trend
 
     # 龙头判定：排名前 10% 且 trend=up 且 momentum_direction=up
-    if pct <= 10 and flat.get("fp_trend_direction") == "up":
+    if pct <= 10 and trend is Direction.UP:
         return "core"
 
     # 二线：排名前 10-30% 且 trend=up
-    if pct <= 30 and flat.get("fp_trend_direction") == "up":
+    if pct <= 30 and trend is Direction.UP:
         return "second_line"
 
     # 弹性：volume_ratio20 > 1.5 且 |change_pct| 较大（top 30%）
@@ -273,11 +277,11 @@ def classify_instrument_board_role(
         return "elasticity"
 
     # 跟随：排名 30-70% 且 trend != down
-    if pct <= 70 and flat.get("fp_trend_direction") != "down":
+    if pct <= 70 and trend is not Direction.DOWN:
         return "follower"
 
     # 滞后：trend=down 或排名后 30%
-    if flat.get("fp_trend_direction") == "down" or pct > 70:
+    if trend is Direction.DOWN or pct > 70:
         return "laggard"
 
     return "unclassified"
@@ -301,14 +305,14 @@ def classify_instrument_relation_to_scope(
         instrument_strong_scope_unsupported / unconfirmed
     """
     chg = _safe_float(flat.get("fp_segment_change_pct"))
-    trend = flat.get("fp_trend_direction")
+    trend = FirstPyramidSemanticAdapter(flat).trend
 
     # 数据不足时返回 unconfirmed
     if chg is None or trend is None:
         return "unconfirmed"
 
-    instrument_strong = chg > 1.0 and trend == "up"
-    instrument_weak = chg < -1.0 or trend == "down"
+    instrument_strong = chg > 1.0 and trend is Direction.UP
+    instrument_weak = chg < -1.0 or trend is Direction.DOWN
     scope_strong = parent_p_value is not None and parent_p_value >= 60
     scope_weak = parent_p_value is not None and parent_p_value < 40
 
@@ -400,16 +404,32 @@ def aggregate_instrument_attributions(
 
 def _extract_first_pyramid_summary(flat: dict[str, Any]) -> dict[str, Any]:
     """提取成员第一金字塔摘要 payload（PRD §14.6 个股验证表字段）。"""
+    semantics = FirstPyramidSemanticAdapter(flat)
     return {
-        "trend": flat.get("fp_trend_direction"),
+        "trend": semantics.trend.value if semantics.trend is not None else None,
         "trend_strength": _safe_float(flat.get("fp_trend_strength")),
-        "swing": flat.get("fp_swing_direction"),
-        "internal": flat.get("fp_internal_direction"),
-        "structure_alignment": flat.get("fp_structure_alignment"),
-        "momentum": flat.get("fp_momentum_direction"),
-        "momentum_change": flat.get("fp_momentum_change"),
-        "squeeze_state": flat.get("fp_squeeze_state"),
-        "volume_badge": flat.get("fp_volume_badge"),
+        "swing": semantics.swing.value if semantics.swing is not None else None,
+        "internal": semantics.internal.value if semantics.internal is not None else None,
+        "structure_alignment": (
+            semantics.structure_alignment.value
+            if semantics.structure_alignment is not None else None
+        ),
+        "momentum": (
+            semantics.momentum_direction.value
+            if semantics.momentum_direction is not None else None
+        ),
+        "momentum_change": (
+            semantics.momentum_change.value
+            if semantics.momentum_change is not None else None
+        ),
+        "squeeze_state": (
+            semantics.squeeze_state.value
+            if semantics.squeeze_state is not None else None
+        ),
+        "volume_badge": (
+            semantics.volume_badge.value
+            if semantics.volume_badge is not None else None
+        ),
         "volume_ratio20": _safe_float(flat.get("fp_volume_ratio20")),
         "volume_percentile20": _safe_float(flat.get("fp_volume_percentile20")),
     }
@@ -423,12 +443,12 @@ def _extract_fresh_events(flat: dict[str, Any]) -> dict[str, Any]:
         ("CHoCH", "fp_latest_choch_direction", "fp_latest_choch_freshness"),
         ("OB", "fp_latest_ob_direction", "fp_latest_ob_freshness"),
     ):
-        d = flat.get(dir_field)
+        d = FirstPyramidSemanticAdapter(flat).event_direction(dir_field)
         f = flat.get(fresh_field)
         if d is not None and f is not None:
             events.append({
                 "type": ev_type,
-                "direction": d,
+                "direction": d.value,
                 "freshness": f,
             })
     return {"events": events, "count": len(events)}

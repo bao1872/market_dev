@@ -58,6 +58,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from app.domain.first_pyramid_semantics import MomentumChange, MomentumDirection
+
 # Pine 颜色常量（与原代码 lime/green/red/maroon/blue/black/gray 一致）
 _COLOR_LIME = "lime"
 _COLOR_GREEN = "green"
@@ -509,13 +511,13 @@ def build_momentum_history(
             phase = "no_squeeze"
         # momentum_direction（按当日 SQZMOM 值正/负/0）
         if v is None or (isinstance(v, float) and np.isnan(v)):
-            direction = "null"
+            direction = None
         elif v > 0:
-            direction = "up"
+            direction = MomentumDirection.EXPANDING.value
         elif v < 0:
-            direction = "down"
+            direction = MomentumDirection.CONTRACTING.value
         else:
-            direction = "null"
+            direction = MomentumDirection.FLAT.value
         # momentum_change + sqzmom_delta
         if v is None or v_prev is None or (
             isinstance(v, float) and np.isnan(v)
@@ -523,15 +525,15 @@ def build_momentum_history(
             isinstance(v_prev, float) and np.isnan(v_prev)
         ):
             delta = None
-            change = "unknown"
+            change = None
         else:
             delta = float(v) - float(v_prev)
             if delta > 0:
-                change = "increasing"
+                change = MomentumChange.ENHANCING.value
             elif delta < 0:
-                change = "decreasing"
+                change = MomentumChange.WEAKENING.value
             else:
-                change = "flat"
+                change = MomentumChange.FLAT.value
 
         daily_state.append({
             "bar_index": i,
