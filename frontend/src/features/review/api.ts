@@ -1,7 +1,7 @@
 // [ReviewApi] - 描述: 复盘模块 API 调用函数（PRD §12）
 // 基于 axios apiClient（baseURL=/api，Vite 代理去掉 /api 前缀）
-// 后端 router prefix=/api/v1/review，调用时传完整 /api/v1/review/... 路径
-// 与 endpoints.ts 中 bars/indicators 等端点的路径约定一致
+// 后端 router prefix=/api/v1/review，调用时传 /v1/review/... 相对路径（baseURL=/api 自动拼接成 /api/v1/review/...）
+// 禁止在路径开头重复写 /api（会导致 /api/api/v1/... 双前缀）
 //
 // 规则：
 // - 用户侧只读 DB，不触发计算
@@ -84,19 +84,19 @@ export function extractReviewError(err: unknown): ReviewApiError {
 // 12.1 日期与总览
 // ============================================================
 
-/** GET /api/v1/review/dates — 已发布复盘交易日列表（降序） */
+/** GET /api/v1/review/dates → baseURL拼接 /api/api/v1/review/dates → nginx去掉首个/api → /api/v1/review/dates — 已发布复盘交易日列表（降序） */
 export async function getReviewDates(): Promise<ReviewDatesResponse> {
   const { data } = await apiClient.get<ReviewDatesResponse>('/api/v1/review/dates')
   return data
 }
 
-/** GET /api/v1/review/latest — 最新已发布复盘 run 信息 */
+/** GET /api/v1/review/latest → /api/v1/review/latest — 最新已发布复盘 run 信息 */
 export async function getReviewLatest(): Promise<ReviewLatestResponse> {
   const { data } = await apiClient.get<ReviewLatestResponse>('/api/v1/review/latest')
   return data
 }
 
-/** GET /api/v1/review/{trade_date}/overview — 当日总览 */
+/** GET /api/v1/review/{trade_date}/overview → /api/v1/review/{trade_date}/overview — 当日总览 */
 export async function getReviewOverview(
   tradeDate: string,
   includePartial = false,
@@ -112,7 +112,7 @@ export async function getReviewOverview(
 // 12.2 市场扫描
 // ============================================================
 
-/** GET /api/v1/review/{trade_date}/scopes — 市场扫描（P/Q/U/C/V） */
+/** GET /api/v1/review/{trade_date}/scopes → /api/v1/review/{trade_date}/scopes — 市场扫描（P/Q/U/C/V） */
 export async function getReviewScopes(
   tradeDate: string,
   params: ReviewScopeListParams = {},
@@ -128,7 +128,7 @@ export async function getReviewScopes(
 // 12.3 信号
 // ============================================================
 
-/** GET /api/v1/review/{trade_date}/signals — 信号列表 */
+/** GET /api/v1/review/{trade_date}/signals → /api/v1/review/{trade_date}/signals — 信号列表 */
 export async function getReviewSignals(
   tradeDate: string,
   params: ReviewSignalListParams = {},
@@ -140,7 +140,7 @@ export async function getReviewSignals(
   return data
 }
 
-/** GET /api/v1/review/signals/{signal_id} — 单信号详情 */
+/** GET /api/v1/review/signals/{signal_id} → /api/v1/review/signals/{signal_id} — 单信号详情 */
 export async function getReviewSignal(
   signalId: string,
   includePartial = false,
@@ -156,7 +156,7 @@ export async function getReviewSignal(
 // 12.4 归因与个股
 // ============================================================
 
-/** GET /api/v1/review/signals/{signal_id}/attributions — 子范围归因 */
+/** GET /api/v1/review/signals/{signal_id}/attributions → /api/v1/review/signals/{signal_id}/attributions — 子范围归因 */
 export async function getSignalAttributions(
   signalId: string,
   params: ReviewAttributionListParams = {},
@@ -168,7 +168,7 @@ export async function getSignalAttributions(
   return data
 }
 
-/** GET /api/v1/review/signals/{signal_id}/instruments — 代表股票 */
+/** GET /api/v1/review/signals/{signal_id}/instruments → /api/v1/review/signals/{signal_id}/instruments — 代表股票 */
 export async function getSignalInstruments(
   signalId: string,
   params: ReviewInstrumentListParams = {},
@@ -184,7 +184,7 @@ export async function getSignalInstruments(
 // 12.5 追踪
 // ============================================================
 
-/** GET /api/v1/review/trackings — 当前用户追踪列表 */
+/** GET /api/v1/review/trackings → /api/v1/review/trackings — 当前用户追踪列表 */
 export async function getReviewTrackings(
   params: ReviewTrackingListParams = {},
 ): Promise<ReviewTrackingListResponse> {
@@ -195,7 +195,7 @@ export async function getReviewTrackings(
   return data
 }
 
-/** POST /api/v1/review/trackings — 新增追踪（幂等） */
+/** POST /api/v1/review/trackings → /api/v1/review/trackings — 新增追踪（幂等） */
 export async function createReviewTracking(
   payload: ReviewTrackingCreateRequest,
 ): Promise<ReviewTracking> {
@@ -206,7 +206,7 @@ export async function createReviewTracking(
   return data
 }
 
-/** PATCH /api/v1/review/trackings/{id} — 修改追踪（幂等） */
+/** PATCH /api/v1/review/trackings/{id} → /api/v1/review/trackings/{id} — 修改追踪（幂等） */
 export async function updateReviewTracking(
   trackingId: string,
   payload: ReviewTrackingPatchRequest,
@@ -218,7 +218,7 @@ export async function updateReviewTracking(
   return data
 }
 
-/** DELETE /api/v1/review/trackings/{id} — 关闭追踪（不物理删除） */
+/** DELETE /api/v1/review/trackings/{id} → /api/v1/review/trackings/{id} — 关闭追踪（不物理删除） */
 export async function closeReviewTracking(
   trackingId: string,
   idempotencyKey: string,
@@ -230,7 +230,7 @@ export async function closeReviewTracking(
   return data
 }
 
-/** GET /api/v1/review/trackings/{id}/evaluations — 追踪逐日评估 */
+/** GET /api/v1/review/trackings/{id}/evaluations → /api/v1/review/trackings/{id}/evaluations — 追踪逐日评估 */
 export async function getTrackingEvaluations(
   trackingId: string,
   params: { page?: number; page_size?: number } = {},

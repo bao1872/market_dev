@@ -88,36 +88,26 @@ export function strategyForOriginScope(originScope: OriginScope): string {
 /**
  * 构建个股详情页 URL（唯一入口，3 个导航点共用）。
  *
- * 生成：/stock/:symbol?originScope=market&source=selection&strategy=dsa_selector&returnTo=...&timeframe=...&mcq=...
+ * 生成：/stock/:symbol?originScope=market&returnTo=...&timeframe=...&mcq=...
  *
- * originScope 是来源唯一真源；source/strategy 由 originScope 推导。
+ * originScope 是来源唯一真源；source/strategy 等 legacy 参数不再写入新 URL，
+ * 在消费端由 originScope 推导即可，避免携带已删除 DSA 合同的冗余参数。
  * returnTo 只编码在 URL 中用于返回，不参与来源决策。
  * [CHANGE-20260731-SAME-SOURCE] mcq（Market Canonical Query）固定入口时刻 /market/stocks 查询快照，
  *   切换股票时原样透传，详情左栏用此 mcq 查询 /market/stocks，禁止重新推导。
- *   旧 DSA sourceRunId/cq 保留兼容（仍编码到 URL），但详情页不再消费。
+ *   旧 DSA sourceRunId/cq 标记 deprecated：buildStockDetailUrl 不再写入（保持 options 字段仅向后兼容）。
  *
  * [PRD V2.0 §4.4] originScope 支持三值：market|watchlist|direct
  */
 export function buildStockDetailUrl(symbol: string, opts: BuildStockDetailUrlOptions): string {
-  const source = sourceForOriginScope(opts.originScope)
-  const strategy = strategyForOriginScope(opts.originScope)
   const params = new URLSearchParams({
     originScope: opts.originScope,
-    source,
-    strategy,
   })
   if (opts.returnTo) {
     params.set('returnTo', opts.returnTo)
   }
   if (opts.timeframe) {
     params.set('timeframe', opts.timeframe)
-  }
-  // [DEPRECATED 20260731-SAME-SOURCE] 旧 DSA 快照，保留兼容但不再消费
-  if (opts.sourceRunId) {
-    params.set('sourceRunId', opts.sourceRunId)
-  }
-  if (opts.canonicalQuery) {
-    params.set('cq', opts.canonicalQuery)
   }
   // [CHANGE-20260731-SAME-SOURCE] Market Canonical Query（/market/stocks 同源查询参数）
   if (opts.marketCanonicalQuery) {

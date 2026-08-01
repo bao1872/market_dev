@@ -263,18 +263,17 @@ export function useStockDetailActions({
     const nextIndex = (currentIndex + direction + sourceStocks.length) % sourceStocks.length
     const target = sourceStocks[nextIndex]
     if (!target?.symbol) return
-    // [CHANGE-20260731-SAME-SOURCE] 切股时透传 mcq（优先）或旧 DSA 上下文，保持来源不变
+    // [CHANGE-20260801-URL-CLEAN] 切股只透传 mcq（新合同），不传旧 DSA sourceRunId/cq，
+    //   保持来源上下文稳定。旧链接在消费端仍向后兼容解析。
     navigate(
       buildStockDetailUrl(target.symbol, {
         originScope: origin,
         returnTo,
         timeframe,
-        sourceRunId,
-        canonicalQuery: canonicalQueryRaw,
         marketCanonicalQuery: marketCanonicalQueryRaw,
       }),
     )
-  }, [canNavigate, currentIndex, sourceStocks, navigate, origin, returnTo, timeframe, sourceRunId, canonicalQueryRaw, marketCanonicalQueryRaw])
+  }, [canNavigate, currentIndex, sourceStocks, navigate, origin, returnTo, timeframe, marketCanonicalQueryRaw])
 
   return {
     inWatchlist,

@@ -2755,7 +2755,7 @@ export async function getBoardAnalysisList(
   params?: BoardAnalysisListParams,
   options?: { signal?: AbortSignal },
 ): Promise<BoardAnalysisListResponse> {
-  const { data } = await apiClient.get<BoardAnalysisListResponse>('/boards/analysis', {
+  const { data } = await apiClient.get<BoardAnalysisListResponse>('/api/v1/boards/analysis', {
     params,
     signal: options?.signal,
   })
@@ -2769,7 +2769,7 @@ export async function getBoardAnalysisDetail(
   options?: { signal?: AbortSignal },
 ): Promise<BoardAnalysisDetailResponse> {
   const { data } = await apiClient.get<BoardAnalysisDetailResponse>(
-    `/boards/${boardId}/analysis`,
+    `/api/v1/boards/${boardId}/analysis`,
     { params, signal: options?.signal },
   )
   return data
@@ -2790,7 +2790,7 @@ export async function triggerComputeBoard(
   snapshot_id: string
 }> {
   const { data } = await apiClient.post(
-    `/admin/boards/${boardId}/analysis/compute`,
+    `/api/v1/admin/boards/${boardId}/analysis/compute`,
     null,
     { params },
   )
@@ -2823,7 +2823,7 @@ export async function triggerComputeAllBoards(
   errors: Array<{ board_id: string; board_name: string; error: string }>
 }> {
   const { data } = await apiClient.post(
-    '/admin/boards/analysis/compute-all',
+    '/api/v1/admin/boards/analysis/compute-all',
     null,
     { params },
   )
