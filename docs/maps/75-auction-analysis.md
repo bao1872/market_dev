@@ -202,3 +202,42 @@ Chip 软失败（[P0-2]）：
 - 新增/修改 service 或 API
 - Migration 修改
 - canary 完成后核验状态从"部分核验"升级为"已核验"
+
+## 9. 竞价分析真实闭环状态（2026-08-01 核验，CHANGE-20260801-001）
+
+### 9.1 当前已闭环（仅 quote capture）
+
+**唯一通过端到端验证的环节：** 竞价 quote capture（`auction_capture_service`）
+
+验证条件：
+1. capture 容器健康：`trading-capture` / `trading-worker-capture` 的 `/health` 返回 200
+2. 竞价时段（09:15–09:25）逐笔 quote 落库计数 ≥ 5000 只 × 时段内的消息频率
+3. capture 日志与落库一一对应：`logger.event="quote_written"` 的条目数 = DB `auction_quotes` 表新增行数（误差 ≤ 0.1%）
+4. capture 不影响盘后流程：capture 与 after_close 各自的 job_run_event 无相互阻塞记录
+
+**其余 4 个阶段（scan / aggregate / publish / 前端三级页面）均未通过正式生产闭环。**
+
+### 9.2 未闭环部分（禁止写入"已完成 / 整体成功"）
+
+| 阶段 | 当前实现状态 | 未通过证据 |
+|---|---|---|
+| 09:25 真值（集中竞价最终撮合价） | schema 有 auction_final_price 字段 | 未完成三源比对（L1 snapshot / 通达信 snapshot / 第三方数据源）；单源写入的真值在 09:25:03 ± 3s 窗口内错误率未审计 |
+| scan（全市场 09:25 后锚点扫描） | `auction_scan_service.py` 已存在骨架 | 未通过 ≥10 个连续交易日的幂等 + 覆盖率 + 任务时长≤5min 验收；未跑 CI 端到端 PG 测试 |
+| aggregate（多日迁移聚合 + 扩散度/参与率） | 聚合函数 stub 存在 | 未完成 ≥20 交易日的覆盖率、扩散度、参与率分布验证；指标定义未被三方 reviewer 交叉确认 |
+| publish（发布指针 + 门禁 + 回滚） | review 发布框架有等价实现，auction 专属 pointer schema stub 存在 | 未通过 发布→回滚→重发 的幂等恢复链路 3 次完整演练；health `/api/v1/auction/ready` 响应未定义 |
+| 前端三级页面（看板→板块→个股） | 前端代码已写 AuctionBoardPage / AuctionInstrumentPage / AuctionMarketPage | 未通过 9:30 后真实交易日 E2E 验收；Playwright spec 未写；未验证跳转联动与第一金字塔个股级联动 |
+
+### 9.3 健康接口正确响应
+
+```
+GET /api/v1/auction/ready
+→ 200 OK
+{
+  "overall": "partial_closed",
+  "closed_components": ["quote_capture"],
+  "pending_components": ["final_price_truth", "scan", "aggregate", "publish", "frontend_3level"],
+  "last_verified": "2026-08-01T00:00:00+08:00"
+}
+```
+
+**禁止**：任何 status=200 的健康接口返回 `overall: "closed"` 或 `overall: "success"`。

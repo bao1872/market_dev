@@ -133,22 +133,24 @@ export function useStockDetailActions({
   const hasValidSourceContext = useMcq || useLegacyDsa
 
   // ===== 新 mcq 合同：useMarketStocks =====
-  // marketCanonicalQuery 已由 detailSourceContext 校验 scope/page/page_size 合法，直接透传
+  // marketCanonicalQuery 已由 detailSourceContext 校验 scope/page/page_size 合法，直接透传。
+  // 注意：useMarketStocks 第一个参数必填（非 optional），通过 enabled 选项控制是否真正发起请求，
+  //       避免 useMcq=false 时传 undefined 触发 TS2345 类型错误。
   const marketStocksParams: MarketStocksQueryParams = useMemo(
     () => ({
-      scope: marketCanonicalQuery!.scope,
-      query: marketCanonicalQuery!.query ?? undefined,
-      industry: marketCanonicalQuery!.industry ?? undefined,
-      concept: marketCanonicalQuery!.concept ?? undefined,
-      fp_filter: marketCanonicalQuery!.fp_filter ?? undefined,
-      fp_sort: marketCanonicalQuery!.fp_sort ?? undefined,
-      page: marketCanonicalQuery!.page,
-      page_size: marketCanonicalQuery!.page_size,
+      scope: (marketCanonicalQuery?.scope as 'market' | 'watchlist') ?? 'market',
+      query: marketCanonicalQuery?.query ?? undefined,
+      industry: marketCanonicalQuery?.industry ?? undefined,
+      concept: marketCanonicalQuery?.concept ?? undefined,
+      fp_filter: marketCanonicalQuery?.fp_filter ?? undefined,
+      fp_sort: marketCanonicalQuery?.fp_sort ?? undefined,
+      page: marketCanonicalQuery?.page ?? 1,
+      page_size: marketCanonicalQuery?.page_size ?? 50,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [marketCanonicalQueryRaw], // 依赖 raw JSON 字符串（入口时刻 URL 参数，切股时不变）
   )
-  const marketStocksQuery = useMarketStocks(useMcq ? marketStocksParams : undefined)
+  const marketStocksQuery = useMarketStocks(marketStocksParams, { enabled: useMcq })
 
   // ===== 旧 DSA 合同（backward 兼容）：useStrategyRunResults =====
   // [FIX max-update-depth] 稳定化 canonicalQuery 引用，避免 resolveDetailSourceContextV2 每次返回新对象

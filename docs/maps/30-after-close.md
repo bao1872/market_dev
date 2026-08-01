@@ -550,3 +550,101 @@ stock_core 发布 → chip_consensus 结果 → auction_anchor 生成发布 → 
 - `after_close_chip_consensus_service.py` 在 chip 完成回调中触发锚点重建
 - `auction_scheduler_service.py` 提供 09:25/10:00 任务创建与执行
 - 详见 `docs/maps/75-auction-analysis.md`
+
+## 12. review 阶段接入 + 时间线负耗时修复（2026-08-01 核验，CHANGE-20260801-001）
+
+### 12.1 盘后正式链（已核验代码）
+
+**真实执行链**（`after_close_orchestrator.py:publishing` 之后的 `computing_review` 阶段）：
+
+```python
+# 步骤 1：从 factor_publications 拿 stock_core + board_analysis 正式 pointer
+stock_core_pub   = get_current_pointer(scope='stock_core')
+board_analysis_pub = get_current_pointer(scope='board_analysis')
+
+# 步骤 2：review_orchestrator_service.create_run() (幂等: 同输入返回同 run)
+review_run_id = review_orchestrator_service.create_run(
+    trade_date              = trade_date,
+    source_stock_core_run_id = stock_core_pub.run_id,
+    source_board_run_id      = board_analysis_pub.run_id,
+    algorithm_version       = CURRENT_ALGO_VERSION,
+    # + metadata: bootstrap_required, scope 列表, 等
+)
+
+# 步骤 3：review_orchestrator_service.compute_run(review_run_id)
+#   - 内部按 scope 逐项计算; 失败记录 reason; 支持幂等
+compute_status = review_orchestrator_service.compute_run(review_run_id)
+if compute_status != 'succeeded':
+    raise AfterCloseReviewError(review_run_id, compute_status)
+
+# 步骤 4：review_orchestrator_service.publish_review(review_run_id)
+#   - 切换 review_publications.published_run_id; 写入 publishing factor 元数据
+pub_status = review_orchestrator_service.publish_review(review_run_id)
+
+# 步骤 5：主任务 only after 上面四步都 succeeded → 主任务 SUCCEEDED
+# 若任一步失败: 主任务 FAILED, metadata.review_run_id / review_status / review_reason 回写
+```
+
+位置：`backend/app/services/after_close_orchestrator.py` 的 `computing_review` 阶段（在 publishing 后，watchlist_ready 前）。
+
+### 12.2 7 步状态机 & 时间线映射（后端）
+
+文件：`backend/app/services/after_close_pipeline_service.py`
+
+```text
+_PIPELINE_STEPS（7步展示序列）：
+  refreshing_daily (0)
+    → syncing_boards (1)
+    → checking_coverage (2)
+    → computing_features (3)  # absorbing legacy 4-steps (creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot)
+    → publishing (4)
+    → computing_review (5)  # [NEW] 本 CHANGE 新增
+    → watchlist_ready (6)
+```
+
+- `_COMPLETED_STEP_INDEX[COMPUTING_REVIEW] = 5`, `_COMPLETED_STEP_INDEX[SUCCEEDED] = 6`
+- `StepStatus` 聚合：`SUCCEEDED` 仅当 review_publications.published pointer 存在且 review_run.status=succeeded。
+
+### 12.3 时间线负耗时根因 & 修复（后端核心）
+
+**根因（修复前）**：
+- `_aggregate_step_events` 按创建时间 降序（新→旧）处理事件 → 对同一 attempt 中的同一 transfer 先拿到 finished（新） 再拿 started（旧），导致 `start=finished_event.created_at`、`finish=started_event.created_at`，出现负 duration。
+- 跨 attempt 事件（如 queued→queued 两次之间的 START）未被隔离，旧 attempt 的 finish 与新 attempt 的 start 混用。
+- 混用 naive/aware datetime，未统一时区。
+
+**修复（代码核验）**：
+1. **统一时区 `_normalize_to_shanghai`**：所有 datetime 转为 Asia/Shanghai aware。naive datetime 按 UTC 再转上海；该函数在 `__main__` 自测中覆盖 UTC→上海正确转换。
+2. **按事件升序（旧→新）**：事件排序 `sorted(events, key=lambda e: e.created_at)`。
+3. **attempt 隔离**：通过边界事件（status=queued/manual_resume 或包含 START 关键字的 payload.step ）切开 attempts；每 attempt 独立计算 step 转移。
+4. **step 正确配对**：每个 attempt 内从 step_prev → step_next 转移时，step_prev.finish = transfer_event.created_at，step_next.start = transfer_event.created_at；终端事件（status=failed/succeeded）作为当前 running_step.finish。
+5. **异常告警写入 `warnings`**：若出现 `start > finish` 或 `duration ≤ 0`，不填负数，不填 `max(0, duration)`，而是：
+   - `duration_seconds = None`
+   - `warnings.append("invalid_order_or_zero_duration")`
+   - （前端用黄底展示"未知"）
+
+### 12.4 时间线前端展示映射（已核验代码）
+
+文件：
+- `frontend/src/pages/adminAfterClosePipelineHelpers.ts:formatDurationSeconds()`
+- `frontend/src/pages/AdminAfterClosePipelinePage.tsx → PipelineTimeline`
+- `frontend/src/styles/global.scss:.timeline-meta-warn`
+
+规则：
+| status | duration | warnings | 显示 | 样式 |
+|---|---|---|---|---|
+| running | null / ≤0 | — | "进行中" | 正常灰字 |
+| completed / succeeded / failed | 正数 且无 invalid_order warning | — | `Xm Ys` 或 `X.Xs` | 正常 |
+| 任何 | null / ≤0 | `includes('invalid_order_or_zero_duration')` | "未知" | `.timeline-meta-warn` 黄底，⚠ 前缀 + title 诊断 |
+| 任何 | 正数 | `includes('invalid_order_or_zero_duration')` | "未知" | 同上（警告优先于数值展示） |
+
+### 12.5 测试覆盖（已核验）
+
+后端：
+- `__main__` 自测：7 步、computing_review 顺序、succeeded index=6、时区转换 通过
+- `backend/tests/test_admin_after_close_pipeline.py`（CI PG 集成测试：CI 真实执行）
+- `backend/tests/test_after_close_status_detail.py`（CI PG 集成测试）
+
+前端 node 合同（local 33/33 pass）：
+- `frontend/src/pages/__tests__/adminAfterClosePipeline.test.ts`
+  - `7步断言` + computing_review 标签/位置
+  - `formatDurationSeconds` 9 项覆盖 running/未知/正数 + warnings invalid_order 情形

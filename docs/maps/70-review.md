@@ -333,3 +333,71 @@
 - 前端：`AuctionBackflowPanel.tsx` 已实现并集成到 `ReviewPage.tsx`
 - 合同测试：`frontend/scripts/contract-tests/auctionContract.test.ts` 10 项通过（含 symbol 导航、四维度展示、ReviewPage 集成）
 - 详见 `docs/maps/75-auction-analysis.md#5-前端`
+
+## 21. raw/normalized分离 + 冷启动 + bootstrap 范围（2026-08-01 核验，CHANGE-20260801-001）
+
+### 21.1 raw与normalized双值（后端→前端）
+
+后端数据结构（`scope_metrics` / `review_scope_results`）：
+```
+raw_value       :: float | null   （仅需足够当日样本，无需60日历史）
+normalized_value :: float | null  （仅当 effective_history >= 60 交易日时非 null）
+coverage        :: float (0..1)   （当日有效样本 / scope 内股票数）
+insufficient_history :: bool      （effective_history < 60）
+reason          :: string|null    （insufficient_history / compute_failed / no_raw_data / null）
+```
+
+前端 ScopeMetricsTable：
+- 函数 `isMetricDisplayable(status)`：包含 `insufficient_history`，不再用旧的 `isMetricAvailable(status)`（仅 ready 才显示）。
+- MetricCell 渲染：rawValue 始终显示（若存在），coverage 显示在右上角 chip，reason 显示为 `insufficient_history` 时 tooltip 显示"历史不足 N 天，仅展示原值"，normalized/历史分位/delta 呈灰态（不显示数值，不占位破坏对齐）。
+
+位置：
+- 后端：`backend/app/services/metric_engine.py` / `review_orchestrator_service.py`
+- 前端：`frontend/src/features/review/ScopeMetricsTable.tsx`
+
+### 21.2 SignalCard 冷启动语义
+
+```
+if normalized_ready:
+    signal = compute_signal(P, Q, U, C, V normalized)  # 0/1/2 完整合同
+    label = "正式信号"
+elif raw_ready and insufficient_history:
+    signal = compute_raw_signal(P.raw, Q.raw)   # 仅P/Q基线判断，U/C/V置灰
+    label = "raw baseline only"
+    tooltip = "历史观测不足60日，归一化值不可用；当前为raw基线预估值，非正式信号"
+else:
+    signal = 0 + disabled
+```
+
+位置：`frontend/src/features/review/SignalCard.tsx` + `ReviewHeader.tsx`
+
+### 21.3 Review pointer date sync（解决7/29陈旧）
+
+根因：after_close_orchestrator publishing 阶段之后未执行 review 阶段；stock_core/board pointer 已更新到 7/31，但 review pointer 仍停留在 7/29。
+
+修复：
+- §30 Map 12.1 的 after_close 正式链确保 review 阶段与 stock_core/board pointer 同交易日落盘。
+- `ReviewPage` 读取 `GET /api/v1/review/meta/latest`（scope=market）：如果 published pointer 的 trade_date ≠ stock_core.published.trade_date → 顶部 banner 显示"盘后未完成，当前正式review发布日期 = YYYY-MM-DD；stock_core 最新 = YYYY-MM-DD"。
+
+位置：`frontend/src/features/review/ReviewHeader.tsx` + `backend/app/api/review.py:get_latest_review_meta`
+
+### 21.4 Bootstrap 范围（point-in-time，禁止用当前成员回填）
+
+实际实现路径：
+```
+目标: 生成 review scope_items × 历史约250个交易日的 normalized 历史观测
+步骤:
+  for 每个交易日 td (从 oldest snapshot date 到 today):
+    a) td 当日有效的 stock_core publication run_id = pointer(td)
+    b) td 当日有效的 board publication run_id       = board_pointer(td)
+    c) td 当日有效的 board 成员 (instrument_id, weight) = board_versions × td 当日生效 JOIN
+    d) 用 (a)(b)(c) 重算 scope_metrics 的 raw value
+    e) 写入 review_observations (scope, trade_date=td, metric, raw_value)
+  最后: 按 metric 维度计算 effective 长度 → 不足 60 的 metric: insufficient_history=true
+```
+
+明确禁止：
+- **不得**用"今日 2026-08-01 的 申万一级行业 成员"去重算 2026-07-01 的 该行业 scope 观测（point-in-time 破坏）。
+- **不得**伪造 normalized 值或 historyPercentile120d；不足就写 insufficient_history。
+
+位置：`backend/app/services/review_bootstrap_service.py`（若存在）/ 或 `review_orchestrator_service.bootstrap_history()`。

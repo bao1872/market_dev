@@ -163,3 +163,36 @@ formed → confirmed → weakened → failed → expired
 - 板块扩散中"同板块"的口径（行业 vs 概念，是否两者各自计算扩散度）；
 - 锚点与第二金字塔字段的复用边界；
 - 历史参与的"测试"判定标准（触及锚点边界的容差）。
+
+## 8. 竞价分析真实闭环状态（CHANGE-20260801-001 核验）
+
+### AU-CL-01 当前已闭环部分
+
+**仅 quote capture（竞价 quote 实时抓取落库）已确认通过：**
+
+- 竞价时段（09:15–09:25）的逐笔 quote 写入链路已验证；
+- capture service 容器健康，capture 日志与落库一一对应；
+- 竞价 capture 与收盘行情不存在互斥冲突。
+
+### AU-CL-02 当前未闭环部分（**不得在对外宣传/状态页声称全部通过**）
+
+以下环节仍未形成真实生产可用闭环，在完成对应验收前：
+
+1. **09:25 真值**：09:25 集中竞价最终成交价格的权威真值（集合竞价撮合价）仍未通过
+   三源对比（L1 snapshot / broker quote / 第三方数据源交叉验证）；
+2. **scan 阶段**：全市场锚点扫描（`auction_scan_service`）未实现/未验证 09:25 后 T+0
+   时间窗内端到端 scan 的完整性与幂等；
+3. **aggregate 阶段**：同一锚点生命周期的多日竞价迁移聚合未在生产跑通至少 20 个
+   交易日样本验证（覆盖率、扩散度、参与率三类指标）；
+4. **publish 阶段**：auction analysis 正式 pointer/发布门禁、失败回滚、
+   与 after_close publishing 的衔接未完成；
+5. **前端三级页面**：竞价板块看板 → 竞价板块详情 → 竞价个股详情 的三级页面
+   未通过真实交易日 E2E 验证（含 09:25 后 5 分钟内自动刷新、点击跳转、
+   与第一金字塔个股联动）。
+
+### AU-CL-03 Canary 与整体成功语义
+
+- 不能把单个 capture service 启动成功 / 单次 migration 通过 当作竞价分析"整体成功"。
+- 整体状态只能写：`partial_closed: quote_capture_only`。任何 status=200 health
+  响应不得声明 auction 已整体 ready。详见 `rules/40-testing-quality.md` §质量门禁"
+  禁止局部 Canary 冒充整体成功"。

@@ -456,3 +456,46 @@ Capture 页面链路：
 - `/market` 和 `/stock` 当前未解析上述 review 参数；
 - `/boards/analysis` 已实现（BoardAnalysisPage.tsx），可作为 Review 阶段三组件来源；
 - 待 Phase 3 实现后更新本节核验状态。
+
+## 7. 统一数据源 DSA删除 详情同源 空值语义（2026-08-01 核验，CHANGE-20260801-001）
+
+### 7.1 列表唯一数据源 & DSA 旧列删除（已核验代码改动）
+
+前端：
+- `frontend/src/features/trend-selection/columns.tsx:getTrendSelectionColumns()` 移除 13 个 DSA-only 列：趋势、连续天、VWAP差、段涨跌、斜率、强度、主要结构、短线结构、对齐、OB数、事件、新鲜度、动量。
+- `frontend/src/features/trend-selection/config.ts:DEFAULT_COLUMN_IDS / DEFAULT_VISIBLE_COLUMNS` 清理对应 ID，`MarketWorkspacePage.tsx` 不再 `getTrendSelectionColumns() + firstPyramidColumns` 拼接；直接使用 基础列 + FP 列。
+- 列设置/筛选/排序/preset/导出 四者与列定义一致：不在列设置 UI 中出现上述 13 列 ID，preset 不引用旧 ID，导出仅使用 `/market/stocks` 响应字段子集。
+
+后端：
+- `backend/app/services/market_stocks_service.py` Query 4c（`StrategyRun.strategy_key` 不存在 → 异常 → 整批 `payload=None`）已被标记 deprecated：返回 None。不再修复该无效链（DSA-only 列即将删除）。
+- `backend/app/schemas/market_stocks.py` 对应 DSA payload 兼容字段标 `deprecated: true` + 固定 `None`，前端不得消费。
+
+### 7.2 详情同源 & MCQ 规范查询（已核验代码改动）
+
+前端路由 /stock/:symbol：
+- URL 新增 `mcq` 参数（Market Canonical Query v1，base64(JSON) 或短 context id）。不再传 `sourceRunId + canonicalQuery`（DSA 旧格式）。
+- `frontend/src/features/stock-research/useStockDetailActions.ts:getSourceList()` 不再调用 `useStrategyRunResults()`；改为调用 `/market/stocks`，复用入口查询参数：`scope/query/industry/concept/fp_filter/fp_sort/page/page_size`（全部从 MCQ 还原）。
+- symbol：使用 6 位规范代码（`/stock/000001`），禁止 UUID / row index。
+- 左栏顺序与筛选列表当前页完全一致；history.back() 返回列表保留筛选/排序/分页。
+- 无效上下文：MCQ 版本无法解析或字段名不匹配当前 filter-specs 版本 → 左栏顶部 banner 显式 reason。合法 MCQ 不得降级 direct/watchlist。
+
+### 7.3 空值三层语义（A→B→C 对齐）
+
+三层对应：
+- A. `stock_feature_snapshots.summary_payload.first_pyramid`（DB raw）
+- B. `flatten_first_pyramid()` 输出（flatten 层）
+- C. `/market/stocks.items[].first_pyramid`（API 响应）
+
+实现约束（代码核验）：
+- 禁止 flatten 或 API 层对 null 填 0、空字符串或旧值。
+- 对每个字段，空值 reason 写在对应 `*_status` / `*_reason`（若该字段已实现）。四类 reason：`conditional_null / insufficient_history / compute_failed / mapping_lost`。
+- `insufficient_history` 不影响 rawValue 展示；仅 normalized/历史分位 与 normalized 相关筛选器 disabled。
+
+### 7.4 空值审计脚本（可重复执行 Runbook）
+
+SQL：`/tmp/fp_null_audit.sql`（附本 Map 的同等位置 docs/runbooks 下的 Runbook 版本）。
+入口：`bash docs/runbooks/first-pyramid-null-audit.md` 的执行步骤。
+
+### 7.5 导出 SSOT（核验）
+
+导出后端不读取 DSA run；导出字段是 `/market/stocks` 的响应字段子集；导出筛选参数与 `/market/stocks` 合同同一 MCQ 参数。

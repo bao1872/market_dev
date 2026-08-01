@@ -235,3 +235,71 @@ direct 访问、来源失效或当前股票不在 sourceStocks 时，为避免�
 - 静默迁移不弹任何提示；非静默迁移必须显示 banner，且 banner 可被用户关闭。
 - 后端 `/market/stocks` 接收到非法组合时返回 422 + 结构化 `detail`（含 `field` / `operator` / `reason` / `allowed_operators`），前端按 `detail` 提示用户。
 - 迁移规则不写入后端；后端只校验最终接收到的 `(field, operator, value)` 三元组是否合法。
+
+## 7. 统一列表数据源 + 删除DSA旧列 + 详情同源 + 空值语义（CHANGE-20260801-001）
+
+### MX-60 列表唯一数据源 SSOT
+
+**`/market` 行情列表（含自选范围）的唯一后端数据源为 `GET /api/v1/market/stocks`**。
+
+- 禁止前端或列表再读取 `StrategyRun`、`/strategy-results`、`/dsa-results`、`strategyKey` 或任何 DSA-only 运行结果作为列表数据源。
+- `/market/stocks` 响应内的 `items[].first_pyramid` 是筛选、排序、列展示、左栏来源列表、导出的唯一字段合同。
+- `flatten_first_pyramid`（后端 flatten 层）→ `/market/stocks.items[].first_pyramid`（API 响应）字段一一对应；缺失必须显式标记 `null + reason`，不得在 flatten 层填 0、空字符串或旧值。
+- 自选范围（scope=watchlist）与市场范围（scope=market）使用同一 `/market/stocks` 合同，仅 `scope`、`watchlist_id` 或 `user_id` 过滤条件不同。
+
+### MX-61 删除列表DSA-only列（13列）
+
+**立即删除以下旧 DSA 列**，包括：列定义、默认列配置、列设置面板、筛选、排序、preset、导出映射、以及对应测试：
+
+- 趋势
+- 连续天
+- VWAP差
+- 段涨跌
+- 斜率
+- 强度
+- 主要结构
+- 短线结构
+- 对齐
+- OB数
+- 事件
+- 新鲜度
+- 动量
+
+保留：基础列（股票代码/名称/价格/涨跌幅/行业/自选操作）+ 99 个第一金字塔列。
+
+约束：
+- 不得删除第一金字塔内部同概念字段（如 `fp_trend_direction`、`fp_structure_state` 等是第一金字塔字段，保留）。
+- 不得删除底层第一金字塔计算逻辑。
+- 公共 schema 兼容字段（如 `StrategyRun` 相关反序列化）仅在还有其他非列表消费者时保留为 `deprecated: true + null`，前端不得消费。
+
+### MX-62 详情页来源列表同源同序
+
+**个股详情左栏"来源列表"必须与进入详情前的 `/market` 列表使用同一查询合同和同一请求快照。**
+
+1. 同源查询参数：`scope / query / industry / concept / fp_filter / fp_sort / page / page_size` 必须从列表页原样传递到详情页，不得再把第一金字塔筛选参数传给 `strategy-results` 或任何 DSA 旧 API。
+2. URL 只保存版本化、可解析的 **market canonical query（简称 MCQ）** 或短 context id，禁止再传 `sourceRunId` + `canonicalQuery`（DSA旧格式）。
+3. 当前 symbol 必须使用 6 位规范 A 股代码，不得使用 UUID、DB row index 或非 6 位 alias 作为导航锚点。
+4. 左栏顺序与筛选列表**当前页**完全一致；点击"上一只/下一只"按左栏顺序跳转；返回列表页后保留筛选、排序、分页（`history.back()` 后列表请求参数不跳变）。
+5. 无效上下文（MCQ 版本无法解析、filter-specs 版本不匹配、page 越界等）必须在左栏顶部显示显式 `reason` banner；合法筛选不得**降级为自选/全市场 direct**。
+
+### MX-63 空值语义合同（三层一致）
+
+禁止用 0、空字符串、均值或前值来"填补"任何第一金字塔空值。三层（A. DB summary_payload.first_pyramid → B. flatten_first_pyramid 输出 → C. API `items[].first_pyramid`）字段的 `null` 必须一致，并提供显式 `reason`。空值 reason 分四类：
+
+| 分类 | 语义 | 例子 |
+|---|---|---|
+| `conditional_null` | 合理条件空值 | 单结构段无 prev 段、今日无事件、chip skipped/failed、筹码五元组不匹配、历史观测不足门槛（但仍可展示raw） |
+| `insufficient_history` | 数据/历史不足 | 上市不足 60 交易日、15m 数据不足 20 根 K 线 |
+| `compute_failed` | 计算失败 | 上游特征抛异常、子任务返回 failed 且不可重试、NaN 被拒绝写入 |
+| `mapping_lost` | flatten/API 映射丢失 | 上游 A/B 层非 null 但 API 层字段名错配或未反序列化 |
+
+API 响应字段：
+- 第一金字塔字段本体：`null` 表示空，非空表示实际值；
+- 字段级 `status`（若已实现）：对应上表；
+- `insufficient_history=true` 时，`rawValue` 仍可展示；只有 normalized/分位/筛选信号变空。
+
+### MX-64 导出合同
+
+列表导出字段必须与 `/market/stocks` 的筛选、排序合同一致。禁止在导出后端重新查询 DSA run 结果或拼接第一金字塔外的字段。
+
+导出的唯一 SSOT 是 `/market/stocks + 同一份 filter-specs` 的响应数据子集。

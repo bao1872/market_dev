@@ -88,6 +88,57 @@ Gov     python tools/check_governance_rules.py
 
 `ref/` 目录下所有文件仅供人工阅读参考，**禁止作为运行依赖**。
 
+## 2026-08-01 收口：全局安装、baseline膨胀、局部Canary、部署黑名单（CHANGE-20260801-001 配套）
+
+### TQ-80 禁止用户级/全局依赖安装
+
+- **禁止** `pip install <package>`、`npm install <package>`、`brew install <package>`、`conda install <package>` 四种用户级依赖安装，除非：
+  1. PRD 明确新增了依赖并在 `pyproject.toml` / `package.json` 声明；
+  2. 且本轮任务必须在本地真实运行该依赖（非 CI 替代）。
+- **禁止**绕过：`pip install --user` / `npm install -g` / 临时安装后不写入 package.json/pyproject.toml。
+- 依赖缺失 → 优先使用 py_compile / ast / 语法检查（后端）或交 CI 跑全量测试，不为了"本地跑测试"而装全局依赖。
+
+### TQ-81 禁止 baseline 膨胀
+
+- **Ruff / Mypy baseline**（`tools/quality_baselines/ruff.json` 与 `mypy.json`）：
+  1. 每轮任务 baseline 文件 **净增大** 不得超过 3 行；
+  2. 不得批量 `# noqa`、批量 `type: ignore`、扩大 `exclude` 目录；
+  3. CI 中 **Ruff 新增错误为 0** 是门禁；任何 "修改规则基线以适配错误代码" 行为必须在 CHANGE 中单独解释根因与修复计划。
+- **Playwright baseline 截图**：
+  1. 单轮变更 baseline 图片张数新增 ≤ 3；
+  2. 不得删除旧 baseline 图以"适配"视觉回归失败；必须解释视觉差异确实来自 UI 合法变化。
+
+### TQ-82 禁止推后不监控CI
+
+- dev push **不是结束**；以下完整闭环必须在对话终止前真实执行：
+  1. `git push origin <branch>` →
+  2. 找到最新 CI Actions run（对应 head_sha = 推送 SHA）→
+  3. 等待 **CI Gate = success（全绿）** →
+  4. 查看所有失败 job 的 annotations / logs 并修复后重推 →
+  5. 全部门禁通过后才允许部署。
+- 禁止以下三种"未全绿即声称成功"：
+  - "我本地通过了，CI 失败应该是 flaky" → 不允许；
+  - "Playwright 视觉回归是环境问题，我 skip 3 个" → 不允许；
+  - "PG 集成测试 0 skipped 但有 1 个失败，我先部署再修" → 不允许。
+- PG 集成测试必须 **0 skipped**；单个 failed 必须定位根因修复后重推，不得在 CHANGE 中写成 "1 个 flaky" 掩盖。
+
+### TQ-83 禁止局部Canary冒充整体成功
+
+- 整体功能（如竞价分析、review 五阶段、after_close 七步）不得把单组件/局部 Canary 通过写成整体完成：
+  - 例子 1：capture 服务启动 ≠ 竞价分析整体闭环（09:25真值/scan/aggregate/publish 未过）；
+  - 例子 2：stock_core publishing ≠ after_close watchlist_ready（review 阶段未跑）；
+  - 例子 3：1 个行业 review scope 成功 ≠ 全市场 ready。
+- 规则：整体 status = `min(各组件 status)`，任何一个未通过 → 整体不是"成功"；
+  - 正确写法：`partial_closed: quote_capture_only`、`review_in_progress: stock_core_ok_but_review_pointer_not_published`；
+  - 健康接口不得返回 `overall: "success"` 给以上部分成功情形。
+
+### TQ-84 部署黑名单方式永久禁止
+
+见 `rules/80-deployment-data-safety.md` §部署永久黑名单。
+
+- 禁止 `scp` 单文件；禁止 `docker cp`；禁止 SSH 进容器 vi/sed 修改源码；禁止临时 `python -c` 执行业务脚本。
+- 所有部署 / review 恢复 / after_close 重跑 **必须** 走正式 CLI / orchestrator API / admin 后端 API。
+
 - 生产代码、测试、工具、构建脚本在运行时不得 `import` / `open` / `read` / `glob` `ref/` 目录下任何文件；
 - SMC Pine parity 测试只读取 `backend/tests/fixtures/smc_pine/*.csv`；
 - 禁止从 DB 重新取 bar 或依赖 `ref/` 导出脚本；

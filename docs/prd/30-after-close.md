@@ -272,3 +272,50 @@ stock_core published
 - signal evaluation 无系统性异常；
 - `source_core_run_id` 和 `source_board_run_id` 均指向当前正式 pointer。
 
+## 17. 正式盘后含review阶段 + 时间线负耗时修复（CHANGE-20260801-001）
+
+### AC-70 盘后7步正式状态机（含复盘）
+
+新的 after_close_orchestrator 状态机为 **7 个展示步骤**（旧 8 步收敛为新 7 步）：
+
+```
+refreshing_daily        // 刷新 & 校验日线 readiness
+→ syncing_boards        // 同步板块成员
+→ checking_coverage     // 检查 coverage 质量门槛
+→ computing_features    // 统一特征计算（含旧4步：creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
+→ publishing            // stock_core & board_analysis 正式 pointer 切换
+→ computing_review      // 【新增】复盘计算与发布（create_run→compute_run→publish_review）
+→ watchlist_ready      // 全部就绪：选股监控与自选可用
+```
+
+- `watchlist_ready` 只在 **stock_core 成功 + board_analysis 成功 + review 成功 三项全部满足** 时标记为 completed；任何一环失败都不得显示为整体成功。
+- review 四步（create/compute/publish 三步 + 结果校验）必须在盘后编排代码中显式调用，不得仅存在于注释中。
+- 失败不得静默写主任务 SUCCEEDED：review 任一步骤失败或返回 failed 时，主任务整体转 FAILED，在 `after_close_runs.metadata` 和 `job_run_event` 时间线中记录 `review_run_id / review_status / review_reason`。
+
+### AC-71 幂等review重跑合同
+
+- review 创建/计算/发布必须遵循输入幂等原则：
+
+| 输入变化情况 | 行为 |
+|---|---|
+| `stock_core_pointer run_id + board_analysis run_id 与上次相同 | 直接返回已存在的同一 review_run；已发布则不重复切换 pointer |
+| 任一上游 run_id 变化（pointer 切换为新 run） | 创建新 review_run；新 run 通过后再切换正式 pointer；旧 review_run 保留供审计不删 |
+| 计算中/发布中（running） | 不重入；返回当前 run 完成后再判定 |
+
+### AC-72 时间线合同（防负数耗时）
+
+盘后管理页的步骤时间线必须满足：
+
+1. **同 run 同 attempt 配对原则：每一步骤的 `started_at` / `finished_at` 必须来自同一 `job_run_id` 且同一 attempt（attempt 由 queued/manual_resume/START 等边界事件切开）。跨 attempt 或跨 job_run 的事件不得配对为同一步骤耗时。
+2. **Asia/Shanghai 时区统一**：所有时间戳统一转换为 Asia/Shanghai 时区 aware datetime。DB 内 naive 时间按 UTC 解释再转上海；后端返回给前端的 started_at/finished_at 字符串带上海时区或显式说明。
+3. **缺一端不填负数**：若只有 started_at 无 finished_at → 状态为 running，duration 为 null，前端显示"进行中"；若两端缺失或顺序异常（started_at > finished_at），不得用 `max(duration, 0)` 掩盖，而应在 `PipelineStep.warnings` 中记录 `invalid_order_or_zero_duration` 并返回 `duration_seconds: null`，前端显示为"未知"并使用黄底警告样式（`timeline-meta-warn`）提示管理员。
+4. **多 attempt 语义**：一次 after_close run 被 queued/manual_resume 重启后，后续步骤的前一次 attempt 记为 failed/interrupted；UI 不展示警告。
+
+### AC-73 review 冷启动合同（历史不足）
+
+- Review pipeline 不因为历史 < 60 交易日不显示为整页"不可用"。正确行为：
+1. rawValue（从 metric_engine 已有 raw）必须展示，coverage 必须展示，reason 显示 `insufficient_history`；
+2. 历史分位、normalized 值、delta 可为 null；
+3. 筛选信号若基于 normalized 值的筛选器在 insufficient_history 下禁用；
+4. `fp_segment_change_pct` 等第一金字塔上游字段全空时，按 §MX-63 的 null 语义合同返回 `null + "无可用分段数据"`，不得在 review 层伪造 0 或均值回填。
+

@@ -87,6 +87,72 @@ CN 可按需切换以下模式：
 - 当前 dev push 只触发 CI 质量门禁；
 - 自动部署需要：`panji-deploy` 服务器用户 + SSH forced command + GitHub Environment + 部署锁 + 变更分类；
 - 自动部署不自动回滚 migration；
+
+## 2026-08-01 收口（配合 CHANGE-20260801-001）
+
+### TRAE-90 一轮闭环禁止的错误姿势
+
+本轮四个用户问题（第一金字塔空值审计、详情同源、删除DSA列、复盘闭环+时间线负耗时）必须真实通过证据支持，以下为禁止姿势：
+
+1. **不得中途报告"已完成"**：一轮闭环完成或被权限阻塞时只输出一次最终报告；不得逐文件/逐子任务写阶段性"成功"；
+2. **不得把未验证的结论写成事实**：四问题通过前，不得在对话输出/ledger/CHANGE 中写 `DONE` / `CANARY_PASSED` / `COMPLETED` / `SUCCESS`；
+3. **不得自动清理历史Canary证据**：旧 Canary namespace / run 数据保留用于对比，本轮不得 DELETE 或 PURGE 已存在的 canary 数据；
+4. **不得创建本地测试库**：local Backend 必须连接正式 `bz_stock` 数据源，隔离边界为进程而非数据复制；本地测试只能纯单元/mock，不得连接正式库；
+5. **不得本地启动 scheduler/盘后编排**：本机只允许启动 Backend、Frontend、Capture 和 SSH Tunnel，不得启动 Scheduler / 正式 Worker / 全市场盘后任务；
+6. **不得并行重任务**：同一时刻只有一个 `pytest`、`tsc`、`vite build`、`docker build` 在运行；禁止并发子智能体、并行 Playwright 与 pytest；
+7. **禁止扩大缓存基线 / 删除共享缓存**：pytest `-p no:cacheprovider`，不得删除 node_modules/.cache、.pytest_cache、.git 缓存目录；禁止 `git gc`、`git stash`、`git worktree add`；
+8. **禁止 `scp / docker cp / 手工vi源码`部署**：部署只允许通过正式 `panji-test-deploy` 入口；
+9. **禁止把局部Canary当整体成功**：TQ-83 同 `rules/40-testing-quality.md`；
+10. **禁止把局部测试通过当CI全绿**：本地 33/33 node contract 通过 ≠ GitHub Actions CI Gate 通过；PG 集成必须 CI 真实跑且 0 skipped。
+
+### TRAE-91 一轮闭环执行顺序（默认）
+
+未获得用户明确变更执行顺序前，TRAE CN 默认按以下顺序执行：
+
+```
+Step 1: 事实审计（分支、SHA、工作区、SSH只读查询生产publication/run状态）
+Step 2: 第一金字塔空值审计（SQL只读，6天×99字段×三层）
+Step 3: 删除旧DSA-only列 + 后端无效链 deprecate
+Step 4: 详情同源（左栏改用 /market/stocks + MCQ 规范查询）
+Step 5: 复盘闭环（after_close 接入 computing_review 阶段+冷启动展示raw）
+Step 6: 时间线负耗时修复（attempt隔离+时区统一+warnings字段）
+Step 7: 测试与CI：Ruff/Mypy → tsc → 前端合同 → Playwright → Push dev → 监控 CI 全绿
+Step 8: 部署：panji-test-deploy 正式入口（CI 全绿后）
+Step 9: 浏览器验收：/market 筛选→详情左栏；列设置+导出；/review 五阶段；admin 时间线
+Step 10: 更新PRD/Maps/Rules/Runbooks + 写唯一CHANGE + 输出最终一次性报告
+```
+
+若某一步骤遇到权限/外部系统不可用阻塞 → 跳过并记录，继续执行后续不依赖它的步骤；不得整体停下。
+
+### TRAE-92 资源账本必须包含的条目
+
+ledger 文件固定路径：`/tmp/trae_market_review_closure.md`
+
+开始、每步重任务（pytest / tsc / build / Playwright / deploy）前后、结束必须记录：
+
+```
+- memory_pressure
+- memory_pressure -Q
+- vm_stat
+- sysctl vm.swapusage
+- Top 20 RSS (ps -axo pid,rss,comm | sort -k2 -rn | head -20)
+- df -h /
+- du -shc .git/ .pytest_cache/ .ruff_cache/ .mypy_cache/ frontend/dist node_modules tmp 2>/dev/null | tail -1
+```
+
+Compact/上下文压缩后 **只** 读取 ledger 继续；不得重新 git status 扫描全仓、不得重读 instruction.md、不得重新扫描已完成审计。
+
+### TRAE-93 最终报告的状态值
+
+只允许以下状态值之一：
+
+| 状态 | 含义 |
+|---|---|
+| `CLOSURE_PASSED` | 四用户问题全部通过真实数据 + 浏览器验收 + CI 全绿 + 部署SHA一致 |
+| `PARTIAL` | 1~3个用户问题通过，其余有明确根因/已修复但验收证据不足/遗留问题清单明确 |
+| `BLOCKED` | 遇到不可绕过的外部权限/凭据/系统阻塞（如 GitHub token 缺失无法监控 CI，SSH key 缺失无法部署等） |
+
+**禁止**使用：`DONE` / `CANARY_PASSED` / `SUCCESS` / `COMPLETED` / `OK` / `PASSED` 作为最终状态（除非四问题全部通过证据后写 `CLOSURE_PASSED`）。
 - 自动部署不读取数据库秘密。
 
 详见 `80-deployment-data-safety.md`。

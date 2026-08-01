@@ -1414,3 +1414,49 @@ force=True 时跳过 1-6 门禁，但必须：
 - 历史复核是反馈引擎。
 
 复盘页必须把这五个引擎连接成一个可解释、可下钻、可追踪、可复现的工作台。
+
+## 25. raw与normalized分离 + 冷启动展示 + bootstrap 生效范围（CHANGE-20260801-001）
+
+### RV-25-01 raw 与 normalized 双值分离合同
+
+Review 的每个 P/Q/U/C/V 维度和每个聚合指标必须显式维护两套值：
+
+- `raw_value` / `rawValue`：原始聚合值，只要有足够的当日样本即可计算（无需 60 日历史）；
+- `normalized_value` / `normalizedValue`：相对历史分位或归一化值，只有当有效历史观测 ≥ 60 交易日时才允许非 null。
+
+前端展示规则（ScopeMetricsTable / SignalCard / 五阶段）：
+
+| 条件 | rawValue | coverage | normalized / 历史分位 | reason 显示 | 筛选信号 |
+|---|---|---|---|---|---|
+| `rawReady && normalizedReady`（完整合同） | 展示 | 展示 | 展示 | — | 正常可用 |
+| `rawReady && insufficient_history`（冷启动） | **必须展示** | **必须展示** | null / 不展示空值灰态 | `insufficient_history` + "历史不足 N 天，仅展示原值" | 该指标筛选器 disabled，tooltip 显示原因 |
+| 上游失败 / 数据不存在 | null / N/A | 0.0 | null | `no_raw_data` / `compute_failed` | disabled |
+
+- 不得在冷启动时把整页 P/Q/U/C/V 统一显示为"不可用"或"加载失败"。
+- `SignalCard` 的 0/1/2 结论：当至少 P 与 Q 两个维度存在 raw 值时，可显示 raw 基线结论；当任一维度 normalized 仍为 null（insufficient_history）时，SignalCard 必须显示 "raw baseline only" 标签。
+
+### RV-25-02 pointer 日期同步
+
+Review 正式发布 pointer（`review_publications` 或等价发布记录）的 `trade_date` 必须满足：
+
+```
+review.pointer.trade_date == stock_core.pointer.trade_date == board_analysis.pointer.trade_date
+```
+
+若上游 pointer 还未发布（盘后刚启动、盘后未完成），review 页面必须显示未发布提示（"盘后未完成，当前展示上次正式发布：YYYY-MM-DD"），不得指向陈旧 pointer 的 7/29 日期却显示盘后已完成的 7/31 状态栏。
+
+### RV-25-03 bootstrap 生效范围
+
+- 优先使用历史正式 `stock_core` / `board_analysis` 当日快照做 point-in-time bootstrap；**禁止**用"今日板块成员"去回补昨天或更早 review 的 `scope_items`。
+- 没有历史成员版本的板块（如 2026 年新成立板块且 `board_version_id < N`）：该板块的 historical observations 明确标为 `bootstrap_unavailable`，不得伪造。
+- `review_runs.metadata.bootstrap = true` 必须记录 bootstrap 来源 run_id、覆盖的交易日范围、真实观测数量（不等于 60 天花板）、未回填板块清单及原因。
+
+### RV-25-04 五个阶段的冷启动表现
+
+Review 五阶段（Market Scan / Filter Discovery / Board Attribution / Stock Validation / Tracking Review）在 insufficient_history 场景：
+
+1. **Market Scan**：允许展示 raw 的 P/Q/U/C/V 热力或分布卡片，右上角显示 `insufficient_history` chip；
+2. **Filter Discovery**：展示 raw 分布 + 原因提示；依赖 normalized 的 percentile 筛选器 disabled；
+3. **Board Attribution**：展示板块 raw 排名（覆盖度≥0.95 的板块），原因在 hover 显示；
+4. **Stock Validation**：个股第一金字塔必须完整展示（个股不受 review 历史门槛限制），`insufficient_history` 仅影响板块级对比；
+5. **Tracking Review**：追踪信号状态以第一金字塔验证结论为准，normalized 不足时 `trackingStatus` 不允许给出 normalized 偏差结论（只写 raw + "历史不足，未计算分位偏差"）。

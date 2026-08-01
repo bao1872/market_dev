@@ -261,4 +261,83 @@ Phase 5B-2 修复 `scripts/deploy/panji-deploy.sh` 的若干偏差并新增静�
 
 - 部署工作流不变：`workflow_run` on CI success + `workflow_dispatch`，SSH 到 `panji-prod`
 - 自动部署链路启用状态不变：服务器侧 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件、GitHub Secrets 尚未配置
+
+## 13. 测试环境（腾讯云 panji-prod）dev SHA 部署 SSOT（2026-08-01 核验，CHANGE-20260801-001）
+
+### 13.1 部署入口 SSOT
+
+`scripts/ops/panji-test-deploy` 是本轮将最终 dev SHA 部署到当前腾讯云测试环境 / 预发布验收 的**唯一入口**。手工 scp / docker cp / 单文件 sync 一律禁止。
+
+入口位置：`scripts/ops/panji-test-deploy`（正式 bash 脚本，有 set -euo pipefail + flock 锁 + preflight + 所有步骤）
+
+### 13.2 panji-test-deploy 流程（代码/命令核验）
+
+```
+step 1: preflight (必须通过)
+  bash scripts/ops/panji-prod-preflight
+    → 验证 SSH 别名 + 仓库根 + repo status + docker compose + DB/Redis 端口
+
+step 2: SHA 精确校验 (三项严格相等)
+  LOCAL_SHA=$(git rev-parse HEAD)                          # 当前本机 dev HEAD
+  ORIGIN_DEV_SHA=$(git ls-remote origin refs/heads/dev | awk '{print $1}')
+  CI_GREEN_SHA=  # 从 GitHub Actions 最新 origin/dev CI 成功 run 的 head_sha 提取
+  [ "$LOCAL_SHA" = "$ORIGIN_DEV_SHA" ] || die
+  [ "$LOCAL_SHA" = "$CI_GREEN_SHA"  ] || die "CI 未全绿，禁止部署"
+
+step 3: 服务器端 image build（仅受影响服务）
+  → backend   (only backend/* 变化)
+  → frontend  (only frontend/* 变化)
+  → capture   (only backend/app/services/*capture* 或 Dockerfile.capture 变化)
+  永远不: docker-compose down -v / docker restart postgres/redis / 删除 volume
+
+step 4: alembic upgrade head（幂等，已 migrations 跳过）
+  backend 容器内: alembic upgrade head
+  不执行: alembic downgrade（除非 rollback 正式流程触发）
+
+step 5: 重建受影响服务
+  docker-compose up -d --force-recreate --no-deps backend frontend capture
+  健康等待: 最多 60s
+
+step 6: SHA 一致性证明（5 项一致，不一致立即回滚）
+  ① Git repo HEAD SHA                          = $LOCAL_SHA
+  ② Docker image digest (backend/frontend)     = image inspect sha256:...
+  ③ backend runtime /api/v1/version.build_sha  = HTTP GET /api/v1/version 提取
+  ④ frontend asset-manifest/build_sha          = HTTP GET /assets/manifest.json 提取
+  ⑤ deploy release notes 写入 docs/changes/CHANGE 的 deploy_sha 字段
+  若任何一项不一致:
+    → 回到上一版本镜像: docker-compose up -d --force-recreate backend:<prev_sha>
+
+step 7: 健康检查（三项都 200 才算部署成功）
+  - backend  /health
+  - frontend / (含 200 + 非空 body)
+  - API      /api/v1/version 含 build_sha 字段
+
+step 8: 部署后验收（浏览器 / CI / Playwright 独立）
+  详见 docs/runbooks/production-deployment.md §本轮测试环境验收章节
+```
+
+### 13.3 禁止的部署操作（黑名单）
+
+以下操作即便"为了临时测试"也禁止。任何发现违反：本轮部署状态立即 BLOCKED。
+
+1. `scp file.py panji-prod:/app/backend/app/...`  **手工单文件同步**
+2. `docker cp local.py trading-backend:/app/...`  **容器内手工覆盖**
+3. SSH 进入服务器后 `vi / sed / 修改源代码 / 修改 migration**
+4. 执行一次性业务脚本：`python -c 'from review_orchestrator_service import create_run; create_run(...)'`（例外：必须通过正式 orchestrator API 或 worker oneoff task 队列执行）
+5. `docker compose down -v` 或 任何 `rm -rf /var/lib/docker/volumes/trading_*`
+
+### 13.4 本次最终 SHA（待填写，部署后更新）
+
+部署 SHA：`__________`（7 位短 SHA + 40 位完整 SHA）
+CI 成功 run URL：`https://github.com/bao1872/market_dev/actions/runs/xxxx`
+部署开始时间：`____-__-__ __:__:__ +08:00`
+部署结束时间：`____-__-__ __:__:__ +08:00`
+SHA 一致性 5 项结果：
+| # | 维度 | SHA | OK |
+|---|---|---|---|
+| 1 | Git repo HEAD | 096a5d3… | ☐ |
+| 2 | Docker image digest (backend) | | ☐ |
+| 3 | backend runtime /api/v1/version:build_sha | | ☐ |
+| 4 | frontend asset manifest build_sha | | ☐ |
+| 5 | CHANGE release notes | | ☐ |
 - 不 down -v、不删除 PostgreSQL/Redis Volume、不自动 migration 的约束不变

@@ -22,5 +22,10 @@ export interface TrendSelectionRow {
   watched: boolean
   latestChangePct: number | null
   latestChangeTradeDate: string | null
+  // [CHANGE-20260731-REMOVE-DSA] 基础字段显式声明：避免 `[key: string]: unknown` 索引签名导致 industry/concept/latestPrice
+  //   被推断为 unknown，进而 sortValue/filterValue/render 返回值类型不匹配 string | number | ReactNode。
+  latestPrice?: number | null
+  industry?: string | null
+  concept?: string | null
   [key: string]: unknown
 }
