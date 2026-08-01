@@ -222,6 +222,10 @@ class FirstPyramidCoreSnapshot(BaseModel):
     trend: DimensionResult = Field(..., description="趋势维度（必选）")
     structure: DimensionResult = Field(..., description="结构维度（必选）")
     momentum: DimensionResult = Field(..., description="动量维度（必选）")
+    statusText: str = Field(
+        ...,
+        description="核心三维共享 summary builder 生成的聚合中文状态描述",
+    )
     volumeContext: VolumeContextSchema | None = Field(
         None, description="共享量能上下文（Gate1）"
     )

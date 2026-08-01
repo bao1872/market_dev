@@ -306,11 +306,15 @@ def test_dsa_segment_v18_current_segment_fields() -> None:
 def test_dsa_segment_v18_prev_segment_null_when_only_one() -> None:
     """V1.8 DSA 段：只有一段时 prev 字段为 null。"""
     bars, dsa_bundle, atr = _build_dsa_segment_test_setup()
-    visual_segments = dsa_bundle.get("visual_segments", [])
-    if len(visual_segments) < 1:
+    if not dsa_bundle.get("last_row_metrics"):
         return
-    # 强制只保留一个段
-    dsa_bundle_one_seg = {**dsa_bundle, "visual_segments": visual_segments[-1:]}
+    metrics = dict(dsa_bundle["last_row_metrics"])
+    for key in tuple(metrics):
+        if key.startswith("prev_segment_"):
+            metrics[key] = None
+    metrics["current_vs_prev_volume_ratio"] = None
+    metrics["current_vs_prev_volume_mean_ratio"] = None
+    dsa_bundle_one_seg = {**dsa_bundle, "last_row_metrics": metrics}
     result = _compute_dsa_segment_factors(bars, dsa_bundle_one_seg, atr)
     assert result["prev_dsa_segment_dir"] is None
     assert result["prev_dsa_segment_age_bars"] is None
@@ -323,8 +327,7 @@ def test_dsa_segment_v18_prev_segment_null_when_only_one() -> None:
 def test_dsa_segment_v18_prev_segment_when_two() -> None:
     """V1.8 DSA 段：两段时 prev 字段正确。"""
     bars, dsa_bundle, atr = _build_dsa_segment_test_setup()
-    visual_segments = dsa_bundle.get("visual_segments", [])
-    if len(visual_segments) < 2:
+    if dsa_bundle["last_row_metrics"].get("prev_segment_id") is None:
         return  # DSA 数据不足时跳过
     result = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     assert result["prev_dsa_segment_dir"] is not None
@@ -344,7 +347,7 @@ def test_dsa_segment_v18_prev_segment_when_two() -> None:
 def test_dsa_segment_v18_efficiency_in_range() -> None:
     """V1.8 DSA 段：efficiency 在 [0,1] 范围内。"""
     bars, dsa_bundle, atr = _build_dsa_segment_test_setup()
-    if dsa_bundle["factor_per_bar"].empty or not dsa_bundle.get("visual_segments"):
+    if dsa_bundle["factor_per_bar"].empty:
         return
     result = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     eff = result["current_dsa_segment_efficiency_0_1"]
@@ -355,21 +358,15 @@ def test_dsa_segment_v18_efficiency_in_range() -> None:
 def test_dsa_segment_v18_volume_sum_correct() -> None:
     """V1.8 DSA 段：current_segment_volume_sum 等于段内 volume 之和。"""
     bars, dsa_bundle, atr = _build_dsa_segment_test_setup()
-    visual_segments = dsa_bundle.get("visual_segments", [])
     factor_per_bar = dsa_bundle.get("factor_per_bar")
-    if factor_per_bar is None or factor_per_bar.empty or not visual_segments:
+    if factor_per_bar is None or factor_per_bar.empty:
         return
     result = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     # 验证 volume_sum = sum(volume over segment bars)
-    current_seg = visual_segments[-1]
-    points = current_seg.get("points", [])
-    if not points:
+    start_index = dsa_bundle["last_row_metrics"].get("segment_start_bar_index")
+    if start_index is None:
         return
-    start_time = points[0].get("time")
-    if start_time is None:
-        return
-    start_ts = pd.Timestamp(start_time)
-    seg_bars = bars.loc[start_ts:]
+    seg_bars = bars.iloc[int(start_index):]
     expected_vol_sum = float(seg_bars["volume"].sum())
     actual_vol_sum = result["current_segment_volume_sum"]
     if actual_vol_sum is not None:
@@ -381,7 +378,7 @@ def test_dsa_segment_v18_volume_sum_correct() -> None:
 def test_dsa_segment_v18_extents_pct_uses_close() -> None:
     """V1.8 DSA 段：segment_extents_pct 基于 close 不基于 dsa_vwap（bug 修复）。"""
     bars, dsa_bundle, atr = _build_dsa_segment_test_setup()
-    if dsa_bundle["factor_per_bar"].empty or not dsa_bundle.get("visual_segments"):
+    if dsa_bundle["factor_per_bar"].empty:
         return
     result = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     ext = result["segment_extents_pct"]
@@ -400,8 +397,7 @@ def test_dsa_segment_v18_extents_pct_uses_close() -> None:
 def test_dsa_segment_v18_return_per_volume() -> None:
     """V1.8 DSA 段：return_per_volume 计算正确。"""
     bars, dsa_bundle, atr = _build_dsa_segment_test_setup()
-    visual_segments = dsa_bundle.get("visual_segments", [])
-    if len(visual_segments) < 2:
+    if dsa_bundle["last_row_metrics"].get("prev_segment_id") is None:
         return
     result = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     cur_ret = result["current_dsa_segment_return_pct"]
@@ -416,7 +412,7 @@ def test_dsa_segment_v18_return_per_volume() -> None:
 def test_dsa_segment_v18_atr_passed() -> None:
     """V1.8 DSA 段：atr 参数传入后 price_vs_dsa_atr 有值。"""
     bars, dsa_bundle, atr = _build_dsa_segment_test_setup()
-    if dsa_bundle["factor_per_bar"].empty or not dsa_bundle.get("visual_segments"):
+    if dsa_bundle["factor_per_bar"].empty:
         return
     result = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     if atr is not None and np.isfinite(atr[-1]) and atr[-1] > 0:

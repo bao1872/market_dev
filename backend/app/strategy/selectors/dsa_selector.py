@@ -406,6 +406,58 @@ def compute_dsa_history(
     amount = df["amount"].astype(float)
     avg_amount_20d = amount.rolling(window=20, min_periods=1).mean()
 
+    # [Phase 5] DSA segment contract (single producer).
+    # A segment is the causal, continuous DSA direction interval from the latest
+    # regime/anchor switch through the current bar.  Consumers must read these
+    # fields instead of rebuilding boundaries from visual_segments.
+    bar_position = pd.Series(np.arange(len(df), dtype=int), index=df.index)
+    segment_id = (group_id - 1).astype(int)
+    segment_start_bar_index = bar_position.groupby(group_id).transform("first").astype(int)
+    segment_end_bar_index = bar_position.astype(int)
+    segment_start_time = pd.Series(df.index, index=df.index).groupby(group_id).transform("first")
+    segment_end_time = pd.Series(df.index, index=df.index)
+    segment_start_price = close.groupby(group_id).transform("first")
+    segment_end_price = close
+    segment_bars = count.astype(int)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        segment_change_pct = (segment_end_price / segment_start_price - 1.0) * 100.0
+        segment_slope = segment_change_pct / segment_bars.replace(0, np.nan)
+
+    # Previous segment metadata is mapped from the immediately preceding,
+    # already-complete segment.  It is informative only and never changes the
+    # current segment boundary.
+    segment_group_summary = pd.DataFrame(
+        {
+            "segment_id": segment_id.groupby(group_id).first(),
+            "direction": dir_vals.groupby(group_id).first(),
+            "start_bar_index": segment_start_bar_index.groupby(group_id).first(),
+            "end_bar_index": segment_end_bar_index.groupby(group_id).last(),
+            "start_time": segment_start_time.groupby(group_id).first(),
+            "end_time": segment_end_time.groupby(group_id).last(),
+            "start_price": segment_start_price.groupby(group_id).first(),
+            "end_price": segment_end_price.groupby(group_id).last(),
+            "bars": segment_bars.groupby(group_id).last(),
+            "change_pct": segment_change_pct.groupby(group_id).last(),
+            "slope": segment_slope.groupby(group_id).last(),
+        }
+    )
+    previous_segment_summary = segment_group_summary.shift(1)
+
+    def _map_previous(field: str) -> pd.Series:
+        return group_id.map(previous_segment_summary[field])
+
+    prev_segment_id = _map_previous("segment_id")
+    prev_segment_direction = _map_previous("direction")
+    prev_segment_start_bar_index = _map_previous("start_bar_index")
+    prev_segment_end_bar_index = _map_previous("end_bar_index")
+    prev_segment_start_time = _map_previous("start_time")
+    prev_segment_end_time = _map_previous("end_time")
+    prev_segment_start_price = _map_previous("start_price")
+    prev_segment_end_price = _map_previous("end_price")
+    prev_segment_bars = _map_previous("bars")
+    prev_segment_change_pct = _map_previous("change_pct")
+    prev_segment_slope = _map_previous("slope")
+
     # [Phase 5B-1 + CHANGE-20260729-002 量能口径修正] 段内成交量迁移至 DSA SSOT。
     # PRD20 QM-12：每段趋势至少记录平均成交量及与前段的变化关系。
     # 量能口径修正：废弃"当前段累计量 / 前一段总量"（口径不一致），
@@ -531,6 +583,30 @@ def compute_dsa_history(
             "change_pct": change_pct,
             "vol_zscore": vol_zscore,
             "avg_amount_20d": avg_amount_20d,
+            # [Phase 5] canonical DSA segment producer output.  change_pct is
+            # cumulative from segment start, never a one-day return.
+            "segment_id": segment_id,
+            "segment_direction": dir_vals,
+            "segment_start_bar_index": segment_start_bar_index,
+            "segment_end_bar_index": segment_end_bar_index,
+            "segment_start_time": segment_start_time,
+            "segment_end_time": segment_end_time,
+            "segment_start_price": segment_start_price,
+            "segment_end_price": segment_end_price,
+            "segment_bars": segment_bars,
+            "segment_change_pct": segment_change_pct,
+            "segment_slope": segment_slope,
+            "prev_segment_id": prev_segment_id,
+            "prev_segment_direction": prev_segment_direction,
+            "prev_segment_start_bar_index": prev_segment_start_bar_index,
+            "prev_segment_end_bar_index": prev_segment_end_bar_index,
+            "prev_segment_start_time": prev_segment_start_time,
+            "prev_segment_end_time": prev_segment_end_time,
+            "prev_segment_start_price": prev_segment_start_price,
+            "prev_segment_end_price": prev_segment_end_price,
+            "prev_segment_bars": prev_segment_bars,
+            "prev_segment_change_pct": prev_segment_change_pct,
+            "prev_segment_slope": prev_segment_slope,
             # [Phase 5B-1 + CHANGE-20260729-002] 段内成交量（SSOT 输出，禁止外部重复派生）
             # deprecated sum-based 字段保留兼容；新 mean-based 字段为权威口径
             "current_segment_volume_sum": current_segment_volume_sum,  # deprecated
@@ -613,6 +689,48 @@ def _history_row_to_metrics(row: pd.Series) -> dict[str, Any]:
         "dsa_vwap_dev_pct": _safe_float(row["dsa_vwap_dev_pct"]),
         "vol_zscore": _safe_float(row["vol_zscore"]),
         "avg_amount_20d": _safe_float(row["avg_amount_20d"]),
+        # [Phase 5] canonical segment output.  segment_change_pct is cumulative
+        # over the DSA segment and must never be interpreted as return_1d.
+        "segment_id": int(row["segment_id"]) if pd.notna(row["segment_id"]) else None,
+        "segment_direction": int(row["segment_direction"])
+        if pd.notna(row["segment_direction"])
+        else None,
+        "segment_start_bar_index": int(row["segment_start_bar_index"])
+        if pd.notna(row["segment_start_bar_index"])
+        else None,
+        "segment_end_bar_index": int(row["segment_end_bar_index"])
+        if pd.notna(row["segment_end_bar_index"])
+        else None,
+        "segment_start_time": _safe_date(row["segment_start_time"]),
+        "segment_end_time": _safe_date(row["segment_end_time"]),
+        "segment_start_price": _safe_float(row["segment_start_price"]),
+        "segment_end_price": _safe_float(row["segment_end_price"]),
+        "segment_bars": int(row["segment_bars"])
+        if pd.notna(row["segment_bars"])
+        else None,
+        "segment_change_pct": _safe_float(row["segment_change_pct"]),
+        "segment_slope": _safe_float(row["segment_slope"]),
+        "prev_segment_id": int(row["prev_segment_id"])
+        if pd.notna(row["prev_segment_id"])
+        else None,
+        "prev_segment_direction": int(row["prev_segment_direction"])
+        if pd.notna(row["prev_segment_direction"])
+        else None,
+        "prev_segment_start_bar_index": int(row["prev_segment_start_bar_index"])
+        if pd.notna(row["prev_segment_start_bar_index"])
+        else None,
+        "prev_segment_end_bar_index": int(row["prev_segment_end_bar_index"])
+        if pd.notna(row["prev_segment_end_bar_index"])
+        else None,
+        "prev_segment_start_time": _safe_date(row["prev_segment_start_time"]),
+        "prev_segment_end_time": _safe_date(row["prev_segment_end_time"]),
+        "prev_segment_start_price": _safe_float(row["prev_segment_start_price"]),
+        "prev_segment_end_price": _safe_float(row["prev_segment_end_price"]),
+        "prev_segment_bars": int(row["prev_segment_bars"])
+        if pd.notna(row["prev_segment_bars"])
+        else None,
+        "prev_segment_change_pct": _safe_float(row["prev_segment_change_pct"]),
+        "prev_segment_slope": _safe_float(row["prev_segment_slope"]),
         # [Phase 5B-1 + CHANGE-20260729-002] 段内成交量（SSOT 输出，禁止外部重复派生）
         # deprecated sum-based 字段保留兼容；新 mean-based 字段为权威口径
         "current_segment_volume_sum": _safe_float(row["current_segment_volume_sum"]),  # deprecated
@@ -734,18 +852,9 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
     dir_vals = dir_series.fillna(0).astype(int)
     per_bar["dsa_dir"] = dir_vals.values
 
-    # regime_id: dir 第一次切换时递增（与原 compute_indicators 逻辑一致）
-    regime_id: list[int] = [0] * n
-    current_regime = 0
-    last_dir: int | None = None
-    for i, d_val in enumerate(dir_vals.values):
-        d_int = int(d_val)
-        if last_dir is not None and d_int != last_dir and d_int != 0:
-            current_regime += 1
-        if d_int != 0:
-            last_dir = d_int
-        regime_id[i] = current_regime
-    per_bar["regime_id"] = regime_id
+    # regime_id is a compatibility alias of the canonical segment_id produced
+    # by compute_dsa_history.  Do not rebuild it from visual output.
+    per_bar["regime_id"] = per_bar["segment_id"].astype(int)
 
     # pivot_type / pivot_price / anchor_time: 从稀疏 pivot_labels 构造按 bar 对齐的密集数组
     pivot_type: list[str | None] = [None] * n

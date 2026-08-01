@@ -1024,6 +1024,9 @@ def compute_first_pyramid_core_snapshot(
     # 4. core hash（排除 Node 参数）
     input_hash = _compute_input_hash(bars)
     parameter_hash = _compute_core_parameter_hash()
+    aggregate_status = _build_aggregate_status_text(
+        trend_dim, structure_dim, momentum_dim, None
+    )
 
     return FirstPyramidCoreSnapshot(
         symbol=symbol,
@@ -1031,6 +1034,7 @@ def compute_first_pyramid_core_snapshot(
         trend=trend_dim,
         structure=structure_dim,
         momentum=momentum_dim,
+        statusText=aggregate_status,
         volumeContext=vc_schema,
         inputHash=input_hash,
         parameterHash=parameter_hash,

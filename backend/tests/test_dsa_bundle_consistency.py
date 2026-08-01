@@ -229,6 +229,10 @@ class TestDsaBundleLastRowConsistency:
             "last_cross_down_date",
             "rope_cross_up_date",
             "rope_cross_down_date",
+            "segment_start_time",
+            "segment_end_time",
+            "prev_segment_start_time",
+            "prev_segment_end_time",
         }
         bool_keys = {"touch_rope", "touch_vwap"}
         # [CHANGE-20260729-002] trend_transition 为字符串枚举字段，非数值
