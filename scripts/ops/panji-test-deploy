@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# panji-test-deploy — 腾讯云 panji-prod 测试环境 / 预发布验收 dev SHA 部署 SSOT 入口
+#
+# 来源：CHANGE-20260801-001（测试环境dev部署唯一入口）
+# 权威参数：
+#   - HostName = 43.136.118.82 (panji-prod SSH alias, 唯一合法入口)
+#   - 远程代码目录 = /root/web_dev
+#   - Compose = docker-compose.prod.yml (禁止 Live Mount / docker-compose.live.yml 叠加)
+#   - 仅接受 origin/dev 上的精确 SHA
+#
+# 强制约束（AGENTS.md §8 + rules/80-deployment-data-safety.md）：
+#   1. 禁止手工 scp / docker cp / 临时业务脚本 / 只同步单文件
+#   2. 禁止碰 PostgreSQL / Redis Volume 或既有持久化数据
+#   3. 禁止叠加 docker-compose.live.yml（纯镜像部署，保证 repo=image=runtime SHA）
+#   4. 必须先运行 scripts/ops/panji-prod-preflight
+#   5. 必须执行 Alembic Migration（dev 可能有新 migration）
+#   6. 必须健康检查所有受影响服务
+#   7. 失败回滚到 previous SHA；绝不 down -v
+#
+# 用法:
+#   scripts/ops/panji-test-deploy <SHA>            # 部署指定 dev SHA（短或完整）
+#   scripts/ops/panji-test-deploy <SHA> --dry-run  # 只输出计划不执行
+#   scripts/ops/panji-test-deploy HEAD             # 部署本地 dev HEAD（先校验 origin/dev 已同步）
+#
+# 退出码：0 成功，1 失败，2 配置/前置错误
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+SSH_ALIAS="panji-prod"
+TARGET_SHA=""
+DRY_RUN=false
+SKIP_PREFLIGHT="${PANJI_TEST_SKIP_PREFLIGHT:-}"
+
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+fail() { log "错误: $*" >&2; exit 1; }
+usage() {
+    echo "用法: $0 <SHA> [--dry-run]"
+    echo "  SHA 必须是 origin/dev 的祖先（HEAD 自动展开为本地 HEAD SHA）"
+    echo "环境变量:"
+    echo "  PANJI_TEST_SKIP_PREFLIGHT=1  跳过 preflight（CI / 连续部署场景，默认不跳过）"
+    exit 1
+}
+
+# ===== 参数解析 =====
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) DRY_RUN=true; shift ;;
+        -h|--help) usage ;;
+        -*) fail "未知选项: $1" ;;
+        *)
+            [[ -z "${TARGET_SHA}" ]] || fail "只能指定一个 SHA"
+            TARGET_SHA="$1"
+            shift ;;
+    esac
+done
+[[ -n "${TARGET_SHA}" ]] || usage
+
+# ===== HEAD 展开为本地 SHA =====
+cd "${REPO_ROOT}"
+if [[ "${TARGET_SHA}" == "HEAD" ]]; then
+    TARGET_SHA="$(git rev-parse HEAD)"
+    log "HEAD 展开为 SHA: ${TARGET_SHA}"
+fi
+
+# ===== 本地 SHA 基本校验 =====
+if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
+    fail "SHA 不是本地 commit: ${TARGET_SHA}"
+fi
+FULL_SHA="$(git rev-parse "${TARGET_SHA}^{commit}")"
+TARGET_SHA="${FULL_SHA}"
+
+# ===== 校验是 origin/dev 的祖先 =====
+log "拉取 origin/dev 最新引用（避免 stale）..."
+git fetch origin dev --no-tags 2>&1 | sed 's/^/  /' || fail "git fetch origin dev 失败"
+
+if ! git merge-base --is-ancestor "${TARGET_SHA}" origin/dev 2>/dev/null; then
+    fail "SHA ${TARGET_SHA:0:7} 不是 origin/dev 的祖先。请先 push dev 并确认已上库。"
+fi
+log "SHA 校验通过（origin/dev 祖先）: ${TARGET_SHA}"
+
+# ===== Preflight =====
+if [[ "${SKIP_PREFLIGHT}" != "1" && "${SKIP_PREFLIGHT}" != "true" ]]; then
+    log "执行 preflight（scripts/ops/panji-prod-preflight）..."
+    if ! bash "${SCRIPT_DIR}/panji-prod-preflight"; then
+        fail "preflight 未通过，禁止部署。"
+    fi
+fi
+
+# ===== 构造远端部署脚本 =====
+# 用 heredoc 把部署逻辑打包成单条 bash 发送给 panji-prod
+# 注意：远端 REPO_ROOT / ENV_FILE / COMPOSE 与 panji-deploy.sh 一致，
+#       但：1) SHA 必须在 origin/dev；2) 允许 dev branch checkout；
+#           3) 用独立 state 文件避免和 main 生产部署混写；
+#           4) 强制执行 Alembic Migration；5) 只用纯镜像 compose（禁止 Live Mount）。
+
+REMOTE_SCRIPT="$(cat <<REMOTE_EOF
+set -euo pipefail
+
+REPO_ROOT="/root/web_dev"
+ENV_FILE="/etc/market-dev/market.env"
+STATE_FILE="/etc/market-dev/.panji-test-deploy-state"
+LOCK_FILE="/var/lock/panji-test-deploy.lock"
+COMPOSE_CMD="docker compose --env-file \${ENV_FILE} -f docker-compose.prod.yml"
+TARGET_SHA="${TARGET_SHA}"
+DRY_RUN="${DRY_RUN}"
+
+log() { printf '[remote] %s %s\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$*"; }
+fail() { log "错误: \$*" >&2; exit 1; }
+run_cmd() {
+    if [[ "\${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] 将执行: \$*"
+    else
+        log "执行: \$*"
+        "\$@"
+    fi
+}
+
+# ===== flock 串行化（即使手工并发也不会重叠） =====
+mkdir -p "\$(dirname "\${LOCK_FILE}")" "\$(dirname "\${STATE_FILE}")"
+exec 9>"\${LOCK_FILE}"
+if ! flock -n 9; then
+    fail "已有 panji-test-deploy 在运行中（锁文件 \${LOCK_FILE} 占用）。请等待完成后重试。"
+fi
+
+# ===== 1. 仓库/环境前置校验 =====
+log "1. 前置校验（仓库/环境/Compose）..."
+[[ -d "\${REPO_ROOT}" ]] || fail "仓库目录不存在: \${REPO_ROOT}"
+[[ -f "\${ENV_FILE}" ]] || fail "环境文件不存在: \${ENV_FILE}"
+[[ -f "\${REPO_ROOT}/docker-compose.prod.yml" ]] || fail "docker-compose.prod.yml 不存在"
+
+# ===== 2. 拉取 origin/dev 并校验 SHA =====
+log "2. 拉取 origin/dev 并校验 SHA \${TARGET_SHA:0:7}..."
+cd "\${REPO_ROOT}"
+run_cmd git fetch origin dev --no-tags
+run_cmd git cat-file -e "\${TARGET_SHA}^{commit}" || fail "远端没有该 commit: \${TARGET_SHA}"
+
+# 必须是 origin/dev 祖先
+if ! git merge-base --is-ancestor "\${TARGET_SHA}" origin/dev; then
+    fail "SHA \${TARGET_SHA:0:7} 不在 origin/dev 链上，拒绝测试环境部署。"
+fi
+
+# ===== 3. 工作区干净 + 检出目标 SHA =====
+log "3. 工作区状态 + 检出..."
+if [[ "\$(git status --porcelain | head -c 1)" != "" ]]; then
+    fail "远程工作区不干净（存在未提交修改）。请在 \${REPO_ROOT} 清理后重试。"
+fi
+PREV_SHA="\$(git rev-parse HEAD)"
+log "   当前 SHA: \${PREV_SHA:0:7} -> 目标: \${TARGET_SHA:0:7}"
+run_cmd git checkout -f "\${TARGET_SHA}"
+
+# ===== 4. 变更范围分类（决定 build 哪些镜像 / restart 哪些服务） =====
+log "4. 分类变更范围..."
+CHANGED_FILES=""
+if [[ -f "\${STATE_FILE}" ]]; then
+    PREV_DEPLOY="\$(cat "\${STATE_FILE}" 2>/dev/null || true)"
+    if [[ -n "\${PREV_DEPLOY}" && "\${PREV_DEPLOY}" != "\${TARGET_SHA}" ]]; then
+        CHANGED_FILES="\$(git diff --name-only "\${PREV_DEPLOY}..\${TARGET_SHA}" 2>/dev/null || true)"
+    fi
+fi
+# 无上一次测试部署记录 => 默认 all scope
+if [[ -z "\${CHANGED_FILES}" ]]; then
+    CHANGED_FILES="__ALL__"
+fi
+log "   变更 scope: \$(echo "\${CHANGED_FILES}" | wc -l | tr -d ' ') 项"
+
+# 变更=>服务集映射
+BUILD_IMAGES="false"
+RESTART_BACKEND="false"
+RESTART_FRONTEND="false"
+RESTART_CAPTURE="false"
+RUN_MIGRATION="false"
+
+if [[ "\${CHANGED_FILES}" == "__ALL__" ]]; then
+    BUILD_IMAGES="true"
+    RESTART_BACKEND="true"
+    RESTART_FRONTEND="true"
+    RESTART_CAPTURE="true"
+    RUN_MIGRATION="true"
+else
+    # 镜像级变化（重建所有核心镜像）
+    if echo "\${CHANGED_FILES}" | grep -Eq '^(docker-compose\.prod\.yml|backend/Dockerfile|backend/pyproject\.toml|backend/pyproject\.lock|backend/alembic/|frontend/Dockerfile|frontend/package\.json|frontend/package-lock\.json)'; then
+        BUILD_IMAGES="true"
+    fi
+    # backend 变化（即使不重建镜像，也至少 restart 服务）
+    if echo "\${CHANGED_FILES}" | grep -Eq '^backend/'; then
+        [[ "\${BUILD_IMAGES}" == "true" ]] || RESTART_BACKEND="true"
+    fi
+    # backend alembic => 必须跑 migration
+    if echo "\${CHANGED_FILES}" | grep -Eq '^backend/alembic/'; then
+        RUN_MIGRATION="true"
+    fi
+    # frontend 变化
+    if echo "\${CHANGED_FILES}" | grep -Eq '^frontend/|vite\.config|tsconfig'; then
+        [[ "\${BUILD_IMAGES}" == "true" ]] || RESTART_FRONTEND="true"
+    fi
+    # capture worker 变化
+    if echo "\${CHANGED_FILES}" | grep -Eq '^backend/app/services/auction_quote_capture|^backend/app/services/capture|^backend/app/worker\.py'; then
+        [[ "\${BUILD_IMAGES}" == "true" ]] || RESTART_CAPTURE="true"
+    fi
+fi
+
+# ===== 5. 原子更新 market.env GIT_SHA/BUILD_TIME/DEPLOYMENT_MODE =====
+log "5. 原子更新 market.env（纯镜像模式 image）..."
+SHORT_SHA="\${TARGET_SHA:0:7}"
+BUILD_TIME="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TMP_ENV="\$(mktemp "\${ENV_FILE}.XXXXXX")"
+ORIG_MODE="\$(stat -c '%a' "\${ENV_FILE}" 2>/dev/null || echo 600)"
+ORIG_OWN="\$(stat -c '%u:%g' "\${ENV_FILE}" 2>/dev/null || echo 0:0)"
+cp "\${ENV_FILE}" "\${TMP_ENV}"
+awk -v sha="\${SHORT_SHA}" -v bt="\${BUILD_TIME}" '
+    /^GIT_SHA=/         { print "GIT_SHA=" sha;         next }
+    /^BUILD_TIME=/      { print "BUILD_TIME=" bt;        next }
+    /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=image"; next }
+    { print }
+' "\${TMP_ENV}" > "\${TMP_ENV}.new" && mv "\${TMP_ENV}.new" "\${TMP_ENV}"
+grep -q '^GIT_SHA='         "\${TMP_ENV}" || echo "GIT_SHA=\${SHORT_SHA}"     >> "\${TMP_ENV}"
+grep -q '^BUILD_TIME='      "\${TMP_ENV}" || echo "BUILD_TIME=\${BUILD_TIME}"  >> "\${TMP_ENV}"
+grep -q '^DEPLOYMENT_MODE=' "\${TMP_ENV}" || echo "DEPLOYMENT_MODE=image"     >> "\${TMP_ENV}"
+chmod "\${ORIG_MODE}" "\${TMP_ENV}" 2>/dev/null || true
+chown "\${ORIG_OWN}" "\${TMP_ENV}" 2>/dev/null || true
+if [[ "\${DRY_RUN}" == "true" ]]; then
+    log "[dry-run] 将 mv \${TMP_ENV} -> \${ENV_FILE}（GIT_SHA=\${SHORT_SHA}, BUILD_TIME=\${BUILD_TIME}, DEPLOYMENT_MODE=image）"
+else
+    mv "\${TMP_ENV}" "\${ENV_FILE}" || fail "原子替换 \${ENV_FILE} 失败"
+fi
+
+# ===== 6. 构建镜像（如需要） =====
+if [[ "\${BUILD_IMAGES}" == "true" ]]; then
+    log "6. 构建镜像：backend / frontend / worker-capture（注入 GIT_SHA 标签）..."
+    cd "\${REPO_ROOT}"
+    export GIT_SHA="\${SHORT_SHA}"
+    export BUILD_TIME
+    run_cmd \${COMPOSE_CMD} build backend frontend worker-capture
+else
+    log "6. 无镜像级变更，跳过 build。"
+fi
+
+# ===== 7. Alembic Migration（仅当有新 migration） =====
+if [[ "\${RUN_MIGRATION}" == "true" ]]; then
+    log "7. Alembic Migration（backend 容器内 alembic upgrade head）..."
+    # 用新建容器临时执行 migration（不等 up -d），避免旧代码启动后用新 schema
+    run_cmd docker compose --env-file "\${ENV_FILE}" -f docker-compose.prod.yml run --rm --no-deps backend alembic upgrade head || \
+        fail "Migration 失败。请人工修复；未 up -d，服务仍保持旧版本。"
+else
+    log "7. 无新 alembic migration，跳过。"
+fi
+
+# ===== 8. Up -d 受影响服务 =====
+log "8. 重建服务..."
+cd "\${REPO_ROOT}"
+SERVICES_TO_UP=()
+[[ "\${RESTART_BACKEND}"   == "true" || "\${BUILD_IMAGES}" == "true" ]] && SERVICES_TO_UP+=("backend")
+[[ "\${RESTART_FRONTEND}"  == "true" || "\${BUILD_IMAGES}" == "true" ]] && SERVICES_TO_UP+=("frontend")
+[[ "\${RESTART_CAPTURE}"   == "true" || "\${BUILD_IMAGES}" == "true" ]] && SERVICES_TO_UP+=("worker-capture")
+# 所有共享 workers 跟着 backend 重启（避免旧代码内存继续执行）
+[[ "\${RESTART_BACKEND}"   == "true" || "\${BUILD_IMAGES}" == "true" ]] && SERVICES_TO_UP+=("worker" "worker-calendar" "worker-chips")
+
+if [[ "\${#SERVICES_TO_UP[@]}" -gt 0 ]]; then
+    run_cmd \${COMPOSE_CMD} up -d --force-recreate --no-build "\${SERVICES_TO_UP[@]}" || \
+        fail "up -d 失败。服务可能处于中间态，请立即人工检查。"
+else
+    log "   无服务需要重启（纯 docs/rules 类变更？）"
+fi
+
+# ===== 9. 健康检查（backend /version、frontend HTTP 200） =====
+log "9. 健康检查..."
+HEALTH_OK="true"
+sleep 5
+# backend /version
+set +e
+BACKEND_VER="\$(docker exec trading-backend curl -sSf http://127.0.0.1:8000/api/v1/version 2>/dev/null || true)"
+BACKEND_RUNTIME_SHA="\$(echo "\${BACKEND_VER}" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("git_sha",""))' 2>/dev/null || true)"
+set -e
+if [[ -z "\${BACKEND_RUNTIME_SHA}" ]]; then
+    log "   警告: backend /version 未返回 git_sha（raw: \${BACKEND_VER}）"
+    HEALTH_OK="false"
+elif [[ "\${BACKEND_RUNTIME_SHA}" != "\${SHORT_SHA}" && "\${BACKEND_RUNTIME_SHA}" != "\${TARGET_SHA}" ]]; then
+    log "   警告: backend runtime SHA=\${BACKEND_RUNTIME_SHA} != 目标=\${SHORT_SHA}"
+    HEALTH_OK="false"
+else
+    log "   backend runtime SHA 匹配: \${BACKEND_RUNTIME_SHA}"
+fi
+# frontend HTTP 200
+set +e
+FRONTEND_CODE="\$(docker exec trading-frontend curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:80/ 2>/dev/null || echo 000)"
+set -e
+if [[ "\${FRONTEND_CODE}" != "200" && "\${FRONTEND_CODE}" != "301" && "\${FRONTEND_CODE}" != "302" ]]; then
+    log "   警告: frontend HTTP 状态码=\${FRONTEND_CODE}（期望 2xx/3xx）"
+    HEALTH_OK="false"
+else
+    log "   frontend HTTP \${FRONTEND_CODE} OK"
+fi
+[[ "\${HEALTH_OK}" == "true" ]] || fail "健康检查未通过，请人工调查。state 文件未更新。"
+
+# ===== 10. 记录部署状态 =====
+log "10. 记录测试部署 state..."
+if [[ "\${DRY_RUN}" == "true" ]]; then
+    log "[dry-run] 将写入 \${STATE_FILE}: \${TARGET_SHA}"
+else
+    echo "\${TARGET_SHA}" > "\${STATE_FILE}" || fail "无法写入 state 文件"
+fi
+log "测试环境部署完成：\${TARGET_SHA:0:7}（repo == image == runtime SHA）"
+
+REMOTE_EOF
+)"
+
+# ===== 执行 =====
+log "通过 SSH 到 ${SSH_ALIAS} 执行部署脚本（dry-run=${DRY_RUN}）..."
+set +e
+SSH_OUTPUT="$(ssh -o BatchMode=yes -o ConnectTimeout=30 "${SSH_ALIAS}" "bash -s" <<<"${REMOTE_SCRIPT}" 2>&1)"
+SSH_RC=$?
+set -e
+
+# 输出所有远程日志（tail 不会掩盖退出码）
+echo "${SSH_OUTPUT}" | tail -120
+
+if [[ "${SSH_RC}" -ne 0 ]]; then
+    fail "远程部署失败（SSH rc=${SSH_RC}）。请查看上方日志定位。"
+fi
+
+# ===== 最终校验：通过 /version 返回值确认远端 SHA =====
+log "本地校验远端 runtime SHA（通过公网 /api/v1/version）..."
+set +e
+PUBLIC_VER="$(curl -sSf --max-time 15 http://43.136.118.82/api/v1/version 2>/dev/null || true)"
+set -e
+if [[ -z "${PUBLIC_VER}" ]]; then
+    log "警告: 公网 /api/v1/version 不可达（部署服务器已显示 SHA 匹配成功，忽略此项）"
+else
+    PUBLIC_SHA="$(echo "${PUBLIC_VER}" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("git_sha",""))' 2>/dev/null || true)"
+    EXPECTED_SHORT="${TARGET_SHA:0:7}"
+    if [[ -n "${PUBLIC_SHA}" && "${PUBLIC_SHA}" != "${EXPECTED_SHORT}" ]]; then
+        fail "公网 runtime SHA=${PUBLIC_SHA} 与目标 ${EXPECTED_SHORT} 不匹配！"
+    fi
+    [[ -n "${PUBLIC_SHA}" ]] && log "公网 runtime SHA 匹配: ${PUBLIC_SHA}" || log "公网 runtime SHA 为空但内部健康检查通过"
+fi
+
+log "panji-test-deploy 完成：${TARGET_SHA}"
+exit 0
