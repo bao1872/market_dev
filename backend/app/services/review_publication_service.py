@@ -189,26 +189,45 @@ async def publish_review(
     run: MarketReviewRun,
     *,
     force: bool = False,
-) -> FactorPublication:
+    operator: str | None = None,
+    idempotency_key: str | None = None,
+) -> FactorPublication | None:
     """发布复盘：写入 factor_publications 指针并更新 run.published_at/status。
+
+    [P0 安全收口 2026-08-01] force=True 语义变更：
+    - force 不再写正式 pointer，只把 run 标记为 provisional（元数据可审计）；
+    - run.status 不进入 published，run.published_at 不写入；
+    - metadata_json["provisional_publication"] 记录 force_requested、
+      is_provisional、publish gate blockers、执行时间、操作者和幂等键；
+    - provisional run 仅 admin 可通过 include_partial=true 或显式 run_id 查看；
+      普通用户 API 只读正式 pointer，天然不可见。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         run: MarketReviewRun ORM 对象
-        force: 是否强制发布（跳过门禁，仅 admin 调试）
+        force: True 时生成 provisional 标记（不写正式 pointer，仅 admin 调试）
+        operator: 操作者标识（admin user_id 或 CLI 操作者），审计用
+        idempotency_key: 调用方幂等键，审计用
 
     Returns:
-        FactorPublication 记录
+        正式发布返回 FactorPublication 记录；force（provisional）路径返回 None
 
     Raises:
         ReviewPublishBlockError: 发布门禁失败（force=False 时）
     """
-    if not force:
-        publishable, blockers = await evaluate_publish_gate(session, run)
-        if not publishable:
-            raise ReviewPublishBlockError(blockers)
-
     now = datetime.now(UTC)
+
+    if force:
+        await _mark_run_provisional(
+            session, run,
+            operator=operator, idempotency_key=idempotency_key, now=now,
+        )
+        return None
+
+    publishable, blockers = await evaluate_publish_gate(session, run)
+    if not publishable:
+        raise ReviewPublishBlockError(blockers)
+
     meta = {
         "review_run_id": str(run.id),
         "trade_date": run.trade_date.isoformat(),
@@ -259,6 +278,182 @@ async def publish_review(
     return await _get_publication(
         session, PUBLICATION_KIND_MARKET_REVIEW, run.trade_date,
     )  # type: ignore[return-value]
+
+
+async def _mark_run_provisional(
+    session: AsyncSession,
+    run: MarketReviewRun,
+    *,
+    operator: str | None,
+    idempotency_key: str | None,
+    now: datetime,
+) -> None:
+    """force 路径：只把 run 标记为 provisional，不写正式 pointer。
+
+    审计字段（PRD 发布安全收口）：
+    - force_requested / is_provisional: 固定 True
+    - gate_blockers: 当前发布门禁评估结果（不阻断，仅记录）
+    - requested_at / operator / idempotency_key: 执行时间、操作者、幂等键
+    """
+    _publishable, gate_blockers = await evaluate_publish_gate(session, run)
+    record = {
+        "force_requested": True,
+        "is_provisional": True,
+        "gate_blockers": gate_blockers,
+        "requested_at": now.isoformat(),
+        "operator": operator,
+        "idempotency_key": idempotency_key,
+    }
+    run.metadata_json = {
+        **(run.metadata_json or {}),
+        "provisional_publication": record,
+    }
+    logger.warning(
+        "[ReviewPublish] force=provisional（不写正式 pointer）: "
+        "run_id=%s, trade_date=%s, operator=%s, idempotency_key=%s, "
+        "gate_blockers=%s",
+        run.id, run.trade_date, operator, idempotency_key, gate_blockers,
+    )
+
+
+async def withdraw_review_publication(
+    session: AsyncSession,
+    trade_date: date,
+    *,
+    reason: str,
+    operator: str,
+    idempotency_key: str,
+    dry_run: bool = False,
+) -> dict:
+    """撤销指定交易日的 Review 正式 publication pointer（可审计、幂等）。
+
+    安全合同（P0 安全收口 2026-08-01）：
+    - 只删除 factor_publications 中
+      (scope_type=market, scope_key=market, publication_kind=market_review,
+       trade_date=指定日) 的唯一条目，不得触碰其他交易日或其他
+      publication_kind；
+    - 保留 review run / scope snapshot / signal / attribution / instrument
+      全部数据，禁止删除 run；
+    - 只撤销 pointer；run.status 与 run.published_at 是历史发布事实，必须保持不变；
+    - after-close 是否可复用由当前正式 pointer 判定，不以 run 历史状态单独判定；
+    - 撤销审计写入 run.metadata_json["publication_withdrawal"]；
+    - 幂等：pointer 已不存在时返回 already_withdrawn=True，不做任何写入；
+    - dry_run=True 只返回将影响的内容，不执行任何写入。
+
+    Args:
+        session: 异步 DB 会话（caller 控制 commit）
+        trade_date: 要撤销 pointer 的业务交易日
+        reason: 撤销原因（审计必填）
+        operator: 操作者标识（审计必填）
+        idempotency_key: 幂等键（审计必填）
+        dry_run: True 时只读，不写入
+
+    Returns:
+        结果摘要 dict：
+        {
+            "trade_date": str,
+            "dry_run": bool,
+            "pointer_found": bool,
+            "already_withdrawn": bool,
+            "withdrawn": bool,
+            "pointer": {...} | None,      # 将删除/已删除的 pointer 详情
+            "run_id": str | None,
+            "run_status_reset": False,     # 兼容字段；withdrawal 永不改写 run
+            "run_preserved": bool,          # 找到 run 时恒为 True
+        }
+    """
+    if not reason or not operator or not idempotency_key:
+        raise ValueError("withdrawal 需要非空 reason / operator / idempotency_key")
+
+    pub = await _get_publication(
+        session, PUBLICATION_KIND_MARKET_REVIEW, trade_date,
+    )
+    summary: dict = {
+        "trade_date": trade_date.isoformat(),
+        "dry_run": dry_run,
+        "pointer_found": pub is not None,
+        "already_withdrawn": pub is None,
+        "withdrawn": False,
+        "pointer": None,
+        "run_id": None,
+        "run_status_reset": False,
+        "run_preserved": False,
+    }
+    if pub is None:
+        logger.info(
+            "[ReviewWithdraw] 幂等空转（pointer 不存在）: trade_date=%s, "
+            "operator=%s, idempotency_key=%s",
+            trade_date, operator, idempotency_key,
+        )
+        return summary
+
+    pointer_detail = {
+        "id": str(pub.id),
+        "scope_type": pub.scope_type,
+        "scope_key": pub.scope_key,
+        "publication_kind": pub.publication_kind,
+        "trade_date": pub.trade_date.isoformat(),
+        "algorithm_version": pub.algorithm_version,
+        "data_run_id": str(pub.data_run_id),
+        "coverage_ratio": (
+            float(pub.coverage_ratio) if pub.coverage_ratio is not None else None
+        ),
+        "published_at": pub.published_at.isoformat() if pub.published_at else None,
+    }
+    summary["pointer"] = pointer_detail
+    summary["run_id"] = str(pub.data_run_id)
+
+    run = await session.get(MarketReviewRun, pub.data_run_id)
+    summary["run_preserved"] = run is not None
+
+    if dry_run:
+        logger.info(
+            "[ReviewWithdraw] dry-run: trade_date=%s, 将删除 pointer=%s, "
+            "run=%s 将完整保留",
+            trade_date, pub.id, pub.data_run_id,
+        )
+        return summary
+
+    now = datetime.now(UTC)
+
+    # 1) 删除唯一 pointer（ORM 删除，禁止裸 SQL）
+    await session.delete(pub)
+
+    # 2) 只追加撤销审计。run 状态、发布时间及全部关联数据保持不变。
+    if run is not None:
+        run.metadata_json = {
+            **(run.metadata_json or {}),
+            "publication_withdrawal": {
+                "reason": reason,
+                "operator": operator,
+                "idempotency_key": idempotency_key,
+                "withdrawn_at": now.isoformat(),
+                "previous_pointer": pointer_detail,
+            },
+        }
+
+    await session.flush()
+    summary["withdrawn"] = True
+    logger.warning(
+        "[ReviewWithdraw] 已撤销正式 pointer: trade_date=%s, pointer_id=%s, "
+        "run_id=%s, run_preserved=%s, operator=%s, reason=%s, "
+        "idempotency_key=%s",
+        trade_date, pub.id, pub.data_run_id, run is not None,
+        operator, reason, idempotency_key,
+    )
+    return summary
+
+
+def is_formally_published_review_run(
+    run: MarketReviewRun,
+    live_pointer_run_id: uuid.UUID | None,
+) -> bool:
+    """仅当历史状态和当前正式 pointer 同时成立时才允许复用。"""
+    return (
+        run.status == "published"
+        and run.published_at is not None
+        and live_pointer_run_id == run.id
+    )
 
 
 async def get_published_review_run_id(

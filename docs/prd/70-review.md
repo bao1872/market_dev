@@ -1337,12 +1337,38 @@ industry_l1
 5. **无 failed run_items**：`market_review_run_items` 中不得存在 `status=failed` 的记录（`skipped` 允许，但必须记录原因）。
 6. **coverage_ratio >= 0.95**：market 范围 `coverage_ratio >= 0.95`，且 `industry_l1` ready 比例达到配置门槛。
 
-force=True 时跳过 1-6 门禁，但必须：
+force=True 时跳过 1-6 门禁，但必须（2026-08-01 安全收口，已按此实现对齐代码）：
 
 - 不得写入 `factor_publications`（仅 admin 内部查看）；
-- 必须在 run.metadata_json 中记录 `force_published=true` 与跳过的具体门禁；
+- run.status 不得进入 `published`，`published_at` 不得写入；
+- 必须在 run.metadata_json["provisional_publication"] 记录：
+  `force_requested=true`、`is_provisional=true`、发布门禁评估结果
+  `gate_blockers`、执行时间 `requested_at`、操作者 `operator`、
+  幂等键 `idempotency_key`；
 - 必须返回 `is_provisional=true` 标记；
-- 该 run 永远不得作为普通用户读取入口的正式 pointer。
+- 该 run 永远不得作为普通用户读取入口的正式 pointer；
+- 普通用户 API（`/review/dates`、`/review/latest`、`/review/{date}/overview`、
+  `/review/{date}/scopes` 等）只能读取正式 pointer；provisional run 仅 admin
+  可通过 `include_partial=true` 或显式 `run_id` 查看。
+
+### 23.5A Review publication withdrawal（撤销正式 pointer）
+
+- 撤销唯一正式入口：`review_publication_service.withdraw_review_publication`
+  （CLI：`python -m app.scripts.withdraw_review_publication`，默认 dry-run，
+  `--apply` 才执行写入）；
+- 只删除 `(scope_type=market, scope_key=market, publication_kind=market_review,
+  trade_date=指定日)` 的唯一 pointer，不得触碰其他交易日或其他
+  publication_kind；
+- 保留 review run / scope snapshot / signal / attribution / instrument
+  全部数据，禁止删除 Review run，禁止裸 SQL；
+- withdrawal 只撤销 pointer；被撤销 pointer 指向的 run 的 `status`、
+  `published_at` 和全部子数据是历史审计事实，禁止回退、清空或原地重算；
+- after-close 只有在当前正式 market_review pointer 仍指向该 run 时，才可将
+  历史 `published` run 作为正式结果复用；pointer 已撤销时必须明确阻断复用，
+  后续由升级后的算法版本创建新 run 并重新通过完整发布门禁；
+- 撤销审计必须写入 run.metadata_json["publication_withdrawal"]：
+  原因、操作者、幂等键、执行时间、被撤销 pointer 详情；
+- 幂等：pointer 不存在时不做任何写入，返回 `already_withdrawn`。
 
 ### 23.6 history_maps 读取合同
 

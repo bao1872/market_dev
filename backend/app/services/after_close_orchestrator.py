@@ -2200,16 +2200,45 @@ async def execute_after_close_run(
                             review_run.filter_version,
                         )
 
-                        # 幂等恢复：若 run 已 published，跳过计算直接复用
-                        if review_run.status == "published" and review_run.published_at is not None:
+                        # 幂等恢复只认可当前正式 pointer。历史 run 即使保留
+                        # published/published_at，也可能已经被 withdrawal 撤销，不能复用。
+                        from app.services.review_publication_service import (
+                            get_published_review_run_id,
+                            is_formally_published_review_run,
+                        )
+
+                        published_review_run_id = await get_published_review_run_id(
+                            review_db, trade_date,
+                        )
+                        is_formally_published = is_formally_published_review_run(
+                            review_run, published_review_run_id,
+                        )
+                        if is_formally_published:
                             _review_status = "published_already"
                             _review_reason = "idempotent_reuse_published_run"
                             _review_scope_count = review_run.expected_scope_count or 0
                             _review_signal_count = review_run.signal_count or 0
                             _review_coverage = float(review_run.coverage_ratio or 0)
                             logger.info(
-                                "[AfterClose] [Review] run 已 published，跳过计算与发布: %s",
+                                "[AfterClose] [Review] 正式 pointer 仍指向 run，跳过计算与发布: %s",
                                 review_run.id,
+                            )
+                        elif review_run.status == "published":
+                            # Withdrawal 只撤销 pointer，历史发布状态不可篡改。
+                            # 同算法唯一键仍可能返回旧 run；等待新算法版本创建新 run，
+                            # 此处明确阻断复用，也不原地重算历史 run。
+                            _review_status = "withdrawn_publication"
+                            _review_reason = "published_run_not_referenced_by_live_pointer"
+                            _review_scope_count = review_run.expected_scope_count or 0
+                            _review_signal_count = review_run.signal_count or 0
+                            _review_coverage = float(review_run.coverage_ratio or 0)
+                            _review_blockers = [
+                                "历史 published run 已无正式 Review pointer，禁止复用或原地重算",
+                            ]
+                            logger.warning(
+                                "[AfterClose] [Review] run 保留历史 published 状态但 pointer 已撤销，"
+                                "禁止复用: run_id=%s, live_pointer_run_id=%s",
+                                review_run.id, published_review_run_id,
                             )
                         else:
                             # 2) 计算 review（metrics → signals → attribution → tracking）

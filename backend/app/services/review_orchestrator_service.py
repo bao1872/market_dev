@@ -180,7 +180,7 @@ async def create_run(
 
     if dry_run:
         # dry-run：不写 DB，返回一个非持久化的 run 对象供调用方打印
-        run = MarketReviewRun(
+        return MarketReviewRun(
             trade_date=trade_date,
             source_core_run_id=resolved_core_id,
             source_board_run_id=resolved_board_id,
@@ -196,7 +196,6 @@ async def create_run(
                 "idempotency_key": idempotency_key,
             },
         )
-        return run
 
     # upsert run（幂等：相同唯一键复用）
     meta: dict[str, Any] = {
@@ -1212,17 +1211,25 @@ async def publish_run(
     run: MarketReviewRun,
     *,
     force: bool = False,
-) -> tuple[FactorPublication, list[str]]:
+    operator: str | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[FactorPublication | None, list[str]]:
     """发布 review run（委托给 review_publication_service）。
+
+    [P0 安全收口 2026-08-01] force=True 只生成 provisional 标记，
+    不写正式 pointer，publication 返回 None。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         run: MarketReviewRun ORM 对象
-        force: 是否强制发布（跳过门禁）
+        force: True 时生成 provisional（不写正式 pointer，仅 admin 调试）
+        operator: 操作者标识（审计用）
+        idempotency_key: 调用方幂等键（审计用）
 
     Returns:
-        (FactorPublication, blockers)
-        force=True 时 blockers 始终为空；force=False 时 blockers 为空表示门禁通过
+        (FactorPublication | None, blockers)
+        正式发布返回 pointer；force（provisional）路径 publication=None，
+        blockers 为门禁评估结果（仅记录，不阻断）。
 
     Raises:
         ReviewPublishBlockError: force=False 时门禁失败
@@ -1233,7 +1240,12 @@ async def publish_run(
         if not publishable:
             raise ReviewPublishBlockError(blockers)
 
-    publication = await publish_review(session, run, force=force)
+    publication = await publish_review(
+        session, run,
+        force=force, operator=operator, idempotency_key=idempotency_key,
+    )
+    if force:
+        _publishable, blockers = await evaluate_publish_gate(session, run)
     return publication, blockers
 
 

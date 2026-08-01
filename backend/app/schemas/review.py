@@ -538,7 +538,11 @@ class ReviewRunPublishRequest(BaseModel):
 
     idempotency_key: str = Field(..., description="幂等键")
     force: bool = Field(
-        False, description="是否强制发布（跳过部分门禁，仅 admin 调试用）",
+        False,
+        description=(
+            "[P0 安全收口 2026-08-01] True 时只生成 provisional 标记"
+            "（不写正式 pointer、run 不进入 published），仅 admin 调试用"
+        ),
     )
 
 

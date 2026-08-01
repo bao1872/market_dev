@@ -22,6 +22,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -228,11 +229,15 @@ async def publish_review_run(
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_admin),
 ) -> ReviewRunResponse:
-    """[Admin] 发布 review run（写入 factor_publications 指针）。
+    """[Admin] 发布 review run（写入 factor_publications 正式指针）。
 
-    force=True 时跳过发布门禁（仅 admin 调试用）。
+    [P0 安全收口 2026-08-01] force=True 语义变更：
+    - 不再写正式 pointer，只生成 provisional 标记（run metadata 可审计）；
+    - provisional run 不对普通用户可见，仅 admin 可通过 include_partial
+      或显式 run_id 查看；
+    - 撤销错误正式 pointer 使用 withdraw_review_publication（CLI），
+      禁止用 force 覆盖。
     """
-    _ = ctx
     run = await get_run(db, run_id)
     if run is None:
         raise HTTPException(
@@ -241,13 +246,25 @@ async def publish_review_run(
         )
 
     try:
-        publication = await publish_review(db, run, force=payload.force)
+        publication = await publish_review(
+            db, run,
+            force=payload.force,
+            operator=ctx.user_id,
+            idempotency_key=payload.idempotency_key,
+        )
         await db.commit()
         await db.refresh(run)
-        logger.info(
-            "[Admin] review run 发布成功: run_id=%s publication_id=%s",
-            run_id, publication.id,
-        )
+        if publication is not None:
+            logger.info(
+                "[Admin] review run 发布成功: run_id=%s publication_id=%s",
+                run_id, publication.id,
+            )
+        else:
+            logger.warning(
+                "[Admin] review run force=provisional（未写正式 pointer）: "
+                "run_id=%s operator=%s idempotency_key=%s",
+                run_id, ctx.user_id, payload.idempotency_key,
+            )
     except ReviewPublishBlockError as exc:
         await db.rollback()
         raise HTTPException(
@@ -410,7 +427,7 @@ async def get_review_run_timeline(
 
 
 if __name__ == "__main__":
-    paths = [r.path for r in router.routes]
+    paths = [r.path for r in router.routes if isinstance(r, APIRoute)]
     print(f"router prefix: {router.prefix}")
     print(f"端点数: {len(paths)}")
     for p in paths:
