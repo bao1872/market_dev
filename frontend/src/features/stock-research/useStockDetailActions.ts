@@ -2,15 +2,12 @@
 // 负责自选列表查询、加入/移出自选、上下切换、memo 读取/保存/删除。
 // 这些操作是详情页专属，不得进入 /market 的 useStockResearchData 核心 hook。
 //
-// CHANGE-20260713-009: 来源列表复用 published DSA results 链（usePublishedRuns + useStrategyRunResults），
-// 禁止继续使用 useMarketStocks。MarketWorkspacePage 和本 hook 共用 decodeMarketListContext + buildStrategyResultQueryParams。
-//
-// [DetailSourceContextV2] 来源同源同序合同 V2：
-//   - market/watchlist 来源统一用 useStrategyRunResults(sourceRunId, canonicalQuery)，
-//     sourceRunId + canonicalQuery 由入口时刻 URL 固定，禁止 fresh usePublishedRuns 重新推导 activeRunId。
-//   - useWatchlistMonitorStatus 仅用于 inWatchlist 状态，禁止充当来源列表数据源。
-//   - direct 来源无来源列表（UI 隐藏左栏）。
-//   - 失效（sourceContextInvalid）时显示 invalid 占位，禁止静默回退自选或另一来源。
+// [CHANGE-20260731-SAME-SOURCE] 详情左栏改用 /market/stocks 同源查询（mcq 新合同）：
+//   - market/watchlist 有 mcq → useMarketStocks(mcq)，左栏顺序与 /market 当前页完全一致
+//   - 无 mcq 但有 sourceRunId+cq → backward 兼容旧 DSA useStrategyRunResults（deprecated）
+//   - useWatchlistMonitorStatus 仅用于 inWatchlist 状态，禁止充当来源列表数据源
+//   - direct 来源无来源列表（UI 隐藏左栏）
+//   - 失效（sourceContextInvalid）时显示 invalid 占位，禁止静默回退自选或另一来源
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -21,31 +18,37 @@ import {
   useUpsertStockMemo,
   useDeleteStockMemo,
   useStrategyRunResults,
+  useMarketStocks,
 } from '@/hooks/useApi'
 import {
   type StrategyResultQuery,
 } from '@/features/market-workspace/marketWorkspaceUrlState'
 import {
   adaptStrategyResultToTrendRow,
+  adaptMarketStockToTrendRow,
   getStockDisplay,
 } from '@/features/trend-selection'
 import { useToast } from '@/store/toast'
 import type { ResearchSource } from './stockResearchTypes'
-import type { StrategyResultQueryParams } from '@/api/endpoints'
-import { buildStockDetailUrl, type OriginScope } from './stockDetailNavigation'
+import type { StrategyResultQueryParams, MarketStocksQueryParams } from '@/api/endpoints'
+import { buildStockDetailUrl, type OriginScope, type MarketCanonicalQuery } from './stockDetailNavigation'
 
 export interface StockDetailActionsParams {
   instrumentId: string | undefined
   symbol: string | undefined
   // [DetailSourceContextV2] origin 替代 V1 source，为来源唯一真源
   origin: OriginScope
-  // [DetailSourceContextV2] 入口时刻固定 sourceRunId（market/watchlist 必填，direct 可空）
+  // [DEPRECATED 20260731-SAME-SOURCE] 旧 DSA sourceRunId，仅 backward 兼容（推荐用 mcq）
   sourceRunId: string | null
-  // [DetailSourceContextV2] 入口时刻 canonicalQuery（market=universe=all, watchlist=universe=watchlist）
+  // [DEPRECATED 20260731-SAME-SOURCE] 旧 DSA canonicalQuery，仅 backward 兼容（推荐用 mcq）
   canonicalQuery: StrategyResultQuery | null
-  // [DetailSourceContextV2] canonicalQuery 原始 JSON 字符串（切股时原样透传到导航 URL）
+  // [DEPRECATED 20260731-SAME-SOURCE] 旧 DSA canonicalQueryRaw（切股时原样透传，兼容旧链接）
   canonicalQueryRaw: string | null
-  // [DetailSourceContextV2] 来源上下文失效（market/watchlist 缺 runId/cq/universe不匹配/冲突）
+  // [CHANGE-20260731-SAME-SOURCE] Market Canonical Query（解析后对象，/market/stocks 同源查询参数）
+  marketCanonicalQuery: MarketCanonicalQuery | null
+  // [CHANGE-20260731-SAME-SOURCE] mcq 原始 JSON 字符串（切股时原样透传到导航 URL）
+  marketCanonicalQueryRaw: string | null
+  // [DetailSourceContextV2] 来源上下文失效（market/watchlist 缺 mcq/scope不匹配/冲突 或 旧合同缺 runId/cq）
   sourceContextInvalid: boolean
   // returnTo URL（来自详情页 URL 参数），用于上一只/下一只导航保留来源上下文
   returnTo?: string | null
@@ -105,6 +108,8 @@ export function useStockDetailActions({
   sourceRunId,
   canonicalQuery,
   canonicalQueryRaw,
+  marketCanonicalQuery,
+  marketCanonicalQueryRaw,
   sourceContextInvalid,
   returnTo,
   timeframe,
@@ -118,36 +123,66 @@ export function useStockDetailActions({
   // V1 兼容 source（用于 addWatchlist.mutate source 字段）
   const source: ResearchSource = origin === 'market' ? 'selection' : 'watchlist'
 
-  // [DetailSourceContextV2] market/watchlist 有效时用固定 sourceRunId + canonicalQuery 查询 DSA results
-  // direct 或失效时不查询（sourceRunId/canonicalQuery 为 null → useStrategyRunResults disabled）
+  // [CHANGE-20260731-SAME-SOURCE] 优先使用 mcq（Market Canonical Query）新合同：
+  //   market/watchlist 有有效 mcq → useMarketStocks(mcq)，同源同序
+  //   无 mcq 但有 sourceRunId+cq → backward 兼容旧 DSA useStrategyRunResults（deprecated）
+  //   direct 或失效时不查询
   // 禁止 fresh usePublishedRuns 重新推导 activeRunId（避免新 run 发布后来源列表漂移）
-  const hasValidSourceContext =
-    !sourceContextInvalid && (origin === 'market' || origin === 'watchlist') && !!sourceRunId && !!canonicalQuery
+  const useMcq = !sourceContextInvalid && (origin === 'market' || origin === 'watchlist') && !!marketCanonicalQuery
+  const useLegacyDsa = !sourceContextInvalid && !useMcq && (origin === 'market' || origin === 'watchlist') && !!sourceRunId && !!canonicalQuery
+  const hasValidSourceContext = useMcq || useLegacyDsa
 
+  // ===== 新 mcq 合同：useMarketStocks =====
+  // marketCanonicalQuery 已由 detailSourceContext 校验 scope/page/page_size 合法，直接透传
+  const marketStocksParams: MarketStocksQueryParams = useMemo(
+    () => ({
+      scope: marketCanonicalQuery!.scope,
+      query: marketCanonicalQuery!.query ?? undefined,
+      industry: marketCanonicalQuery!.industry ?? undefined,
+      concept: marketCanonicalQuery!.concept ?? undefined,
+      fp_filter: marketCanonicalQuery!.fp_filter ?? undefined,
+      fp_sort: marketCanonicalQuery!.fp_sort ?? undefined,
+      page: marketCanonicalQuery!.page,
+      page_size: marketCanonicalQuery!.page_size,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [marketCanonicalQueryRaw], // 依赖 raw JSON 字符串（入口时刻 URL 参数，切股时不变）
+  )
+  const marketStocksQuery = useMarketStocks(useMcq ? marketStocksParams : undefined)
+
+  // ===== 旧 DSA 合同（backward 兼容）：useStrategyRunResults =====
   // [FIX max-update-depth] 稳定化 canonicalQuery 引用，避免 resolveDetailSourceContextV2 每次返回新对象
   //   导致 useStrategyRunResults 的 params 引用变化（虽然 React Query hashKey 做深比较，但稳定引用更安全）
   //   依赖 canonicalQueryRaw（入口时刻 URL 字符串，切股时不变），确保同来源上下文内 queryKey 稳定
   const stableCanonicalQuery = useMemo(
-    () => (hasValidSourceContext ? (canonicalQuery as StrategyResultQueryParams) : undefined),
+    () => (useLegacyDsa ? (canonicalQuery as StrategyResultQueryParams) : undefined),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasValidSourceContext, canonicalQueryRaw, sourceRunId],
+    [useLegacyDsa, canonicalQueryRaw, sourceRunId],
   )
-
   const sourceResultsQuery = useStrategyRunResults(
-    hasValidSourceContext ? sourceRunId! : undefined,
+    useLegacyDsa ? sourceRunId! : undefined,
     stableCanonicalQuery,
   )
 
-  // 来源列表行数据（StrategyResult → TrendSelectionRow → SourceStockItem）
-  // V2 统一：market 和 watchlist 都走 useStrategyRunResults（同一数据链，避免顺序跳变）
+  // 来源列表行数据（统一：mcq→adaptMarketStockToTrendRow；legacy DSA→adaptStrategyResultToTrendRow）
   const sourceStocks = useMemo(() => {
-    if (!hasValidSourceContext || !sourceResultsQuery.data?.items) return []
+    if (!hasValidSourceContext) return []
+    if (useMcq) {
+      if (!marketStocksQuery.data?.items) return []
+      return marketStocksQuery.data.items.map((r) => {
+        const row = adaptMarketStockToTrendRow(r)
+        const display = getStockDisplay(row)
+        return { symbol: display.symbol, name: display.name, changePct: row.latestChangePct }
+      })
+    }
+    // legacy DSA
+    if (!sourceResultsQuery.data?.items) return []
     return sourceResultsQuery.data.items.map((r) => {
       const row = adaptStrategyResultToTrendRow(r)
       const display = getStockDisplay(row)
       return { symbol: display.symbol, name: display.name, changePct: row.latestChangePct }
     })
-  }, [hasValidSourceContext, sourceResultsQuery.data])
+  }, [hasValidSourceContext, useMcq, marketStocksQuery.data, sourceResultsQuery.data])
 
   // [DetailSourceContextV2] useWatchlistMonitorStatus 仅用于 inWatchlist 状态判断
   // 禁止用作来源列表数据源（V1 根因：watchlist 来源用 monitor-status API，与列表页 dsa_selector universe=watchlist 不同链）
@@ -200,10 +235,15 @@ export function useStockDetailActions({
   }, [instrumentId, inWatchlist, removeWatchlist, addWatchlist, source, showToast])
 
   // [DetailSourceContextV2] 来源列表状态
-  // - market/watchlist 有效：sourceResultsQuery.isLoading/error/empty
+  // - mcq 有效：marketStocksQuery.isLoading/error/empty
+  // - legacy DSA 有效：sourceResultsQuery.isLoading/error/empty
   // - direct/失效：loading=false, error=false, empty=false（UI 不渲染列表）
-  const sourceListLoading = hasValidSourceContext ? sourceResultsQuery.isLoading : false
-  const sourceListError = hasValidSourceContext ? !!sourceResultsQuery.error : false
+  const sourceListLoading = hasValidSourceContext
+    ? useMcq ? marketStocksQuery.isLoading : sourceResultsQuery.isLoading
+    : false
+  const sourceListError = hasValidSourceContext
+    ? useMcq ? !!marketStocksQuery.error : !!sourceResultsQuery.error
+    : false
   const sourceListEmpty =
     hasValidSourceContext &&
     !sourceListLoading &&
@@ -221,7 +261,7 @@ export function useStockDetailActions({
     const nextIndex = (currentIndex + direction + sourceStocks.length) % sourceStocks.length
     const target = sourceStocks[nextIndex]
     if (!target?.symbol) return
-    // [DetailSourceContextV2] 透传 origin/sourceRunId/canonicalQuery，切股时来源上下文不变
+    // [CHANGE-20260731-SAME-SOURCE] 切股时透传 mcq（优先）或旧 DSA 上下文，保持来源不变
     navigate(
       buildStockDetailUrl(target.symbol, {
         originScope: origin,
@@ -229,9 +269,10 @@ export function useStockDetailActions({
         timeframe,
         sourceRunId,
         canonicalQuery: canonicalQueryRaw,
+        marketCanonicalQuery: marketCanonicalQueryRaw,
       }),
     )
-  }, [canNavigate, currentIndex, sourceStocks, navigate, origin, returnTo, timeframe, sourceRunId, canonicalQueryRaw])
+  }, [canNavigate, currentIndex, sourceStocks, navigate, origin, returnTo, timeframe, sourceRunId, canonicalQueryRaw, marketCanonicalQueryRaw])
 
   return {
     inWatchlist,

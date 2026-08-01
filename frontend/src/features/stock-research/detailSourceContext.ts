@@ -22,6 +22,11 @@
 //   originScope 与 returnTo.scope 冲突 → sourceContextInvalid=true（显示"来源上下文失效"）
 //   source=selection 且无有效 marketContext → sourceContextInvalid=true
 //
+// [CHANGE-20260731-SAME-SOURCE] 详情左栏改用 /market/stocks 同源查询：
+//   - 新增 mcq（Market Canonical Query）：JSON 序列化的 /market/stocks 查询参数
+//   - origin=market|watchlist 且有有效 mcq → sourceContextValid
+//   - 旧 DSA sourceRunId/cq 标记 deprecated，详情页不再消费（仅 backward 兼容旧 URL）
+//
 // 禁止：
 //   - 在 stockResearchTypes.ts 或 marketWorkspaceUrlState.ts 中复制 normalizeResearchSource / defaultStrategyForSource
 //   - 在 StockDetailPage 或 useStockDetailActions 中各自推导 source/strategy
@@ -31,8 +36,12 @@
 import type { MarketListContext, StrategyResultQuery } from '../market-workspace/marketWorkspaceUrlState.ts'
 // 值导入：decodeMarketListContext 用于解析 returnTo（函数声明提升，ESM 循环安全）
 import { decodeMarketListContext } from '../market-workspace/marketWorkspaceUrlState.ts'
-// [DetailSourceContextV2] computeStableContextIdV2 来自 stockDetailNavigation（纯 string hash，无循环依赖）
-import { computeStableContextIdV2, type OriginScope } from './stockDetailNavigation.ts'
+// [DetailSourceContextV2] computeStableContextIdV2 + MarketCanonicalQuery 类型
+import {
+  computeStableContextIdV2,
+  type OriginScope,
+  type MarketCanonicalQuery,
+} from './stockDetailNavigation.ts'
 
 // ===== 来源类型与映射（唯一权威实现）=====
 
@@ -160,6 +169,9 @@ export type DetailSourceInvalidReason =
   | 'canonical_query_parse_failed'
   | 'universe_mismatch'
   | 'missing_origin'
+  | 'missing_mcq'
+  | 'mcq_parse_failed'
+  | 'mcq_scope_mismatch'
 
 export interface DetailSourceContextV2 {
   origin: OriginScope
@@ -167,6 +179,10 @@ export interface DetailSourceContextV2 {
   canonicalQuery: StrategyResultQuery | null
   /** 入口时刻 canonical query 原始 JSON 字符串（来自 URL cq 参数，切股时原样透传，供导航重建 URL） */
   canonicalQueryRaw: string | null
+  /** [CHANGE-20260731-SAME-SOURCE] Market Canonical Query（解析后对象，用于 /market/stocks 同源查询） */
+  marketCanonicalQuery: MarketCanonicalQuery | null
+  /** [CHANGE-20260731-SAME-SOURCE] mcq 原始 JSON 字符串（来自 URL mcq 参数，切股时原样透传） */
+  marketCanonicalQueryRaw: string | null
   returnTo: string | null
   stableContextId: string
   sourceContextInvalid: boolean
@@ -174,7 +190,7 @@ export interface DetailSourceContextV2 {
 }
 
 /**
- * 解析 V2 canonical query JSON 字符串。
+ * 解析 V2 canonical query JSON 字符串（旧 DSA StrategyResultQuery，deprecated）。
  * 返回 [query, parseFailed]：解析成功且为对象 → [query, false]；空输入 → [null, false]；解析失败 → [null, true]。
  */
 function parseCanonicalQuery(raw: string | null): [StrategyResultQuery | null, boolean] {
@@ -191,9 +207,37 @@ function parseCanonicalQuery(raw: string | null): [StrategyResultQuery | null, b
 }
 
 /**
+ * [CHANGE-20260731-SAME-SOURCE] 解析 Market Canonical Query（mcq）JSON 字符串。
+ * 返回 [mcq, parseFailed]：解析成功且 scope 合法 → [mcq, false]；空输入 → [null, false]；解析失败 → [null, true]。
+ */
+function parseMarketCanonicalQuery(raw: string | null): [MarketCanonicalQuery | null, boolean] {
+  if (!raw) return [null, false]
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const p = parsed as Record<string, unknown>
+      // 最小合法性校验：scope 必须是 market|watchlist，page/page_size 为数字
+      const scope = p.scope
+      if (scope !== 'market' && scope !== 'watchlist') return [null, true]
+      if (typeof p.page !== 'number' || typeof p.page_size !== 'number') return [null, true]
+      return [parsed as MarketCanonicalQuery, false]
+    }
+    return [null, true]
+  } catch {
+    return [null, true]
+  }
+}
+
+/**
  * [DetailSourceContextV2] 详情页来源上下文统一解析（V2 唯一真源）。
  *
  * StockDetailPage 顶层调用一次，传递给 useStockDetailActions。禁止 useStockDetailActions 自行推导。
+ *
+ * [CHANGE-20260731-SAME-SOURCE] 新增 mcq（Market Canonical Query）合同：
+ *   - 优先检查 mcq：有有效 mcq → 直接用 /market/stocks 同源查询（新合同，推荐）
+ *   - mcq 缺失时回退旧 DSA 合同（sourceRunId+cq），仅为 backward 兼容旧链接
+ *   - origin=market|watchlist：有 mcq 优先，无 mcq 有 cq→兼容旧，都无→invalid
+ *   - 旧 DSA sourceRunId/cq 标记 deprecated，详情页不再消费（只在 mcq 缺失时作为兼容判断 invalid 用）
  *
  * origin 解析优先级：
  *   1. 显式 originScope（market|watchlist|direct）
@@ -201,22 +245,22 @@ function parseCanonicalQuery(raw: string | null): [StrategyResultQuery | null, b
  *   3. 无显式 originScope + 无 /market returnTo → origin=watchlist + invalid(missing_origin)
  *      （合同5：只有显式 direct 才使用单列；上下文缺失时显示 invalid 占位，不静默隐藏）
  *
- * 失效规则：
- *   - 缺 originScope 且无 /market returnTo → missing_origin（origin=watchlist 占位，显示 invalid）
+ * 失效规则（mcq 新合同）：
+ *   - 缺 originScope 且无 /market returnTo → missing_origin
  *   - origin=market|watchlist 与 returnTo.scope 冲突 → context_mismatch
- *   - origin=market|watchlist 缺 sourceRunId → missing_run_id
- *   - canonicalQuery JSON 解析失败 → canonical_query_parse_failed
- *   - 缺 canonicalQuery → missing_canonical_query
- *   - canonicalQuery.universe 与 origin 不匹配 → universe_mismatch
+ *   - origin=market|watchlist 缺 mcq → missing_mcq（新合同；有 cq 视为旧链接，降级用 cq 合同判断）
+ *   - mcq JSON 解析失败 → mcq_parse_failed
+ *   - mcq.scope 与 origin 不匹配 → mcq_scope_mismatch
  *   - direct 永不失效（显式 direct 无左栏，单列布局）
  *
- * stableContextId：origin+sourceRunId+canonicalQueryRaw（不含 selectedSymbol，不含 returnTo，切股不变）。
+ * stableContextId：origin+mcq（新）或 origin+runId+cq（旧兼容）；不含 selectedSymbol，不含 returnTo，切股不变。
  */
 export function resolveDetailSourceContextV2(
   originScopeRaw: string | null,
   returnTo: string | null | undefined,
   sourceRunIdRaw: string | null,
   canonicalQueryRaw: string | null,
+  marketCanonicalQueryRaw?: string | null,
 ): DetailSourceContextV2 {
   const marketContext = decodeMarketListContext(returnTo)
 
@@ -245,8 +289,12 @@ export function resolveDetailSourceContextV2(
     missingOrigin = true
   }
 
-  // 2. 解析 canonicalQuery
+  // 2. 解析 mcq（新合同，优先）+ canonicalQuery（旧 DSA，兼容）
+  const [marketCanonicalQuery, mcqParseFailed] = parseMarketCanonicalQuery(marketCanonicalQueryRaw ?? null)
   const [canonicalQuery, cqParseFailed] = parseCanonicalQuery(canonicalQueryRaw)
+
+  // 是否使用新 mcq 合同（有 mcq raw 输入就按新合同判 invalid）
+  const hasMcqInput = !!marketCanonicalQueryRaw
 
   // 3. 判定失效
   let sourceContextInvalid = false
@@ -259,37 +307,56 @@ export function resolveDetailSourceContextV2(
     if (contextMismatch) {
       sourceContextInvalid = true
       invalidReason = 'context_mismatch'
-    } else if (!sourceRunIdRaw) {
-      sourceContextInvalid = true
-      invalidReason = 'missing_run_id'
-    } else if (cqParseFailed) {
-      sourceContextInvalid = true
-      invalidReason = 'canonical_query_parse_failed'
-    } else if (!canonicalQuery) {
-      sourceContextInvalid = true
-      invalidReason = 'missing_canonical_query'
-    } else {
-      const expectedUniverse = origin === 'market' ? 'all' : 'watchlist'
-      if (canonicalQuery.universe !== expectedUniverse) {
+    } else if (hasMcqInput) {
+      // [CHANGE-20260731-SAME-SOURCE] 新 mcq 合同：按 mcq 判断
+      if (mcqParseFailed) {
         sourceContextInvalid = true
-        invalidReason = 'universe_mismatch'
+        invalidReason = 'mcq_parse_failed'
+      } else if (!marketCanonicalQuery) {
+        sourceContextInvalid = true
+        invalidReason = 'missing_mcq'
+      } else if (marketCanonicalQuery.scope !== origin) {
+        sourceContextInvalid = true
+        invalidReason = 'mcq_scope_mismatch'
+      }
+      // mcq 有效：直接通过，不再检查旧 DSA sourceRunId/cq
+    } else {
+      // backward 兼容：无 mcq 输入时回退旧 DSA 合同（旧链接）
+      if (!sourceRunIdRaw) {
+        sourceContextInvalid = true
+        invalidReason = 'missing_run_id'
+      } else if (cqParseFailed) {
+        sourceContextInvalid = true
+        invalidReason = 'canonical_query_parse_failed'
+      } else if (!canonicalQuery) {
+        sourceContextInvalid = true
+        invalidReason = 'missing_canonical_query'
+      } else {
+        const expectedUniverse = origin === 'market' ? 'all' : 'watchlist'
+        if (canonicalQuery.universe !== expectedUniverse) {
+          sourceContextInvalid = true
+          invalidReason = 'universe_mismatch'
+        }
       }
     }
   }
 
   // 4. stableContextId（不含 selectedSymbol，不含 returnTo；切股不变）
-  // returnTo 含 selected=入口symbol，纳入会间接破坏不变性，故只由 origin+runId+cq 计算。
+  // 优先用 mcq；无 mcq 时回退旧 DSA 组合（兼容旧链接）
   const stableContextId = computeStableContextIdV2(
     origin,
     sourceRunIdRaw,
     canonicalQueryRaw,
+    marketCanonicalQueryRaw ?? null,
   )
 
   return {
     origin,
     sourceRunId: sourceRunIdRaw,
-    canonicalQuery: sourceContextInvalid ? null : canonicalQuery,
+    canonicalQuery: (sourceContextInvalid || hasMcqInput) ? null : canonicalQuery,
     canonicalQueryRaw: canonicalQueryRaw,
+    marketCanonicalQuery: sourceContextInvalid ? null : marketCanonicalQuery,
+    marketCanonicalQueryRaw: marketCanonicalQueryRaw ?? null,
     returnTo: returnTo ?? null,
     stableContextId,
     sourceContextInvalid,

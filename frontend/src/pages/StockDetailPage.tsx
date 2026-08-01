@@ -52,6 +52,10 @@ const INVALID_REASON_LABELS: Record<string, string> = {
   canonical_query_parse_failed: '来源上下文失效（canonicalQuery 解析失败）',
   universe_mismatch: '来源上下文失效（universe 与 origin 不匹配）',
   missing_origin: '来源上下文缺失（请从行情或自选列表进入）',
+  // [CHANGE-20260731-SAME-SOURCE] mcq 新合同失效 reason
+  missing_mcq: '来源上下文失效（缺 Market Canonical Query）',
+  mcq_parse_failed: '来源上下文失效（Market Canonical Query 解析失败）',
+  mcq_scope_mismatch: '来源上下文失效（mcq.scope 与 origin 不匹配）',
 }
 
 // [CHANGE-20260729-007] 紧凑自选切换按钮（22×22px）
@@ -93,19 +97,23 @@ export default function StockDetailPage() {
 
   // [DetailSourceContextV2] origin 为来源唯一真源，resolveDetailSourceContextV2 统一解析。
   // 优先级：显式 originScope > 有效 /market returnTo.scope（兼容旧链接）> direct（不伪造行情来源）
-  // V2 字段：origin + sourceRunId + canonicalQuery + returnTo + stableContextId + sourceContextInvalid
-  //   - market/watchlist 有效：用 sourceRunId + canonicalQuery 固定入口快照查询 DSA results
+  // V2 字段：origin + mcq（新合同）+ sourceRunId/cq（旧 DSA 兼容）+ returnTo + stableContextId + sourceContextInvalid
+  //   - [CHANGE-20260731-SAME-SOURCE] market/watchlist 有 mcq：用 /market/stocks 同源查询（推荐）
+  //   - 无 mcq 但有 sourceRunId+cq：兼容旧 DSA strategy-results（deprecated）
   //   - direct：无来源列表（UI 隐藏左栏，显示"直接访问"占位）
   //   - 失效：显示 invalid 占位，禁止静默回退自选或另一来源
   const returnToParam = searchParams.get('returnTo')
   const originScopeParam = searchParams.get('originScope') as 'market' | 'watchlist' | 'direct' | null
   const sourceRunIdParam = searchParams.get('sourceRunId')
   const canonicalQueryParam = searchParams.get('cq')
+  // [CHANGE-20260731-SAME-SOURCE] mcq（Market Canonical Query）新合同：/market/stocks 同源查询参数
+  const marketCanonicalQueryParam = searchParams.get('mcq')
   const sourceCtxV2 = resolveDetailSourceContextV2(
     originScopeParam,
     returnToParam,
     sourceRunIdParam,
     canonicalQueryParam,
+    marketCanonicalQueryParam,
   )
   // V1 兼容派生：source/strategy 供 loadChartLayerVisibility 使用
   // V2 origin 为来源唯一真源，source/strategy 由 origin 推导
@@ -173,6 +181,7 @@ export default function StockDetailPage() {
 
   // 详情页专属 actions（自选/上下切换/memo + returnTo 上下文恢复左栏列表）
   // [DetailSourceContextV2] 传入 V2 解析结果，useStockDetailActions 不再自行推导
+  // [CHANGE-20260731-SAME-SOURCE] 新增 marketCanonicalQuery/marketCanonicalQueryRaw（mcq 新合同）
   const detailActions = useStockDetailActions({
     instrumentId,
     symbol,
@@ -180,6 +189,8 @@ export default function StockDetailPage() {
     sourceRunId: sourceCtxV2.sourceRunId,
     canonicalQuery: sourceCtxV2.canonicalQuery,
     canonicalQueryRaw: sourceCtxV2.canonicalQueryRaw,
+    marketCanonicalQuery: sourceCtxV2.marketCanonicalQuery,
+    marketCanonicalQueryRaw: sourceCtxV2.marketCanonicalQueryRaw,
     sourceContextInvalid,
     returnTo: returnToParam,
     timeframe,
@@ -609,7 +620,14 @@ export default function StockDetailPage() {
               <div
                 key={s.symbol}
                 className={clsx('tv-source-list-item', s.symbol === symbol && 'active')}
-                onClick={() => navigate(buildStockDetailUrl(s.symbol, { originScope: sourceCtxV2.origin, returnTo: returnToParam, timeframe, sourceRunId: sourceCtxV2.sourceRunId, canonicalQuery: sourceCtxV2.canonicalQueryRaw }))}
+                onClick={() => navigate(buildStockDetailUrl(s.symbol, {
+                  originScope: sourceCtxV2.origin,
+                  returnTo: returnToParam,
+                  timeframe,
+                  sourceRunId: sourceCtxV2.sourceRunId,
+                  canonicalQuery: sourceCtxV2.canonicalQueryRaw,
+                  marketCanonicalQuery: sourceCtxV2.marketCanonicalQueryRaw,
+                }))}
               >
                 <div className="tv-source-name-row">
                   <span className="tv-source-name">{s.name}</span>
