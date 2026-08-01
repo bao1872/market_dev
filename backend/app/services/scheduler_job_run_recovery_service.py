@@ -43,7 +43,7 @@ async def recover_stale_scheduler_job_runs(
     db: AsyncSession,
     now: datetime | None = None,
 ) -> int:
-    """恢复僵尸任务（status='running' 但 lease 过期或 heartbeat 超时）。
+    """恢复僵尸任务（lease 已过期且 heartbeat 不健康）。
 
     原子 UPDATE 将符合条件的 running 任务标记为 interrupted，
     并为每条任务写入唯一一条 recovery 事件（幂等）。
@@ -51,7 +51,8 @@ async def recover_stale_scheduler_job_runs(
 
     恢复条件（WHERE 子句）：
         status='running'
-        AND (lease_expires_at < now OR heartbeat_at < now - interval '90 seconds')
+        AND lease_expires_at < now
+        AND heartbeat_at < now - interval '90 seconds'
 
     Args:
         db: 异步会话（不 commit，由调用方控制事务）
@@ -77,13 +78,11 @@ async def recover_stale_scheduler_job_runs(
         UPDATE scheduler_job_runs
         SET status = 'interrupted',
             error_code = 'STALE_PROCESS_TERMINATED',
-            error_message = '后台进程在任务执行期间重启，任务租约过期或心跳超时，系统自动中断',
+            error_message = '后台进程在任务执行期间失联，任务租约过期且心跳超时，系统自动中断',
             finished_at = :now
         WHERE status = 'running'
-            AND (
-                lease_expires_at < :now
-                OR heartbeat_at < :heartbeat_cutoff
-            )
+            AND lease_expires_at < :now
+            AND (heartbeat_at IS NULL OR heartbeat_at < :heartbeat_cutoff)
         RETURNING id, job_name, heartbeat_at, metadata_json
         """
     )
@@ -135,7 +134,7 @@ async def recover_stale_scheduler_job_runs(
                 job_run_id=job_run_id,
                 step="recovery",
                 level="error",
-                message="后台进程在任务执行期间重启，任务租约过期或心跳超时，系统自动中断",
+                message="后台进程在任务执行期间失联，任务租约过期且心跳超时，系统自动中断",
                 payload={
                     "original_status": "running",
                     "original_step": original_step,

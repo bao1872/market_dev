@@ -321,7 +321,8 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
   RETURNING id;
   ```
 - `lease_epoch` fencing：仅持有当前 `lease_epoch` 的 worker 才能成功刷新 heartbeat；旧 worker（已被 re-claim 抢占）的 UPDATE 影响 0 行，立即退出。
-- `heartbeat_at` 超时阈值默认 180 秒（6 个 heartbeat 周期）；超时后 watchdog 将 run 标记为 `interrupted`。
+- `after_close_chip_consensus` 使用共享 `fenced_job_run_service` 每约 30 秒刷新 heartbeat 和 lease；刷新、snapshot 写入与终态写入统一匹配 job id、`status=running`、worker instance、`lease_epoch`。
+- scheduler watchdog 使用 90 秒 heartbeat 健康阈值，但只有 `lease_expires_at` 已过期且 heartbeat 同时不健康时才把 run 标记为 `interrupted`，不会接管仍有健康 heartbeat 的长任务。
 
 ### 12.2 item lease（14400s）+ fencing_epoch
 
@@ -448,8 +449,10 @@ worker 收到 SIGTERM 信号时的 drain 流程：
   - 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取 `job_name='after_close_chip_consensus'` 且 `status IN ('queued', 'resume_queued')` 的任务；
   - 领取后更新 `status='running'` + `worker_instance_id` + `heartbeat_at` + `lease_expires_at` + `lease_epoch`（fencing）；
   - 调用 `execute_after_close_chip_consensus`（含断点续算）；
-  - 断点续算：`get_pending_chip_instruments` 过滤已 `succeeded` 的 instrument，`resume_queued` 只重试未成功项；
-  - 部分成功写 `metadata.chip_status=partial`，主 `status=succeeded`；
+  - 断点续算：`get_pending_chip_instruments` 过滤已 `succeeded` 和合法 `skipped` 的 instrument，`resume_queued` 只重试 pending/failed/真正失租项；
+  - 执行中由 `fenced_job_run_service.FencedJobHeartbeat` 每 30 秒续租，所有 snapshot upsert 在同一事务内先锁定并验证当前 job owner；
+  - 终态由 `finalize_job_run` fenced 写入 `finished_at`、计数、结构化原因并释放 lease；全成功/部分成功/全 skipped/系统性失败分别形成 `succeeded/succeeded`、`succeeded/partial`、`succeeded/skipped`、`failed/failed`；
+  - heartbeat、成功、失败、取消和失租路径均清理后台 heartbeat task；失租 worker 不执行 auction anchor 回调；
 - **不新增常驻容器**：chip_consensus worker 在现有 after-close worker 容器内通过 `WORKER_TYPE` 分支执行；
 - watchdog：`auto_resume_interrupted_after_close_runs`（`scheduler_job_run_recovery_service.py:L169`）同时扫描 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次；
 - chip 创建：`after_close_orchestrator.py:L2066` 在主 run `succeeded` 后调用 `create_after_close_chip_consensus_job`（软失败，创建失败不反改主 run）。

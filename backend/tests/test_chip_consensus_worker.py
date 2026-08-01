@@ -1,7 +1,7 @@
 """Chip Consensus Worker 测试 - 验证 chip consensus 任务的领取、并发、断点续算、恢复（P0-3）。
 
 覆盖 4 类场景（ref/instruction.md §二.3）：
-1. 领取（test_worker_claims_queued_chip_job）：Worker 领取 queued 任务（status→running, lease_epoch 递增）
+1. 领取（test_worker_claims_queued_chip_job）：Worker 领取 queued 任务并 fenced 写入终态（lease_epoch 递增）
 2. 重复领取（test_worker_concurrent_only_one_claims_chip）：并发只有一个领取成功（FOR UPDATE SKIP LOCKED）
 3. 部分成功（test_worker_partial_success_writes_metadata）：chip 部分成功写 metadata.chip_status=partial，主 status=succeeded
 4. 恢复（test_worker_resumes_interrupted_chip_job）：interrupted → resume_queued → Worker 领取断点续算
@@ -111,12 +111,12 @@ async def test_worker_claims_queued_chip_job() -> None:
     """测试 1：Worker 领取 queued chip consensus 任务。
 
     验证：
-    - status: queued → running
-    - worker_instance_id 已设置
+    - status: queued → running → succeeded
+    - 终态释放 worker_instance_id / lease
     - lease_epoch 递增（fencing）
     - heartbeat_at / lease_expires_at 已更新
     """
-    from app.worker import _WORKER_INSTANCE_ID, _chip_consensus_poll_once
+    from app.worker import _chip_consensus_poll_once
     from tests.conftest import TestAsyncSessionLocal
 
     core_run_id = uuid.uuid4()
@@ -150,10 +150,11 @@ async def test_worker_claims_queued_chip_job() -> None:
         async with TestAsyncSessionLocal() as db:
             result = await db.get(SchedulerJobRun, job_run_id)
             assert result is not None
-            assert result.status == "running", f"status 应为 running, 实际: {result.status}"
-            assert result.worker_instance_id == _WORKER_INSTANCE_ID
+            assert result.status == "succeeded"
+            assert result.worker_instance_id is None
             assert result.heartbeat_at is not None
-            assert result.lease_expires_at is not None
+            assert result.lease_expires_at is None
+            assert result.finished_at is not None
             # lease_epoch 应递增（fencing）
             assert result.lease_epoch == initial_lease_epoch + 1, (
                 f"lease_epoch 应递增 1, 实际: {result.lease_epoch} (初始={initial_lease_epoch})"
@@ -208,9 +209,9 @@ async def test_worker_concurrent_only_one_claims_chip() -> None:
         async with TestAsyncSessionLocal() as db:
             result = await db.get(SchedulerJobRun, job_run_id)
             assert result is not None
-            assert result.status == "running"
-            # worker_instance_id 应是单一值（不会出现并发覆盖）
-            assert result.worker_instance_id is not None
+            assert result.status == "succeeded"
+            assert result.worker_instance_id is None
+            assert result.lease_expires_at is None
     finally:
         await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
 
@@ -226,11 +227,12 @@ async def test_worker_partial_success_writes_metadata() -> None:
 
     验证：
     - execute_after_close_chip_consensus 返回 status=partial 时
-    - _update_job_run_metadata 应写入 metadata.chip_status=partial
+    - finalize_job_run 应 fenced 写入 metadata.chip_status=partial
     - 主 status 保持 succeeded（chip 部分成功不反改 core）
     """
-    from app.services.after_close_chip_consensus_service import (
-        _update_job_run_metadata,
+    from app.services.fenced_job_run_service import (
+        FencedJobToken,
+        finalize_job_run,
     )
     from tests.conftest import TestAsyncSessionLocal
 
@@ -241,14 +243,32 @@ async def test_worker_partial_success_writes_metadata() -> None:
     job_run_id = job_run.id
 
     try:
-        # 直接调用 _update_job_run_metadata 模拟部分成功
-        await _update_job_run_metadata(
-            job_run_id=job_run_id,
-            chip_status="partial",
+        worker_id = "test-partial-worker"
+        async with TestAsyncSessionLocal() as db:
+            claimed = await db.get(SchedulerJobRun, job_run_id)
+            assert claimed is not None
+            claimed.worker_instance_id = worker_id
+            await db.commit()
+        token = FencedJobToken(job_run_id, worker_id, job_run.lease_epoch, 3600)
+        updated = await finalize_job_run(
+            token,
+            status="succeeded",
+            metadata_updates={
+                "chip_status": "partial",
+                "succeeded_count": 80,
+                "failed_count": 20,
+                "skipped_count": 0,
+                "total_count": 100,
+                "chip_results_summary": {
+                    "succeeded": 80, "failed": 20, "skipped": 0, "total": 100,
+                },
+            },
             succeeded_count=80,
             failed_count=20,
             total_count=100,
+            session_factory=TestAsyncSessionLocal,
         )
+        assert updated is True
 
         async with TestAsyncSessionLocal() as db:
             result = await db.get(SchedulerJobRun, job_run_id)
@@ -259,8 +279,12 @@ async def test_worker_partial_success_writes_metadata() -> None:
             assert meta["failed_count"] == 20
             assert meta["total_count"] == 100
             assert meta["chip_results_summary"] == {
-                "succeeded": 80, "failed": 20, "total": 100,
+                "succeeded": 80, "failed": 20, "skipped": 0, "total": 100,
             }
+            assert result.status == "succeeded"
+            assert result.finished_at is not None
+            assert result.worker_instance_id is None
+            assert result.lease_expires_at is None
     finally:
         await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
 
@@ -378,7 +402,8 @@ async def test_worker_missing_metadata_marks_failed() -> None:
                 f"缺 core_run_id 应标记 failed, 实际: {result.status}"
             )
             assert result.finished_at is not None
-            assert result.lease_expires_at == result.finished_at  # 释放 run_key
+            assert result.lease_expires_at is None
+            assert result.worker_instance_id is None
             assert result.error_message is not None
             assert "core_run_id" in result.error_message
     finally:
@@ -441,5 +466,70 @@ async def test_worker_resume_filters_succeeded_instruments() -> None:
             "execute 应收到 pending 列表（过滤已成功项）"
         )
         assert len(call_kwargs["instrument_ids"]) == 20
+    finally:
+        await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_finalize_after_epoch_transfer() -> None:
+    """旧 epoch 在所有权转移后不得覆盖新 worker 的终态。"""
+    from app.services.fenced_job_run_service import (
+        FencedJobToken,
+        finalize_job_run,
+    )
+    from tests.conftest import TestAsyncSessionLocal
+
+    job_run = await _create_queued_chip_job(TestAsyncSessionLocal, status="running")
+    job_run_id = job_run.id
+    old_worker = "worker:old"
+    new_worker = "worker:new"
+
+    try:
+        async with TestAsyncSessionLocal() as db:
+            current = await db.get(SchedulerJobRun, job_run_id)
+            assert current is not None
+            current.worker_instance_id = old_worker
+            current.lease_epoch = 1
+            await db.commit()
+
+        stale_token = FencedJobToken(job_run_id, old_worker, 1, _CHIP_LEASE_SECONDS)
+
+        async with TestAsyncSessionLocal() as db:
+            current = await db.get(SchedulerJobRun, job_run_id)
+            assert current is not None
+            current.worker_instance_id = new_worker
+            current.lease_epoch = 2
+            await db.commit()
+
+        stale_updated = await finalize_job_run(
+            stale_token,
+            status="failed",
+            metadata_updates={"chip_status": "failed"},
+            total_count=1,
+            succeeded_count=0,
+            failed_count=1,
+            session_factory=TestAsyncSessionLocal,
+        )
+        assert stale_updated is False
+
+        current_token = FencedJobToken(job_run_id, new_worker, 2, _CHIP_LEASE_SECONDS)
+        current_updated = await finalize_job_run(
+            current_token,
+            status="succeeded",
+            metadata_updates={"chip_status": "skipped", "skipped_count": 1},
+            total_count=1,
+            succeeded_count=0,
+            failed_count=0,
+            session_factory=TestAsyncSessionLocal,
+        )
+        assert current_updated is True
+
+        async with TestAsyncSessionLocal() as db:
+            current = await db.get(SchedulerJobRun, job_run_id)
+            assert current is not None
+            assert current.status == "succeeded"
+            assert current.worker_instance_id is None
+            assert current.lease_expires_at is None
+            assert json.loads(current.metadata_json or "{}")["chip_status"] == "skipped"
     finally:
         await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)

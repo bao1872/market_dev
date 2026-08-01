@@ -1587,8 +1587,6 @@ async def _chip_consensus_poll_once() -> bool:
     """
     from datetime import date as date_cls
 
-    from sqlalchemy import select
-
     from app.services.after_close_chip_consensus_service import (
         _CHIP_LEASE_SECONDS,
         CHIP_CONSENSUS_JOB_NAME,
@@ -1596,151 +1594,220 @@ async def _chip_consensus_poll_once() -> bool:
         get_pending_chip_instruments,
     )
     from app.services.feature_snapshot_service import get_active_a_share_instruments
-
-    async with AsyncSessionLocal() as db:
-        # [ChipConsensusWorker] - FOR UPDATE SKIP LOCKED 领取一个 queued 或 resume_queued 任务
-        stmt = (
-            select(SchedulerJobRun)
-            .where(
-                SchedulerJobRun.job_name == CHIP_CONSENSUS_JOB_NAME,
-                SchedulerJobRun.status.in_(("queued", "resume_queued")),
-            )
-            .order_by(SchedulerJobRun.created_at)
-            .limit(1)
-            .with_for_update(skip_locked=True)
-        )
-        result = await db.execute(stmt)
-        job_run = result.scalar_one_or_none()
-
-        if job_run is None:
-            # 无 queued/resume_queued 任务，释放锁（rollback 释放 FOR UPDATE 锁）
-            await db.rollback()
-            return False
-
-        prev_status = job_run.status
-        is_resume = prev_status == "resume_queued"
-
-        # 领取任务：更新 status='running' + worker + heartbeat + lease + lease_epoch（fencing）
-        now = datetime.now(ZoneInfo("Asia/Shanghai"))
-        job_run.status = "running"
-        job_run.worker_instance_id = _WORKER_INSTANCE_ID
-        if job_run.started_at is None:
-            job_run.started_at = now
-        job_run.heartbeat_at = now
-        job_run.lease_expires_at = now + timedelta(seconds=_CHIP_LEASE_SECONDS)
-        job_run.lease_epoch = job_run.lease_epoch + 1  # fencing
-        await db.commit()
-
-        # 提取 metadata
-        meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
-        trade_date_str = meta.get("trade_date")
-        core_run_id_str = meta.get("core_run_id")
-        job_run_id = job_run.id
-        current_lease_epoch = job_run.lease_epoch
-
-        logger.info(
-            "[ChipConsensusWorker] 领取任务: job_run_id=%s, prev_status=%s, "
-            "lease_epoch=%s, is_resume=%s",
-            job_run_id, prev_status, current_lease_epoch, is_resume,
-        )
-
-    if not trade_date_str or not core_run_id_str:
-        # 任务缺关键字段，立即标记 failed
-        logger.error(
-            "[ChipConsensusWorker] 任务缺少 trade_date/core_run_id，标记 failed: "
-            "job_run_id=%s", job_run_id,
-        )
-        async with AsyncSessionLocal() as db:
-            jr = await db.get(SchedulerJobRun, job_run_id)
-            if jr is not None:
-                now_fail = datetime.now(ZoneInfo("Asia/Shanghai"))
-                jr.status = "failed"
-                jr.finished_at = now_fail
-                jr.lease_expires_at = now_fail  # 释放 run_key
-                jr.error_message = "任务缺少 trade_date/core_run_id，无法执行 chip consensus"
-                from app.models.job_run_event import JobRunEvent
-                db.add(JobRunEvent(
-                    job_run_id=jr.id,
-                    step="claim",
-                    level="ERROR",
-                    message="任务缺少 trade_date/core_run_id，无法执行 chip consensus",
-                    payload={"reason": "missing_metadata"},
-                ))
-                await db.commit()
-        return True
-
-    trade_date = date_cls.fromisoformat(trade_date_str)
-    core_run_id = uuid.UUID(core_run_id_str)
-
-    # 获取活跃 A 股 instrument 列表
-    try:
-        async with AsyncSessionLocal() as db:
-            all_instrument_ids = await get_active_a_share_instruments(db)
-            # [断点续算] 过滤已 succeeded 的 instrument（resume_queued 只重试未成功项）
-            pending_instrument_ids = await get_pending_chip_instruments(
-                db,
-                trade_date=trade_date,
-                core_run_id=core_run_id,
-                all_instrument_ids=all_instrument_ids,
-            )
-    except Exception as exc:
-        logger.exception(
-            "[ChipConsensusWorker] 获取 instrument 列表失败: job_run_id=%s, error=%s",
-            job_run_id, exc,
-        )
-        async with AsyncSessionLocal() as db:
-            jr = await db.get(SchedulerJobRun, job_run_id)
-            if jr is not None:
-                now_fail = datetime.now(ZoneInfo("Asia/Shanghai"))
-                jr.status = "failed"
-                jr.finished_at = now_fail
-                jr.lease_expires_at = now_fail
-                jr.error_message = f"获取 instrument 列表失败: {exc}"[:500]
-                await db.commit()
-        return True
-
-    logger.info(
-        "[ChipConsensusWorker] 开始执行: job_run_id=%s, trade_date=%s, "
-        "core_run_id=%s, total_instruments=%d, pending=%d, is_resume=%s",
-        job_run_id, trade_date, core_run_id,
-        len(all_instrument_ids), len(pending_instrument_ids), is_resume,
+    from app.services.fenced_job_run_service import (
+        FencedJobHeartbeat,
+        JobLeaseLostError,
+        claim_next_job_run,
+        finalize_job_run,
     )
 
-    # 执行 chip consensus（内部已隔离单股失败，chip 失败不反改 core）
+    async with AsyncSessionLocal() as db:
+        claim = await claim_next_job_run(
+            db,
+            job_name=CHIP_CONSENSUS_JOB_NAME,
+            worker_instance_id=_WORKER_INSTANCE_ID,
+            lease_seconds=_CHIP_LEASE_SECONDS,
+        )
+        if claim is None:
+            await db.rollback()
+            return False
+        await db.commit()
+
+    lease_token = claim.token
+    meta = claim.metadata
+    trade_date_str = meta.get("trade_date")
+    core_run_id_str = meta.get("core_run_id")
+    job_run_id = lease_token.job_run_id
+    current_lease_epoch = lease_token.lease_epoch
+    prev_status = claim.previous_status
+    is_resume = prev_status == "resume_queued"
+
+    logger.info(
+        "[ChipConsensusWorker] 领取任务: job_run_id=%s, prev_status=%s, "
+        "lease_epoch=%s, is_resume=%s",
+        job_run_id, prev_status, current_lease_epoch, is_resume,
+    )
+
+    heartbeat = FencedJobHeartbeat(lease_token, interval_seconds=30.0)
+    await heartbeat.start()
+    finalized = False
+    trade_date = None
+    chip_status = "failed"
+
+    async def _finalize_failure(code: str, message: str) -> bool:
+        return await finalize_job_run(
+            lease_token,
+            status="failed",
+            metadata_updates={
+                "chip_status": "failed",
+                "chip_results_summary": {
+                    "succeeded": 0,
+                    "failed": 1,
+                    "skipped": 0,
+                    "total": 1,
+                    "reason_codes": [code],
+                },
+            },
+            total_count=1,
+            succeeded_count=0,
+            failed_count=1,
+            error_code=code,
+            error_message=message[:500],
+        )
+
     try:
-        result = await execute_after_close_chip_consensus(
+        if not trade_date_str or not core_run_id_str:
+            logger.error(
+                "[ChipConsensusWorker] 任务缺少 trade_date/core_run_id: job_run_id=%s",
+                job_run_id,
+            )
+            finalized = await _finalize_failure(
+                "CHIP_JOB_METADATA_MISSING",
+                "任务缺少 trade_date/core_run_id，无法执行 chip consensus",
+            )
+            return True
+
+        trade_date = date_cls.fromisoformat(trade_date_str)
+        core_run_id = uuid.UUID(core_run_id_str)
+
+        try:
+            heartbeat.ensure_owned()
+            async with AsyncSessionLocal() as db:
+                all_instrument_ids = await get_active_a_share_instruments(db)
+                pending_instrument_ids = await get_pending_chip_instruments(
+                    db,
+                    trade_date=trade_date,
+                    core_run_id=core_run_id,
+                    all_instrument_ids=all_instrument_ids,
+                )
+            heartbeat.ensure_owned()
+        except JobLeaseLostError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "[ChipConsensusWorker] 获取 instrument 列表失败: job_run_id=%s, error=%s",
+                job_run_id, exc,
+            )
+            finalized = await _finalize_failure(
+                "CHIP_INSTRUMENT_LIST_FAILED",
+                f"获取 instrument 列表失败: {exc}",
+            )
+            return True
+
+        logger.info(
+            "[ChipConsensusWorker] 开始执行: job_run_id=%s, trade_date=%s, "
+            "core_run_id=%s, total_instruments=%d, pending=%d, is_resume=%s",
+            job_run_id, trade_date, core_run_id,
+            len(all_instrument_ids), len(pending_instrument_ids), is_resume,
+        )
+
+        chip_result_summary = await execute_after_close_chip_consensus(
             job_run_id=job_run_id,
             trade_date=trade_date,
             core_run_id=core_run_id,
             instrument_ids=pending_instrument_ids,
             worker_id=_WORKER_INSTANCE_ID,
             lease_epoch=current_lease_epoch,
+            ownership_check=heartbeat.ensure_owned,
         )
-        # execute_after_close_chip_consensus 内部已更新 job_run metadata.chip_status
-        # 和主 status（succeeded/failed）；partial 保持主 status 不变由 caller 处理
+        heartbeat.ensure_owned()
+        chip_status = str(chip_result_summary.get("status", "failed"))
+        main_status = "failed" if chip_status == "failed" else "succeeded"
+        failed_items = chip_result_summary.get("failed_instruments", [])
+        skipped_items = chip_result_summary.get("skipped_instruments", [])
+        reason_codes = sorted({
+            str(item.get("reason") or item.get("error") or "UNKNOWN")[:120]
+            for item in [*failed_items, *skipped_items]
+        })[:20]
+        metadata_updates = {
+            "chip_status": chip_status,
+            "succeeded_count": chip_result_summary.get("succeeded_count", 0),
+            "failed_count": chip_result_summary.get("failed_count", 0),
+            "skipped_count": chip_result_summary.get("skipped_count", 0),
+            "total_count": chip_result_summary.get("total_count", 0),
+            "chip_results_summary": {
+                "succeeded": chip_result_summary.get("succeeded_count", 0),
+                "failed": chip_result_summary.get("failed_count", 0),
+                "skipped": chip_result_summary.get("skipped_count", 0),
+                "total": chip_result_summary.get("total_count", 0),
+                "reason_codes": reason_codes,
+            },
+        }
+        finalized = await finalize_job_run(
+            lease_token,
+            status=main_status,
+            metadata_updates=metadata_updates,
+            total_count=int(chip_result_summary.get("total_count", 0)),
+            succeeded_count=int(chip_result_summary.get("succeeded_count", 0)),
+            failed_count=int(chip_result_summary.get("failed_count", 0)),
+            error_code="CHIP_SYSTEMIC_FAILURE" if main_status == "failed" else None,
+            error_message=(
+                "全部 chip instrument 处理失败" if main_status == "failed" else None
+            ),
+        )
+        if not finalized:
+            raise JobLeaseLostError(
+                f"chip terminal update fenced: job_run_id={job_run_id}"
+            )
+
         logger.info(
             "[ChipConsensusWorker] 执行完成: job_run_id=%s, status=%s, "
-            "succeeded=%d, failed=%d, total=%d",
-            job_run_id, result.get("status"),
-            result.get("succeeded_count", 0),
-            result.get("failed_count", 0),
-            result.get("total_count", 0),
+            "succeeded=%d, failed=%d, skipped=%d, total=%d",
+            job_run_id, chip_status,
+            chip_result_summary.get("succeeded_count", 0),
+            chip_result_summary.get("failed_count", 0),
+            chip_result_summary.get("skipped_count", 0),
+            chip_result_summary.get("total_count", 0),
         )
+    except JobLeaseLostError as exc:
+        logger.warning(
+            "[ChipConsensusWorker] 已失去租约，禁止终态或后续写入: job_run_id=%s, error=%s",
+            job_run_id, exc,
+        )
+        return True
     except Exception as exc:
         logger.exception(
             "[ChipConsensusWorker] 执行异常: job_run_id=%s, error=%s", job_run_id, exc,
         )
-        # execute_after_close_chip_consensus 内部已处理单股失败，
-        # 此处仅捕获整体异常，标记 failed
-        async with AsyncSessionLocal() as db:
-            jr = await db.get(SchedulerJobRun, job_run_id)
-            if jr is not None:
-                now_fail = datetime.now(ZoneInfo("Asia/Shanghai"))
-                jr.status = "failed"
-                jr.finished_at = now_fail
-                jr.lease_expires_at = now_fail
-                jr.error_message = f"chip consensus 执行异常: {exc}"[:500]
-                await db.commit()
+        finalized = await _finalize_failure(
+            "CHIP_JOB_EXECUTION_FAILED",
+            f"chip consensus 执行异常: {exc}",
+        )
+        return True
+    finally:
+        await heartbeat.stop()
+
+    # 只有当前 owner 成功写入终态后才触发可选的 auction anchor 回调。
+    if (
+        finalized
+        and trade_date is not None
+        and chip_status in {"succeeded", "partial"}
+        and chip_result_summary.get("anchor_rebuild_required", False)
+    ):
+        try:
+            from app.services.auction_anchor_service import (
+                generate_and_publish_auction_anchors,
+            )
+
+            async with AsyncSessionLocal() as anchor_db:
+                anchor_result = await generate_and_publish_auction_anchors(
+                    anchor_db,
+                    trade_date=trade_date,
+                    worker_id=f"chip_consensus:{job_run_id}",
+                )
+                await anchor_db.commit()
+            logger.info(
+                "[ChipConsensusWorker] chip 终态后锚点重建+发布: trade_date=%s, "
+                "chip_status=%s, anchor_status=%s, publication_id=%s",
+                trade_date, chip_status,
+                anchor_result.get("status"), anchor_result.get("publication_id"),
+            )
+        except Exception:
+            logger.warning(
+                "[ChipConsensusWorker] chip 终态后锚点重建失败（软失败）: trade_date=%s",
+                trade_date,
+                exc_info=True,
+            )
 
     return True
 

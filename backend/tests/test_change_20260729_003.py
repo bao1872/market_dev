@@ -499,34 +499,26 @@ class TestMainRunDoesNotWaitForChip:
         """[P0-10] execute_after_close_chip_consensus 已实现，不再抛 NotImplementedError。
 
         空输入时应返回 succeeded 状态（无 instrument 需要处理），不抛异常。
-        metadata 更新通过 mock 隔离 DB（PURE_UNIT_TEST 模式不连接数据库）。
+        空输入不产生持久化写入（PURE_UNIT_TEST 模式不连接数据库）。
         """
         import asyncio
         import uuid as uuid_mod
         from datetime import date as date_mod
-        from unittest.mock import patch
 
         from app.services.after_close_chip_consensus_service import (
             execute_after_close_chip_consensus,
         )
 
-        # mock _update_job_run_metadata 避免连接 DB（PURE_UNIT_TEST 模式）
-        async def _mock_update_metadata(**kwargs):
-            pass
-
-        with patch(
-            "app.services.after_close_chip_consensus_service._update_job_run_metadata",
-            new=_mock_update_metadata,
-        ):
-            # 空输入 - 应返回 succeeded 状态，不抛 NotImplementedError
-            result = asyncio.run(
-                execute_after_close_chip_consensus(
-                    job_run_id=uuid_mod.uuid4(),
-                    trade_date=date_mod(2026, 7, 29),
-                    core_run_id=uuid_mod.uuid4(),
-                    instrument_ids=[],
-                )
+        result = asyncio.run(
+            execute_after_close_chip_consensus(
+                job_run_id=uuid_mod.uuid4(),
+                trade_date=date_mod(2026, 7, 29),
+                core_run_id=uuid_mod.uuid4(),
+                instrument_ids=[],
+                worker_id="pure-unit-worker",
+                lease_epoch=1,
             )
+        )
         # 空列表应返回 succeeded（无 instrument 需要处理）
         assert result["status"] == "succeeded", (
             f"execute 空输入应返回 succeeded，实际: {result['status']}"

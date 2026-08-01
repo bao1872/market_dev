@@ -2,10 +2,11 @@
 
 覆盖 5 个场景（spec Phase 3）：
 1. 租约未过期且 heartbeat 正常的 running 任务不被恢复
-2. 租约过期的 running 任务被恢复为 interrupted + 写 recovery 事件
+2. 租约过期且 heartbeat 不健康的 running 任务被恢复为 interrupted + 写 recovery 事件
 3. 同一任务不重复写 recovery 事件（幂等）
 4. after_close_orchestrator 任务恢复时 metadata.orchestrator_status 改为 interrupted
-5. heartbeat 超时 90s 但 lease 未过期的 running 任务被恢复（关键边界场景）
+5. heartbeat 超时 90s 但 lease 未过期的 running 任务不被恢复
+6. lease 已过期但 heartbeat 健康的长任务不被恢复
 
 测试环境：PostgreSQL 测试库（conftest.py 的 db_session fixture，事务性回滚）
 设计要点：
@@ -17,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -28,6 +30,15 @@ from app.models.job_run_event import JobRunEvent
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.scheduler_job_run_recovery_service import (
     recover_stale_scheduler_job_runs,
+)
+
+_CI_ENV = (
+    os.environ.get("GITHUB_ACTIONS", "").lower() in ("1", "true", "yes")
+    or os.environ.get("PANJI_CI_DB_TEST", "").lower() in ("1", "true", "yes")
+)
+pytestmark = pytest.mark.skipif(
+    not _CI_ENV,
+    reason="scheduler recovery tests require the CI ephemeral PostgreSQL database",
 )
 
 _TZ = ZoneInfo("Asia/Shanghai")
@@ -115,7 +126,7 @@ async def test_lease_expired_recovered_to_interrupted(db_session) -> None:
         job_name="bars_scheduler",
         status="running",
         lease_expires_at=test_now - timedelta(minutes=1),
-        heartbeat_at=test_now - timedelta(seconds=10),
+        heartbeat_at=test_now - timedelta(seconds=100),
     )
     job_run_id = job_run.id
 
@@ -204,11 +215,11 @@ async def test_after_close_orchestrator_metadata_updated(db_session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_timeout_lease_valid_recovered(db_session) -> None:
-    """场景 5：heartbeat 超时 90s 但 lease 未过期的 running 任务被恢复（关键边界场景）。
+async def test_heartbeat_timeout_lease_valid_not_recovered(db_session) -> None:
+    """场景 5：heartbeat 超时但 lease 未过期时不越权回收。
 
     这是生产环境僵尸任务的典型场景：lease 设置较长（如 4h）但 Worker
-    被 SIGKILL 后 heartbeat 停止更新，90s 后即应被识别为僵尸并恢复。
+    Watchdog 只在 lease 与 heartbeat 同时失效时回收，避免和较长租约冲突。
     """
     test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
     job_run = await _create_job_run(
@@ -222,12 +233,33 @@ async def test_heartbeat_timeout_lease_valid_recovered(db_session) -> None:
 
     recovered = await recover_stale_scheduler_job_runs(db_session, now=test_now)
 
-    assert recovered == 1
+    assert recovered == 0
     await db_session.refresh(job_run)
-    assert job_run.status == "interrupted"
-    assert job_run.error_code == "STALE_PROCESS_TERMINATED"
-    assert job_run.finished_at is not None
-    assert await _count_recovery_events(db_session, job_run_id) == 1
+    assert job_run.status == "running"
+    assert job_run.error_code is None
+    assert job_run.finished_at is None
+    assert await _count_recovery_events(db_session, job_run_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_lease_expired_heartbeat_fresh_not_recovered(db_session) -> None:
+    """场景 6：lease 到点但 heartbeat 健康时不接管正常长任务。"""
+    test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
+    job_run = await _create_job_run(
+        db_session,
+        job_name="after_close_chip_consensus",
+        status="running",
+        lease_expires_at=test_now - timedelta(seconds=1),
+        heartbeat_at=test_now - timedelta(seconds=10),
+    )
+    job_run_id = job_run.id
+
+    recovered = await recover_stale_scheduler_job_runs(db_session, now=test_now)
+
+    assert recovered == 0
+    await db_session.refresh(job_run)
+    assert job_run.status == "running"
+    assert await _count_recovery_events(db_session, job_run_id) == 0
 
 
 if __name__ == "__main__":

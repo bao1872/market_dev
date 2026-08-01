@@ -212,8 +212,11 @@ V1 输入仅趋势、结构、动量、量能、结构事件和权威行业/概�
 
 - chip_consensus 任务在现有 after-close worker 容器内领取执行，**不新增常驻容器**；
 - worker 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取 `queued` / `resume_queued` 的 `after_close_chip_consensus` 任务，`lease_epoch` fencing 防止旧 worker 覆盖新 worker 状态；
-- 断点续算：`resume_queued` 任务只重试未成功 instrument，已 `succeeded` 的 instrument 不重算；
+- worker 每约 30 秒以 job id、`status=running`、worker instance 和 `lease_epoch` 的完整 fencing 条件刷新 heartbeat 与 lease；刷新失败即失去所有权，旧 worker 不得再写 snapshot 或终态；
+- watchdog 只有在 lease 已过期且 heartbeat 不健康时才回收任务，健康长任务不得因执行超过 90 秒被接管；
+- 断点续算：`resume_queued` 任务只重试未成功 instrument，已 `succeeded` 或合法 `skipped` 的 instrument 不重算；
 - chip_consensus 失败只重试自身，不反改 core（`execute_after_close_chip_consensus` 内部已隔离）；
+- 终态必须写 `finished_at`、释放 lease 并保存 succeeded/failed/skipped 计数与结构化原因；全成功、部分成功、全部合法 skipped、系统性失败分别映射为 `succeeded/succeeded`、`succeeded/partial`、`succeeded/skipped`、`failed/failed`（主 status / `metadata.chip_status`）；
 - `auto_resume_interrupted_after_close_runs` 同时处理 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次。
 
 ### AC-19：聚合依赖合同
@@ -318,4 +321,3 @@ refreshing_daily        // 刷新 & 校验日线 readiness
 2. 历史分位、normalized 值、delta 可为 null；
 3. 筛选信号若基于 normalized 值的筛选器在 insufficient_history 下禁用；
 4. `fp_segment_change_pct` 等第一金字塔上游字段全空时，按 §MX-63 的 null 语义合同返回 `null + "无可用分段数据"`，不得在 review 层伪造 0 或均值回填。
-

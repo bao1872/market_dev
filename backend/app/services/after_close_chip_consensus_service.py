@@ -71,6 +71,7 @@ CHIP_STATUS_QUEUED = "queued"
 CHIP_STATUS_RUNNING = "running"
 CHIP_STATUS_SUCCEEDED = "succeeded"
 CHIP_STATUS_PARTIAL = "partial"  # 写 metadata.chip_status，不写 SchedulerJobRun.status
+CHIP_STATUS_SKIPPED = "skipped"
 CHIP_STATUS_FAILED = "failed"
 
 # metadata_json 允许的字段（[P0-9] 禁止把全市场 UUID 数组写入 metadata_json）
@@ -232,7 +233,7 @@ async def get_pending_chip_instruments(
         .where(
             StockChipConsensusSnapshot.trade_date == trade_date,
             StockChipConsensusSnapshot.core_run_id == core_run_id,
-            StockChipConsensusSnapshot.status == "succeeded",
+            StockChipConsensusSnapshot.status.in_(("succeeded", "skipped")),
         )
     )
     result = await db.execute(stmt)
@@ -253,6 +254,7 @@ async def execute_after_close_chip_consensus(
     instrument_ids: list[uuid.UUID],
     worker_id: str | None = None,
     lease_epoch: int | None = None,
+    ownership_check: Any | None = None,
     batch_size: int = _CHIP_BATCH_SIZE,
     _diag_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -292,7 +294,20 @@ async def execute_after_close_chip_consensus(
             "failed_instruments": list[dict],  # 失败详情（instrument_id, error）
         }
     """
+    from app.services.fenced_job_run_service import (
+        FencedJobToken,
+        JobLeaseLostError,
+    )
     from app.services.first_pyramid_service import compute_chip_consensus_snapshot
+
+    if not worker_id or lease_epoch is None:
+        raise ValueError("worker_id and lease_epoch are required for fenced chip execution")
+    lease_token = FencedJobToken(
+        job_run_id=job_run_id,
+        worker_instance_id=worker_id,
+        lease_epoch=lease_epoch,
+        lease_seconds=_CHIP_LEASE_SECONDS,
+    )
 
     succeeded_count = 0
     failed_count = 0
@@ -308,6 +323,8 @@ async def execute_after_close_chip_consensus(
     for batch_start in range(0, total_count, batch_size):
         batch = instrument_ids[batch_start:batch_start + batch_size]
         for instrument_id in batch:
+            if ownership_check is not None:
+                ownership_check()
             try:
                 # 获取 daily + 15m bars（point-in-time <= trade_date）
                 daily_bars, bars_15m = await _fetch_chip_bars(
@@ -332,6 +349,7 @@ async def execute_after_close_chip_consensus(
                     # 写入 skipped 记录（便于查询）
                     try:
                         await _upsert_chip_snapshot(
+                            lease_token=lease_token,
                             instrument_id=instrument_id,
                             trade_date=trade_date,
                             core_run_id=core_run_id,
@@ -340,8 +358,20 @@ async def execute_after_close_chip_consensus(
                             status="skipped",
                             error_message=f"15m bars insufficient: {actual_15m} < {_CHIP_MIN_15M_BARS}",
                         )
-                    except Exception:
-                        pass  # skipped 记录失败不阻塞
+                    except JobLeaseLostError:
+                        raise
+                    except Exception as exc:
+                        skipped_count -= 1
+                        failed_count += 1
+                        skipped_instruments.pop()
+                        failed_instruments.append({
+                            "instrument_id": str(instrument_id),
+                            "error": f"skipped persistence failed: {exc}"[:500],
+                        })
+                        logger.exception(
+                            "[ChipConsensus] skipped 结果持久化失败: instrument_id=%s",
+                            instrument_id,
+                        )
                     continue
 
                 # 计算 chip consensus（独立于 core）
@@ -360,6 +390,7 @@ async def execute_after_close_chip_consensus(
                 # 供 /market/stocks 服务端 filter/sort 从 chip_payload.chip_flat.<fp_key> 读取
                 chip_dict["chip_flat"] = flatten_chip_fields(chip_dict.get("chip"))
                 await _upsert_chip_snapshot(
+                    lease_token=lease_token,
                     instrument_id=instrument_id,
                     trade_date=trade_date,
                     core_run_id=core_run_id,
@@ -369,6 +400,8 @@ async def execute_after_close_chip_consensus(
                     error_message=None,
                 )
                 succeeded_count += 1
+            except JobLeaseLostError:
+                raise
             except Exception as exc:
                 failed_count += 1
                 failed_instruments.append({
@@ -378,6 +411,7 @@ async def execute_after_close_chip_consensus(
                 # 写入失败记录（便于断点续算）
                 try:
                     await _upsert_chip_snapshot(
+                        lease_token=lease_token,
                         instrument_id=instrument_id,
                         trade_date=trade_date,
                         core_run_id=core_run_id,
@@ -386,12 +420,19 @@ async def execute_after_close_chip_consensus(
                         status="failed",
                         error_message=str(exc)[:500],
                     )
+                except JobLeaseLostError:
+                    raise
                 except Exception:
-                    pass  # 失败记录失败不阻塞
+                    logger.exception(
+                        "[ChipConsensus] failed 结果持久化失败: instrument_id=%s",
+                        instrument_id,
+                    )
 
     # 统计状态
-    if failed_count == 0 and skipped_count == 0:
+    if total_count == 0 or succeeded_count == total_count:
         status = "succeeded"
+    elif skipped_count == total_count:
+        status = "skipped"
     elif succeeded_count == 0 and skipped_count == 0:
         status = "failed"
     else:
@@ -405,57 +446,14 @@ async def execute_after_close_chip_consensus(
         "status": status,
         "failed_instruments": failed_instruments,
         "skipped_instruments": skipped_instruments,
+        "anchor_rebuild_required": status in {"succeeded", "partial"},
     }
-
-    # 更新 job_run metadata（chip_status 写 metadata，不修改 SchedulerJobRun.status）
-    # 主 status 保持 succeeded/failed；部分成功写 metadata.chip_status=partial
-    await _update_job_run_metadata(
-        job_run_id=job_run_id,
-        chip_status=status,
-        succeeded_count=succeeded_count,
-        failed_count=failed_count,
-        total_count=total_count,
-    )
 
     logger.info(
         "[ChipConsensus] 任务完成: job_run_id=%s, status=%s, "
         "succeeded=%d, failed=%d, skipped=%d, total=%d",
         job_run_id, status, succeeded_count, failed_count, skipped_count, total_count,
     )
-
-    # [P0-2 修复 2026-07-31] chip 完成回调：触发 auction_anchor 重建并原子切换 publication。
-    # - chip succeeded/partial → 重新生成完整锚点（含筹码维度），原子切换 publication
-    # - chip failed/全失败 → 主流程已生成 structure_only 并发布，此处不重复
-    # - 失败只记录 warn，不反改 chip job 状态（chip 是 source of truth，anchor 是 optional）
-    if status in ("succeeded", "partial"):
-        try:
-            from app.db import AsyncSessionLocal
-            from app.services.auction_anchor_service import (
-                generate_and_publish_auction_anchors,
-            )
-
-            async with AsyncSessionLocal() as anchor_db:
-                anchor_result = await generate_and_publish_auction_anchors(
-                    anchor_db,
-                    trade_date=trade_date,
-                    worker_id=f"chip_consensus:{job_run_id}",
-                )
-                await anchor_db.commit()
-            logger.info(
-                "[ChipConsensus] chip 完成后锚点重建+发布: trade_date=%s, "
-                "chip_status=%s, anchor_status=%s, publication_id=%s",
-                trade_date, status,
-                anchor_result.get("status"),
-                anchor_result.get("publication_id"),
-            )
-        except Exception as anchor_exc:
-            # 锚点重建失败不反改 chip job 状态（软失败）
-            logger.warning(
-                "[ChipConsensus] chip 完成后锚点重建失败（软失败，不影响 chip 状态）: "
-                "trade_date=%s, error=%s",
-                trade_date, anchor_exc,
-                exc_info=True,
-            )
 
     if _diag_sink is not None:
         _diag_sink.update(result_summary)
@@ -524,6 +522,7 @@ async def _fetch_chip_bars(
 
 
 async def _upsert_chip_snapshot(
+    lease_token: Any,
     instrument_id: uuid.UUID,
     trade_date: date,
     core_run_id: uuid.UUID,
@@ -538,8 +537,10 @@ async def _upsert_chip_snapshot(
     (instrument_id, trade_date, core_run_id, algorithm_version)
     """
     from app.db import AsyncSessionLocal
+    from app.services.fenced_job_run_service import lock_owned_job_run
 
     async with AsyncSessionLocal() as db:
+        await lock_owned_job_run(db, lease_token)
         stmt = pg_insert(StockChipConsensusSnapshot).values(
             instrument_id=instrument_id,
             trade_date=trade_date,
@@ -561,60 +562,6 @@ async def _upsert_chip_snapshot(
             },
         )
         await db.execute(stmt)
-        await db.commit()
-
-
-async def _update_job_run_metadata(
-    job_run_id: uuid.UUID,
-    chip_status: str,
-    succeeded_count: int,
-    failed_count: int,
-    total_count: int,
-) -> None:
-    """更新 job_run metadata.chip_status（不修改 SchedulerJobRun.status）。
-
-    [P0-8 修复 2026-07-29] 部分成功写 metadata.chip_status=partial，
-    主 status 保持 succeeded/failed。
-    """
-    import json
-
-    from app.db import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
-        job_run = await db.get(SchedulerJobRun, job_run_id)
-        if job_run is None:
-            logger.warning(
-                "[ChipConsensus] 更新 metadata 失败：job_run 不存在: %s", job_run_id,
-            )
-            return
-
-        # 解析现有 metadata
-        existing: dict[str, Any] = {}
-        if job_run.metadata_json:
-            try:
-                existing = json.loads(job_run.metadata_json)
-            except (json.JSONDecodeError, TypeError):
-                existing = {}
-
-        # 更新 chip_status 相关字段
-        existing["chip_status"] = chip_status
-        existing["succeeded_count"] = succeeded_count
-        existing["failed_count"] = failed_count
-        existing["total_count"] = total_count
-        existing["chip_results_summary"] = {
-            "succeeded": succeeded_count,
-            "failed": failed_count,
-            "total": total_count,
-        }
-
-        # 主 status：全成功→succeeded，全失败→failed，部分→succeeded（chip_status=partial）
-        if chip_status == "succeeded":
-            job_run.status = "succeeded"
-        elif chip_status == "failed":
-            job_run.status = "failed"
-        # partial: 保持主 status 不变（由 caller 设置），只更新 metadata
-
-        job_run.metadata_json = json.dumps(existing, ensure_ascii=False)
         await db.commit()
 
 
