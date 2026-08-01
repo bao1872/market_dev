@@ -1137,6 +1137,7 @@ async def execute_after_close_run(
                                     db,
                                     snapshot,
                                     instrument_resolver=_resolve_instruments_for_board_sync,
+                                    effective_date=trade_date,
                                 )
 
                         # 3. 记录成功状态到 Redis（供 /market/boards API 读取）

@@ -43,19 +43,28 @@ from app.domain.first_pyramid_semantics import (
     StructureAlignment,
     VolumeBadge,
 )
-from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
+from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
 from app.models.factor_publication import FactorPublication
 from app.models.first_pyramid_history import (
     FirstPyramidHistoryDailyState,
     FirstPyramidHistoryEvent,
 )
 from app.models.instrument import Instrument
-from app.models.market_board import MarketBoard, MarketBoardMembership
+from app.models.market_board import MarketBoard
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
+from app.services.board_membership_service import (
+    PITMembership,
+    PITMembershipUnavailableError,
+    batch_version,
+    list_universe_definitions_at,
+    resolve_board_membership_at,
+    resolve_universe_membership_at,
+)
 from app.services.factor_publication_service import (
     PUBLICATION_KIND_MARKET_AGGREGATION,
     get_publication,
     get_published_snapshot_run_id,
+    publish_market_aggregation,
 )
 from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 
@@ -1138,18 +1147,6 @@ async def _compute_peer_metrics(
 # =============================================================================
 
 
-async def _get_board_members(
-    session: AsyncSession,
-    board_id: uuid.UUID,
-) -> list[uuid.UUID]:
-    """获取板块全部成员 instrument_id 列表。"""
-    stmt = select(MarketBoardMembership.instrumentId).where(
-        MarketBoardMembership.boardId == board_id,
-    )
-    result = await session.execute(stmt)
-    return [row[0] for row in result]
-
-
 async def _fetch_member_snapshots(
     session: AsyncSession,
     instrument_ids: list[uuid.UUID],
@@ -1214,6 +1211,8 @@ async def compute_board_analysis(
     trade_date: date,
     *,
     source_core_run_id: uuid.UUID | None = None,
+    board_analysis_run_id: uuid.UUID | None = None,
+    pit_membership: PITMembership | None = None,
     algorithm_version: str = BOARD_ANALYSIS_ALGORITHM_VERSION,
     parameter_hash: str | None = None,
 ) -> BoardAnalysisSnapshot:
@@ -1245,8 +1244,33 @@ async def compute_board_analysis(
     if board is None:
         raise ValueError(f"板块不存在: board_id={board_id}")
 
-    # 3. 获取板块成员
-    member_ids = await _get_board_members(session, board_id)
+    # 3. 使用交易日当时有效的 PIT 成员，禁止当前投影回填历史。
+    membership = pit_membership or await resolve_board_membership_at(
+        session, board_id, trade_date,
+    )
+    standalone_run = board_analysis_run_id is None
+    if standalone_run:
+        batch_run = BoardAnalysisRun(
+            trade_date=trade_date,
+            source_core_run_id=source_core_run_id,
+            taxonomy_version=f"single:{membership.taxonomy_version}",
+            taxonomy_compatibility_key=membership.compatibility_key,
+            membership_version=(
+                f"single:{board_id}:{membership.membership_version}"
+            ),
+            algorithm_version=algorithm_version,
+            expected_count=1,
+            succeeded_count=0,
+            failed_count=0,
+            coverage_ratio=0.0,
+            status="running",
+            blockers=[],
+        )
+        session.add(batch_run)
+        await session.flush()
+        board_analysis_run_id = batch_run.id
+    assert board_analysis_run_id is not None
+    member_ids = list(membership.instrument_ids)
     eligible_count = len(member_ids)
     if eligible_count == 0:
         # 空板块：直接写入空快照（避免后续 None 除零）
@@ -1257,6 +1281,10 @@ async def compute_board_analysis(
             board=board,
             trade_date=trade_date,
             source_core_run_id=source_core_run_id,
+            board_analysis_run_id=board_analysis_run_id,
+            taxonomy_version=membership.taxonomy_version,
+            taxonomy_compatibility_key=membership.compatibility_key,
+            membership_version=membership.membership_version,
             algorithm_version=algorithm_version,
             parameter_hash=parameter_hash or _compute_parameter_hash(),
             eligible_count=0,
@@ -1265,9 +1293,22 @@ async def compute_board_analysis(
             missing_count=0,
             missing_reasons={},
             payload=payload,
-            status="succeeded",
-            error_message=None,
+            status="blocked_external_population",
+            error_message=(
+                "blocked_external_population: PIT membership is empty"
+            ),
         )
+        if board_analysis_run_id is not None:
+            run = await session.get(BoardAnalysisRun, board_analysis_run_id)
+            if run is not None:
+                run.succeeded_count = 0
+                run.failed_count = 1
+                run.coverage_ratio = 0.0
+                run.status = "blocked_external_population"
+                run.blockers = [{
+                    "code": "blocked_external_population",
+                    "board_id": str(board_id),
+                }]
         return snapshot
 
     # 4. 一次性查询所有成员的 first_pyramid_flat
@@ -1357,6 +1398,10 @@ async def compute_board_analysis(
         board=board,
         trade_date=trade_date,
         source_core_run_id=source_core_run_id,
+        board_analysis_run_id=board_analysis_run_id,
+        taxonomy_version=membership.taxonomy_version,
+        taxonomy_compatibility_key=membership.compatibility_key,
+        membership_version=membership.membership_version,
         algorithm_version=algorithm_version,
         parameter_hash=parameter_hash or _compute_parameter_hash(),
         eligible_count=eligible_count,
@@ -1365,9 +1410,21 @@ async def compute_board_analysis(
         missing_count=missing_count,
         missing_reasons=missing_reasons,
         payload=payload,
-        status="succeeded",
+        status=(
+            "succeeded"
+            if coverage_ratio >= BOARD_ANALYSIS_MIN_COVERAGE
+            else "partial"
+        ),
         error_message=None,
     )
+
+    if standalone_run:
+        run = await session.get(BoardAnalysisRun, board_analysis_run_id)
+        if run is not None:
+            run.succeeded_count = int(snapshot.status == "succeeded")
+            run.failed_count = int(snapshot.status != "succeeded")
+            run.coverage_ratio = float(snapshot.status == "succeeded")
+            run.status = snapshot.status
 
     logger.info(
         "[BoardAnalysis] board=%s/%s, eligible=%d, ready=%d, coverage=%.4f, status=%s",
@@ -1384,6 +1441,10 @@ async def _upsert_snapshot(
     board: MarketBoard,
     trade_date: date,
     source_core_run_id: uuid.UUID,
+    board_analysis_run_id: uuid.UUID,
+    taxonomy_version: str,
+    taxonomy_compatibility_key: str,
+    membership_version: str,
     algorithm_version: str,
     parameter_hash: str,
     eligible_count: int,
@@ -1397,7 +1458,7 @@ async def _upsert_snapshot(
 ) -> BoardAnalysisSnapshot:
     """upsert board_analysis_snapshot 记录。
 
-    唯一键 (trade_date, board_id, algorithm_version) 保证幂等。
+    唯一键 (board_analysis_run_id, board_id) 保证同一不可变批次内幂等。
     """
     now = datetime.now(UTC)
 
@@ -1405,9 +1466,8 @@ async def _upsert_snapshot(
     existing_stmt = (
         select(BoardAnalysisSnapshot)
         .where(
-            BoardAnalysisSnapshot.trade_date == trade_date,
+            BoardAnalysisSnapshot.board_analysis_run_id == board_analysis_run_id,
             BoardAnalysisSnapshot.board_id == board.id,
-            BoardAnalysisSnapshot.algorithm_version == algorithm_version,
         )
     )
     existing = (await session.execute(existing_stmt)).scalar_one_or_none()
@@ -1420,6 +1480,10 @@ async def _upsert_snapshot(
             board_type=board.type,
             board_name=board.name,
             source_core_run_id=source_core_run_id,
+            board_analysis_run_id=board_analysis_run_id,
+            taxonomy_version=taxonomy_version,
+            taxonomy_compatibility_key=taxonomy_compatibility_key,
+            membership_version=membership_version,
             algorithm_version=algorithm_version,
             parameter_hash=parameter_hash,
             eligible_count=eligible_count,
@@ -1441,6 +1505,10 @@ async def _upsert_snapshot(
     existing.board_type = board.type
     existing.board_name = board.name
     existing.source_core_run_id = source_core_run_id
+    existing.board_analysis_run_id = board_analysis_run_id
+    existing.taxonomy_version = taxonomy_version
+    existing.taxonomy_compatibility_key = taxonomy_compatibility_key
+    existing.membership_version = membership_version
     existing.parameter_hash = parameter_hash
     existing.eligible_count = eligible_count
     existing.ready_count = ready_count
@@ -1480,6 +1548,10 @@ async def publish_board_analysis(
     """
     import json
 
+    if snapshot.board_analysis_run_id is None:
+        raise ValueError("新 Board publication 必须指向真实 board_analysis_run")
+    if snapshot.status != "succeeded":
+        return None
     if snapshot.coverage_ratio < threshold:
         logger.info(
             "[BoardAnalysis] 不发布: board=%s, coverage=%.4f < threshold=%.4f",
@@ -1495,6 +1567,10 @@ async def publish_board_analysis(
         "coverage_ratio": snapshot.coverage_ratio,
         "ready_count": snapshot.ready_count,
         "eligible_count": snapshot.eligible_count,
+        "board_analysis_run_id": str(snapshot.board_analysis_run_id),
+        "taxonomy_version": snapshot.taxonomy_version,
+        "taxonomy_compatibility_key": snapshot.taxonomy_compatibility_key,
+        "membership_version": snapshot.membership_version,
     }
 
     stmt = pg_insert(FactorPublication).values(
@@ -1503,7 +1579,7 @@ async def publish_board_analysis(
         trade_date=snapshot.trade_date,
         publication_kind=PUBLICATION_KIND_MARKET_AGGREGATION,
         algorithm_version=snapshot.algorithm_version,
-        data_run_id=snapshot.id,
+        data_run_id=snapshot.board_analysis_run_id,
         coverage_ratio=snapshot.coverage_ratio,
         published_at=now,
         metadata_json=json.dumps(meta, ensure_ascii=False),
@@ -1540,7 +1616,7 @@ async def get_published_board_snapshot_id(
     board_id: uuid.UUID,
     trade_date: date,
 ) -> uuid.UUID | None:
-    """读取已发布的 board_analysis snapshot_id（无 pointer 返回 None）。"""
+    """Resolve both legacy snapshot pointers and new batch-run pointers."""
     pub = await get_publication(
         session,
         scope_type=SCOPE_TYPE_BOARD,
@@ -1548,7 +1624,20 @@ async def get_published_board_snapshot_id(
         trade_date=trade_date,
         publication_kind=PUBLICATION_KIND_MARKET_AGGREGATION,
     )
-    return pub.data_run_id if pub else None
+    if pub is None:
+        return None
+    legacy = await session.get(BoardAnalysisSnapshot, pub.data_run_id)
+    if legacy is not None and legacy.board_id == board_id:
+        return legacy.id
+    stmt = (
+        select(BoardAnalysisSnapshot.id)
+        .where(
+            BoardAnalysisSnapshot.board_analysis_run_id == pub.data_run_id,
+            BoardAnalysisSnapshot.board_id == board_id,
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 # =============================================================================
@@ -1565,85 +1654,261 @@ async def compute_all_boards(
     publish: bool = True,
     algorithm_version: str = BOARD_ANALYSIS_ALGORITHM_VERSION,
 ) -> dict[str, Any]:
-    """批量计算所有板块分析（行业+概念）。
+    """Compute one immutable Board batch with PIT membership and real run identity."""
+    source_core_run_id = await get_published_snapshot_run_id(
+        session, trade_date, publication_kind="stock_core",
+    )
+    if source_core_run_id is None:
+        raise ValueError(f"trade_date={trade_date} 无已发布 stock_core pointer")
 
-    Args:
-        session: 异步 DB 会话
-        trade_date: 业务交易日
-        board_type: 限定类型（industry | concept | None=both）
-        limit: 限制每个类型的板块数（用于 canary）
-        publish: 是否发布 coverage >= 0.95 的结果
-        algorithm_version: 算法版本
-
-    Returns:
-        {
-            "trade_date": str,
-            "succeeded": int,
-            "failed": int,
-            "published": int,
-            "coverage_below_threshold": int,
-            "details": [{"board_id", "board_name", "status", "coverage", "published"}],
-            "errors": [{"board_id", "board_name", "error"}],
-        }
-    """
-    stmt = select(MarketBoard).order_by(MarketBoard.name.asc())
+    stmt = (
+        select(MarketBoard)
+        .where(MarketBoard.isActive.is_(True))
+        .order_by(MarketBoard.name.asc())
+    )
     if board_type in ("industry", "concept"):
         stmt = stmt.where(MarketBoard.type == board_type)
     if limit is not None:
         stmt = stmt.limit(limit)
+    boards = list((await session.execute(stmt)).scalars())
 
-    result = await session.execute(stmt)
-    boards = result.scalars().all()
-
-    succeeded = 0
-    failed = 0
-    published = 0
-    coverage_below = 0
-    details: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
+    memberships: dict[uuid.UUID, PITMembership] = {}
+    blockers: list[dict[str, Any]] = []
+    formal_batch = board_type is None and limit is None
+    if not formal_batch:
+        blockers.append({
+            "code": "partial_batch_request",
+            "reason": "filtered/limited Board runs cannot publish market pointer",
+        })
 
     for board in boards:
         try:
+            membership = await resolve_board_membership_at(
+                session, board.id, trade_date,
+            )
+            if (
+                membership.population_status != "ready"
+                or not membership.instrument_ids
+            ):
+                blockers.append({
+                    "code": "blocked_external_population",
+                    "scope_type": "board",
+                    "scope_key": str(board.id),
+                    "reason": membership.population_status,
+                })
+                continue
+            memberships[board.id] = membership
+        except PITMembershipUnavailableError as exc:
+            blockers.append({
+                "code": "blocked_external_population",
+                "scope_type": "board",
+                "scope_key": str(board.id),
+                "reason": str(exc),
+            })
+
+    universe_definitions = (
+        await list_universe_definitions_at(session, trade_date)
+        if formal_batch
+        else []
+    )
+    universe_memberships: list[PITMembership] = []
+    universe_details: list[dict[str, Any]] = []
+    for definition in universe_definitions:
+        universe_membership: PITMembership | None
+        try:
+            _definition, resolved_universe_membership = (
+                await resolve_universe_membership_at(
+                    session, definition.universe_key, trade_date,
+                )
+            )
+            universe_membership = resolved_universe_membership
+            reason = resolved_universe_membership.population_status
+        except PITMembershipUnavailableError as exc:
+            universe_membership = None
+            reason = str(exc)
+        ready = bool(
+            universe_membership is not None
+            and universe_membership.population_status == "ready"
+            and universe_membership.instrument_ids
+        )
+        universe_details.append({
+            "scope_type": definition.universe_type,
+            "scope_key": definition.universe_key,
+            "scope_name": definition.name,
+            "status": "succeeded" if ready else "blocked_external_population",
+            "population_status": reason,
+            "published": False,
+        })
+        if ready and universe_membership is not None:
+            universe_memberships.append(universe_membership)
+        else:
+            blockers.append({
+                "code": "blocked_external_population",
+                "scope_type": definition.universe_type,
+                "scope_key": definition.universe_key,
+                "reason": reason,
+            })
+
+    all_memberships = [*memberships.values(), *universe_memberships]
+    taxonomy_version = batch_version(
+        [m.taxonomy_version for m in all_memberships], prefix="taxonomy",
+    )
+    compatibility_key = batch_version(
+        [m.compatibility_key for m in all_memberships], prefix="compatibility",
+    )
+    membership_version = batch_version(
+        [m.membership_version for m in all_memberships], prefix="membership",
+    )
+    expected_count = len(boards) + len(universe_definitions)
+    run_stmt = select(BoardAnalysisRun).where(
+        BoardAnalysisRun.trade_date == trade_date,
+        BoardAnalysisRun.source_core_run_id == source_core_run_id,
+        BoardAnalysisRun.taxonomy_version == taxonomy_version,
+        BoardAnalysisRun.taxonomy_compatibility_key == compatibility_key,
+        BoardAnalysisRun.algorithm_version == algorithm_version,
+        BoardAnalysisRun.membership_version == membership_version,
+    )
+    batch_run = (await session.execute(run_stmt)).scalar_one_or_none()
+    if batch_run is None:
+        batch_run = BoardAnalysisRun(
+            trade_date=trade_date,
+            source_core_run_id=source_core_run_id,
+            taxonomy_version=taxonomy_version,
+            taxonomy_compatibility_key=compatibility_key,
+            membership_version=membership_version,
+            algorithm_version=algorithm_version,
+            expected_count=expected_count,
+            succeeded_count=0,
+            failed_count=0,
+            coverage_ratio=0.0,
+            status="running",
+            blockers=blockers,
+        )
+        session.add(batch_run)
+        await session.flush()
+    elif batch_run.published_at is not None:
+        return {
+            "board_analysis_run_id": str(batch_run.id),
+            "trade_date": trade_date.isoformat(),
+            "board_type_filter": board_type,
+            "status": batch_run.status,
+            "succeeded": batch_run.succeeded_count,
+            "failed": batch_run.failed_count,
+            "published": batch_run.succeeded_count,
+            "coverage_below_threshold": 0,
+            "details": [],
+            "errors": list(batch_run.blockers or []),
+            "idempotent_reuse": True,
+        }
+    else:
+        batch_run.status = "running"
+        batch_run.expected_count = expected_count
+        batch_run.blockers = blockers
+
+    population_blockers = [
+        item for item in blockers
+        if item.get("code") == "blocked_external_population"
+    ]
+    succeeded_boards = 0
+    failed = len(population_blockers)
+    published = 0
+    coverage_below = 0
+    details: list[dict[str, Any]] = list(universe_details)
+    errors: list[dict[str, Any]] = list(blockers)
+    for board in boards:
+        board_membership = memberships.get(board.id)
+        if board_membership is None:
+            continue
+        try:
             snapshot = await compute_board_analysis(
-                session,
-                board.id,
-                trade_date,
+                session, board.id, trade_date,
+                source_core_run_id=source_core_run_id,
+                board_analysis_run_id=batch_run.id,
+                pit_membership=board_membership,
                 algorithm_version=algorithm_version,
             )
-            succeeded += 1
-            detail: dict[str, Any] = {
+            if snapshot.status == "succeeded":
+                succeeded_boards += 1
+            else:
+                failed += 1
+                coverage_below += 1
+            details.append({
                 "board_id": str(board.id),
                 "board_name": board.name,
                 "board_type": board.type,
                 "status": snapshot.status,
                 "coverage": snapshot.coverage_ratio,
                 "published": False,
-            }
-            if publish:
-                if snapshot.coverage_ratio >= BOARD_ANALYSIS_MIN_COVERAGE:
-                    pub = await publish_board_analysis(session, snapshot)
-                    if pub is not None:
-                        published += 1
-                        detail["published"] = True
-                else:
-                    coverage_below += 1
-            details.append(detail)
+                "snapshot": snapshot,
+            })
         except Exception as exc:
             failed += 1
             errors.append({
+                "code": "board_compute_failed",
                 "board_id": str(board.id),
                 "board_name": board.name,
                 "error": str(exc),
             })
-            logger.exception(
-                "[BoardAnalysis] 计算失败: board=%s/%s", board.type, board.name,
-            )
+            logger.exception("[BoardAnalysis] 计算失败: board=%s/%s", board.type, board.name)
 
+    succeeded = succeeded_boards + len(universe_memberships)
+    batch_run.succeeded_count = succeeded
+    batch_run.failed_count = failed
+    batch_run.coverage_ratio = succeeded / expected_count if expected_count else 0.0
+    if population_blockers:
+        batch_run.status = "blocked_external_population"
+    elif not formal_batch:
+        batch_run.status = "partial"
+    elif expected_count == 0:
+        batch_run.status = "blocked_external_population"
+        empty_blocker = {
+            "code": "blocked_external_population",
+            "scope_type": "board_catalog",
+            "scope_key": "all",
+            "reason": "no configured Board or universe definitions",
+        }
+        batch_run.blockers = [*blockers, empty_blocker]
+        errors.append(empty_blocker)
+        batch_run.failed_count = 1
+    elif failed:
+        batch_run.status = "partial" if succeeded else "failed"
+    else:
+        batch_run.status = "succeeded"
+
+    if publish and batch_run.status == "succeeded":
+        for detail in details:
+            snapshot = detail.pop("snapshot", None)
+            if snapshot is None:
+                continue
+            if await publish_board_analysis(session, snapshot) is not None:
+                published += 1
+                detail["published"] = True
+        await publish_market_aggregation(
+            session,
+            trade_date=trade_date,
+            source_core_run_id=source_core_run_id,
+            aggregation_run_id=batch_run.id,
+            algorithm_version=algorithm_version,
+            metadata={
+                "board_analysis_run_id": str(batch_run.id),
+                "taxonomy_version": taxonomy_version,
+                "taxonomy_compatibility_key": compatibility_key,
+                "membership_version": membership_version,
+            },
+        )
+        batch_run.published_at = datetime.now(UTC)
+    else:
+        for detail in details:
+            detail.pop("snapshot", None)
+
+    await session.flush()
     return {
+        "board_analysis_run_id": str(batch_run.id),
         "trade_date": trade_date.isoformat(),
         "board_type_filter": board_type,
+        "status": batch_run.status,
         "succeeded": succeeded,
-        "failed": failed,
+        "failed": batch_run.failed_count,
         "published": published,
         "coverage_below_threshold": coverage_below,
         "details": details,

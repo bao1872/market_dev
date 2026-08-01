@@ -16,10 +16,11 @@ sync_boards 是异步服务入口，编排完整流程，失败抛异常。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -28,6 +29,10 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis_client import get_redis
+from app.models.board_taxonomy import (
+    BoardDefinitionVersion,
+    BoardMembershipHistory,
+)
 from app.models.market_board import MarketBoard, MarketBoardMembership
 from app.services.wencai_board_provider import BoardSnapshot
 
@@ -203,7 +208,9 @@ def _compute_snapshot_stats(snapshot: BoardSnapshot) -> dict[str, Any]:
 
 async def get_current_counts(db: AsyncSession) -> tuple[int, int]:
     """获取当前板块数和成分关系数。"""
-    board_count = await db.scalar(select(func.count()).select_from(MarketBoard))
+    board_count = await db.scalar(
+        select(func.count()).select_from(MarketBoard).where(MarketBoard.isActive.is_(True))
+    )
     membership_count = await db.scalar(
         select(func.count()).select_from(MarketBoardMembership)
     )
@@ -212,15 +219,21 @@ async def get_current_counts(db: AsyncSession) -> tuple[int, int]:
 
 async def get_current_detailed_counts(db: AsyncSession) -> dict[str, int]:
     """获取当前板块详细计数（board/industry/concept/membership/stock）。"""
-    board_count = await db.scalar(select(func.count()).select_from(MarketBoard)) or 0
+    board_count = await db.scalar(
+        select(func.count()).select_from(MarketBoard).where(MarketBoard.isActive.is_(True))
+    ) or 0
     membership_count = await db.scalar(
         select(func.count()).select_from(MarketBoardMembership)
     ) or 0
     industry_count = await db.scalar(
-        select(func.count()).select_from(MarketBoard).where(MarketBoard.type == "industry")
+        select(func.count()).select_from(MarketBoard).where(
+            MarketBoard.type == "industry", MarketBoard.isActive.is_(True)
+        )
     ) or 0
     concept_count = await db.scalar(
-        select(func.count()).select_from(MarketBoard).where(MarketBoard.type == "concept")
+        select(func.count()).select_from(MarketBoard).where(
+            MarketBoard.type == "concept", MarketBoard.isActive.is_(True)
+        )
     ) or 0
     stock_count = await db.scalar(
         select(func.count(func.distinct(MarketBoardMembership.instrumentId)))
@@ -243,6 +256,8 @@ async def sync_boards(
     db: AsyncSession,
     snapshot: BoardSnapshot,
     instrument_resolver: Any | None = None,
+    *,
+    effective_date: date | None = None,
 ) -> dict[str, Any]:
     """执行完整的板块原子同步（PRD §7.5 重构）。
 
@@ -298,7 +313,12 @@ async def sync_boards(
         )
 
     # 4. 单事务差异 upsert/delete
-    result = await _atomic_switch(db, snapshot, symbol_to_id)
+    result = await _atomic_switch(
+        db,
+        snapshot,
+        symbol_to_id,
+        effective_date=effective_date or datetime.now(UTC).date(),
+    )
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -325,6 +345,8 @@ async def _atomic_switch(
     db: AsyncSession,
     snapshot: BoardSnapshot,
     symbol_to_id: dict[str, UUID],
+    *,
+    effective_date: date,
 ) -> dict[str, Any]:
     """单事务差异 upsert/delete（原子切换）。
 
@@ -335,17 +357,29 @@ async def _atomic_switch(
 
     # 查询现有 boards
     existing_boards_result = await db.execute(
-        select(MarketBoard.id, MarketBoard.externalCode, MarketBoard.type, MarketBoard.name)
+        select(
+            MarketBoard.id,
+            MarketBoard.externalCode,
+            MarketBoard.type,
+            MarketBoard.name,
+            MarketBoard.isActive,
+        )
     )
     existing_board_map: dict[tuple[str, str], dict[str, Any]] = {}
     for row in existing_boards_result:
-        existing_board_map[(row.externalCode, row.type)] = {"id": row.id, "name": row.name}
+        existing_board_map[(row.externalCode, row.type)] = {
+            "id": row.id,
+            "name": row.name,
+            "is_active": row.isActive,
+        }
 
     new_board_keys = {(b["external_code"], b["type"]) for b in snapshot.boards}
 
     # board 差异
-    boards_to_delete_ids = [
-        v["id"] for k, v in existing_board_map.items() if k not in new_board_keys
+    boards_to_deactivate_ids = [
+        v["id"]
+        for k, v in existing_board_map.items()
+        if k not in new_board_keys and v["is_active"]
     ]
     boards_to_insert = [
         b for b in snapshot.boards if (b["external_code"], b["type"]) not in existing_board_map
@@ -364,10 +398,15 @@ async def _atomic_switch(
         if k in existing_board_map
     ]
 
-    # 删除旧 boards（先删 memberships 避免 FK 违约）
-    if boards_to_delete_ids:
-        await _batch_delete_mem_by_board(db, boards_to_delete_ids)
-        await _batch_delete(db, MarketBoard, boards_to_delete_ids)
+    # Removed boards are deactivated in the latest-state projection.  Historical
+    # definition/membership rows remain immutable and queryable.
+    if boards_to_deactivate_ids:
+        await _batch_delete_mem_by_board(db, boards_to_deactivate_ids)
+        await db.execute(
+            sa_update(MarketBoard)
+            .where(MarketBoard.id.in_(boards_to_deactivate_ids))
+            .values(isActive=False, updatedAt=now)
+        )
 
     # 插入新 boards
     new_board_id_map: dict[tuple[str, str], UUID] = {}
@@ -376,6 +415,14 @@ async def _atomic_switch(
             externalCode=b["external_code"],
             name=b["name"],
             type=b["type"],
+            taxonomy=b.get("taxonomy", "qstock"),
+            source=b.get("source", "wencai"),
+            taxonomyVersion=b.get("taxonomy_version", "wencai-v1"),
+            taxonomyCompatibilityKey=b.get(
+                "taxonomy_compatibility_key", "qstock-board-v1"
+            ),
+            hierarchyLevel=b.get("hierarchy_level", "L1"),
+            isActive=True,
             updatedAt=now,
         )
         db.add(new_board)
@@ -387,7 +434,7 @@ async def _atomic_switch(
         await db.execute(
             sa_update(MarketBoard)
             .where(MarketBoard.id == board_id)
-            .values(name=new_name, updatedAt=now)
+            .values(name=new_name, isActive=True, updatedAt=now)
         )
 
     # 刷新已存在 board 的 updated_at（即使内容未变）
@@ -397,7 +444,7 @@ async def _atomic_switch(
             await db.execute(
                 sa_update(MarketBoard)
                 .where(MarketBoard.id.in_(chunk))
-                .values(updatedAt=now)
+                .values(isActive=True, updatedAt=now)
             )
 
     # 合并 board_key → id 映射
@@ -429,6 +476,15 @@ async def _atomic_switch(
             if instr_id is not None:
                 desired_memberships.add((board_id, instr_id))
 
+    await _append_pit_history(
+        db,
+        snapshot=snapshot,
+        board_key_to_id=board_key_to_id,
+        desired_memberships=desired_memberships,
+        deactivated_board_ids=boards_to_deactivate_ids,
+        effective_date=effective_date,
+    )
+
     # membership 差异
     memberships_to_delete = existing_mem_keys - desired_memberships
     memberships_to_insert_keys = desired_memberships - existing_mem_keys
@@ -454,13 +510,14 @@ async def _atomic_switch(
     logger.info(
         "board_sync diff: boards delete=%d insert=%d update=%d touch=%d, "
         "memberships delete=%d insert=%d",
-        len(boards_to_delete_ids), len(boards_to_insert),
+        len(boards_to_deactivate_ids), len(boards_to_insert),
         len(boards_to_update), len(boards_to_touch),
         len(memberships_to_delete), memberships_inserted,
     )
 
     return {
-        "boards_deleted": len(boards_to_delete_ids),
+        "boards_deleted": 0,
+        "boards_deactivated": len(boards_to_deactivate_ids),
         "boards_inserted": len(boards_to_insert),
         "boards_updated": len(boards_to_update),
         "memberships_deleted": len(memberships_to_delete),
@@ -468,16 +525,161 @@ async def _atomic_switch(
     }
 
 
+async def _append_pit_history(
+    db: AsyncSession,
+    *,
+    snapshot: BoardSnapshot,
+    board_key_to_id: dict[tuple[str, str], UUID],
+    desired_memberships: set[tuple[UUID, UUID]],
+    deactivated_board_ids: list[UUID],
+    effective_date: date,
+) -> None:
+    """Append half-open PIT versions while preserving prior membership facts."""
+    active_stmt = select(BoardDefinitionVersion).where(
+        BoardDefinitionVersion.effective_to.is_(None),
+    )
+    active_versions = {
+        row.board_id: row for row in (await db.execute(active_stmt)).scalars()
+    }
+
+    if deactivated_board_ids:
+        await db.execute(
+            sa_update(BoardDefinitionVersion)
+            .where(
+                BoardDefinitionVersion.board_id.in_(deactivated_board_ids),
+                BoardDefinitionVersion.effective_to.is_(None),
+            )
+            .values(effective_to=effective_date)
+        )
+        active_definition_ids = [
+            active_versions[board_id].id
+            for board_id in deactivated_board_ids
+            if board_id in active_versions
+        ]
+        if active_definition_ids:
+            await db.execute(
+                sa_update(BoardMembershipHistory)
+                .where(
+                    BoardMembershipHistory.board_definition_version_id.in_(
+                        active_definition_ids
+                    ),
+                    BoardMembershipHistory.effective_to.is_(None),
+                )
+                .values(effective_to=effective_date)
+            )
+
+    members_by_board: dict[UUID, list[UUID]] = {}
+    for board_id, instrument_id in desired_memberships:
+        members_by_board.setdefault(board_id, []).append(instrument_id)
+
+    board_payloads = {
+        (board["external_code"], board["type"]): board
+        for board in snapshot.boards
+    }
+    for board_key, board_id in board_key_to_id.items():
+        board = board_payloads[board_key]
+        member_ids = sorted(members_by_board.get(board_id, []), key=str)
+        definition_material = "|".join((
+            board["external_code"],
+            board["type"],
+            board["name"],
+            board.get("hierarchy_level", "L1"),
+            board.get("parent_external_code", ""),
+        ))
+        definition_hash = hashlib.sha256(definition_material.encode()).hexdigest()
+        membership_hash = hashlib.sha256(
+            "\n".join(str(item) for item in member_ids).encode()
+        ).hexdigest()
+        taxonomy_version = board.get(
+            "taxonomy_version", f"wencai:{definition_hash[:16]}"
+        )
+        membership_version = f"members:{membership_hash[:16]}"
+        current = active_versions.get(board_id)
+        if (
+            current is not None
+            and current.definition_hash == definition_hash
+            and current.membership_version == membership_version
+        ):
+            await db.execute(
+                sa_update(MarketBoard)
+                .where(MarketBoard.id == board_id)
+                .values(
+                    taxonomy=board.get("taxonomy", "qstock"),
+                    source=board.get("source", "wencai"),
+                    taxonomyVersion=current.taxonomy_version,
+                    taxonomyCompatibilityKey=(
+                        current.taxonomy_compatibility_key
+                    ),
+                    hierarchyLevel=current.hierarchy_level,
+                    parentBoardId=current.parent_board_id,
+                    membershipVersion=current.membership_version,
+                    isActive=True,
+                )
+            )
+            continue
+
+        if current is not None:
+            current.effective_to = effective_date
+            await db.execute(
+                sa_update(BoardMembershipHistory)
+                .where(
+                    BoardMembershipHistory.board_definition_version_id == current.id,
+                    BoardMembershipHistory.effective_to.is_(None),
+                )
+                .values(effective_to=effective_date)
+            )
+
+        parent_board_id = None
+        parent_external_code = board.get("parent_external_code")
+        if parent_external_code:
+            parent_board_id = board_key_to_id.get(
+                (parent_external_code, board["type"])
+            )
+        definition = BoardDefinitionVersion(
+            board_id=board_id,
+            taxonomy=board.get("taxonomy", "qstock"),
+            source=board.get("source", "wencai"),
+            taxonomy_version=taxonomy_version,
+            taxonomy_compatibility_key=board.get(
+                "taxonomy_compatibility_key", "qstock-board-v1"
+            ),
+            board_type=board["type"],
+            hierarchy_level=board.get("hierarchy_level", "L1"),
+            parent_board_id=parent_board_id,
+            membership_version=membership_version,
+            effective_from=effective_date,
+            definition_hash=definition_hash,
+        )
+        db.add(definition)
+        await db.flush()
+        for instrument_id in member_ids:
+            db.add(BoardMembershipHistory(
+                board_definition_version_id=definition.id,
+                instrument_id=instrument_id,
+                membership_version=membership_version,
+                effective_from=effective_date,
+            ))
+        await db.execute(
+            sa_update(MarketBoard)
+            .where(MarketBoard.id == board_id)
+            .values(
+                taxonomy=definition.taxonomy,
+                source=definition.source,
+                taxonomyVersion=taxonomy_version,
+                taxonomyCompatibilityKey=definition.taxonomy_compatibility_key,
+                hierarchyLevel=definition.hierarchy_level,
+                parentBoardId=parent_board_id,
+                membershipVersion=membership_version,
+                isActive=True,
+            )
+        )
+
+    await db.flush()
+
+
 # =============================================================================
 # 批量删除辅助
 # =============================================================================
-
-
-async def _batch_delete(db: AsyncSession, model: Any, ids: list, batch_size: int = BATCH_SIZE) -> None:
-    """分批删除，避免单次 SQL 过大。"""
-    for i in range(0, len(ids), batch_size):
-        chunk = ids[i : i + batch_size]
-        await db.execute(delete(model).where(model.id.in_(chunk)))
 
 
 async def _batch_delete_mem_by_board(db: AsyncSession, board_ids: list, batch_size: int = BATCH_SIZE) -> None:

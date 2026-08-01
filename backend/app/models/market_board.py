@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import TIMESTAMP, ForeignKey, String, UniqueConstraint
+from sqlalchemy import TIMESTAMP, Boolean, ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,6 +36,34 @@ class MarketBoard(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False, comment="板块名称")
     type: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="板块类型：industry | concept"
+    )
+    taxonomy: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="qstock", server_default="qstock"
+    )
+    source: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="qstock", server_default="qstock"
+    )
+    taxonomyVersion: Mapped[str] = mapped_column(
+        "taxonomy_version", String(64), nullable=False,
+        default="legacy-v1", server_default="legacy-v1",
+    )
+    taxonomyCompatibilityKey: Mapped[str] = mapped_column(
+        "taxonomy_compatibility_key", String(128), nullable=False,
+        default="qstock-board-v1", server_default="qstock-board-v1",
+    )
+    hierarchyLevel: Mapped[str] = mapped_column(
+        "hierarchy_level", String(16), nullable=False, default="L1", server_default="L1"
+    )
+    parentBoardId: Mapped[UUID | None] = mapped_column(
+        "parent_board_id", PgUUID(as_uuid=True),
+        ForeignKey("market_boards.id", ondelete="SET NULL"), nullable=True,
+    )
+    isActive: Mapped[bool] = mapped_column(
+        "is_active", Boolean(), nullable=False, default=True, server_default="true"
+    )
+    membershipVersion: Mapped[str] = mapped_column(
+        "membership_version", String(128), nullable=False,
+        default="legacy-projection-20260801", server_default="legacy-projection-20260801",
     )
     updatedAt: Mapped[datetime] = mapped_column(
         "updated_at", TIMESTAMP(timezone=True), nullable=False, server_default="now()"

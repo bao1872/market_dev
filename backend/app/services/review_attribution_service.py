@@ -87,7 +87,7 @@ async def compute_signal_attributions(
         )
         for child_key, child_name in child_keys:
             instrument_ids, _ = await resolve_scope_members(
-                session, child_scope_type, child_key,
+                session, child_scope_type, child_key, trade_date=signal.trade_date,
             )
             if not instrument_ids:
                 continue
@@ -229,7 +229,7 @@ async def compute_signal_instruments(
     """
     # 获取父范围成员
     instrument_ids, _ = await resolve_scope_members(
-        session, signal.scope_type, signal.scope_key,
+        session, signal.scope_type, signal.scope_key, trade_date=signal.trade_date,
     )
     if not instrument_ids:
         return []

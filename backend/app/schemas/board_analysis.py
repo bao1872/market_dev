@@ -33,6 +33,12 @@ class BoardAnalysisSnapshotDTO(BaseModel):
     board_type: str = Field(..., description="板块类型：industry | concept")
     board_name: str = Field(..., description="板块名称（冗余存储）")
     source_core_run_id: str = Field(..., description="输入 stock_core snapshot_run_id")
+    board_analysis_run_id: str = Field(..., description="真实 Board batch run ID")
+    taxonomy_version: str = Field(..., description="当日 taxonomy version")
+    taxonomy_compatibility_key: str = Field(
+        ..., description="taxonomy 兼容序列键",
+    )
+    membership_version: str = Field(..., description="当日 membership version")
     algorithm_version: str = Field(..., description="板块分析算法版本")
     parameter_hash: str = Field(..., description="参数 hash")
     eligible_count: int = Field(..., description="板块成员总数")
@@ -92,6 +98,10 @@ if __name__ == "__main__":
         board_type="industry",
         board_name="银行",
         source_core_run_id="00000000-0000-0000-0000-000000000003",
+        board_analysis_run_id="00000000-0000-0000-0000-000000000004",
+        taxonomy_version="taxonomy-v1",
+        taxonomy_compatibility_key="qstock-board-v1",
+        membership_version="members-v1",
         algorithm_version="board-v1-20260730",
         parameter_hash="hash-placeholder",
         eligible_count=50,

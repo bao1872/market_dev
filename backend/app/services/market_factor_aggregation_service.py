@@ -7,8 +7,8 @@
 4. 与核心解耦：独立 job，不依赖 after_close_orchestrator 主链
 
 当前实现：
-- v1 薄包装：直接复用 source_core_run_id 作为 aggregation_run_id（占位）
-- 后续可扩展：sector strength / market breadth / 风格因子等聚合计算
+- 未提供 run ID 时执行完整 Board batch 计算并发布真实 batch identity
+- 提供 run ID 时仅允许发布已存在且通过门禁的 BoardAnalysisRun
 
 模块自测：
     PURE_UNIT_TEST=1 python -m app.services.market_factor_aggregation_service
@@ -49,7 +49,7 @@ async def run_market_factor_aggregation(
         session: 异步 DB 会话（caller 控制 commit）
         trade_date: 业务交易日
         algorithm_version: 算法版本
-        aggregation_run_id: 聚合 run ID（None 时使用 source_core_run_id 占位）
+        aggregation_run_id: 已存在的真实 BoardAnalysisRun ID；None 时计算完整 batch
         metadata: 额外元数据
 
     Returns:
@@ -63,7 +63,22 @@ async def run_market_factor_aggregation(
     Raises:
         ValueError: 无已发布 stock_core pointer 或校验失败
     """
-    # 1. 读取已发布 stock_core pointer
+    if aggregation_run_id is None:
+        from app.services.board_analysis_service import compute_all_boards
+
+        result = await compute_all_boards(
+            session,
+            trade_date,
+            publish=True,
+            algorithm_version=algorithm_version,
+        )
+        if not result.get("published"):
+            raise ValueError(
+                "market_aggregation 发布失败: Board batch 未通过完整性门禁 "
+                f"status={result.get('status')}",
+            )
+        return result
+
     from app.services.factor_publication_service import get_publication
 
     core_pointer = await get_publication(
@@ -76,21 +91,14 @@ async def run_market_factor_aggregation(
     if core_pointer is None:
         raise ValueError(
             f"market_aggregation 失败: trade_date={trade_date} 无已发布 stock_core pointer，"
-            f"必须先发布 stock_core"
+            "必须先发布 stock_core",
         )
-
     source_core_run_id = core_pointer.data_run_id
-
-    # 2. aggregation_run_id 占位：复用 source_core_run_id（v1 薄包装）
-    # 后续扩展时可创建独立的 SchedulerJobRun 追踪聚合任务
-    effective_agg_run_id = aggregation_run_id or source_core_run_id
-
-    # 3. 切换 market_aggregation pointer（含 source 校验）
     pub = await publish_market_aggregation(
         session,
         trade_date=trade_date,
         source_core_run_id=source_core_run_id,
-        aggregation_run_id=effective_agg_run_id,
+        aggregation_run_id=aggregation_run_id,
         algorithm_version=algorithm_version,
         metadata={
             "aggregation_job": "market_factor_aggregation_service",
@@ -101,14 +109,14 @@ async def run_market_factor_aggregation(
             **(metadata or {}),
         },
     )
-
     logger.info(
-        "[MarketAggregation] 发布: trade_date=%s, source_core=%s, agg=%s",
-        trade_date, source_core_run_id, effective_agg_run_id,
+        "[MarketAggregation] 发布既有 Board batch: trade_date=%s, core=%s, batch=%s",
+        trade_date,
+        source_core_run_id,
+        aggregation_run_id,
     )
-
     return {
-        "aggregation_run_id": str(effective_agg_run_id),
+        "aggregation_run_id": str(aggregation_run_id),
         "source_core_run_id": str(source_core_run_id),
         "trade_date": trade_date.isoformat(),
         "published_at": pub.published_at.isoformat() if pub.published_at else None,

@@ -146,7 +146,7 @@ async def bootstrap_single_date(
 
     # 2. 解析 market 范围成员
     instrument_ids, scope_name = await resolve_scope_members(
-        session, "market", "market",
+        session, "market", "market", trade_date=trade_date,
     )
     if not instrument_ids:
         return {

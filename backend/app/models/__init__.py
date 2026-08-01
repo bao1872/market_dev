@@ -33,6 +33,13 @@ from app.models.auction import (
 from app.models.bar import BarDaily, BarMinute
 from app.models.base import Base
 from app.models.beta_application import BetaApplication
+from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
+from app.models.board_taxonomy import (
+    BoardDefinitionVersion,
+    BoardMembershipHistory,
+    UniverseDefinition,
+    UniverseMembership,
+)
 from app.models.calendar import TradingCalendar
 from app.models.capture_job import CaptureJob
 from app.models.config import ConfigDefinition
@@ -86,6 +93,10 @@ __all__ = [
     "AuctionScopeResult",
     "BarDaily",
     "BarMinute",
+    "BoardAnalysisRun",
+    "BoardAnalysisSnapshot",
+    "BoardDefinitionVersion",
+    "BoardMembershipHistory",
     "Base",
     "BetaApplication",
     "CaptureJob",
@@ -126,6 +137,8 @@ __all__ = [
     "UserRole",
     "UserCapability",
     "UserTableViewPreset",
+    "UniverseDefinition",
+    "UniverseMembership",
     "UserWatchlistItem",
     "WorkerHeartbeat",
 ]

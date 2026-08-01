@@ -255,7 +255,7 @@ async def publish_market_aggregation(
         session: 异步 DB 会话
         trade_date: 业务交易日
         source_core_run_id: 源 stock_core snapshot_run_id（必须匹配已发布 pointer）
-        aggregation_run_id: 聚合 run ID（可指向 SchedulerJobRun 或独立表）
+        aggregation_run_id: 真实 board_analysis_runs.id
         algorithm_version: 算法版本
         metadata: 额外元数据
 
@@ -263,6 +263,8 @@ async def publish_market_aggregation(
         ValueError: source_core_run_id 与已发布 stock_core pointer 不匹配
     """
     import json
+
+    from app.models.board_analysis_snapshot import BoardAnalysisRun
 
     # [CHANGE-20260729-007] 严格校验：source_core_run_id 必须是已发布的 stock_core run
     published_core_run_id = await get_published_snapshot_run_id(
@@ -280,8 +282,36 @@ async def publish_market_aggregation(
             f"禁止聚合基于未发布或旧版本 core run"
         )
 
+    board_run = await session.get(BoardAnalysisRun, aggregation_run_id)
+    if board_run is None:
+        raise ValueError(
+            "market_aggregation 发布失败: data_run_id 必须是真实 "
+            f"board_analysis_runs.id，未找到 {aggregation_run_id}"
+        )
+    if board_run.trade_date != trade_date:
+        raise ValueError("market_aggregation 发布失败: Board batch trade_date 不匹配")
+    if board_run.source_core_run_id != source_core_run_id:
+        raise ValueError("market_aggregation 发布失败: Board batch core run 不匹配")
+    if board_run.status != "succeeded":
+        raise ValueError(
+            "market_aggregation 发布失败: Board batch 非 succeeded，"
+            f"status={board_run.status}"
+        )
+    if board_run.failed_count != 0:
+        raise ValueError("market_aggregation 发布失败: Board batch 存在 failed item")
+    if board_run.succeeded_count != board_run.expected_count:
+        raise ValueError(
+            "market_aggregation 发布失败: Board batch 未达到完整 expected count "
+            f"succeeded={board_run.succeeded_count} expected={board_run.expected_count}",
+        )
+
     now = datetime.now(UTC)
-    meta_str = json.dumps(metadata, ensure_ascii=False) if metadata else None
+    meta_payload = {
+        "source_core_run_id": str(source_core_run_id),
+        "board_analysis_run_id": str(aggregation_run_id),
+        **(metadata or {}),
+    }
+    meta_str = json.dumps(meta_payload, ensure_ascii=False)
 
     stmt = pg_insert(FactorPublication).values(
         scope_type=SCOPE_TYPE_MARKET,
@@ -290,11 +320,9 @@ async def publish_market_aggregation(
         publication_kind=PUBLICATION_KIND_MARKET_AGGREGATION,
         algorithm_version=algorithm_version,
         data_run_id=aggregation_run_id,
-        coverage_ratio=None,
+        coverage_ratio=board_run.coverage_ratio,
         published_at=now,
-        metadata_json=meta_str or json.dumps(
-            {"source_core_run_id": str(source_core_run_id)},
-        ),
+        metadata_json=meta_str,
     )
     stmt = stmt.on_conflict_do_update(
         constraint="uq_factor_publications_scope_date_kind",

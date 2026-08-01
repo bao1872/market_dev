@@ -40,16 +40,18 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.filter_definitions import REVIEW_FILTER_VERSION
-from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
+from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
 from app.models.factor_publication import (
     PUBLICATION_KIND_MARKET_AGGREGATION,
     PUBLICATION_KIND_STOCK_CORE,
     FactorPublication,
 )
+from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewRun,
     MarketReviewRunItem,
 )
+from app.services.board_membership_service import list_universe_definitions_at
 from app.services.review_attribution_service import (
     compute_signal_attributions,
     compute_signal_instruments,
@@ -311,15 +313,14 @@ async def _resolve_source_run_ids(
     """解析 source_core_run_id 和 source_board_run_id。
 
     source_core_run_id：从 stock_core publication pointer 读取
-    source_board_run_id：从 board_analysis_snapshot 读取（其 source_core_run_id）
-        board_analysis_snapshot 通过 market_aggregation publication pointer 的
-        data_run_id 定位
+    source_board_run_id：直接使用 market_aggregation pointer 指向的
+        board_analysis_runs.id
 
     Args:
         session: 异步 DB 会话
         trade_date: 业务交易日
         source_core_run_id: 调用方显式传入的 stock_core run_id（None 时自动解析）
-        source_board_run_id: 调用方显式传入的 board source_core_run_id
+        source_board_run_id: 调用方显式传入的 board_analysis_runs.id
             （None 时自动解析）
 
     Returns:
@@ -352,17 +353,23 @@ async def _resolve_source_run_ids(
                 f"trade_date={trade_date} 无已发布 board_analysis pointer，"
                 f"必须先完成板块分析并发布",
             )
-        # board publication.data_run_id 指向 board_analysis_snapshots.id
-        board_snapshot = await session.get(
-            BoardAnalysisSnapshot, board_pub.data_run_id,
-        )
-        if board_snapshot is None:
-            raise ReviewOrchestratorError(
-                f"board_analysis_snapshot id={board_pub.data_run_id} 不存在",
-            )
-        resolved_board_id = board_snapshot.source_core_run_id
+        resolved_board_id = board_pub.data_run_id
     else:
         resolved_board_id = source_board_run_id
+
+    board_run = await session.get(BoardAnalysisRun, resolved_board_id)
+    if board_run is None:
+        raise ReviewOrchestratorError(
+            f"board_analysis_run id={resolved_board_id} 不存在",
+        )
+    if board_run.trade_date != trade_date:
+        raise ReviewOrchestratorError("Board batch trade_date 与 Review 不一致")
+    if board_run.source_core_run_id != resolved_core_id:
+        raise ReviewOrchestratorError("Board batch 与 stock_core pointer 不同源")
+    if board_run.status != "succeeded":
+        raise ReviewOrchestratorError(
+            f"Board batch 非 ready: status={board_run.status}",
+        )
 
     return resolved_core_id, resolved_board_id
 
@@ -532,14 +539,14 @@ async def _resolve_level1_scopes(
 
     # major_index 范围（PRD §6.1：配置中的主要指数，从 market_boards 读取）
     # [P0 2026-07-30] 补全 major_index/style 范围，否则发布门禁永远 block
-    major_index_scopes = await _list_major_index_scopes(session)
+    major_index_scopes = await _list_major_index_scopes(session, run.trade_date)
     if canary:
         # canary 模式：限定 3 个指数
         major_index_scopes = major_index_scopes[:3]
     scopes.extend(major_index_scopes)
 
     # style 范围（PRD §6.1：风格股票池）
-    style_scopes = await _list_style_scopes(session)
+    style_scopes = await _list_style_scopes(session, run.trade_date)
     if canary:
         # canary 模式：限定 2 个风格
         style_scopes = style_scopes[:2]
@@ -578,18 +585,19 @@ async def _list_industry_l1_scopes(
     Args:
         session: 异步 DB 会话
         trade_date: 业务交易日
-        source_board_run_id: board_analysis_snapshot 的 source_core_run_id
-            （用于过滤同源数据）
+        source_board_run_id: 真实 board_analysis_runs.id
 
     Returns:
         ScopeDefinition 列表（每个行业 L1 一个）
     """
     stmt = (
         select(BoardAnalysisSnapshot)
+        .join(MarketBoard, MarketBoard.id == BoardAnalysisSnapshot.board_id)
         .where(
             BoardAnalysisSnapshot.trade_date == trade_date,
             BoardAnalysisSnapshot.board_type == "industry",
-            BoardAnalysisSnapshot.source_core_run_id == source_board_run_id,
+            BoardAnalysisSnapshot.board_analysis_run_id == source_board_run_id,
+            MarketBoard.hierarchyLevel == "L1",
         )
         .order_by(BoardAnalysisSnapshot.board_name.asc())
     )
@@ -611,56 +619,38 @@ async def _list_industry_l1_scopes(
 
 async def _list_major_index_scopes(
     session: AsyncSession,
+    trade_date: date,
 ) -> list[ScopeDefinition]:
-    """从 market_boards 读取主要指数范围（PRD §6.1）。
-
-    使用 MarketBoard.id 作为 scope_key（与 industry_l1 一致）。
-    主要指数通过 type='major_index' 过滤；若不存在则返回空。
-    """
-    from app.models.market_board import MarketBoard
-    stmt = (
-        select(MarketBoard)
-        .where(MarketBoard.type == "major_index")
-        .order_by(MarketBoard.name.asc())
+    """List configured major-index universes valid on the trade date."""
+    definitions = await list_universe_definitions_at(
+        session, trade_date, universe_type="major_index",
     )
-    result = await session.execute(stmt)
-    out: list[ScopeDefinition] = []
-    for board in result.scalars():
-        out.append(
-            ScopeDefinition(
-                scope_type="major_index",
-                scope_key=str(board.id),
-                scope_name=board.name,
-            ),
+    return [
+        ScopeDefinition(
+            scope_type="major_index",
+            scope_key=definition.universe_key,
+            scope_name=definition.name,
         )
-    return out
+        for definition in definitions
+    ]
 
 
 async def _list_style_scopes(
     session: AsyncSession,
+    trade_date: date,
 ) -> list[ScopeDefinition]:
-    """从 market_boards 读取风格股票池范围（PRD §6.1）。
-
-    使用 MarketBoard.id 作为 scope_key。
-    风格通过 type='style' 过滤；若不存在则返回空。
-    """
-    from app.models.market_board import MarketBoard
-    stmt = (
-        select(MarketBoard)
-        .where(MarketBoard.type == "style")
-        .order_by(MarketBoard.name.asc())
+    """List configured style universes valid on the trade date."""
+    definitions = await list_universe_definitions_at(
+        session, trade_date, universe_type="style",
     )
-    result = await session.execute(stmt)
-    out: list[ScopeDefinition] = []
-    for board in result.scalars():
-        out.append(
-            ScopeDefinition(
-                scope_type="style",
-                scope_key=str(board.id),
-                scope_name=board.name,
-            ),
+    return [
+        ScopeDefinition(
+            scope_type="style",
+            scope_key=definition.universe_key,
+            scope_name=definition.name,
         )
-    return out
+        for definition in definitions
+    ]
 
 
 async def _build_scope_history(
@@ -853,7 +843,7 @@ async def _compute_scope_pipeline(
 
     # 解析范围成员
     instrument_ids, _resolved_name = await resolve_scope_members(
-        session, scope.scope_type, scope.scope_key,
+        session, scope.scope_type, scope.scope_key, trade_date=run.trade_date,
     )
     if not instrument_ids:
         # 空范围：跳过 metrics，标记 succeeded 但无数据

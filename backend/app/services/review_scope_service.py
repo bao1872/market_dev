@@ -37,6 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.review.metric_engine import compute_all_metrics
 from app.domain.review.metric_registry import DEFAULT_REGISTRY
 from app.models.market_review import MarketReviewScopeSnapshot
+from app.services.board_membership_service import (
+    PITMembershipUnavailableError,
+    resolve_board_membership_at,
+    resolve_universe_membership_at,
+)
 
 logger = logging.getLogger("review_scope_service")
 
@@ -373,27 +378,22 @@ async def resolve_scope_members(
     session: AsyncSession,
     scope_type: str,
     scope_key: str,
+    *,
+    trade_date: date,
 ) -> tuple[list[uuid.UUID], str]:
-    """解析范围的成员 instrument_id 列表与 scope_name。
+    """Resolve members from the source valid on ``trade_date``.
 
-    根据 scope_type 路由到不同的成员来源：
-    - market: 全部 active 股票（scope_name="全市场"）
-    - major_index: 暂返回空（PRD §6.1 复用现有指数成分服务，需具体实现）
-    - style: 暂返回空（PRD §6.1 使用已有版本化风格股票池定义）
-    - industry_l1/l2/l3/concept: 通过 market_boards + market_board_memberships 查询
-    - instrument: 单只股票（scope_key 为 instrument_id）
-
-    Returns:
-        (instrument_ids, scope_name)
+    Board and configured universe scopes are point-in-time only. Historical
+    requests never fall back to the latest-state membership projection.
     """
     if scope_type == "market":
         from app.models.instrument import Instrument
+
         stmt = select(Instrument.id).where(Instrument.status == "active")
         result = await session.execute(stmt)
         return [row[0] for row in result], "全市场"
 
     if scope_type == "instrument":
-        # 单只股票
         try:
             inst_id = uuid.UUID(scope_key)
         except ValueError as exc:
@@ -402,33 +402,65 @@ async def resolve_scope_members(
             ) from exc
         return [inst_id], scope_key
 
-    if scope_type in ("industry_l1", "industry_l2", "industry_l3", "concept", "major_index", "style"):
-        # 通过 market_boards 查询
-        # [P0 2026-07-30] 统一使用 MarketBoard.id 作为内部范围主键（不再用 externalCode）
-        # orchestrator 写入 scope_key = str(board_id)，resolve 按 id 查询；API 另返回 externalCode
-        from app.models.market_board import MarketBoard, MarketBoardMembership
+    if scope_type in ("major_index", "style"):
+        expected_type = "major_index" if scope_type == "major_index" else "style"
+        try:
+            definition, membership = await resolve_universe_membership_at(
+                session, scope_key, trade_date,
+            )
+        except PITMembershipUnavailableError as exc:
+            raise ScopeSnapshotError(str(exc)) from exc
+        if definition.universe_type != expected_type:
+            raise ScopeSnapshotError(
+                f"scope_type mismatch: {scope_type} key={scope_key} "
+                f"universe_type={definition.universe_type}",
+            )
+        if membership.population_status != "ready":
+            raise ScopeSnapshotError(
+                f"{membership.population_status}: {scope_type}={scope_key} "
+                f"trade_date={trade_date}",
+            )
+        return list(membership.instrument_ids), definition.name
+
+    if scope_type in ("industry_l1", "industry_l2", "industry_l3", "concept"):
+        from app.models.market_board import MarketBoard
+
         try:
             board_uuid = uuid.UUID(scope_key)
         except ValueError as exc:
             raise ScopeSnapshotError(
                 f"{scope_type} scope_key 非合法 UUID: {scope_key}",
             ) from exc
-        board_stmt = (
-            select(MarketBoard)
-            .where(
-                MarketBoard.type == _board_type_from_scope(scope_type),
-                MarketBoard.id == board_uuid,
+        board = (
+            await session.execute(
+                select(MarketBoard).where(MarketBoard.id == board_uuid).limit(1),
             )
-            .limit(1)
-        )
-        board = (await session.execute(board_stmt)).scalar_one_or_none()
+        ).scalar_one_or_none()
         if board is None:
-            return [], scope_key
-        member_stmt = select(MarketBoardMembership.instrumentId).where(
-            MarketBoardMembership.boardId == board.id,
-        )
-        result = await session.execute(member_stmt)
-        return [row[0] for row in result], board.name
+            raise ScopeSnapshotError(f"board_not_found: {scope_key}")
+        expected_board_type = _board_type_from_scope(scope_type)
+        if board.type != expected_board_type:
+            raise ScopeSnapshotError(
+                f"scope_type mismatch: {scope_type} board_type={board.type}",
+            )
+        expected_level = _hierarchy_level_from_scope(scope_type)
+        if expected_level is not None and board.hierarchyLevel != expected_level:
+            raise ScopeSnapshotError(
+                f"scope hierarchy mismatch: {scope_type} "
+                f"hierarchy={board.hierarchyLevel}",
+            )
+        try:
+            membership = await resolve_board_membership_at(
+                session, board_uuid, trade_date,
+            )
+        except PITMembershipUnavailableError as exc:
+            raise ScopeSnapshotError(str(exc)) from exc
+        if membership.population_status != "ready":
+            raise ScopeSnapshotError(
+                f"{membership.population_status}: board={scope_key} "
+                f"trade_date={trade_date}",
+            )
+        return list(membership.instrument_ids), board.name
 
     return [], scope_key
 
@@ -440,6 +472,16 @@ def _board_type_from_scope(scope_type: str) -> str:
     if scope_type == "concept":
         return "concept"
     return scope_type
+
+
+def _hierarchy_level_from_scope(scope_type: str) -> str | None:
+    if scope_type == "industry_l1":
+        return "L1"
+    if scope_type == "industry_l2":
+        return "L2"
+    if scope_type == "industry_l3":
+        return "L3"
+    return None
 
 
 # =============================================================================
