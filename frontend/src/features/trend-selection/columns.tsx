@@ -2,37 +2,16 @@
 // 职责：提供唯一列定义，首页"最新趋势快照"与趋势选股页共用
 // 唯一性：spec 第七节要求 features/trend-selection 是趋势选股列定义唯一实现
 //         禁止 IndexPage/ScreenerPage 重新定义同字段列
+// [CHANGE-20260731-REMOVE-DSA] 删除旧 DSA-only 列：趋势、连续天、VWAP差、段涨跌、斜率、强度、
+//   主要结构、短线结构、对齐、OB数、事件、新鲜度、动量。列表只保留基础列+第一金字塔列+自选操作。
 import type { ReactNode } from 'react'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
 import type { TrendSelectionRow } from './types'
 import {
-  pickPayload,
-  toNum,
-  fmtNum,
-  fmtPct,
-  fmtRatioAsPct,
   fmtChange,
   changePctColorClass,
   getStockDisplay,
-  DIR_BARS_KEYS,
-  VWAP_RET_AVG_KEYS,
-  VWAP_RET_TOTAL_KEYS,
-  OFFSET_MEAN_KEYS,
-  OFFSET_PERCENTILE_KEYS,
 } from './adapters'
-
-// [趋势选股] - 描述: 仅供 columns.tsx 内部使用的候选 key（不导出，不散落到页面）
-// 趋势附近波动幅度（后端存储为小数，显示需 ×100）
-const OFFSET_STD_KEYS = ['offset_std', 'shift_std'] as const
-// 趋势参考价（VWAP）
-const DSA_VWAP_KEYS = ['dsa_vwap', 'vwap', 'anchor_vwap'] as const
-// 距趋势参考价偏差（后端存储为百分比数值，不 ×100）
-const DSA_VWAP_DEV_PCT_KEYS = ['dsa_vwap_dev_pct', 'vwap_dev_pct', 'close_vwap_dev_pct'] as const
-// 趋势波动程度（后端存储为百分比数值，不 ×100）
-const OFFSET_VARIANCE_RATE_KEYS = ['offset_variance_rate', 'offset_var_rate', 'shift_var'] as const
-// 最新价格
-const PRICE_KEYS = ['last_close', 'price', 'current_price', 'close'] as const
-// CHANGE-20260714-001: change_pct 列改用 row.latestChangePct（bars_daily 最新两根日线），不再读 payload
 
 export interface TrendSelectionColumnOptions {
   // 主页操作列：加入自选（提供时操作列渲染为"已自选/+ 自选"）
@@ -120,21 +99,11 @@ function renderStock(
   )
 }
 
-/** 趋势列渲染：上涨 N天 / 下跌 N天 / 方向未形成（涨红跌绿） */
-function renderDirBars(row: TrendSelectionRow): ReactNode {
-  const v = pickPayload(row.payload, DIR_BARS_KEYS)
-  const n = toNum(v)
-  if (n === null || n === 0) {
-    return <span className="market-flat">方向未形成</span>
-  }
-  if (n > 0) {
-    return <span className="market-up">上涨 {n.toFixed(0)}天</span>
-  }
-  return <span className="market-down">下跌 {Math.abs(n).toFixed(0)}天</span>
-}
-
 /**
  * [趋势选股] - 描述: 趋势选股统一列定义（spec 第七节唯一实现）
+ * [CHANGE-20260731-REMOVE-DSA] 删除所有旧 DSA-only 列：趋势、连续天、VWAP差、段涨跌、斜率、
+ *   强度、主要结构、短线结构、对齐、OB数、事件、新鲜度、动量。
+ *   列表只保留：股票/价格/涨跌/行业等基础列 + 第一金字塔列（由 MarketWorkspacePage 追加） + 自选操作。
  * 主页与 ScreenerPage 共用；主页通过 visibleColumnKeys 显示子集
  * 同 key 的 title/unit/format/颜色规则完全一致，禁止页面层覆盖
  */
@@ -175,8 +144,6 @@ export function getTrendSelectionColumns(
       sortValue: (row) => getStockDisplay(row).name,
       filterValue: (row) => `${getStockDisplay(row).name} ${getStockDisplay(row).symbol}`,
       render: (row) => renderStock(row, onNavigateToStock, buildInlineWatchlist(row)),
-      // CHANGE-20260714-001: stock 列改用普通筛选（contains/not_contains/eq）
-      // 与顶部 keyword 搜索独立（顶部 keyword 负责 symbol/name/pinyin 正向搜索）
     },
     {
       // CHANGE-20260714-001: 当日涨跌幅独立列
@@ -205,122 +172,7 @@ export function getTrendSelectionColumns(
       },
     },
     {
-      // [趋势选股] - 描述: 趋势列 key=dsa_dir_bars，筛选直接透传后端 metric_filters（多头>0/空头<0/持续天数）
-      key: 'dsa_dir_bars',
-      title: '当前趋势',
-      shortTitle: '趋势',
-      dataType: 'number',
-      sortable: true,
-      filterable: true,
-      width: 90,
-      sortValue: (row) => {
-        const v = pickPayload(row.payload, DIR_BARS_KEYS)
-        const n = toNum(v)
-        return n === null ? 0 : Math.abs(n)
-      },
-      render: renderDirBars,
-    },
-    {
-      key: 'vwap_ret_avg',
-      title: '日均趋势变化',
-      shortTitle: '日均',
-      dataType: 'percent',
-      sortable: true,
-      filterable: true,
-      width: 88,
-      sortValue: (row) => Number(pickPayload(row.payload, VWAP_RET_AVG_KEYS) ?? 0),
-      render: (row) => {
-        const v = pickPayload(row.payload, VWAP_RET_AVG_KEYS)
-        return <span className={changePctColorClass(v)}>{fmtRatioAsPct(v)}</span>
-      },
-    },
-    {
-      key: 'vwap_ret_total',
-      title: '本轮趋势涨跌',
-      shortTitle: '累计',
-      dataType: 'percent',
-      sortable: true,
-      filterable: true,
-      width: 88,
-      sortValue: (row) => Number(pickPayload(row.payload, VWAP_RET_TOTAL_KEYS) ?? 0),
-      render: (row) => {
-        const v = pickPayload(row.payload, VWAP_RET_TOTAL_KEYS)
-        return <span className={changePctColorClass(v)}>{fmtRatioAsPct(v)}</span>
-      },
-    },
-    {
-      key: 'offset_mean',
-      title: '平均偏离趋势线',
-      shortTitle: '均偏',
-      dataType: 'percent',
-      sortable: true,
-      filterable: true,
-      width: 90,
-      sortValue: (row) => Number(pickPayload(row.payload, OFFSET_MEAN_KEYS) ?? 0),
-      render: (row) => {
-        const v = pickPayload(row.payload, OFFSET_MEAN_KEYS)
-        return <span className={changePctColorClass(v)}>{fmtRatioAsPct(v)}</span>
-      },
-    },
-    {
-      key: 'offset_std',
-      title: '趋势附近波动幅度',
-      shortTitle: '波动',
-      dataType: 'percent',
-      sortable: true,
-      filterable: true,
-      width: 90,
-      sortValue: (row) => Number(pickPayload(row.payload, OFFSET_STD_KEYS) ?? 0),
-      render: (row) => fmtRatioAsPct(pickPayload(row.payload, OFFSET_STD_KEYS)),
-    },
-    {
-      key: 'offset_percentile',
-      title: '当前强弱位置',
-      shortTitle: '分位',
-      dataType: 'percent',
-      sortable: true,
-      filterable: true,
-      width: 86,
-      sortValue: (row) => Number(pickPayload(row.payload, OFFSET_PERCENTILE_KEYS) ?? 0),
-      render: (row) => fmtRatioAsPct(pickPayload(row.payload, OFFSET_PERCENTILE_KEYS)),
-    },
-    {
-      key: 'dsa_vwap',
-      title: '趋势参考价',
-      shortTitle: '参考价',
-      dataType: 'number',
-      sortable: true,
-      filterable: true,
-      width: 82,
-      sortValue: (row) => Number(pickPayload(row.payload, DSA_VWAP_KEYS) ?? 0),
-      render: (row) => fmtNum(pickPayload(row.payload, DSA_VWAP_KEYS), 2),
-    },
-    {
-      key: 'dsa_vwap_dev_pct',
-      title: '距趋势参考价',
-      shortTitle: '价差',
-      dataType: 'percent',
-      sortable: true,
-      filterable: true,
-      width: 86,
-      sortValue: (row) => Number(pickPayload(row.payload, DSA_VWAP_DEV_PCT_KEYS) ?? 0),
-      render: (row) => {
-        const v = pickPayload(row.payload, DSA_VWAP_DEV_PCT_KEYS)
-        return <span className={changePctColorClass(v)}>{fmtPct(v)}</span>
-      },
-    },
-    {
-      key: 'offset_variance_rate',
-      title: '趋势波动程度',
-      shortTitle: '变异',
-      dataType: 'percent',
-      sortable: true,
-      filterable: true,
-      width: 88,
-      sortValue: (row) => Number(pickPayload(row.payload, OFFSET_VARIANCE_RATE_KEYS) ?? 0),
-      render: (row) => fmtPct(pickPayload(row.payload, OFFSET_VARIANCE_RATE_KEYS)),
-    },
-    {
+      // [CHANGE-20260731-REMOVE-DSA] 保留最新价独立列（数据源：latest_price 直接从 row 取，不再读旧 DSA payload）
       key: 'price',
       title: '最新价格',
       shortTitle: '现价',
@@ -328,8 +180,24 @@ export function getTrendSelectionColumns(
       sortable: true,
       filterable: true,
       width: 76,
-      sortValue: (row) => Number(pickPayload(row.payload, PRICE_KEYS) ?? 0),
-      render: (row) => fmtNum(pickPayload(row.payload, PRICE_KEYS)),
+      sortValue: (row) => Number(row.latestPrice ?? 0),
+      render: (row) => {
+        const v = row.latestPrice
+        if (v === null || v === undefined) return <span className="market-flat">--</span>
+        return <span>{Number(v).toFixed(2)}</span>
+      },
+    },
+    {
+      key: 'industry',
+      title: '行业',
+      shortTitle: '行业',
+      dataType: 'text',
+      sortable: true,
+      filterable: true,
+      width: 90,
+      sortValue: (row) => row.industry ?? '',
+      filterValue: (row) => row.industry ?? '',
+      render: (row) => row.industry ?? <span className="market-flat">--</span>,
     },
     {
       // [趋势选股] - 描述: /market 操作列改名"自选"（onToggleWatchlist 模式）

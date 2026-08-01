@@ -57,7 +57,6 @@ from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
-from app.models.strategy_run import StrategyResult, StrategyRun
 from app.models.watchlist import UserWatchlistItem
 from app.repositories.board_filter_helper import build_board_filter_conditions
 from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
@@ -103,9 +102,6 @@ _FP_FILTER_OPERATORS = {
     "date_eq", "before", "after",
     "has_any", "has_all", "not_has_any",
 }
-
-# [CHANGE-20260729-009] DSA 策略 key（用于查询已发布 dsa_selector run 的 payload）
-_DSA_STRATEGY_KEY = "dsa_selector"
 
 # [CHANGE-20260729-009] 第一金字塔必选维度权威字段（任一非空即维度就绪）
 _FP_TREND_KEYS = ("fp_trend_direction", "fp_trend_bars")
@@ -1107,37 +1103,9 @@ async def get_market_stocks(
         for chip_row in chip_result:
             chip_map[chip_row.instrument_id] = chip_row
 
-    # ===== Query 4c: DSA 策略结果 payload（批量，用于 DSA 列展示） =====
-    # [CHANGE-20260729-009] /market/stocks 作为列表唯一数据源，
-    # 需返回原 DSA 字段（dsa_dir_bars/vwap_ret_avg 等）。
-    # 从最新已发布 dsa_selector run 的 strategy_results 表批量读取 payload。
-    dsa_payload_map: dict[UUID, dict[str, Any]] = {}
-    try:
-        latest_dsa_run_id: UUID | None = await db.scalar(
-            select(StrategyRun.id)
-            .where(
-                StrategyRun.strategy_key == _DSA_STRATEGY_KEY,
-                StrategyRun.status == "published",
-            )
-            .order_by(StrategyRun.trade_date.desc())
-            .limit(1)
-        )
-        if latest_dsa_run_id is not None and instrument_ids:
-            dsa_stmt = (
-                select(
-                    StrategyResult.instrument_id,
-                    StrategyResult.payload,
-                )
-                .where(
-                    StrategyResult.run_id == latest_dsa_run_id,
-                    StrategyResult.instrument_id.in_(instrument_ids),
-                )
-            )
-            dsa_result = await db.execute(dsa_stmt)
-            for dsa_row in dsa_result:
-                dsa_payload_map[dsa_row.instrument_id] = dsa_row.payload or {}
-    except Exception:
-        logger.warning("[MarketStocks] 查询 DSA payload 失败，payload 字段将为 None", exc_info=True)
+    # ===== Query 4c: [REMOVED 20260731-REMOVE-DSA] 旧 DSA Query 4c + payload 组装已删除 =====
+    # StrategyRun.strategy_key 列不存在（正确链：strategy_version_id→StrategyVersion→StrategyDefinition.strategy_key），
+    # 且旧 DSA-only 列已从前端列表移除，故整条无效链路一并删除。
 
     # ===== Query 4d: 日线计数（仅 flat_fp=None 的股票，用于区分 INSUFFICIENT_DAILY_BARS vs COMPUTE_FAILED） =====
     # [CHANGE-20260729-009] 109 只新股 first_pyramid=null，需返回 actual_bars/required_bars 结构化原因
@@ -1263,13 +1231,13 @@ async def get_market_stocks(
                     flat_fp[k] = None
                 flat_fp["fp_chip_available"] = False
 
-        # [CHANGE-20260729-009] 计算 factor_ready/factor_error + 填充 data_run_id/payload/chip_status
+        # [CHANGE-20260729-009] 计算 factor_ready/factor_error + 填充 data_run_id/chip_status
+        # [CHANGE-20260731-REMOVE-DSA] payload 固定为 None（旧 DSA 链路已删除）
         # flat_fp=None 时查询日线计数以区分 INSUFFICIENT_DAILY_BARS vs COMPUTE_FAILED
         daily_count = daily_bar_count_map.get(inst_id) if flat_fp is None else None
         factor_ready, factor_error, factor_actual_bars, factor_required_bars = (
             _compute_factor_ready(flat_fp, daily_count)
         )
-        dsa_payload = dsa_payload_map.get(inst_id)
 
         # 板块归属：industry 取首个行业，concepts 取全部概念
         inst_boards = boards_map.get(inst_id, [])
@@ -1293,7 +1261,7 @@ async def get_market_stocks(
                 latest_event_time=None,
                 is_watchlisted=base.is_watchlisted,
                 first_pyramid=flat_fp,
-                payload=dsa_payload,
+                payload=None,  # [DEPRECATED 20260731-REMOVE-DSA] 旧 DSA payload 已停止写入
                 data_run_id=snap_run_id,
                 factor_ready=factor_ready,
                 factor_error=factor_error,

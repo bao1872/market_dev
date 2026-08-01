@@ -411,30 +411,35 @@ export default function MarketWorkspacePage() {
     [searchParams, setSearchParams],
   )
 
-  // 股票名称链接：进入 /stock/:symbol?originScope=...&source=...&strategy=...&returnTo=...&sourceRunId=...&cq=...
+  // 股票名称链接：进入 /stock/:symbol?originScope=...&source=...&strategy=...&returnTo=...&mcq=...
   // CHANGE-20260716-006: 使用 buildStockDetailUrl 统一构建，originScope 为来源唯一真源
   // [DetailSourceContextV2] returnTo 从当前内存 marketListCtx 构建（buildMarketReturnToUrl），
   //   禁止从 searchParams 副本构建（可能滞后于内存 query 状态）。
-  //   sourceRunId + canonicalQuery 固定入口时刻快照，详情左栏用此快照查询 DSA results，
-  //   禁止重新推导 activeRunId（避免新 run 发布后漂移）。
+  // [CHANGE-20260731-SAME-SOURCE] mcq（Market Canonical Query）固定入口时刻 /market/stocks 查询快照，
+  //   详情左栏用此 mcq 原样查询 /market/stocks，同源同序，禁止重新推导。
+  //   旧 DSA sourceRunId/cq 保留兼容（仍编码到 URL），但详情页不再消费。
   const handleNavigateToStock = useCallback(
     (row: TrendSelectionRow) => {
       const { symbol } = getStockDisplay(row)
       if (!symbol || symbol === '-') return
       // V2: returnTo 从当前内存 marketListCtx 构建（含完整筛选/排序/分页），selected 写入入口股票
       const returnTo = buildMarketReturnToUrl(marketListCtx, symbol)
-      // V2: canonicalQuery 为 resultParams 的 JSON 序列化（入口时刻查询快照）
+      // V2: canonicalQuery 为 resultParams 的 JSON 序列化（入口时刻查询快照，向后兼容旧链接）
       const canonicalQuery = JSON.stringify(resultParams)
+      // [CHANGE-20260731-SAME-SOURCE] Market Canonical Query（/market/stocks 同源查询参数快照）
+      // 直接序列化 marketStocksParams：scope/query/industry/concept/fp_filter/fp_sort/page/page_size
+      const marketCanonicalQuery = JSON.stringify(marketStocksParams)
       navigate(
         buildStockDetailUrl(symbol, {
           originScope: scope,
           returnTo,
           sourceRunId: activeRunId || null,
           canonicalQuery,
+          marketCanonicalQuery,
         }),
       )
     },
-    [navigate, marketListCtx, resultParams, scope, activeRunId],
+    [navigate, marketListCtx, resultParams, scope, activeRunId, marketStocksParams],
   )
 
   // 服务端查询变更

@@ -50,7 +50,7 @@ class MarketStockRow(BaseModel):
     )
     payload: dict[str, Any] | None = Field(
         None,
-        description="DSA 策略结果 payload（含 dsa_dir_bars/vwap_ret_avg 等原 DSA 字段）；无匹配时为 None",
+        description="[DEPRECATED 20260731-REMOVE-DSA] 旧 DSA 策略结果 payload，已停止写入，固定为 None。前端禁止消费。",
     )
     data_run_id: UUID | None = Field(
         None,
