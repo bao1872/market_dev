@@ -16,16 +16,22 @@ export const STEP_LABELS: Record<string, string> = {
   checking_coverage: '检查覆盖率',
   computing_features: '统一特征计算',
   publishing: '发布结果',
+  // [CHANGE-20260801-REVIEW-CLOSURE] 新增复盘计算与发布阶段
+  computing_review: '复盘计算发布',
   watchlist_ready: '自选可用',
 }
 
 // 默认步骤顺序（API 未返回 steps 或步骤缺失时的兜底）
+// [CHANGE-20260801-REVIEW-CLOSURE] 7 步序列（含 computing_review）。
+// 6 步旧数据（无 computing_review 事件）会因 API 步骤聚合缺省，
+//   但 DEFAULT 仍用 7 步以兼容新代码；前端 PipelineTimeline 用 getStepKeys(steps) 取实际 API steps 为主。
 export const DEFAULT_STEP_ORDER: string[] = [
   'refreshing_daily',
   'syncing_boards',
   'checking_coverage',
   'computing_features',
   'publishing',
+  'computing_review',
   'watchlist_ready',
 ]
 
@@ -122,8 +128,25 @@ export function runItemKindLabel(kind: string): string {
 }
 
 // ===== 格式化耗时（秒 → "Xm Ys"）=====
-export function formatDurationSeconds(seconds: number | null | undefined): string {
+// [TIMELINE-FIX]
+// - duration=null 且 stepStatus="running" → 显示"进行中"
+// - duration=null 且 stepStatus!="running" + warnings 含 invalid_order → 显示"未知"（不用 max 掩盖）
+// - duration<0（不应出现，仅防御性）→ 显示"未知"
+export function formatDurationSeconds(
+  seconds: number | null | undefined,
+  stepStatus?: string | null,
+  warnings?: string[] | null,
+): string {
+  // 进行中：running 状态且没有 duration
+  if ((seconds == null || seconds <= 0) && stepStatus === 'running') {
+    return '进行中'
+  }
+  // 顺序异常或非正耗时：显示"未知"而非 max(0,x)/负数
+  if (warnings && warnings.includes('invalid_order_or_zero_duration')) {
+    return '未知'
+  }
   if (seconds == null) return '-'
+  if (seconds <= 0) return '未知'
   if (seconds < 60) return `${seconds.toFixed(1)}s`
   const m = Math.floor(seconds / 60)
   const s = Math.round(seconds % 60)

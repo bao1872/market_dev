@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,15 +56,21 @@ _AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"
 # 收盘后超过该阈值（分钟）仍无 after_close run，视为 blocked
 _BLOCKED_AFTER_CLOSE_MINUTES = 30
 
-# [Phase8A] 6 个展示步骤（前 5 个来自 after_close_orchestrator 新状态机，
-# 最后一个是 watchlist gate）。旧 4 步（creating_dsa/waiting_dsa_worker/
-# quality_gate/feature_snapshot）收敛为 computing_features，仅历史映射。
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_UTC_TZ = dt_timezone.utc
+
+# [CHANGE-20260801-REVIEW-CLOSURE] 7 个展示步骤：
+#   refreshing_daily → syncing_boards → checking_coverage
+#   → computing_features → publishing → computing_review → watchlist_ready
+# 旧 4 步（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
+# 收敛为 computing_features，仅历史映射。
 _PIPELINE_STEPS = [
     AfterCloseRunStatus.REFRESHING_DAILY.value,
     AfterCloseRunStatus.SYNCING_BOARDS.value,
     AfterCloseRunStatus.CHECKING_COVERAGE.value,
     AfterCloseRunStatus.COMPUTING_FEATURES.value,
     AfterCloseRunStatus.PUBLISHING.value,
+    AfterCloseRunStatus.COMPUTING_REVIEW.value,
     "watchlist_ready",
 ]
 
@@ -75,6 +82,14 @@ _LEGACY_STATUS_MAP = {
     AfterCloseRunStatus.FEATURE_SNAPSHOT.value: AfterCloseRunStatus.COMPUTING_FEATURES.value,
 }
 
+# 触发新 attempt 开始的边界 step（retry/resume/管理员手动恢复等）
+_ATTEMPT_BOUNDARY_STEPS = {
+    AfterCloseRunStatus.QUEUED.value,
+    "manual_resume",
+    "resume",
+    "START",
+}
+
 # last_completed_step -> 已完成步骤索引（新状态机 + 旧四状态历史映射）
 _COMPLETED_STEP_INDEX = {
     None: -1,
@@ -84,13 +99,35 @@ _COMPLETED_STEP_INDEX = {
     AfterCloseRunStatus.CHECKING_COVERAGE.value: 2,
     AfterCloseRunStatus.COMPUTING_FEATURES.value: 3,
     AfterCloseRunStatus.PUBLISHING.value: 4,
-    AfterCloseRunStatus.SUCCEEDED.value: 5,
+    AfterCloseRunStatus.COMPUTING_REVIEW.value: 5,
+    AfterCloseRunStatus.SUCCEEDED.value: 6,
     # 旧四状态映射到 computing_features 的索引（历史 run 兼容）
     AfterCloseRunStatus.CREATING_DSA.value: 3,
     AfterCloseRunStatus.WAITING_DSA_WORKER.value: 3,
     AfterCloseRunStatus.QUALITY_GATE.value: 3,
     AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 3,
 }
+
+
+def _normalize_to_shanghai(dt: datetime | None) -> datetime | None:
+    """将任意 datetime 统一为 Asia/Shanghai 时区感知 datetime。
+
+    规则：
+    - None → None
+    - naive（无时区）：按 PostgreSQL 默认 UTC 语义解释，再转为上海时区。
+      （理由：PostgreSQL TIMESTAMPTZ 驱动返回带时区，naive 极少出现，
+       但遇到时采用最保守 UTC→上海 转换而非简单 attach tz。）
+    - UTC aware → 转换到上海
+    - 其他时区 → 转换到上海
+    - 已是上海 → 直接返回
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # naive: 假设 UTC（DB 默认），再转上海
+        utc_dt = dt.replace(tzinfo=_UTC_TZ)
+        return utc_dt.astimezone(_SHANGHAI_TZ)
+    return dt.astimezone(_SHANGHAI_TZ)
 
 
 def _parse_metadata(job_run: SchedulerJobRun) -> dict[str, Any]:
@@ -108,10 +145,11 @@ def _parse_metadata(job_run: SchedulerJobRun) -> dict[str, Any]:
 
 
 def _format_dt(value: datetime | None) -> str | None:
-    """时区感知 datetime 转 ISO 字符串。"""
-    if value is None:
+    """[TIMELINE-FIX] 时区统一归一化到 Asia/Shanghai 后再转 ISO 字符串。"""
+    normalized = _normalize_to_shanghai(value)
+    if normalized is None:
         return None
-    return value.isoformat()
+    return normalized.isoformat()
 
 
 async def _get_after_close_run_for_trade_date(
@@ -184,60 +222,182 @@ async def _get_snapshot_run_summary(
     }
 
 
+def _resolve_event_step(event: JobRunEvent) -> str | None:
+    """从事件解析出真正归属的 pipeline step（归一化 + ERROR/START payload 提取）。
+
+    返回 None 表示该事件不归入任何 pipeline step（忽略）。
+    """
+    step = event.step
+    # [Phase8A] 旧四状态映射到 computing_features
+    if step in _LEGACY_STATUS_MAP:
+        step = _LEGACY_STATUS_MAP[step]
+    # ERROR/START 没有固定 step，尝试从 payload 取 step；否则忽略
+    if step in ("ERROR", "START"):
+        payload_step = (
+            event.payload.get("step")
+            if isinstance(event.payload, dict)
+            else None
+        )
+        if not isinstance(payload_step, str):
+            return None
+        step = payload_step
+        # payload 里的 step 也要旧状态映射
+        if step in _LEGACY_STATUS_MAP:
+            step = _LEGACY_STATUS_MAP[step]
+    # 只关注 pipeline step
+    if step not in _PIPELINE_STEPS and step not in _ATTEMPT_BOUNDARY_STEPS:
+        return None
+    return step
+
+
 def _aggregate_step_events(
     events: list[JobRunEvent],
 ) -> dict[str, dict[str, Any]]:
-    """按 step 聚合事件，得到每个步骤的启停时间、count、错误信息。
+    """[TIMELINE-FIX v2] 按升序＋attempt 隔离＋步骤转移正确计算每个步骤的启停时间。
 
-    [Phase8A] 旧四状态事件（creating_dsa/waiting_dsa_worker/quality_gate/
-    feature_snapshot）映射到 computing_features，使历史 run 的时间线数据
-    在新 6 步序列中正确显示。
+    核心规则：
+    1. list_events 返回 新→旧；此处先按 created_at 升序（旧→新）后再处理。
+    2. 所有 timestamp 统一归一化到 Asia/Shanghai 时区（UTC/naive 先转）。
+    3. attempt 边界（_ATTEMPT_BOUNDARY_STEPS：queued/manual_resume/resume/START）
+       触发新 attempt，之前未闭合的步骤不再与后续 attempt 混用。
+    4. 每个 attempt 内部：步骤顺序是 A→B→C→...
+       - A 的 entered_at = A 事件 created_at（该 attempt 下首次出现步骤 A）
+       - A 的 finished_at = 下一个步骤事件的 created_at（即 B 事件时间 = A 结束 + B 开始）
+       - 最后一个步骤的 finished_at = 之后出现的 succeeded/failed 事件时间
+         或同一最后步骤的最新"更新事件"时间（有计数/数据才视为结束）
+    5. 有 started_at 无 finished_at → 表示该步骤进行中，duration 保持 None。
+    6. 同一 job_run_id 多 attempts：对每个 step，保留"最后一次 attempt 中完整或进行中的时间段"
+       （最能代表真实耗时；早期失败 attempt 不覆盖后期成功 attempt）。
+    7. ERROR 事件：归到对应 step，仅更新 error_message，不篡改 start/end 时间。
+    8. duration 若计算得 ≤ 0（DB 写入偏差或边界事件）→ 置 None，前端显示"未知/进行中"
+       而非用 0 或 max(0, x) 掩盖。
+    9. counts：从 payload 中提取覆盖率/计数；同一 step 多事件保留最新值。
     """
-    stats: dict[str, dict[str, Any]] = {}
-    for event in events:
-        step = event.step
-        # [Phase8A] 旧四状态映射到 computing_features
-        if step in _LEGACY_STATUS_MAP:
-            step = _LEGACY_STATUS_MAP[step]
-        # 只关注状态机步骤或 ERROR 事件
-        if step not in _PIPELINE_STEPS and step not in {
-            AfterCloseRunStatus.QUEUED.value,
-            AfterCloseRunStatus.FAILED.value,
-            "ERROR",
-            "START",
-        }:
+    if not events:
+        return {}
+
+    # (1) 时区归一化 + 按 created_at 升序（旧→新）。用归一化时间排序保证跨时区不会乱序。
+    normalized_events: list[tuple[datetime, JobRunEvent, str | None]] = []
+    for e in events:
+        t = _normalize_to_shanghai(e.created_at)
+        if t is None:
             continue
-        # ERROR 事件没有固定 step，尝试从 payload 取 step；否则归为当前 orchestrator_status
-        if step in ("ERROR", "START"):
-            payload_step = (
-                event.payload.get("step")
-                if isinstance(event.payload, dict)
-                else None
-            )
-            if not isinstance(payload_step, str):
+        resolved_step = _resolve_event_step(e)
+        normalized_events.append((t, e, resolved_step))
+    normalized_events.sort(key=lambda item: item[0])
+
+    # (2) 拆分为多个 attempt（按 boundary step 切开）
+    attempts: list[list[tuple[datetime, JobRunEvent, str | None]]] = []
+    current_attempt: list[tuple[datetime, JobRunEvent, str | None]] = []
+    for item in normalized_events:
+        t, e, resolved_step = item
+        # 边界 step 开启新 attempt（边界事件本身归入新 attempt 作为启动事件）
+        if e.step in _ATTEMPT_BOUNDARY_STEPS:
+            if current_attempt:
+                attempts.append(current_attempt)
+            current_attempt = [item]
+        else:
+            current_attempt.append(item)
+    if current_attempt:
+        attempts.append(current_attempt)
+
+    if not attempts:
+        # fallback：没有 attempt 边界（老数据或极端情况），所有事件归为一个 attempt
+        attempts = [normalized_events]
+
+    # per-step 最终聚合结果：每个 step 取最后一次 attempt 的 segment
+    per_step_final: dict[str, dict[str, Any]] = {}
+
+    for attempt in attempts:
+        # 收集该 attempt 中每个 pipeline step 的首个出现时间（entered_at）
+        # 以及 succeeded/failed 事件（terminal 事件）
+        pipeline_transitions: list[tuple[str, datetime]] = []
+        terminal_at: datetime | None = None
+        step_counts: dict[str, dict[str, Any]] = {}
+        step_error: dict[str, str] = {}
+
+        for t, e, resolved_step in attempt:
+            # 收集 ERROR 信息（无论 step 是否为 pipeline step，只要有 payload.step）
+            if e.level == "error" and isinstance(e.payload, dict):
+                err_step = e.payload.get("step") if isinstance(e.payload, dict) else None
+                if isinstance(err_step, str):
+                    if err_step in _LEGACY_STATUS_MAP:
+                        err_step = _LEGACY_STATUS_MAP[err_step]
+                    if err_step in _PIPELINE_STEPS:
+                        step_error[err_step] = e.message or step_error.get(err_step, "")
+
+            # terminal 事件：succeeded/failed 视为结束
+            if e.step == AfterCloseRunStatus.SUCCEEDED.value:
+                terminal_at = t
                 continue
-            step = payload_step
-        step_stats = stats.setdefault(step, {
-            "started_at": None,
-            "finished_at": None,
-            "error_message": None,
-            "counts": {},
-            "event_count": 0,
-        })
-        if step_stats["started_at"] is None:
-            step_stats["started_at"] = event.created_at
-        step_stats["finished_at"] = event.created_at
-        step_stats["event_count"] += 1
-        if event.level == "error":
-            step_stats["error_message"] = event.message or step_stats["error_message"]
-        if isinstance(event.payload, dict):
-            for key in (
-                "coverage", "covered", "total", "succeeded_count", "failed_count",
-                "snapshot_count", "partial_failed_count", "expected_count",
-            ):
-                if key in event.payload:
-                    step_stats["counts"][key] = event.payload[key]
-    return stats
+            if e.step == AfterCloseRunStatus.FAILED.value:
+                terminal_at = t
+                continue
+
+            if not resolved_step or resolved_step not in _PIPELINE_STEPS:
+                continue
+
+            # 同一 step 的后续事件更新 counts；不重复记录进入时间
+            if resolved_step not in [s for s, _ in pipeline_transitions]:
+                pipeline_transitions.append((resolved_step, t))
+
+            # counts 从 payload 提取（用最新）
+            if isinstance(e.payload, dict):
+                counts: dict[str, Any] = {}
+                for key in (
+                    "coverage", "covered", "total", "succeeded_count", "failed_count",
+                    "snapshot_count", "partial_failed_count", "expected_count",
+                ):
+                    if key in e.payload:
+                        counts[key] = e.payload[key]
+                if counts:
+                    step_counts[resolved_step] = counts
+
+        # 基于 pipeline_transitions + terminal_at 计算每个 step 的 start/end/duration
+        n_trans = len(pipeline_transitions)
+        for i, (step, entered_at) in enumerate(pipeline_transitions):
+            finished_at: datetime | None = None
+            if i + 1 < n_trans:
+                # 下一步骤的进入时间 = 当前步骤结束时间
+                finished_at = pipeline_transitions[i + 1][1]
+            elif terminal_at is not None:
+                # 最后一步且存在 terminal 事件
+                finished_at = terminal_at
+            # 没 finished_at 说明仍在运行中
+
+            # 计算 duration：仅当两端都存在且 finished > entered 才写入
+            duration_seconds: float | None = None
+            if entered_at is not None and finished_at is not None:
+                delta = (finished_at - entered_at).total_seconds()
+                # [HARD RULE] 不用 max(0,x) 掩盖；偏差≤0 时置 None，前端显示"进行中/未知"
+                if delta > 0:
+                    duration_seconds = delta
+                else:
+                    # 非正耗时：尝试从同一 step 的多事件估算（最后事件 - 首个事件）
+                    step_end_estimate: datetime | None = None
+                    for t, _e, rs in attempt:
+                        if rs == step:
+                            step_end_estimate = t  # 升序，最后一次
+                    if step_end_estimate is not None and step_end_estimate > entered_at:
+                        delta2 = (step_end_estimate - entered_at).total_seconds()
+                        if delta2 > 0:
+                            duration_seconds = delta2
+                            finished_at = step_end_estimate
+
+            counts = step_counts.get(step, {})
+            error_message = step_error.get(step)
+
+            # [Attempt 覆盖规则] 总是保存当前 attempt 的 segment
+            # （后面 attempt 会覆盖前面的；最后一次有效 attempt 保留）
+            per_step_final[step] = {
+                "started_at": entered_at,
+                "finished_at": finished_at,
+                "duration_seconds": duration_seconds,
+                "error_message": error_message,
+                "counts": counts,
+            }
+
+    return per_step_final
 
 
 def _compute_step_states(
@@ -246,10 +406,12 @@ def _compute_step_states(
     watchlist_ready: bool,
     snapshot_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 6 步骤状态。
+    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 7 步骤状态（含 computing_review）。
 
-    [Phase8A] 旧四状态（creating_dsa/waiting_dsa_worker/quality_gate/
-    feature_snapshot）映射到 computing_features 展示，历史 run 兼容。
+    [TIMELINE-FIX] duration_seconds 直接来自 _aggregate_step_events 严格校验过的结果；
+    不再从 (finished_at - started_at) 这里二次计算，避免两端事件来源跨 attempt/时区 出偏差。
+    若 _aggregate_step_events 返回的 duration=None 且两端都有，但 finished<started，
+    则标记 warnings="invalid_order"，供前端显示"未知"而非 0。
     """
     if job_run is None:
         return [
@@ -261,6 +423,7 @@ def _compute_step_states(
                 "duration_seconds": None,
                 "counts": {},
                 "error_message": None,
+                "warnings": None,
             }
             for step in _PIPELINE_STEPS
         ]
@@ -301,9 +464,16 @@ def _compute_step_states(
         stats = step_events.get(step, {})
         started_at = stats.get("started_at")
         finished_at = stats.get("finished_at")
-        duration = None
-        if started_at is not None and finished_at is not None:
-            duration = (finished_at - started_at).total_seconds()
+        duration = stats.get("duration_seconds")
+
+        # [TIMELINE-FIX] 附加跨 attempt/时区的顺序异常标记（仅诊断，不掩盖为 0）
+        warnings_list: list[str] = []
+        if (
+            started_at is not None and finished_at is not None
+            and duration is None
+        ):
+            # 两端都有但 duration 没计算出来（顺序异常或 delta≤0）
+            warnings_list.append("invalid_order_or_zero_duration")
 
         if step == "watchlist_ready":
             if job_run.status == "succeeded":
@@ -348,6 +518,13 @@ def _compute_step_states(
             # queued 或其他：已完成步骤显示 completed，当前及之后 pending
             step_status = "completed" if idx <= completed_idx else "pending"
 
+        # running 状态：finished_at/duration 应置 None（即使聚合逻辑因异常标记了也清空）
+        if step_status == "running":
+            finished_at = None
+            duration = None
+            # 保留 started_at；清除 invalid_order warning（running 没结束是正常）
+            warnings_list = [w for w in warnings_list if w != "invalid_order_or_zero_duration"]
+
         steps.append({
             "step": step,
             "status": step_status,
@@ -356,6 +533,7 @@ def _compute_step_states(
             "duration_seconds": duration,
             "counts": stats.get("counts", {}),
             "error_message": stats.get("error_message"),
+            "warnings": warnings_list if warnings_list else None,
         })
     return steps
 
@@ -656,14 +834,41 @@ if __name__ == "__main__":
     assert "watchlist_ready" in _PIPELINE_STEPS
     assert "computing_features" in _PIPELINE_STEPS
     assert "syncing_boards" in _PIPELINE_STEPS
-    # [Phase8A] 6 步序列（旧 8 步收敛后）
-    assert len(_PIPELINE_STEPS) == 6
+    # [CHANGE-20260801-REVIEW-CLOSURE] 7 步序列（新增 computing_review）
+    assert "computing_review" in _PIPELINE_STEPS, (
+        "_PIPELINE_STEPS 必须包含 computing_review（复盘阶段）"
+    )
+    assert len(_PIPELINE_STEPS) == 7, (
+        f"新 7 步序列（含 computing_review），实际={len(_PIPELINE_STEPS)}"
+    )
+    # 顺序：computing_review 在 publishing 之后，watchlist_ready 之前
+    pub_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.PUBLISHING.value)
+    rev_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_REVIEW.value)
+    wl_idx = _PIPELINE_STEPS.index("watchlist_ready")
+    assert pub_idx < rev_idx < wl_idx, (
+        f"computing_review 顺序必须在 publishing 之后、watchlist_ready 之前："
+        f"pub={pub_idx}, rev={rev_idx}, wl={wl_idx}"
+    )
     # 旧四状态映射到 computing_features 索引（=3）
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 3
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 3
-    # 新状态机索引
+    # 新状态机索引（7 步：publishing=4, computing_review=5, succeeded=6）
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_FEATURES.value] == 3
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 5
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.PUBLISHING.value] == 4
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_REVIEW.value] == 5
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 6
     # 旧四状态映射
     assert _LEGACY_STATUS_MAP[AfterCloseRunStatus.CREATING_DSA.value] == "computing_features"
-    print("after_close_pipeline_service 常量与映射自测通过")
+    # 时区归一化 + 负耗时防御：_normalize_to_shanghai 基本行为
+    from datetime import timezone as _tz
+    naive_dt = datetime(2026, 7, 31, 15, 0, 0)
+    sh_from_naive = _normalize_to_shanghai(naive_dt)
+    assert sh_from_naive is not None
+    assert sh_from_naive.tzinfo is not None
+    utc_dt = datetime(2026, 7, 31, 7, 0, 0, tzinfo=_tz.utc)  # UTC 07:00 = Shanghai 15:00
+    sh_from_utc = _normalize_to_shanghai(utc_dt)
+    assert sh_from_utc is not None
+    assert sh_from_utc.hour == 15, (
+        f"UTC 07:00 应转换为上海 15:00，实际 hour={sh_from_utc.hour}"
+    )
+    print("after_close_pipeline_service 常量与映射自测通过（含 computing_review 7 步 + 时区归一化）")

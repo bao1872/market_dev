@@ -3024,6 +3024,16 @@ button.switch {
   color: #ff7774;
   font-size: 12px;
 }
+// [TIMELINE-FIX] 耗时诊断：当 warnings 含 invalid_order 或异常"未知"时加黄底提示
+// （不用 max(0,x) 掩盖；管理员可直观看到事件顺序/跨重试的偏差）
+.timeline-meta-warn {
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(255, 179, 71, 0.12);
+  border: 1px solid rgba(255, 179, 71, 0.45);
+  color: #b26a00;
+}
+.timeline-meta-warn::before { content: '⚠ '; }
 
 // [JobRunEventTimeline] - 描述: 任务事件时间线
 .job-event-timeline {

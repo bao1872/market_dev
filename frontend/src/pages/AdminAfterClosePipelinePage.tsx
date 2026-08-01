@@ -73,8 +73,18 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
                   {step.finished_at && (
                     <span>结束: {formatShanghaiTime(step.finished_at)}</span>
                   )}
-                  {step.duration_seconds != null && (
-                    <span>耗时: {formatDurationSeconds(step.duration_seconds)}</span>
+                  {/* [TIMELINE-FIX] 透传 status + warnings，running→"进行中"，invalid_order→"未知"，负数→"未知" */}
+                  {(step.duration_seconds != null || status === 'running' || step.warnings?.length) && (
+                    <span
+                      title={
+                        step.warnings && step.warnings.length > 0
+                          ? `诊断: ${step.warnings.join(', ')}（事件跨重试/时区偏差，未用 max(0,x) 掩盖）`
+                          : undefined
+                      }
+                      className={step.warnings?.length ? 'timeline-meta-warn' : ''}
+                    >
+                      耗时: {formatDurationSeconds(step.duration_seconds, status, step.warnings)}
+                    </span>
                   )}
                   {Object.keys(step.counts).length > 0 && (
                     <span>
@@ -298,8 +308,9 @@ export default function AdminAfterClosePipelinePage() {
             <div>
               <div className="card-title">步骤时间线</div>
               <div className="card-sub">
+                {/* [CHANGE-20260801-REVIEW-CLOSURE] 7 步序列（含复盘阶段） */}
                 refreshing_daily → syncing_boards → checking_coverage →
-                computing_features → publishing → watchlist_ready
+                computing_features → publishing → computing_review → watchlist_ready
               </div>
             </div>
           </div>

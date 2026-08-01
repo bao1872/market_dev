@@ -19,6 +19,9 @@ class PipelineStep(BaseModel):
     duration_seconds: float | None = None
     counts: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
+    # [TIMELINE-FIX] 异常/诊断信息（如 invalid_order_or_zero_duration），
+    # 存在时前端显示"未知"而非用 0/max(0,x) 掩盖。
+    warnings: list[str] | None = None
 
 
 class AfterCloseRunSummary(BaseModel):

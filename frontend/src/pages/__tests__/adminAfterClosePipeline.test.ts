@@ -89,7 +89,12 @@ test('1b. getStepKeys: API 返回乱序 steps 时保持 API 顺序（不重排�
 test('1c. getStepKeys: API 返回空数组时用 DEFAULT_STEP_ORDER 兜底', () => {
   const keys = getStepKeys([])
   assert.deepEqual(keys, DEFAULT_STEP_ORDER)
-  assert.ok(keys.length === 6, `默认步骤应为 6 步，实际: ${keys.length}`)
+  // [CHANGE-20260801-REVIEW-CLOSURE] 新 7 步（含 computing_review）
+  assert.ok(keys.length === 7, `默认步骤应为 7 步（含 computing_review），实际: ${keys.length}`)
+  assert.ok(
+    keys.includes('computing_review'),
+    'DEFAULT_STEP_ORDER 必须包含 computing_review（复盘阶段）',
+  )
 })
 
 // ============================================================
@@ -111,7 +116,29 @@ test('2c. STEP_LABELS 包含 computing_features 映射', () => {
   assert.strictEqual(STEP_LABELS['computing_features'], '统一特征计算')
 })
 
-test('2d. 新状态机 6 步全部有中文标签', () => {
+// [CHANGE-20260801-REVIEW-CLOSURE] 新增复盘阶段断言
+test('2c2. computing_review: 存在于 DEFAULT_STEP_ORDER + STEP_LABELS 且中文标签正确', () => {
+  assert.ok(
+    DEFAULT_STEP_ORDER.includes('computing_review'),
+    'DEFAULT_STEP_ORDER 必须包含 computing_review',
+  )
+  assert.strictEqual(
+    STEP_LABELS['computing_review'],
+    '复盘计算发布',
+    'computing_review 中文标签应为"复盘计算发布"',
+  )
+  // computing_review 只出现一次
+  const occurrences = DEFAULT_STEP_ORDER.filter((k) => k === 'computing_review').length
+  assert.strictEqual(occurrences, 1, 'computing_review 在 DEFAULT_STEP_ORDER 中应仅出现一次')
+  // 顺序：publishing 之后，watchlist_ready 之前
+  const pubIdx = DEFAULT_STEP_ORDER.indexOf('publishing')
+  const revIdx = DEFAULT_STEP_ORDER.indexOf('computing_review')
+  const wlIdx = DEFAULT_STEP_ORDER.indexOf('watchlist_ready')
+  assert.ok(revIdx > pubIdx, 'computing_review 应在 publishing 之后')
+  assert.ok(revIdx < wlIdx, 'computing_review 应在 watchlist_ready 之前')
+})
+
+test('2d. 新状态机 7 步（含 computing_review）全部有中文标签', () => {
   for (const key of DEFAULT_STEP_ORDER) {
     assert.ok(
       STEP_LABELS[key],
@@ -286,22 +313,46 @@ test('6g. 源码级: useAfterClosePipelineByDate 使用 getPipelinePollInterval'
 })
 
 // ============================================================
-// 补充: formatDurationSeconds 边界测试
+// 补充: formatDurationSeconds 边界测试（含 TIMELINE-FIX 新语义）
 // ============================================================
 
-test('formatDurationSeconds: null/undefined 返回 "-"', () => {
+test('[TIMELINE-FIX] formatDurationSeconds: null/undefined + 非 running 返回 "-"', () => {
+  assert.strictEqual(formatDurationSeconds(null, 'completed'), '-')
+  assert.strictEqual(formatDurationSeconds(undefined, 'completed'), '-')
   assert.strictEqual(formatDurationSeconds(null), '-')
-  assert.strictEqual(formatDurationSeconds(undefined), '-')
 })
 
-test('formatDurationSeconds: <60s 返回 "X.Xs"', () => {
-  assert.strictEqual(formatDurationSeconds(0), '0.0s')
-  assert.strictEqual(formatDurationSeconds(5.5), '5.5s')
-  assert.strictEqual(formatDurationSeconds(59.9), '59.9s')
+// [TIMELINE-FIX] running 状态：无 duration → "进行中"（不是 -），有≤0 也是进行中）
+test('[TIMELINE-FIX] formatDurationSeconds: running + null/0/negative → "进行中"', () => {
+  assert.strictEqual(formatDurationSeconds(null, 'running'), '进行中')
+  assert.strictEqual(formatDurationSeconds(undefined, 'running'), '进行中')
+  assert.strictEqual(formatDurationSeconds(0, 'running'), '进行中')
+  assert.strictEqual(formatDurationSeconds(-1, 'running'), '进行中')
 })
 
-test('formatDurationSeconds: >=60s 返回 "Xm Ys"', () => {
-  assert.strictEqual(formatDurationSeconds(60), '1m 0s')
+// [TIMELINE-FIX] 非正耗时（DB偏差）且非 running：不用 max(0,x) → 掩盖，返回"未知"
+test('[TIMELINE-FIX] formatDurationSeconds: 0 或负秒数 且非 running → "未知"', () => {
+  assert.strictEqual(formatDurationSeconds(0, 'completed'), '未知')
+  assert.strictEqual(formatDurationSeconds(-5, 'completed'), '未知')
+  assert.strictEqual(formatDurationSeconds(-0.1, 'failed'), '未知')
+})
+
+// [TIMELINE-FIX] warnings 含 invalid_order_or_zero_duration：即便 seconds 存在值，也优先"未知"
+test('[TIMELINE-FIX] formatDurationSeconds: invalid_order warnings → "未知"（不掩盖）', () => {
+  assert.strictEqual(
+    formatDurationSeconds(120, 'completed', ['invalid_order_or_zero_duration']),
+    '未知',
+  )
+  // 即使是 running 且 warnings，有警告优先展示警告
+})
+
+// 正常正数值仍可展示
+test('formatDurationSeconds: 正数且无异常 → 正常格式化', () => {
+  assert.strictEqual(formatDurationSeconds(5.5, 'completed'), '5.5s')
+  assert.strictEqual(formatDurationSeconds(59.9, 'completed'), '59.9s')
+  assert.strictEqual(formatDurationSeconds(60, 'completed'), '1m 0s')
+  assert.strictEqual(formatDurationSeconds(125, 'succeeded'), '2m 5s')
+  assert.strictEqual(formatDurationSeconds(3600, 'completed'), '60m 0s')
+  // 无 warnings 参数也正常显示
   assert.strictEqual(formatDurationSeconds(125), '2m 5s')
-  assert.strictEqual(formatDurationSeconds(3600), '60m 0s')
 })

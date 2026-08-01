@@ -2975,6 +2975,9 @@ export interface PipelineStep {
   duration_seconds: number | null
   counts: Record<string, unknown>
   error_message: string | null
+  // [TIMELINE-FIX] 异常/诊断信息（如 invalid_order_or_zero_duration），
+  // 存在时前端显示"未知"而非用 0/max(0,x) 掩盖。
+  warnings?: string[] | null
 }
 
 /** after_close_orchestrator job_run 摘要（对齐后端 AfterCloseRunSummary） */
