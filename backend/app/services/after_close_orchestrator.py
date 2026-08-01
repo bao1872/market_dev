@@ -2169,8 +2169,8 @@ async def execute_after_close_run(
 
                 try:
                     from app.services.review_orchestrator_service import (
-                        create_run,
                         compute_run,
+                        create_run,
                         publish_run,
                     )
                     from app.services.review_publication_service import (
@@ -2296,6 +2296,13 @@ async def execute_after_close_run(
 
                             if publishable:
                                 publication, _ = await publish_run(review_db2, review_run2, force=False)
+                                if publication is None:
+                                    # force=False 且门禁已通过时理论不可达；
+                                    # 防御性收口，避免 None 解引用静默通过
+                                    raise RuntimeError(
+                                        "review publish 门禁通过但未返回 pointer: "
+                                        f"run_id={_review_run_id}"
+                                    )
                                 _review_status = "published"
                                 _review_publication_id = publication.id
                                 _review_reason = None

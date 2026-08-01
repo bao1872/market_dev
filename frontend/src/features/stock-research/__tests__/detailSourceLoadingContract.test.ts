@@ -118,78 +118,83 @@ test('CHANGE-005-7: CSS .tv-source-list-placeholder 存在', () => {
   assert.ok(/\.tv-source-list-placeholder\s*\{/.test(src), 'global.scss 必须定义 .tv-source-list-placeholder')
 })
 
-test('CHANGE-005-8: MarketWorkspacePage.handleNavigateToStock V2 传递 originScope + returnTo + sourceRunId + cq', () => {
+test('CHANGE-005-8: MarketWorkspacePage.handleNavigateToStock 传递 originScope + returnTo + mcq（PRD MX-62）', () => {
   const src = readSource(MARKET_WORKSPACE_PAGE)
   assert.ok(/handleNavigateToStock/.test(src), 'MarketWorkspacePage 必须实现 handleNavigateToStock')
   // CHANGE-20260716-006: 必须从 stockDetailNavigation.ts 导入 buildStockDetailUrl（统一构建）
   assert.ok(/from '@[/]features[/]stock-research[/]stockDetailNavigation'/.test(src), '必须从 stockDetailNavigation 导入 buildStockDetailUrl')
-  // [DetailSourceContextV2] 必须调用 buildStockDetailUrl 并传入 originScope: scope
+  // 必须调用 buildStockDetailUrl 并传入 originScope: scope
   assert.ok(/buildStockDetailUrl\(\s*symbol,\s*\{\s*originScope:\s*scope,/.test(src), 'handleNavigateToStock 必须调用 buildStockDetailUrl(symbol, { originScope: scope, ... })')
-  // V2: returnTo 必须从 buildMarketReturnToUrl 构建（禁止 searchParams 副本）
-  assert.ok(/buildMarketReturnToUrl\(marketListCtx,\s*symbol\)/.test(src), 'V2 returnTo 必须用 buildMarketReturnToUrl(marketListCtx, symbol) 构建')
-  assert.ok(!/returnToParams\.set\('scope'/.test(src), 'V2 禁止用 returnToParams.set 构造 returnTo（改用 buildMarketReturnToUrl）')
-  // V2: sourceRunId + canonicalQuery 必须透传（入口快照）
-  assert.ok(/sourceRunId:\s*activeRunId/.test(src), 'V2 必须透传 sourceRunId: activeRunId（入口快照）')
-  // canonicalQuery 为 JSON.stringify(resultParams)（可为变量赋值或内联）
-  assert.ok(/JSON\.stringify\(resultParams\)/.test(src), 'V2 canonicalQuery 必须为 JSON.stringify(resultParams)')
-  assert.ok(/canonicalQuery,?\s*\n?\s*\}\)/.test(src), 'V2 必须透传 canonicalQuery 给 buildStockDetailUrl')
+  // returnTo 必须从 buildMarketReturnToUrl 构建（禁止 searchParams 副本）
+  assert.ok(/buildMarketReturnToUrl\(marketListCtx,\s*symbol\)/.test(src), 'returnTo 必须用 buildMarketReturnToUrl(marketListCtx, symbol) 构建')
+  assert.ok(!/returnToParams\.set\('scope'/.test(src), '禁止用 returnToParams.set 构造 returnTo（改用 buildMarketReturnToUrl）')
+  // [PRD MX-62 / CHANGE-20260731-SAME-SOURCE] mcq = JSON.stringify(marketStocksParams)（/market/stocks 同源查询快照）
+  assert.ok(/JSON\.stringify\(marketStocksParams\)/.test(src), 'mcq 必须为 JSON.stringify(marketStocksParams)（同源查询快照）')
+  assert.ok(/marketCanonicalQuery,?\s*\n?\s*\}\)/.test(src), '必须透传 marketCanonicalQuery 给 buildStockDetailUrl')
+  // [PRD MX-62] 禁止再传 DSA 旧格式 sourceRunId/canonicalQuery
+  assert.ok(!/sourceRunId:\s*activeRunId/.test(src), 'PRD MX-62 禁止传 sourceRunId（DSA 旧格式）')
+  assert.ok(!/canonicalQuery:\s*JSON\.stringify/.test(src), 'PRD MX-62 禁止传 canonicalQuery（DSA 旧格式）')
   // 间接验证 source/strategy 推导：scope=market → source=selection + strategy=dsa_selector
   const navSrc = readSource(join(__dirname, '..', 'stockDetailNavigation.ts'))
   assert.ok(/originScope === 'market' \? 'selection' : 'watchlist'/.test(navSrc), 'stockDetailNavigation.sourceForOriginScope: market → selection')
   assert.ok(/originScope === 'market' \? 'dsa_selector' : 'watchlist_monitor'/.test(navSrc), 'stockDetailNavigation.strategyForOriginScope: market → dsa_selector')
 })
 
-test('CHANGE-005-9: buildStockDetailUrl 统一生成 source + strategy + returnTo 完整 URL', () => {
+test('CHANGE-005-9: buildStockDetailUrl 统一生成 originScope + returnTo + mcq 完整 URL（PRD MX-62）', () => {
   // CHANGE-20260716-006: URL 构建合同已统一到 stockDetailNavigation.ts buildStockDetailUrl
   // 3 个导航点（MarketWorkspacePage / useStockDetailActions / StockDetailPage 左栏）必须全部使用此函数
   const navSrc = readSource(join(__dirname, '..', 'stockDetailNavigation.ts'))
-  // 必须生成 /stock/:symbol?originScope=...&source=...&strategy=... 模式
+  // 必须生成 /stock/:symbol?originScope=...&mcq=... 模式
   assert.ok(/`[/]stock[/]\$\{symbol\}\?\$\{params\.toString\(\)\}`/.test(navSrc), 'buildStockDetailUrl 必须返回 /stock/:symbol?params 模式')
-  // params 必须包含 originScope + source + strategy
+  // params 必须包含 originScope（source/strategy 由 originScope 在消费端推导，不写入 URL）
   assert.ok(/originScope:\s*opts\.originScope/.test(navSrc), 'params 必须包含 originScope')
-  assert.ok(/source,/.test(navSrc), 'params 必须包含 source')
-  assert.ok(/strategy,/.test(navSrc), 'params 必须包含 strategy')
   // returnTo 通过 params.set 编码（URLSearchParams 自动编码）
   assert.ok(/params\.set\('returnTo',\s*opts\.returnTo\)/.test(navSrc), 'returnTo 必须通过 params.set 编码')
-  // MarketWorkspacePage 必须调用 buildStockDetailUrl 且传 returnTo
+  // [PRD MX-62] mcq 通过 params.set('mcq', ...) 编码
+  assert.ok(/params\.set\('mcq',\s*opts\.marketCanonicalQuery\)/.test(navSrc), 'mcq 必须通过 params.set 编码')
+  // [PRD MX-62] 禁止写入 DSA 旧格式参数
+  assert.ok(!/params\.set\('sourceRunId'/.test(navSrc), 'PRD MX-62 禁止写入 sourceRunId（DSA 旧格式）')
+  assert.ok(!/params\.set\('cq'/.test(navSrc), 'PRD MX-62 禁止写入 cq（DSA 旧格式）')
+  // MarketWorkspacePage 必须调用 buildStockDetailUrl 且传 returnTo + marketCanonicalQuery
   const marketSrc = readSource(MARKET_WORKSPACE_PAGE)
-  assert.ok(/buildStockDetailUrl\(symbol,\s*\{[\s\S]*?returnTo,[\s\S]*?\}\)/.test(marketSrc), 'MarketWorkspacePage 必须调用 buildStockDetailUrl 并传 returnTo')
+  assert.ok(/buildStockDetailUrl\(symbol,\s*\{[\s\S]*?returnTo,[\s\S]*?marketCanonicalQuery[\s\S]*?\}\)/.test(marketSrc), 'MarketWorkspacePage 必须调用 buildStockDetailUrl 并传 returnTo + marketCanonicalQuery')
 })
 
-test('CHANGE-005-10: useStockDetailActions V2 不使用 useMarketStocks/usePublishedRuns，接收 V2 context', () => {
+test('CHANGE-005-10: useStockDetailActions 以 mcq 为来源列表数据源（PRD MX-62），接收 mcq context', () => {
   const src = readSource(USE_DETAIL_ACTIONS)
-  assert.ok(!/useMarketStocks\s*\(/.test(src), '禁止使用旧 useMarketStocks 函数调用')
-  // [DetailSourceContextV2] V2 用固定 sourceRunId + canonicalQuery，禁止 fresh usePublishedRuns 推导 activeRunId
-  assert.ok(!/usePublishedRuns\(/.test(src), 'V2 禁止使用 usePublishedRuns（用固定 sourceRunId 替代）')
-  assert.ok(/useStrategyRunResults\(/.test(src), '必须使用 useStrategyRunResults')
-  // V2: useWatchlistMonitorStatus 仅用于 inWatchlist，禁止充当来源列表数据源
+  // [PRD MX-62 / CHANGE-20260731-SAME-SOURCE] mcq 优先：有 mcq 时用 useMarketStocks 同源查询
+  assert.ok(/useMarketStocks\s*\(/.test(src), '必须使用 useMarketStocks（mcq 同源查询）')
+  assert.ok(/useMcq/.test(src), '必须实现 useMcq 判定（mcq 优先于旧 DSA 路径）')
+  // 禁止 fresh usePublishedRuns 重新推导 activeRunId（避免新 run 发布后来源列表漂移）
+  assert.ok(!/usePublishedRuns\(/.test(src), '禁止使用 usePublishedRuns（用固定入口快照替代）')
+  // useWatchlistMonitorStatus 仅用于 inWatchlist，禁止充当来源列表数据源
   assert.ok(/useWatchlistMonitorStatus\(\)/.test(src), '必须使用 useWatchlistMonitorStatus（仅用于 inWatchlist）')
-  // V2: 接收 origin/sourceRunId/canonicalQuery/canonicalQueryRaw 参数（替代 V1 source/marketContext）
+  // 接收 origin + mcq 参数（旧 DSA sourceRunId/canonicalQuery 仅 deprecated 兼容保留）
   assert.ok(/origin:\s*OriginScope/.test(src), 'StockDetailActionsParams 必须接收 origin: OriginScope')
-  assert.ok(/sourceRunId:\s*string \| null/.test(src), 'StockDetailActionsParams 必须接收 sourceRunId: string | null')
-  assert.ok(/canonicalQuery:\s*StrategyResultQuery \| null/.test(src), 'StockDetailActionsParams 必须接收 canonicalQuery: StrategyResultQuery | null')
-  assert.ok(/canonicalQueryRaw:\s*string \| null/.test(src), 'StockDetailActionsParams 必须接收 canonicalQueryRaw: string | null')
-  // V2: 不再接收 marketContext 参数
-  assert.ok(!/marketContext:\s*MarketListContext \| null/.test(src), 'V2 禁止接收 marketContext 参数（用 canonicalQuery 替代）')
-  // V2: 不再调用 buildStrategyResultQueryParams(marketContext)
-  assert.ok(!/buildStrategyResultQueryParams\(marketContext\)/.test(src), 'V2 禁止调用 buildStrategyResultQueryParams(marketContext)')
+  assert.ok(/marketCanonicalQuery:\s*MarketCanonicalQuery \| null/.test(src), 'StockDetailActionsParams 必须接收 marketCanonicalQuery: MarketCanonicalQuery | null')
+  assert.ok(/marketCanonicalQueryRaw:\s*string \| null/.test(src), 'StockDetailActionsParams 必须接收 marketCanonicalQueryRaw: string | null')
+  assert.ok(/DEPRECATED/.test(src) && /sourceRunId:\s*string \| null/.test(src), '旧 DSA sourceRunId 仅允许 deprecated 兼容保留')
+  // 不再接收 marketContext 参数
+  assert.ok(!/marketContext:\s*MarketListContext \| null/.test(src), '禁止接收 marketContext 参数（用 mcq 替代）')
+  assert.ok(!/buildStrategyResultQueryParams\(marketContext\)/.test(src), '禁止调用 buildStrategyResultQueryParams(marketContext)')
   // resolveDetailSourceContextV2 内部必须调用 decodeMarketListContext(returnTo)
   const detailSrc = readSource(DETAIL_SOURCE_CONTEXT)
   assert.ok(/decodeMarketListContext\(returnTo\)/.test(detailSrc), 'resolveDetailSourceContextV2 必须调用 decodeMarketListContext(returnTo)')
 })
 
-test('CHANGE-005-11: 上一只/下一只 V2 透传 origin/sourceRunId/canonicalQuery', () => {
+test('CHANGE-005-11: 上一只/下一只透传 origin/mcq（PRD MX-62）', () => {
   const src = readSource(USE_DETAIL_ACTIONS)
   // CHANGE-20260716-006: 上一只/下一只必须使用 buildStockDetailUrl 统一构建
   assert.ok(/from '\.\/stockDetailNavigation'/.test(src), '必须从 ./stockDetailNavigation 导入 buildStockDetailUrl')
-  // [DetailSourceContextV2] 必须调用 buildStockDetailUrl 并透传 origin/sourceRunId/canonicalQueryRaw
-  assert.ok(/buildStockDetailUrl\(target\.symbol,\s*\{[\s\S]*?originScope:\s*origin,[\s\S]*?returnTo,[\s\S]*?timeframe,[\s\S]*?sourceRunId,[\s\S]*?canonicalQuery:\s*canonicalQueryRaw,[\s\S]*?\}\)/.test(src), 'V2 上一只/下一只必须透传 originScope: origin + sourceRunId + canonicalQuery: canonicalQueryRaw')
-  // buildStockDetailUrl 内部必须处理 timeframe + returnTo + sourceRunId + cq
+  // [PRD MX-62] 必须调用 buildStockDetailUrl 并透传 originScope: origin + marketCanonicalQuery: marketCanonicalQueryRaw
+  assert.ok(/buildStockDetailUrl\(target\.symbol,\s*\{[\s\S]*?originScope:\s*origin,[\s\S]*?returnTo,[\s\S]*?timeframe,[\s\S]*?marketCanonicalQuery:\s*marketCanonicalQueryRaw,[\s\S]*?\}\)/.test(src), '上一只/下一只必须透传 originScope: origin + marketCanonicalQuery: marketCanonicalQueryRaw（入口 mcq 快照原样透传）')
+  // 切股时不得重新推导 mcq（禁止 JSON.stringify 新查询）
+  assert.ok(!/marketCanonicalQuery:\s*JSON\.stringify/.test(src), '切股禁止重新序列化 mcq（必须原样透传入口快照）')
+  // buildStockDetailUrl 内部必须处理 timeframe + returnTo + mcq
   const navSrc = readSource(join(__dirname, '..', 'stockDetailNavigation.ts'))
   assert.ok(/if \(opts\.timeframe\)\s*\{[\s\S]*?params\.set\('timeframe',\s*opts\.timeframe\)/.test(navSrc), 'buildStockDetailUrl 必须处理 timeframe 参数')
   assert.ok(/if \(opts\.returnTo\)\s*\{[\s\S]*?params\.set\('returnTo',\s*opts\.returnTo\)/.test(navSrc), 'buildStockDetailUrl 必须处理 returnTo 参数')
-  assert.ok(/if \(opts\.sourceRunId\)\s*\{[\s\S]*?params\.set\('sourceRunId',\s*opts\.sourceRunId\)/.test(navSrc), 'buildStockDetailUrl 必须处理 sourceRunId 参数')
-  assert.ok(/if \(opts\.canonicalQuery\)\s*\{[\s\S]*?params\.set\('cq',\s*opts\.canonicalQuery\)/.test(navSrc), 'buildStockDetailUrl 必须处理 canonicalQuery (cq) 参数')
+  assert.ok(/if \(opts\.marketCanonicalQuery\)\s*\{[\s\S]*?params\.set\('mcq',\s*opts\.marketCanonicalQuery\)/.test(navSrc), 'buildStockDetailUrl 必须处理 marketCanonicalQuery (mcq) 参数')
 })
 
 test('CHANGE-005-12: normalizeInternalReturnTo 上限为 4096', () => {

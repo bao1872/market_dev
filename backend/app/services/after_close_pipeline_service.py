@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone as dt_timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -57,7 +57,7 @@ _AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"
 _BLOCKED_AFTER_CLOSE_MINUTES = 30
 
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-_UTC_TZ = dt_timezone.utc
+_UTC_TZ = UTC
 
 # [CHANGE-20260801-REVIEW-CLOSURE] 7 个展示步骤：
 #   refreshing_daily → syncing_boards → checking_coverage
@@ -860,12 +860,11 @@ if __name__ == "__main__":
     # 旧四状态映射
     assert _LEGACY_STATUS_MAP[AfterCloseRunStatus.CREATING_DSA.value] == "computing_features"
     # 时区归一化 + 负耗时防御：_normalize_to_shanghai 基本行为
-    from datetime import timezone as _tz
     naive_dt = datetime(2026, 7, 31, 15, 0, 0)
     sh_from_naive = _normalize_to_shanghai(naive_dt)
     assert sh_from_naive is not None
     assert sh_from_naive.tzinfo is not None
-    utc_dt = datetime(2026, 7, 31, 7, 0, 0, tzinfo=_tz.utc)  # UTC 07:00 = Shanghai 15:00
+    utc_dt = datetime(2026, 7, 31, 7, 0, 0, tzinfo=UTC)  # UTC 07:00 = Shanghai 15:00
     sh_from_utc = _normalize_to_shanghai(utc_dt)
     assert sh_from_utc is not None
     assert sh_from_utc.hour == 15, (

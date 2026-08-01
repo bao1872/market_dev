@@ -326,13 +326,14 @@ step 8: 部署后验收（浏览器 / CI / Playwright 独立）
 4. 执行一次性业务脚本：`python -c 'from review_orchestrator_service import create_run; create_run(...)'`（例外：必须通过正式 orchestrator API 或 worker oneoff task 队列执行）
 5. `docker compose down -v` 或 任何 `rm -rf /var/lib/docker/volumes/trading_*`
 
-### 13.4 本次最终 SHA（待填写，部署后更新）
+### 13.4 本轮部署记录（2026-08-01）
 
-部署 SHA：`__________`（7 位短 SHA + 40 位完整 SHA）
-CI 成功 run URL：`https://github.com/bao1872/market_dev/actions/runs/xxxx`
-部署开始时间：`____-__-__ __:__:__ +08:00`
-部署结束时间：`____-__-__ __:__:__ +08:00`
-SHA 一致性 5 项结果：
+- 部署 SHA：`ff89fea`（origin/dev，经 `scripts/ops/panji-test-deploy` 部署）；
+- 一致性核验（2026-08-01 只读）：repo HEAD / 容器 GIT_SHA / `/api/v1/version`
+  git_sha / runtime / image 一致，alembic=078；
+- 验收状态：非 CLOSURE_PASSED（fp_summary/segment 断链等由 2026-08-01
+  全项目收口承载，见 `docs/changes/2026/CHANGE-20260801-001-*.md` §3）；
+- 下一轮部署时按 §13.2 step 6-7 重新记录 SHA 一致性 5 项结果：
 | # | 维度 | SHA | OK |
 |---|---|---|---|
 | 1 | Git repo HEAD | 096a5d3… | ☐ |

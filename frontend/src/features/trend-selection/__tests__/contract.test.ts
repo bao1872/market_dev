@@ -61,19 +61,14 @@ function extractColumnKeys(src: string): string[] {
 test('完整列集包含 spec 要求的全部 column key', () => {
   const src = readSource(COLUMNS_PATH)
   const keys = extractColumnKeys(src)
-  // [趋势选股] - 描述: spec 第七节要求的完整列集（ScreenerPage 用）
+  // [CHANGE-20260731-REMOVE-DSA / PRD MX-61] 旧 DSA-only 列已删除，
+  // 完整列集 = 基础列（股票/当日涨跌幅/最新价/行业/自选操作）；
+  // 99 个第一金字塔列由 market-workspace 列注册表承载，不在本文件。
   const expected = [
     'stock',
-    'dsa_dir_bars',
-    'vwap_ret_avg',
-    'vwap_ret_total',
-    'offset_mean',
-    'offset_std',
-    'offset_percentile',
-    'dsa_vwap',
-    'dsa_vwap_dev_pct',
-    'offset_variance_rate',
+    'change_pct',
     'price',
+    'industry',
     'action',
   ]
   for (const k of expected) {
@@ -98,9 +93,10 @@ test('visibleColumnKeys 按 column key 过滤，与数组顺序无关', () => {
   // 使用 mock 列数组测试函数逻辑（不依赖真实 columns.tsx）
   const mockCols = [
     { key: 'stock', title: '股票' },
-    { key: 'dsa_dir_bars', title: '当前趋势' },
-    { key: 'vwap_ret_avg', title: '日均趋势变化' },
-    { key: 'offset_mean', title: '平均偏离趋势线' },
+    { key: 'change_pct', title: '当日涨跌幅' },
+    { key: 'price', title: '最新价格' },
+    { key: 'industry', title: '行业' },
+    { key: 'fp_trend_direction', title: '趋势方向（未请求，应被排除）' },
     { key: 'action', title: '操作' },
   ] as unknown as Parameters<typeof visibleColumnKeys>[0]
   // 故意打乱顺序传入，验证结果按完整列集顺序输出
@@ -135,9 +131,9 @@ test('visibleColumnKeys 按 column key 过滤，与数组顺序无关', () => {
 test('visibleColumnKeys 返回的列对象与完整列同 key 是同一引用', () => {
   const mockCols = [
     { key: 'stock', title: '股票' },
-    { key: 'dsa_dir_bars', title: '当前趋势' },
-    { key: 'vwap_ret_avg', title: '日均趋势变化' },
-    { key: 'offset_mean', title: '平均偏离趋势线' },
+    { key: 'change_pct', title: '当日涨跌幅' },
+    { key: 'price', title: '最新价格' },
+    { key: 'industry', title: '行业' },
     { key: 'action', title: '操作' },
   ] as unknown as Parameters<typeof visibleColumnKeys>[0]
   const filtered = visibleColumnKeys(mockCols, INDEX_VISIBLE_COLUMN_KEYS)
@@ -204,16 +200,25 @@ test('ScreenerPage dsaColumns 引用 features/trend-selection 共享列定义', 
 test('列定义颜色规则遵循涨红跌绿（market-up/market-down）', () => {
   const src = readSource(COLUMNS_PATH)
   // [趋势选股] - 描述: 涨红跌绿规则，正数 market-up，负数 market-down，零或未知 market-flat
-  assert.ok(src.includes('market-up'), '列渲染必须包含 market-up（涨红）')
-  assert.ok(src.includes('market-down'), '列渲染必须包含 market-down（跌绿）')
-  assert.ok(src.includes('market-flat'), '列渲染必须包含 market-flat（平/未知）')
+  // [CHANGE-20260731-REMOVE-DSA] 颜色映射收口到 adapters.changePctColorClass，
+  // columns.tsx 必须调用该唯一 helper（禁止各列自行实现颜色判断）
+  assert.ok(src.includes('changePctColorClass'), '列渲染必须使用 changePctColorClass 唯一 helper')
+  // 行为级断言：changePctColorClass 返回值必须遵守涨红跌绿合同
+  assert.equal(changePctColorClass(1.5), 'market-up', '正涨跌幅必须返回 market-up（涨红）')
+  assert.equal(changePctColorClass(-2.3), 'market-down', '负涨跌幅必须返回 market-down（跌绿）')
+  assert.equal(changePctColorClass(0), 'market-flat', '零涨跌幅必须返回 market-flat')
+  assert.equal(changePctColorClass(null), 'market-flat', '未知值必须返回 market-flat')
+  assert.equal(changePctColorClass(undefined), 'market-flat', 'undefined 必须返回 market-flat')
+  // 空值兜底样式仍允许直接出现（"--" 占位）
+  assert.ok(src.includes('market-flat'), '列渲染必须包含 market-flat（空值兜底）')
 })
 
 // ===== 8. 完整列集每列必须含 key/title/dataType/sortable/filterable =====
 test('完整列集每列含必需字段（key/title/dataType/sortable/filterable）', () => {
   const src = readSource(COLUMNS_PATH)
   const keys = extractColumnKeys(src)
-  assert.ok(keys.length >= 12, `完整列集至少 12 列，实际 ${keys.length} 列`)
+  // [CHANGE-20260731-REMOVE-DSA / PRD MX-61] 基础列集 5 列（旧 12+ DSA 列已删除）
+  assert.ok(keys.length >= 5, `完整列集至少 5 列（基础列集），实际 ${keys.length} 列`)
   // [趋势选股] - 描述: 每列必须含 key/title/dataType/sortable/filterable 五个字段
   // 通过正则验证源码中每个列定义块都包含这些字段
   for (const k of keys) {

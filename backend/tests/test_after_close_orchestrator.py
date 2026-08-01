@@ -46,6 +46,38 @@ from app.services.job_run_event_service import append_event
 from app.services.strategy_batch_service import StrategyBatchService
 
 
+@pytest.fixture(autouse=True)
+def _mock_review_phase_boundary():
+    """盘后编排器 review 阶段边界 mock（模块级 autouse）。
+
+    本文件测试目标是编排器主流程（事件/状态/repair/publish），
+    review 计算与发布合同由 tests/test_review_*.py 专门覆盖。
+    [CHANGE-20260801-REVIEW-CLOSURE] computing_review 阶段要求
+    stock_core + board_analysis 正式 pointer；本文件 fixtures 不构造
+    publication 数据，故 mock create_run 返回已 published 的 run，
+    走 idempotent_reuse_published_run 路径（跳过计算与发布）。
+    """
+    fake_review_run = MagicMock()
+    fake_review_run.id = uuid.uuid4()
+    fake_review_run.status = "published"
+    fake_review_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    fake_review_run.expected_scope_count = 0
+    fake_review_run.signal_count = 0
+    fake_review_run.coverage_ratio = 1.0
+    with (
+        patch(
+            "app.services.review_orchestrator_service.create_run",
+            new=AsyncMock(return_value=fake_review_run),
+        ),
+        patch(
+            "app.services.review_publication_service.get_published_review_run_id",
+            new=AsyncMock(return_value=fake_review_run.id),
+        ),
+    ):
+        yield
+
+
+
 async def _create_after_close_job_run(
     db_session,
     *,
