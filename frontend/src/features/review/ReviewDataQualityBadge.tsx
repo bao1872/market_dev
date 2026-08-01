@@ -21,11 +21,25 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   failed: { label: '失败', cls: 'chipDanger' },
 }
 
-/** 判断单个聚合变量是否可用（用于单元格级展示） */
-export function isMetricAvailable(payload: ReviewMetricPayload | null): boolean {
+/** 判断单个聚合变量是否可展示（用于单元格级展示）。
+ *
+ * [PRD §7.1 Cold-Start 合同]：
+ * - ready/partial：完整展示 value（normalized）+ delta + 历史分位
+ * - insufficient_history：已有 rawValue，但历史 < 60 日 normalized 为 null。
+ *   必须展示 rawValue + coverage + 历史不足原因，分位/delta 为空，不得显示"不可用"。
+ * - unavailable：真不可用，显示缺省。
+ */
+export function isMetricDisplayable(payload: ReviewMetricPayload | null): boolean {
   if (!payload) return false
-  return payload.status === 'ready' || payload.status === 'partial'
+  return (
+    payload.status === 'ready' ||
+    payload.status === 'partial' ||
+    payload.status === 'insufficient_history'
+  )
 }
+
+/** 旧名称保留为向后兼容别名（TODO：全局统一后移除） */
+export const isMetricAvailable = isMetricDisplayable
 
 export default function ReviewDataQualityBadge({
   status,

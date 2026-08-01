@@ -105,8 +105,8 @@ class AfterCloseRunStatus(StrEnum):
     """盘后编排流水线状态枚举。
 
     状态流转：
-    queued → refreshing_daily → syncing_boards → waiting_dsa_worker
-      → quality_gate → feature_snapshot → publishing → succeeded
+    queued → refreshing_daily → syncing_boards → checking_coverage
+      → computing_features → publishing → computing_review → succeeded
     任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
     """
 
@@ -122,6 +122,8 @@ class AfterCloseRunStatus(StrEnum):
     FEATURE_SNAPSHOT = "feature_snapshot"
     COMPUTING_FEATURES = "computing_features"
     PUBLISHING = "publishing"
+    # [CHANGE-20260801-REVIEW-CLOSURE] 新增复盘计算与发布阶段
+    COMPUTING_REVIEW = "computing_review"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
@@ -996,8 +998,9 @@ async def execute_after_close_run(
             )
 
         # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
-        # 阶段顺序（Phase 5 收敛后）：refreshing_daily → syncing_boards → computing_features
-        #   → publishing → succeeded
+        # 阶段顺序（Phase 5 + Review Closure）：
+        #   refreshing_daily → syncing_boards → computing_features
+        #   → publishing → computing_review → succeeded
         # 旧步骤名（waiting_dsa_worker/quality_gate/feature_snapshot）兼容读取历史 run
         _completed_steps: dict[str | None, set[str]] = {
             None: set(),
@@ -1012,9 +1015,14 @@ async def execute_after_close_run(
                 "refreshing_daily", "syncing_boards", "computing_features",
                 "publishing",
             },
+            # [CHANGE-20260801-REVIEW-CLOSURE] computing_review 断点恢复
+            "computing_review": {
+                "refreshing_daily", "syncing_boards", "computing_features",
+                "publishing", "computing_review",
+            },
             "succeeded": {
                 "refreshing_daily", "syncing_boards", "computing_features",
-                "publishing", "succeeded",
+                "publishing", "computing_review", "succeeded",
             },
             # [Phase 5] 旧步骤名兼容：历史 run 读取时映射到 computing_features 已完成
             "waiting_dsa_worker": {
@@ -1044,13 +1052,15 @@ async def execute_after_close_run(
         # [Phase 5] 3 个旧 skip 标志收敛为 skip_computing
         skip_computing = "computing_features" in completed
         skip_publish = "publishing" in completed
+        # [CHANGE-20260801-REVIEW-CLOSURE] review 阶段跳过标志
+        skip_review = "computing_review" in completed
 
         logger.info(
             "[AfterClose] 断点恢复: last_completed_step=%s, "
             "skip_refresh=%s, skip_board_sync=%s, skip_computing=%s, "
-            "skip_publish=%s",
+            "skip_publish=%s, skip_review=%s",
             last_completed_step, skip_refresh, skip_board_sync, skip_computing,
-            skip_publish,
+            skip_publish, skip_review,
         )
 
         # ---- 步骤 1: refreshing_daily ----
@@ -2106,6 +2116,367 @@ async def execute_after_close_run(
                     snapshot_run_id, event_exc, exc_info=True,
                 )
 
+        # ---- 步骤 4.5: computing_review（复盘计算 + 发布） ----
+        # [CHANGE-20260801-REVIEW-CLOSURE] 正式闭环：
+        #   stock_core正式pointer → board_analysis正式pointer
+        #   → create/compute review → publish review → after_close succeeded
+        # review 失败不得静默写主任务成功；在 metadata 和事件时间线
+        # 记录 review_run_id/status/reason。
+        _review_run_id: uuid.UUID | None = None
+        _review_status: str = "skipped"
+        _review_reason: str | None = None
+        _review_publication_id: uuid.UUID | None = None
+        _review_scope_count: int = 0
+        _review_signal_count: int = 0
+        _review_coverage: float = 0.0
+        _review_blockers: list[str] = []
+
+        if not skip_review:
+            # 仅在 stock_core + board_analysis 均已正式发布时执行 review
+            # _aggregation_status=succeeded 表示 board_analysis publication 已写
+            if _stock_core_published and _aggregation_status == "succeeded" and snapshot_run_id is not None:
+                # 断点恢复：先从 metadata 读取已有 review_run_id
+                async with AsyncSessionLocal() as db:
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    existing_meta = _parse_metadata(job_run)
+                    existing_review_run_id_str = existing_meta.get("review_run_id")
+                    if existing_review_run_id_str:
+                        try:
+                            _review_run_id = uuid.UUID(existing_review_run_id_str)
+                            logger.info(
+                                "[AfterClose] [Review] 断点恢复: 复用已有 review run: %s",
+                                _review_run_id,
+                            )
+                        except (ValueError, TypeError):
+                            _review_run_id = None
+
+                # 写状态切换事件
+                async with AsyncSessionLocal() as db:
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    await _update_orchestrator_status(
+                        db=db,
+                        job_run=job_run,
+                        status=AfterCloseRunStatus.COMPUTING_REVIEW,
+                        message=(
+                            f"开始复盘计算与发布: trade_date={trade_date}, "
+                            f"source_core_run_id={snapshot_run_id}"
+                        ),
+                        extra={
+                            "review_run_id": str(_review_run_id) if _review_run_id else None,
+                        },
+                    )
+                    await db.commit()
+
+                try:
+                    from app.services.review_orchestrator_service import (
+                        create_run,
+                        compute_run,
+                        publish_run,
+                    )
+                    from app.services.review_publication_service import (
+                        ReviewPublishBlockError,
+                        evaluate_publish_gate,
+                    )
+
+                    # 1) 创建/复用 review run（幂等）
+                    async with AsyncSessionLocal() as review_db:
+                        review_run = await create_run(
+                            review_db,
+                            trade_date=trade_date,
+                            # create_run 内部从 publication pointer 解析 source run_ids，
+                            # 不依赖 snapshot_run_id 直接传入；这保证 publication 为唯一事实源。
+                            canary=False,
+                            dry_run=False,
+                            idempotency_key=f"after_close_orchestrator:{job_run_id}",
+                        )
+                        _review_run_id = review_run.id
+                        logger.info(
+                            "[AfterClose] [Review] create_run 完成: run_id=%s, "
+                            "source_core=%s, source_board=%s, algo=%s, filter=%s",
+                            review_run.id,
+                            review_run.source_core_run_id,
+                            review_run.source_board_run_id,
+                            review_run.algorithm_version,
+                            review_run.filter_version,
+                        )
+
+                        # 幂等恢复：若 run 已 published，跳过计算直接复用
+                        if review_run.status == "published" and review_run.published_at is not None:
+                            _review_status = "published_already"
+                            _review_reason = "idempotent_reuse_published_run"
+                            _review_scope_count = review_run.expected_scope_count or 0
+                            _review_signal_count = review_run.signal_count or 0
+                            _review_coverage = float(review_run.coverage_ratio or 0)
+                            logger.info(
+                                "[AfterClose] [Review] run 已 published，跳过计算与发布: %s",
+                                review_run.id,
+                            )
+                        else:
+                            # 2) 计算 review（metrics → signals → attribution → tracking）
+                            # resume_run 语义：pending/failed/过期running自动重处理；
+                            # succeeded item 不重算，保证输入不变则输出不变。
+                            if (
+                                review_run.status in ("signals_ready", "partial", "failed")
+                                or (review_run.status == "computing" and review_run.started_at is not None)
+                            ):
+                                logger.info(
+                                    "[AfterClose] [Review] run 非 created 终态，调用 resume_run: "
+                                    "run_id=%s, status=%s",
+                                    review_run.id, review_run.status,
+                                )
+                                compute_result = await __import__(
+                                    "app.services.review_orchestrator_service",
+                                    fromlist=["resume_run"],
+                                ).resume_run(review_db, review_run)
+                            else:
+                                compute_result = await compute_run(review_db, review_run)
+
+                            _review_status = compute_result.get("status", "unknown")
+                            _review_scope_count = compute_result.get("expected_scope_count", 0)
+                            _review_signal_count = compute_result.get("signal_count", 0)
+                            _review_coverage = compute_result.get("coverage_ratio", 0.0)
+                            logger.info(
+                                "[AfterClose] [Review] compute_run 完成: run_id=%s, "
+                                "status=%s, scopes=%d, signals=%d, coverage=%.4f",
+                                review_run.id, _review_status,
+                                _review_scope_count, _review_signal_count, _review_coverage,
+                            )
+
+                        await review_db.commit()
+
+                    # 3) 发布 review（切 publication pointer）
+                    #    先重新读取 run 最新状态（上面 commit 后 session 失效）
+                    if _review_status != "published_already":
+                        async with AsyncSessionLocal() as review_db2:
+                            from app.services.review_orchestrator_service import get_run
+                            review_run2 = await get_run(review_db2, _review_run_id)
+                            if review_run2 is None:
+                                raise RuntimeError(
+                                    f"review run 计算后读不到: run_id={_review_run_id}"
+                                )
+
+                            # 先评估门禁（不 force），记录 blockers 便于排查
+                            publishable, blockers = await evaluate_publish_gate(
+                                review_db2, review_run2,
+                            )
+                            _review_blockers = blockers
+                            logger.info(
+                                "[AfterClose] [Review] publish gate: publishable=%s, blockers=%s",
+                                publishable, blockers,
+                            )
+
+                            if publishable:
+                                publication, _ = await publish_run(review_db2, review_run2, force=False)
+                                _review_status = "published"
+                                _review_publication_id = publication.id
+                                _review_reason = None
+                                logger.info(
+                                    "[AfterClose] [Review] publish 成功: publication_id=%s, "
+                                    "review_run_id=%s",
+                                    publication.id, _review_run_id,
+                                )
+                            else:
+                                # 门禁不通过但 run 已计算完成：视为 partial，不抛异常阻断主流程
+                                # 但 review_status=gate_blocked，metadata 明确记录 blockers
+                                _review_status = "gate_blocked"
+                                _review_reason = (
+                                    f"publish_gate_blocked: {'; '.join(blockers)}"
+                                )
+                                logger.warning(
+                                    "[AfterClose] [Review] publish gate 不通过，不切 pointer: "
+                                    "run_id=%s, blockers=%s",
+                                    _review_run_id, blockers,
+                                )
+                                # [CRITICAL RULE] review 失败不得静默写主任务成功。
+                                # gate_blocked 视为 review 阶段失败：向上抛出 RuntimeError，
+                                # 触发 except 块把主任务标记为 failed。
+                                raise RuntimeError(
+                                    f"review publish gate blocked: {'; '.join(blockers)}"
+                                )
+                            await review_db2.commit()
+
+                except ReviewPublishBlockError as pub_block_exc:
+                    _review_status = "gate_blocked"
+                    _review_blockers = list(pub_block_exc.blockers or [])
+                    _review_reason = f"publish_gate_blocked: {'; '.join(_review_blockers)}"
+                    logger.error(
+                        "[AfterClose] [Review] publish gate 阻塞: %s", pub_block_exc,
+                    )
+                    # 显式 raise：review 失败不得静默写主任务 succeeded
+                    raise RuntimeError(
+                        f"review publish gate blocked: {_review_reason}"
+                    ) from pub_block_exc
+                except Exception as review_exc:
+                    _review_status = "failed"
+                    _review_reason = f"{type(review_exc).__name__}: {review_exc}"[:500]
+                    logger.error(
+                        "[AfterClose] [Review] 复盘计算或发布失败（不得静默 succeed）: "
+                        "trade_date=%s, error=%s",
+                        trade_date, review_exc, exc_info=True,
+                    )
+                    # 写 review_failed 事件（供 admin 时间线展示）
+                    try:
+                        async with AsyncSessionLocal() as db:
+                            job_run = await _get_job_run_or_raise(db, job_run_id)
+                            await append_event(
+                                db=db,
+                                job_run_id=job_run_id,
+                                step=AfterCloseRunStatus.COMPUTING_REVIEW.value,
+                                level="error",
+                                message=(
+                                    f"复盘阶段失败: status={_review_status}, "
+                                    f"reason={_review_reason}"
+                                ),
+                                payload={
+                                    "review_run_id": str(_review_run_id) if _review_run_id else None,
+                                    "review_status": _review_status,
+                                    "review_reason": _review_reason,
+                                    "review_blockers": _review_blockers,
+                                },
+                            )
+                            await db.commit()
+                    except Exception as inner_exc:
+                        logger.warning(
+                            "[AfterClose] [Review] 写入 review_failed 事件失败: %s",
+                            inner_exc,
+                        )
+                    # [CRITICAL RULE] review 失败必须向上抛出，使主任务标记 failed
+                    raise RuntimeError(
+                        f"review phase failed: {_review_reason}"
+                    ) from review_exc
+                finally:
+                    # 无论成功/失败，更新 metadata 记录 review_run_id/status/reason
+                    try:
+                        async with AsyncSessionLocal() as db:
+                            job_run = await _get_job_run_or_raise(db, job_run_id)
+                            meta = _parse_metadata(job_run)
+                            meta["review_run_id"] = (
+                                str(_review_run_id) if _review_run_id else None
+                            )
+                            meta["review_status"] = _review_status
+                            meta["review_reason"] = _review_reason
+                            meta["review_publication_id"] = (
+                                str(_review_publication_id)
+                                if _review_publication_id
+                                else None
+                            )
+                            meta["review_scope_count"] = _review_scope_count
+                            meta["review_signal_count"] = _review_signal_count
+                            meta["review_coverage"] = _review_coverage
+                            meta["review_blockers"] = _review_blockers
+                            job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+                            await db.commit()
+                    except Exception as meta_exc:
+                        logger.warning(
+                            "[AfterClose] [Review] 更新 review metadata 失败: %s",
+                            meta_exc,
+                        )
+
+                # review 阶段全部成功：更新心跳 + last_completed_step=computing_review
+                async with AsyncSessionLocal() as db:
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    await _update_orchestrator_status(
+                        db=db,
+                        job_run=job_run,
+                        status=AfterCloseRunStatus.COMPUTING_REVIEW,
+                        message=(
+                            f"复盘完成: status={_review_status}, "
+                            f"run_id={_review_run_id}, "
+                            f"scopes={_review_scope_count}, signals={_review_signal_count}, "
+                            f"coverage={_review_coverage:.4f}"
+                        ),
+                        payload={
+                            "review_run_id": str(_review_run_id) if _review_run_id else None,
+                            "review_status": _review_status,
+                            "review_reason": _review_reason,
+                            "review_publication_id": (
+                                str(_review_publication_id)
+                                if _review_publication_id
+                                else None
+                            ),
+                            "review_scope_count": _review_scope_count,
+                            "review_signal_count": _review_signal_count,
+                            "review_coverage": _review_coverage,
+                            "review_blockers": _review_blockers,
+                        },
+                        extra={
+                            "review_run_id": str(_review_run_id) if _review_run_id else None,
+                            "review_status": _review_status,
+                        },
+                    )
+                    await _update_heartbeat_and_step(
+                        db, job_run, AfterCloseRunStatus.COMPUTING_REVIEW.value, worker_id,
+                    )
+                    await db.commit()
+            else:
+                # 前置条件不满足：stock_core 或 board_analysis 未正式发布
+                _review_status = "skipped"
+                _review_reason = (
+                    f"prerequisite_missing: stock_core_published={_stock_core_published}, "
+                    f"aggregation_status={_aggregation_status}, "
+                    f"snapshot_run_id={'present' if snapshot_run_id else 'None'}"
+                )
+                logger.info(
+                    "[AfterClose] [Review] 跳过复盘阶段（前置条件不满足）: %s",
+                    _review_reason,
+                )
+                try:
+                    async with AsyncSessionLocal() as db:
+                        job_run = await _get_job_run_or_raise(db, job_run_id)
+                        meta = _parse_metadata(job_run)
+                        meta["review_run_id"] = None
+                        meta["review_status"] = _review_status
+                        meta["review_reason"] = _review_reason
+                        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+                        await append_event(
+                            db=db,
+                            job_run_id=job_run_id,
+                            step=AfterCloseRunStatus.COMPUTING_REVIEW.value,
+                            level="warn",
+                            message=f"复盘跳过: {_review_reason}",
+                            payload={
+                                "review_status": _review_status,
+                                "review_reason": _review_reason,
+                                "stock_core_published": _stock_core_published,
+                                "aggregation_status": _aggregation_status,
+                            },
+                        )
+                        await _update_heartbeat_and_step(
+                            db, job_run, AfterCloseRunStatus.COMPUTING_REVIEW.value, worker_id,
+                        )
+                        await db.commit()
+                except Exception as meta_exc2:
+                    logger.warning(
+                        "[AfterClose] [Review] 更新 skipped review metadata 失败: %s",
+                        meta_exc2,
+                    )
+        else:
+            # 断点恢复 skip_review=True：从 metadata 读取 review 信息
+            _review_status = "skipped_by_resume"
+            try:
+                async with AsyncSessionLocal() as db:
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    meta = _parse_metadata(job_run)
+                    if meta.get("review_run_id"):
+                        _review_run_id = uuid.UUID(meta["review_run_id"])
+                    _review_status = meta.get("review_status", "skipped_by_resume")
+                    _review_reason = meta.get("review_reason")
+                    if meta.get("review_publication_id"):
+                        _review_publication_id = uuid.UUID(meta["review_publication_id"])
+                    _review_scope_count = int(meta.get("review_scope_count", 0) or 0)
+                    _review_signal_count = int(meta.get("review_signal_count", 0) or 0)
+                    _review_coverage = float(meta.get("review_coverage", 0.0) or 0.0)
+                    _review_blockers = list(meta.get("review_blockers", []) or [])
+                logger.info(
+                    "[AfterClose] [Review] 断点恢复跳过复盘: status=%s, run_id=%s",
+                    _review_status, _review_run_id,
+                )
+            except Exception as resume_exc:
+                logger.warning(
+                    "[AfterClose] [Review] 断点恢复读取 review metadata 失败: %s",
+                    resume_exc,
+                )
+
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:
             job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -2122,6 +2493,8 @@ async def execute_after_close_run(
                 + f", stock_core_published={_stock_core_published}"
                 + f", auction_anchor_status={_auction_anchor_status}"
                 + f", aggregation_status={_aggregation_status}"
+                + f", review_status={_review_status}"
+                + (f", review_run_id={_review_run_id}" if _review_run_id else "")
             )
             await _update_orchestrator_status(
                 db=db,
@@ -2134,6 +2507,19 @@ async def execute_after_close_run(
                     "stock_core_published": _stock_core_published,
                     "auction_anchor_status": _auction_anchor_status,
                     "aggregation_status": _aggregation_status,
+                    # [CHANGE-20260801-REVIEW-CLOSURE] review 闭环字段
+                    "review_run_id": str(_review_run_id) if _review_run_id else None,
+                    "review_status": _review_status,
+                    "review_reason": _review_reason,
+                    "review_publication_id": (
+                        str(_review_publication_id)
+                        if _review_publication_id
+                        else None
+                    ),
+                    "review_scope_count": _review_scope_count,
+                    "review_signal_count": _review_signal_count,
+                    "review_coverage": _review_coverage,
+                    "review_blockers": _review_blockers,
                 },
             )
             job_run.status = "succeeded"

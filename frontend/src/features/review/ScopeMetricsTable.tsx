@@ -50,27 +50,71 @@ export interface ScopeMetricsTableProps {
   onRowClick?: (scope: ReviewScopeMetrics) => void
 }
 
-/** 单个指标单元格：值 + 方向箭头 + 历史分位细条 */
+/** 单个指标单元格：值 + 方向箭头 + 历史分位细条 + 冷启动rawValue展示。
+ *
+ * [PRD §7.1 Cold-Start]：
+ * - ready/partial：value（normalized）+ delta + 分位条
+ * - insufficient_history：rawValue + coverage，分位条和delta为空（但值行显示），
+ *   鼠标悬浮显示"历史不足（历史观测=N条，coverage=X%）"
+ */
 function MetricCell({ payload }: { payload: ReviewMetricPayload | null }) {
-  if (!payload || !isMetricAvailable(payload)) {
-    const reason = !payload
-      ? '未计算'
-      : payload.status === 'insufficient_history'
-        ? '历史不足'
-        : payload.status === 'unavailable'
-          ? '不可用'
-          : payload.status
-    return <span className={styles.metricUnavailable}>{reason}</span>
+  if (!payload) {
+    return <span className={styles.metricUnavailable}>未计算</span>
   }
-  const pct = payload.historyPercentile120d
-  return (
-    <span className={styles.metricCell}>
-      <span className={styles.metricValue}>{fmt(payload.value)}</span>
-      <span className={`${styles.metricDelta} ${deltaClass(payload.delta1d)}`}>
-        {arrow(payload.delta1d)}
-        {payload.delta1d !== null ? fmt(payload.delta1d) : ''}
+  if (!isMetricAvailable(payload)) {
+    // 真不可用（unavailable 等）
+    return (
+      <span className={styles.metricUnavailable}>
+        {payload.status === 'unavailable' ? '不可用' : payload.status}
       </span>
-      {pct !== null && (
+    )
+  }
+
+  const isCold = payload.status === 'insufficient_history'
+  // 冷启动：优先用 rawValue，否则用 normalized value
+  const displayValue = isCold ? payload.rawValue : payload.value
+  const pct = payload.historyPercentile120d
+  const histCount = payload.historyObservationCount
+  const coverage = payload.coverage
+
+  const titleParts: string[] = []
+  if (isCold) {
+    titleParts.push('历史不足（冷启动）')
+    if (histCount !== null && histCount !== undefined) {
+      titleParts.push(`历史观测=${histCount}条`)
+    }
+  } else {
+    titleParts.push(`状态=${payload.status}`)
+  }
+  if (coverage !== null && coverage !== undefined) {
+    titleParts.push(`coverage=${(coverage * 100).toFixed(1)}%`)
+  }
+  if (pct !== null && pct !== undefined) {
+    titleParts.push(`120日分位=${fmt(pct)}`)
+  }
+  const title = titleParts.join(' · ')
+
+  return (
+    <span className={styles.metricCell} title={title}>
+      <span
+        className={
+          isCold ? `${styles.metricValue} ${styles.metricValueCold}` : styles.metricValue
+        }
+      >
+        {fmt(displayValue)}
+      </span>
+      {!isCold && (
+        <span className={`${styles.metricDelta} ${deltaClass(payload.delta1d)}`}>
+          {arrow(payload.delta1d)}
+          {payload.delta1d !== null ? fmt(payload.delta1d) : ''}
+        </span>
+      )}
+      {isCold && coverage !== null && coverage !== undefined && (
+        <span className={styles.metricCoverageTag}>
+          {(coverage * 100).toFixed(0)}%
+        </span>
+      )}
+      {!isCold && pct !== null && (
         <span
           className={styles.percentileBar}
           title={`120日分位 ${fmt(pct)}`}
@@ -80,6 +124,9 @@ function MetricCell({ payload }: { payload: ReviewMetricPayload | null }) {
             style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
           />
         </span>
+      )}
+      {isCold && (
+        <span className={styles.coldHintDot} title={title} />
       )}
     </span>
   )
