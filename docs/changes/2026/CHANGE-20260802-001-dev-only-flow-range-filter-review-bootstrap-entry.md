@@ -3,7 +3,7 @@
 - **日期**：2026-08-02
 - **类型**：governance + behavior + architecture + contract
 - **影响范围**：分支模型与工作协议 / 行情页筛选交互 / Review 历史回填 / 盘后 Worker 运行结构
-- **状态**：进行中（代码 + 本地纯单元测试通过；exact-SHA CI 待确认；**本轮未部署、未修改任何生产数据**；2026-08-02 发生一次误备份并已清理，见 §8）
+- **状态**：进行中（代码 + 本地纯单元测试 + 部署脚本契约测试通过；exact-SHA CI 已绿（Run 30736134575，部署 SHA 29a5b7d）；**本轮 4 项新增修复（品牌文字 / 部署脚本 / bootstrap 内存 / 资源门禁）已实现、未部署、未修改任何生产数据**；2026-08-02 发生一次误备份并已清理，见 §8）
 - **基线**：`codex/panji-full-closure-20260801` @ `d6360ec5902124cf5394bfc6e883fc2a3852ac32`（CI Run 30732130951 = success）
 
 ---
@@ -224,4 +224,70 @@ AI 生成的计划 / 粘贴指令 / 历史建议 / "检查备份""提供回滚�
 但其数据回填（6 条 INSERT、2 条全表 UPDATE、factor_publications 指针重写）不可逆，
 downgrade 后 `factor_publications.data_run_id` 会指向已被删除的 `board_analysis_runs.id`（悬空指针）。
 因此 079 的可靠回滚依赖**用户另行明确授权的备份或快照**，而非默认要求每次部署前都备份。
-当前测试期部署默认不备份；是否备份属用户每次独立决策。**
+当前测试期部署默认不备份；是否备份属用户每次独立决策。
+
+---
+
+## 9. 本轮新增四项修复（2026-08-02 下午，"继续"任务）
+
+在已部署 SHA `29a5b7d` 的基础上，用户追加四项目标。全部为代码/规则修改，**未重新部署、未修改生产数据、未执行 bootstrap apply**。
+
+### 9.1 盘中监控飞书图片品牌文字（最小修改）
+
+- 文件：`frontend/src/components/MobileIndicatorStage.tsx`
+- 变化：左上角品牌文字 `'小Z拆市场'` → `'小Z说股事'`（仅该文案，仅 2 处：注释与 `brandName` 赋值）。
+- 核验：grep 全仓仅 2 处匹配；`CaptureStockPage` 不覆盖 `brandName`；捕获图经 `<strong>{brandName}</strong>` 渲染。
+- 既有契约测试只校验字号（44–48px），未校验文案，本次未新增测试（用户要求最小改动）。
+
+### 9.2 部署脚本正确性修复（panji-test-deploy）
+
+根因（已确认）：脚本硬编码了 compose 中不存在的服务名 `worker` / `worker-chips`，
+`docker compose up -d` 对该服务静默不处理 → 报"完成"但容器仍跑旧 SHA；
+且健康探测用 `docker exec trading-backend curl`，而 **backend 镜像内无 curl**（只有 `/opt/venv/bin/python3`），
+探测失败被 `|| true` 吞掉 → `/version` 恒空 → 从不校验镜像标签。
+
+修复（`scripts/ops/panji-test-deploy`）：
+
+| 项 | 位置 | 变化 |
+|---|---|---|
+| 资源硬门禁 | §1b | 改动任何状态前校验磁盘可用 ≥20GB、使用率 ≤82%、MemAvailable ≥4096MB；不通过即失败且不改状态 |
+| 服务名唯一真源 | §8 / §8a | 删除 `worker`/`worker-chips` 硬编码；改为 `docker compose config --services` 动态发现；计划服务不在 compose 中立即 `fail` |
+| 镜像标签逐服务校验 | §8b | 对每个重建服务校验运行中镜像必须 `:SHORT_SHA` 结尾，否则拒绝报告成功 |
+| 健康端点修正 | §9 | 改用 `python3 + urllib` 探测 `/v1/health` 与 `/v1/version`；新增 git_sha==runtime==image 三项一致校验 |
+| 部署后受控清理 | §11 | 仅 `builder/image/container prune -f`；记录磁盘前后可用量并复查门禁 |
+
+- 端点真值核验：`/v1/health`、`/v1/version` 正确（200，返回 git_sha=29a5b7d）；`/version`、`/api/v1/health` 均 404，不得用作健康端点。
+- `bash -n` 语法校验通过；grep 确认旧 `worker-chips`/硬编码服务名已移除。
+- 新增契约测试 `scripts/ops/test-panji-test-deploy-contracts.sh`（16 项断言全 PASS）：资源门禁阈值、服务名真源（拒绝 `worker`/`worker-chips`）、镜像标签校验（禁止虚假完成）、健康端点路径。
+
+### 9.3 Review bootstrap 内存预算（防 OOM）
+
+生产 60 日全 scope dry-run 曾在 ~3.4GB RSS 被 OOM Killer 杀死（零业务写入）。根因：
+逐日结果保留全部 scope 明细 + 全程复用同一 AsyncSession 导致 ORM identity map 累积。
+
+修复（不靠扩内存掩盖）：
+
+| 文件 | 变化 |
+|---|---|
+| `review_bootstrap_service.py` | 新增 `DEFAULT_BOOTSTRAP_CHUNK_DAYS=5` / `DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB=1536` / `DEFAULT_BOOTSTRAP_DETAIL_LIMIT=5`；`bootstrap_history()` 按 trade_date 分片，每片 `expunge_all()` + 释放引用；只保留聚合摘要（最前 `detail_limit` 天保留明细）；每片采样 RSS，超过预算即 `status=memory_budget_exceeded` 安全停止；返回 `peak_rss_mb` / `chunks` |
+| `review_bootstrap_cli.py` | 新增 `--chunk-days` / `--memory-budget-mb`；参数校验（`chunk_days>0`、`memory_budget_mb>=256`，否则 `ValueError`）；超限退出码 3 |
+| `review_bootstrap_job_service.py` | 从 `job_metadata` 透传两参数；summary 新增 `peak_rss_mb` / `chunks` |
+
+- 新增 6 项内存上限契约测试（`test_review_bootstrap_admin_entry.py` §9）全 PASS：分片释放 identity map、不累积明细、聚合计数保留、预算超限安全停止、非法参数拒绝。
+- 本地 `PURE_UNIT_TEST=1` 全量 review/bootstrap 测试 55 passed；`expunge_all` 用 `MagicMock` 消除 AsyncMock 误报警告。
+
+### 9.4 服务器资源预算门禁规则（rules/80）
+
+新增 `rules/80-deployment-data-safety.md`「服务器资源预算门禁（2026-08-02 收口）」章节：
+
+- 阈值：`PANJI_MIN_DISK_GB=20`、`PANJI_MAX_DISK_PCT=82`、`PANJI_MIN_MEM_MB=4096`（可环境变量覆盖）。
+- 部署前门禁：任何部署/构建前先校验，不通过即拒绝（不改状态）。
+- 部署后强制回收：仅 builder cache / dangling images / 已停止容器；禁止 `system prune -a` / `image prune -a` / `volume prune`（避免误删 `node:20-alpine` 基础镜像与持久卷）。
+- 长任务内存预算：bootstrap 等分片释放，超限安全停止而非扩内存掩盖。
+- 本轮已依此门禁对服务器执行安全清理（详见工作日志）：磁盘可用 23G→45G、镜像 99→24、清理 build cache 3.49GB 与临时脚本；9 个 volume 与 15 容器均完好，backend `/v1/health`=200。
+
+### 9.5 待办（用户未再授权）
+
+以下仍禁止，需用户再次明确授权：bootstrap **apply**（真实写入）、创建 `review-2.0.0` run、发布 pointer、withdrawal、修改 main、新分支、数据库备份、删除 volume/历史 run。
+
+部署验证顺序（待授权）：CI 绿 → `panji-prod-preflight` → `panji-test-deploy <新SHA>` → 5 天 dry-run → 60 天 dry-run → 暂停报告。

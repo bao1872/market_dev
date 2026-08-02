@@ -342,3 +342,30 @@ step 8: 部署后验收（浏览器 / CI / Playwright 独立）
 | 4 | frontend asset manifest build_sha | | ☐ |
 | 5 | CHANGE release notes | | ☐ |
 - 不 down -v、不删除 PostgreSQL/Redis Volume、不自动 migration 的约束不变
+
+### 13.5 部署脚本修复与资源门禁收口（2026-08-02，CHANGE-20260802-001）
+
+本轮（2026-08-02）对 `scripts/ops/panji-test-deploy` 修复历史缺陷，并在 `rules/80-deployment-data-safety.md` 新增资源预算门禁章节。代码已修改、本地契约测试通过，**待下次 `panji-test-deploy <SHA>` 部署后由生产运行事实核验**。
+
+#### 13.5.1 部署脚本修复点（代码已核验，未部署）
+
+| 修复项 | 位置（panji-test-deploy） | 变化 |
+|---|---|---|
+| 资源硬门禁 | §1b | 改动任何状态前先校验根分区磁盘可用 ≥20GB、使用率 ≤82%、MemAvailable ≥4096MB；不通过即失败且不改状态 |
+| 服务名唯一真源 | §8 / §8a | 删除硬编码 `worker`/`worker-chips`；改为 `docker compose config --services` 动态发现；计划重建服务不在 compose 中立即 `fail`（禁止静默跳过） |
+| 镜像标签逐服务校验 | §8b | 对每个重建服务 `docker inspect .Config.Image` 校验必须以 `:SHORT_SHA` 结尾，否则拒绝报告成功（防"容器仍是旧 SHA 却报完成"） |
+| 健康端点修正 | §9 | backend 容器无 curl，改用 `python3 + urllib` 探测 `/v1/health` 与 `/v1/version`；新增 git_sha==runtime_git_sha==image_git_sha 三项一致校验 |
+| 部署后受控清理 | §11 | 只 `docker builder prune -f` / `image prune -f` / `container prune -f`；清理后记录磁盘前后可用量并复查门禁 |
+
+#### 13.5.2 资源预算门禁（rules/80 §服务器资源预算门禁，已写入）
+
+- 阈值：`PANJI_MIN_DISK_GB=20`、`PANJI_MAX_DISK_PCT=82`、`PANJI_MIN_MEM_MB=4096`；可通过环境变量临时覆盖。
+- 部署前门禁：任何部署/构建前先校验，不通过即拒绝（不改状态）。
+- 部署后强制回收：builder cache / dangling images / 已停止容器；禁止 `system prune -a` / `image prune -a` / `volume prune`。
+- 长任务内存预算：bootstrap 等批处理按 `DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB=1536` 软预算分片释放，超限安全停止而非扩内存掩盖。
+
+#### 13.5.3 部署脚本契约测试（新增）
+
+- 文件：`scripts/ops/test-panji-test-deploy-contracts.sh`
+- 覆盖 4 个不变量（16 项断言，全 PASS）：资源门禁阈值、服务名真源（拒绝 `worker`/`worker-chips`）、镜像标签校验（禁止虚假完成）、健康端点路径（`/v1/health` `/v1/version` 合法，`/version` `/api/v1/health` `/health` 非法）
+- 运行：`bash scripts/ops/test-panji-test-deploy-contracts.sh`

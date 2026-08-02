@@ -470,3 +470,21 @@ scope identity（`scope_type` + `scope_key`）+ compatible taxonomy +
 成分股增减是常态，若按其过滤，任何一次调仓都会截断 60 日历史并重新冷启动。
 该契约由 `backend/tests/test_review_metric_observation_bootstrap.py` 断言固化
 （WHERE 子句不得含 `membership_version`；跨三个 membership_version 的历史必须连续）。
+
+### 23.5 内存预算与分片（2026-08-02 修复，CHANGE-20260802-001）
+
+生产 60 日全 scope dry-run 曾在 ~3.4GB RSS 被 OOM Killer 杀死（零业务写入）。根因：
+逐日结果保留全部 scope 明细 + 全程复用同一 AsyncSession 导致 ORM identity map 累积。
+
+修复（不靠扩内存掩盖）：`review_bootstrap_service.bootstrap_history()` 新增分片与预算参数。
+
+| 常量 | 值 | 作用 |
+|---|---|---|
+| `DEFAULT_BOOTSTRAP_CHUNK_DAYS` | 5 | 按 trade_date 分片，每片结束 `expunge_all()` + 释放引用 |
+| `DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB` | 1536 | 每片采样 RSS，超过即 `status=memory_budget_exceeded` 安全停止 |
+| `DEFAULT_BOOTSTRAP_DETAIL_LIMIT` | 5 | 仅最前若干天保留完整 scope 明细，其余只留聚合摘要 |
+
+- CLI（`review_bootstrap_cli.py`）新增 `--chunk-days` / `--memory-budget-mb` 并校验（`chunk_days>0`、`memory_budget_mb>=256`，否则 `ValueError`）；超限退出码 3。
+- 作业层（`review_bootstrap_job_service.py`）从 `job_metadata` 透传两参数，summary 新增 `peak_rss_mb` / `chunks`。
+- 契约测试：`backend/tests/test_review_bootstrap_admin_entry.py` §9 内存上限契约（6 项）已固化分片释放 / 不累积明细 / 聚合计数保留 / 预算超限安全停止 / 非法参数拒绝。
+- 代码已修改、本地 `PURE_UNIT_TEST=1` 测试通过；**真实 apply 的内存表现仍待生产 dry-run 验证（当前未授权 apply）**。
