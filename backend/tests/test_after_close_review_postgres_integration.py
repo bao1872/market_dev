@@ -541,22 +541,24 @@ async def test_real_review_transaction_rolls_back_pointer_and_audit(
     await _add_scope_snapshot(db_session, run, blocked=False)
     publication, _ = await publish_run(db_session, run)
     assert publication is not None
+    publication_id = publication.id
+    run_id = run.id
 
     with pytest.raises(RuntimeError):
         async with db_session.begin_nested():
             await withdraw_review_publication(
                 db_session,
                 TRADE_DATE,
-                expected_run_id=run.id,
-                expected_publication_id=publication.id,
+                expected_run_id=run_id,
+                expected_publication_id=publication_id,
                 reason="rollback test",
                 operator=OPERATOR,
                 idempotency_key="integration-rollback",
             )
             raise RuntimeError("force rollback")
 
-    assert await db_session.get(FactorPublication, publication.id) is not None
-    persisted_run = await db_session.get(MarketReviewRun, run.id)
+    assert await db_session.get(FactorPublication, publication_id) is not None
+    persisted_run = await db_session.get(MarketReviewRun, run_id)
     assert persisted_run is not None
     assert "publication_withdrawal" not in (persisted_run.metadata_json or {})
 

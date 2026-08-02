@@ -103,7 +103,7 @@ async def test_lease_valid_heartbeat_fresh_not_recovered(db_session) -> None:
         job_name="bars_scheduler",
         status="running",
         lease_expires_at=test_now + timedelta(minutes=5),
-        heartbeat_at=test_now - timedelta(seconds=100),
+        heartbeat_at=test_now - timedelta(seconds=10),
     )
     job_run_id = job_run.id
 
@@ -197,7 +197,7 @@ async def test_after_close_orchestrator_metadata_updated(db_session) -> None:
         job_name="after_close_orchestrator",
         status="running",
         lease_expires_at=test_now - timedelta(minutes=1),
-        heartbeat_at=test_now - timedelta(seconds=10),
+        heartbeat_at=test_now - timedelta(seconds=100),
         metadata={"orchestrator_status": "refreshing_daily", "trade_date": "2026-06-25"},
     )
     job_run_id = job_run.id
