@@ -40,6 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.filter_definitions import REVIEW_FILTER_VERSION
+from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
 from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
 from app.models.factor_publication import (
     PUBLICATION_KIND_MARKET_AGGREGATION,
@@ -85,8 +86,6 @@ logger = logging.getLogger("review_orchestrator_service")
 # 复盘算法版本（每次指标/契约变更时递增）
 # review-2.0.0: typed PIT member facts, true daily returns, day-over-day U,
 # dimensionally correct V, and two-pass cross-section-before-signal evaluation.
-REVIEW_ALGORITHM_VERSION = "review-2.0.0"
-
 # 历史基线窗口（PRD §0、§7.1：默认 120，最低 60）
 DEFAULT_BASELINE_WINDOW = 120
 MIN_BASELINE_WINDOW = 60

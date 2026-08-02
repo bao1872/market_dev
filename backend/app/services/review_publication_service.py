@@ -23,11 +23,15 @@ import logging
 import uuid
 from datetime import UTC, date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
+from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
+from app.models.board_taxonomy import UniverseDefinition
 from app.models.factor_publication import FactorPublication
+from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewRun,
     MarketReviewScopeSnapshot,
@@ -45,6 +49,7 @@ SCOPE_KEY_REVIEW = "market"
 # 发布门禁（PRD §11.1）
 REVIEW_PUBLISH_MIN_INDUSTRY_RATIO = 0.95  # 一级行业 ready 比例门槛
 REVIEW_PUBLISH_MIN_COVERAGE = 0.95  # 单 scope 最低 coverage
+PUBLICATION_KIND_MARKET_AGGREGATION_REF = "market_aggregation"
 
 
 class ReviewPublishBlockError(Exception):
@@ -70,21 +75,83 @@ class ReviewWithdrawalBlockError(Exception):
         super().__init__(f"Review withdrawal 安全门禁失败：{'; '.join(blockers)}")
 
 
+def _validate_scope_ready(
+    snapshot: MarketReviewScopeSnapshot,
+    blockers: list[str],
+) -> None:
+    label = f"{snapshot.scope_type}/{snapshot.scope_key}"
+    if snapshot.status != "ready":
+        blockers.append(f"{label} 状态非 ready: status={snapshot.status}")
+    coverage = snapshot.coverage_ratio
+    if coverage is None or float(coverage) < REVIEW_PUBLISH_MIN_COVERAGE:
+        rendered = "None" if coverage is None else f"{float(coverage):.4f}"
+        blockers.append(
+            f"{label} coverage={rendered} < 门槛 {REVIEW_PUBLISH_MIN_COVERAGE}",
+        )
+
+
+def _compare_scope_keys(
+    scope_type: str,
+    expected: set[str],
+    actual: set[str],
+    blockers: list[str],
+) -> None:
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing:
+        blockers.append(f"{scope_type} 配置范围缺失: {missing}")
+    if unexpected:
+        blockers.append(f"{scope_type} 存在非配置范围: {unexpected}")
+
+
 async def evaluate_publish_gate(
     session: AsyncSession,
     run: MarketReviewRun,
+    *,
+    lock_pointers: bool = False,
 ) -> tuple[bool, list[str]]:
     """评估整套 Review 发布门禁（PRD §11.1）。
 
     Args:
         session: 异步 DB 会话
         run: MarketReviewRun ORM 对象
+        lock_pointers: 正式发布事务中锁定 source/live pointer 行
 
     Returns:
         (publishable, blockers)
         publishable=True 表示可发布；blockers 为失败原因列表
     """
     blockers: list[str] = []
+    metadata = run.metadata_json or {}
+    provisional = metadata.get("provisional_publication") or {}
+    if run.algorithm_version != REVIEW_ALGORITHM_VERSION:
+        blockers.append(
+            f"algorithm_version={run.algorithm_version} 非当前正式版本 "
+            f"{REVIEW_ALGORITHM_VERSION}",
+        )
+    if run.status not in {"signals_ready", "published"}:
+        blockers.append(f"run 状态不可正式发布: status={run.status}")
+    if metadata.get("canary") is True:
+        blockers.append("canary run 不可正式发布")
+    if metadata.get("symbols"):
+        blockers.append("symbols/debug run 不可正式发布")
+    if provisional.get("is_provisional") is True:
+        blockers.append("provisional run 不可正式发布")
+    if float(run.coverage_ratio) < REVIEW_PUBLISH_MIN_COVERAGE:
+        blockers.append(
+            f"run coverage {float(run.coverage_ratio):.4f} < 门槛 "
+            f"{REVIEW_PUBLISH_MIN_COVERAGE}",
+        )
+    if run.expected_scope_count <= 0:
+        blockers.append("expected_scope_count=0，无任何范围被处理")
+    if run.succeeded_scope_count != run.expected_scope_count:
+        blockers.append(
+            "scope 完成数不一致: "
+            f"succeeded={run.succeeded_scope_count}, "
+            f"expected={run.expected_scope_count}",
+        )
+    if run.failed_scope_count != 0:
+        blockers.append(f"failed_scope_count={run.failed_scope_count} 非零")
 
     # 1. market 范围必须 ready，且 P/Q/U/C/V 五项 normalized_ready
     # [P0-6 2026-07-30] readiness 四态区分（PRD §11.1）：
@@ -100,6 +167,7 @@ async def evaluate_publish_gate(
     if market_snap is None:
         blockers.append("market 范围快照缺失")
     else:
+        _validate_scope_ready(market_snap, blockers)
         for metric_code, payload_field in (
             ("P", "p_payload"), ("Q", "q_payload"),
             ("U", "u_payload"), ("C", "c_payload"), ("V", "v_payload"),
@@ -137,20 +205,17 @@ async def evaluate_publish_gate(
                 )
             # raw_ready=True, normalized_ready=True, value 非空 → 可发布，不阻塞
 
-    # 2. 主要指数和风格范围必须齐全且 ready
-    # [P0 2026-07-30] 放宽为：存在即可，缺失视为未配置（避免空 MarketBoard 阻塞）
-    # 但若有 major_index/style scope，则要求全部 ready
+    # 2. 主要指数和风格实际范围必须全部 ready；配置完整性在下方精确核对。
+    actual_by_type: dict[str, list[MarketReviewScopeSnapshot]] = {}
     for scope_type in ("major_index", "style"):
         snaps = await _list_scope_snapshots(session, run.id, scope_type)
+        actual_by_type[scope_type] = snaps
         for snap in snaps:
-            if snap.status != "ready":
-                blockers.append(
-                    f"{scope_type} 范围 {snap.scope_name} 状态非 ready: "
-                    f"status={snap.status}",
-                )
+            _validate_scope_ready(snap, blockers)
 
     # 3. 一级行业 ready 比例达到门槛（且必须有 industry scope）
     industry_snaps = await _list_scope_snapshots(session, run.id, "industry_l1")
+    actual_by_type["industry_l1"] = industry_snaps
     if not industry_snaps:
         blockers.append("一级行业范围快照全部缺失")
     else:
@@ -161,38 +226,116 @@ async def evaluate_publish_gate(
                 f"一级行业 ready 比例 {ratio:.4f} < 门槛 "
                 f"{REVIEW_PUBLISH_MIN_INDUSTRY_RATIO}",
             )
+        for snap in industry_snaps:
+            _validate_scope_ready(snap, blockers)
 
-    # 4. signals 阶段无 failed item（PRD §11.1：signal evaluation 无系统性异常）
-    # [P0 2026-07-30] 从简化升级为真实校验：查询 market_review_run_items
+    # 4. Configured level-1 scope sets must match the PIT definitions exactly.
+    universe_stmt = select(UniverseDefinition).where(
+        UniverseDefinition.universe_type.in_(("major_index", "style")),
+        UniverseDefinition.effective_from <= run.trade_date,
+        or_(
+            UniverseDefinition.effective_to.is_(None),
+            UniverseDefinition.effective_to > run.trade_date,
+        ),
+    )
+    definitions = list((await session.execute(universe_stmt)).scalars())
+    for scope_type in ("major_index", "style"):
+        expected = {
+            item.universe_key
+            for item in definitions if item.universe_type == scope_type
+        }
+        actual = {item.scope_key for item in actual_by_type[scope_type]}
+        _compare_scope_keys(scope_type, expected, actual, blockers)
+        blocked_populations = sorted(
+            item.universe_key
+            for item in definitions
+            if item.universe_type == scope_type
+            and item.population_status != "ready"
+        )
+        if blocked_populations:
+            blockers.append(
+                f"{scope_type} population 非 ready: {blocked_populations}",
+            )
+
+    expected_industry_stmt = (
+        select(BoardAnalysisSnapshot.board_id)
+        .join(MarketBoard, MarketBoard.id == BoardAnalysisSnapshot.board_id)
+        .where(
+            BoardAnalysisSnapshot.board_analysis_run_id == run.source_board_run_id,
+            BoardAnalysisSnapshot.trade_date == run.trade_date,
+            BoardAnalysisSnapshot.board_type == "industry",
+            MarketBoard.hierarchyLevel == "L1",
+        )
+    )
+    expected_industries = {
+        str(row[0]) for row in (await session.execute(expected_industry_stmt)).all()
+    }
+    _compare_scope_keys(
+        "industry_l1",
+        expected_industries,
+        {item.scope_key for item in industry_snaps},
+        blockers,
+    )
+    actual_level1_count = (
+        (1 if market_snap is not None else 0)
+        + len(actual_by_type["major_index"])
+        + len(actual_by_type["style"])
+        + len(industry_snaps)
+    )
+    if actual_level1_count != run.expected_scope_count:
+        blockers.append(
+            "level-1 scope snapshot 数量不一致: "
+            f"actual={actual_level1_count}, expected={run.expected_scope_count}",
+        )
+
+    # 5. No run item may remain failed, pending, or running.
     from app.models.market_review import MarketReviewRunItem
-    failed_signals_stmt = (
+    incomplete_items_stmt = (
         select(MarketReviewRunItem)
         .where(
             MarketReviewRunItem.review_run_id == run.id,
-            MarketReviewRunItem.phase == "signals",
-            MarketReviewRunItem.status == "failed",
+            MarketReviewRunItem.status.in_(("failed", "pending", "running")),
         )
     )
-    failed_signals = (await session.execute(failed_signals_stmt)).scalars().all()
-    if failed_signals:
+    incomplete_items = (
+        await session.execute(incomplete_items_stmt)
+    ).scalars().all()
+    if incomplete_items:
         blockers.append(
-            f"signals 阶段存在 {len(failed_signals)} 个 failed item",
+            f"run items 存在 {len(incomplete_items)} 个未成功终态项",
         )
 
-    # 5. source_core_run_id 和 source_board_run_id 均指向当前正式 pointer
-    # [P0 2026-07-30] 补全 source_board_run_id 校验
+    # 6. Both source identities must still be the current formal pointers.
     core_pub = await _get_publication(
         session, PUBLICATION_KIND_STOCK_CORE_REF, run.trade_date,
+        for_update=lock_pointers,
     )
-    if core_pub is not None and core_pub.data_run_id != run.source_core_run_id:
+    if core_pub is None:
+        blockers.append("正式 stock_core pointer 缺失")
+    elif core_pub.data_run_id != run.source_core_run_id:
         blockers.append(
             f"source_core_run_id={run.source_core_run_id} 与已发布 stock_core "
             f"pointer={core_pub.data_run_id} 不匹配",
         )
+    board_pub = await _get_publication(
+        session, PUBLICATION_KIND_MARKET_AGGREGATION_REF, run.trade_date,
+        for_update=lock_pointers,
+    )
+    if board_pub is None:
+        blockers.append("正式 board pointer 缺失")
+    elif board_pub.data_run_id != run.source_board_run_id:
+        blockers.append(
+            f"source_board_run_id={run.source_board_run_id} 与已发布 board "
+            f"pointer={board_pub.data_run_id} 不匹配",
+        )
 
-    # 6. required scope 数量符合配置（非空校验）
-    if run.expected_scope_count == 0:
-        blockers.append("expected_scope_count=0，无任何范围被处理")
+    if run.status == "published":
+        review_pub = await _get_publication(
+            session, PUBLICATION_KIND_MARKET_REVIEW, run.trade_date,
+            for_update=lock_pointers,
+        )
+        if review_pub is None or review_pub.data_run_id != run.id:
+            blockers.append("旧 published run 已非当前正式 Review pointer，禁止原地重发")
 
     return (len(blockers) == 0, blockers)
 
@@ -237,9 +380,21 @@ async def publish_review(
         )
         return None
 
-    publishable, blockers = await evaluate_publish_gate(session, run)
+    publishable, blockers = await evaluate_publish_gate(
+        session, run, lock_pointers=True,
+    )
     if not publishable:
         raise ReviewPublishBlockError(blockers)
+
+    if run.status == "published":
+        existing = await _get_publication(
+            session,
+            PUBLICATION_KIND_MARKET_REVIEW,
+            run.trade_date,
+            for_update=True,
+        )
+        if existing is not None and existing.data_run_id == run.id:
+            return existing
 
     meta = {
         "review_run_id": str(run.id),

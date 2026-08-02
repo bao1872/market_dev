@@ -18,15 +18,17 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.board_analysis_snapshot import BoardAnalysisRun
+from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
+from app.models.board_taxonomy import UniverseDefinition
 from app.models.factor_publication import (
     PUBLICATION_KIND_MARKET_AGGREGATION,
     PUBLICATION_KIND_STOCK_CORE,
     FactorPublication,
 )
+from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewMetricObservation,
     MarketReviewRun,
@@ -131,7 +133,42 @@ async def _seed_published_inputs(
         status="succeeded",
         published_at=now,
     )
-    session.add_all([core_run, board_run])
+    board = MarketBoard(
+        id=uuid.uuid4(),
+        externalCode=f"integration-{trade_date.isoformat()}",
+        name="集成行业",
+        type="industry",
+        taxonomy="integration",
+        source="integration",
+        taxonomyVersion="integration-taxonomy-v1",
+        taxonomyCompatibilityKey="integration-taxonomy-compatible-v1",
+        hierarchyLevel="L1",
+        isActive=True,
+        membershipVersion="integration-membership-v1",
+    )
+    board_snapshot = BoardAnalysisSnapshot(
+        trade_date=trade_date,
+        board_id=board.id,
+        board_type="industry",
+        board_name=board.name,
+        source_core_run_id=core_id,
+        board_analysis_run_id=board_id,
+        taxonomy_version="integration-taxonomy-v1",
+        taxonomy_compatibility_key="integration-taxonomy-compatible-v1",
+        membership_version="integration-membership-v1",
+        algorithm_version="board-integration-v1",
+        parameter_hash="integration",
+        eligible_count=1,
+        ready_count=1,
+        coverage_ratio=1.0,
+        missing_count=0,
+        missing_reasons={},
+        status="succeeded",
+        payload={},
+        started_at=now,
+        finished_at=now,
+    )
+    session.add_all([core_run, board_run, board, board_snapshot])
     await session.flush()
 
     core_pointer = FactorPublication(
@@ -170,8 +207,28 @@ async def _add_scope_snapshot(
     payload_factory = _blocked_payload if blocked else _ready_payload
     payloads = {key: payload_factory() for key in ("p", "q", "u", "c", "v")}
     status = "insufficient_history" if blocked else "ready"
-    session.add_all(
-        [
+    board_snapshot = await session.scalar(
+        select(BoardAnalysisSnapshot).where(
+            BoardAnalysisSnapshot.board_analysis_run_id == run.source_board_run_id,
+            BoardAnalysisSnapshot.board_type == "industry",
+        ),
+    )
+    assert board_snapshot is not None
+    universe_definitions = list(
+        (
+            await session.execute(
+                select(UniverseDefinition).where(
+                    UniverseDefinition.universe_type.in_(("major_index", "style")),
+                    UniverseDefinition.effective_from <= run.trade_date,
+                    or_(
+                        UniverseDefinition.effective_to.is_(None),
+                        UniverseDefinition.effective_to > run.trade_date,
+                    ),
+                ),
+            )
+        ).scalars(),
+    )
+    snapshots = [
             MarketReviewScopeSnapshot(
                 review_run_id=run.id,
                 trade_date=run.trade_date,
@@ -188,13 +245,11 @@ async def _add_scope_snapshot(
                 c_payload=payloads["c"],
                 v_payload=payloads["v"],
             ),
-            # Gate 要求至少一个真实 industry_l1 scope；集成 fixture 不需要
-            # 依赖 market_boards/member population，只保存该层的 ready 事实。
             MarketReviewScopeSnapshot(
                 review_run_id=run.id,
                 trade_date=run.trade_date,
                 scope_type="industry_l1",
-                scope_key="integration-industry-l1",
+                scope_key=str(board_snapshot.board_id),
                 scope_name="集成行业",
                 eligible_count=1,
                 ready_count=1,
@@ -206,10 +261,33 @@ async def _add_scope_snapshot(
                 c_payload=payloads["c"],
                 v_payload=payloads["v"],
             ),
-        ],
-    )
-    run.expected_scope_count = 2
-    run.succeeded_scope_count = 2
+    ]
+    for definition in universe_definitions:
+        definition.population_status = "ready"
+        snapshots.append(
+            MarketReviewScopeSnapshot(
+                review_run_id=run.id,
+                trade_date=run.trade_date,
+                scope_type=definition.universe_type,
+                scope_key=definition.universe_key,
+                scope_name=definition.name,
+                taxonomy_version=definition.version,
+                taxonomy_compatibility_key=definition.compatibility_key,
+                membership_version=definition.membership_version,
+                eligible_count=1,
+                ready_count=1,
+                coverage_ratio=Decimal("1"),
+                status=status,
+                p_payload=payloads["p"],
+                q_payload=payloads["q"],
+                u_payload=payloads["u"],
+                c_payload=payloads["c"],
+                v_payload=payloads["v"],
+            ),
+        )
+    session.add_all(snapshots)
+    run.expected_scope_count = len(snapshots)
+    run.succeeded_scope_count = len(snapshots)
     run.failed_scope_count = 0
     run.coverage_ratio = Decimal("1")
     run.status = "signals_ready"
@@ -293,22 +371,17 @@ async def test_real_after_close_review_flow_gate_publish_reuse_withdraw_and_forc
             MarketReviewScopeSnapshot.review_run_id == run.id,
         ),
     )
-    await db_session.delete(
-        await db_session.scalar(
-            select(MarketReviewScopeSnapshot).where(
-                MarketReviewScopeSnapshot.review_run_id == run.id,
-                MarketReviewScopeSnapshot.scope_type == "market",
-            ),
-        ),
+    existing_snapshots = list(
+        (
+            await db_session.execute(
+                select(MarketReviewScopeSnapshot).where(
+                    MarketReviewScopeSnapshot.review_run_id == run.id,
+                ),
+            )
+        ).scalars(),
     )
-    await db_session.delete(
-        await db_session.scalar(
-            select(MarketReviewScopeSnapshot).where(
-                MarketReviewScopeSnapshot.review_run_id == run.id,
-                MarketReviewScopeSnapshot.scope_type == "industry_l1",
-            ),
-        ),
-    )
+    for snapshot in existing_snapshots:
+        await db_session.delete(snapshot)
     await db_session.flush()
     await _add_scope_snapshot(db_session, run, blocked=False)
 

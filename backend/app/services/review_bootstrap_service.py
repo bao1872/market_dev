@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.metric_engine import compute_all_metrics
 from app.domain.review.metric_registry import DEFAULT_REGISTRY
+from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
 from app.models.board_taxonomy import BoardDefinitionVersion
 from app.models.factor_publication import (
     PUBLICATION_KIND_STOCK_CORE,
@@ -47,7 +48,7 @@ from app.services.review_scope_service import (
 logger = logging.getLogger("review_bootstrap_service")
 
 # Bootstrap observations must be comparable with the production algorithm.
-BOOTSTRAP_ALGORITHM_VERSION = "review-2.0.0"
+BOOTSTRAP_ALGORITHM_VERSION = REVIEW_ALGORITHM_VERSION
 BOOTSTRAP_FILTER_VERSION = "bootstrap"
 
 # 默认回填天数（PRD §0：默认 120 日，最低 60 日）

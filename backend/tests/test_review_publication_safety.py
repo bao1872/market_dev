@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -27,6 +28,7 @@ from sqlalchemy.dialects.postgresql.dml import Insert as PgInsert
 from app.models.market_review import MarketReviewRun, MarketReviewScopeSnapshot
 from app.services.review_publication_service import (
     ReviewWithdrawalBlockError,
+    evaluate_publish_gate,
     get_published_review_run_id,
     is_formally_published_review_run,
     publish_review,
@@ -90,12 +92,12 @@ def _make_run(
         trade_date=date(2026, 7, 31),
         source_core_run_id=uuid.uuid4(),
         source_board_run_id=uuid.uuid4(),
-        algorithm_version="1.0.0-core-split",
+        algorithm_version="review-2.0.0",
         filter_version="filters-1.1.0",
         baseline_window=120,
         status=status,
-        expected_scope_count=259,
-        succeeded_scope_count=259,
+        expected_scope_count=2,
+        succeeded_scope_count=2,
         failed_scope_count=0,
         signal_count=171,
         coverage_ratio=Decimal("1.0"),
@@ -127,6 +129,7 @@ def _make_market_snap(run_id: uuid.UUID) -> MarketReviewScopeSnapshot:
         scope_key="market",
         scope_name="全市场",
         status="ready",
+        coverage_ratio=Decimal("1.0"),
         p_payload=_ready_payload(),
         q_payload=_ready_payload(),
         u_payload=_ready_payload(),
@@ -136,26 +139,33 @@ def _make_market_snap(run_id: uuid.UUID) -> MarketReviewScopeSnapshot:
 
 
 def _gate_pass_results(run: MarketReviewRun) -> list[_FakeResult]:
-    """构造 evaluate_publish_gate 全部通过所需的 6 次查询结果。"""
+    """构造 evaluate_publish_gate 全部通过所需的 9 次查询结果。"""
     market_snap = _make_market_snap(run.id)
+    board_id = uuid.uuid4()
     industry_snap = MarketReviewScopeSnapshot(
         id=uuid.uuid4(),
         review_run_id=run.id,
         trade_date=run.trade_date,
         scope_type="industry_l1",
-        scope_key=str(uuid.uuid4()),
+        scope_key=str(board_id),
         scope_name="电子",
         status="ready",
+        coverage_ratio=Decimal("1.0"),
     )
     core_pub = AsyncMock()
     core_pub.data_run_id = run.source_core_run_id
+    board_pub = AsyncMock()
+    board_pub.data_run_id = run.source_board_run_id
     return [
         _FakeResult(scalar=market_snap),          # 1. market scope
         _FakeResult(scalar_list=[]),              # 2. major_index
         _FakeResult(scalar_list=[]),              # 3. style
         _FakeResult(scalar_list=[industry_snap]),  # 4. industry_l1
-        _FakeResult(scalar_list=[]),              # 5. failed signal items
-        _FakeResult(scalar=core_pub),             # 6. stock_core pointer
+        _FakeResult(scalar_list=[]),              # 5. PIT universe definitions
+        _FakeResult(scalar_list=[(board_id,)]),   # 6. expected L1 industries
+        _FakeResult(scalar_list=[]),              # 7. incomplete run items
+        _FakeResult(scalar=core_pub),             # 8. stock_core pointer
+        _FakeResult(scalar=board_pub),            # 9. board pointer
     ]
 
 
@@ -166,8 +176,11 @@ def _gate_fail_results() -> list[_FakeResult]:
         _FakeResult(scalar_list=[]),    # major_index
         _FakeResult(scalar_list=[]),    # style
         _FakeResult(scalar_list=[]),    # industry → blocker
-        _FakeResult(scalar_list=[]),    # failed signal items
+        _FakeResult(scalar_list=[]),    # PIT universe definitions
+        _FakeResult(scalar_list=[]),    # expected L1 industries
+        _FakeResult(scalar_list=[]),    # incomplete run items
         _FakeResult(scalar=None),       # stock_core pointer
+        _FakeResult(scalar=None),       # board pointer
     ]
 
 
@@ -222,6 +235,57 @@ class TestForceIsProvisional:
         assert record["requested_at"]
         # 门禁 blockers 必须记录（本用例 market snap 缺失 + 行业缺失）
         assert len(record["gate_blockers"]) >= 2
+
+
+class TestFormalGateCompleteness:
+    async def test_canary_and_provisional_are_never_formally_publishable(self):
+        run = _make_run()
+        run.metadata_json = {
+            "canary": True,
+            "provisional_publication": {"is_provisional": True},
+        }
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(_gate_pass_results(run)), run,
+        )
+        assert publishable is False
+        assert "canary run 不可正式发布" in blockers
+        assert "provisional run 不可正式发布" in blockers
+
+    async def test_configured_universe_missing_from_run_blocks_publish(self):
+        run = _make_run()
+        results = _gate_pass_results(run)
+        results[4] = _FakeResult(scalar_list=[SimpleNamespace(
+            universe_type="major_index",
+            universe_key="csi300",
+            population_status="blocked_external_population",
+        )])
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is False
+        assert any("major_index 配置范围缺失" in item for item in blockers)
+        assert any("population 非 ready" in item for item in blockers)
+
+    async def test_both_source_pointers_are_required(self):
+        run = _make_run()
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(_gate_fail_results()), run,
+        )
+        assert publishable is False
+        assert "正式 stock_core pointer 缺失" in blockers
+        assert "正式 board pointer 缺失" in blockers
+
+    async def test_superseded_published_run_cannot_overwrite_live_pointer(self):
+        run = _make_run(status="published", published_at=datetime.now(UTC))
+        results = _gate_pass_results(run)
+        live_review = AsyncMock()
+        live_review.data_run_id = uuid.uuid4()
+        results.append(_FakeResult(scalar=live_review))
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is False
+        assert any("禁止原地重发" in item for item in blockers)
 
 
 # =============================================================================
@@ -282,9 +346,29 @@ class TestFormalPublish:
             if isinstance(s, PgInsert)
         ]
         assert len(inserts) == 1, "正式发布必须写且只写一次 pointer"
+        statements = _executed_statements(session)
+        assert statements[7]._for_update_arg is not None
+        assert statements[8]._for_update_arg is not None
         assert run.status == "published"
         assert run.published_at is not None
         assert "provisional_publication" not in (run.metadata_json or {})
+
+    async def test_current_published_run_is_a_zero_write_idempotent_replay(self):
+        published_at = datetime.now(UTC)
+        run = _make_run(status="published", published_at=published_at)
+        pointer = _make_pointer(run.id)
+        results = _gate_pass_results(run)
+        results.append(_FakeResult(scalar=pointer))  # gate live Review pointer
+        results.append(_FakeResult(scalar=pointer))  # idempotent return under lock
+        session = _make_session(results)
+
+        result = await publish_review(session, run, force=False)
+
+        assert result is pointer
+        assert run.published_at == published_at
+        assert not any(
+            isinstance(stmt, PgInsert) for stmt in _executed_statements(session)
+        )
 
 
 # =============================================================================
