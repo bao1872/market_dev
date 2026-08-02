@@ -73,6 +73,11 @@ class ReviewMetricComponentDTO(BaseModel):
     extra: dict[str, Any] | None = Field(
         None, description="附加字段（如 price_source / weight_mode）",
     )
+    weightMode: str | None = Field(None, description="权重模式")
+    readiness: dict[str, Any] = Field(
+        default_factory=dict,
+        description="原始值/归一化值就绪状态与具体原因",
+    )
 
 
 class ReviewMetricPayloadDTO(BaseModel):
@@ -98,6 +103,10 @@ class ReviewMetricPayloadDTO(BaseModel):
     status: str = Field(
         "ready",
         description="状态：ready/insufficient_history/partial/unavailable",
+    )
+    readiness: dict[str, Any] = Field(
+        default_factory=dict,
+        description="指标级 raw/normalized readiness、历史门槛与缺失原因",
     )
 
 
@@ -239,7 +248,7 @@ class ReviewSignalResponse(BaseModel):
     id: str = Field(..., description="信号 ID（UUID）")
     reviewRunId: str = Field(..., description="复盘 run ID")
     tradeDate: str = Field(..., description="业务交易日")
-    filterFamily: str = Field(..., description="筛选器族：A/B/C")
+    filterFamily: str = Field(..., description="筛选器族：A/B/C/D")
     signalType: str = Field(..., description="信号类型")
     scopeType: str = Field(..., description="范围类型")
     scopeKey: str = Field(..., description="范围标识")

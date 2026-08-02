@@ -59,7 +59,14 @@ function ComponentsList({ components }: { components: ReviewMetricComponent[] })
           <span className={styles.componentVal}>
             {fmt(c.normalizedValue)} / 原始 {fmt(c.rawValue)}
           </span>
-          <span className={styles.componentSource}>{c.fieldSource}</span>
+          <span className={styles.componentSource}>
+            来源 {c.fieldSource} · 分母 {c.denominator ?? '-'} · 权重 {fmt(c.weight)}
+            {c.coverage !== null ? ` · coverage ${(c.coverage * 100).toFixed(1)}%` : ''}
+            {c.weightMode ? ` · ${c.weightMode}` : ''}
+          </span>
+          {c.readiness?.reason && (
+            <span className={styles.componentSource}>{c.readiness.reason}</span>
+          )}
         </div>
       ))}
     </div>
@@ -69,6 +76,7 @@ function ComponentsList({ components }: { components: ReviewMetricComponent[] })
 /** 缺失原因（status != ready 时展示） */
 function missingReason(payload: ReviewMetricPayload | null): string | null {
   if (!payload) return '未计算该变量'
+  if (payload.readiness?.reason) return payload.readiness.reason
   if (payload.status === 'insufficient_history') {
     const need = payload.historyObservationCount ?? 0
     return `历史观测不足（当前 ${need}，需 >= 60），无法计算分位`
@@ -106,6 +114,9 @@ function MetricEvidence({
           : '-'}
       </Field>
       <Field label="状态">{payload?.status ?? '-'}</Field>
+      <Field label="readiness">
+        raw={String(payload?.readiness?.raw_ready ?? false)} · normalized={String(payload?.readiness?.normalized_ready ?? false)}
+      </Field>
       {reason && (
         <Field label="缺失原因">
           <span className={styles.metricUnavailable}>{reason}</span>

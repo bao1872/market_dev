@@ -18,6 +18,11 @@ export interface ReviewUrlState {
   scopeType: string | null
   /** 范围标识 */
   scopeKey: string | null
+  /** 当前范围展示名 */
+  scopeName: string | null
+  /** 直接父范围（用于可分享的层级面包屑） */
+  parentScopeType: string | null
+  parentScopeKey: string | null
   /** 当前信号 ID */
   signalId: string | null
   /** 板块 ID（跳转 /boards/analysis 用） */
@@ -66,6 +71,9 @@ export function decodeReviewUrl(params: URLSearchParams): ReviewUrlState {
     stage: normalizeStage(params.get('stage')),
     scopeType: params.get('scopeType') || null,
     scopeKey: params.get('scopeKey') || null,
+    scopeName: params.get('scopeName') || null,
+    parentScopeType: params.get('parentScopeType') || null,
+    parentScopeKey: params.get('parentScopeKey') || null,
     signalId: params.get('signalId') || null,
     boardId: params.get('boardId') || null,
     symbol: params.get('symbol') || null,
@@ -87,6 +95,15 @@ export function encodeReviewUrl(state: ReviewUrlState): URLSearchParams {
   }
   if (state.scopeKey) {
     params.set('scopeKey', state.scopeKey)
+  }
+  if (state.scopeName) {
+    params.set('scopeName', state.scopeName)
+  }
+  if (state.parentScopeType) {
+    params.set('parentScopeType', state.parentScopeType)
+  }
+  if (state.parentScopeKey) {
+    params.set('parentScopeKey', state.parentScopeKey)
   }
   if (state.signalId) {
     params.set('signalId', state.signalId)

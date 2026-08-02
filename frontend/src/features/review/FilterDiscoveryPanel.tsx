@@ -15,6 +15,8 @@ const PAGE_SIZE = 50
 
 export interface FilterDiscoveryPanelProps {
   tradeDate: string
+  scopeType?: string | null
+  scopeKey?: string | null
   /** 当前选中信号 ID（高亮卡片） */
   activeSignalId: string | null
   /** 选中信号：更新 URL signalId 并切换到归因阶段 */
@@ -29,6 +31,8 @@ export interface FilterDiscoveryPanelProps {
 
 export default function FilterDiscoveryPanel({
   tradeDate,
+  scopeType,
+  scopeKey,
   activeSignalId,
   onSelectSignal,
   onViewAttribution,
@@ -40,6 +44,8 @@ export default function FilterDiscoveryPanel({
 
   const params: ReviewSignalListParams = {
     status: statusFilter || undefined,
+    scope_type: scopeType || undefined,
+    scope_key: scopeKey || undefined,
     page: 1,
     page_size: PAGE_SIZE,
   }
@@ -88,8 +94,8 @@ export default function FilterDiscoveryPanel({
   }
 
   const items = query.data?.items ?? []
-  // 按筛选器族分组（A/B/C）
-  const groups: Record<string, ReviewSignal[]> = { A: [], B: [], C: [] }
+  // 按筛选器族分组（A/B/C/D）
+  const groups: Record<string, ReviewSignal[]> = { A: [], B: [], C: [], D: [] }
   for (const s of items) {
     if (groups[s.filterFamily]) {
       groups[s.filterFamily].push(s)
@@ -102,6 +108,7 @@ export default function FilterDiscoveryPanel({
     A: 'A 表面/质量偏差',
     B: 'B 状态/速度偏差',
     C: 'C 成交/参与偏差',
+    D: 'D 第二金字塔偏差',
   }
 
   if (!query.isLoading && items.length === 0) {
@@ -138,7 +145,7 @@ export default function FilterDiscoveryPanel({
           <div className={styles.stateDesc}>加载信号数据...</div>
         </div>
       ) : (
-        ['A', 'B', 'C'].map((fam) => {
+        ['A', 'B', 'C', 'D'].map((fam) => {
           const group = groups[fam] ?? []
           if (group.length === 0) return null
           return (

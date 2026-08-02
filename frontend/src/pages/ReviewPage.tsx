@@ -78,7 +78,16 @@ export default function ReviewPage() {
   const handleDateChange = useCallback(
     (date: string) => {
       // 切换日期：清除 scope/signal/symbol（避免跨日残留）
-      patchUrl({ date, scopeType: null, scopeKey: null, signalId: null, symbol: null })
+      patchUrl({
+        date,
+        scopeType: null,
+        scopeKey: null,
+        scopeName: null,
+        parentScopeType: null,
+        parentScopeKey: null,
+        signalId: null,
+        symbol: null,
+      })
     },
     [patchUrl],
   )
@@ -99,6 +108,9 @@ export default function ReviewPage() {
       patchUrl({
         scopeType: scope.scopeType,
         scopeKey: scope.scopeKey,
+        scopeName: scope.scopeName,
+        parentScopeType: scope.parentScopeType,
+        parentScopeKey: scope.parentScopeKey,
         stage: 'signals',
       })
       setEvidenceTarget({ kind: 'metric', title: `${scope.scopeName} 范围指标`, payload: scope.p, meta: { sourceRunId: scope.reviewRunId } })
@@ -136,17 +148,43 @@ export default function ReviewPage() {
     setEvidenceTarget({ kind: 'attribution', attr })
   }, [])
 
+  const handleSelectAttributionScope = useCallback(
+    (attr: ReviewAttribution) => {
+      patchUrl({
+        parentScopeType: urlState.scopeType,
+        parentScopeKey: urlState.scopeKey,
+        scopeType: attr.childScopeType,
+        scopeKey: attr.childScopeKey,
+        scopeName: attr.childScopeName,
+      })
+    },
+    [patchUrl, urlState.scopeType, urlState.scopeKey],
+  )
+
   // 6. 面包屑（PRD §14.2：全市场 > 风格 > 行业 > 个股）
   const breadcrumb = useMemo(() => {
+    const scopeTypeLabel: Record<string, string> = {
+      market: '全市场',
+      major_index: '主要指数',
+      style: '风格',
+      industry_l1: '一级行业',
+      industry_l2: '二级行业',
+      industry_l3: '三级行业',
+      concept: '概念',
+      instrument: '个股',
+    }
     const parts: string[] = ['全市场']
-    if (urlState.scopeType && urlState.scopeKey) {
-      parts.push(`${urlState.scopeType}:${urlState.scopeKey}`)
+    if (urlState.parentScopeType && urlState.parentScopeKey) {
+      parts.push(`${scopeTypeLabel[urlState.parentScopeType] ?? urlState.parentScopeType} · ${urlState.parentScopeKey}`)
+    }
+    if (urlState.scopeType && urlState.scopeKey && urlState.scopeType !== 'market') {
+      parts.push(`${scopeTypeLabel[urlState.scopeType] ?? urlState.scopeType} · ${urlState.scopeName ?? urlState.scopeKey}`)
     }
     if (urlState.symbol) {
       parts.push(urlState.symbol)
     }
     return parts
-  }, [urlState.scopeType, urlState.scopeKey, urlState.symbol])
+  }, [urlState.parentScopeType, urlState.parentScopeKey, urlState.scopeType, urlState.scopeKey, urlState.scopeName, urlState.symbol])
 
   // 7. 加载/异常态（PRD §17）
   const renderContent = () => {
@@ -217,6 +255,8 @@ export default function ReviewPage() {
         return (
           <FilterDiscoveryPanel
             tradeDate={tradeDate}
+            scopeType={urlState.scopeType}
+            scopeKey={urlState.scopeKey}
             activeSignalId={urlState.signalId}
             onSelectSignal={handleSelectSignal}
             onViewAttribution={handleViewAttribution}
@@ -232,6 +272,7 @@ export default function ReviewPage() {
             onOpenEvidence={(s) => setEvidenceTarget({ kind: 'signal', signal: s })}
             onOpenAttributionEvidence={handleOpenAttributionEvidence}
             onOpenInstrumentEvidence={handleOpenInstrumentEvidence}
+            onSelectAttributionScope={handleSelectAttributionScope}
           />
         )
       case 'validation':

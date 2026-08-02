@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.filter_operators import canonicalize_filter_operator
 from app.domain.first_pyramid_semantics import (
     MomentumDirection,
     SqueezeState,
@@ -584,7 +585,7 @@ def parse_fp_filter(fp_filter: str | None) -> list[FpFilterSpec]:
                 f"Invalid fp_filter token '{token}': expected 'key:op[:value]'"
             )
         fp_key = parts[0].strip()
-        operator = parts[1].strip()
+        operator = canonicalize_filter_operator(parts[1].strip())
         value = parts[2] if len(parts) > 2 else None
 
         if fp_key not in FP_QUERY_FIELD_SPECS:

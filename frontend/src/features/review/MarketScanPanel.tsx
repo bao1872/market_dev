@@ -16,6 +16,9 @@ const SCOPE_TYPE_OPTIONS = [
   { value: 'major_index', label: '主要指数' },
   { value: 'style', label: '风格' },
   { value: 'industry_l1', label: '一级行业' },
+  { value: 'industry_l2', label: '二级行业' },
+  { value: 'industry_l3', label: '三级行业' },
+  { value: 'concept', label: '概念' },
 ]
 
 const PAGE_SIZE = 20

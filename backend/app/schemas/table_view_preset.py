@@ -24,6 +24,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.filter_operators import (
+    CANONICAL_FILTER_OPERATORS,
+    canonicalize_filter_config,
+)
+
 # config 允许的字段白名单（其他字段一律拒绝）
 _ALLOWED_CONFIG_KEYS: frozenset[str] = frozenset(
     {"keyword", "sort", "filters", "hiddenColumns", "columnOrder", "pageSize",
@@ -36,9 +41,7 @@ _FORBIDDEN_CONFIG_KEYS: frozenset[str] = frozenset(
 )
 
 # filters.op 白名单（与前端 StrategyDataTable 支持的操作符一致）
-_ALLOWED_FILTER_OPS: frozenset[str] = frozenset(
-    {"contains", "eq", "gt", "gte", "lt", "lte", "between", "empty", "not_empty"}
-)
+_ALLOWED_FILTER_OPS = CANONICAL_FILTER_OPERATORS
 
 # 每 user+table_id+strategy_key 最多 preset 数量
 MAX_PRESETS_PER_SCOPE: int = 20
@@ -133,6 +136,7 @@ class TableViewPresetCreate(BaseModel):
     @model_validator(mode="after")
     def validate_config_forbidden_keys(self) -> TableViewPresetCreate:
         """config 禁止保存 selectedKeys/page/activeRunId/rows 等业务数据。"""
+        self.config = canonicalize_filter_config(self.config)
         _validate_config_keys(self.config)
         return self
 
@@ -159,6 +163,7 @@ class TableViewPresetPatch(BaseModel):
     def validate_config_forbidden_keys(self) -> TableViewPresetPatch:
         """config 禁止保存 selectedKeys/page/activeRunId/rows 等业务数据。"""
         if self.config is not None:
+            self.config = canonicalize_filter_config(self.config)
             _validate_config_keys(self.config)
         return self
 
@@ -177,6 +182,12 @@ class TableViewPresetResponse(BaseModel):
     is_default: bool = Field(..., description="是否默认")
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
+
+    @model_validator(mode="after")
+    def canonicalize_legacy_filter_operators(self) -> TableViewPresetResponse:
+        """Never expose legacy operator aliases from historical JSONB rows."""
+        self.config = canonicalize_filter_config(self.config)
+        return self
 
 
 class TableViewPresetListResponse(BaseModel):

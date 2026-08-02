@@ -11,7 +11,7 @@
 // 自选操作：股票名称旁 22×22 +/- 内联按钮（inlineWatchlistToggle）；单次 useWatchlist 请求按 instrument_id 建 Set；
 //   加入/移除复用 useAddToWatchlist/useRemoveFromWatchlist；按 instrument_id 维护 pending 防重复点击。
 // 批次信息（数据日期/批次/状态）属调试信息：普通用户 DOM 中完全不渲染；仅 admin 可见，默认折叠为"批次信息"，展开后显示。
-import { useState, useCallback, useMemo, useRef } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { MarketToolbar } from './MarketToolbar'
 import { MarketRightPanel } from './MarketRightPanel'
@@ -243,13 +243,36 @@ export default function MarketWorkspacePage() {
   // 自选列表（页面只请求一次，按 instrument_id 建 Set）
   // watchlist scope 依赖此数据；market scope 也需要判断行是否已自选
   const watchlistQuery = useWatchlist()
-  const watchlistInstrumentIds = useMemo(() => {
+  const serverWatchlistInstrumentIds = useMemo(() => {
     const set = new Set<string>()
     for (const item of watchlistQuery.data?.items ?? []) {
       if (item.instrument_id) set.add(item.instrument_id)
     }
     return set
   }, [watchlistQuery.data?.items])
+  const [watchlistOverrides, setWatchlistOverrides] = useState<Map<string, boolean>>(
+    () => new Map(),
+  )
+  const watchlistInstrumentIds = useMemo(() => {
+    const effective = new Set(serverWatchlistInstrumentIds)
+    for (const [instrumentId, watched] of watchlistOverrides) {
+      if (watched) effective.add(instrumentId)
+      else effective.delete(instrumentId)
+    }
+    return effective
+  }, [serverWatchlistInstrumentIds, watchlistOverrides])
+
+  useEffect(() => {
+    setWatchlistOverrides((prev) => {
+      const next = new Map(prev)
+      for (const [instrumentId, watched] of next) {
+        if (serverWatchlistInstrumentIds.has(instrumentId) === watched) {
+          next.delete(instrumentId)
+        }
+      }
+      return next.size === prev.size ? prev : next
+    })
+  }, [serverWatchlistInstrumentIds])
 
   // 自选操作 pending 状态（按 instrument_id 维护，防重复点击）
   const [watchlistPendingIds, setWatchlistPendingIds] = useState<Set<string>>(() => new Set())
@@ -263,6 +286,8 @@ export default function MarketWorkspacePage() {
       if (!instrumentId) return
       // 已在 pending 中，忽略重复点击
       if (watchlistPendingIds.has(instrumentId)) return
+
+      setWatchlistOverrides((prev) => new Map(prev).set(instrumentId, add))
 
       setWatchlistPendingIds((prev) => {
         const next = new Set(prev)
@@ -284,6 +309,11 @@ export default function MarketWorkspacePage() {
         toast.show(add ? '已加入自选' : '已移除自选', '')
       }
       const onError = () => {
+        setWatchlistOverrides((prev) => {
+          const next = new Map(prev)
+          next.delete(instrumentId)
+          return next
+        })
         toast.show(add ? '加入自选失败' : '移除自选失败', '请稍后重试')
       }
 

@@ -210,7 +210,9 @@ export default function TrackingReviewPanel({
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
               <div>
                 <div className={styles.panelSectionTitle} style={{ marginBottom: 6 }}>自选股</div>
-                {watchlistItems.length === 0 ? (
+                {watchlistQuery.isError ? (
+                  <div className={styles.metricUnavailable}>自选列表 API 加载失败</div>
+                ) : watchlistItems.length === 0 ? (
                   <div className={styles.metricUnavailable}>暂无自选股</div>
                 ) : (
                   <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13, color: '#98A1B3' }}>
@@ -226,6 +228,10 @@ export default function TrackingReviewPanel({
                 <div className={styles.panelSectionTitle} style={{ marginBottom: 6 }}>今日命中范围</div>
                 {signalsQuery.isLoading ? (
                   <div className={styles.stateDesc}>加载信号...</div>
+                ) : signalsQuery.isError ? (
+                  <div className={styles.metricUnavailable}>
+                    今日信号 API 加载失败：{extractReviewError(signalsQuery.error).message}
+                  </div>
                 ) : (signalsQuery.data?.items ?? []).length === 0 ? (
                   <div className={styles.metricUnavailable}>今日未命中偏差筛选器</div>
                 ) : (

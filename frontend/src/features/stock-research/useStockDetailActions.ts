@@ -214,24 +214,46 @@ export function useStockDetailActions({
   }, [stockMemoQuery.data])
 
   // 判断当前股票是否已在自选（monitor-status 仅返回 active 自选，命中即 active）
-  const inWatchlist = useMemo(() => {
+  const serverInWatchlist = useMemo(() => {
     if (!instrumentId || !monitorStatusQuery.data) return false
     return monitorStatusQuery.data.items.some(
       (item) => item.instrument_id === instrumentId,
     )
   }, [instrumentId, monitorStatusQuery.data])
+  const [watchlistOverride, setWatchlistOverride] = useState<boolean | null>(null)
+  const inWatchlist = watchlistOverride ?? serverInWatchlist
+
+  useEffect(() => {
+    setWatchlistOverride(null)
+  }, [instrumentId])
+
+  useEffect(() => {
+    if (watchlistOverride === serverInWatchlist) setWatchlistOverride(null)
+  }, [serverInWatchlist, watchlistOverride])
 
   // 操作：加入/移出自选
   const handleToggleWatchlist = useCallback(() => {
     if (!instrumentId) return
+    const target = !inWatchlist
+    setWatchlistOverride(target)
     if (inWatchlist) {
       removeWatchlist.mutate(instrumentId, {
         onSuccess: () => showToast('操作完成', '已移出自选'),
+        onError: () => {
+          setWatchlistOverride(null)
+          showToast('操作失败', '移出自选失败，请稍后重试')
+        },
       })
     } else {
       addWatchlist.mutate(
         { instrument_id: instrumentId, source },
-        { onSuccess: () => showToast('操作完成', '已加入自选') },
+        {
+          onSuccess: () => showToast('操作完成', '已加入自选'),
+          onError: () => {
+            setWatchlistOverride(null)
+            showToast('操作失败', '加入自选失败，请稍后重试')
+          },
+        },
       )
     }
   }, [instrumentId, inWatchlist, removeWatchlist, addWatchlist, source, showToast])

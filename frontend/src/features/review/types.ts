@@ -22,6 +22,17 @@ export interface ReviewMetricComponent {
   /** 状态：ready/insufficient_history/partial/unavailable */
   status: string
   extra: Record<string, unknown> | null
+  weightMode: string | null
+  readiness: ReviewMetricReadiness
+}
+
+export interface ReviewMetricReadiness {
+  raw_ready?: boolean
+  normalized_ready?: boolean
+  status?: string
+  reason?: string | null
+  history_observations?: number | null
+  min_required?: number | null
 }
 
 /** P/Q/U/C/V 单个聚合变量 payload（PRD §7.1 通用结构） */
@@ -42,6 +53,7 @@ export interface ReviewMetricPayload {
   coverage: number | null
   /** 状态：ready/insufficient_history/partial/unavailable */
   status: string
+  readiness: ReviewMetricReadiness
 }
 
 // ============================================================
@@ -158,8 +170,8 @@ export interface ReviewSignal {
   id: string
   reviewRunId: string
   tradeDate: string
-  /** 筛选器族：A/B/C */
-  filterFamily: 'A' | 'B' | 'C'
+  /** 筛选器族：A/B/C/D */
+  filterFamily: 'A' | 'B' | 'C' | 'D'
   signalType: string
   scopeType: string
   scopeKey: string
@@ -312,7 +324,7 @@ export interface ReviewScopeListParams {
 }
 
 export interface ReviewSignalListParams {
-  filter_family?: 'A' | 'B' | 'C'
+  filter_family?: 'A' | 'B' | 'C' | 'D'
   signal_type?: string
   status?: string
   scope_type?: string

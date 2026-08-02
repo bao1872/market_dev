@@ -406,3 +406,23 @@ test('CHANGE-007-12: returnTo 为外部 URL → marketContext=null，回退 rawS
   assert.equal(ctx.source, 'watchlist')
   assert.equal(ctx.sourceContextInvalid, false)
 })
+
+test('旧 filter operator 仅兼容输入，URL hydration 返回 canonical 名称', () => {
+  const params = new URLSearchParams('scope=market')
+  params.set('filters', JSON.stringify([
+    { key: 'a', op: 'ne', value: 1 },
+    { key: 'b', op: 'is_empty', value: '' },
+    { key: 'c', op: 'is_not_empty', value: '' },
+    { key: 'd', op: 'contains_any', value: 'x,y' },
+    { key: 'e', op: 'contains_all', value: 'x,y' },
+  ]))
+  const ctx = decodeMarketListContext(`/market?${params.toString()}`)
+  assert.ok(ctx?.filters)
+  assert.deepEqual(ctx.filters.map((filter) => filter.operator), [
+    'neq',
+    'empty',
+    'not_empty',
+    'has_any',
+    'has_all',
+  ])
+})

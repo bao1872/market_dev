@@ -9,6 +9,7 @@ import { TablePresetMenu } from './TablePresetMenu'
 import { useTableViewPresets } from '@/hooks/useApi'
 import { decodeScreenerUrlState, encodeScreenerUrlState } from './screenerUrlState'
 import { reorderVisibleColumns } from './columnOrdering'
+import { canonicalizeFilterOperator } from './filterOperators'
 import type { TableViewPresetConfig } from '@/api/endpoints'
 
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
@@ -24,6 +25,7 @@ export type FilterOperator =
   | 'contains' | 'not_contains' | 'eq' | 'neq'
   | 'gt' | 'gte' | 'lt' | 'lte' | 'between'
   | 'in' | 'not_in'
+  | 'has_any' | 'has_all' | 'not_has_any'
   | 'date_eq' | 'before' | 'after'
   | 'empty' | 'not_empty'
 
@@ -204,6 +206,9 @@ const OPERATOR_LABELS: Record<FilterOperator, string> = {
   between: '区间',
   in: '属于',
   not_in: '不属于',
+  has_any: '包含任一',
+  has_all: '包含全部',
+  not_has_any: '不包含任一',
   date_eq: '日期等于',
   before: '早于',
   after: '晚于',
@@ -304,6 +309,21 @@ function matchFilter(text: string, filter: DataTableFilter): boolean {
         .filter(Boolean)
       return !values.includes(t)
     }
+    case 'has_any': {
+      const actual = t.split(',').map((v) => v.trim()).filter(Boolean)
+      const expected = String(filter.value || '').split(',').map((v) => v.trim()).filter(Boolean)
+      return expected.some((value) => actual.includes(value))
+    }
+    case 'has_all': {
+      const actual = t.split(',').map((v) => v.trim()).filter(Boolean)
+      const expected = String(filter.value || '').split(',').map((v) => v.trim()).filter(Boolean)
+      return expected.every((value) => actual.includes(value))
+    }
+    case 'not_has_any': {
+      const actual = t.split(',').map((v) => v.trim()).filter(Boolean)
+      const expected = String(filter.value || '').split(',').map((v) => v.trim()).filter(Boolean)
+      return expected.every((value) => !actual.includes(value))
+    }
     case 'date_eq':
       // date_eq: 日期相等（字符串前 10 位匹配 YYYY-MM-DD）
       return t.slice(0, 10) === String(filter.value || '').slice(0, 10)
@@ -369,7 +389,8 @@ function FilterPopover({
   // enum 字段且操作符为 in/not_in 时使用多选（逗号分隔）
   const isEnumMultiSelect =
     (inputControl === 'multi_select' || enumValues.length > 0) &&
-    (operator === 'in' || operator === 'not_in')
+    (operator === 'in' || operator === 'not_in' || operator === 'has_any' ||
+      operator === 'has_all' || operator === 'not_has_any')
   // boolean 字段使用 true/false 下拉
   const isBooleanSelect = inputControl === 'boolean_toggle' && operator === 'eq'
   // datetime 字段使用日期输入
@@ -791,10 +812,11 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
         if (idx < 0) continue
         // [CHANGE-20260730-013] 优先使用 filterSpec.operators 校验（支持新操作符 in/not_in/date_eq 等）
         const ops = getAvailableOperators(columns[idx] as DataTableColumn<unknown>)
-        if (!ops.includes(f.op as FilterOperator)) continue
+        const operator = canonicalizeFilterOperator(f.op) as FilterOperator
+        if (!ops.includes(operator)) continue
         next[idx] = {
           key: f.key,
-          operator: f.op as FilterOperator,
+          operator,
         }
         if (f.value !== undefined) next[idx].value = f.value as string | number
         if (f.value2 !== undefined) next[idx].value2 = f.value2 as string | number
@@ -997,9 +1019,12 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       for (const f of config.filters) {
         const idx = columns.findIndex((c) => c.key === f.key)
         if (idx >= 0) {
+          const operator = canonicalizeFilterOperator(f.op) as FilterOperator
+          const ops = getAvailableOperators(columns[idx] as DataTableColumn<unknown>)
+          if (!ops.includes(operator)) continue
           next[idx] = {
             key: f.key,
-            operator: f.op as FilterOperator,
+            operator,
             value: f.value,
             ...(f.value2 !== undefined ? { value2: f.value2 } : {}),
           }

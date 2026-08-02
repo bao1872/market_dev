@@ -9,6 +9,8 @@
 // 禁止复制 source/strategy 映射。
 
 // CHANGE-20260715-007: 从 detailSourceContext.ts re-export（消除重复真源）
+import { canonicalizeFilterOperator } from '../../components/filterOperators.ts'
+
 export {
   normalizeResearchSource,
   defaultStrategyForSource,
@@ -246,7 +248,7 @@ export function decodeMarketListContext(
           .map((item) => {
             const filter: MarketListFilter = {
               key: String(item.key ?? ''),
-              operator: String(item.op ?? item.operator ?? ''),
+              operator: canonicalizeFilterOperator(String(item.op ?? item.operator ?? '')),
             }
             if (item.value !== undefined) filter.value = item.value as string | number
             if (item.value2 !== undefined) filter.value2 = item.value2 as string | number
