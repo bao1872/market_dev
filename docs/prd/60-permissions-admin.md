@@ -13,7 +13,7 @@
 
 1. 自选管理，包含盘中监控；
 2. 行情管理；
-3. 复盘管理。
+3. 复盘与竞价（含复盘模块与竞价分析模块，单一 capability `research_replay`）。
 
 三类权限独立授予。
 
@@ -46,9 +46,14 @@
 - 不自动获得自选列表；
 - 不自动获得盘中监控。
 
-### PA-12 复盘管理
+### PA-12 复盘与竞价
 
-复盘管理控制未来复盘模块，具体能力由 `70-review.md` 定义。
+"复盘与竞价"为单一 capability（`research_replay`，机器值不变，中文统一展示"复盘与竞价"），同时控制复盘模块与竞价分析模块：
+
+- 复盘模块能力由 `70-review.md` 定义；
+- 竞价分析模块（行情页竞价入口、`/auction`、`/auction/board/:boardId`、`/auction/stock/:symbol`）归同一 capability 控制，不引入独立 auction capability；
+- 任一无 `research_replay` 权限用户，前后端均不得呈现竞价入口，直接访问 URL 由后端 `require_capability("research_replay")` 拒绝（与复盘 403 契约一致）；
+- 管理员（admin）豁免，可直接访问。
 
 ### PA-13 详情访问
 

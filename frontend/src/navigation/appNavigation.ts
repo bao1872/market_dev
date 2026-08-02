@@ -10,6 +10,13 @@
 //   旧 WatchlistPage.tsx 和 IndexPage.tsx 已删除（统一行情工作区改造）
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行，便于路由契约测试。
 
+import {
+  REPLAY_AND_AUCTION_CAPABILITY,
+  hasCapability,
+  type CapabilityKey,
+  type CapabilityStateLike,
+} from './capabilities.ts'
+
 export const APP_ROUTES = {
   market: '/market',
   screener: '/screener',
@@ -53,20 +60,46 @@ export const DEFAULT_ENTRY = APP_ROUTES.market
 export interface AppNavItem {
   path: string
   label: string
+  /**
+   * 展示该导航项所需的 capability 机器值；未声明表示无 capability 门槛。
+   * admin 由 UserAppShell 统一豁免，不在此处特殊处理。
+   */
+  requiredCapability?: CapabilityKey
 }
 
 // 普通用户一级导航（行情 + 自选 + 复盘 + 竞价；消息/设置不在此处）
 // [Round 2026-07-28-4] 自选升级为一级导航，复用 /market?scope=watchlist
-// [P0-FE 2026-07-31] 竞价分析入口加入一级导航（市场/板块/个股三级页面，require_authenticated）
+// [CHANGE-20260802-002] 复盘与竞价同属 research_replay 权益，导航同显同隐
 export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情' },
-  { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选' },
-  { path: APP_ROUTES.review, label: '复盘' },
-  { path: APP_ROUTES.auction, label: '竞价' },
+  { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选', requiredCapability: 'self_selection' },
+  { path: APP_ROUTES.review, label: '复盘', requiredCapability: REPLAY_AND_AUCTION_CAPABILITY },
+  { path: APP_ROUTES.auction, label: '竞价', requiredCapability: REPLAY_AND_AUCTION_CAPABILITY },
 ]
 
 /** 自选导航 path（用于权限判断和 active 匹配） */
 export const WATCHLIST_NAV_PATH = `${APP_ROUTES.market}?scope=watchlist`
+
+/**
+ * 按用户 capability 过滤可见的一级导航项（纯函数，供 UserAppShell 与契约测试共用）。
+ *
+ * 规则（CHANGE-20260802-002）：
+ * - 未声明 requiredCapability 的项始终可见（如「行情」）
+ * - admin 豁免全部 capability 判断
+ * - 无 self_selection：隐藏「自选」
+ * - 无 research_replay：同时隐藏「复盘」和「竞价」
+ * - 有 research_replay：同时显示「复盘」和「竞价」
+ */
+export function filterNavItemsByCapability(
+  items: readonly AppNavItem[],
+  capabilities: Record<string, CapabilityStateLike | undefined> | undefined | null,
+  isAdmin: boolean,
+): AppNavItem[] {
+  return items.filter((item) => {
+    if (!item.requiredCapability) return true
+    return hasCapability(capabilities, item.requiredCapability, isAdmin)
+  })
+}
 
 /**
  * 判断导航项是否 active（不依赖 NavLink pathname，支持 /market 双入口）

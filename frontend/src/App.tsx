@@ -13,6 +13,7 @@ import { useAuthStore, ACCESS_TOKEN_KEY } from './store/auth'
 import UserAppShell from './layouts/UserAppShell'
 import AdminAppShell from './layouts/AdminAppShell'
 import { legacyRedirectEntries, DEFAULT_ENTRY } from './navigation/appNavigation'
+import { REPLAY_AND_AUCTION_CAPABILITY } from './navigation/capabilities'
 import LoginPage from './pages/LoginPage'
 import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
 import MarketWorkspacePage from './features/market-workspace/MarketWorkspacePage'
@@ -34,7 +35,7 @@ import AdminVisitorsPage from './pages/AdminVisitorsPage'
 const LandingPage = lazy(() => import('./pages/LandingPage'))
 
 // [Auction] - 竞价分析三级页面 lazy 加载（市场/板块/个股）
-// 受保护路由 require_authenticated，任何登录用户可读（GET /v1/auction/*）
+// 受保护路由 require_capability("research_replay")：竞价与复盘同属一项权益（GET /v1/auction/*）
 const AuctionMarketPage = lazy(() => import('./features/auction/AuctionMarketPage'))
 const AuctionBoardPage = lazy(() => import('./features/auction/AuctionBoardPage'))
 const AuctionInstrumentPage = lazy(() => import('./features/auction/AuctionInstrumentPage'))
@@ -215,42 +216,42 @@ export const routeConfig: RouteObject[] = [
               { path: '/boards/:boardId', element: <BoardAnalysisPage /> },
             ],
           },
-          // research_replay: 复盘入口（/review，PRD §3.1 主路由）
+          // research_replay = 复盘与竞价（CHANGE-20260802-002）
+          // 复盘工作台与竞价三级页面共用同一 capability 守卫，不存在独立 auction capability；
+          // 直接输入 /auction/* URL 的无权限用户由 CapabilityRoute 统一跳转 /forbidden。
           {
-            element: <CapabilityRoute capability="research_replay" />,
+            element: <CapabilityRoute capability={REPLAY_AND_AUCTION_CAPABILITY} />,
             children: [
               { path: '/review', element: <ReviewPage /> },
+              {
+                path: '/auction',
+                element: (
+                  <Suspense fallback={<AuctionFallback />}>
+                    <AuctionMarketPage />
+                  </Suspense>
+                ),
+              },
+              {
+                path: '/auction/board/:boardId',
+                element: (
+                  <Suspense fallback={<AuctionFallback />}>
+                    <AuctionBoardPage />
+                  </Suspense>
+                ),
+              },
+              {
+                path: '/auction/stock/:symbol',
+                element: (
+                  <Suspense fallback={<AuctionFallback />}>
+                    <AuctionInstrumentPage />
+                  </Suspense>
+                ),
+              },
             ],
           },
           // 不强制订阅的辅助页面（仅认证即可）
           { path: '/settings', element: <SettingsPage /> },
           { path: '/messages', element: <MessagesPage /> },
-          // [Auction] 竞价分析三级页面（require_authenticated，任何登录用户可读）
-          // 后端只读 DB，不触发计算；前端只展示、过滤和展开证据
-          {
-            path: '/auction',
-            element: (
-              <Suspense fallback={<AuctionFallback />}>
-                <AuctionMarketPage />
-              </Suspense>
-            ),
-          },
-          {
-            path: '/auction/board/:boardId',
-            element: (
-              <Suspense fallback={<AuctionFallback />}>
-                <AuctionBoardPage />
-              </Suspense>
-            ),
-          },
-          {
-            path: '/auction/stock/:symbol',
-            element: (
-              <Suspense fallback={<AuctionFallback />}>
-                <AuctionInstrumentPage />
-              </Suspense>
-            ),
-          },
         ],
       },
       // 管理员界面（AdminAppShell 独立布局）

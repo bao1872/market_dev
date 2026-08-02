@@ -10,6 +10,7 @@
 
 | Change ID | 日期 | 标题 | 类型 | 领域 | 状态 | 关联 PRD | 关联 Maps |
 |---|---|---|---|---|---|---|---|
+| CHANGE-20260802-002 | 2026-08-02 | 竞价归入复盘权限 + 邀请码权限回显 | behavior/contract | 权限/前端 | 进行中（代码+纯单元测试+Ruff+TSC+ESLint 通过，Fast CI 待跑） | PA-12/PA-20/PA-21 | `maps/60-permissions-admin.md` §11 |
 | CHANGE-20260801-002 | 2026-08-01 | 全项目问题收口状态 | behavior/architecture | 全局 | 进行中 | PRD20/40/70/75 | `maps/20/40/70/75` |
 | CHANGE-20260726-001 | 2026-07-26 | 文档体系重构 | architecture | 文档治理 | 进行中 | PRD/Maps 全局 | 全局 |
 | CHANGE-20260726-002 | 2026-07-26 | 本地与远程运行模型 | runtime | 运行体系 | 进行中 | SR-01～SR-62 | `maps/80-system-runtime.md` |

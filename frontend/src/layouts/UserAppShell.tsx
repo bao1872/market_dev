@@ -15,6 +15,7 @@ import {
   WATCHLIST_NAV_PATH,
   resolveActiveNav,
   buildScopeSwitchUrl,
+  filterNavItemsByCapability,
 } from '@/navigation/appNavigation'
 import { useAuthStore } from '@/store/auth'
 import BrandLogo from '@/components/BrandLogo'
@@ -53,18 +54,16 @@ export default function UserAppShell({ children }: { children?: ReactNode }) {
     return () => clearInterval(interval)
   }, [])
 
-  // 权限：自选仅 admin 或 self_selection active 可见
+  // 权限过滤：按导航项声明的 requiredCapability 统一判断，admin 全部豁免。
+  // [CHANGE-20260802-002] 复盘与竞价同属 research_replay，因此同显同隐；
+  // 判断逻辑只此一处，不为竞价单独增加第二套权限判断。
   const isAdmin = useAuthStore((s) => s.user?.is_admin === true)
-  const hasSelfSelection = useAuthStore((s) => !!s.user?.capabilities?.self_selection?.active)
-  const canAccessWatchlist = isAdmin || hasSelfSelection
+  const capabilities = useAuthStore((s) => s.user?.capabilities)
 
-  // 过滤可见导航项：无自选权限时隐藏"自选"
-  const visibleNavItems = useMemo(() => {
-    return USER_NAV_ITEMS.filter((item) => {
-      if (item.path === WATCHLIST_NAV_PATH) return canAccessWatchlist
-      return true
-    })
-  }, [canAccessWatchlist])
+  const visibleNavItems = useMemo(
+    () => filterNavItemsByCapability(USER_NAV_ITEMS, capabilities, isAdmin),
+    [isAdmin, capabilities],
+  )
 
   // 构建导航链接的 to 路径：行情/自选需要保留当前筛选条件
   const buildNavTo = (itemPath: string): string => {

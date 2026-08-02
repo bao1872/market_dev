@@ -53,12 +53,16 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
               { path: '/stock/:symbol', guard: 'capability', shell: 'user' },
             ],
           },
-          // CapabilityRoute: research_replay（PRD §3.1 主路由 /review）
+          // CapabilityRoute: research_replay = 复盘与竞价（CHANGE-20260802-002）
+          // /review 与 /auction/* 共用同一守卫，不存在独立 auction capability
           {
             guard: 'capability',
             shell: 'user',
             children: [
               { path: '/review', guard: 'capability', shell: 'user' },
+              { path: '/auction', guard: 'capability', shell: 'user' },
+              { path: '/auction/board/:boardId', guard: 'capability', shell: 'user' },
+              { path: '/auction/stock/:symbol', guard: 'capability', shell: 'user' },
             ],
           },
           // 仅认证（不强制订阅）

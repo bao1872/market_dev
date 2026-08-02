@@ -9,7 +9,9 @@
 - POST /admin/auction/anchors: 触发锚点生成 + 发布（admin）
 
 权限（PRD §3.2）：
-- GET 接口：require_authenticated（任何登录用户可读）
+- GET 接口：require_capability("research_replay")（admin 自动豁免）
+  竞价与复盘同属一项权益：research_replay = 复盘与竞价。
+  不存在独立的 auction capability，无权限时返回与 /v1/review/* 一致的 403 合同。
 - POST 接口：require_admin
 
 设计要点：
@@ -65,7 +67,7 @@ from app.schemas.auction import (
 from app.services.access_control_service import (
     AccessContext,
     require_admin,
-    require_authenticated,
+    require_capability,
 )
 from app.services.auction_anchor_service import (
     AUCTION_ANCHOR_ALGORITHM_VERSION,
@@ -80,6 +82,10 @@ from app.services.auction_scan_service import (
 from app.services.auction_scheduler_service import run_verified_auction_pipeline
 
 logger = logging.getLogger("api.auction")
+
+# [PRD60 PA-01] 竞价读取权限 = 复盘权限（research_replay = 复盘与竞价）。
+# 不新增独立的 auction capability；与 app/api/review.py 的 REVIEW_CAPABILITY 保持同一机器值。
+AUCTION_CAPABILITY = "research_replay"
 
 # 用户侧路由（前端 /v1/auction/* → 经 nginx rewrite 后到此处）
 router = APIRouter(prefix="/v1/auction", tags=["auction"])
@@ -248,7 +254,7 @@ async def get_market_page(
         DEFAULT_TOP_EVENTS, ge=1, le=100, description="Top 事件数",
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    ctx: AccessContext = Depends(require_capability(AUCTION_CAPABILITY)),
 ) -> AuctionMarketPageData:
     """市场级页面数据。
 
@@ -351,7 +357,7 @@ async def get_board_page(
         DEFAULT_TOP_INSTRUMENTS, ge=1, le=100, description="Top 个股数",
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    ctx: AccessContext = Depends(require_capability(AUCTION_CAPABILITY)),
 ) -> AuctionBoardPageData:
     """板块级页面数据。
 
@@ -438,7 +444,7 @@ async def get_stock_page(
     symbol: str,
     trade_date: date | None = Query(None, description="业务交易日（默认当日）"),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    ctx: AccessContext = Depends(require_capability(AUCTION_CAPABILITY)),
 ) -> AuctionInstrumentPageData:
     """个股级页面数据。
 
@@ -549,7 +555,7 @@ class AnchorStatusResponse(BaseModel):
 async def get_anchor_status(
     trade_date: date,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    ctx: AccessContext = Depends(require_capability(AUCTION_CAPABILITY)),
 ) -> AnchorStatusResponse:
     """查询指定日期的锚点快照和发布状态。
 
@@ -600,7 +606,7 @@ async def get_auction_backflow(
         50, ge=1, le=200, description="回流事件数上限（默认 50）",
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    ctx: AccessContext = Depends(require_capability(AUCTION_CAPABILITY)),
 ) -> AuctionBackflowData:
     """[ReviewPage] 第二金字塔 + 竞价事件回流数据。
 

@@ -208,7 +208,7 @@ Phase 5B-2 落地 §10 候选方案中的 PA-01 三类独立 capability 授权�
 |---|---|---|---|
 | `CAPABILITY_SELF_SELECTION` | `self_selection` | 自选管理（含盘中监控+行情列表可见，PA-10） | `/market` |
 | `CAPABILITY_MARKET_DATA` | `market_data` | 行情管理（个股详情，PA-11/PA-13） | `/stock/:symbol` |
-| `CAPABILITY_RESEARCH_REPLAY` | `research_replay` | 复盘管理（PA-12） | `/replay` |
+| `CAPABILITY_RESEARCH_REPLAY` | `research_replay` | 复盘与竞价（PA-12 复盘管理 + 竞价分析；中文统一展示"复盘与竞价"，机器值不变） | `/replay`、`/auction`、`/auction/board/:boardId`、`/auction/stock/:symbol` |
 
 定义入口：`backend/app/models/user_capability.py`（`ALL_CAPABILITIES` 元组）。
 
@@ -224,7 +224,7 @@ Phase 5B-2 落地 §10 候选方案中的 PA-01 三类独立 capability 授权�
 - 入口：`backend/app/services/access_control_service.py:413 require_capability(capability)`
 - 行为：检查 `ctx.capabilities` 是否含指定 capability 且 active；admin 自动豁免（所有 capability active=True）
 - 替代：`require_feature`（旧 feature 检查仍保留兼容期）
-- 调用点：`market.py`（market_data）、`stock_context.py`（market_data）、`watchlist.py`（self_selection）
+- 调用点：`market.py`（market_data）、`stock_context.py`（market_data）、`watchlist.py`（self_selection）、`auction.py`（5 个 GET 端点使用 `require_capability("research_replay")`；2 个 admin POST 仍使用 `require_admin`）
 
 ### 11.4 邀请码 capabilities JSONB（PA-20，已核验）
 
@@ -238,7 +238,10 @@ Phase 5B-2 落地 §10 候选方案中的 PA-01 三类独立 capability 授权�
 - 路由守卫映射（`frontend/src/navigation/routeStructure.ts`）：
   - `/market` → capability 守卫（self_selection）
   - `/stock/:symbol` → capability 守卫（market_data）
-  - `/replay` → capability 守卫（research_replay）
+  - `/replay` → capability 守卫（research_replay，中文"复盘与竞价"）
+  - `/auction` → capability 守卫（research_replay，与复盘共用同一 capability；原 `require_authenticated` 已切换为 `require_capability("research_replay")`）
+  - `/auction/board/:boardId` → capability 守卫（research_replay）
+  - `/auction/stock/:symbol` → capability 守卫（research_replay）
 - 403 页面：`/forbidden`（ForbiddenPage，已登录但缺少指定 capability 时渲染，不跳转）
 - 兼容重定向保留：`/overview`→`/market`、`/watchlist`→`/market?scope=watchlist`、`/screener`→`/market`
 
