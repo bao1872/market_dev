@@ -1,7 +1,6 @@
 # 90 废弃与禁止
 
-> 来源：AGENTS.md §六（12 条禁止行为）+ §七.2、§七.6、§七.8、§七.14、§七.15、§七.18
-> 状态：并行验证
+> 来源：AGENTS.md 基础安全边界与项目废弃合同
 
 ## 通用禁止行为（AGENTS §六）
 
@@ -20,15 +19,34 @@
 
 ## 废弃项（禁止恢复）
 
-### 多分支工作流与 `trae/agent-*` 内部分支（2026-08-02 收口）
+### 多分支工作流与工具自动内部分支（2026-08-02 收口）
 
 每个变更使用独立分支（`fix/` `feat/` `docs/` `refactor/` `chore/` `experiment/` 前缀）
-与 TRAE Work `trae/agent-*` 自动内部分支模型均已废弃。
+与由编辑器/Agent 自动创建的内部工作分支（如 `trae/agent-*`）模型均已废弃。
 
-- 仓库只保留 `main` / `dev` / `experiment` 三个长期分支；
-- 所有 AI 助手默认直接在 `dev` 提交，需要可恢复点时使用 checkpoint commit；
+- 仓库只保留 `main` / `dev` / `experiments` 三个长期分支；
+- 所有执行主体默认直接在 `dev` 提交，需要可恢复点时使用 checkpoint commit；
 - 不得从旧代码或旧文档恢复上述分支前缀约定；
-- 详见 `50-git-development-flow.md` 与 `60-trae-work.md`。
+- 详见 `50-git-development-flow.md`。
+
+### 工具专属角色规则（2026-08-02 收口，CHANGE-20260802-005）
+
+按 IDE / Agent / 模型 / 客户端划分的角色规则已废弃并删除
+（原 `rules/60-trae-work.md`、`rules/70-trae-cn.md`）。
+
+禁止恢复的设计：
+
+- 按工具命名的角色定义与能力矩阵；
+- 工具运行模式表（开发 / 测试 / 观察 / 部署 / 排障 / 紧急修复模式）；
+- 一轮闭环模式与固定十步执行顺序；
+- 固定 ledger 文件路径；
+- 工具专属最终状态值（如 `CLOSURE_PASSED` / `PARTIAL` / `BLOCKED` 作为强制枚举）；
+- 把某次具体业务任务的步骤写成长期规则。
+
+替代合同：所有 IDE、编码助手和自动化 Agent 遵守同一套仓库规则，
+治理按实际操作定义。有长期价值的部分已归入
+`40-testing-quality.md`、`50-git-development-flow.md`、`80-deployment-data-safety.md`。
+旧事实由 Git 历史与 `docs/changes/` 保存。
 
 ### 多策略组合（AGENTS §七.2）
 
@@ -55,7 +73,7 @@
 - 应称为"参考源（人工阅读）"；
 - SMC Pine parity 测试禁止从 DB 重新取 bar 或依赖 `ref/` 导出脚本。
 
-### ref/sync git 跟踪禁止（Phase 5B-0）
+### ref/sync git 跟踪禁止
 
 `ref/` 与 `sync/` 不得进入 Git 仓库（所有活跃分支）。
 
@@ -142,11 +160,6 @@ Fair Value Gap 已完全排除。
 - **多阶段 delivery phase / 未来正式发布流程**；
 - 新增 `development` / `runtime` / `formal_release` 等阶段状态机。
 
-> 这些工作流文件如仍存在，仅作为历史遗留，不作为当前操作指令。任何当前部署行为以 `rules/80-deployment-data-safety.md` + `docs/maps/80-system-runtime.md` + `docs/runbooks/development-deployment.md` 为唯一权威。
-
-## 过时内容候选（DEPRECATED_CANDIDATE）
-
-> 本阶段不删除。Phase 2+ 评估是否从 AGENTS.md 移除。
-
-- `AGENTS.md` §十一 变更历史索引中的"近期关键变更"列表：随时间累积，可考虑迁移到 `maps/changes/CHANGELOG.md` 索引；
-- `AGENTS.md` §七.20 中 `tools/check_docs_consistency.py` 规则清单：可考虑迁移到 `40-testing-quality.md` 详细描述（本 rules 已含概要）。
+上述工作流文件已删除，禁止恢复。任何当前部署行为以
+`rules/80-deployment-data-safety.md`、`docs/maps/80-system-runtime.md` 和
+`docs/runbooks/development-deployment.md` 为唯一权威。

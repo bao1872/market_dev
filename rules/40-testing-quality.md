@@ -1,7 +1,6 @@
 # 40 测试与质量
 
 > 来源：AGENTS.md §五、§七.20、§八、§六.6、§六.8、§七.8（测试部分）
-> 状态：并行验证
 
 ## CHANGE 规则
 
@@ -67,7 +66,7 @@ Gov     python tools/check_governance_rules.py
 ## 报告与对话输出（2026-07-29 收口）
 
 > 硬规则：禁止新建未经用户确认的报告/治理目录（如 `reports/`）。
-> TRAE 完整过程只在对话输出，不写入仓库；普通 Bug 由 Git 历史记录，只有重要行为变化才写一个 CHANGE。
+> 完整执行过程只在对话输出，不写入仓库；普通 Bug 由 Git 历史记录，只有重要行为变化才写一个 CHANGE。
 > `docs/current/` 标记为 legacy 只读，本轮起不得新增或修改其中文件，后续另行迁移；
 > CI 与规则中不再要求"代码变更必须同步 docs/current"。
 
@@ -140,10 +139,13 @@ Gov     python tools/check_governance_rules.py
 
 修改 migration 必须有 upgrade / downgrade / upgrade 验证。详见 `80-deployment-data-safety.md`。
 
-## 持久测试数据库禁用（CHANGE-20260728-007）
+## 持久测试数据库禁用（CHANGE-20260728-004 / CHANGE-20260728-008）
+
+> 引用修订（2026-08-02，CHANGE-20260802-003）：原文的悬空 Change 引用已移除；
+> 实际来源是 CHANGE-20260728-004（永久禁用测试库）
+> 与 CHANGE-20260728-008（永久删除持久测试库）。规则本身不变。
 
 > 来源：AGENTS.md §8 基础安全边界
-> 状态：硬约束
 
 ### 禁止范围
 
@@ -181,7 +183,6 @@ CI 工作流中 `POSTGRES_DB: bz_stock_test` 仅作为容器内临时数据库�
 ## 2026-08-02 收口：测试合同（开发与部署治理）
 
 > 来源：用户本轮治理指令（开发阶段收口）
-> 状态：生效（2026-08-02）
 
 ### TQ-90 测试合同（开发闭环内）
 
@@ -205,7 +206,9 @@ CI 工作流中 `POSTGRES_DB: bz_stock_test` 仅作为容器内临时数据库�
 - Fast CI 作为部署强制门禁；
 - 多阶段 delivery phase / 未来正式发布流程。
 
-> 这些工作流文件如仍存在，仅作为历史遗留，不作为当前操作指令；任何当前部署行为以 `rules/80-deployment-data-safety.md` + `docs/maps/80-system-runtime.md` + `docs/runbooks/development-deployment.md` 为唯一权威。
+> 上述工作流文件已删除，禁止恢复。任何当前部署行为以
+> `rules/80-deployment-data-safety.md`、`docs/maps/80-system-runtime.md` 和
+> `docs/runbooks/development-deployment.md` 为唯一权威。
 
 ### TQ-92 测试分类（仅用于 CI 诊断，不影响部署）
 
@@ -228,3 +231,56 @@ CI 工作流中 `POSTGRES_DB: bz_stock_test` 仅作为容器内临时数据库�
 - 新增测试若需要真实数据库，**必须**由作者显式写 `@pytest.mark.postgres`；若依赖外部数据源，**必须**显式写 `@pytest.mark.external_data`。
 - `conftest.py` 中基于 fixture 闭包与源码文本的自动判定为过渡机制，配套漏标检查 `_DB_SUSPECT_PATTERN` **只报告、不自动补 marker**；出现嫌疑项必须人工确认并补显式 marker。
 - 存量归类稳定后应逐步移除源码文本扫描，改为纯显式 marker。
+
+## 2026-08-02 收口：验收证据与结论纪律（CHANGE-20260802-005 配套）
+
+> 来源：从已删除的工具专属角色文件中提炼的通用规则。
+
+### TQ-94 测试必须进入正式测试文件
+
+- 验收断言必须写入 `backend/tests/` 或 `frontend/src/**/__tests__/`；
+- 禁止仅以临时 `python -c` / `node -e` / 一次性脚本的输出作为验收证据；
+- 临时命令只能用于探查，不能替代可复跑的测试。
+
+### TQ-95 失败重跑上限
+
+- 同一测试集最多运行 2 次：第一次失败只修复相关问题，再复跑一次；
+- 第二次仍失败必须停止并报告真实失败原因，禁止无限重跑或反复微调直到偶然通过。
+
+### TQ-96 禁止用未验证结论冒充事实
+
+- 未取得证据前，禁止在对话输出、CHANGE 或文档中写 `DONE` / `SUCCESS` / `COMPLETED` / `PASSED` 等成功结论；
+- 未知、未验证、部分完成、阻塞和失败必须如实标记；
+- 局部通过不得写成整体通过（与 TQ-83 叠加）。
+
+### TQ-97 页面验收必须有三类证据
+
+涉及前端页面的变更，验收时必须真实在浏览器完成并记录：
+
+- **URL**：目标路由实际访问 URL（含 query 参数），确认 hydration 后不被默认值覆盖，前进/后退能正确恢复状态；
+- **Console**：是否存在 error / warning，异常必须定位根因或明确标注为已知无关警告；
+- **Network**：关键 API 请求的状态码与响应摘要，不得仅凭页面渲染成功推断 API 正常。
+
+禁止以 IDE 截图或静态代码审查代替行为核验。
+
+### TQ-98 成功判定三要素（涉及发布 pointer 的任务）
+
+判定发布类任务成功必须**同时**具备：
+
+- **pointer**：`factor_publications` 中对应 kind 的 pointer 已切换至目标 run，`data_run_id` 指向本轮 run；
+- **版本**：repo HEAD、`algorithm_version`、运行代码 SHA 一致；
+- **真实数据证据**：DB 查询或日志证明发布已生效。
+
+`/health=200` 或"页面能打开"只能作为辅助证据，不能单独判成功。
+
+### TQ-99 CI 结论读取纪律
+
+CI 是**手工诊断工具**（`workflow_dispatch`），不是部署门禁（见 TQ-90.3/TQ-90.4）。手动触发 CI 后：
+
+- 必须监控该**精确 commit SHA** 直到 Workflow 终态，不得用前一次 push 的 SHA 代替；
+- 查询降级顺序：GitHub 连接器 → 已认证 `gh` CLI → 公开 REST API（`/repos/{owner}/{repo}/actions/runs?head_sha={sha}`，无需认证）；
+- `gh` 未认证不能作为停止监控的理由；
+- `db_changed=true` 时 `postgres-integration-tests` 被 skipped 视为 CI 失败；
+  `db_changed=false` 时 skipped 是范围裁剪的预期结果；
+- 必须按真实日志修复，不得凭猜测改代码；无法下载日志时仍须报告失败 Job 名称并运行其本地等价命令；
+- 报告须列出每个 Job 的 name 与 result，以及 `CI Gate` 的最终 conclusion；单个 Job 通过不能代替 `CI Gate` 结论。

@@ -1,7 +1,6 @@
 # 20 行情与指标
 
 > 来源：AGENTS.md §七.5、§七.12-19、§七.23
-> 状态：并行验证
 
 ## Node Cluster 固定契约
 
@@ -230,4 +229,3 @@ pywencai（`wencai_board_provider`）为唯一板块分类源。
 - chip 任务可失败/部分成功/单独重试，绝不反改主 run 或重算 core；
 - chip 使用独立 version/hash/run 关联；
 - chip 持久化 migration 为下一阶段唯一 blocker，禁止用 Redis 冒充持久化、禁止未经验证新增 migration。
-

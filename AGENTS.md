@@ -7,6 +7,17 @@
 它不是 PRD、架构文档、实现地图、项目状态报告或操作手册。项目具体需求、实现细节、
 运行结构、部署方式、数据模型和指标定义必须维护在各自对应的文档中。
 
+## 0. 通用执行主体合同
+
+所有 IDE、编码助手和自动化 Agent 遵守同一套仓库规则。
+
+治理按**实际操作**定义（是否修改代码、是否连接生产、是否执行部署、是否写入数据），
+不按 IDE、Agent、模型或客户端区分。规则体系中不得出现按工具命名的角色定义、
+能力矩阵、模式切换表或工具专属状态值。
+
+一个执行主体能做什么，取决于用户在本轮授予的授权和本文件 §8"基础安全边界"，
+而不取决于它是哪个工具。详见 `rules/50-git-development-flow.md`「通用执行主体合同」。
+
 ## 1. 必读入口与权威层级
 
 开始任务前必须按以下顺序读取入口：
@@ -19,13 +30,9 @@
    - `rules/20-market-data-indicators.md`：MDAS、复权、Node Cluster、SMC、AFC、Canonical、ChartSnapshot、板块同步、因子版本。
    - `rules/30-access-security.md`：Capture Token、权限隔离、生产秘密。
    - `rules/40-testing-quality.md`：CHANGE 必填、CI 门禁、质量门禁、测试纪律、ref 隔离测试。
-   - `rules/50-git-development-flow.md`：dev-only 分支模型、提交安全、执行模式、继续执行。
-   - `rules/60-trae-work.md`：TRAE Work 角色边界与 dev 提交约束。
-   - `rules/70-trae-cn.md`：TRAE CN 多模式职责。
+   - `rules/50-git-development-flow.md`：dev-only 分支模型、通用执行主体合同、提交安全、执行模式。
    - `rules/80-deployment-data-safety.md`：Migration、不备份、Docker 镜像保护、Live Mount。
-   - `rules/85-server-directory-boundaries.md`：三目录职责。
    - `rules/90-deprecated-forbidden.md`：禁止行为清单、废弃项、禁止恢复项。
-   - `rules/AGENTS-MIGRATION-MAP.md`：AGENTS 章节 → rules 映射表。
 4. **docs/prd/**：已确认需求和目标行为的事实源。
 5. **docs/maps/**：已核验当前实现和项目记忆。
 6. **docs/changes/INDEX.md**：重要变更索引；具体变更文件在 `docs/changes/YYYY/`。

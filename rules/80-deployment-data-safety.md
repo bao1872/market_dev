@@ -1,7 +1,6 @@
 # 80 部署与数据安全
 
 > 来源：AGENTS.md §七.9-11、§七.22
-> 状态：生效（Phase 2 激活）
 
 ## Migration 纪律
 
@@ -180,26 +179,26 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 禁止定义或保留其他阶段的工作流程，禁止新增 `development` / `runtime` / `formal_release` 等阶段状态机，禁止在有效治理文档中描述未来正式发布方式。
 
 - `dev` 是 CI 与开发部署的唯一来源；
-- push `dev` 只触发 CI（诊断用途），**不触发自动部署**，也不作为部署前置条件；
+- push `dev` 本身不触发 CI 或部署；CI 仅可手工触发且不作为部署前置条件；
 - 当前唯一部署模式为 **Live Mount 开发部署**（见 §Live Mount 部署规则 与 `docs/runbooks/development-deployment.md`）；
 - Release Gate / GHCR / Registry / immutable image release / formal release candidate / 多阶段 delivery phase / 未来正式发布流程 **不在当前治理范围内**，有效文档不得描述或保留它们。
 
 ## 生产服务器 SSH SSOT（CHANGE-20260730-015）
 
 > 来源：CHANGE-20260730-015（SSH 目标漂移防复发）
-> 状态：生效（2026-07-30）
 
 ### 唯一允许的入口
 
 - 生产服务器只能通过仓库脚本 `scripts/ops/panji-prod-ssh` 访问，该脚本固定使用别名 `panji-prod`；
-- 权威参数定义在 `docs/maps/80-system-runtime.md` §2：HostName=`43.136.118.82`、User=`root`、Port=`22`、远程目录=`/root/web_dev`；
+- 权威身份定义在 `docs/maps/80-system-runtime.md` 的“生产身份”；具体网络值由 `panji-prod-preflight` 校验；
 - 部署/恢复/审计前必须先运行 `scripts/ops/panji-prod-preflight` 校验 ssh -G 解析值、远程目录、`/etc/market-dev/market.env`、Compose 项目和 `trading-backend` 容器；
 - preflight 通过后本轮不得重复检查 SSH，除非连接实际中断。
 
 ### 禁止行为
 
 - 禁止使用 `root@panji-server`、`55-server`、原始 IP 或任何 `~/.ssh/config` 中其他 Host 作为盘迹生产入口；
-- 禁止 Compact/子代理恢复后重新发现服务器入口，必须读取 `/tmp/trae_review_*_ledger.md` 继续工作；
+- 禁止上下文压缩或子代理恢复后自行重新"发现"服务器入口：必须以 `docs/maps/80-system-runtime.md` §2 为权威参数，
+  经 `scripts/ops/panji-prod-preflight` 校验后继续；禁止猜测 SSH 别名或重读 `~/.ssh/config` 重新选择 Host；
 - 禁止使用可能掩盖 SSH 退出码的管道（如 `ssh ... | head`、`| tail`、`| grep`），必须先 `SSH_OUTPUT=$(ssh ...); SSH_RC=$?` 再单独裁剪输出；
 - 禁止把私钥、密码或完整 IdentityFile 路径写入脚本/日志/CHANGE；
 - `~/.ssh/config` 中 `55-server` 已加 `DEPRECATED-PANJI-DO-NOT-USE` 注释，不得删除该别名（保留历史运维），但盘迹操作禁止使用。
@@ -207,8 +206,7 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 ## 生产修改与部署版本合同（2026-07-30 收口）
 
 > 来源：闭环缺口防复发
-> 状态：生效（2026-07-30）
-> 与 `70-trae-cn.md` "闭环恢复与成功判定硬约束" 叠加生效。
+> 成功判定三要素见 `40-testing-quality.md` TQ-98。
 
 ### 禁止 docker cp 和未审计 stdin 脚本
 
@@ -239,28 +237,36 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 代码部署**不自动执行**任何数据 apply / run / publish 操作；migration 仅在确有新 migration 时由部署脚本显式、幂等地执行，且不属于"自动数据发布"。
 - 具体探针命令与逐服务校验以 `docs/runbooks/development-deployment.md` 为准（当前运行后端版本端点路径以该 runbook 实测为准，不在此硬编码）。
 
-## 部署脚本结构与执行纪律（2026-08-02 收口，CHANGE-20260802-002 配套）
+## 部署脚本结构与执行纪律（2026-08-02 收口，CHANGE-20260802-003 配套）
 
 > 来源：2026-08-02 部署事故——旧实现整段 §8（`up -d`）静默未执行，
 > 镜像已构建但容器仍跑旧 SHA，`/health=200` 且无任何告警。
-> 状态：生效（2026-08-02）
 
-### DS-90 远程部署逻辑必须是受版本控制的真实脚本
+### DS-90 部署执行入口只有两个文件
 
-- 远程部署逻辑必须存放为仓库中的真实文件（`scripts/ops/panji-deploy-remote.sh`），**禁止**写在本地脚本的 heredoc 里再经 `bash -s` 从 stdin 执行。
-  - 理由：heredoc 无法本地 `bash -n` / shellcheck 静态检查；执行失败时无法定位行号；未加引号的 heredoc 还会在本地被提前变量展开，产生与预期不符的远端脚本。
-- 本地入口（`scripts/ops/panji-test-deploy`）在传输前必须执行 `bash -n` 语法预检，把远端运行期错误提前到部署之前。
-- 远程脚本必须设置 `ERR` trap，失败时输出**阶段名、行号、失败命令、退出码**四项。
+- 本地唯一用户入口：`scripts/ops/panji-test-deploy`（瘦客户端，只做 SHA 校验 + preflight + SSH 调用）。
+- 服务器端唯一实现：`scripts/deploy/panji-deploy.sh`（受版本控制的真实文件）。
+- 除以上两个文件外，仓库中**不得**存在其他部署执行脚本。已删除并禁止恢复：
+  `scripts/ops/panji-deploy-remote.sh`、`scripts/deploy_live_runtime.sh`、`scripts/sync_live_runtime.sh`。
+- **禁止**把部署逻辑写在本地脚本的 heredoc 里再经 `bash -s` 从 stdin 执行；
+  **禁止**把部署脚本 `scp` / 管道拷贝到 `/tmp` 后执行。
+  服务器执行的必须是服务器仓库内受版本控制的 `scripts/deploy/panji-deploy.sh`。
+  - 理由：heredoc / `/tmp` 副本无法本地 `bash -n` / shellcheck 静态检查；执行失败时无法定位行号；未加引号的 heredoc 还会在本地被提前变量展开，产生与预期不符的远端脚本。
+- 本地入口在 SSH 调用前必须对 `scripts/deploy/panji-deploy.sh` 执行 `bash -n` 语法预检。
 - **禁止** `scp` 单个业务文件、`docker cp`、容器内改码、`/tmp` 临时脚本改生产等任何绕过正式部署入口的做法（与本文件"禁止 docker cp 和未审计 stdin 脚本"叠加生效）。
 
-### DS-91 禁止按变更文件推断部署范围
+### DS-91 变更范围判定必须基于「上一部署 SHA → 目标 SHA」
 
-- **禁止**在部署脚本中依据 `git diff` 结果决定重启哪些服务（如 `RESTART_BACKEND` / `RESTART_FRONTEND` / `BUILD_IMAGES` 之类的标志位）。
-  - 理由：推断错误时部分服务会静默停留在旧 SHA 且不告警——这正是 2026-08-02 事故的直接成因。
-- 每次部署必须**一次性重建全部无状态服务**，不做任何范围裁剪。
-- **有状态服务（`postgres` / `redis`）必须明确排除**，不参与重建，避免触碰持久化数据。
-- 重建后必须**逐服务**校验其运行代码 SHA（RUNTIME_SHA）等于目标 dev SHA，任一不符即判部署失败。
-- 防回潮：部署脚本中不得存在"按变更文件推断重启范围"的逻辑（单次部署一次性重建全部无状态服务）。
+- 变更分类**必须**使用 `git diff --name-only <上一部署 SHA> <目标 SHA>`，
+  上一部署 SHA 来自 `/etc/market-dev/.panji-deploy-state`。
+  - **禁止**使用 `HEAD~1`：一次部署可能跨多个 commit，`HEAD~1` 会漏判。
+  - 无上一部署记录或该 SHA 本地不可解析时，必须按首次部署处理（全量同步 + migration）。
+- 分类结果只用于决定「是否构建运行环境镜像」「是否执行 migration」「重启哪一组服务」，
+  且必须满足：backend 运行代码变化时重启**全部** Python 服务（backend + 所有 worker），
+  不得只重启 backend。
+- **有状态服务（`postgres` / `redis` / `umami`）必须明确排除**，不参与重启，避免触碰持久化数据。
+- 部署结束必须校验运行代码 SHA（`RUNTIME_SHA` 文件与版本端点 `runtime_git_sha`）
+  等于目标**完整** dev SHA，任一不符即判部署失败并回滚。短 SHA 不作为成功判据。
 
 ### DS-92 镜像构建触发条件（仅在依赖或 Dockerfile 变化时才 build）
 
@@ -278,7 +284,8 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 
 - 构建参数必须与 `docker-compose.prod.yml` 同源（用 `docker compose build` 而非手写 `docker build`），避免构建定义漂移。
 - 盘迹共 **3 个业务镜像**：`backend` / `frontend` / `capture`。全部 `worker-*` 服务复用 `backend` 镜像，不单独构建。
-- **单次部署禁止同时使用 Live Mount 代码和新镜像内置代码**，避免运行时来源不明确；普通变更走 Live Mount，依赖/Dockerfile 变化才走镜像构建，二者不混用。
+- 运行代码始终只来自 Live Mount。依赖/Dockerfile 变化时构建的新镜像只提供运行环境，
+  不得切换为镜像内置业务代码。
 
 ### DS-93 部署互斥与资源门禁
 
@@ -289,7 +296,6 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 ## 分层发布与增量检查点纪律
 
 > 来源：CHANGE-20260729-006
-> 状态：生效（2026-07-29）
 
 ### batch 不是发布边界
 
@@ -335,3 +341,31 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - `publish_history_cross_section` 的 coverage 必须由 DB 统计（`compute_history_coverage`），不接受调用方任意传值；
 - `is_stale` 真源为 `bars_daily.max(trade_date)`，不是 `StockFeatureSnapshot.max(trade_date)`；
 - 读取端（stock_context / market_stocks / watchlist）优先读 publication pointer，无 pointer 时兼容回退 `published_at IS NOT NULL`；有 pointer 后禁止混读不同 run。
+
+## 2026-08-02 收口：通用部署与生产操作纪律（CHANGE-20260802-005 配套）
+
+> 来源：从已删除的工具专属角色文件中提炼的通用规则。
+
+### DS-95 生产只读核验的默认姿势
+
+- 未获本轮明确部署授权时，对生产只允许只读核验：版本端点、健康端点、日志查询、DB 只读查询；
+- 只读核验不得修改任何配置、容器、数据或运行状态；
+- 只读结论必须给出实际命令与输出，不得以推断代替核验。
+
+### DS-96 部署后必须留存证据
+
+- 部署完成后必须记录：目标完整 SHA、运行代码 SHA（`RUNTIME_SHA` 与版本端点 `runtime_git_sha`）、
+  `deployment_mode`、健康与就绪端点结果、本次是否执行 migration；
+- 证据不足时判定为部署未验证，不得写成部署成功。
+
+### DS-97 Migration 门禁
+
+- migration 保持人工门禁，不随部署自动放行到不可逆操作；
+- 任何不可逆 migration 必须在提交说明与 CHANGE 中明确标注，并提供 downgrade 步骤；
+- 不得修改已发布的历史 migration。
+
+### DS-98 生产恢复禁止临时脚本代替代码修复
+
+- 禁止用 `/tmp` Python 脚本、裸 SQL、`docker cp`、stdin 注入等临时手段替代正式代码修复；
+- 发现缺口必须走"代码修复 + 正式测试"，再经正式部署入口生效；
+- 已用临时手段补过的生产状态，必须回滚或转正后才能视为闭环。

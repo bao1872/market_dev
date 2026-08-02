@@ -1,7 +1,6 @@
 # 30 访问与安全
 
-> 来源：AGENTS.md §七.7、§六.7、§六.10
-> 状态：并行验证
+> 来源：AGENTS.md 第 8 节与产品安全合同
 
 ## Capture Token 隔离
 
@@ -25,14 +24,10 @@ Capture Token 只能访问 Capture API。
 
 `8752028@qq.com` 为项目 Owner 账户，任何环境中禁止修改或删除其 email、password_hash、status、角色、权限和订阅，除非用户在当前任务中明确指定字段并授权。清理测试数据前必须先排除此邮箱。
 
-## 生产秘密边界（PLANNED）
-
-> 提议中，尚未在 `AGENTS.md` 确立。
+## 生产秘密边界
 
 - 部署 SSH Key 必须专用，仅限部署目标服务器；
-- SSH Key 必须配合 forced command 限制；
+- SSH Key 的权限必须限制在部署所需最小范围；
 - 部署链路不读取数据库秘密；
 - GitHub Actions secrets 不写入镜像环境变量；
-- 生产数据库秘密只在服务器配置目录中存在，不进入 Git。
-
-> Phase 1 注：本节为未来自动部署阶段提议，当前未实现。
+- 生产数据库秘密只在服务器配置目录中存在，不进入 Git、日志或测试夹具。

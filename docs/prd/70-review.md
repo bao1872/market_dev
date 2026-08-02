@@ -1234,7 +1234,7 @@ Review只传：
 - `docs/maps/30-after-close.md`（pointer和run关系）
 - `docs/maps/40-market-stock-experience.md`（Review→Market→Stock跳转合同）
 - `docs/runbooks/after-close-production-run.md`（review canary/resume/publish）
-- `rules/70-trae-cn.md`（一轮闭环、ledger恢复、页面验收要求）
+- `rules/40-testing-quality.md`（TQ-97 页面验收三类证据、TQ-98 成功判定三要素）
 
 保持：
 
