@@ -52,7 +52,7 @@ export interface MobileIndicatorStageProps {
   /** 图表区域子节点（StrategyChart with isCaptureMode + indicatorView）。
    *    loading/error/mismatch 三态可不传（只渲染舞台外壳 + 居中文案） */
   children?: ReactNode
-  /** 品牌名（默认 "小Z拆市场"） */
+  /** 品牌名（默认 "小Z说股事"） */
   brandName?: string
   /** 品牌副标题（默认 "用数据拆解市场和价格背后的结构"） */
   brandTagline?: string
@@ -95,7 +95,7 @@ export default function MobileIndicatorStage({
   changePercent,
   chartDate,
   children,
-  brandName = '小Z拆市场',
+  brandName = '小Z说股事',
   brandTagline = '用数据拆解市场和价格背后的结构',
   testId,
   captureRoot = true,
