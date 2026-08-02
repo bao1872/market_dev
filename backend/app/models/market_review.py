@@ -328,6 +328,15 @@ class MarketReviewScopeSnapshot(Base):
         nullable=True,
         comment="关联 board_analysis_snapshots.id（行业/概念范围填充）",
     )
+    taxonomy_version: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="该交易日有效 taxonomy version",
+    )
+    taxonomy_compatibility_key: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="taxonomy 兼容序列键",
+    )
+    membership_version: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="该交易日有效 membership version",
+    )
     eligible_count: Mapped[int] = mapped_column(
         Integer(), nullable=False, comment="范围成员总数",
     )
@@ -584,6 +593,30 @@ class MarketReviewSignalAttribution(Base):
     coverage_ratio: Mapped[Decimal | None] = mapped_column(
         Numeric(), nullable=True, comment="覆盖率",
     )
+    source_board_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("board_analysis_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="子范围对应的 Board snapshot",
+    )
+    taxonomy_version: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="子范围 taxonomy version",
+    )
+    taxonomy_compatibility_key: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="子范围 taxonomy 兼容键",
+    )
+    membership_version: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="子范围 PIT membership version",
+    )
+    eligible_count: Mapped[int | None] = mapped_column(
+        Integer(), nullable=True, comment="子范围 PIT eligible_count",
+    )
+    ready_count: Mapped[int | None] = mapped_column(
+        Integer(), nullable=True, comment="子范围 ready_count",
+    )
+    data_quality_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, comment="子范围 readiness/coverage 质量证据",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
@@ -683,10 +716,16 @@ class MarketReviewSignalInstrument(Base):
     fresh_events_payload: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, comment="新鲜事件 payload",
     )
+    contribution_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, comment="P/Q/U/C/V 分项贡献与分母",
+    )
+    role_evidence: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, comment="角色判定结构化证据",
+    )
     source_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         nullable=True,
-        comment="来源快照 ID（stock_feature_snapshot_runs.id）",
+        comment="来源单股快照 ID（stock_feature_snapshots.id）",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
@@ -909,8 +948,9 @@ if __name__ == "__main__":
         "market_review_scope_snapshots": {
             "id", "review_run_id", "trade_date", "scope_type", "scope_key",
             "scope_name", "parent_scope_type", "parent_scope_key",
-            "source_board_snapshot_id", "eligible_count", "ready_count",
-            "coverage_ratio", "status",
+            "source_board_snapshot_id", "taxonomy_version",
+            "taxonomy_compatibility_key", "membership_version",
+            "eligible_count", "ready_count", "coverage_ratio", "status",
             "p_payload", "q_payload", "u_payload", "c_payload", "v_payload",
             "data_quality_json", "created_at", "updated_at",
         },
@@ -926,13 +966,15 @@ if __name__ == "__main__":
             "id", "signal_id", "child_scope_type", "child_scope_key",
             "child_scope_name", "relation_type", "contribution_value",
             "contribution_rank", "metrics_payload", "evidence_payload",
-            "coverage_ratio", "created_at",
+            "coverage_ratio", "source_board_snapshot_id", "taxonomy_version",
+            "taxonomy_compatibility_key", "membership_version",
+            "eligible_count", "ready_count", "data_quality_json", "created_at",
         },
         "market_review_signal_instruments": {
             "id", "signal_id", "instrument_id", "symbol", "name",
             "board_role", "relation_to_scope", "contribution_value",
             "contribution_rank", "first_pyramid_payload", "fresh_events_payload",
-            "source_snapshot_id", "created_at",
+            "contribution_payload", "role_evidence", "source_snapshot_id", "created_at",
         },
         "market_review_trackings": {
             "id", "user_id", "source_signal_id", "tracking_type",

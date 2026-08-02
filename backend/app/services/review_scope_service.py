@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.metric_engine import compute_all_metrics
 from app.domain.review.metric_registry import DEFAULT_REGISTRY
+from app.models.instrument import Instrument
 from app.models.market_review import MarketReviewScopeSnapshot
 from app.services.board_membership_service import (
     PITMembershipUnavailableError,
@@ -94,6 +95,9 @@ class ScopeDefinition:
         parent_scope_type: str | None = None,
         parent_scope_key: str | None = None,
         source_board_snapshot_id: uuid.UUID | None = None,
+        taxonomy_version: str | None = None,
+        taxonomy_compatibility_key: str | None = None,
+        membership_version: str | None = None,
     ) -> None:
         self.scope_type = scope_type
         self.scope_key = scope_key
@@ -101,6 +105,9 @@ class ScopeDefinition:
         self.parent_scope_type = parent_scope_type
         self.parent_scope_key = parent_scope_key
         self.source_board_snapshot_id = source_board_snapshot_id
+        self.taxonomy_version = taxonomy_version
+        self.taxonomy_compatibility_key = taxonomy_compatibility_key
+        self.membership_version = membership_version
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +120,9 @@ class ScopeDefinition:
                 str(self.source_board_snapshot_id)
                 if self.source_board_snapshot_id else None
             ),
+            "taxonomy_version": self.taxonomy_version,
+            "taxonomy_compatibility_key": self.taxonomy_compatibility_key,
+            "membership_version": self.membership_version,
         }
 
 
@@ -148,6 +158,9 @@ async def upsert_scope_snapshot(
         "parent_scope_type": scope.parent_scope_type,
         "parent_scope_key": scope.parent_scope_key,
         "source_board_snapshot_id": scope.source_board_snapshot_id,
+        "taxonomy_version": scope.taxonomy_version,
+        "taxonomy_compatibility_key": scope.taxonomy_compatibility_key,
+        "membership_version": scope.membership_version,
         "eligible_count": eligible_count,
         "ready_count": ready_count,
         "coverage_ratio": Decimal(str(coverage_ratio)),
@@ -505,9 +518,13 @@ async def fetch_member_flat_list(
 
     stmt = (
         select(
+            StockFeatureSnapshot.id,
             StockFeatureSnapshot.instrument_id,
+            Instrument.symbol,
+            Instrument.name,
             StockFeatureSnapshot.summary_payload,
         )
+        .join(Instrument, Instrument.id == StockFeatureSnapshot.instrument_id)
         .where(
             StockFeatureSnapshot.instrument_id.in_(instrument_ids),
             StockFeatureSnapshot.source_run_id == source_core_run_id,
@@ -516,8 +533,11 @@ async def fetch_member_flat_list(
     result = await session.execute(stmt)
     out: list[dict[str, Any]] = []
     for row in result:
-        instrument_id = row[0]
-        summary = row[1] or {}
+        snapshot_id = row[0]
+        instrument_id = row[1]
+        symbol = row[2]
+        name = row[3]
+        summary = row[4] or {}
         if not isinstance(summary, dict):
             continue
         flat = summary.get("first_pyramid_flat")
@@ -525,6 +545,9 @@ async def fetch_member_flat_list(
             # 注入 instrument_id 用于归因
             flat_with_id = dict(flat)
             flat_with_id["_instrument_id"] = str(instrument_id)
+            flat_with_id["_instrument_symbol"] = symbol
+            flat_with_id["_instrument_name"] = name
+            flat_with_id["_snapshot_id"] = snapshot_id
             out.append(flat_with_id)
     return out
 

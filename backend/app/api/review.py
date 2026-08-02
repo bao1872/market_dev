@@ -249,7 +249,19 @@ def _attribution_to_dto(attr: MarketReviewSignalAttribution) -> ReviewAttributio
         contributionRank=attr.contribution_rank,
         metricsPayload=attr.metrics_payload or {},
         evidencePayload=attr.evidence_payload or {},
-        coverageRatio=float(attr.coverage_ratio) if attr.coverage_ratio else None,
+        coverageRatio=(
+            float(attr.coverage_ratio) if attr.coverage_ratio is not None else None
+        ),
+        sourceBoardSnapshotId=(
+            str(attr.source_board_snapshot_id)
+            if attr.source_board_snapshot_id else None
+        ),
+        taxonomyVersion=attr.taxonomy_version,
+        taxonomyCompatibilityKey=attr.taxonomy_compatibility_key,
+        membershipVersion=attr.membership_version,
+        eligibleCount=attr.eligible_count,
+        readyCount=attr.ready_count,
+        dataQuality=attr.data_quality_json or {},
         createdAt=attr.created_at.isoformat() if attr.created_at else None,
     )
 
@@ -271,6 +283,8 @@ def _instrument_to_dto(inst: MarketReviewSignalInstrument) -> ReviewInstrumentRe
         contributionRank=inst.contribution_rank,
         firstPyramidPayload=inst.first_pyramid_payload or {},
         freshEventsPayload=inst.fresh_events_payload or {},
+        contributionPayload=inst.contribution_payload or {},
+        roleEvidence=inst.role_evidence or {},
         sourceSnapshotId=(
             str(inst.source_snapshot_id) if inst.source_snapshot_id else None
         ),

@@ -312,6 +312,13 @@ class ReviewAttributionResponse(BaseModel):
         default_factory=dict, description="证据 payload",
     )
     coverageRatio: float | None = Field(None, description="覆盖率")
+    sourceBoardSnapshotId: str | None = Field(None, description="Board snapshot ID")
+    taxonomyVersion: str | None = Field(None, description="taxonomy version")
+    taxonomyCompatibilityKey: str | None = Field(None, description="taxonomy compatibility key")
+    membershipVersion: str | None = Field(None, description="PIT membership version")
+    eligibleCount: int | None = Field(None, description="PIT eligible count")
+    readyCount: int | None = Field(None, description="ready count")
+    dataQuality: dict[str, Any] = Field(default_factory=dict)
     createdAt: str | None = Field(None, description="创建时间 ISO")
 
 
@@ -355,8 +362,14 @@ class ReviewInstrumentResponse(BaseModel):
     freshEventsPayload: dict[str, Any] = Field(
         default_factory=dict, description="新鲜事件 payload",
     )
+    contributionPayload: dict[str, Any] = Field(
+        default_factory=dict, description="P/Q/U/C/V 分项贡献与分母",
+    )
+    roleEvidence: dict[str, Any] = Field(
+        default_factory=dict, description="角色判定结构化证据",
+    )
     sourceSnapshotId: str | None = Field(
-        None, description="来源快照 ID（stock_feature_snapshot_runs.id）",
+        None, description="来源单股快照 ID（stock_feature_snapshots.id）",
     )
     createdAt: str | None = Field(None, description="创建时间 ISO")
 

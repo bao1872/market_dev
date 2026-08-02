@@ -612,6 +612,9 @@ async def _list_industry_l1_scopes(
                 scope_key=str(snap.board_id),
                 scope_name=snap.board_name,
                 source_board_snapshot_id=snap.id,
+                taxonomy_version=snap.taxonomy_version,
+                taxonomy_compatibility_key=snap.taxonomy_compatibility_key,
+                membership_version=snap.membership_version,
             ),
         )
     return out
@@ -630,6 +633,9 @@ async def _list_major_index_scopes(
             scope_type="major_index",
             scope_key=definition.universe_key,
             scope_name=definition.name,
+            taxonomy_version=definition.version,
+            taxonomy_compatibility_key=definition.compatibility_key,
+            membership_version=definition.membership_version,
         )
         for definition in definitions
     ]
@@ -648,6 +654,9 @@ async def _list_style_scopes(
             scope_type="style",
             scope_key=definition.universe_key,
             scope_name=definition.name,
+            taxonomy_version=definition.version,
+            taxonomy_compatibility_key=definition.compatibility_key,
+            membership_version=definition.membership_version,
         )
         for definition in definitions
     ]
@@ -1014,6 +1023,7 @@ async def _compute_scope_pipeline(
                 parent_metrics=parent_metrics,
                 parent_ready_count=parent_ready_count,
                 source_core_run_id=run.source_core_run_id,
+                source_board_run_id=run.source_board_run_id,
             )
             await compute_signal_instruments(
                 session,

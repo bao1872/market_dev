@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -30,12 +31,19 @@ from app.domain.review.attribution_engine import (
     aggregate_child_scope_attributions,
     aggregate_instrument_attributions,
 )
+from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
+from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewSignal,
     MarketReviewSignalAttribution,
     MarketReviewSignalInstrument,
 )
+from app.services.board_membership_service import (
+    PITMembershipUnavailableError,
+    resolve_board_membership_at,
+)
 from app.services.review_scope_service import (
+    SCOPE_PUBLISH_MIN_COVERAGE,
     fetch_member_flat_list,
     resolve_scope_members,
 )
@@ -46,6 +54,22 @@ logger = logging.getLogger("review_attribution_service")
 DEFAULT_TOP_N_ATTRIBUTIONS = 20
 # 个股归因默认保留前 N 项
 DEFAULT_TOP_N_INSTRUMENTS = 30
+MIN_CHILD_READY_COUNT = 3
+
+
+@dataclass(frozen=True)
+class ChildScopeCandidate:
+    """A PIT child scope with the exact Board batch evidence used for attribution."""
+
+    scope_type: str
+    scope_key: str
+    scope_name: str
+    relation_type: str
+    member_ids: tuple[uuid.UUID, ...]
+    source_board_snapshot_id: uuid.UUID
+    taxonomy_version: str
+    taxonomy_compatibility_key: str
+    membership_version: str
 
 
 # =============================================================================
@@ -60,76 +84,96 @@ async def compute_signal_attributions(
     parent_metrics: dict[str, dict[str, Any]],
     parent_ready_count: int,
     source_core_run_id: uuid.UUID,
-    child_scope_types: tuple[str, ...] = ("industry_l2", "concept"),
-    top_n: int = DEFAULT_TOP_N_ATTRIBUTIONS,
+    source_board_run_id: uuid.UUID,
+    child_scope_types: tuple[str, ...] = ("industry_l2", "industry_l3", "concept"),
+    top_n: int | None = None,
 ) -> list[MarketReviewSignalAttribution]:
-    """为信号计算子范围归因并持久化。
+    """Compute every eligible second-level attribution using PIT memberships.
 
-    Args:
-        session: 异步 DB 会话（caller 控制 commit）
-        signal: MarketReviewSignal ORM 对象
-        parent_metrics: 父范围 P/Q/U/C/V payload
-        parent_ready_count: 父范围有效成员数
-        source_core_run_id: stock_core run_id（用于读取成员 flat）
-        child_scope_types: 下钻子范围类型（默认 industry_l2 + concept）
-        top_n: 保留前 N 项（按绝对贡献排序）
-
-    Returns:
-        持久化的 MarketReviewSignalAttribution 列表
+    ``top_n`` is retained only for explicit administrative sampling. Normal runs persist
+    every result so API pagination can retrieve both positive and negative contributors.
     """
-    # 收集子范围
-    child_scopes_data: list[dict[str, Any]] = []
-    for child_scope_type in child_scope_types:
-        # 简化：这里通过 board_analysis 表获取子范围列表
-        # 实际实现需要根据 parent_scope_type 查询直接子范围和关联概念
-        child_keys = await _list_child_scope_keys(
-            session, signal.scope_type, signal.scope_key, child_scope_type,
-        )
-        for child_key, child_name in child_keys:
-            instrument_ids, _ = await resolve_scope_members(
-                session, child_scope_type, child_key, trade_date=signal.trade_date,
-            )
-            if not instrument_ids:
-                continue
-            flat_list = await fetch_member_flat_list(
-                session, instrument_ids, source_core_run_id,
-            )
-            if not flat_list:
-                continue
-            child_scopes_data.append({
-                "scope_type": child_scope_type,
-                "scope_key": child_key,
-                "scope_name": child_name,
-                "relation_type": _relation_type(signal.scope_type, child_scope_type),
-                "flat_list": flat_list,
-                "ready_count": sum(
-                    1 for f in flat_list
-                    if f and f.get("fp_trend_direction") is not None
-                ),
-            })
-
-    if not child_scopes_data:
+    parent_ids, _ = await resolve_scope_members(
+        session,
+        signal.scope_type,
+        signal.scope_key,
+        trade_date=signal.trade_date,
+    )
+    if not parent_ids:
+        await _delete_attributions(session, signal.id)
         return []
 
-    # 计算归因
+    child_scopes_data: list[dict[str, Any]] = []
+    for child_scope_type in child_scope_types:
+        candidates = await _list_child_scope_keys(
+            session,
+            signal.scope_type,
+            signal.scope_key,
+            child_scope_type,
+            trade_date=signal.trade_date,
+            source_board_run_id=source_board_run_id,
+            parent_instrument_ids=parent_ids,
+        )
+        for child in candidates:
+            eligible_count = len(child.member_ids)
+            if eligible_count == 0:
+                continue
+            flat_list = await fetch_member_flat_list(
+                session, list(child.member_ids), source_core_run_id,
+            )
+            ready_count = sum(
+                1 for flat in flat_list
+                if flat and flat.get("fp_trend_direction") is not None
+            )
+            coverage_ratio = ready_count / eligible_count
+            data_quality = {
+                "status": "ready",
+                "eligible_count": eligible_count,
+                "ready_count": ready_count,
+                "coverage_ratio": coverage_ratio,
+                "minimum_ready_count": MIN_CHILD_READY_COUNT,
+                "minimum_coverage": SCOPE_PUBLISH_MIN_COVERAGE,
+            }
+            if child_scope_type == "concept" and (
+                ready_count < MIN_CHILD_READY_COUNT
+                or coverage_ratio < SCOPE_PUBLISH_MIN_COVERAGE
+            ):
+                continue
+            child_scopes_data.append({
+                "scope_type": child.scope_type,
+                "scope_key": child.scope_key,
+                "scope_name": child.scope_name,
+                "relation_type": child.relation_type,
+                "flat_list": flat_list,
+                "eligible_count": eligible_count,
+                "ready_count": ready_count,
+                "coverage_ratio": coverage_ratio,
+                "source_board_snapshot_id": child.source_board_snapshot_id,
+                "taxonomy_version": child.taxonomy_version,
+                "taxonomy_compatibility_key": child.taxonomy_compatibility_key,
+                "membership_version": child.membership_version,
+                "parent_scope_type": signal.scope_type,
+                "parent_scope_key": signal.scope_key,
+                "data_quality": data_quality,
+            })
+
     attributions = aggregate_child_scope_attributions(
         parent_metrics, parent_ready_count, child_scopes_data,
     )
+    if top_n is not None:
+        attributions = attributions[:top_n]
 
-    # 保留前 N 项（绝对贡献排序）
-    attributions = attributions[:top_n]
-
-    # 持久化（先删除旧归因，再插入；幂等）
     await _delete_attributions(session, signal.id)
     created: list[MarketReviewSignalAttribution] = []
     for attr in attributions:
-        record = await _insert_attribution(session, signal.id, attr)
-        created.append(record)
+        created.append(await _insert_attribution(session, signal.id, attr))
 
     logger.info(
         "[ReviewAttribution] signal=%s/%s child_scopes=%d attributions=%d",
-        signal.scope_type, signal.signal_type,
-        len(child_scopes_data), len(created),
+        signal.scope_type,
+        signal.signal_type,
+        len(child_scopes_data),
+        len(created),
     )
     return created
 
@@ -157,6 +201,13 @@ async def _insert_attribution(
             Decimal(str(attr["coverage_ratio"]))
             if attr.get("coverage_ratio") is not None else None
         ),
+        source_board_snapshot_id=attr.get("source_board_snapshot_id"),
+        taxonomy_version=attr.get("taxonomy_version"),
+        taxonomy_compatibility_key=attr.get("taxonomy_compatibility_key"),
+        membership_version=attr.get("membership_version"),
+        eligible_count=attr.get("eligible_count"),
+        ready_count=attr.get("ready_count"),
+        data_quality_json=attr.get("data_quality"),
     )
     session.add(record)
     await session.flush()
@@ -180,20 +231,99 @@ async def _list_child_scope_keys(
     parent_scope_type: str,
     parent_scope_key: str,
     child_scope_type: str,
-) -> list[tuple[str, str]]:
-    """列出父范围下的子范围 (key, name) 列表。
+    *,
+    trade_date: Any,
+    source_board_run_id: uuid.UUID,
+    parent_instrument_ids: list[uuid.UUID],
+) -> list[ChildScopeCandidate]:
+    """List all relevant PIT child scopes without first-page truncation.
 
-    简化实现：通过 market_boards 表查询。
-    实际生产需要根据 parent_scope_type 路由（industry_l1 → industry_l2/l3）。
+    Industry parents use the explicit hierarchy. Market/index/style parents use member
+    intersection, and concepts always require a non-empty parent-member intersection.
+    Every returned candidate is tied to the Board snapshot from the source batch.
     """
-    # 简化：返回空列表由调用方决定如何获取子范围
-    # 生产环境需要从 board_analysis_snapshots 或专用映射表读取
-    return []
+    if child_scope_type not in {"industry_l2", "industry_l3", "concept"}:
+        return []
+
+    stmt = (
+        select(MarketBoard, BoardAnalysisSnapshot)
+        .join(
+            BoardAnalysisSnapshot,
+            BoardAnalysisSnapshot.board_id == MarketBoard.id,
+        )
+        .where(
+            MarketBoard.isActive.is_(True),
+            BoardAnalysisSnapshot.trade_date == trade_date,
+            BoardAnalysisSnapshot.board_analysis_run_id == source_board_run_id,
+        )
+    )
+    if child_scope_type == "concept":
+        stmt = stmt.where(MarketBoard.type == "concept")
+    else:
+        level = "L2" if child_scope_type == "industry_l2" else "L3"
+        stmt = stmt.where(
+            MarketBoard.type == "industry",
+            MarketBoard.hierarchyLevel == level,
+        )
+        if parent_scope_type in {"industry_l1", "industry_l2"}:
+            try:
+                parent_id = uuid.UUID(parent_scope_key)
+            except ValueError:
+                return []
+            if child_scope_type == "industry_l2":
+                if parent_scope_type != "industry_l1":
+                    return []
+                stmt = stmt.where(MarketBoard.parentBoardId == parent_id)
+            elif parent_scope_type == "industry_l2":
+                stmt = stmt.where(MarketBoard.parentBoardId == parent_id)
+            else:
+                l2_ids = select(MarketBoard.id).where(
+                    MarketBoard.parentBoardId == parent_id,
+                    MarketBoard.type == "industry",
+                    MarketBoard.hierarchyLevel == "L2",
+                    MarketBoard.isActive.is_(True),
+                )
+                stmt = stmt.where(MarketBoard.parentBoardId.in_(l2_ids))
+
+    stmt = stmt.order_by(MarketBoard.name.asc(), MarketBoard.id.asc())
+    rows = list((await session.execute(stmt)).all())
+    parent_set = set(parent_instrument_ids)
+    candidates: list[ChildScopeCandidate] = []
+    for board, snapshot in rows:
+        try:
+            membership = await resolve_board_membership_at(
+                session, board.id, trade_date,
+            )
+        except PITMembershipUnavailableError:
+            continue
+        member_ids = tuple(
+            instrument_id
+            for instrument_id in membership.instrument_ids
+            if instrument_id in parent_set
+        )
+        if not member_ids:
+            continue
+        candidates.append(
+            ChildScopeCandidate(
+                scope_type=child_scope_type,
+                scope_key=str(board.id),
+                scope_name=board.name,
+                relation_type=_relation_type(parent_scope_type, child_scope_type),
+                member_ids=member_ids,
+                source_board_snapshot_id=snapshot.id,
+                taxonomy_version=membership.taxonomy_version,
+                taxonomy_compatibility_key=membership.compatibility_key,
+                membership_version=membership.membership_version,
+            ),
+        )
+    return candidates
 
 
 def _relation_type(parent_type: str, child_type: str) -> str:
     """父子范围关系类型。"""
-    if parent_type == "industry_l1" and child_type == "industry_l2":
+    if parent_type == "industry_l1" and child_type in {"industry_l2", "industry_l3"}:
+        return "descendant_industry"
+    if parent_type == "industry_l2" and child_type == "industry_l3":
         return "child_industry"
     if parent_type in ("industry_l1", "industry_l2") and child_type == "concept":
         return "related_concept"
@@ -212,7 +342,7 @@ async def compute_signal_instruments(
     parent_metrics: dict[str, dict[str, Any]],
     parent_ready_count: int,
     source_core_run_id: uuid.UUID,
-    top_n: int = DEFAULT_TOP_N_INSTRUMENTS,
+    top_n: int | None = None,
 ) -> list[MarketReviewSignalInstrument]:
     """为信号计算个股归因并持久化。
 
@@ -252,10 +382,10 @@ async def compute_signal_instruments(
             continue
         instruments_input.append({
             "instrument_id": inst_id,
-            "symbol": flat.get("fp_symbol") or inst_id_str,
-            "name": flat.get("fp_name") or inst_id_str,
+            "symbol": flat.get("_instrument_symbol") or inst_id_str,
+            "name": flat.get("_instrument_name") or inst_id_str,
             "flat": flat,
-            "source_snapshot_id": source_core_run_id,
+            "source_snapshot_id": flat.get("_snapshot_id"),
         })
 
     if not instruments_input:
@@ -266,8 +396,8 @@ async def compute_signal_instruments(
         parent_metrics, parent_ready_count, instruments_input,
     )
 
-    # 保留前 N 项
-    instruments = instruments[:top_n]
+    if top_n is not None:
+        instruments = instruments[:top_n]
 
     # 持久化（先删除旧归因，再插入；幂等）
     await _delete_instruments(session, signal.id)
@@ -303,6 +433,8 @@ async def _insert_instrument(
         contribution_rank=inst.get("contribution_rank"),
         first_pyramid_payload=inst.get("first_pyramid_payload"),
         fresh_events_payload=inst.get("fresh_events_payload"),
+        contribution_payload=inst.get("contribution_payload"),
+        role_evidence=inst.get("role_evidence"),
         source_snapshot_id=inst.get("source_snapshot_id"),
     )
     session.add(record)

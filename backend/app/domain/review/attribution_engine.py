@@ -132,12 +132,31 @@ def aggregate_child_scope_attributions(
                     ready / parent_ready_count
                     if parent_ready_count > 0 else 0.0
                 ),
-                "parent_ready_count": parent_ready_count,
+                "denominator": parent_ready_count,
+                "parent_scope_type": child.get("parent_scope_type"),
+                "parent_scope_key": child.get("parent_scope_key"),
+                "source_board_snapshot_id": str(child["source_board_snapshot_id"]),
+                "relation": child.get("relation_type"),
+                "taxonomy_version": child.get("taxonomy_version"),
+                "taxonomy_compatibility_key": child.get(
+                    "taxonomy_compatibility_key"
+                ),
+                "membership_version": child.get("membership_version"),
                 "child_ready_count": ready,
+                "fresh_events": _aggregate_fresh_events(flat_list),
+                "board_sync": _classify_child_board_sync(
+                    flat_list, parent_metrics,
+                ),
+                "data_quality": child.get("data_quality") or {},
             },
-            "coverage_ratio": (
-                ready / len(flat_list) if flat_list else 0.0
-            ),
+            "coverage_ratio": child.get("coverage_ratio", 0.0),
+            "source_board_snapshot_id": child.get("source_board_snapshot_id"),
+            "taxonomy_version": child.get("taxonomy_version"),
+            "taxonomy_compatibility_key": child.get("taxonomy_compatibility_key"),
+            "membership_version": child.get("membership_version"),
+            "eligible_count": child.get("eligible_count"),
+            "ready_count": ready,
+            "data_quality": child.get("data_quality") or {},
         })
 
     # 按绝对贡献降序排序（PRD §9.1：不得仅按涨幅排序，使用绝对贡献）
@@ -270,10 +289,10 @@ def classify_instrument_board_role(
     if pct <= 30 and trend is Direction.UP:
         return "second_line"
 
-    # 弹性：volume_ratio20 > 1.5 且 |change_pct| 较大（top 30%）
+    # 弹性：量能扩张且动量增强；segment change 不是日收益，禁止用于角色判定。
     vr = _safe_float(flat.get("fp_volume_ratio20"))
-    chg = _safe_float(flat.get("fp_segment_change_pct"))
-    if vr is not None and vr > 1.5 and chg is not None and abs(chg) > 3.0:
+    momentum_change = FirstPyramidSemanticAdapter(flat).momentum_change
+    if vr is not None and vr > 1.5 and momentum_change is MomentumChange.ENHANCING:
         return "elasticity"
 
     # 跟随：排名 30-70% 且 trend != down
@@ -292,27 +311,19 @@ def classify_instrument_relation_to_scope(
     parent_p_value: float | None,
     parent_u_value: float | None,
 ) -> str:
-    """分类个股与板块的关系（PRD §5.6 relation_to_scope 枚举）。
-
-    Args:
-        flat: 成员 first_pyramid_flat
-        parent_p_value: 父范围 P value
-        parent_u_value: 父范围 U value
-
-    Returns:
-        synchronized_strengthening / synchronized_weakening /
-        instrument_leads_scope / scope_strong_instrument_lags /
-        instrument_strong_scope_unsupported / unconfirmed
-    """
-    chg = _safe_float(flat.get("fp_segment_change_pct"))
-    trend = FirstPyramidSemanticAdapter(flat).trend
-
-    # 数据不足时返回 unconfirmed
-    if chg is None or trend is None:
+    """Classify Board synchronization from canonical state, never segment return."""
+    semantics = FirstPyramidSemanticAdapter(flat)
+    if semantics.trend is None:
         return "unconfirmed"
 
-    instrument_strong = chg > 1.0 and trend is Direction.UP
-    instrument_weak = chg < -1.0 or trend is Direction.DOWN
+    instrument_strong = (
+        semantics.trend is Direction.UP
+        and semantics.momentum_change is MomentumChange.ENHANCING
+    )
+    instrument_weak = (
+        semantics.trend is Direction.DOWN
+        or semantics.momentum_change is MomentumChange.WEAKENING
+    )
     scope_strong = parent_p_value is not None and parent_p_value >= 60
     scope_weak = parent_p_value is not None and parent_p_value < 40
 
@@ -321,13 +332,10 @@ def classify_instrument_relation_to_scope(
     if instrument_weak and scope_weak:
         return "synchronized_weakening"
     if instrument_strong and scope_weak:
-        # 个股强但板块弱：领先
         return "instrument_leads_scope"
     if instrument_weak and scope_strong:
-        # 板块强但个股弱：滞后
         return "scope_strong_instrument_lags"
     if instrument_strong and parent_u_value is not None and parent_u_value < 50:
-        # 个股强但板块参与度低：无支撑
         return "instrument_strong_scope_unsupported"
     return "unconfirmed"
 
@@ -398,9 +406,71 @@ def aggregate_instrument_attributions(
         )
         r["first_pyramid_payload"] = _extract_first_pyramid_summary(r["flat"])
         r["fresh_events_payload"] = _extract_fresh_events(r["flat"])
+        r["contribution_payload"] = {
+            "components": r["contribution_breakdown"],
+            "denominator": parent_ready_count,
+        }
+        r["role_evidence"] = _build_role_evidence(
+            r["flat"], i, len(results), r["contribution_breakdown"],
+        )
 
     return results
 
+
+
+def _aggregate_fresh_events(flat_list: list[dict[str, Any]]) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    for flat in flat_list:
+        instrument_id = flat.get("_instrument_id")
+        for event in _extract_fresh_events(flat)["events"]:
+            events.append({**event, "instrument_id": instrument_id})
+    return {"events": events, "count": len(events)}
+
+
+def _classify_child_board_sync(
+    flat_list: list[dict[str, Any]],
+    parent_metrics: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    directions = [FirstPyramidSemanticAdapter(flat).trend for flat in flat_list]
+    comparable = [direction for direction in directions if direction is not None]
+    if not comparable:
+        return {"state": "unconfirmed", "comparable_count": 0}
+    up_ratio = sum(direction is Direction.UP for direction in comparable) / len(comparable)
+    down_ratio = sum(direction is Direction.DOWN for direction in comparable) / len(comparable)
+    parent_p = _safe_float((parent_metrics.get("P") or {}).get("value"))
+    if parent_p is None:
+        state = "unconfirmed"
+    elif (parent_p >= 60 and up_ratio >= 0.6) or (parent_p < 40 and down_ratio >= 0.6):
+        state = "synchronized"
+    else:
+        state = "divergent"
+    return {
+        "state": state,
+        "up_ratio": up_ratio,
+        "down_ratio": down_ratio,
+        "comparable_count": len(comparable),
+    }
+
+
+def _build_role_evidence(
+    flat: dict[str, Any],
+    rank: int,
+    total: int,
+    contributions: dict[str, float | None],
+) -> dict[str, Any]:
+    semantics = FirstPyramidSemanticAdapter(flat)
+    return {
+        "rank": rank,
+        "total": total,
+        "rank_percentile": rank / max(1, total),
+        "trend": semantics.trend.value if semantics.trend is not None else None,
+        "momentum_change": (
+            semantics.momentum_change.value
+            if semantics.momentum_change is not None else None
+        ),
+        "volume_ratio20": _safe_float(flat.get("fp_volume_ratio20")),
+        "component_contributions": contributions,
+    }
 
 def _extract_first_pyramid_summary(flat: dict[str, Any]) -> dict[str, Any]:
     """提取成员第一金字塔摘要 payload（PRD §14.6 个股验证表字段）。"""
