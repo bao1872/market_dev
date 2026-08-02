@@ -37,8 +37,12 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import auction as auction_api
-from app.schemas.invitation import CapabilityGrant, InviteCodeCreate
-from app.schemas.invitation import InviteCodeListItem, InviteCodeResponse
+from app.schemas.invitation import (
+    CapabilityGrant,
+    InviteCodeCreate,
+    InviteCodeListItem,
+    InviteCodeResponse,
+)
 from app.services.access_control_service import (
     AccessContext,
     _infer_capabilities_from_plan,

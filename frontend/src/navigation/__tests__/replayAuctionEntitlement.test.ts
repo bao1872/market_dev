@@ -130,7 +130,7 @@ test('research_replay 中文标签为「复盘与竞价」', () => {
 
 test('邀请码创建结果显示实际权限组合含「复盘与竞价」', () => {
   const text = formatCapabilityGrants([
-    { capability: 'self_selection', months: 1, watchlist_limit: 20 },
+    { capability: 'self_selection', months: 1 },
     { capability: 'market_data', months: 1 },
     { capability: 'research_replay', months: 1 },
   ])
@@ -140,7 +140,7 @@ test('邀请码创建结果显示实际权限组合含「复盘与竞价」', ()
 test('邀请码列表按固定顺序展示，后端顺序变化不影响结果', () => {
   const text = formatCapabilityGrants([
     { capability: 'research_replay', months: 1 },
-    { capability: 'self_selection', months: 1, watchlist_limit: 20 },
+    { capability: 'self_selection', months: 1 },
   ])
   assert.equal(text, '自选管理 · 复盘与竞价')
 })
