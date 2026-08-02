@@ -1,6 +1,6 @@
 """Capture Snapshot API 测试（Phase C Task C.11.2）。
 
-测试 GET /api/v1/capture/stocks/{instrument_id}/snapshot 端点：
+测试 GET /v1/capture/stocks/{instrument_id}/snapshot 端点：
 1. 有效 Capture Token + 数据正常 → 返回完整快照（instrument/bars/indicators/events）
 2. instrument_id 与 token 不匹配 → 返回 403
 3. 无效 token → 返回 401
@@ -194,7 +194,7 @@ class TestCaptureSnapshot:
             new=AsyncMock(return_value=_make_snapshot_result(bars_result, indicators_data)),
         ):
             resp = await client.get(
-                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+                f"/v1/capture/stocks/{test_instrument.id}/snapshot",
                 headers=headers,
             )
 
@@ -266,7 +266,7 @@ class TestCaptureSnapshot:
             new=spy_df,
         ):
             resp = await client.get(
-                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                f"/v1/capture/stocks/{test_instrument.id}/snapshot"
                 "?timeframe=15m&force_refresh=1&capture=1",
                 headers=headers,
             )
@@ -312,7 +312,7 @@ class TestCaptureSnapshot:
         headers = _capture_token_headers(user.id, other_id)
 
         resp = await client.get(
-            f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+            f"/v1/capture/stocks/{test_instrument.id}/snapshot",
             headers=headers,
         )
 
@@ -327,7 +327,7 @@ class TestCaptureSnapshot:
         client, _ = capture_client
 
         resp = await client.get(
-            f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+            f"/v1/capture/stocks/{test_instrument.id}/snapshot",
             headers={"Authorization": "Bearer invalid-token-string"},
         )
 
@@ -354,7 +354,7 @@ class TestCaptureSnapshot:
         headers = {"Authorization": f"Bearer {access_token}"}
 
         resp = await client.get(
-            f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+            f"/v1/capture/stocks/{test_instrument.id}/snapshot",
             headers=headers,
         )
 
@@ -396,7 +396,7 @@ class TestCaptureSnapshot:
             new=AsyncMock(return_value=_make_snapshot_result(bars_result, indicators_data)),
         ):
             resp = await client.get(
-                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot?token={token}",
+                f"/v1/capture/stocks/{test_instrument.id}/snapshot?token={token}",
             )
 
         assert resp.status_code == 200, f"响应体: {resp.text}"
@@ -425,7 +425,7 @@ class TestCaptureSnapshot:
         headers = _capture_token_headers(user.id, fake_instrument_id)
 
         resp = await client.get(
-            f"/api/v1/capture/stocks/{fake_instrument_id}/snapshot",
+            f"/v1/capture/stocks/{fake_instrument_id}/snapshot",
             headers=headers,
         )
 
@@ -468,7 +468,7 @@ class TestCaptureSnapshot:
             new=spy_snapshot,
         ):
             resp = await client.get(
-                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                f"/v1/capture/stocks/{test_instrument.id}/snapshot"
                 "?indicator_view=smc",
                 headers=headers,
             )
@@ -519,7 +519,7 @@ class TestCaptureSnapshot:
             new=spy_snapshot,
         ):
             resp = await client.get(
-                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                f"/v1/capture/stocks/{test_instrument.id}/snapshot"
                 "?indicator_view=node_cluster",
                 headers=headers,
             )
@@ -568,7 +568,7 @@ class TestCaptureSnapshot:
             new=spy_snapshot,
         ):
             resp = await client.get(
-                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                f"/v1/capture/stocks/{test_instrument.id}/snapshot"
                 "?indicator_view=bollinger",
                 headers=headers,
             )
@@ -613,7 +613,7 @@ class TestCaptureSnapshot:
             new=AsyncMock(return_value=_make_snapshot_result(bars_result, indicators_data)),
         ):
             resp = await client.get(
-                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot"
+                f"/v1/capture/stocks/{test_instrument.id}/snapshot"
                 "?indicator_view=invalid_view",
                 headers=headers,
             )
@@ -655,7 +655,7 @@ class TestCaptureSnapshot:
             new=AsyncMock(return_value=_make_snapshot_result(bars_result, indicators_data)),
         ):
             resp = await client.get(
-                f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+                f"/v1/capture/stocks/{test_instrument.id}/snapshot",
                 headers=headers,
             )
 

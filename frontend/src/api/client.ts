@@ -81,7 +81,7 @@ async function refreshTokenSingleton(): Promise<string> {
       const refreshToken = getRefreshToken()
       if (!refreshToken) throw new Error('No refresh token available')
       // 使用 publicApiClient 调用，绕过 apiClient 拦截器，避免 refresh 请求 401 又触发刷新
-      const response = await publicApiClient.post('/auth/refresh', {
+      const response = await publicApiClient.post('/v1/auth/refresh', {
         refresh_token: refreshToken,
       })
       const { access_token, refresh_token: new_refresh_token } = response.data

@@ -165,7 +165,7 @@ class TestStockDetailFeishuManualSend:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={},
                     )
@@ -202,7 +202,7 @@ class TestStockDetailFeishuManualSend:
             transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
-                    f"/instruments/{test_instrument.id}/send-feishu",
+                    f"/v1/instruments/{test_instrument.id}/send-feishu",
                     headers=_auth_headers(test_user.id),
                     json={},
                 )
@@ -219,7 +219,7 @@ class TestStockDetailFeishuManualSend:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/instruments/{test_instrument.id}/send-feishu",
+                f"/v1/instruments/{test_instrument.id}/send-feishu",
                 json={},
             )
         assert response.status_code == 401
@@ -237,7 +237,7 @@ class TestStockDetailFeishuManualSend:
             transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
-                    f"/instruments/{fake_instrument_id}/send-feishu",
+                    f"/v1/instruments/{fake_instrument_id}/send-feishu",
                     headers=_auth_headers(user.id),
                     json={},
                 )
@@ -290,7 +290,7 @@ class TestStockDetailFeishuMemoAndTargetChannel:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={},
                     )
@@ -360,7 +360,7 @@ class TestStockDetailFeishuMemoAndTargetChannel:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={},
                     )
@@ -433,7 +433,7 @@ class TestStockDetailFeishuStatus:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     create_resp = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={},
                     )
@@ -441,7 +441,7 @@ class TestStockDetailFeishuStatus:
                     test_run_id = create_resp.json()["test_run_id"]
 
                     status_resp = await client.get(
-                        f"/stock-detail-feishu/{test_run_id}/status",
+                        f"/v1/stock-detail-feishu/{test_run_id}/status",
                         headers=_auth_headers(user.id),
                     )
 
@@ -501,7 +501,7 @@ class TestStockDetailFeishuCapturePayload:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={},
                     )
@@ -580,7 +580,7 @@ class TestStockDetailFeishuIndicatorView:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={"indicator_view": "bollinger"},
                     )
@@ -645,7 +645,7 @@ class TestStockDetailFeishuIndicatorView:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={"indicator_view": "smc"},
                     )
@@ -709,7 +709,7 @@ class TestStockDetailFeishuIndicatorView:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={"indicator_view": "node_cluster"},
                     )
@@ -773,7 +773,7 @@ class TestStockDetailFeishuIndicatorView:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={},
                     )
@@ -844,7 +844,7 @@ class TestStockDetailFeishuIndicatorView:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={"indicator_view": "invalid_view"},
                     )
@@ -910,7 +910,7 @@ class TestStockDetailFeishuIndicatorView:
                 transport = make_asgi_transport(app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        f"/instruments/{test_instrument.id}/send-feishu",
+                        f"/v1/instruments/{test_instrument.id}/send-feishu",
                         headers=_auth_headers(user.id),
                         json={"indicator_view": "bollinger"},
                     )

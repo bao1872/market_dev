@@ -79,7 +79,7 @@ async def test_login_success(
     )
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "login_ok@example.com", "password": "password123"},
     )
     assert response.status_code == 200
@@ -103,7 +103,7 @@ async def test_login_wrong_password(
     )
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "wrong_pwd@example.com", "password": "wrong-password"},
     )
     assert response.status_code == 401
@@ -114,7 +114,7 @@ async def test_login_wrong_password(
 async def test_login_nonexistent_user(client: httpx.AsyncClient) -> None:
     """不存在用户登录失败（401，统一错误信息）。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "nobody@example.com", "password": "any-password-123"},
     )
     assert response.status_code == 401
@@ -135,7 +135,7 @@ async def test_login_disabled_user(
     )
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "disabled_login@example.com", "password": "password123"},
     )
     assert response.status_code == 401
@@ -155,7 +155,7 @@ async def test_login_without_membership_subscription_active_false(
     )
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "no_member@example.com", "password": "password123"},
     )
     assert response.status_code == 200
@@ -186,7 +186,7 @@ async def test_login_expired_subscription_not_modify_status(
     await db_session.commit()
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "expired_member@example.com", "password": "password123"},
     )
     assert response.status_code == 200
@@ -218,7 +218,7 @@ async def test_login_db_error_returns_500(
         mock_ctx.side_effect = SQLAlchemyError("simulated db failure")
 
         response = await client.post(
-            "/auth/login",
+            "/v1/auth/login",
             json={"email": "db_error@example.com", "password": "password123"},
         )
 
@@ -243,7 +243,7 @@ async def test_login_invalid_password_hash_returns_401(
     await db_session.commit()
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "bad_hash@example.com", "password": "any-password"},
     )
     assert response.status_code == 401
@@ -264,7 +264,7 @@ async def test_login_response_contains_access_profile_fields(
 ) -> None:
     """登录成功后响应 JSON 包含全部 10 个 AccessProfile 字段 + 4 个 token 字段。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "admin@example.com", "password": "admin-password-123"},
     )
     assert response.status_code == 200
@@ -281,13 +281,13 @@ async def test_login_response_admin_next_route(
     client: httpx.AsyncClient,
     admin_user: User,
 ) -> None:
-    """admin 登录 next_route='/admin/overview'。"""
+    """admin 登录 next_route='/v1/admin/overview'。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "admin@example.com", "password": "admin-password-123"},
     )
     assert response.status_code == 200
-    assert response.json()["next_route"] == "/admin/overview"
+    assert response.json()["next_route"] == "/v1/admin/overview"
 
 
 @pytest.mark.asyncio
@@ -311,7 +311,7 @@ async def test_login_response_member_active_next_route(
     await db_session.commit()
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "member_active@example.com", "password": "password123"},
     )
     assert response.status_code == 200
@@ -339,7 +339,7 @@ async def test_login_response_member_expired_next_route(
     await db_session.commit()
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "member_expired@example.com", "password": "password123"},
     )
     assert response.status_code == 200
@@ -353,7 +353,7 @@ async def test_login_response_no_membership_expired_field(
 ) -> None:
     """响应不再包含 membership_expired 字段（已被 subscription_active 替代）。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "admin@example.com", "password": "admin-password-123"},
     )
     assert response.status_code == 200
@@ -367,7 +367,7 @@ async def test_login_response_admin_subscription_required_false(
 ) -> None:
     """admin 的 subscription_required=False（admin 不需要订阅）。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "admin@example.com", "password": "admin-password-123"},
     )
     assert response.status_code == 200
@@ -397,7 +397,7 @@ async def test_login_response_member_subscription_required_true(
     await db_session.commit()
 
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "member_req@example.com", "password": "password123"},
     )
     assert response.status_code == 200

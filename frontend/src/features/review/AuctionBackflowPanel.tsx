@@ -5,7 +5,7 @@
 // - 新鲜度：anchor_items 按 freshness 桶聚合（today/3d/7d/30d/stale）
 // - 集中度：market scope 的 HHI、top3/5、leader_median_gap；top3 行业同字段
 //
-// 数据来源：GET /api/v1/auction/backflow/{trade_date}
+// 数据来源：GET /v1/auction/backflow/{trade_date}
 // 触发：用户在 /review 页面切换到 "竞价回流" Tab，或独立 section 渲染
 // 前端不重算业务结论，只展示后端聚合结果。
 //

@@ -23,7 +23,7 @@ from app.models.calendar import TradingCalendar
 from app.schemas.calendar import CalendarListResponse, CalendarResponse, TradingDayResponse
 from app.services.calendar_service import is_trading_day_async
 
-router = APIRouter(prefix="/calendar", tags=["calendar"])
+router = APIRouter(prefix="/v1/calendar", tags=["calendar"])
 
 
 @router.get("", response_model=CalendarListResponse)

@@ -1,5 +1,5 @@
-// [内测申请] - 描述: 站内内测申请公开 API（无需登录），对应后端 POST /public/beta-applications
-// publicApiClient baseURL=/api，Vite 代理去掉 /api 前缀转发到后端 8000，后端路由为 /public/beta-applications
+// [内测申请] - 描述: 站内内测申请公开 API（无需登录），对应后端 POST /v1/public/beta-applications
+// publicApiClient baseURL=/api，Vite 代理去掉 /api 前缀转发到后端 8000，后端路由为 /v1/public/beta-applications
 import { publicApiClient } from './client'
 
 /** 使用理由枚举（与后端 reason_code 对齐） */
@@ -31,7 +31,7 @@ export async function submitBetaApplication(
   payload: BetaApplicationRequest,
 ): Promise<BetaApplicationResponse> {
   const { data } = await publicApiClient.post<BetaApplicationResponse>(
-    '/public/beta-applications',
+    '/v1/public/beta-applications',
     payload,
   )
   return data

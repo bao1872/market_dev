@@ -78,7 +78,7 @@ def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
 async def test_login_success_admin(client: httpx.AsyncClient, auth_users: dict[str, User]) -> None:
     """测试管理员登录成功。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "admin@example.com", "password": "admin-password-123"},
     )
     assert response.status_code == 200
@@ -93,7 +93,7 @@ async def test_login_success_admin(client: httpx.AsyncClient, auth_users: dict[s
 async def test_login_success_normal_user(client: httpx.AsyncClient, auth_users: dict[str, User]) -> None:
     """测试普通用户登录成功。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "user@example.com", "password": "user-password-123"},
     )
     assert response.status_code == 200
@@ -105,7 +105,7 @@ async def test_login_success_normal_user(client: httpx.AsyncClient, auth_users: 
 async def test_login_wrong_password(client: httpx.AsyncClient, auth_users: dict[str, User]) -> None:
     """测试密码错误登录失败（401）。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "admin@example.com", "password": "wrong-password"},
     )
     assert response.status_code == 401
@@ -116,7 +116,7 @@ async def test_login_wrong_password(client: httpx.AsyncClient, auth_users: dict[
 async def test_login_nonexistent_user(client: httpx.AsyncClient) -> None:
     """测试不存在的用户登录失败（401，统一错误信息避免泄露用户是否存在）。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "nobody@example.com", "password": "any-password-123"},
     )
     assert response.status_code == 401
@@ -127,7 +127,7 @@ async def test_login_nonexistent_user(client: httpx.AsyncClient) -> None:
 async def test_login_disabled_user(client: httpx.AsyncClient, auth_users: dict[str, User]) -> None:
     """测试被禁用用户登录失败（401）。"""
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={
             "email": "disabled@example.com",
             "password": "disabled-password-123",
@@ -149,7 +149,7 @@ async def test_refresh_token_success(client: httpx.AsyncClient, auth_users: dict
     rtoken = create_refresh_token(str(admin_user.id))
 
     response = await client.post(
-        "/auth/refresh",
+        "/v1/auth/refresh",
         json={"refresh_token": rtoken},
     )
     assert response.status_code == 200
@@ -174,7 +174,7 @@ async def test_refresh_token_with_access_token_fails(client: httpx.AsyncClient, 
     atoken = create_access_token(str(admin_user.id))
 
     response = await client.post(
-        "/auth/refresh",
+        "/v1/auth/refresh",
         json={"refresh_token": atoken},
     )
     assert response.status_code == 401
@@ -185,7 +185,7 @@ async def test_refresh_token_with_access_token_fails(client: httpx.AsyncClient, 
 async def test_refresh_token_invalid(client: httpx.AsyncClient) -> None:
     """测试使用无效 refresh token 刷新失败（401）。"""
     response = await client.post(
-        "/auth/refresh",
+        "/v1/auth/refresh",
         json={"refresh_token": "invalid-token-string"},
     )
     assert response.status_code == 401
@@ -202,7 +202,7 @@ async def test_get_me_success(client: httpx.AsyncClient, auth_users: dict[str, U
     admin_user = auth_users["admin"]
     headers = _auth_headers(admin_user.id)
 
-    response = await client.get("/me", headers=headers)
+    response = await client.get("/v1/me", headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert data["email"] == "admin@example.com"
@@ -214,7 +214,7 @@ async def test_get_me_success(client: httpx.AsyncClient, auth_users: dict[str, U
 @pytest.mark.asyncio
 async def test_get_me_no_token(client: httpx.AsyncClient) -> None:
     """测试无 token 访问 /me 被拒绝（401/403）。"""
-    response = await client.get("/me")
+    response = await client.get("/v1/me")
     assert response.status_code in (401, 403)
 
 
@@ -222,7 +222,7 @@ async def test_get_me_no_token(client: httpx.AsyncClient) -> None:
 async def test_get_me_invalid_token(client: httpx.AsyncClient) -> None:
     """测试无效 token 访问 /me 被拒绝（401）。"""
     response = await client.get(
-        "/me", headers={"Authorization": "Bearer invalid-token"}
+        "/v1/me", headers={"Authorization": "Bearer invalid-token"}
     )
     assert response.status_code == 401
 
@@ -233,7 +233,7 @@ async def test_get_me_disabled_user(client: httpx.AsyncClient, auth_users: dict[
     disabled_user = auth_users["disabled"]
     headers = _auth_headers(disabled_user.id)
 
-    response = await client.get("/me", headers=headers)
+    response = await client.get("/v1/me", headers=headers)
     assert response.status_code == 403
     assert "非 active" in response.json()["detail"]
 
@@ -256,7 +256,7 @@ async def test_user_id_from_context_not_body(client: httpx.AsyncClient, auth_use
 
     # 用 admin 的 token 访问 /me，即使 body 中传入 normal_user 的 ID
     # GET 请求无 body，但 /me 端点完全依赖 token，不接受任何 user_id 输入
-    response = await client.get("/me", headers=headers)
+    response = await client.get("/v1/me", headers=headers)
     assert response.status_code == 200
     data = response.json()
     # 必须返回 admin 用户，而非其他用户
@@ -277,12 +277,12 @@ async def test_get_current_user_uses_token_sub(client: httpx.AsyncClient, auth_u
 
     # admin token 应返回 admin 用户
     admin_headers = _auth_headers(admin_user.id)
-    admin_resp = await client.get("/me", headers=admin_headers)
+    admin_resp = await client.get("/v1/me", headers=admin_headers)
     assert admin_resp.json()["email"] == "admin@example.com"
 
     # normal token 应返回 normal 用户
     normal_headers = _auth_headers(normal_user.id)
-    normal_resp = await client.get("/me", headers=normal_headers)
+    normal_resp = await client.get("/v1/me", headers=normal_headers)
     assert normal_resp.json()["email"] == "user@example.com"
 
 
@@ -293,7 +293,7 @@ async def test_refresh_token_with_disabled_user_fails(client: httpx.AsyncClient,
     rtoken = create_refresh_token(str(disabled_user.id))
 
     response = await client.post(
-        "/auth/refresh",
+        "/v1/auth/refresh",
         json={"refresh_token": rtoken},
     )
     assert response.status_code == 401

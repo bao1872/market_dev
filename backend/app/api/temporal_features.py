@@ -1,6 +1,6 @@
 """时序特征 API。
 
-GET /api/v1/instruments/{instrument_id}/temporal-features
+GET /v1/instruments/{instrument_id}/temporal-features
     返回双周期 (1d + 15m) 时序特征，补充 V1.8 结构状态因子的变化量/持续度/派生关系。
 
 参数：
@@ -36,7 +36,7 @@ from app.services.temporal_feature_service import compute_temporal_features
 
 logger = logging.getLogger("api.temporal_features")
 
-router = APIRouter(prefix="/api/v1/instruments", tags=["temporal-features"])
+router = APIRouter(prefix="/v1/instruments", tags=["temporal-features"])
 
 _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}
 _ALLOWED_ADJ = {"qfq", "none"}

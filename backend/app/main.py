@@ -1,26 +1,26 @@
 """FastAPI 应用入口。
 
 V1.1 交易平台后端，提供：
-- /health: 健康检查
-- /auth: 认证 API（登录/注册/续期/刷新/当前用户）（R2 + V1.6）
-- /me: 当前用户信息（R2）
-- /me/membership: 当前用户订阅状态（V1.6 遗留路径，语义等价于 /me/subscription；返回 Subscription 状态）
-- /instruments: 股票主数据 API（R3）
-- /calendar: 交易日历 API（R4）
-- /strategies: 策略目录与版本（R7）
-- /admin/strategies: 策略管理（R7）
-- /admin/strategies/{key}/run: 策略运行（R12）
-- /admin/invite-codes: 邀请码管理（V1.6）
-- /admin/members: 订阅账户管理（V1.6）
-- /messages: 通知消息（R9）
-- /notification-channels: 通知渠道（R9）
-- /instruments/{id}/monitor-states: 监控状态查询（M3）
-- /strategies/{key}/monitor-states: 监控状态查询（M3）
-- /instruments/{id}/events: 策略事件查询（M4）
-- /strategies/{key}/events: 策略事件查询（M4）
-- /strategy-events/{id}: 事件详情（M4）
-- /metrics: Prometheus 指标端点（可观察性，无需认证）
-- /api/v1: 业务 API（行情查询等）
+- /v1/health: 健康检查
+- /v1/auth: 认证 API（登录/注册/续期/刷新/当前用户）（R2 + V1.6）
+- /v1/me: 当前用户信息（R2）
+- /v1/me/membership: 当前用户订阅状态（V1.6 遗留路径，语义等价于 /v1/me/subscription；返回 Subscription 状态）
+- /v1/instruments: 股票主数据 API（R3）
+- /v1/calendar: 交易日历 API（R4）
+- /v1/strategies: 策略目录与版本（R7）
+- /v1/admin/strategies: 策略管理（R7）
+- /v1/admin/strategies/{key}/run: 策略运行（R12）
+- /v1/admin/invite-codes: 邀请码管理（V1.6）
+- /v1/admin/members: 订阅账户管理（V1.6）
+- /v1/messages: 通知消息（R9）
+- /v1/notification-channels: 通知渠道（R9）
+- /v1/instruments/{id}/monitor-states: 监控状态查询（M3）
+- /v1/strategies/{key}/monitor-states: 监控状态查询（M3）
+- /v1/instruments/{id}/events: 策略事件查询（M4）
+- /v1/strategies/{key}/events: 策略事件查询（M4）
+- /v1/strategy-events/{id}: 事件详情（M4）
+- /v1/metrics: Prometheus 指标端点（可观察性，无需认证）
+- /v1: 业务 API（行情查询等）
 """
 
 from __future__ import annotations
@@ -172,7 +172,7 @@ app.include_router(me_table_view_presets_router)
 app.include_router(instruments_router)
 # 交易日历路由（R4）
 app.include_router(calendar_router)
-# 市场状态路由（与 calendar 同级，不走 /api/v1 前缀）
+# 市场状态路由（与 calendar 同级，不走 /v1 前缀）
 app.include_router(market_router)
 # 行情查询路由
 app.include_router(bars_router)

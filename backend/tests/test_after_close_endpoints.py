@@ -217,7 +217,7 @@ class TestForceRestartFromDailyReady:
             transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
-                    f"/admin/after-close-runs/{job_run.id}/force",
+                    f"/v1/admin/after-close-runs/{job_run.id}/force",
                     headers=_auth_headers(admin_user.id),
                     params={"restart_from": "daily_ready"},
                 )
@@ -243,7 +243,7 @@ class TestForceRestartFromDailyReady:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{job_run.id}/force",
+                f"/v1/admin/after-close-runs/{job_run.id}/force",
                 headers=_auth_headers(admin_user.id),
                 params={"restart_from": "invalid_step"},
             )
@@ -309,7 +309,7 @@ class TestForceRestartFromDailyReady:
                 transport=transport, base_url="http://test"
             ) as client:
                 response = await client.post(
-                    f"/admin/after-close-runs/{job_run.id}/force",
+                    f"/v1/admin/after-close-runs/{job_run.id}/force",
                     headers=_auth_headers(admin_user.id),
                     params={"restart_from": "daily_ready"},
                 )
@@ -359,7 +359,7 @@ class TestResumeEndpoint:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{job_run.id}/resume",
+                f"/v1/admin/after-close-runs/{job_run.id}/resume",
                 headers=_auth_headers(admin_user.id),
             )
 
@@ -395,7 +395,7 @@ class TestResumeEndpoint:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{job_run.id}/resume",
+                f"/v1/admin/after-close-runs/{job_run.id}/resume",
                 headers=_auth_headers(admin_user.id),
             )
 
@@ -435,7 +435,7 @@ class TestResumeEndpoint:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{job_run.id}/resume",
+                f"/v1/admin/after-close-runs/{job_run.id}/resume",
                 headers=_auth_headers(admin_user.id),
             )
 
@@ -458,7 +458,7 @@ class TestResumeEndpoint:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{fake_id}/resume",
+                f"/v1/admin/after-close-runs/{fake_id}/resume",
                 headers=_auth_headers(admin_user.id),
             )
 
@@ -488,7 +488,7 @@ class TestResumeEndpoint:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{other_job.id}/resume",
+                f"/v1/admin/after-close-runs/{other_job.id}/resume",
                 headers=_auth_headers(admin_user.id),
             )
 
@@ -517,7 +517,7 @@ class TestResumeEndpoint:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{job_run.id}/resume",
+                f"/v1/admin/after-close-runs/{job_run.id}/resume",
                 headers=_auth_headers(admin_user.id),
             )
 
@@ -562,7 +562,7 @@ class TestResumeEndpoint:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{failed_run.id}/resume",
+                f"/v1/admin/after-close-runs/{failed_run.id}/resume",
                 headers=_auth_headers(admin_user.id),
             )
 
@@ -603,7 +603,7 @@ class TestResumeEndpoint:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                f"/admin/after-close-runs/{job_run.id}/resume",
+                f"/v1/admin/after-close-runs/{job_run.id}/resume",
                 headers=_auth_headers(admin_user.id),
             )
 
@@ -702,7 +702,7 @@ class TestCreateAfterCloseRunEndpoint:
             transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
-                    "/admin/after-close-runs",
+                    "/v1/admin/after-close-runs",
                     headers=_auth_headers(admin_user.id),
                     json={"trade_date": trade_date.isoformat()},
                 )
@@ -739,7 +739,7 @@ class TestCreateAfterCloseRunEndpoint:
             transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
-                    "/admin/after-close-runs",
+                    "/v1/admin/after-close-runs",
                     headers=_auth_headers(admin_user.id),
                     json={"trade_date": trade_date.isoformat()},
                 )
@@ -778,7 +778,7 @@ class TestDsaHistoricalDateRejection:
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                "/admin/strategies/dsa_selector/run",
+                "/v1/admin/strategies/dsa_selector/run",
                 headers=_auth_headers(admin_user.id),
                 json={"trade_date": "2026-06-25", "run_type": "manual"},
             )

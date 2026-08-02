@@ -72,7 +72,7 @@ export interface AnchorPublication {
   superseded_by: string | null
 }
 
-/** GET /api/v1/auction/anchors/{trade_date} 响应 */
+/** GET /v1/auction/anchors/{trade_date} 响应 */
 export interface AnchorStatusResponse {
   snapshot: AnchorSnapshot | null
   publication: AnchorPublication | null
@@ -218,7 +218,7 @@ export interface EventTracking {
 // 页面数据（市场/板块/个股三级页面）
 // ============================================================
 
-/** GET /api/v1/auction 响应 — 市场级页面数据 */
+/** GET /v1/auction 响应 — 市场级页面数据 */
 export interface AuctionMarketPageData {
   trade_date: string
   algorithm_version: string
@@ -234,7 +234,7 @@ export interface AuctionMarketPageData {
   top_events: EventTracking[]
 }
 
-/** GET /api/v1/auction/board/{board_id} 响应 — 板块级页面数据 */
+/** GET /v1/auction/board/{board_id} 响应 — 板块级页面数据 */
 export interface AuctionBoardPageData {
   trade_date: string
   algorithm_version: string
@@ -245,7 +245,7 @@ export interface AuctionBoardPageData {
   reason_codes: string[]
 }
 
-/** GET /api/v1/auction/stock/{symbol} 响应 — 个股级页面数据 */
+/** GET /v1/auction/stock/{symbol} 响应 — 个股级页面数据 */
 export interface AuctionInstrumentPageData {
   trade_date: string
   algorithm_version: string
@@ -330,7 +330,7 @@ export interface AuctionConcentrationInfo {
   median_change_pct?: number | null
 }
 
-/** GET /api/v1/auction/backflow/{trade_date} 响应 — ReviewPage 第二金字塔数据 */
+/** GET /v1/auction/backflow/{trade_date} 响应 — ReviewPage 第二金字塔数据 */
 export interface AuctionBackflowData {
   trade_date: string
   algorithm_version: string

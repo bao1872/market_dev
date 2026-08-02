@@ -3,7 +3,7 @@
 测试内容：
 1. 前复权计算（apply_adj_factor / apply_adj_factor_intraday）
 2. 新鲜度检查（check_daily_freshness / check_minute_freshness）
-3. 行情查询 API（GET /api/v1/instruments/{id}/bars）
+3. 行情查询 API（GET /v1/instruments/{id}/bars）
 """
 
 from __future__ import annotations
@@ -286,7 +286,7 @@ async def test_get_bars_empty(client, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mdas, "fetch_daily_bars", mock_fetch_daily)
 
     response = await client.get(
-        f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+        f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none"},
     )
 
@@ -326,7 +326,7 @@ async def test_get_bars_with_data(client, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(mdas, "_call_expected_last_completed_daily_bar", mock_expected)
 
     response = await client.get(
-        f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+        f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none"},
     )
 
@@ -370,7 +370,7 @@ async def test_get_bars_pagination(client, monkeypatch: pytest.MonkeyPatch) -> N
 
     # 请求第 1 页，每页 2 条
     response = await client.get(
-        f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+        f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "none", "page": 1, "page_size": 2},
     )
 
@@ -386,7 +386,7 @@ async def test_get_bars_pagination(client, monkeypatch: pytest.MonkeyPatch) -> N
 async def test_get_bars_invalid_timeframe(client) -> None:
     """测试无效 timeframe 参数返回 400。"""
     response = await client.get(
-        f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+        f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "5m"},
     )
     assert response.status_code == 400
@@ -395,7 +395,7 @@ async def test_get_bars_invalid_timeframe(client) -> None:
 async def test_get_bars_invalid_adj(client) -> None:
     """测试无效 adj 参数返回 400。"""
     response = await client.get(
-        f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+        f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "hfq"},
     )
     assert response.status_code == 400
@@ -439,7 +439,7 @@ async def test_get_bars_qfq(client, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(AdjustmentFactorService, "get_factor_series", mock_get_adj)
 
     response = await client.get(
-        f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+        f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "qfq"},
     )
 
@@ -489,7 +489,7 @@ async def test_get_bars_qfq_non_chart_scenario(client, monkeypatch: pytest.Monke
 
     # page_size=600 > 500，验证大分页仍正确走 mdas qfq 流程
     response = await client.get(
-        f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+        f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
         params={"timeframe": "1d", "adj": "qfq", "page_size": 600},
     )
 

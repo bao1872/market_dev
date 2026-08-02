@@ -45,7 +45,7 @@ from app.services.first_pyramid_history_service import get_history_run_progress
 logger = logging.getLogger("admin_incremental_publish")
 
 router = APIRouter(
-    prefix="/admin/incremental-publish",
+    prefix="/v1/admin/incremental-publish",
     tags=["admin-incremental-publish"],
 )
 

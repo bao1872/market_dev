@@ -1,5 +1,5 @@
 // [AtomicFactsPanel] - 描述: Atomic Fact Contract V1 用户侧状态观察面板（compact /market 右栏；expanded /stock Drawer）
-// 复用 StockContext 单一接口（GET /api/v1/stocks/{symbol}/context），market/detail 共用 query key。
+// 复用 StockContext 单一接口（GET /v1/stocks/{symbol}/context），market/detail 共用 query key。
 // 四组固定：趋势运行(info) / 动量配合(brand) / 结构位置(purple) / 成交参与(warning)。
 // 事实行按 visualKind 渲染（metric/value_with_category/relation/position/distance/ratio/confirmed_position），
 // 禁止解析中文推断类型/状态；事实行非卡片（CSS Grid 透明行，仅底部分隔线）。

@@ -209,8 +209,8 @@ test('MarketWorkspacePage handleExport 复用 convertFiltersToMetricFilters 避�
     'handleExport 必须复用 convertFiltersToMetricFilters，禁止第二套筛选口径',
   )
   assert.ok(
-    src.includes('/api/strategy-runs/') && src.includes('/results/export'),
-    'handleExport 必须调用 POST /api/strategy-runs/{run_id}/results/export',
+    src.includes('/v1/strategy-runs/') && src.includes('/results/export'),
+    'handleExport 必须调用 POST /v1/strategy-runs/{run_id}/results/export',
   )
   // 不导出操作列：stock 列 payload_key 为 null
   assert.ok(

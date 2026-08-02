@@ -2,7 +2,7 @@
 
 安全约束：
 - capture token 是短期截图模式令牌（TTL 通常 300 秒），仅通过 URL query parameter
-  或 Authorization header 传给 /api/v1/capture/* 端点，不经过 get_current_user。
+  或 Authorization header 传给 /v1/capture/* 端点，不经过 get_current_user。
 - access token 是常规 API 认证令牌，通过 Authorization: Bearer <token> 传递。
 - Capture Token 必须校验 type=capture + scope=stock_detail_capture（advice.md 第六节）。
 
@@ -13,7 +13,7 @@
    （此处以 GET /me/access 覆盖，证明隔离对所有依赖 get_current_user 的端点生效）
 4. capture token 访问 /instruments/{id} 返回 401（C.11.1 扩展）
 5. capture token 访问 /watchlist 返回 401（C.11.1 扩展）
-6. access token 访问 /api/v1/capture/stocks/{id}/snapshot 返回 401（C.11.1 扩展）
+6. access token 访问 /v1/capture/stocks/{id}/snapshot 返回 401（C.11.1 扩展）
 7. capture token instrument_id 与 path 不匹配返回 403（C.11.1 扩展）
 8. 缺失 token 返回 401（C.11.1 扩展）
 
@@ -142,7 +142,7 @@ async def test_capture_token_rejected_for_general_api(
     user = await _create_active_user(db)
     await db.flush()
 
-    resp = await client.get("/me", headers=_capture_token_headers(user.id))
+    resp = await client.get("/v1/me", headers=_capture_token_headers(user.id))
 
     assert resp.status_code == 401
     assert "token 类型错误" in resp.json()["detail"]
@@ -160,7 +160,7 @@ async def test_access_token_accepted_for_general_api(
     user = await _create_active_user(db)
     await db.flush()
 
-    resp = await client.get("/me", headers=_access_token_headers(user.id))
+    resp = await client.get("/v1/me", headers=_access_token_headers(user.id))
 
     assert resp.status_code == 200
     assert resp.json()["email"] == user.email
@@ -178,7 +178,7 @@ async def test_capture_token_rejected_for_access_endpoint(
     user = await _create_active_user(db)
     await db.flush()
 
-    resp = await client.get("/me/access", headers=_capture_token_headers(user.id))
+    resp = await client.get("/v1/me/access", headers=_capture_token_headers(user.id))
 
     assert resp.status_code == 401
     assert "token 类型错误" in resp.json()["detail"]
@@ -200,7 +200,7 @@ async def test_capture_token_rejected_for_stock_memos_api(
     await db.flush()
 
     resp = await client.get(
-        f"/instruments/{test_instrument.id}/memo",
+        f"/v1/instruments/{test_instrument.id}/memo",
         headers=_capture_token_headers(user.id),
     )
 
@@ -220,7 +220,7 @@ async def test_capture_token_rejected_for_watchlist_api(
     user = await _create_active_user(db)
     await db.flush()
 
-    resp = await client.get("/watchlist", headers=_capture_token_headers(user.id))
+    resp = await client.get("/v1/watchlist", headers=_capture_token_headers(user.id))
 
     assert resp.status_code == 401
     assert "token 类型错误" in resp.json()["detail"]
@@ -231,7 +231,7 @@ async def test_access_token_rejected_for_capture_snapshot(
     isolation_client: tuple[AsyncClient, AsyncSession],
     test_instrument,
 ) -> None:
-    """access token 访问 /api/v1/capture/stocks/{id}/snapshot 应返回 401（C.11.1 扩展）。
+    """access token 访问 /v1/capture/stocks/{id}/snapshot 应返回 401（C.11.1 扩展）。
 
     [Security] - 描述: Capture API 只接受 capture token，普通 access token 被拒绝
     （advice.md 第十节硬规则：Capture Token 只能访问 Capture API，反向也成立）
@@ -241,7 +241,7 @@ async def test_access_token_rejected_for_capture_snapshot(
     await db.flush()
 
     resp = await client.get(
-        f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+        f"/v1/capture/stocks/{test_instrument.id}/snapshot",
         headers=_access_token_headers(user.id),
     )
 
@@ -268,7 +268,7 @@ async def test_capture_token_instrument_id_mismatch_returns_403(
     headers = _capture_token_headers(user.id, instrument_id=other_instrument_id)
 
     resp = await client.get(
-        f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+        f"/v1/capture/stocks/{test_instrument.id}/snapshot",
         headers=headers,
     )
 
@@ -288,7 +288,7 @@ async def test_capture_token_missing_returns_401(
     client, db = isolation_client
 
     resp = await client.get(
-        f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+        f"/v1/capture/stocks/{test_instrument.id}/snapshot",
     )
 
     assert resp.status_code == 401
@@ -314,7 +314,7 @@ async def test_capture_token_scope_mismatch_returns_401(
     )
 
     resp = await client.get(
-        f"/api/v1/capture/stocks/{test_instrument.id}/snapshot",
+        f"/v1/capture/stocks/{test_instrument.id}/snapshot",
         headers=headers,
     )
 

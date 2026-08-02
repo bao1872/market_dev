@@ -12,7 +12,7 @@ from app.db import get_db
 from app.schemas.plan import PlanResponse
 from app.services.plan_service import list_all_plans
 
-router = APIRouter(tags=["plans"])
+router = APIRouter(prefix="/v1", tags=["plans"])
 
 
 @router.get("/plans", response_model=list[PlanResponse])

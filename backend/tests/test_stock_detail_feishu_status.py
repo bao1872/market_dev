@@ -143,7 +143,7 @@ async def _send_stock_detail(
         mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
         response = await client.post(
-            f"/instruments/{instrument_id}/send-feishu",
+            f"/v1/instruments/{instrument_id}/send-feishu",
             headers=_auth_headers(user.id),
             json={},
         )
@@ -211,7 +211,7 @@ class TestStockDetailFeishuStatusAggregation:
                 transport=transport, base_url="http://test"
             ) as client:
                 status_resp = await client.get(
-                    f"/stock-detail-feishu/{test_run_id}/status",
+                    f"/v1/stock-detail-feishu/{test_run_id}/status",
                     headers=_auth_headers(user.id),
                 )
 
@@ -294,7 +294,7 @@ class TestStockDetailFeishuStatusAggregation:
                 transport=transport, base_url="http://test"
             ) as client:
                 status_resp = await client.get(
-                    f"/stock-detail-feishu/{test_run_id}/status",
+                    f"/v1/stock-detail-feishu/{test_run_id}/status",
                     headers=_auth_headers(user.id),
                 )
 
@@ -403,7 +403,7 @@ class TestStockDetailFeishuImageRetry:
                 transport=transport, base_url="http://test"
             ) as client:
                 status_resp = await client.get(
-                    f"/stock-detail-feishu/{test_run_id}/status",
+                    f"/v1/stock-detail-feishu/{test_run_id}/status",
                     headers=_auth_headers(user.id),
                 )
             status_data = status_resp.json()
@@ -431,7 +431,7 @@ class TestStockDetailFeishuImageRetry:
                     transport=transport, base_url="http://test"
                 ) as client:
                     retry_resp = await client.post(
-                        f"/stock-detail-feishu/{test_run_id}/retry-image",
+                        f"/v1/stock-detail-feishu/{test_run_id}/retry-image",
                         headers=_auth_headers(user.id),
                     )
 
@@ -447,7 +447,7 @@ class TestStockDetailFeishuImageRetry:
                 transport=transport, base_url="http://test"
             ) as client:
                 status_resp = await client.get(
-                    f"/stock-detail-feishu/{test_run_id}/status",
+                    f"/v1/stock-detail-feishu/{test_run_id}/status",
                     headers=_auth_headers(user.id),
                 )
             status_data = status_resp.json()
@@ -500,14 +500,14 @@ class TestStockDetailFeishuStatusOwnership:
 
                 # 用户 B 查询应 404
                 status_resp = await client.get(
-                    f"/stock-detail-feishu/{test_run_id}/status",
+                    f"/v1/stock-detail-feishu/{test_run_id}/status",
                     headers=_auth_headers(user_b.id),
                 )
                 assert status_resp.status_code == 404
 
                 # 用户 B 重试应 404
                 retry_resp = await client.post(
-                    f"/stock-detail-feishu/{test_run_id}/retry-image",
+                    f"/v1/stock-detail-feishu/{test_run_id}/retry-image",
                     headers=_auth_headers(user_b.id),
                 )
                 assert retry_resp.status_code == 404

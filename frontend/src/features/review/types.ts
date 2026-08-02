@@ -48,13 +48,13 @@ export interface ReviewMetricPayload {
 // 日期与总览（PRD §12.1）
 // ============================================================
 
-/** GET /api/v1/review/dates 响应 */
+/** GET /v1/review/dates 响应 */
 export interface ReviewDatesResponse {
   trade_dates: string[]
   latest_trade_date: string | null
 }
 
-/** GET /api/v1/review/latest 响应 */
+/** GET /v1/review/latest 响应 */
 export interface ReviewLatestResponse {
   review_run_id: string
   trade_date: string
@@ -81,7 +81,7 @@ export interface ReviewOverviewSignalSummary {
   transformed: number
 }
 
-/** GET /api/v1/review/{trade_date}/overview 响应 */
+/** GET /v1/review/{trade_date}/overview 响应 */
 export interface ReviewOverview {
   reviewRunId: string
   tradeDate: string
@@ -107,7 +107,7 @@ export interface ReviewOverview {
 // 市场扫描（PRD §12.2）
 // ============================================================
 
-/** GET /api/v1/review/{trade_date}/scopes 单条记录 */
+/** GET /v1/review/{trade_date}/scopes 单条记录 */
 export interface ReviewScopeMetrics {
   id: string
   reviewRunId: string
@@ -153,7 +153,7 @@ export type ReviewSignalStatus =
   | 'invalidated'
   | 'transformed'
 
-/** GET /api/v1/review/{trade_date}/signals 单条记录 */
+/** GET /v1/review/{trade_date}/signals 单条记录 */
 export interface ReviewSignal {
   id: string
   reviewRunId: string
@@ -201,7 +201,7 @@ export type ReviewRelationToScope =
   | 'instrument_strong_scope_unsupported'
   | 'unconfirmed'
 
-/** GET /api/v1/review/signals/{signal_id}/attributions 单条记录 */
+/** GET /v1/review/signals/{signal_id}/attributions 单条记录 */
 export interface ReviewAttribution {
   id: string
   signalId: string
@@ -219,7 +219,7 @@ export interface ReviewAttribution {
 
 export type ReviewAttributionListResponse = ReviewPagedResponse<ReviewAttribution>
 
-/** GET /api/v1/review/signals/{signal_id}/instruments 单条记录 */
+/** GET /v1/review/signals/{signal_id}/instruments 单条记录 */
 export interface ReviewInstrument {
   id: string
   signalId: string
@@ -263,7 +263,7 @@ export interface ReviewTracking {
 
 export type ReviewTrackingListResponse = ReviewPagedResponse<ReviewTracking>
 
-/** POST /api/v1/review/trackings 请求体（snake_case 对齐后端） */
+/** POST /v1/review/trackings 请求体（snake_case 对齐后端） */
 export interface ReviewTrackingCreateRequest {
   tracking_type: ReviewTrackingType
   source_signal_id?: string | null
@@ -276,7 +276,7 @@ export interface ReviewTrackingCreateRequest {
   idempotency_key: string
 }
 
-/** PATCH /api/v1/review/trackings/{id} 请求体 */
+/** PATCH /v1/review/trackings/{id} 请求体 */
 export interface ReviewTrackingPatchRequest {
   status?: ReviewTrackingStatus
   confirmation_conditions?: Record<string, unknown> | null

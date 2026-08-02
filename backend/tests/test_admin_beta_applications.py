@@ -231,7 +231,7 @@ async def test_normal_user_list_returns_403(
     """普通用户访问 GET /admin/beta-applications 返回 403。"""
     client, _, normal_user = admin_beta_client
     response = await client.get(
-        "/admin/beta-applications",
+        "/v1/admin/beta-applications",
         headers=_auth_headers(normal_user.id),
     )
     assert response.status_code == 403, response.text
@@ -244,7 +244,7 @@ async def test_normal_user_stats_returns_403(
     """普通用户访问 GET /admin/beta-applications/stats 返回 403。"""
     client, _, normal_user = admin_beta_client
     response = await client.get(
-        "/admin/beta-applications/stats",
+        "/v1/admin/beta-applications/stats",
         headers=_auth_headers(normal_user.id),
     )
     assert response.status_code == 403, response.text
@@ -257,7 +257,7 @@ async def test_normal_user_export_returns_403(
     """普通用户访问 GET /admin/beta-applications/export 返回 403。"""
     client, _, normal_user = admin_beta_client
     response = await client.get(
-        "/admin/beta-applications/export",
+        "/v1/admin/beta-applications/export",
         headers=_auth_headers(normal_user.id),
     )
     assert response.status_code == 403, response.text
@@ -270,7 +270,7 @@ async def test_normal_user_patch_returns_403(
     """普通用户访问 PATCH /admin/beta-applications/{id} 返回 403。"""
     client, _, normal_user = admin_beta_client
     response = await client.patch(
-        f"/admin/beta-applications/{uuid.uuid4()}",
+        f"/v1/admin/beta-applications/{uuid.uuid4()}",
         headers=_auth_headers(normal_user.id),
         json={"status": "contacted"},
     )
@@ -284,7 +284,7 @@ async def test_normal_user_retry_feishu_returns_403(
     """普通用户访问 POST /admin/beta-applications/{id}/retry-feishu 返回 403。"""
     client, _, normal_user = admin_beta_client
     response = await client.post(
-        f"/admin/beta-applications/{uuid.uuid4()}/retry-feishu",
+        f"/v1/admin/beta-applications/{uuid.uuid4()}/retry-feishu",
         headers=_auth_headers(normal_user.id),
     )
     assert response.status_code == 403, response.text
@@ -296,7 +296,7 @@ async def test_unauthenticated_list_returns_401(
 ):
     """未认证访问 GET /admin/beta-applications 返回 401。"""
     client, _, _ = admin_beta_client
-    response = await client.get("/admin/beta-applications")
+    response = await client.get("/v1/admin/beta-applications")
     assert response.status_code == 401, response.text
 
 
@@ -312,7 +312,7 @@ async def test_admin_list_empty_returns_200(
     """admin 用户访问空列表返回 200 + 空数组。"""
     client, admin_user, _ = admin_beta_client
     response = await client.get(
-        "/admin/beta-applications",
+        "/v1/admin/beta-applications",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -347,7 +347,7 @@ async def test_admin_list_returns_applications(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        "/admin/beta-applications",
+        "/v1/admin/beta-applications",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -379,7 +379,7 @@ async def test_admin_list_filter_by_status(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        "/admin/beta-applications?status=contacted",
+        "/v1/admin/beta-applications?status=contacted",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -401,7 +401,7 @@ async def test_admin_list_filter_by_reason_code(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        "/admin/beta-applications?reason_code=quant",
+        "/v1/admin/beta-applications?reason_code=quant",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -426,7 +426,7 @@ async def test_admin_list_filter_by_watch_stock_range(
 
     # 1-10 区间
     response = await client.get(
-        "/admin/beta-applications?watch_stock_range=1-10",
+        "/v1/admin/beta-applications?watch_stock_range=1-10",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -436,7 +436,7 @@ async def test_admin_list_filter_by_watch_stock_range(
 
     # 50+ 区间
     response = await client.get(
-        "/admin/beta-applications?watch_stock_range=50+",
+        "/v1/admin/beta-applications?watch_stock_range=50+",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -458,7 +458,7 @@ async def test_admin_list_search_by_wechat(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        "/admin/beta-applications?keyword=alice",
+        "/v1/admin/beta-applications?keyword=alice",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -480,7 +480,7 @@ async def test_admin_list_search_by_phone(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        "/admin/beta-applications?keyword=1380013",
+        "/v1/admin/beta-applications?keyword=1380013",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -503,7 +503,7 @@ async def test_admin_list_pagination(
 
     # limit=2 offset=0
     response = await client.get(
-        "/admin/beta-applications?limit=2&offset=0",
+        "/v1/admin/beta-applications?limit=2&offset=0",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -513,7 +513,7 @@ async def test_admin_list_pagination(
 
     # limit=2 offset=2
     response = await client.get(
-        "/admin/beta-applications?limit=2&offset=2",
+        "/v1/admin/beta-applications?limit=2&offset=2",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -533,7 +533,7 @@ async def test_admin_stats_empty_returns_zero(
     """空数据库时统计返回 0。"""
     client, admin_user, _ = admin_beta_client
     response = await client.get(
-        "/admin/beta-applications/stats",
+        "/v1/admin/beta-applications/stats",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -602,7 +602,7 @@ async def test_admin_stats_returns_correct_counts(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        "/admin/beta-applications/stats",
+        "/v1/admin/beta-applications/stats",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -658,7 +658,7 @@ async def test_admin_patch_updates_status(
     await admin_beta_db_session.flush()
 
     response = await client.patch(
-        f"/admin/beta-applications/{app.id}",
+        f"/v1/admin/beta-applications/{app.id}",
         headers=_auth_headers(admin_user.id),
         json={"status": "contacted"},
     )
@@ -685,7 +685,7 @@ async def test_admin_patch_updates_admin_note(
     await admin_beta_db_session.flush()
 
     response = await client.patch(
-        f"/admin/beta-applications/{app.id}",
+        f"/v1/admin/beta-applications/{app.id}",
         headers=_auth_headers(admin_user.id),
         json={"status": "contacted", "admin_note": "已电话联系"},
     )
@@ -709,7 +709,7 @@ async def test_admin_patch_invalid_status_returns_400(
     await admin_beta_db_session.flush()
 
     response = await client.patch(
-        f"/admin/beta-applications/{app.id}",
+        f"/v1/admin/beta-applications/{app.id}",
         headers=_auth_headers(admin_user.id),
         json={"status": "invalid_status"},
     )
@@ -723,7 +723,7 @@ async def test_admin_patch_nonexistent_returns_404(
     """PATCH 不存在的申请返回 404。"""
     client, admin_user, _ = admin_beta_client
     response = await client.patch(
-        f"/admin/beta-applications/{uuid.uuid4()}",
+        f"/v1/admin/beta-applications/{uuid.uuid4()}",
         headers=_auth_headers(admin_user.id),
         json={"status": "contacted"},
     )
@@ -756,7 +756,7 @@ async def test_admin_get_detail_returns_full_application(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        f"/admin/beta-applications/{app.id}",
+        f"/v1/admin/beta-applications/{app.id}",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -781,7 +781,7 @@ async def test_admin_get_detail_nonexistent_returns_404(
     """GET 不存在的申请返回 404。"""
     client, admin_user, _ = admin_beta_client
     response = await client.get(
-        f"/admin/beta-applications/{uuid.uuid4()}",
+        f"/v1/admin/beta-applications/{uuid.uuid4()}",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 404, response.text
@@ -809,7 +809,7 @@ async def test_admin_retry_feishu_returns_200(
     await admin_beta_db_session.flush()
 
     response = await client.post(
-        f"/admin/beta-applications/{app.id}/retry-feishu",
+        f"/v1/admin/beta-applications/{app.id}/retry-feishu",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -826,7 +826,7 @@ async def test_admin_retry_feishu_nonexistent_returns_404(
     """POST 不存在的申请重发飞书返回 404。"""
     client, admin_user, _ = admin_beta_client
     response = await client.post(
-        f"/admin/beta-applications/{uuid.uuid4()}/retry-feishu",
+        f"/v1/admin/beta-applications/{uuid.uuid4()}/retry-feishu",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 404, response.text
@@ -848,7 +848,7 @@ async def test_admin_retry_feishu_writes_outbox_event(
     await admin_beta_db_session.flush()
 
     response = await client.post(
-        f"/admin/beta-applications/{app.id}/retry-feishu",
+        f"/v1/admin/beta-applications/{app.id}/retry-feishu",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -893,7 +893,7 @@ async def test_admin_export_returns_csv(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        "/admin/beta-applications/export",
+        "/v1/admin/beta-applications/export",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -937,7 +937,7 @@ async def test_admin_export_with_filter_returns_filtered_csv(
     await admin_beta_db_session.flush()
 
     response = await client.get(
-        "/admin/beta-applications/export?reason_code=busy",
+        "/v1/admin/beta-applications/export?reason_code=busy",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text
@@ -979,7 +979,7 @@ async def test_admin_list_filter_by_date_range(
     date_from = (now - timedelta(days=7)).strftime("%Y-%m-%d")
     date_to = now.strftime("%Y-%m-%d")
     response = await client.get(
-        f"/admin/beta-applications?date_from={date_from}&date_to={date_to}",
+        f"/v1/admin/beta-applications?date_from={date_from}&date_to={date_to}",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200, response.text

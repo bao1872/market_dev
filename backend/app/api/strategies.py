@@ -42,7 +42,7 @@ from app.services.strategy_service import (
     release_strategy_version,
 )
 
-router = APIRouter(tags=["strategies"])
+router = APIRouter(prefix="/v1", tags=["strategies"])
 
 
 def _version_to_response(version) -> StrategyVersionResponse:

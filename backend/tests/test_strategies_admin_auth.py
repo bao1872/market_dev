@@ -109,7 +109,7 @@ async def test_create_strategy_requires_admin(
     """
     client, _ = strategies_auth_client
     response = await client.post(
-        "/admin/strategies",
+        "/v1/admin/strategies",
         json={"manifest": {}},
     )
     assert response.status_code == 401, response.text
@@ -125,7 +125,7 @@ async def test_create_strategy_rejects_non_admin(
     """
     client, normal_user = strategies_auth_client
     response = await client.post(
-        "/admin/strategies",
+        "/v1/admin/strategies",
         json={"manifest": {}},
         headers=_auth_headers(normal_user.id),
     )
@@ -147,7 +147,7 @@ async def test_release_strategy_version_requires_admin(
     """
     client, _ = strategies_auth_client
     response = await client.post(
-        "/admin/strategies/test_key/versions/1.0.0/release",
+        "/v1/admin/strategies/test_key/versions/1.0.0/release",
     )
     assert response.status_code == 401, response.text
 
@@ -162,7 +162,7 @@ async def test_release_strategy_version_rejects_non_admin(
     """
     client, normal_user = strategies_auth_client
     response = await client.post(
-        "/admin/strategies/test_key/versions/1.0.0/release",
+        "/v1/admin/strategies/test_key/versions/1.0.0/release",
         headers=_auth_headers(normal_user.id),
     )
     assert response.status_code == 403, response.text
@@ -183,7 +183,7 @@ async def test_archive_strategy_version_requires_admin(
     """
     client, _ = strategies_auth_client
     response = await client.post(
-        "/admin/strategies/test_key/versions/1.0.0/archive",
+        "/v1/admin/strategies/test_key/versions/1.0.0/archive",
     )
     assert response.status_code == 401, response.text
 
@@ -198,7 +198,7 @@ async def test_archive_strategy_version_rejects_non_admin(
     """
     client, normal_user = strategies_auth_client
     response = await client.post(
-        "/admin/strategies/test_key/versions/1.0.0/archive",
+        "/v1/admin/strategies/test_key/versions/1.0.0/archive",
         headers=_auth_headers(normal_user.id),
     )
     assert response.status_code == 403, response.text

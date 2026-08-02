@@ -1054,10 +1054,10 @@ def _auth_headers(user_id) -> dict[str, str]:
 async def test_stock_context_unauthenticated_returns_401(
     stock_context_client,
 ) -> None:
-    """P0-1: 未登录访问 /api/v1/stocks/{symbol}/context 返回 401。"""
+    """P0-1: 未登录访问 /v1/stocks/{symbol}/context 返回 401。"""
     client, db = stock_context_client
     await _create_test_instrument(db, "TEST001")
-    resp = await client.get("/api/v1/stocks/TEST001/context")
+    resp = await client.get("/v1/stocks/TEST001/context")
     assert resp.status_code == 401
 
 
@@ -1070,7 +1070,7 @@ async def test_stock_context_member_without_subscription_returns_403(
     user = await _create_member_without_subscription(db)
     await _create_test_instrument(db, "TEST002")
     resp = await client.get(
-        "/api/v1/stocks/TEST002/context",
+        "/v1/stocks/TEST002/context",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403
@@ -1085,7 +1085,7 @@ async def test_stock_context_member_with_subscription_returns_200(
     user = await _create_member_with_active_subscription(db)
     await _create_test_instrument(db, "TEST003")
     resp = await client.get(
-        "/api/v1/stocks/TEST003/context",
+        "/v1/stocks/TEST003/context",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200
@@ -1100,7 +1100,7 @@ async def test_stock_context_admin_returns_200(
     admin = await _create_admin_user(db)
     await _create_test_instrument(db, "TEST004")
     resp = await client.get(
-        "/api/v1/stocks/TEST004/context",
+        "/v1/stocks/TEST004/context",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200
@@ -1110,10 +1110,10 @@ async def test_stock_context_admin_returns_200(
 async def test_admin_stock_debug_unauthenticated_returns_401(
     stock_context_client,
 ) -> None:
-    """P0-1: 未登录访问 /api/v1/admin/stocks/{symbol}/debug 返回 401。"""
+    """P0-1: 未登录访问 /v1/admin/stocks/{symbol}/debug 返回 401。"""
     client, db = stock_context_client
     await _create_test_instrument(db, "TEST005")
-    resp = await client.get("/api/v1/admin/stocks/TEST005/debug")
+    resp = await client.get("/v1/admin/stocks/TEST005/debug")
     assert resp.status_code == 401
 
 
@@ -1126,7 +1126,7 @@ async def test_admin_stock_debug_member_returns_403(
     user = await _create_member_with_active_subscription(db)
     await _create_test_instrument(db, "TEST006")
     resp = await client.get(
-        "/api/v1/admin/stocks/TEST006/debug",
+        "/v1/admin/stocks/TEST006/debug",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403
@@ -1141,7 +1141,7 @@ async def test_admin_stock_debug_admin_returns_200(
     admin = await _create_admin_user(db)
     await _create_test_instrument(db, "TEST007")
     resp = await client.get(
-        "/api/v1/admin/stocks/TEST007/debug",
+        "/v1/admin/stocks/TEST007/debug",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200
@@ -1651,7 +1651,7 @@ async def test_p02_context_exact_source_run_id_returns_state(
     await _create_db_snapshot(db, inst.id, run, source_run_id=run.id)
 
     resp = await client.get(
-        "/api/v1/stocks/P02001/context",
+        "/v1/stocks/P02001/context",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200
@@ -1679,7 +1679,7 @@ async def test_p02_context_no_published_full_run(
     # 不创建任何 run
 
     resp = await client.get(
-        "/api/v1/stocks/P02002/context",
+        "/v1/stocks/P02002/context",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200
@@ -1706,7 +1706,7 @@ async def test_p02_context_snapshot_missing(
     await _create_db_run(db, trade_date=date(2026, 7, 10))
 
     resp = await client.get(
-        "/api/v1/stocks/P02003/context",
+        "/v1/stocks/P02003/context",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200
@@ -1749,7 +1749,7 @@ async def test_p02_context_snapshot_run_not_linked(
     # API 层面：snapshot 可读（legacy 匹配成功，hasSnapshot=True），
     # reasonCode 传播为 "snapshot_run_not_linked"（commit d8eda23 有意行为）
     resp = await client.get(
-        "/api/v1/stocks/P02004/context",
+        "/v1/stocks/P02004/context",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200
@@ -1814,7 +1814,7 @@ async def test_p02_context_get_no_write_side_effect(
     # 发起 GET 请求（多次调用确保无写副作用）
     for _ in range(3):
         resp = await client.get(
-            "/api/v1/stocks/P02006/context",
+            "/v1/stocks/P02006/context",
             headers=_auth_headers(admin.id),
         )
         assert resp.status_code == 200

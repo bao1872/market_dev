@@ -222,7 +222,7 @@ async def test_expired_member_blocked(
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[0].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -244,7 +244,7 @@ async def test_no_subscription_member_blocked(
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[0].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -269,7 +269,7 @@ async def test_admin_bypasses_limit(
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[50].id), "source": "manual"},
         headers=_auth_headers(admin.id),
     )
@@ -293,7 +293,7 @@ async def test_active_member_at_limit_blocked(
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[20].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -318,7 +318,7 @@ async def test_active_member_under_limit_allowed(
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[19].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -341,7 +341,7 @@ async def test_get_watchlist_expired_member_blocked(
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
     await db.flush()
 
-    resp = await client.get("/watchlist", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist", headers=_auth_headers(user.id))
     assert resp.status_code == 403, resp.text
 
 
@@ -354,7 +354,7 @@ async def test_get_watchlist_no_subscription_member_blocked(
     user = await _create_member_without_subscription(db)
     await db.flush()
 
-    resp = await client.get("/watchlist", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist", headers=_auth_headers(user.id))
     assert resp.status_code == 403, resp.text
 
 
@@ -367,7 +367,7 @@ async def test_get_watchlist_active_member_allowed(
     user, _ = await _create_member_with_plan(db, "observe_20")
     await db.flush()
 
-    resp = await client.get("/watchlist", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist", headers=_auth_headers(user.id))
     assert resp.status_code == 200, resp.text
 
 
@@ -389,7 +389,7 @@ async def test_delete_watchlist_expired_member_blocked(
     await db.flush()
 
     resp = await client.delete(
-        f"/watchlist/{instruments[0].id}",
+        f"/v1/watchlist/{instruments[0].id}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -406,7 +406,7 @@ async def test_delete_watchlist_no_subscription_member_blocked(
     await db.flush()
 
     resp = await client.delete(
-        f"/watchlist/{instruments[0].id}",
+        f"/v1/watchlist/{instruments[0].id}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -424,7 +424,7 @@ async def test_delete_watchlist_active_member_allowed(
     await db.flush()
 
     resp = await client.delete(
-        f"/watchlist/{instruments[0].id}",
+        f"/v1/watchlist/{instruments[0].id}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 204, resp.text
@@ -445,7 +445,7 @@ async def test_monitor_status_expired_member_blocked(
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
     await db.flush()
 
-    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist/monitor-status", headers=_auth_headers(user.id))
     assert resp.status_code == 403, resp.text
 
 
@@ -458,7 +458,7 @@ async def test_monitor_status_no_subscription_member_blocked(
     user = await _create_member_without_subscription(db)
     await db.flush()
 
-    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist/monitor-status", headers=_auth_headers(user.id))
     assert resp.status_code == 403, resp.text
 
 
@@ -471,7 +471,7 @@ async def test_monitor_status_active_member_allowed(
     user, _ = await _create_member_with_plan(db, "observe_20")
     await db.flush()
 
-    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist/monitor-status", headers=_auth_headers(user.id))
     assert resp.status_code == 200, resp.text
 
 

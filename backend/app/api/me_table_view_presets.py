@@ -43,7 +43,7 @@ from app.services.access_control_service import (
     require_feature,
 )
 
-router = APIRouter(tags=["me"])
+router = APIRouter(prefix="/v1", tags=["me"])
 
 
 @router.get(

@@ -1,8 +1,8 @@
 """健康检查路由。
 
-GET /health: 返回应用存活状态
-GET /health/ready: 返回应用就绪状态（策略资产完整性检查）
-GET /version: 返回构建版本信息（git_sha / build_time / app_version / alembic_revision）
+GET /v1/health: 返回应用存活状态
+GET /v1/health/ready: 返回应用就绪状态（策略资产完整性检查）
+GET /v1/version: 返回构建版本信息（git_sha / build_time / app_version / alembic_revision）
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from app.db import AsyncSessionLocal
 
 logger = logging.getLogger("health")
 
-router = APIRouter(tags=["health"])
+router = APIRouter(prefix="/v1", tags=["health"])
 
 # [策略资产] - 就绪标志：启动时检查策略资产文件完整性，缺失则置 False
 _strategy_assets_ready: bool = True

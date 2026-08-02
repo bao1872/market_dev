@@ -1,14 +1,14 @@
 """StockContext API - 个股状态上下文只读接口（Atomic Fact Contract V1）。
 
 核心契约：
-- GET /api/v1/stocks/{symbol}/context
+- GET /v1/stocks/{symbol}/context
   用户侧只读接口，返回 Atomic Fact Contract V1 上下文
   （contractVersion/asOf/core/auxiliary/availability/recentChanges/dataQuality）。
   禁止请求时写数据（事实由盘后快照成功发布后异步生成，本接口只做只读查询）。
   需要 require_active_subscription 守卫（admin 豁免，member 需有效订阅）。
   as_of 直接声明 date | None，非法值由 FastAPI 返回 422。
   as_of 历史查询时严格 point-in-time（仅查 succeeded+published+full run），禁止返回未来快照或未来变化。
-- GET /api/v1/admin/stocks/{symbol}/debug
+- GET /v1/admin/stocks/{symbol}/debug
   管理员调试接口，在用户响应基础上补充原始 payload + 原子事实可追溯信息。
   前后端统一使用 symbol（非 instrument_id）。
 """
@@ -67,11 +67,11 @@ from app.services.feature_snapshot_service import _SCHEMA_VERSION
 
 logger = logging.getLogger("api.stock_context")
 
-# 用户侧路由：/api/v1/stocks/{symbol}/context
-stock_router = APIRouter(prefix="/api/v1/stocks", tags=["stock-context"])
+# 用户侧路由：/v1/stocks/{symbol}/context
+stock_router = APIRouter(prefix="/v1/stocks", tags=["stock-context"])
 
-# 管理员路由：/api/v1/admin/stocks/{symbol}/debug
-admin_router = APIRouter(prefix="/api/v1/admin/stocks", tags=["admin-stock-debug"])
+# 管理员路由：/v1/admin/stocks/{symbol}/debug
+admin_router = APIRouter(prefix="/v1/admin/stocks", tags=["admin-stock-debug"])
 
 # P0-3: 使用 Asia/Shanghai 时区计算 as_of 截止边界（非 UTC）
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -646,7 +646,7 @@ async def _build_stock_context(
 
 
 # =============================================================================
-# 用户侧接口：GET /api/v1/stocks/{symbol}/context
+# 用户侧接口：GET /v1/stocks/{symbol}/context
 # =============================================================================
 
 
@@ -678,7 +678,7 @@ async def get_stock_context(
 
 
 # =============================================================================
-# 管理员调试接口：GET /api/v1/admin/stocks/{symbol}/debug
+# 管理员调试接口：GET /v1/admin/stocks/{symbol}/debug
 # =============================================================================
 
 
@@ -701,7 +701,7 @@ async def get_admin_stock_debug(
 
 
 # =============================================================================
-# [Phase 5B-2] 第一金字塔统一快照接口：GET /api/v1/stocks/{symbol}/first-pyramid
+# [Phase 5B-2] 第一金字塔统一快照接口：GET /v1/stocks/{symbol}/first-pyramid
 # =============================================================================
 
 

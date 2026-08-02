@@ -464,7 +464,7 @@ async def test_create_application_writes_outbox_event(beta_db_session: AsyncSess
 async def test_api_post_returns_201(beta_api_client: AsyncClient):
     """POST /public/beta-applications 合法请求返回 201 + 申请编号。"""
     response = await beta_api_client.post(
-        "/public/beta-applications",
+        "/v1/public/beta-applications",
         json=_make_payload(wechat="api_user_001", phone=None),
     )
     assert response.status_code == 201, response.text
@@ -480,10 +480,10 @@ async def test_api_post_returns_201(beta_api_client: AsyncClient):
 async def test_api_post_duplicate_returns_200(beta_api_client: AsyncClient):
     """重复提交返回 200 + 原申请。"""
     payload = _make_payload(wechat="api_dup_user", phone=None)
-    resp1 = await beta_api_client.post("/public/beta-applications", json=payload)
+    resp1 = await beta_api_client.post("/v1/public/beta-applications", json=payload)
     assert resp1.status_code == 201
 
-    resp2 = await beta_api_client.post("/public/beta-applications", json=payload)
+    resp2 = await beta_api_client.post("/v1/public/beta-applications", json=payload)
     assert resp2.status_code == 200, resp2.text
     assert resp2.json()["id"] == resp1.json()["id"]
 
@@ -492,7 +492,7 @@ async def test_api_post_duplicate_returns_200(beta_api_client: AsyncClient):
 async def test_api_post_no_contact_returns_422(beta_api_client: AsyncClient):
     """微信和手机号都为空返回 422。"""
     response = await beta_api_client.post(
-        "/public/beta-applications",
+        "/v1/public/beta-applications",
         json={
             "watch_stock_count": 10,
             "reason_code": "busy",
@@ -506,7 +506,7 @@ async def test_api_post_no_contact_returns_422(beta_api_client: AsyncClient):
 async def test_api_post_other_without_reason_returns_422(beta_api_client: AsyncClient):
     """选择 'other' 但未填写说明返回 422。"""
     response = await beta_api_client.post(
-        "/public/beta-applications",
+        "/v1/public/beta-applications",
         json={
             "wechat": "test_no_reason",
             "watch_stock_count": 10,
@@ -521,7 +521,7 @@ async def test_api_post_other_without_reason_returns_422(beta_api_client: AsyncC
 async def test_api_post_invalid_phone_returns_422(beta_api_client: AsyncClient):
     """手机号格式非法返回 422。"""
     response = await beta_api_client.post(
-        "/public/beta-applications",
+        "/v1/public/beta-applications",
         json={
             "phone": "12345",
             "watch_stock_count": 10,
@@ -538,14 +538,14 @@ async def test_api_post_rate_limit_returns_429(beta_api_client: AsyncClient):
     # 前 5 次成功
     for i in range(5):
         resp = await beta_api_client.post(
-            "/public/beta-applications",
+            "/v1/public/beta-applications",
             json=_make_payload(wechat=f"api_rate_user_{i}", phone=None),
         )
         assert resp.status_code == 201, f"第 {i+1} 次应成功: {resp.text}"
 
     # 第 6 次限流
     resp = await beta_api_client.post(
-        "/public/beta-applications",
+        "/v1/public/beta-applications",
         json=_make_payload(wechat="api_rate_user_5", phone=None),
     )
     assert resp.status_code == 429, resp.text
@@ -555,7 +555,7 @@ async def test_api_post_rate_limit_returns_429(beta_api_client: AsyncClient):
 async def test_api_post_no_auth_required(beta_api_client: AsyncClient):
     """POST /public/beta-applications 无需 Authorization header。"""
     response = await beta_api_client.post(
-        "/public/beta-applications",
+        "/v1/public/beta-applications",
         json=_make_payload(wechat="no_auth_user", phone=None),
     )
     # 不应返回 401/403（无需登录）

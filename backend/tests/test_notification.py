@@ -292,7 +292,7 @@ class TestNotificationAPI:
         from app.main import app
 
         client = TestClient(app)
-        response = client.post("/notification-previews", json={
+        response = client.post("/v1/notification-previews", json={
             "message_type": "MONITOR_EVENT",
             "context": {
                 "title": "监控事件｜贵州茅台",
@@ -319,7 +319,7 @@ class TestNotificationAPI:
         from app.main import app
 
         client = TestClient(app)
-        response = client.post("/notification-previews", json={
+        response = client.post("/v1/notification-previews", json={
             "message_type": "INVALID",
             "context": {
                 "title": "t", "summary": "s",
@@ -335,7 +335,7 @@ class TestNotificationAPI:
         from app.main import app
 
         client = TestClient(app)
-        response = client.post("/notification-previews", json={
+        response = client.post("/v1/notification-previews", json={
             "message_type": "SYSTEM_ALERT",
             "context": {"title": "t"},  # 缺少 summary 等
         })
@@ -351,7 +351,7 @@ class TestNotificationAPI:
         from app.main import app
 
         client = TestClient(app)
-        response = client.get("/messages")
+        response = client.get("/v1/messages")
         assert response.status_code == 401  # 缺少 Authorization header
 
     def test_channels_endpoint_requires_auth(self) -> None:
@@ -364,7 +364,7 @@ class TestNotificationAPI:
         from app.main import app
 
         client = TestClient(app)
-        response = client.get("/notification-channels")
+        response = client.get("/v1/notification-channels")
         assert response.status_code == 401  # 缺少 Authorization header
 
     def test_x_user_id_header_rejected(self) -> None:
@@ -381,7 +381,7 @@ class TestNotificationAPI:
 
         client = TestClient(app)
         response = client.get(
-            "/notification-channels",
+            "/v1/notification-channels",
             headers={"X-User-Id": str(uuid4())},
         )
         assert response.status_code == 401  # X-User-Id 不再认证，需 Authorization
@@ -396,7 +396,7 @@ class TestNotificationAPI:
         from app.main import app
 
         client = TestClient(app)
-        response = client.get("/notification-channels")
+        response = client.get("/v1/notification-channels")
         assert response.status_code == 401
 
 
@@ -442,7 +442,7 @@ async def test_valid_jwt_returns_user_channels(
         transport = make_asgi_transport(app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
-                "/notification-channels",
+                "/v1/notification-channels",
                 headers={"Authorization": f"Bearer {token}"},
             )
         assert response.status_code == 200
@@ -1054,7 +1054,7 @@ class TestMessageStructuredFields:
             transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.get(
-                    "/messages",
+                    "/v1/messages",
                     headers={"Authorization": f"Bearer {create_access_token(str(test_user.id))}"},
                 )
             assert response.status_code == 200
@@ -2077,7 +2077,7 @@ class TestLatestEventEndpoint:
             transport = make_asgi_transport(app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 # 无 token 访问应 401
-                return await client.post(f"/notification-channels/{uuid4()}/test-latest-event")
+                return await client.post(f"/v1/notification-channels/{uuid4()}/test-latest-event")
 
         import asyncio
         response = asyncio.run(_call())

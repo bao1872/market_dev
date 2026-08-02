@@ -226,7 +226,7 @@ async def test_user_context_no_internal_fields_and_denominator_14(
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -260,7 +260,7 @@ async def test_missing_core_omitted_denominator_14(
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -290,7 +290,7 @@ async def test_m3_threshold_not_confirmed_no_1e6(
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -317,7 +317,7 @@ async def test_m5_missing_omitted_and_double_true_in_data_quality(
     sp, tp = _base_payload(vol_overrides={"sqz_on": None, "sqz_off": None})
     await _make_published_run_and_snapshot(db_session, inst1.id, date(2026, 7, 14), sp, tp)
     r1 = await client.get(
-        f"/api/v1/stocks/{inst1.symbol}/context",
+        f"/v1/stocks/{inst1.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     b1 = r1.json()
@@ -328,7 +328,7 @@ async def test_m5_missing_omitted_and_double_true_in_data_quality(
     sp2, tp2 = _base_payload(vol_overrides={"sqz_on": True, "sqz_off": True})
     await _make_published_run_and_snapshot(db_session, inst2.id, date(2026, 7, 14), sp2, tp2)
     r2 = await client.get(
-        f"/api/v1/stocks/{inst2.symbol}/context",
+        f"/v1/stocks/{inst2.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     b2 = r2.json()
@@ -353,7 +353,7 @@ async def test_s1_unknown_enum_not_inside(
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -378,7 +378,7 @@ async def test_s3_out_of_range_omitted(
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -403,7 +403,7 @@ async def test_s7_s8_admin_sourcepath_by_trend(
     sp_up, tp_up = _base_payload(dsa_overrides={"current_dsa_segment_dir": 1})
     await _make_published_run_and_snapshot(db_session, inst_up.id, date(2026, 7, 14), sp_up, tp_up)
     r_up = await client.get(
-        f"/api/v1/admin/stocks/{inst_up.symbol}/debug",
+        f"/v1/admin/stocks/{inst_up.symbol}/debug",
         headers=_auth_headers(admin_user.id),
     )
     b_up = r_up.json()
@@ -417,7 +417,7 @@ async def test_s7_s8_admin_sourcepath_by_trend(
     sp_dn, tp_dn = _base_payload(dsa_overrides={"current_dsa_segment_dir": -1})
     await _make_published_run_and_snapshot(db_session, inst_dn.id, date(2026, 7, 14), sp_dn, tp_dn)
     r_dn = await client.get(
-        f"/api/v1/admin/stocks/{inst_dn.symbol}/debug",
+        f"/v1/admin/stocks/{inst_dn.symbol}/debug",
         headers=_auth_headers(admin_user.id),
     )
     b_dn = r_dn.json()
@@ -448,7 +448,7 @@ async def test_summary_persisted_preferred(
         db_session, inst.id, date(2026, 7, 14), sp, tp, summary_payload=summary,
     )
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -476,7 +476,7 @@ async def test_summary_missing_or_old_fallback(
         db_session, inst_a.id, date(2026, 7, 14), sp, tp, summary_payload=None,
     )
     r_a = await client.get(
-        f"/api/v1/stocks/{inst_a.symbol}/context",
+        f"/v1/stocks/{inst_a.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     b_a = r_a.json()
@@ -491,7 +491,7 @@ async def test_summary_missing_or_old_fallback(
         summary_payload={"legacy_field": "x"},
     )
     r_b = await client.get(
-        f"/api/v1/stocks/{inst_b.symbol}/context",
+        f"/v1/stocks/{inst_b.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     b_b = r_b.json()
@@ -505,7 +505,7 @@ async def test_summary_missing_or_old_fallback(
         summary_payload={"atomic_fact_contract_v1": {"availability": {"coreDenominator": 14}, "core": {}}},
     )
     r_c = await client.get(
-        f"/api/v1/stocks/{inst_c.symbol}/context",
+        f"/v1/stocks/{inst_c.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert r_c.status_code == 200, r_c.text
@@ -530,7 +530,7 @@ async def test_persisted_matches_fallback(
         db_session, inst.id, date(2026, 7, 14), sp, tp, summary_payload=summary,
     )
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -565,7 +565,7 @@ async def test_as_of_sql_filter_before_limit(
     # 正确实现应得到 07-05 和 07-04 两个快照 → 1 个过渡（asOf=07-05）
     # 旧实现（先取最新 10 个=07-03..07-12 再内存过滤）→ 会得到未来日期的快照
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context?as_of=2026-07-05",
+        f"/v1/stocks/{inst.symbol}/context?as_of=2026-07-05",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -606,7 +606,7 @@ async def test_get_context_writes_nothing(
     ).scalar_one()
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -637,7 +637,7 @@ async def test_recent_changes_precision_filters_noise(
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp2, tp2)
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -666,14 +666,14 @@ async def test_admin_debug_full_traceability(
 
     # member 访问 admin debug → 403
     r_member = await client.get(
-        f"/api/v1/admin/stocks/{inst.symbol}/debug",
+        f"/v1/admin/stocks/{inst.symbol}/debug",
         headers=_auth_headers(member_user.id),
     )
     assert r_member.status_code == 403, r_member.text
 
     # admin 访问 → 200 + rawDebug + atomicFactsDebug 可追溯
     r_admin = await client.get(
-        f"/api/v1/admin/stocks/{inst.symbol}/debug",
+        f"/v1/admin/stocks/{inst.symbol}/debug",
         headers=_auth_headers(admin_user.id),
     )
     assert r_admin.status_code == 200, r_admin.text
@@ -717,7 +717,7 @@ async def test_response_meta_versions(
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -731,7 +731,7 @@ async def test_response_meta_versions(
     # 空态响应也必须含 meta
     inst_empty = await instrument_factory(symbol="ATOMICMETA2")
     r_empty = await client.get(
-        f"/api/v1/stocks/{inst_empty.symbol}/context",
+        f"/v1/stocks/{inst_empty.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert r_empty.status_code == 200
@@ -763,7 +763,7 @@ async def test_as_of_weekend_returns_previous_batch(
 
     # as_of=2026-07-18（周六）应回退到 07-14
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context?as_of=2026-07-18",
+        f"/v1/stocks/{inst.symbol}/context?as_of=2026-07-18",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -776,7 +776,7 @@ async def test_as_of_weekend_returns_previous_batch(
 
     # as_of 早于所有批次（07-10）→ 空态
     resp_early = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context?as_of=2026-07-10",
+        f"/v1/stocks/{inst.symbol}/context?as_of=2026-07-10",
         headers=_auth_headers(member_with_sub.id),
     )
     body_early = resp_early.json()
@@ -842,7 +842,7 @@ async def test_legacy_snapshot_reason_in_degraded_reasons(
     await db_session.flush()
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -924,7 +924,7 @@ async def test_persisted_schema_strict_fallback(
     )
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, (
@@ -979,7 +979,7 @@ async def test_persisted_all_missing_is_valid(
     )
 
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1015,7 +1015,7 @@ async def test_node_availability_no_published_run(
     """无 published run → nodeAvailability.state=unknown, reasonCode=LEGACY_SNAPSHOT_NO_NODE_CLUSTER。"""
     inst = await instrument_factory(symbol="NODENOPRUN")
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1051,7 +1051,7 @@ async def test_node_availability_snapshot_missing(
     await db_session.flush()
     # 不创建 snapshot
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1086,7 +1086,7 @@ async def test_node_availability_available(
     sp, tp = _sp_with_node_cluster(nc)
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1124,7 +1124,7 @@ async def test_node_availability_profile_empty(
     sp, tp = _sp_with_node_cluster(nc)
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1158,7 +1158,7 @@ async def test_node_availability_15m_missing(
     sp, tp = _sp_with_node_cluster(nc)
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1191,7 +1191,7 @@ async def test_node_availability_compute_failed(
     sp, tp = _sp_with_node_cluster(nc)
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1222,7 +1222,7 @@ async def test_node_availability_insufficient_daily_bars(
     sp, tp = _sp_with_node_cluster(nc)
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1280,7 +1280,7 @@ async def test_node_availability_legacy_no_node_cluster(
     # _find_latest_succeeded_run 按 schema_version=_SCHEMA_VERSION=4 过滤，不会查到 schema_version=3 的 run
     # → 顶层 reasonCode=no_published_full_run + nodeAvailability.state=unknown
     resp = await client.get(
-        f"/api/v1/stocks/{inst.symbol}/context",
+        f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),
     )
     assert resp.status_code == 200, resp.text
@@ -1315,7 +1315,7 @@ async def test_node_availability_admin_debug_includes_node_availability(
     sp, tp = _sp_with_node_cluster(nc)
     await _make_published_run_and_snapshot(db_session, inst.id, date(2026, 7, 14), sp, tp)
     resp = await client.get(
-        f"/api/v1/admin/stocks/{inst.symbol}/debug",
+        f"/v1/admin/stocks/{inst.symbol}/debug",
         headers=_auth_headers(admin_user.id),
     )
     assert resp.status_code == 200, resp.text

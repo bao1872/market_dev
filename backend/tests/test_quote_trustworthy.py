@@ -83,7 +83,7 @@ async def test_quote_pytdx_success_during_trading_session(
     monkeypatch.setattr(bars_api, "_is_quote_realtime_session", AsyncMock(return_value=True))
     monkeypatch.setattr(bars_api, "_fetch_pytdx_quote", AsyncMock(return_value=pytdx_quote))
 
-    response = await client.get(f"/api/v1/instruments/{instrument.id}/quote")
+    response = await client.get(f"/v1/instruments/{instrument.id}/quote")
     assert response.status_code == 200, response.text
 
     data = response.json()
@@ -114,7 +114,7 @@ async def test_quote_pytdx_failure_during_trading_session_fallback_daily(
     monkeypatch.setattr(bars_api, "_is_quote_realtime_session", AsyncMock(return_value=True))
     monkeypatch.setattr(bars_api, "_fetch_pytdx_quote", AsyncMock(return_value=None))
 
-    response = await client.get(f"/api/v1/instruments/{instrument.id}/quote")
+    response = await client.get(f"/v1/instruments/{instrument.id}/quote")
     assert response.status_code == 200, response.text
 
     data = response.json()
@@ -148,7 +148,7 @@ async def test_quote_non_trading_session_skips_pytdx(
     monkeypatch.setattr(bars_api, "_is_quote_realtime_session", AsyncMock(return_value=False))
     monkeypatch.setattr(bars_api, "_fetch_pytdx_quote", _spy_fetch)
 
-    response = await client.get(f"/api/v1/instruments/{instrument.id}/quote")
+    response = await client.get(f"/v1/instruments/{instrument.id}/quote")
     assert response.status_code == 200, response.text
 
     data = response.json()
@@ -171,7 +171,7 @@ async def test_quote_no_data_returns_404(
     monkeypatch.setattr(bars_api, "_is_quote_realtime_session", AsyncMock(return_value=False))
     monkeypatch.setattr(bars_api, "_fetch_pytdx_quote", AsyncMock(return_value=None))
 
-    response = await client.get(f"/api/v1/instruments/{instrument.id}/quote")
+    response = await client.get(f"/v1/instruments/{instrument.id}/quote")
     assert response.status_code == 404, response.text
 
 
@@ -214,7 +214,7 @@ async def test_quote_redis_cache_hit_avoids_pytdx(
     monkeypatch.setattr(bars_api, "_fetch_pytdx_quote", _count_fetch)
     monkeypatch.setattr(bars_api, "_quote_cache_get", AsyncMock(return_value=cached_quote.copy()))
 
-    response = await client.get(f"/api/v1/instruments/{instrument.id}/quote")
+    response = await client.get(f"/v1/instruments/{instrument.id}/quote")
     assert response.status_code == 200, response.text
 
     data = response.json()

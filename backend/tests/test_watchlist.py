@@ -74,7 +74,7 @@ async def watchlist_client(
 async def test_add_to_watchlist(watchlist_client) -> None:
     """测试加入自选。"""
     client, _, inst1, _ = watchlist_client
-    response = await client.post("/watchlist", json={"instrument_id": str(inst1.id)})
+    response = await client.post("/v1/watchlist", json={"instrument_id": str(inst1.id)})
     assert response.status_code == 201
     data = response.json()
     assert data["instrument_id"] == str(inst1.id)
@@ -86,9 +86,9 @@ async def test_add_to_watchlist(watchlist_client) -> None:
 async def test_list_watchlist(watchlist_client) -> None:
     """测试查询自选列表。"""
     client, _, inst1, inst2 = watchlist_client
-    await client.post("/watchlist", json={"instrument_id": str(inst1.id)})
-    await client.post("/watchlist", json={"instrument_id": str(inst2.id), "source": "monitor"})
-    response = await client.get("/watchlist")
+    await client.post("/v1/watchlist", json={"instrument_id": str(inst1.id)})
+    await client.post("/v1/watchlist", json={"instrument_id": str(inst2.id), "source": "monitor"})
+    response = await client.get("/v1/watchlist")
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 2
@@ -101,12 +101,12 @@ async def test_list_watchlist(watchlist_client) -> None:
 async def test_remove_from_watchlist(watchlist_client) -> None:
     """测试移除自选（软删除）。"""
     client, _, inst1, _ = watchlist_client
-    await client.post("/watchlist", json={"instrument_id": str(inst1.id)})
+    await client.post("/v1/watchlist", json={"instrument_id": str(inst1.id)})
     # 移除
-    response = await client.delete(f"/watchlist/{inst1.id}")
+    response = await client.delete(f"/v1/watchlist/{inst1.id}")
     assert response.status_code == 204
     # 查询列表应为空
-    list_resp = await client.get("/watchlist")
+    list_resp = await client.get("/v1/watchlist")
     assert list_resp.json()["total"] == 0
 
 
@@ -115,7 +115,7 @@ async def test_remove_not_found(watchlist_client) -> None:
     """测试移除不存在的自选（404）。"""
     client, _, _, _ = watchlist_client
     fake_id = uuid.uuid4()
-    response = await client.delete(f"/watchlist/{fake_id}")
+    response = await client.delete(f"/v1/watchlist/{fake_id}")
     assert response.status_code == 404
 
 
@@ -123,9 +123,9 @@ async def test_remove_not_found(watchlist_client) -> None:
 async def test_duplicate_add_conflict(watchlist_client) -> None:
     """测试重复加入返回 409 Conflict。"""
     client, _, inst1, _ = watchlist_client
-    resp1 = await client.post("/watchlist", json={"instrument_id": str(inst1.id)})
+    resp1 = await client.post("/v1/watchlist", json={"instrument_id": str(inst1.id)})
     assert resp1.status_code == 201
-    resp2 = await client.post("/watchlist", json={"instrument_id": str(inst1.id)})
+    resp2 = await client.post("/v1/watchlist", json={"instrument_id": str(inst1.id)})
     assert resp2.status_code == 409
 
 
@@ -133,10 +133,10 @@ async def test_duplicate_add_conflict(watchlist_client) -> None:
 async def test_readd_after_remove(watchlist_client) -> None:
     """测试移除后重新加入（恢复 active=true）。"""
     client, _, inst1, _ = watchlist_client
-    await client.post("/watchlist", json={"instrument_id": str(inst1.id)})
-    await client.delete(f"/watchlist/{inst1.id}")
+    await client.post("/v1/watchlist", json={"instrument_id": str(inst1.id)})
+    await client.delete(f"/v1/watchlist/{inst1.id}")
     # 重新加入
-    response = await client.post("/watchlist", json={"instrument_id": str(inst1.id)})
+    response = await client.post("/v1/watchlist", json={"instrument_id": str(inst1.id)})
     assert response.status_code == 201
     assert response.json()["active"] is True
 
@@ -146,7 +146,7 @@ async def test_add_nonexistent_instrument(watchlist_client) -> None:
     """测试加入不存在的股票（404）。"""
     client, _, _, _ = watchlist_client
     fake_id = uuid.uuid4()
-    response = await client.post("/watchlist", json={"instrument_id": str(fake_id)})
+    response = await client.post("/v1/watchlist", json={"instrument_id": str(fake_id)})
     assert response.status_code == 404
 
 
@@ -160,7 +160,7 @@ async def test_user_id_injection_ignored(watchlist_client) -> None:
     client, user, inst1, _ = watchlist_client
     fake_user_id = uuid.uuid4()
     # body 中传伪造的 user_id（应被忽略）
-    response = await client.post("/watchlist", json={
+    response = await client.post("/v1/watchlist", json={
         "instrument_id": str(inst1.id),
         "user_id": str(fake_user_id),  # 应被忽略
     })
@@ -175,7 +175,7 @@ async def test_user_id_injection_ignored(watchlist_client) -> None:
 async def test_empty_watchlist(watchlist_client) -> None:
     """测试空自选列表。"""
     client, _, _, _ = watchlist_client
-    response = await client.get("/watchlist")
+    response = await client.get("/v1/watchlist")
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 0

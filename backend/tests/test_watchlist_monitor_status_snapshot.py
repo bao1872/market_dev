@@ -1,4 +1,4 @@
-"""/watchlist/monitor-status 读取 feature snapshot 测试。
+"""/v1/watchlist/monitor-status 读取 feature snapshot 测试。
 
 覆盖：
 - 有 snapshot 时返回 _source='feature_snapshot'，不调用 MonitorSnapshotService
@@ -238,7 +238,7 @@ async def test_monitor_status_uses_snapshot_when_present(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -275,7 +275,7 @@ async def test_monitor_status_no_snapshot_after_close_returns_waiting(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -309,7 +309,7 @@ async def test_monitor_status_no_snapshot_before_close_returns_no_snapshot(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -360,7 +360,7 @@ async def test_monitor_status_trading_day_before_close_reads_yesterday_snapshot(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -409,7 +409,7 @@ async def test_monitor_status_non_trading_day_reads_recent_trading_day_snapshot(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 11, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -446,7 +446,7 @@ async def test_monitor_status_non_trading_day_no_history_returns_no_snapshot(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 11, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -490,7 +490,7 @@ async def test_monitor_status_intraday_no_yesterday_snapshot_returns_no_snapshot
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -540,7 +540,7 @@ async def test_monitor_status_running_run_blocks_snapshot_read(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -587,7 +587,7 @@ async def test_monitor_status_failed_run_blocks_snapshot_read(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -632,7 +632,7 @@ async def test_monitor_status_succeeded_run_allows_snapshot_read(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -674,7 +674,7 @@ async def test_monitor_status_no_run_blocks_snapshot_read(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -740,7 +740,7 @@ async def test_monitor_status_succeeded_run_null_published_at_blocks_read(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -804,7 +804,7 @@ async def test_monitor_status_backfill_full_scope_run_allows_read(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()
@@ -869,7 +869,7 @@ async def test_monitor_status_backfill_sample_scope_run_blocks_read(
         "app.api.watchlist.now_shanghai",
         return_value=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
     ):
-        response = await client.get("/watchlist/monitor-status")
+        response = await client.get("/v1/watchlist/monitor-status")
 
     assert response.status_code == 200, f"响应体: {response.text}"
     data = response.json()

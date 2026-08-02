@@ -79,7 +79,7 @@ from app.services.subscription_service import (
 from app.services.system_overview_service import get_system_overview
 
 router = APIRouter(
-    prefix="/admin",
+    prefix="/v1/admin",
     tags=["admin-subscription"],
 )
 

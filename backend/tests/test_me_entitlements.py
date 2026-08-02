@@ -155,7 +155,7 @@ async def test_entitlements_observe_20_user(entitlements_client):
     await _add_watchlist_items(db, user, instruments, active_count=5)
     await db.flush()
 
-    resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/entitlements", headers=_auth_headers(user.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -177,7 +177,7 @@ async def test_entitlements_research_50_user(entitlements_client):
     await _add_watchlist_items(db, user, instruments, active_count=10)
     await db.flush()
 
-    resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/entitlements", headers=_auth_headers(user.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -195,7 +195,7 @@ async def test_entitlements_admin_has_no_plan(entitlements_client):
     admin = await _create_admin(db)
     await db.flush()
 
-    resp = await client.get("/me/entitlements", headers=_auth_headers(admin.id))
+    resp = await client.get("/v1/me/entitlements", headers=_auth_headers(admin.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -225,7 +225,7 @@ async def test_entitlements_no_membership_returns_404(entitlements_client):
     db.add(UserRole(user_id=user.id, role_id=member_role.id))
     await db.flush()
 
-    resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/entitlements", headers=_auth_headers(user.id))
 
     assert resp.status_code == 404
     assert "无订阅记录" in resp.json()["detail"] or "无订阅" in resp.json()["detail"]
@@ -241,7 +241,7 @@ async def test_entitlements_used_excludes_inactive_watchlist(entitlements_client
     await _add_watchlist_items(db, user, instruments, active_count=8)
     await db.flush()
 
-    resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/entitlements", headers=_auth_headers(user.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -258,7 +258,7 @@ async def test_entitlements_expired_membership_still_returns_plan(entitlements_c
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
     await db.flush()
 
-    resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/entitlements", headers=_auth_headers(user.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -274,7 +274,7 @@ async def test_entitlements_zero_used_when_no_watchlist(entitlements_client):
     user, membership = await _create_normal_user_with_membership(db, "observe_20", grant_months=1)
     await db.flush()
 
-    resp = await client.get("/me/entitlements", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/entitlements", headers=_auth_headers(user.id))
 
     assert resp.status_code == 200
     data = resp.json()

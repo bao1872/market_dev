@@ -256,14 +256,14 @@ async def _assert_trend_blocked(
 
     # GET /strategies/{key}/published-runs
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/published-runs",
+        f"/v1/strategies/{data['strategy_key']}/published-runs",
         headers=_auth_headers(user_id),
     )
     assert resp.status_code == 403, resp.text
 
     # GET /strategies/{key}/results
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/results",
+        f"/v1/strategies/{data['strategy_key']}/results",
         params={"trade_date": data["trade_date"]},
         headers=_auth_headers(user_id),
     )
@@ -271,14 +271,14 @@ async def _assert_trend_blocked(
 
     # GET /strategy-runs/{run_id}/results
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results",
+        f"/v1/strategy-runs/{data['run_id']}/results",
         headers=_auth_headers(user_id),
     )
     assert resp.status_code == 403, resp.text
 
     # GET /strategy-runs/{run_id}/results/{result_id}
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results/{data['result_id']}",
+        f"/v1/strategy-runs/{data['run_id']}/results/{data['result_id']}",
         headers=_auth_headers(user_id),
     )
     assert resp.status_code == 403, resp.text
@@ -296,12 +296,12 @@ async def _assert_watchlist_blocked(
     await db.flush()
 
     # GET /watchlist
-    resp = await client.get("/watchlist", headers=_auth_headers(user_id))
+    resp = await client.get("/v1/watchlist", headers=_auth_headers(user_id))
     assert resp.status_code == 403, resp.text
 
     # POST /watchlist
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[0].id), "source": "manual"},
         headers=_auth_headers(user_id),
     )
@@ -309,19 +309,19 @@ async def _assert_watchlist_blocked(
 
     # DELETE /watchlist/{instrument_id}
     resp = await client.delete(
-        f"/watchlist/{instruments[0].id}",
+        f"/v1/watchlist/{instruments[0].id}",
         headers=_auth_headers(user_id),
     )
     assert resp.status_code == 403, resp.text
 
     # GET /watchlist/monitor-status
-    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user_id))
+    resp = await client.get("/v1/watchlist/monitor-status", headers=_auth_headers(user_id))
     assert resp.status_code == 403, resp.text
 
 
 async def _assert_me_access_ok(client: AsyncClient, user_id: uuid.UUID) -> None:
     """断言 /me/access 对指定用户返回 200。"""
-    resp = await client.get("/me/access", headers=_auth_headers(user_id))
+    resp = await client.get("/v1/me/access", headers=_auth_headers(user_id))
     assert resp.status_code == 200, resp.text
 
 
@@ -362,7 +362,7 @@ async def test_expired_member_me_access_and_renew_allowed(
     await db_session.flush()
 
     # /me/access 200
-    resp = await client.get("/me/access", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/access", headers=_auth_headers(user.id))
     assert resp.status_code == 200, resp.text
     assert resp.json()["subscription_active"] is False
 
@@ -379,7 +379,7 @@ async def test_expired_member_me_access_and_renew_allowed(
 
     # /auth/renew 可访问（登录用户即可调用）
     resp = await client.post(
-        "/auth/renew",
+        "/v1/auth/renew",
         json={"invite_code": results[0][1]},
         headers=_auth_headers(user.id),
     )
@@ -423,7 +423,7 @@ async def test_no_subscription_member_me_access_and_renew_allowed(
     user = await _create_member_without_subscription(db_session)
     await db_session.flush()
 
-    resp = await client.get("/me/access", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/access", headers=_auth_headers(user.id))
     assert resp.status_code == 200, resp.text
     assert resp.json()["subscription_active"] is False
 
@@ -438,7 +438,7 @@ async def test_no_subscription_member_me_access_and_renew_allowed(
     await db_session.flush()
 
     resp = await client.post(
-        "/auth/renew",
+        "/v1/auth/renew",
         json={"invite_code": results[0][1]},
         headers=_auth_headers(user.id),
     )
@@ -462,26 +462,26 @@ async def test_active_member_allowed_on_trend_selection(
     await db_session.flush()
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/published-runs",
+        f"/v1/strategies/{data['strategy_key']}/published-runs",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/results",
+        f"/v1/strategies/{data['strategy_key']}/results",
         params={"trade_date": data["trade_date"]},
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results",
+        f"/v1/strategy-runs/{data['run_id']}/results",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results/{data['result_id']}",
+        f"/v1/strategy-runs/{data['run_id']}/results/{data['result_id']}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
@@ -498,12 +498,12 @@ async def test_active_member_allowed_on_watchlist(
     await db_session.flush()
 
     # GET /watchlist
-    resp = await client.get("/watchlist", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist", headers=_auth_headers(user.id))
     assert resp.status_code == 200, resp.text
 
     # POST /watchlist
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[0].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -511,13 +511,13 @@ async def test_active_member_allowed_on_watchlist(
 
     # DELETE /watchlist/{instrument_id}
     resp = await client.delete(
-        f"/watchlist/{instruments[0].id}",
+        f"/v1/watchlist/{instruments[0].id}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 204, resp.text
 
     # GET /watchlist/monitor-status
-    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist/monitor-status", headers=_auth_headers(user.id))
     assert resp.status_code == 200, resp.text
 
 
@@ -537,26 +537,26 @@ async def test_admin_allowed_on_trend_selection_without_subscription(
     await db_session.flush()
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/published-runs",
+        f"/v1/strategies/{data['strategy_key']}/published-runs",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/results",
+        f"/v1/strategies/{data['strategy_key']}/results",
         params={"trade_date": data["trade_date"]},
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results",
+        f"/v1/strategy-runs/{data['run_id']}/results",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results/{data['result_id']}",
+        f"/v1/strategy-runs/{data['run_id']}/results/{data['result_id']}",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200, resp.text
@@ -572,23 +572,23 @@ async def test_admin_allowed_on_watchlist_without_subscription(
     instruments = await _create_instruments(db_session, 2)
     await db_session.flush()
 
-    resp = await client.get("/watchlist", headers=_auth_headers(admin.id))
+    resp = await client.get("/v1/watchlist", headers=_auth_headers(admin.id))
     assert resp.status_code == 200, resp.text
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[0].id), "source": "manual"},
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 201, resp.text
 
     resp = await client.delete(
-        f"/watchlist/{instruments[0].id}",
+        f"/v1/watchlist/{instruments[0].id}",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 204, resp.text
 
-    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(admin.id))
+    resp = await client.get("/v1/watchlist/monitor-status", headers=_auth_headers(admin.id))
     assert resp.status_code == 200, resp.text
 
 
@@ -609,7 +609,7 @@ async def test_renewal_restores_trend_selection_access(
 
     # 续期前 403
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/published-runs",
+        f"/v1/strategies/{data['strategy_key']}/published-runs",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -626,7 +626,7 @@ async def test_renewal_restores_trend_selection_access(
     await db_session.flush()
 
     resp = await client.post(
-        "/auth/renew",
+        "/v1/auth/renew",
         json={"invite_code": results[0][1]},
         headers=_auth_headers(user.id),
     )
@@ -638,26 +638,26 @@ async def test_renewal_restores_trend_selection_access(
 
     # 续期后同一接口 200
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/published-runs",
+        f"/v1/strategies/{data['strategy_key']}/published-runs",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/results",
+        f"/v1/strategies/{data['strategy_key']}/results",
         params={"trade_date": data["trade_date"]},
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results",
+        f"/v1/strategy-runs/{data['run_id']}/results",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results/{data['result_id']}",
+        f"/v1/strategy-runs/{data['run_id']}/results/{data['result_id']}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
@@ -675,7 +675,7 @@ async def test_renewal_restores_watchlist_access(
 
     # 续期前 POST 403
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[0].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -693,7 +693,7 @@ async def test_renewal_restores_watchlist_access(
     await db_session.flush()
 
     resp = await client.post(
-        "/auth/renew",
+        "/v1/auth/renew",
         json={"invite_code": results[0][1]},
         headers=_auth_headers(user.id),
     )
@@ -703,23 +703,23 @@ async def test_renewal_restores_watchlist_access(
     assert subscription.expires_at > datetime.now(UTC)
 
     # 续期后自选股数据仍保留（本测试无旧数据，重点验证可新增）
-    resp = await client.get("/watchlist", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist", headers=_auth_headers(user.id))
     assert resp.status_code == 200, resp.text
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[0].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 201, resp.text
 
     resp = await client.delete(
-        f"/watchlist/{instruments[0].id}",
+        f"/v1/watchlist/{instruments[0].id}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 204, resp.text
 
-    resp = await client.get("/watchlist/monitor-status", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/watchlist/monitor-status", headers=_auth_headers(user.id))
     assert resp.status_code == 200, resp.text
 
 

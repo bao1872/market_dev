@@ -1,6 +1,6 @@
 """策略指标实时计算 API。
 
-GET /api/v1/instruments/{instrument_id}/indicators
+GET /v1/instruments/{instrument_id}/indicators
     实时计算所有已注册策略的图表指标，供个股详情页面使用。
     返回所有策略的 chart_layers 定义 + 计算结果。
 
@@ -51,7 +51,7 @@ from app.services.indicator_service import compute_all_indicators
 
 logger = logging.getLogger("api.indicators")
 
-router = APIRouter(prefix="/api/v1", tags=["indicators"])
+router = APIRouter(prefix="/v1", tags=["indicators"])
 
 # 支持的周期
 _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}

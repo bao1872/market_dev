@@ -345,7 +345,7 @@ async def test_export_requires_auth(export_client: tuple[AsyncClient, AsyncSessi
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
     )
     assert resp.status_code == 401, resp.text
@@ -362,7 +362,7 @@ async def test_export_rejects_member_without_subscription(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(user.id),
     )
@@ -380,7 +380,7 @@ async def test_export_rejects_expired_member(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(user.id),
     )
@@ -398,7 +398,7 @@ async def test_export_admin_allowed(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(admin.id),
     )
@@ -416,7 +416,7 @@ async def test_export_active_member_allowed(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(user.id),
     )
@@ -438,7 +438,7 @@ async def test_export_nonexistent_run_returns_404(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{uuid.uuid4()}/results/export",
+        f"/v1/strategy-runs/{uuid.uuid4()}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(admin.id),
     )
@@ -461,7 +461,7 @@ async def test_export_unpublished_run_returns_404(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(admin.id),
     )
@@ -484,7 +484,7 @@ async def test_export_universe_all(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(universe="all"),
         headers=_auth_headers(admin.id),
     )
@@ -514,7 +514,7 @@ async def test_export_universe_watchlist(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(universe="watchlist"),
         headers=_auth_headers(user.id),
     )
@@ -539,7 +539,7 @@ async def test_export_keyword_filter(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(keyword="茅台"),
         headers=_auth_headers(admin.id),
     )
@@ -569,7 +569,7 @@ async def test_export_metric_filters(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(
             metric_filters=[{"metric_key": "dsa_dir_bars", "operator": "gte", "value": 30}]
         ),
@@ -596,7 +596,7 @@ async def test_export_sort_by_valid_field(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(sort_by="dsa_dir_bars", sort_desc=True),
         headers=_auth_headers(admin.id),
     )
@@ -614,7 +614,7 @@ async def test_export_sort_by_invalid_field_returns_422(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(sort_by="arbitrary_payload_key"),
         headers=_auth_headers(admin.id),
     )
@@ -642,7 +642,7 @@ async def test_export_visible_columns_order(
         {"key": "stock", "title": "股票", "data_type": "text", "payload_key": None},
     ]
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(visible_columns=columns),
         headers=_auth_headers(admin.id),
     )
@@ -671,7 +671,7 @@ async def test_export_empty_visible_columns_returns_422(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(visible_columns=[]),
         headers=_auth_headers(admin.id),
     )
@@ -694,7 +694,7 @@ async def test_export_rows_equal_filtered_total(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(keyword="茅台"),
         headers=_auth_headers(admin.id),
     )
@@ -726,7 +726,7 @@ async def test_export_exceeds_max_rows_returns_422(
     monkeypatch.setattr(sr_module, "MAX_EXPORT_ROWS", 3)
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(admin.id),
     )
@@ -750,7 +750,7 @@ async def test_export_mime_and_content_disposition(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(admin.id),
     )
@@ -783,7 +783,7 @@ async def test_export_formula_injection_protection(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(admin.id),
     )
@@ -876,7 +876,7 @@ async def test_export_generates_valid_xlsx_structure(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(),
         headers=_auth_headers(admin.id),
     )
@@ -900,7 +900,7 @@ async def test_export_response_headers_contain_four_totals(
     await db.flush()
 
     resp = await client.post(
-        f"/strategy-runs/{data['run_id']}/results/export",
+        f"/v1/strategy-runs/{data['run_id']}/results/export",
         json=_valid_export_request(keyword="茅台"),
         headers=_auth_headers(admin.id),
     )

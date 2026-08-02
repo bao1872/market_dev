@@ -4,7 +4,7 @@ import { fileURLToPath, URL } from 'node:url'
 
 // Vite 配置：React 插件 + 路径别名 @/ -> src/ + SCSS Modules + /api 代理到后端 8000
 // 前端开发服务器监听 0.0.0.0:8008（腾讯云外部可访问）
-// /api 代理：去掉 /api 前缀后转发到后端 8000（后端路由无 /api 前缀，bars 路由自带 /api/v1）
+// /api 代理：只去掉一次网关前缀，/api/v1/... 转发为后端 /v1/...
 export default defineConfig({
   plugins: [react()],
   define: {

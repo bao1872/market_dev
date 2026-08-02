@@ -76,7 +76,7 @@ from app.services.strategy_service import (
 
 logger = logging.getLogger("api.strategy_runs")
 
-router = APIRouter(tags=["strategy-runs"])
+router = APIRouter(prefix="/v1", tags=["strategy-runs"])
 
 # 合法 operator 枚举
 VALID_OPERATORS = {"gt", "gte", "lt", "lte", "eq", "between"}

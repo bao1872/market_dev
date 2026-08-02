@@ -82,7 +82,7 @@ from app.services.market_status_service import compute_market_session
 
 logger = logging.getLogger("watchlist_api")
 
-router = APIRouter(prefix="/watchlist", tags=["watchlist"])
+router = APIRouter(prefix="/v1/watchlist", tags=["watchlist"])
 
 
 class _EvalInfo(NamedTuple):

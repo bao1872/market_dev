@@ -180,7 +180,7 @@ async def test_list_presets_requires_auth(
     """未登录访问 GET /me/table-view-presets → 401。"""
     client, _ = perm_client
     resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener"},
     )
     assert resp.status_code == 401, resp.text
@@ -193,7 +193,7 @@ async def test_create_preset_requires_auth(
     """未登录 POST /me/table-view-presets → 401。"""
     client, _ = perm_client
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -214,7 +214,7 @@ async def test_list_presets_rejects_member_without_subscription(
     await db.flush()
 
     resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener"},
         headers=_auth_headers(user.id),
     )
@@ -231,7 +231,7 @@ async def test_list_presets_rejects_expired_member(
     await db.flush()
 
     resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener"},
         headers=_auth_headers(user.id),
     )
@@ -248,7 +248,7 @@ async def test_list_presets_admin_allowed(
     await db.flush()
 
     resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener"},
         headers=_auth_headers(admin.id),
     )
@@ -268,7 +268,7 @@ async def test_list_presets_active_member_allowed(
     await db.flush()
 
     resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener"},
         headers=_auth_headers(user.id),
     )
@@ -290,7 +290,7 @@ async def test_create_preset_success(
     await db.flush()
 
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -324,7 +324,7 @@ async def test_create_preset_default_null_strategy_key(
     await db.flush()
 
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "watchlist",
             "strategy_key": None,
@@ -350,7 +350,7 @@ async def test_list_presets_filter_by_table_id(
     # 创建两个 table_id 的 preset
     for table_id in ("screener", "watchlist"):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": table_id,
                 "strategy_key": "dsa_selector",
@@ -363,7 +363,7 @@ async def test_list_presets_filter_by_table_id(
 
     # 按 table_id=screener 查询
     resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener"},
         headers=_auth_headers(user.id),
     )
@@ -385,7 +385,7 @@ async def test_list_presets_filter_by_strategy_key(
     # 同一 table_id 下两个 strategy_key
     for sk in ("dsa_selector", "watchlist_monitor"):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": sk,
@@ -397,7 +397,7 @@ async def test_list_presets_filter_by_strategy_key(
         assert resp.status_code == 201, resp.text
 
     resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener", "strategy_key": "dsa_selector"},
         headers=_auth_headers(user.id),
     )
@@ -417,7 +417,7 @@ async def test_update_preset_rename(
     await db.flush()
 
     create_resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -430,7 +430,7 @@ async def test_update_preset_rename(
     preset_id = create_resp.json()["id"]
 
     resp = await client.patch(
-        f"/me/table-view-presets/{preset_id}",
+        f"/v1/me/table-view-presets/{preset_id}",
         json={"name": "new-name"},
         headers=_auth_headers(user.id),
     )
@@ -450,7 +450,7 @@ async def test_update_preset_config(
     await db.flush()
 
     create_resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -463,7 +463,7 @@ async def test_update_preset_config(
 
     new_config = {"pageSize": 100, "keyword": "新能源"}
     resp = await client.patch(
-        f"/me/table-view-presets/{preset_id}",
+        f"/v1/me/table-view-presets/{preset_id}",
         json={"config": new_config},
         headers=_auth_headers(user.id),
     )
@@ -483,7 +483,7 @@ async def test_delete_preset_success(
     await db.flush()
 
     create_resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -495,14 +495,14 @@ async def test_delete_preset_success(
     preset_id = create_resp.json()["id"]
 
     resp = await client.delete(
-        f"/me/table-view-presets/{preset_id}",
+        f"/v1/me/table-view-presets/{preset_id}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 204, resp.text
 
     # 验证已删除
     list_resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener"},
         headers=_auth_headers(user.id),
     )
@@ -519,7 +519,7 @@ async def test_delete_preset_not_found(
     await db.flush()
 
     resp = await client.delete(
-        f"/me/table-view-presets/{uuid.uuid4()}",
+        f"/v1/me/table-view-presets/{uuid.uuid4()}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 404, resp.text
@@ -535,7 +535,7 @@ async def test_update_preset_not_found(
     await db.flush()
 
     resp = await client.patch(
-        f"/me/table-view-presets/{uuid.uuid4()}",
+        f"/v1/me/table-view-presets/{uuid.uuid4()}",
         json={"name": "x"},
         headers=_auth_headers(user.id),
     )
@@ -559,7 +559,7 @@ async def test_user_isolation_list(
 
     # user_a 创建 preset
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -572,7 +572,7 @@ async def test_user_isolation_list(
 
     # user_b 查询，应看不到 user_a 的 preset
     list_resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener"},
         headers=_auth_headers(user_b.id),
     )
@@ -591,7 +591,7 @@ async def test_user_isolation_update(
     await db.flush()
 
     create_resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -604,7 +604,7 @@ async def test_user_isolation_update(
 
     # user_b 尝试修改
     resp = await client.patch(
-        f"/me/table-view-presets/{preset_id}",
+        f"/v1/me/table-view-presets/{preset_id}",
         json={"name": "hijack"},
         headers=_auth_headers(user_b.id),
     )
@@ -622,7 +622,7 @@ async def test_user_isolation_delete(
     await db.flush()
 
     create_resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -634,7 +634,7 @@ async def test_user_isolation_delete(
     preset_id = create_resp.json()["id"]
 
     resp = await client.delete(
-        f"/me/table-view-presets/{preset_id}",
+        f"/v1/me/table-view-presets/{preset_id}",
         headers=_auth_headers(user_b.id),
     )
     assert resp.status_code == 404, resp.text
@@ -661,12 +661,12 @@ async def test_duplicate_name_conflict(
         "config": _valid_config(),
     }
     resp1 = await client.post(
-        "/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
+        "/v1/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
     )
     assert resp1.status_code == 201, resp1.text
 
     resp2 = await client.post(
-        "/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
+        "/v1/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
     )
     assert resp2.status_code == 409, resp2.text
 
@@ -682,7 +682,7 @@ async def test_duplicate_name_different_strategy_key_allowed(
 
     for sk in ("dsa_selector", "watchlist_monitor"):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": sk,
@@ -707,7 +707,7 @@ async def test_rename_to_existing_name_conflict(
     ids = []
     for name in ("view-1", "view-2"):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": "dsa_selector",
@@ -720,7 +720,7 @@ async def test_rename_to_existing_name_conflict(
 
     # 把 view-1 重命名为 view-2 → 409
     resp = await client.patch(
-        f"/me/table-view-presets/{ids[0]}",
+        f"/v1/me/table-view-presets/{ids[0]}",
         json={"name": "view-2"},
         headers=_auth_headers(user.id),
     )
@@ -743,7 +743,7 @@ async def test_quota_limit_20(
 
     for i in range(20):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": "dsa_selector",
@@ -756,7 +756,7 @@ async def test_quota_limit_20(
 
     # 第 21 个应被拒绝
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -781,7 +781,7 @@ async def test_quota_independent_per_strategy_key(
     # dsa_selector 创建 5 个
     for i in range(5):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": "dsa_selector",
@@ -795,7 +795,7 @@ async def test_quota_independent_per_strategy_key(
     # watchlist_monitor 创建 5 个（不冲突）
     for i in range(5):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": "watchlist_monitor",
@@ -824,7 +824,7 @@ async def test_config_rejects_selected_keys(
     bad_config = _valid_config()
     bad_config["selectedKeys"] = ["a", "b"]
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -848,7 +848,7 @@ async def test_config_rejects_page(
     bad_config = _valid_config()
     bad_config["page"] = 3
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -872,7 +872,7 @@ async def test_config_rejects_active_run_id(
     bad_config = _valid_config()
     bad_config["activeRunId"] = "run-xxx"
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -896,7 +896,7 @@ async def test_config_rejects_rows(
     bad_config = _valid_config()
     bad_config["rows"] = [{"symbol": "000001"}]
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -918,7 +918,7 @@ async def test_config_empty_allowed(
     await db.flush()
 
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -946,7 +946,7 @@ async def test_set_default_unsets_previous(
 
     # 创建 preset-1 并设为默认
     resp1 = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -962,7 +962,7 @@ async def test_set_default_unsets_previous(
 
     # 创建 preset-2 并设为默认
     resp2 = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -977,7 +977,7 @@ async def test_set_default_unsets_previous(
 
     # 查询列表，验证 id1 已自动取消默认
     list_resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener", "strategy_key": "dsa_selector"},
         headers=_auth_headers(user.id),
     )
@@ -997,7 +997,7 @@ async def test_patch_set_default_unsets_previous(
 
     # 创建两个非默认 preset
     resp1 = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1009,7 +1009,7 @@ async def test_patch_set_default_unsets_previous(
     id1 = resp1.json()["id"]
 
     resp2 = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1022,20 +1022,20 @@ async def test_patch_set_default_unsets_previous(
 
     # 把 view-1 设为默认
     await client.patch(
-        f"/me/table-view-presets/{id1}",
+        f"/v1/me/table-view-presets/{id1}",
         json={"is_default": True},
         headers=_auth_headers(user.id),
     )
 
     # 再把 view-2 设为默认
     await client.patch(
-        f"/me/table-view-presets/{id2}",
+        f"/v1/me/table-view-presets/{id2}",
         json={"is_default": True},
         headers=_auth_headers(user.id),
     )
 
     list_resp = await client.get(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         params={"table_id": "screener", "strategy_key": "dsa_selector"},
         headers=_auth_headers(user.id),
     )
@@ -1059,7 +1059,7 @@ async def test_create_missing_table_id(
     await db.flush()
 
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "strategy_key": "dsa_selector",
             "name": "view",
@@ -1080,7 +1080,7 @@ async def test_create_missing_name(
     await db.flush()
 
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1101,7 +1101,7 @@ async def test_create_missing_config(
     await db.flush()
 
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1122,7 +1122,7 @@ async def test_create_invalid_config_type(
     await db.flush()
 
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1146,7 +1146,7 @@ async def test_create_invalid_page_size_type(
     bad_config = _valid_config()
     bad_config["pageSize"] = "fifty"
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1170,7 +1170,7 @@ async def test_create_invalid_filters_type(
     bad_config = _valid_config()
     bad_config["filters"] = "not-a-list"
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1198,7 +1198,7 @@ async def test_user_id_in_body_ignored(
     fake_user_id = uuid.uuid4()
 
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1243,12 +1243,12 @@ async def test_duplicate_name_with_null_strategy_key_conflict(
         "config": {"pageSize": 30},
     }
     resp1 = await client.post(
-        "/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
+        "/v1/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
     )
     assert resp1.status_code == 201, resp1.text
 
     resp2 = await client.post(
-        "/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
+        "/v1/me/table-view-presets", json=payload, headers=_auth_headers(user.id),
     )
     assert resp2.status_code == 409, resp2.text
 
@@ -1264,7 +1264,7 @@ async def test_duplicate_name_null_strategy_key_different_table_allowed(
 
     for table_id in ("watchlist", "screener"):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": table_id,
                 "strategy_key": None,
@@ -1288,7 +1288,7 @@ async def test_duplicate_name_null_strategy_key_different_user_allowed(
 
     for user in (user_a, user_b):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "watchlist",
                 "strategy_key": None,
@@ -1312,7 +1312,7 @@ async def test_rename_to_existing_name_null_strategy_key_conflict(
     ids = []
     for name in ("view-a", "view-b"):
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "watchlist",
                 "strategy_key": None,
@@ -1326,7 +1326,7 @@ async def test_rename_to_existing_name_null_strategy_key_conflict(
 
     # 把 view-a 重命名为 view-b → 409
     resp = await client.patch(
-        f"/me/table-view-presets/{ids[0]}",
+        f"/v1/me/table-view-presets/{ids[0]}",
         json={"name": "view-b"},
         headers=_auth_headers(user.id),
     )
@@ -1350,7 +1350,7 @@ async def test_config_filters_element_must_be_dict(
     bad_config = _valid_config()
     bad_config["filters"] = ["not-a-dict"]
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1374,7 +1374,7 @@ async def test_config_filters_element_missing_key(
     bad_config = _valid_config()
     bad_config["filters"] = [{"op": "gt", "value": 3.0}]  # 缺 key
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1401,7 +1401,7 @@ async def test_config_filters_invalid_op(
     bad_config = _valid_config()
     bad_config["filters"] = [{"key": "change_pct", "op": "regex", "value": 3.0}]
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1434,7 +1434,7 @@ async def test_config_filters_valid_ops_accepted(
         {"key": "stock", "op": "not_empty", "value": ""},
     ]
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1458,7 +1458,7 @@ async def test_config_hidden_columns_element_must_be_string(
     bad_config = _valid_config()
     bad_config["hiddenColumns"] = ["symbol", 123]  # 第二个不是 string
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1482,7 +1482,7 @@ async def test_config_sort_key_must_be_nonempty_string(
     bad_config = _valid_config()
     bad_config["sort"] = {"key": "", "direction": "desc"}
     resp = await client.post(
-        "/me/table-view-presets",
+        "/v1/me/table-view-presets",
         json={
             "table_id": "screener",
             "strategy_key": "dsa_selector",
@@ -1521,7 +1521,7 @@ async def test_create_persists_across_sessions(client: AsyncClient) -> None:
         app.dependency_overrides[db_get_db] = _get_db_a
 
         resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": "dsa_selector",
@@ -1542,7 +1542,7 @@ async def test_create_persists_across_sessions(client: AsyncClient) -> None:
         app.dependency_overrides[db_get_db] = _get_db_b
 
         resp = await client.get(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             params={"table_id": "screener", "strategy_key": "dsa_selector"},
             headers=_auth_headers(user.id),
         )
@@ -1586,7 +1586,7 @@ async def test_update_persists_across_sessions(client: AsyncClient) -> None:
         app.dependency_overrides[db_get_db] = _get_db_a
 
         create_resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": "dsa_selector",
@@ -1600,7 +1600,7 @@ async def test_update_persists_across_sessions(client: AsyncClient) -> None:
         preset_id = create_resp.json()["id"]
 
         patch_resp = await client.patch(
-            f"/me/table-view-presets/{preset_id}",
+            f"/v1/me/table-view-presets/{preset_id}",
             json={
                 "name": "更新后",
                 "config": {"pageSize": 100, "keyword": "新能源"},
@@ -1618,7 +1618,7 @@ async def test_update_persists_across_sessions(client: AsyncClient) -> None:
         app.dependency_overrides[db_get_db] = _get_db_b
 
         resp = await client.get(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             params={"table_id": "screener", "strategy_key": "dsa_selector"},
             headers=_auth_headers(user.id),
         )
@@ -1665,7 +1665,7 @@ async def test_delete_persists_across_sessions(client: AsyncClient) -> None:
         app.dependency_overrides[db_get_db] = _get_db_a
 
         create_resp = await client.post(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             json={
                 "table_id": "screener",
                 "strategy_key": "dsa_selector",
@@ -1678,7 +1678,7 @@ async def test_delete_persists_across_sessions(client: AsyncClient) -> None:
         preset_id = create_resp.json()["id"]
 
         del_resp = await client.delete(
-            f"/me/table-view-presets/{preset_id}",
+            f"/v1/me/table-view-presets/{preset_id}",
             headers=_auth_headers(user.id),
         )
         assert del_resp.status_code == 204, del_resp.text
@@ -1691,7 +1691,7 @@ async def test_delete_persists_across_sessions(client: AsyncClient) -> None:
         app.dependency_overrides[db_get_db] = _get_db_b
 
         resp = await client.get(
-            "/me/table-view-presets",
+            "/v1/me/table-view-presets",
             params={"table_id": "screener", "strategy_key": "dsa_selector"},
             headers=_auth_headers(user.id),
         )

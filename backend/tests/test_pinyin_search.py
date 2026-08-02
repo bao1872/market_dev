@@ -80,7 +80,7 @@ def test_compute_pinyin_initials_empty() -> None:
 @pytest.mark.asyncio
 async def test_search_by_pinyin_prefix(client: AsyncClient, pinyin_instruments) -> None:
     """拼音首字母前缀搜索：dmgf -> 东睦股份 + 岱美股份。"""
-    response = await client.get("/instruments", params={"keyword": "dmgf"})
+    response = await client.get("/v1/instruments", params={"keyword": "dmgf"})
     assert response.status_code == 200
     data = response.json()
     # 命中：东睦股份 + 岱美股份（均为 pinyin_initials='dmgf'）
@@ -93,7 +93,7 @@ async def test_search_by_pinyin_prefix(client: AsyncClient, pinyin_instruments) 
 @pytest.mark.asyncio
 async def test_search_by_pinyin_uppercase(client: AsyncClient, pinyin_instruments) -> None:
     """大小写不敏感：DMGF 与 dmgf 等价（pinyin_initials 前缀匹配）。"""
-    response = await client.get("/instruments", params={"keyword": "DMGF"})
+    response = await client.get("/v1/instruments", params={"keyword": "DMGF"})
     assert response.status_code == 200
     data = response.json()
     # DMGF 转小写后匹配 pinyin_initials LIKE 'dmgf%'，命中东睦+岱美
@@ -105,7 +105,7 @@ async def test_search_by_pinyin_uppercase(client: AsyncClient, pinyin_instrument
 @pytest.mark.asyncio
 async def test_search_by_name_contains(client: AsyncClient, pinyin_instruments) -> None:
     """名称包含搜索：东睦 -> 东睦股份。"""
-    response = await client.get("/instruments", params={"keyword": "东睦"})
+    response = await client.get("/v1/instruments", params={"keyword": "东睦"})
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 1
@@ -116,7 +116,7 @@ async def test_search_by_name_contains(client: AsyncClient, pinyin_instruments) 
 @pytest.mark.asyncio
 async def test_search_by_symbol_exact(client: AsyncClient, pinyin_instruments) -> None:
     """代码完全匹配：600114 -> 东睦股份。"""
-    response = await client.get("/instruments", params={"keyword": "600114"})
+    response = await client.get("/v1/instruments", params={"keyword": "600114"})
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 1
@@ -133,7 +133,7 @@ async def test_search_priority_ordering(client: AsyncClient, pinyin_instruments)
     - 贵州茅台: symbol='600519' 无匹配；pinyin_initials='gzmt' 无匹配；name 不包含 -> 未命中
     - 岱美股份: pinyin_initials='dmgf' 不匹配
     """
-    response = await client.get("/instruments", params={"keyword": "600114", "page_size": 10})
+    response = await client.get("/v1/instruments", params={"keyword": "600114", "page_size": 10})
     assert response.status_code == 200
     data = response.json()
     symbols = [item["symbol"] for item in data["items"]]
@@ -150,7 +150,7 @@ async def test_search_priority_symbol_prefix_before_pinyin(client: AsyncClient, 
     - 贵州茅台: symbol='600519' 前缀匹配 -> rank 1
     - 岱美股份: symbol='603730' 前缀匹配 -> rank 1
     """
-    response = await client.get("/instruments", params={"keyword": "60", "page_size": 10})
+    response = await client.get("/v1/instruments", params={"keyword": "60", "page_size": 10})
     assert response.status_code == 200
     data = response.json()
     symbols = [item["symbol"] for item in data["items"]]
@@ -163,7 +163,7 @@ async def test_search_priority_symbol_prefix_before_pinyin(client: AsyncClient, 
 @pytest.mark.asyncio
 async def test_response_has_pinyin_initials(client: AsyncClient, pinyin_instruments) -> None:
     """响应包含 pinyin_initials 字段。"""
-    response = await client.get("/instruments", params={"keyword": "600114"})
+    response = await client.get("/v1/instruments", params={"keyword": "600114"})
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert "pinyin_initials" in item
@@ -173,7 +173,7 @@ async def test_response_has_pinyin_initials(client: AsyncClient, pinyin_instrume
 @pytest.mark.asyncio
 async def test_search_no_match(client: AsyncClient, pinyin_instruments) -> None:
     """边界：无匹配 keyword 返回空。"""
-    response = await client.get("/instruments", params={"keyword": "zzzznotexist"})
+    response = await client.get("/v1/instruments", params={"keyword": "zzzznotexist"})
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 0

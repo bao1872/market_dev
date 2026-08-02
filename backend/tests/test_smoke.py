@@ -1,8 +1,8 @@
-"""R1 smoke test - 验证后端工程骨架可导入且 /health 返回 200。
+"""R1 smoke test - 验证后端工程骨架可导入且 /v1/health 返回 200。
 
 测试内容：
 1. FastAPI app 能导入
-2. /health 端点返回 200 + status=ok
+2. /v1/health 端点返回 200 + status=ok
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ def test_app_importable() -> None:
 
 
 def test_health_endpoint() -> None:
-    """测试 /health 端点返回 200。"""
+    """测试 /v1/health 端点返回 200。"""
     client = TestClient(app)
-    response = client.get("/health")
+    response = client.get("/v1/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"

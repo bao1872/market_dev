@@ -1,7 +1,7 @@
 // [结构状态因子层] - 描述: 个股结构状态因子面板（双周期 1d/15m，5 组因子）
 // 用法：在 StockDetailPage 右侧栏渲染，<StockStructuralStatePanel instrumentId={id} />
 // 契约：前端只渲染后端 DTO，严禁重新计算因子。所有因子由后端 structural_factor_service 计算。
-// 数据源：useStructuralFactors hook → GET /api/v1/instruments/{id}/structural-factors
+// 数据源：useStructuralFactors hook → GET /v1/instruments/{id}/structural-factors
 // 降级策略：API 失败显示"暂无数据"；null 字段显示"-"；degraded_reasons 显示警告条
 // [时序特征 V1] - 描述: 面板末尾折叠卡片，渲染 temporal-features API DTO（受同一个结构状态开关控制）
 import { useState, type ReactNode } from 'react'

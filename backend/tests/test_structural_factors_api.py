@@ -55,7 +55,7 @@ async def test_get_structural_factors_returns_200(client: AsyncClient) -> None:
         return_value=mock_result,
     ):
         resp = await client.get(
-            "/api/v1/instruments/00000000-0000-0000-0000-000000000001/structural-factors"
+            "/v1/instruments/00000000-0000-0000-0000-000000000001/structural-factors"
         )
     assert resp.status_code == 200
     data = resp.json()
@@ -71,7 +71,7 @@ async def test_get_structural_factors_returns_200(client: AsyncClient) -> None:
 async def test_invalid_timeframe_returns_400(client: AsyncClient) -> None:
     """无效 primary_timeframe 返回 400。"""
     resp = await client.get(
-        "/api/v1/instruments/00000000-0000-0000-0000-000000000001/structural-factors"
+        "/v1/instruments/00000000-0000-0000-0000-000000000001/structural-factors"
         "?primary_timeframe=2h"
     )
     assert resp.status_code == 400
@@ -82,7 +82,7 @@ async def test_invalid_timeframe_returns_400(client: AsyncClient) -> None:
 async def test_invalid_adj_returns_400(client: AsyncClient) -> None:
     """无效 adj 返回 400。"""
     resp = await client.get(
-        "/api/v1/instruments/00000000-0000-0000-0000-000000000001/structural-factors"
+        "/v1/instruments/00000000-0000-0000-0000-000000000001/structural-factors"
         "?adj=hfq"
     )
     assert resp.status_code == 400
@@ -115,7 +115,7 @@ async def test_nonexistent_instrument_returns_200_degraded(
         return_value=mock_result,
     ):
         resp = await client.get(
-            "/api/v1/instruments/00000000-0000-0000-0000-000000000002/structural-factors"
+            "/v1/instruments/00000000-0000-0000-0000-000000000002/structural-factors"
         )
     assert resp.status_code == 200
     data = resp.json()
@@ -144,7 +144,7 @@ async def test_response_meta_structure(client: AsyncClient) -> None:
         return_value=mock_result,
     ):
         resp = await client.get(
-            "/api/v1/instruments/00000000-0000-0000-0000-000000000001/structural-factors"
+            "/v1/instruments/00000000-0000-0000-0000-000000000001/structural-factors"
         )
     meta = resp.json()["meta"]
     assert meta["as_of"] == "2026-07-04"

@@ -100,7 +100,7 @@ async def test_admin_can_list_heartbeats(
     await db_session.flush()
 
     response = await client.get(
-        "/admin/worker-heartbeats",
+        "/v1/admin/worker-heartbeats",
         headers=_auth_headers(admin_user.id),
     )
 
@@ -138,7 +138,7 @@ async def test_non_admin_forbidden(
 ) -> None:
     """非 admin 用户访问 /admin/worker-heartbeats 应返回 403。"""
     response = await client.get(
-        "/admin/worker-heartbeats",
+        "/v1/admin/worker-heartbeats",
         headers=_auth_headers(member_user.id),
     )
     assert response.status_code == 403
@@ -152,7 +152,7 @@ async def test_non_admin_forbidden(
 @pytest.mark.asyncio
 async def test_unauthenticated_unauthorized(client: AsyncClient) -> None:
     """未携带 token 访问 /admin/worker-heartbeats 应返回 401。"""
-    response = await client.get("/admin/worker-heartbeats")
+    response = await client.get("/v1/admin/worker-heartbeats")
     assert response.status_code == 401
 
 
@@ -183,7 +183,7 @@ async def test_status_filter(
     await db_session.flush()
 
     response = await client.get(
-        "/admin/worker-heartbeats?status=running",
+        "/v1/admin/worker-heartbeats?status=running",
         headers=_auth_headers(admin_user.id),
     )
 
@@ -234,7 +234,7 @@ async def test_health_state_classification(
     await db_session.flush()
 
     response = await client.get(
-        "/admin/worker-heartbeats?limit=200",
+        "/v1/admin/worker-heartbeats?limit=200",
         headers=_auth_headers(admin_user.id),
     )
 

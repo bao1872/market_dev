@@ -34,7 +34,7 @@ import AdminVisitorsPage from './pages/AdminVisitorsPage'
 const LandingPage = lazy(() => import('./pages/LandingPage'))
 
 // [Auction] - 竞价分析三级页面 lazy 加载（市场/板块/个股）
-// 受保护路由 require_authenticated，任何登录用户可读（GET /api/v1/auction/*）
+// 受保护路由 require_authenticated，任何登录用户可读（GET /v1/auction/*）
 const AuctionMarketPage = lazy(() => import('./features/auction/AuctionMarketPage'))
 const AuctionBoardPage = lazy(() => import('./features/auction/AuctionBoardPage'))
 const AuctionInstrumentPage = lazy(() => import('./features/auction/AuctionInstrumentPage'))

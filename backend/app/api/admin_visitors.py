@@ -28,7 +28,7 @@ from app.services.umami_analytics_adapter import fetch_umami_report
 
 logger = logging.getLogger("admin_visitors")
 
-router = APIRouter(prefix="/admin", tags=["admin-visitors"])
+router = APIRouter(prefix="/v1/admin", tags=["admin-visitors"])
 
 
 @router.get("/visitors", response_model=VisitorReport)

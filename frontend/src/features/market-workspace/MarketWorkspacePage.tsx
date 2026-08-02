@@ -199,7 +199,7 @@ export default function MarketWorkspacePage() {
           visible_columns: visibleColumns,
         }
         const resp = await apiClient.post(
-          `/api/strategy-runs/${activeRunId}/results/export`,
+          `/v1/strategy-runs/${activeRunId}/results/export`,
           body,
           { responseType: 'blob' },
         )

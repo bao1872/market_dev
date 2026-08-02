@@ -37,7 +37,7 @@ from app.services.stock_detail_feishu_service import (
     send_stock_detail_to_feishu,
 )
 
-router = APIRouter(tags=["stock-detail-feishu"])
+router = APIRouter(prefix="/v1", tags=["stock-detail-feishu"])
 
 
 def _error_detail(

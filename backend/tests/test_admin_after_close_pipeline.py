@@ -161,7 +161,7 @@ async def test_pipeline_not_started_pre_market(
         return_value=now,
     ):
         resp = await client.get(
-            "/admin/after-close/pipeline",
+            "/v1/admin/after-close/pipeline",
             params={"trade_date": TEST_DATE_STR},
             headers=_auth_headers(admin_user.id),
         )
@@ -191,7 +191,7 @@ async def test_pipeline_blocked_after_close(
         return_value=now,
     ):
         resp = await client.get(
-            "/admin/after-close/pipeline",
+            "/v1/admin/after-close/pipeline",
             params={"trade_date": TEST_DATE_STR},
             headers=_auth_headers(admin_user.id),
         )
@@ -256,7 +256,7 @@ async def test_pipeline_latest_no_fallback_on_trading_day(
         return_value=today,
     ):
         resp = await client.get(
-            "/admin/after-close/pipeline/latest",
+            "/v1/admin/after-close/pipeline/latest",
             headers=_auth_headers(admin_user.id),
         )
 
@@ -313,7 +313,7 @@ async def test_pipeline_running_current_step(
         return_value=now,
     ):
         resp = await client.get(
-            f"/admin/after-close/pipeline?trade_date={TEST_DATE_STR}",
+            f"/v1/admin/after-close/pipeline?trade_date={TEST_DATE_STR}",
             headers=_auth_headers(admin_user.id),
         )
 
@@ -378,7 +378,7 @@ async def test_pipeline_interrupted_with_running_snapshot(
         return_value=now,
     ):
         resp = await client.get(
-            f"/admin/after-close/pipeline?trade_date={TEST_DATE_STR}",
+            f"/v1/admin/after-close/pipeline?trade_date={TEST_DATE_STR}",
             headers=_auth_headers(admin_user.id),
         )
 
@@ -433,7 +433,7 @@ async def test_pipeline_succeeded_watchlist_ready(
         return_value=now,
     ):
         resp = await client.get(
-            "/admin/after-close/pipeline/latest",
+            "/v1/admin/after-close/pipeline/latest",
             headers=_auth_headers(admin_user.id),
         )
 
@@ -487,7 +487,7 @@ async def test_pipeline_sample_snapshot_not_readable(
         return_value=now,
     ):
         resp = await client.get(
-            "/admin/after-close/pipeline",
+            "/v1/admin/after-close/pipeline",
             params={"trade_date": TEST_DATE_STR},
             headers=_auth_headers(admin_user.id),
         )
@@ -563,7 +563,7 @@ async def test_pipeline_full_snapshot_preferred_over_sample(
         return_value=now,
     ):
         resp = await client.get(
-            f"/admin/after-close/pipeline?trade_date={TEST_DATE_STR}",
+            f"/v1/admin/after-close/pipeline?trade_date={TEST_DATE_STR}",
             headers=_auth_headers(admin_user.id),
         )
 
@@ -616,7 +616,7 @@ async def test_pipeline_failed_with_error(
         return_value=now,
     ):
         resp = await client.get(
-            "/admin/after-close/pipeline",
+            "/v1/admin/after-close/pipeline",
             params={"trade_date": TEST_DATE_STR},
             headers=_auth_headers(admin_user.id),
         )
@@ -659,7 +659,7 @@ async def test_post_pipeline_run_idempotent(
         return_value=now,
     ):
         resp = await client.post(
-            "/admin/after-close/pipeline/run",
+            "/v1/admin/after-close/pipeline/run",
             json={"trade_date": TEST_DATE_STR},
             headers=_auth_headers(admin_user.id),
         )
@@ -711,7 +711,7 @@ async def test_pipeline_events_limit_100(
         return_value=now,
     ):
         resp = await client.get(
-            "/admin/after-close/pipeline",
+            "/v1/admin/after-close/pipeline",
             params={"trade_date": TEST_DATE_STR},
             headers=_auth_headers(admin_user.id),
         )
@@ -732,7 +732,7 @@ async def test_pipeline_non_admin_forbidden(
     """普通用户访问 admin after-close pipeline 端点返回 403。"""
     with _mock_trading_day(is_trading=True):
         resp = await client.get(
-            "/admin/after-close/pipeline/latest",
+            "/v1/admin/after-close/pipeline/latest",
             headers=_auth_headers(normal_user.id),
         )
 

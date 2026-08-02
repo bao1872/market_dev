@@ -66,7 +66,7 @@ from app.services.notification_service import (
     verify_channel,
 )
 
-router = APIRouter(tags=["notifications"])
+router = APIRouter(prefix="/v1", tags=["notifications"])
 
 
 def _channel_response(channel: object) -> NotificationChannelResponse:

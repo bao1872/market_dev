@@ -31,7 +31,7 @@ from app.schemas.monitor_state import (
     MonitorStateResponse,
 )
 
-router = APIRouter(tags=["monitor-states"])
+router = APIRouter(prefix="/v1", tags=["monitor-states"])
 
 
 async def _resolve_strategy_version_ids(

@@ -11,7 +11,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_get_plans_returns_seeded_plans(client):
     """公开端点返回 Alembic 048 初始化的套餐列表。"""
-    resp = await client.get("/plans")
+    resp = await client.get("/v1/plans")
 
     assert resp.status_code == 200
     data = resp.json()

@@ -62,7 +62,7 @@ async def test_generate_invite_codes_single(
     """测试管理员生成单个邀请码。"""
     headers = _auth_headers(admin_user.id)
     response = await client.post(
-        "/admin/invite-codes",
+        "/v1/admin/invite-codes",
         headers=headers,
         json={"count": 1, "note": "test batch"},
     )
@@ -83,7 +83,7 @@ async def test_generate_invite_codes_batch(
     """测试管理员批量生成邀请码。"""
     headers = _auth_headers(admin_user.id)
     response = await client.post(
-        "/admin/invite-codes",
+        "/v1/admin/invite-codes",
         headers=headers,
         json={"count": 5, "note": "batch of 5"},
     )
@@ -104,7 +104,7 @@ async def test_generate_invite_codes_normal_user_forbidden(
     """测试普通用户不能生成邀请码。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id, note="for register")
     reg_resp = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "newuser@example.com",
             "password": "newuser-password-123",
@@ -116,7 +116,7 @@ async def test_generate_invite_codes_normal_user_forbidden(
 
     # 新用户尝试生成邀请码（应被拒绝）
     response = await client.post(
-        "/admin/invite-codes",
+        "/v1/admin/invite-codes",
         headers={"Authorization": f"Bearer {new_user_token}"},
         json={"count": 1},
     )
@@ -137,7 +137,7 @@ async def test_register_success(
     """测试邀请码注册成功。"""
     invite, raw_code = await invite_code_factory(created_by=admin_user.id, note="for register")
     response = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "newuser@example.com",
             "password": "newuser-password-123",
@@ -156,7 +156,7 @@ async def test_register_success(
 async def test_register_invalid_invite_code(client: AsyncClient) -> None:
     """测试无效邀请码注册失败。"""
     response = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "newuser@example.com",
             "password": "newuser-password-123",
@@ -178,7 +178,7 @@ async def test_register_used_invite_code(
 
     # 第一次注册成功
     await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "user1@example.com",
             "password": "password-12345",
@@ -187,7 +187,7 @@ async def test_register_used_invite_code(
     )
     # 第二次使用同一邀请码注册失败
     response = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "user2@example.com",
             "password": "password-12345",
@@ -210,14 +210,14 @@ async def test_register_revoked_invite_code(
     # 作废邀请码
     headers = _auth_headers(admin_user.id)
     revoke_resp = await client.post(
-        f"/admin/invite-codes/{invite.id}/revoke", headers=headers
+        f"/v1/admin/invite-codes/{invite.id}/revoke", headers=headers
     )
     assert revoke_resp.status_code == 200
     assert revoke_resp.json()["status"] == "revoked"
 
     # 使用已作废邀请码注册失败
     response = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "newuser@example.com",
             "password": "newuser-password-123",
@@ -240,7 +240,7 @@ async def test_register_duplicate_email(
 
     # 第一次注册成功
     await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "dup@example.com",
             "password": "password-12345",
@@ -249,7 +249,7 @@ async def test_register_duplicate_email(
     )
     # 第二次用同一邮箱注册失败
     response = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "dup@example.com",
             "password": "password-12345",
@@ -276,7 +276,7 @@ async def test_login_membership_active(
 
     # 注册
     await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "active@example.com",
             "password": "password-12345",
@@ -285,7 +285,7 @@ async def test_login_membership_active(
     )
     # 登录
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "active@example.com", "password": "password-12345"},
     )
     assert response.status_code == 200
@@ -306,7 +306,7 @@ async def test_login_membership_expired(
 
     # 注册
     reg_resp = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "expired@example.com",
             "password": "password-12345",
@@ -328,7 +328,7 @@ async def test_login_membership_expired(
 
     # 登录应返回 subscription_active=False
     response = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "expired@example.com", "password": "password-12345"},
     )
     assert response.status_code == 200
@@ -353,7 +353,7 @@ async def test_get_subscription_status(
 
     # 注册
     reg_resp = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "status@example.com",
             "password": "password-12345",
@@ -365,7 +365,7 @@ async def test_get_subscription_status(
 
     # 查询会员状态
     response = await client.get(
-        "/me/membership", headers={"Authorization": f"Bearer {token}"}
+        "/v1/me/membership", headers={"Authorization": f"Bearer {token}"}
     )
     assert response.status_code == 200
     data = response.json()
@@ -381,7 +381,7 @@ async def test_get_membership_no_record(
 ) -> None:
     """测试无会员记录的用户查询会员状态返回 404。"""
     headers = _auth_headers(admin_user.id)
-    response = await client.get("/me/membership", headers=headers)
+    response = await client.get("/v1/me/membership", headers=headers)
     assert response.status_code == 404
 
 
@@ -402,7 +402,7 @@ async def test_renew_membership_active(
 
     # 注册
     reg_resp = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "renew@example.com",
             "password": "password-12345",
@@ -414,7 +414,7 @@ async def test_renew_membership_active(
 
     # 续期
     renew_resp = await client.post(
-        "/auth/renew",
+        "/v1/auth/renew",
         headers={"Authorization": f"Bearer {token}"},
         json={"invite_code": raw_code2},
     )
@@ -445,7 +445,7 @@ async def test_renew_membership_expired(
 
     # 注册
     reg_resp = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "renew2@example.com",
             "password": "password-12345",
@@ -468,7 +468,7 @@ async def test_renew_membership_expired(
 
     # 续期
     renew_resp = await client.post(
-        "/auth/renew",
+        "/v1/auth/renew",
         headers={"Authorization": f"Bearer {token}"},
         json={"invite_code": raw_code2},
     )
@@ -494,7 +494,7 @@ async def test_revoke_invite_code(
 
     headers = _auth_headers(admin_user.id)
     response = await client.post(
-        f"/admin/invite-codes/{invite.id}/revoke", headers=headers
+        f"/v1/admin/invite-codes/{invite.id}/revoke", headers=headers
     )
     assert response.status_code == 200
     assert response.json()["status"] == "revoked"
@@ -511,7 +511,7 @@ async def test_revoke_used_invite_code_fails(
 
     # 先注册使用邀请码
     await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "used@example.com",
             "password": "password-12345",
@@ -521,7 +521,7 @@ async def test_revoke_used_invite_code_fails(
     # 尝试作废已使用邀请码
     headers = _auth_headers(admin_user.id)
     response = await client.post(
-        f"/admin/invite-codes/{invite.id}/revoke", headers=headers
+        f"/v1/admin/invite-codes/{invite.id}/revoke", headers=headers
     )
     assert response.status_code == 400
     assert "仅未使用" in response.json()["detail"]
@@ -543,7 +543,7 @@ async def test_list_invite_codes(
         await invite_code_factory(created_by=admin_user.id)
 
     headers = _auth_headers(admin_user.id)
-    response = await client.get("/admin/invite-codes", headers=headers)
+    response = await client.get("/v1/admin/invite-codes", headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert data["total"] >= 3
@@ -562,7 +562,7 @@ async def test_list_invite_codes_by_status(
 
     headers = _auth_headers(admin_user.id)
     response = await client.get(
-        "/admin/invite-codes?status=unused", headers=headers
+        "/v1/admin/invite-codes?status=unused", headers=headers
     )
     assert response.status_code == 200
     data = response.json()
@@ -580,7 +580,7 @@ async def test_list_subscribers(
 
     # 注册一个新用户
     await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "member@example.com",
             "password": "password-12345",
@@ -590,7 +590,7 @@ async def test_list_subscribers(
 
     # 查询会员列表
     headers = _auth_headers(admin_user.id)
-    response = await client.get("/admin/members", headers=headers)
+    response = await client.get("/v1/admin/members", headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert data["total"] >= 2  # admin + 新注册用户
@@ -611,7 +611,7 @@ async def test_get_member_redemptions(
 
     # 注册
     reg_resp = await client.post(
-        "/auth/register",
+        "/v1/auth/register",
         json={
             "email": "redemption@example.com",
             "password": "password-12345",
@@ -628,7 +628,7 @@ async def test_get_member_redemptions(
     # 查询兑换记录
     headers = _auth_headers(admin_user.id)
     response = await client.get(
-        f"/admin/members/{user.id}/redemptions", headers=headers
+        f"/v1/admin/members/{user.id}/redemptions", headers=headers
     )
     assert response.status_code == 200
     data = response.json()

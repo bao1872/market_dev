@@ -30,7 +30,7 @@ from app.models.calendar import TradingCalendar
 from app.services.calendar_service import is_trading_day_async
 from app.services.market_status_service import compute_market_session
 
-router = APIRouter(prefix="/market", tags=["market"])
+router = APIRouter(prefix="/v1/market", tags=["market"])
 
 
 class MarketStatusResponse(BaseModel):

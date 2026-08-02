@@ -44,7 +44,7 @@ async def test_quote_update_time_naive_datetime(
     monkeypatch.setattr(bars_api, "_is_quote_realtime_session", AsyncMock(return_value=True))
     monkeypatch.setattr(bars_api, "_fetch_pytdx_quote", AsyncMock(return_value=pytdx_quote))
 
-    response = await client.get(f"/api/v1/instruments/{instrument.id}/quote")
+    response = await client.get(f"/v1/instruments/{instrument.id}/quote")
     assert response.status_code == 200, response.text
 
     data = response.json()
@@ -79,7 +79,7 @@ async def test_quote_update_time_utc_string(
     monkeypatch.setattr(bars_api, "_is_quote_realtime_session", AsyncMock(return_value=True))
     monkeypatch.setattr(bars_api, "_fetch_pytdx_quote", AsyncMock(return_value=pytdx_quote))
 
-    response = await client.get(f"/api/v1/instruments/{instrument.id}/quote")
+    response = await client.get(f"/v1/instruments/{instrument.id}/quote")
     assert response.status_code == 200, response.text
 
     data = response.json()

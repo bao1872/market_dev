@@ -79,7 +79,7 @@ async def test_non_admin_cannot_access_users_list(
 ) -> None:
     """普通用户访问 /admin/users 返回 403。"""
     response = await client.get(
-        "/admin/users",
+        "/v1/admin/users",
         headers=_auth_headers(member_user.id),
     )
     assert response.status_code == 403
@@ -92,7 +92,7 @@ async def test_non_admin_cannot_disable_user(
 ) -> None:
     """普通用户调用 disable 返回 403。"""
     response = await client.post(
-        f"/admin/users/{member_user.id}/disable",
+        f"/v1/admin/users/{member_user.id}/disable",
         headers=_auth_headers(member_user.id),
     )
     assert response.status_code == 403
@@ -105,7 +105,7 @@ async def test_non_admin_cannot_grant_subscription(
 ) -> None:
     """普通用户调用 subscriptions/grant 返回 403。"""
     response = await client.post(
-        f"/admin/users/{member_user.id}/subscriptions/grant",
+        f"/v1/admin/users/{member_user.id}/subscriptions/grant",
         headers=_auth_headers(member_user.id),
         json={"plan_code": "observe_20", "grant_months": 1},
     )
@@ -125,7 +125,7 @@ async def test_admin_list_users(
 ) -> None:
     """管理员可分页查询用户列表。"""
     response = await client.get(
-        "/admin/users?limit=10&offset=0",
+        "/v1/admin/users?limit=10&offset=0",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -146,7 +146,7 @@ async def test_admin_get_user_detail(
 ) -> None:
     """管理员可查询用户详情，并写入 user.read 审计日志。"""
     response = await client.get(
-        f"/admin/users/{member_user.id}",
+        f"/v1/admin/users/{member_user.id}",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -180,7 +180,7 @@ async def test_admin_disable_user(
 ) -> None:
     """管理员可停用普通用户，状态变为 disabled 并记录审计日志。"""
     response = await client.post(
-        f"/admin/users/{member_user.id}/disable",
+        f"/v1/admin/users/{member_user.id}/disable",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -212,7 +212,7 @@ async def test_admin_enable_user(
     await _db_session_flush(member_user, db_session)
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/enable",
+        f"/v1/admin/users/{member_user.id}/enable",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -246,7 +246,7 @@ async def test_admin_grant_subscription_endpoint(
 ) -> None:
     """管理员可通过新端点授予 subscription。"""
     response = await client.post(
-        f"/admin/users/{member_user.id}/subscriptions/grant",
+        f"/v1/admin/users/{member_user.id}/subscriptions/grant",
         headers=_auth_headers(admin_user.id),
         json={"plan_code": "observe_20", "grant_months": 3},
     )
@@ -283,7 +283,7 @@ async def test_admin_renew_subscription_endpoint(
     )
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/subscriptions/renew",
+        f"/v1/admin/users/{member_user.id}/subscriptions/renew",
         headers=_auth_headers(admin_user.id),
         json={"grant_months": 2},
     )
@@ -316,7 +316,7 @@ async def test_admin_revoke_subscription_endpoint(
     await subscription_factory(user_id=member_user.id)
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/subscriptions/revoke",
+        f"/v1/admin/users/{member_user.id}/subscriptions/revoke",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -350,7 +350,7 @@ async def test_admin_change_plan_endpoint(
     )
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/subscriptions/change-plan",
+        f"/v1/admin/users/{member_user.id}/subscriptions/change-plan",
         headers=_auth_headers(admin_user.id),
         json={"plan_code": "research_50", "grant_months": 1},
     )
@@ -395,7 +395,7 @@ async def test_admin_audit_logs_filter_by_target_user(
     await db_session.flush()
 
     response = await client.get(
-        f"/admin/audit-logs?target_user_id={member_user.id}",
+        f"/v1/admin/audit-logs?target_user_id={member_user.id}",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200

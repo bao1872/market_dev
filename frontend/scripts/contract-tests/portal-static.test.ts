@@ -316,10 +316,10 @@ test('11. Nginx 根路径精确分流存在', () => {
 
 test('12. /api、Capture(SPA fallback) 合同未被删除', () => {
   const conf = readFileSync(NGINX_CONF, 'utf-8')
-  // /api/v1/health 精确代理
-  assert.ok(/location\s*=\s*\/api\/v1\/health/.test(conf), '/api/v1/health 精确代理被删除')
   // /api/ 通用代理
   assert.ok(/location\s*\/api\/\s*\{/.test(conf), '/api/ 代理被删除')
+  assert.ok(conf.includes('rewrite ^/api/(.*) /$1 break'), '/api 只剥离一次合同被删除')
+  assert.ok(!conf.includes('/api/api/v1'), '不得恢复双 /api 前缀合同')
   assert.ok(conf.includes('proxy_pass http://$backend_url'), '/api/ proxy_pass 被删除')
   // WebSocket headers
   assert.ok(conf.includes('Upgrade $http_upgrade'), 'WebSocket Upgrade header 被删除')

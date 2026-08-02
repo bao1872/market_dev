@@ -257,7 +257,7 @@ def _auth_headers(user_id: uuid.UUID) -> dict[str, str]:
 async def test_published_runs_requires_auth(perm_client: tuple[AsyncClient, AsyncSession]) -> None:
     """未登录访问 published-runs → 401。"""
     client, _ = perm_client
-    resp = await client.get("/strategies/any_key/published-runs")
+    resp = await client.get("/v1/strategies/any_key/published-runs")
     assert resp.status_code == 401, resp.text
 
 
@@ -271,7 +271,7 @@ async def test_published_runs_rejects_member_without_subscription(
     await db.flush()
 
     resp = await client.get(
-        "/strategies/any_key/published-runs",
+        "/v1/strategies/any_key/published-runs",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -288,7 +288,7 @@ async def test_published_runs_admin_allowed(
     await db.flush()
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/published-runs",
+        f"/v1/strategies/{data['strategy_key']}/published-runs",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200, resp.text
@@ -305,7 +305,7 @@ async def test_published_runs_active_member_allowed(
     await db.flush()
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/published-runs",
+        f"/v1/strategies/{data['strategy_key']}/published-runs",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
@@ -322,7 +322,7 @@ async def test_published_runs_rejects_expired_member(
     await db.flush()
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/published-runs",
+        f"/v1/strategies/{data['strategy_key']}/published-runs",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -341,7 +341,7 @@ async def test_strategy_results_requires_auth(
     """未登录访问 results → 401。"""
     client, _ = perm_client
     resp = await client.get(
-        "/strategies/any_key/results",
+        "/v1/strategies/any_key/results",
         params={"trade_date": "2026-06-23"},
     )
     assert resp.status_code == 401, resp.text
@@ -357,7 +357,7 @@ async def test_strategy_results_rejects_member_without_subscription(
     await db.flush()
 
     resp = await client.get(
-        "/strategies/any_key/results",
+        "/v1/strategies/any_key/results",
         params={"trade_date": "2026-06-23"},
         headers=_auth_headers(user.id),
     )
@@ -375,7 +375,7 @@ async def test_strategy_results_admin_allowed(
     await db.flush()
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/results",
+        f"/v1/strategies/{data['strategy_key']}/results",
         params={"trade_date": data["trade_date"]},
         headers=_auth_headers(admin.id),
     )
@@ -393,7 +393,7 @@ async def test_strategy_results_active_member_allowed(
     await db.flush()
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/results",
+        f"/v1/strategies/{data['strategy_key']}/results",
         params={"trade_date": data["trade_date"]},
         headers=_auth_headers(user.id),
     )
@@ -411,7 +411,7 @@ async def test_strategy_results_rejects_expired_member(
     await db.flush()
 
     resp = await client.get(
-        f"/strategies/{data['strategy_key']}/results",
+        f"/v1/strategies/{data['strategy_key']}/results",
         params={"trade_date": data["trade_date"]},
         headers=_auth_headers(user.id),
     )
@@ -431,7 +431,7 @@ async def test_run_results_requires_auth(
     """未登录访问 strategy-runs/{run_id}/results → 401。"""
     client, _ = perm_client
     fake_run_id = uuid.uuid4()
-    resp = await client.get(f"/strategy-runs/{fake_run_id}/results")
+    resp = await client.get(f"/v1/strategy-runs/{fake_run_id}/results")
     assert resp.status_code == 401, resp.text
 
 
@@ -446,7 +446,7 @@ async def test_run_results_rejects_member_without_subscription(
 
     fake_run_id = uuid.uuid4()
     resp = await client.get(
-        f"/strategy-runs/{fake_run_id}/results",
+        f"/v1/strategy-runs/{fake_run_id}/results",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -463,7 +463,7 @@ async def test_run_results_rejects_expired_member(
 
     fake_run_id = uuid.uuid4()
     resp = await client.get(
-        f"/strategy-runs/{fake_run_id}/results",
+        f"/v1/strategy-runs/{fake_run_id}/results",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -480,7 +480,7 @@ async def test_run_results_admin_allowed(
     await db.flush()
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results",
+        f"/v1/strategy-runs/{data['run_id']}/results",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200, resp.text
@@ -497,7 +497,7 @@ async def test_run_results_active_member_allowed(
     await db.flush()
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results",
+        f"/v1/strategy-runs/{data['run_id']}/results",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text
@@ -517,7 +517,7 @@ async def test_run_result_detail_requires_auth(
     client, _ = perm_client
     fake_run_id = uuid.uuid4()
     fake_result_id = uuid.uuid4()
-    resp = await client.get(f"/strategy-runs/{fake_run_id}/results/{fake_result_id}")
+    resp = await client.get(f"/v1/strategy-runs/{fake_run_id}/results/{fake_result_id}")
     assert resp.status_code == 401, resp.text
 
 
@@ -533,7 +533,7 @@ async def test_run_result_detail_rejects_member_without_subscription(
     fake_run_id = uuid.uuid4()
     fake_result_id = uuid.uuid4()
     resp = await client.get(
-        f"/strategy-runs/{fake_run_id}/results/{fake_result_id}",
+        f"/v1/strategy-runs/{fake_run_id}/results/{fake_result_id}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -551,7 +551,7 @@ async def test_run_result_detail_rejects_expired_member(
     fake_run_id = uuid.uuid4()
     fake_result_id = uuid.uuid4()
     resp = await client.get(
-        f"/strategy-runs/{fake_run_id}/results/{fake_result_id}",
+        f"/v1/strategy-runs/{fake_run_id}/results/{fake_result_id}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 403, resp.text
@@ -568,7 +568,7 @@ async def test_run_result_detail_admin_allowed(
     await db.flush()
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results/{data['result_id']}",
+        f"/v1/strategy-runs/{data['run_id']}/results/{data['result_id']}",
         headers=_auth_headers(admin.id),
     )
     assert resp.status_code == 200, resp.text
@@ -585,7 +585,7 @@ async def test_run_result_detail_active_member_allowed(
     await db.flush()
 
     resp = await client.get(
-        f"/strategy-runs/{data['run_id']}/results/{data['result_id']}",
+        f"/v1/strategy-runs/{data['run_id']}/results/{data['result_id']}",
         headers=_auth_headers(user.id),
     )
     assert resp.status_code == 200, resp.text

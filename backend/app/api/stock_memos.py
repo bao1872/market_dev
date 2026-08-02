@@ -33,7 +33,7 @@ from app.schemas.stock_memo import (
     StockMemoUpsertRequest,
 )
 
-router = APIRouter(prefix="/instruments/{instrument_id}/memo", tags=["stock-memo"])
+router = APIRouter(prefix="/v1/instruments/{instrument_id}/memo", tags=["stock-memo"])
 
 
 @router.get("", response_model=StockMemoResponse)

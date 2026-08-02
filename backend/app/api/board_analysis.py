@@ -1,10 +1,10 @@
 """[CHANGE-20260730-011] 板块分析 V1 API 路由。
 
 端点：
-- GET /api/v1/boards/analysis: 板块分析列表（分页，按 type/trade_date/sort 过滤）
-- GET /api/v1/boards/{board_id}/analysis: 单板块分析详情
-- POST /api/v1/admin/boards/{board_id}/analysis/compute: 管理员触发计算（canary 用）
-- POST /api/v1/admin/boards/analysis/compute-all: 管理员触发批量计算（行业+概念）
+- GET /v1/boards/analysis: 板块分析列表（分页，按 type/trade_date/sort 过滤）
+- GET /v1/boards/{board_id}/analysis: 单板块分析详情
+- POST /v1/admin/boards/{board_id}/analysis/compute: 管理员触发计算（canary 用）
+- POST /v1/admin/boards/analysis/compute-all: 管理员触发批量计算（行业+概念）
 
 权限：
 - GET 接口：require_authenticated（任何登录用户可读）
@@ -47,11 +47,11 @@ from app.services.board_analysis_service import (
 
 logger = logging.getLogger("api.board_analysis")
 
-# 用户侧路由：/api/v1/boards
-board_router = APIRouter(prefix="/api/v1/boards", tags=["board-analysis"])
+# 用户侧路由：/v1/boards
+board_router = APIRouter(prefix="/v1/boards", tags=["board-analysis"])
 
-# 管理员路由：/api/v1/admin/boards
-admin_router = APIRouter(prefix="/api/v1/admin/boards", tags=["admin-board-analysis"])
+# 管理员路由：/v1/admin/boards
+admin_router = APIRouter(prefix="/v1/admin/boards", tags=["admin-board-analysis"])
 
 
 def _to_dto(

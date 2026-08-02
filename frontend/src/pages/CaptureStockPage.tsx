@@ -5,7 +5,7 @@
 // 设计要点（修复 C.7 调查发现的 30s 截图超时根因）：
 // 1. 不经过 ProtectedLayout / SubscriberRoute / AppShell（避免认证守卫与全局布局副作用）
 // 2. 只使用 captureClient（不使用 apiClient），capture token 由本页自行写入 CAPTURE_TOKEN_KEY
-// 3. 只发起一个业务数据请求：GET /api/v1/capture/stocks/{instrument_id}/snapshot
+// 3. 只发起一个业务数据请求：GET /v1/capture/stocks/{instrument_id}/snapshot
 //    后端 Snapshot 一次返回 instrument / bars / indicators / events / quote
 //    不加载 watchlist / memo / events / batchInstruments（避免不必要查询阻塞渲染）
 // 4. data-render-ready 只依赖 bars + indicators 加载完成（不依赖 events）
@@ -140,7 +140,7 @@ export default function CaptureStockPage() {
     queryFn: async () => {
       if (!instrumentId) throw new Error('缺少 instrument_id 参数')
       const { data } = await captureClient.get<CaptureSnapshotResponse>(
-        `/api/v1/capture/stocks/${instrumentId}/snapshot`,
+        `/v1/capture/stocks/${instrumentId}/snapshot`,
         {
           params: {
             timeframe,

@@ -1,14 +1,14 @@
 """行情查询 API。
 
-GET /api/v1/instruments/{instrument_id}/bars
+GET /v1/instruments/{instrument_id}/bars
     查询行情数据，支持多周期（15m/1h/1d/1w/1mo）、前复权/不复权、服务端分页。
     数据获取：DB 优先（PostgreSQL），仅 include_realtime=True 且交易时段内
     调用 Pytdx 补充最后一根 Bar（hybrid 模式）；DB 未命中时 Pytdx 兜底。
 
-GET /api/v1/instruments/{instrument_id}/quote
+GET /v1/instruments/{instrument_id}/quote
     获取标的实时报价（pytdx 1 分钟线优先，DB 日线回退）。
 
-GET /api/v1/bars/health
+GET /v1/bars/health
     行情系统健康检查，返回 DB/Redis 连通性与各周期数据新鲜度。
 
 参数：
@@ -66,7 +66,7 @@ from app.services.market_status_service import (
 
 logger = logging.getLogger("api.bars")
 
-router = APIRouter(prefix="/api/v1", tags=["bars"])
+router = APIRouter(prefix="/v1", tags=["bars"])
 
 # 支持的周期
 _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}

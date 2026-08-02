@@ -163,19 +163,19 @@ class TestRouterRegistration:
     def test_router_has_visitors_route(self) -> None:
         """路由注册了 GET /admin/visitors。"""
         paths = [route.path for route in router.routes]
-        assert "/admin/visitors" in paths, f"路由未注册 /admin/visitors，实际: {paths}"
+        assert "/v1/admin/visitors" in paths, f"路由未注册 /v1/admin/visitors，实际: {paths}"
 
     def test_visitors_route_is_get(self) -> None:
         """路由方法为 GET。"""
         methods = []
         for route in router.routes:
-            if route.path == "/admin/visitors":
+            if route.path == "/v1/admin/visitors":
                 methods.extend(route.methods or [])
         assert "GET" in methods, f"GET 方法未注册，实际: {methods}"
 
     def test_router_prefix(self) -> None:
         """路由 prefix 为 /admin。"""
-        assert router.prefix == "/admin"
+        assert router.prefix == "/v1/admin"
 
     def test_router_tags(self) -> None:
         """路由 tag 包含 admin-visitors。"""

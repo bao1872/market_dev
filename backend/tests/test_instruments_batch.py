@@ -62,7 +62,7 @@ async def test_batch_returns_correct_count(client: AsyncClient, batch_instrument
         "00000000-0000-0000-0000-000000000002",
         "00000000-0000-0000-0000-000000000003",
     ]
-    response = await client.post("/instruments/batch", json={"ids": test_ids})
+    response = await client.post("/v1/instruments/batch", json={"ids": test_ids})
 
     assert response.status_code == 200
     data = response.json()
@@ -79,7 +79,7 @@ async def test_batch_empty_ids_returns_422(client: AsyncClient) -> None:
     InstrumentBatchRequest schema 强制 ids min_length=1，空列表会被 Pydantic 拒绝。
     验证后端输入校验生效，避免空 IN 查询的语义歧义。
     """
-    response = await client.post("/instruments/batch", json={"ids": []})
+    response = await client.post("/v1/instruments/batch", json={"ids": []})
 
     assert response.status_code == 422
     # Pydantic 校验错误应包含 ids 字段
@@ -97,7 +97,7 @@ async def test_batch_nonexistent_ids_returns_empty(client: AsyncClient) -> None:
     IN 查询对不存在的 ID 不报错，只是不返回记录。
     """
     nonexistent_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
-    response = await client.post("/instruments/batch", json={"ids": nonexistent_ids})
+    response = await client.post("/v1/instruments/batch", json={"ids": nonexistent_ids})
 
     assert response.status_code == 200
     data = response.json()

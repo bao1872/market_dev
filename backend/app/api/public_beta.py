@@ -31,7 +31,7 @@ from app.services.beta_application_service import create_application
 
 logger = logging.getLogger("public_beta")
 
-router = APIRouter(prefix="/public", tags=["public"])
+router = APIRouter(prefix="/v1/public", tags=["public"])
 
 
 def _extract_client_ip(request: Request) -> str:

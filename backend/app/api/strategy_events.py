@@ -30,7 +30,7 @@ from app.schemas.strategy_event import (
     StrategyEventResponse,
 )
 
-router = APIRouter(tags=["strategy-events"])
+router = APIRouter(prefix="/v1", tags=["strategy-events"])
 
 
 async def _resolve_strategy_version_ids(

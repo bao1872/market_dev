@@ -53,7 +53,7 @@ from app.services.beta_application_service import (
 logger = logging.getLogger("admin_beta_applications")
 
 router = APIRouter(
-    prefix="/admin",
+    prefix="/v1/admin",
     tags=["admin-beta-applications"],
 )
 

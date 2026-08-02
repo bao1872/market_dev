@@ -282,7 +282,7 @@ async def test_monitor_evaluation_reuse(monkeypatch: pytest.MonkeyPatch) -> None
     try:
         client = TestClient(app)
         response = client.get(
-            f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/indicators",
+            f"/v1/instruments/{TEST_INSTRUMENT_ID}/indicators",
             params={"timeframe": "1d", "adj": "qfq"},
         )
 

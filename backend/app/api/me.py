@@ -33,7 +33,7 @@ from app.services.access_control_service import require_authenticated
 from app.services.plan_service import get_monitor_limit as get_monitor_limit_async
 from app.services.plan_service import get_plan
 
-router = APIRouter(tags=["me"])
+router = APIRouter(prefix="/v1", tags=["me"])
 
 
 @router.get("/me/access")

@@ -80,11 +80,11 @@ from app.services.auction_scan_service import (
 
 logger = logging.getLogger("api.auction")
 
-# 用户侧路由（前端 /api/v1/auction/* → 经 nginx rewrite 后到此处）
-router = APIRouter(prefix="/api/v1/auction", tags=["auction"])
+# 用户侧路由（前端 /v1/auction/* → 经 nginx rewrite 后到此处）
+router = APIRouter(prefix="/v1/auction", tags=["auction"])
 
 # 管理员路由
-admin_router = APIRouter(prefix="/api/v1/admin/auction", tags=["admin-auction"])
+admin_router = APIRouter(prefix="/v1/admin/auction", tags=["admin-auction"])
 
 # 默认 Top N
 DEFAULT_TOP_BOARDS = 10

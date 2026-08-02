@@ -56,7 +56,7 @@ from app.services.job_run_event_service import list_events
 logger = logging.getLogger("admin_after_close")
 
 router = APIRouter(
-    prefix="/admin",
+    prefix="/v1/admin",
     tags=["admin-after-close"],
 )
 

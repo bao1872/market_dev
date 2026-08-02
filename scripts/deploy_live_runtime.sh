@@ -114,7 +114,7 @@ if [[ "$SKIP_CANARY" == "false" ]]; then
   sleep 8
   # 验证 backend 健康
   for i in 1 2 3 4 5; do
-    if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+    if curl -sf http://localhost:8000/v1/health > /dev/null 2>&1; then
       echo "[deploy] backend canary 健康"
       break
     fi
@@ -127,7 +127,7 @@ if [[ "$SKIP_CANARY" == "false" ]]; then
     sleep 4
   done
   # 验证 runtime SHA
-  RUNTIME_SHA=$(curl -sf http://localhost:8000/version | python3 -c "import sys,json; print(json.load(sys.stdin).get('runtime_git_sha','unknown'))" 2>/dev/null || echo "unknown")
+  RUNTIME_SHA=$(curl -sf http://localhost:8000/v1/version | python3 -c "import sys,json; print(json.load(sys.stdin).get('runtime_git_sha','unknown'))" 2>/dev/null || echo "unknown")
   MAIN_SHA=$(git rev-parse HEAD)
   if [[ "$RUNTIME_SHA" != "$MAIN_SHA" ]]; then
     echo "[deploy] WARN: runtime_git_sha=$RUNTIME_SHA != main HEAD=$MAIN_SHA" >&2
@@ -146,5 +146,5 @@ $COMPOSE_CMD up -d --force-recreate --no-build \
   worker-watchdog worker-capture frontend umami
 
 echo "[deploy] === Live Mount 部署完成 ==="
-echo "[deploy] 验证: curl http://localhost:8000/version"
-echo "[deploy] 验证: curl http://localhost:8000/health"
+echo "[deploy] 验证: curl http://localhost:8000/v1/version"
+echo "[deploy] 验证: curl http://localhost:8000/v1/health"

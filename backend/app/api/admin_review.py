@@ -1,10 +1,10 @@
 """复盘模块管理员 API 路由（PRD §12.6）。
 
 端点：
-- POST /api/v1/admin/review/runs: 创建 review run（并执行计算）
-- POST /api/v1/admin/review/runs/{id}/resume: 重启 run（处理 pending/failed）
-- POST /api/v1/admin/review/runs/{id}/publish: 发布 run
-- GET  /api/v1/admin/review/runs/{id}/status: 查询 run 状态（含 items + 发布门禁）
+- POST /v1/admin/review/runs: 创建 review run（并执行计算）
+- POST /v1/admin/review/runs/{id}/resume: 重启 run（处理 pending/failed）
+- POST /v1/admin/review/runs/{id}/publish: 发布 run
+- GET  /v1/admin/review/runs/{id}/status: 查询 run 状态（含 items + 发布门禁）
 
 权限（PRD §3.2）：
 - 所有端点需要 admin 身份（require_admin）
@@ -55,7 +55,7 @@ from app.services.review_publication_service import (
 
 logger = logging.getLogger("api.admin_review")
 
-router = APIRouter(prefix="/api/v1/admin/review", tags=["admin-review"])
+router = APIRouter(prefix="/v1/admin/review", tags=["admin-review"])
 
 
 def _run_to_response(run: Any) -> ReviewRunResponse:

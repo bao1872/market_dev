@@ -166,7 +166,7 @@ def test_db_hit_returns_data_source_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
         client = TestClient(app)
         response = client.get(
-            f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+            f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
             params={"timeframe": "1d", "adj": "none", "include_realtime": "false"},
         )
 
@@ -206,7 +206,7 @@ def test_db_miss_pytdx_hit_returns_data_source_hybrid(monkeypatch: pytest.Monkey
 
         client = TestClient(app)
         response = client.get(
-            f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+            f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
             params={"timeframe": "1d", "adj": "none"},
         )
 
@@ -251,7 +251,7 @@ def test_pytdx_failure_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
 
         client = TestClient(app)
         response = client.get(
-            f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+            f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
             params={"timeframe": "1d", "adj": "none", "include_realtime": "false"},
         )
 
@@ -294,7 +294,7 @@ def test_non_trading_hours_skips_pytdx_realtime(monkeypatch: pytest.MonkeyPatch)
 
         client = TestClient(app)
         response = client.get(
-            f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+            f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
             params={"timeframe": "15m", "adj": "none", "include_realtime": "true"},
         )
 
@@ -346,7 +346,7 @@ def test_trading_hours_calls_pytdx_and_merges(monkeypatch: pytest.MonkeyPatch) -
 
         client = TestClient(app)
         response = client.get(
-            f"/api/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
+            f"/v1/instruments/{TEST_INSTRUMENT_ID}/bars",
             params={"timeframe": "15m", "adj": "none", "include_realtime": "true"},
         )
 

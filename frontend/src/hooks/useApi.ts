@@ -1528,7 +1528,7 @@ export function useDeleteTableViewPreset() {
 // 单一接口替代 structural/temporal/event 多请求链
 // 右栏关闭时通过 enabled=false 停止请求
 
-/** 查询用户侧 StockContext（/api/v1/stocks/{symbol}/context） */
+/** 查询用户侧 StockContext（/v1/stocks/{symbol}/context） */
 export function useStockContext(
   symbol: string | undefined,
   params?: { as_of?: string },
@@ -1543,7 +1543,7 @@ export function useStockContext(
 }
 
 /**
- * [Phase 5B-2] 查询第一金字塔统一快照（/api/v1/stocks/{symbol}/first-pyramid）。
+ * [Phase 5B-2] 查询第一金字塔统一快照（/v1/stocks/{symbol}/first-pyramid）。
  * - 固定维度顺序：trend → structure → momentum → chip_consensus
  * - 前三维必选，chip_consensus 可选（无有效峰时为 null）
  * - [CHANGE-20260730-012] 只读已发布 stock_core 快照；无快照返回结构化 unavailable
@@ -1563,7 +1563,7 @@ export function useFirstPyramid(
   })
 }
 
-/** 查询管理员 StockDebug（/api/v1/admin/stocks/{symbol}/debug，含原始 payload） */
+/** 查询管理员 StockDebug（/v1/admin/stocks/{symbol}/debug，含原始 payload） */
 export function useAdminStockDebug(
   symbol: string | undefined,
   params?: { as_of?: string },

@@ -1,6 +1,6 @@
 """Prometheus 指标模块，提供可观察性。
 
-提供 GET /metrics 端点，返回 Prometheus exposition 格式文本，供 Prometheus
+提供 GET /v1/metrics 端点，返回 Prometheus exposition 格式文本，供 Prometheus
 scraper 直接抓取（无需认证）。
 
 指标定义：
@@ -17,7 +17,7 @@ scraper 直接抓取（无需认证）。
 - 业务侧（Job 调度器、Outbox 处理器、用户会话管理）按需调用对应 Gauge 的
   .set() 更新队列深度、积压量与活跃用户数。
 - 依赖 prometheus_client 库；若运行环境未安装该库，则启用轻量回退实现，
-  保证 /metrics 端点仍可返回有效 Prometheus 文本（指标仅驻留进程内存）。
+  保证 /v1/metrics 端点仍可返回有效 Prometheus 文本（指标仅驻留进程内存）。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Any
 
 from fastapi import APIRouter, Response
 
-router = APIRouter(tags=["metrics"])
+router = APIRouter(prefix="/v1", tags=["metrics"])
 
 # ---------------------------------------------------------------------------
 # 指标后端选择：优先使用 prometheus_client；缺失时启用轻量回退实现。
@@ -246,8 +246,8 @@ async def metrics() -> Response:
 
 if __name__ == "__main__":
     # 自测入口：验证指标定义与端点输出
-    http_requests_total.labels("GET", "/health", "200").inc()
-    http_request_duration_seconds.labels("GET", "/health").observe(0.01)
+    http_requests_total.labels("GET", "/v1/health", "200").inc()
+    http_request_duration_seconds.labels("GET", "/v1/health").observe(0.01)
     job_queue_depth.labels("default").set(3)
     outbox_pending.set(5)
     active_users.set(12)

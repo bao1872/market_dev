@@ -852,7 +852,7 @@ export interface VersionInfo {
 
 /** 获取后端版本信息（无需认证） */
 export async function getVersion(): Promise<VersionInfo> {
-  const res = await apiClient.get<VersionInfo>('/version')
+  const res = await apiClient.get<VersionInfo>('/v1/version')
   return res.data
 }
 
@@ -869,7 +869,7 @@ export interface HealthResponse {
 
 /** 获取后端健康状态（无需认证） */
 export async function getHealth(): Promise<HealthResponse> {
-  const res = await apiClient.get<HealthResponse>('/health')
+  const res = await apiClient.get<HealthResponse>('/v1/health')
   return res.data
 }
 
@@ -1067,19 +1067,19 @@ export interface PaginationParams {
 // [Auth] - 描述: 用户登录 - 返回 token + AccessProfile 权限上下文 + next_route（公开接口）
 // 前端不再判断 membership_expired，直接使用 next_route 跳转
 export async function login(email: string, password: string): Promise<LoginResponse> {
-  const { data } = await publicApiClient.post<LoginResponse>('/auth/login', { email, password })
+  const { data } = await publicApiClient.post<LoginResponse>('/v1/auth/login', { email, password })
   return data
 }
 
 /** 邀请码注册 - 原子操作创建账户 + 开通 30 天会员（公开接口） */
 export async function register(payload: RegisterRequest): Promise<RegisterSuccessResponse> {
-  const { data } = await publicApiClient.post<RegisterSuccessResponse>('/auth/register', payload)
+  const { data } = await publicApiClient.post<RegisterSuccessResponse>('/v1/auth/register', payload)
   return data
 }
 
 /** 邀请码续期 - 未到期顺延 / 已到期从当天计算（需认证，保持 apiClient） */
 export async function renew(inviteCode: string): Promise<RenewSuccessResponse> {
-  const { data } = await apiClient.post<RenewSuccessResponse>('/auth/renew', { invite_code: inviteCode })
+  const { data } = await apiClient.post<RenewSuccessResponse>('/v1/auth/renew', { invite_code: inviteCode })
   return data
 }
 
@@ -1087,7 +1087,7 @@ export async function renew(inviteCode: string): Promise<RenewSuccessResponse> {
  * refresh_token 通过 JSON body 提交（非 query string），避免被 access log / referer 泄露
  */
 export async function refreshToken(refreshToken: string): Promise<TokenResponse> {
-  const { data } = await publicApiClient.post<TokenResponse>('/auth/refresh', {
+  const { data } = await publicApiClient.post<TokenResponse>('/v1/auth/refresh', {
     refresh_token: refreshToken,
   })
   return data
@@ -1095,20 +1095,20 @@ export async function refreshToken(refreshToken: string): Promise<TokenResponse>
 
 /** 获取当前用户信息（含角色列表） */
 export async function getMe(): Promise<UserResponse> {
-  const { data } = await apiClient.get<UserResponse>('/me')
+  const { data } = await apiClient.get<UserResponse>('/v1/me')
   return data
 }
 
 // [Auth] - 描述: 获取当前用户完整权限上下文 AccessProfile（11 字段，对齐后端 AccessProfileResponse）
 // 续期成功后调用此接口刷新前端 accessProfile，避免重新登录
 export async function getMyAccess(): Promise<AccessProfile> {
-  const { data } = await apiClient.get<AccessProfile>('/me/access')
+  const { data } = await apiClient.get<AccessProfile>('/v1/me/access')
   return data
 }
 
 /** 获取当前用户订阅状态（/me/membership 为 V1.6 遗留路径名） */
 export async function getMyMembership(): Promise<MembershipResponse> {
-  const { data } = await apiClient.get<MembershipResponse>('/me/membership')
+  const { data } = await apiClient.get<MembershipResponse>('/v1/me/membership')
   return data
 }
 
@@ -1126,7 +1126,7 @@ export interface EventsSummaryResponse {
 
 /** 查询当前用户指定日期的策略事件汇总 */
 export async function getEventsSummary(date: string): Promise<EventsSummaryResponse> {
-  const { data } = await apiClient.get<EventsSummaryResponse>('/me/events/summary', {
+  const { data } = await apiClient.get<EventsSummaryResponse>('/v1/me/events/summary', {
     params: { date },
   })
   return data
@@ -1138,7 +1138,7 @@ export async function getEventsSummary(date: string): Promise<EventsSummaryRespo
 
 /** 查询股票列表，支持关键词搜索、市场/状态筛选与分页 */
 export async function getInstruments(params?: InstrumentQueryParams): Promise<InstrumentListResponse> {
-  const { data } = await apiClient.get<InstrumentListResponse>('/instruments', { params })
+  const { data } = await apiClient.get<InstrumentListResponse>('/v1/instruments', { params })
   return data
 }
 
@@ -1150,19 +1150,19 @@ export interface InstrumentBatchResponse {
 
 /** 按 ID 列表批量查询股票（最多 1000 个） */
 export async function batchGetInstruments(ids: string[]): Promise<InstrumentBatchResponse> {
-  const { data } = await apiClient.post<InstrumentBatchResponse>('/instruments/batch', { ids })
+  const { data } = await apiClient.post<InstrumentBatchResponse>('/v1/instruments/batch', { ids })
   return data
 }
 
 /** 按 ID 查询单个股票 */
 export async function getInstrumentById(instrumentId: string): Promise<Instrument> {
-  const { data } = await apiClient.get<Instrument>(`/instruments/${instrumentId}`)
+  const { data } = await apiClient.get<Instrument>(`/v1/instruments/${instrumentId}`)
   return data
 }
 
 /** 按 symbol 查询股票（symbol 唯一，最多返回 1 条） */
 export async function getInstrumentBySymbol(symbol: string): Promise<Instrument> {
-  const { data } = await apiClient.get<Instrument>(`/instruments/by-symbol/${symbol}`)
+  const { data } = await apiClient.get<Instrument>(`/v1/instruments/by-symbol/${symbol}`)
   return data
 }
 
@@ -1172,26 +1172,26 @@ export async function getInstrumentBySymbol(symbol: string): Promise<Instrument>
 
 /** 获取策略列表（支持 kind 过滤） */
 export async function getStrategies(kind?: string): Promise<StrategyListResponse> {
-  const { data } = await apiClient.get<StrategyListResponse>('/strategies', { params: { kind } })
+  const { data } = await apiClient.get<StrategyListResponse>('/v1/strategies', { params: { kind } })
   return data
 }
 
 /** 获取策略详情 */
 export async function getStrategy(strategyKey: string): Promise<Strategy> {
-  const { data } = await apiClient.get<Strategy>(`/strategies/${strategyKey}`)
+  const { data } = await apiClient.get<Strategy>(`/v1/strategies/${strategyKey}`)
   return data
 }
 
 /** 获取策略的所有版本 */
 export async function getStrategyVersions(strategyKey: string): Promise<StrategyVersionListResponse> {
-  const { data } = await apiClient.get<StrategyVersionListResponse>(`/strategies/${strategyKey}/versions`)
+  const { data } = await apiClient.get<StrategyVersionListResponse>(`/v1/strategies/${strategyKey}/versions`)
   return data
 }
 
 /** 获取策略版本的 schema（参数/输出/输入/能力） */
 export async function getStrategyVersionSchema(strategyKey: string, version: string): Promise<StrategySchema> {
   const { data } = await apiClient.get<StrategySchema>(
-    `/strategies/${strategyKey}/versions/${version}/schema`,
+    `/v1/strategies/${strategyKey}/versions/${version}/schema`,
   )
   return data
 }
@@ -1201,7 +1201,7 @@ export async function createStrategy(
   manifest: Record<string, unknown>,
   strategySchema?: Record<string, unknown>,
 ): Promise<StrategyVersion> {
-  const { data } = await apiClient.post<StrategyVersion>('/admin/strategies', {
+  const { data } = await apiClient.post<StrategyVersion>('/v1/admin/strategies', {
     manifest,
     schema: strategySchema,
   })
@@ -1211,7 +1211,7 @@ export async function createStrategy(
 /** 发布策略版本（admin）- draft -> released */
 export async function releaseStrategyVersion(strategyKey: string, version: string): Promise<StrategyVersion> {
   const { data } = await apiClient.post<StrategyVersion>(
-    `/admin/strategies/${strategyKey}/versions/${version}/release`,
+    `/v1/admin/strategies/${strategyKey}/versions/${version}/release`,
   )
   return data
 }
@@ -1219,7 +1219,7 @@ export async function releaseStrategyVersion(strategyKey: string, version: strin
 /** 归档策略版本（admin）- released -> archived */
 export async function archiveStrategyVersion(strategyKey: string, version: string): Promise<StrategyVersion> {
   const { data } = await apiClient.post<StrategyVersion>(
-    `/admin/strategies/${strategyKey}/versions/${version}/archive`,
+    `/v1/admin/strategies/${strategyKey}/versions/${version}/archive`,
   )
   return data
 }
@@ -1231,7 +1231,7 @@ export async function archiveStrategyVersion(strategyKey: string, version: strin
 /** 触发策略运行（admin） */
 export async function triggerStrategyRun(strategyKey: string, payload: TriggerRunRequest): Promise<StrategyRun> {
   const { data } = await apiClient.post<StrategyRun>(
-    `/admin/strategies/${strategyKey}/run`,
+    `/v1/admin/strategies/${strategyKey}/run`,
     payload,
   )
   return data
@@ -1243,7 +1243,7 @@ export async function getStrategyRuns(
   params?: { status?: string; limit?: number; offset?: number },
 ): Promise<StrategyRunListResponse> {
   const { data } = await apiClient.get<StrategyRunListResponse>(
-    `/strategies/${strategyKey}/runs`,
+    `/v1/strategies/${strategyKey}/runs`,
     { params },
   )
   return data
@@ -1255,7 +1255,7 @@ export async function getAdminStrategyRuns(
   params?: { status?: string; limit?: number; offset?: number },
 ): Promise<StrategyRunListResponse> {
   const { data } = await apiClient.get<StrategyRunListResponse>(
-    `/admin/strategies/${strategyKey}/runs`,
+    `/v1/admin/strategies/${strategyKey}/runs`,
     { params },
   )
   return data
@@ -1267,7 +1267,7 @@ export async function getPublishedRuns(
   params?: { limit?: number; offset?: number },
 ): Promise<StrategyRunListResponse> {
   const { data } = await apiClient.get<StrategyRunListResponse>(
-    `/strategies/${strategyKey}/published-runs`,
+    `/v1/strategies/${strategyKey}/published-runs`,
     { params },
   )
   return data
@@ -1279,7 +1279,7 @@ export async function getStrategyRunResults(
   params?: StrategyResultQueryParams,
 ): Promise<StrategyResultListResponse> {
   const { data } = await apiClient.get<StrategyResultListResponse>(
-    `/strategy-runs/${runId}/results`,
+    `/v1/strategy-runs/${runId}/results`,
     { params },
   )
   return data
@@ -1291,7 +1291,7 @@ export async function getStrategyRunResultDetail(
   resultId: string,
 ): Promise<StrategyResult> {
   const { data } = await apiClient.get<StrategyResult>(
-    `/strategy-runs/${runId}/results/${resultId}`,
+    `/v1/strategy-runs/${runId}/results/${resultId}`,
   )
   return data
 }
@@ -1303,7 +1303,7 @@ export async function getStrategyRunResultDetail(
 /** 查询某股票的所有监控策略状态 */
 export async function getInstrumentMonitorStates(instrumentId: string): Promise<MonitorStateListResponse> {
   const { data } = await apiClient.get<MonitorStateListResponse>(
-    `/instruments/${instrumentId}/monitor-states`,
+    `/v1/instruments/${instrumentId}/monitor-states`,
   )
   return data
 }
@@ -1314,7 +1314,7 @@ export async function getStrategyMonitorStates(
   version?: string,
 ): Promise<MonitorStateListResponse> {
   const { data } = await apiClient.get<MonitorStateListResponse>(
-    `/strategies/${strategyKey}/monitor-states`,
+    `/v1/strategies/${strategyKey}/monitor-states`,
     { params: { version } },
   )
   return data
@@ -1331,7 +1331,7 @@ export async function getInstrumentEvents(
   options?: { signal?: AbortSignal },
 ): Promise<StrategyEventListResponse> {
   const { data } = await apiClient.get<StrategyEventListResponse>(
-    `/instruments/${instrumentId}/events`,
+    `/v1/instruments/${instrumentId}/events`,
     { params, signal: options?.signal },
   )
   return data
@@ -1343,7 +1343,7 @@ export async function getStrategyEvents(
   params?: { version?: string } & StrategyEventQueryParams,
 ): Promise<StrategyEventListResponse> {
   const { data } = await apiClient.get<StrategyEventListResponse>(
-    `/strategies/${strategyKey}/events`,
+    `/v1/strategies/${strategyKey}/events`,
     { params },
   )
   return data
@@ -1351,7 +1351,7 @@ export async function getStrategyEvents(
 
 /** 查询事件详情（含 snapshot 快照） */
 export async function getStrategyEventDetail(eventId: string): Promise<StrategyEventDetail> {
-  const { data } = await apiClient.get<StrategyEventDetail>(`/strategy-events/${eventId}`)
+  const { data } = await apiClient.get<StrategyEventDetail>(`/v1/strategy-events/${eventId}`)
   return data
 }
 
@@ -1365,7 +1365,7 @@ export async function getMessages(params?: {
   limit?: number
   offset?: number
 }): Promise<NotificationMessageListResponse> {
-  const { data } = await apiClient.get<NotificationMessageListResponse>('/messages', {
+  const { data } = await apiClient.get<NotificationMessageListResponse>('/v1/messages', {
     params,
     headers: getUserIdHeader(),
   })
@@ -1375,7 +1375,7 @@ export async function getMessages(params?: {
 /** 标记消息已读 */
 export async function markMessageRead(messageId: string): Promise<NotificationMessage> {
   const { data } = await apiClient.post<NotificationMessage>(
-    `/messages/${messageId}/read`,
+    `/v1/messages/${messageId}/read`,
     null,
     { headers: getUserIdHeader() },
   )
@@ -1385,7 +1385,7 @@ export async function markMessageRead(messageId: string): Promise<NotificationMe
 // [Messages] - 描述: 未读消息计数，角标专用（避免 list 接口 total 字段语义混淆）
 /** 获取当前用户未读消息总数（角标专用） */
 export async function getUnreadCount(): Promise<UnreadCountResponse> {
-  const { data } = await apiClient.get<UnreadCountResponse>('/messages/unread-count', {
+  const { data } = await apiClient.get<UnreadCountResponse>('/v1/messages/unread-count', {
     headers: getUserIdHeader(),
   })
   return data
@@ -1395,7 +1395,7 @@ export async function getUnreadCount(): Promise<UnreadCountResponse> {
 /** 批量标记当前用户所有未读消息为已读 */
 export async function readAllMessages(): Promise<ReadAllMessagesResponse> {
   const { data } = await apiClient.post<ReadAllMessagesResponse>(
-    '/messages/read-all',
+    '/v1/messages/read-all',
     null,
     { headers: getUserIdHeader() },
   )
@@ -1404,7 +1404,7 @@ export async function readAllMessages(): Promise<ReadAllMessagesResponse> {
 
 /** 获取用户通知渠道列表 */
 export async function getNotificationChannels(): Promise<NotificationChannelListResponse> {
-  const { data } = await apiClient.get<NotificationChannelListResponse>('/notification-channels', {
+  const { data } = await apiClient.get<NotificationChannelListResponse>('/v1/notification-channels', {
     headers: getUserIdHeader(),
   })
   return data
@@ -1412,7 +1412,7 @@ export async function getNotificationChannels(): Promise<NotificationChannelList
 
 /** 创建通知渠道 */
 export async function createNotificationChannel(payload: CreateChannelRequest): Promise<NotificationChannel> {
-  const { data } = await apiClient.post<NotificationChannel>('/notification-channels', payload, {
+  const { data } = await apiClient.post<NotificationChannel>('/v1/notification-channels', payload, {
     headers: getUserIdHeader(),
   })
   return data
@@ -1424,7 +1424,7 @@ export async function updateNotificationChannel(
   data: { display_name?: string; target_config?: Record<string, unknown> },
 ): Promise<NotificationChannel> {
   const res = await apiClient.put<NotificationChannel>(
-    `/notification-channels/${channelId}`,
+    `/v1/notification-channels/${channelId}`,
     data,
   )
   return res.data
@@ -1435,7 +1435,7 @@ export async function deleteNotificationChannel(
   channelId: string,
 ): Promise<NotificationChannel> {
   const res = await apiClient.delete<NotificationChannel>(
-    `/notification-channels/${channelId}`,
+    `/v1/notification-channels/${channelId}`,
   )
   return res.data
 }
@@ -1443,7 +1443,7 @@ export async function deleteNotificationChannel(
 /** 验证通知渠道配置 */
 export async function verifyNotificationChannel(channelId: string): Promise<NotificationChannel> {
   const { data } = await apiClient.post<NotificationChannel>(
-    `/notification-channels/${channelId}/verify`,
+    `/v1/notification-channels/${channelId}/verify`,
     null,
     { headers: getUserIdHeader() },
   )
@@ -1453,7 +1453,7 @@ export async function verifyNotificationChannel(channelId: string): Promise<Noti
 /** 测试渠道投递（发送测试消息到渠道） */
 export async function testNotificationChannel(channelId: string): Promise<ChannelTestResponse> {
   const { data } = await apiClient.post<ChannelTestResponse>(
-    `/notification-channels/${channelId}/test`,
+    `/v1/notification-channels/${channelId}/test`,
     null,
     { headers: getUserIdHeader() },
   )
@@ -1463,7 +1463,7 @@ export async function testNotificationChannel(channelId: string): Promise<Channe
 /** 最近事件实测（发送最近事件到渠道并返回诊断结果） */
 export async function testNotificationChannelLatestEvent(channelId: string): Promise<ChannelLatestEventTestResponse> {
   const { data } = await apiClient.post<ChannelLatestEventTestResponse>(
-    `/notification-channels/${channelId}/test-latest-event`,
+    `/v1/notification-channels/${channelId}/test-latest-event`,
     null,
     { headers: getUserIdHeader() },
   )
@@ -1477,7 +1477,7 @@ export async function sendStockDetailFeishu(
   instrumentId: string,
 ): Promise<StockDetailFeishuCreateResponse> {
   const { data } = await apiClient.post<StockDetailFeishuCreateResponse>(
-    `/instruments/${instrumentId}/send-feishu`,
+    `/v1/instruments/${instrumentId}/send-feishu`,
     // [CHANGE-20260728-010] 不再透传 indicator_view，后端固定使用 FEISHU_CAPTURE_VIEW
     {},
   )
@@ -1489,14 +1489,14 @@ export async function getStockDetailFeishuStatus(
   testRunId: string,
 ): Promise<StockDetailFeishuStatusResponse> {
   const { data } = await apiClient.get<StockDetailFeishuStatusResponse>(
-    `/stock-detail-feishu/${testRunId}/status`,
+    `/v1/stock-detail-feishu/${testRunId}/status`,
   )
   return data
 }
 
 /** 消息预览 - 返回渠道无关 DTO + 站内渲染 + 飞书 card JSON */
 export async function previewNotification(payload: NotificationPreviewRequest): Promise<NotificationPreviewResponse> {
-  const { data } = await apiClient.post<NotificationPreviewResponse>('/notification-previews', payload)
+  const { data } = await apiClient.post<NotificationPreviewResponse>('/v1/notification-previews', payload)
   return data
 }
 
@@ -1510,13 +1510,13 @@ export async function getMessageDeliveries(params?: {
   limit?: number
   offset?: number
 }): Promise<MessageDelivery[]> {
-  const { data } = await apiClient.get<MessageDelivery[]>('/admin/message-deliveries', { params })
+  const { data } = await apiClient.get<MessageDelivery[]>('/v1/admin/message-deliveries', { params })
   return data
 }
 
 /** 立即重试指定消息投递记录（admin） */
 export async function retryMessageDelivery(deliveryId: string): Promise<MessageDelivery> {
-  const { data } = await apiClient.post<MessageDelivery>(`/admin/message-deliveries/${deliveryId}/retry`)
+  const { data } = await apiClient.post<MessageDelivery>(`/v1/admin/message-deliveries/${deliveryId}/retry`)
   return data
 }
 
@@ -1526,24 +1526,24 @@ export async function retryMessageDelivery(deliveryId: string): Promise<MessageD
 
 /** 查询当前用户的自选列表（仅 active=true） */
 export async function getWatchlist(): Promise<WatchlistListResponse> {
-  const { data } = await apiClient.get<WatchlistListResponse>('/watchlist')
+  const { data } = await apiClient.get<WatchlistListResponse>('/v1/watchlist')
   return data
 }
 
 /** 加入自选（instrument_id，user_id 由认证上下文注入） */
 export async function addToWatchlist(payload: WatchlistAddRequest): Promise<WatchlistItem> {
-  const { data } = await apiClient.post<WatchlistItem>('/watchlist', payload)
+  const { data } = await apiClient.post<WatchlistItem>('/v1/watchlist', payload)
   return data
 }
 
 /** 移除自选（软删除：active=false + removed_at） */
 export async function removeFromWatchlist(instrumentId: string): Promise<void> {
-  await apiClient.delete(`/watchlist/${instrumentId}`)
+  await apiClient.delete(`/v1/watchlist/${instrumentId}`)
 }
 
 /** 查询自选股+监控状态聚合数据 */
 export async function getWatchlistMonitorStatus(): Promise<WatchlistMonitorStatusResponse> {
-  const { data } = await apiClient.get<WatchlistMonitorStatusResponse>('/watchlist/monitor-status')
+  const { data } = await apiClient.get<WatchlistMonitorStatusResponse>('/v1/watchlist/monitor-status')
   return data
 }
 
@@ -1576,7 +1576,7 @@ export interface StockMemoNotifyToggleRequest {
 /** 获取当前用户对指定股票的备忘录 */
 export async function getStockMemo(instrumentId: string): Promise<StockMemo | null> {
   try {
-    const { data } = await apiClient.get<StockMemo>(`/instruments/${instrumentId}/memo`)
+    const { data } = await apiClient.get<StockMemo>(`/v1/instruments/${instrumentId}/memo`)
     return data
   } catch (err: unknown) {
     if (err && typeof err === 'object' && 'response' in err) {
@@ -1592,13 +1592,13 @@ export async function upsertStockMemo(
   instrumentId: string,
   payload: StockMemoUpsertRequest,
 ): Promise<StockMemo> {
-  const { data } = await apiClient.put<StockMemo>(`/instruments/${instrumentId}/memo`, payload)
+  const { data } = await apiClient.put<StockMemo>(`/v1/instruments/${instrumentId}/memo`, payload)
   return data
 }
 
 /** 删除备忘录 */
 export async function deleteStockMemo(instrumentId: string): Promise<void> {
-  await apiClient.delete(`/instruments/${instrumentId}/memo`)
+  await apiClient.delete(`/v1/instruments/${instrumentId}/memo`)
 }
 
 /** 切换飞书推送开关 */
@@ -1607,7 +1607,7 @@ export async function toggleMemoNotify(
   payload: StockMemoNotifyToggleRequest,
 ): Promise<StockMemo> {
   const { data } = await apiClient.patch<StockMemo>(
-    `/instruments/${instrumentId}/memo/notify`,
+    `/v1/instruments/${instrumentId}/memo/notify`,
     payload,
   )
   return data
@@ -1619,12 +1619,12 @@ export async function toggleMemoNotify(
 
 /**
  * 查询指定标的的行情数据
- * 后端 bars router 自带 prefix="/api/v1"，完整路径为 /api/v1/instruments/{id}/bars
- * apiClient baseURL="/api" 会添加网关前缀，代理层处理后到达后端 /api/v1/instruments/{id}/bars
+ * 后端 bars router 自带 prefix="/v1"，完整路径为 /v1/instruments/{id}/bars
+ * apiClient baseURL="/api" 会添加网关前缀，代理层处理后到达后端 /v1/instruments/{id}/bars
  */
 export async function getBars(instrumentId: string, params?: BarQueryParams, options?: { signal?: AbortSignal }): Promise<BarListResponse> {
   const { data } = await apiClient.get<BarListResponse>(
-    `/api/v1/instruments/${instrumentId}/bars`,
+    `/v1/instruments/${instrumentId}/bars`,
     { params, signal: options?.signal },
   )
   return data
@@ -1665,7 +1665,7 @@ export interface QuoteResponse {
 /** 查询指定标的的实时报价（交易时段 pytdx 实时，非交易时段降级到数据库最新日线） */
 export async function getQuote(instrumentId: string, options?: { signal?: AbortSignal }): Promise<QuoteResponse> {
   const { data } = await apiClient.get<QuoteResponse>(
-    `/api/v1/instruments/${instrumentId}/quote`,
+    `/v1/instruments/${instrumentId}/quote`,
     { signal: options?.signal },
   )
   return data
@@ -1781,8 +1781,8 @@ export interface CalculationDiagnostics {
 
 /**
  * 查询指定标的的所有策略图表指标
- * 后端 indicators router 自带 prefix="/api/v1"，完整路径为 /api/v1/instruments/{id}/indicators
- * apiClient baseURL="/api" 会添加网关前缀，代理层处理后到达后端 /api/v1/instruments/{id}/indicators
+ * 后端 indicators router 自带 prefix="/v1"，完整路径为 /v1/instruments/{id}/indicators
+ * apiClient baseURL="/api" 会添加网关前缀，代理层处理后到达后端 /v1/instruments/{id}/indicators
  */
 export async function getIndicators(
   instrumentId: string,
@@ -1790,7 +1790,7 @@ export async function getIndicators(
   options?: { signal?: AbortSignal },
 ): Promise<IndicatorResponse> {
   const { data } = await apiClient.get<IndicatorResponse>(
-    `/api/v1/instruments/${instrumentId}/indicators`,
+    `/v1/instruments/${instrumentId}/indicators`,
     { params, signal: options?.signal },
   )
   return data
@@ -1871,8 +1871,8 @@ export interface ChartSnapshotResponse {
  * 一次 MDAS DataFrame 同时生成 bars + indicators + display_frame + render_frame。
  * 详情页必须使用本端点，禁止独立调用 /bars + /indicators。
  *
- * 后端 chart_snapshot router 自带 prefix="/api/v1"，
- * 完整路径为 /api/v1/instruments/{id}/chart-snapshot
+ * 后端 chart_snapshot router 自带 prefix="/v1"，
+ * 完整路径为 /v1/instruments/{id}/chart-snapshot
  */
 export async function getChartSnapshot(
   instrumentId: string,
@@ -1880,7 +1880,7 @@ export async function getChartSnapshot(
   options?: { signal?: AbortSignal },
 ): Promise<ChartSnapshotResponse> {
   const { data } = await apiClient.get<ChartSnapshotResponse>(
-    `/api/v1/instruments/${instrumentId}/chart-snapshot`,
+    `/v1/instruments/${instrumentId}/chart-snapshot`,
     { params, signal: options?.signal },
   )
   return data
@@ -1892,13 +1892,13 @@ export async function getChartSnapshot(
 
 /** 查询交易日历（支持日期范围与市场筛选） */
 export async function getCalendar(params?: CalendarQueryParams): Promise<CalendarListResponse> {
-  const { data } = await apiClient.get<CalendarListResponse>('/calendar', { params })
+  const { data } = await apiClient.get<CalendarListResponse>('/v1/calendar', { params })
   return data
 }
 
 /** 查询指定日期是否为交易日（三级降级：DB -> Mootdx -> weekday） */
 export async function isTradingDay(targetDate: string): Promise<TradingDayResponse> {
-  const { data } = await apiClient.get<TradingDayResponse>(`/calendar/is-trading-day/${targetDate}`)
+  const { data } = await apiClient.get<TradingDayResponse>(`/v1/calendar/is-trading-day/${targetDate}`)
   return data
 }
 
@@ -1908,7 +1908,7 @@ export async function isTradingDay(targetDate: string): Promise<TradingDayRespon
 
 /** 查询当前 A 股市场状态（交易日/交易时段/状态文本） */
 export async function getMarketStatus(): Promise<MarketStatus> {
-  const { data } = await apiClient.get<MarketStatus>('/market/status')
+  const { data } = await apiClient.get<MarketStatus>('/v1/market/status')
   return data
 }
 
@@ -2010,7 +2010,7 @@ export async function getMarketStocks(
   params: MarketStocksQueryParams,
   options?: { signal?: AbortSignal },
 ): Promise<MarketStocksResponse> {
-  const { data } = await apiClient.get<MarketStocksResponse>('/market/stocks', { params, signal: options?.signal })
+  const { data } = await apiClient.get<MarketStocksResponse>('/v1/market/stocks', { params, signal: options?.signal })
   return data
 }
 
@@ -2045,7 +2045,7 @@ export async function getMarketBoards(
   params?: { type?: 'industry' | 'concept' },
   options?: { signal?: AbortSignal },
 ): Promise<MarketBoardsResponse> {
-  const { data } = await apiClient.get<MarketBoardsResponse>('/market/boards', { params, signal: options?.signal })
+  const { data } = await apiClient.get<MarketBoardsResponse>('/v1/market/boards', { params, signal: options?.signal })
   return data
 }
 
@@ -2092,7 +2092,7 @@ export type FpFieldSpecs = Record<string, FpFieldSpec>
 export async function getMarketFilterSpecs(
   options?: { signal?: AbortSignal },
 ): Promise<FpFieldSpecs> {
-  const { data } = await apiClient.get<FpFieldSpecs>('/market/filter-specs', { signal: options?.signal })
+  const { data } = await apiClient.get<FpFieldSpecs>('/v1/market/filter-specs', { signal: options?.signal })
   return data
 }
 
@@ -2103,13 +2103,13 @@ export async function getMarketFilterSpecs(
 
 /** 获取所有 active 套餐定义（公开端点，无需登录） */
 export async function getPlans(): Promise<PlanResponse[]> {
-  const { data } = await publicApiClient.get<PlanResponse[]>('/plans')
+  const { data } = await publicApiClient.get<PlanResponse[]>('/v1/plans')
   return data
 }
 
 /** 生成邀请码（单个/批量，明文仅生成时返回） */
 export async function createInviteCodes(payload: InviteCodeCreateRequest): Promise<InviteCode[]> {
-  const { data } = await apiClient.post<InviteCode[]>('/admin/invite-codes', payload)
+  const { data } = await apiClient.post<InviteCode[]>('/v1/admin/invite-codes', payload)
   return data
 }
 
@@ -2119,51 +2119,51 @@ export async function getInviteCodes(params?: {
   limit?: number
   offset?: number
 }): Promise<InviteCodeListResponse> {
-  const { data } = await apiClient.get<InviteCodeListResponse>('/admin/invite-codes', { params })
+  const { data } = await apiClient.get<InviteCodeListResponse>('/v1/admin/invite-codes', { params })
   return data
 }
 
 /** 作废邀请码（仅 unused 状态可作废） */
 export async function revokeInviteCode(inviteCodeId: string): Promise<InviteCodeListItem> {
   const { data } = await apiClient.post<InviteCodeListItem>(
-    `/admin/invite-codes/${inviteCodeId}/revoke`,
+    `/v1/admin/invite-codes/${inviteCodeId}/revoke`,
   )
   return data
 }
 
 /** 查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数；MemberListResponse 为 V1.6 API 遗留命名） */
 export async function getMembers(params?: PaginationParams): Promise<MemberListResponse> {
-  const { data } = await apiClient.get<MemberListResponse>('/admin/members', { params })
+  const { data } = await apiClient.get<MemberListResponse>('/v1/admin/members', { params })
   return data
 }
 
 /** 查询用户兑换记录 */
 export async function getMemberRedemptions(userId: string): Promise<InviteRedemption[]> {
-  const { data } = await apiClient.get<InviteRedemption[]>(`/admin/members/${userId}/redemptions`)
+  const { data } = await apiClient.get<InviteRedemption[]>(`/v1/admin/members/${userId}/redemptions`)
   return data
 }
 
 /** 查询用户列表（admin） */
 export async function getAdminUsers(params?: PaginationParams): Promise<UserListResponse> {
-  const { data } = await apiClient.get<UserListResponse>('/admin/users', { params })
+  const { data } = await apiClient.get<UserListResponse>('/v1/admin/users', { params })
   return data
 }
 
 /** 查询用户详情（admin） */
 export async function getAdminUser(userId: string): Promise<UserResponse> {
-  const { data } = await apiClient.get<UserResponse>(`/admin/users/${userId}`)
+  const { data } = await apiClient.get<UserResponse>(`/v1/admin/users/${userId}`)
   return data
 }
 
 /** 启用用户账户（admin） */
 export async function adminEnableUser(userId: string): Promise<UserResponse> {
-  const { data } = await apiClient.post<UserResponse>(`/admin/users/${userId}/enable`)
+  const { data } = await apiClient.post<UserResponse>(`/v1/admin/users/${userId}/enable`)
   return data
 }
 
 /** 停用用户账户（admin） */
 export async function adminDisableUser(userId: string): Promise<UserResponse> {
-  const { data } = await apiClient.post<UserResponse>(`/admin/users/${userId}/disable`)
+  const { data } = await apiClient.post<UserResponse>(`/v1/admin/users/${userId}/disable`)
   return data
 }
 
@@ -2173,7 +2173,7 @@ export async function adminGrantSubscription(
   payload: GrantSubscriptionRequest,
 ): Promise<SubscriptionResponse> {
   const { data } = await apiClient.post<SubscriptionResponse>(
-    `/admin/users/${userId}/subscriptions/grant`,
+    `/v1/admin/users/${userId}/subscriptions/grant`,
     payload,
   )
   return data
@@ -2185,7 +2185,7 @@ export async function adminRenewSubscription(
   payload: RenewSubscriptionRequest,
 ): Promise<SubscriptionRenewResponse> {
   const { data } = await apiClient.post<SubscriptionRenewResponse>(
-    `/admin/users/${userId}/subscriptions/renew`,
+    `/v1/admin/users/${userId}/subscriptions/renew`,
     payload,
   )
   return data
@@ -2194,7 +2194,7 @@ export async function adminRenewSubscription(
 /** 管理员撤销用户套餐 */
 export async function adminRevokeSubscription(userId: string): Promise<SubscriptionResponse> {
   const { data } = await apiClient.post<SubscriptionResponse>(
-    `/admin/users/${userId}/subscriptions/revoke`,
+    `/v1/admin/users/${userId}/subscriptions/revoke`,
   )
   return data
 }
@@ -2205,7 +2205,7 @@ export async function adminChangeSubscriptionPlan(
   payload: ChangePlanRequest,
 ): Promise<SubscriptionResponse> {
   const { data } = await apiClient.post<SubscriptionResponse>(
-    `/admin/users/${userId}/subscriptions/change-plan`,
+    `/v1/admin/users/${userId}/subscriptions/change-plan`,
     payload,
   )
   return data
@@ -2222,7 +2222,7 @@ export async function getUserCapabilities(
   userId: string,
 ): Promise<UserCapabilitiesResponse> {
   const { data } = await apiClient.get<UserCapabilitiesResponse>(
-    `/admin/users/${userId}/capabilities`,
+    `/v1/admin/users/${userId}/capabilities`,
   )
   return data
 }
@@ -2233,7 +2233,7 @@ export async function adminGrantCapability(
   payload: GrantCapabilityRequest,
 ): Promise<UserCapabilitiesResponse> {
   const { data } = await apiClient.post<UserCapabilitiesResponse>(
-    `/admin/users/${userId}/capabilities`,
+    `/v1/admin/users/${userId}/capabilities`,
     payload,
   )
   return data
@@ -2245,7 +2245,7 @@ export async function adminRevokeCapability(
   capability: 'self_selection' | 'market_data' | 'research_replay',
 ): Promise<UserCapabilitiesResponse> {
   const { data } = await apiClient.delete<UserCapabilitiesResponse>(
-    `/admin/users/${userId}/capabilities/${capability}`,
+    `/v1/admin/users/${userId}/capabilities/${capability}`,
   )
   return data
 }
@@ -2257,7 +2257,7 @@ export async function getAdminAuditLogs(params?: {
   limit?: number
   offset?: number
 }): Promise<AuditLogListResponse> {
-  const { data } = await apiClient.get<AuditLogListResponse>('/admin/audit-logs', { params })
+  const { data } = await apiClient.get<AuditLogListResponse>('/v1/admin/audit-logs', { params })
   return data
 }
 
@@ -2366,19 +2366,19 @@ export interface BetaApplicationQueryParams {
 export async function getAdminBetaApplications(
   params?: BetaApplicationQueryParams,
 ): Promise<BetaApplicationListResponse> {
-  const { data } = await apiClient.get<BetaApplicationListResponse>('/admin/beta-applications', { params })
+  const { data } = await apiClient.get<BetaApplicationListResponse>('/v1/admin/beta-applications', { params })
   return data
 }
 
 /** 获取内测申请统计数据 */
 export async function getAdminBetaApplicationStats(): Promise<BetaApplicationStats> {
-  const { data } = await apiClient.get<BetaApplicationStats>('/admin/beta-applications/stats')
+  const { data } = await apiClient.get<BetaApplicationStats>('/v1/admin/beta-applications/stats')
   return data
 }
 
 /** 获取内测申请详情 */
 export async function getAdminBetaApplicationDetail(appId: string): Promise<BetaApplicationDetail> {
-  const { data } = await apiClient.get<BetaApplicationDetail>(`/admin/beta-applications/${appId}`)
+  const { data } = await apiClient.get<BetaApplicationDetail>(`/v1/admin/beta-applications/${appId}`)
   return data
 }
 
@@ -2387,13 +2387,13 @@ export async function updateAdminBetaApplication(
   appId: string,
   payload: BetaApplicationPatchRequest,
 ): Promise<BetaApplicationDetail> {
-  const { data } = await apiClient.patch<BetaApplicationDetail>(`/admin/beta-applications/${appId}`, payload)
+  const { data } = await apiClient.patch<BetaApplicationDetail>(`/v1/admin/beta-applications/${appId}`, payload)
   return data
 }
 
 /** 重发内测申请飞书通知 */
 export async function retryAdminBetaApplicationFeishu(appId: string): Promise<RetryFeishuResponse> {
-  const { data } = await apiClient.post<RetryFeishuResponse>(`/admin/beta-applications/${appId}/retry-feishu`)
+  const { data } = await apiClient.post<RetryFeishuResponse>(`/v1/admin/beta-applications/${appId}/retry-feishu`)
   return data
 }
 
@@ -2410,7 +2410,7 @@ export function buildBetaApplicationExportUrl(params?: Omit<BetaApplicationQuery
   if (params?.date_to) searchParams.set('date_to', params.date_to)
   if (params?.keyword) searchParams.set('keyword', params.keyword)
   const qs = searchParams.toString()
-  return qs ? `/admin/beta-applications/export?${qs}` : '/admin/beta-applications/export'
+  return qs ? `/v1/admin/beta-applications/export?${qs}` : '/v1/admin/beta-applications/export'
 }
 
 // ============================================================
@@ -2609,7 +2609,7 @@ export async function getSchedulerJobRuns(params?: {
   limit?: number
   offset?: number
 }): Promise<SchedulerJobRunListResponse> {
-  const { data } = await apiClient.get<SchedulerJobRunListResponse>('/admin/scheduler-job-runs', { params })
+  const { data } = await apiClient.get<SchedulerJobRunListResponse>('/v1/admin/scheduler-job-runs', { params })
   return data
 }
 
@@ -2646,7 +2646,7 @@ export async function getWorkerHeartbeats(params?: {
   offset?: number
 }): Promise<WorkerHeartbeatListResponse> {
   const { data } = await apiClient.get<WorkerHeartbeatListResponse>(
-    '/admin/worker-heartbeats',
+    '/v1/admin/worker-heartbeats',
     { params },
   )
   return data
@@ -2654,7 +2654,7 @@ export async function getWorkerHeartbeats(params?: {
 
 /** 获取系统概览（admin） */
 export async function getAdminSystemOverview(): Promise<SystemOverview> {
-  const { data } = await apiClient.get<SystemOverview>('/admin/system-overview')
+  const { data } = await apiClient.get<SystemOverview>('/v1/admin/system-overview')
   return data
 }
 
@@ -2693,7 +2693,7 @@ export interface VisitorReport {
 
 /** [Gate5] 查询访问统计报告（admin only） */
 export async function getAdminVisitors(): Promise<VisitorReport> {
-  const { data } = await apiClient.get<VisitorReport>('/admin/visitors')
+  const { data } = await apiClient.get<VisitorReport>('/v1/admin/visitors')
   return data
 }
 
@@ -2755,7 +2755,7 @@ export async function getBoardAnalysisList(
   params?: BoardAnalysisListParams,
   options?: { signal?: AbortSignal },
 ): Promise<BoardAnalysisListResponse> {
-  const { data } = await apiClient.get<BoardAnalysisListResponse>('/api/v1/boards/analysis', {
+  const { data } = await apiClient.get<BoardAnalysisListResponse>('/v1/boards/analysis', {
     params,
     signal: options?.signal,
   })
@@ -2769,7 +2769,7 @@ export async function getBoardAnalysisDetail(
   options?: { signal?: AbortSignal },
 ): Promise<BoardAnalysisDetailResponse> {
   const { data } = await apiClient.get<BoardAnalysisDetailResponse>(
-    `/api/v1/boards/${boardId}/analysis`,
+    `/v1/boards/${boardId}/analysis`,
     { params, signal: options?.signal },
   )
   return data
@@ -2790,7 +2790,7 @@ export async function triggerComputeBoard(
   snapshot_id: string
 }> {
   const { data } = await apiClient.post(
-    `/api/v1/admin/boards/${boardId}/analysis/compute`,
+    `/v1/admin/boards/${boardId}/analysis/compute`,
     null,
     { params },
   )
@@ -2823,7 +2823,7 @@ export async function triggerComputeAllBoards(
   errors: Array<{ board_id: string; board_name: string; error: string }>
 }> {
   const { data } = await apiClient.post(
-    '/api/v1/admin/boards/analysis/compute-all',
+    '/v1/admin/boards/analysis/compute-all',
     null,
     { params },
   )
@@ -2892,7 +2892,7 @@ export async function getJobRunEvents(
   limit: number = 100,
 ): Promise<JobRunEventListResponse> {
   const { data } = await apiClient.get<JobRunEventListResponse>(
-    `/admin/job-runs/${runId}/events`,
+    `/v1/admin/job-runs/${runId}/events`,
     { params: { limit } },
   )
   return data
@@ -2903,7 +2903,7 @@ export async function getAfterCloseRunStatus(
   runId: string,
 ): Promise<AfterCloseRunStatusResponse> {
   const { data } = await apiClient.get<AfterCloseRunStatusResponse>(
-    `/admin/after-close-runs/${runId}`,
+    `/v1/admin/after-close-runs/${runId}`,
   )
   return data
 }
@@ -2913,7 +2913,7 @@ export async function createAfterCloseRun(
   tradeDate: string,
 ): Promise<AfterCloseRunCreateResponse> {
   const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    '/admin/after-close-runs',
+    '/v1/admin/after-close-runs',
     { trade_date: tradeDate },
   )
   return data
@@ -2926,7 +2926,7 @@ export async function forceAfterCloseRun(
 ): Promise<AfterCloseRunCreateResponse> {
   const params = restartFrom ? { restart_from: restartFrom } : undefined
   const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    `/admin/after-close-runs/${runId}/force`,
+    `/v1/admin/after-close-runs/${runId}/force`,
     undefined,
     { params },
   )
@@ -2938,7 +2938,7 @@ export async function retryAfterCloseRun(
   runId: string,
 ): Promise<AfterCloseRunCreateResponse> {
   const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    `/admin/after-close-runs/${runId}/retry`,
+    `/v1/admin/after-close-runs/${runId}/retry`,
   )
   return data
 }
@@ -2948,7 +2948,7 @@ export async function resumeAfterCloseRun(
   runId: string,
 ): Promise<AfterCloseRunCreateResponse> {
   const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    `/admin/after-close-runs/${runId}/resume`,
+    `/v1/admin/after-close-runs/${runId}/resume`,
   )
   return data
 }
@@ -3091,7 +3091,7 @@ export interface AfterClosePipelineRunResponse {
  */
 export async function getAfterClosePipelineLatest(): Promise<AfterClosePipelineResponse> {
   const { data } = await apiClient.get<AfterClosePipelineResponse>(
-    '/admin/after-close/pipeline/latest',
+    '/v1/admin/after-close/pipeline/latest',
   )
   return data
 }
@@ -3104,7 +3104,7 @@ export async function getAfterClosePipelineByDate(
   tradeDate: string,
 ): Promise<AfterClosePipelineResponse> {
   const { data } = await apiClient.get<AfterClosePipelineResponse>(
-    '/admin/after-close/pipeline',
+    '/v1/admin/after-close/pipeline',
     { params: { trade_date: tradeDate } },
   )
   return data
@@ -3118,7 +3118,7 @@ export async function getAfterClosePipelineRuns(
   limit: number = 20,
 ): Promise<AfterClosePipelineRunListResponse> {
   const { data } = await apiClient.get<AfterClosePipelineRunListResponse>(
-    '/admin/after-close/pipeline/runs',
+    '/v1/admin/after-close/pipeline/runs',
     { params: { limit } },
   )
   return data
@@ -3133,7 +3133,7 @@ export async function createAfterClosePipelineRun(
   payload: AfterClosePipelineRunRequest,
 ): Promise<AfterClosePipelineRunResponse> {
   const { data } = await apiClient.post<AfterClosePipelineRunResponse>(
-    '/admin/after-close/pipeline/run',
+    '/v1/admin/after-close/pipeline/run',
     payload,
   )
   return data
@@ -3189,15 +3189,15 @@ export interface StructuralFactorResponse {
 
 /**
  * 查询指定标的的双周期结构状态因子
- * 后端 structural_factors router prefix="/api/v1/instruments"
- * 完整路径: /api/v1/instruments/{id}/structural-factors
+ * 后端 structural_factors router prefix="/v1/instruments"
+ * 完整路径: /v1/instruments/{id}/structural-factors
  */
 export async function getStructuralFactors(
   instrumentId: string,
   params?: StructuralFactorQueryParams,
 ): Promise<StructuralFactorResponse> {
   const { data } = await apiClient.get<StructuralFactorResponse>(
-    `/api/v1/instruments/${instrumentId}/structural-factors`,
+    `/v1/instruments/${instrumentId}/structural-factors`,
     { params },
   )
   return data
@@ -3262,8 +3262,8 @@ export interface TemporalFeaturesResponse {
 
 /**
  * 查询指定标的的时序特征 V1。
- * 后端 temporal_features router prefix="/api/v1/instruments"
- * 完整路径: /api/v1/instruments/{id}/temporal-features
+ * 后端 temporal_features router prefix="/v1/instruments"
+ * 完整路径: /v1/instruments/{id}/temporal-features
  * V1 仅支持 as_of=latest，as_of=其他值后端返回 400。
  */
 export async function getTemporalFeatures(
@@ -3271,7 +3271,7 @@ export async function getTemporalFeatures(
   params?: TemporalFeaturesQueryParams,
 ): Promise<TemporalFeaturesResponse> {
   const { data } = await apiClient.get<TemporalFeaturesResponse>(
-    `/api/v1/instruments/${instrumentId}/temporal-features`,
+    `/v1/instruments/${instrumentId}/temporal-features`,
     { params },
   )
   return data
@@ -3338,7 +3338,7 @@ export async function getTableViewPresets(
 ): Promise<TableViewPresetListResponse> {
   const params: Record<string, string> = { table_id: tableId }
   if (strategyKey) params.strategy_key = strategyKey
-  const { data } = await apiClient.get<TableViewPresetListResponse>('/me/table-view-presets', { params })
+  const { data } = await apiClient.get<TableViewPresetListResponse>('/v1/me/table-view-presets', { params })
   return data
 }
 
@@ -3346,7 +3346,7 @@ export async function getTableViewPresets(
 export async function createTableViewPreset(
   payload: TableViewPresetCreateRequest,
 ): Promise<TableViewPreset> {
-  const { data } = await apiClient.post<TableViewPreset>('/me/table-view-presets', payload)
+  const { data } = await apiClient.post<TableViewPreset>('/v1/me/table-view-presets', payload)
   return data
 }
 
@@ -3355,13 +3355,13 @@ export async function updateTableViewPreset(
   id: string,
   payload: TableViewPresetPatchRequest,
 ): Promise<TableViewPreset> {
-  const { data } = await apiClient.patch<TableViewPreset>(`/me/table-view-presets/${id}`, payload)
+  const { data } = await apiClient.patch<TableViewPreset>(`/v1/me/table-view-presets/${id}`, payload)
   return data
 }
 
 /** 删除 preset */
 export async function deleteTableViewPreset(id: string): Promise<void> {
-  await apiClient.delete(`/me/table-view-presets/${id}`)
+  await apiClient.delete(`/v1/me/table-view-presets/${id}`)
 }
 
 // ============================================================
@@ -3609,7 +3609,7 @@ export interface AdminStockDebugResponse extends AtomicFactsContextResponse {
 
 /**
  * 获取个股原子事实上下文（只读，需登录 + 有效订阅）。
- * GET /api/v1/stocks/{symbol}/context?as_of=YYYY-MM-DD
+ * GET /v1/stocks/{symbol}/context?as_of=YYYY-MM-DD
  * 返回 Atomic Fact Contract V1 上下文（contractVersion/asOf/core/auxiliary/availability/recentChanges/dataQuality）。
  */
 export async function getStockContext(
@@ -3618,7 +3618,7 @@ export async function getStockContext(
   options?: { signal?: AbortSignal },
 ): Promise<AtomicFactsContextResponse> {
   const { data } = await apiClient.get<AtomicFactsContextResponse>(
-    `/api/v1/stocks/${symbol}/context`,
+    `/v1/stocks/${symbol}/context`,
     { params, signal: options?.signal },
   )
   return data
@@ -3626,7 +3626,7 @@ export async function getStockContext(
 
 /**
  * [Phase 5B-2] 第一金字塔统一快照（趋势→结构→动量→筹码共识）。
- * GET /api/v1/stocks/{symbol}/first-pyramid?as_of=YYYY-MM-DD
+ * GET /v1/stocks/{symbol}/first-pyramid?as_of=YYYY-MM-DD
  * 返回 FirstPyramidSnapshot（固定维度顺序，前三维必选，chip_consensus 可选）。
  * 前端展示顺序：trend → structure → momentum → chip_consensus。
  */
@@ -3636,7 +3636,7 @@ export async function getFirstPyramid(
   options?: { signal?: AbortSignal },
 ): Promise<FirstPyramidSnapshot> {
   const { data } = await apiClient.get<FirstPyramidSnapshot>(
-    `/api/v1/stocks/${symbol}/first-pyramid`,
+    `/v1/stocks/${symbol}/first-pyramid`,
     { params, signal: options?.signal },
   )
   return data
@@ -3644,7 +3644,7 @@ export async function getFirstPyramid(
 
 /**
  * 管理员个股调试接口（需管理员身份）。
- * GET /api/v1/admin/stocks/{symbol}/debug?as_of=YYYY-MM-DD
+ * GET /v1/admin/stocks/{symbol}/debug?as_of=YYYY-MM-DD
  * 返回 Atomic Fact Contract V1 上下文 + 原始 payload 与可追溯信息。
  */
 export async function getAdminStockDebug(
@@ -3653,7 +3653,7 @@ export async function getAdminStockDebug(
   options?: { signal?: AbortSignal },
 ): Promise<AdminStockDebugResponse> {
   const { data } = await apiClient.get<AdminStockDebugResponse>(
-    `/api/v1/admin/stocks/${symbol}/debug`,
+    `/v1/admin/stocks/${symbol}/debug`,
     { params, signal: options?.signal },
   )
   return data

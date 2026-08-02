@@ -320,16 +320,16 @@ test('CaptureStockPage 只调用 Snapshot API，不调用普通业务端点', ()
   const src = readSource(CAPTURE_PAGE_PATH)
   // 必须包含 Snapshot API 路径
   assert.ok(
-    src.includes('/api/v1/capture/stocks/'),
-    'CaptureStockPage 必须调用 /api/v1/capture/stocks/{instrument_id}/snapshot',
+    src.includes('/v1/capture/stocks/'),
+    'CaptureStockPage 必须调用 /v1/capture/stocks/{instrument_id}/snapshot',
   )
   // 禁止调用普通端点
   const forbiddenEndpoints = [
     '/instruments/by-symbol/',
-    '/api/v1/instruments/',
-    '/api/v1/instruments/{instrumentId}/bars',
-    '/api/v1/instruments/{instrumentId}/indicators',
-    '/api/v1/instruments/{instrumentId}/quote',
+    '/v1/instruments/',
+    '/v1/instruments/{instrumentId}/bars',
+    '/v1/instruments/{instrumentId}/indicators',
+    '/v1/instruments/{instrumentId}/quote',
   ]
   for (const endpoint of forbiddenEndpoints) {
     assert.ok(

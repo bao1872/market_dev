@@ -93,7 +93,7 @@ async def market_stocks_client(
 async def test_market_scope_list(market_stocks_client) -> None:
     """测试 market scope 列表查询：返回全部活跃 A 股。"""
     client, _, instruments = market_stocks_client
-    response = await client.get("/market/stocks", params={"scope": "market"})
+    response = await client.get("/v1/market/stocks", params={"scope": "market"})
     assert response.status_code == 200
     data = response.json()
     # 响应结构
@@ -119,7 +119,7 @@ async def test_market_scope_list(market_stocks_client) -> None:
 async def test_market_scope_is_watchlisted(market_stocks_client) -> None:
     """测试 is_watchlisted 标记：inst1 在自选中，inst2 不在。"""
     client, _, instruments = market_stocks_client
-    response = await client.get("/market/stocks", params={"scope": "market"})
+    response = await client.get("/v1/market/stocks", params={"scope": "market"})
     assert response.status_code == 200
     items = response.json()["items"]
     by_symbol = {item["symbol"]: item for item in items}
@@ -131,7 +131,7 @@ async def test_market_scope_is_watchlisted(market_stocks_client) -> None:
 async def test_watchlist_scope(market_stocks_client) -> None:
     """测试 watchlist scope：仅返回用户自选。"""
     client, _, instruments = market_stocks_client
-    response = await client.get("/market/stocks", params={"scope": "watchlist"})
+    response = await client.get("/v1/market/stocks", params={"scope": "watchlist"})
     assert response.status_code == 200
     data = response.json()
     # 仅 inst1 在自选中
@@ -146,7 +146,7 @@ async def test_pagination(market_stocks_client) -> None:
     """测试分页查询。"""
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "page": 1, "page_size": 2}
+        "/v1/market/stocks", params={"scope": "market", "page": 1, "page_size": 2}
     )
     assert response.status_code == 200
     data = response.json()
@@ -160,7 +160,7 @@ async def test_page_size_max_100(market_stocks_client) -> None:
     """测试 page_size 上限 100：超过 100 应返回 422。"""
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "page_size": 200}
+        "/v1/market/stocks", params={"scope": "market", "page_size": 200}
     )
     assert response.status_code == 422
 
@@ -170,7 +170,7 @@ async def test_search_query(market_stocks_client) -> None:
     """测试搜索关键词（名称包含）。"""
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "query": "茅台"}
+        "/v1/market/stocks", params={"scope": "market", "query": "茅台"}
     )
     assert response.status_code == 200
     data = response.json()
@@ -184,7 +184,7 @@ async def test_search_query(market_stocks_client) -> None:
 async def test_row_fields(market_stocks_client) -> None:
     """测试每行返回页面所需全部字段。"""
     client, _, _ = market_stocks_client
-    response = await client.get("/market/stocks", params={"scope": "market"})
+    response = await client.get("/v1/market/stocks", params={"scope": "market"})
     assert response.status_code == 200
     items = response.json()["items"]
     assert len(items) > 0
@@ -213,7 +213,7 @@ async def test_row_fields(market_stocks_client) -> None:
 @pytest.mark.asyncio
 async def test_unauthenticated_returns_401(client: AsyncClient) -> None:
     """测试未认证返回 401。"""
-    response = await client.get("/market/stocks", params={"scope": "market"})
+    response = await client.get("/v1/market/stocks", params={"scope": "market"})
     assert response.status_code == 401
 
 
@@ -228,7 +228,7 @@ async def test_industry_param_returns_empty_when_no_board_data(market_stocks_cli
     """
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "industry": "银行"}
+        "/v1/market/stocks", params={"scope": "market", "industry": "银行"}
     )
     assert response.status_code == 200
     data = response.json()
@@ -244,7 +244,7 @@ async def test_concept_param_returns_empty_when_no_board_data(market_stocks_clie
     """
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "concept": "新能源"}
+        "/v1/market/stocks", params={"scope": "market", "concept": "新能源"}
     )
     assert response.status_code == 200
     data = response.json()
@@ -276,7 +276,7 @@ async def test_industry_concept_populated_from_board_data(
     ])
     await db_session.flush()
 
-    response = await client.get("/market/stocks", params={"scope": "market"})
+    response = await client.get("/v1/market/stocks", params={"scope": "market"})
     assert response.status_code == 200
     items = response.json()["items"]
     by_symbol = {item["symbol"]: item for item in items}
@@ -308,7 +308,7 @@ async def test_industry_filter_returns_matching_instruments(
     await db_session.flush()
 
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "industry": "银行"}
+        "/v1/market/stocks", params={"scope": "market", "industry": "银行"}
     )
     assert response.status_code == 200
     data = response.json()
@@ -338,7 +338,7 @@ async def test_concept_filter_returns_matching_instruments(
     await db_session.flush()
 
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "concept": "新能源"}
+        "/v1/market/stocks", params={"scope": "market", "concept": "新能源"}
     )
     assert response.status_code == 200
     data = response.json()
@@ -371,7 +371,7 @@ async def test_combined_industry_concept_filter_intersection(
     await db_session.flush()
 
     response = await client.get(
-        "/market/stocks",
+        "/v1/market/stocks",
         params={"scope": "market", "industry": "银行", "concept": "新能源"},
     )
     assert response.status_code == 200
@@ -404,10 +404,10 @@ async def test_price_as_of_global_not_page_dependent(
 
     # 分页查询：page_size=1 查不同页
     resp1 = await client.get(
-        "/market/stocks", params={"scope": "market", "page_size": 1, "page": 1}
+        "/v1/market/stocks", params={"scope": "market", "page_size": 1, "page": 1}
     )
     resp2 = await client.get(
-        "/market/stocks", params={"scope": "market", "page_size": 1, "page": 2}
+        "/v1/market/stocks", params={"scope": "market", "page_size": 1, "page": 2}
     )
     assert resp1.status_code == 200
     assert resp2.status_code == 200
@@ -421,7 +421,7 @@ async def test_state_param_invalid_value_returns_422(market_stocks_client) -> No
     """state 参数非法值返回 422（Phase 4：合法值为 up/down/sideways）。"""
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "state": "上行"}
+        "/v1/market/stocks", params={"scope": "market", "state": "上行"}
     )
     assert response.status_code == 422
     assert "Invalid state value" in response.json()["detail"]
@@ -433,7 +433,7 @@ async def test_state_param_valid_returns_200(market_stocks_client) -> None:
     client, _, _ = market_stocks_client
     for valid_state in ("up", "down", "sideways"):
         response = await client.get(
-            "/market/stocks", params={"scope": "market", "state": valid_state}
+            "/v1/market/stocks", params={"scope": "market", "state": valid_state}
         )
         assert response.status_code == 200, f"state={valid_state} should return 200"
 
@@ -443,7 +443,7 @@ async def test_empty_filter_params_ok(market_stocks_client) -> None:
     """industry/concept/state 为空字符串时正常返回（不触发 422）。"""
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks",
+        "/v1/market/stocks",
         params={"scope": "market", "industry": "", "concept": "", "state": ""},
     )
     assert response.status_code == 200
@@ -457,7 +457,7 @@ async def test_sort_invalid_field_returns_422(market_stocks_client) -> None:
     """非法排序字段返回 422。"""
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "sort": "invalid_field:asc"}
+        "/v1/market/stocks", params={"scope": "market", "sort": "invalid_field:asc"}
     )
     assert response.status_code == 422
     assert "Invalid sort field" in response.json()["detail"]["message"]
@@ -468,7 +468,7 @@ async def test_sort_invalid_direction_returns_422(market_stocks_client) -> None:
     """非法排序方向返回 422。"""
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "sort": "symbol:up"}
+        "/v1/market/stocks", params={"scope": "market", "sort": "symbol:up"}
     )
     assert response.status_code == 422
     assert "Invalid sort direction" in response.json()["detail"]["message"]
@@ -494,7 +494,7 @@ async def test_sort_whitelist_accepted(market_stocks_client, sort_param: str) ->
     """白名单内排序字段+方向均返回 200。"""
     client, _, _ = market_stocks_client
     response = await client.get(
-        "/market/stocks", params={"scope": "market", "sort": sort_param}
+        "/v1/market/stocks", params={"scope": "market", "sort": sort_param}
     )
     assert response.status_code == 200
 
@@ -506,7 +506,7 @@ async def test_sort_whitelist_accepted(market_stocks_client, sort_param: str) ->
 async def test_as_of_fields_null_when_no_data(market_stocks_client) -> None:
     """无行情/快照数据时 price_as_of/state_as_of 为 null，boards_as_of 始终为 null。"""
     client, _, _ = market_stocks_client
-    response = await client.get("/market/stocks", params={"scope": "market"})
+    response = await client.get("/v1/market/stocks", params={"scope": "market"})
     assert response.status_code == 200
     data = response.json()
     # boards_as_of 始终为 null（qstock 未同步）
@@ -523,7 +523,7 @@ async def test_empty_page_returns_real_total_and_as_of(
     client, _, _ = market_stocks_client
     # 请求第 999 页（超出总页数）
     response = await client.get(
-        "/market/stocks",
+        "/v1/market/stocks",
         params={"scope": "market", "page": 999, "page_size": 20},
     )
     assert response.status_code == 200

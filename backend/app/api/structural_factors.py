@@ -1,6 +1,6 @@
 """结构状态因子 API。
 
-GET /api/v1/instruments/{instrument_id}/structural-factors
+GET /v1/instruments/{instrument_id}/structural-factors
     返回双周期 (1d + 15m) 结构状态因子，供个股详情页右侧面板使用。
 
 参数：
@@ -35,7 +35,7 @@ from app.services.structural_factor_service import compute_structural_factors
 
 logger = logging.getLogger("api.structural_factors")
 
-router = APIRouter(prefix="/api/v1/instruments", tags=["structural-factors"])
+router = APIRouter(prefix="/v1/instruments", tags=["structural-factors"])
 
 _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}
 _ALLOWED_ADJ = {"qfq", "none"}

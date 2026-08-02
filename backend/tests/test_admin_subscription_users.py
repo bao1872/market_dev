@@ -259,7 +259,7 @@ async def test_admin_disable_user(
 ) -> None:
     """管理员可以禁用普通用户。"""
     response = await client.post(
-        f"/admin/users/{member_user.id}/disable",
+        f"/v1/admin/users/{member_user.id}/disable",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -289,7 +289,7 @@ async def test_admin_enable_user(
     await db_session_flush(member_user, db_session)
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/enable",
+        f"/v1/admin/users/{member_user.id}/enable",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -305,7 +305,7 @@ async def test_admin_grant_subscription_endpoint(
 ) -> None:
     """管理员可通过端点为用户授予 subscription。"""
     response = await client.post(
-        f"/admin/users/{member_user.id}/grant-subscription",
+        f"/v1/admin/users/{member_user.id}/grant-subscription",
         headers=_auth_headers(admin_user.id),
         json={"plan_code": "observe_20", "grant_months": 3},
     )
@@ -341,7 +341,7 @@ async def test_admin_renew_subscription_endpoint(
     )
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/renew-subscription",
+        f"/v1/admin/users/{member_user.id}/renew-subscription",
         headers=_auth_headers(admin_user.id),
         json={"grant_months": 2},
     )
@@ -364,7 +364,7 @@ async def test_admin_revoke_subscription_endpoint(
     await subscription_factory(user_id=member_user.id)
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/revoke-subscription",
+        f"/v1/admin/users/{member_user.id}/revoke-subscription",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -387,7 +387,7 @@ async def test_admin_change_plan_endpoint(
     )
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/change-plan",
+        f"/v1/admin/users/{member_user.id}/change-plan",
         headers=_auth_headers(admin_user.id),
         json={"plan_code": "research_50", "grant_months": 1},
     )
@@ -407,7 +407,7 @@ async def test_admin_change_role_to_admin_revokes_subscription(
     await subscription_factory(user_id=member_user.id)
 
     response = await client.post(
-        f"/admin/users/{member_user.id}/change-role",
+        f"/v1/admin/users/{member_user.id}/change-role",
         headers=_auth_headers(admin_user.id),
         json={"role": "admin"},
     )
@@ -433,7 +433,7 @@ async def test_admin_change_role_to_member(
     user = await user_factory(roles=["admin"])
 
     response = await client.post(
-        f"/admin/users/{user.id}/change-role",
+        f"/v1/admin/users/{user.id}/change-role",
         headers=_auth_headers(admin_user.id),
         json={"role": "member"},
     )
@@ -452,7 +452,7 @@ async def test_admin_reset_password_endpoint(
 ) -> None:
     """管理员重置用户密码请求端点记录审计日志。"""
     response = await client.post(
-        f"/admin/users/{member_user.id}/reset-password",
+        f"/v1/admin/users/{member_user.id}/reset-password",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -476,7 +476,7 @@ async def test_non_admin_cannot_access_user_endpoints(
     """普通用户不能访问 admin 用户管理端点。"""
     token = create_access_token(str(member_user.id))
     response = await client.post(
-        f"/admin/users/{member_user.id}/disable",
+        f"/v1/admin/users/{member_user.id}/disable",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
@@ -509,7 +509,7 @@ async def test_admin_audit_logs_endpoint(
     await db_session.commit()
 
     response = await client.get(
-        "/admin/audit-logs",
+        "/v1/admin/audit-logs",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200
@@ -549,7 +549,7 @@ async def test_admin_audit_logs_target_user_filter(
     await db_session.commit()
 
     response = await client.get(
-        f"/admin/audit-logs?target_user_id={member_user.id}",
+        f"/v1/admin/audit-logs?target_user_id={member_user.id}",
         headers=_auth_headers(admin_user.id),
     )
     assert response.status_code == 200

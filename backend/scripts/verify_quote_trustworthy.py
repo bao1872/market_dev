@@ -91,7 +91,7 @@ async def main():
                 # 1. 非交易时段 / pytdx 失败场景：DB fallback
                 print("=== 场景 1：非交易时段 DB fallback（degraded=false） ===")
                 data = await _call_quote(client, instrument.id)
-                print(f"curl 示例：curl -s http://127.0.0.1:8000/api/v1/instruments/{instrument.id}/quote | python -m json.tool")
+                print(f"curl 示例：curl -s http://127.0.0.1:8000/v1/instruments/{instrument.id}/quote | python -m json.tool")
                 print(f"响应：{data}")
                 assert data["source"] == "daily_fallback"
                 assert data["is_realtime"] is False
@@ -131,7 +131,7 @@ async def main():
 
                 try:
                     data = await _call_quote(client, instrument.id)
-                    print(f"curl 示例：curl -s http://127.0.0.1:8000/api/v1/instruments/{instrument.id}/quote | python -m json.tool")
+                    print(f"curl 示例：curl -s http://127.0.0.1:8000/v1/instruments/{instrument.id}/quote | python -m json.tool")
                     print(f"响应：{data}")
                     assert data["source"] == "pytdx"
                     assert data["is_realtime"] is True
@@ -161,7 +161,7 @@ async def main():
 
                 try:
                     data = await _call_quote(client, instrument.id)
-                    print(f"curl 示例：curl -s http://127.0.0.1:8000/api/v1/instruments/{instrument.id}/quote | python -m json.tool")
+                    print(f"curl 示例：curl -s http://127.0.0.1:8000/v1/instruments/{instrument.id}/quote | python -m json.tool")
                     print(f"响应：{data}")
                     assert data["source"] == "daily_fallback"
                     assert data["is_realtime"] is False

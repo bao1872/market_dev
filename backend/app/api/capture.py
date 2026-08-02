@@ -4,7 +4,7 @@
 （advice.md 第六节 + spec.md Requirement: Capture 专用链路）
 
 端点：
-- GET /api/v1/capture/stocks/{instrument_id}/snapshot
+- GET /v1/capture/stocks/{instrument_id}/snapshot
     一次返回截图所需完整数据（行情、指标、事件），避免前端多次请求。
 
 认证：
@@ -44,7 +44,7 @@ from app.services.chart_snapshot_service import ChartSnapshotService
 
 logger = logging.getLogger("api.capture")
 
-router = APIRouter(prefix="/api/v1", tags=["capture"])
+router = APIRouter(prefix="/v1", tags=["capture"])
 
 # [Capture] - 描述: 截图固定参数（advice.md 第六节）
 # bars_limit 引用 indicator_contract.CHART_BARS_COUNT 唯一真源（=DAILY_HISTORY_BARS=250），
@@ -284,7 +284,7 @@ if __name__ == "__main__":
     print(f"router.prefix={router.prefix}")
     print(f"router.routes={paths}")
     assert any("/capture/stocks/" in p for p in paths), "应包含 /capture/stocks/{id}/snapshot 路由"
-    assert router.prefix == "/api/v1", "prefix 应为 /api/v1"
+    assert router.prefix == "/v1", "prefix 应为 /v1"
 
     # 验证依赖导入
     assert callable(get_capture_token_payload), "get_capture_token_payload 应可导入"

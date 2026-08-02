@@ -5,7 +5,7 @@ completed_frame + live_revision + diagnostics，禁止详情页 Bars/Indicators 
 独立实时请求。
 
 端点：
-- GET /api/v1/instruments/{instrument_id}/chart-snapshot
+- GET /v1/instruments/{instrument_id}/chart-snapshot
     一次返回个股详情页图表所需的完整数据（bars + indicators + display_frame +
     render_frame + snapshot_time），替代详情页独立 useBars + useIndicators 两次请求。
 
@@ -76,7 +76,7 @@ from app.services.market_status_service import (
 
 logger = logging.getLogger("api.chart_snapshot")
 
-router = APIRouter(prefix="/api/v1", tags=["chart-snapshot"])
+router = APIRouter(prefix="/v1", tags=["chart-snapshot"])
 
 # 支持的周期与复权方式（与 bars/indicators API 对齐）
 _ALLOWED_TIMEFRAMES = {"1d", "15m", "1h", "1w", "1mo"}

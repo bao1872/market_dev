@@ -174,7 +174,7 @@ async def test_me_access_admin(access_client: tuple[AsyncClient, AsyncSession]) 
     admin = await _create_admin(db)
     await db.flush()
 
-    resp = await client.get("/me/access", headers=_auth_headers(admin.id))
+    resp = await client.get("/v1/me/access", headers=_auth_headers(admin.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -200,7 +200,7 @@ async def test_me_access_member_active(
     user, _subscription = await _create_normal_user_with_membership(db, "observe_20", grant_months=1)
     await db.flush()
 
-    resp = await client.get("/me/access", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/access", headers=_auth_headers(user.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -232,7 +232,7 @@ async def test_me_access_member_expired(
     subscription.expires_at = datetime.now(UTC) - timedelta(days=1)
     await db.flush()
 
-    resp = await client.get("/me/access", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/access", headers=_auth_headers(user.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -255,7 +255,7 @@ async def test_me_access_member_no_subscription(
     user = await _create_member_without_subscription(db)
     await db.flush()
 
-    resp = await client.get("/me/access", headers=_auth_headers(user.id))
+    resp = await client.get("/v1/me/access", headers=_auth_headers(user.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -278,7 +278,7 @@ async def test_me_access_returns_all_12_fields(
     admin = await _create_admin(db)
     await db.flush()
 
-    resp = await client.get("/me/access", headers=_auth_headers(admin.id))
+    resp = await client.get("/v1/me/access", headers=_auth_headers(admin.id))
 
     assert resp.status_code == 200
     data = resp.json()
@@ -296,7 +296,7 @@ async def test_me_access_requires_auth(
     """无 token 调用 /me/access 返回 401。"""
     client, _db = access_client
 
-    resp = await client.get("/me/access")  # 不带 Authorization 头
+    resp = await client.get("/v1/me/access")  # 不带 Authorization 头
 
     assert resp.status_code == 401
 

@@ -496,7 +496,7 @@ deploy_scope() {
 health_check() {
     # [Phase 5B-2] dry-run 模式下只做计划验证，不称健康检查
     if [[ "${DRY_RUN}" == "true" ]]; then
-        log "[dry-run] 计划验证: 将检查 port 80, /health, /health/ready, /version runtime_git_sha, 关键容器, Scheduler 单实例"
+        log "[dry-run] 计划验证: 将检查 port 80, /v1/health, /v1/health/ready, /v1/version runtime_git_sha, 关键容器, Scheduler 单实例"
         log "[dry-run] [P0-7] SHA gate: repo HEAD = image tag = container env GIT_SHA = /version runtime SHA"
         return 0
     fi
@@ -506,13 +506,13 @@ health_check() {
     local max_wait=60
     local waited=0
 
-    # 等待 backend /health
+    # 等待 backend /v1/health
     while [[ ${waited} -lt ${max_wait} ]]; do
-        if curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
-            log "backend /health 通过"
+        if curl -sf http://127.0.0.1:8000/v1/health >/dev/null 2>&1; then
+            log "backend /v1/health 通过"
             break
         fi
-        log "等待 backend /health... (${waited}/${max_wait})"
+        log "等待 backend /v1/health... (${waited}/${max_wait})"
         sleep 2
         waited=$((waited + 2))
     done
@@ -521,28 +521,28 @@ health_check() {
         return 1
     fi
 
-    # /health/ready（需要等待 startup 完成，包括种子数据初始化）
+    # /v1/health/ready（需要等待 startup 完成，包括种子数据初始化）
     waited=0
     while [[ ${waited} -lt ${max_wait} ]]; do
-        if curl -sf http://127.0.0.1:8000/health/ready >/dev/null 2>&1; then
+        if curl -sf http://127.0.0.1:8000/v1/health/ready >/dev/null 2>&1; then
             break
         fi
-        log "等待 backend /health/ready... (${waited}/${max_wait})"
+        log "等待 backend /v1/health/ready... (${waited}/${max_wait})"
         sleep 2
         waited=$((waited + 2))
     done
 
     if [[ ${waited} -ge ${max_wait} ]]; then
-        log "/health/ready 未通过（等待 ${max_wait}s 超时）"
+        log "/v1/health/ready 未通过（等待 ${max_wait}s 超时）"
         return 1
     fi
-    log "/health/ready 通过"
+    log "/v1/health/ready 通过"
 
-    # /version runtime_git_sha
+    # /v1/version runtime_git_sha
     # [P0 2026-07-30] 纯镜像部署时 GIT_SHA 只有短 SHA（7 chars），比较前 7 位即可
     # Live Mount 部署时 RUNTIME_SHA 文件含完整 SHA，短 SHA 比较仍然成立
     local runtime_sha
-    runtime_sha="$(curl -sf http://127.0.0.1:8000/version 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("runtime_git_sha","unknown"))' 2>/dev/null || echo "unknown")"
+    runtime_sha="$(curl -sf http://127.0.0.1:8000/v1/version 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("runtime_git_sha","unknown"))' 2>/dev/null || echo "unknown")"
     if [[ "${runtime_sha:0:7}" != "${TARGET_SHA:0:7}" ]]; then
         log "runtime_git_sha 不匹配: 期望 ${TARGET_SHA:0:7}, 实际 ${runtime_sha:0:7}"
         return 1

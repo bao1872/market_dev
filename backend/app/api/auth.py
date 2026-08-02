@@ -73,7 +73,7 @@ from app.services.subscription_service import (
     renew_with_invite_code,
 )
 
-router = APIRouter(tags=["auth"])
+router = APIRouter(prefix="/v1", tags=["auth"])
 _settings = get_settings()
 logger = logging.getLogger("api.auth")
 

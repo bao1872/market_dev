@@ -1,19 +1,19 @@
 """复盘模块用户端 API 路由（PRD §12.1-12.5）。
 
 端点：
-- GET  /api/v1/review/dates: 已发布复盘交易日列表
-- GET  /api/v1/review/latest: 最新已发布复盘 run 信息
-- GET  /api/v1/review/{trade_date}/overview: 复盘总览（覆盖率+信号汇总）
-- GET  /api/v1/review/{trade_date}/scopes: 市场扫描（P/Q/U/C/V）
-- GET  /api/v1/review/{trade_date}/signals: 信号列表
-- GET  /api/v1/review/signals/{signal_id}: 信号详情
-- GET  /api/v1/review/signals/{signal_id}/attributions: 子范围归因
-- GET  /api/v1/review/signals/{signal_id}/instruments: 个股归因
-- GET  /api/v1/review/trackings: 用户追踪列表
-- POST /api/v1/review/trackings: 创建追踪（幂等）
-- PATCH /api/v1/review/trackings/{id}: 更新追踪（幂等）
-- DELETE /api/v1/review/trackings/{id}: 关闭追踪（幂等，不物理删除）
-- GET  /api/v1/review/trackings/{id}/evaluations: 追踪逐日评估
+- GET  /v1/review/dates: 已发布复盘交易日列表
+- GET  /v1/review/latest: 最新已发布复盘 run 信息
+- GET  /v1/review/{trade_date}/overview: 复盘总览（覆盖率+信号汇总）
+- GET  /v1/review/{trade_date}/scopes: 市场扫描（P/Q/U/C/V）
+- GET  /v1/review/{trade_date}/signals: 信号列表
+- GET  /v1/review/signals/{signal_id}: 信号详情
+- GET  /v1/review/signals/{signal_id}/attributions: 子范围归因
+- GET  /v1/review/signals/{signal_id}/instruments: 个股归因
+- GET  /v1/review/trackings: 用户追踪列表
+- POST /v1/review/trackings: 创建追踪（幂等）
+- PATCH /v1/review/trackings/{id}: 更新追踪（幂等）
+- DELETE /v1/review/trackings/{id}: 关闭追踪（幂等，不物理删除）
+- GET  /v1/review/trackings/{id}/evaluations: 追踪逐日评估
 
 权限（PRD §3.2）：
 - 所有读取接口：require_capability("research_replay")（admin 自动豁免）
@@ -99,7 +99,7 @@ from app.services.review_tracking_service import (
 
 logger = logging.getLogger("api.review")
 
-router = APIRouter(prefix="/api/v1/review", tags=["review"])
+router = APIRouter(prefix="/v1/review", tags=["review"])
 
 # research_replay capability 是复盘模块的权限门禁（PRD60 PA-12）
 REVIEW_CAPABILITY = "research_replay"

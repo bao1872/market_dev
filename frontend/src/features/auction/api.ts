@@ -1,6 +1,6 @@
 // [AuctionApi] - 描述: 竞价分析模块 React Query hooks（PRD §3.2 用户侧只读 GET 接口）
 // 基于 axios apiClient（baseURL=/api，Vite 代理去掉 /api 前缀）
-// 后端 router prefix=/api/v1/auction
+// 后端 router prefix=/v1/auction
 //
 // 规则：
 // - 用户侧只读 DB，不触发计算（POST /admin/auction/scan 与 /admin/auction/anchors 由管理员后台触发）
@@ -73,12 +73,12 @@ export function extractAuctionError(err: unknown): AuctionApiError {
 // API 调用函数
 // ============================================================
 
-/** GET /api/v1/auction — 市场级页面数据 */
+/** GET /v1/auction — 市场级页面数据 */
 export async function getAuctionMarket(
   tradeDate?: string,
   options: { top_n?: number; top_events?: number } = {},
 ): Promise<AuctionMarketPageData> {
-  const { data } = await apiClient.get<AuctionMarketPageData>('/api/v1/auction', {
+  const { data } = await apiClient.get<AuctionMarketPageData>('/v1/auction', {
     params: {
       trade_date: tradeDate,
       top_n: options.top_n,
@@ -88,14 +88,14 @@ export async function getAuctionMarket(
   return data
 }
 
-/** GET /api/v1/auction/board/{board_id} — 板块级页面数据 */
+/** GET /v1/auction/board/{board_id} — 板块级页面数据 */
 export async function getAuctionBoard(
   boardId: string,
   tradeDate?: string,
   options: { top_n?: number } = {},
 ): Promise<AuctionBoardPageData> {
   const { data } = await apiClient.get<AuctionBoardPageData>(
-    `/api/v1/auction/board/${boardId}`,
+    `/v1/auction/board/${boardId}`,
     {
       params: {
         trade_date: tradeDate,
@@ -106,13 +106,13 @@ export async function getAuctionBoard(
   return data
 }
 
-/** GET /api/v1/auction/stock/{symbol} — 个股级页面数据 */
+/** GET /v1/auction/stock/{symbol} — 个股级页面数据 */
 export async function getAuctionInstrument(
   symbol: string,
   tradeDate?: string,
 ): Promise<AuctionInstrumentPageData> {
   const { data } = await apiClient.get<AuctionInstrumentPageData>(
-    `/api/v1/auction/stock/${symbol}`,
+    `/v1/auction/stock/${symbol}`,
     {
       params: {
         trade_date: tradeDate,
@@ -122,23 +122,23 @@ export async function getAuctionInstrument(
   return data
 }
 
-/** GET /api/v1/auction/anchors/{trade_date} — 锚点快照与发布状态 */
+/** GET /v1/auction/anchors/{trade_date} — 锚点快照与发布状态 */
 export async function getAuctionAnchors(
   tradeDate: string,
 ): Promise<AnchorStatusResponse> {
   const { data } = await apiClient.get<AnchorStatusResponse>(
-    `/api/v1/auction/anchors/${tradeDate}`,
+    `/v1/auction/anchors/${tradeDate}`,
   )
   return data
 }
 
-/** GET /api/v1/auction/backflow/{trade_date} — ReviewPage 第二金字塔+竞价事件回流数据 */
+/** GET /v1/auction/backflow/{trade_date} — ReviewPage 第二金字塔+竞价事件回流数据 */
 export async function getAuctionBackflow(
   tradeDate: string,
   topEvents = 50,
 ): Promise<AuctionBackflowData> {
   const { data } = await apiClient.get<AuctionBackflowData>(
-    `/api/v1/auction/backflow/${tradeDate}`,
+    `/v1/auction/backflow/${tradeDate}`,
     {
       params: { top_events: topEvents },
     },
@@ -171,7 +171,7 @@ export const auctionKeys = {
 
 /**
  * 市场级页面数据 hook
- * GET /api/v1/auction
+ * GET /v1/auction
  * - trade_date 省略时后端默认取上海当前业务日
  * - 默认 top_n=10、top_events=20（与后端 DEFAULT_TOP_BOARDS/DEFAULT_TOP_EVENTS 对齐）
  */
@@ -191,7 +191,7 @@ export function useAuctionMarket(
 
 /**
  * 板块级页面数据 hook
- * GET /api/v1/auction/board/{board_id}
+ * GET /v1/auction/board/{board_id}
  */
 export function useAuctionBoard(
   boardId: string | null | undefined,
@@ -209,7 +209,7 @@ export function useAuctionBoard(
 
 /**
  * 个股级页面数据 hook
- * GET /api/v1/auction/stock/{symbol}
+ * GET /v1/auction/stock/{symbol}
  */
 export function useAuctionInstrument(
   symbol: string | null | undefined,
@@ -227,7 +227,7 @@ export function useAuctionInstrument(
 
 /**
  * 锚点快照与发布状态 hook
- * GET /api/v1/auction/anchors/{trade_date}
+ * GET /v1/auction/anchors/{trade_date}
  */
 export function useAuctionAnchors(
   tradeDate: string | null | undefined,
@@ -244,7 +244,7 @@ export function useAuctionAnchors(
 
 /**
  * 第二金字塔+竞价事件回流 hook（ReviewPage 调用）
- * GET /api/v1/auction/backflow/{trade_date}
+ * GET /v1/auction/backflow/{trade_date}
  * - 返回分布/迁移/新鲜度/集中度四维度数据
  * - 用于在 /review 页面展示竞价事件回流与第二金字塔可视化
  */

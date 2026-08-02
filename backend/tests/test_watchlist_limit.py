@@ -167,7 +167,7 @@ async def test_watchlist_observe_20_limit_blocked(watchlist_client):
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[20].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -188,7 +188,7 @@ async def test_watchlist_research_50_limit_blocked(watchlist_client):
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[50].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -209,7 +209,7 @@ async def test_watchlist_admin_exceeds_50_allowed(watchlist_client):
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[50].id), "source": "manual"},
         headers=_auth_headers(admin.id),
     )
@@ -250,7 +250,7 @@ async def test_watchlist_downgrade_does_not_delete(watchlist_client):
 
     # 4. 新增第 31 只返回 409
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[30].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -285,7 +285,7 @@ async def test_watchlist_restore_soft_deleted_checks_limit(watchlist_client):
 
     # 通过 API 恢复 inactive 记录 → 409
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[20].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -303,7 +303,7 @@ async def test_watchlist_under_limit_allowed(watchlist_client):
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[19].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )
@@ -335,7 +335,7 @@ async def test_watchlist_no_membership_user_blocked(watchlist_client):
     await db.flush()
 
     resp = await client.post(
-        "/watchlist",
+        "/v1/watchlist",
         json={"instrument_id": str(instruments[0].id), "source": "manual"},
         headers=_auth_headers(user.id),
     )

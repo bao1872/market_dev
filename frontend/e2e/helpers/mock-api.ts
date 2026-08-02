@@ -8,10 +8,8 @@
 // 5. 记录所有 API 调用到 calls[]，供测试断言（如验证 MDAS 调用次数、indicator_view 透传）
 //
 // URL 模式说明：
-// apiClient.baseURL='/api'，前端代码调用 apiClient.get('/api/v1/instruments/...')
-// axios combineURLs 会得到 '/api/api/v1/instruments/...'（双 /api 前缀）
-// Vite proxy rewrite 去掉首个 /api → 后端收到 '/api/v1/instruments/...'
-// Playwright 拦截到的 URL 路径为 '/api/api/v1/instruments/...'，故使用宽松子串匹配
+// apiClient.baseURL='/api'，endpoint 统一为 '/v1/...'
+// 浏览器请求为 '/api/v1/...'，代理剥离一次 '/api' 后端收到 '/v1/...'
 
 import type { Page, Route } from '@playwright/test'
 import {
@@ -116,11 +114,7 @@ export async function setupMockApi(
   // URL 模式 `**/api/**`：
   // Playwright 使用 preview 模式（npm run build && npm run preview），JS bundle 在 /assets/，
   // 不会有 /src/api/ 模块加载请求，故 `**/api/**` 不会误拦截模块。
-  // 真实 API 请求路径有两种形式：
-  //   1. /api/api/v1/...（apiClient.get('/api/v1/...')，baseURL=/api 双 /api）
-  //   2. /api/me/... 或 /api/auth/...（apiClient.get('/me/...')，baseURL=/api 单 /api）
-  // `**/api/api/**` 会漏掉第 2 种导致 /me/access、/auth/refresh 401 → 跳转 /login。
-  // 故用 `**/api/**` 覆盖所有真实 API 请求。
+  // 所有真实 API 请求均为 /api/v1/...，统一由 **/api/** 拦截。
   await page.route('**/api/**', async (route: Route) => {
     const request = route.request()
     const url = request.url()
@@ -145,7 +139,7 @@ export async function setupMockApi(
     }
 
     // === Auth ===
-    // /me/access 和 /me（注意：apiClient.get('/me') → URL /api/me，不带 /auth 前缀）
+    // /v1/me/access 和 /v1/me
     if (url.includes('/me/access')) {
       return route.fulfill({ status: 200, json: FIXTURE_ACCESS_PROFILE })
     }
@@ -194,7 +188,7 @@ export async function setupMockApi(
     }
 
     // === Chart Snapshot（详情页主请求） ===
-    // 后端路径：/api/v1/instruments/{id}/chart-snapshot
+    // 后端路径：/v1/instruments/{id}/chart-snapshot
     if (url.includes('/chart-snapshot')) {
       const symbol = params.symbol || '000001'
       const timeframe = params.timeframe || '1d'
@@ -205,7 +199,7 @@ export async function setupMockApi(
     }
 
     // === First Pyramid（详情页四维状态面板） ===
-    // 后端路径：/api/v1/stocks/{symbol}/first-pyramid
+    // 后端路径：/v1/stocks/{symbol}/first-pyramid
     // 必须先于默认 200 空响应匹配，否则 FirstPyramidPanel 会因 dim.events undefined 抛错
     if (url.includes('/first-pyramid')) {
       const m = url.match(/\/stocks\/([^/?]+)\/first-pyramid/)

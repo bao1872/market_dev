@@ -38,7 +38,7 @@ from app.schemas.instrument import (
 )
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
-router = APIRouter(prefix="/instruments", tags=["instruments"])
+router = APIRouter(prefix="/v1/instruments", tags=["instruments"])
 
 
 @router.get("", response_model=InstrumentListResponse)

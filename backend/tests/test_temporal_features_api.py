@@ -77,7 +77,7 @@ async def test_get_temporal_features_returns_200(client: AsyncClient) -> None:
         return_value=mock_result,
     ):
         resp = await client.get(
-            "/api/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
+            "/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
         )
     assert resp.status_code == 200
     data = resp.json()
@@ -100,7 +100,7 @@ async def test_get_temporal_features_returns_200(client: AsyncClient) -> None:
 async def test_invalid_timeframe_returns_400(client: AsyncClient) -> None:
     """无效 primary_timeframe 返回 400。"""
     resp = await client.get(
-        "/api/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
+        "/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
         "?primary_timeframe=2h"
     )
     assert resp.status_code == 400
@@ -111,7 +111,7 @@ async def test_invalid_timeframe_returns_400(client: AsyncClient) -> None:
 async def test_invalid_adj_returns_400(client: AsyncClient) -> None:
     """无效 adj 返回 400。"""
     resp = await client.get(
-        "/api/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
+        "/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
         "?adj=hfq"
     )
     assert resp.status_code == 400
@@ -160,7 +160,7 @@ async def test_nonexistent_instrument_returns_200_degraded(
         return_value=mock_result,
     ):
         resp = await client.get(
-            "/api/v1/instruments/00000000-0000-0000-0000-000000000002/temporal-features"
+            "/v1/instruments/00000000-0000-0000-0000-000000000002/temporal-features"
         )
     assert resp.status_code == 200
     data = resp.json()
@@ -189,7 +189,7 @@ async def test_response_meta_structure(client: AsyncClient) -> None:
         return_value=mock_result,
     ):
         resp = await client.get(
-            "/api/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
+            "/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
         )
     meta = resp.json()["meta"]
     assert meta["as_of"] == "2026-07-05"
@@ -204,7 +204,7 @@ async def test_response_meta_structure(client: AsyncClient) -> None:
 async def test_invalid_as_of_returns_400(client: AsyncClient) -> None:
     """V1 只支持 as_of=latest，其他值返回 400。"""
     resp = await client.get(
-        "/api/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
+        "/v1/instruments/00000000-0000-0000-0000-000000000001/temporal-features"
         "?as_of=2025-01-01"
     )
     assert resp.status_code == 400
