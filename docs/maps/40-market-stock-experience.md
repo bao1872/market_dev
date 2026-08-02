@@ -1,9 +1,9 @@
 # 行情与个股体验 Map
 
-核验状态：候选代码已核验，真实浏览器 E2E 与最终 SHA CI 待验证
+核验状态：代码与 mock 数据浏览器 E2E 已通过同一 SHA CI；生产数据浏览器验收未执行
 最后核验日期：2026-08-01
 核验分支：`codex/panji-full-closure-20260801`
-核验提交：`a4221e0`、`a254412`
+核验提交：`a4221e0`、`a254412`；最终 CI 证据 `c6abcc1` / Run `30731828236`
 核验范围：API gateway、MCQ 详情同源、operator、自选、Review UI
 对应 PRD：`../prd/40-market-stock-experience.md`
 事实所有权：前端路由、页面、组件、筛选排序状态、详情来源列表和图层清单

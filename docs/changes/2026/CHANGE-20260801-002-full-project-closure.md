@@ -36,17 +36,20 @@ API gateway、CI 与治理文档。
 ## 验证证据
 
 - Review/行情/竞价目标 pure-unit 已通过；竞价目标集 295 项通过。
-- 前端合同 507 项通过；竞价合同 11 项通过；build 通过；lint 0 error（历史 warnings 保留）。
+- 前端合同 508 项通过；竞价合同 11 项通过；build 通过；lint 0 error（历史 warnings 保留）。
 - 本轮新增/修改竞价目标文件 Ruff 与 Mypy 通过；Alembic 单一 head 为 082。
-- PG Integration、Migration 往返、Architecture/Docs/Governance、完整 backend、E2E 与同一最终 SHA
-  CI 尚需远端确定结论，未标记 verified。
+- `c6abcc1` / CI Run `30731828236`：PG Integration、Migration 往返、Architecture、Docs、
+  Governance、Ruff/Mypy baseline、Frontend Contract/Build/Playwright E2E 与 CI Gate 全部通过。
+- Ruff/Mypy Full Repository Report 仍报告既有历史债务；二者为 `continue-on-error` 报告型 Job，
+  阻断门禁 baseline/new-files 均成功且未扩大基线。
 
 ## 生产与外部状态
 
 - 未部署生产、未启动本地 Worker、未连接本地/正式数据库、未执行 production withdrawal。
 - 当前只有 mootdx/pytdx 同一通达信供应链，竞价生产状态为
   `blocked_external_auction_truth_source`；不得以不同服务器伪装双源。
-- 只有 PG Integration、迁移与发布安全通过后，才可按任务书限定条件运行 withdrawal dry-run/apply。
+- 兼容代码与生产 migration 尚未部署，因此未运行生产 preflight 或 withdrawal dry-run/apply；
+  后续仍须按任务书限定日期、kind、scope、run_id 和唯一 pointer 条件执行。
 
 ## 回滚
 
@@ -63,6 +66,5 @@ API gateway、CI 与治理文档。
 
 ## 遗留问题
 
-- 同一最终 SHA 的完整 CI 与 PG Integration。
 - 真实第二独立竞价供应商及正式交易日 E2E。
-- 生产 withdrawal dry-run/apply、部署和 dev 快进均未执行。
+- 生产 withdrawal dry-run/apply、部署和 dev 快进均未执行；这是明确的生产变更边界，不以 CI 代替。

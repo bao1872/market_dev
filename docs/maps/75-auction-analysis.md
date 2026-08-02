@@ -1,6 +1,6 @@
 # 竞价分析 Map
 
-核验状态：候选代码已核验；PG Integration、同一最终 SHA CI 与生产双源待验证
+核验状态：代码、PG Integration 与同一 SHA CI 已验证；生产双源仍阻断
 最后更新：2026-08-01
 核验分支：`codex/panji-full-closure-20260801`
 对应 PRD：`../prd/75-auction-analysis.md`
@@ -21,7 +21,7 @@
 | §4 竞价分析定义 | 已实现 | `auction_scan_service.py` 12 类事件 + 8 种位置 + 5 级参与度 |
 | §5 约束 | 已实现 | 幂等、租约、fencing、生命周期 |
 | §6 真值合同 | 已实现，外部源阻断 | `auction_truth_service.py` |
-| §7 编排与发布 | 已实现，PG 待 CI | Migration 082 + `auction_publication_service.py` |
+| §7 编排与发布 | 已实现并通过 PG CI | Migration 082 + `auction_publication_service.py`；Run `30731828236` |
 
 ## 2. 数据模型（Migration 077、082）
 
@@ -177,8 +177,8 @@ Chip 软失败（[P0-2]）：
 | 项目 | 状态 | 事实 |
 |---|---|---|
 | 第二独立真值源 | `blocked_external` | 仓库仅有 mootdx/pytdx，均属通达信供应链 |
-| Migration 082 PG upgrade/downgrade/upgrade | 待 CI | 本地禁止 PostgreSQL；Alembic 单一 head 已核验 |
-| 全链 PG Integration | 待 CI | 测试已加入共识 capture 与 analysis publication 验证 |
+| Migration 082 PG upgrade/downgrade/upgrade | `verified` | `c6abcc1` / CI Run `30731828236` 临时 PostgreSQL 通过 |
+| 全链 PG Integration | `verified` | 同一 CI Run 完整 PostgreSQL Integration 通过 |
 | 正式交易日 E2E | 未执行 | 未部署、不运行本地 Worker、不写生产 |
 | 生产发布 | 未执行 | 本轮明确不部署生产 |
 

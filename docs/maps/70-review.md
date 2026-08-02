@@ -1,10 +1,10 @@
 # 复盘模块 Map
 
-核验状态：已实现 V1（review-1.0.0 canary 已发布）；review-1.1.0 P0 修复已落代码（main SHA 54fe3a2），待生产 SSH 可达后核验
-最后核验日期：2026-07-30
-核验分支：main
-核验提交：9aea736（review-1.0.0 完整实现 + canary 发布）→ 54fe3a2（review-1.1.0 P0 数据链修复）
-核验范围：基于真实代码、数据库、运行状态核验复盘模块实现状态；review-1.1.0 修复仅静态核验
+核验状态：080/081 候选实现已通过同一 SHA CI 与临时 PostgreSQL；生产部署/发布未执行
+最后核验日期：2026-08-01
+核验分支：`codex/panji-full-closure-20260801`
+核验提交：`c6abcc1`；CI Run `30731828236`
+核验范围：层级归因、P/Q/U/C/V、PIT bootstrap、发布门禁、withdrawal 安全与五阶段 UI
 对应 PRD：`../prd/70-review.md`（含 §23 P0 强化条款）
 事实所有权：复盘模块当前实现状态、已存在入口、数据/API 合同摘要
 
@@ -414,5 +414,6 @@ else:
 | 发布 | `review_publication_service.py` 校验 core/board pointer、scope 配置、coverage、run items、版本和 provisional/canary |
 | UI | 五阶段真实 API；无信号/无追踪/历史不足/字段缺失/API 错误分别展示；Evidence Drawer 可追溯 |
 
-算法版本已升级；旧 Review run 保持不可变。上述为候选代码与本地目标测试事实，Migration 080/081
-PG Integration 和完整 CI 必须在同一最终 SHA 上复验后才能升级为 `verified`。
+算法版本已升级；旧 Review run 保持不可变。Migration 080/081、Review PG Integration、完整后端
+PostgreSQL 测试与阻断 CI 已在 `c6abcc1` / Run `30731828236` 同一 SHA 验证通过。
+生产 migration、部署、正式发布与 withdrawal 仍未执行。
