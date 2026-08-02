@@ -369,3 +369,83 @@ step 8: 部署后验收（浏览器 / CI / Playwright 独立）
 - 文件：`scripts/ops/test-panji-test-deploy-contracts.sh`
 - 覆盖 4 个不变量（16 项断言，全 PASS）：资源门禁阈值、服务名真源（拒绝 `worker`/`worker-chips`）、镜像标签校验（禁止虚假完成）、健康端点路径（`/v1/health` `/v1/version` 合法，`/version` `/api/v1/health` `/health` 非法）
 - 运行：`bash scripts/ops/test-panji-test-deploy-contracts.sh`
+
+## 14. CI 三层结构与部署脚本重构（2026-08-02，CHANGE-20260802-002）
+
+> 核验状态：代码与本地/dry-run 验证已核验；Fast CI 的 exact-SHA 终态待推送后确认；
+> 本轮未执行生产部署，生产运行 SHA 与 alembic head 保持部署前状态。
+
+### 14.1 CI 三层工作流（代码已核验）
+
+单体 `ci.yml`（14 job 无条件全量）已拆为三层：
+
+| 层 | 文件 | 触发 | Job 数 | 阻断门禁 |
+|---|---|---|---|---|
+| Fast CI | `.github/workflows/ci.yml` | push dev / PR main | 12 | `CI Gate` |
+| Release Gate | `.github/workflows/release.yml` | `workflow_dispatch`（exact SHA） | 7 | `Release Gate` |
+| Nightly | `.github/workflows/nightly.yml` | 每日 03:00 Asia/Shanghai | 7 | `Nightly Summary` |
+
+**Fast CI job 构成**：
+- `changes`（纯 git diff，输出 `docs`/`backend`/`frontend`/`db`/`migration`/`deploy` 六标志）；
+- 始终运行：`architecture-rules`、`docs-consistency`、`test-allowlist`、`governance-rules`；
+- 条件运行：`ruff-new-files`/`mypy-new-files`/`backend-unit-tests`（backend）、
+  `postgres-integration-tests`（db）、`migration-verify`（migration）、`frontend-checks`（frontend）；
+- `ci-gate`：按 `changes` 输出逐项判定。
+
+**CI Gate 判定语义**（`ci.yml` 第 390-501 行）：
+- 范围内 job 非 success → 失败；
+- 范围外 job 为 `failure`/`cancelled` → 失败（`if` 条件与 `changes` 输出不一致，属配置错误）；
+- 范围外 job 为 `skipped` → 通过。
+
+**Release Gate job 构成**：`verify-sha`（断言 SHA ∈ origin/dev）→
+`postgres-integration`（`-m "postgres and not external_data"`，断言 skipped=0）、
+`playwright-e2e`（关键场景）、`migration-full`（单 head + base↔head 完整循环）→
+`build-images`（`docker compose build`，与 `docker-compose.prod.yml` 同源）→
+`deploy-drill`（compose config + 脚本语法 + grep 断言无变更推断逻辑）→ `release-gate`。
+
+**Nightly job 构成**：`full-pytest`（`-m "not external_data"`）、
+`external-data-tests`（独立分组，`continue-on-error`，单独报告）、
+`migration-full-cycle`、`full-lint-report`（观测项）、`frontend-full`、
+`playwright-e2e`（全量）、`nightly-summary`。
+
+### 14.2 部署脚本结构（代码 + dry-run 已核验）
+
+| 文件 | 角色 | 规模 |
+|---|---|---|
+| `scripts/ops/panji-test-deploy` | 本地入口：preflight + SHA 祖先校验 + 传输 + 终校验 | 156 行（原 517 行） |
+| `scripts/ops/panji-deploy-remote.sh` | 远端执行体：受版本控制的真实脚本，12 阶段 | 17872 字节 |
+
+远端脚本 12 阶段：0 `flock` 锁 → 1 资源门禁 → 2 校验 SHA → 3 checkout →
+4 `market.env` 原子更新 → 5 获取镜像 → 6 migration → 7 重建全部无状态服务 →
+8 逐服务镜像 SHA 校验 → 9 健康检查 → 10 manifest+state → 11 受控清理。
+
+关键不变量：
+- 旧 heredoc（约 389 行经 `bash -s` stdin 执行）**已完全删除**；
+- 按变更文件推断部署范围的逻辑**已完全移除**，由 `deploy-drill` grep 断言防回潮；
+- `STATEFUL_SERVICES="postgres redis"` 明确排除，不参与重建；
+- 服务器构建仅在显式 `--allow-local-build` 时允许（Registry 凭据未通的过渡开关）；
+- migration 命令带 `</dev/null`，防止 stdin 吞噬后续脚本内容。
+
+dry-run 实测（真实服务器）：12 阶段全部执行，发现 15 个服务，
+13 个无状态服务纳入重建计划，`postgres`/`redis` 正确排除。
+
+### 14.3 测试分类（已核验）
+
+`backend/tests/conftest.py` 的 `pytest_collection_modifyitems` 统一判定并输出
+`[test-classification]` 摘要行。2026-08-02 实测基线：
+
+```
+postgres=1178  pure_unit=2496  external_data=6  total=3674
+漏标嫌疑=0
+```
+
+- `postgres`：由 fixture 闭包（`_DB_FIXTURE_NAMES`）+ 源码文本（`_DB_SOURCE_MARKERS`，过渡机制）+ 显式 marker 三路判定；
+- `external_data`：**仅**显式标注，不做自动推断。当前 6 条集中在 `tests/test_calendar_v9_regression.py`（mootdx 依赖）；
+- 漏标检查 `_DB_SUSPECT_PATTERN`：只报告不自动补 marker。
+
+### 14.4 已知阻塞
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| GHCR 推送 | `blocked_registry_auth` | 服务器无 ghcr 登录态、本机 `gh` 未认证、`docker pull` 返回 401；Release Gate 完整构建并产出 manifest（`pushed=false`、`digest` 空），未伪造 digest / 未用 image tar 旁路 / 未回退服务器构建 |
+| 生产部署 | 未执行 | 本轮为基础设施收口，Registry 未接通，不执行生产部署；生产运行 SHA 保持 `73a46ae`、alembic head 保持 082 |

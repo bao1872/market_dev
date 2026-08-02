@@ -4,6 +4,91 @@
 
 > 当前状态：部署代码已准备（`scripts/deploy/panji-deploy.sh`、`.github/workflows/deploy-production.yml`），但 GitHub Secrets 和服务器侧入口尚未启用。启用前必须完成本清单并经过 dry-run 验证。
 
+> **本文档描述的是 `main` 分支自动部署链路（未启用）。**
+> 当前实际使用的是第 0 节的 dev SHA 手动部署路径（`scripts/ops/panji-test-deploy`），
+> 两者是不同机制，不要混用。
+
+## 0. dev SHA 手动部署（当前实际使用路径）
+
+> 来源：CHANGE-20260802-002。这是当前唯一在用的正式部署入口。
+
+### 0.1 前置条件
+
+1. 目标 SHA 已 push 到 `origin/dev`（脚本会校验其为 `origin/dev` 祖先，否则拒绝）；
+2. 该 SHA 的 `CI Gate = success`（见 `rules/40` TQ-82）；
+3. 确认当前无活跃盘后任务，避免部署中断正在运行的正式任务。
+
+### 0.2 执行
+
+```bash
+# 1) 先 dry-run，检查计划（不改任何状态）
+scripts/ops/panji-test-deploy <FULL_SHA> --dry-run
+
+# 2) 核对 dry-run 输出：目标 SHA、待重建服务清单、
+#    postgres/redis 已排除、migration 计划、资源门禁结果
+
+# 3) 正式部署
+scripts/ops/panji-test-deploy <FULL_SHA>
+```
+
+脚本会自动执行 `scripts/ops/panji-prod-preflight`。
+如需跳过（连续部署场景）设 `PANJI_TEST_SKIP_PREFLIGHT=1`，但常规部署**不应**跳过。
+
+### 0.3 执行结构
+
+本地入口 `scripts/ops/panji-test-deploy` 只做四件事：
+preflight → SHA 祖先校验 → 把 `scripts/ops/panji-deploy-remote.sh` 传到远端并执行
+→ 经公网 `/api/v1/version` 终校验。
+
+真正的部署逻辑在受版本控制的 `scripts/ops/panji-deploy-remote.sh` 中，共 12 个阶段：
+
+| 阶段 | 内容 | 失败影响 |
+|---|---|---|
+| 0 | `flock` 部署互斥锁 | 已有部署在跑，直接退出 |
+| 1 | 资源门禁（磁盘/内存） | 拒绝部署，**不改任何状态** |
+| 2 | 校验目标 SHA | 拒绝部署 |
+| 3 | git checkout | 拒绝部署 |
+| 4 | `market.env` 原子更新 GIT_SHA | 拒绝部署 |
+| 5 | 获取镜像（pull 或 `--allow-local-build`） | 拒绝部署 |
+| 6 | Alembic migration | 中止，需人工判断是否回滚 |
+| 7 | 重建**全部**无状态服务 | 中止 |
+| 8 | 逐服务校验镜像 SHA | 中止（防"容器仍旧 SHA 却报成功"） |
+| 9 | 健康检查 | 中止 |
+| 10 | 写 manifest + state | 记录 |
+| 11 | 受控清理 | 记录 |
+
+`postgres` / `redis` 为有状态服务，**不参与重建**。
+
+### 0.4 失败排查
+
+远端脚本配有 `ERR` trap，失败时输出四项：**阶段名、行号、失败命令、退出码**。
+直接按这四项定位，不需要猜测。
+
+本地入口在传输前会执行 `bash -n` 语法预检，语法错误在部署开始前就会暴露。
+
+### 0.5 部署成功判定
+
+必须**同时**满足以下五项，`/health=200` 不能单独判成功：
+
+1. 远端 repo HEAD = 目标 SHA；
+2. 各服务镜像 tag = 目标 SHA（阶段 8 逐服务校验）；
+3. 容器 env `GIT_SHA` = 目标 SHA；
+4. `/api/v1/version` 的 `runtime_git_sha` 与 `image_git_sha` = 目标 SHA；
+5. 健康检查全部通过。
+
+任一不符即判部署失败，回滚至上一已知良好 SHA，
+**不得**通过"重启容器"或"重新部署"掩盖不一致。
+
+### 0.6 当前过渡状态
+
+Registry（GHCR）凭据尚未配置，实测 `docker pull ghcr.io/...` 返回 401。
+因此部署侧默认带 `PANJI_ALLOW_LOCAL_BUILD=1`，允许服务器构建缺失镜像。
+
+凭据打通后应：
+1. Release Gate 的 `push_images` 默认改为 `true`；
+2. 移除 `panji-test-deploy` 中的 `PANJI_ALLOW_LOCAL_BUILD` 过渡开关；
+3. 设置 `PANJI_REGISTRY_PREFIX`，改为纯 pull-only 部署。
+
 ## 1. 设计约束
 
 - 只部署 `main` 分支上的 commit，且必须属于 `origin/main`；

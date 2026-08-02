@@ -241,6 +241,44 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 四项任一不匹配即视为部署失败，必须回滚至上一已知良好 SHA，不得通过"重启容器"或"重新部署"掩盖不一致。
 - Live Mount 部署同样适用：`RUNTIME_SHA` 文件必须原子替换（temp file + `mv`），禁止 `sed -i`。
 
+## 部署脚本结构与执行纪律（2026-08-02 收口，CHANGE-20260802-002 配套）
+
+> 来源：2026-08-02 部署事故——旧实现整段 §8（`up -d`）静默未执行，
+> 镜像已构建但容器仍跑旧 SHA，`/health=200` 且无任何告警。
+> 状态：生效（2026-08-02）
+
+### DS-90 远程部署逻辑必须是受版本控制的真实脚本
+
+- 远程部署逻辑必须存放为仓库中的真实文件（`scripts/ops/panji-deploy-remote.sh`），**禁止**写在本地脚本的 heredoc 里再经 `bash -s` 从 stdin 执行。
+  - 理由：heredoc 无法本地 `bash -n` / shellcheck 静态检查；执行失败时无法定位行号；未加引号的 heredoc 还会在本地被提前变量展开，产生与预期不符的远端脚本。
+- 本地入口（`scripts/ops/panji-test-deploy`）在传输前必须执行 `bash -n` 语法预检，把远端运行期错误提前到部署之前。
+- 远程脚本必须设置 `ERR` trap，失败时输出**阶段名、行号、失败命令、退出码**四项。
+- **禁止** `scp` 单个业务文件、`docker cp`、容器内改码、`/tmp` 临时脚本改生产等任何绕过正式部署入口的做法（与本文件"禁止 docker cp 和未审计 stdin 脚本"叠加生效）。
+
+### DS-91 禁止按变更文件推断部署范围
+
+- **禁止**在部署脚本中依据 `git diff` 结果决定重启哪些服务（如 `RESTART_BACKEND` / `RESTART_FRONTEND` / `BUILD_IMAGES` 之类的标志位）。
+  - 理由：推断错误时部分服务会静默停留在旧 SHA 且不告警——这正是 2026-08-02 事故的直接成因。
+- 每次部署必须**一次性重建全部无状态服务**，不做任何范围裁剪。
+- **有状态服务（`postgres` / `redis`）必须明确排除**，不参与重建，避免触碰持久化数据。
+- 重建后必须**逐服务**校验其镜像 SHA 等于目标 SHA，任一不符即判部署失败。
+- Release Gate 的 `deploy-drill` job 通过 grep 断言部署脚本中不存在上述推断逻辑，防止回潮。
+
+### DS-92 镜像来源：Registry 优先，服务器构建为显式过渡开关
+
+- 正式路径：镜像由 Release Gate 在 CI 中构建为不可变镜像并推送 Registry，服务器**只 pull 不 build**。
+- 服务器本地构建仅在显式传入 `--allow-local-build` 时允许，且必须在部署日志中打印告警。这是 Registry 凭据打通前的**过渡开关**，凭据就绪后应移除。
+- 构建参数必须与 `docker-compose.prod.yml` 同源（用 `docker compose build` 而非手写 `docker build`）。
+  - 理由：前端镜像需要 `VITE_GIT_SHA` / `VITE_BUILD_TIME` 构建参数，手写 `docker build` 极易漏传，漏传会导致页面显示错误版本号；两套构建定义也必然随时间漂移。
+- 盘迹共 **3 个业务镜像**：`backend` / `frontend` / `capture`。全部 `worker-*` 服务复用 `backend` 镜像，不单独构建。
+- Registry 凭据不可用时，Release Gate 允许完成到"构建 + 本地 manifest 校验"，并把推送步骤显式标记为 **`blocked_registry_auth`**。此时**禁止**：伪造 digest、改用 image tar 旁路、回退为服务器构建来"绕过"阻塞。
+
+### DS-93 部署互斥与资源门禁
+
+- 远程部署脚本必须用 `flock`（`/var/lock/panji-test-deploy.lock`）保证同一时刻只有一次部署在执行。
+- 资源门禁（磁盘/内存阈值）必须在**改动任何状态之前**校验（见本文件"服务器资源预算门禁"）。
+- 涉及 stdin 的远端命令必须重定向 `</dev/null`，防止后续脚本内容被子进程吞掉。
+
 ## 分层发布与增量检查点纪律
 
 > 来源：CHANGE-20260729-006

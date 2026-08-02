@@ -47,6 +47,7 @@
 | CHANGE-20260801-001 | 2026-08-01 | 盘后 Review 闭环 + 时间线修复 + 详情同源/DSA 旧列下线 + 冷启动展示 + 测试环境部署 SSOT | behavior+architecture+runtime | 盘后/Review/行情个股/竞价/部署 | 已完成（部署 ff89fea，验收非 CLOSURE_PASSED，新问题由后续收口承载） | AC/ MX-60~63 / Review 冷启动 / AU / 部署 SSOT | `maps/30-after-close.md`、`maps/40-market-stock-experience.md`、`maps/70-review.md`、`maps/75-auction-analysis.md`、`maps/80-system-runtime.md` |
 | CHANGE-20260801-002 | 2026-08-01 | 全项目问题收口候选版本 | behavior+contract+architecture+data+ci | Review/第一金字塔/板块/行情体验/竞价/治理 | 候选代码完成；最终 SHA CI/PG 待验证；竞价外部双源阻断；生产零写入 | 收口总任务书 | `2026/CHANGE-20260801-002-full-project-closure.md` |
 | CHANGE-20260802-001 | 2026-08-02 | dev-only 分支治理 + 区间筛选双输入 + Review bootstrap 正式入口 + 品牌文字/部署脚本/bootstrap 内存/资源门禁修复 | governance+behavior+architecture+contract+ops | 分支模型/行情筛选/Review 回填/盘后 Worker/部署运维 | 进行中（代码+本地纯单元测试+部署脚本契约测试通过：后端 55、前端 526、治理门禁 PASS；exact-SHA CI 绿 Run 30736134575 @ 29a5b7d；4 项新增修复已实现未部署、生产零写入） | RV-24.4/RV-25-03/SR-09/SR-10/MX 区间筛选/部署 SSOT | `maps/70-review.md` §23/§23.5、`maps/80-system-runtime.md` §13.5、`runbooks/review-restore-and-publish.md` §2/§6、`rules/80-deployment-data-safety.md` |
+| CHANGE-20260802-002 | 2026-08-02 | CI 三层重构（Fast CI / Release Gate / Nightly）+ 部署脚本结构重构 + 测试分类收口 | architecture+ci+ops | CI 工作流/部署脚本/测试分类（业务代码零改动） | 代码完成；Fast CI 待 exact-SHA 验证；Registry 推送 `blocked_registry_auth`；本轮未执行生产部署 | TQ-90~TQ-93 / DS-90~DS-93 | `rules/40-testing-quality.md`、`rules/80-deployment-data-safety.md`、`maps/80-system-runtime.md` §14、`runbooks/production-deployment.md` |
 
 ## 3. 状态说明
 

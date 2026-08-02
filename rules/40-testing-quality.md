@@ -185,3 +185,54 @@ CI 工作流中 `POSTGRES_DB: bz_stock_test` 仅作为容器内临时数据库�
 - 新增测试优先写成纯单元测试（不连接数据库）。
 - 必须连接数据库的集成测试，必须使用 `db_session` fixture，并在 CI 临时库运行。
 - 不得在本地 Mac 创建持久测试库以运行集成测试。
+
+## 2026-08-02 收口：CI 三层结构与测试分类（CHANGE-20260802-002 配套）
+
+### TQ-90 CI 三层结构
+
+单体 CI（14 个 job 无条件全量运行）已拆为三层，各层职责不得混淆：
+
+| 层 | 工作流 | 触发 | 职责 | 阻断门禁 |
+|---|---|---|---|---|
+| Fast CI | `.github/workflows/ci.yml` | push dev / PR main | 按变更范围裁剪的快速反馈 | `CI Gate` |
+| Release Gate | `.github/workflows/release.yml` | 手动指定 exact SHA | 全量测试 + 构建不可变镜像 + 生成 manifest | `Release Gate` |
+| Nightly | `.github/workflows/nightly.yml` | 每日 03:00 | 全量回归兜底 | `Nightly Summary` |
+
+- Fast CI 的裁剪只允许依据 `changes` job 的 git diff 输出，**不得**依据人工判断或 IDE 推测跳过任何 job。
+- 被 `changes` 判定为范围内的 job 若 skipped，`CI Gate` 必须失败；被判定为范围外的 job 若实际运行且失败，同样必须失败（说明 `if` 条件与 `changes` 输出不一致，属 CI 配置错误）。
+- Fast CI 的裁剪是速度优化，不是覆盖率削减；被裁剪掉的部分由 Nightly 每日兜底执行。
+- `CI Gate = success` 仍是部署前置条件（见 TQ-82），三层拆分不放宽该要求。
+
+### TQ-91 测试分类 marker
+
+后端测试按执行环境依赖分为三类，由 `backend/tests/conftest.py` 的 `pytest_collection_modifyitems` 统一判定并在每次收集时输出 `[test-classification]` 摘要行：
+
+| 类别 | marker | 含义 | 运行位置 |
+|---|---|---|---|
+| PG 集成 | `postgres` | 需要真实 PostgreSQL（锁、事务、JSONB、唯一约束等） | CI 临时容器（Fast CI 的 `db_changed` 分支 / Release / Nightly） |
+| 外部数据 | `external_data` | 依赖 mootdx / pytdx / 交易所网络接口 | 仅 Nightly 独立分组 |
+| 纯单元 | 无 | 不连库、不联网 | 所有层 + 本地 `PURE_UNIT_TEST=1` |
+
+约束：
+
+- **三类计数必须可对账**：`postgres + 纯单元 = 总数`，`external_data` 与前两类正交。任何一次收集的摘要行都应能与本文件记录的基线核对，出现漂移必须查明原因。
+- `external_data` 失败**不阻断** Fast CI 与 Release Gate——这类失败通常源于外部服务不可达或数据延迟，而非本仓库代码回归。但 Nightly 必须单独报告其结果；连续多日失败需人工核查数据源可用性，不得长期无人过问。
+- 禁止把 `external_data` 当作"测试跑不过就贴上去"的免死金牌。仅当失败原因确实是外部依赖时才可标注；断言逻辑本身有缺陷的测试必须修复，不得改标 marker 掩盖。
+
+### TQ-92 新增测试必须显式标注 marker
+
+- 新增测试若需要真实数据库，**必须**由作者显式写 `@pytest.mark.postgres`；若依赖外部数据源，**必须**显式写 `@pytest.mark.external_data`。
+- `conftest.py` 中基于 fixture 闭包与源码文本的自动判定是**过渡机制**，只为存量测试做一次性归类，**不是长期唯一分类来源**。其固有缺陷：文本匹配无法理解语义（误判），新的连库方式不在列表中会静默漏判。
+- 配套的漏标检查（`_DB_SUSPECT_PATTERN`）在收集期报告"源码含连库调用但未被判定为 postgres"的嫌疑用例。该检查**只报告、不自动补 marker**——自动补标会掩盖分类规则的盲区，而暴露盲区正是它的目的。出现嫌疑项必须人工确认并补显式 marker。
+- 存量归类稳定后应逐步移除源码文本扫描，改为纯显式 marker。
+
+### TQ-93 分类基线
+
+2026-08-02 实测基线（`PURE_UNIT_TEST=1 pytest --collect-only`）：
+
+```
+postgres=1178  pure_unit=2496  external_data=6  total=3674
+漏标嫌疑=0
+```
+
+修改测试分类规则后必须重新对账；总数或分类数出现非预期变化，须在 CHANGE 中解释原因，不得默默接受。
