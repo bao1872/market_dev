@@ -12,8 +12,11 @@ Review algorithm but never publish a Review pointer.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import uuid
+from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -37,6 +40,7 @@ from app.models.market_review import (
 )
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services.board_membership_service import list_universe_definitions_at
+from app.services.calendar_service import get_most_recent_trading_day_async
 from app.services.review_metric_observation_service import persist_metric_observations
 from app.services.review_scope_service import (
     ScopeDefinition,
@@ -54,6 +58,106 @@ BOOTSTRAP_FILTER_VERSION = "bootstrap"
 # 默认回填天数（PRD §0：默认 120 日，最低 60 日）
 DEFAULT_BOOTSTRAP_DAYS = 120
 MIN_BOOTSTRAP_DAYS = 60
+
+# scope 执行结果四类计数：成功 / 跳过 / 不可用 / 失败
+SCOPE_COUNT_KEYS = ("succeeded", "skipped", "unavailable", "failed")
+
+# scope status → 四类计数归类
+_SCOPE_STATUS_BUCKET = {
+    "completed": "succeeded",
+    "insufficient_history": "succeeded",
+    "skipped": "skipped",
+    "bootstrap_unavailable": "unavailable",
+    "failed": "failed",
+}
+
+
+def compute_input_hash(
+    *,
+    end_date: date,
+    days_back: int,
+    algorithm_version: str,
+) -> str:
+    """计算 bootstrap 输入指纹，用于审计与重复执行识别。
+
+    仅包含决定计算范围的输入（不含 operator/reason 等审计元数据），
+    使同一输入范围的多次执行拥有相同 input_hash。
+    """
+    payload = json.dumps(
+        {
+            "end_date": end_date.isoformat(),
+            "days_back": days_back,
+            "algorithm_version": algorithm_version,
+            "filter_version": BOOTSTRAP_FILTER_VERSION,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _bucket_scope_status(status: str | None) -> str:
+    """把 scope status 归类到四类计数之一；未知状态计为 failed。"""
+    if not status:
+        return "failed"
+    return _SCOPE_STATUS_BUCKET.get(status, "failed")
+
+
+def aggregate_scope_counts(results: list[dict[str, Any]]) -> dict[str, int]:
+    """按 scope 聚合 succeeded / skipped / unavailable / failed 四类计数。
+
+    统计粒度是 (trade_date, scope_type, scope_key) 逐条 scope 结果，
+    而不是日期数，便于判断"哪些 scope 没算出来"。
+    """
+    counter: Counter[str] = Counter()
+    for day in results:
+        day_status = day.get("status")
+        for scope in day.get("scopes") or []:
+            # 整日不可用时，该日全部 scope 归为 unavailable
+            if day_status == "bootstrap_unavailable":
+                counter["unavailable"] += 1
+                continue
+            counter[_bucket_scope_status(scope.get("status"))] += 1
+    return {key: counter.get(key, 0) for key in SCOPE_COUNT_KEYS}
+
+
+def collect_reason_codes(results: list[dict[str, Any]]) -> dict[str, int]:
+    """汇总不可用/失败原因码，便于快速定位阻塞点。"""
+    counter: Counter[str] = Counter()
+    for day in results:
+        if day.get("status") == "bootstrap_unavailable" and day.get("reason"):
+            counter[str(day["reason"])] += 1
+        for scope in day.get("scopes") or []:
+            reason = scope.get("reason")
+            if reason:
+                counter[str(reason)] += 1
+    return dict(counter)
+
+
+async def resolve_bootstrap_end_date(
+    session: AsyncSession,
+    *,
+    end_date: date | None = None,
+) -> date:
+    """解析 bootstrap 截止日期。
+
+    end_date 为空时解析为**最近一个完整 A 股交易日**（trading_calendar 表），
+    不得直接使用自然日 today —— 周末或节假日直接用 today 会让回填窗口
+    错位并把非交易日计入 days_back。
+
+    trading_calendar 无记录时降级为传入参考日，并记录 warning。
+    """
+    if end_date is not None:
+        return end_date
+    today = date.today()
+    resolved = await get_most_recent_trading_day_async(session, today)
+    if resolved is None:
+        logger.warning(
+            "[Bootstrap] trading_calendar 无可用交易日记录，降级使用自然日 %s",
+            today.isoformat(),
+        )
+        return today
+    return resolved
 
 
 # =============================================================================
@@ -114,6 +218,7 @@ async def bootstrap_single_date(
     source_core_run_id: uuid.UUID | None,
     source_board_run_id: uuid.UUID | None = None,
     dry_run: bool = True,
+    audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bootstrap every PIT scope family for one historical date.
 
@@ -122,7 +227,8 @@ async def bootstrap_single_date(
         trade_date: 历史交易日
         source_core_run_id: 可审计 stock_core source identity；apply 时必需
         source_board_run_id: 可审计 board source identity；apply 时必需
-        dry_run: 只计算不写入
+        dry_run: 只计算不写入（严格零业务写入）
+        audit: {"operator","reason","input_hash"}；仅 apply 时持久化到 run metadata
 
     Returns:
         {"trade_date": ..., "run_id": ..., "metrics": {...}, "written": bool}
@@ -207,6 +313,7 @@ async def bootstrap_single_date(
         succeeded_scope_count=len(computed),
         failed_scope_count=len(scopes) - len(computed),
         scope_results=scope_results,
+        audit=audit,
     )
     for scope, flat_list, eligible_count, ready_count, coverage, status, payloads in computed:
         await _upsert_bootstrap_scope_snapshot(
@@ -247,26 +354,35 @@ async def bootstrap_history(
     end_date: date | None = None,
     days_back: int = DEFAULT_BOOTSTRAP_DAYS,
     dry_run: bool = True,
+    algorithm_version: str | None = None,
+    operator: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """批量执行 canonical PIT history bootstrap。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
-        end_date: 截止日期（None=今天）
+        end_date: 截止日期（None=最近一个完整 A 股交易日，非自然日 today）
         days_back: 回溯天数（默认 120，最低 60）
-        dry_run: 只计算不写入
+        dry_run: 只计算不写入（严格零业务写入）
+        algorithm_version: 显式算法版本（None=当前 REVIEW_ALGORITHM_VERSION）
+        operator: 执行人标识（审计用；仅 apply 时持久化）
+        reason: 执行原因（审计用；仅 apply 时持久化）
 
     Returns:
         {
-            "end_date": ...,
-            "days_back": ...,
-            "dry_run": bool,
-            "eligible_dates": int,
-            "processed": int,
-            "skipped": int,
-            "written": int,
+            "end_date", "days_back", "dry_run", "algorithm_version",
+            "eligible_dates", "processed", "skipped", "written",
+            "scope_counts": {"succeeded","skipped","unavailable","failed"},
+            "reason_codes": {...},
+            "input_hash": str,
+            "operator", "reason",
             "results": [...],
         }
+
+    Note:
+        dry_run=True 时不创建 run、不写 metadata_json、不写 observations、
+        不切 pointer；operator/reason/input_hash 只出现在返回值与日志中。
     """
     if days_back < MIN_BOOTSTRAP_DAYS:
         logger.warning(
@@ -274,22 +390,57 @@ async def bootstrap_history(
             days_back, MIN_BOOTSTRAP_DAYS,
         )
 
+    resolved_algorithm_version = algorithm_version or BOOTSTRAP_ALGORITHM_VERSION
+    if resolved_algorithm_version != BOOTSTRAP_ALGORITHM_VERSION:
+        raise ValueError(
+            f"algorithm_version 不匹配当前 Review 算法版本: "
+            f"传入 {resolved_algorithm_version}，当前 {BOOTSTRAP_ALGORITHM_VERSION}",
+        )
+
+    # end_date 为空时必须解析为最近完整交易日，不得直接用自然日 today
+    resolved_end_date = await resolve_bootstrap_end_date(session, end_date=end_date)
+    input_hash = compute_input_hash(
+        end_date=resolved_end_date,
+        days_back=days_back,
+        algorithm_version=resolved_algorithm_version,
+    )
+    audit = {
+        "operator": operator,
+        "reason": reason,
+        "input_hash": input_hash,
+    }
+
+    logger.info(
+        "[Bootstrap] 开始: end_date=%s days_back=%d dry_run=%s "
+        "algorithm_version=%s operator=%s input_hash=%s",
+        resolved_end_date.isoformat(), days_back, dry_run,
+        resolved_algorithm_version, operator, input_hash,
+    )
+
     # 1. 列出可 bootstrap 的日期
     eligible = await list_bootstrap_eligible_dates(
-        session, end_date=end_date, days_back=days_back,
+        session, end_date=resolved_end_date, days_back=days_back,
     )
 
     if not eligible:
+        logger.warning(
+            "[Bootstrap] 无 canonical FP history: end_date=%s days_back=%d",
+            resolved_end_date.isoformat(), days_back,
+        )
         return {
-            "end_date": (end_date or date.today()).isoformat(),
+            "end_date": resolved_end_date.isoformat(),
             "days_back": days_back,
             "dry_run": dry_run,
+            "algorithm_version": resolved_algorithm_version,
             "eligible_dates": 0,
             "processed": 0,
             "skipped": 0,
             "written": 0,
+            "scope_counts": dict.fromkeys(SCOPE_COUNT_KEYS, 0),
+            "reason_codes": {},
             "results": [],
             "status": "no_canonical_fp_history",
+            **audit,
         }
 
     # 2. 逐日执行 bootstrap
@@ -308,6 +459,7 @@ async def bootstrap_history(
             source_core_run_id=core_run_id,
             source_board_run_id=board_run_id,
             dry_run=dry_run,
+            audit=None if dry_run else audit,
         )
         results.append(result)
         processed += 1
@@ -316,16 +468,27 @@ async def bootstrap_history(
         elif result.get("status") == "skipped":
             skipped += 1
 
+    scope_counts = aggregate_scope_counts(results)
+    reason_codes = collect_reason_codes(results)
+    logger.info(
+        "[Bootstrap] 完成: dry_run=%s eligible=%d processed=%d written=%d scope_counts=%s",
+        dry_run, len(eligible), processed, written, scope_counts,
+    )
+
     return {
-        "end_date": (end_date or date.today()).isoformat(),
+        "end_date": resolved_end_date.isoformat(),
         "days_back": days_back,
         "dry_run": dry_run,
+        "algorithm_version": resolved_algorithm_version,
         "eligible_dates": len(eligible),
         "processed": processed,
         "skipped": skipped,
         "written": written,
+        "scope_counts": scope_counts,
+        "reason_codes": reason_codes,
         "results": results,
         "status": "ok" if dry_run or written > 0 else "no_writes",
+        **audit,
     }
 
 
@@ -429,6 +592,7 @@ async def _upsert_bootstrap_run(
     succeeded_scope_count: int,
     failed_scope_count: int,
     scope_results: list[dict[str, Any]],
+    audit: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     """创建或复用 bootstrap run（幂等）。
 
@@ -439,12 +603,21 @@ async def _upsert_bootstrap_run(
     - status = partial（仅提供历史 observation，不创建正式 publication）
     """
     now = datetime.now(UTC)
-    meta = {
+    meta: dict[str, Any] = {
         "bootstrap": True,
         "bootstrap_created_at": now.isoformat(),
         "bootstrap_algorithm_version": BOOTSTRAP_ALGORITHM_VERSION,
         "bootstrap_scope_results": scope_results,
+        "bootstrap_scope_counts": aggregate_scope_counts(
+            [{"status": "completed", "scopes": scope_results}],
+        ),
     }
+    # 审计字段只在 apply 路径写入（dry-run 不会走到这里）
+    if audit:
+        meta["bootstrap_operator"] = audit.get("operator")
+        meta["bootstrap_reason"] = audit.get("reason")
+        meta["bootstrap_input_hash"] = audit.get("input_hash")
+        meta["bootstrap_executed_at"] = now.isoformat()
 
     values = {
         "trade_date": trade_date,

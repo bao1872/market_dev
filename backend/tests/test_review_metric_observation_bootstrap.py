@@ -197,3 +197,128 @@ async def test_bootstrap_dry_run_is_strictly_read_only(
     assert result["written"] is False
     write_run.assert_not_awaited()
     write_observation.assert_not_awaited()
+
+
+# =============================================================================
+# 历史序列兼容性契约
+#
+# 兼容性判定维度 = scope identity (scope_type + scope_key)
+#                + compatible taxonomy
+#                + algorithm_version
+#                + metric definition version
+#
+# membership_version **随每条观测存储，但不参与历史序列过滤**：
+# 成分股的正常增减是常态，若按 membership_version 过滤，任何一次调仓
+# 都会让 60 日历史被截断并重新冷启动。以下测试固化该契约，防止后续
+# 有人"顺手"把 membership_version 加进 where 条件。
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_history_query_does_not_filter_by_membership_version() -> None:
+    """历史序列查询不得按 membership_version 过滤（否则调仓即冷启动）。"""
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_ScalarResult([]))
+
+    await load_metric_history(
+        session,
+        scope_type="industry_l1",
+        scope_key="board-1",
+        trade_date=date(2026, 7, 31),
+        algorithm_version="review-2.0.0",
+        baseline_window=120,
+    )
+
+    sql = str(
+        session.execute.call_args.args[0].compile(compile_kwargs={"literal_binds": True}),
+    )
+    # 只看过滤条件：membership_version 出现在 SELECT 投影列中是正常的
+    # （随观测存储、可追溯当日成员），关键是它不得进入 WHERE。
+    where_clause = sql.split("WHERE", 1)[1]
+    assert "membership_version" not in where_clause, (
+        "历史序列不得按 membership_version 过滤："
+        "成员正常变化不应导致 60 日历史重新冷启动"
+    )
+    # 兼容性维度必须仍然生效
+    assert "scope_type = 'industry_l1'" in where_clause
+    assert "scope_key = 'board-1'" in where_clause
+    assert "algorithm_version = 'review-2.0.0'" in where_clause
+
+
+@pytest.mark.asyncio
+async def test_history_sequence_spans_multiple_membership_versions() -> None:
+    """同一 scope 跨多个 membership_version 的历史必须连续可比。"""
+    observations = [
+        SimpleNamespace(
+            trade_date=date(2026, 7, 30), metric_code="P",
+            component_name="_metric_value", raw_value=Decimal("70"),
+            membership_version="pit-v3",
+        ),
+        SimpleNamespace(
+            trade_date=date(2026, 7, 29), metric_code="P",
+            component_name="_metric_value", raw_value=Decimal("65"),
+            membership_version="pit-v2",
+        ),
+        SimpleNamespace(
+            trade_date=date(2026, 7, 28), metric_code="P",
+            component_name="_metric_value", raw_value=Decimal("60"),
+            membership_version="pit-v1",
+        ),
+    ]
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_ScalarResult(observations))
+
+    history, previous, _ = await load_metric_history(
+        session,
+        scope_type="industry_l1",
+        scope_key="board-1",
+        trade_date=date(2026, 7, 31),
+        algorithm_version="review-2.0.0",
+        baseline_window=120,
+    )
+
+    assert history is not None
+    # 三个不同 membership_version 的观测全部保留，历史序列不被截断
+    assert history["P"]["_metric_value"] == [60.0, 65.0, 70.0]
+    assert previous == {"P": 70.0}
+
+
+@pytest.mark.asyncio
+async def test_observation_persist_stores_membership_version() -> None:
+    """membership_version 必须随观测写入（可追溯当日成员），只是不参与过滤。"""
+    session = AsyncMock()
+    session.execute = AsyncMock()
+    session.flush = AsyncMock()
+
+    await persist_metric_observations(
+        session,
+        review_run_id=uuid.uuid4(),
+        trade_date=date(2026, 7, 31),
+        scope_type="industry_l1",
+        scope_key="board-1",
+        membership_version="pit-v7",
+        algorithm_version="review-2.0.0",
+        flat_list=[{"_instrument_id": "one", "review_return_1d": 1.0}],
+        payloads={
+            "P": {
+                "value": 60.0,
+                "status": "ready",
+                "components": [{
+                    "name": "scope_return_1d",
+                    "rawValue": 1.0,
+                    "denominator": 1,
+                    "fieldSource": "bars_daily.close",
+                    "weightMode": "equal_weight",
+                    "status": "ready",
+                }],
+            },
+        },
+    )
+
+    stmt = session.execute.call_args_list[0].args[0]
+    assert isinstance(stmt, PgInsert)
+    # JSONB 无法 literal_binds 渲染，改为结构化读取绑定参数
+    values = stmt.compile().params
+    assert "pit-v7" in values.values(), (
+        "membership_version 必须随观测持久化（可追溯当日成员）"
+    )

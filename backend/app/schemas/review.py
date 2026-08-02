@@ -594,6 +594,128 @@ class ReviewRunStatusResponse(BaseModel):
     )
 
 
+# =============================================================================
+# Review 历史 bootstrap（正式 admin 入口）
+# =============================================================================
+
+
+class ReviewBootstrapRequest(BaseModel):
+    """POST /api/v1/admin/review/bootstrap 请求体。
+
+    dry_run 默认 True：默认不产生任何业务写入，必须显式传 False 才会回填。
+    """
+
+    end_date: str | None = Field(
+        None,
+        description="截止交易日（ISO YYYY-MM-DD）；为空时解析为最近一个完整 A 股交易日",
+    )
+    days_back: int = Field(
+        120, ge=60, description="回溯交易日数（默认 120，最低 60）",
+    )
+    algorithm_version: str | None = Field(
+        None, description="显式算法版本（默认当前 REVIEW_ALGORITHM_VERSION）",
+    )
+    operator: str = Field(
+        ..., min_length=1, description="执行人标识（必填，审计用）",
+    )
+    reason: str = Field(
+        ..., min_length=1, description="执行原因（必填，审计用）",
+    )
+    dry_run: bool = Field(
+        True, description="True=只计算不写业务数据（默认）",
+    )
+
+
+class ReviewBootstrapSubmitResponse(BaseModel):
+    """POST /api/v1/admin/review/bootstrap 响应（202 Accepted）。
+
+    历史回填是长任务，API 只提交 queued 任务并立即返回 job_run_id，
+    真正计算由 Worker 领取执行；进度经 status 接口查询。
+    """
+
+    job_run_id: str = Field(..., description="bootstrap 任务 ID（用于查询状态）")
+    status: str = Field(..., description="任务状态（queued）")
+    is_new: bool = Field(
+        ..., description="False 表示复用已有活跃任务（幂等）",
+    )
+    dry_run: bool = Field(..., description="是否 dry-run")
+    end_date: str = Field(..., description="解析后的截止交易日")
+    days_back: int = Field(..., description="回溯交易日数")
+    algorithm_version: str = Field(..., description="解析后的算法版本")
+    operator: str = Field(..., description="执行人标识")
+    reason: str = Field(..., description="执行原因")
+    input_hash: str = Field(..., description="输入指纹（同范围多次执行一致）")
+    message: str = Field(..., description="提示信息")
+
+
+class ReviewBootstrapScopeCounts(BaseModel):
+    """按 scope 的四类计数。"""
+
+    succeeded: int = Field(0, description="成功产出观测的 scope 数")
+    skipped: int = Field(0, description="幂等跳过的 scope 数")
+    unavailable: int = Field(
+        0, description="PIT 成员或历史事实缺失，不可用的 scope 数",
+    )
+    failed: int = Field(0, description="执行失败的 scope 数")
+
+
+class ReviewBootstrapSummary(BaseModel):
+    """bootstrap 全局执行摘要。"""
+
+    eligible_dates: int = Field(0, description="可回填的交易日数")
+    processed: int = Field(0, description="已处理交易日数")
+    skipped: int = Field(0, description="跳过交易日数")
+    written: int = Field(0, description="实际写入交易日数（dry-run 恒为 0）")
+    scope_counts: ReviewBootstrapScopeCounts = Field(
+        default_factory=ReviewBootstrapScopeCounts,
+    )
+    reason_codes: dict[str, int] = Field(
+        default_factory=dict, description="不可用/失败原因码计数",
+    )
+
+
+class ReviewBootstrapScopeResult(BaseModel):
+    """单条 (trade_date, scope_type, scope_key) 执行明细。"""
+
+    trade_date: str | None = Field(None)
+    scope_type: str | None = Field(None)
+    scope_key: str | None = Field(None)
+    status: str | None = Field(None)
+    reason: str | None = Field(None, description="不可用/失败原因码")
+    eligible_count: int | None = Field(None)
+    ready_count: int | None = Field(None)
+    coverage: float | None = Field(None)
+
+
+class ReviewBootstrapStatusResponse(BaseModel):
+    """GET /api/v1/admin/review/bootstrap/{job_run_id} 响应。
+
+    全局 summary 常驻返回；scope 明细分页（120 日 × 全 scope 可达上万行）。
+    """
+
+    job_run_id: str = Field(...)
+    job_name: str = Field(...)
+    status: str = Field(..., description="SchedulerJobRun 状态")
+    bootstrap_status: str = Field(..., description="bootstrap 业务状态")
+    dry_run: bool = Field(...)
+    operator: str | None = Field(None)
+    reason: str | None = Field(None)
+    input_hash: str | None = Field(None)
+    end_date: str | None = Field(None)
+    days_back: int | None = Field(None)
+    algorithm_version: str | None = Field(None)
+    summary: ReviewBootstrapSummary = Field(default_factory=ReviewBootstrapSummary)
+    scope_results: list[ReviewBootstrapScopeResult] = Field(default_factory=list)
+    scope_results_total: int = Field(0, description="明细总行数（用于分页）")
+    offset: int = Field(0)
+    limit: int = Field(0)
+    started_at: str | None = Field(None)
+    finished_at: str | None = Field(None)
+    heartbeat_at: str | None = Field(None)
+    error_code: str | None = Field(None)
+    error_message: str | None = Field(None)
+
+
 if __name__ == "__main__":
     # 自测：构造最小合法 payload
     comp = ReviewMetricComponentDTO(
@@ -635,4 +757,28 @@ if __name__ == "__main__":
     assert overview.coverage.market is None
     assert overview.signalSummary.new == 0
     print(f"OK: ReviewOverviewResponse status={overview.status}")
+
+    # bootstrap 请求：dry_run 默认 True，operator/reason 必填
+    boot_req = ReviewBootstrapRequest(operator="owner", reason="review-2.0.0 回填")
+    assert boot_req.dry_run is True, "dry_run 必须默认 True"
+    assert boot_req.days_back == 120
+    assert boot_req.end_date is None, "end_date 默认 None（由服务端解析交易日）"
+    try:
+        ReviewBootstrapRequest(operator="", reason="x")
+    except Exception:
+        pass
+    else:  # pragma: no cover - 防御性断言
+        raise AssertionError("operator 为空应校验失败")
+    print(f"OK: ReviewBootstrapRequest dry_run={boot_req.dry_run}")
+
+    boot_status = ReviewBootstrapStatusResponse(
+        job_run_id="00000000-0000-0000-0000-000000000009",
+        job_name="review_bootstrap",
+        status="succeeded",
+        bootstrap_status="ok",
+        dry_run=True,
+    )
+    assert boot_status.summary.scope_counts.unavailable == 0
+    assert boot_status.scope_results_total == 0
+    print(f"OK: ReviewBootstrapStatusResponse status={boot_status.status}")
     print("OK: review schemas verified")
