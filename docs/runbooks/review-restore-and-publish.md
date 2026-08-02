@@ -155,7 +155,8 @@ python -m app.scripts.withdraw_review_publication \
 3. **`factor_publications.data_run_id` 指针重写无逆向脚本**
    （条件 `publication_kind='market_aggregation'`）。`alembic downgrade` 回滚后该字段
    将指向已被删除的 `board_analysis_runs.id`，成为悬空指针。
-   **079 的回滚预案必须依赖数据库物理备份，不得依赖 `alembic downgrade`。**
+   **079 的可靠回滚依赖用户另行明确授权的备份或快照，不得依赖 `alembic downgrade`。
+   当前测试期部署默认不备份（rules/80），是否备份属用户每次独立决策，不把备份作为默认前置条件。**
 
 其余锁风险：079 全部 `create_index` 均未使用 CONCURRENTLY（Alembic 事务内无法使用），
 8 次 `ADD COLUMN NOT NULL DEFAULT` 持 ACCESS EXCLUSIVE 锁，

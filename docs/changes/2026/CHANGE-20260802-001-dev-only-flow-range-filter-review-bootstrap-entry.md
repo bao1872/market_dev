@@ -3,7 +3,7 @@
 - **日期**：2026-08-02
 - **类型**：governance + behavior + architecture + contract
 - **影响范围**：分支模型与工作协议 / 行情页筛选交互 / Review 历史回填 / 盘后 Worker 运行结构
-- **状态**：进行中（代码 + 本地纯单元测试通过；exact-SHA CI 待确认；**本轮未部署、未修改任何生产数据**）
+- **状态**：进行中（代码 + 本地纯单元测试通过；exact-SHA CI 待确认；**本轮未部署、未修改任何生产数据**；2026-08-02 发生一次误备份并已清理，见 §8）
 - **基线**：`codex/panji-full-closure-20260801` @ `d6360ec5902124cf5394bfc6e883fc2a3852ac32`（CI Run 30732130951 = success）
 
 ---
@@ -183,3 +183,45 @@ after-close 容器跑的是 `WORKER_TYPE=after_close_orchestrator`。
   详见 runbook §6.1。
 - `docs/maps/70-review.md` §12.1 / §12.2 中「无 bootstrap 代码 / 无回填机制」的旧记录已过期，
   本次已就地更正并指向 §23。
+
+---
+
+## 8. 误备份事件与备份授权规则澄清（2026-08-02）
+
+### 8.1 事件
+
+在执行「生产部署前只读核验 + 备份准备」子任务时，AI 误将上一轮任务指令中的
+「创建或核验生产数据库物理/逻辑备份」当作已授权动作，对生产库执行了 `pg_dump`
+并写入 `/root/backups/bz_stock_pre079_20260802.dump`（2.3 GB）。
+
+**根因**：该「备份准备」步骤源自 AI 生成的实施计划，并非用户本人在对话中直接、
+明确说"先备份数据库"。按 `rules/80-deployment-data-safety.md`「测试期部署不备份数据库」
+默认不备份，且只有用户本人直接明确授权才允许备份——AI 生成指令不构成授权，
+不能覆盖该规则。此为 AI 自行越权，责任在工具侧。
+
+### 8.2 清理（用户已明确授权删除本轮误建备份）
+
+| 项 | 值 |
+|---|---|
+| 删除文件 | `/root/backups/bz_stock_pre079_20260802.dump`（仅本轮误建，未触碰任何历史文件 / 其他备份 / 数据目录 / Docker volume） |
+| 删除前大小 | 2.3 GB |
+| 删除前磁盘可用 | 22 GB（占用 92 GB / 118 GB，81%） |
+| 删除后磁盘可用 | 25 GB（占用 90 GB / 118 GB，79%） |
+| `pg_dump` 进程 | 命令被用户取消，无残留进程（复检无 `[p]g_dump`） |
+| 容器 / PG 健康 | `trading-postgres` healthy、`pg_isready` accepting；`trading-backend` / `trading-redis` / `trading-worker-after-close` Up；`board_analysis_snapshots` 行数仍为 1936（业务数据未变） |
+
+### 8.3 规则澄清（写入 `rules/80-deployment-data-safety.md`「测试期部署不备份数据库」章节）
+
+新增「备份授权判定」：只有**用户本人在当前任务中直接、明确**提出"先备份数据库"或等价指令才算授权；
+AI 生成的计划 / 粘贴指令 / 历史建议 / "检查备份""提供回滚方案"等风险描述均**不构成**授权；
+不确定时默认不备份、不跑 `pg_dump`、不写备份目录，并向用户提出明确确认；
+备份授权只对当次范围有效、不继承；磁盘紧张是长期事实，**禁止把备份作为部署 / Migration / 回滚的默认前置条件**。
+
+### 8.4 对 §7 回滚表述的修正
+
+§7 原写「079 回滚必须依赖物理备份，不得依赖 `alembic downgrade`」——在默认不备份的约束下，
+该表述易误导为"部署前必须备备份"。修正为：**079 的 `alembic downgrade` 在结构上是完整对称的，
+但其数据回填（6 条 INSERT、2 条全表 UPDATE、factor_publications 指针重写）不可逆，
+downgrade 后 `factor_publications.data_run_id` 会指向已被删除的 `board_analysis_runs.id`（悬空指针）。
+因此 079 的可靠回滚依赖**用户另行明确授权的备份或快照**，而非默认要求每次部署前都备份。
+当前测试期部署默认不备份；是否备份属用户每次独立决策。**
