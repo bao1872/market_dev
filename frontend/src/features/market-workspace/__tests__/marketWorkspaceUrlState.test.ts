@@ -24,6 +24,7 @@ import {
   normalizeInternalReturnTo,
   decodeMarketListContext,
   buildStrategyResultQueryParams,
+  buildMarketReturnToUrl,
   resolveDetailSourceContext,
   DEFAULT_MARKET_SCOPE,
   type MarketWorkspaceUrlState,
@@ -222,6 +223,50 @@ test('CHANGE-009-4: filters JSON 字符串正确解码并转换为 metric_filter
   assert.equal(parsed[1].operator, 'between')
   assert.equal(parsed[1].value1, 0.2)
   assert.equal(parsed[1].value2, 0.8)
+})
+
+test('between 往返：decode → buildMarketReturnToUrl → decode 两个值均不丢失', () => {
+  // 区间筛选必须同时保留 value 与 value2，任何一段往返丢值都会让「区间」退化为单值筛选
+  const filters = JSON.stringify([
+    { key: 'offset_percentile', op: 'between', value: 0.2, value2: 0.8 },
+  ])
+  const first = decodeMarketListContext(
+    `/market?scope=market&filters=${encodeURIComponent(filters)}`,
+  )
+  assert.notEqual(first, null)
+  assert.equal(first!.filters![0].value, 0.2)
+  assert.equal(first!.filters![0].value2, 0.8)
+
+  // 回跳 URL 必须把两个值一并编码
+  const returnTo = buildMarketReturnToUrl(first!, null)
+  assert.ok(returnTo.includes('filters='), '回跳 URL 必须包含 filters')
+
+  const second = decodeMarketListContext(returnTo)
+  assert.notEqual(second, null)
+  assert.equal(second!.filters!.length, 1)
+  assert.equal(second!.filters![0].operator, 'between')
+  assert.equal(second!.filters![0].value, 0.2, '往返后下界丢失')
+  assert.equal(second!.filters![0].value2, 0.8, '往返后上界丢失')
+
+  // 往返后仍能正确转换为后端 metric_filters 的 value1/value2
+  const query = buildStrategyResultQueryParams(second!)
+  const parsed = JSON.parse(query.metric_filters!)
+  assert.equal(parsed[0].value1, 0.2)
+  assert.equal(parsed[0].value2, 0.8)
+})
+
+test('between 缺失 value2 时不得降级为单值筛选提交后端', () => {
+  const filters = JSON.stringify([
+    { key: 'offset_percentile', op: 'between', value: 0.2 },
+  ])
+  const ctx = decodeMarketListContext(
+    `/market?scope=market&filters=${encodeURIComponent(filters)}`,
+  )
+  assert.notEqual(ctx, null)
+  const query = buildStrategyResultQueryParams(ctx!)
+  const parsed = query.metric_filters ? JSON.parse(query.metric_filters) : []
+  const between = parsed.filter((f: { operator: string }) => f.operator === 'between')
+  assert.equal(between.length, 0, 'value2 缺失的 between 必须被丢弃，不得只带一个值下发')
 })
 
 test('CHANGE-009-5: RATIO/PERCENTILE 类指标百分号自动归一化', () => {

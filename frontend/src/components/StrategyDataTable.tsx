@@ -374,6 +374,7 @@ function FilterPopover({
   )
   const [value, setValue] = useState(String(current?.value || ''))
   const [value2, setValue2] = useState(String(current?.value2 || ''))
+  const [error, setError] = useState('')
   const isEmptyOp = operator === 'empty' || operator === 'not_empty'
   const isBetween = operator === 'between'
 
@@ -397,10 +398,17 @@ function FilterPopover({
   const isDatePicker = inputControl === 'date_picker' ||
     operator === 'date_eq' || operator === 'before' || operator === 'after'
   // number/percent 字段使用数字输入
-  const isNumberInput = inputControl === 'number_input' ||
-    (spec && (spec.data_type === 'number' || spec.data_type === 'percent') &&
-      (operator === 'eq' || operator === 'neq' || operator === 'gt' ||
-       operator === 'gte' || operator === 'lt' || operator === 'lte'))
+  // 注意：between 必须走下方双输入框分支，因此这里统一排除 between。
+  // 否则 number_input 会先命中单输入框分支，导致「区间」只显示一个输入框。
+  const isNumberInput = !isBetween &&
+    (inputControl === 'number_input' ||
+      (spec && (spec.data_type === 'number' || spec.data_type === 'percent') &&
+        (operator === 'eq' || operator === 'neq' || operator === 'gt' ||
+         operator === 'gte' || operator === 'lt' || operator === 'lte')))
+  // between 是否按数值语义校验（number/percent 或数字输入控件）
+  const isNumericBetween = isBetween &&
+    (inputControl === 'number_input' ||
+      spec?.data_type === 'number' || spec?.data_type === 'percent')
 
   // 定位弹窗
   const rect = anchor.getBoundingClientRect()
@@ -422,19 +430,40 @@ function FilterPopover({
     // [CHANGE-20260730-013] 应用 value_normalizer 规范化筛选值
     const val = normalizeFilterValue(value, normalizer)
     const val2 = normalizeFilterValue(value2, normalizer)
-    // [StrategyDataTable] - 描述: between 需要两个值都非空，其余非空校验 value
+    // between 需要两个值都非空；任一为空或区间非法时显示提示，不提交也不静默清空
     if (isBetween) {
       if (!val || !val2) {
-        onClear()
+        setError(
+          isDatePicker
+            ? '请同时填写起始日期与结束日期'
+            : '请同时填写下界与上界',
+        )
         return
       }
+      if (isNumericBetween) {
+        const lower = Number(val)
+        const upper = Number(val2)
+        if (Number.isNaN(lower) || Number.isNaN(upper)) {
+          setError('下界与上界必须是数值')
+          return
+        }
+        if (lower > upper) {
+          setError('下界不能大于上界')
+          return
+        }
+      } else if (isDatePicker && String(val) > String(val2)) {
+        setError('起始日期不能晚于结束日期')
+        return
+      }
+      setError('')
       onApply({ key: column.key, operator, value: val, value2: val2 })
       return
     }
     if (!isEmptyOp && !val) {
-      onClear()
+      setError('请输入筛选值')
       return
     }
+    setError('')
     onApply({ key: column.key, operator, value: val })
   }
 
@@ -518,6 +547,7 @@ function FilterPopover({
               className="input filter-value"
               type="date"
               placeholder="起始日期"
+              aria-label="起始日期"
               value={value}
               onChange={(e) => setValue(e.target.value)}
               autoFocus
@@ -527,6 +557,7 @@ function FilterPopover({
               className="input filter-value"
               type="date"
               placeholder="结束日期"
+              aria-label="结束日期"
               value={value2}
               onChange={(e) => setValue2(e.target.value)}
             />
@@ -559,13 +590,15 @@ function FilterPopover({
       )
     }
 
-    // 数字类型 between（未携带 spec 时回退）
+    // 区间输入：number/percent 使用数值输入，其余回退为文本
     if (isBetween) {
       return (
         <div className="filter-between-inputs">
           <input
             className="input filter-value"
+            type={isNumericBetween ? 'number' : 'text'}
             placeholder="下界"
+            aria-label="下界"
             value={value}
             onChange={(e) => setValue(e.target.value)}
             autoFocus
@@ -573,7 +606,9 @@ function FilterPopover({
           <span className="filter-between-sep">~</span>
           <input
             className="input filter-value"
+            type={isNumericBetween ? 'number' : 'text'}
             placeholder="上界"
+            aria-label="上界"
             value={value2}
             onChange={(e) => setValue2(e.target.value)}
           />
@@ -599,7 +634,10 @@ function FilterPopover({
       <select
         className="select filter-operator"
         value={operator}
-        onChange={(e) => setOperator(e.target.value as FilterOperator)}
+        onChange={(e) => {
+          setOperator(e.target.value as FilterOperator)
+          setError('')
+        }}
       >
         {availableOps.map((op) => (
           <option key={op} value={op}>
@@ -608,6 +646,11 @@ function FilterPopover({
         ))}
       </select>
       {renderValueInput()}
+      {error ? (
+        <div className="filter-error" role="alert">
+          {error}
+        </div>
+      ) : null}
       <div className="filter-pop-actions">
         <button className="btn small filter-clear" onClick={onClear}>
           清除
