@@ -26,6 +26,7 @@ from sqlalchemy.dialects.postgresql.dml import Insert as PgInsert
 
 from app.models.market_review import MarketReviewRun, MarketReviewScopeSnapshot
 from app.services.review_publication_service import (
+    ReviewWithdrawalBlockError,
     get_published_review_run_id,
     is_formally_published_review_run,
     publish_review,
@@ -305,6 +306,16 @@ def _make_pointer(run_id: uuid.UUID) -> AsyncMock:
     return pub
 
 
+def _withdraw_kwargs(run: MarketReviewRun, pub: AsyncMock) -> dict:
+    return {
+        "expected_run_id": run.id,
+        "expected_publication_id": pub.id,
+        "reason": "测试撤销",
+        "operator": "test-operator",
+        "idempotency_key": f"withdraw-{pub.id}",
+    }
+
+
 class TestWithdrawal:
     async def test_withdraw_deletes_only_pointer_and_keeps_run(self):
         run = _make_run(
@@ -315,10 +326,15 @@ class TestWithdrawal:
         session = _make_session([_FakeResult(scalar=pub)])
         session.get = AsyncMock(return_value=run)
 
+        kwargs = _withdraw_kwargs(run, pub)
+        kwargs.update({
+            "reason": "force 发布的错误 run",
+            "operator": "admin-1",
+            "idempotency_key": "withdraw-1",
+        })
         summary = await withdraw_review_publication(
             session, date(2026, 7, 31),
-            reason="force 发布的错误 run", operator="admin-1",
-            idempotency_key="withdraw-1",
+            **kwargs,
         )
 
         assert summary["withdrawn"] is True
@@ -345,6 +361,8 @@ class TestWithdrawal:
 
         summary = await withdraw_review_publication(
             session, date(2026, 7, 31),
+            expected_run_id=uuid.uuid4(),
+            expected_publication_id=uuid.uuid4(),
             reason="重复执行", operator="admin-1",
             idempotency_key="withdraw-1",
         )
@@ -362,10 +380,13 @@ class TestWithdrawal:
         session = _make_session([_FakeResult(scalar=pub)])
         session.get = AsyncMock(return_value=run)
 
+        kwargs = _withdraw_kwargs(run, pub)
+        kwargs["reason"] = "演练"
+        kwargs["operator"] = "admin-1"
+        kwargs["idempotency_key"] = "withdraw-dry"
         summary = await withdraw_review_publication(
             session, date(2026, 7, 31),
-            reason="演练", operator="admin-1",
-            idempotency_key="withdraw-dry", dry_run=True,
+            **kwargs, dry_run=True,
         )
 
         assert summary["dry_run"] is True
@@ -389,7 +410,7 @@ class TestWithdrawal:
 
         await withdraw_review_publication(
             session, date(2026, 7, 31),
-            reason="r", operator="op", idempotency_key="k",
+            **_withdraw_kwargs(run, pub),
         )
 
         assert run.status == "published"
@@ -402,10 +423,116 @@ class TestWithdrawal:
         assert is_formally_published_review_run(run, live_run_id) is False
         assert is_formally_published_review_run(run, run.id) is True
 
+    async def test_dry_run_pointer_switch_is_rejected(self):
+        run = _make_run(status="published", published_at=datetime.now(UTC))
+        old_pub = _make_pointer(run.id)
+        session = _make_session([_FakeResult(scalar=old_pub)])
+        session.get = AsyncMock(return_value=run)
+
+        dry_summary = await withdraw_review_publication(
+            session, date(2026, 7, 31),
+            **_withdraw_kwargs(run, old_pub), dry_run=True,
+        )
+        assert dry_summary["pointer"]["id"] == str(old_pub.id)
+
+        new_pub = _make_pointer(uuid.uuid4())
+        # Simulate the live pointer changing after the dry-run.
+        apply_session = _make_session([_FakeResult(scalar=new_pub)])
+        apply_session.get = AsyncMock(return_value=_make_run(status="published"))
+        with pytest.raises(ReviewWithdrawalBlockError, match="expected_publication_id"):
+            await withdraw_review_publication(
+                apply_session, date(2026, 7, 31),
+                **_withdraw_kwargs(run, old_pub),
+            )
+        apply_session.delete.assert_not_called()
+        apply_session.flush.assert_not_called()
+
+    async def test_expected_run_id_mismatch_is_zero_write(self):
+        run = _make_run(status="published", published_at=datetime.now(UTC))
+        pub = _make_pointer(run.id)
+        session = _make_session([_FakeResult(scalar=pub)])
+        session.get = AsyncMock(return_value=run)
+        with pytest.raises(ReviewWithdrawalBlockError, match="expected_run_id"):
+            await withdraw_review_publication(
+                session, date(2026, 7, 31),
+                expected_run_id=uuid.uuid4(),
+                expected_publication_id=pub.id,
+                reason="mismatch", operator="op", idempotency_key="k",
+            )
+        session.delete.assert_not_called()
+        session.flush.assert_not_called()
+        assert "publication_withdrawal" not in run.metadata_json
+
+    async def test_expected_publication_id_mismatch_is_zero_write(self):
+        run = _make_run(status="published", published_at=datetime.now(UTC))
+        pub = _make_pointer(run.id)
+        session = _make_session([_FakeResult(scalar=pub)])
+        session.get = AsyncMock(return_value=run)
+        with pytest.raises(ReviewWithdrawalBlockError, match="expected_publication_id"):
+            await withdraw_review_publication(
+                session, date(2026, 7, 31),
+                expected_run_id=run.id,
+                expected_publication_id=uuid.uuid4(),
+                reason="mismatch", operator="op", idempotency_key="k",
+            )
+        session.delete.assert_not_called()
+        session.flush.assert_not_called()
+        assert "publication_withdrawal" not in run.metadata_json
+
+    async def test_missing_run_is_zero_write(self):
+        pub = _make_pointer(uuid.uuid4())
+        session = _make_session([_FakeResult(scalar=pub)])
+        session.get = AsyncMock(return_value=None)
+        with pytest.raises(ReviewWithdrawalBlockError, match="MarketReviewRun"):
+            await withdraw_review_publication(
+                session, date(2026, 7, 31),
+                expected_run_id=pub.data_run_id,
+                expected_publication_id=pub.id,
+                reason="missing run", operator="op", idempotency_key="k",
+            )
+        session.delete.assert_not_called()
+        session.flush.assert_not_called()
+
+    async def test_wrong_scope_or_kind_is_zero_write(self):
+        run = _make_run(status="published", published_at=datetime.now(UTC))
+        pub = _make_pointer(run.id)
+        pub.scope_key = "instrument"
+        pub.publication_kind = "stock_core"
+        session = _make_session([_FakeResult(scalar=pub)])
+        session.get = AsyncMock(return_value=run)
+        with pytest.raises(ReviewWithdrawalBlockError) as exc_info:
+            await withdraw_review_publication(
+                session, date(2026, 7, 31),
+                **_withdraw_kwargs(run, pub),
+            )
+        assert "scope_key" in str(exc_info.value)
+        assert "publication_kind" in str(exc_info.value)
+        session.delete.assert_not_called()
+        session.flush.assert_not_called()
+
+    async def test_concurrent_withdrawal_second_call_is_idempotent(self):
+        run = _make_run(status="published", published_at=datetime.now(UTC))
+        pub = _make_pointer(run.id)
+        first = _make_session([_FakeResult(scalar=pub)])
+        first.get = AsyncMock(return_value=run)
+        first_result = await withdraw_review_publication(
+            first, date(2026, 7, 31), **_withdraw_kwargs(run, pub),
+        )
+        assert first_result["withdrawn"] is True
+
+        second = _make_session([_FakeResult(scalar=None)])
+        second_result = await withdraw_review_publication(
+            second, date(2026, 7, 31), **_withdraw_kwargs(run, pub),
+        )
+        assert second_result["already_withdrawn"] is True
+        assert second.delete.call_count == 0
+
     async def test_withdraw_requires_audit_fields(self):
         session = _make_session([])
         with pytest.raises(ValueError):
             await withdraw_review_publication(
                 session, date(2026, 7, 31),
+                expected_run_id=uuid.uuid4(),
+                expected_publication_id=uuid.uuid4(),
                 reason="", operator="op", idempotency_key="k",
             )

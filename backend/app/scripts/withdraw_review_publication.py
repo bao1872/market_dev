@@ -4,6 +4,8 @@
     # dry-run（默认，只读，输出将影响的唯一 pointer）
     python -m app.scripts.withdraw_review_publication \
         --trade-date 2026-07-31 \
+        --expected-run-id 857954c6-... \
+        --expected-publication-id <dry-run-pointer-uuid> \
         --reason "force 发布的错误 run，门禁本应阻塞" \
         --operator admin@example.com \
         --idempotency-key withdraw-20260731-001
@@ -11,6 +13,8 @@
     # 实际执行（需显式 --apply）
     python -m app.scripts.withdraw_review_publication \
         --trade-date 2026-07-31 \
+        --expected-run-id 857954c6-... \
+        --expected-publication-id <dry-run-pointer-uuid> \
         --reason "..." --operator "..." --idempotency-key "..." --apply
 
 安全合同（P0 安全收口 2026-08-01）：
@@ -46,6 +50,14 @@ def _parse_args() -> argparse.Namespace:
         "--trade-date", required=True,
         help="业务交易日，格式 YYYY-MM-DD",
     )
+    parser.add_argument(
+        "--expected-run-id", required=True,
+        help="dry-run 确认的完整 MarketReviewRun UUID",
+    )
+    parser.add_argument(
+        "--expected-publication-id", required=True,
+        help="dry-run 确认的完整 FactorPublication UUID",
+    )
     parser.add_argument("--reason", required=True, help="撤销原因（审计）")
     parser.add_argument("--operator", required=True, help="操作者标识（审计）")
     parser.add_argument(
@@ -64,6 +76,8 @@ async def _run(args: argparse.Namespace) -> dict:
         summary = await withdraw_review_publication(
             session,
             trade_date,
+            expected_run_id=args.expected_run_id,
+            expected_publication_id=args.expected_publication_id,
             reason=args.reason,
             operator=args.operator,
             idempotency_key=args.idempotency_key,

@@ -57,6 +57,19 @@ class ReviewPublishBlockError(Exception):
         )
 
 
+class ReviewWithdrawalBlockError(Exception):
+    """撤销 Review publication pointer 的安全门禁失败。
+
+    该异常只在目标 pointer 仍存在但 expected guard 不匹配，或关联
+    ``MarketReviewRun`` 缺失时抛出。调用方必须回滚当前事务；服务本身在
+    通过全部 guard 前不会执行 delete、flush 或修改 run 审计。
+    """
+
+    def __init__(self, blockers: list[str]) -> None:
+        self.blockers = blockers
+        super().__init__(f"Review withdrawal 安全门禁失败：{'; '.join(blockers)}")
+
+
 async def evaluate_publish_gate(
     session: AsyncSession,
     run: MarketReviewRun,
@@ -320,6 +333,8 @@ async def withdraw_review_publication(
     session: AsyncSession,
     trade_date: date,
     *,
+    expected_run_id: uuid.UUID | str,
+    expected_publication_id: uuid.UUID | str,
     reason: str,
     operator: str,
     idempotency_key: str,
@@ -343,6 +358,8 @@ async def withdraw_review_publication(
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         trade_date: 要撤销 pointer 的业务交易日
+        expected_run_id: dry-run 确认的 MarketReviewRun UUID。
+        expected_publication_id: dry-run 确认的 FactorPublication UUID。
         reason: 撤销原因（审计必填）
         operator: 操作者标识（审计必填）
         idempotency_key: 幂等键（审计必填）
@@ -365,12 +382,31 @@ async def withdraw_review_publication(
     if not reason or not operator or not idempotency_key:
         raise ValueError("withdrawal 需要非空 reason / operator / idempotency_key")
 
+    blockers: list[str] = []
+    try:
+        expected_run_uuid = uuid.UUID(str(expected_run_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ReviewWithdrawalBlockError([
+            f"expected_run_id 无效: {expected_run_id!r}",
+        ]) from exc
+    try:
+        expected_publication_uuid = uuid.UUID(str(expected_publication_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ReviewWithdrawalBlockError([
+            f"expected_publication_id 无效: {expected_publication_id!r}",
+        ]) from exc
+
+    # 这是服务调用方持有的单一事务：先锁定 live pointer，再验证所有
+    # expected guard。dry-run 也使用同一锁并由 CLI 回滚，避免把 dry-run
+    # 的观察结果误当成 apply 时仍然有效的指针。
     pub = await _get_publication(
-        session, PUBLICATION_KIND_MARKET_REVIEW, trade_date,
+        session, PUBLICATION_KIND_MARKET_REVIEW, trade_date, for_update=True,
     )
     summary: dict = {
         "trade_date": trade_date.isoformat(),
         "dry_run": dry_run,
+        "expected_run_id": str(expected_run_uuid),
+        "expected_publication_id": str(expected_publication_uuid),
         "pointer_found": pub is not None,
         "already_withdrawn": pub is None,
         "withdrawn": False,
@@ -382,10 +418,37 @@ async def withdraw_review_publication(
     if pub is None:
         logger.info(
             "[ReviewWithdraw] 幂等空转（pointer 不存在）: trade_date=%s, "
-            "operator=%s, idempotency_key=%s",
-            trade_date, operator, idempotency_key,
+            "expected_publication_id=%s, expected_run_id=%s, operator=%s, "
+            "idempotency_key=%s",
+            trade_date, expected_publication_uuid, expected_run_uuid,
+            operator, idempotency_key,
         )
         return summary
+
+    # 查询已按目标日期/kind/scope 过滤，但仍对返回对象做显式合同校验，
+    # 使 fake session、异常数据或未来查询改动都不能绕过 P0 guard。
+    if pub.trade_date != trade_date:
+        blockers.append(
+            f"trade_date 不匹配: actual={pub.trade_date!s}, expected={trade_date!s}",
+        )
+    if pub.publication_kind != PUBLICATION_KIND_MARKET_REVIEW:
+        blockers.append(
+            f"publication_kind 不匹配: actual={pub.publication_kind!r}",
+        )
+    if pub.scope_type != SCOPE_TYPE_REVIEW:
+        blockers.append(f"scope_type 不匹配: actual={pub.scope_type!r}")
+    if pub.scope_key != SCOPE_KEY_REVIEW:
+        blockers.append(f"scope_key 不匹配: actual={pub.scope_key!r}")
+    if pub.id != expected_publication_uuid:
+        blockers.append(
+            "expected_publication_id 不匹配: "
+            f"actual={pub.id}, expected={expected_publication_uuid}",
+        )
+    if pub.data_run_id != expected_run_uuid:
+        blockers.append(
+            "expected_run_id 不匹配: "
+            f"actual={pub.data_run_id}, expected={expected_run_uuid}",
+        )
 
     pointer_detail = {
         "id": str(pub.id),
@@ -404,7 +467,16 @@ async def withdraw_review_publication(
     summary["run_id"] = str(pub.data_run_id)
 
     run = await session.get(MarketReviewRun, pub.data_run_id)
-    summary["run_preserved"] = run is not None
+    if run is None:
+        blockers.append(
+            f"关联 MarketReviewRun 不存在: run_id={pub.data_run_id}",
+        )
+    else:
+        summary["run_preserved"] = True
+
+    if blockers:
+        # 此处尚未执行 delete/flush，也未修改 run；caller 应回滚事务。
+        raise ReviewWithdrawalBlockError(blockers)
 
     if dry_run:
         logger.info(
@@ -499,6 +571,8 @@ async def _get_publication(
     session: AsyncSession,
     publication_kind: str,
     trade_date: date,
+    *,
+    for_update: bool = False,
 ) -> FactorPublication | None:
     """读取复盘或 stock_core 发布指针。"""
     stmt = (
@@ -514,6 +588,8 @@ async def _get_publication(
         .order_by(FactorPublication.published_at.desc())
         .limit(1)
     )
+    if for_update:
+        stmt = stmt.with_for_update()
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
 
