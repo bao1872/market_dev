@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from app.models.access_audit_log import AccessAuditLog
 from app.models.auction import (
+    AuctionAnalysisPublication,
     AuctionAnchorItem,
     AuctionAnchorPublication,
     AuctionAnchorSnapshot,
@@ -84,6 +85,7 @@ from app.models.worker_heartbeat import WorkerHeartbeat
 
 __all__ = [
     "AccessAuditLog",
+    "AuctionAnalysisPublication",
     "AuctionAnchorItem",
     "AuctionAnchorPublication",
     "AuctionAnchorSnapshot",

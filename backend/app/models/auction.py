@@ -24,6 +24,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -327,6 +328,33 @@ class AuctionScopeResult(Base):
     def __repr__(self) -> str:
         return (f"<AuctionScopeResult(scope_type={self.scope_type!r}, "
                 f"scope_name={self.scope_name!r}, label={self.status_label!r})>")
+
+
+class AuctionAnalysisPublication(Base):
+    """竞价 scan + aggregate 的正式可见性指针。"""
+
+    __tablename__ = "auction_analysis_publications"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "algorithm_version",
+                         name="uq_auction_analysis_publication_date_version"),
+        UniqueConstraint("scan_run_id", name="uq_auction_analysis_publication_scan_run"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    trade_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    scan_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("auction_scan_runs.id", ondelete="RESTRICT"), nullable=False,
+    )
+    capture_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("auction_quote_capture_runs.id", ondelete="RESTRICT"), nullable=False,
+    )
+    algorithm_version: Mapped[str] = mapped_column(Text(), nullable=False)
+    test_namespace: Mapped[str] = mapped_column(Text(), nullable=False)
+    coverage_ratio: Mapped[float] = mapped_column(Float(), nullable=False)
+    truth_status: Mapped[str] = mapped_column(Text(), nullable=False)
+    gate_evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class AuctionEventTracking(Base):

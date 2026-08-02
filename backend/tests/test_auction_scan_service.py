@@ -203,7 +203,7 @@ class TestConstants:
     """常量校验。"""
 
     def test_algorithm_version(self) -> None:
-        assert AUCTION_SCAN_ALGORITHM_VERSION == "v1.0.0"
+        assert AUCTION_SCAN_ALGORITHM_VERSION == "v2.0.0"
 
     def test_percentile_thresholds(self) -> None:
         assert PARTICIPATION_PERCENTILE_LOW == 20

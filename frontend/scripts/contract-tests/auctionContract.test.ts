@@ -39,6 +39,23 @@ test('InstrumentResult 类型含 symbol 和 name 字段', () => {
   assert.ok(src.includes('name:'), 'InstrumentResult 必须含 name')
 })
 
+test('最终竞价 DTO 含来源、原始证据、采集时间和 final 标记', () => {
+  const src = readSource(TYPES_PATH)
+  for (const field of [
+    'final_price:',
+    'prev_close:',
+    'volume:',
+    'amount:',
+    'source_timestamp:',
+    'source_server:',
+    'raw_payload:',
+    'capture_time:',
+    'is_final_auction:',
+  ]) {
+    assert.ok(src.includes(field), `AuctionFinalQuote 必须含 ${field}`)
+  }
+})
+
 test('EventTracking 类型含 symbol 和 name 字段', () => {
   const src = readSource(TYPES_PATH)
   assert.ok(src.includes('symbol:'), 'EventTracking 必须含 symbol')

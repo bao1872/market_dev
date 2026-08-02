@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db
 from app.core.time import shanghai_business_date
 from app.models.auction import (
+    AuctionAnalysisPublication,
     AuctionAnchorItem,
     AuctionAnchorPublication,
     AuctionAnchorSnapshot,
@@ -54,6 +55,7 @@ from app.schemas.auction import (
     AuctionBackflowData,
     AuctionBoardPageData,
     AuctionEventMigrationRow,
+    AuctionFinalQuoteOut,
     AuctionInstrumentPageData,
     AuctionMarketPageData,
     EventTrackingOut,
@@ -65,7 +67,6 @@ from app.services.access_control_service import (
     require_admin,
     require_authenticated,
 )
-from app.services.auction_aggregation_service import compute_auction_aggregation
 from app.services.auction_anchor_service import (
     AUCTION_ANCHOR_ALGORITHM_VERSION,
     generate_and_publish_auction_anchors,
@@ -75,8 +76,8 @@ from app.services.auction_scan_service import (
     AUCTION_SCAN_ALGORITHM_VERSION,
     AnchorExpiredError,
     AnchorNotPublishedError,
-    run_auction_scan,
 )
+from app.services.auction_scheduler_service import run_verified_auction_pipeline
 
 logger = logging.getLogger("api.auction")
 
@@ -138,9 +139,13 @@ async def _get_latest_scan_run(
     *,
     auction_type: str = "final",
 ) -> AuctionScanRun | None:
-    """查询当日最新可见的 scan_run（succeeded/partial）。"""
+    """只通过正式 publication pointer 查询当日可见 scan_run。"""
     stmt = (
         select(AuctionScanRun)
+        .join(
+            AuctionAnalysisPublication,
+            AuctionAnalysisPublication.scan_run_id == AuctionScanRun.id,
+        )
         .where(
             AuctionScanRun.trade_date == trade_date,
             AuctionScanRun.auction_type == auction_type,
@@ -196,6 +201,9 @@ def _instrument_to_dto(
         symbol, name = instruments_map[res.instrument_id]
         dto.symbol = symbol or None
         dto.name = name or None
+    quote_payload = (res.detail_payload or {}).get("final_quote")
+    if isinstance(quote_payload, dict):
+        dto.final_quote = AuctionFinalQuoteOut.model_validate(quote_payload)
     return dto
 
 
@@ -815,39 +823,24 @@ async def trigger_scan(
     """
     _ = ctx
     try:
-        # 1. 扫描
-        scan_result = await run_auction_scan(
-            db,
-            trade_date=payload.trade_date,
-            auction_type=payload.auction_type,
-        )
+        if payload.auction_type != "final":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="admin scan 仅接受 final；opening 由 10:00 confirmation job 执行",
+            )
+        scan_result = await run_verified_auction_pipeline(db, payload.trade_date)
         await db.commit()
 
         run_id = scan_result.get("run_id")
-        aggregation_status: str | None = None
-
-        # 2. 聚合（仅在扫描成功/部分成功时）
-        if run_id is not None and scan_result.get("status") in (
-            "succeeded",
-            "partial",
-        ):
-            try:
-                agg_result = await compute_auction_aggregation(db, run_id)
-                await db.commit()
-                aggregation_status = "succeeded"
-                _ = agg_result  # 概要不回传，前端可调 GET 接口查看
-            except Exception as exc:
-                await db.rollback()
-                logger.exception(
-                    "[Admin] 竞价聚合失败: run_id=%s: %s", run_id, exc,
-                )
-                aggregation_status = "failed"
+        aggregation_status = scan_result.get("aggregation_status")
 
         reason_codes: list[str] = []
         if aggregation_status is None:
             reason_codes.append("aggregation_skipped")
         elif aggregation_status == "failed":
             reason_codes.append("aggregation_failed")
+        if scan_result.get("reason"):
+            reason_codes.append(str(scan_result["reason"]))
 
         return AdminScanResponse(
             trade_date=payload.trade_date,
@@ -875,6 +868,8 @@ async def trigger_scan(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"锚点快照已过期，禁止扫描: {exc}",
         ) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         await db.rollback()
         logger.exception(

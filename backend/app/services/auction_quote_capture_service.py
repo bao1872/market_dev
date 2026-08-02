@@ -27,7 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auction import AuctionFinalQuote, AuctionQuoteCaptureRun
@@ -122,8 +122,9 @@ async def capture_auction_final_quotes(
 
     # 1. 幂等获取/创建 CaptureRun
     now = datetime.now(UTC)
+    source = getattr(provider, "source_id", DEFAULT_SOURCE) if provider is not None else DEFAULT_SOURCE
     run = await _acquire_or_get_capture_run(
-        db, trade_date, source=DEFAULT_SOURCE,
+        db, trade_date, source=source,
         test_namespace=test_namespace, code_version=code_version,
         worker_id=worker_id, now=now,
     )
@@ -211,7 +212,7 @@ async def capture_auction_final_quotes(
             instrument_id=instrument_id,
             capture_run_id=run.id,
             test_namespace=test_namespace,
-            source=DEFAULT_SOURCE,
+            source=source,
             source_server=result.source_server,
             source_time=source_time,
             final_price=final_price,
@@ -220,7 +221,8 @@ async def capture_auction_final_quotes(
             amount=amount,
             matched_volume=None,  # pytdx 不直接返回匹配量
             unmatched_volume=None,
-            is_final=True,
+            captured_at=result.captured_at,
+            is_final=result.is_final_auction,
             quality_status=result.quality_status,
             reason_codes=list(result.reason_codes),
             raw_payload=raw_payload,
@@ -325,8 +327,22 @@ async def _acquire_or_get_capture_run(
                 f"仍有 running run (id={existing.id})，租约有效，拒绝重复执行"
             )
 
-        # failed/partial → 创建新 run
-        # (不覆盖旧记录，保留审计痕迹)
+        # failed/partial → 在唯一键对应的同一 run 上重试，并清理半成品报价。
+        await db.execute(
+            delete(AuctionFinalQuote).where(AuctionFinalQuote.capture_run_id == existing.id)
+        )
+        existing.status = "running"
+        existing.expected_count = 0
+        existing.received_count = 0
+        existing.valid_count = 0
+        existing.coverage = 0.0
+        existing.started_at = now
+        existing.finished_at = None
+        existing.heartbeat_at = now
+        existing.reason_codes = ["capture_retry"]
+        existing.code_version = code_version
+        await db.flush()
+        return existing
 
     # 创建新 run
     run = AuctionQuoteCaptureRun(
@@ -531,7 +547,7 @@ async def load_final_quotes_for_scan(
     trade_date: date,
     *,
     test_namespace: str = PRODUCTION_NAMESPACE,
-    source: str = DEFAULT_SOURCE,
+    source: str | None = None,
 ) -> dict[uuid.UUID, AuctionFinalQuote]:
     """[auction_scan_service 调用] 加载最终竞价报价，替代 _load_final_auction_bars。
 
@@ -543,6 +559,10 @@ async def load_final_quotes_for_scan(
         return {}
 
     # 查询最新成功的 CaptureRun
+    if source is None:
+        from app.services.auction_truth_service import VERIFIED_AUCTION_SOURCE
+
+        source = VERIFIED_AUCTION_SOURCE
     run = await get_capture_run_for_date(
         db, trade_date, test_namespace=test_namespace, source=source,
     )
@@ -567,7 +587,7 @@ async def load_history_final_quotes(
     *,
     lookback: int = 20,
     test_namespace: str = PRODUCTION_NAMESPACE,
-    source: str = DEFAULT_SOURCE,
+    source: str | None = None,
 ) -> dict[uuid.UUID, list[AuctionFinalQuote]]:
     """加载 trade_date 前 lookback 个交易日的竞价报价历史。
 
@@ -575,6 +595,11 @@ async def load_history_final_quotes(
     """
     if not instrument_ids:
         return {}
+
+    if source is None:
+        from app.services.auction_truth_service import VERIFIED_AUCTION_SOURCE
+
+        source = VERIFIED_AUCTION_SOURCE
 
     # 查询历史 CaptureRuns（仅 succeeded/partial）
     calendar_lookback = lookback * 2 + 5

@@ -29,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auction import (
+    AuctionAnalysisPublication,
     AuctionAnchorItem,
     AuctionAnchorPublication,
     AuctionAnchorSnapshot,
@@ -62,12 +63,14 @@ from app.services.auction_anchor_service import (
     get_published_anchors,
     publish_auction_anchors,
 )
+from app.services.auction_publication_service import publish_auction_analysis
 from app.services.auction_scan_service import (
     AnchorNotPublishedError,
     get_scan_results,
     run_auction_scan,
     update_event_lifecycle,
 )
+from app.services.auction_truth_service import VERIFIED_AUCTION_SOURCE
 
 # CI 环境标识（与 conftest.py 一致）
 _CI_ENV = (
@@ -253,7 +256,7 @@ async def _create_auction_capture_run(
     db_session: AsyncSession,
     *,
     trade_date: date,
-    source: str = "mootdx",
+    source: str = VERIFIED_AUCTION_SOURCE,
     test_namespace: str = "production",
     status: str = "succeeded",
     expected_count: int = 3,
@@ -307,7 +310,7 @@ async def _create_final_auction_quote(
         instrument_id=instrument.id,
         capture_run_id=capture_run_id,
         test_namespace=test_namespace,
-        source="mootdx",
+        source=VERIFIED_AUCTION_SOURCE,
         source_server="test_server",
         source_time=source_time,
         final_price=Decimal(final_price),
@@ -570,6 +573,27 @@ class TestAuctionFullPipeline:
         # market 聚合必须有 status_label 和 confidence_level
         assert agg_result["market"]["status_label"] is not None
         assert agg_result["market"]["confidence_level"] is not None
+
+        capture_run = (await db_session.execute(
+            select(AuctionQuoteCaptureRun).where(
+                AuctionQuoteCaptureRun.trade_date == _TRADE_DATE,
+                AuctionQuoteCaptureRun.source == VERIFIED_AUCTION_SOURCE,
+            )
+        )).scalar_one()
+        analysis_publication = await publish_auction_analysis(
+            db_session,
+            scan_run_id=run_id,
+            capture_run_id=capture_run.id,
+            truth_status="verified",
+            test_namespace="production",
+        )
+        assert analysis_publication.scan_run_id == run_id
+        publication_count = (await db_session.execute(
+            select(func.count(AuctionAnalysisPublication.id)).where(
+                AuctionAnalysisPublication.trade_date == _TRADE_DATE,
+            )
+        )).scalar_one()
+        assert publication_count == 1
 
         # 6. 验证 7 张表均有数据
         anchor_item_count = (await db_session.execute(

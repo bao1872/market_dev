@@ -293,6 +293,18 @@ function InstrumentResultBlock({ result }: { result: InstrumentResult }) {
         />
       </div>
 
+      {result.final_quote && (
+        <div className={styles.anchorMeta}>
+          <span className={styles.toolbarLabel}>共识来源：</span>
+          <code className={styles.metaValue}>
+            {result.final_quote.source_server ?? '—'}
+          </code>
+          <span className={styles.metaValue}>
+            {formatShanghaiTime(result.final_quote.capture_time)}
+          </span>
+        </div>
+      )}
+
       {/* 状态标记 */}
       <div className={styles.toolbar}>
         <span className={styles.toolbarLabel}>状态标记：</span>

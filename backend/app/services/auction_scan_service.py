@@ -33,7 +33,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auction import (
@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 # 常量
 # =============================================================================
 
-AUCTION_SCAN_ALGORITHM_VERSION = "v1.0.0"
+AUCTION_SCAN_ALGORITHM_VERSION = "v2.0.0"
 AUCTION_FINAL_TIME = "09:25"  # 最终竞价时间
 OPENING_VERIFY_WINDOW_MINUTES = 30  # 开盘后验证窗口
 PARTICIPATION_PERCENTILE_LOW = 20  # 偏低分位
@@ -428,6 +428,7 @@ async def _acquire_or_recover_scan_run(
             existing.id, trade_date, existing.worker_id,
             existing.lease_epoch, existing.heartbeat_at,
         )
+        await _clear_unpublished_scan_children(db, existing.id)
         existing.worker_id = worker_id
         existing.lease_epoch = new_lease_epoch
         existing.heartbeat_at = current_now
@@ -443,6 +444,7 @@ async def _acquire_or_recover_scan_run(
         "[AuctionScan] 重试 %s run_id=%s trade_date=%s new_attempt=%d",
         existing.status, existing.id, trade_date, new_attempt,
     )
+    await _clear_unpublished_scan_children(db, existing.id)
     existing.status = "running"
     existing.attempt_count = new_attempt
     existing.worker_id = worker_id
@@ -453,6 +455,17 @@ async def _acquire_or_recover_scan_run(
     existing.error_message = None
     await db.flush()
     return existing
+
+
+async def _clear_unpublished_scan_children(
+    db: AsyncSession,
+    scan_run_id: uuid.UUID,
+) -> None:
+    """恢复或重试前清理该未成功 run 的半成品，避免唯一键冲突。"""
+    await db.execute(delete(AuctionScopeResult).where(AuctionScopeResult.scan_run_id == scan_run_id))
+    await db.execute(delete(AuctionEventTracking).where(AuctionEventTracking.scan_run_id == scan_run_id))
+    await db.execute(delete(AuctionInstrumentResult).where(AuctionInstrumentResult.scan_run_id == scan_run_id))
+    await db.flush()
 
 
 # =============================================================================
@@ -1229,6 +1242,22 @@ async def run_auction_scan(
 
             # 构造 detail_payload（含所有比例的分子和分母）
             detail_payload: dict[str, Any] = {
+                "final_quote": {
+                    "symbol": instrument.symbol,
+                    "market": instrument.market,
+                    "final_price": str(final_price) if final_price is not None else None,
+                    "prev_close": str(prev_close) if prev_close is not None else None,
+                    "volume": auction_volume,
+                    "amount": str(auction_amount) if auction_amount is not None else None,
+                    "source_timestamp": (
+                        auction_quote.source_time.isoformat()
+                        if auction_quote.source_time is not None else None
+                    ),
+                    "source_server": auction_quote.source_server,
+                    "raw_payload": auction_quote.raw_payload or {},
+                    "capture_time": auction_quote.captured_at.isoformat(),
+                    "is_final_auction": auction_quote.is_final,
+                },
                 "change_pct_components": change_components,
                 "relative_volume_median_components": vol_median_components,
                 "volume_percentile_components": vol_percentile_components,
@@ -1312,7 +1341,7 @@ async def run_auction_scan(
         )
         ready_count = sum(1 for r in results if r.event_type is not None)
         coverage_ratio = (
-            ready_count / eligible_count if eligible_count > 0 else 0.0
+            valid_count / eligible_count if eligible_count > 0 else 0.0
         )
 
         if valid_count == 0:
@@ -1855,23 +1884,27 @@ if __name__ == "__main__":
             self.leader_median_gap = leader_median_gap
             self.median_change_pct = median_change_pct
     reason, _ev = _detect_structural_transformation(
-        _MockScope(hhi=0.7), market_scope=None, instrument_change_pct=None,
+        cast(AuctionScopeResult, _MockScope(hhi=0.7)),
+        market_scope=None, instrument_change_pct=None,
     )
     assert reason == "sector_dispersion_failed"
     # 龙头孤立：leader_median_gap > 阈值
     reason, _ev = _detect_structural_transformation(
-        _MockScope(leader_median_gap=8.0), market_scope=None, instrument_change_pct=None,
+        cast(AuctionScopeResult, _MockScope(leader_median_gap=8.0)),
+        market_scope=None, instrument_change_pct=None,
     )
     assert reason == "leader_isolation"
     # 指数与中位数背离
     reason, _ev = _detect_structural_transformation(
-        None, market_scope=_MockScope(median_change_pct=2.0), instrument_change_pct=-3.0,
+        None,
+        market_scope=cast(AuctionScopeResult, _MockScope(median_change_pct=2.0)),
+        instrument_change_pct=-3.0,
     )
     assert reason == "index_divergence"
     # 无结构性变化
     reason, _ev = _detect_structural_transformation(
-        _MockScope(hhi=0.3, leader_median_gap=2.0),
-        market_scope=_MockScope(median_change_pct=2.0),
+        cast(AuctionScopeResult, _MockScope(hhi=0.3, leader_median_gap=2.0)),
+        market_scope=cast(AuctionScopeResult, _MockScope(median_change_pct=2.0)),
         instrument_change_pct=2.5,
     )
     assert reason is None

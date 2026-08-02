@@ -105,6 +105,20 @@ export interface ScanRun {
 }
 
 /** 个股竞价结果 */
+export interface AuctionFinalQuote {
+  symbol: string
+  market: string
+  final_price: string | null
+  prev_close: string | null
+  volume: number | null
+  amount: string | null
+  source_timestamp: string | null
+  source_server: string | null
+  raw_payload: Record<string, unknown>
+  capture_time: string
+  is_final_auction: boolean
+}
+
 export interface InstrumentResult {
   id: string
   scan_run_id: string
@@ -114,6 +128,7 @@ export interface InstrumentResult {
   symbol: string | null
   /** [P0-FE 2026-07-31] 股票名称（如 深科技） */
   name: string | null
+  final_quote: AuctionFinalQuote | null
   final_auction_price: string | null
   prev_close: string | null
   change_pct: number | null

@@ -78,6 +78,119 @@ AUCTION_SCHEDULER_POLL_INTERVAL = 30  # 30s 轮询一次（09:25/10:00 窗口内
 _TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
+async def run_verified_auction_pipeline(
+    db: AsyncSession,
+    trade_date: date,
+    *,
+    worker_id: str | None = None,
+    lease_epoch: int | None = None,
+    test_namespace: str = "production",
+    expected_symbols: list[tuple[str, str]] | None = None,
+    providers: list[Any] | None = None,
+) -> dict[str, Any]:
+    """采集来源证据、验证真值、扫描、聚合并切换正式 pointer。"""
+    from app.models.instrument import Instrument
+    from app.services.auction_aggregation_service import compute_auction_aggregation
+    from app.services.auction_publication_service import publish_auction_analysis
+    from app.services.auction_quote_capture_service import capture_auction_final_quotes
+    from app.services.auction_quote_provider import MootdxAuctionQuoteProvider
+    from app.services.auction_scan_service import run_auction_scan
+    from app.services.auction_truth_service import (
+        StaticAuctionQuoteProvider,
+        VerifiedAuctionQuoteProvider,
+        aggregate_auction_truth,
+        fetch_quote_sources,
+    )
+
+    if expected_symbols is None:
+        rows = (await db.execute(select(Instrument.symbol, Instrument.market).where(
+            Instrument.status == "active",
+            Instrument.symbol.op("~")(r"^\d{6}$"),
+        ))).all()
+        expected_symbols = [(str(symbol), str(market)) for symbol, market in rows]
+
+    resolved_providers = providers or [MootdxAuctionQuoteProvider()]
+    source_batches = await fetch_quote_sources(resolved_providers, expected_symbols)
+    source_capture_ids: list[str] = []
+    for source_id, family, quotes in source_batches:
+        source_capture = await capture_auction_final_quotes(
+            db,
+            trade_date,
+            test_namespace=test_namespace,
+            provider=StaticAuctionQuoteProvider(
+                quotes, source_id=source_id, provider_family=family,
+            ),
+            worker_id=worker_id,
+            expected_symbols=expected_symbols,
+        )
+        source_capture_ids.append(str(source_capture["capture_run_id"]))
+
+    truth = aggregate_auction_truth(
+        (quotes for _, _, quotes in source_batches),
+        expected_symbols=expected_symbols,
+        provider_families=(family for _, family, _ in source_batches),
+    )
+    if truth["status"] != "verified":
+        return {
+            "status": truth["status"],
+            "reason": (
+                "blocked_external_auction_truth_source"
+                if truth["status"] == "blocked_external"
+                else f"auction_truth_{truth['status']}"
+            ),
+            "truth_status": truth["status"],
+            "truth_coverage": truth["coverage"],
+            "source_capture_run_ids": source_capture_ids,
+            "decisions": [
+                {
+                    "symbol": decision.symbol,
+                    "market": decision.market,
+                    "status": decision.status,
+                    "reason_codes": list(decision.reason_codes),
+                }
+                for decision in truth["decisions"]
+            ],
+        }
+
+    consensus_capture = await capture_auction_final_quotes(
+        db,
+        trade_date,
+        test_namespace=test_namespace,
+        provider=VerifiedAuctionQuoteProvider(truth["verified_quotes"]),
+        worker_id=worker_id,
+        expected_symbols=expected_symbols,
+    )
+    scan = await run_auction_scan(
+        db,
+        trade_date,
+        auction_type="final",
+        worker_id=worker_id,
+        lease_epoch=lease_epoch,
+    )
+    run_id = scan.get("run_id")
+    if run_id is None or scan.get("status") not in ("succeeded", "partial"):
+        return {**scan, "truth_status": "verified", "capture_run_id": consensus_capture["capture_run_id"]}
+
+    aggregation = await compute_auction_aggregation(db, run_id)
+    publication = await publish_auction_analysis(
+        db,
+        scan_run_id=run_id,
+        capture_run_id=consensus_capture["capture_run_id"],
+        truth_status="verified",
+        test_namespace=test_namespace,
+    )
+    return {
+        **scan,
+        "truth_status": "verified",
+        "truth_coverage": truth["coverage"],
+        "capture_run_id": consensus_capture["capture_run_id"],
+        "source_capture_run_ids": source_capture_ids,
+        "aggregation_status": "succeeded",
+        "aggregation": aggregation,
+        "publication_id": publication.id,
+    }
+
+
 # =============================================================================
 # Job 创建（幂等）
 # =============================================================================
@@ -304,14 +417,8 @@ async def execute_auction_scan_run(
         执行结果 dict（含 status、run_id、coverage、capture_run_id 等）
     """
     from app.db import AsyncSessionLocal
-    from app.services.auction_quote_capture_service import (
-        PRODUCTION_NAMESPACE,
-        capture_auction_final_quotes,
-    )
-    from app.services.auction_scan_service import (
-        AuctionScanConflictError,
-        run_auction_scan,
-    )
+    from app.services.auction_quote_capture_service import PRODUCTION_NAMESPACE
+    from app.services.auction_scan_service import AuctionScanConflictError
 
     namespace = test_namespace or PRODUCTION_NAMESPACE
 
@@ -323,37 +430,14 @@ async def execute_auction_scan_run(
 
     try:
         async with AsyncSessionLocal() as db:
-            # 1. 采集最终竞价报价（09:25:05 后写入 auction_final_quotes）
-            capture_result = await capture_auction_final_quotes(
-                db, trade_date,
+            result = await run_verified_auction_pipeline(
+                db,
+                trade_date,
                 test_namespace=namespace,
                 worker_id=worker_id,
+                lease_epoch=lease_epoch,
                 expected_symbols=expected_symbols,
             )
-            await db.commit()
-
-            logger.info(
-                "[AuctionScheduler] capture 完成: run_id=%s status=%s "
-                "expected=%d received=%d valid=%d coverage=%.4f",
-                capture_result.get("capture_run_id"),
-                capture_result.get("status"),
-                capture_result.get("expected_count"),
-                capture_result.get("received_count"),
-                capture_result.get("valid_count"),
-                capture_result.get("coverage"),
-            )
-
-            # 2. 基于采集结果执行扫描（scan 内部从 auction_final_quotes 读取）
-            result = await run_auction_scan(
-                db, trade_date,
-                auction_type="final",
-                worker_id=worker_id,
-                lease_epoch=lease_epoch,
-            )
-            # 附加 capture 信息到 scan 结果
-            result["capture_run_id"] = capture_result.get("capture_run_id")
-            result["capture_status"] = capture_result.get("status")
-            result["capture_coverage"] = capture_result.get("coverage")
             await db.commit()
 
         # 标记 SchedulerJobRun succeeded
@@ -362,7 +446,7 @@ async def execute_auction_scan_run(
             "[AuctionScheduler] auction_final 完成: job_run_id=%s, status=%s, "
             "coverage=%.4f, events=%d",
             job_run_id, result.get("status"),
-            result.get("coverage_ratio", 0.0),
+            result.get("coverage_ratio", result.get("truth_coverage", 0.0)),
             result.get("event_count", 0),
         )
         return result

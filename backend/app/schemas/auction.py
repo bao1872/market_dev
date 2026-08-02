@@ -107,6 +107,22 @@ class ScanRunOut(BaseModel):
     finished_at: datetime | None = None
 
 
+class AuctionFinalQuoteOut(BaseModel):
+    """通过独立来源门禁后的最终竞价报价合同。"""
+
+    symbol: str
+    market: str
+    final_price: Decimal | None
+    prev_close: Decimal | None
+    volume: int | None
+    amount: Decimal | None
+    source_timestamp: datetime | None = None
+    source_server: str | None = None
+    raw_payload: dict[str, Any]
+    capture_time: datetime
+    is_final_auction: bool
+
+
 class InstrumentResultOut(BaseModel):
     """个股竞价结果输出。"""
 
@@ -117,6 +133,7 @@ class InstrumentResultOut(BaseModel):
     # [P0-FE 2026-07-31] 个体识别字段：DTO 必须返回 symbol + name
     symbol: str | None = Field(default=None, description="股票代码（如 000021）")
     name: str | None = Field(default=None, description="股票名称（如 深科技）")
+    final_quote: AuctionFinalQuoteOut | None = None
     final_auction_price: Decimal | None = None
     prev_close: Decimal | None = None
     change_pct: float | None = None

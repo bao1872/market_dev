@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from app.core.pytdx_adapter import MARKET_NAME_TO_CODE, PytdxAdapter
@@ -54,6 +55,10 @@ class AuctionQuoteResult:
     reason_codes: list[str] = field(default_factory=list)
     raw_payload: dict[str, Any] | None = None
     source_server: str | None = None
+    captured_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    is_final_auction: bool = True
+    source_id: str = "mootdx"
+    provider_family: str = "tongdaxin"
 
     @property
     def is_valid(self) -> bool:
@@ -80,6 +85,16 @@ class AuctionFinalQuoteProvider(Protocol):
 
     def close(self) -> None:
         """释放资源。"""
+        ...
+
+    @property
+    def source_id(self) -> str:
+        """可持久化的数据源标识。"""
+        ...
+
+    @property
+    def provider_family(self) -> str:
+        """独立供应链标识；同 family 的不同服务器不算独立来源。"""
         ...
 
 
@@ -128,6 +143,14 @@ class MootdxAuctionQuoteProvider:
         self._batch_size = batch_size
         self._batch_interval = batch_interval
         self._connected = False
+
+    @property
+    def source_id(self) -> str:
+        return "mootdx"
+
+    @property
+    def provider_family(self) -> str:
+        return "tongdaxin"
 
     def __enter__(self) -> MootdxAuctionQuoteProvider:
         return self
