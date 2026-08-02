@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date
+from collections import defaultdict
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -34,8 +35,11 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.review.metric_engine import compute_all_metrics
+from app.domain.review.member_fact import DailyBarFact, ReviewMemberFact
+from app.domain.review.metric_engine import _cross_section_percentile, compute_all_metrics
 from app.domain.review.metric_registry import DEFAULT_REGISTRY
+from app.models.bar import BarDaily
+from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
 from app.models.instrument import Instrument
 from app.models.market_review import MarketReviewScopeSnapshot
 from app.services.board_membership_service import (
@@ -359,6 +363,64 @@ async def compute_scope_metrics(
     return snapshot
 
 
+def _scope_family(scope_type: str) -> str:
+    if scope_type.startswith("industry_"):
+        return "industry"
+    return scope_type
+
+
+async def apply_cross_section_percentiles(
+    session: AsyncSession,
+    review_run_id: uuid.UUID,
+) -> int:
+    """Second pass: rank normalized values among same-day scope-family peers."""
+    stmt = (
+        select(MarketReviewScopeSnapshot)
+        .where(MarketReviewScopeSnapshot.review_run_id == review_run_id)
+        .order_by(
+            MarketReviewScopeSnapshot.scope_type.asc(),
+            MarketReviewScopeSnapshot.scope_key.asc(),
+        )
+    )
+    snapshots = list((await session.execute(stmt)).scalars())
+    fields = {
+        "P": "p_payload",
+        "Q": "q_payload",
+        "U": "u_payload",
+        "C": "c_payload",
+        "V": "v_payload",
+    }
+    peers: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for snapshot in snapshots:
+        family = _scope_family(snapshot.scope_type)
+        for code, field in fields.items():
+            payload = getattr(snapshot, field)
+            value = payload.get("value") if isinstance(payload, dict) else None
+            if isinstance(value, (int, float)):
+                peers[(family, code)].append(float(value))
+
+    updated = 0
+    for snapshot in snapshots:
+        family = _scope_family(snapshot.scope_type)
+        for code, field in fields.items():
+            original = getattr(snapshot, field)
+            if not isinstance(original, dict):
+                continue
+            payload = dict(original)
+            value = payload.get("value")
+            peer_values = peers.get((family, code), [])
+            percentile = (
+                _cross_section_percentile(float(value), peer_values)
+                if isinstance(value, (int, float)) and peer_values
+                else None
+            )
+            payload["crossSectionPercentile"] = percentile
+            setattr(snapshot, field, payload)
+        updated += 1
+    await session.flush()
+    return updated
+
+
 def _classify_missing_reasons(
     flat_list: list[dict[str, Any]], eligible_count: int,
 ) -> dict[str, int]:
@@ -506,11 +568,14 @@ async def fetch_member_flat_list(
     session: AsyncSession,
     instrument_ids: list[uuid.UUID],
     source_core_run_id: uuid.UUID,
+    *,
+    trade_date: date | None = None,
 ) -> list[dict[str, Any]]:
-    """批量查询成员的 first_pyramid_flat（基于 stock_core snapshot run）。
+    """Build typed Review member facts from one core run and PIT daily data.
 
     Returns:
-        成员 flat 字典列表（缺失成员不在结果中），每条含 instrument_id
+        Metric input dictionaries. When ``trade_date`` is omitted this preserves the
+        legacy identity-only behavior for non-Review callers and unit fixtures.
     """
     if not instrument_ids:
         return []
@@ -531,7 +596,7 @@ async def fetch_member_flat_list(
         )
     )
     result = await session.execute(stmt)
-    out: list[dict[str, Any]] = []
+    source_rows: list[tuple[uuid.UUID, uuid.UUID, str, str, dict[str, Any]]] = []
     for row in result:
         snapshot_id = row[0]
         instrument_id = row[1]
@@ -542,14 +607,62 @@ async def fetch_member_flat_list(
             continue
         flat = summary.get("first_pyramid_flat")
         if isinstance(flat, dict):
-            # 注入 instrument_id 用于归因
-            flat_with_id = dict(flat)
-            flat_with_id["_instrument_id"] = str(instrument_id)
-            flat_with_id["_instrument_symbol"] = symbol
-            flat_with_id["_instrument_name"] = name
-            flat_with_id["_snapshot_id"] = snapshot_id
-            out.append(flat_with_id)
-    return out
+            source_rows.append((snapshot_id, instrument_id, symbol, name, flat))
+
+    if trade_date is None:
+        return [
+            {
+                **flat,
+                "_instrument_id": str(instrument_id),
+                "_instrument_symbol": symbol,
+                "_instrument_name": name,
+                "_snapshot_id": snapshot_id,
+            }
+            for snapshot_id, instrument_id, symbol, name, flat in source_rows
+        ]
+
+    bar_stmt = (
+        select(BarDaily)
+        .where(
+            BarDaily.instrument_id.in_(instrument_ids),
+            BarDaily.trade_date <= trade_date,
+            BarDaily.trade_date >= trade_date - timedelta(days=400),
+        )
+        .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
+    )
+    bars_by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
+    for bar in (await session.execute(bar_stmt)).scalars():
+        bars_by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
+
+    previous_stmt = (
+        select(FirstPyramidHistoryDailyState)
+        .where(
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            FirstPyramidHistoryDailyState.trade_date < trade_date,
+            FirstPyramidHistoryDailyState.trade_date >= trade_date - timedelta(days=45),
+        )
+        .order_by(
+            FirstPyramidHistoryDailyState.instrument_id.asc(),
+            FirstPyramidHistoryDailyState.trade_date.desc(),
+        )
+    )
+    previous_by_instrument: dict[uuid.UUID, dict[str, Any]] = {}
+    for state in (await session.execute(previous_stmt)).scalars():
+        previous_by_instrument.setdefault(state.instrument_id, state.state_payload)
+
+    return [
+        ReviewMemberFact.build(
+            instrument_id=instrument_id,
+            symbol=symbol,
+            name=name,
+            snapshot_id=snapshot_id,
+            trade_date=trade_date,
+            first_pyramid=flat,
+            bars=bars_by_instrument[instrument_id],
+            previous_state=previous_by_instrument.get(instrument_id),
+        ).to_metric_input()
+        for snapshot_id, instrument_id, symbol, name, flat in source_rows
+    ]
 
 
 if __name__ == "__main__":

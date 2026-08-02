@@ -104,10 +104,6 @@ def test_visual_segments_are_not_segment_fact_ownership() -> None:
     assert before["segment_start_bar_index"] is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 8 replaces legacy Review P with typed ReviewMemberFact",
-)
 def test_review_daily_return_derivers_do_not_read_segment_change() -> None:
     forbidden_functions = {
         "_derive_scope_return_1d",

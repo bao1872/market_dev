@@ -185,6 +185,20 @@ class TestInsufficientHistoryContract:
                 "fp_momentum_change": "enhancing",
                 "fp_structure_alignment": "aligned",
                 "fp_segment_change_pct": 2.5,
+                "review_return_1d": 1.5,
+                "review_price_position": 0.9,
+                "review_volume_ratio20": 1.8,
+                "review_amount_ratio20": 1.6,
+                "review_volume_percentile20": 80.0,
+                "review_amount_percentile200": 70.0,
+                "review_amount": 1.0e8,
+                "review_previous_first_pyramid": {
+                    "fp_trend_direction": "sideways",
+                    "fp_swing_direction": "sideways",
+                    "fp_internal_direction": "sideways",
+                    "fp_momentum_direction": "flat",
+                    "fp_momentum_change": "flat",
+                },
                 "fp_volume_badge": "放量",
                 "fp_volume_ratio20": 1.8,
                 "fp_volume_percentile20": 80.0,
@@ -271,7 +285,7 @@ class TestInsufficientHistoryContract:
 
 
 class TestSegmentChangePctDefinition:
-    """[P0-6] 确认 fp_segment_change_pct 定义。
+    """Confirm DSA segment change remains separate from Review daily return.
 
     根因审计（2026-07-30）：
     - 来源: first_pyramid_flatten.py L797
@@ -279,12 +293,8 @@ class TestSegmentChangePctDefinition:
     - 含义: 当前趋势段内累计变化（segment_start_price → now）
     - 非: 当日涨跌幅（daily change）
 
-    P metric 组件 scope_return_1d / advance_ratio 使用此字段作为"1 日收益率"，
-    定义不匹配。后续需：
-    - 方案 A: 上游新增 fp_daily_change_pct 字段（推荐，需改 first_pyramid_flatten）
-    - 方案 B: 调整 P 组件描述为"段内收益率"并重命名组件
-
-    本轮不实现修复，仅写合同测试锁定当前行为。
+    Review P reads ``review_return_1d`` from PIT daily bars. The segment field remains
+    available to First Pyramid consumers but is forbidden in Review return components.
     """
 
     def test_fp_segment_change_pct_is_segment_not_daily(self):
@@ -298,18 +308,23 @@ class TestSegmentChangePctDefinition:
         )
         assert spec.get("data_type") == "percent"
 
-    def test_p_components_using_segment_change_pct(self):
-        """合同：列出所有使用 fp_segment_change_pct 的 P 组件。"""
+    def test_p_components_use_daily_return_not_segment_change(self):
+        """Review return components use the typed daily fact exclusively."""
         p_spec = DEFAULT_REGISTRY.get_metric("P")
-        components_using_change_pct = []
-        for comp in p_spec.components:
-            if "fp_segment_change_pct" in comp.extra_fields:
-                components_using_change_pct.append(comp.name)
-
-        # P 的 3 个组件使用 fp_segment_change_pct
-        assert "scope_return_1d" in components_using_change_pct
-        assert "advance_ratio" in components_using_change_pct
-        assert "trend_price_alignment_ratio" in components_using_change_pct
+        daily_components = {
+            comp.name
+            for comp in p_spec.components
+            if "review_return_1d" in comp.extra_fields
+        }
+        assert daily_components == {
+            "scope_return_1d",
+            "advance_ratio",
+            "trend_price_alignment_ratio",
+        }
+        assert all(
+            "fp_segment_change_pct" not in comp.extra_fields
+            for comp in p_spec.components
+        )
 
 
 if __name__ == "__main__":

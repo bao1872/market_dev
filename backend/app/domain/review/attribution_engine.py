@@ -203,7 +203,7 @@ def compute_instrument_contribution(
     out: dict[str, float | None] = {}
 
     # P 贡献
-    chg = _safe_float(flat.get("fp_segment_change_pct"))
+    chg = _safe_float(flat.get("review_return_1d"))
     p_raw = _safe_float((parent_metrics.get("P") or {}).get("rawValue"))
     if chg is not None and p_raw is not None:
         out["P"] = (chg - p_raw) * weight
@@ -248,9 +248,9 @@ def compute_instrument_contribution(
         out["C"] = None
 
     # V 贡献：成员 volume_ratio20 - 1
-    vr = _safe_float(flat.get("fp_volume_ratio20"))
-    if vr is not None:
-        out["V"] = (vr - 1.0) * weight
+    amount_ratio = _safe_float(flat.get("review_amount_ratio20"))
+    if amount_ratio is not None:
+        out["V"] = (amount_ratio - 1.0) * weight
     else:
         out["V"] = None
 
@@ -290,7 +290,9 @@ def classify_instrument_board_role(
         return "second_line"
 
     # 弹性：量能扩张且动量增强；segment change 不是日收益，禁止用于角色判定。
-    vr = _safe_float(flat.get("fp_volume_ratio20"))
+    vr = _safe_float(flat.get("review_volume_ratio20"))
+    if vr is None:
+        vr = _safe_float(flat.get("fp_volume_ratio20"))
     momentum_change = FirstPyramidSemanticAdapter(flat).momentum_change
     if vr is not None and vr > 1.5 and momentum_change is MomentumChange.ENHANCING:
         return "elasticity"

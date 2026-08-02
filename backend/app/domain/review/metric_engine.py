@@ -38,7 +38,6 @@ from app.domain.first_pyramid_semantics import (
     Direction,
     MomentumChange,
     MomentumDirection,
-    VolumeBadge,
 )
 from app.domain.review.metric_registry import (
     DEFAULT_REGISTRY,
@@ -116,6 +115,15 @@ def _percentile_of(value: float, history: list[float]) -> float | None:
     return _clamp(le_count / n * 100.0)
 
 
+def _cross_section_percentile(value: float, peers: list[float]) -> float | None:
+    """Rank within same-day peers; the 60-observation gate is history-only."""
+    finite = [item for item in peers if item == item]
+    if not finite:
+        return None
+    below_or_equal = sum(item <= value for item in finite)
+    return _clamp(below_or_equal / len(finite) * 100.0)
+
+
 def _normalize_component(
     raw_value: float | None,
     direction: str,
@@ -140,27 +148,9 @@ def _normalize_component(
     return _clamp(pct)
 
 
-# P 指标依赖 fp_segment_change_pct 的 component 名称集合
-# 如果 fp_segment_change_pct 全空，这些 component 无法计算
-_P_SEGMENT_CHANGE_COMPONENTS: frozenset[str] = frozenset({
-    "scope_return_1d",
-    "advance_ratio",
-    "trend_price_alignment_ratio",
-})
-
-
-def _has_segment_change_data(flat_list: list[dict[str, Any]]) -> bool:
-    """检查 flat_list 中是否至少有一个成员的 fp_segment_change_pct 非 None。
-
-    [P0-6 2026-07-30] P 指标核心依赖 fp_segment_change_pct：
-    - scope_return_1d / advance_ratio / trend_price_alignment_ratio 均依赖此字段
-    - 若全空，P 的 value 必须 None，readiness 标记为 unavailable
-    - 不得填 0 或伪造值
-    """
-    for f in flat_list:
-        if _safe_float(f.get("fp_segment_change_pct")) is not None:
-            return True
-    return False
+def _has_daily_return_data(flat_list: list[dict[str, Any]]) -> bool:
+    """Return whether the PIT daily price fact exists for at least one member."""
+    return any(_safe_float(f.get("review_return_1d")) is not None for f in flat_list)
 
 
 # =============================================================================
@@ -174,7 +164,7 @@ def _derive_scope_return_1d(flat_list: list[dict[str, Any]]) -> float | None:
     PRD §7.2：优先官方指数；无官方序列时使用成员等权中位数，
     并记录 price_source=member_equal_weight。
     """
-    returns = [_safe_float(f.get("fp_segment_change_pct")) for f in flat_list]
+    returns = [_safe_float(f.get("review_return_1d")) for f in flat_list]
     returns = [r for r in returns if r is not None]
     if not returns:
         return None
@@ -192,7 +182,7 @@ def _derive_advance_ratio(flat_list: list[dict[str, Any]]) -> float | None:
     ready = 0
     up = 0
     for f in flat_list:
-        chg = _safe_float(f.get("fp_segment_change_pct"))
+        chg = _safe_float(f.get("review_return_1d"))
         if chg is None:
             continue
         ready += 1
@@ -212,7 +202,7 @@ def _derive_trend_price_alignment_ratio(
     ready = 0
     aligned = 0
     for f in flat_list:
-        chg = _safe_float(f.get("fp_segment_change_pct"))
+        chg = _safe_float(f.get("review_return_1d"))
         td = FirstPyramidSemanticAdapter(f).trend
         if chg is None or td is None:
             continue
@@ -227,18 +217,18 @@ def _derive_trend_price_alignment_ratio(
 def _derive_new_high_ratio(flat_list: list[dict[str, Any]]) -> float | None:
     """进入近期高位区间的成员比例（PRD §7.2）。
 
-    近期高位定义：distance_to_trailing_top_pct <= 3%（距阶段顶部 3% 以内）。
+    近期高位定义：当日收盘位于自身 120 日高低区间顶部 3%。
     """
     if not flat_list:
         return None
     ready = 0
     near_high = 0
     for f in flat_list:
-        dist = _safe_float(f.get("fp_distance_to_trailing_top_pct"))
-        if dist is None:
+        position = _safe_float(f.get("review_price_position"))
+        if position is None:
             continue
         ready += 1
-        if dist <= 3.0:
+        if position >= 0.97:
             near_high += 1
     if ready == 0:
         return None
@@ -250,16 +240,14 @@ def _derive_price_position_median(
 ) -> float | None:
     """成员价格在自身滚动区间的位置中位数（PRD §7.2）。
 
-    位置 = (current - trailing_bottom) / (trailing_top - trailing_bottom)
-    使用 distance 字段反推：position = 1 - distance_to_top_pct/100
+    位置由成员事实层用 point-in-time 日线计算。
     """
     positions: list[float] = []
     for f in flat_list:
-        dist_top = _safe_float(f.get("fp_distance_to_trailing_top_pct"))
-        if dist_top is None:
+        position = _safe_float(f.get("review_price_position"))
+        if position is None:
             continue
-        # 简化：位置 = 1 - dist_top/100（距顶部越近位置越高）
-        positions.append(max(0.0, min(1.0, 1.0 - dist_top / 100.0)))
+        positions.append(max(0.0, min(1.0, position)))
     if not positions:
         return None
     positions.sort()
@@ -330,34 +318,79 @@ def _derive_structure_breakdown_diffusion(
 def _derive_multi_dim_improving_ratio(
     flat_list: list[dict[str, Any]],
 ) -> float | None:
-    """至少两个核心维度同步改善的成员比例（PRD §7.4）。
-
-    维度：trend=up, structure(swing)=up, momentum=up, momentum_change=enhancing。
-    任一成员满足其中 >=2 个即计入。
-    """
+    """Share of members improving in at least two dimensions day over day."""
     if not flat_list:
         return None
     ready = 0
     multi = 0
     for f in flat_list:
-        semantics = FirstPyramidSemanticAdapter(f)
-        if semantics.trend is None:
+        current = FirstPyramidSemanticAdapter(f)
+        previous_payload = f.get("review_previous_first_pyramid")
+        if current.trend is None or not isinstance(previous_payload, dict):
             continue
+        previous = FirstPyramidSemanticAdapter(previous_payload)
         ready += 1
-        score = 0
-        if semantics.trend is Direction.UP:
-            score += 1
-        if semantics.swing is Direction.UP:
-            score += 1
-        if semantics.momentum_direction is MomentumDirection.EXPANDING:
-            score += 1
-        if semantics.momentum_change is MomentumChange.ENHANCING:
-            score += 1
-        if score >= 2:
+        improvements = sum(
+            (
+                _direction_score(current.trend) > _direction_score(previous.trend),
+                _direction_score(current.swing) > _direction_score(previous.swing),
+                _direction_score(current.internal) > _direction_score(previous.internal),
+                _momentum_direction_score(current.momentum_direction)
+                > _momentum_direction_score(previous.momentum_direction),
+                _momentum_change_score(current.momentum_change)
+                > _momentum_change_score(previous.momentum_change),
+            )
+        )
+        if improvements >= 2:
             multi += 1
     if ready == 0:
         return None
     return multi / ready
+
+
+def _direction_score(value: Direction | None) -> int:
+    if value is None:
+        return 0
+    return {Direction.DOWN: -1, Direction.SIDEWAYS: 0, Direction.UP: 1}[value]
+
+
+def _momentum_direction_score(value: MomentumDirection | None) -> int:
+    if value is None:
+        return 0
+    return {
+        MomentumDirection.CONTRACTING: -1,
+        MomentumDirection.FLAT: 0,
+        MomentumDirection.EXPANDING: 1,
+    }[value]
+
+
+def _momentum_change_score(value: MomentumChange | None) -> int:
+    if value is None:
+        return 0
+    return {
+        MomentumChange.WEAKENING: -1,
+        MomentumChange.FLAT: 0,
+        MomentumChange.ENHANCING: 1,
+    }[value]
+
+
+def _derive_momentum_enhancing_coverage(
+    flat_list: list[dict[str, Any]],
+) -> float | None:
+    ready = 0
+    enhancing = 0
+    for flat in flat_list:
+        previous_payload = flat.get("review_previous_first_pyramid")
+        if not isinstance(previous_payload, dict):
+            continue
+        current = FirstPyramidSemanticAdapter(flat).momentum_change
+        previous = FirstPyramidSemanticAdapter(previous_payload).momentum_change
+        if current is None or previous is None:
+            continue
+        ready += 1
+        if _momentum_change_score(current) > _momentum_change_score(previous):
+            enhancing += 1
+    return enhancing / ready if ready else None
 
 
 def _derive_fresh_structure_event_coverage(
@@ -397,9 +430,9 @@ def _derive_non_head_participation_ratio(
         return None
     # 按 change_pct 排序，前 30% 视为头部
     valid = [
-        (f, _safe_float(f.get("fp_segment_change_pct")))
+        (f, _safe_float(f.get("review_return_1d")))
         for f in flat_list
-        if _safe_float(f.get("fp_segment_change_pct")) is not None
+        if _safe_float(f.get("review_return_1d")) is not None
         and FirstPyramidSemanticAdapter(f).trend is not None
     ]
     if not valid:
@@ -422,14 +455,13 @@ def _derive_leader_follower_common_confirm_ratio(
     简化定义：按 volume_ratio20 排序，前 20% 为龙头，中 60% 为二线，后 20% 为普通；
     若三组各自上涨比例均 >= 50%，返回 1.0，否则返回三组平均上涨比例。
 
-    [P0-6 2026-07-30] fp_segment_change_pct 全空时返回 None，禁止伪造 0.0。
-    无价格变化数据时无法判断方向确认，结果应为 None。
+    无日收益数据时无法判断方向确认，结果应为 None。
     """
     if not flat_list:
         return None
-    # [P0-6] 前置检查：若全部成员 fp_segment_change_pct 为空，直接返回 None
+    # 前置检查：若全部成员日收益为空，直接返回 None
     has_any_change = any(
-        _safe_float(f.get("fp_segment_change_pct")) is not None
+        _safe_float(f.get("review_return_1d")) is not None
         for f in flat_list
     )
     if not has_any_change:
@@ -455,7 +487,7 @@ def _derive_leader_follower_common_confirm_ratio(
             return 0.0
         up = 0
         for f, _ in group:
-            chg = _safe_float(f.get("fp_segment_change_pct"))
+            chg = _safe_float(f.get("review_return_1d"))
             if chg is not None and chg > 0:
                 up += 1
         return up / len(group)
@@ -471,9 +503,9 @@ def _derive_leader_follower_common_confirm_ratio(
 def _derive_top5_contribution(flat_list: list[dict[str, Any]]) -> float | None:
     """绝对价格变化贡献 Top5 占比（PRD §7.5）。"""
     changes = [
-        (f, _safe_float(f.get("fp_segment_change_pct")))
+        (f, _safe_float(f.get("review_return_1d")))
         for f in flat_list
-        if _safe_float(f.get("fp_segment_change_pct")) is not None
+        if _safe_float(f.get("review_return_1d")) is not None
     ]
     if not changes:
         return None
@@ -518,9 +550,9 @@ def _derive_member_change_hhi(flat_list: list[dict[str, Any]]) -> float | None:
     HHI = sum((abs_change_i / total_abs_change)^2)，范围 [0, 1]。
     """
     changes = [
-        _safe_float(f.get("fp_segment_change_pct"))
+        _safe_float(f.get("review_return_1d"))
         for f in flat_list
-        if _safe_float(f.get("fp_segment_change_pct")) is not None
+        if _safe_float(f.get("review_return_1d")) is not None
     ]
     if not changes:
         return None
@@ -537,9 +569,9 @@ def _derive_leader_median_diff(flat_list: list[dict[str, Any]]) -> float | None:
     简化：top1 成员 change_pct - 中位数 change_pct。
     """
     changes = [
-        _safe_float(f.get("fp_segment_change_pct"))
+        _safe_float(f.get("review_return_1d"))
         for f in flat_list
-        if _safe_float(f.get("fp_segment_change_pct")) is not None
+        if _safe_float(f.get("review_return_1d")) is not None
     ]
     if len(changes) < 3:
         return None
@@ -558,9 +590,9 @@ def _derive_top5_amount_contribution(
 ) -> float | None:
     """Top5 成交额占比（PRD §7.5）。"""
     amounts = [
-        (f, _safe_float(f.get("fp_amount")))
+        (f, _safe_float(f.get("review_amount")))
         for f in flat_list
-        if _safe_float(f.get("fp_amount")) is not None
+        if _safe_float(f.get("review_amount")) is not None
     ]
     if len(amounts) < 5:
         return None
@@ -574,17 +606,17 @@ def _derive_top5_amount_contribution(
 def _derive_volume_expansion_ratio(
     flat_list: list[dict[str, Any]],
 ) -> float | None:
-    """放量成员比例（PRD §7.6）。"""
+    """Members whose daily volume exceeds 1.5 times the prior 20-day mean."""
     if not flat_list:
         return None
     ready = 0
     high = 0
     for f in flat_list:
-        badge = FirstPyramidSemanticAdapter(f).volume_badge
-        if badge is None:
+        ratio = _safe_float(f.get("review_volume_ratio20"))
+        if ratio is None:
             continue
         ready += 1
-        if badge is VolumeBadge.HIGH:
+        if ratio > 1.5:
             high += 1
     if ready == 0:
         return None
@@ -594,17 +626,17 @@ def _derive_volume_expansion_ratio(
 def _derive_amount_expansion_ratio(
     flat_list: list[dict[str, Any]],
 ) -> float | None:
-    """成交额扩张成员比例（PRD §7.6，volume_ratio20 > 1.5）。"""
+    """Members whose amount exceeds 1.5 times the prior 20-day mean."""
     if not flat_list:
         return None
     ready = 0
     expand = 0
     for f in flat_list:
-        vr = _safe_float(f.get("fp_volume_ratio20"))
-        if vr is None:
+        ratio = _safe_float(f.get("review_amount_ratio20"))
+        if ratio is None:
             continue
         ready += 1
-        if vr > 1.5:
+        if ratio > 1.5:
             expand += 1
     if ready == 0:
         return None
@@ -614,22 +646,20 @@ def _derive_amount_expansion_ratio(
 def _derive_trend_segment_volume_improvement(
     flat_list: list[dict[str, Any]],
 ) -> float | None:
-    """趋势段平均量相对前段改善比例（PRD §7.6）。"""
-    improvements: list[float] = []
+    """Median current-segment mean volume / previous-segment mean volume."""
+    ratios: list[float] = []
     for f in flat_list:
-        cur = _safe_float(f.get("fp_segment_volume_ratio"))
-        prev = _safe_float(f.get("fp_prev_segment_volume"))
-        if cur is None or prev is None or prev < _EPSILON:
+        ratio = _safe_float(f.get("fp_segment_volume_ratio"))
+        if ratio is None:
             continue
-        improvements.append((cur - prev) / prev)
-    if not improvements:
+        ratios.append(ratio)
+    if not ratios:
         return None
-    # 返回中位数
-    improvements.sort()
-    n = len(improvements)
+    ratios.sort()
+    n = len(ratios)
     if n % 2 == 1:
-        return improvements[n // 2]
-    return (improvements[n // 2 - 1] + improvements[n // 2]) / 2.0
+        return ratios[n // 2]
+    return (ratios[n // 2 - 1] + ratios[n // 2]) / 2.0
 
 
 def _derive_price_amount_efficiency_median(
@@ -637,15 +667,15 @@ def _derive_price_amount_efficiency_median(
 ) -> float | None:
     """价格变化 / 相对成交额的效率中位数（PRD §7.6）。
 
-    efficiency = abs(change_pct) / max(volume_ratio20, epsilon)
+    efficiency = abs(return_1d) / max(amount_ratio20, epsilon)
     """
     effs: list[float] = []
     for f in flat_list:
-        chg = _safe_float(f.get("fp_segment_change_pct"))
-        vr = _safe_float(f.get("fp_volume_ratio20"))
-        if chg is None or vr is None or vr < _EPSILON:
+        chg = _safe_float(f.get("review_return_1d"))
+        amount_ratio = _safe_float(f.get("review_amount_ratio20"))
+        if chg is None or amount_ratio is None or amount_ratio < _EPSILON:
             continue
-        effs.append(abs(chg) / vr)
+        effs.append(abs(chg) / amount_ratio)
     if not effs:
         return None
     effs.sort()
@@ -665,6 +695,7 @@ _DERIVE_FNS: dict[str, Any] = {
     "structure_net_event_rate": _derive_structure_net_event_rate,
     "structure_breakdown_diffusion": _derive_structure_breakdown_diffusion,
     "multi_dim_improving_ratio": _derive_multi_dim_improving_ratio,
+    "momentum_enhancing_coverage": _derive_momentum_enhancing_coverage,
     "fresh_structure_event_coverage": _derive_fresh_structure_event_coverage,
     "non_head_participation_ratio": _derive_non_head_participation_ratio,
     "leader_follower_common_confirm_ratio": _derive_leader_follower_common_confirm_ratio,
@@ -720,7 +751,12 @@ def _compute_component_raw(
             if val == "up" or val == "enhancing" or val == "aligned":
                 matched += 1
         # 分位类字段（0-100）：取中位数 / 100
-        elif src in ("fp_volume_percentile20", "fp_volume_percentile200"):
+        elif src in (
+            "fp_volume_percentile20",
+            "fp_volume_percentile200",
+            "review_volume_percentile20",
+            "review_amount_percentile200",
+        ):
             try:
                 matched += float(val) / 100.0
             except (TypeError, ValueError):
@@ -790,6 +826,7 @@ def _build_component_payload(
         "denominator": ready_count,
         "fieldSource": spec.field_source,
         "weight": spec.weight,
+        "weightMode": _weight_mode(flat_list),
         "coverage": coverage,
         "status": status,
         "readiness": {
@@ -802,6 +839,15 @@ def _build_component_payload(
             if spec.derive_fn else None
         ),
     }
+
+
+def _weight_mode(flat_list: list[dict[str, Any]]) -> str:
+    modes = {
+        str(flat.get("review_weight_mode"))
+        for flat in flat_list
+        if flat.get("review_weight_mode")
+    }
+    return modes.pop() if len(modes) == 1 else "mixed" if modes else "equal_weight"
 
 
 # =============================================================================
@@ -863,15 +909,11 @@ def compute_metric_payload(
     else:
         value = None
 
-    # [P0-6 2026-07-30] P 指标 fp_segment_change_pct 全空强制 unavailable
-    # PRD §7.2：P 的核心 component（scope_return_1d / advance_ratio /
-    # trend_price_alignment_ratio）均依赖 fp_segment_change_pct。
-    # 若该字段全空，即使 new_high_ratio / price_position_median 有值，
-    # P 的 value 也必须 None，readiness 标记为 unavailable，不得伪造。
-    p_segment_change_unavailable = (
-        metric_code == "P" and not _has_segment_change_data(flat_list)
+    # P 的核心 component 依赖同日行情事实；DSA segment 累计涨跌不得替代。
+    p_daily_return_unavailable = (
+        metric_code == "P" and not _has_daily_return_data(flat_list)
     )
-    if p_segment_change_unavailable:
+    if p_daily_return_unavailable:
         value = None
 
     # 3. rawValue = 原始加权平均（归一化前）
@@ -907,7 +949,7 @@ def compute_metric_payload(
     # 6. crossSectionPercentile
     cross_pct: float | None = None
     if value is not None and cross_section_values:
-        cross_pct = _percentile_of(value, cross_section_values)
+        cross_pct = _cross_section_percentile(value, cross_section_values)
 
     # 7. coverage
     coverage = ready_count / max(1, len(flat_list)) if flat_list else 0.0
@@ -927,10 +969,10 @@ def compute_metric_payload(
     raw_ready = raw_value is not None
     normalized_ready = value is not None
 
-    # [P0-6] P 指标 fp_segment_change_pct 全空属于"上游关键数据缺失"，
+    # P 指标日收益全空属于上游关键数据缺失，
     # 即使部分 component（new_high_ratio/price_position_median）的 rawValue
     # 非 None，P 的语义已无法成立 → UNAVAILABLE，优先级最高。
-    if p_segment_change_unavailable:
+    if p_daily_return_unavailable:
         status = STATUS_UNAVAILABLE
     elif not raw_ready:
         # 所有 component rawValue 均为 None（上游数据缺失）
@@ -945,12 +987,11 @@ def compute_metric_payload(
         status = STATUS_READY
 
     # [P0-6] metric-level readiness（供 publish gate 和操作者诊断）
-    if p_segment_change_unavailable:
+    if p_daily_return_unavailable:
         readiness_reason = (
-            "P metric unavailable: fp_segment_change_pct is None for all "
+            "P metric unavailable: review_return_1d is None for all "
             "members; core components (scope_return_1d / advance_ratio / "
-            "trend_price_alignment_ratio) cannot be computed (upstream "
-            "stock_core flat_list missing fp_segment_change_pct)"
+            "trend_price_alignment_ratio) require point-in-time daily bars"
         )
     elif not raw_ready:
         readiness_reason = (
@@ -977,9 +1018,9 @@ def compute_metric_payload(
     else:
         readiness_reason = None
 
-    # [P0-6] p_segment_change_unavailable 时强制 raw_ready/normalized_ready=False，
+    # 缺少日收益时强制 raw_ready/normalized_ready=False，
     # 使 publish gate 的 readiness 四态判定落入 unavailable 分支。
-    if p_segment_change_unavailable:
+    if p_daily_return_unavailable:
         raw_ready = False
         normalized_ready = False
 
@@ -1045,7 +1086,20 @@ if __name__ == "__main__":
             "fp_momentum_direction": "up",
             "fp_momentum_change": "enhancing",
             "fp_structure_alignment": "aligned",
-            "fp_segment_change_pct": 2.5,
+            "review_return_1d": 2.5,
+            "review_price_position": 0.98,
+            "review_volume_ratio20": 1.8,
+            "review_amount_ratio20": 1.4,
+            "review_volume_percentile20": 80.0,
+            "review_amount_percentile200": 70.0,
+            "review_amount": 1.0e8,
+            "review_previous_first_pyramid": {
+                "fp_trend_direction": "sideways",
+                "fp_swing_direction": "sideways",
+                "fp_internal_direction": "sideways",
+                "fp_momentum_direction": "flat",
+                "fp_momentum_change": "flat",
+            },
             "fp_volume_badge": "放量",
             "fp_volume_ratio20": 1.8,
             "fp_volume_percentile20": 80.0,
@@ -1073,9 +1127,9 @@ if __name__ == "__main__":
         STATUS_READY, STATUS_INSUFFICIENT_HISTORY, STATUS_PARTIAL, STATUS_UNAVAILABLE,
     )
 
-    # [P0-6] P 指标 fp_segment_change_pct 全空 → unavailable
+    # P 指标日收益全空 → unavailable
     fake_flat_no_change = [
-        {**f, "fp_segment_change_pct": None} for f in fake_flat
+        {**f, "review_return_1d": None} for f in fake_flat
     ]
     payloads_no_change = compute_all_metrics(fake_flat_no_change)
     p_payload = payloads_no_change["P"]
@@ -1088,7 +1142,7 @@ if __name__ == "__main__":
     readiness = p_payload.get("readiness") or {}
     assert readiness.get("raw_ready") is False
     assert readiness.get("normalized_ready") is False
-    assert "fp_segment_change_pct" in (readiness.get("reason") or "")
-    print("OK: P unavailable when fp_segment_change_pct all None")
+    assert "review_return_1d" in (readiness.get("reason") or "")
+    print("OK: P unavailable when review_return_1d all None")
 
     print("OK: metric_engine verified")

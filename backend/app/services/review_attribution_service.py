@@ -119,7 +119,10 @@ async def compute_signal_attributions(
             if eligible_count == 0:
                 continue
             flat_list = await fetch_member_flat_list(
-                session, list(child.member_ids), source_core_run_id,
+                session,
+                list(child.member_ids),
+                source_core_run_id,
+                trade_date=signal.trade_date,
             )
             ready_count = sum(
                 1 for flat in flat_list
@@ -365,7 +368,10 @@ async def compute_signal_instruments(
         return []
 
     flat_list = await fetch_member_flat_list(
-        session, instrument_ids, source_core_run_id,
+        session,
+        instrument_ids,
+        source_core_run_id,
+        trade_date=signal.trade_date,
     )
     if not flat_list:
         return []

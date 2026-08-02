@@ -36,6 +36,15 @@ def semantic_flat(request: pytest.FixtureRequest) -> dict[str, object]:
         "fp_volume_percentile20": 85.0,
         "fp_volume_percentile200": 70.0,
         "fp_segment_change_pct": 2.0,
+        "review_return_1d": 2.0,
+        "review_amount_ratio20": 1.5,
+        "review_previous_first_pyramid": {
+            "fp_trend_direction": "sideways",
+            "fp_swing_direction": "sideways",
+            "fp_internal_direction": "down",
+            "fp_momentum_direction": "flat",
+            "fp_momentum_change": "flat",
+        },
     }
     variants: dict[str, dict[str, object]] = {
         "canonical": {

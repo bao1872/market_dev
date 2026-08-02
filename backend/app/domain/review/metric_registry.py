@@ -103,7 +103,7 @@ _P_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="范围 1 日收益率（优先官方指数，回退成员等权中位数）",
         derive_fn="scope_return_1d",
-        extra_fields=("fp_segment_change_pct",),
+        extra_fields=("review_return_1d",),
     ),
     MetricComponentSpec(
         name="advance_ratio",
@@ -111,7 +111,7 @@ _P_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="当日上涨成员比例（change_pct > 0 的成员数 / ready_count）",
         derive_fn="advance_ratio",
-        extra_fields=("fp_segment_change_pct",),
+        extra_fields=("review_return_1d",),
     ),
     MetricComponentSpec(
         name="trend_price_alignment_ratio",
@@ -119,7 +119,7 @@ _P_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="趋势向上且当日上涨成员数 / ready_count",
         derive_fn="trend_price_alignment_ratio",
-        extra_fields=("fp_trend_direction", "fp_segment_change_pct"),
+        extra_fields=("fp_trend_direction", "review_return_1d"),
     ),
     MetricComponentSpec(
         name="new_high_ratio",
@@ -127,7 +127,7 @@ _P_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="进入近期高位区间的成员比例",
         derive_fn="new_high_ratio",
-        extra_fields=("fp_trailing_top", "fp_distance_to_trailing_top_pct"),
+        extra_fields=("review_price_position",),
     ),
     MetricComponentSpec(
         name="price_position_median",
@@ -135,10 +135,7 @@ _P_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="成员价格在自身滚动区间的位置中位数",
         derive_fn="price_position_median",
-        extra_fields=(
-            "fp_distance_to_trailing_top_pct",
-            "fp_distance_to_trailing_bottom_pct",
-        ),
+        extra_fields=("review_price_position",),
     ),
 )
 
@@ -210,9 +207,11 @@ _U_COMPONENTS: tuple[MetricComponentSpec, ...] = (
     ),
     MetricComponentSpec(
         name="momentum_enhancing_coverage",
-        field_source="fp_momentum_change",
+        field_source="derive_momentum_enhancing_coverage",
         direction="positive",
-        description="正动量或动量增强覆盖率",
+        description="相对前一交易日动量增强覆盖率",
+        derive_fn="momentum_enhancing_coverage",
+        extra_fields=("fp_momentum_change", "review_previous_first_pyramid"),
     ),
     MetricComponentSpec(
         name="fresh_structure_event_coverage",
@@ -232,7 +231,7 @@ _U_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="非头部成员参与比例",
         derive_fn="non_head_participation_ratio",
-        extra_fields=("fp_segment_change_pct",),
+        extra_fields=("review_return_1d",),
     ),
     MetricComponentSpec(
         name="leader_follower_common_confirm_ratio",
@@ -240,7 +239,7 @@ _U_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="龙头、二线与普通成员共同确认比例",
         derive_fn="leader_follower_common_confirm_ratio",
-        extra_fields=("fp_segment_change_pct", "fp_volume_ratio20"),
+        extra_fields=("review_return_1d", "review_amount"),
     ),
 )
 
@@ -252,7 +251,7 @@ _C_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="绝对价格变化贡献 Top5 占比",
         derive_fn="top5_contribution",
-        extra_fields=("fp_segment_change_pct",),
+        extra_fields=("review_return_1d",),
     ),
     MetricComponentSpec(
         name="top10pct_event_contribution",
@@ -272,7 +271,7 @@ _C_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="成员绝对变化贡献 HHI（赫芬达尔指数）",
         derive_fn="member_change_hhi",
-        extra_fields=("fp_segment_change_pct",),
+        extra_fields=("review_return_1d",),
     ),
     MetricComponentSpec(
         name="leader_median_diff",
@@ -280,7 +279,7 @@ _C_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="龙头与成员中位数表现差",
         derive_fn="leader_median_diff",
-        extra_fields=("fp_segment_change_pct",),
+        extra_fields=("review_return_1d",),
     ),
     MetricComponentSpec(
         name="top5_amount_contribution",
@@ -288,7 +287,7 @@ _C_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="有可靠成交额数据时 Top5 成交额占比",
         derive_fn="top5_amount_contribution",
-        extra_fields=("fp_amount",),
+        extra_fields=("review_amount",),
     ),
 )
 
@@ -300,25 +299,25 @@ _V_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="放量成员比例",
         derive_fn="volume_expansion_ratio",
-        extra_fields=("fp_volume_badge",),
+        extra_fields=("review_volume_ratio20",),
     ),
     MetricComponentSpec(
         name="amount_expansion_ratio",
         field_source="derive_amount_expansion_ratio",
         direction="positive",
-        description="成交额扩张成员比例",
+        description="成交额相对 20 日均值扩张成员比例",
         derive_fn="amount_expansion_ratio",
-        extra_fields=("fp_volume_ratio20",),
+        extra_fields=("review_amount_ratio20",),
     ),
     MetricComponentSpec(
         name="volume_percentile20_median",
-        field_source="fp_volume_percentile20",
+        field_source="review_volume_percentile20",
         direction="positive",
         description="成员 20 日成交量分位中位数",
     ),
     MetricComponentSpec(
         name="amount_percentile200_median",
-        field_source="fp_volume_percentile200",
+        field_source="review_amount_percentile200",
         direction="positive",
         description="成员 200 日成交额分位中位数",
     ),
@@ -339,7 +338,7 @@ _V_COMPONENTS: tuple[MetricComponentSpec, ...] = (
         direction="positive",
         description="价格变化 / 相对成交额的效率中位数",
         derive_fn="price_amount_efficiency_median",
-        extra_fields=("fp_segment_change_pct", "fp_volume_ratio20"),
+        extra_fields=("review_return_1d", "review_amount_ratio20"),
     ),
 )
 

@@ -50,6 +50,7 @@ from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewRun,
     MarketReviewRunItem,
+    MarketReviewScopeSnapshot,
 )
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.review_attribution_service import (
@@ -66,6 +67,7 @@ from app.services.review_scope_service import (
     LEVEL1_SCOPE_TYPES,
     ScopeDefinition,
     ScopeSnapshotError,
+    apply_cross_section_percentiles,
     compute_scope_metrics,
     fetch_member_flat_list,
     resolve_scope_members,
@@ -81,10 +83,9 @@ from app.services.review_tracking_service import evaluate_all_active_trackings
 logger = logging.getLogger("review_orchestrator_service")
 
 # 复盘算法版本（每次指标/契约变更时递增）
-# [P0 2026-07-30] 升级到 review-1.1.0：修复 scope_key/resolve_scope_members 不一致、
-# orchestrator 传递 history_maps/prev_values、metric_engine history is None 误判 ready、
-# major_index/style 范围补全、publication 门禁强化
-REVIEW_ALGORITHM_VERSION = "review-1.1.0"
+# review-2.0.0: typed PIT member facts, true daily returns, day-over-day U,
+# dimensionally correct V, and two-pass cross-section-before-signal evaluation.
+REVIEW_ALGORITHM_VERSION = "review-2.0.0"
 
 # 历史基线窗口（PRD §0、§7.1：默认 120，最低 60）
 DEFAULT_BASELINE_WINDOW = 120
@@ -444,12 +445,15 @@ async def compute_run(
     failed = 0
     signals_total = 0
 
-    # 2. 逐 scope 执行 metrics + signals + attribution
+    metric_results: list[tuple[ScopeDefinition, MarketReviewScopeSnapshot]] = []
+
+    # 2. 第一遍：全部 scope 只计算 raw/normalized metrics。
     for scope in scopes:
         try:
-            sig_count = await _compute_scope_pipeline(session, run, scope)
+            snapshot = await _compute_scope_metrics_phase(session, run, scope)
             succeeded += 1
-            signals_total += sig_count
+            if snapshot is not None:
+                metric_results.append((scope, snapshot))
         except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.exception(
@@ -467,14 +471,31 @@ async def compute_run(
                 last_error=str(exc)[:500],
             )
 
-    # 3. 评估所有 active 追踪（即使有 scope 失败也执行）
+    # 3. 第二遍：同日同 family 横截面分位，完成后才能评估 signal。
+    await apply_cross_section_percentiles(session, run.id)
+    for scope, snapshot in metric_results:
+        try:
+            signals_total += await _compute_scope_signal_pipeline(
+                session, run, scope, snapshot,
+            )
+        except Exception as exc:  # noqa: BLE001
+            succeeded -= 1
+            failed += 1
+            logger.exception(
+                "[ReviewOrchestrator] signal/attribution 失败: %s/%s err=%s",
+                scope.scope_type,
+                scope.scope_name,
+                exc,
+            )
+
+    # 4. 评估所有 active 追踪（即使有 scope 失败也执行）
     try:
         eval_count = await evaluate_all_active_trackings(session, run)
     except Exception as exc:  # noqa: BLE001
         eval_count = 0
         logger.exception("[ReviewOrchestrator] tracking 评估失败: %s", exc)
 
-    # 4. 更新 run 状态
+    # 5. 更新 run 状态
     run.succeeded_scope_count = succeeded
     run.failed_scope_count = failed
     run.completed_at = datetime.now(UTC)
@@ -829,16 +850,12 @@ async def _fetch_pyramid_v2_for_scope(
     return pv2 if isinstance(pv2, dict) else None
 
 
-async def _compute_scope_pipeline(
+async def _compute_scope_metrics_phase(
     session: AsyncSession,
     run: MarketReviewRun,
     scope: ScopeDefinition,
-) -> int:
-    """执行单个 scope 的完整 pipeline（metrics → signals → attribution）。
-
-    Returns:
-        该 scope 命中的信号数
-    """
+) -> MarketReviewScopeSnapshot | None:
+    """Compute and persist raw/normalized metrics for one scope."""
     # === metrics phase ===
     await _upsert_run_item(
         session,
@@ -866,14 +883,17 @@ async def _compute_scope_pipeline(
             last_error="范围成员为空",
             completed_at=datetime.now(UTC),
         )
-        return 0
+        return None
 
     # 使用调用方传入的 scope_name（resolve_scope_members 可能返回 generic name）
     # scope.scope_name 已在 ScopeDefinition 中设置，compute_scope_metrics 直接读取
 
     # 拉取成员 first_pyramid_flat
     flat_list = await fetch_member_flat_list(
-        session, instrument_ids, run.source_core_run_id,
+        session,
+        instrument_ids,
+        run.source_core_run_id,
+        trade_date=run.trade_date,
     )
 
     # [P0 2026-07-30] 构建 history_maps/prev_values/prev5d_values
@@ -932,6 +952,17 @@ async def _compute_scope_pipeline(
         status=ITEM_SUCCEEDED,
         completed_at=datetime.now(UTC),
     )
+
+    return snapshot
+
+
+async def _compute_scope_signal_pipeline(
+    session: AsyncSession,
+    run: MarketReviewRun,
+    scope: ScopeDefinition,
+    snapshot: MarketReviewScopeSnapshot,
+) -> int:
+    """Evaluate signals and attribution after the cross-section pass is complete."""
 
     # === signals phase ===
     await _upsert_run_item(
@@ -1055,6 +1086,19 @@ async def _compute_scope_pipeline(
     )
 
     return len(signals)
+
+
+async def _compute_scope_pipeline(
+    session: AsyncSession,
+    run: MarketReviewRun,
+    scope: ScopeDefinition,
+) -> int:
+    """Resume-compatible single-scope pipeline using the same two ordered phases."""
+    snapshot = await _compute_scope_metrics_phase(session, run, scope)
+    if snapshot is None:
+        return 0
+    await apply_cross_section_percentiles(session, run.id)
+    return await _compute_scope_signal_pipeline(session, run, scope, snapshot)
 
 
 # =============================================================================

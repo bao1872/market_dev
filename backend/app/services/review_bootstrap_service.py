@@ -159,7 +159,10 @@ async def bootstrap_single_date(
 
     # 3. 读取 stock_core flat list
     flat_list = await fetch_member_flat_list(
-        session, instrument_ids, source_core_run_id,
+        session,
+        instrument_ids,
+        source_core_run_id,
+        trade_date=trade_date,
     )
     if not flat_list:
         return {
