@@ -238,13 +238,15 @@ production 和其他环境保持原有行为。
 - `dev` 推送不自动部署。
 - Map 能指向真实本地启动入口、远程 Compose、配置、CI 和版本核验入口。
 
-## 9. 测试环境（腾讯云）dev SHA 部署 SSOT（CHANGE-20260801-001）
+## 9. 开发部署 SSOT（dev SHA + Live Mount）
 
-### SR-70 测试环境定位
+### SR-70 部署环境定位
 
-**当前 `panji-prod` 腾讯云物理机同时承担：生产稳定运行 + 本轮目标的"预发布测试环境"双重职责。**
+**当前 `panji-prod` 腾讯云物理机是盘迹唯一的远程运行环境，同时承担日常开发部署与业务运行。**
 
-本轮任务中，"部署最终 dev SHA 到腾讯云测试环境"指：在不影响生产稳定运行的前提下，将 dev SHA 096a5d3（或更新的 CI green SHA）作为 测试/验收 目标版本，通过正式入口部署。
+盘迹当前只关心**开发阶段**。"部署"仅指：把 `dev` 上某个精确 SHA 的代码同步到服务器并重启受影响服务。不定义、不保留其他阶段的部署流程。
+
+`dev` 是部署的唯一来源。禁止从 `main` / `experiments` / 任意本地未推送状态部署。
 
 ### SR-71 禁止的部署方式
 
@@ -254,25 +256,29 @@ production 和其他环境保持原有行为。
 2. 禁止 `docker cp` 从本地拷贝任意容器内文件；
 3. 禁止 SSH 进入容器内手动 `sed/vi` 修改源代码；
 4. 禁止临时业务脚本（`create_run.py`/`publish_review_oneoff.py` 等）在生产服务器上任意执行（如果必须执行，必须通过正式 orchestrator API 或 `panji-test-deploy` 的受控 `worker oneoff` 步骤）；
-5. 禁止只重建 `backend` 单服务不跑 migration / 不校验 image SHA / 不做健康检查。
+5. 禁止只重建 `backend` 单服务不做健康检查；
+6. 禁止在一次部署中混合 Live Mount 代码同步与镜像重建。
 
-### SR-72 `panji-test-deploy` 正式入口（新增）
+### SR-72 `panji-test-deploy` 正式入口
 
-新增 `scripts/ops/panji-test-deploy` 作为 dev SHA 测试部署的唯一入口（SSOT）。入口必须：
+`scripts/ops/panji-test-deploy` 是开发部署的唯一入口（SSOT）。入口必须：
 
 | 步骤 | 约束 |
 |---|---|
 | `preflight` | 运行 `scripts/ops/panji-prod-preflight`；通过后方可继续；不通过立即退出且不做任何修改 |
-| SHA 校验 | 精确校验待部署 SHA = 当前 HEAD 本地 SHA = origin/dev 最新 CI green SHA（三者缺一不可）；禁止"latest tag"/"HEAD of dev"模糊匹配 |
-| 服务范围 | 只重建受影响服务：backend/frontend/capture；**禁止**重建 PostgreSQL、Redis、删除 volume、修改持久数据 |
-| Migration | 仅执行 `alembic upgrade head`（自动幂等）；禁止 `alembic downgrade` 除非明确 rollback 流程正式触发 |
-| 健康检查 | 后端 `/health`、前端 `/`、API `/api/v1/version` 必须分别返回 200 且包含正确 `build_sha` 字段；全部通过方可标记部署成功 |
-| SHA 一致性证明 | 部署结束后必须输出以下 5 项 SHA 一致性表格，任何一项不一致立即回滚：<br>① Git repo HEAD → ② Docker image digest → ③ backend runtime `/api/v1/version:build_sha` → ④ frontend asset manifest: `build_sha` → ⑤ release notes 记录 |
-| 回滚 | 任一健康检查失败 / SHA 不一致，自动回滚到部署前镜像版本 |
+| SHA 校验 | 精确校验待部署 SHA = 本地 `dev` HEAD = `origin/dev` 已推送 SHA；禁止"latest tag"/"HEAD of dev"模糊匹配 |
+| 代码同步 | 普通 Python / 前端变更走 Live Mount：服务器 checkout 精确 SHA，同步运行代码到 `/opt/panji-live`，写入 `RUNTIME_SHA`；**不构建镜像** |
+| 镜像构建 | 仅当依赖清单（`pyproject.toml`/lock、`package.json`/lock）、`Dockerfile`、系统依赖、基础镜像、Capture 运行环境或必须固化的 Nginx 配置变化时才构建；一次部署不得混合两种模式 |
+| 服务范围 | 只重启受影响服务：backend/frontend/capture；**禁止**重建 PostgreSQL、Redis、删除 volume、修改持久数据 |
+| Migration | 仅在变更包含 migration 时执行 `alembic upgrade head`（幂等）；禁止 `alembic downgrade` |
+| 健康检查 | 后端 `/health`、前端 `/`、版本端点必须返回 200；业务 smoke 通过方可标记部署成功 |
+| SHA 一致性证明 | 部署结束后必须核验 2 项：① 服务器仓库 HEAD = 目标 dev SHA；② 运行时 `runtime_git_sha` = 目标 dev SHA。任一不一致视为部署失败 |
+| 数据边界 | 代码部署不得自动执行数据 apply / 建 run / 发布 pointer；数据操作是独立授权动作 |
 
-### SR-73 部署与 CI 的衔接
+### SR-73 部署与 CI 的关系
 
-1. dev push 触发 GitHub Actions CI，**必须等待 CI Gate = success（全绿、PG 0 skipped）**；
-2. CI 未全绿时不得执行 `panji-test-deploy`，即便前一步本地测试通过；
-3. 部署完成后，`/api/v1/version` 返回的 `build_sha` 必须与本地 dev HEAD 的 SHA 一致；
-4. 部署状态写入 `docs/changes/2026/CHANGE-20260801-001*.md` 的"部署 SHA 一致性"段落，不得只在聊天输出声称部署成功。
+1. CI（`.github/workflows/ci.yml`）是**人工诊断工具**，不是部署前置条件；
+2. push `dev` 不阻塞服务器开发部署；CI 未跑完或未全绿不阻止 `panji-test-deploy`；
+3. 部署的前置条件是**本地修改范围测试通过**；本地测试失败禁止部署；
+4. 部署完成后，运行时版本端点返回的 `runtime_git_sha` 必须与目标 dev SHA 一致；
+5. 不得只在聊天输出声称部署成功，必须给出上述 2 项 SHA 核验证据。

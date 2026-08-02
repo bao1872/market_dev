@@ -130,6 +130,20 @@ Fair Value Gap 已完全排除。
 - 只允许新增前向 migration；
 - 修改 migration 必须有 upgrade / downgrade / upgrade 验证。
 
+## 部署阶段与发布流程禁止（2026-08-02 开发治理收口）
+
+盘迹当前只关心**开发阶段**，禁止定义或保留其他阶段的工作流程。以下流程当前与盘迹开发阶段无关，有效治理文档中不得描述、保留或改名为 deferred 后继续保留：
+
+- **Release Gate**（`.github/workflows/release.yml` 的 `Release Gate` job / `release-gate` 门禁）；
+- **GHCR / Registry / 镜像仓库推送**（如 `ghcr.io` push、registry digest）；
+- **Release Manifest / immutable image release / formal release candidate**；
+- **服务器只 pull 不 build**（Registry 凭据打通前的过渡开关）；
+- **Fast CI / CI Gate 作为部署强制门禁**；
+- **多阶段 delivery phase / 未来正式发布流程**；
+- 新增 `development` / `runtime` / `formal_release` 等阶段状态机。
+
+> 这些工作流文件如仍存在，仅作为历史遗留，不作为当前操作指令。任何当前部署行为以 `rules/80-deployment-data-safety.md` + `docs/maps/80-system-runtime.md` + `docs/runbooks/development-deployment.md` 为唯一权威。
+
 ## 过时内容候选（DEPRECATED_CANDIDATE）
 
 > 本阶段不删除。Phase 2+ 评估是否从 AGENTS.md 移除。

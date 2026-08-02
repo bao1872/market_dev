@@ -107,21 +107,13 @@ Gov     python tools/check_governance_rules.py
   1. 单轮变更 baseline 图片张数新增 ≤ 3；
   2. 不得删除旧 baseline 图以"适配"视觉回归失败；必须解释视觉差异确实来自 UI 合法变化。
 
-### TQ-82 禁止推后不监控CI
+### TQ-82 禁止用 CI 或服务器测试掩盖本地失败
 
-- dev push **不是结束**；以下完整闭环必须在对话终止前真实执行：
-  1. `git push origin <branch>` →
-  2. 找到最新 CI Actions run（对应 head_sha = 推送 SHA）→
-  3. 等待 **CI Gate = success（全绿）** →
-  4. 查看所有失败 job 的 annotations / logs 并修复后重推 →
-  5. 全部门禁通过后才允许部署。
-- 禁止以下三种"未全绿即声称成功"：
-  - "我本地通过了，CI 失败应该是 flaky" → 不允许；
-  - "Playwright 视觉回归是环境问题，我 skip 3 个" → 不允许；
-  - "PG 集成测试 0 skipped 但有 1 个失败，我先部署再修" → 不允许。
-- PG 集成测试必须 **0 skipped**；单个 failed 必须定位根因修复后重推，不得在 CHANGE 中写成 "1 个 flaky" 掩盖。
+- **本地测试失败时禁止部署**：修改范围内的单元测试或静态检查未通过，不得进入部署步骤。
+- **本地无法运行测试时如实报告**：若本地环境确实无法运行某类测试（如缺依赖、缺 DB），必须明确说明，不得用 "CI 会跑" 或 "服务器部署后验证" 掩盖未验证状态。
+- 禁止把未运行的测试说成已通过；禁止把服务器 smoke 当成完整回归。
 
-### TQ-83 禁止局部Canary冒充整体成功
+### TQ-83 禁止局部 Canary 冒充整体成功
 
 - 整体功能（如竞价分析、review 五阶段、after_close 七步）不得把单组件/局部 Canary 通过写成整体完成：
   - 例子 1：capture 服务启动 ≠ 竞价分析整体闭环（09:25真值/scan/aggregate/publish 未过）；
@@ -141,7 +133,7 @@ Gov     python tools/check_governance_rules.py
 - 生产代码、测试、工具、构建脚本在运行时不得 `import` / `open` / `read` / `glob` `ref/` 目录下任何文件；
 - SMC Pine parity 测试只读取 `backend/tests/fixtures/smc_pine/*.csv`；
 - 禁止从 DB 重新取 bar 或依赖 `ref/` 导出脚本；
-- `AGENTS.md` / `docs/current/*.md` / `docs/maps/*.md` 不得把 `ref/` 文件称为"真源"、"合同"、"fixture 生成器"或"运行依赖"；应称为"参考源（人工阅读）"；
+- `AGENTS.md` / `docs/maps/*.md` 不得把 `ref/` 文件称为"真源"、"合同"、"fixture 生成器"或"运行依赖"；应称为"参考源（人工阅读）"；
 - 算法真源必须是生产代码（如 `smc_pine_core`、`node_cluster_engine`、`indicator_contract`、`indicator_semantics`）。
 
 ## Migration 测试纪律
@@ -186,53 +178,53 @@ CI 工作流中 `POSTGRES_DB: bz_stock_test` 仅作为容器内临时数据库�
 - 必须连接数据库的集成测试，必须使用 `db_session` fixture，并在 CI 临时库运行。
 - 不得在本地 Mac 创建持久测试库以运行集成测试。
 
-## 2026-08-02 收口：CI 三层结构与测试分类（CHANGE-20260802-002 配套）
+## 2026-08-02 收口：测试合同（开发与部署治理）
 
-### TQ-90 CI 三层结构
+> 来源：用户本轮治理指令（开发阶段收口）
+> 状态：生效（2026-08-02）
 
-单体 CI（14 个 job 无条件全量运行）已拆为三层，各层职责不得混淆：
+### TQ-90 测试合同（开发闭环内）
 
-| 层 | 工作流 | 触发 | 职责 | 阻断门禁 |
-|---|---|---|---|---|
-| Fast CI | `.github/workflows/ci.yml` | push dev / PR main | 按变更范围裁剪的快速反馈 | `CI Gate` |
-| Release Gate | `.github/workflows/release.yml` | 手动指定 exact SHA | 全量测试 + 构建不可变镜像 + 生成 manifest | `Release Gate` |
-| Nightly | `.github/workflows/nightly.yml` | 每日 03:00 | 全量回归兜底 | `Nightly Summary` |
+盘迹当前只关心**开发阶段**。测试与部署的边界如下，禁止定义或保留其他阶段的工作流程：
 
-- Fast CI 的裁剪只允许依据 `changes` job 的 git diff 输出，**不得**依据人工判断或 IDE 推测跳过任何 job。
-- 被 `changes` 判定为范围内的 job 若 skipped，`CI Gate` 必须失败；被判定为范围外的 job 若实际运行且失败，同样必须失败（说明 `if` 条件与 `changes` 输出不一致，属 CI 配置错误）。
-- Fast CI 的裁剪是速度优化，不是覆盖率削减；被裁剪掉的部分由 Nightly 每日兜底执行。
-- `CI Gate = success` 仍是部署前置条件（见 TQ-82），三层拆分不放宽该要求。
+1. **默认只运行修改范围单元测试和静态检查**：本地验证聚焦本次改动相关的测试 + Ruff/Mypy/TSC/Lint/Arch/Allow/Gov。
+2. **不默认运行全仓测试**：不把全仓测试作为普通开发的前置要求。
+3. **CI 不是普通开发部署的前置条件**：`ci.yml` 不得因 push dev 自动阻止服务器开发部署；CI 失败不阻断开发者按 Live Mount 合同部署 dev SHA。
+4. **CI 可保留为手工诊断工具**：CI 用于按需诊断（如分类测试、全量回归、集成测试），但不进入默认开发闭环，不作为部署门禁。
+5. **本地测试失败时禁止部署**：见 TQ-82。
+6. **本地无法运行测试时如实报告**：见 TQ-82，不得用 CI 或服务器测试掩盖。
 
-### TQ-91 测试分类 marker
+### TQ-91 禁止的无关流程（当前不定义）
 
-后端测试按执行环境依赖分为三类，由 `backend/tests/conftest.py` 的 `pytest_collection_modifyitems` 统一判定并在每次收集时输出 `[test-classification]` 摘要行：
+以下流程当前与盘迹开发阶段无关，**有效治理文档中不得描述、保留或改名为 deferred 后继续保留**：
+
+- Release Gate（`.github/workflows/release.yml` 的 `Release Gate` job）；
+- GHCR / Registry / 镜像仓库推送；
+- Release Manifest / immutable image release / formal release candidate；
+- 服务器只 pull 不 build；
+- Fast CI 作为部署强制门禁；
+- 多阶段 delivery phase / 未来正式发布流程。
+
+> 这些工作流文件如仍存在，仅作为历史遗留，不作为当前操作指令；任何当前部署行为以 `rules/80-deployment-data-safety.md` + `docs/maps/80-system-runtime.md` + `docs/runbooks/development-deployment.md` 为唯一权威。
+
+### TQ-92 测试分类（仅用于 CI 诊断，不影响部署）
+
+后端测试按执行环境依赖分为三类，由 `backend/tests/conftest.py` 的 `pytest_collection_modifyitems` 统一判定并输出 `[test-classification]` 摘要行，仅供 CI 诊断与对账：
 
 | 类别 | marker | 含义 | 运行位置 |
 |---|---|---|---|
-| PG 集成 | `postgres` | 需要真实 PostgreSQL（锁、事务、JSONB、唯一约束等） | CI 临时容器（Fast CI 的 `db_changed` 分支 / Release / Nightly） |
-| 外部数据 | `external_data` | 依赖 mootdx / pytdx / 交易所网络接口 | 仅 Nightly 独立分组 |
-| 纯单元 | 无 | 不连库、不联网 | 所有层 + 本地 `PURE_UNIT_TEST=1` |
+| PG 集成 | `postgres` | 需要真实 PostgreSQL | CI 临时容器 |
+| 外部数据 | `external_data` | 依赖外部数据源 | CI（失败不阻断开发部署） |
+| 纯单元 | 无 | 不连库、不联网 | 本地 `PURE_UNIT_TEST=1` + CI |
 
 约束：
 
-- **三类计数必须可对账**：`postgres + 纯单元 = 总数`，`external_data` 与前两类正交。任何一次收集的摘要行都应能与本文件记录的基线核对，出现漂移必须查明原因。
-- `external_data` 失败**不阻断** Fast CI 与 Release Gate——这类失败通常源于外部服务不可达或数据延迟，而非本仓库代码回归。但 Nightly 必须单独报告其结果；连续多日失败需人工核查数据源可用性，不得长期无人过问。
-- 禁止把 `external_data` 当作"测试跑不过就贴上去"的免死金牌。仅当失败原因确实是外部依赖时才可标注；断言逻辑本身有缺陷的测试必须修复，不得改标 marker 掩盖。
+- 三类计数可对账：`postgres + 纯单元 = 总数`，`external_data` 与前两类正交。
+- `external_data` 失败属外部依赖问题，不阻断开发部署；连续多日失败需人工核查数据源。
+- 禁止把 `external_data` 当作"测试跑不过就贴上去"的免死金牌；断言逻辑缺陷必须修复。
 
-### TQ-92 新增测试必须显式标注 marker
+### TQ-93 新增测试必须显式标注 marker
 
 - 新增测试若需要真实数据库，**必须**由作者显式写 `@pytest.mark.postgres`；若依赖外部数据源，**必须**显式写 `@pytest.mark.external_data`。
-- `conftest.py` 中基于 fixture 闭包与源码文本的自动判定是**过渡机制**，只为存量测试做一次性归类，**不是长期唯一分类来源**。其固有缺陷：文本匹配无法理解语义（误判），新的连库方式不在列表中会静默漏判。
-- 配套的漏标检查（`_DB_SUSPECT_PATTERN`）在收集期报告"源码含连库调用但未被判定为 postgres"的嫌疑用例。该检查**只报告、不自动补 marker**——自动补标会掩盖分类规则的盲区，而暴露盲区正是它的目的。出现嫌疑项必须人工确认并补显式 marker。
+- `conftest.py` 中基于 fixture 闭包与源码文本的自动判定为过渡机制，配套漏标检查 `_DB_SUSPECT_PATTERN` **只报告、不自动补 marker**；出现嫌疑项必须人工确认并补显式 marker。
 - 存量归类稳定后应逐步移除源码文本扫描，改为纯显式 marker。
-
-### TQ-93 分类基线
-
-2026-08-02 实测基线（`PURE_UNIT_TEST=1 pytest --collect-only`）：
-
-```
-postgres=1178  pure_unit=2496  external_data=6  total=3674
-漏标嫌疑=0
-```
-
-修改测试分类规则后必须重新对账；总数或分类数出现非预期变化，须在 CHANGE 中解释原因，不得默默接受。

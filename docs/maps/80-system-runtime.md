@@ -33,20 +33,20 @@
 | 位置 | 代码目录 | 分支/SHA | 承载方式 | 主要用途 | 自动 Scheduler |
 |---|---|---|---|---|---|
 | 本地 | `/Users/zhenbao/Desktop/coding/market_dev` | `dev` / `069ebcc`；本地另有 `main`、`experiment` | 原生 Python 3.11 venv + Uvicorn；Node.js + Vite | 开发和手动调试 | 关闭 |
-| 远程 | `/root/web_dev` | 已切换并清理为 `main` / `13a0ef3`，工作区干净；运行版本对应 `origin/main` `13a0ef3` | Docker Compose | 稳定运行 | 已运行（bars/strategy/calendar scheduler 各 1 实例） |
+| 远程 | `/root/web_dev` | 核验（2026-08-02）：repo HEAD = `73a46ae`；运行容器镜像 `market-dev-*:73a46ae`（2026-08-02 22:25 创建），属**镜像构建**部署，非 Live Mount；`docker-compose.live.yml` 存在且定义 panji-live 挂载，但运行容器未挂载 panji-live（见 §9 已知偏差） | Docker Compose | 开发部署目标 | 已运行（bars/strategy/calendar scheduler 各 1 实例） |
 
 ### 远程服务器身份
 
 | 项目 | 值 |
 |---|---|
-| 角色 | 腾讯云稳定运行服务器 |
+| 角色 | 腾讯云开发部署目标服务器 |
 | 权威公网 IP | `43.136.118.82` |
-| 项目 SSH 别名 | `panji-prod`（定义于 `~/.ssh/config`，HostName 必须为 `43.136.118.82`） |
+| 项目 SSH 别名 | `panji-prod`（定义于 `~/.ssh/config`，HostName 必须为 `43.136.118.82`）；唯一入口 `scripts/ops/panji-prod-ssh` |
 | 远程代码目录 | `/root/web_dev` |
-| 生产 Compose | `docker-compose.prod.yml` + `docker-compose.live.yml`（Live Mount） |
-| CI Workflow | `.github/workflows/ci.yml`，名称为 `CI`；`dev` push / PR 到 `main` 触发；当前任务包含架构规则、文档一致性、测试白名单、治理规则、Reports、Ruff、Mypy、Alembic、PostgreSQL 集成测试、前端 TSC/Lint/Build/Contract/E2E |
-| 自动部署代码 | 已准备：`.github/workflows/deploy-production.yml`、`scripts/deploy/panji-deploy.sh`；支持精确 SHA、`--dry-run`、`flock` 串行、健康检查、失败回滚 |
-| 自动部署状态 | 未启用；服务器侧 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件、GitHub Secrets 尚未配置；本轮未触发任何真实部署 |
+| 生产 Compose | `docker-compose.prod.yml` + `docker-compose.live.yml`（Live Mount 叠加） |
+| CI Workflow | `.github/workflows/ci.yml`，名称为 `CI`；`dev` push / PR 到 `main` 触发；用作手工诊断工具，**不作为部署前置条件** |
+| 部署模式 | **Live Mount 开发部署**为唯一当前模式（见 `docs/runbooks/development-deployment.md`）；普通变更同步运行代码到 `/opt/panji-live` 并重启受影响服务，不 build 镜像 |
+| 自动部署状态 | 未启用，且不在当前治理范围内；`main` 自动部署 / Release Gate / GHCR 等流程已废止，不作为当前操作指令 |
 
 > 涉及远程服务器、数据库、Redis、路径和端口时，必须先读取本节。聊天记忆和本机任意 SSH 别名（如 `55-server`）不能作为权威来源。`55-server` 解析到 `120.234.137.109`，不是盘迹生产服务器，禁止用于盘迹操作。
 
@@ -85,12 +85,12 @@
 | `experiment` | **[Phase 5A 一致性补验]** 本地、origin、服务器三处 `experiment` SHA 已对齐；Phase 5B-0 cherry-pick `c730876` 为 `38df3af` 并 push origin/experiment；本地与 origin 一致 |
 | 服务器 experiment 归档 | **[Phase 5A]** 服务器原 `experiment`（tip `623ad87`，含 16 个 V2.1 唯一提交）已归档为 annotated tag `archive/server-experiment-wip-20260727`（tag object `40fb4ab2`），tag 已推送 origin 并用 `git ls-remote` 验证；服务器删除分叉的本地 `experiment` 后按 `origin/experiment` 重新创建 tracking 分支 |
 | 非保留分支 | 本地/origin 非 main/dev/experiment 分支已删除；已创建 6 个 `archive/*-YYYYMMDD` annotated tag 保存唯一提交（Phase 4 的 5 个 + Phase 5A 的 `archive/server-experiment-wip-20260727`） |
-| 服务器分支 | `/root/web_dev` 当前检出 `main`，工作区干净；服务器本地保留 `main`/`dev`/`experiment`，均与 origin 对齐 |
+| 服务器分支 | `/root/web_dev` 当前检出分支以部署脚本实际 checkout 为准；核验（2026-08-02）repo HEAD = `73a46ae`；服务器本地保留 `main`/`dev`/`experiment`，均与 origin 对齐 |
 | ref/sync 仓库清理 | **[Phase 5B-0]** `dev`/`experiment` 已通过 `git rm --cached ref/smc_user_source.pine` + 退出跟踪 sync 目录入口（不作为运行时依赖）；`origin/dev`、`origin/experiment` 树中 `git ls-tree -r` 无 `ref/`/`sync/`；本地 `ref/` 实体保留；`sync/` 已从本地删除；`.gitignore` 加入 `/ref/` 与 `/sync/` |
 | CI 防误推 | **[Phase 5B-0]** `.github/workflows/ci.yml` governance-rules job 新增显式检查 `git ls-files ref sync` 必须为空；`backend/tests/test_ref_isolation.py` 守护 `git ls-files ref/` 与 `git ls-files sync/` 均为空；双重防护确保未来误推被 CI 拒绝 |
-| main PR 状态 | **[Phase 5B-0]** origin/main 仍含 `ref/smc_user_source.pine`，需通过 dev → main PR 合并清理；本轮不创建/合并 PR，等待用户授权 |
-| main 自动部署 | 代码已准备，链路未启用；`.github/workflows/deploy-production.yml` 监听 `workflow_run`（CI success on main）和 `workflow_dispatch`；SSH 调用 `/usr/local/bin/panji-deploy.sh` |
-| CI gate | 已核验配置：`.github/workflows/ci.yml` 存在，名称为 `CI`，与 workflow_run 引用一致 |
+| main PR 状态 | **[Phase 5B-0]** origin/main 仍含 `ref/smc_user_source.pine`，需通过 dev → main PR 合并清理；未经明确授权不创建/合并 PR |
+| 部署来源 | `dev` 是 CI 与开发部署的唯一来源；push `dev` 只触发 CI（诊断用途），**不触发自动部署**，也不作为部署前置条件；main 自动部署 / Release Gate / GHCR 等已废止，不作为当前操作指令（见 `rules/90-deprecated-forbidden.md`） |
+| CI gate | `.github/workflows/ci.yml` 存在，名称为 `CI`；用作手工诊断工具，不作为开发部署门禁 |
 
 ## 5. PostgreSQL
 
@@ -202,28 +202,31 @@
 - 未启动任何本地 Docker 应用服务：未执行 `docker compose up`
 - `/version` deployment_mode 返回 `native-development`
 
-### 远程
+### 远程（2026-08-02 只读核验）
 
-- 容器对应 SHA：`/version` 返回 `runtime_git_sha=13a0ef3e2910ee75fe8dd2b583a2ceed0db57fbf`，与 `origin/main` 一致
-- 当前检出分支：`main`，HEAD `13a0ef3`，工作区干净；运行版本与 `origin/main` 的 `13a0ef3` 一致
-- 端口 80 页面：HTTP 200
-- `/health`：`{"status":"ok","service":"trading-platform","version":"1.1.0"}`
-- `/health/ready`：`{"status":"ready"}`
-- `/version`：`deployment_mode=live`，`alembic_revision=067_scheduler_job_runs_lease_epoch_attempt_no`
-- Scheduler 是否运行：`trading-worker-bars-scheduler`、`trading-worker-strategy-scheduler`、`trading-worker-calendar` 各 1 实例
-- Worker 是否消费远程 Redis DB：生产服务均配置 `REDIS_URL=redis://redis:6379/0`，DB0 当前 keys=5300
-- 数据服务未被误重建：未执行 down / volume 删除；`trading-postgresdata`、`trading-redisdata` 存在
+- 运行容器：`trading-backend` / `trading-frontend` / `trading-worker-capture` 镜像 `market-dev-*:73a46ae`，创建于 2026-08-02 22:25，**属镜像构建部署，非 Live Mount**；
+- 服务器 repo HEAD = `73a46ae`；容器 env `GIT_SHA=73a46ae`（与镜像一致）；
+- `/opt/panji-live/RUNTIME_SHA` = `cf7a69051ddef04a5e2bcc1b5d8e9d24da37065c`（较新的目标 SHA，已同步到磁盘但**未应用到运行容器**，因容器未挂载 panji-live）；
+- `docker-compose.live.yml` 存在并定义 panji-live 挂载（`/opt/panji-live/backend/app → /app/app` 等），但运行容器 inspect 显示**无 panji-live 挂载**；
+- 端口 80 页面：HTTP 200；
+- `/health`、`/version`、`/api/v1/version`、`/api/version` 在 :8000 均返回 `{"detail":"Not Found"}`（当前运行镜像未暴露这些端点，路径以实际路由为准，不在此硬编码）；
+- Scheduler 是否运行：`trading-worker-bars-scheduler`、`trading-worker-strategy-scheduler`、`trading-worker-calendar` 各 1 实例；
+- Worker 是否消费远程 Redis DB：生产服务均配置 `REDIS_URL=redis://redis:6379/0`，DB0 keys=5300；
+- 数据服务未被误重建：`trading-postgresdata`、`trading-redisdata` 存在。
+
+> 部署合同要求：Live Mount 为唯一模式，运行容器必须挂载 `/opt/panji-live` 且
+> `RUNTIME_SHA` == 服务器 repo HEAD == 目标 dev SHA。当前运行态（镜像构建 73a46ae，
+> 未挂载 panji-live）与合同存在偏差，属已知 gap（见 §10）。
 
 ## 10. 已知偏差与风险
 
 - 本地 `docker-compose.yml` 仍保留 redis 服务，虽然 `Makefile` 已标记 `up/down` 废弃，但文件本身仍可能误导新开发者。本轮按任务要求不删除，仅标记"非本地开发入口"。
 - 本地 Redis DB 15 已正式保留为本地开发临时状态隔离库，但 Worker 启动前仍需确认 `REDIS_URL` 以 `/15` 结尾。
 - 本地与远程共享 PostgreSQL，开发中的破坏性操作需要额外注意；当前未做权限只读限制。
-- 远程 `/root/web_dev` 已切换为 `main`，工作区干净，满足自动部署脚本的 workspace 检查；但自动部署代码尚未启用。
-- 自动部署代码已准备但尚未启用：服务器侧缺少 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件和 GitHub Secrets；`.github/workflows/deploy-production.yml` 尚未合并到 `main`，因此不会触发真实部署。
 - 远程 PostgreSQL test 容器 (`trading-postgres-test`) 映射 5433 端口，其用途和持久化策略尚未核验。
-- **[Phase 5B-0]** `origin/main` 仍含 `ref/smc_user_source.pine`，需通过 dev → main PR 合并清理；PR 合并前 main 分支不满足 SR-15。
+- **[Phase 5B-0]** `origin/main` 仍含 `ref/smc_user_source.pine`，需通过 dev → main PR 合并清理；未经明确授权不创建/合并 PR。
 - **[Phase 5B-0]** 本地 Vite 开发服务器无 Nginx 前置，访问 `/` 时 `LandingPage` 组件 `window.location.replace('/')` 会触发无限刷新；已知本地开发限制，可通过直接访问 `/login` 或 `/market` 绕过；生产环境由 Nginx 精确分流，不受影响。
+- **[2026-08-02]** 运行态与 Live Mount 合同偏差（详见 §15）：当前运行容器为镜像构建 `73a46ae`、未挂载 panji-live；`/opt/panji-live/RUNTIME_SHA` 已写入更新的 `cf7a69051...` 但未应用。需要进行一次 Live Mount 部署以对齐合同（属部署操作，不在本轮治理文档任务范围）。
 - **[Phase 5B-0]** 本地完整路由验证已完成（admin token），覆盖公共门户、登录后首页、行情列表、个股详情、自选/盘中监控、管理员权限相关页面及实际路由重定向；详细结果见 `docs/maps/40-market-stock-experience.md` / `50-watchlist-intraday.md` / `60-permissions-admin.md` 的前端验证章节。
 
 ## 11. 更新触发条件
@@ -262,190 +265,61 @@ Phase 5B-2 修复 `scripts/deploy/panji-deploy.sh` 的若干偏差并新增静�
 - 部署工作流不变：`workflow_run` on CI success + `workflow_dispatch`，SSH 到 `panji-prod`
 - 自动部署链路启用状态不变：服务器侧 `/usr/local/bin/panji-deploy.sh`、锁文件、state 文件、GitHub Secrets 尚未配置
 
-## 13. 测试环境（腾讯云 panji-prod）dev SHA 部署 SSOT（2026-08-01 核验，CHANGE-20260801-001）
+## 13. Live Mount 开发部署（当前唯一部署模式，2026-08-02 治理收口）
 
-### 13.1 部署入口 SSOT
+> 权威来源：`rules/80-deployment-data-safety.md` §Live Mount 部署规则 + `docs/runbooks/development-deployment.md`
+> 核验状态：2026-08-02 只读核验（见 §9）；运行态与合同存在偏差，见 §10。
 
-`scripts/ops/panji-test-deploy` 是本轮将最终 dev SHA 部署到当前腾讯云测试环境 / 预发布验收 的**唯一入口**。手工 scp / docker cp / 单文件 sync 一律禁止。
+### 13.1 部署合同要点
 
-入口位置：`scripts/ops/panji-test-deploy`（正式 bash 脚本，有 set -euo pipefail + flock 锁 + preflight + 所有步骤）
+- 普通 Python 代码变化：不 build 镜像，同步 `backend/app` 等运行代码到 `/opt/panji-live`；
+- 普通前端代码变化：build `dist` 同步到 `/opt/panji-live/frontend/dist`；
+- 仅依赖 / Dockerfile / 基础镜像 / Capture 环境 / 必须烘焙进镜像的 Nginx 配置变化才 build 镜像；
+- 单次部署禁止 Live Mount 代码与新镜像混用；
+- 必须部署 exact dev SHA；验证 `runtime_git_sha`（= `/opt/panji-live/RUNTIME_SHA`）== 服务器 repo HEAD == 目标 dev SHA；
+- 代码部署不自动执行任何数据 apply / run / publish；
+- `postgres` / `redis` 有状态服务明确排除，不参与重启。
 
-### 13.2 panji-test-deploy 流程（代码/命令核验）
+### 13.2 部署入口与流程
 
-```
-step 1: preflight (必须通过)
-  bash scripts/ops/panji-prod-preflight
-    → 验证 SSH 别名 + 仓库根 + repo status + docker compose + DB/Redis 端口
+- 入口：`scripts/ops/panji-test-deploy <SHA>`（经 `scripts/ops/panji-prod-ssh` 唯一 SSH 入口）；
+- 流程：preflight → 校验目标 dev SHA → 同步运行代码到 `/opt/panji-live`（rsync --delete）→
+  逐服务重启受影响服务 → 逐服务校验 `RUNTIME_SHA`== 目标 SHA → health/version 业务 smoke；
+- 完整步骤与探针以 `docs/runbooks/development-deployment.md` 为准。
 
-step 2: SHA 精确校验 (三项严格相等)
-  LOCAL_SHA=$(git rev-parse HEAD)                          # 当前本机 dev HEAD
-  ORIGIN_DEV_SHA=$(git ls-remote origin refs/heads/dev | awk '{print $1}')
-  CI_GREEN_SHA=  # 从 GitHub Actions 最新 origin/dev CI 成功 run 的 head_sha 提取
-  [ "$LOCAL_SHA" = "$ORIGIN_DEV_SHA" ] || die
-  [ "$LOCAL_SHA" = "$CI_GREEN_SHA"  ] || die "CI 未全绿，禁止部署"
+### 13.3 资源预算门禁（保留，与部署模式无关）
 
-step 3: 服务器端 image build（仅受影响服务）
-  → backend   (only backend/* 变化)
-  → frontend  (only frontend/* 变化)
-  → capture   (only backend/app/services/*capture* 或 Dockerfile.capture 变化)
-  永远不: docker-compose down -v / docker restart postgres/redis / 删除 volume
+`scripts/ops/panji-test-deploy` 在改动任何状态前校验：根分区可用 ≥20GB、使用率 ≤82%、
+MemAvailable ≥4096MB（`PANJI_MIN_DISK_GB` / `PANJI_MAX_DISK_PCT` / `PANJI_MIN_MEM_MB` 可覆盖）。
+不通过即失败且不改状态。部署后受控清理：只 `docker builder prune -f` / `image prune -f` /
+`container prune -f`；禁止 `system prune -a` / `image prune -a` / `volume prune`。
 
-step 4: alembic upgrade head（幂等，已 migrations 跳过）
-  backend 容器内: alembic upgrade head
-  不执行: alembic downgrade（除非 rollback 正式流程触发）
+### 13.4 已废止、不作为当前操作指令
 
-step 5: 重建受影响服务
-  docker-compose up -d --force-recreate --no-deps backend frontend capture
-  健康等待: 最多 60s
+以下流程已从有效治理中移除，仅作为历史遗留，**不得**作为当前部署指令：
 
-step 6: SHA 一致性证明（5 项一致，不一致立即回滚）
-  ① Git repo HEAD SHA                          = $LOCAL_SHA
-  ② Docker image digest (backend/frontend)     = image inspect sha256:...
-  ③ backend runtime /api/v1/version.build_sha  = HTTP GET /api/v1/version 提取
-  ④ frontend asset-manifest/build_sha          = HTTP GET /assets/manifest.json 提取
-  ⑤ deploy release notes 写入 docs/changes/CHANGE 的 deploy_sha 字段
-  若任何一项不一致:
-    → 回到上一版本镜像: docker-compose up -d --force-recreate backend:<prev_sha>
+- Release Gate（`.github/workflows/release.yml`）；
+- GHCR / Registry / 镜像仓库推送；
+- Release Manifest / immutable image release / formal release candidate；
+- 服务器只 pull 不 build；
+- Fast CI / CI Gate 作为部署强制门禁；
+- 多阶段 delivery phase / 未来正式发布流程；
+- `main` 自动部署（`deploy-production.yml` / `panji-deploy.sh`）。
 
-step 7: 健康检查（三项都 200 才算部署成功）
-  - backend  /health
-  - frontend / (含 200 + 非空 body)
-  - API      /api/v1/version 含 build_sha 字段
+## 14. 测试与 CI（手工诊断，非部署前置）
 
-step 8: 部署后验收（浏览器 / CI / Playwright 独立）
-  详见 docs/runbooks/production-deployment.md §本轮测试环境验收章节
-```
+- CI（`.github/workflows/ci.yml`，名称 `CI`）用作按需诊断：分类测试、全量回归、集成测试；
+- CI **不是**普通开发部署的前置条件；push dev 只触发 CI，不触发自动部署；
+- 测试分类（postgres / external_data / 纯单元）仅供 CI 对账，不影响部署决策；
+- 本地测试失败禁止部署；本地无法运行测试时如实报告，不得用 CI 或服务器测试掩盖。
 
-### 13.3 禁止的部署操作（黑名单）
+## 15. 已知偏差与风险（2026-08-02 只读核验）
 
-以下操作即便"为了临时测试"也禁止。任何发现违反：本轮部署状态立即 BLOCKED。
-
-1. `scp file.py panji-prod:/app/backend/app/...`  **手工单文件同步**
-2. `docker cp local.py trading-backend:/app/...`  **容器内手工覆盖**
-3. SSH 进入服务器后 `vi / sed / 修改源代码 / 修改 migration**
-4. 执行一次性业务脚本：`python -c 'from review_orchestrator_service import create_run; create_run(...)'`（例外：必须通过正式 orchestrator API 或 worker oneoff task 队列执行）
-5. `docker compose down -v` 或 任何 `rm -rf /var/lib/docker/volumes/trading_*`
-
-### 13.4 本轮部署记录（2026-08-01）
-
-- 部署 SHA：`ff89fea`（origin/dev，经 `scripts/ops/panji-test-deploy` 部署）；
-- 一致性核验（2026-08-01 只读）：repo HEAD / 容器 GIT_SHA / `/api/v1/version`
-  git_sha / runtime / image 一致，alembic=078；
-- 验收状态：非 CLOSURE_PASSED（fp_summary/segment 断链等由 2026-08-01
-  全项目收口承载，见 `docs/changes/2026/CHANGE-20260801-001-*.md` §3）；
-- 下一轮部署时按 §13.2 step 6-7 重新记录 SHA 一致性 5 项结果：
-| # | 维度 | SHA | OK |
-|---|---|---|---|
-| 1 | Git repo HEAD | 096a5d3… | ☐ |
-| 2 | Docker image digest (backend) | | ☐ |
-| 3 | backend runtime /api/v1/version:build_sha | | ☐ |
-| 4 | frontend asset manifest build_sha | | ☐ |
-| 5 | CHANGE release notes | | ☐ |
-- 不 down -v、不删除 PostgreSQL/Redis Volume、不自动 migration 的约束不变
-
-### 13.5 部署脚本修复与资源门禁收口（2026-08-02，CHANGE-20260802-001）
-
-本轮（2026-08-02）对 `scripts/ops/panji-test-deploy` 修复历史缺陷，并在 `rules/80-deployment-data-safety.md` 新增资源预算门禁章节。代码已修改、本地契约测试通过，**待下次 `panji-test-deploy <SHA>` 部署后由生产运行事实核验**。
-
-#### 13.5.1 部署脚本修复点（代码已核验，未部署）
-
-| 修复项 | 位置（panji-test-deploy） | 变化 |
-|---|---|---|
-| 资源硬门禁 | §1b | 改动任何状态前先校验根分区磁盘可用 ≥20GB、使用率 ≤82%、MemAvailable ≥4096MB；不通过即失败且不改状态 |
-| 服务名唯一真源 | §8 / §8a | 删除硬编码 `worker`/`worker-chips`；改为 `docker compose config --services` 动态发现；计划重建服务不在 compose 中立即 `fail`（禁止静默跳过） |
-| 镜像标签逐服务校验 | §8b | 对每个重建服务 `docker inspect .Config.Image` 校验必须以 `:SHORT_SHA` 结尾，否则拒绝报告成功（防"容器仍是旧 SHA 却报完成"） |
-| 健康端点修正 | §9 | backend 容器无 curl，改用 `python3 + urllib` 探测 `/v1/health` 与 `/v1/version`；新增 git_sha==runtime_git_sha==image_git_sha 三项一致校验 |
-| 部署后受控清理 | §11 | 只 `docker builder prune -f` / `image prune -f` / `container prune -f`；清理后记录磁盘前后可用量并复查门禁 |
-
-#### 13.5.2 资源预算门禁（rules/80 §服务器资源预算门禁，已写入）
-
-- 阈值：`PANJI_MIN_DISK_GB=20`、`PANJI_MAX_DISK_PCT=82`、`PANJI_MIN_MEM_MB=4096`；可通过环境变量临时覆盖。
-- 部署前门禁：任何部署/构建前先校验，不通过即拒绝（不改状态）。
-- 部署后强制回收：builder cache / dangling images / 已停止容器；禁止 `system prune -a` / `image prune -a` / `volume prune`。
-- 长任务内存预算：bootstrap 等批处理按 `DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB=1536` 软预算分片释放，超限安全停止而非扩内存掩盖。
-
-#### 13.5.3 部署脚本契约测试（新增）
-
-- 文件：`scripts/ops/test-panji-test-deploy-contracts.sh`
-- 覆盖 4 个不变量（16 项断言，全 PASS）：资源门禁阈值、服务名真源（拒绝 `worker`/`worker-chips`）、镜像标签校验（禁止虚假完成）、健康端点路径（`/v1/health` `/v1/version` 合法，`/version` `/api/v1/health` `/health` 非法）
-- 运行：`bash scripts/ops/test-panji-test-deploy-contracts.sh`
-
-## 14. CI 三层结构与部署脚本重构（2026-08-02，CHANGE-20260802-002）
-
-> 核验状态：代码与本地/dry-run 验证已核验；Fast CI 的 exact-SHA 终态待推送后确认；
-> 本轮未执行生产部署，生产运行 SHA 与 alembic head 保持部署前状态。
-
-### 14.1 CI 三层工作流（代码已核验）
-
-单体 `ci.yml`（14 job 无条件全量）已拆为三层：
-
-| 层 | 文件 | 触发 | Job 数 | 阻断门禁 |
-|---|---|---|---|---|
-| Fast CI | `.github/workflows/ci.yml` | push dev / PR main | 12 | `CI Gate` |
-| Release Gate | `.github/workflows/release.yml` | `workflow_dispatch`（exact SHA） | 7 | `Release Gate` |
-| Nightly | `.github/workflows/nightly.yml` | 每日 03:00 Asia/Shanghai | 7 | `Nightly Summary` |
-
-**Fast CI job 构成**：
-- `changes`（纯 git diff，输出 `docs`/`backend`/`frontend`/`db`/`migration`/`deploy` 六标志）；
-- 始终运行：`architecture-rules`、`docs-consistency`、`test-allowlist`、`governance-rules`；
-- 条件运行：`ruff-new-files`/`mypy-new-files`/`backend-unit-tests`（backend）、
-  `postgres-integration-tests`（db）、`migration-verify`（migration）、`frontend-checks`（frontend）；
-- `ci-gate`：按 `changes` 输出逐项判定。
-
-**CI Gate 判定语义**（`ci.yml` 第 390-501 行）：
-- 范围内 job 非 success → 失败；
-- 范围外 job 为 `failure`/`cancelled` → 失败（`if` 条件与 `changes` 输出不一致，属配置错误）；
-- 范围外 job 为 `skipped` → 通过。
-
-**Release Gate job 构成**：`verify-sha`（断言 SHA ∈ origin/dev）→
-`postgres-integration`（`-m "postgres and not external_data"`，断言 skipped=0）、
-`playwright-e2e`（关键场景）、`migration-full`（单 head + base↔head 完整循环）→
-`build-images`（`docker compose build`，与 `docker-compose.prod.yml` 同源）→
-`deploy-drill`（compose config + 脚本语法 + grep 断言无变更推断逻辑）→ `release-gate`。
-
-**Nightly job 构成**：`full-pytest`（`-m "not external_data"`）、
-`external-data-tests`（独立分组，`continue-on-error`，单独报告）、
-`migration-full-cycle`、`full-lint-report`（观测项）、`frontend-full`、
-`playwright-e2e`（全量）、`nightly-summary`。
-
-### 14.2 部署脚本结构（代码 + dry-run 已核验）
-
-| 文件 | 角色 | 规模 |
-|---|---|---|
-| `scripts/ops/panji-test-deploy` | 本地入口：preflight + SHA 祖先校验 + 传输 + 终校验 | 156 行（原 517 行） |
-| `scripts/ops/panji-deploy-remote.sh` | 远端执行体：受版本控制的真实脚本，12 阶段 | 17872 字节 |
-
-远端脚本 12 阶段：0 `flock` 锁 → 1 资源门禁 → 2 校验 SHA → 3 checkout →
-4 `market.env` 原子更新 → 5 获取镜像 → 6 migration → 7 重建全部无状态服务 →
-8 逐服务镜像 SHA 校验 → 9 健康检查 → 10 manifest+state → 11 受控清理。
-
-关键不变量：
-- 旧 heredoc（约 389 行经 `bash -s` stdin 执行）**已完全删除**；
-- 按变更文件推断部署范围的逻辑**已完全移除**，由 `deploy-drill` grep 断言防回潮；
-- `STATEFUL_SERVICES="postgres redis"` 明确排除，不参与重建；
-- 服务器构建仅在显式 `--allow-local-build` 时允许（Registry 凭据未通的过渡开关）；
-- migration 命令带 `</dev/null`，防止 stdin 吞噬后续脚本内容。
-
-dry-run 实测（真实服务器）：12 阶段全部执行，发现 15 个服务，
-13 个无状态服务纳入重建计划，`postgres`/`redis` 正确排除。
-
-### 14.3 测试分类（已核验）
-
-`backend/tests/conftest.py` 的 `pytest_collection_modifyitems` 统一判定并输出
-`[test-classification]` 摘要行。2026-08-02 实测基线：
-
-```
-postgres=1178  pure_unit=2496  external_data=6  total=3674
-漏标嫌疑=0
-```
-
-- `postgres`：由 fixture 闭包（`_DB_FIXTURE_NAMES`）+ 源码文本（`_DB_SOURCE_MARKERS`，过渡机制）+ 显式 marker 三路判定；
-- `external_data`：**仅**显式标注，不做自动推断。当前 6 条集中在 `tests/test_calendar_v9_regression.py`（mootdx 依赖）；
-- 漏标检查 `_DB_SUSPECT_PATTERN`：只报告不自动补 marker。
-
-### 14.4 已知阻塞
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| GHCR 推送 | `blocked_registry_auth` | 服务器无 ghcr 登录态、本机 `gh` 未认证、`docker pull` 返回 401；Release Gate 完整构建并产出 manifest（`pushed=false`、`digest` 空），未伪造 digest / 未用 image tar 旁路 / 未回退服务器构建 |
-| 生产部署 | 未执行 | 本轮为基础设施收口，Registry 未接通，不执行生产部署；生产运行 SHA 保持 `73a46ae`、alembic head 保持 082 |
+- **运行态与 Live Mount 合同偏差**：当前运行容器 `market-dev-*:73a46ae`（2026-08-02 22:25）
+  为**镜像构建**部署，未挂载 `/opt/panji-live`；而 `/opt/panji-live/RUNTIME_SHA` 已写入
+  较新的 `cf7a69051...`（目标 SHA），未应用到运行容器。按合同，部署应走 Live Mount，
+  运行容器须挂载 panji-live 且 `RUNTIME_SHA`== repo HEAD == 目标 dev SHA。
+- 当前运行后端在 :8000 未暴露 `/health` / `/version` / `/api/v1/version` 等端点
+  （均返回 `Not Found`）；版本探针路径以实际路由为准，下次 Live Mount 部署后重新核验。
+- 远程 PostgreSQL test 容器（`trading-postgres-test`，映射 5433）用途与持久化策略尚未核验。
+- 本地 Redis DB 15 已正式保留为本地开发临时状态隔离库，但 Worker 启动前仍需确认 `REDIS_URL` 以 `/15` 结尾。

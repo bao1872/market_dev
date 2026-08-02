@@ -1,6 +1,12 @@
 # CHANGE-20260730-017：发布前真实闭环 — 状态机+部署合同+CI门禁+基线对齐
 
-状态：进行中（代码+测试+文档已 commit；PG 集成待 CI 终态；本轮未部署、未 push main、未修改生产数据）
+> **历史状态（2026-08-02 治理收口）**
+> - `historical_status`: superseded（发布流程部分已废止；业务实现仍属历史事实）
+> - `superseded_by`: CHANGE-20260802-003（开发治理收口）
+> - `current_authority`: `rules/80-deployment-data-safety.md` + `docs/maps/80-system-runtime.md` + `docs/runbooks/development-deployment.md`
+> - 说明：本 Change 中的 Release Gate / CI 门禁作为部署前置 / 正式发布流程**已废止**；盘后编排、部署合同中的 Live Mount 业务实现仍属历史事实，但当前部署唯一权威以 2026-08-02 治理收口文档为准。
+
+状态：历史（superseded；发布流程部分已废止，业务实现保留为历史事实）
 日期：2026-07-30
 类型：behavior + contract + architecture + ci
 领域：盘后编排 / 部署运维 / 复盘模块 / CI 治理 / 测试基础设施

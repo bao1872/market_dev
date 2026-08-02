@@ -1,6 +1,12 @@
 # CHANGE-20260729-006：盘后编排与历史回补增量检查点/分层发布重构
 
-状态：进行中（代码+目标纯单元测试+Ruff 通过；PostgreSQL 集成测试待 CI；浏览器验收待用户手工；CI 待触发）
+> **历史状态（2026-08-02 治理收口）**
+> - `historical_status`: historical（代码事实保留；"分层发布"流程术语已弃用）
+> - `superseded_by`: CHANGE-20260802-003（开发治理收口弃用多阶段发布术语）
+> - `current_authority`: `rules/80-deployment-data-safety.md` + `docs/runbooks/development-deployment.md`
+> - 说明：增量发布 / 分层发布的"发布阶段"术语已废止；本 Change 记录的盘后编排与历史回补实现仍属历史事实。
+
+状态：历史（代码事实；"分层发布"发布流程术语已弃用）
 日期：2026-07-29
 类型：architecture + behavior + contract
 领域：盘后编排 / 历史回补 / 分层发布

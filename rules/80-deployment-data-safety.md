@@ -156,32 +156,33 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 
 ### 版本端点
 
-`/version` 返回：
+当前运行后端版本端点（以 `docs/runbooks/development-deployment.md` 实测探针为准）应返回：
 
-- `runtime_git_sha`（RUNTIME_SHA 文件）；
-- `image_git_sha`（GIT_SHA 环境变量）；
-- `deployment_mode`（live / image）。
+- `runtime_git_sha`（= `/opt/panji-live/RUNTIME_SHA` 文件内容）；
+- `deployment_mode`（`live`）。
 
-验证部署时 `runtime_git_sha` 必须等于 main HEAD。
+> 早期镜像曾返回 `image_git_sha` / `GIT_SHA` 环境变量，属镜像构建时代的残留；Live Mount 模式下运行时来源是 `RUNTIME_SHA` 文件，不再依赖镜像内置 `GIT_SHA`。如运行后端未暴露该端点，以 `RUNTIME_SHA` 文件内容 + 服务器 repo HEAD 作为 SHA 一致性证据（见 §部署版本合同）。
+
+验证部署时 `runtime_git_sha` 必须等于目标 **dev SHA**。
 
 ## 部署顺序与回滚
 
 - 部署按 `backend → frontend → worker` 顺序，禁止并行；
-- 镜像必须打 SHA 标签，便于回滚；
-- 保留当前 + 1 rollback 镜像；
-- 不可逆 migration 必须在 PR 描述中明确标注并提供 downgrade 步骤；
-- migration 不自动回滚（自动部署 PLANNED 阶段同样不自动回滚 migration）。
+- 普通变更走 Live Mount（同步运行代码 + 重启受影响服务），**不构建镜像**，因此回滚即重新同步上一已知良好 dev SHA 的运行代码并重启；
+- 仅当依赖 / Dockerfile / 基础镜像变化触发镜像构建时，才以镜像 SHA 标签区分版本，回滚为切回上一镜像并重启；
+- 不可逆 migration 必须在变更说明中明确标注并提供 downgrade 步骤；
+- migration 不自动回滚。
 
-## 自动部署（PLANNED）
+## 部署来源与阶段边界
 
-> 提议中，当前未实现。详见 `70-trae-cn.md`。
+盘迹当前只关心**开发阶段**。有效治理只描述开发闭环（本地开发 → 修改范围测试 → 精确 commit → push origin/dev → 服务器 checkout 精确 SHA → Live Mount 同步运行代码 → 重启受影响服务 → health/version/业务 smoke → 停止）。
 
-- dev push 自动部署为 PLANNED；
-- 当前 dev push 只触发 CI 质量门禁；
-- 自动部署需要：`panji-deploy` 服务器用户 + SSH forced command + GitHub Environment + 部署锁 + 变更分类；
-- 自动部署不自动回滚 migration；
-- 自动部署不读取数据库秘密；
-- 自动部署只部署 GitHub commit。
+禁止定义或保留其他阶段的工作流程，禁止新增 `development` / `runtime` / `formal_release` 等阶段状态机，禁止在有效治理文档中描述未来正式发布方式。
+
+- `dev` 是 CI 与开发部署的唯一来源；
+- push `dev` 只触发 CI（诊断用途），**不触发自动部署**，也不作为部署前置条件；
+- 当前唯一部署模式为 **Live Mount 开发部署**（见 §Live Mount 部署规则 与 `docs/runbooks/development-deployment.md`）；
+- Release Gate / GHCR / Registry / immutable image release / formal release candidate / 多阶段 delivery phase / 未来正式发布流程 **不在当前治理范围内**，有效文档不得描述或保留它们。
 
 ## 生产服务器 SSH SSOT（CHANGE-20260730-015）
 
@@ -227,19 +228,16 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 禁止 `/tmp` Python 脚本绕过 service 直接操作 ORM；
 - 禁止 DELETE 历史 `dsa_only` 记录或失败 run，必须通过正式 cancel/interrupted/retry 服务处理。
 
-### 部署版本合同
+### 部署版本合同（Live Mount 开发部署）
 
-- 构建成功后必须先原子更新 `/etc/market-dev/market.env` 中的 `GIT_SHA`，再执行 `docker compose` 重建：
-  - 更新方式：临时文件 + `mv` 原子替换，**禁止 `sed -i`**（`sed -i` 在某些环境下不是原子操作，且会破坏文件权限/SELinux 上下文）；
-  - 模板：`cp market.env market.env.tmp && { grep -v '^GIT_SHA=' market.env.tmp; echo "GIT_SHA=<SHA>"; } > market.env.tmp && mv market.env.tmp market.env`；
-  - `market.env` 更新成功后才能执行 `docker compose -f docker-compose.prod.yml up -d --force-recreate`。
-- 部署成功门禁必须**同时**验证以下四项一致，**`/health=200` 不能单独判成功**：
-  1. repo HEAD（`git -C /root/web_dev rev-parse HEAD`）= 目标 SHA；
-  2. image tag（`docker images` 中 `trading-backend:<SHA>` 存在）= 目标 SHA；
-  3. container env `GIT_SHA`（`docker inspect trading-backend` 的 env）= 目标 SHA；
-  4. `/version` runtime SHA（`curl /api/v1/version` 的 `runtime_git_sha` + `image_git_sha`）= 目标 SHA。
-- 四项任一不匹配即视为部署失败，必须回滚至上一已知良好 SHA，不得通过"重启容器"或"重新部署"掩盖不一致。
-- Live Mount 部署同样适用：`RUNTIME_SHA` 文件必须原子替换（temp file + `mv`），禁止 `sed -i`。
+- 必须部署 **exact dev SHA**：服务器 `git checkout` / `git fetch` 到目标 dev SHA，运行代码同步到 `/opt/panji-live`（`RUNTIME_SHA` 文件写入该 SHA）。
+- 部署成功门禁必须**同时**验证以下两项一致，**`/health=200` 不能单独判成功**：
+  1. 服务器 repo HEAD（`git -C /root/web_dev rev-parse HEAD`）= 目标 dev SHA；
+  2. `runtime_git_sha`（运行代码 `RUNTIME_SHA` 文件 / 版本端点返回的 `runtime_git_sha`）= 目标 dev SHA。
+- 任一项不匹配即视为部署失败，必须回到上一已知良好 SHA，不得通过"重启容器"或"重新部署"掩盖不一致。
+- `RUNTIME_SHA` 文件必须原子替换（temp file + `mv`），禁止 `sed -i`。
+- 代码部署**不自动执行**任何数据 apply / run / publish 操作；migration 仅在确有新 migration 时由部署脚本显式、幂等地执行，且不属于"自动数据发布"。
+- 具体探针命令与逐服务校验以 `docs/runbooks/development-deployment.md` 为准（当前运行后端版本端点路径以该 runbook 实测为准，不在此硬编码）。
 
 ## 部署脚本结构与执行纪律（2026-08-02 收口，CHANGE-20260802-002 配套）
 
@@ -261,17 +259,26 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
   - 理由：推断错误时部分服务会静默停留在旧 SHA 且不告警——这正是 2026-08-02 事故的直接成因。
 - 每次部署必须**一次性重建全部无状态服务**，不做任何范围裁剪。
 - **有状态服务（`postgres` / `redis`）必须明确排除**，不参与重建，避免触碰持久化数据。
-- 重建后必须**逐服务**校验其镜像 SHA 等于目标 SHA，任一不符即判部署失败。
-- Release Gate 的 `deploy-drill` job 通过 grep 断言部署脚本中不存在上述推断逻辑，防止回潮。
+- 重建后必须**逐服务**校验其运行代码 SHA（RUNTIME_SHA）等于目标 dev SHA，任一不符即判部署失败。
+- 防回潮：部署脚本中不得存在"按变更文件推断重启范围"的逻辑（单次部署一次性重建全部无状态服务）。
 
-### DS-92 镜像来源：Registry 优先，服务器构建为显式过渡开关
+### DS-92 镜像构建触发条件（仅在依赖或 Dockerfile 变化时才 build）
 
-- 正式路径：镜像由 Release Gate 在 CI 中构建为不可变镜像并推送 Registry，服务器**只 pull 不 build**。
-- 服务器本地构建仅在显式传入 `--allow-local-build` 时允许，且必须在部署日志中打印告警。这是 Registry 凭据打通前的**过渡开关**，凭据就绪后应移除。
-- 构建参数必须与 `docker-compose.prod.yml` 同源（用 `docker compose build` 而非手写 `docker build`）。
-  - 理由：前端镜像需要 `VITE_GIT_SHA` / `VITE_BUILD_TIME` 构建参数，手写 `docker build` 极易漏传，漏传会导致页面显示错误版本号；两套构建定义也必然随时间漂移。
+普通开发变更**不构建镜像**，使用 Live Mount 同步运行代码（见 §Live Mount 部署规则）。只有以下变化才构建对应镜像：
+
+- `pyproject.toml` 或 Python 依赖锁；
+- `package.json` / `package-lock.json`；
+- `Dockerfile` / `Dockerfile.capture`；
+- 系统依赖（如 apt 层）；
+- 基础镜像；
+- Capture 浏览器运行环境；
+- 必须烘焙进镜像的 Nginx 配置。
+
+约束：
+
+- 构建参数必须与 `docker-compose.prod.yml` 同源（用 `docker compose build` 而非手写 `docker build`），避免构建定义漂移。
 - 盘迹共 **3 个业务镜像**：`backend` / `frontend` / `capture`。全部 `worker-*` 服务复用 `backend` 镜像，不单独构建。
-- Registry 凭据不可用时，Release Gate 允许完成到"构建 + 本地 manifest 校验"，并把推送步骤显式标记为 **`blocked_registry_auth`**。此时**禁止**：伪造 digest、改用 image tar 旁路、回退为服务器构建来"绕过"阻塞。
+- **单次部署禁止同时使用 Live Mount 代码和新镜像内置代码**，避免运行时来源不明确；普通变更走 Live Mount，依赖/Dockerfile 变化才走镜像构建，二者不混用。
 
 ### DS-93 部署互斥与资源门禁
 

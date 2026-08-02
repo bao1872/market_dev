@@ -1,5 +1,11 @@
 # CHANGE-20260802-002 CI 三层重构 + 部署脚本结构重构 + 测试分类收口
 
+> **历史状态（2026-08-02 治理收口）**
+> - `historical_status`: superseded（历史事实保留，流程已废止）
+> - `superseded_by`: CHANGE-20260802-003（开发治理收口：Live Mount 开发部署 + CI 仅作诊断工具）
+> - `current_authority`: `rules/80-deployment-data-safety.md` + `docs/maps/80-system-runtime.md` + `docs/runbooks/development-deployment.md`
+> - 说明：本 Change 描述的 Release Gate / GHCR / 三层 CI / CI Gate 部署门禁 / 多阶段发布流程**已废止**，不作为当前操作指令。CI 仅保留为手工诊断工具，不进入默认开发闭环。
+
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-08-02 |
