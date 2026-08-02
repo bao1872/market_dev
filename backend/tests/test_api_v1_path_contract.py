@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from app.main import app
 
-
 _FRAMEWORK_PATHS = {
     "/",
     "/openapi.json",
