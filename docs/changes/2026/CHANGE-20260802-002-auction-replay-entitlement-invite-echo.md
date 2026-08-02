@@ -5,7 +5,10 @@
 - 领域：权限（PRD60 PA-12 / PA-20 / PA-21）、前端导航与邀请码管理后台
 - 关联 PRD：`docs/prd/60-permissions-admin.md`（PA-12 复盘与竞价、PA-20/PA-21 邀请码）
 - 关联 Maps：`docs/maps/60-permissions-admin.md` §11
-- 状态：代码 + 纯单元测试 + Ruff + TSC + ESLint 通过；Fast CI 待跑；真实运行未部署（本轮禁止生产部署）
+- 状态：`verified_code` / `runtime_pending`
+  - `verified_code`：代码 + 纯单元测试（后端 32 项、前端 35 项）+ TSC + ESLint 本地复验通过（2026-08-02 复核）。
+  - `runtime_pending`：生产链路真实运行未核验，需在 Live Mount 部署后按 §5 逐项验收。
+  - CI 已收敛为手动 `workflow_dispatch` 诊断，不构成本 Change 的验收前置或阻断条件。
 
 ## 1. 背景与意图
 
@@ -65,16 +68,19 @@
 - 邀请码回显：创建/列表/撤销响应与审计含 capability 维度，便于权限核对。
 - 不引入独立 auction capability，不新增 migration，不修改 main / 不部署生产。
 
-## 4. 测试（verified_code）
+## 4. 测试（verified_code，2026-08-02 本地复验）
 
-- 后端 `backend/tests/test_auction_replay_entitlement.py`：纯单元测试 32 项通过（PURE_UNIT_TEST=1，全 mock 无 DB）。覆盖 11 类场景：401/403/200、admin POST 仍 require_admin、capability 回显、plan fallback、显式 capabilities 优先、无 auction capability。
-- 前端 `frontend/src/navigation/__tests__/replayAuctionEntitlement.test.ts`：node `--experimental-strip-types --test` 18 项通过；既有 nav/route 合同 27 项通过。
-- `npx tsc --noEmit` 干净（前后端均通过）。
-- `ruff` 通过。
+- 后端 `backend/tests/test_auction_replay_entitlement.py`：`PURE_UNIT_TEST=1` 下 32 项通过（全 mock 无 DB）。覆盖：无 `research_replay` 访问竞价 GET → 403；有 `research_replay` → 200；未登录 → 401；admin POST 端点仍走 `require_admin` 未被放宽；邀请码创建/列表/撤销响应含 `capabilities`；plan fallback；显式 capabilities 优先；不存在独立 auction capability。
+- 前端 `frontend/src/navigation/__tests__/replayAuctionEntitlement.test.ts` 与 `routeStructure.test.ts`：`node --experimental-strip-types --test` 合计 35 项通过。覆盖：无 `research_replay` 时复盘与竞价入口一同隐藏；有该 capability 时一同显示；admin 始终可见。
+- `frontend/node_modules/.bin/tsc --noEmit`：0 错误。
+- `frontend/node_modules/.bin/eslint src/navigation src/pages/AdminUsersPage.tsx`：0 错误（4 条既有 `react-hooks/exhaustive-deps` 警告，与本次权限修改无关，未新增）。
 
 ## 5. 验证与未完成项
 
-- 已完成：代码修改、单元测试、Ruff、TSC、ESLint、文档同步。
-- 待 Fast CI：push origin/dev 后等待该精确 SHA 的 Fast CI 至终态（Backend Unit / PostgreSQL Integration / Frontend Checks / CI Gate）。
-- 明确不做（本轮禁止）：生产部署、bootstrap、Review 数据闭环、GHCR、Release Gate、main 分支修改、Migration 生产应用、pointer 发布。
-- 真实运行验收（页面/API 在生产链路）：本轮禁止部署，故未核验；行为由后端守卫契约与前端路由守卫保证。
+- `verified_code`：代码修改、纯单元测试、TSC、ESLint、文档同步已完成并于 2026-08-02 复验。
+- `runtime_pending`：生产链路真实运行未核验。需在 Live Mount 部署后按下列三条证据验收：
+  1. 无 `research_replay` 账户请求竞价 GET 端点实际返回 403；
+  2. 有 `research_replay` 账户导航同时出现"复盘与竞价"两个入口；
+  3. 邀请码创建/列表接口响应体实际包含 `capabilities` 字段。
+- CI 定位说明：CI 已收敛为手动 `workflow_dispatch` 诊断，非部署门禁，不作为本 Change 的验收前置条件（原"待 Fast CI"表述已废止）。
+- 明确不做：生产部署、bootstrap、Review 数据闭环、main 分支修改、Migration 生产应用、pointer 发布。

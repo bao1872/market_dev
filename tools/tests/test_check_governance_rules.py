@@ -52,12 +52,78 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
         ("auto_ci", "automatic trigger"),
         ("old_deploy", "removed path restored"),
         ("duplicate_change", "duplicate Change ID"),
+        ("no_bootstrap_detach", "local deploy entry missing contract signal"),
+        ("no_head_restore", "local deploy entry missing contract signal"),
+        ("no_previous_sha_tiers", "server deploy implementation missing contract signal"),
+        ("no_first_live_detect", "server deploy implementation missing contract signal"),
+        ("no_migration_state", "server deploy implementation missing contract signal"),
+        ("split_image_tag_group", "server deploy implementation missing contract signal"),
+        ("runtime_sha_rename", "breaks single-file bind mount inode"),
+        ("migration_failure_recreate", "must not recreate containers"),
+        ("global_prune", "global system prune"),
     ],
 )
 def test_governance_regressions_are_rejected(
     governance_repo: Path, mutation: str, expected: str
 ) -> None:
-    if mutation == "role_file":
+    local_entry = governance_repo / "scripts/ops/panji-test-deploy"
+    server_impl = governance_repo / "scripts/deploy/panji-deploy.sh"
+
+    if mutation == "no_bootstrap_detach":
+        # 回潮：本地入口不再自举到目标 SHA，直接跑服务器当前工作树的脚本。
+        path = local_entry
+        path.write_text(read_text(path).replace("checkout -f --detach", "checkout -f"), encoding="utf-8")
+    elif mutation == "no_head_restore":
+        path = local_entry
+        path.write_text(read_text(path).replace("trap restore_head EXIT", "# no trap"), encoding="utf-8")
+    elif mutation == "no_previous_sha_tiers":
+        # 回潮：删掉四级解析的兜底标识，退回「状态文件缺失即强制 migration」。
+        path = server_impl
+        path.write_text(read_text(path).replace("unknown_baseline", "legacy_missing"), encoding="utf-8")
+    elif mutation == "no_first_live_detect":
+        path = server_impl
+        path.write_text(
+            read_text(path).replace("detect_first_live_deploy()", "legacy_detect()"), encoding="utf-8"
+        )
+    elif mutation == "no_migration_state":
+        path = server_impl
+        path.write_text(
+            read_text(path).replace("handle_migration_failure()", "legacy_fail()"), encoding="utf-8"
+        )
+    elif mutation == "split_image_tag_group":
+        # 回潮：只构建"受影响的那一个"镜像，破坏共享 GIT_SHA tag 组。
+        path = server_impl
+        path.write_text(
+            read_text(path).replace(
+                "ENV_IMAGE_TAG_GROUP=(backend frontend worker-capture)",
+                "ENV_IMAGE_TAG_GROUP=(backend)",
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "runtime_sha_rename":
+        # 回潮：用 rsync 覆盖 RUNTIME_SHA，单文件挂载 inode 失效。
+        path = server_impl
+        text = read_text(path).replace(
+            'printf \'%s\' "${TARGET_SHA}" > "${sha_file}" || fail "无法原地写入 ${sha_file}"',
+            'rsync -a /tmp/x "${LIVE_ROOT}/RUNTIME_SHA"',
+        )
+        path.write_text(text, encoding="utf-8")
+    elif mutation == "migration_failure_recreate":
+        path = server_impl
+        text = read_text(path).replace(
+            '    log "结论: migration_failed_requires_inspection"',
+            '    ${COMPOSE_CMD} up -d --force-recreate backend\n'
+            '    log "结论: migration_failed_requires_inspection"',
+        )
+        path.write_text(text, encoding="utf-8")
+    elif mutation == "global_prune":
+        path = server_impl
+        text = read_text(path).replace(
+            "    run_cmd docker builder prune -f",
+            "    run_cmd docker system prune -af",
+        )
+        path.write_text(text, encoding="utf-8")
+    elif mutation == "role_file":
         (governance_repo / "rules/60-trae-work.md").write_text("# role\n", encoding="utf-8")
     elif mutation == "future_state":
         path = governance_repo / "rules/00-core-governance.md"

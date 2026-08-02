@@ -58,19 +58,40 @@ scripts/ops/panji-test-deploy <FULL_SHA> [--dry-run]
 
 实现边界：
 
-- 本地入口只校验来源、运行 preflight 并调用服务器仓库内的部署实现；
-- 服务器实现根据“上一成功部署 SHA 到目标 SHA”的完整差异分类；
+- 本地入口只校验来源、运行 preflight，并让服务器先自举到目标 SHA 工作树，
+  再执行**目标工作树中**的 `scripts/deploy/panji-deploy.sh`。
+  远端序列：`fetch origin dev → 工作树干净校验 → 祖先校验 → 记录原始 HEAD →
+  checkout -f --detach 目标 SHA → 执行部署实现`；dry-run 与失败经 `trap` 恢复原始 HEAD，
+  正式部署成功后保持在目标 SHA。这解决了"服务器停在旧 SHA 时跑的是旧部署脚本"的问题；
+- 服务器实现根据"上一成功部署 SHA 到目标 SHA"的完整差异分类；
+  上一 SHA 按四级解析：状态文件 → `/opt/panji-live/RUNTIME_SHA` → 部署前 repo HEAD →
+  首次未知基线。仅第四级才强制全量同步 + migration，状态文件缺失本身不构成 migration 理由；
+- 首次 Live Mount 部署由 `docker inspect` 判定（`trading-backend` / `trading-frontend`
+  是否挂载 `/opt/panji-live`）。判定为首次时强制全量同步 Python 与前端运行代码以建立挂载，
+  但**不会**据此设置 `migration_changed`；
 - 普通 Backend 代码只同步 Live Mount，不构建镜像；
 - 普通 Frontend 代码在服务器生成 `dist` 后同步，不构建镜像；
-- 依赖、Dockerfile、系统依赖或必须烘焙的 Nginx 配置变化才构建对应环境镜像；
+- backend / frontend / worker-capture 三个镜像共用同一 `GIT_SHA` tag。依赖、Dockerfile、
+  系统依赖或必须烘焙的 Nginx 配置变化时，必须把三者作为**同一 tag 组整体构建**，
+  不存在只构建其中一个的做法；
 - 即使构建环境镜像，服务仍通过 prod + live 叠加运行，代码来源仍是 `/opt/panji-live`；
-- migration 只在 migration 文件发生变化时执行；部署不自动执行 bootstrap、业务 run、
-  publish、withdrawal 或其他业务数据动作；
+- migration 只在 migration 文件发生变化时执行，且**始终早于任何服务重启**；
+  部署不自动执行 bootstrap、业务 run、publish、withdrawal 或其他业务数据动作；
+- `/opt/panji-live/RUNTIME_SHA` 是单文件 bind mount 源，采用原地写入（保持 inode），
+  写后校验 inode 未变并回读完整 SHA；
+- 失败处理分两类：migration 失败（服务未重启）只恢复文件层并输出
+  `migration_failed_requires_inspection`，不做任何容器重建、不声称数据库已回滚；
+  服务已重启后的核验失败才执行容器级回滚；
+- 部署后清理是有条件的：本轮未构建镜像则完全不清理；构建了镜像才执行
+  `builder prune -f` 与 `image prune -f`。禁止 `-a` 级 prune、`system prune`、`volume prune`；
 - PostgreSQL、Redis 和 Umami 不进入普通重启列表；禁止 `down -v`。
 
 成功证据必须同时满足：服务器 repo HEAD、`/opt/panji-live/RUNTIME_SHA` 和版本接口的
-`runtime_git_sha` 等于目标完整 SHA，`deployment_mode=live`，健康/就绪探针通过，受影响
-容器挂载来源包含 `/opt/panji-live`。状态文件只在这些检查全部通过后更新。
+`runtime_git_sha` 等于目标完整 SHA，`deployment_mode=live`，健康/就绪探针通过，
+`trading-backend` 与 `trading-frontend` 挂载来源分别包含 `/opt/panji-live` 与
+`/opt/panji-live/frontend/dist`；当本轮重启了 Python 服务或属首次 Live Mount 部署时，
+全部 11 个共用 Live Mount 的 Python 服务挂载均需核验通过。
+状态文件只在这些检查全部通过后更新。
 
 ## Compose 服务边界
 

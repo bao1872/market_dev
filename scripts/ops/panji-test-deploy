@@ -8,7 +8,17 @@
 # 职责边界（本脚本是"瘦客户端"，不含任何部署实现逻辑）：
 #   1. 校验目标 SHA 存在且是 origin/dev 的祖先；
 #   2. 运行 scripts/ops/panji-prod-preflight；
-#   3. 通过 SSH 调用服务器仓库内的 scripts/deploy/panji-deploy.sh 执行部署。
+#   3. 通过 SSH 让服务器**先自举到目标 SHA 工作树**，再执行该工作树中的
+#      scripts/deploy/panji-deploy.sh。
+#
+# 为什么需要自举（首次 Live Mount 部署缺陷修复）：
+#   服务器仓库可能仍停在旧 SHA。若直接执行服务器**当前**工作树中的
+#   panji-deploy.sh，跑的就是旧脚本，无法保证执行目标 SHA 中的新部署实现。
+#   因此远端启动顺序固定为：
+#     cd REPO → fetch origin dev → 工作树干净校验 → 目标 SHA 属于 origin/dev
+#     → 记录原始 HEAD → checkout --detach 目标 SHA
+#     → 执行目标工作树中的 scripts/deploy/panji-deploy.sh
+#   dry-run 结束或任何失败都经 trap 恢复原始 HEAD；正式部署成功则保持在目标 SHA。
 #
 # 唯一运行模式：Live Mount（docker-compose.prod.yml + docker-compose.live.yml）。
 #   本脚本不提供模式开关，不提供镜像构建开关。
@@ -36,7 +46,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 REMOTE_REPO_ROOT="${PANJI_REMOTE_REPO_ROOT:-/root/web_dev}"
-REMOTE_DEPLOY_SCRIPT="${REMOTE_REPO_ROOT}/scripts/deploy/panji-deploy.sh"
 LOCAL_DEPLOY_SCRIPT="${REPO_ROOT}/scripts/deploy/panji-deploy.sh"
 SSH_WRAPPER="${SCRIPT_DIR}/panji-prod-ssh"
 
@@ -103,16 +112,94 @@ if [[ "${SKIP_PREFLIGHT}" != "1" && "${SKIP_PREFLIGHT}" != "true" ]]; then
     fi
 fi
 
-# ===== SSH 调用服务器仓库内的部署脚本 =====
-# 远端当前仓库中的受版本控制脚本负责 fetch、校验并 checkout 目标 SHA。
-# dry-run 只做计划，不允许为读取脚本而修改远端工作树。
-REMOTE_ARGS=("${TARGET_SHA}")
-[[ "${DRY_RUN}" == "true" ]] && REMOTE_ARGS+=(--dry-run)
+# ===== SSH 让服务器自举到目标 SHA 后执行目标工作树中的部署脚本 =====
+#
+# 安全引用：目标 SHA 已通过 40 位十六进制正则校验，DRY_RUN 为脚本内布尔量，
+# 二者都不来自未校验输入；仓库路径经 printf %q 转义后嵌入远端脚本。
+# 不使用 stdin 传输脚本，不复制到 /tmp，不使用 scp/docker cp，不使用裸 ssh。
 
-REMOTE_CMD="set -euo pipefail; cd '${REMOTE_REPO_ROOT}'; test -f '${REMOTE_DEPLOY_SCRIPT}' || { echo '服务器缺少 scripts/deploy/panji-deploy.sh' >&2; exit 2; }; bash '${REMOTE_DEPLOY_SCRIPT}' ${REMOTE_ARGS[*]}"
+Q_REPO_ROOT="$(printf '%q' "${REMOTE_REPO_ROOT}")"
+REMOTE_DRY_FLAG=""
+[[ "${DRY_RUN}" == "true" ]] && REMOTE_DRY_FLAG=" --dry-run"
+
+read -r -d '' REMOTE_CMD <<REMOTE_SCRIPT || true
+set -euo pipefail
+
+TARGET_SHA=${TARGET_SHA}
+REPO_ROOT=${Q_REPO_ROOT}
+ORIGINAL_HEAD=""
+RESTORE_HEAD=true
+
+cd "\${REPO_ROOT}"
+
+# 1. 拉取 origin/dev（不拉 tag）
+git fetch origin dev --no-tags
+
+# 2. 工作树必须干净——脏工作树下 checkout 会丢失或阻断
+if [[ -n "\$(git status --porcelain)" ]]; then
+    echo "服务器工作树不干净，拒绝自举到目标 SHA" >&2
+    git status --short >&2
+    exit 2
+fi
+
+# 3. 目标 SHA 必须存在且属于 origin/dev
+if ! git cat-file -e "\${TARGET_SHA}^{commit}" 2>/dev/null; then
+    echo "服务器上不存在该 commit: \${TARGET_SHA}" >&2
+    exit 2
+fi
+if ! git merge-base --is-ancestor "\${TARGET_SHA}" origin/dev; then
+    echo "SHA \${TARGET_SHA} 不是 origin/dev 的祖先，拒绝自举" >&2
+    exit 2
+fi
+
+# 4. 记录原始 HEAD（分支名优先，detached 时记录 SHA）
+if ORIGINAL_HEAD="\$(git symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
+    :
+else
+    ORIGINAL_HEAD="\$(git rev-parse HEAD)"
+fi
+echo "[bootstrap] 原始 HEAD = \${ORIGINAL_HEAD}"
+
+restore_head() {
+    local rc=\$?
+    if [[ "\${RESTORE_HEAD}" == "true" && -n "\${ORIGINAL_HEAD}" ]]; then
+        echo "[bootstrap] 恢复原始 HEAD: \${ORIGINAL_HEAD}"
+        git -C "\${REPO_ROOT}" checkout -f "\${ORIGINAL_HEAD}" >/dev/null 2>&1 \\
+            || echo "[bootstrap] WARN: 恢复原始 HEAD 失败，请手动检查" >&2
+    fi
+    exit \${rc}
+}
+trap restore_head EXIT
+
+# 5. 自举到目标 SHA 工作树
+echo "[bootstrap] checkout --detach \${TARGET_SHA}"
+git checkout -f --detach "\${TARGET_SHA}"
+
+DEPLOY_SCRIPT="\${REPO_ROOT}/scripts/deploy/panji-deploy.sh"
+if [[ ! -f "\${DEPLOY_SCRIPT}" ]]; then
+    echo "目标 SHA 中缺少 scripts/deploy/panji-deploy.sh" >&2
+    exit 2
+fi
+
+# 6. 执行**目标工作树**中的部署实现
+# 关闭 errexit 以捕获退出码：失败时仍须经 trap 恢复原始 HEAD。
+echo "[bootstrap] 执行目标 SHA 工作树中的 panji-deploy.sh"
+set +e
+bash "\${DEPLOY_SCRIPT}" "\${TARGET_SHA}"${REMOTE_DRY_FLAG}
+DEPLOY_RC=\$?
+set -e
+
+# 正式部署成功后服务器保持在目标 SHA；dry-run 始终恢复原始 HEAD
+if [[ "\${DEPLOY_RC}" -eq 0 && "${DRY_RUN}" != "true" ]]; then
+    RESTORE_HEAD=false
+    echo "[bootstrap] 部署成功，服务器保持在目标 SHA"
+fi
+
+exit \${DEPLOY_RC}
+REMOTE_SCRIPT
 
 log "通过 panji-prod-ssh 执行部署（dry-run=${DRY_RUN}）..."
-log "远端命令: bash ${REMOTE_DEPLOY_SCRIPT} ${REMOTE_ARGS[*]}"
+log "远端序列: fetch → 干净校验 → 祖先校验 → 记录 HEAD → checkout --detach ${TARGET_SHA} → 目标工作树 panji-deploy.sh"
 
 set +e
 "${SSH_WRAPPER}" -o BatchMode=yes -o ConnectTimeout=30 "${REMOTE_CMD}"

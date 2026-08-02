@@ -92,13 +92,35 @@ def check(root: Path) -> list[str]:
 
     local_code = shell_code(local_entry)
     server_code = shell_code(server_impl)
-    required_local = ("origin/dev", "merge-base --is-ancestor", "panji-prod-preflight", "panji-prod-ssh")
+    required_local = (
+        "origin/dev",
+        "merge-base --is-ancestor",
+        "panji-prod-preflight",
+        "panji-prod-ssh",
+        # 首次 Live Mount 自举：必须先 detach 到目标 SHA 再执行目标工作树脚本
+        "checkout -f --detach",
+        "trap restore_head EXIT",
+    )
     required_server = (
         "origin/dev",
         "merge-base --is-ancestor",
         "docker-compose.prod.yml -f docker-compose.live.yml",
         'git diff --name-only "${PREVIOUS_SHA}" "${TARGET_SHA}"',
         "RUNTIME_SHA",
+        # 上一 SHA 四级解析（禁止仅因状态文件缺失就强制 migration）
+        "PREVIOUS_SHA_SOURCE",
+        "unknown_baseline",
+        # 首次 Live Mount 检测与同步范围提升
+        "detect_first_live_deploy()",
+        "apply_first_live_deploy_override()",
+        # migration 状态机与专用失败路径
+        "MIGRATION_ATTEMPTED",
+        "MIGRATION_SUCCEEDED",
+        "SERVICES_RESTARTED",
+        "handle_migration_failure()",
+        "migration_failed_requires_inspection",
+        # 环境镜像 tag 组整体构建
+        "ENV_IMAGE_TAG_GROUP=(backend frontend worker-capture)",
     )
     for signal in required_local:
         if signal not in local_code:
@@ -112,10 +134,25 @@ def check(root: Path) -> list[str]:
         "origin/main": "main deployment source",
         "HEAD~1": "single-commit change classification",
         "down -v": "volume-destructive compose command",
+        # 资源清理边界：永不允许全局 prune 或删除持久卷
+        "image prune -a": "global image prune",
+        "system prune": "global system prune",
+        "volume prune": "volume prune",
+        "container prune": "unrelated container prune",
     }
     for token, reason in forbidden_code.items():
         if token in local_code or token in server_code:
             errors.append(f"forbidden deployment implementation ({reason}): {token}")
+    # RUNTIME_SHA 是单文件 bind mount 源：必须原地写入，rename/rsync 会换 inode
+    write_sha = re.search(r"(?ms)^write_runtime_sha\(\)\s*\{.*?^\}", server_code)
+    if write_sha is None:
+        errors.append("server deploy implementation missing write_runtime_sha()")
+    elif re.search(r"(?:rsync|mv)\s+[^\n]*RUNTIME_SHA", write_sha.group(0)):
+        errors.append("RUNTIME_SHA updated via rename/rsync breaks single-file bind mount inode")
+    # migration 失败路径不得触发任何容器重建
+    migration_fail = re.search(r"(?ms)^handle_migration_failure\(\)\s*\{.*?^\}", server_code)
+    if migration_fail is not None and re.search(r"up -d|force-recreate", migration_fail.group(0)):
+        errors.append("migration failure path must not recreate containers")
     if re.search(r"\bssh\s+[^\n]*panji-prod", local_code):
         errors.append("local deploy entry bypasses scripts/ops/panji-prod-ssh")
     if re.search(r"https?://\d{1,3}(?:\.\d{1,3}){3}", local_code):

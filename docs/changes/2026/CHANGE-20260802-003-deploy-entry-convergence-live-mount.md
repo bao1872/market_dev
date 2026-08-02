@@ -44,8 +44,13 @@ dev-only 分支模型」，但**实际执行脚本与 workflow 仍停留在旧�
 SSH 前对服务器端脚本执行 `bash -n` 静态预检。
 
 **`panji-deploy.sh`（服务器）承担全部部署实现**：
-`fetch → validate SHA → checkout → 变更分类 → 环境镜像 build（仅必要）→ rsync 到 /opt/panji-live →
-migration（仅 migration 变更）→ 重启 → 健康与 SHA 核验 → 状态记录 → 失败回滚`。
+`fetch → validate SHA → checkout → 变更分类 → 环境镜像 build（仅环境级变化，且按完整 tag 组）→
+rsync 到 /opt/panji-live → migration（仅 migration 变更，且早于任何重启）→ 重启 →
+健康与 SHA 核验 → 状态记录 → 分级失败处理`。
+
+> 构建口径（经 §6 复盘修正）：普通代码变化**零构建**；任意环境级变化时，
+> backend / frontend / worker-capture 共用同一 `GIT_SHA` tag，必须作为**完整 tag 组整体构建**，
+> 不存在"只构建受影响的那一个镜像"这种做法。
 
 ### 2.2 删除双模式，只保留 Live Mount
 
@@ -172,9 +177,9 @@ job 内容与 `CI` / `CI Gate` 名称未变，仅改触发方式。
 | 项 | 方式 | 结果 |
 |---|---|---|
 | 保留 shell 语法 | `bash -n` | 通过 |
-| 部署结构契约 | `bash scripts/deploy/panji-deploy.test.sh` | 34 通过 / 0 失败 |
-| 真实实现 dry-run 合同 | `bash scripts/ops/test-panji-test-deploy-contracts.sh` | 第二轮 9 通过 / 0 失败 |
-| Compose 叠加可解析 | `docker compose ... config --quiet` | 本机无 Docker CLI，留待手工 CI/目标环境验证 |
+| 部署结构契约 | `bash scripts/deploy/panji-deploy.test.sh` | 当轮 34 通过 / 0 失败（§6 复盘后已扩展至 67） |
+| 真实实现 dry-run 合同 | `bash scripts/ops/test-panji-test-deploy-contracts.sh` | 当轮 9 通过 / 0 失败（§6 复盘后已扩展至 23） |
+| Compose 叠加可解析 | `docker compose ... config --quiet` | `environment_not_ready`：本机无 Docker CLI，留待目标环境或手工 CI 验证 |
 | Workflow YAML | Python `yaml.safe_load` | 通过，12 jobs |
 | 治理检查器 | `tools/check_governance_rules.py` | 通过 |
 | 检查器负向有效性 | 5 类违规注入 | 5 项均被拒绝；正例在移除悬空自指后由检查器通过 |
@@ -187,3 +192,48 @@ job 内容与 `CI` / `CI Gate` 名称未变，仅改触发方式。
 | Compose 叠加解析 | `blocked_external` | 本机无 Docker CLI；需由手工 CI 或目标环境执行 |
 | 历史本地额外分支 | `deferred_with_reason` | 删除或改名属于破坏性仓库操作，本轮未获单独授权 |
 | 历史 CHANGE 中的旧脚本引用 | 保留 | `CHANGE-20260729-005/009` 等历史文件提到 `deploy_live_runtime.sh`，属历史事实，不修改 |
+
+## 6. 复盘修正（2026-08-02，首次 Live Mount 实跑前）
+
+§2 收敛的两脚本结构在**首次 Live Mount 实跑场景**下存在 6 项会导致失败或误判的缺陷。
+下列修正在同一两脚本结构内完成，未新增脚本、未恢复任何已删除模式。
+
+| # | 原实现缺陷 | 修正后行为 |
+|---|---|---|
+| 1 | 本地入口直接执行服务器**当前**工作树的 `panji-deploy.sh`。服务器仍停在旧 SHA 时，跑的是旧脚本，无法保证执行目标 SHA 的部署实现。 | 远端启动顺序固定为 `cd REPO → fetch origin dev --no-tags → 工作树干净校验 → 目标 SHA 属于 origin/dev → 记录原始 HEAD → checkout -f --detach <SHA> → 执行**目标工作树**的 `scripts/deploy/panji-deploy.sh``。dry-run 与任何失败经 `trap` 恢复原始 HEAD，正式部署成功则保持在目标 SHA。仍不经 stdin / `/tmp` / `scp` / 裸 `ssh`。 |
+| 2 | 无首次 Live Mount 识别。核心容器尚未挂载 `/opt/panji-live` 时不会强制建立挂载。 | 新增 `FIRST_LIVE_DEPLOY`，经 `docker inspect` 检查 `trading-backend` / `trading-frontend` 是否挂载 `LIVE_ROOT`；任一未挂载即为首次部署，强制全量同步 Python 与前端运行代码。**边界**：只提升同步范围，**不得**据此把 `migration_changed` 置为 true。 |
+| 3 | 状态文件缺失即判定基线未知，进而强制执行 migration。 | 上一 SHA 按四级顺序解析：①部署状态文件 ②`/opt/panji-live/RUNTIME_SHA` ③部署前服务器 repo HEAD ④全部失败才按首次未知基线处理。仅第四级会强制全量同步 + migration。 |
+| 4 | `docker-compose.prod.yml` 中 backend / frontend / capture 三个镜像**共用同一个 `GIT_SHA` tag**，但原实现只构建"受影响的那一个"，新 tag 下会出现未构建镜像导致启动失败。 | 修正为：普通代码变化**零构建**；任意 `environment_changed=true` → 将 backend / frontend / worker-capture 作为**同一 tag 组整体构建**。构建后仍以 prod+live 叠加启动，运行代码仍唯一来自 `/opt/panji-live`。不引入三态 tag 状态机，不恢复镜像模式。 |
+| 5 | migration 失败与重启后失败共用同一条回滚路径，会在 migration 失败后仍 `up -d --force-recreate`。 | 新增 `MIGRATION_ATTEMPTED` / `MIGRATION_SUCCEEDED` / `SERVICES_RESTARTED` / `FAILURE_STAGE` 状态。migration 始终早于任何重启；失败时只恢复 repo / Live Mount 文件 / `RUNTIME_SHA` / `market.env` 到上一 SHA，**不执行任何容器重建**，不记成功状态，**不声称数据库已回滚**，输出 `migration_failed_requires_inspection`。仅在服务已重启后（health / SHA 核验失败）才走容器级回滚。 |
+| 6 | `RUNTIME_SHA` 经 `rsync` 覆盖。它是**单文件 bind mount** 源，rename/rsync 会更换 inode，容器内仍读到旧内容。 | 改为原地写入（`> file` truncate + write，保持同一 inode），首次不存在时先创建；写后校验 inode 未变并回读全 SHA。 |
+
+补充修正：
+
+- **Mount 核验范围**：原只核验 `trading-backend`。现无条件核验 `trading-backend` 含 `/opt/panji-live`
+  与 `trading-frontend` 含 `/opt/panji-live/frontend/dist`；当 backend / migration / 首次 Live Mount
+  触发 Python 重启时，核验全部 11 个共用 Live Mount 的 Python 服务。
+- **资源清理边界**：原实现无条件 `builder prune` + `image prune` + `container prune`。
+  现改为——本轮未构建任何镜像（普通 Live Mount 代码部署）→ **完全不清理**；
+  仅当本轮确实构建了环境镜像，才做 `builder prune -f` 与 `image prune -f`。
+  永久禁止 `image prune -a` / `system prune` / `volume prune` / 删除 `node:20-alpine` / 删除 PG 与 Redis Volume。
+- **§2.1 表述修正**：原"环境镜像 build（仅必要）"易被读作"只构建受影响的那一个镜像"。
+  准确表述为"普通代码零构建；任意环境级变化构建完整环境镜像 tag 组"。
+
+复盘修正后的验证（本地，未连接生产）：
+
+| 项 | 方式 | 结果 |
+|---|---|---|
+| 两脚本语法 | `bash -n` | 通过 |
+| 部署结构契约 | `bash scripts/deploy/panji-deploy.test.sh` | 67 通过 / 0 失败 |
+| 真实实现 dry-run 合同 | `bash scripts/ops/test-panji-test-deploy-contracts.sh` | 23 通过 / 0 失败 |
+| 治理检查器负向有效性 | `pytest tools/tests/test_check_governance_rules.py` | 15 通过（1 正例 + 14 类违规注入均被拒绝） |
+| 治理 / 文档 / 架构检查器 | `tools/check_governance_rules.py`、`check_docs_consistency.py`、`check_architecture.py` | 三者退出码均为 0 |
+| 后端权限单元测试 | `PURE_UNIT_TEST=1 pytest backend/tests/test_auction_replay_entitlement.py` | 32 通过 / 0 失败 |
+| 前端权限与路由测试 | `node --experimental-strip-types --test src/navigation/__tests__/{replayAuctionEntitlement,routeStructure}.test.ts` | 35 通过 / 0 失败 |
+| 前端类型检查 | `frontend/node_modules/.bin/tsc --noEmit` | 0 错误 |
+| 前端 ESLint（修改范围） | `eslint src/navigation src/pages/AdminUsersPage.tsx` | 0 错误（4 条既有 hooks 警告，非本轮新增） |
+| 尾随空白 | `git diff --check` | 无问题 |
+| Compose 叠加解析 | `docker compose ... config --quiet` | `environment_not_ready` —— 本机无 Docker CLI，未执行也未伪造结果；需在目标环境或手动 CI 执行 |
+
+> §6 全部修正**未连接生产服务器、未执行真实部署、未重启容器、未执行 migration、
+> 未运行任何业务数据任务**。首次实跑仍须先 `--dry-run`。

@@ -47,11 +47,12 @@
 
 除非明确升级 Node 版本或镜像损坏，否则不要删除 `node:20-alpine`。
 
-普通清理只允许：
+普通清理只允许（且仅在本轮实际构建了镜像时由部署脚本自动执行）：
 
 - `docker builder prune -f`；
-- `docker image prune -f`；
-- `docker container prune -f`。
+- `docker image prune -f`。
+
+未构建镜像的普通 Live Mount 代码部署不做任何自动清理。
 
 ## 服务器资源预算门禁（2026-08-02 收口）
 
@@ -75,23 +76,30 @@
 
 门禁失败时禁止用"扩阈值"或"跳过门禁"绕过，必须先按下方允许范围清理。
 
-### 部署后强制回收
+### 部署后回收（按本轮是否实际构建镜像分档）
 
-部署成功后（步骤 11）自动执行受控清理，保证净增长趋近于零：
+清理是**有条件的**，不是每次部署都执行：
+
+- **本轮未构建任何镜像**（普通 Live Mount 代码部署，`images_built=false`）：
+  **不执行任何清理**。此时既没有新增 BuildKit 缓存，也没有产生悬空镜像，
+  执行 `builder prune` 只会清掉与本轮无关的历史缓存，且可能误伤其他容器/镜像。
+- **本轮确实构建了环境镜像**（`images_built=true`）：执行受控范围清理，
+  保证镜像与缓存净增长趋近于零：
 
 ```
 docker builder prune -f
 docker image prune -f
-docker container prune -f
 ```
 
 清理后若可用空间仍低于门禁下限，脚本发出显式警告，提示下次部署会被拦截。
 
 ### 允许的清理范围
 
+> 下列范围仅在**本轮确实构建了镜像**时才允许由部署脚本自动执行；
+> 未构建镜像的普通 Live Mount 部署不做任何自动清理。
+
 - BuildKit 构建缓存：`docker builder prune -f`（可全量清，重建只是变慢）；
 - 悬挂（dangling）镜像：`docker image prune -f`；
-- 已停止容器：`docker container prune -f`；
 - **旧 SHA 业务镜像**：`market-dev-{backend,capture,frontend}:<旧SHA>`，
   但必须保留：当前运行 SHA、上一个可回滚 SHA、任何 `*-rollback` 标签；
 - 生产上遗留的临时诊断脚本与部署日志（`/tmp/*.py`、`/tmp/deploy_*.log` 等）；

@@ -12,8 +12,15 @@
 #   即使因依赖/Dockerfile 变化重建镜像，重建后仍以 prod+live 叠加启动。
 #
 # 职责（本脚本是服务器端唯一部署实现）：
-#   fetch → checkout → 变更分类 → 环境镜像 build（仅必要时）→ sync →
-#   migration（仅 migration_changed）→ restart → health → SHA 验证 → 状态记录 → 回滚
+#   fetch → checkout → 上一 SHA 四级解析 → 首次 Live Mount 检测 → 变更分类 →
+#   环境镜像 build（仅 environment_changed，且按同一 GIT_SHA tag 组整体构建）→ sync →
+#   migration（仅 migration_changed，且早于任何重启）→ restart → health →
+#   SHA 与 Mount 验证 → 状态记录 → 分级失败处理
+#
+# 构建策略：
+#   普通代码变化零构建（Live Mount 直接生效）；
+#   任意 environment_changed → backend/frontend/worker-capture 作为同一 GIT_SHA tag 组整体构建；
+#   构建后仍以 prod+live 叠加启动，运行代码仍唯一来自 /opt/panji-live。
 #
 # 用法:
 #   scripts/deploy/panji-deploy.sh <FULL_SHA> [--dry-run]
@@ -59,6 +66,7 @@ PYTHON_SERVICES=(
 DRY_RUN=false
 TARGET_SHA=""
 PREVIOUS_SHA=""
+PREVIOUS_SHA_SOURCE=""
 
 # 变更分类标志（由 classify_changes 计算）
 BACKEND_RUNTIME_CHANGED=false
@@ -67,6 +75,17 @@ MIGRATION_CHANGED=false
 BACKEND_ENVIRONMENT_CHANGED=false
 FRONTEND_ENVIRONMENT_CHANGED=false
 CAPTURE_ENVIRONMENT_CHANGED=false
+
+# 首次 Live Mount 部署：核心应用容器尚未挂载 LIVE_ROOT。
+# 需要强制建立挂载，但**不得**因此把 migration_changed 设为 true。
+FIRST_LIVE_DEPLOY=false
+
+# 部署执行状态机（用于区分 migration 失败与重启后失败两类回滚路径）
+SERVICES_RESTARTED=false
+FAILURE_STAGE=""
+MIGRATION_ATTEMPTED=false
+MIGRATION_SUCCEEDED=false
+IMAGES_BUILT=false
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -213,13 +232,91 @@ check_working_tree() {
     fi
 }
 
+# 一个 SHA 只有同时满足「40 位十六进制」与「本地可解析为 commit」才可用作基线。
+_is_resolvable_sha() {
+    local sha="${1:-}"
+    [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+    git -C "${REPO_ROOT}" cat-file -e "${sha}^{commit}" 2>/dev/null
+}
+
+# 上一部署 SHA 按四级顺序解析，只有全部失败才按「首次未知基线」处理。
+# 关键：不得仅因状态文件不存在就把 migration_changed 置为 true。
 load_previous_state() {
+    log "解析上一部署 SHA（四级顺序）..."
+    PREVIOUS_SHA=""
+    PREVIOUS_SHA_SOURCE=""
+
+    # 1. 部署状态文件
     if [[ -f "${STATE_FILE}" ]]; then
-        PREVIOUS_SHA="$(cat "${STATE_FILE}" 2>/dev/null || echo "")"
-    else
-        PREVIOUS_SHA=""
+        local candidate
+        candidate="$(tr -d '[:space:]' < "${STATE_FILE}" 2>/dev/null || echo "")"
+        if _is_resolvable_sha "${candidate}"; then
+            PREVIOUS_SHA="${candidate}"
+            PREVIOUS_SHA_SOURCE="state_file"
+        else
+            log "  状态文件存在但内容不可解析: ${candidate:-空}"
+        fi
     fi
-    log "上一次部署 SHA: ${PREVIOUS_SHA:-无（按首次 Live Mount 部署处理）}"
+
+    # 2. /opt/panji-live/RUNTIME_SHA
+    if [[ -z "${PREVIOUS_SHA}" && -f "${LIVE_ROOT}/RUNTIME_SHA" ]]; then
+        local candidate
+        candidate="$(tr -d '[:space:]' < "${LIVE_ROOT}/RUNTIME_SHA" 2>/dev/null || echo "")"
+        if _is_resolvable_sha "${candidate}"; then
+            PREVIOUS_SHA="${candidate}"
+            PREVIOUS_SHA_SOURCE="runtime_sha_file"
+        else
+            log "  RUNTIME_SHA 存在但内容不可解析: ${candidate:-空}"
+        fi
+    fi
+
+    # 3. 部署前服务器 repo HEAD（必须在 checkout_target 之前调用）
+    if [[ -z "${PREVIOUS_SHA}" ]]; then
+        local candidate
+        candidate="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo "")"
+        if _is_resolvable_sha "${candidate}"; then
+            PREVIOUS_SHA="${candidate}"
+            PREVIOUS_SHA_SOURCE="repo_head"
+        fi
+    fi
+
+    # 4. 全部失败 → 首次未知基线
+    if [[ -z "${PREVIOUS_SHA}" ]]; then
+        PREVIOUS_SHA_SOURCE="unknown_baseline"
+        log "上一部署 SHA: 无法解析（首次未知基线）"
+    else
+        log "上一部署 SHA: ${PREVIOUS_SHA}（来源: ${PREVIOUS_SHA_SOURCE}）"
+    fi
+}
+
+# 首次 Live Mount 部署识别：任一核心应用容器未挂载 LIVE_ROOT 即为 true。
+# 只影响「是否强制同步与重建以建立挂载」，不影响 migration 判定。
+detect_first_live_deploy() {
+    log "检测 Live Mount 是否已建立..."
+
+    if ! command -v docker >/dev/null 2>&1; then
+        log "  docker 不可用，按首次 Live Mount 部署处理"
+        FIRST_LIVE_DEPLOY=true
+        return 0
+    fi
+
+    local container mounts
+    for container in trading-backend trading-frontend; do
+        mounts="$(docker inspect "${container}" --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null || echo "")"
+        if [[ -z "${mounts}" ]]; then
+            log "  容器 ${container} 不存在或无法 inspect → 首次 Live Mount 部署"
+            FIRST_LIVE_DEPLOY=true
+            return 0
+        fi
+        if [[ "${mounts}" != *"${LIVE_ROOT}"* ]]; then
+            log "  容器 ${container} 未挂载 ${LIVE_ROOT} → 首次 Live Mount 部署"
+            FIRST_LIVE_DEPLOY=true
+            return 0
+        fi
+    done
+
+    FIRST_LIVE_DEPLOY=false
+    log "  backend 与 frontend 均已挂载 ${LIVE_ROOT}（非首次 Live Mount 部署）"
 }
 
 save_state() {
@@ -239,16 +336,10 @@ classify_changes() {
 
     cd "${REPO_ROOT}"
 
+    # 首次未知基线：四级解析全部失败，无法算 diff，只能全量同步。
+    # 此时 migration 状态同样未知，必须执行 alembic upgrade head（幂等）。
     if [[ -z "${PREVIOUS_SHA}" ]]; then
-        log "无上一次部署记录：按首次 Live Mount 部署处理（同步 backend + frontend）"
-        BACKEND_RUNTIME_CHANGED=true
-        FRONTEND_RUNTIME_CHANGED=true
-        MIGRATION_CHANGED=true
-        return
-    fi
-
-    if ! git cat-file -e "${PREVIOUS_SHA}^{commit}" 2>/dev/null; then
-        log "上一部署 SHA ${PREVIOUS_SHA:0:7} 在本地不可解析：按首次 Live Mount 部署处理"
+        log "上一部署 SHA 不可解析（${PREVIOUS_SHA_SOURCE}）：全量同步 + migration"
         BACKEND_RUNTIME_CHANGED=true
         FRONTEND_RUNTIME_CHANGED=true
         MIGRATION_CHANGED=true
@@ -259,8 +350,7 @@ classify_changes() {
     changed_files="$(git diff --name-only "${PREVIOUS_SHA}" "${TARGET_SHA}" 2>/dev/null || true)"
 
     if [[ -z "${changed_files}" ]]; then
-        log "两次 SHA 之间无文件变化（仍将执行最终 SHA 与 Mount 核验）"
-        return
+        log "两次 SHA 之间无文件变化"
     fi
 
     # backend 运行代码（Live Mount 同步范围）
@@ -301,6 +391,25 @@ classify_changes() {
     log "  capture_environment_changed=${CAPTURE_ENVIRONMENT_CHANGED}"
 }
 
+# 首次 Live Mount 部署强制覆盖：必须完整同步 Python 与前端运行代码并重建挂载，
+# 否则容器内不存在 /opt/panji-live 内容。
+# 明确边界：FIRST_LIVE_DEPLOY 只提升运行代码同步范围，**不得**据此设置 migration_changed。
+apply_first_live_deploy_override() {
+    if [[ "${FIRST_LIVE_DEPLOY}" != "true" ]]; then
+        return 0
+    fi
+
+    log "首次 Live Mount 部署：强制全量同步 backend + frontend 运行代码以建立挂载"
+    log "  （migration_changed 保持由差异判定决定，不因首次挂载而强制执行）"
+    BACKEND_RUNTIME_CHANGED=true
+    FRONTEND_RUNTIME_CHANGED=true
+
+    log "  first_live_deploy=${FIRST_LIVE_DEPLOY}"
+    log "  backend_runtime_changed=${BACKEND_RUNTIME_CHANGED}"
+    log "  frontend_runtime_changed=${FRONTEND_RUNTIME_CHANGED}"
+    log "  migration_changed=${MIGRATION_CHANGED}"
+}
+
 run_cmd() {
     if [[ "${DRY_RUN}" == "true" ]]; then
         log "[dry-run] 将执行: $*"
@@ -318,22 +427,32 @@ checkout_target() {
     log "已检出: ${TARGET_SHA}"
 }
 
-# 仅构建确实受影响的镜像。镜像只提供运行环境，
-# 构建完成后仍以 prod+live 叠加启动，运行代码仍来自 /opt/panji-live。
-build_environment_images() {
-    local images=()
-    [[ "${BACKEND_ENVIRONMENT_CHANGED}" == "true" ]] && images+=(backend)
-    [[ "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]] && images+=(frontend)
-    [[ "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" ]] && images+=(worker-capture)
+# 是否存在任意运行环境级变化。
+environment_changed() {
+    [[ "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" ]]
+}
 
-    if [[ ${#images[@]} -eq 0 ]]; then
-        log "无运行环境变化，跳过镜像构建（普通代码变化不 build）"
+# 环境镜像构建策略（与 docker-compose.prod.yml 的 image tag 约定保持一致）：
+#   backend / frontend / worker-capture 三个镜像共用同一个 GIT_SHA tag。
+#   因此只要发生任意 environment_changed，就必须把三者作为**同一个 tag 组**整体构建，
+#   否则新 GIT_SHA 下会出现未构建的镜像 tag，Compose 启动即失败。
+# 普通代码变化（无 environment_changed）零构建：Live Mount 直接生效。
+# 构建完成后仍以 prod+live 叠加启动，运行代码仍唯一来自 /opt/panji-live。
+ENV_IMAGE_TAG_GROUP=(backend frontend worker-capture)
+
+build_environment_images() {
+    if ! environment_changed; then
+        log "无运行环境变化，跳过镜像构建（普通代码变化零构建）"
         return 0
     fi
 
-    log "运行环境变化，构建受影响镜像: ${images[*]}"
+    log "运行环境变化，按同一 GIT_SHA tag 组整体构建镜像: ${ENV_IMAGE_TAG_GROUP[*]}"
+    log "  触发项: backend_env=${BACKEND_ENVIRONMENT_CHANGED} frontend_env=${FRONTEND_ENVIRONMENT_CHANGED} capture_env=${CAPTURE_ENVIRONMENT_CHANGED}"
     cd "${REPO_ROOT}"
-    run_cmd ${COMPOSE_CMD} build "${images[@]}"
+    run_cmd ${COMPOSE_CMD} build "${ENV_IMAGE_TAG_GROUP[@]}"
+    IMAGES_BUILT=true
 }
 
 build_frontend_dist() {
@@ -405,22 +524,50 @@ sync_frontend_runtime() {
     log "frontend dist 同步完成"
 }
 
+# RUNTIME_SHA 是**单文件 bind mount** 源。
+# 单文件挂载在容器启动时绑定的是 inode，一旦通过
+#   「写临时文件 → mv/rename 覆盖」或「rsync 覆盖」
+# 更新，源文件 inode 会改变，容器内看到的仍是旧 inode 的旧内容。
+# 因此这里必须**原地写入**（truncate + write 同一个 inode），不得 rename/rsync。
 write_runtime_sha() {
-    log "写入 RUNTIME_SHA=${TARGET_SHA}..."
+    local sha_file="${LIVE_ROOT}/RUNTIME_SHA"
+    log "写入 RUNTIME_SHA=${TARGET_SHA}（原地写入，保持 inode）..."
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        log "[dry-run] 写入 ${LIVE_ROOT}/RUNTIME_SHA = ${TARGET_SHA}（完整 SHA）"
+        log "[dry-run] 原地写入 ${sha_file} = ${TARGET_SHA}（完整 SHA，保持 inode）"
         return 0
     fi
 
     mkdir -p "${LIVE_ROOT}"
-    local tmp
-    tmp="$(mktemp)"
-    printf '%s' "${TARGET_SHA}" > "${tmp}"
-    rsync -a "${tmp}" "${LIVE_ROOT}/RUNTIME_SHA"
-    rm -f "${tmp}"
 
-    log "RUNTIME_SHA 已写入 ${LIVE_ROOT}/RUNTIME_SHA"
+    if [[ ! -e "${sha_file}" ]]; then
+        # 首次不存在：创建文件本身（此后该 inode 即为挂载源，不得再替换）
+        : > "${sha_file}" || fail "无法创建 ${sha_file}"
+        chmod 644 "${sha_file}" 2>/dev/null || true
+        log "  RUNTIME_SHA 首次创建: ${sha_file}"
+    fi
+
+    [[ -f "${sha_file}" ]] || fail "${sha_file} 不是普通文件，拒绝写入"
+
+    local inode_before inode_after
+    inode_before="$(stat -c '%i' "${sha_file}" 2>/dev/null || echo "")"
+
+    # `> file` 是 truncate + 原地写，保持同一 inode。
+    printf '%s' "${TARGET_SHA}" > "${sha_file}" || fail "无法原地写入 ${sha_file}"
+
+    inode_after="$(stat -c '%i' "${sha_file}" 2>/dev/null || echo "")"
+    if [[ -n "${inode_before}" && "${inode_before}" != "${inode_after}" ]]; then
+        fail "RUNTIME_SHA inode 发生变化（${inode_before} → ${inode_after}），单文件挂载已失效"
+    fi
+
+    # 回读校验：必须等于完整 40 位 SHA
+    local readback
+    readback="$(tr -d '[:space:]' < "${sha_file}" 2>/dev/null || echo "")"
+    if [[ "${readback}" != "${TARGET_SHA}" ]]; then
+        fail "RUNTIME_SHA 回读校验失败: 期望 ${TARGET_SHA}, 实际 ${readback:-空}"
+    fi
+
+    log "RUNTIME_SHA 原地写入并回读通过: ${sha_file} (inode=${inode_after:-unknown})"
 }
 
 # 更新 market.env：BUILD_TIME 与 DEPLOYMENT_MODE=live。
@@ -496,11 +643,18 @@ compose_config_check() {
     log "Compose 配置校验通过"
 }
 
-# migration 仅在 migration_changed 时执行；失败时调用方不得重启应用服务。
+# migration 仅在 migration_changed 时执行，且**必须早于任何服务重启**。
+# 失败时调用方不得重启应用服务，也不得 force-recreate 任何容器。
 run_migration() {
     log "执行 alembic upgrade head（使用目标 SHA 的 Live Mount 代码）..."
+    MIGRATION_ATTEMPTED=true
     cd "${REPO_ROOT}"
-    run_cmd ${COMPOSE_CMD} run --rm --no-deps --no-build backend bash -c "cd /app && alembic upgrade head"
+    if ! run_cmd ${COMPOSE_CMD} run --rm --no-deps --no-build backend bash -c "cd /app && alembic upgrade head"; then
+        MIGRATION_SUCCEEDED=false
+        log "migration 执行失败"
+        return 1
+    fi
+    MIGRATION_SUCCEEDED=true
     log "migration 完成"
 }
 
@@ -512,21 +666,29 @@ restart_services() {
     fi
     log "重启服务: ${services[*]}"
     cd "${REPO_ROOT}"
+    # 标记必须在实际发起重启之前置位：一旦 up -d 开始，容器状态即可能已被改变。
+    SERVICES_RESTARTED=true
     run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build "${services[@]}"
 }
 
+RESTARTED_PYTHON=false
+RESTARTED_FRONTEND=false
+
 deploy() {
-    # 1. 运行环境镜像（仅受影响的）
-    if [[ "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
-        || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" \
-        || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" ]]; then
+    # 1. 运行环境镜像：任意 environment_changed → 按同一 GIT_SHA tag 组整体构建。
+    #    无 environment_changed → 零构建，GIT_SHA 保持不变。
+    FAILURE_STAGE="environment_images"
+    if environment_changed; then
         update_env_file true
-        build_environment_images
     else
         update_env_file false
     fi
+    # build_environment_images 自带 environment_changed 守卫：
+    # 无环境变化时只记录「零构建」决策，不执行任何 build。
+    build_environment_images
 
-    # 2. 前端 dist（运行代码或运行环境变化都需要重新产出 dist）
+    # 2. 前端 dist（运行代码 / 运行环境 / 首次 Live Mount 都需要重新产出 dist）
+    FAILURE_STAGE="frontend_build"
     local need_frontend=false
     if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
         need_frontend=true
@@ -535,6 +697,7 @@ deploy() {
     fi
 
     # 3. backend 运行代码
+    FAILURE_STAGE="backend_sync"
     local need_backend=false
     if [[ "${BACKEND_RUNTIME_CHANGED}" == "true" \
         || "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
@@ -544,25 +707,32 @@ deploy() {
         sync_backend_runtime
     fi
 
-    # 4. RUNTIME_SHA 始终写入（是 runtime_git_sha 的唯一来源）
+    # 4. RUNTIME_SHA 始终原地写入（是 runtime_git_sha 的唯一来源）
+    FAILURE_STAGE="runtime_sha"
     write_runtime_sha
 
+    FAILURE_STAGE="compose_config"
     compose_config_check
 
-    # 5. migration（失败即返回，调用方不重启服务）
+    # 5. migration —— 必须早于任何服务重启。
+    #    失败时立即返回，main() 走 migration 专用失败路径（不重启、不 force-recreate）。
     if [[ "${MIGRATION_CHANGED}" == "true" ]]; then
+        FAILURE_STAGE="migration"
         run_migration || return 1
     else
         log "migration_changed=false，跳过 alembic upgrade"
     fi
 
     # 6. 重启：Python 服务与 frontend 分别判定；postgres/redis/umami 永不重启
+    FAILURE_STAGE="restart"
     local restart_list=()
     if [[ "${need_backend}" == "true" ]]; then
         restart_list+=("${PYTHON_SERVICES[@]}")
+        RESTARTED_PYTHON=true
     fi
     if [[ "${need_frontend}" == "true" ]]; then
         restart_list+=(frontend)
+        RESTARTED_FRONTEND=true
     fi
 
     if [[ ${#restart_list[@]} -eq 0 ]]; then
@@ -570,6 +740,9 @@ deploy() {
     else
         restart_services "${restart_list[@]}"
     fi
+
+    FAILURE_STAGE=""
+    return 0
 }
 
 # 部署成功判据（全部基于完整 SHA，不接受短 SHA）：
@@ -584,7 +757,9 @@ verify_deployment() {
         log "[dry-run]   /v1/version runtime_git_sha = ${TARGET_SHA}（完整 SHA）"
         log "[dry-run]   /v1/version deployment_mode = live"
         log "[dry-run]   /v1/health, /v1/health/ready 返回 200"
-        log "[dry-run]   backend 与 Python 容器 Mounts 包含 ${LIVE_ROOT}"
+        log "[dry-run]   trading-backend Mounts 包含 ${LIVE_ROOT}"
+        log "[dry-run]   trading-frontend Mounts 包含 ${LIVE_ROOT}/frontend/dist"
+        log "[dry-run]   全部 ${#PYTHON_SERVICES[@]} 个 Python 服务 Mounts 包含 ${LIVE_ROOT}"
         return 0
     fi
 
@@ -662,23 +837,46 @@ verify_deployment() {
     fi
     log "deployment_mode = live"
 
-    # 6. Mounts 包含 /opt/panji-live
+    # 6. Mount 核验
+    # 6a. 无条件核验：trading-backend 必须包含 ${LIVE_ROOT}，
+    #     trading-frontend 必须包含 ${LIVE_ROOT}/frontend/dist。
+    #     无论本轮是否触发前端重建，都必须核验，否则无法发现挂载缺失。
     local backend_mounts
     backend_mounts="$(docker inspect trading-backend --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null || echo "")"
     if [[ "${backend_mounts}" != *"${LIVE_ROOT}"* ]]; then
-        log "backend 容器 Mounts 不含 ${LIVE_ROOT}（未实际运行 Live Mount）"
+        log "trading-backend Mounts 不含 ${LIVE_ROOT}（未实际运行 Live Mount）"
         return 1
     fi
-    log "backend 容器 Mounts 包含 ${LIVE_ROOT}"
+    log "trading-backend Mounts 包含 ${LIVE_ROOT}"
 
-    if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
-        local frontend_mounts
-        frontend_mounts="$(docker inspect trading-frontend --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null || echo "")"
-        if [[ "${frontend_mounts}" != *"${LIVE_ROOT}/frontend/dist"* ]]; then
-            log "frontend 容器 Mounts 不含 ${LIVE_ROOT}/frontend/dist"
-            return 1
-        fi
-        log "frontend 容器 Mounts 包含 ${LIVE_ROOT}/frontend/dist"
+    local frontend_mounts
+    frontend_mounts="$(docker inspect trading-frontend --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null || echo "")"
+    if [[ "${frontend_mounts}" != *"${LIVE_ROOT}/frontend/dist"* ]]; then
+        log "trading-frontend Mounts 不含 ${LIVE_ROOT}/frontend/dist（未实际运行 Live Mount）"
+        return 1
+    fi
+    log "trading-frontend Mounts 包含 ${LIVE_ROOT}/frontend/dist"
+
+    # 6b. 全量 Python 服务核验：这 11 个服务共用同一份 Live Mount backend 代码。
+    #     只核验 backend 一个容器会漏掉 worker 未挂载/未重启的情况。
+    if [[ "${RESTARTED_PYTHON}" == "true" || "${FIRST_LIVE_DEPLOY}" == "true" ]]; then
+        log "核验全部 ${#PYTHON_SERVICES[@]} 个 Python 服务的 Live Mount..."
+        local svc container svc_mounts
+        for svc in "${PYTHON_SERVICES[@]}"; do
+            container="trading-${svc}"
+            svc_mounts="$(docker inspect "${container}" --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null || echo "")"
+            if [[ -z "${svc_mounts}" ]]; then
+                log "Python 服务容器不存在或无法 inspect: ${container}"
+                return 1
+            fi
+            if [[ "${svc_mounts}" != *"${LIVE_ROOT}"* ]]; then
+                log "Python 服务容器 Mounts 不含 ${LIVE_ROOT}: ${container}"
+                return 1
+            fi
+        done
+        log "全部 ${#PYTHON_SERVICES[@]} 个 Python 服务 Mounts 均包含 ${LIVE_ROOT}"
+    else
+        log "本轮未重启 Python 服务且非首次 Live Mount，跳过 worker 级 Mount 全量核验"
     fi
 
     # 7. 关键容器与 Scheduler 单实例
@@ -705,35 +903,66 @@ verify_deployment() {
     return 0
 }
 
-rollback() {
-    log "!!! 部署失败，执行回滚 !!!"
-
-    if [[ -z "${PREVIOUS_SHA}" ]]; then
-        log "无 previous SHA 记录，无法自动回滚代码。请手动处理。"
-        return 1
-    fi
-
-    log "回滚到 previous SHA: ${PREVIOUS_SHA}"
+# 把 repo / Live Mount 文件 / RUNTIME_SHA / market.env 恢复到 PREVIOUS_SHA。
+# 只做「文件层」恢复，不触碰任何容器，也不触碰数据库。
+restore_files_to_previous_sha() {
+    log "恢复代码与运行文件到 previous SHA: ${PREVIOUS_SHA}（来源: ${PREVIOUS_SHA_SOURCE}）"
 
     cd "${REPO_ROOT}"
     run_cmd git checkout -f "${PREVIOUS_SHA}"
 
     local saved_target_sha="${TARGET_SHA}"
     TARGET_SHA="${PREVIOUS_SHA}"
-    if [[ "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
-        || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" \
-        || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" ]]; then
+
+    if environment_changed; then
         update_env_file true
     else
         update_env_file false
     fi
+
     sync_backend_runtime
     if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
         build_frontend_dist
         sync_frontend_runtime
     fi
     write_runtime_sha
+
     TARGET_SHA="${saved_target_sha}"
+    log "文件层已恢复到 ${PREVIOUS_SHA}"
+}
+
+# migration 失败专用路径。
+# 硬约束：
+#   - 此刻服务**尚未重启**，容器仍运行 previous SHA 的代码；
+#   - 因此绝不执行 docker compose up / --force-recreate，避免把失败状态推给容器；
+#   - 只恢复文件层，使 Live Mount 与 RUNTIME_SHA 回到 previous SHA；
+#   - 数据库状态未知，**不得**声称数据库已回滚。
+handle_migration_failure() {
+    log "!!! migration 失败：进入 migration 专用失败路径 !!!"
+    log "服务未重启（services_restarted=${SERVICES_RESTARTED}），不执行任何容器重建"
+
+    if [[ -z "${PREVIOUS_SHA}" ]]; then
+        log "无 previous SHA，无法恢复文件层，请手动处理"
+    else
+        restore_files_to_previous_sha
+    fi
+
+    log "migration_attempted=${MIGRATION_ATTEMPTED} migration_succeeded=${MIGRATION_SUCCEEDED}"
+    log "数据库状态未知：本脚本没有也不会自动回滚数据库 schema 或数据"
+    log "结论: migration_failed_requires_inspection"
+}
+
+# 服务已重启后（health / SHA 核验失败）才允许做容器级回滚。
+rollback() {
+    log "!!! 部署失败，执行容器级回滚 !!!"
+    log "failure_stage=${FAILURE_STAGE} services_restarted=${SERVICES_RESTARTED}"
+
+    if [[ -z "${PREVIOUS_SHA}" ]]; then
+        log "无 previous SHA 记录，无法自动回滚代码。请手动处理。"
+        return 1
+    fi
+
+    restore_files_to_previous_sha
 
     cd "${REPO_ROOT}"
     run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build \
@@ -742,11 +971,22 @@ rollback() {
     log "回滚完成（已恢复到 ${PREVIOUS_SHA}）"
 }
 
+# 资源清理边界：
+#   - 普通 Live Mount 代码部署（本轮未构建任何镜像）→ 完全不清理，
+#     因为没有产生新的 build cache 或悬空镜像，清理只会误伤无关资源；
+#   - 仅当本轮确实构建了环境镜像时，才做受控范围清理。
+# 永久禁止：docker image prune -a / docker system prune -a / docker volume prune /
+#           删除 node:20-alpine / 删除 PostgreSQL 或 Redis Volume。
 cleanup_resources() {
-    log "执行部署后受控清理..."
+    if [[ "${IMAGES_BUILT}" != "true" ]]; then
+        log "本轮未构建任何镜像（images_built=false），跳过资源清理"
+        log "  普通 Live Mount 代码部署不做 builder 缓存清理，也不清理无关容器/镜像"
+        return 0
+    fi
+
+    log "本轮构建了环境镜像，执行受控范围清理（仅 builder 与悬空镜像）..."
     run_cmd docker builder prune -f
     run_cmd docker image prune -f
-    run_cmd docker container prune -f
 }
 
 main() {
@@ -760,17 +1000,37 @@ main() {
         ensure_state_directory
         validate_sha
         check_working_tree
+        # load_previous_state 必须在 checkout_target 之前：
+        # 第三级来源依赖「部署前的服务器 repo HEAD」。
         load_previous_state
+        detect_first_live_deploy
         classify_changes
+        apply_first_live_deploy_override
 
         checkout_target
 
         if ! deploy; then
-            rollback
-            fail "部署失败并已回滚（migration 失败时不会重启应用服务）"
+            # 区分两类失败路径：
+            #   migration 失败（服务未重启）→ 只恢复文件，不动容器；
+            #   其他阶段失败 → 按是否已重启决定容器级回滚。
+            if [[ "${FAILURE_STAGE}" == "migration" ]]; then
+                handle_migration_failure
+                fail "migration_failed_requires_inspection：migration 失败，服务未重启，数据库状态需人工确认"
+            fi
+
+            if [[ "${SERVICES_RESTARTED}" == "true" ]]; then
+                rollback
+                fail "部署失败（阶段: ${FAILURE_STAGE}）并已执行容器级回滚"
+            fi
+
+            if [[ -n "${PREVIOUS_SHA}" ]]; then
+                restore_files_to_previous_sha
+            fi
+            fail "部署失败（阶段: ${FAILURE_STAGE}），服务未重启，已恢复文件层"
         fi
 
         if ! verify_deployment; then
+            # 核验发生在重启之后，属于容器级回滚场景。
             rollback
             fail "部署核验失败并已回滚"
         fi
@@ -781,6 +1041,10 @@ main() {
 
         log "部署成功: ${TARGET_SHA}"
         log "  deployment_mode=live"
+        log "  first_live_deploy=${FIRST_LIVE_DEPLOY}"
+        log "  previous_sha=${PREVIOUS_SHA:-none} (source=${PREVIOUS_SHA_SOURCE})"
+        log "  migration_attempted=${MIGRATION_ATTEMPTED} migration_succeeded=${MIGRATION_SUCCEEDED}"
+        log "  images_built=${IMAGES_BUILT} services_restarted=${SERVICES_RESTARTED}"
         log "  repo HEAD = RUNTIME_SHA = version.runtime_git_sha = ${TARGET_SHA}"
 
     ) 200>"${LOCK_FILE}"
