@@ -131,6 +131,36 @@ log "1. 前置校验（仓库/环境/Compose）..."
 [[ -f "\${ENV_FILE}" ]] || fail "环境文件不存在: \${ENV_FILE}"
 [[ -f "\${REPO_ROOT}/docker-compose.prod.yml" ]] || fail "docker-compose.prod.yml 不存在"
 
+# ===== 1b. 资源硬门禁（rules/80-deployment-data-safety.md §服务器资源预算门禁） =====
+# 目的：构建镜像会临时占用大量磁盘（capture 镜像 ~3GB + BuildKit 缓存），
+#       资源不足时必须在改动任何状态之前失败，而不是构建到一半把磁盘写满。
+log "1b. 资源硬门禁校验..."
+DISK_AVAIL_GB="\$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+DISK_USE_PCT="\$(df --output=pcent / | tail -1 | tr -dc '0-9')"
+MEM_AVAIL_MB="\$(awk '/^MemAvailable:/ {print int(\$2/1024)}' /proc/meminfo)"
+log "   磁盘可用=\${DISK_AVAIL_GB}GB 使用率=\${DISK_USE_PCT}% 可用内存=\${MEM_AVAIL_MB}MB"
+
+RESOURCE_GATE_OK="true"
+if [[ "\${DISK_AVAIL_GB}" -lt "\${PANJI_MIN_DISK_GB:-20}" ]]; then
+    log "   门禁失败: 根分区可用 \${DISK_AVAIL_GB}GB < \${PANJI_MIN_DISK_GB:-20}GB 下限"
+    RESOURCE_GATE_OK="false"
+fi
+if [[ "\${DISK_USE_PCT}" -gt "\${PANJI_MAX_DISK_PCT:-82}" ]]; then
+    log "   门禁失败: 根分区使用率 \${DISK_USE_PCT}% > \${PANJI_MAX_DISK_PCT:-82}% 上限"
+    RESOURCE_GATE_OK="false"
+fi
+if [[ "\${MEM_AVAIL_MB}" -lt "\${PANJI_MIN_MEM_MB:-4096}" ]]; then
+    log "   门禁失败: 可用内存 \${MEM_AVAIL_MB}MB < \${PANJI_MIN_MEM_MB:-4096}MB 下限"
+    RESOURCE_GATE_OK="false"
+fi
+if [[ "\${RESOURCE_GATE_OK}" != "true" ]]; then
+    log "   提示: 可先执行受控清理释放空间："
+    log "     docker builder prune -f && docker image prune -f && docker container prune -f"
+    log "   禁止使用 docker system prune -a / docker image prune -a / volume prune 绕过本门禁。"
+    fail "资源门禁未通过，拒绝部署（未修改任何状态）。"
+fi
+log "   资源门禁通过。"
+
 # ===== 2. 拉取 origin/dev 并校验 SHA =====
 log "2. 拉取 origin/dev 并校验 SHA \${TARGET_SHA:0:7}..."
 cd "\${REPO_ROOT}"
@@ -249,30 +279,133 @@ else
 fi
 
 # ===== 8. Up -d 受影响服务 =====
+# [FIX-20260802] 历史缺陷：硬编码 "worker" / "worker-chips" 等 compose 中不存在的服务名，
+#   docker compose up -d 对未知服务直接报错或静默不处理，导致脚本报"完成"但容器仍跑旧 SHA。
+#   现改为：从 docker compose config --services 读取真实服务清单，
+#   并对任何"计划重建但 compose 中不存在"的服务立即失败。
 log "8. 重建服务..."
 cd "\${REPO_ROOT}"
+
+# 8a. 读取 compose 真实服务清单（唯一真源）
+COMPOSE_SERVICES="\$(\${COMPOSE_CMD} config --services 2>/dev/null || true)"
+[[ -n "\${COMPOSE_SERVICES}" ]] || fail "无法读取 compose 服务清单（docker compose config --services 返回空）"
+log "   compose 服务清单: \$(echo "\${COMPOSE_SERVICES}" | tr '\n' ' ')"
+
+service_exists() { echo "\${COMPOSE_SERVICES}" | grep -qx "\$1"; }
+
 SERVICES_TO_UP=()
-[[ "\${RESTART_BACKEND}"   == "true" || "\${BUILD_IMAGES}" == "true" ]] && SERVICES_TO_UP+=("backend")
-[[ "\${RESTART_FRONTEND}"  == "true" || "\${BUILD_IMAGES}" == "true" ]] && SERVICES_TO_UP+=("frontend")
-[[ "\${RESTART_CAPTURE}"   == "true" || "\${BUILD_IMAGES}" == "true" ]] && SERVICES_TO_UP+=("worker-capture")
-# 所有共享 workers 跟着 backend 重启（避免旧代码内存继续执行）
-[[ "\${RESTART_BACKEND}"   == "true" || "\${BUILD_IMAGES}" == "true" ]] && SERVICES_TO_UP+=("worker" "worker-calendar" "worker-chips")
+add_service() {
+    if service_exists "\$1"; then
+        SERVICES_TO_UP+=("\$1")
+    else
+        fail "计划重建的服务 '\$1' 不在 docker-compose.prod.yml 中。脚本与 compose 定义已漂移，拒绝继续（禁止静默跳过）。"
+    fi
+}
+
+[[ "\${RESTART_FRONTEND}" == "true" || "\${BUILD_IMAGES}" == "true" ]] && add_service "frontend"
+[[ "\${RESTART_CAPTURE}"  == "true" || "\${BUILD_IMAGES}" == "true" ]] && add_service "worker-capture"
+
+# backend 及其全部共享 worker：从 compose 清单动态发现，避免再次出现硬编码漂移。
+# 规则：backend 本体 + 所有 worker-* 服务（capture 已单列，去重由下方过滤保证）。
+if [[ "\${RESTART_BACKEND}" == "true" || "\${BUILD_IMAGES}" == "true" ]]; then
+    add_service "backend"
+    while IFS= read -r svc; do
+        [[ -z "\${svc}" ]] && continue
+        case "\${svc}" in
+            worker-capture) continue ;;   # 已由 RESTART_CAPTURE 分支加入
+            worker-*) add_service "\${svc}" ;;
+        esac
+    done <<< "\${COMPOSE_SERVICES}"
+fi
+
+# 去重（保持顺序）
+if [[ "\${#SERVICES_TO_UP[@]}" -gt 0 ]]; then
+    DEDUP=()
+    for s in "\${SERVICES_TO_UP[@]}"; do
+        skip="false"
+        for d in "\${DEDUP[@]:-}"; do [[ "\${d}" == "\${s}" ]] && skip="true" && break; done
+        [[ "\${skip}" == "false" ]] && DEDUP+=("\${s}")
+    done
+    SERVICES_TO_UP=("\${DEDUP[@]}")
+fi
 
 if [[ "\${#SERVICES_TO_UP[@]}" -gt 0 ]]; then
+    log "   将重建 \${#SERVICES_TO_UP[@]} 个服务: \${SERVICES_TO_UP[*]}"
     run_cmd \${COMPOSE_CMD} up -d --force-recreate --no-build "\${SERVICES_TO_UP[@]}" || \
         fail "up -d 失败。服务可能处于中间态，请立即人工检查。"
 else
     log "   无服务需要重启（纯 docs/rules 类变更？）"
 fi
 
-# ===== 9. 健康检查（backend /version、frontend HTTP 200） =====
+# ===== 8b. 镜像标签逐服务校验（防止"报告完成但容器仍是旧镜像"） =====
+# [FIX-20260802] 历史缺陷：仅检查 backend /version 就宣布完成，
+#   frontend / worker-* 若未被重建则长期停留在旧 SHA 且无任何告警。
+if [[ "\${#SERVICES_TO_UP[@]}" -gt 0 && "\${DRY_RUN}" != "true" ]]; then
+    log "8b. 逐服务校验运行中容器镜像标签 == \${SHORT_SHA}..."
+    sleep 3
+    TAG_MISMATCH=""
+    for svc in "\${SERVICES_TO_UP[@]}"; do
+        CID="\$(\${COMPOSE_CMD} ps -q "\${svc}" 2>/dev/null | head -1)"
+        if [[ -z "\${CID}" ]]; then
+            TAG_MISMATCH="\${TAG_MISMATCH} \${svc}(无运行容器)"
+            continue
+        fi
+        IMG="\$(docker inspect -f '{{.Config.Image}}' "\${CID}" 2>/dev/null || echo '')"
+        if [[ "\${IMG}" != *":\${SHORT_SHA}" ]]; then
+            TAG_MISMATCH="\${TAG_MISMATCH} \${svc}(\${IMG:-unknown})"
+        fi
+    done
+    if [[ -n "\${TAG_MISMATCH}" ]]; then
+        fail "以下服务未运行在目标镜像标签 \${SHORT_SHA} 上:\${TAG_MISMATCH}。拒绝报告部署成功。"
+    fi
+    log "   全部 \${#SERVICES_TO_UP[@]} 个服务镜像标签匹配 \${SHORT_SHA}"
+fi
+
+# ===== 9. 健康检查（backend /v1/health + /v1/version、frontend HTTP 200） =====
+# [FIX-20260802] 历史缺陷：本步骤用 \`docker exec trading-backend curl\` 探测，
+#   但 backend 镜像内**没有 curl**（只有 /opt/venv/bin/python3），
+#   docker exec 直接失败 -> \`|| true\` 吞掉错误 -> BACKEND_VER 恒为空。
+#   叠加当时不校验镜像标签，脚本因此可以在容器仍跑旧 SHA 时报告"部署完成"。
+#   现改用容器内确实存在的 python3 + urllib 探测。
 log "9. 健康检查..."
 HEALTH_OK="true"
 sleep 5
-# backend /version
+
+# backend 容器内 HTTP 探测辅助：使用 python3（backend 镜像无 curl）
+backend_http() {
+    # \$1=path  输出: "<status_code>\n<body>"
+    docker exec trading-backend python3 -c "
+import sys, urllib.request
+try:
+    r = urllib.request.urlopen('http://127.0.0.1:8000' + sys.argv[1], timeout=10)
+    print(r.status)
+    print(r.read().decode('utf-8', 'replace'))
+except Exception as exc:
+    print('000')
+    print(str(exc))
+" "\$1" 2>/dev/null || printf '000\n'
+}
+
+# backend /v1/health（存活）— 端点真值为 /v1/health，非 /health、非 /api/v1/health
 set +e
-BACKEND_VER="\$(docker exec trading-backend curl -sSf http://127.0.0.1:8000/v1/version 2>/dev/null || true)"
-BACKEND_RUNTIME_SHA="\$(echo "\${BACKEND_VER}" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("git_sha",""))' 2>/dev/null || true)"
+HEALTH_OUT="\$(backend_http /v1/health)"
+HEALTH_CODE="\$(echo "\${HEALTH_OUT}" | head -1)"
+set -e
+if [[ "\${HEALTH_CODE}" != "200" ]]; then
+    log "   警告: backend /v1/health 状态码=\${HEALTH_CODE}（期望 200）"
+    HEALTH_OK="false"
+else
+    log "   backend /v1/health 200 OK"
+fi
+# backend /v1/version
+set +e
+VER_OUT="\$(backend_http /v1/version)"
+VER_CODE="\$(echo "\${VER_OUT}" | head -1)"
+BACKEND_VER="\$(echo "\${VER_OUT}" | tail -n +2)"
+BACKEND_RUNTIME_SHA=""
+if [[ "\${VER_CODE}" == "200" ]]; then
+    BACKEND_RUNTIME_SHA="\$(echo "\${BACKEND_VER}" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("git_sha",""))' 2>/dev/null || true)"
+fi
 set -e
 if [[ -z "\${BACKEND_RUNTIME_SHA}" ]]; then
     log "   警告: backend /version 未返回 git_sha（raw: \${BACKEND_VER}）"
@@ -293,6 +426,25 @@ if [[ "\${FRONTEND_CODE}" != "200" && "\${FRONTEND_CODE}" != "301" && "\${FRONTE
 else
     log "   frontend HTTP \${FRONTEND_CODE} OK"
 fi
+# /v1/version 内部一致性：runtime_git_sha == image_git_sha == git_sha
+if [[ -n "\${BACKEND_VER}" ]]; then
+    set +e
+    SHA_TRIPLE_OK="\$(echo "\${BACKEND_VER}" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+vals = {d.get("git_sha"), d.get("runtime_git_sha"), d.get("image_git_sha")}
+vals.discard(None)
+print("ok" if len(vals) == 1 else "mismatch:" + ",".join(sorted(map(str, vals))))
+' 2>/dev/null || echo "parse_error")"
+    set -e
+    if [[ "\${SHA_TRIPLE_OK}" == "ok" ]]; then
+        log "   /v1/version 三项 SHA 一致（git_sha == runtime_git_sha == image_git_sha）"
+    else
+        log "   警告: /v1/version SHA 不一致: \${SHA_TRIPLE_OK}"
+        HEALTH_OK="false"
+    fi
+fi
+
 [[ "\${HEALTH_OK}" == "true" ]] || fail "健康检查未通过，请人工调查。state 文件未更新。"
 
 # ===== 10. 记录部署状态 =====
@@ -302,7 +454,30 @@ if [[ "\${DRY_RUN}" == "true" ]]; then
 else
     echo "\${TARGET_SHA}" > "\${STATE_FILE}" || fail "无法写入 state 文件"
 fi
-log "测试环境部署完成：\${TARGET_SHA:0:7}（repo == image == runtime SHA）"
+
+# ===== 11. 部署后受控清理（保证单次部署不产生持久资源净增长） =====
+# 仅清理：BuildKit 构建缓存 + dangling 镜像 + 已停止容器。
+# 严禁：docker system prune -a / docker image prune -a / volume prune —
+#       会误删 node:20-alpine 等基础镜像与持久卷（rules/90-deprecated-forbidden.md）。
+log "11. 部署后受控清理（builder cache / dangling images / stopped containers）..."
+if [[ "\${DRY_RUN}" == "true" ]]; then
+    log "[dry-run] 将执行: docker builder prune -f / docker image prune -f / docker container prune -f"
+else
+    DISK_BEFORE="\$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+    docker builder prune -f   >/dev/null 2>&1 || log "   警告: builder prune 失败（忽略）"
+    docker image prune -f     >/dev/null 2>&1 || log "   警告: image prune 失败（忽略）"
+    docker container prune -f >/dev/null 2>&1 || log "   警告: container prune 失败（忽略）"
+    DISK_AFTER="\$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+    log "   清理完成：可用磁盘 \${DISK_BEFORE}GB -> \${DISK_AFTER}GB"
+    DISK_FINAL_PCT="\$(df --output=pcent / | tail -1 | tr -dc '0-9')"
+    if [[ "\${DISK_AFTER}" -lt "\${PANJI_MIN_DISK_GB:-20}" ]]; then
+        log "   警告: 清理后可用磁盘 \${DISK_AFTER}GB 仍低于 \${PANJI_MIN_DISK_GB:-20}GB 门禁，"
+        log "        下次部署将被资源门禁拦截。请人工按 rules/80 清理旧 SHA 业务镜像。"
+    fi
+    log "   部署后磁盘使用率: \${DISK_FINAL_PCT}%"
+fi
+
+log "测试环境部署完成：\${TARGET_SHA:0:7}（repo == image == runtime SHA，全部受影响服务镜像标签已逐一校验）"
 
 REMOTE_EOF
 )"

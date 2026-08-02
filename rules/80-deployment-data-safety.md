@@ -54,6 +54,72 @@
 - `docker image prune -f`；
 - `docker container prune -f`。
 
+## 服务器资源预算门禁（2026-08-02 收口）
+
+生产服务器根分区 118G、内存 7.4G，是**共享且不可弹性扩容**的资源。
+历史上每次部署都会新增三个业务镜像（backend 1.2G + capture 3.0G + frontend 65M）
+与数 GB BuildKit 缓存，且从不回收，磁盘长期单向增长直至逼近写满。
+本节把"单次部署不产生持久资源净增长"固化为硬约束。
+
+### 硬门禁阈值
+
+`scripts/ops/panji-test-deploy` 在**修改任何状态之前**校验以下阈值，任一不满足即失败退出：
+
+| 指标 | 阈值 | 环境变量覆盖 |
+|---|---|---|
+| 根分区可用空间 | ≥ 20 GB | `PANJI_MIN_DISK_GB` |
+| 根分区使用率 | ≤ 82% | `PANJI_MAX_DISK_PCT` |
+| MemAvailable | ≥ 4096 MB | `PANJI_MIN_MEM_MB` |
+
+阈值依据：一次全量构建的峰值临时占用约 8–12 GB（capture 镜像层 + BuildKit 缓存），
+20 GB 下限保证构建期间不会触及 fs 写满；82% 使用率给 PostgreSQL 与日志留出增长余量。
+
+门禁失败时禁止用"扩阈值"或"跳过门禁"绕过，必须先按下方允许范围清理。
+
+### 部署后强制回收
+
+部署成功后（步骤 11）自动执行受控清理，保证净增长趋近于零：
+
+```
+docker builder prune -f
+docker image prune -f
+docker container prune -f
+```
+
+清理后若可用空间仍低于门禁下限，脚本发出显式警告，提示下次部署会被拦截。
+
+### 允许的清理范围
+
+- BuildKit 构建缓存：`docker builder prune -f`（可全量清，重建只是变慢）；
+- 悬挂（dangling）镜像：`docker image prune -f`；
+- 已停止容器：`docker container prune -f`；
+- **旧 SHA 业务镜像**：`market-dev-{backend,capture,frontend}:<旧SHA>`，
+  但必须保留：当前运行 SHA、上一个可回滚 SHA、任何 `*-rollback` 标签；
+- 生产上遗留的临时诊断脚本与部署日志（`/tmp/*.py`、`/tmp/deploy_*.log` 等）；
+- systemd journal：`journalctl --vacuum-size=200M`。
+
+### 禁止的清理操作
+
+- `docker system prune -a`（会删除全部未使用镜像，包括受保护基础镜像）；
+- `docker image prune -a`（同上）；
+- `docker volume prune` / 任何删除卷的操作（业务数据）；
+- 删除当前运行镜像或唯一可回滚镜像；
+- 删除 `node:20-alpine`、`postgres:16`、`redis:7-alpine`、`nginx:alpine` 等基础镜像；
+- 删除 `/var/lib/docker/volumes` 下任何内容；
+- 为了通过门禁而删除业务数据、日志表或历史 run。
+
+### 长任务内存预算
+
+批量历史回填类长任务（如 Review bootstrap）必须自带内存上限，不得依赖"服务器内存够大"：
+
+- 按自然分片（交易日 / scope）处理，分片结束释放 ORM identity map；
+- 只保留聚合计数，不在进程内线性累积逐条明细；
+- 记录 RSS 高水位；超过预算时**安全停止并如实上报 partial 状态**，
+  绝不静默截断、不假装成功、不通过扩容内存掩盖实现缺陷；
+- 并发固定为 1，禁止用并行放大峰值内存。
+
+违反上述任一条即视为实现缺陷，必须修实现而不是调大预算。
+
 ## Live Mount 部署规则
 
 Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实现代码热更新而无需重建镜像。
