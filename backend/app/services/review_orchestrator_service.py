@@ -688,20 +688,20 @@ async def _build_scope_history(
     *,
     scope: ScopeDefinition,
     trade_date: date,
-    source_core_run_id: uuid.UUID,
+    algorithm_version: str,
     baseline_window: int,
 ) -> tuple[
     dict[str, dict[str, list[float]]] | None,
     dict[str, float] | None,
     dict[str, float] | None,
 ]:
-    """从历史 market_review_scope_snapshots 构建历史序列（PRD §7.1）。
+    """从同算法版本的 observation SSOT 构建历史序列（PRD §7.1）。
 
     Args:
         session: 异步 DB 会话
         scope: 当前 scope 定义
         trade_date: 当前交易日（排除当日，只用历史）
-        source_core_run_id: 当前 stock_core run_id（用于过滤同源）
+        algorithm_version: 当前 Review 算法版本（禁止混用旧版本）
         baseline_window: 历史窗口长度（默认 120）
 
     Returns:
@@ -710,108 +710,19 @@ async def _build_scope_history(
         - prev_values: {metric_code: value}（最近一交易日）
         - prev5d_values: {metric_code: value}（最近第5交易日）
 
-    说明：
-    - 只读取已存在的历史 market_review_scope_snapshots，禁止用当前成员回填
-    - 无历史数据时返回 (None, None, None)，component status 将标为 insufficient_history
-    - 历史可能跨多个 algorithm_version，按 trade_date desc 取最近 baseline_window 个
+    只读取严格早于目标日且算法版本完全一致的 observation。无历史时返回
+    ``(None, None, None)``，由 metric engine 标记 insufficient_history。
     """
-    from app.models.market_review import MarketReviewScopeSnapshot
+    from app.services.review_metric_observation_service import load_metric_history
 
-    stmt = (
-        select(
-            MarketReviewScopeSnapshot.trade_date,
-            MarketReviewScopeSnapshot.p_payload,
-            MarketReviewScopeSnapshot.q_payload,
-            MarketReviewScopeSnapshot.u_payload,
-            MarketReviewScopeSnapshot.c_payload,
-            MarketReviewScopeSnapshot.v_payload,
-        )
-        .where(
-            MarketReviewScopeSnapshot.scope_type == scope.scope_type,
-            MarketReviewScopeSnapshot.scope_key == scope.scope_key,
-            MarketReviewScopeSnapshot.trade_date < trade_date,
-        )
-        .order_by(MarketReviewScopeSnapshot.trade_date.desc())
-        .limit(baseline_window)
+    return await load_metric_history(
+        session,
+        scope_type=scope.scope_type,
+        scope_key=scope.scope_key,
+        trade_date=trade_date,
+        algorithm_version=algorithm_version,
+        baseline_window=baseline_window,
     )
-    result = await session.execute(stmt)
-    rows = result.all()
-
-    if not rows:
-        return None, None, None
-
-    # 反向（旧到新）构建历史序列
-    rows_asc = list(reversed(rows))
-
-    metric_payloads = {
-        "P": "p_payload",
-        "Q": "q_payload",
-        "U": "u_payload",
-        "C": "c_payload",
-        "V": "v_payload",
-    }
-
-    history_maps: dict[str, dict[str, list[float]]] = {}
-    for metric_code, payload_field in metric_payloads.items():
-        comp_history: dict[str, list[float]] = {}
-        for row in rows_asc:
-            payload = row[1] if payload_field == "p_payload" else (
-                row[2] if payload_field == "q_payload" else (
-                    row[3] if payload_field == "u_payload" else (
-                        row[4] if payload_field == "c_payload" else row[5]
-                    )
-                )
-            )
-            if not isinstance(payload, dict):
-                continue
-            components = payload.get("components") or []
-            for comp in components:
-                if not isinstance(comp, dict):
-                    continue
-                name = comp.get("name")
-                raw_value = comp.get("rawValue")
-                if name is None or raw_value is None:
-                    continue
-                try:
-                    rv = float(raw_value)
-                except (TypeError, ValueError):
-                    continue
-                comp_history.setdefault(name, []).append(rv)
-        if comp_history:
-            history_maps[metric_code] = comp_history
-
-    # prev_values：最近一个交易日的 value
-    prev_values: dict[str, float] = {}
-    prev5d_values: dict[str, float] = {}
-
-    for idx, row in enumerate(rows_asc):
-        # idx=0 是最旧，idx=-1 是最近
-        # prev_values 用最近一行；prev5d_values 用倒数第5行
-        if idx != len(rows_asc) - 1 and idx != len(rows_asc) - 5:
-            continue
-        target = prev_values if idx == len(rows_asc) - 1 else prev5d_values
-        for metric_code, payload_field in metric_payloads.items():
-            payload = row[1] if payload_field == "p_payload" else (
-                row[2] if payload_field == "q_payload" else (
-                    row[3] if payload_field == "u_payload" else (
-                        row[4] if payload_field == "c_payload" else row[5]
-                    )
-                )
-            )
-            if not isinstance(payload, dict):
-                continue
-            value = payload.get("value")
-            if value is None:
-                continue
-            try:
-                target[metric_code] = float(value)
-            except (TypeError, ValueError):
-                continue
-
-    if not history_maps:
-        return None, None, None
-
-    return history_maps, (prev_values or None), (prev5d_values or None)
 
 
 async def _fetch_pyramid_v2_for_scope(
@@ -908,7 +819,7 @@ async def _compute_scope_metrics_phase(
         session,
         scope=scope,
         trade_date=run.trade_date,
-        source_core_run_id=run.source_core_run_id,
+        algorithm_version=run.algorithm_version,
         baseline_window=run.baseline_window,
     )
 
@@ -924,6 +835,7 @@ async def _compute_scope_metrics_phase(
             trade_date=run.trade_date,
             scope=scope,
             flat_list=flat_list,
+            algorithm_version=run.algorithm_version,
             eligible_count=len(instrument_ids),
             history_maps=history_maps,
             prev_values=prev_values,

@@ -35,13 +35,18 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.review.member_fact import DailyBarFact, ReviewMemberFact
+from app.domain.review.member_fact import (
+    DailyBarFact,
+    ReviewMemberFact,
+    previous_state_to_flat,
+)
 from app.domain.review.metric_engine import _cross_section_percentile, compute_all_metrics
 from app.domain.review.metric_registry import DEFAULT_REGISTRY
 from app.models.bar import BarDaily
 from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
 from app.models.instrument import Instrument
 from app.models.market_review import MarketReviewScopeSnapshot
+from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services.board_membership_service import (
     PITMembershipUnavailableError,
     resolve_board_membership_at,
@@ -265,6 +270,7 @@ async def compute_scope_metrics(
     scope: ScopeDefinition,
     flat_list: list[dict[str, Any]],
     *,
+    algorithm_version: str,
     eligible_count: int | None = None,
     history_maps: dict[str, dict[str, list[float]]] | None = None,
     prev_values: dict[str, float] | None = None,
@@ -280,6 +286,7 @@ async def compute_scope_metrics(
         trade_date: 业务交易日
         scope: 范围定义
         flat_list: 成员 first_pyramid_flat 列表
+        algorithm_version: 生成 observation 的 Review 算法版本
         eligible_count: 范围成员总数（None=取 len(flat_list)）
         history_maps: 每个 metric 的历史序列 map（用于历史分位归一化）
         prev_values: 前一交易日各 metric 的 value（用于 delta1d）
@@ -353,6 +360,22 @@ async def compute_scope_metrics(
         c_payload=payloads.get("C"),
         v_payload=payloads.get("V"),
         data_quality_json=data_quality,
+    )
+
+    from app.services.review_metric_observation_service import (
+        persist_metric_observations,
+    )
+
+    await persist_metric_observations(
+        session,
+        review_run_id=review_run_id,
+        trade_date=trade_date,
+        scope_type=scope.scope_type,
+        scope_key=scope.scope_key,
+        membership_version=scope.membership_version,
+        algorithm_version=algorithm_version,
+        flat_list=flat_list,
+        payloads=payloads,
     )
 
     logger.info(
@@ -639,8 +662,10 @@ async def fetch_member_flat_list(
         .where(
             FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
             FirstPyramidHistoryDailyState.trade_date < trade_date,
-            FirstPyramidHistoryDailyState.trade_date >= trade_date - timedelta(days=45),
+            FirstPyramidHistoryDailyState.algorithm_version
+            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
         )
+        .distinct(FirstPyramidHistoryDailyState.instrument_id)
         .order_by(
             FirstPyramidHistoryDailyState.instrument_id.asc(),
             FirstPyramidHistoryDailyState.trade_date.desc(),
@@ -663,6 +688,88 @@ async def fetch_member_flat_list(
         ).to_metric_input()
         for snapshot_id, instrument_id, symbol, name, flat in source_rows
     ]
+
+
+async def fetch_historical_member_facts(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    *,
+    trade_date: date,
+) -> list[dict[str, Any]]:
+    """Build PIT Review facts directly from canonical FP history and daily bars."""
+    if not instrument_ids:
+        return []
+
+    identity_stmt = select(Instrument).where(Instrument.id.in_(instrument_ids))
+    identities = {
+        item.id: item for item in (await session.execute(identity_stmt)).scalars()
+    }
+
+    current_stmt = (
+        select(FirstPyramidHistoryDailyState)
+        .where(
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            FirstPyramidHistoryDailyState.trade_date == trade_date,
+            FirstPyramidHistoryDailyState.algorithm_version
+            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        )
+    )
+    current_by_instrument = {
+        state.instrument_id: state
+        for state in (await session.execute(current_stmt)).scalars()
+    }
+    previous_stmt = (
+        select(FirstPyramidHistoryDailyState)
+        .where(
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            FirstPyramidHistoryDailyState.trade_date < trade_date,
+            FirstPyramidHistoryDailyState.algorithm_version
+            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        )
+        .distinct(FirstPyramidHistoryDailyState.instrument_id)
+        .order_by(
+            FirstPyramidHistoryDailyState.instrument_id.asc(),
+            FirstPyramidHistoryDailyState.trade_date.desc(),
+        )
+    )
+    previous_by_instrument = {
+        state.instrument_id: state.state_payload
+        for state in (await session.execute(previous_stmt)).scalars()
+    }
+
+    bar_stmt = (
+        select(BarDaily)
+        .where(
+            BarDaily.instrument_id.in_(instrument_ids),
+            BarDaily.trade_date <= trade_date,
+            BarDaily.trade_date >= trade_date - timedelta(days=400),
+        )
+        .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
+    )
+    bars_by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
+    for bar in (await session.execute(bar_stmt)).scalars():
+        bars_by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
+
+    facts: list[dict[str, Any]] = []
+    for instrument_id in instrument_ids:
+        current_state = current_by_instrument.get(instrument_id)
+        identity = identities.get(instrument_id)
+        if current_state is None or identity is None:
+            continue
+        fact = ReviewMemberFact.build(
+            instrument_id=instrument_id,
+            symbol=identity.symbol,
+            name=identity.name,
+            snapshot_id=None,
+            trade_date=trade_date,
+            first_pyramid=previous_state_to_flat(current_state.state_payload),
+            bars=bars_by_instrument[instrument_id],
+            previous_state=previous_by_instrument.get(instrument_id),
+        ).to_metric_input()
+        fact["_history_state_id"] = str(current_state.id)
+        fact["_history_input_hash"] = current_state.input_hash
+        facts.append(fact)
+    return facts
 
 
 if __name__ == "__main__":

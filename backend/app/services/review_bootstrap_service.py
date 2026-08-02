@@ -1,26 +1,10 @@
-"""Review 冷启动 Bootstrap 服务（PRD §0 冷启动、§7.1 历史归一化）。
+"""Point-in-time Review history bootstrap.
 
-问题：
-- metric_engine 需要 >= 60 个交易日的 scope snapshot 历史才能归一化
-- 新系统冷启动时无 review 历史 → normalizedValue=None → value=None → publish gate block
-- 旧方案：等待 60 个交易日的 review run 累积（不可接受）
-
-Bootstrap 方案：
-- 从已发布的 stock_core 历史（factor_publications where kind=stock_core）回填
-- 对每个历史交易日：
-  1. 读取 stock_core snapshot
-  2. 解析 market 范围成员
-  3. 计算 P/Q/U/C/V 原始值（raw values，无需归一化）
-  4. 存储为 scope snapshot（带 metadata.bootstrap=True 标记）
-- _build_scope_history 读取 scope snapshots 时不区分 review_run_id，
-  会自动拾取 bootstrap 写入的历史 raw values
-- 可重复执行：相同 trade_date 已有 bootstrap snapshot 时跳过
-
-约束：
-- 不修改 stock_core 数据（只读）
-- 不修改现有 review run（只创建 bootstrap run）
-- 不绕过 publish gate（bootstrap 只补历史，不 force publish）
-- dry_run=True 时只计算不写入（canary 用）
+Historical facts come from canonical first-pyramid daily state, daily bars, and
+PIT scope memberships. Missing historical membership is recorded as
+``bootstrap_unavailable`` and never falls back to today's population. Dry-run is
+strictly read-only. Applied runs materialize observations for the production
+Review algorithm but never publish a Review pointer.
 
 模块自测：
     PURE_UNIT_TEST=1 python -m app.services.review_bootstrap_service
@@ -33,30 +17,37 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.metric_engine import compute_all_metrics
 from app.domain.review.metric_registry import DEFAULT_REGISTRY
+from app.models.board_taxonomy import BoardDefinitionVersion
 from app.models.factor_publication import (
     PUBLICATION_KIND_STOCK_CORE,
     FactorPublication,
 )
+from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
+from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewRun,
     MarketReviewScopeSnapshot,
 )
+from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+from app.services.board_membership_service import list_universe_definitions_at
+from app.services.review_metric_observation_service import persist_metric_observations
 from app.services.review_scope_service import (
     ScopeDefinition,
-    fetch_member_flat_list,
+    ScopeSnapshotError,
+    fetch_historical_member_facts,
     resolve_scope_members,
 )
 
 logger = logging.getLogger("review_bootstrap_service")
 
-# Bootstrap 专用版本号（与正式 review 算法版本隔离）
-BOOTSTRAP_ALGORITHM_VERSION = "bootstrap-1.0.0"
+# Bootstrap observations must be comparable with the production algorithm.
+BOOTSTRAP_ALGORITHM_VERSION = "review-2.0.0"
 BOOTSTRAP_FILTER_VERSION = "bootstrap"
 
 # 默认回填天数（PRD §0：默认 120 日，最低 60 日）
@@ -74,8 +65,8 @@ async def list_bootstrap_eligible_dates(
     *,
     end_date: date | None = None,
     days_back: int = DEFAULT_BOOTSTRAP_DAYS,
-) -> list[tuple[date, uuid.UUID]]:
-    """列出可 bootstrap 的历史交易日（有 stock_core publication 的日期）。
+) -> list[tuple[date, uuid.UUID | None]]:
+    """List canonical FP history dates and optional audit source run identities.
 
     Args:
         session: 异步 DB 会话
@@ -83,174 +74,169 @@ async def list_bootstrap_eligible_dates(
         days_back: 回溯天数（默认 120）
 
     Returns:
-        [(trade_date, stock_core_run_id), ...] 按日期降序
+        ``[(trade_date, stock_core_run_id | None), ...]`` 按日期降序。
+        日期来源始终是 FP history；缺少 source identity 不删除该日期。
     """
     if end_date is None:
         end_date = date.today()
 
     start_date = end_date - timedelta(days=days_back)
 
-    stmt = (
-        select(
-            FactorPublication.trade_date,
-            FactorPublication.data_run_id,
-        )
+    history_stmt = (
+        select(FirstPyramidHistoryDailyState.trade_date)
         .where(
-            FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
-            FactorPublication.trade_date >= start_date,
-            FactorPublication.trade_date <= end_date,
+            FirstPyramidHistoryDailyState.trade_date >= start_date,
+            FirstPyramidHistoryDailyState.trade_date <= end_date,
+            FirstPyramidHistoryDailyState.algorithm_version
+            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
         )
-        .order_by(FactorPublication.trade_date.desc())
+        .distinct()
+        .order_by(FirstPyramidHistoryDailyState.trade_date.desc())
     )
-    result = await session.execute(stmt)
-    return [(row[0], row[1]) for row in result.all()]
+    dates = [row[0] for row in (await session.execute(history_stmt)).all()]
+    if not dates:
+        return []
+    source_stmt = select(
+        FactorPublication.trade_date, FactorPublication.data_run_id,
+    ).where(
+        FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
+        FactorPublication.trade_date.in_(dates),
+    )
+    sources = {row[0]: row[1] for row in (await session.execute(source_stmt)).all()}
+    return [(item, sources.get(item)) for item in dates]
 
 
 async def bootstrap_single_date(
     session: AsyncSession,
     *,
     trade_date: date,
-    source_core_run_id: uuid.UUID,
+    source_core_run_id: uuid.UUID | None,
     source_board_run_id: uuid.UUID | None = None,
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """对单个历史交易日执行 bootstrap。
-
-    流程：
-    1. 创建 bootstrap run（metadata.bootstrap=True）
-    2. 解析 market 范围成员
-    3. 读取 stock_core flat list
-    4. 计算 P/Q/U/C/V 原始值（无历史，只算 raw）
-    5. dry_run=True: 返回计算结果不写入
-       dry_run=False: upsert scope snapshot
+    """Bootstrap every PIT scope family for one historical date.
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         trade_date: 历史交易日
-        source_core_run_id: stock_core run_id
-        source_board_run_id: board run_id（None 时用 core_id 占位）
+        source_core_run_id: 可审计 stock_core source identity；apply 时必需
+        source_board_run_id: 可审计 board source identity；apply 时必需
         dry_run: 只计算不写入
 
     Returns:
         {"trade_date": ..., "run_id": ..., "metrics": {...}, "written": bool}
     """
-    board_id = source_board_run_id or source_core_run_id
-
-    # 1. 创建 bootstrap run（或复用已有）
-    run_id = await _upsert_bootstrap_run(
-        session,
-        trade_date=trade_date,
-        source_core_run_id=source_core_run_id,
-        source_board_run_id=board_id,
-    )
-
-    # 2. 解析 market 范围成员
-    instrument_ids, scope_name = await resolve_scope_members(
-        session, "market", "market", trade_date=trade_date,
-    )
-    if not instrument_ids:
-        return {
-            "trade_date": trade_date.isoformat(),
-            "run_id": str(run_id),
-            "status": "skipped",
-            "reason": "no active instruments",
-            "written": False,
-        }
-
-    # 3. 读取 stock_core flat list
-    flat_list = await fetch_member_flat_list(
-        session,
-        instrument_ids,
-        source_core_run_id,
-        trade_date=trade_date,
-    )
-    if not flat_list:
-        return {
-            "trade_date": trade_date.isoformat(),
-            "run_id": str(run_id),
-            "status": "skipped",
-            "reason": "no stock_core snapshots for this run_id",
-            "written": False,
-        }
-
-    # 4. 计算 P/Q/U/C/V 原始值（无历史归一化，只算 raw）
-    ready_count = sum(
-        1 for f in flat_list if f and f.get("fp_trend_direction") is not None
-    )
-    payloads = compute_all_metrics(
-        flat_list,
-        ready_count=ready_count,
-        history_maps=None,  # 无历史，只算 raw
-        registry=DEFAULT_REGISTRY,
-    )
-
-    # 5. 状态判定（bootstrap snapshot 标记为 partial，因为无归一化）
-    statuses = [p.get("status") for p in payloads.values()]
-    if not flat_list:
-        snap_status = "unavailable"
-    elif all(s == "ready" for s in statuses):
-        snap_status = "ready"
-    elif any(s == "insufficient_history" for s in statuses):
-        snap_status = "insufficient_history"
-    else:
-        snap_status = "partial"
-
-    coverage = ready_count / max(1, len(instrument_ids))
+    scopes = await _list_bootstrap_scopes(session, trade_date)
+    computed: list[tuple[ScopeDefinition, list[dict[str, Any]], int, int, float, str, dict[str, dict[str, Any]]]] = []
+    scope_results: list[dict[str, Any]] = []
+    for scope in scopes:
+        try:
+            if scope.scope_type == "market":
+                instrument_ids = await _market_history_members(session, trade_date)
+            else:
+                instrument_ids, _ = await resolve_scope_members(
+                    session, scope.scope_type, scope.scope_key, trade_date=trade_date,
+                )
+        except ScopeSnapshotError as exc:
+            scope_results.append(_unavailable_scope(scope, str(exc)))
+            continue
+        if not instrument_ids:
+            scope_results.append(_unavailable_scope(scope, "pit_membership_empty"))
+            continue
+        flat_list = await fetch_historical_member_facts(
+            session, instrument_ids, trade_date=trade_date,
+        )
+        if not flat_list:
+            scope_results.append(_unavailable_scope(scope, "historical_member_facts_missing"))
+            continue
+        ready_count = sum(
+            1 for fact in flat_list if fact.get("fp_trend_direction") is not None
+        )
+        payloads = compute_all_metrics(
+            flat_list, ready_count=ready_count, history_maps=None,
+            registry=DEFAULT_REGISTRY,
+        )
+        coverage = ready_count / len(instrument_ids)
+        status = "insufficient_history"
+        computed.append(
+            (scope, flat_list, len(instrument_ids), ready_count, coverage, status, payloads),
+        )
+        scope_results.append({
+            "scope_type": scope.scope_type,
+            "scope_key": scope.scope_key,
+            "status": status,
+            "eligible_count": len(instrument_ids),
+            "ready_count": ready_count,
+            "coverage": coverage,
+        })
 
     if dry_run:
         return {
             "trade_date": trade_date.isoformat(),
-            "run_id": str(run_id),
-            "status": snap_status,
-            "eligible_count": len(instrument_ids),
-            "ready_count": ready_count,
-            "coverage": coverage,
-            "metrics": {
-                code: {
-                    "value": p.get("value"),
-                    "rawValue": p.get("rawValue"),
-                    "status": p.get("status"),
-                    "readiness": p.get("readiness"),
-                }
-                for code, p in payloads.items()
-            },
+            "run_id": None,
+            "status": "dry_run",
+            "scopes": scope_results,
+            "written": False,
+        }
+    if source_core_run_id is None or source_board_run_id is None:
+        return {
+            "trade_date": trade_date.isoformat(),
+            "run_id": None,
+            "status": "bootstrap_unavailable",
+            "reason": "source_run_identity_missing",
+            "scopes": scope_results,
+            "written": False,
+        }
+    if not computed:
+        return {
+            "trade_date": trade_date.isoformat(),
+            "run_id": None,
+            "status": "bootstrap_unavailable",
+            "reason": "no_pit_scope_facts",
+            "scopes": scope_results,
             "written": False,
         }
 
-    # 6. 写入 scope snapshot
-    scope = ScopeDefinition(
-        scope_type="market",
-        scope_key="market",
-        scope_name=scope_name,
-    )
-    await _upsert_bootstrap_scope_snapshot(
+    run_id = await _upsert_bootstrap_run(
         session,
-        review_run_id=run_id,
         trade_date=trade_date,
-        scope=scope,
-        eligible_count=len(instrument_ids),
-        ready_count=ready_count,
-        coverage_ratio=coverage,
-        status=snap_status,
-        payloads=payloads,
+        source_core_run_id=source_core_run_id,
+        source_board_run_id=source_board_run_id,
+        expected_scope_count=len(scopes),
+        succeeded_scope_count=len(computed),
+        failed_scope_count=len(scopes) - len(computed),
+        scope_results=scope_results,
     )
+    for scope, flat_list, eligible_count, ready_count, coverage, status, payloads in computed:
+        await _upsert_bootstrap_scope_snapshot(
+            session,
+            review_run_id=run_id,
+            trade_date=trade_date,
+            scope=scope,
+            eligible_count=eligible_count,
+            ready_count=ready_count,
+            coverage_ratio=coverage,
+            status=status,
+            payloads=payloads,
+        )
+        await persist_metric_observations(
+            session,
+            review_run_id=run_id,
+            trade_date=trade_date,
+            scope_type=scope.scope_type,
+            scope_key=scope.scope_key,
+            membership_version=scope.membership_version,
+            algorithm_version=BOOTSTRAP_ALGORITHM_VERSION,
+            flat_list=flat_list,
+            payloads=payloads,
+        )
 
     return {
         "trade_date": trade_date.isoformat(),
         "run_id": str(run_id),
-        "status": snap_status,
-        "eligible_count": len(instrument_ids),
-        "ready_count": ready_count,
-        "coverage": coverage,
+        "status": "completed",
+        "scopes": scope_results,
         "written": True,
-        # [P0-5 2026-07-30] P0 只 bootstrap market scope
-        # 行业/概念不回填：无历史板块成员快照，使用当前成员会产生存活偏差
-        "scope_limitations": {
-            "market": "bootstrapped",
-            "industry_l1": "membership_history_unavailable",
-            "industry_l2": "membership_history_unavailable",
-            "concept": "membership_history_unavailable",
-        },
     }
 
 
@@ -261,7 +247,7 @@ async def bootstrap_history(
     days_back: int = DEFAULT_BOOTSTRAP_DAYS,
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """批量执行 bootstrap（从 stock_core 历史回填 scope snapshots）。
+    """批量执行 canonical PIT history bootstrap。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
@@ -302,7 +288,7 @@ async def bootstrap_history(
             "skipped": 0,
             "written": 0,
             "results": [],
-            "status": "no_stock_core_history",
+            "status": "no_canonical_fp_history",
         }
 
     # 2. 逐日执行 bootstrap
@@ -347,12 +333,101 @@ async def bootstrap_history(
 # =============================================================================
 
 
+async def _market_history_members(
+    session: AsyncSession,
+    trade_date: date,
+) -> list[uuid.UUID]:
+    stmt = select(FirstPyramidHistoryDailyState.instrument_id).where(
+        FirstPyramidHistoryDailyState.trade_date == trade_date,
+        FirstPyramidHistoryDailyState.algorithm_version
+        == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+    )
+    return list((await session.execute(stmt)).scalars())
+
+
+async def _list_bootstrap_scopes(
+    session: AsyncSession,
+    trade_date: date,
+) -> list[ScopeDefinition]:
+    scopes = [ScopeDefinition("market", "market", "全市场", membership_version="fp-history")]
+    for universe_type in ("major_index", "style"):
+        definitions = await list_universe_definitions_at(
+            session, trade_date, universe_type=universe_type,
+        )
+        scopes.extend(
+            ScopeDefinition(
+                definition.universe_type,
+                definition.universe_key,
+                definition.name,
+                taxonomy_version=definition.version,
+                taxonomy_compatibility_key=definition.compatibility_key,
+                membership_version=definition.membership_version,
+            )
+            for definition in definitions
+        )
+
+    board_stmt = (
+        select(BoardDefinitionVersion, MarketBoard)
+        .join(MarketBoard, MarketBoard.id == BoardDefinitionVersion.board_id)
+        .where(
+            BoardDefinitionVersion.effective_from <= trade_date,
+            or_(
+                BoardDefinitionVersion.effective_to.is_(None),
+                BoardDefinitionVersion.effective_to > trade_date,
+            ),
+            BoardDefinitionVersion.board_type.in_(("industry", "concept")),
+        )
+        .order_by(BoardDefinitionVersion.board_type, MarketBoard.name)
+    )
+    for definition, board in (await session.execute(board_stmt)).all():
+        if definition.board_type == "concept":
+            scope_type = "concept"
+        else:
+            level = definition.hierarchy_level.lower()
+            if level not in {"l1", "l2", "l3"}:
+                continue
+            scope_type = f"industry_{level}"
+        scopes.append(
+            ScopeDefinition(
+                scope_type,
+                str(definition.board_id),
+                board.name,
+                parent_scope_type=(
+                    "industry_l1" if definition.parent_board_id and scope_type == "industry_l2"
+                    else "industry_l2" if definition.parent_board_id and scope_type == "industry_l3"
+                    else None
+                ),
+                parent_scope_key=(
+                    str(definition.parent_board_id)
+                    if definition.parent_board_id is not None else None
+                ),
+                taxonomy_version=definition.taxonomy_version,
+                taxonomy_compatibility_key=definition.taxonomy_compatibility_key,
+                membership_version=definition.membership_version,
+            ),
+        )
+    return scopes
+
+
+def _unavailable_scope(scope: ScopeDefinition, reason: str) -> dict[str, Any]:
+    return {
+        "scope_type": scope.scope_type,
+        "scope_key": scope.scope_key,
+        "status": "bootstrap_unavailable",
+        "reason": reason,
+    }
+
+
 async def _upsert_bootstrap_run(
     session: AsyncSession,
     *,
     trade_date: date,
     source_core_run_id: uuid.UUID,
     source_board_run_id: uuid.UUID,
+    expected_scope_count: int,
+    succeeded_scope_count: int,
+    failed_scope_count: int,
+    scope_results: list[dict[str, Any]],
 ) -> uuid.UUID:
     """创建或复用 bootstrap run（幂等）。
 
@@ -360,13 +435,14 @@ async def _upsert_bootstrap_run(
     - algorithm_version = BOOTSTRAP_ALGORITHM_VERSION
     - filter_version = BOOTSTRAP_FILTER_VERSION
     - metadata.bootstrap = True
-    - status = published（bootstrap 数据是终态，不会被重新计算）
+    - status = partial（仅提供历史 observation，不创建正式 publication）
     """
     now = datetime.now(UTC)
     meta = {
         "bootstrap": True,
         "bootstrap_created_at": now.isoformat(),
         "bootstrap_algorithm_version": BOOTSTRAP_ALGORITHM_VERSION,
+        "bootstrap_scope_results": scope_results,
     }
 
     values = {
@@ -376,12 +452,17 @@ async def _upsert_bootstrap_run(
         "algorithm_version": BOOTSTRAP_ALGORITHM_VERSION,
         "filter_version": BOOTSTRAP_FILTER_VERSION,
         "baseline_window": DEFAULT_BOOTSTRAP_DAYS,
-        "status": "published",
-        "expected_scope_count": 1,
-        "succeeded_scope_count": 1,
-        "failed_scope_count": 0,
+        "status": "partial",
+        "expected_scope_count": expected_scope_count,
+        "succeeded_scope_count": succeeded_scope_count,
+        "failed_scope_count": failed_scope_count,
         "signal_count": 0,
-        "coverage_ratio": 0,
+        "coverage_ratio": (
+            succeeded_scope_count / expected_scope_count
+            if expected_scope_count else 0
+        ),
+        "started_at": now,
+        "completed_at": now,
         "metadata_json": meta,
     }
     stmt = pg_insert(MarketReviewRun).values(**values)
@@ -389,6 +470,12 @@ async def _upsert_bootstrap_run(
         constraint="uq_review_runs_date_core_board_algo_filter",
         set_={
             "metadata_json": stmt.excluded.metadata_json,
+            "status": stmt.excluded.status,
+            "expected_scope_count": stmt.excluded.expected_scope_count,
+            "succeeded_scope_count": stmt.excluded.succeeded_scope_count,
+            "failed_scope_count": stmt.excluded.failed_scope_count,
+            "coverage_ratio": stmt.excluded.coverage_ratio,
+            "completed_at": stmt.excluded.completed_at,
         },
     )
     await session.execute(stmt)

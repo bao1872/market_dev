@@ -401,6 +401,63 @@ class MarketReviewScopeSnapshot(Base):
         )
 
 
+class MarketReviewMetricObservation(Base):
+    """Versioned raw metric observation used for PIT historical normalization."""
+
+    __tablename__ = "market_review_metric_observations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    review_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("market_review_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    trade_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    scope_type: Mapped[str] = mapped_column(Text(), nullable=False)
+    scope_key: Mapped[str] = mapped_column(Text(), nullable=False)
+    metric_code: Mapped[str] = mapped_column(Text(), nullable=False)
+    component_name: Mapped[str] = mapped_column(Text(), nullable=False)
+    raw_value: Mapped[Decimal | None] = mapped_column(Numeric(), nullable=True)
+    denominator: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    field_source_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    weight_mode: Mapped[str] = mapped_column(Text(), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(Text(), nullable=False)
+    input_hash: Mapped[str] = mapped_column(Text(), nullable=False)
+    membership_version: Mapped[str] = mapped_column(Text(), nullable=False)
+    status: Mapped[str] = mapped_column(Text(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "review_run_id",
+            "scope_type",
+            "scope_key",
+            "metric_code",
+            "component_name",
+            name="uq_review_metric_observation_run_scope_component",
+        ),
+        Index(
+            "ix_review_metric_observation_history",
+            "scope_type",
+            "scope_key",
+            "algorithm_version",
+            "metric_code",
+            "component_name",
+            "trade_date",
+        ),
+    )
+
+
 class MarketReviewSignal(Base):
     """复盘三类偏差筛选器命中信号（PRD §5.4）。
 

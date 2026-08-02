@@ -28,11 +28,13 @@ from app.models.factor_publication import (
     FactorPublication,
 )
 from app.models.market_review import (
+    MarketReviewMetricObservation,
     MarketReviewRun,
     MarketReviewRunItem,
     MarketReviewScopeSnapshot,
 )
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+from app.services.review_metric_observation_service import persist_metric_observations
 from app.services.review_orchestrator_service import (
     ITEM_FAILED,
     PHASE_METRICS,
@@ -480,6 +482,55 @@ async def test_real_review_transaction_rolls_back_pointer_and_audit(
     persisted_run = await db_session.get(MarketReviewRun, run.id)
     assert persisted_run is not None
     assert "publication_withdrawal" not in (persisted_run.metadata_json or {})
+
+
+async def test_review_metric_observations_are_migrated_and_idempotent(
+    db_session: AsyncSession,
+) -> None:
+    """Migration 081 provides the versioned, idempotent history SSOT."""
+    await _seed_published_inputs(db_session, trade_date=TRADE_DATE)
+    run = await _make_review_run(db_session)
+    payloads = {
+        "P": {
+            "value": 55.0,
+            "status": "ready",
+            "components": [{
+                "name": "scope_return_1d",
+                "rawValue": 1.25,
+                "denominator": 1,
+                "fieldSource": "bars_daily.close",
+                "weightMode": "equal_weight",
+                "status": "ready",
+            }],
+        },
+    }
+    kwargs = {
+        "review_run_id": run.id,
+        "trade_date": TRADE_DATE,
+        "scope_type": "market",
+        "scope_key": "market",
+        "membership_version": "pit-v1",
+        "algorithm_version": "review-2.0.0",
+        "flat_list": [{"_instrument_id": str(uuid.uuid4()), "review_return_1d": 1.25}],
+        "payloads": payloads,
+    }
+    assert await persist_metric_observations(db_session, **kwargs) == 2
+    assert await persist_metric_observations(db_session, **kwargs) == 2
+
+    rows = list(
+        (
+            await db_session.execute(
+                select(MarketReviewMetricObservation).where(
+                    MarketReviewMetricObservation.review_run_id == run.id,
+                ),
+            )
+        ).scalars(),
+    )
+    assert {row.component_name for row in rows} == {
+        "scope_return_1d", "_metric_value",
+    }
+    assert all(row.algorithm_version == "review-2.0.0" for row in rows)
+    assert all(row.membership_version == "pit-v1" for row in rows)
 
 
 # ``asyncio`` is intentionally imported above so this file keeps a direct

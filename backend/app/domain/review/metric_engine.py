@@ -809,7 +809,7 @@ def _build_component_payload(
         hist_len = len(history) if history else 0
         reason = (
             f"history insufficient: {hist_len} < {MIN_BASELINE_WINDOW} "
-            f"(run bootstrap to backfill from stock_core history)"
+            f"(run bootstrap from canonical FP history, bars, and PIT membership)"
         )
     else:
         reason = None
@@ -1007,7 +1007,8 @@ def compute_metric_payload(
             f"history insufficient for normalization: "
             f"{len(insufficient_comps)}/{len(component_payloads)} components "
             f"need >= {MIN_BASELINE_WINDOW} observations "
-            f"(run review_bootstrap_service to backfill from stock_core history)"
+            f"(run review_bootstrap_service from canonical FP history, "
+            f"bars, and PIT membership)"
         )
     elif comp_insufficient > 0 or comp_unavailable > 0:
         readiness_reason = (

@@ -87,7 +87,7 @@ class ReviewMemberFact:
     instrument_id: uuid.UUID
     symbol: str
     name: str
-    snapshot_id: uuid.UUID
+    snapshot_id: uuid.UUID | None
     trade_date: date
     first_pyramid: dict[str, Any]
     previous_first_pyramid: dict[str, Any]
@@ -114,7 +114,7 @@ class ReviewMemberFact:
         instrument_id: uuid.UUID,
         symbol: str,
         name: str,
-        snapshot_id: uuid.UUID,
+        snapshot_id: uuid.UUID | None,
         trade_date: date,
         first_pyramid: dict[str, Any],
         bars: Iterable[DailyBarFact],
