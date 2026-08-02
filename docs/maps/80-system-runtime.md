@@ -131,7 +131,7 @@
 | strategy batch | `trading-worker-strategy-batch` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=strategy_batch` |
 | outbox | `trading-worker-outbox` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=outbox` |
 | delivery | `trading-worker-delivery` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=delivery` |
-| after-close orchestrator | `trading-worker-after-close` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=after_close_orchestrator`；**[P0-3 2026-07-31]** 同进程启动 Auction Scheduler co-process（09:25/10:00 触发），无独立 auction 容器 |
+| after-close orchestrator | `trading-worker-after-close` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=after_close_orchestrator`；**[P0-3 2026-07-31]** 同进程启动 Auction Scheduler co-process（09:25/10:00 触发），无独立 auction 容器；**[2026-08-02]** 主循环按 core → chip consensus → review bootstrap 顺序轮询，三者共用本容器，无独立 chip / bootstrap 容器 |
 | watchdog | `trading-worker-watchdog` | `docker-compose.prod.yml` | redis, postgres | - | `WORKER_TYPE=watchdog` |
 | capture | `trading-worker-capture` | `docker-compose.prod.yml` | redis, postgres | `0.0.0.0:8001->8001/tcp` | 独立 Dockerfile.capture；healthcheck 健康 |
 | PostgreSQL | `trading-postgres` | `docker-compose.prod.yml` | - | `5432/tcp` | `trading-postgresdata`；healthcheck 健康；**[CHANGE-009]** 复用承载 umami 数据库（独立 user/schema） |

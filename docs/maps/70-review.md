@@ -262,7 +262,7 @@
 | §24.1 第二金字塔维度（6 维） | 未实现 | 当前第二金字塔仅覆盖"趋势/结构/动量/内部分布"（见 PRD §14.5 描述），未实现状态分布/状态迁移/事件新鲜度/宽度/集中度/相对强度六维度 |
 | §24.2 行业与概念分别聚合 | 部分实现 | `board_analysis_snapshots` 已分别存储行业和概念，但第二金字塔六维度尚未实现 |
 | §24.3 P/Q/U/C/V 就绪状态（raw_ready/normalized_ready/insufficient_history/reason） | 未实现 | 当前 `metric_engine` 仅返回单一 `status` 字段（ready/insufficient_history），未拆分为四字段 |
-| §24.4 冷启动 bootstrap | 未实现 | 无 bootstrap 代码 |
+| §24.4 冷启动 bootstrap | 已实现 | 见 §23：service + CLI + admin API 三层入口（2026-08-02 更新，原记录「无 bootstrap 代码」已过期） |
 | §24.5 fp_segment_change_pct 禁止伪造 | 待核验 | 需核验当前 `fp_segment_change_pct` 空值处理 |
 
 ### 12.2 冷启动缺口（已识别）
@@ -271,7 +271,7 @@
 
 - **metric_engine 要求 60+ 日历史**：`metric_engine` 在历史观测 < 60 时返回所有 P/Q/U/C/V `value=null`、`status=insufficient_history`；
 - **首次运行无历史数据**：`market_review_scope_snapshots` 首次运行时无历史记录，所有 component `historyObservationCount=0`，返回 `insufficient_history`；
-- **无 bootstrap 回填机制**：当前不存在从第一金字塔历史（约 250 日）回填第二金字塔历史观测的流程，导致新部署系统需累计 60 个交易日才能生成 normalized 值；
+- ~~**无 bootstrap 回填机制**~~（2026-08-02 已解决）：回填流程已实现，正式入口见 §23；下方其余冷启动约束仍然成立；
 - **发布门禁阻塞**：§23.5 发布门禁要求 market P/Q/U/C/V `value` 非空，冷启动期间因 `insufficient_history` 导致 `value=null`，系统无法通过 `force=False` 发布。
 
 ### 12.3 P/Q/U/C/V 就绪状态当前行为
@@ -400,7 +400,7 @@ else:
 - **不得**用"今日 2026-08-01 的 申万一级行业 成员"去重算 2026-07-01 的 该行业 scope 观测（point-in-time 破坏）。
 - **不得**伪造 normalized 值或 historyPercentile120d；不足就写 insufficient_history。
 
-位置：`backend/app/services/review_bootstrap_service.py`（若存在）/ 或 `review_orchestrator_service.bootstrap_history()`。
+位置：`backend/app/services/review_bootstrap_service.py`（已存在，见 §23）。
 
 ## 22. 2026-08-01 Review 候选实现核验
 
@@ -417,3 +417,56 @@ else:
 算法版本已升级；旧 Review run 保持不可变。Migration 080/081、Review PG Integration、完整后端
 PostgreSQL 测试与阻断 CI 已在 `c6abcc1` / Run `30731828236` 同一 SHA 验证通过。
 生产 migration、部署、正式发布与 withdrawal 仍未执行。
+
+## 23. Bootstrap 正式入口（2026-08-02 核验，CHANGE-20260802-001）
+
+`§12.1 §24.4「无 bootstrap 代码」与 §12.2「无 bootstrap 回填机制」已过期`，
+以本节为准：bootstrap 已有 service、CLI 与 admin API 三层实现。
+
+### 23.1 代码入口
+
+| 层 | 位置 | 职责 |
+|---|---|---|
+| Service | `backend/app/services/review_bootstrap_service.py` | `bootstrap_history()` / `bootstrap_single_date()`；PIT 成员解析、四类计数聚合、input_hash、交易日解析 |
+| 作业层 | `backend/app/services/review_bootstrap_job_service.py` | run_key 构造、任务提交/领取元数据、执行编排、状态摊平与分页 |
+| Admin API | `backend/app/api/admin_review.py` | 提交 / 状态 / resume 三个端点 |
+| Worker | `backend/app/worker.py` → `run_review_bootstrap_worker()` / `_review_bootstrap_poll_once()` | 领取并执行 queued 任务 |
+| CLI | `backend/scripts/review_bootstrap_cli.py` | 同步执行，用于受控窗口 |
+| Schema | `backend/app/schemas/review.py` | `ReviewBootstrapRequest` / `SubmitResponse` / `StatusResponse` 等 |
+
+### 23.2 提交与执行分离（异步）
+
+120 交易日 × 全 scope 耗时远超 HTTP 超时，因此 API 不同步执行：
+
+- `POST /api/v1/admin/review/bootstrap` → **202 + job_run_id**，只创建
+  `status=queued` 的 `SchedulerJobRun`；复用已有活跃任务时返回 200 + `is_new=false`。
+- 计算由 `review_bootstrap` Worker 经 `FOR UPDATE SKIP LOCKED` + lease fencing +
+  heartbeat 领取执行（与 chip consensus worker 同构），`WORKER_TYPE=all` 时启动，
+  不新增常驻容器。
+- `GET /api/v1/admin/review/bootstrap/{job_run_id}` → 全局 summary
+  （`succeeded`/`skipped`/`unavailable`/`failed` 四类计数 + `reason_codes`）
+  + 按 `(trade_date, scope_type, scope_key)` 的分页明细。
+- `POST /api/v1/admin/review/bootstrap/{job_run_id}/resume` → 失败/中断任务重新入队。
+
+### 23.3 安全默认
+
+- `dry_run` 默认 True，且 dry-run 路径**零业务写入**：`bootstrap_single_date(audit=None)`
+  且作业层显式 rollback，不建 run、不写 metadata_json、不写 observations、不切 pointer。
+  `operator`/`reason`/`input_hash` 仅在响应与日志返回，apply 才经 `_upsert_bootstrap_run` 落库。
+- `operator` / `reason` 必填；`algorithm_version` 必须等于 `BOOTSTRAP_ALGORITHM_VERSION`
+  （当前 `review-2.0.0`）。
+- `end_date` 为空时经 `resolve_bootstrap_end_date()` 调
+  `get_most_recent_trading_day_async()` 查 `trading_calendar` 解析为最近完整 A 股交易日，
+  不使用自然日 today；无日历记录时降级 today 并带 warning。
+- dry-run 与 apply 使用不同 run_key，互不幂等抵消。
+
+### 23.4 历史序列兼容性契约（仅固化，未改判定实现）
+
+`review_metric_observation_service.load_metric_history()` 的过滤维度为
+scope identity（`scope_type` + `scope_key`）+ compatible taxonomy +
+`algorithm_version` + metric definition version。
+
+**`membership_version` 随每条观测持久化（可追溯当日成员），但不参与历史序列过滤**——
+成分股增减是常态，若按其过滤，任何一次调仓都会截断 60 日历史并重新冷启动。
+该契约由 `backend/tests/test_review_metric_observation_bootstrap.py` 断言固化
+（WHERE 子句不得含 `membership_version`；跨三个 membership_version 的历史必须连续）。

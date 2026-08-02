@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
 from datetime import date
@@ -25,6 +26,7 @@ import pytest
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
 
+from app import worker
 from app.api import admin_review
 from app.schemas.review import ReviewBootstrapRequest
 from app.services import review_bootstrap_job_service as job_service
@@ -103,6 +105,45 @@ def test_bootstrap_endpoints_require_admin_dependency() -> None:
             d.call for d in _route(path).dependant.dependencies if d.call is not None
         }
         assert admin_review.require_admin in deps, f"{path} 缺少 require_admin"
+
+
+# =============================================================================
+# 1b. Worker 挂载点：提交端点必须有真实执行者
+#
+# 生产没有 WORKER_TYPE=all 容器（after-close 容器跑 after_close_orchestrator），
+# 若 bootstrap 只在 "all" 分支注册，任务会永远停在 queued 且无任何报错。
+# 以下测试固化"提交必有执行者且不重复领取"的契约。
+# =============================================================================
+
+
+def test_bootstrap_is_polled_by_after_close_orchestrator_loop() -> None:
+    """生产执行者：after-close 主循环必须轮询 bootstrap，否则任务永远 queued。"""
+    src = inspect.getsource(worker.run_after_close_orchestrator_worker)
+    assert "_review_bootstrap_poll_once" in src, (
+        "生产没有 WORKER_TYPE=all 容器，bootstrap 必须挂在 after-close 主循环内，"
+        "否则 admin 提交的任务没有执行者"
+    )
+
+
+def test_bootstrap_poll_is_lowest_priority_in_after_close_loop() -> None:
+    """回填不得抢占当日盘后主链：core → chip → bootstrap。"""
+    src = inspect.getsource(worker.run_after_close_orchestrator_worker)
+    assert (
+        src.index("_after_close_poll_once")
+        < src.index("_chip_consensus_poll_once")
+        < src.index("_review_bootstrap_poll_once")
+    ), "bootstrap 必须排在 core 与 chip consensus 之后"
+
+
+def test_standalone_bootstrap_worker_not_started_in_all_mode() -> None:
+    """WORKER_TYPE=all 不得再起独立 bootstrap worker，避免与主循环重复领取。"""
+    src = inspect.getsource(worker.main)
+    assert 'WORKER_TYPE == "review_bootstrap"' in src, (
+        "独立 bootstrap worker 只应在 WORKER_TYPE=review_bootstrap 时启动"
+    )
+    assert 'WORKER_TYPE in ("review_bootstrap", "all")' not in src, (
+        "all 模式下会与 after-close 主循环重复领取同一批任务"
+    )
 
 
 # =============================================================================

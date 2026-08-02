@@ -1535,8 +1535,15 @@ async def run_after_close_orchestrator_worker() -> None:
                 claimed = await _after_close_poll_once()
                 if not claimed:
                     claimed = await _chip_consensus_poll_once()
+                # [2026-08-02] 最低优先级：core 与 chip 都空闲时才领取 review
+                # 历史回填。生产没有 WORKER_TYPE=all 容器，bootstrap 必须挂在
+                # after-close 容器内才有执行者，否则任务会永远停在 queued。
+                # 放在最后保证回填不抢占当日盘后主链资源。
+                if not claimed:
+                    claimed = await _review_bootstrap_poll_once()
             except Exception as exc:
-                # _after_close_poll_once / _chip_consensus_poll_once
+                # _after_close_poll_once / _chip_consensus_poll_once /
+                # _review_bootstrap_poll_once
                 # 内部已捕获执行异常，此处仅捕获领取阶段的意外异常
                 logger.exception("[AfterCloseWorker] 轮询异常: %s", exc)
             if _shutdown:
@@ -1993,8 +2000,13 @@ async def _review_bootstrap_poll_once() -> bool:
 async def run_review_bootstrap_worker() -> None:
     """[ReviewBootstrapWorker] - Review 历史回填 Worker：领取 queued 任务并执行。
 
-    不新增常驻容器：与 chip consensus 一致，在 after-close worker 容器内
-    以独立轮询函数运行（WORKER_TYPE=all 时自动启动）。
+    不新增常驻容器：与 chip consensus 一致，生产由
+    run_after_close_orchestrator_worker 在 after-close 容器内轮询
+    （_review_bootstrap_poll_once，最低优先级）。
+
+    本函数仅在 WORKER_TYPE=review_bootstrap 时作为独立 worker 启动，
+    用于调试或独立部署；WORKER_TYPE=all 不启动，避免与 after-close 循环
+    重复领取同一批任务。
 
     每个轮询周期：
     1. _review_bootstrap_poll_once 领取并执行一个 queued/resume_queued 任务
@@ -2339,8 +2351,12 @@ async def main() -> None:
     if WORKER_TYPE in ("auction_scheduler", "all"):
         tasks.append(asyncio.create_task(run_auction_scheduler_worker()))
 
-    # [2026-08-02] Review 历史回填 Worker：领取 admin API 提交的 queued bootstrap 任务
-    if WORKER_TYPE in ("review_bootstrap", "all"):
+    # [2026-08-02] review bootstrap 已接入 run_after_close_orchestrator_worker
+    # （每轮 core → chip → bootstrap，最低优先级，不抢占盘后主链）。
+    # 生产没有 WORKER_TYPE=all 容器，after-close 容器跑 after_close_orchestrator，
+    # 因此这里只在 WORKER_TYPE=review_bootstrap 时启动独立 worker（调试/独立部署），
+    # 避免 all 模式下与 after-close 循环重复领取同一批任务。
+    if WORKER_TYPE == "review_bootstrap":
         tasks.append(asyncio.create_task(run_review_bootstrap_worker()))
 
     # [Recovery] - 看门狗：all 模式自动启动，或 WORKER_TYPE=watchdog 单独启动
