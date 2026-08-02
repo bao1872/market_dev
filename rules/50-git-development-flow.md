@@ -3,22 +3,27 @@
 > 来源：AGENTS.md §九、§七.21、§六.9
 > 状态：生效（Phase 2 激活）
 
-## 分支模型
+## 分支模型（dev-only）
 
-每个变更使用独立分支：
+仓库只保留三个长期分支，未经用户明确授权禁止创建任何新分支：
 
-- `fix/<topic>`
-- `feat/<topic>`
-- `docs/<topic>`
-- `refactor/<topic>`
-- `chore/<topic>`
-- `experiment/<topic>`
+| 分支 | 职责 | 约束 |
+|---|---|---|
+| `dev` | 唯一默认日常开发分支 | 所有变更默认直接在 `dev` 提交；`dev` 是 CI 与手动部署的唯一来源；push `dev` 只触发 CI，不触发自动部署 |
+| `main` | 阶段性稳定锚点 | 未经明确授权不得修改、合并或推送 |
+| `experiments` | 明确授权下的隔离实验 | 不得作为生产部署来源；进入 `dev` 前必须明确审查 |
 
-禁止直接改 main。
+硬约束：
 
-## PR 要求
+- 未经用户明确授权，禁止创建任何新的本地或远程分支，**包括 backup 分支**；
+- 未经用户明确授权，禁止切换工作分支（`git checkout` / `git switch` 到 `dev` 以外的分支）；
+- 未经用户明确授权，禁止对任何分支 force push；
+- 需要可恢复点时，使用 **checkpoint commit** 而不是新建分支；
+- 无法以 fast-forward 方式对齐时必须停止并报告，不得自行 merge、rebase 或覆盖。
 
-PR 必须说明：
+## 提交说明要求
+
+每个提交（或一组紧密相关提交的说明）必须能回答：
 
 - 当前系统原来如何运行；
 - 本次为什么修改；
@@ -67,8 +72,11 @@ PR 必须说明：
 
 ## 分支保护
 
-- 直接修改 main：禁止；
-- force push 已共享分支：禁止；
+- 未经明确授权修改、合并或推送 `main`：禁止；
+- 未经明确授权创建任何新分支（含 backup 分支）：禁止；
+- 未经明确授权切换到 `dev` 以外的工作分支：禁止；
+- 对任何分支 force push：未经明确授权禁止；
+- 以 `experiments` 作为生产部署来源：禁止；
 - 为通过检查削弱 `check_docs_consistency.py`：禁止。
 
 ## 执行模式
@@ -79,7 +87,7 @@ PR 必须说明：
 
 断线恢复校验仅检查：
 
-- 分支 / HEAD；
+- 当前分支必须是 `dev`，并核对 HEAD；
 - 未提交文件；
 - 冲突标记；
 - 编译；
@@ -99,10 +107,11 @@ PR 必须说明：
 
 > 详见 `60-trae-work.md` 与 `70-trae-cn.md`。
 
-- TRAE Work 使用系统生成的 `trae/agent-*` 内部分支，**不固定直接工作在 dev 分支**，**不允许切换分支**；
-- 完成后使用 `git push origin HEAD:dev` 以 fast-forward 方式推送到远程 dev；
+- 所有 AI 助手（CodeBuddy / Codex / TRAE Work / TRAE CN）默认直接在当前 `dev` 分支工作与提交；
+- 未经明确授权不得创建新分支、不得切换工作分支；
+- 完成后使用 `git push origin dev` 以 fast-forward 方式推送；
 - 只允许 fast-forward；禁止 force push；
 - 若 `origin/dev` 已前进、不是当前 HEAD 祖先，必须停止并报告；
 - TRAE CN 保留开发、测试、部署、验收和运维全部能力；
-- dev 是日常开发基线和未来自动部署线（自动部署本身为 PLANNED）；
-- main 是阶段性稳定锚点。
+- `dev` 是 CI 与手动部署的唯一来源；push `dev` 不触发自动部署（自动部署为 PLANNED）；
+- `main` 是阶段性稳定锚点，未经明确授权不得修改、合并或推送。

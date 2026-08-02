@@ -33,8 +33,8 @@
 | `20-market-data-indicators.md` | MDAS、复权、Node Cluster、SMC、AFC、Canonical、ChartSnapshot、板块同步、因子版本 | §七.5、§七.12-19、§七.23 | 生效 |
 | `30-access-security.md` | Capture Token、权限隔离、生产秘密 | §七.7、§六.7、§六.10 | 生效 |
 | `40-testing-quality.md` | CHANGE 必填、CI 门禁、质量门禁、测试纪律、ref 隔离测试 | §五、§七.20、§八、§六.6、§六.8、§七.8 | 生效 |
-| `50-git-development-flow.md` | 分支、PR、提交安全、执行模式、继续执行 | §九、§七.21、§六.9 | 生效 |
-| `60-trae-work.md` | TRAE Work 角色边界与自动分支模型 | Phase 2 确立 | 生效 |
+| `50-git-development-flow.md` | dev-only 分支模型、提交安全、执行模式、继续执行 | §九、§七.21、§六.9 | 生效 |
+| `60-trae-work.md` | TRAE Work 角色边界与 dev 提交约束 | Phase 2 确立 | 生效 |
 | `70-trae-cn.md` | TRAE CN 多模式职责 | Phase 2 确立 | 生效 |
 | `80-deployment-data-safety.md` | Migration、不备份、Docker 镜像保护、Live Mount | §七.9-11、§七.22 | 生效 |
 | `85-server-directory-boundaries.md` | 三目录职责 | §七.22 + 提议 | 目标合同（PLANNED 部分标记） |

@@ -13,12 +13,22 @@
 6. 删除测试以适配错误实现 / 修改 API 不检查前端调用 / 修改数据模型不检查 migration：禁止；
 7. 修改 Worker 不检查幂等、心跳、重试 / 修改权限不检查用户隔离：禁止；
 8. 把 Mock E2E 说成真实生产 E2E / 把 OPEN 问题写成最终结论 / 把临时实验写成永久规则：禁止；
-9. 直接修改 main / force push 已共享分支 / 为通过检查削弱 `check_docs_consistency.py`：禁止；
+9. 未经明确授权修改 / 合并 / 推送 main、对任何分支 force push、创建新分支（含 backup 分支）、切换到 `dev` 以外的工作分支、为通过检查削弱 `check_docs_consistency.py`：禁止；
 10. 未经许可修改生产环境账户密码：禁止；
 11. 生产代码 / 测试 / 工具 / 构建脚本在运行时 `import` / `open` / `read` / `glob` `ref/` 目录：禁止；
 12. `git add -A` / `git add .` / `git add -u` 批量暂存：禁止（必须精确 `git add <file>`）。
 
 ## 废弃项（禁止恢复）
+
+### 多分支工作流与 `trae/agent-*` 内部分支（2026-08-02 收口）
+
+每个变更使用独立分支（`fix/` `feat/` `docs/` `refactor/` `chore/` `experiment/` 前缀）
+与 TRAE Work `trae/agent-*` 自动内部分支模型均已废弃。
+
+- 仓库只保留 `main` / `dev` / `experiment` 三个长期分支；
+- 所有 AI 助手默认直接在 `dev` 提交，需要可恢复点时使用 checkpoint commit；
+- 不得从旧代码或旧文档恢复上述分支前缀约定；
+- 详见 `50-git-development-flow.md` 与 `60-trae-work.md`。
 
 ### 多策略组合（AGENTS §七.2）
 

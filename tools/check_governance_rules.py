@@ -315,11 +315,13 @@ def check_trae_work_required_phrases() -> list[Violation]:
     violations: list[Violation] = []
     work_file = RULES_DIR / "60-trae-work.md"
     text = read_text(work_file)
+    # 2026-08-02 收口为 dev-only 工作流：不再要求 `trae/agent-*` 内部分支模型，
+    # 改为要求明确声明「直接在 dev 提交 + fast-forward 推送 + 禁止 force push」。
     required = [
-        "trae/agent-",
         "origin/dev",
-        "git push origin HEAD:dev",
+        "git push origin dev",
         "禁止 force push",
+        "禁止切换工作分支",
     ]
     for phrase in required:
         if phrase not in text:

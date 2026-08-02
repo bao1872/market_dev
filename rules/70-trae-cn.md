@@ -39,7 +39,7 @@ CN 可按需切换以下模式：
 | 观察模式 | 只读生产验证（`/version`、`/health`、日志查询、DB 只读查询） | 不修改任何配置 |
 | 手动部署模式 | 调用部署脚本 / Live Mount 同步 / 镜像构建 | 必须用户明确授权 |
 | 排障模式 | 日志分析 / Capture 缓存清理 / 飞书投递重发 | 不修改业务代码 |
-| 紧急修复模式 | hotfix 分支 + 快速验证 + 部署 | 必须事后补 CHANGE + 文档对齐 |
+| 紧急修复模式 | 直接在 `dev` 修复 + 快速验证 + 部署 | 不新建 hotfix 分支；必须事后补 CHANGE + 文档对齐 |
 
 ## 必须做
 
@@ -50,7 +50,7 @@ CN 可按需切换以下模式：
 - 部署后验证 `/version` 与 `/health`；
 - 部署后记录 evidence；
 - migration 保持手动门禁；
-- 任何不可逆 migration 必须在 PR 描述中明确标注并提供 downgrade 步骤。
+- 任何不可逆 migration 必须在提交说明与 CHANGE 中明确标注并提供 downgrade 步骤。
 
 ## 报告与对话输出（2026-07-29 收口）
 
@@ -68,7 +68,8 @@ CN 可按需切换以下模式：
 - 不写入 `/root/backups` 或 `/root/web_dev/backups`；
 - 不修改已发布历史 migration；
 - 不绕过 `check_docs_consistency.py`；
-- 不 force push 已共享分支；
+- 未经明确授权不对任何分支 force push；
+- 未经明确授权不创建新分支（含 backup 分支）、不切换工作分支；
 - 不批量 `git add`。
 
 ## 目录职责

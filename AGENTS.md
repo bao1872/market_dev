@@ -19,8 +19,8 @@
    - `rules/20-market-data-indicators.md`：MDAS、复权、Node Cluster、SMC、AFC、Canonical、ChartSnapshot、板块同步、因子版本。
    - `rules/30-access-security.md`：Capture Token、权限隔离、生产秘密。
    - `rules/40-testing-quality.md`：CHANGE 必填、CI 门禁、质量门禁、测试纪律、ref 隔离测试。
-   - `rules/50-git-development-flow.md`：分支、PR、提交安全、执行模式、继续执行。
-   - `rules/60-trae-work.md`：TRAE Work 角色边界与自动分支模型。
+   - `rules/50-git-development-flow.md`：dev-only 分支模型、提交安全、执行模式、继续执行。
+   - `rules/60-trae-work.md`：TRAE Work 角色边界与 dev 提交约束。
    - `rules/70-trae-cn.md`：TRAE CN 多模式职责。
    - `rules/80-deployment-data-safety.md`：Migration、不备份、Docker 镜像保护、Live Mount。
    - `rules/85-server-directory-boundaries.md`：三目录职责。
@@ -184,6 +184,9 @@
 - 删除持久化数据或资源的唯一副本；
 - 暴露或提交密钥、凭据或私钥；
 - 使用强制推送覆盖共享历史；
+- 创建任何新的本地或远程分支（含 backup 分支）；仓库只保留 `main` / `dev` / `experiments`；
+- 从 `dev` 切换到其他工作分支；所有 AI 助手默认直接在 `dev` 提交，需要可恢复点时使用 checkpoint commit；
+- 修改、合并或推送 `main`；`experiments` 仅用于授权的隔离实验，不得作为生产部署来源；
 - 静默改变已确认需求；
 - 用虚假的成功状态掩盖失败；
 - 新增未经确认的文档层或治理层；
