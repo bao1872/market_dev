@@ -32,7 +32,9 @@ from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.idempotency_service import acquire_job_run_lock
 from app.services.review_bootstrap_service import (
     BOOTSTRAP_ALGORITHM_VERSION,
+    DEFAULT_BOOTSTRAP_CHUNK_DAYS,
     DEFAULT_BOOTSTRAP_DAYS,
+    DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB,
     MIN_BOOTSTRAP_DAYS,
     SCOPE_COUNT_KEYS,
     bootstrap_history,
@@ -354,6 +356,13 @@ async def execute_bootstrap_job(
     end_date_str = job_metadata.get("end_date")
     end_date = date.fromisoformat(end_date_str) if end_date_str else None
 
+    # [FIX-20260802] Worker 路径同样受内存分片与 RSS 预算约束。
+    #   缺省沿用 service 常量；job metadata 可覆盖以便对超大窗口分批续跑。
+    chunk_days = int(job_metadata.get("chunk_days", DEFAULT_BOOTSTRAP_CHUNK_DAYS))
+    memory_budget_mb = int(
+        job_metadata.get("memory_budget_mb", DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB),
+    )
+
     result = await bootstrap_history(
         db,
         end_date=end_date,
@@ -362,6 +371,8 @@ async def execute_bootstrap_job(
         algorithm_version=job_metadata.get("algorithm_version"),
         operator=job_metadata.get("operator"),
         reason=job_metadata.get("reason"),
+        chunk_days=chunk_days,
+        memory_budget_mb=memory_budget_mb,
     )
 
     if dry_run:
@@ -388,6 +399,9 @@ def build_job_metadata_updates(result: dict[str, Any]) -> dict[str, Any]:
                 "scope_counts", dict.fromkeys(SCOPE_COUNT_KEYS, 0),
             ),
             "reason_codes": result.get("reason_codes", {}),
+            # [FIX-20260802] 内存可观测性：便于判断任务是否触顶预算而提前停止
+            "peak_rss_mb": result.get("peak_rss_mb"),
+            "chunks": result.get("chunks"),
         },
         "bootstrap_results": result.get("results", []),
         "completed_at": datetime.now(UTC).isoformat(),

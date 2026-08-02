@@ -53,6 +53,34 @@ logger = logging.getLogger("review_bootstrap_cli")
 
 MIN_DAYS_BACK = 60
 
+# [FIX-20260802] 内存分片默认值。
+# 与 app.services.review_bootstrap_service 中的同名常量保持一致，
+# 在此本地定义是为了让 --help 不依赖 app 运行时（模块导入被延迟到 _run 内）。
+# 一致性由 _assert_defaults_in_sync() 在实际执行前校验，防止两处默默漂移。
+DEFAULT_BOOTSTRAP_CHUNK_DAYS = 5
+DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB = 1536
+
+
+def _assert_defaults_in_sync() -> None:
+    """校验 CLI 默认值与 service 常量一致，避免两处定义漂移。"""
+    from app.services import review_bootstrap_service as svc
+
+    mismatches = []
+    if DEFAULT_BOOTSTRAP_CHUNK_DAYS != svc.DEFAULT_BOOTSTRAP_CHUNK_DAYS:
+        mismatches.append(
+            f"chunk_days CLI={DEFAULT_BOOTSTRAP_CHUNK_DAYS} "
+            f"service={svc.DEFAULT_BOOTSTRAP_CHUNK_DAYS}",
+        )
+    if DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB != svc.DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB:
+        mismatches.append(
+            f"memory_budget_mb CLI={DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB} "
+            f"service={svc.DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB}",
+        )
+    if mismatches:
+        raise RuntimeError(
+            "CLI 与 service 的 bootstrap 内存默认值不一致: " + "; ".join(mismatches),
+        )
+
 
 def _format_summary(result: dict) -> str:
     """把执行结果渲染为人可读摘要（四类计数 + 原因码）。"""
@@ -71,6 +99,9 @@ def _format_summary(result: dict) -> str:
         f"  processed         : {result.get('processed')}",
         f"  skipped           : {result.get('skipped')}",
         f"  written           : {result.get('written')}",
+        f"  status            : {result.get('status')}",
+        f"  chunks            : {result.get('chunks')}",
+        f"  peak_rss_mb       : {result.get('peak_rss_mb')}",
         "  scope_counts:",
         f"    succeeded   : {counts.get('succeeded', 0)}",
         f"    skipped     : {counts.get('skipped', 0)}",
@@ -89,6 +120,8 @@ def _format_summary(result: dict) -> str:
 async def _run(args: argparse.Namespace) -> int:
     from app.db import AsyncSessionLocal
     from app.services.review_bootstrap_service import bootstrap_history
+
+    _assert_defaults_in_sync()
 
     end_date = None
     if args.end_date:
@@ -122,6 +155,8 @@ async def _run(args: argparse.Namespace) -> int:
                 algorithm_version=args.algorithm_version,
                 operator=args.operator.strip(),
                 reason=args.reason.strip(),
+                chunk_days=args.chunk_days,
+                memory_budget_mb=args.memory_budget_mb,
             )
         except ValueError as exc:
             # 服务层参数校验失败（如 algorithm_version 不匹配）
@@ -142,6 +177,17 @@ async def _run(args: argparse.Namespace) -> int:
         if result.get("eligible_dates", 0) == 0:
             print("WARNING: 无可 bootstrap 的日期", file=sys.stderr)
             return 1
+
+        # 内存预算触顶：如实以失败退出，绝不当作成功
+        if result.get("status") == "memory_budget_exceeded":
+            print(
+                f"ERROR: RSS 峰值 {result.get('peak_rss_mb')}MB 超出预算 "
+                f"{args.memory_budget_mb}MB，已在处理 {result.get('processed')}/"
+                f"{result.get('eligible_dates')} 日后安全停止。"
+                f"请减小 --days-back 或 --chunk-days 后分批续跑。",
+                file=sys.stderr,
+            )
+            return 3
 
         failed = int(result.get("scope_counts", {}).get("failed", 0))
         if failed > 0:
@@ -187,6 +233,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--summary-only", action="store_true", default=False,
         help="只打印摘要与四类计数，不打印逐日明细",
+    )
+    parser.add_argument(
+        "--chunk-days", type=int, default=DEFAULT_BOOTSTRAP_CHUNK_DAYS,
+        help=(
+            f"每分片处理的交易日数（默认 {DEFAULT_BOOTSTRAP_CHUNK_DAYS}）；"
+            "分片越小峰值内存越低"
+        ),
+    )
+    parser.add_argument(
+        "--memory-budget-mb", type=int, default=DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB,
+        help=(
+            f"RSS 软预算 MB（默认 {DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB}）；"
+            "超出后安全停止并返回 memory_budget_exceeded"
+        ),
     )
     return parser
 

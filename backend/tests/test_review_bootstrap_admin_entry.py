@@ -18,9 +18,9 @@ from __future__ import annotations
 import inspect
 import json
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.routing import APIRoute
@@ -553,8 +553,10 @@ async def test_dry_run_bootstrap_history_passes_no_audit_to_writer(
     monkeypatch.setattr(bootstrap, "_try_resolve_board_run_id", AsyncMock(return_value=None))
     monkeypatch.setattr(bootstrap, "bootstrap_single_date", _fake_single)
 
+    session = AsyncMock()
+    session.expunge_all = MagicMock()
     result = await bootstrap.bootstrap_history(
-        AsyncMock(), end_date=date(2026, 7, 31), days_back=120,
+        session, end_date=date(2026, 7, 31), days_back=120,
         dry_run=True, operator="ops", reason="核对",
     )
 
@@ -584,8 +586,10 @@ async def test_apply_bootstrap_history_passes_audit_to_writer(
     monkeypatch.setattr(bootstrap, "_try_resolve_board_run_id", AsyncMock(return_value=None))
     monkeypatch.setattr(bootstrap, "bootstrap_single_date", _fake_single)
 
+    session = AsyncMock()
+    session.expunge_all = MagicMock()
     await bootstrap.bootstrap_history(
-        AsyncMock(), end_date=date(2026, 7, 31), days_back=120,
+        session, end_date=date(2026, 7, 31), days_back=120,
         dry_run=False, operator="ops", reason="正式回填",
     )
 
@@ -665,3 +669,157 @@ async def test_get_bootstrap_job_raises_when_missing() -> None:
     db.get = AsyncMock(return_value=None)
     with pytest.raises(ReviewBootstrapJobError):
         await job_service.get_bootstrap_job(db, uuid.uuid4())
+
+
+# =============================================================================
+# 9. 内存上限契约（[FIX-20260802] 60 日全 scope dry-run 曾在 3.4GB RSS 被 OOM 杀死）
+#
+# 固化四条不变量，防止回归到"单会话 + 全量明细累积"的无上限实现：
+#   1. 按 chunk_days 分片，每片结束释放 ORM identity map；
+#   2. 返回体不保留全部逐日 scope 明细（detail_limit 之外只留聚合摘要）；
+#   3. 聚合计数与压缩前等价（压缩不得丢失 succeeded/skipped/unavailable/failed）；
+#   4. RSS 超预算时安全停止并如实上报 partial，绝不静默截断或假装成功。
+# =============================================================================
+
+
+def _patch_eligible_days(monkeypatch: pytest.MonkeyPatch, days: int) -> None:
+    """构造 N 个可 bootstrap 日期，并让每日返回固定 scope 明细。"""
+    eligible = [
+        (date(2026, 7, 31) - timedelta(days=offset), uuid.uuid4())
+        for offset in range(days)
+    ]
+    monkeypatch.setattr(
+        bootstrap, "list_bootstrap_eligible_dates", AsyncMock(return_value=eligible),
+    )
+    monkeypatch.setattr(
+        bootstrap, "_try_resolve_board_run_id", AsyncMock(return_value=None),
+    )
+
+    async def _fake_single(session, **kwargs):
+        return {
+            "trade_date": kwargs["trade_date"].isoformat(),
+            "run_id": None,
+            "status": "dry_run",
+            "written": False,
+            # 每日 3 个 scope：2 成功 + 1 不可用
+            "scopes": [
+                {"scope_type": "market", "scope_key": "market",
+                 "status": "insufficient_history"},
+                {"scope_type": "industry_l1", "scope_key": "b1",
+                 "status": "insufficient_history"},
+                {"scope_type": "concept", "scope_key": "c1",
+                 "status": "bootstrap_unavailable", "reason": "pit_membership_empty"},
+            ],
+        }
+
+    monkeypatch.setattr(bootstrap, "bootstrap_single_date", _fake_single)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_history_chunks_and_releases_identity_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """分片执行：每个分片结束必须 expunge_all 释放 ORM identity map。"""
+    _patch_eligible_days(monkeypatch, days=10)
+    session = AsyncMock()
+    session.expunge_all = MagicMock()  # 真实 AsyncSession.expunge_all 是同步方法
+
+    result = await bootstrap.bootstrap_history(
+        session, end_date=date(2026, 7, 31), days_back=60,
+        dry_run=True, operator="ops", reason="内存契约", chunk_days=3,
+    )
+
+    # 10 日 / 每片 3 日 => 4 个分片
+    assert result["chunks"] == 4, f"分片数应为 4，实际 {result['chunks']}"
+    assert session.expunge_all.call_count == 4, (
+        "每个分片结束都必须释放 ORM identity map，否则跨日对象长期驻留导致 OOM"
+    )
+    assert result["processed"] == 10
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_history_does_not_retain_all_scope_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """返回体不得线性累积全部 scope 明细（这是 OOM 的第二个根因）。"""
+    _patch_eligible_days(monkeypatch, days=20)
+    session = AsyncMock()
+    session.expunge_all = MagicMock()
+
+    result = await bootstrap.bootstrap_history(
+        session, end_date=date(2026, 7, 31), days_back=60,
+        dry_run=True, operator="ops", reason="内存契约",
+        chunk_days=5, detail_limit=3,
+    )
+
+    detailed = [day for day in result["results"] if "scopes" in day]
+    assert len(detailed) == 3, (
+        f"仅前 detail_limit=3 天保留完整明细，实际 {len(detailed)} 天"
+    )
+    # 其余天必须保留聚合摘要，信息不丢失
+    for day in result["results"][3:]:
+        assert "scope_counts" in day, "压缩后的日结果必须保留四类计数"
+        assert day["scope_total"] == 3, "压缩后必须保留 scope 总数"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_history_compaction_preserves_aggregate_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """压缩明细不得改变全批次四类计数与原因码（增量聚合与全量聚合等价）。"""
+    _patch_eligible_days(monkeypatch, days=12)
+    session = AsyncMock()
+    session.expunge_all = MagicMock()
+
+    result = await bootstrap.bootstrap_history(
+        session, end_date=date(2026, 7, 31), days_back=60,
+        dry_run=True, operator="ops", reason="内存契约",
+        chunk_days=4, detail_limit=1,
+    )
+
+    # 每日 2 成功 + 1 不可用 × 12 日
+    assert result["scope_counts"]["succeeded"] == 24
+    assert result["scope_counts"]["unavailable"] == 12
+    assert result["scope_counts"]["failed"] == 0
+    assert result["reason_codes"]["pit_membership_empty"] == 12
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_history_stops_safely_when_memory_budget_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RSS 超预算必须安全停止并如实上报，不得静默截断或报告成功。"""
+    _patch_eligible_days(monkeypatch, days=20)
+    session = AsyncMock()
+    session.expunge_all = MagicMock()
+    # 模拟第一个分片结束时 RSS 就已超预算
+    monkeypatch.setattr(bootstrap, "_current_rss_mb", lambda: 9999.0)
+
+    result = await bootstrap.bootstrap_history(
+        session, end_date=date(2026, 7, 31), days_back=60,
+        dry_run=True, operator="ops", reason="内存契约",
+        chunk_days=5, memory_budget_mb=1024,
+    )
+
+    assert result["status"] == "memory_budget_exceeded", (
+        "超预算必须以专用状态返回，不得伪装为 ok"
+    )
+    assert result["chunks"] == 1, "必须在第一个分片后立即停止"
+    assert result["processed"] == 5, "已处理天数必须如实上报"
+    assert result["eligible_dates"] == 20, "未处理天数不得被抹去"
+    assert result["peak_rss_mb"] == 9999.0
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_history_rejects_invalid_memory_params() -> None:
+    """非法分片/预算参数必须直接拒绝，避免退化为无上限执行。"""
+    with pytest.raises(ValueError):
+        await bootstrap.bootstrap_history(
+            AsyncMock(), days_back=60, chunk_days=0,
+            operator="ops", reason="x",
+        )
+    with pytest.raises(ValueError):
+        await bootstrap.bootstrap_history(
+            AsyncMock(), days_back=60, memory_budget_mb=1,
+            operator="ops", reason="x",
+        )
