@@ -67,7 +67,7 @@ docker exec trading-backend python -m scripts.dsa_recovery_cli --job-run-id <job
 
 ```bash
 # 只读检查：确认有 interrupted 的 chip_consensus 任务
-ssh panji-prod 'docker exec trading-postgres psql -U bz -d bz_stock -c "
+scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock -c "
   SELECT id, status, attempt_no, heartbeat_at
   FROM scheduler_job_runs
   WHERE job_name = '\''after_close_chip_consensus'\''
@@ -150,7 +150,7 @@ ssh panji-prod 'docker exec trading-postgres psql -U bz -d bz_stock -c "
 
 ```bash
 # 板块分析（已有 CLI，CHANGE-20260730-011）
-ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli --all --publish"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.board_analysis_cli --all --publish"
 
 # 市场聚合（CLI 尚未实现，需新增 scripts/market_factor_aggregation_cli.py）
 # docker exec trading-backend python -m scripts.market_factor_aggregation_cli --trade-date 2026-07-29
@@ -204,7 +204,7 @@ ssh panji-prod "docker exec trading-backend python -m scripts.board_analysis_cli
 
 - 所有恢复操作必须走正式 service / CLI / admin API，**禁止裸 SQL、`/tmp` Python、`docker cp`、`docker exec ... python -c "..." 写入**（详见 `rules/80-deployment-data-safety.md` "生产修改与部署版本合同"）；
 - 恢复前必须先只读确认失败 run 的当前状态和根因；
-- 恢复后必须按 `rules/70-trae-cn.md` "闭环恢复与成功判定硬约束" 三要素验证：pointer + 版本 + 真实数据证据；
+- 恢复后必须按 `rules/40-testing-quality.md` TQ-98 "成功判定三要素" 验证：pointer + 版本 + 真实数据证据；
 - pointer 切换失败只重试发布，不重算数据；
 - 已 succeeded 且 `input_hash` + `algorithm_version` 一致的 item 不得重算；
 - chip / aggregation / review 等 optional 任务失败只重试自身，不反改 core；

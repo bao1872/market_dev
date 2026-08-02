@@ -18,7 +18,7 @@
 
 ```bash
 # 1.1 canary 5 只股票 dry-run
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --canary --dry-run"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --canary --dry-run"
 # 期望输出：
 #   mode=scan, timeframe=daily
 #   canary=true
@@ -27,10 +27,10 @@ ssh panji-prod "docker exec trading-backend python -m scripts.market_data_qualit
 #   不创建 run/items，不查询 bars_daily
 
 # 1.2 指定股票 dry-run
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --symbols 000001,000021 --dry-run"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --symbols 000001,000021 --dry-run"
 
 # 1.3 全市场 dry-run（不推荐首次执行，预计 5000+ items）
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --dry-run --verbose"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --dry-run --verbose"
 ```
 
 `--dry-run` 不创建任何 DB 记录，不修改任何行情表（PRD MQ-01）。
@@ -40,7 +40,7 @@ ssh panji-prod "docker exec trading-backend python -m scripts.market_data_qualit
 ### 2.1 阶段 1：scan（canary）
 
 ```bash
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --canary"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --canary"
 # 期望输出：
 #   run_id=<SCAN_RUN_ID>
 #   mode=scan, canary=true
@@ -54,20 +54,20 @@ ssh panji-prod "docker exec trading-backend python -m scripts.market_data_qualit
 
 ```bash
 # 查询 scan run 状态
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   SELECT id, mode, status, expected_count, succeeded_count, failed_count, skipped_count, metadata_json
   FROM market_data_quality_runs
   WHERE id = '<SCAN_RUN_ID>';\""
 
 # 查询 items 详情
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -c \"
   SELECT symbol, timeframe, classification, status, gap_details
   FROM market_data_quality_items
   WHERE run_id = '<SCAN_RUN_ID>'
   ORDER BY symbol;\""
 
 # 核验 bars_daily / bars_15min / adj_factor 未被修改（应无变化）
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   SELECT COUNT(*) FROM bars_daily WHERE updated_at > NOW() - INTERVAL '10 minutes';\""
 # 期望：0（scan 不修改 bars）
 ```
@@ -75,7 +75,7 @@ ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
 ### 2.3 阶段 2：repair（canary）
 
 ```bash
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode repair --run-id <SCAN_RUN_ID>"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode repair --run-id <SCAN_RUN_ID>"
 # 期望输出：
 #   run_id=<REPAIR_RUN_ID>
 #   parent_run_id=<SCAN_RUN_ID>
@@ -91,13 +91,13 @@ ssh panji-prod "docker exec trading-backend python -m scripts.market_data_qualit
 
 ```bash
 # 查询 repair run 状态
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   SELECT id, mode, parent_run_id, status, succeeded_count, failed_count, skipped_count
   FROM market_data_quality_runs
   WHERE id = '<REPAIR_RUN_ID>';\""
 
 # 查询修复后的 bars_daily 行数变化
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -c \"
   SELECT symbol, COUNT(*) AS bars_count, MAX(trade_date) AS latest_date
   FROM bars_daily bd
   JOIN instruments i ON bd.instrument_id = i.id
@@ -106,7 +106,7 @@ ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
   ORDER BY symbol;\""
 
 # 查询 adj_factor 重算情况
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -c \"
   SELECT symbol, COUNT(*) AS factor_count, MAX(updated_at) AS last_updated
   FROM adj_factor af
   JOIN instruments i ON af.instrument_id = i.id
@@ -118,7 +118,7 @@ ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
 ### 2.5 阶段 3：verification scan（canary）
 
 ```bash
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode verify --run-id <REPAIR_RUN_ID>"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode verify --run-id <REPAIR_RUN_ID>"
 # 期望输出：
 #   run_id=<VERIFICATION_RUN_ID>
 #   parent_run_id=<REPAIR_RUN_ID>
@@ -135,13 +135,13 @@ ssh panji-prod "docker exec trading-backend python -m scripts.market_data_qualit
 
 ```bash
 # 查询 verification run 状态
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   SELECT id, mode, parent_run_id, status, succeeded_count, failed_count
   FROM market_data_quality_runs
   WHERE id = '<VERIFICATION_RUN_ID>';\""
 
 # 比对 repair 前后的 classification 变化
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -c \"
   SELECT
     v.symbol,
     v.timeframe,
@@ -166,10 +166,10 @@ canary 通过后，执行全市场流程：
 
 ```bash
 # 后台运行（nohup 确保持久化，SSH 断开不中断）
-ssh panji-prod 'docker exec -d trading-backend bash -c "nohup python -m scripts.market_data_quality_cli --mode scan > /tmp/market-data-scan-fullmarket.log 2>&1"'
+scripts/ops/panji-prod-ssh 'docker exec -d trading-backend bash -c "nohup python -m scripts.market_data_quality_cli --mode scan > /tmp/market-data-scan-fullmarket.log 2>&1"'
 
 # 查询最新 scan run 进度
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   SELECT id, mode, status, expected_count, succeeded_count, failed_count, skipped_count,
     ROUND(100.0 * succeeded_count / NULLIF(expected_count, 0), 1) AS pct,
     heartbeat_at
@@ -178,7 +178,7 @@ ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   ORDER BY started_at DESC LIMIT 1;\""
 
 # 查询 item 级进度（按 classification 汇总）
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -c \"
   SELECT classification, status, COUNT(*) AS count
   FROM market_data_quality_items
   WHERE run_id = '<SCAN_RUN_ID>'
@@ -186,14 +186,14 @@ ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
   ORDER BY classification, status;\""
 
 # 查看日志
-ssh panji-prod "docker exec trading-backend tail -50 /tmp/market-data-scan-fullmarket.log"
+scripts/ops/panji-prod-ssh "docker exec trading-backend tail -50 /tmp/market-data-scan-fullmarket.log"
 ```
 
 ### 3.2 全市场 scan resume（中断后续跑）
 
 ```bash
 # 续跑未完成的 items（必须显式 --run-id）
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --resume --run-id <SCAN_RUN_ID>"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --resume --run-id <SCAN_RUN_ID>"
 ```
 
 > 注意：`--resume` 必须搭配 `--run-id`，否则报错退出（PRD MQ-10）。resume 不创建新 run，只续跑原 run 的 pending/failed items。
@@ -202,10 +202,10 @@ ssh panji-prod "docker exec trading-backend python -m scripts.market_data_qualit
 
 ```bash
 # 基于 scan run 创建 repair run
-ssh panji-prod 'docker exec -d trading-backend bash -c "nohup python -m scripts.market_data_quality_cli --mode repair --run-id <SCAN_RUN_ID> > /tmp/market-data-repair-fullmarket.log 2>&1"'
+scripts/ops/panji-prod-ssh 'docker exec -d trading-backend bash -c "nohup python -m scripts.market_data_quality_cli --mode repair --run-id <SCAN_RUN_ID> > /tmp/market-data-repair-fullmarket.log 2>&1"'
 
 # 查询 repair run 进度
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   SELECT id, mode, parent_run_id, status, succeeded_count, failed_count, skipped_count,
     ROUND(100.0 * succeeded_count / NULLIF(expected_count, 0), 1) AS pct,
     heartbeat_at
@@ -218,17 +218,17 @@ ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
 
 ```bash
 # 续跑未完成的 repair items（必须显式 --run-id 指向 repair run）
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode repair --resume --run-id <REPAIR_RUN_ID>"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode repair --resume --run-id <REPAIR_RUN_ID>"
 ```
 
 ### 3.5 全市场 verification
 
 ```bash
 # 基于 repair run 创建 verification run
-ssh panji-prod 'docker exec -d trading-backend bash -c "nohup python -m scripts.market_data_quality_cli --mode verify --run-id <REPAIR_RUN_ID> > /tmp/market-data-verify-fullmarket.log 2>&1"'
+scripts/ops/panji-prod-ssh 'docker exec -d trading-backend bash -c "nohup python -m scripts.market_data_quality_cli --mode verify --run-id <REPAIR_RUN_ID> > /tmp/market-data-verify-fullmarket.log 2>&1"'
 
 # 查询 verification run 进度
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   SELECT id, mode, parent_run_id, status, succeeded_count, failed_count, skipped_count,
     ROUND(100.0 * succeeded_count / NULLIF(expected_count, 0), 1) AS pct
   FROM market_data_quality_runs
@@ -236,7 +236,7 @@ ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   ORDER BY started_at DESC LIMIT 1;\""
 
 # 比对全市场 repair 前后 classification 变化
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -c \"
   SELECT
     i.classification AS before_classification,
     v.classification AS after_classification,
@@ -257,20 +257,20 @@ ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -c \"
 
 ```bash
 # 指定 symbols scan
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --symbols 000001,000021,600519"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --symbols 000001,000021,600519"
 
 # 指定 symbols repair（基于上一步 scan run）
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode repair --run-id <SCAN_RUN_ID>"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode repair --run-id <SCAN_RUN_ID>"
 
 # 指定 symbols verify
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode verify --run-id <REPAIR_RUN_ID>"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode verify --run-id <REPAIR_RUN_ID>"
 ```
 
 ## 5. 限定时间范围
 
 ```bash
 # 扫描 2026-01-01 至 2026-07-29 的缺口
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --start 2026-01-01 --end 2026-07-29"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --start 2026-01-01 --end 2026-07-29"
 
 # 默认时间范围：bars_daily.max(trade_date) - 365 天 到 bars_daily.max(trade_date)
 ```
@@ -279,13 +279,13 @@ ssh panji-prod "docker exec trading-backend python -m scripts.market_data_qualit
 
 ```bash
 # 仅扫描日线
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --timeframe daily"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --timeframe daily"
 
 # 仅扫描 15 分钟线
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --timeframe 15min"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --timeframe 15min"
 
 # 同时扫描日线和 15 分钟线（默认）
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --timeframe both"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --timeframe both"
 ```
 
 ## 安全边界
@@ -304,16 +304,16 @@ ssh panji-prod "docker exec trading-backend python -m scripts.market_data_qualit
 
 ```bash
 # 检查 heartbeat_at 是否最新
-ssh panji-prod "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
+scripts/ops/panji-prod-ssh "docker exec trading-postgres psql -U bz -d bz_stock -tAc \"
   SELECT id, status, heartbeat_at, NOW() - heartbeat_at AS stale_for
   FROM market_data_quality_runs
   WHERE id = '<SCAN_RUN_ID>';\""
 
 # 若 stale_for > 5 分钟，检查 worker 是否存活
-ssh panji-prod "docker logs --tail 50 trading-backend 2>&1 | grep market_data_quality"
+scripts/ops/panji-prod-ssh "docker logs --tail 50 trading-backend 2>&1 | grep market_data_quality"
 
 # worker 已死，通过 --resume 续跑
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --resume --run-id <SCAN_RUN_ID>"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --resume --run-id <SCAN_RUN_ID>"
 ```
 
 ### repair 引入新缺口
@@ -322,7 +322,7 @@ verification run 发现 `after=DB_MISSING` 但 `before=OK` 的 items：
 
 1. 检查 repair run 日志，确认是否覆盖了非目标日期的 bars：
    ```bash
-   ssh panji-prod "docker exec trading-backend grep -A5 'ERROR\|WARN' /tmp/market-data-repair-fullmarket.log | tail -50"
+   scripts/ops/panji-prod-ssh "docker exec trading-backend grep -A5 'ERROR\|WARN' /tmp/market-data-repair-fullmarket.log | tail -50"
    ```
 2. 若确认是 repair 误覆盖，从备份恢复 `bars_daily` 对应日期的记录（备份策略见 `docs/runbooks/production-deployment.md`）。
 3. 重新执行 `--verify` 确认缺口已消除。
@@ -331,11 +331,11 @@ verification run 发现 `after=DB_MISSING` 但 `before=OK` 的 items：
 
 ```bash
 # 检查 canary_symbols 配置
-ssh panji-prod "docker exec trading-backend python -c \"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -c \"
 from scripts.market_data_quality_cli import CANARY_SYMBOLS
 print(CANARY_SYMBOLS)
 \""
 
 # 覆盖 canary symbols
-ssh panji-prod "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --canary --canary-symbols 000001,000021,600519,000008,300750"
+scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.market_data_quality_cli --mode scan --canary --canary-symbols 000001,000021,600519,000008,300750"
 ```

@@ -1,8 +1,13 @@
-# CHANGE-20260802-002 CI 三层重构 + 部署脚本结构重构 + 测试分类收口
+# CHANGE-20260802-004 CI 三层重构 + 部署脚本结构重构 + 测试分类收口
+
+> **ID 修订说明（2026-08-02）**：本文件原编号为 `CHANGE-20260802-002`，
+> 与《竞价归入复盘权限 + 邀请码权限回显》撞号。按"先落库者保留原号"原则，
+> 002 保留给竞价/邀请码 Change，本文件重编号为 `CHANGE-20260802-004`。
+> 内容未变，历史事实不受影响。
 
 > **历史状态（2026-08-02 治理收口）**
 > - `historical_status`: superseded（历史事实保留，流程已废止）
-> - `superseded_by`: CHANGE-20260802-003（开发治理收口：Live Mount 开发部署 + CI 仅作诊断工具）
+> - `superseded_by`: CHANGE-20260802-003（开发部署执行入口收敛：两脚本 Live Mount + CI 仅作诊断工具）
 > - `current_authority`: `rules/80-deployment-data-safety.md` + `docs/maps/80-system-runtime.md` + `docs/runbooks/development-deployment.md`
 > - 说明：本 Change 描述的 Release Gate / GHCR / 三层 CI / CI Gate 部署门禁 / 多阶段发布流程**已废止**，不作为当前操作指令。CI 仅保留为手工诊断工具，不进入默认开发闭环。
 

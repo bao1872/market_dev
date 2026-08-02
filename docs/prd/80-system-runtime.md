@@ -14,7 +14,7 @@
 - 本地开发；
 - 远程稳定运行。
 
-IDE 不是运行环境。TRAE CN 或其他 IDE 只是开发和操作工具。
+IDE 不是运行环境。任何 IDE、编码助手或自动化 Agent 都只是开发和操作工具。
 
 ### SR-02 本地使用原生进程
 
@@ -24,7 +24,7 @@ IDE 不是运行环境。TRAE CN 或其他 IDE 只是开发和操作工具。
 
 - 后端通过本地 Python 虚拟环境直接启动；
 - 前端通过本地 Node.js 和 Vite 直接启动；
-- 需要调试 Worker 时，以本地 Python 进程手动启动指定 Worker；
+- 本地不启动正式 Worker、Scheduler、盘后编排或全市场任务；
 - 本地不创建盘迹 PostgreSQL 或 Redis 容器；
 - 普通代码修改不得要求反复构建本地 Docker 镜像。
 
@@ -54,14 +54,14 @@ IDE 不是运行环境。TRAE CN 或其他 IDE 只是开发和操作工具。
 | 分支 | 职责 | 进入方式与约束 |
 |---|---|---|
 | `main` | 阶段性稳定锚点 | 未经明确授权不得修改、合并或推送 |
-| `dev` | 唯一默认日常开发分支 | 所有变更直接在 `dev` 提交；`dev` 是 CI 与手动部署的唯一来源 |
-| `experiment` | 明确授权下的隔离实验 | 仅在明确授权时使用；不得作为生产部署来源；进入 `dev` 前必须明确审查 |
+| `dev` | 唯一默认日常开发分支 | 所有变更直接在 `dev` 提交；`dev` 是手工 CI 与手动部署的唯一来源 |
+| `experiments` | 明确授权下的隔离实验 | 仅在明确授权时使用；不得作为生产部署来源；进入 `dev` 前必须明确审查 |
 
-本地、`origin` 和远程服务器最终仅保留 `main`/`dev`/`experiment`。存在未确认数据风险时，允许停止服务器分支清理，但不得强删含唯一提交或未提交工作的分支。
+本地、`origin` 和远程服务器只允许保留 `main`/`dev`/`experiments`。现有分支不符合该命名时，必须在用户明确授权分支删除或改名后单独治理，不得在普通任务中强删。
 
 ### SR-10 日常开发分支（dev-only）
 
-本地日常开发直接在 `dev` 进行。所有 AI 助手（CodeBuddy / Codex / TRAE Work / TRAE CN）默认直接在当前 `dev` 分支工作与提交。
+本地日常开发直接在 `dev` 进行。所有 IDE、编码助手和自动化 Agent 默认直接在当前 `dev` 分支工作与提交，不按工具区分。
 
 未经用户明确授权：
 
@@ -77,33 +77,27 @@ IDE 不是运行环境。TRAE CN 或其他 IDE 只是开发和操作工具。
 
 ### SR-12 开发不自动部署
 
-推送 `dev` 触发 CI 检查，但不自动部署远程稳定环境。
+推送 `dev` 本身不触发 CI 或远程部署。CI 只能通过 `workflow_dispatch` 手工触发，且只是诊断工具。
 
 ### SR-13 稳定版本可识别
 
 远程当前运行版本必须能够通过稳定 SHA 或等价方式明确识别。
 
-### SR-14 稳定版本自动部署
+### SR-14 稳定版本手工部署
 
-`main` 分支经 PR 合并且 CI 通过后，应自动部署到腾讯云稳定运行服务器。
+开发部署只能由获得本轮明确授权的执行主体，在本地运行
+`scripts/ops/panji-test-deploy <FULL_SHA> [--dry-run]`。目标 SHA 必须属于 `origin/dev`。
 
-自动部署必须满足：
+部署必须满足：串行锁；远端工作树干净；始终叠加 prod + live Compose；普通代码走
+`/opt/panji-live`；仅环境变化构建对应镜像；仅 migration 变化执行前向 upgrade；核验完整 SHA、
+运行模式、健康端点、挂载来源、关键容器和 Scheduler 单实例；失败恢复上一成功代码和应用容器，
+但不自动 downgrade 数据库；永不删除 PostgreSQL/Redis Volume，也不自动执行任何业务数据动作。
 
-- 接收精确 commit SHA，且该 SHA 必须属于 `origin/main`；
-- 部署串行执行（`flock` 锁），不取消进行中的部署；
-- 远程 `/root/web_dev` 工作区不干净或当前分支不是 `main` 时拒绝部署；
-- CI 门禁通过后才触发部署；
-- 部署后检查端口 80、`/health`、`/health/ready`、`/version` 的 `runtime_git_sha`、关键容器和 Scheduler 单实例；
-- 失败时回滚代码和应用容器，但不回滚数据库、不自动执行 Alembic migration；
-- 普通代码变更使用 Live Mount，不重建镜像；依赖 / Dockerfile / Compose 核心变化时重建镜像；
-- 纯文档 / 治理 / 部署脚本变更跳过应用部署；
-- 永不执行 `docker compose down -v`，不删除 / 重建 PostgreSQL 和 Redis Volume。
-
-当前状态：部署脚本 `scripts/deploy/panji-deploy.sh` 与 GitHub Actions workflow `.github/workflows/deploy-production.yml` 已准备，但服务器侧入口与 GitHub Secrets 尚未启用，因此自动部署链路尚未激活。
+GitHub Actions 不包含部署动作。详细合同见 `rules/80-deployment-data-safety.md`。
 
 ### SR-15 本地参考/传输目录不得进入仓库
 
-本地参考资料与废弃中转目录不得进入 Git 仓库的所有活跃分支（`main`/`dev`/`experiment`）：
+本地参考资料与废弃中转目录不得进入 Git 仓库的所有活跃分支（`main`/`dev`/`experiments`）：
 
 - `ref/` 是本地参考资料（第三方项目源码、用户原创 Pine、实验归档脚本），保留本地实体但不得被 Git 跟踪；
 - `sync/` 是已废弃的临时中转目录，不得在 Git 或本地存在；
@@ -167,7 +161,8 @@ production 现有行为不得被意外改变。
 
 ### SR-41 本地调试能力
 
-本地可按需以原生 Python 进程手动启动指定 Worker、Orchestrator 和完整盘后链路。
+本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。正式 Worker、Scheduler、盘后编排和
+全市场任务只能在远程正式运行位置执行，且必须获得相应授权。
 
 ### SR-42 远程 Scheduler
 

@@ -1,113 +1,122 @@
 #!/usr/bin/env bash
-# panji-deploy.test.sh — 静态测试 panji-deploy.sh 关键修复点
+# panji-deploy.test.sh — 部署两脚本结构的静态契约测试
 #
-# 验证项：
-# 1. bash 语法正确
-# 2. 关键函数存在
-# 3. calendar 容器名正确（trading-worker-calendar，非 -scheduler）
-# 4. dry-run 使用"计划验证"而非"健康检查"
-# 5. validate_sha 前有 git fetch origin main
-# 6. 部署后有 git checkout main（避免 detached HEAD）
-# 7. state 目录初始化
-# 8. 不碰 postgres/redis（不在 recreate_services 列表中）
+# 绑定来源（CHANGE-20260802-003）：
+#   - 本地唯一入口：scripts/ops/panji-test-deploy
+#   - 服务器端唯一实现：scripts/deploy/panji-deploy.sh
+#
+# 断言目标：防止回潮到已废止的双模式 / 镜像模式 / stdin 临时脚本 / main 分支来源。
 #
 # 用法: bash scripts/deploy/panji-deploy.test.sh
+# 退出码：0 = 全部契约通过；1 = 任一契约失败。
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_PATH="${SCRIPT_DIR}/panji-deploy.sh"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+SERVER_SCRIPT="${REPO_ROOT}/scripts/deploy/panji-deploy.sh"
+LOCAL_ENTRY="${REPO_ROOT}/scripts/ops/panji-test-deploy"
+
 PASS=0
 FAIL=0
 
-assert_contains() {
-    local label="$1"
-    local pattern="$2"
-    local file="$3"
-    if grep -q "${pattern}" "${file}" 2>/dev/null; then
-        echo "  [PASS] ${label}"
-        PASS=$((PASS + 1))
-    else
-        echo "  [FAIL] ${label}"
-        FAIL=$((FAIL + 1))
-    fi
+ok()   { echo "  [PASS] $1"; PASS=$((PASS + 1)); }
+bad()  { echo "  [FAIL] $1" >&2; FAIL=$((FAIL + 1)); }
+
+# 去掉注释行后再匹配，避免注释中的"禁止 X"被误判为存在 X。
+# 注意：不使用 `code_of | grep -q` 管道——grep -q 提前关闭管道会触发 SIGPIPE，
+# 在 `set -o pipefail` 下导致整条管道返回非零，产生假失败。
+code_of() { grep -v '^[[:space:]]*#' "$1"; }
+
+code_matches() {
+    # $1=file  $2=ERE pattern；匹配返回 0
+    local matched
+    matched="$(code_of "$1" | grep -cE "$2" || true)"
+    [[ "${matched}" -gt 0 ]]
 }
 
-assert_not_contains() {
-    local label="$1"
-    local pattern="$2"
-    local file="$3"
-    if grep -q "${pattern}" "${file}" 2>/dev/null; then
-        echo "  [FAIL] ${label}"
-        FAIL=$((FAIL + 1))
-    else
-        echo "  [PASS] ${label}"
-        PASS=$((PASS + 1))
-    fi
+assert_code_contains() {
+    local label="$1" pattern="$2" file="$3"
+    if code_matches "${file}" "${pattern}"; then ok "${label}"; else bad "${label}"; fi
 }
 
-echo "=== panji-deploy.sh 静态测试 ==="
+assert_code_absent() {
+    local label="$1" pattern="$2" file="$3"
+    if code_matches "${file}" "${pattern}"; then bad "${label}"; else ok "${label}"; fi
+}
 
-# 1. 语法检查
-if bash -n "${SCRIPT_PATH}" 2>/dev/null; then
-    echo "  [PASS] bash 语法正确"
-    PASS=$((PASS + 1))
-else
-    echo "  [FAIL] bash 语法错误"
-    FAIL=$((FAIL + 1))
-fi
+assert_file_absent() {
+    local label="$1" path="$2"
+    if [[ -e "${path}" ]]; then bad "${label}"; else ok "${label}"; fi
+}
 
-# 2. 关键函数存在
-assert_contains "validate_sha 函数存在" "validate_sha()" "${SCRIPT_PATH}"
-assert_contains "health_check 函数存在" "health_check()" "${SCRIPT_PATH}"
-assert_contains "rollback 函数存在" "rollback()" "${SCRIPT_PATH}"
-assert_contains "classify_changes 函数存在" "classify_changes()" "${SCRIPT_PATH}"
+echo "=== 部署脚本结构契约测试 ==="
 
-# 3. calendar 容器名正确
-assert_contains "calendar 容器名: trading-worker-calendar" "trading-worker-calendar)" "${SCRIPT_PATH}"
-assert_not_contains "不使用 trading-worker-calendar-scheduler" "calendar-scheduler" "${SCRIPT_PATH}"
+# ---------------------------------------------------------------------------
+echo "== 1/6 文件存在性与语法 =="
+for f in "${SERVER_SCRIPT}" "${LOCAL_ENTRY}"; do
+    if [[ -f "${f}" ]]; then ok "存在: ${f#"${REPO_ROOT}/"}"; else bad "缺失: ${f#"${REPO_ROOT}/"}"; fi
+    if bash -n "${f}" 2>/dev/null; then ok "语法正确: ${f#"${REPO_ROOT}/"}"; else bad "语法错误: ${f#"${REPO_ROOT}/"}"; fi
+done
 
-# 4. dry-run 使用"计划验证"
-assert_contains "dry-run 使用计划验证" "计划验证" "${SCRIPT_PATH}"
+# ---------------------------------------------------------------------------
+echo "== 2/6 已废止执行入口不得恢复 =="
+assert_file_absent "scripts/ops/panji-deploy-remote.sh 已删除" "${REPO_ROOT}/scripts/ops/panji-deploy-remote.sh"
+assert_file_absent "scripts/deploy_live_runtime.sh 已删除"     "${REPO_ROOT}/scripts/deploy_live_runtime.sh"
+assert_file_absent "scripts/sync_live_runtime.sh 已删除"       "${REPO_ROOT}/scripts/sync_live_runtime.sh"
 
-# 5. validate_sha 前有 git fetch
-assert_contains "git fetch origin main 存在" "git fetch origin main" "${SCRIPT_PATH}"
+# ---------------------------------------------------------------------------
+echo "== 3/6 唯一运行模式为 Live Mount =="
+assert_code_contains "服务端始终叠加 docker-compose.live.yml" \
+    'docker-compose\.prod\.yml -f docker-compose\.live\.yml' "${SERVER_SCRIPT}"
+assert_code_absent "无 COMPOSE_CMD_NO_LIVE 变体" \
+    'COMPOSE_CMD_NO_LIVE' "${SERVER_SCRIPT}"
+assert_code_absent "无 DEPLOYMENT_MODE=image" \
+    'DEPLOYMENT_MODE=image' "${SERVER_SCRIPT}"
+assert_code_absent "无 PANJI_FORCE_IMAGE_BUILD 开关" \
+    'PANJI_FORCE_IMAGE_BUILD|FORCE_IMAGE_BUILD' "${SERVER_SCRIPT}"
+assert_code_absent "本地入口无 --allow-local-build 开关" \
+    'allow-local-build' "${LOCAL_ENTRY}"
+assert_code_contains "服务端强制 DEPLOYMENT_MODE=live" \
+    'DEPLOYMENT_MODE=live' "${SERVER_SCRIPT}"
 
-# 6. 部署后有 git checkout main
-assert_contains "部署后 checkout main" "git checkout main" "${SCRIPT_PATH}"
+# ---------------------------------------------------------------------------
+echo "== 4/6 dev 是唯一部署来源 =="
+assert_code_contains "服务端 fetch origin dev" 'git fetch origin dev' "${SERVER_SCRIPT}"
+assert_code_contains "服务端校验 origin/dev 祖先" 'merge-base --is-ancestor .* origin/dev' "${SERVER_SCRIPT}"
+assert_code_absent   "服务端不引用 origin/main"  'origin/main|origin main' "${SERVER_SCRIPT}"
+assert_code_absent   "服务端不 checkout main"    'git checkout .*\bmain\b' "${SERVER_SCRIPT}"
+assert_code_contains "本地入口校验 origin/dev 祖先" 'merge-base --is-ancestor .* origin/dev' "${LOCAL_ENTRY}"
 
-# 7. state 目录初始化
-assert_contains "state 目录初始化" "state_dir" "${SCRIPT_PATH}"
+# ---------------------------------------------------------------------------
+echo "== 5/6 执行方式与变更判定 =="
+assert_code_absent "本地入口不把脚本拷到 /tmp 执行" '/tmp/panji|bash -s' "${LOCAL_ENTRY}"
+assert_code_contains "本地入口执行服务器仓库内脚本" \
+    'scripts/deploy/panji-deploy\.sh' "${LOCAL_ENTRY}"
+assert_code_contains "本地入口只经 panji-prod-ssh 访问生产" \
+    'panji-prod-ssh' "${LOCAL_ENTRY}"
+assert_code_absent "本地入口不直接执行 ssh" \
+    '^[[:space:]]*ssh[[:space:]]' "${LOCAL_ENTRY}"
+assert_code_contains "本地入口部署前 bash -n 预检" 'bash -n' "${LOCAL_ENTRY}"
+assert_code_contains "变更判定基于上一部署 SHA" \
+    'git diff --name-only "\$\{PREVIOUS_SHA\}" "\$\{TARGET_SHA\}"' "${SERVER_SCRIPT}"
+assert_code_absent "不使用 HEAD~1 判定变更" 'HEAD~1' "${SERVER_SCRIPT}"
+assert_code_contains "存在 classify_changes 函数" 'classify_changes\(\)' "${SERVER_SCRIPT}"
+assert_code_contains "存在 rollback 函数" 'rollback\(\)' "${SERVER_SCRIPT}"
+assert_code_contains "存在 flock 并发锁" 'flock -n' "${SERVER_SCRIPT}"
 
-# 8. 不碰 postgres/redis（不在 up -d / recreate_services 的服务列表中）
-#    postgres/redis 仅出现在 health_check 的 required 容器检查中，不应出现在 up -d 命令行
-#    过滤掉注释行后再检查
-if grep -v '^ *#' "${SCRIPT_PATH}" | grep -E 'up -d.*postgres' 2>/dev/null; then
-    echo "  [FAIL] up -d 命令包含 postgres"
-    FAIL=$((FAIL + 1))
-else
-    echo "  [PASS] up -d 命令不含 postgres"
-    PASS=$((PASS + 1))
-fi
-if grep -v '^ *#' "${SCRIPT_PATH}" | grep -E 'up -d.*redis' 2>/dev/null; then
-    echo "  [FAIL] up -d 命令包含 redis"
-    FAIL=$((FAIL + 1))
-else
-    echo "  [PASS] up -d 命令不含 redis"
-    PASS=$((PASS + 1))
-fi
+# ---------------------------------------------------------------------------
+echo "== 6/6 有状态服务保护与完整 SHA 判据 =="
+assert_code_absent "up -d 不含 postgres/redis/umami" \
+    'up -d.*(postgres|redis|umami)' "${SERVER_SCRIPT}"
+assert_code_absent "不得 down -v" 'down -v' "${SERVER_SCRIPT}"
+assert_code_contains "核验完整 runtime_git_sha" 'runtime_git_sha' "${SERVER_SCRIPT}"
+assert_code_contains "核验 deployment_mode=live" 'deployment_mode.*live|"live"' "${SERVER_SCRIPT}"
+assert_code_contains "核验容器 Mounts 含 LIVE_ROOT" 'docker inspect .*Mounts' "${SERVER_SCRIPT}"
+# 成功判据必须比较完整 SHA，禁止短 SHA 截断比较
+assert_code_absent "不以短 SHA 作为成功判据" 'PUBLIC_SHA.*:0:7|EXPECTED_SHORT' "${LOCAL_ENTRY}"
 
-# 9. 锁机制
-assert_contains "flock 锁存在" "flock -n" "${SCRIPT_PATH}"
-
-# 10. SHA 精确验证
-assert_contains "git cat-file SHA 验证" "git cat-file -e" "${SCRIPT_PATH}"
-assert_contains "main 祖先验证" "merge-base --is-ancestor" "${SCRIPT_PATH}"
-
-echo ""
-echo "=== 结果: ${PASS} passed, ${FAIL} failed ==="
-
-if [[ ${FAIL} -gt 0 ]]; then
-    exit 1
-fi
-exit 0
+echo "----------------------------------------"
+echo "部署脚本结构契约测试：${PASS} 通过 / ${FAIL} 失败"
+[[ "${FAIL}" -eq 0 ]] && exit 0 || exit 1

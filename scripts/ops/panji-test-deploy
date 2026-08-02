@@ -1,26 +1,32 @@
 #!/usr/bin/env bash
-# panji-test-deploy — 腾讯云 panji-prod 测试环境 / 预发布验收 dev SHA 部署 SSOT 入口
+# panji-test-deploy — 盘迹开发部署唯一本地入口（Live Mount）
 #
-# 来源：CHANGE-20260801-001（测试环境dev部署唯一入口）
-# 权威参数：
-#   - HostName = 43.136.118.82 (panji-prod SSH alias, 唯一合法入口)
-#   - 远程代码目录 = /root/web_dev
-#   - Compose = docker-compose.prod.yml (禁止 Live Mount / docker-compose.live.yml 叠加)
-#   - 仅接受 origin/dev 上的精确 SHA
+# 权威来源：
+#   - rules/80-deployment-data-safety.md（部署与数据安全硬约束）
+#   - docs/runbooks/development-deployment.md（操作步骤）
 #
-# 强制约束（AGENTS.md §8 + rules/80-deployment-data-safety.md）：
-#   1. 禁止手工 scp / docker cp / 临时业务脚本 / 只同步单文件
-#   2. 禁止碰 PostgreSQL / Redis Volume 或既有持久化数据
-#   3. 禁止叠加 docker-compose.live.yml（纯镜像部署，保证 repo=image=runtime SHA）
-#   4. 必须先运行 scripts/ops/panji-prod-preflight
-#   5. 必须执行 Alembic Migration（dev 可能有新 migration）
-#   6. 必须健康检查所有受影响服务
-#   7. 失败回滚到 previous SHA；绝不 down -v
+# 职责边界（本脚本是"瘦客户端"，不含任何部署实现逻辑）：
+#   1. 校验目标 SHA 存在且是 origin/dev 的祖先；
+#   2. 运行 scripts/ops/panji-prod-preflight；
+#   3. 通过 SSH 调用服务器仓库内的 scripts/deploy/panji-deploy.sh 执行部署。
+#
+# 唯一运行模式：Live Mount（docker-compose.prod.yml + docker-compose.live.yml）。
+#   本脚本不提供模式开关，不提供镜像构建开关。
+#
+# 强制约束：
+#   - 禁止把部署脚本经 stdin / scp 拷到 /tmp 执行；服务器执行的必须是
+#     服务器仓库内受版本控制的 scripts/deploy/panji-deploy.sh；
+#   - 禁止手工 scp / docker cp / 容器内改码 / 临时业务脚本；
+#   - 禁止碰 PostgreSQL / Redis Volume 或既有持久化数据；
+#   - dev 是唯一部署来源；不接受非 origin/dev 祖先的 SHA。
 #
 # 用法:
-#   scripts/ops/panji-test-deploy <SHA>            # 部署指定 dev SHA（短或完整）
-#   scripts/ops/panji-test-deploy <SHA> --dry-run  # 只输出计划不执行
-#   scripts/ops/panji-test-deploy HEAD             # 部署本地 dev HEAD（先校验 origin/dev 已同步）
+#   scripts/ops/panji-test-deploy <FULL_SHA>            # 部署指定 dev SHA
+#   scripts/ops/panji-test-deploy <FULL_SHA> --dry-run  # 只输出计划不执行
+#
+# 环境变量:
+#   PANJI_TEST_SKIP_PREFLIGHT=1  跳过 preflight（默认不跳过）
+#   PANJI_REMOTE_REPO_ROOT       服务器仓库根目录（默认 /root/web_dev）
 #
 # 退出码：0 成功，1 失败，2 配置/前置错误
 
@@ -29,7 +35,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-SSH_ALIAS="panji-prod"
+REMOTE_REPO_ROOT="${PANJI_REMOTE_REPO_ROOT:-/root/web_dev}"
+REMOTE_DEPLOY_SCRIPT="${REMOTE_REPO_ROOT}/scripts/deploy/panji-deploy.sh"
+LOCAL_DEPLOY_SCRIPT="${REPO_ROOT}/scripts/deploy/panji-deploy.sh"
+SSH_WRAPPER="${SCRIPT_DIR}/panji-prod-ssh"
+
 TARGET_SHA=""
 DRY_RUN=false
 SKIP_PREFLIGHT="${PANJI_TEST_SKIP_PREFLIGHT:-}"
@@ -38,10 +48,11 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 fail() { log "错误: $*" >&2; exit 1; }
 usage() {
     echo "用法: $0 <SHA> [--dry-run]"
-    echo "  SHA 必须是 origin/dev 的祖先（HEAD 自动展开为本地 HEAD SHA）"
+    echo "  FULL_SHA 必须是 origin/dev 的祖先"
     echo "环境变量:"
-    echo "  PANJI_TEST_SKIP_PREFLIGHT=1  跳过 preflight（CI / 连续部署场景，默认不跳过）"
-    exit 1
+    echo "  PANJI_TEST_SKIP_PREFLIGHT=1  跳过 preflight（默认不跳过）"
+    echo "  PANJI_REMOTE_REPO_ROOT       服务器仓库根目录（默认 /root/web_dev）"
+    exit 2
 }
 
 # ===== 参数解析 =====
@@ -49,7 +60,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
         -h|--help) usage ;;
-        -*) fail "未知选项: $1" ;;
+        -*) fail "未知选项: $1（本入口不提供模式/构建开关，唯一模式为 Live Mount）" ;;
         *)
             [[ -z "${TARGET_SHA}" ]] || fail "只能指定一个 SHA"
             TARGET_SHA="$1"
@@ -58,28 +69,31 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "${TARGET_SHA}" ]] || usage
 
-# ===== HEAD 展开为本地 SHA =====
 cd "${REPO_ROOT}"
-if [[ "${TARGET_SHA}" == "HEAD" ]]; then
-    TARGET_SHA="$(git rev-parse HEAD)"
-    log "HEAD 展开为 SHA: ${TARGET_SHA}"
-fi
 
-# ===== 本地 SHA 基本校验 =====
+# ===== 只接受完整 SHA =====
+[[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || fail "必须提供 40 位完整 SHA"
+
 if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
     fail "SHA 不是本地 commit: ${TARGET_SHA}"
 fi
-FULL_SHA="$(git rev-parse "${TARGET_SHA}^{commit}")"
-TARGET_SHA="${FULL_SHA}"
+TARGET_SHA="$(git rev-parse "${TARGET_SHA}^{commit}")"
+[[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || fail "必须解析为 40 位完整 SHA"
 
-# ===== 校验是 origin/dev 的祖先 =====
+# ===== 校验是 origin/dev 的祖先（dev 是唯一部署来源）=====
 log "拉取 origin/dev 最新引用（避免 stale）..."
 git fetch origin dev --no-tags 2>&1 | sed 's/^/  /' || fail "git fetch origin dev 失败"
 
 if ! git merge-base --is-ancestor "${TARGET_SHA}" origin/dev 2>/dev/null; then
-    fail "SHA ${TARGET_SHA:0:7} 不是 origin/dev 的祖先。请先 push dev 并确认已上库。"
+    fail "SHA ${TARGET_SHA} 不是 origin/dev 的祖先。请先 push dev 并确认已上库。"
 fi
 log "SHA 校验通过（origin/dev 祖先）: ${TARGET_SHA}"
+
+# ===== 服务器端部署脚本必须存在于仓库（本地静态预检）=====
+[[ -f "${LOCAL_DEPLOY_SCRIPT}" ]] \
+    || fail "仓库缺少服务器端部署实现: scripts/deploy/panji-deploy.sh"
+bash -n "${LOCAL_DEPLOY_SCRIPT}" \
+    || fail "scripts/deploy/panji-deploy.sh 语法错误，拒绝部署"
 
 # ===== Preflight =====
 if [[ "${SKIP_PREFLIGHT}" != "1" && "${SKIP_PREFLIGHT}" != "true" ]]; then
@@ -89,67 +103,24 @@ if [[ "${SKIP_PREFLIGHT}" != "1" && "${SKIP_PREFLIGHT}" != "true" ]]; then
     fi
 fi
 
-# ===== 传输并执行远端部署脚本 =====
-# [CHANGE-20260802-002] 旧实现把 ~389 行部署逻辑写进未加引号的 heredoc，
-#   经本地展开后用 `bash -s` 从 stdin 执行。该结构无法本地静态检查、
-#   无法定位失败位置，且 2026-08-02 曾发生整段 §8（up -d）未执行、
-#   镜像已构建但容器仍跑旧 SHA 的事故。
-#
-# 现改为：把仓库中的真实脚本 panji-deploy-remote.sh 传到远端临时路径后执行。
-#   - 脚本可本地 bash -n / shellcheck；
-#   - 失败时 ERR trap 输出阶段/行号/命令/退出码；
-#   - 不按变更文件推断服务，一次性重建全部无状态服务；
-#   - 不在服务器构建镜像（除非显式 --allow-local-build 过渡开关）。
-
-REMOTE_SCRIPT_LOCAL="${SCRIPT_DIR}/panji-deploy-remote.sh"
-[[ -f "${REMOTE_SCRIPT_LOCAL}" ]] || fail "缺少远端部署脚本: ${REMOTE_SCRIPT_LOCAL}"
-
-# 本地语法预检——把远端运行期错误提前到部署之前
-bash -n "${REMOTE_SCRIPT_LOCAL}" || fail "远端部署脚本语法错误，拒绝部署"
-
-REMOTE_ARGS=(--sha "${TARGET_SHA}")
+# ===== SSH 调用服务器仓库内的部署脚本 =====
+# 远端当前仓库中的受版本控制脚本负责 fetch、校验并 checkout 目标 SHA。
+# dry-run 只做计划，不允许为读取脚本而修改远端工作树。
+REMOTE_ARGS=("${TARGET_SHA}")
 [[ "${DRY_RUN}" == "true" ]] && REMOTE_ARGS+=(--dry-run)
-# 过渡期：Registry（GHCR）凭据尚未配置，允许服务器构建缺失镜像。
-# 一旦 Release Gate + Registry 打通，去掉本开关即可强制 pull-only。
-if [[ "${PANJI_ALLOW_LOCAL_BUILD:-1}" == "1" ]]; then
-    REMOTE_ARGS+=(--allow-local-build)
-fi
 
-log "通过 SSH 到 ${SSH_ALIAS} 执行部署（dry-run=${DRY_RUN}）..."
-log "远端命令: panji-deploy-remote.sh ${REMOTE_ARGS[*]}"
+REMOTE_CMD="set -euo pipefail; cd '${REMOTE_REPO_ROOT}'; test -f '${REMOTE_DEPLOY_SCRIPT}' || { echo '服务器缺少 scripts/deploy/panji-deploy.sh' >&2; exit 2; }; bash '${REMOTE_DEPLOY_SCRIPT}' ${REMOTE_ARGS[*]}"
+
+log "通过 panji-prod-ssh 执行部署（dry-run=${DRY_RUN}）..."
+log "远端命令: bash ${REMOTE_DEPLOY_SCRIPT} ${REMOTE_ARGS[*]}"
 
 set +e
-SSH_OUTPUT="$(ssh -o BatchMode=yes -o ConnectTimeout=30 "${SSH_ALIAS}" \
-    "cat > /tmp/panji-deploy-remote.sh && chmod +x /tmp/panji-deploy-remote.sh && PANJI_REGISTRY_PREFIX='${PANJI_REGISTRY_PREFIX:-}' bash /tmp/panji-deploy-remote.sh ${REMOTE_ARGS[*]}" \
-    < "${REMOTE_SCRIPT_LOCAL}" 2>&1)"
+"${SSH_WRAPPER}" -o BatchMode=yes -o ConnectTimeout=30 "${REMOTE_CMD}"
 SSH_RC=$?
 set -e
 
-echo "${SSH_OUTPUT}"
-
 if [[ "${SSH_RC}" -ne 0 ]]; then
     fail "远程部署失败（SSH rc=${SSH_RC}）。服务保持部署前版本，请查看上方阶段/行号定位。"
-fi
-
-# ===== 最终校验：通过公网 /api/v1/version 确认远端 SHA =====
-if [[ "${DRY_RUN}" != "true" ]]; then
-    log "本地校验远端 runtime SHA（公网 /api/v1/version）..."
-    set +e
-    PUBLIC_VER="$(curl -sSf --max-time 15 http://43.136.118.82/api/v1/version 2>/dev/null || true)"
-    set -e
-    if [[ -z "${PUBLIC_VER}" ]]; then
-        log "警告: 公网 /api/v1/version 不可达（远端内部校验已通过，忽略此项）"
-    else
-        PUBLIC_SHA="$(echo "${PUBLIC_VER}" \
-            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("git_sha",""))' 2>/dev/null || true)"
-        EXPECTED_SHORT="${TARGET_SHA:0:7}"
-        if [[ -n "${PUBLIC_SHA}" && "${PUBLIC_SHA}" != "${EXPECTED_SHORT}" ]]; then
-            fail "公网 runtime SHA=${PUBLIC_SHA} 与目标 ${EXPECTED_SHORT} 不匹配！"
-        fi
-        [[ -n "${PUBLIC_SHA}" ]] \
-            && log "公网 runtime SHA 匹配: ${PUBLIC_SHA}" \
-            || log "公网 runtime SHA 为空但远端健康检查通过"
-    fi
 fi
 
 log "panji-test-deploy 完成：${TARGET_SHA}"

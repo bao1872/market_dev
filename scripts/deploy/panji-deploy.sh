@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
-# panji-deploy.sh — 盘迹生产环境自动部署脚本
+# panji-deploy.sh — 盘迹开发部署唯一服务器端实现（Live Mount）
 #
-# 设计目标：
-# - 接收精确 SHA，验证其属于 origin/main；
-# - 工作区不干净即失败；
-# - 按变更范围分类部署，默认使用 Live Mount，不重建镜像；
-# - 不 down -v，不删除 PostgreSQL/Redis Volume，不自动 migration；
-# - 记录 previous/last-good SHA，失败可回滚代码和应用容器；
-# - 支持 --dry-run，只输出计划不执行变更。
+# 权威来源：
+#   - rules/80-deployment-data-safety.md（部署与数据安全硬约束）
+#   - docs/runbooks/development-deployment.md（操作步骤）
+#   - docs/maps/80-system-runtime.md（已核验运行事实）
+#
+# 唯一运行模式：
+#   docker-compose.prod.yml + docker-compose.live.yml（始终叠加）
+#   镜像只提供运行环境；运行代码唯一来自 /opt/panji-live。
+#   即使因依赖/Dockerfile 变化重建镜像，重建后仍以 prod+live 叠加启动。
+#
+# 职责（本脚本是服务器端唯一部署实现）：
+#   fetch → checkout → 变更分类 → 环境镜像 build（仅必要时）→ sync →
+#   migration（仅 migration_changed）→ restart → health → SHA 验证 → 状态记录 → 回滚
 #
 # 用法:
-#   scripts/deploy/panji-deploy.sh <SHA> [--dry-run]
-#   scripts/deploy/panji-deploy.sh --dry-run <SHA>
+#   scripts/deploy/panji-deploy.sh <FULL_SHA> [--dry-run]
 #
-# 示例:
-#   ssh panji-prod '/usr/local/bin/panji-deploy.sh abc1234'
+# 调用方：scripts/ops/panji-test-deploy（本地唯一用户入口，经 SSH 调用本脚本）
 #
 # 约束:
 # - 必须在 panji-prod（43.136.118.82）上运行；
-# - REPO_ROOT 默认 /root/web_dev；
-# - LIVE_ROOT 默认 /opt/panji-live；
-# - 依赖：git, docker compose, flock, rsync, curl, npm/node（前端构建）.
+# - REPO_ROOT 默认 /root/web_dev；LIVE_ROOT 默认 /opt/panji-live；
+# - 不 down -v，不删除 PostgreSQL/Redis Volume；
+# - 不自动执行 bootstrap / Review run / pointer publish 等任何数据操作；
+# - 依赖：git, docker compose, flock, rsync, curl, npm/node（前端构建）。
 
 set -euo pipefail
 
@@ -29,15 +34,39 @@ LIVE_ROOT="${PANJI_LIVE_ROOT:-/opt/panji-live}"
 ENV_FILE="${PANJI_ENV_FILE:-/etc/market-dev/market.env}"
 STATE_FILE="${PANJI_STATE_FILE:-/etc/market-dev/.panji-deploy-state}"
 LOCK_FILE="${PANJI_LOCK_FILE:-/var/lock/panji-deploy.lock}"
+MIN_DISK_GB="${PANJI_MIN_DISK_GB:-20}"
+MAX_DISK_PCT="${PANJI_MAX_DISK_PCT:-82}"
+MIN_MEM_MB="${PANJI_MIN_MEM_MB:-4096}"
+
+# 唯一 Compose 组合：prod + live 始终叠加。禁止出现不叠加 live.yml 的变体。
 COMPOSE_CMD="docker compose --env-file ${ENV_FILE} -f docker-compose.prod.yml -f docker-compose.live.yml"
-# [P0 2026-07-30] 纯镜像部署：不叠加 live.yml，禁止 Live Mount 覆盖 baked-in 代码
-# 满足 AGENTS.md §8 "正式镜像部署，禁止Live Mount/docker cp/临时业务脚本，保证repo=image=runtime SHA"
-COMPOSE_CMD_NO_LIVE="docker compose --env-file ${ENV_FILE} -f docker-compose.prod.yml"
-# 强制镜像构建：PANJI_FORCE_IMAGE_BUILD=1 时无论变更范围都走 image scope
-FORCE_IMAGE_BUILD="${PANJI_FORCE_IMAGE_BUILD:-}"
+
+# 所有复用 backend 代码的 Python 服务（Live Mount 挂载 /opt/panji-live/backend/app）
+PYTHON_SERVICES=(
+    backend
+    worker-bars-scheduler
+    worker-strategy-scheduler
+    worker-calendar
+    worker-monitor
+    worker-strategy-batch
+    worker-outbox
+    worker-delivery
+    worker-after-close
+    worker-watchdog
+    worker-capture
+)
 
 DRY_RUN=false
 TARGET_SHA=""
+PREVIOUS_SHA=""
+
+# 变更分类标志（由 classify_changes 计算）
+BACKEND_RUNTIME_CHANGED=false
+FRONTEND_RUNTIME_CHANGED=false
+MIGRATION_CHANGED=false
+BACKEND_ENVIRONMENT_CHANGED=false
+FRONTEND_ENVIRONMENT_CHANGED=false
+CAPTURE_ENVIRONMENT_CHANGED=false
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -49,7 +78,7 @@ fail() {
 }
 
 usage() {
-    echo "用法: $0 <SHA> [--dry-run]"
+    echo "用法: $0 <FULL_SHA> [--dry-run]"
     echo "环境变量: PANJI_REPO_ROOT, PANJI_LIVE_ROOT, PANJI_ENV_FILE, PANJI_STATE_FILE, PANJI_LOCK_FILE"
     exit 1
 }
@@ -63,6 +92,9 @@ parse_args() {
                 ;;
             -h|--help)
                 usage
+                ;;
+            -*)
+                fail "未知选项: $1"
                 ;;
             *)
                 if [[ -z "${TARGET_SHA}" ]]; then
@@ -94,15 +126,6 @@ check_prerequisites() {
     command -v rsync >/dev/null 2>&1 || fail "缺少 rsync"
     command -v curl >/dev/null 2>&1 || fail "缺少 curl"
 
-    # [Phase 5B-2] 确保 state 文件目录存在（state 初始化）
-    local state_dir
-    state_dir="$(dirname "${STATE_FILE}")"
-    if [[ ! -d "${state_dir}" ]]; then
-        mkdir -p "${state_dir}" || fail "无法创建 state 目录: ${state_dir}"
-        log "已创建 state 目录: ${state_dir}"
-    fi
-
-    # 验证 SSH Host 别名/身份（如通过别名调用）
     if [[ -n "${PANJI_SSH_HOST:-}" ]]; then
         local resolved
         resolved="$(ssh -G "${PANJI_SSH_HOST}" 2>/dev/null | awk '/^hostname /{print $2; exit}')"
@@ -110,16 +133,61 @@ check_prerequisites() {
     fi
 }
 
+check_resource_budget() {
+    log "检查资源预算（任何状态修改之前）..."
+
+    [[ "${MIN_DISK_GB}" =~ ^[0-9]+$ && "${MIN_DISK_GB}" -ge 20 ]] \
+        || fail "PANJI_MIN_DISK_GB 只能保持或提高 20 GB 下限"
+    [[ "${MAX_DISK_PCT}" =~ ^[0-9]+$ && "${MAX_DISK_PCT}" -le 82 ]] \
+        || fail "PANJI_MAX_DISK_PCT 只能保持或收紧 82% 上限"
+    [[ "${MIN_MEM_MB}" =~ ^[0-9]+$ && "${MIN_MEM_MB}" -ge 4096 ]] \
+        || fail "PANJI_MIN_MEM_MB 只能保持或提高 4096 MB 下限"
+
+    local available_kb available_gb used_pct mem_kb mem_mb
+    available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+    used_pct="$(df -Pk / | awk 'NR==2 {gsub(/%/, "", $5); print $5}')"
+    if [[ -r /proc/meminfo ]]; then
+        mem_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)"
+    elif command -v sysctl >/dev/null 2>&1; then
+        mem_kb="$(( $(sysctl -n hw.memsize) / 1024 ))"
+    else
+        fail "无法读取 MemAvailable"
+    fi
+    [[ "${available_kb}" =~ ^[0-9]+$ && "${used_pct}" =~ ^[0-9]+$ && "${mem_kb}" =~ ^[0-9]+$ ]] \
+        || fail "无法读取磁盘或内存预算"
+    available_gb=$((available_kb / 1024 / 1024))
+    mem_mb=$((mem_kb / 1024))
+
+    [[ "${available_gb}" -ge "${MIN_DISK_GB}" ]] \
+        || fail "根分区可用 ${available_gb} GB，低于 ${MIN_DISK_GB} GB"
+    [[ "${used_pct}" -le "${MAX_DISK_PCT}" ]] \
+        || fail "根分区使用率 ${used_pct}%，高于 ${MAX_DISK_PCT}%"
+    [[ "${mem_mb}" -ge "${MIN_MEM_MB}" ]] \
+        || fail "MemAvailable ${mem_mb} MB，低于 ${MIN_MEM_MB} MB"
+
+    log "资源预算通过: disk_free=${available_gb}GB disk_used=${used_pct}% mem_available=${mem_mb}MB"
+}
+
+ensure_state_directory() {
+    local state_dir
+    state_dir="$(dirname "${STATE_FILE}")"
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] 将确保 state 目录存在: ${state_dir}"
+    elif [[ ! -d "${state_dir}" ]]; then
+        mkdir -p "${state_dir}" || fail "无法创建 state 目录: ${state_dir}"
+    fi
+}
+
 validate_sha() {
     log "验证 SHA: ${TARGET_SHA}"
 
     cd "${REPO_ROOT}"
+    [[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || fail "必须提供 40 位完整 SHA"
 
-    # [Phase 5B-2] 部署前必须 fetch origin main，避免使用 stale refs
-    log "拉取 origin/main 最新引用..."
-    git fetch origin main --no-tags 2>&1 | sed 's/^/  /' || fail "git fetch origin main 失败"
+    # dev 是唯一部署来源
+    log "拉取 origin/dev 最新引用..."
+    git fetch origin dev --no-tags 2>&1 | sed 's/^/  /' || fail "git fetch origin dev 失败"
 
-    # 必须是完整或短 SHA，且能被解析
     if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
         fail "SHA 不存在或不是 commit: ${TARGET_SHA}"
     fi
@@ -127,13 +195,12 @@ validate_sha() {
     local full_sha
     full_sha="$(git rev-parse "${TARGET_SHA}^{commit}")"
 
-    # 必须属于 origin/main
-    if ! git merge-base --is-ancestor "${full_sha}" origin/main 2>/dev/null; then
-        fail "SHA ${full_sha} 不是 origin/main 的祖先，拒绝部署"
+    if ! git merge-base --is-ancestor "${full_sha}" origin/dev 2>/dev/null; then
+        fail "SHA ${full_sha} 不是 origin/dev 的祖先，拒绝部署"
     fi
 
     TARGET_SHA="${full_sha}"
-    log "SHA 验证通过: ${TARGET_SHA}"
+    log "SHA 验证通过（origin/dev 祖先，完整 SHA）: ${TARGET_SHA}"
 }
 
 check_working_tree() {
@@ -142,13 +209,7 @@ check_working_tree() {
     cd "${REPO_ROOT}"
 
     if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-        fail "工作区不干净，拒绝自动部署。请手动处理未提交修改后再试。"
-    fi
-
-    local current_branch
-    current_branch="$(git branch --show-current)"
-    if [[ "${current_branch}" != "main" ]]; then
-        fail "当前分支是 '${current_branch}'，不是 main，拒绝部署"
+        fail "工作区不干净，拒绝部署。请手动处理未提交修改后再试。"
     fi
 }
 
@@ -158,7 +219,7 @@ load_previous_state() {
     else
         PREVIOUS_SHA=""
     fi
-    log "上一次部署 SHA: ${PREVIOUS_SHA:-无}"
+    log "上一次部署 SHA: ${PREVIOUS_SHA:-无（按首次 Live Mount 部署处理）}"
 }
 
 save_state() {
@@ -171,67 +232,73 @@ save_state() {
     fi
 }
 
+# 变更分类：使用「上一部署 SHA → 目标 SHA」的差异，禁止使用 HEAD~1
+# （一次部署可能跨多个 commit，HEAD~1 会漏判）。
 classify_changes() {
-    log "分类变更范围..."
+    log "分类变更范围（${PREVIOUS_SHA:0:7}..${TARGET_SHA:0:7}）..."
 
     cd "${REPO_ROOT}"
 
-    # [P0 2026-07-30] 强制镜像构建：PANJI_FORCE_IMAGE_BUILD=1 跳过分类，直接走 image scope
-    if [[ "${FORCE_IMAGE_BUILD}" == "1" || "${FORCE_IMAGE_BUILD}" == "true" ]]; then
-        log "PANJI_FORCE_IMAGE_BUILD=1，强制镜像构建（纯镜像部署，禁止 Live Mount）"
-        CHANGE_SCOPE="image"
+    if [[ -z "${PREVIOUS_SHA}" ]]; then
+        log "无上一次部署记录：按首次 Live Mount 部署处理（同步 backend + frontend）"
+        BACKEND_RUNTIME_CHANGED=true
+        FRONTEND_RUNTIME_CHANGED=true
+        MIGRATION_CHANGED=true
         return
     fi
 
-    if [[ -z "${PREVIOUS_SHA}" ]]; then
-        log "无上一次部署记录，按全量 backend+frontend 处理"
-        CHANGE_SCOPE="all"
+    if ! git cat-file -e "${PREVIOUS_SHA}^{commit}" 2>/dev/null; then
+        log "上一部署 SHA ${PREVIOUS_SHA:0:7} 在本地不可解析：按首次 Live Mount 部署处理"
+        BACKEND_RUNTIME_CHANGED=true
+        FRONTEND_RUNTIME_CHANGED=true
+        MIGRATION_CHANGED=true
         return
     fi
 
     local changed_files
-    changed_files="$(git diff --name-only "${PREVIOUS_SHA}..${TARGET_SHA}" 2>/dev/null || true)"
+    changed_files="$(git diff --name-only "${PREVIOUS_SHA}" "${TARGET_SHA}" 2>/dev/null || true)"
 
     if [[ -z "${changed_files}" ]]; then
-        log "两次 SHA 之间无文件变化"
-        CHANGE_SCOPE="none"
+        log "两次 SHA 之间无文件变化（仍将执行最终 SHA 与 Mount 核验）"
         return
     fi
 
-    # 判断是否为纯文档/治理/部署脚本变更
-    local non_docs_files
-    non_docs_files="$(echo "${changed_files}" | grep -vE '^(docs/|rules/|AGENTS\.md|README\.md|CHANGELOG|\.github/workflows/deploy-production\.yml|scripts/deploy/panji-deploy\.sh)' || true)"
-
-    if [[ -z "${non_docs_files}" ]]; then
-        log "纯文档/治理/部署脚本变更，跳过应用部署"
-        CHANGE_SCOPE="docs"
-        return
+    # backend 运行代码（Live Mount 同步范围）
+    if echo "${changed_files}" | grep -qE '^backend/(app/|alembic/|alembic\.ini)'; then
+        BACKEND_RUNTIME_CHANGED=true
     fi
 
-    # 判断是否需要重建镜像（依赖/基础镜像/Dockerfile/Compose 核心变化）
-    local image_build_files
-    image_build_files="$(echo "${changed_files}" | grep -E '^(docker-compose\.prod\.yml|backend/Dockerfile|backend/Dockerfile\.capture|backend/pyproject\.toml|backend/pyproject\.lock|frontend/Dockerfile|frontend/package\.json|frontend/package-lock\.json)' || true)"
-
-    if [[ -n "${image_build_files}" ]]; then
-        log "检测到镜像/依赖变化，需要重建镜像: ${image_build_files}"
-        CHANGE_SCOPE="image"
-        return
+    # frontend 运行代码（需要 build dist）
+    if echo "${changed_files}" | grep -qE '^frontend/(src/|public/|index\.html|vite\.config|tsconfig)'; then
+        FRONTEND_RUNTIME_CHANGED=true
     fi
 
-    # 判断是否只有前端变化
-    local backend_files frontend_files
-    backend_files="$(echo "${changed_files}" | grep -E '^(backend/|scripts/)' | grep -vE '^scripts/deploy/panji-deploy\.sh$' || true)"
-    frontend_files="$(echo "${changed_files}" | grep -E '^(frontend/|frontend\.config\.|vite\.config)' || true)"
-
-    if [[ -n "${frontend_files}" && -z "${backend_files}" ]]; then
-        CHANGE_SCOPE="frontend"
-        log "变更范围: frontend only"
-        return
+    # migration
+    if echo "${changed_files}" | grep -qE '^backend/alembic/versions/'; then
+        MIGRATION_CHANGED=true
     fi
 
-    # 默认 backend + shared workers（Live Mount）
-    CHANGE_SCOPE="backend"
-    log "变更范围: backend + shared workers（Live Mount）"
+    # backend 运行环境（依赖 / Dockerfile / 系统依赖 → 需要 build backend 镜像）
+    if echo "${changed_files}" | grep -qE '^backend/(Dockerfile|pyproject\.toml|pyproject\.lock|poetry\.lock|requirements.*\.txt)$'; then
+        BACKEND_ENVIRONMENT_CHANGED=true
+    fi
+
+    # frontend 运行环境（依赖 / Dockerfile / Nginx / entrypoint → 需要 build frontend 镜像）
+    if echo "${changed_files}" | grep -qE '^frontend/(Dockerfile|package\.json|package-lock\.json|nginx\.conf|docker-entrypoint\.sh|logrotate-nginx)'; then
+        FRONTEND_ENVIRONMENT_CHANGED=true
+    fi
+
+    # capture 运行环境（浏览器环境 → 需要 build capture 镜像）
+    if echo "${changed_files}" | grep -qE '^backend/Dockerfile\.capture$'; then
+        CAPTURE_ENVIRONMENT_CHANGED=true
+    fi
+
+    log "  backend_runtime_changed=${BACKEND_RUNTIME_CHANGED}"
+    log "  frontend_runtime_changed=${FRONTEND_RUNTIME_CHANGED}"
+    log "  migration_changed=${MIGRATION_CHANGED}"
+    log "  backend_environment_changed=${BACKEND_ENVIRONMENT_CHANGED}"
+    log "  frontend_environment_changed=${FRONTEND_ENVIRONMENT_CHANGED}"
+    log "  capture_environment_changed=${CAPTURE_ENVIRONMENT_CHANGED}"
 }
 
 run_cmd() {
@@ -246,19 +313,59 @@ run_cmd() {
 checkout_target() {
     log "检出目标 SHA..."
     cd "${REPO_ROOT}"
+    run_cmd git fetch origin dev --no-tags
     run_cmd git checkout -f "${TARGET_SHA}"
     log "已检出: ${TARGET_SHA}"
 }
 
-sync_live_mount() {
-    log "同步运行时代码到 ${LIVE_ROOT}..."
+# 仅构建确实受影响的镜像。镜像只提供运行环境，
+# 构建完成后仍以 prod+live 叠加启动，运行代码仍来自 /opt/panji-live。
+build_environment_images() {
+    local images=()
+    [[ "${BACKEND_ENVIRONMENT_CHANGED}" == "true" ]] && images+=(backend)
+    [[ "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]] && images+=(frontend)
+    [[ "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" ]] && images+=(worker-capture)
 
-    if [[ "${DRY_RUN}" == "true" ]]; then
-        log "[dry-run] rsync backend/app, backend/alembic, backend/alembic.ini, frontend/dist 到 ${LIVE_ROOT}"
-        return
+    if [[ ${#images[@]} -eq 0 ]]; then
+        log "无运行环境变化，跳过镜像构建（普通代码变化不 build）"
+        return 0
     fi
 
-    mkdir -p "${LIVE_ROOT}/backend" "${LIVE_ROOT}/frontend"
+    log "运行环境变化，构建受影响镜像: ${images[*]}"
+    cd "${REPO_ROOT}"
+    run_cmd ${COMPOSE_CMD} build "${images[@]}"
+}
+
+build_frontend_dist() {
+    log "构建前端 dist..."
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] 在 ${REPO_ROOT}/frontend 执行 vite build（不构建 Docker 镜像）"
+        return 0
+    fi
+
+    cd "${REPO_ROOT}/frontend"
+    if [[ "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
+        log "前端依赖或构建环境变化，先执行 npm ci"
+        npm ci
+    fi
+    if [[ -x "./node_modules/.bin/vite" ]]; then
+        NODE_OPTIONS=--max-old-space-size=1024 ./node_modules/.bin/vite build
+    else
+        log "WARN: ./node_modules/.bin/vite 不存在，回退到 npm run build"
+        NODE_OPTIONS=--max-old-space-size=1024 npm run build
+    fi
+    cd "${REPO_ROOT}"
+}
+
+sync_backend_runtime() {
+    log "同步 backend 运行代码到 ${LIVE_ROOT}..."
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] rsync backend/app, backend/alembic, backend/alembic.ini → ${LIVE_ROOT}/backend/"
+        return 0
+    fi
+
+    mkdir -p "${LIVE_ROOT}/backend"
 
     rsync -a --delete \
         --exclude='__pycache__' \
@@ -275,117 +382,91 @@ sync_live_mount() {
 
     rsync -a "${REPO_ROOT}/backend/alembic.ini" "${LIVE_ROOT}/backend/alembic.ini"
 
-    if [[ -d "${REPO_ROOT}/frontend/dist" ]]; then
-        rsync -a --delete \
-            --exclude='.gitkeep' \
-            "${REPO_ROOT}/frontend/dist/" "${LIVE_ROOT}/frontend/dist/"
-        mkdir -p "${LIVE_ROOT}/frontend/dist/static/captures"
-    fi
-
-    echo -n "${TARGET_SHA}" > /tmp/panji-runtime-sha-tmp
-    rsync -a /tmp/panji-runtime-sha-tmp "${LIVE_ROOT}/RUNTIME_SHA"
-    rm -f /tmp/panji-runtime-sha-tmp
-
-    log "同步完成"
+    log "backend 运行代码同步完成"
 }
 
-build_frontend() {
-    log "本地构建前端..."
-    cd "${REPO_ROOT}/frontend"
+sync_frontend_runtime() {
+    log "同步 frontend dist 到 ${LIVE_ROOT}..."
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        log "[dry-run] npm run build（或 vite build）"
-        return
+        log "[dry-run] rsync frontend/dist → ${LIVE_ROOT}/frontend/dist"
+        return 0
     fi
 
-    if [[ -x "./node_modules/.bin/vite" ]]; then
-        NODE_OPTIONS=--max-old-space-size=1024 ./node_modules/.bin/vite build
-    else
-        NODE_OPTIONS=--max-old-space-size=1024 npm run build
+    [[ -d "${REPO_ROOT}/frontend/dist" ]] || fail "frontend/dist 不存在，前端构建可能失败"
+
+    mkdir -p "${LIVE_ROOT}/frontend"
+    rsync -a --delete \
+        --exclude='.gitkeep' \
+        "${REPO_ROOT}/frontend/dist/" "${LIVE_ROOT}/frontend/dist/"
+    # capture 静态目录是 frontend nginx 的嵌套挂载点，必须存在
+    mkdir -p "${LIVE_ROOT}/frontend/dist/static/captures"
+
+    log "frontend dist 同步完成"
+}
+
+write_runtime_sha() {
+    log "写入 RUNTIME_SHA=${TARGET_SHA}..."
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] 写入 ${LIVE_ROOT}/RUNTIME_SHA = ${TARGET_SHA}（完整 SHA）"
+        return 0
     fi
+
+    mkdir -p "${LIVE_ROOT}"
+    local tmp
+    tmp="$(mktemp)"
+    printf '%s' "${TARGET_SHA}" > "${tmp}"
+    rsync -a "${tmp}" "${LIVE_ROOT}/RUNTIME_SHA"
+    rm -f "${tmp}"
+
+    log "RUNTIME_SHA 已写入 ${LIVE_ROOT}/RUNTIME_SHA"
 }
 
-compose_config_check() {
-    log "校验 Compose 配置..."
-    cd "${REPO_ROOT}"
-    run_cmd ${COMPOSE_CMD} config --quiet
-    log "Compose 配置校验通过"
-}
-
-recreate_services() {
-    local services=("$@")
-    log "重建服务: ${services[*]}"
-    cd "${REPO_ROOT}"
-    run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build "${services[@]}"
-}
-
-build_images() {
-    log "构建镜像（backend/frontend/worker-capture）..."
-    cd "${REPO_ROOT}"
-    # [P0-7 2026-07-30] 先原子更新 market.env，再构建，确保 build 和 up -d 使用同一 GIT_SHA
-    # image 模式: repo SHA = image tag = image_git_sha = runtime_git_sha
-    update_env_file image
-    # 注入版本信息（shell export 作为 build-arg 备用，market.env 是 SSOT）
-    export GIT_SHA="${TARGET_SHA:0:7}"
-    export BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    run_cmd docker compose --env-file "${ENV_FILE}" -f docker-compose.prod.yml build backend frontend worker-capture
-}
-
-# [P0-7 2026-07-30] 原子更新 market.env 中的 GIT_SHA / BUILD_TIME / DEPLOYMENT_MODE
-# 禁止用 sed -i 直接修改（非原子，中途崩溃会损坏文件）
-# 使用 temp file + mv 原子替换，保留原文件 owner/mode
-# 参数: $1 = deployment_mode (image 或 live)
-# [P0-4 2026-07-30] Live 模式不得修改 GIT_SHA（用于 docker-compose.prod.yml image tag）
-#   docker-compose.prod.yml 使用 image: market-dev-backend:${GIT_SHA}
-#   Live 模式不构建新镜像，如果把 GIT_SHA 改成新 SHA，Compose 找不到对应镜像
-#   Live 模式只更新 BUILD_TIME 和 DEPLOYMENT_MODE=live；RUNTIME_SHA 由 sync_live_mount 写入
+# 更新 market.env：BUILD_TIME 与 DEPLOYMENT_MODE=live。
+# 唯一运行模式为 live，故 DEPLOYMENT_MODE 恒为 live。
+# GIT_SHA 用于 docker-compose.prod.yml 的 image tag，仅在构建镜像时更新，
+# 否则保持不变（避免 Compose 引用不存在的镜像 tag）。
 update_env_file() {
-    local deployment_mode="${1:-image}"
-    log "原子更新 ${ENV_FILE} (mode=${deployment_mode})..."
+    local update_git_sha="${1:-false}"
+    log "原子更新 ${ENV_FILE}（DEPLOYMENT_MODE=live, update_git_sha=${update_git_sha}）..."
 
     local short_sha="${TARGET_SHA:0:7}"
     local build_time
     build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        if [[ "${deployment_mode}" == "image" ]]; then
-            log "[dry-run] 将更新 ${ENV_FILE}: GIT_SHA=${short_sha}, BUILD_TIME=${build_time}, DEPLOYMENT_MODE=${deployment_mode}"
+        if [[ "${update_git_sha}" == "true" ]]; then
+            log "[dry-run] 将更新 ${ENV_FILE}: GIT_SHA=${short_sha}, BUILD_TIME=${build_time}, DEPLOYMENT_MODE=live"
         else
-            log "[dry-run] 将更新 ${ENV_FILE}: BUILD_TIME=${build_time}, DEPLOYMENT_MODE=${deployment_mode} (GIT_SHA 保持不变)"
+            log "[dry-run] 将更新 ${ENV_FILE}: BUILD_TIME=${build_time}, DEPLOYMENT_MODE=live（GIT_SHA 保持不变）"
         fi
         return 0
     fi
 
-    # [P4 2026-07-30] 保存原文件 owner/mode，原子替换后恢复
     local orig_owner orig_group orig_mode
     orig_owner="$(stat -c '%u' "${ENV_FILE}" 2>/dev/null || echo "0")"
     orig_group="$(stat -c '%g' "${ENV_FILE}" 2>/dev/null || echo "0")"
     orig_mode="$(stat -c '%a' "${ENV_FILE}" 2>/dev/null || echo "600")"
 
-    # 临时文件必须与目标同目录（确保 mv 原子）
     local tmp_file
     tmp_file="$(mktemp "${ENV_FILE}.XXXXXX")" || fail "无法创建临时文件"
-
-    # 复制现有 env
     cp "${ENV_FILE}" "${tmp_file}"
 
-    # [P0-4] image 模式: 更新 GIT_SHA (镜像 tag); live 模式: 不更新 GIT_SHA
-    if [[ "${deployment_mode}" == "image" ]]; then
-        awk -v sha="${short_sha}" -v bt="${build_time}" -v dm="${deployment_mode}" '
+    if [[ "${update_git_sha}" == "true" ]]; then
+        awk -v sha="${short_sha}" -v bt="${build_time}" '
             /^GIT_SHA=/ { print "GIT_SHA=" sha; next }
             /^BUILD_TIME=/ { print "BUILD_TIME=" bt; next }
-            /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=" dm; next }
+            /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=live"; next }
             { print }
         ' "${tmp_file}" > "${tmp_file}.new" && mv "${tmp_file}.new" "${tmp_file}"
-        # 检查是否已存在
         if ! grep -q "^GIT_SHA=" "${tmp_file}"; then
             echo "GIT_SHA=${short_sha}" >> "${tmp_file}"
         fi
     else
-        # live 模式: 只更新 BUILD_TIME 和 DEPLOYMENT_MODE，不动 GIT_SHA
-        awk -v bt="${build_time}" -v dm="${deployment_mode}" '
+        awk -v bt="${build_time}" '
             /^BUILD_TIME=/ { print "BUILD_TIME=" bt; next }
-            /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=" dm; next }
+            /^DEPLOYMENT_MODE=/ { print "DEPLOYMENT_MODE=live"; next }
             { print }
         ' "${tmp_file}" > "${tmp_file}.new" && mv "${tmp_file}.new" "${tmp_file}"
     fi
@@ -394,134 +475,158 @@ update_env_file() {
         echo "BUILD_TIME=${build_time}" >> "${tmp_file}"
     fi
     if ! grep -q "^DEPLOYMENT_MODE=" "${tmp_file}"; then
-        echo "DEPLOYMENT_MODE=${deployment_mode}" >> "${tmp_file}"
+        echo "DEPLOYMENT_MODE=live" >> "${tmp_file}"
     fi
 
-    # [P4] 恢复原文件 owner/mode（cp 会用默认 umask）
     chmod "${orig_mode}" "${tmp_file}" 2>/dev/null || true
     chown "${orig_owner}:${orig_group}" "${tmp_file}" 2>/dev/null || true
-
-    # 原子替换（mv 在同一文件系统上是原子的）
     mv "${tmp_file}" "${ENV_FILE}" || fail "无法原子替换 ${ENV_FILE}"
 
-    # 验证写入成功
-    local verified_bt verified_dm
-    verified_bt="$(grep "^BUILD_TIME=" "${ENV_FILE}" | cut -d= -f2)"
+    local verified_dm
     verified_dm="$(grep "^DEPLOYMENT_MODE=" "${ENV_FILE}" | cut -d= -f2)"
-    if [[ "${verified_bt}" != "${build_time}" ]]; then
-        fail "market.env BUILD_TIME 验证失败: 期望 ${build_time}, 实际 ${verified_bt}"
-    fi
-    if [[ "${verified_dm}" != "${deployment_mode}" ]]; then
-        fail "market.env DEPLOYMENT_MODE 验证失败: 期望 ${deployment_mode}, 实际 ${verified_dm}"
-    fi
+    [[ "${verified_dm}" == "live" ]] || fail "market.env DEPLOYMENT_MODE 验证失败: 期望 live, 实际 ${verified_dm}"
 
-    if [[ "${deployment_mode}" == "image" ]]; then
-        local verified_sha
-        verified_sha="$(grep "^GIT_SHA=" "${ENV_FILE}" | cut -d= -f2)"
-        if [[ "${verified_sha}" != "${short_sha}" ]]; then
-            fail "market.env GIT_SHA 验证失败: 期望 ${short_sha}, 实际 ${verified_sha}"
-        fi
-        log "已原子更新 ${ENV_FILE}: GIT_SHA=${verified_sha}, BUILD_TIME=${verified_bt}, DEPLOYMENT_MODE=${verified_dm}"
+    log "已原子更新 ${ENV_FILE}: DEPLOYMENT_MODE=${verified_dm}"
+}
+
+compose_config_check() {
+    log "校验 Compose 配置（prod + live 叠加）..."
+    cd "${REPO_ROOT}"
+    run_cmd ${COMPOSE_CMD} config --quiet
+    log "Compose 配置校验通过"
+}
+
+# migration 仅在 migration_changed 时执行；失败时调用方不得重启应用服务。
+run_migration() {
+    log "执行 alembic upgrade head（使用目标 SHA 的 Live Mount 代码）..."
+    cd "${REPO_ROOT}"
+    run_cmd ${COMPOSE_CMD} run --rm --no-deps --no-build backend bash -c "cd /app && alembic upgrade head"
+    log "migration 完成"
+}
+
+restart_services() {
+    local services=("$@")
+    if [[ ${#services[@]} -eq 0 ]]; then
+        log "无需重启任何服务"
+        return 0
+    fi
+    log "重启服务: ${services[*]}"
+    cd "${REPO_ROOT}"
+    run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build "${services[@]}"
+}
+
+deploy() {
+    # 1. 运行环境镜像（仅受影响的）
+    if [[ "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" ]]; then
+        update_env_file true
+        build_environment_images
     else
-        local existing_sha
-        existing_sha="$(grep "^GIT_SHA=" "${ENV_FILE}" | cut -d= -f2)"
-        log "已原子更新 ${ENV_FILE}: GIT_SHA=${existing_sha} (不变), BUILD_TIME=${verified_bt}, DEPLOYMENT_MODE=${verified_dm}"
+        update_env_file false
+    fi
+
+    # 2. 前端 dist（运行代码或运行环境变化都需要重新产出 dist）
+    local need_frontend=false
+    if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
+        need_frontend=true
+        build_frontend_dist
+        sync_frontend_runtime
+    fi
+
+    # 3. backend 运行代码
+    local need_backend=false
+    if [[ "${BACKEND_RUNTIME_CHANGED}" == "true" \
+        || "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" \
+        || "${MIGRATION_CHANGED}" == "true" ]]; then
+        need_backend=true
+        sync_backend_runtime
+    fi
+
+    # 4. RUNTIME_SHA 始终写入（是 runtime_git_sha 的唯一来源）
+    write_runtime_sha
+
+    compose_config_check
+
+    # 5. migration（失败即返回，调用方不重启服务）
+    if [[ "${MIGRATION_CHANGED}" == "true" ]]; then
+        run_migration || return 1
+    else
+        log "migration_changed=false，跳过 alembic upgrade"
+    fi
+
+    # 6. 重启：Python 服务与 frontend 分别判定；postgres/redis/umami 永不重启
+    local restart_list=()
+    if [[ "${need_backend}" == "true" ]]; then
+        restart_list+=("${PYTHON_SERVICES[@]}")
+    fi
+    if [[ "${need_frontend}" == "true" ]]; then
+        restart_list+=(frontend)
+    fi
+
+    if [[ ${#restart_list[@]} -eq 0 ]]; then
+        log "无运行代码变化，不重启任何服务（仅刷新 RUNTIME_SHA 与核验）"
+    else
+        restart_services "${restart_list[@]}"
     fi
 }
 
-deploy_scope() {
-    case "${CHANGE_SCOPE}" in
-        none|docs)
-            log "无需应用变更，跳过部署"
-            ;;
-        frontend)
-            # [P0-7 2026-07-30] Live Mount scope: DEPLOYMENT_MODE=live
-            # repo SHA = runtime_git_sha; image_git_sha 允许为旧镜像（不重建）
-            # market.env GIT_SHA = runtime SHA（非镜像 tag），不指向不存在镜像
-            update_env_file live
-            build_frontend
-            sync_live_mount
-            compose_config_check
-            recreate_services frontend
-            ;;
-        backend)
-            # [P0-7 2026-07-30] Live Mount scope: DEPLOYMENT_MODE=live
-            # repo SHA = runtime_git_sha; image_git_sha 允许为旧镜像（不重建）
-            # market.env GIT_SHA = runtime SHA（非镜像 tag），不指向不存在镜像
-            update_env_file live
-            build_frontend
-            sync_live_mount
-            compose_config_check
-            recreate_services \
-                backend \
-                worker-bars-scheduler worker-strategy-scheduler worker-calendar \
-                worker-monitor worker-strategy-batch worker-outbox worker-delivery \
-                worker-after-close worker-watchdog worker-capture
-            ;;
-        image)
-            # [P0 2026-07-30] 纯镜像部署：构建镜像后不 sync_live_mount，
-            # 使用 docker-compose.prod.yml 单文件重建，保证 repo=image=runtime SHA
-            # [P0-7] build_images 内部已调用 update_env_file（构建前原子更新）
-            build_images
-            build_frontend
-            compose_config_check
-            # 镜像重建后全量 up -d（不叠加 live.yml，不覆盖 baked-in 代码）
-            # [P0 2026-07-30] 移除 goaccess（已被 Umami 替代，docker-compose.prod.yml 无此服务）
-            run_cmd ${COMPOSE_CMD_NO_LIVE} up -d --force-recreate --remove-orphans \
-                backend frontend \
-                worker-bars-scheduler worker-strategy-scheduler worker-calendar \
-                worker-monitor worker-strategy-batch worker-outbox worker-delivery \
-                worker-after-close worker-watchdog worker-capture
-            ;;
-        all)
-            # [P0-7 2026-07-30] Live Mount scope: DEPLOYMENT_MODE=live
-            # repo SHA = runtime_git_sha; image_git_sha 允许为旧镜像（不重建）
-            # market.env GIT_SHA = runtime SHA（非镜像 tag），不指向不存在镜像
-            update_env_file live
-            build_frontend
-            sync_live_mount
-            compose_config_check
-            recreate_services \
-                backend frontend \
-                worker-bars-scheduler worker-strategy-scheduler worker-calendar \
-                worker-monitor worker-strategy-batch worker-outbox worker-delivery \
-                worker-after-close worker-watchdog worker-capture
-            ;;
-        *)
-            fail "未知变更范围: ${CHANGE_SCOPE}"
-            ;;
-    esac
-}
-
-health_check() {
-    # [Phase 5B-2] dry-run 模式下只做计划验证，不称健康检查
+# 部署成功判据（全部基于完整 SHA，不接受短 SHA）：
+#   repo HEAD = RUNTIME_SHA = version.runtime_git_sha = 目标完整 SHA
+#   deployment_mode = live
+#   受影响容器 Mounts 包含 /opt/panji-live
+verify_deployment() {
     if [[ "${DRY_RUN}" == "true" ]]; then
-        log "[dry-run] 计划验证: 将检查 port 80, /v1/health, /v1/health/ready, /v1/version runtime_git_sha, 关键容器, Scheduler 单实例"
-        log "[dry-run] [P0-7] SHA gate: repo HEAD = image tag = container env GIT_SHA = /version runtime SHA"
+        log "[dry-run] 计划核验:"
+        log "[dry-run]   repo HEAD = ${TARGET_SHA}"
+        log "[dry-run]   ${LIVE_ROOT}/RUNTIME_SHA = ${TARGET_SHA}"
+        log "[dry-run]   /v1/version runtime_git_sha = ${TARGET_SHA}（完整 SHA）"
+        log "[dry-run]   /v1/version deployment_mode = live"
+        log "[dry-run]   /v1/health, /v1/health/ready 返回 200"
+        log "[dry-run]   backend 与 Python 容器 Mounts 包含 ${LIVE_ROOT}"
         return 0
     fi
 
-    log "健康检查..."
+    log "核验部署结果..."
 
+    # 1. repo HEAD
+    cd "${REPO_ROOT}"
+    local repo_head
+    repo_head="$(git rev-parse HEAD)"
+    if [[ "${repo_head}" != "${TARGET_SHA}" ]]; then
+        log "repo HEAD 不匹配: 期望 ${TARGET_SHA}, 实际 ${repo_head}"
+        return 1
+    fi
+    log "repo HEAD 一致: ${repo_head}"
+
+    # 2. RUNTIME_SHA 文件
+    local file_sha
+    file_sha="$(cat "${LIVE_ROOT}/RUNTIME_SHA" 2>/dev/null || echo "")"
+    if [[ "${file_sha}" != "${TARGET_SHA}" ]]; then
+        log "RUNTIME_SHA 不匹配: 期望 ${TARGET_SHA}, 实际 ${file_sha:-空}"
+        return 1
+    fi
+    log "RUNTIME_SHA 一致: ${file_sha}"
+
+    # 3. health
     local max_wait=60
     local waited=0
-
-    # 等待 backend /v1/health
     while [[ ${waited} -lt ${max_wait} ]]; do
         if curl -sf http://127.0.0.1:8000/v1/health >/dev/null 2>&1; then
-            log "backend /v1/health 通过"
             break
         fi
         log "等待 backend /v1/health... (${waited}/${max_wait})"
         sleep 2
         waited=$((waited + 2))
     done
-
     if [[ ${waited} -ge ${max_wait} ]]; then
+        log "/v1/health 未通过（超时 ${max_wait}s）"
         return 1
     fi
+    log "/v1/health 通过"
 
-    # /v1/health/ready（需要等待 startup 完成，包括种子数据初始化）
+    # 4. ready
     waited=0
     while [[ ${waited} -lt ${max_wait} ]]; do
         if curl -sf http://127.0.0.1:8000/v1/health/ready >/dev/null 2>&1; then
@@ -531,61 +636,52 @@ health_check() {
         sleep 2
         waited=$((waited + 2))
     done
-
     if [[ ${waited} -ge ${max_wait} ]]; then
-        log "/v1/health/ready 未通过（等待 ${max_wait}s 超时）"
+        log "/v1/health/ready 未通过（超时 ${max_wait}s）"
         return 1
     fi
     log "/v1/health/ready 通过"
 
-    # /v1/version runtime_git_sha
-    # [P0 2026-07-30] 纯镜像部署时 GIT_SHA 只有短 SHA（7 chars），比较前 7 位即可
-    # Live Mount 部署时 RUNTIME_SHA 文件含完整 SHA，短 SHA 比较仍然成立
-    local runtime_sha
-    runtime_sha="$(curl -sf http://127.0.0.1:8000/v1/version 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("runtime_git_sha","unknown"))' 2>/dev/null || echo "unknown")"
-    if [[ "${runtime_sha:0:7}" != "${TARGET_SHA:0:7}" ]]; then
-        log "runtime_git_sha 不匹配: 期望 ${TARGET_SHA:0:7}, 实际 ${runtime_sha:0:7}"
+    # 5. version：完整 runtime_git_sha + deployment_mode=live
+    local version_json runtime_sha deployment_mode
+    version_json="$(curl -sf http://127.0.0.1:8000/v1/version 2>/dev/null || echo "")"
+    [[ -n "${version_json}" ]] || { log "/v1/version 不可达"; return 1; }
+
+    runtime_sha="$(echo "${version_json}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("runtime_git_sha",""))' 2>/dev/null || echo "")"
+    deployment_mode="$(echo "${version_json}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("deployment_mode",""))' 2>/dev/null || echo "")"
+
+    if [[ "${runtime_sha}" != "${TARGET_SHA}" ]]; then
+        log "version.runtime_git_sha 不匹配（要求完整 SHA）: 期望 ${TARGET_SHA}, 实际 ${runtime_sha:-空}"
         return 1
     fi
-    log "runtime_git_sha 验证通过: ${runtime_sha:0:7}"
+    log "version.runtime_git_sha 一致: ${runtime_sha}"
 
-    # [P0-7 2026-07-30] SHA gate: 验证 image tag 和 container env GIT_SHA
-    # repo HEAD = image tag = container env = /version runtime SHA
-    # health=200 不能单独判成功，必须四重一致
-    local short_sha="${TARGET_SHA:0:7}"
-
-    # 验证 backend 容器 env GIT_SHA
-    local container_env_sha
-    container_env_sha="$(docker inspect trading-backend --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep "^GIT_SHA=" | cut -d= -f2 || echo "unknown")"
-    if [[ "${container_env_sha:0:7}" != "${short_sha}" ]]; then
-        log "容器 env GIT_SHA 不匹配: 期望 ${short_sha}, 实际 ${container_env_sha:0:7}"
+    if [[ "${deployment_mode}" != "live" ]]; then
+        log "deployment_mode 不是 live: 实际 ${deployment_mode:-空}"
         return 1
     fi
-    log "容器 env GIT_SHA 验证通过: ${container_env_sha:0:7}"
+    log "deployment_mode = live"
 
-    # 验证 backend 镜像 tag（纯镜像部署时镜像 tag 应包含 SHA）
-    local image_tag
-    image_tag="$(docker inspect trading-backend --format '{{.Config.Image}}' 2>/dev/null || echo "unknown")"
-    # 镜像 tag 可能是 "panji-backend:abc1234" 或 "panji-backend:latest"
-    # 只在纯镜像部署（CHANGE_SCOPE=image）时强制校验 tag 包含 SHA
-    if [[ "${CHANGE_SCOPE}" == "image" ]]; then
-        if [[ "${image_tag}" != *"${short_sha}"* ]]; then
-            log "镜像 tag 不包含 SHA: 期望含 ${short_sha}, 实际 ${image_tag}"
+    # 6. Mounts 包含 /opt/panji-live
+    local backend_mounts
+    backend_mounts="$(docker inspect trading-backend --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null || echo "")"
+    if [[ "${backend_mounts}" != *"${LIVE_ROOT}"* ]]; then
+        log "backend 容器 Mounts 不含 ${LIVE_ROOT}（未实际运行 Live Mount）"
+        return 1
+    fi
+    log "backend 容器 Mounts 包含 ${LIVE_ROOT}"
+
+    if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
+        local frontend_mounts
+        frontend_mounts="$(docker inspect trading-frontend --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null || echo "")"
+        if [[ "${frontend_mounts}" != *"${LIVE_ROOT}/frontend/dist"* ]]; then
+            log "frontend 容器 Mounts 不含 ${LIVE_ROOT}/frontend/dist"
             return 1
         fi
-        log "镜像 tag 验证通过: ${image_tag}"
+        log "frontend 容器 Mounts 包含 ${LIVE_ROOT}/frontend/dist"
     fi
 
-    log "[P0-7] SHA gate 通过: repo=${short_sha} env=${container_env_sha:0:7} runtime=${runtime_sha:0:7} image=${image_tag}"
-
-    # 端口 80
-    if ! curl -sf http://127.0.0.1:80 >/dev/null 2>&1; then
-        log "端口 80 未返回 2xx"
-        return 1
-    fi
-    log "端口 80 通过"
-
-    # 关键容器检查
+    # 7. 关键容器与 Scheduler 单实例
     local required=(trading-backend trading-frontend trading-redis trading-postgres)
     for c in "${required[@]}"; do
         if ! docker ps --format '{{.Names}}' | grep -qx "${c}"; then
@@ -595,7 +691,6 @@ health_check() {
     done
     log "关键容器检查通过"
 
-    # Scheduler 单实例检查（每个 scheduler 类型只应有一个容器在运行）
     local scheduler_names=(trading-worker-bars-scheduler trading-worker-strategy-scheduler trading-worker-calendar)
     for s in "${scheduler_names[@]}"; do
         local count
@@ -606,55 +701,6 @@ health_check() {
         fi
     done
     log "Scheduler 单实例检查通过"
-
-    # GoAccess 非破坏性检查（失败报告具体错误，不让整个部署无限等待）
-    check_goaccess_health
-
-    return 0
-}
-
-check_goaccess_health() {
-    log "GoAccess 健康检查..."
-
-    # 1. trading-goaccess 容器必须 running
-    if ! docker ps --format '{{.Names}}' | grep -qx "trading-goaccess"; then
-        log "GoAccess 容器 trading-goaccess 未运行（非阻塞，报告后继续）"
-        return 0
-    fi
-    log "trading-goaccess 容器运行中"
-
-    # 2. frontend 容器内 /var/log/nginx/access.log 必须存在
-    if ! docker exec trading-frontend test -f /var/log/nginx/access.log 2>/dev/null; then
-        log "GoAccess 检查: trading-frontend:/var/log/nginx/access.log 不存在（非阻塞）"
-        return 0
-    fi
-    log "frontend access.log 存在"
-
-    # 3. backend 容器内 /srv/goaccess 目录必须存在（挂载点）
-    if ! docker exec trading-backend test -d /srv/goaccess 2>/dev/null; then
-        log "GoAccess 检查: trading-backend:/srv/goaccess 目录不存在（非阻塞）"
-        return 0
-    fi
-    log "backend /srv/goaccess 目录存在"
-
-    # 4. report.json 允许首次启动后最多等待 300 秒生成
-    local report_max_wait=300
-    local report_waited=0
-    while [[ ${report_waited} -lt ${report_max_wait} ]]; do
-        if docker exec trading-backend test -f /srv/goaccess/report.json 2>/dev/null; then
-            log "GoAccess report.json 已生成（等待 ${report_waited}s）"
-            return 0
-        fi
-        sleep 10
-        report_waited=$((report_waited + 10))
-        if [[ $((report_waited % 60)) -eq 0 ]]; then
-            log "等待 GoAccess report.json 生成... (${report_waited}/${report_max_wait})"
-        fi
-    done
-
-    # report.json 未生成：输出 goaccess 最近日志辅助排查，但不让部署失败
-    log "GoAccess report.json 在 ${report_max_wait}s 内未生成（非阻塞，检查 goaccess 日志）"
-    docker logs --tail 30 trading-goaccess 2>&1 | sed 's/^/  goaccess: /' || true
 
     return 0
 }
@@ -672,67 +718,70 @@ rollback() {
     cd "${REPO_ROOT}"
     run_cmd git checkout -f "${PREVIOUS_SHA}"
 
-    # [P0-7 2026-07-30] 回滚时用 update_env_file 原子恢复 GIT_SHA（禁止 sed -i）
-    # 临时将 TARGET_SHA 设为 PREVIOUS_SHA 以复用 update_env_file
     local saved_target_sha="${TARGET_SHA}"
     TARGET_SHA="${PREVIOUS_SHA}"
-    update_env_file
+    if [[ "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" ]]; then
+        update_env_file true
+    else
+        update_env_file false
+    fi
+    sync_backend_runtime
+    if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
+        build_frontend_dist
+        sync_frontend_runtime
+    fi
+    write_runtime_sha
     TARGET_SHA="${saved_target_sha}"
 
-    # 重新同步旧代码
-    sync_live_mount
-
-    # 重新创建应用容器（不回滚数据库）
     cd "${REPO_ROOT}"
     run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build \
-        backend frontend \
-        worker-bars-scheduler worker-strategy-scheduler worker-calendar \
-        worker-monitor worker-strategy-batch worker-outbox worker-delivery \
-        worker-after-close worker-watchdog worker-capture
+        "${PYTHON_SERVICES[@]}" frontend
 
-    log "回滚完成"
+    log "回滚完成（已恢复到 ${PREVIOUS_SHA}）"
+}
+
+cleanup_resources() {
+    log "执行部署后受控清理..."
+    run_cmd docker builder prune -f
+    run_cmd docker image prune -f
+    run_cmd docker container prune -f
 }
 
 main() {
     parse_args "$@"
+    check_prerequisites
+    check_resource_budget
 
-    # 串行锁
     (
         flock -n 200 || fail "另一个部署正在进行中"
 
-        check_prerequisites
+        ensure_state_directory
         validate_sha
         check_working_tree
         load_previous_state
         classify_changes
 
-        if [[ "${CHANGE_SCOPE}" == "none" || "${CHANGE_SCOPE}" == "docs" ]]; then
-            checkout_target
-            save_state "${TARGET_SHA}"
-            # [Phase 5B-2] 部署后切回 main 分支，避免 detached HEAD
-            cd "${REPO_ROOT}"
-            git checkout main 2>/dev/null || log "警告: 切回 main 分支失败"
-            log "部署完成（无应用变更）"
-            exit 0
+        checkout_target
+
+        if ! deploy; then
+            rollback
+            fail "部署失败并已回滚（migration 失败时不会重启应用服务）"
         fi
 
-        # 部署
-        if ! (
-            checkout_target
-            deploy_scope
-            health_check
-        ); then
+        if ! verify_deployment; then
             rollback
-            fail "部署失败并已回滚"
+            fail "部署核验失败并已回滚"
         fi
+
+        cleanup_resources
 
         save_state "${TARGET_SHA}"
 
-        # [Phase 5B-2] 部署后切回 main 分支，避免 detached HEAD
-        cd "${REPO_ROOT}"
-        run_cmd git checkout main 2>/dev/null || log "警告: 切回 main 分支失败，仓库可能处于 detached HEAD"
-
         log "部署成功: ${TARGET_SHA}"
+        log "  deployment_mode=live"
+        log "  repo HEAD = RUNTIME_SHA = version.runtime_git_sha = ${TARGET_SHA}"
 
     ) 200>"${LOCK_FILE}"
 }

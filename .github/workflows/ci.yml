@@ -1,26 +1,27 @@
-# Fast CI — 每次 push / PR 到 dev 触发
+# CI — 手动触发的诊断工具（CHANGE-20260802-003 配套）
 #
-# 职责（CHANGE-20260802-002 配套）：
+# 定位：CI **不是**部署前置门禁，也**不是** dev 的自动检查。
+#   - 唯一触发方式为 workflow_dispatch（手动）；
+#   - push dev / PR 均不触发，避免把 CI 变成事实上的发布流程；
+#   - 部署是否执行由 scripts/ops/panji-test-deploy + 人工判断决定，与本 workflow 无耦合。
+#
+# 职责：
 #   - changes job 依据 git diff 输出 docs/backend/frontend/db/migration/deploy 标志；
 #   - 始终运行：architecture / docs-consistency / governance / test-allowlist；
 #   - 仅相关范围运行后端 / 前端 / PG / Migration 测试；
 #   - 不相关 job 允许 skipped，且不计入 CI Gate 失败（依据 changes 输出，非 IDE 判断）；
 #   - 不运行完整 Playwright / 全 pytest / 全 base cycle / 全仓 Ruff/Mypy 报告。
 #
-# 本文件取代原单体 ci.yml（14 job 全量无条件运行）。名称保持 "CI"、
-# Gate 名称保持 "CI Gate"，以兼容 rules/40、AGENTS.md 及分支保护配置中的引用。
-#
-# 配套的另外两层：
-#   - .github/workflows/release.yml  Release Gate（手动指定 exact SHA，全量+构建镜像）
-#   - .github/workflows/nightly.yml  Nightly（定时全量回归）
+# 名称保持 "CI"、Gate 名称保持 "CI Gate"，以兼容既有引用。
 name: CI
 
 on:
-  push:
-    branches: [dev]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      base_sha:
+        description: "可选：用于范围分类的基线完整 SHA；为空时使用目标 SHA 的第一父提交"
+        required: false
+        type: string
 
 concurrency:
   group: fast-ci-${{ github.ref }}
@@ -44,6 +45,8 @@ jobs:
       db_changed: ${{ steps.filter.outputs.db_changed }}
       migration_changed: ${{ steps.filter.outputs.migration_changed }}
       deploy_changed: ${{ steps.filter.outputs.deploy_changed }}
+      base_sha: ${{ steps.shas.outputs.BASE }}
+      head_sha: ${{ steps.shas.outputs.HEAD }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,17 +55,15 @@ jobs:
         id: shas
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "BASE=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-            echo "HEAD=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
-          else
-            BASE="${{ github.event.before }}"
-            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
-              BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
-            fi
-            echo "BASE=$BASE" >> "$GITHUB_OUTPUT"
-            echo "HEAD=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          HEAD="${{ github.sha }}"
+          BASE="${{ inputs.base_sha }}"
+          if [ -z "$BASE" ]; then
+            BASE=$(git rev-parse "$HEAD^" 2>/dev/null || printf '%s' "$HEAD")
           fi
+          git cat-file -e "$BASE^{commit}"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          echo "BASE=$(git rev-parse "$BASE^{commit}")" >> "$GITHUB_OUTPUT"
+          echo "HEAD=$(git rev-parse "$HEAD^{commit}")" >> "$GITHUB_OUTPUT"
       - name: Classify changed files
         id: filter
         run: |
@@ -168,6 +169,7 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
       - run: pip install -e "backend[dev]"
       - run: python tools/check_governance_rules.py
+      - run: PURE_UNIT_TEST=1 pytest -q tools/tests/test_check_governance_rules.py
 
   # ---------------------------------------------------------------------------
   # 后端变化：Ruff / Mypy 增量 + 纯单元测试
@@ -191,7 +193,7 @@ jobs:
         working-directory: backend
         run: |
           set -euo pipefail
-          BASE="${{ needs.changes.outputs.BASE || github.event.before }}"
+          BASE="${{ needs.changes.outputs.base_sha }}"
           NEW=$(git diff --name-only --diff-filter=A "$BASE" "${{ github.sha }}" -- '*.py' | sed 's|^backend/||' | tr '\n' ' ' || true)
           if [ -n "$NEW" ]; then echo "New files: $NEW"; ruff check $NEW; else echo "No new backend Python files."; fi
 
@@ -217,7 +219,7 @@ jobs:
           mypy app --output json --show-error-codes --no-error-summary --hide-error-context --no-pretty > mypy-report.jsonl
           exit 0
       - name: Check new app files for mypy errors
-        run: python tools/check_mypy_new_files.py "${{ needs.changes.outputs.BASE || github.event.before }}" "${{ github.sha }}" backend/mypy-report.jsonl
+        run: python tools/check_mypy_new_files.py "${{ needs.changes.outputs.base_sha }}" "${{ needs.changes.outputs.head_sha }}" backend/mypy-report.jsonl
 
   backend-unit-tests:
     name: Backend Unit Tests
@@ -240,8 +242,7 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
       - run: pip install -e ".[dev]"
       # 排除 external_data：这些用例依赖 mootdx / 交易所网络接口，
-      # 失败通常代表外部服务不可达而非本仓库代码回归，不应阻断 Fast CI。
-      # 它们在 Nightly 的独立分组中运行并单独报告。
+      # 失败通常代表外部服务不可达而非本仓库代码回归；手工诊断时单独运行。
       - name: Run pure unit tests (no DB, no external data)
         run: pytest -m "not postgres and not external_data" --tb=short -q
 

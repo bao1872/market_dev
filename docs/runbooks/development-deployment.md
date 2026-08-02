@@ -1,161 +1,87 @@
-# 开发部署 Runbook（Live Mount 开发部署）
+# 开发部署 Runbook
 
-本 Runbook 是盘迹**唯一**的部署操作权威来源。它只描述开发阶段的部署闭环。
-禁止在本文件定义其他阶段，禁止描述未来正式发布方式。
+本文件是盘迹唯一的当前部署 Runbook。硬约束见
+`rules/80-deployment-data-safety.md`，运行事实见 `docs/maps/80-system-runtime.md`。
 
-权威来源（三者一致，冲突时以本文件 + `rules/80-deployment-data-safety.md` +
-`docs/maps/80-system-runtime.md` 为准）：
+## 适用边界
 
-- `rules/80-deployment-data-safety.md`（部署与数据安全硬约束）
-- `docs/maps/80-system-runtime.md`（已核验的当前运行事实）
-- 本文件（可重复执行的操作步骤）
+- 部署来源只能是已推送到 `origin/dev` 的精确完整 SHA；
+- 唯一本地入口是 `scripts/ops/panji-test-deploy`；
+- 唯一服务器实现是 `scripts/deploy/panji-deploy.sh`；
+- 唯一运行方式是 `docker-compose.prod.yml` + `docker-compose.live.yml`；
+- 本 Runbook 不授权生产部署、migration 或业务数据操作，执行这些动作仍需用户在当前任务明确授权。
 
-> 其他部署相关历史文档（如旧 `production-deployment.md` 描述的 `main` 自动部署 /
-> GHCR pull-only / Release Gate）已废止，不作为当前操作指令。
+## 部署前
 
-## 0. 当前唯一开发闭环
+1. 确认当前分支为 `dev`，工作树内容已经精确提交并推送到 `origin/dev`。
+2. 确认目标 SHA 是完整 40 位 commit，且 `git merge-base --is-ancestor <SHA> origin/dev` 成功。
+3. 完成修改范围内的本地纯单元测试、静态检查和部署合同测试。
+4. 确认没有正在运行的正式盘后任务或其他会被服务重启中断的业务任务。
+5. 不在命令中加入数据库 apply、业务 run、publish、withdrawal 或临时恢复脚本。
 
-```
-本地开发
-→ 修改范围测试（单元 + 静态检查；CI 非前置条件）
-→ 精确 commit（git add <file>，禁止 git add ./-A/-u）
-→ push origin/dev
-→ 服务器 checkout 精确 dev SHA
-→ Live Mount 同步运行代码到 /opt/panji-live
-→ 重启受影响服务
-→ health / version / 业务 smoke
-→ 停止
-```
-
-CI 可保留为手工诊断工具（分类测试、全量回归、集成测试），**不进入默认开发闭环**，
-不作为部署门禁。本地测试失败禁止部署；本地无法运行测试时如实报告，不得用 CI 或
-服务器测试掩盖。
-
-## 1. 部署合同（硬约束）
-
-### 1.1 普通 Python 代码变化
-
-- **不 build 镜像**；
-- 同步 `backend/app` 等运行代码到 `/opt/panji-live`；
-- 通过 `docker-compose.prod.yml` + `docker-compose.live.yml` 叠加，重启受影响的
-  Python 服务（backend 及所有 worker / capture）。
-
-### 1.2 普通前端代码变化
-
-- 执行 `frontend build` 生成 `dist`；
-- 同步 `dist` 到 `/opt/panji-live/frontend/dist`；
-- 重启 frontend；
-- **不 build 前端 Docker 镜像**。
-
-### 1.3 只有以下变化才 build 对应镜像
-
-- `pyproject.toml` 或 Python 依赖锁；
-- `package.json` / `package-lock.json`；
-- `Dockerfile` / `Dockerfile.capture`；
-- 系统依赖；
-- 基础镜像；
-- Capture 浏览器运行环境；
-- 必须烘焙进镜像的 Nginx 配置。
-
-### 1.4 互斥约束
-
-- **单次部署禁止同时使用 Live Mount 代码和新镜像内置代码**，避免运行时来源不明确；
-- 普通变更走 Live Mount，依赖 / Dockerfile 变化才走镜像构建，二者不混用。
-
-### 1.5 精确 SHA 与验证
-
-- 必须部署 **exact dev SHA**；
-- 必须验证 `runtime_git_sha`（= `/opt/panji-live/RUNTIME_SHA`）等于目标 dev SHA；
-- 必须验证服务器 repo HEAD 等于目标 dev SHA；
-- `/health` 正常不能单独判成功，两项 SHA 一致才是部署成功判据。
-
-### 1.6 数据边界
-
-- 代码部署**不自动执行**任何数据 apply / run / publish 操作；
-- migration 仅在确有新 migration 时由部署脚本显式、幂等地执行，且不属于"自动数据发布"。
-
-## 2. 前置条件
-
-1. 目标 SHA 已 `git push origin dev`；
-2. 修改范围内的单元测试与静态检查已在本地通过（失败禁止部署）；
-3. 当前无活跃盘后 / 正式任务，避免部署中断正在运行的正式流程；
-4. 通过 `scripts/ops/panji-prod-preflight` 校验（SSH 别名、仓库根、repo status、
-   docker compose、DB/Redis 端口）。
-
-## 3. 执行入口
-
-当前正式部署入口仍为 `scripts/ops/panji-test-deploy <SHA>`（经 `scripts/ops/panji-prod-ssh`
-唯一 SSH 入口）。执行结构：
-
-```
-preflight → 校验目标 dev SHA → 同步运行代码到 /opt/panji-live（rsync --delete） →
-逐服务重启受影响服务 → 逐服务校验 RUNTIME_SHA == 目标 SHA → health/version 业务 smoke
-```
-
-### 3.1 执行
+## Dry Run
 
 ```bash
-# 1) dry-run 检查计划（不改任何状态）
 scripts/ops/panji-test-deploy <FULL_SHA> --dry-run
+```
 
-# 2) 核对 dry-run：目标 SHA、待重启服务清单、postgres/redis 已排除、资源门禁结果
+dry-run 必须保持远端工作树、运行目录、容器、环境文件、数据库和部署状态文件不变。
+检查输出中的目标 SHA、上一成功 SHA、变更分类、镜像构建计划、migration 判定、同步目录、
+重启服务和最终验证计划。任一项与实际 diff 不一致时停止。
 
-# 3) 正式部署（Live Mount 同步 + 重启受影响服务，普通变更不 build 镜像）
+## 执行
+
+获得本轮明确生产部署授权后执行：
+
+```bash
 scripts/ops/panji-test-deploy <FULL_SHA>
 ```
 
-`postgres` / `redis` 为有状态服务，明确排除，不参与重启，避免触碰持久化数据。
+入口会先运行 `scripts/ops/panji-prod-preflight`，再经 `scripts/ops/panji-prod-ssh` 调用服务器
+仓库内的 `scripts/deploy/panji-deploy.sh`。不得用裸 `ssh`、`scp`、`docker cp`、stdin 脚本
+或容器内编辑替代该调用链。
 
-## 4. 版本与 SHA 核验
+## 变更分类
 
-当前运行后端版本端点路径以实测为准（早期镜像暴露 `/version` / `/api/v1/version`，
-Live Mount 模式以后端实际路由为准）。SHA 一致性证据：
+| 变化 | 动作 |
+|---|---|
+| 普通 Backend 代码 | 同步到 `/opt/panji-live/backend`，不构建镜像，重启 Python 服务 |
+| 普通 Frontend 代码 | 构建并同步 `frontend/dist`，不构建镜像，重启 frontend |
+| Backend 依赖或 Dockerfile | 构建 backend 环境镜像，仍以 Live Mount 运行 |
+| Frontend 依赖、Dockerfile 或 Nginx 运行环境 | 安装锁定依赖、构建对应环境镜像和 dist，仍以 Live Mount 运行 |
+| Capture Dockerfile | 构建 capture 环境镜像，仍以 Live Mount 运行 |
+| Alembic version 文件 | 同步目标代码后执行一次 `alembic upgrade head`；失败时不得重启应用 |
+| 纯文档/治理变化 | 不构建镜像、不执行 migration、不重启服务，只更新并核验目标 SHA |
 
-```bash
-# 服务器 repo HEAD 必须等于目标 dev SHA
-ssh panji-prod 'cd /root/web_dev && git rev-parse HEAD'
+所有分类基于“上一成功部署 SHA到目标 SHA”的完整差异，不使用 `HEAD~1`。
 
-# RUNTIME_SHA 文件必须等于目标 dev SHA
-ssh panji-prod 'cat /opt/panji-live/RUNTIME_SHA'
+## 成功判据
 
-# 受影响服务容器的运行代码来源（live 挂载点）应指向 /opt/panji-live
-ssh panji-prod 'docker inspect trading-backend --format "{{json .Mounts}}"'
-```
+部署脚本必须确认：
 
-任一不一致即判部署失败，回到上一已知良好 dev SHA 重新同步，不得通过"重启容器"
-或"重新部署"掩盖不一致。
+- 服务器 repo HEAD = 目标完整 SHA；
+- `/opt/panji-live/RUNTIME_SHA` = 目标完整 SHA；
+- `/v1/version.runtime_git_sha` = 目标完整 SHA；
+- `/v1/version.deployment_mode` = `live`；
+- `/v1/health` 与 `/v1/health/ready` 通过；
+- 受影响容器的 Mounts 包含 `/opt/panji-live`；
+- 关键容器运行，三个 Scheduler 各为单实例。
 
-## 5. 健康检查与业务 smoke
+只有全部成立后才能写入上一成功部署状态。`/health=200` 不能单独判成功。
 
-```bash
-# 端口 80
-curl -sf http://127.0.0.1:80 >/dev/null && echo "port 80 OK"
+## 失败与回滚
 
-# 后端健康（以实际暴露端点为准）
-curl -s http://127.0.0.1:8000/health
+失败时服务器实现恢复上一成功 SHA 的仓库、Live Mount 内容、前端 dist 和环境镜像引用，
+然后重建受影响应用容器。回滚不得执行数据库 downgrade，不得删除 Volume。
 
-# 版本 SHA
-curl -s http://127.0.0.1:8000/version
+若没有上一成功 SHA、migration 已产生无法自动恢复的外部影响，或回滚验证失败，必须停止并
+报告真实状态，不能继续重试或用手工覆盖掩盖。
 
-# 关键容器状态
-docker ps --format "table {{.Names}}\t{{.Status}}" | grep trading-
-```
+## 禁止操作
 
-## 6. 回滚
-
-普通变更（Live Mount）：重新同步上一已知良好 dev SHA 的运行代码到 `/opt/panji-live`
-并重启受影响服务。
-
-镜像构建变更：切回上一镜像并重启。
-
-均不回滚数据库，不执行 `docker compose down -v`，不删除 PostgreSQL / Redis Volume。
-
-## 7. 禁止操作（黑名单）
-
-1. `scp file.py panji-prod:/app/...` 手工单文件同步；
-2. `docker cp local.py trading-backend:/app/...` 容器内手工覆盖；
-3. SSH 进容器 `vi / sed` 修改源代码 / migration；
-4. 一次性业务脚本（`python -c '...'` 直接改生产）；
-5. `docker compose down -v` 或 `rm -rf /var/lib/docker/volumes/trading_*`；
-6. 单次部署混用 Live Mount 代码与新建镜像；
-7. 部署时自动执行数据 apply / run / publish。
+- `docker compose down -v` 或删除 PostgreSQL/Redis Volume；
+- 在服务器或容器内手工改源码；
+- 自动执行 bootstrap、Review/Auction run、publish 或 withdrawal；
+- 将 PostgreSQL、Redis、Umami 加入普通应用重启列表；
+- 同一次部署让运行代码同时来自镜像内置代码和非 Live Mount 路径；
+- 未验证完整 SHA、运行模式和挂载来源就报告成功。

@@ -1,4 +1,4 @@
-# CHANGE-20260801-002 — 全项目问题收口状态
+# CHANGE-20260801-003 — 全项目问题收口状态
 
 - 基线：`origin/dev@ff89fea`
 - 分支：`codex/panji-full-closure-20260801`
