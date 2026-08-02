@@ -1486,3 +1486,19 @@ Review 五阶段（Market Scan / Filter Discovery / Board Attribution / Stock Va
 3. **Board Attribution**：展示板块 raw 排名（覆盖度≥0.95 的板块），原因在 hover 显示；
 4. **Stock Validation**：个股第一金字塔必须完整展示（个股不受 review 历史门槛限制），`insufficient_history` 仅影响板块级对比；
 5. **Tracking Review**：追踪信号状态以第一金字塔验证结论为准，normalized 不足时 `trackingStatus` 不允许给出 normalized 偏差结论（只写 raw + "历史不足，未计算分位偏差"）。
+
+## 26. Review 计算事实、历史观测与发布终态合同（2026-08-01）
+
+- 当日与历史计算统一使用 `ReviewMemberFact`：instrument identity、日线 OHLC/真实日收益、
+  rolling position、volume/amount、第一金字塔 canonical 当前/前日状态、新鲜事件和权重。
+- P 使用真实日收益与价格位置；Q 使用 canonical 趋势/结构/新鲜事件；U 至少两个维度较前日改善；
+  C 明确 `equal_weight/official_weight/amount_weight`；V 分离 volume 与 amount 并使用同量纲均量比。
+- 编排采用两遍：先保存 raw/normalized，再按同日同 scope family 计算横截面分位，最后评估 signal。
+- `market_review_metric_observations` 保存 component raw、denominator、field source、weight mode、
+  algorithm/input/membership version；唯一键保证 bootstrap 重放幂等。
+- Bootstrap 默认 dry-run，按 market/index/style/industry/concept 分开处理；缺 PIT 成员时写
+  `bootstrap_unavailable`，禁止回退到当前成员。
+- force 永远只产生 provisional，不写正式 pointer；正式发布必须校验 core/board pointer、配置范围、
+  coverage、run items、算法版本和非 canary/provisional。旧 run 不原地修改。
+- 五阶段 UI 必须区分无信号、无追踪、历史不足、字段缺失和 API 错误；Evidence Drawer 展示来源、
+  分母、权重、版本与 readiness。

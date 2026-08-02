@@ -7,6 +7,7 @@
 - 已通过 `scripts/ops/panji-prod-preflight` 校验生产服务器入口；
 - 已读取目标 trade_date 的当前状态（`auction_anchor_snapshots` / `auction_anchor_publications` / `auction_scan_runs`）；
 - 已确认盘后主编排（`after_close_orchestrator`）的 stock_core pointer 已发布；
+- 已确认至少两个不同 `provider_family` 的外部来源已配置；只有 mootdx/pytdx 时必须停止在 `blocked_external_auction_truth_source`；
 - 本地 Mac 不启动 Worker；正式 Worker 在 `panji-prod` 服务器上运行。
 
 ## 1. 触发
@@ -90,8 +91,8 @@ curl -X POST https://<api>/api/v1/admin/auction/anchors \
 **行为**（`_acquire_or_recover_scan_run`）：
 1. 同 `date/type/version` 已 `succeeded` → 返回现有 run，幂等命中（`AuctionScanAlreadySucceededError`）
 2. 同 `date/type/version` 状态 `running` 且租约有效 → 拒绝重复（`AuctionScanConflictError`）
-3. 同 `date/type/version` 状态 `failed/partial` → 递增 `attempt_count`，创建新 run
-4. 同 `date/type/version` 状态 `running` 但租约过期 → fencing 恢复，原子切换到新 run，旧 run 保留审计
+3. 同 `date/type/version` 状态 `failed/partial` → 递增 `attempt_count`，复用同一 run 并清理未发布子结果后重算
+4. 同 `date/type/version` 状态 `running` 但租约过期 → fencing 接管同一 run，清理半成品后恢复
 
 **手动恢复**：
 ```bash
@@ -128,46 +129,25 @@ curl https://<api>/api/v1/auction/anchors/2026-07-31 \
 4. 若重启发生在 09:25:05 触发窗口的补偿窗口内（09:25:05 ~ 09:29:59），co-process 仍可创建当日任务
 5. fencing：旧 worker 的租约过期后，新 worker 通过 `lease_epoch` 递增原子接管
 
-### 2.5 09:25 数据源覆盖检查（只读）
+### 2.5 最终报价真值检查
 
-**目的**：确认生产 `bars_minute` 表是否有 09:25 最终竞价数据，决定是否可执行 auction_final 扫描。
+scan 不再读取 `bars_minute`。统一入口先把每个来源写入 `auction_final_quotes`，再按
+`provider_family` 验证独立性和价格/量/额一致性，只有 `verified_consensus` capture 可被 scan 消费。
 
-**检查命令**（通过 `scripts/ops/panji-prod-ssh` 只读查询，禁止修改生产数据）：
-```bash
-# 1. bars_minute 总行数与时间范围
-scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock -c \
-  "SELECT COUNT(*) AS total, MIN(trade_time), MAX(trade_time) FROM bars_minute;"'
-
-# 2. 最近 20 交易日 09:25 覆盖率
-scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock -c \
-  "SELECT DATE(trade_time) AS d, COUNT(DISTINCT instrument_id) AS stocks_0925, \
-   COUNT(*) FILTER (WHERE close IS NOT NULL) AS close_nn, \
-   COUNT(*) FILTER (WHERE volume IS NOT NULL) AS vol_nn, \
-   COUNT(*) FILTER (WHERE amount IS NOT NULL) AS amt_nn \
-   FROM bars_minute WHERE trade_time::time = '\''09:25:00'\'' \
-   AND trade_time >= CURRENT_DATE - INTERVAL '\''30 days'\'' \
-   GROUP BY d ORDER BY d DESC LIMIT 20;"'
-
-# 3. 对照活跃 A 股数量
-scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock -c \
-  "SELECT market, status, COUNT(*) FROM instruments GROUP BY market, status;"'
-```
-
-**判定规则**：
-- `bars_minute` 为空 或 09:25 覆盖率 < 90% → `AUCTION_DATA_SOURCE_BLOCKED`，禁止执行 auction_final 扫描
-- 09:25 记录的 `close`/`volume`/`amount` 非空率 < 95% → `AUCTION_DATA_SOURCE_BLOCKED`
-- 抽查 10 只股票确认 09:25 记录是最终集合竞价结果（非 09:30 第一根分钟线、非补写、非零成交占位）
-
-**2026-07-31 审计结果**：`bars_minute` 为空（0 行），标记 `AUCTION_DATA_SOURCE_BLOCKED`。详见 `docs/maps/75-auction-analysis.md` §7.1。
+判定规则：
+- 独立 family 少于 2：`blocked_external_auction_truth_source`；
+- 价格超过最小跳动单位：`auction_truth_price_conflict`；
+- 量或额超过配置容差：对应 conflict；
+- 个股来源缺失：`partial`；
+- 以上状态均不得写 `auction_analysis_publications`。
 
 ## 3. Canary（小批量验证）
 
 ### 3.1 前置条件
 
 - 已有 dev/staging 环境（**禁止把 dev 直接部署生产"看效果"**）
-- 应用 Migration 077/078
-- 已确认 09:25 数据源覆盖率（按 §2.5 检查，不足时禁止扫描）
-- 已建立 `auction_final_quotes` 数据合同或接入现有行情 Provider 的最终竞价 DTO
+- 应用 Migration 077–082，并在 CI 临时 PostgreSQL 完成 upgrade/downgrade/upgrade
+- 已按 §2.5 确认两个独立来源和容差
 
 ### 3.2 Canary 样本
 
@@ -184,8 +164,9 @@ scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock 
 2. **09:25 扫描**：`auction_scan_runs` 状态 `succeeded`，`coverage_ratio` > 0
 3. **聚合**：`auction_scope_results` 含 market/industry/concept 三级
 4. **10:00 生命周期**：`auction_event_trackings.lifecycle` 从 `formed` 转为 `confirmed/weakened/failed`
-5. **/auction 三级页面**：`/auction`、`/auction/board/:boardId`、`/auction/stock/:symbol` 均可访问，DTO 含 `symbol` 和 `name`
-6. **/review 回流**：`/review` 第6阶段 AuctionBackflowPanel 展示五维度数据
+5. **正式 pointer**：`auction_analysis_publications` 指向同一 `scan_run_id`，用户 API 不可见未发布 run
+6. **/auction 三级页面**：三个页面均可访问，个股 DTO 含共识来源、原始证据与 capture time
+7. **/review 回流**：`/review` 竞价阶段展示五维度数据
 
 **禁止全量运行**：Canary 仅限小样本，验证通过后才可全量。
 
@@ -204,12 +185,11 @@ scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock 
 
 ### 4.2 Migration 回滚
 
-**场景**：Migration 077/078 引入问题需要回滚。
+**场景**：Migration 082 引入问题需要回滚。
 
 **行为**：
-- `alembic downgrade -1` 回滚到 076（`076_market_review_workbench`）
-- 077 含 7 张表 `drop_table`，回滚会删除所有 auction 数据
-- **回滚前必须备份**（如 `pg_dump --table=auction_*`）
+- `alembic downgrade 081_review_metric_observations` 只删除 analysis publication pointer 表，不删除 scan/run 子数据。
+- 不得在生产自动回滚 077；其 downgrade 会删除竞价业务表，必须单独获得破坏性操作授权。
 
 ### 4.3 前端回滚
 
@@ -227,7 +207,8 @@ scripts/ops/panji-prod-ssh 'docker exec trading-postgres psql -U bz -d bz_stock 
 - `auction_anchor_publications` 当日是否存在
 - `auction_scan_runs.status` 分布（succeeded/partial/failed）
 - `auction_event_trackings.lifecycle` 分布
-- 09:25 BarMinute 覆盖率
+- 各 `provider_family` capture coverage、truth status 和共识 capture coverage
+- `auction_analysis_publications` 与 scan/capture run 一致性
 
 ### 5.2 失败告警
 

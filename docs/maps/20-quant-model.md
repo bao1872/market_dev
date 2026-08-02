@@ -187,6 +187,15 @@
 
 **禁止**：前端解析 `statusText` 推断多空；用 VAH/VAL 替代 POC；显示原始 volume 大整数；向普通用户暴露 `DSA/Swing/Internal/CHoCH/Squeeze/dir_bars/Node` 等内部英文。
 
+## 14. DSA 选股与第一金字塔当前入口（2026-08-01 核验）
+
+- `backend/app/strategy/selectors/dsa_selector.py` 是由人工参考实现迁移后的生产 SSOT；运行时不读取 `ref/`。
+- `DSASelector.execute`、`compute_indicators`、单股详情、第一金字塔、temporal/structural factor 和
+  canonical adapter 均调用 `compute_dsa_bundle`，选股不再绕过统一计算入口。
+- `compute_dsa_bundle` 同时产出 visual segments 与 `last_row_metrics`；summary 的 segment/change 字段
+  从同一 bundle 映射，缺失保持 null，不以日收益或 0 伪造。
+- DSA 负责趋势段，SMC 负责结构事件，Node Cluster 负责筹码共识，三者边界不变。
+
 ## 10. 更新触发条件
 
 - 指标入口、参数源、输出 Schema 或写入位置变化；

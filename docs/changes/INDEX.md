@@ -45,6 +45,7 @@
 | CHANGE-20260730-018 | 2026-07-30 | 竞价分析完整链路 — 锚点+扫描+聚合+追踪+前端 | behavior+contract+architecture+data | 竞价分析/盘后编排/第二金字塔/复盘模块/前端 | 进行中（代码+测试+前端已实现；PG集成待CI；canary和部署待后续） | AU-01~AU-16/AC-01~AC-20/RV-01~RV-12 | `maps/75-auction-analysis.md`、`maps/30-after-close.md`、`maps/70-review.md` |
 | CHANGE-20260731-001 | 2026-07-31 | Auction Scheduler 真实可达 + 09:25 数据源审计 | behavior+architecture+data | 竞价分析/盘后编排/生产运行 | **仍 BLOCKED**（AUCTION_DATA_SOURCE_BLOCKED + BLOCKED_NO_STAGING + CI 终态未确认） | AU-01~AU-16 | `maps/75-auction-analysis.md`、`maps/80-system-runtime.md`、`runbooks/auction-analysis.md` |
 | CHANGE-20260801-001 | 2026-08-01 | 盘后 Review 闭环 + 时间线修复 + 详情同源/DSA 旧列下线 + 冷启动展示 + 测试环境部署 SSOT | behavior+architecture+runtime | 盘后/Review/行情个股/竞价/部署 | 已完成（部署 ff89fea，验收非 CLOSURE_PASSED，新问题由后续收口承载） | AC/ MX-60~63 / Review 冷启动 / AU / 部署 SSOT | `maps/30-after-close.md`、`maps/40-market-stock-experience.md`、`maps/70-review.md`、`maps/75-auction-analysis.md`、`maps/80-system-runtime.md` |
+| CHANGE-20260801-002 | 2026-08-01 | 全项目问题收口候选版本 | behavior+contract+architecture+data+ci | Review/第一金字塔/板块/行情体验/竞价/治理 | 候选代码完成；最终 SHA CI/PG 待验证；竞价外部双源阻断；生产零写入 | 收口总任务书 | `2026/CHANGE-20260801-002-full-project-closure.md` |
 
 ## 3. 状态说明
 

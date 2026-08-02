@@ -139,60 +139,37 @@ formed → confirmed → weakened → failed → expired
 - 是 NEW 分析层，不属于第一/第二金字塔；
 - 不生成第三金字塔、不生成综合分；
 - 锚点价格必须关联复权因子版本；
-- 本轮仅产出 PRD/Map 设计草案，迁移与业务代码延后。
+- 最终报价必须经过至少两个独立 `provider_family` 的一致性验证；同一供应链的不同服务器不构成两个来源。
 
-## 6. 本轮范围（DRAFT）
+## 6. 最终报价真值合同
 
-本 PRD 为草案（DRAFT），尚未确认。本轮只产出：
+最终报价 DTO 固定包含：`symbol`、`market`、`final_price`、`prev_close`、`volume`、
+`amount`、`source_timestamp`、`source_server`、`raw_payload`、`capture_time`、
+`is_final_auction`。
 
-- `docs/prd/75-auction-analysis.md`（本文件）；
-- `docs/maps/75-auction-analysis.md`（设计状态 Map 草案）。
+- 价格差不得超过最小价格跳动单位；量和额分别使用配置的相对容差。
+- 任一维度冲突时标记 `conflict`，不得进入 scan。
+- 配置了两个独立来源但个股报价缺失时标记 `partial`，不得正式发布。
+- 实际独立来源少于两个时标记 `blocked_external_auction_truth_source`。
+- 当前 mootdx/pytdx 属于同一通达信供应链，因此生产必须保持外部阻断。
 
-本轮不包含：
+## 7. 编排与发布合同
 
-- 数据库迁移；
-- 后端 service/domain/API 代码；
-- 前端代码；
-- 测试代码。
+正式链路为：来源采集留证 → 独立性与一致性验证 → 共识报价落库 → scan →
+market/industry/concept aggregate → `auction_analysis_publications` pointer。
 
-## 7. 待确认问题
+- 用户 API 只读取专属 pointer 指向的 `scan_run_id`，禁止直接读取最新 succeeded run。
+- 正式发布要求 truth=verified、production namespace、共识 capture succeeded、scan succeeded、
+  数据覆盖率不低于 0.95 且聚合结果存在。
+- Canary、partial、conflict、blocked_external 均不得写正式 pointer。
+- 重试复用唯一键对应 run，清理未发布半成品；已成功 run 幂等返回。
+- 开盘确认与 Review 回流独立于 P/Q/U/C/V，不并入第一或第二金字塔。
 
-以下问题在草案阶段未明确，需在确认前补充：
+## 8. 验收与状态语义
 
-- 锚点有效期阈值（`freshness` 由 fresh 转为 stale/expired 的具体交易日数）；
-- 板块扩散中"同板块"的口径（行业 vs 概念，是否两者各自计算扩散度）；
-- 锚点与第二金字塔字段的复用边界；
-- 历史参与的"测试"判定标准（触及锚点边界的容差）。
+内部代码合同以 `verified` 为最高状态；生产整体只有在 migration、PG Integration、真实双源、
+正式交易日 scan/aggregate/publish 和三级页面 E2E 全部通过后才能称为闭环。
 
-## 8. 竞价分析真实闭环状态（CHANGE-20260801-001 核验）
-
-### AU-CL-01 当前已闭环部分
-
-**仅 quote capture（竞价 quote 实时抓取落库）已确认通过：**
-
-- 竞价时段（09:15–09:25）的逐笔 quote 写入链路已验证；
-- capture service 容器健康，capture 日志与落库一一对应；
-- 竞价 capture 与收盘行情不存在互斥冲突。
-
-### AU-CL-02 当前未闭环部分（**不得在对外宣传/状态页声称全部通过**）
-
-以下环节仍未形成真实生产可用闭环，在完成对应验收前：
-
-1. **09:25 真值**：09:25 集中竞价最终成交价格的权威真值（集合竞价撮合价）仍未通过
-   三源对比（L1 snapshot / broker quote / 第三方数据源交叉验证）；
-2. **scan 阶段**：全市场锚点扫描（`auction_scan_service`）未实现/未验证 09:25 后 T+0
-   时间窗内端到端 scan 的完整性与幂等；
-3. **aggregate 阶段**：同一锚点生命周期的多日竞价迁移聚合未在生产跑通至少 20 个
-   交易日样本验证（覆盖率、扩散度、参与率三类指标）；
-4. **publish 阶段**：auction analysis 正式 pointer/发布门禁、失败回滚、
-   与 after_close publishing 的衔接未完成；
-5. **前端三级页面**：竞价板块看板 → 竞价板块详情 → 竞价个股详情 的三级页面
-   未通过真实交易日 E2E 验证（含 09:25 后 5 分钟内自动刷新、点击跳转、
-   与第一金字塔个股联动）。
-
-### AU-CL-03 Canary 与整体成功语义
-
-- 不能把单个 capture service 启动成功 / 单次 migration 通过 当作竞价分析"整体成功"。
-- 整体状态只能写：`partial_closed: quote_capture_only`。任何 status=200 health
-  响应不得声明 auction 已整体 ready。详见 `rules/40-testing-quality.md` §质量门禁"
-  禁止局部 Canary 冒充整体成功"。
+当前候选版本状态：内部双源合同、门禁、迁移、三级页面和 Review 回流已实现并通过本地纯单元/
+合同验证；真实第二独立供应商缺失，因此生产状态必须为
+`blocked_external_auction_truth_source`，不得声称生产竞价闭环。

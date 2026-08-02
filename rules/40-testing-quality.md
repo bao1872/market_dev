@@ -5,7 +5,7 @@
 
 ## CHANGE 规则
 
-每次修改必须新增 `docs/changes/records/CHANGE-YYYYMMDD-NNN.md` 并更新 `docs/changes/CHANGELOG.md`。
+普通 Bug 与局部代码修改默认由 Git 历史记录。只有重要业务规则、契约、主要实现结构、运行方式或重大数据修复发生变化时，才在 `docs/changes/YYYY/` 新增一个 Change 并更新 `docs/changes/INDEX.md`。
 
 CHANGE 必填字段：
 
@@ -24,7 +24,7 @@ CHANGE 必填字段：
 - 风险；
 - 遗留问题。
 
-不存在"小改不用 CHANGE"。`tools/check_docs_consistency.py` 规则 12 强制校验 CHANGE 引用可达性。
+禁止为同一闭环拆出多个重复 Change，也禁止新建报告或治理目录。
 
 ## 文档目录与 CI 门禁
 
@@ -32,9 +32,8 @@ CHANGE 必填字段：
 
 规则包括：
 
-- MANIFEST 存在且含实现核对基线（40 位 SHA 且为 HEAD 祖先）；
-- baseline 必须在 HEAD 的最近 50 个 commit 内；
-- `docs/current/*.md` 与 `docs/maps/*.md` 存在；
+- PRD、Maps、Changes 和 Runbooks 的本地链接有效；
+- `docs/current/` 保持 legacy 只读，不作为变更同步门禁；
 - 本地 Markdown 链接有效；
 - 无"待填写"占位符；
 - `feishu_webhook` 不得回退为当前方案；
@@ -42,7 +41,7 @@ CHANGE 必填字段：
 - CHANGE 引用必须可达；
 - ref/ 隔离文本扫描。
 
-CI 必须失败若代码 SHA 变化后未同步 current/contracts/CHANGE/MANIFEST baseline。
+CI 应在文档职责、链接、禁止路径或已确认事实出现矛盾时失败；不得仅因普通代码 SHA 变化强制制造无意义文档变更。
 
 ## 质量门禁
 

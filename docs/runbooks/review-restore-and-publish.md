@@ -1,183 +1,74 @@
-# Review 恢复与正式发布 Runbook
+# Review 恢复、发布与撤销 Runbook
 
-本 Runbook 描述盘后流水线中 review 阶段失败的恢复、正式发布、幂等重跑、与 after_close 正式链的操作。所有写入必须通过正式 orchestrator API / CLI / 管理后端 API，禁止裸 SQL、临时脚本 `UPDATE`。
+本 Runbook 只描述仓库当前存在的正式入口。禁止裸 SQL、`python -c`、临时脚本或直接修改
+`market_review_runs` / `factor_publications`。
 
-对应 PRD：
-- `docs/prd/30-after-close.md` §AC-70、§AC-71（盘后 7 步 review 阶段 + 幂等重跑）
-- `docs/prd/70-review.md` §RV-25（raw 冷启动 / pointer 日期同步 / bootstrap）
+对应 PRD：`../prd/70-review.md`。
 
 ## 前置条件
 
-1. 通过 `scripts/ops/panji-prod-preflight` 校验；
-2. 明确 `stock_core` 与 `board_analysis` 正式 pointer 已就绪（通过 `factor_publications` 表 is_published=true 的最新两条 scope=stock_core / board_analysis）；
-3. 禁止 force 发布全空数据（coverage < 0.95 或 P/Q/U/C/V raw 全部为 null）。
+1. 生产操作先运行 `scripts/ops/panji-prod-preflight`；本地不得连接数据库或启动 Worker。
+2. 当日正式 `stock_core` 与 `market_aggregation` pointer 已发布且日期一致。
+3. Migration 080–081 已在 CI 临时 PostgreSQL 完成 upgrade/downgrade/upgrade 与 Integration 验证。
+4. Review run 的 algorithm version、source run、scope 配置与输入 hash 均已核对。
 
-## 1. after_close review 阶段的正常流
+## 1. 正常计算与恢复
 
-### 1.1 after_close_orchestrator 正式 8 步（已在 `after_close_orchestrator.py 实现）
+正式盘后入口为 `after_close_orchestrator` 的 `computing_review` 阶段；管理员入口为
+`/api/v1/admin/review/runs`、`/runs/{id}/resume`、`/runs/{id}/publish` 和 `/runs/{id}/status`。
 
-```
-1. refreshing_daily → syncing_boards → checking_coverage
-2. computing_features（旧 4 步收敛后）
-3. publishing: 切换 stock_core + board_analysis 正式 pointer
-4. computing_review: 【新增，本 Runbook 核心】
-   4a. get_current_pointer(stock_core) + get_current_pointer(board_analysis)
-   4b. review_orchestrator.create_run(trade_date, stock_core_run_id, board_analysis_run_id)
-   4c. review_orchestrator.compute_run(review_run_id)
-   4d. review_orchestrator.publish_review(review_run_id)
-5. watchlist_ready（三项都 succeeded 时标记 completed）
-```
+- 同一输入的失败/中断 run 通过 resume 恢复，已完成 item 不重复计算。
+- 上游 core/board pointer 改变时必须创建新 Review run，旧 run 保留审计。
+- 不得原地修改已发布旧 run；新 run 通过门禁后原子切换 `factor_publications`。
+- failed run item 或 failed signal 必须修复根因，不得把状态直接改成 succeeded。
 
-### 1.2 review 失败的影响（失败绝不静默写 succeeded）
+## 2. Bootstrap
 
-- 任一步 4b/4c/4d 失败 → orchestrator metadata 写入：
-  - `metadata.review_run_id / review_status / review_reason`
-  - `SchedulerJobRun.status = 'failed' + error_message = 'review_failed: <具体原因>'`
-- **禁止**：`after_close_runs.status = 'succeeded' 但 review pointer 未 publish。
+`review_bootstrap_service.bootstrap_history(..., dry_run=True)` 默认只读，按
+market/index/style/industry/concept 分开处理。
 
-## 2. review 幂等恢复
+- 历史事实来自当日第一金字塔 history state/events、历史日线和 PIT universe/membership。
+- 缺少 PIT membership 时写 `bootstrap_unavailable`，禁止使用当前成员。
+- 相同 input hash + membership version 幂等写 `market_review_metric_observations`。
+- 未提供正式 CLI/API 前，不得在生产通过临时 Python 调用 service；由 after-close/admin 正式入口接入后再执行。
 
-**触发时机**：盘后主任务在 computing_review 阶段失败；或 4b/4c/4d 任一步失败，但上游 stock_core / board pointer 不需要重跑（只恢复 review）。
+## 3. 正式发布门禁
 
-### 2.1 Step 1: 只读确认状态
+`review_publication_service.publish_review` 必须同时满足：
 
-```bash
-# 用正式 CLI，禁止 docker exec 里 python -c 临时脚本
-docker exec trading-backend python -m scripts.review_cli status --trade-date YYYY-MM-DD
-```
+1. run 已完成且非 canary/provisional；force 请求只保留 provisional，永不写 pointer；
+2. source core/board run 与当日正式 pointer 完全一致；
+3. algorithm version 为当前版本，配置要求的 scope types/keys 完整；
+4. coverage、run items、signals 和 component readiness 达到门禁；
+5. publication date 与 core/board pointer date 一致。
 
-输出：
-```
-stock_core_pointer:   run_id=X status=published trade_date=YYYY-MM-DD coverage=0.98
-board_analysis_pointer: run_id=Y status=published trade_date=YYYY-MM-DD coverage=0.97
-current_latest_review_run: run_id=Z status=failed reason='<具体原因> created_at
-review_publication: is_published=false
-```
+普通 `/api/v1/review/*` 只读取正式 `factor_publications(publication_kind=market_review)`；
+provisional 仅允许 admin 通过显式 run_id/include_partial 查看。
 
-### 2.2 Step 2: 幂等重跑（上游未变）
+## 4. 撤销错误 pointer
 
-若 stock_core_run_id + board_analysis_run_id 与 current_latest_review_run 相同 → 使用同一 review_run_id 重跑：
+唯一正式入口：
 
 ```bash
-# --skip-if-same-input（只重跑当前失败的 compute/publish 步骤；
-# 若 compute 已 succeeded，直接 publish 失败 → 只跑 publish）
-docker exec trading-backend python -m scripts.review_cli rerun --review-run-id <review_run_id>
+python -m app.scripts.withdraw_review_publication \
+  --trade-date 2026-07-31 \
+  --expected-run-id <完整-run-uuid> \
+  --expected-publication-id <dry-run-返回的-pointer-uuid> \
+  --reason '<原因>' \
+  --operator '<操作者>' \
+  --idempotency-key '<唯一幂等键>'
 ```
 
-**幂等保证**：
-- 任一阶段已 succeeded 的子步骤跳过（create / compute / publish）不重跑；
-- 同一 review_run_id 重复调用返回同一结果。
+缺省为 dry-run。只有 dry-run 同时匹配任务书限定的日期、kind、scope、run_id 和唯一 pointer，
+并且 PG Integration、migration 与发布安全验证均通过后，才可在同一命令追加 `--apply`。
 
-### 2.3 Step 3: 输入变化（上游 pointer 已切换）→ 创建新 review_run
+撤销只删除唯一 pointer，保留 run、scope、signal、attribution、instrument、observation 和 audit metadata。
+重复执行返回 already-withdrawn；任何预期值不匹配立即停止。
 
-若上游 stock_core / board pointer 变化（例如 stock_core 重新跑了增量修复后切了新 run_id），必须创建新 review_run：
+## 5. 验证
 
-```bash
-docker exec trading-backend python -m scripts.review_cli create-and-run \
-  --trade-date YYYY-MM-DD \
-  --stock-core-run-id <new_X> \
-  --board-analysis-run-id <new_Y> \
-  --publish-on-success
-```
-
-→ 旧 review_run（run_id=Z 保留为审计（不 DELETE / UPDATE status）。
-
-## 3. Review 发布门禁（publish_review）
-
-### 3.1 发布前 5 项硬条件
-
-在正式切换 review_publications.published_run_id 前必须满足：
-
-```
-条件 1: market 范围 coverage >= 0.95
-条件 2: market 范围的 P.raw / Q.raw / U.raw 不全为 null（否则 P 若 raw 依赖 fp_segment_change_pct 全空则必须查 §40 MX-63)
-条件 3: review_run.status = 'succeeded' （非 running / failed）
-条件 4: source_core_run_id 与 source_board_run_id  == 当前正式 pointer run_id
-条件 5: 若 review_runs.metadata 中至少有一个 scope 成功 completed
-```
-
-违反任一条 → `publish_review()` 直接拒绝，返回 `error='publish_gate_failed: <违反项>`。**禁止 force 发布全空数据。`
-
-### 3.2 冷启动时的发布门禁（历史不足60天）
-
-冷启动场景（累计 normalized 不可用但 raw 已足够）：
-
-```
-放宽: normalized / historyPercentile120d 可为 null
-必须: raw_ready=true, coverage>=0.95, P.raw 和 Q.raw 存在
-发布后: /review 页面 header 显示 "raw baseline only" chip；五阶段正常展示 raw 与 coverage + insufficient_history reason
-```
-
-## 4. Review pointer 与 after_close watchlist_ready 标志位回填
-
-### 4.1 review 成功发布后，立即回填
-
-```
-after_close_runs.metadata.review_run_id   = published_review_run.id
-after_close_runs.metadata.review_status  = published
-after_close_runs.status                = succeeded
-SchedulerJobRun.status                     = succeeded + payload.review_stage = succeeded
-factor_publications (scope='review'): is_published=true, published_run_id=review_run_id
-```
-
-→ 上述 5 项必须同一原子事务内完成（或 2-3 个有序事务）。任一步失败 → 整体 rollback + rollback 一致。。
-
-### 4.2 Review pointer 日期同步审计
-
-禁止：review.pointer.trade_date 必须 == stock_core.pointer.trade_date == board.pointer.trade_date。
-
-若发现不一致：
-```bash
-docker exec trading-backend python -m scripts.review_cli audit-pointer-dates --fix=false
-# 若不一致:
-  → 审计不一致的 scope 与原因；
-  → 把 after_close status 改为 failed（若之前错误地标为 succeeded）
-```
-
-## 5. 冷启动 bootstrap（历史观测不足60）
-
-### 5.1 bootstrap 入口（幂等）
-
-```bash
-docker exec trading-backend python -m scripts.review_cli bootstrap-history \
-  --from-date YYYY-MM-DD \
-  --obs-count-target 120 \
-  --dry-run true      # 先 dry-run，输出 "将回填 N 天，K 个板块因无历史版本将标记 bootstrap_unavailable
-```
-
-### 5.2 point-in-time 约束（严格执行
-
-- 执行前检查以下 point-in-time 三条：
-
-1. 每个历史观测值 必须使用当日有效的 board members（通过 board_versions × 与 publication 与当日 snapshot 有效 board_membership 表 join）；
-2. 禁止使用当日 effective 当日 stock_core / board_analysis publication.run_id（禁止使用未来 run_id；
-3. 禁止伪造 normalized 值；观测不足 60 → 标记 insufficient_history=true。
-
-违反任一条不符合 → bootstrap 立即停止并输出：
-```
-output: {skipped_boards_total=12, reason=no_board_version_prior_to_YYYY-MM-DD,
-```
-
-## 6. 禁止清单
-
-1. 禁止裸 SQL `UPDATE review_runs SET status='succeeded' WHERE id=?`；
-2. 禁止 force 直接写 `review_runs` / factor_publications` 用 INSERT，必须走 `publish_review()`；
-3. 禁止临时 one-off 脚本 `python -c "from review_orchestrator_service import publish_review"`（必须用 review_cli 正式入口）；
-4. 禁止把 `review_publications` 中的 `is_published=true` 的 published_run_id 指向 `status=failed` 的 run_id；
-5. 禁止在盘后流水线中 computing_review 阶段静默写主任务 succeeded；
-6. 禁止用当前成员数据回填历史 scope_items；
-7. 禁止把 `fp_segment_change_pct 全空 `时填 0 或均值。
-
-## 7. 验收 / 验证步骤
-
-review 恢复 + 发布后，执行以下浏览器验收（手动或 Playwright 自动）：
-
-| 验收项目 | 通过标准 |
-|---|---|
-| `/review` 顶部 date picker latest trade date  == stock_core.pointer.trade_date | 日期一致，不等于 7/29（若当日为 7/31 及以后） |
-| Market Scan 阶段 P/Q/U/C/V 5 维度 有值 至少 3 个维度有 raw value 展示 + coverage chip | 不是整页“不可用” |
-| insufficient_history 时 rawValue + reason | 页面 右侧显示 `insufficient_history` chip |
-| 5 阶段页面导航：Market → Filter → Board → Stock → Tracking 可切换 | 5 个阶段均可进入，无 4xx/5xx |
-| market 范围 + 至少一个行业范围 均可展示 至少 1 个 scope 的 raw | scope 列表为空的行业 ≤ 5% |
-| SignalCard：若 normalized 不可用 显示 "raw baseline only" 标签，signal 有 raw 结论 | signal=0 但 raw 不 0 时 给出说明 |
-| admin 盘后时间线 computing_review 步骤 存在且 status=completed，duration 正数或 "进行中/未知" | computing_review 步骤存在，非负数 负数不显示 负数耗时 |
+- 普通 `/review/dates`、`/review/latest` 和 overview/scopes/signals 只返回正式 pointer。
+- admin 显式 run_id 可读取 provisional 或已撤销 run。
+- 五阶段分别展示无信号、无追踪、历史不足、字段缺失和 API 错误。
+- Evidence Drawer 显示 field source、denominator、weight mode、coverage、algorithm/membership version 和 readiness。
+- 同一最终 SHA 的 Review pure-unit、PostgreSQL Integration、Migration、Frontend Contract 和 E2E 全绿后才标记 verified。

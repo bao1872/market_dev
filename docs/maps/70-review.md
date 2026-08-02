@@ -401,3 +401,18 @@ else:
 - **不得**伪造 normalized 值或 historyPercentile120d；不足就写 insufficient_history。
 
 位置：`backend/app/services/review_bootstrap_service.py`（若存在）/ 或 `review_orchestrator_service.bootstrap_history()`。
+
+## 22. 2026-08-01 Review 候选实现核验
+
+| 能力 | 当前实现事实 |
+|---|---|
+| 层级 scope/归因 | Migration 080；支持 L1/L2/L3/concept PIT membership、全量分页、正负贡献、真实 instrument/snapshot/run evidence |
+| P/Q/U/C/V | `domain/review/member_fact.py` + `metric_engine.py` 使用真实日收益、canonical 状态、前日比较和显式权重/量纲 |
+| 历史观测 | Migration 081；`review_metric_observation_service.py` 保存 raw/denominator/source/version/hash/membership |
+| Bootstrap | `review_bootstrap_service.py` 默认 dry-run，PIT 缺失写 `bootstrap_unavailable`，不使用当前成员回填 |
+| 两遍横截面 | orchestrator 先落 component，再按同日同 family 计算分位并评估 signal |
+| 发布 | `review_publication_service.py` 校验 core/board pointer、scope 配置、coverage、run items、版本和 provisional/canary |
+| UI | 五阶段真实 API；无信号/无追踪/历史不足/字段缺失/API 错误分别展示；Evidence Drawer 可追溯 |
+
+算法版本已升级；旧 Review run 保持不可变。上述为候选代码与本地目标测试事实，Migration 080/081
+PG Integration 和完整 CI 必须在同一最终 SHA 上复验后才能升级为 `verified`。

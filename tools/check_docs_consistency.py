@@ -1,48 +1,4 @@
-#!/usr/bin/env python3
-"""
-检查 docs/ 文档一致性（v2：MANIFEST 集中基线）。
-
-用法:
-    python tools/check_docs_consistency.py
-
-v2 规则（docs/restructure-system-map-v2 之后）:
-1. 只要求 docs/current/MANIFEST.md 有全局基线字段 `实现核对基线：<40位SHA>`；
-2. MANIFEST 的 实现核对基线 必须是 40 位 SHA；
-3. SHA 必须是真实 git 提交；
-4. SHA 必须是当前 HEAD 的祖先；
-5. current 其他文档不要求重复 baseline 字段；
-6. archive 旧文档不参与 baseline 一致性检查；
-7. 保留 docs 本地 Markdown 链接检查（docs/ 递归 + AGENTS.md）；
-8. 保留 `待填写` 占位符检查；
-9. 保留 feishu_webhook 当前方案回归阻断（current 文档，删除语境豁免）；
-10. 保留 open-decisions 把 Webhook vs Platform App 写回 OPEN 的阻断。
-11. 拒绝未授权 docs 顶层目录（CHANGE-20260718-002）：docs/ 直属子目录
-    只允许 current/、maps/、changes/、archive/；禁止 analysis/、
-    architecture-audits/ 等非规范目录（docs/ 根 .md 文件不受限）。
-12. 校验 CHANGE 引用存在性（CHANGE-20260718-002）：扫描 docs/ 递归 + AGENTS.md
-    中 `CHANGE-YYYYMMDD-NNN` 引用，验证对应 records/ 文件存在。
-13. 必需新文档存在性（CHANGE-20260718-004）：要求
-    docs/current/08-indicator-calculation-contracts.md 和
-    docs/maps/indicator-computation-map.md 存在。
-14. ref/ 隔离文本扫描（CHANGE-20260718-004）：扫描 docs/current/*.md +
-    docs/maps/*.md + AGENTS.md，禁止把 ref/ 文件称为"真源"、"运行依赖"、
-    "fixture 生成器"（应改用"参考源（人工阅读）"或"历史路径"）。
-    判定逻辑与 backend/tests/test_ref_isolation.py 保持一致。
-15. 必需 CHANGE 记录（CHANGE-20260718-004）：要求
-    docs/changes/records/CHANGE-20260718-004.md 存在且被 CHANGELOG.md 引用。
-16. MANIFEST baseline 新鲜度（CP-19 / CHANGE-20260722-001）：baseline SHA
-    必须在 HEAD 的最近 BASELINE_FRESHNESS_WINDOW 个 commit 内。
-    修复 PROMPT.md §4 指出的问题：旧规则只要求 baseline 是 HEAD 祖先，
-    即使 baseline 落后 88 个 commit 仍能通过，导致文档与代码严重脱节。
-    新规则要求 baseline 必须在最近 N 个 commit 内，强制每次 checkpoint
-    提交时同步更新 MANIFEST baseline。
-
-输出汇总：
-- MANIFEST baseline SHA
-- current 文档数量
-- maps 文档数量
-- 链接检查文件数量
-"""
+"""检查 PRD/Maps/Changes/Runbooks 的结构、链接与关键治理回归。"""
 
 from __future__ import annotations
 
@@ -233,9 +189,12 @@ def check_baseline_ancestor(shas: list[str]) -> list[str]:
     """规则 4：检查 baseline SHA 是否为当前 HEAD 的祖先。"""
     errors: list[str] = []
     for sha in shas:
-        if re.fullmatch(r"[0-9a-fA-F]{40}", sha) and is_valid_commit(sha):
-            if not is_ancestor_of_head(sha):
-                errors.append(f"SHA 不是当前 HEAD 的祖先: {sha}")
+        if (
+            re.fullmatch(r"[0-9a-fA-F]{40}", sha)
+            and is_valid_commit(sha)
+            and not is_ancestor_of_head(sha)
+        ):
+            errors.append(f"SHA 不是当前 HEAD 的祖先: {sha}")
     return errors
 
 
@@ -690,20 +649,8 @@ def main() -> int:
     all_errors: list[str] = []
     placeholder_files: list[str] = []
 
-    # === 第一阶段：MANIFEST 集中基线检查（v2 规则 1-4）===
+    # 代码 SHA 变化不再强制制造 MANIFEST/文档提交；Maps 只记录已核验事实。
     print(f"检查文档目录: {DOCS_DIR.relative_to(REPO_ROOT)}")
-    print(f"baseline 文件: {MANIFEST_FILE.relative_to(REPO_ROOT)}\n")
-
-    manifest_errors, baseline_sha = check_manifest_baseline()
-    if manifest_errors:
-        all_errors.extend([f"MANIFEST: {e}" for e in manifest_errors])
-        print(f"[FAIL] {MANIFEST_FILE.relative_to(REPO_ROOT)}")
-        for e in manifest_errors:
-            print(f"       - {e}")
-    else:
-        print(f"[PASS] {MANIFEST_FILE.relative_to(REPO_ROOT)}")
-    print(f"       MANIFEST baseline: {baseline_sha or '(未解析)'}")
-
     # === 第一阶段补充：docs 顶层目录结构检查（v2 规则 11，CHANGE-20260718-002）===
     print()
     tld_errors = check_unauthorized_top_level_dirs()
@@ -715,9 +662,9 @@ def main() -> int:
     else:
         print("[PASS] docs/ 顶层目录结构（允许 prd/maps/changes/archive 等）")
 
-    # === 第二阶段：current 文档回归检查（webhook + open-decisions）===
+    # === 第二阶段：PRD 回归检查（webhook + open-decisions）===
     current_docs = collect_current_docs()
-    print(f"\n共扫描 {len(current_docs)} 个 current 文档（webhook/open 回归检查）\n")
+    print(f"\n共扫描 {len(current_docs)} 个 PRD 文档（webhook/open 回归检查）\n")
 
     for doc_path in current_docs:
         relative = doc_path.relative_to(REPO_ROOT)
@@ -741,16 +688,16 @@ def main() -> int:
 
     # === 第三阶段：链接与占位符检查 ===
     # 链接检查：docs/ 递归 + AGENTS.md（所有文档）
-    # 占位符检查：仅 current + maps（v2 事实源，不应有占位符；
+    # 占位符检查：仅 PRD + maps（目标与实现事实源不应有占位符；
     #            archive/changes/规则说明文档可能引用"待填写"作为规则描述，不检查）
     all_doc_files = collect_all_doc_files()
     maps_docs = collect_maps_docs()
     placeholder_check_files = set(current_docs) | set(maps_docs)
     print(f"\n共扫描 {len(all_doc_files)} 个文档文件（链接检查）")
-    print(f"current 文档数量: {len(current_docs)}")
+    print(f"PRD 文档数量: {len(current_docs)}")
     print(f"maps 文档数量: {len(maps_docs)}")
     print(f"链接检查文件数量: {len(all_doc_files)}")
-    print(f"占位符检查文件数量: {len(placeholder_check_files)}（仅 current + maps）\n")
+    print(f"占位符检查文件数量: {len(placeholder_check_files)}（仅 PRD + maps）\n")
 
     for doc_path in all_doc_files:
         relative = doc_path.relative_to(REPO_ROOT)
@@ -812,7 +759,7 @@ def main() -> int:
             print(f"       - {e}")
     else:
         print(
-            "[PASS] ref/ 隔离文本扫描（规则 14：current/maps/AGENTS 未把 ref/ 称为真源）"
+            "[PASS] ref/ 隔离文本扫描（规则 14：PRD/maps/AGENTS 未把 ref/ 称为真源）"
         )
 
     # 规则 15：必需 CHANGE 记录必须存在且被 CHANGELOG 引用
@@ -824,7 +771,7 @@ def main() -> int:
             print(f"       - {e}")
     else:
         print(
-            f"[PASS] 必需 CHANGE 记录（规则 15：{REQUIRED_CHANGE_ID} 存在且 CHANGELOG 引用）"
+            f"[PASS] 必需 CHANGE 记录（规则 15：{REQUIRED_CHANGE_ID} 存在且 INDEX 引用）"
         )
 
     # === 汇总 ===
@@ -839,8 +786,7 @@ def main() -> int:
         return 1
     else:
         print(
-            f"全部通过。MANIFEST baseline: {baseline_sha or 'N/A'}，"
-            f"current 文档 {len(current_docs)} 个，"
+            f"全部通过。PRD 文档 {len(current_docs)} 个，"
             f"maps 文档 {len(maps_docs)} 个，"
             f"链接检查文件 {len(all_doc_files)} 个。"
         )

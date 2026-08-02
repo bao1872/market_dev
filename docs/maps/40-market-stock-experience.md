@@ -1,11 +1,11 @@
 # 行情与个股体验 Map
 
-核验状态：待重建  
-最后核验日期：未核验  
-核验分支：未核验  
-核验提交：未核验  
-核验范围：尚未基于最新代码完整核验  
-对应 PRD：`../prd/40-market-stock-experience.md`  
+核验状态：候选代码已核验，真实浏览器 E2E 与最终 SHA CI 待验证
+最后核验日期：2026-08-01
+核验分支：`codex/panji-full-closure-20260801`
+核验提交：`a4221e0`、`a254412`
+核验范围：API gateway、MCQ 详情同源、operator、自选、Review UI
+对应 PRD：`../prd/40-market-stock-experience.md`
 事实所有权：前端路由、页面、组件、筛选排序状态、详情来源列表和图层清单
 
 > 本文件必须基于真实代码、数据、日志或运行结果填写。不得根据 PRD 推测实现已经存在。
@@ -499,3 +499,11 @@ SQL：`/tmp/fp_null_audit.sql`（附本 Map 的同等位置 docs/runbooks 下的
 ### 7.5 导出 SSOT（核验）
 
 导出后端不读取 DSA run；导出字段是 `/market/stocks` 的响应字段子集；导出筛选参数与 `/market/stocks` 合同同一 MCQ 参数。
+## 2026-08-01 行情与详情用户链路核验
+
+- API 路径已统一为 client `/api` + endpoint `/v1/...`，开发代理与 Nginx 各剥离一次 gateway 前缀。
+- `/market/stocks` MCQ 是列表、详情来源和切股导航的统一状态；刷新恢复保留筛选，symbol/UUID 职责分离。
+- canonical operator 在后端 `core/filter_operators.py` 和前端 `components/filterOperators.ts` 对齐；旧别名仅输入兼容。
+- 自选采用即时 UI 状态并修正 `market-stocks` 缓存失效 key；chip skipped 原因保持结构化展示。
+- Review 五阶段使用真实 API 状态，Evidence Drawer 展示 field source、denominator、weight、coverage、readiness 和算法版本。
+- 本地验证：前端合同 507 项、build 通过、lint 0 error；浏览器真实 E2E 与同一最终 SHA CI 仍待执行。

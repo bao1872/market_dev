@@ -303,3 +303,14 @@ API 响应字段：
 列表导出字段必须与 `/market/stocks` 的筛选、排序合同一致。禁止在导出后端重新查询 DSA run 结果或拼接第一金字塔外的字段。
 
 导出的唯一 SSOT 是 `/market/stocks + 同一份 filter-specs` 的响应数据子集。
+
+## 8. 网关、筛选与详情闭环合同（2026-08-01）
+
+- 浏览器 API client 的 `baseURL` 固定为 `/api`，业务 endpoint 固定写 `/v1/...`；Vite 与 Nginx 各只去除一次 `/api`。
+- canonical operator 输出只允许 `neq/empty/not_empty/has_any/has_all/not_has_any/date_eq`；
+  `ne/is_empty/is_null/is_not_empty/is_not_null/contains_any/contains_all/not_contains_any`
+  仅作为旧输入兼容，保存与响应必须 canonical 化。
+- `/market/stocks` 的 MCQ 同时驱动列表、详情来源、左右导航和上一只/下一只；URL hydration 不得覆盖合法筛选。
+- symbol 用于用户 URL，UUID 用于后端实体关联，两者不得互换。
+- 自选切换先更新当前行即时状态，再按 `market-stocks` query key 失效缓存。
+- 第一金字塔 99 字段、chip skipped 原因、结构/筹码截图和飞书详情链接继续复用同一 canonical 数据合同。
