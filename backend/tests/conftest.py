@@ -34,6 +34,30 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+# ---------------------------------------------------------------------------
+# 纯单元模式必须在导入任何 app 模块之前判定，并注入不可连接的 sentinel。
+# 否则 96 个测试模块在 import 期调用 get_settings() 会因 DATABASE_URL 缺失
+# 而抛 MissingRequiredSettingError，导致整段 collection 中断（Interrupted）。
+#
+# 设计（CHANGE-20260802-002 配套修复）：
+#   - DATABASE_URL 设为明确不可达的 sentinel（127.0.0.1:1，端口 1 无服务）；
+#   - APP_ENV 设为中性 "pure-unit"，使 config.py 的 fail-closed 硬校验
+#     （development 要求 bz_stock / test 要求 _test 后缀 / production 安全校验）
+#     全部变为 no-op —— 不修改 app/config.py 的 fail-closed 合同，其他环境仍强制。
+#   - 不设置 TEST_DATABASE_URL（避免与 PG job 的语义混淆）；
+#   - 不启动任何本地/CI PostgreSQL；任何 pure-unit 测试若真实连接 sentinel
+#     地址会因连接拒绝而失败，从而暴露错误的分类。
+# ---------------------------------------------------------------------------
+_PURE_UNIT = os.environ.get("PURE_UNIT_TEST", "").lower() in ("1", "true", "yes")
+_PURE_UNIT_DB_SENTINEL = (
+    "postgresql+asyncpg://panji_unit:panji_unit@127.0.0.1:1/panji_unit_unreachable"
+)
+if _PURE_UNIT and not os.environ.get("DATABASE_URL"):
+    os.environ["DATABASE_URL"] = _PURE_UNIT_DB_SENTINEL
+    # 强制中性 APP_ENV：覆盖 CI 可能注入的 test/development，使 config.py 的
+    # fail-closed 硬校验（库名后缀/安全密钥）变为 no-op；不修改 app/config.py 合同。
+    os.environ["APP_ENV"] = "pure-unit"
+
 from app.models.instrument import Instrument
 from app.models.invitation import InviteCode
 from app.models.subscription import Subscription
@@ -68,8 +92,6 @@ def make_asgi_transport(app: FastAPI) -> httpx.ASGITransport:
 
 _APP_ENV = os.environ.get("APP_ENV", "").lower()
 _TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
-# 纯单元测试跳过 DB 初始化（不连接任何数据库）
-_PURE_UNIT = os.environ.get("PURE_UNIT_TEST", "").lower() in ("1", "true", "yes")
 # CI 环境标识：仅 GitHub Actions 设置 GITHUB_ACTIONS=true；CI=true 可能被本地 IDE 误设
 # 显式 PANJI_CI_DB_TEST=1 用于其他 CI 系统的 opt-in（必须配合临时 Postgres 容器）
 _CI_ENV = (
@@ -159,13 +181,6 @@ else:
         )
 
     TestAsyncSessionLocal = _pure_unit_db_guard  # type: ignore[assignment]
-
-    # 供模块级读取 TEST_DATABASE_URL 的测试在收集期不至于 KeyError；
-    # 真正连接时 asyncpg 仍会失败，但此时测试已被 postgres marker 过滤掉。
-    os.environ.setdefault(
-        "TEST_DATABASE_URL",
-        "postgresql+asyncpg://pure-unit-placeholder@127.0.0.1:1/pure_unit_test",
-    )
 
 
 # ---------------------------------------------------------------------------

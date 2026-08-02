@@ -859,13 +859,20 @@ async def test_12_cross_worker_dsa_recovery() -> None:
 # =============================================================================
 
 # 独立引擎/session（绕过 db_session 的 savepoint 隔离，模拟真实跨 session 场景）
-_sep_url = os.environ["TEST_DATABASE_URL"].replace(
-    "postgresql+psycopg://", "postgresql+asyncpg://"
-).replace("postgresql://", "postgresql+asyncpg://")
-_sep_engine = create_async_engine(_sep_url, pool_pre_ping=True, pool_size=2)
-_SepSession = async_sessionmaker(
-    bind=_sep_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False,
-)
+# 纯单元模式（PURE_UNIT_TEST=1）下 TEST_DATABASE_URL 未设置，导入期不得崩溃；
+# 该引擎仅在真实 PG 集成测试中按需使用，纯单元 job 会按 postgres marker 跳过。
+_sep_env_url = os.environ.get("TEST_DATABASE_URL", "")
+if _sep_env_url:
+    _sep_url = _sep_env_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace("postgresql://", "postgresql+asyncpg://")
+    _sep_engine = create_async_engine(_sep_url, pool_pre_ping=True, pool_size=2)
+    _SepSession = async_sessionmaker(
+        bind=_sep_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False,
+    )
+else:
+    _sep_engine = None
+    _SepSession = None
 
 
 async def _cleanup_strategy_records(*run_ids: uuid.UUID) -> None:
