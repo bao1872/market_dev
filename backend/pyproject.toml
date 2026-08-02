@@ -94,4 +94,9 @@ markers = [
     # 只在 CI 临时 Postgres 容器中运行（Fast CI 的 db_changed 分支 / Release / Nightly）。
     # 由 tests/conftest.py 的 pytest_collection_modifyitems 自动打标，无需逐个手写。
     "postgres: 需要真实 PostgreSQL 的集成测试（禁止在纯单元测试 job 中运行）",
+    # [CI 分层] 依赖外部数据源（mootdx / pytdx / 交易所网络接口）的测试。
+    # 这类测试的失败不代表本仓库代码回归，可能只是外部服务不可达或数据延迟，
+    # 因此不进入 Fast CI 与 Release Gate 阻断路径，只在 Nightly 独立分组中运行并单独报告。
+    # 必须由作者显式标注 @pytest.mark.external_data，不做源码文本自动推断。
+    "external_data: 依赖外部行情数据源/网络的测试（不阻断 CI，仅 Nightly 独立分组报告）",
 ]

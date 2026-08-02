@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 from datetime import UTC, date, datetime, timedelta
@@ -194,11 +195,62 @@ _DB_FIXTURE_NAMES = frozenset(
 # 用源码扫描而非 getattr(module, ...)，因为这些引用常写在函数体内
 # （如 `from tests.conftest import TestAsyncSessionLocal` 位于测试函数内部），
 # 模块对象上并不存在对应属性，运行期反射无法识别。
+#
+# ⚠️ 过渡机制（CHANGE-20260802-002）
+# ----------------------------------
+# 源码文本扫描只是为存量 218 个测试文件做一次性归类的过渡手段，
+# **不是** postgres 分类的长期唯一来源。它的固有缺陷：
+#   - 文本匹配无法理解语义，注释/字符串里出现同名 token 会误判为需要 PG；
+#   - 新的连库方式（换个 helper 名字）不在列表里就会漏判，且漏判是静默的。
+# 因此：
+#   1. 新增测试必须由作者显式写 @pytest.mark.postgres，不得依赖本扫描；
+#   2. 下方 _assert_no_unmarked_db_tests 提供漏标检查，PURE_UNIT 模式下若
+#      某个未被判定为 PG 的测试在运行期真的去连库，会由 _pure_unit_db_guard
+#      直接抛错而不是静默通过；
+#   3. 存量归类完成后应逐步移除本扫描，改为纯显式 marker。
 _DB_SOURCE_MARKERS = (
     "TestAsyncSessionLocal",  # 复用 conftest 的 session 工厂
     "test_async_engine",      # 复用 conftest 的引擎
     "create_async_engine",    # 模块自建独立引擎（如 phase8a 的 _sep_engine）
 )
+
+
+# 漏标嫌疑标志：出现这些调用几乎必然要连真实数据库，
+# 但它们不在 _DB_SOURCE_MARKERS（那组只覆盖已知的三种建连方式）里。
+# 命中即报告，不自动打 marker——自动补标会掩盖分类规则的盲区，
+# 而这里的目的正是把盲区暴露出来让人补显式 marker。
+#
+# 用正则而非裸子串：裸子串会把 `AsyncSessionLocal`、`ConflictError` 之类
+# 仅仅名字相似的标识符也算进来，产生大量噪声，使漏标检查失去意义。
+_DB_SUSPECT_PATTERN = re.compile(
+    r"\basync_sessionmaker\s*\(|"
+    r"(?<![A-Za-z0-9_])sessionmaker\s*\(|"
+    r"\bpsycopg\.(?:Async)?[Cc]onnect|"
+    r"\basyncpg\.connect|"
+    r"\bengine\.begin\s*\(|"
+    r"\bengine\.connect\s*\("
+)
+
+
+def _suspect_unmarked_db(item) -> bool:  # type: ignore[no-untyped-def]
+    """判断某个未被归类为 postgres 的用例，其源码是否仍疑似连库。
+
+    仅用于报告，不自动补 marker。命中说明分类规则可能存在盲区，
+    应由作者确认后补显式 @pytest.mark.postgres。
+    """
+    path = str(getattr(item, "fspath", "") or "")
+    if not path:
+        return False
+    cache = _suspect_unmarked_db.__dict__.setdefault("_cache", {})
+    if path not in cache:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                source = fh.read()
+        except OSError:
+            cache[path] = False
+        else:
+            cache[path] = bool(_DB_SUSPECT_PATTERN.search(source))
+    return bool(cache[path])
 
 
 def pytest_collection_modifyitems(config, items) -> None:  # type: ignore[no-untyped-def]
@@ -243,18 +295,59 @@ def pytest_collection_modifyitems(config, items) -> None:  # type: ignore[no-unt
                 file_needs_pg[path] = any(m in source for m in _DB_SOURCE_MARKERS)
         return file_needs_pg[path]
 
+    n_pg = 0
+    n_external = 0
+    n_pure = 0
+    # 漏标候选：源码里出现疑似连库调用，但既没被 fixture 判定命中、
+    # 也没有显式 marker。这类用例一旦真的连库，在 PURE_UNIT 下会直接报错，
+    # 属于分类规则的盲区，必须显式暴露而不是让它悄悄进纯单元 job。
+    suspects: list[str] = []
+
     for item in items:
         fixtures = set(getattr(item, "fixturenames", ()))
-        needs_pg = (
-            bool(fixtures & _DB_FIXTURE_NAMES)
-            or item.get_closest_marker("postgres") is not None
-            or _file_uses_real_db(item)
-        )
+        explicit_pg = item.get_closest_marker("postgres") is not None
+        fixture_pg = bool(fixtures & _DB_FIXTURE_NAMES)
+        source_pg = _file_uses_real_db(item)
+        needs_pg = explicit_pg or fixture_pg or source_pg
+
+        if item.get_closest_marker("external_data") is not None:
+            n_external += 1
+
         if not needs_pg:
+            n_pure += 1
+            if _suspect_unmarked_db(item):
+                suspects.append(item.nodeid)
             continue
+
+        n_pg += 1
         item.add_marker(pytest.mark.postgres)
         if _PURE_UNIT:
             item.add_marker(skip_pg)
+
+    # 分类摘要：让每次 CI 运行都能直接看到三类计数，
+    # 便于与 rules/40 中记录的基线对账，发现漂移。
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(
+            f"[test-classification] postgres={n_pg} pure_unit={n_pure} "
+            f"external_data={n_external} total={len(items)}"
+        )
+        if suspects:
+            reporter.write_line(
+                f"[test-classification] 漏标嫌疑 {len(suspects)} 个"
+                "（源码含连库调用但未被判定为 postgres）："
+            )
+            for nid in suspects[:20]:
+                reporter.write_line(f"  - {nid}")
+        # ⚠️ suspect=0 只代表「按当前规则没有发现可疑项」，
+        # 不等于「不存在漏标或误标风险」。源码文本扫描是过渡机制，
+        # 其盲区（新连库方式、注释/字符串同名 token）无法被该检查覆盖，
+        # 因此新增测试必须由作者显式 @pytest.mark.postgres，
+        # 不能依赖 suspect=0 或自动扫描作为分类正确的证据。
+        reporter.write_line(
+            "[test-classification] 注：本自动分类为 transitional_marker_migration，"
+            "suspect=0 不证明无漏标/误标，新增测试须显式 marker。"
+        )
 
 
 def _run_alembic_upgrade():

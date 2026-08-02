@@ -53,8 +53,14 @@ def test_provider_constants_exist():
     assert MANUAL_OVERRIDE_SOURCE == "MANUAL_OVERRIDE"
 
 
+@pytest.mark.external_data
 def test_build_calendar_for_year_columns():
-    """build_calendar_for_year 返回正确列名与类型。"""
+    """build_calendar_for_year 返回正确列名与类型。
+
+    [CI 分层] build_calendar_for_year 内部调用 mootdx holidays()，需要访问外部
+    行情数据源。网络不可达时失败与本仓库代码无关，故标 external_data，
+    不进入 Fast CI / Release Gate 阻断路径。
+    """
     df = build_calendar_for_year(2026)
     assert list(df.columns) == ["date", "is_trading_day", "status", "source"]
     assert len(df) == 365
@@ -62,6 +68,7 @@ def test_build_calendar_for_year_columns():
     assert df["date"].iloc[-1] == date(2026, 12, 31)
 
 
+@pytest.mark.external_data
 def test_historical_trading_day_2026_06_29():
     """2026-06-29 在历史覆盖内且为交易日 -> OPEN + MOOTDX_HISTORICAL。"""
     df = build_calendar_for_year(2026)
@@ -71,6 +78,7 @@ def test_historical_trading_day_2026_06_29():
     assert row["source"] == MOOTDX_HISTORICAL_SOURCE
 
 
+@pytest.mark.external_data
 def test_historical_weekend_2026_06_27():
     """2026-06-27 周六 -> CLOSED + MOOTDX_HISTORICAL。"""
     df = build_calendar_for_year(2026)
@@ -80,6 +88,7 @@ def test_historical_weekend_2026_06_27():
     assert row["source"] == MOOTDX_HISTORICAL_SOURCE
 
 
+@pytest.mark.external_data
 def test_historical_holiday_2026_01_01():
     """2026-01-01 元旦 -> CLOSED + MOOTDX_HISTORICAL。"""
     df = build_calendar_for_year(2026)
@@ -89,6 +98,7 @@ def test_historical_holiday_2026_01_01():
     assert row["source"] == MOOTDX_HISTORICAL_SOURCE
 
 
+@pytest.mark.external_data
 def test_future_date_uses_mootdx_holiday_source():
     """超出 holidays() 覆盖的未来日期使用 MOOTDX_HOLIDAY 源。
 
@@ -105,6 +115,7 @@ def test_future_date_uses_mootdx_holiday_source():
         assert row["status"] == CALENDAR_STATUS_OPEN
 
 
+@pytest.mark.external_data
 def test_is_trading_day_by_mootdx_for_known_dates():
     """单日期判断函数对已知日期返回预期结果。"""
     assert is_trading_day_by_mootdx(date(2026, 6, 29)) is True
@@ -388,22 +399,48 @@ async def test_sync_identifies_suspicious_dates(db_session):
 # ---------------------------------------------------------------------------
 
 def test_no_tushare_references_in_backend():
-    """backend/app、tests、pyproject.toml 中无 Tushare 引用（历史迁移文件除外）。"""
+    """backend 正式源码（Git 跟踪的 app / pyproject / tests）中无 Tushare 引用。
+
+    修复点（CHANGE-20260802-002）：
+    - 改用 `git grep` 而非裸 `grep -R`，只扫描版本库跟踪的正式源码；
+    - 不扫描 __pycache__ / *.pyc，避免本地 __pycache__ 字节码误报；
+    - 真实源码出现 Tushare 时仍必须失败（不删除、不弱化本测试）。
+    """
     import subprocess
     from pathlib import Path
 
     repo_root = str(Path(__file__).resolve().parents[2])
+    # git grep 默认只匹配 index/tracked 文件，天然排除 __pycache__/*.pyc。
+    # -- ':!backend/tests/test_calendar_v9_regression.py' 排除本测试自身（含关键词）。
+    # 使用 -F（fixed-string，非正则）避免 "." 被解释为通配；
+    # 模式只匹配真实 Tushare 用法（import / pro_api / token / 抓取函数），
+    # 不匹配普通注释里出现的 "tushare" 字样（如 auction 模块的 source 注释），
+    # 避免把无关模块的文档性提及误判为违规。
+    patterns = [
+        "import tushare",
+        "from tushare",
+        "tushare.pro",
+        "pro_api",
+        "get_tushare_token",
+        "fetch_calendar_from_tushare",
+    ]
     result = subprocess.run(
         [
-            "grep", "-Rin",
-            "tushare|TUSHARE|pro_api|trade_cal|get_tushare_token|fetch_calendar_from_tushare",
-            "backend/app", "backend/pyproject.toml", "backend/tests",
+            "git", "grep", "-inF",
+            "-e", patterns[0],
+        ]
+        + [item for p in patterns[1:] for item in ("-e", p)]
+        + [
+            "--",
+            "backend/app",
+            "backend/pyproject.toml",
+            "backend/tests",
+            ":!backend/tests/test_calendar_v9_regression.py",
         ],
         cwd=repo_root,
         capture_output=True,
         text=True,
     )
-    # 仅允许本测试文件自身与历史迁移文件出现关键词
-    allowed = ["test_calendar_v9_regression.py"]
-    lines = [line for line in result.stdout.splitlines() if not any(a in line for a in allowed)]
+    # git grep 无匹配时返回 rc=1 且 stdout 为空；匹配时逐行输出 "path:linenum:content"。
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
     assert not lines, f"发现未清理的 Tushare 引用：\n{chr(10).join(lines)}"
