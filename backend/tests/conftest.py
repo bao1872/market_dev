@@ -139,6 +139,122 @@ if not _PURE_UNIT:
         expire_on_commit=False,
         autoflush=False,
     )
+else:
+    # [CI 分层] PURE_UNIT_TEST=1 下不建立任何数据库连接，但仍需保证「收集期不报错」。
+    #
+    # 背景：部分模块在 import 期就 `from tests.conftest import TestAsyncSessionLocal`
+    # 或读取 os.environ["TEST_DATABASE_URL"]，若这些名字在纯单元模式下完全缺失，
+    # pytest 会在 collection 阶段直接 ImportError/KeyError 而中断整个 session
+    # （Interrupted: errors during collection），导致纯单元 job 一条测试都跑不了。
+    #
+    # 处理方式：提供占位符，使模块可被导入并完成收集；这些占位符一旦被真正调用
+    # 就会抛出明确错误，避免「本该连库的测试静默跑成假通过」。
+    test_async_engine = None  # type: ignore[assignment]
+
+    def _pure_unit_db_guard(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(
+            "当前处于 PURE_UNIT_TEST=1 纯单元测试模式，禁止建立数据库会话。\n"
+            "该测试依赖真实 PostgreSQL，应带 @pytest.mark.postgres 并在 CI 临时容器中运行。"
+        )
+
+    TestAsyncSessionLocal = _pure_unit_db_guard  # type: ignore[assignment]
+
+    # 供模块级读取 TEST_DATABASE_URL 的测试在收集期不至于 KeyError；
+    # 真正连接时 asyncpg 仍会失败，但此时测试已被 postgres marker 过滤掉。
+    os.environ.setdefault(
+        "TEST_DATABASE_URL",
+        "postgresql+asyncpg://pure-unit-placeholder@127.0.0.1:1/pure_unit_test",
+    )
+
+
+# ---------------------------------------------------------------------------
+# postgres marker 自动标注
+# ---------------------------------------------------------------------------
+
+# 依赖真实数据库的 fixture 名称。任何测试（或其 fixture 链）用到这些，
+# 就必然需要真实 PostgreSQL。
+_DB_FIXTURE_NAMES = frozenset(
+    {
+        "db_session",
+        "pg_connection",
+        "_db_connection",
+        "client",
+        "role_factory",
+        "user_factory",
+        "instrument_factory",
+        "subscription_factory",
+        "invite_code_factory",
+        "test_user",
+        "test_instrument",
+    }
+)
+
+# 源码级标志：模块自建真实 PG 连接。
+#
+# 用源码扫描而非 getattr(module, ...)，因为这些引用常写在函数体内
+# （如 `from tests.conftest import TestAsyncSessionLocal` 位于测试函数内部），
+# 模块对象上并不存在对应属性，运行期反射无法识别。
+_DB_SOURCE_MARKERS = (
+    "TestAsyncSessionLocal",  # 复用 conftest 的 session 工厂
+    "test_async_engine",      # 复用 conftest 的引擎
+    "create_async_engine",    # 模块自建独立引擎（如 phase8a 的 _sep_engine）
+)
+
+
+def pytest_collection_modifyitems(config, items) -> None:  # type: ignore[no-untyped-def]
+    """自动为依赖真实数据库的测试打 `postgres` marker，并在纯单元模式下跳过它们。
+
+    [CI 分层] 目的：让「纯单元测试」与「真实 PG 集成测试」有一条机器可判定的边界，
+    而不是靠人工维护清单或靠目录约定。
+
+    判定规则（满足任一即视为需要真实 PG）：
+    1. 测试用例的 fixture 闭包中出现 _DB_FIXTURE_NAMES 中的任一 fixture；
+    2. 测试所在模块直接导入了 TestAsyncSessionLocal / test_async_engine
+       （这些模块自建 DB fixture，绕过 conftest.db_session，无法靠 fixture 名识别）；
+    3. 测试已被作者显式标注 @pytest.mark.postgres。
+
+    行为：
+    - 命中的用例统一补上 `postgres` marker，供 CI 用 `-m postgres` / `-m "not postgres"` 精确切分；
+    - PURE_UNIT_TEST=1 时给这些用例追加 skip 标记，避免它们在无数据库环境下报错失败。
+
+    注意：这里只做「分类」，不删除任何测试。真实锁/事务/JSONB/UUID/唯一约束等测试
+    仍会在 Release Gate 与 Nightly 的完整 PG job 中执行。
+    """
+    import pytest
+
+    skip_pg = pytest.mark.skip(
+        reason="需要真实 PostgreSQL；当前为 PURE_UNIT_TEST=1 纯单元测试模式"
+    )
+
+    # 文件级判定缓存：源码中是否出现自建真实 PG 连接的标志。
+    file_needs_pg: dict[str, bool] = {}
+
+    def _file_uses_real_db(item) -> bool:  # type: ignore[no-untyped-def]
+        path = str(getattr(item, "fspath", "") or "")
+        if not path:
+            return False
+        if path not in file_needs_pg:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    source = fh.read()
+            except OSError:
+                file_needs_pg[path] = False
+            else:
+                file_needs_pg[path] = any(m in source for m in _DB_SOURCE_MARKERS)
+        return file_needs_pg[path]
+
+    for item in items:
+        fixtures = set(getattr(item, "fixturenames", ()))
+        needs_pg = (
+            bool(fixtures & _DB_FIXTURE_NAMES)
+            or item.get_closest_marker("postgres") is not None
+            or _file_uses_real_db(item)
+        )
+        if not needs_pg:
+            continue
+        item.add_marker(pytest.mark.postgres)
+        if _PURE_UNIT:
+            item.add_marker(skip_pg)
 
 
 def _run_alembic_upgrade():

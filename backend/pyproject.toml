@@ -88,3 +88,10 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 xfail_strict = true
 testpaths = ["tests"]
+markers = [
+    # [CI 分层] 真实 PostgreSQL 语义测试：依赖 db_session / pg_connection / 模块级
+    # 独立 engine，或显式验证锁、事务、JSONB、UUID、唯一约束等真实数据库行为。
+    # 只在 CI 临时 Postgres 容器中运行（Fast CI 的 db_changed 分支 / Release / Nightly）。
+    # 由 tests/conftest.py 的 pytest_collection_modifyitems 自动打标，无需逐个手写。
+    "postgres: 需要真实 PostgreSQL 的集成测试（禁止在纯单元测试 job 中运行）",
+]
