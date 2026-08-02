@@ -43,6 +43,14 @@ import {
   type CapabilityGrantInput,
   type GrantCapabilityRequest,
 } from '@/api/endpoints'
+// [CHANGE-20260802-002] capability 中文标签唯一真源（research_replay → 复盘与竞价）
+import {
+  CAPABILITY_KEYS,
+  CAPABILITY_LABELS,
+  CAPABILITY_DESCRIPTIONS,
+  capabilityLabel,
+  formatCapabilityGrants,
+} from '@/navigation/capabilities'
 
 // ===== 类型定义（带索引签名以满足 StrategyDataTable 的 Row extends Record<string, unknown>）=====
 
@@ -74,6 +82,12 @@ interface InviteCodeRow {
   used_by: string | null
   used_at: string | null
   usage_type: string | null
+  /**
+   * [PRD60 PA-20] 邀请码授予的 capability 组合。
+   * 后端 GET /v1/admin/invite-codes 始终回显该字段；
+   * null 表示旧模式邀请码（按 plan_code 兑换），不是后端漏传。
+   */
+  capabilities: CapabilityGrantInput[] | null
   [key: string]: unknown
 }
 
@@ -396,7 +410,10 @@ export default function AdminUsersPage() {
     }
 
     if (capabilities.length === 0) {
-      toast.show('校验失败', '至少选择一项权限（自选管理/行情数据/复盘研究）')
+      toast.show(
+        '校验失败',
+        `至少选择一项权限（${CAPABILITY_KEYS.map((c) => CAPABILITY_LABELS[c]).join('/')}）`,
+      )
       return
     }
     if (capSelfSelection && (!capWatchlistLimit || capWatchlistLimit < 1 || capWatchlistLimit > 500)) {
@@ -548,12 +565,13 @@ export default function AdminUsersPage() {
       capability: 'self_selection' | 'market_data' | 'research_replay',
     ) => {
       if (!selectedMember) return
-      if (!window.confirm(`确认撤销 ${capability} 权限？撤销后用户将失去该权限。`)) return
+      const label = capabilityLabel(capability)
+      if (!window.confirm(`确认撤销「${label}」权限？撤销后用户将失去该权限。`)) return
       revokeCapabilityMut.mutate(
         { userId: selectedMember.user_id, capability },
         {
           onSuccess: () => {
-            toast.show('权限已撤销', `${capability} 已撤销`)
+            toast.show('权限已撤销', `${label} 已撤销`)
           },
           onError: (err: unknown) => {
             const axiosErr = err as { response?: { data?: { detail?: string } } }
@@ -716,6 +734,18 @@ export default function AdminUsersPage() {
         sortValue: (row) => getPlanName(row.plan_code, plans),
       },
       {
+        // [CHANGE-20260802-002] 展示邀请码实际授予的权限组合
+        // 格式：自选管理 · 行情数据 · 复盘与竞价；无对应权限时不显示该标签
+        key: 'capabilities',
+        title: '权限',
+        dataType: 'text',
+        sortable: true,
+        filterable: true,
+        render: (row) => formatCapabilityGrants(row.capabilities) || '—',
+        filterValue: (row) => formatCapabilityGrants(row.capabilities),
+        sortValue: (row) => formatCapabilityGrants(row.capabilities),
+      },
+      {
         key: 'monitor_limit',
         title: '最大自选',
         dataType: 'number',
@@ -828,13 +858,13 @@ export default function AdminUsersPage() {
   const benefitPreview = useMemo(() => {
     const parts: string[] = []
     if (capSelfSelection) {
-      parts.push(`自选管理（${capWatchlistLimit}只上限）`)
+      parts.push(`${CAPABILITY_LABELS.self_selection}（${capWatchlistLimit}只上限）`)
     }
     if (capMarketData) {
-      parts.push('行情数据')
+      parts.push(CAPABILITY_LABELS.market_data)
     }
     if (capResearchReplay) {
-      parts.push('复盘研究')
+      parts.push(CAPABILITY_LABELS.research_replay)
     }
     const capText = parts.length > 0 ? parts.join(' + ') : '未选择权限'
     return `${capText} · 有效期${generateGrantMonths}周期（每周期30天）`
@@ -1163,14 +1193,16 @@ export default function AdminUsersPage() {
                     <>
                       {/* 当前权限状态列表 */}
                       <div className="cap-status-list">
-                        {(['self_selection', 'market_data', 'research_replay'] as const).map((cap) => {
+                        {CAPABILITY_KEYS.map((cap) => {
                           const capInfo = userCapabilitiesQuery.data?.capabilities[cap]
                           const hasCap = !!capInfo
                           const isActive = capInfo?.active === true
                           return (
                             <div key={cap} className={`cap-status-item ${isActive ? 'active' : hasCap ? 'expired' : 'none'}`}>
                               <div className="cap-status-head">
-                                <b>{cap}</b>
+                                {/* 展示中文标签（research_replay → 复盘与竞价），机器值作为副标题保留可追溯性 */}
+                                <b>{CAPABILITY_LABELS[cap]}</b>
+                                <small className="cap-status-key">{cap}</small>
                                 {hasCap ? (
                                   <span className={`status-pill ${isActive ? 'ok' : 'off'}`}>
                                     {isActive ? '有效' : '已过期'}
@@ -1211,9 +1243,11 @@ export default function AdminUsersPage() {
                               value={capGrantCapability}
                               onChange={(e) => setCapGrantCapability(e.target.value as typeof capGrantCapability)}
                             >
-                              <option value="self_selection">自选管理（self_selection）</option>
-                              <option value="market_data">行情数据（market_data）</option>
-                              <option value="research_replay">复盘研究（research_replay）</option>
+                              {CAPABILITY_KEYS.map((cap) => (
+                                <option key={cap} value={cap}>
+                                  {CAPABILITY_LABELS[cap]}（{cap}）
+                                </option>
+                              ))}
                             </select>
                           </div>
                           <div className="form-row">
@@ -1382,8 +1416,8 @@ export default function AdminUsersPage() {
                         onChange={(e) => setCapSelfSelection(e.target.checked)}
                       />
                       <span>
-                        <b>自选管理</b>
-                        <small>self_selection · 行情列表/自选/盘中监控</small>
+                        <b>{CAPABILITY_LABELS.self_selection}</b>
+                        <small>{CAPABILITY_DESCRIPTIONS.self_selection}</small>
                       </span>
                     </label>
                     <label className="capability-checkbox-item">
@@ -1393,8 +1427,8 @@ export default function AdminUsersPage() {
                         onChange={(e) => setCapMarketData(e.target.checked)}
                       />
                       <span>
-                        <b>行情数据</b>
-                        <small>market_data · 行情列表/个股详情</small>
+                        <b>{CAPABILITY_LABELS.market_data}</b>
+                        <small>{CAPABILITY_DESCRIPTIONS.market_data}</small>
                       </span>
                     </label>
                     <label className="capability-checkbox-item">
@@ -1404,8 +1438,8 @@ export default function AdminUsersPage() {
                         onChange={(e) => setCapResearchReplay(e.target.checked)}
                       />
                       <span>
-                        <b>复盘研究</b>
-                        <small>research_replay · 复盘入口</small>
+                        <b>{CAPABILITY_LABELS.research_replay}</b>
+                        <small>{CAPABILITY_DESCRIPTIONS.research_replay}</small>
                       </span>
                     </label>
                   </div>
@@ -1485,17 +1519,25 @@ export default function AdminUsersPage() {
               {generatedCodes.length > 0 && (
                 <div className="generated-invite-list">
                   <div className="generated-invite-title">新邀请码</div>
-                  {generatedCodes.map((code) => (
-                    <div key={code.id} className="generated-invite-box">
-                      <b>{code.code}</b>
-                      <button
-                        className="btn small"
-                        onClick={() => handleCopyCode(code.code)}
-                      >
-                        复制
-                      </button>
-                    </div>
-                  ))}
+                  {generatedCodes.map((code) => {
+                    // [CHANGE-20260802-002] 展示后端实际回显的权限组合，而非前端勾选状态，
+                    // 后端漏传时显示明确提示而不是静默隐藏。
+                    const capText = formatCapabilityGrants(code.capabilities)
+                    return (
+                      <div key={code.id} className="generated-invite-box">
+                        <b>{code.code}</b>
+                        <small className="generated-invite-caps">
+                          {capText || '按套餐授权（未返回 capability 组合）'}
+                        </small>
+                        <button
+                          className="btn small"
+                          onClick={() => handleCopyCode(code.code)}
+                        >
+                          复制
+                        </button>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>

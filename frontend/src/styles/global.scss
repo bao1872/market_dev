@@ -2629,6 +2629,23 @@ button.switch {
     letter-spacing: .5px;
     color: #62d0c5;
   }
+
+  // [CHANGE-20260802-002] 邀请码实际授予的权限组合（自选管理 · 行情数据 · 复盘与竞价）
+  .generated-invite-caps {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    color: v.$color-muted;
+    text-align: right;
+  }
+}
+
+// [CHANGE-20260802-002] 权限状态卡机器值副标题（中文标签之后展示 capability key）
+.cap-status-head .cap-status-key {
+  margin-left: 6px;
+  font-size: 11px;
+  color: v.$color-muted;
+  font-family: v.$font-mono;
 }
 
 // ===== V1.6.3 AdminJobsPage 补充样式 =====

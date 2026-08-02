@@ -190,6 +190,9 @@ async def create_invite_codes(
                 "grant_months": invite.grant_months,
                 "grant_days": invite.grant_days,
                 "note": invite.note,
+                # [PRD60 PA-20] 记录实际授予的 capability 组合（旧模式为 None）
+                # research_replay 在展示层为「复盘与竞价」，机器值保持 research_replay
+                "capabilities": invite.capabilities,
             },
         )
 
@@ -205,6 +208,8 @@ async def create_invite_codes(
             grant_months=invite.grant_months,
             note=invite.note,
             created_at=invite.created_at,
+            # [PRD60 PA-20] 回显 capability 组合，供前端展示实际权限（旧模式为 None）
+            capabilities=invite.capabilities,
         )
         for invite, raw_code in results
     ]
@@ -250,6 +255,8 @@ async def get_invite_codes(
                 used_by=invite.used_by,
                 used_at=invite.used_at,
                 usage_type=invite.usage_type,
+                # [PRD60 PA-20] 回显 capability 组合（旧模式为 None）
+                capabilities=invite.capabilities,
             )
             for invite in items
         ],
@@ -293,11 +300,14 @@ async def revoke_code(
         action="invite_code.revoke",
         target_type="invite_code",
         target_id=str(invite.id),
-        before_data={"status": "unused"},
+        # [PRD60 PA-20] before_data 保留被撤销邀请码原本授予的 capability 组合，
+        # 使审计可还原「该邀请码本应授予哪些权限」（revoke 不修改 capabilities 列）
+        before_data={"status": "unused", "capabilities": invite.capabilities},
         after_data={
             "status": invite.status,
             "plan_code": invite.plan_code,
             "grant_months": invite.grant_months,
+            "capabilities": invite.capabilities,
         },
     )
 
@@ -316,6 +326,8 @@ async def revoke_code(
         used_by=invite.used_by,
         used_at=invite.used_at,
         usage_type=invite.usage_type,
+        # [PRD60 PA-20] 回显 capability 组合（旧模式为 None）
+        capabilities=invite.capabilities,
     )
 
 

@@ -774,8 +774,11 @@ export interface InviteCode {
   grant_months: number | null
   note: string | null
   created_at: string
-  /** [Gate2 PRD60 PA-20] capability 组合（新模式，可能为 null 表示旧模式） */
-  capabilities?: CapabilityGrantInput[] | null
+  /**
+   * [Gate2 PRD60 PA-20] capability 组合。后端始终返回该字段：
+   * null 表示旧模式邀请码（按 plan_code 兑换），不是后端漏传。
+   */
+  capabilities: CapabilityGrantInput[] | null
 }
 
 /** 邀请码列表项（不含明文）+ 套餐快照 */
@@ -792,8 +795,11 @@ export interface InviteCodeListItem {
   used_by: string | null
   used_at: string | null
   usage_type: string | null
-  /** [Gate2 PRD60 PA-20] capability 组合（新模式，可能为 null 表示旧模式） */
-  capabilities?: CapabilityGrantInput[] | null
+  /**
+   * [Gate2 PRD60 PA-20] capability 组合。后端始终返回该字段：
+   * null 表示旧模式邀请码（按 plan_code 兑换），不是后端漏传。
+   */
+  capabilities: CapabilityGrantInput[] | null
 }
 
 /** 邀请码列表响应 */
