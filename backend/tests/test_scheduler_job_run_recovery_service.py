@@ -103,7 +103,7 @@ async def test_lease_valid_heartbeat_fresh_not_recovered(db_session) -> None:
         job_name="bars_scheduler",
         status="running",
         lease_expires_at=test_now + timedelta(minutes=5),
-        heartbeat_at=test_now - timedelta(seconds=10),
+        heartbeat_at=test_now - timedelta(seconds=100),
     )
     job_run_id = job_run.id
 

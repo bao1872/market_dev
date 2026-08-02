@@ -298,6 +298,29 @@ async def test_worker_exception_marks_failed() -> None:
 # 测试 4: 断点恢复跳过日线刷新
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _mock_review_phase_boundary():
+    """本模块只验证 Worker 编排；Review 发布合同由专门测试覆盖。"""
+    fake_review_run = MagicMock()
+    fake_review_run.id = uuid.uuid4()
+    fake_review_run.status = "published"
+    fake_review_run.published_at = datetime.now(_TZ)
+    fake_review_run.expected_scope_count = 0
+    fake_review_run.signal_count = 0
+    fake_review_run.coverage_ratio = 1.0
+    with (
+        patch(
+            "app.services.review_orchestrator_service.create_run",
+            new=AsyncMock(return_value=fake_review_run),
+        ),
+        patch(
+            "app.services.review_publication_service.get_published_review_run_id",
+            new=AsyncMock(return_value=fake_review_run.id),
+        ),
+    ):
+        yield
+
 @pytest.mark.asyncio
 async def test_execute_with_checkpoint_skips_refresh_daily(db_session) -> None:
     """测试 4：last_completed_step='refreshing_daily' 时跳过日线刷新。

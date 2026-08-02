@@ -9,7 +9,7 @@
 2. dsa_selector.yaml manifest 中不存在 current_trend 输出字段
 3. _validate_metric_filters 接受 dsa_dir_bars 筛选条件
 4. _validate_metric_filters 拒绝 current_trend 筛选条件（422）
-5. 前端 ScreenerPage 列定义中趋势列 key 为 dsa_dir_bars（非 current_trend）
+5. 前端共享基础列不重新暴露旧 DSA-only 列
 
 业务背景：
 - 趋势列原始字段为 dsa_dir_bars（正值为多头持续天数，负值为空头持续天数）
@@ -22,6 +22,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 # dsa_selector.yaml manifest 路径
@@ -114,22 +115,19 @@ def test_validate_metric_filters_rejects_current_trend():
     manifest = _load_dsa_selector_manifest()
     version = _FakeVersion(manifest)
     filters = [{"metric_key": "current_trend", "operator": "eq", "value": "多头"}]
-    try:
+    with pytest.raises(HTTPException) as exc_info:
         _validate_metric_filters(filters, version)
-        assert False, "应抛出 HTTPException 422（current_trend 不在白名单）"
-    except HTTPException as e:
-        assert e.status_code == 422, f"期望 422，实际 {e.status_code}"
-        assert "current_trend" in str(e.detail)
+    assert exc_info.value.status_code == 422
+    assert "current_trend" in str(exc_info.value.detail)
     print("  _validate_metric_filters 拒绝 current_trend (422) ✓")
 
 
-def test_screener_page_trend_column_uses_dsa_dir_bars_key():
-    """验证趋势选股列定义中趋势列 key 为 dsa_dir_bars，非 current_trend。
+def test_screener_page_does_not_restore_legacy_dsa_only_column():
+    """验证趋势选股共享基础列不恢复旧 DSA-only 趋势列。
 
-    advice.md v8 Task 7 重构后，列定义统一移至 features/trend-selection/columns.tsx，
-    ScreenerPage.tsx 与 IndexPage.tsx 均通过 getTrendSelectionColumns() 引用共享列定义。
-    前端列定义的 key 直接作为 metric_filters 的 metric_key 发送到后端，
-    因此趋势列 key 必须是 dsa_dir_bars。
+    DSA 仍由 selector manifest 提供可筛选字段，但行情列表的共享基础列已按
+    CHANGE-20260731-REMOVE-DSA 移除旧 DSA-only 展示列。第一金字塔字段由
+    MarketWorkspacePage 的 canonical 列集合追加，不应把旧列重新塞回共享模块。
     """
     # 优先扫描共享列定义（Task 7 后唯一实现位置）
     with open(_TREND_SELECTION_COLUMNS_PATH, encoding="utf-8") as f:
@@ -138,9 +136,8 @@ def test_screener_page_trend_column_uses_dsa_dir_bars_key():
     assert "key: 'current_trend'" not in shared_columns_content, (
         "features/trend-selection/columns.tsx 中趋势列 key 不应为 current_trend"
     )
-    # dsa_dir_bars 应作为列 key 出现
-    assert "key: 'dsa_dir_bars'" in shared_columns_content, (
-        "features/trend-selection/columns.tsx 中趋势列 key 应为 dsa_dir_bars"
+    assert "key: 'dsa_dir_bars'" not in shared_columns_content, (
+        "features/trend-selection/columns.tsx 不应恢复旧 dsa_dir_bars 展示列"
     )
 
     # ScreenerPage.tsx 不应再独立定义 current_trend 列 key（防止回退）
@@ -149,14 +146,14 @@ def test_screener_page_trend_column_uses_dsa_dir_bars_key():
     assert "key: 'current_trend'" not in screener_content, (
         "ScreenerPage.tsx 中不应独立定义 current_trend 列 key"
     )
-    print("  趋势选股列定义 key 为 dsa_dir_bars（共享模块 + ScreenerPage 无 current_trend） ✓")
+    print("  趋势选股共享基础列未恢复旧 DSA-only 列 ✓")
 
 
 if __name__ == "__main__":
     print("=== 选股筛选字段契约测试 ===")
     test_dsa_dir_bars_is_filterable_output()
     test_current_trend_not_in_manifest_outputs()
-    test_screener_page_trend_column_uses_dsa_dir_bars_key()
+    test_screener_page_does_not_restore_legacy_dsa_only_column()
 
     # 以下两个测试需要导入 app 模块，standalone 运行（无 PYTHONPATH）时跳过并提示
     # 通过 PYTHONPATH=/root/web_dev/backend 或 pytest 运行可执行全部测试

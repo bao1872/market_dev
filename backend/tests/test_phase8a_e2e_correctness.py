@@ -512,13 +512,14 @@ async def test_08b_pipeline_legacy_status_mapping(db_session) -> None:
         _PIPELINE_STEPS,
     )
 
-    # 新状态机 6 步
+    # 新状态机 7 步（正式发布后还需完成 Review）
     assert _PIPELINE_STEPS == [
         "refreshing_daily",
         "syncing_boards",
         "checking_coverage",
         "computing_features",
         "publishing",
+        "computing_review",
         "watchlist_ready",
     ]
 

@@ -281,13 +281,13 @@ async def test_login_response_admin_next_route(
     client: httpx.AsyncClient,
     admin_user: User,
 ) -> None:
-    """admin 登录 next_route='/v1/admin/overview'。"""
+    """admin 登录 next_route='/admin/overview'（前端路由不带 API 版本前缀）。"""
     response = await client.post(
         "/v1/auth/login",
         json={"email": "admin@example.com", "password": "admin-password-123"},
     )
     assert response.status_code == 200
-    assert response.json()["next_route"] == "/v1/admin/overview"
+    assert response.json()["next_route"] == "/admin/overview"
 
 
 @pytest.mark.asyncio

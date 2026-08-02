@@ -168,7 +168,11 @@ async def _seed_published_inputs(
         started_at=now,
         finished_at=now,
     )
-    session.add_all([core_run, board_run, board, board_snapshot])
+    # BoardAnalysisSnapshot 通过真实 FK 引用 market_boards；先持久化父记录，
+    # 避免没有 ORM relationship 时 flush 无法推导对象级插入顺序。
+    session.add_all([core_run, board_run, board])
+    await session.flush()
+    session.add(board_snapshot)
     await session.flush()
 
     core_pointer = FactorPublication(
