@@ -1141,11 +1141,12 @@ async def revoke_capability_from_user(
     user_id: uuid.UUID,
     capability: str,
 ) -> bool:
-    """管理员撤销用户 capability（PRD60 PA-20）。
+    """管理员撤销用户 capability（PRD60 PA-20 + 权限模型 V2）。
 
-    行为：硬删除 user_capabilities 行（撤销即失去该 capability）。
-    旧 plan_code fallback 仍可能为用户提供该 capability（兼容期），
-    若需完全禁止，管理员应同时调整 subscription 状态。
+    行为：[权限模型 V2] 撤销后**保留显式 revoked 记录**，不硬删除——
+    否则用户可能因无显式记录而重新触发 legacy plan fallback（权限意外恢复）。
+    撤销记录把 expires_at 置为过去 + source=admin_revoke，active=false；
+    resolve_effective_access 因用户存在显式记录而不进入 legacy fallback。
 
     Args:
         db: 异步数据库会话
@@ -1153,7 +1154,7 @@ async def revoke_capability_from_user(
         capability: 权限类型 self_selection/market_data/research_replay
 
     Returns:
-        True 如果删除了行；False 如果原本就没有该 capability 行
+        True 如果更新了显式记录（含 revoked 标记）；False 如果原本就没有该 capability 行
 
     Raises:
         ValueError: capability 非法
@@ -1173,7 +1174,11 @@ async def revoke_capability_from_user(
     if existing_row is None:
         return False
 
-    await db.delete(existing_row)
+    # [权限模型 V2] 不硬删除：保留 revoked 记录，active=false，防止 legacy fallback 恢复
+    past = datetime.now(UTC) - timedelta(days=1)
+    existing_row.expires_at = past
+    existing_row.source = "admin_revoke"
+    existing_row.watchlist_limit = None
     await db.flush()
     return True
 

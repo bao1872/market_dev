@@ -221,6 +221,11 @@ async def resolve_effective_access(
             granted_at = _ensure_aware(row.granted_at)
             active = bool(expires_at and expires_at > now)
             source = row.source or "user_capabilities"
+            # [权限模型 V2] revoked 记录（source=admin_revoke）reason=explicitly_revoked
+            if source == "admin_revoke":
+                reason = "explicitly_revoked"
+            else:
+                reason = "expired" if (expires_at and not active) else ("active" if active else "no_expiry")
             capabilities[row.capability] = CapabilityState(
                 key=row.capability,
                 active=active,
@@ -228,7 +233,7 @@ async def resolve_effective_access(
                 expires_at=expires_at,
                 watchlist_limit=row.watchlist_limit,
                 source=source,
-                reason="expired" if (expires_at and not active) else ("active" if active else "no_expiry"),
+                reason=reason,
             )
     else:
         # legacy plan fallback（兼容期，显式标记 source，不得静默混入正常用户）
