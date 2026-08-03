@@ -112,6 +112,13 @@ if _SHARED_DEV_DB and not _PURE_UNIT:
         raise RuntimeError(
             "PANJI_SHARED_DEV_DB_TEST=1 禁止设置 TEST_DATABASE_URL（不存在临时测试库路线）。"
         )
+    # [第 5 部分加固] 必须显式指定唯一目标测试文件，禁止全仓/其他目录 pytest
+    _shared_target = os.environ.get("PANJI_SHARED_DEV_DB_TARGET", "")
+    if not _shared_target:
+        raise RuntimeError(
+            "PANJI_SHARED_DEV_DB_TEST=1 必须显式设置 PANJI_SHARED_DEV_DB_TARGET="
+            "（唯一允许的目标测试文件，如 tests/test_permission_v2_pg_integration.py）。"
+        )
     if _APP_ENV != "development":
         raise RuntimeError(
             f"shared_dev_db 测试要求 APP_ENV=development，当前={_APP_ENV!r}。"
@@ -187,7 +194,6 @@ if not _PURE_UNIT and not _SHARED_DEV_DB:
 
 # 测试专用 engine / session factory（CI 临时库 与 shared_dev_db 共用此入口）
 if not _PURE_UNIT:
-    # [测试] - 描述: test_async_engine 与 TestAsyncSessionLocal 保留供需要独立 session 的测试导入使用
     test_async_engine = create_async_engine(
         _TEST_ASYNC_URL,
         echo=False,
@@ -195,12 +201,23 @@ if not _PURE_UNIT:
         pool_size=5,
         max_overflow=10,
     )
-    TestAsyncSessionLocal = async_sessionmaker(
-        bind=test_async_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False,
-    )
+    if _SHARED_DEV_DB:
+        # [第 5 部分加固] shared_dev_db 模式：TestAsyncSessionLocal 必须 fail-closed，
+        # 禁止测试自建独立 session/engine（只能使用 db_session/client fixture）。
+        def _shared_db_guard(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError(
+                "shared_dev_db 模式禁止测试自建独立 session/engine（TestAsyncSessionLocal 已禁用）。"
+                "只能使用 conftest 的 db_session / client fixture（复用同一事务）。"
+            )
+
+        TestAsyncSessionLocal = _shared_db_guard  # type: ignore[assignment]
+    else:
+        TestAsyncSessionLocal = async_sessionmaker(
+            bind=test_async_engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False,
+        )
 else:
     # [CI 分层] PURE_UNIT_TEST=1 下不建立任何数据库连接，但仍需保证「收集期不报错」。
     #
@@ -327,6 +344,27 @@ def pytest_collection_modifyitems(config, items) -> None:  # type: ignore[no-unt
     仍会在 Release Gate 与 Nightly 的完整 PG job 中执行。
     """
     import pytest
+
+    # [第 5 部分加固] shared_dev_db 模式：强制唯一目标文件 + shared_dev_db marker
+    if _SHARED_DEV_DB and not _PURE_UNIT:
+        target_file = os.environ.get("PANJI_SHARED_DEV_DB_TARGET", "").strip()
+        expected_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", target_file)
+        ) if target_file else ""
+        for item in items:
+            item_path = str(getattr(item, "fspath", "") or "")
+            if item_path != expected_path:
+                pytest.exit(
+                    f"shared_dev_db 模式只允许运行目标文件 {target_file}（当前收集到 {item_path}）。"
+                    "禁止全仓 pytest 或其他目录。",
+                    returncode=2,
+                )
+            if "shared_dev_db" not in item.keywords:
+                pytest.exit(
+                    f"shared_dev_db 目标测试必须带 @pytest.mark.shared_dev_db（{item_path}）。",
+                    returncode=2,
+                )
+        return  # shared 模式不做 postgres 分类
 
     skip_pg = pytest.mark.skip(
         reason="需要真实 PostgreSQL；当前为 PURE_UNIT_TEST=1 纯单元测试模式"
