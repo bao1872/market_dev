@@ -49,6 +49,7 @@ import {
   CAPABILITY_LABELS,
   CAPABILITY_DESCRIPTIONS,
   capabilityLabel,
+  computeDefaultRoute,
   formatCapabilityGrants,
 } from '@/navigation/capabilities'
 
@@ -906,16 +907,12 @@ export default function AdminUsersPage() {
       parts.push(CAPABILITY_LABELS.research_replay)
     }
     const capText = parts.length > 0 ? parts.join(' + ') : '未选择权限'
-    // [权限模型 V2] 注册后默认入口（与后端 compute_default_route 一致）
-    const hasResearch = capResearchReplay
-    const hasSelfSel = capSelfSelection
-    const hasMarket = capMarketData
-    let defaultRoute = '/forbidden'
-    if (hasSelfSel && hasMarket) defaultRoute = '/market'
-    else if (hasResearch && !hasSelfSel && !hasMarket) defaultRoute = '/review'
-    else if (hasSelfSel && !hasMarket) defaultRoute = '/market?scope=watchlist'
-    else if (hasMarket) defaultRoute = '/market'
-    else if (hasResearch) defaultRoute = '/review'
+    // [权限模型 V2] 注册后默认入口：复用共享 computeDefaultRoute（与登录/后台列表同源）
+    const defaultRoute = computeDefaultRoute({
+      self_selection: capSelfSelection,
+      market_data: capMarketData,
+      research_replay: capResearchReplay,
+    })
     return `${capText} · 有效期${generateGrantMonths}周期（每周期30天） · 注册后默认入口: ${defaultRoute}`
   }, [capSelfSelection, capMarketData, capResearchReplay, capWatchlistLimit, generateGrantMonths])
 

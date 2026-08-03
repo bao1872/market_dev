@@ -90,3 +90,45 @@ export function formatCapabilityGrants(
     .filter((c) => !isCapabilityKey(c))
   return [...ordered, ...unknown].join(' · ')
 }
+
+// =============================================================================
+// [权限模型 V2] 默认入口计算（与 backend effective_access_service.compute_default_route 一致）
+// 登录、邀请码预览、后台列表共用此唯一实现，禁止各组件内联第二套路由矩阵。
+// =============================================================================
+
+export const DEFAULT_ROUTE_MARKET = '/market'
+export const DEFAULT_ROUTE_MARKET_WATCHLIST = '/market?scope=watchlist'
+export const DEFAULT_ROUTE_REVIEW = '/review'
+export const DEFAULT_ROUTE_FORBIDDEN = '/forbidden'
+
+/** 邀请码/登录用的 capability active 状态集合输入 */
+export interface CapabilityActiveInput {
+  self_selection?: boolean
+  market_data?: boolean
+  research_replay?: boolean
+}
+
+/**
+ * 依据 capability active 状态计算默认入口（与后端 compute_default_route 一致）。
+ * - admin → /admin/overview
+ * - 无 active → /forbidden
+ * - 仅 research_replay → /review
+ * - 仅 self_selection → /market?scope=watchlist
+ * - 仅 market_data → /market
+ * - self_selection + market_data（含 research_replay）→ /market
+ */
+export function computeDefaultRoute(
+  active: CapabilityActiveInput,
+  isAdmin = false,
+): string {
+  if (isAdmin) return '/admin/overview'
+  const hasSelfSel = !!active.self_selection
+  const hasMarket = !!active.market_data
+  const hasResearch = !!active.research_replay
+  if (!hasSelfSel && !hasMarket && !hasResearch) return DEFAULT_ROUTE_FORBIDDEN
+  if (hasResearch && !hasSelfSel && !hasMarket) return DEFAULT_ROUTE_REVIEW
+  if (hasSelfSel && !hasMarket) return DEFAULT_ROUTE_MARKET_WATCHLIST
+  if (hasMarket && !hasSelfSel) return DEFAULT_ROUTE_MARKET
+  if (hasSelfSel && hasMarket) return DEFAULT_ROUTE_MARKET
+  return DEFAULT_ROUTE_MARKET
+}
