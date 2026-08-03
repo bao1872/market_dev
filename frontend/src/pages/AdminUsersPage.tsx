@@ -234,7 +234,7 @@ export default function AdminUsersPage() {
   // 用户详情抽屉
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [selectedMember, setSelectedMember] = useState<MemberRow | null>(null)
-  const [drawerTab, setDrawerTab] = useState<string>('profile')
+  const [drawerTab, setDrawerTab] = useState<string>('capabilities')
 
   // 数据查询 hooks（依赖 selectedMember 的需放在状态定义之后）
   const membersQuery = useMembers()
@@ -343,7 +343,7 @@ export default function AdminUsersPage() {
   /** 打开用户详情抽屉，初始化表单状态 */
   const handleOpenDrawer = useCallback((member: MemberRow) => {
     setSelectedMember(member)
-    setDrawerTab('profile')
+    setDrawerTab('capabilities')
     setAccountStatusEdit(member.account_status === 'disabled' ? '停用' : '有效')
     const statusPill = getMemberStatusPill(member)
     setMembershipStatusEdit(statusPill.label)
@@ -1107,7 +1107,7 @@ export default function AdminUsersPage() {
               <div>
                 <b>会员详情 · {getEmailUsername(selectedMember.email)}</b>
                 <div className="card-sub">
-                  会员状态控制有效期，自选股额度由套餐决定
+                  账户状态控制登录；功能范围和额度由当前有效权限决定。
                 </div>
               </div>
               <button className="icon-btn" onClick={handleCloseDrawer}>
@@ -1130,25 +1130,25 @@ export default function AdminUsersPage() {
                 </div>
               </div>
 
-              {/* 抽屉内四 tab - [Gate2] 新增"权限"tab 用于 per-capability 管理 */}
+              {/* 抽屉内四 tab - [权限模型 V2] 默认权限概览，顺序：权限概览/账户/授权记录/审计 */}
               <div className="tabs drawer-tabs">
-                <div
-                  className={clsx('tab', drawerTab === 'profile' && 'active')}
-                  onClick={() => setDrawerTab('profile')}
-                >
-                  账户
-                </div>
                 <div
                   className={clsx('tab', drawerTab === 'capabilities' && 'active')}
                   onClick={() => setDrawerTab('capabilities')}
                 >
-                  权限
+                  权限概览
+                </div>
+                <div
+                  className={clsx('tab', drawerTab === 'profile' && 'active')}
+                  onClick={() => setDrawerTab('profile')}
+                >
+                  账户信息
                 </div>
                 <div
                   className={clsx('tab', drawerTab === 'membership' && 'active')}
                   onClick={() => setDrawerTab('membership')}
                 >
-                  会员记录
+                  授权记录
                 </div>
                 <div
                   className={clsx('tab', drawerTab === 'audit' && 'active')}
