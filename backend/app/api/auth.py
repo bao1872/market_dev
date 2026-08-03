@@ -65,10 +65,6 @@ from app.services.access_control_service import (
     get_access_context,
     require_authenticated,
 )
-from app.services.effective_access_service import (
-    CapabilityState,
-    compute_default_route,
-)
 from app.services.subscription_service import (
     _ensure_aware,
     get_renewal_count,
@@ -187,16 +183,12 @@ async def login(
         # [Auth] - 描述: 调用 get_access_context 计算 AccessProfile（只读，不写 DB）
         ctx = await get_access_context(db, user)
 
-        # [Auth] - 描述: 默认路由依据 capabilities 计算（权限模型 V2），
-        # 不再由 subscription_active 决定功能入口。
-        # admin → /admin/overview；无 active capability → /forbidden；
-        # 仅 research_replay → /review；self_selection/market_data 任一 → /market 族。
-        cap_states = {
-            key: CapabilityState(key=key, active=bool(info.get("active")), expires_at=info.get("expires_at"),
-                                 watchlist_limit=info.get("watchlist_limit"), source="user_capabilities")
-            for key, info in ctx.capabilities.items()
-        }
-        next_route = compute_default_route(ctx.is_admin, cap_states)
+        # [Auth] - 描述: 默认路由直接使用 resolve_effective_access 的 profile.default_route，
+        # 不再把 ctx.capabilities 重新转换为第二套 CapabilityState。
+        from app.services.effective_access_service import resolve_effective_access
+
+        profile = await resolve_effective_access(db, user)
+        next_route = profile.default_route
 
         # 生成 token
         user_id_str = str(user.id)
@@ -491,6 +483,8 @@ async def get_my_membership(
 @router.get("/me/access", response_model=AccessProfileResponse)
 async def get_my_access(
     ctx: AccessContext = Depends(require_authenticated),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
 ) -> AccessProfileResponse:
     """获取当前用户的完整权限上下文 AccessContext（11 个字段）。
 
@@ -508,7 +502,14 @@ async def get_my_access(
     Returns:
         AccessProfileResponse（11 个字段，与 AccessContext 对齐）
     """
-    # [Auth] - 描述: require_authenticated 已通过链式依赖复用 get_access_context 唯一真源
+    # [Auth] - 描述: canonical /me/access：复用 resolve_effective_access 唯一解析，
+    # capabilities 与 default_route/active_keys/source/diagnostics 均来自 profile。
+    from app.services.effective_access_service import (
+        capabilities_to_serializable,
+        resolve_effective_access,
+    )
+
+    profile = await resolve_effective_access(db, user)
     return AccessProfileResponse(
         user_id=ctx.user_id,
         account_status=ctx.account_status,
@@ -521,7 +522,11 @@ async def get_my_access(
         expires_at=ctx.expires_at,
         features=ctx.features,
         limits=ctx.limits,
-        capabilities=ctx.capabilities,
+        capabilities=capabilities_to_serializable(profile.capabilities),
+        default_route=profile.default_route,
+        active_capability_keys=profile.active_capability_keys,
+        capability_source=profile.capability_source,
+        diagnostics=profile.diagnostics,
     )
 
 

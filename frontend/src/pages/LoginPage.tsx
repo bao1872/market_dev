@@ -196,23 +196,24 @@ export default function LoginPage() {
         limits: access.limits,
         // [Phase 5B-2 PRD60 PA-01] 注册后从 /me/access 获取 capabilities
         capabilities: access.capabilities ?? {},
+        // [权限模型 V2] 统一权限画像字段
+        default_route: access.default_route,
+        active_capability_keys: access.active_capability_keys ?? [],
+        capability_source: access.capability_source,
       }
-      // 异步补全 email/name（不阻塞跳转）
+      // 异步补全 email/name（不阻塞跳转；setUser 只合并基础字段，不覆盖 capabilities）
       getMe()
         .then((me) => {
-          useAuthStore.getState().setUser({
-            ...user,
-            name: me.email,
-            email: me.email,
-          })
+          useAuthStore.getState().setUser({ ...user, name: me.email, email: me.email })
         })
         .catch(() => {
           // getMe 失败不阻塞跳转
         })
-      useAuthStore.getState().setUser(user)
+      // 直接设置完整权限画像（setUser 只合并基础字段，此处需完整 user）
+      useAuthStore.setState({ user, accessStatus: 'ready', accessLoading: false })
       useToast.getState().show('登录成功', '已进入盘迹')
-      // [Auth] - 描述: 注册后默认跳转 /market（新注册订阅已激活，无 next_route 字段）
-      navigate('/market')
+      // [权限模型 V2] 注册后按 default_route 跳转（不硬编码 /market）
+      navigate(access.default_route || '/market')
     } catch (err) {
       useAuthStore.getState().logout()
       useToast.getState().show('获取权限信息失败', getErrorMessage(err))

@@ -174,52 +174,9 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             capabilities={cap: {"active": True, "expires_at": None, "watchlist_limit": None} for cap in ALL_CAPABILITIES},
         )
 
-    # [AccessControl] - 描述: member 路径查询订阅有效状态（只读，复用 subscription_service）
-    effective_status, expires_at = await get_effective_subscription_status(db, user.id)
-    subscription_active = effective_status == "active"
-
-    # 无订阅记录：plan_code=None，features=[]，limits={}
-    if effective_status == "none":
-        return AccessContext(
-            user_id=str(user.id),
-            account_status=user.status,
-            roles=roles,
-            is_admin=False,
-            is_member=is_member,
-            subscription_active=False,
-            plan_code=None,
-            plan_display_name=None,
-            expires_at=None,
-            features=[],
-            limits={},
-            capabilities={},
-        )
-
-    # [AccessControl] - 描述: 有订阅记录（active 或 expired）查询 plan_code 并读取 plans 表
-    # 过期订阅仍填充 plan_code/plan_display_name/features/limits，便于前端展示降级提示
-    sub_stmt = select(Subscription.plan_code).where(Subscription.user_id == user.id)
-    sub_result = await db.execute(sub_stmt)
-    plan_code = sub_result.scalar_one_or_none()
-
-    if plan_code is None:
-        # 理论不可达：effective_status != "none" 但查不到 plan_code
-        return AccessContext(
-            user_id=str(user.id),
-            account_status=user.status,
-            roles=roles,
-            is_admin=False,
-            is_member=is_member,
-            subscription_active=subscription_active,
-            plan_code=None,
-            plan_display_name=None,
-            expires_at=expires_at,
-            features=[],
-            limits={},
-            capabilities={},
-        )
-
     # [权限模型 V2] capabilities 统一由 resolve_effective_access 解析（唯一真源），
-    # get_access_context 仅作为兼容包装，不再重复查询与推导 user_capabilities。
+    # get_access_context 仅作为兼容包装，无条件调用 resolve，不重复查询与推导。
+    # 禁止提前返回 capabilities={}（无 Subscription / plan_code is None 时也必须解析权限）。
     from app.services.effective_access_service import (
         capabilities_to_serializable,
         resolve_effective_access,
@@ -227,8 +184,19 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
 
     profile = await resolve_effective_access(db, user)
 
+    # [AccessControl] - 描述: member 路径查询订阅有效状态（只读，复用 subscription_service）
+    # Subscription 只负责返回商业展示字段（subscription_active/plan_code/expires_at/features/limits），
+    # 不得决定 capabilities 与 default_route。
+    effective_status, expires_at = await get_effective_subscription_status(db, user.id)
+    subscription_active = effective_status == "active"
+
+    # 有订阅记录（active 或 expired）查询 plan_code 并读取 plans 表
+    sub_stmt = select(Subscription.plan_code).where(Subscription.user_id == user.id)
+    sub_result = await db.execute(sub_stmt)
+    plan_code = sub_result.scalar_one_or_none()
+
     # [PlanService] - 描述: 复用 plan_service.get_plan 读取套餐定义（唯一真源，商业展示字段）
-    plan = await get_plan(db, plan_code)
+    plan = await get_plan(db, plan_code) if plan_code else None
 
     return AccessContext(
         user_id=str(user.id),
@@ -237,15 +205,15 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
         is_admin=False,
         is_member=is_member,
         subscription_active=subscription_active,
-        plan_code=plan.plan_code,
-        plan_display_name=plan.display_name,
+        plan_code=plan.plan_code if plan else None,
+        plan_display_name=plan.display_name if plan else None,
         expires_at=expires_at,
-        features=list(plan.features) if plan.features else [],
+        features=list(plan.features) if plan and plan.features else [],
         limits={
             "monitor_limit": int(plan.monitor_limit),
             "notification_channel_limit": int(plan.notification_channel_limit),
             "message_retention_days": int(plan.message_retention_days),
-        },
+        } if plan else {},
         capabilities=capabilities_to_serializable(profile.capabilities),
     )
 

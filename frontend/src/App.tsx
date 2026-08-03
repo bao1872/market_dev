@@ -55,20 +55,31 @@ function AuctionFallback() {
 // 由独立 CaptureStockPage 处理 token。普通受保护路由即使携带 capture 参数也绝不能清除 ACCESS_TOKEN_KEY。
 function ProtectedLayout() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const hydrationStatus = useAuthStore((s) => s.hydrationStatus)
+  const accessStatus = useAuthStore((s) => s.accessStatus)
   const revalidateAccess = useAuthStore((s) => s.revalidateAccess)
 
-  // [Auth] - 描述: 刷新页面后校验权限上下文（防止 persist 的 subscription_active 过期）
-  // 仅执行一次（useRef 守卫避免路由切换重复触发）
+  // hooks 必须先于任何条件 return（React Hooks 规则）
   const revalidatedRef = useRef(false)
   useEffect(() => {
     if (revalidatedRef.current) return
     revalidatedRef.current = true
-    void revalidateAccess()
-  }, [revalidateAccess])
+    // hydration 完成后且 accessStatus=idle 时触发 /v1/me/access（补水）
+    if (accessStatus === 'idle') {
+      void revalidateAccess()
+    }
+  }, [revalidateAccess, accessStatus, hydrationStatus])
 
-  // 双重检查：zustand isAuthenticated + localStorage auth_token
+  // [权限模型 V2] persist 完成前不渲染受保护路由
+  if (hydrationStatus === 'hydrating') {
+    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
+  }
+
+  // 双重检查：zustand isAuthenticated + auth_token（sessionStorage 优先，localStorage 兜底）
   // 防止 token 过期后 isAuthenticated 仍为 true 但 auth_token 已被清除
-  const hasToken = !!localStorage.getItem(ACCESS_TOKEN_KEY)
+  const hasToken = !!(
+    sessionStorage.getItem(ACCESS_TOKEN_KEY) ?? localStorage.getItem(ACCESS_TOKEN_KEY)
+  )
   if (!isAuthenticated || !hasToken) {
     return <Navigate to="/login" replace />
   }
@@ -96,17 +107,26 @@ function AdminRoute() {
 
 // [Phase 5B-2 PRD60 PA-01] CapabilityRoute - 三类独立权限守卫
 // capability: 'self_selection' | 'market_data' | 'research_replay'
-// admin 豁免；accessLoading 期间显示 loading（等待 /me/access 返回 capabilities）
-// 无权限时跳转到 /forbidden 页面（区分于 /subscription-expired 的"订阅过期"语义）
+// [权限模型 V2] 权限状态机：accessStatus==ready 且确认无权限才跳 /forbidden；
+// loading / idle 显示 loading；error 显示"权限加载失败"页（不伪装 403）。
 function CapabilityRoute({ capability }: { capability: string }) {
   const user = useAuthStore((s) => s.user)
-  const accessLoading = useAuthStore((s) => s.accessLoading)
+  const accessStatus = useAuthStore((s) => s.accessStatus)
+  const accessError = useAuthStore((s) => s.accessError)
+  const revalidateAccess = useAuthStore((s) => s.revalidateAccess)
 
-  // 仅在 capabilities 尚未加载时显示 loading（首次登录或刷新后无持久化状态）
-  // 已有持久化 capabilities 时不阻塞渲染，避免页面重载时 loading 闪烁导致 E2E 选择器失配；
-  // revalidateAccess 仍会异步刷新权限，若过期后会在 /me/access 响应后跳转 /subscription-expired
-  const hasCapability = !!user?.capabilities?.[capability]
-  if (accessLoading && !hasCapability) {
+  // 权限加载失败：显示失败页 + 重试按钮，不伪装 403
+  if (accessStatus === 'error') {
+    return (
+      <AccessLoadFailedPage
+        error={accessError}
+        onRetry={() => void revalidateAccess()}
+      />
+    )
+  }
+
+  // 权限未就绪（idle/loading/hydrating）：显示 loading，禁止跳 /forbidden
+  if (accessStatus !== 'ready') {
     return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
   }
 
@@ -115,7 +135,7 @@ function CapabilityRoute({ capability }: { capability: string }) {
     return <Outlet />
   }
 
-  // 检查 capability 是否存在且 active
+  // 仅 ready 且后端确认没有所需 capability 才允许跳 /forbidden
   const cap = user?.capabilities?.[capability]
   if (!cap?.active) {
     return <Navigate to="/forbidden" replace />
@@ -126,13 +146,23 @@ function CapabilityRoute({ capability }: { capability: string }) {
 
 // [Gate2 PRD60] CapabilityAnyRoute - 任一 capability 通过即放行
 // 用于 /market 等需要多种权限类型任一即可访问的路由
-// 如 /market 允许 self_selection（自选管理）或 market_data（行情管理）任一进入
+// [权限模型 V2] 同 CapabilityRoute 状态机：ready 且确认无权限才跳 /forbidden
 function CapabilityAnyRoute({ capabilities }: { capabilities: string[] }) {
   const user = useAuthStore((s) => s.user)
-  const accessLoading = useAuthStore((s) => s.accessLoading)
+  const accessStatus = useAuthStore((s) => s.accessStatus)
+  const accessError = useAuthStore((s) => s.accessError)
+  const revalidateAccess = useAuthStore((s) => s.revalidateAccess)
 
-  const hasAny = capabilities.some((cap) => !!user?.capabilities?.[cap])
-  if (accessLoading && !hasAny) {
+  if (accessStatus === 'error') {
+    return (
+      <AccessLoadFailedPage
+        error={accessError}
+        onRetry={() => void revalidateAccess()}
+      />
+    )
+  }
+
+  if (accessStatus !== 'ready') {
     return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
   }
 
@@ -149,6 +179,30 @@ function CapabilityAnyRoute({ capabilities }: { capabilities: string[] }) {
   }
 
   return <Outlet />
+}
+
+// [权限模型 V2] 权限加载失败页：表达 accessStatus=error（非 403），提供重试
+function AccessLoadFailedPage({ error, onRetry }: { error: string | null; onRetry: () => void }) {
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 12,
+        background: '#0A0F14',
+        color: '#E0E0E0',
+      }}
+    >
+      <div>权限加载失败</div>
+      <div style={{ color: '#888', fontSize: 13 }}>{error || '无法获取权限上下文，请重试'}</div>
+      <button className="btn" onClick={onRetry}>
+        重试
+      </button>
+    </div>
+  )
 }
 
 // [Phase 5B-2 PRD60 PA-01] 简易 403 页面 - 用户已登录但缺少指定 capability

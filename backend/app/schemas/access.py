@@ -52,6 +52,11 @@ class AccessProfileResponse(BaseModel):
     features: list[str] = Field(default_factory=list, description="功能特性列表")
     limits: dict = Field(default_factory=dict, description="额度限制 dict")
     capabilities: dict = Field(default_factory=dict, description="三类独立权限状态（PA-01）")
+    # [权限模型 V2] 统一权限画像字段（与 EffectiveAccessProfile 对齐）
+    default_route: str | None = Field(default=None, description="依据权限计算的默认入口")
+    active_capability_keys: list[str] = Field(default_factory=list, description="active 的 capability key 列表")
+    capability_source: str = Field(default="none", description="权限来源 admin/user_capabilities/legacy_plan_fallback")
+    diagnostics: list[str] = Field(default_factory=list, description="诊断（legacy fallback 标记等）")
 
 
 if __name__ == "__main__":

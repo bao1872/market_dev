@@ -55,6 +55,11 @@ export interface AccessProfile {
   features: string[]
   limits: Record<string, number>
   capabilities: Record<string, CapabilityInfo>
+  // [权限模型 V2] 统一权限画像字段
+  default_route?: string | null
+  active_capability_keys?: string[]
+  capability_source?: string
+  diagnostics?: string[]
 }
 
 // [Auth] - 描述: 登录响应 - 含 4 个 token 字段 + 10 个 AccessProfile 字段（对齐后端 LoginResponse）
