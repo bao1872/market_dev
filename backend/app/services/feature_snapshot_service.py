@@ -317,6 +317,10 @@ def build_summary_payload(
             flatten_first_pyramid(first_pyramid),
             snapshot_columns={
                 "trade_date": trade_date,
+                # [修复] 写入时即覆盖 fp_calculated_at/fp_run_id 真实列，
+                #       fp_calculated_at 用快照计算时间（created_at 由 ORM flush 设置，
+                #       这里用当前时间作为稳定回填），避免 fp_calculated_at 持久化为 null
+                "created_at": datetime.now(UTC).isoformat(),
                 "source_run_id": str(source_run_id) if source_run_id is not None else None,
             },
         ),
