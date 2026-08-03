@@ -2,10 +2,8 @@
 // 用法：node --experimental-strip-types --test src/features/stock-research/__tests__/stockDetailNavigation.test.ts
 //
 // 覆盖：
-//   1. buildStockDetailUrl 生成 originScope + source + strategy + returnTo + timeframe
-//   2. originScope=market → source=selection&strategy=dsa_selector
-//   3. originScope=watchlist → source=watchlist&strategy=watchlist_monitor
-//   4. [PRD V2.0 §4.4] originScope=direct → source=watchlist&strategy=watchlist_monitor
+//   1. buildStockDetailUrl 仅生成稳定 originScope + returnTo + timeframe + mcq
+//   2. market/watchlist/direct 均不再生成旧 DSA-only source/strategy/sourceRunId/cq
 //   5. resolveStockDetailOrigin 显式 originScope 不被 returnTo.scope 覆盖
 //   6. stale returnTo=watchlist + originScope=market → contextMismatch=true
 //   7. [PRD V2.0 §7.3 CI门禁] originScope=market 不得静默回退 watchlist
@@ -20,35 +18,27 @@ import { test } from 'node:test'
 import {
   buildStockDetailUrl,
   resolveStockDetailOrigin,
-  sourceForOriginScope,
-  strategyForOriginScope,
   buildDetailEntryContext,
   computeDetailEntryContextId,
 } from '../stockDetailNavigation.ts'
 
-test('buildStockDetailUrl: originScope=market → source=selection&strategy=dsa_selector', () => {
+test('buildStockDetailUrl: originScope=market 不生成旧 DSA-only 参数', () => {
   const url = buildStockDetailUrl('000001.SZ', { originScope: 'market' })
   assert.ok(url.startsWith('/stock/000001.SZ?'), `URL should start with /stock/000001.SZ?, got: ${url}`)
   const params = new URLSearchParams(url.split('?')[1])
   assert.equal(params.get('originScope'), 'market')
-  assert.equal(params.get('source'), 'selection')
-  assert.equal(params.get('strategy'), 'dsa_selector')
+  assert.ok(!params.has('source'))
+  assert.ok(!params.has('strategy'))
 })
 
-test('buildStockDetailUrl: originScope=watchlist → source=watchlist&strategy=watchlist_monitor', () => {
-  const url = buildStockDetailUrl('000001.SZ', { originScope: 'watchlist' })
-  const params = new URLSearchParams(url.split('?')[1])
-  assert.equal(params.get('originScope'), 'watchlist')
-  assert.equal(params.get('source'), 'watchlist')
-  assert.equal(params.get('strategy'), 'watchlist_monitor')
-})
-
-test('buildStockDetailUrl: [PRD V2.0 §4.4] originScope=direct → source=watchlist&strategy=watchlist_monitor', () => {
-  const url = buildStockDetailUrl('000001.SZ', { originScope: 'direct' })
-  const params = new URLSearchParams(url.split('?')[1])
-  assert.equal(params.get('originScope'), 'direct')
-  assert.equal(params.get('source'), 'watchlist')
-  assert.equal(params.get('strategy'), 'watchlist_monitor')
+test('buildStockDetailUrl: watchlist/direct 不生成旧 DSA-only 参数', () => {
+  for (const originScope of ['watchlist', 'direct'] as const) {
+    const url = buildStockDetailUrl('000001.SZ', { originScope })
+    const params = new URLSearchParams(url.split('?')[1])
+    assert.equal(params.get('originScope'), originScope)
+    assert.ok(!params.has('source'))
+    assert.ok(!params.has('strategy'))
+  }
 })
 
 test('buildStockDetailUrl: 保留 returnTo 和 timeframe', () => {
@@ -67,15 +57,6 @@ test('buildStockDetailUrl: 无 returnTo/timeframe 时不写入参数', () => {
   const params = new URLSearchParams(url.split('?')[1])
   assert.ok(!params.has('returnTo'), 'returnTo should not be present')
   assert.ok(!params.has('timeframe'), 'timeframe should not be present')
-})
-
-test('sourceForOriginScope / strategyForOriginScope 映射正确（含 direct）', () => {
-  assert.equal(sourceForOriginScope('market'), 'selection')
-  assert.equal(sourceForOriginScope('watchlist'), 'watchlist')
-  assert.equal(sourceForOriginScope('direct'), 'watchlist')
-  assert.equal(strategyForOriginScope('market'), 'dsa_selector')
-  assert.equal(strategyForOriginScope('watchlist'), 'watchlist_monitor')
-  assert.equal(strategyForOriginScope('direct'), 'watchlist_monitor')
 })
 
 test('resolveStockDetailOrigin: 显式 originScope=market 立即点击仍为行情来源', () => {

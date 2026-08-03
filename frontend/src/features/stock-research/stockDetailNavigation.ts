@@ -43,15 +43,9 @@ export interface BuildStockDetailUrlOptions {
   returnTo?: string | null
   /** 时间周期（1d|15m|1h|1w|1mo），切换股票时保留 */
   timeframe?: string | null
-  /**
-   * [DEPRECATED 20260731-SAME-SOURCE] 旧 DSA sourceRunId，保留兼容但不再消费。
-   * 左栏统一用 mcq（Market Canonical Query）查询 /market/stocks。
-   */
+  /** @deprecated 旧 DSA source run，仅保留调用方类型兼容，不写入新 URL。 */
   sourceRunId?: string | null
-  /**
-   * [DEPRECATED 20260731-SAME-SOURCE] 旧 DSA canonicalQuery（StrategyResultQuery JSON），
-   * 保留兼容但不再消费。左栏统一用 mcq 查询 /market/stocks。
-   */
+  /** @deprecated 旧 DSA canonical query，仅保留调用方类型兼容，不写入新 URL。 */
   canonicalQuery?: string | null
   /**
    * [CHANGE-20260731-SAME-SOURCE] Market Canonical Query（/market/stocks 同源查询参数 JSON 字符串）。
@@ -61,28 +55,21 @@ export interface BuildStockDetailUrlOptions {
   marketCanonicalQuery?: string | null
 }
 
+/** legacy来源映射，仅用于旧调用方兼容；新详情页以originScope/mcq为稳定合同。 */
+export function sourceForOriginScope(originScope: OriginScope): 'selection' | 'watchlist' {
+  return originScope === 'market' ? 'selection' : 'watchlist'
+}
+
+/** legacy策略映射，仅用于旧调用方兼容。 */
+export function strategyForOriginScope(originScope: OriginScope): string {
+  return originScope === 'market' ? 'dsa_selector' : 'watchlist_monitor'
+}
+
 export interface ResolvedDetailOrigin {
   /** 解析后的 originScope（含 direct） */
   originScope: OriginScope
   /** originScope 与 returnTo.scope 冲突时为 true（显示"来源上下文失效"，禁止静默回退自选） */
   contextMismatch: boolean
-}
-
-/**
- * originScope → source 映射。
- * market → selection；watchlist → watchlist；direct → watchlist（向后兼容数据获取，
- * 但 UI 应根据 originScope==='direct' 隐藏来源列表）。
- */
-export function sourceForOriginScope(originScope: OriginScope): 'selection' | 'watchlist' {
-  return originScope === 'market' ? 'selection' : 'watchlist'
-}
-
-/**
- * originScope → strategy 映射。
- * market → dsa_selector；watchlist/direct → watchlist_monitor。
- */
-export function strategyForOriginScope(originScope: OriginScope): string {
-  return originScope === 'market' ? 'dsa_selector' : 'watchlist_monitor'
 }
 
 /**

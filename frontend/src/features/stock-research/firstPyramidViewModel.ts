@@ -8,7 +8,8 @@ import type {
   FirstPyramidSnapshot,
   PyramidEvent,
   VolumeContextSchema,
-} from '@/api/endpoints'
+} from '../../api/endpoints.ts'
+import { formatSmcEvent, getSmcEqLabel, formatSmcOrderBlock } from '../../components/smcLabels.ts'
 
 /** 方向：1=偏多/上行, -1=偏空/下行, 0=中性/未形成 */
 export type Direction = 1 | -1 | 0
@@ -188,10 +189,26 @@ function buildVolumeWaterLevel(vc: VolumeContextSchema | null | undefined): Volu
 
 function buildStructureEvent(e: PyramidEvent): StructureEventVM {
   const levelRaw = e.extra?.['structure_level']
+  const structureLevel = levelRaw === 'swing' || levelRaw === 'internal' ? levelRaw : null
+  const direction = e.direction === 'up' || e.direction === 'down' ? e.direction : null
+  const bias = asNumber(e.extra?.['bias'])
+  let typeLabel = EVENT_TYPE_LABEL[e.type] ?? e.type
+  let levelLabel = structureLevel ? STRUCTURE_LEVEL_LABEL[structureLevel] : null
+  if (e.type === 'BOS' || e.type === 'CHoCH') {
+    const semantic = formatSmcEvent({ type: e.type, structureLevel, direction, bias })
+    typeLabel = semantic.arrow ? `${semantic.label}${semantic.arrow}` : semantic.label
+    levelLabel = semantic.structureLevel ? STRUCTURE_LEVEL_LABEL[semantic.structureLevel] : null
+  } else if (e.type === 'EQH' || e.type === 'EQL') {
+    typeLabel = getSmcEqLabel(e.type)
+    levelLabel = null
+  } else if (e.type === 'OB_ENTRY' || e.type === 'OB_CREATED' || e.type === 'OB_ENTERED' || e.type === 'OB_MITIGATED') {
+    const semantic = formatSmcOrderBlock({ structureLevel, direction, bias })
+    typeLabel = semantic.arrow ? `${semantic.label}${semantic.arrow}` : semantic.label
+  }
   return {
-    typeLabel: EVENT_TYPE_LABEL[e.type] ?? e.type,
-    directionLabel: e.direction ? (DIRECTION_LABEL[e.direction] ?? e.direction) : '—',
-    levelLabel: typeof levelRaw === 'string' ? (STRUCTURE_LEVEL_LABEL[levelRaw] ?? null) : null,
+    typeLabel,
+    directionLabel: direction ? DIRECTION_LABEL[direction] : '—',
+    levelLabel,
     freshnessLabel: FRESHNESS_LABEL(asNumber(e.freshnessBars)),
     occurredAt: e.occurredAt,
     price: asNumber(e.price),
