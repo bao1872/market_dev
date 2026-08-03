@@ -38,6 +38,8 @@ from app.domain.first_pyramid_semantics import (
     Direction,
     MomentumChange,
     MomentumDirection,
+    StructureAlignment,
+    VolumeBadge,
 )
 from app.domain.review.metric_registry import (
     DEFAULT_REGISTRY,
@@ -715,6 +717,47 @@ _DERIVE_FNS: dict[str, Any] = {
 # 单 component 原始值计算
 # =============================================================================
 
+# 方向类字段 → 是否计为"积极方向"的统一语义判断。
+# [C2] 禁止直接比较 "up"/"enhancing"/"aligned"（中文"上行/共振/扩张"等值无法命中），
+# 统一使用 FirstPyramidSemanticAdapter 将中文/英文/数字/枚举规范化为 canonical 类型。
+# 关键修复：
+#   - 中文"上行" → Direction.UP（计为积极）
+#   - 中文"下行" → Direction.DOWN（不计为积极）
+#   - "共振" → StructureAlignment.ALIGNED（计为积极）；"背离" → DIVERGENT（不计）
+#   - fp_momentum_change 数值：>0 → ENHANCING（计为积极），<0 → WEAKENING（不计）
+_SEMANTIC_POSITIVE: dict[str, tuple[str, Any]] = {
+    "fp_trend_direction": ("direction", Direction.UP),
+    "fp_swing_direction": ("direction", Direction.UP),
+    "fp_internal_direction": ("direction", Direction.UP),
+    "fp_structure_alignment": ("alignment", "aligned"),
+    "fp_momentum_direction": ("momentum_direction", "expanding"),
+    "fp_momentum_change": ("momentum_change", "enhancing"),
+    "fp_volume_badge": ("volume_badge", "high"),
+}
+
+
+def _is_positive_semantic_direction(src: str, val: Any) -> bool:
+    """按字段类型用 FirstPyramidSemanticAdapter 判定 val 是否属"积极方向"。
+
+    未知字段返回 False（不把 truthy 值误判为积极方向）。
+    """
+    mapping = _SEMANTIC_POSITIVE.get(src)
+    if mapping is None:
+        return False
+    kind, positive = mapping
+    adapter = FirstPyramidSemanticAdapter()
+    if kind == "direction":
+        return adapter.direction(val) is Direction.UP
+    if kind == "alignment":
+        return adapter.alignment(val) is StructureAlignment.ALIGNED
+    if kind == "momentum_direction":
+        return adapter.momentum_direction_value(val) is MomentumDirection.EXPANDING
+    if kind == "momentum_change":
+        return adapter.momentum_change_value(val) is MomentumChange.ENHANCING
+    if kind == "volume_badge":
+        return adapter.volume_badge_value(val) is VolumeBadge.HIGH
+    return False
+
 
 def _compute_component_raw(
     spec: MetricComponentSpec,
@@ -743,12 +786,11 @@ def _compute_component_raw(
         if val is None:
             continue
         ready += 1
-        # 方向匹配：trend/structure/momentum 方向类字段
-        if src in (
-            "fp_trend_direction", "fp_swing_direction",
-            "fp_internal_direction", "fp_momentum_change",
-        ):
-            if val == "up" or val == "enhancing" or val == "aligned":
+        # 方向匹配：[C2] 统一用 FirstPyramidSemanticAdapter 判定积极方向，
+        # 不再直接比较 "up"/"enhancing"/"aligned"（中文"上行/共振/扩张"与数值
+        # 动量方向须经语义规范化，避免"下行/背离/走弱"被 truthy 误判为积极）。
+        if src in _SEMANTIC_POSITIVE:
+            if _is_positive_semantic_direction(src, val):
                 matched += 1
         # 分位类字段（0-100）：取中位数 / 100
         elif src in (

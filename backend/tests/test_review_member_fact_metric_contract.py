@@ -200,3 +200,59 @@ async def test_orchestrator_finishes_cross_section_before_any_signal(
         "signals:one",
         "signals:two",
     ]
+
+
+# =============================================================================
+# [C2] metric_engine 语义方向判定合同测试
+# 统一使用 FirstPyramidSemanticAdapter，覆盖中文/英文/数字/枚举。
+# =============================================================================
+
+
+class TestPositiveSemanticDirection:
+    """_is_positive_semantic_direction：中文/英文/数字/枚举均正确归类积极方向。"""
+
+    @pytest.mark.parametrize(
+        "field,value,expected",
+        [
+            # 方向类：中文"上行"计 UP，中文"下行"/"震荡"不计
+            ("fp_trend_direction", "上行", True),
+            ("fp_trend_direction", "down", False),
+            ("fp_trend_direction", "下行", False),
+            ("fp_trend_direction", "震荡", False),
+            ("fp_swing_direction", "上行", True),
+            ("fp_internal_direction", "上行", True),
+            ("fp_swing_direction", "下行", False),
+            # 数值方向：1 → UP，-1 → DOWN，0 → SIDEWAYS
+            ("fp_trend_direction", 1, True),
+            ("fp_trend_direction", -1, False),
+            ("fp_trend_direction", 0, False),
+            # 对齐：中文"共振"计 ALIGNED，"背离"不计
+            ("fp_structure_alignment", "共振", True),
+            ("fp_structure_alignment", "背离", False),
+            ("fp_structure_alignment", "aligned", True),
+            ("fp_structure_alignment", "divergent", False),
+            # 动量方向：中文"扩张"计 EXPANDING，"收缩"不计
+            ("fp_momentum_direction", "扩张", True),
+            ("fp_momentum_direction", "收缩", False),
+            ("fp_momentum_direction", "contracting", False),
+            # 动量变化：中文"增强"/英文"enhancing"计 ENHANCING；数值 +/− 分方向
+            ("fp_momentum_change", "增强", True),
+            ("fp_momentum_change", "enhancing", True),
+            ("fp_momentum_change", "走弱", False),
+            ("fp_momentum_change", 0.5, True),
+            ("fp_momentum_change", -0.3, False),
+            # 量能徽标：中文"放量"/英文"high"计 HIGH，"缩量"不计
+            ("fp_volume_badge", "放量", True),
+            ("fp_volume_badge", "high", True),
+            ("fp_volume_badge", "缩量", False),
+            ("fp_volume_badge", "normal", False),
+            # 未知字段不误判为积极方向
+            ("fp_unknown_field", "up", False),
+            ("fp_poc_price", 10.5, False),
+        ],
+    )
+    def test_positive_semantic_direction(
+        self, field: str, value: Any, expected: bool
+    ) -> None:
+        from app.domain.review.metric_engine import _is_positive_semantic_direction
+        assert _is_positive_semantic_direction(field, value) is expected
