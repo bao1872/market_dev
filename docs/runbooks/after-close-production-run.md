@@ -11,7 +11,7 @@
 
 ## 1. 只读前置确认
 
-通过 SSH 登录生产服务器，执行只读检查：
+通过 SSH 登录远程开发运行服务器，执行只读检查：
 
 ```bash
 # 1.1 确认最近完成交易日
@@ -101,7 +101,7 @@ scripts/ops/panji-prod-ssh "curl -s -X POST -H 'Authorization: Bearer <admin_tok
 ## 安全边界
 
 - 禁止在容器内临时拼 Python 创建任务。
-- 禁止直接修改生产数据库任务 metadata。
+- 禁止直接修改共享开发业务数据库任务 metadata。
 - 禁止 DELETE 历史 `dsa_only` 记录；通过正式 cancel/interrupted/retry 服务处理。
 - 禁止关闭或重启 worker 容器以"重置"任务。
 - 禁止启动 nohup 临时脚本轮询任务状态。

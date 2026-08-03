@@ -128,7 +128,7 @@ Fair Value Gap 已完全排除。
 
 - `git add -A` / `git add .` / `git add -u`：禁止；
 - 不得提交：`.vscode/settings.json`、`.traeignore`、`node_modules/`、`.venv/`、`__pycache__/`、`*.py[cod]`、`.mypy_cache/`、`.pytest_cache/`、`.ruff_cache/`、`.coverage`、`coverage.xml`、`dist/`、`build/`、`*.log`、`*.csv`、`*.parquet`；
-- 未经用户明确授权禁止删除：数据库卷、运行中容器、postgres / redis 数据目录、node_modules、.venv、.git、源码、生产数据。
+- 未经用户明确授权禁止删除：数据库卷、运行中容器、postgres / redis 数据目录、node_modules、.venv、.git、源码、共享开发业务数据。
 
 ## Docker 镜像禁止（AGENTS §七.11）
 

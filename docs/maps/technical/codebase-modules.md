@@ -28,8 +28,8 @@
 | 数据访问 | `backend/app/db.py` | 异步 SQLAlchemy engine、session factory、FastAPI `get_db` | Service / API / Worker | `DATABASE_URL` | 已核验 |
 | Redis Client | `redis.asyncio.from_url(settings.redis_url)` | 队列、锁、缓存 | Worker / Service | `REDIS_URL` | 已核验 |
 | SSH 隧道 | `scripts/local/ssh-tunnel.sh` | 本地开发连接远程 PostgreSQL / Redis 的可重复隧道 | 开发者手动调用 | `~/.ssh/config` Host 别名 | 已核验 |
-| 生产部署脚本 | `scripts/deploy/panji-deploy.sh` | 接收精确 SHA，验证 origin/main，按变更范围 Live Mount / 重建镜像部署，记录 previous/last-good，失败回滚 | GitHub Actions / 管理员手动 SSH 调用 | git、docker compose、flock、rsync、curl、npm/node | 代码已准备 / 未启用 |
-| 生产部署 workflow | `.github/workflows/deploy-production.yml` | CI 通过后通过 SSH 调用远程部署脚本；支持手动 workflow_dispatch | GitHub Actions | secrets.PANJI_PROD_HOST/USER/SSH_KEY | 代码已准备 / 未启用 |
+| 远程开发部署脚本 | `scripts/deploy/panji-deploy.sh` | 接收精确 SHA，验证 origin/main，按变更范围 Live Mount / 重建镜像部署，记录 previous/last-good，失败回滚 | GitHub Actions / 管理员手动 SSH 调用 | git、docker compose、flock、rsync、curl、npm/node | 代码已准备 / 未启用 |
+| 远程开发部署 workflow | `.github/workflows/deploy-production.yml` | CI 通过后通过 SSH 调用远程部署脚本；支持手动 workflow_dispatch | GitHub Actions | secrets.PANJI_PROD_HOST/USER/SSH_KEY | 代码已准备 / 未启用 |
 | 指标计算 | `backend/app/services/`、`backend/app/strategy_assets/algorithms/` | 纯计算与业务编排 | Worker / Service / API | 行情数据、数据库 | 未深入核验 |
 | 发布 | `backend/app/services/after_close_pipeline_service.py` | 正式 run 切换 | Orchestrator | DB | 未核验 |
 | 权限 | `backend/app/core/`、JWT / 依赖注入 | 后端授权 | API | 用户数据 | 未深入核验 |
@@ -60,8 +60,8 @@
 | DB Session | `backend/app/db.py:AsyncSessionLocal`、`get_db()` | 直接新建 engine |
 | Redis Client | `redis.asyncio.from_url(get_settings().redis_url)` | 硬编码 Redis URL 或 DB |
 | after-close readiness | `backend/app/services/after_close_orchestrator.py:execute_after_close_run` 中 `checking_coverage` 步骤（仅日线覆盖率 >= 0.9；Phase 5A 移除 15m 阻塞） | 在 after-close 链路中重复实现 15m 覆盖率检查或绕过 `execute_after_close_run` 自行检查 readiness；15m intraday 工具 `BarsCoverageService.compute_intraday_coverage` 保留供其他链路使用 |
-| 生产部署脚本 | `scripts/deploy/panji-deploy.sh` | 服务器本地其他入口或手动复制 |
-| 生产部署 workflow | `.github/workflows/deploy-production.yml` | 其他分支或未经 CI 的触发器 |
+| 远程开发部署脚本 | `scripts/deploy/panji-deploy.sh` | 服务器本地其他入口或手动复制 |
+| 远程开发部署 workflow | `.github/workflows/deploy-production.yml` | 其他分支或未经 CI 的触发器 |
 | 时间转换 | `backend/app/core/time.py`（待核验） | 未核验 |
 | 股票标识 | `backend/app/models/instrument.py`（待核验） | 未核验 |
 | 正式结果读取 | `backend/app/services/after_close_pipeline_service.py`（待核验） | 未核验 |

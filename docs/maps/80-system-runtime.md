@@ -13,7 +13,7 @@
 | Frontend | Node.js + Vite，配置入口 `frontend/vite.config.ts` |
 | PostgreSQL | 不在本地启动；应用开发可经 SSH Tunnel 连接正式 `bz_stock`，本地测试禁止连接任何数据库 |
 | Redis | 不在本地启动；开发连接使用隔离逻辑 DB，测试使用 mock |
-| Worker/Scheduler | 本地不得启动正式 Worker、Scheduler、盘后编排或全市场任务 |
+| Worker/Scheduler | 本地不得启动远程常驻 Worker、Scheduler、盘后编排或全市场任务 |
 | 测试 | `PURE_UNIT_TEST=1`；PostgreSQL 集成测试只在 CI 临时容器运行 |
 
 本地启动和隧道命令以 `docs/runbooks/local-development.md` 为准。本地进程隔离不能被

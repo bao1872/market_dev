@@ -6,7 +6,7 @@
 
 - **本地固定连接正式数据源**：PostgreSQL=`bz_stock`，Redis 使用 `backend/.env` 中的正式运行配置（本地隔离 DB）。
 - **永久禁止本地 / 远程开发运行环境创建或复用任何独立/临时测试库**；独立测试库已于 2026-07-28 DROP，不得重建。
-- **本地与服务器隔离边界是进程，不是数据复制**：本地只启动 Backend、Frontend、Capture 和 SSH Tunnel；Scheduler、正式 Worker、盘后编排和全市场任务必须为 0。
+- **本地与服务器隔离边界是进程，不是数据复制**：本地只启动 Backend、Frontend、Capture 和 SSH Tunnel；Scheduler、远程常驻 Worker、盘后编排和全市场任务必须为 0。
 - **本地写入均为真实业务写入**：禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道；禁止清库、批量更新、Migration、删除正式数据。
 - **8752028@qq.com 为受保护 Owner 账户**：禁止修改其密码、邮箱、状态、角色、权限、订阅和业务数据。
 - **本地测试只能纯单元/mock**：必须设置 `PURE_UNIT_TEST=1`；禁止连接共享开发业务数据库 `bz_stock` 或任何持久测试库。
@@ -243,7 +243,7 @@ ssh -G panji-prod | grep hostname
 - 本地开发不启动 Docker 或 Docker Compose 盘迹服务。
 - **本地固定连接共享开发业务数据库 `bz_stock`**；禁止连接任何独立测试库或创建新的独立/临时测试库。
 - 不执行 Alembic migration、CREATE TABLE、TRUNCATE 或其他破坏性 SQL。
-- **禁止本地启动 Scheduler、正式 Worker、盘后编排或全市场任务**；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
+- **禁止本地启动 Scheduler、远程常驻 Worker、盘后编排或全市场任务**；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
 - 禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道。
 - **8752028@qq.com 为受保护 Owner 账户**：禁止修改其密码、邮箱、状态、角色、权限、订阅和业务数据。
 - 不得在命令、日志、浏览器自动化或报告中写入 Owner 真实密码；TRAE 不得自动登录 Owner 账户，登录由用户手工完成。

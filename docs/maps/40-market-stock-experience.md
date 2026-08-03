@@ -1,6 +1,6 @@
 # 行情与个股体验 Map
 
-核验状态：代码与 mock 数据浏览器 E2E 已通过同一 SHA CI；生产数据浏览器验收未执行
+核验状态：代码与 mock 数据浏览器 E2E 已通过同一 SHA CI；共享开发业务数据浏览器验收未执行
 最后核验日期：2026-08-01
 核验分支：`codex/panji-full-closure-20260801`
 核验提交：`a4221e0`、`a254412`；最终 CI 证据 `c6abcc1` / Run `30731828236`
@@ -25,7 +25,7 @@
 | MX-13 | 中文标签待核验 | 部分实现 | 未核验 |
 | MX-14 | 管理调试路由待核验 | 部分已知 | 未核验 |
 | MX-15 | 页面状态待核验 | 未核验 | 未核验 |
-| MX-20 列表视图第一金字塔全量字段 | `backend/app/services/first_pyramid_flatten.py`（99 键扁平化函数）；`backend/app/services/market_stocks_service.py`（批量读取快照，无 N+1；**[CHANGE-008]** `_build_snap_lateral(snapshot_run_id=...)` 严格绑定已发布 `factor_publications` 的 `data_run_id`，无 pointer 时回退每股 latest；**[CHANGE-009]** 单一数据源，删除前端双分页合并架构，统一使用 `useMarketStocks`；`MarketStockRow` schema 扩展 `payload/data_run_id/factor_ready/factor_error/factor_actual_bars/factor_required_bars/chip_status` 字段；`_compute_factor_ready` 区分新股数据不足（`INSUFFICIENT_DAILY_BARS`）与程序异常；`_build_chip_status_struct` 从 `stock_chip_consensus_snapshots` 严格匹配返回结构化状态）；`backend/app/schemas/market_stocks.py`（`MarketStockRow.first_pyramid` + `ChipStatus`）；`frontend/src/features/market-workspace/firstPyramidColumns.tsx`（ColumnRegistry 99 列）；`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`（**[CHANGE-009]** 删除 `useStrategyRunResults`，仅使用 `useMarketStocks`）；`frontend/src/features/trend-selection/adapters.ts`（`adaptMarketStockToTrendRow` 全量字段映射）；`frontend/src/components/StrategyDataTable.tsx`（`defaultHiddenColumns` prop）；复用 `TableViewPreset` 保存显隐与顺序 | 已实现未运行核验 | 25 个后端纯单元测试通过（`test_market_stocks_helpers.py`）+ 8 个前端 adapter 测试（`adapter.test.ts`）；TSC+ESLint 通过；浏览器真实链路验收待生产部署后执行 |
+| MX-20 列表视图第一金字塔全量字段 | `backend/app/services/first_pyramid_flatten.py`（99 键扁平化函数）；`backend/app/services/market_stocks_service.py`（批量读取快照，无 N+1；**[CHANGE-008]** `_build_snap_lateral(snapshot_run_id=...)` 严格绑定已发布 `factor_publications` 的 `data_run_id`，无 pointer 时回退每股 latest；**[CHANGE-009]** 单一数据源，删除前端双分页合并架构，统一使用 `useMarketStocks`；`MarketStockRow` schema 扩展 `payload/data_run_id/factor_ready/factor_error/factor_actual_bars/factor_required_bars/chip_status` 字段；`_compute_factor_ready` 区分新股数据不足（`INSUFFICIENT_DAILY_BARS`）与程序异常；`_build_chip_status_struct` 从 `stock_chip_consensus_snapshots` 严格匹配返回结构化状态）；`backend/app/schemas/market_stocks.py`（`MarketStockRow.first_pyramid` + `ChipStatus`）；`frontend/src/features/market-workspace/firstPyramidColumns.tsx`（ColumnRegistry 99 列）；`frontend/src/features/market-workspace/MarketWorkspacePage.tsx`（**[CHANGE-009]** 删除 `useStrategyRunResults`，仅使用 `useMarketStocks`）；`frontend/src/features/trend-selection/adapters.ts`（`adaptMarketStockToTrendRow` 全量字段映射）；`frontend/src/components/StrategyDataTable.tsx`（`defaultHiddenColumns` prop）；复用 `TableViewPreset` 保存显隐与顺序 | 已实现未运行核验 | 25 个后端纯单元测试通过（`test_market_stocks_helpers.py`）+ 8 个前端 adapter 测试（`adapter.test.ts`）；TSC+ESLint 通过；浏览器真实链路验收待远程开发部署后执行 |
 
 ## 2. 路由
 

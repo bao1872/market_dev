@@ -114,7 +114,7 @@ completed → published
 - ~~P0：本地调试误触正式发布风险~~ **[Phase 5A 已关闭并核验]** 所有 Redis 入口（`backend/app/core/redis_client.py`、`backend/app/db.py`、Worker、admin API）统一经过 `app.config.get_settings()`；development 环境下 `_validate_redis_url` 拒绝 DB0，`_resolve_redis_url` 缺失 REDIS_URL 抛 `MissingRequiredSettingError`，无 `localhost:6379/0` 默认回退。测试证据：`backend/tests/test_config_validation.py`（DB0 拒绝 / 隐式 DB0 拒绝 / DB15 通过 / 默认 localhost 拒绝 / 缺 URL 拒绝）。
 - P1：子任务跨 Worker re-claim 在 StrategyBatch Worker 中通过 `FOR UPDATE SKIP LOCKED` + `lease_expires_at` 实现，但具体超时/重试策略需进一步核验。
 - P2：AC-13 中 "pending" / "partial" 字段未显式存在，使用 queued / partial_failed 表达，文档和 API 消费者需注意语义映射。
-- **P0（生产诊断 2026-07-28，CHANGE-20260728-005）**：生产服务器（GIT_SHA=37c9fa3）2026-07-27 和 2026-07-28 两次盘后 run 失败，根因有二：
+- **P0（生产诊断 2026-07-28，CHANGE-20260728-005）**：远程开发运行服务器（GIT_SHA=37c9fa3）2026-07-27 和 2026-07-28 两次盘后 run 失败，根因有二：
   1. `compute_for_trade_date() got an unexpected keyword argument 'dsa_run_id'`（2026-07-27 16:00 run）。origin/main `37c9fa3` 已修复（PR #94），dev 未包含此修复，本轮规则禁止 merge/rebase。
   2. DSA StrategyRun 卡在 `running` 状态，`succeeded_count=0, failed_count=0`，feature snapshot 计算成功（`snapshot_count=5293`）但 `publish_run` 拒绝发布（要求 `completed`）。涉及 `after_close_orchestrator.py:L1735` 和 `strategy_batch_service.py:L1132` 的状态转换逻辑，需后续排查。
 - **问财软失败语义**：生产 `BOARD_SYNC_ENABLED=true` 时问财为硬依赖，但 2026-07-27/28 三次运行均 `board_sync_result.status=succeeded`（raw=5542, resolved=5287, 行业=257, 概念=388），失败发生在 DSA 计算和发布步骤，与问财无关。
@@ -207,14 +207,14 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 **[本轮仍待验证的项]**：
 
 - PG 集成测试 6 项待 CI（`PURE_UNIT_TEST=1` 时 SKIP，需 CI 临时 PG 容器）
-- 生产部署后真实 canary 验证待执行
+- 远程开发部署后真实 canary 验证待执行
 - 全市场 history 回补待执行
 
 详见 `docs/changes/2026/CHANGE-20260729-008-incremental-publish-full-closure.md`。
 
 ### 11.6 History 版本一致性审计结论（CHANGE-20260729-009）
 
-**核验状态：已基于生产数据库只读审计确认（2026-07-29）**
+**核验状态：已基于共享开发业务数据库只读审计确认（2026-07-29）**
 
 | 表 | 字段 | 实际值 | 期望值 | 结论 |
 |---|---|---|---|---|

@@ -204,14 +204,14 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 
 ### 禁止行为
 
-- 禁止使用 `root@panji-server`、`55-server`、原始 IP 或任何 `~/.ssh/config` 中其他 Host 作为盘迹生产入口；
+- 禁止使用 `root@panji-server`、`55-server`、原始 IP 或任何 `~/.ssh/config` 中其他 Host 作为盘迹远程开发运行入口；
 - 禁止上下文压缩或子代理恢复后自行重新"发现"服务器入口：必须以 `docs/maps/80-system-runtime.md` §2 为权威参数，
   经 `scripts/ops/panji-prod-preflight` 校验后继续；禁止猜测 SSH 别名或重读 `~/.ssh/config` 重新选择 Host；
 - 禁止使用可能掩盖 SSH 退出码的管道（如 `ssh ... | head`、`| tail`、`| grep`），必须先 `SSH_OUTPUT=$(ssh ...); SSH_RC=$?` 再单独裁剪输出；
 - 禁止把私钥、密码或完整 IdentityFile 路径写入脚本/日志/CHANGE；
 - `~/.ssh/config` 中 `55-server` 已加 `DEPRECATED-PANJI-DO-NOT-USE` 注释，不得删除该别名（保留历史运维），但盘迹操作禁止使用。
 
-## 生产修改与部署版本合同（2026-07-30 收口）
+## 远程开发修改与部署版本合同（2026-07-30 收口）
 
 > 来源：闭环缺口防复发
 > 成功判定三要素见 `40-testing-quality.md` TQ-98。

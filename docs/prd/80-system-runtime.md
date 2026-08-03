@@ -24,7 +24,7 @@ IDE 不是运行环境。任何 IDE、编码助手或自动化 Agent 都只是�
 
 - 后端通过本地 Python 虚拟环境直接启动；
 - 前端通过本地 Node.js 和 Vite 直接启动；
-- 本地不启动正式 Worker、Scheduler、盘后编排或全市场任务；
+- 本地不启动远程常驻 Worker、Scheduler、盘后编排或全市场任务；
 - 本地不创建盘迹 PostgreSQL 或 Redis 容器；
 - 普通代码修改不得要求反复构建本地 Docker 镜像。
 
@@ -161,7 +161,7 @@ production 现有行为不得被意外改变。
 
 ### SR-41 本地调试能力
 
-本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。正式 Worker、Scheduler、盘后编排和
+本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。远程常驻 Worker、Scheduler、盘后编排和
 全市场任务只能在远程正式运行位置执行，且必须获得相应授权。
 
 ### SR-42 远程 Scheduler

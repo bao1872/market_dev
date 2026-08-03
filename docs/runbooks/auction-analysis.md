@@ -4,11 +4,11 @@
 
 ## 前置条件
 
-- 已通过 `scripts/ops/panji-prod-preflight` 校验生产服务器入口；
+- 已通过 `scripts/ops/panji-prod-preflight` 校验远程开发运行服务器入口；
 - 已读取目标 trade_date 的当前状态（`auction_anchor_snapshots` / `auction_anchor_publications` / `auction_scan_runs`）；
 - 已确认盘后主编排（`after_close_orchestrator`）的 stock_core pointer 已发布；
 - 已确认至少两个不同 `provider_family` 的外部来源已配置；只有 mootdx/pytdx 时必须停止在 `blocked_external_auction_truth_source`；
-- 本地 Mac 不启动 Worker；正式 Worker 在 `panji-prod` 服务器上运行。
+- 本地 Mac 不启动 Worker；远程常驻 Worker 在 `panji-prod` 服务器上运行。
 
 ## 1. 触发
 
@@ -23,13 +23,13 @@
 | 10:00:00 | `auction_open_confirmation:{date}` | `auction_open_confirmation:{date}` | `create_auction_open_confirmation_job` → `execute_auction_open_confirmation_run` |
 
 **Scheduler 运行拓扑**（[P0-3 2026-07-31]）：
-- 生产入口：`docker-compose.prod.yml` 的 `worker-after-close` 服务（`WORKER_TYPE=after_close_orchestrator`）
+- 远程开发运行入口：`docker-compose.prod.yml` 的 `worker-after-close` 服务（`WORKER_TYPE=after_close_orchestrator`）
 - `run_after_close_orchestrator_worker()` 启动时通过 `asyncio.create_task(_run_auction_scheduler_co_process())` 启动同进程 Auction co-process
 - co-process 每 30s（`AUCTION_SCHEDULER_POLL_INTERVAL`）独立轮询触发窗口和 queued auction jobs
 - **不阻塞 core/chip**：Auction 轮询在独立 co-process，主循环只处理 core/chip
 - **异常隔离**：co-process 异常不影响主 Worker
 - **SIGTERM**：共享 `_shutdown` 标志，主 Worker `finally` 块 await co-process 退出（超时 35s cancel）
-- `WORKER_TYPE=auction_scheduler` 仅用于本地调试，不是生产入口
+- `WORKER_TYPE=auction_scheduler` 仅用于本地调试，不是远程开发运行入口
 
 ### 1.2 触发窗口与补偿
 

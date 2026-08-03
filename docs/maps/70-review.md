@@ -1,6 +1,6 @@
 # 复盘模块 Map
 
-核验状态：080/081 候选实现已通过同一 SHA CI 与临时 PostgreSQL；生产部署/发布未执行
+核验状态：080/081 候选实现已通过同一 SHA CI 与临时 PostgreSQL；远程开发部署/发布未执行
 最后核验日期：2026-08-01
 核验分支：`codex/panji-full-closure-20260801`
 核验提交：`c6abcc1`；CI Run `30731828236`
@@ -222,7 +222,7 @@
 
 ### 11.3 当前限制
 
-- **服务器 SSH 不可达**：本轮 review-1.1.0 修复仅完成代码静态核验（main SHA 54fe3a2），canary review run 重跑与生产数据验收未完成，待 SSH 可达后由 admin 手工触发新 run 并核验 §11.2 全部修复项。
+- **服务器 SSH 不可达**：本轮 review-1.1.0 修复仅完成代码静态核验（main SHA 54fe3a2），canary review run 重跑与共享开发业务数据验收未完成，待 SSH 可达后由 admin 手工触发新 run 并核验 §11.2 全部修复项。
 - **history_maps 数据源**：`history_maps` 从 `market_review_scope_snapshots` 读取同 `scope_type + scope_key` 的历史记录；首次运行无历史数据时，所有 component `status=insufficient_history`，`historyObservationCount=0`；review-1.1.0 修复后首次 run 不会伪造分位，但生产环境需要持续运行 ≥60 个交易日才能产生有效 P/Q/U/C/V value。
 - **`force=True` 路径**：review-1.0.0 canary run 使用 `force=True` 发布，已写入 `factor_publications`；review-1.1.0 后 `force=True` 仅允许 admin 内部查看（`is_provisional=true`），不得写入 `factor_publications`，但旧记录保留为审计记录不删除。
 

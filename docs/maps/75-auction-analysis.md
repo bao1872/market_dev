@@ -98,7 +98,7 @@ Chip 软失败（[P0-2]）：
 
 ### 3.4.1 Scheduler 生产运行拓扑（[P0-3 2026-07-31]）
 
-**生产入口**：`docker-compose.prod.yml` 的 `worker-after-close` 服务（`WORKER_TYPE=after_close_orchestrator`）。
+**远程开发运行入口**：`docker-compose.prod.yml` 的 `worker-after-close` 服务（`WORKER_TYPE=after_close_orchestrator`）。
 
 **Co-process 接入**（`backend/app/worker.py`）：
 - `run_after_close_orchestrator_worker()` 启动时通过 `asyncio.create_task(_run_auction_scheduler_co_process())` 启动同进程 Auction co-process
@@ -111,7 +111,7 @@ Chip 软失败（[P0-2]）：
 - **启动恢复**：co-process 启动时调用 `recover_stale_scheduler_job_runs(db)` 清理上次崩溃残留的 running 任务
 - **不新增容器**：复用 `worker-after-close` 容器，无 `auction_scheduler` 独立服务
 
-`WORKER_TYPE=auction_scheduler` 分支保留仅用于本地调试，**不是生产入口**。架构测试 `test_compose_worker_after_close_uses_after_close_orchestrator` 守护 Compose 配置。
+`WORKER_TYPE=auction_scheduler` 分支保留仅用于本地调试，**不是远程开发运行入口**。架构测试 `test_compose_worker_after_close_uses_after_close_orchestrator` 守护 Compose 配置。
 
 ### 3.5 after_close_orchestrator.py 接入
 - 在 stock_core 发布后、market_aggregation 之前插入 auction_anchor 生成

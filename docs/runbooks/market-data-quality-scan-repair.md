@@ -7,7 +7,7 @@
 
 ## 前置条件
 
-- 生产服务器已部署包含 `market_data_quality_cli.py` 与 migration 075 的代码版本。
+- 远程开发运行服务器已部署包含 `market_data_quality_cli.py` 与 migration 075 的代码版本。
 - `alembic current` 显示版本 >= `075_market_data_quality`。
 - 已有 admin token（用于 API 查询；CLI 本身不需要 token，但通过 docker exec 执行）。
 - 当前不在 A 股交易时段（避免与盘后任务冲突，建议 22:00 之后或周末执行）。
