@@ -90,19 +90,25 @@ export function stepStatusLabel(status: string): string {
   switch (status) {
     case 'pending': return '待执行'
     case 'running': return '执行中'
-    case 'completed': return '已完成'
+    case 'completed':
+    case 'succeeded': return '已完成'
     case 'failed': return '失败'
     case 'skipped': return '跳过'
-    default: return '-'
+    case 'skipped_unavailable': return '不可用，已跳过'
+    case 'cancelled': return '已终止'
+    default: return '未知'
   }
 }
 
 export function stepStatusClass(status: string): string {
   switch (status) {
-    case 'completed': return 'done'
+    case 'completed':
+    case 'succeeded': return 'done'
     case 'running': return 'active'
     case 'failed': return 'error'
-    case 'skipped': return 'skipped'
+    case 'skipped':
+    case 'skipped_unavailable':
+    case 'cancelled': return 'skipped'
     default: return ''
   }
 }

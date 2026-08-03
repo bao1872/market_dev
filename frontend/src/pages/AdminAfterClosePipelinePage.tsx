@@ -25,7 +25,10 @@ import {
   useAfterClosePipelineByDate,
   useAfterClosePipelineRuns,
   useCreateAfterClosePipelineRun,
-  useResumeAfterCloseRun,
+  useCancelAfterCloseRun,
+  useReconcileAfterCloseRun,
+  useRestartAfterCloseRun,
+  useForceRestartAfterCloseRun,
 } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
 import { shanghaiBusinessDate, formatShanghaiTime } from '@/utils/datetime'
@@ -86,9 +89,16 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
                       耗时: {formatDurationSeconds(step.duration_seconds, status, step.warnings)}
                     </span>
                   )}
+                  <span>
+                    进度: {step.processed == null ? '未知' : step.processed.toLocaleString()} /{' '}
+                    {step.total == null ? '未知' : step.total.toLocaleString()}
+                  </span>
+                  <span>最近进度: {step.last_progress_at ? formatShanghaiTime(step.last_progress_at) : '未知'}</span>
+                  <span>尝试: {step.attempt ?? '未知'}{step.retry_count != null ? ` · 重试 ${step.retry_count}` : ''}</span>
+                  {step.optional && <span>可选步骤</span>}
                   {Object.keys(step.counts).length > 0 && (
                     <span>
-                      计数:{' '}
+                      其他计数:{' '}
                       {Object.entries(step.counts)
                         .map(([k, v]) => `${k}=${String(v)}`)
                         .join(', ')}
@@ -122,9 +132,13 @@ export default function AdminAfterClosePipelinePage() {
   )
   const runsQuery = useAfterClosePipelineRuns(20)
   const createMutation = useCreateAfterClosePipelineRun()
-  const resumeMutation = useResumeAfterCloseRun()
+  const cancelMutation = useCancelAfterCloseRun()
+  const reconcileMutation = useReconcileAfterCloseRun()
+  const restartMutation = useRestartAfterCloseRun()
+  const forceRestartMutation = useForceRestartAfterCloseRun()
 
   const [eventDrawerOpen, setEventDrawerOpen] = useState(false)
+  const [confirmAction, setConfirmAction] = useState<'cancel' | 'force' | null>(null)
 
   // 统一取 pipeline 数据（latest 或 by-date）
   const pipeline = selectedDate === '' ? pipelineQuery.data : byDateQuery.data
@@ -156,27 +170,45 @@ export default function AdminAfterClosePipelinePage() {
     }
   }
 
-  // 从失败/中断步骤继续（保留断点检查点，幂等）
-  const handleResumeRun = async () => {
-    if (!afterCloseRun) return
+  const runAction = async (
+    title: string,
+    action: () => Promise<{ message?: string }>,
+  ) => {
     try {
-      const result = await resumeMutation.mutateAsync(afterCloseRun.job_run_id)
-      toast.show(
-        '已恢复',
-        `${result.message}（last_completed_step 保留）`,
-      )
+      const result = await action()
+      toast.show(title, result.message)
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { status?: number; data?: { detail?: unknown } } }
+      const axiosErr = err as { response?: { data?: { detail?: unknown } } }
       const detail = axiosErr.response?.data?.detail
-      const message = typeof detail === 'string' ? detail : '请稍后重试'
-      toast.show('恢复失败', message)
+      toast.show(`${title}失败`, typeof detail === 'string' ? detail : '请稍后重试')
     }
   }
 
-  // 是否可恢复（interrupted/failed 且无同日 queued/running 冲突）
-  const canResume =
-    afterCloseRun != null &&
+  const handleCancelRun = () => afterCloseRun && runAction(
+    '终止请求已提交',
+    () => cancelMutation.mutateAsync({ runId: afterCloseRun.job_run_id, reason: '管理员从诊断页终止' }),
+  ).finally(() => setConfirmAction(null))
+
+  const handleReconcileRun = () => afterCloseRun && runAction(
+    '对账完成',
+    () => reconcileMutation.mutateAsync({ runId: afterCloseRun.job_run_id, reason: '管理员从诊断页对账' }),
+  )
+
+  const handleRestartRun = () => afterCloseRun && runAction(
+    '已从检查点续跑',
+    () => restartMutation.mutateAsync(afterCloseRun.job_run_id),
+  )
+
+  const handleForceRestartRun = () => afterCloseRun && runAction(
+    '完整强制重跑已排队',
+    () => forceRestartMutation.mutateAsync({ runId: afterCloseRun.job_run_id }),
+  ).finally(() => setConfirmAction(null))
+
+  const canRestart = afterCloseRun != null &&
     (afterCloseRun.status === 'interrupted' || afterCloseRun.status === 'failed')
+  const isActiveRun = afterCloseRun?.status === 'queued' || afterCloseRun?.status === 'running'
+  const anyActionPending = cancelMutation.isPending || reconcileMutation.isPending ||
+    restartMutation.isPending || forceRestartMutation.isPending
 
   return (
     <>
@@ -217,28 +249,45 @@ export default function AdminAfterClosePipelinePage() {
                 ))}
             </select>
           </div>
-          {/* 继续未完成任务：仅 interrupted/failed 可恢复，保留断点检查点 */}
-          {canResume && (
-            <button
-              className="btn small warning"
-              onClick={handleResumeRun}
-              disabled={resumeMutation.isPending}
-              title={`从断点继续: last_completed_step=${afterCloseRun?.last_completed_step ?? '-'}（跳过已成功阶段，幂等）`}
-            >
-              {resumeMutation.isPending ? '恢复中…' : '继续未完成任务'}
-            </button>
-          )}
+          <button
+            className="btn small danger"
+            onClick={() => setConfirmAction('cancel')}
+            disabled={!isActiveRun || anyActionPending}
+            title={isActiveRun ? '请求 Worker 协作式终止；不会删除已有结果' : '仅运行中或排队中的任务可终止'}
+          >
+            终止任务
+          </button>
+          <button
+            className="btn small"
+            onClick={handleReconcileRun}
+            disabled={!afterCloseRun || anyActionPending}
+            title="核验运行状态与事件并修正持久化状态；不会启动计算"
+          >
+            {reconcileMutation.isPending ? '对账中…' : '对账状态'}
+          </button>
+          <button
+            className="btn small warning"
+            onClick={handleRestartRun}
+            disabled={!canRestart || anyActionPending}
+            title={`保留成功检查点，从 ${afterCloseRun?.restart_from ?? afterCloseRun?.last_completed_step ?? '失败位置'} 继续`}
+          >
+            {restartMutation.isPending ? '续跑中…' : '从此处续跑'}
+          </button>
+          <button
+            className="btn small danger"
+            onClick={() => setConfirmAction('force')}
+            disabled={!afterCloseRun || anyActionPending}
+            title="忽略已有检查点，从首步完整重新排队"
+          >
+            完整强制重跑
+          </button>
           <button
             className="btn small primary"
             onClick={handleCreateRun}
             disabled={createMutation.isPending || overallStatus === 'running'}
-            title={
-              overallStatus === 'running'
-                ? '当前任务运行中，请等待完成'
-                : '触发当日 after_close 编排（幂等，已有任务时返回 existing）'
-            }
+            title="幂等创建当日盘后编排"
           >
-            {createMutation.isPending ? '创建中…' : '触发当日编排'}
+            {createMutation.isPending ? '创建中…' : '创建当日编排'}
           </button>
           <button
             className="btn small"
@@ -491,8 +540,15 @@ export default function AdminAfterClosePipelinePage() {
                 </div>
                 <div className="toggle-row">
                   <span>最后成功步骤</span>
-                  <b className="num">{afterCloseRun.last_completed_step ?? '-'}</b>
+                  <b className="num">{afterCloseRun.last_completed_step ?? '未知'}</b>
                 </div>
+                <div className="toggle-row"><span>处理进度</span><b className="num">{pipeline?.diagnostics?.processed ?? '未知'} / {pipeline?.diagnostics?.total ?? '未知'}</b></div>
+                <div className="toggle-row"><span>最近进度</span><b className="num">{pipeline?.diagnostics?.last_progress_at ? formatShanghaiTime(pipeline.diagnostics.last_progress_at) : '未知'}</b></div>
+                <div className="toggle-row"><span>心跳年龄</span><b className="num">{pipeline?.diagnostics?.heartbeat_age_seconds == null ? '未知' : formatDurationSeconds(pipeline.diagnostics.heartbeat_age_seconds)}</b></div>
+                <div className="toggle-row"><span>租约剩余</span><b className="num">{pipeline?.diagnostics?.lease_remaining_seconds == null ? '未知' : formatDurationSeconds(pipeline.diagnostics.lease_remaining_seconds)}</b></div>
+                <div className="toggle-row"><span>已用时</span><b className="num">{pipeline?.diagnostics?.elapsed_seconds == null ? '未知' : formatDurationSeconds(pipeline.diagnostics.elapsed_seconds)}</b></div>
+                <div className="toggle-row"><span>重试次数</span><b className="num">{pipeline?.diagnostics?.retry_count ?? '未知'}</b></div>
+                <div className="toggle-row"><span>发布状态</span><b className="num">{pipeline?.diagnostics?.partial_success ? '部分成功（核心结果已发布）' : pipeline?.diagnostics?.publication_status ?? '未知'}</b></div>
                 {afterCloseRun.error_message && (
                   <div className="notice error" style={{ marginTop: '10px' }}>
                     {afterCloseRun.error_message}
@@ -615,6 +671,37 @@ export default function AdminAfterClosePipelinePage() {
           </div>
         </section>
       </div>
+
+      {confirmAction && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setConfirmAction(null)}>
+          <section
+            className="modal-card"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="after-close-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="after-close-confirm-title">
+              {confirmAction === 'cancel' ? '确认终止当前任务？' : '确认完整强制重跑？'}
+            </h2>
+            <p>
+              {confirmAction === 'cancel'
+                ? '系统将请求 Worker 协作式停止；已产生的数据不会删除。'
+                : '系统将忽略已有成功检查点，从第一步完整重新排队。已有发布结果不会在前端删除。'}
+            </p>
+            <div className="after-close-actions">
+              <button className="btn" onClick={() => setConfirmAction(null)} autoFocus>返回</button>
+              <button
+                className="btn danger"
+                onClick={confirmAction === 'cancel' ? handleCancelRun : handleForceRestartRun}
+                disabled={anyActionPending}
+              >
+                {anyActionPending ? '提交中…' : confirmAction === 'cancel' ? '确认终止' : '确认完整重跑'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {/* ===== 事件日志抽屉（100 events max，来自 pipeline.events）===== */}
       {eventDrawerOpen && (

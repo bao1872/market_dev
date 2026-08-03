@@ -1410,19 +1410,54 @@ export function useAfterClosePipelineRuns(
  * 同 trade_date 已有 queued/running/succeeded 时返回 existing，不重复创建。
  * 成功后失效 pipeline latest/by-date/runs 与 system-overview 缓存。
  */
+function invalidateAfterCloseAdminQueries(queryClient: ReturnType<typeof useQueryClient>) {
+  queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
+  queryClient.invalidateQueries({ queryKey: ['after-close-pipeline'] })
+  queryClient.invalidateQueries({ queryKey: ['scheduler-job-runs'] })
+  queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
+}
+
 export function useCreateAfterClosePipelineRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (payload: AfterClosePipelineRunRequest) =>
       api.createAfterClosePipelineRun(payload),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['after-close-pipeline', 'latest'] })
-      queryClient.invalidateQueries({
-        queryKey: ['after-close-pipeline', 'by-date', variables.trade_date],
-      })
-      queryClient.invalidateQueries({ queryKey: ['after-close-pipeline', 'runs'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
-    },
+    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
+  })
+}
+
+export function useCancelAfterCloseRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ runId, reason }: { runId: string; reason?: string }) =>
+      api.cancelAfterCloseRun(runId, reason),
+    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
+  })
+}
+
+export function useReconcileAfterCloseRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ runId, reason }: { runId: string; reason?: string }) =>
+      api.reconcileAfterCloseRun(runId, reason),
+    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
+  })
+}
+
+export function useRestartAfterCloseRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) => api.restartAfterCloseRun(runId),
+    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
+  })
+}
+
+export function useForceRestartAfterCloseRun() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { runId: string; restartFrom?: 'daily_ready' }) =>
+      api.forceRestartAfterCloseRun(input.runId, input.restartFrom),
+    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
   })
 }
 

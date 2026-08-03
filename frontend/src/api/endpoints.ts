@@ -2598,6 +2598,17 @@ export interface SchedulerJobRunItem {
   succeeded_count: number | null
   failed_count: number | null
   progress: number | null
+  /** 服务端诊断字段；前端不得根据时间戳自行推导 */
+  processed_count?: number | null
+  last_progress_at?: string | null
+  heartbeat_age_seconds?: number | null
+  lease_remaining_seconds?: number | null
+  elapsed_seconds?: number | null
+  retry_count?: number | null
+  max_retries?: number | null
+  retryable?: boolean
+  publication_status?: string | null
+  partial_success?: boolean
   error_code: string | null
   error_message: string | null
   metadata_json: string | null
@@ -2978,14 +2989,32 @@ export async function resumeAfterCloseRun(
 // - DataFreshness / BarsFreshness / StrategyFreshness（同文件上方）
 // - JobRunEvent（与 PipelineEventItem 字段完全一致，事件时间线条目）
 
-/** 盘后流水线单步骤状态（对齐后端 PipelineStep） */
+/** 盘后流水线单步骤真实状态（对齐后端 PipelineStep/step_summary） */
+export type AfterCloseStepStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'succeeded'
+  | 'failed'
+  | 'skipped'
+  | 'skipped_unavailable'
+  | 'cancelled'
+
 export interface PipelineStep {
   step: string
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  status: AfterCloseStepStatus
   started_at: string | null
   finished_at: string | null
   duration_seconds: number | null
   counts: Record<string, unknown>
+  processed?: number | null
+  total?: number | null
+  last_progress_at?: string | null
+  elapsed_seconds?: number | null
+  error_code?: string | null
+  retry_count?: number | null
+  optional?: boolean
+  attempt?: number | null
   error_message: string | null
   // [TIMELINE-FIX] 异常/诊断信息（如 invalid_order_or_zero_duration），
   // 存在时前端显示"未知"而非用 0/max(0,x) 掩盖。
@@ -3005,6 +3034,23 @@ export interface AfterCloseRunSummary {
   error_message: string | null
   worker_instance_id: string | null
   trade_date: string | null
+  parent_job_run_id?: string | null
+  restart_from?: string | null
+  partial_success?: boolean
+  step_summary?: PipelineStep[]
+}
+
+/** 服务端计算的盘后运行诊断，时间类语义不得由前端自行推导 */
+export interface AfterCloseDiagnostics {
+  processed: number | null
+  total: number | null
+  last_progress_at: string | null
+  heartbeat_age_seconds: number | null
+  lease_remaining_seconds: number | null
+  elapsed_seconds: number | null
+  retry_count: number | null
+  publication_status: string | null
+  partial_success: boolean | null
 }
 
 /** stock_feature_snapshot_run 摘要（对齐后端 FeatureSnapshotRunSummary） */
@@ -3051,6 +3097,7 @@ export interface AfterClosePipelineResponse {
   has_backfill_full: boolean
   after_close_run: AfterCloseRunSummary | null
   steps: PipelineStep[]
+  diagnostics?: AfterCloseDiagnostics | null
   data_freshness: DataFreshness
   feature_snapshot_run: FeatureSnapshotRunSummary | null
   events: JobRunEvent[]
@@ -3082,13 +3129,31 @@ export interface AfterClosePipelineRunListResponse {
   total: number
 }
 
-/** POST /admin/after-close/pipeline/run 请求体（对齐后端 AfterClosePipelineRunRequest） */
+export type AfterCloseRestartStep =
+  | 'refreshing_daily'
+  | 'syncing_boards'
+  | 'checking_coverage'
+  | 'computing_features'
+  | 'publishing'
+  | 'computing_review'
+
+/** POST /admin/after-close/pipeline/run 请求体；仅用于幂等创建。 */
 export interface AfterClosePipelineRunRequest {
   trade_date: string
 }
 
-/** POST /admin/after-close/pipeline/run 响应（对齐后端 AfterClosePipelineRunResponse）。
- * is_new=false 表示同 trade_date 已有 queued/running/succeeded 任务，返回已存在记录。 */
+/** 所有盘后管理动作共用的稳定响应。 */
+export interface AfterCloseRunActionResponse {
+  job_run_id: string
+  trade_date: string
+  status: string
+  message?: string
+  is_new: boolean
+  orchestrator_status?: string | null
+  parent_job_run_id?: string | null
+  restart_from?: string | null
+}
+
 export interface AfterClosePipelineRunResponse {
   job_run_id: string
   trade_date: string
@@ -3149,6 +3214,43 @@ export async function createAfterClosePipelineRun(
     payload,
   )
   return data
+}
+
+export async function cancelAfterCloseRun(
+  runId: string,
+  reason?: string,
+): Promise<AfterCloseRunActionResponse> {
+  const { data } = await apiClient.post<AfterCloseRunActionResponse>(
+    `/v1/admin/after-close-runs/${runId}/cancel`,
+    reason ? { reason } : {},
+  )
+  return data
+}
+
+export async function reconcileAfterCloseRun(
+  runId: string,
+  reason?: string,
+): Promise<AfterCloseRunActionResponse> {
+  const { data } = await apiClient.post<AfterCloseRunActionResponse>(
+    `/v1/admin/after-close-runs/${runId}/reconcile`,
+    reason ? { reason } : {},
+  )
+  return data
+}
+
+export async function restartAfterCloseRun(runId: string): Promise<AfterCloseRunActionResponse> {
+  const { data } = await apiClient.post<AfterCloseRunActionResponse>(
+    `/v1/admin/after-close-runs/${runId}/resume`,
+  )
+  return data
+}
+
+export async function forceRestartAfterCloseRun(
+  runId: string,
+  restartFrom?: 'daily_ready',
+): Promise<AfterCloseRunActionResponse> {
+  const response = await forceAfterCloseRun(runId, restartFrom)
+  return { ...response, is_new: true }
 }
 
 // ============================================================

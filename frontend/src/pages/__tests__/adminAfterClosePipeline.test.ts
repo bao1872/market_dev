@@ -202,9 +202,12 @@ test('4c. overallStatusPillClass: undefined/未知状态降级为 "off"', () => 
   assert.strictEqual(overallStatusPillClass('unknown'), 'off')
 })
 
-test('4d. stepStatusLabel: 未知状态降级为 "-"', () => {
-  assert.strictEqual(stepStatusLabel('unknown'), '-')
-  assert.strictEqual(stepStatusLabel(''), '-')
+test('4d. stepStatusLabel: 新增真实状态有文字，未知状态明确为未知', () => {
+  assert.strictEqual(stepStatusLabel('succeeded'), '已完成')
+  assert.strictEqual(stepStatusLabel('skipped_unavailable'), '不可用，已跳过')
+  assert.strictEqual(stepStatusLabel('cancelled'), '已终止')
+  assert.strictEqual(stepStatusLabel('unknown'), '未知')
+  assert.strictEqual(stepStatusLabel(''), '未知')
 })
 
 test('4e. stepStatusClass: 未知状态降级为空字符串', () => {
