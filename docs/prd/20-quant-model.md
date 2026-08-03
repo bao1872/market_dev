@@ -76,6 +76,10 @@ DSA 趋势段描述长周期方向；SMC 结构不得重复维护另一套等价
 
 SMC 实现需要与选定 Pine 参考语义对齐；不展示 FVG，不使用内部英文标签直接面向用户。
 
+### QM-24 SMC 展示语义一致性
+
+前端必须用同一格式化合同展示 SMC：BOS/CHoCH 按 `structureLevel(swing/internal) × direction(up/down)` 覆盖八种组合，OB 按级别与方向覆盖四种组合，未知输入显式显示“未知结构”，不得把未知值默认为多头或空头。`structureLevel=null` 只用于 EQH/EQL 等无级别事实，不得虚构主要或短线级别；事件 `direction` 与数值 `bias` 同时存在但冲突时必须保留可诊断的不一致状态。图表的文字、A 股红涨绿跌颜色、方向箭头和线型必须来自该语义合同；未失效的 Swing OB 与 Internal OB 均须渲染。
+
 ## 5. 动量
 
 ### QM-30 动量职责
@@ -149,7 +153,13 @@ Node Cluster 不使用 VAH/VAL 区间过滤替代其自身逻辑。
 
 ### QM-62 可追踪
 
-正式结果应能追踪必要的输入日期、计算 run、参数或算法版本。
+正式结果应能追踪必要的输入日期、计算 run、参数或算法版本。一次计算 run 必须注入唯一 `calculated_at`，同 run 内所有个股快照和扁平读模型不得各自取时钟。
+
+### QM-63 正式事件与可用性合同
+
+`PyramidEvent` 顶层正式字段必须包含 `structureLevel`、`direction` 与 `bias`；结构层级与方向冲突必须输出诊断，不得静默覆盖。旧快照中 `extra.structure_level` 等历史字段只能通过兼容 adapter 读取。动量必须显式输出 availability 状态和不可用原因，不得以空值冒充中性。
+
+筹码状态统一为七态：`strong_support`、`weak_support`、`neutral`、`weak_pressure`、`strong_pressure`、`unavailable`、`not_applicable`，并携带稳定的 label、tone、order 元数据。正式快照是第一金字塔读模型的唯一 canonical 来源，API、筛选与 Review 不得绕过快照重新计算或拼接另一份语义。
 
 ## 9. 验收标准
 

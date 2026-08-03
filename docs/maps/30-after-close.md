@@ -45,6 +45,11 @@
 
 ## 3. 主要入口
 
+### Feature Snapshot 批处理实现
+
+`feature_snapshot_service.compute_for_trade_date` 按 `batch_size` 通过 `MarketDataAggregationService.get_bars_batch` 为每批预读 1d 与 15m 的 point-in-time qfq bars，将 canonical frame 传入单股计算，并在批内完成计算后集中 upsert/flush。MDAS 批入口复用单股 `get_bars` 的 bars、复权和诊断合同，按标的返回结果或异常；同一 `AsyncSession` 下有界顺序执行。批结果包含 `batch_count`、`mdas_batch_read_count`，每批完成后发送 progress callback；整日期 commit/rollback 与 published 快照保护仍由原事务边界负责。
+
+
 | 类型 | 路径 | 符号 | 职责 |
 |---|---|---|---|
 | 自动触发 | `backend/app/worker.py` | `scheduled_bars_refresh` | bars_scheduler Worker 每日 16:00 创建 after_close run |

@@ -85,13 +85,24 @@
 
 不再使用的盘后自动触发入口应删除，不长期保留重复编排路径。
 
+### AC-16 Feature Snapshot 批处理性能合同
+
+- 全市场 `feature_snapshot` 必须经 MDAS 批量入口预读 `symbols × bars × adj_factor`，不得由快照服务直连行情 Repository 或自行实现复权；同一股票、周期、交易日的 canonical bars frame 与诊断 hash 必须在该批计算内复用。
+- 批处理并发必须有显式上限；失败按单股隔离并计数，批次完成后发送 heartbeat/progress；禁止无界任务创建。
+- 成功快照按批量 upsert/flush 写入，不得逐股票 commit；调用方仍持有整日期事务，失败率超阈值时可整体 rollback，已发布快照保护不变。
+- 批结果必须暴露批次数、MDAS 批读次数、成功/失败数、耗时与有效并发度等低基数 metrics，支持性能回归核验。
+
 ### AC-16 统一盘后编排（CHANGE-20260728-008）
 
 系统只允许 `job_name=after_close_orchestrator`、`run_type=full` 一种盘后任务类型。不得存在 `dsa_only` 独立端点、独立 `mode` 分支或独立 `run_type`。
 
-"从 DSA 阶段重算"通过现有 `force` 端点 + `restart_from="daily_ready"` 参数实现，仍是同一 `after_close` 任务，不创建 `dsa_only` 类型，不跳过后续特征/快照/发布步骤。仅 admin 可用；必须先验证日线覆盖率 ≥ 90%。
+"从 DSA 阶段重算"通过现有 `force` 端点 + `restart_from="daily_ready"` 参数实现，仍是同一 `after_close` 任务，不创建 `dsa_only` 类型，不跳过后续特征/快照/发布步骤。仅 admin 可用；必须先验证日线覆盖率 ≥ 90%。显式 `restart_from` 必须属于允许的步骤并验证其前置步骤已完成；重启 run 在 `metadata_json` 保存 `parent_job_run_id`、`restart_from` 和重启次数，不新增数据库列。
 
 状态链：`queued→running→refreshing_daily→syncing_boards→checking_coverage→computing_features→publishing→succeeded`；`StrategyRun` 状态链：`running→completed→published`，异常 → `failed`。不得在发布前伪造 `completed`。
+
+顶层步骤使用统一执行合同：开始时写步骤状态、进度和 heartbeat，执行受明确 timeout 约束；成功、失败、超时、取消和合法不可用均写结构化 `step_summary`；`finally` 必须停止 heartbeat 并保存结束时间。可选步骤失败使主 run 成为 `partial_success`，不得伪装全成功；`auction_anchor` 超时或无数据统一记为 `skipped_unavailable`，默认非阻断，不得仅因此阻断 Review。
+
+管理 API 的 cancel 与 reconcile 必须幂等：重复 cancel 不改变终态；reconcile 只依据现有任务事实修复派生状态，不启动真实数据任务。stale watchdog 同时检查 heartbeat 与步骤级 timeout，避免长 lease 掩盖已失联或已超时的步骤；健康 heartbeat 的长任务不得被接管。
 
 对已有旧 `dsa_only` queued/running 记录只读识别；生产执行前通过正式 cancel/interrupted/retry 服务处理，禁止 DELETE 或直接改 metadata。
 
@@ -313,6 +324,13 @@ refreshing_daily        // 刷新 & 校验日线 readiness
 2. **Asia/Shanghai 时区统一**：所有时间戳统一转换为 Asia/Shanghai 时区 aware datetime。DB 内 naive 时间按 UTC 解释再转上海；后端返回给前端的 started_at/finished_at 字符串带上海时区或显式说明。
 3. **缺一端不填负数**：若只有 started_at 无 finished_at → 状态为 running，duration 为 null，前端显示"进行中"；若两端缺失或顺序异常（started_at > finished_at），不得用 `max(duration, 0)` 掩盖，而应在 `PipelineStep.warnings` 中记录 `invalid_order_or_zero_duration` 并返回 `duration_seconds: null`，前端显示为"未知"并使用黄底警告样式（`timeline-meta-warn`）提示管理员。
 4. **多 attempt 语义**：一次 after_close run 被 queued/manual_resume 重启后，后续步骤的前一次 attempt 记为 failed/interrupted；UI 不展示警告。
+
+### AC-72A 管理诊断与恢复操作合同
+
+- 盘后管理页与任务详情必须直接展示服务端返回的每步真实状态、`processed/total`、最近进度时间、心跳年龄、租约剩余、已用时、错误与重试信息，以及发布状态；存在非关键项失败但核心结果已发布时，必须明确显示“部分成功”，不得仅靠颜色表达状态。
+- 管理操作必须语义分离：**终止任务**只请求协作式取消；**对账状态**只核验并修正持久化状态；**从此处续跑**保留成功检查点；**完整强制重跑**清空检查点并从头排队。四项操作不得复用含义模糊的“重试/强制执行”文案。
+- 危险操作必须二次确认，按钮在请求期间禁用，并向管理员说明影响范围；操作完成后必须刷新流水线聚合、单次运行、最近运行及任务列表缓存。
+- 前端不得根据时间戳自行判定心跳陈旧、租约过期、重试资格、发布成功或部分成功；这些诊断与能力字段必须由服务端合同提供，缺失时显示未知或禁用操作。
 
 ### AC-73 review 冷启动合同（历史不足）
 

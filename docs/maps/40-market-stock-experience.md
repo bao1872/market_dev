@@ -44,6 +44,10 @@
 | EventStatePanel | 待核验 | 待核验 | 待核验 |
 | 行列表 | 待核验 | 待核验 | 待核验 |
 
+## 3.1 稳定详情导航
+
+`frontend/src/features/stock-research/stockDetailNavigation.ts` 的 `buildStockDetailUrl` 是详情导航构造入口，新 URL 仅写入 `originScope / returnTo / timeframe / mcq`。`mcq` 固定行情入口时的 `/market/stocks` 筛选、排序和分页快照，详情内切股原样透传；旧 DSA-only `source/strategy/sourceRunId/cq` 不再由新导航生成。
+
 ## 4. 个股详情组件
 
 | 组件 | 路径 | 数据来源 | 责任 |

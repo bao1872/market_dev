@@ -281,6 +281,7 @@ direct 访问、来源失效或当前股票不在 sourceStocks 时，为避免�
 3. 当前 symbol 必须使用 6 位规范 A 股代码，不得使用 UUID、DB row index 或非 6 位 alias 作为导航锚点。
 4. 左栏顺序与筛选列表**当前页**完全一致；点击"上一只/下一只"按左栏顺序跳转；返回列表页后保留筛选、排序、分页（`history.back()` 后列表请求参数不跳变）。
 5. 无效上下文（MCQ 版本无法解析、filter-specs 版本不匹配、page 越界等）必须在左栏顶部显示显式 `reason` banner；合法筛选不得**降级为自选/全市场 direct**。
+6. 新生成的详情 URL 只允许使用稳定 `originScope + returnTo + mcq`（以及可选 timeframe/capture）合同；不得再生成或依赖旧 DSA-only `sourceRunId / cq / source / strategy`。刷新、详情内切股和浏览器后退必须保留同一筛选、排序与分页；来源请求错误必须绑定该 MCQ，不得因 fresh run 或旧 run 参数漂移。
 
 ### MX-63 空值语义合同（三层一致）
 

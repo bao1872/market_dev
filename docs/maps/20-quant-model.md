@@ -74,6 +74,10 @@
 4. **板块/指数第二金字塔**：本轮不实施 QM-50/QM-51（保留为已知缺口）。
 5. **研究路径统一**：`research/feature_computer.py` 仍直接调用 `compute_dsa_history`，非阻塞，保留为下次维护项。
 
+## 3.1 SMC 前端语义与渲染
+
+`frontend/src/components/smcLabels.ts` 是 BOS/CHoCH/OB/EQH/EQL 的统一展示格式化入口，按结构级别和方向生成文字、箭头并报告 `direction/bias` 不一致；未知值不猜测多空，EQH/EQL 不带结构级别。`StrategyChart.tsx` 复用该入口，`smcRendering.ts` 对未失效 Swing 与 Internal OB 分级各取最多 5 个并共同渲染。第一金字塔 ViewModel 同样消费该 formatter。
+
 ## 4. 结构
 
 | 项目 | 当前事实 |

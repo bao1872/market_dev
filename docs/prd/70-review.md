@@ -757,7 +757,11 @@ stock_core published
 - 重启只处理pending/可重试failed/过期running；
 - 相同输入hash和版本的succeeded item不得重算；
 - 信号和归因幂等；
-- pointer切换失败只重试发布，不重算。
+- pointer切换失败只重试发布，不重算；
+- 依赖按矩阵解析：`stock_core` 是必需依赖，板块依赖缺失时允许明确的 `core_only` 降级；run 元数据必须记录每项来源 pointer/run、解析方式与降级原因；
+- 指标同时保留 raw 与 normalized；历史读取必须满足 `observation.trade_date < run.trade_date`，并按算法版本、scope 类型、scope key 及兼容版本隔离，禁止未来数据和跨范围污染；
+- run coverage 表示底层有效样本覆盖率，不能用成功 scope 数比例冒充；
+- quality gate、Review pointer upsert 与 run published 状态在同一调用方事务内完成；任一步失败必须回滚并保留旧 pointer。
 
 ### 11.1 发布门禁
 
