@@ -114,6 +114,9 @@ class GrantCapabilityRequest(BaseModel):
     watchlist_limit: int | None = Field(
         None, ge=1, le=500, description="自选数量上限（仅 self_selection 必填，1-500）"
     )
+    reason: str | None = Field(
+        None, max_length=500, description="授予原因（审计用，可选；去空白，空转 None）"
+    )
 
     @model_validator(mode="after")
     def _validate_capability(self) -> GrantCapabilityRequest:
@@ -123,6 +126,10 @@ class GrantCapabilityRequest(BaseModel):
             raise ValueError("self_selection capability 必须指定 watchlist_limit（PA-02）")
         if self.capability != "self_selection" and self.watchlist_limit is not None:
             raise ValueError(f"{self.capability} 不支持 watchlist_limit（仅 self_selection）")
+        # [权限模型 V2 PV2-B07] reason 去空白、空字符串转 None
+        if self.reason is not None:
+            trimmed = self.reason.strip()
+            self.reason = trimmed if trimmed else None
         return self
 
 
@@ -140,11 +147,18 @@ class RevokeCapabilityRequest(BaseModel):
     """[Gate2 PRD60] 管理员撤销用户 capability 请求。"""
 
     capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
+    reason: str | None = Field(
+        None, max_length=500, description="撤销原因（审计用，可选；去空白，空转 None）"
+    )
 
     @model_validator(mode="after")
     def _validate_capability(self) -> RevokeCapabilityRequest:
         if self.capability not in _VALID_CAPABILITIES:
             raise ValueError(f"无效 capability: {self.capability}，允许: {_VALID_CAPABILITIES}")
+        # [权限模型 V2 PV2-B07] reason 去空白、空字符串转 None
+        if self.reason is not None:
+            trimmed = self.reason.strip()
+            self.reason = trimmed if trimmed else None
         return self
 
 

@@ -177,6 +177,8 @@ def _make_ctx(
         subscription_active=True,
         capabilities=capabilities or {},
         limits=limits or {},
+        # [权限模型 V2] AccessContext.default_route 已必填，测试需显式提供
+        default_route="/forbidden",
     )
 
 
@@ -492,9 +494,11 @@ class TestCapabilityServiceIntegration:
             granted_by=admin.id,
         )
 
-        assert result["active"] is True
-        assert result["watchlist_limit"] == 20
-        assert result["expires_at"] is not None
+        # [权限模型 V2] grant 返回 CapabilityMutationResult（after 快照）
+        assert result.action == "grant"
+        assert result.after["active"] is True
+        assert result.after["watchlist_limit"] == 20
+        assert result.after["expires_at"] is not None
         # 验证 DB 行存在
         from sqlalchemy import select
 
@@ -540,16 +544,16 @@ class TestCapabilityServiceIntegration:
             months=3, watchlist_limit=None, granted_by=admin.id,
         )
         # 较晚的 expires_at（3 个月后 > 1 个月后）
-        assert result["expires_at"] > first_expires
+        assert result.after["expires_at"] > first_expires
         # 仍只有一行
         rows = (await db_session.execute(stmt)).scalars().all()
         assert len(rows) == 1
 
     @pytest.mark.asyncio
-    async def test_revoke_capability_removes_row(
+    async def test_revoke_capability_creates_tombstone(
         self, db_session, user_factory,
     ) -> None:
-        """revoke 硬删除 user_capabilities 行。"""
+        """[权限模型 V2 PV2-B04] revoke 采用 tombstone（source=admin_revoke），不硬删除。"""
         from sqlalchemy import select
 
         from app.models.user_capability import UserCapability
@@ -570,15 +574,24 @@ class TestCapabilityServiceIntegration:
             UserCapability.user_id == user.id,
             UserCapability.capability == "research_replay",
         )
-        assert (await db_session.execute(stmt)).scalar_one_or_none() is not None
+        row_before = (await db_session.execute(stmt)).scalar_one_or_none()
+        assert row_before is not None
+        original_granted_by = row_before.granted_by
 
         # 撤销
         removed = await revoke_capability_from_user(
             db=db_session, user_id=user.id, capability="research_replay",
+            revoked_by=admin.id,
         )
-        assert removed is True
-        # 行已删除
-        assert (await db_session.execute(stmt)).scalar_one_or_none() is None
+        assert removed.action == "revoke"
+        # 行未被硬删除：仍存在且为 admin_revoke tombstone
+        row_after = (await db_session.execute(stmt)).scalar_one_or_none()
+        assert row_after is not None
+        assert row_after.source == "admin_revoke"
+        assert row_after.watchlist_limit is None
+        assert not (row_after.expires_at and row_after.expires_at > datetime.now(UTC))
+        # 撤销保留原 granted_by（不被撤销人覆盖）
+        assert row_after.granted_by == original_granted_by
 
     @pytest.mark.asyncio
     async def test_get_user_capabilities_returns_all_three(

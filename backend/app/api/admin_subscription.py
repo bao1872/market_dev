@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -34,6 +33,12 @@ from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
 from app.models.worker_heartbeat import WorkerHeartbeat
+from app.schemas.access import (
+    AdminAccessProfileResponse,
+    AdminAccountInfo,
+    EffectiveAccessInfo,
+    SubscriptionSummaryInfo,
+)
 from app.schemas.invitation import (
     InviteCodeCreate,
     InviteCodeListItem,
@@ -981,13 +986,14 @@ async def grant_capability_endpoint(
     await _fetch_user_or_404(db, user_id)
 
     try:
-        await grant_capability_to_user(
+        mutation = await grant_capability_to_user(
             db=db,
             user_id=user_id,
             capability=payload.capability,
             months=payload.months,
             watchlist_limit=payload.watchlist_limit,
             granted_by=current_user.id,
+            reason=payload.reason,
         )
     except ValueError as e:
         raise HTTPException(
@@ -995,16 +1001,23 @@ async def grant_capability_endpoint(
             detail=str(e),
         ) from e
 
+    # [权限模型 V2 PV2-B05] 同事务结构化审计：target_id="{user_id}:{capability}"，
+    # action 依据真实 mutation_type 生成（capability.grant/extend/quota_change/
+    # extend_and_quota_change/regrant），不得把全部授权记成同一 action；
+    # before/after 来自 mutation 快照，含 granted_by/reason/mutation_type
     await write_audit_log(
         db=db,
         actor_user_id=current_user.id,
-        action="user.grant_capability",
+        action=f"capability.{mutation.mutation_type}",
         target_type="user_capability",
-        target_id=str(user_id),
+        target_id=f"{user_id}:{payload.capability}",
+        before_data=mutation.before,
         after_data={
-            "capability": payload.capability,
-            "months": payload.months,
-            "watchlist_limit": payload.watchlist_limit,
+            **mutation.after,
+            "granted_by": str(current_user.id),
+            "actor": str(current_user.id),
+            "reason": mutation.after.get("reason") or "admin_manual_grant",
+            "mutation_type": mutation.mutation_type,
         },
     )
 
@@ -1022,13 +1035,19 @@ async def grant_capability_endpoint(
 async def revoke_capability_endpoint(
     user_id: UUID,
     capability: str,
+    reason: str | None = Query(
+        default=None,
+        max_length=500,
+        description="撤销原因（审计用，可选；去空白，空转 None）",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> UserCapabilitiesResponse:
-    """[Gate2 PRD60 PA-20] 管理员撤销用户 capability。
+    """[Gate2 PRD60 PA-20] 管理员撤销用户 capability（tombstone，非硬删除）。
 
-    硬删除 user_capabilities 行。旧 plan_code fallback 仍可能为用户提供该 capability（兼容期）。
-    若需完全禁止，管理员应同时调整 subscription 状态。
+    行为：[权限模型 V2 PV2-B04] 不硬删除，采用 admin_revoke tombstone；
+    保留原 granted_by；revoked_by 与 reason 仅写入审计。
+    可选 reason query 参数：去空白、空字符串转 None、限长 500（PV2-B07）。
     """
     # 校验用户存在
     await _fetch_user_or_404(db, user_id)
@@ -1041,21 +1060,41 @@ async def revoke_capability_endpoint(
             detail=f"无效 capability: {capability}，允许: {valid_caps}",
         )
 
+    # [权限模型 V2 PV2-B07] query reason 规范化：去空白、空转 None（query 不走 Pydantic validator）
+    if reason is not None:
+        trimmed = reason.strip()
+        reason = trimmed if trimmed else None
+
     try:
-        await revoke_capability_from_user(db=db, user_id=user_id, capability=capability)
+        mutation = await revoke_capability_from_user(
+            db=db,
+            user_id=user_id,
+            capability=capability,
+            revoked_by=current_user.id,
+            reason=reason,
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         ) from e
 
+    # [权限模型 V2 PV2-B04/B05] 同事务结构化审计：撤销不覆盖 granted_by，
+    # revoked_by 仅写入 after 快照；action=capability.revoke；target_id="{user_id}:{capability}"
     await write_audit_log(
         db=db,
         actor_user_id=current_user.id,
-        action="user.revoke_capability",
+        action="capability.revoke",
         target_type="user_capability",
-        target_id=str(user_id),
-        after_data={"capability": capability},
+        target_id=f"{user_id}:{capability}",
+        before_data=mutation.before,
+        after_data={
+            **mutation.after,
+            "revoked_by": str(current_user.id),
+            "actor": str(current_user.id),
+            "reason": mutation.after.get("reason") or "admin_manual_revoke",
+            "mutation_type": mutation.mutation_type,
+        },
     )
 
     # 返回该用户剩余 capabilities
@@ -1115,9 +1154,11 @@ async def list_users(
         profile = await resolve_effective_access(db, user_with_roles)
 
         active_expiries = [
-            _ensure_aware(cap.expires_at)
+            aware
             for cap in profile.capabilities.values()
             if cap.active and cap.expires_at is not None
+            for aware in [_ensure_aware(cap.expires_at)]
+            if aware is not None
         ]
         nearest_expires = min(active_expiries) if active_expiries else None
 
@@ -1203,14 +1244,15 @@ async def get_user(
     )
 
 
-@router.get("/users/{user_id}/access-profile")
+@router.get("/users/{user_id}/access-profile", response_model=AdminAccessProfileResponse)
 async def get_user_access_profile(
     user_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
-) -> dict:
-    """[权限模型 V2] 返回用户完整 access-profile（account / effective_access / subscription_summary / explicit_capability_records）。
+) -> AdminAccessProfileResponse:
+    """[权限模型 V2 PV2-B06] 返回用户完整 access-profile（account / effective_access / subscription_summary / explicit_capability_records）。
 
+    商业状态由 resolve_commercial_status 解析（受限 status + 诊断 reason，异常周期 fail-closed）。
     稳定错误：用户不存在 404；权限解析失败 500 + permission_resolution_failed（不暴露内部异常）。
     """
     from app.services.effective_access_service import (
@@ -1243,36 +1285,23 @@ async def get_user_access_profile(
     )
 
     # subscription_summary（商业展示，不参与判权）
+    # [权限模型 V2 PV2-B06] 用 resolve_commercial_status 解析受限状态 + 诊断 reason
     from app.models.subscription import Subscription
+    from app.services.subscription_service import resolve_commercial_status
 
     sub = (
         await db.execute(select(Subscription).where(Subscription.user_id == user.id))
     ).scalars().first()
-    subscription_summary: dict[str, Any] = {
-        "status": "none",
-        "plan_code": None,
-        "plan_display_name": None,
-        "starts_at": None,
-        "expires_at": None,
-        "source": None,
-        "entitlement_snapshot": None,
-    }
-    if sub is not None:
-        plan_display = None
-        if sub.plan_code:
-            from app.services.plan_service import get_plan
+    commercial = resolve_commercial_status(sub)
+    plan_display = None
+    if sub is not None and sub.plan_code:
+        from app.services.plan_service import get_plan
 
-            plan = await get_plan(db, sub.plan_code)
-            plan_display = plan.display_name if plan else None
-        subscription_summary = {
-            "status": sub.status,
-            "plan_code": sub.plan_code,
-            "plan_display_name": plan_display,
-            "starts_at": _ensure_aware(sub.starts_at).isoformat() if sub.starts_at else None,
-            "expires_at": _ensure_aware(sub.expires_at).isoformat() if sub.expires_at else None,
-            "source": getattr(sub, "source", None),
-            "entitlement_snapshot": getattr(sub, "entitlement_snapshot", None),
-        }
+        plan = await get_plan(db, sub.plan_code)
+        plan_display = plan.display_name if plan else None
+
+    sub_starts_aware = _ensure_aware(sub.starts_at) if sub and sub.starts_at else None
+    sub_expires_aware = _ensure_aware(sub.expires_at) if sub and sub.expires_at else None
 
     # explicit_capability_records（规范化 state：active/expired/revoked）
     from app.models.user_capability import UserCapability
@@ -1284,6 +1313,7 @@ async def get_user_access_profile(
     explicit_records = []
     for r in cap_rows:
         exp = _ensure_aware(r.expires_at)
+        granted_aware = _ensure_aware(r.granted_at)
         if r.source == "admin_revoke":
             state = "revoked"
         elif exp is not None and exp > now:
@@ -1294,7 +1324,7 @@ async def get_user_access_profile(
             {
                 "capability": r.capability,
                 "state": state,
-                "granted_at": _ensure_aware(r.granted_at).isoformat() if r.granted_at else None,
+                "granted_at": granted_aware.isoformat() if granted_aware else None,
                 "expires_at": exp.isoformat() if exp else None,
                 "watchlist_limit": r.watchlist_limit,
                 "source": r.source,
@@ -1302,28 +1332,37 @@ async def get_user_access_profile(
             }
         )
 
-    return {
-        "account": {
-            "id": str(user.id),
-            "email": user.email,
-            "account_status": user.status,
-            "roles": roles,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-            "last_login_at": getattr(user, "last_login_at", None),
-        },
-        "effective_access": {
-            "capabilities": capabilities,
-            "active_capability_keys": profile.active_capability_keys,
-            "has_any_access": profile.has_any_access,
-            "default_route": profile.default_route,
-            "capability_source": profile.capability_source,
-            "nearest_capability_expires_at": nearest_expires,
-            "legacy_fallback": profile.capability_source == "legacy_plan_fallback",
-            "diagnostics": profile.diagnostics,
-        },
-        "subscription_summary": subscription_summary,
-        "explicit_capability_records": explicit_records,
-    }
+    return AdminAccessProfileResponse(
+        account=AdminAccountInfo(
+            id=str(user.id),
+            email=user.email,
+            account_status=user.status,
+            roles=roles,
+            created_at=user.created_at.isoformat() if user.created_at else None,
+            last_login_at=getattr(user, "last_login_at", None),
+        ),
+        effective_access=EffectiveAccessInfo(
+            capabilities=capabilities,
+            active_capability_keys=profile.active_capability_keys,
+            has_any_access=profile.has_any_access,
+            default_route=profile.default_route,
+            capability_source=profile.capability_source,
+            nearest_capability_expires_at=nearest_expires,
+            legacy_fallback=profile.capability_source == "legacy_plan_fallback",
+            diagnostics=profile.diagnostics,
+        ),
+        subscription_summary=SubscriptionSummaryInfo(
+            status=commercial.status,
+            reason=commercial.reason,
+            plan_code=sub.plan_code if sub else None,
+            plan_display_name=plan_display,
+            starts_at=sub_starts_aware.isoformat() if sub_starts_aware else None,
+            expires_at=sub_expires_aware.isoformat() if sub_expires_aware else None,
+            source=getattr(sub, "source", None) if sub else None,
+            entitlement_snapshot=getattr(sub, "entitlement_snapshot", None) if sub else None,
+        ),
+        explicit_capability_records=explicit_records,
+    )
 
 
 # ============================================================
