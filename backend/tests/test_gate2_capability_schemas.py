@@ -142,20 +142,19 @@ class TestInviteCodeCreateSchema:
         assert payload.capabilities is not None
         assert len(payload.capabilities) == 2
 
-    def test_legacy_plan_code_mode_still_works(self):
-        """旧模式：无 capabilities，使用 plan_code + grant_months。"""
-        payload = InviteCodeCreate(count=1, plan_code="observe_20", grant_months=1)
-        assert payload.capabilities is None
-        assert payload.plan_code == "observe_20"
+    def test_legacy_plan_code_mode_rejected(self):
+        """[权限模型 V2] 旧模式（无 capabilities）被 schema 拒绝。"""
+        import pytest as _pytest
 
-    def test_empty_capabilities_list_rejected_by_business(self):
-        """空 capabilities 列表应由后端业务层拒绝（schema 允许 None 但非空列表）。
+        with _pytest.raises(ValueError):
+            InviteCodeCreate(count=1, plan_code="observe_20", grant_months=1)
 
-        注：schema 不强制非空，由 service 层 validate_capabilities 检查。
-        """
-        payload = InviteCodeCreate(capabilities=[])
-        # schema 允许空列表（语义上等于"无权限"），由后端业务层拒绝
-        assert payload.capabilities == []
+    def test_empty_capabilities_list_rejected_by_schema(self):
+        """[权限模型 V2] 空 capabilities 列表由 schema 拒绝（生成前置校验）。"""
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError):
+            InviteCodeCreate(capabilities=[])
 
 
 # ============================================================

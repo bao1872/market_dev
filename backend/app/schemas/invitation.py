@@ -79,6 +79,19 @@ class InviteCodeCreate(BaseModel):
         description="capability 组合（PA-20）；提供时优先于 plan_code",
     )
 
+    @model_validator(mode="after")
+    def _validate_capabilities_nonempty(self) -> InviteCodeCreate:
+        """[权限模型 V2] 所有新邀请码必须显式包含非空 capabilities。
+
+        拒绝 capabilities=null 与 capabilities=[]（避免生成旧模式无权限行邀请码）。
+        """
+        if not self.capabilities:
+            raise ValueError(
+                "新邀请码必须显式提供非空 capabilities（self_selection/market_data/research_replay），"
+                "禁止生成 capabilities=null 或 [] 的邀请码"
+            )
+        return self
+
 
 class InviteCodeResponse(BaseModel):
     """邀请码响应 - 含明文（仅生成时返回）+ 套餐快照。"""
