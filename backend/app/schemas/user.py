@@ -92,6 +92,16 @@ class UserResponse(BaseModel):
     roles: list[str] = Field(default_factory=list, description="角色名列表")
     created_at: datetime = Field(..., description="创建时间")
     updated_at: datetime = Field(..., description="更新时间")
+    # [权限模型 V2] 管理员会员列表权限摘要（复用 resolve_effective_access，不重复推导）
+    capabilities: dict = Field(default_factory=dict, description="三类独立权限状态（含 active/granted_at/expires_at/watchlist_limit/source/reason）")
+    active_capability_keys: list[str] = Field(default_factory=list, description="active 的 capability key 列表")
+    has_any_access: bool = Field(default=False, description="是否有任一 active 权限")
+    default_route: str | None = Field(default=None, description="依据权限计算的默认入口")
+    capability_source: str = Field(default="none", description="权限来源 admin/user_capabilities/legacy_plan_fallback")
+    diagnostics: list[str] = Field(default_factory=list, description="诊断（legacy fallback 标记等）")
+    nearest_capability_expires_at: datetime | None = Field(default=None, description="最近到期日（最近的 active capability 到期时间）")
+    legacy_fallback: bool = Field(default=False, description="是否走 legacy plan fallback")
+    subscription_summary: dict = Field(default_factory=dict, description="商业记录摘要（只读，不参与判权）")
 
 
 class TokenResponse(BaseModel):

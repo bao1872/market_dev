@@ -1101,6 +1101,24 @@ async def list_users(
     items: list[UserResponse] = []
     for user in users:
         roles = await _get_user_role_names(db, user.id)
+        # [权限模型 V2] 复用 resolve_effective_access 唯一解析，不在管理员 service 重新推导
+        from app.services.effective_access_service import (
+            _ensure_aware,
+            capabilities_to_serializable,
+            resolve_effective_access,
+        )
+        user_with_roles = user
+        # 挂载 _roles 供 _get_user_roles 读取
+        user_with_roles._roles = roles  # type: ignore[attr-defined]
+        profile = await resolve_effective_access(db, user_with_roles)
+
+        active_expiries = [
+            _ensure_aware(cap.expires_at)
+            for cap in profile.capabilities.values()
+            if cap.active and cap.expires_at is not None
+        ]
+        nearest_expires = min(active_expiries) if active_expiries else None
+
         items.append(
             UserResponse(
                 id=user.id,
@@ -1110,6 +1128,15 @@ async def list_users(
                 roles=roles,
                 created_at=user.created_at,
                 updated_at=user.updated_at,
+                capabilities=capabilities_to_serializable(profile.capabilities),
+                active_capability_keys=profile.active_capability_keys,
+                has_any_access=profile.has_any_access,
+                default_route=profile.default_route,
+                capability_source=profile.capability_source,
+                diagnostics=profile.diagnostics,
+                nearest_capability_expires_at=nearest_expires,
+                legacy_fallback=profile.capability_source == "legacy_plan_fallback",
+                subscription_summary=profile.subscription_summary,
             )
         )
 
