@@ -5,6 +5,7 @@
 // 前端不计算聚合变量，只展示后端返回的 payload
 import type { ReviewScopeMetrics, ReviewMetricPayload, MetricKey } from './types'
 import ReviewDataQualityBadge, { isMetricAvailable } from './ReviewDataQualityBadge'
+import { resolveMetricColdStart } from './reviewReadiness'
 import styles from './review.module.scss'
 
 const METRIC_KEYS: MetricKey[] = ['p', 'q', 'u', 'c', 'v']
@@ -70,9 +71,10 @@ function MetricCell({ payload }: { payload: ReviewMetricPayload | null }) {
     )
   }
 
-  const isCold = payload.status === 'insufficient_history'
-  // 冷启动：优先用 rawValue，否则用 normalized value
-  const displayValue = isCold ? payload.rawValue : payload.value
+  // [C3] 冷启动判定统一走纯函数 resolveMetricColdStart：
+  // status 为 insufficient_history 或 value 空但 raw_ready=true 时以 rawValue 展示并标注
+  // 历史不足，不得显示 0 分或 "-"、不得隐藏卡片、不得写成计算失败。
+  const { isCold, displayValue } = resolveMetricColdStart(payload)
   const pct = payload.historyPercentile120d
   const histCount = payload.historyObservationCount
   const coverage = payload.coverage
@@ -82,6 +84,10 @@ function MetricCell({ payload }: { payload: ReviewMetricPayload | null }) {
     titleParts.push('历史不足（冷启动）')
     if (histCount !== null && histCount !== undefined) {
       titleParts.push(`历史观测=${histCount}条`)
+    }
+    // 后端 readiness.reason 存在时优先展示（如"history observation < 60"）
+    if (payload.readiness?.reason) {
+      titleParts.push(payload.readiness.reason)
     }
   } else {
     titleParts.push(`状态=${payload.status}`)
