@@ -275,18 +275,33 @@ _resolve_version_sha() {
 }
 
 # 读取当前 trading-backend 镜像 tag 中的 SHA。
-# 镜像 tag 形如 ...:<GIT_SHA> 或 ...:sha-<40位>，提取其中的 40 位 SHA。
+# 项目镜像 tag 既可能是 40 位完整 SHA（如 ...:<GIT_SHA> 或 ...:sha-<40位>），
+# 也可能是 7 位短 SHA（如 ...:<7位>）；两种都需解析为唯一完整 commit 才采用。
 _resolve_image_tag_sha() {
-    local tag sha
+    local tag candidate resolved
     tag="$(docker inspect trading-backend --format '{{.Config.Image}}' 2>/dev/null || echo "")"
     [[ -n "${tag}" ]] || return 0
+
+    # 优先尝试 40 位完整 SHA：必须能在当前仓库解析为 commit。
     if [[ "${tag}" =~ ([0-9a-fA-F]{40}) ]]; then
-        sha="${BASH_REMATCH[1]}"
-        if _is_resolvable_sha "${sha}"; then
-            echo "${sha}"
+        candidate="${BASH_REMATCH[1]}"
+        if _is_resolvable_sha "${candidate}"; then
+            echo "${candidate}"
             return 0
         fi
-        log "  镜像 tag ${tag} 含 SHA ${sha} 但仓库中不可解析"
+        log "  镜像 tag ${tag} 含 40 位 SHA ${candidate} 但仓库中不可解析，跳过"
+    fi
+
+    # 退而尝试 7 位短 SHA：必须通过 git 唯一解析为完整 40 位 commit。
+    # 无法解析或存在歧义（多个匹配）时拒绝使用，不得猜测或直接采用 7 位值。
+    if [[ "${tag}" =~ ([0-9a-fA-F]{7}) ]]; then
+        candidate="${BASH_REMATCH[1]}"
+        resolved="$(git -C "${REPO_ROOT}" rev-parse --quiet --verify "${candidate}^{commit}" 2>/dev/null || echo "")"
+        if [[ -n "${resolved}" && "${resolved}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "${resolved}"
+            return 0
+        fi
+        log "  镜像 tag ${tag} 的 7 位短 SHA ${candidate} 无法唯一解析，跳过"
     fi
     return 0
 }

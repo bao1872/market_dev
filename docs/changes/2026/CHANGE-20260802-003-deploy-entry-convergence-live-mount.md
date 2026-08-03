@@ -286,8 +286,8 @@ job 内容与 `CI` / `CI Gate` 名称未变，仅改触发方式。
 | 项 | 方式 | 结果 |
 |---|---|---|
 | 两脚本语法 | `bash -n` | 通过 |
-| 部署结构契约 | `bash scripts/deploy/panji-deploy.test.sh` | 75 通过 / 0 失败（含顺序约束、禁止 repo HEAD、bootstrap fallback 信号） |
-| 真实实现 dry-run 合同 | `bash scripts/ops/test-panji-test-deploy-contracts.sh` | 26 通过 / 0 失败（含首次优先 running version、短 SHA 解析、unknown 拒绝、bootstrap fallback） |
+| 部署结构契约 | `bash scripts/deploy/panji-deploy.test.sh` | 81 通过 / 0 失败（含顺序约束、禁止 repo HEAD、bootstrap fallback 信号、镜像 tag 短 SHA 解析） |
+| 真实实现 dry-run 合同 | `bash scripts/ops/test-panji-test-deploy-contracts.sh` | 32 通过 / 0 失败（含首次优先 running version、短 SHA 解析、unknown 拒绝、bootstrap fallback、镜像 tag 40/7 位解析） |
 | 治理检查器负向有效性 | `pytest tools/tests/test_check_governance_rules.py` | 15 通过（1 正例 + 14 类违规注入均被拒绝） |
 | 治理 / 文档 / 架构检查器 | `tools/check_governance_rules.py`、`check_docs_consistency.py`、`check_architecture.py` | 三者退出码均为 0 |
 | 尾随空白 | `git diff --check` | 无问题 |
@@ -302,3 +302,30 @@ job 内容与 `CI` / `CI Gate` 名称未变，仅改触发方式。
 |---|---|
 | 真实部署验证（首次 Live Mount） | `deferred_with_reason`：P0 已修复，但首次真实部署授权仍待用户确认，须先 dry-run |
 | Compose 叠加解析 | `blocked_external`：本机无 Docker CLI，需目标环境或手动 CI |
+
+### 7.6 实现修正（2026-08-02，镜像 tag 短 SHA 解析）
+
+§7.2 的 `resolve_previous_runtime_sha` 首次路径第三级来源 `running_image_tag` 由
+`_resolve_image_tag_sha` 实现，原实现只识别 40 位完整 SHA。项目镜像 tag 通常使用 7 位短 SHA，
+导致首次 Live Mount 时该来源形同虚设，漏掉一条真实运行 SHA 的解析路径。
+
+**修复**（`_resolve_image_tag_sha`，仍在 `panji-deploy.sh` 内）：
+
+- 从 `trading-backend` 的 `.Config.Image` 中提取 SHA 候选：
+  - **40 位完整 SHA**：必须能在当前仓库解析为 commit，否则拒绝使用；
+  - **7 位短 SHA**：必须经由 `git rev-parse --quiet --verify <candidate>^{commit}` **唯一解析**
+    为完整 40 位 commit；无法解析或存在歧义时拒绝使用，**不猜测、不直接把 7 位值作为 `PREVIOUS_SHA`**。
+- 解析成功后 `PREVIOUS_SHA_SOURCE=running_image_tag`，不改变既有解析顺序
+  （首次 Live Mount 仍为 `running_version → running_image_tag → PANJI_BOOTSTRAP_PREVIOUS_SHA → previous_runtime_sha_unknown`）。
+
+**验证（本地，未连接生产）**：
+
+| 项 | 方式 | 结果 |
+|---|---|---|
+| 两脚本语法 | `bash -n` | 通过 |
+| 部署结构契约 | `bash scripts/deploy/panji-deploy.test.sh` | 81 通过 / 0 失败（含镜像 tag 40/7 位解析信号与 running_image_tag 来源标记） |
+| 真实实现 dry-run 合同 | `bash scripts/ops/test-panji-test-deploy-contracts.sh` | 32 通过 / 0 失败（含 40 位 tag 解析、7 位唯一解析、version 不可用时 tag 优先于 bootstrap、7 位不可解析回落 bootstrap） |
+| 治理 / 文档 / 架构检查器 | `tools/check_governance_rules.py`、`check_docs_consistency.py`、`check_architecture.py` | 三者退出码均为 0 |
+| 尾随空白 | `git diff --check` | 无问题 |
+
+> §7.6 修正**未连接生产服务器、未执行真实部署、未重启容器、未执行 migration、未运行任何业务数据任务**。

@@ -210,6 +210,84 @@ grep -q "上一真实运行 SHA: ${TARGET_SHA}" "${TIER5_LOG}" \
   && ok "short SHA from version resolves to unique full SHA" \
   || bad "short SHA from version resolves to unique full SHA"
 
+# --- 镜像 tag SHA 解析（支持 40 位与 7 位短 SHA）---
+echo "== runtime image tag SHA resolution =="
+# 自定义 docker mock：首次路径 Mounts 探测 exit 1（判定首次 Live Mount），
+# 但 Config.Image 探测返回含 SHA 的镜像 tag。
+IMG_MOCK_BIN="${TMP_ROOT}/imgbin"
+mkdir -p "${IMG_MOCK_BIN}"
+cat > "${IMG_MOCK_BIN}/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "inspect" ]]; then
+  # Mounts 探测：首次 Live Mount 场景返回空（exit 1）
+  if [[ "${3:-}" == *"Mounts"* ]]; then
+    exit 1
+  fi
+  # Config.Image 探测：返回含 SHA 的镜像 tag
+  printf '%s' "${PANJI_MOCK_IMAGE_TAG:-market-dev-backend:unknown}"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "${IMG_MOCK_BIN}/docker"
+
+# 场景 A：40 位完整 SHA 镜像 tag 解析成功
+IMG_A_LIVE="${TMP_ROOT}/live-imga"
+IMG_A_LOG="${TMP_ROOT}/img-a.log"
+PATH="${IMG_MOCK_BIN}:${MOCK_BIN}:${PATH}" PANJI_MOCK_NO_LIVE_MOUNT=1 \
+  PANJI_MOCK_IMAGE_TAG="market-dev-backend:${TARGET_SHA}" \
+  PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${IMG_A_LIVE}" \
+  PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${TMP_ROOT}/none-state" PANJI_LOCK_FILE="${LOCK_FILE}" \
+  bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${IMG_A_LOG}" 2>&1 || true
+grep -q '来源: running_image_tag' "${IMG_A_LOG}" \
+  && ok "40-bit image tag resolves to previous SHA" \
+  || bad "40-bit image tag resolves to previous SHA"
+grep -q "上一真实运行 SHA: ${TARGET_SHA}" "${IMG_A_LOG}" \
+  && ok "40-bit image tag yields full SHA" \
+  || bad "40-bit image tag yields full SHA"
+
+# 场景 B：7 位短 SHA 镜像 tag 唯一解析为完整 SHA
+IMG_B_LIVE="${TMP_ROOT}/live-imgb"
+IMG_B_LOG="${TMP_ROOT}/img-b.log"
+PATH="${IMG_MOCK_BIN}:${MOCK_BIN}:${PATH}" PANJI_MOCK_NO_LIVE_MOUNT=1 \
+  PANJI_MOCK_IMAGE_TAG="market-dev-backend:${SHORT_SHA}" \
+  PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${IMG_B_LIVE}" \
+  PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${TMP_ROOT}/none-state" PANJI_LOCK_FILE="${LOCK_FILE}" \
+  bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${IMG_B_LOG}" 2>&1 || true
+grep -q '来源: running_image_tag' "${IMG_B_LOG}" \
+  && ok "7-bit short image tag resolves to previous SHA" \
+  || bad "7-bit short image tag resolves to previous SHA"
+grep -q "上一真实运行 SHA: ${TARGET_SHA}" "${IMG_B_LOG}" \
+  && ok "7-bit short image tag unique-resolves to full SHA" \
+  || bad "7-bit short image tag unique-resolves to full SHA"
+
+# 场景 C：version 不可用但 7 位镜像 tag 可用时，优先于 bootstrap fallback
+IMG_C_LIVE="${TMP_ROOT}/live-imgc"
+IMG_C_LOG="${TMP_ROOT}/img-c.log"
+PATH="${IMG_MOCK_BIN}:${MOCK_BIN}:${PATH}" PANJI_MOCK_NO_LIVE_MOUNT=1 \
+  PANJI_MOCK_IMAGE_TAG="market-dev-backend:${SHORT_SHA}" \
+  PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${IMG_C_LIVE}" \
+  PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${TMP_ROOT}/none-state" PANJI_LOCK_FILE="${LOCK_FILE}" \
+  PANJI_BOOTSTRAP_PREVIOUS_SHA="0000000000000000000000000000000000000000" \
+  bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${IMG_C_LOG}" 2>&1 || true
+grep -q '来源: running_image_tag' "${IMG_C_LOG}" \
+  && ok "image tag preferred over bootstrap fallback when version unavailable" \
+  || bad "image tag preferred over bootstrap fallback when version unavailable"
+
+# 场景 D：7 位镜像 tag 无法唯一解析时不采用（回落 bootstrap fallback）
+IMG_D_LIVE="${TMP_ROOT}/live-imgd"
+IMG_D_LOG="${TMP_ROOT}/img-d.log"
+# 用合法 hex 7 位串但仓库中不可解析作为 tag，且传入合法 bootstrap fallback
+PATH="${IMG_MOCK_BIN}:${MOCK_BIN}:${PATH}" PANJI_MOCK_NO_LIVE_MOUNT=1 \
+  PANJI_MOCK_IMAGE_TAG="market-dev-backend:deadbee" \
+  PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${IMG_D_LIVE}" \
+  PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${TMP_ROOT}/none-state" PANJI_LOCK_FILE="${LOCK_FILE}" \
+  PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+  bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${IMG_D_LOG}" 2>&1 || true
+grep -q '来源: bootstrap_previous_sha' "${IMG_D_LOG}" \
+  && ok "unresolvable 7-bit image tag falls back to bootstrap SHA" \
+  || bad "unresolvable 7-bit image tag falls back to bootstrap SHA"
+
 # --- RUNTIME_SHA / Mount / 镜像构建计划 ---
 echo "== runtime sha and mount plan =="
 grep -q '原地写入' "${OUTPUT_FILE}" \

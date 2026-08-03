@@ -160,6 +160,21 @@ assert_code_contains "接受外层自举前 SHA 作为 fallback" \
     'PANJI_BOOTSTRAP_PREVIOUS_SHA' "${SERVER_SCRIPT}"
 assert_code_contains "无法确认运行 SHA 时停止部署" \
     'previous_runtime_sha_unknown' "${SERVER_SCRIPT}"
+# 镜像 tag SHA 解析：40 位需仓库可解析；7 位需 git 唯一解析为完整 commit
+assert_code_contains "存在 _resolve_image_tag_sha 函数" \
+    '_resolve_image_tag_sha()' "${SERVER_SCRIPT}"
+assert_code_contains "镜像 tag 支持 40 位 SHA 解析" \
+    '\[0-9a-fA-F\]\{40\}' "${SERVER_SCRIPT}"
+assert_code_contains "镜像 tag 支持 7 位短 SHA 解析" \
+    '\[0-9a-fA-F\]\{7\}' "${SERVER_SCRIPT}"
+assert_code_contains "7 位短 SHA 经 git 唯一解析为完整 commit" \
+    'rev-parse --quiet --verify' "${SERVER_SCRIPT}"
+assert_code_contains "镜像 tag 解析来源标记为 running_image_tag" \
+    'running_image_tag' "${SERVER_SCRIPT}"
+# 7 位短 SHA 分支必须先把 candidate 经 rev-parse 解析为完整 SHA（resolved）再采用，
+# 不得直接把 7 位候选值作为 PREVIOUS_SHA。
+assert_code_contains "7 位分支采用 git 解析后的完整 SHA" \
+    'echo "\${resolved}"' "${SERVER_SCRIPT}"
 # 顺序约束：resolve_previous_runtime_sha 在 classify_changes 之前（基于行号比较）
 _resolve_line="$(code_of "${SERVER_SCRIPT}" \
     | awk '/^main\(\)/,/^}/' \
