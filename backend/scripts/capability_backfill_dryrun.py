@@ -54,6 +54,32 @@ def _stats(engine: Any) -> dict[str, int]:
             "SELECT count(*) FROM user_capabilities WHERE capability='self_selection' "
             "AND watchlist_limit IS NULL"
         ),
+        # [权限模型 V2] 补充统计
+        "legacy_fallback_users": (
+            "SELECT count(*) FROM users u WHERE u.status='active' "
+            "AND NOT EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id "
+            "WHERE ur.user_id=u.id AND r.name='admin') "
+            "AND NOT EXISTS (SELECT 1 FROM user_capabilities uc WHERE uc.user_id=u.id) "
+            "AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.user_id=u.id)"
+        ),
+        "partial_capability_users": (
+            "SELECT count(*) FROM (SELECT user_id FROM user_capabilities "
+            "GROUP BY user_id HAVING count(*) < 3) t"
+        ),
+        "subscription_capability_expiry_conflicts": (
+            "SELECT count(*) FROM user_capabilities uc "
+            "JOIN subscriptions s ON s.user_id=uc.user_id "
+            "WHERE s.expires_at IS NOT NULL AND uc.expires_at IS NOT NULL "
+            "AND s.expires_at <> uc.expires_at"
+        ),
+        "unknown_plan_code": (
+            "SELECT count(*) FROM subscriptions s "
+            "WHERE s.plan_code NOT IN ('observe_20','research_50')"
+        ),
+        "expired_but_active_status_abnormal": (
+            "SELECT count(*) FROM subscriptions s "
+            "WHERE s.status='active' AND s.expires_at IS NOT NULL AND s.expires_at < now()"
+        ),
     }
     with engine.connect() as conn:
         for key, q in queries.items():
@@ -82,8 +108,24 @@ def _plan(engine: Any, canary: str | None) -> None:
           + (f"（canary={canary}）" if canary else ""))
     for r in rows:
         caps = BACKFILL_MAP.get(r.plan_code or "")
-        print(f"  user={r.id} plan={r.plan_code or '?'} status={r.status} "
-              f"expires={r.expires_at} -> caps={list(caps or [])}")
+        masked_id = f"{str(r.id)[:8]}...{str(r.id)[-4:]}" if r.id else "?"
+        plan_code = r.plan_code or "?"
+        # 建议到期日 = subscription.expires_at（不缩短）
+        suggested_expires = r.expires_at
+        # watchlist_limit 来源：observe_20/research_50 → plan 快照（本轮 dry-run 标记 plan_monitor_limit 占位）
+        wl_source = "plan_monitor_limit" if plan_code in BACKFILL_MAP else "unknown"
+        # skip 原因
+        skip_reason = ""
+        if plan_code not in BACKFILL_MAP:
+            skip_reason = f"未知 plan_code={plan_code}"
+        elif r.status != "active":
+            skip_reason = f"订阅非 active（{r.status}）"
+        print(
+            f"  user={masked_id} plan={plan_code} sub_expires={suggested_expires} "
+            f"现有权限=[] 建议新增={list(caps or [])} "
+            f"建议到期日={suggested_expires} watchlist_limit来源={wl_source} "
+            f"skip={skip_reason or '-'}"
+        )
     print("[plan] 仅 dry-run，未执行任何写入。apply 未实现（本轮禁止执行）。")
 
 
