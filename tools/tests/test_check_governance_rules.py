@@ -64,6 +64,9 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
         ("ci_db_test_flag", "forbidden standalone test-db"),
         ("test_db_url", "forbidden standalone test-db"),
         ("postgres_service", "forbidden standalone test-db"),
+        ("prod_server", "forbidden production-stage term"),
+        ("prod_deploy", "forbidden production-stage term"),
+        ("prod_db", "forbidden production-stage term"),
     ],
 )
 def test_governance_regressions_are_rejected(
@@ -157,8 +160,25 @@ def test_governance_regressions_are_rejected(
             read_text(path) + "\nservices:\n  postgres:\n    image: postgres:16\n",
             encoding="utf-8",
         )
+    elif mutation == "prod_server":
+        # 回潮：AGENTS.md 重新出现"生产服务器"
+        path = governance_repo / "AGENTS.md"
+        path.write_text(read_text(path) + "\n部署到生产服务器。\n", encoding="utf-8")
+    elif mutation == "prod_deploy":
+        # 回潮：runbook 重新出现"生产部署"
+        path = governance_repo / "docs/runbooks/development-deployment.md"
+        path.write_text(read_text(path) + "\n执行生产部署。\n", encoding="utf-8")
+    elif mutation == "prod_db":
+        # 回潮：rules 重新出现"生产库"
+        path = governance_repo / "rules/80-deployment-data-safety.md"
+        path.write_text(read_text(path) + "\n写入生产库。\n", encoding="utf-8")
 
     assert any(expected in error for error in check(governance_repo))
+
+
+def test_historical_technical_identifiers_allowed(governance_repo: Path) -> None:
+    """历史技术标识符（panji-prod / APP_ENV=production 等）不误报为生产阶段术语。"""
+    assert check(governance_repo) == []
 
 
 def read_text(path: Path) -> str:

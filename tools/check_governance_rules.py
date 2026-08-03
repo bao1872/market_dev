@@ -262,6 +262,38 @@ def check(root: Path) -> list[str]:
                         f"forbidden standalone test-db ({reason}): {rel} contains {token}"
                     )
 
+    # [开发测试阶段] 禁止当前有效文档使用"生产阶段"业务术语（历史技术标识符 panji-prod 等除外）
+    _FORBIDDEN_PROD_TERMS = (
+        "生产服务器",
+        "生产部署",
+        "生产库",
+        "正式库",
+        "生产入口",
+        "生产任务",
+        "生产队列",
+        "生产身份",
+        "生产修改与部署版本合同",
+    )
+    for base in [agents, *sorted(rules_dir.glob("*.md")),
+                 root / "docs/prd", root / "docs/maps", root / "docs/runbooks"]:
+        if base.is_dir():
+            files = sorted(base.rglob("*.md"))
+        elif base.is_file():
+            files = [base]
+        else:
+            continue
+        for path in files:
+            rel = path.relative_to(root)
+            # 排除历史 CHANGE / archive / 明确的历史技术标识符解释段
+            if "changes" in rel.parts or "archive" in rel.parts:
+                continue
+            text = read(path)
+            for term in _FORBIDDEN_PROD_TERMS:
+                if term in text:
+                    errors.append(
+                        f"forbidden production-stage term ({term}): {rel}（应为开发测试阶段术语，如远程开发运行服务器/共享开发业务数据库）"
+                    )
+
     return errors
 
 
