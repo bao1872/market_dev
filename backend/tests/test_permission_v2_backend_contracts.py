@@ -20,10 +20,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.schemas.access import AccessProfileResponse
+from app.schemas.access import (
+    AccessProfileResponse,
+    AdminAccessProfileResponse,
+    AdminAccountInfo,
+    EffectiveAccessInfo,
+    ExplicitCapabilityRecord,
+    SubscriptionSummaryInfo,
+)
 from app.schemas.subscription import GrantCapabilityRequest, RevokeCapabilityRequest
 from app.services.subscription_service import (
     apply_capability_grant,
+    change_self_selection_quota,
+    get_effective_subscription_status,
+    list_subscribers,
+    resolve_commercial_status,
     revoke_capability_from_user,
 )
 
@@ -63,6 +74,12 @@ class _FakeResult:
 
     def scalar_one_or_none(self):
         return self._value
+
+    def scalar_one(self):
+        return self._value
+
+    def all(self):
+        return self._many
 
     def scalars(self):
         _many = self._many
@@ -150,7 +167,7 @@ class TestLockContract:
                 watchlist_limit=None,
                 source="admin_grant",
                 materialize_legacy=True,
-                granted_by=uuid.uuid4(),
+                actor_user_id=uuid.uuid4(),
             )
 
         assert session.lock_with_for_update_used is True, (
@@ -409,13 +426,13 @@ class TestRevokePreservesGrantedBy:
 class TestMutationType:
     """apply_capability_grant / revoke_capability_from_user 的 mutation_type 区分。
 
-    覆盖：
+    覆盖（apply_capability_grant 只产生四种）：
     - grant：无既有行，新建授权。
     - extend：已有行续期（active 顺延 / expired 从 now 重算，额度不变或非 self_selection）。
-    - quota_change：已有行过期且仅调整 self_selection 额度。
-    - extend_and_quota_change：已有行 active 且续期 + 调整额度。
+    - extend_and_quota_change：已有 self_selection 且额度变化（无论此前 active/expired）。
     - regrant：tombstone（admin_revoke）重新授权。
     - revoke：撤销（mutation_type="revoke"）。
+    纯 quota_change 由独立 change_self_selection_quota 产生（见 TestQuotaChange）。
     """
 
     async def _run_apply(
@@ -426,6 +443,7 @@ class TestMutationType:
         watchlist_limit=None,
         source="admin_grant",
         materialize_legacy=True,
+        actor_user_id=None,
     ):
         session = _FakeSession()
         user_row = _user_row()
@@ -468,16 +486,20 @@ class TestMutationType:
                 watchlist_limit=watchlist_limit,
                 source=source,
                 materialize_legacy=materialize_legacy,
-                granted_by=uuid.uuid4(),
+                actor_user_id=actor_user_id,
             )
 
     @pytest.mark.asyncio
     async def test_new_row_grant(self):
-        """无既有行 → mutation_type=grant。"""
-        result = await self._run_apply(None, materialize_legacy=False)
+        """无既有行（admin_grant）→ mutation_type=grant；不物化时 materialized 为空。"""
+        result = await self._run_apply(
+            None, materialize_legacy=False, actor_user_id=uuid.uuid4()
+        )
         assert result.action == "grant"
         assert result.mutation_type == "grant"
         assert result.after["mutation_type"] == "grant"
+        # materialize_legacy=False：不物化，materialized_capabilities 为空列表
+        assert result.materialized_capabilities == []
 
     @pytest.mark.asyncio
     async def test_active_extend(self):
@@ -486,20 +508,23 @@ class TestMutationType:
             capability="market_data", source="admin_grant",
             expires_at=_now() + timedelta(days=10),
         )
-        result = await self._run_apply(existing, capability="market_data")
+        result = await self._run_apply(
+            existing, capability="market_data", actor_user_id=uuid.uuid4()
+        )
         assert result.mutation_type == "extend"
 
     @pytest.mark.asyncio
-    async def test_expired_quota_change(self):
-        """过期 self_selection 行仅调整额度 → mutation_type=quota_change。"""
+    async def test_expired_quota_change_is_extend_and_quota_change(self):
+        """过期 self_selection 行且额度变化 → extend_and_quota_change（本次同时改期限与额度）。"""
         existing = _cap_row(
             capability="self_selection", source="admin_grant",
             expires_at=_now() - timedelta(days=1), watchlist_limit=20,
         )
         result = await self._run_apply(
-            existing, capability="self_selection", watchlist_limit=30
+            existing, capability="self_selection", watchlist_limit=30,
+            actor_user_id=uuid.uuid4(),
         )
-        assert result.mutation_type == "quota_change"
+        assert result.mutation_type == "extend_and_quota_change"
         assert result.after["watchlist_limit"] == 30
 
     @pytest.mark.asyncio
@@ -510,7 +535,8 @@ class TestMutationType:
             expires_at=_now() + timedelta(days=10), watchlist_limit=20,
         )
         result = await self._run_apply(
-            existing, capability="self_selection", watchlist_limit=30
+            existing, capability="self_selection", watchlist_limit=30,
+            actor_user_id=uuid.uuid4(),
         )
         assert result.mutation_type == "extend_and_quota_change"
         assert result.after["watchlist_limit"] == 30
@@ -522,7 +548,9 @@ class TestMutationType:
             capability="market_data", source="admin_revoke",
             expires_at=_now() - timedelta(days=1),
         )
-        result = await self._run_apply(existing, capability="market_data")
+        result = await self._run_apply(
+            existing, capability="market_data", actor_user_id=uuid.uuid4()
+        )
         assert result.mutation_type == "regrant"
         # regrant 恢复真实来源
         assert result.after["source"] == "admin_grant"
@@ -638,7 +666,7 @@ class TestExpiryAndTombstoneSafety:
                 watchlist_limit=None,
                 source="admin_grant",
                 materialize_legacy=True,
-                granted_by=uuid.uuid4(),
+                actor_user_id=uuid.uuid4(),
             )
 
         assert result.mutation_type == "extend"
@@ -743,6 +771,556 @@ class TestExpiryAndTombstoneSafety:
         assert result.after["source"] == "admin_revoke"
         # 幂等：已是 admin_revoke，不 add 新行（不重复插入）
         assert session.add.called is False
+
+
+# ============================================================
+# 8. source/actor 合同（PV2-B08）
+# ============================================================
+
+
+class TestSourceActorContract:
+    """admin_grant 必须有 actor；invite_code 必须无 actor；invite 默认 reason 非 admin_manual_grant。"""
+
+    async def _invite_grant(self):
+        """构造一个显式邀请码新注册（materialize_legacy=False, source=invite_code）mock 场景。"""
+        session = _FakeSession()
+        user_row = _user_row()
+        session.execute.side_effect = _make_lock_execute(session, user_row)
+        from sqlalchemy import select as real_select
+
+        def _patched_select(*cols, **kwargs):
+            stmt = real_select(*cols, **kwargs)
+            for c in cols:
+                from app.models.user import User as _User
+                if isinstance(c, type) and issubclass(c, _User):
+                    object.__setattr__(stmt, "_is_user_lock", True)
+            return stmt
+
+        with patch(
+            "app.services.subscription_service.datetime"
+        ) as mock_dt, patch(
+            "app.services.subscription_service.select", side_effect=_patched_select
+        ):
+            mock_dt.now.return_value = _now()
+            mock_dt.UTC = UTC
+            mock_dt.timedelta = timedelta
+            return await apply_capability_grant(
+                db=session,
+                user_id=user_row.id,
+                capability="self_selection",
+                grant_days=30,
+                watchlist_limit=20,
+                source="invite_code",
+                materialize_legacy=False,
+                actor_user_id=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_admin_grant_requires_actor(self):
+        """admin_grant + actor=None 必须抛 ValueError。"""
+        session = _FakeSession()
+        with pytest.raises(ValueError, match="admin_grant 必须提供 actor_user_id"):
+            await apply_capability_grant(
+                db=session,
+                user_id=uuid.uuid4(),
+                capability="market_data",
+                grant_days=30,
+                watchlist_limit=None,
+                source="admin_grant",
+                materialize_legacy=False,
+                actor_user_id=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_invite_code_rejects_actor(self):
+        """invite_code + actor 非空必须抛 ValueError。"""
+        session = _FakeSession()
+        with pytest.raises(ValueError, match="invite_code 不允许提供 actor_user_id"):
+            await apply_capability_grant(
+                db=session,
+                user_id=uuid.uuid4(),
+                capability="market_data",
+                grant_days=30,
+                watchlist_limit=None,
+                source="invite_code",
+                materialize_legacy=False,
+                actor_user_id=uuid.uuid4(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_invite_default_reason_not_admin_manual_grant(self):
+        """邀请码授权默认 reason 不是 admin_manual_grant（应保持 None）。"""
+        result = await self._invite_grant()
+        assert result.after["reason"] is None
+        assert result.after["reason"] != "admin_manual_grant"
+
+    @pytest.mark.asyncio
+    async def test_admin_grant_reason_default(self):
+        """admin_grant 未提供 reason 时默认 admin_manual_grant。"""
+        session = _FakeSession()
+        user_row = _user_row()
+        session.execute.side_effect = _make_lock_execute(session, user_row)
+        from sqlalchemy import select as real_select
+
+        def _patched_select(*cols, **kwargs):
+            stmt = real_select(*cols, **kwargs)
+            for c in cols:
+                from app.models.user import User as _User
+                if isinstance(c, type) and issubclass(c, _User):
+                    object.__setattr__(stmt, "_is_user_lock", True)
+            return stmt
+
+        with patch(
+            "app.services.subscription_service.datetime"
+        ) as mock_dt, patch(
+            "app.services.subscription_service.select", side_effect=_patched_select
+        ):
+            mock_dt.now.return_value = _now()
+            mock_dt.UTC = UTC
+            mock_dt.timedelta = timedelta
+            result = await apply_capability_grant(
+                db=session,
+                user_id=user_row.id,
+                capability="self_selection",
+                grant_days=30,
+                watchlist_limit=20,
+                source="admin_grant",
+                materialize_legacy=False,
+                actor_user_id=uuid.uuid4(),
+            )
+        assert result.after["reason"] == "admin_manual_grant"
+
+
+# ============================================================
+# 9. 独立 quota change（PV2-B05）
+# ============================================================
+
+
+class TestQuotaChange:
+    """change_self_selection_quota：纯 quota_change，不修改 expires_at；revoked 不可恢复。"""
+
+    async def _run(self, existing_row, *, new_limit=30):
+        session = _FakeSession()
+        user_row = _user_row()
+
+        from sqlalchemy import select as real_select
+
+        def _patched_select(*cols, **kwargs):
+            stmt = real_select(*cols, **kwargs)
+            for c in cols:
+                from app.models.user import User as _User
+                if isinstance(c, type) and issubclass(c, _User):
+                    object.__setattr__(stmt, "_is_user_lock", True)
+            return stmt
+
+        async def _execute(stmt, *args, **kwargs):
+            if getattr(stmt, "_is_user_lock", False):
+                session.locked_user = user_row
+                return _FakeResult(user_row)
+            return _FakeResult(existing_row, many=[existing_row] if existing_row else [])
+
+        session.execute.side_effect = _execute
+
+        with patch(
+            "app.services.subscription_service.datetime"
+        ) as mock_dt, patch(
+            "app.services.subscription_service.select", side_effect=_patched_select
+        ):
+            mock_dt.now.return_value = _now()
+            mock_dt.UTC = UTC
+            mock_dt.timedelta = timedelta
+            return session, await change_self_selection_quota(
+                db=session,
+                user_id=user_row.id,
+                new_watchlist_limit=new_limit,
+                actor_user_id=uuid.uuid4(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_quota_change_does_not_modify_expires_at(self):
+        """纯 quota change 只改额度，不修改 expires_at。"""
+        original_expiry = _now() + timedelta(days=50)
+        existing = _cap_row(
+            capability="self_selection", source="admin_grant",
+            expires_at=original_expiry, watchlist_limit=20,
+        )
+        session, result = await self._run(existing, new_limit=30)
+        assert result.action == "grant"
+        assert result.mutation_type == "quota_change"
+        assert result.after["watchlist_limit"] == 30
+        # expires_at 保持不变（原有期限不被修改）
+        assert result.after["expires_at"] == original_expiry
+
+    @pytest.mark.asyncio
+    async def test_quota_change_rejects_revoked(self):
+        """revoked 状态不能通过调整额度恢复。"""
+        existing = _cap_row(
+            capability="self_selection", source="admin_revoke",
+            expires_at=_now() - timedelta(days=1), watchlist_limit=20,
+        )
+        with pytest.raises(ValueError, match="revoked"):
+            await self._run(existing, new_limit=30)
+
+    @pytest.mark.asyncio
+    async def test_quota_change_requires_existing_record(self):
+        """无显式 self_selection 记录时调整额度失败。"""
+        with pytest.raises(ValueError, match="无显式 self_selection"):
+            await self._run(None, new_limit=30)
+
+
+# ============================================================
+# 10. 商业状态三入口复用（PV2-B06）
+# ============================================================
+
+
+class TestCommercialStatusReuse:
+    """get_effective_subscription_status / list_subscribers / access-profile 三入口
+    对相同 Subscription 返回相同商业状态（均复用 resolve_commercial_status）。"""
+
+    def _sub(self, *, status="active", starts_at=None, expires_at=None):
+        return SimpleNamespace(
+            status=status,
+            starts_at=starts_at or (_now() - timedelta(days=1)),
+            expires_at=expires_at or (_now() + timedelta(days=30)),
+            plan_code="observe_20",
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_effective_subscription_status_active(self):
+        """get_effective_subscription_status 复用解析器返回 active。"""
+        sub = self._sub()
+        session = _FakeSession()
+        session.execute.return_value = _FakeResult(sub)
+        status, _ = await get_effective_subscription_status(session, uuid.uuid4())
+        assert status == "active"
+
+    @pytest.mark.asyncio
+    async def test_get_effective_subscription_status_expired(self):
+        """过期订阅复用解析器返回 expired。"""
+        sub = self._sub(expires_at=_now() - timedelta(days=1))
+        session = _FakeSession()
+        session.execute.return_value = _FakeResult(sub)
+        status, _ = await get_effective_subscription_status(session, uuid.uuid4())
+        assert status == "expired"
+
+    @pytest.mark.asyncio
+    async def test_get_effective_subscription_status_revoked(self):
+        """revoked 订阅复用解析器返回 revoked。"""
+        sub = self._sub(status="revoked")
+        session = _FakeSession()
+        session.execute.return_value = _FakeResult(sub)
+        status, _ = await get_effective_subscription_status(session, uuid.uuid4())
+        assert status == "revoked"
+
+    @pytest.mark.asyncio
+    async def test_list_subscribers_reuses_commercial_status(self):
+        """list_subscribers 的 membership_status 复用解析器（active 正常周期）。"""
+        sub = self._sub()
+        user = SimpleNamespace(id=uuid.uuid4(), email="u@e.com", status="active", created_at=_now())
+        session = _FakeSession()
+
+        # 第 1 次 execute：count 查询 scalar_one -> total；第 2 次：列表查询 all() -> [(user, sub)]
+        calls = {"n": 0}
+
+        async def _execute(stmt, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeResult(1)
+            return _FakeResult(many=[(user, sub)])
+
+        session.execute.side_effect = _execute
+        with patch(
+            "app.services.subscription_service.get_renewal_count",
+            AsyncMock(return_value=0),
+        ):
+            rows, total = await list_subscribers(session, limit=10)
+        assert total == 1
+        assert len(rows) == 1
+        assert rows[0]["membership_status"] == "active"
+
+    @pytest.mark.asyncio
+    async def test_commercial_status_direct_consistency(self):
+        """三入口与唯一解析器对相同订阅语义一致（active 场景）。"""
+        sub = self._sub()
+        commercial = resolve_commercial_status(sub)
+        # list_subscribers / access-profile 均以 resolve_commercial_status 为唯一来源
+        assert commercial.status == "active"
+
+
+# ============================================================
+# 11. access-profile 真正 Schema 化（PV2-B06）：受限类型与 datetime
+# ============================================================
+
+
+class TestAccessProfileSchema:
+    """管理员 access-profile 分层 Schema：受限 Literal、datetime 序列化、非法值失败。"""
+
+    def _profile_payload(self):
+        return {
+            "account": {
+                "id": uuid.uuid4(),
+                "email": "u@e.com",
+                "account_status": "active",
+                "roles": ["member"],
+                "created_at": _now(),
+                "last_login_at": _now(),
+            },
+            "effective_access": {
+                "capabilities": {},
+                "active_capability_keys": [],
+                "has_any_access": True,
+                "default_route": "/overview",
+                "capability_source": "user_capabilities",
+                "nearest_capability_expires_at": _now() + timedelta(days=30),
+                "legacy_fallback": False,
+                "diagnostics": [],
+            },
+            "subscription_summary": {
+                "status": "active",
+                "reason": "active",
+                "plan_code": "observe_20",
+                "plan_display_name": None,
+                "starts_at": _now() - timedelta(days=1),
+                "expires_at": _now() + timedelta(days=30),
+                "source": "invite",
+                "entitlement_snapshot": None,
+            },
+            "explicit_capability_records": [
+                {
+                    "capability": "market_data",
+                    "state": "active",
+                    "granted_at": _now(),
+                    "expires_at": _now() + timedelta(days=30),
+                    "watchlist_limit": None,
+                    "source": "admin_grant",
+                    "granted_by": uuid.uuid4(),
+                }
+            ],
+        }
+
+    def test_full_profile_validates(self):
+        """完整 access-profile 响应通过 Schema 校验。"""
+        resp = AdminAccessProfileResponse.model_validate(self._profile_payload())
+        assert resp.subscription_summary.status == "active"
+        assert len(resp.explicit_capability_records) == 1
+        assert resp.explicit_capability_records[0].state == "active"
+
+    def test_invalid_capability_state_fails(self):
+        """非法 capability state（如 bogus）验证失败。"""
+        from pydantic import ValidationError
+
+        payload = self._profile_payload()
+        payload["explicit_capability_records"][0]["state"] = "bogus"
+        with pytest.raises(ValidationError):
+            AdminAccessProfileResponse.model_validate(payload)
+
+    def test_invalid_subscription_status_fails(self):
+        """非法订阅商业状态验证失败。"""
+        from pydantic import ValidationError
+
+        payload = self._profile_payload()
+        payload["subscription_summary"]["status"] = "activeish"
+        with pytest.raises(ValidationError):
+            AdminAccessProfileResponse.model_validate(payload)
+
+    def test_datetime_fields_are_not_str(self):
+        """access-profile 时间字段类型为 datetime，由 Pydantic 序列化为 ISO 字符串。"""
+        from app.schemas.access import (
+            CAPABILITY_STATE_LITERAL,
+            COMMERCIAL_STATUS_LITERAL,
+        )
+
+        assert SubscriptionSummaryInfo.model_fields["starts_at"].annotation == datetime | None
+        assert SubscriptionSummaryInfo.model_fields["expires_at"].annotation == datetime | None
+        assert AdminAccountInfo.model_fields["created_at"].annotation == datetime | None
+        assert AdminAccountInfo.model_fields["last_login_at"].annotation == datetime | None
+        assert EffectiveAccessInfo.model_fields[
+            "nearest_capability_expires_at"
+        ].annotation == datetime | None
+        assert ExplicitCapabilityRecord.model_fields["granted_at"].annotation == datetime | None
+        assert ExplicitCapabilityRecord.model_fields["expires_at"].annotation == datetime | None
+        assert COMMERCIAL_STATUS_LITERAL is not None
+        assert CAPABILITY_STATE_LITERAL is not None
+
+    def test_datetime_serializes_to_iso(self):
+        """完整 profile 序列化为 JSON 时 datetime 字段为 ISO 字符串。"""
+        resp = AdminAccessProfileResponse.model_validate(self._profile_payload())
+        data = resp.model_dump(mode="json")
+        assert isinstance(data["account"]["created_at"], str)
+        assert isinstance(data["subscription_summary"]["expires_at"], str)
+        assert isinstance(data["explicit_capability_records"][0]["expires_at"], str)
+        # UUID 序列化为字符串
+        assert isinstance(data["account"]["id"], str)
+        assert isinstance(data["explicit_capability_records"][0]["granted_by"], str)
+
+
+# ============================================================
+# 12. 审计证据（PV2-B09）：request_id 传递 + 首次物化列表进入审计
+# ============================================================
+
+
+class TestAuditEvidence:
+    """write_audit_log 传递 request_id；首次物化时 materialized_capabilities 非空。"""
+
+    @pytest.mark.asyncio
+    async def test_write_audit_log_persists_request_id(self):
+        """write_audit_log 接收 request_id 并写入审计对象（不伪造随机值）。"""
+        from app.services.access_audit_service import write_audit_log
+
+        session = _FakeSession()
+        log = await write_audit_log(
+            db=session,
+            actor_user_id=uuid.uuid4(),
+            action="capability.grant",
+            target_type="user_capability",
+            target_id="u:market_data",
+            after_data={"mutation_type": "grant"},
+            request_id="req-abc-123",
+        )
+        assert log.request_id == "req-abc-123"
+        assert session.add.called is True
+
+    @pytest.mark.asyncio
+    async def test_write_audit_log_request_id_optional(self):
+        """无 request_id 时（请求链未提供）request_id 为 None，不伪造随机值。"""
+        from app.services.access_audit_service import write_audit_log
+
+        session = _FakeSession()
+        log = await write_audit_log(
+            db=session,
+            actor_user_id=uuid.uuid4(),
+            action="capability.revoke",
+            target_type="user_capability",
+            target_id="u:market_data",
+            after_data={"mutation_type": "revoke"},
+        )
+        assert log.request_id is None
+
+    @pytest.mark.asyncio
+    async def test_apply_first_materialize_returns_snapshot(self):
+        """管理员首次操作触发 legacy 物化时，materialized_capabilities 非空。"""
+        session = _FakeSession()
+        user_row = _user_row()
+        sub = SimpleNamespace(
+            plan_code="observe_20", status="active",
+            starts_at=_now() - timedelta(days=1),
+            expires_at=_now() + timedelta(days=30),
+        )
+
+        from sqlalchemy import select as real_select
+
+        def _patched_select(*cols, **kwargs):
+            stmt = real_select(*cols, **kwargs)
+            for c in cols:
+                from app.models.user import User as _User
+                if isinstance(c, type) and issubclass(c, _User):
+                    object.__setattr__(stmt, "_is_user_lock", True)
+            return stmt
+
+        calls = {"n": 0}
+
+        async def _execute(stmt, *args, **kwargs):
+            calls["n"] += 1
+            if getattr(stmt, "_is_user_lock", False):
+                session.locked_user = user_row
+                return _FakeResult(user_row)
+            if calls["n"] == 2:
+                # ensure: UserCapability.all() 空（无显式记录）
+                return _FakeResult(None)
+            if calls["n"] == 3:
+                # ensure: Subscription.first() -> sub（触发物化）
+                return _FakeResult(sub)
+            # apply 目标 capability 行 -> None（新建）
+            return _FakeResult(None)
+
+        session.execute.side_effect = _execute
+
+        from app.services import effective_access_service as eas
+        from app.services import plan_service
+
+        plan = SimpleNamespace(monitor_limit=20)
+        inferred = {
+            "market_data": {"watchlist_limit": None, "expires_at": _now() + timedelta(days=30)},
+            "self_selection": {"watchlist_limit": 20, "expires_at": _now() + timedelta(days=30)},
+        }
+
+        with patch(
+            "app.services.subscription_service.datetime"
+        ) as mock_dt, patch(
+            "app.services.subscription_service.select", side_effect=_patched_select
+        ), patch.object(plan_service, "get_plan", new=AsyncMock(return_value=plan)), patch.object(
+            eas, "infer_capabilities_from_plan", return_value=inferred
+        ):
+            mock_dt.now.return_value = _now()
+            mock_dt.UTC = UTC
+            mock_dt.timedelta = timedelta
+
+            result = await apply_capability_grant(
+                db=session,
+                user_id=user_row.id,
+                capability="market_data",
+                grant_days=30,
+                watchlist_limit=None,
+                source="admin_grant",
+                materialize_legacy=True,
+                actor_user_id=uuid.uuid4(),
+            )
+
+        # 首次物化：materialized_capabilities 含 legacy 推导出的 Capability 快照
+        assert len(result.materialized_capabilities) >= 1
+        assert all(
+            item.get("source") == "legacy_materialized"
+            for item in result.materialized_capabilities
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_materialize_returns_empty(self):
+        """非首次（已有显式记录）不物化时 materialized_capabilities 为空。"""
+        existing = _cap_row(capability="market_data", source="admin_grant")
+        session = _FakeSession()
+        user_row = _user_row()
+
+        from sqlalchemy import select as real_select
+
+        def _patched_select(*cols, **kwargs):
+            stmt = real_select(*cols, **kwargs)
+            for c in cols:
+                from app.models.user import User as _User
+                if isinstance(c, type) and issubclass(c, _User):
+                    object.__setattr__(stmt, "_is_user_lock", True)
+            return stmt
+
+        async def _execute(stmt, *args, **kwargs):
+            if getattr(stmt, "_is_user_lock", False):
+                session.locked_user = user_row
+                return _FakeResult(user_row)
+            # ensure: UserCapability.all() 非空（已有显式记录）-> 不物化，返回空；
+            # apply 目标行 -> existing
+            return _FakeResult(existing, many=[existing])
+
+        session.execute.side_effect = _execute
+
+        with patch(
+            "app.services.subscription_service.datetime"
+        ) as mock_dt, patch(
+            "app.services.subscription_service.select", side_effect=_patched_select
+        ):
+            mock_dt.now.return_value = _now()
+            mock_dt.UTC = UTC
+            mock_dt.timedelta = timedelta
+
+            result = await apply_capability_grant(
+                db=session,
+                user_id=user_row.id,
+                capability="market_data",
+                grant_days=30,
+                watchlist_limit=None,
+                source="admin_grant",
+                materialize_legacy=True,
+                actor_user_id=uuid.uuid4(),
+            )
+
+        assert result.materialized_capabilities == []
 
 
 if __name__ == "__main__":

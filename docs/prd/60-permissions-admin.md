@@ -188,22 +188,41 @@ legacy Plan 推导权限的物化由调用场景显式控制，禁止无条件�
 - `target_type="user_capability"`
 - `target_id="{user_id}:{capability}"`
 - `action` 依据真实 `mutation_type` 生成（**不得把全部授权记成同一 action**）：
-  - 授予：`capability.grant` / `capability.extend` / `capability.quota_change` / `capability.extend_and_quota_change` / `capability.regrant`
+  - 授予：`capability.grant` / `capability.extend` / `capability.extend_and_quota_change` / `capability.regrant` / `capability.quota_change`
   - 撤销：`capability.revoke`
-- `mutation_type` 精确区分五态 + 撤销：
+- `mutation_type` 精确区分（授权总会改变有效期，因此 `apply_capability_grant` **不产生纯 quota_change**）：
   - `grant`：新建授权行
   - `extend`：已有行续期（active 顺延 / expired 从 now 重算，额度不变或非 self_selection）
-  - `quota_change`：已有行过期且仅调整 `self_selection` 额度
-  - `extend_and_quota_change`：已有行 active 且续期 + 调整额度
+  - `extend_and_quota_change`：已有 `self_selection` 且额度变化（**无论此前 active 还是 expired**，因为本次同时修改了有效期与额度）
   - `regrant`：tombstone（admin_revoke）重新授权
+  - `quota_change`：仅由独立入口 `change_self_selection_quota` 产生（不改变 `expires_at`）
   - `revoke`：撤销
 - `before_data/after_data` 含用户、能力、状态、来源、期限、额度、`granted_by`。
 - grant 的 after 快照含 `reason`；revoke 的 after 快照含 `revoked_by` 和 `reason`。
 - 默认原因分别为 `admin_manual_grant` 和 `admin_manual_revoke`。
+- 首次操作触发 legacy 物化时，`after_data` 含 `materialized_capabilities`（本次实际物化的 Capability 快照列表）；未物化为空列表。
+- 管理员 grant/revoke/quota change 必须传真实 `request_id`（复用请求链的 `x-request-id`，禁止自行生成随机值；请求链未提供则为 `None`）。
 
 邀请码注册和续期由现有 `InviteRedemption` 追溯，通用授权服务不私自写管理员审计。
 
-### PV2-B05a 撤销路由 reason
+### PV2-B05a 独立 quota change 入口
+
+`apply_capability_grant` 每次都会顺延有效期，因此**不能**产生纯 quota_change。纯额度调整由独立服务 `change_self_selection_quota` 提供，并通过 API：
+
+```
+PATCH /v1/admin/users/{user_id}/capabilities/self_selection/quota
+请求体：{ watchlist_limit, reason? }
+```
+
+合同：
+- 只允许 `self_selection`。
+- 必须已有显式 `UserCapability` 记录（无记录抛 `ValueError`，不自动授权）。
+- **不修改 `expires_at`**。
+- `revoked`（`source="admin_revoke"`）状态**不得**通过调整额度恢复，抛 `ValueError`。
+- 只修改 `watchlist_limit`。
+- `mutation_type="quota_change"`，审计 action 恒为 `capability.quota_change`。
+- 先 `SELECT User FOR UPDATE` 锁行并物化 legacy 权限。
+- 返回 before/after。
 
 `DELETE /v1/admin/users/{user_id}/capabilities/{capability}` 接收可选 `reason` query 参数：
 去空白、空字符串转 `None`、限长 500（与 Grant/Revoke 请求 reason 合同一致，PV2-B07）。
@@ -221,8 +240,36 @@ legacy Plan 推导权限的物化由调用场景显式控制，禁止无条件�
 7. 已到期：`expired`
 8. 其余正常周期：`active`
 
-异常商业周期采用 **fail-closed**，一律判 `expired` 并返回诊断原因。订阅列表与管理员 access-profile 共用该解析器。权限解析、默认路由和 capability guard **不读取** 商业状态。
+异常商业周期采用 **fail-closed**，一律判 `expired` 并返回诊断原因。**三个入口共用唯一解析器 `resolve_commercial_status`**，对相同 `Subscription` 返回相同状态：
+
+- `get_effective_subscription_status`（返回状态扩展为六态：none/pending/active/expired/revoked/cancelled）
+- `list_subscribers`（`membership_status` 字段）
+- `GET /admin/users/{user_id}/access-profile`（`subscription_summary.status`）
+
+禁止任何入口自行比较 `expires_at` / 复制 active/expired 判断。权限解析、默认路由和 capability guard **不读取** 商业状态。
 
 ### PV2-B07 Grant/Revoke 请求 reason
 
 Grant/Revoke 请求新增可选 `reason`：统一去除首尾空白、空字符串转 `None`、限制最大长度。保持既有路由兼容，尤其避免改变现有 DELETE 调用方式。
+
+### PV2-B08 source/actor 授权来源合同
+
+`apply_capability_grant` 公共签名只保留一个操作者字段 `actor_user_id`，消除 `granted_by` 与 `actor_user_id` 语义重叠：
+
+- `source == "admin_grant"`：
+  - `actor_user_id` **必须存在**（否则 `ValueError`）。
+  - `UserCapability.granted_by = actor_user_id`。
+  - 默认 `reason = admin_manual_grant`。
+- `source == "invite_code"`：
+  - `actor_user_id` **必须为 None**（否则 `ValueError`）。
+  - `UserCapability.granted_by = None`。
+  - 默认 `reason` **不得**为 `admin_manual_grant`（保持 `None`）。
+- legacy 物化：管理员操作传 `actor_user_id`；邀请码续期物化时 `actor` 为空；`legacy_materialized` 记录的 `granted_by` 按真实来源保存。
+
+非法组合（`admin_grant` + actor=None；`invite_code` + actor 非空）一律抛 `ValueError`。
+
+### PV2-B09 审计 request_id 与 legacy 物化
+
+管理员 grant/revoke/quota change 写审计时传真实 `request_id`（复用请求链的 `x-request-id`；请求链未提供则为 `None`，禁止伪造随机值）。
+
+`_lock_and_materialize_legacy` 返回本次实际物化的 Capability 快照列表；`CapabilityMutationResult` 携带 `materialized_capabilities`。管理员首次操作触发物化时，审计 `after_data` 必须包含 `materialized_capabilities`（未物化为空列表），保证 legacy 物化来源可追踪。
