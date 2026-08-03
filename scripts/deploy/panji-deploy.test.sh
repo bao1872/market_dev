@@ -123,11 +123,19 @@ echo "== 7/8 首次 Live Mount 自举与状态机 =="
 # 场景 1：本地入口必须让服务器先自举到目标 SHA，再执行目标工作树的脚本
 assert_code_contains "本地入口远端 checkout --detach 目标 SHA" \
     'checkout -f --detach' "${LOCAL_ENTRY}"
-# 场景 2：自举失败/ dry-run 必须经 trap 恢复原始 HEAD
-assert_code_contains "本地入口 trap 恢复原始 HEAD" \
+# 场景 2：自举失败/ dry-run 必须经 trap 恢复原始 REF（分支名或 detached SHA）
+assert_code_contains "本地入口 trap 恢复原始 REF" \
     'trap restore_head EXIT' "${LOCAL_ENTRY}"
+assert_code_contains "本地入口记录自举前完整 SHA" \
+    'ORIGINAL_SHA=' "${LOCAL_ENTRY}"
+assert_code_contains "本地入口记录自举前 REF" \
+    'ORIGINAL_REF=' "${LOCAL_ENTRY}"
+assert_code_contains "本地入口经环境变量传递自举前 SHA" \
+    'PANJI_BOOTSTRAP_PREVIOUS_SHA=' "${LOCAL_ENTRY}"
+assert_code_absent "本地入口不把脚本写入 /tmp" \
+    '/tmp/panji-deploy' "${LOCAL_ENTRY}"
 # 场景 3：正式部署成功后服务器保持在目标 SHA
-assert_code_contains "部署成功后不恢复 HEAD" \
+assert_code_contains "部署成功后不恢复 REF" \
     'RESTORE_HEAD=false' "${LOCAL_ENTRY}"
 # 场景 4：服务器端存在首次 Live Mount 检测
 assert_code_contains "存在 detect_first_live_deploy 函数" \
@@ -139,14 +147,31 @@ assert_code_contains "存在 apply_first_live_deploy_override 函数" \
     'apply_first_live_deploy_override\(\)' "${SERVER_SCRIPT}"
 assert_code_absent "首次 Live Mount 不强制 migration" \
     'FIRST_LIVE_DEPLOY.*==.*true.*\n?.*MIGRATION_CHANGED=true' "${SERVER_SCRIPT}"
-# 场景 6：上一 SHA 四级解析且不因状态文件缺失就强制 migration
-assert_code_contains "四级解析记录来源" 'PREVIOUS_SHA_SOURCE' "${SERVER_SCRIPT}"
-assert_code_contains "第二级来源 RUNTIME_SHA 文件" \
-    'LIVE_ROOT\}/RUNTIME_SHA' "${SERVER_SCRIPT}"
-assert_code_contains "第三级来源部署前 repo HEAD" \
+# 场景 6：上一真实运行 SHA 解析（P0 修复）——禁止用 checkout 后的 repo HEAD 当上一 SHA
+assert_code_contains "存在 resolve_previous_runtime_sha 函数" \
+    'resolve_previous_runtime_sha()' "${SERVER_SCRIPT}"
+assert_code_absent "禁止把 repo HEAD 当作上一 SHA 来源" \
     'PREVIOUS_SHA_SOURCE="repo_head"' "${SERVER_SCRIPT}"
-assert_code_contains "第四级 unknown_baseline" \
-    'unknown_baseline' "${SERVER_SCRIPT}"
+assert_code_contains "已 Live Mount 路径含 RUNTIME_SHA 文件来源" \
+    'LIVE_ROOT\}/RUNTIME_SHA' "${SERVER_SCRIPT}"
+assert_code_contains "未知基线仍保留" 'unknown_baseline' "${SERVER_SCRIPT}"
+assert_code_contains "首次 Live Mount 优先读运行版本" 'running_version' "${SERVER_SCRIPT}"
+assert_code_contains "接受外层自举前 SHA 作为 fallback" \
+    'PANJI_BOOTSTRAP_PREVIOUS_SHA' "${SERVER_SCRIPT}"
+assert_code_contains "无法确认运行 SHA 时停止部署" \
+    'previous_runtime_sha_unknown' "${SERVER_SCRIPT}"
+# 顺序约束：resolve_previous_runtime_sha 在 classify_changes 之前（基于行号比较）
+_resolve_line="$(code_of "${SERVER_SCRIPT}" \
+    | awk '/^main\(\)/,/^}/' \
+    | grep -n 'resolve_previous_runtime_sha' | head -1 | cut -d: -f1)"
+_classify_line="$(code_of "${SERVER_SCRIPT}" \
+    | awk '/^main\(\)/,/^}/' \
+    | grep -n 'classify_changes' | head -1 | cut -d: -f1)"
+if [[ -n "${_resolve_line}" && -n "${_classify_line}" && "${_resolve_line}" -lt "${_classify_line}" ]]; then
+    ok "main 顺序: resolve_previous_runtime_sha 在 classify_changes 之前"
+else
+    bad "main 顺序: resolve_previous_runtime_sha 应在 classify_changes 之前"
+fi
 # 场景 7：migration 状态机与失败路径
 assert_code_contains "存在 MIGRATION_ATTEMPTED 状态" 'MIGRATION_ATTEMPTED' "${SERVER_SCRIPT}"
 assert_code_contains "存在 MIGRATION_SUCCEEDED 状态" 'MIGRATION_SUCCEEDED' "${SERVER_SCRIPT}"

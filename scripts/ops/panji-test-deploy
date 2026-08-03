@@ -127,7 +127,8 @@ set -euo pipefail
 
 TARGET_SHA=${TARGET_SHA}
 REPO_ROOT=${Q_REPO_ROOT}
-ORIGINAL_HEAD=""
+ORIGINAL_REF=""
+ORIGINAL_SHA=""
 RESTORE_HEAD=true
 
 cd "\${REPO_ROOT}"
@@ -152,20 +153,32 @@ if ! git merge-base --is-ancestor "\${TARGET_SHA}" origin/dev; then
     exit 2
 fi
 
-# 4. 记录原始 HEAD（分支名优先，detached 时记录 SHA）
-if ORIGINAL_HEAD="\$(git symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
+# 4. 记录自举前状态：
+#    ORIGINAL_REF  —— 用于 dry-run/失败后恢复（分支名优先，detached 时记录完整 SHA）；
+#    ORIGINAL_SHA  —— 自举前 repo 的 40 位完整 SHA，仅作为"上一真实运行 SHA"的
+#                     最终 fallback（经 PANJI_BOOTSTRAP_PREVIOUS_SHA 传给部署脚本）。
+#    注意：ORIGINAL_SHA 是服务器自举前的 repo HEAD，未必等于当前真实运行镜像；
+#    首次 Live Mount 时部署脚本应优先读取当前运行 backend 的 /v1/version，
+#    只有全部运行时来源都失效才回退到此值。
+if ORIGINAL_REF="\$(git symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
     :
 else
-    ORIGINAL_HEAD="\$(git rev-parse HEAD)"
+    ORIGINAL_REF="\$(git rev-parse HEAD)"
 fi
-echo "[bootstrap] 原始 HEAD = \${ORIGINAL_HEAD}"
+ORIGINAL_SHA="\$(git rev-parse HEAD)"
+if [[ ! "\${ORIGINAL_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "无法解析自举前完整 SHA: \${ORIGINAL_SHA}" >&2
+    exit 2
+fi
+echo "[bootstrap] 原始 REF = \${ORIGINAL_REF}"
+echo "[bootstrap] 原始 SHA = \${ORIGINAL_SHA}"
 
 restore_head() {
     local rc=\$?
-    if [[ "\${RESTORE_HEAD}" == "true" && -n "\${ORIGINAL_HEAD}" ]]; then
-        echo "[bootstrap] 恢复原始 HEAD: \${ORIGINAL_HEAD}"
-        git -C "\${REPO_ROOT}" checkout -f "\${ORIGINAL_HEAD}" >/dev/null 2>&1 \\
-            || echo "[bootstrap] WARN: 恢复原始 HEAD 失败，请手动检查" >&2
+    if [[ "\${RESTORE_HEAD}" == "true" && -n "\${ORIGINAL_REF}" ]]; then
+        echo "[bootstrap] 恢复原始 REF: \${ORIGINAL_REF}"
+        git -C "\${REPO_ROOT}" checkout -f "\${ORIGINAL_REF}" >/dev/null 2>&1 \\
+            || echo "[bootstrap] WARN: 恢复原始 REF 失败，请手动检查" >&2
     fi
     exit \${rc}
 }
@@ -182,14 +195,17 @@ if [[ ! -f "\${DEPLOY_SCRIPT}" ]]; then
 fi
 
 # 6. 执行**目标工作树**中的部署实现
-# 关闭 errexit 以捕获退出码：失败时仍须经 trap 恢复原始 HEAD。
+# 关闭 errexit 以捕获退出码：失败时仍须经 trap 恢复原始 REF。
+# PANJI_BOOTSTRAP_PREVIOUS_SHA：自举前的完整 SHA，作为"上一真实运行 SHA"的
+# 最终 fallback，经受控环境变量传递（不通过 stdin、不写 /tmp）。
 echo "[bootstrap] 执行目标 SHA 工作树中的 panji-deploy.sh"
 set +e
-bash "\${DEPLOY_SCRIPT}" "\${TARGET_SHA}"${REMOTE_DRY_FLAG}
+PANJI_BOOTSTRAP_PREVIOUS_SHA="\${ORIGINAL_SHA}" \
+    bash "\${DEPLOY_SCRIPT}" "\${TARGET_SHA}"${REMOTE_DRY_FLAG}
 DEPLOY_RC=\$?
 set -e
 
-# 正式部署成功后服务器保持在目标 SHA；dry-run 始终恢复原始 HEAD
+# 正式部署成功后服务器保持在目标 SHA；dry-run 始终恢复原始 REF
 if [[ "\${DEPLOY_RC}" -eq 0 && "${DRY_RUN}" != "true" ]]; then
     RESTORE_HEAD=false
     echo "[bootstrap] 部署成功，服务器保持在目标 SHA"

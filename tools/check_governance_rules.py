@@ -107,9 +107,15 @@ def check(root: Path) -> list[str]:
         "docker-compose.prod.yml -f docker-compose.live.yml",
         'git diff --name-only "${PREVIOUS_SHA}" "${TARGET_SHA}"',
         "RUNTIME_SHA",
-        # 上一 SHA 四级解析（禁止仅因状态文件缺失就强制 migration）
+        # 上一真实运行 SHA 解析（P0 修复：禁止用 checkout 后的 repo HEAD 当上一 SHA）
+        "resolve_previous_runtime_sha()",
         "PREVIOUS_SHA_SOURCE",
         "unknown_baseline",
+        "previous_runtime_sha_unknown",
+        "running_version",
+        "PANJI_BOOTSTRAP_PREVIOUS_SHA",
+        "_resolve_version_sha",
+        "_resolve_image_tag_sha",
         # 首次 Live Mount 检测与同步范围提升
         "detect_first_live_deploy()",
         "apply_first_live_deploy_override()",

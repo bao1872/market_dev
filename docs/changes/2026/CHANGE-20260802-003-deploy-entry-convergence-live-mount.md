@@ -202,7 +202,7 @@ job 内容与 `CI` / `CI Gate` 名称未变，仅改触发方式。
 |---|---|---|
 | 1 | 本地入口直接执行服务器**当前**工作树的 `panji-deploy.sh`。服务器仍停在旧 SHA 时，跑的是旧脚本，无法保证执行目标 SHA 的部署实现。 | 远端启动顺序固定为 `cd REPO → fetch origin dev --no-tags → 工作树干净校验 → 目标 SHA 属于 origin/dev → 记录原始 HEAD → checkout -f --detach <SHA> → 执行**目标工作树**的 `scripts/deploy/panji-deploy.sh``。dry-run 与任何失败经 `trap` 恢复原始 HEAD，正式部署成功则保持在目标 SHA。仍不经 stdin / `/tmp` / `scp` / 裸 `ssh`。 |
 | 2 | 无首次 Live Mount 识别。核心容器尚未挂载 `/opt/panji-live` 时不会强制建立挂载。 | 新增 `FIRST_LIVE_DEPLOY`，经 `docker inspect` 检查 `trading-backend` / `trading-frontend` 是否挂载 `LIVE_ROOT`；任一未挂载即为首次部署，强制全量同步 Python 与前端运行代码。**边界**：只提升同步范围，**不得**据此把 `migration_changed` 置为 true。 |
-| 3 | 状态文件缺失即判定基线未知，进而强制执行 migration。 | 上一 SHA 按四级顺序解析：①部署状态文件 ②`/opt/panji-live/RUNTIME_SHA` ③部署前服务器 repo HEAD ④全部失败才按首次未知基线处理。仅第四级会强制全量同步 + migration。 |
+| 3 | 状态文件缺失即判定基线未知，进而强制执行 migration。 | 已 Live Mount：上一 SHA 按 ①部署状态文件 ②`/opt/panji-live/RUNTIME_SHA` ③当前运行版本 `version.runtime_git_sha` ④外层自举前 `PANJI_BOOTSTRAP_PREVIOUS_SHA` 解析；仅全部失败才按首次未知基线处理。 |
 | 4 | `docker-compose.prod.yml` 中 backend / frontend / capture 三个镜像**共用同一个 `GIT_SHA` tag**，但原实现只构建"受影响的那一个"，新 tag 下会出现未构建镜像导致启动失败。 | 修正为：普通代码变化**零构建**；任意 `environment_changed=true` → 将 backend / frontend / worker-capture 作为**同一 tag 组整体构建**。构建后仍以 prod+live 叠加启动，运行代码仍唯一来自 `/opt/panji-live`。不引入三态 tag 状态机，不恢复镜像模式。 |
 | 5 | migration 失败与重启后失败共用同一条回滚路径，会在 migration 失败后仍 `up -d --force-recreate`。 | 新增 `MIGRATION_ATTEMPTED` / `MIGRATION_SUCCEEDED` / `SERVICES_RESTARTED` / `FAILURE_STAGE` 状态。migration 始终早于任何重启；失败时只恢复 repo / Live Mount 文件 / `RUNTIME_SHA` / `market.env` 到上一 SHA，**不执行任何容器重建**，不记成功状态，**不声称数据库已回滚**，输出 `migration_failed_requires_inspection`。仅在服务已重启后（health / SHA 核验失败）才走容器级回滚。 |
 | 6 | `RUNTIME_SHA` 经 `rsync` 覆盖。它是**单文件 bind mount** 源，rename/rsync 会更换 inode，容器内仍读到旧内容。 | 改为原地写入（`> file` truncate + write，保持同一 inode），首次不存在时先创建；写后校验 inode 未变并回读全 SHA。 |
@@ -237,3 +237,68 @@ job 内容与 `CI` / `CI Gate` 名称未变，仅改触发方式。
 
 > §6 全部修正**未连接生产服务器、未执行真实部署、未重启容器、未执行 migration、
 > 未运行任何业务数据任务**。首次实跑仍须先 `--dry-run`。
+
+## 7. P0 修正（2026-08-02，首次 Live Mount 真实运行 SHA 识别）
+
+§6 的收敛仍存在一个 **P0 逻辑缺口**：`panji-test-deploy` 先 `checkout --detach` 目标 SHA，
+再执行目标工作树中的 `panji-deploy.sh`。若 `panji-deploy.sh` 在进入 checkout 之后才解析
+"上一部署 SHA"，则 `repo HEAD` 已是 `TARGET_SHA`，导致 `git diff TARGET_SHA TARGET_SHA` 为空，
+漏判 migration 与依赖/Dockerfile 变化，首次 Live Mount 可能"新代码已挂载、依赖镜像未重建、migration 未执行"。
+
+### 7.1 根因
+
+- 外层 checkout 发生在 `panji-deploy.sh` 的 `resolve` 之前；
+- 旧 `load_previous_state` 第三级来源是"部署前服务器 repo HEAD"，但此时 repo 已被 checkout 到目标 SHA；
+- 因此 `PREVIOUS_SHA = TARGET_SHA`，diff 为空，`MIGRATION_CHANGED` / `*_ENVIRONMENT_CHANGED` 全部漏判。
+
+### 7.2 修复（仍在两脚本结构内，未新增脚本、未恢复已删除模式）
+
+**`panji-test-deploy`（本地入口）**：
+
+- 自举前分别记录 `ORIGINAL_REF`（分支名优先、detached 时记完整 SHA，用于 dry-run/失败后恢复）
+  与 `ORIGINAL_SHA`（自举前 repo 的完整 40 位 SHA，仅作为"上一真实运行 SHA"的最终 fallback）；
+- 经受控环境变量 `PANJI_BOOTSTRAP_PREVIOUS_SHA=<ORIGINAL_SHA>` 传给目标部署脚本；
+- 仍不经 stdin / `/tmp` / `scp` / `docker cp` / 裸 `ssh`；dry-run 与失败恢复 `ORIGINAL_REF`，正式成功保持目标 SHA。
+
+**`panji-deploy.sh`（服务器实现）**：
+
+- 新增 `resolve_previous_runtime_sha`，按 **首次 / 非首次** 两条路径解析，且**禁止**把 checkout 后的 repo HEAD 当上一 SHA：
+  - **首次 Live Mount**（核心容器尚未挂载 `LIVE_ROOT`）：
+    ① 当前 `trading-backend` `/v1/version`（`runtime_git_sha` → `image_git_sha` → `git_sha`）；
+    ② 当前 `trading-backend` 镜像 tag 中的 SHA；
+    ③ `PANJI_BOOTSTRAP_PREVIOUS_SHA`；
+    ④ 仍无法确认 → **停止并报告 `previous_runtime_sha_unknown`**，不得把 `TARGET_SHA` 当上一 SHA。
+  - **已 Live Mount**：① 部署状态文件 ② `/opt/panji-live/RUNTIME_SHA` ③ `version.runtime_git_sha` ④ `PANJI_BOOTSTRAP_PREVIOUS_SHA`。
+- 短 SHA 仅在仓库中能唯一解析为完整 commit 时才允许使用（`_resolve_version_sha` 内处理）。
+- `main()` 顺序收紧为：`validate_sha → check_working_tree → detect_first_live_deploy → resolve_previous_runtime_sha → classify_changes → checkout_target → deploy`。
+- `FIRST_LIVE_DEPLOY` 仍只提升同步范围，**不**无条件触发 migration；只有真实 diff 触发 migration 或环境镜像构建。
+
+### 7.3 受影响契约
+
+| 契约 | 变化 |
+|---|---|
+| 上一真实运行 SHA 来源 | 删除"deploy 后 repo HEAD"；首次路径优先 running version，fallback 经 `PANJI_BOOTSTRAP_PREVIOUS_SHA` |
+| 无法确认运行 SHA | 首次 Live Mount 下停止部署（`previous_runtime_sha_unknown`），不再静默用 TARGET_SHA |
+| 本地入口恢复目标 | `ORIGINAL_HEAD` → `ORIGINAL_REF`（语义不变，名称更准） |
+
+### 7.4 验证（本地，未连接生产）
+
+| 项 | 方式 | 结果 |
+|---|---|---|
+| 两脚本语法 | `bash -n` | 通过 |
+| 部署结构契约 | `bash scripts/deploy/panji-deploy.test.sh` | 75 通过 / 0 失败（含顺序约束、禁止 repo HEAD、bootstrap fallback 信号） |
+| 真实实现 dry-run 合同 | `bash scripts/ops/test-panji-test-deploy-contracts.sh` | 26 通过 / 0 失败（含首次优先 running version、短 SHA 解析、unknown 拒绝、bootstrap fallback） |
+| 治理检查器负向有效性 | `pytest tools/tests/test_check_governance_rules.py` | 15 通过（1 正例 + 14 类违规注入均被拒绝） |
+| 治理 / 文档 / 架构检查器 | `tools/check_governance_rules.py`、`check_docs_consistency.py`、`check_architecture.py` | 三者退出码均为 0 |
+| 尾随空白 | `git diff --check` | 无问题 |
+
+> §7 修正**未连接生产服务器、未执行真实部署、未重启容器、未执行 migration、
+> 未运行任何业务数据任务**。部署执行链现已具备进行第一次受控 Live Mount 验证的条件，
+> 但仍须先 `--dry-run`。
+
+### 7.5 状态
+
+| 项 | 状态 |
+|---|---|
+| 真实部署验证（首次 Live Mount） | `deferred_with_reason`：P0 已修复，但首次真实部署授权仍待用户确认，须先 dry-run |
+| Compose 叠加解析 | `blocked_external`：本机无 Docker CLI，需目标环境或手动 CI |

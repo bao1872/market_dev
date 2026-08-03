@@ -61,8 +61,18 @@ scripts/ops/panji-test-deploy <FULL_SHA>
 
 所有分类基于"上一成功部署 SHA到目标 SHA"的完整差异，不使用 `HEAD~1`。
 
-上一部署 SHA 按四级顺序解析：①部署状态文件 ②`/opt/panji-live/RUNTIME_SHA`
-③部署前服务器 repo HEAD ④全部失败才按首次未知基线（全量同步 + migration）处理。
+上一部署 SHA 解析**禁止**使用 checkout 后的 repo HEAD（外层已把服务器检出到目标 SHA，
+否则 `git diff 目标SHA 目标SHA` 为空、漏判 migration 与依赖变化）：
+
+- **已 Live Mount**：① 部署状态文件 ② `/opt/panji-live/RUNTIME_SHA` ③ 当前运行版本
+  `version.runtime_git_sha` ④ `PANJI_BOOTSTRAP_PREVIOUS_SHA`（外层自举前完整 SHA）；
+- **首次 Live Mount**（核心容器尚未挂载 `/opt/panji-live`）：① 当前 `trading-backend`
+  `/v1/version`（`runtime_git_sha` → `image_git_sha` → `git_sha`）② 当前 `trading-backend`
+  镜像 tag 中的 SHA ③ `PANJI_BOOTSTRAP_PREVIOUS_SHA`；仍无法确认则**停止部署**并报告
+  `previous_runtime_sha_unknown`，**不得**把 `TARGET_SHA` 当作上一 SHA。
+
+短 SHA 仅在仓库中能唯一解析为完整 commit 时才允许使用。
+全部失败（非首次未知基线）才按首次未知基线（全量同步 + migration）处理。
 **仅状态文件缺失不构成强制 migration 的理由。**
 
 ## 首次 Live Mount 部署
@@ -70,7 +80,7 @@ scripts/ops/panji-test-deploy <FULL_SHA>
 服务器仓库可能仍停在旧 SHA，因此本地入口会先让服务器自举：
 `cd 仓库 → fetch origin dev → 工作树干净校验 → 目标 SHA 属于 origin/dev →
 记录原始 HEAD → checkout --detach 目标 SHA → 执行目标工作树中的 panji-deploy.sh`。
-dry-run 或任何失败都会恢复原始 HEAD；正式部署成功后服务器保持在目标 SHA。
+dry-run 或任何失败都会恢复原始 REF（分支名或 detached 完整 SHA）；正式部署成功后服务器保持在目标 SHA。
 
 服务器实现通过 `docker inspect` 检查 `trading-backend` 与 `trading-frontend` 是否挂载
 `/opt/panji-live`。任一未挂载即判定为首次 Live Mount 部署，强制全量同步 Python 与前端

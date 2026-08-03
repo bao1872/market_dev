@@ -68,6 +68,10 @@ TARGET_SHA=""
 PREVIOUS_SHA=""
 PREVIOUS_SHA_SOURCE=""
 
+# 外层自举前记录的完整 SHA（由 panji-test-deploy 经环境变量传入），
+# 仅作为"上一真实运行 SHA"的最终 fallback。
+BOOTSTRAP_PREVIOUS_SHA="${PANJI_BOOTSTRAP_PREVIOUS_SHA:-}"
+
 # 变更分类标志（由 classify_changes 计算）
 BACKEND_RUNTIME_CHANGED=false
 FRONTEND_RUNTIME_CHANGED=false
@@ -239,12 +243,122 @@ _is_resolvable_sha() {
     git -C "${REPO_ROOT}" cat-file -e "${sha}^{commit}" 2>/dev/null
 }
 
-# 上一部署 SHA 按四级顺序解析，只有全部失败才按「首次未知基线」处理。
-# 关键：不得仅因状态文件不存在就把 migration_changed 置为 true。
-load_previous_state() {
-    log "解析上一部署 SHA（四级顺序）..."
+# 读取当前运行 backend 的 /v1/version 中的 SHA 字段。
+# 优先顺序：runtime_git_sha → image_git_sha → git_sha。
+# 任一字段若为 7 位短 SHA，尝试在仓库中唯一解析为完整 40 位 SHA。
+_resolve_version_sha() {
+    local version_json field val resolved
+    version_json="$(curl -sf http://127.0.0.1:8000/v1/version 2>/dev/null || echo "")"
+    [[ -n "${version_json}" ]] || return 0
+
+    for field in runtime_git_sha image_git_sha git_sha; do
+        val="$(echo "${version_json}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('${field}',''))" 2>/dev/null || echo "")"
+        [[ -n "${val}" ]] || continue
+
+        # 完整 40 位 SHA 直接采用
+        if [[ "${val}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "${val}"
+            return 0
+        fi
+        # 7 位短 SHA：在仓库中唯一解析
+        if [[ "${val}" =~ ^[0-9a-fA-F]{7}$ ]]; then
+            resolved="$(git -C "${REPO_ROOT}" rev-parse --quiet --verify "${val}^{commit}" 2>/dev/null || echo "")"
+            if [[ -n "${resolved}" && "${resolved}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                echo "${resolved}"
+                return 0
+            fi
+            log "  version.${field}=${val} 在仓库中无法唯一解析，跳过"
+        fi
+    done
+    return 0
+}
+
+# 读取当前 trading-backend 镜像 tag 中的 SHA。
+# 镜像 tag 形如 ...:<GIT_SHA> 或 ...:sha-<40位>，提取其中的 40 位 SHA。
+_resolve_image_tag_sha() {
+    local tag sha
+    tag="$(docker inspect trading-backend --format '{{.Config.Image}}' 2>/dev/null || echo "")"
+    [[ -n "${tag}" ]] || return 0
+    if [[ "${tag}" =~ ([0-9a-fA-F]{40}) ]]; then
+        sha="${BASH_REMATCH[1]}"
+        if _is_resolvable_sha "${sha}"; then
+            echo "${sha}"
+            return 0
+        fi
+        log "  镜像 tag ${tag} 含 SHA ${sha} 但仓库中不可解析"
+    fi
+    return 0
+}
+
+# 上一真实运行 SHA 解析。
+# 关键约束：外层 panji-test-deploy 已把服务器 checkout 到 TARGET_SHA，
+# 因此**禁止**把当前 repo HEAD 当作上一部署 SHA（否则 diff 为空、漏判 migration/环境变化）。
+#
+# 首次 Live Mount（核心容器尚未挂载 LIVE_ROOT）：
+#   当前真实运行版本应优先于任何 repo 状态读取：
+#     1. 当前 trading-backend /v1/version（runtime/image/git_sha）
+#     2. 当前 trading-backend 镜像 tag 中的 SHA
+#     3. 外层自举前的完整 SHA（PANJI_BOOTSTRAP_PREVIOUS_SHA）
+#     4. 仍无法确认 → 停止并报告 previous_runtime_sha_unknown
+#
+# 已处于 Live Mount：
+#     1. 部署状态文件
+#     2. /opt/panji-live/RUNTIME_SHA
+#     3. version.runtime_git_sha（当前运行版本，非 repo HEAD）
+#     4. PANJI_BOOTSTRAP_PREVIOUS_SHA
+#
+# 短 SHA 仅在仓库中能唯一解析为完整 commit 时才允许使用。
+resolve_previous_runtime_sha() {
+    log "解析上一真实运行 SHA..."
     PREVIOUS_SHA=""
     PREVIOUS_SHA_SOURCE=""
+
+    if [[ "${FIRST_LIVE_DEPLOY}" == "true" ]]; then
+        log "  [首次 Live Mount] 优先读取当前真实运行版本"
+
+        # 1. 当前运行 backend /v1/version
+        local vsha
+        vsha="$(_resolve_version_sha)"
+        if _is_resolvable_sha "${vsha}"; then
+            PREVIOUS_SHA="${vsha}"
+            PREVIOUS_SHA_SOURCE="running_version"
+        fi
+
+        # 2. 当前镜像 tag 中的 SHA
+        if [[ -z "${PREVIOUS_SHA}" ]]; then
+            local isha
+            isha="$(_resolve_image_tag_sha)"
+            if _is_resolvable_sha "${isha}"; then
+                PREVIOUS_SHA="${isha}"
+                PREVIOUS_SHA_SOURCE="running_image_tag"
+            fi
+        fi
+
+        # 3. 外层自举前完整 SHA（最终 fallback）
+        if [[ -z "${PREVIOUS_SHA}" && -n "${BOOTSTRAP_PREVIOUS_SHA}" ]]; then
+            if _is_resolvable_sha "${BOOTSTRAP_PREVIOUS_SHA}"; then
+                PREVIOUS_SHA="${BOOTSTRAP_PREVIOUS_SHA}"
+                PREVIOUS_SHA_SOURCE="bootstrap_previous_sha"
+            else
+                log "  BOOTSTRAP_PREVIOUS_SHA 不可解析: ${BOOTSTRAP_PREVIOUS_SHA:-空}"
+            fi
+        fi
+
+        # 4. 仍无法确认 → 停止
+        if [[ -z "${PREVIOUS_SHA}" ]]; then
+            log "!!! 无法确认当前真实运行 SHA（首次 Live Mount），拒绝部署"
+            log "结论: previous_runtime_sha_unknown"
+            PREVIOUS_SHA_SOURCE="unknown_runtime"
+            return 1
+        fi
+
+        log "上一真实运行 SHA: ${PREVIOUS_SHA}（来源: ${PREVIOUS_SHA_SOURCE}）"
+        return 0
+    fi
+
+    # 已处于 Live Mount：状态文件 / RUNTIME_SHA / 运行版本 / 自举前 SHA
+    log "  [已 Live Mount] 按状态文件 → RUNTIME_SHA → 运行版本 → 自举前 SHA 解析"
 
     # 1. 部署状态文件
     if [[ -f "${STATE_FILE}" ]]; then
@@ -270,23 +384,33 @@ load_previous_state() {
         fi
     fi
 
-    # 3. 部署前服务器 repo HEAD（必须在 checkout_target 之前调用）
+    # 3. 当前运行版本（非 repo HEAD）
     if [[ -z "${PREVIOUS_SHA}" ]]; then
-        local candidate
-        candidate="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo "")"
-        if _is_resolvable_sha "${candidate}"; then
-            PREVIOUS_SHA="${candidate}"
-            PREVIOUS_SHA_SOURCE="repo_head"
+        local vsha
+        vsha="$(_resolve_version_sha)"
+        if _is_resolvable_sha "${vsha}"; then
+            PREVIOUS_SHA="${vsha}"
+            PREVIOUS_SHA_SOURCE="running_version"
         fi
     fi
 
-    # 4. 全部失败 → 首次未知基线
+    # 4. 外层自举前完整 SHA
+    if [[ -z "${PREVIOUS_SHA}" && -n "${BOOTSTRAP_PREVIOUS_SHA}" ]]; then
+        if _is_resolvable_sha "${BOOTSTRAP_PREVIOUS_SHA}"; then
+            PREVIOUS_SHA="${BOOTSTRAP_PREVIOUS_SHA}"
+            PREVIOUS_SHA_SOURCE="bootstrap_previous_sha"
+        else
+            log "  BOOTSTRAP_PREVIOUS_SHA 不可解析: ${BOOTSTRAP_PREVIOUS_SHA:-空}"
+        fi
+    fi
+
     if [[ -z "${PREVIOUS_SHA}" ]]; then
         PREVIOUS_SHA_SOURCE="unknown_baseline"
-        log "上一部署 SHA: 无法解析（首次未知基线）"
+        log "上一真实运行 SHA: 无法解析（未知基线）"
     else
-        log "上一部署 SHA: ${PREVIOUS_SHA}（来源: ${PREVIOUS_SHA_SOURCE}）"
+        log "上一真实运行 SHA: ${PREVIOUS_SHA}（来源: ${PREVIOUS_SHA_SOURCE}）"
     fi
+    return 0
 }
 
 # 首次 Live Mount 部署识别：任一核心应用容器未挂载 LIVE_ROOT 即为 true。
@@ -1000,10 +1124,14 @@ main() {
         ensure_state_directory
         validate_sha
         check_working_tree
-        # load_previous_state 必须在 checkout_target 之前：
-        # 第三级来源依赖「部署前的服务器 repo HEAD」。
-        load_previous_state
+        # 顺序约束（P0 修复）：
+        #   必须先用当前真实运行状态解析上一 SHA，再分类变化，最后 checkout。
+        #   禁止在进入 checkout 目标 SHA 之后才解析——否则会把 TARGET_SHA 当作上一 SHA。
         detect_first_live_deploy
+        resolve_previous_runtime_sha || {
+            # 首次 Live Mount 且无法确认当前真实运行 SHA：停止，不部署。
+            fail "previous_runtime_sha_unknown：首次 Live Mount 无法确认当前运行版本，拒绝部署"
+        }
         classify_changes
         apply_first_live_deploy_override
 

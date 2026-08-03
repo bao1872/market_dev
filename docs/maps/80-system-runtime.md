@@ -60,12 +60,16 @@ scripts/ops/panji-test-deploy <FULL_SHA> [--dry-run]
 
 - 本地入口只校验来源、运行 preflight，并让服务器先自举到目标 SHA 工作树，
   再执行**目标工作树中**的 `scripts/deploy/panji-deploy.sh`。
-  远端序列：`fetch origin dev → 工作树干净校验 → 祖先校验 → 记录原始 HEAD →
-  checkout -f --detach 目标 SHA → 执行部署实现`；dry-run 与失败经 `trap` 恢复原始 HEAD，
+  远端序列：`fetch origin dev → 工作树干净校验 → 祖先校验 → 记录原始 REF(SHA) →
+  checkout -f --detach 目标 SHA → 执行部署实现`；dry-run 与失败经 `trap` 恢复原始 REF，
   正式部署成功后保持在目标 SHA。这解决了"服务器停在旧 SHA 时跑的是旧部署脚本"的问题；
-- 服务器实现根据"上一成功部署 SHA 到目标 SHA"的完整差异分类；
-  上一 SHA 按四级解析：状态文件 → `/opt/panji-live/RUNTIME_SHA` → 部署前 repo HEAD →
-  首次未知基线。仅第四级才强制全量同步 + migration，状态文件缺失本身不构成 migration 理由；
+- 服务器实现根据"上一真实运行 SHA 到目标 SHA"的完整差异分类；
+  上一真实运行 SHA 解析**禁止**使用 checkout 后的 repo HEAD（否则 diff 为空、漏判 migration/环境变化）。
+  已 Live Mount：状态文件 → `/opt/panji-live/RUNTIME_SHA` → `version.runtime_git_sha`
+  → `PANJI_BOOTSTRAP_PREVIOUS_SHA`（外层自举前完整 SHA）；
+  首次 Live Mount：当前运行 `trading-backend` `/v1/version` → 镜像 tag SHA
+  → `PANJI_BOOTSTRAP_PREVIOUS_SHA` → 仍无法确认则停止并报告 `previous_runtime_sha_unknown`。
+  仅全部失败（非首次未知基线）才强制全量同步 + migration，状态文件缺失本身不构成 migration 理由；
 - 首次 Live Mount 部署由 `docker inspect` 判定（`trading-backend` / `trading-frontend`
   是否挂载 `/opt/panji-live`）。判定为首次时强制全量同步 Python 与前端运行代码以建立挂载，
   但**不会**据此设置 `migration_changed`；

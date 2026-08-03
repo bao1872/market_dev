@@ -168,7 +168,7 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - `runtime_git_sha`（= `/opt/panji-live/RUNTIME_SHA` 文件内容）；
 - `deployment_mode`（`live`）。
 
-> 早期镜像曾返回 `image_git_sha` / `GIT_SHA` 环境变量，属镜像构建时代的残留；Live Mount 模式下运行时来源是 `RUNTIME_SHA` 文件，不再依赖镜像内置 `GIT_SHA`。如运行后端未暴露该端点，以 `RUNTIME_SHA` 文件内容 + 服务器 repo HEAD 作为 SHA 一致性证据（见 §部署版本合同）。
+> 早期镜像曾返回 `image_git_sha` / `GIT_SHA` 环境变量，属镜像构建时代的残留；Live Mount 模式下运行时来源是 `RUNTIME_SHA` 文件，不再依赖镜像内置 `GIT_SHA`。如运行后端未暴露该端点，以 `RUNTIME_SHA` 文件内容 + 服务器 repo HEAD（部署后已 checkout 到目标 SHA）作为部署后 SHA 一致性证据（见 §部署版本合同）。注意：**上一真实运行 SHA 的解析不得依赖 checkout 后的 repo HEAD**，否则会漏判 migration 与环境变化（详见 DS-91）。
 
 验证部署时 `runtime_git_sha` 必须等于目标 **dev SHA**。
 
@@ -263,11 +263,15 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 本地入口在 SSH 调用前必须对 `scripts/deploy/panji-deploy.sh` 执行 `bash -n` 语法预检。
 - **禁止** `scp` 单个业务文件、`docker cp`、容器内改码、`/tmp` 临时脚本改生产等任何绕过正式部署入口的做法（与本文件"禁止 docker cp 和未审计 stdin 脚本"叠加生效）。
 
-### DS-91 变更范围判定必须基于「上一部署 SHA → 目标 SHA」
+### DS-91 变更范围判定必须基于「上一真实运行 SHA → 目标 SHA」
 
-- 变更分类**必须**使用 `git diff --name-only <上一部署 SHA> <目标 SHA>`，
-  上一部署 SHA 来自 `/etc/market-dev/.panji-deploy-state`。
+- 变更分类**必须**使用 `git diff --name-only <上一真实运行 SHA> <目标 SHA>`。
   - **禁止**使用 `HEAD~1`：一次部署可能跨多个 commit，`HEAD~1` 会漏判。
+  - **禁止**在本地入口已将服务器 `checkout` 到目标 SHA 之后，把"当前 repo HEAD"当作上一真实运行 SHA——
+    P0（2026-08-02）：这会导致 `git diff 目标SHA 目标SHA` 为空、漏判 migration 与依赖/Dockerfile 变化。
+    正确来源顺序见 `docs/runbooks/development-deployment.md`：
+    - 已 Live Mount：部署状态文件 → `/opt/panji-live/RUNTIME_SHA` → 当前运行版本 `version.runtime_git_sha` → 外层自举前 `PANJI_BOOTSTRAP_PREVIOUS_SHA`；
+    - 首次 Live Mount：当前运行 `trading-backend` `/v1/version` → 镜像 tag SHA → `PANJI_BOOTSTRAP_PREVIOUS_SHA` → 仍无法确认则**停止部署**并报告 `previous_runtime_sha_unknown`。
   - 无上一部署记录或该 SHA 本地不可解析时，必须按首次部署处理（全量同步 + migration）。
 - 分类结果只用于决定「是否构建运行环境镜像」「是否执行 migration」「重启哪一组服务」，
   且必须满足：backend 运行代码变化时重启**全部** Python 服务（backend + 所有 worker），

@@ -119,7 +119,9 @@ fi
 # --- 首次 Live Mount 部署行为 ---
 echo "== first live mount bootstrap =="
 FIRST_LOG="${TMP_ROOT}/first-live.log"
-if PANJI_MOCK_NO_LIVE_MOUNT=1 run_deploy "${TARGET_SHA}" --dry-run >"${FIRST_LOG}" 2>&1; then
+# 首次 Live Mount 必须传入外层自举前 SHA 作为 fallback（模拟 panji-test-deploy）
+if PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${FIRST_LOG}" 2>&1; then
   ok "first live deploy dry-run succeeds"
 else
   bad "first live deploy dry-run succeeds"
@@ -159,14 +161,54 @@ grep -q 'migration_changed=false' "${TIER2_LOG}" \
   && ok "missing state file alone does NOT force migration" \
   || bad "missing state file alone does NOT force migration"
 
-# 三级：状态文件与 RUNTIME_SHA 都不可解析时回落部署前 repo HEAD
+# 三级（P0 修复）：首次 Live Mount 且状态文件/RUNTIME_SHA 均缺失时，
+# 必须回落到外层自举前传入的完整 SHA（PANJI_BOOTSTRAP_PREVIOUS_SHA），
+# 而非把 checkout 后的 repo HEAD 当作上一 SHA。
 TIER3_LIVE="${TMP_ROOT}/live-tier3"
 TIER3_LOG="${TMP_ROOT}/tier3.log"
 PATH="${MOCK_BIN}:${PATH}" PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${TIER3_LIVE}" \
   PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${TMP_ROOT}/none-state" PANJI_LOCK_FILE="${LOCK_FILE}" \
+  PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
   bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${TIER3_LOG}" 2>&1 || true
-grep -q '来源: repo_head' "${TIER3_LOG}" \
-  && ok "tier3 falls back to pre-deploy repo HEAD" || bad "tier3 falls back to pre-deploy repo HEAD"
+grep -q '来源: bootstrap_previous_sha' "${TIER3_LOG}" \
+  && ok "tier3 (first-live) falls back to bootstrap previous SHA" \
+  || bad "tier3 (first-live) falls back to bootstrap previous SHA"
+
+# 四级（P0 修复）：首次 Live Mount 且当前运行版本与外层 SHA 都无法确认时，
+# 必须停止并报告 previous_runtime_sha_unknown，不得把 TARGET_SHA 当作上一 SHA。
+TIER4_LIVE="${TMP_ROOT}/live-tier4"
+TIER4_LOG="${TMP_ROOT}/tier4.log"
+PATH="${MOCK_BIN}:${PATH}" PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${TIER4_LIVE}" \
+  PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${TMP_ROOT}/none-state" PANJI_LOCK_FILE="${LOCK_FILE}" \
+  bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${TIER4_LOG}" 2>&1 || true
+grep -q 'previous_runtime_sha_unknown' "${TIER4_LOG}" \
+  && ok "first-live with no resolvable runtime SHA refuses to deploy" \
+  || bad "first-live with no resolvable runtime SHA refuses to deploy"
+
+# 五级（P0 修复）：首次 Live Mount 优先读取当前运行 backend 的 /v1/version，
+# 且 7 位短 SHA 必须唯一解析为完整 SHA（优先于外层传入的 fallback）。
+# 通过 curl mock 让 /v1/version 返回 7 位短 SHA。
+CURL_MOCK_BIN="${TMP_ROOT}/curlbin"
+mkdir -p "${CURL_MOCK_BIN}"
+SHORT_SHA="${TARGET_SHA:0:7}"
+cat > "${CURL_MOCK_BIN}/curl" <<EOF
+#!/usr/bin/env bash
+# 仅响应 /v1/version，返回含 7 位短 SHA 的 version JSON
+printf '{"runtime_git_sha":"${SHORT_SHA}","deployment_mode":"live"}'
+EOF
+chmod +x "${CURL_MOCK_BIN}/curl"
+TIER5_LIVE="${TMP_ROOT}/live-tier5"
+TIER5_LOG="${TMP_ROOT}/tier5.log"
+PATH="${CURL_MOCK_BIN}:${MOCK_BIN}:${PATH}" PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${TIER5_LIVE}" \
+  PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${TMP_ROOT}/none-state" PANJI_LOCK_FILE="${LOCK_FILE}" \
+  PANJI_BOOTSTRAP_PREVIOUS_SHA="0000000000000000000000000000000000000000" \
+  bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${TIER5_LOG}" 2>&1 || true
+grep -q '来源: running_version' "${TIER5_LOG}" \
+  && ok "first-live prefers running version over bootstrap fallback" \
+  || bad "first-live prefers running version over bootstrap fallback"
+grep -q "上一真实运行 SHA: ${TARGET_SHA}" "${TIER5_LOG}" \
+  && ok "short SHA from version resolves to unique full SHA" \
+  || bad "short SHA from version resolves to unique full SHA"
 
 # --- RUNTIME_SHA / Mount / 镜像构建计划 ---
 echo "== runtime sha and mount plan =="
