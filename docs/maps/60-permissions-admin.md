@@ -347,3 +347,35 @@ Gate 2 在 Phase 5B-2 capability 模型基础上完成权限代码改造（非"�
 | 权限矩阵单元测试（35 项） | 通过（纯 schema/单元测试，非真实 API 集成） |
 | Ruff / TSC / ESLint | 通过 |
 | 三进程真实页面/API 验证 | 未核验（待补） |
+
+## 13. 权限模型 V2 统一（2026-08-03 已核验代码 + shared_dev_db 目标测试）
+
+### 13.1 唯一真源与调用链
+
+- 功能权限唯一真源 = `user_capabilities`；Subscription 仅商业记录；Plan 仅销售模板；运行时判权不按 plan_code。
+- 统一入口 `resolve_effective_access(db, user)`（`backend/app/services/effective_access_service.py`）：
+  `_get_user_roles` → `select(UserCapability).where(user_id)` → (无行) `infer_capabilities_from_plan`(source=legacy_plan_fallback) → `compute_default_route`。
+- 兼容包装：`access_control_service.get_access_context` 内部调用 resolve，不重复推导。
+- 供 login/register/refresh//me/access/API guards/后台列表/默认路由共用。
+
+### 13.2 认证与路由
+
+- login 与 `/me/access` 响应含 `capabilities`（每项 active/granted_at/expires_at/watchlist_limit/source/reason）。
+- 登录默认路由由 capabilities 计算（前端共享 `computeDefaultRoute`，与后端一致）。
+
+### 13.3 管理后台
+
+- `/v1/admin/users` 与 `/admin/members` 返回权限摘要（capabilities/active_keys/has_any_access/default_route/capability_source/nearest_expires/legacy_fallback/subscription_summary）。
+- 前端会员列表权限摘要列；抽屉默认权限概览（Tab：权限概览/账户信息/授权记录/审计）。
+
+### 13.4 邀请码
+
+- 新邀请码必须显式非空 capabilities（schema 拒绝 null/[]）。
+- 邀请码列表 capabilities 为 null 显示"旧套餐模式"（不可再用于新注册）。
+
+### 13.5 shared_dev_db 目标测试（已通过）
+
+- 模式：`PANJI_SHARED_DEV_DB_TEST=1` + SSH 隧道连共享开发业务数据库 `bz_stock`（不创建临时/测试库）。
+- `test_permission_v2_pg_integration.py` 5 项通过（self_selection 注册写 UserCapability、/me/access、login capabilities+next_route、API guard 200/403、admin 权限摘要）。
+- savepoint rollback，测试后无残留（pg-v2-test 用户/邀请码均 0）。
+- 当前阶段：开发测试阶段；当前代码待远程开发部署；backfill 未执行。
