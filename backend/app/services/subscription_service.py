@@ -35,6 +35,7 @@ Phase 2 Task 2.2：由 membership_service.py 重命名为 subscription_service.p
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -1226,9 +1227,20 @@ async def list_subscribers_with_capabilities(
                 else:
                     member["nearest_capability_expires_at"] = None
                 member["legacy_fallback"] = profile.capability_source == "legacy_plan_fallback"
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # [权限模型 V2] 权限解析异常不得静默吞掉：记录明确日志并在 member 标记解析失败
+            logger.exception(
+                "list_subscribers_with_capabilities resolve_effective_access failed user_id=%s: %s",
+                user_id,
+                exc,
+            )
+            member["permission_resolution_error"] = str(exc)
+            member["diagnostics"] = member.get("diagnostics") or []
+            member["diagnostics"].append("permission_resolution_error")
     return members, total
+
+
+logger = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
