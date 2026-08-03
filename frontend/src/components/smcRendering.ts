@@ -28,7 +28,9 @@ export interface SmcOrderBlock {
   bar_high: number
   bar_low: number
   bias: number  // 1=bullish, -1=bearish
-  internal?: boolean  // true=internal OB, false/undefined=swing OB
+  internal?: boolean  // legacy adapter only; missing is unknown, not swing
+  structureLevel?: 'swing' | 'internal' | null
+  direction?: 'bullish' | 'bearish' | null
   confirmed_index: number
   confirmed_time: string
   mitigated: boolean
@@ -168,15 +170,18 @@ export function selectVisibleSmcOrderBlocks(
   orderBlocks: SmcOrderBlock[],
   ctx: SmcVisibleContext,
 ): SmcOrderBlock[] {
-  // 只选 internal && !mitigated
-  const candidates = orderBlocks.filter(ob => ob.internal === true && !ob.mitigated)
-  // 后端最新 OB 在数组头部 → 取前 5 个
-  const top5 = candidates.slice(0, 5)
+  // Swing 与 Internal OB 都可渲染；仅排除已失效区域。
+  const candidates = orderBlocks.filter(ob => !ob.mitigated)
+  // 两个级别分别限制数量，避免任一级别静默挤掉另一类。
+  const swing = candidates.filter(ob => ob.structureLevel === 'swing' || ob.internal === false).slice(0, 5)
+  const internal = candidates.filter(ob => ob.structureLevel === 'internal' || ob.internal === true).slice(0, 5)
+  const unknown = candidates.filter(ob => ob.structureLevel == null && ob.internal == null).slice(0, 5)
+  const visibleByLevel = [...swing, ...unknown, ...internal]
   // 与 viewport 无交集时跳过：
   //   - anchor 重基准后 < displayCount（在窗口左侧或窗口内）→ 可见
   //   - anchor >= displayCount（在窗口右侧）→ 不可见
   //   - clipped_left（anchor 为负）→ 仍可见（mapSmcIndexToDisplay clamp 到 0）
-  return top5.filter(ob => {
+  return visibleByLevel.filter(ob => {
     // [CP-V3-C] 优先用 anchor_time 匹配（viewport 250→90 切换时索引 rebasing 可能错位）
     const anchorIdx = mapSmcIndexToDisplay(ob.anchor_index, ctx, ob.anchor_time)
     return anchorIdx != null

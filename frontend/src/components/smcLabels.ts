@@ -24,48 +24,98 @@
 
 /** SMC 事件类型（与后端 DTO type 字段对齐，不改底层 key） */
 export type SmcEventType = 'BOS' | 'CHoCH'
-
-/** SMC bias 值（1=bullish, -1=bearish，与后端 DTO bias 字段对齐） */
 export type SmcBias = 1 | -1
-
-/** SMC 等高/等低类型（与后端 DTO type 字段对齐） */
 export type SmcEqType = 'EQH' | 'EQL'
+export type SmcStructureLevel = 'swing' | 'internal'
+export type SmcDirection = 'up' | 'down'
 
-/**
- * BOS/CHoCH 事件中文标签（按 bias 区分多空）。
- *
- * @param type 事件类型 'BOS' | 'CHoCH'
- * @param bias 1=bullish, -1=bearish；其他值（如 0）回退到 bullish 标签
- * @returns 中文标签字符串
- */
-export function getSmcEventLabel(type: SmcEventType, bias: number | null | undefined): string {
-  const isBull = bias === 1
-  if (type === 'BOS') {
-    return isBull ? '突破前高' : '跌破前低'
-  }
-  if (type === 'CHoCH') {
-    return isBull ? '转强拐点' : '转弱拐点'
-  }
-  return type
+export interface SmcSemantic {
+  label: string
+  direction: SmcDirection | null
+  structureLevel: SmcStructureLevel | null
+  arrow: '↑' | '↓' | ''
+  inconsistent: boolean
+  diagnostic: string | null
 }
 
-/**
- * EQH/EQL 中文标签。
- *
- * @param type 'EQH' | 'EQL'
- * @returns "双顶压力" | "双底支撑"
- */
+export function directionFromSmcBias(bias: number | null | undefined): SmcDirection | null {
+  return bias === 1 ? 'up' : bias === -1 ? 'down' : null
+}
+
+function resolveDirection(direction: SmcDirection | null | undefined, bias: number | null | undefined) {
+  const biasDirection = directionFromSmcBias(bias)
+  const normalized = direction === 'up' || direction === 'down' ? direction : biasDirection
+  const inconsistent = normalized != null && biasDirection != null && normalized !== biasDirection
+  return {
+    direction: normalized,
+    inconsistent,
+    diagnostic: inconsistent ? `direction=${normalized} 与 bias=${bias} 不一致` : null,
+  }
+}
+
+const EVENT_ACTION: Record<SmcEventType, Record<SmcDirection, string>> = {
+  BOS: { up: '突破前高', down: '跌破前低' },
+  CHoCH: { up: '转强拐点', down: '转弱拐点' },
+}
+const LEVEL_LABEL: Record<SmcStructureLevel, string> = { swing: '主要', internal: '短线' }
+
+/** BOS/CHoCH 八组合统一格式化；未知值不猜测为多头或空头。 */
+export function formatSmcEvent(input: {
+  type: SmcEventType | string | null | undefined
+  structureLevel: SmcStructureLevel | null | undefined
+  direction?: SmcDirection | null
+  bias?: number | null
+}): SmcSemantic {
+  const resolved = resolveDirection(input.direction, input.bias)
+  const eventType: SmcEventType | null = input.type === 'BOS' || input.type === 'CHoCH'
+    ? input.type
+    : null
+  const level = input.structureLevel === 'swing' || input.structureLevel === 'internal'
+    ? input.structureLevel
+    : null
+  if (eventType == null || level == null || resolved.direction == null) {
+    return { ...resolved, structureLevel: level, label: '未知结构', arrow: '' }
+  }
+  return {
+    ...resolved,
+    structureLevel: level,
+    label: `${LEVEL_LABEL[level]}${EVENT_ACTION[eventType][resolved.direction]}`,
+    arrow: resolved.direction === 'up' ? '↑' : '↓',
+  }
+}
+
+/** Order Block 四组合统一格式化；未知值不猜测为多头或空头。 */
+export function formatSmcOrderBlock(input: {
+  structureLevel: SmcStructureLevel | null | undefined
+  direction?: SmcDirection | null
+  bias?: number | null
+}): SmcSemantic {
+  const resolved = resolveDirection(input.direction, input.bias)
+  const level = input.structureLevel === 'swing' || input.structureLevel === 'internal'
+    ? input.structureLevel
+    : null
+  if (level == null || resolved.direction == null) {
+    return { ...resolved, structureLevel: level, label: '未知结构', arrow: '' }
+  }
+  return {
+    ...resolved,
+    structureLevel: level,
+    label: `${LEVEL_LABEL[level]}${resolved.direction === 'up' ? '多头承接区' : '空头压制区'}`,
+    arrow: resolved.direction === 'up' ? '↑' : '↓',
+  }
+}
+
+export function getSmcEventLabel(type: SmcEventType, bias: number | null | undefined, structureLevel: SmcStructureLevel = 'swing'): string {
+  const semantic = formatSmcEvent({ type, bias, structureLevel })
+  return semantic.label
+}
+
+/** EQH/EQL 没有结构级别，不虚构主要/短线语义。 */
 export function getSmcEqLabel(type: SmcEqType): string {
   return type === 'EQH' ? '双顶压力' : '双底支撑'
 }
 
-/**
- * Order Block 中文标签（按 bias 区分多空）。
- *
- * @param bias 1=bullish, -1=bearish；其他值回退到 bullish 标签
- * @returns "多头承接区" | "空头压制区"
- */
-export function getSmcObLabel(bias: number | null | undefined): string {
-  const isBull = bias === 1
-  return isBull ? '多头承接区' : '空头压制区'
+export function getSmcObLabel(bias: number | null | undefined, structureLevel: SmcStructureLevel = 'swing'): string {
+  const semantic = formatSmcOrderBlock({ bias, structureLevel })
+  return semantic.label
 }

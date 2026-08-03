@@ -1933,7 +1933,7 @@ function renderIndicatorSmc(
     const drawObLabel = isMobileCapture && height > 40 && (x2 - x1) > 80
       && (!hasFocus || obIsFocus)
     if (drawObLabel) {
-      const obLabel = getSmcObLabel(ob.bias)
+      const obLabel = getSmcObLabel(ob.bias, ob.internal === true ? 'internal' : 'swing')
       const obLabelY = yTop + height / 2
       labelAnchors.push({
         kind: 'ob',
@@ -2004,7 +2004,7 @@ function renderIndicatorSmc(
     // [Task 2] focus 模式下：非 focus 事件不绘制标签（避免历史结构干扰本次触发事件）
     if (!hasFocus || evIsFocus) {
       const midX = (x1 + x2) / 2
-      const label = getSmcEventLabel(ev.type, ev.bias)
+      const label = getSmcEventLabel(ev.type, ev.bias, ev.internal === true ? 'internal' : 'swing')
       const fontSize = isInternal ? scale.fonts.smcInternalLabel : scale.fonts.smcSwingLabel
       const labelOffset = Math.round(parseFloat(fontSize) * 0.3)
       labelAnchors.push({

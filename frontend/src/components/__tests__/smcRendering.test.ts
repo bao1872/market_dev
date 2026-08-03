@@ -601,18 +601,18 @@ test('[CP-V3-C] collectVisibleSmcPriceCandidates: OB anchor_time 命中 → bar_
 
 // ===== 2. selectVisibleSmcOrderBlocks =====
 
-test('selectVisibleSmcOrderBlocks: 只选 internal===true && mitigated===false', () => {
+test('selectVisibleSmcOrderBlocks: Swing / Internal 均渲染，仅过滤已失效 OB', () => {
   const ctx = { displayCount: 30 }
   const obs = [
-    makeOb({ anchor_index: 1, internal: true, mitigated: false }),   // ✓ 选中
-    makeOb({ anchor_index: 2, internal: false, mitigated: false }),  // ✗ 非 internal
-    makeOb({ anchor_index: 3, internal: true, mitigated: true }),    // ✗ 已 mitigated
-    makeOb({ anchor_index: 4, internal: true, mitigated: false }),   // ✓ 选中
-    makeOb({ anchor_index: 5, internal: undefined, mitigated: false }), // ✗ internal 未声明
+    makeOb({ anchor_index: 1, internal: true, mitigated: false }),
+    makeOb({ anchor_index: 2, internal: false, mitigated: false }),
+    makeOb({ anchor_index: 3, internal: true, mitigated: true }),
+    makeOb({ anchor_index: 4, internal: true, mitigated: false }),
+    makeOb({ anchor_index: 5, internal: undefined, mitigated: false }),
   ]
   const result = selectVisibleSmcOrderBlocks(obs, ctx)
-  assert.equal(result.length, 2)
-  assert.deepEqual(result.map(o => o.anchor_index), [1, 4])
+  assert.equal(result.length, 4)
+  assert.deepEqual(result.map(o => o.anchor_index), [2, 5, 1, 4])
 })
 
 test('selectVisibleSmcOrderBlocks: 后端最新 OB 在数组头部 → slice(0, 5)', () => {
@@ -682,19 +682,19 @@ test('collectVisibleSmcPriceCandidates: 收集 event.level (anchor 或 confirmed
   assert.ok(!result.includes(110.0), 'event 2 level 不应包含（窗口外）')
 })
 
-test('collectVisibleSmcPriceCandidates: 收集 OB bar_high/bar_low (仅选中的 5 个 internal+unmitigated)', () => {
+test('collectVisibleSmcPriceCandidates: 收集 Swing/Internal 未失效 OB 的 bar_high/bar_low', () => {
   const ctx = { displayCount: 30 }
   const order_blocks: SmcOrderBlock[] = [
     makeOb({ anchor_index: 5, bar_high: 11.5, bar_low: 9.5, internal: true, mitigated: false }), // ✓
     makeOb({ anchor_index: 10, bar_high: 22.0, bar_low: 18.0, internal: true, mitigated: false }), // ✓
     makeOb({ anchor_index: 15, bar_high: 99.0, bar_low: 88.0, internal: true, mitigated: true }),  // ✗ mitigated
-    makeOb({ anchor_index: 20, bar_high: 55.0, bar_low: 45.0, internal: false, mitigated: false }), // ✗ 非 internal
+    makeOb({ anchor_index: 20, bar_high: 55.0, bar_low: 45.0, internal: false, mitigated: false }), // ✓ Swing
   ]
   const result = collectVisibleSmcPriceCandidates({ order_blocks }, ctx)
   assert.ok(result.includes(11.5) && result.includes(9.5), 'OB1 bar_high/bar_low')
   assert.ok(result.includes(22.0) && result.includes(18.0), 'OB2 bar_high/bar_low')
   assert.ok(!result.includes(99.0) && !result.includes(88.0), 'mitigated OB 不应包含')
-  assert.ok(!result.includes(55.0) && !result.includes(45.0), 'swing OB 不应包含')
+  assert.ok(result.includes(55.0) && result.includes(45.0), 'Swing OB 应包含')
 })
 
 test('collectVisibleSmcPriceCandidates: 收集 EQH/EQL level (anchor 或 second_pivot 在窗口内)', () => {
