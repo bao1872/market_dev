@@ -217,6 +217,51 @@ def check(root: Path) -> list[str]:
                 if change_id not in known_ids:
                     errors.append(f"dangling Change reference: {path.relative_to(root)}:{line_no} {change_id}")
 
+    # [权限模型 V2] 独立/临时测试数据库路线永久禁止（只扫描活跃文件，允许在禁止清单/历史说明中）
+    # 活跃文件：AGENTS / rules / docs(prd|maps|runbooks) / conftest / ci.yml / scripts
+    _FORBIDDEN_TEST_DB_TOKENS = {
+        "PANJI_CI_DB_TEST": "独立 CI 临时数据库开关",
+        "TEST_DATABASE_URL": "独立测试数据库 URL",
+        "bz_stock_test": "独立测试数据库名",
+        "postgres-integration-tests": "CI 独立 PG 集成 job",
+        "CI 临时 Postgres": "CI 临时 Postgres 唯一例外",
+        "一次性临时 Postgres": "一次性临时 Postgres 路线",
+    }
+    active_doc_paths = [
+        agents,
+        *sorted(rules_dir.glob("*.md")),
+        root / "docs/prd",
+        root / "docs/maps",
+        root / "docs/runbooks",
+        root / "backend/tests/conftest.py",
+        root / ".github/workflows/ci.yml",
+    ]
+    for base in active_doc_paths:
+        if base.is_dir():
+            files = sorted(base.rglob("*.md"))
+        elif base.is_file():
+            files = [base]
+        else:
+            continue
+        for path in files:
+            rel = path.relative_to(root)
+            # 跳过历史 CHANGE（docs/changes）与禁止清单（rules/90）
+            if "changes" in rel.parts or rel.name == "90-deprecated-forbidden.md":
+                continue
+            text = read(path)
+            # ci.yml：额外检测独立 postgres 测试 service 块（image: postgres:16）
+            if rel.name == "ci.yml" and re.search(
+                r"(?m)^\s*services:\s*\n\s*postgres:\s*\n\s*image:\s*postgres:16", text
+            ):
+                errors.append(
+                    f"forbidden standalone test-db (CI 独立 postgres:16 测试 service): {rel}"
+                )
+            for token, reason in _FORBIDDEN_TEST_DB_TOKENS.items():
+                if token in text:
+                    errors.append(
+                        f"forbidden standalone test-db ({reason}): {rel} contains {token}"
+                    )
+
     return errors
 
 

@@ -61,6 +61,9 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
         ("runtime_sha_rename", "breaks single-file bind mount inode"),
         ("migration_failure_recreate", "must not recreate containers"),
         ("global_prune", "global system prune"),
+        ("ci_db_test_flag", "forbidden standalone test-db"),
+        ("test_db_url", "forbidden standalone test-db"),
+        ("postgres_service", "forbidden standalone test-db"),
     ],
 )
 def test_governance_regressions_are_rejected(
@@ -139,6 +142,21 @@ def test_governance_regressions_are_rejected(
         source = next((governance_repo / "docs/changes/2026").glob("CHANGE-*.md"))
         duplicate = source.with_name(source.stem + "-duplicate.md")
         shutil.copy2(source, duplicate)
+    elif mutation == "ci_db_test_flag":
+        # 回潮：rules/40 重新出现独立 CI 临时数据库开关
+        path = governance_repo / "rules/40-testing-quality.md"
+        path.write_text(read_text(path) + "\nPANJI_CI_DB_TEST=1 识别 CI 环境\n", encoding="utf-8")
+    elif mutation == "test_db_url":
+        # 回潮：rules/40 重新出现独立测试库 URL 变量
+        path = governance_repo / "rules/40-testing-quality.md"
+        path.write_text(read_text(path) + "\nTEST_DATABASE_URL=postgresql://.../bz_stock_test\n", encoding="utf-8")
+    elif mutation == "postgres_service":
+        # 回潮：ci.yml 重新出现 postgres:16 service
+        path = governance_repo / ".github/workflows/ci.yml"
+        path.write_text(
+            read_text(path) + "\nservices:\n  postgres:\n    image: postgres:16\n",
+            encoding="utf-8",
+        )
 
     assert any(expected in error for error in check(governance_repo))
 
