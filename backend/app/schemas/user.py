@@ -146,6 +146,7 @@ class LoginResponse(BaseModel):
     expires_at: datetime | None = Field(default=None, description="订阅过期时间")
     features: list[str] = Field(default_factory=list, description="功能特性列表")
     limits: dict = Field(default_factory=dict, description="额度限制 dict")
+    capabilities: dict = Field(default_factory=dict, description="三类独立权限状态（PA-01）")
     next_route: str = Field(..., description="前端下一步路由")
 
 

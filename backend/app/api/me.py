@@ -63,6 +63,7 @@ async def get_my_access(
         "expires_at": ctx.expires_at.isoformat() if ctx.expires_at else None,
         "features": ctx.features,
         "limits": ctx.limits,
+        "capabilities": ctx.capabilities,
     }
 
 

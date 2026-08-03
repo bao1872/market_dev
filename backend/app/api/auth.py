@@ -65,6 +65,12 @@ from app.services.access_control_service import (
     get_access_context,
     require_authenticated,
 )
+from app.services.effective_access_service import (
+    CapabilityState,
+)
+from app.services.effective_access_service import (
+    _compute_default_route as _compute_default_route_v2,
+)
 from app.services.subscription_service import (
     _ensure_aware,
     get_renewal_count,
@@ -183,13 +189,16 @@ async def login(
         # [Auth] - 描述: 调用 get_access_context 计算 AccessProfile（只读，不写 DB）
         ctx = await get_access_context(db, user)
 
-        # [Auth] - 描述: 计算 next_route 路由（admin→/admin/overview；active→/overview；expired→/subscription-expired）
-        if ctx.is_admin:
-            next_route = "/admin/overview"
-        elif ctx.subscription_active:
-            next_route = "/overview"
-        else:
-            next_route = "/subscription-expired"
+        # [Auth] - 描述: 默认路由依据 capabilities 计算（权限模型 V2），
+        # 不再由 subscription_active 决定功能入口。
+        # admin → /admin/overview；无 active capability → /forbidden；
+        # 仅 research_replay → /review；self_selection/market_data 任一 → /market 族。
+        cap_states = {
+            key: CapabilityState(key=key, active=bool(info.get("active")), expires_at=info.get("expires_at"),
+                                 watchlist_limit=info.get("watchlist_limit"), source="user_capabilities")
+            for key, info in ctx.capabilities.items()
+        }
+        next_route = _compute_default_route_v2(ctx.is_admin, cap_states)
 
         # 生成 token
         user_id_str = str(user.id)
@@ -210,6 +219,7 @@ async def login(
             expires_at=ctx.expires_at,
             features=ctx.features,
             limits=ctx.limits,
+            capabilities=ctx.capabilities,
             next_route=next_route,
         )
     except HTTPException:
@@ -513,6 +523,7 @@ async def get_my_access(
         expires_at=ctx.expires_at,
         features=ctx.features,
         limits=ctx.limits,
+        capabilities=ctx.capabilities,
     )
 
 
