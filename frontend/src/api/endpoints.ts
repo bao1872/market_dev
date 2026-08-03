@@ -76,6 +76,7 @@ export interface LoginResponse {
   expires_at: string | null
   features: string[]
   limits: Record<string, number>
+  capabilities: Record<string, CapabilityInfo>
   next_route: string
 }
 

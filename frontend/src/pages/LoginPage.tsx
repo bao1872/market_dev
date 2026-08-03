@@ -84,8 +84,9 @@ export default function LoginPage() {
         expires_at: data.expires_at,
         features: data.features,
         limits: data.limits,
-        // [Phase 5B-2 PRD60] login 响应不含 capabilities，默认空对象，由 revalidateAccess 填充
-        capabilities: {},
+        // [权限模型V2] login 响应现含 capabilities（后端 /auth/login 返回），
+        // 登录即拿到完整权限，避免 capabilities 空导致路由守卫误判 /forbidden。
+        capabilities: (data.capabilities ?? {}) as Record<string, import('../api/endpoints').CapabilityInfo>,
       }
       // 异步补全 user.id/email/name（不阻塞跳转，路由守卫不依赖这些字段）
       getMe()
