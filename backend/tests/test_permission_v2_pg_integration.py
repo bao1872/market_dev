@@ -296,15 +296,14 @@ async def test_active_permission_true_extends(db_session: AsyncSession) -> None:
             UserCapability.user_id == user.id, UserCapability.capability == "market_data"
         )
     )
-    await grant_capability_to_user(
+    # 立即保存 before 值（同一 session identity map 会复用同一 ORM 对象，
+    # grant 会就地修改 expires_at，因此必须保存快照值而非对象引用）
+    before_expires = before.expires_at
+    mutation = await grant_capability_to_user(
         db_session, user.id, "market_data", months=1, watchlist_limit=None, actor_user_id=admin.id
     )
-    after = await db_session.scalar(
-        select(UserCapability).where(
-            UserCapability.user_id == user.id, UserCapability.capability == "market_data"
-        )
-    )
-    assert after.expires_at > before.expires_at
+    assert mutation.mutation_type == "extend"
+    assert mutation.after["expires_at"] > before_expires
 
 
 @pytest.mark.asyncio
@@ -481,18 +480,26 @@ async def test_admin_access_profile_real_api(
 
 @pytest.mark.asyncio
 async def test_audit_contains_mutation_reason_actor_request_id(
-    db_session: AsyncSession,
+    db_session: AsyncSession, client: AsyncClient,
 ) -> None:
-    """审计记录包含 mutation_type/reason/actor/request_id。"""
+    """审计记录包含 mutation_type/reason/actor/request_id（经 grant API 写入）。"""
     user = await _explicit_user(
         db_session, [{"capability": "market_data", "months": 1}], "audit"
     )
     admin = await _admin_user(db_session)
-
-    await grant_capability_to_user(
-        db_session, user.id, "market_data", months=1, watchlist_limit=None,
-        actor_user_id=admin.id, reason="pg-audit",
+    token = create_access_token(str(admin.id))
+    # 审计由 grant API 端点写（服务层 grant_capability_to_user 不写审计）
+    resp = await client.post(
+        f"/v1/admin/users/{user.id}/capabilities",
+        headers={"Authorization": f"Bearer {token}", "x-request-id": "req-pg-audit-001"},
+        json={
+            "capability": "market_data",
+            "months": 1,
+            "watchlist_limit": None,
+            "reason": "pg-audit",
+        },
     )
+    assert resp.status_code == 200
     log = await db_session.scalar(
         select(AccessAuditLog)
         .where(
@@ -502,6 +509,10 @@ async def test_audit_contains_mutation_reason_actor_request_id(
         .order_by(AccessAuditLog.created_at.desc())
     )
     assert log is not None
+    assert (log.after_data or {}).get("mutation_type") in (
+        "grant", "extend", "extend_and_quota_change", "regrant",
+    )
+    assert (log.after_data or {}).get("reason") == "pg-audit"
     assert "mutation_type" in (log.after_data or {})
     assert log.after_data.get("reason") == "pg-audit"
 
@@ -553,6 +564,7 @@ async def test_access_profile_resolution_failure_stable_error(
     )
     assert resp.status_code == 500
     body = resp.json()
-    assert body.get("code") == "permission_resolution_failed"
+    # API 稳定错误结构：detail 内携带 code（非顶层）
+    assert body["detail"]["code"] == "permission_resolution_failed"
     # 不泄露内部异常文本/SQL/堆栈
     assert "secret internal detail 98765" not in resp.text

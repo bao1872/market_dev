@@ -39,6 +39,33 @@ _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
 
 
+def _json_safe(value: Any) -> Any:
+    """递归把 dict 快照转成 PostgreSQL JSONB 可序列化类型。
+
+    - datetime → isoformat 字符串
+    - UUID → 字符串
+    - dict/list → 递归转换
+    - 其他非基本类型 → str（兜底，避免 JSONB 写入失败）
+
+    Args:
+        value: before/after 审计快照（可含 datetime/UUID 等非 JSON 类型）
+
+    Returns:
+        JSON 安全的等价结构
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 async def write_audit_log(
     db: AsyncSession,
     actor_user_id: UUID,
@@ -76,8 +103,10 @@ async def write_audit_log(
         action=action,
         target_type=target_type,
         target_id=target_id,
-        before_data=before_data,
-        after_data=after_data,
+        # [修复] JSONB 列要求 JSON 可序列化：before/after 可能含 datetime/UUID
+        #（如 capability expires_at/granted_by），写库前统一转为可 JSON 序列化类型。
+        before_data=_json_safe(before_data),
+        after_data=_json_safe(after_data),
         request_id=request_id,
         ip_hash=ip_hash,
     )
