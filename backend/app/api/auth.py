@@ -185,9 +185,9 @@ async def login(
 
         # [Auth] - 描述: 默认路由直接使用 resolve_effective_access 的 profile.default_route，
         # 不再把 ctx.capabilities 重新转换为第二套 CapabilityState。
-        # [权限模型 V2] get_access_context 已一次性构建完整上下文（含 default_route），
-        # 登录只序列化 ctx，不再重复调用 resolve_effective_access。
-        next_route = ctx.default_route or "/forbidden"
+        # [权限模型 V2] get_access_context 已一次性构建完整上下文（含必填 default_route），
+        # 登录只序列化 ctx，不再重复调用 resolve_effective_access，也不用 or 兜底。
+        next_route = ctx.default_route
 
         # 生成 token
         user_id_str = str(user.id)

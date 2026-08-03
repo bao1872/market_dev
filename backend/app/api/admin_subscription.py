@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -1201,6 +1203,129 @@ async def get_user(
     )
 
 
+@router.get("/users/{user_id}/access-profile")
+async def get_user_access_profile(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> dict:
+    """[权限模型 V2] 返回用户完整 access-profile（account / effective_access / subscription_summary / explicit_capability_records）。
+
+    稳定错误：用户不存在 404；权限解析失败 500 + permission_resolution_failed（不暴露内部异常）。
+    """
+    from app.services.effective_access_service import (
+        _ensure_aware,
+        capabilities_to_serializable,
+        resolve_effective_access,
+    )
+
+    user = await _fetch_user_or_404(db, user_id)
+    roles = await _get_user_role_names(db, user.id)
+
+    # effective_access
+    user._roles = roles  # type: ignore[attr-defined]
+    try:
+        profile = await resolve_effective_access(db, user)
+    except Exception:  # noqa: BLE001
+        logger.exception("get_user_access_profile resolve failed user_id=%s", user.id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "permission_resolution_failed"},
+        ) from None
+    capabilities = capabilities_to_serializable(profile.capabilities)
+    active_expiries = [
+        _ensure_aware(cap.expires_at)
+        for cap in profile.capabilities.values()
+        if cap.active and cap.expires_at is not None
+    ]
+    nearest_expires = (
+        min(e for e in active_expiries if e is not None).isoformat() if active_expiries else None
+    )
+
+    # subscription_summary（商业展示，不参与判权）
+    from app.models.subscription import Subscription
+
+    sub = (
+        await db.execute(select(Subscription).where(Subscription.user_id == user.id))
+    ).scalars().first()
+    subscription_summary: dict[str, Any] = {
+        "status": "none",
+        "plan_code": None,
+        "plan_display_name": None,
+        "starts_at": None,
+        "expires_at": None,
+        "source": None,
+        "entitlement_snapshot": None,
+    }
+    if sub is not None:
+        plan_display = None
+        if sub.plan_code:
+            from app.services.plan_service import get_plan
+
+            plan = await get_plan(db, sub.plan_code)
+            plan_display = plan.display_name if plan else None
+        subscription_summary = {
+            "status": sub.status,
+            "plan_code": sub.plan_code,
+            "plan_display_name": plan_display,
+            "starts_at": _ensure_aware(sub.starts_at).isoformat() if sub.starts_at else None,
+            "expires_at": _ensure_aware(sub.expires_at).isoformat() if sub.expires_at else None,
+            "source": getattr(sub, "source", None),
+            "entitlement_snapshot": getattr(sub, "entitlement_snapshot", None),
+        }
+
+    # explicit_capability_records（规范化 state：active/expired/revoked）
+    from app.models.user_capability import UserCapability
+
+    cap_rows = (
+        await db.execute(select(UserCapability).where(UserCapability.user_id == user.id))
+    ).scalars().all()
+    now = datetime.now(UTC)
+    explicit_records = []
+    for r in cap_rows:
+        exp = _ensure_aware(r.expires_at)
+        if r.source == "admin_revoke":
+            state = "revoked"
+        elif exp is not None and exp > now:
+            state = "active"
+        else:
+            state = "expired"
+        explicit_records.append(
+            {
+                "capability": r.capability,
+                "state": state,
+                "granted_at": _ensure_aware(r.granted_at).isoformat() if r.granted_at else None,
+                "expires_at": exp.isoformat() if exp else None,
+                "watchlist_limit": r.watchlist_limit,
+                "source": r.source,
+                "granted_by": str(r.granted_by) if r.granted_by else None,
+            }
+        )
+
+    return {
+        "account": {
+            "id": str(user.id),
+            "email": user.email,
+            "account_status": user.status,
+            "roles": roles,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "last_login_at": getattr(user, "last_login_at", None),
+        },
+        "effective_access": {
+            "capabilities": capabilities,
+            "active_capability_keys": profile.active_capability_keys,
+            "has_any_access": profile.has_any_access,
+            "default_route": profile.default_route,
+            "capability_source": profile.capability_source,
+            "nearest_capability_expires_at": nearest_expires,
+            "legacy_fallback": profile.capability_source == "legacy_plan_fallback",
+            "diagnostics": profile.diagnostics,
+        },
+        "subscription_summary": subscription_summary,
+        "explicit_capability_records": explicit_records,
+    }
+
+
 # ============================================================
 # /admin/users/{user_id}/subscriptions 订阅管理端点（V1.6.4）
 # ============================================================
@@ -1411,6 +1536,9 @@ async def get_audit_logs(
         limit=limit,
         offset=offset,
     )
+
+
+logger = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":

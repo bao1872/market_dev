@@ -102,7 +102,7 @@ class AccessContext(BaseModel):
     # 旧用户（无 user_capabilities 行）: fallback 到 plan_code 推断
     capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # [权限模型 V2] 统一权限画像字段（由 get_access_context 一次性从 resolve 构建）
-    default_route: str | None = Field(default=None, description="依据权限计算的默认入口")
+    default_route: str = Field(..., description="依据权限计算的默认入口（必填：admin→/admin/overview；无权限→/forbidden）")
     active_capability_keys: list[str] = Field(default_factory=list, description="active 的 capability key 列表")
     capability_source: str = Field(default="none", description="权限来源 admin/user_capabilities/legacy_plan_fallback")
     diagnostics: list[str] = Field(default_factory=list, description="诊断（legacy fallback 标记等）")

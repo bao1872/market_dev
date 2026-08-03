@@ -1095,6 +1095,11 @@ async def grant_capability_to_user(
     now_utc = datetime.now(UTC)
     new_expires_at = now_utc + timedelta(days=30 * months)
 
+    # [权限模型 V2] 授予前先确保显式模式（把 legacy 推导权限物化，避免其他权限消失）
+    from app.services.effective_access_service import ensure_explicit_capability_mode
+
+    await ensure_explicit_capability_mode(db, user_id, actor_user_id=granted_by)
+
     # 查询是否已有该 capability
     existing = await db.execute(
         select(UserCapability).where(
@@ -1105,12 +1110,23 @@ async def grant_capability_to_user(
     existing_row = existing.scalar_one_or_none()
 
     if existing_row:
-        # 已有：取较晚的 expires_at（不降权），更新 watchlist_limit
-        existing_row.expires_at = max(existing_row.expires_at, new_expires_at)
-        if watchlist_limit is not None:
-            existing_row.watchlist_limit = watchlist_limit
-        existing_row.granted_by = granted_by
-        existing_row.source = "admin_grant"
+        if existing_row.source == "admin_revoke":
+            # [权限模型 V2] revoked 行重新授权：从当前时间重新计算，恢复 active
+            existing_row.expires_at = new_expires_at
+            existing_row.source = "admin_grant"
+            existing_row.granted_at = now_utc
+            existing_row.granted_by = granted_by
+            if watchlist_limit is not None:
+                existing_row.watchlist_limit = watchlist_limit
+        else:
+            # 普通 active/expired 行：不降权顺延，但保护 None expires_at
+            cur_expires = _ensure_aware(existing_row.expires_at)
+            base = cur_expires if (cur_expires and cur_expires > now_utc) else now_utc
+            existing_row.expires_at = base + timedelta(days=30 * months)
+            existing_row.source = "admin_grant"
+            existing_row.granted_by = granted_by
+            if watchlist_limit is not None:
+                existing_row.watchlist_limit = watchlist_limit
         await db.flush()
         row = existing_row
     else:
@@ -1140,30 +1156,42 @@ async def revoke_capability_from_user(
     db: AsyncSession,
     user_id: uuid.UUID,
     capability: str,
+    revoked_by: uuid.UUID | None = None,
+    reason: str | None = None,
 ) -> bool:
     """管理员撤销用户 capability（PRD60 PA-20 + 权限模型 V2）。
 
-    行为：[权限模型 V2] 撤销后**保留显式 revoked 记录**，不硬删除——
-    否则用户可能因无显式记录而重新触发 legacy plan fallback（权限意外恢复）。
-    撤销记录把 expires_at 置为过去 + source=admin_revoke，active=false；
-    resolve_effective_access 因用户存在显式记录而不进入 legacy fallback。
+    行为：[权限模型 V2]
+    1. 先调用 ensure_explicit_capability_mode（legacy → explicit 安全转换），
+       避免用户因无显式记录而遗留 plan fallback 权限。
+    2. 查询目标 Capability 显式行。
+    3. 目标行存在：expires_at 置过去 + source=admin_revoke + watchlist_limit=None + revoked_by。
+    4. 转换后目标仍不存在（legacy 未推导该权限）：创建撤销 tombstone（不能简单返回 False）。
+    5. 重复撤销幂等：不重复创建，返回当前 revoked 状态。
 
     Args:
         db: 异步数据库会话
         user_id: 目标用户 ID
         capability: 权限类型 self_selection/market_data/research_replay
+        revoked_by: 操作管理员 user_id
+        reason: 撤销原因（审计用）
 
     Returns:
-        True 如果更新了显式记录（含 revoked 标记）；False 如果原本就没有该 capability 行
+        True 表示该 capability 当前处于 revoked 状态（更新或创建 tombstone）
 
     Raises:
         ValueError: capability 非法
     """
     from app.models.user_capability import ALL_CAPABILITIES, UserCapability
+    from app.services.effective_access_service import ensure_explicit_capability_mode
 
     if capability not in ALL_CAPABILITIES:
         raise ValueError(f"无效 capability: {capability}，允许: {ALL_CAPABILITIES}")
 
+    # 1. 先确保显式模式（把 legacy 推导权限物化为显式记录）
+    await ensure_explicit_capability_mode(db, user_id, actor_user_id=revoked_by)
+
+    # 2. 查询目标显式行
     existing = await db.execute(
         select(UserCapability).where(
             UserCapability.user_id == user_id,
@@ -1171,14 +1199,31 @@ async def revoke_capability_from_user(
         )
     )
     existing_row = existing.scalar_one_or_none()
-    if existing_row is None:
-        return False
 
-    # [权限模型 V2] 不硬删除：保留 revoked 记录，active=false，防止 legacy fallback 恢复
+    # 3/4. 存在则更新为 revoked；不存在则创建撤销 tombstone
     past = datetime.now(UTC) - timedelta(days=1)
+    if existing_row is None:
+        tombstone = UserCapability(
+            user_id=user_id,
+            capability=capability,
+            watchlist_limit=None,
+            granted_at=datetime.now(UTC),
+            expires_at=past,
+            source="admin_revoke",
+            granted_by=revoked_by,
+        )
+        db.add(tombstone)
+        await db.flush()
+        return True
+
+    # 5. 幂等：已是 admin_revoke 撤销状态则返回 True（不重复）
+    if existing_row.source == "admin_revoke":
+        return True
+
     existing_row.expires_at = past
     existing_row.source = "admin_revoke"
     existing_row.watchlist_limit = None
+    existing_row.granted_by = revoked_by
     await db.flush()
     return True
 

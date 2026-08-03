@@ -296,3 +296,83 @@ def capabilities_to_serializable(
         }
         for key, state in capabilities.items()
     }
+
+
+async def ensure_explicit_capability_mode(
+    db: AsyncSession,
+    user_id: Any,
+    actor_user_id: Any | None = None,
+) -> list[dict]:
+    """[权限模型 V2] 确保用户进入显式 capability 模式（legacy → explicit 安全转换）。
+
+    合同：
+    1. 查询用户全部显式 UserCapability 记录，已存在任意显式记录 → 不重复物化，直接返回。
+    2. 不存在显式记录：查询当前 Subscription 与 Plan，按 legacy 规则计算全部推导 Capability，
+       一次性写为显式记录（source=legacy_materialized），保留每项当前 expires_at，
+       self_selection 保留 watchlist_limit，granted_by=当前管理员，granted_at=当前时间。
+    3. 当前 legacy 权限为空：不创建无意义 active 记录，返回空。
+
+    任何管理员首次 grant/extend/quota change/revoke 前必须先调用本服务。
+    这样避免：旧 research_50 用户只修改 self_selection → market_data/research_replay 消失。
+    """
+    from app.models.subscription import Subscription
+    from app.models.user_capability import UserCapability
+    from app.services.plan_service import get_plan
+
+    now = _utcnow()
+
+    # 1. 已存在任意显式记录 → 不重复物化
+    stmt = select(UserCapability).where(UserCapability.user_id == user_id)
+    existing = (await db.execute(stmt)).scalars().all()
+    if existing:
+        return [
+            {
+                "capability": r.capability,
+                "expires_at": _ensure_aware(r.expires_at),
+                "source": r.source,
+            }
+            for r in existing
+        ]
+
+    # 2. 无显式记录：按 legacy 规则计算推导 capability
+    sub_stmt = select(Subscription).where(Subscription.user_id == user_id)
+    sub_row = (await db.execute(sub_stmt)).scalars().first()
+    if sub_row is None:
+        return []
+    plan_code = sub_row.plan_code
+    plan_monitor_limit = None
+    expires_at = _ensure_aware(sub_row.expires_at)
+    sub_active = bool(
+        sub_row.status == "active"
+        and _ensure_aware(sub_row.starts_at) is not None
+        and (_ensure_aware(sub_row.starts_at) or now) <= now
+        and expires_at is not None
+        and expires_at > now
+    )
+    if plan_code:
+        plan = await get_plan(db, plan_code)
+        plan_monitor_limit = plan.monitor_limit if plan else None
+    inferred = infer_capabilities_from_plan(plan_code, plan_monitor_limit, expires_at, sub_active)
+
+    # 3. 一次性写为显式记录（source=legacy_materialized）
+    materialized: list[dict] = []
+    for key, info in inferred.items():
+        row = UserCapability(
+            user_id=user_id,
+            capability=key,
+            watchlist_limit=info.get("watchlist_limit"),
+            granted_at=now,
+            expires_at=_ensure_aware(info.get("expires_at")),
+            source="legacy_materialized",
+            granted_by=actor_user_id,
+        )
+        db.add(row)
+        materialized.append(
+            {
+                "capability": key,
+                "expires_at": _ensure_aware(info.get("expires_at")),
+                "source": "legacy_materialized",
+            }
+        )
+    await db.flush()
+    return materialized
