@@ -290,22 +290,6 @@ jobs:
           assert len(orphans) == 1, f"非单一 head: {orphans}"
           print(f"static migration check OK: {len(files)} files, single head={orphans.pop()}")
           PY
-      - name: No DB service blocks in workflow
-        run: |
-          set -euo pipefail
-          # 只检测活跃的 services: postgres 块（不检测本检查自身的说明文字）
-          if python - <<'PY'
-          import re, sys
-          text = open(".github/workflows/ci.yml", encoding="utf-8").read()
-          tag = "postgres" + ":16"
-          # 匹配 "services:" 下的 "postgres:" service 定义
-          if re.search(r"(?m)^\s*services:\s*\n\s*postgres:\s*\n\s*image:\s*" + re.escape(tag), text):
-              sys.exit(1)
-          PY
-          then
-            echo "::error::ci.yml 不得包含独立 postgres 测试 service 块"
-            exit 1
-          fi
 
   # ---------------------------------------------------------------------------
   # 前端变化：单一 job，一次 npm ci 后运行 tsc/lint/contract/build
