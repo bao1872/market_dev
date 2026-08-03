@@ -98,8 +98,46 @@ _CI_ENV = (
     os.environ.get("GITHUB_ACTIONS", "").lower() in ("1", "true", "yes")
     or os.environ.get("PANJI_CI_DB_TEST", "").lower() in ("1", "true", "yes")
 )
+# [权限 V2 / 开发测试阶段] 共享开发数据库目标测试：
+# 通过 SSH 隧道连接共享开发业务数据库 bz_stock，不创建任何临时/测试库。
+# 要求：APP_ENV=development、DATABASE_URL 主机为 127.0.0.1/localhost（隧道端口）、
+# 库名精确为 bz_stock、禁止 TEST_DATABASE_URL、必须显式选择目标测试文件。
+_SHARED_DEV_DB = (
+    os.environ.get("PANJI_SHARED_DEV_DB_TEST", "").lower() in ("1", "true", "yes")
+)
 
-if not _PURE_UNIT:
+if _SHARED_DEV_DB and not _PURE_UNIT:
+    # 共享开发库模式：禁止任何临时/测试库，只用现有共享 bz_stock（经 SSH 隧道）
+    if _TEST_DATABASE_URL:
+        raise RuntimeError(
+            "PANJI_SHARED_DEV_DB_TEST=1 禁止设置 TEST_DATABASE_URL（不存在临时测试库路线）。"
+        )
+    if _APP_ENV != "development":
+        raise RuntimeError(
+            f"shared_dev_db 测试要求 APP_ENV=development，当前={_APP_ENV!r}。"
+        )
+    _shared_db_url = os.environ.get("DATABASE_URL", "")
+    if not _shared_db_url:
+        raise RuntimeError(
+            "shared_dev_db 测试要求 DATABASE_URL（本地开发配置，经 SSH 隧道指向共享 bz_stock）。"
+        )
+    _shared_parsed = urlparse(_shared_db_url)
+    if _shared_parsed.hostname not in ("127.0.0.1", "localhost"):
+        raise RuntimeError(
+            f"shared_dev_db DATABASE_URL 主机必须是 127.0.0.1/localhost（SSH 隧道），当前={_shared_parsed.hostname!r}"
+        )
+    _shared_db_name = (_shared_parsed.path or "").lstrip("/")
+    if _shared_db_name != "bz_stock":
+        raise RuntimeError(
+            f"shared_dev_db DATABASE_URL 库名必须精确为 bz_stock（共享开发业务数据库），当前={_shared_db_name!r}"
+        )
+    _TEST_ASYNC_URL = _shared_db_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace(
+        "postgresql://", "postgresql+asyncpg://"
+    )
+
+elif not _PURE_UNIT:
     # [CHANGE-20260728-007] 非 CI 环境禁止 DB 集成测试，避免本地 Mac 复用持久测试库
     if not _CI_ENV:
         raise RuntimeError(
@@ -121,8 +159,8 @@ if not _PURE_UNIT:
             "示例：TEST_DATABASE_URL=postgresql://user:pass@host:port/dbname_test"
         )
 
-# [测试配置] - 描述: 校验数据库 URL scheme 与测试库命名
-if not _PURE_UNIT:
+# [测试配置] - 描述: 校验数据库 URL scheme 与测试库命名（shared 模式已单独校验，跳过 _test 后缀要求）
+if not _PURE_UNIT and not _SHARED_DEV_DB:
     _parsed = urlparse(_TEST_DATABASE_URL)
     _ALLOWED_SCHEMES = {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
     if _parsed.scheme not in _ALLOWED_SCHEMES:
@@ -147,7 +185,8 @@ if not _PURE_UNIT:
         "postgresql://", "postgresql+asyncpg://"
     )
 
-    # 测试专用 engine / session factory
+# 测试专用 engine / session factory（CI 临时库 与 shared_dev_db 共用此入口）
+if not _PURE_UNIT:
     # [测试] - 描述: test_async_engine 与 TestAsyncSessionLocal 保留供需要独立 session 的测试导入使用
     test_async_engine = create_async_engine(
         _TEST_ASYNC_URL,
@@ -397,6 +436,11 @@ async def init_test_db():
     """
     if _PURE_UNIT:
         yield
+        return
+    # [shared_dev_db] 共享开发库目标测试禁止 DDL/Alembic（不修改共享 bz_stock schema）
+    if _SHARED_DEV_DB:
+        yield
+        await test_async_engine.dispose()
         return
     if os.environ.get("SKIP_ALEMBIC_UPGRADE", "") == "1":
         yield

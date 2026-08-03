@@ -1,13 +1,18 @@
-"""权限模型 V2 - PostgreSQL 集成目标测试（CI 临时库运行）。
+"""权限模型 V2 - 共享开发数据库目标测试。
 
-覆盖（权限 V2 关键合同，本地 PURE_UNIT_TEST=1 跳过，CI postgres 容器运行）：
+运行模式：PANJI_SHARED_DEV_DB_TEST=1（经 SSH 隧道连共享开发业务数据库 bz_stock，
+不创建任何临时/测试库，禁止 DDL/Alembic，完整 rollback，测试结束无残留）。
+
+使用 conftest 的 `client` fixture（自动 override get_db 复用同一 db_session，
+不逃逸事务）。所有写入经统一 db_session，测试结束外层事务 rollback。
+
+覆盖（权限 V2 关键合同）：
 1. self_selection 邀请码注册后真实写入 UserCapability；
 2. /me/access 真实响应包含 capabilities；
 3. login 真实响应包含 capabilities 且仅 self_selection 的 next_route=/market?scope=watchlist；
-4. API 守卫真实 200/403（require_capability / require_any_capability）；
+4. API 守卫真实 200/403（require_any_capability）；
 5. 管理员列表返回权限摘要字段；
-6. 新邀请码拒绝空 capabilities；
-7. legacy fallback 返回 source 与 diagnostics。
+6. 新邀请码拒绝空 capabilities。
 """
 from __future__ import annotations
 
@@ -18,57 +23,56 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import create_access_token, get_password_hash
-from app.main import app
+from app.core.security import create_access_token
 from app.models.user import Role, User, UserRole
 from app.services.subscription_service import (
     generate_invite_codes,
     register_with_invite_code,
 )
-from tests.conftest import make_asgi_transport
+
+pytestmark = pytest.mark.shared_dev_db
+
+# 测试数据唯一前缀（结束必须无残留）
+_TEST_EMAIL_PREFIX = "pg-v2-test-"
 
 
-async def _create_user(
-    db: AsyncSession,
-    email: str,
-    *,
-    admin: bool = False,
-) -> User:
+async def _register_with_invite(db: AsyncSession, email: str, cap: list[dict]) -> User:
+    """用指定 capabilities 生成邀请码并注册，返回 user。"""
+    codes = await generate_invite_codes(
+        db=db, count=1, note="pg-v2-test", capabilities=cap, created_by=None
+    )
+    code = codes[0]
+    return await register_with_invite_code(db, email=email, invite_code=code, password="test-pass-123")
+
+
+async def _admin_user(db: AsyncSession) -> User:
+    """创建 admin 用户（savepoint 内，结束 rollback）。"""
+    from app.core.security import get_password_hash
+
     user = User(
-        email=email,
+        email=f"{_TEST_EMAIL_PREFIX}admin-{uuid.uuid4().hex[:8]}@test.local",
         password_hash=get_password_hash("test-pass-123"),
         status="active",
         timezone="Asia/Shanghai",
     )
     db.add(user)
     await db.flush()
-    role = await db.scalar(select(Role).where(Role.name == ("admin" if admin else "member")))
+    role = await db.scalar(select(Role).where(Role.name == "admin"))
     if role is not None:
         db.add(UserRole(user_id=user.id, role_id=role.id))
-    await db.commit()
+    await db.flush()
     return user
-
-
-async def _register_with_invite(db: AsyncSession, email: str, cap: list[dict]) -> str:
-    """用指定 capabilities 生成邀请码并注册，返回邀请码明文。"""
-    codes = await generate_invite_codes(
-        db=db, count=1, note="pg-test", capabilities=cap, created_by=None
-    )
-    code = codes[0]
-    return await register_with_invite_code(db, email=email, invite_code=code, password="test-pass-123")
 
 
 @pytest.mark.asyncio
 async def test_self_selection_invite_writes_user_capability(db_session: AsyncSession) -> None:
     """self_selection 邀请码注册 → 真实写入 UserCapability（含 watchlist_limit）。"""
-    email = f"pg-ss-{uuid.uuid4().hex[:8]}@test.local"
-    await _register_with_invite(
+    email = f"{_TEST_EMAIL_PREFIX}ss-{uuid.uuid4().hex[:8]}@test.local"
+    user = await _register_with_invite(
         db_session,
         email,
         [{"capability": "self_selection", "months": 1, "watchlist_limit": 5}],
     )
-    user = await db_session.scalar(select(User).where(User.email == email))
-    assert user is not None
     from app.models.user_capability import UserCapability
 
     cap = await db_session.scalar(
@@ -83,22 +87,19 @@ async def test_self_selection_invite_writes_user_capability(db_session: AsyncSes
 
 
 @pytest.mark.asyncio
-async def test_me_access_returns_capabilities(db_session: AsyncSession) -> None:
+async def test_me_access_returns_capabilities(db_session: AsyncSession, client: AsyncClient) -> None:
     """GET /me/access 真实响应包含 capabilities。"""
-    email = f"pg-access-{uuid.uuid4().hex[:8]}@test.local"
-    await _register_with_invite(
+    email = f"{_TEST_EMAIL_PREFIX}access-{uuid.uuid4().hex[:8]}@test.local"
+    user = await _register_with_invite(
         db_session,
         email,
         [{"capability": "self_selection", "months": 1, "watchlist_limit": 5}],
     )
-    user = await db_session.scalar(select(User).where(User.email == email))
     token = create_access_token(str(user.id))
-    transport = make_asgi_transport(app, db_session)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get(
-            "/v1/me/access",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+    resp = await client.get(
+        "/v1/me/access",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert "capabilities" in body
@@ -108,17 +109,17 @@ async def test_me_access_returns_capabilities(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_returns_capabilities_and_watchlist_next_route(db_session: AsyncSession) -> None:
+async def test_login_returns_capabilities_and_watchlist_next_route(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
     """login 真实响应含 capabilities，仅 self_selection 的 next_route=/market?scope=watchlist。"""
-    email = f"pg-login-{uuid.uuid4().hex[:8]}@test.local"
+    email = f"{_TEST_EMAIL_PREFIX}login-{uuid.uuid4().hex[:8]}@test.local"
     await _register_with_invite(
         db_session,
         email,
         [{"capability": "self_selection", "months": 1, "watchlist_limit": 5}],
     )
-    transport = make_asgi_transport(app, db_session)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post("/v1/auth/login", json={"email": email, "password": "test-pass-123"})
+    resp = await client.post("/v1/auth/login", json={"email": email, "password": "test-pass-123"})
     assert resp.status_code == 200
     body = resp.json()
     assert "capabilities" in body
@@ -127,45 +128,62 @@ async def test_login_returns_capabilities_and_watchlist_next_route(db_session: A
 
 
 @pytest.mark.asyncio
-async def test_api_guard_200_and_403(db_session: AsyncSession) -> None:
-    """require_any_capability(self_selection, market_data) 真实 200；无权限用户 403。"""
-    # 有 self_selection 用户可访问 /market
-    email_ok = f"pg-guard-ok-{uuid.uuid4().hex[:8]}@test.local"
-    await _register_with_invite(
+async def test_api_guard_200_and_403(db_session: AsyncSession, client: AsyncClient) -> None:
+    """require_any_capability 真实 200（有 self_selection）；无权限用户 403。"""
+    email_ok = f"{_TEST_EMAIL_PREFIX}guard-ok-{uuid.uuid4().hex[:8]}@test.local"
+    user_ok = await _register_with_invite(
         db_session,
         email_ok,
         [{"capability": "self_selection", "months": 1, "watchlist_limit": 5}],
     )
-    user_ok = await db_session.scalar(select(User).where(User.email == email_ok))
     token_ok = create_access_token(str(user_ok.id))
 
-    # 无任何权限用户（普通注册不写 capability）
-    email_none = f"pg-guard-none-{uuid.uuid4().hex[:8]}@test.local"
-    await _create_user(db_session, email_none)
-    user_none = await db_session.scalar(select(User).where(User.email == email_none))
+    # 无任何权限用户（普通注册，不写 capability）
+    from app.core.security import get_password_hash
+
+    email_none = f"{_TEST_EMAIL_PREFIX}guard-none-{uuid.uuid4().hex[:8]}@test.local"
+    user_none = User(
+        email=email_none,
+        password_hash=get_password_hash("test-pass-123"),
+        status="active",
+        timezone="Asia/Shanghai",
+    )
+    db_session.add(user_none)
+    await db_session.flush()
+    role = await db_session.scalar(select(Role).where(Role.name == "member"))
+    if role is not None:
+        db_session.add(UserRole(user_id=user_none.id, role_id=role.id))
+    await db_session.flush()
     token_none = create_access_token(str(user_none.id))
 
-    transport = make_asgi_transport(app, db_session)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        ok = await client.get("/v1/market/stocks?page=1&page_size=1", headers={"Authorization": f"Bearer {token_ok}"})
-        none = await client.get("/v1/market/stocks?page=1&page_size=1", headers={"Authorization": f"Bearer {token_none}"})
+    ok = await client.get(
+        "/v1/market/stocks?page=1&page_size=1",
+        headers={"Authorization": f"Bearer {token_ok}"},
+    )
+    none = await client.get(
+        "/v1/market/stocks?page=1&page_size=1",
+        headers={"Authorization": f"Bearer {token_none}"},
+    )
     assert ok.status_code in (200, 422)  # 200 或参数校验（权限已放行）
     assert none.status_code == 403
 
 
 @pytest.mark.asyncio
-async def test_admin_user_list_includes_capability_summary(db_session: AsyncSession) -> None:
+async def test_admin_user_list_includes_capability_summary(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
     """管理员用户列表返回权限摘要字段（capabilities/active_keys/default_route）。"""
-    admin = await _create_user(db_session, f"pg-admin-{uuid.uuid4().hex[:8]}@test.local", admin=True)
+    admin = await _admin_user(db_session)
     await _register_with_invite(
         db_session,
-        f"pg-list-{uuid.uuid4().hex[:8]}@test.local",
+        f"{_TEST_EMAIL_PREFIX}list-{uuid.uuid4().hex[:8]}@test.local",
         [{"capability": "self_selection", "months": 1, "watchlist_limit": 3}],
     )
     token = create_access_token(str(admin.id))
-    transport = make_asgi_transport(app, db_session)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/v1/admin/users?limit=50", headers={"Authorization": f"Bearer {token}"})
+    resp = await client.get(
+        "/v1/admin/users?limit=50",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert "items" in body
