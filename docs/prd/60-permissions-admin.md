@@ -143,3 +143,86 @@
 ### PV2-05 新邀请码必须显式授权
 
 所有新邀请码必须显式包含非空 `capabilities`（禁止 null/[]）。self_selection 必须指定 `watchlist_limit`。旧 capabilities=NULL 邀请码标记"旧套餐模式"，禁止再用于新注册，不静默 fallback。
+
+## 7. 权限模型 V2 后端合同（2026-08-03 确认）
+
+### PV2-B01 统一授权生命周期
+
+管理员 grant 与邀请码兑换统一走 `apply_capability_grant`，底层只接收确定性期限输入 `grant_days`（天数，正整数）。`months`（30 天周期）仅在调用边界由 `months * 30` 转换为 `grant_days`，底层不得混用绝对到期日、months、days。
+
+期限算法统一为：
+- active（现有 `expires_at` 晚于 now）：从当前 `expires_at` 顺延 `grant_days`。
+- expired / revoked / 空 `expires_at`：从注入的 `now` 重新计算 `grant_days`。
+- tombstone（`source="admin_revoke"`）重新授权：恢复真实来源并更新授予者。
+
+`self_selection` 保持 `watchlist_limit` 额度校验；其他 capability 拒绝 `watchlist_limit` 参数。
+
+### PV2-B02 场景化 legacy 物化
+
+legacy Plan 推导权限的物化由调用场景显式控制，禁止无条件物化：
+
+| 调用场景 | materialize_legacy | 说明 |
+|---|---|---|
+| 显式 Capability 邀请码**新用户注册** | `False` | 只授予邀请码声明的 capability，不得物化套餐推导权限 |
+| 旧用户**显式邀请码续期** | `True` | 先物化完整 legacy 权限，避免只更新一项导致其他权限消失 |
+| 管理员**首次 grant/revoke** | `True` | 先物化完整 legacy 权限 |
+
+注册流程**不得**根据 Subscription 是否存在判断新旧用户，必须由调用边界显式传入 `materialize_legacy=False/True`。
+
+### PV2-B03 统一用户行锁顺序
+
+所有需要物化 legacy 的路径（管理员 grant/revoke、旧用户续期）必须先 `SELECT ... FOR UPDATE` 锁定目标 `User` 行，再查询 capability、物化、grant/revoke、写审计，最后提交。固定锁顺序避免管理员操作与邀请码续期之间形成反向锁依赖。
+
+### PV2-B04 撤销 tombstone 合同
+
+撤销不硬删除，采用 tombstone（`source="admin_revoke"`）：
+- `admin_revoke` 记录无论 `expires_at` 是否在未来，`resolve_effective_access` 一律解析为 `active=False`。
+- 无目标记录时创建撤销 tombstone（`granted_by` 为空）。
+- 已撤销时重复撤销幂等，不重复插入。
+- 已有记录时保留原 `granted_by`，不得把撤销人写入 `granted_by`。
+- 撤销人 `revoked_by` 与原因写入审计快照。
+
+### PV2-B05 同事务结构化审计
+
+所有管理员 capability 写操作在同一事务内调用 `write_audit_log`：
+- `target_type="user_capability"`
+- `target_id="{user_id}:{capability}"`
+- `action` 依据真实 `mutation_type` 生成（**不得把全部授权记成同一 action**）：
+  - 授予：`capability.grant` / `capability.extend` / `capability.quota_change` / `capability.extend_and_quota_change` / `capability.regrant`
+  - 撤销：`capability.revoke`
+- `mutation_type` 精确区分五态 + 撤销：
+  - `grant`：新建授权行
+  - `extend`：已有行续期（active 顺延 / expired 从 now 重算，额度不变或非 self_selection）
+  - `quota_change`：已有行过期且仅调整 `self_selection` 额度
+  - `extend_and_quota_change`：已有行 active 且续期 + 调整额度
+  - `regrant`：tombstone（admin_revoke）重新授权
+  - `revoke`：撤销
+- `before_data/after_data` 含用户、能力、状态、来源、期限、额度、`granted_by`。
+- grant 的 after 快照含 `reason`；revoke 的 after 快照含 `revoked_by` 和 `reason`。
+- 默认原因分别为 `admin_manual_grant` 和 `admin_manual_revoke`。
+
+邀请码注册和续期由现有 `InviteRedemption` 追溯，通用授权服务不私自写管理员审计。
+
+### PV2-B05a 撤销路由 reason
+
+`DELETE /v1/admin/users/{user_id}/capabilities/{capability}` 接收可选 `reason` query 参数：
+去空白、空字符串转 `None`、限长 500（与 Grant/Revoke 请求 reason 合同一致，PV2-B07）。
+
+### PV2-B06 商业状态与功能权限解耦
+
+商业订阅状态与功能权限完全解耦。新增纯商业状态解析结果（受限 `status` + 诊断原因）：
+
+1. 无记录：`none`
+2. 持久状态 revoked/cancelled：保持原状态
+3. 缺少 `starts_at`：`expired/missing_starts_at`
+4. 缺少 `expires_at`：`expired/missing_expires_at`
+5. `starts_at` 晚于 `expires_at`：`expired/invalid_period`
+6. 尚未开始：`pending`
+7. 已到期：`expired`
+8. 其余正常周期：`active`
+
+异常商业周期采用 **fail-closed**，一律判 `expired` 并返回诊断原因。订阅列表与管理员 access-profile 共用该解析器。权限解析、默认路由和 capability guard **不读取** 商业状态。
+
+### PV2-B07 Grant/Revoke 请求 reason
+
+Grant/Revoke 请求新增可选 `reason`：统一去除首尾空白、空字符串转 `None`、限制最大长度。保持既有路由兼容，尤其避免改变现有 DELETE 调用方式。

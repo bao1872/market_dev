@@ -379,3 +379,44 @@ Gate 2 在 Phase 5B-2 capability 模型基础上完成权限代码改造（非"�
 - `test_permission_v2_pg_integration.py` 5 项通过（self_selection 注册写 UserCapability、/me/access、login capabilities+next_route、API guard 200/403、admin 权限摘要）。
 - savepoint rollback，测试后无残留（pg-v2-test 用户/邀请码均 0）。
 - 当前阶段：开发测试阶段；当前代码待远程开发部署；backfill 未执行。
+
+## 14. 权限模型 V2 后端合同收口（2026-08-03 已核验代码 + 纯单元测试）
+
+### 14.1 统一授权与锁合同
+
+- 统一入口 `apply_capability_grant`（`backend/app/services/subscription_service.py`）：只接收确定性 `grant_days`（天数），`source` 收窄为 `admin_grant`/`invite_code`，返回 `CapabilityMutationResult`（action/before/after）。
+- `months` 在调用边界转换为 `grant_days = months * 30`：`grant_capability_to_user`（管理员）与 `_grant_capabilities_from_invite`（邀请码）。
+- **场景化 legacy 物化**（`materialize_legacy`）：
+  - 显式邀请码新注册 `register_with_invite_code` → `False`（不物化套餐推导权限）。
+  - 旧用户续期 `renew_with_invite_code` → `True`（先物化完整 legacy）。
+  - 管理员 `grant_capability_to_user` → `True`（先物化完整 legacy）。
+- **用户行锁**：`_lock_and_materialize_legacy` 先 `SELECT User ... FOR UPDATE` 再 `ensure_explicit_capability_mode`，任何需物化路径统一锁顺序，避免反向锁依赖。
+- 期限算法：active 从当前 expires_at 顺延；expired/revoked/空 从注入 now 重算；tombstone 重新授权恢复真实来源并更新授予者。
+
+### 14.2 撤销 tombstone 与审计
+
+- `revoke_capability_from_user` 返回 `CapabilityMutationResult`；撤销保留原 `granted_by`（不写入撤销人），新 tombstone 的 `granted_by=None`；重复撤销幂等。
+- `resolve_effective_access` 对 `source="admin_revoke"` 强制 `active=False`（不再只改 reason）。
+- 管理员 grant/revoke API（`admin_subscription.py`）同一事务写 `write_audit_log`：
+  - `target_type="user_capability"`，`target_id="{user_id}:{capability}"`。
+  - `action` 依据真实 `mutation_type` 生成（`capability.grant` / `capability.extend` / `capability.quota_change` / `capability.extend_and_quota_change` / `capability.regrant` / `capability.revoke`），不得全部记成同一 action。
+  - `CapabilityMutationResult` 新增 `mutation_type` 字段；grant/revoke API 的 after 快照含 `mutation_type`。
+  - grant after 含 `granted_by`/`actor`/`reason`（默认 `admin_manual_grant`）。
+  - revoke after 含 `revoked_by`/`actor`/`reason`（默认 `admin_manual_revoke`）。
+  - `DELETE /users/{user_id}/capabilities/{capability}` 接收可选 `reason` query（去空白/空转 None/限长 500），传入 `revoke_capability_from_user`。
+- 邀请码注册/续期由 `InviteRedemption` 追溯，统一授权服务不私自写管理员审计。
+
+### 14.3 商业状态与响应 Schema
+
+- 新增 `resolve_commercial_status`（`subscription_service.py`）纯商业状态解析器，订阅列表与管理员 access-profile 共用；异常周期 fail-closed 判 `expired` + 诊断 reason（missing_starts_at/missing_expires_at/invalid_period）。
+- `schemas/access.py` 新增管理员 access-profile 分层模型：`AdminAccessProfileResponse`/`AdminAccountInfo`/`EffectiveAccessInfo`/`SubscriptionSummaryInfo`/`ExplicitCapabilityRecord`；旧 `AccessProfileResponse` 自测字段数更新为 16。
+- `schemas/subscription.py`：`GrantCapabilityRequest`/`RevokeCapabilityRequest` 新增可选 `reason`（去空白、空转 None、限长 500）。
+- `get_user_access_profile` 端点绑定 `AdminAccessProfileResponse`，商业状态用 `resolve_commercial_status` 解析。
+- `AccessContext.default_route` 必填；`test_gate2_capability_schemas.py` 的 `_make_ctx` 已补 `default_route`。
+
+### 14.4 测试证据（PURE_UNIT_TEST=1）
+
+- `test_permission_v2_backend_contracts.py`（28 项，纯单元/mock，不连库）：锁合同（materialize=True 锁用户 / False 不锁）、reason 规范化、Access Schema 字段、商业状态 fail-closed（8 分支）、撤销保留 granted_by、mutation_type 六态（grant/extend/quota_change/extend_and_quota_change/regrant/revoke）、expires_at=None 安全、无记录创建 tombstone、重复撤销幂等。
+- 权限定向测试集：`test_permission_v2_backend_contracts.py` + `test_explicit_capability_lifecycle.py` + `test_gate2_capability_schemas.py` = **62 passed / 7 skipped**（PG 集成在纯单元模式 skip）。
+- 含 effective_access / access_control_service：**84 passed / 22 skipped**。
+- Ruff、Mypy、docs consistency、architecture、governance 全部通过。
