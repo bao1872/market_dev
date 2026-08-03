@@ -37,12 +37,19 @@ _TEST_EMAIL_PREFIX = "pg-v2-test-"
 
 
 async def _register_with_invite(db: AsyncSession, email: str, cap: list[dict]) -> User:
-    """用指定 capabilities 生成邀请码并注册，返回 user。"""
+    """用指定 capabilities 生成邀请码并注册，返回 user。
+
+    共享库 invite_codes.created_by NOT NULL，需传入真实 admin 用户 id。
+    """
+    created_by = await _admin_user(db)
     codes = await generate_invite_codes(
-        db=db, count=1, note="pg-v2-test", capabilities=cap, created_by=None
+        db=db, count=1, note="pg-v2-test", capabilities=cap, created_by=created_by.id
     )
-    code = codes[0]
-    return await register_with_invite_code(db, email=email, invite_code=code, password="test-pass-123")
+    code = codes[0][1]
+    user, _subscription = await register_with_invite_code(
+        db, email=email, raw_invite_code=code, password="test-pass-123"
+    )
+    return user
 
 
 async def _admin_user(db: AsyncSession) -> User:
