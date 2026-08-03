@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -64,15 +66,22 @@ class AccessProfileResponse(BaseModel):
 # ============================================================
 
 
+# [权限模型 V2 PV2-B06] 受限字面量类型（fail-closed，非法值验证失败）
+# 商业订阅状态：none/pending/active/expired/revoked/cancelled
+COMMERCIAL_STATUS_LITERAL = Literal["none", "pending", "active", "expired", "revoked", "cancelled"]
+# capability state：active/expired/revoked
+CAPABILITY_STATE_LITERAL = Literal["active", "expired", "revoked"]
+
+
 class AdminAccountInfo(BaseModel):
     """管理员 access-profile 账户层。"""
 
-    id: str = Field(..., description="用户 ID（字符串化）")
+    id: UUID = Field(..., description="用户 ID")
     email: str = Field(..., description="用户邮箱")
     account_status: str = Field(..., description="账户状态 active/disabled/pending")
     roles: list[str] = Field(default_factory=list, description="角色名列表")
-    created_at: str | None = Field(None, description="创建时间")
-    last_login_at: str | None = Field(None, description="最近登录时间")
+    created_at: datetime | None = Field(None, description="创建时间")
+    last_login_at: datetime | None = Field(None, description="最近登录时间")
 
 
 class EffectiveAccessInfo(BaseModel):
@@ -81,9 +90,9 @@ class EffectiveAccessInfo(BaseModel):
     capabilities: dict[str, dict] = Field(default_factory=dict, description="三类 capability 状态")
     active_capability_keys: list[str] = Field(default_factory=list, description="active 的 capability key 列表")
     has_any_access: bool = Field(False, description="是否有任一有效权限")
-    default_route: str = Field("/forbidden", description="默认入口")
+    default_route: str = Field(..., description="默认入口（必填，不设静默默认值）")
     capability_source: str = Field("none", description="权限来源")
-    nearest_capability_expires_at: str | None = Field(None, description="最近到期时间")
+    nearest_capability_expires_at: datetime | None = Field(None, description="最近到期时间")
     legacy_fallback: bool = Field(False, description="是否 legacy plan fallback")
     diagnostics: list[str] = Field(default_factory=list, description="诊断")
 
@@ -95,12 +104,12 @@ class SubscriptionSummaryInfo(BaseModel):
     reason 为诊断原因（异常周期 fail-closed 为 expired + 原因）。
     """
 
-    status: str = Field("none", description="受限商业状态")
+    status: COMMERCIAL_STATUS_LITERAL = Field("none", description="受限商业状态")
     reason: str | None = Field(None, description="诊断原因")
     plan_code: str | None = Field(None, description="套餐代码")
     plan_display_name: str | None = Field(None, description="套餐展示名")
-    starts_at: str | None = Field(None, description="生效时间")
-    expires_at: str | None = Field(None, description="到期时间")
+    starts_at: datetime | None = Field(None, description="生效时间")
+    expires_at: datetime | None = Field(None, description="到期时间")
     source: str | None = Field(None, description="来源")
     entitlement_snapshot: dict | None = Field(None, description="权益快照")
 
@@ -108,13 +117,15 @@ class SubscriptionSummaryInfo(BaseModel):
 class ExplicitCapabilityRecord(BaseModel):
     """管理员 access-profile 显式 capability 记录层。"""
 
-    capability: str = Field(..., description="权限类型")
-    state: str = Field(..., description="active/expired/revoked")
-    granted_at: str | None = Field(None, description="授予时间")
-    expires_at: str | None = Field(None, description="到期时间")
+    capability: Literal["self_selection", "market_data", "research_replay"] = Field(
+        ..., description="权限类型"
+    )
+    state: CAPABILITY_STATE_LITERAL = Field(..., description="active/expired/revoked")
+    granted_at: datetime | None = Field(None, description="授予时间")
+    expires_at: datetime | None = Field(None, description="到期时间")
     watchlist_limit: int | None = Field(None, description="自选数量上限")
     source: str = Field("", description="来源")
-    granted_by: str | None = Field(None, description="授予人 user_id")
+    granted_by: UUID | None = Field(None, description="授予人 user_id")
 
 
 class AdminAccessProfileResponse(BaseModel):

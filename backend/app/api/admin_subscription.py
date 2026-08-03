@@ -22,7 +22,7 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +37,7 @@ from app.schemas.access import (
     AdminAccessProfileResponse,
     AdminAccountInfo,
     EffectiveAccessInfo,
+    ExplicitCapabilityRecord,
     SubscriptionSummaryInfo,
 )
 from app.schemas.invitation import (
@@ -52,6 +53,7 @@ from app.schemas.scheduler_job_run import (
 )
 from app.schemas.subscription import (
     ChangePlanRequest,
+    ChangeSelfSelectionQuotaRequest,
     GrantCapabilityRequest,
     GrantSubscriptionRequest,
     MemberListItem,
@@ -70,6 +72,7 @@ from app.schemas.worker_heartbeat import (
 from app.services.access_audit_service import query_audit_logs, write_audit_log
 from app.services.notification_service import list_message_deliveries, retry_delivery
 from app.services.subscription_service import (
+    change_self_selection_quota,
     change_subscription_plan,
     generate_invite_codes,
     get_redemptions_by_user,
@@ -969,6 +972,7 @@ async def get_user_capabilities_endpoint(
 async def grant_capability_endpoint(
     user_id: UUID,
     payload: GrantCapabilityRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> UserCapabilitiesResponse:
@@ -985,6 +989,9 @@ async def grant_capability_endpoint(
     # 校验用户存在
     await _fetch_user_or_404(db, user_id)
 
+    # [权限模型 V2 PV2-B09] 复用现有请求链 request_id（不伪造随机值）
+    request_id = request.headers.get("x-request-id")
+
     try:
         mutation = await grant_capability_to_user(
             db=db,
@@ -992,7 +999,7 @@ async def grant_capability_endpoint(
             capability=payload.capability,
             months=payload.months,
             watchlist_limit=payload.watchlist_limit,
-            granted_by=current_user.id,
+            actor_user_id=current_user.id,
             reason=payload.reason,
         )
     except ValueError as e:
@@ -1002,9 +1009,10 @@ async def grant_capability_endpoint(
         ) from e
 
     # [权限模型 V2 PV2-B05] 同事务结构化审计：target_id="{user_id}:{capability}"，
-    # action 依据真实 mutation_type 生成（capability.grant/extend/quota_change/
+    # action 依据真实 mutation_type 生成（capability.grant/extend/
     # extend_and_quota_change/regrant），不得把全部授权记成同一 action；
-    # before/after 来自 mutation 快照，含 granted_by/reason/mutation_type
+    # before/after 来自 mutation 快照，含 granted_by/reason/mutation_type；
+    # 首次物化时 after 含 materialized_capabilities（未物化为空列表）
     await write_audit_log(
         db=db,
         actor_user_id=current_user.id,
@@ -1018,7 +1026,9 @@ async def grant_capability_endpoint(
             "actor": str(current_user.id),
             "reason": mutation.after.get("reason") or "admin_manual_grant",
             "mutation_type": mutation.mutation_type,
+            "materialized_capabilities": mutation.materialized_capabilities,
         },
+        request_id=request_id,
     )
 
     # 返回该用户所有 capabilities（含刚授予的）
@@ -1035,6 +1045,7 @@ async def grant_capability_endpoint(
 async def revoke_capability_endpoint(
     user_id: UUID,
     capability: str,
+    request: Request,
     reason: str | None = Query(
         default=None,
         max_length=500,
@@ -1065,6 +1076,9 @@ async def revoke_capability_endpoint(
         trimmed = reason.strip()
         reason = trimmed if trimmed else None
 
+    # [权限模型 V2 PV2-B09] 复用现有请求链 request_id（不伪造随机值）
+    request_id = request.headers.get("x-request-id")
+
     try:
         mutation = await revoke_capability_from_user(
             db=db,
@@ -1080,7 +1094,8 @@ async def revoke_capability_endpoint(
         ) from e
 
     # [权限模型 V2 PV2-B04/B05] 同事务结构化审计：撤销不覆盖 granted_by，
-    # revoked_by 仅写入 after 快照；action=capability.revoke；target_id="{user_id}:{capability}"
+    # revoked_by 仅写入 after 快照；action=capability.revoke；target_id="{user_id}:{capability}"；
+    # 首次物化时 after 含 materialized_capabilities（未物化为空列表）
     await write_audit_log(
         db=db,
         actor_user_id=current_user.id,
@@ -1094,10 +1109,69 @@ async def revoke_capability_endpoint(
             "actor": str(current_user.id),
             "reason": mutation.after.get("reason") or "admin_manual_revoke",
             "mutation_type": mutation.mutation_type,
+            "materialized_capabilities": mutation.materialized_capabilities,
         },
+        request_id=request_id,
     )
 
     # 返回该用户剩余 capabilities
+    capabilities = await get_user_capabilities(db, user_id)
+    await db.commit()
+
+    return UserCapabilitiesResponse(user_id=user_id, capabilities=capabilities)
+
+
+@router.patch(
+    "/users/{user_id}/capabilities/self_selection/quota",
+    response_model=UserCapabilitiesResponse,
+)
+async def change_self_selection_quota_endpoint(
+    user_id: UUID,
+    payload: ChangeSelfSelectionQuotaRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> UserCapabilitiesResponse:
+    """[权限模型 V2 PV2-B05] 独立调整 self_selection 额度（mutation_type=quota_change）。
+
+    只修改 watchlist_limit，不改变 expires_at；revoked 状态不得通过改额度恢复。
+    审计 action 恒为 capability.quota_change。
+    """
+    await _fetch_user_or_404(db, user_id)
+
+    request_id = request.headers.get("x-request-id")
+
+    try:
+        mutation = await change_self_selection_quota(
+            db=db,
+            user_id=user_id,
+            new_watchlist_limit=payload.watchlist_limit,
+            actor_user_id=current_user.id,
+            reason=payload.reason,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+
+    await write_audit_log(
+        db=db,
+        actor_user_id=current_user.id,
+        action="capability.quota_change",
+        target_type="user_capability",
+        target_id=f"{user_id}:self_selection",
+        before_data=mutation.before,
+        after_data={
+            **mutation.after,
+            "actor": str(current_user.id),
+            "reason": mutation.after.get("reason") or "admin_manual_quota_change",
+            "mutation_type": mutation.mutation_type,
+            "materialized_capabilities": mutation.materialized_capabilities,
+        },
+        request_id=request_id,
+    )
+
     capabilities = await get_user_capabilities(db, user_id)
     await db.commit()
 
@@ -1280,9 +1354,7 @@ async def get_user_access_profile(
         for cap in profile.capabilities.values()
         if cap.active and cap.expires_at is not None
     ]
-    nearest_expires = (
-        min(e for e in active_expiries if e is not None).isoformat() if active_expiries else None
-    )
+    nearest_expires = min(e for e in active_expiries if e is not None) if active_expiries else None
 
     # subscription_summary（商业展示，不参与判权）
     # [权限模型 V2 PV2-B06] 用 resolve_commercial_status 解析受限状态 + 诊断 reason
@@ -1300,8 +1372,8 @@ async def get_user_access_profile(
         plan = await get_plan(db, sub.plan_code)
         plan_display = plan.display_name if plan else None
 
-    sub_starts_aware = _ensure_aware(sub.starts_at) if sub and sub.starts_at else None
-    sub_expires_aware = _ensure_aware(sub.expires_at) if sub and sub.expires_at else None
+    sub_starts = _ensure_aware(sub.starts_at) if sub and sub.starts_at else None
+    sub_expires = _ensure_aware(sub.expires_at) if sub and sub.expires_at else None
 
     # explicit_capability_records（规范化 state：active/expired/revoked）
     from app.models.user_capability import UserCapability
@@ -1313,33 +1385,34 @@ async def get_user_access_profile(
     explicit_records = []
     for r in cap_rows:
         exp = _ensure_aware(r.expires_at)
-        granted_aware = _ensure_aware(r.granted_at)
         if r.source == "admin_revoke":
             state = "revoked"
         elif exp is not None and exp > now:
             state = "active"
         else:
             state = "expired"
+        # [权限模型 V2 PV2-B06] 直接传 datetime/UUID，由 Pydantic 序列化为 ISO，
+        # 禁止手工 isoformat
         explicit_records.append(
-            {
-                "capability": r.capability,
-                "state": state,
-                "granted_at": granted_aware.isoformat() if granted_aware else None,
-                "expires_at": exp.isoformat() if exp else None,
-                "watchlist_limit": r.watchlist_limit,
-                "source": r.source,
-                "granted_by": str(r.granted_by) if r.granted_by else None,
-            }
+            ExplicitCapabilityRecord(
+                capability=r.capability,
+                state=state,
+                granted_at=_ensure_aware(r.granted_at),
+                expires_at=exp,
+                watchlist_limit=r.watchlist_limit,
+                source=r.source,
+                granted_by=r.granted_by,
+            )
         )
 
     return AdminAccessProfileResponse(
         account=AdminAccountInfo(
-            id=str(user.id),
+            id=user.id,
             email=user.email,
             account_status=user.status,
             roles=roles,
-            created_at=user.created_at.isoformat() if user.created_at else None,
-            last_login_at=getattr(user, "last_login_at", None),
+            created_at=_ensure_aware(user.created_at),
+            last_login_at=_ensure_aware(getattr(user, "last_login_at", None)),
         ),
         effective_access=EffectiveAccessInfo(
             capabilities=capabilities,
@@ -1356,8 +1429,8 @@ async def get_user_access_profile(
             reason=commercial.reason,
             plan_code=sub.plan_code if sub else None,
             plan_display_name=plan_display,
-            starts_at=sub_starts_aware.isoformat() if sub_starts_aware else None,
-            expires_at=sub_expires_aware.isoformat() if sub_expires_aware else None,
+            starts_at=sub_starts,
+            expires_at=sub_expires,
             source=getattr(sub, "source", None) if sub else None,
             entitlement_snapshot=getattr(sub, "entitlement_snapshot", None) if sub else None,
         ),

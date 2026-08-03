@@ -133,6 +133,28 @@ class GrantCapabilityRequest(BaseModel):
         return self
 
 
+class ChangeSelfSelectionQuotaRequest(BaseModel):
+    """[权限模型 V2 PV2-B05] 独立调整 self_selection 额度请求。
+
+    只允许 self_selection；仅修改 watchlist_limit，不改变 expires_at（mutation_type=quota_change）。
+    """
+
+    watchlist_limit: int = Field(
+        ..., ge=1, le=500, description="新自选数量上限（1-500）"
+    )
+    reason: str | None = Field(
+        None, max_length=500, description="调整原因（审计用，可选；去空白，空转 None）"
+    )
+
+    @model_validator(mode="after")
+    def _validate_reason(self) -> ChangeSelfSelectionQuotaRequest:
+        # [权限模型 V2 PV2-B07] reason 去空白、空字符串转 None
+        if self.reason is not None:
+            trimmed = self.reason.strip()
+            self.reason = trimmed if trimmed else None
+        return self
+
+
 class UserCapabilitiesResponse(BaseModel):
     """[Gate2 PRD60] 用户 capability 列表响应（管理员查看/授予/撤销后返回最新状态）。"""
 
@@ -172,6 +194,7 @@ __all__ = [
     "RenewSubscriptionRequest",
     "ChangePlanRequest",
     "GrantCapabilityRequest",
+    "ChangeSelfSelectionQuotaRequest",
     "UserCapabilitiesResponse",
     "RevokeCapabilityRequest",
 ]

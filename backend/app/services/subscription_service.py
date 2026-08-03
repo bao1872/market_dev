@@ -82,6 +82,8 @@ class CapabilityMutationResult:
     - capability: 目标 capability
     - before: 操作前规范化状态 dict（active/source/expires_at/watchlist_limit/granted_by/reason）
     - after: 操作后规范化状态 dict（同上，含 mutation_type）
+    - materialized_capabilities: 本次实际操作触发的 legacy 物化 Capability 快照列表；
+      未发生物化时为空列表（供审计记录 legacy 物化来源）
     """
 
     action: str
@@ -89,6 +91,7 @@ class CapabilityMutationResult:
     capability: str
     before: dict[str, Any]
     after: dict[str, Any]
+    materialized_capabilities: list[dict[str, Any]]
 
 
 @dataclass
@@ -341,7 +344,6 @@ async def apply_capability_grant(
     watchlist_limit: int | None,
     source: Literal["admin_grant", "invite_code"],
     materialize_legacy: bool,
-    granted_by: uuid.UUID | None = None,
     actor_user_id: uuid.UUID | None = None,
     reason: str | None = None,
     now: datetime | None = None,
@@ -359,7 +361,16 @@ async def apply_capability_grant(
        - active（现有 expires_at 晚于 now）：从当前 expires_at 顺延 grant_days。
        - expired/revoked/空 expires_at：从注入 now 重新计算 grant_days。
        - tombstone（source="admin_revoke"）重新授权：恢复真实来源并更新授予者。
-    4. 返回 CapabilityMutationResult（action/before/after），供 API 直接审计。
+    4. source/actor 合同（PV2-B08）：
+       - source=="admin_grant"：actor_user_id 必须存在，granted_by=actor_user_id；
+         默认 reason=admin_manual_grant。
+       - source=="invite_code"：actor_user_id 必须为 None，granted_by=None；
+         默认 reason 不写 admin_manual_grant（保持 None）。
+       - 非法组合抛 ValueError。
+    5. mutation_type 只产生 grant/extend/extend_and_quota_change/regrant
+       （授权总会改变有效期，因此不产生纯 quota_change；纯额度变更走独立
+       ``change_self_selection_quota``）。
+    6. 返回 CapabilityMutationResult（action/before/after/materialized_capabilities）。
 
     Args:
         db: 异步数据库会话
@@ -369,16 +380,16 @@ async def apply_capability_grant(
         watchlist_limit: 自选数量上限（仅 self_selection 必填）
         source: 授权来源 admin_grant/invite_code
         materialize_legacy: 是否需要先物化 legacy 权限（True=旧续期/管理员；False=显式新注册）
-        granted_by: 授予人 user_id（admin_grant 时为管理员 ID，invite_code 时为 None）
-        actor_user_id: 物化写入的管理员 ID（可选，默认取 granted_by）
-        reason: 审计原因（可选，默认 admin_manual_grant）
+        actor_user_id: 操作者 user_id（admin_grant 必须；invite_code 必须为 None）
+        reason: 审计原因（可选；admin_grant 默认 admin_manual_grant，invite_code 默认 None）
         now: 注入基准时间（UTC aware，可测试注入）
 
     Returns:
         CapabilityMutationResult
 
     Raises:
-        ValueError: capability 非法、grant_days 非法或 self_selection 未提供 watchlist_limit
+        ValueError: capability 非法、grant_days 非法、self_selection 未提供 watchlist_limit，
+          或 source/actor 非法组合
     """
     from app.models.user_capability import ALL_CAPABILITIES, UserCapability
 
@@ -392,13 +403,28 @@ async def apply_capability_grant(
         raise ValueError(f"grant_days 必须 >= 1，当前: {grant_days}")
     if source not in ("admin_grant", "invite_code"):
         raise ValueError(f"无效 source: {source}，允许: admin_grant/invite_code")
+    # [权限模型 V2 PV2-B08] source/actor 约束：admin_grant 必须有 actor；invite_code 必须无 actor
+    if source == "admin_grant" and actor_user_id is None:
+        raise ValueError("admin_grant 必须提供 actor_user_id")
+    if source == "invite_code" and actor_user_id is not None:
+        raise ValueError("invite_code 不允许提供 actor_user_id")
 
     now_utc = _ensure_aware(now) if now else datetime.now(UTC)
 
+    # [权限模型 V2 PV2-B08] granted_by 按真实来源派生
+    granted_by = actor_user_id if source == "admin_grant" else None
+    # 默认 reason：admin_grant -> admin_manual_grant；invite_code -> 不写管理员默认原因
+    default_reason: str | None
+    if source == "admin_grant":
+        default_reason = reason or "admin_manual_grant"
+    else:
+        default_reason = reason
+
+    materialized_capabilities: list[dict[str, Any]] = []
     # [PV2-B02/B03] 需要物化时，最外层先锁 User 行（SELECT ... FOR UPDATE）
     if materialize_legacy:
-        await _lock_and_materialize_legacy(
-            db, user_id, actor_user_id=actor_user_id or granted_by
+        materialized_capabilities = await _lock_and_materialize_legacy(
+            db, user_id, actor_user_id=actor_user_id
         )
 
     # 查询目标 capability 显式行（读取 before 快照）
@@ -422,12 +448,10 @@ async def apply_capability_grant(
         )
 
     before = _snapshot(existing_row) if existing_row else None
-    default_reason = reason or "admin_manual_grant"
 
     if existing_row:
         # 在写入前捕获旧额度，供 mutation_type 判定（写入后比较恒等）
         old_watchlist_limit = existing_row.watchlist_limit
-        old_expires_aware = _ensure_aware(existing_row.expires_at)
         if existing_row.source == "admin_revoke":
             # tombstone 重新授权：从 now 重算，恢复真实来源并更新授予者
             existing_row.expires_at = now_utc + timedelta(days=grant_days)
@@ -446,22 +470,15 @@ async def apply_capability_grant(
             existing_row.granted_by = granted_by
             if watchlist_limit is not None:
                 existing_row.watchlist_limit = watchlist_limit
-            # [权限模型 V2 PV2-B05] mutation_type 精确区分：
-            #   - 已有行续期且 self_selection 额度变化 -> extend_and_quota_change
-            #   - 过期行仅调整额度 -> quota_change
-            #   - 其余已有行续期（active 顺延 / expired 从 now 重算）-> extend
-            cur_active = bool(old_expires_aware and old_expires_aware > now_utc)
+            # [权限模型 V2 PV2-B05] mutation_type：授权总会改变有效期，
+            # 已有 self_selection 且额度变化 -> extend_and_quota_change（无论此前 active/expired）；
+            # 其余已有行续期 -> extend。纯 quota_change 由 change_self_selection_quota 独立产生。
             quota_changed = (
                 capability == "self_selection"
                 and watchlist_limit is not None
                 and old_watchlist_limit != watchlist_limit
             )
-            if quota_changed and cur_active:
-                mutation_type = "extend_and_quota_change"
-            elif quota_changed:
-                mutation_type = "quota_change"
-            else:
-                mutation_type = "extend"
+            mutation_type = "extend_and_quota_change" if quota_changed else "extend"
         await db.flush()
         row = existing_row
     else:
@@ -489,6 +506,7 @@ async def apply_capability_grant(
         capability=capability,
         before=before or {},
         after=after,
+        materialized_capabilities=materialized_capabilities,
     )
 
 
@@ -496,17 +514,21 @@ async def _lock_and_materialize_legacy(
     db: AsyncSession,
     user_id: uuid.UUID,
     actor_user_id: uuid.UUID | None = None,
-) -> None:
+) -> list[dict[str, Any]]:
     """[权限模型 V2 PV2-B03] 锁定目标 User 行并物化完整 legacy 权限。
 
     事务内最外层编排一次：先 SELECT User FOR UPDATE，再物化 legacy 推导 capability。
     固定锁顺序避免管理员操作与邀请码续期之间形成反向锁依赖。
+
+    Returns:
+        本次实际物化的 Capability 快照列表（capability/expires_at/source）；
+        未发生物化时返回空列表（供审计记录 legacy 物化来源）。
     """
     from app.models.user import User
     from app.services.effective_access_service import ensure_explicit_capability_mode
 
     await db.execute(select(User).where(User.id == user_id).with_for_update())
-    await ensure_explicit_capability_mode(db, user_id, actor_user_id=actor_user_id)
+    return await ensure_explicit_capability_mode(db, user_id, actor_user_id=actor_user_id)
 
 
 async def _grant_capabilities_from_invite(
@@ -548,7 +570,8 @@ async def _grant_capabilities_from_invite(
             watchlist_limit=cap_watchlist_limit,
             source="invite_code",
             materialize_legacy=materialize_legacy,
-            granted_by=None,
+            # [PV2-B08] invite_code 必须 actor=None，granted_by=None
+            actor_user_id=None,
         )
     await db.flush()
 
@@ -805,23 +828,21 @@ async def renew_with_invite_code(
 async def get_effective_subscription_status(
     db: AsyncSession,
     user_id: uuid.UUID,
-) -> tuple[Literal["active", "expired", "none"], datetime | None]:
+) -> tuple[
+    Literal["none", "pending", "active", "expired", "revoked", "cancelled"],
+    datetime | None,
+]:
     """只读查询用户订阅有效状态。
 
-    不修改、不 flush 数据库。根据当前时间判断 status 语义：
-    - 无订阅记录 -> ("none", None)
-    - 有订阅且未过期 -> ("active", expires_at)
-    - 有订阅但已过期 -> ("expired", expires_at)
-
-    有效订阅实时计算（不缓存到登录态）：
-        status = 'active' AND starts_at <= now AND expires_at > now
+    复用唯一商业状态解析器 ``resolve_commercial_status``（PV2-B06），返回六态：
+    none/pending/active/expired/revoked/cancelled。
 
     Args:
         db: 异步数据库会话
         user_id: 用户 ID
 
     Returns:
-        (状态字符串, expires_at) 元组
+        (受限商业状态字符串, expires_at) 元组
     """
     stmt = select(Subscription).where(Subscription.user_id == user_id)
     result = await db.execute(stmt)
@@ -830,11 +851,11 @@ async def get_effective_subscription_status(
     if subscription is None:
         return "none", None
 
-    now = datetime.now(UTC)
-    expires_at = _ensure_aware(subscription.expires_at)
-    if expires_at <= now:
-        return "expired", expires_at
-    return "active", expires_at
+    commercial = resolve_commercial_status(subscription)
+    expires_at = (
+        _ensure_aware(subscription.expires_at) if subscription.expires_at is not None else None
+    )
+    return commercial.status, expires_at
 
 
 async def get_subscription_status(
@@ -1233,13 +1254,12 @@ async def list_subscribers(
         subscription = row[1]
 
         if subscription is not None:
-            # 计算展示用 status（不写库）：active 且已过期 -> 'expired'，
-            # 其余沿用持久化状态（active/revoked/cancelled）
-            display_status = subscription.status
-            if subscription.status == "active" and _ensure_aware(subscription.expires_at) <= now:
-                display_status = "expired"
+            # [权限模型 V2 PV2-B06] 展示用商业状态复用唯一解析器 resolve_commercial_status
+            commercial = resolve_commercial_status(subscription)
+            display_status = commercial.status
 
-            remaining_days = (_ensure_aware(subscription.expires_at) - now).days
+            expires_aware = _ensure_aware(subscription.expires_at) if subscription.expires_at else None
+            remaining_days = (expires_aware - now).days if expires_aware is not None else None
             renewal_count = await get_renewal_count(db, user.id)
             subscribers.append({
                 "user_id": user.id,
@@ -1328,7 +1348,7 @@ async def grant_capability_to_user(
     capability: str,
     months: int,
     watchlist_limit: int | None,
-    granted_by: uuid.UUID,
+    actor_user_id: uuid.UUID,
     reason: str | None = None,
 ) -> CapabilityMutationResult:
     """管理员直接授予/修改用户 capability（PRD60 PA-20 + 权限模型 V2）。
@@ -1343,7 +1363,7 @@ async def grant_capability_to_user(
         capability: 权限类型 self_selection/market_data/research_replay
         months: 30 天周期有效期（1-36，1 = 30 天）
         watchlist_limit: 自选数量上限（仅 self_selection 必填）
-        granted_by: 管理员 user_id
+        actor_user_id: 操作管理员 user_id（admin_grant，必填）
         reason: 授予原因（审计用）
 
     Returns:
@@ -1360,8 +1380,7 @@ async def grant_capability_to_user(
         watchlist_limit=watchlist_limit,
         source="admin_grant",
         materialize_legacy=True,
-        granted_by=granted_by,
-        actor_user_id=granted_by,
+        actor_user_id=actor_user_id,
         reason=reason,
     )
 
@@ -1404,8 +1423,10 @@ async def revoke_capability_from_user(
         raise ValueError(f"无效 capability: {capability}，允许: {ALL_CAPABILITIES}")
 
     now_utc = datetime.now(UTC)
-    # 1. 先锁用户行并物化完整 legacy 权限
-    await _lock_and_materialize_legacy(db, user_id, actor_user_id=revoked_by)
+    # 1. 先锁用户行并物化完整 legacy 权限（记录本次实际物化列表供审计）
+    materialized_capabilities = await _lock_and_materialize_legacy(
+        db, user_id, actor_user_id=revoked_by
+    )
 
     # 2. 查询目标显式行
     existing = await db.execute(
@@ -1459,6 +1480,7 @@ async def revoke_capability_from_user(
             capability=capability,
             before=before,
             after=after,
+            materialized_capabilities=materialized_capabilities,
         )
 
     # 5. 幂等：已是 admin_revoke 撤销状态则返回（不重复插入）
@@ -1472,6 +1494,7 @@ async def revoke_capability_from_user(
             capability=capability,
             before=before,
             after=after,
+            materialized_capabilities=materialized_capabilities,
         )
 
     existing_row.expires_at = past
@@ -1488,6 +1511,93 @@ async def revoke_capability_from_user(
         capability=capability,
         before=before,
         after=after,
+        materialized_capabilities=materialized_capabilities,
+    )
+
+
+async def change_self_selection_quota(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    new_watchlist_limit: int,
+    actor_user_id: uuid.UUID,
+    reason: str | None = None,
+) -> CapabilityMutationResult:
+    """[权限模型 V2 PV2-B05] 独立调整 self_selection 额度（mutation_type=quota_change）。
+
+    与 apply_capability_grant 正交：本操作**不改变 expires_at**，只修改 watchlist_limit，
+    因此产生纯 ``quota_change``（apply 总会顺延有效期，不能产生纯 quota_change）。
+
+    合同：
+    1. 只允许 self_selection。
+    2. 必须已有显式 UserCapability 记录（否则 ValueError，无行不可改额度）。
+    3. 不修改 expires_at。
+    4. revoked（source="admin_revoke"）状态不得通过改额度恢复，抛 ValueError。
+    5. 只修改 watchlist_limit。
+    6. mutation_type=quota_change。
+    7. 先 SELECT User FOR UPDATE 锁定用户行，并物化 legacy 权限（记录实际物化列表）。
+    8. 返回 CapabilityMutationResult（before/after）。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 目标用户 ID
+        new_watchlist_limit: 新自选数量上限（正整数）
+        actor_user_id: 操作管理员 user_id
+        reason: 审计原因（可选，默认 admin_manual_quota_change）
+
+    Returns:
+        CapabilityMutationResult（action="grant"，mutation_type="quota_change"）
+
+    Raises:
+        ValueError: capability 非 self_selection、无显式记录、或处于 revoked 状态
+    """
+    from app.models.user_capability import UserCapability
+
+    if new_watchlist_limit < 1:
+        raise ValueError(f"watchlist_limit 必须 >= 1，当前: {new_watchlist_limit}")
+
+    now_utc = datetime.now(UTC)
+    materialized_capabilities = await _lock_and_materialize_legacy(
+        db, user_id, actor_user_id=actor_user_id
+    )
+
+    existing = await db.execute(
+        select(UserCapability).where(
+            UserCapability.user_id == user_id,
+            UserCapability.capability == "self_selection",
+        )
+    )
+    existing_row = existing.scalar_one_or_none()
+
+    def _snapshot(row: Any) -> dict[str, Any]:
+        active = bool(row.expires_at and _ensure_aware(row.expires_at) > now_utc)
+        return _cap_state_dict(
+            active=active,
+            source=row.source or "",
+            expires_at=_ensure_aware(row.expires_at),
+            watchlist_limit=row.watchlist_limit,
+            granted_by=row.granted_by,
+            reason="explicitly_revoked" if row.source == "admin_revoke" else None,
+        )
+
+    before = _snapshot(existing_row) if existing_row else None
+    if existing_row is None:
+        raise ValueError("无显式 self_selection 记录，无法调整额度（请先授权）")
+    if existing_row.source == "admin_revoke":
+        raise ValueError("self_selection 处于 revoked 状态，不能通过调整额度恢复")
+
+    existing_row.watchlist_limit = new_watchlist_limit
+    await db.flush()
+
+    after = _snapshot(existing_row)
+    after["reason"] = reason or "admin_manual_quota_change"
+    after["mutation_type"] = "quota_change"
+    return CapabilityMutationResult(
+        action="grant",
+        mutation_type="quota_change",
+        capability="self_selection",
+        before=before or {},
+        after=after,
+        materialized_capabilities=materialized_capabilities,
     )
 
 

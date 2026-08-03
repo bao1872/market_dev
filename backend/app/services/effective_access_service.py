@@ -323,18 +323,11 @@ async def ensure_explicit_capability_mode(
 
     now = _utcnow()
 
-    # 1. 已存在任意显式记录 → 不重复物化
+    # 1. 已存在任意显式记录 → 不重复物化，返回空（本次未发生物化）
     stmt = select(UserCapability).where(UserCapability.user_id == user_id)
     existing = (await db.execute(stmt)).scalars().all()
     if existing:
-        return [
-            {
-                "capability": r.capability,
-                "expires_at": _ensure_aware(r.expires_at),
-                "source": r.source,
-            }
-            for r in existing
-        ]
+        return []
 
     # 2. 无显式记录：按 legacy 规则计算推导 capability
     sub_stmt = select(Subscription).where(Subscription.user_id == user_id)
