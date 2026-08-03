@@ -1,17 +1,21 @@
-# 完整盘后生产运行 Runbook
+# 完整盘后任务远程开发运行 Runbook
 
-本 Runbook 描述如何在腾讯云生产环境启动一次完整盘后任务并进行有限前置监控。
+本 Runbook 描述如何在远程开发运行环境启动一次完整盘后任务并进行有限前置监控。
+当前项目全程为开发测试阶段，只有"本地开发位置"与"远程开发运行环境"两个运行位置。
 
 ## 前置条件
 
-- 本地 dev 已合并到 main，main CI 全绿，自动部署完成。
-- 生产 runtime SHA 等于 main HEAD（通过 `curl /api/v1/health` 或 `git -C /srv/panji-live rev-parse HEAD` 核验）。
+- 运行版本以精确 **dev SHA** 与 **Live Mount 合同**为准（不依赖 main、不自动部署）。
+- 远程开发运行环境已通过 `scripts/ops/panji-test-deploy <FULL_SHA>` 部署到目标 dev SHA
+  （详见 `docs/runbooks/development-deployment.md`）。
+- 核验运行 SHA：`curl http://127.0.0.1:8000/v1/version` 的 `runtime_git_sha` 等于目标 dev SHA，
+  `deployment_mode=live`。
 - 当前时间在 A 股交易日 15:30 之后（盘后）。
 - 最近完成交易日的日线数据已 ready（覆盖率 ≥ 90%）。
 
 ## 1. 只读前置确认
 
-通过 SSH 登录远程开发运行服务器，执行只读检查：
+通过 `scripts/ops/panji-prod-ssh`（历史兼容技术标识，唯一远程开发运行 SSH 入口）执行只读检查：
 
 ```bash
 # 1.1 确认最近完成交易日
@@ -190,10 +194,12 @@ scripts/ops/panji-prod-ssh "curl -s -H 'Authorization: Bearer <admin_token>' htt
 scripts/ops/panji-prod-ssh "curl -s -H 'Authorization: Bearer <admin_token>' http://localhost:8000/admin/incremental-publish/pointers | python -m json.tool"
 ```
 
-### 8. 完整部署流程
+### 8. 完整远程开发部署流程
 
-> 部署只有一个入口（CHANGE-20260802-003）。migration 与健康核验均由部署脚本内部完成，
-> 不需要、也**禁止**手工 sync / `git reset --hard` / 容器内 `alembic upgrade`。
+> 远程开发部署只有一个入口（CHANGE-20260802-003）：`scripts/ops/panji-test-deploy <FULL_SHA>`。
+> 运行版本以精确 dev SHA 与 Live Mount 合同为准；不依赖 main、不自动部署。
+> migration 与健康核验均由部署脚本内部完成，不需要、也**禁止**手工 sync / `git reset --hard` /
+> 容器内 `alembic upgrade`。
 
 ```bash
 # 本地执行（唯一入口，SHA 必须已在 origin/dev 上）
@@ -287,7 +293,6 @@ scripts/ops/panji-prod-ssh "curl -s -X POST -H 'Authorization: Bearer <admin_tok
 ```
 
 验证项（PRD §19.4）：
-
 - P/Q/U/C/V 值可复算；
 - 至少一条正向和一条风险信号；
 - 下钻路径和成员归因一致；

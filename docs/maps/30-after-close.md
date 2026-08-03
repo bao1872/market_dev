@@ -466,7 +466,7 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - `board_analysis_service` 输入门禁：必须存在已发布 `stock_core` pointer，否则拒绝计算（PRD §5 BA-01）；
 - 聚合失败只重跑聚合，不影响已发布 `stock_core`；
 - 依赖顺序：`stock_core published` → `market_aggregation` / `board_analysis` 可触发 → `review` 可触发；
-- `after_close_orchestrator` 当前止于 stock_core + chip_consensus 创建，**market aggregation 和 board_analysis 不在主编排内自动触发**，需通过 CLI / admin API 单独触发（见 `docs/runbooks/after-close-production-run.md` §9）。
+- `after_close_orchestrator` 当前止于 stock_core + chip_consensus 创建，**market aggregation 和 board_analysis 不在主编排内自动触发**，需通过 CLI / admin API 单独触发（见 `docs/runbooks/after-close-remote-development-run.md` §9）。
 
 ## 复盘 pointer 与 run 关系
 

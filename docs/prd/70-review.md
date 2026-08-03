@@ -1233,7 +1233,7 @@ Review只传：
 - `docs/prd/30-after-close.md`（Core→Board→Review编排）
 - `docs/maps/30-after-close.md`（pointer和run关系）
 - `docs/maps/40-market-stock-experience.md`（Review→Market→Stock跳转合同）
-- `docs/runbooks/after-close-production-run.md`（review canary/resume/publish）
+- `docs/runbooks/after-close-remote-development-run.md`（review canary/resume/publish）
 - `rules/40-testing-quality.md`（TQ-97 页面验收三类证据、TQ-98 成功判定三要素）
 
 保持：

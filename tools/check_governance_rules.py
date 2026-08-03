@@ -294,6 +294,23 @@ def check(root: Path) -> list[str]:
                         f"forbidden production-stage term ({term}): {rel}（应为开发测试阶段术语，如远程开发运行服务器/共享开发业务数据库）"
                     )
 
+    # [开发测试阶段] 盘后远程开发运行 Runbook 禁止 dev→main 合并 / 自动部署 / main HEAD 运行合同
+    # "不自动部署"/"禁止自动部署"是合规声明，不误报（用负向后顾排除"不/禁止"前缀）。
+    _FORBIDDEN_RUNBOOK_PATTERNS = (
+        (r"dev 合并到 main", "dev→main 合并"),
+        (r"(?<!不)(?<!禁止)自动部署", "自动部署流程"),
+        (r"main HEAD", "main HEAD 运行合同"),
+        (r"生产运行合同", "生产运行合同"),
+    )
+    after_close_runbook = root / "docs/runbooks/after-close-remote-development-run.md"
+    if after_close_runbook.exists():
+        runbook_text = read(after_close_runbook)
+        for pattern, reason in _FORBIDDEN_RUNBOOK_PATTERNS:
+            if re.search(pattern, runbook_text):
+                errors.append(
+                    f"forbidden runbook legacy flow ({reason}): docs/runbooks/after-close-remote-development-run.md"
+                )
+
     return errors
 
 

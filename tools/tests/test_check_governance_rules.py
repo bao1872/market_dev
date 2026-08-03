@@ -181,5 +181,20 @@ def test_historical_technical_identifiers_allowed(governance_repo: Path) -> None
     assert check(governance_repo) == []
 
 
+def test_after_close_runbook_legacy_flow_rejected(governance_repo: Path) -> None:
+    """盘后远程开发运行 Runbook 出现 dev→main 合并 / 自动部署 / main HEAD 时失败。"""
+    source = ROOT / "docs/runbooks/after-close-remote-development-run.md"
+    target = governance_repo / "docs/runbooks/after-close-remote-development-run.md"
+    _copy_file(source, target)
+    assert check(governance_repo) == []
+    # 注入 legacy 流程：dev 合并到 main + 自动部署
+    target.write_text(
+        read_text(target) + "\n本地 dev 合并到 main 后自动部署，运行版本以 main HEAD 为准。\n",
+        encoding="utf-8",
+    )
+    errors = check(governance_repo)
+    assert any("forbidden runbook legacy flow" in e for e in errors)
+
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
