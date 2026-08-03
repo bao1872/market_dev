@@ -185,10 +185,9 @@ async def login(
 
         # [Auth] - 描述: 默认路由直接使用 resolve_effective_access 的 profile.default_route，
         # 不再把 ctx.capabilities 重新转换为第二套 CapabilityState。
-        from app.services.effective_access_service import resolve_effective_access
-
-        profile = await resolve_effective_access(db, user)
-        next_route = profile.default_route
+        # [权限模型 V2] get_access_context 已一次性构建完整上下文（含 default_route），
+        # 登录只序列化 ctx，不再重复调用 resolve_effective_access。
+        next_route = ctx.default_route or "/forbidden"
 
         # 生成 token
         user_id_str = str(user.id)
@@ -483,8 +482,6 @@ async def get_my_membership(
 @router.get("/me/access", response_model=AccessProfileResponse)
 async def get_my_access(
     ctx: AccessContext = Depends(require_authenticated),
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_active_user),
 ) -> AccessProfileResponse:
     """获取当前用户的完整权限上下文 AccessContext（11 个字段）。
 
@@ -502,14 +499,8 @@ async def get_my_access(
     Returns:
         AccessProfileResponse（11 个字段，与 AccessContext 对齐）
     """
-    # [Auth] - 描述: canonical /me/access：复用 resolve_effective_access 唯一解析，
-    # capabilities 与 default_route/active_keys/source/diagnostics 均来自 profile。
-    from app.services.effective_access_service import (
-        capabilities_to_serializable,
-        resolve_effective_access,
-    )
-
-    profile = await resolve_effective_access(db, user)
+    # [Auth] - 描述: canonical /me/access：get_access_context 已一次性构建完整上下文，
+    # 这里只序列化 ctx（capabilities/default_route/active_keys/source/diagnostics），不再重复 resolve。
     return AccessProfileResponse(
         user_id=ctx.user_id,
         account_status=ctx.account_status,
@@ -522,11 +513,11 @@ async def get_my_access(
         expires_at=ctx.expires_at,
         features=ctx.features,
         limits=ctx.limits,
-        capabilities=capabilities_to_serializable(profile.capabilities),
-        default_route=profile.default_route,
-        active_capability_keys=profile.active_capability_keys,
-        capability_source=profile.capability_source,
-        diagnostics=profile.diagnostics,
+        capabilities=ctx.capabilities,
+        default_route=ctx.default_route,
+        active_capability_keys=ctx.active_capability_keys,
+        capability_source=ctx.capability_source,
+        diagnostics=ctx.diagnostics,
     )
 
 

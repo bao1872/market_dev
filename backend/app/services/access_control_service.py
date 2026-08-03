@@ -101,6 +101,11 @@ class AccessContext(BaseModel):
     # admin: 所有 capability active=True
     # 旧用户（无 user_capabilities 行）: fallback 到 plan_code 推断
     capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # [权限模型 V2] 统一权限画像字段（由 get_access_context 一次性从 resolve 构建）
+    default_route: str | None = Field(default=None, description="依据权限计算的默认入口")
+    active_capability_keys: list[str] = Field(default_factory=list, description="active 的 capability key 列表")
+    capability_source: str = Field(default="none", description="权限来源 admin/user_capabilities/legacy_plan_fallback")
+    diagnostics: list[str] = Field(default_factory=list, description="诊断（legacy fallback 标记等）")
 
 
 def _infer_capabilities_from_plan(
@@ -172,6 +177,10 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             features=[],
             limits={},
             capabilities={cap: {"active": True, "expires_at": None, "watchlist_limit": None} for cap in ALL_CAPABILITIES},
+            default_route="/admin/overview",
+            active_capability_keys=list(ALL_CAPABILITIES),
+            capability_source="admin",
+            diagnostics=[],
         )
 
     # [权限模型 V2] capabilities 统一由 resolve_effective_access 解析（唯一真源），
@@ -215,6 +224,10 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             "message_retention_days": int(plan.message_retention_days),
         } if plan else {},
         capabilities=capabilities_to_serializable(profile.capabilities),
+        default_route=profile.default_route,
+        active_capability_keys=profile.active_capability_keys,
+        capability_source=profile.capability_source,
+        diagnostics=profile.diagnostics,
     )
 
 

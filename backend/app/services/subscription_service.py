@@ -1227,16 +1227,16 @@ async def list_subscribers_with_capabilities(
                 else:
                     member["nearest_capability_expires_at"] = None
                 member["legacy_fallback"] = profile.capability_source == "legacy_plan_fallback"
-        except Exception as exc:  # noqa: BLE001
-            # [权限模型 V2] 权限解析异常不得静默吞掉：记录明确日志并在 member 标记解析失败
+        except Exception:  # noqa: BLE001
+            # [权限模型 V2] 权限解析异常不得静默吞掉：记录完整异常到日志，但 API 只暴露稳定标记，
+            # 不得返回内部异常文本/SQL/字段。
             logger.exception(
-                "list_subscribers_with_capabilities resolve_effective_access failed user_id=%s: %s",
+                "list_subscribers_with_capabilities resolve_effective_access failed user_id=%s",
                 user_id,
-                exc,
             )
-            member["permission_resolution_error"] = str(exc)
+            member["permission_resolution_error"] = True
             member["diagnostics"] = member.get("diagnostics") or []
-            member["diagnostics"].append("permission_resolution_error")
+            member["diagnostics"].append("permission_resolution_failed")
     return members, total
 
 
