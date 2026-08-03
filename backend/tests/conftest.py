@@ -451,6 +451,14 @@ async def init_test_db():
     await test_async_engine.dispose()
 
 
+def pytest_configure(config: Any) -> None:
+    """注册 shared_dev_db marker（避免 pyproject marker 定义触发 backend 环境构建）。"""
+    config.addinivalue_line(
+        "markers",
+        "shared_dev_db: 共享开发数据库目标测试（PANJI_SHARED_DEV_DB_TEST=1，经 SSH 隧道连 bz_stock，禁止临时/测试库）",
+    )
+
+
 @pytest_asyncio.fixture
 async def _db_connection() -> AsyncGenerator[AsyncConnection, None]:
     """[内部] function 级数据库连接，每个测试独立事务，通过 savepoint 隔离。
