@@ -103,3 +103,43 @@
 - 直接访问受限 URL 时仍由后端阻止。
 - 权限矩阵在 Map 中与实际代码逐项对应。
 - 自选数量不能仅依赖前端限制。
+
+## 6. 权限模型 V2 统一（2026-08-03 确认）
+
+### PV2-01 功能权限唯一真源
+
+功能访问判权唯一依据 `user_capabilities`（三类独立 capability）。**Subscription 只记录商业周期**（注册/续期），**不参与功能判权**；**Plan 仅是销售/展示模板**，不作为运行时权限真源。运行时判权不得根据 plan_code 决定功能权限。
+
+- `users.status`：控制是否允许登录；
+- `user_capabilities`：功能访问唯一真源；
+- `invite_codes.capabilities`：授权模板；
+- `subscriptions`：商业周期记录；
+- `plans`：展示/销售模板；
+- `roles`：admin/member 身份。
+
+统一由 `resolve_effective_access(user_id)` 解析（login/register/refresh//me/access/API guards/后台/默认路由共用），禁止各模块自行推导权限。
+
+### PV2-02 默认入口矩阵
+
+| 权限组合 | 默认入口 |
+|---|---|
+| admin | `/admin/overview` |
+| 无 active capability | `/forbidden` |
+| 仅 research_replay | `/review` |
+| 仅 self_selection | `/market?scope=watchlist` |
+| 仅 market_data | `/market` |
+| self_selection + market_data（含 research_replay） | `/market` |
+
+### PV2-03 legacy fallback 退出条件
+
+无显式 `user_capabilities` 行的旧用户允许兼容期 plan fallback，但必须显式标记 `source=legacy_plan_fallback`，不得静默混入正常用户。迁移目标是所有用户生成显式 capability，legacy fallback 退出后删除。
+
+### PV2-04 管理员页面展示合同
+
+会员列表必须展示权限摘要（capabilities/active_keys/has_any_access/default_route/capability_source/nearest_expires/legacy_fallback）。抽屉默认打开"权限概览"，顺序：权限概览/账户信息/授权记录/审计。权限概览固定显示三张卡（self_selection/market_data/research_replay），含中文名/机器值/状态/granted_at/expires_at/watchlist_limit/source/reason。
+
+文案：账户状态控制登录；功能范围和额度由当前有效权限决定。
+
+### PV2-05 新邀请码必须显式授权
+
+所有新邀请码必须显式包含非空 `capabilities`（禁止 null/[]）。self_selection 必须指定 `watchlist_limit`。旧 capabilities=NULL 邀请码标记"旧套餐模式"，禁止再用于新注册，不静默 fallback。
