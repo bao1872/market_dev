@@ -5,12 +5,12 @@
 ## 核心数据架构规则（2026-07-28 起）
 
 - **本地固定连接正式数据源**：PostgreSQL=`bz_stock`，Redis 使用 `backend/.env` 中的正式运行配置（本地隔离 DB）。
-- **永久禁止本地 Mac / 开发服务器 / 腾讯云创建或复用持久测试库**（如 `bz_stock_test`）；`bz_stock_test` 已于 2026-07-28 DROP，不得重建。
+- **永久禁止本地 / 远程开发运行环境创建或复用任何独立/临时测试库**；独立测试库已于 2026-07-28 DROP，不得重建。
 - **本地与服务器隔离边界是进程，不是数据复制**：本地只启动 Backend、Frontend、Capture 和 SSH Tunnel；Scheduler、正式 Worker、盘后编排和全市场任务必须为 0。
 - **本地写入均为真实业务写入**：禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道；禁止清库、批量更新、Migration、删除正式数据。
 - **8752028@qq.com 为受保护 Owner 账户**：禁止修改其密码、邮箱、状态、角色、权限、订阅和业务数据。
-- **本地测试只能纯单元/mock**：必须设置 `PURE_UNIT_TEST=1`；禁止连接正式库 `bz_stock` 或任何持久测试库。
-- **数据库集成测试只在 CI 临时 Postgres 容器中运行**（job 结束自动销毁，唯一例外）；`backend/tests/conftest.py` 通过 `GITHUB_ACTIONS=true` 或显式 `PANJI_CI_DB_TEST=1` 识别 CI 环境，非 CI 必须 `PURE_UNIT_TEST=1`。详见 `rules/40-testing-quality.md`。
+- **本地测试只能纯单元/mock**：必须设置 `PURE_UNIT_TEST=1`；禁止连接共享开发业务数据库 `bz_stock` 或任何持久测试库。
+- **已永久删除独立/临时测试数据库路线**；本地测试只允许 `PURE_UNIT_TEST=1`（纯单元）或 `PANJI_SHARED_DEV_DB_TEST=1`（经 SSH 隧道连共享开发业务数据库 `bz_stock` 的授权目标测试）。详见 `rules/40-testing-quality.md`。
 
 ## 前置条件
 
@@ -18,14 +18,14 @@
 - Node.js 20+ 和前端依赖 `frontend/node_modules` 已安装。
 - `~/.ssh/config` 中已配置 Host `panji-prod`（HostName 必须为 `43.136.118.82`）。
 - 建隧道前可运行 `ssh -G panji-prod` 校验解析出的 `hostname` 精确等于 `43.136.118.82`；不符合时禁止启动隧道。
-- 不得使用 `55-server`（解析到 `120.234.137.109`，不是盘迹生产服务器）。
+- 不得使用 `55-server`（解析到 `120.234.137.109`，不是盘迹远程开发运行服务器）。
 - `backend/.env` 已按 `backend/.env.example` 配置：
   - `APP_ENV=development`
-  - `DATABASE_URL=postgresql+psycopg://***@127.0.0.1:15432/bz_stock`（正式库）
-  - `REDIS_URL=redis://127.0.0.1:16379/15`（本地隔离 DB，避免进入远程生产队列）
+  - `DATABASE_URL=postgresql+psycopg://***@127.0.0.1:15432/bz_stock`（共享开发业务数据库）
+  - `REDIS_URL=redis://127.0.0.1:16379/15`（本地隔离 DB，避免进入远程远程开发业务队列）
 
 > 注意：不要把真实密码写入仓库跟踪文件。`backend/.env` 已被 `.gitignore` 排除。
-> 禁止创建 `backend/.env.test` 或任何指向 `bz_stock_test` 的本地配置。
+> 禁止创建 `backend/.env.test` 或任何指向独立测试库的本地配置。
 
 ## 启动流程
 
@@ -197,7 +197,7 @@ lsof -iTCP:16379 -sTCP:LISTEN
 错误示例：
 
 ```text
-拒绝启动：开发环境 REDIS_URL 指向 Redis DB 0（远程生产队列）
+拒绝启动：开发环境 REDIS_URL 指向 Redis DB 0（远程远程开发业务队列）
 ```
 
 解决：将 `backend/.env` 中的 `REDIS_URL` 改为独立逻辑 DB，例如：
@@ -241,10 +241,10 @@ ssh -G panji-prod | grep hostname
 ## 安全边界
 
 - 本地开发不启动 Docker 或 Docker Compose 盘迹服务。
-- **本地固定连接 `bz_stock` 正式库**；禁止连接 `bz_stock_test` 或创建新的持久测试库。
+- **本地固定连接共享开发业务数据库 `bz_stock`**；禁止连接任何独立测试库或创建新的独立/临时测试库。
 - 不执行 Alembic migration、CREATE TABLE、TRUNCATE 或其他破坏性 SQL。
 - **禁止本地启动 Scheduler、正式 Worker、盘后编排或全市场任务**；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
 - 禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道。
 - **8752028@qq.com 为受保护 Owner 账户**：禁止修改其密码、邮箱、状态、角色、权限、订阅和业务数据。
 - 不得在命令、日志、浏览器自动化或报告中写入 Owner 真实密码；TRAE 不得自动登录 Owner 账户，登录由用户手工完成。
-- Redis DB 15 为本地隔离逻辑 DB，避免进入远程生产队列；不要把 `backend/.env` 或任何含密码/完整连接串的文件提交到 Git。
+- Redis DB 15 为本地隔离逻辑 DB，避免进入远程远程开发业务队列；不要把 `backend/.env` 或任何含密码/完整连接串的文件提交到 Git。

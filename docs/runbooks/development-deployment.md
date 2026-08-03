@@ -9,7 +9,7 @@
 - 唯一本地入口是 `scripts/ops/panji-test-deploy`；
 - 唯一服务器实现是 `scripts/deploy/panji-deploy.sh`；
 - 唯一运行方式是 `docker-compose.prod.yml` + `docker-compose.live.yml`；
-- 本 Runbook 不授权生产部署、migration 或业务数据操作，执行这些动作仍需用户在当前任务明确授权。
+- 本 Runbook 不授权远程开发部署、migration 或业务数据操作，执行这些动作仍需用户在当前任务明确授权。
 
 ## 部署前
 
@@ -31,7 +31,7 @@ dry-run 必须保持远端工作树、运行目录、容器、环境文件、数
 
 ## 执行
 
-获得本轮明确生产部署授权后执行：
+获得本轮明确远程开发部署授权后执行：
 
 ```bash
 scripts/ops/panji-test-deploy <FULL_SHA>

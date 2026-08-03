@@ -55,7 +55,7 @@ IDE 不是运行环境。任何 IDE、编码助手或自动化 Agent 都只是�
 |---|---|---|
 | `main` | 阶段性稳定锚点 | 未经明确授权不得修改、合并或推送 |
 | `dev` | 唯一默认日常开发分支 | 所有变更直接在 `dev` 提交；`dev` 是手工 CI 与手动部署的唯一来源 |
-| `experiments` | 明确授权下的隔离实验 | 仅在明确授权时使用；不得作为生产部署来源；进入 `dev` 前必须明确审查 |
+| `experiments` | 明确授权下的隔离实验 | 仅在明确授权时使用；不得作为远程开发部署来源；进入 `dev` 前必须明确审查 |
 
 本地、`origin` 和远程服务器只允许保留 `main`/`dev`/`experiments`。现有分支不符合该命名时，必须在用户明确授权分支删除或改名后单独治理，不得在普通任务中强删。
 
@@ -250,7 +250,7 @@ production 和其他环境保持原有行为。
 1. 禁止 `scp` 单个 `.py/.tsx/.js` 文件到服务器；
 2. 禁止 `docker cp` 从本地拷贝任意容器内文件；
 3. 禁止 SSH 进入容器内手动 `sed/vi` 修改源代码；
-4. 禁止临时业务脚本（`create_run.py`/`publish_review_oneoff.py` 等）在生产服务器上任意执行（如果必须执行，必须通过正式 orchestrator API 或 `panji-test-deploy` 的受控 `worker oneoff` 步骤）；
+4. 禁止临时业务脚本（`create_run.py`/`publish_review_oneoff.py` 等）在远程开发运行服务器上任意执行（如果必须执行，必须通过正式 orchestrator API 或 `panji-test-deploy` 的受控 `worker oneoff` 步骤）；
 5. 禁止只重建 `backend` 单服务不做健康检查；
 6. 禁止在一次部署中混合 Live Mount 代码同步与镜像重建。
 

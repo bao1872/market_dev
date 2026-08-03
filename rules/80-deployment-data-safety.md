@@ -56,7 +56,7 @@
 
 ## 服务器资源预算门禁（2026-08-02 收口）
 
-生产服务器根分区 118G、内存 7.4G，是**共享且不可弹性扩容**的资源。
+远程开发运行服务器根分区 118G、内存 7.4G，是**共享且不可弹性扩容**的资源。
 历史上每次部署都会新增三个业务镜像（backend 1.2G + capture 3.0G + frontend 65M）
 与数 GB BuildKit 缓存，且从不回收，磁盘长期单向增长直至逼近写满。
 本节把"单次部署不产生持久资源净增长"固化为硬约束。
@@ -191,14 +191,14 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 当前唯一部署模式为 **Live Mount 开发部署**（见 §Live Mount 部署规则 与 `docs/runbooks/development-deployment.md`）；
 - Release Gate / GHCR / Registry / immutable image release / formal release candidate / 多阶段 delivery phase / 未来正式发布流程 **不在当前治理范围内**，有效文档不得描述或保留它们。
 
-## 生产服务器 SSH SSOT（CHANGE-20260730-015）
+## 远程开发运行服务器 SSH SSOT（CHANGE-20260730-015）
 
 > 来源：CHANGE-20260730-015（SSH 目标漂移防复发）
 
 ### 唯一允许的入口
 
-- 生产服务器只能通过仓库脚本 `scripts/ops/panji-prod-ssh` 访问，该脚本固定使用别名 `panji-prod`；
-- 权威身份定义在 `docs/maps/80-system-runtime.md` 的“生产身份”；具体网络值由 `panji-prod-preflight` 校验；
+- 远程开发运行服务器只能通过仓库脚本 `scripts/ops/panji-prod-ssh` 访问，该脚本固定使用别名 `panji-prod`；
+- 权威身份定义在 `docs/maps/80-system-runtime.md` 的“远程开发运行身份”；具体网络值由 `panji-prod-preflight` 校验；
 - 部署/恢复/审计前必须先运行 `scripts/ops/panji-prod-preflight` 校验 ssh -G 解析值、远程目录、`/etc/market-dev/market.env`、Compose 项目和 `trading-backend` 容器；
 - preflight 通过后本轮不得重复检查 SSH，除非连接实际中断。
 
@@ -219,7 +219,7 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 ### 禁止 docker cp 和未审计 stdin 脚本
 
 - 禁止使用 `docker cp` 向生产容器写入文件、配置或代码补丁；
-- 禁止通过 `docker exec ... python -c "..."`、`docker exec ... psql -c "..."`、heredoc stdin 注入等未审计方式修改生产容器或生产数据；
+- 禁止通过 `docker exec ... python -c "..."`、`docker exec ... psql -c "..."`、heredoc stdin 注入等未审计方式修改生产容器或共享开发业务数据；
 - 临时诊断只能用只读 `docker exec ... python -c "..."` 查询，禁止写入；
 - 任何对生产容器或数据的修改必须通过正式 service / CLI / migration / 部署脚本完成，并留 Git 历史 + 审计日志。
 

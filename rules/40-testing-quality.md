@@ -149,30 +149,19 @@ Gov     python tools/check_governance_rules.py
 
 ### 禁止范围
 
-- 本地 Mac、开发服务器、腾讯云**创建或复用**持久测试数据库（如 `bz_stock_test`）。
-- 本地测试连接正式库 `bz_stock` 或任何持久测试库。
-- 把 CI 临时 Postgres 容器改为长期库。
-- 保留 `.env.test`、`TEST_DATABASE_URL` 持久配置、SSH 测试库隧道说明、conftest 持久测试引擎或 Alembic 自动迁移到本地 Mac。
-- 保留任何会自动创建或复用 `bz_stock_test` 的脚本。
+- 禁止在任何位置（本地、远程开发运行环境、CI、Docker 容器）创建或复用**独立/临时测试数据库**。
+- 本地测试只允许两种模式：
+  - `PURE_UNIT_TEST=1`：纯单元/mock，不连接数据库；
+  - `PANJI_SHARED_DEV_DB_TEST=1`：经 SSH 隧道连共享开发业务数据库 `bz_stock` 的明确授权目标测试。
+- 共享模式禁止 DDL/Alembic、独立 session/engine；仅使用 `db_session`/`client` fixture；savepoint rollback；测试结束无残留。
+- 已永久删除 CI 临时数据库容器路线、独立测试库 URL 变量、独立测试库名。
+- 不保留 conftest 持久测试引擎或 Alembic 自动迁移到本地。
 
-### 唯一例外
+### 测试模式规则
 
-CI（GitHub Actions）job 级临时 Postgres 容器，job 结束自动销毁。
-CI 工作流中 `POSTGRES_DB: bz_stock_test` 仅作为容器内临时数据库名，不持久化。
-
-### 本地测试规则
-
-- 本地测试只能纯单元/mock。
-- 必须设置 `PURE_UNIT_TEST=1` 跳过 DB 初始化。
-- `backend/tests/conftest.py` 通过 `GITHUB_ACTIONS=true` 或显式 `PANJI_CI_DB_TEST=1` 识别 CI 环境。
-- 非 CI 环境且未设置 `PURE_UNIT_TEST=1` 时，conftest 加载即失败。
-
-### CI 临时库规则
-
-- CI 工作流使用 job 级 `postgres:16` 容器，job 结束自动销毁。
-- `TEST_DATABASE_URL` 由 CI 工作流注入，指向 `localhost:5432/bz_stock_test`（容器内）。
-- 不得在 CI 之外保留 `TEST_DATABASE_URL` 环境变量。
-- 数据库集成测试（使用 `db_session` fixture）只在 CI 运行；本地不运行。
+- 非 `PURE_UNIT_TEST=1` 且非 `PANJI_SHARED_DEV_DB_TEST=1` 时，conftest 加载即失败。
+- 共享模式必须设置 `PANJI_SHARED_DEV_DB_TARGET`（唯一目标测试文件）、`APP_ENV=development`、`DATABASE_URL` 指向 `127.0.0.1/localhost` 的 `bz_stock`。
+- 共享模式 `TestAsyncSessionLocal` fail-closed（禁止测试自建独立 session/engine）。
 
 ### 新增测试规则
 
@@ -280,7 +269,6 @@ CI 是**手工诊断工具**（`workflow_dispatch`），不是部署门禁（见
 - 必须监控该**精确 commit SHA** 直到 Workflow 终态，不得用前一次 push 的 SHA 代替；
 - 查询降级顺序：GitHub 连接器 → 已认证 `gh` CLI → 公开 REST API（`/repos/{owner}/{repo}/actions/runs?head_sha={sha}`，无需认证）；
 - `gh` 未认证不能作为停止监控的理由；
-- `db_changed=true` 时 `postgres-integration-tests` 被 skipped 视为 CI 失败；
-  `db_changed=false` 时 skipped 是范围裁剪的预期结果；
+- 数据库目标测试不通过 CI 执行（独立/临时测试库已永久删除）；仅共享开发库目标测试（`PANJI_SHARED_DEV_DB_TEST=1`）在本地/授权环境经 SSH 隧道运行；
 - 必须按真实日志修复，不得凭猜测改代码；无法下载日志时仍须报告失败 Job 名称并运行其本地等价命令；
 - 报告须列出每个 Job 的 name 与 result，以及 `CI Gate` 的最终 conclusion；单个 Job 通过不能代替 `CI Gate` 结论。

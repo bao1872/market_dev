@@ -40,9 +40,7 @@ OK: TEST.MOCK 2026-04-24
 
 ```bash
 cd backend
-APP_ENV=test \
-TEST_DATABASE_URL=postgresql://localhost/panji_test \
-SKIP_ALEMBIC_UPGRADE=1 \
+PURE_UNIT_TEST=1 \
 .venv/bin/python -m pytest tests/test_first_pyramid_contract.py -v
 ```
 
@@ -133,8 +131,8 @@ from app.services.market_data_aggregation_service import MarketDataAggregationSe
 - 解决：检查 `bollinger_features_plotly.py` 实际导出的类名
 
 ### 5.2 RuntimeError: 测试必须在 APP_ENV=test 下运行
-- 原因：conftest.py 强制要求 APP_ENV=test
-- 解决：`export APP_ENV=test TEST_DATABASE_URL=postgresql://localhost/panji_test`
+- 原因：conftest.py 强制要求测试模式
+- 解决：使用 `PURE_UNIT_TEST=1` 纯单元模式（或经 SSH 隧道连共享开发业务数据库的 `PANJI_SHARED_DEV_DB_TEST=1` 目标测试）
 
 ### 5.3 FileNotFoundError: alembic
 - 原因：conftest.py 默认执行 alembic 迁移

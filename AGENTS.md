@@ -193,17 +193,17 @@
 - 使用强制推送覆盖共享历史；
 - 创建任何新的本地或远程分支（含 backup 分支）；仓库只保留 `main` / `dev` / `experiments`；
 - 从 `dev` 切换到其他工作分支；所有 AI 助手默认直接在 `dev` 提交，需要可恢复点时使用 checkpoint commit；
-- 修改、合并或推送 `main`；`experiments` 仅用于授权的隔离实验，不得作为生产部署来源；
+- 修改、合并或推送 `main`；`experiments` 仅用于授权的隔离实验，不得作为远程开发部署来源；
 - 静默改变已确认需求；
 - 用虚假的成功状态掩盖失败；
 - 新增未经确认的文档层或治理层；
 - 在处理局部任务时进行大范围无关修改。
 - 修改或删除 `8752028@qq.com`（受保护 Owner 账户）的 email、password_hash、status、角色、权限或订阅；清理测试数据前必须先排除此邮箱。
-- 本地 Mac、开发服务器、腾讯云创建或复用持久测试数据库（如 `bz_stock_test`）；本地 Backend 必须连接正式 `bz_stock` 数据源，隔离边界为进程而非数据复制。本地测试只能纯单元/mock，禁止连接正式库 `bz_stock` 或任何持久测试库。数据库集成测试只在 CI 临时 Postgres 容器中运行（job 结束自动销毁，唯一例外）；不得把 CI 临时库改为长期库。`backend/tests/conftest.py` 通过 `GITHUB_ACTIONS=true` 或显式 `PANJI_CI_DB_TEST=1` 识别 CI 环境，非 CI 必须 `PURE_UNIT_TEST=1`。
+- 创建或复用任何独立/临时测试数据库（本地、远程、CI、Docker 容器均禁止）。本地测试只允许两种模式：`PURE_UNIT_TEST=1`（纯单元/mock，不连库）或 `PANJI_SHARED_DEV_DB_TEST=1`（经 SSH 隧道连共享开发业务数据库 `bz_stock` 的明确授权目标测试）。共享模式禁止 DDL/Alembic，savepoint rollback，测试结束无残留。
 - 本地启动 Scheduler、正式 Worker、盘后编排或全市场任务；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
 - 在本地创建测试用户、测试邀请码、测试权限、测试快照或测试通知渠道；本地写入均为真实业务写入。
 - 在命令、日志、浏览器自动化或报告中写入 Owner 真实密码；TRAE 不得自动登录 Owner 账户。
-- 使用 `panji-server`/`55-server`/原始 IP 或任何非 `panji-prod` 别名访问盘迹生产服务器；生产 SSH 入口唯一为 `scripts/ops/panji-prod-ssh`，部署前必须运行 `scripts/ops/panji-prod-preflight`（详见 `rules/80-deployment-data-safety.md` "生产服务器 SSH SSOT"）。
+- 使用 `panji-server`/`55-server`/原始 IP 或任何非 `panji-prod` 别名访问盘迹远程开发运行服务器；生产 SSH 入口唯一为 `scripts/ops/panji-prod-ssh`，部署前必须运行 `scripts/ops/panji-prod-preflight`（详见 `rules/80-deployment-data-safety.md` "远程开发运行服务器 SSH SSOT"）。
 
 项目特定的高风险操作和环境约束，应记录在 `rules/` 或对应 Runbook 中。
 

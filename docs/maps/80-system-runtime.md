@@ -17,9 +17,9 @@
 | 测试 | `PURE_UNIT_TEST=1`；PostgreSQL 集成测试只在 CI 临时容器运行 |
 
 本地启动和隧道命令以 `docs/runbooks/local-development.md` 为准。本地进程隔离不能被
-解释为测试数据隔离；任何连接正式库的写入都是真实业务写入。
+解释为测试数据隔离；任何连接共享开发业务数据库的写入都是真实业务写入。
 
-## 生产身份
+## 远程开发运行身份
 
 | 项目 | 当前事实 |
 |---|---|
@@ -32,7 +32,7 @@
 | Compose | `docker-compose.prod.yml` 与 `docker-compose.live.yml` 始终叠加 |
 | 部署状态文件 | `/etc/market-dev/.panji-deploy-state`，保存上一成功部署完整 SHA |
 
-原始 IP 和旧 SSH 别名不是允许的操作入口。生产身份的具体网络值由 SSH 配置和
+原始 IP 和旧 SSH 别名不是允许的操作入口。远程开发运行身份的具体网络值由 SSH 配置和
 `panji-prod-preflight` 校验，不在普通命令或报告中重复传播。
 
 ## Git 与 CI
