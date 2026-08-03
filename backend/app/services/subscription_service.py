@@ -1219,7 +1219,12 @@ async def list_subscribers_with_capabilities(
                 member["default_route"] = profile.default_route
                 member["capability_source"] = profile.capability_source
                 member["diagnostics"] = profile.diagnostics
-                member["nearest_capability_expires_at"] = min(active_expiries).isoformat() if active_expiries else None
+                if active_expiries:
+                    member["nearest_capability_expires_at"] = min(
+                        e for e in active_expiries if e is not None
+                    ).isoformat()
+                else:
+                    member["nearest_capability_expires_at"] = None
                 member["legacy_fallback"] = profile.capability_source == "legacy_plan_fallback"
         except Exception:  # noqa: BLE001
             pass

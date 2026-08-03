@@ -247,79 +247,16 @@ jobs:
         run: pytest -m "not postgres and not external_data" --tb=short -q
 
   # ---------------------------------------------------------------------------
-  # 数据库变化：仅真实 PostgreSQL 集成测试（marker=postgres）
-  # ---------------------------------------------------------------------------
-  postgres-integration-tests:
-    name: PostgreSQL Integration Tests
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.db_changed == 'true'
-    needs: [changes]
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: bz
-          POSTGRES_PASSWORD: bz
-          POSTGRES_DB: bz_stock_test
-          TZ: Asia/Shanghai
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    defaults:
-      run:
-        working-directory: backend
-    env:
-      APP_ENV: test
-      TEST_DATABASE_URL: postgresql+asyncpg://bz:bz@localhost:5432/bz_stock_test
-      REDIS_URL: redis://localhost:6379/15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: backend/pyproject.toml
-      - run: pip install -e ".[dev]"
-      - name: Wait for PostgreSQL
-        run: for i in {1..30}; do pg_isready -h localhost -p 5432 -U bz && break; sleep 1; done
-      - name: Run PostgreSQL integration tests only
-        run: pytest -m "postgres and not external_data" --tb=short -q
-
-  # ---------------------------------------------------------------------------
-  # Migration 变化：增量验证（fresh→head，head→本轮 down_revision→head）
+  # Migration 变化：静态验证（不启动数据库，不执行 upgrade/downgrade）
   # ---------------------------------------------------------------------------
   migration-verify:
-    name: Migration Verify
+    name: Migration Verify (static)
     runs-on: ubuntu-latest
     if: needs.changes.outputs.migration_changed == 'true'
     needs: [changes]
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: bz
-          POSTGRES_PASSWORD: bz
-          POSTGRES_DB: bz_stock_test
-          TZ: Asia/Shanghai
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     defaults:
       run:
         working-directory: backend
-    env:
-      APP_ENV: test
-      DATABASE_URL: postgresql+psycopg://bz:bz@localhost:5432/bz_stock_test
-      TEST_DATABASE_URL: postgresql+asyncpg://bz:bz@localhost:5432/bz_stock_test
-      REDIS_URL: redis://localhost:6379/15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -328,36 +265,47 @@ jobs:
           cache: "pip"
           cache-dependency-path: backend/pyproject.toml
       - run: pip install -e ".[dev]"
-      - name: Wait for PostgreSQL
-        run: for i in {1..30}; do pg_isready -h localhost -p 5432 -U bz && break; sleep 1; done
-      - name: Fresh DB upgrade head
-        run: alembic upgrade head
-      - name: Verify single head
+      - name: Static import & chain check (no DB)
         run: |
           set -euo pipefail
-          HEADS=$(alembic heads | grep -c '(head)' || true)
-          alembic heads
-          if [ "$HEADS" != "1" ]; then
-            echo "::error::Alembic 必须保持单一 head，当前 head 数=$HEADS"
+          python - <<'PY'
+          import importlib.util, re, sys
+          from pathlib import Path
+          heads = set()
+          downrefs = set()
+          files = sorted(Path("alembic/versions").glob("[0-9][0-9][0-9]_*.py"))
+          assert files, "no migration files"
+          for p in files:
+              spec = importlib.util.spec_from_file_location("m", p)
+              m = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(m)
+              rev = getattr(m, "revision", None)
+              down = getattr(m, "down_revision", None)
+              assert isinstance(rev, str) and rev, f"revision 缺失/非法: {p}"
+              assert isinstance(down, (str, type(None))), f"down_revision 类型非法: {p}"
+              heads.add(rev)
+              if down:
+                  downrefs.add(down)
+          orphans = heads - downrefs
+          assert len(orphans) == 1, f"非单一 head: {orphans}"
+          print(f"static migration check OK: {len(files)} files, single head={orphans.pop()}")
+          PY
+      - name: No DB service blocks in workflow
+        run: |
+          set -euo pipefail
+          # 只检测活跃的 services: postgres 块（不检测本检查自身的说明文字）
+          if python - <<'PY'
+          import re, sys
+          text = open(".github/workflows/ci.yml", encoding="utf-8").read()
+          tag = "postgres" + ":16"
+          # 匹配 "services:" 下的 "postgres:" service 定义
+          if re.search(r"(?m)^\s*services:\s*\n\s*postgres:\s*\n\s*image:\s*" + re.escape(tag), text):
+              sys.exit(1)
+          PY
+          then
+            echo "::error::ci.yml 不得包含独立 postgres 测试 service 块"
             exit 1
           fi
-      - name: Downgrade to newest migration's down_revision, then upgrade again
-        run: |
-          set -euo pipefail
-          # working-directory 已是 backend，故使用相对 alembic/ 路径
-          NEWEST=$(ls alembic/versions/ | grep -E '^[0-9]{3}_.*\.py$' | sort | tail -1)
-          echo "Newest migration file: $NEWEST"
-          DOWN=$(python -c "
-          import importlib.util
-          spec = importlib.util.spec_from_file_location('m', 'alembic/versions/$NEWEST')
-          m = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(m)
-          print(m.down_revision)
-          ")
-          echo "down_revision: $DOWN"
-          alembic downgrade "$DOWN"
-          alembic upgrade head
-          echo "Migration 增量往返验证通过"
 
   # ---------------------------------------------------------------------------
   # 前端变化：单一 job，一次 npm ci 后运行 tsc/lint/contract/build
@@ -404,7 +352,6 @@ jobs:
       - ruff-new-files
       - mypy-new-files
       - backend-unit-tests
-      - postgres-integration-tests
       - migration-verify
       - frontend-checks
     steps:
@@ -428,7 +375,6 @@ jobs:
             ["ruff-new-files"]="$backend"
             ["mypy-new-files"]="$backend"
             ["backend-unit-tests"]="$backend"
-            ["postgres-integration-tests"]="$db"
             ["migration-verify"]="$migration"
             ["frontend-checks"]="$frontend"
           )
@@ -442,7 +388,6 @@ jobs:
             "ruff-new-files": "${{ needs.ruff-new-files.result }}",
             "mypy-new-files": "${{ needs.mypy-new-files.result }}",
             "backend-unit-tests": "${{ needs.backend-unit-tests.result }}",
-            "postgres-integration-tests": "${{ needs.postgres-integration-tests.result }}",
             "migration-verify": "${{ needs.migration-verify.result }}",
             "frontend-checks": "${{ needs.frontend-checks.result }}"
           }

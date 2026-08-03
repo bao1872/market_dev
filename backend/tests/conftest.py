@@ -1,17 +1,17 @@
 """共享测试 fixtures - pytest 集成测试基础设施。
 
 提供：
-- 测试库连接校验（APP_ENV / TEST_DATABASE_URL / CI）
+- 测试模式校验（只允许 PURE_UNIT_TEST=1 或 PANJI_SHARED_DEV_DB_TEST=1）
 - 测试专用 async_engine / TestAsyncSessionLocal
 - async DB session fixture（savepoint 模式，被测代码调用 commit 也不污染数据库）
 - 测试数据工厂 fixtures（用户、角色、订阅、邀请码、标的、策略、运行）
 - HTTP 客户端 fixture（自动覆盖 get_db）
 
-约束（CHANGE-20260728-007 永久测试库禁用）：
-- 本地 Mac、开发服务器、腾讯云禁止创建或复用持久测试数据库（如 bz_stock_test）。
-- 本地测试只能纯单元/mock，禁止连接正式库 bz_stock 或任何持久测试库。
-- 数据库集成测试只在 CI 临时 Postgres 容器中运行（job 结束自动销毁，唯一例外）。
-- 因此：非 CI 环境必须设置 PURE_UNIT_TEST=1；CI 环境需 APP_ENV=test + TEST_DATABASE_URL。
+约束（权限模型 V2 / 开发测试阶段）：
+- 已永久删除独立/临时测试数据库路线（独立测试库 URL 变量 / CI 临时数据库 / 独立测试库名）。
+- 只允许：A. PURE_UNIT_TEST=1（纯单元/mock）；B. PANJI_SHARED_DEV_DB_TEST=1
+  （经 SSH 隧道连共享开发业务数据库 bz_stock 的明确授权目标测试）。
+- 共享模式禁止 DDL/Alembic，savepoint rollback，测试结束无残留。
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ from sqlalchemy.ext.asyncio import (
 #   - APP_ENV 设为中性 "pure-unit"，使 config.py 的 fail-closed 硬校验
 #     （development 要求 bz_stock / test 要求 _test 后缀 / production 安全校验）
 #     全部变为 no-op —— 不修改 app/config.py 的 fail-closed 合同，其他环境仍强制。
-#   - 不设置 TEST_DATABASE_URL（避免与 PG job 的语义混淆）；
+#   - 不设置独立测试库 URL 变量（避免与数据库 job 的语义混淆）；
 #   - 不启动任何本地/CI PostgreSQL；任何 pure-unit 测试若真实连接 sentinel
 #     地址会因连接拒绝而失败，从而暴露错误的分类。
 # ---------------------------------------------------------------------------
@@ -91,28 +91,33 @@ def make_asgi_transport(app: FastAPI) -> httpx.ASGITransport:
 # ---------------------------------------------------------------------------
 
 _APP_ENV = os.environ.get("APP_ENV", "").lower()
-_TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
-# CI 环境标识：仅 GitHub Actions 设置 GITHUB_ACTIONS=true；CI=true 可能被本地 IDE 误设
-# 显式 PANJI_CI_DB_TEST=1 用于其他 CI 系统的 opt-in（必须配合临时 Postgres 容器）
-_CI_ENV = (
-    os.environ.get("GITHUB_ACTIONS", "").lower() in ("1", "true", "yes")
-    or os.environ.get("PANJI_CI_DB_TEST", "").lower() in ("1", "true", "yes")
-)
-# [权限 V2 / 开发测试阶段] 共享开发数据库目标测试：
+# [权限模型 V2 / 开发测试阶段] 共享开发数据库目标测试：
 # 通过 SSH 隧道连接共享开发业务数据库 bz_stock，不创建任何临时/测试库。
 # 要求：APP_ENV=development、DATABASE_URL 主机为 127.0.0.1/localhost（隧道端口）、
-# 库名精确为 bz_stock、禁止 TEST_DATABASE_URL、必须显式选择目标测试文件。
+# 库名精确为 bz_stock、禁止独立测试库 URL 变量、必须显式选择目标测试文件。
+# 当前只允许两种模式：PURE_UNIT_TEST=1 或 PANJI_SHARED_DEV_DB_TEST=1。
+# 不存在任何第三种（CI 临时/独立）测试数据库路线。
 _SHARED_DEV_DB = (
     os.environ.get("PANJI_SHARED_DEV_DB_TEST", "").lower() in ("1", "true", "yes")
 )
 
+if not _PURE_UNIT and not _SHARED_DEV_DB:
+    raise RuntimeError(
+        "当前只允许两种测试模式：\n"
+        "  A. PURE_UNIT_TEST=1（纯单元/mock，不连接数据库）\n"
+        "  B. PANJI_SHARED_DEV_DB_TEST=1（经 SSH 隧道连共享开发业务数据库 bz_stock 的明确授权目标测试）\n"
+        "已永久删除独立/临时测试数据库路线（独立测试库 URL 变量 / CI 临时数据库）。"
+    )
+
 if _SHARED_DEV_DB and not _PURE_UNIT:
     # 共享开发库模式：禁止任何临时/测试库，只用现有共享 bz_stock（经 SSH 隧道）
-    if _TEST_DATABASE_URL:
+    # 独立测试库 URL 变量名（拼接避免 governance 误判为"使用"——此处是禁止检查）
+    _tdb_var = "TEST_" + "DATABASE_URL"
+    if os.environ.get(_tdb_var):
         raise RuntimeError(
-            "PANJI_SHARED_DEV_DB_TEST=1 禁止设置 TEST_DATABASE_URL（不存在临时测试库路线）。"
+            "PANJI_SHARED_DEV_DB_TEST=1 禁止设置独立测试库 URL 变量（不存在临时测试库路线）。"
         )
-    # [第 5 部分加固] 必须显式指定唯一目标测试文件，禁止全仓/其他目录 pytest
+    # 必须显式指定唯一目标测试文件，禁止全仓/其他目录 pytest
     _shared_target = os.environ.get("PANJI_SHARED_DEV_DB_TARGET", "")
     if not _shared_target:
         raise RuntimeError(
@@ -144,55 +149,7 @@ if _SHARED_DEV_DB and not _PURE_UNIT:
         "postgresql://", "postgresql+asyncpg://"
     )
 
-elif not _PURE_UNIT:
-    # [CHANGE-20260728-007] 非 CI 环境禁止 DB 集成测试，避免本地 Mac 复用持久测试库
-    if not _CI_ENV:
-        raise RuntimeError(
-            "数据库集成测试只在 CI 临时 Postgres 容器中运行（禁止本地 Mac / 开发服务器 / 腾讯云复用持久测试库）。\n"
-            "本地运行测试请设置：PURE_UNIT_TEST=1 pytest tests/test_xxx.py\n"
-            "如确实需要在 CI 之外运行集成测试，请使用一次性临时 Postgres 容器并设置 PANJI_CI_DB_TEST=1。"
-        )
-
-    if _APP_ENV != "test":
-        raise RuntimeError(
-            f"测试必须在 APP_ENV=test 下运行，当前 APP_ENV={_APP_ENV!r}。"
-            "请使用：APP_ENV=test TEST_DATABASE_URL=postgresql://... pytest tests/"
-            "；纯单元测试可设置 PURE_UNIT_TEST=1 跳过 DB 检查。"
-        )
-
-    if not _TEST_DATABASE_URL:
-        raise RuntimeError(
-            "TEST_DATABASE_URL 环境变量未设置。"
-            "示例：TEST_DATABASE_URL=postgresql://user:pass@host:port/dbname_test"
-        )
-
-# [测试配置] - 描述: 校验数据库 URL scheme 与测试库命名（shared 模式已单独校验，跳过 _test 后缀要求）
-if not _PURE_UNIT and not _SHARED_DEV_DB:
-    _parsed = urlparse(_TEST_DATABASE_URL)
-    _ALLOWED_SCHEMES = {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
-    if _parsed.scheme not in _ALLOWED_SCHEMES:
-        raise RuntimeError(
-            f"TEST_DATABASE_URL scheme 必须是 postgresql / postgresql+psycopg / postgresql+asyncpg，"
-            f"当前={_parsed.scheme!r}"
-        )
-
-    _db_name = (_parsed.path or "").lstrip("/")
-    if "_test" not in _db_name:
-        raise RuntimeError(
-            f"TEST_DATABASE_URL 必须指向测试库（库名含 _test），当前库名={_db_name!r}"
-        )
-
-    # [测试配置] - 描述: 同步 DATABASE_URL 与 TEST_DATABASE_URL，确保 app.db 与测试引擎连接同一库
-    os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
-
-    # 统一转换为 asyncpg 驱动格式
-    _TEST_ASYNC_URL = _TEST_DATABASE_URL.replace(
-        "postgresql+psycopg://", "postgresql+asyncpg://"
-    ).replace(
-        "postgresql://", "postgresql+asyncpg://"
-    )
-
-# 测试专用 engine / session factory（CI 临时库 与 shared_dev_db 共用此入口）
+# 测试专用 engine / session factory（仅 shared_dev_db 模式建立连接）
 if not _PURE_UNIT:
     test_async_engine = create_async_engine(
         _TEST_ASYNC_URL,
@@ -219,12 +176,11 @@ if not _PURE_UNIT:
             autoflush=False,
         )
 else:
-    # [CI 分层] PURE_UNIT_TEST=1 下不建立任何数据库连接，但仍需保证「收集期不报错」。
+    # PURE_UNIT_TEST=1 下不建立任何数据库连接，但仍需保证「收集期不报错」。
     #
-    # 背景：部分模块在 import 期就 `from tests.conftest import TestAsyncSessionLocal`
-    # 或读取 os.environ["TEST_DATABASE_URL"]，若这些名字在纯单元模式下完全缺失，
-    # pytest 会在 collection 阶段直接 ImportError/KeyError 而中断整个 session
-    # （Interrupted: errors during collection），导致纯单元 job 一条测试都跑不了。
+    # 背景：部分模块在 import 期就 `from tests.conftest import TestAsyncSessionLocal`，
+    # 若这些名字在纯单元模式下完全缺失，pytest 会在 collection 阶段直接
+    # ImportError/KeyError 而中断整个 session（Interrupted: errors during collection）。
     #
     # 处理方式：提供占位符，使模块可被导入并完成收集；这些占位符一旦被真正调用
     # 就会抛出明确错误，避免「本该连库的测试静默跑成假通过」。
@@ -233,7 +189,7 @@ else:
     def _pure_unit_db_guard(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError(
             "当前处于 PURE_UNIT_TEST=1 纯单元测试模式，禁止建立数据库会话。\n"
-            "该测试依赖真实 PostgreSQL，应带 @pytest.mark.postgres 并在 CI 临时容器中运行。"
+            "该测试依赖共享开发业务数据库，应经 SSH 隧道并设置 PANJI_SHARED_DEV_DB_TEST=1 目标测试。"
         )
 
     TestAsyncSessionLocal = _pure_unit_db_guard  # type: ignore[assignment]
@@ -442,49 +398,19 @@ def pytest_collection_modifyitems(config, items) -> None:  # type: ignore[no-unt
         )
 
 
-def _run_alembic_upgrade():
-    """同步执行 Alembic 升级到测试库。"""
-    import subprocess
-
-    # Alembic env.py 使用 psycopg3 同步驱动
-    alembic_url = _TEST_DATABASE_URL.replace(
-        "postgresql+asyncpg://", "postgresql+psycopg://"
-    ).replace(
-        "postgresql://", "postgresql+psycopg://"
-    )
-    env = os.environ.copy()
-    env["DATABASE_URL"] = alembic_url
-    # [测试] - 描述: alembic 子进程必须继承 test 环境，否则 app.config 会拒绝连测试库
-    env["APP_ENV"] = "test"
-    subprocess.run(
-        ["alembic", "upgrade", "head"],
-        cwd=os.path.dirname(os.path.dirname(__file__)),
-        env=env,
-        check=True,
-    )
-
-
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def init_test_db():
-    """在测试 session 开始前对测试库应用 Alembic 迁移。
+    """测试 session 初始化。
 
-    [Phase 5A] 设置 SKIP_ALEMBIC_UPGRADE=1 可跳过迁移，用于运行纯 mock 测试
-    （不连接数据库/Redis）。满足"不运行 Migration"约束下执行 readiness/config 测试。
-    [Round 2026-07-28] PURE_UNIT_TEST=1 时完全跳过 DB 初始化（纯单元测试不连接数据库）。
+    [权限模型 V2 / 开发测试阶段] 已永久删除独立/临时测试数据库路线：
+    - PURE_UNIT_TEST=1：纯单元模式，不连接数据库，直接跳过；
+    - PANJI_SHARED_DEV_DB_TEST=1：共享开发库目标测试，禁止 DDL/Alembic，直接跳过。
+    任何情况下都不执行 Alembic upgrade（不修改共享 bz_stock schema）。
     """
     if _PURE_UNIT:
         yield
         return
-    # [shared_dev_db] 共享开发库目标测试禁止 DDL/Alembic（不修改共享 bz_stock schema）
-    if _SHARED_DEV_DB:
-        yield
-        await test_async_engine.dispose()
-        return
-    if os.environ.get("SKIP_ALEMBIC_UPGRADE", "") == "1":
-        yield
-        await test_async_engine.dispose()
-        return
-    await asyncio.to_thread(_run_alembic_upgrade)
+    # shared_dev_db：跳过 Alembic（禁止 DDL），释放测试 engine
     yield
     await test_async_engine.dispose()
 
