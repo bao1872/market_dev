@@ -13,15 +13,20 @@
 统一供以下链路使用：login / register / refresh / /me/access / API route guards /
 前端 AuthStore / 管理员用户列表 / 管理员用户详情 / 默认路由计算。
 
-禁止这些模块各自重新推导权限。
+禁止这些模块各自重新推导权限（get_access_context 作为兼容包装，内部必须调用
+本服务，不得再次查询和推导）。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.deps import _get_user_roles
+from app.models.user_capability import UserCapability
 
 CAP_SELF_SELECTION = "self_selection"
 CAP_MARKET_DATA = "market_data"
@@ -41,7 +46,19 @@ DEFAULT_ROUTE_MARKET = "/market"
 DEFAULT_ROUTE_MARKET_WATCHLIST = "/market?scope=watchlist"
 DEFAULT_ROUTE_REVIEW = "/review"
 DEFAULT_ROUTE_FORBIDDEN = "/forbidden"
-DEFAULT_ROUTE_EXPIRED = "/subscription-expired"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _ensure_aware(value: datetime | None) -> datetime | None:
+    """统一 naive/aware 时间为 UTC-aware（naive 视为 UTC）。"""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 @dataclass
@@ -91,20 +108,32 @@ class EffectiveAccessProfile:
     def has_any_access(self) -> bool:
         return self.is_admin or bool(self.active_capability_keys)
 
+    @property
+    def capability_source(self) -> str:
+        """来源：admin / user_capabilities / legacy_plan_fallback / none。"""
+        if self.is_admin:
+            return "admin"
+        sources = {v.source for v in self.capabilities.values() if v.source}
+        if not sources:
+            return "none"
+        if sources == {"legacy_plan_fallback"}:
+            return "legacy_plan_fallback"
+        return "user_capabilities"
 
-def _compute_default_route(
+
+def compute_default_route(
     is_admin: bool,
     capabilities: dict[str, CapabilityState],
 ) -> str:
-    """依据 capabilities 计算默认入口（不与 Subscription 状态耦合）。
+    """依据 capabilities 计算默认入口（公开函数，供登录/路由/后台共用）。
 
     规则（权限模型 V2）：
     - admin → /admin/overview
     - 无 active capability → /forbidden
     - 仅 research_replay → /review
-    - self_selection + market_data（含 research_replay）→ /market
     - 仅 self_selection → /market?scope=watchlist
     - 仅 market_data → /market
+    - self_selection + market_data（含 research_replay）→ /market
     - research_replay 加其他权限 → /market
     """
     if is_admin:
@@ -118,103 +147,118 @@ def _compute_default_route(
         return DEFAULT_ROUTE_MARKET_WATCHLIST
     if active == {CAP_MARKET_DATA}:
         return DEFAULT_ROUTE_MARKET
-    # self_selection + market_data（可含 research_replay）→ /market
     if CAP_SELF_SELECTION in active and CAP_MARKET_DATA in active:
         return DEFAULT_ROUTE_MARKET
-    # 其他组合：research_replay 加任一 → /market
     if CAP_RESEARCH_REPLAY in active:
         return DEFAULT_ROUTE_MARKET
     return DEFAULT_ROUTE_FORBIDDEN
 
 
-async def resolve_effective_access(db: Any, user: Any) -> EffectiveAccessProfile:
+def infer_capabilities_from_plan(
+    plan_code: str | None,
+    plan_monitor_limit: int | None,
+    expires_at: datetime | None,
+    subscription_active: bool,
+) -> dict[str, dict[str, Any]]:
+    """Legacy plan fallback 适配器（公开函数）。
+
+    仅用于无显式 user_capabilities 的旧用户兼容期。调用方必须显式标记
+    ``source=legacy_plan_fallback``，不得静默混入正常用户。
+    """
+    expires_at = _ensure_aware(expires_at)
+    if plan_code == "observe_20":
+        return {
+            CAP_SELF_SELECTION: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
+            CAP_MARKET_DATA: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+        }
+    if plan_code == "research_50":
+        return {
+            CAP_SELF_SELECTION: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
+            CAP_MARKET_DATA: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+            CAP_RESEARCH_REPLAY: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+        }
+    return {}
+
+
+async def resolve_effective_access(
+    db: AsyncSession,
+    user: Any,
+) -> EffectiveAccessProfile:
     """唯一权限解析入口。
 
     从 user_capabilities 解析 capabilities（唯一真源），旧用户无显式行时
     显式标记 legacy plan fallback。不因 plan_code 决定功能权限。
 
-    Args:
-        db: 异步 DB 会话
-        user: User 对象（需挂载 _roles）
-
-    Returns:
-        EffectiveAccessProfile
+    时区统一：比较一律使用 ``datetime.now(UTC)`` 与 UTC-aware 时间；
+    数据库返回的 naive 时间视为 UTC 统一处理。
     """
-    from app.models.user_capability import UserCapability
-
     user_id = str(user.id)
-    roles = list(getattr(user, "_roles", []) or [])
+    roles = list(_get_user_roles(user))
     is_admin = "admin" in roles
-
-    # 查询显式 user_capabilities（唯一真源）
-    cap_rows: list[UserCapability] = []
-    if not is_admin:
-        stmt = (
-            "SELECT capability, granted_at, expires_at, watchlist_limit, source "
-            "FROM user_capabilities WHERE user_id = :uid"
-        )
-        result = await db.execute(
-            stmt,
-            {"uid": user.id},
-        )
-        cap_rows = result.fetchall() if hasattr(result, "fetchall") else result.scalars().all()
+    now = _utcnow()
 
     capabilities: dict[str, CapabilityState] = {}
     diagnostics: list[str] = []
-    now_utc = datetime.utcnow()
 
     if is_admin:
-        # admin 全权限豁免
         for key in ALL_CAPABILITIES:
             capabilities[key] = CapabilityState(
                 key=key, active=True, granted_at=None, expires_at=None,
-                watchlist_limit=None, source="admin",
+                watchlist_limit=None, source="admin", reason="admin",
             )
-    elif cap_rows:
+        return EffectiveAccessProfile(
+            user_id=user_id, account_status=user.status, roles=roles, is_admin=True,
+            capabilities=capabilities, default_route=compute_default_route(True, capabilities),
+        )
+
+    # 唯一真源：显式 user_capabilities（ORM select，禁止原始 SQL 字符串）
+    stmt = select(UserCapability).where(UserCapability.user_id == user.id)
+    cap_rows = (await db.execute(stmt)).scalars().all()
+
+    if cap_rows:
         for row in cap_rows:
-            cap_key = getattr(row, "capability", None) or "unknown"
-            granted_at = getattr(row, "granted_at", None)
-            expires_at = getattr(row, "expires_at", None)
-            watchlist_limit = getattr(row, "watchlist_limit", None)
-            source = getattr(row, "source", None) or "user_capabilities"
-            active = bool(expires_at and expires_at > now_utc)
-            capabilities[cap_key] = CapabilityState(
-                key=cap_key,
+            expires_at = _ensure_aware(row.expires_at)
+            granted_at = _ensure_aware(row.granted_at)
+            active = bool(expires_at and expires_at > now)
+            source = row.source or "user_capabilities"
+            capabilities[row.capability] = CapabilityState(
+                key=row.capability,
                 active=active,
                 granted_at=granted_at,
                 expires_at=expires_at,
-                watchlist_limit=watchlist_limit,
+                watchlist_limit=row.watchlist_limit,
                 source=source,
                 reason="expired" if (expires_at and not active) else ("active" if active else "no_expiry"),
             )
     else:
         # legacy plan fallback（兼容期，显式标记 source，不得静默混入正常用户）
         from app.models.subscription import Subscription
-        from app.services.access_control_service import _infer_capabilities_from_plan
+        from app.services.plan_service import get_plan
 
         sub_stmt = select(Subscription).where(Subscription.user_id == user.id)
         sub_row = (await db.execute(sub_stmt)).scalars().first()
         plan_code = sub_row.plan_code if sub_row else None
         plan_monitor_limit = None
-        expires_at = sub_row.expires_at if sub_row else None
+        expires_at = _ensure_aware(sub_row.expires_at) if sub_row else None
         sub_active = bool(
             sub_row
             and sub_row.status == "active"
-            and sub_row.starts_at <= now_utc
-            and sub_row.expires_at > now_utc
+            and _ensure_aware(sub_row.starts_at) is not None
+            and (_ensure_aware(sub_row.starts_at) or now) <= now
+            and expires_at is not None
+            and expires_at > now
         )
         if plan_code:
-            from app.services.plan_service import get_plan
             plan = await get_plan(db, plan_code)
             plan_monitor_limit = plan.monitor_limit if plan else None
-        inferred = _infer_capabilities_from_plan(
+        inferred = infer_capabilities_from_plan(
             plan_code, plan_monitor_limit, expires_at, sub_active
         )
         for key, info in inferred.items():
             capabilities[key] = CapabilityState(
                 key=key,
                 active=bool(info.get("active")),
-                expires_at=info.get("expires_at"),
+                expires_at=_ensure_aware(info.get("expires_at")),
                 watchlist_limit=info.get("watchlist_limit"),
                 source="legacy_plan_fallback",
                 reason="legacy_plan_fallback",
@@ -227,7 +271,7 @@ async def resolve_effective_access(db: Any, user: Any) -> EffectiveAccessProfile
         roles=roles,
         is_admin=is_admin,
         capabilities=capabilities,
-        default_route=_compute_default_route(is_admin, capabilities),
+        default_route=compute_default_route(is_admin, capabilities),
         diagnostics=diagnostics,
     )
 

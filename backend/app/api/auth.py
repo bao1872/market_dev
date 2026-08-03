@@ -67,9 +67,7 @@ from app.services.access_control_service import (
 )
 from app.services.effective_access_service import (
     CapabilityState,
-)
-from app.services.effective_access_service import (
-    _compute_default_route as _compute_default_route_v2,
+    compute_default_route,
 )
 from app.services.subscription_service import (
     _ensure_aware,
@@ -198,7 +196,7 @@ async def login(
                                  watchlist_limit=info.get("watchlist_limit"), source="user_capabilities")
             for key, info in ctx.capabilities.items()
         }
-        next_route = _compute_default_route_v2(ctx.is_admin, cap_states)
+        next_route = compute_default_route(ctx.is_admin, cap_states)
 
         # 生成 token
         user_id_str = str(user.id)

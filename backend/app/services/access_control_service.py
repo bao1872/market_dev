@@ -43,7 +43,7 @@ from app.core.deps import _get_user_roles, get_current_active_user
 from app.db import get_db
 from app.models.subscription import Subscription
 from app.models.user import User
-from app.models.user_capability import ALL_CAPABILITIES, UserCapability
+from app.models.user_capability import ALL_CAPABILITIES
 from app.services.plan_service import get_plan
 from app.services.subscription_service import get_effective_subscription_status
 
@@ -218,32 +218,17 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             capabilities={},
         )
 
-    # [Phase 5B-2 PRD60 PA-01] 查询 user_capabilities 表（优先于 plan_code 推断）
-    cap_stmt = select(UserCapability).where(UserCapability.user_id == user.id)
-    cap_result = await db.execute(cap_stmt)
-    cap_rows = cap_result.scalars().all()
+    # [权限模型 V2] capabilities 统一由 resolve_effective_access 解析（唯一真源），
+    # get_access_context 仅作为兼容包装，不再重复查询与推导 user_capabilities。
+    from app.services.effective_access_service import (
+        capabilities_to_serializable,
+        resolve_effective_access,
+    )
 
-    # [PlanService] - 描述: 复用 plan_service.get_plan 读取套餐定义（唯一真源）
-    # 提前到 capability 推断之前，便于 fallback 读取 monitor_limit（避免硬编码套餐数值）
+    profile = await resolve_effective_access(db, user)
+
+    # [PlanService] - 描述: 复用 plan_service.get_plan 读取套餐定义（唯一真源，商业展示字段）
     plan = await get_plan(db, plan_code)
-
-    if cap_rows:
-        # 优先使用 user_capabilities 表（per-capability 独立 expires_at）
-        now_utc = datetime.now(cap_rows[0].expires_at.tzinfo) if cap_rows[0].expires_at.tzinfo else datetime.now()
-        capabilities: dict[str, dict[str, Any]] = {}
-        for row in cap_rows:
-            cap_active = row.expires_at > now_utc if row.expires_at else False
-            capabilities[row.capability] = {
-                "active": cap_active,
-                "expires_at": row.expires_at,
-                "watchlist_limit": row.watchlist_limit,
-            }
-    else:
-        # Fallback: 从 plan_code 推断（兼容期，旧用户无 user_capabilities 行）
-        # watchlist_limit 从 plan.monitor_limit 读取，避免硬编码套餐数值
-        capabilities = _infer_capabilities_from_plan(
-            plan_code, plan.monitor_limit if plan else None, expires_at, subscription_active
-        )
 
     return AccessContext(
         user_id=str(user.id),
@@ -261,7 +246,7 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
             "notification_channel_limit": int(plan.notification_channel_limit),
             "message_retention_days": int(plan.message_retention_days),
         },
-        capabilities=capabilities,
+        capabilities=capabilities_to_serializable(profile.capabilities),
     )
 
 

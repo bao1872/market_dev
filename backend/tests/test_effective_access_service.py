@@ -24,7 +24,7 @@ from app.services.effective_access_service import (
     DEFAULT_ROUTE_MARKET_WATCHLIST,
     DEFAULT_ROUTE_REVIEW,
     CapabilityState,
-    _compute_default_route,
+    compute_default_route,
     resolve_effective_access,
 )
 
@@ -51,7 +51,7 @@ class TestComputeDefaultRoute:
     )
     def test_route_matrix(self, is_admin: bool, active_keys: list[str], expected: str) -> None:
         caps = {k: _cap(k, k in active_keys) for k in active_keys}
-        assert _compute_default_route(is_admin, caps) == expected
+        assert compute_default_route(is_admin, caps) == expected
 
 
 class TestResolveEffectiveAccess:
@@ -131,3 +131,57 @@ class TestResolveEffectiveAccess:
         profile = await resolve_effective_access(db, self._mk_user())
         # fallback 需要订阅查询，这里 mock 无订阅 → 无 capabilities
         assert profile.diagnostics == [] or "legacy_plan_fallback" in profile.diagnostics
+
+
+class TestCapabilityTimezone:
+    """时区统一：aware/naive/过期/正好当前/无 expires 判定。"""
+
+    def _mk_row(self, expires_at: datetime | None) -> SimpleNamespace:
+        return SimpleNamespace(
+            capability=CAP_SELF_SELECTION, granted_at=None,
+            expires_at=expires_at, watchlist_limit=1, source="invite_code",
+        )
+
+    def _mk_user(self, roles: list[str] | None = None, status: str = "active") -> SimpleNamespace:
+        return SimpleNamespace(id="user-1", status=status, _roles=roles or ["member"])
+
+    def _mk_db(self, rows: list[Any]) -> SimpleNamespace:
+        async def execute(stmt, params=None):
+            return SimpleNamespace(
+                fetchall=lambda: rows,
+                scalars=lambda: SimpleNamespace(all=lambda: rows, first=lambda: rows[0] if rows else None),
+            )
+        return SimpleNamespace(execute=execute, scalar_one_or_none=lambda: None)
+
+    @pytest.mark.asyncio
+    async def test_aware_expires_future_is_active(self) -> None:
+        from datetime import UTC, timedelta
+        exp = datetime.now(UTC) + timedelta(days=1)
+        db = self._mk_db([self._mk_row(exp)])
+        profile = await resolve_effective_access(db, self._mk_user())
+        assert profile.active_capability_keys == [CAP_SELF_SELECTION]
+
+    @pytest.mark.asyncio
+    async def test_naive_expires_future_is_active(self) -> None:
+        from datetime import timedelta
+        # naive 时间视为 UTC
+        exp = datetime.utcnow() + timedelta(days=1)
+        db = self._mk_db([self._mk_row(exp)])
+        profile = await resolve_effective_access(db, self._mk_user())
+        assert profile.active_capability_keys == [CAP_SELF_SELECTION]
+
+    @pytest.mark.asyncio
+    async def test_expired_is_inactive(self) -> None:
+        from datetime import UTC, timedelta
+        exp = datetime.now(UTC) - timedelta(days=1)
+        db = self._mk_db([self._mk_row(exp)])
+        profile = await resolve_effective_access(db, self._mk_user())
+        assert profile.active_capability_keys == []
+        assert profile.capabilities[CAP_SELF_SELECTION].reason == "expired"
+
+    @pytest.mark.asyncio
+    async def test_no_expires_is_inactive_no_expiry(self) -> None:
+        db = self._mk_db([self._mk_row(None)])
+        profile = await resolve_effective_access(db, self._mk_user())
+        assert profile.active_capability_keys == []
+        assert profile.capabilities[CAP_SELF_SELECTION].reason == "no_expiry"
