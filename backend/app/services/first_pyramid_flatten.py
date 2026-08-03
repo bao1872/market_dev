@@ -1005,6 +1005,87 @@ def flatten_chip_fields(chip_dimension: dict[str, Any] | None) -> dict[str, Any]
     return {k: flat[k] for k in FP_CHIP_KEYS}
 
 
+# =============================================================================
+# [C1] 第一金字塔统一读模型组装
+# =============================================================================
+# 唯一权威组装函数：producer 写入持久化 flat、Market API / Review / 详情 / 导出
+# 读取时**必须**复用本函数完成元数据覆盖与 chip 合并，不得各自重复覆盖字段。
+# 设计要点：
+#   - fp_trade_date 覆盖为 snapshot.trade_date 真实列（不读 first_pyramid.tradeDate）
+#   - fp_run_id 覆盖为 snapshot.source_run_id 真实列
+#   - fp_calculated_at 覆盖为 snapshot.created_at 真实列
+#   - fp_is_stale 动态计算：snapshot.trade_date < max_bar_date（None 时 False）
+#   - 合并严格匹配 chip_flat 到 10 个 chip 字段；fp_chip_available 按 chip available 计算
+#   - 保留条件性 null，不补 0
+# =============================================================================
+
+
+def assemble_first_pyramid_read_model(
+    stored_flat: dict[str, Any] | None,
+    snapshot_columns: dict[str, Any] | None = None,
+    chip_snapshot: dict[str, Any] | None = None,
+    max_bar_date: str | None = None,
+) -> dict[str, Any] | None:
+    """将已扁平化的 first_pyramid_flat 统一组装为最终读模型（99 键）。
+
+    Args:
+        stored_flat: flatten_first_pyramid 的输出（99 键）；None 时返回 None（无快照）
+        snapshot_columns: 快照真实列，可用键：
+            - trade_date: date|str（业务交易日，覆盖 fp_trade_date）
+            - created_at: str|None（快照创建时间 ISO，覆盖 fp_calculated_at）
+            - source_run_id: str|None（快照归属 run，覆盖 fp_run_id）
+        chip_snapshot: 严格匹配的 chip 快照，可用键：
+            - chip_flat: dict（chip_payload.chip_flat，10 个 chip 字段）
+            - chip_available: bool（chip 维度 available 是否 true）
+            None 或缺省时 chip 字段清为 None、fp_chip_available=False
+        max_bar_date: 该股票最新日线 trade_date（ISO YYYY-MM-DD），用于 fp_is_stale；
+            None 时 is_stale 保持 False
+
+    Returns:
+        组装后的 flat dict（恰好 99 键）；stored_flat 为 None 时返回 None
+    """
+    if stored_flat is None:
+        return None
+
+    cols = snapshot_columns or {}
+    chip = chip_snapshot or {}
+
+    # 1. 覆盖元数据字段（真实列优先）
+    trade_date = cols.get("trade_date")
+    if trade_date is not None:
+        stored_flat["fp_trade_date"] = (
+            trade_date.isoformat() if hasattr(trade_date, "isoformat") else str(trade_date)
+        )
+
+    created_at = cols.get("created_at")
+    if created_at is not None:
+        stored_flat["fp_calculated_at"] = (
+            created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at)
+        )
+
+    source_run_id = cols.get("source_run_id")
+    if source_run_id is not None:
+        stored_flat["fp_run_id"] = str(source_run_id)
+
+    # 2. 动态计算 fp_is_stale：snapshot.trade_date < 该股最新日线 trade_date
+    if trade_date is not None and max_bar_date is not None:
+        td = trade_date.isoformat() if hasattr(trade_date, "isoformat") else str(trade_date)
+        md = max_bar_date.isoformat() if hasattr(max_bar_date, "isoformat") else str(max_bar_date)
+        stored_flat["fp_is_stale"] = td < md
+
+    # 3. 合并 chip_flat / 计算 fp_chip_available
+    chip_flat = chip.get("chip_flat") or {}
+    chip_available = bool(chip.get("chip_available"))
+    for k in FP_CHIP_KEYS:
+        if chip_flat and k in chip_flat:
+            stored_flat[k] = chip_flat[k]
+        else:
+            stored_flat[k] = None
+    stored_flat["fp_chip_available"] = chip_available
+
+    return stored_flat
+
+
 if __name__ == "__main__":
     # 自测：验证 99 键完整性
     flat_none = flatten_first_pyramid(None)

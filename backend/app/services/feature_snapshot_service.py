@@ -71,7 +71,10 @@ from app.services.canonical_adapters import (
     profile_to_dict,
 )
 from app.services.canonical_computation_service import CanonicalComputationService
-from app.services.first_pyramid_flatten import flatten_first_pyramid
+from app.services.first_pyramid_flatten import (
+    assemble_first_pyramid_read_model,
+    flatten_first_pyramid,
+)
 from app.services.node_cluster_input_provider import NodeClusterInputProvider
 
 
@@ -243,6 +246,8 @@ def build_summary_payload(
     source_bar_time: str | None = None,
     extra: dict[str, Any] | None = None,
     first_pyramid: dict[str, Any] | None = None,
+    *,
+    source_run_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """从 structural/temporal payload 抽取前端列表用摘要。
 
@@ -257,6 +262,7 @@ def build_summary_payload(
         source_bar_time: 数据源截止时间（ISO 字符串）
         extra: 额外字段（current_price, change_pct, bb_upper/mid/lower 等）
         first_pyramid: 第一金字塔统一快照 dict（Gate1 持久化；None 表示未计算或数据不足）
+        source_run_id: 快照归属 run ID（写入 fp_run_id 元数据字段）
 
     Returns:
         前端列表用摘要 dict，包含 _source='feature_snapshot'
@@ -305,7 +311,15 @@ def build_summary_payload(
         "first_pyramid": first_pyramid,
         # [CHANGE-20260729-005 二.2] 扁平化 99 字段对象，供服务端 filter/sort 统一读取
         # 包含全部 99 个 fp_ 键；chip 字段在 core 写入时可能为 None（chip 异步写入独立表）
-        "first_pyramid_flat": flatten_first_pyramid(first_pyramid),
+        # [C1] 统一读模型组装：写入时即覆盖 fp_trade_date/fp_run_id 真实列，
+        #      避免持久化 flat 与 API 响应 read model 元数据不一致
+        "first_pyramid_flat": assemble_first_pyramid_read_model(
+            flatten_first_pyramid(first_pyramid),
+            snapshot_columns={
+                "trade_date": trade_date,
+                "source_run_id": str(source_run_id) if source_run_id is not None else None,
+            },
+        ),
     }
 
 
@@ -653,6 +667,7 @@ async def compute_feature_snapshot_for_date(
         structural_payload, temporal_payload, trade_date,
         source_bar_time=source_bar_time_str, extra=extra,
         first_pyramid=first_pyramid_dict,
+        source_run_id=source_run_id,
     )
 
     return StockFeatureSnapshot(
@@ -881,6 +896,7 @@ async def compute_review_core_for_trade_date(
         structural_payload, temporal_payload, trade_date,
         source_bar_time=source_bar_time_str, extra=extra,
         first_pyramid=first_pyramid_dict,
+        source_run_id=source_run_id,
     )
     # 标记 review core 路径（供下游区分）
     summary_payload["_review_core"] = True

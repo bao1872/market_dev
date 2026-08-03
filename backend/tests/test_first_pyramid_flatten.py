@@ -807,3 +807,150 @@ class TestFlattenChipFields:
         # 校验全部 chip 键都在筹码分组中
         chip_group_keys = set(FP_FIELD_GROUPS["筹码"])
         assert set(FP_CHIP_KEYS) == chip_group_keys
+
+
+# =============================================================================
+# [C1] assemble_first_pyramid_read_model 统一读模型合同测试
+# producer 写入持久化 flat / Market API / Review / 详情 / 导出复用同一组装逻辑
+# =============================================================================
+
+
+def _build_minimal_first_pyramid() -> dict:
+    """构造一个最小合法的 first_pyramid 嵌套 dict（仅必选维度+状态文本）。"""
+    return {
+        "tradeDate": "2026-07-31",
+        "statusText": "趋势上行 + 结构共振 + 动量扩张",
+        "trend": {
+            "available": True,
+            "continuousFactors": {
+                "regime_value": 1,
+                "dsa_dir_bars": 60,
+                "segment_change_pct": 2.5,
+                "segment_slope": 0.8,
+                "current_segment_volume_mean": 1000,
+            },
+            "events": [],
+            "statusText": "趋势上行",
+        },
+        "structure": {
+            "available": True,
+            "continuousFactors": {},
+            "events": [],
+            "statusText": "结构共振",
+        },
+        "momentum": {
+            "available": True,
+            "continuousFactors": {"squeeze_on": False, "bb_width": 0.1},
+            "events": [],
+            "statusText": "动量扩张",
+        },
+    }
+
+
+class TestAssembleReadModel:
+    """assemble_first_pyramid_read_model 统一读模型组装合同。"""
+
+    def test_none_stored_flat_returns_none(self) -> None:
+        """stored_flat=None（无快照）→ 返回 None。"""
+        from app.services.first_pyramid_flatten import assemble_first_pyramid_read_model
+        assert assemble_first_pyramid_read_model(None) is None
+
+    def test_overrides_metadata_from_snapshot_columns(self) -> None:
+        """fp_trade_date / fp_run_id / fp_calculated_at 覆盖为快照真实列。"""
+        from app.services.first_pyramid_flatten import assemble_first_pyramid_read_model
+        flat = flatten_first_pyramid(_build_minimal_first_pyramid())
+        # flatten 自身不注入 run_id/calculated_at（模拟 producer 旧行为）
+        assert flat["fp_run_id"] is None
+        assert flat["fp_calculated_at"] is None
+
+        result = assemble_first_pyramid_read_model(
+            flat,
+            snapshot_columns={
+                "trade_date": "2026-07-31",
+                "created_at": "2026-07-31T15:00:00+08:00",
+                "source_run_id": "11111111-2222-3333-4444-555555555555",
+            },
+        )
+        assert result["fp_trade_date"] == "2026-07-31"
+        assert result["fp_run_id"] == "11111111-2222-3333-4444-555555555555"
+        assert result["fp_calculated_at"] == "2026-07-31T15:00:00+08:00"
+
+    def test_is_stale_dynamic_computation(self) -> None:
+        """fp_is_stale = snapshot.trade_date < max_bar_date。"""
+        from app.services.first_pyramid_flatten import assemble_first_pyramid_read_model
+        flat = flatten_first_pyramid(_build_minimal_first_pyramid())
+
+        # 快照日期早于最新日线 → stale
+        r1 = assemble_first_pyramid_read_model(
+            flat,
+            snapshot_columns={"trade_date": "2026-07-30"},
+            max_bar_date="2026-07-31",
+        )
+        assert r1["fp_is_stale"] is True
+        # 快照日期等于最新日线 → 不 stale
+        r2 = assemble_first_pyramid_read_model(
+            flat,
+            snapshot_columns={"trade_date": "2026-07-31"},
+            max_bar_date="2026-07-31",
+        )
+        assert r2["fp_is_stale"] is False
+        # 无 max_bar_date → 保持 False
+        r3 = assemble_first_pyramid_read_model(
+            flat,
+            snapshot_columns={"trade_date": "2026-07-30"},
+        )
+        assert r3["fp_is_stale"] is False
+
+    def test_merges_chip_flat_and_sets_available(self) -> None:
+        """chip_snapshot 存在时合并 10 个 chip 字段并计算 fp_chip_available。"""
+        from app.services.first_pyramid_flatten import assemble_first_pyramid_read_model
+        flat = flatten_first_pyramid(_build_minimal_first_pyramid())
+        assert flat["fp_chip_available"] is None
+
+        chip_flat = {
+            "fp_chip_state": "ready",
+            "fp_poc_price": 10.5,
+        }
+        result = assemble_first_pyramid_read_model(
+            flat,
+            chip_snapshot={"chip_flat": chip_flat, "chip_available": True},
+        )
+        assert result["fp_chip_available"] is True
+        assert result["fp_chip_state"] == "ready"
+        assert result["fp_poc_price"] == 10.5
+        # 未提供的 chip 键清为 None
+        assert result["fp_vah_price"] is None
+
+    def test_no_chip_clears_chip_fields_and_available_false(self) -> None:
+        """无 chip_snapshot → 10 个 chip 字段清为 None、fp_chip_available=False。"""
+        from app.services.first_pyramid_flatten import assemble_first_pyramid_read_model
+        flat = flatten_first_pyramid(_build_minimal_first_pyramid())
+        # 先写入伪 chip 值再验证清空
+        flat["fp_poc_price"] = 999.0
+        result = assemble_first_pyramid_read_model(flat)
+        assert result["fp_chip_available"] is False
+        assert result["fp_poc_price"] is None
+        for k in FP_CHIP_KEYS:
+            assert result[k] is None
+
+    def test_preserves_conditional_null_not_zero(self) -> None:
+        """条件性 null 保留为 None，不补 0。"""
+        from app.services.first_pyramid_flatten import assemble_first_pyramid_read_model
+        flat = flatten_first_pyramid(_build_minimal_first_pyramid())
+        result = assemble_first_pyramid_read_model(flat)
+        # 量能字段当前未提供 volumeContext → 保持 None（不补 0）
+        assert result["fp_volume"] is None
+        assert result["fp_amount"] is None
+        # SMC OB 事件价格等条件性字段同样保持 None
+        assert result["fp_poc_price"] is None
+        # 有真实值的必选字段不受影响
+        assert result["fp_segment_change_pct"] == 2.5
+        assert "fp_trade_date" in result
+
+    def test_summary_from_status_text(self) -> None:
+        """fp_summary 来自 first_pyramid.statusText。"""
+        from app.services.first_pyramid_flatten import assemble_first_pyramid_read_model
+        flat = flatten_first_pyramid(_build_minimal_first_pyramid())
+        assert flat["fp_summary"] == "趋势上行 + 结构共振 + 动量扩张"
+        result = assemble_first_pyramid_read_model(flat)
+        assert result["fp_summary"] == "趋势上行 + 结构共振 + 动量扩张"

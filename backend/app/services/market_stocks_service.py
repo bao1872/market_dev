@@ -73,10 +73,10 @@ from app.services.board_sync_service import get_instrument_boards_batch
 # 消费查询必须用同一常量，否则新快照读不到、as_of 永远为 None。
 from app.services.feature_snapshot_service import _SCHEMA_VERSION
 from app.services.first_pyramid_flatten import (
-    FP_CHIP_KEYS,
     FP_QUERY_FIELD_SPECS,
     FpFilterSpec,
     FpSortSpec,
+    assemble_first_pyramid_read_model,
     flatten_first_pyramid,
 )
 from app.services.first_pyramid_flatten import (
@@ -1028,7 +1028,7 @@ async def get_market_stocks(
     snap_stmt = select(snap_subq).where(snap_subq.c.rn == 1)
     snap_result = await db.execute(snap_stmt)
 
-    state_map: dict[UUID, tuple[str | None, str | None, dict[str, Any] | None, date | None, UUID | None]] = {}
+    state_map: dict[UUID, tuple[str | None, str | None, dict[str, Any] | None, date | None, UUID | None, datetime | None]] = {}
     # 全局最新 trade_date 用于判断快照过期（来自 Query 7 的预查询）
     # 此处先用 None 占位，实际过期判定在组装响应阶段对比 price_as_of_date
     for snap_row in snap_result:
@@ -1039,26 +1039,17 @@ async def get_market_stocks(
         first_pyramid_raw = payload.get("first_pyramid")
         flat_fp: dict[str, Any] | None = None
         if first_pyramid_raw is not None:
-            # is_stale 由调用方在组装响应时通过 trade_date 对比 price_as_of 判定；
-            # 此处先用 False 占位，组装阶段修正
-            flat_fp = flatten_first_pyramid(
-                first_pyramid_raw,
-                calculated_at=to_shanghai_iso(snap_row.created_at)
-                if snap_row.created_at
-                else None,
-                run_id=str(snap_row.source_run_id) if snap_row.source_run_id else None,
-                is_stale=False,
-            )
-            # [P0-2 修复 2026-07-29 二.2] fp_trade_date 改用 snapshot.trade_date 真实列
-            # （不读 first_pyramid.tradeDate，确保 DB 筛选/排序与响应同口径）
-            if snap_row.trade_date is not None:
-                flat_fp["fp_trade_date"] = snap_row.trade_date.isoformat()
+            # [C1] 统一读模型组装：此处仅扁平化（99 键），元数据/chip/is_stale 覆盖
+            # 统一交由 assemble_first_pyramid_read_model 在响应组装阶段完成（见下方循环），
+            # 避免 producer 写入与 API 读取各自重复覆盖字段。
+            flat_fp = flatten_first_pyramid(first_pyramid_raw)
         state_map[snap_row.instrument_id] = (
             dsa_state,
             str(structure_state) if structure_state else None,
             flat_fp,
             snap_row.trade_date,
             snap_row.source_run_id,
+            snap_row.created_at,
         )
 
     # ===== Query 4b: 严格五元组匹配的 chip 记录批量查询（禁止 N+1） =====
@@ -1112,7 +1103,7 @@ async def get_market_stocks(
     daily_bar_count_map: dict[UUID, int] = {}
     instruments_needing_bar_count = [
         iid for iid in instrument_ids
-        if state_map.get(iid, (None, None, None, None, None))[2] is None
+        if state_map.get(iid, (None, None, None, None, None, None))[2] is None
     ]
     if instruments_needing_bar_count:
         bar_count_stmt = (
@@ -1175,32 +1166,19 @@ async def get_market_stocks(
         if latest_price is not None and prev_close is not None and prev_close != 0:
             change_pct = round((latest_price - prev_close) / prev_close * 100, 2)
 
-        dsa_state, structure_state, flat_fp, snap_td, snap_run_id = state_map.get(
-            inst_id, (None, None, None, None, None)
+        dsa_state, structure_state, flat_fp, snap_td, snap_run_id, snap_created_at = state_map.get(
+            inst_id, (None, None, None, None, None, None)
         )
 
-        # [CHANGE-20260731-006] PER-INSTRUMENT is_stale：快照 trade_date 早于该股票自身最新日线 trade_date
-        # 旧实现用全局 price_as_of_date 判定，导致任一股票有更新日线时所有快照都 stale。
-        # 与 DB 筛选同口径（_build_max_trade_date_subquery 已改相关子查询）。
-        if flat_fp is not None:
-            inst_max_bar = inst_max_bar_date_map.get(inst_id)
-            if snap_td is not None and inst_max_bar is not None:
-                flat_fp["fp_is_stale"] = snap_td < inst_max_bar
-            else:
-                flat_fp["fp_is_stale"] = False
-
-        # [P0-3 修复 2026-07-29 二.6] 合并 matched chip 的 chip_flat 到 first_pyramid
-        # 保证用于 filter/sort 的数据与返回 first_pyramid 中的 10 个 chip 字段完全一致
-        # [P0-4 修复 2026-07-29 二.4] fp_chip_available 改为 computed 表达式：
-        # 只在存在严格匹配（五元组）且 chip_payload.chip.available=true 的 succeeded 记录时为 True
-        # [CHANGE-20260729-009] chip_map 现存储完整 chip row（含 status/error_message/created_at），
-        # 仅 succeeded 状态才合并 chip_flat；任意状态都构建 chip_status 结构化状态。
-        # [CHANGE-20260730-010] chip_status 与 /first-pyramid 详情 API 完全同口径：
-        # - chip_row 存在：调用共享 _build_chip_status_from_row → camelCase ChipStatus
-        # - chip_row 为 None 但 flat_fp 存在（有 snap 但 chip job 未跑）：state=pending
-        # - chip_row 为 None 且 flat_fp 为 None（无 snap）：chip_status=None
-        chip_row = chip_map.get(inst_id)
-        chip_status_struct: dict[str, Any] | None = _build_chip_status_struct(chip_row)
+        # [C1] 统一读模型组装：元数据覆盖（fp_trade_date/fp_run_id/fp_calculated_at）、
+        #      fp_is_stale（per-instrument）、chip 合并 与 fp_chip_available 全部由
+        #      assemble_first_pyramid_read_model 唯一完成，禁止此处各自重复覆盖字段。
+        #      - is_stale 语义（CHANGE-20260731-006）：快照 trade_date 早于该股票自身
+        #        最新日线 trade_date；旧实现用全局 price_as_of_date 导致所有快照误判 stale。
+        #      - chip 合并（P0-3/P0-4）：仅 succeeded 且 chip.available=true 合并 chip_flat；
+        #        其余状态 chip 字段为 None、fp_chip_available=False。
+        matched_chip_row: Any | None = chip_map.get(inst_id)
+        chip_status_struct: dict[str, Any] | None = _build_chip_status_struct(matched_chip_row)
         if chip_status_struct is None and flat_fp is not None:
             # 有快照但无 chip 记录：chip job 尚未执行（与详情 API resolve_chip_status 一致）
             from app.schemas.first_pyramid import ChipStatus as _ChipStatusSchema
@@ -1211,25 +1189,31 @@ async def get_market_stocks(
                 computedAt=None,
             ).model_dump(by_alias=False)
         if flat_fp is not None:
-            if chip_row is not None and chip_row.status == "succeeded":
-                chip_payload = chip_row.chip_payload
-                chip_flat = chip_payload.get("chip_flat") or {} if isinstance(chip_payload, dict) else {}
-                chip_dim = chip_payload.get("chip") if isinstance(chip_payload, dict) else None
+            # 构造 chip_snapshot：仅 succeeded 且 chip.available=true 才提供 chip_flat
+            chip_snapshot: dict[str, Any] | None = None
+            if matched_chip_row is not None and matched_chip_row.status == "succeeded":
+                chip_payload = matched_chip_row.chip_payload if isinstance(matched_chip_row.chip_payload, dict) else {}
+                chip_dim = chip_payload.get("chip")
                 chip_available = bool(
-                    chip_dim is not None
-                    and isinstance(chip_dim, dict)
-                    and chip_dim.get("available") is True
+                    isinstance(chip_dim, dict) and chip_dim.get("available") is True
                 )
-                # 用 matched chip 的 chip_flat 覆盖 10 个 chip 字段
-                for k in FP_CHIP_KEYS:
-                    if k in chip_flat:
-                        flat_fp[k] = chip_flat[k]
-                flat_fp["fp_chip_available"] = chip_available
-            else:
-                # 无匹配 chip 或非 succeeded：所有 chip 字段保持 None，fp_chip_available=False
-                for k in FP_CHIP_KEYS:
-                    flat_fp[k] = None
-                flat_fp["fp_chip_available"] = False
+                chip_snapshot = {
+                    "chip_flat": chip_payload.get("chip_flat") or {},
+                    "chip_available": chip_available,
+                }
+            inst_max_bar = inst_max_bar_date_map.get(inst_id)
+            assembled_flat: dict[str, Any] | None = assemble_first_pyramid_read_model(
+                flat_fp,
+                snapshot_columns={
+                    "trade_date": snap_td,
+                    "created_at": to_shanghai_iso(snap_created_at) if snap_created_at else None,
+                    "source_run_id": str(snap_run_id) if snap_run_id else None,
+                },
+                chip_snapshot=chip_snapshot,
+                max_bar_date=inst_max_bar.isoformat() if inst_max_bar else None,
+            )
+            if assembled_flat is not None:
+                flat_fp = assembled_flat
 
         # [CHANGE-20260729-009] 计算 factor_ready/factor_error + 填充 data_run_id/chip_status
         # [CHANGE-20260731-REMOVE-DSA] payload 固定为 None（旧 DSA 链路已删除）
