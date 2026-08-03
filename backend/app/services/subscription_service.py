@@ -1195,6 +1195,34 @@ async def list_subscribers_with_capabilities(
             except ValueError:
                 pass
         member["capabilities"] = await get_user_capabilities(db, user_id)
+        # [权限模型 V2] 补充统一权限摘要（复用 resolve_effective_access 唯一解析）
+        try:
+            from app.models.user import User as _User
+            from app.services.effective_access_service import (
+                _ensure_aware,
+                capabilities_to_serializable,
+                resolve_effective_access,
+            )
+            user_obj = await db.get(_User, user_id)
+            if user_obj is not None:
+                roles = member.get("roles") or []
+                user_obj._roles = roles  # type: ignore[attr-defined]
+                profile = await resolve_effective_access(db, user_obj)
+                active_expiries = [
+                    _ensure_aware(cap.expires_at)
+                    for cap in profile.capabilities.values()
+                    if cap.active and cap.expires_at is not None
+                ]
+                member["capabilities"] = capabilities_to_serializable(profile.capabilities)
+                member["active_capability_keys"] = profile.active_capability_keys
+                member["has_any_access"] = profile.has_any_access
+                member["default_route"] = profile.default_route
+                member["capability_source"] = profile.capability_source
+                member["diagnostics"] = profile.diagnostics
+                member["nearest_capability_expires_at"] = min(active_expiries).isoformat() if active_expiries else None
+                member["legacy_fallback"] = profile.capability_source == "legacy_plan_fallback"
+        except Exception:  # noqa: BLE001
+            pass
     return members, total
 
 

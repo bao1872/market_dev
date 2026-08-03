@@ -91,6 +91,36 @@ interface InviteCodeRow {
   [key: string]: unknown
 }
 
+/** [权限模型 V2] 会员列表权限摘要单元格：展示各权限状态 + 来源 + legacy 警告。 */
+function CapabilitySummaryCell({ row }: { row: MemberRow }) {
+  const caps = (row.capabilities ?? {}) as Record<
+    string,
+    { active: boolean; source?: string; watchlist_limit?: number | null } | undefined
+  >
+  const source = (row.capability_source as string) || 'none'
+  const activeKeys = (row.active_capability_keys as string[]) || []
+  const isLegacy = source === 'legacy_plan_fallback'
+  if (activeKeys.length === 0 && !isLegacy) {
+    return <span className="status-pill pill-dim">无权限</span>
+  }
+  return (
+    <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+      {CAPABILITY_KEYS.map((k) => {
+        const c = caps[k]
+        const label = c?.active ? '✓' : '—'
+        return (
+          <div key={k}>
+            {label} {capabilityLabel(k)}
+            {c?.watchlist_limit ? `(${c.watchlist_limit})` : ''}
+          </div>
+        )
+      })}
+      {isLegacy && <span style={{ color: '#C0392B' }}>⚠ legacy fallback</span>}
+      {activeKeys.length > 0 && <div style={{ color: '#666' }}>入口: {(row.default_route as string) || '—'}</div>}
+    </div>
+  )
+}
+
 // observe_20 套餐默认上限（命名避开架构规则敏感词，以免数值与关键字同行）
 const OBSERVE_PLAN_DEFAULT = 20
 
@@ -665,6 +695,15 @@ export default function AdminUsersPage() {
         render: (row) => `${row.renewal_count} 次`,
         filterValue: (row) => String(row.renewal_count),
         sortValue: (row) => row.renewal_count,
+      },
+      {
+        key: 'capability_summary',
+        title: '权限摘要',
+        dataType: 'text',
+        sortable: false,
+        filterable: false,
+        // [权限模型 V2] 复用后端 resolve_effective_access 返回的权限摘要
+        render: (row) => <CapabilitySummaryCell row={row} />,
       },
       {
         key: 'last_login',
