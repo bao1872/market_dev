@@ -781,7 +781,13 @@ export default function AdminUsersPage() {
         dataType: 'text',
         sortable: true,
         filterable: true,
-        render: (row) => formatCapabilityGrants(row.capabilities) || '—',
+        // [权限模型 V2] capabilities 为 null → 旧套餐模式（不可再用于新注册）
+        render: (row) => {
+          if (!row.capabilities || row.capabilities.length === 0) {
+            return <span style={{ color: '#C0392B' }}>旧套餐模式</span>
+          }
+          return formatCapabilityGrants(row.capabilities)
+        },
         filterValue: (row) => formatCapabilityGrants(row.capabilities),
         sortValue: (row) => formatCapabilityGrants(row.capabilities),
       },
