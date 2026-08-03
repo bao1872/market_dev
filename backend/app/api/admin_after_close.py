@@ -33,6 +33,7 @@ from app.schemas.after_close_pipeline import (
     AfterClosePipelineRunResponse,
 )
 from app.schemas.scheduler_job_run import (
+    AfterCloseRunActionRequest,
     AfterCloseRunCreateResponse,
     AfterCloseRunStatusResponse,
     JobRunEventItem,
@@ -40,8 +41,10 @@ from app.schemas.scheduler_job_run import (
 )
 from app.services.after_close_orchestrator import (
     AfterCloseRunStatus,
+    cancel_after_close_run,
     create_after_close_run,
     get_after_close_run_status,
+    reconcile_after_close_run,
     retry_after_close_run,
 )
 from app.services.after_close_pipeline_service import (
@@ -172,6 +175,55 @@ async def create_after_close_run_endpoint(
 # [CHANGE-20260728-008] force?restart_from=daily_ready 的合法取值与覆盖率门槛
 _RESTART_FROM_VALID_VALUES = {"daily_ready"}
 _RESTART_FROM_COVERAGE_THRESHOLD = 0.9
+
+
+def _action_response(job_run, message: str) -> AfterCloseRunCreateResponse:
+    from app.services.after_close_orchestrator import _parse_metadata
+
+    meta = _parse_metadata(job_run)
+    return AfterCloseRunCreateResponse(
+        job_run_id=str(job_run.id),
+        status=job_run.status,
+        orchestrator_status=meta.get("orchestrator_status", job_run.status),
+        trade_date=str(job_run.scheduled_for),
+        message=message,
+        parent_job_run_id=meta.get("parent_job_run_id"),
+        restart_from=meta.get("restart_from"),
+    )
+
+
+@router.post("/after-close-runs/{run_id}/cancel", response_model=AfterCloseRunCreateResponse)
+async def cancel_after_close_run_endpoint(
+    run_id: str,
+    payload: AfterCloseRunActionRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> AfterCloseRunCreateResponse:
+    try:
+        job_run = await cancel_after_close_run(
+            db, job_run_id=run_id, reason=payload.reason if payload else None,
+        )
+        await db.commit()
+        return _action_response(job_run, "盘后任务已取消或已处于终态")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/after-close-runs/{run_id}/reconcile", response_model=AfterCloseRunCreateResponse)
+async def reconcile_after_close_run_endpoint(
+    run_id: str,
+    payload: AfterCloseRunActionRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles("admin")),
+) -> AfterCloseRunCreateResponse:
+    try:
+        job_run = await reconcile_after_close_run(
+            db, job_run_id=run_id, reason=payload.reason if payload else None,
+        )
+        await db.commit()
+        return _action_response(job_run, "盘后任务状态已校准")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get(

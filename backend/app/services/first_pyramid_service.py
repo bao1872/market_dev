@@ -1131,6 +1131,7 @@ def assemble_first_pyramid_view(
     # 组装视图使用完整 parameterHash（含 Node 参数，向后兼容）
     parameter_hash = _compute_parameter_hash()
     chip_status = _build_chip_status(chip)
+    semantic_meta = _chip_semantic_meta(chip_status, chip_dim)
 
     return FirstPyramidSnapshot(
         symbol=core.symbol,
@@ -1139,7 +1140,7 @@ def assemble_first_pyramid_view(
         structure=core.structure,
         momentum=core.momentum,
         chipConsensus=chip_dim,
-        chipStatus=chip_status,
+        chipStatus=chip_status.model_copy(update=semantic_meta),
         statusText=aggregate_status,
         volumeContext=core.volumeContext,
         inputHash=core.inputHash,
@@ -1150,6 +1151,18 @@ def assemble_first_pyramid_view(
 # =============================================================================
 # [CHANGE-20260729-004 P0-2] chipStatus 构建辅助
 # =============================================================================
+
+
+def _chip_semantic_meta(status: ChipStatus, chip_dim: Any) -> dict[str, Any]:
+    available = status.state == "ready" and chip_dim is not None
+    if not available:
+        semantic = "unavailable" if status.state != "pending" else "not_applicable"
+    else:
+        support = getattr(chip_dim, "supportPressure", None)
+        pressure = float(support) if support is not None else 0.0
+        semantic = "strong_support" if pressure >= 0.6 else "weak_support" if pressure > 0.1 else "strong_pressure" if pressure <= -0.6 else "weak_pressure" if pressure < -0.1 else "neutral"
+    meta = {"strong_support": {"label": "强支撑", "tone": "positive", "order": 1}, "weak_support": {"label": "弱支撑", "tone": "positive", "order": 2}, "neutral": {"label": "中性", "tone": "neutral", "order": 3}, "weak_pressure": {"label": "弱压力", "tone": "negative", "order": 4}, "strong_pressure": {"label": "强压力", "tone": "negative", "order": 5}, "unavailable": {"label": "不可用", "tone": "muted", "order": 6}, "not_applicable": {"label": "不适用", "tone": "muted", "order": 7}}[semantic]
+    return {"semanticState": semantic, **meta}
 
 
 def _build_chip_status(chip: ChipConsensusResult | None) -> ChipStatus:

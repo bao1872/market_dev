@@ -73,6 +73,87 @@ _DSA_POLL_TIMEOUT_SECONDS = 7200
 
 # [AfterClose] - 编排任务租约时长（秒，需覆盖全流水线 2h+）
 _ORCHESTRATOR_LEASE_SECONDS = 14400
+_DEFAULT_STEP_TIMEOUT_SECONDS = 3600
+_AUCTION_ANCHOR_TIMEOUT_SECONDS = 300
+_HEARTBEAT_INTERVAL_SECONDS = 10
+
+
+class StepUnavailableError(RuntimeError):
+    """可选步骤因上游无数据而合法不可用。"""
+
+
+async def execute_orchestrator_step(
+    step: str,
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    timeout_seconds: float = _DEFAULT_STEP_TIMEOUT_SECONDS,
+    optional: bool = False,
+    heartbeat: Callable[[], Awaitable[None]] | None = None,
+    progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+) -> tuple[Any | None, dict[str, Any]]:
+    """统一执行步骤；任何退出路径均停止 heartbeat 并产出结构化摘要。"""
+    started_at = datetime.now(UTC)
+    summary: dict[str, Any] = {
+        "step": step, "status": "running", "started_at": started_at.isoformat(),
+        "finished_at": None, "elapsed_seconds": None, "processed": None,
+        "total": None, "last_progress_at": started_at.isoformat(),
+        "error_code": None, "error_message": None, "optional": optional, "attempt": 1,
+    }
+    if progress is not None:
+        await progress(dict(summary))
+    stop = asyncio.Event()
+
+    async def _heartbeat_loop() -> None:
+        if heartbeat is None:
+            return
+        while not stop.is_set():
+            await heartbeat()
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=_HEARTBEAT_INTERVAL_SECONDS)
+            except TimeoutError:
+                continue
+
+    heartbeat_task = asyncio.create_task(_heartbeat_loop()) if heartbeat else None
+    result: Any | None = None
+    try:
+        result = await asyncio.wait_for(operation(), timeout=timeout_seconds)
+        if result is None and optional:
+            raise StepUnavailableError(f"{step} returned no data")
+        summary["status"] = "succeeded"
+        if isinstance(result, dict):
+            summary["processed"] = result.get("processed", result.get("count"))
+            summary["total"] = result.get("total")
+    except StepUnavailableError as exc:
+        if not optional:
+            raise
+        summary.update(status="skipped_unavailable", error_code="STEP_UNAVAILABLE", error_message=str(exc))
+    except TimeoutError as exc:
+        if not optional:
+            summary.update(status="failed", error_code="STEP_TIMEOUT", error_message=str(exc))
+            raise
+        summary.update(
+            status="skipped_unavailable", error_code="STEP_TIMEOUT",
+            error_message=f"{step} timed out after {timeout_seconds}s",
+        )
+    except asyncio.CancelledError:
+        summary.update(status="cancelled", error_code="STEP_CANCELLED", error_message="cancelled")
+        raise
+    except Exception as exc:
+        summary.update(status="failed", error_code=type(exc).__name__, error_message=str(exc))
+        if not optional:
+            raise
+    finally:
+        stop.set()
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        finished_at = datetime.now(UTC)
+        summary["finished_at"] = finished_at.isoformat()
+        summary["elapsed_seconds"] = max(0.0, (finished_at - started_at).total_seconds())
+        summary["last_progress_at"] = finished_at.isoformat()
+        if progress is not None:
+            await progress(dict(summary))
+    return result, summary
 
 
 class LeaseEpochMismatchError(Exception):
@@ -1640,6 +1721,8 @@ async def execute_after_close_run(
                         compute_review_core_with_run_items,
                     )
 
+                    if snapshot_run_id is None:
+                        raise RuntimeError("FEATURE_SNAPSHOT_RUN_ID_MISSING")
                     snapshot_result = await compute_review_core_with_run_items(
                         trade_date=trade_date,
                         instrument_ids=cached_instrument_ids or [],
@@ -2016,24 +2099,41 @@ async def execute_after_close_run(
                     )
 
                     async with AsyncSessionLocal() as anchor_db:
-                        anchor_result = await generate_and_publish_auction_anchors(
-                            anchor_db,
-                            trade_date=trade_date,
-                            worker_id=worker_id,
-                            lease_epoch=lease_epoch,
+                        async def _generate_anchor() -> dict[str, Any]:
+                            result = await generate_and_publish_auction_anchors(
+                                anchor_db,
+                                trade_date=trade_date,
+                                worker_id=worker_id,
+                                lease_epoch=lease_epoch,
+                            )
+                            if not result or (
+                                result.get("structure_count", 0) == 0
+                                and result.get("chip_count", 0) == 0
+                                and result.get("composite_count", 0) == 0
+                            ):
+                                raise StepUnavailableError("auction anchor source data unavailable")
+                            await anchor_db.commit()
+                            return result
+
+                        anchor_result, anchor_summary = await execute_orchestrator_step(
+                            "auction_anchor",
+                            _generate_anchor,
+                            timeout_seconds=_AUCTION_ANCHOR_TIMEOUT_SECONDS,
+                            optional=True,
                         )
-                        await anchor_db.commit()
-                    _auction_anchor_status = anchor_result.get("status", "unknown")
-                    _auction_publication_id = anchor_result.get("publication_id")
+                    _auction_anchor_status = anchor_summary["status"]
+                    _auction_publication_id = (
+                        anchor_result.get("publication_id") if anchor_result else None
+                    )
                     logger.info(
                         "[AfterClose] auction anchor 生成+发布完成: trade_date=%s, "
                         "status=%s, publication_id=%s, structure=%s, chip=%s, composite=%s",
                         trade_date,
                         _auction_anchor_status,
                         _auction_publication_id,
-                        anchor_result.get("structure_count", 0),
-                        anchor_result.get("chip_count", 0),
-                        anchor_result.get("composite_count", 0),
+                        anchor_result.get("structure_count", 0) if anchor_result else 0,
+                        anchor_result.get("chip_count", 0) if anchor_result else 0,
+                        anchor_result.get("composite_count", 0) if anchor_result else 0,
                     )
                 except Exception as anchor_exc:
                     _auction_anchor_status = "failed"
@@ -2080,6 +2180,18 @@ async def execute_after_close_run(
             # [Phase5] - publishing 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
+                meta = _parse_metadata(job_run)
+                step_summary = dict(meta.get("step_summary") or {})
+                if "anchor_summary" in locals():
+                    step_summary["auction_anchor"] = anchor_summary
+                meta["step_summary"] = step_summary
+                optional_failures = [
+                    name for name, item in step_summary.items()
+                    if item.get("optional") and item.get("status") in {"failed", "skipped_unavailable"}
+                ]
+                meta["partial_success"] = bool(optional_failures)
+                meta["optional_failures"] = optional_failures
+                job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
                 await _update_heartbeat_and_step(
                     db, job_run, AfterCloseRunStatus.PUBLISHING.value, worker_id,
                 )
@@ -2581,35 +2693,42 @@ async def execute_after_close_run(
             if cached_instrument_ids is not None
             else None
         )
-        try:
-            async with AsyncSessionLocal() as db:
-                chip_job, chip_is_new = await create_after_close_chip_consensus_job(
-                    db=db,
-                    trade_date=trade_date,
-                    core_run_id=snapshot_run_id,
-                    scope="all_a_share",
-                    expected_count=_expected_chip_count,
-                )
-                await db.commit()
-            if chip_job is not None:
-                logger.info(
-                    "[AfterClose] chip consensus job 已创建（独立 Worker 异步执行）: "
-                    "chip_run_id=%s, is_new=%s, snapshot_run_id=%s, expected_count=%s",
-                    chip_job.id, chip_is_new, snapshot_run_id, _expected_chip_count,
-                )
-            else:
-                logger.warning(
-                    "[AfterClose] chip consensus job 创建返回 None（软失败，主 run 仍 succeeded）: "
-                    "trade_date=%s, snapshot_run_id=%s",
-                    trade_date, snapshot_run_id,
-                )
-        except Exception as chip_exc:
-            # [P0-7] 软失败：创建失败只记录 warn，不反改主 run，不抛异常
+        if snapshot_run_id is None:
             logger.warning(
-                "[AfterClose] 创建 chip consensus job 失败（软失败，不影响主 run succeeded）: "
-                "trade_date=%s, snapshot_run_id=%s, error=%s",
-                trade_date, snapshot_run_id, chip_exc, exc_info=True,
+                "[AfterClose] snapshot_run_id 为 None，跳过 chip consensus job 创建"
+                "（主 run 仍 succeeded）: trade_date=%s",
+                trade_date,
             )
+        else:
+            try:
+                async with AsyncSessionLocal() as db:
+                    chip_job, chip_is_new = await create_after_close_chip_consensus_job(
+                        db=db,
+                        trade_date=trade_date,
+                        core_run_id=snapshot_run_id,
+                        scope="all_a_share",
+                        expected_count=_expected_chip_count,
+                    )
+                    await db.commit()
+                if chip_job is not None:
+                    logger.info(
+                        "[AfterClose] chip consensus job 已创建（独立 Worker 异步执行）: "
+                        "chip_run_id=%s, is_new=%s, snapshot_run_id=%s, expected_count=%s",
+                        chip_job.id, chip_is_new, snapshot_run_id, _expected_chip_count,
+                    )
+                else:
+                    logger.warning(
+                        "[AfterClose] chip consensus job 创建返回 None（软失败，主 run 仍 succeeded）: "
+                        "trade_date=%s, snapshot_run_id=%s",
+                        trade_date, snapshot_run_id,
+                    )
+            except Exception as chip_exc:
+                # [P0-7] 软失败：创建失败只记录 warn，不反改主 run，不抛异常
+                logger.warning(
+                    "[AfterClose] 创建 chip consensus job 失败（软失败，不影响主 run succeeded）: "
+                    "trade_date=%s, snapshot_run_id=%s, error=%s",
+                    trade_date, snapshot_run_id, chip_exc, exc_info=True,
+                )
 
         logger.info(
             "[AfterClose] 盘后编排成功完成: job_run_id=%s, dsa_run_id=%s",
@@ -2853,6 +2972,57 @@ async def get_after_close_run_status(
             for e in events
         ],
     }
+
+
+async def cancel_after_close_run(
+    db: AsyncSession,
+    *,
+    job_run_id: str,
+    reason: str | None = None,
+) -> SchedulerJobRun:
+    """幂等取消；终态重复调用仅返回当前事实。"""
+    job_run = await _get_job_run_or_raise(db, uuid.UUID(job_run_id))
+    if job_run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
+        return job_run
+    now = datetime.now(UTC)
+    meta = _parse_metadata(job_run)
+    meta.update(
+        orchestrator_status="cancelled",
+        cancel_reason=reason or "admin_cancelled",
+        cancelled_at=now.isoformat(),
+    )
+    job_run.status = "cancelled"
+    job_run.error_code = "ADMIN_CANCELLED"
+    job_run.error_message = reason or "管理员取消盘后任务"
+    job_run.finished_at = now
+    job_run.lease_expires_at = None
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db.flush()
+    return job_run
+
+
+async def reconcile_after_close_run(
+    db: AsyncSession,
+    *,
+    job_run_id: str,
+    reason: str | None = None,
+) -> SchedulerJobRun:
+    """幂等校准 metadata 派生状态，不启动任务、不修改业务数据。"""
+    job_run = await _get_job_run_or_raise(db, uuid.UUID(job_run_id))
+    meta = _parse_metadata(job_run)
+    expected = {
+        "succeeded": AfterCloseRunStatus.SUCCEEDED.value,
+        "failed": AfterCloseRunStatus.FAILED.value,
+        "cancelled": "cancelled",
+        "interrupted": "interrupted",
+    }.get(job_run.status)
+    if expected and meta.get("orchestrator_status") != expected:
+        meta["orchestrator_status"] = expected
+        meta["reconciled_at"] = datetime.now(UTC).isoformat()
+        meta["reconcile_reason"] = reason or "admin_reconcile"
+        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+        await db.flush()
+    return job_run
 
 
 async def retry_after_close_run(

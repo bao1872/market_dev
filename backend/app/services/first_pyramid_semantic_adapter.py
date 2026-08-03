@@ -222,3 +222,23 @@ class FirstPyramidSemanticAdapter:
 
     def event_direction(self, field: str = "fp_structure_event_direction") -> Direction | None:
         return self.direction(self.source.get(field))
+
+
+def adapt_legacy_pyramid_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """把旧事件 extra 字段提升到正式合同，并保留矛盾诊断。"""
+    adapted = dict(event)
+    raw_extra = event.get("extra")
+    extra: Mapping[str, Any] = raw_extra if isinstance(raw_extra, Mapping) else {}
+    level = adapted.get("structureLevel") or extra.get("structure_level")
+    bias = adapted.get("bias")
+    if bias is None:
+        bias = extra.get("bias")
+    direction = adapted.get("direction")
+    expected_bias = 1 if direction == "up" else -1 if direction == "down" else 0 if direction else None
+    diagnostics = list(adapted.get("diagnostics") or [])
+    if expected_bias is not None and bias is not None and int(bias) != expected_bias:
+        diagnostics.append("EVENT_DIRECTION_BIAS_CONFLICT")
+    adapted["structureLevel"] = level
+    adapted["bias"] = bias if bias is not None else expected_bias
+    adapted["diagnostics"] = diagnostics
+    return adapted

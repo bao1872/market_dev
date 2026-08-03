@@ -110,10 +110,19 @@ class AfterCloseRunStatusResponse(BaseModel):
 
 
 class AfterCloseRunCreateResponse(BaseModel):
-    """盘后编排任务创建/重试响应。"""
+    """盘后编排任务创建/重试/管理动作响应。"""
 
     job_run_id: str
     status: str
     orchestrator_status: str
     trade_date: str
     message: str
+    is_new: bool = False
+    parent_job_run_id: str | None = None
+    restart_from: str | None = None
+
+
+class AfterCloseRunActionRequest(BaseModel):
+    """幂等 cancel/reconcile 管理动作请求。"""
+
+    reason: str | None = None

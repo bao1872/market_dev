@@ -79,6 +79,15 @@ class PyramidEvent(BaseModel):
     direction: str | None = Field(
         None, description="方向：'up' / 'down' / None（部分事件无方向）"
     )
+    structureLevel: str | None = Field(
+        None, description="正式结构层级：swing / internal；非结构事件可空"
+    )
+    bias: int | None = Field(
+        None, description="正式数值方向：1 / -1 / 0；非方向事件可空"
+    )
+    diagnostics: list[str] = Field(
+        default_factory=list, description="字段矛盾或旧合同适配诊断"
+    )
     occurredAt: str | None = Field(
         None, description="事件发生日期（ISO YYYY-MM-DD）；intrabar 事件可空"
     )
@@ -130,6 +139,12 @@ class DimensionResult(BaseModel):
     volumeContext: VolumeContextSchema | None = Field(
         None, description="当前 bar 的量能上下文（Gate1，共享计算结果）"
     )
+    availability: str = Field(
+        default="available", description="显式可用性：available / unavailable"
+    )
+    unavailableReason: str | None = Field(
+        None, description="不可用时稳定原因；可用时为空"
+    )
 
 
 class FirstPyramidSnapshot(BaseModel):
@@ -165,6 +180,9 @@ class FirstPyramidSnapshot(BaseModel):
     parameterHash: str = Field(..., description="参数 hash（含算法版本与固定参数）")
     algorithmVersion: str = Field(
         default=FIRST_PYRAMID_ALGORITHM_VERSION, description="算法版本"
+    )
+    calculatedAt: str | None = Field(
+        None, description="run级唯一计算时间；由编排器注入，禁止单股各自取时钟"
     )
 
     @model_validator(mode="after")
@@ -237,6 +255,9 @@ class FirstPyramidCoreSnapshot(BaseModel):
         default=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
         description="核心算法版本（不含 chip）",
     )
+    calculatedAt: str | None = Field(
+        None, description="run级唯一计算时间；由编排器注入"
+    )
     nBars: int = Field(..., description="输入 bar 数")
     lastBarIndex: int = Field(..., description="最后一根 bar 的索引（0-based）")
 
@@ -288,12 +309,22 @@ class ChipConsensusResult(BaseModel):
 
 # chipStatus.state 合法值
 CHIP_STATUS_STATES: frozenset[str] = frozenset({
-    "ready",       # chipConsensus.available=True 且有有效峰
-    "pending",     # chip job 仍在计算中（盘后异步未完成）
-    "failed",      # chip job 执行失败（异常）
-    "unavailable",  # 数据不足或 Node Cluster 不可用
-    "stale",       # chip 结果与当前 core_run_id 不匹配或过期
+    "ready", "pending", "failed", "unavailable", "stale",
 })
+
+CHIP_SEMANTIC_STATES: frozenset[str] = frozenset({
+    "strong_support", "weak_support", "neutral", "weak_pressure",
+    "strong_pressure", "unavailable", "not_applicable",
+})
+CHIP_SEMANTIC_META: dict[str, dict[str, str | int]] = {
+    "strong_support": {"label": "强支撑", "tone": "positive", "order": 1},
+    "weak_support": {"label": "弱支撑", "tone": "positive", "order": 2},
+    "neutral": {"label": "中性", "tone": "neutral", "order": 3},
+    "weak_pressure": {"label": "弱压力", "tone": "negative", "order": 4},
+    "strong_pressure": {"label": "强压力", "tone": "negative", "order": 5},
+    "unavailable": {"label": "不可用", "tone": "muted", "order": 6},
+    "not_applicable": {"label": "不适用", "tone": "muted", "order": 7},
+}
 
 # chipStatus.reasonCode 合法值（与 NODE_* 区分：chip_* 用于第一金字塔 DTO）
 CHIP_STATUS_REASON_CODES: frozenset[str] = frozenset({
@@ -326,8 +357,14 @@ class ChipStatus(BaseModel):
 
     state: str = Field(
         ...,
-        description="筹码共识状态：ready/pending/failed/unavailable/stale",
+        description="筹码任务状态：ready/pending/failed/unavailable/stale（兼容）",
     )
+    semanticState: str = Field(
+        default="unavailable", description="筹码共识七态语义"
+    )
+    label: str = Field(default="不可用", description="七态稳定展示文案")
+    tone: str = Field(default="muted", description="七态稳定视觉语气")
+    order: int = Field(default=6, description="七态稳定排序")
     reasonCode: str | None = Field(
         None,
         description=(

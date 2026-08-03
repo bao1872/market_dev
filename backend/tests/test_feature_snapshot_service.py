@@ -32,6 +32,7 @@ from app.services.feature_snapshot_service import (
     _truncate_bars_to_trade_date,
     build_summary_payload,
     compute_feature_snapshot_for_date,
+    compute_for_trade_date,
     upsert_snapshot,
 )
 from app.services.node_cluster_input_provider import NodeClusterInput
@@ -614,6 +615,28 @@ async def test_upsert_snapshot_rollback_preserves_old_ownership(
 
 
 # ===== 5. compute_for_trade_date =====
+
+
+@pytest.mark.asyncio
+async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics() -> None:
+    instrument_ids = [uuid.uuid4() for _ in range(5)]
+    bars = pd.DataFrame({"close": [1.0]}, index=pd.DatetimeIndex(["2026-01-10"]))
+    agg = MagicMock(bars=bars)
+    session = AsyncMock()
+    session.execute.return_value = [(item, f"{i:06d}") for i, item in enumerate(instrument_ids)]
+    progress = AsyncMock()
+    with (
+        patch("app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars_batch", new_callable=AsyncMock) as batch_read,
+        patch("app.services.feature_snapshot_service.compute_feature_snapshot_for_date", new_callable=AsyncMock, side_effect=[MagicMock(spec=StockFeatureSnapshot) for _ in instrument_ids]),
+        patch("app.services.feature_snapshot_service.upsert_snapshot", new_callable=AsyncMock) as upsert,
+    ):
+        batch_read.side_effect = lambda _session, ids, **_kwargs: dict.fromkeys(ids, agg)
+        result = await compute_for_trade_date(session, date(2026, 1, 10), instrument_ids, batch_size=2, progress_callback=progress)
+    assert batch_read.await_count == 6
+    assert upsert.await_count == 5
+    assert progress.await_count == 3
+    assert result["batch_count"] == 3
+    assert result["mdas_batch_read_count"] == 6
 
 
 @pytest.mark.asyncio

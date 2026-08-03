@@ -24,6 +24,7 @@ import logging
 import math
 import random
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
@@ -991,6 +992,31 @@ def _cache_set(
 
 class MarketDataAggregationService:
     """行情聚合统一入口。"""
+
+    async def get_bars_batch(
+        self,
+        session: AsyncSession,
+        instrument_ids: Sequence[uuid.UUID],
+        **kwargs: Any,
+    ) -> dict[uuid.UUID, BarAggregationResult | Exception]:
+        """批量获取同一行情合同的多个标的。
+
+        该入口是批任务唯一允许使用的 MDAS 批读边界。它复用 ``get_bars`` 的
+        完整 bars/复权/诊断合同，并按标的隔离失败。当前 AsyncSession 不支持并发
+        SQL 操作，因此在一个事务会话内有界顺序读取；调用方不得自行无界 gather。
+        返回值保留输入顺序，便于批任务稳定产生进度和 metrics。
+        """
+        results: dict[uuid.UUID, BarAggregationResult | Exception] = {}
+        for instrument_id in instrument_ids:
+            try:
+                results[instrument_id] = await self.get_bars(
+                    session,
+                    instrument_id,
+                    **kwargs,
+                )
+            except Exception as exc:
+                results[instrument_id] = exc
+        return results
 
     async def get_bars(
         self,

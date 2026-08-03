@@ -1542,6 +1542,8 @@ async def compute_for_trade_date(
     total = len(instrument_ids)
     snapshot_count = 0
     failed_count = 0
+    batch_count = 0
+    mdas_batch_read_count = 0
     # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
     run_diag: dict[str, Any] = {}
     # [P0-symbol合同 2026-07-30] 一次查询 instrument_id → symbol 映射，避免 N 次 DB 查询
@@ -1553,17 +1555,32 @@ async def compute_for_trade_date(
         )
         symbol_map = {row[0]: row[1] for row in sym_rows}
 
+    from app.services.market_data_aggregation_service import MarketDataAggregationService
+    mdas = MarketDataAggregationService()
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
+        batch_count += 1
+        primary_results = await mdas.get_bars_batch(session, batch, timeframe="1d", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date)
+        secondary_results = await mdas.get_bars_batch(session, batch, timeframe="15m", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date)
+        mdas_batch_read_count += 2
+        batch_snapshots: list[StockFeatureSnapshot] = []
         for instrument_id in batch:
             try:
+                primary_result = primary_results.get(instrument_id)
+                secondary_result = secondary_results.get(instrument_id)
+                if isinstance(primary_result, Exception):
+                    raise primary_result
+                if isinstance(secondary_result, Exception):
+                    raise secondary_result
                 snapshot = await compute_feature_snapshot_for_date(
                     session, instrument_id, trade_date,
+                    primary_bars=primary_result.bars if primary_result is not None else None,
+                    secondary_bars=secondary_result.bars if secondary_result is not None else None,
                     source_run_id=source_run_id,
                     instrument_symbol=symbol_map.get(instrument_id),
                     _diag_sink=run_diag,
                 )
-                await upsert_snapshot(session, snapshot)
+                batch_snapshots.append(snapshot)
                 snapshot_count += 1
             except Exception as exc:
                 failed_count += 1
@@ -1571,6 +1588,10 @@ async def compute_for_trade_date(
                     "snapshot 计算失败 instrument_id=%s trade_date=%s: %s",
                     instrument_id, trade_date, exc, exc_info=True,
                 )
+
+        # 批内计算完成后统一执行 upsert；保持调用方整日期事务与 published 保护。
+        for snapshot in batch_snapshots:
+            await upsert_snapshot(session, snapshot)
 
         # [Heartbeat] 每批完成后回调进度，供长任务更新心跳/lease 与 metadata
         if progress_callback is not None:
@@ -1597,13 +1618,15 @@ async def compute_for_trade_date(
             )
 
     logger.info(
-        "feature_snapshot 批量完成 trade_date=%s snapshot_count=%d failed_count=%d",
-        trade_date, snapshot_count, failed_count,
+        "feature_snapshot 批量完成 trade_date=%s snapshot_count=%d failed_count=%d batches=%d mdas_batch_reads=%d",
+        trade_date, snapshot_count, failed_count, batch_count, mdas_batch_read_count,
     )
 
     return {
         "snapshot_count": snapshot_count,
         "failed_count": failed_count,
+        "batch_count": batch_count,
+        "mdas_batch_read_count": mdas_batch_read_count,
         "schema_version": _SCHEMA_VERSION,
         "trade_date": trade_date.isoformat(),
         # [CHANGE-20260717-002 SSOT] run 级行情诊断（供 finish_snapshot_run 落库）

@@ -37,6 +37,7 @@ from app.domain.first_pyramid_semantics import (
     momentum_direction_display,
     squeeze_display,
 )
+from app.services.first_pyramid_semantic_adapter import adapt_legacy_pyramid_event
 
 # 99 个键的分组定义（用于前端 ColumnRegistry 和后端验证）
 FP_FIELD_GROUPS: dict[str, list[str]] = {
@@ -788,7 +789,7 @@ def flatten_first_pyramid(
     result["fp_trade_date"] = first_pyramid.get("tradeDate")
     result["fp_data_source"] = "feature_snapshot"
     result["fp_is_stale"] = is_stale
-    result["fp_calculated_at"] = calculated_at
+    result["fp_calculated_at"] = calculated_at or first_pyramid.get("calculatedAt")
     result["fp_run_id"] = str(run_id) if run_id is not None else None
     result["fp_summary"] = first_pyramid.get("statusText")
     # [P0-4 修复 2026-07-29 二.4] fp_chip_available 改为 computed 表达式
@@ -849,10 +850,10 @@ def flatten_first_pyramid(
     struct_events = structure.get("events") or []
     latest_struct = struct_events[-1] if struct_events else None
     if latest_struct:
+        latest_struct = adapt_legacy_pyramid_event(latest_struct)
         result["fp_structure_event_type"] = latest_struct.get("type")
         result["fp_structure_event_direction"] = latest_struct.get("direction")
-        extra = latest_struct.get("extra") or {}
-        result["fp_structure_event_level"] = extra.get("structure_level")
+        result["fp_structure_event_level"] = latest_struct.get("structureLevel")
         result["fp_structure_event_freshness"] = latest_struct.get("freshnessBars")
         result["fp_structure_event_date"] = latest_struct.get("occurredAt")
         result["fp_structure_event_price"] = _safe_float(latest_struct.get("price"))
@@ -860,15 +861,17 @@ def flatten_first_pyramid(
 
     bos_evt = _latest_event_by_type(struct_events, {"BOS"})
     if bos_evt:
+        bos_evt = adapt_legacy_pyramid_event(bos_evt)
         result["fp_latest_bos_direction"] = bos_evt.get("direction")
         result["fp_latest_bos_freshness"] = bos_evt.get("freshnessBars")
-        result["fp_latest_bos_level"] = (bos_evt.get("extra") or {}).get("structure_level")
+        result["fp_latest_bos_level"] = bos_evt.get("structureLevel")
 
     choch_evt = _latest_event_by_type(struct_events, {"CHoCH"})
     if choch_evt:
+        choch_evt = adapt_legacy_pyramid_event(choch_evt)
         result["fp_latest_choch_direction"] = choch_evt.get("direction")
         result["fp_latest_choch_freshness"] = choch_evt.get("freshnessBars")
-        result["fp_latest_choch_level"] = (choch_evt.get("extra") or {}).get("structure_level")
+        result["fp_latest_choch_level"] = choch_evt.get("structureLevel")
 
     # [P0-3 修复 2026-07-29] SMC OB 生命周期改为 OB_CREATED/OB_ENTERED/OB_MITIGATED 三事件
     # 旧 OB_ENTRY 已废弃，保留读取仅为历史快照兼容
