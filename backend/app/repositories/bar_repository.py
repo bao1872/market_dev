@@ -32,6 +32,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -711,6 +712,122 @@ async def get_adj_factor_series(
         as_of_ts = pd.Timestamp(as_of)
         df = df[df["trade_date"] <= as_of_ts].reset_index(drop=True)
     return df
+
+
+async def get_daily_bars_batch(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    start_date: date,
+    end_date: date,
+) -> dict[uuid.UUID, pd.DataFrame]:
+    """[CHANGE-20260804-FS] 批量查询日线行情：一次 SQL 读取整批股票的 bars_daily。
+
+    替代逐股调用 _query_daily_bars（N 次往返），将 N×2 DB 往返降为 1 次 bars 查询
+    + 1 次 adj_factor 查询（配合 get_adj_factor_series_batch）。
+
+    Args:
+        session: 异步会话
+        instrument_ids: 标的 UUID 列表
+        start_date / end_date: 查询日期范围
+
+    Returns:
+        {instrument_id: DataFrame(index=trade_date, columns=OHLCV+adj_factor)}
+        无数据的标的返回空 DataFrame。
+    """
+    results: dict[uuid.UUID, pd.DataFrame] = {
+        iid: pd.DataFrame() for iid in instrument_ids
+    }
+    if not instrument_ids:
+        return results
+    try:
+        rows = (
+            await session.execute(
+                select(
+                    BarDaily.instrument_id,
+                    BarDaily.trade_date,
+                    BarDaily.open,
+                    BarDaily.high,
+                    BarDaily.low,
+                    BarDaily.close,
+                    BarDaily.volume,
+                    BarDaily.amount,
+                    BarDaily.adj_factor,
+                )
+                .where(BarDaily.instrument_id.in_(instrument_ids))
+                .where(BarDaily.trade_date >= start_date)
+                .where(BarDaily.trade_date <= end_date)
+                .order_by(BarDaily.instrument_id, BarDaily.trade_date)
+            )
+        ).all()
+    except Exception as exc:
+        logger.warning("批量查询 bars_daily 失败 instrument_ids=%s: %s", instrument_ids, exc)
+        raise
+
+    if not rows:
+        return results
+
+    for iid, grp in groupby(rows, key=lambda r: r.instrument_id):
+        recs = list(grp)
+        df = pd.DataFrame(recs, columns=["instrument_id"] + _BAR_COLUMNS)
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        for col in _BAR_COLUMNS:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.set_index("trade_date")
+        results[iid] = df
+    return results
+
+
+async def get_adj_factor_series_batch(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    as_of: date | None = None,
+) -> dict[uuid.UUID, pd.DataFrame]:
+    """[CHANGE-20260804-FS] 批量查询复权因子：一次 SQL 读取整批股票 adj_factor。
+
+    Args:
+        session: 异步会话
+        instrument_ids: 标的 UUID 列表
+        as_of: 复权锚点（None=全量；date=只返回 <= as_of 的因子）
+
+    Returns:
+        {instrument_id: DataFrame(columns=[trade_date, adj_factor])}
+        无数据的标的返回空 DataFrame。
+    """
+    results: dict[uuid.UUID, pd.DataFrame] = {
+        iid: pd.DataFrame(columns=["trade_date", "adj_factor"]) for iid in instrument_ids
+    }
+    if not instrument_ids:
+        return results
+    try:
+        rows = (
+            await session.execute(
+                select(
+                    BarDaily.instrument_id,
+                    BarDaily.trade_date,
+                    BarDaily.adj_factor,
+                )
+                .where(BarDaily.instrument_id.in_(instrument_ids))
+                .where(BarDaily.adj_factor.isnot(None))
+                .order_by(BarDaily.instrument_id, BarDaily.trade_date)
+            )
+        ).all()
+    except Exception as exc:
+        logger.warning("批量查询 adj_factor 失败 instrument_ids=%s: %s", instrument_ids, exc)
+        raise
+
+    if not rows:
+        return results
+
+    for iid, grp in groupby(rows, key=lambda r: r.instrument_id):
+        recs = list(grp)
+        df = pd.DataFrame(recs, columns=["instrument_id", "trade_date", "adj_factor"])
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce")
+        if as_of is not None:
+            as_of_ts = pd.Timestamp(as_of)
+            df = df[df["trade_date"] <= as_of_ts].reset_index(drop=True)
+        results[iid] = df
+    return results
 
 
 async def rebuild_adj_factors(

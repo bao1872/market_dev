@@ -504,7 +504,7 @@ Review 检查点：`_update_heartbeat_and_step` 的 `last_completed_step` 为 `s
 
 管理后台两页（OPS-06，2026-08-03）：
 - `AdminAfterClosePipelinePage`（`/admin/after-close`）为盘后流水线专用诊断页，承载四类操作（终止/对账/从此处续跑/完整强制重跑）与 7 步时间线 + watchlist_ready + 部分成功 + stale 警告。
-- `AdminJobsPage`（`/admin/jobs`）为通用任务 + Worker 心跳监控页，不复制盘后四类操作（避免两页按钮语义分歧）；对 `after_close_orchestrator` 任务，任务详情抽屉新增「盘后详情（四类操作）」链接跳转 `/admin/after-close`，使通用页与专用页共享同一操作/状态事实源。
+- `AdminJobsPage`（`/admin/jobs`）为通用任务 + Worker 心跳监控页，不复制盘后四类操作（避免两页按钮语义分歧）；对 `after_close_orchestrator` 任务，任务详情抽屉新增「盘后详情（四类操作）」链接跳转 `/admin/after-close?tradeDate=<business_date>`，**携带被点击 run 的业务日期**，使专用页直接定位到该历史任务而非默认最新（CHANGE-20260804-001）；`AdminAfterClosePipelinePage` 通过 `useSearchParams` 读取 `tradeDate` 初始化 `selectedDate`，刷新/返回保持同一任务。通用页与专用页共享同一操作/状态事实源。
 
 > 数据操作：以上为本地纯单元验证（PURE_UNIT_TEST=1），未部署、未连接共享库、未修改业务数据。
 

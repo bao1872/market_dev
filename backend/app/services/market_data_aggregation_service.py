@@ -43,6 +43,8 @@ from app.repositories.bar_repository import (
     _query_60min_bars,
     _query_daily_bars,
     _query_minute_bars,
+    get_adj_factor_series_batch,
+    get_daily_bars_batch,
 )
 from app.services.adjustment_factor_service import AdjustmentFactorService
 from app.services.calendar_service import is_trading_day_async
@@ -990,6 +992,180 @@ def _cache_set(
 # ===== 主服务 =====
 
 
+async def _build_daily_aggregation(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    daily_df: pd.DataFrame,
+    factor_df: pd.DataFrame,
+    expected: Any,
+    now: datetime,
+    *,
+    timeframe: str,
+    adj: str,
+    include_realtime: bool,
+    completed_only: bool,
+    start: date,
+    end: date,
+    limit: int | None,
+    warmup_bars: int,
+    adjustment_as_of: date | None,
+) -> BarAggregationResult:
+    """[CHANGE-20260804-FS] 从预批量读取的 daily_df / factor_df 构造日线类聚合结果。
+
+    复用 get_bars 日线路径的完整 bars/复权/诊断合同，但不触发任何 per-instrument
+    DB 查询（bars 与 adj_factor 已由调用方批量读取）。仅在 need_tail（今日 partial
+    daily 缺失）时按需 fetch_daily_bars，属罕见路径，不改变主路径的批量性质。
+    """
+    bars_df = pd.DataFrame()
+    data_source = "db"
+    is_partial = False
+    last_persisted_bar_time: pd.Timestamp | None = None
+    last_live_bar_time: pd.Timestamp | None = None
+    degraded = False
+    degraded_reason: str | None = None
+
+    adj_factor_hash = _compute_adj_factor_hash(factor_df)
+
+    backfill_rounds = 0
+    coverage_reason = "daily_no_backfill"
+
+    if not daily_df.empty:
+        last_persisted_bar_time = pd.Timestamp(daily_df.index[-1])
+
+    need_tail = daily_df.empty or daily_df.index[-1].date() < expected  # type: ignore[attr-defined]
+    if need_tail:
+        try:
+            tail_df = await fetch_daily_bars(session, instrument_id, start, end)  # type: ignore[arg-type]
+            if not tail_df.empty:
+                daily_df = _merge_bars(daily_df, tail_df)
+                data_source = "hybrid"
+                last_live_bar_time = pd.Timestamp(tail_df.index[-1])
+        except Exception as exc:
+            degraded = True
+            degraded_reason = f"pytdx daily fallback failed: {exc}"
+            data_source = "degraded"
+
+    if timeframe in ("1w", "1mo") and include_realtime and _is_trading_hours(now):
+        try:
+            is_trading_day = await is_trading_day_async(session, now.date())
+            session_name = compute_market_session(now, is_trading_day)
+            if session_name in (MARKET_SESSION_MORNING, MARKET_SESSION_AFTERNOON):
+                partial_daily = await fetch_today_daily_bars(session, instrument_id, now.date())
+                if not partial_daily.empty:
+                    daily_df = _merge_bars(daily_df, partial_daily)
+                    if data_source == "db":
+                        data_source = "hybrid"
+                    is_partial = True
+                    last_live_bar_time = pd.Timestamp(partial_daily.index[-1])
+                else:
+                    degraded = True
+                    degraded_reason = "realtime_1d_empty_in_trading_hours"
+                    if data_source != "degraded":
+                        data_source = "degraded"
+        except Exception as exc:
+            logger.warning(
+                "1w/1mo partial daily 合并失败 instrument_id=%s: %s", instrument_id, exc,
+            )
+            degraded = True
+            degraded_reason = f"pytdx partial daily failed: {exc}"
+            data_source = "degraded"
+
+    if adj == "qfq" and not daily_df.empty and not factor_df.empty:
+        try:
+            daily_df = AdjustmentFactorService().apply_qfq(
+                daily_df, factor_df, as_of=adjustment_as_of, intraday=False
+            )
+        except Exception as exc:
+            degraded = True
+            degraded_reason = f"qfq failed: {exc}"
+            data_source = "degraded"
+
+    if timeframe == "1w":
+        bars_df = aggregate_kline(daily_df, "1w") if not daily_df.empty else daily_df
+    elif timeframe == "1mo":
+        bars_df = aggregate_kline(daily_df, "1mo") if not daily_df.empty else daily_df
+    else:
+        bars_df = daily_df
+
+    completed_through = last_persisted_bar_time
+    pre_limit_count = len(bars_df) if not bars_df.empty else 0
+    bars_df_full = bars_df
+
+    warmup_bars_full: pd.DataFrame | None = None
+    if warmup_bars > 0 and not bars_df.empty:
+        full_count = (limit or 0) + warmup_bars
+        warmup_bars_full = (
+            bars_df.tail(full_count) if full_count <= len(bars_df) else bars_df
+        )
+    if limit is not None and not bars_df.empty:
+        bars_df = bars_df.tail(limit)
+
+    source_bar_hash = (
+        compute_source_bar_hash(bars_df, timeframe) if not bars_df.empty else ""
+    )
+
+    actual_count = len(bars_df) if not bars_df.empty else 0
+    coverage_start: pd.Timestamp | None = (
+        pd.Timestamp(bars_df.index[0]) if not bars_df.empty else None
+    )
+    coverage_end: pd.Timestamp | None = (
+        pd.Timestamp(bars_df.index[-1]) if not bars_df.empty else None
+    )
+    history_exhausted = limit is not None and pre_limit_count < limit
+
+    latest_daily_quote: dict | None = None
+    try:
+        if timeframe in ("1w", "1mo"):
+            _qdf = daily_df
+        else:
+            _qdf = bars_df_full
+        if _qdf is not None and not _qdf.empty:
+            _latest = _qdf.iloc[-1]
+            _prev_close = float(_qdf.iloc[-2]["close"]) if len(_qdf) >= 2 else None
+            _cp = float(_latest["close"])
+            latest_daily_quote = {
+                "open": float(_latest["open"]),
+                "high": float(_latest["high"]),
+                "low": float(_latest["low"]),
+                "close": _cp,
+                "volume": float(_latest["volume"]),
+                "amount": float(_latest["amount"]) if "amount" in _qdf.columns else 0.0,
+                "prev_close": _prev_close,
+                "change_pct": (
+                    (_cp - _prev_close) / _prev_close * 100
+                    if _prev_close and _prev_close != 0 else 0.0
+                ),
+            }
+    except Exception as exc:
+        logger.warning("latest_daily_quote 聚合失败: %s", exc)
+        latest_daily_quote = None
+
+    return BarAggregationResult(
+        bars=bars_df,
+        data_source=data_source,
+        as_of=now,
+        is_partial=is_partial,
+        last_persisted_bar_time=last_persisted_bar_time,
+        last_live_bar_time=last_live_bar_time,
+        freshness_seconds=0.0,
+        degraded=degraded,
+        degraded_reason=degraded_reason,
+        warmup_bars_full=warmup_bars_full,
+        source_bar_hash=source_bar_hash,
+        adj_factor_hash=adj_factor_hash,
+        adjustment_as_of=adjustment_as_of,
+        completed_through=completed_through,
+        requested_count=limit,
+        actual_count=actual_count,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        history_exhausted=history_exhausted,
+        backfill_rounds=backfill_rounds,
+        coverage_reason=coverage_reason,
+        latest_daily_quote=latest_daily_quote,
+    )
+
+
 class MarketDataAggregationService:
     """行情聚合统一入口。"""
 
@@ -999,20 +1175,87 @@ class MarketDataAggregationService:
         instrument_ids: Sequence[uuid.UUID],
         **kwargs: Any,
     ) -> dict[uuid.UUID, BarAggregationResult | Exception]:
-        """批量获取同一行情合同的多个标的。
+        """[CHANGE-20260804-FS] 批量获取同一行情合同的多个标的（数据库级批读）。
 
-        该入口是批任务唯一允许使用的 MDAS 批读边界。它复用 ``get_bars`` 的
-        完整 bars/复权/诊断合同，并按标的隔离失败。当前 AsyncSession 不支持并发
-        SQL 操作，因此在一个事务会话内有界顺序读取；调用方不得自行无界 gather。
+        与旧实现（循环逐股调用 get_bars → N 次 bars 查询 + N 次复权因子查询）不同，
+        本方法对整批标的只发起：
+
+        * 1 次 bars_daily 批量查询（get_daily_bars_batch，IN 子句）；
+        * 1 次 adj_factor 批量查询（get_adj_factor_series_batch，IN 子句）；
+        * 1 次共享的「预期最后完成日」计算（按 now 日期，与标的无关）。
+
+        随后在内存按 instrument_id 分组，逐股复用同一套 bars/复权/诊断构造合同
+        （_build_daily_aggregation），按标的隔离失败。这把 N×2 的 DB 往返降到约 3 次。
+
+        仅支持日线类周期（1d/1w/1mo）；其余周期（日内）退回逐股 get_bars 以保证合同一致。
         返回值保留输入顺序，便于批任务稳定产生进度和 metrics。
         """
-        results: dict[uuid.UUID, BarAggregationResult | Exception] = {}
+        if not instrument_ids:
+            return {}
+
+        timeframe = str(kwargs.get("timeframe", "1d")).lower()
+        adj = kwargs.get("adj", "none")
+        include_realtime = kwargs.get("include_realtime", True)
+        completed_only = kwargs.get("completed_only", False)
+        start_date = kwargs.get("start_date")
+        end_date = kwargs.get("end_date")
+        limit = kwargs.get("limit")
+        warmup_bars = kwargs.get("warmup_bars", 0)
+        adjustment_as_of = kwargs.get("adjustment_as_of")
+
+        now = now_shanghai()
+        start, end = _resolve_date_range(timeframe, start_date, end_date, limit=limit)
+
+        # 日内周期不在批读范围内：退回逐股 get_bars（合同一致，行为不变）
+        if timeframe not in ("1d", "1w", "1mo"):
+            results: dict[uuid.UUID, BarAggregationResult | Exception] = {}
+            for instrument_id in instrument_ids:
+                try:
+                    results[instrument_id] = await self.get_bars(
+                        session, instrument_id, **kwargs
+                    )
+                except Exception as exc:
+                    results[instrument_id] = exc
+            return results
+
+        # [CHANGE-20260804-FS] 数据库级批读：bars + 复权因子各 1 次 SQL
+        bars_by_id = await get_daily_bars_batch(session, list(instrument_ids), start, end)
+
+        factor_by_id: dict[uuid.UUID, pd.DataFrame] | None = None
+        if adj == "qfq":
+            fetch_as_of = None if include_realtime else adjustment_as_of
+            factor_by_id = await get_adj_factor_series_batch(
+                session, list(instrument_ids), as_of=fetch_as_of
+            )
+
+        # 共享的「预期最后完成日」（按 now 日期，与标的无关，整批只算 1 次）
+        expected = await _call_expected_last_completed_daily_bar(session, now)
+
+        results = {}
         for instrument_id in instrument_ids:
             try:
-                results[instrument_id] = await self.get_bars(
+                daily_df = bars_by_id.get(instrument_id, pd.DataFrame())
+                factor_df = (
+                    factor_by_id.get(instrument_id, pd.DataFrame())
+                    if factor_by_id is not None
+                    else pd.DataFrame()
+                )
+                results[instrument_id] = await _build_daily_aggregation(
                     session,
                     instrument_id,
-                    **kwargs,
+                    daily_df,
+                    factor_df,
+                    expected,
+                    now,
+                    timeframe=timeframe,
+                    adj=adj,
+                    include_realtime=include_realtime,
+                    completed_only=completed_only,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    warmup_bars=warmup_bars,
+                    adjustment_as_of=adjustment_as_of,
                 )
             except Exception as exc:
                 results[instrument_id] = exc

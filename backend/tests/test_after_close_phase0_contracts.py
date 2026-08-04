@@ -377,3 +377,91 @@ async def test_review_step_resume_skip_returns_resume_skipped():
     assert result["resume_skipped"] is True
     assert result["status"] == "published"  # 从 metadata 复用
     assert result["failed"] is False
+
+
+def test_review_prereq_missing_does_not_advance_checkpoint():
+    """[CHANGE-20260804-P0-1] 前置条件缺失不得推进 computing_review 检查点。
+
+    缺口1：review prereq_missing 时，主流程必须只刷新心跳/租约
+    （_update_heartbeat_and_step(db, job_run, None, ...)），
+    不能把 last_completed_step 写成 computing_review，否则后续 resume
+    会误判 Review 已完成而永久跳过。
+
+    源码守卫：在 prereq_missing 分支内，_update_heartbeat_and_step 的
+    last_completed_step 实参必须为 None（而非 COMPUTING_REVIEW.value）。
+    """
+    import inspect
+    import re
+
+    from app.services import after_close_orchestrator as orch
+
+    # 前置条件缺失分支位于 _execute_review_step（不是 execute_after_close_run）
+    src = inspect.getsource(orch._execute_review_step)
+    # 取前置条件缺失分支文本（到该分支后的 db.commit() 为止）
+    branch = re.search(
+        r'# 前置条件不满足.*?await db\.commit\(\)',
+        src,
+        re.DOTALL,
+    )
+    assert branch is not None, (
+        "未找到 _execute_review_step 的 prereq_missing 分支"
+    )
+    m = re.search(
+        r'_update_heartbeat_and_step\(\s*db, job_run, ([^,]+),',
+        branch.group(0),
+    )
+    assert m is not None, (
+        "prereq_missing 分支未调用 _update_heartbeat_and_step"
+    )
+    step_arg = m.group(1).strip()
+    assert step_arg == "None", (
+        f"prereq_missing 分支必须把 last_completed_step 设为 None（仅刷新心跳），"
+        f"实际为: {step_arg}"
+    )
+    # 仅禁止把检查点（_update_heartbeat_and_step 的 step 实参）写为 COMPUTING_REVIEW；
+    # _add_pipeline_event 引用 COMPUTING_REVIEW.value 仅用于事件标记，不构成检查点推进。
+    assert re.search(
+        r'_update_heartbeat_and_step\(\s*db, job_run, AfterCloseRunStatus\.COMPUTING_REVIEW\.value',
+        branch.group(0),
+    ) is None, (
+        "prereq_missing 分支不得将 _update_heartbeat_and_step 的检查点推进为 computing_review"
+    )
+
+
+def test_review_executor_timeout_forces_partial_success():
+    """[CHANGE-20260804-P0-1] 执行器超时/中断必须进入 partial_success（非 succeeded）。
+
+    缺口2：执行器 timed_out/unavailable/interrupted/cancelled 会返回
+    result=None 或 failed=False，但 step_summary.status 已如实记录。
+    最终 partial_success 判定必须同时读 review 业务结果和 _review_step_summary.status，
+    否则超时会被误判为成功（succeeded）。
+
+    源码守卫：_review_failed 的推导必须包含对 _review_step_summary.get("status")
+    的集合判定（timed_out/unavailable/interrupted/cancelled/failed）。
+    """
+    import inspect
+    import re
+
+    from app.services import after_close_orchestrator as orch
+
+    src = inspect.getsource(orch.execute_after_close_run)
+
+    # 1) _review_failed 推导必须引用 _review_step_summary
+    assert "_review_step_summary.get(\"status\")" in src or "_review_step_status" in src, (
+        "review 失败判定必须读取 _review_step_summary.status"
+    )
+    # 2) 失败集合必须显式包含执行器终态，而非只看业务 failed 字段
+    assert "timed_out" in src and "interrupted" in src and "cancelled" in src, (
+        "review 失败判定必须覆盖执行器终态 timed_out/unavailable/interrupted/cancelled"
+    )
+    # 3) 最终 final status 判定必须消费 _review_failed（而非仅 stock_core 成功）
+    m = re.search(
+        r'_review_failed = bool\(.*?\)\s*\n\s*_review_reason =',
+        src,
+        re.DOTALL,
+    )
+    assert m is not None, "未找到 _review_failed 推导"
+    block = m.group(0)
+    assert "timed_out" in block and "_review_step_status" in block, (
+        "_review_failed 必须结合 _review_step_summary.status（含 timed_out）"
+    )

@@ -641,28 +641,19 @@ async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics(
 
 @pytest.mark.asyncio
 async def test_review_core_with_run_items_uses_mdas_batch_read_and_metrics() -> None:
-    """[AC-16] 主链 compute_review_core_with_run_items 必须 MDAS 批读 1d bars。
+    """[CHANGE-20260804-FS] 主链必须真正数据库级批读，而非逐股 N×2 次查询。
 
-    修复前该主链逐股 _fetch_bars_from_db（N×2 次 DB 往返），未走 MDAS 批读；
-    与 compute_for_trade_date 的批量化不一致。本测试锁定：
-    - get_bars_batch 每个 claim 批一次（batch_count 次，而非每股 2 次）
-    - 预读 bars 通过 primary_bars 传入单股计算（canonical frame 批内复用）
-    - 返回 metrics：batch_count / mdas_batch_read_count
-    - 每股独立提交（mark_item_succeeded 每 item 一次）不因批读而改变 AC-08 检查点
+    升级自 AC-16 的接口级测试：不再 mock get_bars_batch，而是 spy 底层
+    repository 批量方法 get_daily_bars_batch / get_adj_factor_series_batch，
+    验证整批标的只各触发 1 次 SQL（bars 1 次 + 因子 1 次），而不是每 just N 次。
     """
     import uuid as uuid_mod
     from datetime import date as date_mod
 
-    from app.services import feature_snapshot_service as fss
     from app.services.feature_snapshot_service import compute_review_core_with_run_items
 
     instrument_ids = [uuid_mod.uuid4() for _ in range(5)]
     snapshot_run_id = uuid_mod.uuid4()
-    bars = pd.DataFrame({"close": [1.0]}, index=pd.DatetimeIndex(["2026-07-31"]))
-    agg = MagicMock(
-        spec=fss.BarAggregationResult,
-        bars=bars, source_bar_hash="hash1", adj_factor_hash="adj1",
-    )
 
     class _Item:
         def __init__(self, instrument_id):
@@ -707,11 +698,54 @@ async def test_review_core_with_run_items_uses_mdas_batch_read_and_metrics() -> 
             new_callable=AsyncMock,
             return_value={"coverage": 1.0, "succeeded": 5, "failed": 0, "skipped": 0},
         ),
+        # 不 mock get_bars_batch：让真实批读入口运行，从而触发底层 repository 批量方法
+        # （spy_bars / spy_factor），以验证数据库级批读（每批 bars 1 次 + 因子 1 次）。
+        # 用安全的空结果替换真实 SQL，避免 mock session 执行 SQL 触发降级逐股读取。
         patch(
-            "app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars_batch",
+            "app.services.market_data_aggregation_service.get_daily_bars_batch",
+            side_effect=lambda _s, _ids, *_a, **_k: {
+                i: pd.DataFrame(
+                    {
+                        "open": [1.0], "high": [1.1], "low": [0.9],
+                        "close": [1.0], "volume": [1000.0], "amount": [1000.0],
+                    },
+                    index=pd.DatetimeIndex(["2026-07-31"]),
+                )
+                for i in _ids
+            },
+        ) as spy_bars,
+        patch(
+            "app.services.market_data_aggregation_service.get_adj_factor_series_batch",
+            side_effect=lambda _s, _ids, *_a, **_k: {
+                i: pd.DataFrame(
+                    {
+                        "trade_date": pd.DatetimeIndex(["2026-07-31"]),
+                        "adj_factor": [1.0],
+                    }
+                )
+                for i in _ids
+            },
+        ) as spy_factor,
+        patch(
+            "app.services.market_data_aggregation_service._call_expected_last_completed_daily_bar",
             new_callable=AsyncMock,
-            side_effect=lambda _db, ids, **_kw: dict.fromkeys(ids, agg),
-        ) as batch_read,
+            return_value=date_mod(2026, 7, 31),
+        ),
+        patch(
+            "app.services.market_data_aggregation_service.fetch_daily_bars",
+            new_callable=AsyncMock,
+            return_value=pd.DataFrame(),
+        ),
+        patch(
+            "app.services.market_data_aggregation_service.fetch_today_daily_bars",
+            new_callable=AsyncMock,
+            return_value=pd.DataFrame(),
+        ),
+        patch(
+            "app.services.market_data_aggregation_service.is_trading_day_async",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
         patch(
             "app.services.feature_snapshot_service.compute_review_core_for_trade_date",
             new_callable=AsyncMock,
@@ -729,8 +763,17 @@ async def test_review_core_with_run_items_uses_mdas_batch_read_and_metrics() -> 
             batch_size=2, failure_threshold=0.3,
         )
 
-    # MDAS 批读：每 claim 批一次（3 个非空批），而非逐股 N×2 次
-    assert batch_read.await_count == 3
+    # [CHANGE-20260804-FS] 数据库级批读：每个 claim 批只发起 1 次 bars SQL + 1 次
+    # adj_factor SQL（而非逐股 N×2 次）。断言批量入口按批调用底层 repository，
+    # 且调用次数等于 batch_count（每批 1 次），而不是按标的数量 N。
+    assert spy_bars.await_count == result["batch_count"] == 3, (
+        f"bars 应为每批 1 次批量 SQL（共 {result['batch_count']} 次），"
+        f"实际 {spy_bars.await_count}"
+    )
+    assert spy_factor.await_count == result["batch_count"] == 3, (
+        f"adj_factor 应为每批 1 次批量 SQL（共 {result['batch_count']} 次），"
+        f"实际 {spy_factor.await_count}"
+    )
     assert result["batch_count"] == 3
     assert result["mdas_batch_read_count"] == 3
     # 每股独立计算 + 提交（AC-08 检查点不因批读改变）
@@ -739,8 +782,11 @@ async def test_review_core_with_run_items_uses_mdas_batch_read_and_metrics() -> 
     # 预读 bars 必须传给单股计算（canonical frame 批内复用）
     for call in core_compute.await_args_list:
         kwargs = call.kwargs
-        assert kwargs.get("primary_bars") is bars, (
+        assert kwargs.get("primary_bars") is not None, (
             "AC-16 预读 bars 必须通过 primary_bars 传入单股计算"
+        )
+        assert hasattr(kwargs.get("primary_bars"), "index"), (
+            "AC-16 primary_bars 必须是 DataFrame"
         )
 
 

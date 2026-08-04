@@ -1207,7 +1207,10 @@ export default function AdminJobsPage() {
             </div>
             <div className="drawer-foot">
               {selectedRun && selectedRun.job_name === 'after_close_orchestrator' && (
-                <Link className="btn small" to="/admin/after-close">
+                <Link
+                  className="btn small"
+                  to={`/admin/after-close?tradeDate=${selectedRun.business_date ?? ''}`}
+                >
                   盘后详情（四类操作）
                 </Link>
               )}

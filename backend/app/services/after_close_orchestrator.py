@@ -1885,8 +1885,10 @@ async def _execute_review_step(
                             "aggregation_status": aggregation_status,
                         },
                     )
+                    # 前置条件缺失：仅刷新心跳/租约，不推进 last_completed_step。
+                    # 否则后续 resume 会误判 computing_review 已完成，永久跳过 Review。
                     await _update_heartbeat_and_step(
-                        db, job_run, AfterCloseRunStatus.COMPUTING_REVIEW.value, worker_id,
+                        db, job_run, None, worker_id,
                     )
                     await db.commit()
             except Exception as meta_exc2:
@@ -3184,10 +3186,14 @@ async def execute_after_close_run(
         _review_status = (
             _review_result.get("status") if isinstance(_review_result, dict) else "skipped"
         )
-        _review_failed = (
-            bool(_review_result.get("failed"))
-            if isinstance(_review_result, dict)
-            else False
+        # [P0-1 2026-08-04] 失败判定必须同时考虑 review 业务结果 _和_ 执行器 step summary：
+        # 执行器若 timed_out/unavailable/interrupted/cancelled 会返回 result=None 或
+        # failed=False，但 step_summary.status 已如实记录。仅看业务结果会把超时误判为成功。
+        _review_step_status = _review_step_summary.get("status")
+        _review_failed = bool(
+            (isinstance(_review_result, dict) and _review_result.get("failed"))
+            or _review_step_status
+            in ("failed", "timed_out", "unavailable", "interrupted", "cancelled")
         )
         _review_reason = (
             _review_result.get("reason") if isinstance(_review_result, dict) else None

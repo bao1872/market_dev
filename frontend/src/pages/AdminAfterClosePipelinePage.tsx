@@ -19,7 +19,7 @@
 // - useCreateAfterClosePipelineRun：触发编排（admin，幂等）
 
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   useAfterClosePipelineLatest,
   useAfterClosePipelineByDate,
@@ -120,8 +120,12 @@ function PipelineTimeline({ steps }: { steps: PipelineStep[] }) {
 // ===== 主页面 =====
 export default function AdminAfterClosePipelinePage() {
   const toast = useToast.getState()
+  // [OPS-06] 从 AdminJobsPage 跳转而来的历史任务：URL 携带 ?tradeDate=YYYY-MM-DD，
+  // 直接定位到被点击的 run，而不是默认显示最新交易日。
+  const [searchParams] = useSearchParams()
+  const initialTradeDate = searchParams.get('tradeDate') ?? ''
   // selectedDate: '' 表示"最新交易日"，否则按指定日期查询（允许选择历史日期如 2026-07-15）
-  const [selectedDate, setSelectedDate] = useState('')
+  const [selectedDate, setSelectedDate] = useState(initialTradeDate)
   const todayStr = shanghaiBusinessDate()
 
   // selectedDate === '' 时用 latest（自动定位最近交易日），否则按指定日期查询
