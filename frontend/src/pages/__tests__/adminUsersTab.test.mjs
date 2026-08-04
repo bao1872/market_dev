@@ -47,3 +47,14 @@ test('切换 tab 写回 URL（setSearchParams）', () => {
   const src = readSource(PAGE_PATH)
   assert.ok(src.includes('setSearchParams'), '切换 tab 必须写回 URL')
 })
+
+// ===== 5. 旧路由重定向目标与页面识别一致（P0 审查修复）=====
+test('旧路由 tab=beta_applications 与页面识别一致（下划线）', () => {
+  const pageSrc = readSource(PAGE_PATH)
+  const routeSrc = readSource(join(__dirname, '..', '..', 'navigation', 'routeStructure.ts'))
+  // 页面必须识别下划线 beta_applications
+  assert.ok(pageSrc.includes("'beta_applications'"), 'AdminUsersPage 必须识别 beta_applications')
+  // 旧路由重定向必须用下划线 beta_applications（连字符会导致旧入口失效）
+  assert.ok(routeSrc.includes('/admin/users?tab=beta_applications'), '旧路由必须重定向到 tab=beta_applications（下划线）')
+  assert.ok(!routeSrc.includes('/admin/users?tab=beta-applications'), '不得用连字符 beta-applications')
+})

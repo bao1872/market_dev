@@ -70,6 +70,23 @@
 - 用户与权限：Tab 以 URL query 为唯一真源（`useEffect` 同步 URL→state，
   前进/后退/外部修改均可恢复；每个 tab 有明确 URL 表示）。
 
+### 2.5 审查修复（第二轮垂直切片审查 6 项）
+
+- **内测申请路由失效**：旧路由重定向目标统一为下划线 `tab=beta_applications`，
+  与 `AdminUsersPage` 识别值一致（原连字符 `beta-applications` 导致旧入口退回默认会员账户）。
+- **R14 前端错误链闭合**：`AdminAfterClosePipelinePage`（handleCreateRun/runAction）
+  与 `AfterClosePipelineCard`（handleRetry/handleResume/handleForce/handleForceFromDsa）
+  全部改用 `formatAdminApiError` 消费结构化错误；删除 dead `formatAfterCloseCreate409Message`；
+  修复 resume 将后端对象声明为 string 导致 Toast 收到对象的隐患。
+- **板块节点 run 级语义**：改用 `BoardAnalysisRun`（expected_count/succeeded_count/
+  coverage_ratio/status/published_at），以批次覆盖率判定，不再用单条 snapshot 最高覆盖率误判。
+- **第一金字塔取错对象**：改用 `FactorPublication(publication_kind="stock_core")` 发布指针
+  （trade_date/coverage_ratio/data_run_id），不再用 `FirstPyramidHistoryRun`（历史回补、无 trade_date）。
+- **正式发布未限定策略**：`StrategyRun.status='published'` 关联 strategy_versions +
+  strategy_definitions 限定 `strategy_key='dsa_selector'`，不再裸查所有策略的 published run。
+- **数据生产页面掩盖错误**：处理 `overviewQuery.isError`（显示真实错误而非"暂无数据"）；
+  `publication_status=not_applicable` 显示"不适用"而非"未发布"；默认 tab 改为"总览"。
+
 ## 3. 完成状态（如实区分）
 
 | 范围 | 状态 |
@@ -85,13 +102,14 @@
 
 ## 4. 验证
 
-- 前端：`tsc --noEmit` 通过；eslint 0 error；node 测试套件 84 passed
-  （导航/路由 29 + adminErrors 4 + 数据生产中心 5 + 用户 Tab 4 + 任务中心标题 2 + 既有 40）。
+- 前端：`tsc --noEmit` 通过；eslint 0 error；node 测试套件 **88 passed**
+  （导航/路由 29 + adminErrors 4 + 数据生产中心 8 + 用户 Tab 5 + 任务中心标题 2 + 既有 40）。
 - 后端纯单元（`PURE_UNIT_TEST=1`，无需 DB）：
   - `test_admin_errors.py`：8 passed（含源码守卫：端点统一用 helper、不手工 raise HTTPException）；
-  - `test_system_overview_service.py`：15 passed；
-  - 本轮改动 6 文件 Ruff 全部通过；`git diff --check` 通过。
-- 需 DB 连接测试（`postgres` 依赖 60+43 项，如 `test_response_has_18_fields`、
+  - `test_system_overview_service.py`：18 passed（含 product_nodes 数据语义守卫：
+    板块用 run 级 BoardAnalysisRun、第一金字塔用 stock_core 指针、正式发布限定 dsa_selector）；
+  - 本轮改动文件 Ruff 全部通过；`git diff --check` 通过。
+- 需 DB 连接测试（`postgres` 依赖 43+ 项，如 `test_response_has_18_fields`、
   `test_after_close_endpoints` 等）在共享开发库 `bz_stock` 下运行。因 AGENTS.md 安全边界
   未授权 `PANJI_SHARED_DEV_DB_TEST` 连接，本轮跳过；不影响代码正确性判断，但真实端到端
   行为验证留待后续授权后进行。

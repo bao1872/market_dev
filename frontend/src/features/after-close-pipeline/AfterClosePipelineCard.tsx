@@ -28,6 +28,7 @@ import {
 } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
 import { shanghaiBusinessDate, formatShanghaiTime } from '@/utils/datetime'
+import { formatAdminApiError } from '@/utils/adminErrors'
 import type { SystemOverview } from '@/api/endpoints'
 
 // [AfterClosePipelineCard] - 状态 → pill 样式映射
@@ -56,46 +57,6 @@ function statusLabel(status: string | undefined): string {
     case 'STALE': return '过期'
     default: return '-'
   }
-}
-
-// [AfterClose] - 创建盘后编排 409 detail → 人类可读消息（透明化真实失败原因）
-// 后端 409 来源：NON_TRADING_DAY（非交易日）/ DUPLICATE_RUN（同日已有 queued/running 任务）/
-// DATA_COVERAGE_INSUFFICIENT（覆盖率不足，从DSA重算复用此 formatter）
-// [R14] 优先消费统一错误字段（stable_error_code/recommended_action），兼容旧 error_code/reason。
-function formatAfterCloseCreate409Message(detail: unknown): string {
-  if (typeof detail === 'string') return detail
-  if (detail && typeof detail === 'object') {
-    const d = detail as {
-      stable_error_code?: string
-      error_code?: string
-      reason?: string
-      message?: string
-      recommended_action?: string
-      orchestrator_status?: string
-      started_at?: string
-    }
-    // [R14] 统一错误：stable_error_code 是权威码，recommended_action 是建议动作
-    if (d.stable_error_code) {
-      let msg = d.message ?? '创建失败，请稍后重试'
-      if (d.recommended_action) {
-        msg = `${msg}（${d.recommended_action}）`
-      }
-      return msg
-    }
-    if (d.error_code === 'NON_TRADING_DAY' || d.reason === 'NON_TRADING_DAY') {
-      return d.message ?? '非交易日无需执行'
-    }
-    if (d.error_code === 'DUPLICATE_RUN') {
-      const stage = d.orchestrator_status ? `（当前阶段: ${d.orchestrator_status}）` : ''
-      const start = d.started_at ? `，开始于 ${formatShanghaiTime(d.started_at)}` : ''
-      return `当天已有盘后任务正在运行${stage}${start}`
-    }
-    if (d.reason === 'DATA_COVERAGE_INSUFFICIENT') {
-      return d.message ?? '行情覆盖率不足，暂无法执行'
-    }
-    return d.message ?? '创建失败，请稍后重试'
-  }
-  return '创建失败，请稍后重试'
 }
 
 interface AfterClosePipelineCardProps {
@@ -145,16 +106,8 @@ export function AfterClosePipelineCard({
       const result = await createMutation.mutateAsync(date)
       toast.show('任务已加入队列', result.message)
     } catch (err: unknown) {
-      const axiosErr = err as {
-        response?: { status?: number; data?: { detail?: unknown } }
-      }
-      const respStatus = axiosErr.response?.status
-      const detail = axiosErr.response?.data?.detail
-      if (respStatus === 409) {
-        toast.show('创建失败', formatAfterCloseCreate409Message(detail))
-      } else {
-        toast.show('创建失败', '请稍后重试')
-      }
+      // [R14] 统一经 formatAdminApiError 消费结构化错误（含 recommended_action）
+      toast.show('创建失败', formatAdminApiError(err))
     }
   }
 
@@ -163,8 +116,9 @@ export function AfterClosePipelineCard({
     try {
       const result = await retryMutation.mutateAsync(jobRunId)
       toast.show('重试已启动', result.message)
-    } catch {
-      toast.show('重试失败', '请稍后重试')
+    } catch (err: unknown) {
+      // [R14] 统一消费结构化错误（run_not_found / not_retryable 等）
+      toast.show('重试失败', formatAdminApiError(err))
     }
   }
 
@@ -174,9 +128,8 @@ export function AfterClosePipelineCard({
       const result = await resumeMutation.mutateAsync(jobRunId)
       toast.show('已从断点恢复', result.message)
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } }
-      const message = axiosErr.response?.data?.detail ?? '请稍后重试'
-      toast.show('恢复失败', message)
+      // [R14] 统一消费结构化错误（修复旧实现将后端对象声明为 string 导致 Toast 收到对象的问题）
+      toast.show('恢复失败', formatAdminApiError(err))
     }
   }
 
@@ -190,8 +143,9 @@ export function AfterClosePipelineCard({
     try {
       const result = await forceMutation.mutateAsync({ runId: jobRunId })
       toast.show('强制执行已启动', result.message)
-    } catch {
-      toast.show('强制执行失败', '请稍后重试')
+    } catch (err: unknown) {
+      // [R14] 统一消费结构化错误（bad_request / coverage_insufficient 等）
+      toast.show('强制执行失败', formatAdminApiError(err))
     }
   }
 
@@ -206,14 +160,8 @@ export function AfterClosePipelineCard({
       })
       toast.show('DSA 重算已启动', result.message)
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { status?: number; data?: { detail?: unknown } } }
-      const respStatus = axiosErr.response?.status
-      const detail = axiosErr.response?.data?.detail
-      if (respStatus === 409) {
-        toast.show('DSA 重算失败', formatAfterCloseCreate409Message(detail))
-      } else {
-        toast.show('DSA 重算失败', '请稍后重试')
-      }
+      // [R14] 统一经 formatAdminApiError 消费结构化错误（coverage_insufficient 等）
+      toast.show('DSA 重算失败', formatAdminApiError(err))
     }
   }
 

@@ -1422,72 +1422,83 @@ async def _compute_product_nodes(
             ).model_dump()
         )
 
-    # ===== 2. 第一金字塔（first_pyramid_history_runs，最近一次回补 run）=====
-    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
-    fp_run = await db.scalar(
-        select(FirstPyramidHistoryRun)
-        .order_by(FirstPyramidHistoryRun.created_at.desc())
+    # ===== 2. 第一金字塔（FactorPublication stock_core 发布指针 = 正式生产事实源）=====
+    # 不能读 first_pyramid_history_runs（历史回补任务，无 trade_date，不代表今日生产状态）。
+    # 正式状态应从 stock_core 发布指针获取（含 trade_date/coverage_ratio/data_run_id/published_at）。
+    from app.models.factor_publication import FactorPublication
+    fp_pub = await db.scalar(
+        select(FactorPublication)
+        .where(FactorPublication.publication_kind == "stock_core")
+        .order_by(FactorPublication.published_at.desc())
         .limit(1)
     )
-    if fp_run is None:
+    if fp_pub is None:
         nodes.append(
             ProductionChainNode(
                 key="first_pyramid", label="第一金字塔", status="pending",
-                detail="尚无第一金字塔历史回补记录", trade_date=None,
-                publication_status="not_applicable",
-                blocking_reason="无 run 记录", recommended_action="触发第一金字塔历史回补",
+                detail="尚无 stock_core 正式发布", trade_date=None,
+                publication_status="pending",
+                blocking_reason="无 stock_core 发布指针", recommended_action="等待第一金字塔计算并发布 stock_core",
             ).model_dump()
         )
     else:
-        fp_status_map = {"succeeded": "ok", "partial": "attention", "running": "running", "failed": "failed"}
+        fp_cov_ok = fp_pub.coverage_ratio is not None and fp_pub.coverage_ratio >= 0.98
         nodes.append(
             ProductionChainNode(
                 key="first_pyramid", label="第一金字塔",
-                status=fp_status_map.get(fp_run.status, "pending"),
-                detail=f"最近回补 run：{fp_run.status}（成功 {fp_run.succeeded_count}/{fp_run.expected_count or 0}）",
-                trade_date=None, run_id=str(fp_run.id),
-                quality_gate="passed" if fp_run.status == "succeeded" else "failed",
-                publication_status="not_applicable",
-                blocking_reason=None if fp_run.status in ("succeeded", "partial", "running") else f"回补 {fp_run.status}",
-                recommended_action=None if fp_run.status in ("succeeded", "partial") else "查看失败股票或重跑历史回补",
+                status="ok" if fp_cov_ok else "attention",
+                detail=(
+                    f"{fp_pub.trade_date} 覆盖率 {(fp_pub.coverage_ratio * 100):.0f}%"
+                    if fp_pub.coverage_ratio is not None
+                    else f"{fp_pub.trade_date} 已发布（覆盖率未知）"
+                ),
+                trade_date=fp_pub.trade_date,
+                run_id=str(fp_pub.data_run_id),
+                quality_gate="passed" if fp_cov_ok else "failed",
+                publication_status="published",
+                blocking_reason=None if fp_cov_ok else "stock_core 覆盖率未达 98%",
+                recommended_action=None if fp_cov_ok else "检查第一金字塔计算覆盖并重新发布",
             ).model_dump()
         )
 
-    # ===== 3. 板块分析（board_analysis_snapshots，最近一个 trade_date）=====
-    from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
-    board_date = await db.scalar(select(func.max(BoardAnalysisSnapshot.trade_date)))
+    # ===== 3. 板块分析（BoardAnalysisRun run 级模型 = 整个批次的真实质量）=====
+    # 不能取单条 snapshot 的最高覆盖率来判定整个板块正常（一个板块 100% 但其他板块缺失仍会误判）。
+    # 用 BoardAnalysisRun（含 expected_count/succeeded_count/failed_count/coverage_ratio/status/published_at）
+    # 按最新 trade_date 取该批次 run，以 run 级覆盖率判定整个批次。
+    from app.models.board_analysis_snapshot import BoardAnalysisRun
+    board_date = await db.scalar(select(func.max(BoardAnalysisRun.trade_date)))
     if board_date is None:
         nodes.append(
             ProductionChainNode(
                 key="board", label="板块分析", status="pending",
-                detail="尚无板块分析快照", trade_date=None,
+                detail="尚无板块分析 run", trade_date=None,
                 publication_status="not_applicable",
-                blocking_reason="无快照", recommended_action="触发板块分析计算",
+                blocking_reason="无 run 记录", recommended_action="触发板块分析计算",
             ).model_dump()
         )
     else:
-        # 取该交易日覆盖率最高的一条快照作为代表
-        board_snap = await db.scalar(
-            select(BoardAnalysisSnapshot)
-            .where(BoardAnalysisSnapshot.trade_date == board_date)
-            .order_by(BoardAnalysisSnapshot.coverage_ratio.desc())
+        board_run = await db.scalar(
+            select(BoardAnalysisRun)
+            .where(BoardAnalysisRun.trade_date == board_date)
+            .order_by(BoardAnalysisRun.created_at.desc())
             .limit(1)
         )
-        cov_ok = board_snap is not None and board_snap.coverage_ratio >= 0.95
+        board_cov_ok = board_run is not None and board_run.coverage_ratio >= 0.95
         nodes.append(
             ProductionChainNode(
                 key="board", label="板块分析",
-                status="ok" if cov_ok else ("running" if board_snap and board_snap.status == "running" else "failed"),
+                status="ok" if board_cov_ok else ("running" if board_run and board_run.status == "running" else "failed"),
                 detail=(
-                    f"{board_date} 覆盖率 {(board_snap.coverage_ratio * 100):.0f}%"
-                    if board_snap else "无快照"
+                    f"{board_date} 批次覆盖率 {(board_run.coverage_ratio * 100):.0f}%"
+                    f"（成功 {board_run.succeeded_count}/{board_run.expected_count}）"
+                    if board_run else "无 run"
                 ),
                 trade_date=board_date,
-                run_id=str(board_snap.board_analysis_run_id) if board_snap else None,
-                quality_gate="passed" if cov_ok else "failed",
+                run_id=str(board_run.id) if board_run else None,
+                quality_gate="passed" if board_cov_ok else "failed",
                 publication_status="not_applicable",
-                blocking_reason=None if cov_ok else "覆盖率未达 95%",
-                recommended_action=None if cov_ok else "查看板块缺失股票并重算",
+                blocking_reason=None if board_cov_ok else "批次覆盖率未达 95%",
+                recommended_action=None if board_cov_ok else "查看板块批次缺失股票并重算",
             ).model_dump()
         )
 
@@ -1561,11 +1572,24 @@ async def _compute_product_nodes(
             ).model_dump()
         )
 
-    # ===== 6. 正式发布（StrategyRun dsa_selector 最新 published）=====
+    # ===== 6. 正式发布（StrategyRun 最新 published，限定 dsa_selector）=====
+    # 必须关联 strategy_versions + strategy_definitions 限定 strategy_key='dsa_selector'，
+    # 不能取所有 StrategyRun.status='published' 最新一条（其他策略也会产生 published run）。
+    from app.models.strategy import StrategyDefinition as _SdModel
+    from app.models.strategy import StrategyVersion as _SvModel
     from app.models.strategy_run import StrategyRun
+    _dsa_selector_version_ids_subq = (
+        select(_SvModel.id)
+        .join(_SdModel, _SdModel.id == _SvModel.strategy_definition_id)
+        .where(_SdModel.strategy_key == "dsa_selector")
+        .subquery()
+    )
     latest_published_run = await db.scalar(
         select(StrategyRun)
-        .where(StrategyRun.status == "published")
+        .where(
+            StrategyRun.status == "published",
+            StrategyRun.strategy_version_id.in_(select(_dsa_selector_version_ids_subq)),
+        )
         .order_by(StrategyRun.trade_date.desc())
         .limit(1)
     )

@@ -1533,4 +1533,46 @@ async def test_product_nodes_empty_db_returns_6_nodes() -> None:
             assert f in n, f"节点 {n['key']} 缺字段 {f}"
 
 
+# ============================================================
+# [PRD §8.2 审查] _compute_product_nodes 数据语义守卫测试
+# ============================================================
+
+
+def test_product_nodes_uses_run_level_board_model() -> None:
+    """板块节点必须用 BoardAnalysisRun（run 级批次质量），不能用单条 snapshot 最高覆盖率。"""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "app/services/system_overview_service.py"
+    src = path.read_text(encoding="utf-8")
+    assert "from app.models.board_analysis_snapshot import BoardAnalysisRun" in src, "必须用 BoardAnalysisRun"
+    assert "board_run.coverage_ratio" in src, "必须用 run 级覆盖率判定"
+    assert "board_run.succeeded_count" in src, "必须展示 run 级成功数"
+    assert "BoardAnalysisRun.trade_date" in src, "必须按 run 级 trade_date 查询"
+
+
+def test_product_nodes_uses_stock_core_publication_for_pyramid() -> None:
+    """第一金字塔节点必须用 FactorPublication(stock_core) 发布指针，不能用历史回补 run。"""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "app/services/system_overview_service.py"
+    src = path.read_text(encoding="utf-8")
+    assert 'FactorPublication.publication_kind == "stock_core"' in src, "必须用 stock_core 发布指针"
+    assert "FirstPyramidHistoryRun" not in src, "不得再用历史回补 run 作为今日生产状态"
+    assert "fp_pub.data_run_id" in src, "必须暴露发布指针指向的 data_run_id"
+
+
+def test_product_nodes_limits_selector_publish() -> None:
+    """正式发布节点必须限定 dsa_selector（不能取所有 published StrategyRun 最新一条）。"""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "app/services/system_overview_service.py"
+    src = path.read_text(encoding="utf-8")
+    assert 'StrategyDefinition.strategy_key == "dsa_selector"' in src, "必须限定 dsa_selector"
+    assert "StrategyRun.strategy_version_id.in_" in src, "必须按 strategy_version_id 限定 selector 版本"
+    # 不得出现裸 published 查询（未限定策略）：select(StrategyRun) 后跟 .where(StrategyRun.status == "published")
+    assert 'select(StrategyRun)\n        .where(StrategyRun.status == "published")' not in src, (
+        "不得裸查所有 published StrategyRun，必须限定 dsa_selector"
+    )
+
+
 

@@ -60,3 +60,25 @@ test('总览渲染每项的 detail/blocking_reason/recommended_action', () => {
   assert.ok(src.includes('node.blocking_reason'), '必须展示阻塞原因')
   assert.ok(src.includes('node.recommended_action'), '必须展示建议动作')
 })
+
+// ===== 6. 默认进入总览（P0 审查修复）=====
+test('默认 tab 为总览（overview），而非盘后编排', () => {
+  const src = readSource(PAGE_PATH)
+  // 默认值必须为 overview（不再默认 after-close）
+  assert.ok(src.includes(": 'overview')"), '默认 tab 必须是 overview')
+  assert.ok(!src.includes(": 'after-close')"), '默认 tab 不得再是 after-close')
+})
+
+// ===== 7. 接口失败显示真实错误（P0 审查修复）=====
+test('overviewQuery.isError 显示真实错误而非暂无数据', () => {
+  const src = readSource(PAGE_PATH)
+  assert.ok(src.includes('overviewQuery.isError'), '必须处理 isError')
+  assert.ok(src.includes('查询失败') || src.includes('请稍后重试'), '必须显示错误提示')
+})
+
+// ===== 8. not_applicable 不误显示为"未发布"（P0 审查修复）=====
+test("publication_status=not_applicable 显示'不适用'而非'未发布'", () => {
+  const src = readSource(PAGE_PATH)
+  assert.ok(src.includes("'不适用'"), '必须区分 not_applicable 为"不适用"')
+  assert.ok(src.includes("publication_status === 'pending'"), '必须区分 pending 为"待发布"')
+})

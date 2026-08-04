@@ -110,7 +110,7 @@ test('旧管理路由兼容重定向到新一级路由', () => {
     '/admin': '/admin/overview',
     '/admin/jobs': '/admin/tasks',
     '/admin/after-close': '/admin/data-production?tab=after-close',
-    '/admin/beta-applications': '/admin/users?tab=beta-applications',
+    '/admin/beta-applications': '/admin/users?tab=beta_applications',
     '/admin/stocks': '/admin/diagnostics?tab=stock',
     '/admin/visitors': '/admin/diagnostics?tab=visitors',
     '/admin/strategies': '/admin/data-production',

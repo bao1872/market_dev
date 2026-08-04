@@ -91,7 +91,7 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
               { path: '/admin', guard: 'redirect', shell: 'none', redirectTo: '/admin/overview' },
               { path: '/admin/jobs', guard: 'redirect', shell: 'none', redirectTo: '/admin/tasks' },
               { path: '/admin/after-close', guard: 'redirect', shell: 'none', redirectTo: '/admin/data-production?tab=after-close' },
-              { path: '/admin/beta-applications', guard: 'redirect', shell: 'none', redirectTo: '/admin/users?tab=beta-applications' },
+              { path: '/admin/beta-applications', guard: 'redirect', shell: 'none', redirectTo: '/admin/users?tab=beta_applications' },
               { path: '/admin/stocks', guard: 'redirect', shell: 'none', redirectTo: '/admin/diagnostics?tab=stock' },
               { path: '/admin/visitors', guard: 'redirect', shell: 'none', redirectTo: '/admin/diagnostics?tab=visitors' },
               // C8: 策略目录页已废弃，重定向到数据生产中心

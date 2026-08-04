@@ -71,9 +71,10 @@ function chainStatusText(status: string): string {
 export default function AdminDataProductionPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTabRaw = searchParams.get('tab')
+  // 默认进入"总览"（展示 6 节点生产链），而非盘后编排详情
   const activeTab: DataProductionTab = (TAB_ITEMS.some((t) => t.key === activeTabRaw)
     ? (activeTabRaw as DataProductionTab)
-    : 'after-close') as DataProductionTab
+    : 'overview') as DataProductionTab
 
   const overviewQuery = useAdminSystemOverview(true)
   const overview = overviewQuery.data
@@ -81,7 +82,7 @@ export default function AdminDataProductionPage() {
 
   const handleTab = (tab: DataProductionTab) => {
     const params = new URLSearchParams(searchParams)
-    if (tab === 'after-close') {
+    if (tab === 'overview') {
       // 默认 Tab 不加 tab 参数，保持 URL 简洁
       params.delete('tab')
     } else {
@@ -137,6 +138,8 @@ export default function AdminDataProductionPage() {
           <div className="card-body">
             {overviewQuery.isLoading ? (
               <div className="notice">加载中…</div>
+            ) : overviewQuery.isError ? (
+              <div className="notice warn">生产状态查询失败，请稍后重试</div>
             ) : chain.length ? (
               chain.map((node) => (
                 <div key={node.key} className="toggle-row">
@@ -182,6 +185,8 @@ export default function AdminDataProductionPage() {
           <div className="card-body">
             {overviewQuery.isLoading ? (
               <div className="notice">加载中…</div>
+            ) : overviewQuery.isError ? (
+              <div className="notice warn">生产状态查询失败，请稍后重试</div>
             ) : businessNode ? (
               <>
                 <div className="toggle-row">
@@ -207,7 +212,9 @@ export default function AdminDataProductionPage() {
                       ? '已通过'
                       : businessNode.quality_gate === 'failed'
                         ? '未通过'
-                        : '未触发'}
+                        : businessNode.quality_gate === 'pending'
+                          ? '待通过'
+                          : '不适用'}
                   </b>
                 </div>
                 <div className="toggle-row">
@@ -217,7 +224,9 @@ export default function AdminDataProductionPage() {
                       ? '已发布'
                       : businessNode.publication_status === 'failed'
                         ? '发布失败'
-                        : '未发布'}
+                        : businessNode.publication_status === 'pending'
+                          ? '待发布'
+                          : '不适用'}
                   </b>
                 </div>
                 {businessNode.detail && (

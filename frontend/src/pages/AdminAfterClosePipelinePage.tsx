@@ -32,6 +32,7 @@ import {
 } from '@/hooks/useApi'
 import { useToast } from '@/store/toast'
 import { shanghaiBusinessDate, formatShanghaiTime } from '@/utils/datetime'
+import { formatAdminApiError } from '@/utils/adminErrors'
 import type { PipelineStep, PipelineRunItem } from '@/api/endpoints'
 import {
   stepLabel,
@@ -168,9 +169,8 @@ export default function AdminAfterClosePipelinePage() {
         )
       }
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } }
-      const message = axiosErr.response?.data?.detail ?? '请稍后重试'
-      toast.show('创建失败', message)
+      // [R14] 统一经 parseAdminApiError/formatAdminApiError 消费结构化错误（含 recommended_action）
+      toast.show('创建失败', formatAdminApiError(err))
     }
   }
 
@@ -182,9 +182,8 @@ export default function AdminAfterClosePipelinePage() {
       const result = await action()
       toast.show(title, result.message)
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { detail?: unknown } } }
-      const detail = axiosErr.response?.data?.detail
-      toast.show(`${title}失败`, typeof detail === 'string' ? detail : '请稍后重试')
+      // [R14] 统一经 formatAdminApiError 消费结构化错误（cancel/reconcile/restart/force 等）
+      toast.show(`${title}失败`, formatAdminApiError(err))
     }
   }
 
