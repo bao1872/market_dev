@@ -126,25 +126,39 @@ class TestCompletedStepsIntegration:
         )
 
     def test_board_sync_step_exists(self) -> None:
-        """编排函数中必须包含 syncing_boards 步骤的执行代码。"""
+        """编排函数中必须包含 syncing_boards 步骤的执行代码。
+
+        [AC-02 2026-08-03] syncing_boards 业务体已抽取为 _execute_syncing_boards，
+        由统一执行器以 "syncing_boards" 步骤名调用。编排函数负责调用该 helper，
+        具体实现（fetch/record/status）在 helper 内部。
+        """
         import inspect
 
-        from app.services.after_close_orchestrator import execute_after_close_run
+        from app.services.after_close_orchestrator import (
+            _execute_syncing_boards,
+            execute_after_close_run,
+        )
 
-        source = inspect.getsource(execute_after_close_run)
-        # 验证关键代码片段存在
-        assert "fetch_board_snapshot" in source, "缺少 fetch_board_snapshot 调用"
-        assert "sync_boards" in source, "缺少 sync_boards 调用"
-        assert "record_sync_status" in source, "缺少 record_sync_status 调用"
-        assert "AfterCloseRunStatus.SYNCING_BOARDS" in source, "缺少 SYNCING_BOARDS 状态切换"
+        orchestrator_src = inspect.getsource(execute_after_close_run)
+        helper_src = inspect.getsource(_execute_syncing_boards)
+        # 验证编排函数以 syncing_boards 步骤调用 helper
+        assert "syncing_boards" in orchestrator_src, "编排函数缺少 syncing_boards 步骤"
+        assert "_execute_syncing_boards" in orchestrator_src, "编排函数未调用 syncing_boards helper"
+        assert "AfterCloseRunStatus.SYNCING_BOARDS" in orchestrator_src, "缺少 SYNCING_BOARDS 状态切换"
+        # 验证关键实现代码存在于 helper
+        assert "fetch_board_snapshot" in helper_src, "缺少 fetch_board_snapshot 调用"
+        assert "record_sync_status" in helper_src, "缺少 record_sync_status 调用"
 
     def test_board_sync_soft_failure(self) -> None:
-        """板块同步失败时不应阻断主流程（软失败）。"""
+        """板块同步失败时不应阻断主流程（软失败）。
+
+        [AC-02 2026-08-03] 软失败逻辑位于 _execute_syncing_boards helper。
+        """
         import inspect
 
-        from app.services.after_close_orchestrator import execute_after_close_run
+        from app.services.after_close_orchestrator import _execute_syncing_boards
 
-        source = inspect.getsource(execute_after_close_run)
+        source = inspect.getsource(_execute_syncing_boards)
         # 验证软失败逻辑：except 块中不 raise
         assert "软失败" in source or "soft" in source.lower(), "缺少软失败标记"
         # 验证失败时记录状态但不抛异常
@@ -158,12 +172,14 @@ class TestCompletedStepsIntegration:
         - reused_previous_snapshot: True（沿用上次数据，不覆盖）
         - status: failed（标记该步骤失败）
         - 不 raise（不阻断后续 DSA/快照/发布）
+
+        [AC-02 2026-08-03] 该逻辑位于 _execute_syncing_boards helper。
         """
         import inspect
 
-        from app.services.after_close_orchestrator import execute_after_close_run
+        from app.services.after_close_orchestrator import _execute_syncing_boards
 
-        source = inspect.getsource(execute_after_close_run)
+        source = inspect.getsource(_execute_syncing_boards)
         # Gate3: 验证 error_code 记录（异常类名）
         assert "error_code" in source and "type(board_exc).__name__" in source, (
             "板块同步失败未记录 error_code（异常类名）"
@@ -176,12 +192,15 @@ class TestCompletedStepsIntegration:
         assert except_block_end > 0, "未找到软失败 reused_previous_snapshot 标记"
 
     def test_board_sync_skipped_when_disabled(self) -> None:
-        """[Gate3] BOARD_SYNC_ENABLED=false 时板块同步标记为 skipped（不访问问财）。"""
+        """[Gate3] BOARD_SYNC_ENABLED=false 时板块同步标记为 skipped（不访问问财）。
+
+        [AC-02 2026-08-03] 开关与 skipped 逻辑位于 _execute_syncing_boards helper。
+        """
         import inspect
 
-        from app.services.after_close_orchestrator import execute_after_close_run
+        from app.services.after_close_orchestrator import _execute_syncing_boards
 
-        source = inspect.getsource(execute_after_close_run)
+        source = inspect.getsource(_execute_syncing_boards)
         # 验证 BOARD_SYNC_ENABLED 开关检查
         assert "BOARD_SYNC_ENABLED" in source, "缺少 BOARD_SYNC_ENABLED 开关"
         # 验证 skipped 状态记录

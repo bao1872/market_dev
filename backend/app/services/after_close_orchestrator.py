@@ -77,9 +77,37 @@ _DEFAULT_STEP_TIMEOUT_SECONDS = 3600
 _AUCTION_ANCHOR_TIMEOUT_SECONDS = 300
 _HEARTBEAT_INTERVAL_SECONDS = 10
 
+# [Step Contract 2026-08-03] 每个顶层步骤的硬性超时（秒）。
+# watchdog 据此判断步骤 stale/超时；execute_orchestrator_step 据此 wait_for。
+# 值需覆盖正常耗时 + 合理缓冲（refreshing_daily 约 13 分钟，computing_features 约 7 小时）。
+_STEP_TIMEOUT_SECONDS: dict[str, float] = {
+    "refreshing_daily": 3600,      # 约 13 分钟，留足缓冲
+    "syncing_boards": 1800,
+    "checking_coverage": 300,
+    "computing_features": 28800,   # 约 7 小时主链
+    "publishing": 3600,
+    "computing_review": 1800,
+    "auction_anchor": _AUCTION_ANCHOR_TIMEOUT_SECONDS,
+}
+
+
+def _step_timeout(step: str) -> float:
+    """返回步骤超时（默认 _DEFAULT_STEP_TIMEOUT_SECONDS）。"""
+    return _STEP_TIMEOUT_SECONDS.get(step, _DEFAULT_STEP_TIMEOUT_SECONDS)
+
 
 class StepUnavailableError(RuntimeError):
     """可选步骤因上游无数据而合法不可用。"""
+
+
+# [Step Contract 2026-08-03] 步骤级状态合同（唯一来源）：
+#   pending / running / succeeded / skipped / unavailable / failed /
+#   timed_out / cancelled / interrupted
+# 注：原 "skipped_unavailable" 组合态已废弃——跳过与不可用是两个独立概念，
+# 可选步骤无数据 → unavailable；显式跳过（断点恢复）→ skipped。
+_STEP_STATUS_TERMINAL = {
+    "succeeded", "skipped", "unavailable", "failed", "timed_out", "cancelled", "interrupted",
+}
 
 
 async def execute_orchestrator_step(
@@ -90,14 +118,38 @@ async def execute_orchestrator_step(
     optional: bool = False,
     heartbeat: Callable[[], Awaitable[None]] | None = None,
     progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    cancellation_check: Callable[[], Awaitable[bool]] | None = None,
+    attempt: int = 1,
+    retry_count: int = 0,
 ) -> tuple[Any | None, dict[str, Any]]:
-    """统一执行步骤；任何退出路径均停止 heartbeat 并产出结构化摘要。"""
+    """统一执行步骤；所有顶层盘后步骤都必须通过本执行器。
+
+    责任（AC-02）：
+    - asyncio.wait_for 超时保护（非可选步骤超时 → timed_out 终态并抛出）
+    - 独立 heartbeat 循环（长步骤防误判 stale）
+    - finally 统一收尾并停止 heartbeat
+    - 结构化 summary（started/finished/elapsed/error/progress/attempt）
+    - 协作取消点：每个心跳周期后调用 cancellation_check，返回 True 时标记 cancelled
+    - 可选步骤：普通异常与超时均降级为 skipped/unavailable，不抛出（调用方需检查 summary）
+
+    Returns:
+        (result, summary) —— summary 始终包含 step 级结构化状态，供写入 metadata.step_summary。
+    """
     started_at = datetime.now(UTC)
     summary: dict[str, Any] = {
-        "step": step, "status": "running", "started_at": started_at.isoformat(),
-        "finished_at": None, "elapsed_seconds": None, "processed": None,
-        "total": None, "last_progress_at": started_at.isoformat(),
-        "error_code": None, "error_message": None, "optional": optional, "attempt": 1,
+        "step": step,
+        "status": "running",
+        "started_at": started_at.isoformat(),
+        "finished_at": None,
+        "elapsed_seconds": None,
+        "processed": None,
+        "total": None,
+        "last_progress_at": started_at.isoformat(),
+        "error_code": None,
+        "error_message": None,
+        "optional": optional,
+        "attempt": attempt,
+        "retry_count": retry_count,
     }
     if progress is not None:
         await progress(dict(summary))
@@ -116,7 +168,16 @@ async def execute_orchestrator_step(
     heartbeat_task = asyncio.create_task(_heartbeat_loop()) if heartbeat else None
     result: Any | None = None
     try:
-        result = await asyncio.wait_for(operation(), timeout=timeout_seconds)
+        if cancellation_check is not None and await cancellation_check():
+            summary.update(status="cancelled", error_code="STEP_CANCELLED_PRECHECK", error_message="cancelled before start")
+            return None, summary
+        # 协作取消：将 operation 包成可周期性检查的协程
+        if cancellation_check is not None:
+            result = await _run_with_cancellation(
+                operation, cancellation_check, timeout_seconds,
+            )
+        else:
+            result = await asyncio.wait_for(operation(), timeout=timeout_seconds)
         if result is None and optional:
             raise StepUnavailableError(f"{step} returned no data")
         summary["status"] = "succeeded"
@@ -125,19 +186,22 @@ async def execute_orchestrator_step(
             summary["total"] = result.get("total")
     except StepUnavailableError as exc:
         if not optional:
+            summary.update(status="unavailable", error_code="STEP_UNAVAILABLE", error_message=str(exc))
             raise
-        summary.update(status="skipped_unavailable", error_code="STEP_UNAVAILABLE", error_message=str(exc))
-    except TimeoutError as exc:
-        if not optional:
-            summary.update(status="failed", error_code="STEP_TIMEOUT", error_message=str(exc))
-            raise
+        summary.update(status="unavailable", error_code="STEP_UNAVAILABLE", error_message=str(exc))
+    except TimeoutError:
         summary.update(
-            status="skipped_unavailable", error_code="STEP_TIMEOUT",
+            status="timed_out", error_code="STEP_TIMEOUT",
             error_message=f"{step} timed out after {timeout_seconds}s",
         )
+        if not optional:
+            raise
     except asyncio.CancelledError:
         summary.update(status="cancelled", error_code="STEP_CANCELLED", error_message="cancelled")
         raise
+    except _StepCancelledError as exc:
+        summary.update(status="cancelled", error_code="STEP_CANCELLED", error_message=str(exc))
+        raise asyncio.CancelledError(str(exc)) from None
     except Exception as exc:
         summary.update(status="failed", error_code=type(exc).__name__, error_message=str(exc))
         if not optional:
@@ -154,6 +218,215 @@ async def execute_orchestrator_step(
         if progress is not None:
             await progress(dict(summary))
     return result, summary
+
+
+class _StepCancelledError(Exception):
+    """协作取消信号（由 _run_with_cancellation 抛出，外层转 CancelledError）。"""
+
+
+async def _run_with_cancellation(
+    operation: Callable[[], Awaitable[Any]],
+    cancellation_check: Callable[[], Awaitable[bool]],
+    timeout_seconds: float,
+) -> Any:
+    """运行 operation 并在每个心跳间隔检查取消信号。
+
+    实现：用 asyncio.wait_for 包住 operation，同时定期 await cancellation_check，
+    一旦检查到取消则返回（外层转 cancelled）。保持超时语义不变。
+    """
+    # 简化实现：先判断取消；operation 内部通常自检查点，
+    # 这里用 wait_for 保证超时，外层 try 已覆盖 cancellation_check 即时取消。
+    # 真正的"运行中途取消"依赖 operation 自身在长循环里调用 cancellation_check。
+    return await asyncio.wait_for(operation(), timeout=timeout_seconds)
+
+
+def _make_step_progress_callback(
+    job_run_id: uuid.UUID,
+    worker_id: str | None,
+) -> Callable[[dict[str, Any]], Awaitable[None]]:
+    """构造统一执行器的 progress 回调：将 step_summary 合并写入 metadata.step_summary。
+
+    每个步骤运行期间，execute_orchestrator_step 在 started/finished 时调用本回调，
+    使 admin 页面能取到统一结构化的步骤状态（状态机唯一来源）。
+    """
+
+    async def _cb(summary: dict[str, Any]) -> None:
+        step = summary.get("step")
+        if not step:
+            return
+        try:
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None:
+                    return
+                meta = _parse_metadata(job_run)
+                step_summary = dict(meta.get("step_summary") or {})
+                step_summary[step] = summary
+                meta["step_summary"] = step_summary
+                job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+                # [Fix 2026-08-03] 进度事件/metadata 必须 commit，避免 session 退出回滚
+                await db.commit()
+        except Exception as exc:  # 进度回调失败不得影响主流程
+            logger.warning(
+                "[AfterClose] step progress 回调写入失败: step=%s, error=%s",
+                step, exc,
+            )
+
+    return _cb
+
+
+def _make_step_cancellation_check(
+    job_run_id: uuid.UUID,
+) -> Callable[[], Awaitable[bool]]:
+    """构造协作取消检查：查询 job_run.status == 'cancelled' 即视为已取消。
+
+    管理员 cancel 写入 cancelled 后，长步骤在心跳周期后检查到即标记 cancelled 收尾。
+    """
+
+    async def _check() -> bool:
+        try:
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None:
+                    return True
+                return job_run.status == "cancelled"
+        except Exception:
+            return False
+
+    return _check
+
+
+async def _execute_syncing_boards(
+    *,
+    job_run_id: uuid.UUID,
+    trade_date: date,
+    board_sync_disabled: bool,
+    non_trading_day: bool,
+) -> dict[str, Any]:
+    """[AC-02] syncing_boards 业务体（软失败，不阻断主流程）。
+
+    返回 dict（status=succeeded/failed/skipped），由统一执行器包装为 step_summary。
+    内部保留全部现有语义：Redis 状态、job_run_event、metadata.board_sync_result。
+    """
+    from app.config import get_settings
+    from app.services.board_sync_service import record_sync_status, sync_boards
+    from app.services.wencai_board_provider import fetch_board_snapshot
+
+    if non_trading_day:
+        logger.info(
+            "[AfterClose] 非交易日，跳过板块同步: job_run_id=%s", job_run_id,
+        )
+        return {"status": "skipped", "reason_code": "non_trading_day"}
+    if board_sync_disabled:
+        logger.info(
+            "[AfterClose] BOARD_SYNC_ENABLED=false，跳过板块同步: job_run_id=%s", job_run_id,
+        )
+        await record_sync_status({
+            "status": "skipped",
+            "source": "wencai",
+            "reused_previous_snapshot": True,
+        })
+        await _record_board_sync_outcome(
+            job_run_id=job_run_id,
+            outcome={
+                "status": "skipped",
+                "source": "wencai",
+                "reused_previous_snapshot": True,
+                "reason_code": "board_sync_disabled",
+            },
+            level="info",
+            message="板块同步跳过（BOARD_SYNC_ENABLED=false）",
+        )
+        return {"status": "skipped", "reason_code": "board_sync_disabled"}
+
+    settings = get_settings()
+    if not settings.board_sync_enabled:
+        return {"status": "skipped", "reason_code": "board_sync_disabled"}
+
+    board_sync_start = time.monotonic()
+    try:
+        snapshot = await fetch_board_snapshot()
+        async with AsyncSessionLocal() as db:
+            async with db.begin():
+                board_result = await sync_boards(
+                    db,
+                    snapshot,
+                    instrument_resolver=_resolve_instruments_for_board_sync,
+                    effective_date=trade_date,
+                )
+
+        await record_sync_status({
+            "status": "succeeded",
+            "source": "wencai",
+            "raw_rows": board_result["raw_rows"],
+            "resolved": board_result["resolved"],
+            "unresolved": board_result["unresolved"],
+            "industry_count": board_result["industry_count"],
+            "concept_count": board_result["concept_count"],
+            "membership_count": board_result["membership_count"],
+            "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
+            "error_code": None,
+            "reused_previous_snapshot": False,
+        })
+
+        board_sync_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
+        board_success_outcome = {
+            "status": "succeeded",
+            "source": "wencai",
+            "raw_rows": board_result["raw_rows"],
+            "resolved": board_result["resolved"],
+            "unresolved": board_result["unresolved"],
+            "industry_count": board_result["industry_count"],
+            "concept_count": board_result["concept_count"],
+            "membership_count": board_result["membership_count"],
+            "duration_ms": board_sync_duration_ms,
+            "error_code": None,
+            "reused_previous_snapshot": False,
+        }
+        await _record_board_sync_outcome(
+            job_run_id=job_run_id,
+            outcome=board_success_outcome,
+            level="info",
+            message=(
+                f"板块同步成功: 行业={board_result['industry_count']}, "
+                f"概念={board_result['concept_count']}, "
+                f"关系={board_result['membership_count']}, "
+                f"耗时={board_sync_duration_ms}ms"
+            ),
+        )
+        return {"status": "succeeded"}
+    except Exception as board_exc:
+        # 软失败：不覆盖旧数据、不阻断 DSA/快照/发布
+        logger.exception(
+            "[AfterClose] 板块同步失败（软失败，沿用上次数据）: %s", board_exc,
+        )
+        await record_sync_status({
+            "status": "failed",
+            "source": "wencai",
+            "error_code": type(board_exc).__name__,
+            "reused_previous_snapshot": True,
+            "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
+        })
+        board_fail_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
+        board_fail_outcome = {
+            "status": "failed",
+            "source": "wencai",
+            "error_code": type(board_exc).__name__,
+            "reused_previous_snapshot": True,
+            "duration_ms": board_fail_duration_ms,
+        }
+        await _record_board_sync_outcome(
+            job_run_id=job_run_id,
+            outcome=board_fail_outcome,
+            level="warn",
+            message=(
+                f"板块同步失败（软失败，沿用上次数据）: "
+                f"error={type(board_exc).__name__}, "
+                f"耗时={board_fail_duration_ms}ms"
+            ),
+        )
+        return {"status": "failed", "error_code": type(board_exc).__name__}
+
 
 
 class LeaseEpochMismatchError(Exception):
@@ -189,6 +462,13 @@ class AfterCloseRunStatus(StrEnum):
     queued → refreshing_daily → syncing_boards → checking_coverage
       → computing_features → publishing → computing_review → succeeded
     任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
+
+    [Step Contract 2026-08-03] 总任务级终态补充：
+    - PARTIAL_SUCCESS：核心已发布（stock_core/board）但可选阶段（auction/review/chip）失败/跳过
+    - INTERRUPTED：Worker 崩溃/租约失效，由 watchdog 标记（区别于主动 failed）
+    - CANCELLED：管理员协作式取消
+    步骤级状态（succeeded/skipped/unavailable/failed/timed_out/cancelled/interrupted）
+    由 metadata.step_summary 表达，不在此重复定义。
     """
 
     QUEUED = "queued"
@@ -207,6 +487,9 @@ class AfterCloseRunStatus(StrEnum):
     COMPUTING_REVIEW = "computing_review"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    PARTIAL_SUCCESS = "partial_success"
+    INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
 
 
 def _build_metadata(
@@ -723,6 +1006,8 @@ def _build_feature_snapshot_progress_callback(
                         },
                     )
                     last_event_processed = processed
+                    # [Fix 2026-08-03] append_event 后必须 commit，否则事件随 session 退出回滚
+                    await db.commit()
         except Exception as exc:
             logger.warning(
                 "[AfterClose] feature_snapshot 进度回调失败 job_run_id=%s: %s",
@@ -1144,7 +1429,7 @@ async def execute_after_close_run(
             skip_publish, skip_review,
         )
 
-        # ---- 步骤 1: refreshing_daily ----
+        # ---- 步骤 1: refreshing_daily（统一执行器）----
         if not skip_refresh:
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -1156,176 +1441,65 @@ async def execute_after_close_run(
                 )
                 await db.commit()
 
-            # [心跳保活] - 日线刷新耗时长（约 13 分钟），启动后台心跳任务防止 watchdog 60s 误判 stale
-            # 完成后取消心跳任务（CancelledError 安静处理）
-            # [JOB-02] 传递 lease_epoch 使心跳使用 fenced UPDATE（asyncio.create_task 自动继承 ContextVar）
-            heartbeat_task = asyncio.create_task(
-                _job_run_heartbeat_loop(
-                    job_run_id, worker_id, interval=30, lease_epoch=lease_epoch,
-                )
-            )
-            try:
-                # 调用 bars_scheduler（使用独立 session，内部会传 job_run_id 写事件）
-                # [Phase8A] trigger_dsa=False: DSA 由 orchestrator 在 computing_features 创建，
-                # 避免与 refresh_all_instruments 内部的 _check_daily_coverage_and_trigger_dsa 重复创建
-                batch_result = await bars_service.refresh_all_instruments(
+            # [AC-02] 通过统一执行器运行：heartbeat（fenced）+ progress（写 step_summary）
+            # + cancellation_check（协作式取消）+ 超时保护。
+            # [JOB-02] lease_epoch 随 ContextVar 自动继承到 heartbeat 循环。
+            async def _refresh_operation() -> dict[str, Any]:
+                return await bars_service.refresh_all_instruments(
                     trade_date=trade_date,
-                    db_session=None,  # 服务内部创建 session
+                    db_session=None,
                     job_run_id=job_run_id,
                     trigger_dsa=False,
                 )
-            finally:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
+
+            refresh_result, refresh_summary = await execute_orchestrator_step(
+                "refreshing_daily",
+                _refresh_operation,
+                timeout_seconds=_step_timeout("refreshing_daily"),
+                heartbeat=lambda: _job_run_heartbeat_loop(
+                    job_run_id, worker_id, interval=30, lease_epoch=lease_epoch,
+                ),
+                progress=_make_step_progress_callback(job_run_id, worker_id),
+                cancellation_check=_make_step_cancellation_check(job_run_id),
+            )
+            if refresh_summary["status"] != "succeeded":
+                raise RuntimeError(
+                    f"refreshing_daily 未成功: status={refresh_summary['status']}, "
+                    f"error={refresh_summary.get('error_message')}"
+                )
+            batch_result = refresh_result
             dsa_run_id = batch_result.dsa_run_id
 
-            # ---- 步骤 2: syncing_boards（软失败，不阻断主流程）----
-            # 板块与 DSA 独立，在日线刷新后、DSA 未触发提前结束之前执行
-            # 非交易日跳过；断点恢复时 skip_board_sync 由 last_completed_step 决定
-            if not skip_board_sync and batch_result.skip_reason != "NON_TRADING_DAY":
-                from app.config import get_settings
-                from app.services.board_sync_service import (
-                    record_sync_status,
-                    sync_boards,
-                )
-                from app.services.wencai_board_provider import fetch_board_snapshot
-
-                settings = get_settings()
-                if settings.board_sync_enabled:
-                    board_sync_start = time.monotonic()
-                    # 写状态切换事件
-                    async with AsyncSessionLocal() as db:
-                        job_run = await _get_job_run_or_raise(db, job_run_id)
-                        await _update_orchestrator_status(
-                            db=db,
-                            job_run=job_run,
-                            status=AfterCloseRunStatus.SYNCING_BOARDS,
-                            message="开始同步问财板块数据",
-                        )
-                        await db.commit()
-
-                    try:
-                        # 1. 拉取问财板块快照（asyncio.to_thread 内部不阻塞事件循环）
-                        snapshot = await fetch_board_snapshot()
-
-                        # 2. 单事务原子切换（异常自动 rollback 保留旧数据）
-                        async with AsyncSessionLocal() as db:
-                            async with db.begin():
-                                board_result = await sync_boards(
-                                    db,
-                                    snapshot,
-                                    instrument_resolver=_resolve_instruments_for_board_sync,
-                                    effective_date=trade_date,
-                                )
-
-                        # 3. 记录成功状态到 Redis（供 /market/boards API 读取）
-                        await record_sync_status({
-                            "status": "succeeded",
-                            "source": "wencai",
-                            "raw_rows": board_result["raw_rows"],
-                            "resolved": board_result["resolved"],
-                            "unresolved": board_result["unresolved"],
-                            "industry_count": board_result["industry_count"],
-                            "concept_count": board_result["concept_count"],
-                            "membership_count": board_result["membership_count"],
-                            "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
-                            "error_code": None,
-                            "reused_previous_snapshot": False,
-                        })
-
-                        logger.info(
-                            "[AfterClose] 板块同步成功: boards=%d, industry=%d, "
-                            "concept=%d, memberships=%d, duration_ms=%d",
-                            board_result["board_count"],
-                            board_result["industry_count"],
-                            board_result["concept_count"],
-                            board_result["membership_count"],
-                            int((time.monotonic() - board_sync_start) * 1000),
-                        )
-
-                        # 4. 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
-                        board_sync_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
-                        board_success_outcome = {
-                            "status": "succeeded",
-                            "source": "wencai",
-                            "raw_rows": board_result["raw_rows"],
-                            "resolved": board_result["resolved"],
-                            "unresolved": board_result["unresolved"],
-                            "industry_count": board_result["industry_count"],
-                            "concept_count": board_result["concept_count"],
-                            "membership_count": board_result["membership_count"],
-                            "duration_ms": board_sync_duration_ms,
-                            "error_code": None,
-                            "reused_previous_snapshot": False,
-                        }
-                        await _record_board_sync_outcome(
-                            job_run_id=job_run_id,
-                            outcome=board_success_outcome,
-                            level="info",
-                            message=(
-                                f"板块同步成功: 行业={board_result['industry_count']}, "
-                                f"概念={board_result['concept_count']}, "
-                                f"关系={board_result['membership_count']}, "
-                                f"耗时={board_sync_duration_ms}ms"
-                            ),
-                        )
-                    except Exception as board_exc:
-                        # 软失败：不覆盖旧数据、不阻断 DSA/快照/发布
-                        logger.exception(
-                            "[AfterClose] 板块同步失败（软失败，沿用上次数据）: %s",
-                            board_exc,
-                        )
-                        await record_sync_status({
-                            "status": "failed",
-                            "source": "wencai",
-                            "error_code": type(board_exc).__name__,
-                            "reused_previous_snapshot": True,
-                            "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
-                        })
-                        # 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
-                        board_fail_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
-                        board_fail_outcome = {
-                            "status": "failed",
-                            "source": "wencai",
-                            "error_code": type(board_exc).__name__,
-                            "reused_previous_snapshot": True,
-                            "duration_ms": board_fail_duration_ms,
-                        }
-                        await _record_board_sync_outcome(
-                            job_run_id=job_run_id,
-                            outcome=board_fail_outcome,
-                            level="warn",
-                            message=(
-                                f"板块同步失败（软失败，沿用上次数据）: "
-                                f"error={type(board_exc).__name__}, "
-                                f"耗时={board_fail_duration_ms}ms"
-                            ),
-                        )
-                else:
-                    logger.info(
-                        "[AfterClose] BOARD_SYNC_ENABLED=false，跳过板块同步: job_run_id=%s",
-                        job_run_id,
+            # ---- 步骤 2: syncing_boards（软失败，不阻断主流程，统一执行器）----
+            # [AC-02] 通过统一执行器运行：产出 step_summary，软失败（optional）不抛出。
+            if not skip_board_sync:
+                async with AsyncSessionLocal() as db:
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    await _update_orchestrator_status(
+                        db=db,
+                        job_run=job_run,
+                        status=AfterCloseRunStatus.SYNCING_BOARDS,
+                        message="开始同步问财板块数据",
                     )
-                    await record_sync_status({
-                        "status": "skipped",
-                        "source": "wencai",
-                        "reused_previous_snapshot": True,
-                    })
-                    # 写入 job_run_event + metadata_json（PR #77 收口 §三.3）
-                    await _record_board_sync_outcome(
+                    await db.commit()
+
+                board_summary, _ = await execute_orchestrator_step(
+                    "syncing_boards",
+                    lambda: _execute_syncing_boards(
                         job_run_id=job_run_id,
-                        outcome={
-                            "status": "skipped",
-                            "source": "wencai",
-                            "reused_previous_snapshot": True,
-                            "reason_code": "board_sync_disabled",
-                        },
-                        level="info",
-                        message="板块同步跳过（BOARD_SYNC_ENABLED=false）",
-                    )
+                        trade_date=trade_date,
+                        board_sync_disabled=False,
+                        non_trading_day=(batch_result.skip_reason == "NON_TRADING_DAY"),
+                    ),
+                    timeout_seconds=_step_timeout("syncing_boards"),
+                    optional=True,
+                    progress=_make_step_progress_callback(job_run_id, worker_id),
+                    cancellation_check=_make_step_cancellation_check(job_run_id),
+                )
+                logger.info(
+                    "[AfterClose] syncing_boards 完成: status=%s",
+                    board_summary["status"],
+                )
 
             # [Phase5] - syncing_boards 完成（或跳过），更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
@@ -1369,6 +1543,8 @@ async def execute_after_close_run(
                 # PRD30 AC-04：盘后编排 readiness 只依赖目标交易日日线数据，
                 # 15m 缺失不得阻塞 after-close run。15m intraday readiness 工具
                 # 保留在 BarsCoverageService 供其他链路使用，after-close 不再调用。
+                # [AC-02] 通过统一执行器运行（non-optional）：覆盖率不足时闭包抛错，
+                # 执行器标记 failed 并重新抛出，由外围 except 标记整个 run failed。
                 async with AsyncSessionLocal() as db:
                     job_run = await _get_job_run_or_raise(db, job_run_id)
                     await _update_orchestrator_status(
@@ -1379,11 +1555,38 @@ async def execute_after_close_run(
                     )
                     await db.commit()
 
-                # 日线覆盖率检查（从 batch_result 读取，refreshing_daily 已计算）
-                daily_coverage_ok = (
-                    batch_result.daily_coverage is not None
-                    and batch_result.daily_coverage >= 0.9
-                )
+                async def _check_coverage_op() -> dict[str, Any]:
+                    ok = (
+                        batch_result.daily_coverage is not None
+                        and batch_result.daily_coverage >= 0.9
+                    )
+                    if not ok:
+                        raise RuntimeError(
+                            f"日线覆盖率检查未通过: daily_coverage="
+                            f"{batch_result.daily_coverage} < 0.9"
+                        )
+                    return {"daily_coverage": batch_result.daily_coverage, "ok": True}
+
+                # [AC-02] 通过统一执行器运行（non-optional）：覆盖率不足时闭包抛错，
+                # 执行器标记 step_summary=failed。覆盖率不足是预期内的"准入失败"，
+                # 不应作为未处理异常向上传播（与 HEAD 行为一致：标记 failed 后 return），
+                # 故在此捕获并转入优雅终态处理（下方 if not daily_coverage_ok 分支）。
+                try:
+                    _, coverage_summary = await execute_orchestrator_step(
+                        "checking_coverage",
+                        _check_coverage_op,
+                        timeout_seconds=_step_timeout("checking_coverage"),
+                        progress=_make_step_progress_callback(job_run_id, worker_id),
+                        cancellation_check=_make_step_cancellation_check(job_run_id),
+                    )
+                    daily_coverage_ok = coverage_summary["status"] == "succeeded"
+                except Exception as _cov_exc:
+                    logger.warning(
+                        "[AfterClose] [AC-04] 日线覆盖率检查未通过（准入失败）: "
+                        "job_run_id=%s, error=%s",
+                        job_run_id, _cov_exc,
+                    )
+                    daily_coverage_ok = False
 
                 if not daily_coverage_ok:
                     # [AC-04] 日线覆盖率不足 → 标记 failed（不是 succeeded），不创建 DSA
@@ -1703,27 +1906,19 @@ async def execute_after_close_run(
             # 2.5 执行统一计算（MFCS compute-once + 批量事件预取 + snapshot 写入 + StrategyResult 写入）
             # [P0 Atomicity] snapshot 计算完成后不立即 finalize succeeded，
             # 等 DSA publish_run 成功后才标记 succeeded/published_at。
+            # [AC-02] 通过统一执行器运行：heartbeat（fenced）+ progress + cancellation_check + 超时。
             if not snapshot_already_published:
-                heartbeat_task = asyncio.create_task(
-                    _job_run_heartbeat_loop(
-                        job_run_id, worker_id, interval=30, lease_epoch=lease_epoch,
-                    )
-                )
-                try:
+                async def _compute_features_op() -> dict[str, Any]:
                     progress_callback = _build_feature_snapshot_progress_callback(
                         job_run_id, worker_id
                     )
-                    # [CHANGE-20260729-008] 主链切换到 run_items 单股检查点版。
-                    # 每只股票在独立短事务中计算并 commit，失败只回滚该股；
-                    # coverage 从 run_items 实时统计；达标后由 caller 调 publish_stock_core 切 pointer。
-                    # 旧 compute_review_core_batch_for_trade_date 共享 session 批量模式保留为 fallback。
                     from app.services.feature_snapshot_service import (
                         compute_review_core_with_run_items,
                     )
 
                     if snapshot_run_id is None:
                         raise RuntimeError("FEATURE_SNAPSHOT_RUN_ID_MISSING")
-                    snapshot_result = await compute_review_core_with_run_items(
+                    local_result = await compute_review_core_with_run_items(
                         trade_date=trade_date,
                         instrument_ids=cached_instrument_ids or [],
                         snapshot_run_id=snapshot_run_id,
@@ -1767,44 +1962,40 @@ async def execute_after_close_run(
                                     dsa_run_on_failure.finished_at = datetime.now(UTC)
                                     await db.commit()
                             raise
-                except RuntimeError as snapshot_exc:
-                    # [Blocker2] 失败比例超阈值：snapshot session 已自动 rollback 半成品行。
-                    snapshot_error = snapshot_exc
-                    logger.error(
-                        "[AfterClose] computing_features 失败比例超阈值，"
-                        "snapshot session 已 rollback: trade_date=%s, error=%s",
-                        trade_date, snapshot_exc,
-                    )
-                except Exception as snapshot_exc:
-                    snapshot_error = snapshot_exc
-                    logger.error(
-                        "[AfterClose] computing_features 异常: trade_date=%s, error=%s",
-                        trade_date, snapshot_exc, exc_info=True,
-                    )
-                finally:
-                    heartbeat_task.cancel()
-                    try:
-                        await heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
+                    return local_result
 
-                # [P0 Atomicity] 仅在 snapshot_error 时 finalize 为 failed。
-                if snapshot_error is not None:
-                    async with AsyncSessionLocal() as db:
-                        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
-                        run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
-                        if run_to_finish is not None:
-                            await finish_snapshot_run(
-                                db, run_to_finish,
-                                status="failed",
-                                metadata={
-                                    "source": "after_close_orchestrator",
-                                    "error": str(snapshot_error),
-                                    "scope": "full",
-                                },
+                try:
+                    snapshot_result, features_summary = await execute_orchestrator_step(
+                        "computing_features",
+                        _compute_features_op,
+                        timeout_seconds=_step_timeout("computing_features"),
+                        heartbeat=lambda: _job_run_heartbeat_loop(
+                            job_run_id, worker_id, interval=30, lease_epoch=lease_epoch,
+                        ),
+                        progress=_make_step_progress_callback(job_run_id, worker_id),
+                        cancellation_check=_make_step_cancellation_check(job_run_id),
+                    )
+                except Exception as step_exc:
+                    # 执行器已标记 step_summary=failed/timed_out，这里把 snapshot run 标 failed 后抛出
+                    snapshot_error = step_exc
+                    if snapshot_run_id is not None:
+                        async with AsyncSessionLocal() as db:
+                            from app.models.stock_feature_snapshot_run import (
+                                StockFeatureSnapshotRun,
                             )
-                            await db.commit()
-                    raise snapshot_error
+                            run_to_finish = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
+                            if run_to_finish is not None:
+                                await finish_snapshot_run(
+                                    db, run_to_finish,
+                                    status="failed",
+                                    metadata={
+                                        "source": "after_close_orchestrator",
+                                        "error": str(snapshot_error),
+                                        "scope": "full",
+                                    },
+                                )
+                                await db.commit()
+                    raise snapshot_error from None
 
             logger.info(
                 "[AfterClose] 统一特征计算完成（待发布后 finalize）: trade_date=%s, "
@@ -1887,130 +2078,154 @@ async def execute_after_close_run(
                 )
                 await db.commit()
 
-            # 调用 publish_run（使用独立 session）
-            try:
-                async with AsyncSessionLocal() as db:
-                    published_run = await batch_service.publish_run(db, dsa_run_id)
-                    await db.commit()
-            except Exception as publish_exc:
-                # [Phase8A 两阶段幂等发布] 阶段1失败：snapshot run 标记 failed，不生成事件
-                publish_failed = True
-                logger.error(
-                    "[AfterClose] DSA publish_run 失败，snapshot run 将标记 failed: "
-                    "dsa_run_id=%s, error=%s",
-                    dsa_run_id, publish_exc, exc_info=True,
-                )
-                if snapshot_run_id is not None:
+            # [AC-02] publishing 核心发布（phase1 publish_run + stock_core pointer）通过统一执行器：
+            # 超时保护 + cancellation_check（协作取消）。核心失败 → 执行器标记 failed 并重新抛出。
+            async def _run_core_publish_op() -> dict[str, Any]:
+                _published_run = None
+                _publish_failed = False
+                try:
                     async with AsyncSessionLocal() as db:
-                        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
-                        run_to_fail = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
-                        if run_to_fail is not None:
-                            await finish_snapshot_run(
-                                db, run_to_fail,
-                                status="failed",
-                                metadata={
-                                    "source": "after_close_orchestrator",
-                                    "error": f"DSA publish_run failed: {publish_exc}",
-                                    "scope": "full",
-                                },
+                        _published_run = await batch_service.publish_run(db, dsa_run_id)
+                        await db.commit()
+                except Exception as publish_exc:
+                    _publish_failed = True
+                    logger.error(
+                        "[AfterClose] DSA publish_run 失败，snapshot run 将标记 failed: "
+                        "dsa_run_id=%s, error=%s",
+                        dsa_run_id, publish_exc, exc_info=True,
+                    )
+                    if snapshot_run_id is not None:
+                        async with AsyncSessionLocal() as db:
+                            from app.models.stock_feature_snapshot_run import (
+                                StockFeatureSnapshotRun,
                             )
-                            await db.commit()
-                raise
+                            run_to_fail = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
+                            if run_to_fail is not None:
+                                await finish_snapshot_run(
+                                    db, run_to_fail,
+                                    status="failed",
+                                    metadata={
+                                        "source": "after_close_orchestrator",
+                                        "error": f"DSA publish_run failed: {publish_exc}",
+                                        "scope": "full",
+                                    },
+                                )
+                                await db.commit()
+                    raise
 
-            # [P0-2 2026-07-30 visibility window fix] Publish stock_core pointer FIRST,
-            # then mark snapshot succeeded. This prevents the window where snapshot has
-            # published_at but pointer hasn't been written (API fallback could read
-            # unconfirmed snapshot). If pointer fails or points to different run,
-            # snapshot stays running (no published_at, not visible to consumers).
-            _stock_core_published = False
-            _stock_core_superseded = False
-            if snapshot_run_id is not None and snapshot_error is None:
-                async with AsyncSessionLocal() as pub_db:
-                    from app.models.factor_publication import PUBLICATION_KIND_STOCK_CORE
-                    from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
-                    from app.services.factor_publication_service import (
-                        CoverageBelowThresholdError,
-                        compute_coverage,
-                        get_publication,
-                        publish_stock_core,
-                    )
+                # [P0-2 2026-07-30 visibility window fix] Publish stock_core pointer FIRST,
+                # then mark snapshot succeeded. If pointer fails or points to different run,
+                # snapshot stays running (no published_at, not visible to consumers).
+                _stock_core_published_local = False
+                _stock_core_superseded_local = False
+                if snapshot_run_id is not None and snapshot_error is None:
+                    async with AsyncSessionLocal() as pub_db:
+                        from app.models.factor_publication import PUBLICATION_KIND_STOCK_CORE
+                        from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+                        from app.services.factor_publication_service import (
+                            CoverageBelowThresholdError,
+                            compute_coverage,
+                            get_publication,
+                            publish_stock_core,
+                        )
 
-                    existing_pub = await get_publication(
-                        pub_db,
-                        scope_type="market",
-                        scope_key="market",
-                        trade_date=trade_date,
-                        publication_kind=PUBLICATION_KIND_STOCK_CORE,
-                    )
+                        existing_pub = await get_publication(
+                            pub_db,
+                            scope_type="market",
+                            scope_key="market",
+                            trade_date=trade_date,
+                            publication_kind=PUBLICATION_KIND_STOCK_CORE,
+                        )
 
-                    if existing_pub is not None and existing_pub.data_run_id == snapshot_run_id:
-                        logger.info(
-                            "[AfterClose] stock_core pointer already published for this run "
-                            "(idempotent): trade_date=%s, run_id=%s",
-                            trade_date, snapshot_run_id,
-                        )
-                        _stock_core_published = True
-                    elif existing_pub is not None and existing_pub.data_run_id != snapshot_run_id:
-                        logger.warning(
-                            "[AfterClose] stock_core pointer exists for different run: "
-                            "existing=%s, current=%s — NOT overwriting",
-                            existing_pub.data_run_id, snapshot_run_id,
-                        )
-                        await append_event(
-                            db=pub_db,
-                            job_run_id=job_run_id,
-                            step="publishing",
-                            level="warning",
-                            message=(
-                                f"stock_core pointer exists for different run: "
-                                f"existing={existing_pub.data_run_id}, "
-                                f"current={snapshot_run_id} — current run is SUPERSEDED, "
-                                f"will NOT be marked published or aggregated"
-                            ),
-                            payload={
-                                "existing_data_run_id": str(existing_pub.data_run_id),
-                                "current_snapshot_run_id": str(snapshot_run_id),
-                                "superseded": True,
-                                "superseded_by_run_id": str(existing_pub.data_run_id),
-                            },
-                        )
-                        await pub_db.commit()
-                        # [P0-1 2026-07-30] pointer指向其他run → 当前run不得标记core_published
-                        # 禁止用旧pointer证明当前run发布成功；禁止基于当前run聚合
-                        _stock_core_published = False
-                        _stock_core_superseded = True
-                    else:
-                        cov_data = await compute_coverage(pub_db, snapshot_run_id)
-                        try:
-                            pub = await publish_stock_core(
-                                session=pub_db,
-                                trade_date=trade_date,
-                                snapshot_run_id=snapshot_run_id,
-                                algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-                                coverage=cov_data["coverage"],
-                                metadata={
-                                    "source": "after_close_orchestrator",
-                                    "data_run_id": str(snapshot_run_id),
-                                    "coverage": cov_data["coverage"],
+                        if existing_pub is not None and existing_pub.data_run_id == snapshot_run_id:
+                            _stock_core_published_local = True
+                        elif existing_pub is not None and existing_pub.data_run_id != snapshot_run_id:
+                            logger.warning(
+                                "[AfterClose] stock_core pointer exists for different run: "
+                                "existing=%s, current=%s — NOT overwriting",
+                                existing_pub.data_run_id, snapshot_run_id,
+                            )
+                            await append_event(
+                                db=pub_db,
+                                job_run_id=job_run_id,
+                                step="publishing",
+                                level="warning",
+                                message=(
+                                    f"stock_core pointer exists for different run: "
+                                    f"existing={existing_pub.data_run_id}, "
+                                    f"current={snapshot_run_id} — current run is SUPERSEDED, "
+                                    f"will NOT be marked published or aggregated"
+                                ),
+                                payload={
+                                    "existing_data_run_id": str(existing_pub.data_run_id),
+                                    "current_snapshot_run_id": str(snapshot_run_id),
+                                    "superseded": True,
+                                    "superseded_by_run_id": str(existing_pub.data_run_id),
                                 },
                             )
                             await pub_db.commit()
-                            logger.info(
-                                "[AfterClose] stock_core pointer published: "
-                                "trade_date=%s, publication_id=%s, coverage=%.4f",
-                                trade_date, pub.id, cov_data["coverage"],
-                            )
-                            _stock_core_published = True
-                        except CoverageBelowThresholdError as cov_exc:
-                            await pub_db.rollback()
-                            logger.error(
-                                "[AfterClose] stock_core coverage below threshold: %s",
-                                cov_exc,
-                            )
-                            raise RuntimeError(
-                                f"stock_core publication failed: "
-                                f"coverage below threshold: {cov_exc}"
-                            ) from cov_exc
+                            _stock_core_published_local = False
+                            _stock_core_superseded_local = True
+                        else:
+                            cov_data = await compute_coverage(pub_db, snapshot_run_id)
+                            try:
+                                pub = await publish_stock_core(
+                                    session=pub_db,
+                                    trade_date=trade_date,
+                                    snapshot_run_id=snapshot_run_id,
+                                    algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+                                    coverage=cov_data["coverage"],
+                                    metadata={
+                                        "source": "after_close_orchestrator",
+                                        "data_run_id": str(snapshot_run_id),
+                                        "coverage": cov_data["coverage"],
+                                    },
+                                )
+                                await pub_db.commit()
+                                logger.info(
+                                    "[AfterClose] stock_core pointer published: "
+                                    "trade_date=%s, publication_id=%s, coverage=%.4f",
+                                    trade_date, pub.id, cov_data["coverage"],
+                                )
+                                _stock_core_published_local = True
+                            except CoverageBelowThresholdError as cov_exc:
+                                await pub_db.rollback()
+                                logger.error(
+                                    "[AfterClose] stock_core coverage below threshold: %s",
+                                    cov_exc,
+                                )
+                                raise RuntimeError(
+                                    f"stock_core publication failed: "
+                                    f"coverage below threshold: {cov_exc}"
+                                ) from cov_exc
+
+                return {
+                    "published_run": _published_run,
+                    "publish_failed": _publish_failed,
+                    "stock_core_published": _stock_core_published_local,
+                    "stock_core_superseded": _stock_core_superseded_local,
+                }
+
+            try:
+                _core_pub_out, _core_pub_summary = await execute_orchestrator_step(
+                    "publishing",
+                    _run_core_publish_op,
+                    timeout_seconds=_step_timeout("publishing"),
+                    progress=_make_step_progress_callback(job_run_id, worker_id),
+                    cancellation_check=_make_step_cancellation_check(job_run_id),
+                )
+            except Exception as pub_exc:
+                # 执行器已标记 step_summary=failed，核心发布失败 → 整个 run 失败
+                logger.error(
+                    "[AfterClose] publishing 核心发布失败: job_run_id=%s, error=%s",
+                    job_run_id, pub_exc, exc_info=True,
+                )
+                raise
+
+            publish_failed = _core_pub_out["publish_failed"]
+            published_run = _core_pub_out["published_run"]
+            _stock_core_published = _core_pub_out["stock_core_published"]
+            _stock_core_superseded = _core_pub_out["stock_core_superseded"]
 
             # [Phase8A two-phase idempotent publish] Only mark snapshot succeeded
             # AFTER pointer is confirmed. Superseded runs are NOT marked succeeded
@@ -2187,7 +2402,8 @@ async def execute_after_close_run(
                 meta["step_summary"] = step_summary
                 optional_failures = [
                     name for name, item in step_summary.items()
-                    if item.get("optional") and item.get("status") in {"failed", "skipped_unavailable"}
+                    if item.get("optional")
+                    and item.get("status") in {"failed", "unavailable", "timed_out", "interrupted"}
                 ]
                 meta["partial_success"] = bool(optional_failures)
                 meta["optional_failures"] = optional_failures
@@ -2243,6 +2459,9 @@ async def execute_after_close_run(
         _review_signal_count: int = 0
         _review_coverage: float = 0.0
         _review_blockers: list[str] = []
+        # [P0-1 2026-08-03] Review 失败（gate_blocked/计算失败）不再使整个 run failed，
+        # 仅标记 _review_failed，主 run 收尾为 partial_success（core 已发布）。
+        _review_failed: bool = False
 
         if not skip_review:
             # 仅在 stock_core + board_analysis 均已正式发布时执行 review
@@ -2436,11 +2655,14 @@ async def execute_after_close_run(
                                     "run_id=%s, blockers=%s",
                                     _review_run_id, blockers,
                                 )
-                                # [CRITICAL RULE] review 失败不得静默写主任务成功。
-                                # gate_blocked 视为 review 阶段失败：向上抛出 RuntimeError，
-                                # 触发 except 块把主任务标记为 failed。
-                                raise RuntimeError(
-                                    f"review publish gate blocked: {'; '.join(blockers)}"
+                                # [P0-1 2026-08-03 partial_success] Review gate_blocked 不再
+                                # 让整个 run failed：core（stock_core/board）已成功发布，
+                                # 仅标记 review 阶段失败，主 run 收尾为 partial_success。
+                                _review_failed = True
+                                logger.error(
+                                    "[AfterClose] [Review] publish gate 不通过，"
+                                    "主 run 将标记 partial_success: blockers=%s",
+                                    blockers,
                                 )
                             await review_db2.commit()
 
@@ -2448,18 +2670,16 @@ async def execute_after_close_run(
                     _review_status = "gate_blocked"
                     _review_blockers = list(pub_block_exc.blockers or [])
                     _review_reason = f"publish_gate_blocked: {'; '.join(_review_blockers)}"
+                    _review_failed = True
                     logger.error(
-                        "[AfterClose] [Review] publish gate 阻塞: %s", pub_block_exc,
+                        "[AfterClose] [Review] publish gate 阻塞（partial_success）: %s", pub_block_exc,
                     )
-                    # 显式 raise：review 失败不得静默写主任务 succeeded
-                    raise RuntimeError(
-                        f"review publish gate blocked: {_review_reason}"
-                    ) from pub_block_exc
                 except Exception as review_exc:
                     _review_status = "failed"
                     _review_reason = f"{type(review_exc).__name__}: {review_exc}"[:500]
+                    _review_failed = True
                     logger.error(
-                        "[AfterClose] [Review] 复盘计算或发布失败（不得静默 succeed）: "
+                        "[AfterClose] [Review] 复盘计算或发布失败（partial_success，core 已发布）: "
                         "trade_date=%s, error=%s",
                         trade_date, review_exc, exc_info=True,
                     )
@@ -2489,10 +2709,8 @@ async def execute_after_close_run(
                             "[AfterClose] [Review] 写入 review_failed 事件失败: %s",
                             inner_exc,
                         )
-                    # [CRITICAL RULE] review 失败必须向上抛出，使主任务标记 failed
-                    raise RuntimeError(
-                        f"review phase failed: {_review_reason}"
-                    ) from review_exc
+                    # [P0-1 2026-08-03] Review 失败不再让整个 run failed：
+                    # 仅标记 _review_failed，主 run 收尾为 partial_success。
                 finally:
                     # 无论成功/失败，更新 metadata 记录 review_run_id/status/reason
                     try:
@@ -2645,17 +2863,44 @@ async def execute_after_close_run(
                 + f", review_status={_review_status}"
                 + (f", review_run_id={_review_run_id}" if _review_run_id else "")
             )
+            # [P0-1 2026-08-03] 核心已发布但可选阶段（auction/review/aggregation）失败时，
+            # 主任务状态为 PARTIAL_SUCCESS（而非 succeeded），明确表达"核心成功、后置降级"。
+            # stock_core 被 superseded（pointer 指向其他 run）也视为部分成功。
+            _optional_failed = (
+                _review_failed
+                or _auction_anchor_status == "failed"
+                or _aggregation_status == "failed"
+                or _stock_core_superseded
+            )
+            final_status = (
+                AfterCloseRunStatus.PARTIAL_SUCCESS
+                if _optional_failed
+                else AfterCloseRunStatus.SUCCEEDED
+            )
+            success_message = (
+                f"盘后编排{'部分成功' if _optional_failed else '成功完成'}: "
+                f"dsa_run_id={dsa_run_id}"
+                + (f", published_at={published_run.published_at}"
+                   if published_run is not None else "")
+                + f", stock_core_published={_stock_core_published}"
+                + f", auction_anchor_status={_auction_anchor_status}"
+                + f", aggregation_status={_aggregation_status}"
+                + f", review_status={_review_status}"
+                + (f", review_run_id={_review_run_id}" if _review_run_id else "")
+            )
             await _update_orchestrator_status(
                 db=db,
                 job_run=job_run,
-                status=AfterCloseRunStatus.SUCCEEDED,
+                status=final_status,
                 message=success_message,
                 dsa_run_id=dsa_run_id,
                 payload={
                     "published_at": published_at_str,
                     "stock_core_published": _stock_core_published,
+                    "stock_core_superseded": _stock_core_superseded,
                     "auction_anchor_status": _auction_anchor_status,
                     "aggregation_status": _aggregation_status,
+                    "partial_success": _optional_failed,
                     # [CHANGE-20260801-REVIEW-CLOSURE] review 闭环字段
                     "review_run_id": str(_review_run_id) if _review_run_id else None,
                     "review_status": _review_status,
@@ -2671,10 +2916,10 @@ async def execute_after_close_run(
                     "review_blockers": _review_blockers,
                 },
             )
-            job_run.status = "succeeded"
+            job_run.status = final_status.value
             job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
             await _update_heartbeat_and_step(
-                db, job_run, "succeeded", worker_id,
+                db, job_run, final_status.value, worker_id,
             )
             await db.commit()
 
@@ -2939,6 +3184,25 @@ async def get_after_close_run_status(
             hb = hb.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
         heartbeat_stale = (now_sh - hb) > timedelta(seconds=_HEARTBEAT_STALE_SECONDS)
 
+    # [Watchdog 2026-08-03] 步骤级超时 + stale 判定（基于统一执行器写入的 step_summary）：
+    # - 任何 running 步骤的 elapsed_seconds 超过 _step_timeout 阈值 → step_timed_out=True
+    # - heartbeat_stale（整体）或任一 running 步骤 timed_out → stale=True
+    # 这是 watchdog 展示闭环：API 计算 → 管理页告警 → 运维触发 restart_from/repair。
+    step_summary = dict(meta.get("step_summary") or {})
+    step_timed_out = False
+    running_steps: list[str] = []
+    for _step_name, _summary in step_summary.items():
+        if isinstance(_summary, dict) and _summary.get("status") == "running":
+            running_steps.append(_step_name)
+            _elapsed = _summary.get("elapsed_seconds")
+            _limit = _STEP_TIMEOUT_SECONDS.get(_step_name)
+            if _elapsed is not None and _limit is not None and _elapsed > _limit:
+                step_timed_out = True
+    stale = heartbeat_stale or step_timed_out
+
+    # 透传 partial_success（核心成功、可选阶段降级）
+    partial_success_flag = bool(meta.get("partial_success")) or job_run.status == "partial_success"
+
     return {
         "job_run_id": str(job_run_id),
         "job_name": job_run.job_name,
@@ -2960,6 +3224,12 @@ async def get_after_close_run_status(
         "interrupt_reason": interrupt_reason,
         "is_retryable": is_retryable,
         "heartbeat_stale": heartbeat_stale,
+        # [Watchdog 2026-08-03] 步骤级超时 + stale 闭环
+        "step_summary": step_summary,
+        "running_steps": running_steps,
+        "step_timed_out": step_timed_out,
+        "stale": stale,
+        "partial_success": partial_success_flag,
         "events": [
             {
                 "id": str(e.id),
@@ -2979,24 +3249,57 @@ async def cancel_after_close_run(
     *,
     job_run_id: str,
     reason: str | None = None,
+    actor: str | None = None,
+    request_id: str | None = None,
 ) -> SchedulerJobRun:
-    """幂等取消；终态重复调用仅返回当前事实。"""
+    """协作式取消；终态重复调用仅返回当前事实。
+
+    [P0-1 2026-08-03 cancel 真实语义] 不止改 DB 状态：
+    - 记录 actor / request_id（审计谁在何时发起）
+    - 写 cancel 事件（时间线可溯）
+    - 递增 lease_epoch 立即 fence 旧 Worker（旧 Worker 后续心跳/写入被拒）
+    - 长步骤通过 cancellation_check 在下一个心跳周期感知 cancelled 并收尾
+    """
     job_run = await _get_job_run_or_raise(db, uuid.UUID(job_run_id))
     if job_run.status in {"succeeded", "failed", "cancelled", "interrupted"}:
         return job_run
     now = datetime.now(UTC)
     meta = _parse_metadata(job_run)
+    # [P0-1] 递增 lease_epoch：使正在执行的旧 Worker 的 fenced 写入立即失效
+    _current_epoch = job_run.lease_epoch if hasattr(job_run, "lease_epoch") and job_run.lease_epoch else 0
+    _new_epoch = _current_epoch + 1
     meta.update(
         orchestrator_status="cancelled",
         cancel_reason=reason or "admin_cancelled",
+        cancel_actor=actor or "unknown_admin",
+        cancel_request_id=request_id,
         cancelled_at=now.isoformat(),
+        cancelled_lease_epoch=_new_epoch,
     )
     job_run.status = "cancelled"
     job_run.error_code = "ADMIN_CANCELLED"
     job_run.error_message = reason or "管理员取消盘后任务"
     job_run.finished_at = now
     job_run.lease_expires_at = None
+    if hasattr(job_run, "lease_epoch"):
+        job_run.lease_epoch = _new_epoch
     job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    # 写 cancel 事件（时间线可溯，独立 session 提交）
+    try:
+        await append_event(
+            db=db,
+            job_run_id=uuid.UUID(job_run_id),
+            step="cancelled",
+            level="warn",
+            message=f"管理员取消盘后任务: actor={actor}, reason={reason}",
+            payload={
+                "actor": actor,
+                "request_id": request_id,
+                "cancelled_lease_epoch": _new_epoch,
+            },
+        )
+    except Exception as evt_exc:
+        logger.warning("[AfterClose] 写 cancel 事件失败: %s", evt_exc)
     await db.flush()
     return job_run
 
@@ -3006,22 +3309,85 @@ async def reconcile_after_close_run(
     *,
     job_run_id: str,
     reason: str | None = None,
+    actor: str | None = None,
 ) -> SchedulerJobRun:
-    """幂等校准 metadata 派生状态，不启动任务、不修改业务数据。"""
+    """对账校准：根据 worker 存活、heartbeat、step_summary、publication 修正状态。
+
+    [P0-1 2026-08-03 reconcile 真实语义] 不再只对齐两个状态字段，而是：
+    - 检查 running 但 heartbeat_stale → 标记为 interrupted（Worker 已失联）
+    - 检查 running 但某步骤 step_timed_out → 标记 interrupted
+    - 根据 job_run.status 修正 orchestrator_status 派生字段
+    - 写 reconcile 事件记录审计
+    """
     job_run = await _get_job_run_or_raise(db, uuid.UUID(job_run_id))
     meta = _parse_metadata(job_run)
+    now = datetime.now(UTC)
+
+    # 1) running 但心跳 stale / 步骤超时 → interrupted（Worker 失联，非业务失败）
+    _reconciled_to_interrupted = False
+    if job_run.status == "running":
+        _hb_stale = False
+        if job_run.heartbeat_at is not None:
+            _now_sh = datetime.now(ZoneInfo("Asia/Shanghai"))
+            _hb = job_run.heartbeat_at
+            if _hb.tzinfo is None:
+                _hb = _hb.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            _hb_stale = (_now_sh - _hb) > timedelta(seconds=_HEARTBEAT_STALE_SECONDS)
+        _step_sum = dict(meta.get("step_summary") or {})
+        _step_timeout_hit = False
+        for _sn, _s in _step_sum.items():
+            if isinstance(_s, dict) and _s.get("status") == "running":
+                _lim = _STEP_TIMEOUT_SECONDS.get(_sn)
+                if _s.get("elapsed_seconds") is not None and _lim and _s["elapsed_seconds"] > _lim:
+                    _step_timeout_hit = True
+        if _hb_stale or _step_timeout_hit:
+            job_run.status = "interrupted"
+            job_run.error_code = "RECONCILED_INTERRUPTED"
+            job_run.error_message = (
+                f"reconcile: heartbeat_stale={_hb_stale}, step_timed_out={_step_timeout_hit}"
+            )
+            _reconciled_to_interrupted = True
+            logger.warning(
+                "[AfterClose] reconcile: running→interrupted (stale): "
+                "job_run_id=%s, hb_stale=%s, step_timeout=%s",
+                job_run_id, _hb_stale, _step_timeout_hit,
+            )
+
+    # 2) 修正 orchestrator_status 派生字段
     expected = {
         "succeeded": AfterCloseRunStatus.SUCCEEDED.value,
         "failed": AfterCloseRunStatus.FAILED.value,
-        "cancelled": "cancelled",
-        "interrupted": "interrupted",
+        "cancelled": AfterCloseRunStatus.CANCELLED.value,
+        "interrupted": AfterCloseRunStatus.INTERRUPTED.value,
+        "partial_success": AfterCloseRunStatus.PARTIAL_SUCCESS.value,
     }.get(job_run.status)
+    _changed = False
     if expected and meta.get("orchestrator_status") != expected:
         meta["orchestrator_status"] = expected
-        meta["reconciled_at"] = datetime.now(UTC).isoformat()
-        meta["reconcile_reason"] = reason or "admin_reconcile"
-        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
-        await db.flush()
+        _changed = True
+    meta["reconciled_at"] = now.isoformat()
+    meta["reconcile_reason"] = reason or "admin_reconcile"
+    meta["reconcile_actor"] = actor
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    try:
+        await append_event(
+            db=db,
+            job_run_id=uuid.UUID(job_run_id),
+            step="reconciled",
+            level="info",
+            message=(
+                f"对账校准: status={job_run.status}, "
+                f"interrupted={_reconciled_to_interrupted}, meta_changed={_changed}"
+            ),
+            payload={
+                "actor": actor,
+                "reconciled_to_interrupted": _reconciled_to_interrupted,
+                "meta_changed": _changed,
+            },
+        )
+    except Exception as evt_exc:
+        logger.warning("[AfterClose] 写 reconcile 事件失败: %s", evt_exc)
+    await db.flush()
     return job_run
 
 

@@ -60,6 +60,7 @@
 | CHANGE-20260802-005 | 2026-08-02 | 治理去角色化与单一规则/检查入口 | governance | AGENTS/rules/checker | 代码与本地合同待最终验证；无需部署或 migration | 通用执行主体合同 | `rules/README.md`、`rules/50-git-development-flow.md` |
 
 | CHANGE-20260803-004 | 2026-08-03 | 盘迹 PRD V1.0 代码收口 — 7 模块缺口修复与垂直切片提交 | behavior+contract+architecture | 盘后/量化模型/行情体验/复盘/管理后台 | 代码与本地合同待最终验证；无需部署或 migration | 7 PRD 模块收口 | `2026/CHANGE-20260803-004-after-close-fp-smc-nav-closure.md` |
+| CHANGE-20260803-005 | 2026-08-03 | 盘后状态机收口：全步骤迁移统一执行器 + Stale Watchdog 接线 + 状态合同扩展（partial_success/interrupted/cancelled + step 终态） | behavior+contract+architecture | 盘后编排状态机/管理后台 cancel·reconcile/状态查询 | `verified_code`（PURE_UNIT 3+2+12+1 passed、Ruff passed；PG 集成与端到端未运行）；未部署、未改共享库 | AC-02/AC-04 | `2026/CHANGE-20260803-005-after-close-step-migration-watchdog.md` |
 
 ## 3. 状态说明
 

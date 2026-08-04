@@ -162,8 +162,10 @@ def test_board_sync_registered_in_after_close_orchestrator() -> None:
     from app.services.after_close_orchestrator import execute_after_close_run
 
     source = inspect.getsource(execute_after_close_run)
-    assert "sync_boards" in source, \
-        "after_close_orchestrator 应调用 sync_boards"
+    # [AC-02 2026-08-03] syncing_boards 业务体抽取为 _execute_syncing_boards，
+    # 由统一执行器以 "syncing_boards" 步骤名调用；原 "sync_boards" 字面量已不存在。
+    assert "syncing_boards" in source, \
+        "after_close_orchestrator 应调用 syncing_boards 步骤"
     assert "board_sync" in source, \
         "after_close_orchestrator 应包含 board_sync 逻辑"
     assert "skip_board_sync" in source, \

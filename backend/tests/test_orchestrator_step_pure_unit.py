@@ -49,6 +49,12 @@ async def test_auction_anchor_optional_unavailable_is_non_blocking(mode: str):
     )
 
     assert result is None
-    assert summary["status"] == "skipped_unavailable"
+    # [Step Contract 2026-08-03] 原 "skipped_unavailable" 组合态已废弃：
+    # 可选步骤无数据 → unavailable；可选步骤超时 → timed_out（调用方降级为 skipped）。
+    if mode == "unavailable":
+        assert summary["status"] == "unavailable"
+        assert summary["error_code"] == "STEP_UNAVAILABLE"
+    else:
+        assert summary["status"] == "timed_out"
+        assert summary["error_code"] == "STEP_TIMEOUT"
     assert summary["optional"] is True
-    assert summary["error_code"] in {"STEP_TIMEOUT", "STEP_UNAVAILABLE"}

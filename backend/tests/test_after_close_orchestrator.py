@@ -418,6 +418,9 @@ async def test_execute_writes_status_events(db_session) -> None:
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -694,6 +697,9 @@ async def test_execute_feature_snapshot_success_creates_succeeded_run(db_session
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -805,6 +811,9 @@ async def test_compute_for_trade_date_not_passed_dsa_run_id_kwarg(db_session) ->
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1047,6 +1056,9 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1164,6 +1176,9 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1269,6 +1284,9 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1642,6 +1660,9 @@ async def test_repair_clears_stuck_run_before_new_after_close(db_session) -> Non
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=new_job_run.id,
@@ -1735,6 +1756,9 @@ async def test_execute_calls_repair_at_start(db_session) -> None:
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -1934,6 +1958,9 @@ async def test_c5_publishing_success_generates_events_once(db_session) -> None:
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -2164,6 +2191,9 @@ async def test_p0_publish_success_finalizes_snapshot_run_succeeded(
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -2595,6 +2625,9 @@ async def test_resume_from_feature_snapshot_reads_actual_count(db_session) -> No
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -2722,6 +2755,9 @@ async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,
@@ -2853,6 +2889,9 @@ async def test_ac04_daily_ready_15m_missing_allows_proceed() -> None:
         "app.services.after_close_orchestrator._job_run_heartbeat_loop",
         new=AsyncMock(),
     ), patch(
+        "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
+        new=AsyncMock(return_value={"publication_id": uuid.uuid4(), "chip_count": 0, "composite_count": 0}),
+    ), patch(
         "app.services.state_event_service.generate_events_for_run",
         new=AsyncMock(return_value={"event_count": 0}),
     ), patch(
@@ -2879,6 +2918,9 @@ async def test_ac04_daily_ready_15m_missing_allows_proceed() -> None:
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run_id,
@@ -3125,6 +3167,9 @@ async def test_execute_run_called_after_mfcs_transitions_dsa_to_completed(db_ses
     ), patch(
         "app.services.factor_publication_service.publish_stock_core",
         new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
         await execute_after_close_run(
             job_run_id=job_run.id,

@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -196,12 +197,18 @@ def _action_response(job_run, message: str) -> AfterCloseRunCreateResponse:
 async def cancel_after_close_run_endpoint(
     run_id: str,
     payload: AfterCloseRunActionRequest | None = None,
+    request: Request = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> AfterCloseRunCreateResponse:
     try:
+        _request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         job_run = await cancel_after_close_run(
-            db, job_run_id=run_id, reason=payload.reason if payload else None,
+            db,
+            job_run_id=run_id,
+            reason=payload.reason if payload else None,
+            actor=getattr(current_user, "username", None) or str(current_user),
+            request_id=_request_id,
         )
         await db.commit()
         return _action_response(job_run, "盘后任务已取消或已处于终态")
@@ -213,12 +220,17 @@ async def cancel_after_close_run_endpoint(
 async def reconcile_after_close_run_endpoint(
     run_id: str,
     payload: AfterCloseRunActionRequest | None = None,
+    request: Request = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> AfterCloseRunCreateResponse:
     try:
+        _request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         job_run = await reconcile_after_close_run(
-            db, job_run_id=run_id, reason=payload.reason if payload else None,
+            db,
+            job_run_id=run_id,
+            reason=payload.reason if payload else None,
+            actor=getattr(current_user, "username", None) or str(current_user),
         )
         await db.commit()
         return _action_response(job_run, "盘后任务状态已校准")
