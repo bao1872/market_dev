@@ -75,6 +75,10 @@ from app.services.first_pyramid_flatten import (
     assemble_first_pyramid_read_model,
     flatten_first_pyramid,
 )
+from app.services.market_data_aggregation_service import (
+    BarAggregationResult,
+    MarketDataAggregationService,
+)
 from app.services.node_cluster_input_provider import NodeClusterInputProvider
 
 
@@ -704,6 +708,8 @@ async def compute_review_core_for_trade_date(
     adj: str = "qfq",
     *,
     primary_bars: pd.DataFrame | None = None,
+    primary_source_bar_hash: str | None = None,
+    primary_adj_factor_hash: str | None = None,
     source_run_id: uuid.UUID | None = None,
     instrument_symbol: str | None = None,
     _diag_sink: dict[str, Any] | None = None,
@@ -728,6 +734,9 @@ async def compute_review_core_for_trade_date(
         primary_timeframe: 主周期（默认 1d）
         adj: 复权方式（默认 qfq）
         primary_bars: 预加载的日线 bars（可选，不传则从 DB 获取）
+        primary_source_bar_hash: 预加载 bars 的 source_bar_hash（[AC-16] 批读时从
+            BarAggregationResult 传入，不传且 primary_bars 传入时为 None）
+        primary_adj_factor_hash: 预加载 bars 的 adj_factor_hash（同上）
         source_run_id: 关联的 snapshot run id
         _diag_sink: 诊断信息收集 dict
 
@@ -741,8 +750,6 @@ async def compute_review_core_for_trade_date(
     warmup_notes: list[str] = []
 
     # 获取日线 K 线（如果未预加载）
-    primary_adj_factor_hash: str | None = None
-    primary_source_bar_hash: str | None = None
     if primary_bars is None:
         primary_bars, primary_diag = await _fetch_bars_from_db(
             session, instrument_id, primary_timeframe, adj, trade_date,
@@ -1121,6 +1128,9 @@ async def compute_review_core_with_run_items(
     skipped_count = 0
     total = len(instrument_ids)
     run_diag: dict[str, Any] = {}
+    # [AC-16] 低基数 metrics：批次数、MDAS 批读次数（支持性能回归核验）
+    batch_count = 0
+    mdas_batch_read_count = 0
 
     while True:
         # 2.1 claim 一批 items（独立 session）
@@ -1135,6 +1145,8 @@ async def compute_review_core_with_run_items(
         if not items:
             break  # 无可领取 items，完成
 
+        batch_count += 1
+
         # [P0-symbol合同 2026-07-30] 批量查询本批 items 的 instrument_id → symbol 映射
         async with AsyncSessionLocal() as sym_db:
             sym_rows = await sym_db.execute(
@@ -1145,15 +1157,60 @@ async def compute_review_core_with_run_items(
                 row[0]: row[1] for row in sym_rows
             }
 
+        # [AC-16] 本批 items 通过 MDAS 批量入口一次预读 1d bars（review core 只允许日线；
+        # 同一股票、周期、交易日的 canonical frame 与诊断 hash 在该批内复用），
+        # 避免逐股 _fetch_bars_from_db 的 N×2 次 DB 往返。仍保持每股独立事务
+        # （AC-08 单股×阶段检查点），批读只降低行情读取开销，不改变提交边界。
+        primary_batch_results: dict[
+            uuid.UUID, BarAggregationResult | Exception
+        ] = {}
+        try:
+            async with AsyncSessionLocal() as mdas_db:
+                primary_batch_results = await _get_mdas().get_bars_batch(
+                    mdas_db,
+                    [item.instrument_id for item in items],
+                    timeframe="1d", adj="qfq",
+                    include_realtime=False, completed_only=True,
+                    end_date=trade_date, adjustment_as_of=trade_date,
+                )
+            mdas_batch_read_count += 1
+        except Exception as mdas_exc:
+            # 批读整体失败不阻断：降级为逐股读取（不抛，保留原语义）
+            logger.error(
+                "[RunItems] MDAS 批读失败，降级逐股读取: batch=%d, error=%s",
+                batch_count, mdas_exc,
+            )
+
         # 2.2 逐股计算（每股独立事务）
         for item in items:
             try:
                 # 计算在事务外（长事务避免锁竞争）
                 async with AsyncSessionLocal() as compute_db:
+                    # [AC-16] 从批读结果取 bars + 诊断 hash；失败/缺失则降级（bars=None
+                    # 触发 compute_review_core_for_trade_date 内部逐股 _fetch_bars_from_db）
+                    primary_result = primary_batch_results.get(item.instrument_id)
+                    primary_bars = (
+                        primary_result.bars
+                        if isinstance(primary_result, BarAggregationResult)
+                        else None
+                    )
+                    pre_hash = (
+                        primary_result.source_bar_hash
+                        if isinstance(primary_result, BarAggregationResult)
+                        else None
+                    )
+                    pre_adj_hash = (
+                        primary_result.adj_factor_hash
+                        if isinstance(primary_result, BarAggregationResult)
+                        else None
+                    )
                     snapshot = await compute_review_core_for_trade_date(
                         compute_db,
                         item.instrument_id,
                         trade_date,
+                        primary_bars=primary_bars,
+                        primary_source_bar_hash=pre_hash,
+                        primary_adj_factor_hash=pre_adj_hash,
                         source_run_id=snapshot_run_id,
                         instrument_symbol=batch_symbol_map.get(item.instrument_id),
                         _diag_sink=run_diag,
@@ -1233,8 +1290,10 @@ async def compute_review_core_with_run_items(
 
     logger.info(
         "[RunItems] review_core_with_run_items 完成: trade_date=%s, "
-        "succeeded=%d, failed=%d, skipped=%d, coverage=%.4f",
+        "succeeded=%d, failed=%d, skipped=%d, coverage=%.4f, "
+        "batches=%d, mdas_batch_reads=%d",
         trade_date, succeeded, failed, skipped, coverage,
+        batch_count, mdas_batch_read_count,
     )
 
     return {
@@ -1242,6 +1301,8 @@ async def compute_review_core_with_run_items(
         "failed_count": failed,
         "skipped_count": skipped,
         "coverage": coverage,
+        "batch_count": batch_count,
+        "mdas_batch_read_count": mdas_batch_read_count,
         "schema_version": _SCHEMA_VERSION,
         "trade_date": trade_date.isoformat(),
         "source_bar_hash": run_diag.get("source_bar_hash"),
@@ -1252,6 +1313,11 @@ async def compute_review_core_with_run_items(
         "_review_core": True,
         "_uses_run_items": True,
     }
+
+
+def _get_mdas() -> MarketDataAggregationService:
+    """[AC-16] 返回 MDAS 实例（批读唯一入口 get_bars_batch 的提供者）。"""
+    return MarketDataAggregationService()
 
 
 async def _fetch_bars_from_db(

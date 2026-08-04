@@ -49,6 +49,8 @@
 
 `feature_snapshot_service.compute_for_trade_date` 按 `batch_size` 通过 `MarketDataAggregationService.get_bars_batch` 为每批预读 1d 与 15m 的 point-in-time qfq bars，将 canonical frame 传入单股计算，并在批内完成计算后集中 upsert/flush。MDAS 批入口复用单股 `get_bars` 的 bars、复权和诊断合同，按标的返回结果或异常；同一 `AsyncSession` 下有界顺序执行。批结果包含 `batch_count`、`mdas_batch_read_count`，每批完成后发送 progress callback；整日期 commit/rollback 与 published 快照保护仍由原事务边界负责。
 
+**主链批读（AC-16，2026-08-03）**：`compute_review_core_with_run_items`（盘后编排实际调用的主链，单股×阶段检查点）现也在每 claim 批内通过 MDAS `get_bars_batch` 一次预读 1d point-in-time qfq bars，将 canonical frame 与诊断 hash（`source_bar_hash`/`adj_factor_hash`）经 `primary_bars`/`primary_source_bar_hash`/`primary_adj_factor_hash` 传入单股计算；批读失败降级为逐股 `_fetch_bars_from_db`（不抛）。仍保持每股独立事务提交（AC-08 检查点不因批读改变）。返回新增 `batch_count`/`mdas_batch_read_count` 低基数 metrics。
+
 
 | 类型 | 路径 | 符号 | 职责 |
 |---|---|---|---|

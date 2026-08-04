@@ -640,6 +640,111 @@ async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics(
 
 
 @pytest.mark.asyncio
+async def test_review_core_with_run_items_uses_mdas_batch_read_and_metrics() -> None:
+    """[AC-16] 主链 compute_review_core_with_run_items 必须 MDAS 批读 1d bars。
+
+    修复前该主链逐股 _fetch_bars_from_db（N×2 次 DB 往返），未走 MDAS 批读；
+    与 compute_for_trade_date 的批量化不一致。本测试锁定：
+    - get_bars_batch 每个 claim 批一次（batch_count 次，而非每股 2 次）
+    - 预读 bars 通过 primary_bars 传入单股计算（canonical frame 批内复用）
+    - 返回 metrics：batch_count / mdas_batch_read_count
+    - 每股独立提交（mark_item_succeeded 每 item 一次）不因批读而改变 AC-08 检查点
+    """
+    import uuid as uuid_mod
+    from datetime import date as date_mod
+
+    from app.services import feature_snapshot_service as fss
+    from app.services.feature_snapshot_service import compute_review_core_with_run_items
+
+    instrument_ids = [uuid_mod.uuid4() for _ in range(5)]
+    snapshot_run_id = uuid_mod.uuid4()
+    bars = pd.DataFrame({"close": [1.0]}, index=pd.DatetimeIndex(["2026-07-31"]))
+    agg = MagicMock(
+        spec=fss.BarAggregationResult,
+        bars=bars, source_bar_hash="hash1", adj_factor_hash="adj1",
+    )
+
+    class _Item:
+        def __init__(self, instrument_id):
+            self.id = uuid_mod.uuid4()
+            self.instrument_id = instrument_id
+            self.lease_epoch = 1
+
+    claim_side_effects = [instrument_ids[:2], instrument_ids[2:4], instrument_ids[4:], []]
+
+    async def _fake_claim(db, snapshot_run_id, **kwargs):
+        if claim_side_effects:
+            batch_ids = claim_side_effects.pop(0)
+            return [_Item(i) for i in batch_ids]
+        return []
+
+    async def _fake_mark_succeeded(db, item_id, **kwargs):
+        return True
+
+    with (
+        patch(
+            "app.db.AsyncSessionLocal",
+            new_callable=lambda: MagicMock(return_value=AsyncMock()),
+        ),
+        patch(
+            "app.services.snapshot_run_item_service.claim_items",
+            new_callable=AsyncMock, side_effect=_fake_claim,
+        ),
+        patch(
+            "app.services.snapshot_run_item_service.create_run_items",
+            new_callable=AsyncMock, return_value=5,
+        ),
+        patch(
+            "app.services.snapshot_run_item_service.mark_item_succeeded",
+            new_callable=AsyncMock, side_effect=_fake_mark_succeeded,
+        ),
+        patch(
+            "app.services.snapshot_run_item_service.mark_item_failed",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.snapshot_run_item_service.get_run_progress",
+            new_callable=AsyncMock,
+            return_value={"coverage": 1.0, "succeeded": 5, "failed": 0, "skipped": 0},
+        ),
+        patch(
+            "app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars_batch",
+            new_callable=AsyncMock,
+            side_effect=lambda _db, ids, **_kw: dict.fromkeys(ids, agg),
+        ) as batch_read,
+        patch(
+            "app.services.feature_snapshot_service.compute_review_core_for_trade_date",
+            new_callable=AsyncMock,
+            side_effect=[
+                MagicMock(spec=StockFeatureSnapshot) for _ in instrument_ids
+            ],
+        ) as core_compute,
+        patch(
+            "app.services.feature_snapshot_service.upsert_snapshot",
+            new_callable=AsyncMock,
+        ) as upsert,
+    ):
+        result = await compute_review_core_with_run_items(
+            date_mod(2026, 7, 31), instrument_ids, snapshot_run_id,
+            batch_size=2, failure_threshold=0.3,
+        )
+
+    # MDAS 批读：每 claim 批一次（3 个非空批），而非逐股 N×2 次
+    assert batch_read.await_count == 3
+    assert result["batch_count"] == 3
+    assert result["mdas_batch_read_count"] == 3
+    # 每股独立计算 + 提交（AC-08 检查点不因批读改变）
+    assert core_compute.await_count == 5
+    assert upsert.await_count == 5
+    # 预读 bars 必须传给单股计算（canonical frame 批内复用）
+    for call in core_compute.await_args_list:
+        kwargs = call.kwargs
+        assert kwargs.get("primary_bars") is bars, (
+            "AC-16 预读 bars 必须通过 primary_bars 传入单股计算"
+        )
+
+
+@pytest.mark.asyncio
 async def test_compute_for_trade_date_single_failure_does_not_block(
     db_session: AsyncSession,
 ) -> None:

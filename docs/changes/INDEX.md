@@ -61,6 +61,7 @@
 
 | CHANGE-20260803-004 | 2026-08-03 | 盘迹 PRD V1.0 代码收口 — 7 模块缺口修复与垂直切片提交 | behavior+contract+architecture | 盘后/量化模型/行情体验/复盘/管理后台 | 代码与本地合同待最终验证；无需部署或 migration | 7 PRD 模块收口 | `2026/CHANGE-20260803-004-after-close-fp-smc-nav-closure.md` |
 | CHANGE-20260803-005 | 2026-08-03 | 盘后状态机收口：全步骤迁移统一执行器 + Stale Watchdog 接线 + 状态合同扩展（partial_success/interrupted/cancelled + step 终态） | behavior+contract+architecture | 盘后编排状态机/管理后台 cancel·reconcile/状态查询 | `verified_code`（PURE_UNIT 3+2+12+1 passed、Ruff passed；PG 集成与端到端未运行）；未部署、未改共享库 | AC-02/AC-04 | `2026/CHANGE-20260803-005-after-close-step-migration-watchdog.md` |
+| CHANGE-20260803-006 | 2026-08-03 | Feature Snapshot 主链 MDAS 批读收口（AC-16）：compute_review_core_with_run_items 接入 get_bars_batch 批读 + 诊断 hash 传播 + batch_count/mdas_batch_read_count metrics | behavior+contract+performance | 盘后编排/特征快照/行情数据 | `verified_code`（feature snapshot 16 passed/11 skip；盘后相关 43 passed/30 skip；Ruff passed）；真实性能未基准、未部署、未连共享库 | AC-16 | `maps/30-after-close.md` |
 
 ## 3. 状态说明
 
