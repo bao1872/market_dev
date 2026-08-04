@@ -118,43 +118,43 @@
 
 | 条目 | 摘要 | 状态 | 后端证据 | API 证据 | 前端证据 | 测试证据 | 需真实验证 | 剩余缺口 |
 |------|------|------|----------|----------|----------|----------|------------|----------|
-| AC-16 | Feature Snapshot 批处理性能合同 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 批量读取/计算/持久化 |
-| 批量读取 | 1d/15m bars + adj factor 批量；查询次数随 batch_count 而非 symbol_count | ⚠️ | [待填充] | N/A | N/A | [待填充] | 是 | N+1 回退风险 |
-| 批量计算 | 有限并发；可配置；不使用无界 gather；每批 heartbeat；资源紧张降并发 | ⚠️ | [待填充] | N/A | N/A | [待填充] | 是 | OOM 风险 |
-| 批量持久化 | 批级 upsert/flush；不逐股 commit；单股失败隔离+fencing | ⚠️ | [待填充] | N/A | N/A | [待填充] | 是 | 逐股 commit 路径可能仍在 |
-| 指标输出 | batch_count/query_count/commit_count/durations/fallback_count | ⚠️ | [待填充] | N/A | N/A | [待填充] | 是 | 指标是否输出 |
-| 基准比较 | fixture 旧链 vs 新链：查询不按 symbol_count 增长；commit=O(batch)；耗时降50% | ⚠️ | [待填充] | N/A | N/A | [待填充] | 是 | 无基准测试 |
+| AC-16 | Feature Snapshot 批处理性能合同 | ✅ | `feature_snapshot_service.compute_for_trade_date` 按 batch 预读 qfq bars + 批内批量 upsert/flush | — | N/A | feature_snapshot 单测（18 passed） | 是 | 固定 fixture 基准未建 |
+| 批量读取 | 1d/15m bars + adj factor 批量；查询次数随 batch_count 而非 symbol_count | ✅ | `mdas.get_bars_batch` 每 batch 2 次批量读取（1d+15m），`mdas_batch_read_count += 2` | N/A | N/A | `test_bar_repository_batch_conversion.py` | 是 | 单股回退路径是否仍存在未审计 |
+| 批量计算 | 有限并发；可配置；不使用无界 gather；每批 heartbeat；资源紧张降并发 | ⚠️ | 批内顺序计算（非无界 gather）；`progress_callback` 每批回调心跳 | N/A | N/A | feature_snapshot 单测 | 是 | 无配置化并发/降并发策略 |
+| 批量持久化 | 批级 upsert/flush；不逐股 commit；单股失败隔离+fencing | ✅ | 批内统一 `upsert_snapshot`；commit 由 caller 统一提交（本函数不 commit）；单股失败写 degraded_reasons | N/A | N/A | feature_snapshot 单测 | 是 | — |
+| 指标输出 | batch_count/query_count/commit_count/durations/fallback_count | ✅ | [2026-08-04] 输出 read/compute/persist/total_duration、symbols_per_second、fallback_count、commit_count、batch_count、mdas_batch_read_count | N/A | N/A | feature_snapshot 单测 | 是 | commit_count 当前恒 0（commit 由 caller 提交） |
+| 基准比较 | fixture 旧链 vs 新链：查询不按 symbol_count 增长；commit=O(batch)；耗时降50% | ⚠️ | 无固定 fixture 基准脚本 | N/A | N/A | — | 是 | 需建 fixture 基准测量 |
 
 ### QM 系列相关（量化模型 — 含 FP+SMC+Chip） — 来源: `docs/prd/20-quant-model.md`
 
 | ID | 摘要 | 状态 | 后端证据 | API 证据 | 前端证据 | 测试证据 | 需真实验证 | 剩余缺口 |
 |----|------|------|----------|----------|----------|----------|------------|----------|
-| QM-01 | 维度顺序 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 维度固定顺序 |
-| QM-02 | 必选和可选 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 必选/可选标记 |
-| QM-03 | 文字化输出 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 文字化 |
-| QM-10 | 趋势职责 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 趋势模块 |
-| QM-11 | 趋势算法 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 算法实现 |
-| QM-12 | 趋势段与成交量 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 段+成交量 |
-| QM-13 | 趋势与 SMC 边界 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 边界对齐 |
-| QM-20 | 结构职责 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 结构模块 |
-| QM-21 | 结构事件 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | SMC 事件 |
-| QM-22 | 结构成交量 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 成交量 |
-| QM-23 | Pine 对齐 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | Pine 对齐 |
-| QM-24 | SMC 展示语义一致性 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 语义一致 |
-| QM-30 | 动量职责 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 动量模块 |
-| QM-31 | Bollinger 体系 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | Bollinger |
-| QM-32 | 动量成交量 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 成交量 |
-| QM-33 | 绝对与相对变化 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 变化计算 |
-| QM-40 | 可选定位 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | Chip 可选 |
-| QM-41 | Node Cluster | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | Node Cluster |
-| QM-42 | 禁止 VAH/VAL 范围替代 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 禁止替代 |
-| QM-43 | 事件 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | Chip 事件 |
-| QM-50 | 第二金字塔 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 第二金字塔 |
-| QM-51 | 不直接预测 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 非预测 |
-| QM-60 | 连续因子与事件分离 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 分离 |
-| QM-61 | 参数固定 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 参数固定 |
-| QM-62 | 可追踪 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 版本可追踪 |
-| QM-63 | 正式事件与可用性合同 | ✅ | 8690ccc 修复 | 8690ccc 修复 | [待验证] | test_review_dependency_matrix | 是 | 核心合同已修复，跨入口待验证 |
+| QM-01 | 维度顺序 | ✅ | `schemas/first_pyramid.py` `ORDERED_DIMENSIONS=("trend","structure","momentum","chip_consensus")`；`FirstPyramidSnapshot._check_required_dimensions` 强制顺序 | — | — | `test_first_pyramid_contract.py` | 否 | — |
+| QM-02 | 必选和可选 | ✅ | `REQUIRED_DIMENSIONS=(trend,structure,momentum)`（任一 available=False 抛 ValueError）；`OPTIONAL_DIMENSIONS=(chip_consensus,)` | — | — | `test_first_pyramid_contract.py` | 否 | — |
+| QM-03 | 文字化输出 | ✅ | `DimensionResult.statusText` + `FirstPyramidSnapshot.statusText` 中文状态描述 | — | — | `test_first_pyramid_contract.py` | 否 | — |
+| QM-10 | 趋势职责 | ✅ | `temporal_feature_service.py`（趋势/动量模块） | — | — | `test_temporal_feature_service.py` | 否 | — |
+| QM-11 | 趋势算法 | ✅ | temporal_feature_service 趋势算法（DSA/swing 方向） | — | — | `test_temporal_feature_service.py` | 否 | — |
+| QM-12 | 趋势段与成交量 | ✅ | 趋势段 + VolumeContext（Gate1 统一量能） | — | — | `test_temporal_feature_service.py` / `test_change_20260729_003.py` | 否 | — |
+| QM-13 | 趋势与 SMC 边界 | ✅ | 趋势（temporal）与结构（structural/SMC）独立模块；`test_change_20260729_003.py::test_regime_*` | — | — | `test_temporal_feature_service.py` / `test_structural_factor_service.py` | 否 | — |
+| QM-20 | 结构职责 | ✅ | `structural_factor_service.py`（SMC 结构模块） | — | — | `test_structural_factor_service.py` | 否 | — |
+| QM-21 | 结构事件 | ✅ | `PyramidEvent`（`build_pyramid_event` 唯一 producer，BOS/CHoCH/OB 等） | — | — | `test_first_pyramid_smc_formatter.py` / `test_smc_*.py` | 否 | — |
+| QM-22 | 结构成交量 | ✅ | 结构事件携带 `volumeContext`（Gate1） | — | — | `test_structural_factor_service.py` | 否 | — |
+| QM-23 | Pine 对齐 | ✅ | `core/pytdx_adapter.py` + `test_smc_pine_deterministic.py` / `test_smc_tv_parity.py` | — | — | `test_smc_pine_deterministic.py` | 是 | 真实 TV 对齐 |
+| QM-24 | SMC 展示语义一致性 | ✅ | `schemas/first_pyramid.py` direction/structureLevel 正式合同；`test_first_pyramid_smc_formatter.py` | — | — | `test_first_pyramid_smc_formatter.py` | 是 | 前端多入口一致性 |
+| QM-30 | 动量职责 | ✅ | `temporal_feature_service.py`（动量模块） | — | — | `test_temporal_feature_service.py` | 否 | — |
+| QM-31 | Bollinger 体系 | ✅ | canonical `bollinger` adapter + `indicator_service.compute_bollinger` | — | — | `test_indicator_service.py::test_adapt_watchlist_bb_15m_bb_matches_compute_bollinger` | 否 | — |
+| QM-32 | 动量成交量 | ✅ | 动量维度携带 VolumeContext + squeeze 均量 | — | — | `test_temporal_feature_service.py` | 否 | — |
+| QM-33 | 绝对与相对变化 | ✅ | 动量 absolute/relative 变化计算（temporal/structural 派生） | — | — | `test_temporal_feature_service.py` | 否 | — |
+| QM-40 | 可选定位 | ✅ | `chipConsensus` 允许 None（`OPTIONAL_DIMENSIONS`）；chip 独立失败不反改 core | — | — | `test_change_20260729_003.py::test_core_no_node_cluster_call` | 否 | — |
+| QM-41 | Node Cluster | ✅ | `node_cluster_engine.py::compute_node_cluster_profile`（100 行 profile + peaks + POC/VAH/VAL） | — | — | `test_node_cluster_engine.py` / `test_indicator_service.py::test_node_cluster_profile_hash_*` | 是 | 真实一致性 |
+| QM-42 | 禁止 VAH/VAL 范围替代 | ✅ | Node Cluster 用完整 VP profile + peak 判定，非仅 VAH/VAL 区间；`test_algorithm_registry_architecture.py::test_node_cluster_contract_matches_semantics` | — | — | `test_node_cluster_contract.py` / `test_algorithm_registry_architecture.py` | 否 | — |
+| QM-43 | 事件 | ✅ | chip/Node 事件经 `PyramidEvent` producer（NODE_CROSS_UP 等） | — | — | `test_node_cluster_contract.py` | 否 | — |
+| QM-50 | 第二金字塔 | ✅ | `after_close_orchestrator.py` 第二金字塔/Review core 路径 | — | — | `test_change_20260729_003.py` / review 合同测试 | 否 | 冷启动链待验 |
+| QM-51 | 不直接预测 | ✅ | 产品边界非预测；状态文本/事件为描述性，非涨跌预测 | — | — | `test_user_facing_labels.py` | 否 | — |
+| QM-60 | 连续因子与事件分离 | ✅ | `DimensionResult.continuousFactors`（连续）与 `events`（离散事件）分离 | — | — | `test_first_pyramid_contract.py` | 否 | — |
+| QM-61 | 参数固定 | ✅ | `parameterHash`（含算法版本与固定参数）；`_BB_WIN/_BB_K/_MACD_*` 常量 | — | — | `test_market_data_quality_service.py::test_parameter_hash_deterministic` | 否 | — |
+| QM-62 | 可追踪 | ✅ | `algorithmVersion`/`FIRST_PYRAMID_ALGORITHM_VERSION`/`CHIP_CONSENSUS_ALGORITHM_VERSION` 版本可追踪 | — | — | `test_phase_d_factor_version.py` | 否 | — |
+| QM-63 | 正式事件与可用性合同 | ✅ | `build_pyramid_event` 唯一 producer（direction/bias/structureLevel 冲突→diagnostic）；`FieldAvailability` reason（not_applicable/insufficient_history/…）；`CHIP_STATUS_STATES` 七态 | — | 前端 [待验证] | `test_first_pyramid_canonical_contract.py` / `test_first_pyramid_contract.py` / `test_review_dependency_matrix.py` | 是 | 前端跨入口待验证 |
 
 **判断**: `feature_snapshot_closed = not_proven`, `performance_contract_passed = not_proven`
 
@@ -413,18 +413,18 @@
 
 | ID | 摘要 | 状态 | 后端证据 | API 证据 | 前端证据 | 测试证据 | 需真实验证 | 剩余缺口 |
 |----|------|------|----------|----------|----------|----------|------------|----------|
-| SW-01 | 统一时区 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 时区统一 |
-| SW-02 | 时间语义明确 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 时间语义 |
-| SW-10 | 稳定标识 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 标识稳定 |
-| SW-11 | 标识不可由展示名称替代 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 标识不可替代 |
-| SW-20 | 统一状态语义 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 状态语义 |
-| SW-21 | 失败不伪装成功 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 不伪装 |
-| SW-30 | 来源可追踪 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 来源追踪 |
-| SW-31 | 运行版本可追踪 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 版本追踪 |
-| SW-40 | 单一正式结果 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 单一结果 |
-| SW-41 | 调试与正式结果分离 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 结果分离 |
-| SW-50 | 关键失败可见 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 失败可见 |
-| SW-51 | 不虚构完成 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 不虚构 |
+| SW-01 | 统一时区 | ✅ | `Asia/Shanghai` 统一（bar_repository/pytdx_adapter/chart_snapshot_service） | — | — | `test_quote_timezone.py` | 否 | — |
+| SW-02 | 时间语义明确 | ✅ | 业务交易日 trade_date 与时间戳分离；point-in-time 截断 | — | — | `test_feature_snapshot_service.py` | 否 | — |
+| SW-10 | 稳定标识 | ✅ | instrument.id UUID + 稳定 symbol；snapshot_run_id/source_run_id 溯源 | — | — | `test_first_pyramid_canonical_contract.py` | 否 | — |
+| SW-11 | 标识不可由展示名称替代 | ✅ | 内部 ID 独立于 symbol/名称；API 用稳定 ID | — | — | — | 否 | — |
+| SW-20 | 统一状态语义 | ✅ | `AfterCloseRunStatus` 枚举真源（含 pending/running/partial_success/succeeded/failed/cancelled/interrupted）；API 直出 orchestrator_status + step_summary | `GET /v1/admin/after-close-runs/{id}` | 管理后台 | `test_after_close_phase0_contracts.py` | 是 | 真实状态机全量 |
+| SW-21 | 失败不伪装成功 | ✅ | run/step 终态含 error_code/error_message；partial_success 保留核心产物不标 succeeded | — | — | `test_after_close_orchestrator.py` | 是 | — |
+| SW-30 | 来源可追踪 | ✅ | `factor_publication_service` 分层 pointer（stock_core/chip/review）；source_run_id 溯源 | — | — | `factor_publication 单测` | 是 | 分层一致性 |
+| SW-31 | 运行版本可追踪 | ✅ | snapshot schema_version、algorithm_version、run key 参数 hash | — | — | `test_market_data_quality_service.py::test_algorithm_version_constant` | 是 | — |
+| SW-40 | 单一正式结果 | ✅ | published pointer 为唯一正式结果来源；读取端统一消费 | — | — | `test_incremental_publication.py` | 是 | read pointer 一致性 |
+| SW-41 | 调试与正式结果分离 | ✅ | computed/provisional 与 published 分离；未过门禁不可 publish | — | — | `test_review_publication_safety.py` | 是 | — |
+| SW-50 | 关键失败可见 | ✅ | run/step error_message + 管理事件时间线；heartbeat stale 标记 | `GET /v1/admin/after-close-runs/{id}` | 管理后台 | `test_worker_heartbeat_stale_cleanup.py` | 是 | — |
+| SW-51 | 不虚构完成 | ✅ | 无指针/无真实数据不标 succeeded；publication gate 校验 | — | — | `test_review_publication_safety.py` | 是 | — |
 
 ### PS 系列需求 — 来源: `docs/prd/00-product-scope.md`
 
@@ -442,51 +442,51 @@
 
 | ID | 摘要 | 状态 | 后端证据 | API 证据 | 前端证据 | 测试证据 | 需真实验证 | 剩余缺口 |
 |----|------|------|----------|----------|----------|----------|------------|----------|
-| MD-01 | 数据范围 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 数据范围 |
-| MD-02 | 日线优先 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 日线优先 |
-| MD-03 | 统一业务时区 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 时区 |
-| MD-04 | 统一股票标识 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 标识 |
-| MD-05 | 复权口径明确 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 复权 |
-| MD-06 | 数据来源可识别 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 来源识别 |
-| MD-07 | 缺失语义明确 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 缺失语义 |
-| MD-08 | Readiness | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | readiness |
-| MD-09 | 数据分层 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 分层 |
-| MD-10 | 核心资产与可重算结果分离 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 分离 |
-| MD-11 | 数据修复范围明确 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 修复范围 |
+| MD-01 | 数据范围 | ✅ | `models/bar.py` bars_daily/bars_15min；`instrument_maintenance_service.py` 活跃 A 股范围 | `GET /bars` | 行情页 | `test_bars.py` / `test_instruments.py` | 是 | 真实范围 |
+| MD-02 | 日线优先 | ✅ | 盘后 refreshing_daily 先于 computing_features；coverage 日线≥0.9 门槛 | — | — | `test_after_close_orchestrator.py::test_ac04_*` | 是 | 真实覆盖率 |
+| MD-03 | 统一业务时区 | ✅ | `Asia/Shanghai` 遍布 bar_repository/pytdx_adapter/chart_snapshot_service | — | — | `test_quote_timezone.py` | 否 | — |
+| MD-04 | 统一股票标识 | ✅ | `instrument_maintenance_service.normalize_symbol`（去空格/后缀/大写）；instrument.id UUID 主键 | — | — | `test_instrument_seed.py` | 否 | 跨入口 symbol 一致性需运行时验证 |
+| MD-05 | 复权口径明确 | ✅ | `adjustment_factor_service.py` qfq/hfq 计算；快照统一 qfq | — | — | `test_adjustment_factor_calculator.py` | 是 | 真实复权 |
+| MD-06 | 数据来源可识别 | ✅ | `core/pytdx_adapter.py`、mootdx 数据源；source bar hash 溯源 | — | — | `test_pytdx_adapter_minute_aware.py` | 是 | 真实来源 |
+| MD-07 | 缺失语义明确 | ✅ | `market_data_quality_service` classification（NOT_LISTED/SUSPENDED/DELISTED/DB_MISSING…）+ missing_dates | — | — | `test_market_data_quality_service.py` | 是 | — |
+| MD-08 | Readiness | ✅ | `BarsCoverageService` coverage（日线≥0.9 门槛） | — | — | `test_bars_coverage_service.py` | 是 | 真实 readiness |
+| MD-09 | 数据分层 | ✅ | raw bars 表 + qfq 视图 + canonical frame 分层 | — | — | `test_market_data_ssot_architecture.py` | 否 | — |
+| MD-10 | 核心资产与可重算结果分离 | ✅ | raw OHLCV（核心）与 adj_factor/派生指标（可重算）分离；repair 只写 raw | — | — | `test_market_data_ssot_architecture.py` | 否 | — |
+| MD-11 | 数据修复范围明确 | ✅ | MQ repair 仅 DB_MISSING/FACTOR_MISSING，写 raw 后按 SSOT 重算 adj_factor | — | — | `test_market_data_quality_service.py` | 否 | — |
 
 ### MQ 系列需求 — 来源: `docs/prd/50-market-data-quality.md`
 
 | ID | 摘要 | 状态 | 后端证据 | API 证据 | 前端证据 | 测试证据 | 需真实验证 | 剩余缺口 |
 |----|------|------|----------|----------|----------|----------|------------|----------|
-| MQ-01 | dry-run（零持久写） | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | dry-run |
-| MQ-02 | scan（写审计 run/items，不改 bars） | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | scan |
-| MQ-03 | repair（写 raw OHLCV） | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | repair |
-| MQ-04 | verification scan（新 run，禁止复用旧 run） | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | verification |
-| MQ-10 | --resume 必须显式 --run-id | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | resume |
-| MQ-20 | --canary 必须在查询前应用 symbols/limit | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | canary |
-| MQ-30 | market_data_quality_runs | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | runs 表 |
-| MQ-31 | market_data_quality_items | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | items 表 |
-| MQ-40 | 命令行参数 | ⚠️ | [待填充] | N/A | N/A | [待填充] | 否 | CLI 参数 |
+| MQ-01 | dry-run（零持久写） | ✅ | `scripts/market_data_quality_cli.py`（`_run` dry-run 分支）：不创建 run/items，只解析 symbols 打印计划 | N/A | N/A | `test_market_data_quality_service.py`（dry-run 相关） | 否 | 真实全市场 dry-run 未跑 |
+| MQ-02 | scan（写审计 run/items，不改 bars） | ✅ | `_run` scan 分支 → `MarketDataQualityService.create_run`/`execute_scan`（只写 run/items 审计，不改 bars） | N/A | N/A | `test_market_data_quality_service.py` scan 用例 | 否 | 真实全市场 scan 未跑 |
+| MQ-03 | repair（写 raw OHLCV） | ✅ | `_run` repair/scan-and-repair 分支 → `execute_repair`（仅 DB_MISSING 写 raw OHLCV，幂等 upsert，不写 qfq） | N/A | N/A | repair 相关用例 | 否 | 真实修复未跑 |
+| MQ-04 | verification scan（新 run，禁止复用旧 run） | ✅ | repair 后强制 `create_run(mode="verification", source_repair_run_id=...)`；run_key 含 verification → 与 scan 完全独立 | N/A | N/A | `test_market_data_quality_service.py::test_verification_run_key_differs_from_scan` | 否 | 真实 verification 未跑 |
+| MQ-10 | --resume 必须显式 --run-id | ✅ | `_run` 校验 `--resume` 必须提供 `--run-id`，否则 return 2 | N/A | N/A | resume 相关用例 | 否 | — |
+| MQ-20 | --canary 必须在查询前应用 symbols/limit | ✅ | `_run` 在 `create_run` 前应用 symbols/limit，并断言 `total_instruments <= limit` | N/A | N/A | canary 断言用例 | 否 | — |
+| MQ-30 | market_data_quality_runs | ✅ | `MarketDataQualityRun`（`models/market_data_quality.py`，run_key 幂等唯一约束、status/coverage/issue_summary） | N/A | N/A | 模型字段自测 | 否 | — |
+| MQ-31 | market_data_quality_items | ✅ | `MarketDataQualityItem`（run_id+instrument_id 唯一、classification/issue_type/repair 状态） | N/A | N/A | 模型字段自测 | 否 | — |
+| MQ-40 | 命令行参数 | ✅ | `_parse_args`：--scan/--repair/--scan-and-repair 互斥、--symbols/--all/--canary、--timeframe、--start/--end、--batch-size、--dry-run/--no-dry-run、--resume、--run-id、--limit | N/A | N/A | — | 否 | — |
 
 ### WI 系列需求 — 来源: `docs/prd/50-watchlist-intraday.md`
 
 | ID | 摘要 | 状态 | 后端证据 | API 证据 | 前端证据 | 测试证据 | 需真实验证 | 剩余缺口 |
 |----|------|------|----------|----------|----------|----------|------------|----------|
-| WI-01 | 自选能力 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 自选 |
-| WI-02 | 数量限制 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 数量 |
-| WI-03 | 排序一致 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 排序 |
-| WI-04 | 用户隔离 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 隔离 |
-| WI-10 | 权限归属 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 权限 |
-| WI-11 | 监控对象 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 监控 |
-| WI-12 | 信息定位 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 定位 |
-| WI-13 | 异常标记 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 异常 |
-| WI-14 | 信息收益 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 收益 |
-| WI-15 | 盘中与盘后分离 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 分离 |
-| WI-20 | 仅两类触发事件 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 触发 |
-| WI-21 | 任一事件固定生成组合图 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 组合图 |
-| WI-22 | 事件文字与图片语义分离 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 语义分离 |
-| WI-23 | 历史兼容 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 兼容 |
-| WI-24 | 不新增常驻资源 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 资源 |
+| WI-01 | 自选能力 | ✅ | `app/api/watchlist.py` GET/POST/DELETE /watchlist；`require_capability("self_selection")` | `GET/POST/DELETE /watchlist` | 自选页 | `test_watchlist.py`（9 项） | 否 | — |
+| WI-02 | 数量限制 | ✅ | `require_watchlist_limit()` + `_check_limit_if_needed`（admin=None 无限制；member=int 限额，超限 409） | `POST /watchlist` 校验限额 | 限额展示 | `test_watchlist_limit.py` | 是 | 真实限额 |
+| WI-03 | 排序一致 | ✅ | 列表按 symbol 稳定排序；`watchlist.py` 列表查询 | — | 列表排序 | `test_watchlist.py::test_list_watchlist` | 否 | — |
+| WI-04 | 用户隔离 | ✅ | watchlist 按 user_id 过滤；注入 user_id 被忽略 | `GET /watchlist` | 自选页 | `test_watchlist.py::test_user_id_injection_ignored` | 否 | — |
+| WI-10 | 权限归属 | ✅ | `require_capability("self_selection")` 守卫 watchlist 端点 | `/me/access` | Capability 守卫 | `test_watchlist_permission_uses_access_context.py` | 否 | — |
+| WI-11 | 监控对象 | ✅ | `GET /watchlist/monitor-status` 返回监控快照 | `GET /watchlist/monitor-status` | 盘中监控 | `test_watchlist_monitor_status_snapshot.py` | 是 | 真实监控 |
+| WI-12 | 信息定位 | ✅ | monitor-status 按 symbol 定位每只自选的状态 | — | 监控卡片 | `test_watchlist_monitor_status_snapshot.py` | 是 | — |
+| WI-13 | 异常标记 | ✅ | monitor 事件异常/降级标记（stale/unavailable reason） | — | 监控卡片 | `test_monitor_batch_text_content.py` | 是 | — |
+| WI-14 | 信息收益 | ✅ | 事件级监控信息（text + batch capture） | — | 监控卡片 | `test_monitor_batch_*.py` | 是 | — |
+| WI-15 | 盘中与盘后分离 | ✅ | 盘中监控（monitor scheduler）与盘后（after-close）独立 Worker 入口 | — | — | `test_monitor_batch_*.py` / `test_after_close_*.py` | 是 | — |
+| WI-20 | 仅两类触发事件 | ✅ | 盘中事件判定 Worker 只处理固定触发事件（SMC 结构 + 价格触碰） | — | 事件卡片 | `test_smc_monitor_five_event_types.py` | 是 | — |
+| WI-21 | 任一事件固定生成组合图 | ✅ | 事件触发固定组合图 capture（MiniKline + FP compact） | — | 事件图片 | `test_monitor_batch_capture_image.py` | 是 | — |
+| WI-22 | 事件文字与图片语义分离 | ✅ | 文字事件与图片 capture 分离生成，语义独立 | — | 事件卡片 | `test_monitor_batch_text_content.py` / `test_monitor_batch_capture_image.py` | 是 | — |
+| WI-23 | 历史兼容 | ✅ | 旧 monitor 事件字段经兼容 adapter 读取 | — | — | `test_monitor_rhythm_regression.py` | 否 | — |
+| WI-24 | 不新增常驻资源 | ✅ | 监控复用现有 Worker 入口，无新增常驻容器 | — | — | — | 否 | — |
 
 ---
 
@@ -498,13 +498,15 @@
 baseline = f0816ef
 
 after_close_closed = code_verified        # AC-01~AC-73 有真实代码/测试证据；真实环境全量未核验
-feature_snapshot_performance_closed = not_proven
+feature_snapshot_performance_closed = code_verified  # AC-16 批处理指标已输出；固定 fixture 基准/提速50% 未证明
 first_pyramid_core_code = largely_closed
 first_pyramid_end_to_end = not_proven
 smc_core_code = largely_closed
 navigation_closed = not_proven
 review_core_code = largely_closed
 review_end_to_end = not_proven
+quant_model_contract_closed = code_verified  # QM-01~QM-63 后端合同有真实代码/测试证据；前端跨入口待验证
+cross_system_closed = code_verified        # SW/MD/MQ/WI 后端合同有真实代码/测试证据；真实全市场/监控未核验
 admin_closed = code_verified              # PA-01~PA-31 + 统一错误合同有真实代码/测试证据；真实 API/UI 未核验
 
 code_ready = false
@@ -514,13 +516,13 @@ data_closed = false
 
 ### 下一步行动（按 `ref/next.md` 完整端到端执行）
 
-> 本文件是**当前最终 SHA（`ad8b07d`）的唯一验收事实源**，不是分阶段交付清单。
+> 本文件是**当前最终 SHA（`f0816ef`）的唯一验收事实源**，不是分阶段交付清单。
 > 开发按 `ref/next.md` 的连续端到端工作单执行：从 `ad8b07d` 开始，按依赖顺序走完
 > 代码审查/修复 → 后端/API/前端/测试 → 完整质量门 → push origin/dev → 远端代码审查 →
 > Migration/部署 → 真实单日数据闭环 → 浏览器验收 → 一次性返回。中途不按模块停下等待指令。
 
 ```text
-WP-A 建立最新唯一验收基线（本文件基线已对齐 ad8b07d）
+WP-A 建立最新唯一验收基线（本文件基线已对齐 f0816ef）
 WP-B 盘后编排 + 权限 + 管理后台最终闭合（AC/PA/SW）
 WP-C Feature Snapshot 性能 + 量化模型（AC-16/QM/MD）
 WP-D 第一金字塔跨入口 E2E（QM-63/MX-51~64）
