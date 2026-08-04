@@ -21,6 +21,10 @@ from app.domain.first_pyramid_semantics import (
     VolumeBadge,
     direction_from_regime,
 )
+from app.schemas.first_pyramid import (
+    normalize_direction,
+    normalize_structure_level,
+)
 
 T = TypeVar("T")
 
@@ -225,20 +229,52 @@ class FirstPyramidSemanticAdapter:
 
 
 def adapt_legacy_pyramid_event(event: Mapping[str, Any]) -> dict[str, Any]:
-    """把旧事件 extra 字段提升到正式合同，并保留矛盾诊断。"""
+    """把旧事件 extra 字段提升到正式合同，并保留矛盾诊断。
+
+    [QM-63 canonical 2026-08-04] 兼容 adapter 是**唯一**允许读取
+    `extra.structure_level` / `extra.bias` 的位置。新 producer
+    （build_pyramid_event）不依赖此函数。
+
+    方向归一同时接受旧值（up/down）与正式值（bullish/bearish），
+    统一输出正式值；缺方向保持 None（不默认 bearish），
+    缺级别保持 None（不默认 swing）。
+    """
     adapted = dict(event)
     raw_extra = event.get("extra")
     extra: Mapping[str, Any] = raw_extra if isinstance(raw_extra, Mapping) else {}
-    level = adapted.get("structureLevel") or extra.get("structure_level")
-    bias = adapted.get("bias")
-    if bias is None:
-        bias = extra.get("bias")
-    direction = adapted.get("direction")
-    expected_bias = 1 if direction == "up" else -1 if direction == "down" else 0 if direction else None
     diagnostics = list(adapted.get("diagnostics") or [])
-    if expected_bias is not None and bias is not None and int(bias) != expected_bias:
+
+    # 级别：正式字段优先，回退 extra（旧合同）
+    level = normalize_structure_level(adapted.get("structureLevel"))
+    if level is None:
+        legacy_level = normalize_structure_level(extra.get("structure_level"))
+        if legacy_level is not None:
+            level = legacy_level
+            diagnostics.append("STRUCTURE_LEVEL_FROM_LEGACY_EXTRA")
+
+    # 方向：归一 up/down → bullish/bearish
+    direction = normalize_direction(adapted.get("direction"))
+
+    # bias：正式字段优先，回退 extra
+    raw_bias = adapted.get("bias")
+    if raw_bias is None:
+        raw_bias = extra.get("bias")
+    bias_direction = normalize_direction(raw_bias)
+
+    if direction is None and bias_direction is not None:
+        # 仅 bias 可用：据此推导方向
+        direction = bias_direction
+    elif (
+        direction is not None
+        and bias_direction is not None
+        and direction != bias_direction
+    ):
+        # [QM-63] 冲突必须输出 diagnostic，以 direction 为准
         diagnostics.append("EVENT_DIRECTION_BIAS_CONFLICT")
+
+    adapted["direction"] = direction
     adapted["structureLevel"] = level
-    adapted["bias"] = bias if bias is not None else expected_bias
+    # bias 由最终 direction 派生，保证二者永远一致
+    adapted["bias"] = 1 if direction == "bullish" else -1 if direction == "bearish" else None
     adapted["diagnostics"] = diagnostics
     return adapted

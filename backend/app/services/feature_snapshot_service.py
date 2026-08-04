@@ -700,6 +700,19 @@ async def compute_feature_snapshot_for_date(
 # =============================================================================
 
 
+def _make_run_calculated_at() -> str:
+    """[QM-62 2026-08-04] 生成 run 级唯一计算时间（ISO8601，Asia/Shanghai）。
+
+    必须在批任务入口调用一次，并把结果传给该 run 内所有股票，
+    保证同一 run 的 calculatedAt 完全相同。禁止单股各自取时钟——
+    否则同 run 快照时间戳散落，无法判断数据是否同批产出。
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    return _dt.now(ZoneInfo("Asia/Shanghai")).isoformat()
+
+
 async def compute_review_core_for_trade_date(
     session: AsyncSession,
     instrument_id: uuid.UUID,
@@ -712,6 +725,7 @@ async def compute_review_core_for_trade_date(
     primary_adj_factor_hash: str | None = None,
     source_run_id: uuid.UUID | None = None,
     instrument_symbol: str | None = None,
+    run_calculated_at: str | None = None,
     _diag_sink: dict[str, Any] | None = None,
 ) -> StockFeatureSnapshot:
     """[CHANGE-20260729-003] 盘后 review core 计算路径（daily-core only）。
@@ -896,6 +910,14 @@ async def compute_review_core_for_trade_date(
             first_pyramid_dict = fp_core.model_dump(by_alias=False)
             first_pyramid_dict["chipConsensus"] = None
             first_pyramid_dict["_review_core"] = True
+            # [QM-62/QM-63 run 级来源合同 2026-08-04] 注入 run 级来源。
+            # 同一 run 的所有股票必须共享完全相同的 sourceRunId 与 calculatedAt，
+            # 由编排器统一传入，禁止单股各自取时钟。
+            first_pyramid_dict["sourceRunId"] = (
+                str(source_run_id) if source_run_id is not None else None
+            )
+            if run_calculated_at is not None:
+                first_pyramid_dict["calculatedAt"] = run_calculated_at
     except Exception as exc:
         logger.warning(
             "review core 第一金字塔计算失败 instrument_id=%s trade_date=%s: %s",
@@ -973,14 +995,26 @@ async def compute_review_core_batch_for_trade_date(
 
     Raises:
         RuntimeError: 失败比例超过 failure_threshold（caller 应 rollback）
+        ValueError: [QM-62] 缺 source_run_id（不得产出无来源快照）
     """
     if instrument_ids is None:
         instrument_ids = []
     total = len(instrument_ids)
+    # [QM-62 run 级来源合同 2026-08-04] 批任务入口缺 sourceRunId 必须直接失败。
+    # 否则会产出"一半有来源、一半没有来源"的快照，下游无法追溯与比对。
+    if total > 0 and source_run_id is None:
+        raise ValueError(
+            "[QM-62] compute_review_core_batch_for_trade_date 缺少 source_run_id："
+            f"trade_date={trade_date}, instruments={total}。"
+            "批量入口必须提供 run 级来源，禁止产出无来源快照。"
+        )
     snapshot_count = 0
     failed_count = 0
     # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
     run_diag: dict[str, Any] = {}
+    # [QM-62 run 级来源合同 2026-08-04] 整个 run 只取一次时钟，
+    # 保证同 run 所有股票 calculatedAt 完全相同。
+    run_calculated_at = _make_run_calculated_at()
     # [P0-symbol合同 2026-07-30] 一次查询 instrument_id → symbol 映射，避免 N 次 DB 查询
     symbol_map: dict[uuid.UUID, str | None] = {}
     if total > 0:
@@ -1000,6 +1034,7 @@ async def compute_review_core_batch_for_trade_date(
                     trade_date,
                     source_run_id=source_run_id,
                     instrument_symbol=symbol_map.get(instrument_id),
+                    run_calculated_at=run_calculated_at,
                     _diag_sink=run_diag,
                 )
                 await upsert_snapshot(session, snapshot)
@@ -1109,6 +1144,10 @@ async def compute_review_core_with_run_items(
         mark_item_succeeded,
     )
 
+    # [QM-62 run 级来源合同 2026-08-04] 整个 run 只取一次时钟，
+    # 保证同 run 所有股票 calculatedAt 完全相同（禁止单股各自取时钟）。
+    run_calculated_at = _make_run_calculated_at()
+
     # 1. 创建 run items（幂等）
     async with AsyncSessionLocal() as db:
         created = await create_run_items(
@@ -1213,6 +1252,7 @@ async def compute_review_core_with_run_items(
                         primary_adj_factor_hash=pre_adj_hash,
                         source_run_id=snapshot_run_id,
                         instrument_symbol=batch_symbol_map.get(item.instrument_id),
+                        run_calculated_at=run_calculated_at,
                         _diag_sink=run_diag,
                     )
                     await upsert_snapshot(compute_db, snapshot)
@@ -1612,6 +1652,8 @@ async def compute_for_trade_date(
     mdas_batch_read_count = 0
     # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
     run_diag: dict[str, Any] = {}
+    # 注：本函数走 compute_feature_snapshot_for_date（非 review-core 路径），
+    # first_pyramid 由旧链路生成；QM-62 run 级来源合同在 review-core 入口实施。
     # [P0-symbol合同 2026-07-30] 一次查询 instrument_id → symbol 映射，避免 N 次 DB 查询
     symbol_map: dict[uuid.UUID, str | None] = {}
     if total > 0:

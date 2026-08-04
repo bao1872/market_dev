@@ -206,6 +206,25 @@ def _build_chip_status_from_row(chip_row: Any) -> ChipStatus:
             computedAt=computed_at_iso,
         )
 
+    # [QM-63 chip 七态 2026-08-04] 中断态：被取消或 Worker 接管而未完成。
+    # 与 failed 区分——中断不是计算错误，重跑即可恢复，不应展示"计算失败"。
+    if status in ("interrupted", "cancelled"):
+        return ChipStatus(
+            state="interrupted",
+            reasonCode="CHIP_JOB_INTERRUPTED",
+            reasonText=error_message or "筹码任务被中断，等待重新计算",
+            computedAt=computed_at_iso,
+        )
+
+    # [QM-63 chip 七态 2026-08-04] 运行中：与 pending 区分开的进行态
+    if status in ("running", "queued", "pending"):
+        return ChipStatus(
+            state="pending",
+            reasonCode="CHIP_JOB_PENDING",
+            reasonText="筹码任务进行中",
+            computedAt=computed_at_iso,
+        )
+
     # 未知 status：兜底 failed
     logger.warning(
         "[chip_status_resolver] 未知 chip status=%s, instrument_id=%s",

@@ -201,7 +201,10 @@ _ENUM_VALUES_STRUCTURE_EVENT_TYPE = [
 ]
 _ENUM_VALUES_MOMENTUM_EVENT_TYPE = ["SQZ_OFF", "MOMENTUM_DIFFUSION"]
 _ENUM_VALUES_NODE_EVENT_TYPE = ["node_cluster_touch"]
-_ENUM_VALUES_EVENT_DIRECTION = ["up", "down"]
+# [QM-63 canonical 2026-08-04] 事件方向正式值为 bullish/bearish。
+# 保留 up/down 仅用于读取历史快照（兼容 adapter 会归一为正式值），
+# 新写入一律为 bullish/bearish。
+_ENUM_VALUES_EVENT_DIRECTION = ["bullish", "bearish", "up", "down"]
 _ENUM_VALUES_STRUCTURE_LEVEL = ["swing", "internal"]
 _ENUM_VALUES_VOLUME_BADGE = ["放量", "缩量", "正常", "未知"]
 _ENUM_VALUES_MOMENTUM_VOLUME_RELATION = ["共振", "背离"]

@@ -31,8 +31,12 @@ class TestChipStatusSchema:
             ChipStatus()  # type: ignore[call-arg]
 
     def test_valid_states_accepted(self) -> None:
+        # [QM-63 2026-08-04] 非 ready 状态必须带 reasonCode（禁止无原因的不可用）
         for state in CHIP_STATUS_STATES:
-            cs = ChipStatus(state=state)
+            cs = ChipStatus(
+                state=state,
+                reasonCode=None if state == "ready" else "CHIP_JOB_PENDING",
+            )
             assert cs.state == state
 
     def test_reason_codes_documented(self) -> None:

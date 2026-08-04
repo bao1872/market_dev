@@ -42,8 +42,10 @@ def _build_chip_dimension() -> DimensionResult:
         },
         events=[
             {
+                # [QM-63 canonical 2026-08-04] DTO 只接受正式方向值
                 "type": "NODE_CROSSOVER",
-                "direction": "up",
+                "direction": "bullish",
+                "bias": 1,
                 "freshnessBars": 3,
                 "price": 29.40,
                 "occurredAt": "2026-07-25",
@@ -89,7 +91,8 @@ class TestChipDictSerialization:
         assert chip_flat["fp_val_price"] == 28.8
         assert chip_flat["fp_chip_state"] == "筹码峰稳定，价格在 POC 上方"
         assert chip_flat["fp_node_event_type"] == "NODE_CROSSOVER"
-        assert chip_flat["fp_node_event_direction"] == "up"
+        # [QM-63 canonical 2026-08-04] 旧值 up 归一为正式值 bullish
+        assert chip_flat["fp_node_event_direction"] == "bullish"
         assert chip_flat["fp_node_event_freshness"] == 3
         assert chip_flat["fp_node_event_price"] == 29.40
         # poc_distance_pct = (last_close - poc_price) / poc_price * 100

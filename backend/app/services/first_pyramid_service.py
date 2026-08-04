@@ -56,6 +56,7 @@ from app.schemas.first_pyramid import (
     FirstPyramidSnapshot,
     PyramidEvent,
     VolumeContextSchema,
+    build_pyramid_event,
 )
 from app.services.node_cluster_engine import (
     NodeClusterProfileResult,
@@ -411,19 +412,12 @@ def _build_structure_dimension(
     pyramid_events: list[PyramidEvent] = []
     for evt in events_raw:
         evt_type = evt.get("type", "")  # "BOS" / "CHoCH"
-        # [Round 2026-07-28] SMC 事件用 bullish(bool)/bias(1/-1) 表达方向，
-        # 兼容旧 direction 字段；定稿要求 BOS/CHoCH 必须保存 bullish/bearish
-        direction = None
-        if evt.get("bullish") is True or evt.get("bias") == 1:
-            direction = "up"
-        elif evt.get("bullish") is False or evt.get("bias") == -1:
-            direction = "down"
-        else:
-            direction_raw = evt.get("direction")
-            if direction_raw in (1, "bullish", "up"):
-                direction = "up"
-            elif direction_raw in (-1, "bearish", "down"):
-                direction = "down"
+        # [QM-63 canonical] 方向由唯一 producer 归一：
+        # 优先 bullish(bool)，其次旧 direction 字段；bias 作为交叉校验来源。
+        # 冲突由 build_pyramid_event 输出 diagnostic，缺方向保持 None。
+        direction_source = evt.get("bullish")
+        if direction_source is None:
+            direction_source = evt.get("direction")
         occurred_at = _safe_iso_date(evt.get("confirmed_time") or evt.get("time"))
         bar_index = evt.get("confirmed_index") or evt.get("barIndex")
         price = _safe_float(evt.get("level") or evt.get("broken_level") or evt.get("price"))
@@ -435,17 +429,20 @@ def _build_structure_dimension(
         is_internal = bool(evt.get("internal", False))
         structure_level = "internal" if is_internal else "swing"
         pyramid_events.append(
-            PyramidEvent(
-                type=str(evt_type),
-                direction=direction,
-                occurredAt=occurred_at,
-                barIndex=int(bar_index) if bar_index is not None else None,
+            build_pyramid_event(
+                event_type=str(evt_type),
+                direction_raw=direction_source,
+                bias_raw=evt.get("bias"),
+                structure_level_raw=structure_level,
+                occurred_at=occurred_at,
+                bar_index=int(bar_index) if bar_index is not None else None,
                 price=price,
-                freshnessBars=fresh,
-                volumeContext=evt_vc,
-                volumeBadge=evt_badge,
+                freshness_bars=fresh,
+                volume_context=evt_vc,
+                volume_badge=evt_badge,
                 extra={
                     "anchor_index": evt.get("anchor_index"),
+                    # 兼容字段：仅供旧消费者读取，正式来源是 structureLevel
                     "structure_level": structure_level,
                 },
             )
@@ -457,14 +454,8 @@ def _build_structure_dimension(
     #       bar_high/bar_low/structure_level/[enter_index/enter_time/mitigated_index/mitigated_time]
     for ob_evt in ob_lifecycle_events:
         evt_type = ob_evt.get("type", "")
-        # 方向：bias(1/-1) → up/down
+        # [QM-63 canonical] 方向由 bias(1/-1) 经唯一 producer 归一
         ob_bias = ob_evt.get("bias")
-        if ob_bias == 1:
-            direction = "up"
-        elif ob_bias == -1:
-            direction = "down"
-        else:
-            direction = None
         # 事件发生 bar：CREATED 用 confirmed_index；ENTERED 用 enter_index；MITIGATED 用 mitigated_index
         bar_index = (
             ob_evt.get("enter_index")
@@ -509,15 +500,17 @@ def _build_structure_dimension(
             extra["enter_index"] = ob_evt.get("enter_index")
             extra["enter_time"] = _safe_iso_date(ob_evt.get("enter_time"))
         pyramid_events.append(
-            PyramidEvent(
-                type=str(evt_type),
-                direction=direction,
-                occurredAt=occurred_at,
-                barIndex=int(bar_index) if bar_index is not None else None,
+            build_pyramid_event(
+                event_type=str(evt_type),
+                direction_raw=ob_bias,
+                bias_raw=ob_bias,
+                structure_level_raw=ob_level,
+                occurred_at=occurred_at,
+                bar_index=int(bar_index) if bar_index is not None else None,
                 price=price,
-                freshnessBars=fresh,
-                volumeContext=evt_vc,
-                volumeBadge=evt_badge,
+                freshness_bars=fresh,
+                volume_context=evt_vc,
+                volume_badge=evt_badge,
                 extra=extra,
             )
         )
@@ -525,27 +518,29 @@ def _build_structure_dimension(
     # 连续高点/低点（EQH/EQL）
     for eq in equal_highs_lows:
         eq_type = eq.get("type", "EQH_EQL")
-        direction = None
+        # EQH=等高（上方阻力簇）→ bullish 侧；EQL=等低（下方支撑簇）→ bearish 侧
+        eq_direction_raw: str | None = None
         if eq_type in ("EQH", "equal_high"):
-            direction = "up"
+            eq_direction_raw = "bullish"
         elif eq_type in ("EQL", "equal_low"):
-            direction = "down"
+            eq_direction_raw = "bearish"
         occurred_at = _safe_iso_date(eq.get("confirmed_time"))
         bar_index = eq.get("confirmed_index")
         price = _safe_float(eq.get("second_pivot_price") or eq.get("price"))
         fresh = max(0, int(last_bar_index - int(bar_index))) if bar_index is not None else 0
         evt_vc, evt_badge = _event_vc(vc_series, int(bar_index) if bar_index is not None else None)
-        # [Round 2026-07-28] EQH/EQL 不属于 swing/internal，structure_level=null（禁止推测）
+        # [Round 2026-07-28] EQH/EQL 不属于 swing/internal，structureLevel=None（禁止推测）
         pyramid_events.append(
-            PyramidEvent(
-                type=str(eq_type),
-                direction=direction,
-                occurredAt=occurred_at,
-                barIndex=int(bar_index) if bar_index is not None else None,
+            build_pyramid_event(
+                event_type=str(eq_type),
+                direction_raw=eq_direction_raw,
+                structure_level_raw=None,
+                occurred_at=occurred_at,
+                bar_index=int(bar_index) if bar_index is not None else None,
                 price=price,
-                freshnessBars=fresh,
-                volumeContext=evt_vc,
-                volumeBadge=evt_badge,
+                freshness_bars=fresh,
+                volume_context=evt_vc,
+                volume_badge=evt_badge,
                 extra={"structure_level": None},
             )
         )
@@ -678,13 +673,16 @@ def _build_momentum_dimension(
         if expansion_event_idx < len(bb_df):
             occurred = _safe_iso_date(bb_df.index[expansion_event_idx])
         events.append(
-            PyramidEvent(
-                type="SQZ_OFF",
-                direction="up",  # squeeze 释放默认方向上（BB 向外突破）
-                occurredAt=occurred,
-                barIndex=expansion_event_idx,
+            build_pyramid_event(
+                event_type="SQZ_OFF",
+                # squeeze 释放为 BB 向外突破，语义上偏多
+                direction_raw="bullish",
+                # 波动率事件不属于 swing/internal 结构层级
+                structure_level_raw=None,
+                occurred_at=occurred,
+                bar_index=expansion_event_idx,
                 price=expansion_price,
-                freshnessBars=fresh,
+                freshness_bars=fresh,
                 extra={"trigger": "bb_breaks_kc"},
             )
         )
@@ -696,13 +694,14 @@ def _build_momentum_dimension(
         if diffusion_event_idx < len(bb_df):
             occurred = _safe_iso_date(bb_df.index[diffusion_event_idx])
         events.append(
-            PyramidEvent(
-                type="MOMENTUM_DIFFUSION",
-                direction=diffusion_direction,
-                occurredAt=occurred,
-                barIndex=diffusion_event_idx,
+            build_pyramid_event(
+                event_type="MOMENTUM_DIFFUSION",
+                direction_raw=diffusion_direction,
+                structure_level_raw=None,
+                occurred_at=occurred,
+                bar_index=diffusion_event_idx,
                 price=None,
-                freshnessBars=fresh,
+                freshness_bars=fresh,
                 extra={
                     "val_prev": prev_val,
                     "val_curr": last_val,
@@ -862,19 +861,21 @@ def _build_chip_consensus_dimension(
     events: list[PyramidEvent] = []
     for sig in signals or []:
         sig_type = sig.get("type", "")
-        direction = None
+        node_direction: str | None = None
         if "cross_up" in sig_type or "touch_up" in sig_type:
-            direction = "up"
+            node_direction = "bullish"
         elif "cross_down" in sig_type or "touch_down" in sig_type:
-            direction = "down"
+            node_direction = "bearish"
         events.append(
-            PyramidEvent(
-                type=str(sig_type),
-                direction=direction,
-                occurredAt=_safe_iso_date(daily_bars.index[-1]),
-                barIndex=last_bar_index,
+            build_pyramid_event(
+                event_type=str(sig_type),
+                direction_raw=node_direction,
+                # 筹码节点穿越不属于 SMC swing/internal 结构层级
+                structure_level_raw=None,
+                occurred_at=_safe_iso_date(daily_bars.index[-1]),
+                bar_index=last_bar_index,
                 price=_safe_float(sig.get("price") or last_close),
-                freshnessBars=0,  # 当前 bar 触发
+                freshness_bars=0,  # 当前 bar 触发
                 extra={
                     "node_price": _safe_float(sig.get("node_price")),
                     "poc_price": _safe_float(poc_price),

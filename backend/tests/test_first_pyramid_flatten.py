@@ -251,14 +251,15 @@ class TestFlattenComplete:
     def test_structure_event_fields(self, complete_first_pyramid: dict) -> None:
         result = flatten_first_pyramid(complete_first_pyramid)
         assert result["fp_structure_event_type"] == "BOS"
-        assert result["fp_structure_event_direction"] == "up"
+        # [QM-63 canonical 2026-08-04] 旧值 up 由兼容 adapter 归一为正式值 bullish
+        assert result["fp_structure_event_direction"] == "bullish"
         assert result["fp_structure_event_level"] == "swing"
         assert result["fp_structure_event_freshness"] == 3
         assert result["fp_structure_event_date"] == "2026-07-22"
         assert result["fp_structure_event_price"] == 10.7
         assert result["fp_structure_event_volume_badge"] == "放量"
-        # BOS 子事件
-        assert result["fp_latest_bos_direction"] == "up"
+        # BOS 子事件（同样归一为正式值）
+        assert result["fp_latest_bos_direction"] == "bullish"
         assert result["fp_latest_bos_freshness"] == 3
         assert result["fp_latest_bos_level"] == "swing"
         # CHoCH/OB/EQH/EQL 无匹配事件，应为 None
