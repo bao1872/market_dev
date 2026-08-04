@@ -1506,3 +1506,54 @@ Review 五阶段（Market Scan / Filter Discovery / Board Attribution / Stock Va
   coverage、run items、算法版本和非 canary/provisional。旧 run 不原地修改。
 - 五阶段 UI 必须区分无信号、无追踪、历史不足、字段缺失和 API 错误；Evidence Drawer 展示来源、
   分母、权重、版本与 readiness。
+
+## 27. Review 依赖矩阵与发布质量硬门（QM-63，2026-08-04）
+
+### RV-27-01 上游依赖矩阵
+
+Review run 创建时必须显式解析上游依赖状态，并把结果固化到 run 记录，
+禁止用"没查到就当成功"或"缺失就静默跳过"掩盖降级：
+
+| 上游 | 状态 | Review 行为 | 记录 |
+|---|---|---|---|
+| stock_core | 失败 / 未发布正式 pointer | **阻断**，不得发布 | publish gate blocker |
+| 第一金字塔核心字段 | 不完整 | **阻断** | publish gate blocker |
+| chip 共识 | 全缺失 / 全失败 | 降级为 **core-only**，仍可生成 | `source_chip_run_id=NULL` + `degraded_reasons=["CHIP_UNAVAILABLE"]` |
+| chip 共识 | 部分成功 | 生成，标记部分降级 | `source_chip_run_id=<core_run_id>` + `degraded_reasons=["CHIP_PARTIAL"]` |
+| chip 共识 | 全部成功 | 正常生成 | `source_chip_run_id=<core_run_id>`，`degraded_reasons=[]` |
+| auction 竞价 | 失败 / 不可用 | **默认降级，不阻断**（不参与发布门禁） | 由 auction 自身 readiness 表达 |
+| 历史基线 | <60 日 | 保留 raw，normalized 不就绪 | `status=insufficient_history` |
+
+`market_review_runs` 新增两列承载该合同：
+
+- `source_chip_run_id UUID NULL`：输入 chip 共识 run id；`NULL` 明确表示 chip 不可用（core-only 降级），
+  不得用"未写入"或"写成 core_run_id"来伪装可用；
+- `degraded_reasons JSONB NOT NULL DEFAULT '[]'`：降级原因列表，空数组表示无降级。
+
+重新创建同一 (trade_date, algorithm_version) 的 run 时，这两列必须按当次解析结果**刷新**，
+不得沿用上一次的陈旧降级状态。
+
+### RV-27-02 发布质量硬门（在既有门禁基础上新增）
+
+`evaluate_publish_gate` 在原有检查（canary/provisional 禁发、market/major_index/style/industry_l1
+范围完整、配置范围隔离、run items 终态、core/board pointer 一致、published run 不可原地重发）之外，
+新增三条硬门：
+
+1. **无未来数据（point-in-time 硬门）**：本 run 落库的 `market_review_metric_observations`
+   不得存在 `trade_date >= run.trade_date` 的记录。历史基线必须严格早于目标日期，
+   检出即阻断并报告条数。
+2. **reason 完整性**：market 范围的 P/Q/U/C/V，凡处于非 ready 状态
+   （`raw_ready=false`，或 `raw_ready=true` 且 `normalized_ready=false`）
+   必须给出非空 `readiness.reason`。**禁止无原因的不可用**——与第一金字塔 chip 七态合同一致。
+3. **all-null 禁止发布空壳**：market 范围 P/Q/U/C/V 的 `value` 全部为 `None` 时禁止正式发布。
+   此类 run 可以以 provisional / failed 形式留档审计，但不得成为正式 pointer。
+
+三条硬门均只产出 blocker，不做任何"自动修正"或静默兜底。
+
+### RV-27-03 原子发布与幂等
+
+- publication 记录写入与 current pointer 更新必须在同一事务内完成；
+- 失败时保留旧 pointer，新 publication 对普通用户不可见；
+- 对**已是当前正式 pointer** 的 published run 重复发布：返回既有 publication，
+  **零写入**（不插入新行、不 flush、不 delete、不改写 `run.status` 与 `run.published_at`）；
+- 已 published 但**已非**当前正式 pointer 的旧 run：禁止原地重发。

@@ -23,7 +23,7 @@ import logging
 import uuid
 from datetime import UTC, date, datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -336,6 +336,64 @@ async def evaluate_publish_gate(
         )
         if review_pub is None or review_pub.data_run_id != run.id:
             blockers.append("旧 published run 已非当前正式 Review pointer，禁止原地重发")
+
+    # 7. [QM-63 review 质量硬门 2026-08-04] 无未来数据：
+    #    本 run 落库的 metric observation 不得包含 >= trade_date 的记录
+    #    （历史基线必须严格 point-in-time，禁止混入当日或未来数据）。
+    from app.models.market_review import MarketReviewMetricObservation
+
+    future_obs_stmt = (
+        select(func.count(MarketReviewMetricObservation.id))
+        .where(
+            MarketReviewMetricObservation.review_run_id == run.id,
+            MarketReviewMetricObservation.trade_date >= run.trade_date,
+        )
+        .limit(1)
+    )
+    future_obs_count = (await session.execute(future_obs_stmt)).scalar() or 0
+    if future_obs_count > 0:
+        blockers.append(
+            f"检测到 {future_obs_count} 条 >= trade_date 的 observation，"
+            "禁止混入当日/未来数据（point-in-time 违规）",
+        )
+
+    # 8. [QM-63 review 质量硬门 2026-08-04] reason 完整性：
+    #    market 范围每个 P/Q/U/C/V 非 ready 状态必须给出非空 reason，
+    #    禁止无原因的不可用（与 chip 七态合同一致）。
+    if market_snap is not None:
+        for metric_code, payload_field in (
+            ("P", "p_payload"), ("Q", "q_payload"),
+            ("U", "u_payload"), ("C", "c_payload"), ("V", "v_payload"),
+        ):
+            payload = getattr(market_snap, payload_field, None)
+            if not isinstance(payload, dict):
+                continue
+            readiness = payload.get("readiness") or {}
+            if readiness.get("raw_ready") is False or (
+                readiness.get("raw_ready") is True
+                and readiness.get("normalized_ready") is False
+            ):
+                reason = readiness.get("reason")
+                if not reason:
+                    blockers.append(
+                        f"market {metric_code} 非 ready 但缺 reason"
+                        "（禁止无原因的不可用）",
+                    )
+
+    # 9. [QM-63 review 质量硬门 2026-08-04] all-null 不可发布：
+    #    market 范围 P/Q/U/C/V 全部 value 为 None 视为数据缺失，
+    #    即使 status 字段存在也不允许发布（防止空壳发布）。
+    if market_snap is not None:
+        all_null = True
+        for payload_field in (
+            "p_payload", "q_payload", "u_payload", "c_payload", "v_payload",
+        ):
+            payload = getattr(market_snap, payload_field, None)
+            if isinstance(payload, dict) and payload.get("value") is not None:
+                all_null = False
+                break
+        if all_null:
+            blockers.append("market P/Q/U/C/V 全部 value 为 None，禁止发布空壳")
 
     return (len(blockers) == 0, blockers)
 

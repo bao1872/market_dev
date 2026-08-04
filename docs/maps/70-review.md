@@ -488,3 +488,67 @@ scope identity（`scope_type` + `scope_key`）+ compatible taxonomy +
 - 作业层（`review_bootstrap_job_service.py`）从 `job_metadata` 透传两参数，summary 新增 `peak_rss_mb` / `chunks`。
 - 契约测试：`backend/tests/test_review_bootstrap_admin_entry.py` §9 内存上限契约（6 项）已固化分片释放 / 不累积明细 / 聚合计数保留 / 预算超限安全停止 / 非法参数拒绝。
 - 代码已修改、本地 `PURE_UNIT_TEST=1` 测试通过；**真实 apply 的内存表现仍待生产 dry-run 验证（当前未授权 apply）**。
+
+## 24. 依赖矩阵与发布质量硬门实现（2026-08-04 核验，QM-63）
+
+对应 PRD §27。以下为**已核验的当前实现**（`PURE_UNIT_TEST=1` 全绿，未连真实库）。
+
+### 24.1 代码入口
+
+| 关注点 | 位置 |
+|---|---|
+| chip 依赖解析 | `app/services/review_orchestrator_service.py::_resolve_chip_dependency` |
+| chip 依赖写入 run | `app/services/review_orchestrator_service.py::create_run`（含 `on_conflict_do_update` 刷新） |
+| run 承载列 | `app/models/market_review.py::MarketReviewRun.source_chip_run_id` / `.degraded_reasons` |
+| DDL | `alembic/versions/083_review_run_chip_dependency.py`（down_revision=`082_auction_analysis_publication`） |
+| 发布门禁 | `app/services/review_publication_service.py::evaluate_publish_gate` 第 7/8/9 项检查 |
+| 原子发布 / 幂等 | `app/services/review_publication_service.py::publish_review` |
+
+### 24.2 `_resolve_chip_dependency` 判定
+
+查询 `stock_chip_consensus_snapshots`，按 `(instrument_id, trade_date, core_run_id, algorithm_version)`
+定位后按 `status` 分组计数，返回 `(source_chip_run_id, degraded_reasons)`：
+
+- 无任何行 → `(None, ["CHIP_UNAVAILABLE"])`
+- succeeded == 0（全失败）→ `(None, ["CHIP_UNAVAILABLE"])`
+- 0 < succeeded < total → `(core_run_id, ["CHIP_PARTIAL"])`
+- succeeded == total → `(core_run_id, [])`
+
+chip 的 `core_run_id` 与 stock_core 的 run id 同源，因此 `source_chip_run_id` 复用 `source_core_run_id` 值。
+
+### 24.3 `evaluate_publish_gate` 查询顺序（测试 mock 必须与之一致）
+
+1 market scope → 2 major_index → 3 style → 4 industry_l1 → 5 PIT universe definitions →
+6 expected L1 industries → 7 incomplete run items → 8 stock_core pointer → 9 board pointer →
+**[仅当 `run.status == "published"`] 10 live review pointer** → 末位 future_obs count。
+
+新增的 future_obs 计数查询位于**最后**；published 分支的 review pointer 查询在其**之前**。
+该顺序是 mock-session 契约测试的隐式依赖，调整实现顺序时必须同步更新
+`tests/test_review_publication_safety.py::_gate_pass_results` 与
+`tests/test_review_dependency_matrix.py`。
+
+### 24.4 契约测试
+
+`backend/tests/test_review_dependency_matrix.py`（13 项，纯单元 mock session）：
+
+- chip 四态：全缺失 / 部分成功 / 全部成功 / 全部失败；
+- auction 缺失不产生 blocker（门禁不查询 auction 表）；
+- 59 条 `insufficient_history`（`raw_ready=true` + `normalized_ready=false`）语义正确，
+  且门禁仍阻断（不误判为 `unavailable`）；
+- 未来数据检出即 block；无未来数据放行；
+- industry scope_key 与配置不一致 → block（`配置范围缺失` / `存在非配置范围`）；
+- all-null → block（`禁止发布空壳`）；
+- 非 ready 缺 reason → block；给出 reason → 该检查通过；
+- 重复发布零写入幂等：返回既有 pointer，无 `PgInsert`，`flush`/`delete` 未被调用，
+  `run.status`/`run.published_at` 不被改写。
+
+`backend/tests/test_review_publication_safety.py`（22 项）已同步适配新查询顺序，
+`_FakeResult` 补充 `.scalar()`，`_gate_pass_results` 支持 `live_review_pointer` / `future_obs_count` 参数。
+
+### 24.5 当前状态与缺口
+
+- **代码闭环完成**，`review` 相关 335 项 `PURE_UNIT_TEST=1` 全绿；
+- Migration 083 **已编写但未 apply**（本地不连共享库，远程 apply 需另行授权并先跑
+  `scripts/ops/panji-prod-preflight`）；
+- 因此 `source_chip_run_id` / `degraded_reasons` 的**真实数据表现尚未验证**，
+  属于 `data_closed=false` 范畴。

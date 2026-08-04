@@ -53,6 +53,7 @@ from app.models.market_review import (
     MarketReviewRunItem,
     MarketReviewScopeSnapshot,
 )
+from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.review_attribution_service import (
     compute_signal_attributions,
@@ -180,12 +181,21 @@ async def create_run(
         source_board_run_id=source_board_run_id,
     )
 
+    # [QM-63 review 依赖矩阵 2026-08-04] 解析 chip 来源与降级原因
+    chip_run_id, degraded_reasons = await _resolve_chip_dependency(
+        session,
+        trade_date=trade_date,
+        source_core_run_id=resolved_core_id,
+    )
+
     if dry_run:
         # dry-run：不写 DB，返回一个非持久化的 run 对象供调用方打印
         return MarketReviewRun(
             trade_date=trade_date,
             source_core_run_id=resolved_core_id,
             source_board_run_id=resolved_board_id,
+            source_chip_run_id=chip_run_id,
+            degraded_reasons=degraded_reasons,
             algorithm_version=algo,
             filter_version=filt,
             baseline_window=baseline_window,
@@ -209,6 +219,8 @@ async def create_run(
         "trade_date": trade_date,
         "source_core_run_id": resolved_core_id,
         "source_board_run_id": resolved_board_id,
+        "source_chip_run_id": chip_run_id,
+        "degraded_reasons": degraded_reasons,
         "algorithm_version": algo,
         "filter_version": filt,
         "baseline_window": baseline_window,
@@ -225,6 +237,9 @@ async def create_run(
         constraint="uq_review_runs_date_core_board_algo_filter",
         set_={
             "metadata_json": stmt.excluded.metadata_json,
+            # [QM-63] 重新创建 run 时刷新 chip 来源与降级状态（chip 可能已异步完成）
+            "source_chip_run_id": stmt.excluded.source_chip_run_id,
+            "degraded_reasons": stmt.excluded.degraded_reasons,
         },
     )
     await session.execute(stmt)
@@ -372,6 +387,63 @@ async def _resolve_source_run_ids(
         )
 
     return resolved_core_id, resolved_board_id
+
+
+async def _resolve_chip_dependency(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    source_core_run_id: uuid.UUID,
+) -> tuple[uuid.UUID | None, list[str]]:
+    """[QM-63 review 依赖矩阵 2026-08-04] 解析 chip 来源与降级原因。
+
+    依赖矩阵（PRD §11 / QM-63）：
+    - chip 存在（至少一条 succeeded 的 stock_chip_consensus_snapshot
+      匹配 core_run_id + trade_date）→ source_chip_run_id = core_run_id，
+      无降级；
+    - chip 完全缺失 / 全部 failed → source_chip_run_id = None，
+      降级为 core-only，degraded_reasons = ["CHIP_UNAVAILABLE"]；
+    - 部分成功（succeeded + failed 混合）→ 仍记录 source_chip_run_id，
+      降级原因 ["CHIP_PARTIAL"]（可用维度仍纳入，缺失维度按 unavailable 处理）。
+
+    Args:
+        session: 异步 DB 会话
+        trade_date: 业务交易日
+        source_core_run_id: stock_core run id（chip 的 core_run_id 与之相等）
+
+    Returns:
+        (source_chip_run_id, degraded_reasons)
+    """
+    stmt = (
+        select(
+            StockChipConsensusSnapshot.status,
+            func.count(StockChipConsensusSnapshot.id),
+        )
+        .where(
+            StockChipConsensusSnapshot.trade_date == trade_date,
+            StockChipConsensusSnapshot.core_run_id == source_core_run_id,
+        )
+        .group_by(StockChipConsensusSnapshot.status)
+    )
+    rows = (await session.execute(stmt)).all()
+
+    if not rows:
+        # chip 完全缺失：降级 core-only
+        return None, ["CHIP_UNAVAILABLE"]
+
+    total = 0
+    succeeded = 0
+    for status_val, cnt in rows:
+        total += cnt
+        if status_val == "succeeded":
+            succeeded += cnt
+    if succeeded == 0:
+        # 全部失败：降级 core-only
+        return None, ["CHIP_UNAVAILABLE"]
+    if succeeded < total:
+        # 部分成功：记录来源，但标记 partial 降级
+        return source_core_run_id, ["CHIP_PARTIAL"]
+    return source_core_run_id, []
 
 
 async def _get_publication(

@@ -44,7 +44,7 @@ pytestmark = pytest.mark.asyncio
 
 
 class _FakeResult:
-    """模拟 sqlalchemy Result：支持 scalar_one_or_none / scalars().all()。"""
+    """模拟 sqlalchemy Result：支持 scalar / scalar_one_or_none / scalars().all()。"""
 
     def __init__(
         self,
@@ -56,6 +56,9 @@ class _FakeResult:
         self._list = scalar_list if scalar_list is not None else []
 
     def scalar_one_or_none(self) -> object:
+        return self._scalar
+
+    def scalar(self) -> object:
         return self._scalar
 
     def scalars(self) -> _FakeResult:
@@ -138,8 +141,21 @@ def _make_market_snap(run_id: uuid.UUID) -> MarketReviewScopeSnapshot:
     )
 
 
-def _gate_pass_results(run: MarketReviewRun) -> list[_FakeResult]:
-    """构造 evaluate_publish_gate 全部通过所需的 9 次查询结果。"""
+def _gate_pass_results(
+    run: MarketReviewRun,
+    *,
+    live_review_pointer: object | None = None,
+    future_obs_count: int = 0,
+) -> list[_FakeResult]:
+    """构造 evaluate_publish_gate 全部通过所需的查询结果。
+
+    查询顺序（与 evaluate_publish_gate 实现严格一致）：
+        1 market / 2 major_index / 3 style / 4 industry_l1 /
+        5 PIT universe defs / 6 expected L1 / 7 incomplete items /
+        8 stock_core pointer / 9 board pointer /
+        [仅 run.status == "published"] 10 live review pointer /
+        末位 future_obs count（[QM-63] 无未来数据硬门）。
+    """
     market_snap = _make_market_snap(run.id)
     board_id = uuid.uuid4()
     industry_snap = MarketReviewScopeSnapshot(
@@ -156,7 +172,7 @@ def _gate_pass_results(run: MarketReviewRun) -> list[_FakeResult]:
     core_pub.data_run_id = run.source_core_run_id
     board_pub = AsyncMock()
     board_pub.data_run_id = run.source_board_run_id
-    return [
+    results = [
         _FakeResult(scalar=market_snap),          # 1. market scope
         _FakeResult(scalar_list=[]),              # 2. major_index
         _FakeResult(scalar_list=[]),              # 3. style
@@ -167,6 +183,10 @@ def _gate_pass_results(run: MarketReviewRun) -> list[_FakeResult]:
         _FakeResult(scalar=core_pub),             # 8. stock_core pointer
         _FakeResult(scalar=board_pub),            # 9. board pointer
     ]
+    if run.status == "published":
+        results.append(_FakeResult(scalar=live_review_pointer))
+    results.append(_FakeResult(scalar=future_obs_count))  # future_obs count
+    return results
 
 
 def _gate_fail_results() -> list[_FakeResult]:
@@ -181,6 +201,7 @@ def _gate_fail_results() -> list[_FakeResult]:
         _FakeResult(scalar_list=[]),    # incomplete run items
         _FakeResult(scalar=None),       # stock_core pointer
         _FakeResult(scalar=None),       # board pointer
+        _FakeResult(scalar=0),          # future_obs count
     ]
 
 
@@ -277,10 +298,9 @@ class TestFormalGateCompleteness:
 
     async def test_superseded_published_run_cannot_overwrite_live_pointer(self):
         run = _make_run(status="published", published_at=datetime.now(UTC))
-        results = _gate_pass_results(run)
         live_review = AsyncMock()
         live_review.data_run_id = uuid.uuid4()
-        results.append(_FakeResult(scalar=live_review))
+        results = _gate_pass_results(run, live_review_pointer=live_review)
         publishable, blockers = await evaluate_publish_gate(
             _make_session(results), run,
         )
@@ -357,8 +377,7 @@ class TestFormalPublish:
         published_at = datetime.now(UTC)
         run = _make_run(status="published", published_at=published_at)
         pointer = _make_pointer(run.id)
-        results = _gate_pass_results(run)
-        results.append(_FakeResult(scalar=pointer))  # gate live Review pointer
+        results = _gate_pass_results(run, live_review_pointer=pointer)
         results.append(_FakeResult(scalar=pointer))  # idempotent return under lock
         session = _make_session(results)
 

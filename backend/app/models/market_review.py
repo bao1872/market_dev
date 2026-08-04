@@ -80,6 +80,21 @@ class MarketReviewRun(Base):
         nullable=False,
         comment="输入 board_analysis_snapshot 的 source_core_run_id",
     )
+    # [QM-63 review 依赖矩阵 2026-08-04] chip 来源 run id。
+    # None 表示本次 run 未解析到 chip run（chip 不可用 → core-only 降级）。
+    source_chip_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+        comment="输入 chip 共识 run id；None 表示 chip 不可用，run 降级为 core-only",
+    )
+    # [QM-63 review 依赖矩阵 2026-08-04] 降级原因列表（JSON 数组）。
+    # 例如 chip 不可用 / auction 失败。空数组表示无降级。
+    degraded_reasons: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        comment="降级原因列表（chip不可用/auction失败等）；空数组=无降级",
+    )
     algorithm_version: Mapped[str] = mapped_column(
         Text(), nullable=False, comment="复盘算法版本（如 review-1.0.0）",
     )
@@ -991,6 +1006,7 @@ if __name__ == "__main__":
     _expected_cols: dict[str, set[str]] = {
         "market_review_runs": {
             "id", "trade_date", "source_core_run_id", "source_board_run_id",
+            "source_chip_run_id", "degraded_reasons",
             "algorithm_version", "filter_version", "baseline_window", "status",
             "expected_scope_count", "succeeded_scope_count", "failed_scope_count",
             "signal_count", "coverage_ratio",
