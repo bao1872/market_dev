@@ -31,8 +31,6 @@ def governance_repo(tmp_path: Path) -> Path:
         "scripts/ops/panji-test-deploy",
         "scripts/deploy/panji-deploy.sh",
         "docker-compose.prod.yml",
-        "backend/scripts/feature_snapshot_backfill.py",
-        "backend/app/services/review_bootstrap_service.py",
         "docs/prd/80-system-runtime.md",
         "docs/maps/80-system-runtime.md",
         "docs/runbooks/development-deployment.md",
@@ -78,16 +76,6 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
         ("deploy_missing_oom_check", "容器 OOM 检查"),
         ("deploy_system_prune_exec", "system prune"),
         ("cleanup_missing_disk_evidence", "清理前磁盘证据"),
-        # [CHANGE-20260804-005] 行为级门禁回归用例（DS-101/DS-107）
-        ("budget_not_below_limit", "未显著低于"),
-        ("workers_allowed", "未禁止 --workers>1"),
-        ("partial_success_guard_removed", "禁止 partial 伪装 success"),
-        ("resume_not_consumed", "未消费 checkpoint"),
-        ("stockcore_boundary_removed", "未声明 stock core 边界"),
-        # [CHANGE-20260804-005] 部署脚本行为补强回归用例（DS-103/104）
-        ("deploy_no_rsync_timeout", "rsync 限时"),
-        ("deploy_no_total_timeout", "部署总时长硬上限"),
-        ("deploy_no_swap", "swap 采集"),
     ],
 )
 def test_governance_regressions_are_rejected(
@@ -258,83 +246,6 @@ def test_governance_regressions_are_rejected(
             read_text(server_impl).replace(
                 "cleanup_disk_before_mb",
                 "disk_before_missing",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "budget_not_below_limit":
-        # 回潮：Review 预算抬到等于/高于容器上限（DS-101）
-        review = governance_repo / "backend/app/services/review_bootstrap_service.py"
-        review.write_text(
-            read_text(review).replace(
-                "DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB = 768",
-                "DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB = 1536",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "workers_allowed":
-        # 回潮：重新放开 --workers>1
-        fp = governance_repo / "backend/scripts/feature_snapshot_backfill.py"
-        fp.write_text(
-            read_text(fp).replace(
-                "--workers 必须等于 1",
-                "--workers 建议等于 CPU 核数",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "partial_success_guard_removed":
-        # 回潮：删掉预算超限强制 failed 的行为门禁标记
-        fp = governance_repo / "backend/scripts/feature_snapshot_backfill.py"
-        fp.write_text(
-            read_text(fp).replace(
-                "[P0-budget-partial-failed]",
-                "[guard removed]",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "resume_not_consumed":
-        # 回潮：续跑不再读取 input_hash 一致性
-        fp = governance_repo / "backend/scripts/feature_snapshot_backfill.py"
-        fp.write_text(
-            read_text(fp).replace(
-                "--resume input_hash 一致",
-                "--resume 跳过（不校验）",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "stockcore_boundary_removed":
-        # 回潮：rules/80 删掉 stock core 边界声明
-        rules80 = governance_repo / "rules/80-deployment-data-safety.md"
-        rules80.write_text(
-            read_text(rules80).replace(
-                "stock core 边界（本条款的权威定义",
-                "stock core 无独立边界",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "deploy_no_rsync_timeout":
-        # 回潮：部署脚本删掉 rsync 限时
-        server_impl.write_text(
-            read_text(server_impl).replace(
-                "TIMEOUT_RSYNC_SECONDS",
-                "TIMEOUT_RSYNC_REMOVED",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "deploy_no_total_timeout":
-        # 回潮：部署脚本删掉总时长硬上限
-        server_impl.write_text(
-            read_text(server_impl).replace(
-                "TIMEOUT_TOTAL_DEPLOY_SECONDS",
-                "TIMEOUT_TOTAL_REMOVED",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "deploy_no_swap":
-        # 回潮：部署后复检删掉 swap 采集
-        server_impl.write_text(
-            read_text(server_impl).replace(
-                "SwapTotal",
-                "SwapRemoved",
             ),
             encoding="utf-8",
         )

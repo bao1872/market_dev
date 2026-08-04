@@ -123,13 +123,15 @@ strategy、calendar、monitor、strategy-batch、outbox、delivery、after-close
 | frontend（Nginx 静态） | 128m | 64m | 1 | 256 | 应用服务 |
 | umami | 384m | 128m | 1 | 512 | 应用服务 |
 
-**硬约束**：重任务服务（review / feature / stock core）的应用级 `memory_budget_mb`（见 DS-107）必须
-**显著低于**其所在容器 `mem_limit`（禁止等于或高于上限）。当前实现：`mem_limit` 1024m 对应应用级
-预算 **768m**（= 1024 × 0.75，为 ORM / 解释器开销与临时 DataFrame 预留余量），由 checker 断言
-`预算 < 上限` 且 `预算 ≤ 上限的 ~80%`；部署后按实测高水位再收紧。
+**硬约束（DS-107 规则，尚未实现）**：重任务服务（review / feature / stock core）的应用级
+`memory_budget_mb` 必须**显著低于**其所在容器 `mem_limit`（禁止等于或高于上限）。该数值关系为**规则要求**，
+**当前应用级预算尚未在代码中落地**（见 CHANGE-20260804-007：本阶段仅规则与文档，实施待办）。部署后按
+`docker stats --no-stream` 实测高水位再收紧。
 
-**状态**：本轮完成本地配置落地与治理门禁断言。**部署后真实高水位待采集**（DS-104 的
-`docker stats --no-stream` 结果需在用户授权真实部署后回填本 Map），据此再收紧预算；禁止只采集不限制。
+**状态**：容器级 `mem_limit` 已在 `docker-compose.prod.yml` 落地（DS-101，源自 CHANGE-20260804-004）；
+**应用级预算 / 长任务资源治理为实施待办**（CHANGE-20260804-007 `implementation_pending`）。**部署后真实
+高水位待采集**（DS-104 的 `docker stats --no-stream` 结果需在用户授权真实部署后回填本 Map），据此再收紧
+预算；禁止只采集不限制。
 
 ## 部署后资源证据字段
 

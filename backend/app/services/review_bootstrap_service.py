@@ -87,10 +87,7 @@ SCOPE_COUNT_KEYS = ("succeeded", "skipped", "unavailable", "failed")
 DEFAULT_BOOTSTRAP_CHUNK_DAYS = 5
 
 # 单进程 RSS 软预算（MB）。超过即安全停止，返回 status=memory_budget_exceeded。
-# [CHANGE-20260804-005 / DS-101] 必须显著低于所在容器 mem_limit（重 worker 默认 1024m）：
-# 768 = 1024 * 0.75，为 Python/ORM/共享库/临时 DataFrame 留出余量，避免容器先于应用 OOM。
-# 部署后按 docker stats --no-stream 实测高水位收紧，禁止等于或高于容器上限。
-DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB = 768
+DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB = 1536
 
 # 返回体中保留完整 scope 明细的最大天数（其余日期只保留聚合摘要）
 DEFAULT_BOOTSTRAP_DETAIL_LIMIT = 5

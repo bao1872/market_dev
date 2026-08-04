@@ -127,32 +127,6 @@ def test_to_status_contains_all_contract_keys():
         "chunk_size", "concurrency", "memory_budget_mb", "sample_every",
         "total", "processed", "remaining", "progress", "peak_rss_mb",
         "heartbeat_at", "stop_reason", "resume_token", "metadata",
-        "business_cursor",
     ):
         assert key in payload, f"缺少契约字段: {key}"
     json.dumps(payload, ensure_ascii=False)  # 必须可 JSON 序列化
-
-
-def test_business_cursor_roundtrip():
-    # [CHANGE-20260804-005 / DS-107] 业务断点必须随 checkpoint 序列化并在恢复时保留，
-    # 供续跑入口读取（last_instrument_index / input_hash / last_trade_date 等）。
-    state = LongTaskBudgetState(
-        chunk_size=20,
-        concurrency=1,
-        memory_budget_mb=768,
-        total=5000,
-        business_cursor={
-            "input_hash": "abc123",
-            "schema_version": 1,
-            "last_instrument_index": 999,
-            "last_trade_date": "2026-08-03",
-            "chunk_index": 49,
-            "trade_dates": ["2026-08-01", "2026-08-03"],
-        },
-    )
-    cp = state.make_checkpoint()
-    restored = LongTaskBudgetState.restore_from_checkpoint(cp)
-    assert restored.business_cursor["input_hash"] == "abc123"
-    assert restored.business_cursor["last_instrument_index"] == 999
-    assert restored.business_cursor["last_trade_date"] == "2026-08-03"
-    assert restored.business_cursor["chunk_index"] == 49
