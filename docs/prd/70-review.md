@@ -1341,6 +1341,13 @@ industry_l1
 5. **无 failed run_items**：`market_review_run_items` 中不得存在 `status=failed` 的记录（`skipped` 允许，但必须记录原因）。
 6. **coverage_ratio >= 0.95**：market 范围 `coverage_ratio >= 0.95`，且 `industry_l1` ready 比例达到配置门槛。
 
+> **[P0 2026-08-04] 无未来数据门（历史基线 point-in-time）**：
+> 本 run 正常落库的当日观测（`trade_date == run.trade_date`）是**合法行为**，
+> 不得被当作"未来数据"拦截。门禁只拦截严格未来观测（`trade_date > run.trade_date`），
+> 它代表乱序计算或历史基线污染（真实数据泄漏）。
+> 历史基线读取（`load_metric_history`）已使用 `trade_date < run.trade_date` 过滤，
+> 因此合法 run 只有当日观测，必然通过该门。
+
 force=True 时跳过 1-6 门禁，但必须（2026-08-01 安全收口，已按此实现对齐代码）：
 
 - 不得写入 `factor_publications`（仅 admin 内部查看）；
@@ -1518,16 +1525,24 @@ Review run 创建时必须显式解析上游依赖状态，并把结果固化到
 |---|---|---|---|
 | stock_core | 失败 / 未发布正式 pointer | **阻断**，不得发布 | publish gate blocker |
 | 第一金字塔核心字段 | 不完整 | **阻断** | publish gate blocker |
-| chip 共识 | 全缺失 / 全失败 | 降级为 **core-only**，仍可生成 | `source_chip_run_id=NULL` + `degraded_reasons=["CHIP_UNAVAILABLE"]` |
-| chip 共识 | 部分成功 | 生成，标记部分降级 | `source_chip_run_id=<core_run_id>` + `degraded_reasons=["CHIP_PARTIAL"]` |
-| chip 共识 | 全部成功 | 正常生成 | `source_chip_run_id=<core_run_id>`，`degraded_reasons=[]` |
+| chip 共识 | 全缺失 / 全失败 / expected 无法确定 | 降级为 **core-only**，仍可生成 | `degraded_reasons=["CHIP_UNAVAILABLE"]` + `chip_coverage` |
+| chip 共识 | 部分覆盖（`succeeded/expected < 1`） | 生成，标记部分降级 | `degraded_reasons=["CHIP_PARTIAL"]` + `chip_coverage` |
+| chip 共识 | 全部覆盖（`succeeded == expected`） | 正常生成 | `degraded_reasons=[]` + `chip_coverage` |
 | auction 竞价 | 失败 / 不可用 | **默认降级，不阻断**（不参与发布门禁） | 由 auction 自身 readiness 表达 |
 | 历史基线 | <60 日 | 保留 raw，normalized 不就绪 | `status=insufficient_history` |
 
+> **[P0 2026-08-04] chip 覆盖率合同**：chip 无独立 run 记录，只通过 `core_run_id` 挂靠 stock_core。
+> 因此 `source_chip_run_id` 恒为 `NULL`，**不得把 stock_core 的 run id 写成 source_chip_run_id 冒充 chip run**。
+> chip 质量改由真实覆盖率判定（分母 = stock_core run 的 `expected_count`）：
+> `succeeded_count / failed_count / skipped_count / missing_count / coverage`，
+> 覆盖率写入 `run.metadata_json["chip_coverage"]` 并经 overview/run API 暴露给前端展示。
+> 判定规则：`expected_count` 缺失或 `succeeded==0` → `CHIP_UNAVAILABLE`；
+> `coverage==1` 且 `missing==0` → 无降级；否则 `CHIP_PARTIAL`。
+> 不得再用"chip 表已有行"的占位比例冒充覆盖率（那会漏掉缺失股票）。
+
 `market_review_runs` 新增两列承载该合同：
 
-- `source_chip_run_id UUID NULL`：输入 chip 共识 run id；`NULL` 明确表示 chip 不可用（core-only 降级），
-  不得用"未写入"或"写成 core_run_id"来伪装可用；
+- `source_chip_run_id UUID NULL`：chip 无独立 run 记录，恒为 `NULL`；不得写成 core_run_id 伪装可用；
 - `degraded_reasons JSONB NOT NULL DEFAULT '[]'`：降级原因列表，空数组表示无降级。
 
 重新创建同一 (trade_date, algorithm_version) 的 run 时，这两列必须按当次解析结果**刷新**，

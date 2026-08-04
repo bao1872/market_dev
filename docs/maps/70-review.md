@@ -506,15 +506,20 @@ scope identity（`scope_type` + `scope_key`）+ compatible taxonomy +
 
 ### 24.2 `_resolve_chip_dependency` 判定
 
-查询 `stock_chip_consensus_snapshots`，按 `(instrument_id, trade_date, core_run_id, algorithm_version)`
-定位后按 `status` 分组计数，返回 `(source_chip_run_id, degraded_reasons)`：
+[P0 2026-08-04] 以 stock_core run 的 `expected_count` 为分母，统计 chip 真实覆盖率。
+查询 `stock_chip_consensus_snapshots` 按 `status` 分组计数 + 读取
+`StockFeatureSnapshotRun.expected_count`，返回 `(source_chip_run_id, degraded_reasons, chip_coverage)`：
 
-- 无任何行 → `(None, ["CHIP_UNAVAILABLE"])`
-- succeeded == 0（全失败）→ `(None, ["CHIP_UNAVAILABLE"])`
-- 0 < succeeded < total → `(core_run_id, ["CHIP_PARTIAL"])`
-- succeeded == total → `(core_run_id, [])`
+- `expected_count` 缺失 / `succeeded == 0` → `(None, ["CHIP_UNAVAILABLE"], coverage)`
+- `coverage < 1` 或 `missing > 0` → `(None, ["CHIP_PARTIAL"], coverage)`
+- `coverage == 1` 且 `missing == 0` → `(None, [], coverage)`
 
-chip 的 `core_run_id` 与 stock_core 的 run id 同源，因此 `source_chip_run_id` 复用 `source_core_run_id` 值。
+`source_chip_run_id` **恒为 `None`**（[P0 2026-08-04]）：chip 无独立 run 记录，只通过
+`core_run_id` 挂靠 stock_core，不得把 `source_core_run_id` 写成 `source_chip_run_id` 冒充。
+chip 质量由 `degraded_reasons` + `metadata_json["chip_coverage"]` 表达：
+`{expected_count, succeeded_count, failed_count, skipped_count, missing_count, coverage}`。
+coverage 经 `_extract_chip_coverage`（`app/api/review.py` / `admin_review.py`）暴露到
+overview/run API 的 `chipCoverage` / `chip_coverage` 字段。
 
 ### 24.3 `evaluate_publish_gate` 查询顺序（测试 mock 必须与之一致）
 
@@ -557,19 +562,19 @@ chip 的 `core_run_id` 与 stock_core 的 run id 同源，因此 `source_chip_ru
 
 对应 PRD §27 与 CHANGE-20260804-003。以下为**已核验的当前前端实现**（TSC/ESLint/build 全绿）。
 
-### 25.1 四层贯通：degraded_reasons / source_chip_run_id
+### 25.1 四层贯通：degraded_reasons / chip 覆盖率
 
 ORM → schema → API → 前端类型 → UI 已闭环：
 
 | 层 | 位置 | 字段 |
 |---|---|---|
-| ORM | `app/models/market_review.py::MarketReviewRun` | `source_chip_run_id` / `degraded_reasons` |
-| schema | `app/schemas/review.py::ReviewOverviewResponse` | `sourceChipRunId` / `degradedReasons`（camelCase） |
-| schema | `app/schemas/review.py::ReviewRunResponse` | `source_chip_run_id` / `degraded_reasons`（snake_case） |
-| API | `app/api/review.py::get_review_overview` | 透传两字段 |
-| API | `app/api/admin_review.py` | 透传两字段 |
-| 前端类型 | `src/features/review/types.ts::ReviewOverview` | `sourceChipRunId` / `degradedReasons` |
-| UI | `src/features/review/ReviewHeader.tsx` | Chip Run 溯源 + 降级横幅 |
+| ORM | `app/models/market_review.py::MarketReviewRun` | `source_chip_run_id` / `degraded_reasons` / `metadata_json.chip_coverage` |
+| schema | `app/schemas/review.py::ReviewOverviewResponse` | `sourceChipRunId` / `degradedReasons` / `chipCoverage`（camelCase） |
+| schema | `app/schemas/review.py::ReviewRunResponse` | `source_chip_run_id` / `degraded_reasons` / `chip_coverage`（snake_case） |
+| API | `app/api/review.py::get_review_overview` | 透传 + `_extract_chip_coverage` |
+| API | `app/api/admin_review.py` | 透传 + `_extract_chip_coverage` |
+| 前端类型 | `src/features/review/types.ts::ReviewOverview` | `sourceChipRunId` / `degradedReasons` / `chipCoverage` |
+| UI | `src/features/review/ReviewHeader.tsx` | [P0] Chip 覆盖率展示 + 降级横幅（不再把 core run id 误称 Chip Run） |
 
 前端展示语义：`sourceChipRunId === null` → 显式显示「不可用」而非留空；
 `degradedReasons` 非空 → 顶部降级横幅（`CHIP_UNAVAILABLE`/`CHIP_PARTIAL` 等映射中文，未知 code 原样展示不猜测）。

@@ -278,6 +278,45 @@ class TestInsufficientHistoryContract:
                 f"{code} 历史充足时 normalized_ready 必须 True"
             )
 
+    def _make_history_maps(self, n: int) -> dict[str, dict[str, list[float]]]:
+        """构造每个组件恰好 n 个观测的历史 map。"""
+        history_maps: dict[str, dict[str, list[float]]] = {}
+        for code in DEFAULT_REGISTRY.metric_codes:
+            metric = DEFAULT_REGISTRY.get_metric(code)
+            comp_history: dict[str, list[float]] = {}
+            for comp in metric.components:
+                comp_history[comp.name] = [0.5] * n
+            comp_history["_metric_value"] = [50.0] * n
+            history_maps[code] = comp_history
+        return history_maps
+
+    def test_59_vs_60_history_boundary(self):
+        """真实 59/60 边界行为：59 条 normalized_ready=False，60 条 True。
+
+        [报告 2026-08-04] 不能用手工拼 payload 冒充边界测试；必须真实执行
+        metric engine：历史 < MIN_BASELINE_WINDOW(60) 时 normalized_ready=False，
+        >= 60 时 True。
+        """
+        flat_list = self._make_flat_list(20)
+
+        # 59 条历史 → normalized_ready=False
+        hist59 = self._make_history_maps(59)
+        payloads59 = compute_all_metrics(flat_list, history_maps=hist59)
+        for code, payload in payloads59.items():
+            readiness = payload.get("readiness", {})
+            assert readiness.get("normalized_ready") is False, (
+                f"{code} 59 条历史时 normalized_ready 必须 False（<60）"
+            )
+
+        # 60 条历史 → normalized_ready=True
+        hist60 = self._make_history_maps(60)
+        payloads60 = compute_all_metrics(flat_list, history_maps=hist60)
+        for code, payload in payloads60.items():
+            readiness = payload.get("readiness", {})
+            assert readiness.get("normalized_ready") is True, (
+                f"{code} 60 条历史时 normalized_ready 必须 True（>=60）"
+            )
+
 
 # =============================================================================
 # 3. fp_segment_change_pct 定义确认

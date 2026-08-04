@@ -878,10 +878,13 @@ def flatten_first_pyramid(
 
     # [P0-3 修复 2026-07-29] SMC OB 生命周期改为 OB_CREATED/OB_ENTERED/OB_MITIGATED 三事件
     # 旧 OB_ENTRY 已废弃，保留读取仅为历史快照兼容
+    # [2026-08-04] 历史 OB 事件必须统一经 adapt_legacy_pyramid_event 归一
+    # （up/down → bullish/bearish，extra.structure_level → structureLevel）。
     ob_evt = _latest_event_by_type(
         struct_events, {"OB_CREATED", "OB_ENTERED", "OB_MITIGATED", "OB_ENTRY"},
     )
     if ob_evt:
+        ob_evt = adapt_legacy_pyramid_event(ob_evt)
         result["fp_latest_ob_direction"] = ob_evt.get("direction")
         result["fp_latest_ob_freshness"] = ob_evt.get("freshnessBars")
         ob_extra = ob_evt.get("extra") or {}

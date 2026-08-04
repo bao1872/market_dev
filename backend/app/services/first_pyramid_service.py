@@ -52,6 +52,7 @@ from app.schemas.first_pyramid import (
     ChipConsensusResult,
     ChipStatus,
     DimensionResult,
+    FieldAvailability,
     FirstPyramidCoreSnapshot,
     FirstPyramidSnapshot,
     PyramidEvent,
@@ -1118,6 +1119,10 @@ def assemble_first_pyramid_view(
     [CHANGE-20260729-004 P0-2] 同步构建 chipStatus 结构化状态（替代统一"暂不可用"），
     前端可读取 reasonCode/reasonText 显示真实原因（如 M15_BARS_INSUFFICIENT + 实际数量）。
 
+    [字段级 availability 合同 2026-08-04] 同步构建 fieldAvailability：条件性可空因子
+    为 None 时必须给出字段级原因（not_applicable/insufficient_history/
+    upstream_unavailable/failed/stale/missing），禁止无原因的缺失。
+
     Args:
         core: 核心快照（trend/structure/momentum）
         chip: 筹码快照（可为 None 或含 error）
@@ -1146,7 +1151,80 @@ def assemble_first_pyramid_view(
         volumeContext=core.volumeContext,
         inputHash=core.inputHash,
         parameterHash=parameter_hash,
+        fieldAvailability=_build_field_availability(core.momentum),
     )
+
+
+def _build_field_availability(
+    momentum: DimensionResult,
+) -> dict[str, FieldAvailability]:
+    """构建条件性可空因子的字段级 availability 元数据。
+
+    [字段级 availability 合同 2026-08-04] 覆盖此前高空值字段：
+      - momentum.squeeze_avg_volume（无挤压时语义不适用 / 上游未提供挤压期均量）
+      - momentum.volume_relation（量价关系仅在有挤压区间时才有意义）
+      - momentum.sqzmom_value（上游连续因子缺失）
+    动量维度整体不可用 → upstream_unavailable；否则按字段实际缺失原因分类。
+    """
+    cf = momentum.continuousFactors or {}
+    squeeze_active = bool(cf.get("squeeze_on") or cf.get("squeeze_off"))
+    no_squeeze = bool(cf.get("no_squeeze"))
+
+    def _entry(
+        code: str, text: str, obs: int | None = None,
+    ) -> FieldAvailability:
+        kwargs: dict[str, Any] = {
+            "availability": code,
+            "reasonCode": code,
+            "reasonText": text,
+        }
+        if obs is not None:
+            kwargs["observationCount"] = obs
+        return FieldAvailability(**kwargs)
+
+    out: dict[str, FieldAvailability] = {}
+    upstream_reason = momentum.unavailableReason or "上游 momentum 维度不可用"
+    has_upstream = bool(cf)
+
+    # 动量维度整体不可用 → 所有可空因子 upstream_unavailable
+    if not momentum.available or not has_upstream:
+        for key in (
+            "squeeze_avg_volume",
+            "volume_relation",
+            "sqzmom_value",
+        ):
+            out[f"momentum.{key}"] = _entry(
+                "upstream_unavailable", f"动量维度不可用：{upstream_reason}",
+            )
+        return out
+
+    # squeeze_avg_volume
+    if not squeeze_active and no_squeeze:
+        out["momentum.squeeze_avg_volume"] = _entry(
+            "not_applicable", "当前无挤压区间，挤压期均量语义不适用",
+        )
+    elif cf.get("squeeze_period_volume_mean") is None:
+        out["momentum.squeeze_avg_volume"] = _entry(
+            "missing", "上游未提供 squeeze_period_volume_mean",
+        )
+
+    # volume_relation
+    if not squeeze_active and no_squeeze:
+        out["momentum.volume_relation"] = _entry(
+            "not_applicable", "当前无挤压区间，量价关系语义不适用",
+        )
+    elif cf.get("vol_divergence") is None:
+        out["momentum.volume_relation"] = _entry(
+            "upstream_unavailable", "量能上下文未就绪，无法判定量价关系",
+        )
+
+    # sqzmom_value
+    if cf.get("sqzmom_val") is None:
+        out["momentum.sqzmom_value"] = _entry(
+            "missing", "上游未提供 sqzmom_val",
+        )
+
+    return out
 
 
 # =============================================================================

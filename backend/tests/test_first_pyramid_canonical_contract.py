@@ -23,9 +23,11 @@ import pytest
 
 from app.schemas.first_pyramid import (
     CHIP_STATUS_STATES,
+    FIELD_AVAILABILITY_REASONS,
     PYRAMID_DIRECTIONS,
     PYRAMID_STRUCTURE_LEVELS,
     ChipStatus,
+    FieldAvailability,
     PyramidEvent,
     build_pyramid_event,
     normalize_direction,
@@ -442,6 +444,33 @@ def test_legacy_snapshot_normalized_at_flatten() -> None:
     assert flat["fp_structure_event_level"] == "swing"
 
 
+def test_legacy_ob_event_normalized_at_flatten() -> None:
+    """历史 OB 事件必须统一经兼容 adapter 归一（up/down → bullish/bearish）。
+
+    [报告 2026-08-04] 历史 OB 事件不得直接读原始 direction，必须经
+    adapt_legacy_pyramid_event 归一，否则旧 up/down 值会污染正式字段。
+    """
+    snapshot = {
+        "structure": {
+            "available": True,
+            "continuousFactors": {},
+            "events": [
+                {
+                    "type": "OB_CREATED",
+                    "direction": "down",
+                    "freshnessBars": 2,
+                    "occurredAt": "2026-07-20",
+                    "extra": {"structure_level": "swing", "ob_high": 12.0, "ob_low": 11.0},
+                }
+            ],
+        },
+    }
+    flat = flatten_first_pyramid(snapshot)
+    assert flat["fp_latest_ob_direction"] == "bearish", (
+        "历史 OB 的 down 必须归一为 bearish"
+    )
+
+
 def test_direction_and_level_value_sets_are_canonical() -> None:
     """正式取值集合本身即合同的一部分。"""
     assert PYRAMID_DIRECTIONS == {"bullish", "bearish"}
@@ -525,3 +554,125 @@ def test_snapshot_carries_source_run_id_field() -> None:
     fields = FirstPyramidSnapshot.model_fields
     assert "sourceRunId" in fields, "快照必须含 sourceRunId"
     assert "calculatedAt" in fields, "快照必须含 calculatedAt"
+
+
+# ---------------------------------------------------------------------------
+# [字段级 availability 合同 2026-08-04] 条件性可空因子必须有字段级原因
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_carries_field_availability_field() -> None:
+    """FirstPyramidSnapshot 必须承载 fieldAvailability（字段级原因元数据）。"""
+    from app.schemas.first_pyramid import FirstPyramidSnapshot
+
+    fields = FirstPyramidSnapshot.model_fields
+    assert "fieldAvailability" in fields, "快照必须含 fieldAvailability"
+
+
+def test_field_availability_reason_codes_canonical() -> None:
+    """合法 reasonCode 必须覆盖 PRD 要求的 6 类。"""
+    assert FIELD_AVAILABILITY_REASONS == {
+        "not_applicable", "insufficient_history", "upstream_unavailable",
+        "failed", "stale", "missing",
+    }, f"reasonCode 集合不完整: {sorted(FIELD_AVAILABILITY_REASONS)}"
+
+
+def test_field_availability_accepts_all_reason_codes() -> None:
+    """六类 reasonCode 都必须能构造 FieldAvailability。"""
+    for code in sorted(FIELD_AVAILABILITY_REASONS):
+        fa = FieldAvailability(
+            availability=code,
+            reasonCode=code,
+            reasonText="测试原因",
+            observationCount=None,
+            sourceRunId="run-1",
+            calculatedAt="2026-08-04T15:00:00Z",
+        )
+        assert fa.reasonCode == code
+        assert fa.sourceRunId == "run-1"
+
+
+def test_field_availability_rejects_unknown_reason_code() -> None:
+    """未知 reasonCode 必须被拒绝（禁止自造状态）。"""
+    with pytest.raises(ValueError, match="reasonCode 非法"):
+        FieldAvailability(
+            availability="weird", reasonCode="weird", reasonText="x",
+        )
+
+
+def test_field_availability_builder_distinguishes_not_applicable() -> None:
+    """无挤压状态 → squeeze_avg_volume/volume_relation 为 not_applicable。
+
+    [字段级 availability 合同] 合法空值必须能区分"当前不适用"而非无原因缺失。
+    """
+    from app.schemas.first_pyramid import DimensionResult
+    from app.services.first_pyramid_service import _build_field_availability
+
+    momentum = DimensionResult(
+        name="momentum",
+        available=True,
+        continuousFactors={"no_squeeze": True, "sqzmom_val": 1.2},
+        events=[],
+        statusText="无挤压",
+    )
+    avail = _build_field_availability(momentum)
+    assert avail["momentum.squeeze_avg_volume"].reasonCode == "not_applicable"
+    assert avail["momentum.volume_relation"].reasonCode == "not_applicable"
+    # sqzmom_value 有值，不应标记
+    assert "momentum.sqzmom_value" not in avail
+
+
+def test_field_availability_builder_distinguishes_upstream_unavailable() -> None:
+    """动量维度整体不可用 → 所有可空因子为 upstream_unavailable。"""
+    from app.schemas.first_pyramid import DimensionResult
+    from app.services.first_pyramid_service import _build_field_availability
+
+    momentum = DimensionResult(
+        name="momentum",
+        available=True,
+        continuousFactors={},  # 无上游连续因子
+        events=[],
+        statusText="无数据",
+    )
+    avail = _build_field_availability(momentum)
+    assert avail["momentum.sqzmom_value"].reasonCode == "upstream_unavailable"
+
+
+def test_field_availability_builder_distinguishes_missing() -> None:
+    """挤压活跃但上游未提供 squeeze_period_volume_mean → missing。"""
+    from app.schemas.first_pyramid import DimensionResult
+    from app.services.first_pyramid_service import _build_field_availability
+
+    momentum = DimensionResult(
+        name="momentum",
+        available=True,
+        continuousFactors={
+            "squeeze_on": True,
+            "sqzmom_val": 1.2,
+            "vol_divergence": "放量释放",
+            # squeeze_period_volume_mean 缺失
+        },
+        events=[],
+        statusText="挤压中",
+    )
+    avail = _build_field_availability(momentum)
+    assert avail["momentum.squeeze_avg_volume"].reasonCode == "missing"
+    assert "momentum.volume_relation" not in avail  # 有值，不应标记
+
+
+def test_assemble_view_injects_field_availability() -> None:
+    """assemble_first_pyramid_view 必须注入 fieldAvailability。"""
+    from app.schemas.first_pyramid import DimensionResult, FirstPyramidCoreSnapshot
+    from app.services.first_pyramid_service import assemble_first_pyramid_view
+
+    trend = DimensionResult(name="trend", available=True, continuousFactors={"regime_value": 1}, events=[], statusText="上行")
+    structure = DimensionResult(name="structure", available=True, continuousFactors={}, events=[], statusText="BOS")
+    momentum = DimensionResult(name="momentum", available=True, continuousFactors={"no_squeeze": True}, events=[], statusText="无挤压")
+    core = FirstPyramidCoreSnapshot(
+        symbol="000001.SZ", tradeDate="2026-08-04",
+        trend=trend, structure=structure, momentum=momentum,
+        statusText="无挤压", inputHash="h", parameterHash="p", nBars=120, lastBarIndex=119,
+    )
+    snap = assemble_first_pyramid_view(core, None)
+    assert snap.fieldAvailability, "快照必须携带 fieldAvailability"
+    assert snap.fieldAvailability["momentum.squeeze_avg_volume"].reasonCode == "not_applicable"

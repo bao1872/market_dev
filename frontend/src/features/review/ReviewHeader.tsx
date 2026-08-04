@@ -2,7 +2,7 @@
 // 展示：交易日与前后交易日 / Review发布状态 / Core/Board Run /
 //      股票与板块覆盖率 / 算法版本、筛选器版本、历史基线 / 数据质量入口
 // 顶部不得显示 AI 自由生成的市场结论
-import type { ReviewOverview } from './types'
+import type { ReviewChipCoverage, ReviewOverview } from './types'
 import styles from './review.module.scss'
 
 const RUN_STATUS_META: Record<string, { label: string; cls: string }> = {
@@ -30,6 +30,14 @@ const DEGRADED_REASON_LABEL: Record<string, string> = {
 
 function degradedReasonText(code: string): string {
   return DEGRADED_REASON_LABEL[code] ?? code
+}
+
+// [P0 2026-08-04] chip 覆盖率悬浮说明：真实覆盖/成功/缺失明细
+function chipCoverageTitle(cov: ReviewChipCoverage): string {
+  return (
+    `chip 覆盖率 ${Math.round((cov.coverage ?? 0) * 100)}%` +
+    `（成功 ${cov.succeededCount}/${cov.expectedCount ?? 0}，缺失 ${cov.missingCount}）`
+  )
 }
 
 function CoverageItem({ label, ratio }: { label: string; ratio: number | null | undefined }) {
@@ -114,12 +122,16 @@ export default function ReviewHeader({
               <span className={styles.metaLabel}>Board Run:</span>
               <span className={styles.metaValue}>{overview.sourceBoardRunId.slice(0, 8)}</span>
             </span>
-            {/* [QM-63] chip 溯源：null 明确显示「不可用」，不留空、不猜测 */}
+            {/* [P0 2026-08-04] chip 覆盖率：chip 无独立 run 记录，sourceChipRunId
+                恒为 null，不得把 core run id 误称 Chip Run。展示真实覆盖率。 */}
             <span className={styles.metaItem}>
-              <span className={styles.metaLabel}>Chip Run:</span>
-              {overview.sourceChipRunId ? (
-                <span className={styles.metaValue} title={overview.sourceChipRunId}>
-                  {overview.sourceChipRunId.slice(0, 8)}
+              <span className={styles.metaLabel}>Chip:</span>
+              {overview.chipCoverage && overview.chipCoverage.coverage !== null ? (
+                <span
+                  className={styles.metaValue}
+                  title={chipCoverageTitle(overview.chipCoverage)}
+                >
+                  {Math.round(overview.chipCoverage.coverage * 100)}%
                 </span>
               ) : (
                 <span

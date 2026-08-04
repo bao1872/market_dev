@@ -32,6 +32,7 @@ from app.services.review_publication_service import (
     evaluate_publish_gate,
     publish_review,
 )
+from app.services.review_scope_service import ScopeDefinition, compute_scope_metrics
 
 pytestmark = pytest.mark.asyncio
 
@@ -205,43 +206,78 @@ def _gate_pass_results(run: MarketReviewRun, *, future_obs_count: int = 0, marke
 
 
 async def test_chip_unavailable_downgrades_to_core_only() -> None:
-    """chip 完全缺失 → source_chip_run_id=None, degraded_reasons=[CHIP_UNAVAILABLE]。"""
+    """chip 完全缺失 → source_chip_run_id=None, degraded_reasons=[CHIP_UNAVAILABLE]。
+
+    [P0 2026-08-04] 覆盖率合同：expected_count 存在但 succeeded==0 → unavailable。
+    """
     run = _make_run()
     session = _make_session([
         _FakeResult(scalar_list=[]),  # 无任何 chip 快照
+        _FakeResult(scalar=5000),     # core run expected_count
     ])
-    chip_run_id, reasons = await _resolve_chip_dependency(
+    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
         session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
     )
-    assert chip_run_id is None
+    assert chip_run_id is None  # 不把 core run 冒充 chip run
     assert reasons == ["CHIP_UNAVAILABLE"]
+    assert coverage["expected_count"] == 5000
+    assert coverage["succeeded_count"] == 0
+    assert coverage["coverage"] == 0.0
 
 
 async def test_chip_partial_success_records_source_and_degraded() -> None:
-    """chip 部分成功 → 记录 source_chip_run_id，degraded_reasons=[CHIP_PARTIAL]。"""
+    """chip 覆盖不足 → degraded_reasons=[CHIP_PARTIAL]，真实覆盖率 <1。"""
     run = _make_run()
-    # group_by 返回 (status, count) 两行：succeeded=10, failed=5
+    # group_by 返回 (status, count)：succeeded=10, failed=5；expected=5000
     session = _make_session([
         _FakeResult(scalar_list=[("succeeded", 10), ("failed", 5)]),
+        _FakeResult(scalar=5000),
     ])
-    chip_run_id, reasons = await _resolve_chip_dependency(
+    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
         session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
     )
-    assert chip_run_id == run.source_core_run_id
+    assert chip_run_id is None
     assert reasons == ["CHIP_PARTIAL"]
+    assert coverage["expected_count"] == 5000
+    assert coverage["succeeded_count"] == 10
+    assert coverage["missing_count"] == 5000 - 15
+    assert coverage["coverage"] == 10 / 5000
 
 
-async def test_chip_all_succeeded_no_degradation() -> None:
-    """chip 全部成功 → 记录 source_chip_run_id，无降级。"""
+async def test_chip_coverage_partial_when_only_one_of_many() -> None:
+    """chip 表只有 1 只 succeeded 而 core 应有 5000 → CHIP_PARTIAL（原 P0 复现）。
+
+    旧逻辑只看“已有行全 succeeded”会误判 100% 覆盖；现以 expected_count 为分母。
+    """
     run = _make_run()
     session = _make_session([
-        _FakeResult(scalar_list=[("succeeded", 10)]),
+        _FakeResult(scalar_list=[("succeeded", 1)]),
+        _FakeResult(scalar=5000),
     ])
-    chip_run_id, reasons = await _resolve_chip_dependency(
+    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
         session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
     )
-    assert chip_run_id == run.source_core_run_id
+    assert chip_run_id is None
+    assert reasons == ["CHIP_PARTIAL"]
+    assert coverage["succeeded_count"] == 1
+    assert coverage["missing_count"] == 4999
+    assert coverage["coverage"] == 1 / 5000
+
+
+async def test_chip_all_succeeded_full_coverage_no_degradation() -> None:
+    """chip 全量 succeeded 且覆盖全部 expected → 无降级。"""
+    run = _make_run()
+    session = _make_session([
+        _FakeResult(scalar_list=[("succeeded", 5000)]),
+        _FakeResult(scalar=5000),
+    ])
+    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
+        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
+    )
+    assert chip_run_id is None
     assert reasons == []
+    assert coverage["coverage"] == 1.0
+    assert coverage["missing_count"] == 0
 
 
 async def test_chip_all_failed_downgrades_to_core_only() -> None:
@@ -249,12 +285,94 @@ async def test_chip_all_failed_downgrades_to_core_only() -> None:
     run = _make_run()
     session = _make_session([
         _FakeResult(scalar_list=[("failed", 10)]),
+        _FakeResult(scalar=5000),
     ])
-    chip_run_id, reasons = await _resolve_chip_dependency(
+    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
         session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
     )
     assert chip_run_id is None
     assert reasons == ["CHIP_UNAVAILABLE"]
+    assert coverage["succeeded_count"] == 0
+
+
+async def test_chip_unavailable_when_expected_count_missing() -> None:
+    """core run 无 expected_count（None）→ 无法评估覆盖率 → CHIP_UNAVAILABLE。"""
+    run = _make_run()
+    session = _make_session([
+        _FakeResult(scalar_list=[("succeeded", 5000)]),
+        _FakeResult(scalar=None),  # expected_count 缺失
+    ])
+    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
+        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
+    )
+    assert chip_run_id is None
+    assert reasons == ["CHIP_UNAVAILABLE"]
+    assert coverage["expected_count"] is None
+
+
+# ---------------------------------------------------------------------------
+# [P0 2026-08-04] chip 覆盖率经 API/schema 暴露（前端显示真实覆盖率）
+# ---------------------------------------------------------------------------
+
+
+async def test_chip_coverage_exposed_via_review_overview_schema() -> None:
+    """ReviewOverviewResponse 必须承载 chipCoverage（真实覆盖率，非占位比例）。"""
+    from app.schemas.review import (
+        ReviewChipCoverageDTO,
+        ReviewOverviewResponse,
+    )
+
+    overview = ReviewOverviewResponse(
+        reviewRunId="00000000-0000-0000-0000-000000000001",
+        tradeDate="2026-08-04",
+        status="published",
+        sourceCoreRunId="00000000-0000-0000-0000-000000000002",
+        sourceBoardRunId="00000000-0000-0000-0000-000000000003",
+        algorithmVersion="review-1.0.0",
+        filterVersion="filters-1.0.0",
+        baselineWindow=120,
+        chipCoverage=ReviewChipCoverageDTO(
+            expectedCount=5000,
+            succeededCount=4500,
+            failedCount=100,
+            skippedCount=50,
+            missingCount=350,
+            coverage=0.9,
+        ),
+    )
+    assert overview.chipCoverage is not None
+    assert overview.chipCoverage.expectedCount == 5000
+    assert overview.chipCoverage.missingCount == 350
+    assert overview.chipCoverage.coverage == 0.9
+    # sourceChipRunId 不再冒充独立 chip run：恒为 None
+    assert overview.sourceChipRunId is None
+
+
+async def test_extract_chip_coverage_from_metadata() -> None:
+    """_extract_chip_coverage 从 run.metadata_json 提取 chip 真实覆盖率。"""
+    from app.api.review import _extract_chip_coverage
+
+    class _FakeRun:
+        def __init__(self, metadata):
+            self.metadata_json = metadata
+
+    run = _FakeRun({
+        "chip_coverage": {
+            "expected_count": 5000,
+            "succeeded_count": 1,
+            "failed_count": 0,
+            "skipped_count": 0,
+            "missing_count": 4999,
+            "coverage": 1 / 5000,
+        },
+    })
+    cov = _extract_chip_coverage(run)
+    assert cov is not None
+    assert cov.coverage == 1 / 5000
+    assert cov.missingCount == 4999
+
+    # 无 chip_coverage 元数据 → None（前端不展示虚报覆盖率）
+    assert _extract_chip_coverage(_FakeRun({})) is None
 
 
 # =============================================================================
@@ -304,12 +422,28 @@ async def test_gauge_insufficient_history_not_unavailable() -> None:
 
 
 async def test_future_data_blocks_publish() -> None:
-    """检测到 >= trade_date 的 observation → 门禁 block（point-in-time 违规）。"""
+    """严格未来观测（trade_date > run.trade_date）→ 门禁 block（point-in-time 违规）。
+
+    [P0 修复 2026-08-04] 门禁只拦截“乱序/未来”观测（> run.trade_date），
+    不再把当前 run 自身当日观测（== run.trade_date）误判为未来数据。
+    """
     run = _make_run()
     results = _gate_pass_results(run, future_obs_count=3)
     publishable, blockers = await evaluate_publish_gate(_make_session(results), run)
     assert publishable is False
-    assert any("未来数据" in b or "point-in-time" in b for b in blockers)
+    assert any("未来" in b or "point-in-time" in b for b in blockers)
+
+
+async def test_own_same_day_observations_do_not_block() -> None:
+    """当前 run 落库的当日观测（== trade_date）不得被当作未来数据拦截。
+
+    计算当日 Review → 保存当日 observation → 发布门，合法 Review 必须能通过。
+    """
+    run = _make_run()
+    results = _gate_pass_results(run, future_obs_count=0)
+    publishable, blockers = await evaluate_publish_gate(_make_session(results), run)
+    assert publishable is True
+    assert not any("未来" in b for b in blockers)
 
 
 async def test_no_future_data_passes() -> None:
@@ -505,3 +639,77 @@ async def test_run_response_exposes_degraded_reasons() -> None:
     payload = resp.model_dump(mode="json")
     assert payload["source_chip_run_id"] is not None
     assert payload["degraded_reasons"] == ["CHIP_PARTIAL"]
+
+
+# =============================================================================
+# 11. [P0 2026-08-04] 真实组合链路：compute_scope_metrics → persist →
+#     evaluate_publish_gate。当前 run 落库当日观测（== trade_date）不得阻塞发布。
+# =============================================================================
+
+
+def _make_flat_list(n: int = 6) -> list[dict]:
+    """构造带 fp_trend_direction 的真实 first_pyramid_flat 列表。"""
+    rows = []
+    for i in range(n):
+        rows.append({
+            "_instrument_id": f"ins{i}",
+            "fp_trend_direction": "bullish" if i % 2 == 0 else "bearish",
+            "fp_trend_structure_level": "swing",
+        })
+    return rows
+
+
+async def test_combination_legit_run_own_observations_pass_publish_gate() -> None:
+    """compute_scope_metrics → persist_metric_observations → evaluate_publish_gate。
+
+    真实组合：合法 Review 计算当日指标并落库当日观测后，发布门必须通过——
+    不得把当前 run 自身 == trade_date 的观测误判为“未来数据”。
+    """
+    from sqlalchemy.dialects.postgresql.dml import Insert as _PgInsert
+
+    run = _make_run()
+    scope = ScopeDefinition(
+        scope_type="market",
+        scope_key="market",
+        scope_name="全市场",
+        membership_version="v1",
+    )
+    flat_list = _make_flat_list()
+
+    # 阶段 1+2：compute_scope_metrics 内部调用 persist_metric_observations，
+    # 记录所有 pg_insert 写入（scope snapshot + 各 metric observation）。
+    writes: list = []
+    compute_session = AsyncMock()
+    compute_session.flush = AsyncMock()
+
+    async def _capture(*args, **kwargs):
+        writes.append(args[0])
+        return _FakeResult(scalar=None)
+
+    compute_session.execute = AsyncMock(side_effect=_capture)
+
+    snap = await compute_scope_metrics(
+        compute_session,
+        run.id,
+        run.trade_date,
+        scope,
+        flat_list,
+        algorithm_version=run.algorithm_version,
+        eligible_count=len(flat_list),
+    )
+    # 确认真实产生了当日观测写入（== trade_date）
+    obs_rows = [
+        stmt
+        for stmt in writes
+        if isinstance(stmt, _PgInsert)
+        and "market_review_metric_observations" in str(stmt)
+    ]
+    assert len(obs_rows) > 0, "compute_scope_metrics 必须真实写入 metric observations"
+    assert snap is None or snap.scope_type == "market"  # 仅确认无异常
+
+    # 阶段 3：对同一 run 运行发布门，构造全部通过序列（market snap 等）。
+    # 关键：未来观测数为 0（本 run 只有 == trade_date 的当日观测）。
+    gate_results = _gate_pass_results(run, future_obs_count=0)
+    publishable, blockers = await evaluate_publish_gate(_make_session(gate_results), run)
+    assert publishable is True, f"合法 Review 应通过发布门，blockers={blockers}"
+    assert not any("未来" in b for b in blockers)

@@ -38,6 +38,7 @@ from app.schemas.review import (
     ReviewBootstrapRequest,
     ReviewBootstrapStatusResponse,
     ReviewBootstrapSubmitResponse,
+    ReviewChipCoverageDTO,
     ReviewRunCreateRequest,
     ReviewRunPublishRequest,
     ReviewRunResponse,
@@ -75,6 +76,26 @@ logger = logging.getLogger("api.admin_review")
 router = APIRouter(prefix="/v1/admin/review", tags=["admin-review"])
 
 
+def _extract_chip_coverage(run: Any) -> ReviewChipCoverageDTO | None:
+    """[P0 2026-08-04] 从 run.metadata_json 提取 chip 真实覆盖率明细。
+
+    chip_coverage 由 create_run 时 _resolve_chip_dependency 写入 metadata_json，
+    以 stock_core expected_count 为分母；缺失时返回 None。
+    """
+    metadata = run.metadata_json if not isinstance(run, dict) else run.get("metadata_json")
+    raw = (metadata or {}).get("chip_coverage") if isinstance(metadata, dict) else None
+    if not raw or not isinstance(raw, dict):
+        return None
+    return ReviewChipCoverageDTO(
+        expectedCount=raw.get("expected_count"),
+        succeededCount=int(raw.get("succeeded_count") or 0),
+        failedCount=int(raw.get("failed_count") or 0),
+        skippedCount=int(raw.get("skipped_count") or 0),
+        missingCount=int(raw.get("missing_count") or 0),
+        coverage=raw.get("coverage"),
+    )
+
+
 def _run_to_response(run: Any) -> ReviewRunResponse:
     """run ORM / dict → ReviewRunResponse。"""
     if isinstance(run, dict):
@@ -88,6 +109,8 @@ def _run_to_response(run: Any) -> ReviewRunResponse:
         source_chip_run_id=(
             str(run.source_chip_run_id) if run.source_chip_run_id else None
         ),
+        # [P0 2026-08-04] chip 真实覆盖率明细（以 expected_count 为分母）
+        chip_coverage=_extract_chip_coverage(run),
         degraded_reasons=list(run.degraded_reasons or []),
         algorithm_version=run.algorithm_version,
         filter_version=run.filter_version,

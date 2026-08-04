@@ -337,24 +337,28 @@ async def evaluate_publish_gate(
         if review_pub is None or review_pub.data_run_id != run.id:
             blockers.append("旧 published run 已非当前正式 Review pointer，禁止原地重发")
 
-    # 7. [QM-63 review 质量硬门 2026-08-04] 无未来数据：
-    #    本 run 落库的 metric observation 不得包含 >= trade_date 的记录
-    #    （历史基线必须严格 point-in-time，禁止混入当日或未来数据）。
+    # 7. [QM-63 review 质量硬门 2026-08-04] 无未来数据（point-in-time）。
+    #    本 run 正常落库的 observation 是当日数据（trade_date == run.trade_date），
+    #    这是合法行为，不得被当作“未来数据”拦截（P0 修复 2026-08-04）。
+    #    门禁只验证：同一 scope 下不得存在 trade_date > run.trade_date 的
+    #    严格未来观测——这代表乱序计算或历史基线污染（真实数据泄漏）。
+    #    历史基线读取（load_metric_history）已使用 trade_date < 当日过滤，
+    #    因此合法 run 只有 == trade_date 的观测，必然通过本门。
     from app.models.market_review import MarketReviewMetricObservation
 
     future_obs_stmt = (
         select(func.count(MarketReviewMetricObservation.id))
         .where(
             MarketReviewMetricObservation.review_run_id == run.id,
-            MarketReviewMetricObservation.trade_date >= run.trade_date,
+            MarketReviewMetricObservation.trade_date > run.trade_date,
         )
         .limit(1)
     )
     future_obs_count = (await session.execute(future_obs_stmt)).scalar() or 0
     if future_obs_count > 0:
         blockers.append(
-            f"检测到 {future_obs_count} 条 >= trade_date 的 observation，"
-            "禁止混入当日/未来数据（point-in-time 违规）",
+            f"检测到 {future_obs_count} 条 > trade_date 的未来 observation，"
+            "历史基线被乱序/未来数据污染（point-in-time 违规）",
         )
 
     # 8. [QM-63 review 质量硬门 2026-08-04] reason 完整性：

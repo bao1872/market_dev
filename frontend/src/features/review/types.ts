@@ -93,6 +93,16 @@ export interface ReviewOverviewSignalSummary {
   transformed: number
 }
 
+/** [P0 2026-08-04] chip 真实覆盖率明细（以 stock_core expectedCount 为分母） */
+export interface ReviewChipCoverage {
+  expectedCount: number | null
+  succeededCount: number
+  failedCount: number
+  skippedCount: number
+  missingCount: number
+  coverage: number | null
+}
+
 /** GET /v1/review/{trade_date}/overview 响应 */
 export interface ReviewOverview {
   reviewRunId: string
@@ -111,6 +121,11 @@ export interface ReviewOverview {
    * 空数组表示无降级。
    */
   degradedReasons: string[]
+  /**
+   * [P0 2026-08-04] chip 真实覆盖率明细。
+   * sourceChipRunId 恒为 null（chip 无独立 run 记录）时，以此展示真实覆盖情况。
+   */
+  chipCoverage: ReviewChipCoverage | null
   algorithmVersion: string
   filterVersion: string
   baselineWindow: number

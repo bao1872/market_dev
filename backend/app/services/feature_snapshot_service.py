@@ -924,6 +924,11 @@ async def compute_review_core_for_trade_date(
             instrument_id, trade_date, exc,
         )
         first_pyramid_dict = None
+        # [FP 失败完整性 2026-08-04] 第一金字塔属 core 必选结果。计算失败不能
+        # 以无原因的 first_pyramid=None 冒充成功——记录明确的 FP_COMPUTE_FAILED，
+        # 由下游从 publish-ready coverage 排除，避免"盘后任务成功但 FP 大量为空"。
+        if "first_pyramid: compute failed" not in degraded_reasons:
+            degraded_reasons.append("first_pyramid: compute failed")
 
     summary_payload = build_summary_payload(
         structural_payload, temporal_payload, trade_date,
@@ -933,6 +938,11 @@ async def compute_review_core_for_trade_date(
     )
     # 标记 review core 路径（供下游区分）
     summary_payload["_review_core"] = True
+    # [FP 失败完整性 2026-08-04] 显式 FP 状态：ready / insufficient_history / FP_COMPUTE_FAILED
+    if "first_pyramid: compute failed" in degraded_reasons:
+        summary_payload["first_pyramid_status"] = "FP_COMPUTE_FAILED"
+    elif first_pyramid_dict is None:
+        summary_payload["first_pyramid_status"] = "insufficient_history"
 
     return StockFeatureSnapshot(
         instrument_id=instrument_id,
@@ -1037,6 +1047,20 @@ async def compute_review_core_batch_for_trade_date(
                     run_calculated_at=run_calculated_at,
                     _diag_sink=run_diag,
                 )
+                # [FP 失败完整性 2026-08-04] 第一金字塔计算失败（FP_COMPUTE_FAILED）
+                # 不能计入成功快照：core 必选结果缺失，纳入 failed 由失败阈值兜底，
+                # 且不参与 publish-ready coverage。
+                fp_status = (snapshot.summary_payload or {}).get(
+                    "first_pyramid_status"
+                )
+                if fp_status == "FP_COMPUTE_FAILED":
+                    failed_count += 1
+                    logger.error(
+                        "review_core 第一金字塔计算失败不计入成功 instrument_id=%s "
+                        "trade_date=%s",
+                        instrument_id, trade_date,
+                    )
+                    continue
                 await upsert_snapshot(session, snapshot)
                 snapshot_count += 1
             except Exception as exc:
@@ -1255,6 +1279,29 @@ async def compute_review_core_with_run_items(
                         run_calculated_at=run_calculated_at,
                         _diag_sink=run_diag,
                     )
+                    # [FP 失败完整性 2026-08-04] 第一金字塔计算失败（FP_COMPUTE_FAILED）
+                    # 属 core 必选结果缺失，不能标记 succeeded：改为 failed，使
+                    # publish-ready coverage 排除该股票，避免"任务成功但 FP 大量为空"。
+                    fp_status = (snapshot.summary_payload or {}).get(
+                        "first_pyramid_status"
+                    )
+                    if fp_status == "FP_COMPUTE_FAILED":
+                        await upsert_snapshot(compute_db, snapshot)
+                        await compute_db.commit()
+                        failed_count += 1
+                        async with AsyncSessionLocal() as fail_fp_db:
+                            await mark_item_failed(
+                                fail_fp_db, item.id,
+                                error="first_pyramid compute failed (FP_COMPUTE_FAILED)",
+                                lease_epoch=item.lease_epoch,
+                            )
+                            await fail_fp_db.commit()
+                        logger.error(
+                            "[RunItems] item %s 第一金字塔计算失败，标记 failed",
+                            item.id,
+                        )
+                        continue
+
                     await upsert_snapshot(compute_db, snapshot)
                     await compute_db.commit()
 

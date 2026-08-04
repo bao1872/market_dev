@@ -157,6 +157,24 @@ class ReviewOverviewSignalSummaryDTO(BaseModel):
     transformed: int = Field(0, description="transformed 状态信号数")
 
 
+class ReviewChipCoverageDTO(BaseModel):
+    """[P0 2026-08-04] chip 真实覆盖率明细（以 stock_core expected_count 为分母）。
+
+    替代旧的"chip 表已有行占位比例"，前端据此显示真实覆盖率而非误称为 Chip Run 的 core run id。
+    """
+
+    expectedCount: int | None = Field(
+        None, description="stock_core run 期望股票数（覆盖率分母）",
+    )
+    succeededCount: int = Field(0, description="chip succeeded 股票数")
+    failedCount: int = Field(0, description="chip failed 股票数")
+    skippedCount: int = Field(0, description="chip skipped 股票数")
+    missingCount: int = Field(0, description="缺失股票数（expected - 已有行）")
+    coverage: float | None = Field(
+        None, description="真实覆盖率 succeeded/expected（0-1）",
+    )
+
+
 class ReviewOverviewResponse(BaseModel):
     """GET /api/v1/review/{trade_date}/overview 响应（PRD §12.1）。"""
 
@@ -177,6 +195,13 @@ class ReviewOverviewResponse(BaseModel):
         description=(
             "[QM-63] 降级原因列表（CHIP_UNAVAILABLE / CHIP_PARTIAL 等）；"
             "空数组表示无降级"
+        ),
+    )
+    chipCoverage: ReviewChipCoverageDTO | None = Field(
+        None,
+        description=(
+            "[P0 2026-08-04] chip 真实覆盖率明细；sourceChipRunId 恒为 null 时，"
+            "以此展示真实覆盖情况而非误称为 Chip Run 的 core run id"
         ),
     )
     algorithmVersion: str = Field(..., description="算法版本")
@@ -552,6 +577,10 @@ class ReviewRunResponse(BaseModel):
     degraded_reasons: list[str] = Field(
         default_factory=list,
         description="[QM-63] 降级原因列表；空数组表示无降级",
+    )
+    chip_coverage: ReviewChipCoverageDTO | None = Field(
+        None,
+        description="[P0 2026-08-04] chip 真实覆盖率明细（以 expected_count 为分母）",
     )
     algorithm_version: str = Field(..., description="算法版本")
     filter_version: str = Field(..., description="筛选器版本")

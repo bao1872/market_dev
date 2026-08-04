@@ -1679,3 +1679,145 @@ async def test_smc_freshness_factors_persist_through_snapshot(
         assert mem_val == db_val, (
             f"因子 {key} 持久化后值变化: 内存={mem_val!r} → DB={db_val!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# [FP 失败完整性 2026-08-04] 第一金字塔计算失败不得计入成功快照
+# ---------------------------------------------------------------------------
+
+
+class _SymResult:
+    """session.execute(text(symbol query)) 的假返回（可迭代）。"""
+
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+@pytest.mark.asyncio
+async def test_review_core_fp_failure_excluded_from_snapshot_count() -> None:
+    """第一金字塔计算失败（FP_COMPUTE_FAILED）→ 计入 failed，不计入成功快照。
+
+    [FP 失败完整性 2026-08-04] 第一金字塔属 core 必选结果，计算失败不能以
+    无原因的 first_pyramid=None 冒充成功，否则 stock_core coverage 虚高，
+    发布门无法识别第一金字塔实际缺失。
+    """
+    from app.services.feature_snapshot_service import (
+        compute_review_core_batch_for_trade_date,
+    )
+
+    inst_ids = [uuid.uuid4() for _ in range(3)]
+    trade_date = date(2026, 7, 31)
+
+    def _make_fp_failed_snapshot() -> MagicMock:
+        snap = MagicMock(spec=StockFeatureSnapshot)
+        snap.summary_payload = {
+            "_review_core": True,
+            "first_pyramid_status": "FP_COMPUTE_FAILED",
+        }
+        snap.degraded_reasons = ["first_pyramid: compute failed"]
+        return snap
+
+    def _make_normal_snapshot() -> MagicMock:
+        snap = MagicMock(spec=StockFeatureSnapshot)
+        snap.summary_payload = {"_review_core": True}
+        snap.degraded_reasons = []
+        return snap
+
+    session = AsyncMock()
+    # 符号查询返回 3 行（可迭代）
+    session.execute = AsyncMock(
+        return_value=_SymResult(
+            [(inst_ids[0], "AAA"), (inst_ids[1], "BBB"), (inst_ids[2], "CCC")]
+        )
+    )
+    # 3 只股票：第 1 只 FP 失败，第 2、3 只正常
+    core_compute_side_effect = [
+        _make_fp_failed_snapshot(),
+        _make_normal_snapshot(),
+        _make_normal_snapshot(),
+    ]
+
+    with patch(
+        "app.services.feature_snapshot_service.compute_review_core_for_trade_date",
+        new_callable=AsyncMock,
+        side_effect=core_compute_side_effect,
+    ) as core_compute, patch(
+        "app.services.feature_snapshot_service.upsert_snapshot",
+        new_callable=AsyncMock,
+    ) as upsert:
+        result = await compute_review_core_batch_for_trade_date(
+            session,
+            trade_date,
+            inst_ids,
+            source_run_id=uuid.uuid4(),
+            failure_threshold=0.5,  # 1/3 失败不超阈值，验证 FP 失败仍计入 failed
+        )
+
+    # FP 失败的第 1 只不计入成功快照，也不 upsert
+    assert result["snapshot_count"] == 2, "FP 失败不得计入 snapshot_count"
+    assert result["failed_count"] == 1, "FP 失败必须计入 failed_count"
+    assert upsert.await_count == 2, "FP 失败股票不得 upsert"
+    assert core_compute.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_review_core_shared_run_time_across_stocks() -> None:
+    """两只股票必须共享完全相同的 run 级 calculatedAt 与 sourceRunId。
+
+    [QM-62 / 报告 2026-08-04] 源码守卫不能作为主要行为证据；真实行为必须：
+    同一 run 的所有股票注入的 run_calculatedAt 完全相同，source_run_id 相同。
+    """
+    from app.services.feature_snapshot_service import (
+        compute_review_core_batch_for_trade_date,
+    )
+
+    inst_ids = [uuid.uuid4(), uuid.uuid4()]
+    trade_date = date(2026, 7, 31)
+    snapshot_run_id = uuid.uuid4()
+
+    def _make_normal_snapshot() -> MagicMock:
+        snap = MagicMock(spec=StockFeatureSnapshot)
+        snap.summary_payload = {"_review_core": True}
+        snap.degraded_reasons = []
+        return snap
+
+    session = AsyncMock()
+    session.execute = AsyncMock(
+        return_value=_SymResult(
+            [(inst_ids[0], "AAA"), (inst_ids[1], "BBB")]
+        )
+    )
+    captured_times: list[str] = []
+    captured_run_ids: list[uuid.UUID] = []
+
+    async def _capturing_core(*args, **kwargs):
+        captured_times.append(kwargs.get("run_calculated_at"))
+        captured_run_ids.append(kwargs.get("source_run_id"))
+        return _make_normal_snapshot()
+
+    with patch(
+        "app.services.feature_snapshot_service.compute_review_core_for_trade_date",
+        new_callable=AsyncMock,
+        side_effect=_capturing_core,
+    ), patch(
+        "app.services.feature_snapshot_service.upsert_snapshot",
+        new_callable=AsyncMock,
+    ):
+        await compute_review_core_batch_for_trade_date(
+            session,
+            trade_date,
+            inst_ids,
+            source_run_id=snapshot_run_id,
+        )
+
+    # 两只股票共享完全相同的 calculatedAt 与 sourceRunId
+    assert len(captured_times) == 2
+    assert captured_times[0] == captured_times[1], (
+        "同 run 两只股票的 calculatedAt 必须完全相同"
+    )
+    assert captured_run_ids[0] == captured_run_ids[1] == snapshot_run_id, (
+        "同 run 两只股票的 sourceRunId 必须相同且等于入口传入值"
+    )

@@ -50,6 +50,7 @@ from app.models.market_review import (
 from app.schemas.review import (
     ReviewAttributionListResponse,
     ReviewAttributionResponse,
+    ReviewChipCoverageDTO,
     ReviewDatesResponse,
     ReviewInstrumentListResponse,
     ReviewInstrumentResponse,
@@ -396,6 +397,25 @@ async def get_latest_review(
     )
 
 
+def _extract_chip_coverage(run: MarketReviewRun) -> ReviewChipCoverageDTO | None:
+    """[P0 2026-08-04] 从 run.metadata_json 提取 chip 真实覆盖率明细。
+
+    chip_coverage 由 create_run 时 _resolve_chip_dependency 写入 metadata_json，
+    以 stock_core expected_count 为分母；缺失时返回 None（前端不展示虚报的覆盖率）。
+    """
+    raw = (run.metadata_json or {}).get("chip_coverage")
+    if not raw or not isinstance(raw, dict):
+        return None
+    return ReviewChipCoverageDTO(
+        expectedCount=raw.get("expected_count"),
+        succeededCount=int(raw.get("succeeded_count") or 0),
+        failedCount=int(raw.get("failed_count") or 0),
+        skippedCount=int(raw.get("skipped_count") or 0),
+        missingCount=int(raw.get("missing_count") or 0),
+        coverage=raw.get("coverage"),
+    )
+
+
 @router.get("/{trade_date}/overview", response_model=ReviewOverviewResponse)
 async def get_review_overview(
     trade_date: str,
@@ -460,6 +480,8 @@ async def get_review_overview(
             str(run.source_chip_run_id) if run.source_chip_run_id else None
         ),
         degradedReasons=list(run.degraded_reasons or []),
+        # [P0 2026-08-04] chip 真实覆盖率明细（以 expected_count 为分母）
+        chipCoverage=_extract_chip_coverage(run),
         algorithmVersion=run.algorithm_version,
         filterVersion=run.filter_version,
         baselineWindow=run.baseline_window,

@@ -351,6 +351,59 @@ class DimensionResult(BaseModel):
     )
 
 
+# 字段级 availability 合法 reasonCode（[字段级 availability 合同 2026-08-04]）
+FIELD_AVAILABILITY_REASONS: frozenset[str] = frozenset({
+    "not_applicable",       # 语义不适用（如无挤压时挤压期均量）
+    "insufficient_history", # 历史样本不足
+    "upstream_unavailable", # 上游数据缺失
+    "failed",               # 计算异常
+    "stale",                # 结果过期
+    "missing",              # producer 未写该字段
+})
+
+
+class FieldAvailability(BaseModel):
+    """条件性可空因子的字段级 availability 合同（[QM 2026-08-04]）。
+
+    解决"合法空值没有字段级原因"：具体因子为 None 时必须能区分
+    not_applicable / insufficient_history / upstream_unavailable / failed /
+    stale / missing，并返回完整的溯源元数据。
+    """
+
+    availability: str = Field(
+        ...,
+        description=(
+            "稳定状态码：not_applicable / insufficient_history / "
+            "upstream_unavailable / failed / stale / missing"
+        ),
+    )
+    reasonCode: str = Field(
+        ...,
+        description="机器可读原因码（与 availability 相同，保持稳定）",
+    )
+    reasonText: str = Field(
+        ..., description="人类可读原因（含实际数据数量与边界，便于诊断）"
+    )
+    observationCount: int | None = Field(
+        None, description="可用观测数（如历史样本数）；不适用时 None"
+    )
+    sourceRunId: str | None = Field(
+        None, description="产生该字段的 run id；单股各自计算时为 None"
+    )
+    calculatedAt: str | None = Field(
+        None, description="产生该字段的计算时间 ISO"
+    )
+
+    @model_validator(mode="after")
+    def _check_reason_code(self) -> FieldAvailability:
+        if self.reasonCode not in FIELD_AVAILABILITY_REASONS:
+            raise ValueError(
+                f"reasonCode 非法: {self.reasonCode!r}，"
+                f"只接受 {sorted(FIELD_AVAILABILITY_REASONS)}"
+            )
+        return self
+
+
 class FirstPyramidSnapshot(BaseModel):
     """第一金字塔统一快照（PRD20 QM-01~QM-43、QM-60~QM-62）。
 
@@ -393,6 +446,16 @@ class FirstPyramidSnapshot(BaseModel):
     # 批任务入口缺 sourceRunId 应直接失败，不得产出"一半有来源"的快照。
     sourceRunId: str | None = Field(
         None, description="run级唯一来源 id；由编排器注入，单股各自计算时为 None"
+    )
+    # [字段级 availability 合同 2026-08-04] 条件性可空因子的字段级原因。
+    # key 为因子路径（如 "momentum.squeeze_avg_volume"），value 为 FieldAvailability。
+    # 具体因子为 None 时必须在 fieldAvailability 中给出原因，禁止无原因的缺失。
+    fieldAvailability: dict[str, FieldAvailability] = Field(
+        default_factory=dict,
+        description=(
+            "条件性可空因子的字段级 availability 元数据"
+            "（key=字段路径，value=原因+溯源）"
+        ),
     )
 
     @model_validator(mode="after")

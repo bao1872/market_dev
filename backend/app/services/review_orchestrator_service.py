@@ -54,6 +54,7 @@ from app.models.market_review import (
     MarketReviewScopeSnapshot,
 )
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
+from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.review_attribution_service import (
     compute_signal_attributions,
@@ -181,8 +182,8 @@ async def create_run(
         source_board_run_id=source_board_run_id,
     )
 
-    # [QM-63 review 依赖矩阵 2026-08-04] 解析 chip 来源与降级原因
-    chip_run_id, degraded_reasons = await _resolve_chip_dependency(
+    # [QM-63 review 依赖矩阵 2026-08-04] 解析 chip 来源、降级原因与覆盖率
+    chip_run_id, degraded_reasons, chip_coverage = await _resolve_chip_dependency(
         session,
         trade_date=trade_date,
         source_core_run_id=resolved_core_id,
@@ -206,6 +207,8 @@ async def create_run(
                 "symbols": symbols,
                 "dry_run": True,
                 "idempotency_key": idempotency_key,
+                # [P0 2026-08-04] chip 真实覆盖率（非占位比例）
+                "chip_coverage": chip_coverage,
             },
         )
 
@@ -214,6 +217,8 @@ async def create_run(
         "canary": canary,
         "symbols": symbols,
         "idempotency_key": idempotency_key,
+        # [P0 2026-08-04] chip 真实覆盖率（非占位比例）
+        "chip_coverage": chip_coverage,
     }
     values = {
         "trade_date": trade_date,
@@ -394,17 +399,24 @@ async def _resolve_chip_dependency(
     *,
     trade_date: date,
     source_core_run_id: uuid.UUID,
-) -> tuple[uuid.UUID | None, list[str]]:
+) -> tuple[uuid.UUID | None, list[str], dict[str, Any]]:
     """[QM-63 review 依赖矩阵 2026-08-04] 解析 chip 来源与降级原因。
 
-    依赖矩阵（PRD §11 / QM-63）：
-    - chip 存在（至少一条 succeeded 的 stock_chip_consensus_snapshot
-      匹配 core_run_id + trade_date）→ source_chip_run_id = core_run_id，
-      无降级；
-    - chip 完全缺失 / 全部 failed → source_chip_run_id = None，
-      降级为 core-only，degraded_reasons = ["CHIP_UNAVAILABLE"]；
-    - 部分成功（succeeded + failed 混合）→ 仍记录 source_chip_run_id，
-      降级原因 ["CHIP_PARTIAL"]（可用维度仍纳入，缺失维度按 unavailable 处理）。
+    [P0 修复 2026-08-04] 覆盖率合同：以 stock_core run 的 expected_count 为分母，
+    对比 chip 实际落库的 succeeded/failed/skipped，计算真实覆盖率判定
+    ready/partial/unavailable。不再用“chip 表已有行”的占位比例冒充覆盖率，
+    也不再遗漏缺失股票（missing = expected - 已有行）。
+
+    依赖矩阵：
+    - expected 无法确定（core run 缺失 expected_count）或 succeeded == 0
+      → source_chip_run_id = None，降级 core-only，
+        degraded_reasons = ["CHIP_UNAVAILABLE"]；
+    - coverage >= 1.0（全部 expected 股票 chip succeeded）→ 无降级；
+    - 否则 → ["CHIP_PARTIAL"]。
+
+    source_chip_run_id 语义修正（[P0 2026-08-04]）：chip 无独立 run 记录，
+    只通过 core_run_id 挂靠 stock_core；因此不得把 core run id 冒充 chip run id。
+    这里恒返回 None，chip 质量由 degraded_reasons + coverage 表达。
 
     Args:
         session: 异步 DB 会话
@@ -412,8 +424,11 @@ async def _resolve_chip_dependency(
         source_core_run_id: stock_core run id（chip 的 core_run_id 与之相等）
 
     Returns:
-        (source_chip_run_id, degraded_reasons)
+        (source_chip_run_id, degraded_reasons, chip_coverage)
+        chip_coverage = {expected_count, succeeded_count, failed_count,
+                          skipped_count, missing_count, coverage}
     """
+    # 1. chip 实际落库统计（按 status 分组）
     stmt = (
         select(
             StockChipConsensusSnapshot.status,
@@ -427,23 +442,56 @@ async def _resolve_chip_dependency(
     )
     rows = (await session.execute(stmt)).all()
 
-    if not rows:
-        # chip 完全缺失：降级 core-only
-        return None, ["CHIP_UNAVAILABLE"]
-
-    total = 0
-    succeeded = 0
+    counts: dict[str, int] = {"succeeded": 0, "failed": 0, "skipped": 0}
     for status_val, cnt in rows:
-        total += cnt
-        if status_val == "succeeded":
-            succeeded += cnt
-    if succeeded == 0:
-        # 全部失败：降级 core-only
-        return None, ["CHIP_UNAVAILABLE"]
-    if succeeded < total:
-        # 部分成功：记录来源，但标记 partial 降级
-        return source_core_run_id, ["CHIP_PARTIAL"]
-    return source_core_run_id, []
+        key = status_val if status_val in counts else "failed"
+        counts[key] += cnt
+
+    # 2. 从 stock_core run 读取 expected_count（覆盖率分母）
+    expected_count = await _load_core_expected_count(session, source_core_run_id)
+
+    succeeded = counts["succeeded"]
+    failed = counts["failed"]
+    skipped = counts["skipped"]
+    existing = succeeded + failed + skipped
+    missing = max(0, (expected_count or 0) - existing)
+    coverage = (
+        succeeded / expected_count
+        if expected_count and expected_count > 0
+        else 0.0
+    )
+
+    chip_coverage = {
+        "expected_count": expected_count,
+        "succeeded_count": succeeded,
+        "failed_count": failed,
+        "skipped_count": skipped,
+        "missing_count": missing,
+        "coverage": round(coverage, 6),
+    }
+
+    # 3. 覆盖率判定（不再用占位比例，也不误称 core run 为 chip run）
+    if expected_count is None or expected_count <= 0 or succeeded == 0:
+        return None, ["CHIP_UNAVAILABLE"], chip_coverage
+    if coverage >= 1.0 and missing == 0:
+        return None, [], chip_coverage
+    return None, ["CHIP_PARTIAL"], chip_coverage
+
+
+async def _load_core_expected_count(
+    session: AsyncSession,
+    source_core_run_id: uuid.UUID,
+) -> int | None:
+    """读取 stock_core run 的 expected_count（active A 股总数，覆盖率分母）。
+
+    expected_count 缺失时返回 None（无法确定覆盖率，按 unavailable 处理）。
+    """
+    stmt = (
+        select(StockFeatureSnapshotRun.expected_count)
+        .where(StockFeatureSnapshotRun.id == source_core_run_id)
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def _get_publication(
