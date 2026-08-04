@@ -310,6 +310,70 @@ async def test_chip_unavailable_when_expected_count_missing() -> None:
     assert coverage["expected_count"] is None
 
 
+async def test_chip_query_isolated_by_algorithm_version_and_distinct() -> None:
+    """chip 覆盖查询必须按当前算法版本隔离，且按 instrument 去重。
+
+    [P0 2026-08-04] chip 表唯一键含 algorithm_version：同一
+    (instrument, trade_date, core_run_id) 可同时存在不同 chip 版本记录。
+    不隔离会重复计数、coverage 超 100%、旧版本行掩盖新版本失败。
+    """
+    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
+
+    run = _make_run()
+    _fake = _make_session([
+        _FakeResult(scalar_list=[("succeeded", 5000)]),
+        _FakeResult(scalar=5000),
+    ])
+    await _resolve_chip_dependency(
+        _fake, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
+    )
+
+    # 捕获第一条 chip 统计查询，断言 WHERE 含 algorithm_version、投影用 DISTINCT
+    chip_stmt = _fake.execute.call_args_list[0][0][0]
+    sql = chip_stmt.compile(
+        compile_kwargs={"literal_binds": True}
+    ).string.lower()
+    assert "algorithm_version" in sql, (
+        "chip 覆盖查询必须按 algorithm_version 隔离（防止跨版本重复计数）"
+    )
+    assert "distinct" in sql, (
+        "chip 覆盖统计必须 COUNT(DISTINCT instrument_id)（防止同版本重复行）"
+    )
+    assert CHIP_CONSENSUS_ALGORITHM_VERSION in sql
+
+
+async def test_chip_coverage_records_algorithm_version() -> None:
+    """chip_coverage 元数据必须记录实际采用的 chip 算法版本。"""
+    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
+
+    run = _make_run()
+    session = _make_session([
+        _FakeResult(scalar_list=[("succeeded", 5000)]),
+        _FakeResult(scalar=5000),
+    ])
+    _, _, coverage = await _resolve_chip_dependency(
+        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
+    )
+    assert coverage["algorithm_version"] == CHIP_CONSENSUS_ALGORITHM_VERSION
+
+
+async def test_chip_ready_requires_no_failed_skipped_missing() -> None:
+    """ready 必须 succeeded==expected 且 failed==0、skipped==0、missing==0。"""
+    run = _make_run()
+    # succeeded=5000 但有 failed=1 → 不得判为无降级
+    session = _make_session([
+        _FakeResult(scalar_list=[("succeeded", 5000), ("failed", 1)]),
+        _FakeResult(scalar=5000),
+    ])
+    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
+        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
+    )
+    assert chip_run_id is None
+    assert reasons == ["CHIP_PARTIAL"], (
+        "存在 failed 即使 succeeded 已达 expected 也不得判为无降级"
+    )
+
+
 # ---------------------------------------------------------------------------
 # [P0 2026-08-04] chip 覆盖率经 API/schema 暴露（前端显示真实覆盖率）
 # ---------------------------------------------------------------------------

@@ -531,6 +531,15 @@ class FirstPyramidCoreSnapshot(BaseModel):
     calculatedAt: str | None = Field(
         None, description="run级唯一计算时间；由编排器注入"
     )
+    # [字段级 availability 合同 2026-08-04] 条件性可空因子的字段级原因。
+    # 与 FirstPyramidSnapshot 一致；盘后 stock_core / Review 主链持久化必须携带。
+    fieldAvailability: dict[str, FieldAvailability] = Field(
+        default_factory=dict,
+        description=(
+            "条件性可空因子的字段级 availability 元数据"
+            "（key=字段路径，value=原因+溯源）"
+        ),
+    )
     nBars: int = Field(..., description="输入 bar 数")
     lastBarIndex: int = Field(..., description="最后一根 bar 的索引（0-based）")
 

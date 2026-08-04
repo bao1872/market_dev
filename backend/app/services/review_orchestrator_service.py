@@ -428,15 +428,25 @@ async def _resolve_chip_dependency(
         chip_coverage = {expected_count, succeeded_count, failed_count,
                           skipped_count, missing_count, coverage}
     """
-    # 1. chip 实际落库统计（按 status 分组）
+    # 1. chip 实际落库统计（按 status 分组）。
+    #    [P0 2026-08-04 算法版本隔离] chip 表唯一键含 algorithm_version，同一
+    #    (instrument, trade_date, core_run_id) 可同时存在不同 chip 版本记录；
+    #    必须按当前 chip 算法版本过滤，并用 COUNT(DISTINCT instrument_id) 去重，
+    #    否则可能重复计数、coverage 超 100%、旧版本行掩盖新版本失败。
+    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
+
     stmt = (
         select(
             StockChipConsensusSnapshot.status,
-            func.count(StockChipConsensusSnapshot.id),
+            func.count(
+                func.distinct(StockChipConsensusSnapshot.instrument_id)
+            ),
         )
         .where(
             StockChipConsensusSnapshot.trade_date == trade_date,
             StockChipConsensusSnapshot.core_run_id == source_core_run_id,
+            StockChipConsensusSnapshot.algorithm_version
+            == CHIP_CONSENSUS_ALGORITHM_VERSION,
         )
         .group_by(StockChipConsensusSnapshot.status)
     )
@@ -468,12 +478,20 @@ async def _resolve_chip_dependency(
         "skipped_count": skipped,
         "missing_count": missing,
         "coverage": round(coverage, 6),
+        # [P0 2026-08-04] 记录实际采用的 chip 算法版本（覆盖判定以它为隔离口径）
+        "algorithm_version": CHIP_CONSENSUS_ALGORITHM_VERSION,
     }
 
-    # 3. 覆盖率判定（不再用占位比例，也不误称 core run 为 chip run）
+    # 3. 覆盖率判定（不再用占位比例，也不误称 core run 为 chip run）。
+    #    ready 要求：全部 expected 股票 succeeded，且无 failed/skipped/missing。
     if expected_count is None or expected_count <= 0 or succeeded == 0:
         return None, ["CHIP_UNAVAILABLE"], chip_coverage
-    if coverage >= 1.0 and missing == 0:
+    if (
+        succeeded >= expected_count
+        and failed == 0
+        and skipped == 0
+        and missing == 0
+    ):
         return None, [], chip_coverage
     return None, ["CHIP_PARTIAL"], chip_coverage
 

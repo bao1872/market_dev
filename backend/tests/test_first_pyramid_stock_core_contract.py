@@ -230,3 +230,84 @@ def _safe_float(v) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+class TestFieldAvailabilityAfterCloseChain:
+    """[字段级 availability 合同 2026-08-04] 盘后 stock_core/Review 主链必须携带 fieldAvailability。
+
+    即时完整视图（assemble_first_pyramid_view）已有 test_assemble_view_injects_field_availability
+    覆盖；本类验证盘后主链的**源**（FirstPyramidCoreSnapshot）与**溯源注入**（inject_...）。
+    """
+
+    def test_core_snapshot_carries_field_availability(self):
+        """盘后主链使用的 FirstPyramidCoreSnapshot 必须携带 fieldAvailability。"""
+        core = compute_first_pyramid_core_snapshot(
+            _build_bars(n=250), symbol="TEST.UP",
+            trade_date=_build_bars(n=250).index[-1].date().isoformat(),
+        )
+        assert isinstance(core, FirstPyramidCoreSnapshot)
+        assert hasattr(core, "fieldAvailability"), (
+            "FirstPyramidCoreSnapshot 缺 fieldAvailability → 盘后持久化链丢失字段级原因"
+        )
+        # 至少高空值字段存在显式原因（squeeze_avg_volume / volume_relation / sqzmom_value）
+        keys = set(core.fieldAvailability.keys())
+        assert "momentum.squeeze_avg_volume" in keys or keys, (
+            "fieldAvailability 必须至少覆盖条件性可空因子"
+        )
+        for fa in core.fieldAvailability.values():
+            assert fa.reasonCode in {
+                "not_applicable",
+                "insufficient_history",
+                "upstream_unavailable",
+                "failed",
+                "stale",
+                "missing",
+            }, f"非法 reasonCode: {fa.reasonCode}"
+
+    def test_inject_field_availability_provenance_fills_run_meta(self):
+        """inject_field_availability_provenance 必须为每个条目注入 sourceRunId/calculatedAt。
+
+        [PRD 溯源要求] 每个 FieldAvailability 返回 sourceRunId / calculatedAt；
+        盘后主链由编排器统一注入（同一 run 全股票共享）。
+        """
+        from app.schemas.first_pyramid import FieldAvailability
+        from app.services.first_pyramid_service import (
+            inject_field_availability_provenance,
+        )
+
+        avail = {
+            "momentum.squeeze_avg_volume": FieldAvailability(
+                availability="not_applicable",
+                reasonCode="not_applicable",
+                reasonText="当前无挤压，均量不适用",
+                observationCount=0,
+            )
+        }
+        injected = inject_field_availability_provenance(
+            avail,
+            source_run_id="00000000-0000-0000-0000-0000000000aa",
+            calculated_at="2026-08-04T15:30:00Z",
+        )
+        entry = injected["momentum.squeeze_avg_volume"]
+        assert entry.sourceRunId == "00000000-0000-0000-0000-0000000000aa"
+        assert entry.calculatedAt == "2026-08-04T15:30:00Z"
+        assert entry.reasonCode == "not_applicable"
+
+    def test_inject_keeps_none_when_no_run(self):
+        """单股即时路径无 run 来源时保持 None（不伪造溯源）。"""
+        from app.schemas.first_pyramid import FieldAvailability
+        from app.services.first_pyramid_service import (
+            inject_field_availability_provenance,
+        )
+
+        avail = {
+            "momentum.squeeze_avg_volume": FieldAvailability(
+                availability="not_applicable",
+                reasonCode="not_applicable",
+                reasonText="当前无挤压",
+                observationCount=0,
+            )
+        }
+        injected = inject_field_availability_provenance(avail, source_run_id=None, calculated_at=None)
+        assert injected["momentum.squeeze_avg_volume"].sourceRunId is None
+        assert injected["momentum.squeeze_avg_volume"].calculatedAt is None

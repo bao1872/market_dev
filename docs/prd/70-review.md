@@ -1537,8 +1537,15 @@ Review run 创建时必须显式解析上游依赖状态，并把结果固化到
 > `succeeded_count / failed_count / skipped_count / missing_count / coverage`，
 > 覆盖率写入 `run.metadata_json["chip_coverage"]` 并经 overview/run API 暴露给前端展示。
 > 判定规则：`expected_count` 缺失或 `succeeded==0` → `CHIP_UNAVAILABLE`；
-> `coverage==1` 且 `missing==0` → 无降级；否则 `CHIP_PARTIAL`。
-> 不得再用"chip 表已有行"的占位比例冒充覆盖率（那会漏掉缺失股票）。
+> 无降级仅当 `succeeded >= expected` **且 `failed==0` 且 `skipped==0` 且 `missing==0`**；
+> 否则 `CHIP_PARTIAL`。不得再用"chip 表已有行"的占位比例冒充覆盖率（那会漏掉缺失股票）。
+
+> **[P0 2026-08-04] chip 覆盖率算法版本隔离**：chip 表唯一键含 `algorithm_version`，
+> 同一 (instrument, trade_date, core_run_id) 可同时存在不同 chip 算法版本记录。
+> 覆盖统计必须按当前 `CHIP_CONSENSUS_ALGORITHM_VERSION` 过滤，并用
+> `COUNT(DISTINCT instrument_id)` 去重，否则会重复计数、coverage 超 100%、
+> 旧版本成功行掩盖新版本失败行。实际采用的 chip 算法版本写入
+> `metadata_json["chip_coverage"]["algorithm_version"]`。
 
 `market_review_runs` 新增两列承载该合同：
 
@@ -1555,8 +1562,10 @@ Review run 创建时必须显式解析上游依赖状态，并把结果固化到
 新增三条硬门：
 
 1. **无未来数据（point-in-time 硬门）**：本 run 落库的 `market_review_metric_observations`
-   不得存在 `trade_date >= run.trade_date` 的记录。历史基线必须严格早于目标日期，
-   检出即阻断并报告条数。
+   不得存在 `trade_date > run.trade_date` 的**严格未来**记录（`>` 而非 `>=`，[P0 2026-08-04]）。
+   本 run 正常落库的当日观测（`trade_date == run.trade_date`）是合法行为，不得被拦截；
+   门禁只拦截乱序/未来观测（代表历史基线污染）。历史基线读取满足 `observation.trade_date < run.trade_date`。
+   检出严格未来即阻断并报告条数。
 2. **reason 完整性**：market 范围的 P/Q/U/C/V，凡处于非 ready 状态
    （`raw_ready=false`，或 `raw_ready=true` 且 `normalized_ready=false`）
    必须给出非空 `readiness.reason`。**禁止无原因的不可用**——与第一金字塔 chip 七态合同一致。

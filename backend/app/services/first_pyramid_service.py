@@ -1040,6 +1040,9 @@ def compute_first_pyramid_core_snapshot(
         volumeContext=vc_schema,
         inputHash=input_hash,
         parameterHash=parameter_hash,
+        # [字段级 availability 合同 2026-08-04] 盘后主链必须携带字段级原因；
+        # sourceRunId/calculatedAt 由编排器在持久化时按 run 注入（见 feature_snapshot_service）。
+        fieldAvailability=_build_field_availability(momentum_dim),
         nBars=n_bars,
         lastBarIndex=last_bar_index,
     )
@@ -1224,6 +1227,31 @@ def _build_field_availability(
             "missing", "上游未提供 sqzmom_val",
         )
 
+    return out
+
+
+def inject_field_availability_provenance(
+    availability: dict[str, FieldAvailability],
+    *,
+    source_run_id: str | None,
+    calculated_at: str | None,
+) -> dict[str, FieldAvailability]:
+    """[字段级 availability 合同 2026-08-04] 为每个字段级条目注入 run 级溯源。
+
+    PRD 要求每个 FieldAvailability 返回 sourceRunId / calculatedAt。
+    单股即时路径无 run 来源，source_run_id/calculated_at 为 None 时保持 None；
+    盘后 stock_core / Review 主链由编排器统一注入（同一 run 全股票共享）。
+    """
+    if not availability:
+        return availability
+    out: dict[str, FieldAvailability] = {}
+    for key, fa in availability.items():
+        out[key] = fa.model_copy(
+            update={
+                "sourceRunId": source_run_id,
+                "calculatedAt": calculated_at,
+            }
+        )
     return out
 
 

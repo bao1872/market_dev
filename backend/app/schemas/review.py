@@ -186,8 +186,9 @@ class ReviewOverviewResponse(BaseModel):
     sourceChipRunId: str | None = Field(
         None,
         description=(
-            "[QM-63] 输入 chip 共识 run ID；null 表示 chip 不可用，"
-            "本次 run 降级为 core-only（不得理解为未记录）"
+            "[P0 2026-08-04] chip 无独立可追溯 snapshot run ID，本字段恒为 null；"
+            "即使 chip 覆盖 100% 也为 null（chip 只通过 core_run_id 挂靠 stock_core）。"
+            "chip 真实质量读取 chipCoverage 与 degradedReasons。"
         ),
     )
     degradedReasons: list[str] = Field(
@@ -570,8 +571,8 @@ class ReviewRunResponse(BaseModel):
     source_chip_run_id: str | None = Field(
         None,
         description=(
-            "[QM-63] 输入 chip 共识 run ID；null 表示 chip 不可用，"
-            "本次 run 降级为 core-only"
+            "[P0 2026-08-04] chip 无独立可追溯 snapshot run ID，本字段恒为 null；"
+            "chip 真实质量读取 chip_coverage 与 degraded_reasons。"
         ),
     )
     degraded_reasons: list[str] = Field(

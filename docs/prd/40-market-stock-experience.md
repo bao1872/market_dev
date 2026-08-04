@@ -300,12 +300,16 @@ API 响应字段：
 - `insufficient_history=true` 时，`rawValue` 仍可展示；只有 normalized/分位/筛选信号变空。
 
 > **[字段级 availability 合同 2026-08-04]** 条件性可空因子的字段级原因必须具体化。
-> `FirstPyramidSnapshot` 承载 `fieldAvailability`（key=字段路径，value=FieldAvailability），
+> `FirstPyramidSnapshot` **与盘后 `FirstPyramidCoreSnapshot`** 均承载 `fieldAvailability`
+> （key=字段路径，value=FieldAvailability），即时完整视图与盘后 stock_core/Review 主链持久化
+> 必须一致携带，禁止只在即时路径暴露。
 > 合法 reasonCode 共六类：`not_applicable`（语义不适用，如无挤压时挤压期均量）、
 > `insufficient_history`（历史样本不足）、`upstream_unavailable`（上游数据缺失）、
 > `failed`（计算异常）、`stale`（结果过期）、`missing`（producer 未写该字段）。
 > 每个 FieldAvailability 返回：`availability / reasonCode / reasonText / observationCount /
-> sourceRunId / calculatedAt`。此前高空值字段（`momentum.squeeze_avg_volume`、
+> sourceRunId / calculatedAt`；其中 `sourceRunId`/`calculatedAt` 在盘后主链由编排器
+> 按 run 统一注入（同一 run 全股票共享，与 snapshot 级溯源一致），单股即时路径无 run 来源时
+> 保持 `None`（不伪造溯源）。此前高空值字段（`momentum.squeeze_avg_volume`、
 > `momentum.volume_relation`、`momentum.sqzmom_value`）在维度可用但无挤压时必须
 > 标记 `not_applicable`，上游缺失时标记 `upstream_unavailable`，禁止无原因的空 `null`。
 

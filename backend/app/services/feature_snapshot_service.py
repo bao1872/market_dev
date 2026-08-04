@@ -918,6 +918,22 @@ async def compute_review_core_for_trade_date(
             )
             if run_calculated_at is not None:
                 first_pyramid_dict["calculatedAt"] = run_calculated_at
+            # [字段级 availability 合同 2026-08-04] 盘后主链必须持久化字段级原因，
+            # 且每个条目注入同一 run 的 sourceRunId/calculatedAt（PRD 溯源要求）。
+            from app.services.first_pyramid_service import (
+                inject_field_availability_provenance,
+            )
+            fp_avail = fp_core.fieldAvailability or {}
+            if fp_avail:
+                first_pyramid_dict["fieldAvailability"] = (
+                    inject_field_availability_provenance(
+                        fp_avail,
+                        source_run_id=(
+                            str(source_run_id) if source_run_id is not None else None
+                        ),
+                        calculated_at=run_calculated_at,
+                    )
+                )
     except Exception as exc:
         logger.warning(
             "review core 第一金字塔计算失败 instrument_id=%s trade_date=%s: %s",

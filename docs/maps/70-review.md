@@ -517,9 +517,16 @@ scope identity（`scope_type` + `scope_key`）+ compatible taxonomy +
 `source_chip_run_id` **恒为 `None`**（[P0 2026-08-04]）：chip 无独立 run 记录，只通过
 `core_run_id` 挂靠 stock_core，不得把 `source_core_run_id` 写成 `source_chip_run_id` 冒充。
 chip 质量由 `degraded_reasons` + `metadata_json["chip_coverage"]` 表达：
-`{expected_count, succeeded_count, failed_count, skipped_count, missing_count, coverage}`。
+`{expected_count, succeeded_count, failed_count, skipped_count, missing_count, coverage,
+algorithm_version}`。
 coverage 经 `_extract_chip_coverage`（`app/api/review.py` / `admin_review.py`）暴露到
 overview/run API 的 `chipCoverage` / `chip_coverage` 字段。
+
+[P0 2026-08-04 算法版本隔离] chip 覆盖查询按 `CHIP_CONSENSUS_ALGORITHM_VERSION` 过滤，
+并用 `COUNT(DISTINCT instrument_id)` 按 instrument 去重（chip 表唯一键含
+`algorithm_version`，同一 core run 可存在多版本记录，不隔离会重复计数/旧版掩盖新版）。
+无降级判定要求 `succeeded >= expected` 且 `failed==0` 且 `skipped==0` 且 `missing==0`。
+实际采用的 chip 算法版本记录在 `chip_coverage["algorithm_version"]`。
 
 ### 24.3 `evaluate_publish_gate` 查询顺序（测试 mock 必须与之一致）
 

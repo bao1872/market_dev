@@ -152,7 +152,7 @@
 | 动量维度 | 调用 `compute_bollinger_features` + `compute_sqzmom_lb`；输出 squeeze 状态/BB 带宽/SQZ_OFF/MOMENTUM_DIFFUSION 事件 |
 | 筹码共识 | 调用 `compute_node_cluster_profile`；无有效峰时返回 None，不阻塞前三维；**可选层，不得用 VAH/VAL 过滤或替代主要筹码峰** |
 | 跨入口一致性 | 同 OHLCV + 参数 → 同 inputHash/parameterHash/snapshot；测试 `test_first_pyramid_contract.py` 验证 |
-| 字段级 availability | [2026-08-04] `FirstPyramidSnapshot.fieldAvailability`（key=字段路径，value=FieldAvailability）；`_build_field_availability` 覆盖 `momentum.squeeze_avg_volume/volume_relation/sqzmom_value`；合法 reasonCode 六类：not_applicable/insufficient_history/upstream_unavailable/failed/stale/missing |
+| 字段级 availability | [2026-08-04] `FirstPyramidSnapshot` **与盘后 `FirstPyramidCoreSnapshot`** 均承载 `fieldAvailability`（key=字段路径，value=FieldAvailability）；`compute_first_pyramid_core_snapshot` 构建、`inject_field_availability_provenance` 在盘后主链按 run 注入 `sourceRunId/calculatedAt`；`_build_field_availability` 覆盖 `momentum.squeeze_avg_volume/volume_relation/sqzmom_value`；合法 reasonCode 六类：not_applicable/insufficient_history/upstream_unavailable/failed/stale/missing |
 | FP 失败完整性 | [2026-08-04] `compute_review_core_for_trade_date` 第一金字塔异常 → `summary_payload.first_pyramid_status=FP_COMPUTE_FAILED` + degraded reason；batch 路径计入 failed_count 且不 upsert、run-items 路径标记 item failed；不得以无原因 `first_pyramid=None` 冒充成功 |
 | 状态文本顺序 | trend→structure→momentum→chip_consensus（修正历史 trend→momentum→structure→volume 错误顺序） |
 | 事件级别契约 | BOS/CHoCH/OB_ENTRY 事件 `extra.structure_level = "swing"（主要级别）\| "internal"（短线级别）`；EQH/EQL 事件 `structure_level = null`（不显示虚构级别）；前端 FirstPyramidPanel 显示中文事件名（结构突破/结构转折/进入订单区域/连续高点/连续低点） |
