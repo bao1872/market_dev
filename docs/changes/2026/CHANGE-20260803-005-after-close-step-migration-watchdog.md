@@ -69,3 +69,62 @@
 
 - `computing_review`（约 380 行）因风险与纯单元测试约束，未整体包裹进 `execute_orchestrator_step`，沿用既有分支逻辑但通过 `_review_failed` 接入统一 `partial_success` 收尾；Review service 自身有独立状态机，整体迁移列为后续工作。
 - 真实 Feature Snapshot 主链（7 小时）性能与端到端运行验证需在共享开发库 / 生产环境进行，不在本轮本地验证范围。
+
+## 6. Phase 0 修正与收口（2026-08-03）
+
+> 本 CHANGE 原稿基于 `90c3eaa` 后的开发中间态，其中若干"已完成"结论被审阅评估为夸大（见 §6.1）。Phase 0 在保留原改动价值的基础上补齐了这些缺口，并新增了本收口对应的行为测试。以下描述的是 Phase 0 修复后的**真实实现**，与 `after_close_orchestrator.py` 逐字一致。
+
+### 6.1 对原稿结论的修正
+
+| 原稿表述 | 评估 | Phase 0 实际 |
+|---|---|---|
+| §2.1 标题"全步骤迁移到执行器" | 夸大：`computing_review` 明确未包裹进执行器 | 保持如实标注：`computing_review` 仍不经过 `execute_orchestrator_step`，经内联 `review_orchestrator_service` 逻辑 + `_update_orchestrator_status` 实现，通过 `_review_failed` 接入统一 `partial_success`。**"全步骤迁移"结论不成立**，PRD AC-02 中 `auction_anchor / enqueue_chip_job / watchlist_ready` 中 watchlist_ready 仍未成为正式步骤 |
+| §2.2 运行中取消 | 原稿只做开始前一次检查，`_run_with_cancellation` 仅 `wait_for`，无法在运行中终止业务 | 已实现真实运行中取消：`_run_with_cancellation` 把 operation 建为独立 task，周期调用 `cancellation_check`，命中时 `op_task.cancel()` + `await`，`_StepCancelledError` 转 `cancelled` summary 不炸穿 Worker（`execute_orchestrator_step` L273-320/L240-247） |
+| §2.3 stale watchdog | 原稿 `elapsed_seconds` 仅 finally 后计算，运行期恒为 None，`step_timed_out` 无法实时触发 | 已实现运行期实时判定：执行器唯一周期循环 `_tick_loop` 每 `_HEARTBEAT_INTERVAL_SECONDS`(10s) 刷新 `elapsed_seconds / heartbeat_at / last_progress_at`，`get_after_close_run_status` 用 `running + elapsed_seconds > timeout` 判定 `step_timed_out`（`stale = heartbeat_stale or step_timed_out`） |
+| §2.4 chip 创建时机 | 原稿 chip 在主 run succeeded 之后创建，创建失败不进入 partial_success | 已抽为正式步骤 `_enqueue_chip_job_step`（step=`enqueue_chip_job`），在主任务终态提交**之前**调用（L3126 → L3175），返回 `(status, chip_job_id)`，入队失败纳入 `_optional_failed` 判定 partial_success，metadata 记录 `chip_enqueue_status / chip_job_id` |
+
+### 6.2 心跳契约修正（单一周期循环）
+
+- `_job_run_heartbeat_loop`（无限循环）不再作为 heartbeat 回调传入执行器；改为 `_make_step_heartbeat` 构造**单次 touch** 回调，执行器在唯一周期循环 `_tick_loop` 内每次 touch 一次 `touch_job_run_heartbeat`（fenced UPDATE，检查 lease_epoch + status='running'，失败即停止心跳）。
+- 效果：心跳从"独立无限循环"收敛为"执行器单一周期循环内的单次 touch"，避免循环套循环，且运行期心跳持续更新。
+
+### 6.3 syncing_boards 的 result/summary 分离
+
+- 原调用 `board_summary, _ = await execute_orchestrator_step(...)` 把业务 result 误当执行器 summary，导致业务 failed 时 step summary 仍为 succeeded，且超时 result=None 时取下标会二次抛错。
+- 修复为 `board_result, board_step_summary`，将业务 `failed/skipped` 如实映射到 step summary 并 `_persist_step_summary`，避免"业务失败 / 步骤 succeeded"的矛盾状态。
+
+### 6.4 API 合同完整透传
+
+- `AfterCloseRunStatusResponse` 新增 `step_summary / running_steps / step_timed_out / stale / partial_success`，并补透传 `skip_reason`；端点（`admin_after_close.py`）完整传入这些字段，修复"service 已计算 → API 丢弃 → 管理后台看不到"的合同断链。
+
+### 6.5 Review 失败不推进检查点
+
+- `_update_heartbeat_and_step` 的 `last_completed_step` 改为 `str | None`；`None` 表示"仅刷新心跳/租约，不推进 last_completed_step 检查点"。
+- Review 失败/质量门阻塞时（`_review_failed=True`）调用传 `None`，主任务收 `partial_success` 但 `last_completed_step` 保持不进 `computing_review`，下次 resume 不会跳过失败的 Review。
+
+### 6.6 reconcile 补齐（request_id / lease fencing / 产物核验）
+
+- `reconcile_after_close_run` 接入 `request_id`（端点已生成但此前未传入），metadata 写 `reconcile_request_id`。
+- running→interrupted 时：写 `finished_at`、释放 `lease_expires_at`、**递增 `lease_epoch`**（fence 旧 Worker，防止旧 Worker 心跳匹配后继续写业务数据）、把仍 `running` 的 step_summary 收敛为 `interrupted`。
+- 新增 `_inspect_run_artifacts`：只读核验 `factor_publications` 表 `scope_type='market'` 且 `publication_kind IN ('stock_core','market_aggregation')` 的真实 pointer，记录 `reconcile_artifacts / reconcile_contradictions`（`STOCK_CORE_PUBLISHED_BUT_RUN_NOT_SUCCEEDED` 等），暴露"产物与任务状态矛盾"。
+- reconcile 事件 payload 含 `actor / request_id / artifacts / contradictions / new_lease_epoch`。
+
+### 6.7 补充行为测试
+
+- `tests/test_orchestrator_step_pure_unit.py`：新增 6 项行为测试，覆盖运行中取消、cancellation_check 周期轮询、心跳/运行期 elapsed 持续更新、timeout_seconds 透传、非可选超时抛出、超时后 cancel operation task。
+- `tests/test_after_close_phase0_contracts.py`：新增 9 项合同测试，覆盖 board 软失败如实 summary、Review 失败不推进检查点、chip 入队终态前、API 字段序列化等。
+- 既有测试调整：`test_change_20260729_003` 源码断言改为检查 `execute_after_close_run` + `_enqueue_chip_job_step` 拼接（chip 逻辑迁移）；`test_ac04_daily_ready_15m_missing_allows_proceed` 用装饰器 mock 掉 chip 入队（避免 20 层嵌套块上限）。
+
+### 6.8 验证结论（PURE_UNIT_TEST=1，未部署/未连接共享库）
+
+- `test_orchestrator_step_pure_unit.py`：9 passed；`test_after_close_phase0_contracts.py`：9 passed。
+- 盘后相关套件（`-k "after_close or orchestrator or change_20260729"`）：67 passed / 0 failure。
+- 全量纯单元测试：失败数回到 pre-existing 基线（`test_auction_replay_entitlement / test_bars / test_calendar_v9_regression / test_stock_state_and_events` 等约 11 项，经 `git stash` 对照确认为 dev HEAD 既有失败，与盘后无关）。
+- Ruff：全部改动文件 `All checks passed!`。
+- **关键行为证明**：`test_mid_run_cancel_actually_stops_operation` 在旧 `_run_with_cancellation`（仅 `wait_for`）语义下会失败（业务协程跑完全程、零取消检查），新实现正确终止——验证运行中取消是真实行为而非字符串断言。
+
+### 6.9 仍未验证 / 未完成项（如实标注，不声称通过）
+
+- **`computing_review` 仍未整体包裹进 `execute_orchestrator_step`**：PRD AC-02 的"全步骤迁移"目标未完全达成；watchlist_ready 仍未成为正式步骤。这些列为后续工作。
+- 依赖 Postgres 的 after_close 集成测试（`test_after_close_status_detail.py / test_after_close_endpoints.py / test_after_close_worker.py` 等）本地未运行（需 SSH 隧道连共享开发库，非本轮授权范围）。
+- 未部署、未 push main、未修改共享业务数据；`data_closed=false`。

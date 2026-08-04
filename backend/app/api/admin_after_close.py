@@ -231,6 +231,8 @@ async def reconcile_after_close_run_endpoint(
             job_run_id=run_id,
             reason=payload.reason if payload else None,
             actor=getattr(current_user, "username", None) or str(current_user),
+            # [Phase0-Fix#6] 此前生成了 _request_id 却未传入 service（审计断链）
+            request_id=_request_id,
         )
         await db.commit()
         return _action_response(job_run, "盘后任务状态已校准")
@@ -289,6 +291,14 @@ async def get_after_close_run_endpoint(
         interrupt_reason=result["interrupt_reason"],
         is_retryable=result["is_retryable"],
         heartbeat_stale=result["heartbeat_stale"],
+        # [Phase0-Fix#4] 统一步骤合同 / watchdog 字段完整透传，
+        # 修复「service 已计算 → API 组装丢弃 → 管理后台看不到」的合同断链。
+        skip_reason=result.get("skip_reason"),
+        step_summary=result.get("step_summary") or {},
+        running_steps=result.get("running_steps") or [],
+        step_timed_out=bool(result.get("step_timed_out")),
+        stale=bool(result.get("stale")),
+        partial_success=bool(result.get("partial_success")),
         events=[
             JobRunEventItem(
                 id=e["id"],

@@ -28,6 +28,7 @@ syncing_boards 在 BOARD_SYNC_ENABLED=false / 非交易日时跳过
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import json
 import logging
@@ -88,6 +89,8 @@ _STEP_TIMEOUT_SECONDS: dict[str, float] = {
     "publishing": 3600,
     "computing_review": 1800,
     "auction_anchor": _AUCTION_ANCHOR_TIMEOUT_SECONDS,
+    # [Phase0-Fix#8] chip 只做入队（不等计算），超时应短
+    "enqueue_chip_job": 120,
 }
 
 
@@ -121,15 +124,19 @@ async def execute_orchestrator_step(
     cancellation_check: Callable[[], Awaitable[bool]] | None = None,
     attempt: int = 1,
     retry_count: int = 0,
+    poll_interval: float | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """统一执行步骤；所有顶层盘后步骤都必须通过本执行器。
 
     责任（AC-02）：
-    - asyncio.wait_for 超时保护（非可选步骤超时 → timed_out 终态并抛出）
-    - 独立 heartbeat 循环（长步骤防误判 stale）
-    - finally 统一收尾并停止 heartbeat
+    - 超时保护（非可选步骤超时 → timed_out 终态并抛出），超时会 cancel operation task
+    - [Phase0] 执行器唯一周期循环：单次 heartbeat touch + 运行期进度刷新
+      （elapsed_seconds / heartbeat_at / last_progress_at / timeout_seconds），
+      使 watchdog 能在步骤运行期间判定 step_timed_out，而非仅事后诊断
+    - finally 统一收尾并停止周期循环
     - 结构化 summary（started/finished/elapsed/error/progress/attempt）
-    - 协作取消点：每个心跳周期后调用 cancellation_check，返回 True 时标记 cancelled
+    - [Phase0] 真正的运行中取消：周期轮询 cancellation_check，命中后 cancel
+      operation task 并 await 其结束，确保业务写入停止
     - 可选步骤：普通异常与超时均降级为 skipped/unavailable，不抛出（调用方需检查 summary）
 
     Returns:
@@ -141,10 +148,12 @@ async def execute_orchestrator_step(
         "status": "running",
         "started_at": started_at.isoformat(),
         "finished_at": None,
-        "elapsed_seconds": None,
+        "elapsed_seconds": 0.0,
         "processed": None,
         "total": None,
         "last_progress_at": started_at.isoformat(),
+        "heartbeat_at": started_at.isoformat(),
+        "timeout_seconds": timeout_seconds,
         "error_code": None,
         "error_message": None,
         "optional": optional,
@@ -155,26 +164,55 @@ async def execute_orchestrator_step(
         await progress(dict(summary))
     stop = asyncio.Event()
 
-    async def _heartbeat_loop() -> None:
-        if heartbeat is None:
-            return
-        while not stop.is_set():
-            await heartbeat()
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=_HEARTBEAT_INTERVAL_SECONDS)
-            except TimeoutError:
-                continue
+    async def _tick_loop() -> None:
+        """[Phase0] 执行器唯一周期循环：心跳 touch + 运行期进度刷新。
 
-    heartbeat_task = asyncio.create_task(_heartbeat_loop()) if heartbeat else None
+        每 _HEARTBEAT_INTERVAL_SECONDS 执行一次：
+        1. heartbeat() 单次 touch（不再传入无限循环）
+        2. 刷新 elapsed_seconds / heartbeat_at / last_progress_at 并落库，
+           使 watchdog 能在运行期间判定 step_timed_out。
+        """
+        while not stop.is_set():
+            try:
+                # 动态读取模块级间隔，便于测试注入更短周期
+                await asyncio.wait_for(
+                    stop.wait(), timeout=_HEARTBEAT_INTERVAL_SECONDS,
+                )
+                return
+            except TimeoutError:
+                pass
+            now = datetime.now(UTC)
+            if heartbeat is not None:
+                try:
+                    await heartbeat()
+                except Exception as exc:  # 心跳失败不得中断业务步骤
+                    logger.warning(
+                        "[AfterClose] step heartbeat touch 失败: step=%s, error=%s", step, exc,
+                    )
+            summary["elapsed_seconds"] = max(0.0, (now - started_at).total_seconds())
+            summary["heartbeat_at"] = now.isoformat()
+            summary["last_progress_at"] = now.isoformat()
+            if progress is not None:
+                try:
+                    await progress(dict(summary))
+                except Exception as exc:
+                    logger.warning(
+                        "[AfterClose] step 运行期进度刷新失败: step=%s, error=%s", step, exc,
+                    )
+
+    tick_task = asyncio.create_task(_tick_loop())
     result: Any | None = None
     try:
         if cancellation_check is not None and await cancellation_check():
             summary.update(status="cancelled", error_code="STEP_CANCELLED_PRECHECK", error_message="cancelled before start")
             return None, summary
-        # 协作取消：将 operation 包成可周期性检查的协程
+        # 协作取消：运行期周期轮询取消状态，命中后 cancel 并 await operation task
         if cancellation_check is not None:
             result = await _run_with_cancellation(
-                operation, cancellation_check, timeout_seconds,
+                operation,
+                cancellation_check,
+                timeout_seconds,
+                poll_interval=poll_interval or _CANCEL_POLL_INTERVAL_SECONDS,
             )
         else:
             result = await asyncio.wait_for(operation(), timeout=timeout_seconds)
@@ -200,17 +238,21 @@ async def execute_orchestrator_step(
         summary.update(status="cancelled", error_code="STEP_CANCELLED", error_message="cancelled")
         raise
     except _StepCancelledError as exc:
-        summary.update(status="cancelled", error_code="STEP_CANCELLED", error_message=str(exc))
-        raise asyncio.CancelledError(str(exc)) from None
+        # [Phase0] 运行中取消：operation task 已被 cancel 并 await 结束，
+        # 业务写入确定已停止。这是"受控取消"，返回 cancelled summary 由调用方收尾，
+        # 不再转成 CancelledError 炸穿 Worker（区别于外部 CancelledError）。
+        summary.update(
+            status="cancelled", error_code="STEP_CANCELLED", error_message=str(exc),
+        )
+        result = None
     except Exception as exc:
         summary.update(status="failed", error_code=type(exc).__name__, error_message=str(exc))
         if not optional:
             raise
     finally:
         stop.set()
-        if heartbeat_task is not None:
-            heartbeat_task.cancel()
-            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        tick_task.cancel()
+        await asyncio.gather(tick_task, return_exceptions=True)
         finished_at = datetime.now(UTC)
         summary["finished_at"] = finished_at.isoformat()
         summary["elapsed_seconds"] = max(0.0, (finished_at - started_at).total_seconds())
@@ -224,20 +266,58 @@ class _StepCancelledError(Exception):
     """协作取消信号（由 _run_with_cancellation 抛出，外层转 CancelledError）。"""
 
 
+# [Phase0] 运行中取消轮询间隔（秒）——独立于心跳间隔，便于测试注入
+_CANCEL_POLL_INTERVAL_SECONDS = 5.0
+
+
 async def _run_with_cancellation(
     operation: Callable[[], Awaitable[Any]],
     cancellation_check: Callable[[], Awaitable[bool]],
     timeout_seconds: float,
+    poll_interval: float = _CANCEL_POLL_INTERVAL_SECONDS,
 ) -> Any:
-    """运行 operation 并在每个心跳间隔检查取消信号。
+    """运行 operation，并在运行期间周期性调用 cancellation_check。
 
-    实现：用 asyncio.wait_for 包住 operation，同时定期 await cancellation_check，
-    一旦检查到取消则返回（外层转 cancelled）。保持超时语义不变。
+    [Phase0] 真正的运行中取消：
+    - operation 作为独立 task 运行；
+    - 每 poll_interval 秒轮询一次 cancellation_check；
+    - 命中取消 → cancel operation task 并 await 其真正结束（保证业务写入停止），
+      随后抛出 _StepCancelledError；
+    - 总耗时超过 timeout_seconds → cancel task 并抛 TimeoutError；
+    - 保持原有超时语义。
     """
-    # 简化实现：先判断取消；operation 内部通常自检查点，
-    # 这里用 wait_for 保证超时，外层 try 已覆盖 cancellation_check 即时取消。
-    # 真正的"运行中途取消"依赖 operation 自身在长循环里调用 cancellation_check。
-    return await asyncio.wait_for(operation(), timeout=timeout_seconds)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    op_task = asyncio.ensure_future(operation())
+
+    async def _finalize(exc: BaseException) -> None:
+        """cancel operation task 并等待其真正结束，确保业务协程停止执行。"""
+        op_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await op_task
+        raise exc
+
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                await _finalize(TimeoutError())
+            wait_slice = min(poll_interval, remaining)
+            done, _pending = await asyncio.wait({op_task}, timeout=wait_slice)
+            if done:
+                return await op_task
+            # operation 仍在运行：轮询取消状态
+            try:
+                cancelled = await cancellation_check()
+            except Exception:  # 取消检查失败不得误杀正在运行的步骤
+                cancelled = False
+            if cancelled:
+                await _finalize(_StepCancelledError("cancelled during run"))
+    except asyncio.CancelledError:
+        op_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await op_task
+        raise
 
 
 def _make_step_progress_callback(
@@ -273,6 +353,145 @@ def _make_step_progress_callback(
             )
 
     return _cb
+
+
+async def _enqueue_chip_job_step(
+    *,
+    job_run_id: uuid.UUID,
+    worker_id: str | None,
+    lease_epoch: int | None,
+    trade_date: date,
+    snapshot_run_id: uuid.UUID | None,
+    expected_count: int | None,
+) -> tuple[str, uuid.UUID | None]:
+    """[Phase0-Fix#8] 正式步骤 `enqueue_chip_job`：把 chip 入队纳入统一执行合同。
+
+    语义：
+    - 只负责"入队"，不 await chip 计算（chip 由独立 Worker 异步执行）；
+    - 通过统一执行器产生 step summary（可选步骤，失败不炸主链）；
+    - 返回 (status, chip_job_id) 供主任务终态计算 partial_success。
+
+    [CHANGE-20260729-006 ID 合同统一] chip.core_run_id 必须指向 snapshot_run_id
+    （StockFeatureSnapshotRun.id，数据版本），不再指向 job_run_id。
+
+    Returns:
+        (status, chip_job_id)，status ∈ {succeeded, skipped, failed}
+    """
+    if snapshot_run_id is None:
+        summary = {
+            "step": "enqueue_chip_job",
+            "status": "skipped",
+            "skip_reason": "SNAPSHOT_RUN_ID_MISSING",
+            "optional": True,
+            "error_code": None,
+            "error_message": None,
+        }
+        await _persist_step_summary(job_run_id, summary)
+        logger.warning(
+            "[AfterClose] snapshot_run_id 为 None，跳过 chip consensus job 入队: "
+            "trade_date=%s", trade_date,
+        )
+        return "skipped", None
+
+    captured: dict[str, Any] = {}
+
+    async def _enqueue() -> dict[str, Any]:
+        async with AsyncSessionLocal() as db:
+            chip_job, chip_is_new = await create_after_close_chip_consensus_job(
+                db=db,
+                trade_date=trade_date,
+                core_run_id=snapshot_run_id,
+                scope="all_a_share",
+                expected_count=expected_count,
+            )
+            await db.commit()
+        if chip_job is None:
+            # 返回 None 视为业务软失败（下方统一转 failed）
+            return {"status": "failed", "reason": "CHIP_JOB_CREATE_RETURNED_NONE"}
+        captured["job_id"] = chip_job.id
+        return {
+            "status": "succeeded",
+            "job_id": str(chip_job.id),
+            "is_new": chip_is_new,
+        }
+
+    result, summary = await execute_orchestrator_step(
+        "enqueue_chip_job",
+        _enqueue,
+        timeout_seconds=_step_timeout("enqueue_chip_job"),
+        optional=True,
+        heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
+        progress=_make_step_progress_callback(job_run_id, worker_id),
+        cancellation_check=_make_step_cancellation_check(job_run_id),
+    )
+
+    business_status = result.get("status") if isinstance(result, dict) else None
+    if summary["status"] == "succeeded" and business_status == "failed":
+        # 业务软失败如实反映到 step summary（不得出现 business=failed/step=succeeded）
+        summary["status"] = "failed"
+        summary["error_code"] = "CHIP_ENQUEUE_FAILED"
+        summary["error_message"] = str(result.get("reason"))
+        await _persist_step_summary(job_run_id, summary)
+
+    chip_job_id = captured.get("job_id")
+    if summary["status"] == "succeeded":
+        logger.info(
+            "[AfterClose] chip consensus job 已入队（独立 Worker 异步执行）: "
+            "chip_run_id=%s, snapshot_run_id=%s, expected_count=%s",
+            chip_job_id, snapshot_run_id, expected_count,
+        )
+        return "succeeded", chip_job_id
+
+    logger.warning(
+        "[AfterClose] chip consensus job 入队未成功（主 run 将记 partial_success）: "
+        "step_status=%s, trade_date=%s, snapshot_run_id=%s, error=%s",
+        summary["status"], trade_date, snapshot_run_id, summary.get("error_message"),
+    )
+    return "failed", chip_job_id
+
+
+def _make_step_heartbeat(
+    job_run_id: uuid.UUID,
+    worker_id: str | None,
+    lease_epoch: int | None,
+) -> Callable[[], Awaitable[None]]:
+    """[Phase0] 构造执行器的单次心跳回调。
+
+    执行器自身拥有唯一周期循环，这里只做一次 touch；
+    不再把 _job_run_heartbeat_loop（无限循环）当作回调传入。
+    """
+
+    async def _hb() -> None:
+        await touch_job_run_heartbeat(
+            job_run_id, worker_id=worker_id, lease_epoch=lease_epoch,
+        )
+
+    return _hb
+
+
+async def _persist_step_summary(
+    job_run_id: uuid.UUID,
+    summary: dict[str, Any],
+) -> None:
+    """[Phase0] 将（可能被调用方修正过的）step summary 落库到 metadata.step_summary。"""
+    step = summary.get("step")
+    if not step:
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            job_run = await db.get(SchedulerJobRun, job_run_id)
+            if job_run is None:
+                return
+            meta = _parse_metadata(job_run)
+            step_summary = dict(meta.get("step_summary") or {})
+            step_summary[step] = summary
+            meta["step_summary"] = step_summary
+            job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+            await db.commit()
+    except Exception as exc:
+        logger.warning(
+            "[AfterClose] step summary 持久化失败: step=%s, error=%s", step, exc,
+        )
 
 
 def _make_step_cancellation_check(
@@ -751,7 +970,7 @@ async def compute_daily_coverage(
 async def _update_heartbeat_and_step(
     db: AsyncSession,
     job_run: SchedulerJobRun,
-    last_completed_step: str,
+    last_completed_step: str | None,
     worker_id: str | None = None,
 ) -> None:
     """[Phase5] - 更新 heartbeat + lease + metadata.last_completed_step（flush 不 commit）。
@@ -769,7 +988,9 @@ async def _update_heartbeat_and_step(
     Args:
         db: 异步会话
         job_run: SchedulerJobRun 记录（已在 session 中）
-        last_completed_step: 刚完成的阶段名（AfterCloseRunStatus.value）
+        last_completed_step: 刚完成的阶段名（AfterCloseRunStatus.value）；
+            [Phase0] 传 None 表示仅刷新心跳/租约，不推进检查点
+            （用于 Review 等失败步骤，避免下次 resume 误跳过）
         worker_id: Worker 实例标识（非 None 时同步更新 worker_instance_id）
 
     Raises:
@@ -780,7 +1001,9 @@ async def _update_heartbeat_and_step(
     # 保留已有 metadata（含 feature_snapshot_progress / feature_snapshot_run_id 等），
     # 仅更新 last_completed_step。
     meta = _parse_metadata(job_run)
-    meta["last_completed_step"] = last_completed_step
+    # [Phase0] None = 仅心跳，不推进检查点（保留原有 last_completed_step）
+    if last_completed_step is not None:
+        meta["last_completed_step"] = last_completed_step
     metadata_json_str = json.dumps(meta, ensure_ascii=False)
 
     expected_epoch = _current_lease_epoch.get()
@@ -856,57 +1079,11 @@ async def _job_run_heartbeat_loop(
     while True:
         try:
             await asyncio.sleep(interval)
-            async with AsyncSessionLocal() as db:
-                now = datetime.now(ZoneInfo("Asia/Shanghai"))
-                lease_expires_at = now + timedelta(
-                    seconds=_ORCHESTRATOR_LEASE_SECONDS,
-                )
-
-                if lease_epoch is None:
-                    # Legacy 模式：ORM 属性更新（向后兼容）
-                    job_run = await _get_job_run_or_raise(db, job_run_id)
-                    if job_run is None or job_run.status != "running":
-                        return
-                    job_run.heartbeat_at = now
-                    job_run.lease_expires_at = lease_expires_at
-                    if worker_id is not None:
-                        job_run.worker_instance_id = worker_id
-                    await db.commit()
-                    continue
-
-                # [JOB-02] fenced UPDATE：检查 lease_epoch + status='running'
-                # 失败说明 Worker 已被 watchdog 标记 interrupted 或其他 Worker 接管
-                # 使用 RETURNING + fetchall() 计数（与 _update_heartbeat_and_step 一致），
-                # 避免 mypy 对 Result.rowcount 的 attr-defined 误报
-                update_sql = text(
-                    """
-                    UPDATE scheduler_job_runs
-                    SET heartbeat_at = :now,
-                        lease_expires_at = :lease_expires,
-                        worker_instance_id = COALESCE(:worker_id, worker_instance_id)
-                    WHERE id = :id
-                        AND lease_epoch = :expected_epoch
-                        AND status = 'running'
-                    RETURNING id
-                    """
-                )
-                result = await db.execute(update_sql, {
-                    "now": now,
-                    "lease_expires": lease_expires_at,
-                    "worker_id": worker_id,
-                    "id": job_run_id,
-                    "expected_epoch": lease_epoch,
-                })
-                if not result.fetchall():
-                    # lease_epoch 不匹配 或 status != running：Worker 已被中断或被接管，安静退出
-                    logger.warning(
-                        "[AfterClose] 心跳 lease_epoch 不匹配或任务非 running，"
-                        "退出心跳（任务已被中断或被新 Worker 接管）: "
-                        "job_run_id=%s, expected_epoch=%s",
-                        job_run_id, lease_epoch,
-                    )
-                    return
-                await db.commit()
+            alive = await touch_job_run_heartbeat(
+                job_run_id, worker_id=worker_id, lease_epoch=lease_epoch,
+            )
+            if not alive:
+                return
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -914,6 +1091,69 @@ async def _job_run_heartbeat_loop(
                 "[AfterClose] 心跳更新失败 job_run_id=%s: %s",
                 job_run_id, exc,
             )
+
+
+async def touch_job_run_heartbeat(
+    job_run_id: uuid.UUID,
+    worker_id: str | None = None,
+    lease_epoch: int | None = None,
+) -> bool:
+    """[Phase0] 单次心跳 touch：更新 heartbeat_at + lease_expires_at。
+
+    从 _job_run_heartbeat_loop 中抽出，供统一执行器的单一周期循环调用，
+    避免"把一个无限循环当作 heartbeat 回调传进执行器"。
+
+    Returns:
+        True  — 心跳写入成功，任务仍持有 lease；
+        False — lease_epoch 不匹配或任务已非 running（调用方应停止心跳）。
+    """
+    async with AsyncSessionLocal() as db:
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
+
+        if lease_epoch is None:
+            # Legacy 模式：ORM 属性更新（向后兼容）
+            job_run = await _get_job_run_or_raise(db, job_run_id)
+            if job_run is None or job_run.status != "running":
+                return False
+            job_run.heartbeat_at = now
+            job_run.lease_expires_at = lease_expires_at
+            if worker_id is not None:
+                job_run.worker_instance_id = worker_id
+            await db.commit()
+            return True
+
+        # [JOB-02] fenced UPDATE：检查 lease_epoch + status='running'
+        # 失败说明 Worker 已被 watchdog 标记 interrupted 或其他 Worker 接管
+        update_sql = text(
+            """
+            UPDATE scheduler_job_runs
+            SET heartbeat_at = :now,
+                lease_expires_at = :lease_expires,
+                worker_instance_id = COALESCE(:worker_id, worker_instance_id)
+            WHERE id = :id
+                AND lease_epoch = :expected_epoch
+                AND status = 'running'
+            RETURNING id
+            """
+        )
+        result = await db.execute(update_sql, {
+            "now": now,
+            "lease_expires": lease_expires_at,
+            "worker_id": worker_id,
+            "id": job_run_id,
+            "expected_epoch": lease_epoch,
+        })
+        if not result.fetchall():
+            logger.warning(
+                "[AfterClose] 心跳 lease_epoch 不匹配或任务非 running，"
+                "退出心跳（任务已被中断或被新 Worker 接管）: "
+                "job_run_id=%s, expected_epoch=%s",
+                job_run_id, lease_epoch,
+            )
+            return False
+        await db.commit()
+        return True
 
 
 # [Heartbeat] - feature_snapshot 进度事件采样间隔（instrument 数）
@@ -1456,9 +1696,7 @@ async def execute_after_close_run(
                 "refreshing_daily",
                 _refresh_operation,
                 timeout_seconds=_step_timeout("refreshing_daily"),
-                heartbeat=lambda: _job_run_heartbeat_loop(
-                    job_run_id, worker_id, interval=30, lease_epoch=lease_epoch,
-                ),
+                heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
                 progress=_make_step_progress_callback(job_run_id, worker_id),
                 cancellation_check=_make_step_cancellation_check(job_run_id),
             )
@@ -1483,7 +1721,11 @@ async def execute_after_close_run(
                     )
                     await db.commit()
 
-                board_summary, _ = await execute_orchestrator_step(
+                # [Phase0-Fix#5] 正确区分 result 与 summary：
+                # 之前写成 `board_summary, _ =`，把业务 result 当成执行器 summary，
+                # 导致 result={"status":"failed"} 时 step summary 仍为 succeeded，
+                # 且超时 result=None 时下方取下标会把可选失败升级为主链失败。
+                board_result, board_step_summary = await execute_orchestrator_step(
                     "syncing_boards",
                     lambda: _execute_syncing_boards(
                         job_run_id=job_run_id,
@@ -1493,12 +1735,29 @@ async def execute_after_close_run(
                     ),
                     timeout_seconds=_step_timeout("syncing_boards"),
                     optional=True,
+                    heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
                     progress=_make_step_progress_callback(job_run_id, worker_id),
                     cancellation_check=_make_step_cancellation_check(job_run_id),
                 )
+                # [Phase0-Fix#5] 业务软失败必须如实反映到 step summary，
+                # 否则会出现「业务 failed / 步骤 succeeded」的矛盾状态。
+                board_business_status = (
+                    board_result.get("status") if isinstance(board_result, dict) else None
+                )
+                if board_step_summary["status"] == "succeeded" and board_business_status:
+                    if board_business_status == "failed":
+                        board_step_summary["status"] = "failed"
+                        board_step_summary["error_code"] = (
+                            board_result.get("error_code") or "BOARD_SYNC_SOFT_FAILURE"
+                        )
+                        board_step_summary["error_message"] = "板块同步软失败（沿用上次数据）"
+                    elif board_business_status == "skipped":
+                        board_step_summary["status"] = "skipped"
+                        board_step_summary["skip_reason"] = board_result.get("reason_code")
+                    await _persist_step_summary(job_run_id, board_step_summary)
                 logger.info(
-                    "[AfterClose] syncing_boards 完成: status=%s",
-                    board_summary["status"],
+                    "[AfterClose] syncing_boards 完成: step_status=%s, business_status=%s",
+                    board_step_summary["status"], board_business_status,
                 )
 
             # [Phase5] - syncing_boards 完成（或跳过），更新心跳 + 检查点
@@ -1969,8 +2228,8 @@ async def execute_after_close_run(
                         "computing_features",
                         _compute_features_op,
                         timeout_seconds=_step_timeout("computing_features"),
-                        heartbeat=lambda: _job_run_heartbeat_loop(
-                            job_run_id, worker_id, interval=30, lease_epoch=lease_epoch,
+                        heartbeat=_make_step_heartbeat(
+                            job_run_id, worker_id, lease_epoch,
                         ),
                         progress=_make_step_progress_callback(job_run_id, worker_id),
                         cancellation_check=_make_step_cancellation_check(job_run_id),
@@ -2739,7 +2998,10 @@ async def execute_after_close_run(
                             meta_exc,
                         )
 
-                # review 阶段全部成功：更新心跳 + last_completed_step=computing_review
+                # [Phase0-Fix#7] review 阶段收尾：
+                # 只有 review 真正成功才推进 last_completed_step=computing_review。
+                # 失败/gate_blocked 时若仍推进检查点，下次 restart_from/resume 会
+                # 直接跳过失败的 Review，破坏断点恢复语义。
                 async with AsyncSessionLocal() as db:
                     job_run = await _get_job_run_or_raise(db, job_run_id)
                     await _update_orchestrator_status(
@@ -2771,9 +3033,20 @@ async def execute_after_close_run(
                             "review_status": _review_status,
                         },
                     )
-                    await _update_heartbeat_and_step(
-                        db, job_run, AfterCloseRunStatus.COMPUTING_REVIEW.value, worker_id,
-                    )
+                    if _review_failed:
+                        # 仅更新心跳，不推进 last_completed_step
+                        await _update_heartbeat_and_step(
+                            db, job_run, None, worker_id,
+                        )
+                        logger.warning(
+                            "[AfterClose] [Review] 阶段失败，不推进 last_completed_step："
+                            "status=%s, 下次 resume 将重新执行 computing_review",
+                            _review_status,
+                        )
+                    else:
+                        await _update_heartbeat_and_step(
+                            db, job_run, AfterCloseRunStatus.COMPUTING_REVIEW.value, worker_id,
+                        )
                     await db.commit()
             else:
                 # 前置条件不满足：stock_core 或 board_analysis 未正式发布
@@ -2844,6 +3117,25 @@ async def execute_after_close_run(
                     resume_exc,
                 )
 
+        # ---- 步骤 4.9: enqueue_chip_job（正式步骤，必须在主任务终态之前）----
+        # [Phase0-Fix#8] chip 原先在主任务终态提交之后创建，导致：
+        # 1) chip job 创建失败无法进入 partial_success；
+        # 2) chip 没有统一 step summary；
+        # 3) metadata 缺稳定的 chip job id / enqueue 状态。
+        # chip 本身仍是异步任务（不 await 其计算），这里只把"入队"做成正式步骤。
+        _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
+            job_run_id=job_run_id,
+            worker_id=worker_id,
+            lease_epoch=lease_epoch,
+            trade_date=trade_date,
+            snapshot_run_id=snapshot_run_id,
+            expected_count=(
+                len(cached_instrument_ids)
+                if cached_instrument_ids is not None
+                else None
+            ),
+        )
+
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:
             job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -2853,16 +3145,6 @@ async def execute_after_close_run(
                 if published_run is not None and published_run.published_at
                 else None
             )
-            success_message = (
-                f"盘后编排成功完成: dsa_run_id={dsa_run_id}"
-                + (f", published_at={published_run.published_at}"
-                   if published_run is not None else "")
-                + f", stock_core_published={_stock_core_published}"
-                + f", auction_anchor_status={_auction_anchor_status}"
-                + f", aggregation_status={_aggregation_status}"
-                + f", review_status={_review_status}"
-                + (f", review_run_id={_review_run_id}" if _review_run_id else "")
-            )
             # [P0-1 2026-08-03] 核心已发布但可选阶段（auction/review/aggregation）失败时，
             # 主任务状态为 PARTIAL_SUCCESS（而非 succeeded），明确表达"核心成功、后置降级"。
             # stock_core 被 superseded（pointer 指向其他 run）也视为部分成功。
@@ -2871,6 +3153,8 @@ async def execute_after_close_run(
                 or _auction_anchor_status == "failed"
                 or _aggregation_status == "failed"
                 or _stock_core_superseded
+                # [Phase0-Fix#8] chip 入队失败纳入 partial_success 判定
+                or _chip_enqueue_status == "failed"
             )
             final_status = (
                 AfterCloseRunStatus.PARTIAL_SUCCESS
@@ -2901,6 +3185,9 @@ async def execute_after_close_run(
                     "auction_anchor_status": _auction_anchor_status,
                     "aggregation_status": _aggregation_status,
                     "partial_success": _optional_failed,
+                    # [Phase0-Fix#8] chip 入队结果进入主任务 metadata（稳定 job id + 状态）
+                    "chip_enqueue_status": _chip_enqueue_status,
+                    "chip_job_id": str(_chip_job_id) if _chip_job_id else None,
                     # [CHANGE-20260801-REVIEW-CLOSURE] review 闭环字段
                     "review_run_id": str(_review_run_id) if _review_run_id else None,
                     "review_status": _review_status,
@@ -2923,61 +3210,10 @@ async def execute_after_close_run(
             )
             await db.commit()
 
-        # [P0-7 修复 2026-07-29] 主 run 成功后软失败创建 chip consensus job
-        # chip job 由独立 Worker 领取执行；创建失败只记录 warn，不反改主 run succeeded。
-        # 不得 await chip 执行（chip 执行由独立 after_close_chip_consensus Worker 完成）。
-        # chip 失败/部分成功通过 metadata.chip_status=partial 记录，主 status 保持 succeeded。
-        #
-        # [CHANGE-20260729-006 ID 合同统一] chip.core_run_id 必须指向 snapshot_run_id
-        # （StockFeatureSnapshotRun.id，数据版本），不再指向 job_run_id
-        # （SchedulerJobRun.id，任务追踪）。
-        # 查询严格匹配：instrument_id + trade_date + snapshot_run_id +
-        # algorithm_version + status=succeeded。
-        _expected_chip_count = (
-            len(cached_instrument_ids)
-            if cached_instrument_ids is not None
-            else None
-        )
-        if snapshot_run_id is None:
-            logger.warning(
-                "[AfterClose] snapshot_run_id 为 None，跳过 chip consensus job 创建"
-                "（主 run 仍 succeeded）: trade_date=%s",
-                trade_date,
-            )
-        else:
-            try:
-                async with AsyncSessionLocal() as db:
-                    chip_job, chip_is_new = await create_after_close_chip_consensus_job(
-                        db=db,
-                        trade_date=trade_date,
-                        core_run_id=snapshot_run_id,
-                        scope="all_a_share",
-                        expected_count=_expected_chip_count,
-                    )
-                    await db.commit()
-                if chip_job is not None:
-                    logger.info(
-                        "[AfterClose] chip consensus job 已创建（独立 Worker 异步执行）: "
-                        "chip_run_id=%s, is_new=%s, snapshot_run_id=%s, expected_count=%s",
-                        chip_job.id, chip_is_new, snapshot_run_id, _expected_chip_count,
-                    )
-                else:
-                    logger.warning(
-                        "[AfterClose] chip consensus job 创建返回 None（软失败，主 run 仍 succeeded）: "
-                        "trade_date=%s, snapshot_run_id=%s",
-                        trade_date, snapshot_run_id,
-                    )
-            except Exception as chip_exc:
-                # [P0-7] 软失败：创建失败只记录 warn，不反改主 run，不抛异常
-                logger.warning(
-                    "[AfterClose] 创建 chip consensus job 失败（软失败，不影响主 run succeeded）: "
-                    "trade_date=%s, snapshot_run_id=%s, error=%s",
-                    trade_date, snapshot_run_id, chip_exc, exc_info=True,
-                )
-
         logger.info(
-            "[AfterClose] 盘后编排成功完成: job_run_id=%s, dsa_run_id=%s",
-            job_run_id, dsa_run_id,
+            "[AfterClose] 盘后编排结束: job_run_id=%s, dsa_run_id=%s, status=%s, "
+            "chip_enqueue_status=%s",
+            job_run_id, dsa_run_id, final_status.value, _chip_enqueue_status,
         )
 
     except Exception as exc:
@@ -3304,20 +3540,77 @@ async def cancel_after_close_run(
     return job_run
 
 
+async def _inspect_run_artifacts(
+    db: AsyncSession,
+    job_run: SchedulerJobRun,
+) -> dict[str, Any]:
+    """[Phase0-Fix#6] 只读核验任务对应交易日的真实产物 pointer。
+
+    reconcile 若只对齐状态字段，无法发现"任务 failed 但 stock_core 已发布"
+    或"任务 succeeded 但没有任何 publication"这类矛盾。
+
+    只做只读查询，不修改任何业务 pointer。
+    """
+    artifacts: dict[str, Any] = {
+        "stock_core_published": False,
+        "stock_core_data_run_id": None,
+        "market_aggregation_published": False,
+        "checked_trade_date": None,
+    }
+    meta = _parse_metadata(job_run)
+    trade_date_raw = meta.get("trade_date")
+    if not trade_date_raw:
+        return artifacts
+    artifacts["checked_trade_date"] = trade_date_raw
+    try:
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT publication_kind, data_run_id
+                    FROM factor_publications
+                    WHERE trade_date = CAST(:trade_date AS date)
+                      AND scope_type = 'market'
+                      AND publication_kind IN ('stock_core', 'market_aggregation')
+                    """
+                ),
+                {"trade_date": trade_date_raw},
+            )
+        ).fetchall()
+        for kind, data_run_id in rows:
+            if kind == "stock_core":
+                artifacts["stock_core_published"] = True
+                artifacts["stock_core_data_run_id"] = str(data_run_id)
+            elif kind == "market_aggregation":
+                artifacts["market_aggregation_published"] = True
+    except Exception as exc:
+        logger.warning("[AfterClose] reconcile 产物核验失败（不阻断）: %s", exc)
+        artifacts["inspect_error"] = str(exc)[:200]
+    return artifacts
+
+
 async def reconcile_after_close_run(
     db: AsyncSession,
     *,
     job_run_id: str,
     reason: str | None = None,
     actor: str | None = None,
+    request_id: str | None = None,
 ) -> SchedulerJobRun:
-    """对账校准：根据 worker 存活、heartbeat、step_summary、publication 修正状态。
+    """对账校准：根据 heartbeat、step_summary、产物 pointer 修正状态。
 
-    [P0-1 2026-08-03 reconcile 真实语义] 不再只对齐两个状态字段，而是：
+    [P0-1 2026-08-03 reconcile 真实语义]
     - 检查 running 但 heartbeat_stale → 标记为 interrupted（Worker 已失联）
     - 检查 running 但某步骤 step_timed_out → 标记 interrupted
     - 根据 job_run.status 修正 orchestrator_status 派生字段
     - 写 reconcile 事件记录审计
+
+    [Phase0-Fix#6] 补齐：
+    - 接入 request_id（端点已生成，此前未传入，审计断链）
+    - interrupted 时写 finished_at、释放 lease_expires_at、递增 lease_epoch
+      fence 旧 Worker（否则旧 Worker 仍可继续写入）
+    - 核验真实产物 pointer（stock_core publication / review pointer），
+      记录"产物已存在但任务未成功"的矛盾，供管理员判断
     """
     job_run = await _get_job_run_or_raise(db, uuid.UUID(job_run_id))
     meta = _parse_metadata(job_run)
@@ -3347,10 +3640,23 @@ async def reconcile_after_close_run(
                 f"reconcile: heartbeat_stale={_hb_stale}, step_timed_out={_step_timeout_hit}"
             )
             _reconciled_to_interrupted = True
+            # [Phase0-Fix#6] 终态收尾 + fence 旧 Worker：
+            # 不写 finished_at / 不释放 lease / 不递增 epoch 时，
+            # 旧 Worker 心跳仍可能匹配成功并继续写入业务数据。
+            job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+            job_run.lease_expires_at = None
+            job_run.lease_epoch = (job_run.lease_epoch or 0) + 1
+            # 把仍处于 running 的步骤如实收敛为 interrupted，避免永远挂 running
+            for _sn, _s in _step_sum.items():
+                if isinstance(_s, dict) and _s.get("status") == "running":
+                    _s["status"] = "interrupted"
+                    _s["error_code"] = "RECONCILED_INTERRUPTED"
+                    _s["finished_at"] = now.isoformat()
+            meta["step_summary"] = _step_sum
             logger.warning(
                 "[AfterClose] reconcile: running→interrupted (stale): "
-                "job_run_id=%s, hb_stale=%s, step_timeout=%s",
-                job_run_id, _hb_stale, _step_timeout_hit,
+                "job_run_id=%s, hb_stale=%s, step_timeout=%s, new_lease_epoch=%s",
+                job_run_id, _hb_stale, _step_timeout_hit, job_run.lease_epoch,
             )
 
     # 2) 修正 orchestrator_status 派生字段
@@ -3365,9 +3671,25 @@ async def reconcile_after_close_run(
     if expected and meta.get("orchestrator_status") != expected:
         meta["orchestrator_status"] = expected
         _changed = True
+    # 3) [Phase0-Fix#6] 核验真实产物 pointer，暴露"产物与任务状态矛盾"
+    artifacts = await _inspect_run_artifacts(db, job_run)
+    contradictions: list[str] = []
+    if job_run.status in {"failed", "interrupted"} and artifacts.get("stock_core_published"):
+        contradictions.append("STOCK_CORE_PUBLISHED_BUT_RUN_NOT_SUCCEEDED")
+    if job_run.status == "succeeded" and not artifacts.get("stock_core_published"):
+        contradictions.append("RUN_SUCCEEDED_BUT_NO_STOCK_CORE_PUBLICATION")
+    meta["reconcile_artifacts"] = artifacts
+    meta["reconcile_contradictions"] = contradictions
+    if contradictions:
+        logger.warning(
+            "[AfterClose] reconcile 发现产物/状态矛盾: job_run_id=%s, status=%s, items=%s",
+            job_run_id, job_run.status, contradictions,
+        )
+
     meta["reconciled_at"] = now.isoformat()
     meta["reconcile_reason"] = reason or "admin_reconcile"
     meta["reconcile_actor"] = actor
+    meta["reconcile_request_id"] = request_id
     job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
     try:
         await append_event(
@@ -3381,8 +3703,12 @@ async def reconcile_after_close_run(
             ),
             payload={
                 "actor": actor,
+                "request_id": request_id,
                 "reconciled_to_interrupted": _reconciled_to_interrupted,
                 "meta_changed": _changed,
+                "artifacts": artifacts,
+                "contradictions": contradictions,
+                "new_lease_epoch": job_run.lease_epoch,
             },
         )
     except Exception as evt_exc:

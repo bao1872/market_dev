@@ -486,13 +486,17 @@ class TestMainRunDoesNotWaitForChip:
             "orchestrator 不得导入 execute_after_close_chip_consensus（主 run 不等待 chip）"
         )
 
-        # 验证 execute_after_close_run 函数源码不引用 execute_after_close_chip_consensus
-        source = inspect.getsource(orch.execute_after_close_run)
+        # 验证主编排全链路（含 chip 入队步骤）不引用 execute_after_close_chip_consensus
+        # [Phase0-Fix#8] chip 入队已抽为正式步骤 _enqueue_chip_job_step，
+        # 并在主任务终态之前执行；因此需连同该步骤一起检查。
+        source = inspect.getsource(orch.execute_after_close_run) + inspect.getsource(
+            orch._enqueue_chip_job_step
+        )
         assert "execute_after_close_chip_consensus" not in source, (
-            "execute_after_close_run 不得调用 execute_after_close_chip_consensus"
+            "主编排不得调用 execute_after_close_chip_consensus（不得 await chip 执行）"
         )
         assert "create_after_close_chip_consensus_job" in source, (
-            "execute_after_close_run 必须在 succeeded 后调用 create_after_close_chip_consensus_job"
+            "主编排必须调用 create_after_close_chip_consensus_job 完成 chip 入队"
         )
 
     def test_chip_execute_is_implemented(self):

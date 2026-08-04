@@ -13,7 +13,7 @@
 - 远程自动触发：bars_scheduler Worker 每日 16:00（上海时区）调用 `create_after_close_run`，交易日历判断后创建 SchedulerJobRun。
 - 本地不自动调度：backend lifespan 不启动 Scheduler；Scheduler/Worker 必须显式设置 `WORKER_TYPE` 启动。
 - 手动入口：`admin_after_close.py` 提供创建、查询、重试、恢复、force（含 `restart_from="daily_ready"` 从 DSA 阶段重算）API；`backend/scripts/trigger_dsa_batch_small.py` 为脚本入口。
-- 编排任务以 `SchedulerJobRun`（job_name="after_close_orchestrator"）记录，状态机：queued → refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → succeeded；异常 → failed；可被 watchdog 中断后自动 resume_queued。
+- 编排任务以 `SchedulerJobRun`（job_name="after_close_orchestrator"）记录。顶层步骤统一经过 `execute_orchestrator_step`（统一步骤执行器，见 §13.5）：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → computing_review → enqueue_chip_job(可选)`；主任务终态 `succeeded / partial_success / failed`，可被 watchdog 中断为 `interrupted` 后自动 `resume_queued`，可被管理员 `cancelled`。**注意：`computing_review` 不经过执行器**（内联 review_orchestrator_service 逻辑，见 §12.1）；`watchlist_ready` 仍为前端展示步骤，未成为正式执行步骤。
 - readiness：checking_coverage 步骤仅检查日线覆盖率 >= 0.9（Phase 5A 移除 15m 阻塞，符合 PRD30 AC-04）；日线不足则标记 failed，15m 缺失不再阻塞 after-close run。
 - run 隔离：`create_after_close_run` 使用 run_key = `after_close_orchestrator:{trade_date}` 去重；同一 trade_date 同时只能有一个活跃（queued/running/resume_queued）任务。
 - 计算与发布分离：DSA StrategyRun 完成后进入 publishing，调用 `StrategyBatchService.publish_run` 标记 published_at，再 finish snapshot run。
@@ -460,7 +460,7 @@ worker 收到 SIGTERM 信号时的 drain 流程：
   - heartbeat、成功、失败、取消和失租路径均清理后台 heartbeat task；失租 worker 不执行 auction anchor 回调；
 - **不新增常驻容器**：chip_consensus worker 在现有 after-close worker 容器内通过 `WORKER_TYPE` 分支执行；
 - watchdog：`auto_resume_interrupted_after_close_runs`（`scheduler_job_run_recovery_service.py:L169`）同时扫描 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次；
-- chip 创建：`after_close_orchestrator.py:L2066` 在主 run `succeeded` 后调用 `create_after_close_chip_consensus_job`（软失败，创建失败不反改主 run）。
+- chip 入队：`after_close_orchestrator.py` 的正式步骤 `enqueue_chip_job`（`_enqueue_chip_job_step`）在**主任务终态提交之前**调用 `create_after_close_chip_consensus_job`（只入队，不 await chip 计算，chip 由独立 Worker 异步执行）。入队失败计入 `partial_success` 判定，metadata 记录 `chip_enqueue_status / chip_job_id`；chip.core_run_id 指向 `snapshot_run_id`（数据版本）。
 
 ### 13.4 聚合依赖闭环：stock_core pointer → board aggregation
 
@@ -472,6 +472,31 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - 聚合失败只重跑聚合，不影响已发布 `stock_core`；
 - 依赖顺序：`stock_core published` → `market_aggregation` / `board_analysis` 可触发 → `review` 可触发；
 - `after_close_orchestrator` 当前止于 stock_core + chip_consensus 创建，**market aggregation 和 board_analysis 不在主编排内自动触发**，需通过 CLI / admin API 单独触发（见 `docs/runbooks/after-close-remote-development-run.md` §9）。
+
+### 13.5 统一步骤执行器 / watchdog / reconcile（Phase 0 收口，2026-08-03 核验）
+
+统一步骤执行器 `execute_orchestrator_step`（`after_close_orchestrator.py:L116`）：
+- 参数：`timeout_seconds / optional / heartbeat / progress / cancellation_check / attempt / retry_count / poll_interval`；返回 `(result, summary)`。
+- **唯一周期循环 `_tick_loop`**：每 `_HEARTBEAT_INTERVAL_SECONDS`(10s) 刷新 `summary["elapsed_seconds"] / heartbeat_at / last_progress_at` 并调用 `progress`，使 watchdog 能实时判定 `step_timed_out`（`running + elapsed_seconds > timeout`），而非仅"结束后诊断"。
+- **heartbeat 为单次 touch**：`_make_step_heartbeat` 构造单次 `touch_job_run_heartbeat`（fenced UPDATE，检查 lease_epoch + status='running'）；执行器不再把无限循环 `_job_run_heartbeat_loop` 当作回调传入。
+- **运行中取消**：`_run_with_cancellation` 把 operation 建为独立 task，周期调用 `cancellation_check`，命中时 `op_task.cancel()` + `await` 终止业务协程；`_StepCancelledError` 转 `cancelled` summary 不炸穿 Worker。
+- 步骤终态集合：`{succeeded, skipped, unavailable, failed, timed_out, cancelled, interrupted}`；非可选步骤超时/异常会 `raise`，可选步骤降级不抛。
+
+顶层步骤（经执行器）顺序：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → enqueue_chip_job(可选)`。**`computing_review` 不经过执行器**（内联 review_orchestrator_service 逻辑 + `_update_orchestrator_status`，见 §12.1），通过 `_review_failed` 接入统一 `partial_success` 收尾。
+
+syncing_boards 软失败：`_execute_syncing_boards` 返回业务 `{status}`（succeeded/skipped/failed），执行器外层将业务 failed/skipped 如实映射到 step summary 并 `_persist_step_summary`，避免"业务 failed / 步骤 succeeded"矛盾。
+
+watchdog / 状态查询（`get_after_close_run_status`）：
+- `heartbeat_stale`（> `_HEARTBEAT_STALE_SECONDS`=60）+ 步骤级 `step_timed_out` 合并为 `stale`；
+- 暴露 `step_summary / running_steps / step_timed_out / stale / partial_success`，API 完整透传（`AfterCloseRunStatusResponse`），管理后台可见真实 watchdog 字段。
+
+cancel / reconcile（`cancel_after_close_run` / `reconcile_after_close_run`）：
+- cancel：记录 `actor / request_id`，递增 `lease_epoch` fence 旧 Worker；
+- reconcile：接入 `request_id`（metadata 写 `reconcile_request_id`）；running→interrupted 时写 `finished_at`、释放 `lease_expires_at`、递增 `lease_epoch`、把仍 running 的 step_summary 收敛为 interrupted；`_inspect_run_artifacts` 只读核验 `factor_publications` 表 `stock_core / market_aggregation` 真实 pointer，记录 `reconcile_artifacts / reconcile_contradictions`；reconcile 事件 payload 含 `actor / request_id / artifacts / contradictions / new_lease_epoch`。
+
+Review 检查点：`_update_heartbeat_and_step` 的 `last_completed_step` 为 `str | None`，`None`=仅刷新心跳/租约、不推进检查点；Review 失败时传 `None`，避免下次 resume 跳过失败的 Review（详见 §12.1 检查点语义）。
+
+> 数据操作：以上为本地纯单元验证（PURE_UNIT_TEST=1），未部署、未连接共享库、未修改业务数据。
 
 ## 复盘 pointer 与 run 关系
 
@@ -594,6 +619,8 @@ pub_status = review_orchestrator_service.publish_review(review_run_id)
 ```
 
 位置：`backend/app/services/after_close_orchestrator.py` 的 `computing_review` 阶段（在 publishing 后，watchlist_ready 前）。
+
+**检查点语义（Phase 0 收口）**：Review 失败/质量门阻塞时 `_review_failed=True`，主任务收 `partial_success`，但通过 `_update_heartbeat_and_step(db, job_run, None, worker_id)` 传 `None` 仅刷新心跳、**不推进 `last_completed_step`**；只有 Review 真正成功才推进 `computing_review` 检查点，避免下次 resume 跳过失败的 Review。
 
 ### 12.2 7 步状态机 & 时间线映射（后端）
 

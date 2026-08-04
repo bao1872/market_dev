@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.services import after_close_orchestrator
 from app.services.after_close_orchestrator import (
     StepUnavailableError,
     execute_orchestrator_step,
@@ -58,3 +59,180 @@ async def test_auction_anchor_optional_unavailable_is_non_blocking(mode: str):
         assert summary["status"] == "timed_out"
         assert summary["error_code"] == "STEP_TIMEOUT"
     assert summary["optional"] is True
+
+
+# ---------------------------------------------------------------------------
+# [Phase0] 行为测试：运行中取消 / 心跳 / 运行期 elapsed / 非可选超时
+# 这些是 Phase 0 验收门的核心，全部为真实行为断言（不使用 inspect.getsource）。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mid_run_cancel_actually_stops_operation(monkeypatch):
+    """[Gate] mid_run_cancel_verified：运行中取消必须真正终止业务协程。
+
+    operation 是一个长循环；取消信号在运行途中出现。
+    断言：operation 被 cancel（未跑完全程），且 summary.status=cancelled。
+    """
+    monkeypatch.setattr(
+        after_close_orchestrator, "_CANCEL_POLL_INTERVAL_SECONDS", 0.01,
+    )
+
+    progressed: list[int] = []
+    completed = False
+
+    async def long_operation():
+        nonlocal completed
+        for i in range(200):
+            await asyncio.sleep(0.005)
+            progressed.append(i)
+        completed = True
+        return {"processed": len(progressed)}
+
+    calls = {"n": 0}
+
+    async def cancellation_check() -> bool:
+        # 前 2 次未取消，之后返回已取消（模拟管理员运行中点取消）
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    result, summary = await execute_orchestrator_step(
+        "computing_features",
+        long_operation,
+        timeout_seconds=30,
+        cancellation_check=cancellation_check,
+        poll_interval=0.01,
+    )
+
+    assert summary["status"] == "cancelled"
+    assert result is None
+    # 关键断言：业务协程被真正终止，没有跑完
+    assert completed is False
+    assert len(progressed) < 200
+    # 关键断言：cancellation_check 在运行期间被周期性调用（不只开始前一次）
+    assert calls["n"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_cancellation_check_polled_periodically_during_run():
+    """[Gate] cancellation_check 必须在运行期间被多次调用。"""
+    calls = {"n": 0}
+
+    async def cancellation_check() -> bool:
+        calls["n"] += 1
+        return False
+
+    async def operation():
+        await asyncio.sleep(0.12)
+        return {"ok": True}
+
+    result, summary = await execute_orchestrator_step(
+        "example", operation, timeout_seconds=30,
+        cancellation_check=cancellation_check, poll_interval=0.02,
+    )
+
+    assert summary["status"] == "succeeded"
+    assert result == {"ok": True}
+    # 开始前 1 次 + 运行期间多次
+    assert calls["n"] >= 4, f"cancellation_check 仅被调用 {calls['n']} 次，未周期轮询"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_and_running_elapsed_update_during_long_step(monkeypatch):
+    """[Gate] heartbeat_updates_during_long_step + running_elapsed_updates。
+
+    断言运行期间：
+    - heartbeat 被多次单次 touch（而非传入一个无限循环）；
+    - progress 回调在 running 状态下上报递增的 elapsed_seconds。
+    """
+    monkeypatch.setattr(
+        after_close_orchestrator, "_HEARTBEAT_INTERVAL_SECONDS", 0.02,
+    )
+
+    heartbeat_calls = {"n": 0}
+
+    async def heartbeat() -> None:
+        heartbeat_calls["n"] += 1
+
+    running_elapsed: list[float] = []
+
+    async def progress(summary: dict) -> None:
+        if summary["status"] == "running":
+            running_elapsed.append(summary["elapsed_seconds"])
+
+    async def operation():
+        await asyncio.sleep(0.15)
+        return {"ok": True}
+
+    _result, summary = await execute_orchestrator_step(
+        "computing_features", operation, timeout_seconds=30,
+        heartbeat=heartbeat, progress=progress,
+    )
+
+    assert summary["status"] == "succeeded"
+    # 心跳在长步骤运行期间被多次调用
+    assert heartbeat_calls["n"] >= 3, f"心跳仅 {heartbeat_calls['n']} 次"
+    # 运行期间上报了多次 running 进度，且 elapsed 单调递增（不再恒为 None）
+    assert len(running_elapsed) >= 3, f"running 进度仅 {len(running_elapsed)} 次"
+    assert all(e is not None for e in running_elapsed)
+    assert running_elapsed == sorted(running_elapsed)
+    assert running_elapsed[-1] > running_elapsed[0]
+
+
+@pytest.mark.asyncio
+async def test_running_summary_carries_timeout_seconds_for_watchdog():
+    """[Gate] step_timeout_can_trigger：running 期间 summary 必须带 timeout_seconds。
+
+    watchdog 依据 running + elapsed_seconds > timeout 判定 step_timed_out，
+    因此运行期上报必须同时具备这两个字段。
+    """
+    seen: list[dict] = []
+
+    async def progress(summary: dict) -> None:
+        seen.append(dict(summary))
+
+    await execute_orchestrator_step(
+        "checking_coverage", lambda: asyncio.sleep(0, result={"ok": True}),
+        timeout_seconds=300, progress=progress,
+    )
+
+    first = seen[0]
+    assert first["status"] == "running"
+    assert first["timeout_seconds"] == 300
+    assert first["elapsed_seconds"] is not None
+
+
+@pytest.mark.asyncio
+async def test_non_optional_timeout_raises_and_marks_timed_out():
+    """[Gate] 非可选步骤超时必须抛出，不得被静默降级。"""
+    async def slow_operation():
+        await asyncio.sleep(5)
+        return {"ok": True}
+
+    with pytest.raises(asyncio.TimeoutError):
+        await execute_orchestrator_step(
+            "publishing", slow_operation, timeout_seconds=0.02, optional=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_timeout_cancels_operation_task():
+    """超时后 operation task 必须被 cancel，不得成为脱缰的后台写入。"""
+    completed = False
+
+    async def slow_operation():
+        nonlocal completed
+        await asyncio.sleep(5)
+        completed = True
+
+    async def never_cancelled() -> bool:
+        return False
+
+    _result, summary = await execute_orchestrator_step(
+        "auction_anchor", slow_operation, timeout_seconds=0.03,
+        optional=True, cancellation_check=never_cancelled, poll_interval=0.01,
+    )
+
+    assert summary["status"] == "timed_out"
+    await asyncio.sleep(0.05)
+    assert completed is False

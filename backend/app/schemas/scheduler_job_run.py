@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -106,6 +107,13 @@ class AfterCloseRunStatusResponse(BaseModel):
     interrupt_reason: str | None = None  # 中断原因（error_code: error_message）
     is_retryable: bool = False  # 是否允许重试（status in failed/interrupted）
     heartbeat_stale: bool = False  # 心跳是否超时（running 且 heartbeat_at > 60s 前）
+    # [Phase0-Fix#4] 统一步骤合同 / watchdog 字段：
+    # service 层已计算，此前 Schema 未定义导致 API 组装时被丢弃（合同断链）。
+    step_summary: dict[str, Any] = {}  # 每个步骤的统一 summary（状态机唯一来源）
+    running_steps: list[str] = []  # 当前处于 running 的步骤名
+    step_timed_out: bool = False  # 是否存在运行超时步骤
+    stale: bool = False  # 综合 stale 判定（心跳超时 或 步骤超时）
+    partial_success: bool = False  # 核心成功但可选阶段降级
     events: list[JobRunEventItem] = []
 
 

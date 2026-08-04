@@ -2785,7 +2785,14 @@ async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ac04_daily_ready_15m_missing_allows_proceed() -> None:
+@patch(
+    # [Phase0-Fix#8] chip 入队已成为主任务终态之前的正式步骤，入队失败会使主任务
+    # 变 partial_success。本用例只验证 AC-04（15m 缺失不阻塞），故 mock 掉 chip 入队。
+    # 使用装饰器而非再嵌套 with，避免触发 Python 20 层静态嵌套块上限。
+    "app.services.after_close_orchestrator.create_after_close_chip_consensus_job",
+    new_callable=lambda: AsyncMock(return_value=(MagicMock(), True)),
+)
+async def test_ac04_daily_ready_15m_missing_allows_proceed(_chip_mock) -> None:
     """[AC-04] 日线就绪 + 15m 缺失 → 允许进入下一阶段。
 
     场景：
