@@ -21,6 +21,7 @@
 // - useToast：操作反馈
 
 import { useState, useMemo, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import {
   useSchedulerJobRuns,
   useAdminStrategyRuns,
@@ -1205,6 +1206,11 @@ export default function AdminJobsPage() {
               )}
             </div>
             <div className="drawer-foot">
+              {selectedRun && selectedRun.job_name === 'after_close_orchestrator' && (
+                <Link className="btn small" to="/admin/after-close">
+                  盘后详情（四类操作）
+                </Link>
+              )}
               <button className="btn" onClick={() => setJobDrawerOpen(false)}>
                 关闭
               </button>
