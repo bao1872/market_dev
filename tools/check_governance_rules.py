@@ -22,6 +22,7 @@ CANONICAL_RULES = {
     "40-testing-quality.md",
     "50-git-development-flow.md",
     "80-deployment-data-safety.md",
+    "81-remote-deployment-only.md",
     "90-deprecated-forbidden.md",
 }
 REMOVED_PATHS = {

@@ -32,6 +32,7 @@
    - `rules/40-testing-quality.md`：CHANGE 必填、CI 门禁、质量门禁、测试纪律、ref 隔离测试。
    - `rules/50-git-development-flow.md`：dev-only 分支模型、通用执行主体合同、提交安全、执行模式。
    - `rules/80-deployment-data-safety.md`：Migration、不备份、Docker 镜像保护、Live Mount。
+   - `rules/81-remote-deployment-only.md`：远程部署唯一性、本地仅作控制端。
    - `rules/90-deprecated-forbidden.md`：禁止行为清单、废弃项、禁止恢复项。
 4. **docs/prd/**：已确认需求和目标行为的事实源。
 5. **docs/maps/**：已核验当前实现和项目记忆。
