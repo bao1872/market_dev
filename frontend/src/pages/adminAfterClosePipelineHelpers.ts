@@ -56,6 +56,10 @@ export function overallStatusLabel(status: string | undefined): string {
     case 'failed': return '失败'
     case 'blocked': return '阻塞'
     case 'skipped': return '跳过（非交易日）'
+    // [AC-TERMINAL-01 2026-08-04] 终态如实显示，不再回落 '-'
+    case 'partial_success': return '部分成功'
+    case 'cancelled': return '已取消'
+    case 'interrupted': return '已中断'
     default: return '-'
   }
 }
@@ -64,8 +68,13 @@ export function overallStatusPillClass(status: string | undefined): string {
   switch (status) {
     case 'succeeded': return 'ok'
     case 'running': return 'warn'
+    // 部分成功：核心已发布但有降级，用 warn 而非 error
+    case 'partial_success': return 'warn'
     case 'failed':
     case 'blocked': return 'error'
+    // 取消/中断不是失败，用中性样式
+    case 'cancelled':
+    case 'interrupted': return 'off'
     case 'skipped':
     case 'not_started':
     default: return 'off'
@@ -96,6 +105,10 @@ export function stepStatusLabel(status: string): string {
     case 'skipped': return '跳过'
     case 'skipped_unavailable': return '不可用，已跳过'
     case 'cancelled': return '已终止'
+    // [AC-TERMINAL-01 2026-08-04] 步骤级终态显式呈现，不再回落"未知"
+    case 'timed_out': return '超时'
+    case 'unavailable': return '不可用'
+    case 'interrupted': return '已中断'
     default: return '未知'
   }
 }
@@ -105,9 +118,13 @@ export function stepStatusClass(status: string): string {
     case 'completed':
     case 'succeeded': return 'done'
     case 'running': return 'active'
-    case 'failed': return 'error'
+    case 'failed':
+    // 超时属于异常终态，与 failed 同级提示
+    case 'timed_out': return 'error'
     case 'skipped':
     case 'skipped_unavailable':
+    case 'unavailable':
+    case 'interrupted':
     case 'cancelled': return 'skipped'
     default: return ''
   }
@@ -118,9 +135,13 @@ export function runItemStatusPillClass(status: string): string {
   switch (status) {
     case 'succeeded': return 'ok'
     case 'running':
-    case 'queued': return 'warn'
+    case 'queued':
+    // [AC-TERMINAL-01 2026-08-04] 部分成功：核心已发布但有降级
+    case 'partial_success': return 'warn'
     case 'failed':
     case 'interrupted': return 'error'
+    // 取消是管理员主动行为，不标红
+    case 'cancelled': return 'off'
     default: return 'off'
   }
 }

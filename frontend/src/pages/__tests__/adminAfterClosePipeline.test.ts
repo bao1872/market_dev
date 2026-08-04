@@ -215,6 +215,33 @@ test('4e. stepStatusClass: 未知状态降级为空字符串', () => {
   assert.strictEqual(stepStatusClass(''), '')
 })
 
+// [AC-TERMINAL-01 2026-08-04] 终态必须如实显示，不得回落 '-'/'未知'
+test('4f. overallStatusLabel: partial_success/cancelled/interrupted 有明确中文', () => {
+  assert.strictEqual(overallStatusLabel('partial_success'), '部分成功')
+  assert.strictEqual(overallStatusLabel('cancelled'), '已取消')
+  assert.strictEqual(overallStatusLabel('interrupted'), '已中断')
+})
+
+test('4g. overallStatusPillClass: 终态样式区分失败与取消', () => {
+  // 部分成功：核心已发布但有降级 → warn
+  assert.strictEqual(overallStatusPillClass('partial_success'), 'warn')
+  // 取消/中断不是失败 → 不标红
+  assert.notStrictEqual(overallStatusPillClass('cancelled'), 'error')
+  assert.notStrictEqual(overallStatusPillClass('interrupted'), 'error')
+})
+
+test('4h. stepStatusLabel: 步骤级终态 timed_out/unavailable/interrupted 有文字', () => {
+  assert.strictEqual(stepStatusLabel('timed_out'), '超时')
+  assert.strictEqual(stepStatusLabel('unavailable'), '不可用')
+  assert.strictEqual(stepStatusLabel('interrupted'), '已中断')
+})
+
+test('4i. stepStatusClass: timed_out 视为错误，interrupted/unavailable 为跳过态', () => {
+  assert.strictEqual(stepStatusClass('timed_out'), 'error')
+  assert.strictEqual(stepStatusClass('unavailable'), 'skipped')
+  assert.strictEqual(stepStatusClass('interrupted'), 'skipped')
+})
+
 test('4f. getStepKeys: API 返回含未知 step 时不报错，原样保留', () => {
   const apiSteps: PipelineStep[] = [
     makeStep('refreshing_daily', 'completed'),

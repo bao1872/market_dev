@@ -77,7 +77,9 @@ class AfterClosePipelineResponse(BaseModel):
 
     trade_date: str
     market_session: str
+    # [AC-TERMINAL-01 2026-08-04] 新增终态：partial_success / cancelled / interrupted
     overall_status: str  # not_started / running / succeeded / failed / blocked / skipped
+                         # / partial_success / cancelled / interrupted
     watchlist_ready: bool
     watchlist_reason: str
     has_backfill_full: bool = False

@@ -492,3 +492,225 @@ async def test_terminal_review_short_circuit_detection():
         assert _is_terminal_review_short_circuit(status) is False, (
             f"终态 {status} 不应短路"
         )
+
+
+# ---------------------------------------------------------------------------
+# Gate: review_terminal_state_closed
+# [AC-TERMINAL-01 2026-08-04] 完整控制流验证，不止布尔函数
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_terminal_run_status_returns_enum_not_string():
+    """[P0#1] 终态字符串必须转成 AfterCloseRunStatus 枚举。
+
+    _update_orchestrator_status(status=...) 内部访问 status.value；
+    传裸字符串会在运行时抛 AttributeError，使取消链路写状态失败。
+    """
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        resolve_terminal_run_status,
+    )
+
+    cancelled = resolve_terminal_run_status("cancelled")
+    interrupted = resolve_terminal_run_status("interrupted")
+
+    assert cancelled is AfterCloseRunStatus.CANCELLED
+    assert interrupted is AfterCloseRunStatus.INTERRUPTED
+    # 关键：返回值必须有 .value（枚举），这正是修复前崩溃的原因
+    assert cancelled.value == "cancelled"
+    assert interrupted.value == "interrupted"
+
+    # 非短路终态不得被静默映射
+    for bad in ("succeeded", "failed", "timed_out", None):
+        with pytest.raises(ValueError):
+            resolve_terminal_run_status(bad)
+
+
+def test_completed_step_index_excludes_terminal_run_statuses():
+    """[P0#2] cancelled/interrupted 不得成为 last_completed_step 的合法检查点。
+
+    若被写入，_COMPLETED_STEP_INDEX 查表 fallback -1，
+    会让所有已完成步骤回退成 pending 且断点恢复从头重跑。
+    """
+    from app.services.after_close_pipeline_service import _COMPLETED_STEP_INDEX
+
+    for terminal in ("cancelled", "interrupted", "partial_success"):
+        assert terminal not in _COMPLETED_STEP_INDEX, (
+            f"{terminal} 是 run 终态而非流水线步骤，不得作为检查点"
+        )
+        # 证明后果：一旦误写入，索引退化为 -1
+        assert _COMPLETED_STEP_INDEX.get(terminal, -1) == -1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_preserves_checkpoint_and_skips_chip():
+    """[P0 完整控制流] Review 返回 cancelled 时的端到端行为。
+
+    验证链路：
+      Review executor 返回 cancelled
+      → chip 未入队
+      → job_run.status = cancelled
+      → orchestrator_status = cancelled
+      → last_completed_step 仍为 publishing（未被覆写）
+    """
+    from app.services import after_close_orchestrator as orch
+    from app.services.after_close_orchestrator import AfterCloseRunStatus
+
+    job_run = _FakeJobRun('{"last_completed_step": "publishing"}')
+    db = AsyncMock()
+
+    # 模拟短路块的两个关键调用
+    terminal = orch.resolve_terminal_run_status(
+        AfterCloseRunStatus.CANCELLED.value
+    )
+    job_run.status = terminal.value
+    # 短路块必须传 None 以保留检查点
+    await orch._update_heartbeat_and_step(db, job_run, None, "worker-1")
+
+    meta = orch._parse_metadata(job_run)
+    assert job_run.status == "cancelled"
+    assert meta["last_completed_step"] == "publishing", (
+        "取消不得覆写检查点为 cancelled"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_not_overwritten_as_failed():
+    """[P0#3] AfterCloseCancelledError 必须与真实失败区分。
+
+    取消/中断的终态已在短路块写入并 commit；
+    外层 except 若把它当普通异常处理会覆写成 failed，
+    导致管理员取消显示为"任务失败"。
+    """
+    from app.services.after_close_orchestrator import (
+        AfterCloseCancelledError,
+        AfterCloseRunStatus,
+    )
+
+    exc = AfterCloseCancelledError(AfterCloseRunStatus.CANCELLED)
+    assert exc.terminal_status is AfterCloseRunStatus.CANCELLED
+    assert isinstance(exc, Exception)
+    # 必须是独立异常类型，可被 except 精确捕获而不落入通用 failed 分支
+    assert not isinstance(exc, ValueError)
+
+
+def test_execute_after_close_run_short_circuit_uses_enum_and_none_checkpoint():
+    """[P0 源码守卫] 短路块必须：用枚举写状态 + 传 None 保留检查点 + 抛信号异常。
+
+    这三点共同保证取消链路不破坏状态。
+    """
+    import inspect
+    import re
+
+    from app.services import after_close_orchestrator as orch
+
+    src = inspect.getsource(orch.execute_after_close_run)
+    block = re.search(
+        r'if _is_terminal_review_short_circuit\(.*?raise AfterCloseCancelledError',
+        src,
+        re.DOTALL,
+    )
+    assert block is not None, "未找到终态短路块或缺少 AfterCloseCancelledError 抛出"
+    body = block.group(0)
+
+    # 1) 必须经 resolve_terminal_run_status 转枚举，不得直接传字符串
+    assert "resolve_terminal_run_status" in body, (
+        "短路块必须用 resolve_terminal_run_status 转枚举"
+    )
+    assert re.search(r'status=_review_step_status\b', body) is None, (
+        "不得把裸字符串 _review_step_status 传给 _update_orchestrator_status"
+    )
+
+    # 2) _update_heartbeat_and_step 必须传 None 保留检查点
+    m = re.search(r'_update_heartbeat_and_step\(\s*db, job_run, ([^,]+),', body)
+    assert m is not None, "短路块未调用 _update_heartbeat_and_step"
+    assert m.group(1).strip() == "None", (
+        f"短路块必须传 None 保留原检查点，实际: {m.group(1).strip()}"
+    )
+
+    # 3) 不得在短路块内执行 chip 入队
+    assert "_enqueue_chip_job_step" not in body, (
+        "终态短路后不得再执行 chip 入队"
+    )
+
+
+def test_outer_exception_handler_excludes_cancellation():
+    """[P0#3 源码守卫] 外层 except 必须先捕获 AfterCloseCancelledError。
+
+    否则取消会被通用 except 覆写成 failed。
+    """
+    import inspect
+
+    from app.services import after_close_orchestrator as orch
+
+    src = inspect.getsource(orch.execute_after_close_run)
+    cancel_idx = src.find("except AfterCloseCancelledError")
+    assert cancel_idx != -1, "外层必须显式捕获 AfterCloseCancelledError"
+
+    # 外层通用处理器：定位写 failed 的那个 except（含 LeaseEpochMismatchError 判定）
+    outer_generic_idx = src.find("if isinstance(exc, LeaseEpochMismatchError)")
+    assert outer_generic_idx != -1, "未找到外层通用异常处理器"
+
+    assert cancel_idx < outer_generic_idx, (
+        "AfterCloseCancelledError 必须在外层通用 except Exception 之前捕获，"
+        "否则取消会被覆写为 failed"
+    )
+
+
+def test_pipeline_overall_status_exposes_terminal_states():
+    """[P0 状态消费] partial_success/cancelled/interrupted 必须如实透出。
+
+    修复前这三种终态落到 else 分支返回 not_started，
+    前端会把"已取消"显示成"未开始"。
+    """
+    import json
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services.after_close_pipeline_service import (
+        MARKET_SESSION_CLOSED,
+        _compute_overall_status,
+    )
+
+    now = datetime(2026, 7, 31, 18, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    for status in ("partial_success", "cancelled", "interrupted"):
+        job_run = _FakeJobRun(json.dumps({"last_completed_step": "publishing"}))
+        job_run.status = status
+        result = _compute_overall_status(
+            job_run,
+            market_session=MARKET_SESSION_CLOSED,
+            now=now,
+            watchlist_ready=False,
+            has_backfill_full=False,
+        )
+        assert result == status, (
+            f"overall_status 必须如实返回 {status}，实际 {result}"
+        )
+
+
+def test_pipeline_cancelled_keeps_completed_steps():
+    """[P0 状态消费] 取消后已完成步骤不得全部回退为 pending。"""
+    import json
+
+    from app.services.after_close_pipeline_service import _compute_step_states
+
+    job_run = _FakeJobRun(json.dumps({
+        "last_completed_step": "publishing",
+        "orchestrator_status": "computing_review",
+    }))
+    job_run.status = "cancelled"
+
+    steps = _compute_step_states(job_run, events=[], watchlist_ready=False)
+    by_step = {s["step"]: s["status"] for s in steps}
+
+    # publishing 及之前必须保持 completed
+    for done in (
+        "refreshing_daily", "syncing_boards",
+        "checking_coverage", "computing_features", "publishing",
+    ):
+        assert by_step[done] == "completed", (
+            f"取消后 {done} 不应回退为 {by_step[done]}"
+        )
+    # 被取消的当前步骤如实显示 cancelled
+    assert by_step["computing_review"] == "cancelled"

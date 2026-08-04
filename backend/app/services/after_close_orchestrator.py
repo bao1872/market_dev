@@ -1955,6 +1955,38 @@ def _is_terminal_review_short_circuit(review_step_status: str | None) -> bool:
     )
 
 
+def resolve_terminal_run_status(review_step_status: str | None) -> AfterCloseRunStatus:
+    """[AC-TERMINAL-01 2026-08-04] 把 Review 终态字符串转为 AfterCloseRunStatus 枚举。
+
+    P0 修复：`_update_orchestrator_status(status=...)` 的形参类型是
+    AfterCloseRunStatus 枚举，此前短路块直接传入裸字符串
+    ("cancelled"/"interrupted")，导致 `status.value` 在运行时抛
+    AttributeError（str 无 .value），取消链路写状态失败。
+
+    仅接受短路终态；其余输入视为编程错误直接抛 ValueError，
+    避免把未知字符串静默映射成某个终态。
+    """
+    if review_step_status == AfterCloseRunStatus.CANCELLED.value:
+        return AfterCloseRunStatus.CANCELLED
+    if review_step_status == AfterCloseRunStatus.INTERRUPTED.value:
+        return AfterCloseRunStatus.INTERRUPTED
+    raise ValueError(
+        f"非短路终态不得转换为总任务终态: review_step_status={review_step_status!r}"
+    )
+
+
+class AfterCloseCancelledError(Exception):
+    """[AC-TERMINAL-01 2026-08-04] 盘后编排被取消/中断的信号异常。
+
+    外层 except 捕获到本异常时，不得把 job_run 覆写成 failed —— 终态已由
+    短路块写入（cancelled/interrupted）。
+    """
+
+    def __init__(self, terminal_status: AfterCloseRunStatus) -> None:
+        self.terminal_status = terminal_status
+        super().__init__(f"after-close run terminated as {terminal_status.value}")
+
+
 async def execute_after_close_run(
     job_run_id: uuid.UUID,
     trade_date: date,
@@ -3260,20 +3292,17 @@ async def execute_after_close_run(
         # 两者均不应降级为 partial_success 而继续执行后续步骤。
         _review_step_status = _review_step_summary.get("status")
         if _is_terminal_review_short_circuit(_review_step_status):
-            # 短路函数已保证 _review_step_status 为 "cancelled"/"interrupted"（非 None）
-            assert _review_step_status is not None
-            assert _review_step_status in (
-                AfterCloseRunStatus.CANCELLED.value,
-                AfterCloseRunStatus.INTERRUPTED.value,
-            )
+            # [AC-TERMINAL-01 P0#1] 裸字符串必须转为 AfterCloseRunStatus 枚举，
+            # 否则 _update_orchestrator_status 内部 status.value 抛 AttributeError。
+            _terminal_status = resolve_terminal_run_status(_review_step_status)
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
-                    status=_review_step_status,
+                    status=_terminal_status,
                     message=(
-                        f"盘后编排在复盘阶段被{_review_step_status}，"
+                        f"盘后编排在复盘阶段被{_terminal_status.value}，"
                         f"停止后续步骤: review_reason={_review_reason}"
                     ),
                     dsa_run_id=dsa_run_id,
@@ -3287,18 +3316,23 @@ async def execute_after_close_run(
                         "terminal_short_circuit": True,
                     },
                 )
-                job_run.status = _review_step_status
+                job_run.status = _terminal_status.value
                 job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-                await _update_heartbeat_and_step(
-                    db, job_run, _review_step_status, worker_id,
-                )
+                # [AC-TERMINAL-01 P0#2] last_completed_step 是"断点恢复检查点"，
+                # 只能记录真正完成的流水线步骤。取消/中断不是步骤，写入会导致
+                # _COMPLETED_STEP_INDEX 查不到（fallback -1）→ 已完成步骤全部
+                # 回退成 pending，且断点恢复从头重跑。
+                # 传 None：只刷心跳/租约，保留 publishing 等原检查点。
+                await _update_heartbeat_and_step(db, job_run, None, worker_id)
                 await db.commit()
             logger.warning(
                 "[AfterClose] 复盘阶段终态短路: job_run_id=%s, status=%s, "
-                "不再执行 chip 入队",
-                job_run_id, _review_step_status,
+                "不再执行 chip 入队（保留原检查点）",
+                job_run_id, _terminal_status.value,
             )
-            return
+            # [AC-TERMINAL-01 P0#3] 抛信号异常，让外层 except 明确区分
+            # "取消/中断"与"真实失败"，避免被覆写成 failed。
+            raise AfterCloseCancelledError(_terminal_status)
 
         # ---- 步骤 4.9: enqueue_chip_job（正式步骤，必须在主任务终态之前）----
         # [Phase0-Fix#8] chip 原先在主任务终态提交之后创建，导致：
@@ -3398,6 +3432,15 @@ async def execute_after_close_run(
             "chip_enqueue_status=%s",
             job_run_id, dsa_run_id, final_status.value, _chip_enqueue_status,
         )
+
+    except AfterCloseCancelledError as cancel_exc:
+        # [AC-TERMINAL-01 P0#3] 取消/中断不是失败：终态已由短路块写入并 commit，
+        # 这里绝不能再覆写成 failed，否则管理员取消会显示为"任务失败"。
+        logger.info(
+            "[AfterClose] 盘后编排以终态结束（非失败）: job_run_id=%s, status=%s",
+            job_run_id, cancel_exc.terminal_status.value,
+        )
+        return
 
     except Exception as exc:
         # [JOB-02] LeaseEpochMismatchError：任务已被新 Worker 接管，不标记 failed

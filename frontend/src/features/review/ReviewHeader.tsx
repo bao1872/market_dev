@@ -14,6 +14,9 @@ const RUN_STATUS_META: Record<string, { label: string; cls: string }> = {
   completed_with_errors: { label: '完成但有错误', cls: 'chipWarning' },
   failed: { label: '失败', cls: 'chipDanger' },
   cancelled: { label: '已取消', cls: 'chipDefault' },
+  // [AC-TERMINAL-01 2026-08-04] 终态如实呈现，不回落原始英文 key
+  interrupted: { label: '已中断', cls: 'chipWarning' },
+  partial_success: { label: '部分成功', cls: 'chipWarning' },
 }
 
 function CoverageItem({ label, ratio }: { label: string; ratio: number | null | undefined }) {

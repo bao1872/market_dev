@@ -108,6 +108,44 @@ _COMPLETED_STEP_INDEX = {
     AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 3,
 }
 
+# [AC-TERMINAL-01 2026-08-04] 注意：cancelled / interrupted / partial_success
+# 刻意不在 _COMPLETED_STEP_INDEX 中——它们是 run 终态而非流水线步骤。
+# 若被误写入 last_completed_step，此处查表 fallback -1，会让所有已完成步骤
+# 回退成 pending 并使断点恢复从头重跑。orchestrator 短路块因此必须传 None
+# 以保留原检查点。
+
+# 步骤级终态：允许在 partial_success 聚合时如实透出，而不是笼统 pending。
+_STEP_TERMINAL_STATUSES = frozenset({
+    "succeeded",
+    "completed",
+    "failed",
+    "timed_out",
+    "unavailable",
+    AfterCloseRunStatus.CANCELLED.value,
+    AfterCloseRunStatus.INTERRUPTED.value,
+})
+
+
+def _step_summary_status(
+    step_summaries: dict[str, Any],
+    step: str,
+) -> str | None:
+    """从 metadata.step_summary 读取指定步骤的终态字符串。
+
+    [AC-TERMINAL-01 2026-08-04] step_summary 由 orchestrator 落库，
+    是 computing_review 等可选步骤 timed_out/unavailable/cancelled/interrupted
+    的权威来源；事件聚合不提供该字段。
+    """
+    summary = step_summaries.get(step)
+    if not isinstance(summary, dict):
+        return None
+    status = summary.get("status")
+    if status is None:
+        return None
+    status_str = str(status)
+    # step_summary 里 succeeded 与展示层 completed 等价
+    return "completed" if status_str == "succeeded" else status_str
+
 
 def _normalize_to_shanghai(dt: datetime | None) -> datetime | None:
     """将任意 datetime 统一为 Asia/Shanghai 时区感知 datetime。
@@ -436,6 +474,12 @@ def _compute_step_states(
     last_completed_step = meta.get("last_completed_step")
     completed_idx = _COMPLETED_STEP_INDEX.get(last_completed_step, -1)
     step_events = _aggregate_step_events(events)
+    # [AC-TERMINAL-01 2026-08-04] step_summary 是各步骤终态的权威来源
+    # （由 orchestrator._persist_step_summary 落库）。
+    raw_step_summary = meta.get("step_summary")
+    step_summaries: dict[str, Any] = (
+        raw_step_summary if isinstance(raw_step_summary, dict) else {}
+    )
 
     # 失败时定位失败步骤
     failed_step: str | None = None
@@ -500,7 +544,7 @@ def _compute_step_states(
                 step_status = "completed"
             else:
                 step_status = "pending"
-        elif job_run.status == "interrupted":
+        elif job_run.status == AfterCloseRunStatus.INTERRUPTED.value:
             # [Repair] orchestrator 已中断但 snapshot 仍在 running，
             # computing_features 步骤应显示 running，提示"快照计算失联/待修复"。
             # [Phase8A] 旧 run 的 feature_snapshot 已映射到 computing_features
@@ -510,6 +554,29 @@ def _compute_step_states(
                 and snapshot_summary.get("status") == "running"
             ):
                 step_status = "running"
+            elif idx <= completed_idx:
+                step_status = "completed"
+            elif idx == current_idx:
+                # 中断发生在该步骤上（如 computing_review）
+                step_status = AfterCloseRunStatus.INTERRUPTED.value
+            else:
+                step_status = "pending"
+        elif job_run.status == AfterCloseRunStatus.CANCELLED.value:
+            # [AC-TERMINAL-01 2026-08-04] 取消不得让已完成步骤回退为 pending。
+            # 检查点（last_completed_step）已由短路块保留为真实完成的步骤。
+            if idx <= completed_idx:
+                step_status = "completed"
+            elif idx == current_idx:
+                step_status = AfterCloseRunStatus.CANCELLED.value
+            else:
+                step_status = "pending"
+        elif job_run.status == AfterCloseRunStatus.PARTIAL_SUCCESS.value:
+            # [AC-TERMINAL-01 2026-08-04] 部分成功：核心步骤已完成，
+            # 可选步骤（computing_review 等）按 step_summary 真实终态显示，
+            # 不得笼统显示 pending 掩盖 failed/timed_out/unavailable。
+            summary_status = _step_summary_status(step_summaries, step)
+            if summary_status in _STEP_TERMINAL_STATUSES:
+                step_status = summary_status
             elif idx <= completed_idx:
                 step_status = "completed"
             else:
@@ -576,6 +643,15 @@ def _compute_overall_status(
         return "failed"
     if job_run.status == "succeeded":
         return "succeeded" if watchlist_ready else "failed"
+    # [AC-TERMINAL-01 2026-08-04] 终态如实透出，不再落到 not_started。
+    # partial_success：核心已发布、可选阶段降级；cancelled：管理员主动取消；
+    # interrupted：Worker 被接管。三者都不是"未开始"。
+    if job_run.status == AfterCloseRunStatus.PARTIAL_SUCCESS.value:
+        return AfterCloseRunStatus.PARTIAL_SUCCESS.value
+    if job_run.status == AfterCloseRunStatus.CANCELLED.value:
+        return AfterCloseRunStatus.CANCELLED.value
+    if job_run.status == AfterCloseRunStatus.INTERRUPTED.value:
+        return AfterCloseRunStatus.INTERRUPTED.value
     # queued 视为 running
     if job_run.status == "queued":
         return "running"
