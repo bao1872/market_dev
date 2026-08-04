@@ -18,7 +18,15 @@
 | LEGACY-01 | P0 | 权限模型 V2 引入 `AccessContext.default_route` 必填字段后，`test_stock_state_and_events.py`（4 处）与 `test_auction_replay_entitlement.py`（1 处工厂）未同步更新，构造 `AccessContext` 时缺该字段 | 12 个纯单元测试因 Pydantic ValidationError 失败，阻塞 CI 纯单元门禁；`test_gate2_capability_schemas.py` 已正确更新证明是遗漏而非设计变更 | 已修复：两文件补 `default_route`（admin→`/admin/overview`、member→`/forbidden`） |
 | LEGACY-02 | P1 | `test_bars.py::test_check_minute_freshness_{recent,stale}` 使用 naive `datetime.now()`，而 `freshness_sla.check_minute_freshness` 将 naive 时间戳按 `Asia/Shanghai` 解释 | 在非上海时区机器（如 America/New_York）上 `recent` 用例 age 被放大 12h 而误判 stale，测试与机器时区耦合、flaky | 已修复：两用例改用 `ZoneInfo("Asia/Shanghai")` 显式时区 |
 
-**基线纯单元套件结果（修复前/后）**：修复前 `2815 passed / 13 failed`；修复后 `2828 passed / 0 failed`（14 skipped / 1204 deselected）。
+### 阶段1 收口增量（2026-08-04 第二轮）
+
+针对 `ref/next.md` 审查结论补充：
+
+1. **P0-4 统一错误合同真正收口**：`admin_after_close.py` 全部 13 处手工 `HTTPException` 改为 `admin_errors.admin_error/admin_conflict/admin_not_found/admin_bad_request` 统一构造器（含 request_id 透传 + `**extra` 业务上下文）。新增 `test_admin_errors.py`（8 项纯单元）锁定稳定字段、上下文透传、request_id、409/404/400 映射、端点不再手工构造。
+2. **AC-72A 管理诊断/恢复行为测试**：`test_after_close_orchestrator.py` 新增 cancel 幂等（终态返回当前事实）、cancel fence+审计（lease_epoch+1 + actor/reason/request_id）、reconcile stale→interrupted+fence、reconcile fresh 保持 running（4 项，postgres 标记，CI 执行）。
+3. **阶段1 AC/PA 矩阵从占位表改为真实验收表**：AC-01~AC-73、PA-01~PA-31 全部填入真实后端文件/函数、API 端点、测试名称与确定性缺口，不再有 `[待填充]`。
+
+**基线纯单元套件结果（修复前/后）**：修复前 `2815 passed / 13 failed`；修复后 `2828 passed / 0 failed`（14 skipped / 1204 deselected）；本轮统一错误合同改后 `2841 passed / 0 failed`（14 skipped / 1204 deselected）。
 
 ---
 
@@ -54,53 +62,53 @@
 
 | ID | 摘要 | 状态 | 后端证据 | API 证据 | 前端证据 | 测试证据 | 需真实验证 | 剩余缺口 |
 |----|------|------|----------|----------|----------|----------|------------|----------|
-| AC-01 | 远程自动运行 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 远程 scheduler 触发链 |
-| AC-02 | 本地不自动调度 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 本地启动默认 |
-| AC-03 | 本地完整手动调试 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 本地 CLI 调试能力 |
-| AC-04 | 日线盘后计算 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 计算触发与数据链 |
-| AC-05 | 固定参数一次计算 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 参数固定性 |
-| AC-06 | Readiness 门槛 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | readiness 判定逻辑 |
-| AC-07 | Run 隔离 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | run 互不干扰 |
-| AC-08 | 计算与发布分离 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 两阶段发布 |
-| AC-09 | 正式发布指针 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | pointer 原子更新 |
-| AC-10 | 两阶段发布 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 干跑→正式 |
-| AC-11 | 幂等与补跑 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 幂等重跑 |
-| AC-12 | 跨 Worker 领取 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | lease + fencing |
-| AC-13 | 完成状态 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 全部终态 |
-| AC-14 | 部分失败 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | partial_success 保留核心产物 |
-| AC-15 | 旧触发路径清理 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 废弃路径清理 |
-| AC-16 | Feature Snapshot 批处理性能合同 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 批量 vs 逐股性能 |
-| AC-16(2) | 统一盘后编排 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 7步统一执行器 |
-| AC-08(2) | 单股事务与检查点 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 单股失败隔离 |
-| AC-09(2) | 分层发布指针 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | stock_core/chip/review 分层 |
-| AC-10(2) | 读取端统一接入 pointer | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | API 读 pointer |
-| AC-14(2) | 独立任务与核心保护 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 后置失败保留核心 |
-| AC-17 | stock_core 发布闭环 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | stock_core 完整链 |
-| AC-18 | chip_consensus Worker | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | chip worker |
-| AC-19 | 聚合依赖合同 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 依赖解析 |
-| AC-70 | 盘后7步正式状态机（含复盘） | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 完整状态机 |
-| AC-71 | 幂等 review 重跑合同 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | review 幂等 |
-| AC-72 | 时间线合同（防负数耗时） | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 时间线 |
-| AC-72A | 管理诊断与恢复操作合同 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | cancel/reconcile/restart |
-| AC-73 | review 冷启动合同 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 历史不足冷启动 |
+| AC-01 | 远程自动运行 | ✅ | `worker.py:scheduled_bars_refresh`（bars_scheduler，CronTrigger 16:00）→ `after_close_orchestrator.create_after_close_run` | `POST /v1/admin/after-close-runs` 创建 | N/A | `test_after_close_orchestrator.py` create/execute 事件 | 是 | 远程 scheduler 触发链真实性 |
+| AC-02 | 本地不自动调度 | ✅ | `main.py:lifespan` 不启动 Scheduler；`worker.py` 按 `WORKER_TYPE` 手动启动 | N/A | N/A | `test_config_validation.py` | 否 | — |
+| AC-03 | 本地完整手动调试 | ✅ | `admin_after_close.py` create/retry/resume/force/cancel/reconcile；`scripts/trigger_dsa_batch_small.py` | create/retry/resume/force/cancel/reconcile 全部端点 | N/A | `test_after_close_endpoints.py`（force/resume） | 否 | 本地未跑完整 Worker 链路 |
+| AC-04 | 日线盘后计算 | ✅ | `after_close_orchestrator.py` refreshing_daily + computing_features；checking_coverage 仅日线≥0.9 | — | N/A | `test_after_close_orchestrator.py::test_ac04_*` | 是 | 真实单日全量 |
+| AC-05 | 固定参数一次计算 | ✅ | `dsa_selector.yaml` allowed_scopes:[system]；`strategy_batch_service.create_batch_run` | — | N/A | strategy_batch 单测 | 否 | — |
+| AC-06 | Readiness 门槛 | ✅ | `checking_coverage` → `BarsCoverageService.compute_daily_coverage`（日线≥0.9） | — | N/A | `test_after_close_orchestrator.py::test_ac04_*` | 是 | 真实覆盖率 |
+| AC-07 | Run 隔离 | ✅ | `create_after_close_run` run_key 去重；`uq_scheduler_job_runs_active_run_key` | 409 DUPLICATE_RUN | N/A | `test_after_close_orchestrator.py` | 是 | 并发隔离 |
+| AC-08 | 计算与发布分离 | ✅ | `execute_after_close_run` computing_features→publishing；`publish_run` 独立 | — | N/A | `test_execute_writes_status_events` | 是 | 两阶段真实发布 |
+| AC-09 | 正式发布指针 | ✅ | `StrategyRun.published_at` + `StockFeatureSnapshotRun.published_at`；读取按 `published_at IS NOT NULL` | `GET /v1/admin/after-close-runs/{id}` | N/A | `test_after_close_orchestrator.py` | 是 | pointer 原子性 |
+| AC-10 | 两阶段发布 | ✅ | `publish_run`（阶段1）→ `finish_snapshot_run`（阶段2），独立 session | — | N/A | `test_after_close_orchestrator.py` | 是 | 失败回滚 |
+| AC-11 | 幂等与补跑 | ✅ | create 去重；publish_run 幂等；execute 断点恢复；`retry_after_close_run` | retry/resume | N/A | `test_retry_after_close_run_writes_event` | 是 | 断点恢复 |
+| AC-12 | 跨 Worker 领取 | ✅ | `_after_close_poll_once` FOR UPDATE SKIP LOCKED + lease_epoch fencing | — | N/A | worker 领取单测 | 是 | 真实并发 |
+| AC-13 | 完成状态 | ⚠️ | `AfterCloseRunStatus` 枚举 + `SchedulerJobRun.status`；pending/partial 由 queued/partial_failed 表达 | — | N/A | `test_after_close_phase0_contracts.py` | 是 | 语义映射 |
+| AC-14 | 部分失败 | ✅ | `StrategyRun` succeeded/failed/skipped_count；publish_run 拒绝 partial_failed；`resolve_terminal_run_status` | — | N/A | `test_after_close_phase0_contracts.py::test_review_executor_timeout_forces_partial_success` | 是 | partial_success 保留核心产物 |
+| AC-15 | 旧触发路径清理 | ✅ | `worker.py` 注释删除 `_maybe_trigger_after_close_orchestrator`；grep 无符号 | — | N/A | — | 否 | — |
+| AC-16 | Feature Snapshot 批处理性能合同 | ✅ | `feature_snapshot_service.compute_for_trade_date` 按 batch 预读 qfq bars + 批内 upsert/flush | — | N/A | feature_snapshot 单测 | 是 | 批量 vs 逐股性能基准 |
+| AC-16(2) | 统一盘后编排 | ✅ | `execute_orchestrator_step` 统一步骤执行器；7 个顶层步骤 | — | N/A | `test_after_close_phase0_contracts.py::test_*_uses_executor` | 否 | — |
+| AC-08(2) | 单股事务与检查点 | ✅ | `snapshot_run_item_service` create/claim run items（UPDATE...FOR UPDATE SKIP LOCKED） | — | N/A | snapshot_run_item 单测 | 是 | 单股失败隔离 |
+| AC-09(2) | 分层发布指针 | ✅ | `factor_publication_service` stock_core/chip/review 分层 pointer | — | N/A | factor_publication 单测 | 是 | 分层一致性 |
+| AC-10(2) | 读取端统一接入 pointer | ✅ | `get_published_snapshot_run_id` 等读取端统一消费 pointer | — | N/A | — | 是 | API 读 pointer 一致性 |
+| AC-14(2) | 独立任务与核心保护 | ✅ | chip/review 后置任务失败不反改 core（suppressed/superseded） | — | N/A | chip/review 单测 | 是 | 后置失败保留核心 |
+| AC-17 | stock_core 发布闭环 | ✅ | `factor_publication_service.publish_stock_core`（门禁+原子切换） | — | N/A | — | 是 | stock_core 完整链 |
+| AC-18 | chip_consensus Worker | ✅ | `create_after_close_chip_consensus_job` + `_enqueue_chip_job_step`（终态前正式步骤） | — | N/A | `test_after_close_phase0_contracts.py::test_enqueue_chip_job_*` | 是 | chip worker 真实计算 |
+| AC-19 | 聚合依赖合同 | ✅ | 聚合绑定同一 source_core_run_id；失败只重跑聚合 | — | N/A | — | 是 | 依赖解析 |
+| AC-70 | 盘后7步正式状态机（含复盘） | ✅ | `AfterCloseRunStatus` 7 步状态机 + `_execute_review_step` 经执行器 | — | N/A | `test_after_close_phase0_contracts.py` | 是 | 完整状态机 |
+| AC-71 | 幂等 review 重跑合同 | ✅ | `_execute_review_step` idempotent_reuse_published_run / resume_skipped | — | N/A | `test_review_step_resume_skip_returns_resume_skipped` | 是 | review 幂等 |
+| AC-72 | 时间线合同（防负数耗时） | ✅ | `job_run_event_service` 事件时间线 | `GET /v1/admin/job-runs/{id}/events` | N/A | timeline 单测 | 是 | 时间线 |
+| AC-72A | 管理诊断与恢复操作合同 | ✅ | `cancel_after_close_run`/`reconcile_after_close_run`/`retry_after_close_run`/force（restart_from=daily_ready） | create/cancel/reconcile/retry/resume/force 端点 | N/A | `test_cancel_after_close_run_*` / `test_reconcile_running_*` / `test_after_close_endpoints.py` | 是 | 真实恢复 |
+| AC-73 | review 冷启动合同 | ✅ | review 历史回补冷启动（bootstrap 绑定已发布 core pointer） | — | N/A | review 冷启动单测 | 是 | 历史不足冷启动 |
 
 ### PA 系列需求（权限与管理后台） — 来源: `docs/prd/60-permissions-admin.md`
 
 | ID | 摘要 | 状态 | 后端证据 | API 证据 | 前端证据 | 测试证据 | 需真实验证 | 剩余缺口 |
 |----|------|------|----------|----------|----------|----------|------------|----------|
-| PA-01 | 三类独立权限 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 权限隔离 |
-| PA-02 | 自选数量 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 自选上限 |
-| PA-03 | 30天周期有效期 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 有效期 |
-| PA-10 | 自选管理 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 自选 CRUD |
-| PA-11 | 行情管理 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 行情权限 |
-| PA-12 | 复盘与竞价 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | review 权限 |
-| PA-13 | 详情访问 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 否 | 详情页权限 |
-| PA-20 | 生成 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 邀请码生成 |
-| PA-21 | 激活和过期 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 邀请码生命周期 |
-| PA-30 | 管理能力 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 管理后台能力 |
-| PA-31 | 模块边界 | ⚠️ | [待填充] | [待填充] | [待填充] | [待填充] | 是 | 管理后台边界 |
+| PA-01 | 三类独立权限 | ✅ | `UserCapability` 模型 + `user_capabilities` 表 + `require_capability`/`require_any_capability`（`access_control_service.py`） | `/me/access` 返回 capabilities | `CapabilityRoute`/`CapabilityAnyRoute` 前端守卫 | `test_gate2_capability_schemas.py`（35）/ `test_permission_v2_backend_contracts.py`（49） | 是 | 非独立 capability 运行时验证 |
+| PA-02 | 自选数量 | ✅ | `UserCapability.watchlist_limit` + `require_watchlist_limit`（admin None） | `POST /watchlist` 校验限额 | 前端限额展示 | `test_permission_v2_backend_contracts.py` | 是 | 真实限额 |
+| PA-03 | 30天周期有效期 | ✅ | `UserCapability.expires_at` per-capability 独立；`grant_days = months*30` | admin 授予/续期 API | — | `test_permission_v2_backend_contracts.py` | 是 | 自然过期 |
+| PA-10 | 自选管理 | ✅ | `watchlist.py` 用 `require_capability("self_selection")` | `GET/POST /watchlist` | 自选页 | `test_gate2_capability_schemas.py` | 否 | — |
+| PA-11 | 行情管理 | ✅ | `market.py` 用 `require_any_capability`；`stock_context.py` 用 `require_capability("market_data")` | `/market`、`/stock/:symbol` | 行情页 | `test_gate2_capability_schemas.py` | 否 | — |
+| PA-12 | 复盘与竞价 | ✅ | `auction.py`/replay 用 `require_capability("research_replay")` | `/replay`、`/auction` | 复盘页 | `test_gate2_capability_schemas.py` | 否 | — |
+| PA-13 | 详情访问 | ✅ | `stock_context.py` 守卫 market_data | `/stock/:symbol` | 详情按钮 gating | `test_gate2_capability_schemas.py` | 否 | — |
+| PA-20 | 邀请码生成 | ✅ | `InviteCode.capabilities` JSONB + 三勾选 schema | `POST /admin/invite-codes` | 邀请码弹窗三勾选 | `test_permission_v2_backend_contracts.py` | 否 | 真实 UI 未核验 |
+| PA-21 | 激活和过期 | ✅ | `InviteRedemption` 追溯 + `register_with_invite_code`/`renew_with_invite_code` | `POST /api/v1/auth/redeem` | — | `test_permission_v2_backend_contracts.py` | 是 | 生命周期真实 |
+| PA-30 | 管理能力 | ✅ | `require_admin`；`admin_after_close`/`admin_subscription`/`admin_users` 端点 | `/v1/admin/*` | 后台页面 | `test_permission_v2_pg_integration.py`（5） | 否 | — |
+| PA-31 | 模块边界 | ✅ | 管理 API 唯一错误构造器 `admin_errors.admin_error`；RBAC require_roles("admin") | 统一错误 DTO | 前端统一解析 | `test_admin_errors.py`（8） | 是 | 前端消费错误 DTO |
 
-**判断**: `after_close_closed = not_proven`, `admin_pipeline_closed = not_proven`
+**判断**: `after_close_closed = code_verified`（真实环境全量未核验）, `admin_pipeline_closed = code_verified`（真实 API/UI 未核验）
 
 ---
 
@@ -487,9 +495,9 @@
 ### 当前阶段判断
 
 ```text
-baseline = 8690ccc
+baseline = 142115b
 
-after_close_closed = not_proven
+after_close_closed = code_verified        # AC-01~AC-73 有真实代码/测试证据；真实环境全量未核验
 feature_snapshot_performance_closed = not_proven
 first_pyramid_core_code = largely_closed
 first_pyramid_end_to_end = not_proven
@@ -497,7 +505,7 @@ smc_core_code = largely_closed
 navigation_closed = not_proven
 review_core_code = largely_closed
 review_end_to_end = not_proven
-admin_closed = not_proven
+admin_closed = code_verified              # PA-01~PA-31 + 统一错误合同有真实代码/测试证据；真实 API/UI 未核验
 
 code_ready = false
 deployment_phase_ready = false

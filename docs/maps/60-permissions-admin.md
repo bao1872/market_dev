@@ -425,3 +425,12 @@ Gate 2 在 Phase 5B-2 capability 模型基础上完成权限代码改造（非"�
 - 含 effective_access / access_control_service：**105 passed / 22 skipped**。
 - `test_permission_v2_pg_integration.py` 已补充本轮 14 项真实 PG 合同（**已写代码未运行**）：新注册只建声明权限 / 旧套餐用户首管物化 / active 顺延 / expired 重算 / tombstone 不硬删 / 管理员与邀请码 regrant / granted_by 不覆盖 / quota 不改 expires_at / commercial 六态 / access-profile 真实 API / 审计含 mutation_type·reason·actor·request_id / legacy 物化入审计 / 回滚无残留 / permission_resolution_failed 稳定错误。
 - Ruff、Mypy、docs consistency、architecture、governance 全部通过。
+
+## 15. 管理 API 统一错误合同（2026-08-04 阶段1 收口，已核验）
+
+管理后台错误响应统一由 `backend/app/api/admin_errors.py` 的 `admin_error` 构造（PA-31 模块边界落地）：
+
+- **唯一事实源**：`admin_error` 稳定字段 `detail/message/error_code/severity/retryable/resumable/recommended_action`，可选 `request_id`（从 `x-request-id` 透传，供审计对齐），业务上下文字段经 `**extra` 透传（保留旧前端依赖的扩展字段）。
+- **便捷别名**：`admin_conflict`（409）/ `admin_not_found`（404）/ `admin_bad_request`（400）。
+- **落地范围**：`admin_after_close.py` 全部 13 处手工 `HTTPException` 已改为统一构造器；新增 `test_admin_errors.py`（8 项纯单元）锁定稳定字段、上下文透传、request_id、状态码映射，并含源码守卫断言端点不再手工 `raise HTTPException(detail={...})`。
+- 前端统一解析该 DTO；400/403/404/409/422/500 行为测试由 `test_admin_errors.py`/`test_after_close_endpoints.py` 覆盖。

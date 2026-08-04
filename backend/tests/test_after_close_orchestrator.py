@@ -35,9 +35,11 @@ from app.models.stock_feature_snapshot_run import (
 from app.models.strategy_run import StrategyRun
 from app.services.after_close_orchestrator import (
     AfterCloseRunStatus,
+    cancel_after_close_run,
     create_after_close_run,
     execute_after_close_run,
     get_after_close_run_status,
+    reconcile_after_close_run,
     repair_stale_after_close_snapshot_runs,
     retry_after_close_run,
 )
@@ -335,6 +337,133 @@ async def test_retry_after_close_run_writes_event(db_session) -> None:
     queued_events = [e for e in events if e.step == AfterCloseRunStatus.QUEUED.value]
     assert len(queued_events) >= 1
     assert "重试" in queued_events[-1].message
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_close_run_idempotent_on_terminal_state(db_session) -> None:
+    """cancel 对终态任务幂等返回当前事实，不重复改状态、不抛错。
+
+    [AC-72A 2026-08-04] cancel 重复调用必须幂等：终态（succeeded）直接返回
+    当前事实，不能把已成功任务误标记为 cancelled。
+    """
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="succeeded",
+        orchestrator_status=AfterCloseRunStatus.SUCCEEDED.value,
+    )
+    await db_session.flush()
+
+    with patch.object(db_session, "commit", new=db_session.flush):
+        result = await cancel_after_close_run(
+            db_session,
+            job_run_id=str(job_run.id),
+            reason="late cancel",
+            actor="admin@test",
+        )
+
+    assert result.status == "succeeded"
+    assert result.error_code != "ADMIN_CANCELLED"
+    assert result.metadata_json is not None
+    meta = json.loads(result.metadata_json)
+    assert meta["orchestrator_status"] != AfterCloseRunStatus.CANCELLED.value
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_close_run_fences_worker_and_records_audit(db_session) -> None:
+    """cancel 运行中任务：fence 旧 Worker（lease_epoch+1）+ 记录 actor/reason/request_id。
+
+    [AC-72A 2026-08-04] 取消必须递增 lease_epoch 使旧 Worker 的 fenced 写入
+    立即失效，并记录审计上下文（actor / reason / request_id）供时间线可溯。
+    """
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.COMPUTING_FEATURES.value,
+    )
+    job_run.lease_epoch = 3
+    await db_session.flush()
+
+    with patch.object(db_session, "commit", new=db_session.flush):
+        result = await cancel_after_close_run(
+            db_session,
+            job_run_id=str(job_run.id),
+            reason="manual_cancel",
+            actor="admin@test",
+            request_id="req-cancel-1",
+        )
+
+    assert result.status == "cancelled"
+    assert result.error_code == "ADMIN_CANCELLED"
+    # fence：lease_epoch 递增，旧 Worker 心跳/写入被拒
+    assert result.lease_epoch == 4
+    assert result.metadata_json is not None
+    meta = json.loads(result.metadata_json)
+    assert meta["orchestrator_status"] == AfterCloseRunStatus.CANCELLED.value
+    assert meta["cancelled_lease_epoch"] == 4
+    assert meta["cancel_actor"] == "admin@test"
+    assert meta["cancel_reason"] == "manual_cancel"
+    assert meta["cancel_request_id"] == "req-cancel-1"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_running_with_stale_heartbeat_becomes_interrupted(db_session) -> None:
+    """reconcile 运行中但心跳 stale 的任务 → 标记 interrupted + fence 旧 Worker。
+
+    [AC-72A 2026-08-04] Worker 失联（heartbeat 超时）必须被 reconcile 正确
+    收敛为 interrupted（而非永远挂 running），并递增 lease_epoch fence 旧 Worker。
+    """
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.COMPUTING_FEATURES.value,
+    )
+    job_run.heartbeat_at = datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(seconds=300)
+    job_run.lease_epoch = 2
+    await db_session.flush()
+
+    with patch.object(db_session, "commit", new=db_session.flush):
+        result = await reconcile_after_close_run(
+            db_session,
+            job_run_id=str(job_run.id),
+            actor="admin@test",
+            request_id="req-reconcile-1",
+        )
+
+    assert result.status == "interrupted"
+    assert result.error_code == "RECONCILED_INTERRUPTED"
+    # fence：lease_epoch 递增
+    assert result.lease_epoch == 3
+    assert result.metadata_json is not None
+    meta = json.loads(result.metadata_json)
+    assert meta["orchestrator_status"] == AfterCloseRunStatus.INTERRUPTED.value
+    assert meta["reconcile_request_id"] == "req-reconcile-1"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_running_with_fresh_heartbeat_stays_running(db_session) -> None:
+    """reconcile 心跳新鲜的任务 → 保持 running，不误判 interrupted。
+
+    [AC-72A 2026-08-04] 不能把健康 Worker 误收敛为 interrupted。
+    """
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.COMPUTING_FEATURES.value,
+    )
+    job_run.heartbeat_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    job_run.lease_epoch = 1
+    await db_session.flush()
+
+    with patch.object(db_session, "commit", new=db_session.flush):
+        result = await reconcile_after_close_run(
+            db_session,
+            job_run_id=str(job_run.id),
+            actor="admin@test",
+        )
+
+    assert result.status == "running"
+    # 未触发 fence（lease_epoch 不变）
+    assert result.lease_epoch == 1
 
 
 @pytest.mark.asyncio

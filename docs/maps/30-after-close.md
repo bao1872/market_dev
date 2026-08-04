@@ -508,6 +508,20 @@ Review 检查点：`_update_heartbeat_and_step` 的 `last_completed_step` 为 `s
 
 > 数据操作：以上为本地纯单元验证（PURE_UNIT_TEST=1），未部署、未连接共享库、未修改业务数据。
 
+### 13.6 管理 API 统一错误合同（2026-08-04 收口）
+
+管理后台所有错误响应统一经 `app.api.admin_errors.admin_error` 构造（唯一事实源），禁止端点在
+`detail` 里手工拼多套字典：
+
+- 统一稳定字段：`detail / message / error_code / severity / retryable / resumable / recommended_action / request_id`；
+- `message` 恒等于 `detail`（兼容旧前端 `detail.message` 解析）；
+- 业务上下文字段（`after_close_run_id / trade_date / started_at / heartbeat_at / last_completed_step / conflicting_run_id / daily_coverage / reason / threshold` 等）经 `**extra` 透传，不丢失；
+- 便捷别名：`admin_conflict`(409) / `admin_not_found`(404) / `admin_bad_request`(400)。
+
+`admin_after_close.py` 全部端点（create/force/resume/retry/cancel/reconcile/status/events）
+已改用统一构造器；cancel/reconcile 的 404 错误透传 `request_id`。测试：`backend/tests/test_admin_errors.py`
+（纯单元 8 项，覆盖稳定字段/extra 透传/request_id/状态码映射/源码不再手工 raise HTTPException）。
+
 ## 复盘 pointer 与 run 关系
 
 **核验状态：待实现（复盘模块尚未开发）**
