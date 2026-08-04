@@ -81,3 +81,30 @@ class TestAdminErrorConvenienceAliases:
     def test_admin_bad_request_status_400(self) -> None:
         exc = admin_bad_request("bad_request", "参数非法")
         assert exc.status_code == status.HTTP_400_BAD_REQUEST
+
+
+class TestAdminErrorSourceGuard:
+    """源码守卫：管理端点必须统一经 admin_error 构造错误，禁止手工拼 detail 字典。
+
+    这是 R14 闭环的回归防线——一旦端点又改回手工 ``HTTPException(detail={...})``
+    或直接 ``raise HTTPException(404, str(...))``，测试立即失败。
+    """
+
+    _API_DIR = "app/api"
+
+    def test_after_close_endpoint_uses_admin_error(self) -> None:
+        """admin_after_close.py 不得再直接 raise HTTPException（手工 detail 字典）。"""
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parent.parent / self._API_DIR / "admin_after_close.py"
+        src = path.read_text(encoding="utf-8")
+        # 统一构造器必须被使用
+        assert "admin_error(" in src, "必须使用 admin_error"
+        assert "admin_conflict(" in src, "必须使用 admin_conflict"
+        assert "admin_not_found(" in src, "必须使用 admin_not_found"
+        assert "admin_bad_request(" in src, "必须使用 admin_bad_request"
+        # 不得再手工构造 HTTPException（唯一允许的是 import 处不再出现 HTTPException）
+        assert "raise HTTPException(" not in src, "端点不得再手工 raise HTTPException"
+        assert "HTTPException," not in src.replace("from fastapi import APIRouter, Depends, Query, Request, status", ""), (
+            "不得再 import HTTPException（应从 admin_errors 走统一构造器）"
+        )

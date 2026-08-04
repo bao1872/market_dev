@@ -21,10 +21,16 @@ import uuid
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.admin_errors import (
+    admin_bad_request,
+    admin_conflict,
+    admin_error,
+    admin_not_found,
+)
 from app.core.deps import get_db, require_roles
 from app.core.route_utils import get_route_paths, iter_api_routes
 from app.schemas.after_close_pipeline import (
@@ -77,9 +83,14 @@ def _parse_trade_date(trade_date_str: str):
     try:
         return date_cls.fromisoformat(trade_date_str)
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"trade_date 格式错误（需 YYYY-MM-DD）: {trade_date_str}, error={e}",
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "after_close_invalid_trade_date",
+            f"trade_date 格式错误（需 YYYY-MM-DD）: {trade_date_str}, error={e}",
+            retryable=False,
+            resumable=False,
+            recommended_action="重新提交 YYYY-MM-DD 格式的交易日",
         ) from e
 
 
@@ -118,21 +129,17 @@ async def create_after_close_run_endpoint(
 
     # [AfterClose] - 非交易日拦截：避免创建空转的盘后编排任务（不创建 SchedulerJobRun 记录）
     if not await is_trading_day_async(db, trade_date):
-        # [PRD §8.4.9] 统一错误字段（保留旧 error_code/message 兼容，新增稳定语义字段）
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": "NON_TRADING_DAY",
-                "detail": f"{trade_date.isoformat()}（{trade_date.strftime('%A')}）非交易日，无需执行盘后编排",
-                "message": f"{trade_date.isoformat()}（{trade_date.strftime('%A')}）非交易日，无需执行盘后编排",
-                "severity": "info",
-                "retryable": False,
-                "resumable": False,
-                "recommended_action": "无需处理，非交易日不执行盘后编排",
-                "reason": "非交易日无需执行盘后编排",
-                "trade_date": trade_date.isoformat(),
-                "weekday": trade_date.strftime("%A"),
-            },
+        # [PRD §8.4.9] 统一错误：stable_error_code=after_close_non_trading_day，error_code/reason 保留旧码 NON_TRADING_DAY
+        raise admin_conflict(
+            "after_close_non_trading_day",
+            f"{trade_date.isoformat()}（{trade_date.strftime('%A')}）非交易日，无需执行盘后编排",
+            legacy_error_code="NON_TRADING_DAY",
+            severity="info",
+            retryable=False,
+            resumable=False,
+            recommended_action="无需处理，非交易日不执行盘后编排",
+            trade_date=trade_date.isoformat(),
+            weekday=trade_date.strftime("%A"),
         )
 
     job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
@@ -146,29 +153,26 @@ async def create_after_close_run_endpoint(
     # [AfterClose] - detail 增强：透传 error_code/started_at/heartbeat_at/last_completed_step，
     # 供前端展示真实冲突原因（当前阶段 + 开始时间）并提供"查看任务"入口（job_run_id）
     if not is_new:
-        # [PRD §8.4.9] 统一错误字段（保留旧 error_code/message 兼容，新增稳定语义字段）
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": "DUPLICATE_RUN",
-                "detail": f"当天已有盘后任务正在运行: trade_date={trade_date}",
-                "message": f"当天已有盘后任务正在运行: trade_date={trade_date}",
-                "severity": "warning",
-                "retryable": False,
-                "resumable": True,
-                "recommended_action": "查看任务详情或等待其进入终态",
-                "after_close_run_id": str(job_run.id),
-                "status": job_run.status,
-                "orchestrator_status": orchestrator_status or "unknown",
-                "trade_date": trade_date.isoformat(),
-                "started_at": (
-                    job_run.started_at.isoformat() if job_run.started_at else None
-                ),
-                "heartbeat_at": (
-                    job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None
-                ),
-                "last_completed_step": meta.get("last_completed_step"),
-            },
+        # [PRD §8.4.9] 统一错误：stable_error_code=after_close_conflict，error_code/reason 保留旧码 DUPLICATE_RUN
+        raise admin_conflict(
+            "after_close_conflict",
+            f"当天已有盘后任务正在运行: trade_date={trade_date}",
+            legacy_error_code="DUPLICATE_RUN",
+            severity="warning",
+            retryable=False,
+            resumable=True,
+            recommended_action="查看任务详情或等待其进入终态",
+            after_close_run_id=str(job_run.id),
+            status=job_run.status,
+            orchestrator_status=orchestrator_status or "unknown",
+            trade_date=trade_date.isoformat(),
+            started_at=(
+                job_run.started_at.isoformat() if job_run.started_at else None
+            ),
+            heartbeat_at=(
+                job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None
+            ),
+            last_completed_step=meta.get("last_completed_step"),
         )
 
     return AfterCloseRunCreateResponse(
@@ -225,7 +229,12 @@ async def cancel_after_close_run_endpoint(
         await db.commit()
         return _action_response(job_run, "盘后任务已取消或已处于终态")
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_not_found(
+            "after_close_run_not_found",
+            str(exc),
+            request_id=_request_id,
+        ) from exc
 
 
 @router.post("/after-close-runs/{run_id}/reconcile", response_model=AfterCloseRunCreateResponse)
@@ -249,7 +258,12 @@ async def reconcile_after_close_run_endpoint(
         await db.commit()
         return _action_response(job_run, "盘后任务状态已校准")
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_not_found(
+            "after_close_run_not_found",
+            str(exc),
+            request_id=_request_id,
+        ) from exc
 
 
 @router.get(
@@ -278,10 +292,8 @@ async def get_after_close_run_endpoint(
     try:
         result = await get_after_close_run_status(db=db, job_run_id=run_id)
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
-        ) from e
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_not_found("after_close_run_not_found", str(e)) from e
 
     return AfterCloseRunStatusResponse(
         job_run_id=result["job_run_id"],
@@ -358,13 +370,12 @@ async def retry_after_close_run_endpoint(
     except ValueError as e:
         error_msg = str(e)
         if "不存在" in error_msg:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=error_msg,
+            # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+            raise admin_not_found(
+                "after_close_run_not_found", error_msg,
             ) from e
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_msg,
+        raise admin_bad_request(
+            "after_close_not_retryable", error_msg,
         ) from e
 
     # [Phase5] - 仅重置为 queued，由独立 Worker 领取执行（不再 _kick_off_async_execution）
@@ -453,22 +464,24 @@ async def resume_after_close_run_endpoint(
     job_run = result.scalar_one_or_none()
 
     if job_run is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"编排任务不存在: job_run_id={run_id}",
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_not_found(
+            "after_close_run_not_found", f"编排任务不存在: job_run_id={run_id}",
         )
     if job_run.job_name != _AFTER_CLOSE_JOB_NAME:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"任务非盘后编排: job_name={job_run.job_name}",
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_bad_request(
+            "after_close_wrong_job_type",
+            f"任务非盘后编排: job_name={job_run.job_name}",
         )
 
     meta = _parse_metadata(job_run)
     trade_date_str = meta.get("trade_date", "")
     if not trade_date_str:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"metadata_json 中缺少 trade_date: job_run_id={run_id}",
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_bad_request(
+            "after_close_missing_trade_date",
+            f"metadata_json 中缺少 trade_date: job_run_id={run_id}",
         )
 
     # 3. 幂等：已 queued（前一次 resume 已提交，Worker 尚未领取）直接返回同一任务
@@ -487,9 +500,10 @@ async def resume_after_close_run_endpoint(
 
     # 4. 校验状态
     if job_run.status not in _RESUMABLE_STATUSES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_bad_request(
+            "after_close_not_resumable",
+            (
                 f"仅 failed/interrupted 状态可恢复: "
                 f"current_status={job_run.status}"
             ),
@@ -508,18 +522,20 @@ async def resume_after_close_run_endpoint(
     conflict_result = await db.execute(conflict_stmt)
     conflict_run = conflict_result.scalar_one_or_none()
     if conflict_run is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": "SAME_DAY_ACTIVE_RUN",
-                "conflicting_run_id": str(conflict_run.id),
-                "trade_date": trade_date_str,
-                "status": conflict_run.status,
-                "message": (
-                    f"同日已有 {conflict_run.status} 任务: "
-                    f"trade_date={trade_date_str}, run_id={conflict_run.id}"
-                ),
-            },
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_conflict(
+            "SAME_DAY_ACTIVE_RUN",
+            (
+                f"同日已有 {conflict_run.status} 任务: "
+                f"trade_date={trade_date_str}, run_id={conflict_run.id}"
+            ),
+            severity="warning",
+            retryable=True,
+            resumable=True,
+            recommended_action="等待同日活跃任务进入终态后再恢复",
+            conflicting_run_id=str(conflict_run.id),
+            trade_date=trade_date_str,
+            status=conflict_run.status,
         )
 
     # 6-8. 重置为 queued（保留 last_completed_step / dsa_run_id /
@@ -647,9 +663,10 @@ async def force_advance_after_close_endpoint(
 
     # 校验 restart_from 取值
     if restart_from is not None and restart_from not in _RESTART_FROM_VALID_VALUES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_bad_request(
+            "after_close_invalid_restart_from",
+            (
                 f"restart_from 仅支持 {_RESTART_FROM_VALID_VALUES}，"
                 f"当前值: {restart_from}"
             ),
@@ -657,22 +674,24 @@ async def force_advance_after_close_endpoint(
 
     job_run = await db.get(SchedulerJobRun, run_id)
     if job_run is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"编排任务不存在: job_run_id={run_id}",
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_not_found(
+            "after_close_run_not_found", f"编排任务不存在: job_run_id={run_id}",
         )
     if job_run.job_name != "after_close_orchestrator":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"任务非盘后编排: job_name={job_run.job_name}",
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_bad_request(
+            "after_close_wrong_job_type",
+            f"任务非盘后编排: job_name={job_run.job_name}",
         )
 
     meta = _parse_metadata(job_run)
     trade_date_str = meta.get("trade_date", "")
     if not trade_date_str:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"metadata_json 中缺少 trade_date: job_run_id={run_id}",
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_bad_request(
+            "after_close_missing_trade_date",
+            f"metadata_json 中缺少 trade_date: job_run_id={run_id}",
         )
 
     # restart_from="daily_ready"：校验覆盖率 ≥ 90%
@@ -688,32 +707,25 @@ async def force_advance_after_close_endpoint(
         )
         coverage_raw = coverage_result["coverage_raw"]
         if coverage_raw < _RESTART_FROM_COVERAGE_THRESHOLD:
-            # [PRD §8.4.9] 统一错误字段（保留 reason/message 兼容，新增稳定语义字段）
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "error_code": "DATA_COVERAGE_INSUFFICIENT",
-                    "detail": (
-                        f"restart_from=daily_ready 覆盖率不足: "
-                        f"{coverage_result['coverage']:.1%} < "
-                        f"{_RESTART_FROM_COVERAGE_THRESHOLD:.0%}"
-                    ),
-                    "message": (
-                        f"restart_from=daily_ready 覆盖率不足: "
-                        f"{coverage_result['coverage']:.1%} < "
-                        f"{_RESTART_FROM_COVERAGE_THRESHOLD:.0%}"
-                    ),
-                    "severity": "warning",
-                    "retryable": True,
-                    "resumable": False,
-                    "recommended_action": "重新同步日线数据后再重试",
-                    "reason": "DATA_COVERAGE_INSUFFICIENT",
-                    "trade_date": coverage_result["trade_date"],
-                    "daily_coverage": coverage_result["coverage"],
-                    "daily_covered": coverage_result["covered"],
-                    "daily_total": coverage_result["total"],
-                    "threshold": _RESTART_FROM_COVERAGE_THRESHOLD,
-                },
+            # [PRD §8.4.9] 统一错误：stable_error_code=after_close_coverage_insufficient，
+            # error_code/reason 保留旧码 DATA_COVERAGE_INSUFFICIENT
+            raise admin_conflict(
+                "after_close_coverage_insufficient",
+                (
+                    f"restart_from=daily_ready 覆盖率不足: "
+                    f"{coverage_result['coverage']:.1%} < "
+                    f"{_RESTART_FROM_COVERAGE_THRESHOLD:.0%}"
+                ),
+                legacy_error_code="DATA_COVERAGE_INSUFFICIENT",
+                severity="warning",
+                retryable=True,
+                resumable=False,
+                recommended_action="重新同步日线数据后再重试",
+                trade_date=coverage_result["trade_date"],
+                daily_coverage=coverage_result["coverage"],
+                daily_covered=coverage_result["covered"],
+                daily_total=coverage_result["total"],
+                threshold=_RESTART_FROM_COVERAGE_THRESHOLD,
             )
         coverage_info = {
             "daily_coverage": coverage_result["coverage"],
@@ -811,9 +823,9 @@ async def list_job_run_events_endpoint(
     # 校验任务存在（不限制 job_name，通用端点）
     job_run = await db.get(SchedulerJobRun, run_id)
     if job_run is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"任务不存在: job_run_id={run_id}",
+        # [PRD §8.4.9] 统一错误字段（管理 API 唯一构造器）
+        raise admin_not_found(
+            "after_close_run_not_found", f"任务不存在: job_run_id={run_id}",
         )
 
     events = await list_events(db=db, job_run_id=run_id, limit=limit)
