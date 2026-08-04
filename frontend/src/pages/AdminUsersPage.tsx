@@ -16,8 +16,10 @@
 // - useRevokeInviteCode：作废邀请码
 
 import { useState, useMemo, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { useToast } from '@/store/toast'
+import AdminBetaApplicationsPage from './AdminBetaApplicationsPage'
 import {
   useMembers,
   useMemberRedemptions,
@@ -230,8 +232,26 @@ function getPlanMonitorLimit(
 export default function AdminUsersPage() {
   const toast = useToast()
 
-  // 页面状态
-  const [activeTab, setActiveTab] = useState<string>('memberList')
+  // 页面状态：tab 进入 URL query（/admin/users?tab=beta-applications），刷新保持，可分享定位
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab')
+  const [activeTab, setActiveTab] = useState<string>(
+    tabParam === 'beta-applications' ? 'betaApplications' : 'memberList',
+  )
+
+  const handleSetTab = useCallback(
+    (tab: string) => {
+      setActiveTab(tab)
+      const params = new URLSearchParams(searchParams)
+      if (tab === 'betaApplications') {
+        params.set('tab', 'beta-applications')
+      } else {
+        params.delete('tab')
+      }
+      setSearchParams(params, { replace: false })
+    },
+    [searchParams, setSearchParams],
+  )
   // 用户详情抽屉
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [selectedMember, setSelectedMember] = useState<MemberRow | null>(null)
@@ -928,15 +948,17 @@ export default function AdminUsersPage() {
       {/* 页头 */}
       <div className="page-head">
         <div>
-          <h1 className="page-title">会员与邀请码</h1>
+          <h1 className="page-title">用户与权限</h1>
           <div className="page-desc">
-            邀请码绑定套餐（观察版/研究版）与有效期周期（每周期30天），用于注册或续期，兑换后按套餐开通自选额度
+            管理账户、capability 权限、邀请码与内测申请（功能访问以 effective capability 为准，商业周期不直接决定访问权限）
           </div>
         </div>
         <div className="actions">
-          <button className="btn primary" onClick={handleOpenModal}>
-            ＋ 生成邀请码
-          </button>
+          {activeTab === 'inviteList' && (
+            <button className="btn primary" onClick={handleOpenModal}>
+              ＋ 生成邀请码
+            </button>
+          )}
         </div>
       </div>
 
@@ -968,23 +990,29 @@ export default function AdminUsersPage() {
         </div>
       </div>
 
-      {/* 三 tab */}
+      {/* [管理后台优化 PRD] 四 tab：会员账户 / 邀请码管理 / 内测申请 / 规则说明 */}
       <div className="tabs admin-member-tabs">
         <div
           className={clsx('tab', activeTab === 'memberList' && 'active')}
-          onClick={() => setActiveTab('memberList')}
+          onClick={() => handleSetTab('memberList')}
         >
           会员账户
         </div>
         <div
           className={clsx('tab', activeTab === 'inviteList' && 'active')}
-          onClick={() => setActiveTab('inviteList')}
+          onClick={() => handleSetTab('inviteList')}
         >
           邀请码管理
         </div>
         <div
+          className={clsx('tab', activeTab === 'betaApplications' && 'active')}
+          onClick={() => handleSetTab('betaApplications')}
+        >
+          内测申请
+        </div>
+        <div
           className={clsx('tab', activeTab === 'rulePanel' && 'active')}
-          onClick={() => setActiveTab('rulePanel')}
+          onClick={() => handleSetTab('rulePanel')}
         >
           规则说明
         </div>
@@ -1029,6 +1057,13 @@ export default function AdminUsersPage() {
               emptyText="暂无邀请码"
             />
           </div>
+        </div>
+      )}
+
+      {/* 内测申请 tab（并入用户与权限，PRD §8.4.7） */}
+      {activeTab === 'betaApplications' && (
+        <div className="tab-panel active">
+          <AdminBetaApplicationsPage />
         </div>
       )}
 

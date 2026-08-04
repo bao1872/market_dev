@@ -75,6 +75,20 @@ test('管理员路由集中于 /admin/*（独立壳层承载）', () => {
   }
 })
 
+// [管理后台优化 PRD §6] 一级菜单固定为 5 个：系统概览/数据生产/任务中心/用户与权限/诊断工具
+test('管理员一级导航收敛为 5 个目标入口（信息架构收口）', () => {
+  const paths = ADMIN_NAV_ITEMS.map((i) => i.path)
+  assert.deepStrictEqual(paths, [
+    '/admin/overview',
+    '/admin/data-production',
+    '/admin/tasks',
+    '/admin/users',
+    '/admin/diagnostics',
+  ])
+  const labels = ADMIN_NAV_ITEMS.map((i) => i.label)
+  assert.deepStrictEqual(labels, ['系统概览', '数据生产', '任务中心', '用户与权限', '诊断工具'])
+})
+
 test('Capture 路由位于两套壳层之外（不在用户/管理员导航中）', () => {
   assert.equal(APP_ROUTES.capture, '/capture/stock/:symbol')
   const userPaths = USER_NAV_ITEMS.map((i) => i.path)

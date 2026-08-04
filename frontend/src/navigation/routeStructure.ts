@@ -79,16 +79,23 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
             guard: 'admin',
             shell: 'admin',
             children: [
-              { path: '/admin', guard: 'admin', shell: 'admin' },
+              // [管理后台优化 PRD §6] 目标一级路由（5 个）
               { path: '/admin/overview', guard: 'admin', shell: 'admin' },
+              { path: '/admin/data-production', guard: 'admin', shell: 'admin' },
+              { path: '/admin/tasks', guard: 'admin', shell: 'admin' },
               { path: '/admin/users', guard: 'admin', shell: 'admin' },
-              { path: '/admin/beta-applications', guard: 'admin', shell: 'admin' },
-              // C8: /admin/strategies 重定向到 /admin/after-close（策略目录页已废弃）
-              { path: '/admin/strategies', guard: 'redirect', shell: 'none', redirectTo: '/admin/after-close' },
-              { path: '/admin/jobs', guard: 'admin', shell: 'admin' },
-              { path: '/admin/after-close', guard: 'admin', shell: 'admin' },
-              { path: '/admin/stocks', guard: 'admin', shell: 'admin' },
+              { path: '/admin/diagnostics', guard: 'admin', shell: 'admin' },
+              // 旧个股调试动态路由：保留（PRD 允许"保留或重定向"）
               { path: '/admin/stocks/:symbol/debug', guard: 'admin', shell: 'admin' },
+              // ===== 旧路由兼容重定向（PRD §6.2）=====
+              { path: '/admin', guard: 'redirect', shell: 'none', redirectTo: '/admin/overview' },
+              { path: '/admin/jobs', guard: 'redirect', shell: 'none', redirectTo: '/admin/tasks' },
+              { path: '/admin/after-close', guard: 'redirect', shell: 'none', redirectTo: '/admin/data-production?tab=after-close' },
+              { path: '/admin/beta-applications', guard: 'redirect', shell: 'none', redirectTo: '/admin/users?tab=beta-applications' },
+              { path: '/admin/stocks', guard: 'redirect', shell: 'none', redirectTo: '/admin/diagnostics?tab=stock' },
+              { path: '/admin/visitors', guard: 'redirect', shell: 'none', redirectTo: '/admin/diagnostics?tab=visitors' },
+              // C8: 策略目录页已废弃，重定向到数据生产中心
+              { path: '/admin/strategies', guard: 'redirect', shell: 'none', redirectTo: '/admin/data-production' },
             ],
           },
         ],

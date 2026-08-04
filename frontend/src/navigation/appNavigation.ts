@@ -26,10 +26,14 @@ export const APP_ROUTES = {
   messages: '/messages',
   settings: '/settings',
   admin: '/admin',
+  // [管理后台优化 PRD] 目标一级路由（5 个入口收敛）
   adminOverview: '/admin/overview',
+  adminDataProduction: '/admin/data-production',
+  adminTasks: '/admin/tasks',
   adminUsers: '/admin/users',
+  adminDiagnostics: '/admin/diagnostics',
+  // 旧路由（保留用于兼容重定向；新代码不得直接使用）
   adminBeta: '/admin/beta-applications',
-  // C8: adminStrategies 已废弃，重定向到 adminAfterClose（DSA 运行能力保留在盘后流水线）
   adminJobs: '/admin/jobs',
   adminAfterClose: '/admin/after-close',
   adminStockDebug: '/admin/stocks',
@@ -156,16 +160,14 @@ export function buildScopeSwitchUrl(
   return qs ? `${APP_ROUTES.market}?${qs}` : APP_ROUTES.market
 }
 
-// 管理员控制台导航（仅 AdminAppShell 侧栏使用）
-// P1: 移除"策略目录"（多策略组合已废弃，只保留 dsa_selector + watchlist_monitor）
+// 管理员控制台一级导航（仅 AdminAppShell 侧栏使用）
+// [管理后台优化 PRD §6] 最终一级菜单固定为 5 个：系统概览 / 数据生产 / 任务中心 / 用户与权限 / 诊断工具
 export const ADMIN_NAV_ITEMS: AppNavItem[] = [
-  { path: APP_ROUTES.admin, label: '系统概览' },
-  { path: APP_ROUTES.adminUsers, label: '用户与套餐' },
-  { path: APP_ROUTES.adminBeta, label: '内测申请' },
-  { path: APP_ROUTES.adminJobs, label: '任务与事件' },
-  { path: APP_ROUTES.adminAfterClose, label: '盘后流水线' },
-  { path: APP_ROUTES.adminStockDebug, label: '个股调试' },
-  { path: APP_ROUTES.adminVisitors, label: '访问统计' },
+  { path: APP_ROUTES.adminOverview, label: '系统概览' },
+  { path: APP_ROUTES.adminDataProduction, label: '数据生产' },
+  { path: APP_ROUTES.adminTasks, label: '任务中心' },
+  { path: APP_ROUTES.adminUsers, label: '用户与权限' },
+  { path: APP_ROUTES.adminDiagnostics, label: '诊断工具' },
 ]
 
 export interface AccountMenuItem {
@@ -213,6 +215,7 @@ export function getAccountMenuItemsForVariant(
 }
 
 // 旧路由兼容重定向映射
+// [管理后台优化 PRD §6.2] 旧管理路由 → 新路由兼容重定向（至少保留两个正式版本周期）
 export const LEGACY_REDIRECTS: Record<string, string> = {
   '/overview': APP_ROUTES.market,
   '/watchlist': `${APP_ROUTES.market}?scope=watchlist`,

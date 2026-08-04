@@ -20,7 +20,6 @@ import { Link } from 'react-router-dom'
 import { useStrategies, useAdminSystemOverview } from '@/hooks/useApi'
 import { getVersion, type VersionInfo } from '@/api/endpoints'
 import { formatShanghaiTime } from '@/utils/datetime'
-import { AfterClosePipelineCard } from '@/features/after-close-pipeline/AfterClosePipelineCard'
 
 // ===== 工具函数 =====
 
@@ -359,14 +358,47 @@ export default function AdminIndexPage() {
         </section>
       </div>
 
-      {/* ===== 第二层：今日盘后处理（占整行，AfterClosePipelineCard 含七阶段/覆盖率/选股/Worker/心跳/日志/按钮）===== */}
+      {/* ===== 第二层：今日生产链摘要（PRD §8.1：概览只给摘要，详细流水线移至数据生产中心）===== */}
       <div className="grid section-gap">
-        <AfterClosePipelineCard
-          pipeline={overview?.after_close_pipeline ?? null}
-          jobRunId={overview?.after_close_pipeline?.job_run_id ?? null}
-          tradeDate={overview?.business_date ?? undefined}
-          loading={overviewLoading}
-        />
+        <section className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">今日生产链</div>
+              <div className="card-sub">
+                {overview?.business_date ? `业务日期 ${overview.business_date}` : '概览摘要'}
+              </div>
+            </div>
+          </div>
+          <div className="card-body">
+            <div className="toggle-row">
+              <span>行情更新至</span>
+              <b className="num">
+                {overviewLoading ? '-' : (barsFreshness?.latest_daily_trade_date ?? '-')}
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>选股发布至</span>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : (strategyFreshness?.latest_published_trade_date ?? '-')}
+              </b>
+            </div>
+            <div className="toggle-row">
+              <span>是否落后</span>
+              <b className="num">
+                {overviewLoading
+                  ? '-'
+                  : barsFreshness?.is_behind_latest_trade_date
+                    ? '是（落后最近交易日）'
+                    : '否'}
+              </b>
+            </div>
+            <Link className="btn small card-body-action" to="/admin/data-production">
+              查看今日数据生产 →
+            </Link>
+          </div>
+        </section>
       </div>
 
       {/* ===== 第三层：基础设施两列（Worker与调度 / 消息队列与飞书）===== */}
@@ -405,8 +437,8 @@ export default function AdminIndexPage() {
                 ))}
               </div>
             )}
-            <Link className="btn small card-body-action" to="/admin/jobs">
-              任务与事件 →
+            <Link className="btn small card-body-action" to="/admin/tasks">
+              任务中心 →
             </Link>
           </div>
         </section>
@@ -436,8 +468,8 @@ export default function AdminIndexPage() {
               <span>事件分发</span>
               <b className="num">暂无数据</b>
             </div>
-            <Link className="btn small card-body-action" to="/admin/jobs">
-              任务与事件 →
+            <Link className="btn small card-body-action" to="/admin/tasks">
+              任务中心 →
             </Link>
           </div>
         </section>
@@ -556,7 +588,7 @@ export default function AdminIndexPage() {
                     <span>耗时</span>
                     <b className="num">{dsaDuration}</b>
                   </div>
-                  <Link className="btn small card-body-action" to="/admin/after-close">
+                  <Link className="btn small card-body-action" to="/admin/data-production">
                     查看运行详情
                   </Link>
                 </>

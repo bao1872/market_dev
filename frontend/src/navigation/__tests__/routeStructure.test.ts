@@ -72,7 +72,21 @@ test('/settings 经过 UserAppShell 但不经过 CapabilityRoute', () => {
 })
 
 test('/admin/* 经过 AdminRoute + AdminAppShell', () => {
-  const adminPaths = ['/admin', '/admin/overview', '/admin/users', '/admin/beta-applications', '/admin/jobs', '/admin/after-close', '/admin/stocks', '/admin/stocks/:symbol/debug']
+  // [管理后台优化 PRD §6] 含目标一级路由 + 旧路由（旧路由为 redirect 守卫，但仍在 admin 祖先链内）
+  const adminPaths = [
+    '/admin',
+    '/admin/overview',
+    '/admin/data-production',
+    '/admin/tasks',
+    '/admin/users',
+    '/admin/diagnostics',
+    '/admin/beta-applications',
+    '/admin/jobs',
+    '/admin/after-close',
+    '/admin/stocks',
+    '/admin/stocks/:symbol/debug',
+    '/admin/visitors',
+  ]
   for (const p of adminPaths) {
     assert.ok(hasGuardInChain(ROUTE_STRUCTURE, p, 'admin'), `${p} 应经过 AdminRoute`)
     assert.ok(hasShellInChain(ROUTE_STRUCTURE, p, 'admin'), `${p} 应经过 AdminAppShell`)
@@ -80,12 +94,33 @@ test('/admin/* 经过 AdminRoute + AdminAppShell', () => {
   }
 })
 
-// C8: /admin/strategies 已废弃，重定向到 /admin/after-close
-test('/admin/strategies 重定向到 /admin/after-close', () => {
-  const node = findRouteNode(ROUTE_STRUCTURE, '/admin/strategies')
-  assert.ok(node, '/admin/strategies 路由应存在')
-  assert.strictEqual(node!.node.guard, 'redirect', '/admin/strategies 应为 redirect 守卫')
-  assert.strictEqual(node!.node.redirectTo, '/admin/after-close', '/admin/strategies 应重定向到 /admin/after-close')
+// [管理后台优化 PRD §6] 目标一级路由必须是非重定向的 admin 页面
+test('目标一级路由均为 admin 页面（非重定向）', () => {
+  const canonical = ['/admin/overview', '/admin/data-production', '/admin/tasks', '/admin/users', '/admin/diagnostics']
+  for (const p of canonical) {
+    const node = findRouteNode(ROUTE_STRUCTURE, p)
+    assert.ok(node, `${p} 路由应存在`)
+    assert.notEqual(node!.node.guard, 'redirect', `${p} 应为 admin 页面而非重定向`)
+  }
+})
+
+// [管理后台优化 PRD §6.2] 旧管理路由 → 新路由兼容重定向
+test('旧管理路由兼容重定向到新一级路由', () => {
+  const redirects: Record<string, string> = {
+    '/admin': '/admin/overview',
+    '/admin/jobs': '/admin/tasks',
+    '/admin/after-close': '/admin/data-production?tab=after-close',
+    '/admin/beta-applications': '/admin/users?tab=beta-applications',
+    '/admin/stocks': '/admin/diagnostics?tab=stock',
+    '/admin/visitors': '/admin/diagnostics?tab=visitors',
+    '/admin/strategies': '/admin/data-production',
+  }
+  for (const [from, to] of Object.entries(redirects)) {
+    const node = findRouteNode(ROUTE_STRUCTURE, from)
+    assert.ok(node, `${from} 路由应存在`)
+    assert.strictEqual(node!.node.guard, 'redirect', `${from} 应为 redirect 守卫`)
+    assert.strictEqual(node!.node.redirectTo, to, `${from} 应重定向到 ${to}`)
+  }
 })
 
 test('/admin/stocks/:symbol/debug 调试路由位于管理员壳层（不暴露给普通用户）', () => {

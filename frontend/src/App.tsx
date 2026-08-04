@@ -25,11 +25,10 @@ import SettingsPage from './pages/SettingsPage'
 import MessagesPage from './pages/MessagesPage'
 import AdminIndexPage from './pages/AdminIndexPage'
 import AdminUsersPage from './pages/AdminUsersPage'
-import AdminJobsPage from './pages/AdminJobsPage'
-import AdminBetaApplicationsPage from './pages/AdminBetaApplicationsPage'
-import AdminAfterClosePipelinePage from './pages/AdminAfterClosePipelinePage'
 import AdminStockDebugPage from './pages/AdminStockDebugPage'
-import AdminVisitorsPage from './pages/AdminVisitorsPage'
+import AdminDataProductionPage from './pages/AdminDataProductionPage'
+import AdminTasksPage from './pages/AdminTasksPage'
+import AdminDiagnosticsPage from './pages/AdminDiagnosticsPage'
 
 // 门户页 lazy 加载，避免门户动画代码进入业务页面首包
 const LandingPage = lazy(() => import('./pages/LandingPage'))
@@ -315,18 +314,40 @@ export const routeConfig: RouteObject[] = [
           {
             element: <AdminAppShell />,
             children: [
-              // [Auth] - 描述: /admin/overview 为后端 next_route 返回值，与 /admin 同渲染 AdminIndexPage
-              { path: '/admin', element: <AdminIndexPage /> },
+              // ===== 目标一级路由（管理后台优化 PRD §6）=====
               { path: '/admin/overview', element: <AdminIndexPage /> },
+              // 数据生产中心（盘后流水线并入其中）
+              { path: '/admin/data-production', element: <AdminDataProductionPage /> },
+              // 任务中心（原"任务与事件"页）
+              { path: '/admin/tasks', element: <AdminTasksPage /> },
+              // 用户与权限
               { path: '/admin/users', element: <AdminUsersPage /> },
-              { path: '/admin/beta-applications', element: <AdminBetaApplicationsPage /> },
-              // C8: 策略目录页已废弃，重定向到盘后流水线（DSA 运行能力保留在此）
-              { path: '/admin/strategies', element: <Navigate to="/admin/after-close" replace /> },
-              { path: '/admin/jobs', element: <AdminJobsPage /> },
-              { path: '/admin/after-close', element: <AdminAfterClosePipelinePage /> },
-              { path: '/admin/stocks', element: <AdminStockDebugPage /> },
+              // 诊断工具（个股调试 + 访问统计并入）
+              { path: '/admin/diagnostics', element: <AdminDiagnosticsPage /> },
+
+              // ===== 旧路由兼容重定向（PRD §6.2，保留至少两个正式版本周期）=====
+              { path: '/admin', element: <Navigate to="/admin/overview" replace /> },
+              { path: '/admin/jobs', element: <Navigate to="/admin/tasks" replace /> },
+              {
+                path: '/admin/after-close',
+                element: <Navigate to="/admin/data-production?tab=after-close" replace />,
+              },
+              {
+                path: '/admin/beta-applications',
+                element: <Navigate to="/admin/users?tab=beta-applications" replace />,
+              },
+              {
+                path: '/admin/stocks',
+                element: <Navigate to="/admin/diagnostics?tab=stock" replace />,
+              },
+              {
+                path: '/admin/visitors',
+                element: <Navigate to="/admin/diagnostics?tab=visitors" replace />,
+              },
+              // C8: 策略目录页已废弃，重定向到数据生产中心
+              { path: '/admin/strategies', element: <Navigate to="/admin/data-production" replace /> },
+              // 旧个股调试动态路由：保留（PRD 允许"保留或重定向"），直接渲染调试页
               { path: '/admin/stocks/:symbol/debug', element: <AdminStockDebugPage /> },
-              { path: '/admin/visitors', element: <AdminVisitorsPage /> },
             ],
           },
         ],

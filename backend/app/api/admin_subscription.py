@@ -685,26 +685,30 @@ async def enable_user(
     )
 
 
-@router.post("/users/{user_id}/reset-password", response_model=ResetPasswordResponse)
+@router.post(
+    "/users/{user_id}/reset-password",
+    response_model=ResetPasswordResponse,
+    deprecated=True,
+    description="[DEPRECATED] 重置用户密码链路尚未实现。为避免“仅写审计却向管理员显示已重置”的误导，本端点 fail-closed 返回 501；前端不得展示重置入口。",
+)
 async def reset_user_password(
     user_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> ResetPasswordResponse:
-    """管理员重置用户密码（当前仅记录审计日志，重置链路后续实现）。"""
-    user = await _fetch_user_or_404(db, user_id)
+    """管理员重置用户密码（当前仅记录审计日志，重置链路后续实现）。
 
-    await write_audit_log(
-        db=db,
-        actor_user_id=current_user.id,
-        action="user.reset_password",
-        target_type="user",
-        target_id=str(user.id),
-        after_data={"initiated_by": str(current_user.id)},
+    [PRD §8.4.8] 未真实实现前：
+    - 前端必须隐藏该按钮；
+    - 后端接口标记 deprecated；
+    - 不得只写审计却向管理员显示“已重置”。
+    因此本端点直接 fail-closed，不写“成功”审计，也不伪装已重置。
+    """
+    await _fetch_user_or_404(db, user_id)
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="密码重置能力尚未实现，该入口已废弃，请勿使用",
     )
-    await db.commit()
-
-    return ResetPasswordResponse(user_id=user.id)
 
 
 @router.post("/users/{user_id}/change-role", response_model=UserResponse)
@@ -1257,15 +1261,7 @@ async def list_users(
             )
         )
 
-    await write_audit_log(
-        db=db,
-        actor_user_id=current_user.id,
-        action="user.list",
-        target_type="user",
-        after_data={"count": len(items), "limit": limit, "offset": offset},
-    )
-    await db.commit()
-
+    # [PRD §8.4] 普通读取不写审计：GET /users 列表查询仅只读，移除原 user.list 审计写入
     return UserListResponse(
         items=items,
         total=total,
@@ -1293,20 +1289,8 @@ async def get_user(
     user = await _fetch_user_or_404(db, user_id)
     roles = await _get_user_role_names(db, user.id)
 
-    await write_audit_log(
-        db=db,
-        actor_user_id=current_user.id,
-        action="user.read",
-        target_type="user",
-        target_id=str(user.id),
-        after_data={
-            "email": user.email,
-            "status": user.status,
-            "roles": roles,
-        },
-    )
-    await db.commit()
-
+    # [PRD §8.4] 普通读取不写审计：GET /users/{user_id} 仅查询详情，移除原 user.read 审计写入，
+    # 避免只读操作污染审计记录（审计仅记录真实的写操作：授予/撤销/禁用/启用/邀请码等）
     return UserResponse(
         id=user.id,
         email=user.email,
