@@ -425,12 +425,18 @@ async def _enqueue_chip_job_step(
         cancellation_check=_make_step_cancellation_check(job_run_id),
     )
 
-    business_status = result.get("status") if isinstance(result, dict) else None
+    # [Mypy-fix 2026-08-04] 先窄化 result 为 dict，避免 union-attr（result 可能为 None）
+    if isinstance(result, dict):
+        business_status = result.get("status")
+        business_reason = result.get("reason")
+    else:
+        business_status = None
+        business_reason = None
     if summary["status"] == "succeeded" and business_status == "failed":
         # 业务软失败如实反映到 step summary（不得出现 business=failed/step=succeeded）
         summary["status"] = "failed"
         summary["error_code"] = "CHIP_ENQUEUE_FAILED"
-        summary["error_message"] = str(result.get("reason"))
+        summary["error_message"] = str(business_reason)
         await _persist_step_summary(job_run_id, summary)
 
     chip_job_id = captured.get("job_id")
@@ -2184,19 +2190,25 @@ async def execute_after_close_run(
                 )
                 # [Phase0-Fix#5] 业务软失败必须如实反映到 step summary，
                 # 否则会出现「业务 failed / 步骤 succeeded」的矛盾状态。
-                board_business_status = (
-                    board_result.get("status") if isinstance(board_result, dict) else None
-                )
+                # [Mypy-fix 2026-08-04] 先窄化 board_result 为 dict，避免 union-attr
+                if isinstance(board_result, dict):
+                    board_business_status = board_result.get("status")
+                    board_error_code = board_result.get("error_code")
+                    board_reason_code = board_result.get("reason_code")
+                else:
+                    board_business_status = None
+                    board_error_code = None
+                    board_reason_code = None
                 if board_step_summary["status"] == "succeeded" and board_business_status:
                     if board_business_status == "failed":
                         board_step_summary["status"] = "failed"
                         board_step_summary["error_code"] = (
-                            board_result.get("error_code") or "BOARD_SYNC_SOFT_FAILURE"
+                            board_error_code or "BOARD_SYNC_SOFT_FAILURE"
                         )
                         board_step_summary["error_message"] = "板块同步软失败（沿用上次数据）"
                     elif board_business_status == "skipped":
                         board_step_summary["status"] = "skipped"
-                        board_step_summary["skip_reason"] = board_result.get("reason_code")
+                        board_step_summary["skip_reason"] = board_reason_code
                     await _persist_step_summary(job_run_id, board_step_summary)
                 logger.info(
                     "[AfterClose] syncing_boards 完成: step_status=%s, business_status=%s",
