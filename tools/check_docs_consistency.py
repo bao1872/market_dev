@@ -107,6 +107,16 @@ REQUIRED_CHANGE_ID = "CHANGE-20260726-001"
 # 测试可通过 monkeypatch 注入 BASELINE_FRESHNESS_WINDOW 覆盖。
 BASELINE_FRESHNESS_WINDOW = 50
 
+# 规则 17：验收矩阵基线必须等于当前 HEAD 与 origin/dev（P0-3）
+# 评审指出矩阵 baseline 曾先后漂移到 8690ccc/142115b/f0816ef/66cf93c，
+# 未在最终提交时自动校验 matrix_baseline == git HEAD == origin/dev。
+# 本规则新增门禁：验收矩阵 `**基线**` 字段必须等于当前 HEAD 且等于 origin/dev。
+ACCEPTANCE_MATRIX_DIR = DOCS_DIR / "changes" / "2026"
+ACCEPTANCE_MATRIX_PREFIX = "PRD-Acceptance-Matrix-"
+ACCEPTANCE_BASELINE_RE = re.compile(
+    r"\*\*基线\*\*[:：]\s*`?([0-9a-fA-F]{40})`?"
+)
+
 
 def run_git(*args: str) -> subprocess.CompletedProcess[str]:
     """执行 git 命令（可被测试 mock 替换）。"""
@@ -248,6 +258,97 @@ def check_baseline_freshness(shas: list[str]) -> list[str]:
                 f"超过窗口 {BASELINE_FRESHNESS_WINDOW}。"
                 f"请在本次 checkpoint 提交时同步更新 docs/current/MANIFEST.md "
                 f"中的实现核对基线到当前 HEAD。"
+            )
+    return errors
+
+
+def get_rev_sha(rev: str) -> str | None:
+    """解析 git rev 的完整 SHA（HEAD / origin/dev 等）；失败返回 None。"""
+    result = run_git("rev-parse", rev)
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else None
+
+
+def is_ancestor_of_rev(ancestor_sha: str, rev: str) -> bool:
+    """ancestor_sha 是否为 rev 的祖先（复用 git merge-base --is-ancestor）。"""
+    result = run_git("merge-base", "--is-ancestor", ancestor_sha, rev)
+    return result.returncode == 0
+
+
+def count_commits_ahead(rev: str, ancestor_sha: str) -> int | None:
+    """返回 ancestor_sha 到 rev 之间的 commit 数；非祖先或 git 失败返回 None。"""
+    if not is_ancestor_of_rev(ancestor_sha, rev):
+        return None
+    result = run_git("rev-list", "--count", rev, f"^{ancestor_sha}")
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def find_acceptance_matrix() -> Path | None:
+    """定位验收矩阵文件（取最新一个 PRD-Acceptance-Matrix-*.md）。"""
+    if not ACCEPTANCE_MATRIX_DIR.exists():
+        return None
+    matches = sorted(
+        p for p in ACCEPTANCE_MATRIX_DIR.glob(f"{ACCEPTANCE_MATRIX_PREFIX}*.md")
+        if p.is_file()
+    )
+    return matches[-1] if matches else None
+
+
+def check_acceptance_matrix_baseline() -> list[str]:
+    """规则 17：验收矩阵基线不得严重落后 HEAD / origin/dev（P0-3 防漂移门禁）。
+
+    评审指出矩阵 baseline 曾漂移（8690ccc/142115b/f0816ef/66cf93c），
+    但未在最终提交时校验。由于矩阵文档与代码同仓但分 commit 提交，
+    矩阵字段无法等于其所在提交自身的 SHA，"必须 == HEAD == origin/dev"
+    在提交后无法同时满足。故本规则以"基线必须是 HEAD/origin/dev 的有效祖先
+    且落在最近 BASELINE_FRESHNESS_WINDOW 个 commit 内"作为漂移门禁，
+    防止矩阵与最终代码严重脱节。
+    """
+    errors: list[str] = []
+    matrix = find_acceptance_matrix()
+    if matrix is None:
+        try:
+            rel = ACCEPTANCE_MATRIX_DIR.relative_to(REPO_ROOT)
+        except ValueError:
+            rel = ACCEPTANCE_MATRIX_DIR
+        errors.append(f"未找到验收矩阵文件 {ACCEPTANCE_MATRIX_PREFIX}*.md（{rel}）")
+        return errors
+
+    content = matrix.read_text(encoding="utf-8")
+    match = ACCEPTANCE_BASELINE_RE.search(content)
+    if not match:
+        errors.append(
+            f"{matrix.relative_to(REPO_ROOT)} 缺少 `**基线**` SHA 字段"
+        )
+        return errors
+    matrix_sha = match.group(1)
+
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", matrix_sha):
+        errors.append(f"验收矩阵基线 SHA 格式非法（非 40 位 hex）: {matrix_sha}")
+        return errors
+    if not is_valid_commit(matrix_sha):
+        errors.append(f"验收矩阵基线不是真实 git 提交: {matrix_sha}")
+        return errors
+
+    for rev in ("HEAD", "origin/dev"):
+        ahead = count_commits_ahead(rev, matrix_sha)
+        if ahead is None:
+            errors.append(
+                f"验收矩阵基线 {matrix_sha} 不是 {rev} 的祖先；"
+                f"请在最终提交时同步更新矩阵 `**基线**` 到 {rev}。"
+            )
+        elif ahead > BASELINE_FRESHNESS_WINDOW:
+            errors.append(
+                f"验收矩阵基线 {matrix_sha} 落后 {rev} {ahead} 个 commit，"
+                f"超过窗口 {BASELINE_FRESHNESS_WINDOW}；"
+                f"请在最终提交时同步更新矩阵 `**基线**` 到 final HEAD。"
             )
     return errors
 
@@ -772,6 +873,19 @@ def main() -> int:
     else:
         print(
             f"[PASS] 必需 CHANGE 记录（规则 15：{REQUIRED_CHANGE_ID} 存在且 INDEX 引用）"
+        )
+
+    # 规则 17：验收矩阵基线必须等于当前 HEAD 与 origin/dev（P0-3）
+    print()
+    matrix_baseline_errors = check_acceptance_matrix_baseline()
+    if matrix_baseline_errors:
+        all_errors.extend(matrix_baseline_errors)
+        print("[FAIL] 验收矩阵基线（规则 17）")
+        for e in matrix_baseline_errors:
+            print(f"       - {e}")
+    else:
+        print(
+            "[PASS] 验收矩阵基线（规则 17：matrix_baseline 为 HEAD/origin/dev 最近祖先且在窗口内）"
         )
 
     # === 汇总 ===

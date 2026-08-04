@@ -154,6 +154,14 @@ def _setup_docs(
             f"| {_change_id} | 2026-07-26 | 文档体系重构 |\n",
             encoding="utf-8",
         )
+    # [P0-3] 规则 17：默认创建一份合法验收矩阵（基线=VALID_SHA），避免既有场景因缺矩阵误失败
+    _matrix_file = changes_year_dir / "PRD-Acceptance-Matrix-2026-08-04.md"
+    if not _matrix_file.exists():
+        _matrix_file.write_text(
+            f"# PRD 完整验收矩阵\n\n**基线**: `{VALID_SHA}`\n\n"
+            f"**当前判断**: `code_ready = false`\n",
+            encoding="utf-8",
+        )
 
     # 注入模块路径变量
     monkeypatch.setattr(cdc, "REPO_ROOT", tmp_path)
@@ -163,6 +171,7 @@ def _setup_docs(
     monkeypatch.setattr(cdc, "MAPS_DIR", maps_dir)
     monkeypatch.setattr(cdc, "ARCHIVE_DIR", archive_dir.parent)
     monkeypatch.setattr(cdc, "AGENTS_FILE", tmp_path / "AGENTS.md")
+    monkeypatch.setattr(cdc, "ACCEPTANCE_MATRIX_DIR", changes_year_dir)
 
     # 默认 mock git 校验为通过
     monkeypatch.setattr(cdc, "is_valid_commit", lambda sha: True)
@@ -170,6 +179,11 @@ def _setup_docs(
     # 规则 16 默认 mock：baseline 在窗口内（既有 11 个场景不应因新规则失败）
     # 单独测试场景 12 会覆盖此 mock 触发失败
     monkeypatch.setattr(cdc, "count_commits_ahead_of_baseline", lambda sha: 10)
+    # 规则 17 默认 mock：HEAD/origin/dev 解析为 None（不依赖真实 git）
+    monkeypatch.setattr(cdc, "get_rev_sha", lambda rev: None)
+    # [P0-3] 规则 17 漂移门禁默认 mock：baseline 是任意 rev 祖先且在窗口内
+    monkeypatch.setattr(cdc, "is_ancestor_of_rev", lambda sha, rev: True)
+    monkeypatch.setattr(cdc, "count_commits_ahead", lambda rev, sha: 10)
 
     return tmp_path
 
@@ -201,7 +215,11 @@ class TestCheckDocsConsistencyV2:
     def test_02_manifest_missing_baseline_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """场景 2：MANIFEST 缺 baseline 字段失败。"""
+        """场景 2：MANIFEST 缺 baseline 字段失败。
+
+        [P0-3] 直接测 check_manifest_baseline()：main() 不强制 MANIFEST
+        每次提交更新（见 main() 注释），基线规则由该函数独立承载。
+        """
         manifest_no_baseline = (
             "# Current Docs Manifest\n\n"
             "> 文档状态：CURRENT DESIGN BASELINE  \n"
@@ -215,8 +233,9 @@ class TestCheckDocsConsistencyV2:
             readme="# README\n",
         )
 
-        rc = cdc.main()
-        assert rc == 1, "MANIFEST 缺 baseline 字段应失败"
+        errors, baseline = cdc.check_manifest_baseline()
+        assert errors, "MANIFEST 缺 baseline 字段应返回错误"
+        assert baseline is None, "缺 baseline 时解析结果应为 None"
 
     def test_03_baseline_invalid_sha_format_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -231,8 +250,11 @@ class TestCheckDocsConsistencyV2:
             readme="# README\n",
         )
 
-        rc = cdc.main()
-        assert rc == 1, "非 40 位 SHA 应失败"
+        errors, _ = cdc.check_manifest_baseline()
+        assert errors, "非 40 位 SHA 应返回错误"
+        assert any(
+            "缺少" in e or "格式非法" in e for e in errors
+        ), "应报告缺少合格的 baseline 字段"
 
     def test_04_baseline_not_real_commit_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -247,8 +269,9 @@ class TestCheckDocsConsistencyV2:
         # mock is_valid_commit 返回 False
         monkeypatch.setattr(cdc, "is_valid_commit", lambda sha: False)
 
-        rc = cdc.main()
-        assert rc == 1, "非真实 commit 的 SHA 应失败"
+        errors, _ = cdc.check_manifest_baseline()
+        assert errors, "非真实 commit 的 SHA 应返回错误"
+        assert any("不是有效的 git 提交" in e for e in errors)
 
     def test_05_baseline_not_head_ancestor_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -263,8 +286,9 @@ class TestCheckDocsConsistencyV2:
         # mock is_ancestor_of_head 返回 False
         monkeypatch.setattr(cdc, "is_ancestor_of_head", lambda sha: False)
 
-        rc = cdc.main()
-        assert rc == 1, "非 HEAD 祖先的 SHA 应失败"
+        errors, _ = cdc.check_manifest_baseline()
+        assert errors, "非 HEAD 祖先的 SHA 应返回错误"
+        assert any("不是当前 HEAD 的祖先" in e for e in errors)
 
     def test_06_current_docs_without_baseline_passes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -447,12 +471,11 @@ class TestCheckDocsConsistencyV2:
             cdc, "count_commits_ahead_of_baseline", lambda sha: 88
         )
 
-        rc = cdc.main()
-        assert rc == 1, "baseline 落后 HEAD 88 个 commit（超过窗口 50）应失败"
-
-        captured = capsys.readouterr()
-        assert "严重落后" in captured.out, "错误信息应包含'严重落后'"
-        assert "88" in captured.out, "错误信息应包含落后 commit 数量"
+        errors, _ = cdc.check_manifest_baseline()
+        assert errors, "baseline 严重落后应返回错误"
+        assert any(
+            "严重落后" in e and "88" in e for e in errors
+        ), "错误信息应包含'严重落后'和落后 commit 数量 88"
 
     def test_13_baseline_within_window_passes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -493,3 +516,75 @@ class TestCheckDocsConsistencyV2:
 
         rc = cdc.main()
         assert rc == 0, "baseline 落后 HEAD 50 commit（等于窗口）应通过"
+
+    # ===== 规则 17：验收矩阵基线（P0-3） =====
+
+    @staticmethod
+    def _write_acceptance_matrix(tmp_path: Path, sha: str | None) -> None:
+        """在临时 changes/2026 目录写入验收矩阵文件。"""
+        content = "# PRD 完整验收矩阵\n\n"
+        if sha is not None:
+            content += f"**基线**: `{sha}`\n"
+        content += "\n**当前判断**: `code_ready = false`\n"
+        matrix_path = (
+            tmp_path / "docs" / "changes" / "2026"
+            / "PRD-Acceptance-Matrix-2026-08-04.md"
+        )
+        matrix_path.write_text(content, encoding="utf-8")
+
+    def test_14_acceptance_matrix_baseline_matches_head_and_origin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """场景 14：矩阵基线 == HEAD == origin/dev 时通过。"""
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": "# 产品业务\n"},
+            maps_docs={"api-route-map.md": "# API 路由\n"},
+            readme="# README\n",
+        )
+        self._write_acceptance_matrix(tmp_path, VALID_SHA)
+        # HEAD 与 origin/dev 都解析为矩阵基线
+        monkeypatch.setattr(cdc, "get_rev_sha", lambda rev: VALID_SHA)
+
+        rc = cdc.main()
+        assert rc == 0, "矩阵基线 == HEAD == origin/dev 应通过"
+
+    def test_15_acceptance_matrix_baseline_stale_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """场景 15：矩阵基线严重落后 HEAD 时失败（规则 17 防漂移）。"""
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": "# 产品业务\n"},
+            maps_docs={"api-route-map.md": "# API 路由\n"},
+            readme="# README\n",
+        )
+        self._write_acceptance_matrix(tmp_path, VALID_SHA)
+        # 矩阵基线仍停留在 VALID_SHA，但 HEAD/origin/dev 已前进 88 commit
+        monkeypatch.setattr(cdc, "count_commits_ahead", lambda rev, sha: 88)
+
+        rc = cdc.main()
+        assert rc == 1, "矩阵基线严重落后 HEAD 应失败"
+        captured = capsys.readouterr()
+        assert "验收矩阵基线" in captured.out, "应报告验收矩阵基线问题"
+
+    def test_16_acceptance_matrix_missing_baseline_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """场景 16：验收矩阵缺少 `**基线**` SHA 字段时失败。"""
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": "# 产品业务\n"},
+            maps_docs={"api-route-map.md": "# API 路由\n"},
+            readme="# README\n",
+        )
+        self._write_acceptance_matrix(tmp_path, None)
+
+        rc = cdc.main()
+        assert rc == 1, "验收矩阵缺少 **基线** 字段应失败"
