@@ -48,6 +48,19 @@ MIN_MEM_MB="${PANJI_MIN_MEM_MB:-4096}"
 # 唯一 Compose 组合：prod + live 始终叠加。禁止出现不叠加 live.yml 的变体。
 COMPOSE_CMD="docker compose --env-file ${ENV_FILE} -f docker-compose.prod.yml -f docker-compose.live.yml"
 
+# [CHANGE-20260804 / DS-102] 强制 Compose 串行：禁止并行拉起多容器（瞬时内存峰值不可控）。
+# 必须在每次 COMPOSE_CMD 执行前导出，覆盖任何并行默认值。
+export COMPOSE_PARALLEL_LIMIT=1
+
+# [CHANGE-20260804 / DS-103] 关键命令外层超时（秒），可在环境变量覆盖收紧。
+TIMEOUT_NPM_CI_SECONDS="${PANJI_TIMEOUT_NPM_CI_SECONDS:-900}"
+TIMEOUT_VITE_BUILD_SECONDS="${PANJI_TIMEOUT_VITE_BUILD_SECONDS:-900}"
+TIMEOUT_DOCKER_BUILD_SECONDS="${PANJI_TIMEOUT_DOCKER_BUILD_SECONDS:-2400}"
+TIMEOUT_COMPOSE_UP_SECONDS="${PANJI_TIMEOUT_COMPOSE_UP_SECONDS:-600}"
+TIMEOUT_MIGRATION_SECONDS="${PANJI_TIMEOUT_MIGRATION_SECONDS:-600}"
+TIMEOUT_HEALTH_WAIT_SECONDS="${PANJI_TIMEOUT_HEALTH_WAIT_SECONDS:-120}"
+TIMEOUT_RSYNC_SECONDS="${PANJI_TIMEOUT_RSYNC_SECONDS:-600}"
+
 # 所有复用 backend 代码的 Python 服务（Live Mount 挂载 /opt/panji-live/backend/app）
 PYTHON_SERVICES=(
     backend
@@ -558,6 +571,28 @@ run_cmd() {
     fi
 }
 
+# [CHANGE-20260804 / DS-103] 统一长命令外层超时。
+# 用法: run_with_timeout <stage> <seconds> -- <cmd...>
+# 超时/失败时返回非 0，由调用方既有的失败路径处理（写 failure_stage、释放锁、不重试）。
+run_with_timeout() {
+    local stage="$1"
+    local seconds="$2"
+    shift 2
+    [[ "$1" == "--" ]] && shift
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] ${stage}: 将执行(限时 ${seconds}s): $*"
+        return 0
+    fi
+
+    if ! timeout --kill-after=30 "${seconds}" "$@"; then
+        FAILURE_STAGE="${stage}"
+        log "错误: ${stage} 执行超时(>${seconds}s)或失败，failure_stage=${stage}"
+        return 1
+    fi
+    return 0
+}
+
 checkout_target() {
     log "检出目标 SHA..."
     cd "${REPO_ROOT}"
@@ -590,7 +625,12 @@ build_environment_images() {
     log "运行环境变化，按同一 GIT_SHA tag 组整体构建镜像: ${ENV_IMAGE_TAG_GROUP[*]}"
     log "  触发项: backend_env=${BACKEND_ENVIRONMENT_CHANGED} frontend_env=${FRONTEND_ENVIRONMENT_CHANGED} capture_env=${CAPTURE_ENVIRONMENT_CHANGED}"
     cd "${REPO_ROOT}"
-    run_cmd ${COMPOSE_CMD} build "${ENV_IMAGE_TAG_GROUP[@]}"
+    # [CHANGE-20260804 / DS-102] 逐服务串行构建（COMPOSE_PARALLEL_LIMIT=1 兜底），
+    # 避免并发构建放大磁盘/CPU/内存峰值。任一服务构建失败即整体失败。
+    for svc in "${ENV_IMAGE_TAG_GROUP[@]}"; do
+        run_with_timeout "docker_build_${svc}" "${TIMEOUT_DOCKER_BUILD_SECONDS}" -- \
+            ${COMPOSE_CMD} build "${svc}" || return 1
+    done
     IMAGES_BUILT=true
 }
 
@@ -604,13 +644,15 @@ build_frontend_dist() {
     cd "${REPO_ROOT}/frontend"
     if [[ "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
         log "前端依赖或构建环境变化，先执行 npm ci"
-        npm ci
+        run_with_timeout "npm_ci" "${TIMEOUT_NPM_CI_SECONDS}" -- npm ci || return 1
     fi
     if [[ -x "./node_modules/.bin/vite" ]]; then
-        NODE_OPTIONS=--max-old-space-size=1024 ./node_modules/.bin/vite build
+        run_with_timeout "vite_build" "${TIMEOUT_VITE_BUILD_SECONDS}" -- \
+            env NODE_OPTIONS=--max-old-space-size=1024 ./node_modules/.bin/vite build || return 1
     else
         log "WARN: ./node_modules/.bin/vite 不存在，回退到 npm run build"
-        NODE_OPTIONS=--max-old-space-size=1024 npm run build
+        run_with_timeout "vite_build" "${TIMEOUT_VITE_BUILD_SECONDS}" -- \
+            env NODE_OPTIONS=--max-old-space-size=1024 npm run build || return 1
     fi
     cd "${REPO_ROOT}"
 }
@@ -788,26 +830,119 @@ run_migration() {
     log "执行 alembic upgrade head（使用目标 SHA 的 Live Mount 代码）..."
     MIGRATION_ATTEMPTED=true
     cd "${REPO_ROOT}"
-    if ! run_cmd ${COMPOSE_CMD} run --rm --no-deps --no-build backend bash -c "cd /app && alembic upgrade head"; then
+    if ! run_with_timeout "migration" "${TIMEOUT_MIGRATION_SECONDS}" -- \
+        ${COMPOSE_CMD} run --rm --no-deps --no-build backend bash -c "cd /app && alembic upgrade head"; then
         MIGRATION_SUCCEEDED=false
-        log "migration 执行失败"
+        log "migration 执行失败或超时"
         return 1
     fi
     MIGRATION_SUCCEEDED=true
     log "migration 完成"
 }
 
+# [CHANGE-20260804 / DS-102] 按固定波次重启，禁止一次性 up -d 交出全部 Python 服务：
+#   波次1 backend → 健康/就绪检查；波次2 frontend；波次3 Scheduler 单实例；
+#   波次4 普通 Worker 小批次；波次5 after-close/watchdog；波次6 capture。
+#   数据服务（postgres/redis/umami）永不进入普通重启列表。
 restart_services() {
     local services=("$@")
     if [[ ${#services[@]} -eq 0 ]]; then
         log "无需重启任何服务"
         return 0
     fi
-    log "重启服务: ${services[*]}"
+    log "按波次重启服务: ${services[*]}"
     cd "${REPO_ROOT}"
-    # 标记必须在实际发起重启之前置位：一旦 up -d 开始，容器状态即可能已被改变。
+
+    # 标记必须在实际发起重启之前置位：一旦 up 开始，容器状态即可能已被改变。
     SERVICES_RESTARTED=true
-    run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build "${services[@]}"
+
+    _wave_up() {
+        local wave_name="$1"; shift
+        local wave_services=("$@")
+        if [[ ${#wave_services[@]} -eq 0 ]]; then
+            return 0
+        fi
+        log "  波次 [${wave_name}]: ${wave_services[*]}"
+        run_with_timeout "compose_up_${wave_name}" "${TIMEOUT_COMPOSE_UP_SECONDS}" -- \
+            ${COMPOSE_CMD} up -d --force-recreate --no-build "${wave_services[@]}" || return 1
+    }
+
+    _wave_backend=()
+    _wave_frontend=()
+    _wave_scheduler=()
+    _wave_workers=()
+    _wave_recovery=()
+    _wave_capture=()
+
+    for s in "${services[@]}"; do
+        case "${s}" in
+            backend) _wave_backend+=("${s}") ;;
+            frontend) _wave_frontend+=("${s}") ;;
+            worker-bars-scheduler|worker-strategy-scheduler|worker-calendar)
+                _wave_scheduler+=("${s}") ;;
+            worker-capture) _wave_capture+=("${s}") ;;
+            worker-after-close|worker-watchdog) _wave_recovery+=("${s}") ;;
+            worker-monitor|worker-strategy-batch|worker-outbox|worker-delivery)
+                _wave_workers+=("${s}") ;;
+            postgres|redis|umami)
+                log "  跳过数据服务（永不重启）: ${s}"
+                ;;
+            *)
+                log "  WARN: 未识别服务放入普通 worker 波次: ${s}"
+                _wave_workers+=("${s}") ;;
+        esac
+    done
+
+    _wave_up backend "${_wave_backend[@]}" || return 1
+    if [[ ${#_wave_backend[@]} -gt 0 ]]; then
+        _wait_health
+    fi
+    _wave_up frontend "${_wave_frontend[@]}" || return 1
+    _wave_up scheduler "${_wave_scheduler[@]}" || return 1
+    if [[ ${#_wave_scheduler[@]} -gt 0 ]]; then
+        _check_scheduler_single_instance
+    fi
+    _wave_up workers "${_wave_workers[@]}" || return 1
+    _wave_up recovery "${_wave_recovery[@]}" || return 1
+    _wave_up capture "${_wave_capture[@]}" || return 1
+    return 0
+}
+
+# 等待 backend /v1/health 就绪（限时）。
+_wait_health() {
+    local health_url="http://localhost:8000/v1/health"
+    local deadline=$(( $(date +%s) + TIMEOUT_HEALTH_WAIT_SECONDS ))
+    while :; do
+        if curl -s -o /dev/null -w '%{http_code}' "${health_url}" 2>/dev/null | grep -q 200; then
+            log "  backend health 就绪"
+            return 0
+        fi
+        if [[ "$(date +%s)" -ge "${deadline}" ]]; then
+            FAILURE_STAGE="health_wait"
+            log "错误: backend health 等待超时(>${TIMEOUT_HEALTH_WAIT_SECONDS}s)"
+            return 1
+        fi
+        sleep 3
+    done
+}
+
+# Scheduler 波次后校验三个 Scheduler 均为单实例。
+_check_scheduler_single_instance() {
+    local failed=false
+    for container in trading-worker-bars-scheduler trading-worker-strategy-scheduler trading-worker-calendar; do
+        local count
+        count="$(docker ps --filter "name=${container}" --format '{{.Names}}' | wc -l | tr -d ' ')"
+        if [[ "${count}" != "1" ]]; then
+            log "错误: Scheduler 单实例校验失败 ${container} count=${count}"
+            failed=true
+        fi
+    done
+    if [[ "${failed}" == "true" ]]; then
+        FAILURE_STAGE="scheduler_single_instance"
+        return 1
+    fi
+    log "  Scheduler 单实例校验通过"
+    return 0
 }
 
 RESTARTED_PYTHON=false
@@ -1039,6 +1174,71 @@ verify_deployment() {
     done
     log "Scheduler 单实例检查通过"
 
+    # [CHANGE-20260804 / DS-104] 部署后资源复检：任一失败即判部署失败。
+    post_deploy_resource_check || return 1
+
+    return 0
+}
+
+# [CHANGE-20260804 / DS-104] 部署后资源验收：
+#   主机磁盘/内存/swap、容器 OOMKilled/RestartCount、Compose 限制实际生效、stats 高水位。
+#   任一失败即部署失败，不得写成功状态文件。
+post_deploy_resource_check() {
+    log "部署后资源复检..."
+
+    # 1. 主机资源（复用 check_resource_budget 的阈值，但允许只读采集不修改）
+    local available_kb available_gb used_pct mem_kb mem_mb
+    available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+    used_pct="$(df -Pk / | awk 'NR==2 {gsub(/%/, "", $5); print $5}')"
+    mem_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
+    available_gb=$((available_kb / 1024 / 1024))
+    mem_mb=$((mem_kb / 1024))
+    log "  host: disk_free=${available_gb}GB disk_used=${used_pct}% mem_available=${mem_mb}MB"
+    if [[ "${available_gb}" -lt "${MIN_DISK_GB}" || "${used_pct}" -gt "${MAX_DISK_PCT}" || "${mem_mb}" -lt "${MIN_MEM_MB}" ]]; then
+        FAILURE_STAGE="post_deploy_host_resource"
+        log "错误: 部署后主机资源跌破阈值"
+        return 1
+    fi
+
+    # 2. 关键容器 OOMKilled / RestartCount / 限制生效
+    local check_failed=false
+    for container in trading-backend trading-worker-after-close trading-worker-capture; do
+        local oom restart
+        oom="$(docker inspect -f '{{.State.OOMKilled}}' "${container}" 2>/dev/null || echo "unknown")"
+        restart="$(docker inspect -f '{{.RestartCount}}' "${container}" 2>/dev/null || echo "unknown")"
+        log "  ${container}: oom_killed=${oom} restart_count=${restart}"
+        if [[ "${oom}" == "true" ]]; then
+            log "错误: ${container} OOMKilled"
+            check_failed=true
+        fi
+        if [[ "${restart}" != "unknown" && "${restart}" -gt 3 ]]; then
+            log "错误: ${container} 异常 RestartCount=${restart}"
+            check_failed=true
+        fi
+    done
+
+    # 3. Compose 限制实际生效（Memory/PidsLimit/NanoCpus 非 0）
+    local mem_cfg pids_cfg cpu_cfg
+    mem_cfg="$(docker inspect -f '{{.HostConfig.Memory}}' trading-backend 2>/dev/null || echo 0)"
+    pids_cfg="$(docker inspect -f '{{.HostConfig.PidsLimit}}' trading-backend 2>/dev/null || echo 0)"
+    cpu_cfg="$(docker inspect -f '{{.HostConfig.NanoCpus}}' trading-backend 2>/dev/null || echo 0)"
+    log "  trading-backend limits: mem_limit_bytes=${mem_cfg} pids_limit=${pids_cfg} nano_cpus=${cpu_cfg}"
+    if [[ "${mem_cfg}" == "0" || "${pids_cfg}" == "0" || "${cpu_cfg}" == "0" ]]; then
+        log "错误: Compose 资源限制未实际生效（Memory/PidsLimit/NanoCpus 存在 0）"
+        check_failed=true
+    fi
+
+    # 4. stats 高水位（只读采集，供 Map 记录与后续收紧预算）
+    log "  docker stats 高水位（no-stream）:"
+    docker stats --no-stream --format '    stats {{.Name}} mem_usage={{.MemUsage}} mem_pct={{.MemPerc}}' 2>/dev/null \
+        | sed -n '1,30p' || true
+
+    if [[ "${check_failed}" == "true" ]]; then
+        FAILURE_STAGE="post_deploy_container_resource"
+        return 1
+    fi
+
+    log "部署后资源复检通过"
     return 0
 }
 
@@ -1113,9 +1313,17 @@ rollback() {
 # 资源清理边界：
 #   - 普通 Live Mount 代码部署（本轮未构建任何镜像）→ 完全不清理，
 #     因为没有产生新的 build cache 或悬空镜像，清理只会误伤无关资源；
-#   - 仅当本轮确实构建了环境镜像时，才做受控范围清理。
+#   - 仅当本轮确实构建了环境镜像时，才做受控范围清理（builder + 悬空 + 旧 SHA 精确回收）。
 # 永久禁止：docker image prune -a / docker system prune -a / docker volume prune /
-#           删除 node:20-alpine / 删除 PostgreSQL 或 Redis Volume。
+#           container prune / 删除 node:20-alpine / 删除 PostgreSQL 或 Redis Volume。
+# [CHANGE-20260804 / DS-105] 旧 SHA 业务镜像精确回收：保留当前/上一成功/rollback/基础镜像，
+# 按完整 SHA 组删除，禁止按模糊名或创建时间删除。
+
+# 读取根分区可用空间（MB），用于清理前后磁盘证据。
+_disk_free_mb() {
+    df -Pk / | awk 'NR==2 {print $4}' 2>/dev/null || echo 0
+}
+
 cleanup_resources() {
     if [[ "${IMAGES_BUILT}" != "true" ]]; then
         log "本轮未构建任何镜像（images_built=false），跳过资源清理"
@@ -1123,9 +1331,61 @@ cleanup_resources() {
         return 0
     fi
 
-    log "本轮构建了环境镜像，执行受控范围清理（仅 builder 与悬空镜像）..."
+    local disk_before_mb disk_after_mb
+    disk_before_mb="$(_disk_free_mb)"
+
+    log "本轮构建了环境镜像，执行受控范围清理（builder + 悬空 + 旧 SHA 精确回收）..."
+    log "cleanup_disk_before_mb=${disk_before_mb}"
+
     run_cmd docker builder prune -f
     run_cmd docker image prune -f
+
+    # 构造保留集合：当前运行 SHA、上一成功部署 SHA、rollback 标签、基础镜像。
+    local keep_sha=""
+    for candidate in "${TARGET_SHA}" "${PREVIOUS_SHA}"; do
+        if [[ -n "${candidate}" ]]; then
+            keep_sha="${keep_sha} ${candidate}"
+        fi
+    done
+    log "  旧 SHA 回收：保留 SHA 集合 =${keep_sha}，及所有 *-rollback 标签与基础镜像"
+
+    local reclaimed=()
+    # 枚举 market-dev-{backend,capture,frontend}:<sha> 的完整 SHA 组，仅在整组不在保留集合时删除。
+    while IFS= read -r repo_tag; do
+        [[ -n "${repo_tag}" ]] || continue
+        # repo_tag 形如 market-dev/backend:abcdef... 或 market-dev-backend:abc（取决于本地构建命名）
+        local short
+        short="${repo_tag##*/}"
+        local sha
+        sha="${short##*:}"
+        # 跳过非 SHA 形式（rollback / dev / latest 等标签，以及基础镜像/其他项目镜像）
+        if ! [[ "${sha}" =~ ^[0-9a-f]{7,40}$ ]]; then
+            continue
+        fi
+        if [[ "${keep_sha}" == *"${sha}"* ]]; then
+            continue
+        fi
+        # 仅当该 SHA 的三个业务镜像（backend/capture/frontend）都指向同一且均不在保留集合时才整组删
+        local backend_tag="market-dev-backend:${sha}"
+        local capture_tag="market-dev-capture:${sha}"
+        local frontend_tag="market-dev-frontend:${sha}"
+        local b_count c_count f_count
+        b_count="$(docker images -q "${backend_tag}" 2>/dev/null | wc -l | tr -d ' ')"
+        c_count="$(docker images -q "${capture_tag}" 2>/dev/null | wc -l | tr -d ' ')"
+        f_count="$(docker images -q "${frontend_tag}" 2>/dev/null | wc -l | tr -d ' ')"
+        if [[ "${b_count}" != "0" && "${c_count}" != "0" && "${f_count}" != "0" ]]; then
+            log "  回收旧 SHA 镜像组: ${sha} (backend/capture/frontend)"
+            run_cmd docker rmi "${backend_tag}" "${capture_tag}" "${frontend_tag}" >/dev/null 2>&1 || true
+            reclaimed+=("${sha}")
+        fi
+    done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null)
+
+    disk_after_mb="$(_disk_free_mb)"
+    log "cleanup_disk_after_mb=${disk_after_mb}"
+    log "  回收旧 SHA 组数: ${#reclaimed[@]} 组"
+
+    # [CHANGE-20260804 / DS-104] 清理后再复检一次资源，失败返回 1 由 main 判部署失败。
+    post_deploy_resource_check || return 1
 }
 
 main() {
@@ -1178,7 +1438,11 @@ main() {
             fail "部署核验失败并已回滚"
         fi
 
-        cleanup_resources
+        if ! cleanup_resources; then
+            # 清理后资源复检失败（OOM / 资源跌破阈值 / 限制未生效）→ 判部署失败。
+            rollback
+            fail "部署后清理与资源复检失败（failure_stage=${FAILURE_STAGE}）并已回滚"
+        fi
 
         save_state "${TARGET_SHA}"
 

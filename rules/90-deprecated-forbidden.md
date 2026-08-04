@@ -136,6 +136,15 @@ Fair Value Gap 已完全排除。
 - 禁止 `docker image prune -a`；
 - 除非明确升级 Node 版本或镜像损坏，否则不要删除 `node:20-alpine`。
 
+## 清理边界正向路径（2026-08-04 收口）
+
+本节只回答「不能通用 prune，那到底该怎么清理」——把禁止项落回可安全执行的正向路径。
+
+- 无用**镜像**：禁止通用 `docker image prune -a`；应走 `80-deployment-data-safety.md` DS-105 的旧 SHA 完整组精确回收（保留当前 / 上一成功 / rollback / 基础镜像）；
+- 无用**容器**：禁止通用 `container prune`；应走 DS-106 只读盘点，满足全部前置条件且当轮授权后定向删除，Volume 永不随容器删除；
+- **构建缓存 / 悬挂镜像**：仅在本轮实际构建镜像时允许 `docker builder prune -f` / `docker image prune -f`（见 DS-105 / 80 部署后回收）；
+- **测试库**：禁止创建 / 复用任何独立、临时、CI 测试数据库或测试专用容器；唯一允许的两种测试模式见 `40-testing-quality.md` TQ-100（`PURE_UNIT_TEST=1` 与 `PANJI_SHARED_DEV_DB_TEST=1`）。此路径已永久废弃，禁止恢复。
+
 ## 数据库备份禁止（AGENTS §七.10）
 
 - 测试期部署默认不备份数据库；

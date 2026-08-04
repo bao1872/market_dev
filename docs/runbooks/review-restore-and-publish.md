@@ -9,8 +9,8 @@
 
 1. 生产操作先运行 `scripts/ops/panji-prod-preflight`；本地不得连接数据库或启动 Worker。
 2. 当日正式 `stock_core` 与 `market_aggregation` pointer 已发布且日期一致。
-3. Migration 079–082 已在 CI 临时 PostgreSQL 完成 upgrade/downgrade/upgrade 与 Integration 验证
-   （清单与风险见 §6）。
+3. Migration 079–082 已在共享开发库目标测试模式（`PANJI_SHARED_DEV_DB_TEST=1`，经 SSH 隧道连 `bz_stock`）完成 upgrade/downgrade/upgrade 与 Integration 验证
+   （清单与风险见 §6；见 `rules/40-testing-quality.md` TQ-100）。
 4. Review run 的 algorithm version、source run、scope 配置与输入 hash 均已核对。
 
 ## 1. 正常计算与恢复

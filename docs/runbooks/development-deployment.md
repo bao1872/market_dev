@@ -132,15 +132,38 @@ migration 始终早于任何服务重启。migration 失败时：
 若没有上一成功 SHA、migration 已产生无法自动恢复的外部影响，或回滚验证失败，必须停止并
 报告真实状态，不能继续重试或用手工覆盖掩盖。
 
+## 部署后资源复检（DS-104）
+
+部署成功（SHA / health / Mount 核验通过）后，在写成功状态**之前**必须复检资源，任一失败即判部署失败：
+
+- **主机**：磁盘可用 ≥ `PANJI_MIN_DISK_GB`、使用率 ≤ `PANJI_MAX_DISK_PCT`、`MemAvailable` ≥ `PANJI_MIN_MEM_MB`；
+- **容器**：任一关键容器 `State.OOMKilled=true` 或异常 `RestartCount` → 失败；
+- **配置生效**：`docker inspect` 读取关键容器 `Memory` / `PidsLimit` / `NanoCpus` 非 0（未生效）→ 失败；
+- **高水位**：`docker stats --no-stream` 采集各服务内存，按 `key=value` 记录，作为后续收紧预算的证据；
+- **服务**：health / ready / 单实例校验。
+
 ## 部署后清理
 
 清理按本轮是否实际构建镜像分档：
 
 - 本轮未构建任何镜像（普通 Live Mount 代码部署）→ **不做任何清理**；
-- 本轮构建了环境镜像 → 执行 `docker builder prune -f` 与 `docker image prune -f`。
+- 本轮构建了环境镜像（`IMAGES_BUILT=true`）→ 执行受控清理，保证镜像与缓存净增长趋近于零：
+  1. `docker builder prune -f`；
+  2. `docker image prune -f`；
+  3. **旧 SHA 业务镜像精确回收**（DS-105）：构造保留集合（当前运行 SHA、上一成功部署 SHA、任何 `*-rollback` 标签、基础镜像、非 `market-dev` 项目镜像），按完整 SHA 组枚举 `market-dev-{backend,capture,frontend}:<sha>`，仅当该组三标签全部不在保留集合中才整组删除；**禁止**按模糊名或创建时间删除；
+  4. 清理**前后**各输出一次磁盘证据（`cleanup_disk_before/after_mb`），记录回收的 SHA 列表。
+
+清理后再执行一次资源复检，确认清理后资源不反弹。
 
 任何情况下都禁止 `docker image prune -a`、`docker system prune`、`docker volume prune`、
-删除 `node:20-alpine`、删除 PostgreSQL 或 Redis Volume。
+`container prune`、删除 `node:20-alpine`、删除 PostgreSQL 或 Redis Volume。
+
+## 任务产物收尾（GF-100）
+
+部署 / 任务结束收尾时，按 `rules/50-git-development-flow.md` GF-100 盘点本轮产生的临时产物
+（临时脚本、一次性日志、临时 JSON/CSV、调试截图、构建残留、缓存目录等），明确可删 / 不可删边界，
+报告输出创建 / 删除 / 保留清单与保留原因。不得错删 `.venv` / `node_modules` / 正式 fixtures /
+用户上传文件 / 未知来源 / 任何数据库或 Volume。
 
 ## 禁止操作
 

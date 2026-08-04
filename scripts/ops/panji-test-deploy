@@ -35,10 +35,12 @@
 #   scripts/ops/panji-test-deploy <FULL_SHA> --dry-run  # 只输出计划不执行
 #
 # 环境变量:
-#   PANJI_TEST_SKIP_PREFLIGHT=1  跳过 preflight（默认不跳过）
 #   PANJI_REMOTE_REPO_ROOT       服务器仓库根目录（默认 /root/web_dev）
 #
 # 退出码：0 成功，1 失败，2 配置/前置错误
+#
+# [CHANGE-20260804 / P1] preflight 跳过开关已永久删除。
+# preflight（scripts/ops/panji-prod-preflight）是部署的唯一必经路径，禁止绕过。
 
 set -euo pipefail
 
@@ -51,7 +53,6 @@ SSH_WRAPPER="${SCRIPT_DIR}/panji-prod-ssh"
 
 TARGET_SHA=""
 DRY_RUN=false
-SKIP_PREFLIGHT="${PANJI_TEST_SKIP_PREFLIGHT:-}"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 fail() { log "错误: $*" >&2; exit 1; }
@@ -59,7 +60,6 @@ usage() {
     echo "用法: $0 <SHA> [--dry-run]"
     echo "  FULL_SHA 必须是 origin/dev 的祖先"
     echo "环境变量:"
-    echo "  PANJI_TEST_SKIP_PREFLIGHT=1  跳过 preflight（默认不跳过）"
     echo "  PANJI_REMOTE_REPO_ROOT       服务器仓库根目录（默认 /root/web_dev）"
     exit 2
 }
@@ -104,12 +104,10 @@ log "SHA 校验通过（origin/dev 祖先）: ${TARGET_SHA}"
 bash -n "${LOCAL_DEPLOY_SCRIPT}" \
     || fail "scripts/deploy/panji-deploy.sh 语法错误，拒绝部署"
 
-# ===== Preflight =====
-if [[ "${SKIP_PREFLIGHT}" != "1" && "${SKIP_PREFLIGHT}" != "true" ]]; then
-    log "执行 preflight（scripts/ops/panji-prod-preflight）..."
-    if ! bash "${SCRIPT_DIR}/panji-prod-preflight"; then
-        fail "preflight 未通过，禁止部署。"
-    fi
+# ===== Preflight（唯一必经路径，禁止绕过）=====
+log "执行 preflight（scripts/ops/panji-prod-preflight）..."
+if ! bash "${SCRIPT_DIR}/panji-prod-preflight"; then
+    fail "preflight 未通过，禁止部署。"
 fi
 
 # ===== SSH 让服务器自举到目标 SHA 后执行目标工作树中的部署脚本 =====

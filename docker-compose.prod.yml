@@ -12,6 +12,29 @@ x-logging: &default-logging
     max-size: "50m"
     max-file: "5"
 
+# [CHANGE-20260804] 容器运行期资源硬预算（DS-101）：内存上限/预留、CPU、PID、优雅停止全部
+# 环境变量可配置（默认保守宽松值，可在 /etc/market-dev/market.env 覆盖收紧）。
+# 应用级长任务 memory_budget_mb 必须显著低于所在容器 mem_limit（见 rules/80 DS-107）。
+# 轻量应用服务（scheduler / 轻 worker / watchdog）
+x-resource-app-light: &resource-app-light
+  mem_limit: ${PANJI_APP_LIGHT_MEM_LIMIT:-512m}
+  mem_reservation: ${PANJI_APP_LIGHT_MEM_RESERVATION:-256m}
+  cpus: ${PANJI_APP_LIGHT_CPUS:-1}
+  pids_limit: ${PANJI_APP_LIGHT_PIDS_LIMIT:-512}
+  stop_grace_period: ${PANJI_APP_LIGHT_STOP_GRACE:-30s}
+# 重量应用服务（review / feature / stock core / 批量计算）
+x-resource-app-heavy: &resource-app-heavy
+  mem_limit: ${PANJI_APP_HEAVY_MEM_LIMIT:-1024m}
+  mem_reservation: ${PANJI_APP_HEAVY_MEM_RESERVATION:-512m}
+  cpus: ${PANJI_APP_HEAVY_CPUS:-1}
+  pids_limit: ${PANJI_APP_HEAVY_PIDS_LIMIT:-1024}
+  stop_grace_period: ${PANJI_APP_HEAVY_STOP_GRACE:-60s}
+# 数据服务（postgres / redis / umami）
+x-resource-data: &resource-data
+  cpus: ${PANJI_DATA_CPUS:-1}
+  pids_limit: ${PANJI_DATA_PIDS_LIMIT:-512}
+  stop_grace_period: ${PANJI_DATA_STOP_GRACE:-60s}
+
 services:
   # ===== PostgreSQL 数据库 =====
   postgres:
@@ -19,6 +42,12 @@ services:
     container_name: trading-postgres
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-data
+    mem_limit: ${PANJI_POSTGRES_MEM_LIMIT:-1536m}
+    mem_reservation: ${PANJI_POSTGRES_MEM_RESERVATION:-1024m}
+    cpus: ${PANJI_POSTGRES_CPUS:-2}
+    pids_limit: ${PANJI_POSTGRES_PIDS_LIMIT:-512}
+    stop_grace_period: ${PANJI_POSTGRES_STOP_GRACE:-60s}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-bz}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -40,6 +69,12 @@ services:
     container_name: trading-redis
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-data
+    mem_limit: ${PANJI_REDIS_MEM_LIMIT:-256m}
+    mem_reservation: ${PANJI_REDIS_MEM_RESERVATION:-128m}
+    cpus: ${PANJI_REDIS_CPUS:-1}
+    pids_limit: ${PANJI_REDIS_PIDS_LIMIT:-256}
+    stop_grace_period: ${PANJI_REDIS_STOP_GRACE:-30s}
     command: redis-server --appendonly yes
     environment:
       TZ: Asia/Shanghai
@@ -64,6 +99,12 @@ services:
     container_name: trading-backend
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-heavy
+    mem_limit: ${PANJI_BACKEND_MEM_LIMIT:-1024m}
+    mem_reservation: ${PANJI_BACKEND_MEM_RESERVATION:-512m}
+    cpus: ${PANJI_BACKEND_CPUS:-2}
+    pids_limit: ${PANJI_BACKEND_PIDS_LIMIT:-1024}
+    stop_grace_period: ${PANJI_BACKEND_STOP_GRACE:-30s}
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -97,6 +138,7 @@ services:
     container_name: trading-worker-bars-scheduler
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -122,6 +164,7 @@ services:
     container_name: trading-worker-strategy-scheduler
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -147,6 +190,7 @@ services:
     container_name: trading-worker-calendar
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -172,6 +216,7 @@ services:
     container_name: trading-worker-monitor
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -202,6 +247,7 @@ services:
     container_name: trading-worker-strategy-batch
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-heavy
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -229,6 +275,7 @@ services:
     container_name: trading-worker-outbox
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -254,6 +301,7 @@ services:
     container_name: trading-worker-delivery
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -279,6 +327,7 @@ services:
     container_name: trading-worker-after-close
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-heavy
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -311,6 +360,7 @@ services:
     container_name: trading-worker-watchdog
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -342,6 +392,12 @@ services:
     container_name: trading-worker-capture
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-heavy
+    mem_limit: ${PANJI_CAPTURE_MEM_LIMIT:-768m}
+    mem_reservation: ${PANJI_CAPTURE_MEM_RESERVATION:-384m}
+    cpus: ${PANJI_CAPTURE_CPUS:-2}
+    pids_limit: ${PANJI_CAPTURE_PIDS_LIMIT:-512}
+    stop_grace_period: ${PANJI_CAPTURE_STOP_GRACE:-60s}
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -386,6 +442,12 @@ services:
     container_name: trading-frontend
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-app-light
+    mem_limit: ${PANJI_FRONTEND_MEM_LIMIT:-128m}
+    mem_reservation: ${PANJI_FRONTEND_MEM_RESERVATION:-64m}
+    cpus: ${PANJI_FRONTEND_CPUS:-1}
+    pids_limit: ${PANJI_FRONTEND_PIDS_LIMIT:-256}
+    stop_grace_period: ${PANJI_FRONTEND_STOP_GRACE:-20s}
     environment:
       TZ: Asia/Shanghai
       # [CHANGE-20260729-009] Umami tracking script 注入控制
@@ -415,11 +477,23 @@ services:
     container_name: trading-umami
     restart: unless-stopped
     logging: *default-logging
+    <<: *resource-data
+    mem_limit: ${PANJI_UMAMI_MEM_LIMIT:-384m}
+    mem_reservation: ${PANJI_UMAMI_MEM_RESERVATION:-128m}
+    cpus: ${PANJI_UMAMI_CPUS:-1}
+    pids_limit: ${PANJI_UMAMI_PIDS_LIMIT:-512}
+    stop_grace_period: ${PANJI_UMAMI_STOP_GRACE:-60s}
     env_file:
       - /etc/market-dev/umami.env
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     volumes:
       - umami_data:/app/data
     networks:

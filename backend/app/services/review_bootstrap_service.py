@@ -42,6 +42,11 @@ from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.calendar_service import get_most_recent_trading_day_async
 from app.services.review_metric_observation_service import persist_metric_observations
+from app.utils.long_task_budget import (
+    LongTaskBudgetState,
+    LongTaskStopReason,
+    current_rss_mb,
+)
 from app.services.review_scope_service import (
     ScopeDefinition,
     ScopeSnapshotError,
@@ -89,13 +94,11 @@ DEFAULT_BOOTSTRAP_DETAIL_LIMIT = 5
 
 
 def _current_rss_mb() -> float | None:
-    """读取当前进程 RSS（MB）。不可用时返回 None，绝不因监控失败中断业务。"""
-    try:
-        with open("/proc/self/statm", encoding="utf-8") as fh:
-            pages = int(fh.read().split()[1])
-        return pages * 4096 / (1024 * 1024)
-    except (OSError, ValueError, IndexError):
-        return None
+    """读取当前进程 RSS（MB）。委托共享工具 ``long_task_budget.current_rss_mb``（DS-107）。
+
+    保留本薄封装以最小化对既有调用点的改动，行为等价；新增长任务直接使用共享工具。
+    """
+    return current_rss_mb()
 
 
 def _compact_day_result(result: dict[str, Any], *, keep_detail: bool) -> dict[str, Any]:
@@ -576,9 +579,9 @@ async def bootstrap_history(
             f"{peak_rss:.1f}MB" if peak_rss is not None else "n/a",
         )
 
-        # 内存预算门禁：超出即安全停止，如实上报，绝不靠扩内存掩盖
+        # 内存预算门禁：超出即安全停止，如实上报，绝不靠扩内存掩盖（DS-107）
         if rss is not None and rss > memory_budget_mb:
-            stopped_reason = "memory_budget_exceeded"
+            stopped_reason = LongTaskStopReason.MEMORY_BUDGET_EXCEEDED.value
             logger.error(
                 "[Bootstrap] RSS %.1fMB 超出预算 %dMB，在第 %d 分片安全停止。"
                 "已处理 %d/%d 日；请减小 days_back 或 chunk_days 后分批续跑。",
@@ -604,6 +607,19 @@ async def bootstrap_history(
         status, scope_counts,
     )
 
+    # [CHANGE-20260804 / DS-107] 用共享工具汇总资源治理状态并暴露
+    # stop_reason / resume_token / progress，不改既有返回字段语义（消费端均 .get）。
+    budget_state = LongTaskBudgetState(
+        chunk_size=chunk_days,
+        concurrency=1,
+        memory_budget_mb=memory_budget_mb,
+        total=len(eligible),
+        processed=processed,
+    )
+    budget_state.peak_rss_mb = peak_rss
+    if stopped_reason:
+        budget_state.mark_stopped(LongTaskStopReason(stopped_reason))
+
     return {
         "end_date": resolved_end_date.isoformat(),
         "days_back": days_back,
@@ -619,6 +635,12 @@ async def bootstrap_history(
         "status": status,
         "peak_rss_mb": round(peak_rss, 1) if peak_rss is not None else None,
         "chunks": chunks,
+        # DS-107 新增字段：长任务统一资源治理状态（安全停止原因 / 断点 / 进度）
+        "stop_reason": (
+            LongTaskStopReason(stopped_reason).value if stopped_reason else None
+        ),
+        "resume_token": budget_state.make_checkpoint(),
+        "progress": budget_state.progress,
         **audit,
     }
 

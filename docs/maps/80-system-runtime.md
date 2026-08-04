@@ -14,7 +14,7 @@
 | PostgreSQL | 不在本地启动；应用开发可经 SSH Tunnel 连接正式 `bz_stock`，本地测试禁止连接任何数据库 |
 | Redis | 不在本地启动；开发连接使用隔离逻辑 DB，测试使用 mock |
 | Worker/Scheduler | 本地不得启动远程常驻 Worker、Scheduler、盘后编排或全市场任务 |
-| 测试 | `PURE_UNIT_TEST=1`；PostgreSQL 集成测试只在 CI 临时容器运行 |
+| 测试 | 唯二模式 `PURE_UNIT_TEST=1`（默认）与 `PANJI_SHARED_DEV_DB_TEST=1`（当轮授权，经 SSH 隧道连 `bz_stock`）；见 `rules/40-testing-quality.md` TQ-100，禁止任何独立/临时/CI 测试库 |
 
 本地启动和隧道命令以 `docs/runbooks/local-development.md` 为准。本地进程隔离不能被
 解释为测试数据隔离；任何连接共享开发业务数据库的写入都是真实业务写入。
@@ -105,6 +105,40 @@ strategy、calendar、monitor、strategy-batch、outbox、delivery、after-close
 
 有状态服务的数据卷由 Compose 管理。部署脚本不得删除或重建 PostgreSQL/Redis Volume，
 不得把测试数据库或测试数据写入生产持久化资源。
+
+## 容器资源预算现状
+
+> 2026-08-04 治理垂直切片落地 `docker-compose.prod.yml` 容器级资源限制（DS-101）。
+> 以下为**初始保守宽松值**，全部经环境变量 `${PANJI_<SERVICE>_<FIELD>:-default}` 可配置，可在
+> `/etc/market-dev/market.env` 覆盖收紧。初始值依据服务器 7.4G 内存为宿主机保留 ≥1G 余量规划。
+
+| 服务 | mem_limit 初值 | mem_reservation | cpus | pids_limit | 类别 |
+|---|---|---|---|---|---|
+| postgres | 1536m | 1024m | 2 | 512 | 数据服务 |
+| redis | 256m | 128m | 1 | 256 | 数据服务 |
+| backend | 1024m | 512m | 2 | 1024 | 应用服务 |
+| capture | 768m | 384m | 2 | 512 | 应用服务 |
+| 重 Worker（review/feature/stock core 等） | 1024m | 512m | 1 | 1024 | 应用服务 |
+| 轻 Worker / scheduler / watchdog | 512m | 256m | 1 | 512 | 应用服务 |
+| frontend（Nginx 静态） | 128m | 64m | 1 | 256 | 应用服务 |
+| umami | 384m | 128m | 1 | 512 | 应用服务 |
+
+**硬约束**：重任务服务（review / feature / stock core）的应用级 `memory_budget_mb`（见 DS-107）必须
+**显著低于**其所在容器 `mem_limit`。初始 `mem_limit` 1024m 对应应用级预算建议 ≤512m，为 ORM /
+解释器开销与安全边界预留空间。
+
+**状态**：本轮完成本地配置落地与治理门禁断言。**部署后真实高水位待采集**（DS-104 的
+`docker stats --no-stream` 结果需在用户授权真实部署后回填本 Map），据此再收紧预算；禁止只采集不限制。
+
+## 部署后资源证据字段
+
+部署成功后应在状态文件 / Map 记录以下结构化字段（`key=value`），便于 grep 与预算收紧对账：
+
+- `post_deploy_oom_killed=<true|false>`：任一关键容器 OOMKilled 为 true 即部署失败；
+- `post_deploy_restart_count=<int>`：异常重启计数；
+- `stats_mem_usage_mb_<service>=<value>`：各服务 `docker stats --no-stream` 高水位；
+- `mem_limit_effective=<true|false>`：`docker inspect` 校验 `Memory`/`PidsLimit`/`NanoCpus` 已生效；
+- `cleanup_disk_before_mb` / `cleanup_disk_after_mb`：清理前后磁盘证据（DS-105）。
 
 ## 最近只读运行证据
 

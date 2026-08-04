@@ -30,6 +30,7 @@ def governance_repo(tmp_path: Path) -> Path:
     for relative in (
         "scripts/ops/panji-test-deploy",
         "scripts/deploy/panji-deploy.sh",
+        "docker-compose.prod.yml",
         "docs/prd/80-system-runtime.md",
         "docs/maps/80-system-runtime.md",
         "docs/runbooks/development-deployment.md",
@@ -67,6 +68,14 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
         ("prod_server", "forbidden production-stage term"),
         ("prod_deploy", "forbidden production-stage term"),
         ("prod_db", "forbidden production-stage term"),
+        # [CHANGE-20260804] 四类新门禁回归用例
+        ("compose_missing_mem_limit", "缺少资源限制字段"),
+        ("compose_stateful_missing_healthcheck", "有状态服务缺少字段"),
+        ("deploy_missing_timeout", "统一长命令超时"),
+        ("deploy_skip_preflight", "preflight 绕过开关"),
+        ("deploy_missing_oom_check", "容器 OOM 检查"),
+        ("deploy_system_prune_exec", "system prune"),
+        ("cleanup_missing_disk_evidence", "清理前磁盘证据"),
     ],
 )
 def test_governance_regressions_are_rejected(
@@ -172,6 +181,74 @@ def test_governance_regressions_are_rejected(
         # 回潮：rules 重新出现"生产库"
         path = governance_repo / "rules/80-deployment-data-safety.md"
         path.write_text(read_text(path) + "\n写入生产库。\n", encoding="utf-8")
+    elif mutation == "compose_missing_mem_limit":
+        # 回潮：worker-strategy-batch 失去全部资源限制（移除 anchor 合并，DS-101）。
+        # 该 worker 的资源限制完全来自 `<<: *resource-app-heavy`，移除合并即无 mem_limit 等字段。
+        compose = governance_repo / "docker-compose.prod.yml"
+        batch_anchor = (
+            "    container_name: trading-worker-strategy-batch\n"
+            "    restart: unless-stopped\n"
+            "    logging: *default-logging\n"
+            "    <<: *resource-app-heavy\n"
+        )
+        compose.write_text(
+            read_text(compose).replace(batch_anchor, ""),
+            encoding="utf-8",
+        )
+    elif mutation == "compose_stateful_missing_healthcheck":
+        # 回潮：postgres 有状态服务缺失 healthcheck
+        compose = governance_repo / "docker-compose.prod.yml"
+        postgres_hc = (
+            '    healthcheck:\n'
+            '      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bz} -d ${POSTGRES_DB:-bz_stock}"]\n'
+            '      interval: 10s\n'
+            '      timeout: 5s\n'
+            '      retries: 10\n'
+            '      start_period: 20s\n'
+        )
+        compose.write_text(
+            read_text(compose).replace(postgres_hc, ""),
+            encoding="utf-8",
+        )
+    elif mutation == "deploy_missing_timeout":
+        # 回潮：部署脚本删除 run_with_timeout 统一超时（DS-103）
+        server_impl.write_text(
+            read_text(server_impl).replace(
+                "run_with_timeout",
+                "legacy_timeout",
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "deploy_skip_preflight":
+        # 回潮：panji-test-deploy 重新出现 preflight 绕过开关
+        local_entry.write_text(
+            read_text(local_entry) + "\nPANJI_TEST_SKIP_PREFLIGHT=1 可跳过\n",
+            encoding="utf-8",
+        )
+    elif mutation == "deploy_missing_oom_check":
+        # 回潮：部署脚本删除 OOMKilled 检查（DS-104）
+        server_impl.write_text(
+            read_text(server_impl).replace(
+                "OOMKilled",
+                "oom_flag_removed",
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "deploy_system_prune_exec":
+        # 回潮：部署脚本在可执行代码里使用 system prune（非注释）
+        server_impl.write_text(
+            read_text(server_impl) + "\nrun_cmd docker system prune -af\n",
+            encoding="utf-8",
+        )
+    elif mutation == "cleanup_missing_disk_evidence":
+        # 回潮：清理合同缺失磁盘证据字段（DS-105）
+        server_impl.write_text(
+            read_text(server_impl).replace(
+                "cleanup_disk_before_mb",
+                "disk_before_missing",
+            ),
+            encoding="utf-8",
+        )
 
     assert any(expected in error for error in check(governance_repo))
 

@@ -8,6 +8,11 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+try:
+    import yaml
+except ImportError:  # pragma: no cover - yaml 缺失时 Compose 门禁跳过并告警
+    yaml = None
+
 CANONICAL_RULES = {
     "README.md",
     "00-core-governance.md",
@@ -256,11 +261,21 @@ def check(root: Path) -> list[str]:
                 errors.append(
                     f"forbidden standalone test-db (CI 独立 postgres:16 测试 service): {rel}"
                 )
-            for token, reason in _FORBIDDEN_TEST_DB_TOKENS.items():
-                if token in text:
-                    errors.append(
-                        f"forbidden standalone test-db ({reason}): {rel} contains {token}"
-                    )
+            # 逐行扫描并豁免「明确禁止」语句：禁止/不得/永不/排除等上下文中的 token 属于禁止清单本身，不误报。
+            # 活跃文档中这些 token 只允许出现在「明确禁止/不得」句子里，其余出现即视为违规。
+            prohibition_markers = (
+                "禁止", "不得", "永不", "排除", "已永久删除", "已删除",
+                "不允许", "禁止引入", "禁止创建", "禁止使用",
+            )
+            for line_no, line in enumerate(text.splitlines(), 1):
+                if any(marker in line for marker in prohibition_markers):
+                    continue
+                for token, reason in _FORBIDDEN_TEST_DB_TOKENS.items():
+                    if token in line:
+                        errors.append(
+                            f"forbidden standalone test-db ({reason}): "
+                            f"{rel}:{line_no} contains {token}"
+                        )
 
     # [开发测试阶段] 禁止当前有效文档使用"生产阶段"业务术语（历史技术标识符 panji-prod 等除外）
     _FORBIDDEN_PROD_TERMS = (
@@ -310,6 +325,100 @@ def check(root: Path) -> list[str]:
                 errors.append(
                     f"forbidden runbook legacy flow ({reason}): docs/runbooks/after-close-remote-development-run.md"
                 )
+
+    # =========================================================================
+    # [CHANGE-20260804 / DS-101] Compose 容器资源硬预算门禁
+    #   每个运行时服务必须配置 mem_limit / mem_reservation / cpus / pids_limit /
+    #   logging / stop_grace_period；有状态服务（postgres/redis/umami）额外要求
+    #   restart / healthcheck / volumes。
+    # =========================================================================
+    compose_path = root / "docker-compose.prod.yml"
+    if compose_path.exists():
+        if yaml is None:
+            errors.append("Compose 资源门禁无法运行：缺少 PyYAML 依赖")
+        else:
+            try:
+                compose = yaml.safe_load(read(compose_path))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Compose 文件解析失败: {exc}")
+                compose = None
+            if compose:
+                svcs = (compose.get("services") or {})
+                stateful = {"postgres", "redis", "umami"}
+                for name, svc in (svcs.items() if isinstance(svcs, dict) else []):
+                    rel_svc = f"docker-compose.prod.yml service:{name}"
+                    if not isinstance(svc, dict):
+                        errors.append(f"{rel_svc} 不是字典")
+                        continue
+                    for field in (
+                        "mem_limit", "mem_reservation", "cpus", "pids_limit",
+                        "logging", "stop_grace_period",
+                    ):
+                        if field not in svc:
+                            errors.append(f"{rel_svc} 缺少资源限制字段: {field}")
+                    if name in stateful:
+                        for field in ("restart", "healthcheck", "volumes"):
+                            if field not in svc:
+                                errors.append(
+                                    f"{rel_svc} 有状态服务缺少字段: {field}"
+                                )
+
+    # =========================================================================
+    # [CHANGE-20260804 / DS-102/103/104] 部署脚本合同门禁
+    #   必须含串行、超时、部署后资源复检；不得含 preflight 绕过与通用 prune。
+    # =========================================================================
+    deploy_sh = root / "scripts/deploy/panji-deploy.sh"
+    if deploy_sh.exists():
+        deploy_text = read(deploy_sh)
+        required_signals = {
+            "COMPOSE_PARALLEL_LIMIT=1": "构建/重启串行",
+            "run_with_timeout": "统一长命令超时",
+            "post_deploy_resource_check": "部署后资源复检",
+            "OOMKilled": "容器 OOM 检查",
+            "RestartCount": "容器重启计数检查",
+            "docker stats --no-stream": "高水位采集",
+        }
+        for signal, reason in required_signals.items():
+            if signal not in deploy_text:
+                errors.append(f"部署脚本缺少 {reason} 断言: {signal}")
+
+        # 禁止项只扫描可执行代码（shell_code 剥离注释行），避免误判「永久禁止」注释。
+        forbidden_deploy = {
+            "PANJI_TEST_SKIP_PREFLIGHT": "preflight 绕过开关",
+            "docker system prune": "system prune（全局清理禁止）",
+            "docker volume prune": "volume prune（数据禁止）",
+            "docker container prune": "container prune（定向治理替代）",
+        }
+        deploy_code = shell_code(deploy_sh)
+        for token, reason in forbidden_deploy.items():
+            if token in deploy_code:
+                errors.append(f"部署脚本含禁止项 ({reason}): {token}")
+        # PANJI_TEST_SKIP_PREFLIGHT 绕过开关在本地入口（panji-test-deploy）同样永久禁止。
+        local_entry = root / "scripts/ops/panji-test-deploy"
+        if local_entry.exists():
+            local_code = shell_code(local_entry)
+            if "PANJI_TEST_SKIP_PREFLIGHT" in local_code:
+                errors.append(
+                    "部署入口含禁止项 (preflight 绕过开关): "
+                    "scripts/ops/panji-test-deploy"
+                )
+
+    # =========================================================================
+    # [CHANGE-20260804 / DS-105] 清理合同门禁
+    #   部署脚本须体现 IMAGES_BUILT 分档、保留当前与上一 SHA、禁删 Volume、
+    #   输出清理前后磁盘证据。
+    # =========================================================================
+    if deploy_sh.exists():
+        deploy_text = read(deploy_sh)
+        cleanup_required = {
+            "IMAGES_BUILT": "按是否构建镜像分档清理",
+            "cleanup_disk_before_mb": "清理前磁盘证据",
+            "cleanup_disk_after_mb": "清理后磁盘证据",
+            "docker rmi": "旧 SHA 镜像定向回收",
+        }
+        for signal, reason in cleanup_required.items():
+            if signal not in deploy_text:
+                errors.append(f"部署脚本清理合同缺少 {reason}: {signal}")
 
     return errors
 

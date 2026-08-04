@@ -85,6 +85,7 @@ from app.services.feature_snapshot_service import (
     finish_snapshot_run,
     upsert_snapshot,
 )
+from app.utils.long_task_budget import LongTaskBudgetState, LongTaskStopReason
 
 logging.basicConfig(
     level=logging.INFO,
@@ -404,6 +405,7 @@ async def backfill_instrument_first(
     schema_version: int = _DEFAULT_SCHEMA_VERSION,
     scope: str = SCOPE_FULL,
     profile: ProfileCollector | None = None,
+    memory_budget_mb: int = 1024,
 ) -> dict[str, Any]:
     """Instrument-first 回补：每只 instrument 加载 bars 一次，遍历 trade_dates 切片。
 
@@ -411,6 +413,8 @@ async def backfill_instrument_first(
     - 外层循环按 instrument batch
     - 每只 instrument 只加载 1 次 1d/15m bars
     - 内层循环按 trade_date，在内存切片（compute_feature_snapshot_for_date 内部 _truncate_bars_to_trade_date）
+    - [CHANGE-20260804 / DS-107] 在 batch 边界采样 RSS，超 memory_budget_mb 安全停止并上报 stop_reason；
+      不改变业务计算语义与 run 状态判定（partial 由各 trade_date 实际成功/失败计数如实反映）。
 
     [事务边界 + run gate]
     - 本函数不内部 commit，由 caller（main）控制
@@ -545,8 +549,23 @@ async def backfill_instrument_first(
                 existing_per_date[td] = set()
 
     # instrument-first 主循环
+    # [CHANGE-20260804 / DS-107] 长任务资源治理：batch 边界采样 RSS，超预算安全停止。
     _processed_count = 0
+    budget = LongTaskBudgetState(
+        chunk_size=batch_size,
+        concurrency=1,
+        memory_budget_mb=memory_budget_mb,
+        sample_every=max(1, batch_size),
+        total=total_instruments,
+    )
+    stop_reason: str | None = None
     for i in range(0, total_instruments, batch_size):
+        if stop_reason is not None:
+            logger.info(
+                "[backfill] 内存预算已超出，安全停止于 batch %d（stop_reason=%s）",
+                i // batch_size + 1, stop_reason,
+            )
+            break
         batch = instruments[i : i + batch_size]
         for instrument_id in batch:
             _inst_start = time.perf_counter() if profile else None
@@ -638,6 +657,18 @@ async def backfill_instrument_first(
             i + 1, min(i + batch_size, total_instruments),
         )
 
+        # [CHANGE-20260804 / DS-107] batch 边界采样 RSS，超预算安全停止。
+        rss = budget.record_chunk_done(len(batch))
+        if budget.should_stop(rss):
+            stop_reason = LongTaskStopReason.MEMORY_BUDGET_EXCEEDED.value
+            logger.error(
+                "[backfill] RSS %.1fMB 超出预算 %dMB，安全停止于 batch %d。"
+                "已完成 %d/%d instruments；请调小 batch_size 或分批续跑。",
+                rss if rss is not None else float("nan"),
+                memory_budget_mb, i // batch_size + 1,
+                budget.processed, total_instruments,
+            )
+
     # 为每个 trade_date finalize run（succeeded/failed）
     total_snapshots = 0
     total_failed = 0
@@ -689,6 +720,10 @@ async def backfill_instrument_first(
         total_snapshots, total_failed, total_skipped,
     )
 
+    # [CHANGE-20260804 / DS-107] 如实上报长任务资源治理状态（附加字段，不改变既有语义）。
+    if stop_reason:
+        budget.mark_stopped(LongTaskStopReason(stop_reason))
+
     return {
         "dry_run": False,
         "trade_dates": total_dates,
@@ -697,6 +732,12 @@ async def backfill_instrument_first(
         "total_snapshots": total_snapshots,
         "total_failed": total_failed,
         "skipped_existing": total_skipped,
+        "stop_reason": stop_reason,
+        "peak_rss_mb": (
+            round(budget.peak_rss_mb, 1) if budget.peak_rss_mb is not None else None
+        ),
+        "progress": budget.progress,
+        "resume_token": budget.make_checkpoint(),
     }
 
 
@@ -1269,6 +1310,7 @@ async def main(args: argparse.Namespace) -> None:
                         dry_run=False,
                         scope=scope,
                         profile=profile,
+                        memory_budget_mb=args.memory_budget_mb,
                     )
                     await db.commit()
                     logger.info(
@@ -1317,6 +1359,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="每批 instrument 数（默认 20，保守内存）",
+    )
+    parser.add_argument(
+        "--memory-budget-mb",
+        type=int,
+        default=int(os.environ.get("PANJI_FEATURE_BACKFILL_MEMORY_BUDGET_MB", "1024")),
+        help="单进程 RSS 软预算（MB，默认 1024，须低于所在容器 mem_limit，见 DS-107）",
     )
     parser.add_argument(
         "--failure-threshold",

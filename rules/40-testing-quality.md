@@ -154,7 +154,7 @@ Gov     python tools/check_governance_rules.py
   - `PURE_UNIT_TEST=1`：纯单元/mock，不连接数据库；
   - `PANJI_SHARED_DEV_DB_TEST=1`：经 SSH 隧道连共享开发业务数据库 `bz_stock` 的明确授权目标测试。
 - 共享模式禁止 DDL/Alembic、独立 session/engine；仅使用 `db_session`/`client` fixture；savepoint rollback；测试结束无残留。
-- 已永久删除 CI 临时数据库容器路线、独立测试库 URL 变量、独立测试库名。
+- 已永久删除独立测试数据库路线、独立测试库 URL 变量、独立测试库名与测试专用容器。
 - 不保留 conftest 持久测试引擎或 Alembic 自动迁移到本地。
 
 ### 测试模式规则
@@ -166,8 +166,41 @@ Gov     python tools/check_governance_rules.py
 ### 新增测试规则
 
 - 新增测试优先写成纯单元测试（不连接数据库）。
-- 必须连接数据库的集成测试，必须使用 `db_session` fixture，并在 CI 临时库运行。
+- 必须连接数据库的集成测试，必须使用 `db_session` fixture，并只能在 `PANJI_SHARED_DEV_DB_TEST=1` 共享开发库目标模式下运行。
 - 不得在本地 Mac 创建持久测试库以运行集成测试。
+
+### TQ-100 唯一测试模式合同
+
+> 本条是测试运行环境的**唯一权威**。任何文档、脚本、CI 配置、注释与本条冲突的，以本条为准。
+
+**唯二允许的测试模式**：
+
+| 模式 | 触发变量 | 数据库 | 适用范围 |
+|---|---|---|---|
+| 纯单元 | `PURE_UNIT_TEST=1` | 不连接任何数据库、不联网 | 默认模式，绝大多数测试 |
+| 共享开发库目标测试 | `PANJI_SHARED_DEV_DB_TEST=1` | 经 SSH 隧道连共享开发业务库 `bz_stock` | 当轮明确授权的少量目标测试 |
+
+两个变量均未设置时，`backend/tests/conftest.py` 必须在加载阶段 fail-closed 直接失败，不得回退到任何默认数据库。
+
+**共享模式的强制前置条件**（缺一即失败）：
+
+- `PANJI_SHARED_DEV_DB_TARGET` 指定唯一目标测试文件，禁止全量跑；
+- `APP_ENV=development`；
+- `DATABASE_URL` 指向 `127.0.0.1` / `localhost` 的 `bz_stock`（即经本地 SSH 隧道），禁止直连远程地址；
+- 仅使用 `db_session` / `client` fixture，`TestAsyncSessionLocal` fail-closed；
+- 全程 savepoint rollback，测试结束数据库无残留；
+- 禁止任何 DDL 与 Alembic 操作。
+
+**永久禁止**（在本地、远程开发运行服务器、CI、Docker 容器任一位置均禁止）：
+
+- 禁止创建或复用独立测试数据库、临时测试数据库；
+- 禁止启动测试专用数据库容器（含 CI service container 与 `docker compose` 临时 Postgres）；
+- 禁止创建测试专用 Volume 或持久测试引擎；
+- 禁止引入 `TEST_DATABASE_URL` 一类独立测试库连接变量；
+- 禁止使用 `bz_stock_test` 一类独立测试库名；
+- 禁止在 CI 中为数据库测试挂载 `services: postgres`。
+
+**文档一致性要求**：`rules/`、`docs/maps/`、`docs/prd/`、`docs/runbooks/`、`.github/workflows/` 的活跃内容中，不得出现描述上述禁止路径为**当前可用方案**的表述。历史 `docs/changes/` 记录与本条中明确标注为"禁止"的语句不受此限。该约束由 `tools/check_governance_rules.py` 自动断言。
 
 ## 2026-08-02 收口：测试合同（开发与部署治理）
 
@@ -205,7 +238,7 @@ Gov     python tools/check_governance_rules.py
 
 | 类别 | marker | 含义 | 运行位置 |
 |---|---|---|---|
-| PG 集成 | `postgres` | 需要真实 PostgreSQL | CI 临时容器 |
+| PG 集成 | `postgres` | 需要真实 PostgreSQL | 仅共享开发库目标测试（`PANJI_SHARED_DEV_DB_TEST=1`，经 SSH 隧道） |
 | 外部数据 | `external_data` | 依赖外部数据源 | CI（失败不阻断开发部署） |
 | 纯单元 | 无 | 不连库、不联网 | 本地 `PURE_UNIT_TEST=1` + CI |
 

@@ -241,7 +241,7 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
   1. 服务器 repo HEAD（`git -C /root/web_dev rev-parse HEAD`）= 目标 dev SHA；
   2. `runtime_git_sha`（运行代码 `RUNTIME_SHA` 文件 / 版本端点返回的 `runtime_git_sha`）= 目标 dev SHA。
 - 任一项不匹配即视为部署失败，必须回到上一已知良好 SHA，不得通过"重启容器"或"重新部署"掩盖不一致。
-- `RUNTIME_SHA` 文件必须原子替换（temp file + `mv`），禁止 `sed -i`。
+- `RUNTIME_SHA` 文件必须**原地写入**（truncate + write 同一 inode），并在写入前后校验 inode 不变、写入后回读校验内容。**禁止** `temp file + mv`、`rsync`、`rename` 或 `sed -i` 更换 inode 的做法。以 `scripts/deploy/panji-deploy.sh` 的 `write_runtime_sha` 与 `docs/maps/80-system-runtime.md` 为权威实现，`tools/check_governance_rules.py` 自动断言禁止 `mv`/`rsync`。
 - 代码部署**不自动执行**任何数据 apply / run / publish 操作；migration 仅在确有新 migration 时由部署脚本显式、幂等地执行，且不属于"自动数据发布"。
 - 具体探针命令与逐服务校验以 `docs/runbooks/development-deployment.md` 为准（当前运行后端版本端点路径以该 runbook 实测为准，不在此硬编码）。
 
@@ -304,6 +304,115 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 远程部署脚本必须用 `flock`（`/var/lock/panji-test-deploy.lock`）保证同一时刻只有一次部署在执行。
 - 资源门禁（磁盘/内存阈值）必须在**改动任何状态之前**校验（见本文件"服务器资源预算门禁"）。
 - 涉及 stdin 的远端命令必须重定向 `</dev/null`，防止后续脚本内容被子进程吞掉。
+
+## 2026-08-04 收口：资源与测试治理垂直切片（CHANGE 待记）
+
+> 本节把「写了未落实」的容器运行期资源控制、部署串行/超时/复检、定向清理与长任务预算固化为可执行合同，
+> 每条条款必须同时具备：规则文本 + 代码/配置落实点 + 治理检查断言（`tools/check_governance_rules.py`）。
+> 无法被 checker 断言的条款一律降级为 `docs/maps/80-system-runtime.md` 记录而非本 Rules 条款。
+
+### DS-100 主机资源准入时机
+
+- 主机资源门禁（磁盘 / 使用率 / MemAvailable）必须在**任何状态修改之前**执行，作为第一道关卡；
+- `dry-run` / 预检模式只读不改，只输出资源读取与校验结果，不创建锁、不修改任何状态；
+- 资源读取必须以结构化行输出（`key=value`），便于后续 grep 与 Map 记录；
+- 门禁失败禁止用「扩阈值」或「跳过门禁」绕过，必须先按允许范围清理（见 DS-105）后重试。
+
+### DS-101 容器运行期硬预算
+
+所有运行时服务（postgres、redis、backend、全部 worker、frontend、capture、umami）必须配置**容器级**资源限制：
+
+- **内存上限** `mem_limit`；
+- **内存预留** `mem_reservation`；
+- **CPU 上限** `cpus`；
+- **PID 上限** `pids_limit`；
+- **优雅停止时长** `stop_grace_period`；
+- **日志轮转** `logging`（复用现有 `x-logging` 锚点）。
+
+规则：
+
+- 全部数值用 `${PANJI_<SERVICE>_<FIELD>:-<默认值>}` 环境变量形式，可在 `market.env` 覆盖收紧；
+- 初始值为保守宽松值，后续按部署后实测高水位（DS-104）收紧，**禁止只采集不限制**；
+- 宿主机保留 ≥1G 余量（内核 / 文件缓存），不得把 7.4G 内存全部分光；
+- 重任务服务的应用级 `memory_budget_mb`（见 DS-107）必须**显著低于**其所在容器 `mem_limit`，为 ORM / 解释器开销与安全边界预留空间，该数值关系由 checker 断言。
+
+### DS-102 构建与重启串行纪律
+
+- 全局 `COMPOSE_PARALLEL_LIMIT=1`，禁止 Compose 并行拉起多容器；
+- 镜像构建逐服务串行，禁止前端构建与 `docker build` 并行、禁止 migration 与构建 / 重启并行；
+- 重启按固定波次，禁止一次性 `up -d` 交出全部 Python 服务：
+  1. backend → 健康 / 就绪检查；
+  2. frontend；
+  3. Scheduler 单独成波并立即校验单实例；
+  4. 普通 Worker 小批次；
+  5. after-close / watchdog；
+  6. capture（最后）；
+- **数据服务（postgres / redis / umami）永不进入普通重启列表**，避免触碰持久化数据；
+- 波与波之间插入健康 / 存在性检查，任一失败即停并走失败路径。
+
+### DS-103 长命令超时
+
+所有长命令（`npm ci` / Vite build / `docker build` / alembic / compose up / health-ready 等待 / 远程总时长）必须有**外层超时**：
+
+- 统一封装为单一辅助函数（如 `run_with_timeout <stage> <seconds> -- <cmd...>`），避免散落的重复 timeout 逻辑，也便于 checker 断言；
+- 超时时必须：记录 `failure_stage`、释放部署锁、走既有失败路径、**禁止自动重试**、不得继续后续步骤；
+- 未超时阈值由 Runbook 给出，禁止"超时值被绕过（如 `timeout 0` / 无 timeout）"。
+
+### DS-104 部署后资源验收
+
+部署成功前必须复检（任一失败即判部署失败，不得写成功状态文件）：
+
+- **主机**：磁盘可用 / 使用率 / MemAvailable / swap；
+- **容器**：任一关键容器 `State.OOMKilled=true`、异常 `RestartCount` → 失败；
+- **配置生效**：`docker inspect` 读取 `Memory` / `PidsLimit` / `NanoCpus` 为 0（未生效）→ 失败；
+- **高水位采集**：`docker stats --no-stream` 输出各容器内存，作为后续收紧预算的证据；
+- **服务**：health / ready / 单实例校验。
+
+清理（DS-105）之后再执行一次同样的资源复检，确认清理后资源不反弹。
+
+### DS-105 旧 SHA 业务镜像精确回收
+
+仅当本轮实际构建镜像（`IMAGES_BUILT=true`）时触发：
+
+- 先构造**保留集合**：当前运行 SHA、上一成功部署 SHA、任何 `*-rollback` 标签、基础镜像、非 `market-dev` 项目镜像；
+- 按**完整 SHA 分组**枚举 `market-dev-{backend,capture,frontend}:<sha>`，只有该 SHA 组的三个标签**全部不在保留集合中**才整组删除；
+- **禁止**按模糊名（`<*>`）、创建时间或数量上限删除镜像；
+- 删除前后各输出一次磁盘证据，并记录回收的 SHA 列表；
+- 禁止 `docker system prune` / `docker image prune -a` / `docker volume prune`。
+
+### DS-106 遗留容器定向治理
+
+- 遗留无用容器禁止用通用 `container prune` 清理；
+- 只能先做**只读盘点**，记录：容器名、镜像、状态、退出码、创建时间、挂载卷、是否有日志；
+- 满足以下**全部**条件才建议删除，且删除仍需**当轮明确授权**：
+  1. 不属于当前 `docker compose` 项目管理的服务；
+  2. 状态为 exited / dead（非 running）；
+  3. 挂载卷不包含业务数据或持久数据；
+  4. 镜像仍受保护或可重建（不依赖唯一本地镜像）；
+  5. 退出码为已知正常结束；
+  6. 仓库无活跃引用。
+- **Volume 永不随容器删除**（`docker rm -v` 禁止），业务数据卷只能经正式备份 / 迁移流程处理。
+
+### DS-107 长任务统一资源合同
+
+以下长任务主链必须统一支持资源治理：**Feature Snapshot（第一金字塔）**、**stock core**、**Review**（含 bootstrap / 回填）。
+
+必备字段（checker 可断言的落地形态）：
+
+- **分片**：按自然分片（交易日 / scope / chunk）处理，不在内存线性累积全部结果；
+- **并发**：默认 1，禁止用并行放大峰值内存；
+- **内存预算**：`memory_budget_mb` 可配置，且必须低于所在容器 `mem_limit`（DS-101）；
+- **峰值 RSS**：记录 `peak_rss_mb`；
+- **心跳与进度**：记录 heartbeat / progress / processed / remaining；
+- **安全停止**：超预算安全停止，返回 `stop_reason`（completed / memory_budget_exceeded / cancelled / error），**绝不静默截断、不假装成功、OOM 被杀不得写 success**；
+- **检查点恢复**：支持 `resume_token` / checkpoint，已完成分片可恢复且幂等；
+- **partial 状态**：未完成时如实上报 partial，不得写成功。
+
+分片结束必须释放 ORM 对象（`session.expunge_all()` 等），批次内部按步长采样内存（O(1) 系统调用）。
+
+共享工具：`backend/app/utils/long_task_budget.py`，统一提供 RSS 采样 / 预算判定 / 峰值累计 / 停止原因 / checkpoint 序列化；禁止各长任务各自复制实现导致漂移。
+
+违反上述任一条即视为实现缺陷，必须修实现而不是调大预算。
 
 ## 分层发布与增量检查点纪律
 

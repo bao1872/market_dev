@@ -402,6 +402,11 @@ def build_job_metadata_updates(result: dict[str, Any]) -> dict[str, Any]:
             # [FIX-20260802] 内存可观测性：便于判断任务是否触顶预算而提前停止
             "peak_rss_mb": result.get("peak_rss_mb"),
             "chunks": result.get("chunks"),
+            # [CHANGE-20260804 / DS-107] 透传长任务资源治理状态：
+            #   stop_reason 安全停止原因；resume_token 断点续跑凭证；progress 进度。
+            "stop_reason": result.get("stop_reason"),
+            "resume_token": result.get("resume_token"),
+            "progress": result.get("progress"),
         },
         "bootstrap_results": result.get("results", []),
         "completed_at": datetime.now(UTC).isoformat(),
