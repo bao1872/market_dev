@@ -20,6 +20,7 @@
 | `40-testing-quality.md` | 测试隔离、质量门禁、CI 和结论纪律 |
 | `50-git-development-flow.md` | 分支、提交、推送和执行纪律 |
 | `80-deployment-data-safety.md` | Migration、部署、生产访问和数据安全 |
+| `81-remote-deployment-only.md` | 部署位置唯一性：本地仅开发/验证/控制，所有部署均在远程服务器执行 |
 | `90-deprecated-forbidden.md` | 已废止入口和禁止恢复项 |
 
 上述规则均为当前有效规则。未来方案、阶段迁移表和已经删除的流程不在有效规则中保留；
