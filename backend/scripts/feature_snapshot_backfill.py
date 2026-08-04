@@ -1,24 +1,22 @@
 """特征快照历史回补脚本 - instrument-first 优化版。
 
 用法：
-    # 单进程模式（默认）
+    # 单进程模式（唯一允许；DS-107 并发固定为 1）
     cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfill \\
         --start 2026-01-01 --end latest --batch-size 20
-
-    # 多进程模式（--workers > 1）
-    cd /root/web_dev/backend && .venv/bin/python -m scripts.feature_snapshot_backfill \\
-        --start 2026-01-01 --end latest --workers 4 --resume
 
 参数：
     --start: 起始日期（YYYY-MM-DD，必填）
     --end: 结束日期（YYYY-MM-DD 或 "latest"，默认 "latest" 表示最新 bars_daily 日期）
     --batch-size: 每批 instrument 数（默认 20，保守内存；仅单进程模式生效）
+    --memory-budget-mb: 单进程 RSS 软预算（默认取 PANJI_FEATURE_BACKFILL_MEMORY_BUDGET_MB，
+                        必须显著低于所在容器 mem_limit，见 DS-107）
     --symbols: 只处理指定股票代码（逗号分隔，如 000100,603303）
     --limit-instruments: 限制处理的 instrument 数量（用于小样本验证）
     --resume: 跳过已存在 snapshot 且所属 trade_date 的 run.status='succeeded' 的行
     --dry-run: 只打印计划与 missing 统计，不执行写入
     --failure-threshold: 失败比例阈值（默认 0.3，超过则该 trade_date 标 run.status='failed'）
-    --workers: 并行进程数（默认 1 单进程，>1 启用 multiprocessing；建议 = CPU 核数）
+    --workers: 并发进程数（DS-107 固定为 1，传入非 1 会被拒绝；多进程路径已禁用）
 
 [instrument-first 优化]：
     旧 date-first 实现已废弃（每只 instrument 每个 trade_date 重复 fetch bars）。
@@ -30,18 +28,15 @@
             compute_feature_snapshot_for_date(primary_bars=..., secondary_bars=...)
             upsert
 
-[multiprocessing 优化]（--workers > 1）：
-    - 主进程创建 run records + 分发 instrument chunks
-    - 每个 worker 独立 async engine + session
-    - per-date commit（被 kill 不丢已完成，resume 可续）
-    - 单 worker 失败不阻塞其他
-    - 预期 4-8x 提速（取决于 CPU 核数）
+[DS-107 资源治理]：
+    - 并发固定为 1，多进程路径（backfill_instrument_first_parallel）已禁用（parse_args 拒绝 --workers>1）
+    - 在 batch 边界采样 RSS，超 memory_budget_mb 安全停止，stop_reason 记入 metadata_
+    - 预算超限或未处理完全部预期 instruments 时，run 强制标 failed（published_at 保持 NULL，
+      禁止 partial 伪装 success；--resume 不会跳过 failed run）
 
 [事务边界 + run gate]：
     - 单进程：backfill_instrument_first 不内部 commit，由 main 控制
-    - 多进程：backfill_instrument_first_parallel 创建 run records 后 commit，
-      每个 worker per-date commit，主进程 finalize run records
-    - 失败比例超阈值的 trade_date 标 run.status='failed'（不抛 RuntimeError）
+    - 失败比例超阈值或未完成预期的 trade_date 标 run.status='failed'（不抛 RuntimeError）
     - 单股失败不阻塞其他股票
     - watchlist 只读取 run.status='succeeded' + published_at IS NOT NULL + metadata_.scope='full' 的 snapshot
 
@@ -60,7 +55,6 @@ import os
 import sys
 import time
 import uuid
-import warnings
 from datetime import date
 from typing import Any
 
@@ -103,6 +97,35 @@ _DEFAULT_SCHEMA_VERSION = 1
 # [Blocker Fix] - run scope 枚举
 SCOPE_FULL = "full"  # 全市场 backfill / after_close，watchlist 可读
 SCOPE_SAMPLE = "sample"  # --symbols / --limit-instruments 小样本，watchlist 不可读
+
+
+def _input_hash(
+    trade_dates: list[date],
+    instruments: list[uuid.UUID],
+    *,
+    batch_size: int,
+    primary_timeframe: str,
+    secondary_timeframe: str,
+    adj: str,
+    schema_version: int,
+    scope: str,
+) -> str:
+    """稳定地哈希本次回补的输入，用于 checkpoint 一致性校验（DS-107）。
+    同一组输入（同一批 instruments + trade_dates + 参数）续跑时 input_hash 必须一致，
+    续跑入口据此拒绝「参数漂移」的误续跑。
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update("\x00".join(td.isoformat() for td in trade_dates).encode("utf-8"))
+    h.update(b"\x01")
+    h.update("\x00".join(str(i) for i in instruments).encode("utf-8"))
+    h.update(b"\x02")
+    h.update(
+        f"{batch_size}|{primary_timeframe}|{secondary_timeframe}|{adj}|{schema_version}|{scope}"
+        .encode("utf-8"),
+    )
+    return h.hexdigest()[:16]
 
 
 def _resolve_run_scope(
@@ -405,7 +428,8 @@ async def backfill_instrument_first(
     schema_version: int = _DEFAULT_SCHEMA_VERSION,
     scope: str = SCOPE_FULL,
     profile: ProfileCollector | None = None,
-    memory_budget_mb: int = 1024,
+    # [CHANGE-20260804-005 / DS-101] 768 = 重 worker 容器 1024m * 0.75，须显著低于 mem_limit
+    memory_budget_mb: int = 768,
 ) -> dict[str, Any]:
     """Instrument-first 回补：每只 instrument 加载 bars 一次，遍历 trade_dates 切片。
 
@@ -557,6 +581,24 @@ async def backfill_instrument_first(
         memory_budget_mb=memory_budget_mb,
         sample_every=max(1, batch_size),
         total=total_instruments,
+        # [CHANGE-20260804-005 / DS-107] 业务断点身份：input_hash 用于续跑一致性校验。
+        business_cursor={
+            "input_hash": _input_hash(
+                trade_dates, instruments,
+                batch_size=batch_size,
+                primary_timeframe=primary_timeframe,
+                secondary_timeframe=secondary_timeframe,
+                adj=adj,
+                schema_version=schema_version,
+                scope=scope,
+            ),
+            "schema_version": schema_version,
+            "run_type": run_type,
+            "trade_dates": [td.isoformat() for td in trade_dates],
+            "last_instrument_index": -1,
+            "last_trade_date": None,
+            "chunk_index": 0,
+        },
     )
     stop_reason: str | None = None
     for i in range(0, total_instruments, batch_size):
@@ -659,14 +701,22 @@ async def backfill_instrument_first(
 
         # [CHANGE-20260804 / DS-107] batch 边界采样 RSS，超预算安全停止。
         rss = budget.record_chunk_done(len(batch))
+        # [CHANGE-20260804-005 / DS-107] 刷新业务断点：供 checkpoint 记录最后完成位置。
+        budget.business_cursor["last_instrument_index"] = min(
+            i + len(batch) - 1, total_instruments - 1,
+        )
+        budget.business_cursor["chunk_index"] = i // batch_size
+        budget.business_cursor["last_trade_date"] = trade_dates[-1].isoformat()
         if budget.should_stop(rss):
             stop_reason = LongTaskStopReason.MEMORY_BUDGET_EXCEEDED.value
             logger.error(
                 "[backfill] RSS %.1fMB 超出预算 %dMB，安全停止于 batch %d。"
-                "已完成 %d/%d instruments；请调小 batch_size 或分批续跑。",
+                "已完成 %d/%d instruments；resume 起点 last_instrument_index=%d。"
+                "请调小 batch_size 或 --resume 分批续跑。",
                 rss if rss is not None else float("nan"),
                 memory_budget_mb, i // batch_size + 1,
                 budget.processed, total_instruments,
+                budget.business_cursor["last_instrument_index"],
             )
 
     # 为每个 trade_date finalize run（succeeded/failed）
@@ -685,7 +735,17 @@ async def backfill_instrument_first(
         processed = snapshots + failed
         failure_rate = failed / processed if processed > 0 else 0.0
 
-        if failure_rate > failure_threshold:
+        # [CHANGE-20260804-005 / P0] 预算超限安全停止时禁止写 succeeded：
+        #   未处理的 instruments 未进入分母，单纯 failure_rate 会错误地为 0；
+        #   必须强制 failed（published_at 保持 NULL → watchlist 不读、--resume 不跳过）。
+        #   成功条件须同时满足：stop_reason 为 None 且已处理 == 预期 且失败率不超阈值。
+        #   [P0-budget-partial-failed] 行为门禁标记：checker 据此断言 partial 不得伪装 success。
+        if stop_reason is not None:
+            run_status = STATUS_FAILED
+        elif processed != total_instruments:
+            # 未完成全部预期 instruments（非预算停止但也没算完）——同样不得视为成功。
+            run_status = STATUS_FAILED
+        elif failure_rate > failure_threshold:
             run_status = STATUS_FAILED
         else:
             run_status = STATUS_SUCCEEDED
@@ -705,6 +765,20 @@ async def backfill_instrument_first(
                 "batch_size": batch_size,
                 "failure_threshold": failure_threshold,
                 "scope": scope,
+                # [CHANGE-20260804-005 / P0] 预算安全停止如实记录，禁止 partial 伪装 success
+                "stop_reason": stop_reason,
+                "peak_rss_mb": (
+                    round(budget.peak_rss_mb, 1)
+                    if budget.peak_rss_mb is not None else None
+                ),
+                # [CHANGE-20260804-005 / DS-107] 持久化真实业务断点与输入身份：
+                #   --resume 依据 DB 已完成快照续跑；input_hash/断点用于一致性审计。
+                "resume_token": budget.make_checkpoint(),
+                "input_hash": budget.business_cursor.get("input_hash"),
+                "last_instrument_index": budget.business_cursor.get(
+                    "last_instrument_index",
+                ),
+                "last_trade_date": budget.business_cursor.get("last_trade_date"),
             },
         )
         logger.info(
@@ -1144,7 +1218,14 @@ async def backfill_instrument_first_parallel(
 
         processed = snapshots + failed
         failure_rate = failed / processed if processed > 0 else 0.0
-        run_status = STATUS_FAILED if failure_rate > failure_threshold else STATUS_SUCCEEDED
+        # [CHANGE-20260804-005 / P0] 并行路径（当前规则下已禁止 workers>1，见 parse_args）
+        # 同样禁止在未处理完全部预期 instruments 时写 succeeded，防止 partial 伪装 success。
+        if processed != total_instruments:
+            run_status = STATUS_FAILED
+        elif failure_rate > failure_threshold:
+            run_status = STATUS_FAILED
+        else:
+            run_status = STATUS_SUCCEEDED
 
         await finish_snapshot_run(
             db, run_records[td],
@@ -1231,6 +1312,42 @@ async def main(args: argparse.Namespace) -> None:
         # - 任一过滤条件启用 → 'sample'（小样本验证，watchlist 不可读）
         # - 都未启用 → 'full'（全市场，watchlist 可读）
         scope = _resolve_run_scope(args.symbols, args.limit_instruments)
+
+        # [CHANGE-20260804-005 / DS-107] 续跑一致性校验：--resume 时读取上一 run 持久化的
+        # input_hash，与本次输入哈希比对。参数漂移（换参数误续跑）必须告警，避免把
+        # 不同输入的结果误认为可续。
+        if args.resume:
+            current_hash = _input_hash(
+                trade_dates, instruments,
+                batch_size=args.batch_size,
+                primary_timeframe=_DEFAULT_PRIMARY_TF,
+                secondary_timeframe=_DEFAULT_SECONDARY_TF,
+                adj=_DEFAULT_ADJ,
+                schema_version=_DEFAULT_SCHEMA_VERSION,
+                scope=scope,
+            )
+            # scope 过滤：metadata_['scope']，取该 trade_date 最新一次 run
+            last_stmt = (
+                select(StockFeatureSnapshotRun.metadata_)
+                .where(
+                    StockFeatureSnapshotRun.trade_date == trade_dates[-1],
+                    StockFeatureSnapshotRun.schema_version == _DEFAULT_SCHEMA_VERSION,
+                    StockFeatureSnapshotRun.metadata_["scope"].astext == scope,
+                )
+                .order_by(StockFeatureSnapshotRun.created_at.desc())
+                .limit(1)
+            )
+            last_meta = (await db.execute(last_stmt)).scalar_one_or_none()
+            if last_meta and last_meta.get("input_hash") not in (None, current_hash):
+                logger.warning(
+                    "[backfill] --resume 输入参数漂移：上一 run input_hash=%s，本次=%s。"
+                    "请确认确实想用新参数续跑，否则结果可能不一致。",
+                    last_meta.get("input_hash"), current_hash,
+                )
+            else:
+                logger.info(
+                    "[backfill] --resume input_hash 一致或首跑，继续按 DB 已完成快照续跑。",
+                )
 
         logger.info(
             "[backfill] 计划回补: trade_dates=%d (%s ~ %s), instruments=%d "
@@ -1363,8 +1480,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--memory-budget-mb",
         type=int,
-        default=int(os.environ.get("PANJI_FEATURE_BACKFILL_MEMORY_BUDGET_MB", "1024")),
-        help="单进程 RSS 软预算（MB，默认 1024，须低于所在容器 mem_limit，见 DS-107）",
+        default=int(os.environ.get("PANJI_FEATURE_BACKFILL_MEMORY_BUDGET_MB", "768")),
+        help=(
+            "单进程 RSS 软预算（MB，默认 768 = 重 worker 容器 1024m * 0.75；"
+            "须显著低于所在容器 mem_limit，见 DS-107）"
+        ),
     )
     parser.add_argument(
         "--failure-threshold",
@@ -1397,7 +1517,7 @@ def parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=1,
-        help="并行进程数（默认 1 单进程，>1 启用 multiprocessing；建议 = CPU 核数）",
+        help="并发进程数（DS-107 固定为 1，传入非 1 会被拒绝）",
     )
     parser.add_argument(
         "--profile-summary",
@@ -1406,19 +1526,14 @@ def parse_args() -> argparse.Namespace:
         help="启用轻量性能诊断：只在 stdout 输出聚合统计（total/avg/p50/p95），不写文件、不输出逐股票明细",
     )
     args = parser.parse_args()
-    # [Blocker Fix] workers 参数保护
-    # 1. workers < 1 → 拒绝（argparse error → SystemExit）
-    if args.workers < 1:
-        parser.error(f"--workers 必须 >= 1，实际: {args.workers}")
-    # 2. workers > cpu_count → cap + warning
-    #    防止用户误设过大值导致进程调度抖动
-    cpu_count = os.cpu_count() or 1
-    if args.workers > cpu_count:
-        warnings.warn(
-            f"--workers={args.workers} > cpu_count={cpu_count}，自动 cap 到 {cpu_count}",
-            stacklevel=2,
+    # [CHANGE-20260804-005 / P1 + DS-107] 并发固定为 1，禁止任何多进程路径。
+    # 多进程路径没有每 worker 独立 RSS 预算、没有统一 stop_reason、没有 partial checkpoint，
+    # 且会以并发放大峰值内存，直接违反 DS-107「并发默认 1」。当前规则下直接拒绝。
+    if args.workers != 1:
+        parser.error(
+            "--workers 必须等于 1（DS-107 要求长任务并发固定为 1）；"
+            f"实际: {args.workers}"
         )
-        args.workers = cpu_count
     # 解析 --symbols 为 list[str]
     if args.symbols is not None:
         args.symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]

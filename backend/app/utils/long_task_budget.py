@@ -60,6 +60,11 @@ class LongTaskBudgetState:
     # checkpoint（用于断点续跑 / 部分完成状态）
     resume_token: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # [CHANGE-20260804-005 / DS-107] 真实业务断点：由调用方在每个分片/批次边界更新，
+    # 并随 checkpoint 序列化。续跑入口必须读取它（或等价 DB 游标）决定从何处继续。
+    # 至少含：last_cursor（最后完成的业务单位，如最后 instrument index / 最后 trade_date）、
+    #          run_id、input_hash、schema_version、chunk_index。
+    business_cursor: dict[str, Any] = field(default_factory=dict)
 
     def _update_heartbeat(self) -> None:
         self.heartbeat_at = datetime.now(timezone.utc)
@@ -138,6 +143,7 @@ class LongTaskBudgetState:
             ),
             "resume_token": self.resume_token,
             "metadata": self.metadata,
+            "business_cursor": self.business_cursor,
         }
 
     def make_checkpoint(self) -> str:
@@ -175,6 +181,9 @@ class LongTaskBudgetState:
                 state.stop_reason = LongTaskStopReason(reason)
             except ValueError:
                 state.stop_reason = None
+        cursor = data.get("business_cursor")
+        if isinstance(cursor, dict):
+            state.business_cursor = cursor
         return state
 
     @classmethod

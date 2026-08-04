@@ -60,6 +60,9 @@ TIMEOUT_COMPOSE_UP_SECONDS="${PANJI_TIMEOUT_COMPOSE_UP_SECONDS:-600}"
 TIMEOUT_MIGRATION_SECONDS="${PANJI_TIMEOUT_MIGRATION_SECONDS:-600}"
 TIMEOUT_HEALTH_WAIT_SECONDS="${PANJI_TIMEOUT_HEALTH_WAIT_SECONDS:-120}"
 TIMEOUT_RSYNC_SECONDS="${PANJI_TIMEOUT_RSYNC_SECONDS:-600}"
+TIMEOUT_COMPOSE_CONFIG_SECONDS="${PANJI_TIMEOUT_COMPOSE_CONFIG_SECONDS:-120}"
+# [CHANGE-20260804-005 / DS-103] 远程部署总时长硬上限（秒）：超过即终止，防止失控长任务。
+TIMEOUT_TOTAL_DEPLOY_SECONDS="${PANJI_TIMEOUT_TOTAL_DEPLOY_SECONDS:-3600}"
 
 # 所有复用 backend 代码的 Python 服务（Live Mount 挂载 /opt/panji-live/backend/app）
 PYTHON_SERVICES=(
@@ -202,6 +205,16 @@ check_resource_budget() {
         || fail "MemAvailable ${mem_mb} MB，低于 ${MIN_MEM_MB} MB"
 
     log "资源预算通过: disk_free=${available_gb}GB disk_used=${used_pct}% mem_available=${mem_mb}MB"
+}
+
+# [CHANGE-20260804-005 / DS-103] 在任何构建/拉取/up 之前先校验 Compose 配置可解析（含 env 变量）。
+# 必须限时；配置错误（含缺失 env 的 `:?` 断言）在此阶段尽早暴露，而非在构建后才发现。
+validate_compose_config() {
+    log "校验 Compose 配置可解析（限时 ${TIMEOUT_COMPOSE_CONFIG_SECONDS}s）..."
+    cd "${REPO_ROOT}"
+    run_with_timeout "compose_config" "${TIMEOUT_COMPOSE_CONFIG_SECONDS}" -- \
+        ${COMPOSE_CMD} config >/dev/null
+    log "Compose 配置解析通过"
 }
 
 ensure_state_directory() {
@@ -667,7 +680,9 @@ sync_backend_runtime() {
 
     mkdir -p "${LIVE_ROOT}/backend"
 
-    rsync -a --delete \
+    # [CHANGE-20260804-005 / DS-103] rsync 必须限时（TIMEOUT_RSYNC_SECONDS），禁止裸执行。
+    run_with_timeout "rsync_backend_app" "${TIMEOUT_RSYNC_SECONDS}" -- \
+        rsync -a --delete \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
         --exclude='.pytest_cache' \
@@ -675,12 +690,14 @@ sync_backend_runtime() {
         --exclude='.ruff_cache' \
         "${REPO_ROOT}/backend/app/" "${LIVE_ROOT}/backend/app/"
 
-    rsync -a --delete \
+    run_with_timeout "rsync_backend_alembic" "${TIMEOUT_RSYNC_SECONDS}" -- \
+        rsync -a --delete \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
         "${REPO_ROOT}/backend/alembic/" "${LIVE_ROOT}/backend/alembic/"
 
-    rsync -a "${REPO_ROOT}/backend/alembic.ini" "${LIVE_ROOT}/backend/alembic.ini"
+    run_with_timeout "rsync_backend_alembic_ini" "${TIMEOUT_RSYNC_SECONDS}" -- \
+        rsync -a "${REPO_ROOT}/backend/alembic.ini" "${LIVE_ROOT}/backend/alembic.ini"
 
     log "backend 运行代码同步完成"
 }
@@ -696,7 +713,9 @@ sync_frontend_runtime() {
     [[ -d "${REPO_ROOT}/frontend/dist" ]] || fail "frontend/dist 不存在，前端构建可能失败"
 
     mkdir -p "${LIVE_ROOT}/frontend"
-    rsync -a --delete \
+    # [CHANGE-20260804-005 / DS-103] rsync 必须限时，禁止裸执行。
+    run_with_timeout "rsync_frontend_dist" "${TIMEOUT_RSYNC_SECONDS}" -- \
+        rsync -a --delete \
         --exclude='.gitkeep' \
         "${REPO_ROOT}/frontend/dist/" "${LIVE_ROOT}/frontend/dist/"
     # capture 静态目录是 frontend nginx 的嵌套挂载点，必须存在
@@ -1186,24 +1205,50 @@ verify_deployment() {
 post_deploy_resource_check() {
     log "部署后资源复检..."
 
-    # 1. 主机资源（复用 check_resource_budget 的阈值，但允许只读采集不修改）
+    # 1. 主机资源（复用 check_resource_budget 的阈值，但允许只读采集不修改），含 swap
     local available_kb available_gb used_pct mem_kb mem_mb
+    local swap_total_kb swap_free_kb swap_used_mb
     available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
     used_pct="$(df -Pk / | awk 'NR==2 {gsub(/%/, "", $5); print $5}')"
     mem_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
+    swap_total_kb="$(awk '/^SwapTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
+    swap_free_kb="$(awk '/^SwapFree:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
     available_gb=$((available_kb / 1024 / 1024))
     mem_mb=$((mem_kb / 1024))
-    log "  host: disk_free=${available_gb}GB disk_used=${used_pct}% mem_available=${mem_mb}MB"
+    swap_used_mb=$(( (swap_total_kb - swap_free_kb) / 1024 ))
+    log "  host: disk_free=${available_gb}GB disk_used=${used_pct}% mem_available=${mem_mb}MB swap_total=${swap_total_kb}KB swap_used=${swap_used_mb}MB"
     if [[ "${available_gb}" -lt "${MIN_DISK_GB}" || "${used_pct}" -gt "${MAX_DISK_PCT}" || "${mem_mb}" -lt "${MIN_MEM_MB}" ]]; then
         FAILURE_STAGE="post_deploy_host_resource"
         log "错误: 部署后主机资源跌破阈值"
         return 1
     fi
 
-    # 2. 关键容器 OOMKilled / RestartCount / 限制生效
+    # 2. 全部关键容器 OOMKilled / RestartCount 复检
+    # [CHANGE-20260804-005 / DS-104] 覆盖 backend + 全部重 worker + capture + frontend + 数据服务，
+    # 不再只抽查 3 个容器。
+    local key_containers=(
+        trading-backend
+        trading-worker-strategy-batch
+        trading-worker-after-close
+        trading-worker-capture
+        trading-worker-monitor
+        trading-worker-bars-scheduler
+        trading-worker-strategy-scheduler
+        trading-worker-calendar
+        trading-worker-outbox
+        trading-worker-delivery
+        trading-frontend
+        trading-postgres
+        trading-redis
+        trading-umami
+    )
     local check_failed=false
-    for container in trading-backend trading-worker-after-close trading-worker-capture; do
-        local oom restart
+    local container oom restart
+    for container in "${key_containers[@]}"; do
+        # 容器未运行（本部署可能不含某些服务）不判失败，只记录
+        if ! docker ps -a --format '{{.Names}}' | grep -qx "${container}"; then
+            continue
+        fi
         oom="$(docker inspect -f '{{.State.OOMKilled}}' "${container}" 2>/dev/null || echo "unknown")"
         restart="$(docker inspect -f '{{.RestartCount}}' "${container}" 2>/dev/null || echo "unknown")"
         log "  ${container}: oom_killed=${oom} restart_count=${restart}"
@@ -1217,21 +1262,36 @@ post_deploy_resource_check() {
         fi
     done
 
-    # 3. Compose 限制实际生效（Memory/PidsLimit/NanoCpus 非 0）
+    # 3. Compose 资源限制实际生效（Memory/PidsLimit/NanoCpus 非 0）——覆盖全部重 worker + backend
+    # [CHANGE-20260804-005 / DS-104] 不再只检查 backend。
+    local limit_containers=(trading-backend trading-worker-strategy-batch trading-worker-after-close)
     local mem_cfg pids_cfg cpu_cfg
-    mem_cfg="$(docker inspect -f '{{.HostConfig.Memory}}' trading-backend 2>/dev/null || echo 0)"
-    pids_cfg="$(docker inspect -f '{{.HostConfig.PidsLimit}}' trading-backend 2>/dev/null || echo 0)"
-    cpu_cfg="$(docker inspect -f '{{.HostConfig.NanoCpus}}' trading-backend 2>/dev/null || echo 0)"
-    log "  trading-backend limits: mem_limit_bytes=${mem_cfg} pids_limit=${pids_cfg} nano_cpus=${cpu_cfg}"
-    if [[ "${mem_cfg}" == "0" || "${pids_cfg}" == "0" || "${cpu_cfg}" == "0" ]]; then
-        log "错误: Compose 资源限制未实际生效（Memory/PidsLimit/NanoCpus 存在 0）"
-        check_failed=true
-    fi
+    for container in "${limit_containers[@]}"; do
+        if ! docker ps -a --format '{{.Names}}' | grep -qx "${container}"; then
+            continue
+        fi
+        mem_cfg="$(docker inspect -f '{{.HostConfig.Memory}}' "${container}" 2>/dev/null || echo 0)"
+        pids_cfg="$(docker inspect -f '{{.HostConfig.PidsLimit}}' "${container}" 2>/dev/null || echo 0)"
+        cpu_cfg="$(docker inspect -f '{{.HostConfig.NanoCpus}}' "${container}" 2>/dev/null || echo 0)"
+        log "  ${container} limits: mem_limit_bytes=${mem_cfg} pids_limit=${pids_cfg} nano_cpus=${cpu_cfg}"
+        if [[ "${mem_cfg}" == "0" || "${pids_cfg}" == "0" || "${cpu_cfg}" == "0" ]]; then
+            log "错误: ${container} Compose 资源限制未实际生效（Memory/PidsLimit/NanoCpus 存在 0）"
+            check_failed=true
+        fi
+    done
 
     # 4. stats 高水位（只读采集，供 Map 记录与后续收紧预算）
+    # [CHANGE-20260804-005 / DS-104] docker stats 失败不再被 `|| true` 吞掉：
+    # 采集失败属于复检无法完成，判部署失败。
+    local stats_ok
     log "  docker stats 高水位（no-stream）:"
-    docker stats --no-stream --format '    stats {{.Name}} mem_usage={{.MemUsage}} mem_pct={{.MemPerc}}' 2>/dev/null \
-        | sed -n '1,30p' || true
+    if ! stats_out="$(docker stats --no-stream --format 'stats {{.Name}} mem_usage={{.MemUsage}} mem_pct={{.MemPerc}}' 2>&1)"; then
+        log "错误: docker stats --no-stream 采集失败，复检无法完成"
+        FAILURE_STAGE="post_deploy_stats_failed"
+        return 1
+    fi
+    stats_ok=$(printf '%s\n' "${stats_out}" | sed -n '1,30p')
+    printf '%s\n' "${stats_ok}"
 
     if [[ "${check_failed}" == "true" ]]; then
         FAILURE_STAGE="post_deploy_container_resource"
@@ -1303,9 +1363,21 @@ rollback() {
 
     restore_files_to_previous_sha
 
-    cd "${REPO_ROOT}"
-    run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build \
-        "${PYTHON_SERVICES[@]}" frontend
+    # [CHANGE-20260804-005 / DS-102+DS-103+DS-104] 回滚也按波次重启（禁一次性 up -d 交出全部），
+    # 且每波次限时；回滚后做资源复检验证，不再"回滚即宣称完成"。
+    local rollback_list=("${PYTHON_SERVICES[@]}" frontend)
+    if ! restart_services "${rollback_list[@]}"; then
+        FAILURE_STAGE="rollback_restart"
+        log "错误: 回滚重启失败（failure_stage=${FAILURE_STAGE}）"
+        return 1
+    fi
+
+    # 回滚后资源复检：OOM / 限制未生效 / stats 采集失败任一失败即判回滚失败。
+    if ! post_deploy_resource_check; then
+        FAILURE_STAGE="rollback_resource_check"
+        log "错误: 回滚后资源复检失败（failure_stage=${FAILURE_STAGE}）"
+        return 1
+    fi
 
     log "回滚完成（已恢复到 ${PREVIOUS_SHA}）"
 }
@@ -1396,9 +1468,15 @@ main() {
     (
         flock -n 200 || fail "另一个部署正在进行中"
 
+        # [CHANGE-20260804-005 / DS-103] 总时长硬上限：超过即强制退出并失败。
+        # 由外层 wrap 承担（见文件末尾），此处记录基线用于诊断。
+        DEPLOY_START_EPOCH="$(date +%s)"
+
         ensure_state_directory
         validate_sha
         check_working_tree
+        # [CHANGE-20260804-005 / DS-103] 构建前先校验 Compose 配置可解析（限时）。
+        validate_compose_config
         # 顺序约束（P0 修复）：
         #   必须先用当前真实运行状态解析上一 SHA，再分类变化，最后 checkout。
         #   禁止在进入 checkout 目标 SHA 之后才解析——否则会把 TARGET_SHA 当作上一 SHA。
@@ -1457,4 +1535,17 @@ main() {
     ) 200>"${LOCK_FILE}"
 }
 
-main "$@"
+# [CHANGE-20260804-005 / DS-103] 远程部署总时长硬上限：用外层 timeout 包裹整个 main。
+# 超时即退出并判失败（不再有"卡死的长任务无限运行"），由调用方（panji-test-deploy）感知失败。
+if [[ -n "${PANJI_TOTAL_TIMEOUT_SECONDS:-}" ]]; then
+    # 显式设置总超时时用显式值（允许调用方收紧）
+    TOTAL_TIMEOUT="${PANJI_TOTAL_TIMEOUT_SECONDS}"
+else
+    TOTAL_TIMEOUT="${TIMEOUT_TOTAL_DEPLOY_SECONDS}"
+fi
+log "部署总时长上限: ${TOTAL_TIMEOUT}s"
+if command -v timeout >/dev/null 2>&1; then
+    timeout --kill-after=30 "${TOTAL_TIMEOUT}" bash -c 'main "$@"' _ "$@"
+else
+    main "$@"
+fi

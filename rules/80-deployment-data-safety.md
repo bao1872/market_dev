@@ -397,15 +397,26 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 
 以下长任务主链必须统一支持资源治理：**Feature Snapshot（第一金字塔）**、**stock core**、**Review**（含 bootstrap / 回填）。
 
+**stock core 边界（本条款的权威定义，避免「规则说必须有、代码没有、文档却宣称完成」）：**
+`stock core`（`first_pyramid` 核心快照）是**单股、同步、纯计算**单元
+（`first_pyramid_service.compute_first_pyramid_core_snapshot`），其内存有界、不随任务线性累积；
+它**不是**独立的批量长任务。stock core 总是在 Feature Snapshot 批量管线内部、按股调用
+（`feature_snapshot_service.compute_review_core_for_trade_date` → `compute_feature_snapshot_for_date`），
+其内存治理由**外层 Feature Snapshot 批量循环的 DS-107 预算门禁**统一承担。
+因此：stock core **不得**各自复制一份独立预算实现；只要 Feature Snapshot 批量入口（回填 / after_close）
+落实了本合同的全部必备字段，即视为 stock core 已纳入治理。若未来引入独立于 Feature Snapshot 的
+stock core 批量入口，该入口必须另行满足本合同的全部字段。
+
 必备字段（checker 可断言的落地形态）：
 
 - **分片**：按自然分片（交易日 / scope / chunk）处理，不在内存线性累积全部结果；
-- **并发**：默认 1，禁止用并行放大峰值内存；
-- **内存预算**：`memory_budget_mb` 可配置，且必须低于所在容器 `mem_limit`（DS-101）；
+- **并发**：默认 1，禁止用并行放大峰值内存（`--workers` 必须等于 1，非 1 直接拒绝）；
+- **内存预算**：`memory_budget_mb` 可配置，且必须**显著低于**所在容器 `mem_limit`（DS-101，初值取重 worker 上限的 ~75%），禁止等于或高于容器上限；
 - **峰值 RSS**：记录 `peak_rss_mb`；
 - **心跳与进度**：记录 heartbeat / progress / processed / remaining；
 - **安全停止**：超预算安全停止，返回 `stop_reason`（completed / memory_budget_exceeded / cancelled / error），**绝不静默截断、不假装成功、OOM 被杀不得写 success**；
-- **检查点恢复**：支持 `resume_token` / checkpoint，已完成分片可恢复且幂等；
+- **成功判定（禁止 partial 伪装 success）**：run 标 `succeeded` 必须同时满足 `stop_reason is None` **且** `processed_count == expected_count` **且** 失败率不超阈值；内存超限或未处理完全部预期单位时必须写 `failed`（或数据模型支持的 `partial`），并如实记录 `stop_reason`，禁止发布 publication pointer；
+- **检查点恢复**：`resume_token` / checkpoint 必须承载**业务断点**（最后完成的 instrument / trade_date / run_id / 输入参数 hash / schema 版本），并**被续跑入口真正读取**以决定从何处继续，而非仅作状态快照字符串；已完成分片恢复须幂等；
 - **partial 状态**：未完成时如实上报 partial，不得写成功。
 
 分片结束必须释放 ORM 对象（`session.expunge_all()` 等），批次内部按步长采样内存（O(1) 系统调用）。

@@ -56,6 +56,35 @@ def shell_code(path: Path) -> str:
     return "\n".join(line for line in read(path).splitlines() if not line.lstrip().startswith("#"))
 
 
+def _parse_memory_mb(compose: dict, anchor_key: str) -> int | None:
+    """从 compose 的 anchor（x-resource-app-heavy 等）解析 mem_limit（MB）。
+    支持 `${PANJI_X:-1024m}` / `1024m` / `1024M` / `1g` 形式；解析失败返回 None。
+    """
+    anchor = (compose.get(anchor_key) or {})
+    raw = str(anchor.get("mem_limit") or "")
+    if not raw:
+        return None
+    m = re.search(r"([0-9]+)\s*([kKmMgG]?)", raw)
+    if not m:
+        return None
+    val = int(m.group(1))
+    unit = m.group(2).lower()
+    if unit == "g":
+        val *= 1024
+    elif unit == "k":
+        val //= 1024
+    return val
+
+
+def _extract_int_after(text: str, token: str) -> int | None:
+    """在 text 中 token 之后的第一个整数。找不到返回 None。"""
+    idx = text.find(token)
+    if idx < 0:
+        return None
+    m = re.search(r"(\d+)", text[idx + len(token):])
+    return int(m.group(1)) if m else None
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     rules_dir = root / "rules"
@@ -364,6 +393,81 @@ def check(root: Path) -> list[str]:
                                 )
 
     # =========================================================================
+    # [CHANGE-20260804-005 / DS-101 + DS-107] 行为级门禁：预算必须显著低于容器上限，
+    # 并发必须为 1，partial 不得伪装 success，resume 必须被消费，stock core 边界必须声明。
+    # 相比纯字段存在性，这些断言落到「行为/数值关系」上，防止浅层门禁放行缺陷实现。
+    # =========================================================================
+    compose_path = root / "docker-compose.prod.yml"
+    deploy_sh = root / "scripts/deploy/panji-deploy.sh"
+    if compose_path.exists() and yaml is not None:
+        try:
+            compose = yaml.safe_load(read(compose_path))
+        except Exception:  # noqa: BLE001
+            compose = None
+        if compose:
+            # 1. 应用预算 < 重 worker 容器 mem_limit（DS-101）
+            heavy_limit_mb = _parse_memory_mb(compose, "x-resource-app-heavy")
+            if heavy_limit_mb is not None:
+                budget_sources = [
+                    (
+                        "Review bootstrap",
+                        "backend/app/services/review_bootstrap_service.py",
+                        "DEFAULT_BOOTSTRAP_MEMORY_BUDGET_MB = ",
+                    ),
+                    (
+                        "Feature Snapshot",
+                        "backend/scripts/feature_snapshot_backfill.py",
+                        'os.environ.get("PANJI_FEATURE_BACKFILL_MEMORY_BUDGET_MB", "',
+                    ),
+                ]
+                for label, path_rel, token in budget_sources:
+                    budget = _extract_int_after(read(root / path_rel), token)
+                    if budget is not None:
+                        if budget >= heavy_limit_mb:
+                            errors.append(
+                                f"{label} memory_budget_mb={budget}MB 未显著低于 "
+                                f"容器 mem_limit={heavy_limit_mb}MB（DS-101 要求预算 < 上限）"
+                            )
+                        elif budget > int(heavy_limit_mb * 0.8):
+                            errors.append(
+                                f"{label} memory_budget_mb={budget}MB 距容器上限 "
+                                f"{heavy_limit_mb}MB 余量不足（应 ≤ 上限的 ~80%）"
+                            )
+
+    # 2. 并发必须为 1：Feature Snapshot CLI 禁止 --workers>1（DS-107）
+    fp_script = root / "backend/scripts/feature_snapshot_backfill.py"
+    if fp_script.exists():
+        fp_text = read(fp_script)
+        if "--workers 必须等于 1" not in fp_text:
+            errors.append(
+                "Feature Snapshot 未禁止 --workers>1（DS-107 要求并发固定为 1，"
+                "多进程路径必须被拒绝）"
+            )
+        # 3. partial 不得伪装 success：预算超限必须强制 failed 而非 succeeded
+        if (
+            "[P0-budget-partial-failed]" not in fp_text
+            or "stop_reason is not None" not in fp_text
+        ):
+            errors.append(
+                "Feature Snapshot 未落实「预算超限强制 failed」行为门禁（DS-107："
+                "禁止 partial 伪装 success）"
+            )
+        # 4. resume 必须消费 checkpoint：续跑需读取持久化 input_hash 做一致性校验
+        if "--resume input_hash 一致" not in fp_text:
+            errors.append(
+                "Feature Snapshot 续跑未消费 checkpoint（--resume 需读取 input_hash "
+                "做一致性校验，DS-107）"
+            )
+
+    # 5. stock core 边界必须声明：避免「规则说必须有、代码没有、文档却宣称完成」
+    rules80 = root / "rules/80-deployment-data-safety.md"
+    if rules80.exists() and "stock core 边界（本条款的权威定义" not in read(rules80):
+        errors.append(
+            "rules/80 未声明 stock core 边界（DS-107：需明确 stock core 是单股纯计算、"
+            "由外层 Feature Snapshot 预算门禁治理，或实现独立入口）"
+        )
+
+    # =========================================================================
     # [CHANGE-20260804 / DS-102/103/104] 部署脚本合同门禁
     #   必须含串行、超时、部署后资源复检；不得含 preflight 绕过与通用 prune。
     # =========================================================================
@@ -377,6 +481,11 @@ def check(root: Path) -> list[str]:
             "OOMKilled": "容器 OOM 检查",
             "RestartCount": "容器重启计数检查",
             "docker stats --no-stream": "高水位采集",
+            # [CHANGE-20260804-005] 行为级补强：rsync 限时 / compose config 限时 / 总时长硬上限 / swap 采集
+            "TIMEOUT_RSYNC_SECONDS": "rsync 限时（DS-103）",
+            "validate_compose_config": "compose config 限时校验（DS-103）",
+            "TIMEOUT_TOTAL_DEPLOY_SECONDS": "部署总时长硬上限（DS-103）",
+            "SwapTotal": "swap 采集（DS-104）",
         }
         for signal, reason in required_signals.items():
             if signal not in deploy_text:

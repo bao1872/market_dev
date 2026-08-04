@@ -124,8 +124,9 @@ strategy、calendar、monitor、strategy-batch、outbox、delivery、after-close
 | umami | 384m | 128m | 1 | 512 | 应用服务 |
 
 **硬约束**：重任务服务（review / feature / stock core）的应用级 `memory_budget_mb`（见 DS-107）必须
-**显著低于**其所在容器 `mem_limit`。初始 `mem_limit` 1024m 对应应用级预算建议 ≤512m，为 ORM /
-解释器开销与安全边界预留空间。
+**显著低于**其所在容器 `mem_limit`（禁止等于或高于上限）。当前实现：`mem_limit` 1024m 对应应用级
+预算 **768m**（= 1024 × 0.75，为 ORM / 解释器开销与临时 DataFrame 预留余量），由 checker 断言
+`预算 < 上限` 且 `预算 ≤ 上限的 ~80%`；部署后按实测高水位再收紧。
 
 **状态**：本轮完成本地配置落地与治理门禁断言。**部署后真实高水位待采集**（DS-104 的
 `docker stats --no-stream` 结果需在用户授权真实部署后回填本 Map），据此再收紧预算；禁止只采集不限制。
