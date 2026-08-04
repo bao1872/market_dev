@@ -13,7 +13,7 @@
 - 远程自动触发：bars_scheduler Worker 每日 16:00（上海时区）调用 `create_after_close_run`，交易日历判断后创建 SchedulerJobRun。
 - 本地不自动调度：backend lifespan 不启动 Scheduler；Scheduler/Worker 必须显式设置 `WORKER_TYPE` 启动。
 - 手动入口：`admin_after_close.py` 提供创建、查询、重试、恢复、force（含 `restart_from="daily_ready"` 从 DSA 阶段重算）API；`backend/scripts/trigger_dsa_batch_small.py` 为脚本入口。
-- 编排任务以 `SchedulerJobRun`（job_name="after_close_orchestrator"）记录。顶层步骤统一经过 `execute_orchestrator_step`（统一步骤执行器，见 §13.5）：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → computing_review → enqueue_chip_job(可选)`；主任务终态 `succeeded / partial_success / failed`，可被 watchdog 中断为 `interrupted` 后自动 `resume_queued`，可被管理员 `cancelled`。**注意：`computing_review` 不经过执行器**（内联 review_orchestrator_service 逻辑，见 §12.1）；`watchlist_ready` 仍为前端展示步骤，未成为正式执行步骤。
+- 编排任务以 `SchedulerJobRun`（job_name="after_close_orchestrator"）记录。顶层步骤统一经过 `execute_orchestrator_step`（统一步骤执行器，见 §13.5）：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → computing_review → enqueue_chip_job(可选)`；主任务终态 `succeeded / partial_success / failed`，可被 watchdog 中断为 `interrupted` 后自动 `resume_queued`，可被管理员 `cancelled`。**`computing_review` 已抽为 `_execute_review_step` 业务体并经执行器包装（AC-02，2026-08-03）**；`watchlist_ready` 为**派生就绪指示器**（`has_succeeded_snapshot_run`），非可执行步骤，不作为执行器步骤（见 §13.5）。
 - readiness：checking_coverage 步骤仅检查日线覆盖率 >= 0.9（Phase 5A 移除 15m 阻塞，符合 PRD30 AC-04）；日线不足则标记 failed，15m 缺失不再阻塞 after-close run。
 - run 隔离：`create_after_close_run` 使用 run_key = `after_close_orchestrator:{trade_date}` 去重；同一 trade_date 同时只能有一个活跃（queued/running/resume_queued）任务。
 - 计算与发布分离：DSA StrategyRun 完成后进入 publishing，调用 `StrategyBatchService.publish_run` 标记 published_at，再 finish snapshot run。
@@ -482,7 +482,11 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - **运行中取消**：`_run_with_cancellation` 把 operation 建为独立 task，周期调用 `cancellation_check`，命中时 `op_task.cancel()` + `await` 终止业务协程；`_StepCancelledError` 转 `cancelled` summary 不炸穿 Worker。
 - 步骤终态集合：`{succeeded, skipped, unavailable, failed, timed_out, cancelled, interrupted}`；非可选步骤超时/异常会 `raise`，可选步骤降级不抛。
 
-顶层步骤（经执行器）顺序：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → enqueue_chip_job(可选)`。**`computing_review` 不经过执行器**（内联 review_orchestrator_service 逻辑 + `_update_orchestrator_status`，见 §12.1），通过 `_review_failed` 接入统一 `partial_success` 收尾。
+顶层步骤（经执行器）顺序：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → computing_review → enqueue_chip_job(可选)`。
+
+**`computing_review`（AC-02，2026-08-03 收口）**：复盘业务体抽为模块级协程 `_execute_review_step(...)`，由 `execute_orchestrator_step("computing_review", lambda: _execute_review_step(...), optional=True, ...)` 包装，满足 AC-02「所有顶层步骤必须通过统一步骤执行器」。`_execute_review_step` 内部保留既有幂等 create_run / compute_run / resume_run / publish_run 语义与 publication pointer 唯一事实源，软失败（gate_blocked/计算失败）不抛异常，仅返回 `result["failed"]=True`；调用方将业务软失败如实映射到 step summary（`REVIEW_SOFT_FAILURE`）并 `_persist_step_summary`，并据此把主任务收为 `partial_success`（core 已发布）。检查点语义不变：失败时 `_execute_review_step` 内部传 `None` 不推进 `last_completed_step`（见 §12.1）。
+
+**`watchlist_ready`（非执行器步骤）**：是**派生就绪指示器**而非可执行工作步骤——无 operation、无 timeout/heartbeat/cancellation，由 `feature_snapshot_service.has_succeeded_snapshot_run`（succeeded + published + full scope）推导，供 admin 流水线可视化渲染为终态展示步骤（`after_close_pipeline_service._PIPELINE_STEPS` 含 `"watchlist_ready"`）。强制塞进 `execute_orchestrator_step` 会造出空 operation，违反最小必要修改原则；此处如实标注：`watchlist_ready` 不经过统一执行器。
 
 syncing_boards 软失败：`_execute_syncing_boards` 返回业务 `{status}`（succeeded/skipped/failed），执行器外层将业务 failed/skipped 如实映射到 step summary 并 `_persist_step_summary`，避免"业务 failed / 步骤 succeeded"矛盾。
 

@@ -125,6 +125,15 @@
 
 ### 6.9 仍未验证 / 未完成项（如实标注，不声称通过）
 
-- **`computing_review` 仍未整体包裹进 `execute_orchestrator_step`**：PRD AC-02 的"全步骤迁移"目标未完全达成；watchlist_ready 仍未成为正式步骤。这些列为后续工作。
+- **`computing_review` 已整体接入 `execute_orchestrator_step`（AC-02 收口，2026-08-03 第二轮）**：复盘业务体抽为模块级协程 `_execute_review_step`，由执行器包装（optional=True，软失败映射 step_summary 收 partial_success）。见 §6.10。
+- **`watchlist_ready` 不经过执行器（设计使然）**：它是**派生就绪指示器**（`has_succeeded_snapshot_run` 推导 succeeded+published+full snapshot），非可执行工作步骤，无 operation/timeout/heartbeat；仅作为 admin 流水线可视化终态展示步骤。强制塞进执行器会造出空 operation，违反最小必要修改原则，故如实标注为"非执行器步骤"，AC-02"全步骤迁移"仅对**可执行顶层步骤**成立。
 - 依赖 Postgres 的 after_close 集成测试（`test_after_close_status_detail.py / test_after_close_endpoints.py / test_after_close_worker.py` 等）本地未运行（需 SSH 隧道连共享开发库，非本轮授权范围）。
 - 未部署、未 push main、未修改共享业务数据；`data_closed=false`。
+
+### 6.10 computing_review 执行器收口（2026-08-03 第二轮）
+
+- 原内联 `computing_review`（约 410 行）抽为模块级协程 `_execute_review_step(...)`，返回业务 result dict（`status/failed/reason/run_id/publication_id/scope_count/signal_count/coverage/blockers/prereq_missing/resume_skipped`），内部保留既有幂等 create_run/compute_run/resume_run/publish_run 与 publication pointer 唯一事实源语义。
+- `execute_after_close_run` 改经 `execute_orchestrator_step("computing_review", lambda: _execute_review_step(...), timeout_seconds=_step_timeout("computing_review")=1800, optional=True, ...)` 包装，满足 AC-02；执行器唯一周期循环负责 heartbeat 单次 touch + 运行期 elapsed 刷新 + 运行中取消。
+- 软失败映射：`_execute_review_step` 不抛异常，仅 `result["failed"]=True`；调用方在 `_review_step_summary["status"]=="succeeded" and _review_failed` 时改置 `failed`（`REVIEW_SOFT_FAILURE`）并 `_persist_step_summary`，避免"业务 failed / 步骤 succeeded"矛盾（与 syncing_boards 同一合同）。
+- 检查点语义不变：`_execute_review_step` 内部失败时传 `None` 不推进 `last_completed_step`，成功才推进 `computing_review`。
+- 新增 AC-02 合同测试：`test_execute_after_close_run_wires_computing_review_through_executor`（源码守卫：主编排必须经 `execute_orchestrator_step("computing_review", ...)` 且不内联 import review_orchestrator_service）、`test_review_step_prereq_missing_returns_skipped`、`test_review_step_resume_skip_returns_resume_skipped`。盘后+编排套件 214 passed / 0 failure，Ruff 全绿。
