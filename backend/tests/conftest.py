@@ -747,35 +747,59 @@ async def test_selector_strategy(db_session):
 
 @pytest_asyncio.fixture
 async def dsa_selector_strategy(db_session):
-    """创建 strategy_key='dsa_selector' 的选股策略定义+ released 版本。
+    """创建或复用 strategy_key='dsa_selector' 的选股策略定义+ released 版本。
 
     用于测试 system_overview_service 中限定 dsa_selector 的盘后流水线逻辑。
+
+    [P0-1 2026-08-04] 共享开发库目标测试：共享 bz_stock 已存在真实 dsa_selector
+    定义与 released 版本。若无条件新建会触发
+    strategy_definitions_strategy_key_key / (strategy_definition_id, version)
+    唯一约束冲突。故先复用已存在定义与 released 版本；不存在时才新建。
     """
+    from sqlalchemy import select
+
     from app.models.strategy import StrategyDefinition, StrategyVersion
 
-    definition = StrategyDefinition(
-        strategy_key="dsa_selector",
-        kind="selector",
-        display_name="趋势选股",
-    )
-    db_session.add(definition)
-    await db_session.flush()
+    definition = (
+        await db_session.execute(
+            select(StrategyDefinition).where(
+                StrategyDefinition.strategy_key == "dsa_selector"
+            )
+        )
+    ).scalar_one_or_none()
+    if definition is None:
+        definition = StrategyDefinition(
+            strategy_key="dsa_selector",
+            kind="selector",
+            display_name="趋势选股",
+        )
+        db_session.add(definition)
+        await db_session.flush()
 
-    version = StrategyVersion(
-        strategy_definition_id=definition.id,
-        version="1.0.0",
-        status="released",
-        manifest={
-            "outputs": [
-                {"key": "dsa_dir_bars", "type": "numeric", "filterable": True, "sortable": True},
-                {"key": "offset_mean", "type": "numeric", "filterable": True, "sortable": True},
-            ],
-        },
-        build_hash=f"test_hash_{uuid.uuid4().hex[:16]}",
-        released_at=datetime.now(UTC),
-    )
-    db_session.add(version)
-    await db_session.flush()
+    version = (
+        await db_session.execute(
+            select(StrategyVersion).where(
+                StrategyVersion.strategy_definition_id == definition.id,
+                StrategyVersion.status == "released",
+            )
+        )
+    ).scalars().first()
+    if version is None:
+        version = StrategyVersion(
+            strategy_definition_id=definition.id,
+            version="1.0.0",
+            status="released",
+            manifest={
+                "outputs": [
+                    {"key": "dsa_dir_bars", "type": "numeric", "filterable": True, "sortable": True},
+                    {"key": "offset_mean", "type": "numeric", "filterable": True, "sortable": True},
+                ],
+            },
+            build_hash=f"test_hash_{uuid.uuid4().hex[:16]}",
+            released_at=datetime.now(UTC),
+        )
+        db_session.add(version)
+        await db_session.flush()
 
     yield {"definition": definition, "version": version}
 

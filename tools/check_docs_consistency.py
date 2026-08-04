@@ -107,6 +107,13 @@ REQUIRED_CHANGE_ID = "CHANGE-20260726-001"
 # 测试可通过 monkeypatch 注入 BASELINE_FRESHNESS_WINDOW 覆盖。
 BASELINE_FRESHNESS_WINDOW = 50
 
+# [P0-3 2026-08-04] 验收矩阵基线新鲜度窗口收敛到 2：
+# 评审指出"50 个 commit 的窗口过于宽松"，无法防止矩阵停在数十个提交前。
+# 验收矩阵用于当前收口审查，合理合同是 matrix_verified_through_sha = 最近一个代码提交，
+# HEAD 最多只能比它多 1～2 个纯文档提交。故 rule 17 使用独立严格窗口 2，
+# 不再共用 MANIFEST 的宽松窗口 50。
+ACCEPTANCE_MATRIX_FRESHNESS_WINDOW = 2
+
 # 规则 17：验收矩阵基线必须等于当前 HEAD 与 origin/dev（P0-3）
 # 评审指出矩阵 baseline 曾先后漂移到 8690ccc/142115b/f0816ef/66cf93c，
 # 未在最终提交时自动校验 matrix_baseline == git HEAD == origin/dev。
@@ -344,10 +351,10 @@ def check_acceptance_matrix_baseline() -> list[str]:
                 f"验收矩阵基线 {matrix_sha} 不是 {rev} 的祖先；"
                 f"请在最终提交时同步更新矩阵 `**基线**` 到 {rev}。"
             )
-        elif ahead > BASELINE_FRESHNESS_WINDOW:
+        elif ahead > ACCEPTANCE_MATRIX_FRESHNESS_WINDOW:
             errors.append(
                 f"验收矩阵基线 {matrix_sha} 落后 {rev} {ahead} 个 commit，"
-                f"超过窗口 {BASELINE_FRESHNESS_WINDOW}；"
+                f"超过严格窗口 {ACCEPTANCE_MATRIX_FRESHNESS_WINDOW}（P0-3：最多 1~2 个纯文档提交）；"
                 f"请在最终提交时同步更新矩阵 `**基线**` 到 final HEAD。"
             )
     return errors
@@ -877,6 +884,16 @@ def main() -> int:
 
     # 规则 17：验收矩阵基线必须等于当前 HEAD 与 origin/dev（P0-3）
     print()
+    # [P0-3 2026-08-04 决策] 基线门禁在 main() 中的取舍：
+    # - 规则 17（验收矩阵基线）必须在 main() 中强制执行，且使用严格窗口 2。
+    #   验收矩阵是当前收口审查的事实源，任何代码提交后都必须及时对齐，
+    #   否则审查会依据数十个提交前的旧状态（P0-3 评审指出的漂移问题）。
+    # - 规则 16（MANIFEST baseline 新鲜度，check_manifest_baseline()）不接入
+    #   main()，而是由其对应用例直接独立测试。MANIFEST 是 "current docs" 索引，
+    #   若要求每次代码提交都更新 MANIFEST 会制造无谓的文档提交 churn（与
+    #   "代码 SHA 变化不再强制制造 MANIFEST/文档提交" 的约定一致）。
+    #   因此 MANIFEST 基线规则由 check_manifest_baseline() 独立承载并在测试中锁定，
+    #   不在 main() 门禁中强制。
     matrix_baseline_errors = check_acceptance_matrix_baseline()
     if matrix_baseline_errors:
         all_errors.extend(matrix_baseline_errors)

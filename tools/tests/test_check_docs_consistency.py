@@ -182,8 +182,10 @@ def _setup_docs(
     # 规则 17 默认 mock：HEAD/origin/dev 解析为 None（不依赖真实 git）
     monkeypatch.setattr(cdc, "get_rev_sha", lambda rev: None)
     # [P0-3] 规则 17 漂移门禁默认 mock：baseline 是任意 rev 祖先且在窗口内
+    # 默认落后 1 个纯文档提交（严格窗口 2 内），保证不涉及规则 17 的既有场景
+    # 不会因默认值 10（旧窗口 50 时的取值）超过新窗口 2 而误失败。
     monkeypatch.setattr(cdc, "is_ancestor_of_rev", lambda sha, rev: True)
-    monkeypatch.setattr(cdc, "count_commits_ahead", lambda rev, sha: 10)
+    monkeypatch.setattr(cdc, "count_commits_ahead", lambda rev, sha: 1)
 
     return tmp_path
 
@@ -588,3 +590,31 @@ class TestCheckDocsConsistencyV2:
 
         rc = cdc.main()
         assert rc == 1, "验收矩阵缺少 **基线** 字段应失败"
+
+    def test_17_acceptance_matrix_strict_window_2(self, tmp_path, monkeypatch):
+        """场景 17（P0-3）：验收矩阵基线只允许落后 1~2 个纯文档提交。
+
+        与 MANIFEST 宽松窗口 50 解耦：ACCEPTANCE_MATRIX_FRESHNESS_WINDOW=2。
+        落后 2 commit（含）通过；落后 3 commit 起失败。
+        """
+        _setup_docs(
+            tmp_path,
+            monkeypatch,
+            manifest=_manifest_content(VALID_SHA),
+            current_docs={"00-product-business.md": "# 产品业务\n"},
+            maps_docs={"api-route-map.md": "# API 路由\n"},
+            readme="# README\n",
+        )
+        self._write_acceptance_matrix(tmp_path, VALID_SHA)
+        monkeypatch.setattr(cdc, "get_rev_sha", lambda rev: VALID_SHA)
+        assert cdc.ACCEPTANCE_MATRIX_FRESHNESS_WINDOW == 2, (
+            "验收矩阵基线窗口必须收敛到 2（P0-3，不再允许 50）"
+        )
+
+        # 落后 2 个纯文档提交 → 通过
+        monkeypatch.setattr(cdc, "count_commits_ahead", lambda rev, sha: 2)
+        assert cdc.main() == 0, "矩阵基线落后 2 commit（窗口边界）应通过"
+
+        # 落后 3 个 commit → 失败
+        monkeypatch.setattr(cdc, "count_commits_ahead", lambda rev, sha: 3)
+        assert cdc.main() == 1, "矩阵基线落后 3 commit 应失败"

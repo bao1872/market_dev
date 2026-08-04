@@ -35,6 +35,7 @@ from app.services.feature_snapshot_service import (
     compute_for_trade_date,
     upsert_snapshot,
 )
+from app.services.market_data_aggregation_service import BarAggregationResult
 from app.services.node_cluster_input_provider import NodeClusterInput
 from app.services.structural_factor_service import _compute_all_factors_for_bars
 
@@ -625,25 +626,53 @@ async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics(
     session = AsyncMock()
     session.execute.return_value = [(item, f"{i:06d}") for i, item in enumerate(instrument_ids)]
     progress = AsyncMock()
+
+    def _fake_batch(session, ids, **_kwargs):
+        # [P0-2 2026-08-04] 模拟 MDAS 真实批读诊断：一级(1d)批读模式、二级(15m)逐股回退。
+        tf = _kwargs.get("timeframe")
+        diag = _kwargs.get("_diag_sink")
+        if diag is not None:
+            if tf == "1d":
+                diag.update(
+                    {
+                        "read_mode": "batch",
+                        "fallback_symbol_count": 0,
+                        "read_operation_count": 1,
+                        "repository_query_count": 3,
+                    }
+                )
+            else:  # 15m 日内周期 → 逐股回退
+                diag.update(
+                    {
+                        "read_mode": "per_symbol_fallback",
+                        "fallback_symbol_count": len(ids),
+                        "read_operation_count": len(ids),
+                        "repository_query_count": len(ids) * 3,
+                    }
+                )
+        return dict.fromkeys(ids, agg)
+
     with (
         patch("app.services.market_data_aggregation_service.MarketDataAggregationService.get_bars_batch", new_callable=AsyncMock) as batch_read,
         patch("app.services.feature_snapshot_service.compute_feature_snapshot_for_date", new_callable=AsyncMock, side_effect=[MagicMock(spec=StockFeatureSnapshot) for _ in instrument_ids]),
         patch("app.services.feature_snapshot_service.upsert_snapshot", new_callable=AsyncMock) as upsert,
     ):
-        batch_read.side_effect = lambda _session, ids, **_kwargs: dict.fromkeys(ids, agg)
+        batch_read.side_effect = _fake_batch
         result = await compute_for_trade_date(session, date(2026, 1, 10), instrument_ids, batch_size=2, progress_callback=progress)
     assert batch_read.await_count == 6
     assert upsert.await_count == 5
     assert progress.await_count == 3
     assert result["batch_count"] == 3
     assert result["mdas_batch_read_count"] == 6
-    # [P0-2 2026-08-04] 固定 fixture：5 只 / batch_size=2 → 3 批。
-    # 二级周期 15m 为日内周期必退回逐股 get_bars，fallback 按标的计数。
-    assert result["fallback_count"] == 5  # 每只 15m 均回退逐股
-    # query_count：一级批读 1 次/批 + 二级回退 len(batch) 次/批 → 3 批 = 8 次
-    assert result["query_count"] == 8
+    # [P0-2 2026-08-04] 固定 fixture：5 只 / batch_size=2 → 3 批（2/2/1）。
+    # 二级周期 15m 为日内周期必退回逐股 get_bars，fallback 按标的计数（真实诊断）。
+    assert result["fallback_count"] == 5  # 二次批次回退 2+2+1
+    # market_data_read_operation_count：一级批读 1 次/批 + 二级回退 len(batch) 次/批 → 3 批 = 8
+    assert result["market_data_read_operation_count"] == 8
+    # repository_query_count：一级 3/批 + 二级 len*3/批 → (3+6)+(3+6)+(3+3) = 24
+    assert result["repository_query_count"] == 24
     assert result["internal_commit_count"] == 0  # 本函数不内部 commit
-    assert result["transaction_count"] == 1  # 单一 caller 管理事务
+    assert result["transaction_owner"] == "caller"  # [P0-2] 事务由 caller 管理，不硬编码 count
     assert result["batch_size"] == 2
     assert result["configured_concurrency"] == 1
     assert result["peak_rss_mb"] >= 0
@@ -799,6 +828,101 @@ async def test_review_core_with_run_items_uses_mdas_batch_read_and_metrics() -> 
         assert hasattr(kwargs.get("primary_bars"), "index"), (
             "AC-16 primary_bars 必须是 DataFrame"
         )
+
+
+# ===== 5.1 [P0-2] MDAS 批读诊断：固定 fixture 10/100/500，随 batch 增长而非股票数线性 =====
+
+
+@pytest.mark.asyncio
+async def test_mdas_batch_read_query_count_scales_with_batch_not_symbols() -> None:
+    """[P0-2] 批读模式 repository 查询数随 batch 增长，不随股票数线性增长。
+
+    固定 fixture：10/100/500 只股票，spy 底层 repository 批量方法
+    get_daily_bars_batch / get_adj_factor_series_batch。
+
+    合同：
+    - 无论标的数 N，整批只发起 bars 1 次 + 因子 1 次 + 预期完成日 1 次
+      → repository_query_count 恒为 3（qfq），read_operation_count 恒为 1，
+        fallback_symbol_count 恒为 0（批读模式，无逐股回退）。
+    - 该计数随 batch 数增长，不随股票数 N 线性增长。
+
+    这是对"查询数随 batch 增长而非股票数线性增长"的机器可判定的回归测试。
+    """
+    import uuid as uuid_mod
+    from datetime import date as date_mod
+
+    from app.services.market_data_aggregation_service import (
+        MarketDataAggregationService,
+    )
+
+    service = MarketDataAggregationService()
+    session = AsyncMock()
+
+    def _dag_row(_s, _ids, *_a, **_k):
+        return {
+            i: pd.DataFrame(
+                {
+                    "open": [1.0], "high": [1.1], "low": [0.9],
+                    "close": [1.0], "volume": [1000.0], "amount": [1000.0],
+                },
+                index=pd.DatetimeIndex(["2026-07-31"]),
+            )
+            for i in _ids
+        }
+
+    def _adj_row(_s, _ids, *_a, **_k):
+        return {
+            i: pd.DataFrame(
+                {"trade_date": pd.DatetimeIndex(["2026-07-31"]), "adj_factor": [1.0]}
+            )
+            for i in _ids
+        }
+
+    async def _fake_build(*_a, **_k):
+        return MagicMock(spec=BarAggregationResult)
+
+    for n in (10, 100, 500):
+        instrument_ids = [uuid_mod.uuid4() for _ in range(n)]
+        diag: dict = {}
+        with (
+            patch(
+                "app.services.market_data_aggregation_service.get_daily_bars_batch",
+                side_effect=_dag_row,
+            ) as spy_bars,
+            patch(
+                "app.services.market_data_aggregation_service.get_adj_factor_series_batch",
+                side_effect=_adj_row,
+            ) as spy_factor,
+            patch(
+                "app.services.market_data_aggregation_service._call_expected_last_completed_daily_bar",
+                new_callable=AsyncMock,
+                return_value=date_mod(2026, 7, 31),
+            ),
+            patch(
+                "app.services.market_data_aggregation_service._build_daily_aggregation",
+                new_callable=AsyncMock,
+                side_effect=_fake_build,
+            ),
+        ):
+            results = await service.get_bars_batch(
+                session, instrument_ids,
+                timeframe="1d", adj="qfq",
+                include_realtime=False, completed_only=True,
+                end_date=date_mod(2026, 7, 31),
+                adjustment_as_of=date_mod(2026, 7, 31),
+                _diag_sink=diag,
+            )
+
+        assert len(results) == n
+        # 批读：整批只发起 1 次 bars + 1 次因子 SQL，无论 N。
+        assert spy_bars.await_count == 1, f"N={n} bars 批量 SQL 应恒为 1 次"
+        assert spy_factor.await_count == 1, f"N={n} 因子批量 SQL 应恒为 1 次"
+        # 诊断：随 batch 增长而非股票数线性增长。
+        assert diag["read_mode"] == "batch"
+        assert diag["repository_query_count"] == 3, f"N={n} repository 查询应恒为 3"
+        assert diag["read_operation_count"] == 1, f"N={n} 读操作应恒为 1"
+        assert diag["fallback_symbol_count"] == 0, f"N={n} 批读应无逐股回退"
+        assert diag["symbol_count"] == n
 
 
 @pytest.mark.asyncio

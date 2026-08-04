@@ -1669,8 +1669,6 @@ async def upsert_snapshot(
 # 批量计算
 # =============================================================================
 
-_BATCH_READ_TIMEFRAMES = ("1d", "1w", "1mo")
-
 
 def _peak_rss_mb() -> float:
     """当前进程峰值 RSS（MB）。跨平台：macOS ru_maxrss 单位 KB，Linux 单位 Bytes。"""
@@ -1734,7 +1732,11 @@ async def compute_for_trade_date(
     compute_duration = 0.0
     persist_duration = 0.0
     fallback_count = 0
-    query_count = 0
+    # [P0-2 2026-08-04] 行情读取操作数改为 MDAS 真实批读诊断（不再静态推算）。
+    # 名称用 market_data_read_operation_count（MDAS 层读操作数），
+    # 不冒充精确 SQL 查询计数；真实 SQL 数由 get_bars_batch 的 repository_query_count 提供。
+    market_data_read_operation_count = 0
+    repository_query_count = 0
     _t0 = time.perf_counter()
     # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
     run_diag: dict[str, Any] = {}
@@ -1754,18 +1756,27 @@ async def compute_for_trade_date(
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
         batch_count += 1
-        # 二级周期（15m）为日内周期，get_bars_batch 不批读，必退回逐股 get_bars；
-        # 据此累计真实 fallback_count / query_count（行情读取操作数）。
-        secondary_fallback = "15m" not in _BATCH_READ_TIMEFRAMES
+        # [P0-2 2026-08-04] 批读诊断：由 get_bars_batch 真实返回 read_mode/回退数/读操作数。
+        # 一级（1d）为批读模式；二级（15m）为日内周期必退回逐股 get_bars。
+        # 不再用 _BATCH_READ_TIMEFRAMES 静态推断 fallback。
         _t_read = time.perf_counter()
-        primary_results = await mdas.get_bars_batch(session, batch, timeframe="1d", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date)
-        secondary_results = await mdas.get_bars_batch(session, batch, timeframe="15m", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date)
+        _primary_diag: dict[str, Any] = {}
+        _secondary_diag: dict[str, Any] = {}
+        primary_results = await mdas.get_bars_batch(session, batch, timeframe="1d", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date, _diag_sink=_primary_diag)
+        secondary_results = await mdas.get_bars_batch(session, batch, timeframe="15m", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date, _diag_sink=_secondary_diag)
         read_duration += time.perf_counter() - _t_read
         mdas_batch_read_count += 2
-        if secondary_fallback:
-            fallback_count += len(batch)
-        # 一级批读 1 次 + 二级（批读 1 次，或回退逐股 len(batch) 次）
-        query_count += 1 + (len(batch) if secondary_fallback else 1)
+        # 真实回退标计数（二级日内周期回退逐股时按标的计数）
+        fallback_count += _secondary_diag.get("fallback_symbol_count", 0)
+        # 真实读操作数/近似 SQL 数（来自 MDAS 批读诊断，非静态推算）
+        market_data_read_operation_count += (
+            _primary_diag.get("read_operation_count", 0)
+            + _secondary_diag.get("read_operation_count", 0)
+        )
+        repository_query_count += (
+            _primary_diag.get("repository_query_count", 0)
+            + _secondary_diag.get("repository_query_count", 0)
+        )
         batch_snapshots: list[StockFeatureSnapshot] = []
         _t_compute = time.perf_counter()
         for instrument_id in batch:
@@ -1841,12 +1852,17 @@ async def compute_for_trade_date(
         "persist_duration": round(persist_duration, 4),
         "total_duration": round(_total, 4),
         "symbols_per_second": round(snapshot_count / _total, 2) if _total > 0 else 0.0,
-        # [P0-2 2026-08-04] 真实回退/查询计数：二级日内周期退回逐股 get_bars 时按标的计数
+        # [P0-2 2026-08-04] 真实回退/行情读取操作计数：来源为 MDAS get_bars_batch 的
+        # _diag_sink 诊断（read_mode/fallback_symbol_count/read_operation_count/
+        # repository_query_count），非静态公式推算。
         "fallback_count": fallback_count,
-        "query_count": query_count,
+        "market_data_read_operation_count": market_data_read_operation_count,
+        "repository_query_count": repository_query_count,
         # 本函数只批量 upsert+flush（O(batch)），不调用 session.commit；由 caller 统一提交
         "internal_commit_count": 0,
-        "transaction_count": 1,  # 整个 trade_date 在单个 caller 管理的事务内完成
+        # [P0-2 2026-08-04] 事务归属如实声明：本函数不拥有事务，由 caller 管理。
+        # 不再硬编码推测值 transaction_count=1。
+        "transaction_owner": "caller",
         "peak_rss_mb": _peak_rss_mb(),
         "batch_size": batch_size,
         "configured_concurrency": 1,  # 当前实现为顺序分批处理，无并发

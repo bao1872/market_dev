@@ -62,6 +62,12 @@ logger = logging.getLogger("services.market_data_aggregation_service")
 _ALLOWED_TIMEFRAMES: set[str] = {"1d", "15m", "1h", "1w", "1mo", "1m"}
 _ALLOWED_ADJ: set[str] = {"qfq", "none"}
 
+# [P0-2 2026-08-04] 单次 get_bars 在典型路径下的 repository 级读操作数：
+# bars 查询 1 次 + 复权因子 1 次（qfq）+ 预期最后完成日 1 次 = 3 次。
+# 仅用于 get_bars_batch 日内回退路径的近似诊断（与真实 SQL 数仍有出入，
+# 不作为精确 SQL 计数），批读模式使用精确的 3/2 常数值。
+_SINGLE_GET_BARS_REPOSITORY_QUERIES: int = 3
+
 # [mdas] - 描述: 默认回看范围（与 bars.py / indicator_service.py 保持一致）
 _DEFAULT_DAILY_LOOKBACK_DAYS: int = 5000
 _DEFAULT_INTRADAY_LOOKBACK_DAYS: int = 180
@@ -1178,6 +1184,8 @@ class MarketDataAggregationService:
         self,
         session: AsyncSession,
         instrument_ids: Sequence[uuid.UUID],
+        *,
+        _diag_sink: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[uuid.UUID, BarAggregationResult | Exception]:
         """[CHANGE-20260804-FS] 批量获取同一行情合同的多个标的（数据库级批读）。
@@ -1217,6 +1225,17 @@ class MarketDataAggregationService:
 
         # 日内周期不在批读范围内：退回逐股 get_bars（合同一致，行为不变）
         if timeframe not in ("1d", "1w", "1mo"):
+            if _diag_sink is not None:
+                _diag_sink.update(
+                    {
+                        "read_mode": "per_symbol_fallback",
+                        "symbol_count": len(instrument_ids),
+                        "fallback_symbol_count": len(instrument_ids),
+                        "read_operation_count": len(instrument_ids),
+                        "repository_query_count": len(instrument_ids)
+                        * _SINGLE_GET_BARS_REPOSITORY_QUERIES,
+                    }
+                )
             results: dict[uuid.UUID, BarAggregationResult | Exception] = {}
             for instrument_id in instrument_ids:
                 try:
@@ -1239,6 +1258,19 @@ class MarketDataAggregationService:
 
         # 共享的「预期最后完成日」（按 now 日期，与标的无关，整批只算 1 次）
         expected = await _call_expected_last_completed_daily_bar(session, now)
+
+        # [P0-2 2026-08-04] 批读模式真实诊断：整批只发起 bars + 复权因子 + 预期完成日
+        # 共 3 次 repository 级查询（adj=none 时 2 次），与标的数量无关。
+        if _diag_sink is not None:
+            _diag_sink.update(
+                {
+                    "read_mode": "batch",
+                    "symbol_count": len(instrument_ids),
+                    "fallback_symbol_count": 0,
+                    "read_operation_count": 1,
+                    "repository_query_count": 3 if adj == "qfq" else 2,
+                }
+            )
 
         results = {}
         for instrument_id in instrument_ids:
