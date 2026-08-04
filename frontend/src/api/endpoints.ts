@@ -3684,11 +3684,42 @@ export interface FirstPyramidSnapshot {
   inputHash: string
   parameterHash: string
   algorithmVersion: string
+  /**
+   * [QM-63] run 级唯一计算时间（编排器注入）。
+   * 同一 run 的所有股票共享完全相同的值；单股各自计算时为 null。
+   */
+  calculatedAt?: string | null
+  /**
+   * [QM-63] run 级唯一来源 id（编排器注入）。
+   * null 表示本快照非批量 run 产出（单股即时计算），不得理解为「丢失」。
+   */
+  sourceRunId?: string | null
 }
 
-/** [CHANGE-20260729-004 P0-2 + CHANGE-20260730-010] 筹码共识结构化状态 */
+/**
+ * [QM-63 2026-08-04] chipStatus.state 完整七态（与后端
+ * `app/schemas/first_pyramid.py::CHIP_STATUS_STATES` 严格一致）。
+ *
+ * - pending      : chip job 已入队/运行中，尚未产出
+ * - ready        : chip 结果完整可用
+ * - unavailable  : 上游数据不足，本交易日合法不可算（非错误）
+ * - failed       : chip 计算异常（错误，需排查）
+ * - interrupted  : chip job 被取消/Worker 接管而未完成
+ * - stale        : chip 结果存在但落后于 core run（旧残留）
+ * - partial      : chip 部分维度可用，coverage < 1
+ */
+export type ChipStatusState =
+  | 'pending'
+  | 'ready'
+  | 'unavailable'
+  | 'failed'
+  | 'interrupted'
+  | 'stale'
+  | 'partial'
+
+/** [CHANGE-20260729-004 P0-2 + CHANGE-20260730-010 + QM-63] 筹码共识结构化状态 */
 export interface ChipStatus {
-  state: 'ready' | 'pending' | 'failed' | 'unavailable' | 'stale'
+  state: ChipStatusState
   reasonCode: string | null
   reasonText: string | null
   computedAt: string | null
@@ -3696,6 +3727,14 @@ export interface ChipStatus {
   actualBars?: number | null
   requiredBars?: number | null
   fullQualityBars?: number | null
+  /** [QM-63] 产出该 chip 结果的 run id（用于与 core run 比对） */
+  sourceRunId?: string | null
+  /** [QM-63] chip 异步任务 id（定位失败/中断的具体 job） */
+  jobId?: string | null
+  /** [QM-63] chip 结果落后 core 的交易日数；0 表示同日 */
+  freshness?: number | null
+  /** [QM-63] chip 维度覆盖度 0~1；partial 状态必须 <1 */
+  coverage?: number | null
 }
 
 /** AdminAtomicFactDebugItem - 管理员调试：单事实可追溯信息（保留内部 ID / 路径） */

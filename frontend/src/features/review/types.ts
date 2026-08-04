@@ -100,6 +100,17 @@ export interface ReviewOverview {
   status: string
   sourceCoreRunId: string
   sourceBoardRunId: string
+  /**
+   * [QM-63] 输入 chip 共识 run ID。
+   * null 明确表示 chip 不可用、本次 run 降级为 core-only，
+   * 不得理解为「未记录」或「未知」。
+   */
+  sourceChipRunId: string | null
+  /**
+   * [QM-63] 降级原因列表（如 CHIP_UNAVAILABLE / CHIP_PARTIAL）。
+   * 空数组表示无降级。
+   */
+  degradedReasons: string[]
   algorithmVersion: string
   filterVersion: string
   baselineWindow: number

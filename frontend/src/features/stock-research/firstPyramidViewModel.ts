@@ -10,6 +10,7 @@ import type {
   VolumeContextSchema,
 } from '../../api/endpoints.ts'
 import { formatSmcEvent, getSmcEqLabel, formatSmcOrderBlock } from '../../components/smcLabels.ts'
+import type { SmcDirectionInput } from '../../components/smcLabels.ts'
 
 /** 方向：1=偏多/上行, -1=偏空/下行, 0=中性/未形成 */
 export type Direction = 1 | -1 | 0
@@ -90,6 +91,25 @@ export interface ChipConsensusVM {
   nPeakNodes: number | null
 }
 
+/**
+ * [QM-63 2026-08-04] 第一金字塔 run 级来源信息。
+ *
+ * 同一批 run 的所有股票共享完全相同的 sourceRunId 与 calculatedAt。
+ * 两者为 null 时表示「本快照非批量 run 产出（单股即时计算）」，
+ * 是明确语义，不得渲染成「加载中」或空白。
+ */
+export interface FirstPyramidProvenanceVM {
+  /** run 级唯一来源 id；null=单股即时计算 */
+  sourceRunId: string | null
+  /** run 级唯一计算时间 ISO；null=单股即时计算 */
+  calculatedAt: string | null
+  algorithmVersion: string | null
+  inputHash: string | null
+  parameterHash: string | null
+  /** 是否来自批量 run（sourceRunId 与 calculatedAt 同时存在） */
+  fromBatchRun: boolean
+}
+
 export interface FirstPyramidVM {
   symbol: string
   tradeDate: string
@@ -101,6 +121,8 @@ export interface FirstPyramidVM {
   chipConsensus: ChipConsensusVM | null
   /** [CHANGE-20260729-004 P0-2] 筹码共识结构化状态（替代统一"暂不可用"文案） */
   chipStatus: ChipStatus | null
+  /** [QM-63] run 级来源与计算时间（溯源展示用） */
+  provenance: FirstPyramidProvenanceVM
 }
 
 // ===== 类型安全字段提取 =====
@@ -193,7 +215,9 @@ function buildStructureEvent(e: PyramidEvent): StructureEventVM {
   const levelRaw = e.structureLevel ?? e.extra?.['structure_level']
   const structureLevel = levelRaw === 'swing' || levelRaw === 'internal' ? levelRaw : null
   // 正式方向接受 bullish/bearish；历史 up/down 归一（smcLabels 内部处理）。
-  const direction = e.direction ?? null
+  // SmcDirectionInput 为窄联合，DTO 里是宽 string；运行时 normalizeSmcDirection
+  // 对无法识别值一律归一为 null，因此在此收窄是安全的（不默认空头/多头）。
+  const direction = e.direction as SmcDirectionInput
   const biasRaw = e.bias ?? e.extra?.['bias']
   const bias = asNumber(biasRaw)
   let typeLabel = EVENT_TYPE_LABEL[e.type] ?? e.type
@@ -341,6 +365,25 @@ export function buildFirstPyramidVM(
     momentum: buildMomentum(data.momentum),
     chipConsensus: buildChipConsensus(data.chipConsensus),
     chipStatus: data.chipStatus ?? null,
+    provenance: buildProvenance(data),
+  }
+}
+
+/**
+ * [QM-63] 提取 run 级来源信息。
+ *
+ * 只做透传与空值判定，不补默认值、不用当前时间冒充 calculatedAt。
+ */
+function buildProvenance(data: FirstPyramidSnapshot): FirstPyramidProvenanceVM {
+  const sourceRunId = asString(data.sourceRunId)
+  const calculatedAt = asString(data.calculatedAt)
+  return {
+    sourceRunId,
+    calculatedAt,
+    algorithmVersion: asString(data.algorithmVersion),
+    inputHash: asString(data.inputHash),
+    parameterHash: asString(data.parameterHash),
+    fromBatchRun: sourceRunId !== null && calculatedAt !== null,
   }
 }
 

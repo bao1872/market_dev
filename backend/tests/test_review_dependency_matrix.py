@@ -13,6 +13,7 @@
 7. all-null（P/Q/U/C/V 全 None）不可发布
 8. 原子发布失败保留旧 pointer（重复发布幂等，零写入）
 9. 非 ready 必须给出 reason（禁止无原因的不可用）
+10. API/schema 暴露合同：degraded_reasons + source_chip_run_id 透传
 """
 
 from __future__ import annotations
@@ -453,3 +454,54 @@ async def test_non_ready_with_reason_passes_that_check() -> None:
     results = _gate_pass_results(run, market_payloads={"P": payload})
     _, blockers = await evaluate_publish_gate(_make_session(results), run)
     assert not any("缺 reason" in b for b in blockers)
+
+
+# =============================================================================
+# 10. API / schema 暴露合同：degraded_reasons + source_chip_run_id 必须透传
+# =============================================================================
+
+
+async def test_overview_response_exposes_chip_dependency() -> None:
+    """ReviewOverviewResponse 必须返回 sourceChipRunId 与 degradedReasons。"""
+    from app.schemas.review import ReviewOverviewResponse
+
+    resp = ReviewOverviewResponse(
+        reviewRunId=str(uuid.uuid4()),
+        tradeDate="2026-08-04",
+        status="signals_ready",
+        sourceCoreRunId=str(uuid.uuid4()),
+        sourceBoardRunId=str(uuid.uuid4()),
+        sourceChipRunId=None,  # chip 不可用，core-only 降级
+        degradedReasons=["CHIP_UNAVAILABLE"],
+        algorithmVersion="v1",
+        filterVersion="f1",
+        baselineWindow=60,
+    )
+    payload = resp.model_dump(mode="json")
+    # 契约：sourceChipRunId=null 必须明确返回（不得省略导致前端当"未记录"）
+    assert "sourceChipRunId" in payload
+    assert payload["sourceChipRunId"] is None
+    assert payload["degradedReasons"] == ["CHIP_UNAVAILABLE"]
+
+
+async def test_run_response_exposes_degraded_reasons() -> None:
+    """ReviewRunResponse（管理端）必须返回 source_chip_run_id 与 degraded_reasons。"""
+    from app.schemas.review import ReviewRunResponse
+
+    resp = ReviewRunResponse(
+        id=str(uuid.uuid4()),
+        trade_date="2026-08-04",
+        source_core_run_id=str(uuid.uuid4()),
+        source_board_run_id=str(uuid.uuid4()),
+        source_chip_run_id=str(uuid.uuid4()),
+        degraded_reasons=["CHIP_PARTIAL"],
+        algorithm_version="v1",
+        filter_version="f1",
+        baseline_window=60,
+        status="signals_ready",
+        created_at="2026-08-04T15:00:00Z",
+        updated_at="2026-08-04T15:00:00Z",
+    )
+    payload = resp.model_dump(mode="json")
+    assert payload["source_chip_run_id"] is not None
+    assert payload["degraded_reasons"] == ["CHIP_PARTIAL"]

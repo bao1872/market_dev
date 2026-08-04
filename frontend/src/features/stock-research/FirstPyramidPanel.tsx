@@ -7,7 +7,7 @@
 //   - 解析 statusText 推断多空或事件类型
 //   - 内联 style 堆积（全部进入 CSS Module）
 import { useFirstPyramid } from '@/hooks/useApi'
-import type { ChipStatus } from '@/api/endpoints'
+import type { ChipStatus, ChipStatusState } from '@/api/endpoints'
 import { buildFirstPyramidVM, directionClass, directionLabel, volumeBadgeClass } from './firstPyramidViewModel'
 import type { FirstPyramidVM, StructureEventVM } from './firstPyramidViewModel'
 import styles from './FirstPyramidPanel.module.scss'
@@ -20,11 +20,39 @@ interface FirstPyramidPanelProps {
 
 // ===== 内部展示组件 =====
 
-function PyramidHeader({ tradeDate }: { tradeDate: string }) {
+function PyramidHeader({
+  tradeDate,
+  provenance,
+}: {
+  tradeDate: string
+  provenance?: FirstPyramidVM['provenance']
+}) {
   return (
     <div className={styles.header}>
       <span className={styles.title}>第一金字塔</span>
       <span className={styles.tradeDate}>{tradeDate}</span>
+      {/* [QM-63] run 级溯源：批量 run 显示 run id + 计算时间；
+          单股即时计算显式标注，不留空白让用户误以为数据缺失。 */}
+      {provenance && (
+        provenance.fromBatchRun ? (
+          <span
+            className={styles.tradeDate}
+            title={[
+              `source run: ${provenance.sourceRunId}`,
+              `calculatedAt: ${provenance.calculatedAt}`,
+              provenance.algorithmVersion ? `algo: ${provenance.algorithmVersion}` : null,
+              provenance.inputHash ? `inputHash: ${provenance.inputHash}` : null,
+              provenance.parameterHash ? `paramHash: ${provenance.parameterHash}` : null,
+            ].filter(Boolean).join('\n')}
+          >
+            run {provenance.sourceRunId?.slice(0, 8)} · {provenance.calculatedAt}
+          </span>
+        ) : (
+          <span className={styles.tradeDate} title="本快照为单股即时计算，非批量 run 产出">
+            即时计算
+          </span>
+        )
+      )}
     </div>
   )
 }
@@ -300,12 +328,73 @@ function MomentumVisualCard({ vm, variant }: { vm: FirstPyramidVM['momentum']; v
   )
 }
 
+/**
+ * [QM-63 2026-08-04] chip 七态展示文案（与后端 CHIP_STATUS_STATES 一一对应）。
+ *
+ * 每一态都必须有专属中文标签：缺标签会让 unavailable / interrupted / partial
+ * 退化成「没有徽章」，用户无法区分「合法不可算」「被中断」「部分可用」。
+ * ready 不显示徽章（正常态无需提示）。
+ */
+const CHIP_STATE_LABEL: Record<ChipStatusState, string | null> = {
+  ready: null,
+  pending: '筹码任务尚未执行',
+  unavailable: '筹码本日不可算',
+  failed: '筹码计算失败',
+  interrupted: '筹码任务已中断',
+  stale: '筹码结果已过期',
+  partial: '筹码部分可用',
+}
+
+/**
+ * [QM-63] chip 溯源与新鲜度行：source run / job / freshness / coverage。
+ * 仅展示后端实际给出的字段，缺失即不渲染该项，不用占位值伪装已知。
+ */
+function ChipProvenance({ chipStatus }: { chipStatus: ChipStatus }) {
+  const items: { label: string; value: string; title?: string }[] = []
+  if (chipStatus.sourceRunId) {
+    items.push({
+      label: 'Chip Run',
+      value: chipStatus.sourceRunId.slice(0, 8),
+      title: chipStatus.sourceRunId,
+    })
+  }
+  if (chipStatus.jobId) {
+    items.push({
+      label: 'Job',
+      value: chipStatus.jobId.slice(0, 8),
+      title: chipStatus.jobId,
+    })
+  }
+  if (chipStatus.freshness !== null && chipStatus.freshness !== undefined) {
+    items.push({
+      label: '滞后',
+      value: chipStatus.freshness === 0 ? '同日' : `${chipStatus.freshness}日`,
+    })
+  }
+  if (chipStatus.coverage !== null && chipStatus.coverage !== undefined) {
+    items.push({ label: '覆盖', value: `${(chipStatus.coverage * 100).toFixed(0)}%` })
+  }
+  if (chipStatus.computedAt) {
+    items.push({ label: '计算于', value: chipStatus.computedAt })
+  }
+  if (items.length === 0) return null
+  return (
+    <div className={styles.metricRow}>
+      {items.map((it) => (
+        <span key={it.label} className={styles.metric} title={it.title}>
+          {it.label} <b>{it.value}</b>
+        </span>
+      ))}
+    </div>
+  )
+}
+
 /** 筹码卡：POC位置轨道 + 距离% + 峰数量
- * [CHANGE-20260729-004 P0-2 + CHANGE-20260730-010] 当筹码不可用时：
+ * [CHANGE-20260729-004 P0-2 + CHANGE-20260730-010 + QM-63] 当筹码不可用时：
  * - 显示 chipStatus.reasonText 真实原因（不再统一显示"暂无有效筹码峰"）
- * - state=pending 显示"筹码任务尚未执行"
- * - state=failed 显示"筹码计算失败"+ reasonText
+ * - 七态各有专属中文标签（见 CHIP_STATE_LABEL）
  * - state=unavailable + M15_BARS_INSUFFICIENT 显示 actualBars/requiredBars/fullQualityBars
+ * - 展示 chip 溯源（source run / job / freshness / coverage / computedAt）
  */
 function ChipVisualCard({
   vm,
@@ -317,13 +406,7 @@ function ChipVisualCard({
   if (!vm || !vm.available || vm.pocPrice === null) {
     // 不可用时展示结构化原因（来自 chipStatus），缺省才退回中性文案
     const fallbackText = chipStatus?.reasonText ?? '可选维度 · 暂无有效筹码峰'
-    const stateLabel = chipStatus?.state === 'pending'
-      ? '筹码任务尚未执行'
-      : chipStatus?.state === 'failed'
-        ? '筹码计算失败'
-        : chipStatus?.state === 'stale'
-          ? '筹码结果已过期'
-          : null
+    const stateLabel = chipStatus ? CHIP_STATE_LABEL[chipStatus.state] ?? null : null
     return (
       <div className={`${styles.dimCard} ${styles.dimChip} ${styles.optional}`}>
         <div className={styles.dimHeader}>
@@ -331,6 +414,8 @@ function ChipVisualCard({
           {stateLabel && <span className={styles.dimBadge}>{stateLabel}</span>}
         </div>
         <div className={styles.dimEmpty}>{fallbackText}</div>
+        {/* [QM-63] chip 溯源与新鲜度：有值才展示，缺失不编造 */}
+        {chipStatus && <ChipProvenance chipStatus={chipStatus} />}
         {/* [CHANGE-20260730-010] M15_BARS_INSUFFICIENT 时展示诊断字段 */}
         {chipStatus?.reasonCode === 'M15_BARS_INSUFFICIENT'
           && chipStatus.actualBars !== null
@@ -365,6 +450,12 @@ function ChipVisualCard({
     <div className={`${styles.dimCard} ${styles.dimChip} ${styles.optional}`}>
       <div className={styles.dimHeader}>
         <span className={styles.dimName}>筹码共识</span>
+        {/* [QM-63] 有数据但非 ready（stale/partial）时仍须显示状态徽章 */}
+        {chipStatus && CHIP_STATE_LABEL[chipStatus.state] && (
+          <span className={styles.dimBadge} title={chipStatus.reasonText ?? undefined}>
+            {CHIP_STATE_LABEL[chipStatus.state]}
+          </span>
+        )}
       </div>
       {/* POC 位置轨道 */}
       <div className={styles.pocTrack}>
@@ -384,6 +475,8 @@ function ChipVisualCard({
           <span className={styles.metric}>峰数 <b>{vm.nPeakNodes}</b></span>
         )}
       </div>
+      {/* [QM-63] chip 溯源与新鲜度 */}
+      {chipStatus && <ChipProvenance chipStatus={chipStatus} />}
     </div>
   )
 }
@@ -436,7 +529,7 @@ export function FirstPyramidPanel({ symbol, variant = 'detail', className }: Fir
 
   return (
     <div className={`${styles.panel} ${variantClass} ${className ?? ''}`}>
-      <PyramidHeader tradeDate={vm.tradeDate} />
+      <PyramidHeader tradeDate={vm.tradeDate} provenance={vm.provenance} />
       {/* compact 不渲染 statusText；detail 也不渲染聚合 statusText */}
       <StateRibbon vm={vm} />
       <VolumeWaterLevel vm={vm.volumeWaterLevel} />

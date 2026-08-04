@@ -1,7 +1,72 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import type { DimensionResult, FirstPyramidSnapshot } from '@/api/endpoints'
+import type { ChipStatus, DimensionResult, FirstPyramidSnapshot } from '@/api/endpoints'
 import { buildFirstPyramidVM } from '../firstPyramidViewModel.ts'
+
+/**
+ * [QM-63 2026-08-04] chip 七态 + run 级溯源的展示合同。
+ * 通过 view-model 断言：VM 必须透传/推导出七态语义与溯源字段，
+ * 不得丢弃、不得把 unavailable/interrupted/partial 静默归并为普通不可用。
+ */
+test('chip 七态：partial/interrupted/stale 在 VM 中保留原始 state', () => {
+  const states: ChipStatus['state'][] = [
+    'pending', 'ready', 'unavailable', 'failed',
+    'interrupted', 'stale', 'partial',
+  ]
+  for (const state of states) {
+    const payload = canonicalPayload()
+    payload.chipStatus = {
+      state,
+      reasonCode: state === 'unavailable' ? 'DAILY_BARS_INSUFFICIENT' : `CHIP_${state.toUpperCase()}`,
+      reasonText: `reason-${state}`,
+      computedAt: null,
+    }
+    const vm = buildFirstPyramidVM(payload, 'detail')
+    assert.equal(
+      vm.chipStatus?.state, state,
+      `chip 七态 ${state} 必须原样透传到 VM（不得被归一）`,
+    )
+  }
+})
+
+test('run 级溯源：批量 run 推导 fromBatchRun，单股即时计算显式标注', () => {
+  const batch = canonicalPayload()
+  batch.calculatedAt = '2026-08-03T15:30:00+08:00'
+  batch.sourceRunId = 'run-abc-123'
+  const vm = buildFirstPyramidVM(batch, 'detail')
+  assert.equal(vm.provenance.fromBatchRun, true)
+  assert.equal(vm.provenance.sourceRunId, 'run-abc-123')
+  assert.equal(vm.provenance.calculatedAt, '2026-08-03T15:30:00+08:00')
+  assert.equal(vm.provenance.algorithmVersion, 'synthetic-v1')
+
+  const adhoc = canonicalPayload()
+  delete adhoc.sourceRunId
+  delete adhoc.calculatedAt
+  const vm2 = buildFirstPyramidVM(adhoc, 'detail')
+  assert.equal(vm2.provenance.fromBatchRun, false)
+  assert.equal(vm2.provenance.sourceRunId, null)
+  assert.equal(vm2.provenance.calculatedAt, null)
+})
+
+test('chip 溯源透传：sourceRunId/jobId/freshness/coverage 不丢失', () => {
+  const payload = canonicalPayload()
+  payload.chipStatus = {
+    state: 'partial',
+    reasonCode: 'CHIP_PARTIAL_COVERAGE',
+    reasonText: '部分维度可用',
+    computedAt: '2026-08-03T15:35:00+08:00',
+    sourceRunId: 'chip-run-x',
+    jobId: 'job-9',
+    freshness: 1,
+    coverage: 0.6,
+  }
+  const vm = buildFirstPyramidVM(payload, 'detail')
+  assert.equal(vm.chipStatus?.state, 'partial')
+  assert.equal(vm.chipStatus?.sourceRunId, 'chip-run-x')
+  assert.equal(vm.chipStatus?.jobId, 'job-9')
+  assert.equal(vm.chipStatus?.freshness, 1)
+  assert.equal(vm.chipStatus?.coverage, 0.6)
+})
 
 function dimension(overrides: Partial<DimensionResult> = {}): DimensionResult {
   return {

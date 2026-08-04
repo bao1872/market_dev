@@ -165,6 +165,20 @@ class ReviewOverviewResponse(BaseModel):
     status: str = Field(..., description="run 状态")
     sourceCoreRunId: str = Field(..., description="输入 stock_core run ID")
     sourceBoardRunId: str = Field(..., description="输入 board_analysis run ID")
+    sourceChipRunId: str | None = Field(
+        None,
+        description=(
+            "[QM-63] 输入 chip 共识 run ID；null 表示 chip 不可用，"
+            "本次 run 降级为 core-only（不得理解为未记录）"
+        ),
+    )
+    degradedReasons: list[str] = Field(
+        default_factory=list,
+        description=(
+            "[QM-63] 降级原因列表（CHIP_UNAVAILABLE / CHIP_PARTIAL 等）；"
+            "空数组表示无降级"
+        ),
+    )
     algorithmVersion: str = Field(..., description="算法版本")
     filterVersion: str = Field(..., description="筛选器版本")
     baselineWindow: int = Field(120, description="历史基线窗口（默认 120，最低 60）")
@@ -528,6 +542,17 @@ class ReviewRunResponse(BaseModel):
     trade_date: str = Field(..., description="业务交易日")
     source_core_run_id: str = Field(..., description="输入 stock_core run ID")
     source_board_run_id: str = Field(..., description="输入 board_analysis run ID")
+    source_chip_run_id: str | None = Field(
+        None,
+        description=(
+            "[QM-63] 输入 chip 共识 run ID；null 表示 chip 不可用，"
+            "本次 run 降级为 core-only"
+        ),
+    )
+    degraded_reasons: list[str] = Field(
+        default_factory=list,
+        description="[QM-63] 降级原因列表；空数组表示无降级",
+    )
     algorithm_version: str = Field(..., description="算法版本")
     filter_version: str = Field(..., description="筛选器版本")
     baseline_window: int = Field(..., description="历史基线窗口")

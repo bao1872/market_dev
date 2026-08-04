@@ -552,3 +552,53 @@ chip 的 `core_run_id` 与 stock_core 的 run id 同源，因此 `source_chip_ru
   `scripts/ops/panji-prod-preflight`）；
 - 因此 `source_chip_run_id` / `degraded_reasons` 的**真实数据表现尚未验证**，
   属于 `data_closed=false` 范畴。
+
+## 25. 前端展示收口（2026-08-04 核验，QM-63）
+
+对应 PRD §27 与 CHANGE-20260804-003。以下为**已核验的当前前端实现**（TSC/ESLint/build 全绿）。
+
+### 25.1 四层贯通：degraded_reasons / source_chip_run_id
+
+ORM → schema → API → 前端类型 → UI 已闭环：
+
+| 层 | 位置 | 字段 |
+|---|---|---|
+| ORM | `app/models/market_review.py::MarketReviewRun` | `source_chip_run_id` / `degraded_reasons` |
+| schema | `app/schemas/review.py::ReviewOverviewResponse` | `sourceChipRunId` / `degradedReasons`（camelCase） |
+| schema | `app/schemas/review.py::ReviewRunResponse` | `source_chip_run_id` / `degraded_reasons`（snake_case） |
+| API | `app/api/review.py::get_review_overview` | 透传两字段 |
+| API | `app/api/admin_review.py` | 透传两字段 |
+| 前端类型 | `src/features/review/types.ts::ReviewOverview` | `sourceChipRunId` / `degradedReasons` |
+| UI | `src/features/review/ReviewHeader.tsx` | Chip Run 溯源 + 降级横幅 |
+
+前端展示语义：`sourceChipRunId === null` → 显式显示「不可用」而非留空；
+`degradedReasons` 非空 → 顶部降级横幅（`CHIP_UNAVAILABLE`/`CHIP_PARTIAL` 等映射中文，未知 code 原样展示不猜测）。
+
+### 25.2 Review 指标冷启动：requiredObservationCount
+
+- `ScopeMetricsTable.tsx::MetricCell` 冷启动 title 统一复用 `reviewReadiness.buildColdStartTitle`
+  （含 `min_required`），删除本地重复实现——此前该实现遗漏 `min_required`。
+- `EvidenceDrawer.tsx` 新增「所需观测数」字段，冷启动原因改为读 `readiness.min_required`
+  （后端未给出则显式标注「未知」，禁止前端硬编码 60）。
+
+### 25.3 第一金字塔 chip 七态 + 溯源
+
+- 类型：`src/api/endpoints.ts::ChipStatusState` 补齐七态
+  `pending/ready/unavailable/failed/interrupted/stale/partial`（与后端 `CHIP_STATUS_STATES` 严格一致）；
+  `ChipStatus` 新增 `sourceRunId/jobId/freshness/coverage`。
+- UI：`FirstPyramidPanel.tsx` 用 `CHIP_STATE_LABEL` 七态映射（ready 无徽章），
+  `unavailable/interrupted/partial` 均有专属中文标签；新增 `ChipProvenance` 组件展示
+  source run / job / freshness / coverage / computedAt（仅显示后端实际给出字段）。
+- run 级溯源：`firstPyramidViewModel.ts` 新增 `FirstPyramidProvenanceVM`
+  （`sourceRunId/calculatedAt/algorithmVersion/inputHash/parameterHash/fromBatchRun`）；
+  Panel 头部批量 run 显示 `run <id> · <calculatedAt>`，单股即时计算显式标注「即时计算」。
+
+### 25.4 契约测试
+
+- `src/features/stock-research/__tests__/firstPyramidSmcContract.test.ts` 新增 3 项：
+  chip 七态透传、run 级溯源（批量 vs 即时）、chip 溯源字段不丢失。
+- `backend/tests/test_review_dependency_matrix.py` 新增 2 项：
+  `ReviewOverviewResponse` / `ReviewRunResponse` 暴露 chip 依赖字段。
+- `frontend/package.json::test:contract`：移除失效引用 `index-page-columns.test.ts`（文件不存在），
+  登记 `firstPyramidSmcContract.test.ts`。
+- 前端合同测试 552 项全绿；TSC 0 errors；ESLint 0 errors；build 通过。

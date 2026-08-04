@@ -90,8 +90,26 @@
   19 项失败（auction entitlement / calendar v9 / bars freshness / stock state entitlement）
   经 stash 基线对比确认为**既有失败**，与本次改动无关。
 
-## 未验证 / 缺口
+## 4. 前端展示收口（Commit 5，同日完成）
+
+在依赖矩阵与质量硬门落地后，前端同步收口（详见 Map §25）：
+
+- **四层贯通**：`degraded_reasons` / `source_chip_run_id` 自 ORM → schema → API → 前端类型 → UI 全链路透传。
+  `ReviewHeader` 显示 Chip Run 溯源（null 显式「不可用」）与降级横幅（未知 code 原样展示不猜测）。
+- **requiredObservationCount**：`ScopeMetricsTable` 冷启动 title 复用 `buildColdStartTitle`（含 `min_required`），
+  删除本地重复实现；`EvidenceDrawer` 新增「所需观测数」，冷启动原因读 `readiness.min_required`
+  （后端未给出则显式「未知」，禁止硬编码 60）。
+- **chip 七态**：`ChipStatusState` 补齐 `interrupted/partial`；`FirstPyramidPanel` 用 `CHIP_STATE_LABEL` 七态映射
+  （unavailable/interrupted/partial 各有专属标签），新增 `ChipProvenance`（source run / job / freshness / coverage）。
+- **run 级溯源**：`FirstPyramidProvenanceVM`（sourceRunId/calculatedAt/fromBatchRun），
+  Panel 头部批量 run 显示 `run <id> · <calculatedAt>`，即时计算显式标注。
+
+**前端验证**：contract 测试 552 项全绿；TSC 0 errors；ESLint 0 errors；`npm run build` 通过。
+**后端新增**：schema/API 两处透传测试（`test_review_dependency_matrix.py` 增 2 项，共 15 项）。
+
+## 5. 未验证 / 缺口
 
 - Migration 083 **未 apply**（本地不连共享库；远程 apply 需另行授权并先跑 `scripts/ops/panji-prod-preflight`）。
 - `source_chip_run_id` / `degraded_reasons` 的真实数据表现尚未验证，属 `data_closed=false`。
-- 前端尚未展示 `degraded_reasons`（属后续 Commit 5 前端收口范围）。
+- `sourceChipRunId` / `degradedReasons` 真实数据下的 UI 渲染效果未在浏览器端到端验证（无真实 run 数据，
+  仅纯单元/合同测试覆盖）。

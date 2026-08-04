@@ -455,6 +455,11 @@ async def get_review_overview(
         status=run.status,
         sourceCoreRunId=str(run.source_core_run_id),
         sourceBoardRunId=str(run.source_board_run_id),
+        # [QM-63] chip 依赖溯源：None 明确表示 core-only 降级，不得省略字段
+        sourceChipRunId=(
+            str(run.source_chip_run_id) if run.source_chip_run_id else None
+        ),
+        degradedReasons=list(run.degraded_reasons or []),
         algorithmVersion=run.algorithm_version,
         filterVersion=run.filter_version,
         baselineWindow=run.baseline_window,

@@ -84,6 +84,11 @@ def _run_to_response(run: Any) -> ReviewRunResponse:
         trade_date=run.trade_date.isoformat(),
         source_core_run_id=str(run.source_core_run_id),
         source_board_run_id=str(run.source_board_run_id),
+        # [QM-63] chip 依赖溯源：None 明确表示 core-only 降级
+        source_chip_run_id=(
+            str(run.source_chip_run_id) if run.source_chip_run_id else None
+        ),
+        degraded_reasons=list(run.degraded_reasons or []),
         algorithm_version=run.algorithm_version,
         filter_version=run.filter_version,
         baseline_window=run.baseline_window,

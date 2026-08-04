@@ -19,6 +19,19 @@ const RUN_STATUS_META: Record<string, { label: string; cls: string }> = {
   partial_success: { label: '部分成功', cls: 'chipWarning' },
 }
 
+// [QM-63 2026-08-04] 降级原因中文说明。
+// 未收录的 code 原样展示，不猜测、不静默丢弃。
+const DEGRADED_REASON_LABEL: Record<string, string> = {
+  CHIP_UNAVAILABLE: '筹码数据不可用（core-only 降级）',
+  CHIP_PARTIAL: '筹码数据部分成功（覆盖不完整）',
+  AUCTION_UNAVAILABLE: '竞价数据不可用',
+  AUCTION_FAILED: '竞价计算失败',
+}
+
+function degradedReasonText(code: string): string {
+  return DEGRADED_REASON_LABEL[code] ?? code
+}
+
 function CoverageItem({ label, ratio }: { label: string; ratio: number | null | undefined }) {
   const pct = ratio !== null && ratio !== undefined ? Math.round(ratio * 100) : null
   return (
@@ -101,9 +114,36 @@ export default function ReviewHeader({
               <span className={styles.metaLabel}>Board Run:</span>
               <span className={styles.metaValue}>{overview.sourceBoardRunId.slice(0, 8)}</span>
             </span>
+            {/* [QM-63] chip 溯源：null 明确显示「不可用」，不留空、不猜测 */}
+            <span className={styles.metaItem}>
+              <span className={styles.metaLabel}>Chip Run:</span>
+              {overview.sourceChipRunId ? (
+                <span className={styles.metaValue} title={overview.sourceChipRunId}>
+                  {overview.sourceChipRunId.slice(0, 8)}
+                </span>
+              ) : (
+                <span
+                  className={styles.metricUnavailable}
+                  title="chip 共识不可用，本次复盘降级为 core-only"
+                >
+                  不可用
+                </span>
+              )}
+            </span>
           </div>
         )}
       </div>
+      {/* [QM-63] 降级横幅：有降级必须显式解释原因，禁止静默降级 */}
+      {overview && overview.degradedReasons.length > 0 && (
+        <div className={styles.headerBottom} role="status" aria-live="polite">
+          <span className={`${styles.chip} ${styles.chipWarning}`}>数据降级</span>
+          {overview.degradedReasons.map((code) => (
+            <span key={code} className={styles.metaItem} title={code}>
+              <span className={styles.metaValue}>{degradedReasonText(code)}</span>
+            </span>
+          ))}
+        </div>
+      )}
       {overview && (
         <div className={styles.headerBottom}>
           <CoverageItem label="全市场" ratio={overview.coverage.market} />

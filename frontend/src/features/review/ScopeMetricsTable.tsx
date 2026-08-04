@@ -5,7 +5,7 @@
 // 前端不计算聚合变量，只展示后端返回的 payload
 import type { ReviewScopeMetrics, ReviewMetricPayload, MetricKey } from './types'
 import ReviewDataQualityBadge, { isMetricAvailable } from './ReviewDataQualityBadge'
-import { resolveMetricColdStart } from './reviewReadiness'
+import { buildColdStartTitle, resolveMetricColdStart } from './reviewReadiness'
 import styles from './review.module.scss'
 
 const METRIC_KEYS: MetricKey[] = ['p', 'q', 'u', 'c', 'v']
@@ -76,21 +76,20 @@ function MetricCell({ payload }: { payload: ReviewMetricPayload | null }) {
   // 历史不足，不得显示 0 分或 "-"、不得隐藏卡片、不得写成计算失败。
   const { isCold, displayValue } = resolveMetricColdStart(payload)
   const pct = payload.historyPercentile120d
-  const histCount = payload.historyObservationCount
   const coverage = payload.coverage
 
   const titleParts: string[] = []
   if (isCold) {
-    titleParts.push('历史不足（冷启动）')
-    if (histCount !== null && histCount !== undefined) {
-      titleParts.push(`历史观测=${histCount}条`)
-    }
-    // 后端 readiness.reason 存在时优先展示（如"history observation < 60"）
-    if (payload.readiness?.reason) {
-      titleParts.push(payload.readiness.reason)
-    }
+    // [QM-63] 冷启动提示统一走 buildColdStartTitle：
+    // 含历史观测数 + min_required（requiredObservationCount）+ 后端 reason，
+    // 不得在此重复实现一份遗漏 min_required 的逻辑。
+    titleParts.push(buildColdStartTitle(payload))
   } else {
     titleParts.push(`状态=${payload.status}`)
+    // [QM-63] 非 ready（如 normalized 未就绪）也必须给出原因，禁止无原因的不可用
+    if (payload.readiness?.normalized_ready === false && payload.readiness?.reason) {
+      titleParts.push(payload.readiness.reason)
+    }
   }
   if (coverage !== null && coverage !== undefined) {
     titleParts.push(`coverage=${(coverage * 100).toFixed(1)}%`)

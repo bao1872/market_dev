@@ -78,8 +78,13 @@ function missingReason(payload: ReviewMetricPayload | null): string | null {
   if (!payload) return '未计算该变量'
   if (payload.readiness?.reason) return payload.readiness.reason
   if (payload.status === 'insufficient_history') {
-    const need = payload.historyObservationCount ?? 0
-    return `历史观测不足（当前 ${need}，需 >= 60），无法计算分位`
+    const have = payload.historyObservationCount ?? 0
+    // [QM-63] 门槛以后端 readiness.min_required 为准，禁止在前端硬编码 60；
+    // 后端未给出时如实标注「未知」，不猜测。
+    const required = payload.readiness?.min_required
+    const requiredText =
+      required !== null && required !== undefined ? `${required}` : '未知'
+    return `历史观测不足（当前 ${have}，需 ≥ ${requiredText}），无法计算分位`
   }
   if (payload.status === 'unavailable') return '该变量不可用（必要组件缺失）'
   if (payload.status === 'partial') return '部分组件缺失，值为部分加权结果'
@@ -108,6 +113,8 @@ function MetricEvidence({
       </Field>
       <Field label="横截面分位">{fmt(payload?.crossSectionPercentile, 1)}</Field>
       <Field label="历史观测数">{payload?.historyObservationCount ?? '-'}</Field>
+      {/* [QM-63] 显式展示所需观测数，避免用户只看到「不足」却不知门槛 */}
+      <Field label="所需观测数">{payload?.readiness?.min_required ?? '-'}</Field>
       <Field label="coverage">
         {payload?.coverage !== null && payload?.coverage !== undefined
           ? `${(payload.coverage * 100).toFixed(1)}%`
