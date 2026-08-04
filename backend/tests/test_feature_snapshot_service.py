@@ -637,6 +637,17 @@ async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics(
     assert progress.await_count == 3
     assert result["batch_count"] == 3
     assert result["mdas_batch_read_count"] == 6
+    # [P0-2 2026-08-04] 固定 fixture：5 只 / batch_size=2 → 3 批。
+    # 二级周期 15m 为日内周期必退回逐股 get_bars，fallback 按标的计数。
+    assert result["fallback_count"] == 5  # 每只 15m 均回退逐股
+    # query_count：一级批读 1 次/批 + 二级回退 len(batch) 次/批 → 3 批 = 8 次
+    assert result["query_count"] == 8
+    assert result["internal_commit_count"] == 0  # 本函数不内部 commit
+    assert result["transaction_count"] == 1  # 单一 caller 管理事务
+    assert result["batch_size"] == 2
+    assert result["configured_concurrency"] == 1
+    assert result["peak_rss_mb"] >= 0
+    assert result["total_duration"] >= 0
 
 
 @pytest.mark.asyncio

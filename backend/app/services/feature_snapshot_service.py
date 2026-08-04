@@ -30,6 +30,8 @@
 from __future__ import annotations
 
 import logging
+import platform
+import resource
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -1667,6 +1669,19 @@ async def upsert_snapshot(
 # 批量计算
 # =============================================================================
 
+_BATCH_READ_TIMEFRAMES = ("1d", "1w", "1mo")
+
+
+def _peak_rss_mb() -> float:
+    """当前进程峰值 RSS（MB）。跨平台：macOS ru_maxrss 单位 KB，Linux 单位 Bytes。"""
+    try:
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if platform.system() == "Darwin":
+            return round(raw / 1024, 2)
+        return round(raw / 1024 / 1024, 2)
+    except Exception:
+        return 0.0
+
 
 async def compute_for_trade_date(
     session: AsyncSession,
@@ -1719,6 +1734,7 @@ async def compute_for_trade_date(
     compute_duration = 0.0
     persist_duration = 0.0
     fallback_count = 0
+    query_count = 0
     _t0 = time.perf_counter()
     # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
     run_diag: dict[str, Any] = {}
@@ -1738,11 +1754,18 @@ async def compute_for_trade_date(
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
         batch_count += 1
+        # 二级周期（15m）为日内周期，get_bars_batch 不批读，必退回逐股 get_bars；
+        # 据此累计真实 fallback_count / query_count（行情读取操作数）。
+        secondary_fallback = "15m" not in _BATCH_READ_TIMEFRAMES
         _t_read = time.perf_counter()
         primary_results = await mdas.get_bars_batch(session, batch, timeframe="1d", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date)
         secondary_results = await mdas.get_bars_batch(session, batch, timeframe="15m", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date)
         read_duration += time.perf_counter() - _t_read
         mdas_batch_read_count += 2
+        if secondary_fallback:
+            fallback_count += len(batch)
+        # 一级批读 1 次 + 二级（批读 1 次，或回退逐股 len(batch) 次）
+        query_count += 1 + (len(batch) if secondary_fallback else 1)
         batch_snapshots: list[StockFeatureSnapshot] = []
         _t_compute = time.perf_counter()
         for instrument_id in batch:
@@ -1806,6 +1829,7 @@ async def compute_for_trade_date(
         trade_date, snapshot_count, failed_count, batch_count, mdas_batch_read_count,
     )
 
+    _total = time.perf_counter() - _t0
     return {
         "snapshot_count": snapshot_count,
         "failed_count": failed_count,
@@ -1815,10 +1839,17 @@ async def compute_for_trade_date(
         "read_duration": round(read_duration, 4),
         "compute_duration": round(compute_duration, 4),
         "persist_duration": round(persist_duration, 4),
-        "total_duration": round(time.perf_counter() - _t0, 4),
-        "symbols_per_second": round(snapshot_count / (time.perf_counter() - _t0), 2) if (time.perf_counter() - _t0) > 0 else 0.0,
+        "total_duration": round(_total, 4),
+        "symbols_per_second": round(snapshot_count / _total, 2) if _total > 0 else 0.0,
+        # [P0-2 2026-08-04] 真实回退/查询计数：二级日内周期退回逐股 get_bars 时按标的计数
         "fallback_count": fallback_count,
-        "commit_count": 0,  # 本函数只批量 upsert+flush，不调用 session.commit（由 caller 统一提交）
+        "query_count": query_count,
+        # 本函数只批量 upsert+flush（O(batch)），不调用 session.commit；由 caller 统一提交
+        "internal_commit_count": 0,
+        "transaction_count": 1,  # 整个 trade_date 在单个 caller 管理的事务内完成
+        "peak_rss_mb": _peak_rss_mb(),
+        "batch_size": batch_size,
+        "configured_concurrency": 1,  # 当前实现为顺序分批处理，无并发
         "schema_version": _SCHEMA_VERSION,
         "trade_date": trade_date.isoformat(),
         # [CHANGE-20260717-002 SSOT] run 级行情诊断（供 finish_snapshot_run 落库）
