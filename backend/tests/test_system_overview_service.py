@@ -36,6 +36,7 @@ from app.services.market_status_service import (
 from app.services.system_overview_service import (
     FRESHNESS_DELAYED_THRESHOLD,
     HEARTBEAT_OFFLINE_THRESHOLD,
+    _compute_product_nodes,
     _compute_summary,
     _determine_monitor_status,
     get_system_overview,
@@ -768,8 +769,8 @@ async def test_base_fields_backward_compatible(db_session):
 
 
 @pytest.mark.asyncio
-async def test_response_has_17_fields(db_session):
-    """验证响应包含 17 个字段（12 基础 + 5 新增）。"""
+async def test_response_has_18_fields(db_session):
+    """验证响应包含 18 个字段（12 基础 + 5 新增 + 1 summary[P1]）。"""
     now = datetime(2026, 6, 24, 10, 0, tzinfo=SHANGHAI)
 
     with _mock_trading_day(is_trading=True):
@@ -784,11 +785,19 @@ async def test_response_has_17_fields(db_session):
         # 新增 5 个
         "server_time", "business_date", "market_session",
         "monitor_runtime", "after_close_pipeline",
+        # [PRD §8.1/8.2] 统一数据生产与发布状态摘要
+        "summary",
     }
     assert set(result.keys()) == expected_keys, (
         f"字段不匹配，多余: {set(result.keys()) - expected_keys}, "
         f"缺少: {expected_keys - set(result.keys())}"
     )
+    # [PRD §8.1] summary 必须为 dict 且含核心键（后端直出状态层）
+    assert isinstance(result["summary"], dict)
+    assert {
+        "overall_status", "quality_gate", "publication_status",
+        "today_must_process", "production_chain",
+    } <= set(result["summary"].keys()), f"summary 缺少核心键: {result['summary'].keys()}"
 
 
 # ==================== WAITING_DSA 细分原因测试（7 种场景）====================
@@ -1499,6 +1508,29 @@ async def test_summary_publish_failed_is_resumable() -> None:
     pub_issue = next(i for i in s["today_must_process"] if i["key"] == "publish_failed")
     assert pub_issue["resumable"] is True
     assert pub_issue["retryable"] is True
+
+
+# ============================================================
+# [PRD §8.2] _compute_product_nodes 6 节点查询测试（mock db，纯单元）
+# ============================================================
+
+
+async def test_product_nodes_empty_db_returns_6_nodes() -> None:
+    """空库场景（所有 db.scalar 返回 None）→ 产出完整 6 节点且字段齐全。"""
+    from unittest.mock import AsyncMock
+
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=None)
+    from datetime import date as _date
+
+    nodes = await _compute_product_nodes(db, _date(2026, 8, 4))
+    assert len(nodes) == 6, f"应 6 节点, got {len(nodes)}"
+    assert [n["key"] for n in nodes] == ["bars", "first_pyramid", "board", "review", "auction", "publish"]
+    # 每个节点都应含审查要求的展示字段
+    required = ["trade_date", "status", "run_id", "quality_gate", "publication_status", "blocking_reason", "recommended_action"]
+    for n in nodes:
+        for f in required:
+            assert f in n, f"节点 {n['key']} 缺字段 {f}"
 
 
 

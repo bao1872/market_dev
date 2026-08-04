@@ -15,7 +15,7 @@
 // - useCreateInviteCodes：生成邀请码
 // - useRevokeInviteCode：作废邀请码
 
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { useToast } from '@/store/toast'
@@ -232,19 +232,43 @@ function getPlanMonitorLimit(
 export default function AdminUsersPage() {
   const toast = useToast()
 
-  // 页面状态：tab 进入 URL query（/admin/users?tab=beta-applications），刷新保持，可分享定位
+  // [管理后台优化 PRD §8.4.7] 页面状态：tab 以 URL query 为唯一真源
+  // 每个 tab 有明确 URL 表示，刷新/分享/前进/后退/外部链接均可恢复，state 仅作同步镜像
   const [searchParams, setSearchParams] = useSearchParams()
   const tabParam = searchParams.get('tab')
-  const [activeTab, setActiveTab] = useState<string>(
-    tabParam === 'beta-applications' ? 'betaApplications' : 'memberList',
-  )
+  // URL param → activeTab 值 映射
+  const TAB_PARAM_TO_STATE: Record<string, string> = {
+    beta_applications: 'betaApplications',
+    members: 'memberList',
+    invites: 'inviteList',
+    rules: 'rulePanel',
+  }
+  // activeTab 值 → URL param 映射（memberList 为默认，URL 省略 tab 参数）
+  const TAB_STATE_TO_PARAM: Record<string, string | undefined> = {
+    memberList: undefined,
+    inviteList: 'invites',
+    betaApplications: 'beta_applications',
+    rulePanel: 'rules',
+  }
+
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    const mapped = tabParam ? TAB_PARAM_TO_STATE[tabParam] : undefined
+    return mapped ?? 'memberList'
+  })
+
+  // [D2 收口] URL 变化（前进/后退/外部修改）时同步 state，保证 URL 为唯一真源
+  useEffect(() => {
+    const mapped = tabParam ? TAB_PARAM_TO_STATE[tabParam] : undefined
+    setActiveTab(mapped ?? 'memberList')
+  }, [tabParam]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSetTab = useCallback(
     (tab: string) => {
       setActiveTab(tab)
       const params = new URLSearchParams(searchParams)
-      if (tab === 'betaApplications') {
-        params.set('tab', 'beta-applications')
+      const param = TAB_STATE_TO_PARAM[tab]
+      if (param) {
+        params.set('tab', param)
       } else {
         params.delete('tab')
       }

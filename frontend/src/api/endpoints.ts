@@ -2577,18 +2577,25 @@ export interface SystemOverview {
     }
     today_must_process: Array<{
       key: string
+      error_code: string
       severity: 'error' | 'warning' | 'info'
       message: string
       retryable: boolean
       resumable: boolean
       recommended_action: string
+      target_route: string | null
     }>
     production_chain: Array<{
       key: string
       label: string
-      status: 'ok' | 'pending' | 'running' | 'failed' | 'stale'
+      status: 'ok' | 'pending' | 'running' | 'failed' | 'stale' | 'attention' | 'not_applicable'
       detail: string
       trade_date: string | null
+      run_id: string | null
+      quality_gate: 'not_applicable' | 'passed' | 'failed' | 'pending'
+      publication_status: 'published' | 'unpublished' | 'pending' | 'failed' | 'not_applicable'
+      blocking_reason: string | null
+      recommended_action: string | null
     }>
   }
 }

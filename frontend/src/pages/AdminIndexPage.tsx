@@ -452,6 +452,11 @@ export default function AdminIndexPage() {
                     <span className="muted" style={{ display: 'block', fontSize: '0.85em' }}>
                       {issue.recommended_action}
                     </span>
+                    {issue.target_route && (
+                      <span className="muted" style={{ display: 'block', fontSize: '0.8em' }}>
+                        <Link to={issue.target_route}>前往处理 →</Link>
+                      </span>
+                    )}
                   </b>
                 </div>
               ))
@@ -466,7 +471,7 @@ export default function AdminIndexPage() {
           <div className="card-head">
             <div>
               <div className="card-title">今日生产链</div>
-              <div className="card-sub">行情 / 选股 / 发布 三环节状态</div>
+              <div className="card-sub">行情 / 第一金字塔 / 板块 / 复盘 / 竞价 / 发布</div>
             </div>
           </div>
           <div className="card-body">

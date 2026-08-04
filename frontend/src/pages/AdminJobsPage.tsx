@@ -832,7 +832,7 @@ export default function AdminJobsPage() {
       {/* 页头 */}
       <div className="page-head">
         <div>
-          <h1 className="page-title">任务与事件</h1>
+          <h1 className="page-title">任务中心</h1>
           <div className="page-desc">
             任务运行、全局碰触事件、用户分发和第三方投递均具备独立状态与幂等键
           </div>

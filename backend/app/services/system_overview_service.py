@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -140,6 +140,8 @@ async def get_system_overview(
     summary = await _compute_summary(
         base_fields, market_session, monitor_runtime, after_close_pipeline
     )
+    # [PRD §8.2] 数据生产中心：从各数据产品表查询完整 6 节点状态，覆盖纯派生的 3 节点
+    summary["production_chain"] = await _compute_product_nodes(db, business_date_obj)
 
     return {
         **base_fields,
@@ -1235,11 +1237,13 @@ async def _compute_summary(
         issues.append(
             TodayIssue(
                 key="worker_offline",
+                error_code="overview_worker_offline",
                 severity="error",
                 message="盘中监控 Worker 离线，实时计算已中断",
                 retryable=False,
                 resumable=False,
                 recommended_action="检查 trading-worker 容器并重启",
+                target_route="/admin/overview",
             ).model_dump()
         )
 
@@ -1248,11 +1252,13 @@ async def _compute_summary(
         issues.append(
             TodayIssue(
                 key="bars_behind",
+                error_code="overview_bars_behind",
                 severity="warning",
                 message="行情数据落后最近交易日",
                 retryable=True,
                 resumable=False,
                 recommended_action="重新同步日线数据并重跑盘后编排",
+                target_route="/admin/data-production",
             ).model_dump()
         )
 
@@ -1263,11 +1269,13 @@ async def _compute_summary(
         issues.append(
             TodayIssue(
                 key="quality_gate_failed",
+                error_code="overview_quality_gate_failed",
                 severity="error",
                 message="选股质量门禁未通过，今日结果未发布",
                 retryable=False,
                 resumable=False,
                 recommended_action="检查质量门禁配置与失败股票",
+                target_route="/admin/data-production",
             ).model_dump()
         )
     elif pipeline_status == PIPELINE_STATUS_PUBLISHED:
@@ -1278,11 +1286,13 @@ async def _compute_summary(
         issues.append(
             TodayIssue(
                 key="publish_failed",
+                error_code="overview_publish_failed",
                 severity="error",
                 message="选股发布失败",
                 retryable=True,
                 resumable=True,
                 recommended_action="检查发布逻辑与 published_run 表，可恢复重试",
+                target_route="/admin/data-production",
             ).model_dump()
         )
 
@@ -1291,11 +1301,13 @@ async def _compute_summary(
         issues.append(
             TodayIssue(
                 key="data_coverage_insufficient",
+                error_code="overview_data_coverage_insufficient",
                 severity="warning",
                 message="日线数据覆盖率不足，选股未发布",
                 retryable=True,
                 resumable=False,
                 recommended_action="重新同步日线数据后重跑",
+                target_route="/admin/data-production",
             ).model_dump()
         )
 
@@ -1304,6 +1316,7 @@ async def _compute_summary(
         issues.append(
             TodayIssue(
                 key="dsa_run_failed",
+                error_code="overview_dsa_run_failed",
                 severity="warning",
                 message="选股计算失败或未创建",
                 retryable=True,
@@ -1311,10 +1324,16 @@ async def _compute_summary(
                 recommended_action=(
                     "查看失败股票与 error_message，可重跑编排"
                 ),
+                target_route="/admin/data-production",
             ).model_dump()
         )
 
-    # ===== 汇总状态 =====
+    # ===== 汇总状态（PRD §8.1 唯一判定规则，后端唯一权威）=====
+    # 规则优先级（从高到低，返回首个命中的状态）：
+    #   1. 存在 severity=error 的 issue → blocked（需立即处理）
+    #   2. 存在 severity=warning 的 issue → attention（需关注）
+    #   3. 无任何 issue → ok
+    # 前端不得自行推导 overall_status，仅按此展示。
     has_error = any(i["severity"] == "error" for i in issues)
     has_warning = any(i["severity"] == "warning" for i in issues)
     if has_error:
@@ -1337,7 +1356,10 @@ async def _compute_summary(
         latest_published_trade_date=latest_published,
         latest_compute_trade_date=latest_compute,
         is_current=(latest_published is not None and latest_published == latest_compute),
-        quality_gate_passed=(quality_gate == "passed"),
+        # [PRD §8.2] 三态语义：passed→True；failed→False；pending/not_applicable→None（未触发不代表未通过）
+        quality_gate_passed=(
+            True if quality_gate == "passed" else False if quality_gate == "failed" else None
+        ),
     ).model_dump()
 
     return OverallSummary(
@@ -1347,6 +1369,229 @@ async def _compute_summary(
         today_must_process=issues,
         production_chain=chain,
     ).model_dump()
+
+
+async def _compute_product_nodes(
+    db: AsyncSession,
+    business_date: date,
+) -> list[dict[str, Any]]:
+    """[PRD §8.2] 数据生产中心：从各数据产品表查询完整 6 节点状态。
+
+    覆盖行情 / 第一金字塔 / 板块分析 / 复盘 / 竞价准备 / 正式发布 六个产品环节，
+    每项返回 trade_date / status / run_id / quality_gate / publication_status /
+    blocking_reason / recommended_action。纯只读查询，无副作用。
+
+    Args:
+        db: 异步数据库会话
+        business_date: 业务交易日
+
+    Returns:
+        6 个 ProductionChainNode 的 dict 列表
+    """
+    nodes: list[dict[str, Any]] = []
+
+    # ===== 1. 行情（bars_daily）=====
+    from app.models.bar import BarDaily
+    latest_daily = await db.scalar(
+        select(func.max(BarDaily.trade_date)).where(BarDaily.trade_date <= business_date)
+    )
+    if latest_daily is None:
+        nodes.append(
+            ProductionChainNode(
+                key="bars", label="行情", status="pending",
+                detail="今日尚无行情数据", trade_date=None,
+                publication_status="not_applicable",
+                blocking_reason="bars_daily 无数据", recommended_action="等待或触发日线同步",
+            ).model_dump()
+        )
+    elif latest_daily < business_date:
+        nodes.append(
+            ProductionChainNode(
+                key="bars", label="行情", status="stale",
+                detail=f"最新日线为 {latest_daily}（落后今日）", trade_date=latest_daily,
+                publication_status="not_applicable",
+                blocking_reason="行情落后最近交易日", recommended_action="重新同步日线数据",
+            ).model_dump()
+        )
+    else:
+        nodes.append(
+            ProductionChainNode(
+                key="bars", label="行情", status="ok",
+                detail=f"行情已更新至 {latest_daily}", trade_date=latest_daily,
+                publication_status="not_applicable",
+            ).model_dump()
+        )
+
+    # ===== 2. 第一金字塔（first_pyramid_history_runs，最近一次回补 run）=====
+    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
+    fp_run = await db.scalar(
+        select(FirstPyramidHistoryRun)
+        .order_by(FirstPyramidHistoryRun.created_at.desc())
+        .limit(1)
+    )
+    if fp_run is None:
+        nodes.append(
+            ProductionChainNode(
+                key="first_pyramid", label="第一金字塔", status="pending",
+                detail="尚无第一金字塔历史回补记录", trade_date=None,
+                publication_status="not_applicable",
+                blocking_reason="无 run 记录", recommended_action="触发第一金字塔历史回补",
+            ).model_dump()
+        )
+    else:
+        fp_status_map = {"succeeded": "ok", "partial": "attention", "running": "running", "failed": "failed"}
+        nodes.append(
+            ProductionChainNode(
+                key="first_pyramid", label="第一金字塔",
+                status=fp_status_map.get(fp_run.status, "pending"),
+                detail=f"最近回补 run：{fp_run.status}（成功 {fp_run.succeeded_count}/{fp_run.expected_count or 0}）",
+                trade_date=None, run_id=str(fp_run.id),
+                quality_gate="passed" if fp_run.status == "succeeded" else "failed",
+                publication_status="not_applicable",
+                blocking_reason=None if fp_run.status in ("succeeded", "partial", "running") else f"回补 {fp_run.status}",
+                recommended_action=None if fp_run.status in ("succeeded", "partial") else "查看失败股票或重跑历史回补",
+            ).model_dump()
+        )
+
+    # ===== 3. 板块分析（board_analysis_snapshots，最近一个 trade_date）=====
+    from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
+    board_date = await db.scalar(select(func.max(BoardAnalysisSnapshot.trade_date)))
+    if board_date is None:
+        nodes.append(
+            ProductionChainNode(
+                key="board", label="板块分析", status="pending",
+                detail="尚无板块分析快照", trade_date=None,
+                publication_status="not_applicable",
+                blocking_reason="无快照", recommended_action="触发板块分析计算",
+            ).model_dump()
+        )
+    else:
+        # 取该交易日覆盖率最高的一条快照作为代表
+        board_snap = await db.scalar(
+            select(BoardAnalysisSnapshot)
+            .where(BoardAnalysisSnapshot.trade_date == board_date)
+            .order_by(BoardAnalysisSnapshot.coverage_ratio.desc())
+            .limit(1)
+        )
+        cov_ok = board_snap is not None and board_snap.coverage_ratio >= 0.95
+        nodes.append(
+            ProductionChainNode(
+                key="board", label="板块分析",
+                status="ok" if cov_ok else ("running" if board_snap and board_snap.status == "running" else "failed"),
+                detail=(
+                    f"{board_date} 覆盖率 {(board_snap.coverage_ratio * 100):.0f}%"
+                    if board_snap else "无快照"
+                ),
+                trade_date=board_date,
+                run_id=str(board_snap.board_analysis_run_id) if board_snap else None,
+                quality_gate="passed" if cov_ok else "failed",
+                publication_status="not_applicable",
+                blocking_reason=None if cov_ok else "覆盖率未达 95%",
+                recommended_action=None if cov_ok else "查看板块缺失股票并重算",
+            ).model_dump()
+        )
+
+    # ===== 4. 复盘（market_review_runs，最近一个 trade_date）=====
+    from app.models.market_review import MarketReviewRun
+    review_date = await db.scalar(select(func.max(MarketReviewRun.trade_date)))
+    if review_date is None:
+        nodes.append(
+            ProductionChainNode(
+                key="review", label="复盘", status="pending",
+                detail="尚无复盘 run", trade_date=None,
+                publication_status="not_applicable",
+                blocking_reason="无复盘记录", recommended_action="触发复盘计算",
+            ).model_dump()
+        )
+    else:
+        review_run = await db.scalar(
+            select(MarketReviewRun)
+            .where(MarketReviewRun.trade_date == review_date)
+            .order_by(MarketReviewRun.created_at.desc())
+            .limit(1)
+        )
+        review_published = review_run is not None and review_run.status == "published"
+        nodes.append(
+            ProductionChainNode(
+                key="review", label="复盘",
+                status="ok" if review_published else ("running" if review_run and review_run.status in ("created", "computing") else "failed"),
+                detail=f"{review_date} 状态：{review_run.status if review_run else '无'}"
+                if review_run else "无复盘",
+                trade_date=review_date,
+                run_id=str(review_run.id) if review_run else None,
+                quality_gate="passed" if review_published else ("pending" if review_run else "failed"),
+                publication_status="published" if review_published else "pending",
+                blocking_reason=None if review_published else (review_run.status if review_run else "无 run"),
+                recommended_action=None if review_published else "检查复盘计算或发布",
+            ).model_dump()
+        )
+
+    # ===== 5. 竞价准备（auction_anchor_snapshots，最近一个 trade_date）=====
+    from app.models.auction import AuctionAnchorSnapshot
+    auction_date = await db.scalar(select(func.max(AuctionAnchorSnapshot.trade_date)))
+    if auction_date is None:
+        nodes.append(
+            ProductionChainNode(
+                key="auction", label="竞价准备", status="pending",
+                detail="尚无竞价锚点快照", trade_date=None,
+                publication_status="not_applicable",
+                blocking_reason="无快照", recommended_action="触发竞价分析计算",
+            ).model_dump()
+        )
+    else:
+        auction_snap = await db.scalar(
+            select(AuctionAnchorSnapshot)
+            .where(AuctionAnchorSnapshot.trade_date == auction_date)
+            .order_by(AuctionAnchorSnapshot.created_at.desc())
+            .limit(1)
+        )
+        auction_ok = auction_snap is not None and auction_snap.status == "succeeded"
+        nodes.append(
+            ProductionChainNode(
+                key="auction", label="竞价准备",
+                status="ok" if auction_ok else ("running" if auction_snap and auction_snap.status == "running" else "failed"),
+                detail=f"{auction_date} 状态：{auction_snap.status if auction_snap else '无'}"
+                if auction_snap else "无竞价",
+                trade_date=auction_date,
+                run_id=str(auction_snap.id) if auction_snap else None,
+                quality_gate="passed" if auction_ok else "failed",
+                publication_status="not_applicable",
+                blocking_reason=None if auction_ok else (auction_snap.status if auction_snap else "无快照"),
+                recommended_action=None if auction_ok else "查看竞价分析结果",
+            ).model_dump()
+        )
+
+    # ===== 6. 正式发布（StrategyRun dsa_selector 最新 published）=====
+    from app.models.strategy_run import StrategyRun
+    latest_published_run = await db.scalar(
+        select(StrategyRun)
+        .where(StrategyRun.status == "published")
+        .order_by(StrategyRun.trade_date.desc())
+        .limit(1)
+    )
+    if latest_published_run is None:
+        nodes.append(
+            ProductionChainNode(
+                key="publish", label="正式发布", status="pending",
+                detail="尚无正式发布", trade_date=None,
+                publication_status="pending",
+                blocking_reason="无 published run", recommended_action="等待 DSA 发布",
+            ).model_dump()
+        )
+    else:
+        nodes.append(
+            ProductionChainNode(
+                key="publish", label="正式发布",
+                status="ok",
+                detail=f"已发布至 {latest_published_run.trade_date}",
+                trade_date=latest_published_run.trade_date,
+                run_id=str(latest_published_run.id),
+                quality_gate="passed",
+                publication_status="published",
+            ).model_dump()
+        )
+
+    return nodes
 
 
 if __name__ == "__main__":

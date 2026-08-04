@@ -223,21 +223,33 @@ class TodayIssue(BaseModel):
     """
 
     key: str = Field(..., description="稳定标识（如 data_coverage_insufficient）")
+    error_code: str = Field(..., description="稳定错误码（同 admin_errors 命名规范，如 overview_bars_behind）")
     severity: str = Field(..., description="error / warning / info")
     message: str = Field(..., description="人类可读描述")
     retryable: bool = Field(False, description="是否可重跑（重跑盘后编排）")
     resumable: bool = Field(False, description="是否可恢复（断点继续）")
     recommended_action: str = Field(..., description="建议动作（人类可读）")
+    target_route: str | None = Field(None, description="前端导航目标（如 /admin/data-production），供 issue 跳转")
 
 
 class ProductionChainNode(BaseModel):
-    """[PRD §8.2] 今日生产链节点 - 行情/选股/发布三个环节的状态直出。"""
+    """[PRD §8.2] 今日生产链节点 - 各数据产品环节的状态直出。
 
-    key: str = Field(..., description="节点标识：bars / strategy / publish")
+    PRD 要求 6 个产品节点：行情 / 第一金字塔 / 板块分析 / 复盘 / 竞价准备 / 正式发布。
+    每项返回并展示：trade_date / status / run_id / quality_gate / publication_status /
+    blocking_reason / recommended_action。前端只展示，不判定。
+    """
+
+    key: str = Field(..., description="节点标识：bars / first_pyramid / board / review / auction / publish")
     label: str = Field(..., description="节点名称")
-    status: str = Field(..., description="ok / pending / running / failed / stale")
+    status: str = Field(..., description="ok / pending / running / failed / stale / not_applicable")
     detail: str = Field(..., description="人类可读详情")
     trade_date: date | None = None
+    run_id: str | None = Field(None, description="最近一次 run 的 ID（用于进入详情）")
+    quality_gate: str = Field("not_applicable", description="not_applicable / passed / failed / pending")
+    publication_status: str = Field("not_applicable", description="published / unpublished / pending / failed / not_applicable")
+    blocking_reason: str | None = Field(None, description="若节点未完成/阻塞，给出原因")
+    recommended_action: str | None = Field(None, description="建议动作（人类可读）")
 
 
 class PublicationStatus(BaseModel):
@@ -255,7 +267,7 @@ class OverallSummary(BaseModel):
 
     overall_status: str = Field("ok", description="ok / attention / blocked")
     quality_gate: str = Field("not_applicable", description="not_applicable / passed / failed / pending")
-    publication_status: PublicationStatus = PublicationStatus()
+    publication_status: PublicationStatus = Field(default_factory=PublicationStatus)
     today_must_process: list[TodayIssue] = Field(default_factory=list)
     production_chain: list[ProductionChainNode] = Field(default_factory=list)
 
@@ -290,7 +302,7 @@ class SystemOverviewResponse(BaseModel):
     after_close_pipeline: AfterClosePipeline | None = None
 
     # [PRD §8.1/8.2] 统一数据生产与发布状态摘要（P1，后端直出）
-    summary: OverallSummary = OverallSummary()
+    summary: OverallSummary = Field(default_factory=OverallSummary)
 
 
 if __name__ == "__main__":
@@ -383,10 +395,12 @@ if __name__ == "__main__":
         "scheduler_health", "recent_scheduler_jobs", "recent_anomalies",
         "server_time", "business_date", "market_session",
         "monitor_runtime", "after_close_pipeline",
+        # [PRD §8.1/8.2] 统一数据生产与发布状态摘要
+        "summary",
     }
     missing = expected_fields - set(fields.keys())
     assert not missing, f"缺少字段: {missing}"
-    print(f"SystemOverviewResponse fields count={len(fields)} (expected 17)")
+    print(f"SystemOverviewResponse fields count={len(fields)} (expected 18)")
 
     # 验证空响应可构建
     resp = SystemOverviewResponse()

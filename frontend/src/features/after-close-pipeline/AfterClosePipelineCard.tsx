@@ -61,15 +61,26 @@ function statusLabel(status: string | undefined): string {
 // [AfterClose] - 创建盘后编排 409 detail → 人类可读消息（透明化真实失败原因）
 // 后端 409 来源：NON_TRADING_DAY（非交易日）/ DUPLICATE_RUN（同日已有 queued/running 任务）/
 // DATA_COVERAGE_INSUFFICIENT（覆盖率不足，从DSA重算复用此 formatter）
+// [R14] 优先消费统一错误字段（stable_error_code/recommended_action），兼容旧 error_code/reason。
 function formatAfterCloseCreate409Message(detail: unknown): string {
   if (typeof detail === 'string') return detail
   if (detail && typeof detail === 'object') {
     const d = detail as {
+      stable_error_code?: string
       error_code?: string
       reason?: string
       message?: string
+      recommended_action?: string
       orchestrator_status?: string
       started_at?: string
+    }
+    // [R14] 统一错误：stable_error_code 是权威码，recommended_action 是建议动作
+    if (d.stable_error_code) {
+      let msg = d.message ?? '创建失败，请稍后重试'
+      if (d.recommended_action) {
+        msg = `${msg}（${d.recommended_action}）`
+      }
+      return msg
     }
     if (d.error_code === 'NON_TRADING_DAY' || d.reason === 'NON_TRADING_DAY') {
       return d.message ?? '非交易日无需执行'

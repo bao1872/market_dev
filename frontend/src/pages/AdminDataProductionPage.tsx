@@ -1,11 +1,15 @@
 // 数据生产中心（受保护路由，admin only）
 // [管理后台优化 PRD §8.2] 统一查看盘迹所有业务数据产品的生产状态、质量门禁、正式发布与恢复动作。
 //
-// P0：将原「盘后流水线」并入本中心，作为「盘后编排」Tab 的主内容；
-//     提供 Tab 结构（总览/盘后编排/第一金字塔/板块/复盘/竞价/发布），后续 P1 阶段填充各业务 Tab。
+// 结构：
+// - 盘后编排：复用原「盘后流水线」页面
+// - 总览：从后端 summary.production_chain 渲染 6 个产品节点（行情/第一金字塔/板块/复盘/竞价/发布）
+// - 各业务 Tab（第一金字塔/板块/复盘/竞价/发布）：展示同一聚合读模型的筛选视图（该产品节点详情），
+//   不重复建设复杂详情（PRD §8.2：其他业务 Tab 先展示同一个聚合读模型的筛选视图）
 // URL 状态：tab 进入 URL query（/admin/data-production?tab=after-close），刷新保持，可分享定位。
 import { useSearchParams } from 'react-router-dom'
 import AdminAfterClosePipelinePage from './AdminAfterClosePipelinePage'
+import { useAdminSystemOverview } from '@/hooks/useApi'
 
 export type DataProductionTab =
   | 'overview'
@@ -26,12 +30,54 @@ const TAB_ITEMS: { key: DataProductionTab; label: string }[] = [
   { key: 'publish', label: '发布' },
 ]
 
+// 业务产品 Tab → production_chain 节点 key 映射（筛选视图）
+const TAB_TO_CHAIN_KEY: Partial<Record<DataProductionTab, string>> = {
+  'first-pyramid': 'first_pyramid',
+  board: 'board',
+  review: 'review',
+  auction: 'auction',
+  publish: 'publish',
+}
+
+const CHAIN_KEY_TO_LABEL: Record<string, string> = {
+  bars: '行情',
+  first_pyramid: '第一金字塔',
+  board: '板块分析',
+  review: '复盘',
+  auction: '竞价准备',
+  publish: '正式发布',
+}
+
+// 节点状态 → pill 颜色映射（与全局 status-pill 一致）
+function chainStatusPill(status: string): string {
+  if (status === 'ok') return 'ok'
+  if (status === 'failed') return 'off'
+  return 'warn'
+}
+
+function chainStatusText(status: string): string {
+  const map: Record<string, string> = {
+    ok: '正常',
+    pending: '待处理',
+    running: '进行中',
+    failed: '失败',
+    stale: '落后',
+    attention: '需关注',
+    not_applicable: '不适用',
+  }
+  return map[status] ?? status
+}
+
 export default function AdminDataProductionPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTabRaw = searchParams.get('tab')
   const activeTab: DataProductionTab = (TAB_ITEMS.some((t) => t.key === activeTabRaw)
     ? (activeTabRaw as DataProductionTab)
     : 'after-close') as DataProductionTab
+
+  const overviewQuery = useAdminSystemOverview(true)
+  const overview = overviewQuery.data
+  const chain = overview?.summary?.production_chain ?? []
 
   const handleTab = (tab: DataProductionTab) => {
     const params = new URLSearchParams(searchParams)
@@ -43,6 +89,12 @@ export default function AdminDataProductionPage() {
     }
     setSearchParams(params, { replace: false })
   }
+
+  // 业务产品 Tab 的筛选视图：展示该产品节点（若总览未命中则给空态）
+  const businessChainKey = activeTab === 'overview' ? null : TAB_TO_CHAIN_KEY[activeTab] ?? null
+  const businessNode = businessChainKey
+    ? chain.find((n) => n.key === businessChainKey) ?? null
+    : null
 
   return (
     <>
@@ -73,18 +125,125 @@ export default function AdminDataProductionPage() {
       {/* 盘后编排：并入原盘后流水线页面 */}
       {activeTab === 'after-close' && <AdminAfterClosePipelinePage />}
 
-      {/* 业务产品 Tab：P1 阶段填充聚合状态；当前给出空态占位，避免"暂无数据"误导 */}
-      {activeTab !== 'after-close' && (
-        <div className="card section-gap">
-          <div className="card-body">
-            <div className="empty-state">
-              该业务产品聚合视图将在统一数据生产与发布状态阶段（P1）提供
-            </div>
-            <div className="hint">
-              当前阶段先完成信息架构收口，后续接入后端聚合读模型（AdminRunSummary）。
+      {/* 总览：从后端 summary.production_chain 渲染 6 个产品节点 */}
+      {activeTab === 'overview' && (
+        <section className="card section-gap">
+          <div className="card-head">
+            <div>
+              <div className="card-title">各数据产品生产状态</div>
+              <div className="card-sub">行情 / 第一金字塔 / 板块分析 / 复盘 / 竞价准备 / 正式发布</div>
             </div>
           </div>
-        </div>
+          <div className="card-body">
+            {overviewQuery.isLoading ? (
+              <div className="notice">加载中…</div>
+            ) : chain.length ? (
+              chain.map((node) => (
+                <div key={node.key} className="toggle-row">
+                  <span>{node.label}</span>
+                  <b className="num" style={{ maxWidth: '60%', textAlign: 'right' }}>
+                    <span className={`status-pill ${chainStatusPill(node.status)}`}>
+                      {chainStatusText(node.status)}
+                    </span>
+                    <span className="muted" style={{ display: 'block', fontSize: '0.85em' }}>
+                      {node.detail}
+                    </span>
+                    {node.blocking_reason && (
+                      <span className="muted" style={{ display: 'block', fontSize: '0.8em' }}>
+                        阻塞原因：{node.blocking_reason}
+                      </span>
+                    )}
+                    {node.recommended_action && (
+                      <span className="muted" style={{ display: 'block', fontSize: '0.8em' }}>
+                        建议：{node.recommended_action}
+                      </span>
+                    )}
+                  </b>
+                </div>
+              ))
+            ) : (
+              <div className="notice">暂无数据</div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* 业务产品 Tab：聚合读模型筛选视图（PRD §8.2），展示该产品节点状态，不再显示"P1 后续提供"占位 */}
+      {activeTab !== 'after-close' && activeTab !== 'overview' && (
+        <section className="card section-gap">
+          <div className="card-head">
+            <div>
+              <div className="card-title">
+                {businessNode ? businessNode.label : (CHAIN_KEY_TO_LABEL[businessChainKey ?? ''] ?? '数据产品')}
+              </div>
+              <div className="card-sub">生产状态 / 质量门禁 / 正式发布</div>
+            </div>
+          </div>
+          <div className="card-body">
+            {overviewQuery.isLoading ? (
+              <div className="notice">加载中…</div>
+            ) : businessNode ? (
+              <>
+                <div className="toggle-row">
+                  <span>状态</span>
+                  <b>
+                    <span className={`status-pill ${chainStatusPill(businessNode.status)}`}>
+                      {chainStatusText(businessNode.status)}
+                    </span>
+                  </b>
+                </div>
+                <div className="toggle-row">
+                  <span>交易日</span>
+                  <b className="num">{businessNode.trade_date ?? '-'}</b>
+                </div>
+                <div className="toggle-row">
+                  <span>run_id</span>
+                  <b className="num" style={{ fontSize: '0.8em' }}>{businessNode.run_id ?? '-'}</b>
+                </div>
+                <div className="toggle-row">
+                  <span>质量门禁</span>
+                  <b className="num">
+                    {businessNode.quality_gate === 'passed'
+                      ? '已通过'
+                      : businessNode.quality_gate === 'failed'
+                        ? '未通过'
+                        : '未触发'}
+                  </b>
+                </div>
+                <div className="toggle-row">
+                  <span>正式发布</span>
+                  <b className="num">
+                    {businessNode.publication_status === 'published'
+                      ? '已发布'
+                      : businessNode.publication_status === 'failed'
+                        ? '发布失败'
+                        : '未发布'}
+                  </b>
+                </div>
+                {businessNode.detail && (
+                  <div className="toggle-row">
+                    <span>详情</span>
+                    <b className="num">{businessNode.detail}</b>
+                  </div>
+                )}
+                {businessNode.blocking_reason && (
+                  <div className="toggle-row">
+                    <span>阻塞原因</span>
+                    <b className="num">{businessNode.blocking_reason}</b>
+                  </div>
+                )}
+                {businessNode.recommended_action && (
+                  <div className="toggle-row">
+                    <span>建议动作</span>
+                    <b className="num">{businessNode.recommended_action}</b>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="notice">该产品暂无生产记录</div>
+            )}
+          </div>
+        </section>
       )}
     </>
   )
