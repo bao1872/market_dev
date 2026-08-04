@@ -1,6 +1,6 @@
 # PRD 完整验收矩阵
 
-**基线**: `f0816ef636d46e19ba2d793bd94320ec3b7dd0e8`
+**基线**: `d338a0747801966007360e3acf5231c96f2ac45a`
 **生成日期**: 2026-08-04
 **目的**: 逐条核对所有 PRD 需求的实现状态、证据和剩余缺口
 **当前判断**: `code_ready = false`, `data_closed = false`
@@ -34,7 +34,7 @@
 
 每一项需求必须记录 7 个维度：`implementation_status` / `backend_evidence` / `api_schema_evidence` / `frontend_evidence` / `behavior_test_evidence` / `real_data_required` / `remaining_gap`
 
-状态标记：✅ 已实现且通过验证 | ⚠️ 部分实现但有缺口 | ❌ 未开始或未通过验证 | 🚫 不适用
+状态标记（P0-3 离散分级，禁止用单个✅混合代表不同层级）：`implemented`（有实现）→ `behavior_tested`（行为测试通过）→ `pg_tested`（PG 集成测试通过）→ `runtime_tested`（远端运行验证）→ `browser_tested`（浏览器验收）→ `data_verified`（真实数据核验）→ `blocked`（被阻塞）。任一需求须标注其最高已达成的离散层级，具体证据落在 7 个维度列。
 
 ---
 
