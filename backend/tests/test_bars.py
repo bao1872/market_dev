@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
@@ -225,7 +226,7 @@ async def test_check_minute_freshness_no_data() -> None:
 @pytest.mark.asyncio
 async def test_check_minute_freshness_recent() -> None:
     """测试分钟线数据新鲜（最近 60 秒）。"""
-    recent_time = datetime.now() - pd.Timedelta(seconds=60)
+    recent_time = datetime.now(ZoneInfo("Asia/Shanghai")) - pd.Timedelta(seconds=60)
     session = _make_mock_session(recent_time)
     result = await check_minute_freshness(session, TEST_INSTRUMENT_ID)
 
@@ -239,7 +240,7 @@ async def test_check_minute_freshness_recent() -> None:
 @pytest.mark.asyncio
 async def test_check_minute_freshness_stale() -> None:
     """测试分钟线数据过期（2 小时前）。"""
-    stale_time = datetime.now() - pd.Timedelta(hours=2)
+    stale_time = datetime.now(ZoneInfo("Asia/Shanghai")) - pd.Timedelta(hours=2)
     session = _make_mock_session(stale_time)
     result = await check_minute_freshness(session, TEST_INSTRUMENT_ID)
 

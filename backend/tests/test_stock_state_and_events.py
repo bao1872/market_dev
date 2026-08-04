@@ -824,6 +824,8 @@ async def test_require_active_subscription_rejects_expired() -> None:
         expires_at=datetime(2026, 1, 1, tzinfo=UTC),
         features=[],
         limits={},
+        # [权限模型 V2] AccessContext.default_route 已必填，测试需显式提供
+        default_route="/forbidden",
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -852,6 +854,8 @@ async def test_require_active_subscription_allows_admin() -> None:
         expires_at=None,
         features=[],
         limits={},
+        # [权限模型 V2] AccessContext.default_route 已必填，测试需显式提供
+        default_route="/admin/overview",
     )
 
     result = await require_active_subscription(ctx=admin_ctx)
@@ -880,6 +884,8 @@ async def test_require_admin_rejects_member() -> None:
         expires_at=datetime(2026, 12, 31, tzinfo=UTC),
         features=[],
         limits={},
+        # [权限模型 V2] AccessContext.default_route 已必填，测试需显式提供
+        default_route="/forbidden",
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -908,6 +914,8 @@ async def test_require_admin_allows_admin() -> None:
         expires_at=None,
         features=[],
         limits={},
+        # [权限模型 V2] AccessContext.default_route 已必填，测试需显式提供
+        default_route="/admin/overview",
     )
 
     result = await require_admin(ctx=admin_ctx)

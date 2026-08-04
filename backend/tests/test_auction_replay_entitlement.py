@@ -77,6 +77,8 @@ def _ctx(
         features=[],
         limits={},
         capabilities=capabilities or {},
+        # [权限模型 V2] AccessContext.default_route 已必填，测试需显式提供
+        default_route="/admin/overview" if is_admin else "/forbidden",
     )
 
 
