@@ -3644,7 +3644,12 @@ export interface VolumeContextSchema {
 
 export interface PyramidEvent {
   type: string
+  /** [QM-63] 正式方向值：bullish/bearish/null（up/down 仅历史兼容） */
   direction: string | null
+  /** [QM-63] 正式结构级别：swing/internal/null（缺级别保持 null，不默认 swing） */
+  structureLevel?: string | null
+  /** [QM-63] 正式 bias：1/-1/null（由 direction 派生，二者永远一致） */
+  bias?: number | null
   occurredAt: string | null
   barIndex: number | null
   price: number | null

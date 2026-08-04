@@ -188,10 +188,14 @@ function buildVolumeWaterLevel(vc: VolumeContextSchema | null | undefined): Volu
 }
 
 function buildStructureEvent(e: PyramidEvent): StructureEventVM {
-  const levelRaw = e.extra?.['structure_level']
+  // [QM-63 canonical] 优先读正式字段（direction/structureLevel/bias），
+  // 仅当正式字段缺失时回退 extra（历史兼容），禁止默认 swing / 默认 bearish。
+  const levelRaw = e.structureLevel ?? e.extra?.['structure_level']
   const structureLevel = levelRaw === 'swing' || levelRaw === 'internal' ? levelRaw : null
-  const direction = e.direction === 'up' || e.direction === 'down' ? e.direction : null
-  const bias = asNumber(e.extra?.['bias'])
+  // 正式方向接受 bullish/bearish；历史 up/down 归一（smcLabels 内部处理）。
+  const direction = e.direction ?? null
+  const biasRaw = e.bias ?? e.extra?.['bias']
+  const bias = asNumber(biasRaw)
   let typeLabel = EVENT_TYPE_LABEL[e.type] ?? e.type
   let levelLabel = structureLevel ? STRUCTURE_LEVEL_LABEL[structureLevel] : null
   if (e.type === 'BOS' || e.type === 'CHoCH') {

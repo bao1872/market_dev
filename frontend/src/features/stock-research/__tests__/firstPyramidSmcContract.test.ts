@@ -24,10 +24,12 @@ function canonicalPayload(): FirstPyramidSnapshot {
     trend: dimension({ name: 'trend' }),
     structure: dimension({
       continuousFactors: { swing_direction: 1, internal_direction: -1 },
+      // [QM-63 canonical 2026-08-04] 正式字段：direction=bullish/bearish，
+      // structureLevel/bias 为顶层字段（不再藏 extra）。
       events: [
-        { type: 'BOS', direction: 'up', occurredAt: '2026-08-03', barIndex: 1, price: 11, freshnessBars: 0, extra: { structure_level: 'swing', bias: 1 } },
-        { type: 'CHoCH', direction: 'down', occurredAt: '2026-08-02', barIndex: 0, price: 10, freshnessBars: 1, extra: { structure_level: 'internal', bias: -1 } },
-        { type: 'EQH', direction: null, occurredAt: '2026-08-01', barIndex: 0, price: 12, freshnessBars: 2, extra: { structure_level: null } },
+        { type: 'BOS', direction: 'bullish', structureLevel: 'swing', bias: 1, occurredAt: '2026-08-03', barIndex: 1, price: 11, freshnessBars: 0 },
+        { type: 'CHoCH', direction: 'bearish', structureLevel: 'internal', bias: -1, occurredAt: '2026-08-02', barIndex: 0, price: 10, freshnessBars: 1 },
+        { type: 'EQH', direction: null, structureLevel: null, occurredAt: '2026-08-01', barIndex: 0, price: 12, freshnessBars: 2 },
       ],
     }),
     momentum: dimension({ name: 'momentum' }),
@@ -44,8 +46,8 @@ test('canonical/stock_core/Review payload 到 FirstPyramidVM 保持统一 SMC �
   const vm = buildFirstPyramidVM(canonicalPayload(), 'detail')
   assert.deepEqual(vm.structure.events.map(event => event.typeLabel), [
     '双顶压力',
-    '短线转弱拐点↓',
-    '主要突破前高↑',
+    '短线·转弱拐点↓',
+    '主要·多头突破↑',
   ])
   assert.equal(vm.structure.events[0].levelLabel, null, 'EQH 不得虚构 structureLevel')
   assert.equal(vm.structure.events[1].levelLabel, '短线级别')
