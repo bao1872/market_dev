@@ -118,14 +118,20 @@ async def create_after_close_run_endpoint(
 
     # [AfterClose] - 非交易日拦截：避免创建空转的盘后编排任务（不创建 SchedulerJobRun 记录）
     if not await is_trading_day_async(db, trade_date):
+        # [PRD §8.4.9] 统一错误字段（保留旧 error_code/message 兼容，新增稳定语义字段）
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "error_code": "NON_TRADING_DAY",
+                "detail": f"{trade_date.isoformat()}（{trade_date.strftime('%A')}）非交易日，无需执行盘后编排",
+                "message": f"{trade_date.isoformat()}（{trade_date.strftime('%A')}）非交易日，无需执行盘后编排",
+                "severity": "info",
+                "retryable": False,
+                "resumable": False,
+                "recommended_action": "无需处理，非交易日不执行盘后编排",
                 "reason": "非交易日无需执行盘后编排",
                 "trade_date": trade_date.isoformat(),
                 "weekday": trade_date.strftime("%A"),
-                "message": f"{trade_date.isoformat()}（{trade_date.strftime('%A')}）非交易日，无需执行盘后编排",
             },
         )
 
@@ -140,10 +146,17 @@ async def create_after_close_run_endpoint(
     # [AfterClose] - detail 增强：透传 error_code/started_at/heartbeat_at/last_completed_step，
     # 供前端展示真实冲突原因（当前阶段 + 开始时间）并提供"查看任务"入口（job_run_id）
     if not is_new:
+        # [PRD §8.4.9] 统一错误字段（保留旧 error_code/message 兼容，新增稳定语义字段）
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "error_code": "DUPLICATE_RUN",
+                "detail": f"当天已有盘后任务正在运行: trade_date={trade_date}",
+                "message": f"当天已有盘后任务正在运行: trade_date={trade_date}",
+                "severity": "warning",
+                "retryable": False,
+                "resumable": True,
+                "recommended_action": "查看任务详情或等待其进入终态",
                 "after_close_run_id": str(job_run.id),
                 "status": job_run.status,
                 "orchestrator_status": orchestrator_status or "unknown",
@@ -155,7 +168,6 @@ async def create_after_close_run_endpoint(
                     job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None
                 ),
                 "last_completed_step": meta.get("last_completed_step"),
-                "message": f"当天已有盘后任务正在运行: trade_date={trade_date}",
             },
         )
 
@@ -676,20 +688,31 @@ async def force_advance_after_close_endpoint(
         )
         coverage_raw = coverage_result["coverage_raw"]
         if coverage_raw < _RESTART_FROM_COVERAGE_THRESHOLD:
+            # [PRD §8.4.9] 统一错误字段（保留 reason/message 兼容，新增稳定语义字段）
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
+                    "error_code": "DATA_COVERAGE_INSUFFICIENT",
+                    "detail": (
+                        f"restart_from=daily_ready 覆盖率不足: "
+                        f"{coverage_result['coverage']:.1%} < "
+                        f"{_RESTART_FROM_COVERAGE_THRESHOLD:.0%}"
+                    ),
+                    "message": (
+                        f"restart_from=daily_ready 覆盖率不足: "
+                        f"{coverage_result['coverage']:.1%} < "
+                        f"{_RESTART_FROM_COVERAGE_THRESHOLD:.0%}"
+                    ),
+                    "severity": "warning",
+                    "retryable": True,
+                    "resumable": False,
+                    "recommended_action": "重新同步日线数据后再重试",
                     "reason": "DATA_COVERAGE_INSUFFICIENT",
                     "trade_date": coverage_result["trade_date"],
                     "daily_coverage": coverage_result["coverage"],
                     "daily_covered": coverage_result["covered"],
                     "daily_total": coverage_result["total"],
                     "threshold": _RESTART_FROM_COVERAGE_THRESHOLD,
-                    "message": (
-                        f"restart_from=daily_ready 覆盖率不足: "
-                        f"{coverage_result['coverage']:.1%} < "
-                        f"{_RESTART_FROM_COVERAGE_THRESHOLD:.0%}"
-                    ),
                 },
             )
         coverage_info = {
