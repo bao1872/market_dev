@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # [SystemOverview] - 监控运行时状态枚举
 MONITOR_STATUS_RUNNING = "RUNNING"
@@ -216,6 +216,50 @@ class AfterClosePipeline(BaseModel):
     last_completed_step: str | None = None
 
 
+class TodayIssue(BaseModel):
+    """[PRD §8.1] 今日必须处理项 - 由后端基于实时状态直出，前端只做展示不判定。
+
+    覆盖：数据覆盖不足/质量门禁失败/发布失败/Worker 离线/队列积压等需要管理员介入的项。
+    """
+
+    key: str = Field(..., description="稳定标识（如 data_coverage_insufficient）")
+    severity: str = Field(..., description="error / warning / info")
+    message: str = Field(..., description="人类可读描述")
+    retryable: bool = Field(False, description="是否可重跑（重跑盘后编排）")
+    resumable: bool = Field(False, description="是否可恢复（断点继续）")
+    recommended_action: str = Field(..., description="建议动作（人类可读）")
+
+
+class ProductionChainNode(BaseModel):
+    """[PRD §8.2] 今日生产链节点 - 行情/选股/发布三个环节的状态直出。"""
+
+    key: str = Field(..., description="节点标识：bars / strategy / publish")
+    label: str = Field(..., description="节点名称")
+    status: str = Field(..., description="ok / pending / running / failed / stale")
+    detail: str = Field(..., description="人类可读详情")
+    trade_date: date | None = None
+
+
+class PublicationStatus(BaseModel):
+    """[PRD §8.2] 正式发布状态 - 区分"最新计算成功"与"已正式发布"。"""
+
+    status: str = Field("pending", description="published / unpublished / pending / failed")
+    latest_published_trade_date: date | None = None
+    latest_compute_trade_date: date | None = None
+    is_current: bool = Field(False, description="已发布交易日是否等于最新计算交易日")
+    quality_gate_passed: bool | None = None
+
+
+class OverallSummary(BaseModel):
+    """[PRD §8.1/8.2] 统一数据生产与发布状态摘要 - 后端直出，前端不再自行判定。"""
+
+    overall_status: str = Field("ok", description="ok / attention / blocked")
+    quality_gate: str = Field("not_applicable", description="not_applicable / passed / failed / pending")
+    publication_status: PublicationStatus = PublicationStatus()
+    today_must_process: list[TodayIssue] = Field(default_factory=list)
+    production_chain: list[ProductionChainNode] = Field(default_factory=list)
+
+
 class SystemOverviewResponse(BaseModel):
     """系统概览响应 - 管理员仪表盘数据。
 
@@ -244,6 +288,9 @@ class SystemOverviewResponse(BaseModel):
     market_session: str | None = None
     monitor_runtime: MonitorRuntime | None = None
     after_close_pipeline: AfterClosePipeline | None = None
+
+    # [PRD §8.1/8.2] 统一数据生产与发布状态摘要（P1，后端直出）
+    summary: OverallSummary = OverallSummary()
 
 
 if __name__ == "__main__":

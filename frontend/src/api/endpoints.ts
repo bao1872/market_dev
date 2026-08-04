@@ -2564,6 +2564,33 @@ export interface SystemOverview {
     // [Phase8A] - 当前执行步骤（与 orchestrator_status 同义，便于前端直接读取）
     current_step: string | null
   }
+  // [PRD §8.1/8.2] 统一数据生产与发布状态摘要（后端直出，前端只展示不判定）
+  summary: {
+    overall_status: 'ok' | 'attention' | 'blocked'
+    quality_gate: 'not_applicable' | 'passed' | 'failed' | 'pending'
+    publication_status: {
+      status: 'published' | 'unpublished' | 'pending' | 'failed'
+      latest_published_trade_date: string | null
+      latest_compute_trade_date: string | null
+      is_current: boolean
+      quality_gate_passed: boolean | null
+    }
+    today_must_process: Array<{
+      key: string
+      severity: 'error' | 'warning' | 'info'
+      message: string
+      retryable: boolean
+      resumable: boolean
+      recommended_action: string
+    }>
+    production_chain: Array<{
+      key: string
+      label: string
+      status: 'ok' | 'pending' | 'running' | 'failed' | 'stale'
+      detail: string
+      trade_date: string | null
+    }>
+  }
 }
 
 /** 最近定时任务摘要（系统概览） */

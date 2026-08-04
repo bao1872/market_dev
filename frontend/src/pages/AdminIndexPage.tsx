@@ -358,12 +358,12 @@ export default function AdminIndexPage() {
         </section>
       </div>
 
-      {/* ===== 第二层：今日生产链摘要（PRD §8.1：概览只给摘要，详细流水线移至数据生产中心）===== */}
+      {/* ===== 第二层：总状态 + 今日必须处理 + 今日生产链（PRD §8.1，后端 summary 直出）===== */}
       <div className="grid section-gap">
         <section className="card">
           <div className="card-head">
             <div>
-              <div className="card-title">今日生产链</div>
+              <div className="card-title">总状态</div>
               <div className="card-sub">
                 {overview?.business_date ? `业务日期 ${overview.business_date}` : '概览摘要'}
               </div>
@@ -371,32 +371,125 @@ export default function AdminIndexPage() {
           </div>
           <div className="card-body">
             <div className="toggle-row">
-              <span>行情更新至</span>
-              <b className="num">
-                {overviewLoading ? '-' : (barsFreshness?.latest_daily_trade_date ?? '-')}
+              <span>系统整体状态</span>
+              <b>
+                <span
+                  className={`status-pill ${
+                    !overview?.summary
+                      ? ''
+                      : overview.summary.overall_status === 'blocked'
+                        ? 'off'
+                        : overview.summary.overall_status === 'attention'
+                          ? 'warn'
+                          : 'ok'
+                  }`}
+                >
+                  {overviewLoading
+                    ? '-'
+                    : overview?.summary?.overall_status === 'blocked'
+                      ? '需立即处理'
+                      : overview?.summary?.overall_status === 'attention'
+                        ? '需关注'
+                        : '正常'}
+                </span>
               </b>
             </div>
             <div className="toggle-row">
-              <span>选股发布至</span>
+              <span>质量门禁</span>
               <b className="num">
                 {overviewLoading
                   ? '-'
-                  : (strategyFreshness?.latest_published_trade_date ?? '-')}
+                  : overview?.summary?.quality_gate === 'passed'
+                    ? '已通过'
+                    : overview?.summary?.quality_gate === 'failed'
+                      ? '未通过'
+                      : '未触发'}
               </b>
             </div>
             <div className="toggle-row">
-              <span>是否落后</span>
+              <span>正式发布</span>
               <b className="num">
                 {overviewLoading
                   ? '-'
-                  : barsFreshness?.is_behind_latest_trade_date
-                    ? '是（落后最近交易日）'
-                    : '否'}
+                  : overview?.summary?.publication_status?.status === 'published'
+                    ? `已发布至 ${overview.summary.publication_status.latest_published_trade_date ?? '-'}`
+                    : overview?.summary?.publication_status?.status === 'failed'
+                      ? '发布失败'
+                      : '未发布'}
               </b>
             </div>
             <Link className="btn small card-body-action" to="/admin/data-production">
               查看今日数据生产 →
             </Link>
+          </div>
+        </section>
+
+        {/* 今日必须处理（issues） */}
+        <section className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">今日必须处理</div>
+              <div className="card-sub">后端派生，需要管理员介入的事项</div>
+            </div>
+          </div>
+          <div className="card-body">
+            {overviewLoading ? (
+              <div className="notice">加载中…</div>
+            ) : overview?.summary?.today_must_process?.length ? (
+              overview.summary.today_must_process.map((issue) => (
+                <div key={issue.key} className="toggle-row">
+                  <span>
+                    <span
+                      className={`status-pill ${
+                        issue.severity === 'error' ? 'off' : 'warn'
+                      }`}
+                    >
+                      {issue.severity === 'error' ? '严重' : '注意'}
+                    </span>
+                  </span>
+                  <b className="num" style={{ maxWidth: '60%', textAlign: 'right' }}>
+                    {issue.message}
+                    <span className="muted" style={{ display: 'block', fontSize: '0.85em' }}>
+                      {issue.recommended_action}
+                    </span>
+                  </b>
+                </div>
+              ))
+            ) : (
+              <div className="notice">无需人工处理</div>
+            )}
+          </div>
+        </section>
+
+        {/* 今日生产链（后端 summary.production_chain 直出） */}
+        <section className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">今日生产链</div>
+              <div className="card-sub">行情 / 选股 / 发布 三环节状态</div>
+            </div>
+          </div>
+          <div className="card-body">
+            {overviewLoading ? (
+              <div className="notice">加载中…</div>
+            ) : overview?.summary?.production_chain?.length ? (
+              overview.summary.production_chain.map((node) => (
+                <div key={node.key} className="toggle-row">
+                  <span>{node.label}</span>
+                  <b className="num">
+                    <span
+                      className={`status-pill ${
+                        node.status === 'ok' ? 'ok' : node.status === 'failed' ? 'off' : 'warn'
+                      }`}
+                    >
+                      {node.detail}
+                    </span>
+                  </b>
+                </div>
+              ))
+            ) : (
+              <div className="notice">暂无数据</div>
+            )}
           </div>
         </section>
       </div>

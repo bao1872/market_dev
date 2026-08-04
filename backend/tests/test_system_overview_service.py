@@ -36,6 +36,7 @@ from app.services.market_status_service import (
 from app.services.system_overview_service import (
     FRESHNESS_DELAYED_THRESHOLD,
     HEARTBEAT_OFFLINE_THRESHOLD,
+    _compute_summary,
     _determine_monitor_status,
     get_system_overview,
 )
@@ -1373,6 +1374,131 @@ async def test_compute_bars_coverage_excludes_non_stocks(db_session):
         f"若分子含指数，覆盖率会变为 1.5（3/2）；"
         f"若分母含指数/ETF，覆盖率会变为 0.75（3/4）"
     )
+
+
+# ============================================================
+# [PRD §8.1/8.2] _compute_summary 纯派生逻辑测试（无 DB，直接喂字典）
+# ============================================================
+
+
+async def _summary_ctx() -> tuple[dict, dict]:
+    """构造健康 base_fields + monitor_runtime。"""
+    return (
+        {"worker_health": "healthy"},
+        {"status": "RUNNING"},
+    )
+
+
+def _pipeline(
+    *,
+    status: str,
+    waiting_reason: str | None,
+    latest_compute: str | None,
+    latest_published: str | None,
+    run_status: str | None,
+    bars_behind: bool = False,
+) -> dict:
+    return {
+        "status": status,
+        "waiting_dsa_reason": waiting_reason,
+        "data_freshness": {
+            "bars": {
+                "latest_daily_trade_date": "2026-08-03",
+                "is_behind_latest_trade_date": bars_behind,
+            },
+            "strategy": {
+                "latest_compute_trade_date": latest_compute,
+                "latest_published_trade_date": latest_published,
+                "status": run_status,
+            },
+        },
+    }
+
+
+async def test_summary_ok_when_published() -> None:
+    """全部正常 → overall=ok，quality_gate=passed，发布为当前日期。"""
+    base, monitor = await _summary_ctx()
+    pipeline = _pipeline(
+        status="PUBLISHED",
+        waiting_reason=None,
+        latest_compute="2026-08-03",
+        latest_published="2026-08-03",
+        run_status="published",
+    )
+    s = await _compute_summary(base, "MARKET_CLOSED", monitor, pipeline)
+    assert s["overall_status"] == "ok"
+    assert s["quality_gate"] == "passed"
+    assert s["publication_status"]["is_current"] is True
+    assert s["publication_status"]["status"] == "published"
+    assert s["today_must_process"] == []
+    assert [n["key"] for n in s["production_chain"]] == ["bars", "strategy", "publish"]
+
+
+async def test_summary_blocked_when_quality_gate_failed() -> None:
+    """质量门禁失败 → overall=blocked，quality_gate=failed，产生 quality_gate_failed issue。"""
+    base, monitor = await _summary_ctx()
+    pipeline = _pipeline(
+        status="DSA_FAILED",
+        waiting_reason="QUALITY_GATE_FAILED",
+        latest_compute="2026-08-03",
+        latest_published="2026-08-01",
+        run_status="failed",
+    )
+    s = await _compute_summary(base, "MARKET_CLOSED", monitor, pipeline)
+    assert s["overall_status"] == "blocked"
+    assert s["quality_gate"] == "failed"
+    assert any(i["key"] == "quality_gate_failed" for i in s["today_must_process"])
+
+
+async def test_summary_attention_when_bars_behind() -> None:
+    """行情落后 → overall=attention，bars 节点 failed，产生 bars_behind issue。"""
+    base, monitor = await _summary_ctx()
+    pipeline = _pipeline(
+        status="PUBLISHED",
+        waiting_reason=None,
+        latest_compute="2026-08-03",
+        latest_published="2026-08-03",
+        run_status="published",
+        bars_behind=True,
+    )
+    s = await _compute_summary(base, "MARKET_CLOSED", monitor, pipeline)
+    assert s["overall_status"] == "attention"
+    assert any(i["key"] == "bars_behind" for i in s["today_must_process"])
+    bars_node = next(n for n in s["production_chain"] if n["key"] == "bars")
+    assert bars_node["status"] == "failed"
+
+
+async def test_summary_worker_offline_blocked() -> None:
+    """Worker 离线 → overall=blocked，产生 worker_offline issue。"""
+    base, monitor = await _summary_ctx()
+    monitor["status"] = "WORKER_OFFLINE"
+    pipeline = _pipeline(
+        status="PUBLISHED",
+        waiting_reason=None,
+        latest_compute="2026-08-03",
+        latest_published="2026-08-03",
+        run_status="published",
+    )
+    s = await _compute_summary(base, "MARKET_CLOSED", monitor, pipeline)
+    assert s["overall_status"] == "blocked"
+    assert any(i["key"] == "worker_offline" for i in s["today_must_process"])
+
+
+async def test_summary_publish_failed_is_resumable() -> None:
+    """发布失败 → overall=error，issue 标记 resumable=True（可恢复重试）。"""
+    base, monitor = await _summary_ctx()
+    pipeline = _pipeline(
+        status="DSA_FAILED",
+        waiting_reason="PUBLISH_FAILED",
+        latest_compute="2026-08-03",
+        latest_published="2026-08-01",
+        run_status="failed",
+    )
+    s = await _compute_summary(base, "MARKET_CLOSED", monitor, pipeline)
+    assert s["overall_status"] == "blocked"
+    pub_issue = next(i for i in s["today_must_process"] if i["key"] == "publish_failed")
+    assert pub_issue["resumable"] is True
+    assert pub_issue["retryable"] is True
 
 
 

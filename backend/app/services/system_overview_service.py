@@ -65,6 +65,10 @@ from app.schemas.system_overview import (
     WAITING_DSA_REASON_QUEUED_NOT_CLAIMED,
     WAITING_DSA_REASON_RUN_FAILED,
     WAITING_DSA_SUGGESTIONS,
+    OverallSummary,
+    ProductionChainNode,
+    PublicationStatus,
+    TodayIssue,
 )
 from app.services.market_status_service import (
     MARKET_SESSION_AFTERNOON,
@@ -132,6 +136,11 @@ async def get_system_overview(
         db, now, business_date_obj, business_date_str
     )
 
+    # [PRD §8.1/8.2] 统一数据生产与发布状态摘要（P1，后端直出，前端不再自行判定）
+    summary = await _compute_summary(
+        base_fields, market_session, monitor_runtime, after_close_pipeline
+    )
+
     return {
         **base_fields,
         "server_time": now.isoformat(),
@@ -139,6 +148,7 @@ async def get_system_overview(
         "market_session": market_session,
         "monitor_runtime": monitor_runtime,
         "after_close_pipeline": after_close_pipeline,
+        "summary": summary,
     }
 
 
@@ -1120,6 +1130,223 @@ async def _has_released_selector_version(db: AsyncSession) -> bool:
     )
     count = await db.scalar(stmt)
     return int(count or 0) > 0
+
+
+async def _compute_summary(
+    base_fields: dict[str, Any],
+    market_session: str,
+    monitor_runtime: dict[str, Any],
+    after_close_pipeline: dict[str, Any],
+) -> dict[str, Any]:
+    """[PRD §8.1/8.2] 计算统一数据生产与发布状态摘要（P1）。
+
+    由后端基于实时查询结果直出以下状态，前端只做展示不判定：
+    - overall_status: ok / attention / blocked（系统是否需要管理员介入）
+    - quality_gate: not_applicable / passed / failed / pending（选股质量门禁）
+    - publication_status: published / unpublished / pending / failed（正式发布）
+    - today_must_process: 今日需要管理员处理的事项列表
+    - production_chain: 行情/选股/发布三个环节节点状态
+
+    纯派生逻辑，无副作用（只读）。
+    """
+    pipeline_status = after_close_pipeline.get("status")
+    waiting_reason = after_close_pipeline.get("waiting_dsa_reason")
+    data_freshness = after_close_pipeline.get("data_freshness") or {}
+    strategy_fresh = (data_freshness.get("strategy") or {})
+    bars_fresh = (data_freshness.get("bars") or {})
+
+    latest_compute = strategy_fresh.get("latest_compute_trade_date")
+    latest_published = strategy_fresh.get("latest_published_trade_date")
+    latest_run_status = strategy_fresh.get("status")
+
+    issues: list[dict[str, Any]] = []
+    chain: list[dict[str, Any]] = []
+
+    # ===== 生产链节点 =====
+    # 行情节点（bars）：新鲜度是否落后
+    bars_behind = bool(bars_fresh.get("is_behind_latest_trade_date"))
+    bars_chain_status = "failed" if bars_behind else ("ok" if bars_fresh.get("latest_daily_trade_date") else "pending")
+    chain.append(
+        ProductionChainNode(
+            key="bars",
+            label="行情",
+            status=bars_chain_status,
+            detail=(
+                "行情落后最近交易日"
+                if bars_behind
+                else (f"更新至 {bars_fresh.get('latest_daily_trade_date')}" if bars_fresh.get("latest_daily_trade_date") else "今日尚无行情")
+            ),
+            trade_date=bars_fresh.get("latest_daily_trade_date"),
+        ).model_dump()
+    )
+
+    # 选股节点（strategy）：最新计算状态
+    strategy_chain_status = "pending"
+    strategy_detail = "今日尚未计算"
+    if latest_run_status == "published":
+        strategy_chain_status = "ok"
+        strategy_detail = "已发布"
+    elif latest_run_status == "failed":
+        strategy_chain_status = "failed"
+        strategy_detail = "计算失败"
+    elif latest_run_status in ("queued", "running"):
+        strategy_chain_status = "running"
+        strategy_detail = "计算中"
+    elif latest_compute is not None:
+        strategy_chain_status = "stale"
+        strategy_detail = f"计算至 {latest_compute}"
+    chain.append(
+        ProductionChainNode(
+            key="strategy",
+            label="选股",
+            status=strategy_chain_status,
+            detail=strategy_detail,
+            trade_date=latest_compute,
+        ).model_dump()
+    )
+
+    # 发布节点（publish）：正式发布状态
+    if latest_published is None:
+        publish_status = "pending"
+        publish_detail = "尚无正式发布"
+    elif latest_run_status == "failed":
+        publish_status = "failed"
+        publish_detail = "发布失败"
+    elif latest_published == latest_compute:
+        publish_status = "ok"
+        publish_detail = f"已发布至 {latest_published}"
+    else:
+        publish_status = "stale"
+        publish_detail = f"已发布至 {latest_published}（落后最新计算 {latest_compute}）"
+    chain.append(
+        ProductionChainNode(
+            key="publish",
+            label="发布",
+            status=publish_status,
+            detail=publish_detail,
+            trade_date=latest_published,
+        ).model_dump()
+    )
+
+    # ===== 今日必须处理项 =====
+    # Worker 离线（阻塞级）
+    worker_offline = monitor_runtime.get("status") == MONITOR_STATUS_WORKER_OFFLINE
+    if worker_offline:
+        issues.append(
+            TodayIssue(
+                key="worker_offline",
+                severity="error",
+                message="盘中监控 Worker 离线，实时计算已中断",
+                retryable=False,
+                resumable=False,
+                recommended_action="检查 trading-worker 容器并重启",
+            ).model_dump()
+        )
+
+    # 行情落后（警告级）
+    if bars_behind:
+        issues.append(
+            TodayIssue(
+                key="bars_behind",
+                severity="warning",
+                message="行情数据落后最近交易日",
+                retryable=True,
+                resumable=False,
+                recommended_action="重新同步日线数据并重跑盘后编排",
+            ).model_dump()
+        )
+
+    # 质量门禁失败（阻塞级）
+    quality_gate = "not_applicable"
+    if waiting_reason == WAITING_DSA_REASON_QUALITY_GATE_FAILED:
+        quality_gate = "failed"
+        issues.append(
+            TodayIssue(
+                key="quality_gate_failed",
+                severity="error",
+                message="选股质量门禁未通过，今日结果未发布",
+                retryable=False,
+                resumable=False,
+                recommended_action="检查质量门禁配置与失败股票",
+            ).model_dump()
+        )
+    elif pipeline_status == PIPELINE_STATUS_PUBLISHED:
+        quality_gate = "passed"
+
+    # 发布失败（警告级，可恢复）
+    if waiting_reason == WAITING_DSA_REASON_PUBLISH_FAILED:
+        issues.append(
+            TodayIssue(
+                key="publish_failed",
+                severity="error",
+                message="选股发布失败",
+                retryable=True,
+                resumable=True,
+                recommended_action="检查发布逻辑与 published_run 表，可恢复重试",
+            ).model_dump()
+        )
+
+    # 数据覆盖不足（警告级，可重试）
+    if waiting_reason == WAITING_DSA_REASON_DATA_COVERAGE_INSUFFICIENT:
+        issues.append(
+            TodayIssue(
+                key="data_coverage_insufficient",
+                severity="warning",
+                message="日线数据覆盖率不足，选股未发布",
+                retryable=True,
+                resumable=False,
+                recommended_action="重新同步日线数据后重跑",
+            ).model_dump()
+        )
+
+    # 计算失败（警告级，可重试）
+    if waiting_reason in (WAITING_DSA_REASON_RUN_FAILED, WAITING_DSA_REASON_NO_RUN_CREATED):
+        issues.append(
+            TodayIssue(
+                key="dsa_run_failed",
+                severity="warning",
+                message="选股计算失败或未创建",
+                retryable=True,
+                resumable=True,
+                recommended_action=(
+                    "查看失败股票与 error_message，可重跑编排"
+                ),
+            ).model_dump()
+        )
+
+    # ===== 汇总状态 =====
+    has_error = any(i["severity"] == "error" for i in issues)
+    has_warning = any(i["severity"] == "warning" for i in issues)
+    if has_error:
+        overall_status = "blocked"
+    elif has_warning:
+        overall_status = "attention"
+    else:
+        overall_status = "ok"
+
+    publication_status = PublicationStatus(
+        status=(
+            "failed"
+            if waiting_reason == WAITING_DSA_REASON_PUBLISH_FAILED
+            else (
+                "published"
+                if latest_published is not None
+                else "pending"
+            )
+        ),
+        latest_published_trade_date=latest_published,
+        latest_compute_trade_date=latest_compute,
+        is_current=(latest_published is not None and latest_published == latest_compute),
+        quality_gate_passed=(quality_gate == "passed"),
+    ).model_dump()
+
+    return OverallSummary(
+        overall_status=overall_status,
+        quality_gate=quality_gate,
+        publication_status=publication_status,
+        today_must_process=issues,
+        production_chain=chain,
+    ).model_dump()
 
 
 if __name__ == "__main__":
