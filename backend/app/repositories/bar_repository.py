@@ -768,11 +768,15 @@ async def get_daily_bars_batch(
 
     for iid, grp in groupby(rows, key=lambda r: r.instrument_id):
         recs = list(grp)
-        df = pd.DataFrame(recs, columns=["instrument_id"] + _BAR_COLUMNS)
+        # [FS-DB-01 2026-08-04] SQL 返回 9 列：
+        #   instrument_id, trade_date, open, high, low, close, volume, amount, adj_factor
+        # columns 必须与之一一对应，否则列错位 + 后续 df["trade_date"] KeyError。
+        # instrument_id 仅用于分组，构造后 drop，输出与单股 get_bars 一致（无 instrument_id 列）。
+        df = pd.DataFrame(recs, columns=["instrument_id", "trade_date", *_BAR_COLUMNS])
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         for col in _BAR_COLUMNS:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.set_index("trade_date")
+        df = df.set_index("trade_date").drop(columns=["instrument_id"])
         results[iid] = df
     return results
 

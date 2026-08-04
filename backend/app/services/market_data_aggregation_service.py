@@ -1080,6 +1080,11 @@ async def _build_daily_aggregation(
             degraded_reason = f"qfq failed: {exc}"
             data_source = "degraded"
 
+    # [FS-CONTRACT 2026-08-04] 与单股 get_bars 对齐：qfq 之后统一 finalize
+    # （排序 + 去重 + 1d 过滤未完成 bar），不维护两份近似实现。
+    if not daily_df.empty:
+        daily_df = _finalize_bars(daily_df, timeframe, now)
+
     if timeframe == "1w":
         bars_df = aggregate_kline(daily_df, "1w") if not daily_df.empty else daily_df
     elif timeframe == "1mo":
@@ -1197,6 +1202,10 @@ class MarketDataAggregationService:
         adj = kwargs.get("adj", "none")
         include_realtime = kwargs.get("include_realtime", True)
         completed_only = kwargs.get("completed_only", False)
+        # [FS-CONTRACT 2026-08-04] 与单股 get_bars 对齐：completed_only 强制不含实时，
+        # 否则批读与单股合同不一致（单股在 1306-1308 强制 include_realtime=False）。
+        if completed_only:
+            include_realtime = False
         start_date = kwargs.get("start_date")
         end_date = kwargs.get("end_date")
         limit = kwargs.get("limit")

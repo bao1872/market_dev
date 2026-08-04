@@ -17,6 +17,7 @@ import pytest
 from app.services import after_close_orchestrator
 from app.services.after_close_orchestrator import (
     _enqueue_chip_job_step,
+    _is_terminal_review_short_circuit,
     _update_heartbeat_and_step,
     execute_orchestrator_step,
 )
@@ -465,3 +466,29 @@ def test_review_executor_timeout_forces_partial_success():
     assert "timed_out" in block and "_review_step_status" in block, (
         "_review_failed 必须结合 _review_step_summary.status（含 timed_out）"
     )
+
+
+@pytest.mark.asyncio
+async def test_terminal_review_short_circuit_detection():
+    """[AC-CANCEL-01 2026-08-04] Review 终态短路判定（真实行为，非正则）。
+
+    cancelled / interrupted 必须短路（保持终态、不继续 chip）；
+    succeeded / failed / timed_out / unavailable 不得短路（走 partial_success 判定）。
+    """
+    from app.services.after_close_orchestrator import AfterCloseRunStatus
+
+    assert _is_terminal_review_short_circuit(AfterCloseRunStatus.CANCELLED.value) is True
+    assert _is_terminal_review_short_circuit(AfterCloseRunStatus.INTERRUPTED.value) is True
+
+    # 步骤级终态（timed_out/unavailable）与 succeeded/failed 均为字符串值，
+    # 不短路（走 partial_success 判定）
+    for status in (
+        AfterCloseRunStatus.SUCCEEDED.value,
+        AfterCloseRunStatus.FAILED.value,
+        "timed_out",
+        "unavailable",
+        None,
+    ):
+        assert _is_terminal_review_short_circuit(status) is False, (
+            f"终态 {status} 不应短路"
+        )

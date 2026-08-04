@@ -1938,6 +1938,23 @@ async def _execute_review_step(
     }
 
 
+def _is_terminal_review_short_circuit(review_step_status: str | None) -> bool:
+    """[AC-CANCEL-01 2026-08-04] 判定 Review 步骤终态是否必须短路收尾。
+
+    Review step 为 cancelled / interrupted 时，主流程不得继续 chip 入队、
+    不得覆盖总任务终态：
+    - cancelled：管理员主动取消，保持 cancelled；
+    - interrupted：旧 Worker 被接管，保持 interrupted，交由 reconcile/restart。
+
+    其余终态（succeeded / failed / timed_out / unavailable）走既有
+    partial_success 判定，不在此短路。
+    """
+    return review_step_status in (
+        AfterCloseRunStatus.CANCELLED.value,
+        AfterCloseRunStatus.INTERRUPTED.value,
+    )
+
+
 async def execute_after_close_run(
     job_run_id: uuid.UUID,
     trade_date: date,
@@ -3234,6 +3251,54 @@ async def execute_after_close_run(
             _review_step_summary.get("status"), _review_status,
             _review_run_id, _review_failed,
         )
+
+        # ---- 步骤 4.8.5: 取消/中断终态短路 ----
+        # [AC-CANCEL-01 2026-08-04] Review step 为 cancelled/interrupted 时，
+        # 不得继续 chip 入队、不得覆盖总任务终态：
+        # - cancelled：管理员主动取消，保持 cancelled，交由用户/调度不再恢复；
+        # - interrupted：旧 Worker 被接管，保持 interrupted，交由 reconcile/restart。
+        # 两者均不应降级为 partial_success 而继续执行后续步骤。
+        _review_step_status = _review_step_summary.get("status")
+        if _is_terminal_review_short_circuit(_review_step_status):
+            # 短路函数已保证 _review_step_status 为 "cancelled"/"interrupted"（非 None）
+            assert _review_step_status is not None
+            assert _review_step_status in (
+                AfterCloseRunStatus.CANCELLED.value,
+                AfterCloseRunStatus.INTERRUPTED.value,
+            )
+            async with AsyncSessionLocal() as db:
+                job_run = await _get_job_run_or_raise(db, job_run_id)
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=_review_step_status,
+                    message=(
+                        f"盘后编排在复盘阶段被{_review_step_status}，"
+                        f"停止后续步骤: review_reason={_review_reason}"
+                    ),
+                    dsa_run_id=dsa_run_id,
+                    payload={
+                        "stock_core_published": _stock_core_published,
+                        "review_status": _review_status,
+                        "review_run_id": (
+                            str(_review_run_id) if _review_run_id else None
+                        ),
+                        "review_reason": _review_reason,
+                        "terminal_short_circuit": True,
+                    },
+                )
+                job_run.status = _review_step_status
+                job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+                await _update_heartbeat_and_step(
+                    db, job_run, _review_step_status, worker_id,
+                )
+                await db.commit()
+            logger.warning(
+                "[AfterClose] 复盘阶段终态短路: job_run_id=%s, status=%s, "
+                "不再执行 chip 入队",
+                job_run_id, _review_step_status,
+            )
+            return
 
         # ---- 步骤 4.9: enqueue_chip_job（正式步骤，必须在主任务终态之前）----
         # [Phase0-Fix#8] chip 原先在主任务终态提交之后创建，导致：
