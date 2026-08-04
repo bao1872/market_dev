@@ -46,11 +46,23 @@
 - `admin_error` 新增 `legacy_error_code` 参数，响应双字段兼容：
   `stable_error_code`（权威统一码，如 `after_close_conflict`）+
   `error_code`/`reason`（保留历史码，如 `DUPLICATE_RUN`），保证旧前端不回归。
-- 盘后编排 3 处关键错误（NON_TRADING_DAY / DUPLICATE_RUN / DATA_COVERAGE_INSUFFICIENT）
-  改用统一 helper 并传 legacy 兼容。
+- **`admin_after_close.py` 全部 13 处手工 `HTTPException` 改用统一构造器**，
+  覆盖所有盘后编排端点与错误场景：
+  - 创建：`after_close_invalid_trade_date`(422) / `after_close_non_trading_day`(409) /
+    `after_close_conflict`(409，legacy `DUPLICATE_RUN`，透传 `after_close_run_id`)；
+  - force：`after_close_bad_request` / `after_close_run_not_found` /
+    `after_close_coverage_insufficient`(409，legacy `DATA_COVERAGE_INSUFFICIENT`)；
+  - retry：`after_close_run_not_found` / `after_close_not_retryable`；
+  - resume：`after_close_run_not_found` / `after_close_wrong_job_type` /
+    `after_close_missing_trade_date` / `after_close_not_resumable` / 冲突；
+  - cancel / reconcile：`after_close_run_not_found` + **透传 `request_id`**；
+  - status / list_events：`after_close_run_not_found`。
 - 前端新增 `utils/adminErrors.ts`：`parseAdminApiError` / `formatAdminApiError`
-  消费 `stable_error_code`/`recommended_action`/`retryable`/`resumable`。
+  消费 `stable_error_code`/`recommended_action`/`retryable`/`resumable`，
+  并透出 legacy `error_code`/`reason` 兼容。
 - `AfterClosePipelineCard.formatAfterCloseCreate409Message` 优先消费统一错误字段。
+- `test_admin_errors.py` 新增源码守卫：断言 `admin_after_close.py` 使用全部 4 个 helper、
+  不再手工 `raise HTTPException`（防止回归）。
 
 ### 2.4 P0 遗留收口
 
@@ -65,7 +77,7 @@
 | P0 信息架构收口 | 完成 |
 | P1 统一生产与发布总览（6 节点状态直出） | 完成到"总览 + 各业务 Tab 筛选视图"层级 |
 | 各业务详情 Tab（第一金字塔/板块/复盘/竞价 的深度详情） | 仍待后续（本轮仅聚合筛选视图） |
-| R14 统一错误模型（helper + 关键接口 + 前端消费） | 完成 |
+| R14 统一错误模型（helper + 全部盘后端点接入 + 前端消费） | 完成 |
 | 发布预检 preflight + 撤回确认（R13） | 未开始 |
 | 全局搜索 / 字段链路追踪 / 数据质量中心 / 权限诊断 / 版本一致性（P2） | 未开始 |
 | 部署 | 未执行 |
@@ -73,8 +85,14 @@
 
 ## 4. 验证
 
-- 前端：`tsc --noEmit` 通过；node 测试套件 84 passed
+- 前端：`tsc --noEmit` 通过；eslint 0 error；node 测试套件 84 passed
   （导航/路由 29 + adminErrors 4 + 数据生产中心 5 + 用户 Tab 4 + 任务中心标题 2 + 既有 40）。
-- 后端：`admin_errors` 7 passed、`_compute_summary`/`_compute_product_nodes` 6 passed、
-  after_close 相关 45 passed；Ruff 通过；`git diff --check` 通过。
-- 需 DB 连接测试（`test_response_has_18_fields` 等 43 项）在共享开发库下运行，本轮未执行。
+- 后端纯单元（`PURE_UNIT_TEST=1`，无需 DB）：
+  - `test_admin_errors.py`：8 passed（含源码守卫：端点统一用 helper、不手工 raise HTTPException）；
+  - `test_system_overview_service.py`：15 passed；
+  - 本轮改动 6 文件 Ruff 全部通过；`git diff --check` 通过。
+- 需 DB 连接测试（`postgres` 依赖 60+43 项，如 `test_response_has_18_fields`、
+  `test_after_close_endpoints` 等）在共享开发库 `bz_stock` 下运行。因 AGENTS.md 安全边界
+  未授权 `PANJI_SHARED_DEV_DB_TEST` 连接，本轮跳过；不影响代码正确性判断，但真实端到端
+  行为验证留待后续授权后进行。
+- 文档一致性：`tools/check_docs_consistency.py` 全部通过（105 文档链接、占位符、CHANGE 引用）。
