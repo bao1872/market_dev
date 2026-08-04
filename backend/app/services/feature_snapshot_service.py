@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime
@@ -1713,6 +1714,12 @@ async def compute_for_trade_date(
     failed_count = 0
     batch_count = 0
     mdas_batch_read_count = 0
+    # [Performance Contract 2026-08-04] 阶段耗时累计（供性能基准与资源门禁使用）
+    read_duration = 0.0
+    compute_duration = 0.0
+    persist_duration = 0.0
+    fallback_count = 0
+    _t0 = time.perf_counter()
     # [CHANGE-20260717-002 SSOT] run 级行情诊断（取首个成功 instrument 的 primary_diag 为权威）
     run_diag: dict[str, Any] = {}
     # 注：本函数走 compute_feature_snapshot_for_date（非 review-core 路径），
@@ -1731,10 +1738,13 @@ async def compute_for_trade_date(
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
         batch_count += 1
+        _t_read = time.perf_counter()
         primary_results = await mdas.get_bars_batch(session, batch, timeframe="1d", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date)
         secondary_results = await mdas.get_bars_batch(session, batch, timeframe="15m", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date)
+        read_duration += time.perf_counter() - _t_read
         mdas_batch_read_count += 2
         batch_snapshots: list[StockFeatureSnapshot] = []
+        _t_compute = time.perf_counter()
         for instrument_id in batch:
             try:
                 primary_result = primary_results.get(instrument_id)
@@ -1759,10 +1769,13 @@ async def compute_for_trade_date(
                     "snapshot 计算失败 instrument_id=%s trade_date=%s: %s",
                     instrument_id, trade_date, exc, exc_info=True,
                 )
+        compute_duration += time.perf_counter() - _t_compute
 
         # 批内计算完成后统一执行 upsert；保持调用方整日期事务与 published 保护。
+        _t_persist = time.perf_counter()
         for snapshot in batch_snapshots:
             await upsert_snapshot(session, snapshot)
+        persist_duration += time.perf_counter() - _t_persist
 
         # [Heartbeat] 每批完成后回调进度，供长任务更新心跳/lease 与 metadata
         if progress_callback is not None:
@@ -1798,6 +1811,14 @@ async def compute_for_trade_date(
         "failed_count": failed_count,
         "batch_count": batch_count,
         "mdas_batch_read_count": mdas_batch_read_count,
+        # [Performance Contract 2026-08-04] 阶段耗时/吞吐/回退指标（供 finish_snapshot_run 落库与基准对比）
+        "read_duration": round(read_duration, 4),
+        "compute_duration": round(compute_duration, 4),
+        "persist_duration": round(persist_duration, 4),
+        "total_duration": round(time.perf_counter() - _t0, 4),
+        "symbols_per_second": round(snapshot_count / (time.perf_counter() - _t0), 2) if (time.perf_counter() - _t0) > 0 else 0.0,
+        "fallback_count": fallback_count,
+        "commit_count": 0,  # 本函数只批量 upsert+flush，不调用 session.commit（由 caller 统一提交）
         "schema_version": _SCHEMA_VERSION,
         "trade_date": trade_date.isoformat(),
         # [CHANGE-20260717-002 SSOT] run 级行情诊断（供 finish_snapshot_run 落库）

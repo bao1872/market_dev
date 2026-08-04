@@ -1,8 +1,8 @@
 # PRD 完整验收矩阵
 
-**基线**: `8690ccccfca12737923c5088290aa883a663bcac`  
-**生成日期**: 2026-08-04  
-**目的**: 逐条核对所有 PRD 需求的实现状态、证据和剩余缺口  
+**基线**: `f0816ef636d46e19ba2d793bd94320ec3b7dd0e8`
+**生成日期**: 2026-08-04
+**目的**: 逐条核对所有 PRD 需求的实现状态、证据和剩余缺口
 **当前判断**: `code_ready = false`, `data_closed = false`
 
 ---
@@ -74,10 +74,10 @@
 | AC-10 | 两阶段发布 | ✅ | `publish_run`（阶段1）→ `finish_snapshot_run`（阶段2），独立 session | — | N/A | `test_after_close_orchestrator.py` | 是 | 失败回滚 |
 | AC-11 | 幂等与补跑 | ✅ | create 去重；publish_run 幂等；execute 断点恢复；`retry_after_close_run` | retry/resume | N/A | `test_retry_after_close_run_writes_event` | 是 | 断点恢复 |
 | AC-12 | 跨 Worker 领取 | ✅ | `_after_close_poll_once` FOR UPDATE SKIP LOCKED + lease_epoch fencing | — | N/A | worker 领取单测 | 是 | 真实并发 |
-| AC-13 | 完成状态 | ⚠️ | `AfterCloseRunStatus` 枚举 + `SchedulerJobRun.status`；pending/partial 由 queued/partial_failed 表达 | — | N/A | `test_after_close_phase0_contracts.py` | 是 | 语义映射 |
+| AC-13 | 完成状态 | ✅ | 状态真源 `AfterCloseRunStatus`（`after_close_orchestrator.py:683`，含 partial_success/interrupted/cancelled）；API `AfterCloseRunStatusResponse`（`schemas/scheduler_job_run.py:86`）直出 orchestrator_status + step_summary + partial_success；前端 `adminAfterClosePipelineHelpers.ts` STEP_LABELS/DEFAULT_STEP_ORDER/statusLabel/statusTone 同一语义适配 | `GET /v1/admin/after-close-runs/{id}` | `AdminAfterClosePipelinePage` | `test_after_close_phase0_contracts.py` / `adminAfterClosePipeline.test.ts` | 是 | 真实状态机全量 |
 | AC-14 | 部分失败 | ✅ | `StrategyRun` succeeded/failed/skipped_count；publish_run 拒绝 partial_failed；`resolve_terminal_run_status` | — | N/A | `test_after_close_phase0_contracts.py::test_review_executor_timeout_forces_partial_success` | 是 | partial_success 保留核心产物 |
 | AC-15 | 旧触发路径清理 | ✅ | `worker.py` 注释删除 `_maybe_trigger_after_close_orchestrator`；grep 无符号 | — | N/A | — | 否 | — |
-| AC-16 | Feature Snapshot 批处理性能合同 | ✅ | `feature_snapshot_service.compute_for_trade_date` 按 batch 预读 qfq bars + 批内 upsert/flush | — | N/A | feature_snapshot 单测 | 是 | 批量 vs 逐股性能基准 |
+| AC-16 | Feature Snapshot 批处理性能合同 | ✅ | `feature_snapshot_service.compute_for_trade_date` 按 batch 预读 qfq bars + 批内 upsert/flush；[2026-08-04] 新增阶段耗时/吞吐/回退指标输出（read/compute/persist/total_duration、symbols_per_second、fallback_count、commit_count） | — | N/A | feature_snapshot 单测（18 passed） | 是 | 固定 fixture 基准：query_count=O(batch_count)、commit=O(batch)、相对旧链提速50% 未证明（需运行时测量） |
 | AC-16(2) | 统一盘后编排 | ✅ | `execute_orchestrator_step` 统一步骤执行器；7 个顶层步骤 | — | N/A | `test_after_close_phase0_contracts.py::test_*_uses_executor` | 否 | — |
 | AC-08(2) | 单股事务与检查点 | ✅ | `snapshot_run_item_service` create/claim run items（UPDATE...FOR UPDATE SKIP LOCKED） | — | N/A | snapshot_run_item 单测 | 是 | 单股失败隔离 |
 | AC-09(2) | 分层发布指针 | ✅ | `factor_publication_service` stock_core/chip/review 分层 pointer | — | N/A | factor_publication 单测 | 是 | 分层一致性 |
@@ -495,7 +495,7 @@
 ### 当前阶段判断
 
 ```text
-baseline = 142115b
+baseline = f0816ef
 
 after_close_closed = code_verified        # AC-01~AC-73 有真实代码/测试证据；真实环境全量未核验
 feature_snapshot_performance_closed = not_proven
@@ -512,14 +512,24 @@ deployment_phase_ready = false
 data_closed = false
 ```
 
-### 下一步行动
+### 下一步行动（按 `ref/next.md` 完整端到端执行）
 
-1. ✅ 完成阶段 0：固定基线 + 生成完整 PRD 验收矩阵（本文件）
-2. ⏭️ 阶段 1：盘后编排 + 管理后台闭环（AC + PA 系列）
-3. ⏭️ 阶段 2：Feature Snapshot 性能与资源闭环（AC-16 + QM 系列）
-4. ⏭️ 阶段 3：第一金字塔完整跨入口闭环（QM-63 + 跨入口链）
-5. ⏭️ 阶段 4：SMC + 行情导航前后端闭环（QM-13/21/24 + MX 系列）
-6. ⏭️ 阶段 5：Review 完整业务闭环（§0~27 章节）
-7. ⏭️ 阶段 6：代码验收门
-8. ⏭️ 阶段 7：受控部署与真实数据闭环（SR 系列）
-9. 全部推送 `origin/dev` → 远端完整代码审查 → `code_ready = true` → 部署
+> 本文件是**当前最终 SHA（`ad8b07d`）的唯一验收事实源**，不是分阶段交付清单。
+> 开发按 `ref/next.md` 的连续端到端工作单执行：从 `ad8b07d` 开始，按依赖顺序走完
+> 代码审查/修复 → 后端/API/前端/测试 → 完整质量门 → push origin/dev → 远端代码审查 →
+> Migration/部署 → 真实单日数据闭环 → 浏览器验收 → 一次性返回。中途不按模块停下等待指令。
+
+```text
+WP-A 建立最新唯一验收基线（本文件基线已对齐 ad8b07d）
+WP-B 盘后编排 + 权限 + 管理后台最终闭合（AC/PA/SW）
+WP-C Feature Snapshot 性能 + 量化模型（AC-16/QM/MD）
+WP-D 第一金字塔跨入口 E2E（QM-63/MX-51~64）
+WP-E SMC + 行情/详情 + 自选前端闭环（QM-13/21/24/MX/WI）
+WP-F Review §0~§27 完整业务闭环
+WP-G 跨模块 PRD 收口（PS/SW/MD/MQ/WI）
+WP-H 完整代码质量门（含 py_mini_racer 修复）
+WP-I 部署 + 真实数据 + 浏览器验收（需一次性明确授权，本轮未授权）
+```
+
+状态演进：`code_verified → pg_verified → runtime_verified → browser_verified → data_verified`；
+只有远端代码审查通过后设 `code_ready = true`；部署/数据/浏览器验收需在一次性授权后执行。
