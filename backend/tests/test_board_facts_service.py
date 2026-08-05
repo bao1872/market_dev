@@ -17,6 +17,7 @@ from app.services.board_facts_service import (
     RUN_MODE_HISTORICAL_REPLAY,
     RUN_MODE_MANUAL_CURRENT,
     RUN_MODE_SCHEDULED_CURRENT,
+    _count_boards_by_level,
     _stable_snapshot_hash,
 )
 
@@ -81,3 +82,28 @@ def test_run_modes_are_stable() -> None:
         RUN_MODE_HISTORICAL_REPLAY,
     }
     assert RUN_MODE_HISTORICAL_REPLAY == "historical_replay"
+
+
+def test_count_boards_by_level() -> None:
+    """行业 L1/L2/L3 层级计数（Commit A §6.2）。"""
+    snapshot = _FakeSnapshot(
+        boards=[
+            {"type": "industry", "hierarchy_level": "L1"},
+            {"type": "industry", "hierarchy_level": "L2"},
+            {"type": "industry", "hierarchy_level": "L3"},
+            {"type": "industry", "hierarchy_level": "L2"},
+            {"type": "concept", "hierarchy_level": "L1"},
+        ],
+        memberships={},
+    )
+    assert _count_boards_by_level(snapshot, "L1") == 1
+    assert _count_boards_by_level(snapshot, "L2") == 2
+    assert _count_boards_by_level(snapshot, "L3") == 1
+
+
+def test_count_boards_by_level_empty() -> None:
+    """无 boards 时各层级计数为 0。"""
+    snapshot = _FakeSnapshot(boards=[], memberships={})
+    assert _count_boards_by_level(snapshot, "L1") == 0
+    assert _count_boards_by_level(snapshot, "L2") == 0
+    assert _count_boards_by_level(snapshot, "L3") == 0
