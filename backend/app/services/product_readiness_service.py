@@ -28,7 +28,10 @@ freshness 标志（E08-T03）：
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
+
+from sqlalchemy import select
 
 from app.domain_status import (
     CLOSURE_BLOCKED,
@@ -213,6 +216,197 @@ def compute_freshness_flags(
         "mandatoryProductsReady": all(p.is_consumable for p in mandatory) if mandatory else True,
         "mandatoryProductsFullyFresh": all(p.is_fully_fresh for p in mandatory) if mandatory else True,
     }
+
+
+# ============================================================================
+# ProductReadinessService — 动态聚合服务层（E08-T01）
+# ============================================================================
+
+
+class ProductReadinessService:
+    """动态聚合各领域 run/publication 到 ProductReadinessState，并调用闭包评估。
+
+    服务层职责（EPIC-08 E08-T01）：
+    - 读取当日各产品 run / publication / pointer
+    - 映射为 ProductReadinessState（readiness + freshness）
+    - 调用 evaluate_closure 得到闭包状态
+    纯决策逻辑保留在 evaluate_closure；本服务只负责 DB 查询与状态映射。
+
+    用法：
+        service = ProductReadinessService()
+        ev = await service.evaluate_for_trade_date(db, trade_date)
+        print(ev.closure, ev.issues)
+    """
+
+    async def evaluate_for_trade_date(
+        self,
+        db: Any,
+        trade_date: date,
+    ) -> ClosureEvaluation:
+        """评估指定交易日的产品闭包状态。
+
+        Args:
+            db: 异步数据库会话
+            trade_date: 业务交易日
+
+        Returns:
+            ClosureEvaluation
+        """
+        states = [
+            await self._board_facts_state(db, trade_date),
+            await self._stock_core_state(db, trade_date),
+            await self._board_aggregation_state(db, trade_date),
+            await self._review_state(db, trade_date),
+            await self._chip_state(db, trade_date),
+            await self._auction_state(db, trade_date),
+        ]
+        return evaluate_closure(states)
+
+    # ---- 各产品状态映射 ----
+
+    async def _board_facts_state(
+        self, db: Any, trade_date: date,
+    ) -> ProductReadinessState:
+        """board_facts：BoardFactsRun 当日最新 run。"""
+        from app.models.board_facts_run import BoardFactsRun
+
+        run = await db.scalar(
+            select(BoardFactsRun)
+            .where(BoardFactsRun.trade_date == trade_date)
+            .order_by(BoardFactsRun.created_at.desc())
+            .limit(1)
+        )
+        if run is None:
+            return ProductReadinessState("board_facts", READINESS_PENDING, "fresh")
+        if run.status == "published":
+            return ProductReadinessState("board_facts", READINESS_READY, "fresh")
+        if run.status == "reused_previous":
+            return ProductReadinessState(
+                "board_facts", READINESS_READY_REUSED, "reused",
+            )
+        if run.status in ("failed", "cancelled", "interrupted"):
+            return ProductReadinessState("board_facts", READINESS_UNAVAILABLE, "fresh")
+        # queued/fetching/normalizing/validating/persisting → 进行中
+        return ProductReadinessState("board_facts", READINESS_PENDING, "fresh")
+
+    async def _stock_core_state(
+        self, db: Any, trade_date: date,
+    ) -> ProductReadinessState:
+        """stock_core：FactorPublication 发布指针（market scope）。"""
+        from app.models.factor_publication import (
+            PUBLICATION_KIND_STOCK_CORE,
+            SCOPE_TYPE_MARKET,
+            FactorPublication,
+        )
+
+        pub = await db.scalar(
+            select(FactorPublication)
+            .where(
+                FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
+                FactorPublication.scope_type == SCOPE_TYPE_MARKET,
+                FactorPublication.trade_date == trade_date,
+            )
+            .limit(1)
+        )
+        if pub is not None:
+            return ProductReadinessState("stock_core", READINESS_READY, "fresh")
+        return ProductReadinessState("stock_core", READINESS_PENDING, "fresh")
+
+    async def _board_aggregation_state(
+        self, db: Any, trade_date: date,
+    ) -> ProductReadinessState:
+        """board_aggregation：market_aggregation 发布指针。"""
+        from app.models.factor_publication import (
+            PUBLICATION_KIND_MARKET_AGGREGATION,
+            SCOPE_TYPE_MARKET,
+            FactorPublication,
+        )
+
+        pub = await db.scalar(
+            select(FactorPublication)
+            .where(
+                FactorPublication.publication_kind
+                == PUBLICATION_KIND_MARKET_AGGREGATION,
+                FactorPublication.scope_type == SCOPE_TYPE_MARKET,
+                FactorPublication.trade_date == trade_date,
+            )
+            .limit(1)
+        )
+        if pub is not None:
+            return ProductReadinessState("board_aggregation", READINESS_READY, "fresh")
+        return ProductReadinessState("board_aggregation", READINESS_PENDING, "fresh")
+
+    async def _review_state(
+        self, db: Any, trade_date: date,
+    ) -> ProductReadinessState:
+        """review：MarketReviewRun 当日最新 run。"""
+        from app.models.market_review import MarketReviewRun
+
+        run = await db.scalar(
+            select(MarketReviewRun)
+            .where(MarketReviewRun.trade_date == trade_date)
+            .order_by(MarketReviewRun.created_at.desc())
+            .limit(1)
+        )
+        if run is None:
+            return ProductReadinessState("review", READINESS_PENDING, "fresh")
+        if run.status == "published":
+            return ProductReadinessState("review", READINESS_READY, "fresh")
+        if run.status in ("failed",):
+            return ProductReadinessState("review", READINESS_UNAVAILABLE, "fresh")
+        return ProductReadinessState("review", READINESS_PENDING, "fresh")
+
+    async def _chip_state(
+        self, db: Any, trade_date: date,
+    ) -> ProductReadinessState:
+        """chip：增强产品，不阻断 mandatory chain。"""
+        from app.models.chip_consensus_run import ChipConsensusRun
+
+        run = await db.scalar(
+            select(ChipConsensusRun)
+            .where(ChipConsensusRun.trade_date == trade_date)
+            .order_by(ChipConsensusRun.created_at.desc())
+            .limit(1)
+        )
+        if run is None:
+            return ProductReadinessState("chip", READINESS_PENDING, "fresh", is_mandatory=False)
+        if run.status == "succeeded":
+            return ProductReadinessState("chip", READINESS_READY, "fresh", is_mandatory=False)
+        if run.status == "partial":
+            return ProductReadinessState("chip", READINESS_READY, "stale", is_mandatory=False)
+        if run.status in ("failed", "cancelled", "interrupted"):
+            return ProductReadinessState(
+                "chip", READINESS_UNAVAILABLE, "fresh", is_mandatory=False,
+            )
+        return ProductReadinessState("chip", READINESS_PENDING, "fresh", is_mandatory=False)
+
+    async def _auction_state(
+        self, db: Any, trade_date: date,
+    ) -> ProductReadinessState:
+        """auction_anchor：增强产品，不阻断 mandatory chain。"""
+        from app.models.auction_anchor_run import AuctionAnchorRun
+
+        run = await db.scalar(
+            select(AuctionAnchorRun)
+            .where(AuctionAnchorRun.trade_date == trade_date)
+            .order_by(AuctionAnchorRun.created_at.desc())
+            .limit(1)
+        )
+        if run is None:
+            return ProductReadinessState(
+                "auction_anchor", READINESS_PENDING, "fresh", is_mandatory=False,
+            )
+        if run.status == "succeeded":
+            return ProductReadinessState(
+                "auction_anchor", READINESS_READY, "fresh", is_mandatory=False,
+            )
+        if run.status in ("failed", "cancelled", "interrupted"):
+            return ProductReadinessState(
+                "auction_anchor", READINESS_UNAVAILABLE, "fresh", is_mandatory=False,
+            )
+        return ProductReadinessState(
+            "auction_anchor", READINESS_PENDING, "fresh", is_mandatory=False,
+        )
 
 
 if __name__ == "__main__":
