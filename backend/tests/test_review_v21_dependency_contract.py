@@ -31,6 +31,7 @@ from app.services.review_orchestrator_service import (
     ReviewOrchestratorError,
     _resolve_source_run_ids,
 )
+from app.services.review_publication_service import get_published_review_run_id
 
 pytestmark = pytest.mark.asyncio
 
@@ -155,7 +156,7 @@ async def test_resolve_queries_only_core_and_board_kinds() -> None:
         board_run=_make_board_run(source_core_run_id=core_id),
     )
     await _resolve_source_run_ids(
-        session, TRADE_DATE,
+        session, TRADE_DATE,  # type: ignore[arg-type]
         source_core_run_id=None, source_board_run_id=None,
     )
 
@@ -243,7 +244,7 @@ async def test_resolve_success_exact_lineage() -> None:
         board_run=board_run,
     )
     resolved_core, resolved_board = await _resolve_source_run_ids(
-        session, TRADE_DATE,
+        session, TRADE_DATE,  # type: ignore[arg-type]
         source_core_run_id=None, source_board_run_id=None,
     )
     assert resolved_core == core_id
@@ -259,41 +260,27 @@ async def test_resolve_success_exact_lineage() -> None:
 
 
 async def test_consumer_reads_published_pointer_not_temp() -> None:
-    """普通用户 _get_published_run 只返回 publication pointer 指向的 run。"""
-    from app.api.review import _get_published_run
-
+    """consumer 入口 get_published_review_run_id 只返回 publication pointer 指向的 run_id。"""
     pointer_run_id = uuid.uuid4()
     pointer = _make_pointer(pointer_run_id)
-    published_run = AsyncMock()
-    published_run.id = pointer_run_id
 
     class _ConsumerSession:
         async def execute(self, stmt):
             return _FakeResult(scalar=pointer)
 
-        async def get(self, model, ident):
-            assert ident == pointer_run_id
-            return published_run
-
-    got = await _get_published_run(
-        _ConsumerSession(), TRADE_DATE, include_partial=False,
+    got = await get_published_review_run_id(
+        _ConsumerSession(), TRADE_DATE,  # type: ignore[arg-type]
     )
-    assert got is published_run
-    assert got.id == pointer_run_id
+    assert got == pointer_run_id
 
 
-async def test_consumer_404_when_no_pointer() -> None:
-    """无正式 pointer → 普通用户 404（不读临时/未发布 run）。"""
-    from fastapi import HTTPException
-
-    from app.api.review import _get_published_run
-
+async def test_consumer_none_when_no_pointer() -> None:
+    """无正式 pointer → consumer 返回 None（不读临时/未发布 run）。"""
     class _EmptySession:
         async def execute(self, stmt):
             return _FakeResult(scalar=None)
 
-    with pytest.raises(HTTPException) as exc:
-        await _get_published_run(
-            _EmptySession(), TRADE_DATE, include_partial=False,
-        )
-    assert exc.value.status_code == 404
+    got = await get_published_review_run_id(
+        _EmptySession(), TRADE_DATE,  # type: ignore[arg-type]
+    )
+    assert got is None
