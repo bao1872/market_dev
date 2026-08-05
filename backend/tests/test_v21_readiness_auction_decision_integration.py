@@ -28,7 +28,6 @@ status=authored_not_executed reason=pg_gate_deferred_no_local_db_authorizationã€
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 import pytest
 
@@ -39,16 +38,11 @@ from app.domain_status import (
 )
 from app.services.auction_mode_service import decide_auction_mode
 from app.services.product_readiness_service import (
-    CLOSURE_BLOCKED,
     CLOSURE_CORE_READY,
-    CLOSURE_DEGRADED_READY,
     CLOSURE_FULLY_READY,
-    CLOSURE_PENDING,
     READINESS_DEGRADED,
     READINESS_PENDING,
     READINESS_READY,
-    READINESS_READY_REUSED,
-    READINESS_UNAVAILABLE,
     ProductReadinessState,
     evaluate_closure,
     evaluate_governance,

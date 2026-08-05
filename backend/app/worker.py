@@ -1606,7 +1606,9 @@ async def _chip_consensus_poll_once() -> bool:
         finalize_chip_run,
         resolve_or_create_chip_run,
     )
-    from app.services.feature_snapshot_service import get_active_a_share_instruments
+    from app.services.feature_snapshot_service import (
+        get_active_a_share_instruments,
+    )
     from app.services.fenced_job_run_service import (
         FencedJobHeartbeat,
         JobLeaseLostError,
