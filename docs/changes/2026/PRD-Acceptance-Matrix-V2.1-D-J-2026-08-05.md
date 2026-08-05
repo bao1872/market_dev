@@ -25,11 +25,13 @@
 | CP3 Ruff 自动修复（导入/UP017） | `d151cb4` |
 | CP3 测试 mock/fixture 修复 | `77a5d26` |
 | CP3 JSONB has_key 检测修正 | `0bc7bfe` |
-| **Corrective Pass 3（远程门禁全部通过，候选最终 SHA）** | `0bc7bfe3ee1db9d4d34bb6f3da27ec2601372ddb` |
+| CP3 矩阵门禁结果记录 | `b3d114b` |
+
+**代码门禁基线（code_gate_baseline_sha）**: `0bc7bfe3ee1db9d4d34bb6f3da27ec2601372ddb` — 首次完整通过全部代码与静态基础设施门禁的 SHA。
+
+**Phase 4 目标 SHA（phase4_target_sha）**: `b3d114b25d229c484f3db8b0afcb226387c6709d` — 当前 origin/dev；GitHub 对比 `0bc7bfe → b3d114b` ahead_by=1，唯一变化为验收矩阵文档，业务代码/Compose/测试代码均未变化；完整门禁已在本 SHA 重跑全部通过。
 
 **生成日期**: 2026-08-05
-
-**基线**: `0bc7bfe3ee1db9d4d34bb6f3da27ec2601372ddb`（当前 HEAD/origin/dev，矩阵核对时点；远程静态门禁已全部实跑通过）
 
 **当前判断（PRD Alignment Pass 2026-08-05 后）**：
 
@@ -55,12 +57,12 @@
 | `restart_enum_single_source` | `true` | API 层改用 `ALL_BOUNDARIES`，补回漏掉的 `board_aggregation` |
 | `p1_3_exact_completeness` | `implemented` | 冻结 eligible universe 作分母（消除自指比值），新增可达 `exact` 分支 |
 | `granular_restart_complete` | `true`（代码层） | 运行时仍需远程 PG 验证（Phase 4） |
-| `static_checks_passed` | **`true`（远程实跑，SHA `0bc7bfe`）** | 见下方「远程门禁结果表」；`fc34440`/`e69f6c7` 等中间 SHA 自动失去候选资格 |
+| `static_checks_passed` | **`true`（远程实跑，SHA `b3d114b`）** | 代码门禁基线 `0bc7bfe` 首过，Phase 4 目标 `b3d114b` 全量重跑通过；`fc34440`/`e69f6c7` 等中间 SHA 自动失去候选资格 |
 | `verify_compose_runnable` | `config_runnable=true` | `docker compose config` 通过、9 服务解析、Live Mount 宿主路径存在（唯一 `RUNTIME_SHA` 由部署脚本部署时生成）；**未部署/未启动** |
 | `db_created` / `migration_run` / `deployed` | `false` | 本轮授权范围外（用户明确要求不创建库、不 Migration、不部署） |
 | `manual_acceptance_ready` | `false` | 待 Phase 4 建库 → Migration → PG E2E → 部署验证栈 → 自动/手动验收 |
 
-### 远程门禁结果表（2026-08-05，panji-prod `/root/web_dev_verify` 精确检出 `0bc7bfe`）
+### 远程门禁结果表（2026-08-05，panji-prod `/root/web_dev_verify` 精确检出 `b3d114b` 全量重跑）
 
 | 门禁 | 结果 |
 |---|---|
@@ -76,11 +78,11 @@
 | Frontend lint（`eslint .`） | ✅ PASS（0 errors，66 既有 warnings 非阻断） |
 | Frontend contract（`test:contract`） | ✅ 552 passed / 0 fail |
 | Frontend build（`tsc -b && vite build`） | ✅ PASS（`✓ built in 5.39s`，dist 产出） |
-| `docker compose config`（`panji-verify`，DB 名全等校验） | ✅ PASS（exit 0，9 服务，DB=`bz_stock_verify_0bc7bfe...`；未连 PG/未启动） |
+| `docker compose config`（`panji-verify`，DB 名全等校验） | ✅ PASS（exit 0，9 服务，DB=`bz_stock_verify_b3d114b...`；未连 PG/未启动） |
 | Live Mount 宿主路径 | ✅ 除部署时生成的 `RUNTIME_SHA` 外全部存在（`backend/app`、`alembic`、`alembic.ini`、`frontend/dist`、`/etc/market-dev/config.production.py`） |
-| worktree | ✅ clean（HEAD==origin/dev==`0bc7bfe`；仅 untracked venv 符号链接/静态检查 env 文件，非仓库产物） |
+| worktree | ✅ **严格 clean**（HEAD==origin/dev==`b3d114b`；`git status --porcelain` 无输出，venv 符号链接经 `/root/web_dev/.git/info/exclude` 排除，`git diff`/`--cached` 均空） |
 
-> **进入 Phase 4 的前置条件已达成（静态与无数据库门禁全部通过）**。下一步按授权在远程检出最终 SHA `0bc7bfe` 后：创建 `bz_stock_verify_0bc7bfe...` → Migration → Seed → PG E2E → 部署验证栈 → 自动/手动验收。本轮严格未建库/未 Migration/未部署。
+> **进入 Phase 4 的前置条件已达成（静态与无数据库门禁全部通过）**。下一步按授权在远程检出 Phase 4 目标 SHA `b3d114b` 后：创建 `bz_stock_verify_b3d114b...` → Migration → Seed → PG E2E → 部署验证栈 → 自动/手动验收。本轮严格未建库/未 Migration/未部署。
 
 ## V2.1 Corrective Pass 2 状态（2026-08-05，HEAD `8b1e4a3`，已被 CP3 取代）
 
