@@ -24,6 +24,7 @@ from app.services.dsa_projection_service import (
     compute_projection_hash,
     is_projection_consumable,
     map_dsa_projection,
+    reconcile_projection_parameter_hash,
 )
 
 _DSA_VERSION = "dsa-v1"
@@ -160,3 +161,37 @@ def test_fallback_to_top_level_metrics():
     rec = map_dsa_projection(artifact, dsa_version=_DSA_VERSION, parameter_hash=_PARAM_HASH)
     assert rec.payload["dsa_dir_bars"] == 5
     assert rec.payload["regime_value"] == -1
+
+
+def test_reconcile_matching_parameter_hash_ok():
+    """projection 参数 hash 与 core artifact 一致 → 对账通过。"""
+    rec = map_dsa_projection(
+        _make_artifact(),
+        dsa_version=_DSA_VERSION,
+        parameter_hash=_PARAM_HASH,
+        source_core_run_id="run-1",
+        expected_core_parameter_hash=_PARAM_HASH,
+    )
+    assert rec.parameter_hash == _PARAM_HASH
+
+
+def test_reconcile_mismatch_raises():
+    """projection 参数 hash 与 core artifact 不一致 → 拒绝映射（lineage 断裂）。"""
+    with pytest.raises(DSAProjectionMappingError, match="参数 hash 与 core artifact 不一致"):
+        map_dsa_projection(
+            _make_artifact(),
+            dsa_version=_DSA_VERSION,
+            parameter_hash=_PARAM_HASH,
+            expected_core_parameter_hash="different-core-hash",
+        )
+
+
+def test_reconcile_function_mismatch_raises():
+    """直接调用 reconcile_projection_parameter_hash 不一致时抛错。"""
+    with pytest.raises(DSAProjectionMappingError):
+        reconcile_projection_parameter_hash("core-a", "proj-b")
+
+
+def test_reconcile_function_match_ok():
+    """对账一致时不抛错。"""
+    reconcile_projection_parameter_hash(_PARAM_HASH, _PARAM_HASH)

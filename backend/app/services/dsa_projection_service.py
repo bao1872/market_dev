@@ -185,6 +185,28 @@ def compute_projection_hash(
     ).hexdigest()
 
 
+def reconcile_projection_parameter_hash(
+    core_parameter_hash: str,
+    projection_parameter_hash: str,
+) -> None:
+    """对账：projection 派生所依据的参数 hash 必须与 core artifact 一致。
+
+    [Commit C §8.2 / §8.3 source run/hash/version 一致]
+    projection 由持久化 CoreComputationArtifact 派生，其 parameter_hash 必须与
+    该 core artifact 携带的参数 hash 一致。若不一致，说明 projection 基于不同版本
+    的 core 参数被构建，属于 lineage 断裂，应拒绝消费。
+
+    Raises:
+        DSAProjectionMappingError: 两者不一致。
+    """
+    if core_parameter_hash != projection_parameter_hash:
+        raise DSAProjectionMappingError(
+            "DSA projection 参数 hash 与 core artifact 不一致："
+            f"core={core_parameter_hash!r}, projection={projection_parameter_hash!r}，"
+            "禁止基于不同版本 core 参数的 projection 被消费"
+        )
+
+
 def map_dsa_projection(
     artifact: CoreComputationArtifact,
     *,
@@ -192,14 +214,25 @@ def map_dsa_projection(
     parameter_hash: str,
     source_core_run_id: Any | None = None,
     requirement: str = DSA_PROJECTION_REQUIREMENT_REQUIRED,
+    expected_core_parameter_hash: str | None = None,
 ) -> DSAProjectionRecord:
     """从持久化 CoreComputationArtifact 映射 DSA projection（E04-T01/T02）。
 
     不调用 runtime.execute；不解析中文摘要；metrics/visual 直接映射。
 
+    [Commit C §8.2 对账] 若传入 expected_core_parameter_hash，则必须与
+    parameter_hash 一致——projection 派生所依据的参数必须来自同一 core artifact，
+    否则映射失败，防止基于不同版本 core 参数的 projection 被消费。
+
     Raises:
-        DSAProjectionMappingError: 必需指标缺失（映射不完整）或 requirement 非法。
+        DSAProjectionMappingError: 必需指标缺失、requirement 非法，或
+            expected_core_parameter_hash 与 parameter_hash 不一致。
     """
+    if expected_core_parameter_hash is not None:
+        reconcile_projection_parameter_hash(
+            expected_core_parameter_hash, parameter_hash
+        )
+
     metrics = _extract_metrics(artifact)
     visual = _extract_visual(artifact)
 
