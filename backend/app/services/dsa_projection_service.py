@@ -35,6 +35,7 @@ from app.domain_status import (
     DSA_PROJECTION_REQUIREMENT_REQUIRED,
 )
 from app.services.core_run_context import (
+    CoreArtifactLineageError,
     CoreComputationArtifact,
     CoreRunContext,
 )
@@ -328,7 +329,12 @@ def map_dsa_projection_with_context(
         )
     # 无条件对账：即使是 map_dsa_projection 中"expected_* is None 时跳过"的分支，
     # 此处也强制 artifact 自身 lineage 完整且与 run_context 一致。
-    artifact.validate_lineage()
+    # [Corrective-2 2026-08-05] validate_lineage 抛 CoreArtifactLineageError，
+    # 统一包装为 DSAProjectionMappingError，保证正式入口错误类型一致。
+    try:
+        artifact.validate_lineage()
+    except CoreArtifactLineageError as exc:
+        raise DSAProjectionMappingError(f"artifact lineage 不完整: {exc}") from exc
     if str(artifact.source_core_run_id) != str(run_context.run_id):
         raise DSAProjectionMappingError(
             "DSA projection source_core_run_id 与 CoreRunContext.run_id 不一致："
