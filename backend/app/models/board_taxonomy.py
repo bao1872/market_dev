@@ -34,6 +34,7 @@ class BoardDefinitionVersion(Base):
     source: Mapped[str] = mapped_column(Text(), nullable=False)
     taxonomy_version: Mapped[str] = mapped_column(Text(), nullable=False)
     taxonomy_compatibility_key: Mapped[str] = mapped_column(Text(), nullable=False)
+    identity_contract_version: Mapped[str] = mapped_column(Text(), nullable=False)
     board_type: Mapped[str] = mapped_column(Text(), nullable=False)
     hierarchy_level: Mapped[str] = mapped_column(Text(), nullable=False)
     parent_board_id: Mapped[uuid.UUID | None] = mapped_column(

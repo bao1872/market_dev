@@ -12,18 +12,24 @@
 from __future__ import annotations
 
 import hashlib
+import time
 import unicodedata
+from pickle import PicklingError
+from queue import Empty
 
 import pandas as pd
 import pytest
 
+from app.services import wencai_board_provider as wencai_provider
 from app.services.wencai_board_provider import (
     MAX_CONCEPTS_PER_STOCK,
+    WencaiFetchError,
     WencaiHashCollisionError,
     WencaiParseError,
     _build_board_snapshot,
     _detect_hash_collision,
     _df_content_hash,
+    _fetch_with_terminable_subprocess,
     _make_external_code,
     _match_column,
     _normalize_concepts,
@@ -31,6 +37,7 @@ from app.services.wencai_board_provider import (
     _normalize_name,
     _normalize_stock_code,
     _select_primary_dataframe,
+    _subprocess_fetch_worker,
     get_provider_info,
 )
 
@@ -467,6 +474,228 @@ class TestSelectPrimaryDataframe:
         df_a = _make_test_dataframe(rows=10, concepts_per_stock=2)
         df_b = _make_test_dataframe(rows=10, concepts_per_stock=3)
         assert _df_content_hash(df_a) != _df_content_hash(df_b)
+
+
+# =============================================================================
+# 9.1 _df_content_hash 行关系语义（整行 tuple 排序）
+# =============================================================================
+
+
+class TestDfContentHashRowRelationships:
+    """_df_content_hash 必须保留整行字段关系，禁止拆散列值排序。"""
+
+    @staticmethod
+    def _swap_df() -> tuple[pd.DataFrame, pd.DataFrame]:
+        """构造两批行序相同、但股票↔概念/行业对应关系互换的 DataFrame。"""
+        data1 = pd.DataFrame([
+            {"股票代码": "600000.SH", "股票简称": "测试1", "所属概念": "概念A", "所属同花顺行业": "行业X"},
+            {"股票代码": "600001.SH", "股票简称": "测试2", "所属概念": "概念B", "所属同花顺行业": "行业Y"},
+        ])
+        # 行序不变，仅把 600000/600001 与 概念A/概念B 的对应关系对调
+        data2 = pd.DataFrame([
+            {"股票代码": "600001.SH", "股票简称": "测试2", "所属概念": "概念B", "所属同花顺行业": "行业X"},
+            {"股票代码": "600000.SH", "股票简称": "测试1", "所属概念": "概念A", "所属同花顺行业": "行业Y"},
+        ])
+        return data1, data2
+
+    def test_same_content_different_row_order_same_hash(self) -> None:
+        """同内容不同行序 hash 相同（整行 tuple 排序）。"""
+        df = _make_test_dataframe(rows=20, concepts_per_stock=3)
+        reordered = df.iloc[::-1].reset_index(drop=True)
+        assert not reordered.equals(df)
+        assert _df_content_hash(df) == _df_content_hash(reordered)
+
+    def test_relationship_swap_changes_hash(self) -> None:
+        """股票与行业/概念对应关系互换时 hash 必须不同。"""
+        data1, data2 = self._swap_df()
+        # 两份数据行序相同、单元格值集合相同，仅行内对应关系不同
+        assert data1.equals(data1) and data2.equals(data2)
+        assert _df_content_hash(data1) != _df_content_hash(data2)
+
+    def test_single_field_change_changes_hash(self) -> None:
+        """某字段变化 hash 必须不同。"""
+        df_a = pd.DataFrame([
+            {"股票代码": "600000.SH", "股票简称": "测试1", "所属概念": "概念A", "所属同花顺行业": "行业X"},
+        ])
+        df_b = df_a.copy()
+        df_b.loc[0, "所属概念"] = "概念B"  # 仅改一个单元格
+        assert _df_content_hash(df_a) != _df_content_hash(df_b)
+
+    def test_duplicate_rows_semantics(self) -> None:
+        """重复行语义明确：重复行数量变化必须改变 hash。
+
+        相同股票/概念/行业出现两次（重复行）与出现一次，语义不同，hash 必须不同。
+        """
+        df_single = pd.DataFrame([
+            {"股票代码": "600000.SH", "股票简称": "测试1", "所属概念": "概念A", "所属同花顺行业": "行业X"},
+        ])
+        df_dup = pd.DataFrame([
+            {"股票代码": "600000.SH", "股票简称": "测试1", "所属概念": "概念A", "所属同花顺行业": "行业X"},
+            {"股票代码": "600000.SH", "股票简称": "测试1", "所属概念": "概念A", "所属同花顺行业": "行业X"},
+        ])
+        assert _df_content_hash(df_single) != _df_content_hash(df_dup)
+
+
+# =============================================================================
+# 9.2 pywencai 可终止子进程（生命周期加固）
+# =============================================================================
+
+
+class _FakeProc:
+    """模拟 multiprocessing.Process，可编程存活/退出/terminate/kill。"""
+
+    def __init__(self, is_alive: bool = True, exitcode: int | None = None,
+                 stubborn: bool = False) -> None:
+        self._alive = is_alive
+        self.exitcode = exitcode
+        self.pid = 1234
+        # stubborn=True 模拟 terminate 无效（进程仍存活），必须 kill
+        self.stubborn = stubborn
+        self.terminated = 0
+        self.killed = 0
+        self.joined: list[float | None] = []
+
+    def start(self) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def terminate(self) -> None:
+        self.terminated += 1
+        if not self.stubborn:
+            self._alive = False
+
+    def kill(self) -> None:
+        self.killed += 1
+        self._alive = False
+
+    def join(self, timeout: float | None = None) -> None:
+        self.joined.append(timeout)
+
+
+class _FakeQueue:
+    """模拟 multiprocessing.Queue，可编程 get_nowait/put/close/join_thread。"""
+
+    def __init__(self, get_nowait_results: list | None = None,
+                 put_ok_raises: Exception | None = None) -> None:
+        self._get_results = list(get_nowait_results or [])
+        self.put_items: list = []
+        self.put_ok_raises = put_ok_raises
+        self.closed = False
+        self.joined = False
+
+    def get_nowait(self):
+        if not self._get_results:
+            raise Empty
+        return self._get_results.pop(0)
+
+    def put(self, item) -> None:
+        # 模拟"结果不可 pickle"：ok 结果 put 抛异常，error 结果可正常 put
+        if self.put_ok_raises is not None and item[0] == "ok":
+            raise self.put_ok_raises
+        self.put_items.append(item)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def join_thread(self) -> None:
+        self.joined = True
+
+
+class _FakeCtx:
+    """模拟 multiprocessing 上下文，注入假 Queue/Process。"""
+
+    def __init__(self, queue: _FakeQueue, proc: _FakeProc) -> None:
+        self._queue = queue
+        self._proc = proc
+
+    def Queue(self) -> _FakeQueue:
+        return self._queue
+
+    def Process(self, target, args, daemon) -> _FakeProc:
+        return self._proc
+
+
+class TestSubprocessWorker:
+    """_subprocess_fetch_worker 结果/错误/不可 pickle 回传。"""
+
+    def test_worker_ok(self, monkeypatch) -> None:
+        q = _FakeQueue()
+        monkeypatch.setattr(wencai_provider, "_fetch_wencai_sync", lambda: {"data": 1})
+        _subprocess_fetch_worker(q)
+        assert q.put_items == [("ok", {"data": 1})]
+
+    def test_worker_error(self, monkeypatch) -> None:
+        q = _FakeQueue()
+
+        def boom() -> None:
+            raise ValueError("boom")
+
+        monkeypatch.setattr(wencai_provider, "_fetch_wencai_sync", boom)
+        _subprocess_fetch_worker(q)
+        assert q.put_items[0][0] == "error"
+        assert q.put_items[0][1] == "ValueError"
+        assert "boom" in q.put_items[0][2]
+
+    def test_worker_unpicklable_result(self, monkeypatch) -> None:
+        """结果不可 pickle 时回传结构化错误，而非让父进程只能靠超时兜底。"""
+        q = _FakeQueue(put_ok_raises=PicklingError("can't pickle"))
+        monkeypatch.setattr(wencai_provider, "_fetch_wencai_sync", lambda: object())
+        _subprocess_fetch_worker(q)
+        assert q.put_items[0][0] == "error"
+        assert q.put_items[0][1] == "PicklingError"
+
+
+class TestFetchTerminableSubprocess:
+    """_fetch_with_terminable_subprocess 轮询/超时/异常退出/资源释放。"""
+
+    @staticmethod
+    def _freeze_time(monkeypatch) -> None:
+        monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+
+    @pytest.mark.asyncio
+    async def test_ok(self, monkeypatch) -> None:
+        q = _FakeQueue(get_nowait_results=[("ok", {"data": 1})])
+        proc = _FakeProc(is_alive=True)
+        monkeypatch.setattr(wencai_provider, "PROVIDER_TIMEOUT_SECONDS", 100)
+        self._freeze_time(monkeypatch)
+        result = await _fetch_with_terminable_subprocess(_FakeCtx(q, proc))
+        assert result == {"data": 1}
+        # 队列资源释放：close + join_thread
+        assert q.closed is True
+        assert q.joined is True
+
+    @pytest.mark.asyncio
+    async def test_error_item(self, monkeypatch) -> None:
+        q = _FakeQueue(get_nowait_results=[("error", "ValueError", "bad")])
+        proc = _FakeProc(is_alive=True)
+        monkeypatch.setattr(wencai_provider, "PROVIDER_TIMEOUT_SECONDS", 100)
+        self._freeze_time(monkeypatch)
+        with pytest.raises(WencaiFetchError, match="问财拉取失败"):
+            await _fetch_with_terminable_subprocess(_FakeCtx(q, proc))
+
+    @pytest.mark.asyncio
+    async def test_timeout_terminates_and_kills(self, monkeypatch) -> None:
+        """超时：terminate 无效（仍存活）时必须 kill 兜底。"""
+        q = _FakeQueue(get_nowait_results=[])  # 永远 Empty
+        proc = _FakeProc(is_alive=True, stubborn=True)  # terminate 无效 → kill
+        monkeypatch.setattr(wencai_provider, "PROVIDER_TIMEOUT_SECONDS", 0.0)
+        self._freeze_time(monkeypatch)
+        with pytest.raises(WencaiFetchError, match="超时"):
+            await _fetch_with_terminable_subprocess(_FakeCtx(q, proc))
+        assert proc.terminated >= 1
+        assert proc.killed >= 1
+
+    @pytest.mark.asyncio
+    async def test_abnormal_exit_detected(self, monkeypatch) -> None:
+        """子进程已退出但队列仍空 → 识别为异常终止。"""
+        q = _FakeQueue(get_nowait_results=[])
+        proc = _FakeProc(is_alive=False, exitcode=1)
+        monkeypatch.setattr(wencai_provider, "PROVIDER_TIMEOUT_SECONDS", 100)
+        self._freeze_time(monkeypatch)
+        with pytest.raises(WencaiFetchError, match="异常退出"):
+            await _fetch_with_terminable_subprocess(_FakeCtx(q, proc))
 
 
 # =============================================================================

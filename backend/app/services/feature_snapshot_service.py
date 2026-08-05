@@ -74,6 +74,10 @@ from app.services.canonical_adapters import (
     profile_to_dict,
 )
 from app.services.canonical_computation_service import CanonicalComputationService
+from app.services.core_run_context import (
+    ComputeOnceDiagnostics,
+    enforce_compute_once_gate,
+)
 from app.services.first_pyramid_flatten import (
     assemble_first_pyramid_read_model,
     flatten_first_pyramid,
@@ -352,6 +356,7 @@ async def compute_feature_snapshot_for_date(
     source_run_id: uuid.UUID | None = None,
     instrument_symbol: str | None = None,
     _diag_sink: dict[str, Any] | None = None,
+    compute_diagnostics: ComputeOnceDiagnostics | None = None,
 ) -> StockFeatureSnapshot:
     """为指定 instrument + trade_date 计算 point-in-time 特征快照。
 
@@ -490,6 +495,9 @@ async def compute_feature_snapshot_for_date(
         bars=df_1d if df_1d is not None else pd.DataFrame(),
         timeframe=primary_timeframe,
         precomputed_node_cluster=node_cluster_profile,
+        # [Corrective-2 2026-08-05] run-scoped compute-once 计数：仅 primary(1d)
+        # 帧传入 diagnostics，secondary(15m) 不传（不计入 canonical 保证）。
+        diagnostics=compute_diagnostics,
     )
     primary_factors = primary_canonical.payload
     degraded_reasons.extend(primary_factors.pop("degraded_reasons", []))
@@ -1756,12 +1764,13 @@ async def compute_for_trade_date(
 
     from app.services.market_data_aggregation_service import MarketDataAggregationService
     mdas = MarketDataAggregationService()
-    # [Commit B 修正 2026-08-05] 真实 compute-once 调用计数：清零后经
-    # structural_factor_service 内部埋点累计，结束时读取快照（不再用伪 frame_build_count）。
-    from app.services import structural_factor_service as _sf
-    reset_compute_call_counts = _sf.reset_compute_call_counts
-    get_compute_call_counts = _sf.get_compute_call_counts
-    reset_compute_call_counts()
+    # [Corrective-2 2026-08-05] run-scoped compute-once 计数：本 run 持有独立
+    # ComputeOnceDiagnostics 实例（并发 run 天然隔离），沿计算链传递到
+    # _compute_all_factors_for_bars 的 canonical(1d) 帧埋点累计，结束时硬门禁校验。
+    # 不再使用模块级全局计数（已删除 reset/get_compute_call_counts）。
+    compute_diagnostics = ComputeOnceDiagnostics()
+    # eligible_compute_count：本 run 实际纳入 compute-once 的标的数（成功消费 primary 1d 帧）。
+    eligible_compute_count = 0
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
         batch_count += 1
@@ -1794,14 +1803,17 @@ async def compute_for_trade_date(
                 attempted_count += 1
                 # [Commit B §7.2] 每股每 core run 只消费一次 canonical frame（df_1d），
                 # 同一个 frame 传给 DSA/SMC/Bollinger/SQZMOM/VolumeContext（compute-once）。
-                # 实际调用计数由 structural_factor_service 内部 `_compute_all_factors_for_bars`
-                # 在 1d 帧上埋点累计（见 reset/get_compute_call_counts），此处不再用伪计数。
+                # [Corrective-2 2026-08-05] 实际计数由 run-scoped ComputeOnceDiagnostics
+                # 沿计算链传递到 _compute_all_factors_for_bars 的 canonical(1d) 帧埋点累计。
                 primary_result = primary_results.get(instrument_id)
                 secondary_result = secondary_results.get(instrument_id)
                 if isinstance(primary_result, Exception):
                     raise primary_result
                 if isinstance(secondary_result, Exception):
                     raise secondary_result
+                # 成功消费 primary 1d 帧的标的才计入 eligible_compute_count（门禁基准）。
+                if primary_result is not None and primary_result.bars is not None and len(primary_result.bars) > 0:
+                    eligible_compute_count += 1
                 snapshot = await compute_feature_snapshot_for_date(
                     session, instrument_id, trade_date,
                     primary_bars=primary_result.bars if primary_result is not None else None,
@@ -1809,6 +1821,7 @@ async def compute_for_trade_date(
                     source_run_id=source_run_id,
                     instrument_symbol=symbol_map.get(instrument_id),
                     _diag_sink=run_diag,
+                    compute_diagnostics=compute_diagnostics,
                 )
                 batch_snapshots.append(snapshot)
                 snapshot_count += 1
@@ -1856,17 +1869,21 @@ async def compute_for_trade_date(
     )
 
     _total = time.perf_counter() - _t0
-    # [Commit B 修正 2026-08-05] 真实 compute-once 调用计数快照：由
-    # structural_factor_service 内部在 canonical(1d) 帧上埋点累计，取代伪 frame_build_count。
-    _compute_counts = get_compute_call_counts()
+    # [Corrective-2 2026-08-05] run-scoped compute-once 计数快照 + 硬门禁。
+    # 四类计数（canonical/dsa/smc/momentum）必须 == eligible_compute_count，
+    # 否则抛 ComputeOnceGateViolation，caller 不得发布 stock_core。
+    _compute_counts = compute_diagnostics.to_dict()
+    if total > 0:
+        enforce_compute_once_gate(compute_diagnostics, eligible_compute_count)
     return {
         "snapshot_count": snapshot_count,
         "failed_count": failed_count,
         "batch_count": batch_count,
         "mdas_batch_read_count": mdas_batch_read_count,
-        # [Commit B §7.2] compute-once 证明：真实调用计数 == eligible attempted。
+        # [Corrective-2 §6] compute-once 硬门禁证明：四类计数 == eligible_compute_count。
         # canonical_frame_build / dsa / smc / momentum 均在同一 canonical(1d) 帧上各一次。
         "attempted_count": attempted_count,
+        "eligible_compute_count": eligible_compute_count,
         "frame_build_count": _compute_counts["canonical_frame_build"],
         "dsa_call_count": _compute_counts["dsa"],
         "smc_call_count": _compute_counts["smc"],

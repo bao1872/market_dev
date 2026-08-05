@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -33,6 +34,85 @@ BOLLINGER_ALGORITHM_VERSION = "bollinger-v1"
 SQZMOM_ALGORITHM_VERSION = "sqzmom-v1"
 CORE_EXECUTION_CONTRACT_VERSION = "core-exec-v1"
 
+# ===== compute-once 计数键（唯一 SSOT）=====
+# canonical_frame_build 代表 canonical(1d) 帧被消费计算一次；
+# dsa / smc / momentum 为该 canonical 帧上各维度计算调用次数。
+_COMPUTE_ONCE_KEYS: tuple[str, ...] = (
+    "canonical_frame_build",
+    "dsa",
+    "smc",
+    "momentum",
+)
+
+
+class ComputeOnceGateViolation(RuntimeError):
+    """compute-once 硬门禁失败：维度调用次数 != 实际纳入计算标的数。
+
+    触发时禁止发布 stock_core。
+    """
+
+
+class CoreArtifactLineageError(ValueError):
+    """CoreComputationArtifact 缺少必需 lineage 字段。"""
+
+
+@dataclass
+class ComputeOnceDiagnostics:
+    """Run-scoped compute-once 诊断计数（替代模块级计数器）。
+
+    [Corrective-2 2026-08-05] 每个 CoreRunContext 持有一个独立实例，天然支持
+    并发 run 隔离——两个 run 的计数互不污染。计数由计算链显式传递的
+    diagnostics 实例累计（不再使用模块级全局计数）。
+    """
+
+    canonical_frame_build: int = 0
+    dsa: int = 0
+    smc: int = 0
+    momentum: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def bump(self, key: str) -> None:
+        """对指定计算类型计数自增（线程安全）。"""
+        if key not in _COMPUTE_ONCE_KEYS:
+            raise ValueError(f"无效 compute-once 计数键: {key}")
+        with self._lock:
+            setattr(self, key, getattr(self, key) + 1)
+
+    def to_dict(self) -> dict[str, int]:
+        """转换为计数字典快照（线程安全）。"""
+        with self._lock:
+            return {
+                "canonical_frame_build": self.canonical_frame_build,
+                "dsa": self.dsa,
+                "smc": self.smc,
+                "momentum": self.momentum,
+            }
+
+
+def enforce_compute_once_gate(
+    diagnostics: ComputeOnceDiagnostics,
+    eligible_compute_count: int,
+) -> None:
+    """compute-once 硬门禁：四类计数都必须等于 eligible_compute_count。
+
+    任一不一致即抛 ComputeOnceGateViolation，调用方不得发布 stock_core。
+
+    Args:
+        diagnostics: run-scoped 计数
+        eligible_compute_count: 本 run 实际纳入核心计算的标的数
+
+    Raises:
+        ComputeOnceGateViolation: 任一维度计数与 eligible 不一致
+    """
+    counts = diagnostics.to_dict()
+    for key in _COMPUTE_ONCE_KEYS:
+        actual = counts[key]
+        if actual != eligible_compute_count:
+            raise ComputeOnceGateViolation(
+                f"compute-once 门禁失败: {key}={actual} != eligible_compute_count="
+                f"{eligible_compute_count}，禁止发布 stock_core"
+            )
+
 
 @dataclass(frozen=True)
 class CoreRunContext:
@@ -40,6 +120,7 @@ class CoreRunContext:
 
     所有字段在 run 启动时冻结，后续计算不得修改。
     parameter_hash 由关键配置派生，用于跨 run 幂等与审计。
+    compute_diagnostics 为 run-scoped compute-once 计数（并发隔离）。
     """
 
     trade_date: date
@@ -47,6 +128,11 @@ class CoreRunContext:
     algorithm_versions: dict[str, str] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
     execution_contract_version: str = CORE_EXECUTION_CONTRACT_VERSION
+    # [Corrective-2 2026-08-05] 绑定真实 run：计数与 lineage 对账必须归属同一 run
+    run_id: Any | None = field(default=None)
+    compute_diagnostics: ComputeOnceDiagnostics = field(
+        default_factory=ComputeOnceDiagnostics
+    )
 
     @property
     def parameter_hash(self) -> str:
@@ -120,6 +206,29 @@ class CoreComputationArtifact:
             if self.availability.get(dim) != "ready":
                 return False
         return True
+
+    def validate_lineage(self) -> None:
+        """强制校验 lineage 必需字段（[Corrective-2 2026-08-05]）。
+
+        - source_core_run_id 非空
+        - parameter_hash 非空
+        - dsa algorithm version 非空
+
+        Raises:
+            CoreArtifactLineageError: 任一必需 lineage 字段缺失
+        """
+        if self.source_core_run_id is None:
+            raise CoreArtifactLineageError(
+                "CoreComputationArtifact.source_core_run_id 不能为空"
+            )
+        if not self.parameter_hash:
+            raise CoreArtifactLineageError(
+                "CoreComputationArtifact.parameter_hash 不能为空"
+            )
+        if not self.algorithm_versions.get("dsa"):
+            raise CoreArtifactLineageError(
+                "CoreComputationArtifact 必须携带 dsa algorithm version"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

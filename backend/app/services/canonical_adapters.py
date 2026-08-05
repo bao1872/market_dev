@@ -415,6 +415,7 @@ def compute_structural_features_adapter(
     timeframe: str = "1d",
     *,
     precomputed_node_cluster: Any | None = None,
+    diagnostics: Any | None = None,
 ) -> dict[str, Any]:
     """Structural Features 统一 adapter — wraps structural_factor_service._compute_all_factors_for_bars。
 
@@ -426,6 +427,9 @@ def compute_structural_features_adapter(
         timeframe: 周期标识（"1d" / "15m" 等）
         precomputed_node_cluster: 预计算的 Node Cluster Profile（仅盘后 primary 1d 链路
             由 feature_snapshot_service 注入）。None 时 cost_position 走单周期 VP。
+        diagnostics: run-scoped ComputeOnceDiagnostics（[Corrective-2 2026-08-05]）。
+            仅 primary(1d) 帧由 feature_snapshot_service 传入以累计 compute-once 计数；
+            secondary(15m) 帧不传，避免与 compute-once 保证混淆。
 
     Returns:
         dict: dsa_segment/swing_position/cost_position/volatility_momentum/participation
@@ -450,6 +454,7 @@ def compute_structural_features_adapter(
         degraded_reasons,
         warmup_notes,
         precomputed_node_cluster=precomputed_node_cluster,
+        diagnostics=diagnostics,
     )
     result["degraded_reasons"] = degraded_reasons
     result["warmup_notes"] = warmup_notes

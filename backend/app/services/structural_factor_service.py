@@ -25,7 +25,6 @@ V1 范围：
 from __future__ import annotations
 
 import logging
-import threading
 import uuid
 from typing import Any
 
@@ -68,36 +67,14 @@ _BB_K = 2.0
 _ATR_LENGTH = 14
 _PERCENTILE_LOOKBACK = 120  # 约 6 个月日线
 # =============================================================================
-# [Commit B 2026-08-05] 真实 compute-once 调用计数
+# [Corrective-2 2026-08-05] compute-once 调用计数改为 run-scoped
 # =============================================================================
-# 在 canonical(1d) 帧上对 DSA/SMC/momentum 实际计算函数的真实调用计数，
-# 供 feature_snapshot_service 批量层按 eligible instrument 校验每股各一次。
-# 仅统计 timeframe == "1d"（canonical frame）的计算；15m secondary 不计入，
-# 避免与 compute-once 保证混淆。模块级 + 锁保证线程安全。
+# 原模块级 _COMPUTE_CALL_COUNTS 会造成并发 run 计数互相污染，已删除。
+# 计数改为 run-scoped ComputeOnceDiagnostics，由 CoreRunContext 创建并沿计算链
+# 显式传递（见 app.services.core_run_context）。本模块不再持有任何全局计数状态。
 #
-# 计数键：canonical_frame_build / dsa / smc / momentum
-_COMPUTE_CALL_COUNT_KEYS = ("canonical_frame_build", "dsa", "smc", "momentum")
-_COMPUTE_CALL_COUNTS: dict[str, int] = dict.fromkeys(_COMPUTE_CALL_COUNT_KEYS, 0)
-_COMPUTE_CALLS_LOCK = threading.Lock()
-
-
-def reset_compute_call_counts() -> dict[str, int]:
-    """清零 compute-once 计数并返回当前值（供 batch 层 run 开始时调用）。"""
-    with _COMPUTE_CALLS_LOCK:
-        _COMPUTE_CALL_COUNTS.update(dict.fromkeys(_COMPUTE_CALL_COUNT_KEYS, 0))
-        return dict(_COMPUTE_CALL_COUNTS)
-
-
-def get_compute_call_counts() -> dict[str, int]:
-    """返回当前 compute-once 计数快照（供 batch 层 run 结束时读取）。"""
-    with _COMPUTE_CALLS_LOCK:
-        return dict(_COMPUTE_CALL_COUNTS)
-
-
-def _bump_compute_call(key: str) -> None:
-    """对指定计算类型计数自增。"""
-    with _COMPUTE_CALLS_LOCK:
-        _COMPUTE_CALL_COUNTS[key] = _COMPUTE_CALL_COUNTS.get(key, 0) + 1
+# _compute_all_factors_for_bars 接受可选 diagnostics 参数；仅在 canonical(1d)
+# 帧且 diagnostics 非空时累计，保证计数严格归属真实 run。
 
 
 def percentile_rank(
@@ -1632,6 +1609,7 @@ def _compute_all_factors_for_bars(
     warmup_notes: list[str],
     *,
     precomputed_node_cluster: NodeClusterProfileResult | None = None,
+    diagnostics: Any | None = None,
 ) -> dict[str, Any]:
     """计算单周期所有因子组，每组独立异常隔离。
 
@@ -1644,6 +1622,8 @@ def _compute_all_factors_for_bars(
             由 feature_snapshot_service 注入）。当提供时，cost_position 消费 engine 结果
             （三链同核）；当为 None，cost_position 走单周期 VP（15m secondary 或
             compute_structural_factors 独立调用）。
+        diagnostics: run-scoped ComputeOnceDiagnostics（[Corrective-2 2026-08-05]）。
+            仅 canonical(1d) 帧且非空时累计真实调用计数；None 表示非核心 run 路径，不计数。
     """
     factors: dict[str, Any] = {
         "dsa_segment": None,
@@ -1657,12 +1637,12 @@ def _compute_all_factors_for_bars(
         degraded_reasons.append(f"{timeframe}: bars is None or empty")
         return factors
 
-    # [Commit B 修正 2026-08-05] 真实 compute-once 调用计数。
-    # 仅对 canonical(1d) 帧计数；15m secondary 不计入，避免与 compute-once 保证混淆。
-    # canonical_frame_build 代表该 canonical 帧被消费计算一次。
+    # [Corrective-2 2026-08-05] 真实 compute-once 调用计数（run-scoped）。
+    # 仅对 canonical(1d) 帧且 diagnostics 非空时计数；15m secondary 不计入，
+    # 避免与 compute-once 保证混淆。canonical_frame_build 代表该 canonical 帧被消费一次。
     is_canonical = timeframe == "1d"
-    if is_canonical:
-        _bump_compute_call("canonical_frame_build")
+    if is_canonical and diagnostics is not None:
+        diagnostics.bump("canonical_frame_build")
 
     # ATR
     atr: np.ndarray | None = None
@@ -1677,8 +1657,8 @@ def _compute_all_factors_for_bars(
 
     # 1. DSA 段质量
     try:
-        if is_canonical:
-            _bump_compute_call("dsa")
+        if is_canonical and diagnostics is not None:
+            diagnostics.bump("dsa")
         dsa_bundle = compute_dsa_bundle(bars, {})
         factors["dsa_segment"] = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     except Exception as exc:
@@ -1703,8 +1683,8 @@ def _compute_all_factors_for_bars(
 
     # 4. 动量/波动
     try:
-        if is_canonical:
-            _bump_compute_call("momentum")
+        if is_canonical and diagnostics is not None:
+            diagnostics.bump("momentum")
         factors["volatility_momentum"] = _compute_volatility_momentum_factors(bars, atr)
     except Exception as exc:
         degraded_reasons.append(f"{timeframe}: volatility_momentum failed: {exc}")
@@ -1723,7 +1703,8 @@ def _compute_all_factors_for_bars(
     #    [PROMPT.md §四.4] 事件 bar=0，此后按已完成日线 bar 递增，从未发生为 null
     if timeframe == "1d":
         try:
-            _bump_compute_call("smc")
+            if is_canonical and diagnostics is not None:
+                diagnostics.bump("smc")
             factors["smc_freshness"] = _compute_smc_freshness_factors(bars)
         except Exception as exc:
             degraded_reasons.append(f"{timeframe}: smc_freshness failed: {exc}")

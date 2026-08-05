@@ -34,7 +34,10 @@ from app.domain_status import (
     ALL_DSA_PROJECTION_REQUIREMENTS,
     DSA_PROJECTION_REQUIREMENT_REQUIRED,
 )
-from app.services.core_run_context import CoreComputationArtifact
+from app.services.core_run_context import (
+    CoreComputationArtifact,
+    CoreRunContext,
+)
 
 # ===== DSA projection 指标唯一 SSOT（与 dsa_selector._history_row_to_metrics 对齐）=====
 DSA_PROJECTION_METRIC_KEYS: frozenset[str] = frozenset({
@@ -286,6 +289,58 @@ def map_dsa_projection(
         visual=visual,
         requirement=requirement,
         projection_hash=projection_hash,
+    )
+
+
+def map_dsa_projection_with_context(
+    artifact: CoreComputationArtifact,
+    run_context: CoreRunContext,
+    *,
+    requirement: str = DSA_PROJECTION_REQUIREMENT_REQUIRED,
+) -> DSAProjectionRecord:
+    """DSA projection 正式入口：接收 CoreRunContext 并无条件对账。
+
+    [Corrective-2 2026-08-05 §8] 与 map_dsa_projection 不同，本入口**不依赖可选
+    expected_* 参数**，而是从 CoreRunContext 读取 run 级 lineage（run_id /
+    parameter_hash / dsa algorithm version）并**无条件**与 artifact 携带的持久化
+    lineage 对账：
+
+    - run_context.run_id 必须非空（否则无法对账 source_core_run_id）
+    - run_context.algorithm_versions 必须携带 dsa version（否则无法对账算法版本）
+    - run_context.parameter_hash 必须与 artifact 持久化 parameter_hash 一致
+
+    任一缺失或不一致即映射失败（拒绝基于不同 run/参数/算法版本的 projection 消费）。
+    真实 orchestrator / stock_core publication / persistence caller 必须使用本入口，
+    禁止绕过对账直接调用 map_dsa_projection。
+
+    Raises:
+        DSAProjectionMappingError: run_context lineage 不完整，或与 artifact 对账失败；
+            或 artifact 缺少 lineage / 必需指标。
+    """
+    if run_context.run_id is None:
+        raise DSAProjectionMappingError(
+            "DSA projection 正式入口要求 CoreRunContext.run_id 非空（无法无条件对账 source_core_run_id）"
+        )
+    dsa_version = run_context.algorithm_versions.get("dsa")
+    if not dsa_version:
+        raise DSAProjectionMappingError(
+            "DSA projection 正式入口要求 CoreRunContext 携带 dsa algorithm version（无法无条件对账）"
+        )
+    # 无条件对账：即使是 map_dsa_projection 中"expected_* is None 时跳过"的分支，
+    # 此处也强制 artifact 自身 lineage 完整且与 run_context 一致。
+    artifact.validate_lineage()
+    if str(artifact.source_core_run_id) != str(run_context.run_id):
+        raise DSAProjectionMappingError(
+            "DSA projection source_core_run_id 与 CoreRunContext.run_id 不一致："
+            f"artifact={artifact.source_core_run_id!s}, run_context={run_context.run_id!s}，"
+            "禁止基于不同 core run 的 projection 被消费"
+        )
+    return map_dsa_projection(
+        artifact,
+        requirement=requirement,
+        expected_core_run_id=run_context.run_id,
+        expected_core_parameter_hash=run_context.parameter_hash,
+        expected_dsa_version=dsa_version,
     )
 
 

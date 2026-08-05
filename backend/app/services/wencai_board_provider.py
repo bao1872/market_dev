@@ -195,24 +195,42 @@ def _match_required_columns(columns: list[str]) -> dict[str, str | None]:
     }
 
 
+def _df_cell_str(value: Any) -> str:
+    """将单元格值规范化为稳定字符串（None/NaN → 空串）。"""
+    if value is None:
+        return ""
+    try:
+        # float('nan') 不自等，视为缺失
+        if isinstance(value, float) and value != value:
+            return ""
+    except Exception:  # pragma: no cover - 防御性兜底
+        pass
+    return str(value)
+
+
 def _df_content_hash(df: Any) -> str:
     """对 DataFrame 内容计算稳定 hash（用于多表哈希冲突检测）。
 
-    基于规范化后的四类必需字段拼接，并对规范化行排序，保证同一批数据
-    即使行序不同也得到相同 hash（顺序无关）。
+    基于规范化后的四类必需字段，按**整行 tuple** 排序后拼接 hash：
+    1. 同一批数据即使行序不同也得到相同 hash（顺序无关）
+    2. 保留整行内字段间关系（股票与行业/概念的对应关系不被拆散）
+
+    禁止把不同列值拆散排序——那会丢失"某行股票对应某个概念/行业"的行关系。
     """
     columns = list(df.columns)
     col_map = _match_required_columns(columns)
-    material_parts: list[str] = []
-    for key in ("stock_code", "stock_name", "concept", "industry"):
-        col = col_map.get(key)
-        if col is None or col not in df.columns:
-            continue
-        for value in df[col].astype(str).tolist():
-            material_parts.append(f"{key}={value}")
-    # 规范化行排序：保证同行不同顺序 hash 相同（与 _stable_snapshot_hash 顺序无关语义对齐）
-    material_parts.sort()
-    return hashlib.sha256("\n".join(material_parts).encode("utf-8")).hexdigest()
+    rows: list[tuple[str, str, str, str]] = []
+    for _, row in df.iterrows():
+        rows.append((
+            _df_cell_str(row[col_map["stock_code"]]) if col_map["stock_code"] else "",
+            _df_cell_str(row[col_map["stock_name"]]) if col_map["stock_name"] else "",
+            _df_cell_str(row[col_map["concept"]]) if col_map["concept"] else "",
+            _df_cell_str(row[col_map["industry"]]) if col_map["industry"] else "",
+        ))
+    # 对整行 tuple 排序，保证行序无关同时保留字段间关系
+    rows.sort()
+    material = "\n".join(f"{sc}|{sn}|{c}|{i}" for sc, sn, c, i in rows)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _select_primary_dataframe(result: Any, pd: Any) -> Any:
@@ -624,11 +642,17 @@ def _fetch_wencai_sync() -> Any:
 
 _FETCH_SUBPROCESS_POLL_SECONDS = 0.2
 
+# 子进程终止时优雅等待，超过仍存活则升级为 kill
+TERMINATE_JOIN_TIMEOUT = 5
+KILL_JOIN_TIMEOUT = 2
+
 
 def _subprocess_fetch_worker(queue: Any) -> None:
     """在独立子进程中执行 pywencai 拉取，把结果/错误放入 multiprocessing Queue。
 
     作为 scripts 顶层函数，可被 spawn 子进程 picklable 序列化。
+    若结果不可 pickle（queue.put 抛 PicklingError），同样回传结构化错误，
+    避免父进程只能靠超时兜底。
     """
     try:
         result = _fetch_wencai_sync()
@@ -637,27 +661,50 @@ def _subprocess_fetch_worker(queue: Any) -> None:
         queue.put(("error", type(exc).__name__, str(exc)[:500]))
 
 
-async def _fetch_with_terminable_subprocess() -> Any:
+def _terminate_subprocess(proc: Any) -> None:
+    """终止子进程：先 terminate，仍存活则 kill，并等待退出。幂等。"""
+    if getattr(proc, "pid", None) is None:
+        return
+    if not proc.is_alive():
+        return
+    proc.terminate()
+    proc.join(timeout=TERMINATE_JOIN_TIMEOUT)
+    if proc.is_alive():
+        proc.kill()
+        proc.join(timeout=KILL_JOIN_TIMEOUT)
+
+
+async def _fetch_with_terminable_subprocess(ctx: Any | None = None) -> Any:
     """在可终止子进程中执行 pywencai 拉取，超时后真正终止底层调用。
 
     [Commit A 修正 2026-08-05] 原实现用 asyncio.wait_for(asyncio.to_thread(...))
     包装 _fetch_wencai_sync：超时会取消等待，但底层 to_thread 线程仍会继续运行
     pywencai（不可终止），多次超时会导致后台线程叠加。此处改为在独立
     spawn 子进程中执行，父进程在 PROVIDER_TIMEOUT_SECONDS 内非阻塞轮询
-    multiprocessing Queue；超时则 proc.terminate() 真正终止子进程（含 pywencai
-    网络调用），杜绝线程/进程叠加。
+    multiprocessing Queue；超时则真正终止子进程（含 pywencai 网络调用），
+    杜绝线程/进程叠加。
+
+    [Corrective-2 2026-08-05] 子进程生命周期加固：
+    1. 轮询仅捕获 queue.Empty（不再吞掉其他异常）
+    2. 子进程已退出但队列仍空 → 识别为异常终止（如不可 pickle 结果未入队）
+    3. terminate 后仍存活则 kill
+    4. 队列 close/join_thread 释放 feeder 线程资源
+
+    Args:
+        ctx: multiprocessing 上下文（测试注入用；默认 spawn）
 
     Returns:
         pywencai 返回的原始结果（可由 Queue 传输，DataFrame/dict/list/tuple）
 
     Raises:
-        WencaiFetchError: 超时（子进程已被终止）或子进程内拉取失败
+        WencaiFetchError: 超时（子进程已被终止）、子进程异常退出或拉取失败
     """
     import multiprocessing as mp
+    from queue import Empty as _QueueEmpty
 
-    ctx = mp.get_context("spawn")
-    queue = ctx.Queue()
-    proc = ctx.Process(target=_subprocess_fetch_worker, args=(queue,), daemon=True)
+    mp_ctx = ctx or mp.get_context("spawn")
+    queue = mp_ctx.Queue()
+    proc = mp_ctx.Process(target=_subprocess_fetch_worker, args=(queue,), daemon=True)
 
     start = time.monotonic()
     proc.start()
@@ -670,20 +717,27 @@ async def _fetch_with_terminable_subprocess() -> Any:
             try:
                 item = queue.get_nowait()
                 break
-            except Exception:  # noqa: BLE001 - queue.Empty（空队列继续轮询）
+            except _QueueEmpty:
+                # 子进程已退出但队列仍空 → 异常终止（如不可 pickle 结果未入队）
+                if not proc.is_alive() and proc.exitcode not in (None, 0):
+                    raise WencaiFetchError(
+                        f"问财子进程异常退出（exitcode={proc.exitcode}），未返回结果"
+                    )
                 await asyncio.sleep(_FETCH_SUBPROCESS_POLL_SECONDS)
-    except TimeoutError as exc:
+    except (TimeoutError, WencaiFetchError) as exc:
         # 真正终止子进程（含底层 pywencai 网络调用），并等待其退出
-        proc.terminate()
-        proc.join(timeout=5)
-        raise WencaiFetchError(
-            f"问财拉取超时（>{PROVIDER_TIMEOUT_SECONDS}s），子进程已终止"
-        ) from exc
+        _terminate_subprocess(proc)
+        if isinstance(exc, TimeoutError):
+            raise WencaiFetchError(
+                f"问财拉取超时（>{PROVIDER_TIMEOUT_SECONDS}s），子进程已终止"
+            ) from exc
+        raise
     finally:
-        # 兜底：任何路径下确保子进程不残留
-        if proc.is_alive():
-            proc.terminate()
-            proc.join(timeout=5)
+        # 兜底：先终止子进程，避免其在队列关闭后仍尝试写入/阻塞 feeder 线程
+        _terminate_subprocess(proc)
+        # 队列资源释放：close + join feeder 线程，避免后台线程残留
+        queue.close()
+        queue.join_thread()
 
     if item is None:
         raise WencaiFetchError("问财拉取未返回结果")

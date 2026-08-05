@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -16,7 +16,10 @@ from app.domain_status import (
     DSA_PROJECTION_REQUIREMENT_REQUIRED,
     DSA_PROJECTION_REQUIREMENT_RETIRED,
 )
-from app.services.core_run_context import CoreComputationArtifact
+from app.services.core_run_context import (
+    CoreComputationArtifact,
+    CoreRunContext,
+)
 from app.services.dsa_projection_service import (
     DSAProjectionMappingError,
     DSAProjectionRecord,
@@ -24,6 +27,7 @@ from app.services.dsa_projection_service import (
     compute_projection_hash,
     is_projection_consumable,
     map_dsa_projection,
+    map_dsa_projection_with_context,
     reconcile_projection_parameter_hash,
 )
 
@@ -221,3 +225,97 @@ def test_reconcile_function_mismatch_raises():
 def test_reconcile_function_match_ok():
     """对账一致时不抛错。"""
     reconcile_projection_parameter_hash(_PARAM_HASH, _PARAM_HASH)
+
+
+# =============================================================================
+# [Corrective-2 2026-08-05 §8] map_dsa_projection_with_context 无条件对账
+# =============================================================================
+def _make_run_context(
+    *,
+    run_id: object = "run-1",
+    dsa_version: str = _DSA_VERSION,
+    config: dict | None = None,
+) -> CoreRunContext:
+    """构造带 run 级 lineage 的 CoreRunContext。"""
+    return CoreRunContext(
+        trade_date=date(2026, 8, 4),
+        run_calculated_at=datetime(2026, 8, 4, 15, 0, 0),
+        algorithm_versions={"dsa": dsa_version},
+        config=config or {},
+        run_id=run_id,
+    )
+
+
+def test_with_context_matching_lineage_ok():
+    """run_context 与 artifact lineage 全一致 → 无条件对账通过。"""
+    run_ctx = _make_run_context()
+    artifact = _make_artifact(
+        source_core_run_id=run_ctx.run_id,
+        parameter_hash=run_ctx.parameter_hash,
+        algorithm_versions={"dsa": _DSA_VERSION},
+    )
+    rec = map_dsa_projection_with_context(artifact, run_ctx)
+    assert rec.source_core_run_id == "run-1"
+    assert rec.parameter_hash == run_ctx.parameter_hash
+    assert rec.dsa_version == _DSA_VERSION
+
+
+def test_with_context_run_id_mismatch_raises():
+    """run_context.run_id 与 artifact.source_core_run_id 不一致 → 拒绝。"""
+    run_ctx = _make_run_context(run_id="run-other")
+    artifact = _make_artifact(
+        source_core_run_id="run-1",
+        parameter_hash=run_ctx.parameter_hash,
+        algorithm_versions={"dsa": _DSA_VERSION},
+    )
+    with pytest.raises(DSAProjectionMappingError, match="source_core_run_id 与 CoreRunContext.run_id 不一致"):
+        map_dsa_projection_with_context(artifact, run_ctx)
+
+
+def test_with_context_parameter_hash_mismatch_raises():
+    """run_context.parameter_hash 与 artifact 不一致 → 拒绝。"""
+    run_ctx = _make_run_context()
+    # artifact 用与 run_context 不同的 parameter_hash
+    artifact = _make_artifact(
+        source_core_run_id=run_ctx.run_id,
+        parameter_hash="different-core-hash",
+        algorithm_versions={"dsa": _DSA_VERSION},
+    )
+    with pytest.raises(DSAProjectionMappingError, match="参数 hash 与 core artifact 不一致"):
+        map_dsa_projection_with_context(artifact, run_ctx)
+
+
+def test_with_context_missing_dsa_version_raises():
+    """run_context 未携带 dsa algorithm version → 拒绝（无法无条件对账）。"""
+    run_ctx = _make_run_context(dsa_version="")
+    artifact = _make_artifact(
+        source_core_run_id=run_ctx.run_id,
+        parameter_hash=run_ctx.parameter_hash,
+        algorithm_versions={"dsa": _DSA_VERSION},
+    )
+    with pytest.raises(DSAProjectionMappingError, match="dsa algorithm version"):
+        map_dsa_projection_with_context(artifact, run_ctx)
+
+
+def test_with_context_run_id_none_raises():
+    """run_context.run_id 为 None → 拒绝（无法无条件对账 source_core_run_id）。"""
+    run_ctx = _make_run_context(run_id=None)
+    artifact = _make_artifact(
+        source_core_run_id="run-1",
+        parameter_hash=_PARAM_HASH,
+        algorithm_versions={"dsa": _DSA_VERSION},
+    )
+    with pytest.raises(DSAProjectionMappingError, match="run_id 非空"):
+        map_dsa_projection_with_context(artifact, run_ctx)
+
+
+def test_with_context_artifact_missing_source_run_id_raises():
+    """artifact 未持久化 source_core_run_id → validate_lineage 拒绝。"""
+    run_ctx = _make_run_context()
+    artifact = _make_artifact(
+        source_core_run_id=None,
+        parameter_hash=run_ctx.parameter_hash,
+        algorithm_versions={"dsa": _DSA_VERSION},
+    )
+    with pytest.raises(DSAProjectionMappingError):
+        map_dsa_projection_with_context(artifact, run_ctx)

@@ -21,6 +21,7 @@ from uuid import UUID
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from app.services.structural_factor_service import (
     _classify_confirmed_swing_breakout_state,
@@ -1480,18 +1481,19 @@ def test_developing_swing_000100_like_case() -> None:
     assert 0.0 <= pos <= 1.0
 
 
-# ===== [Commit B 修正] 真实 compute-once 调用计数 =====
+# ===== [Corrective-2 2026-08-05] run-scoped compute-once 调用计数 =====
+def _make_diagnostics() -> "ComputeOnceDiagnostics":
+    from app.services.core_run_context import ComputeOnceDiagnostics
+
+    return ComputeOnceDiagnostics()
+
+
 def test_real_compute_call_counts_1d_bumps_each_once() -> None:
     """在 canonical(1d) 帧上调用 _compute_all_factors_for_bars，DSA/SMC/momentum/canonical 各计一次。"""
-    from app.services.structural_factor_service import (
-        get_compute_call_counts,
-        reset_compute_call_counts,
-    )
-
     bars = _build_bars(n=250)
-    reset_compute_call_counts()
-    _compute_all_factors_for_bars(bars, "1d", [], [])
-    counts = get_compute_call_counts()
+    diag = _make_diagnostics()
+    _compute_all_factors_for_bars(bars, "1d", [], [], diagnostics=diag)
+    counts = diag.to_dict()
     assert counts["canonical_frame_build"] == 1
     assert counts["dsa"] == 1
     assert counts["smc"] == 1
@@ -1500,39 +1502,87 @@ def test_real_compute_call_counts_1d_bumps_each_once() -> None:
 
 def test_real_compute_call_counts_15m_does_not_count() -> None:
     """secondary(15m) 帧不纳入 compute-once 计数（避免与 canonical 保证混淆）。"""
-    from app.services.structural_factor_service import (
-        get_compute_call_counts,
-        reset_compute_call_counts,
-    )
-
     bars = _build_bars(n=250)
-    reset_compute_call_counts()
-    _compute_all_factors_for_bars(bars, "15m", [], [])
-    counts = get_compute_call_counts()
+    diag = _make_diagnostics()
+    _compute_all_factors_for_bars(bars, "15m", [], [], diagnostics=diag)
+    counts = diag.to_dict()
     assert counts["canonical_frame_build"] == 0
     assert counts["dsa"] == 0
     assert counts["smc"] == 0
     assert counts["momentum"] == 0
 
 
-def test_real_compute_call_counts_cumulative_and_reset() -> None:
-    """多次 1d 调用计数累计；reset 后归零。"""
-    from app.services.structural_factor_service import (
-        get_compute_call_counts,
-        reset_compute_call_counts,
-    )
+def test_real_compute_call_counts_diagnostics_none_does_not_count() -> None:
+    """diagnostics=None（非核心 run 路径）时不计入任何维度。"""
+    bars = _build_bars(n=250)
+    _compute_all_factors_for_bars(bars, "1d", [], [], diagnostics=None)
+    # 无副作用：不依赖全局计数，仅验证不抛错且不污染任何 run-scoped 实例
+    diag = _make_diagnostics()
+    assert diag.to_dict()["dsa"] == 0
+
+
+def test_real_compute_call_counts_two_runs_isolated() -> None:
+    """两个独立 run 的计数互不污染（并发隔离）。"""
+    from app.services.core_run_context import enforce_compute_once_gate
+
+    bars1 = _build_bars(n=250, seed=1)
+    bars2 = _build_bars(n=250, seed=2)
+    diag_a = _make_diagnostics()
+    diag_b = _make_diagnostics()
+    # run A 消费两帧，run B 只消费一帧
+    _compute_all_factors_for_bars(bars1, "1d", [], [], diagnostics=diag_a)
+    _compute_all_factors_for_bars(bars2, "1d", [], [], diagnostics=diag_a)
+    _compute_all_factors_for_bars(bars2, "1d", [], [], diagnostics=diag_b)
+    # run A = 2，run B = 1，互不污染
+    assert diag_a.to_dict()["dsa"] == 2
+    assert diag_b.to_dict()["dsa"] == 1
+    # 各自能通过各自 run 的门禁
+    enforce_compute_once_gate(diag_a, eligible_compute_count=2)
+    enforce_compute_once_gate(diag_b, eligible_compute_count=1)
+
+
+def test_real_compute_call_counts_concurrent_isolation() -> None:
+    """并发线程下两个 run 的计数互不污染（线程安全）。"""
+    import threading
+
+    from app.services.core_run_context import enforce_compute_once_gate
 
     bars = _build_bars(n=250)
-    reset_compute_call_counts()
-    _compute_all_factors_for_bars(bars, "1d", [], [])
-    _compute_all_factors_for_bars(bars, "1d", [], [])
-    counts = get_compute_call_counts()
-    assert counts["dsa"] == 2
-    assert counts["smc"] == 2
-    assert counts["momentum"] == 2
-    assert counts["canonical_frame_build"] == 2
-    reset_compute_call_counts()
-    assert get_compute_call_counts()["dsa"] == 0
+    diag_a = _make_diagnostics()
+    diag_b = _make_diagnostics()
+    n = 50
+    barrier = threading.Barrier(2)
+
+    def _worker(diag) -> None:
+        barrier.wait()
+        for _ in range(n):
+            _compute_all_factors_for_bars(bars, "1d", [], [], diagnostics=diag)
+
+    ta = threading.Thread(target=_worker, args=(diag_a,))
+    tb = threading.Thread(target=_worker, args=(diag_b,))
+    ta.start()
+    tb.start()
+    ta.join()
+    tb.join()
+    # 两个 run 各自精确计数 n 次，互不污染
+    assert diag_a.to_dict()["dsa"] == n
+    assert diag_b.to_dict()["dsa"] == n
+    assert diag_a.to_dict()["smc"] == n
+    assert diag_b.to_dict()["smc"] == n
+    enforce_compute_once_gate(diag_a, eligible_compute_count=n)
+    enforce_compute_once_gate(diag_b, eligible_compute_count=n)
+
+
+def test_compute_once_gate_violation_when_mismatch() -> None:
+    """任一维度计数与 eligible 不一致时抛 ComputeOnceGateViolation。"""
+    from app.services.core_run_context import ComputeOnceGateViolation
+
+    bars = _build_bars(n=250)
+    diag = _make_diagnostics()
+    _compute_all_factors_for_bars(bars, "1d", [], [], diagnostics=diag)
+    # eligible=2 但实际 dsa=1 → 门禁失败
+    with pytest.raises(ComputeOnceGateViolation):
+        enforce_compute_once_gate(diag, eligible_compute_count=2)
 
 
 # ===== 模块自测入口 =====

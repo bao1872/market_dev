@@ -413,11 +413,14 @@ async def _atomic_switch(
     for b in boards_to_insert:
         # [Commit A 2026-08-05] 显式分类学/身份合同，禁止回退 qstock 默认值。
         # 缺失任一字段即视为 provider 合同破裂，直接报错由调用方捕获。
+        # [Corrective-2 2026-08-05] identity_contract_version 为强制字段，
+        # 必须由 provider 输出并由 board_sync 强制校验，禁止输出后丢弃。
         try:
             taxonomy = b["taxonomy"]
             source = b["source"]
             taxonomy_version = b["taxonomy_version"]
             taxonomy_compatibility_key = b["taxonomy_compatibility_key"]
+            identity_contract_version = b["identity_contract_version"]
         except KeyError as exc:
             raise BoardSyncError(
                 f"board 缺少显式分类学/身份合同字段: {exc.args[0]} "
@@ -546,6 +549,16 @@ async def _append_pit_history(
     effective_date: date,
 ) -> None:
     """Append half-open PIT versions while preserving prior membership facts."""
+    # [Corrective-2 2026-08-05] 强制校验：所有 board 必须显式携带
+    # identity_contract_version，禁止只输出后丢弃或回退默认值。
+    for board in snapshot.boards:
+        if not board.get("identity_contract_version"):
+            raise BoardSyncError(
+                f"board 缺少 identity_contract_version: "
+                f"(external_code={board.get('external_code')!r}, name={board.get('name')!r})，"
+                "禁止丢弃 provider 身份合同版本"
+            )
+
     active_stmt = select(BoardDefinitionVersion).where(
         BoardDefinitionVersion.effective_to.is_(None),
     )
@@ -596,6 +609,8 @@ async def _append_pit_history(
             board["name"],
             board.get("hierarchy_level", "L1"),
             board.get("parent_external_code", ""),
+            # [Corrective-2 2026-08-05] 身份合同版本纳入定义哈希，参与不可变身份
+            board["identity_contract_version"],
         ))
         definition_hash = hashlib.sha256(definition_material.encode()).hexdigest()
         membership_hash = hashlib.sha256(
@@ -654,6 +669,8 @@ async def _append_pit_history(
             taxonomy_compatibility_key=board.get(
                 "taxonomy_compatibility_key", "qstock-board-v1"
             ),
+            # [Corrective-2 2026-08-05] 正式存储身份合同版本（上方已强制非空）
+            identity_contract_version=board["identity_contract_version"],
             board_type=board["type"],
             hierarchy_level=board.get("hierarchy_level", "L1"),
             parent_board_id=parent_board_id,

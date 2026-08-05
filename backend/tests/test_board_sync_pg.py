@@ -1,15 +1,12 @@
-"""Board Sync Service 测试（PRD §7.5 重构：问财原子快照同步）。
+"""Board Sync DB 集成测试（原子切换 / 详细计数）。
 
-验证项：
-1. 绝对门禁：原始行数、代码唯一率、行业数、概念数、关系数、解析率
-2. 相对门禁：股票/行业/概念/关系下降 >20% 拒绝
-3. 原子切换：成功时正确 upsert/delete，失败时 rollback 保留旧数据
-4. 幂等性：重复同步相同数据不产生重复
-5. Redis 状态记录
+[Corrective-2 2026-08-05 §10/§11] 从原 test_board_sync.py 拆分出的 **DB 集成测试**：
+- 使用 conftest `db_session` fixture（命中 postgres 自动分类），**不**标记 shared_dev_db
+- 禁止把整个混合文件标记 shared_dev_db（纯单元已拆到 test_board_sync_unit.py）
+- 只在**远程隔离 PostgreSQL** 运行（CI/部署 PG job），禁止再次连接共享 bz_stock 测试
 
-注：真实问财拉取测试不进入 CI，只在部署后执行一次。
-DB 集成测试通过 mock validate_snapshot 绕过绝对门禁（需 5000+ 股票），
-门禁逻辑由纯函数测试覆盖。
+运行（隔离 PG，非 bz_stock）：
+    pytest --no-header -q tests/test_board_sync_pg.py -p no:cacheprovider
 """
 
 from __future__ import annotations
@@ -28,24 +25,17 @@ from app.services.board_sync_service import (
     MIN_CONCEPT_COUNT,
     MIN_INDUSTRY_COUNT,
     MIN_RAW_ROWS,
-    MIN_RELATION_COUNT,
     BoardSyncError,
     StagingValidationError,
     get_current_counts,
     get_current_detailed_counts,
     sync_boards,
-    validate_snapshot,
 )
 from app.services.wencai_board_provider import BoardSnapshot
 
-# [Commit A 修正 2026-08-05] 本文件含 DB 集成测试（经 db_session savepoint 连共享 bz_stock），
-# 运行 shared_dev_db 目标测试须带该 marker；纯单元测试在 PURE_UNIT_TEST 下不受影响。
-pytestmark = pytest.mark.shared_dev_db
 
-
-# [Commit A 修正 2026-08-05] 测试快照须满足 provider 合同：board 显式携带
-# taxonomy/source/taxonomy_version/taxonomy_compatibility_key（board_sync_service
-# 已禁止回退 qstock 默认值，缺失任一字段即抛 BoardSyncError）。
+# [Corrective-2 2026-08-05] 测试快照须满足 provider 合同：board 显式携带
+# taxonomy/source/taxonomy_version/taxonomy_compatibility_key/identity_contract_version。
 def _board(
     external_code: str,
     name: str,
@@ -65,60 +55,6 @@ def _board(
         "taxonomy_compatibility_key": "wencai-board-v1",
         "identity_contract_version": "wencai-identity-v1",
     }
-
-# =============================================================================
-# 辅助函数：构造测试用 BoardSnapshot
-# =============================================================================
-
-
-def _make_valid_snapshot(
-    num_stocks: int = 5500,
-    concepts_per_stock: int = 12,
-    num_industries: int = 257,
-    num_concepts: int = 388,
-) -> BoardSnapshot:
-    """构造能通过绝对门禁的 BoardSnapshot。
-
-    默认参数接近生产基线：5537股、257行业、388概念、69737概念关系。
-    raw_rows = num_stocks，每股唯一 → code_uniqueness_rate = 1.0
-    """
-    boards: list[dict[str, str]] = []
-    memberships: dict[tuple[str, str], list[str]] = {}
-
-    # 生成行业 boards
-    for i in range(num_industries):
-        name = f"行业{i}-子类{i % 10}"
-        ext_code = f"wc:i:industry_{i:04d}"
-        boards.append(_board(ext_code, name, "industry"))
-        memberships[(ext_code, "industry")] = []
-
-    # 生成概念 boards
-    for i in range(num_concepts):
-        ext_code = f"wc:c:concept_{i:04d}"
-        boards.append(_board(ext_code, f"概念{i}", "concept"))
-        memberships[(ext_code, "concept")] = []
-
-    # 生成股票及其板块归属
-    for stock_idx in range(num_stocks):
-        symbol = f"{600000 + stock_idx:06d}"
-
-        # 每股分配一个行业（轮询）
-        industry_idx = stock_idx % num_industries
-        industry_key = (f"wc:i:industry_{industry_idx:04d}", "industry")
-        memberships[industry_key].append(symbol)
-
-        # 每股分配多个概念（轮询）
-        for c in range(concepts_per_stock):
-            concept_idx = (stock_idx * concepts_per_stock + c) % num_concepts
-            concept_key = (f"wc:c:concept_{concept_idx:04d}", "concept")
-            memberships[concept_key].append(symbol)
-
-    return BoardSnapshot(
-        boards=boards,
-        memberships=memberships,
-        raw_rows=num_stocks,
-        unresolved_symbols=[],
-    )
 
 
 def _make_small_snapshot(
@@ -177,121 +113,6 @@ def _mock_stats(snapshot: BoardSnapshot) -> dict:
         "code_uniqueness_rate": 1.0,
         "unresolved_count": 0,
     }
-
-
-# =============================================================================
-# 1. 绝对门禁测试（纯函数）
-# =============================================================================
-
-
-class TestValidateSnapshotAbsolute:
-    """绝对门禁校验测试。"""
-
-    def test_valid_snapshot_passes(self) -> None:
-        snapshot = _make_valid_snapshot()
-        stats = validate_snapshot(snapshot)
-        assert stats["raw_rows"] >= MIN_RAW_ROWS
-        assert stats["industry_count"] >= MIN_INDUSTRY_COUNT
-        assert stats["concept_count"] >= MIN_CONCEPT_COUNT
-        assert stats["relation_count"] >= MIN_RELATION_COUNT
-        assert stats["code_uniqueness_rate"] >= 0.999
-
-    def test_raw_rows_below_minimum_rejected(self) -> None:
-        """raw_rows < 5000 拒绝。"""
-        snapshot = BoardSnapshot(
-            boards=[_board("wc:i:b0", "b", "industry")],
-            memberships={("wc:i:b0", "industry"): ["000001"]},
-            raw_rows=MIN_RAW_ROWS - 1,
-        )
-        with pytest.raises(StagingValidationError, match="raw rows"):
-            validate_snapshot(snapshot)
-
-    def test_industry_below_minimum_rejected(self) -> None:
-        """行业数 < 200 拒绝。"""
-        snapshot = _make_valid_snapshot(num_industries=MIN_INDUSTRY_COUNT - 1)
-        with pytest.raises(StagingValidationError, match="industry count"):
-            validate_snapshot(snapshot)
-
-    def test_concept_below_minimum_rejected(self) -> None:
-        """概念数 < 300 拒绝。"""
-        snapshot = _make_valid_snapshot(num_concepts=MIN_CONCEPT_COUNT - 1)
-        with pytest.raises(StagingValidationError, match="concept count"):
-            validate_snapshot(snapshot)
-
-    def test_relation_below_minimum_rejected(self) -> None:
-        """关系数 < 60000 拒绝（其它门禁均通过）。"""
-        # 5000 唯一股票 → code_uniqueness_rate=1.0；200行业+300概念通过；
-        # 每股仅 1 行业 + 1 概念 → 10000 关系 < 60000
-        num_stocks = MIN_RAW_ROWS
-        boards: list[dict[str, str]] = []
-        memberships: dict[tuple[str, str], list[str]] = {}
-        for i in range(MIN_INDUSTRY_COUNT):
-            ext = f"wc:i:b{i:04d}"
-            boards.append(_board(ext, f"b{i}", "industry"))
-            memberships[(ext, "industry")] = []
-        for i in range(MIN_CONCEPT_COUNT):
-            ext = f"wc:c:b{i:04d}"
-            boards.append(_board(ext, f"c{i}", "concept"))
-            memberships[(ext, "concept")] = []
-        for s_idx in range(num_stocks):
-            sym = f"{s_idx:06d}"
-            memberships[(f"wc:i:b{s_idx % MIN_INDUSTRY_COUNT:04d}", "industry")].append(sym)
-            memberships[(f"wc:c:b{s_idx % MIN_CONCEPT_COUNT:04d}", "concept")].append(sym)
-        snapshot = BoardSnapshot(
-            boards=boards,
-            memberships=memberships,
-            raw_rows=num_stocks,
-        )
-        with pytest.raises(StagingValidationError, match="relation count"):
-            validate_snapshot(snapshot)
-
-
-# =============================================================================
-# 2. 相对门禁测试（纯函数）
-# =============================================================================
-
-
-class TestValidateSnapshotRelative:
-    """相对门禁校验测试。"""
-
-    def test_normal_drop_accepted(self) -> None:
-        """下降 ≤20% 接受。"""
-        snapshot = _make_valid_snapshot(num_stocks=5000)
-        validate_snapshot(
-            snapshot,
-            prev_stock_count=6000,
-            prev_industry_count=300,
-            prev_concept_count=450,
-            prev_relation_count=80000,
-        )
-
-    def test_stock_drop_over_20_percent_rejected(self) -> None:
-        """股票数下降 >20% 拒绝（snapshot 通过绝对门禁）。"""
-        # 默认 5500 股票通过绝对门禁；prev=8000 → drop=31.25% > 20%
-        snapshot = _make_valid_snapshot(num_stocks=5500)
-        with pytest.raises(StagingValidationError, match="stock count dropped"):
-            validate_snapshot(snapshot, prev_stock_count=8000)
-
-    def test_industry_drop_over_20_percent_rejected(self) -> None:
-        snapshot = _make_valid_snapshot(num_industries=200)
-        with pytest.raises(StagingValidationError, match="industry count dropped"):
-            validate_snapshot(snapshot, prev_industry_count=300)
-
-    def test_concept_drop_over_20_percent_rejected(self) -> None:
-        snapshot = _make_valid_snapshot(num_concepts=300)
-        with pytest.raises(StagingValidationError, match="concept count dropped"):
-            validate_snapshot(snapshot, prev_concept_count=400)
-
-    def test_first_sync_no_drop_check(self) -> None:
-        """首次同步（prev=0）不检查相对门禁。"""
-        snapshot = _make_valid_snapshot()
-        validate_snapshot(
-            snapshot,
-            prev_stock_count=0,
-            prev_industry_count=0,
-            prev_concept_count=0,
-            prev_relation_count=0,
-        )
 
 
 # =============================================================================
