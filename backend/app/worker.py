@@ -1594,13 +1594,13 @@ async def _chip_consensus_poll_once() -> bool:
     """
     from datetime import date as date_cls
 
+    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
     from app.services.after_close_chip_consensus_service import (
         _CHIP_LEASE_SECONDS,
         CHIP_CONSENSUS_JOB_NAME,
         execute_after_close_chip_consensus,
         get_pending_chip_instruments,
     )
-    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
     from app.services.chip_consensus_run_lifecycle import (
         META_CHIP_RUN_ID,
         finalize_chip_run,

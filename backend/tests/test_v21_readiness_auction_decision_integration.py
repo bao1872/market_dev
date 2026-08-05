@@ -48,7 +48,6 @@ from app.services.product_readiness_service import (
     evaluate_governance,
 )
 
-
 # ---- 编排状态构造 helpers（模拟真实 service 会产出的 state 集合）----
 
 
