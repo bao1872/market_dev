@@ -764,13 +764,22 @@ async def force_advance_after_close_endpoint(
     # 并调用对应 publish/重建函数（失败记事件，不伪造成功）。
     from app.services.granular_restart_service import dispatch_restart
 
-    handled = await dispatch_restart(
-        db=db,
-        job_run=job_run,
-        restart_from=restart_from,
-        actor=current_user.username if hasattr(current_user, "username") else str(current_user),
-        request_id=str(uuid.uuid4()),
-    )
+    try:
+        handled = await dispatch_restart(
+            db=db,
+            job_run=job_run,
+            restart_from=restart_from,
+            actor=current_user.username if hasattr(current_user, "username") else str(current_user),
+            request_id=str(uuid.uuid4()),
+        )
+    except NotImplementedError as exc:
+        # 无真实领域级 handler（如 state_events 尚未实现重建入口）：明确报错，不伪造成功、不 501。
+        raise admin_error(
+            "restart_boundary_not_implemented",
+            f"{exc}（该 boundary 已纳入 PRD §6 合同，但后端真实 handler 未实现，禁止伪造成功）",
+        )
+    except ValueError as exc:
+        raise admin_bad_request("invalid_restart_request", str(exc))
 
     # restart_from="daily_ready"：清除旧 dsa_run_id（dispatch 内部已设 restart_from，此处清理残留）
     if restart_from == "daily_ready":

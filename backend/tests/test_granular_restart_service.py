@@ -1,7 +1,7 @@
 """Granular restart service 单测（PURE_UNIT_TEST）。
 
-验证 [PRD 31 §6] 门禁：所有 10 个 boundary 均已实现，不再返回 not_implemented/501；
-主链 boundary 设置正确的续跑起点；子产品 boundary 创建 child SchedulerJobRun 并真实调用 publisher。
+[Corrective Pass 2] 验证：真实 handler registry 为唯一权威（state_events 诚实未实现）；
+子产品 child 成功后置 succeeded+finished_at；幂等复用 run_key；失败记错误事件不伪造成功。
 """
 
 import json
@@ -38,19 +38,17 @@ class _FakeJobRun:
         self.status = "succeeded"
         self.error_code = None
         self.error_message = None
+        self.started_at = None
+        self.finished_at = None
         self.metadata_json = json.dumps(metadata or {"trade_date": business_date})
-
-    def __getitem__(self, key):
-        return self.__dict__[key]
 
 
 class _FakeDB:
-    """最小 fake AsyncSession：记录 add/commit，execute 默认空。"""
-
     def __init__(self):
         self.added = []
         self.committed = 0
         self.events = []
+        self._children = []
 
     async def add(self, obj):
         self.added.append(obj)
@@ -79,55 +77,73 @@ def patch_event(monkeypatch):
     monkeypatch.setattr(svc, "append_event", _fake_append_event)
 
 
-def test_all_ten_boundaries_implemented():
-    """门禁：10 个正式 boundary 全部实现，无 not_implemented。"""
-    assert len(ALL_BOUNDARIES) == 10
-    for b in ALL_BOUNDARIES:
+def test_implemented_registry_not_just_enum():
+    """[Corrective Pass 2] is_implemented_boundary 以真实 handler 为权威，state_events 诚实未实现。"""
+    for b in ("daily_ready", "board_facts", "core", "stock_core_published",
+              "dsa_projection", "chip", "auction", "board_aggregation", "review"):
         assert is_implemented_boundary(b) is True
+    # state_events 无真实领域级 handler → 明确未实现
+    assert is_implemented_boundary("state_events") is False
 
 
 def test_unknown_boundary_rejected():
-    import pytest
+    import asyncio
 
     db = _FakeDB()
     job = _FakeJobRun()
     with pytest.raises(ValueError):
-        import asyncio
-
         asyncio.get_event_loop().run_until_complete(
             dispatch_restart(db, job, "nope", actor="tester", request_id="r1")
         )
 
 
-async def test_child_boundary_dispatches_publisher(patch_event):
-    """子产品 boundary：创建 child SchedulerJobRun 并调用注入 publisher。"""
+async def test_state_events_not_implemented_raises(patch_event):
+    """state_events 无真实 handler：dispatch_restart 抛 NotImplementedError，不伪造成功。"""
+    import asyncio
+
+    db = _FakeDB()
+    job = _FakeJobRun()
+    with pytest.raises(NotImplementedError):
+        await dispatch_restart(db, job, "state_events", actor="tester", request_id="r1")
+
+
+async def test_child_boundary_success_sets_succeeded(patch_event):
+    """子产品 boundary：创建 child，publisher 成功后 child.status=succeeded 且 finished_at 有值。"""
     db = _FakeDB()
     job = _FakeJobRun()
     called = {}
 
     async def fake_publisher(db, *, trade_date, source_run_id, actor):
         called["trade_date"] = trade_date
-        called["source_run_id"] = source_run_id
-        called["actor"] = actor
         return source_run_id or uuid.uuid4()
 
     child = await dispatch_restart(
-        db,
-        job,
-        "review",
-        actor="tester",
-        request_id="r1",
+        db, job, "review", actor="tester", request_id="r1",
         publishers={"review": fake_publisher},
     )
     assert child.job_name == "granular_restart_review"
-    assert child.metadata_json
+    assert child.status == "succeeded"
+    assert child.finished_at is not None
+    assert child.started_at is not None
     md = json.loads(child.metadata_json)
     assert md["parent_job_run_id"] == str(job.id)
-    assert md["operation"] == "review"
     assert called.get("trade_date") == "2026-08-05"
-    assert child.status == "queued"
-    # 写入了 manual_restart 事件
     assert any(e["step"] == "manual_restart" for e in db.events)
+
+
+async def test_child_boundary_idempotent_reuse(patch_event):
+    """重复调用同 boundary：复用已有 child（run_key），不新建重复任务。"""
+    db = _FakeDB()
+    job = _FakeJobRun()
+
+    async def pub(db, *, trade_date, source_run_id, actor):
+        return uuid.uuid4()
+
+    c1 = await dispatch_restart(db, job, "chip", actor="t", request_id="r1", publishers={"chip": pub})
+    # 模拟已存在 child 被复用：第二次调用应使用同 run_key
+    # 由于 fake db 不持久化，这里验证 run_key 幂等键生成规则一致
+    c2 = await dispatch_restart(db, job, "chip", actor="t", request_id="r2", publishers={"chip": pub})
+    assert c1.run_key == c2.run_key == f"granular_restart:2026-08-05:chip"
 
 
 async def test_child_boundary_publisher_failure_not_501(patch_event):
@@ -139,33 +155,26 @@ async def test_child_boundary_publisher_failure_not_501(patch_event):
         raise RuntimeError("lineage mismatch: source core run 不匹配")
 
     child = await dispatch_restart(
-        db,
-        job,
-        "dsa_projection",
-        actor="tester",
-        request_id="r1",
+        db, job, "dsa_projection", actor="tester", request_id="r1",
         publishers={"dsa_projection": boom},
     )
     assert child.status == "failed"
     assert child.error_code == "granular_restart_publish_failed"
     assert "lineage mismatch" in (child.error_message or "")
+    assert child.finished_at is not None
     assert any(e["level"] == "error" for e in db.events)
 
 
 async def test_mainchain_boundary_sets_resume_step(patch_event, monkeypatch):
-    """主链 boundary：设置正确的 last_completed_step 续跑（不返回 501）。"""
+    """主链 boundary：设置正确的 last_completed_step 续跑。"""
     import app.api.admin_after_close as _aao_module
-    import app.services.granular_restart_service as svc
 
     captured = {}
 
     async def fake_update(db, job_run, status, message, extra=None, payload=None):
         captured["extra"] = extra
-        captured["status"] = status
 
     monkeypatch.setattr(_aao_module, "_update_orchestrator_status", fake_update)
-    # 确保 after_close_orchestrator 的 AfterCloseRunStatus 可被 import（避免断点恢复依赖）
-    monkeypatch.setattr(svc, "_update_orchestrator_status", fake_update)  # 兼容直接引用
     db = _FakeDB()
     job = _FakeJobRun()
 

@@ -1076,6 +1076,9 @@ class ProductReadinessService:
 
         # [V2.1 P1-3] 完整性门槛：coverage = matched / total，须达阈值才 ready；
         # 仅 matched>0 不得判 ready（存在性检查已被禁止）。
+        # 注：eligible_count 以"当日归属当前 core run 的 snapshot 总数"为代理（DSA 每股每
+        # core run 一次，该集合即 universe）；精确 eligible universe 比对与 parameter_hash 一致性
+        # 待 Phase 4 在验证库补全（当前标记 p1_3_exact_completeness=partial）。
         coverage_ratio = (matched / total) if total > 0 else 0.0
         detail = {
             **detail,
@@ -1083,6 +1086,8 @@ class ProductReadinessService:
             "matched_count": matched,
             "coverage_ratio": round(coverage_ratio, 4),
             "coverage_threshold": _DSA_PROJECTION_COVERAGE_THRESHOLD,
+            "algorithm_versions": counts.get("algorithm_versions", []),
+            "p1_3_exact_completeness": "partial" if coverage_ratio >= _DSA_PROJECTION_COVERAGE_THRESHOLD else "not_complete",
         }
         if matched > 0 and coverage_ratio >= _DSA_PROJECTION_COVERAGE_THRESHOLD:
             return ProductReadinessState(
@@ -1148,6 +1153,8 @@ class ProductReadinessService:
 
         # [V2.1 P1-3] 完整性门槛：coverage = matched / total，须达阈值才 ready；
         # 仅 matched>0 不得判 ready（存在性检查已被禁止）。完整生命周期由 by_type 非空佐证。
+        # 注：eligible_count 以"当日归属当前 core run 的事件总数"为代理；每个 eligible instrument
+        # 的 required event_type 完整生命周期精确验证待 Phase 4 补全（标记 p1_3_exact_completeness）。
         coverage_ratio = (matched / total) if total > 0 else 0.0
         lifecycle_complete = bool(counts["by_type"]) and coverage_ratio >= _STATE_EVENTS_COVERAGE_THRESHOLD
         detail = {
@@ -1157,6 +1164,7 @@ class ProductReadinessService:
             "coverage_ratio": round(coverage_ratio, 4),
             "coverage_threshold": _STATE_EVENTS_COVERAGE_THRESHOLD,
             "lifecycle_complete": lifecycle_complete,
+            "p1_3_exact_completeness": "partial" if lifecycle_complete else "not_complete",
         }
         if matched > 0 and coverage_ratio >= _STATE_EVENTS_COVERAGE_THRESHOLD:
             return ProductReadinessState(

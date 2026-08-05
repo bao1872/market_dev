@@ -1,6 +1,31 @@
 #!/usr/bin/env bash
-# panji-verify-deploy — 远程验证栈部署包装（复用 panji-prod-ssh 入口）
+# panji-verify-deploy — 本地控制脚本（P0-8 修正：本地发起，远程实现分离）
+#
+# 调用链：
+#   本地：scripts/ops/panji-verify-deploy <SHA> [env_file]
+#     → panji-prod-preflight
+#     → panji-prod-ssh 'cd /root/web_dev_verify && scripts/deploy/panji-verify-deploy.sh <SHA> [env_file]'
+#
+# 本地脚本只负责发起控制命令与 preflight；远程实现脚本内部不再调用 panji-prod-ssh（避免自环）。
+#
 # 用法：scripts/ops/panji-verify-deploy <SHA> [env_file]
 set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: $0 <SHA> [env_file]" >&2
+  exit 2
+fi
+
+SHA="$1"
+ENV_FILE="${2:-market.verify.env}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/../deploy/panji-verify-deploy.sh" "$@"
+
+# 部署前必跑 preflight（DS-80 远程开发运行服务器 SSH SSOT）
+"$SCRIPT_DIR/panji-prod-preflight" || {
+  echo "panji-verify-deploy: preflight 失败，中止" >&2
+  exit 4
+}
+
+# 远程执行（验证代码目录固定 /root/web_dev_verify，已 checkout 目标 SHA）
+scripts/ops/panji-prod-ssh "cd /root/web_dev_verify && bash scripts/deploy/panji-verify-deploy.sh '$SHA' '$ENV_FILE'"

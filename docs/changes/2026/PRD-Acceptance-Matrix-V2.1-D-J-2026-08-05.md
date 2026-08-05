@@ -29,6 +29,27 @@
 > 但代码改动尚未在真实 PG 验证，granular restart 大部分边界后端未实现，
 > 前端完整页面接入待手动验证，PG E2E 未执行。故诚实标记为 `partial` / `code_ready=false`。
 
+## V2.1 Corrective Pass 2 状态（2026-08-05，HEAD `8b1e4a3`）
+
+> [Corrective Pass 2] 用户审查指出 CHANGE-008 的 granular restart 存在确定性缺陷（枚举即实现、
+> ORM `.c` 误用、child 状态未闭环、无幂等、未经验证的 publisher 签名），P1-3 仅 coverage 门槛、
+> 验证栈不可部署。本轮已修复（CHANGE-009），但均需远程 PG / 部署验证后方可称 complete。
+
+| 维度 | 状态 | 说明 |
+|---|---|---|
+| `granular_restart_contract` | `implemented_skeleton` | 主链4 + 子产品5 有真实 handler；`state_events` 无真实重建入口，诚实未实现 |
+| `granular_restart_runtime_verified` | `false` | 未跑 PG，publish 签名未经验证 |
+| `granular_restart_complete` | `false` | 待 state_events 真实 handler + PG 验证 |
+| `dsa_state_events_coverage_gate` | `partially_improved` | 已加 coverage 门槛（非存在性检查），但精确 eligible/parameter_hash/完整生命周期未验证 |
+| `p1_3_exact_completeness` | `not_complete` | 核心字段已暴露，精确比对待 Phase 4 验证库 |
+| `verify_infra_ready` | `false` | compose 未静态验证、验证库未以最终 SHA 重建、未部署 |
+| `pg_tested` | `false` | Migration/PG E2E 未执行 |
+| `verify_deployed` | `false` | 验证栈未部署 |
+| `manual_acceptance_ready` | `false` | 不能开始手动验收 |
+
+> 失配验证库 `bz_stock_verify_773f827...` 已删除；待 Backend/Frontend/验证栈代码全提交后，
+> 以最终 SHA 创建 `bz_stock_verify_<final_sha>` 再走 Migration→Seed→PG E2E→部署→验收。
+
 ```text
 development_chain_D_to_J        = partial   # 合同级缺口已修，PG/前端整链未闭环
 prd_code_alignment              = partial

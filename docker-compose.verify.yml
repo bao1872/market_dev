@@ -1,13 +1,13 @@
-# V2.1 远程验证栈 Compose（DS-111）
-# 独立 project 名 panji-verify；复用 panji-prod 现有 trading-postgres / trading-redis 容器
-# （external，不新建 PostgreSQL 容器或 Volume）；验证库 bz_stock_verify_<sha>；
-# 端口仅绑定 127.0.0.1；自动 Scheduler 关闭；只启动必要 Worker。
+# V2.1 远程验证栈 Compose（DS-111，Corrective Pass 2 修正）
+# 修复 P0-6/P0-7：
+#   - Redis 方案 B：独立 verify-redis，所有验证服务统一连接 redis://verify-redis:6379/0
+#   - 接入正式 PostgreSQL 所在 external network（market-dev-default），使 trading-postgres 可解析
+# 独立 project 名 panji-verify；端口仅绑定 127.0.0.1；自动 Scheduler 关闭；只启动必要 Worker。
 #
-# 用法（在 panji-prod 的 /root/web_dev 内）：
+# 用法（在 panji-prod 的 /root/web_dev_verify 内，由远程脚本调用）：
 #   docker compose -p panji-verify --env-file market.verify.env -f docker-compose.verify.yml up -d
 #
-# 注意：postgres/redis 声明为 external，验证服务连同一容器但用验证库 URL（DATABASE_URL）
-# 与独立 Redis DB（REDIS_URL 用 /1 或前缀隔离）。
+# 注意：postgres 声明为 external（复用 trading-postgres 容器），验证库 bz_stock_verify_<sha>。
 
 x-logging: &default-logging
   driver: json-file
@@ -29,8 +29,25 @@ x-resource-app-heavy: &resource-app-heavy
   pids_limit: 1024
   stop_grace_period: 60s
 
+networks:
+  # 复用正式 PostgreSQL 所在网络，使验证服务可解析 trading-postgres
+  market-dev-default:
+    external: true
+  # 验证栈内部网络（verify-redis + 各验证服务）
+  panji-verify-internal:
+    driver: bridge
+
 services:
-  # 复用现有 postgres/redis（不在这里定义，声明 external）
+  # 独立验证 Redis（方案 B：隔离更清楚，不暴露宿主机端口）
+  verify-redis:
+    image: redis:7-alpine
+    container_name: verify-redis
+    logging: *default-logging
+    command: redis-server --appendonly yes --port 6379
+    networks:
+      - panji-verify-internal
+    # 不暴露宿主机端口（仅验证栈内部访问）
+
   # 验证 backend
   verify-backend:
     image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
@@ -39,7 +56,7 @@ services:
     <<: *resource-app-heavy
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL (bz_stock_verify_<sha>) is required}
-      REDIS_URL: ${REDIS_URL:-redis://trading-redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: verification
       TZ: Asia/Shanghai
@@ -51,17 +68,12 @@ services:
       - verify-redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - market-dev-default
+      - panji-verify-internal
     ports:
       - "127.0.0.1:8000:8000"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-  verify-redis:
-    image: redis:7-alpine
-    container_name: verify-redis
-    logging: *default-logging
-    command: redis-server --appendonly yes --port 6379
-    ports:
-      - "127.0.0.1:6379:6379"
 
   verify-frontend:
     image: market-dev-frontend:${GIT_SHA:?GIT_SHA is required}
@@ -70,10 +82,12 @@ services:
     <<: *resource-app-light
     environment:
       VITE_API_BASE_URL: http://127.0.0.1:8000
+    networks:
+      - panji-verify-internal
     ports:
       - "127.0.0.1:8080:80"
 
-  # 必要 Worker（不复用正式 Worker 容器）
+  # 必要 Worker（不复用正式 Worker 容器，独立实例）
   verify-worker-after-close:
     image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
     container_name: verify-worker-after-close
@@ -81,7 +95,7 @@ services:
     <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:-redis://trading-redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: verification
       WORKER_TYPE: after_close
@@ -91,6 +105,9 @@ services:
       - verify-redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - market-dev-default
+      - panji-verify-internal
     command: python -m app.worker
 
   verify-worker-chip:
@@ -100,7 +117,7 @@ services:
     <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:-redis://trading-redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: verification
       WORKER_TYPE: chip
@@ -109,6 +126,9 @@ services:
       - verify-redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - market-dev-default
+      - panji-verify-internal
     command: python -m app.worker
 
   verify-worker-watchdog:
@@ -118,7 +138,7 @@ services:
     <<: *resource-app-light
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:-redis://trading-redis:6379/1}
+      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: verification
       WORKER_TYPE: watchdog
@@ -127,4 +147,7 @@ services:
       - verify-redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - market-dev-default
+      - panji-verify-internal
     command: python -m app.worker

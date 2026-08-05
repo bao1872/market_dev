@@ -1,29 +1,27 @@
-"""V2.1 Granular Restart 调度服务。
+"""V2.1 Granular Restart 调度服务（Corrective Pass 2）。
 
-[PRD 31 §6] 正式枚举（10 个 boundary，全部必须真实落地，禁止返回 not_implemented/501）：
-    daily_ready         使用已有日线，从 core 链开始
-    board_facts         只重跑 Board Facts，不重算 daily
-    core                新建 core run，计算趋势/结构/动量
-    stock_core_published 对已通过门禁的 core run 重试 publication，不重算 core
-    dsa_projection      从持久化 core artifact 重建，禁止再次运行 DSA
-    state_events        从当前 core artifact 重建 events
-    chip                只创建或恢复 chip domain run
-    auction             使用当前 core/chip pointer 重建 anchor
-    board_aggregation   使用正式 core + board facts 重建 aggregation
-    review              使用正式 core + aggregation 重建 Review
+[PRD 31 §6] 正式枚举（10 个 boundary）：
+    daily_ready / board_facts / core / stock_core_published /
+    dsa_projection / state_events / chip / auction / board_aggregation / review
 
-设计：
-- 主链四 boundary（daily_ready/board_facts/core/stock_core_published）通过 orchestrator
-  断点恢复（设置 last_completed_step）真实续跑 —— 复用 admin_after_close 的
-  _update_orchestrator_status。
-- 子产品六 boundary（dsa_projection/state_events/chip/auction/board_aggregation/review）
-  查找当日对应已完成的源 run/snapshot，创建 child SchedulerJobRun（含 parent_job_run_id /
-  operation / target_run_id / run_key 幂等键），并调用对应 publish/重建函数。
-- 任何 boundary 的真实调用若因 lineage / pointer 缺失失败，捕获异常并写入 manual_restart
-  事件（level=error），任务以 failed 终态记录真实原因；**绝不返回 501，也绝不伪造成功**。
+设计约束（禁止伪造成功）：
+- 只有存在**真实领域级 handler** 的 boundary 才计入 `_REAL_HANDLERS`，
+  `is_implemented_boundary()` 以 `_REAL_HANDLERS` 为唯一权威（不再用
+  `boundary in ALL_BOUNDARIES` 形式化判定）。
+- 主链四 boundary 通过 orchestrator 断点恢复（设置 last_completed_step）真实续跑。
+- 子产品 boundary 查找当日对应已完成的源 run/snapshot（真实 Model 字段，非 `.c`），
+  创建 child SchedulerJobRun（幂等：按 run_key 复用已有 child，避免唯一键冲突），
+  调用对应 publish/重建函数；成功置 succeeded+finished_at，失败置 failed+错误事件。
+- 任何真实调用失败：捕获异常并写入 manual_restart 事件（level=error），任务以 failed 终态
+  记录真实原因；绝不返回 501，也绝不伪造成功。
 
-测试策略：纯单元测试可注入 `publishers` 覆盖真实 publish 调用，验证 dispatch / child run /
-事件逻辑（PURE_UNIT_TEST）；真实 PG 路径在远程验证库（DS-110）首跑验证（Phase 4）。
+当前真实 handler 覆盖：
+- 主链：daily_ready / board_facts / core / stock_core_published（4）
+- 子产品：dsa_projection / chip / auction / board_aggregation / review（5）
+- **state_events：无独立重建入口，未计入 _REAL_HANDLERS（诚实标记未实现，需补领域级 handler）**
+
+测试策略：纯单元测试注入 fake db + publishers 验证 dispatch/child/幂等/事件逻辑
+（PURE_UNIT_TEST）；真实 PG publish 路径在远程验证库首跑验证（Phase 4）。
 """
 
 from __future__ import annotations
@@ -41,26 +39,13 @@ from app.services.job_run_event_service import append_event
 
 # 主链续跑起点（AfterCloseRunStatus 枚举值，见 after_close_orchestrator）
 _MAINCHAIN_RESUME_STEP: dict[str, str] = {
-    # 使用已有日线从 core 链开始：跳 daily+board+coverage，从 computing_features 续跑
-    "daily_ready": "checking_coverage",
-    # 只重跑 Board Facts，不重算 daily：跳日线刷新，从 syncing_boards 续跑
-    "board_facts": "refreshing_daily",
-    # 新建 core run 算 trend/structure/momentum：从 computing_features 续跑
-    "core": "checking_coverage",
-    # 重试 stock_core publication：从 publishing 续跑（仅重发 core publication）
-    "stock_core_published": "publishing",
+    "daily_ready": "checking_coverage",       # 用已有日线从 core 链开始
+    "board_facts": "refreshing_daily",        # 只重跑 board，跳日线刷新
+    "core": "checking_coverage",              # 新建 core run 算 trend/structure/momentum
+    "stock_core_published": "publishing",      # 重试 core publication
 }
 
 _MAINCHAIN_BOUNDARIES = set(_MAINCHAIN_RESUME_STEP.keys())
-
-_CHILD_BOUNDARIES = {
-    "dsa_projection",
-    "state_events",
-    "chip",
-    "auction",
-    "board_aggregation",
-    "review",
-}
 
 ALL_BOUNDARIES: tuple[str, ...] = (
     "daily_ready",
@@ -77,34 +62,49 @@ ALL_BOUNDARIES: tuple[str, ...] = (
 
 
 class _Publisher(Protocol):
-    """子产品 boundary 的发布/重建回调（用于真实路径与单测注入）。"""
+    """子产品 boundary 的发布/重建回调（真实路径或单测注入）。"""
 
-    async def __call__(self, db: AsyncSession, *, trade_date: str, source_run_id: uuid.UUID | None, actor: str) -> uuid.UUID | None:
+    async def __call__(
+        self, db: AsyncSession, *, trade_date: str, source_run_id: uuid.UUID | None, actor: str
+    ) -> uuid.UUID | None:
         ...
 
 
 async def _find_source_run_id(
     db: AsyncSession,
-    table: Any,
+    model: Any,
     trade_date: str,
     run_type: str | None = None,
-    statuses: tuple[str, ...] = ("succeeded", "completed", "partial_success"),
+    statuses: tuple[str, ...] = ("succeeded", "completed", "partial_success", "published"),
 ) -> uuid.UUID | None:
     """通用查找当日已完成源 run id（按 created_at desc 取最新）。
 
-    用于子产品 boundary 定位重建输入；找不到返回 None（由上层记事件，不 501）。
+    使用真实 ORM Model 字段（model.id / model.trade_date / model.status），非 `.c`。
     """
-    stmt = select(table.c.id).where(table.c.trade_date == trade_date)
-    if run_type is not None:
-        stmt = stmt.where(table.c.run_type == run_type)
-    if statuses:
-        stmt = stmt.where(table.c.status.in_(statuses))
-    stmt = stmt.order_by(table.c.created_at.desc()).limit(1)
+    stmt = select(model.id).where(model.trade_date == trade_date)
+    if run_type is not None and hasattr(model, "run_type"):
+        stmt = stmt.where(model.run_type == run_type)
+    if statuses and hasattr(model, "status"):
+        stmt = stmt.where(model.status.in_(statuses))
+    stmt = stmt.order_by(model.created_at.desc()).limit(1)
     row = (await db.execute(stmt)).first()
     return row[0] if row else None
 
 
-async def _create_child_job_run(
+async def _find_existing_child(
+    db: AsyncSession, run_key: str
+) -> SchedulerJobRun | None:
+    """幂等：查询已有同 run_key 的 child，存在则复用（避免唯一键冲突 / 重复任务）。"""
+    stmt = (
+        select(SchedulerJobRun)
+        .where(SchedulerJobRun.run_key == run_key)
+        .order_by(SchedulerJobRun.created_at.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _create_or_reuse_child(
     db: AsyncSession,
     *,
     parent_job_run_id: uuid.UUID,
@@ -113,8 +113,26 @@ async def _create_child_job_run(
     target_run_id: uuid.UUID | None,
     actor: str,
 ) -> SchedulerJobRun:
-    """为子产品 boundary 创建 child SchedulerJobRun（含 parent/operation/target/幂等键）。"""
+    """为子产品 boundary 创建 child SchedulerJobRun（幂等：run_key 复用已有）。"""
     run_key = f"granular_restart:{trade_date}:{boundary}"
+    existing = await _find_existing_child(db, run_key)
+    if existing is not None:
+        # 幂等复用：已成功则直接返回；已失败则重置为 queued 允许重排；其余复用不新建
+        await append_event(
+            db,
+            job_run_id=existing.id,
+            step="manual_restart",
+            level="info",
+            message=f"granular restart 幂等复用: boundary={boundary}, 已有 run_key={run_key}, status={existing.status}",
+            payload={"reused": True, "parent_job_run_id": str(parent_job_run_id)},
+        )
+        if existing.status == "failed":
+            existing.status = "queued"
+            existing.error_code = None
+            existing.error_message = None
+            await db.flush()
+        return existing
+
     child = SchedulerJobRun(
         job_name=f"granular_restart_{boundary}",
         business_date=trade_date,
@@ -153,12 +171,17 @@ async def dispatch_restart(
     request_id: str,
     publishers: dict[str, _Publisher] | None = None,
 ) -> SchedulerJobRun:
-    """V2.1 真实调度一个 granular restart boundary，绝不返回 501。
+    """V2.1 真实调度一个 granular restart boundary。
 
-    返回被复用的父 SchedulerJobRun（主链 boundary）或新建的 child SchedulerJobRun（子产品 boundary）。
+    返回被复用的父 SchedulerJobRun（主链 boundary）或新建/复用的 child SchedulerJobRun（子产品 boundary）。
+    未知 boundary 或 state_events（无真实 handler）将明确报错，不伪造成功。
     """
     if restart_from not in ALL_BOUNDARIES:
         raise ValueError(f"未知 restart_from boundary: {restart_from}")
+    if not is_implemented_boundary(restart_from):
+        raise NotImplementedError(
+            f"restart_from={restart_from} 无真实领域级 handler，未实现（不得伪造成功）"
+        )
 
     meta = json.loads(job_run.metadata_json or "{}")
     trade_date = meta.get("trade_date") or job_run.business_date
@@ -175,7 +198,6 @@ async def dispatch_restart(
             "restart_from": restart_from,
         }
         if restart_from == "stock_core_published":
-            # 仅重试 core publication，不重算 review：标记避免 worker 重算 review
             extra["restart_scope"] = "stock_core_publication_only"
         job_run.status = "queued"
         job_run.error_message = None
@@ -199,9 +221,9 @@ async def dispatch_restart(
         await db.commit()
         return job_run
 
-    # ---- 子产品六 boundary：查找源 run + 创建 child + 调用 publish ----
+    # ---- 子产品 boundary：查找源 run + 创建/复用 child + 调用真实 handler ----
     source_run_id = await _resolve_source_run_id(db, restart_from, trade_date)
-    child = await _create_child_job_run(
+    child = await _create_or_reuse_child(
         db,
         parent_job_run_id=job_run.id,
         boundary=restart_from,
@@ -213,23 +235,23 @@ async def dispatch_restart(
     publisher = (publishers or {}).get(restart_from)
     if publisher is None:
         publisher = _REAL_PUBLISHERS.get(restart_from)
-
     if publisher is None:
-        # 该 boundary 暂无真实发布入口（如 state_events 无独立重建函数）：
-        # 创建 child + 事件标注需 worker 重算，但不返回 501（不伪造成功）。
-        await append_event(
-            db,
-            job_run_id=child.id,
-            step="manual_restart",
-            level="warning",
-            message=f"boundary={restart_from} 暂无单函数发布入口，已创建 child 任务待 worker 重算",
-            payload={"target_run_id": str(source_run_id) if source_run_id else None},
-        )
+        # 防御：理论上不会到达（is_implemented_boundary 已拦截），仍兜底报错。
+        child.status = "failed"
+        child.error_code = "no_real_handler"
+        child.error_message = f"boundary={restart_from} 无真实 handler"
         await db.commit()
-        return child
+        raise NotImplementedError(f"boundary={restart_from} 无真实 handler")
 
     try:
-        new_run_id = await publisher(db, trade_date=trade_date, source_run_id=source_run_id, actor=actor)
+        child.status = "running"
+        child.started_at = datetime.now(timezone.utc)
+        await db.flush()
+        new_run_id = await publisher(
+            db, trade_date=trade_date, source_run_id=source_run_id, actor=actor
+        )
+        child.status = "succeeded"
+        child.finished_at = datetime.now(timezone.utc)
         await append_event(
             db,
             job_run_id=child.id,
@@ -240,6 +262,7 @@ async def dispatch_restart(
         )
     except Exception as exc:  # 真实 lineage/pointer 缺失等：记事件，不 501
         child.status = "failed"
+        child.finished_at = datetime.now(timezone.utc)
         child.error_code = "granular_restart_publish_failed"
         child.error_message = f"{type(exc).__name__}: {exc}"
         await append_event(
@@ -255,7 +278,7 @@ async def dispatch_restart(
 
 
 async def _resolve_source_run_id(db: AsyncSession, boundary: str, trade_date: str) -> uuid.UUID | None:
-    """查找子产品 boundary 重建所需的源 run/snapshot id。"""
+    """查找子产品 boundary 重建所需的源 run/snapshot id（真实 Model 字段）。"""
     if boundary == "dsa_projection":
         from app.models.strategy_run import StrategyRun
 
@@ -267,18 +290,18 @@ async def _resolve_source_run_id(db: AsyncSession, boundary: str, trade_date: st
             db, ChipConsensusRun, trade_date, statuses=("succeeded", "partial_success")
         )
     if boundary == "auction":
-        from app.models.auction_anchor import AuctionAnchorSnapshot
+        from app.models.auction import AuctionAnchorSnapshot
 
         return await _find_source_run_id(db, AuctionAnchorSnapshot, trade_date, statuses=("succeeded",))
     if boundary == "board_aggregation":
-        from app.models.board_analysis import BoardAnalysisSnapshot
+        from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
 
         return await _find_source_run_id(db, BoardAnalysisSnapshot, trade_date, statuses=("succeeded",))
     if boundary == "review":
         from app.models.market_review import MarketReviewRun
 
         return await _find_source_run_id(db, MarketReviewRun, trade_date, statuses=("succeeded",))
-    # state_events：无独立源 run 表，返回 None（由 publisher 自行从 core artifact 重建）
+    # state_events：无独立源 run 表（需 worker 从 core artifact 重建），返回 None
     return None
 
 
@@ -293,8 +316,6 @@ async def _publish_dsa_projection(db: AsyncSession, *, trade_date: str, source_r
 
 
 async def _publish_chip(db: AsyncSession, *, trade_date: str, source_run_id: uuid.UUID | None, actor: str) -> uuid.UUID | None:
-    # chip 重发：优先使用 factor_publication_service.publish_chip_consensus（若可用），
-    # 否则调用 chip_consensus_run_lifecycle 的安全包装（需 worker context 时由 worker 执行）。
     from app.services.factor_publication_service import publish_chip_consensus
 
     if source_run_id is None:
@@ -313,7 +334,7 @@ async def _publish_auction(db: AsyncSession, *, trade_date: str, source_run_id: 
 
 
 async def _publish_board_aggregation(db: AsyncSession, *, trade_date: str, source_run_id: uuid.UUID | None, actor: str) -> uuid.UUID | None:
-    from app.models.board_analysis import BoardAnalysisSnapshot
+    from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
     from app.services.board_analysis_service import publish_board_analysis
 
     if source_run_id is None:
@@ -336,16 +357,27 @@ async def _publish_review(db: AsyncSession, *, trade_date: str, source_run_id: u
     return source_run_id
 
 
-_REAL_PUBLISHERS: dict[str, _Publisher] = {
+# [Corrective Pass 2] 只有存在真实领域级 handler 的 boundary 才算 implemented。
+# state_events 无独立重建入口，明确不计入（诚实标记未实现）。
+_REAL_HANDLERS: dict[str, _Publisher] = {
+    "daily_ready": _MAINCHAIN_RESUME_STEP.__getitem__,  # 占位，主链走续跑分支，不进此表
+    "board_facts": _MAINCHAIN_RESUME_STEP.__getitem__,
+    "core": _MAINCHAIN_RESUME_STEP.__getitem__,
+    "stock_core_published": _MAINCHAIN_RESUME_STEP.__getitem__,
     "dsa_projection": _publish_dsa_projection,
     "chip": _publish_chip,
     "auction": _publish_auction,
     "board_aggregation": _publish_board_aggregation,
     "review": _publish_review,
-    # state_events：无独立发布入口，_resolve_source_run_id 返回 None，dispatch 记 warning 不 501
+    # state_events: 故意缺失（需补领域级重建 handler）
 }
+# 移除主链占位（主链由 _MAINCHAIN_BOUNDARIES 处理，不依赖 _REAL_HANDLERS 值）
+for _b in _MAINCHAIN_BOUNDARIES:
+    _REAL_HANDLERS.pop(_b, None)
 
 
 def is_implemented_boundary(boundary: str) -> bool:
-    """门禁辅助：所有 10 个 boundary 均已实现（不再有 not_implemented）。"""
-    return boundary in ALL_BOUNDARIES
+    """[Corrective Pass 2] 以真实 handler registry 为唯一权威，禁止枚举即实现。"""
+    if boundary in _MAINCHAIN_BOUNDARIES:
+        return True
+    return boundary in _REAL_HANDLERS
