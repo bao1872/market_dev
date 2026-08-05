@@ -7,7 +7,7 @@
 | D–J 原始开发基线 | `2267d43` |
 | D–J 初次收口 | `5df542d` |
 | Completion Pass 1 | `94aa38e` |
-| Corrective-3 | `<pending_commit>`（提交后回填） |
+| Corrective-3 | `abbd845`（`abbd84500f94e7a165352d94825fe88222e8ab8a`） |
 
 **生成日期**: 2026-08-05
 **当前判断（Corrective-3 代码提交后、远程验证前）**：

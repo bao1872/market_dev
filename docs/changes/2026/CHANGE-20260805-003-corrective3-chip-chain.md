@@ -7,6 +7,7 @@
 - 关联前序：`CHANGE-20260805-001-v21-development-chain.md`、
   `CHANGE-20260805-002-v21-dj-completion-pass.md`
 - 基线：`94aa38eee1a9e89deeb364ae09677fe55df01740`（origin/dev）
+- 收口 SHA：`abbd84500f94e7a165352d94825fe88222e8ab8a`
 
 ## 0. 为什么需要 Corrective-3
 
