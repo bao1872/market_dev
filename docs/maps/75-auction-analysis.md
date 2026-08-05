@@ -232,7 +232,8 @@ Chip 软失败（[P0-2]）：
 ### 10.3 状态
 
 - 代码：已实现并 push origin/dev。
-- `remote_static_verified = false`、`remote_unit_verified = false`、
-  `remote_frontend_build_verified = false`（[Corrective-3 §六] 此前标注无证据支持，已撤销；
-  需在远程精确检出 Corrective-3 SHA 后执行）。
+- `remote_static_verified = true`、`remote_unit_verified = true`、
+  `remote_frontend_build_verified = true`（[Corrective-3 §七] 于隔离 worktree
+  精确检出 `f1612f6` 后执行：Ruff 全通过、Mypy 改动文件零错误、
+  PURE_UNIT_TEST 52 passed、TSC/ESLint 零错误、vite build 成功）。
 - PG 集成 / Migration apply / 部署 / 真实数据验收 / 浏览器验收：未执行（PG gate deferred）。

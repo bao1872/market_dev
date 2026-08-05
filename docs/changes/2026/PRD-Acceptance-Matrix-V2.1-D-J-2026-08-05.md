@@ -7,16 +7,17 @@
 | D–J 原始开发基线 | `2267d43` |
 | D–J 初次收口 | `5df542d` |
 | Completion Pass 1 | `94aa38e` |
-| Corrective-3 | `abbd845`（`abbd84500f94e7a165352d94825fe88222e8ab8a`） |
+| Corrective-3（代码收口） | `abbd845` |
+| Corrective-3（远程验证 SHA） | `f1612f641f2c43684a468583405abea70410a818` |
 
 **生成日期**: 2026-08-05
-**当前判断（Corrective-3 代码提交后、远程验证前）**：
+**当前判断（Corrective-3 远程验证完成后）**：
 
 ```text
 development_chain_D_to_J = partial
-remote_static_verified   = false
-remote_unit_verified     = false
-remote_frontend_build_verified = false
+remote_static_verified         = true   # SHA f1612f6，Ruff 全通过 + Mypy 改动文件零错误
+remote_unit_verified           = true   # PURE_UNIT_TEST 52 passed
+remote_frontend_build_verified = true   # TSC 0 错误 / ESLint 0 错误 / vite build 成功
 pg_tested        = false
 deployed         = false
 runtime_verified = false
@@ -24,15 +25,48 @@ data_closed      = false
 browser_verified = false
 ```
 
+### 远程验证证据（`/root/web_dev` 隔离 worktree 精确检出 `f1612f6`）
+
+验证在 `git worktree add --detach /root/corrective3_verify f1612f6` 中执行，
+**未触碰运行中的部署**（部署树保持 `6f008ca`，工作树干净，15 个容器全程运行），
+未连接 PG，未执行 migration，未中断 worker。
+
+| 项目 | 命令 | 结果 |
+|---|---|---|
+| Ruff | `ruff check`（9 个改动文件） | `All checks passed!` |
+| Mypy | `mypy`（5 个改动模块 + `app/worker.py`） | Corrective-3 文件**零错误**；`worker.py` 自身零错误 |
+| PURE_UNIT_TEST | `pytest`（5 个目标测试文件） | `52 passed in 0.57s`，`postgres=0` |
+| 前端 TSC | `tsc --noEmit` | 退出码 0，零错误 |
+| 前端 ESLint | `eslint .`（项目脚本口径） | **0 errors**（66 warnings 全部为既有文件，改动的 2 个前端文件零告警） |
+| 前端 build | `vite build` | `✓ built in 5.00s`，dist 产物完整 |
+
+#### Mypy 独立佐证了 Commit D 的缺陷真实存在
+
+在**基线 `94aa38e`** 上对 `app/worker.py` 执行 Mypy，得到 50 个错误，其中 4 个
+精确对应本次修复的缺陷：
+
+```text
+app/worker.py:1832: error: Unexpected keyword argument "core_run_id" for "publish_chip_consensus"
+app/worker.py:1832: error: Unexpected keyword argument "worker_id" for "publish_chip_consensus"
+app/worker.py:1836: error: Argument "chip_run_id" ... has incompatible type "None"; expected "UUID"
+app/worker.py:1844: error: "FactorPublication" has no attribute "get"
+```
+
+Corrective-3 后 `worker.py` 降至 46 个错误，上述 4 项全部消失，且
+`app/worker.py` 自身零错误。剩余 46 个错误分布于未改动文件
+（`metric_engine.py` 18、`after_close_orchestrator.py` 16、
+`auction_aggregation_service.py` 5、`snapshot_run_item_service.py` 4、
+`market_review.py` 2、`redis_client.py` 1），属既有问题，本轮不扩大范围处理。
+
 > **诚实声明**：本文件在 Completion Pass 1 中曾出现两类不实标注，均已删除：
 > 1. 多行标注 `remote_static_verified` / `remote_unit_verified`，但从未在远程精确检出
 >    SHA 后执行过任何检查；
 > 2. Commit I 被称为 `real_e2e`，实际只组合了三个决策纯函数，不经过 worker、
 >    publication adapter 或任何真实编排路径。
 >
-> Corrective-3 已按证据重置：所有 `remote_*` 标记在远程验证输出产生前一律为 `false`。
-> 本轮**未在本地执行任何 Ruff / Mypy / pytest / TSC / ESLint / build**（受
-> Corrective-3 §一执行边界约束），因此也不存在 `local_*_verified` 声明。
+> Corrective-3 已按证据重置并重新验证：本轮**未在本地执行任何 Ruff / Mypy /
+> pytest / TSC / ESLint / build**（受 Corrective-3 §一执行边界约束）；
+> 所有 `remote_*` 标记均由远程精确检出 `f1612f6` 后的实际命令输出支撑（见下表）。
 
 ---
 
@@ -42,9 +76,9 @@ browser_verified = false
 
 - `authored`：代码/测试/文档已编写，未验证
 - `implemented`：有实现，未经本轮验证
-- `remote_static_verified`：远程精确检出 SHA 后 Ruff + Mypy 通过（**本轮 false**）
-- `remote_unit_verified`：远程 PURE_UNIT_TEST 通过（**本轮 false**）
-- `remote_frontend_build_verified`：远程 TSC + ESLint + build 通过（**本轮 false**）
+- `remote_static_verified`：远程精确检出 SHA 后 Ruff + Mypy 通过（**本轮 true @ f1612f6**）
+- `remote_unit_verified`：远程 PURE_UNIT_TEST 通过（**本轮 true，52 passed**）
+- `remote_frontend_build_verified`：远程 TSC + ESLint + build 通过（**本轮 true**）
 - `pg_tested`：PG 集成测试通过（**本轮 deferred，禁止执行**）
 - `deployment_pending` / `data_validation_pending` / `browser_pending`：未执行
 
@@ -131,7 +165,7 @@ Completion Pass 1 声称"D 已接入生产链"，但代码证据显示该链路�
 | 展示统一 lineage（跳过 null） | 同上 | authored | implemented |
 | **删除前端自行猜测业务动作** | 移除 `recommendedAction()`，改为 `actionText()` 纯文案映射 | authored | implemented（Corrective-3 §四） |
 | 展示后端 reasonCode / recommendedAction / targetRunId | 同上 | authored | implemented |
-| TSC / ESLint / build | — | `remote_frontend_build_verified = false` | pending（远程验证） |
+| TSC / ESLint / build | — | `remote_frontend_build_verified` | done（TSC 0 错误、ESLint 0 错误、vite build 成功 @ f1612f6） |
 
 ## Commit I — 测试分层（[Corrective-3 §五] 重新定义）
 
@@ -157,10 +191,12 @@ Completion Pass 1 声称"D 已接入生产链"，但代码证据显示该链路�
 
 ## 剩余阻塞 / 未验证项
 
-1. **远程验证未执行**：Ruff / Mypy / PURE_UNIT_TEST / TSC / ESLint / build
-   必须在远程 `/root/web_dev` 精确检出 Corrective-3 SHA 后运行。在此之前
-   所有 `remote_*` 标记保持 `false`。
+1. ~~远程验证未执行~~ **已完成**（`f1612f6`）：Ruff / Mypy / PURE_UNIT_TEST /
+   TSC / ESLint / build 全部通过，证据见上表。
 2. PG 集成（chip/board/review/auction 落库全链路）——本轮明令禁止，deferred。
+   因此 `ChipConsensusRun` 的真实落库、`publish_chip_consensus` 的真实
+   lineage 校验、readiness 的真实产物计数**均未经数据库验证**，
+   仅由 fake session 的服务级测试覆盖契约与顺序。
 3. Migration 085 apply——未授权。
 4. 真实全市场任务、生产部署、浏览器验收——未授权。
 5. `ChipConsensusRun` 表此前从无生产写入，历史交易日不存在领域 run 记录；

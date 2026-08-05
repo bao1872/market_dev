@@ -166,10 +166,11 @@ SHA 谱系：`2267d43`（D–J 原始开发基线）→ `5df542d`（D–J 初次
 → `94aa38e`（Completion Pass 1）→ Corrective-3（见提交记录）。
 
 - `git_branch = dev`
-- `remote_static_verified = false`（**Corrective-3 更正**：此前标 true 但从未在远程
-  精确检出 SHA 后执行过 Ruff/Mypy，无输出证据）
-- `remote_unit_verified = false`（**Corrective-3 更正**：同上，无远程 PURE_UNIT_TEST 输出）
-- `remote_frontend_build_verified = false`（**Corrective-3 更正**：无远程 TSC/ESLint/build 输出）
+- `remote_verification_sha = f1612f6`（隔离 worktree 精确检出，未触碰部署树）
+- `remote_static_verified = true`（Ruff 全通过；Mypy 改动文件零错误）
+- `remote_unit_verified = true`（PURE_UNIT_TEST 52 passed，postgres=0）
+- `remote_frontend_build_verified = true`（TSC 0 错误 / ESLint 0 错误 / vite build 成功）
+- `deployed_head = 6f008ca`（部署树未随验证变动）
 - `pg_tested = false`
 - `pg_gate = deferred`
 - `migration_085_authored = true`（Corrective-2 已存在，未 apply）

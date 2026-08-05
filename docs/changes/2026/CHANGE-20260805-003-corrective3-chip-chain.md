@@ -171,11 +171,12 @@ docs/changes/2026/CHANGE-20260805-002-v21-dj-completion-pass.md     加更正声
 
 本轮受 Corrective-3 §一执行边界约束，**本地未执行任何** py_compile / Ruff /
 Mypy / pytest / TSC / ESLint / build / migration / 数据库连接。
+全部验证在远程隔离 worktree 精确检出 `f1612f6` 后执行。
 
 ```text
-remote_static_verified          = false
-remote_unit_verified            = false
-remote_frontend_build_verified  = false
+remote_static_verified          = true    # Ruff All checks passed；Mypy 改动文件零错误
+remote_unit_verified            = true    # PURE_UNIT_TEST 52 passed，postgres=0
+remote_frontend_build_verified  = true    # TSC 0 / ESLint 0 errors / vite build ✓
 pg_tested                       = false
 deployed                        = false
 runtime_verified                = false
@@ -183,7 +184,24 @@ data_closed                     = false
 browser_verified                = false
 ```
 
-远程验证需在 `/root/web_dev` 精确检出本 CHANGE 的提交 SHA 后执行。
+验证方式：`git worktree add --detach /root/corrective3_verify f1612f6`，
+**未触碰运行中的部署**（部署树保持 `6f008ca`、工作树干净、15 个容器全程运行），
+未连接 PG，未执行 migration，未中断 worker。前端复用
+`/root/web_dev/frontend/node_modules`（package.json 校验一致，只读软链，验证后移除）。
+
+### Mypy 对缺陷的独立佐证
+
+在基线 `94aa38e` 上 `mypy app/worker.py` 输出 50 个错误，其中 4 个精确对应本次修复：
+
+```text
+worker.py:1832 Unexpected keyword argument "core_run_id" for "publish_chip_consensus"
+worker.py:1832 Unexpected keyword argument "worker_id" for "publish_chip_consensus"
+worker.py:1836 Argument "chip_run_id" has incompatible type "None"; expected "UUID"
+worker.py:1844 "FactorPublication" has no attribute "get"
+```
+
+Corrective-3 后降至 46 个，上述 4 项全部消失，`app/worker.py` 自身零错误；
+剩余 46 个分布于未改动文件（既有问题，未扩大范围处理）。
 
 ## 7. 已知限制
 
