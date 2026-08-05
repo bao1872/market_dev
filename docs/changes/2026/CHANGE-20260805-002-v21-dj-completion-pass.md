@@ -11,6 +11,25 @@
 > 审查结论指出 `CHANGE-20260805-001` 将 D–J 标为 completed 并声称远程静态/单元/前端 build
 > 全部验证，但证据不支持。本 CHANGE 执行 D–J Completion Pass，补齐缺口并修正文档状态。
 
+> **⚠️ Corrective-3 更正（2026-08-05，后续修订）**
+>
+> 本 CHANGE 中的两条结论经复核**不成立**，已由
+> `CHANGE-20260805-003-corrective3-chip-chain.md` 更正：
+>
+> 1. **第 D 项「已接入生产链」不成立**。当时的 worker 调用使用了错误签名
+>    （`core_run_id=` / `worker_id=` / `chip_run_id=None`）并把返回的
+>    `FactorPublication` ORM 当 dict 读取；更根本的是，**当时没有任何生产路径
+>    创建 `ChipConsensusRun`**，因此 `publish_chip_consensus` 在生产上 100% 抛
+>    `ValueError` 并被软失败吞掉——chip pointer 从未真正发布。
+>    此外 auction 重建被放在 chip 发布之前，顺序颠倒。
+> 2. **第 I 项「service-level 编排 E2E」不成立**。该测试只组合了
+>    `evaluate_closure` / `evaluate_governance` / `decide_auction_mode` 三个决策
+>    纯函数，不经过 worker、publication adapter 或任何真实编排路径，
+>    已更名为 `test_v21_readiness_auction_decision_integration.py`。
+>
+> 同时，本 CHANGE 声称的本地实跑（Ruff/Mypy/pytest/tsc/ESLint/build）不构成
+> 远程验证证据；Corrective-3 已把所有 `remote_*` 标记重置为 `false`。
+
 ## 1. 审查认定的 8 项缺口与处置
 
 | 项 | 审查结论 | 本 Pass 处置 |

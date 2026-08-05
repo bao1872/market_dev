@@ -1600,12 +1600,19 @@ async def _chip_consensus_poll_once() -> bool:
         execute_after_close_chip_consensus,
         get_pending_chip_instruments,
     )
+    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
+    from app.services.chip_consensus_run_lifecycle import (
+        META_CHIP_RUN_ID,
+        finalize_chip_run,
+        resolve_or_create_chip_run,
+    )
     from app.services.feature_snapshot_service import get_active_a_share_instruments
     from app.services.fenced_job_run_service import (
         FencedJobHeartbeat,
         JobLeaseLostError,
         claim_next_job_run,
         finalize_job_run,
+        merge_job_run_metadata,
     )
 
     async with AsyncSessionLocal() as db:
@@ -1640,6 +1647,19 @@ async def _chip_consensus_poll_once() -> bool:
     finalized = False
     trade_date = None
     chip_status = "failed"
+    # [Corrective-3 §二.1] 领域 run id：retry/resume 必须复用 metadata 中已固定的 id，
+    # 禁止每次重试新建 ChipConsensusRun。
+    chip_run_id: uuid.UUID | None = None
+    existing_chip_run_id_str = meta.get(META_CHIP_RUN_ID)
+    existing_chip_run_id: uuid.UUID | None = None
+    if existing_chip_run_id_str:
+        try:
+            existing_chip_run_id = uuid.UUID(str(existing_chip_run_id_str))
+        except (ValueError, TypeError):
+            logger.warning(
+                "[ChipConsensusWorker] metadata.chip_run_id 非法，忽略: %s",
+                existing_chip_run_id_str,
+            )
 
     async def _finalize_failure(code: str, message: str) -> bool:
         return await finalize_job_run(
@@ -1701,10 +1721,50 @@ async def _chip_consensus_poll_once() -> bool:
             )
             return True
 
+        # [Corrective-3 §二.1] 建立 ChipConsensusRun 生命周期。
+        # 修复前：没有任何生产路径写入 chip_consensus_runs，导致
+        # publish_chip_consensus 的 session.get(ChipConsensusRun, ...) 永远为空。
+        try:
+            heartbeat.ensure_owned()
+            async with AsyncSessionLocal() as run_db:
+                chip_run = await resolve_or_create_chip_run(
+                    run_db,
+                    trade_date=trade_date,
+                    source_core_run_id=core_run_id,
+                    algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
+                    scheduler_job_run_id=job_run_id,
+                    expected_count=len(all_instrument_ids),
+                    worker_id=_WORKER_INSTANCE_ID,
+                    lease_epoch=current_lease_epoch,
+                    existing_run_id=existing_chip_run_id,
+                )
+                chip_run_id = chip_run.id
+                await run_db.commit()
+            # 把 chip_run_id 固定到 SchedulerJobRun metadata，恢复任务时复用同一 ID
+            if existing_chip_run_id != chip_run_id:
+                await merge_job_run_metadata(
+                    job_run_id, {META_CHIP_RUN_ID: str(chip_run_id)},
+                )
+            heartbeat.ensure_owned()
+        except JobLeaseLostError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "[ChipConsensusWorker] 创建/解析 ChipConsensusRun 失败: "
+                "job_run_id=%s, error=%s",
+                job_run_id, exc,
+            )
+            finalized = await _finalize_failure(
+                "CHIP_DOMAIN_RUN_INIT_FAILED",
+                f"创建/解析 ChipConsensusRun 失败: {exc}",
+            )
+            return True
+
         logger.info(
             "[ChipConsensusWorker] 开始执行: job_run_id=%s, trade_date=%s, "
-            "core_run_id=%s, total_instruments=%d, pending=%d, is_resume=%s",
-            job_run_id, trade_date, core_run_id,
+            "core_run_id=%s, chip_run_id=%s, total_instruments=%d, pending=%d, "
+            "is_resume=%s",
+            job_run_id, trade_date, core_run_id, chip_run_id,
             len(all_instrument_ids), len(pending_instrument_ids), is_resume,
         )
 
@@ -1740,6 +1800,39 @@ async def _chip_consensus_poll_once() -> bool:
                 "reason_codes": reason_codes,
             },
         }
+
+        # [Corrective-3 §二.1/§二.3] chip snapshots 完成 → ChipConsensusRun 终态。
+        # 必须先于 publish_chip_consensus，因为发布函数校验
+        # chip_run.status ∈ (succeeded, partial) 并读取 coverage_ratio。
+        if chip_run_id is not None:
+            try:
+                async with AsyncSessionLocal() as run_db:
+                    await finalize_chip_run(
+                        run_db,
+                        chip_run_id=chip_run_id,
+                        chip_status=chip_status,
+                        succeeded_count=int(
+                            chip_result_summary.get("succeeded_count", 0),
+                        ),
+                        failed_count=int(chip_result_summary.get("failed_count", 0)),
+                        skipped_count=int(chip_result_summary.get("skipped_count", 0)),
+                        total_count=int(chip_result_summary.get("total_count", 0)),
+                        error_code=(
+                            "CHIP_SYSTEMIC_FAILURE" if chip_status == "failed" else None
+                        ),
+                        error_message=(
+                            "全部 chip instrument 处理失败"
+                            if chip_status == "failed" else None
+                        ),
+                        diagnostics={"reason_codes": reason_codes},
+                    )
+                    await run_db.commit()
+            except Exception:
+                logger.warning(
+                    "[ChipConsensusWorker] ChipConsensusRun 终态写入失败: chip_run_id=%s",
+                    chip_run_id, exc_info=True,
+                )
+
         finalized = await finalize_job_run(
             lease_token,
             status=main_status,
@@ -1784,70 +1877,55 @@ async def _chip_consensus_poll_once() -> bool:
     finally:
         await heartbeat.stop()
 
-    # 只有当前 owner 成功写入终态后才触发可选的 auction anchor 回调。
+    # [Corrective-3 §二.3] 正确顺序：
+    #   chip snapshots 完成
+    #   → ChipConsensusRun 终态（上方 finalize_chip_run 已完成）
+    #   → publish_chip_consensus
+    #   → commit publication pointer
+    #   → generate_and_publish_auction_anchors
+    #
+    # 修复前的缺陷：auction 在 chip pointer 之前执行，且 publish 调用使用了
+    # 错误签名（core_run_id=/worker_id=/chip_run_id=None）并把 ORM 当 dict 读，
+    # 生产上必然抛错并被软失败吞掉，等于 chip pointer 从未发布。
     if (
         finalized
         and trade_date is not None
-        and chip_status in {"succeeded", "partial"}
-        and chip_result_summary.get("anchor_rebuild_required", False)
-    ):
-        try:
-            from app.services.auction_anchor_service import (
-                generate_and_publish_auction_anchors,
-            )
-
-            async with AsyncSessionLocal() as anchor_db:
-                anchor_result = await generate_and_publish_auction_anchors(
-                    anchor_db,
-                    trade_date=trade_date,
-                    worker_id=f"chip_consensus:{job_run_id}",
-                )
-                await anchor_db.commit()
-            logger.info(
-                "[ChipConsensusWorker] chip 终态后锚点重建+发布: trade_date=%s, "
-                "chip_status=%s, anchor_status=%s, publication_id=%s",
-                trade_date, chip_status,
-                anchor_result.get("status"), anchor_result.get("publication_id"),
-            )
-        except Exception:
-            logger.warning(
-                "[ChipConsensusWorker] chip 终态后锚点重建失败（软失败）: trade_date=%s",
-                trade_date,
-                exc_info=True,
-            )
-
-    # 只有当前 owner 成功写入终态后才触发 chip consensus 发布 pointer。
-    # [D: 接入真实业务链] publish_chip_consensus 必须被 chip run 完成路径调用，
-    # 否则没有任何生产路径会在 chip run 完成后发布 stock_core pointer。
-    # 软失败：发布失败绝不反改 chip 终态或重算 core。
-    if (
-        finalized
-        and trade_date is not None
+        and chip_run_id is not None
         and chip_status in {"succeeded", "partial"}
     ):
-        try:
-            from app.services.factor_publication_service import publish_chip_consensus
+        from app.services.auction_anchor_service import (
+            generate_and_publish_auction_anchors,
+        )
+        from app.services.chip_consensus_run_lifecycle import (
+            publish_chip_and_upgrade_auction,
+        )
+        from app.services.factor_publication_service import publish_chip_consensus
 
-            async with AsyncSessionLocal() as pub_db:
-                pub_result = await publish_chip_consensus(
-                    pub_db,
-                    trade_date=trade_date,
-                    core_run_id=core_run_id,
-                    chip_run_id=None,  # 领域 run 由 publish_chip_consensus 内部按 algorithm_version 解析
-                    worker_id=f"chip_consensus:{job_run_id}",
-                )
-                await pub_db.commit()
-            logger.info(
-                "[ChipConsensusWorker] chip 终态后发布 stock_core pointer: "
-                "trade_date=%s, chip_status=%s, status=%s, publication_id=%s",
-                trade_date, chip_status,
-                pub_result.get("status"), pub_result.get("publication_id"),
-            )
+        outcome = await publish_chip_and_upgrade_auction(
+            trade_date=trade_date,
+            chip_run_id=chip_run_id,
+            algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
+            chip_status=chip_status,
+            scheduler_job_run_id=job_run_id,
+            worker_id=_WORKER_INSTANCE_ID,
+            lease_epoch=current_lease_epoch,
+            anchor_rebuild_required=bool(
+                chip_result_summary.get("anchor_rebuild_required", False),
+            ),
+            session_factory=AsyncSessionLocal,
+            publish_fn=publish_chip_consensus,
+            auction_fn=generate_and_publish_auction_anchors,
+        )
+
+        # [Corrective-3 §二.4] 软失败必须可治理：写入 SchedulerJobRun metadata，
+        # 使 ProductReadiness 能显示 chip run succeeded 但 publication missing。
+        try:
+            await merge_job_run_metadata(job_run_id, outcome.to_metadata())
         except Exception:
             logger.warning(
-                "[ChipConsensusWorker] chip 终态后发布 pointer 失败（软失败）: trade_date=%s",
-                trade_date,
-                exc_info=True,
+                "[ChipConsensusWorker] 写入 chip publication 治理 metadata 失败: "
+                "job_run_id=%s",
+                job_run_id, exc_info=True,
             )
 
     return True

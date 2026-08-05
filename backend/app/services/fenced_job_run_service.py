@@ -201,6 +201,39 @@ async def finalize_job_run(
         return True
 
 
+async def merge_job_run_metadata(
+    job_run_id: uuid.UUID,
+    metadata_updates: dict[str, Any],
+    *,
+    session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
+) -> bool:
+    """[Corrective-3 §二.4] 在任务终态之后合并治理 metadata。
+
+    chip publication 发生在 `finalize_job_run` 之后（租约已释放），因此不能复用
+    fenced 路径。本函数只做 metadata 合并，不修改 status/count 等终态字段，
+    用于把 publication 成功/失败结果落到 SchedulerJobRun，使其可被治理与巡检。
+
+    Returns:
+        True 表示已写入；False 表示 job_run 不存在。
+    """
+    async with session_factory() as db:
+        job_run = await db.get(SchedulerJobRun, job_run_id)
+        if job_run is None:
+            await db.rollback()
+            return False
+
+        metadata: dict[str, Any] = {}
+        if job_run.metadata_json:
+            try:
+                metadata = json.loads(job_run.metadata_json)
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+        metadata.update(metadata_updates)
+        job_run.metadata_json = json.dumps(metadata, ensure_ascii=False)
+        await db.commit()
+        return True
+
+
 class FencedJobHeartbeat:
     """Background heartbeat whose failure permanently invalidates the token."""
 

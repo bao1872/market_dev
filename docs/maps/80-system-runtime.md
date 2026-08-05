@@ -162,11 +162,14 @@ strategy、calendar、monitor、strategy-batch、outbox、delivery、after-close
 > 当前为代码开发阶段，非集成/部署阶段。以下 status 如实区分，禁止把代码完成写成
 > 生产 fully_ready，也禁止把 PG deferred 写成开发失败。
 
+SHA 谱系：`2267d43`（D–J 原始开发基线）→ `5df542d`（D–J 初次收口）
+→ `94aa38e`（Completion Pass 1）→ Corrective-3（见提交记录）。
+
 - `git_branch = dev`
-- `git_head = 6f008ca`（Commit I 收口；Commit D–I 已 push origin/dev）
-- `remote_static_verified = true`（Ruff、改动文件 Mypy、静态合同/架构检查，授权范围内）
-- `remote_unit_verified = true`（PURE_UNIT_TEST 纯单元，不连接 DB）
-- `frontend_build_verified = true`（前端 tsc / ESLint / build，授权范围内）
+- `remote_static_verified = false`（**Corrective-3 更正**：此前标 true 但从未在远程
+  精确检出 SHA 后执行过 Ruff/Mypy，无输出证据）
+- `remote_unit_verified = false`（**Corrective-3 更正**：同上，无远程 PURE_UNIT_TEST 输出）
+- `remote_frontend_build_verified = false`（**Corrective-3 更正**：无远程 TSC/ESLint/build 输出）
 - `pg_tested = false`
 - `pg_gate = deferred`
 - `migration_085_authored = true`（Corrective-2 已存在，未 apply）

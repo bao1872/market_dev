@@ -42,8 +42,31 @@ class ProductReadinessDTO(BaseModel):
     )
     lineage: dict[str, object] = Field(
         default_factory=dict,
-        description="[G 修正] 真实数据血缘：run_id/publication_id/pointer_data_run_id/"
-        "source_core_run_id/algorithm_version/coverage/reason_code 等，支撑血统审计",
+        description="[Corrective-3 §三] 统一结构的真实数据血缘：source_type/"
+        "publication_id/pointer_data_run_id/domain_run_id/parent_product/"
+        "parent_run_id/source_core_run_id/source_board_run_id/algorithm_version/"
+        "parameter_hash/coverage/status/reason_code/published_at/calculated_at/"
+        "freshness/retryable/recommended_action",
+    )
+    reasonCode: str = Field(
+        "NONE",
+        description="[Corrective-3 §三] 该节点当前状态的原因码（pending 节点也必须给出）",
+    )
+    retryable: bool = Field(
+        False,
+        description="[Corrective-3 §四] 是否可重试（后端权威判定，前端不得自行推断）",
+    )
+    recommendedAction: str = Field(
+        "none",
+        description="[Corrective-3 §四] 后端输出的推荐恢复动作，前端只展示",
+    )
+    operation: str = Field(
+        "no_operation",
+        description="[Corrective-3 §四] 对应的可执行治理操作标识",
+    )
+    targetRunId: str | None = Field(
+        None,
+        description="[Corrective-3 §四] 治理操作的目标 run id",
     )
 
 

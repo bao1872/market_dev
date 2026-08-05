@@ -2728,8 +2728,18 @@ export interface ProductReadinessItem {
   isTerminal: boolean
   isConsumable: boolean
   dataSource: string
-  /** [H 修正] 真实数据血缘：run_id/publication_id/pointer_data_run_id/algorithm_version/coverage/reason_code 等 */
+  /** [Corrective-3 §三] 统一结构真实数据血缘（缺失字段显式为 null） */
   lineage: Record<string, unknown>
+  /** [Corrective-3 §三] 当前状态原因码（pending 节点也必给出） */
+  reasonCode: string
+  /** [Corrective-3 §四] 后端权威判定：是否可重试 */
+  retryable: boolean
+  /** [Corrective-3 §四] 后端输出的推荐恢复动作，前端只展示 */
+  recommendedAction: string
+  /** [Corrective-3 §四] 对应的可执行治理操作标识 */
+  operation: string
+  /** [Corrective-3 §四] 治理操作的目标 run id */
+  targetRunId: string | null
 }
 
 /** 闭包评估问题项 */

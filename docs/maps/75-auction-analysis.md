@@ -209,16 +209,30 @@ Chip 软失败（[P0-2]）：
 - 生成失败（无可发布 snapshot）软失败返回 `failed`/`publish_failed`，不抛异常。
 - 不允许重算 DSA / SMC / momentum；chip 到达后才做 hybrid/composite 升级。
 
-### 10.2 Synthetic E2E（Commit I）
+### 10.2 测试分层（Commit I，[Corrective-3 §五] 重新定义）
 
-- 纯逻辑 E2E：`backend/tests/test_v21_synthetic_e2e_pure.py`
-  （`SyntheticAuctionRepository` + 内存 batch transitions，PURE_UNIT_TEST）。
-  覆盖 structure_only→hybrid→composite、晚到 chip、failure matrix、retry 幂等、
-  performance instrumentation。
+此前本节称 `test_v21_synthetic_e2e_pure.py` 为 "E2E"，但该测试只组合
+`evaluate_closure` / `evaluate_governance` / `decide_auction_mode` 三个决策纯函数，
+**不经过 worker、publication adapter 或任何真实编排路径**，不构成 E2E。
+
+- **决策函数集成测试**：`backend/tests/test_v21_readiness_auction_decision_integration.py`
+  （原 `test_v21_synthetic_e2e_pure.py`，PURE_UNIT_TEST）。
+  覆盖 structure_only→hybrid→composite 模式决策、晚到 chip、failure matrix、
+  闭包状态转换。
+- **worker 编排服务级测试**：`backend/tests/test_chip_worker_orchestration.py`
+  （Corrective-3 新增）。调用真实
+  `chip_consensus_run_lifecycle.publish_chip_and_upgrade_auction` /
+  `resolve_or_create_chip_run` / `finalize_chip_run`，注入 fake session 与
+  fake publish/auction adapter。覆盖 publish→auction 顺序、真实 chip_run_id、
+  发布失败不触发 auction composite upgrade、治理 metadata、retry 复用同一领域 run、
+  lease 丢失阻断写入。
 - PG 依赖部分：`backend/tests/test_v21_synthetic_e2e_pg.py` 标记
   `status = authored_not_executed`、`reason = pg_gate_deferred_during_development`。
 
 ### 10.3 状态
 
-- 代码 & 纯单元：已实现、已提交并 push origin/dev，远程静态/纯单元验证在授权范围执行。
+- 代码：已实现并 push origin/dev。
+- `remote_static_verified = false`、`remote_unit_verified = false`、
+  `remote_frontend_build_verified = false`（[Corrective-3 §六] 此前标注无证据支持，已撤销；
+  需在远程精确检出 Corrective-3 SHA 后执行）。
 - PG 集成 / Migration apply / 部署 / 真实数据验收 / 浏览器验收：未执行（PG gate deferred）。

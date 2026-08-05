@@ -46,9 +46,11 @@ router = APIRouter(
 def _to_dto(state, lineage: dict) -> ProductReadinessDTO:
     """将 ProductReadinessState 映射为 API DTO。
 
-    [G 修正] 直接透传真实 lineage dict（run_id/publication_id/pointer_data_run_id/
-    source_core_run_id/algorithm_version/coverage/reason_code），而非字符串来源类型。
+    [Corrective-3 §三/§四] 透传统一结构 lineage，并把后端权威治理动作
+    （reasonCode/retryable/recommendedAction/operation/targetRunId）提升为
+    一级 DTO 字段。前端只展示，不得再自行解释 reason code。
     """
+    target = lineage.get("target_run_id")
     return ProductReadinessDTO(
         product=state.product,
         readiness=state.readiness,
@@ -58,6 +60,11 @@ def _to_dto(state, lineage: dict) -> ProductReadinessDTO:
         isConsumable=state.is_consumable,
         dataSource=lineage.get("source_type", "unknown"),
         lineage=lineage,
+        reasonCode=str(lineage.get("reason_code", "NONE")),
+        retryable=bool(lineage.get("retryable", False)),
+        recommendedAction=str(lineage.get("recommended_action", "none")),
+        operation=str(lineage.get("operation", "no_operation")),
+        targetRunId=str(target) if target else None,
     )
 
 

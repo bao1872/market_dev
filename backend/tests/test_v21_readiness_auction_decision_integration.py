@@ -1,9 +1,14 @@
-"""V2.1 Synthetic E2E —— 盘后编排生命周期（service-level，fake repository，不连数据库）。
+"""V2.1 就绪闭包 + 竞价模式**决策函数集成测试**（纯内存，不连数据库）。
 
-[Commit I · 修正] 上一版只是 decide_auction_mode 的纯函数单测，并非真实编排 E2E。
-本版改为 **service-level orchestration E2E**：用 SyntheticStateRepository（内存状态仓库）
-驱动真实编排决策函数 evaluate_closure + evaluate_governance（product_readiness_service）
-以及 auction_mode_service.decide_auction_mode，覆盖整条链路的关键不变量：
+[Corrective-3 §五] 本文件此前被命名/描述为 "Synthetic E2E"，但它只组合了三个
+决策纯函数（evaluate_closure / evaluate_governance / decide_auction_mode），
+**不经过任何 worker、publication adapter 或真实编排路径**，因此不构成 E2E。
+现更名为 decision integration，如实反映其覆盖范围。
+
+真正的 worker 编排测试见 `test_chip_worker_orchestration.py`
+（真实 finalize helper + publish adapter + auction adapter，fake session）。
+
+本文件覆盖决策层的关键不变量：
 
   1. closure transition：stock_core 形成 → core_ready → mandatory 完成 → fully_ready；
   2. late chip upgrade：chip 由 partial（degraded）补齐为 ready 后 closure 升级为 fully_ready；

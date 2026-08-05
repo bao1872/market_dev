@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.domain_status import (
     CLOSURE_BLOCKED,
@@ -294,26 +294,125 @@ class GovernanceReport:
     degraded_reasons: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _product_lineage(p: ProductReadinessState) -> dict[str, Any]:
-    """从产品就绪状态提取真实数据血缘（G 修正）。
+# [Corrective-3 §三] 统一 lineage 结构：每个节点都必须返回全部这些键。
+# 缺失值显式为 None，不允许键缺席，使前端与审计可以稳定消费。
+LINEAGE_KEYS: tuple[str, ...] = (
+    "source_type",
+    "publication_id",
+    "pointer_data_run_id",
+    "domain_run_id",
+    "parent_product",
+    "parent_run_id",
+    "source_core_run_id",
+    "source_board_run_id",
+    "algorithm_version",
+    "parameter_hash",
+    "coverage",
+    "status",
+    "reason_code",
+    "published_at",
+    "calculated_at",
+    "freshness",
+    "retryable",
+    "recommended_action",
+)
 
-    返回真实 run_id / publication_id / pointer_data_run_id / source_core_run_id /
-    algorithm_version / coverage / reason_code / source_type，支撑真正的血统审计，
-    而非仅"数据来源类型"字符串。
+# [Corrective-3 §四] 治理动作由后端输出。前端只展示，不重新解释 reason code。
+# 与 chip_consensus_run_lifecycle.ACTION_RETRY_CHIP_PUBLICATION 保持同一取值。
+ACTION_RETRY_CHIP_PUBLICATION = "retry_chip_publication"
+
+# reason_code → (retryable, recommended_action, operation)
+_ACTION_BY_REASON: dict[str, tuple[bool, str, str]] = {
+    # chip：run 成功但 publication 缺失 —— 必须可治理
+    "CHIP_PUBLICATION_MISSING": (
+        True, ACTION_RETRY_CHIP_PUBLICATION, "republish_chip_consensus",
+    ),
+    "CHIP_PUBLICATION_FAILED": (
+        True, ACTION_RETRY_CHIP_PUBLICATION, "republish_chip_consensus",
+    ),
+    "CHIP_PUBLICATION_LINEAGE_REJECTED": (
+        False, "inspect_chip_lineage_conflict", "manual_investigation",
+    ),
+    "CHIP_PARTIAL": (True, "retry_failed_chip_instruments", "rerun_chip_consensus"),
+    "CHIP_FAILED": (True, "rerun_chip_consensus", "rerun_chip_consensus"),
+    "CHIP_CANCELLED": (True, "rerun_chip_consensus", "rerun_chip_consensus"),
+    "NO_CHIP_RUN": (True, "trigger_chip_consensus", "trigger_chip_consensus"),
+    # auction
+    "AUCTION_STRUCTURE_ONLY": (
+        True, "await_chip_upgrade", "regenerate_auction_anchor",
+    ),
+    "AUCTION_FAILED": (True, "rerun_auction_anchor", "rerun_auction_anchor"),
+    "AUCTION_CANCELLED": (True, "rerun_auction_anchor", "rerun_auction_anchor"),
+    "NO_AUCTION_RUN": (True, "trigger_auction_anchor", "trigger_auction_anchor"),
+    # board facts
+    "REUSED_PREVIOUS_RUN": (True, "rerun_board_facts", "rerun_board_facts"),
+    "NO_RUN": (True, "trigger_upstream_job", "trigger_upstream_job"),
+    "RUN_FAILED": (True, "rerun_board_facts", "rerun_board_facts"),
+    "RUN_CANCELLED": (True, "rerun_board_facts", "rerun_board_facts"),
+    # review
+    "NO_REVIEW_RUN": (True, "trigger_market_review", "trigger_market_review"),
+    "REVIEW_NOT_PUBLISHED": (True, "publish_market_review", "publish_market_review"),
+    "REVIEW_FAILED": (True, "rerun_market_review", "rerun_market_review"),
+    "REVIEW_CANCELLED": (True, "rerun_market_review", "rerun_market_review"),
+    # 派生投影
+    "PARENT_NOT_CONSUMABLE": (False, "await_parent_product", "no_operation"),
+    "NO_PROJECTION": (True, "rebuild_dsa_projection", "rebuild_dsa_projection"),
+    "NO_STATE_EVENTS": (True, "rebuild_state_events", "rebuild_state_events"),
+    # 通用 pending
+    "NO_PUBLICATION": (True, "await_publication", "trigger_upstream_job"),
+}
+
+_DEFAULT_ACTION: tuple[bool, str, str] = (False, "none", "no_operation")
+
+
+def resolve_governance_action(
+    reason_code: str | None,
+    readiness: str,
+) -> tuple[bool, str, str]:
+    """[Corrective-3 §四] 后端解析治理动作，返回 (retryable, action, operation)。
+
+    这是治理动作的**唯一**事实源。前端不得再自行根据 reason code 猜测业务动作。
     """
-    base = {
-        "source_type": p.lineage.get("source_type", "unknown"),
-        "reason_code": p.lineage.get("reason_code", "NONE"),
-        "readiness": p.readiness,
-        "freshness": p.freshness,
-    }
-    for key in (
-        "publication_id", "pointer_data_run_id", "algorithm_version",
-        "coverage", "published_at", "run_id", "review_run_id",
-        "source_core_run_id", "derived_from",
+    if readiness in CONSUMABLE_READINESS and reason_code in (
+        None, "NONE", "FRESH_PUBLICATION", "REVIEW_PUBLISHED", "CHIP_SUCCEEDED",
+        "UPGRADED_FROM_PARENT", "AUCTION_SUCCEEDED",
     ):
-        if key in p.lineage:
-            base[key] = p.lineage[key]
+        return _DEFAULT_ACTION
+    return _ACTION_BY_REASON.get(reason_code or "", _DEFAULT_ACTION)
+
+
+def _product_lineage(p: ProductReadinessState) -> dict[str, Any]:
+    """[Corrective-3 §三] 输出统一结构的真实数据血缘。
+
+    每个节点返回 `LINEAGE_KEYS` 的全部键（缺失显式 None），并由后端补齐
+    status / freshness / retryable / recommended_action。
+    """
+    reason_code = p.lineage.get("reason_code")
+    retryable, action, operation = resolve_governance_action(reason_code, p.readiness)
+
+    base: dict[str, Any] = {key: p.lineage.get(key) for key in LINEAGE_KEYS}
+    base["source_type"] = p.lineage.get("source_type", "unknown")
+    base["reason_code"] = reason_code or "NONE"
+    base["status"] = p.lineage.get("status", p.readiness)
+    base["freshness"] = p.freshness
+    base["readiness"] = p.readiness
+    # 后端权威治理动作（§四）
+    base["retryable"] = p.lineage.get("retryable", retryable)
+    base["recommended_action"] = p.lineage.get("recommended_action", action)
+    base["operation"] = p.lineage.get("operation", operation)
+    base["target_run_id"] = (
+        p.lineage.get("domain_run_id")
+        or p.lineage.get("run_id")
+        or p.lineage.get("review_run_id")
+        or p.lineage.get("pointer_data_run_id")
+    )
+    # 兼容既有键
+    if "run_id" in p.lineage:
+        base["run_id"] = p.lineage["run_id"]
+    if "review_run_id" in p.lineage:
+        base["review_run_id"] = p.lineage["review_run_id"]
+    if "derived_from" in p.lineage:
+        base["derived_from"] = p.lineage["derived_from"]
     return base
 
 
@@ -372,6 +471,95 @@ def evaluate_governance(
     )
 
 
+def _iso(value: Any) -> str | None:
+    """安全地把 datetime 转 ISO 字符串。"""
+    return value.isoformat() if hasattr(value, "isoformat") else None
+
+
+def _sid(value: Any) -> str | None:
+    """安全地把 id 转字符串；None 保持 None（不得退化为空串）。"""
+    return str(value) if value is not None else None
+
+
+def _num(value: Any) -> float | None:
+    """安全地把 Decimal/数值转 float（JSON 可序列化）。"""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _publication_lineage(
+    pub: Any,
+    domain_run: Any | None,
+    source_core_run_id: str | None = None,
+) -> dict[str, Any]:
+    """[Corrective-3 §三] 由 FactorPublication + 领域 run 联查生成完整 lineage。
+
+    `source_core_run_id` 优先取领域 run 的真实字段，其次取显式传入值，
+    不得默认 None。
+    """
+    run_core = _sid(getattr(domain_run, "source_core_run_id", None))
+    return {
+        "source_type": "publication_pointer",
+        "publication_id": _sid(getattr(pub, "id", None)),
+        "pointer_data_run_id": _sid(getattr(pub, "data_run_id", None)),
+        "domain_run_id": _sid(getattr(domain_run, "id", None))
+        or _sid(getattr(pub, "data_run_id", None)),
+        "source_core_run_id": run_core or source_core_run_id,
+        "source_board_run_id": _sid(getattr(domain_run, "source_board_run_id", None)),
+        "algorithm_version": getattr(pub, "algorithm_version", None)
+        or getattr(domain_run, "algorithm_version", None),
+        "parameter_hash": getattr(pub, "parameter_hash", None)
+        or getattr(domain_run, "parameter_hash", None),
+        "coverage": _num(
+            getattr(pub, "coverage_ratio", None)
+            if getattr(pub, "coverage_ratio", None) is not None
+            else getattr(domain_run, "coverage_ratio", None),
+        ),
+        "status": getattr(domain_run, "status", None) or "published",
+        "reason_code": "FRESH_PUBLICATION",
+        "published_at": _iso(getattr(pub, "published_at", None)),
+        "calculated_at": _iso(
+            getattr(domain_run, "finished_at", None)
+            or getattr(domain_run, "created_at", None),
+        ),
+    }
+
+
+# publication_kind → 领域 run 模型（延迟导入，避免循环依赖）
+def _domain_run_model_map() -> dict[str, Any]:
+    from app.models.auction_anchor_run import AuctionAnchorRun
+    from app.models.board_facts_run import BoardFactsRun
+    from app.models.chip_consensus_run import ChipConsensusRun
+
+    return {
+        PUBLICATION_KIND_BOARD_FACTS: BoardFactsRun,
+        PUBLICATION_KIND_CHIP_CONSENSUS: ChipConsensusRun,
+        PUBLICATION_KIND_AUCTION_ANCHOR: AuctionAnchorRun,
+    }
+
+
+class _LazyModelMap(dict):  # type: ignore[type-arg]
+    """延迟解析的 publication_kind → 领域 run 模型映射。"""
+
+    _loaded = False
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        if not self._loaded:
+            try:
+                self.update(_domain_run_model_map())
+            except Exception:
+                pass
+            self._loaded = True
+        return super().get(key, default)
+
+
+_DOMAIN_RUN_MODEL_BY_KIND: Any = _LazyModelMap()
+
+
 # ============================================================================
 # ProductReadinessService — 动态聚合服务层（E08-T01）
 # ============================================================================
@@ -421,9 +609,9 @@ class ProductReadinessService:
             stock_core,
             board_aggregation,
             review,
-            self._derived_state("dsa_projection", stock_core),
+            await self._dsa_projection_state(db, trade_date, stock_core),
             await self._chip_state(db, trade_date),
-            self._derived_state("state_events", stock_core),
+            await self._state_events_state(db, trade_date, stock_core),
             await self._auction_state(db, trade_date),
         ]
 
@@ -476,24 +664,34 @@ class ProductReadinessService:
             )
             .limit(1)
         )
-        if pub is not None:
-            lineage = {
-                "source_type": "publication_pointer",
-                "publication_id": str(getattr(pub, "id", "")),
-                "pointer_data_run_id": str(getattr(pub, "data_run_id", "")),
-                "algorithm_version": getattr(pub, "algorithm_version", None),
-                "coverage": getattr(pub, "coverage_ratio", None),
-                "published_at": (
-                    pub.published_at.isoformat()
-                    if getattr(pub, "published_at", None) else None
-                ),
-                "source_core_run_id": source_core_run_id,
-            }
-            return ProductReadinessState(
-                product, READINESS_READY, "fresh",
-                is_mandatory=is_mandatory, is_terminal=True, lineage=lineage,
+        if pub is None:
+            return None
+
+        # [Corrective-3 §三] publication 节点必须与对应领域 run 联查，
+        # source_core_run_id 不得默认 None。
+        domain_run = await self._load_domain_run(db, publication_kind, pub.data_run_id)
+        lineage = _publication_lineage(pub, domain_run, source_core_run_id)
+        return ProductReadinessState(
+            product, READINESS_READY, "fresh",
+            is_mandatory=is_mandatory, is_terminal=True, lineage=lineage,
+        )
+
+    @staticmethod
+    async def _load_domain_run(
+        db: Any, publication_kind: str, data_run_id: Any,
+    ) -> Any | None:
+        """按 publication_kind 联查对应领域 run，用于补全真实 lineage。"""
+        if data_run_id is None:
+            return None
+        model = _DOMAIN_RUN_MODEL_BY_KIND.get(publication_kind)
+        if model is None:
+            return None
+        try:
+            return await db.scalar(
+                select(model).where(model.id == data_run_id).limit(1)
             )
-        return None
+        except Exception:  # 领域 run 查询失败不得阻断 readiness 评估
+            return None
 
     # ---- 各产品状态映射 ----
 
@@ -507,7 +705,11 @@ class ProductReadinessService:
         )
         if st is not None:
             return st
-        return ProductReadinessState("daily_facts", READINESS_PENDING, "fresh")
+        return ProductReadinessState(
+            "daily_facts", READINESS_PENDING, "fresh",
+            lineage={"source_type": "publication_pointer",
+                     "reason_code": "NO_PUBLICATION"},
+        )
 
     async def _board_facts_state(
         self, db: Any, trade_date: date,
@@ -538,18 +740,10 @@ class ProductReadinessService:
                 .limit(1)
             )
             reused = data_run is not None and data_run.status == "reused_previous"
-            lineage = {
-                "source_type": "publication_pointer",
-                "publication_id": str(getattr(pub, "id", "")),
-                "pointer_data_run_id": str(getattr(pub, "data_run_id", "")),
-                "algorithm_version": getattr(pub, "algorithm_version", None),
-                "coverage": getattr(pub, "coverage_ratio", None),
-                "published_at": (
-                    pub.published_at.isoformat()
-                    if getattr(pub, "published_at", None) else None
-                ),
-                "reason_code": "REUSED_PREVIOUS_RUN" if reused else "FRESH_PUBLICATION",
-            }
+            lineage = _publication_lineage(pub, data_run)
+            lineage["reason_code"] = (
+                "REUSED_PREVIOUS_RUN" if reused else "FRESH_PUBLICATION"
+            )
             if reused:
                 return ProductReadinessState(
                     "board_facts", READINESS_READY_REUSED, "reused",
@@ -596,7 +790,11 @@ class ProductReadinessService:
         )
         if st is not None:
             return st
-        return ProductReadinessState("stock_core", READINESS_PENDING, "fresh")
+        return ProductReadinessState(
+            "stock_core", READINESS_PENDING, "fresh",
+            lineage={"source_type": "publication_pointer",
+                     "reason_code": "NO_PUBLICATION"},
+        )
 
     async def _board_aggregation_state(
         self, db: Any, trade_date: date,
@@ -608,14 +806,19 @@ class ProductReadinessService:
         )
         if st is not None:
             return st
-        return ProductReadinessState("board_aggregation", READINESS_PENDING, "fresh")
+        return ProductReadinessState(
+            "board_aggregation", READINESS_PENDING, "fresh",
+            lineage={"source_type": "publication_pointer",
+                     "reason_code": "NO_PUBLICATION"},
+        )
 
     async def _review_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """review：MarketReviewRun published 即视为已发布（P0-2，以发布态为准）。
+        """review：优先使用正式 review publication pointer（[Corrective-3 §三]）。
 
-        [G 修正] 填充真实 lineage（review_run_id / algorithm_version / reason_code）。
+        修复前只看 latest run status，run 被标 published 但 pointer 未发布时会误报
+        ready。现在先查 FactorPublication，pointer 缺失时降级为 REVIEW_NOT_PUBLISHED。
         """
         from app.models.market_review import MarketReviewRun
 
@@ -625,62 +828,155 @@ class ProductReadinessService:
             .order_by(MarketReviewRun.created_at.desc())
             .limit(1)
         )
+
         if run is None:
             return ProductReadinessState(
                 "review", READINESS_PENDING, "fresh",
-                lineage={"source_type": "run_status", "reason_code": "NO_REVIEW_RUN"},
+                lineage={"source_type": "review_publication",
+                         "reason_code": "NO_REVIEW_RUN"},
             )
+
+        published_at = getattr(run, "published_at", None)
+        base = {
+            "source_type": "review_publication",
+            "domain_run_id": _sid(getattr(run, "id", None)),
+            "review_run_id": _sid(getattr(run, "id", None)),
+            "algorithm_version": getattr(run, "algorithm_version", None),
+            "parameter_hash": getattr(run, "filter_version", None),
+            "coverage": _num(getattr(run, "coverage_ratio", None)),
+            "status": run.status,
+            "published_at": _iso(published_at),
+            "calculated_at": _iso(
+                getattr(run, "completed_at", None) or getattr(run, "created_at", None),
+            ),
+        }
+        # [Corrective-3 §三] 使用正式 review publication pointer（published_at 是
+        # 写入 factor_publications 的时间），而非仅 latest run status。
+        # run.status=published 但 published_at 为空 → pointer 未真正写入。
         if run.status == "published":
+            if published_at is not None:
+                return ProductReadinessState(
+                    "review", READINESS_READY, "fresh", is_terminal=True,
+                    lineage={**base, "reason_code": "REVIEW_PUBLISHED"},
+                )
             return ProductReadinessState(
-                "review", READINESS_READY, "fresh", is_terminal=True,
-                lineage={
-                    "source_type": "review_publication",
-                    "review_run_id": str(getattr(run, "id", "")),
-                    "algorithm_version": getattr(run, "algorithm_version", None),
-                    "reason_code": "REVIEW_PUBLISHED",
-                },
+                "review", READINESS_DEGRADED, "stale", is_terminal=True,
+                lineage={**base, "reason_code": "REVIEW_NOT_PUBLISHED"},
             )
         if run.status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
                 "review", READINESS_UNAVAILABLE, "fresh", is_terminal=True,
-                lineage={"source_type": "run_status",
-                          "review_run_id": str(getattr(run, "id", "")),
-                          "reason_code": f"REVIEW_{run.status.upper()}"},
+                lineage={**base, "reason_code": f"REVIEW_{run.status.upper()}"},
             )
         return ProductReadinessState(
             "review", READINESS_PENDING, "fresh",
-            lineage={"source_type": "run_status",
-                      "review_run_id": str(getattr(run, "id", ""))},
+            lineage={**base, "reason_code": "REVIEW_RUNNING"},
+        )
+
+    async def _dsa_projection_state(
+        self, db: Any, trade_date: date, core: ProductReadinessState,
+    ) -> ProductReadinessState:
+        """[Corrective-3 §三] dsa_projection 必须检查真实投影产物，不得随 stock_core 自动 ready。"""
+        parent = {
+            "source_type": "derived_projection",
+            "parent_product": "stock_core",
+            "derived_from": "stock_core",
+            "parent_run_id": core.lineage.get("pointer_data_run_id"),
+            "source_core_run_id": core.lineage.get("pointer_data_run_id")
+            or core.lineage.get("domain_run_id"),
+        }
+        if not core.is_consumable:
+            return ProductReadinessState(
+                "dsa_projection", READINESS_PENDING, "fresh",
+                is_mandatory=False, is_terminal=False,
+                lineage={**parent, "reason_code": "PARENT_NOT_CONSUMABLE"},
+            )
+
+        count = await self._count_dsa_projections(db, trade_date)
+        if count > 0:
+            return ProductReadinessState(
+                "dsa_projection", READINESS_READY, "fresh",
+                is_mandatory=False, is_terminal=True,
+                lineage={**parent, "reason_code": "PROJECTION_PRESENT",
+                         "coverage": count, "status": "present"},
+            )
+        return ProductReadinessState(
+            "dsa_projection", READINESS_PENDING, "stale",
+            is_mandatory=False, is_terminal=False,
+            lineage={**parent, "reason_code": "NO_PROJECTION",
+                     "coverage": 0, "status": "missing"},
+        )
+
+    async def _state_events_state(
+        self, db: Any, trade_date: date, core: ProductReadinessState,
+    ) -> ProductReadinessState:
+        """[Corrective-3 §三] state_events 必须检查真实 candidate/confirmed 状态。"""
+        parent = {
+            "source_type": "derived_projection",
+            "parent_product": "stock_core",
+            "derived_from": "stock_core",
+            "parent_run_id": core.lineage.get("pointer_data_run_id"),
+            "source_core_run_id": core.lineage.get("pointer_data_run_id")
+            or core.lineage.get("domain_run_id"),
+        }
+        if not core.is_consumable:
+            return ProductReadinessState(
+                "state_events", READINESS_PENDING, "fresh",
+                is_mandatory=False, is_terminal=False,
+                lineage={**parent, "reason_code": "PARENT_NOT_CONSUMABLE"},
+            )
+
+        counts = await self._count_state_events(db, trade_date)
+        total = sum(counts.values())
+        if total > 0:
+            return ProductReadinessState(
+                "state_events", READINESS_READY, "fresh",
+                is_mandatory=False, is_terminal=True,
+                lineage={**parent, "reason_code": "STATE_EVENTS_PRESENT",
+                         "coverage": total, "status": "present",
+                         "event_type_counts": counts},
+            )
+        return ProductReadinessState(
+            "state_events", READINESS_PENDING, "stale",
+            is_mandatory=False, is_terminal=False,
+            lineage={**parent, "reason_code": "NO_STATE_EVENTS",
+                     "coverage": 0, "status": "missing"},
         )
 
     @staticmethod
-    def _derived_state(
-        product: str, core: ProductReadinessState,
-    ) -> ProductReadinessState:
-        """派生投影（dsa_projection/state_events）：随 stock_core 就绪（enhancement）。
+    async def _count_dsa_projections(db: Any, trade_date: date) -> int:
+        """统计当日真实存在的特征快照数（DSA 投影产物核验）。
 
-        [G 修正] 注入 derived_from_stock_core 真实父子关系 lineage。
+        DSA 投影随 stock_core 特征快照落库，因此以 `stock_feature_snapshots`
+        当日行数作为真实产物证据，而不是假定"父节点 ready 即 ready"。
         """
-        if core.is_consumable:
-            return ProductReadinessState(
-                product, READINESS_READY, "fresh",
-                is_mandatory=False, is_terminal=True,
-                lineage={
-                    "source_type": "derived_from_stock_core",
-                    "derived_from": "stock_core",
-                    "source_core_run_id": core.lineage.get("pointer_data_run_id"),
-                    "reason_code": "UPGRADED_FROM_PARENT",
-                },
+        try:
+            from app.models.stock_feature_snapshot import StockFeatureSnapshot
+
+            return int(
+                await db.scalar(
+                    select(func.count())
+                    .select_from(StockFeatureSnapshot)
+                    .where(StockFeatureSnapshot.trade_date == trade_date)
+                ) or 0
             )
-        return ProductReadinessState(
-            product, READINESS_PENDING, "fresh",
-            is_mandatory=False, is_terminal=False,
-            lineage={
-                "source_type": "derived_from_stock_core",
-                "derived_from": "stock_core",
-                "reason_code": "PARENT_NOT_CONSUMABLE",
-            },
-        )
+        except Exception:
+            return 0
+
+    @staticmethod
+    async def _count_state_events(db: Any, trade_date: date) -> dict[str, int]:
+        """按 event_type 统计当日真实状态事件数（candidate/confirmed 产物核验）。"""
+        try:
+            from app.models.stock_state_event import StockStateEvent
+
+            rows = await db.execute(
+                select(StockStateEvent.event_type, func.count())
+                .where(StockStateEvent.current_as_of == trade_date)
+                .group_by(StockStateEvent.event_type)
+            )
+            return {str(event_type): int(count) for event_type, count in rows.all()}
+        except Exception:
+            return {}
 
     async def _chip_state(
         self, db: Any, trade_date: date,
@@ -705,31 +1001,42 @@ class ProductReadinessService:
                 "chip", READINESS_PENDING, "fresh", is_mandatory=False,
                 lineage={"source_type": "run_status", "reason_code": "NO_CHIP_RUN"},
             )
+        base = {
+            "source_type": "domain_run",
+            "domain_run_id": _sid(getattr(run, "id", None)),
+            "run_id": _sid(getattr(run, "id", None)),
+            "source_core_run_id": _sid(getattr(run, "source_core_run_id", None)),
+            "algorithm_version": getattr(run, "algorithm_version", None),
+            "coverage": _num(getattr(run, "coverage_ratio", None)),
+            "status": run.status,
+            "calculated_at": _iso(
+                getattr(run, "finished_at", None) or getattr(run, "created_at", None),
+            ),
+        }
+
+        # [Corrective-3 §二.4] chip run 已成功但 publication 缺失 —— 必须可治理。
+        # 修复前：此分支返回 ready，运维完全看不到 chip pointer 未发布。
         if run.status == "succeeded":
             return ProductReadinessState(
-                "chip", READINESS_READY, "fresh",
+                "chip", READINESS_DEGRADED, "stale",
                 is_mandatory=False, is_terminal=True,
-                lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", "")),
-                          "algorithm_version": getattr(run, "algorithm_version", None),
-                          "reason_code": "CHIP_SUCCEEDED"},
+                lineage={**base, "reason_code": "CHIP_PUBLICATION_MISSING"},
             )
         if run.status == "partial":
             return ProductReadinessState(
                 "chip", READINESS_DEGRADED, "stale",
                 is_mandatory=False, is_terminal=True,
-                lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", "")),
-                          "reason_code": "CHIP_PARTIAL"},
+                lineage={**base, "reason_code": "CHIP_PARTIAL"},
             )
         if run.status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
                 "chip", READINESS_UNAVAILABLE, "fresh",
                 is_mandatory=False, is_terminal=True,
-                lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", "")),
-                          "reason_code": f"CHIP_{run.status.upper()}"},
+                lineage={**base, "reason_code": f"CHIP_{run.status.upper()}"},
             )
         return ProductReadinessState(
             "chip", READINESS_PENDING, "fresh", is_mandatory=False,
-            lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", ""))},
+            lineage={**base, "reason_code": "CHIP_RUNNING"},
         )
 
     async def _auction_state(
@@ -756,21 +1063,47 @@ class ProductReadinessService:
                 is_mandatory=False,
                 lineage={"source_type": "run_status", "reason_code": "NO_AUCTION_RUN"},
             )
-        if run.status in ("succeeded", "structure_only"):
+        base = {
+            "source_type": "domain_run",
+            "domain_run_id": _sid(getattr(run, "id", None)),
+            "run_id": _sid(getattr(run, "id", None)),
+            "source_core_run_id": _sid(getattr(run, "source_core_run_id", None)),
+            "algorithm_version": getattr(run, "algorithm_version", None),
+            "status": run.status,
+            "calculated_at": _iso(
+                getattr(run, "finished_at", None) or getattr(run, "created_at", None),
+            ),
+        }
+
+        # [Corrective-3 §三] structure_only 必须体现"等待 chip 升级"，
+        # 不得与 succeeded 一样呈现为 fresh/ready。
+        if run.status == "structure_only":
+            return ProductReadinessState(
+                "auction_anchor", READINESS_DEGRADED, "stale",
+                is_mandatory=False, is_terminal=True,
+                lineage={**base, "reason_code": "AUCTION_STRUCTURE_ONLY"},
+            )
+        if run.status == "succeeded":
             return ProductReadinessState(
                 "auction_anchor", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
-                lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", "")),
-                          "reason_code": f"AUCTION_{run.status.upper()}"},
+                lineage={**base, "reason_code": "AUCTION_SUCCEEDED"},
             )
+        # [Corrective-3 §三] terminal failure 必须包含 run_id 与 reason
         if run.status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
                 "auction_anchor", READINESS_UNAVAILABLE, "fresh",
                 is_mandatory=False, is_terminal=True,
+                lineage={
+                    **base,
+                    "reason_code": f"AUCTION_{run.status.upper()}",
+                    "error_message": getattr(run, "error_message", None),
+                },
             )
         return ProductReadinessState(
             "auction_anchor", READINESS_PENDING, "fresh",
             is_mandatory=False, is_terminal=False,
+            lineage={**base, "reason_code": "AUCTION_RUNNING"},
         )
 
 

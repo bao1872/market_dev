@@ -76,32 +76,59 @@ const LINEAGE_KEY_LABELS: Record<string, string> = {
   source_type: '来源类型',
   publication_id: '发布 ID',
   pointer_data_run_id: '指针数据 run',
+  domain_run_id: '领域 run',
   run_id: 'run ID',
   review_run_id: '复盘 run',
+  parent_product: '父产品',
+  parent_run_id: '父 run',
   source_core_run_id: '核心 run',
+  source_board_run_id: '板块 run',
   derived_from: '派生自',
   algorithm_version: '算法版本',
+  parameter_hash: '参数哈希',
   coverage: '覆盖率',
+  status: '状态',
   reason_code: '原因码',
+  published_at: '发布时间',
+  calculated_at: '计算时间',
   readiness: '就绪',
   freshness: '新鲜度',
+  retryable: '可重试',
+  recommended_action: '推荐动作',
+  operation: '操作',
+  target_run_id: '目标 run',
+  error_message: '错误信息',
+  event_type_counts: '事件类型统计',
 }
 
-// 根据 reason_code / readiness 推导推荐恢复动作（admin 诊断提示，不触发写）
-function recommendedAction(lineage: Record<string, unknown> | undefined, readiness: string, freshness: string): string {
-  if (!lineage) return '—'
-  const rc = lineage.reason_code as string | undefined
-  if (rc === 'REUSED_PREVIOUS_RUN') return '重新触发板块事实计算以刷新指针'
-  if (rc === 'CHIP_PARTIAL') return '补齐筹码口径后重算 chip 共识'
-  if (rc === 'REVIEW_PUBLISHED') return '已发布，无需动作'
-  if (rc === 'UPGRADED_FROM_PARENT') return '已由核心升级派生，无需动作'
-  if (rc === 'PARENT_NOT_CONSUMABLE') return '等待核心就绪后派生'
-  if (rc === 'NO_PUBLICATION' || rc === 'NO_REVIEW_RUN' || rc === 'NO_CHIP_RUN' || rc === 'NO_AUCTION_RUN' || rc === 'NO_RUN')
-    return '运行对应任务或检查是否缺失'
-  if (readiness === 'unavailable') return '检查 run 终态与失败原因'
-  if (readiness === 'degraded') return '补齐依赖后重试'
-  if (freshness === 'stale') return '检查是否落后核心，必要时刷新'
-  return '无需动作'
+// [Corrective-3 §四] 治理动作由后端输出，前端只做展示层文案映射，
+// 不得再根据 reason code 自行推断业务动作。
+const ACTION_LABELS: Record<string, string> = {
+  none: '无需动作',
+  retry_chip_publication: '重试筹码共识发布',
+  inspect_chip_lineage_conflict: '排查筹码血缘冲突（不可自动重试）',
+  retry_failed_chip_instruments: '补算失败标的后重算筹码共识',
+  rerun_chip_consensus: '重跑筹码共识',
+  trigger_chip_consensus: '触发筹码共识任务',
+  await_chip_upgrade: '等待筹码就绪后升级集合竞价锚点',
+  rerun_auction_anchor: '重跑集合竞价锚点',
+  trigger_auction_anchor: '触发集合竞价锚点任务',
+  rerun_board_facts: '重跑板块事实',
+  trigger_upstream_job: '触发上游任务',
+  trigger_market_review: '触发复盘任务',
+  publish_market_review: '发布复盘指针',
+  rerun_market_review: '重跑复盘任务',
+  await_parent_product: '等待父产品就绪',
+  await_publication: '等待发布指针写入',
+  rebuild_dsa_projection: '重建 DSA 投影',
+  rebuild_state_events: '重建状态事件',
+}
+
+// 只做文案映射，动作本身来自后端 DTO
+function actionText(action: string, retryable: boolean): string {
+  const label = ACTION_LABELS[action] ?? action
+  if (action === 'none') return label
+  return retryable ? `${label}（可重试）` : `${label}（需人工介入）`
 }
 
 export default function AdminReadinessWorkbench() {
@@ -192,15 +219,23 @@ export default function AdminReadinessWorkbench() {
                     新鲜度：{p.freshness} · 终态：{p.isTerminal ? '是' : '否'} · 可消费：
                     {p.isConsumable ? '是' : '否'} · 来源：{SOURCE_LABELS[p.dataSource] ?? p.dataSource}
                   </span>
-                  {/* [H 修正] 展示真实 lineage 血缘字段 */}
+                  {/* [Corrective-3 §三] 展示真实 lineage 血缘字段（跳过空值） */}
                   {p.lineage && Object.keys(p.lineage).length > 0 && (
                     <span className="muted" style={{ display: 'block', fontSize: '0.78em', marginTop: '0.3em' }}>
                       {Object.entries(p.lineage)
-                        .filter(([k]) => k !== 'source_type' && k !== 'readiness' && k !== 'freshness')
+                        .filter(
+                          ([k, v]) =>
+                            v !== null &&
+                            v !== undefined &&
+                            k !== 'source_type' &&
+                            k !== 'readiness' &&
+                            k !== 'freshness',
+                        )
                         .map(([k, v]) => `${LINEAGE_KEY_LABELS[k] ?? k}=${String(v)}`)
                         .join(' · ')}
                     </span>
                   )}
+                  {/* [Corrective-3 §四] 动作与原因码均由后端输出，前端只展示 */}
                   <span
                     className="muted"
                     style={{
@@ -210,7 +245,8 @@ export default function AdminReadinessWorkbench() {
                       color: '#b45309',
                     }}
                   >
-                    动作：{recommendedAction(p.lineage, p.readiness, p.freshness)}
+                    原因码：{p.reasonCode} · 动作：{actionText(p.recommendedAction, p.retryable)}
+                    {p.targetRunId ? ` · 目标 run：${p.targetRunId}` : ''}
                   </span>
                 </b>
               </div>
@@ -229,7 +265,14 @@ export default function AdminReadinessWorkbench() {
                     <b>{PRODUCT_LABELS[k] ?? k}</b>
                     {': '}
                     {Object.entries(v as Record<string, unknown>)
-                      .filter(([fk]) => fk !== 'source_type' && fk !== 'readiness' && fk !== 'freshness')
+                      .filter(
+                        ([fk, fv]) =>
+                          fv !== null &&
+                          fv !== undefined &&
+                          fk !== 'source_type' &&
+                          fk !== 'readiness' &&
+                          fk !== 'freshness',
+                      )
                       .map(([fk, fv]) => `${LINEAGE_KEY_LABELS[fk] ?? fk}=${String(fv)}`)
                       .join(' · ')}
                   </div>

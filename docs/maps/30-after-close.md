@@ -735,25 +735,68 @@ _PIPELINE_STEPS（7步展示序列）：
 | board_facts | mandatory | `board_facts` publication pointer（pointer 指向 `reused_previous` → ready_reused） |
 | stock_core | mandatory | `stock_core` publication pointer |
 | board_aggregation | mandatory | `market_aggregation` publication pointer |
-| review | mandatory | `MarketReviewRun.status == published` |
-| dsa_projection | enhancement（派生投影） | 随 stock_core 就绪（compute-once，不重算） |
-| chip | enhancement | `chip_consensus` publication pointer / ChipConsensusRun |
-| state_events | enhancement（派生投影） | 随 stock_core 就绪 |
-| auction_anchor | enhancement | `auction_anchor` publication pointer / AuctionAnchorRun |
+| review | mandatory | 正式发布指针（`MarketReviewRun.published_at` 非空）；run 自称 published 但 `published_at` 为空 → `degraded + REVIEW_NOT_PUBLISHED` |
+| dsa_projection | enhancement（派生投影） | 真实产物核验：当日 `stock_feature_snapshots` 行数 > 0；无产物 → `NO_PROJECTION` |
+| chip | enhancement | `chip_consensus` publication pointer；run succeeded 但无 pointer → `degraded + CHIP_PUBLICATION_MISSING` |
+| state_events | enhancement（派生投影） | 真实产物核验：当日 `StockStateEvent` 按 `event_type` 计数 > 0；无事件 → `NO_STATE_EVENTS` |
+| auction_anchor | enhancement | `auction_anchor` publication pointer；`structure_only` → `degraded + stale + AUCTION_STRUCTURE_ONLY`（等待 chip 升级） |
+
+> [Corrective-3 §三] 修改前 `dsa_projection` / `state_events` 随 stock_core 自动 ready、
+> `review` 仅看 run.status、`chip` succeeded 即 ready、`auction structure_only` 与
+> succeeded 同样呈现 fresh/ready；这四处均会掩盖真实缺口，已按真实产物/指针核验修正。
 
 闭包状态语义（`evaluate_closure`）：`pending` / `blocked` / `core_ready` /
 `degraded_ready` / `fully_ready`。关键判定顺序：blocked（mandatory 任一 unavailable）→
 pending（stock_core 未形成）→ core_ready（stock_core 就绪但其余 mandatory 未完成）→
 mandatory 全部就绪后分 fully_ready / degraded_ready。
 
-### 13.3 chip 发布与血统（Commit D）
+### 13.3 chip 发布与血统（Commit D，[Corrective-3] 重写）
+
+**关键历史事实**：在 Corrective-3 之前，**没有任何生产路径向 `chip_consensus_runs`
+写入过数据**（`after_close_chip_consensus_service` 只写
+`StockChipConsensusSnapshot`）。同时 worker 用错误签名 + `chip_run_id=None`
+调用发布函数并把返回的 ORM 当 dict 读，因此 chip pointer 从未真正发布过，
+且被 `except Exception: warning` 静默吞掉。
+
+#### 13.3.1 ChipConsensusRun 生命周期
+
+入口：`backend/app/services/chip_consensus_run_lifecycle.py`
+
+- `resolve_or_create_chip_run(...)`：worker 领取 chip job 后创建或解析**唯一**领域 run。
+  解析优先级：job metadata `chip_run_id` → 同
+  `(trade_date, source_core_run_id, algorithm_version)` 未终结 run → 新建。
+  retry/resume 复用同一 run，已完成进度不清零。
+- `chip_run_id` 通过 `fenced_job_run_service.merge_job_run_metadata` 固定进
+  `SchedulerJobRun.metadata_json`。
+- `finalize_chip_run(...)`：计算结束写终态，`coverage_ratio` 由真实计数推导。
+
+#### 13.3.2 编排顺序（强制）
+
+```text
+chip snapshots 完成
+  → ChipConsensusRun 终态（finalize_chip_run）
+  → publish_chip_consensus（真实 chip_run_id + algorithm_version）
+  → commit publication pointer
+  → generate_and_publish_auction_anchors
+```
+
+由 `publish_chip_and_upgrade_auction` 编排（依赖可注入，便于不连库测试）。
+**auction 升级只在 chip pointer 成功发布之后执行**；发布失败禁止触发 composite upgrade。
+
+#### 13.3.3 发布校验链与治理
 
 - `publish_chip_consensus` 校验链：chip_run 存在 → trade_date 匹配 → status 为
-  `succeeded`/`partial` → 当日已发布 `stock_core` pointer 存在 → 
+  `succeeded`/`partial` → 当日已发布 `stock_core` pointer 存在 →
   `chip_run.source_core_run_id == 已发布 stock_core pointer.data_run_id`。
 - coverage 由 DB 统计（`chip_run.coverage_ratio`），不接受调用方任意传值。
 - 重复发布走 `on_conflict_do_update` 幂等；失败只重试指针，不重算 DSA/SMC/momentum。
-- 测试：`test_chip_publication_unit.py`（8 项，PURE_UNIT_TEST，mock session）。
+- **软失败可治理**：写入 SchedulerJobRun metadata
+  `chip_publication_status` / `chip_publication_error_code` /
+  `chip_publication_error_message` / `chip_publication_retryable` / `chip_publication_id`。
+  ProductReadiness 据此显示 `CHIP_PUBLICATION_MISSING` + `retry_chip_publication`。
+- **lease fencing**：发布前与 auction 前各校验一次租约；失去租约则跳过全部写入。
+- 测试：`test_chip_publication_unit.py`（发布函数）、
+  `test_chip_worker_orchestration.py`（编排顺序 / 治理 metadata / retry 复用 / lease）。
 
 ### 13.4 Review 依赖与血统（Commit F）
 
