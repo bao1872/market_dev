@@ -24,6 +24,7 @@ test_v21_synthetic_e2e_pg.py，status=authored_not_executed reason=pg_gate_defer
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -348,8 +349,9 @@ class TestRetryAndIdempotency:
                 raise _TransientFailureError("transient timeout")
             return real(**kwargs)
 
-        import app.services.auction_mode_service as ams
-        monkeypatch.setattr(ams, "decide_auction_mode", _flaky)
+        # repo.next_batch 调用的是本模块命名空间里的 decide_auction_mode，
+        # 因此 patch 本模块的引用（而非 auction_mode_service），才能让仓库命中 flaky。
+        monkeypatch.setattr(sys.modules[__name__], "decide_auction_mode", _flaky)
 
         # 第一次调度抛瞬时异常
         with pytest.raises(_TransientFailureError):
