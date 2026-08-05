@@ -7,10 +7,16 @@ SELECT-then-INSERT，在单 worker 下可用，但并发下无法保证幂等，
 本迁移补齐数据库级唯一约束，使重复创建在存储层被真正阻止，并让服务层可以
 使用 ON CONFLICT DO NOTHING 做原子 upsert。
 
-历史数据可能已存在重复行，因此 upgrade 先做去重：保留每组中 created_at 最早
-的一行（其 id 通常已被 publication / run_items 引用），把其余重复行标记为
-cancelled 并置 error_code，而**不删除**，避免破坏既有外键引用与审计链。
-若去重后仍存在冲突则创建约束失败，需人工介入，不做静默跳过。
+**处理历史重复的正确方式（经确认，非静默伪造去重）**：
+- 历史重复行的 status 改成 cancelled **不会改变**唯一键的三列，重复组依然存在，
+  把行置 cancelled 并不能让唯一约束创建成功。
+- 因此本迁移**不修改任何历史业务记录**，只在 upgrade 开头做重复 preflight：
+  - 若存在重复组，明确 RAISE 并输出重复组详情，事务整体回滚，约束不创建；
+  - 无重复时才创建硬唯一约束。
+
+若真实库已存在重复，需单独的数据对账方案（选 canonical run、核查
+publication pointer / run items / SchedulerJobRun metadata、明确引用关系、
+经人工确认后再合并或归档），不在迁移内自动处理。
 
 Revision ID: 086_chip_consensus_run_uniqueness
 Revises: 085_board_definition_identity_contract
@@ -30,66 +36,68 @@ depends_on: str | Sequence[str] | None = None
 
 _CONSTRAINT = "uq_chip_consensus_runs_date_core_algo"
 
+# 与 ORM 模型 ChipConsensusRun.__table_args__ 中的 UniqueConstraint 列顺序一致
+_UNIQUE_COLUMNS = ["trade_date", "source_core_run_id", "algorithm_version"]
+
+
+def _duplicate_groups_exist() -> bool:
+    """返回是否存在 (trade_date, source_core_run_id, algorithm_version) 重复组。
+
+    仅做只读 SELECT，不修改任何历史行。
+    """
+    result = op.get_bind().execute(
+        sa.text(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT 1
+                FROM chip_consensus_runs
+                GROUP BY trade_date, source_core_run_id, algorithm_version
+                HAVING COUNT(*) > 1
+            ) AS d
+            """
+        )
+    )
+    count = result.scalar() or 0
+    return count > 0
+
+
+def _raise_duplicate_error() -> None:
+    """输出重复组详情并显式报错，使 upgrade 事务整体回滚、约束不创建。"""
+    dup_rows = op.get_bind().execute(
+        sa.text(
+            """
+            SELECT trade_date, source_core_run_id, algorithm_version, COUNT(*) AS n
+            FROM chip_consensus_runs
+            GROUP BY trade_date, source_core_run_id, algorithm_version
+            HAVING COUNT(*) > 1
+            ORDER BY n DESC, trade_date
+            LIMIT 50
+            """
+        )
+    ).fetchall()
+    detail_lines = [
+        f"  ({row[0]}, {row[1]}, {row[2]}) x{row[3]}" for row in dup_rows
+    ]
+    detail = "\n".join(detail_lines)
+    raise Exception(
+        "migration 086: 检测到 "
+        f"{len(dup_rows)} 组重复的 chip_consensus_runs，唯一约束无法创建。\n"
+        "请先做数据对账（选 canonical run、核查 publication pointer / run items / "
+        "SchedulerJobRun metadata），经人工确认后再重试 migration。\n"
+        "重复组（前 50）:\n"
+        f"{detail}"
+    )
+
 
 def upgrade() -> None:
-    # 1) 历史重复行降级为 cancelled（保留行本身，不破坏外键与审计链）
-    op.execute(
-        sa.text(
-            """
-            WITH ranked AS (
-                SELECT
-                    id,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY trade_date, source_core_run_id, algorithm_version
-                        ORDER BY created_at ASC, id ASC
-                    ) AS rn
-                FROM chip_consensus_runs
-            )
-            UPDATE chip_consensus_runs AS c
-            SET status = 'cancelled',
-                error_code = COALESCE(c.error_code, 'DUPLICATE_DOMAIN_RUN'),
-                error_message = COALESCE(
-                    c.error_message,
-                    'migration 086: 同 (trade_date, source_core_run_id, '
-                    'algorithm_version) 的重复领域 run，已保留最早一条'
-                ),
-                updated_at = now()
-            FROM ranked AS r
-            WHERE c.id = r.id AND r.rn > 1
-            """
-        )
-    )
+    # 1) 重复 preflight：只读检查，发现重复立即报错并回滚，不修改历史业务数据
+    if _duplicate_groups_exist():
+        _raise_duplicate_error()
 
-    # 2) 去重后仍冲突则直接报错（不静默跳过），交由人工处理
-    op.execute(
-        sa.text(
-            """
-            DO $$
-            DECLARE dup_count integer;
-            BEGIN
-                SELECT COUNT(*) INTO dup_count FROM (
-                    SELECT 1
-                    FROM chip_consensus_runs
-                    GROUP BY trade_date, source_core_run_id, algorithm_version
-                    HAVING COUNT(*) > 1
-                ) AS d;
-                IF dup_count > 0 THEN
-                    RAISE EXCEPTION
-                        'migration 086: 仍存在 % 组重复 chip_consensus_runs，'
-                        '请人工核对后重试', dup_count;
-                END IF;
-            END $$;
-            """
-        )
-    )
-
-    op.create_unique_constraint(
-        _CONSTRAINT,
-        "chip_consensus_runs",
-        ["trade_date", "source_core_run_id", "algorithm_version"],
-    )
+    # 2) 无重复时创建硬唯一约束
+    op.create_unique_constraint(_CONSTRAINT, "chip_consensus_runs", _UNIQUE_COLUMNS)
 
 
 def downgrade() -> None:
-    # 只回退约束；被标记 cancelled 的历史行不还原（无法可靠区分原始状态）
+    # 只删除约束，不修改任何业务数据
     op.drop_constraint(_CONSTRAINT, "chip_consensus_runs", type_="unique")

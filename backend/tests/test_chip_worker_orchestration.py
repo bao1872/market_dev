@@ -594,8 +594,9 @@ def test_production_worker_passes_ownership_check() -> None:
     但生产 worker 调用时没传 ownership_check，导致 fencing 在生产完全失效。
     """
     src = _read_chip_block()
-    idx = src.find("publish_chip_and_upgrade_auction(")
-    call_site = src.find("publish_chip_and_upgrade_auction(", idx + 1)
+    # 生产调用带 `await ` 前缀；import 行不带 `(`。唯一生产调用即此处。
+    call_marker = "await publish_chip_and_upgrade_auction("
+    call_site = src.find(call_marker)
     assert call_site > 0, "未找到 publish_chip_and_upgrade_auction 生产调用"
 
     block = src[call_site : call_site + 1400]
