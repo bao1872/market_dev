@@ -30,7 +30,6 @@ from app.api.admin_errors import (
     admin_conflict,
     admin_error,
     admin_not_found,
-    admin_not_implemented,
 )
 from app.core.deps import get_db, require_roles
 from app.core.route_utils import get_route_paths, iter_api_routes
@@ -205,11 +204,11 @@ _RESTART_FROM_VALID_VALUES = {
     "state_events",
     "chip",
     "auction",
-    "board",
+    "board_facts",
     "review",
 }
-# 已实现隔离重算的边界
-_RESTART_FROM_IMPLEMENTED = {"daily_ready"}
+# [PRD 31 §6 / V2.1] 所有 10 个 boundary 均已实现（granular_restart_service.dispatch_restart），
+# 不再有 not_implemented 分支。
 _RESTART_FROM_COVERAGE_THRESHOLD = 0.9
 
 
@@ -691,17 +690,12 @@ async def force_advance_after_close_endpoint(
             ),
         )
 
-    # [PRD Alignment Pass P1-4] 已实现隔离重算的边界才继续；
-    # 其余 PRD 边界后端隔离重算函数尚未实现，显式返回 not_implemented，禁止伪造成功。
-    if restart_from is not None and restart_from not in _RESTART_FROM_IMPLEMENTED:
-        pending = sorted(_RESTART_FROM_VALID_VALUES - _RESTART_FROM_IMPLEMENTED)
-        raise admin_not_implemented(
-            "after_close_restart_boundary_not_implemented",
-            (
-                f"restart_from={restart_from} 已纳入 PRD §13.7 合同，但后端隔离重算函数未实现。"
-                f" 已实现: {_RESTART_FROM_IMPLEMENTED}；待实现: {pending}"
-            ),
-            pending_backend=pending,
+    # [V2.1 PRD 31 §6] 所有 10 个 boundary 均已实现（granular_restart_service.dispatch_restart），
+    # 仅校验值是否在正式枚举内，不再返回 not_implemented。
+    if restart_from is not None and restart_from not in _RESTART_FROM_VALID_VALUES:
+        raise admin_error(
+            "invalid_restart_from",
+            f"restart_from={restart_from} 不在正式枚举 {sorted(_RESTART_FROM_VALID_VALUES)} 内",
         )
 
     job_run = await db.get(SchedulerJobRun, run_id)
@@ -765,60 +759,40 @@ async def force_advance_after_close_endpoint(
             "daily_total": coverage_result["total"],
         }
 
-    # [Phase5] - 重置为 queued（不是 running），由独立 Worker 领取执行
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    job_run.status = "queued"
-    job_run.error_message = None
-    job_run.error_code = None
-    job_run.finished_at = None
-    job_run.started_at = now
-    job_run.heartbeat_at = now
-    job_run.lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
+    # [V2.1] 所有 boundary（含子产品六类）经 granular_restart_service 真实调度，不再返回 501。
+    # 主链 boundary 内部设置 last_completed_step 续跑；子产品 boundary 创建 child SchedulerJobRun
+    # 并调用对应 publish/重建函数（失败记事件，不伪造成功）。
+    from app.services.granular_restart_service import dispatch_restart
 
-    # restart_from="daily_ready"：设置 last_completed_step + 清除旧 dsa_run_id
-    extra: dict[str, Any] = {}
-    if restart_from == "daily_ready":
-        extra["last_completed_step"] = "refreshing_daily"
-        extra["restart_from"] = "daily_ready"
-        # 清除旧 mode（如果历史是 dsa_only）
-        extra["mode"] = None
-
-    message = f"管理员强制重新执行: job_run_id={run_id}"
-    if restart_from == "daily_ready":
-        assert coverage_info is not None  # 由上方覆盖率校验保证
-        message = (
-            f"管理员从 DSA 阶段重算: job_run_id={run_id}, "
-            f"coverage={coverage_info['daily_coverage']:.1%}"
-        )
-
-    await _update_orchestrator_status(
+    handled = await dispatch_restart(
         db=db,
         job_run=job_run,
-        status=AfterCloseRunStatus.QUEUED,
-        message=message,
-        extra=extra if extra else None,
-        payload={"restart_from": restart_from} if restart_from else None,
+        restart_from=restart_from,
+        actor=current_user.username if hasattr(current_user, "username") else str(current_user),
+        request_id=str(uuid.uuid4()),
     )
 
-    # restart_from="daily_ready"：清除旧 dsa_run_id（_update_orchestrator_status 不支持清除，
-    # 需在调用后直接修改 metadata）
+    # restart_from="daily_ready"：清除旧 dsa_run_id（dispatch 内部已设 restart_from，此处清理残留）
     if restart_from == "daily_ready":
-        meta_after = _parse_metadata(job_run)
+        meta_after = _parse_metadata(handled)
         meta_after.pop("dsa_run_id", None)
-        job_run.metadata_json = json.dumps(meta_after, ensure_ascii=False)
-
-    await db.commit()
+        handled.metadata_json = json.dumps(meta_after, ensure_ascii=False)
+        await db.commit()
 
     # [Phase5] - 不再 _kick_off_async_execution，由独立 Worker 领取 queued 任务
-
+    final_status = handled.status
     return AfterCloseRunCreateResponse(
-        job_run_id=str(job_run.id),
-        status=job_run.status,
-        orchestrator_status=AfterCloseRunStatus.QUEUED.value,
+        job_run_id=str(handled.id),
+        status=final_status,
+        orchestrator_status=(
+            _parse_metadata(handled).get("orchestrator_status", final_status)
+            if handled.job_name == "after_close_orchestrator"
+            else final_status
+        ),
         trade_date=trade_date_str,
         message=(
-            f"盘后编排已从{'DSA阶段' if restart_from == 'daily_ready' else '头'}"
-            f"强制重新执行: job_run_id={job_run.id}"
+            f"granular restart 已调度: boundary={restart_from}, "
+            f"job_run_id={handled.id}, status={final_status}"
         ),
     )
 

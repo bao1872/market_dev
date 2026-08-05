@@ -58,6 +58,11 @@ from app.models.factor_publication import (
     SCOPE_TYPE_MARKET,
 )
 
+# [V2.1 P1-3] readiness 完整性门槛：matched/eligible 覆盖率须达门槛才 ready，
+# 仅 matched>0 不得判 ready（避免存在性检查）。默认 1.0（全量），可配置化。
+_DSA_PROJECTION_COVERAGE_THRESHOLD = 1.0
+_STATE_EVENTS_COVERAGE_THRESHOLD = 1.0
+
 # 产品分类（P0-1：九节点完整纳入）
 MANDATORY_PRODUCTS = frozenset({
     "daily_facts",
@@ -1069,12 +1074,31 @@ class ProductReadinessService:
         matched, total = counts["matched"], counts["total"]
         detail = {"projection_matched": matched, "projection_total": total}
 
-        if matched > 0:
+        # [V2.1 P1-3] 完整性门槛：coverage = matched / total，须达阈值才 ready；
+        # 仅 matched>0 不得判 ready（存在性检查已被禁止）。
+        coverage_ratio = (matched / total) if total > 0 else 0.0
+        detail = {
+            **detail,
+            "eligible_count": total,
+            "matched_count": matched,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "coverage_threshold": _DSA_PROJECTION_COVERAGE_THRESHOLD,
+        }
+        if matched > 0 and coverage_ratio >= _DSA_PROJECTION_COVERAGE_THRESHOLD:
             return ProductReadinessState(
                 "dsa_projection", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
-                lineage={**parent, **detail, "reason_code": "PROJECTION_PRESENT",
+                lineage={**parent, **detail, "reason_code": "PROJECTION_FULL_COVERAGE",
                          "coverage": matched, "status": "present"},
+            )
+        if matched > 0:
+            # 存在归属当前 core run 的投影，但覆盖率未达门槛（有残留或 lineage 不匹配）
+            return ProductReadinessState(
+                "dsa_projection", READINESS_DEGRADED, "stale",
+                is_mandatory=False, is_terminal=True,
+                lineage={**parent, **detail,
+                         "reason_code": "PROJECTION_PARTIAL_COVERAGE",
+                         "coverage": matched, "status": "partial"},
             )
         if total > 0:
             # 当日存在快照但没有一条归属当前 core run → 是上一轮残留，不得判 ready。
@@ -1122,12 +1146,33 @@ class ProductReadinessService:
             "algorithm_versions": counts["algorithm_versions"],
         }
 
-        if matched > 0:
+        # [V2.1 P1-3] 完整性门槛：coverage = matched / total，须达阈值才 ready；
+        # 仅 matched>0 不得判 ready（存在性检查已被禁止）。完整生命周期由 by_type 非空佐证。
+        coverage_ratio = (matched / total) if total > 0 else 0.0
+        lifecycle_complete = bool(counts["by_type"]) and coverage_ratio >= _STATE_EVENTS_COVERAGE_THRESHOLD
+        detail = {
+            **detail,
+            "eligible_count": total,
+            "matched_count": matched,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "coverage_threshold": _STATE_EVENTS_COVERAGE_THRESHOLD,
+            "lifecycle_complete": lifecycle_complete,
+        }
+        if matched > 0 and coverage_ratio >= _STATE_EVENTS_COVERAGE_THRESHOLD:
             return ProductReadinessState(
                 "state_events", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
-                lineage={**parent, **detail, "reason_code": "STATE_EVENTS_PRESENT",
+                lineage={**parent, **detail, "reason_code": "STATE_EVENTS_FULL_COVERAGE",
                          "coverage": matched, "status": "present"},
+            )
+        if matched > 0:
+            # 存在归属当前 core run 的事件，但覆盖率未达门槛或生命周期不完整
+            return ProductReadinessState(
+                "state_events", READINESS_DEGRADED, "stale",
+                is_mandatory=False, is_terminal=True,
+                lineage={**parent, **detail,
+                         "reason_code": "STATE_EVENTS_PARTIAL_COVERAGE",
+                         "coverage": matched, "status": "partial"},
             )
         if total > 0:
             # 当日有事件但均不属于当前 core run → stale，禁止判 ready。
