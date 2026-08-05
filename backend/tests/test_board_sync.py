@@ -38,6 +38,10 @@ from app.services.board_sync_service import (
 )
 from app.services.wencai_board_provider import BoardSnapshot
 
+# [Commit A 修正 2026-08-05] 本文件含 DB 集成测试（经 db_session savepoint 连共享 bz_stock），
+# 运行 shared_dev_db 目标测试须带该 marker；纯单元测试在 PURE_UNIT_TEST 下不受影响。
+pytestmark = pytest.mark.shared_dev_db
+
 
 # [Commit A 修正 2026-08-05] 测试快照须满足 provider 合同：board 显式携带
 # taxonomy/source/taxonomy_version/taxonomy_compatibility_key（board_sync_service

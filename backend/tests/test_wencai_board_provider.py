@@ -23,6 +23,7 @@ from app.services.wencai_board_provider import (
     WencaiParseError,
     _build_board_snapshot,
     _detect_hash_collision,
+    _df_content_hash,
     _make_external_code,
     _match_column,
     _normalize_concepts,
@@ -449,6 +450,23 @@ class TestSelectPrimaryDataframe:
         df = _make_test_dataframe(rows=10)
         result = _select_primary_dataframe({"t1": df, "t2": df}, pd)
         assert len(result) == 10
+
+    def test_content_hash_row_order_invariant(self) -> None:
+        """同行不同顺序 hash 相同（_df_content_hash 对规范化行排序）。
+
+        [Commit A 修正 2026-08-05] 同一批数据即使行序不同，内容 hash 必须一致，
+        否则多表哈希冲突检测会误判"内容不同"。
+        """
+        df = _make_test_dataframe(rows=20, concepts_per_stock=3)
+        reordered = df.iloc[::-1].reset_index(drop=True)  # 反转行序
+        assert not reordered.equals(df)  # 行序确实不同，测试才有意义
+        assert _df_content_hash(df) == _df_content_hash(reordered)
+
+    def test_content_hash_different_content_differs(self) -> None:
+        """内容确实不同时 hash 必须不同（防止行序无关退化为恒等）。"""
+        df_a = _make_test_dataframe(rows=10, concepts_per_stock=2)
+        df_b = _make_test_dataframe(rows=10, concepts_per_stock=3)
+        assert _df_content_hash(df_a) != _df_content_hash(df_b)
 
 
 # =============================================================================
