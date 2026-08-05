@@ -144,7 +144,7 @@ async def resolve_or_create_chip_run(
         # 拿到胜方创建的同一行，而不是各自新建。
         new_id = uuid.uuid4()
         stmt = (
-            pg_insert(ChipConsensusRun.__table__)
+            pg_insert(ChipConsensusRun)
             .values(
                 id=new_id,
                 scheduler_job_run_id=scheduler_job_run_id,
@@ -165,7 +165,7 @@ async def resolve_or_create_chip_run(
             .on_conflict_do_nothing(
                 index_elements=["trade_date", "source_core_run_id", "algorithm_version"],
             )
-            .returning(ChipConsensusRun.__table__.c.id)
+            .returning(ChipConsensusRun.id)
         )
         inserted_id = await db.scalar(stmt)
 
