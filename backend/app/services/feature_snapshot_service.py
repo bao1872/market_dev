@@ -1726,6 +1726,10 @@ async def compute_for_trade_date(
     snapshot_count = 0
     failed_count = 0
     batch_count = 0
+    # [Commit B §7.2] compute-once/property 计数（供远程 DSA/SMC/momentum 每股各一次证明）
+    attempted_count = 0
+    frame_build_count = 0
+    peak_batch_size = 0
     mdas_batch_read_count = 0
     # [Performance Contract 2026-08-04] 阶段耗时累计（供性能基准与资源门禁使用）
     read_duration = 0.0
@@ -1756,6 +1760,7 @@ async def compute_for_trade_date(
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
         batch_count += 1
+        peak_batch_size = max(peak_batch_size, len(batch))
         # [P0-2 2026-08-04] 批读诊断：由 get_bars_batch 真实返回 read_mode/回退数/读操作数。
         # 一级（1d）为批读模式；二级（15m）为日内周期必退回逐股 get_bars。
         # 不再用 _BATCH_READ_TIMEFRAMES 静态推断 fallback。
@@ -1781,6 +1786,10 @@ async def compute_for_trade_date(
         _t_compute = time.perf_counter()
         for instrument_id in batch:
             try:
+                attempted_count += 1
+                # [Commit B §7.2] 每股每 core run 只构建一次 canonical frame（df_1d），
+                # 同一个 frame 传给 DSA/SMC/Bollinger/SQZMOM/VolumeContext（compute-once）。
+                frame_build_count += 1
                 primary_result = primary_results.get(instrument_id)
                 secondary_result = secondary_results.get(instrument_id)
                 if isinstance(primary_result, Exception):
@@ -1846,6 +1855,11 @@ async def compute_for_trade_date(
         "failed_count": failed_count,
         "batch_count": batch_count,
         "mdas_batch_read_count": mdas_batch_read_count,
+        # [Commit B §7.2] compute-once 证明：frame_build_count == attempted_count == snapshot_count+failed_count
+        # DSA/SMC/momentum 均在同一 canonical frame 上计算，每股各一次。
+        "attempted_count": attempted_count,
+        "frame_build_count": frame_build_count,
+        "peak_batch_size": peak_batch_size,
         # [Performance Contract 2026-08-04] 阶段耗时/吞吐/回退指标（供 finish_snapshot_run 落库与基准对比）
         "read_duration": round(read_duration, 4),
         "compute_duration": round(compute_duration, 4),

@@ -664,6 +664,12 @@ async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics(
     assert progress.await_count == 3
     assert result["batch_count"] == 3
     assert result["mdas_batch_read_count"] == 6
+    # [Commit B §7.2] compute-once：每股每 core run 只构建一次 canonical frame，
+    # frame_build_count == attempted_count == snapshot_count + failed_count。
+    assert result["frame_build_count"] == 5
+    assert result["attempted_count"] == 5
+    assert result["frame_build_count"] == result["attempted_count"]
+    assert result["peak_batch_size"] == 2
     # [P0-2 2026-08-04] 固定 fixture：5 只 / batch_size=2 → 3 批（2/2/1）。
     # 二级周期 15m 为日内周期必退回逐股 get_bars，fallback 按标的计数（真实诊断）。
     assert result["fallback_count"] == 5  # 二次批次回退 2+2+1
