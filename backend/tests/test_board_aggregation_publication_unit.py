@@ -25,7 +25,6 @@ from app.models.factor_publication import (
 from app.services import (
     board_analysis_service,
     factor_publication_service,
-    market_factor_aggregation_service,
 )
 from app.services.market_factor_aggregation_service import run_market_factor_aggregation
 
