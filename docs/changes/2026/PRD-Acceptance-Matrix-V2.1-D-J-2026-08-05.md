@@ -14,7 +14,7 @@
 | Corrective-3.1（中间修正） | `25b263a` |
 | Corrective-3.1（测试修正） | `5a96e34` |
 | **Corrective-3.1（最终代码）** | `16b056f` |
-| Corrective-3.1（文档回填 SHA） | `a4b0d3c` |
+| Corrective-3.1（文档回填 SHA） | `ae90aa1` |
 
 **生成日期**: 2026-08-05
 **当前判断（Corrective-3.1 远程隔离验证完成后，开发阶段收口）**：
