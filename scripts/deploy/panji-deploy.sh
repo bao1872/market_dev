@@ -641,19 +641,24 @@ build_frontend_dist() {
         return 0
     fi
 
+    # [deploy-fix 2026-08-05] 服务器主机无宿主 npm：/usr/local/bin/node 是
+    # trae-cn 内嵌单文件二进制，不带 npm/corepack。前端 dist 必须在远端生成且
+    # 禁止 docker cp，故在 node:20-alpine 容器内执行 npm ci + vite build，
+    # 产物落到 ${REPO_ROOT}/frontend/dist（与 frontend/Dockerfile 同一基础镜像，
+    # 同为远端服务器上生成，非本地 dist）。
+    local node_image="node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293"
     cd "${REPO_ROOT}/frontend"
     if [[ "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
-        log "前端依赖或构建环境变化，先执行 npm ci"
-        run_with_timeout "npm_ci" "${TIMEOUT_NPM_CI_SECONDS}" -- npm ci || return 1
+        log "前端依赖或构建环境变化，先执行 npm ci（node:20-alpine 容器内）"
+        run_with_timeout "npm_ci" "${TIMEOUT_NPM_CI_SECONDS}" -- \
+            docker run --rm -v "${REPO_ROOT}/frontend:/app" -w /app \
+            -e NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+            "${node_image}" npm ci || return 1
     fi
-    if [[ -x "./node_modules/.bin/vite" ]]; then
-        run_with_timeout "vite_build" "${TIMEOUT_VITE_BUILD_SECONDS}" -- \
-            env NODE_OPTIONS=--max-old-space-size=1024 ./node_modules/.bin/vite build || return 1
-    else
-        log "WARN: ./node_modules/.bin/vite 不存在，回退到 npm run build"
-        run_with_timeout "vite_build" "${TIMEOUT_VITE_BUILD_SECONDS}" -- \
-            env NODE_OPTIONS=--max-old-space-size=1024 npm run build || return 1
-    fi
+    run_with_timeout "vite_build" "${TIMEOUT_VITE_BUILD_SECONDS}" -- \
+        docker run --rm -v "${REPO_ROOT}/frontend:/app" -w /app \
+        -e NODE_OPTIONS=--max-old-space-size=1024 \
+        "${node_image}" npm run build || return 1
     cd "${REPO_ROOT}"
 }
 
@@ -830,8 +835,11 @@ run_migration() {
     log "执行 alembic upgrade head（使用目标 SHA 的 Live Mount 代码）..."
     MIGRATION_ATTEMPTED=true
     cd "${REPO_ROOT}"
+    # [deploy-fix 2026-08-05] `docker compose run` 不支持 --no-build（仅 up/build 支持）。
+    # 本阶段环境镜像已由 build_environment_images 按同一 GIT_SHA tag 组构建，
+    # compose run 直接复用已构建 backend 镜像 + Live Mount 挂载运行迁移代码。
     if ! run_with_timeout "migration" "${TIMEOUT_MIGRATION_SECONDS}" -- \
-        ${COMPOSE_CMD} run --rm --no-deps --no-build backend bash -c "cd /app && alembic upgrade head"; then
+        ${COMPOSE_CMD} run --rm --no-deps backend bash -c "cd /app && alembic upgrade head"; then
         MIGRATION_SUCCEEDED=false
         log "migration 执行失败或超时"
         return 1
