@@ -56,6 +56,19 @@ ALL_READINESS = frozenset({
 
 READY_READINESS = frozenset({READINESS_READY, READINESS_READY_REUSED})
 
+# ===== DSA projection requirement 兼容阶段（EPIC-04 E04-T03）=====
+# 初始阶段为 required_compatibility：消费者必须读取由 CoreComputationArtifact
+# 派生的 precomputed DSA projection，禁止回退旧 DSA-only canonical 路径。
+DSA_PROJECTION_REQUIREMENT_REQUIRED = "required_compatibility"
+DSA_PROJECTION_REQUIREMENT_OPTIONAL = "optional_compatibility"
+DSA_PROJECTION_REQUIREMENT_RETIRED = "retired"
+
+ALL_DSA_PROJECTION_REQUIREMENTS = frozenset({
+    DSA_PROJECTION_REQUIREMENT_REQUIRED,
+    DSA_PROJECTION_REQUIREMENT_OPTIONAL,
+    DSA_PROJECTION_REQUIREMENT_RETIRED,
+})
+
 # ===== auction mode =====
 AUCTION_MODE_STRUCTURE_ONLY = "structure_only"
 AUCTION_MODE_HYBRID = "hybrid"
