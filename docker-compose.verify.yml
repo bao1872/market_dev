@@ -1,13 +1,29 @@
-# V2.1 远程验证栈 Compose（DS-111，Corrective Pass 2 修正）
-# 修复 P0-6/P0-7：
+# V2.1 远程验证栈 Compose（DS-111，Corrective Pass 3 修正）
+#
+# [Corrective Pass 3 P0-A] 采用 **Live Mount 策略**，不使用 `up --build`：
+#   本文件没有任何 `build:` 段，`--build` 无效（CP2 缺陷）。改为复用**已存在的正式镜像**
+#   （market-dev-backend/market-dev-frontend），将 /root/web_dev_verify 下已 checkout 到
+#   目标 SHA 的运行时代码只读挂载进容器，并挂载 RUNTIME_SHA 使 /v1/version.runtime_git_sha
+#   等于目标 SHA（与 docker-compose.live.yml 的既有约定一致，见 CHANGE-20260724-004）。
+#
+# 挂载矩阵（全部 :ro）：
+#   /root/web_dev_verify/backend/app          → /app/app
+#   /root/web_dev_verify/backend/alembic      → /app/alembic
+#   /root/web_dev_verify/backend/alembic.ini  → /app/alembic.ini
+#   /root/web_dev_verify/RUNTIME_SHA          → /app/RUNTIME_SHA
+#   /etc/market-dev/config.production.py      → /app/config.production.py
+#   /root/web_dev_verify/frontend/dist        → /usr/share/nginx/html   (frontend)
+#
+# 修复 P0-6/P0-7（CP2 保留）：
 #   - Redis 方案 B：独立 verify-redis，所有验证服务统一连接 redis://verify-redis:6379/0
-#   - 接入正式 PostgreSQL 所在 external network（market-dev-default），使 trading-postgres 可解析
-# 独立 project 名 panji-verify；端口仅绑定 127.0.0.1；自动 Scheduler 关闭；只启动必要 Worker。
+#   - 接入正式 PostgreSQL 所在 external network，使 trading-postgres 可解析
+#     网络名由 VERIFY_PG_NETWORK 提供（由部署脚本实测 trading-postgres 的真实网络后注入）
 #
-# 用法（在 panji-prod 的 /root/web_dev_verify 内，由远程脚本调用）：
+# 独立 project 名 panji-verify；端口仅绑定 127.0.0.1；Scheduler 关闭；只启动必要 Worker。
+# postgres 为 external（复用 trading-postgres 容器），验证库 bz_stock_verify_<sha>。
+#
+# 用法（在 panji-prod 的 /root/web_dev_verify 内，由 scripts/deploy/panji-verify-deploy.sh 调用）：
 #   docker compose -p panji-verify --env-file market.verify.env -f docker-compose.verify.yml up -d
-#
-# 注意：postgres 声明为 external（复用 trading-postgres 容器），验证库 bz_stock_verify_<sha>。
 
 x-logging: &default-logging
   driver: json-file
@@ -29,10 +45,20 @@ x-resource-app-heavy: &resource-app-heavy
   pids_limit: 1024
   stop_grace_period: 60s
 
+# Live Mount：验证代码目录只读挂载（VERIFY_CODE_DIR 由部署脚本注入，固定 /root/web_dev_verify）
+x-verify-live-python: &verify-live-python
+  volumes:
+    - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/app:/app/app:ro
+    - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic:/app/alembic:ro
+    - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic.ini:/app/alembic.ini:ro
+    - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/RUNTIME_SHA:/app/RUNTIME_SHA:ro
+    - /etc/market-dev/config.production.py:/app/config.production.py:ro
+
 networks:
   # 复用正式 PostgreSQL 所在网络，使验证服务可解析 trading-postgres
-  market-dev-default:
+  verify-pg-network:
     external: true
+    name: ${VERIFY_PG_NETWORK:?VERIFY_PG_NETWORK is required}
   # 验证栈内部网络（verify-redis + 各验证服务）
   panji-verify-internal:
     driver: bridge
@@ -46,21 +72,20 @@ services:
     command: redis-server --appendonly yes --port 6379
     networks:
       - panji-verify-internal
-    # 不暴露宿主机端口（仅验证栈内部访问）
 
-  # 验证 backend
+  # 验证 backend（Live Mount：镜像仅提供依赖，代码来自 VERIFY_CODE_DIR）
   verify-backend:
-    image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
+    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
     container_name: verify-backend
     logging: *default-logging
-    <<: *resource-app-heavy
+    <<: [*resource-app-heavy, *verify-live-python]
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL (bz_stock_verify_<sha>) is required}
       REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: verification
       TZ: Asia/Shanghai
-      CONFIG_FILE: /app/app/config.production.py
+      CONFIG_FILE: /app/config.production.py
       PANJI_SCHEDULER_ENABLED: "false"
       FRONTEND_BASE_URL: http://verify-frontend
       CAPTURE_WORKER_URL: http://verify-worker-capture:8001
@@ -69,19 +94,19 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - market-dev-default
+      - verify-pg-network
       - panji-verify-internal
     ports:
       - "127.0.0.1:8000:8000"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   verify-frontend:
-    image: market-dev-frontend:${GIT_SHA:?GIT_SHA is required}
+    image: ${VERIFY_FRONTEND_IMAGE:?VERIFY_FRONTEND_IMAGE is required}
     container_name: verify-frontend
     logging: *default-logging
     <<: *resource-app-light
-    environment:
-      VITE_API_BASE_URL: http://127.0.0.1:8000
+    volumes:
+      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/frontend/dist:/usr/share/nginx/html:ro
     networks:
       - panji-verify-internal
     ports:
@@ -89,10 +114,10 @@ services:
 
   # 必要 Worker（不复用正式 Worker 容器，独立实例）
   verify-worker-after-close:
-    image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
+    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
     container_name: verify-worker-after-close
     logging: *default-logging
-    <<: *resource-app-light
+    <<: [*resource-app-light, *verify-live-python]
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
@@ -100,21 +125,22 @@ services:
       APP_ENV: verification
       WORKER_TYPE: after_close
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/config.production.py
       PANJI_SCHEDULER_ENABLED: "false"
     depends_on:
       - verify-redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - market-dev-default
+      - verify-pg-network
       - panji-verify-internal
     command: python -m app.worker
 
   verify-worker-chip:
-    image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
+    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
     container_name: verify-worker-chip
     logging: *default-logging
-    <<: *resource-app-light
+    <<: [*resource-app-light, *verify-live-python]
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
@@ -122,20 +148,22 @@ services:
       APP_ENV: verification
       WORKER_TYPE: chip
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/config.production.py
+      PANJI_SCHEDULER_ENABLED: "false"
     depends_on:
       - verify-redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - market-dev-default
+      - verify-pg-network
       - panji-verify-internal
     command: python -m app.worker
 
   verify-worker-watchdog:
-    image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
+    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
     container_name: verify-worker-watchdog
     logging: *default-logging
-    <<: *resource-app-light
+    <<: [*resource-app-light, *verify-live-python]
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
@@ -143,11 +171,13 @@ services:
       APP_ENV: verification
       WORKER_TYPE: watchdog
       TZ: Asia/Shanghai
+      CONFIG_FILE: /app/config.production.py
+      PANJI_SCHEDULER_ENABLED: "false"
     depends_on:
       - verify-redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - market-dev-default
+      - verify-pg-network
       - panji-verify-internal
     command: python -m app.worker

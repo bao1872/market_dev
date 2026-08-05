@@ -29,7 +29,33 @@
 > 但代码改动尚未在真实 PG 验证，granular restart 大部分边界后端未实现，
 > 前端完整页面接入待手动验证，PG E2E 未执行。故诚实标记为 `partial` / `code_ready=false`。
 
-## V2.1 Corrective Pass 2 状态（2026-08-05，HEAD `8b1e4a3`）
+## V2.1 Corrective Pass 3 状态（2026-08-05，本轮最新）
+
+> [Corrective Pass 3] 用户复核指出 CP2 仍存在确定性缺陷：主链 checkpoint 语义反转
+> （`last_completed_step="checking_coverage"` 在 orchestrator `_completed_steps` 中无此键，
+> 落到空集合 = 全跑，与意图相反）、子产品 handler 只重发不重建、幂等复用行却仍重跑、
+> `state_events` 未实现、P1-3 不能推迟到 Phase 4、验证栈 `/v1/version` 探针路径不存在且
+> `--build` 无 build 段。本轮逐条修复（CHANGE-010）。
+
+| 维度 | 状态 | 说明 |
+|---|---|---|
+| `granular_restart_contract` | `implemented` | 10/10 真实 handler；`state_events` 补 `rebuild_state_events` 真实重建 |
+| `mainchain_checkpoint_semantics` | `fixed` | 废除 `last_completed_step`，改 `metadata.mainchain_stage`（起始阶段，非已完成检查点） |
+| `handler_signatures_verified` | `true` | chip/review/auction/dsa_projection/board_aggregation 逐个读源码核对，修正 CP2 会 TypeError/AttributeError 的调用 |
+| `idempotency_correct` | `true` | run_key 含 parent/source/input_hash；succeeded 同 hash **不再执行** handler |
+| `restart_enum_single_source` | `true` | API 层改用 `ALL_BOUNDARIES`，补回漏掉的 `board_aggregation` |
+| `p1_3_exact_completeness` | `implemented` | 冻结 eligible universe 作分母（消除自指比值），新增可达 `exact` 分支 |
+| `granular_restart_complete` | `true`（代码层） | 运行时仍需远程 PG 验证 |
+| `static_checks_passed` | **`false`** | 本地无 docker/fastapi/ruff；pytest、ruff、mypy、`compose config` **均未运行**。未运行 ≠ 通过 |
+| `verify_compose_runnable` | `pending_remote_verification` | 无效 `--build` 已改 Live Mount，探针/DB/SHA/等待已修，待远程实跑 |
+| `db_created` / `migration_run` / `deployed` | `false` | 本轮授权范围外（用户明确要求不创建库、不 Migration、不部署） |
+| `manual_acceptance_ready` | `false` | 须先在远程精确检出最终 SHA 并跑通全部静态检查 |
+
+> **进入 Phase 4 的前置条件**：在远程精确检出最终 SHA 后，实际运行并全部通过
+> Ruff / Mypy-changed / PURE_UNIT_TEST / granular restart 目标测试 / API contract /
+> frontend contract / build / `docker compose config`。在此之前不得声称代码已验证。
+
+## V2.1 Corrective Pass 2 状态（2026-08-05，HEAD `8b1e4a3`，已被 CP3 取代）
 
 > [Corrective Pass 2] 用户审查指出 CHANGE-008 的 granular restart 存在确定性缺陷（枚举即实现、
 > ORM `.c` 误用、child 状态未闭环、无幂等、未经验证的 publisher 签名），P1-3 仅 coverage 门槛、

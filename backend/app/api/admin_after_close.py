@@ -54,6 +54,10 @@ from app.services.after_close_orchestrator import (
     reconcile_after_close_run,
     retry_after_close_run,
 )
+# [CP3] restart boundary 枚举单一真源，避免 API 层与 service 层枚举漂移。
+from app.services.granular_restart_service import (
+    ALL_BOUNDARIES as _ALL_RESTART_BOUNDARIES,
+)
 from app.services.after_close_pipeline_service import (
     create_pipeline_run,
     get_latest_pipeline,
@@ -189,24 +193,16 @@ async def create_after_close_run_endpoint(
 # 系统只允许 job_name=after_close_orchestrator、run_type=full，
 # 正常任务从 refreshing_daily 开始，不创建 dsa_only 类型。
 
-# [PRD Alignment Pass P1-4] force?restart_from 合法取值扩展为 PRD §13.7 全枚举。
+# [PRD Alignment Pass P1-4] force?restart_from 合法取值 = PRD 31 §6 全枚举。
 # 不同 restart 不应重算不相关上游：
 #   review 不重算 core/board；board_aggregation 不重算 core；
 #   chip 不重算 core；dsa_projection 不执行 DSA；
 #   auction 不重算 core；state_events 不重算 core。
-# 当前仅 "daily_ready" 已实现隔离重算；其余边界后端隔离重算函数尚未实现，
-# 调用时返回 not_implemented（HTTP 501）而非伪造成功，使合同缺口显式化。
-_RESTART_FROM_VALID_VALUES = {
-    "daily_ready",
-    "core",
-    "stock_core_published",
-    "dsa_projection",
-    "state_events",
-    "chip",
-    "auction",
-    "board_facts",
-    "review",
-}
+#
+# [CP3 修正] 本集合此前只有 9 项，漏了 `board_aggregation`，导致该 boundary
+# 虽有真实 handler 却被 API 层判为非法值（400）。现与
+# granular_restart_service.ALL_BOUNDARIES 单一真源对齐，避免两处枚举漂移。
+_RESTART_FROM_VALID_VALUES = set(_ALL_RESTART_BOUNDARIES)
 # [PRD 31 §6 / V2.1] 所有 10 个 boundary 均已实现（granular_restart_service.dispatch_restart），
 # 不再有 not_implemented 分支。
 _RESTART_FROM_COVERAGE_THRESHOLD = 0.9
@@ -652,8 +648,10 @@ async def force_advance_after_close_endpoint(
     2. 若 restart_from="daily_ready"：校验覆盖率 ≥ 90%
     3. 重置 status=queued, error_message=None（由 Worker 领取）
     4. 更新 orchestrator_status=queued
-    5. 若 restart_from="daily_ready"：设置 last_completed_step="refreshing_daily"，
-       清除旧 dsa_run_id（Worker 会创建新 DSA run）
+    5. [CP3] 交由 granular_restart_service.dispatch_restart 按 boundary 显式分派；
+       主链 boundary 写 child metadata.mainchain_stage（worker 起始阶段），
+       **不再写 last_completed_step**（该字段语义为"已完成"，且 orchestrator
+       的 _completed_steps 不包含 checking_coverage，写入会导致语义反转）。
 
     Args:
         run_id: 编排任务 ID
@@ -759,9 +757,12 @@ async def force_advance_after_close_endpoint(
             "daily_total": coverage_result["total"],
         }
 
-    # [V2.1] 所有 boundary（含子产品六类）经 granular_restart_service 真实调度，不再返回 501。
-    # 主链 boundary 内部设置 last_completed_step 续跑；子产品 boundary 创建 child SchedulerJobRun
-    # 并调用对应 publish/重建函数（失败记事件，不伪造成功）。
+    # [V2.1 / CP3] 所有 10 个 boundary 经 granular_restart_service 真实调度，不返回 501。
+    # 主链四 boundary：创建 child SchedulerJobRun 并写 metadata.mainchain_stage（worker 从
+    #   该阶段开始执行），child 保持 queued —— **不写 last_completed_step**
+    #   （orchestrator 的 _completed_steps 不认识 checking_coverage，且语义为"已完成"，相反）。
+    # 子产品六 boundary：本请求内同步执行真实重建 + 发布，成功 succeeded / 失败 failed
+    #   并记 level=error 事件（记录真实异常，不伪造成功）。
     from app.services.granular_restart_service import dispatch_restart
 
     try:
@@ -781,12 +782,13 @@ async def force_advance_after_close_endpoint(
     except ValueError as exc:
         raise admin_bad_request("invalid_restart_request", str(exc))
 
-    # restart_from="daily_ready"：清除旧 dsa_run_id（dispatch 内部已设 restart_from，此处清理残留）
+    # restart_from="daily_ready"：清除 child 上可能继承的旧 dsa_run_id（worker 会新建 DSA run）
     if restart_from == "daily_ready":
         meta_after = _parse_metadata(handled)
-        meta_after.pop("dsa_run_id", None)
-        handled.metadata_json = json.dumps(meta_after, ensure_ascii=False)
-        await db.commit()
+        if "dsa_run_id" in meta_after:
+            meta_after.pop("dsa_run_id", None)
+            handled.metadata_json = json.dumps(meta_after, ensure_ascii=False)
+            await db.commit()
 
     # [Phase5] - 不再 _kick_off_async_execution，由独立 Worker 领取 queued 任务
     final_status = handled.status

@@ -290,10 +290,14 @@ def test_review_pointer_missing_is_governable() -> None:
 
 
 def test_dsa_counter_signature_requires_core_run() -> None:
-    """_count_dsa_projections 必须接受 source_core_run_id 并返回 matched/total。
+    """_count_dsa_projections 必须按 core run 过滤，并返回**冻结 eligible universe**。
 
     Corrective-3 只按 trade_date 计数，任何当日快照都会让节点变 ready，
     无法区分"上一轮 run 的残留投影"。
+
+    [CP3 P1-3] 进一步收紧：分母不得再是"当日快照总数"（自指比值，1 只股票也能
+    coverage=1.0）。必须返回 `eligible`（归属当前 core run 的 distinct instrument）
+    与 `stale`（当日不归属该 run 的残留），由调用方以 matched==eligible 判 exact。
     """
     import inspect
 
@@ -305,11 +309,14 @@ def test_dsa_counter_signature_requires_core_run() -> None:
     )
     src = inspect.getsource(ProductReadinessService._count_dsa_projections)
     assert "source_run_id" in src, "必须绑定 StockFeatureSnapshot.source_run_id"
-    assert '"matched"' in src and '"total"' in src
+    assert '"matched"' in src
+    assert '"eligible"' in src, "必须返回冻结的 eligible universe 作为分母"
+    assert '"stale"' in src, "必须暴露残留快照数用于 lineage 诊断"
+    assert "distinct" in src.lower(), "eligible universe 必须按 distinct instrument 统计"
 
 
 def test_state_events_counter_requires_core_run_and_algo() -> None:
-    """_count_state_events 必须按 core run 过滤并暴露 algorithm_version。"""
+    """_count_state_events 必须按 core run 过滤、暴露 algorithm_version 与 eligible universe。"""
     import inspect
 
     from app.services.product_readiness_service import ProductReadinessService
@@ -319,6 +326,43 @@ def test_state_events_counter_requires_core_run_and_algo() -> None:
     src = inspect.getsource(ProductReadinessService._count_state_events)
     assert "source_run_id" in src
     assert "algorithm_version" in src, "state events lineage 必须暴露算法版本"
+    # [CP3 P1-3] eligible/comparable/stale 三项是精确完整性判定的必要输入
+    assert '"eligible"' in src, "必须返回冻结 eligible universe"
+    assert '"comparable"' in src, "必须返回可比对集合（事件只在状态变化时产生）"
+    assert '"stale"' in src, "必须暴露不归属当前 core run 的残留事件数"
+
+
+def test_p1_3_exact_completeness_can_reach_exact() -> None:
+    """[CP3 P1-3] `p1_3_exact_completeness` 必须**可能**取值 "exact"。
+
+    CP2 缺陷：该字段被硬编码为 "partial"/"not_complete" 两种取值，
+    无论数据多完整都永远无法达到 exact —— 等于 P1-3 判定从未实现。
+    """
+    import inspect
+
+    from app.services.product_readiness_service import ProductReadinessService
+
+    for fn in (
+        ProductReadinessService._dsa_projection_state,
+        ProductReadinessService._state_events_state,
+    ):
+        src = inspect.getsource(fn)
+        assert '"exact"' in src, (
+            f"{fn.__name__} 的 p1_3_exact_completeness 必须可取 exact，"
+            "不得硬编码为永远 partial"
+        )
+
+
+def test_dsa_exact_requires_full_eligible_coverage() -> None:
+    """[CP3 P1-3] DSA exact 判据必须是 matched == eligible，而非 matched > 0。"""
+    import inspect
+
+    from app.services.product_readiness_service import ProductReadinessService
+
+    src = inspect.getsource(ProductReadinessService._dsa_projection_state)
+    assert "matched == eligible" in src, (
+        "DSA 精确完整性必须要求 eligible universe 全覆盖"
+    )
 
 
 def test_review_state_reads_factor_publication_pointer() -> None:

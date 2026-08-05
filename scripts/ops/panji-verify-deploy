@@ -28,4 +28,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
 
 # 远程执行（验证代码目录固定 /root/web_dev_verify，已 checkout 目标 SHA）
-scripts/ops/panji-prod-ssh "cd /root/web_dev_verify && bash scripts/deploy/panji-verify-deploy.sh '$SHA' '$ENV_FILE'"
+# [CP3] 使用 $SCRIPT_DIR 绝对路径，不依赖调用方 CWD
+"$SCRIPT_DIR/panji-prod-ssh" "cd /root/web_dev_verify && bash scripts/deploy/panji-verify-deploy.sh '$SHA' '$ENV_FILE'"

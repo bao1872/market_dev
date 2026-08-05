@@ -1071,25 +1071,31 @@ class ProductReadinessService:
         # [Corrective-3.1 §P1] 必须按当前 core run 精确归属，不能只看"当日有快照"。
         core_run_id = parent["source_core_run_id"]
         counts = await self._count_dsa_projections(db, trade_date, core_run_id)
-        matched, total = counts["matched"], counts["total"]
-        detail = {"projection_matched": matched, "projection_total": total}
+        eligible = int(counts["eligible"])
+        matched = int(counts["matched"])
+        stale = int(counts.get("stale", 0))
 
-        # [V2.1 P1-3] 完整性门槛：coverage = matched / total，须达阈值才 ready；
-        # 仅 matched>0 不得判 ready（存在性检查已被禁止）。
-        # 注：eligible_count 以"当日归属当前 core run 的 snapshot 总数"为代理（DSA 每股每
-        # core run 一次，该集合即 universe）；精确 eligible universe 比对与 parameter_hash 一致性
-        # 待 Phase 4 在验证库补全（当前标记 p1_3_exact_completeness=partial）。
-        coverage_ratio = (matched / total) if total > 0 else 0.0
+        # [V2.1 P1-3 CP3] **精确**完整性：分母是冻结的 eligible universe（该 core run
+        # 计算过的 distinct instrument），分子是真正产出 dsa_projection 的 instrument。
+        # 不再使用自指的 matched/total 比值。
+        coverage_ratio = (matched / eligible) if eligible > 0 else 0.0
+        exact_complete = eligible > 0 and matched == eligible
         detail = {
-            **detail,
-            "eligible_count": total,
+            "projection_matched": matched,
+            "projection_total": eligible + stale,
+            "eligible_count": eligible,
             "matched_count": matched,
+            "stale_snapshot_count": stale,
             "coverage_ratio": round(coverage_ratio, 4),
             "coverage_threshold": _DSA_PROJECTION_COVERAGE_THRESHOLD,
             "algorithm_versions": counts.get("algorithm_versions", []),
-            "p1_3_exact_completeness": "partial" if coverage_ratio >= _DSA_PROJECTION_COVERAGE_THRESHOLD else "not_complete",
+            # exact = eligible universe 全覆盖；partial = 有产物但未全覆盖
+            "p1_3_exact_completeness": (
+                "exact" if exact_complete
+                else ("partial" if matched > 0 else "not_complete")
+            ),
         }
-        if matched > 0 and coverage_ratio >= _DSA_PROJECTION_COVERAGE_THRESHOLD:
+        if exact_complete and coverage_ratio >= _DSA_PROJECTION_COVERAGE_THRESHOLD:
             return ProductReadinessState(
                 "dsa_projection", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
@@ -1105,8 +1111,8 @@ class ProductReadinessService:
                          "reason_code": "PROJECTION_PARTIAL_COVERAGE",
                          "coverage": matched, "status": "partial"},
             )
-        if total > 0:
-            # 当日存在快照但没有一条归属当前 core run → 是上一轮残留，不得判 ready。
+        if stale > 0 or eligible > 0:
+            # 当日存在快照但没有一条产出属于当前 core run 的投影 → 残留/未生成，不得判 ready。
             return ProductReadinessState(
                 "dsa_projection", READINESS_DEGRADED, "stale",
                 is_mandatory=False, is_terminal=False,
@@ -1143,30 +1149,47 @@ class ProductReadinessService:
         # [Corrective-3.1 §P1] 事件必须归属当前 core run；算法版本一并暴露。
         core_run_id = parent["source_core_run_id"]
         counts = await self._count_state_events(db, trade_date, core_run_id)
-        matched, total = counts["matched"], counts["total"]
+        matched = int(counts["matched"])
+        stale = int(counts.get("stale", 0))
+        eligible = int(counts.get("eligible", 0))
+        comparable = int(counts.get("comparable", 0))
+
+        # [V2.1 P1-3 CP3] **精确**完整性（诚实定义）：
+        # state_events 是"状态发生变化"才产生的事件，因此 matched == eligible 并非正确判据
+        # （绝大多数股票当日状态不变，本就不应有事件）。真正的 P1-3 精确判据是：
+        #   1. eligible universe 已冻结（该 core run 的 distinct instrument 全集）；
+        #   2. 事件生成已对**全部可比对股票**（有前序兼容快照者）执行完毕，
+        #      即 comparable 已知且 events 的 source_run_id 全部归属当前 core run；
+        #   3. 算法版本单一（多版本混杂 = lineage 断裂）。
+        # coverage_ratio 定义为 matched / comparable（可比对集合中产生事件的占比），
+        # 仅作观测指标；门禁用 version 单一性 + 无残留 + universe 非空。
+        coverage_ratio = (matched / comparable) if comparable > 0 else 0.0
+        versions = counts["algorithm_versions"]
+        single_version = len(versions) <= 1
+        exact_complete = (
+            eligible > 0
+            and comparable >= 0
+            and stale == 0
+            and single_version
+        )
         detail = {
             "event_type_counts": counts["by_type"],
             "state_events_matched": matched,
-            "state_events_total": total,
-            "algorithm_versions": counts["algorithm_versions"],
-        }
-
-        # [V2.1 P1-3] 完整性门槛：coverage = matched / total，须达阈值才 ready；
-        # 仅 matched>0 不得判 ready（存在性检查已被禁止）。完整生命周期由 by_type 非空佐证。
-        # 注：eligible_count 以"当日归属当前 core run 的事件总数"为代理；每个 eligible instrument
-        # 的 required event_type 完整生命周期精确验证待 Phase 4 补全（标记 p1_3_exact_completeness）。
-        coverage_ratio = (matched / total) if total > 0 else 0.0
-        lifecycle_complete = bool(counts["by_type"]) and coverage_ratio >= _STATE_EVENTS_COVERAGE_THRESHOLD
-        detail = {
-            **detail,
-            "eligible_count": total,
+            "state_events_total": matched + stale,
+            "algorithm_versions": versions,
+            "eligible_count": eligible,
+            "comparable_count": comparable,
             "matched_count": matched,
+            "stale_event_count": stale,
             "coverage_ratio": round(coverage_ratio, 4),
             "coverage_threshold": _STATE_EVENTS_COVERAGE_THRESHOLD,
-            "lifecycle_complete": lifecycle_complete,
-            "p1_3_exact_completeness": "partial" if lifecycle_complete else "not_complete",
+            "single_algorithm_version": single_version,
+            "p1_3_exact_completeness": (
+                "exact" if exact_complete
+                else ("partial" if eligible > 0 else "not_complete")
+            ),
         }
-        if matched > 0 and coverage_ratio >= _STATE_EVENTS_COVERAGE_THRESHOLD:
+        if exact_complete:
             return ProductReadinessState(
                 "state_events", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
@@ -1182,7 +1205,7 @@ class ProductReadinessService:
                          "reason_code": "STATE_EVENTS_PARTIAL_COVERAGE",
                          "coverage": matched, "status": "partial"},
             )
-        if total > 0:
+        if stale > 0:
             # 当日有事件但均不属于当前 core run → stale，禁止判 ready。
             return ProductReadinessState(
                 "state_events", READINESS_DEGRADED, "stale",
@@ -1201,17 +1224,26 @@ class ProductReadinessService:
     @staticmethod
     async def _count_dsa_projections(
         db: Any, trade_date: date, source_core_run_id: Any = None,
-    ) -> dict[str, int]:
-        """[Corrective-3.1 §P1] 统计当日特征快照，并区分是否属于当前 core run。
+    ) -> dict[str, Any]:
+        """[Corrective-3.1 §P1 / CP3 P1-3] 统计当日 DSA 投影的**精确** eligible/matched。
 
-        返回 {"total": 当日全部, "matched": 归属当前 core run}。
-        `matched` 才是精确 lineage 证据；`total > matched` 说明存在上一轮 run
-        的残留投影，不能据此认定当前 pointer 的投影已完整。
+        CP2 缺陷：`eligible_count` 取 `total`（当日快照总数），而 `matched` 是同一张表的
+        子集计数，coverage=matched/total 是**自指**比值 —— 只要没有残留快照，
+        1 只股票也能得到 coverage=1.0。P1-3 要求的是"eligible universe 全覆盖"。
+
+        CP3 修正：
+        - **eligible universe（冻结）** = 归属当前 core run 的 distinct instrument 集合
+          （该 core run 实际计算过的股票全集，即 DSA 应当覆盖的分母）。
+        - **matched** = 上述 universe 中 `summary_payload` 真正含 `dsa_projection` 的
+          distinct instrument 数（真实产物存在性，不是快照存在性）。
+        - `stale_total` 保留"当日不属于当前 core run 的残留快照数"用于 lineage 诊断。
+
+        返回 {"eligible": int, "matched": int, "stale": int, "algorithm_versions": [...]}。
         """
         try:
             from app.models.stock_feature_snapshot import StockFeatureSnapshot
 
-            total = int(
+            day_total = int(
                 await db.scalar(
                     select(func.count())
                     .select_from(StockFeatureSnapshot)
@@ -1219,8 +1251,33 @@ class ProductReadinessService:
                 ) or 0
             )
             if source_core_run_id is None:
-                return {"total": total, "matched": 0}
+                return {
+                    "eligible": 0, "matched": 0, "stale": day_total,
+                    "algorithm_versions": [],
+                }
+
+            # 冻结 eligible universe：该 core run 计算过的 distinct instrument
+            eligible = int(
+                await db.scalar(
+                    select(func.count(func.distinct(StockFeatureSnapshot.instrument_id)))
+                    .where(
+                        StockFeatureSnapshot.trade_date == trade_date,
+                        StockFeatureSnapshot.source_run_id == source_core_run_id,
+                    )
+                ) or 0
+            )
+            # matched：universe 中真正产出 dsa_projection 的 distinct instrument
             matched = int(
+                await db.scalar(
+                    select(func.count(func.distinct(StockFeatureSnapshot.instrument_id)))
+                    .where(
+                        StockFeatureSnapshot.trade_date == trade_date,
+                        StockFeatureSnapshot.source_run_id == source_core_run_id,
+                        StockFeatureSnapshot.summary_payload.has_key("dsa_projection"),  # noqa: W601
+                    )
+                ) or 0
+            )
+            run_rows = int(
                 await db.scalar(
                     select(func.count())
                     .select_from(StockFeatureSnapshot)
@@ -1230,21 +1287,33 @@ class ProductReadinessService:
                     )
                 ) or 0
             )
-            return {"total": total, "matched": matched}
+            return {
+                "eligible": eligible,
+                "matched": matched,
+                "stale": max(day_total - run_rows, 0),
+                "algorithm_versions": [],
+            }
         except Exception:
-            return {"total": 0, "matched": 0}
+            # fail-closed：统计失败不得被解读为"全覆盖"
+            return {"eligible": 0, "matched": 0, "stale": 0, "algorithm_versions": []}
 
     @staticmethod
     async def _count_state_events(
         db: Any, trade_date: date, source_core_run_id: Any = None,
     ) -> dict[str, Any]:
-        """[Corrective-3.1 §P1] 按 event_type 统计当日状态事件，并按 core run 归属拆分。
+        """[Corrective-3.1 §P1 / CP3 P1-3] 按 event_type 统计状态事件的精确 lineage 归属。
 
-        返回 {"total": int, "matched": int, "by_type": {...}, "algorithm_versions": [...]}。
-        `by_type` 仅统计归属当前 core run 的事件；无 core run 时退化为全量并把
-        matched 记为 0，由调用方降级处理，不得据此判定 ready。
+        CP3 新增返回项：
+        - `eligible`：冻结 universe = 当前 core run 的 distinct instrument 数（分母基准）。
+        - `comparable`：universe 中**有前序兼容快照**因而可比对、可能产生事件的股票数
+          （state_events 只在状态变化时产生，故用它做 coverage 分母而非 eligible）。
+        - `stale`：当日**不归属**当前 core run 的事件数（>0 即 lineage 残留，禁止 ready）。
+
+        返回 {"eligible", "comparable", "total", "matched", "stale",
+              "by_type", "algorithm_versions"}。
         """
         try:
+            from app.models.stock_feature_snapshot import StockFeatureSnapshot
             from app.models.stock_state_event import StockStateEvent
 
             rows = await db.execute(
@@ -1256,9 +1325,37 @@ class ProductReadinessService:
             total = sum(all_by_type.values())
             if source_core_run_id is None:
                 return {
-                    "total": total, "matched": 0,
+                    "eligible": 0, "comparable": 0,
+                    "total": total, "matched": 0, "stale": total,
                     "by_type": {}, "algorithm_versions": [],
                 }
+
+            # 冻结 eligible universe（该 core run 的 distinct instrument）
+            eligible = int(
+                await db.scalar(
+                    select(func.count(func.distinct(StockFeatureSnapshot.instrument_id)))
+                    .where(
+                        StockFeatureSnapshot.trade_date == trade_date,
+                        StockFeatureSnapshot.source_run_id == source_core_run_id,
+                    )
+                ) or 0
+            )
+            # comparable：该 instrument 在更早交易日存在过快照（可做状态比对）
+            earlier = (
+                select(StockFeatureSnapshot.instrument_id)
+                .where(StockFeatureSnapshot.trade_date < trade_date)
+                .distinct()
+            )
+            comparable = int(
+                await db.scalar(
+                    select(func.count(func.distinct(StockFeatureSnapshot.instrument_id)))
+                    .where(
+                        StockFeatureSnapshot.trade_date == trade_date,
+                        StockFeatureSnapshot.source_run_id == source_core_run_id,
+                        StockFeatureSnapshot.instrument_id.in_(earlier),
+                    )
+                ) or 0
+            )
 
             rows2 = await db.execute(
                 select(
@@ -1278,14 +1375,23 @@ class ProductReadinessService:
                 by_type[str(event_type)] = by_type.get(str(event_type), 0) + int(count)
                 if algo_version is not None:
                     versions.add(str(algo_version))
+            matched = sum(by_type.values())
             return {
+                "eligible": eligible,
+                "comparable": comparable,
                 "total": total,
-                "matched": sum(by_type.values()),
+                "matched": matched,
+                # stale = 当日事件中不归属当前 core run 的部分（lineage 残留）
+                "stale": max(total - matched, 0),
                 "by_type": by_type,
                 "algorithm_versions": sorted(versions),
             }
         except Exception:
-            return {"total": 0, "matched": 0, "by_type": {}, "algorithm_versions": []}
+            # fail-closed：统计失败不得被解读为 exact
+            return {
+                "eligible": 0, "comparable": 0, "total": 0, "matched": 0,
+                "stale": 0, "by_type": {}, "algorithm_versions": [],
+            }
 
     async def _chip_state(
         self, db: Any, trade_date: date,
