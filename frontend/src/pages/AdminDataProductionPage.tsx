@@ -9,11 +9,13 @@
 // URL 状态：tab 进入 URL query（/admin/data-production?tab=after-close），刷新保持，可分享定位。
 import { useSearchParams } from 'react-router-dom'
 import AdminAfterClosePipelinePage from './AdminAfterClosePipelinePage'
+import AdminReadinessWorkbench from '@/features/product-readiness/AdminReadinessWorkbench'
 import { useAdminSystemOverview } from '@/hooks/useApi'
 
 export type DataProductionTab =
   | 'overview'
   | 'after-close'
+  | 'readiness'
   | 'first-pyramid'
   | 'board'
   | 'review'
@@ -23,6 +25,7 @@ export type DataProductionTab =
 const TAB_ITEMS: { key: DataProductionTab; label: string }[] = [
   { key: 'overview', label: '总览' },
   { key: 'after-close', label: '盘后编排' },
+  { key: 'readiness', label: '盘后就绪' },
   { key: 'first-pyramid', label: '第一金字塔' },
   { key: 'board', label: '板块' },
   { key: 'review', label: '复盘' },
@@ -126,6 +129,9 @@ export default function AdminDataProductionPage() {
       {/* 盘后编排：并入原盘后流水线页面 */}
       {activeTab === 'after-close' && <AdminAfterClosePipelinePage />}
 
+      {/* 盘后就绪：九节点就绪状态 + 治理报告（Commit G/H） */}
+      {activeTab === 'readiness' && <AdminReadinessWorkbench />}
+
       {/* 总览：从后端 summary.production_chain 渲染 6 个产品节点 */}
       {activeTab === 'overview' && (
         <section className="card section-gap">
@@ -172,7 +178,7 @@ export default function AdminDataProductionPage() {
       )}
 
       {/* 业务产品 Tab：聚合读模型筛选视图（PRD §8.2），展示该产品节点状态，不再显示"P1 后续提供"占位 */}
-      {activeTab !== 'after-close' && activeTab !== 'overview' && (
+      {activeTab !== 'after-close' && activeTab !== 'overview' && activeTab !== 'readiness' && (
         <section className="card section-gap">
           <div className="card-head">
             <div>

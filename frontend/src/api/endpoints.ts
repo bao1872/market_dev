@@ -2716,6 +2716,62 @@ export async function getAdminSystemOverview(): Promise<SystemOverview> {
 }
 
 // ============================================================
+// ===== [Commit G] ProductReadiness 就绪状态 + 治理报告 =====
+// ============================================================
+
+/** 单个产品的就绪状态（九节点之一） */
+export interface ProductReadinessItem {
+  product: string
+  readiness: string
+  freshness: string
+  isMandatory: boolean
+  isTerminal: boolean
+  isConsumable: boolean
+  dataSource: string
+}
+
+/** 闭包评估问题项 */
+export interface BenefitsIssue {
+  product: string
+  code: string
+  severity: string
+  recommendedAction: string
+}
+
+/** 治理报告（Commit G） */
+export interface GovernanceReport {
+  pointerLineage: Record<string, string>
+  staleChildren: string[]
+  unmatchedActiveChildren: string[]
+  readyProducts: string[]
+  pendingProducts: string[]
+  blockedProducts: string[]
+  unavailableProducts: string[]
+  degradedReasons: BenefitsIssue[]
+}
+
+/** ProductReadiness 响应（GET /v1/admin/readiness/{trade_date}） */
+export interface ProductReadinessResponse {
+  tradeDate: string
+  closure: string
+  mandatoryProductsReady: boolean
+  mandatoryProductsFullyFresh: boolean
+  enhancementJobsTerminal: boolean
+  products: ProductReadinessItem[]
+  governance: GovernanceReport
+}
+
+/** 查询指定交易日的产品就绪状态 + 治理报告（admin） */
+export async function getAdminProductReadiness(
+  tradeDate: string,
+): Promise<ProductReadinessResponse> {
+  const { data } = await apiClient.get<ProductReadinessResponse>(
+    `/v1/admin/readiness/${tradeDate}`,
+  )
+  return data
+}
+
+// ============================================================
 // ===== [Gate5] GoAccess 访问统计 =====
 // ============================================================
 

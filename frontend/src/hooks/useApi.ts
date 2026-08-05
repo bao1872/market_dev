@@ -1265,6 +1265,22 @@ export function useJobRunEvents(runId: string | null | undefined) {
   })
 }
 
+/** 查询指定交易日的产品就绪状态 + 治理报告（admin，Commit G）。
+ * 15 秒轮询紧跟盘后编排进度；页面不可见暂停。 */
+export function useAdminProductReadiness(
+  tradeDate: string | null | undefined,
+  enabled: boolean = true,
+) {
+  return useQuery({
+    queryKey: ['admin', 'readiness', tradeDate],
+    queryFn: () => api.getAdminProductReadiness(tradeDate!),
+    enabled: !!tradeDate && enabled,
+    staleTime: STALE_REALTIME,
+    refetchInterval: enabled ? 15_000 : false,
+    refetchIntervalInBackground: false,
+  })
+}
+
 /** 查询盘后编排状态（10 秒轮询，含事件时间线 + DSA run 状态） */
 export function useAfterCloseRunStatus(runId: string | null | undefined, enabled: boolean = true) {
   return useQuery({
