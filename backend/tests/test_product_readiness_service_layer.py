@@ -161,9 +161,19 @@ class _FakeDB:
             q = self._pubs.get(kind, [])
             return q.pop(0) if q else None
         if ent is StockFeatureSnapshot:
-            val = self._dsa[self._dsa_idx]
-            self._dsa_idx += 1
-            return val
+            # [CP3] _count_dsa_projections / _count_state_events 各发多个标量查询：
+            #   - day_total：无 source_run_id 过滤（当日快照总数）
+            #   - eligible / comparable / run_rows：带 source_run_id 过滤
+            #   - matched：额外带 summary_payload.has_key("dsa_projection")
+            # 旧 mock 用 2 元素 FIFO，第 3 次标量即越界触发服务层 fail-closed 降级。
+            # 改为按查询谓词路由，与真实 SQL 契约一致且顺序无关。
+            wc = str(stmt.whereclause)
+            eligible, matched = (self._dsa + [0, 0])[:2]
+            if "dsa_projection" in wc:
+                return matched
+            if "source_run_id" in wc:
+                return eligible
+            return eligible  # day_total：简化取 eligible universe 规模
         q = self._runs.get(ent, [])
         return q.pop(0) if q else None
 

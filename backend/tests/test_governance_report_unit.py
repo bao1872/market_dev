@@ -40,7 +40,7 @@ def _full_states() -> list[ProductReadinessState]:
         ProductReadinessState("dsa_projection", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
         ProductReadinessState("chip", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
         ProductReadinessState("state_events", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
-        ProductReadinessState("auction_anchor", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
+        ProductReadinessState("auction_anchor", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, auction_mode="composite"),
     ]
 
 
