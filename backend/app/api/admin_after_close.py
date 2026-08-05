@@ -719,7 +719,6 @@ async def force_advance_after_close_endpoint(
         )
 
     # restart_from="daily_ready"：校验覆盖率 ≥ 90%
-    coverage_info: dict[str, Any] | None = None
     if restart_from == "daily_ready":
         from datetime import date as date_cls
 

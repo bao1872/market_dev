@@ -940,7 +940,7 @@ def implemented_boundaries() -> tuple[str, ...]:
 async def dispatch_restart(
     db: AsyncSession,
     job_run: SchedulerJobRun,
-    restart_from: str,
+    restart_from: str | None,
     *,
     actor: str,
     request_id: str,
