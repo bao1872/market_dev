@@ -1,0 +1,130 @@
+# V2.1 远程验证栈 Compose（DS-111）
+# 独立 project 名 panji-verify；复用 panji-prod 现有 trading-postgres / trading-redis 容器
+# （external，不新建 PostgreSQL 容器或 Volume）；验证库 bz_stock_verify_<sha>；
+# 端口仅绑定 127.0.0.1；自动 Scheduler 关闭；只启动必要 Worker。
+#
+# 用法（在 panji-prod 的 /root/web_dev 内）：
+#   docker compose -p panji-verify --env-file market.verify.env -f docker-compose.verify.yml up -d
+#
+# 注意：postgres/redis 声明为 external，验证服务连同一容器但用验证库 URL（DATABASE_URL）
+# 与独立 Redis DB（REDIS_URL 用 /1 或前缀隔离）。
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+x-resource-app-light: &resource-app-light
+  mem_limit: 512m
+  mem_reservation: 256m
+  cpus: 1
+  pids_limit: 512
+  stop_grace_period: 30s
+
+x-resource-app-heavy: &resource-app-heavy
+  mem_limit: 1024m
+  mem_reservation: 512m
+  cpus: 1
+  pids_limit: 1024
+  stop_grace_period: 60s
+
+services:
+  # 复用现有 postgres/redis（不在这里定义，声明 external）
+  # 验证 backend
+  verify-backend:
+    image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
+    container_name: verify-backend
+    logging: *default-logging
+    <<: *resource-app-heavy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL (bz_stock_verify_<sha>) is required}
+      REDIS_URL: ${REDIS_URL:-redis://trading-redis:6379/1}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: verification
+      TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
+      PANJI_SCHEDULER_ENABLED: "false"
+      FRONTEND_BASE_URL: http://verify-frontend
+      CAPTURE_WORKER_URL: http://verify-worker-capture:8001
+    depends_on:
+      - verify-redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  verify-redis:
+    image: redis:7-alpine
+    container_name: verify-redis
+    logging: *default-logging
+    command: redis-server --appendonly yes --port 6379
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  verify-frontend:
+    image: market-dev-frontend:${GIT_SHA:?GIT_SHA is required}
+    container_name: verify-frontend
+    logging: *default-logging
+    <<: *resource-app-light
+    environment:
+      VITE_API_BASE_URL: http://127.0.0.1:8000
+    ports:
+      - "127.0.0.1:8080:80"
+
+  # 必要 Worker（不复用正式 Worker 容器）
+  verify-worker-after-close:
+    image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
+    container_name: verify-worker-after-close
+    logging: *default-logging
+    <<: *resource-app-light
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://trading-redis:6379/1}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: verification
+      WORKER_TYPE: after_close
+      TZ: Asia/Shanghai
+      PANJI_SCHEDULER_ENABLED: "false"
+    depends_on:
+      - verify-redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
+  verify-worker-chip:
+    image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
+    container_name: verify-worker-chip
+    logging: *default-logging
+    <<: *resource-app-light
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://trading-redis:6379/1}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: verification
+      WORKER_TYPE: chip
+      TZ: Asia/Shanghai
+    depends_on:
+      - verify-redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker
+
+  verify-worker-watchdog:
+    image: market-dev-backend:${GIT_SHA:?GIT_SHA is required}
+    container_name: verify-worker-watchdog
+    logging: *default-logging
+    <<: *resource-app-light
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:-redis://trading-redis:6379/1}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: verification
+      WORKER_TYPE: watchdog
+      TZ: Asia/Shanghai
+    depends_on:
+      - verify-redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: python -m app.worker

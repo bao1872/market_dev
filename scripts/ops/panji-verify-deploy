@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# panji-verify-deploy — 远程验证栈部署包装（复用 panji-prod-ssh 入口）
+# 用法：scripts/ops/panji-verify-deploy <SHA> [env_file]
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/../deploy/panji-verify-deploy.sh" "$@"
