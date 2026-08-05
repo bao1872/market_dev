@@ -30,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.factor_publication import (
+    PUBLICATION_KIND_CHIP_CONSENSUS,
     PUBLICATION_KIND_HISTORY_CROSS_SECTION,
     PUBLICATION_KIND_MARKET_AGGREGATION,
     PUBLICATION_KIND_STOCK_CORE,
@@ -347,6 +348,127 @@ async def publish_market_aggregation(
         "[Publication] market_aggregation 发布: trade_date=%s, "
         "source_core_run_id=%s, aggregation_run_id=%s",
         trade_date, source_core_run_id, aggregation_run_id,
+    )
+    return pub  # type: ignore[return-value]
+
+
+async def publish_chip_consensus(
+    session: AsyncSession,
+    trade_date: date,
+    chip_run_id: uuid.UUID,
+    algorithm_version: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> FactorPublication:
+    """切换 chip_consensus publication pointer（正式发布指针）。
+
+    [Commit D 2026-08-05] 补齐 chip 正式发布指针：
+    - 此前 chip 只持久化到 stock_chip_consensus_snapshots + ChipConsensusRun，
+      从未写入 PUBLICATION_KIND_CHIP_CONSENSUS 发布指针，导致 product_readiness
+      只能通过 ChipConsensusRun 状态回退，无法通过 pointer 判定 chip 已发布。
+    - 本函数在 chip run 达到可发布终态（succeeded/partial）后原子写入发布指针，
+      强化 chip 的 publication / pointer / lineage 合同。
+
+    校验（严格 lineage，禁止基于旧/未发布 core run 发布 chip）：
+    - chip_run 必须存在且 status 为可发布终态（succeeded/partial）
+    - chip_run.trade_date 必须等于调用方 trade_date
+    - chip_run.source_core_run_id 必须等于当日已发布 stock_core pointer.data_run_id
+    - coverage 由 DB 统计（chip_run.coverage_ratio），不接受调用方任意传值
+
+    Args:
+        session: 异步 DB 会话
+        trade_date: 业务交易日
+        chip_run_id: ChipConsensusRun.id（数据版本）
+        algorithm_version: 算法版本
+        metadata: 额外元数据
+
+    Returns:
+        FactorPublication 记录
+
+    Raises:
+        ValueError: chip_run 不存在、状态不可发布、trade_date 不匹配、
+            source_core_run_id 与已发布 stock_core pointer 不匹配
+    """
+    import json
+
+    from app.models.chip_consensus_run import ChipConsensusRun
+
+    chip_run = await session.get(ChipConsensusRun, chip_run_id)
+    if chip_run is None:
+        raise ValueError(f"chip_consensus 发布失败: chip_run_id={chip_run_id} 不存在")
+    if chip_run.trade_date != trade_date:
+        raise ValueError(
+            f"chip_consensus 发布失败: chip_run.trade_date={chip_run.trade_date} "
+            f"与调用方 {trade_date} 不匹配"
+        )
+    if chip_run.status not in ("succeeded", "partial"):
+        raise ValueError(
+            f"chip_consensus 发布失败: chip_run.status={chip_run.status!r} "
+            f"非可发布终态（succeeded/partial），禁止发布"
+        )
+
+    # lineage：chip 必须基于已发布的 stock_core run
+    published_core_run_id = await get_published_snapshot_run_id(
+        session, trade_date, publication_kind=PUBLICATION_KIND_STOCK_CORE,
+    )
+    if published_core_run_id is None:
+        raise ValueError(
+            f"chip_consensus 发布失败: trade_date={trade_date} 无已发布 stock_core pointer，"
+            f"必须先发布 stock_core"
+        )
+    if published_core_run_id != chip_run.source_core_run_id:
+        raise ValueError(
+            f"chip_consensus 发布失败: chip_run.source_core_run_id={chip_run.source_core_run_id} "
+            f"与已发布 stock_core pointer={published_core_run_id} 不匹配，"
+            f"禁止基于旧/未发布 core run 发布 chip"
+        )
+
+    # coverage 由 DB 统计（chip_run.coverage_ratio）
+    coverage = chip_run.coverage_ratio or 0.0
+
+    now = datetime.now(UTC)
+    meta_payload = {
+        "source_core_run_id": str(chip_run.source_core_run_id),
+        "chip_run_status": chip_run.status,
+        **(metadata or {}),
+    }
+    meta_str = json.dumps(meta_payload, ensure_ascii=False)
+
+    stmt = pg_insert(FactorPublication).values(
+        scope_type=SCOPE_TYPE_MARKET,
+        scope_key="market",
+        trade_date=trade_date,
+        publication_kind=PUBLICATION_KIND_CHIP_CONSENSUS,
+        algorithm_version=algorithm_version,
+        data_run_id=chip_run_id,
+        coverage_ratio=coverage,
+        published_at=now,
+        metadata_json=meta_str,
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_factor_publications_scope_date_kind",
+        set_={
+            "algorithm_version": stmt.excluded.algorithm_version,
+            "data_run_id": stmt.excluded.data_run_id,
+            "coverage_ratio": stmt.excluded.coverage_ratio,
+            "published_at": stmt.excluded.published_at,
+            "metadata_json": stmt.excluded.metadata_json,
+        },
+    )
+    await session.execute(stmt)
+    await session.flush()
+
+    pub = await get_publication(
+        session,
+        scope_type=SCOPE_TYPE_MARKET,
+        scope_key="market",
+        trade_date=trade_date,
+        publication_kind=PUBLICATION_KIND_CHIP_CONSENSUS,
+    )
+    logger.info(
+        "[Publication] chip_consensus 发布: trade_date=%s, chip_run_id=%s, "
+        "source_core_run_id=%s, coverage=%.4f",
+        trade_date, chip_run_id, chip_run.source_core_run_id, coverage,
     )
     return pub  # type: ignore[return-value]
 
