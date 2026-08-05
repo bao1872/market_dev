@@ -38,6 +38,30 @@ from app.services.board_sync_service import (
 )
 from app.services.wencai_board_provider import BoardSnapshot
 
+
+# [Commit A 修正 2026-08-05] 测试快照须满足 provider 合同：board 显式携带
+# taxonomy/source/taxonomy_version/taxonomy_compatibility_key（board_sync_service
+# 已禁止回退 qstock 默认值，缺失任一字段即抛 BoardSyncError）。
+def _board(
+    external_code: str,
+    name: str,
+    type_: str,
+    *,
+    hierarchy_level: str = "L1",
+) -> dict[str, str]:
+    """构造带显式分类学/身份合同字段的 board dict。"""
+    return {
+        "external_code": external_code,
+        "name": name,
+        "type": type_,
+        "hierarchy_level": hierarchy_level,
+        "taxonomy": "wencai",
+        "source": "wencai",
+        "taxonomy_version": "wencai-hierarchy-v1",
+        "taxonomy_compatibility_key": "wencai-board-v1",
+        "identity_contract_version": "wencai-identity-v1",
+    }
+
 # =============================================================================
 # 辅助函数：构造测试用 BoardSnapshot
 # =============================================================================
@@ -61,13 +85,13 @@ def _make_valid_snapshot(
     for i in range(num_industries):
         name = f"行业{i}-子类{i % 10}"
         ext_code = f"wc:i:industry_{i:04d}"
-        boards.append({"external_code": ext_code, "name": name, "type": "industry"})
+        boards.append(_board(ext_code, name, "industry"))
         memberships[(ext_code, "industry")] = []
 
     # 生成概念 boards
     for i in range(num_concepts):
         ext_code = f"wc:c:concept_{i:04d}"
-        boards.append({"external_code": ext_code, "name": f"概念{i}", "type": "concept"})
+        boards.append(_board(ext_code, f"概念{i}", "concept"))
         memberships[(ext_code, "concept")] = []
 
     # 生成股票及其板块归属
@@ -107,12 +131,12 @@ def _make_small_snapshot(
 
     for i in range(num_industries):
         ext_code = f"wc:i:small_ind_{i:04d}"
-        boards.append({"external_code": ext_code, "name": f"行业{i}", "type": "industry"})
+        boards.append(_board(ext_code, f"行业{i}", "industry"))
         memberships[(ext_code, "industry")] = []
 
     for i in range(num_concepts):
         ext_code = f"wc:c:small_con_{i:04d}"
-        boards.append({"external_code": ext_code, "name": f"概念{i}", "type": "concept"})
+        boards.append(_board(ext_code, f"概念{i}", "concept"))
         memberships[(ext_code, "concept")] = []
 
     for stock_idx in range(num_stocks):
@@ -171,7 +195,7 @@ class TestValidateSnapshotAbsolute:
     def test_raw_rows_below_minimum_rejected(self) -> None:
         """raw_rows < 5000 拒绝。"""
         snapshot = BoardSnapshot(
-            boards=[{"external_code": "wc:i:b0", "name": "b", "type": "industry"}],
+            boards=[_board("wc:i:b0", "b", "industry")],
             memberships={("wc:i:b0", "industry"): ["000001"]},
             raw_rows=MIN_RAW_ROWS - 1,
         )
@@ -199,11 +223,11 @@ class TestValidateSnapshotAbsolute:
         memberships: dict[tuple[str, str], list[str]] = {}
         for i in range(MIN_INDUSTRY_COUNT):
             ext = f"wc:i:b{i:04d}"
-            boards.append({"external_code": ext, "name": f"b{i}", "type": "industry"})
+            boards.append(_board(ext, f"b{i}", "industry"))
             memberships[(ext, "industry")] = []
         for i in range(MIN_CONCEPT_COUNT):
             ext = f"wc:c:b{i:04d}"
-            boards.append({"external_code": ext, "name": f"c{i}", "type": "concept"})
+            boards.append(_board(ext, f"c{i}", "concept"))
             memberships[(ext, "concept")] = []
         for s_idx in range(num_stocks):
             sym = f"{s_idx:06d}"
@@ -433,11 +457,7 @@ class TestAtomicSwitch:
         """差异同步：旧 board name 更新。"""
         snapshot = _make_small_snapshot(num_stocks=50)
         # 显式添加与 fixture 同 external_code 的 board，name 改为"旧板块-更新"
-        snapshot.boards.append({
-            "external_code": "wc:i:old_001",
-            "name": "旧板块-更新",
-            "type": "industry",
-        })
+        snapshot.boards.append(_board("wc:i:old_001", "旧板块-更新", "industry"))
         snapshot.memberships[("wc:i:old_001", "industry")] = ["600000"]
 
         resolver = _make_instrument_resolver(db_session)
