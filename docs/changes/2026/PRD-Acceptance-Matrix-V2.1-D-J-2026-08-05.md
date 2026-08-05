@@ -15,8 +15,8 @@
 | Corrective-3.1（测试修正） | `5a96e34` |
 | **Corrective-3.1（最终代码）** | `16b056f` |
 | Corrective-3.1（文档回填 SHA） | `ae90aa1` |
-| Corrective-3.2（fencing 代码 SHA） | `（待提交）` |
-| **最终文档 HEAD** | `1d32d59` |
+| Corrective-3.2（fencing 代码 SHA） | `bc38d07` |
+| **最终文档 HEAD** | `1d32d59` → `bc38d07`（005 文档/脚本同一提交） |
 
 **生成日期**: 2026-08-05
 

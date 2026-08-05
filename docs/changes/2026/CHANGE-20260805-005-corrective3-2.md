@@ -6,7 +6,7 @@
   ownership 校验、Mypy changed-file 门禁、前端本地验证收口
 - 关联前序：`CHANGE-20260805-004-corrective3-1.md`
 - 基线（Corrective-3.2 起点）：`16b056f`
-- 最终代码 SHA：（待提交）
+- 最终代码 SHA：`bc38d07`
 
 ## 0. 为什么需要 Corrective-3.2
 
