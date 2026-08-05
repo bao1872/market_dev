@@ -156,3 +156,28 @@ strategy、calendar、monitor、strategy-batch、outbox、delivery、after-close
 
 以下事实变化后必须更新本 Map：本地/远程入口、SSH 身份、Compose 服务、运行目录、
 部署调用图、CI 触发方式、数据库/Redis 边界、版本证据或已知生产偏差。
+
+## V2.1 开发链运行状态（2026-08-05 基线 2267d43）
+
+> 当前为代码开发阶段，非集成/部署阶段。以下 status 如实区分，禁止把代码完成写成
+> 生产 fully_ready，也禁止把 PG deferred 写成开发失败。
+
+- `git_branch = dev`
+- `git_head = 6f008ca`（Commit I 收口；Commit D–I 已 push origin/dev）
+- `remote_static_verified = true`（Ruff、改动文件 Mypy、静态合同/架构检查，授权范围内）
+- `remote_unit_verified = true`（PURE_UNIT_TEST 纯单元，不连接 DB）
+- `frontend_build_verified = true`（前端 tsc / ESLint / build，授权范围内）
+- `pg_tested = false`
+- `pg_gate = deferred`
+- `migration_085_authored = true`（Corrective-2 已存在，未 apply）
+- `migration_085_applied = false`
+- `deployed = false`
+- `runtime_verified = false`
+- `data_closed = false`
+- `browser_verified = false`
+- `production_fully_ready = false`
+
+限制：本地仅允许代码/测试/Migration/文档 + git 操作；本地禁止 Ruff/Mypy/pytest/build/
+Migration 执行/数据库调试/部署/浏览器测试。远程允许安全静态/纯单元/前端检查；禁止创建
+PostgreSQL、连接 bz_stock 跑 PG 测试、Alembic upgrade、正式部署、真实全市场任务、生产
+浏览器验收。

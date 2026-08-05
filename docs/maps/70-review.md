@@ -614,3 +614,32 @@ ORM → schema → API → 前端类型 → UI 已闭环：
 - `frontend/package.json::test:contract`：移除失效引用 `index-page-columns.test.ts`（文件不存在），
   登记 `firstPyramidSmcContract.test.ts`。
 - 前端合同测试 552 项全绿；TSC 0 errors；ESLint 0 errors；build 通过。
+
+## 26. V2.1 Review 依赖与血统（2026-08-05 基线 2267d43，Commit F）
+
+> 当前为代码开发阶段，未部署、未跑 PG 集成、未做真实数据验收。
+
+### 26.1 依赖与血统合同
+
+- Review 只依赖 `stock_core` + `market_aggregation` 两个正式 publication pointer；
+  不等待 chip、不等待 auction。
+- 创建阶段只查询这两类 kind；禁止额外查询 chip / auction / state_event /
+  market_review / history_cross_section 等其他 kind（`FORBIDDEN_KINDS`）。
+- exact lineage：board run 的 `source_core_run_id` 与 stock_core pointer 同源、同日、
+  status=succeeded，否则拒绝创建。
+- consumer 只读发布结果（publication pointer 指向的 run），不读临时表。
+
+### 26.2 代码入口
+
+- `review_orchestrator_service._resolve_source_run_ids`：解析 stock_core / market_aggregation 指针。
+- `review_publication_service.get_published_review_run_id`：consumer 读取已发布 review run。
+
+### 26.3 测试
+
+- `backend/tests/test_review_v21_dependency_contract.py`（PURE_UNIT_TEST，mock AsyncSession）：
+  依赖闭合、不等待 chip/auction、禁止 kind、exact lineage、consumer 只读发布结果。
+
+### 26.4 状态
+
+- 代码 & 纯单元：已实现、已提交并 push origin/dev，远程静态/纯单元验证在授权范围执行。
+- PG 集成 / 部署 / 真实数据验收 / 浏览器验收：未执行（PG gate deferred）。

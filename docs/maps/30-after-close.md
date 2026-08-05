@@ -707,3 +707,74 @@ _PIPELINE_STEPS（7步展示序列）：
 - `frontend/src/pages/__tests__/adminAfterClosePipeline.test.ts`
   - `7步断言` + computing_review 标签/位置
   - `formatDurationSeconds` 9 项覆盖 running/未知/正数 + warnings invalid_order 情形
+
+## 13. V2.1 开发链 Commit D–J（2026-08-05 基线 2267d43）
+
+> 本节记录 Commit D–I 的**真实实现**（Commit J 为本文档/Change/Acceptance Matrix/Runbook
+> 收口）。当前为代码开发阶段，未部署、未 apply Migration、未跑 PG 集成、未做真实数据验收。
+
+### 13.1 进入点（entry functions）
+
+- **chip 正式发布指针**：`factor_publication_service.publish_chip_consensus`
+  （见 maps/20-quant-model.md §13.1 与 `backend/app/services/factor_publication_service.py`）。
+  在 `ChipConsensusRun` 达到可发布终态（`succeeded`/`partial`）后原子写入
+  `PUBLICATION_KIND_CHIP_CONSENSUS` 发布指针，并强制 lineage。
+- **ProductReadiness 聚合/闭包**：`ProductReadinessService.evaluate_for_trade_date` /
+  `collect_states`（`backend/app/services/product_readiness_service.py`）。
+- **治理报告**：`evaluate_governance`（同文件，纯函数）。
+- **Admin readiness API**：`GET /v1/admin/readiness/{trade_date}`
+  （`backend/app/api/admin_readiness.py`，`require_roles("admin")`）。
+- **Admin 盘后工作台前端**：`frontend/src/features/product-readiness/AdminReadinessWorkbench.tsx`，
+  挂载于 `AdminDataProductionPage`「数据生产中心」总览。
+
+### 13.2 九节点产品与分类（Commit G）
+
+| 产品 | 分类 | readiness 数据源 |
+|---|---|---|
+| daily_facts | mandatory | `history_cross_section` publication pointer |
+| board_facts | mandatory | `board_facts` publication pointer（pointer 指向 `reused_previous` → ready_reused） |
+| stock_core | mandatory | `stock_core` publication pointer |
+| board_aggregation | mandatory | `market_aggregation` publication pointer |
+| review | mandatory | `MarketReviewRun.status == published` |
+| dsa_projection | enhancement（派生投影） | 随 stock_core 就绪（compute-once，不重算） |
+| chip | enhancement | `chip_consensus` publication pointer / ChipConsensusRun |
+| state_events | enhancement（派生投影） | 随 stock_core 就绪 |
+| auction_anchor | enhancement | `auction_anchor` publication pointer / AuctionAnchorRun |
+
+闭包状态语义（`evaluate_closure`）：`pending` / `blocked` / `core_ready` /
+`degraded_ready` / `fully_ready`。关键判定顺序：blocked（mandatory 任一 unavailable）→
+pending（stock_core 未形成）→ core_ready（stock_core 就绪但其余 mandatory 未完成）→
+mandatory 全部就绪后分 fully_ready / degraded_ready。
+
+### 13.3 chip 发布与血统（Commit D）
+
+- `publish_chip_consensus` 校验链：chip_run 存在 → trade_date 匹配 → status 为
+  `succeeded`/`partial` → 当日已发布 `stock_core` pointer 存在 → 
+  `chip_run.source_core_run_id == 已发布 stock_core pointer.data_run_id`。
+- coverage 由 DB 统计（`chip_run.coverage_ratio`），不接受调用方任意传值。
+- 重复发布走 `on_conflict_do_update` 幂等；失败只重试指针，不重算 DSA/SMC/momentum。
+- 测试：`test_chip_publication_unit.py`（8 项，PURE_UNIT_TEST，mock session）。
+
+### 13.4 Review 依赖与血统（Commit F）
+
+- Review 只依赖 `stock_core` + `market_aggregation` 两个正式 publication pointer；
+  不等待 chip、不等待 auction。
+- 创建阶段只查询这两类 kind，禁止额外查询 chip/auction/state_event 等 kind。
+- exact lineage：board run 的 `source_core_run_id` 必须与 stock_core pointer 同源、同日、succeeded。
+- consumer 只读发布结果（publication pointer 指向的 run），不读临时表。
+- 测试：`test_review_v21_dependency_contract.py`（mock AsyncSession）。
+
+### 13.5 Migration 085 与 PG deferred 状态
+
+- `backend/alembic/versions/085_board_definition_identity_contract.py` 已存在
+  （Corrective-2，`board_definition_versions.identity_contract_version`）。
+- 本轮未新增 Migration；`085` 未 apply。
+- PG 集成测试（`test_v21_synthetic_e2e_pg.py` 等）标记
+  `status = authored_not_executed`、`reason = pg_gate_deferred_during_development`，
+  不阻塞开发。
+
+### 13.6 当前实现状态
+
+- 代码：已实现（Commit D–I 已提交并 push origin/dev）。
+- 远程静态/纯单元验证：在授权范围内执行（Ruff、改动文件 Mypy、PURE_UNIT_TEST）。
+- PG 集成 / Migration apply / 部署 / 真实数据验收 / 浏览器验收：未执行（PG gate deferred）。

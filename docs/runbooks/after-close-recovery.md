@@ -209,3 +209,20 @@ scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.board_
 - 已 succeeded 且 `input_hash` + `algorithm_version` 一致的 item 不得重算；
 - chip / aggregation / review 等 optional 任务失败只重试自身，不反改 core；
 - 当前未实现 CLI 的恢复路径（DSA 恢复、stock_core 发布、市场聚合、Review bootstrap）需先在 `backend/scripts/` 下新增正式 CLI 包装再执行，**禁止用 `/tmp` Python 绕过**。
+
+## V2.1 开发链恢复说明（2026-08-05，Commit D–J）
+
+- **chip 发布指针恢复**：`factor_publication_service.publish_chip_consensus` 在
+  `ChipConsensusRun` 达 `succeeded`/`partial` 后原子写入 `chip_consensus` 发布指针。
+  恢复只重试指针切换（`on_conflict_do_update` 幂等），不重算 DSA/SMC/momentum。
+  前置 lineage：当日必须已有已发布 `stock_core` pointer，且 `chip_run.source_core_run_id`
+  与之一致，否则拒绝发布。
+- **board aggregation 恢复**：`publish_market_aggregation` 严格校验 board run 与
+  stock_core pointer 同源/同日/succeeded/完整 expected count；失败只重跑聚合，不回滚 core。
+- **ProductReadiness 检查**：`GET /v1/admin/readiness/{trade_date}` 返回九节点就绪状态 +
+  闭包 + 治理报告（pointer lineage / stale / unmatched active child / degraded reasons），
+  用于恢复前确认哪些产品未就绪及原因。
+- **PG 集成恢复验证**：本轮为代码开发阶段，PG 集成测试标记
+  `authored_not_executed`（`pg_gate_deferred_during_development`）。授权后需先在 PostgreSQL
+  验证 chip / board / review / auction 落库全链路（items 批量 upsert → publication 指针切换），
+  再执行真实恢复。

@@ -195,3 +195,30 @@ Chip 软失败（[P0-2]）：
 代码层已不再是 quote-capture-only：真值聚合、scan、aggregate、publication pointer、三级页面、
 开盘确认和 Review 回流均有真实入口与目标测试。生产仍不能称为闭环，因为独立外部真值源缺失，
 统一入口会在 scan 前返回 `blocked_external_auction_truth_source`，且不会写正式 pointer。
+
+## 10. V2.1 竞价锚点编排生命周期（2026-08-05 基线 2267d43，Commit D/I）
+
+> 当前为代码开发阶段，未部署、未跑 PG 集成、未做真实数据验收。
+
+### 10.1 锚点模式决策（Commit D）
+
+- `auction_anchor_service.generate_and_publish_auction_anchors` 为统一入口，
+  在一个事务边界内完成「锚点生成 + 校验 + publication 切换」。
+- 模式决策：`structure_only`（无 chip）→ `hybrid`（部分 chip ready）→
+  `composite`（全部 chip ready）。chip 晚到后升级。
+- 生成失败（无可发布 snapshot）软失败返回 `failed`/`publish_failed`，不抛异常。
+- 不允许重算 DSA / SMC / momentum；chip 到达后才做 hybrid/composite 升级。
+
+### 10.2 Synthetic E2E（Commit I）
+
+- 纯逻辑 E2E：`backend/tests/test_v21_synthetic_e2e_pure.py`
+  （`SyntheticAuctionRepository` + 内存 batch transitions，PURE_UNIT_TEST）。
+  覆盖 structure_only→hybrid→composite、晚到 chip、failure matrix、retry 幂等、
+  performance instrumentation。
+- PG 依赖部分：`backend/tests/test_v21_synthetic_e2e_pg.py` 标记
+  `status = authored_not_executed`、`reason = pg_gate_deferred_during_development`。
+
+### 10.3 状态
+
+- 代码 & 纯单元：已实现、已提交并 push origin/dev，远程静态/纯单元验证在授权范围执行。
+- PG 集成 / Migration apply / 部署 / 真实数据验收 / 浏览器验收：未执行（PG gate deferred）。

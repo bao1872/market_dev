@@ -173,3 +173,17 @@ migration 始终早于任何服务重启。migration 失败时：
 - 将 PostgreSQL、Redis、Umami 加入普通应用重启列表；
 - 同一次部署让运行代码同时来自镜像内置代码和非 Live Mount 路径；
 - 未验证完整 SHA、运行模式和挂载来源就报告成功。
+
+## V2.1 开发链部署状态（2026-08-05，Commit D–J）
+
+- 本轮为**代码开发阶段**，未部署、未 apply Migration、未连接生产数据库，`deployed = false`。
+- 部署步骤遵循本节既有 Live Mount / 版本合同流程；部署前必须运行
+  `scripts/ops/panji-prod-preflight`，部署入口唯一为 `scripts/ops/panji-prod-ssh`。
+- `migration_085_board_definition_identity_contract` 已 authored 未 apply
+  （`migration_085_applied = false`）；授权后按本节 Migration 步骤 apply。
+- PG 集成未执行（`pg_tested = false`、`pg_gate = deferred`）；授权后先跑
+  `test_v21_synthetic_e2e_pg.py` 等的 PG 行为测试，再进入真实数据验收。
+- 浏览器验收（Admin 盘后工作台九节点）标记 `browser_pending`。
+- 成功判据：遵循本节「成功判据」，并额外确认
+  `repo HEAD = image tag = container env = /version runtime SHA`、九节点 readiness 的
+  pointer/coverage/reason 均有真实数据证据。
