@@ -19,11 +19,17 @@
 | **最终文档 HEAD** | `1d32d59` → `bc38d07`（005 文档/脚本同一提交） |
 | V2.1 规则纠偏 + PRD 收口 + 验证基础设施 Phase 0-3 | `8b1e4a3` |
 | Corrective Pass 2 | `fdb09a1` |
-| **Corrective Pass 3（候选验收 SHA）** | `fc344402e0ff056419929f3a8be2cfa5d2bfcd9e` |
+| Corrective Pass 3（候选 SHA，已废弃） | `fc344402e0ff056419929f3a8be2cfa5d2bfcd9e` |
+| CP3 文档门禁修复（CHANGE-004 补录 + 基线同步） | `e69f6c7` |
+| CP3 Ruff 修复（死代码/raise-from） | `58a803b` |
+| CP3 Ruff 自动修复（导入/UP017） | `d151cb4` |
+| CP3 测试 mock/fixture 修复 | `77a5d26` |
+| CP3 JSONB has_key 检测修正 | `0bc7bfe` |
+| **Corrective Pass 3（远程门禁全部通过，候选最终 SHA）** | `0bc7bfe3ee1db9d4d34bb6f3da27ec2601372ddb` |
 
 **生成日期**: 2026-08-05
 
-**基线**: `fc344402e0ff056419929f3a8be2cfa5d2bfcd9e`（当前 HEAD/origin/dev，矩阵核对时点；CP3 远程门禁执行中点）
+**基线**: `0bc7bfe3ee1db9d4d34bb6f3da27ec2601372ddb`（当前 HEAD/origin/dev，矩阵核对时点；远程静态门禁已全部实跑通过）
 
 **当前判断（PRD Alignment Pass 2026-08-05 后）**：
 
@@ -48,15 +54,33 @@
 | `idempotency_correct` | `true` | run_key 含 parent/source/input_hash；succeeded 同 hash **不再执行** handler |
 | `restart_enum_single_source` | `true` | API 层改用 `ALL_BOUNDARIES`，补回漏掉的 `board_aggregation` |
 | `p1_3_exact_completeness` | `implemented` | 冻结 eligible universe 作分母（消除自指比值），新增可达 `exact` 分支 |
-| `granular_restart_complete` | `true`（代码层） | 运行时仍需远程 PG 验证 |
-| `static_checks_passed` | **`false`** | 本地无 docker/fastapi/ruff；pytest、ruff、mypy、`compose config` **均未运行**。未运行 ≠ 通过 |
-| `verify_compose_runnable` | `pending_remote_verification` | 无效 `--build` 已改 Live Mount，探针/DB/SHA/等待已修，待远程实跑 |
+| `granular_restart_complete` | `true`（代码层） | 运行时仍需远程 PG 验证（Phase 4） |
+| `static_checks_passed` | **`true`（远程实跑，SHA `0bc7bfe`）** | 见下方「远程门禁结果表」；`fc34440`/`e69f6c7` 等中间 SHA 自动失去候选资格 |
+| `verify_compose_runnable` | `config_runnable=true` | `docker compose config` 通过、9 服务解析、Live Mount 宿主路径存在（唯一 `RUNTIME_SHA` 由部署脚本部署时生成）；**未部署/未启动** |
 | `db_created` / `migration_run` / `deployed` | `false` | 本轮授权范围外（用户明确要求不创建库、不 Migration、不部署） |
-| `manual_acceptance_ready` | `false` | 须先在远程精确检出最终 SHA 并跑通全部静态检查 |
+| `manual_acceptance_ready` | `false` | 待 Phase 4 建库 → Migration → PG E2E → 部署验证栈 → 自动/手动验收 |
 
-> **进入 Phase 4 的前置条件**：在远程精确检出最终 SHA 后，实际运行并全部通过
-> Ruff / Mypy-changed / PURE_UNIT_TEST / granular restart 目标测试 / API contract /
-> frontend contract / build / `docker compose config`。在此之前不得声称代码已验证。
+### 远程门禁结果表（2026-08-05，panji-prod `/root/web_dev_verify` 精确检出 `0bc7bfe`）
+
+| 门禁 | 结果 |
+|---|---|
+| governance（`check_governance_rules.py`） | ✅ PASS |
+| docs consistency（`check_docs_consistency.py`） | ✅ PASS（CHANGE-20260724-004 补录后悬空引用恢复；基线同步满足规则17） |
+| architecture（`check_architecture.py`） | ✅ PASS（11/11，0 violations） |
+| Ruff（CP3 5 个改动文件） | ✅ PASS（`All checks passed!`） |
+| Mypy changed（`BASE=fdb09a1`，mypy-changed.sh） | ✅ PASS（exit 0，5 文件 0 错误；`dispatch_restart` `restart_from` 类型修正） |
+| compileall（backend/app） | ✅ PASS |
+| PURE_UNIT（granular restart + governance + product readiness + 决策 E2E，7 文件） | ✅ 82 passed / 0 failed |
+| API contract（admin_after_close/after_close/errors，PURE_UNIT） | ✅ 32 passed / 26 postgres-skipped |
+| Frontend typecheck（`tsc -b`） | ✅ PASS（exit 0） |
+| Frontend lint（`eslint .`） | ✅ PASS（0 errors，66 既有 warnings 非阻断） |
+| Frontend contract（`test:contract`） | ✅ 552 passed / 0 fail |
+| Frontend build（`tsc -b && vite build`） | ✅ PASS（`✓ built in 5.39s`，dist 产出） |
+| `docker compose config`（`panji-verify`，DB 名全等校验） | ✅ PASS（exit 0，9 服务，DB=`bz_stock_verify_0bc7bfe...`；未连 PG/未启动） |
+| Live Mount 宿主路径 | ✅ 除部署时生成的 `RUNTIME_SHA` 外全部存在（`backend/app`、`alembic`、`alembic.ini`、`frontend/dist`、`/etc/market-dev/config.production.py`） |
+| worktree | ✅ clean（HEAD==origin/dev==`0bc7bfe`；仅 untracked venv 符号链接/静态检查 env 文件，非仓库产物） |
+
+> **进入 Phase 4 的前置条件已达成（静态与无数据库门禁全部通过）**。下一步按授权在远程检出最终 SHA `0bc7bfe` 后：创建 `bz_stock_verify_0bc7bfe...` → Migration → Seed → PG E2E → 部署验证栈 → 自动/手动验收。本轮严格未建库/未 Migration/未部署。
 
 ## V2.1 Corrective Pass 2 状态（2026-08-05，HEAD `8b1e4a3`，已被 CP3 取代）
 
