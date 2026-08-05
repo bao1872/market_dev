@@ -17,10 +17,13 @@
 | Corrective-3.1（文档回填 SHA） | `ae90aa1` |
 | Corrective-3.2（fencing 代码 SHA） | `bc38d07` |
 | **最终文档 HEAD** | `1d32d59` → `bc38d07`（005 文档/脚本同一提交） |
+| V2.1 规则纠偏 + PRD 收口 + 验证基础设施 Phase 0-3 | `8b1e4a3` |
+| Corrective Pass 2 | `fdb09a1` |
+| **Corrective Pass 3（候选验收 SHA）** | `fc344402e0ff056419929f3a8be2cfa5d2bfcd9e` |
 
 **生成日期**: 2026-08-05
 
-**基线**: `ce0a2ec972fdca90998a9345c1f01999beee537f`（当前 HEAD/origin/dev，矩阵核对时点）
+**基线**: `fc344402e0ff056419929f3a8be2cfa5d2bfcd9e`（当前 HEAD/origin/dev，矩阵核对时点；CP3 远程门禁执行中点）
 
 **当前判断（PRD Alignment Pass 2026-08-05 后）**：
 
