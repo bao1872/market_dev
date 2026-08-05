@@ -1728,7 +1728,6 @@ async def compute_for_trade_date(
     batch_count = 0
     # [Commit B §7.2] compute-once/property 计数（供远程 DSA/SMC/momentum 每股各一次证明）
     attempted_count = 0
-    frame_build_count = 0
     peak_batch_size = 0
     mdas_batch_read_count = 0
     # [Performance Contract 2026-08-04] 阶段耗时累计（供性能基准与资源门禁使用）
@@ -1757,6 +1756,12 @@ async def compute_for_trade_date(
 
     from app.services.market_data_aggregation_service import MarketDataAggregationService
     mdas = MarketDataAggregationService()
+    # [Commit B 修正 2026-08-05] 真实 compute-once 调用计数：清零后经
+    # structural_factor_service 内部埋点累计，结束时读取快照（不再用伪 frame_build_count）。
+    from app.services import structural_factor_service as _sf
+    reset_compute_call_counts = _sf.reset_compute_call_counts
+    get_compute_call_counts = _sf.get_compute_call_counts
+    reset_compute_call_counts()
     for i in range(0, total, batch_size):
         batch = instrument_ids[i : i + batch_size]
         batch_count += 1
@@ -1787,9 +1792,10 @@ async def compute_for_trade_date(
         for instrument_id in batch:
             try:
                 attempted_count += 1
-                # [Commit B §7.2] 每股每 core run 只构建一次 canonical frame（df_1d），
+                # [Commit B §7.2] 每股每 core run 只消费一次 canonical frame（df_1d），
                 # 同一个 frame 传给 DSA/SMC/Bollinger/SQZMOM/VolumeContext（compute-once）。
-                frame_build_count += 1
+                # 实际调用计数由 structural_factor_service 内部 `_compute_all_factors_for_bars`
+                # 在 1d 帧上埋点累计（见 reset/get_compute_call_counts），此处不再用伪计数。
                 primary_result = primary_results.get(instrument_id)
                 secondary_result = secondary_results.get(instrument_id)
                 if isinstance(primary_result, Exception):
@@ -1850,15 +1856,21 @@ async def compute_for_trade_date(
     )
 
     _total = time.perf_counter() - _t0
+    # [Commit B 修正 2026-08-05] 真实 compute-once 调用计数快照：由
+    # structural_factor_service 内部在 canonical(1d) 帧上埋点累计，取代伪 frame_build_count。
+    _compute_counts = get_compute_call_counts()
     return {
         "snapshot_count": snapshot_count,
         "failed_count": failed_count,
         "batch_count": batch_count,
         "mdas_batch_read_count": mdas_batch_read_count,
-        # [Commit B §7.2] compute-once 证明：frame_build_count == attempted_count == snapshot_count+failed_count
-        # DSA/SMC/momentum 均在同一 canonical frame 上计算，每股各一次。
+        # [Commit B §7.2] compute-once 证明：真实调用计数 == eligible attempted。
+        # canonical_frame_build / dsa / smc / momentum 均在同一 canonical(1d) 帧上各一次。
         "attempted_count": attempted_count,
-        "frame_build_count": frame_build_count,
+        "frame_build_count": _compute_counts["canonical_frame_build"],
+        "dsa_call_count": _compute_counts["dsa"],
+        "smc_call_count": _compute_counts["smc"],
+        "momentum_call_count": _compute_counts["momentum"],
         "peak_batch_size": peak_batch_size,
         # [Performance Contract 2026-08-04] 阶段耗时/吞吐/回退指标（供 finish_snapshot_run 落库与基准对比）
         "read_duration": round(read_duration, 4),

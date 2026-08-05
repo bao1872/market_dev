@@ -411,16 +411,27 @@ async def _atomic_switch(
     # 插入新 boards
     new_board_id_map: dict[tuple[str, str], UUID] = {}
     for b in boards_to_insert:
+        # [Commit A 2026-08-05] 显式分类学/身份合同，禁止回退 qstock 默认值。
+        # 缺失任一字段即视为 provider 合同破裂，直接报错由调用方捕获。
+        try:
+            taxonomy = b["taxonomy"]
+            source = b["source"]
+            taxonomy_version = b["taxonomy_version"]
+            taxonomy_compatibility_key = b["taxonomy_compatibility_key"]
+        except KeyError as exc:
+            raise BoardSyncError(
+                f"board 缺少显式分类学/身份合同字段: {exc.args[0]} "
+                f"(external_code={b.get('external_code')!r}, name={b.get('name')!r})，"
+                "禁止回退 qstock 默认值"
+            ) from exc
         new_board = MarketBoard(
             externalCode=b["external_code"],
             name=b["name"],
             type=b["type"],
-            taxonomy=b.get("taxonomy", "qstock"),
-            source=b.get("source", "wencai"),
-            taxonomyVersion=b.get("taxonomy_version", "wencai-v1"),
-            taxonomyCompatibilityKey=b.get(
-                "taxonomy_compatibility_key", "qstock-board-v1"
-            ),
+            taxonomy=taxonomy,
+            source=source,
+            taxonomyVersion=taxonomy_version,
+            taxonomyCompatibilityKey=taxonomy_compatibility_key,
             hierarchyLevel=b.get("hierarchy_level", "L1"),
             isActive=True,
             updatedAt=now,

@@ -210,28 +210,56 @@ def reconcile_projection_parameter_hash(
 def map_dsa_projection(
     artifact: CoreComputationArtifact,
     *,
-    dsa_version: str,
-    parameter_hash: str,
-    source_core_run_id: Any | None = None,
     requirement: str = DSA_PROJECTION_REQUIREMENT_REQUIRED,
+    expected_core_run_id: Any | None = None,
     expected_core_parameter_hash: str | None = None,
+    expected_dsa_version: str | None = None,
 ) -> DSAProjectionRecord:
     """从持久化 CoreComputationArtifact 映射 DSA projection（E04-T01/T02）。
 
     不调用 runtime.execute；不解析中文摘要；metrics/visual 直接映射。
 
-    [Commit C §8.2 对账] 若传入 expected_core_parameter_hash，则必须与
-    parameter_hash 一致——projection 派生所依据的参数必须来自同一 core artifact，
-    否则映射失败，防止基于不同版本 core 参数的 projection 被消费。
+    [Commit C 修正 2026-08-05] lineage 唯一真源：
+    - parameter_hash / dsa_version / source_core_run_id 一律**从 artifact 自身读取**，
+      禁止比较两个调用者任意传入的字符串。
+    - 调用方可传入 `expected_*`（来自 CoreRunContext 的 run 级 lineage），与 artifact
+      携带的持久化 lineage 对账：source_core_run_id / parameter_hash / dsa algorithm
+      version 任一不一致即映射失败（拒绝基于不同 run/参数/算法版本的 projection 消费）。
 
     Raises:
         DSAProjectionMappingError: 必需指标缺失、requirement 非法，或
-            expected_core_parameter_hash 与 parameter_hash 不一致。
+            artifact 缺少 lineage、或 expected_* 与 artifact lineage 不一致。
     """
-    if expected_core_parameter_hash is not None:
-        reconcile_projection_parameter_hash(
-            expected_core_parameter_hash, parameter_hash
+    # 从持久化 artifact 自身读取 lineage（唯一真源）
+    parameter_hash = artifact.parameter_hash
+    dsa_version = artifact.algorithm_versions.get("dsa")
+    source_core_run_id = artifact.source_core_run_id
+
+    if not parameter_hash:
+        raise DSAProjectionMappingError(
+            "artifact 缺少持久化 parameter_hash，禁止用任意传入字符串派生 projection"
         )
+    if not dsa_version:
+        raise DSAProjectionMappingError(
+            "artifact 缺少 dsa algorithm version，无法派生 projection"
+        )
+
+    # 对账：expected_*（来自 CoreRunContext）必须与 artifact lineage 一致
+    if expected_core_parameter_hash is not None:
+        reconcile_projection_parameter_hash(expected_core_parameter_hash, parameter_hash)
+    if expected_dsa_version is not None and expected_dsa_version != dsa_version:
+        raise DSAProjectionMappingError(
+            "DSA projection algorithm version 与 core artifact 不一致："
+            f"expected={expected_dsa_version!r}, artifact={dsa_version!r}，"
+            "禁止基于不同算法版本 core 的 projection 被消费"
+        )
+    if expected_core_run_id is not None and source_core_run_id is not None:
+        if str(expected_core_run_id) != str(source_core_run_id):
+            raise DSAProjectionMappingError(
+                "DSA projection source_core_run_id 与 core artifact 不一致："
+                f"expected={expected_core_run_id!s}, artifact={source_core_run_id!s}，"
+                "禁止基于不同 core run 的 projection 被消费"
+            )
 
     metrics = _extract_metrics(artifact)
     visual = _extract_visual(artifact)
@@ -264,18 +292,23 @@ def map_dsa_projection(
 def build_dsa_projection_payload(
     artifact: CoreComputationArtifact,
     *,
-    dsa_version: str,
-    parameter_hash: str,
-    source_core_run_id: Any | None = None,
     requirement: str = DSA_PROJECTION_REQUIREMENT_REQUIRED,
+    expected_core_run_id: Any | None = None,
+    expected_core_parameter_hash: str | None = None,
+    expected_dsa_version: str | None = None,
 ) -> dict[str, Any]:
-    """便捷入口：返回 DSAProjectionRecord.to_dict()（持久化/API 负载）。"""
+    """便捷入口：返回 DSAProjectionRecord.to_dict()（持久化/API 负载）。
+
+    [Commit C 修正 2026-08-05] 强制对账：与正式 production caller 一致，必须校验
+    source_core_run_id / parameter_hash / dsa algorithm version 与 artifact lineage
+    一致，防止基于任意传入字符串构建 projection。
+    """
     record = map_dsa_projection(
         artifact=artifact,
-        dsa_version=dsa_version,
-        parameter_hash=parameter_hash,
-        source_core_run_id=source_core_run_id,
         requirement=requirement,
+        expected_core_run_id=expected_core_run_id,
+        expected_core_parameter_hash=expected_core_parameter_hash,
+        expected_dsa_version=expected_dsa_version,
     )
     return record.to_dict()
 
@@ -315,13 +348,11 @@ if __name__ == "__main__":
         },
         visual={"dsa_vwap": 10.5, "regime_id": 1, "anchor_time": "2026-08-04"},
         availability={"structure": "ready", "smc": "ready", "momentum": "ready"},
-    )
-    rec = map_dsa_projection(
-        ctx,
-        dsa_version="dsa-v1",
-        parameter_hash="abc",
         source_core_run_id="run-1",
+        parameter_hash="abc",
+        algorithm_versions={"dsa": "dsa-v1"},
     )
+    rec = map_dsa_projection(ctx)
     assert rec.projection_hash, "projection hash 不应为空"
     assert rec.requirement == DSA_PROJECTION_REQUIREMENT_REQUIRED
     assert is_projection_consumable(rec, artifact_available=True)

@@ -63,6 +63,21 @@ MAX_CONCEPTS_PER_STOCK = 100
 # 行业层级上限（L1/L2/L3）
 MAX_INDUSTRY_DEPTH = 3
 
+# ===== 板块分类学/身份合同版本（单一来源，禁止使用 qstock 默认值）=====
+# 所有 wencai board 必须显式携带 taxonomy/source/taxonomy_version/
+# taxonomy_compatibility_key/identity_contract_version，禁止在消费端回退 qstock 默认值。
+BOARD_TAXONOMY = "wencai"
+BOARD_SOURCE = "wencai"
+BOARD_TAXONOMY_VERSION = "wencai-hierarchy-v1"
+BOARD_TAXONOMY_COMPATIBILITY_KEY = "wencai-board-v1"
+BOARD_IDENTITY_CONTRACT_VERSION = "wencai-identity-v1"
+# provider 合同版本（fetch 层），供 BoardFactsRun.provider_contract_version 记录
+BOARD_PROVIDER_CONTRACT_VERSION = "wencai-provider-v1"
+# 规范化合同版本，供 BoardFactsRun.normalization_contract_version 记录
+BOARD_NORMALIZATION_CONTRACT_VERSION = "wencai-normalization-v1"
+# 质量门禁版本，供 BoardFactsRun.quality_gate_version 记录
+BOARD_QUALITY_GATE_VERSION = "board-gate-v1"
+
 
 class WencaiBoardProviderError(Exception):
     """问财板块数据源错误基类。"""
@@ -183,7 +198,8 @@ def _match_required_columns(columns: list[str]) -> dict[str, str | None]:
 def _df_content_hash(df: Any) -> str:
     """对 DataFrame 内容计算稳定 hash（用于多表哈希冲突检测）。
 
-    基于规范化后的四类必需字段拼接，避免受行序/无关列影响。
+    基于规范化后的四类必需字段拼接，并对规范化行排序，保证同一批数据
+    即使行序不同也得到相同 hash（顺序无关）。
     """
     columns = list(df.columns)
     col_map = _match_required_columns(columns)
@@ -194,6 +210,8 @@ def _df_content_hash(df: Any) -> str:
             continue
         for value in df[col].astype(str).tolist():
             material_parts.append(f"{key}={value}")
+    # 规范化行排序：保证同行不同顺序 hash 相同（与 _stable_snapshot_hash 顺序无关语义对齐）
+    material_parts.sort()
     return hashlib.sha256("\n".join(material_parts).encode("utf-8")).hexdigest()
 
 
@@ -443,9 +461,7 @@ def _build_board_snapshot(
     df = df.fillna("")
 
     snapshot = BoardSnapshot(raw_rows=len(df))
-    snapshot.diagnostics["required_column_mapping"] = {
-        k: v for k, v in col_map.items()
-    }
+    snapshot.diagnostics["required_column_mapping"] = dict(col_map)
 
     # 名称 → external_code 映射（用于哈希冲突检测）
     name_to_code: dict[str, str] = {}
@@ -488,6 +504,12 @@ def _build_board_snapshot(
                     "external_code": ext_code,
                     "name": concept_name,
                     "type": "concept",
+                    # [Commit A 2026-08-05] 显式分类学/身份合同，禁止下游回退 qstock 默认值
+                    "taxonomy": BOARD_TAXONOMY,
+                    "source": BOARD_SOURCE,
+                    "taxonomy_version": BOARD_TAXONOMY_VERSION,
+                    "taxonomy_compatibility_key": BOARD_TAXONOMY_COMPATIBILITY_KEY,
+                    "identity_contract_version": BOARD_IDENTITY_CONTRACT_VERSION,
                 })
                 name_to_code[concept_name] = ext_code
                 code_to_names.setdefault(ext_code, []).append(concept_name)
@@ -501,7 +523,7 @@ def _build_board_snapshot(
         if industry_path:
             levels = _split_industry_path(industry_path)
             parent_code: str | None = None
-            for level_idx, level_name in enumerate(levels):
+            for level_idx, _level_name in enumerate(levels):
                 # 从 L1 到当前层级的完整名称（"金融" → "金融-银行" → "金融-银行-国有银行"）
                 level_path = "-".join(levels[: level_idx + 1])
                 hierarchy_level = f"L{level_idx + 1}"
@@ -509,13 +531,21 @@ def _build_board_snapshot(
                 key = (ext_code, "industry")
                 if key not in boards_seen:
                     boards_seen.add(key)
-                    board = {
+                    board: dict[str, str] = {
                         "external_code": ext_code,
                         "name": level_path,
                         "type": "industry",
                         "hierarchy_level": hierarchy_level,
-                        "parent_external_code": parent_code,
+                        # [Commit A 2026-08-05] 显式分类学/身份合同，禁止下游回退 qstock 默认值
+                        "taxonomy": BOARD_TAXONOMY,
+                        "source": BOARD_SOURCE,
+                        "taxonomy_version": BOARD_TAXONOMY_VERSION,
+                        "taxonomy_compatibility_key": BOARD_TAXONOMY_COMPATIBILITY_KEY,
+                        "identity_contract_version": BOARD_IDENTITY_CONTRACT_VERSION,
                     }
+                    # parent_external_code 仅 L2/L3 存在（L1 为 None，省略以保持 dict[str, str] 类型）
+                    if parent_code is not None:
+                        board["parent_external_code"] = parent_code
                     snapshot.boards.append(board)
                     name_to_code[level_path] = ext_code
                     code_to_names.setdefault(ext_code, []).append(level_path)
@@ -592,11 +622,81 @@ def _fetch_wencai_sync() -> Any:
     )
 
 
+_FETCH_SUBPROCESS_POLL_SECONDS = 0.2
+
+
+def _subprocess_fetch_worker(queue: Any) -> None:
+    """在独立子进程中执行 pywencai 拉取，把结果/错误放入 multiprocessing Queue。
+
+    作为 scripts 顶层函数，可被 spawn 子进程 picklable 序列化。
+    """
+    try:
+        result = _fetch_wencai_sync()
+        queue.put(("ok", result))
+    except Exception as exc:  # noqa: BLE001 - 边界捕获，脱敏后回传
+        queue.put(("error", type(exc).__name__, str(exc)[:500]))
+
+
+async def _fetch_with_terminable_subprocess() -> Any:
+    """在可终止子进程中执行 pywencai 拉取，超时后真正终止底层调用。
+
+    [Commit A 修正 2026-08-05] 原实现用 asyncio.wait_for(asyncio.to_thread(...))
+    包装 _fetch_wencai_sync：超时会取消等待，但底层 to_thread 线程仍会继续运行
+    pywencai（不可终止），多次超时会导致后台线程叠加。此处改为在独立
+    spawn 子进程中执行，父进程在 PROVIDER_TIMEOUT_SECONDS 内非阻塞轮询
+    multiprocessing Queue；超时则 proc.terminate() 真正终止子进程（含 pywencai
+    网络调用），杜绝线程/进程叠加。
+
+    Returns:
+        pywencai 返回的原始结果（可由 Queue 传输，DataFrame/dict/list/tuple）
+
+    Raises:
+        WencaiFetchError: 超时（子进程已被终止）或子进程内拉取失败
+    """
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_subprocess_fetch_worker, args=(queue,), daemon=True)
+
+    start = time.monotonic()
+    proc.start()
+    deadline = start + PROVIDER_TIMEOUT_SECONDS
+    item: tuple[Any, ...] | None = None
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            try:
+                item = queue.get_nowait()
+                break
+            except Exception:  # noqa: BLE001 - queue.Empty（空队列继续轮询）
+                await asyncio.sleep(_FETCH_SUBPROCESS_POLL_SECONDS)
+    except TimeoutError as exc:
+        # 真正终止子进程（含底层 pywencai 网络调用），并等待其退出
+        proc.terminate()
+        proc.join(timeout=5)
+        raise WencaiFetchError(
+            f"问财拉取超时（>{PROVIDER_TIMEOUT_SECONDS}s），子进程已终止"
+        ) from exc
+    finally:
+        # 兜底：任何路径下确保子进程不残留
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=5)
+
+    if item is None:
+        raise WencaiFetchError("问财拉取未返回结果")
+    if item[0] == "error":
+        raise WencaiFetchError(f"问财拉取失败: {item[1]}: {item[2]}")
+    return item[1]
+
+
 async def fetch_board_snapshot() -> BoardSnapshot:
-    """异步拉取问财板块快照（asyncio.to_thread 包装同步调用）。
+    """异步拉取问财板块快照（pywencai 在可终止子进程中执行）。
 
     流程：
-    1. asyncio.to_thread 调用 _fetch_wencai_sync（不阻塞事件循环）
+    1. 在可终止子进程中执行 pywencai 拉取（超时真正终止，防止线程叠加）
     2. 选择包含必需字段且行数最大的主表
     3. 构建完整 BoardSnapshot（boards + memberships + 门禁数据）
 
@@ -610,18 +710,10 @@ async def fetch_board_snapshot() -> BoardSnapshot:
     """
     start_time = time.monotonic()
 
-    # asyncio.to_thread 包装同步调用 + provider 整体超时（防止 io 阻塞拖垮事件循环）
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(_fetch_wencai_sync),
-            timeout=PROVIDER_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError as exc:
-        raise WencaiFetchError(
-            f"问财拉取超时（>{PROVIDER_TIMEOUT_SECONDS}s）"
-        ) from exc
+    # 在可终止子进程中执行 pywencai（超时真正终止，杜绝 to_thread 线程叠加）
+    result = await _fetch_with_terminable_subprocess()
 
-    # 选择主表 + 构建 BoardSnapshot（也在线程中执行，避免阻塞）
+    # 选择主表 + 构建 BoardSnapshot（纯 CPU 函数，耗时有限，用 to_thread 包装避免阻塞）
     import pandas as pd
     df = await asyncio.to_thread(_select_primary_dataframe, result, pd)
     snapshot = await asyncio.to_thread(_build_board_snapshot, df, pd)
@@ -630,6 +722,12 @@ async def fetch_board_snapshot() -> BoardSnapshot:
     snapshot.diagnostics.update({
         "duration_ms": duration_ms,
         "provider_timeout_seconds": PROVIDER_TIMEOUT_SECONDS,
+        # [Commit A 2026-08-05] 合同版本单一来源，供 BoardFactsRun 记录
+        "provider_contract_version": BOARD_PROVIDER_CONTRACT_VERSION,
+        "normalization_contract_version": BOARD_NORMALIZATION_CONTRACT_VERSION,
+        "identity_contract_version": BOARD_IDENTITY_CONTRACT_VERSION,
+        "taxonomy_version": BOARD_TAXONOMY_VERSION,
+        "quality_gate_version": BOARD_QUALITY_GATE_VERSION,
     })
     logger.info(
         "[WencaiBoard] 快照拉取完成: duration_ms=%d, boards=%d, memberships=%d",
@@ -642,9 +740,16 @@ async def fetch_board_snapshot() -> BoardSnapshot:
 def get_provider_info() -> dict[str, Any]:
     """返回 provider 元信息（供 metadata 记录，不含敏感数据）。"""
     return {
-        "source": "wencai",
+        "source": BOARD_SOURCE,
         "query": WENCAI_QUERY,
         "max_retries": MAX_RETRIES,
         "timeout_seconds": PROVIDER_TIMEOUT_SECONDS,
         "industry_max_depth": MAX_INDUSTRY_DEPTH,
+        "taxonomy": BOARD_TAXONOMY,
+        "taxonomy_version": BOARD_TAXONOMY_VERSION,
+        "taxonomy_compatibility_key": BOARD_TAXONOMY_COMPATIBILITY_KEY,
+        "identity_contract_version": BOARD_IDENTITY_CONTRACT_VERSION,
+        "provider_contract_version": BOARD_PROVIDER_CONTRACT_VERSION,
+        "normalization_contract_version": BOARD_NORMALIZATION_CONTRACT_VERSION,
+        "quality_gate_version": BOARD_QUALITY_GATE_VERSION,
     }

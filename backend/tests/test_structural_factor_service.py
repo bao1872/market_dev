@@ -1480,6 +1480,61 @@ def test_developing_swing_000100_like_case() -> None:
     assert 0.0 <= pos <= 1.0
 
 
+# ===== [Commit B 修正] 真实 compute-once 调用计数 =====
+def test_real_compute_call_counts_1d_bumps_each_once() -> None:
+    """在 canonical(1d) 帧上调用 _compute_all_factors_for_bars，DSA/SMC/momentum/canonical 各计一次。"""
+    from app.services.structural_factor_service import (
+        get_compute_call_counts,
+        reset_compute_call_counts,
+    )
+
+    bars = _build_bars(n=250)
+    reset_compute_call_counts()
+    _compute_all_factors_for_bars(bars, "1d", [], [])
+    counts = get_compute_call_counts()
+    assert counts["canonical_frame_build"] == 1
+    assert counts["dsa"] == 1
+    assert counts["smc"] == 1
+    assert counts["momentum"] == 1
+
+
+def test_real_compute_call_counts_15m_does_not_count() -> None:
+    """secondary(15m) 帧不纳入 compute-once 计数（避免与 canonical 保证混淆）。"""
+    from app.services.structural_factor_service import (
+        get_compute_call_counts,
+        reset_compute_call_counts,
+    )
+
+    bars = _build_bars(n=250)
+    reset_compute_call_counts()
+    _compute_all_factors_for_bars(bars, "15m", [], [])
+    counts = get_compute_call_counts()
+    assert counts["canonical_frame_build"] == 0
+    assert counts["dsa"] == 0
+    assert counts["smc"] == 0
+    assert counts["momentum"] == 0
+
+
+def test_real_compute_call_counts_cumulative_and_reset() -> None:
+    """多次 1d 调用计数累计；reset 后归零。"""
+    from app.services.structural_factor_service import (
+        get_compute_call_counts,
+        reset_compute_call_counts,
+    )
+
+    bars = _build_bars(n=250)
+    reset_compute_call_counts()
+    _compute_all_factors_for_bars(bars, "1d", [], [])
+    _compute_all_factors_for_bars(bars, "1d", [], [])
+    counts = get_compute_call_counts()
+    assert counts["dsa"] == 2
+    assert counts["smc"] == 2
+    assert counts["momentum"] == 2
+    assert counts["canonical_frame_build"] == 2
+    reset_compute_call_counts()
+    assert get_compute_call_counts()["dsa"] == 0
+
+
 # ===== 模块自测入口 =====
 if __name__ == "__main__":
     import pytest

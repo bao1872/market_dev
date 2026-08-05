@@ -664,11 +664,15 @@ async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics(
     assert progress.await_count == 3
     assert result["batch_count"] == 3
     assert result["mdas_batch_read_count"] == 6
-    # [Commit B §7.2] compute-once：每股每 core run 只构建一次 canonical frame，
-    # frame_build_count == attempted_count == snapshot_count + failed_count。
-    assert result["frame_build_count"] == 5
+    # [Commit B §7.2] compute-once：本测试 mock 了 compute_feature_snapshot_for_date，
+    # 不触发 structural_factor_service 内部真实计算，因此真实调用计数均为 0
+    # （attempted_count 仍按 eligible 逐股累计）。真实计数由 test_structural_factor_service
+    # 的 test_real_compute_call_counts 直接验证。
     assert result["attempted_count"] == 5
-    assert result["frame_build_count"] == result["attempted_count"]
+    assert result["frame_build_count"] == 0
+    assert result["dsa_call_count"] == 0
+    assert result["smc_call_count"] == 0
+    assert result["momentum_call_count"] == 0
     assert result["peak_batch_size"] == 2
     # [P0-2 2026-08-04] 固定 fixture：5 只 / batch_size=2 → 3 批（2/2/1）。
     # 二级周期 15m 为日内周期必退回逐股 get_bars，fallback 按标的计数（真实诊断）。

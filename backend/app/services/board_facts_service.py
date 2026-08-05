@@ -410,6 +410,23 @@ async def run_board_facts(
         snapshot_hash = _stable_snapshot_hash(snapshot)
         run.snapshot_hash = snapshot_hash
         run.raw_rows = snapshot.raw_rows
+        # [Commit A 2026-08-05] 从 provider diagnostics 单一来源记录合同版本，禁止回退 qstock 默认值
+        _diag = getattr(snapshot, "diagnostics", {}) or {}
+        run.provider_contract_version = _diag.get(
+            "provider_contract_version"
+        ) or getattr(snapshot, "provider_contract_version", None)
+        run.normalization_contract_version = _diag.get(
+            "normalization_contract_version"
+        ) or getattr(snapshot, "normalization_contract_version", None)
+        run.identity_contract_version = _diag.get(
+            "identity_contract_version"
+        ) or getattr(snapshot, "identity_contract_version", None)
+        run.taxonomy_version = _diag.get(
+            "taxonomy_version"
+        ) or getattr(snapshot, "taxonomy_version", None)
+        run.quality_gate_version = _diag.get(
+            "quality_gate_version"
+        ) or getattr(snapshot, "quality_gate_version", None)
         run.industry_l1_count = _count_boards_by_level(snapshot, "L1")
         run.industry_l2_count = _count_boards_by_level(snapshot, "L2")
         run.industry_l3_count = _count_boards_by_level(snapshot, "L3")

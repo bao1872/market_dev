@@ -322,7 +322,8 @@ class TestBuildBoardSnapshot:
         l1, l2, l3 = by_level["L1"], by_level["L2"], by_level["L3"]
         assert l2["parent_external_code"] == l1["external_code"]
         assert l3["parent_external_code"] == l2["external_code"]
-        assert l1["parent_external_code"] is None
+        # L1 无父级（省略 key，等价语义为 None）
+        assert l1.get("parent_external_code") is None
 
     def test_concepts_deduped_per_stock(self) -> None:
         """同一股票的重复概念去重。"""
@@ -391,9 +392,9 @@ class TestBuildBoardSnapshot:
         concept_boards = [b for b in snapshot.boards if b["type"] == "concept"]
         assert len(concept_boards) == 3
 
-        # 行业：科技-软件 = 1 个（两股相同行业）
+        # 行业：科技-软件（2 级）→ L1"科技" + L2"科技-软件" = 2 个（两股相同路径，去重）
         industry_boards = [b for b in snapshot.boards if b["type"] == "industry"]
-        assert len(industry_boards) == 1
+        assert len(industry_boards) == 2
 
 
 # =============================================================================
@@ -433,7 +434,7 @@ class TestSelectPrimaryDataframe:
         """所有表都缺必需字段时禁止静默降级，直接失败。"""
         df_bad = pd.DataFrame([{"股票代码": "600000.SH", "股票简称": "测试"}])
         df_bad2 = pd.DataFrame([{"价格": 1.0, "市值": 100}])
-        with pytest.raises(WencaiParseError, match="缺列.*静默降级"):
+        with pytest.raises(WencaiParseError, match="缺少必需字段.*静默降级"):
             _select_primary_dataframe({"t1": df_bad, "t2": df_bad2}, pd)
 
     def test_equal_size_qualified_hash_conflict_raises(self) -> None:

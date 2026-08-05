@@ -102,6 +102,11 @@ class CoreComputationArtifact:
     availability: dict[str, str] = field(default_factory=dict)
     hashes: dict[str, str] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    # [Commit C 修正 2026-08-05] 持久化 lineage：DSA projection 必须从 artifact 自身读取
+    # source_core_run_id / parameter_hash / algorithm_versions，禁止消费端比较任意传入字符串。
+    source_core_run_id: Any | None = field(default=None)
+    parameter_hash: str = field(default="")
+    algorithm_versions: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_available(self) -> bool:
@@ -126,6 +131,9 @@ class CoreComputationArtifact:
             "availability": self.availability,
             "hashes": self.hashes,
             "diagnostics": self.diagnostics,
+            "source_core_run_id": str(self.source_core_run_id) if self.source_core_run_id is not None else None,
+            "parameter_hash": self.parameter_hash,
+            "algorithm_versions": self.algorithm_versions,
         }
 
 
