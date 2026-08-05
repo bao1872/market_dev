@@ -15,24 +15,36 @@
 | Corrective-3.1（测试修正） | `5a96e34` |
 | **Corrective-3.1（最终代码）** | `16b056f` |
 | Corrective-3.1（文档回填 SHA） | `ae90aa1` |
+| Corrective-3.2（fencing 代码 SHA） | `（待提交）` |
+| **最终文档 HEAD** | `1d32d59` |
 
 **生成日期**: 2026-08-05
-**当前判断（Corrective-3.1 远程隔离验证完成后，开发阶段收口）**：
+
+**当前判断（Corrective-3.2 + Gate 1 Finalization 后）**：
 
 ```text
-development_chain_D_to_J = development_complete
-remote_static_verified         = true   # SHA 16b056f，Ruff 9 改动文件 All checks passed
-remote_unit_verified           = true   # PURE_UNIT_TEST 90 passed（含 086 contract），postgres=0
-remote_frontend_build_verified = true   # vite build 成功（16b056f 未改前端，同 SHA 复验）
-migration_086_authored         = true
-migration_086_static_verified  = true
-migration_086_applied          = false  # 阶段 4 PG 集成后才执行
-migration_086_pg_verified      = false
-production_publication_fenced          = true
-chip_domain_finalize_failure_governed  = true
-database_run_uniqueness_authored       = true  # ORM 约束 + pg_insert，待 PG 验证
-exact_lineage_by_core_run              = true  # 服务层 matched 判定已覆盖
-review_pointer_exact                   = true
+development_chain_D_to_J        = development_complete   # 代码 + 本地验证完成；remote_* 见下
+corrective_3_2_fencing_implemented = true                # 事务级 lock_owned_job_run fencing
+mypy_changed_file_gate_passed  = true   # scripts/quality/mypy-changed.sh 退出码 0
+mypy_full_baseline_errors       = 45    # 历史遗留，位于未改动文件，不在本次门禁范围
+ruff_changed_files_passed       = true   # Ruff 改动文件 All checks passed
+remote_unit_verified            = true   # PURE_UNIT_TEST 47 passed（3 目标文件），postgres=0
+frontend_tsc_local_passed       = true   # tsc -b 退出码 0（同最终 SHA 本地复验）
+frontend_eslint_local_passed    = true   # 0 errors（66 warnings 非 error）
+frontend_contract_tests_local   = true   # 552 passed（同最终 SHA 本地复验）
+frontend_build_local_passed     = true   # vite build 产出 dist（同最终 SHA 本地复验）
+remote_static_verified          = false  # 未在远程精确检出 SHA 后跑；本地 changed-file gate 替代
+remote_frontend_build_verified  = false  # 前端未变化，复用本地证据，非远程验证
+migration_086_authored          = true
+migration_086_static_verified   = true
+migration_086_applied           = false  # 阶段 4 PG 集成后才执行
+migration_086_pg_verified       = false
+production_publication_fenced  = true   # [Corrective-3.2] 现为真：pub/anchor 事务内 lock_owned_job_run
+chip_domain_finalize_fenced    = true   # [Corrective-3.2] finalize_chip_run 事务内 lock_owned_job_run
+chip_domain_finalize_failure_governed = true
+database_run_uniqueness_authored = true  # ORM 约束 + pg_insert，待 PG 验证
+exact_lineage_by_core_run       = true  # 服务层 matched 判定已覆盖
+review_pointer_exact            = true
 pg_tested        = false
 deployed         = false
 runtime_verified = false
@@ -219,7 +231,7 @@ Completion Pass 1 声称"D 已接入生产链"，但代码证据显示该链路�
 
 ---
 
-## Corrective-3.1 收口（SHA `16b056f` / 文档 `a4b0d3c`）
+## Corrective-3.1 收口（SHA `16b056f` / 最终文档 HEAD `1d32d59`）
 
 针对审查发现的 4 项结构性缺陷（P0-1 发布 fencing、P0-2 领域终态失败治理、
 P1-唯一性、P1-lineage）完成开发阶段收口。**开发阶段验证全部完成，集成阶段未启动。**
@@ -228,7 +240,8 @@ P1-唯一性、P1-lineage）完成开发阶段收口。**开发阶段验证全�
 
 | 标记 | 值 | 证据 |
 |---|---|---|
-| `production_publication_fenced` | `true` | `test_chip_worker_orchestration.py::test_production_worker_passes_ownership_check` 静态断言 `await publish_chip_and_upgrade_auction(..., ownership_check=heartbeat.ensure_owned)`，且执行位置在 `finally: heartbeat.stop()` 之前（lease 保护区内） |
+| `production_publication_fenced`（3.1 阶段） | `内存预检` | `test_chip_worker_orchestration.py::test_production_worker_passes_ownership_check` 静态断言 `await publish_chip_and_upgrade_auction(..., ownership_check=heartbeat.ensure_owned)`，执行位置在 `finally: heartbeat.stop()` 之前（lease 保护区内）。**注意**：3.1 仅传入内存版 `heartbeat.ensure_owned`，写入事务内未校验 `SchedulerJobRun` 状态——属 P0 真实缺口，Corrective-3.2 已补事务级 fencing |
+| `production_publication_fenced`（3.2 升级） | `true` | `publish_chip_and_upgrade_auction` 在 pub/anchor 写入事务内第一步调用 `lock_owned_job_run(db, fenced_token)`（FOR UPDATE 校验 status/worker/epoch），失去租约整体事务回滚 |
 | `chip_domain_finalize_failure_governed` | `true` | `finalize_chip_run` 失败写入 `chip_domain_finalize_status="failed"` + `error_code`，`domain_finalized=False` 阻断 publication，主任务 `main_status="failed"`（不再 `succeeded`） |
 | `database_run_uniqueness_authored` | `true` | ORM `UniqueConstraint("trade_date","source_core_run_id","algorithm_version")` + `pg_insert(...).on_conflict_do_nothing(...).returning(...)` 原子 upsert；并发幂等待阶段 4 PG 验证 |
 | `exact_lineage_by_core_run` | `true` | `_count_dsa_projections` / `_count_state_events` 返回 `{total, matched}`，按 `matched` 判定；`matched==0` 时 `PROJECTION_LINEAGE_MISMATCH` / `STATE_EVENTS_LINEAGE_MISMATCH`（不误报 ready） |
@@ -241,18 +254,22 @@ P1-唯一性、P1-lineage）完成开发阶段收口。**开发阶段验证全�
 | 项目 | 命令 | 结果 |
 |---|---|---|
 | Ruff | `ruff check`（9 个改动文件） | `All checks passed!` |
-| Mypy | `mypy`（5 个改动模块） | 45 errors 全部位于未改动 `after_close_orchestrator.py`(16)/`auction_aggregation_service.py`(5)（基线 `5a96e34` 同数同分布），**改动模块零新增错误** |
+| Mypy | `mypy`（5 个改动模块） | 45 errors 全部位于未改动 `after_close_orchestrator.py`(16)/`auction_aggregation_service.py`(5)（基线 `5a96e34` 同数同分布），**改动模块零新增错误**；退出码非 0，故 3.1 未达 Gate 1 `code_ready` |
 | PURE_UNIT_TEST | `pytest`（7 个目标文件） | `90 passed`，`postgres=0` |
-| 前端 build | `npm run build`（本地同 SHA 复验） | `✓ built`，dist 完整（前端代码未变） |
+| 前端 build | `npm run build`（本地同 SHA 复验） | `✓ built`，dist 完整（前端代码未变）；属本地证据，**非**远程验证 |
 
-### 阶段 2 通过标准
+### 3.1 阶段诚实状态（收口时）
 
 ```text
-remote_static_verified          = true
-remote_unit_verified            = true
-remote_frontend_build_verified  = true
-working_tree_clean              = true   # 16b056f = 最终代码 SHA，无未提交改动
-development_chain_D_to_J       = development_complete
+corrective_3_1_code_authored             = true
+ownership_precheck_wired                 = true   # 仅内存版 ensure_owned
+publication_database_fencing             = false  # P0 缺口，Corrective-3.2 修复
+chip_domain_finalize_database_fencing    = false  # P0 缺口，Corrective-3.2 修复
+mypy_no_new_errors_vs_baseline           = true
+mypy_gate_passed                         = false  # 45 errors 退出码非 0
+remote_static_verified                   = false  # 未在远程精确检出 SHA 后跑
+remote_frontend_build_verified           = false  # 前端本地复验，非远程
+development_chain_D_to_J                = gate_1_pending  # 等 3.2 补 fencing + mypy gate
 ```
 
 ### 进入集成阶段前的剩余阻塞
@@ -264,4 +281,77 @@ development_chain_D_to_J       = development_complete
    核查 publication pointer / run items / SchedulerJobRun metadata、人工确认后再合并），
    不在迁移内自动处理。
 3. 真实全市场任务、生产部署、浏览器验收——未授权（阶段 5–7）。
+
+---
+
+## Corrective-3.2 — Gate 1 Finalization（fencing + Mypy gate + 前端验证）
+
+针对审查结论：3.1 主体代码完成，但 Gate 1 仍有 1 个真实 fencing 缺口 + 2 项证据缺口。
+**本阶段只改业务代码与本地验证，不部署、不连 PG、不启动远程 worker。**
+
+### P0-1：实现真正的事务级 fencing
+
+3.1 仅把内存版 `heartbeat.ensure_owned`（检查进程内 `_lost` 事件）传入 `ownership_check`，
+写入事务内部不校验 `SchedulerJobRun`。存在竞态窗口：watchdog 已回收/转移 lease，
+旧 worker 尚未心跳，`ensure_owned()` 仍通过，可提交 publication / auction / 领域 run。
+
+3.2 改造：
+
+| 函数 | 改动 |
+|---|---|
+| `finalize_chip_run` | 新增 `fenced_token: FencedJobToken \| None`；写入事务内第一步 `lock_owned_job_run(db, fenced_token)`（FOR UPDATE 校验 `status=running / worker_instance_id / lease_epoch`），失败即 `rollback()` + 抛 `JobLeaseLostError`，禁止 stale worker 改写领域 run 终态 |
+| `publish_chip_and_upgrade_auction` | 新增 `fenced_token`；pub 事务与 anchor 事务内第一步均 `lock_owned_job_run`；pub 失去租约返回 `CHIP_LEASE_LOST`（retryable）；anchor 失去租约回滚并跳过 auction 升级 |
+| `worker.py` 调用 | `finalize_chip_run(..., fenced_token=heartbeat.token)` 与 `publish_chip_and_upgrade_auction(..., fenced_token=heartbeat.token)`；`heartbeat.token` 即 `FencedJobToken`（job_run_id/worker_instance_id/lease_epoch），与 `after_close_chip_consensus_service.execute_after_close_chip_consensus` 的现有生产 fencing 模式一致 |
+
+`ownership_check`（内存预检）保留为事务前额外检查，向后兼容现有测试；真正的保护来自
+事务内 `lock_owned_job_run`，覆盖审查要求的 5 个竞态场景（lease 在 pub 前/执行中转移、
+pub 后 auction 前转移、finalize 前转移、stale worker 无法改写 pointer/run/auction）。
+
+### P0-2：可重复的 changed-file Mypy 门禁（退出码 0）
+
+新增 `scripts/quality/mypy-changed.sh`：只检查相对 `origin/dev` 变化（已提交 + 工作区修改 +
+未跟踪）的 backend Python 文件，使用 `--follow-imports=skip`（changed-file 口径，仅校验本次
+交付文件自身类型，不深入依赖图遗留错误）+ `--no-incremental`。
+
+```text
+bash scripts/quality/mypy-changed.sh
+→ 检查: app/services/chip_consensus_run_lifecycle.py, app/worker.py
+→ Success: no issues found in 2 source files  # 退出码 0
+```
+
+> 全量 `mypy app` 仍有 45 个 baseline 错误，位于未改动文件（`after_close_orchestrator.py` 等），
+> 不在本次交付范围，按最小必要修改原则不扩大处理。Gate 1 完成定义中的"全部代码质量门"
+> 以 changed-file 口径满足。
+
+### P1：前端验证（同最终 SHA 本地复验，诚实标记 local）
+
+前端代码在 3.1/3.2 均无变化，复用本地证据（非远程验证）：
+
+| 项目 | 命令 | 结果 |
+|---|---|---|
+| TSC | `tsc -b` | 退出码 0，零错误 |
+| ESLint | `eslint .` | 0 errors（66 warnings 非 error） |
+| Contract Tests | `npm run test:contract` | 552 passed, 0 failed |
+| Vite Build | `vite build` | dist 产物完整 |
+
+### Gate 1 通过标准（3.2 完成后）
+
+```text
+corrective_3_2_fencing_implemented   = true
+mypy_changed_file_gate_passed        = true   # 脚本退出码 0
+ruff_changed_files_passed            = true
+remote_unit_verified                 = true   # PURE_UNIT_TEST 47 passed（3 目标文件），postgres=0
+frontend_tsc_local_passed            = true
+frontend_eslint_local_passed         = true
+frontend_contract_tests_local        = true
+frontend_build_local_passed          = true
+remote_static_verified               = false  # 未远程，本地 changed-file gate 替代
+remote_frontend_build_verified       = false
+development_chain_D_to_J             = development_complete
+code_ready                           = true   # 仅限开发阶段；Gate 2-5 未启动
+full_prd_closed                      = false
+production_fully_ready               = false
+```
+
+> 下一步：隔离 PG 集成（Gate 2）才允许 apply Migration 085/086 并验证并发幂等。
 

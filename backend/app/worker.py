@@ -1832,6 +1832,7 @@ async def _chip_consensus_poll_once() -> bool:
                             if chip_status == "failed" else None
                         ),
                         diagnostics={"reason_codes": reason_codes},
+                        fenced_token=heartbeat.token,
                     )
                     await run_db.commit()
                 domain_finalized = True
@@ -1890,6 +1891,7 @@ async def _chip_consensus_poll_once() -> bool:
                 publish_fn=publish_chip_consensus,
                 auction_fn=generate_and_publish_auction_anchors,
                 ownership_check=heartbeat.ensure_owned,
+                fenced_token=heartbeat.token,
             )
             # [Corrective-3 §二.4] 软失败必须可治理：并入主任务终态 metadata，
             # 使 ProductReadiness 能显示 chip run succeeded 但 publication missing。

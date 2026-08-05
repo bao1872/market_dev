@@ -34,6 +34,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chip_consensus_run import ChipConsensusRun
+from app.services.fenced_job_run_service import (
+    FencedJobToken,
+    JobLeaseLostError,
+    lock_owned_job_run,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +237,7 @@ async def finalize_chip_run(
     error_code: str | None = None,
     error_message: str | None = None,
     diagnostics: dict[str, Any] | None = None,
+    fenced_token: FencedJobToken | None = None,
 ) -> ChipConsensusRun:
     """把 chip 计算结果写入 `ChipConsensusRun` 终态。
 
@@ -239,7 +245,20 @@ async def finalize_chip_run(
     `chip_run.status in (succeeded, partial)` 且读取 `coverage_ratio`。
 
     coverage_ratio 由真实计数推导，不接受调用方任意传值。
+
+    [Corrective-3.2 §P0-fencing] 若传入 `fenced_token`，在写入事务内部
+    第一步用 `lock_owned_job_run` 对 `SchedulerJobRun` 行加 FOR UPDATE 并校验
+    `status=running / worker_instance_id / lease_epoch` 仍与 token 一致。
+    失去租约（watchdog 已回收/转移）时整个事务回滚并抛 `JobLeaseLostError`，
+    禁止 stale worker 改写领域 run 终态。
     """
+    if fenced_token is not None:
+        try:
+            await lock_owned_job_run(db, fenced_token)
+        except JobLeaseLostError:
+            await db.rollback()
+            raise
+
     run = await db.get(ChipConsensusRun, chip_run_id)
     if run is None:
         raise ValueError(f"finalize_chip_run 失败: chip_run_id={chip_run_id} 不存在")
@@ -354,6 +373,7 @@ async def publish_chip_and_upgrade_auction(
     publish_fn: _PublishFn,
     auction_fn: _AuctionFn,
     ownership_check: Any | None = None,
+    fenced_token: FencedJobToken | None = None,
 ) -> ChipPublicationOutcome:
     """[Corrective-3 §二.3] chip 发布 + auction 升级的正确顺序编排。
 
@@ -416,6 +436,21 @@ async def publish_chip_and_upgrade_auction(
     # ---- 步骤 1：发布 chip pointer ----
     try:
         async with session_factory() as pub_db:
+            # [Corrective-3.2 §P0-fencing] 写入事务内第一步校验租约：
+            # 对 SchedulerJobRun 加 FOR UPDATE 并核对 status/worker/epoch。
+            # watchdog 已回收/转移租约时 lock 抛 JobLeaseLostError，整个
+            # publication 事务回滚，stale worker 无法写入 pointer。
+            if fenced_token is not None:
+                try:
+                    await lock_owned_job_run(pub_db, fenced_token)
+                except JobLeaseLostError as lost:
+                    await pub_db.rollback()
+                    return ChipPublicationOutcome(
+                        status=PUBLICATION_STATUS_SKIPPED,
+                        error_code="CHIP_LEASE_LOST",
+                        error_message=str(lost)[:500],
+                        retryable=True,
+                    )
             pub = await publish_fn(
                 session=pub_db,
                 trade_date=trade_date,
@@ -476,6 +511,18 @@ async def publish_chip_and_upgrade_auction(
 
     try:
         async with session_factory() as anchor_db:
+            # [Corrective-3.2 §P0-fencing] auction 升级事务内同样校验租约，
+            # 防止 publication 成功、lease 在两者间被回收的竞态窗口。
+            if fenced_token is not None:
+                try:
+                    await lock_owned_job_run(anchor_db, fenced_token)
+                except JobLeaseLostError as lost:
+                    await anchor_db.rollback()
+                    logger.warning(
+                        "[ChipRunLifecycle] 发布后失去租约，跳过 auction 升级: %s",
+                        lost,
+                    )
+                    return outcome
             anchor_result = await auction_fn(
                 anchor_db,
                 trade_date=trade_date,
