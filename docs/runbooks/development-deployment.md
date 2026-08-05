@@ -11,6 +11,28 @@
 - 唯一运行方式是 `docker-compose.prod.yml` + `docker-compose.live.yml`；
 - 本 Runbook 不授权远程开发部署、migration 或业务数据操作，执行这些动作仍需用户在当前任务明确授权。
 
+## 两种部署子流程
+
+### primary development deployment（正式运行栈）
+
+- 目标：把已确认 SHA 部署到 `panji-prod` 正式运行栈（`docker-compose.prod.yml` + `docker-compose.live.yml`），操作 `bz_stock`。
+- 触发：用户明确授权后，且 V2.1 已在验证栈通过验收。
+- 前置：`panji-prod-preflight` + `panji-prod-ssh` 入口（见 `rules/80`）。
+
+### remote verification deployment（远程验证栈，V2.1 验收用）
+
+- 目标：把同一 SHA 部署到独立验证栈（`docker-compose.verify.yml` + `market.verify.env`），操作 `bz_stock_verify_<sha>`。
+- 约束（详见 `rules/80` DS-110/111/112）：
+  - 独立 Compose project（`panji-verify`），不复用正式容器；
+  - 端口仅绑定 `127.0.0.1`，只经 SSH Tunnel 访问；
+  - `APP_ENV=verification`、独立 Redis DB/前缀；
+  - 自动 Scheduler 关闭（`PANJI_SCHEDULER_ENABLED=false`）；
+  - 只启动必要 Worker（after-close / chip / watchdog），不加入正式 Nginx 公网入口；
+  - **绝不连接 `bz_stock`**。
+- 脚本：`scripts/ops/panji-verify-deploy`、`scripts/deploy/panji-verify-deploy.sh`、`scripts/verify/create_verify_database.sh`、`scripts/verify/drop_verify_database.sh`、`scripts/verify/seed_v21_verify_data.py`。
+- 连接校验：验证栈启动后执行 `SELECT current_database()`，非 `bz_stock_verify_<sha>` 立即中止。
+- 验证栈不得替代正式运行栈；验收通过后才允许同 SHA 部署正式栈。
+
 ## 部署前
 
 1. 确认当前分支为 `dev`，工作树内容已经精确提交并推送到 `origin/dev`。
@@ -176,14 +198,12 @@ migration 始终早于任何服务重启。migration 失败时：
 
 ## V2.1 开发链部署状态（2026-08-05，Commit D–J）
 
-- 本轮为**代码开发阶段**，未部署、未 apply Migration、未连接生产数据库，`deployed = false`。
-- 部署步骤遵循本节既有 Live Mount / 版本合同流程；部署前必须运行
-  `scripts/ops/panji-prod-preflight`，部署入口唯一为 `scripts/ops/panji-prod-ssh`。
-- `migration_085_board_definition_identity_contract` 已 authored 未 apply
-  （`migration_085_applied = false`）；授权后按本节 Migration 步骤 apply。
-- PG 集成未执行（`pg_tested = false`、`pg_gate = deferred`）；授权后先跑
-  `test_v21_synthetic_e2e_pg.py` 等的 PG 行为测试，再进入真实数据验收。
-- 浏览器验收（Admin 盘后工作台九节点）标记 `browser_pending`。
+- 本轮为**代码开发阶段**，未部署、未 apply Migration、未连接业务数据库，`deployed = false`。
+- **PG 验证不再在 `bz_stock` 执行**：按 `rules/80` DS-110，V2.1 的完整 PG 验证（Migration 085/086、PG 集成、Synthetic E2E）只在 `panji-prod` 上临时验证库 `bz_stock_verify_<sha>` 运行，由正式验证脚本创建、校验与删除；本地/CI 永久禁止临时库。
+- 验证栈部署走「remote verification deployment」子流程（`docker-compose.verify.yml`），不触碰正式运行栈；验收通过后才允许同 SHA 部署正式栈。
+- `migration_085_board_definition_identity_contract` 与 `migration_086_*`（如存在）已 authored 未 apply（`migration_085_applied = false`）；授权后在验证库按 Migration 步骤 apply，并执行 upgrade→downgrade→upgrade 验证。
+- PG 集成执行（`PANJI_REMOTE_VERIFY_DB_TEST=1`）：`test_v21_synthetic_e2e_pg.py` 等，硬断言见 `docs/prd/31-after-close-product-closure-v2.1.md` §10；任一失败直接修代码、重建验证库重跑，不询问普通修复确认。
+- 浏览器验收（Admin 盘后工作台九节点）走 `docs/runbooks/v21-manual-acceptance.md`，标记 `browser_pending`。
 - 成功判据：遵循本节「成功判据」，并额外确认
   `repo HEAD = image tag = container env = /version runtime SHA`、九节点 readiness 的
-  pointer/coverage/reason 均有真实数据证据。
+  pointer/coverage/reason 均有真实数据证据，且验证库 `current_database()` 为 `bz_stock_verify_<sha>`。

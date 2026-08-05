@@ -425,6 +425,45 @@ stock core 批量入口，该入口必须另行满足本合同的全部字段。
 
 违反上述任一条即视为实现缺陷，必须修实现而不是调大预算。
 
+## 远程临时验证数据库与验证栈（2026-08-05，V2.1 验收闭环）
+
+> 背景：V2.1 开发链需要真实 PG 验证（Migration、PG 集成、Synthetic E2E、远程手动验收），
+> 但本地/CI 永久禁止任何临时数据库。因此在 `panji-prod` 已有 PostgreSQL 容器内引入
+> **唯一允许的临时数据库** `bz_stock_verify_<sha>`，由正式验证脚本创建、检查与删除。
+> 本节的合同优先级高于 `40-testing-quality.md` 中"本地/CI 永久禁止"的条款，但**不授权**任何本地/CI 临时库。
+
+### DS-110 远程临时验证数据库
+
+- **命名**：`bz_stock_verify_<7到40位SHA>`，SHA 必须为待验收的 `origin/dev` 精确 commit。
+- **创建入口**：仅允许正式验证脚本（`scripts/verify/create_verify_database.sh`）在 `panji-prod` 已有 PostgreSQL 容器内创建；禁止新建 PostgreSQL 容器或 Volume。
+- **连接校验**：应用/测试连接建立后必须执行 `SELECT current_database(), current_user;` 并确认数据库名匹配验证库命名；若 `current_database()` 返回 `bz_stock`，立即中止并告警。
+- **禁止连接 `bz_stock`**：验证栈的所有连接字符串、Worker、测试、seed 脚本不得指向 `bz_stock`；任何写入 `bz_stock` 的动作视为越权。
+- **Migration 规则**：允许 DDL 与 Alembic，但只针对验证数据库，从确认 head 升级到目标 migration（含 085/086），可执行 upgrade→downgrade→upgrade 验证；不得触碰 `bz_stock` schema。
+- **连接终止**：用户验收完成、验证资源清理阶段，验证脚本必须先断开验证栈连接再删除数据库。
+- **验收后删除**：用户确认通过后，由 `scripts/verify/drop_verify_database.sh` 删除 `bz_stock_verify_<sha>`。
+- **无备份要求**：验证数据库不是业务数据库，不要求备份，删除不可逆但无业务影响。
+
+### DS-111 远程验证栈
+
+- **Compose project 独立命名**：使用独立的 `docker-compose.verify.yml` 与 project 名（如 `panji-verify`），不得复用正式 `market-dev` project，避免容器名/网络冲突。
+- **端口仅绑定 `127.0.0.1`**：验证栈所有对外端口只绑定服务器回环地址，只通过 SSH Tunnel 给用户访问，不得暴露公网。
+- **独立环境文件**：使用独立的 `market.verify.env`，明确 `APP_ENV=verification`、`DATABASE_URL=<bz_stock_verify_<sha>>`、独立的 Redis DB 或 key 前缀，不读取正式 `market.env`。
+- **自动 Scheduler 关闭**：验证栈 `PANJI_SCHEDULER_ENABLED=false`（或等价），避免自动盘后编排干扰验收。
+- **只启动必要 Worker**：仅启动 after-close / chip / watchdog 等验收必需的 Worker，不得复用正式 Worker 容器，不得加入正式 Nginx 公网入口。
+- **运行 SHA 可检查**：验证栈必须暴露 `runtime_git_sha`、repo HEAD、镜像 SHA 三类证据，且均等于目标验收 SHA。
+
+### DS-112 验证数据合同
+
+- **不完整复制 `bz_stock`**：验证库不得 `pg_dump` 整个 `bz_stock`；只通过正式 seed CLI（`scripts/verify/seed_v21_verify_data.py`）写入有限数据。
+- **`bz_stock` 只读**：seed 脚本对 `bz_stock` 只做 SELECT，绝不写入；源数据读取走只读连接。
+- **复制范围**：仅复制验收必需的有限 instrument、bars（约 90–120 个交易日）、board membership（行业 L1/L2/L3 与 concept 分离）、以及必要基础数据（交易日历、板块定义）。
+- **四类场景支持**：seed 必须能生成至少四类代表状态数据：
+  1. 完整成功（fully_ready）；
+  2. 异步增强（core_ready，chip 异步）；
+  3. 降级（degraded_ready，board reused / chip partial / hybrid）；
+  4. 治理与恢复（publication missing / lease lost / retryable child）。
+- **不得写成一次性远程脚本**：seed 必须是仓库内可复跑的正式 CLI，受版本控制，支持重建验证库时幂等重跑。
+
 ## 分层发布与增量检查点纪律
 
 > 来源：CHANGE-20260729-006

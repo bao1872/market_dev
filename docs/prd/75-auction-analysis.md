@@ -6,6 +6,8 @@
 条款前缀：`AU`
 需求所有权：竞价分析层的目标行为、锚点合同、分析定义与边界约束
 
+> **V2.1 升级合同**：`structure-only / hybrid / composite` 三种 publication 的升级路径与 `fully_ready` 判定（composite 才 fully_ready，structure-only/hybrid 不得 fully_ready）以 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §3 与 §6 为权威真源。本文件陈述的已确认 auction 链路仍需对齐 V2.1 closure 语义。
+
 > 本文件是竞价分析层的 PRD。竞价分析是一个独立的分析层，不属于第一金字塔或第二金字塔。
 > [CHANGE-20260730-018] 已实现完整链路：Migration 077+078、7张表、3个service、6个API端点、前端三级页面、248个单元测试+15个PG集成测试。
 

@@ -5,6 +5,8 @@
 对应 Map：`../maps/30-after-close.md`  
 需求所有权：盘后触发、readiness、编排、计算、校验、发布和补跑
 
+> **V2.1 正式真源**：本 PRD 的 V2.1 产品闭环（九节点 readiness、closure 定义、Granular restart 枚举、P1-3 readiness 完整性、端到端验收）的权威事实源为 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md)。本文件主要定义 `restart_from=daily_ready`（从 core 链开始），不替代 V2.1 完整 granular restart 合同；V2.1 临时验证库与验证栈见 `rules/80` DS-110/111/112。
+
 ## 1. 目标
 
 每个 A 股交易日完成所需数据准备、全市场日线因子和事件计算、结果校验和正式发布，并支持本地调试及远程补跑。

@@ -20,6 +20,8 @@
 
 **生成日期**: 2026-08-05
 
+**基线**: `ce0a2ec972fdca90998a9345c1f01999beee537f`（当前 HEAD/origin/dev，矩阵核对时点）
+
 **当前判断（PRD Alignment Pass 2026-08-05 后）**：
 
 > [PRD Alignment Pass 2026-08-05] 审查结论：上一轮 `development_complete` / `code_ready=true`

@@ -139,46 +139,46 @@ Gov     python tools/check_governance_rules.py
 
 修改 migration 必须有 upgrade / downgrade / upgrade 验证。详见 `80-deployment-data-safety.md`。
 
-## 持久测试数据库禁用（CHANGE-20260728-004 / CHANGE-20260728-008）
+## 测试数据库与测试模式（CHANGE-20260728-004 / CHANGE-20260728-008 修订；2026-08-05 引入第三种模式）
 
 > 引用修订（2026-08-02，CHANGE-20260802-003）：原文的悬空 Change 引用已移除；
-> 实际来源是 CHANGE-20260728-004（永久禁用测试库）
-> 与 CHANGE-20260728-008（永久删除持久测试库）。规则本身不变。
+> 实际来源是 CHANGE-20260728-004（禁用临时测试库）与 CHANGE-20260728-008（删除持久测试库）。
+> 2026-08-05 补充：新增第三种模式 `PANJI_REMOTE_VERIFY_DB_TEST=1`（远程临时验证库），
+> 规则由禁止变为"本地/CI 永久禁止，远程验证库在 DS-110 条件下允许"。
 
 > 来源：AGENTS.md §8 基础安全边界
 
-### 禁止范围
+### 禁止范围（本地 / CI / Docker 容器）
 
-- 禁止在任何位置（本地、远程开发运行环境、CI、Docker 容器）创建或复用**独立/临时测试数据库**。
-- 本地测试只允许两种模式：
-  - `PURE_UNIT_TEST=1`：纯单元/mock，不连接数据库；
-  - `PANJI_SHARED_DEV_DB_TEST=1`：经 SSH 隧道连共享开发业务数据库 `bz_stock` 的明确授权目标测试。
-- 共享模式禁止 DDL/Alembic、独立 session/engine；仅使用 `db_session`/`client` fixture；savepoint rollback；测试结束无残留。
-- 已永久删除独立测试数据库路线、独立测试库 URL 变量、独立测试库名与测试专用容器。
-- 不保留 conftest 持久测试引擎或 Alembic 自动迁移到本地。
+- **本地、CI、Docker 容器**：禁止创建或复用任何独立/临时测试数据库；禁止启动测试专用数据库容器（含 CI service container 与 `docker compose` 临时 Postgres）；禁止创建测试专用 Volume 或持久测试引擎；禁止引入 `TEST_DATABASE_URL` 一类独立测试库连接变量；禁止使用 `bz_stock_test` 一类独立测试库名；禁止在 CI 中为数据库测试挂载 `services: postgres`。
+- **唯一允许的临时数据库**是 `rules/80-deployment-data-safety.md` DS-110 定义的远程验证数据库 `bz_stock_verify_<sha>`，且仅在 `panji-prod` 已有 PostgreSQL 容器内、由正式验证脚本创建。
 
 ### 测试模式规则
 
-- 非 `PURE_UNIT_TEST=1` 且非 `PANJI_SHARED_DEV_DB_TEST=1` 时，conftest 加载即失败。
+- 三种模式见 TQ-100。非三种模式之一时，`conftest` 加载即失败。
 - 共享模式必须设置 `PANJI_SHARED_DEV_DB_TARGET`（唯一目标测试文件）、`APP_ENV=development`、`DATABASE_URL` 指向 `127.0.0.1/localhost` 的 `bz_stock`。
 - 共享模式 `TestAsyncSessionLocal` fail-closed（禁止测试自建独立 session/engine）。
+- 远程验证模式必须在 `panji-prod` 运行，连接 `bz_stock_verify_<sha>`，`APP_ENV=verification`，且 `current_database()` 不得为 `bz_stock`。
 
 ### 新增测试规则
 
 - 新增测试优先写成纯单元测试（不连接数据库）。
-- 必须连接数据库的集成测试，必须使用 `db_session` fixture，并只能在 `PANJI_SHARED_DEV_DB_TEST=1` 共享开发库目标模式下运行。
+- 必须连接数据库的集成测试，必须使用 `db_session` fixture：
+  - 目标测试只能在 `PANJI_SHARED_DEV_DB_TEST=1` 共享开发库目标模式下运行；
+  - 完整 PG 集成 / E2E 只能在 `PANJI_REMOTE_VERIFY_DB_TEST=1` 远程验证库模式下运行。
 - 不得在本地 Mac 创建持久测试库以运行集成测试。
 
 ### TQ-100 唯一测试模式合同
 
 > 本条是测试运行环境的**唯一权威**。任何文档、脚本、CI 配置、注释与本条冲突的，以本条为准。
 
-**唯二允许的测试模式**：
+**三种允许的测试模式**：
 
 | 模式 | 触发变量 | 数据库 | 适用范围 |
 |---|---|---|---|
 | 纯单元 | `PURE_UNIT_TEST=1` | 不连接任何数据库、不联网 | 默认模式，绝大多数测试 |
 | 共享开发库目标测试 | `PANJI_SHARED_DEV_DB_TEST=1` | 经 SSH 隧道连共享开发业务库 `bz_stock` | 当轮明确授权的少量目标测试 |
+| 远程临时验证库 | `PANJI_REMOTE_VERIFY_DB_TEST=1` | `panji-prod` 上 `bz_stock_verify_<sha>` | Migration、PG 集成、完整 Synthetic E2E |
 
 两个变量均未设置时，`backend/tests/conftest.py` 必须在加载阶段 fail-closed 直接失败，不得回退到任何默认数据库。
 
@@ -191,16 +191,26 @@ Gov     python tools/check_governance_rules.py
 - 全程 savepoint rollback，测试结束数据库无残留；
 - 禁止任何 DDL 与 Alembic 操作。
 
-**永久禁止**（在本地、远程开发运行服务器、CI、Docker 容器任一位置均禁止）：
+**远程验证模式的强制前置条件**（fail-closed，任一不满足立即中止）：
 
-- 禁止创建或复用独立测试数据库、临时测试数据库；
+- 只能在远程 `panji-prod` 运行，禁止在本地 / CI 启用；
+- `APP_ENV=verification`；
+- `DATABASE_URL` 指向 `bz_stock_verify_<7到40位SHA>`（DS-110 命名规则）；
+- 连接建立后必须执行 `SELECT current_database()`，若返回 `bz_stock` 立即中止（禁止触碰业务库）；
+- 允许 DDL 与 Alembic，但只针对验证数据库；
+- 允许完整 PG 测试（Migration、PG 集成、Synthetic E2E）；
+- 禁止创建测试 PostgreSQL 容器与测试 Volume。
+
+**本地 / CI 永久禁止**（与第一种模式无关，仅约束本地/CI）：
+
+- 禁止在本地 / CI 创建或复用独立测试数据库、临时测试数据库；
 - 禁止启动测试专用数据库容器（含 CI service container 与 `docker compose` 临时 Postgres）；
 - 禁止创建测试专用 Volume 或持久测试引擎；
 - 禁止引入 `TEST_DATABASE_URL` 一类独立测试库连接变量；
 - 禁止使用 `bz_stock_test` 一类独立测试库名；
 - 禁止在 CI 中为数据库测试挂载 `services: postgres`。
 
-**文档一致性要求**：`rules/`、`docs/maps/`、`docs/prd/`、`docs/runbooks/`、`.github/workflows/` 的活跃内容中，不得出现描述上述禁止路径为**当前可用方案**的表述。历史 `docs/changes/` 记录与本条中明确标注为"禁止"的语句不受此限。该约束由 `tools/check_governance_rules.py` 自动断言。
+**文档一致性要求**：`rules/`、`docs/maps/`、`docs/prd/`、`docs/runbooks/`、`.github/workflows/` 的活跃内容中，不得出现描述上述本地/CI 禁止路径为**当前可用方案**的表述；但**不得再出现**"所有临时数据库永久禁止"的绝对表述（远程验证库为允许例外，见 DS-110）。历史 `docs/changes/` 记录与本条中明确标注为"禁止"的语句不受此限。该约束由 `tools/check_governance_rules.py` 自动断言。
 
 ## 2026-08-02 收口：测试合同（开发与部署治理）
 

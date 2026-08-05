@@ -5,6 +5,8 @@
 对应 Map：`../maps/80-system-runtime.md`  
 需求所有权：本地原生开发、远程容器运行、Git、数据库、Redis、Scheduler、服务和部署边界
 
+> **V2.1 验证基础设施**：远程临时验证数据库 `bz_stock_verify_<sha>` 与独立验证栈（verify-backend/frontend/workers）的合同见 [`rules/80-deployment-data-safety.md`](../../rules/80-deployment-data-safety.md) DS-110 / DS-111 / DS-112，以及 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §11。验证栈仍属远程部署（`rules/81`），本地只发起控制命令与 SSH Tunnel。
+
 ## 1. 运行位置与承载方式
 
 ### SR-01 两个运行位置

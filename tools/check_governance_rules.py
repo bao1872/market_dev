@@ -223,16 +223,24 @@ def check(root: Path) -> list[str]:
                 if change_id not in known_ids:
                     errors.append(f"dangling Change reference: {path.relative_to(root)}:{line_no} {change_id}")
 
-    # [权限模型 V2] 独立/临时测试数据库路线永久禁止（只扫描活跃文件，允许在禁止清单/历史说明中）
+    # [权限模型 V2] 本地/CI 独立测试数据库路线永久禁止；远程验证库（DS-110）为唯一例外。
     # 活跃文件：AGENTS / rules / docs(prd|maps|runbooks) / conftest / ci.yml / scripts
     _FORBIDDEN_TEST_DB_TOKENS = {
         "PANJI_CI_DB_TEST": "独立 CI 临时数据库开关",
         "TEST_DATABASE_URL": "独立测试数据库 URL",
-        "bz_stock_test": "独立测试数据库名",
+        "bz_stock_test": "独立测试数据库名（验证库必须叫 bz_stock_verify_<sha>）",
         "postgres-integration-tests": "CI 独立 PG 集成 job",
         "CI 临时 Postgres": "CI 临时 Postgres 唯一例外",
         "一次性临时 Postgres": "一次性临时 Postgres 路线",
     }
+    # DS-110 远程验证库允许的 token（出现时不视为违规）
+    _VERIFY_DB_ALLOWED_TOKENS = (
+        "bz_stock_verify_",
+        "PANJI_REMOTE_VERIFY_DB_TEST",
+        "DS-110",
+        "远程验证数据库",
+        "远程临时验证数据库",
+    )
     active_doc_paths = [
         agents,
         *sorted(rules_dir.glob("*.md")),
@@ -251,8 +259,8 @@ def check(root: Path) -> list[str]:
             continue
         for path in files:
             rel = path.relative_to(root)
-            # 跳过历史 CHANGE（docs/changes）与禁止清单（rules/90）
-            if "changes" in rel.parts or rel.name == "90-deprecated-forbidden.md":
+            # 跳过历史 CHANGE（docs/changes）
+            if "changes" in rel.parts:
                 continue
             text = read(path)
             # ci.yml：额外检测独立 postgres 测试 service 块（image: postgres:16）
@@ -267,16 +275,81 @@ def check(root: Path) -> list[str]:
             prohibition_markers = (
                 "禁止", "不得", "永不", "排除", "已永久删除", "已删除",
                 "不允许", "禁止引入", "禁止创建", "禁止使用",
+                "例外", "唯一允许",
             )
             for line_no, line in enumerate(text.splitlines(), 1):
                 if any(marker in line for marker in prohibition_markers):
                     continue
                 for token, reason in _FORBIDDEN_TEST_DB_TOKENS.items():
-                    if token in line:
+                    if token in line and not any(
+                        a in line for a in _VERIFY_DB_ALLOWED_TOKENS
+                    ):
                         errors.append(
                             f"forbidden standalone test-db ({reason}): "
                             f"{rel}:{line_no} contains {token}"
                         )
+
+    # [V2.1 验收闭环] 活跃文档不得再出现"所有临时数据库永久禁止"的绝对表述，
+    # 因为 DS-110 已允许远程验证库 bz_stock_verify_<sha> 作为唯一例外。
+    # 允许出现"本地/CI 永久禁止"或"仅远程验证库例外"的精确表述。
+    _ABSOLUTE_FORBID_PHRASES = (
+        "所有独立临时数据库永久禁止",
+        "所有临时数据库永久禁止",
+        "所有临时数据库永久废弃",
+        "一律禁止任何独立/临时测试数据库",
+        "任何独立/临时测试数据库均禁止",
+    )
+    _ABSOLUTE_FORBID_EXEMPT = (
+        "DS-110", "远程验证库", "bz_stock_verify", "唯一允许", "例外",
+    )
+    for base in [agents, *sorted(rules_dir.glob("*.md")),
+                 root / "docs/prd", root / "docs/maps", root / "docs/runbooks"]:
+        if base.is_dir():
+            files = sorted(base.rglob("*.md"))
+        elif base.is_file():
+            files = [base]
+        else:
+            continue
+        for path in files:
+            rel = path.relative_to(root)
+            if "changes" in rel.parts:
+                continue
+            for line_no, line in enumerate(read(path).splitlines(), 1):
+                for phrase in _ABSOLUTE_FORBID_PHRASES:
+                    if phrase in line and not any(
+                        ex in line for ex in _ABSOLUTE_FORBID_EXEMPT
+                    ):
+                        errors.append(
+                            f"absolute temporary-db ban must reference DS-110 exception: "
+                            f"{rel}:{line_no} ({phrase})"
+                        )
+
+    # [V2.1 验收闭环] 活跃 PRD/Runbook 不得把 ref/instruction.md 当作正式真源引用。
+    # ref/ 仅允许人工阅读（AGENTS clause 59），正式需求真源必须是 docs/prd/ 下的文件。
+    # 允许：把 ref/instruction.md 称为"参考源/人工阅读/非正式"，或在 docs/changes 历史中引用。
+    _REF_INSTRUCTION_TOKENS = (
+        "ref/instruction.md",
+        "ref/instruction",
+    )
+    _REF_SOURCE_SAFE = (
+        "参考源", "人工阅读", "非正式", "非真源", "参考", "历史", "草稿",
+        "不作为", "不得作为", "不能作为", "废除", "不再作为",
+    )
+    for base in [root / "docs/prd", root / "docs/runbooks", root / "docs/maps"]:
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.md")):
+            rel = path.relative_to(root)
+            if "changes" in rel.parts:
+                continue
+            for line_no, line in enumerate(read(path).splitlines(), 1):
+                if any(tok in line for tok in _REF_INSTRUCTION_TOKENS) and not any(
+                    s in line for s in _REF_SOURCE_SAFE
+                ):
+                    errors.append(
+                        f"ref/instruction.md must not be cited as authoritative source: "
+                        f"{rel}:{line_no}"
+                    )
 
     # [开发测试阶段] 禁止当前有效文档使用"生产阶段"业务术语（历史技术标识符 panji-prod 等除外）
     _FORBIDDEN_PROD_TERMS = (

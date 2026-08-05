@@ -91,25 +91,57 @@ def make_asgi_transport(app: FastAPI) -> httpx.ASGITransport:
 # ---------------------------------------------------------------------------
 
 _APP_ENV = os.environ.get("APP_ENV", "").lower()
-# [权限模型 V2 / 开发测试阶段] 共享开发数据库目标测试：
-# 通过 SSH 隧道连接共享开发业务数据库 bz_stock，不创建任何临时/测试库。
-# 要求：APP_ENV=development、DATABASE_URL 主机为 127.0.0.1/localhost（隧道端口）、
-# 库名精确为 bz_stock、禁止独立测试库 URL 变量、必须显式选择目标测试文件。
-# 当前只允许两种模式：PURE_UNIT_TEST=1 或 PANJI_SHARED_DEV_DB_TEST=1。
-# 不存在任何第三种（CI 临时/独立）测试数据库路线。
+# [权限模型 V2 / V2.1 验收闭环] 三种测试模式：
+#   A. PURE_UNIT_TEST=1                 纯单元/mock，不连接数据库（默认）
+#   B. PANJI_SHARED_DEV_DB_TEST=1       经 SSH 隧道连共享开发业务库 bz_stock 的明确授权目标测试
+#   C. PANJI_REMOTE_VERIFY_DB_TEST=1    远程 panji-prod 上 bz_stock_verify_<sha> 验证库
+#      （Migration、PG 集成、完整 Synthetic E2E；本地/CI 禁用，详见 rules/80 DS-110）
 _SHARED_DEV_DB = (
     os.environ.get("PANJI_SHARED_DEV_DB_TEST", "").lower() in ("1", "true", "yes")
 )
+_REMOTE_VERIFY_DB = (
+    os.environ.get("PANJI_REMOTE_VERIFY_DB_TEST", "").lower() in ("1", "true", "yes")
+)
 
-if not _PURE_UNIT and not _SHARED_DEV_DB:
+if not _PURE_UNIT and not _SHARED_DEV_DB and not _REMOTE_VERIFY_DB:
     raise RuntimeError(
-        "当前只允许两种测试模式：\n"
+        "当前只允许三种测试模式：\n"
         "  A. PURE_UNIT_TEST=1（纯单元/mock，不连接数据库）\n"
         "  B. PANJI_SHARED_DEV_DB_TEST=1（经 SSH 隧道连共享开发业务数据库 bz_stock 的明确授权目标测试）\n"
-        "已永久删除独立/临时测试数据库路线（独立测试库 URL 变量 / CI 临时数据库）。"
+        "  C. PANJI_REMOTE_VERIFY_DB_TEST=1（远程 panji-prod 验证库 bz_stock_verify_<sha>，仅远程运行）\n"
+        "本地/CI 永久禁止独立/临时测试数据库路线（独立测试库 URL 变量 / CI 临时数据库）。"
     )
 
-if _SHARED_DEV_DB and not _PURE_UNIT:
+# 本地/CI 严禁启用远程验证模式（fail-closed：该模式只能在 panji-prod 运行）
+if _REMOTE_VERIFY_DB and _APP_ENV != "verification":
+    raise RuntimeError(
+        f"PANJI_REMOTE_VERIFY_DB_TEST=1 要求 APP_ENV=verification，当前={_APP_ENV!r}。"
+        "该模式只能在远程 panji-prod 验证栈运行，禁止在本地/CI 启用。"
+    )
+
+if _REMOTE_VERIFY_DB:
+    # 远程验证库模式（DS-110）：连接 panji-prod 上的 bz_stock_verify_<sha>。
+    # 允许 DDL/Alembic（只针对验证库），但绝对禁止指向 bz_stock。
+    _verify_db_url = os.environ.get("DATABASE_URL", "")
+    if not _verify_db_url:
+        raise RuntimeError(
+            "PANJI_REMOTE_VERIFY_DB_TEST=1 要求 DATABASE_URL（指向 bz_stock_verify_<sha>）。"
+        )
+    _verify_parsed = urlparse(_verify_db_url)
+    _verify_db_name = (_verify_parsed.path or "").lstrip("/")
+    import re as _re
+
+    if not _re.fullmatch(r"bz_stock_verify_[0-9a-f]{7,40}", _verify_db_name):
+        raise RuntimeError(
+            f"远程验证库 DATABASE_URL 库名必须匹配 bz_stock_verify_<7-40位SHA>，"
+            f"当前={_verify_db_name!r}"
+        )
+    _TEST_ASYNC_URL = _verify_db_url.replace(
+        "postgresql+psycopg://", "postgresql+asyncpg://"
+    ).replace(
+        "postgresql://", "postgresql+asyncpg://"
+    )
+elif _SHARED_DEV_DB and not _PURE_UNIT:
     # 共享开发库模式：禁止任何临时/测试库，只用现有共享 bz_stock（经 SSH 隧道）
     # 独立测试库 URL 变量名（拼接避免 governance 误判为"使用"——此处是禁止检查）
     _tdb_var = "TEST_" + "DATABASE_URL"
@@ -169,6 +201,8 @@ if not _PURE_UNIT:
 
         TestAsyncSessionLocal = _shared_db_guard  # type: ignore[assignment]
     else:
+        # 纯远程验证库模式（DS-110）：允许 DDL/Alembic，测试可自建 session。
+        # 业务库保护由连接校验（库名必须 bz_stock_verify_<sha>）保证，不在此 guard。
         TestAsyncSessionLocal = async_sessionmaker(
             bind=test_async_engine,
             class_=AsyncSession,

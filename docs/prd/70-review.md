@@ -5,6 +5,8 @@
 对应 Map：`../maps/70-review.md`
 需求所有权：复盘模块完整产品与工程合同（目标行为、数据契约、API、筛选器、归因、追踪、编排）
 
+> **V2.1 页面验收标准**：Review 页面必须满足 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §9 的"不等待 chip、显示 core+aggregation lineage"合同，以及 §10 的四类场景（尤其 B 异步增强、C 降级）。V2.1 真源为本文件引用的 31 PRD，不再引用参考源。
+
 > 本文件是复盘模块的权威产品与工程合同。实现时不得根据页面方便性重新发明业务逻辑；前端不计算聚合变量、筛选器或归因结论。
 
 ## 0. 背景与当前基线

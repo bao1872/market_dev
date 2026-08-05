@@ -200,11 +200,38 @@
 - 新增未经确认的文档层或治理层；
 - 在处理局部任务时进行大范围无关修改。
 - 修改或删除 `8752028@qq.com`（受保护 Owner 账户）的 email、password_hash、status、角色、权限或订阅；清理测试数据前必须先排除此邮箱。
-- 创建或复用任何独立/临时测试数据库（本地、远程、CI、Docker 容器均禁止）。本地测试只允许两种模式：`PURE_UNIT_TEST=1`（纯单元/mock，不连库）或 `PANJI_SHARED_DEV_DB_TEST=1`（经 SSH 隧道连共享开发业务数据库 `bz_stock` 的明确授权目标测试）。共享模式禁止 DDL/Alembic，savepoint rollback，测试结束无残留。
+- 创建或复用任何独立/临时测试数据库（本地、远程、CI、Docker 容器均禁止），**唯一例外**是 `rules/80-deployment-data-safety.md` DS-110 定义的远程临时验证数据库 `bz_stock_verify_<sha>`。本地测试只允许两种模式：`PURE_UNIT_TEST=1`（纯单元/mock，不连库）或 `PANJI_SHARED_DEV_DB_TEST=1`（经 SSH 隧道连共享开发业务数据库 `bz_stock` 的明确授权目标测试）。共享模式禁止 DDL/Alembic，savepoint rollback，测试结束无残留。第三种模式 `PANJI_REMOTE_VERIFY_DB_TEST=1` 仅用于远程 `panji-prod` 验证库（见 DS-110），本地禁用。
 - 本地启动 Scheduler、远程常驻 Worker、盘后编排或全市场任务；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
 - 在本地创建测试用户、测试邀请码、测试权限、测试快照或测试通知渠道；本地写入均为真实业务写入。
 - 在命令、日志、浏览器自动化或报告中写入 Owner 真实密码；TRAE 不得自动登录 Owner 账户。
 - 使用 `panji-server`/`55-server`/原始 IP 或任何非 `panji-prod` 别名访问盘迹远程开发运行服务器；远程开发运行 SSH 入口唯一为 `scripts/ops/panji-prod-ssh`（`panji-prod` 是历史兼容技术标识，不表示当前处于生产发布阶段），部署前必须运行 `scripts/ops/panji-prod-preflight`（详见 `rules/80-deployment-data-safety.md` "远程开发运行服务器 SSH SSOT"）。
+
+### 允许的远程临时验证数据库
+
+仅允许在以下**全部**条件成立时，由正式验证脚本在 `panji-prod` 已有 PostgreSQL 容器内创建 `bz_stock_verify_<7到40位SHA>`：
+
+- 位于 `panji-prod` 已有 PostgreSQL 容器；
+- 数据库名匹配 `bz_stock_verify_<7到40位SHA>`；
+- 不新建 PostgreSQL 容器或 Volume；
+- 不从验证环境写入 `bz_stock`；
+- 由正式验证脚本创建、检查和删除；
+- 应用连接后必须执行 `SELECT current_database(), current_user;` 并确认数据库名是验证数据库；
+- 只用于 Migration、PG 集成、Synthetic E2E 和远程手动验收；
+- 用户完成验收后才删除。
+
+详见 `rules/80-deployment-data-safety.md` DS-110、DS-111、DS-112。
+
+### 任务范围授权
+
+用户批准一份包含明确目标、数据库名、部署目标、允许操作和停止条件的执行计划，即视为对该计划完整闭环的一次授权。该授权覆盖计划内列出的：修改代码和文档、提交并推送 `dev`、创建验证数据库、对验证数据库执行 Migration、启动验证栈、写入验证数据、执行验证任务，以及验收完成后的验证资源清理。
+
+**同一闭环内不得逐条重复索要授权。** 只有以下情况必须重新询问：
+
+- 要操作 `bz_stock`；
+- 要部署到正式运行栈；
+- 要删除计划外数据或资源；
+- 实际动作超出批准计划；
+- 检测到数据损坏或不可逆影响。
 
 项目特定的高风险操作和环境约束，应记录在 `rules/` 或对应 Runbook 中。
 
