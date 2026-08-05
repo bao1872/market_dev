@@ -76,7 +76,7 @@ class BoardFactsRun(Base):
         comment="ready / ready_reused / unavailable / pending",
     )
     reused_from_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True,
+        UUID(as_uuid=True), ForeignKey("board_facts_runs.id"), nullable=True,
         comment="status=reused_previous 时指向被复用的旧 run",
     )
     staleness: Mapped[int | None] = mapped_column(

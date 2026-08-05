@@ -131,14 +131,19 @@ async def _count_trading_days_between(
     earlier: date,
     later: date,
 ) -> int:
-    """统计 [earlier, later] 之间的 A 股交易日数（含两端）。"""
+    """统计 (earlier, later] 之间的 A 股交易日数（不含 earlier，含 later）。
+
+    [P0-6 修正] 业务上的陈旧交易日数语义为 (earlier, later]：
+      同日 = 0，相邻交易日 = 1。
+    原实现误用闭区间 [earlier, later]，导致同日=1、相邻=2 的 off-by-one。
+    """
     from app.models.calendar import TradingCalendar
 
     result = await db.scalar(
         select(func.count())
         .select_from(TradingCalendar)
         .where(
-            TradingCalendar.trade_date >= earlier,
+            TradingCalendar.trade_date > earlier,
             TradingCalendar.trade_date <= later,
             TradingCalendar.is_trading_day.is_(True),
             TradingCalendar.market == "A",

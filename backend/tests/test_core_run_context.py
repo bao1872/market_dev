@@ -58,20 +58,28 @@ def test_parameter_hash_order_independent_config():
 
 
 def test_artifact_availability_gate():
-    """availability 全部 ready → is_available；任一缺失 → False。"""
+    """availability 全部 ready → is_available；任一缺失 → False（P0-8：trend/structure/momentum）。"""
     full = CoreComputationArtifact(
         instrument_id="600000",
         trade_date=date(2026, 8, 4),
-        availability={"structure": "ready", "smc": "ready", "momentum": "ready"},
+        availability={"trend": "ready", "structure": "ready", "momentum": "ready"},
     )
     assert full.is_available
 
     missing = CoreComputationArtifact(
         instrument_id="600000",
         trade_date=date(2026, 8, 4),
-        availability={"structure": "ready", "smc": "unavailable", "momentum": "ready"},
+        availability={"trend": "ready", "structure": "unavailable", "momentum": "ready"},
     )
     assert not missing.is_available
+
+    # 旧维度（smc）不能替代 trend（P0-8）
+    wrong = CoreComputationArtifact(
+        instrument_id="600000",
+        trade_date=date(2026, 8, 4),
+        availability={"structure": "ready", "smc": "ready", "momentum": "ready"},
+    )
+    assert not wrong.is_available
 
 
 def test_artifact_to_dict_roundtrip():

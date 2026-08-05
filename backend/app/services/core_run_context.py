@@ -105,8 +105,12 @@ class CoreComputationArtifact:
 
     @property
     def is_available(self) -> bool:
-        """所有必需维度均可用。"""
-        required = {"structure", "smc", "momentum"}
+        """所有必需核心维度均可用。
+
+        [P0-8 修正] 正式第一金字塔 core 维度为 trend / structure / momentum。
+        原实现误用 structure / smc / momentum（smc 与 structure 重复且未检查 DSA/trend）。
+        """
+        required = {"trend", "structure", "momentum"}
         for dim in required:
             if self.availability.get(dim) != "ready":
                 return False
@@ -149,7 +153,7 @@ if __name__ == "__main__":
     artifact = CoreComputationArtifact(
         instrument_id="600000",
         trade_date=date(2026, 8, 4),
-        availability={"structure": "ready", "smc": "ready", "momentum": "ready"},
+        availability={"trend": "ready", "structure": "ready", "momentum": "ready"},
     )
     assert artifact.is_available
     print("OK: CoreComputationArtifact availability verified")

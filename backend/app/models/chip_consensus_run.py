@@ -69,7 +69,7 @@ class ChipConsensusRun(Base):
         comment="ready / unavailable / pending / degraded",
     )
     reuse_of_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True,
+        UUID(as_uuid=True), ForeignKey("chip_consensus_runs.id"), nullable=True,
         comment="复用旧 run 时指向被复用的 run",
     )
     expected_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)

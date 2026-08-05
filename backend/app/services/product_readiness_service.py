@@ -40,13 +40,25 @@ from app.domain_status import (
     CLOSURE_FULLY_READY,
     CLOSURE_PENDING,
     READINESS_BLOCKED,
+    READINESS_DEGRADED,
     READINESS_PENDING,
     READINESS_READY,
     READINESS_READY_REUSED,
     READINESS_UNAVAILABLE,
+    RUN_STATUS_SUCCEEDED,
+    TERMINAL_RUN_STATUS,
+)
+from app.models.factor_publication import (
+    PUBLICATION_KIND_AUCTION_ANCHOR,
+    PUBLICATION_KIND_BOARD_FACTS,
+    PUBLICATION_KIND_CHIP_CONSENSUS,
+    PUBLICATION_KIND_HISTORY_CROSS_SECTION,
+    PUBLICATION_KIND_MARKET_AGGREGATION,
+    PUBLICATION_KIND_STOCK_CORE,
+    SCOPE_TYPE_MARKET,
 )
 
-# 产品分类
+# 产品分类（P0-1：九节点完整纳入）
 MANDATORY_PRODUCTS = frozenset({
     "daily_facts",
     "board_facts",
@@ -54,11 +66,14 @@ MANDATORY_PRODUCTS = frozenset({
     "board_aggregation",
     "review",
 })
+# dsa_projection 为 stock_core 的派生投影，随 stock_core 就绪，划为增强不阻断
 ENHANCEMENT_PRODUCTS = frozenset({
+    "dsa_projection",
     "chip",
-    "auction_anchor",
     "state_events",
+    "auction_anchor",
 })
+NINE_NODES = MANDATORY_PRODUCTS | ENHANCEMENT_PRODUCTS
 
 # readiness 可消费集合（ready / ready_reused）
 CONSUMABLE_READINESS = frozenset({READINESS_READY, READINESS_READY_REUSED})
@@ -66,12 +81,19 @@ CONSUMABLE_READINESS = frozenset({READINESS_READY, READINESS_READY_REUSED})
 
 @dataclass(frozen=True)
 class ProductReadinessState:
-    """单一产品的就绪状态。"""
+    """单一产品的就绪状态。
+
+    P0-3：terminal 与 consumable 分离。
+    - is_terminal：run 是否已达终态（succeeded/partial/skipped/failed/cancelled），不再运行
+    - is_consumable：产品当前是否可安全消费（ready/ready_reused）
+    - is_fully_fresh：既 ready 又 fresh
+    """
 
     product: str
     readiness: str  # pending / ready / ready_reused / degraded / unavailable / blocked
     freshness: str = "fresh"  # fresh / stale / reused
     is_mandatory: bool = True
+    is_terminal: bool = False
 
     @property
     def is_consumable(self) -> bool:
@@ -89,7 +111,7 @@ class ClosureEvaluation:
     - closure: pending / blocked / core_ready / degraded_ready / fully_ready
     - mandatory_products_ready: 全部 mandatory 产品 consumable
     - mandatory_products_full_fresh: 全部 mandatory 产品 is_fully_fresh
-    - enhancement_jobs_terminal: 全部 enhancement 产品 consumable/terminal
+    - enhancement_jobs_terminal: 全部 enhancement 产品 is_terminal
     - issues: 按产品生成的问题列表（code/severity/product/recommended_action）
     """
 
@@ -109,19 +131,37 @@ def _issue(product: str, code: str, severity: str, recommended_action: str) -> d
     }
 
 
+def _enhancement_terminal(enhancement: list[ProductReadinessState]) -> bool:
+    """全部 enhancement 产品是否已达终态（P0-3）。"""
+    return all(e.is_terminal for e in enhancement) if enhancement else True
+
+
 def evaluate_closure(
     products: list[ProductReadinessState],
 ) -> ClosureEvaluation:
-    """评估一次产品 ready 集合的闭包状态（E08-T02/T03）。
+    """评估一次产品 ready 集合的闭包状态（E08-T02/T03 修正版）。
+
+    [P0-4] 分阶段、以 stock_core 为轴心的判定顺序：
+        1. blocked：任一 mandatory 产品 unavailable/blocked
+        2. pending：stock_core 尚未形成（不可消费）
+        3. core_ready：stock_core 可消费，但 board/review 等其他 mandatory 尚未完成
+        4. mandatory 全部可消费：
+           - fully fresh 且 enhancement 全部终态 → fully_ready
+           - 否则 → degraded_ready
+
+    [P0-3] enhancement 终态用 is_terminal，而非 is_consumable，
+    避免 chip 失败后永久表现为"仍在运行"。
 
     Args:
-        products: 全部产品就绪状态（mandatory + enhancement）
+        products: 全部产品就绪状态（mandatory + enhancement，九节点）
 
     Returns:
         ClosureEvaluation
     """
+    by_product = {p.product: p for p in products}
     mandatory = [p for p in products if p.is_mandatory]
     enhancement = [p for p in products if not p.is_mandatory]
+    stock_core = by_product.get("stock_core")
 
     issues: list[dict[str, Any]] = []
 
@@ -139,25 +179,19 @@ def evaluate_closure(
             closure=CLOSURE_BLOCKED,
             mandatory_products_ready=False,
             mandatory_products_full_fresh=False,
-            enhancement_jobs_terminal=all(e.is_consumable for e in enhancement)
-            if enhancement else True,
+            enhancement_jobs_terminal=_enhancement_terminal(enhancement),
             issues=issues,
         )
 
-    # 2. pending：mandatory 任一 pending
-    if any(p.readiness == READINESS_PENDING for p in mandatory):
+    # 2. pending：stock_core 尚未形成
+    if stock_core is None or not stock_core.is_consumable:
         return ClosureEvaluation(
             closure=CLOSURE_PENDING,
             mandatory_products_ready=False,
             mandatory_products_full_fresh=False,
-            enhancement_jobs_terminal=all(e.is_consumable for e in enhancement)
-            if enhancement else True,
+            enhancement_jobs_terminal=_enhancement_terminal(enhancement),
             issues=issues,
         )
-
-    mandatory_ready = all(p.is_consumable for p in mandatory)
-    mandatory_full_fresh = all(p.is_fully_fresh for p in mandatory)
-    enhancement_terminal = all(e.is_consumable for e in enhancement) if enhancement else True
 
     # 非 fully fresh 的产品问题（degraded_ready 提示）
     for p in mandatory:
@@ -170,8 +204,23 @@ def evaluate_closure(
                 )
             )
 
-    # 3. fully_ready
-    if mandatory_ready and mandatory_full_fresh and enhancement_terminal:
+    mandatory_ready = all(p.is_consumable for p in mandatory)
+
+    # 3. core_ready：stock_core 可消费，但其他 mandatory 未完成
+    if not mandatory_ready:
+        return ClosureEvaluation(
+            closure=CLOSURE_CORE_READY,
+            mandatory_products_ready=False,
+            mandatory_products_full_fresh=False,
+            enhancement_jobs_terminal=_enhancement_terminal(enhancement),
+            issues=issues,
+        )
+
+    mandatory_full_fresh = all(p.is_fully_fresh for p in mandatory)
+    enhancement_terminal = _enhancement_terminal(enhancement)
+
+    # 4. fully_ready
+    if mandatory_full_fresh and enhancement_terminal:
         return ClosureEvaluation(
             closure=CLOSURE_FULLY_READY,
             mandatory_products_ready=True,
@@ -180,21 +229,11 @@ def evaluate_closure(
             issues=issues,
         )
 
-    # 4. degraded_ready：mandatory ready（含 ready_reused/degraded）或 enhancement 未 terminal
-    if mandatory_ready:
-        return ClosureEvaluation(
-            closure=CLOSURE_DEGRADED_READY,
-            mandatory_products_ready=True,
-            mandatory_products_full_fresh=mandatory_full_fresh,
-            enhancement_jobs_terminal=enhancement_terminal,
-            issues=issues,
-        )
-
-    # 5. core_ready：mandatory 核心已 ready 但 enhancement 未 terminal
+    # 5. degraded_ready
     return ClosureEvaluation(
-        closure=CLOSURE_CORE_READY,
-        mandatory_products_ready=False,
-        mandatory_products_full_fresh=False,
+        closure=CLOSURE_DEGRADED_READY,
+        mandatory_products_ready=True,
+        mandatory_products_full_fresh=mandatory_full_fresh,
         enhancement_jobs_terminal=enhancement_terminal,
         issues=issues,
     )
@@ -243,7 +282,10 @@ class ProductReadinessService:
         db: Any,
         trade_date: date,
     ) -> ClosureEvaluation:
-        """评估指定交易日的产品闭包状态。
+        """评估指定交易日的产品闭包状态（P0-1：完整九节点）。
+
+        九节点：daily_facts / board_facts / stock_core / board_aggregation /
+        review（mandatory）+ dsa_projection / chip / state_events / auction_anchor（enhancement）。
 
         Args:
             db: 异步数据库会话
@@ -252,22 +294,104 @@ class ProductReadinessService:
         Returns:
             ClosureEvaluation
         """
+        states = []
+        # stock_core 只计算一次，派生投影复用（compute-once）
+        daily = await self._daily_facts_state(db, trade_date)
+        board_facts = await self._board_facts_state(db, trade_date)
+        stock_core = await self._stock_core_state(db, trade_date)
+        board_aggregation = await self._board_aggregation_state(db, trade_date)
+        review = await self._review_state(db, trade_date)
         states = [
-            await self._board_facts_state(db, trade_date),
-            await self._stock_core_state(db, trade_date),
-            await self._board_aggregation_state(db, trade_date),
-            await self._review_state(db, trade_date),
+            daily,
+            board_facts,
+            stock_core,
+            board_aggregation,
+            review,
+            self._derived_state("dsa_projection", stock_core),
             await self._chip_state(db, trade_date),
+            self._derived_state("state_events", stock_core),
             await self._auction_state(db, trade_date),
         ]
         return evaluate_closure(states)
 
+    # ---- 通用 helper：publication pointer 决定 readiness（P0-2）----
+
+    async def _publication_readiness(
+        self,
+        db: Any,
+        trade_date: date,
+        publication_kind: str,
+        product: str,
+        *,
+        is_mandatory: bool,
+        scope_type: str = SCOPE_TYPE_MARKET,
+    ) -> ProductReadinessState | None:
+        """读取发布指针；存在则返回 ready（terminal=True），否则 None。"""
+        from app.models.factor_publication import FactorPublication
+
+        pub = await db.scalar(
+            select(FactorPublication)
+            .where(
+                FactorPublication.publication_kind == publication_kind,
+                FactorPublication.scope_type == scope_type,
+                FactorPublication.trade_date == trade_date,
+            )
+            .limit(1)
+        )
+        if pub is not None:
+            return ProductReadinessState(
+                product, READINESS_READY, "fresh",
+                is_mandatory=is_mandatory, is_terminal=True,
+            )
+        return None
+
     # ---- 各产品状态映射 ----
+
+    async def _daily_facts_state(
+        self, db: Any, trade_date: date,
+    ) -> ProductReadinessState:
+        """daily_facts：历史截面（history_cross_section）发布指针。"""
+        st = await self._publication_readiness(
+            db, trade_date, PUBLICATION_KIND_HISTORY_CROSS_SECTION,
+            "daily_facts", is_mandatory=True,
+        )
+        if st is not None:
+            return st
+        return ProductReadinessState("daily_facts", READINESS_PENDING, "fresh")
 
     async def _board_facts_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """board_facts：BoardFactsRun 当日最新 run。"""
+        """board_facts：以发布指针为准；latest run 单列（P0-2/P0-7）。
+
+        P0-7：若指针 data_run 是 reused 旧 run，则 readiness=ready_reused（degraded）。
+        """
+        from app.models.factor_publication import FactorPublication
+
+        pub = await db.scalar(
+            select(FactorPublication)
+            .where(
+                FactorPublication.publication_kind == PUBLICATION_KIND_BOARD_FACTS,
+                FactorPublication.scope_type == SCOPE_TYPE_MARKET,
+                FactorPublication.trade_date == trade_date,
+            )
+            .limit(1)
+        )
+        if pub is not None:
+            from app.models.board_facts_run import BoardFactsRun
+
+            data_run = await db.scalar(
+                select(BoardFactsRun)
+                .where(BoardFactsRun.id == pub.data_run_id)
+                .limit(1)
+            )
+            if data_run is not None and data_run.status == "reused_previous":
+                return ProductReadinessState(
+                    "board_facts", READINESS_READY_REUSED, "reused", is_terminal=True,
+                )
+            return ProductReadinessState(
+                "board_facts", READINESS_READY, "fresh", is_terminal=True,
+            )
         from app.models.board_facts_run import BoardFactsRun
 
         run = await db.scalar(
@@ -278,68 +402,40 @@ class ProductReadinessService:
         )
         if run is None:
             return ProductReadinessState("board_facts", READINESS_PENDING, "fresh")
-        if run.status == "published":
-            return ProductReadinessState("board_facts", READINESS_READY, "fresh")
-        if run.status == "reused_previous":
+        if run.status in TERMINAL_RUN_STATUS and run.status != RUN_STATUS_SUCCEEDED:
             return ProductReadinessState(
-                "board_facts", READINESS_READY_REUSED, "reused",
+                "board_facts", READINESS_UNAVAILABLE, "fresh", is_terminal=True,
             )
-        if run.status in ("failed", "cancelled", "interrupted"):
-            return ProductReadinessState("board_facts", READINESS_UNAVAILABLE, "fresh")
-        # queued/fetching/normalizing/validating/persisting → 进行中
         return ProductReadinessState("board_facts", READINESS_PENDING, "fresh")
 
     async def _stock_core_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """stock_core：FactorPublication 发布指针（market scope）。"""
-        from app.models.factor_publication import (
-            PUBLICATION_KIND_STOCK_CORE,
-            SCOPE_TYPE_MARKET,
-            FactorPublication,
+        """stock_core：stock_core 发布指针。"""
+        st = await self._publication_readiness(
+            db, trade_date, PUBLICATION_KIND_STOCK_CORE,
+            "stock_core", is_mandatory=True,
         )
-
-        pub = await db.scalar(
-            select(FactorPublication)
-            .where(
-                FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
-                FactorPublication.scope_type == SCOPE_TYPE_MARKET,
-                FactorPublication.trade_date == trade_date,
-            )
-            .limit(1)
-        )
-        if pub is not None:
-            return ProductReadinessState("stock_core", READINESS_READY, "fresh")
+        if st is not None:
+            return st
         return ProductReadinessState("stock_core", READINESS_PENDING, "fresh")
 
     async def _board_aggregation_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
         """board_aggregation：market_aggregation 发布指针。"""
-        from app.models.factor_publication import (
-            PUBLICATION_KIND_MARKET_AGGREGATION,
-            SCOPE_TYPE_MARKET,
-            FactorPublication,
+        st = await self._publication_readiness(
+            db, trade_date, PUBLICATION_KIND_MARKET_AGGREGATION,
+            "board_aggregation", is_mandatory=True,
         )
-
-        pub = await db.scalar(
-            select(FactorPublication)
-            .where(
-                FactorPublication.publication_kind
-                == PUBLICATION_KIND_MARKET_AGGREGATION,
-                FactorPublication.scope_type == SCOPE_TYPE_MARKET,
-                FactorPublication.trade_date == trade_date,
-            )
-            .limit(1)
-        )
-        if pub is not None:
-            return ProductReadinessState("board_aggregation", READINESS_READY, "fresh")
+        if st is not None:
+            return st
         return ProductReadinessState("board_aggregation", READINESS_PENDING, "fresh")
 
     async def _review_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """review：MarketReviewRun 当日最新 run。"""
+        """review：MarketReviewRun published 即视为已发布（P0-2，以发布态为准）。"""
         from app.models.market_review import MarketReviewRun
 
         run = await db.scalar(
@@ -351,15 +447,36 @@ class ProductReadinessService:
         if run is None:
             return ProductReadinessState("review", READINESS_PENDING, "fresh")
         if run.status == "published":
-            return ProductReadinessState("review", READINESS_READY, "fresh")
-        if run.status in ("failed",):
-            return ProductReadinessState("review", READINESS_UNAVAILABLE, "fresh")
+            return ProductReadinessState("review", READINESS_READY, "fresh", is_terminal=True)
+        if run.status in TERMINAL_RUN_STATUS:
+            return ProductReadinessState("review", READINESS_UNAVAILABLE, "fresh", is_terminal=True)
         return ProductReadinessState("review", READINESS_PENDING, "fresh")
+
+    @staticmethod
+    def _derived_state(
+        product: str, core: ProductReadinessState,
+    ) -> ProductReadinessState:
+        """派生投影（dsa_projection/state_events）：随 stock_core 就绪（enhancement）。"""
+        if core.is_consumable:
+            return ProductReadinessState(
+                product, READINESS_READY, "fresh",
+                is_mandatory=False, is_terminal=True,
+            )
+        return ProductReadinessState(
+            product, READINESS_PENDING, "fresh",
+            is_mandatory=False, is_terminal=False,
+        )
 
     async def _chip_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """chip：增强产品，不阻断 mandatory chain。"""
+        """chip：增强产品，以 chip_consensus 发布指针为准。"""
+        st = await self._publication_readiness(
+            db, trade_date, PUBLICATION_KIND_CHIP_CONSENSUS,
+            "chip", is_mandatory=False,
+        )
+        if st is not None:
+            return st
         from app.models.chip_consensus_run import ChipConsensusRun
 
         run = await db.scalar(
@@ -369,21 +486,38 @@ class ProductReadinessService:
             .limit(1)
         )
         if run is None:
-            return ProductReadinessState("chip", READINESS_PENDING, "fresh", is_mandatory=False)
-        if run.status == "succeeded":
-            return ProductReadinessState("chip", READINESS_READY, "fresh", is_mandatory=False)
-        if run.status == "partial":
-            return ProductReadinessState("chip", READINESS_READY, "stale", is_mandatory=False)
-        if run.status in ("failed", "cancelled", "interrupted"):
             return ProductReadinessState(
-                "chip", READINESS_UNAVAILABLE, "fresh", is_mandatory=False,
+                "chip", READINESS_PENDING, "fresh", is_mandatory=False,
             )
-        return ProductReadinessState("chip", READINESS_PENDING, "fresh", is_mandatory=False)
+        if run.status == "succeeded":
+            return ProductReadinessState(
+                "chip", READINESS_READY, "fresh",
+                is_mandatory=False, is_terminal=True,
+            )
+        if run.status == "partial":
+            return ProductReadinessState(
+                "chip", READINESS_DEGRADED, "stale",
+                is_mandatory=False, is_terminal=True,
+            )
+        if run.status in TERMINAL_RUN_STATUS:
+            return ProductReadinessState(
+                "chip", READINESS_UNAVAILABLE, "fresh",
+                is_mandatory=False, is_terminal=True,
+            )
+        return ProductReadinessState(
+            "chip", READINESS_PENDING, "fresh", is_mandatory=False,
+        )
 
     async def _auction_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """auction_anchor：增强产品，不阻断 mandatory chain。"""
+        """auction_anchor：增强产品，以 auction_anchor 发布指针为准。"""
+        st = await self._publication_readiness(
+            db, trade_date, PUBLICATION_KIND_AUCTION_ANCHOR,
+            "auction_anchor", is_mandatory=False,
+        )
+        if st is not None:
+            return st
         from app.models.auction_anchor_run import AuctionAnchorRun
 
         run = await db.scalar(
@@ -394,31 +528,37 @@ class ProductReadinessService:
         )
         if run is None:
             return ProductReadinessState(
-                "auction_anchor", READINESS_PENDING, "fresh", is_mandatory=False,
+                "auction_anchor", READINESS_PENDING, "fresh",
+                is_mandatory=False,
             )
-        if run.status == "succeeded":
+        if run.status in ("succeeded", "structure_only"):
             return ProductReadinessState(
-                "auction_anchor", READINESS_READY, "fresh", is_mandatory=False,
+                "auction_anchor", READINESS_READY, "fresh",
+                is_mandatory=False, is_terminal=True,
             )
-        if run.status in ("failed", "cancelled", "interrupted"):
+        if run.status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
-                "auction_anchor", READINESS_UNAVAILABLE, "fresh", is_mandatory=False,
+                "auction_anchor", READINESS_UNAVAILABLE, "fresh",
+                is_mandatory=False, is_terminal=True,
             )
         return ProductReadinessState(
-            "auction_anchor", READINESS_PENDING, "fresh", is_mandatory=False,
+            "auction_anchor", READINESS_PENDING, "fresh",
+            is_mandatory=False, is_terminal=False,
         )
 
 
 if __name__ == "__main__":
-    # fully_ready
+    # fully_ready（九节点，enhancement 全部 terminal）
     full = [
         ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
         ProductReadinessState("board_facts", READINESS_READY, "fresh"),
         ProductReadinessState("stock_core", READINESS_READY, "fresh"),
         ProductReadinessState("board_aggregation", READINESS_READY, "fresh"),
         ProductReadinessState("review", READINESS_READY, "fresh"),
-        ProductReadinessState("chip", READINESS_READY, "fresh", is_mandatory=False),
-        ProductReadinessState("auction_anchor", READINESS_READY, "fresh", is_mandatory=False),
+        ProductReadinessState("dsa_projection", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
+        ProductReadinessState("chip", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
+        ProductReadinessState("state_events", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
+        ProductReadinessState("auction_anchor", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
     ]
     assert evaluate_closure(full).closure == CLOSURE_FULLY_READY
 
@@ -428,7 +568,7 @@ if __name__ == "__main__":
     ]
     assert evaluate_closure(blocked).closure == CLOSURE_BLOCKED
 
-    # degraded_ready（board facts ready_reused）
+    # degraded_ready（board facts ready_reused → 非 fully fresh）
     degraded = [
         ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
         ProductReadinessState("board_facts", READINESS_READY_REUSED, "reused"),
@@ -437,5 +577,25 @@ if __name__ == "__main__":
         ProductReadinessState("review", READINESS_READY, "fresh"),
     ]
     assert evaluate_closure(degraded).closure == CLOSURE_DEGRADED_READY
+
+    # P0-4：stock_core ready 但 review 未完成 → core_ready（而非 pending）
+    core_ready_case = [
+        ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
+        ProductReadinessState("board_facts", READINESS_READY, "fresh"),
+        ProductReadinessState("stock_core", READINESS_READY, "fresh"),
+        ProductReadinessState("board_aggregation", READINESS_READY, "fresh"),
+        ProductReadinessState("review", READINESS_PENDING, "fresh"),
+    ]
+    assert evaluate_closure(core_ready_case).closure == CLOSURE_CORE_READY
+
+    # P0-3：stock_core 未形成 → pending
+    pending_case = [
+        ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
+        ProductReadinessState("board_facts", READINESS_READY, "fresh"),
+        ProductReadinessState("stock_core", READINESS_PENDING, "fresh"),
+        ProductReadinessState("board_aggregation", READINESS_PENDING, "fresh"),
+        ProductReadinessState("review", READINESS_PENDING, "fresh"),
+    ]
+    assert evaluate_closure(pending_case).closure == CLOSURE_PENDING
 
     print("OK: closure evaluator verified")

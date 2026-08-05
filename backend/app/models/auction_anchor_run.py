@@ -59,7 +59,7 @@ class AuctionAnchorRun(Base):
         comment="关联 stock_core run",
     )
     source_chip_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True,
+        UUID(as_uuid=True), ForeignKey("chip_consensus_runs.id"), nullable=True,
         comment="关联 chip run（hybrid/composite 时使用）",
     )
     mode: Mapped[str] = mapped_column(
@@ -83,7 +83,7 @@ class AuctionAnchorRun(Base):
     composite_anchor_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
     diagnostics_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     superseded_by_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True,
+        UUID(as_uuid=True), ForeignKey("auction_anchor_runs.id"), nullable=True,
         comment="晚到升级：被新 run 取代时指向新 run",
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
