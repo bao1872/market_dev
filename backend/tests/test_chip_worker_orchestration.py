@@ -57,12 +57,21 @@ ALGO = "chip-consensus-1.0.0"
 
 @dataclass
 class FakeSession:
-    """最小 AsyncSession 替身：支持 async context manager + commit 计数。"""
+    """最小 AsyncSession 替身：支持 async context manager + commit 计数。
+
+    [Corrective-3.1] `resolve_or_create_chip_run` 改为 ON CONFLICT 原子 upsert
+    后不再走 `session.add()`，因此这里需要模拟 INSERT ... RETURNING id 的语义：
+    识别 pg_insert 语句，按唯一键 (trade_date, source_core_run_id,
+    algorithm_version) 判重 —— 冲突返回 None（模拟 DO NOTHING），
+    否则物化一行并返回其 id。
+    """
 
     commits: int = 0
     added: list[Any] = field(default_factory=list)
     store: dict[Any, Any] = field(default_factory=dict)
     scalar_result: Any = None
+    # 模拟唯一约束：(trade_date, source_core_run_id, algorithm_version) -> id
+    unique_index: dict[tuple[Any, Any, Any], Any] = field(default_factory=dict)
 
     async def __aenter__(self) -> FakeSession:
         return self
@@ -87,8 +96,43 @@ class FakeSession:
     async def get(self, _model: Any, key: Any) -> Any:
         return self.store.get(key)
 
-    async def scalar(self, _stmt: Any) -> Any:
-        return self.scalar_result
+    async def scalar(self, stmt: Any) -> Any:
+        values = self._insert_values(stmt)
+        if values is None:
+            return self.scalar_result
+        return self._apply_upsert(values)
+
+    @staticmethod
+    def _insert_values(stmt: Any) -> dict[str, Any] | None:
+        """若 stmt 是 INSERT，返回其 values dict，否则 None。"""
+        compiled = getattr(stmt, "compile", None)
+        if compiled is None or not hasattr(stmt, "is_insert"):
+            return None
+        if not getattr(stmt, "is_insert", False):
+            return None
+        params = getattr(stmt, "_values", None) or {}
+        out: dict[str, Any] = {}
+        for col, val in params.items():
+            name = getattr(col, "name", str(col))
+            out[name] = getattr(val, "value", val)
+        return out
+
+    def _apply_upsert(self, values: dict[str, Any]) -> Any:
+        from app.models.chip_consensus_run import ChipConsensusRun
+
+        key = (
+            values.get("trade_date"),
+            values.get("source_core_run_id"),
+            values.get("algorithm_version"),
+        )
+        if key in self.unique_index:
+            return None  # ON CONFLICT DO NOTHING → 无 RETURNING 行
+
+        row = ChipConsensusRun(**values)
+        self.unique_index[key] = row.id
+        self.store[row.id] = row
+        self.added.append(row)
+        return row.id
 
 
 @dataclass
@@ -532,12 +576,15 @@ def _read_chip_block() -> str:
     这些是**生产接线**约束，无法用 fake adapter 覆盖（helper 层早已支持
     ownership_check，Corrective-3 的缺陷恰恰是生产调用方没有传）。因此这里
     直接对生产源码做结构断言，防止回归。
+
+    注意：按文件路径读取而非 `import app.worker` —— 导入 worker 会触发
+    REDIS_URL 等运行时配置校验，违反 PURE_UNIT_TEST 不连外部依赖的约束。
     """
     from pathlib import Path
 
-    import app.worker as worker_module
-
-    return Path(worker_module.__file__).read_text(encoding="utf-8")
+    path = Path(__file__).resolve().parent.parent / "app" / "worker.py"
+    assert path.exists(), f"worker.py 不存在: {path}"
+    return path.read_text(encoding="utf-8")
 
 
 def test_production_worker_passes_ownership_check() -> None:
