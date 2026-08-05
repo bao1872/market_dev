@@ -751,11 +751,6 @@ async def force_advance_after_close_endpoint(
                 daily_total=coverage_result["total"],
                 threshold=_RESTART_FROM_COVERAGE_THRESHOLD,
             )
-        coverage_info = {
-            "daily_coverage": coverage_result["coverage"],
-            "daily_covered": coverage_result["covered"],
-            "daily_total": coverage_result["total"],
-        }
 
     # [V2.1 / CP3] 所有 10 个 boundary 经 granular_restart_service 真实调度，不返回 501。
     # 主链四 boundary：创建 child SchedulerJobRun 并写 metadata.mainchain_stage（worker 从
@@ -778,9 +773,9 @@ async def force_advance_after_close_endpoint(
         raise admin_error(
             "restart_boundary_not_implemented",
             f"{exc}（该 boundary 已纳入 PRD §6 合同，但后端真实 handler 未实现，禁止伪造成功）",
-        )
+        ) from exc
     except ValueError as exc:
-        raise admin_bad_request("invalid_restart_request", str(exc))
+        raise admin_bad_request("invalid_restart_request", str(exc)) from exc
 
     # restart_from="daily_ready"：清除 child 上可能继承的旧 dsa_run_id（worker 会新建 DSA run）
     if restart_from == "daily_ready":

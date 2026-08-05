@@ -225,7 +225,7 @@ def test_run_key_differs_across_parent_and_source():
     """不同 parent / 不同 source → 不同 run_key（不得误复用）。"""
     p1, p2 = uuid.uuid4(), uuid.uuid4()
     s1, s2 = uuid.uuid4(), uuid.uuid4()
-    base = dict(trade_date="2026-08-05", boundary="chip", input_hash="h")
+    base = {"trade_date": "2026-08-05", "boundary": "chip", "input_hash": "h"}
     k1 = build_run_key(parent_job_run_id=p1, source_core_run_id=s1, **base)
     k2 = build_run_key(parent_job_run_id=p2, source_core_run_id=s1, **base)
     k3 = build_run_key(parent_job_run_id=p1, source_core_run_id=s2, **base)
