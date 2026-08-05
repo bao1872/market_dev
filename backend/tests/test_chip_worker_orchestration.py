@@ -519,3 +519,151 @@ async def test_auction_failure_does_not_reverse_chip_publication() -> None:
     assert outcome.status == PUBLICATION_STATUS_SUCCEEDED
     assert outcome.publication_id == recorder.publication.id
     assert recorder.order == ["publish", "auction"]
+
+
+# =============================================================================
+# [Corrective-3.1 §P0-1] 生产 worker 必须真正启用 lease fencing
+# =============================================================================
+
+
+def _read_chip_block() -> str:
+    """读取 worker.py 中 chip publication 相关源码，用于结构性断言。
+
+    这些是**生产接线**约束，无法用 fake adapter 覆盖（helper 层早已支持
+    ownership_check，Corrective-3 的缺陷恰恰是生产调用方没有传）。因此这里
+    直接对生产源码做结构断言，防止回归。
+    """
+    from pathlib import Path
+
+    import app.worker as worker_module
+
+    return Path(worker_module.__file__).read_text(encoding="utf-8")
+
+
+def test_production_worker_passes_ownership_check() -> None:
+    """生产调用 publish_chip_and_upgrade_auction 必须传 ownership_check。
+
+    Corrective-3 的缺陷：helper 支持 fencing、测试也验证了 fencing，
+    但生产 worker 调用时没传 ownership_check，导致 fencing 在生产完全失效。
+    """
+    src = _read_chip_block()
+    idx = src.find("publish_chip_and_upgrade_auction(")
+    call_site = src.find("publish_chip_and_upgrade_auction(", idx + 1)
+    assert call_site > 0, "未找到 publish_chip_and_upgrade_auction 生产调用"
+
+    block = src[call_site : call_site + 1400]
+    assert "ownership_check=heartbeat.ensure_owned" in block, (
+        "生产调用必须传 ownership_check=heartbeat.ensure_owned，否则 lease "
+        "fencing 只在测试中成立"
+    )
+
+
+def test_publication_happens_before_job_run_finalize() -> None:
+    """publication 必须在 SchedulerJobRun 终态与 heartbeat.stop() 之前执行。
+
+    Corrective-3 的缺陷：publication 位于 `finally: await heartbeat.stop()`
+    之后，此时 SchedulerJobRun 已写终态、租约已释放，任何 fencing 都无意义。
+    """
+    src = _read_chip_block()
+    anchor = src.find("_chip_consensus_poll_once")
+    region = src[anchor:]
+
+    pub_pos = region.find("publish_chip_and_upgrade_auction(\n")
+    if pub_pos < 0:
+        pub_pos = region.find("await publish_chip_and_upgrade_auction(")
+    finalize_pos = region.find("finalized = await finalize_job_run(")
+    stop_pos = region.find("await heartbeat.stop()")
+
+    assert pub_pos > 0 and finalize_pos > 0 and stop_pos > 0
+    assert pub_pos < finalize_pos, (
+        "publication 必须在 finalize_job_run 之前（租约仍持有）"
+    )
+    assert pub_pos < stop_pos, (
+        "publication 必须在 heartbeat.stop() 之前，否则租约已释放"
+    )
+
+
+# =============================================================================
+# [Corrective-3.1 §P0-2] 领域 run 终态失败必须阻断发布且不得报成功
+# =============================================================================
+
+
+def test_domain_finalize_failure_blocks_publication_and_success() -> None:
+    """finalize_chip_run 失败时：写治理字段、阻断 publication、主任务不报成功。
+
+    Corrective-3 的缺陷：finalize_chip_run 异常被 warning 吞掉后，仍无条件
+    用 main_status 写 SchedulerJobRun，可能出现
+    SchedulerJobRun=succeeded 而 ChipConsensusRun=running 的不一致。
+    """
+    src = _read_chip_block()
+
+    assert 'metadata_updates["chip_domain_finalize_status"] = "failed"' in src, (
+        "领域 run 终态失败必须写 chip_domain_finalize_status=failed"
+    )
+    assert "chip_domain_finalize_error_code" in src, (
+        "必须写 chip_domain_finalize_error_code 供治理消费"
+    )
+    assert "domain_finalized" in src, "必须用 domain_finalized 作为发布前置条件"
+    assert "and domain_finalized" in src, (
+        "publication 前置条件必须包含 domain_finalized"
+    )
+    assert 'main_status = "failed"' in src, (
+        "领域 run 终态失败后主任务不得继续写 succeeded"
+    )
+    assert "CHIP_DOMAIN_FINALIZE_FAILED" in src, (
+        "必须用独立 error_code 区分于 CHIP_SYSTEMIC_FAILURE"
+    )
+
+
+def test_no_publication_after_job_run_terminal() -> None:
+    """终态之后不得再存在无租约保护的 publication 写入路径。"""
+    src = _read_chip_block()
+    anchor = src.find("_chip_consensus_poll_once")
+    region = src[anchor:]
+    stop_pos = region.find("await heartbeat.stop()")
+    tail = region[stop_pos:stop_pos + 1200]
+
+    assert "publish_chip_and_upgrade_auction(" not in tail, (
+        "heartbeat.stop() 之后不得再调用 publication（租约已释放）"
+    )
+
+
+# =============================================================================
+# [Corrective-3.1 §P1] 领域 run 数据库级唯一性
+# =============================================================================
+
+
+def test_chip_consensus_run_has_unique_constraint() -> None:
+    """ChipConsensusRun 必须有 (trade_date, source_core_run_id, algorithm_version)
+    唯一约束，否则 SELECT-then-INSERT 在并发下无法保证幂等。
+    """
+    from sqlalchemy import UniqueConstraint
+
+    from app.models.chip_consensus_run import ChipConsensusRun
+
+    uniques = [
+        c for c in ChipConsensusRun.__table__.constraints
+        if isinstance(c, UniqueConstraint)
+    ]
+    cols = [tuple(sorted(c.name for c in u.columns)) for u in uniques]
+    expected = tuple(sorted(
+        ["trade_date", "source_core_run_id", "algorithm_version"],
+    ))
+    assert expected in cols, (
+        f"缺少领域 run 唯一约束，现有: {cols}"
+    )
+
+
+def test_resolve_uses_atomic_upsert() -> None:
+    """resolve_or_create_chip_run 必须使用 ON CONFLICT 原子 upsert。"""
+    import inspect
+
+    from app.services import chip_consensus_run_lifecycle as mod
+
+    src = inspect.getsource(mod.resolve_or_create_chip_run)
+    assert "on_conflict_do_nothing" in src, (
+        "必须使用 ON CONFLICT DO NOTHING 做原子 upsert，"
+        "而不是 SELECT-then-INSERT"
+    )
+    assert "pg_insert" in src or "insert(" in src
+

@@ -352,12 +352,23 @@ _ACTION_BY_REASON: dict[str, tuple[bool, str, str]] = {
     # review
     "NO_REVIEW_RUN": (True, "trigger_market_review", "trigger_market_review"),
     "REVIEW_NOT_PUBLISHED": (True, "publish_market_review", "publish_market_review"),
+    # [Corrective-3.1] run 自称 published 但 factor_publications 无 pointer
+    "REVIEW_POINTER_MISSING": (
+        True, "publish_market_review", "publish_market_review",
+    ),
     "REVIEW_FAILED": (True, "rerun_market_review", "rerun_market_review"),
     "REVIEW_CANCELLED": (True, "rerun_market_review", "rerun_market_review"),
     # 派生投影
     "PARENT_NOT_CONSUMABLE": (False, "await_parent_product", "no_operation"),
     "NO_PROJECTION": (True, "rebuild_dsa_projection", "rebuild_dsa_projection"),
     "NO_STATE_EVENTS": (True, "rebuild_state_events", "rebuild_state_events"),
+    # [Corrective-3.1 §P1] 当日有产物但不属于当前 core run → 必须重建而非放行
+    "PROJECTION_LINEAGE_MISMATCH": (
+        True, "rebuild_dsa_projection", "rebuild_dsa_projection",
+    ),
+    "STATE_EVENTS_LINEAGE_MISMATCH": (
+        True, "rebuild_state_events", "rebuild_state_events",
+    ),
     # 通用 pending
     "NO_PUBLICATION": (True, "await_publication", "trigger_upstream_job"),
 }
@@ -815,13 +826,43 @@ class ProductReadinessService:
     async def _review_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """review：优先使用正式 review publication pointer（[Corrective-3 §三]）。
+        """review：以正式 FactorPublication pointer 为准（[Corrective-3.1 §P1]）。
 
-        修复前只看 latest run status，run 被标 published 但 pointer 未发布时会误报
-        ready。现在先查 FactorPublication，pointer 缺失时降级为 REVIEW_NOT_PUBLISHED。
+        Corrective-3 只查 MarketReviewRun 并检查 run.status/published_at，会把一个
+        "曾经发布过、但已不是当前 pointer" 的旧 run 误判为 ready。现在真正读取
+        `factor_publications`（publication_kind=market_review），并要求 pointer 的
+        data_run_id 与 latest run 一致，否则判定 lineage 失配。
         """
+        from app.models.factor_publication import FactorPublication
         from app.models.market_review import MarketReviewRun
+        from app.services.review_publication_service import (
+            PUBLICATION_KIND_MARKET_REVIEW,
+        )
 
+        pub = await db.scalar(
+            select(FactorPublication)
+            .where(
+                FactorPublication.publication_kind == PUBLICATION_KIND_MARKET_REVIEW,
+                FactorPublication.trade_date == trade_date,
+            )
+            .limit(1)
+        )
+        if pub is not None:
+            pub_run = await db.scalar(
+                select(MarketReviewRun)
+                .where(MarketReviewRun.id == pub.data_run_id)
+                .limit(1)
+            )
+            lineage = _publication_lineage(pub, pub_run)
+            lineage["source_type"] = "review_publication"
+            lineage["review_run_id"] = _sid(getattr(pub, "data_run_id", None))
+            lineage["reason_code"] = "REVIEW_PUBLISHED"
+            return ProductReadinessState(
+                "review", READINESS_READY, "fresh", is_terminal=True,
+                lineage=lineage,
+            )
+
+        # 无正式 pointer → 回落到 run 状态，但绝不判 ready。
         run = await db.scalar(
             select(MarketReviewRun)
             .where(MarketReviewRun.trade_date == trade_date)
@@ -850,18 +891,17 @@ class ProductReadinessService:
                 getattr(run, "completed_at", None) or getattr(run, "created_at", None),
             ),
         }
-        # [Corrective-3 §三] 使用正式 review publication pointer（published_at 是
-        # 写入 factor_publications 的时间），而非仅 latest run status。
-        # run.status=published 但 published_at 为空 → pointer 未真正写入。
+        # [Corrective-3.1 §P1] 走到这里说明 factor_publications 中没有 market_review
+        # pointer。此时即使 run.status=published 也**不得**判 ready —— 那只是一个
+        # 历史发布过、现已不是当前 pointer 的旧 run。
         if run.status == "published":
-            if published_at is not None:
-                return ProductReadinessState(
-                    "review", READINESS_READY, "fresh", is_terminal=True,
-                    lineage={**base, "reason_code": "REVIEW_PUBLISHED"},
-                )
             return ProductReadinessState(
                 "review", READINESS_DEGRADED, "stale", is_terminal=True,
-                lineage={**base, "reason_code": "REVIEW_NOT_PUBLISHED"},
+                lineage={
+                    **base,
+                    "reason_code": "REVIEW_POINTER_MISSING" if published_at is not None
+                    else "REVIEW_NOT_PUBLISHED",
+                },
             )
         if run.status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
@@ -892,18 +932,32 @@ class ProductReadinessService:
                 lineage={**parent, "reason_code": "PARENT_NOT_CONSUMABLE"},
             )
 
-        count = await self._count_dsa_projections(db, trade_date)
-        if count > 0:
+        # [Corrective-3.1 §P1] 必须按当前 core run 精确归属，不能只看"当日有快照"。
+        core_run_id = parent["source_core_run_id"]
+        counts = await self._count_dsa_projections(db, trade_date, core_run_id)
+        matched, total = counts["matched"], counts["total"]
+        detail = {"projection_matched": matched, "projection_total": total}
+
+        if matched > 0:
             return ProductReadinessState(
                 "dsa_projection", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
-                lineage={**parent, "reason_code": "PROJECTION_PRESENT",
-                         "coverage": count, "status": "present"},
+                lineage={**parent, **detail, "reason_code": "PROJECTION_PRESENT",
+                         "coverage": matched, "status": "present"},
+            )
+        if total > 0:
+            # 当日存在快照但没有一条归属当前 core run → 是上一轮残留，不得判 ready。
+            return ProductReadinessState(
+                "dsa_projection", READINESS_DEGRADED, "stale",
+                is_mandatory=False, is_terminal=False,
+                lineage={**parent, **detail,
+                         "reason_code": "PROJECTION_LINEAGE_MISMATCH",
+                         "coverage": 0, "status": "stale_lineage"},
             )
         return ProductReadinessState(
             "dsa_projection", READINESS_PENDING, "stale",
             is_mandatory=False, is_terminal=False,
-            lineage={**parent, "reason_code": "NO_PROJECTION",
+            lineage={**parent, **detail, "reason_code": "NO_PROJECTION",
                      "coverage": 0, "status": "missing"},
         )
 
@@ -926,46 +980,86 @@ class ProductReadinessService:
                 lineage={**parent, "reason_code": "PARENT_NOT_CONSUMABLE"},
             )
 
-        counts = await self._count_state_events(db, trade_date)
-        total = sum(counts.values())
-        if total > 0:
+        # [Corrective-3.1 §P1] 事件必须归属当前 core run；算法版本一并暴露。
+        core_run_id = parent["source_core_run_id"]
+        counts = await self._count_state_events(db, trade_date, core_run_id)
+        matched, total = counts["matched"], counts["total"]
+        detail = {
+            "event_type_counts": counts["by_type"],
+            "state_events_matched": matched,
+            "state_events_total": total,
+            "algorithm_versions": counts["algorithm_versions"],
+        }
+
+        if matched > 0:
             return ProductReadinessState(
                 "state_events", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
-                lineage={**parent, "reason_code": "STATE_EVENTS_PRESENT",
-                         "coverage": total, "status": "present",
-                         "event_type_counts": counts},
+                lineage={**parent, **detail, "reason_code": "STATE_EVENTS_PRESENT",
+                         "coverage": matched, "status": "present"},
+            )
+        if total > 0:
+            # 当日有事件但均不属于当前 core run → stale，禁止判 ready。
+            return ProductReadinessState(
+                "state_events", READINESS_DEGRADED, "stale",
+                is_mandatory=False, is_terminal=False,
+                lineage={**parent, **detail,
+                         "reason_code": "STATE_EVENTS_LINEAGE_MISMATCH",
+                         "coverage": 0, "status": "stale_lineage"},
             )
         return ProductReadinessState(
             "state_events", READINESS_PENDING, "stale",
             is_mandatory=False, is_terminal=False,
-            lineage={**parent, "reason_code": "NO_STATE_EVENTS",
+            lineage={**parent, **detail, "reason_code": "NO_STATE_EVENTS",
                      "coverage": 0, "status": "missing"},
         )
 
     @staticmethod
-    async def _count_dsa_projections(db: Any, trade_date: date) -> int:
-        """统计当日真实存在的特征快照数（DSA 投影产物核验）。
+    async def _count_dsa_projections(
+        db: Any, trade_date: date, source_core_run_id: Any = None,
+    ) -> dict[str, int]:
+        """[Corrective-3.1 §P1] 统计当日特征快照，并区分是否属于当前 core run。
 
-        DSA 投影随 stock_core 特征快照落库，因此以 `stock_feature_snapshots`
-        当日行数作为真实产物证据，而不是假定"父节点 ready 即 ready"。
+        返回 {"total": 当日全部, "matched": 归属当前 core run}。
+        `matched` 才是精确 lineage 证据；`total > matched` 说明存在上一轮 run
+        的残留投影，不能据此认定当前 pointer 的投影已完整。
         """
         try:
             from app.models.stock_feature_snapshot import StockFeatureSnapshot
 
-            return int(
+            total = int(
                 await db.scalar(
                     select(func.count())
                     .select_from(StockFeatureSnapshot)
                     .where(StockFeatureSnapshot.trade_date == trade_date)
                 ) or 0
             )
+            if source_core_run_id is None:
+                return {"total": total, "matched": 0}
+            matched = int(
+                await db.scalar(
+                    select(func.count())
+                    .select_from(StockFeatureSnapshot)
+                    .where(
+                        StockFeatureSnapshot.trade_date == trade_date,
+                        StockFeatureSnapshot.source_run_id == source_core_run_id,
+                    )
+                ) or 0
+            )
+            return {"total": total, "matched": matched}
         except Exception:
-            return 0
+            return {"total": 0, "matched": 0}
 
     @staticmethod
-    async def _count_state_events(db: Any, trade_date: date) -> dict[str, int]:
-        """按 event_type 统计当日真实状态事件数（candidate/confirmed 产物核验）。"""
+    async def _count_state_events(
+        db: Any, trade_date: date, source_core_run_id: Any = None,
+    ) -> dict[str, Any]:
+        """[Corrective-3.1 §P1] 按 event_type 统计当日状态事件，并按 core run 归属拆分。
+
+        返回 {"total": int, "matched": int, "by_type": {...}, "algorithm_versions": [...]}。
+        `by_type` 仅统计归属当前 core run 的事件；无 core run 时退化为全量并把
+        matched 记为 0，由调用方降级处理，不得据此判定 ready。
+        """
         try:
             from app.models.stock_state_event import StockStateEvent
 
@@ -974,9 +1068,40 @@ class ProductReadinessService:
                 .where(StockStateEvent.current_as_of == trade_date)
                 .group_by(StockStateEvent.event_type)
             )
-            return {str(event_type): int(count) for event_type, count in rows.all()}
+            all_by_type = {str(t): int(c) for t, c in rows.all()}
+            total = sum(all_by_type.values())
+            if source_core_run_id is None:
+                return {
+                    "total": total, "matched": 0,
+                    "by_type": {}, "algorithm_versions": [],
+                }
+
+            rows2 = await db.execute(
+                select(
+                    StockStateEvent.event_type,
+                    StockStateEvent.algorithm_version,
+                    func.count(),
+                )
+                .where(
+                    StockStateEvent.current_as_of == trade_date,
+                    StockStateEvent.source_run_id == source_core_run_id,
+                )
+                .group_by(StockStateEvent.event_type, StockStateEvent.algorithm_version)
+            )
+            by_type: dict[str, int] = {}
+            versions: set[str] = set()
+            for event_type, algo_version, count in rows2.all():
+                by_type[str(event_type)] = by_type.get(str(event_type), 0) + int(count)
+                if algo_version is not None:
+                    versions.add(str(algo_version))
+            return {
+                "total": total,
+                "matched": sum(by_type.values()),
+                "by_type": by_type,
+                "algorithm_versions": sorted(versions),
+            }
         except Exception:
-            return {}
+            return {"total": 0, "matched": 0, "by_type": {}, "algorithm_versions": []}
 
     async def _chip_state(
         self, db: Any, trade_date: date,

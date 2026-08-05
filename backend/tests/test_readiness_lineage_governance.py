@@ -259,6 +259,84 @@ def test_consumable_fresh_publication_needs_no_action() -> None:
 
 
 # =============================================================================
+# [Corrective-3.1 §P1] 精确 lineage：产物必须归属当前 core run
+# =============================================================================
+
+
+def test_projection_lineage_mismatch_is_governable() -> None:
+    """当日有快照但不属于当前 core run → 必须可治理，且不得判 ready。"""
+    retryable, action, _op = resolve_governance_action(
+        "PROJECTION_LINEAGE_MISMATCH", READINESS_DEGRADED,
+    )
+    assert retryable is True
+    assert action == "rebuild_dsa_projection"
+
+
+def test_state_events_lineage_mismatch_is_governable() -> None:
+    retryable, action, _op = resolve_governance_action(
+        "STATE_EVENTS_LINEAGE_MISMATCH", READINESS_DEGRADED,
+    )
+    assert retryable is True
+    assert action == "rebuild_state_events"
+
+
+def test_review_pointer_missing_is_governable() -> None:
+    """run 自称 published 但 factor_publications 无 pointer → 可治理。"""
+    retryable, action, _op = resolve_governance_action(
+        "REVIEW_POINTER_MISSING", READINESS_DEGRADED,
+    )
+    assert retryable is True
+    assert action == "publish_market_review"
+
+
+def test_dsa_counter_signature_requires_core_run() -> None:
+    """_count_dsa_projections 必须接受 source_core_run_id 并返回 matched/total。
+
+    Corrective-3 只按 trade_date 计数，任何当日快照都会让节点变 ready，
+    无法区分"上一轮 run 的残留投影"。
+    """
+    import inspect
+
+    from app.services.product_readiness_service import ProductReadinessService
+
+    sig = inspect.signature(ProductReadinessService._count_dsa_projections)
+    assert "source_core_run_id" in sig.parameters, (
+        "DSA 投影计数必须按 core run 过滤"
+    )
+    src = inspect.getsource(ProductReadinessService._count_dsa_projections)
+    assert "source_run_id" in src, "必须绑定 StockFeatureSnapshot.source_run_id"
+    assert '"matched"' in src and '"total"' in src
+
+
+def test_state_events_counter_requires_core_run_and_algo() -> None:
+    """_count_state_events 必须按 core run 过滤并暴露 algorithm_version。"""
+    import inspect
+
+    from app.services.product_readiness_service import ProductReadinessService
+
+    sig = inspect.signature(ProductReadinessService._count_state_events)
+    assert "source_core_run_id" in sig.parameters
+    src = inspect.getsource(ProductReadinessService._count_state_events)
+    assert "source_run_id" in src
+    assert "algorithm_version" in src, "state events lineage 必须暴露算法版本"
+
+
+def test_review_state_reads_factor_publication_pointer() -> None:
+    """_review_state 必须真正查询 FactorPublication，而不是只看 MarketReviewRun。"""
+    import inspect
+
+    from app.services.product_readiness_service import ProductReadinessService
+
+    src = inspect.getsource(ProductReadinessService._review_state)
+    assert "FactorPublication" in src, (
+        "review 就绪必须以 factor_publications pointer 为准"
+    )
+    assert "PUBLICATION_KIND_MARKET_REVIEW" in src
+    # 无 pointer 时不得因 run.status == published 就判 ready
+    assert "REVIEW_POINTER_MISSING" in src
+
+
+# =============================================================================
 # 集成：governance report 输出统一 lineage
 # =============================================================================
 

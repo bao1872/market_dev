@@ -30,6 +30,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chip_consensus_run import ChipConsensusRun
@@ -137,43 +138,83 @@ async def resolve_or_create_chip_run(
     now = datetime.now(UTC)
 
     if run is None:
-        run = ChipConsensusRun(
-            id=uuid.uuid4(),
-            scheduler_job_run_id=scheduler_job_run_id,
-            trade_date=trade_date,
-            source_core_run_id=source_core_run_id,
-            algorithm_version=algorithm_version,
-            status="running",
-            expected_count=expected_count,
-            succeeded_count=0,
-            failed_count=0,
-            skipped_count=0,
-            coverage_ratio=0.0,
-            started_at=now,
-            heartbeat_at=now,
-            worker_id=worker_id,
-            lease_epoch=lease_epoch or 0,
+        # [Corrective-3.1 §P1] 原子 upsert：依赖唯一约束
+        # uq_chip_consensus_runs_date_core_algo（migration 086）在数据库层阻止
+        # 并发重复创建。ON CONFLICT DO NOTHING 后回读，确保并发竞争的败方也能
+        # 拿到胜方创建的同一行，而不是各自新建。
+        new_id = uuid.uuid4()
+        stmt = (
+            pg_insert(ChipConsensusRun.__table__)
+            .values(
+                id=new_id,
+                scheduler_job_run_id=scheduler_job_run_id,
+                trade_date=trade_date,
+                source_core_run_id=source_core_run_id,
+                algorithm_version=algorithm_version,
+                status="running",
+                expected_count=expected_count,
+                succeeded_count=0,
+                failed_count=0,
+                skipped_count=0,
+                coverage_ratio=0.0,
+                started_at=now,
+                heartbeat_at=now,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch or 0,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["trade_date", "source_core_run_id", "algorithm_version"],
+            )
+            .returning(ChipConsensusRun.__table__.c.id)
         )
-        db.add(run)
+        inserted_id = await db.scalar(stmt)
+
+        if inserted_id is not None:
+            created = await db.get(ChipConsensusRun, inserted_id)
+            if created is None:
+                raise RuntimeError(
+                    f"resolve_or_create_chip_run: 新建行回读失败 id={inserted_id}"
+                )
+            logger.info(
+                "[ChipRunLifecycle] 新建 ChipConsensusRun: id=%s trade_date=%s "
+                "core_run=%s",
+                created.id, trade_date, source_core_run_id,
+            )
+            await db.flush()
+            return created
+
+        # 并发竞争败方：回读胜方创建的行，走下面统一的复用分支
+        run = await db.scalar(
+            select(ChipConsensusRun).where(
+                ChipConsensusRun.trade_date == trade_date,
+                ChipConsensusRun.source_core_run_id == source_core_run_id,
+                ChipConsensusRun.algorithm_version == algorithm_version,
+            ).limit(1)
+        )
+        if run is None:
+            raise RuntimeError(
+                "resolve_or_create_chip_run: ON CONFLICT 未插入且回读为空 "
+                f"(trade_date={trade_date}, core_run={source_core_run_id}, "
+                f"algo={algorithm_version})"
+            )
         logger.info(
-            "[ChipRunLifecycle] 新建 ChipConsensusRun: id=%s trade_date=%s core_run=%s",
-            run.id, trade_date, source_core_run_id,
+            "[ChipRunLifecycle] 并发竞争，复用已存在 ChipConsensusRun: id=%s", run.id,
         )
-    else:
-        # retry / resume：复用同一领域 run，只刷新执行 lineage
-        run.status = "running"
-        run.scheduler_job_run_id = scheduler_job_run_id or run.scheduler_job_run_id
-        run.worker_id = worker_id or run.worker_id
-        if lease_epoch is not None:
-            run.lease_epoch = lease_epoch
-        if expected_count:
-            run.expected_count = expected_count
-        run.heartbeat_at = now
-        if run.started_at is None:
-            run.started_at = now
-        logger.info(
-            "[ChipRunLifecycle] 复用 ChipConsensusRun: id=%s status→running", run.id,
-        )
+
+    # retry / resume / 并发败方：复用同一领域 run，只刷新执行 lineage
+    run.status = "running"
+    run.scheduler_job_run_id = scheduler_job_run_id or run.scheduler_job_run_id
+    run.worker_id = worker_id or run.worker_id
+    if lease_epoch is not None:
+        run.lease_epoch = lease_epoch
+    if expected_count:
+        run.expected_count = expected_count
+    run.heartbeat_at = now
+    if run.started_at is None:
+        run.started_at = now
+    logger.info(
+        "[ChipRunLifecycle] 复用 ChipConsensusRun: id=%s status→running", run.id,
+    )
 
     await db.flush()
     return run

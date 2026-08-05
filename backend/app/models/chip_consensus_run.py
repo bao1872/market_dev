@@ -94,6 +94,14 @@ class ChipConsensusRun(Base):
     )
 
     __table_args__ = (
+        # [Corrective-3.1 §P1] 数据库级幂等：同一 (trade_date, source_core_run_id,
+        # algorithm_version) 只允许存在一个领域 run。
+        # 修复前 resolve_or_create_chip_run 是 SELECT-then-INSERT，单 worker 可用，
+        # 但并发下无法阻止重复创建。有了该约束后可用 ON CONFLICT 做原子 upsert。
+        UniqueConstraint(
+            "trade_date", "source_core_run_id", "algorithm_version",
+            name="uq_chip_consensus_runs_date_core_algo",
+        ),
         Index("ix_chip_consensus_runs_trade_date", "trade_date"),
         Index("ix_chip_consensus_runs_core_run", "source_core_run_id"),
         Index("ix_chip_consensus_runs_status", "status"),
