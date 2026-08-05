@@ -28,7 +28,7 @@ freshness 标志（E08-T03）：
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -98,6 +98,12 @@ class ProductReadinessState:
     is_mandatory: bool = True
     is_terminal: bool = False
     lineage: dict[str, Any] = field(default_factory=dict)
+    # [PRD Alignment Pass] 增强语义字段，供 evaluate_closure 做合同级闭包判定：
+    # - auction: mode（structure_only / hybrid / composite），composite 才是完整就绪
+    # - chip / state_events / dsa_projection：是否"真正就绪"（ready 且 lineage 匹配当前 core）
+    #   terminal 只代表 run 已终结，不等同于产品就绪。
+    auction_mode: str | None = None
+    is_product_ready: bool | None = None  # 显式就绪（区分 terminal）；None 由 readiness 推导
 
     @property
     def is_consumable(self) -> bool:
@@ -106,6 +112,18 @@ class ProductReadinessState:
     @property
     def is_fully_fresh(self) -> bool:
         return self.readiness == READINESS_READY and self.freshness == "fresh"
+
+    @property
+    def is_truly_ready(self) -> bool:
+        """[PRD Alignment Pass] 产品"完全就绪"的合同语义。
+
+        优先用 is_product_ready（调用方显式标注）；否则回退到 is_fully_fresh。
+        用于 fully_ready 判定：chip/state_events/dsa_projection 必须真正 ready，
+        而非仅 run terminal（failed/partial/cancelled 也 terminal 但不可消费）。
+        """
+        if self.is_product_ready is not None:
+            return self.is_product_ready
+        return self.is_fully_fresh
 
 
 @dataclass(frozen=True)
@@ -222,9 +240,19 @@ def evaluate_closure(
 
     mandatory_full_fresh = all(p.is_fully_fresh for p in mandatory)
     enhancement_terminal = _enhancement_terminal(enhancement)
+    # [PRD Alignment Pass P0-1] enhancement 必须"真正就绪"，而非仅 run terminal。
+    # failed/partial/cancelled 也 terminal 但不可消费，必须排除。
+    enhancement_all_ready = all(e.is_truly_ready for e in enhancement)
+    # auction 必须 composite 才构成完整就绪；仅当 auction 已终态才强制该约束，
+    # 未终态（pending/running）不应降级为 degraded，而是 core_ready / enhanced_pending。
+    auction = by_product.get("auction_anchor")
+    if auction is not None and auction.is_terminal:
+        auction_composite = auction.auction_mode == "composite"
+    else:
+        auction_composite = True
 
     # 4. fully_ready
-    if mandatory_full_fresh and enhancement_terminal:
+    if mandatory_full_fresh and enhancement_all_ready and auction_composite:
         return ClosureEvaluation(
             closure=CLOSURE_FULLY_READY,
             mandatory_products_ready=True,
@@ -292,6 +320,22 @@ class GovernanceReport:
     blocked_products: list[str] = field(default_factory=list)
     unavailable_products: list[str] = field(default_factory=list)
     degraded_reasons: list[dict[str, Any]] = field(default_factory=list)
+    # [PRD Alignment Pass P1-2] 父任务 + 子任务真实聚合
+    scheduler: SchedulerReadiness | None = None
+
+
+@dataclass
+class SchedulerReadiness:
+    """[PRD Alignment Pass P1-2] 父任务（AfterCloseRun）+ 子 SchedulerJobRun 真实聚合。"""
+
+    scheduler_job_run_id: str | None = None
+    status: str | None = None
+    latest_heartbeat: str | None = None
+    lease_epoch: int | None = None
+    is_stale: bool | None = None
+    total_children: int = 0
+    processed_children: int = 0
+    unreconciled_children: int = 0
 
 
 # [Corrective-3 §三] 统一 lineage 结构：每个节点都必须返回全部这些键。
@@ -430,15 +474,19 @@ def _product_lineage(p: ProductReadinessState) -> dict[str, Any]:
 def evaluate_governance(
     products: list[ProductReadinessState],
     closure: ClosureEvaluation,
+    scheduler: SchedulerReadiness | None = None,
 ) -> GovernanceReport:
     """纯函数：从产品就绪状态 + 闭包评估生成治理报告（Commit G，已修正真实 lineage）。
 
     不连接数据库；所有信号均由 ProductReadinessState 推导，可 PURE_UNIT_TEST 测试。
     [G 修正] pointer_lineage 返回每个产品的真实数据血缘 dict，而非字符串来源类型。
+    [PRD Alignment Pass P1-2] scheduler 承载父任务 + 子任务真实聚合；
+    当提供时，unmatched_active_children 优先采用真实子任务状态。
 
     Args:
         products: 全部九节点产品状态
         closure: 对应的闭包评估结果
+        scheduler: 父任务 + 子任务真实聚合（可选）
 
     Returns:
         GovernanceReport
@@ -470,6 +518,14 @@ def evaluate_governance(
         elif p.readiness == READINESS_DEGRADED:
             blocked_products.append(p.product)
 
+    # [PRD Alignment Pass P1-2] 优先采用真实子任务聚合判定未对账子任务
+    if scheduler is not None and scheduler.unreconciled_children > 0:
+        unmatched_active_children = unmatched_active_children or []
+        for p in products:
+            if not p.is_mandatory and p.is_terminal is False and core_consumable:
+                if p.product not in unmatched_active_children:
+                    unmatched_active_children.append(p.product)
+
     return GovernanceReport(
         pointer_lineage=pointer_lineage,
         stale_children=sorted(stale_children),
@@ -478,6 +534,7 @@ def evaluate_governance(
         pending_products=sorted(pending_products),
         blocked_products=sorted(blocked_products),
         unavailable_products=sorted(unavailable_products),
+        scheduler=scheduler,
         degraded_reasons=list(closure.issues),
     )
 
@@ -625,6 +682,80 @@ class ProductReadinessService:
             await self._state_events_state(db, trade_date, stock_core),
             await self._auction_state(db, trade_date),
         ]
+
+    async def collect_scheduler(
+        self,
+        db: Any,
+        trade_date: date,
+    ) -> SchedulerReadiness:
+        """[PRD Alignment Pass P1-2] 聚合父任务（AfterCloseRun）+ 子 SchedulerJobRun 真实状态。
+
+        查询当前 trade_date 的 after_close_orchestrator job_run（父任务），
+        及其 enhancement 子任务（chip_consensus / auction_anchor / state_events 等）
+        的真实 job_run，计算 total/processed/unreconciled 与 heartbeat/lease 新鲜度。
+
+        若父任务不存在，返回全 None 的 SchedulerReadiness（不报错，纯聚合）。
+
+        Args:
+            db: 异步数据库会话
+            trade_date: 业务交易日
+
+        Returns:
+            SchedulerReadiness
+        """
+        from app.models.scheduler_job_run import SchedulerJobRun
+
+        trade_date_str = trade_date.isoformat()
+        parent = await db.scalar(
+            select(SchedulerJobRun)
+            .where(
+                SchedulerJobRun.job_name == "after_close_orchestrator",
+                SchedulerJobRun.business_date == trade_date_str,
+            )
+            .order_by(SchedulerJobRun.created_at.desc())
+            .limit(1)
+        )
+        if parent is None:
+            return SchedulerReadiness()
+
+        # enhancement 子任务：同一 business_date 的派生产品 job_run
+        enhancement_jobs = {
+            "chip_consensus",
+            "auction_anchor",
+            "state_events",
+        }
+        children = (
+            await db.scalars(
+                select(SchedulerJobRun)
+                .where(
+                    SchedulerJobRun.business_date == trade_date_str,
+                    SchedulerJobRun.job_name.in_(enhancement_jobs),
+                )
+            )
+        ).all()
+
+        total = len(children)
+        processed = sum(1 for c in children if c.status in TERMINAL_RUN_STATUS)
+        unreconciled = total - processed
+
+        # 僵尸 worker 判定：父任务 running 但租约/心跳已过期
+        is_stale: bool | None = None
+        if getattr(parent, "status", None) == "running":
+            lease_expires = getattr(parent, "lease_expires_at", None)
+            now = datetime.now(UTC)
+            if lease_expires is not None:
+                is_stale = lease_expires < now
+
+        return SchedulerReadiness(
+            scheduler_job_run_id=_sid(getattr(parent, "id", None)),
+            status=getattr(parent, "status", None),
+            latest_heartbeat=_iso(getattr(parent, "heartbeat_at", None)),
+            lease_epoch=getattr(parent, "lease_epoch", None),
+            is_stale=is_stale,
+            total_children=total,
+            processed_children=processed,
+            unreconciled_children=unreconciled,
+        )
 
     async def evaluate_for_trade_date(
         self,
@@ -1167,13 +1298,12 @@ class ProductReadinessService:
     async def _auction_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """auction_anchor：增强产品，以 auction_anchor 发布指针为准。"""
-        st = await self._publication_readiness(
-            db, trade_date, PUBLICATION_KIND_AUCTION_ANCHOR,
-            "auction_anchor", is_mandatory=False,
-        )
-        if st is not None:
-            return st
+        """auction_anchor：增强产品，以 auction_anchor 发布指针为准。
+
+        [PRD Alignment Pass P0-1] 无论经由 publication 还是 domain run，都读取 run.mode：
+        fully_ready 要求 auction mode == composite。publication 指针本身不存 mode，
+        故先取 domain run 的 mode 再与 publication 状态合并。
+        """
         from app.models.auction_anchor_run import AuctionAnchorRun
 
         run = await db.scalar(
@@ -1182,6 +1312,32 @@ class ProductReadinessService:
             .order_by(AuctionAnchorRun.created_at.desc())
             .limit(1)
         )
+        current_mode = getattr(run, "mode", None) if run is not None else None
+
+        st = await self._publication_readiness(
+            db, trade_date, PUBLICATION_KIND_AUCTION_ANCHOR,
+            "auction_anchor", is_mandatory=False,
+        )
+        if st is not None:
+            # publication 存在 → 附加 run.mode 供 fully_ready 判定（state 不可变，重建）
+            if run is not None and run.status == "succeeded":
+                is_ready = current_mode == "composite"
+            else:
+                is_ready = False
+            return ProductReadinessState(
+                "auction_anchor",
+                st.readiness,
+                st.freshness,
+                is_mandatory=False,
+                is_terminal=st.is_terminal,
+                auction_mode=current_mode,
+                is_product_ready=is_ready,
+                lineage={
+                    **st.lineage,
+                    "mode": current_mode,
+                    "reason_code": st.lineage.get("reason_code", "AUCTION_PUBLISHED"),
+                },
+            )
         if run is None:
             return ProductReadinessState(
                 "auction_anchor", READINESS_PENDING, "fresh",
@@ -1202,50 +1358,75 @@ class ProductReadinessService:
 
         # [Corrective-3 §三] structure_only 必须体现"等待 chip 升级"，
         # 不得与 succeeded 一样呈现为 fresh/ready。
+        # [PRD Alignment Pass P0-1] auction_mode 暴露当前模式，fully_ready 要求 composite。
         if run.status == "structure_only":
             return ProductReadinessState(
                 "auction_anchor", READINESS_DEGRADED, "stale",
                 is_mandatory=False, is_terminal=True,
-                lineage={**base, "reason_code": "AUCTION_STRUCTURE_ONLY"},
+                auction_mode=current_mode,
+                is_product_ready=False,
+                lineage={**base, "reason_code": "AUCTION_STRUCTURE_ONLY", "mode": current_mode},
             )
         if run.status == "succeeded":
             return ProductReadinessState(
                 "auction_anchor", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
-                lineage={**base, "reason_code": "AUCTION_SUCCEEDED"},
+                auction_mode=current_mode,
+                # 仅 composite 视为完整就绪；hybrid/structure_only 不算 fully_ready
+                is_product_ready=(current_mode == "composite"),
+                lineage={**base, "reason_code": "AUCTION_SUCCEEDED", "mode": current_mode},
             )
         # [Corrective-3 §三] terminal failure 必须包含 run_id 与 reason
         if run.status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
                 "auction_anchor", READINESS_UNAVAILABLE, "fresh",
                 is_mandatory=False, is_terminal=True,
+                auction_mode=current_mode,
+                is_product_ready=False,
                 lineage={
                     **base,
                     "reason_code": f"AUCTION_{run.status.upper()}",
+                    "mode": current_mode,
                     "error_message": getattr(run, "error_message", None),
                 },
             )
         return ProductReadinessState(
             "auction_anchor", READINESS_PENDING, "fresh",
             is_mandatory=False, is_terminal=False,
-            lineage={**base, "reason_code": "AUCTION_RUNNING"},
+            auction_mode=current_mode,
+            lineage={**base, "reason_code": "AUCTION_RUNNING", "mode": current_mode},
         )
 
 
 if __name__ == "__main__":
-    # fully_ready（九节点，enhancement 全部 terminal）
+    # fully_ready（九节点，enhancement 真正就绪且 auction composite）
     full = [
         ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
         ProductReadinessState("board_facts", READINESS_READY, "fresh"),
         ProductReadinessState("stock_core", READINESS_READY, "fresh"),
         ProductReadinessState("board_aggregation", READINESS_READY, "fresh"),
         ProductReadinessState("review", READINESS_READY, "fresh"),
-        ProductReadinessState("dsa_projection", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
-        ProductReadinessState("chip", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
-        ProductReadinessState("state_events", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
-        ProductReadinessState("auction_anchor", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True),
+        ProductReadinessState("dsa_projection", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, is_product_ready=True),
+        ProductReadinessState("chip", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, is_product_ready=True),
+        ProductReadinessState("state_events", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, is_product_ready=True),
+        ProductReadinessState("auction_anchor", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, auction_mode="composite", is_product_ready=True),
     ]
     assert evaluate_closure(full).closure == CLOSURE_FULLY_READY
+
+    # [PRD Alignment Pass P0-1] chip partial（terminal）不得误判 fully_ready
+    chip_partial = list(full)
+    chip_partial[6] = ProductReadinessState("chip", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, is_product_ready=False, lineage={"reason_code": "CHIP_PARTIAL"})
+    assert evaluate_closure(chip_partial).closure == CLOSURE_DEGRADED_READY
+
+    # [PRD Alignment Pass P0-1] auction structure_only（terminal）不得误判 fully_ready
+    auction_struct = list(full)
+    auction_struct[8] = ProductReadinessState("auction_anchor", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, auction_mode="structure_only", is_product_ready=False, lineage={"reason_code": "AUCTION_STRUCTURE_ONLY", "mode": "structure_only"})
+    assert evaluate_closure(auction_struct).closure == CLOSURE_DEGRADED_READY
+
+    # [PRD Alignment Pass P0-1] auction hybrid（terminal但非composite）不得误判 fully_ready
+    auction_hybrid = list(full)
+    auction_hybrid[8] = ProductReadinessState("auction_anchor", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, auction_mode="hybrid", is_product_ready=False, lineage={"reason_code": "AUCTION_HYBRID", "mode": "hybrid"})
+    assert evaluate_closure(auction_hybrid).closure == CLOSURE_DEGRADED_READY
 
     # blocked
     blocked = [

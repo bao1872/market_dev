@@ -20,15 +20,27 @@
 
 **生成日期**: 2026-08-05
 
-**当前判断（Corrective-3.2 + Gate 1 Finalization 后）**：
+**当前判断（PRD Alignment Pass 2026-08-05 后）**：
+
+> [PRD Alignment Pass 2026-08-05] 审查结论：上一轮 `development_complete` / `code_ready=true`
+> 标记过早。本轮收口了 P0-1..P0-5、P1-1、P1-2、P1-4 合同表面、P1-5 决策层 E2E，
+> 但代码改动尚未在真实 PG 验证，granular restart 大部分边界后端未实现，
+> 前端完整页面接入待手动验证，PG E2E 未执行。故诚实标记为 `partial` / `code_ready=false`。
 
 ```text
-development_chain_D_to_J        = development_complete   # 代码 + 本地验证完成；remote_* 见下
-corrective_3_2_fencing_implemented = true                # 事务级 lock_owned_job_run fencing
-mypy_changed_file_gate_passed  = true   # scripts/quality/mypy-changed.sh 退出码 0
+development_chain_D_to_J        = partial   # 合同级缺口已修，PG/前端整链未闭环
+prd_code_alignment              = partial
+corrective_3_2_fencing_implemented = true    # 事务级 lock_owned_job_run fencing
+board_facts_contract            = corrective_applied   # P0-2/3/4/5 已修，PG 待验证
+product_readiness_closure       = corrective_applied   # P0-1 已修，PG 待验证
+scheduler_child_governance      = wired_code_pending_pg  # P1-2 已接真实聚合
+granular_restart                = partial   # 枚举已扩展；仅 daily_ready 后端实现
+synthetic_e2e                   = partial   # 决策层 E2E 已加；PG E2E 仍 authored_not_executed
+frontend_full_contract          = pending_manual_validation
+mypy_changed_file_gate_passed   = true   # scripts/quality/mypy-changed.sh 退出码 0
 mypy_full_baseline_errors       = 45    # 历史遗留，位于未改动文件，不在本次门禁范围
 ruff_changed_files_passed       = true   # Ruff 改动文件 All checks passed
-remote_unit_verified            = true   # PURE_UNIT_TEST 47 passed（3 目标文件），postgres=0
+remote_unit_verified            = true   # PURE_UNIT_TEST 140 passed（9 文件），postgres=0
 frontend_tsc_local_passed       = true   # tsc -b 退出码 0（同最终 SHA 本地复验）
 frontend_eslint_local_passed    = true   # 0 errors（66 warnings 非 error）
 frontend_contract_tests_local   = true   # 552 passed（同最终 SHA 本地复验）
@@ -38,13 +50,14 @@ remote_frontend_build_verified  = false  # 前端未变化，复用本地证据�
 migration_086_authored          = true
 migration_086_static_verified   = true
 migration_086_applied           = false  # 阶段 4 PG 集成后才执行
-migration_086_pg_verified       = false
-production_publication_fenced  = true   # [Corrective-3.2] 现为真：pub/anchor 事务内 lock_owned_job_run
+migration_086_pg_verified        = false
+production_publication_fenced  = true   # [Corrective-3.2] pub/anchor 事务内 lock_owned_job_run
 chip_domain_finalize_fenced    = true   # [Corrective-3.2] finalize_chip_run 事务内 lock_owned_job_run
 chip_domain_finalize_failure_governed = true
 database_run_uniqueness_authored = true  # ORM 约束 + pg_insert，待 PG 验证
 exact_lineage_by_core_run       = true  # 服务层 matched 判定已覆盖
 review_pointer_exact            = true
+code_ready        = false   # 合同缺口已修但 PG/前端整链未闭环
 pg_tested        = false
 deployed         = false
 runtime_verified = false
@@ -334,24 +347,38 @@ bash scripts/quality/mypy-changed.sh
 | Contract Tests | `npm run test:contract` | 552 passed, 0 failed |
 | Vite Build | `vite build` | dist 产物完整 |
 
-### Gate 1 通过标准（3.2 完成后）
+### Gate 1 状态（PRD Alignment Pass 2026-08-05 后）
 
 ```text
+# [PRD Alignment Pass 2026-08-05] 审查结论：此前 development_complete / code_ready=true 标记过早。
+# 本轮收口了 P0-1..P0-5、P1-1、P1-2、P1-4 合同表面、P1-5 决策层 E2E；
+# 但以下仍为开发阶段未闭合项，故 development_chain_D_to_J=partial、code_ready=false：
+#   - 所有代码改动尚未在真实 PG 跑集成（dev 环境禁止连 PG，仅 PURE_UNIT_TEST）
+#   - granular restart 仅 daily_ready 后端实现，core/stock_core/dsa_projection/state_events/chip/
+#     auction/board/review 的隔离重算函数未实现（API 已接受枚举并返回 not_implemented）
+#   - 前端完整页面接入（行情/详情/Review/auction/父任务与产品 readiness 分离/晚到更新/
+#     structure-only/hybrid/composite 展示）仅 Admin 工作台已验证，需逐页手动验证
+#   - PG synthetic E2E（test_v21_synthetic_e2e_pg.py）仍为 authored_not_executed
+
 corrective_3_2_fencing_implemented   = true
-mypy_changed_file_gate_passed        = true   # 脚本退出码 0
+mypy_changed_file_gate_passed        = true   # scripts/quality/mypy-changed.sh 退出码 0
 ruff_changed_files_passed            = true
-remote_unit_verified                 = true   # PURE_UNIT_TEST 47 passed（3 目标文件），postgres=0
-frontend_tsc_local_passed            = true
-frontend_eslint_local_passed         = true
-frontend_contract_tests_local        = true
-frontend_build_local_passed          = true
-remote_static_verified               = false  # 未远程，本地 changed-file gate 替代
+pure_unit_tests_passed               = true   # 140 passed（9 文件），postgres=0
+board_facts_contract                 = corrective_applied   # P0-2/3/4/5 已修，PG 行为待验证
+product_readiness_closure            = corrective_applied   # P0-1 已修，PG 行为待验证
+scheduler_child_governance           = wired_code_pending_pg  # P1-2 已接真实聚合，未 PG 验证
+granular_restart                     = partial   # 枚举已扩展；仅 daily_ready 后端实现
+synthetic_e2e                        = partial   # 决策层 E2E 已加；PG E2E 仍 authored_not_executed
+frontend_full_contract               = pending_manual_validation
+remote_static_verified               = false
 remote_frontend_build_verified       = false
-development_chain_D_to_J             = development_complete
-code_ready                           = true   # 仅限开发阶段；Gate 2-5 未启动
+development_chain_D_to_J             = partial
+code_ready                           = false   # 合同级缺口已修，但 PG/部署/前端整链尚未闭环
+prd_code_alignment                   = partial
 full_prd_closed                      = false
 production_fully_ready               = false
 ```
 
-> 下一步：隔离 PG 集成（Gate 2）才允许 apply Migration 085/086 并验证并发幂等。
+> 下一步：隔离 PG 集成（Gate 2）才允许 apply Migration 085/086 并验证并发幂等、board fetch/reuse 真实行为、scheduler 子任务聚合。
+> 之后交人工做前端逐页手动验证（P1-6），再考虑 PG synthetic E2E 执行。
 

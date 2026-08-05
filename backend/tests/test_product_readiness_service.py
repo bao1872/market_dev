@@ -21,6 +21,7 @@ from app.domain_status import (
     READINESS_PENDING,
     READINESS_READY,
     READINESS_READY_REUSED,
+    READINESS_DEGRADED,
     READINESS_UNAVAILABLE,
 )
 from app.services.product_readiness_service import (
@@ -40,15 +41,20 @@ _MANDATORY = {
 _ENHANCEMENT = {
     "dsa_projection": ProductReadinessState(
         "dsa_projection", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True,
+        is_product_ready=True,
     ),
     "chip": ProductReadinessState(
         "chip", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True,
+        is_product_ready=True,
     ),
     "state_events": ProductReadinessState(
         "state_events", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True,
+        is_product_ready=True,
     ),
+    # [PRD Alignment Pass P0-1] auction 必须是 composite 才算 fully_ready
     "auction_anchor": ProductReadinessState(
         "auction_anchor", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True,
+        auction_mode="composite", is_product_ready=True,
     ),
 }
 
@@ -58,12 +64,34 @@ def _full_products() -> list[ProductReadinessState]:
 
 
 def test_fully_ready():
-    """全部 mandatory fresh + enhancement 全部 terminal → fully_ready。"""
+    """全部 mandatory fresh + enhancement 真正就绪且 auction=composite → fully_ready。"""
     ev = evaluate_closure(_full_products())
     assert ev.closure == CLOSURE_FULLY_READY
     assert ev.mandatory_products_ready is True
     assert ev.mandatory_products_full_fresh is True
     assert ev.enhancement_jobs_terminal is True
+
+
+def test_fully_ready_requires_composite_auction():
+    """[PRD Alignment Pass P0-1] auction 非 composite（terminal 但 structure_only/hybrid）
+    不得误判 fully_ready，应为 degraded_ready。"""
+    products = _full_products()
+    new_products = []
+    for p in products:
+        if p.product == "auction_anchor":
+            new_products.append(
+                ProductReadinessState(
+                    "auction_anchor", READINESS_DEGRADED, "stale",
+                    is_mandatory=False, is_terminal=True,
+                    auction_mode="structure_only", is_product_ready=False,
+                    lineage={**p.lineage, "reason_code": "AUCTION_STRUCTURE_ONLY"},
+                )
+            )
+        else:
+            new_products.append(p)
+    ev = evaluate_closure(new_products)
+    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.mandatory_products_full_fresh is True
 
 
 def test_blocked_when_mandatory_unavailable():
@@ -127,15 +155,31 @@ def test_enhancement_not_terminal_degrades():
 
 
 def test_failed_enhancement_is_terminal_and_does_not_block():
-    """P0-3 修复：chip 失败（terminal+unavailable）→ enhancementJobsTerminal=True 且不阻断。"""
+    """P0-3 修复：chip 失败（terminal+unavailable）→ enhancementJobsTerminal=True 且不阻断 mandatory chain。
+
+    [PRD Alignment Pass P0-1] 但失败的 chip 不是"真正就绪"，故闭包为 degraded_ready，
+    不得误判 fully_ready（failed/failed 的 enhancement 不可消费）。
+    """
     products = list(_MANDATORY.values())
     products.append(
         ProductReadinessState(
             "chip", READINESS_UNAVAILABLE, is_mandatory=False, is_terminal=True,
+            is_product_ready=False,
         ),
     )
+    # 补齐其余 enhancement（含 composite auction）以隔离"chip 失败"这一变量
+    products.append(
+        ProductReadinessState("dsa_projection", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, is_product_ready=True),
+    )
+    products.append(
+        ProductReadinessState("state_events", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, is_product_ready=True),
+    )
+    products.append(
+        ProductReadinessState("auction_anchor", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, auction_mode="composite", is_product_ready=True),
+    )
     ev = evaluate_closure(products)
-    assert ev.closure == CLOSURE_FULLY_READY  # mandatory fresh + enhancement 全部 terminal
+    assert ev.closure == CLOSURE_DEGRADED_READY  # mandatory fresh，但 chip 失败未真正就绪
+    assert ev.mandatory_products_full_fresh is True
     assert ev.enhancement_jobs_terminal is True
 
 

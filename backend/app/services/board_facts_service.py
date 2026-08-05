@@ -348,26 +348,12 @@ async def run_board_facts(
     run_id = run.id
 
     try:
-        # 1. 失败复用判定
-        previous_run = await _find_latest_published_run(db, trade_date)
-        if previous_run is not None:
-            staleness = await _count_trading_days_between(
-                db, previous_run.trade_date, trade_date
-            )
-            if staleness > max_reuse_trading_days:
-                logger.info(
-                    "[BoardFacts] run=%s 前一个 published run=%s 陈旧 %d 交易日 > 上限 %d，不复用",
-                    run_id, previous_run.id, staleness, max_reuse_trading_days,
-                )
-            else:
-                run = await _reuse_previous(db, run, previous_run, staleness)
-                logger.info(
-                    "[BoardFacts] run=%s 复用前一个 published run=%s (staleness=%d)",
-                    run_id, previous_run.id, staleness,
-                )
-                return run
+        # [PRD Alignment Pass P0-2] 修正 fetch/reuse 顺序：
+        # 先尝试获取当前新快照（scheduled_current / manual_current）；
+        # 仅当 fetch 或门禁失败，且前一个 published run 在允许陈旧度内才复用。
+        # historical_replay 不调用 pywencai，仅解析目标 trade_date 的 PIT publication。
 
-        # 2. historical_replay：禁 pywencai，消费已有 PIT publication
+        # 1. historical_replay：禁 pywencai，消费已有 PIT publication
         if run_mode == RUN_MODE_HISTORICAL_REPLAY:
             pub = await _find_publication(db, trade_date)
             if pub is None:
@@ -388,7 +374,7 @@ async def run_board_facts(
             await db.flush()
             return run
 
-        # 3. 拉取（provider）或使用注入 snapshot
+        # 2. 拉取当前快照（provider）或使用注入 snapshot
         run.status = BOARD_FACTS_STATUS_FETCHING
         run.started_at = datetime.now(UTC)
         await db.flush()
@@ -399,13 +385,32 @@ async def run_board_facts(
             try:
                 snapshot = await wencai_board_provider.fetch_board_snapshot()
             except Exception as exc:
-                run.status = RUN_STATUS_FAILED
-                run.readiness = READINESS_UNAVAILABLE
-                run.error_code = ERR_BOARD_PROVIDER_UNAVAILABLE
-                run.error_message = f"pywencai provider 拉取失败: {exc}"
-                run.finished_at = datetime.now(UTC)
-                await db.flush()
+                # fetch 失败 → 进入 previous publication fallback
+                logger.warning(
+                    "[BoardFacts] run=%s 当前 pywencai 拉取失败: %s，进入复用判定",
+                    run_id, exc,
+                )
+                run = await _try_reuse_previous_on_failure(
+                    db, run, trade_date, max_reuse_trading_days, run_id,
+                )
                 return run
+
+        # fetch 成功 → 继续规范化 + 门禁 + 写入；门禁失败也在 sync_boards 内转 reused
+        try:
+            _ = await _validate_and_persist(
+                db, run, snapshot, trade_date, run_id, instrument_resolver,
+            )
+            return run
+        except _BoardFetchFailedError as gate_exc:
+            # 门禁/写入失败 → 进入 previous publication fallback
+            logger.warning(
+                "[BoardFacts] run=%s 当前快照门禁/写入失败: %s，进入复用判定",
+                run_id, gate_exc,
+            )
+            run = await _try_reuse_previous_on_failure(
+                db, run, trade_date, max_reuse_trading_days, run_id,
+            )
+            return run
 
         snapshot_hash = _stable_snapshot_hash(snapshot)
         run.snapshot_hash = snapshot_hash
@@ -445,44 +450,11 @@ async def run_board_facts(
         run.status = BOARD_FACTS_STATUS_VALIDATING
         await db.flush()
 
-        from app.services import board_sync_service
-
-        try:
-            sync_result = await board_sync_service.sync_boards(
-                db,
-                snapshot,
-                instrument_resolver=instrument_resolver,
-                effective_date=trade_date,
-            )
-        except Exception as exc:
-            run.status = RUN_STATUS_FAILED
-            run.readiness = READINESS_UNAVAILABLE
-            run.error_code = ERR_BOARD_QUALITY_GATE_FAILED
-            run.error_message = f"board facts 门禁/写入失败: {exc}"
-            run.finished_at = datetime.now(UTC)
-            await db.flush()
-            return run
-
-        run.status = BOARD_FACTS_STATUS_PERSISTING
-        run.resolved_count = sync_result.get("resolved")
-        run.unresolved_count = sync_result.get("unresolved")
-        # industry_l1/l2/l3_count 已在抓取阶段按层级从 snapshot 计算，勿用总 industry_count 覆盖
-        run.membership_count = sync_result.get("membership_count")
-        run.raw_rows = sync_result.get("raw_rows", run.raw_rows)
-        run.coverage_json = {
-            "resolved": sync_result.get("resolved", 0),
-            "unresolved": sync_result.get("unresolved", 0),
-            "parse_rate": sync_result.get("parse_rate"),
-        }
-        await db.flush()
-
-        # 5. 原子发布
-        run.status = BOARD_FACTS_STATUS_PUBLISHED
-        run.readiness = READINESS_READY
-        run.finished_at = datetime.now(UTC)
-        await _publish_board_facts(db, run)
-        await db.flush()
-
+        # 规范化 + 门禁 + 写入 + 发布；门禁失败抛 _BoardFetchFailedError 由调用方转复用
+        await _validate_and_persist(
+            db, run, snapshot, trade_date, run_id, instrument_resolver,
+        )
+        snapshot_hash = run.snapshot_hash
         logger.info(
             "[BoardFacts] run=%s published: trade_date=%s, hash=%.16s, "
             "resolved=%s, unresolved=%s",
@@ -501,6 +473,104 @@ async def run_board_facts(
         run.finished_at = datetime.now(UTC)
         await db.flush()
         return run
+
+
+class _BoardFetchFailedError(Exception):
+    """当前快照门禁/写入失败，调用方应转 previous publication 复用。"""
+
+
+async def _validate_and_persist(
+    db: AsyncSession,
+    run: BoardFactsRun,
+    snapshot: Any,
+    trade_date: date,
+    run_id: Any,
+    instrument_resolver: Any | None,
+) -> dict[str, Any]:
+    """规范化 + 门禁 + 写入 + 发布当前快照；门禁失败抛 _BoardFetchFailedError。"""
+    from app.services import board_sync_service
+
+    try:
+        sync_result = await board_sync_service.sync_boards(
+            db,
+            snapshot,
+            instrument_resolver=instrument_resolver,
+            effective_date=trade_date,
+        )
+    except Exception as exc:
+        run.status = RUN_STATUS_FAILED
+        run.readiness = READINESS_UNAVAILABLE
+        run.error_code = ERR_BOARD_QUALITY_GATE_FAILED
+        run.error_message = f"board facts 门禁/写入失败: {exc}"
+        run.finished_at = datetime.now(UTC)
+        await db.flush()
+        raise _BoardFetchFailedError(str(exc)) from None
+
+    run.status = BOARD_FACTS_STATUS_PERSISTING
+    run.resolved_count = sync_result.get("resolved")
+    run.unresolved_count = sync_result.get("unresolved")
+    # industry_l1/l2/l3_count 已在抓取阶段按层级从 snapshot 计算，勿用总 industry_count 覆盖
+    run.membership_count = sync_result.get("membership_count")
+    run.raw_rows = sync_result.get("raw_rows", run.raw_rows)
+    run.coverage_json = {
+        "resolved": sync_result.get("resolved", 0),
+        "unresolved": sync_result.get("unresolved", 0),
+        "parse_rate": sync_result.get("parse_rate"),
+    }
+    await db.flush()
+
+    # 原子发布
+    run.status = BOARD_FACTS_STATUS_PUBLISHED
+    run.readiness = READINESS_READY
+    run.finished_at = datetime.now(UTC)
+    await _publish_board_facts(db, run)
+    await db.flush()
+    return sync_result
+
+
+async def _try_reuse_previous_on_failure(
+    db: AsyncSession,
+    run: BoardFactsRun,
+    trade_date: date,
+    max_reuse_trading_days: int,
+    run_id: Any,
+) -> BoardFactsRun:
+    """[PRD Alignment Pass P0-2] fetch/门禁失败后的复用 fallback。
+
+    仅当存在前一个 published run 且其 staleness 在允许范围内才复用，
+    否则标记 failed（不再静默默认复用）。
+    """
+    previous_run = await _find_latest_published_run(db, trade_date)
+    if previous_run is None:
+        run.status = RUN_STATUS_FAILED
+        run.readiness = READINESS_UNAVAILABLE
+        run.error_code = ERR_BOARD_PROVIDER_UNAVAILABLE
+        run.error_message = (
+            "当前 pywencai 快照不可用且无前一个可复用 published run"
+        )
+        run.finished_at = datetime.now(UTC)
+        await db.flush()
+        return run
+    staleness = await _count_trading_days_between(
+        db, previous_run.trade_date, trade_date
+    )
+    if staleness > max_reuse_trading_days:
+        run.status = RUN_STATUS_FAILED
+        run.readiness = READINESS_UNAVAILABLE
+        run.error_code = ERR_BOARD_PROVIDER_UNAVAILABLE
+        run.error_message = (
+            f"当前 pywencai 快照不可用；前一个 published run 陈旧 {staleness} 交易日 "
+            f"> 上限 {max_reuse_trading_days}，禁止复用"
+        )
+        run.finished_at = datetime.now(UTC)
+        await db.flush()
+        return run
+    run = await _reuse_previous(db, run, previous_run, staleness)
+    logger.info(
+        "[BoardFacts] run=%s fetch/门禁失败，复用前一个 published run=%s (staleness=%d)",
+        run_id, previous_run.id, staleness,
+    )
+    return run
 
 
 def _publication_snapshot_hash(pub: FactorPublication) -> str | None:

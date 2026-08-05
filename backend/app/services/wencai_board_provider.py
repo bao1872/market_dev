@@ -42,7 +42,10 @@ WENCAI_QUERY = "同花顺概念，行业分类"
 MAX_RETRIES = 3
 RETRY_WAIT_SECONDS = 5
 
-# provider 整体超时（含重试与 to_thread 包装），防止 io 阻塞拖垮事件循环
+# provider 整体超时（含重试与 to_thread 包装），防止 io 阻塞拖垮事件循环。
+# 注：[PRD Alignment Pass P1-1] PRD instruction.md 未强制具体秒数；
+# 120s 为工程取值（单次交易日拉取上限），与 PRD 无数值冲突。
+# 若后续 PRD 明确外层总超时阈值，应在此对齐并记录 Change。
 PROVIDER_TIMEOUT_SECONDS = 120
 
 # 必需字段（股票代码、股票简称、所属概念、所属同花顺行业）
@@ -93,6 +96,14 @@ class WencaiParseError(WencaiBoardProviderError):
 
 class WencaiHashCollisionError(WencaiBoardProviderError):
     """不同名称哈希冲突（理论极低概率，发现立即失败）。"""
+
+
+class WencaiConceptLimitError(WencaiBoardProviderError):
+    """单股概念数超过上限（PRD 硬编码 100），禁止静默截断，必须门禁失败。"""
+
+
+class WencaiIndustryDepthError(WencaiBoardProviderError):
+    """行业层级深度超过三级（PRD 硬性上限），视为格式异常，禁止静默截断。"""
 
 
 @dataclass
@@ -380,25 +391,34 @@ def _normalize_industry(raw: Any) -> str:
 def _split_industry_path(path: str) -> list[str]:
     """把规范化行业路径拆分为有序层级段（L1/L2/L3）。
 
-    返回至少一个元素；深度超过 MAX_INDUSTRY_DEPTH 时截断到前 3 段。
+    深度超过 MAX_INDUSTRY_DEPTH（三级）视为格式异常，抛 WencaiIndustryDepthError，
+    禁止静默截断（PRD 硬性上限；深度超限进入 invalid depth 统计与门禁）。
+
     例：
         "银行"                 → ["银行"]
         "金融-银行"             → ["金融", "银行"]
         "金融-银行-国有银行"      → ["金融", "银行", "国有银行"]
-        "金融-银行-国有银行-细分" → ["金融", "银行", "国有银行"]（截断）
+        "金融-银行-国有银行-细分" → WencaiIndustryDepthError
 
     Args:
         path: 规范化行业路径（"-" 连接，可能为空）
 
     Returns:
         有序层级段列表
+
+    Raises:
+        WencaiIndustryDepthError: 行业深度超过三级
     """
     if not path:
         return []
     parts = [p.strip() for p in path.split("-") if p.strip()]
     if not parts:
         return []
-    return parts[:MAX_INDUSTRY_DEPTH]
+    if len(parts) > MAX_INDUSTRY_DEPTH:
+        raise WencaiIndustryDepthError(
+            f"行业路径深度 {len(parts)} 超过三级上限: '{path}'"
+        )
+    return parts
 
 
 def _make_external_code(board_type: str, name: str) -> str:
@@ -503,11 +523,11 @@ def _build_board_snapshot(
         # 规范化概念
         concepts = _normalize_concepts(row[col_map["concept"]])
         if len(concepts) > MAX_CONCEPTS_PER_STOCK:
-            logger.warning(
-                "[WencaiBoard] 股票 %s 概念数 %d 超过上限 %d，截断",
-                symbol, len(concepts), MAX_CONCEPTS_PER_STOCK,
+            # [PRD Alignment Pass P0-3] 禁止静默截断；超过上限必须门禁失败
+            raise WencaiConceptLimitError(
+                f"股票 {symbol} 概念数 {len(concepts)} 超过上限 "
+                f"{MAX_CONCEPTS_PER_STOCK}，禁止截断"
             )
-            concepts = concepts[:MAX_CONCEPTS_PER_STOCK]
 
         # 规范化行业
         industry_path = _normalize_industry(row[col_map["industry"]])

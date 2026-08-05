@@ -39,6 +39,7 @@ from app.domain_status import (
 from app.services.auction_mode_service import decide_auction_mode
 from app.services.product_readiness_service import (
     CLOSURE_CORE_READY,
+    CLOSURE_DEGRADED_READY,
     CLOSURE_FULLY_READY,
     READINESS_DEGRADED,
     READINESS_PENDING,
@@ -80,14 +81,20 @@ def _mandatory_ready(product: str, pub_id: str, run_id: str) -> ProductReadiness
 
 
 def _enhancement_ready(product: str, src_run_id: str) -> ProductReadinessState:
+    # [PRD Alignment Pass P0-1] auction 必须带 composite mode 才算真正就绪
+    extra = {}
+    if product == "auction_anchor":
+        extra["auction_mode"] = "composite"
     return ProductReadinessState(
         product, READINESS_READY, "fresh", is_mandatory=False, is_terminal=True,
+        is_product_ready=True,
         lineage={
             "source_type": "derived_from_stock_core",
             "derived_from": "stock_core",
             "source_core_run_id": src_run_id,
             "reason_code": "UPGRADED_FROM_PARENT",
         },
+        **extra,
     )
 
 
@@ -183,7 +190,8 @@ def test_late_chip_upgrade_degraded_to_fresh():
     base.append(_enhancement_degraded("chip", "CHIP_PARTIAL"))
     repo.submit("2026-08-05", base)
     closure1, gov1 = repo.orchestrate("2026-08-05")
-    assert closure1.closure == CLOSURE_FULLY_READY  # 终态 chip 不阻塞闭包（P0-3）
+    # [PRD Alignment Pass P0-1] chip 初态 partial（degraded）→ 非真正就绪，闭包为 degraded_ready
+    assert closure1.closure == CLOSURE_DEGRADED_READY
     assert "chip" in gov1.stale_children  # 但 chip 仍被标记为 stale
     assert gov1.pointer_lineage["chip"]["reason_code"] == "CHIP_PARTIAL"
 
@@ -215,7 +223,9 @@ def test_failure_matrix_chip_partial_never_fake_fresh():
     ]
     repo.submit("2026-08-05", states)
     closure, gov = repo.orchestrate("2026-08-05")
-    assert closure.closure == CLOSURE_FULLY_READY  # 终态 chip 不阻塞
+    # [PRD Alignment Pass P0-1] chip partial（degraded）= 非真正就绪，闭包为 degraded_ready，
+    # 不得误判 fully_ready（failed/partial 的 enhancement 不可消费）
+    assert closure.closure == CLOSURE_DEGRADED_READY
     assert gov.pointer_lineage["chip"]["freshness"] == "stale"  # 不伪 fresh
     # auction mode：chip 未 composite → 批次不得标 composite
     instr = ["A", "B"]

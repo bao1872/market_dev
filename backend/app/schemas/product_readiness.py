@@ -79,6 +79,31 @@ class BenefitsIssueDTO(BaseModel):
     recommendedAction: str = Field("", description="建议动作")
 
 
+class SchedulerReadinessDTO(BaseModel):
+    """[PRD Alignment Pass P1-2] 父任务（AfterCloseRun）与其子 SchedulerJobRun 的真实聚合。
+
+    - schedulerJobRunId: 当前 AfterCloseRun 的 job_run_id
+    - status: 父任务状态（queued/running/succeeded/failed/...）
+    - latestHeartbeat: 父任务最近心跳时间（ISO）
+    - leaseEpoch: 当前租约代际
+    - isStale: 租约/心跳是否过期（僵尸 worker 判定）
+    - totalChildren: enhancement/派生子任务总数
+    - processedChildren: 已终态子任务数
+    - unreconciledChildren: 未对账子任务（active 但父已就绪 / 状态异常）
+    """
+
+    schedulerJobRunId: str | None = Field(
+        None, description="[PRD §10] 当前 AfterCloseRun 的 job_run_id"
+    )
+    status: str | None = Field(None, description="父任务状态")
+    latestHeartbeat: str | None = Field(None, description="父任务最近心跳时间 ISO")
+    leaseEpoch: int | None = Field(None, description="当前租约代际")
+    isStale: bool | None = Field(None, description="租约/心跳是否过期")
+    totalChildren: int = Field(0, description="子任务总数")
+    processedChildren: int = Field(0, description="已终态子任务数")
+    unreconciledChildren: int = Field(0, description="未对账子任务数")
+
+
 class GovernanceReportDTO(BaseModel):
     """治理报告（Commit G）。
 
@@ -90,6 +115,7 @@ class GovernanceReportDTO(BaseModel):
     - readyProducts/pendingProducts/blockedProducts/unavailableProducts:
       按 readiness 分组的产品清单
     - degradedReasons: 闭包评估产生的问题列表
+    - scheduler: [PRD Alignment Pass P1-2] 父任务 + 子任务的真实聚合
     """
 
     pointerLineage: dict[str, dict[str, object]] = Field(default_factory=dict)
@@ -100,6 +126,7 @@ class GovernanceReportDTO(BaseModel):
     blockedProducts: list[str] = Field(default_factory=list)
     unavailableProducts: list[str] = Field(default_factory=list)
     degradedReasons: list[BenefitsIssueDTO] = Field(default_factory=list)
+    scheduler: SchedulerReadinessDTO = Field(default_factory=SchedulerReadinessDTO)
 
 
 class ProductReadinessResponse(BaseModel):

@@ -23,6 +23,7 @@ import pytest
 from app.services import wencai_board_provider as wencai_provider
 from app.services.wencai_board_provider import (
     MAX_CONCEPTS_PER_STOCK,
+    WencaiConceptLimitError,
     WencaiFetchError,
     WencaiHashCollisionError,
     WencaiParseError,
@@ -349,7 +350,7 @@ class TestBuildBoardSnapshot:
                 assert v.count("600000") == 1
 
     def test_concepts_over_limit_truncated(self) -> None:
-        """超过 MAX_CONCEPTS_PER_STOCK 的概念截断。"""
+        """[PRD Alignment Pass P0-3] 超过 MAX_CONCEPTS_PER_STOCK 的概念禁止静默截断，必须门禁失败。"""
         too_many = ";".join(f"概念{i}" for i in range(MAX_CONCEPTS_PER_STOCK + 10))
         df = pd.DataFrame([{
             "股票代码": "600000.SH",
@@ -357,14 +358,9 @@ class TestBuildBoardSnapshot:
             "所属概念": too_many,
             "所属同花顺行业": "科技-软件",
         }])
-        snapshot = _build_board_snapshot(df, pd)
-
-        # 该股票的概念关系数应 ≤ MAX_CONCEPTS_PER_STOCK
-        stock_concept_count = sum(
-            1 for k, v in snapshot.memberships.items()
-            if k[1] == "concept" and "600000" in v
-        )
-        assert stock_concept_count <= MAX_CONCEPTS_PER_STOCK
+        # 静默截断已移除：超限必须抛 WencaiConceptLimitError
+        with pytest.raises(WencaiConceptLimitError):
+            _build_board_snapshot(df, pd)
 
     def test_unresolved_symbols_recorded(self) -> None:
         """无效股票代码记录到 unresolved_symbols。"""

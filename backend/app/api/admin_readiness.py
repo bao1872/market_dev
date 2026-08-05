@@ -28,6 +28,7 @@ from app.schemas.product_readiness import (
     GovernanceReportDTO,
     ProductReadinessDTO,
     ProductReadinessResponse,
+    SchedulerReadinessDTO,
 )
 from app.services.product_readiness_service import (
     ProductReadinessService,
@@ -107,7 +108,9 @@ async def get_product_readiness_endpoint(
     # 动态聚合：读取九节点 run/publication/pointer 并映射为就绪状态
     states = await service.collect_states(db, trade_date_obj)
     closure = evaluate_closure(states)
-    governance = evaluate_governance(states, closure)
+    # [PRD Alignment Pass P1-2] 聚合父任务 + 子任务真实状态
+    scheduler = await service.collect_scheduler(db, trade_date_obj)
+    governance = evaluate_governance(states, closure, scheduler)
 
     # 组装产品明细（含真实 lineage 血缘）
     products = [
@@ -139,5 +142,31 @@ async def get_product_readiness_endpoint(
                 )
                 for i in closure.issues
             ],
+            scheduler=SchedulerReadinessDTO(
+                schedulerJobRunId=governance.scheduler.scheduler_job_run_id
+                if governance.scheduler is not None
+                else None,
+                status=governance.scheduler.status
+                if governance.scheduler is not None
+                else None,
+                latestHeartbeat=governance.scheduler.latest_heartbeat
+                if governance.scheduler is not None
+                else None,
+                leaseEpoch=governance.scheduler.lease_epoch
+                if governance.scheduler is not None
+                else None,
+                isStale=governance.scheduler.is_stale
+                if governance.scheduler is not None
+                else None,
+                totalChildren=governance.scheduler.total_children
+                if governance.scheduler is not None
+                else 0,
+                processedChildren=governance.scheduler.processed_children
+                if governance.scheduler is not None
+                else 0,
+                unreconciledChildren=governance.scheduler.unreconciled_children
+                if governance.scheduler is not None
+                else 0,
+            ),
         ),
     )

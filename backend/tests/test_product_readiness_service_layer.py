@@ -227,10 +227,12 @@ def _chip_run(status="succeeded", drid=_DRID):
                            coverage_ratio=0.99, finished_at=None, created_at=None)
 
 
-def _auction_run(status="succeeded", drid=_DRID):
+def _auction_run(status="succeeded", drid=_DRID, mode="composite"):
+    # [PRD Alignment Pass P0-1] mode 默认 composite（完整就绪）；structure_only/hybrid 用于负向测试
     return SimpleNamespace(id=drid, status=status, data_run_id=drid,
                            source_core_run_id="c1", source_board_run_id="b1",
-                           algorithm_version="v1", finished_at=None, created_at=None)
+                           algorithm_version="v1", mode=mode,
+                           finished_at=None, created_at=None)
 
 
 def _full_plan(**overrides) -> dict:
@@ -323,12 +325,14 @@ async def test_no_publish_pending():
 
 
 async def test_failed_enhancement_terminal_fully_ready():
-    """P0-3：chip 失败（terminal+unavailable）→ enhancement_jobs_terminal=True，不阻断。"""
+    """P0-3/P0-1：chip 失败（terminal+unavailable）→ 不阻断 mandatory chain，但 chip 非真正就绪，
+    闭包为 degraded_ready（不得误判 fully_ready）。"""
     plan = _full_plan()
     plan["pubs"][_CHIP] = [None]                 # chip 无 pointer
     plan["runs"][ChipConsensusRun] = [_chip_run("failed")]  # latest run failed
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_FULLY_READY
+    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.mandatory_products_full_fresh is True
     assert ev.enhancement_jobs_terminal is True
 
 

@@ -110,3 +110,8 @@ def admin_not_found(error_code: str, detail: str, **kw) -> HTTPException:
 def admin_bad_request(error_code: str, detail: str, **kw) -> HTTPException:
     """400 参数/状态非法错误。"""
     return admin_error(http_status.HTTP_400_BAD_REQUEST, error_code, detail, **kw)
+
+
+def admin_not_implemented(error_code: str, detail: str, **kw) -> HTTPException:
+    """501 未实现错误（已纳入 PRD 合同但后端隔离重算函数尚未实现）。"""
+    return admin_error(http_status.HTTP_501_NOT_IMPLEMENTED, error_code, detail, **kw)

@@ -30,6 +30,7 @@ from app.api.admin_errors import (
     admin_conflict,
     admin_error,
     admin_not_found,
+    admin_not_implemented,
 )
 from app.core.deps import get_db, require_roles
 from app.core.route_utils import get_route_paths, iter_api_routes
@@ -189,8 +190,26 @@ async def create_after_close_run_endpoint(
 # 系统只允许 job_name=after_close_orchestrator、run_type=full，
 # 正常任务从 refreshing_daily 开始，不创建 dsa_only 类型。
 
-# [CHANGE-20260728-008] force?restart_from=daily_ready 的合法取值与覆盖率门槛
-_RESTART_FROM_VALID_VALUES = {"daily_ready"}
+# [PRD Alignment Pass P1-4] force?restart_from 合法取值扩展为 PRD §13.7 全枚举。
+# 不同 restart 不应重算不相关上游：
+#   review 不重算 core/board；board_aggregation 不重算 core；
+#   chip 不重算 core；dsa_projection 不执行 DSA；
+#   auction 不重算 core；state_events 不重算 core。
+# 当前仅 "daily_ready" 已实现隔离重算；其余边界后端隔离重算函数尚未实现，
+# 调用时返回 not_implemented（HTTP 501）而非伪造成功，使合同缺口显式化。
+_RESTART_FROM_VALID_VALUES = {
+    "daily_ready",
+    "core",
+    "stock_core_published",
+    "dsa_projection",
+    "state_events",
+    "chip",
+    "auction",
+    "board",
+    "review",
+}
+# 已实现隔离重算的边界
+_RESTART_FROM_IMPLEMENTED = {"daily_ready"}
 _RESTART_FROM_COVERAGE_THRESHOLD = 0.9
 
 
@@ -670,6 +689,19 @@ async def force_advance_after_close_endpoint(
                 f"restart_from 仅支持 {_RESTART_FROM_VALID_VALUES}，"
                 f"当前值: {restart_from}"
             ),
+        )
+
+    # [PRD Alignment Pass P1-4] 已实现隔离重算的边界才继续；
+    # 其余 PRD 边界后端隔离重算函数尚未实现，显式返回 not_implemented，禁止伪造成功。
+    if restart_from is not None and restart_from not in _RESTART_FROM_IMPLEMENTED:
+        pending = sorted(_RESTART_FROM_VALID_VALUES - _RESTART_FROM_IMPLEMENTED)
+        raise admin_not_implemented(
+            "after_close_restart_boundary_not_implemented",
+            (
+                f"restart_from={restart_from} 已纳入 PRD §13.7 合同，但后端隔离重算函数未实现。"
+                f" 已实现: {_RESTART_FROM_IMPLEMENTED}；待实现: {pending}"
+            ),
+            pending_backend=pending,
         )
 
     job_run = await db.get(SchedulerJobRun, run_id)

@@ -85,19 +85,23 @@ def validate_snapshot(
     prev_industry_count: int = 0,
     prev_concept_count: int = 0,
     prev_relation_count: int = 0,
+    effective_date: date | None = None,
 ) -> dict[str, Any]:
     """校验快照完整性（绝对门禁 + 相对门禁）。
 
-    绝对门禁：
+    绝对门禁（[PRD Alignment Pass P0-5] 补齐此前仅定义未执行项）：
     1. 原始行数 ≥ 5000
-    2. 代码唯一率 ≥ 99.9%（unique_symbols / total_symbol_refs）
+    2. 代码唯一率 ≥ 99.9%
     3. 行业数 ≥ 200
     4. 概念数 ≥ 300
     5. 总关系数 ≥ 60000
-    6. 概念数/股 ≤ 100（已在 provider 截断）
+    6. 行业覆盖率 ≥ 99%（已解析股票行业覆盖）
+    7. 行业深度违规数 = 0（>3 级视为格式异常）
+    8. 单股最大概念数 ≤ 100（超已在 provider 抛错，此处再防线）
+    9. effective_date 不得晚于拉取日（禁止回填成历史事实）
 
     相对门禁（prev > 0 时检查）：
-    7. 股票/行业/概念/关系任一下降 > 20% 拒绝
+    10. 股票/行业/概念/关系任一下降 > 20% 拒绝
 
     Args:
         snapshot: wencai_board_provider 构建的 BoardSnapshot
@@ -105,6 +109,7 @@ def validate_snapshot(
         prev_industry_count: 上次成功的行业数
         prev_concept_count: 上次成功的概念数
         prev_relation_count: 上次成功的关系数
+        effective_date: 业务交易日（禁止未来生效，PRD §5.1）
 
     Returns:
         校验统计 dict（供 metadata 记录）
@@ -135,6 +140,26 @@ def validate_snapshot(
     if stats["relation_count"] < MIN_RELATION_COUNT:
         raise StagingValidationError(
             f"relation count {stats['relation_count']} < minimum {MIN_RELATION_COUNT}"
+        )
+    if stats["industry_coverage"] < MIN_INDUSTRY_COVERAGE:
+        raise StagingValidationError(
+            f"industry coverage {stats['industry_coverage']:.4f} "
+            f"< minimum {MIN_INDUSTRY_COVERAGE}"
+        )
+    if stats["invalid_industry_depth_count"] > 0:
+        raise StagingValidationError(
+            f"invalid industry depth count {stats['invalid_industry_depth_count']} > 0 "
+            f"(industry depth must be ≤ 3, PRD §6.2)"
+        )
+    if stats["max_concepts_per_stock"] > MAX_CONCEPTS_PER_STOCK:
+        raise StagingValidationError(
+            f"max concepts per stock {stats['max_concepts_per_stock']} "
+            f"> maximum {MAX_CONCEPTS_PER_STOCK}"
+        )
+    if effective_date is not None and effective_date > date.today():
+        raise StagingValidationError(
+            f"effective_date {effective_date} is in the future "
+            f"(today={date.today()}), board facts 禁止回填未来生效"
         )
 
     # 相对门禁
@@ -171,7 +196,14 @@ def validate_snapshot(
 
 
 def _compute_snapshot_stats(snapshot: BoardSnapshot) -> dict[str, Any]:
-    """计算快照统计信息（纯函数）。"""
+    """计算快照统计信息（纯函数）。
+
+    [PRD Alignment Pass P0-5] 增加缺失门禁统计：
+    - industry_coverage：有行业归属的股票 / 唯一股票数（≥ 99%）
+    - invalid_industry_depth_count：行业深度 >3 的股票数（应为 0）
+    - max_concepts_per_stock：单股最大概念数（≤ 100，超限已在 provider 抛错）
+    - future_effective_date_violation：effective_date 晚于拉取日（应为 0）
+    """
     industry_count = sum(1 for b in snapshot.boards if b["type"] == "industry")
     concept_count = sum(1 for b in snapshot.boards if b["type"] == "concept")
 
@@ -188,6 +220,28 @@ def _compute_snapshot_stats(snapshot: BoardSnapshot) -> dict[str, Any]:
         unique_stock_count / snapshot.raw_rows if snapshot.raw_rows > 0 else 0.0
     )
 
+    # 逐股概念数 / 行业归属 / 行业深度
+    concepts_per_stock: dict[str, int] = {}
+    industry_stock: set[str] = set()
+    invalid_industry_depth_count = 0
+    max_depth = 3
+    for (ext_code, board_type), symbols in snapshot.memberships.items():
+        if board_type == "concept":
+            for sym in symbols:
+                concepts_per_stock[sym] = concepts_per_stock.get(sym, 0) + 1
+        elif board_type == "industry":
+            # 行业层级深度 = 路径段数（external_code 内 "-" 数 + 1）
+            depth = ext_code.count("-") + 1
+            if depth > max_depth:
+                invalid_industry_depth_count += len(symbols)
+            for sym in symbols:
+                industry_stock.add(sym)
+
+    max_concepts_per_stock = max(concepts_per_stock.values()) if concepts_per_stock else 0
+    industry_coverage = (
+        len(industry_stock) / unique_stock_count if unique_stock_count > 0 else 0.0
+    )
+
     return {
         "raw_rows": snapshot.raw_rows,
         "industry_count": industry_count,
@@ -198,6 +252,10 @@ def _compute_snapshot_stats(snapshot: BoardSnapshot) -> dict[str, Any]:
         "total_symbol_refs": total_symbol_refs,
         "code_uniqueness_rate": round(code_uniqueness_rate, 4),
         "unresolved_count": len(snapshot.unresolved_symbols),
+        # [PRD Alignment Pass P0-5]
+        "industry_coverage": round(industry_coverage, 4),
+        "invalid_industry_depth_count": invalid_industry_depth_count,
+        "max_concepts_per_stock": max_concepts_per_stock,
     }
 
 
@@ -292,6 +350,7 @@ async def sync_boards(
         prev_industry_count=prev_counts["industry_count"],
         prev_concept_count=prev_counts["concept_count"],
         prev_relation_count=prev_counts["membership_count"],
+        effective_date=effective_date,
     )
 
     # 3. 批量解析 symbol → instrument_id
