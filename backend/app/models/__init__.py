@@ -31,10 +31,12 @@ from app.models.auction import (
     AuctionScanRun,
     AuctionScopeResult,
 )
+from app.models.auction_anchor_run import AuctionAnchorRun, AuctionAnchorRunItem
 from app.models.bar import BarDaily, BarMinute
 from app.models.base import Base
 from app.models.beta_application import BetaApplication
 from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
+from app.models.board_facts_run import BoardFactsRun, BoardFactsRunItem
 from app.models.board_taxonomy import (
     BoardDefinitionVersion,
     BoardMembershipHistory,
@@ -43,6 +45,7 @@ from app.models.board_taxonomy import (
 )
 from app.models.calendar import TradingCalendar
 from app.models.capture_job import CaptureJob
+from app.models.chip_consensus_run import ChipConsensusRun, ChipConsensusRunItem
 from app.models.config import ConfigDefinition
 from app.models.event_recipient import StrategyEventRecipient
 from app.models.instrument import Instrument
@@ -88,6 +91,8 @@ __all__ = [
     "AuctionAnalysisPublication",
     "AuctionAnchorItem",
     "AuctionAnchorPublication",
+    "AuctionAnchorRun",
+    "AuctionAnchorRunItem",
     "AuctionAnchorSnapshot",
     "AuctionEventTracking",
     "AuctionInstrumentResult",
@@ -98,10 +103,14 @@ __all__ = [
     "BoardAnalysisRun",
     "BoardAnalysisSnapshot",
     "BoardDefinitionVersion",
+    "BoardFactsRun",
+    "BoardFactsRunItem",
     "BoardMembershipHistory",
     "Base",
     "BetaApplication",
     "CaptureJob",
+    "ChipConsensusRun",
+    "ChipConsensusRunItem",
     "ConfigDefinition",
     "Instrument",
     "InviteCode",
