@@ -420,7 +420,8 @@ async def _atomic_switch(
             source = b["source"]
             taxonomy_version = b["taxonomy_version"]
             taxonomy_compatibility_key = b["taxonomy_compatibility_key"]
-            identity_contract_version = b["identity_contract_version"]
+            # 仅用于强制校验在场（provider 合同），不在此处存储
+            _identity_contract_version = b["identity_contract_version"]
         except KeyError as exc:
             raise BoardSyncError(
                 f"board 缺少显式分类学/身份合同字段: {exc.args[0]} "

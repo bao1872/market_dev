@@ -1871,7 +1871,7 @@ async def compute_for_trade_date(
     _total = time.perf_counter() - _t0
     # [Corrective-2 2026-08-05] run-scoped compute-once 计数快照 + 硬门禁。
     # 四类计数（canonical/dsa/smc/momentum）必须 == eligible_compute_count，
-    # 否则抛 ComputeOnceGateViolation，caller 不得发布 stock_core。
+    # 否则抛 ComputeOnceGateError，caller 不得发布 stock_core。
     _compute_counts = compute_diagnostics.to_dict()
     if total > 0:
         enforce_compute_once_gate(compute_diagnostics, eligible_compute_count)

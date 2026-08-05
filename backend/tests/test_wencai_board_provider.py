@@ -610,10 +610,10 @@ class _FakeCtx:
         self._queue = queue
         self._proc = proc
 
-    def Queue(self) -> _FakeQueue:
+    def Queue(self) -> _FakeQueue:  # noqa: N802 - 镜像 multiprocessing 上下文 API
         return self._queue
 
-    def Process(self, target, args, daemon) -> _FakeProc:
+    def Process(self, target, args, daemon) -> _FakeProc:  # noqa: N802 - 镜像 multiprocessing 上下文 API
         return self._proc
 
 

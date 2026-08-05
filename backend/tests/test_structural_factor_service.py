@@ -23,6 +23,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.services.core_run_context import (
+    ComputeOnceDiagnostics,
+    ComputeOnceGateError,
+    enforce_compute_once_gate,
+)
 from app.services.structural_factor_service import (
     _classify_confirmed_swing_breakout_state,
     _classify_cost_position_zone,
@@ -1482,9 +1487,7 @@ def test_developing_swing_000100_like_case() -> None:
 
 
 # ===== [Corrective-2 2026-08-05] run-scoped compute-once 调用计数 =====
-def _make_diagnostics() -> "ComputeOnceDiagnostics":
-    from app.services.core_run_context import ComputeOnceDiagnostics
-
+def _make_diagnostics() -> ComputeOnceDiagnostics:
     return ComputeOnceDiagnostics()
 
 
@@ -1523,8 +1526,6 @@ def test_real_compute_call_counts_diagnostics_none_does_not_count() -> None:
 
 def test_real_compute_call_counts_two_runs_isolated() -> None:
     """两个独立 run 的计数互不污染（并发隔离）。"""
-    from app.services.core_run_context import enforce_compute_once_gate
-
     bars1 = _build_bars(n=250, seed=1)
     bars2 = _build_bars(n=250, seed=2)
     diag_a = _make_diagnostics()
@@ -1544,8 +1545,6 @@ def test_real_compute_call_counts_two_runs_isolated() -> None:
 def test_real_compute_call_counts_concurrent_isolation() -> None:
     """并发线程下两个 run 的计数互不污染（线程安全）。"""
     import threading
-
-    from app.services.core_run_context import enforce_compute_once_gate
 
     bars = _build_bars(n=250)
     diag_a = _make_diagnostics()
@@ -1574,14 +1573,12 @@ def test_real_compute_call_counts_concurrent_isolation() -> None:
 
 
 def test_compute_once_gate_violation_when_mismatch() -> None:
-    """任一维度计数与 eligible 不一致时抛 ComputeOnceGateViolation。"""
-    from app.services.core_run_context import ComputeOnceGateViolation
-
+    """任一维度计数与 eligible 不一致时抛 ComputeOnceGateError。"""
     bars = _build_bars(n=250)
     diag = _make_diagnostics()
     _compute_all_factors_for_bars(bars, "1d", [], [], diagnostics=diag)
     # eligible=2 但实际 dsa=1 → 门禁失败
-    with pytest.raises(ComputeOnceGateViolation):
+    with pytest.raises(ComputeOnceGateError):
         enforce_compute_once_gate(diag, eligible_compute_count=2)
 
 

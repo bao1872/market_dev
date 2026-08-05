@@ -45,7 +45,7 @@ _COMPUTE_ONCE_KEYS: tuple[str, ...] = (
 )
 
 
-class ComputeOnceGateViolation(RuntimeError):
+class ComputeOnceGateError(RuntimeError):
     """compute-once 硬门禁失败：维度调用次数 != 实际纳入计算标的数。
 
     触发时禁止发布 stock_core。
@@ -95,20 +95,20 @@ def enforce_compute_once_gate(
 ) -> None:
     """compute-once 硬门禁：四类计数都必须等于 eligible_compute_count。
 
-    任一不一致即抛 ComputeOnceGateViolation，调用方不得发布 stock_core。
+    任一不一致即抛 ComputeOnceGateError，调用方不得发布 stock_core。
 
     Args:
         diagnostics: run-scoped 计数
         eligible_compute_count: 本 run 实际纳入核心计算的标的数
 
     Raises:
-        ComputeOnceGateViolation: 任一维度计数与 eligible 不一致
+        ComputeOnceGateError: 任一维度计数与 eligible 不一致
     """
     counts = diagnostics.to_dict()
     for key in _COMPUTE_ONCE_KEYS:
         actual = counts[key]
         if actual != eligible_compute_count:
-            raise ComputeOnceGateViolation(
+            raise ComputeOnceGateError(
                 f"compute-once 门禁失败: {key}={actual} != eligible_compute_count="
                 f"{eligible_compute_count}，禁止发布 stock_core"
             )

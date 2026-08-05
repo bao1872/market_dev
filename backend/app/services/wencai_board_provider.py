@@ -722,7 +722,7 @@ async def _fetch_with_terminable_subprocess(ctx: Any | None = None) -> Any:
                 if not proc.is_alive() and proc.exitcode not in (None, 0):
                     raise WencaiFetchError(
                         f"问财子进程异常退出（exitcode={proc.exitcode}），未返回结果"
-                    )
+                    ) from None
                 await asyncio.sleep(_FETCH_SUBPROCESS_POLL_SECONDS)
     except (TimeoutError, WencaiFetchError) as exc:
         # 真正终止子进程（含底层 pywencai 网络调用），并等待其退出
