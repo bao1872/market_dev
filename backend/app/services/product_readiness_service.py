@@ -258,6 +258,101 @@ def compute_freshness_flags(
 
 
 # ============================================================================
+# Governance 治理报告（Commit G）
+# ============================================================================
+
+# 派生投影产品：readiness 直接继承 stock_core，其"数据源"标为派生
+_DERIVED_PRODUCTS = frozenset({"dsa_projection", "state_events"})
+
+
+@dataclass(frozen=True)
+class GovernanceReport:
+    """一次闭包评估的治理视图（Commit G）。
+
+    - pointer_lineage: 每个产品的数据来源（publication_pointer / run_status /
+      derived_from_stock_core），用于审计"谁支撑该产品的 readiness"
+    - stale_children: freshness != fresh 的产品（stale / reused）
+    - unmatched_active_children: 增强/派生产品仍 active（非终态）而其父
+      stock_core 已可消费 → 表明子产品仍在运行、父已就绪的边缘态
+    - ready_products / pending_products / blocked_products / unavailable_products:
+      按 readiness 分组的产品清单
+    - degraded_reasons: 闭包评估产生的问题列表（含 code/severity）
+    """
+
+    pointer_lineage: dict[str, str] = field(default_factory=dict)
+    stale_children: list[str] = field(default_factory=list)
+    unmatched_active_children: list[str] = field(default_factory=list)
+    ready_products: list[str] = field(default_factory=list)
+    pending_products: list[str] = field(default_factory=list)
+    blocked_products: list[str] = field(default_factory=list)
+    unavailable_products: list[str] = field(default_factory=list)
+    degraded_reasons: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _product_data_source(product: str, state: ProductReadinessState) -> str:
+    """判定单个产品的 readiness 数据来源（pointer lineage 的一环）。"""
+    if product in _DERIVED_PRODUCTS:
+        return "derived_from_stock_core"
+    if state.readiness in CONSUMABLE_READINESS:
+        return "publication_pointer"
+    return "run_status"
+
+
+def evaluate_governance(
+    products: list[ProductReadinessState],
+    closure: ClosureEvaluation,
+) -> GovernanceReport:
+    """纯函数：从产品就绪状态 + 闭包评估生成治理报告（Commit G）。
+
+    不连接数据库；所有信号均由 ProductReadinessState 推导，可 PURE_UNIT_TEST 测试。
+
+    Args:
+        products: 全部九节点产品状态
+        closure: 对应的闭包评估结果
+
+    Returns:
+        GovernanceReport
+    """
+    by_product = {p.product: p for p in products}
+    stock_core = by_product.get("stock_core")
+    core_consumable = stock_core is not None and stock_core.is_consumable
+
+    pointer_lineage: dict[str, str] = {}
+    stale_children: list[str] = []
+    unmatched_active_children: list[str] = []
+    ready_products: list[str] = []
+    pending_products: list[str] = []
+    blocked_products: list[str] = []
+    unavailable_products: list[str] = []
+
+    for p in products:
+        pointer_lineage[p.product] = _product_data_source(p.product, p)
+        if p.freshness != "fresh":
+            stale_children.append(p.product)
+        if not p.is_mandatory and not p.is_terminal and core_consumable:
+            unmatched_active_children.append(p.product)
+        if p.readiness == READINESS_READY or p.readiness == READINESS_READY_REUSED:
+            ready_products.append(p.product)
+        elif p.readiness == READINESS_PENDING:
+            pending_products.append(p.product)
+        elif p.readiness in (READINESS_UNAVAILABLE, READINESS_BLOCKED):
+            unavailable_products.append(p.product)
+        elif p.readiness == READINESS_DEGRADED:
+            blocked_products.append(p.product)
+
+    return GovernanceReport(
+        pointer_lineage=pointer_lineage,
+        stale_children=sorted(stale_children),
+        unmatched_active_children=sorted(unmatched_active_children),
+        ready_products=sorted(ready_products),
+        pending_products=sorted(pending_products),
+        blocked_products=sorted(blocked_products),
+        unavailable_products=sorted(unavailable_products),
+        degraded_reasons=list(closure.issues),
+    )
+
+
+# ============================================================================
 # ProductReadinessService — 动态聚合服务层（E08-T01）
 # ============================================================================
 
@@ -277,6 +372,41 @@ class ProductReadinessService:
         print(ev.closure, ev.issues)
     """
 
+    async def collect_states(
+        self,
+        db: Any,
+        trade_date: date,
+    ) -> list[ProductReadinessState]:
+        """聚合指定交易日的九节点就绪状态（Commit G）。
+
+        供 evaluate_for_trade_date（求闭包）与 admin readiness API（治理报告）共用，
+        保证同一入口、同一查询顺序，避免治理报告与闭包评估口径不一致。
+
+        Args:
+            db: 异步数据库会话
+            trade_date: 业务交易日
+
+        Returns:
+            九节点 ProductReadinessState 列表
+        """
+        # stock_core 只计算一次，派生投影复用（compute-once）
+        daily = await self._daily_facts_state(db, trade_date)
+        board_facts = await self._board_facts_state(db, trade_date)
+        stock_core = await self._stock_core_state(db, trade_date)
+        board_aggregation = await self._board_aggregation_state(db, trade_date)
+        review = await self._review_state(db, trade_date)
+        return [
+            daily,
+            board_facts,
+            stock_core,
+            board_aggregation,
+            review,
+            self._derived_state("dsa_projection", stock_core),
+            await self._chip_state(db, trade_date),
+            self._derived_state("state_events", stock_core),
+            await self._auction_state(db, trade_date),
+        ]
+
     async def evaluate_for_trade_date(
         self,
         db: Any,
@@ -294,24 +424,7 @@ class ProductReadinessService:
         Returns:
             ClosureEvaluation
         """
-        states = []
-        # stock_core 只计算一次，派生投影复用（compute-once）
-        daily = await self._daily_facts_state(db, trade_date)
-        board_facts = await self._board_facts_state(db, trade_date)
-        stock_core = await self._stock_core_state(db, trade_date)
-        board_aggregation = await self._board_aggregation_state(db, trade_date)
-        review = await self._review_state(db, trade_date)
-        states = [
-            daily,
-            board_facts,
-            stock_core,
-            board_aggregation,
-            review,
-            self._derived_state("dsa_projection", stock_core),
-            await self._chip_state(db, trade_date),
-            self._derived_state("state_events", stock_core),
-            await self._auction_state(db, trade_date),
-        ]
+        states = await self.collect_states(db, trade_date)
         return evaluate_closure(states)
 
     # ---- 通用 helper：publication pointer 决定 readiness（P0-2）----
