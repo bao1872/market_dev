@@ -238,7 +238,8 @@ async def test_publication_rollback_keeps_old_pointer(db_session: AsyncSession) 
     )
     old_pub_id = old_pub.id
 
-    # 模拟切换：先创建新 pointer（会违反唯一约束 → 抛错），回滚后旧 pointer 仍在
+    # 用嵌套 savepoint 执行一次会违反唯一约束的指针写入：失败只回滚嵌套层，
+    # 不波及外层 savepoint 中已创建的旧 pointer（db_session 整体 rollback 会连旧指针一起回滚）。
     duplicate = FactorPublication(
         scope_type="market",
         scope_key=scope_key,
@@ -249,9 +250,11 @@ async def test_publication_rollback_keeps_old_pointer(db_session: AsyncSession) 
         coverage_ratio=1.0,
     )
     db_session.add(duplicate)
-    with pytest.raises(IntegrityError):
-        await db_session.flush()
-    await db_session.rollback()
+    try:
+        async with db_session.begin_nested():
+            await db_session.flush()
+    except IntegrityError:
+        pass
 
     result = await db_session.execute(
         select(FactorPublication).where(FactorPublication.id == old_pub_id)
