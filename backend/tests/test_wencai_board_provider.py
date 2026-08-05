@@ -299,11 +299,30 @@ class TestBuildBoardSnapshot:
         df = _make_test_dataframe(rows=50, concepts_per_stock=2)
         snapshot = _build_board_snapshot(df, pd)
 
-        # 每股恰好一个行业 → 行业关系数 = 股票数
+        # [Commit A §6.2] 行业拆分为 L1/L2/L3 层级，每股挂到每一级。
+        # 示例行业 "金融-银行-子类{i%3}" 为 3 级 → 每股 3 条行业关系。
         industry_memberships = sum(
             len(v) for k, v in snapshot.memberships.items() if k[1] == "industry"
         )
-        assert industry_memberships == 50
+        assert industry_memberships == 50 * 3
+
+    def test_industry_hierarchy_levels(self) -> None:
+        """行业拆分为 L1/L2/L3，三级的 parent 关系正确。"""
+        df = _make_test_dataframe(rows=10, concepts_per_stock=1)
+        snapshot = _build_board_snapshot(df, pd)
+
+        industry_boards = [b for b in snapshot.boards if b["type"] == "industry"]
+        # 每个行业路径 3 级 → 10 行全部同一路径 "金融-银行-子类N" 家族
+        # 只产生一组 L1/L2/L3（金融 / 金融-银行 / 金融-银行-子类x）
+        levels = {b["hierarchy_level"] for b in industry_boards}
+        assert levels == {"L1", "L2", "L3"}
+
+        # L2 的 parent 是 L1，L3 的 parent 是 L2
+        by_level: dict[str, dict] = {b["hierarchy_level"]: b for b in industry_boards}
+        l1, l2, l3 = by_level["L1"], by_level["L2"], by_level["L3"]
+        assert l2["parent_external_code"] == l1["external_code"]
+        assert l3["parent_external_code"] == l2["external_code"]
+        assert l1["parent_external_code"] is None
 
     def test_concepts_deduped_per_stock(self) -> None:
         """同一股票的重复概念去重。"""
@@ -409,6 +428,26 @@ class TestSelectPrimaryDataframe:
             pd,
         )
         assert len(result) == 30
+
+    def test_no_qualified_table_raises(self) -> None:
+        """所有表都缺必需字段时禁止静默降级，直接失败。"""
+        df_bad = pd.DataFrame([{"股票代码": "600000.SH", "股票简称": "测试"}])
+        df_bad2 = pd.DataFrame([{"价格": 1.0, "市值": 100}])
+        with pytest.raises(WencaiParseError, match="缺列.*静默降级"):
+            _select_primary_dataframe({"t1": df_bad, "t2": df_bad2}, pd)
+
+    def test_equal_size_qualified_hash_conflict_raises(self) -> None:
+        """多张同等合格且行数最大的表内容 hash 冲突 → 失败。"""
+        df_a = _make_test_dataframe(rows=10, concepts_per_stock=2)
+        df_b = _make_test_dataframe(rows=10, concepts_per_stock=3)  # 内容不同
+        with pytest.raises(WencaiHashCollisionError, match="hash 冲突"):
+            _select_primary_dataframe({"t1": df_a, "t2": df_b}, pd)
+
+    def test_equal_size_identical_tables_ok(self) -> None:
+        """多张同等合格但内容相同（同一 DataFrame 重复引用）→ 不冲突，选其一。"""
+        df = _make_test_dataframe(rows=10)
+        result = _select_primary_dataframe({"t1": df, "t2": df}, pd)
+        assert len(result) == 10
 
 
 # =============================================================================

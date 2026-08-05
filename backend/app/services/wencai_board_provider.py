@@ -42,6 +42,9 @@ WENCAI_QUERY = "同花顺概念，行业分类"
 MAX_RETRIES = 3
 RETRY_WAIT_SECONDS = 5
 
+# provider 整体超时（含重试与 to_thread 包装），防止 io 阻塞拖垮事件循环
+PROVIDER_TIMEOUT_SECONDS = 120
+
 # 必需字段（股票代码、股票简称、所属概念、所属同花顺行业）
 # 问财返回的列名可能略有差异，按包含关系匹配
 REQUIRED_FIELD_PATTERNS = {
@@ -56,6 +59,9 @@ _STOCK_CODE_RE = re.compile(r"(\d{6})\.(?:SH|SZ|BJ)", re.IGNORECASE)
 
 # 单股概念上限（门禁用）
 MAX_CONCEPTS_PER_STOCK = 100
+
+# 行业层级上限（L1/L2/L3）
+MAX_INDUSTRY_DEPTH = 3
 
 
 class WencaiBoardProviderError(Exception):
@@ -83,12 +89,14 @@ class BoardSnapshot:
         memberships: {(external_code, type): [symbol, ...]}
         raw_rows: 原始行数（门禁用）
         unresolved_symbols: 未解析为有效 A 股代码的原始值（脱敏样本，前50个）
+        diagnostics: 结构化诊断（主表选择、字段匹配、耗时等），供 metadata 记录
     """
 
     boards: list[dict[str, str]] = field(default_factory=list)
     memberships: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     raw_rows: int = 0
     unresolved_symbols: list[str] = field(default_factory=list)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def board_count(self) -> int:
@@ -160,45 +168,83 @@ def _match_column(columns: list[str], patterns: tuple[str, ...]) -> str | None:
     return None
 
 
+def _match_required_columns(columns: list[str]) -> dict[str, str | None]:
+    """匹配 DataFrame 列名中的必需四类字段。
+
+    Returns:
+        {field_key: 匹配到的列名}，缺失字段的值为 None
+    """
+    return {
+        key: _match_column(columns, patterns)
+        for key, patterns in REQUIRED_FIELD_PATTERNS.items()
+    }
+
+
+def _df_content_hash(df: Any) -> str:
+    """对 DataFrame 内容计算稳定 hash（用于多表哈希冲突检测）。
+
+    基于规范化后的四类必需字段拼接，避免受行序/无关列影响。
+    """
+    columns = list(df.columns)
+    col_map = _match_required_columns(columns)
+    material_parts: list[str] = []
+    for key in ("stock_code", "stock_name", "concept", "industry"):
+        col = col_map.get(key)
+        if col is None or col not in df.columns:
+            continue
+        for value in df[col].astype(str).tolist():
+            material_parts.append(f"{key}={value}")
+    return hashlib.sha256("\n".join(material_parts).encode("utf-8")).hexdigest()
+
+
 def _select_primary_dataframe(result: Any, pd: Any) -> Any:
     """从问财返回值中选择包含必需字段且行数最大的主表。
 
-    选择逻辑：
+    选择逻辑（[Commit A §6.2] 严格选择，禁止缺列后静默降级）：
     1. 收集所有嵌套 DataFrame
-    2. 过滤出包含全部必需字段的 DataFrame
-    3. 按行数降序选择最大表
+    2. 过滤出包含全部必需字段的合格表；若无合格表 → 直接失败（不降级到最大表）
+    3. 若存在多张合格表且行数相同但内容 hash 冲突 → 失败
+    4. 否则按行数×列数降序选择最大合格表
 
     Raises:
-        WencaiParseError: 无 DataFrame 或无表包含全部必需字段
+        WencaiParseError: 无 DataFrame 或无合格表
+        WencaiHashCollisionError: 同等合格表内容 hash 冲突
     """
     frames = _collect_dataframes(result, pd)
     if not frames:
         raise WencaiParseError("问财未返回可保存的表格数据")
 
-    # 按行数×列数降序排序
-    frames.sort(key=lambda item: (len(item[1]), len(item[1].columns)), reverse=True)
-
-    # 优先选择包含全部必需字段的表
+    # 合格表：包含全部必需字段
+    qualified: list[tuple[str, Any, dict[str, str | None]]] = []
     for label, df in frames:
-        columns = list(df.columns)
-        matched = {
-            key: _match_column(columns, patterns)
-            for key, patterns in REQUIRED_FIELD_PATTERNS.items()
-        }
-        if all(v is not None for v in matched.values()):
-            logger.info(
-                "[WencaiBoard] 选择主表: label=%s, rows=%d, cols=%d",
-                label, len(df), len(df.columns),
-            )
-            return df
+        col_map = _match_required_columns(list(df.columns))
+        if all(v is not None for v in col_map.values()):
+            qualified.append((label, df, col_map))
 
-    # 退化：选择行数最多的表（后续解析会在字段缺失时失败）
-    selected_label, selected_df = frames[0]
-    logger.warning(
-        "[WencaiBoard] 未找到包含全部必需字段的表，退化选择最大表: "
-        "label=%s, rows=%d, cols=%d, columns=%s",
-        selected_label, len(selected_df), len(selected_df.columns),
-        list(selected_df.columns),
+    if not qualified:
+        columns_sample = list(frames[0][1].columns)
+        raise WencaiParseError(
+            "问财返回的表格均缺少必需字段，禁止静默降级到最大表，"
+            f"共 {len(frames)} 张表，样本列名: {columns_sample}"
+        )
+
+    # 多合格表且行数相同但内容 hash 冲突 → 失败
+    max_rows = max(len(df) for _, df, _ in qualified)
+    same_size = [(label, df) for label, df, _ in qualified if len(df) == max_rows]
+    if len(same_size) > 1:
+        hashes = {_df_content_hash(df) for _, df in same_size}
+        if len(hashes) > 1:
+            raise WencaiHashCollisionError(
+                f"多张同等合格（{max_rows} 行）且行数最大的表内容 hash 冲突，"
+                f"无法确定唯一主表，labels={[label for label, _ in same_size]}"
+            )
+
+    # 按行数×列数降序，选择最大合格表
+    qualified.sort(key=lambda item: (len(item[1]), len(item[1].columns)), reverse=True)
+    selected_label, selected_df, selected_col_map = qualified[0]
+    logger.info(
+        "[WencaiBoard] 选择主表: label=%s, rows=%d, cols=%d, 合格表数=%d",
+        selected_label, len(selected_df), len(selected_df.columns), len(qualified),
     )
     return selected_df
 
@@ -295,6 +341,30 @@ def _normalize_industry(raw: Any) -> str:
     return "-".join(parts)
 
 
+def _split_industry_path(path: str) -> list[str]:
+    """把规范化行业路径拆分为有序层级段（L1/L2/L3）。
+
+    返回至少一个元素；深度超过 MAX_INDUSTRY_DEPTH 时截断到前 3 段。
+    例：
+        "银行"                 → ["银行"]
+        "金融-银行"             → ["金融", "银行"]
+        "金融-银行-国有银行"      → ["金融", "银行", "国有银行"]
+        "金融-银行-国有银行-细分" → ["金融", "银行", "国有银行"]（截断）
+
+    Args:
+        path: 规范化行业路径（"-" 连接，可能为空）
+
+    Returns:
+        有序层级段列表
+    """
+    if not path:
+        return []
+    parts = [p.strip() for p in path.split("-") if p.strip()]
+    if not parts:
+        return []
+    return parts[:MAX_INDUSTRY_DEPTH]
+
+
 def _make_external_code(board_type: str, name: str) -> str:
     """生成稳定 external_code：wc:c:/wc:i: + 规范化名称 SHA256 前24位。
 
@@ -373,6 +443,9 @@ def _build_board_snapshot(
     df = df.fillna("")
 
     snapshot = BoardSnapshot(raw_rows=len(df))
+    snapshot.diagnostics["required_column_mapping"] = {
+        k: v for k, v in col_map.items()
+    }
 
     # 名称 → external_code 映射（用于哈希冲突检测）
     name_to_code: dict[str, str] = {}
@@ -422,21 +495,33 @@ def _build_board_snapshot(
             snapshot.memberships[key].append(symbol)
             concept_relation_count += 1
 
-        # 添加行业 board + membership（每股恰好一个行业）
+        # 添加行业 L1/L2/L3 层级 boards + membership
+        # [Commit A §6.2] 每股所属行业拆分为有序层级，股票挂到每一级 board，
+        # 层级间通过 parent_external_code 建立父子身份（L1 → L2 → L3）。
         if industry_path:
-            ext_code = _make_external_code("industry", industry_path)
-            key = (ext_code, "industry")
-            if key not in boards_seen:
-                boards_seen.add(key)
-                snapshot.boards.append({
-                    "external_code": ext_code,
-                    "name": industry_path,
-                    "type": "industry",
-                })
-                name_to_code[industry_path] = ext_code
-                code_to_names.setdefault(ext_code, []).append(industry_path)
-                snapshot.memberships[key] = []
-            snapshot.memberships[key].append(symbol)
+            levels = _split_industry_path(industry_path)
+            parent_code: str | None = None
+            for level_idx, level_name in enumerate(levels):
+                # 从 L1 到当前层级的完整名称（"金融" → "金融-银行" → "金融-银行-国有银行"）
+                level_path = "-".join(levels[: level_idx + 1])
+                hierarchy_level = f"L{level_idx + 1}"
+                ext_code = _make_external_code("industry", level_path)
+                key = (ext_code, "industry")
+                if key not in boards_seen:
+                    boards_seen.add(key)
+                    board = {
+                        "external_code": ext_code,
+                        "name": level_path,
+                        "type": "industry",
+                        "hierarchy_level": hierarchy_level,
+                        "parent_external_code": parent_code,
+                    }
+                    snapshot.boards.append(board)
+                    name_to_code[level_path] = ext_code
+                    code_to_names.setdefault(ext_code, []).append(level_path)
+                    snapshot.memberships[key] = []
+                snapshot.memberships[key].append(symbol)
+                parent_code = ext_code
 
     # 检测哈希冲突
     _detect_hash_collision(name_to_code, code_to_names)
@@ -525,8 +610,16 @@ async def fetch_board_snapshot() -> BoardSnapshot:
     """
     start_time = time.monotonic()
 
-    # asyncio.to_thread 包装同步调用
-    result = await asyncio.to_thread(_fetch_wencai_sync)
+    # asyncio.to_thread 包装同步调用 + provider 整体超时（防止 io 阻塞拖垮事件循环）
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_wencai_sync),
+            timeout=PROVIDER_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise WencaiFetchError(
+            f"问财拉取超时（>{PROVIDER_TIMEOUT_SECONDS}s）"
+        ) from exc
 
     # 选择主表 + 构建 BoardSnapshot（也在线程中执行，避免阻塞）
     import pandas as pd
@@ -534,6 +627,10 @@ async def fetch_board_snapshot() -> BoardSnapshot:
     snapshot = await asyncio.to_thread(_build_board_snapshot, df, pd)
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
+    snapshot.diagnostics.update({
+        "duration_ms": duration_ms,
+        "provider_timeout_seconds": PROVIDER_TIMEOUT_SECONDS,
+    })
     logger.info(
         "[WencaiBoard] 快照拉取完成: duration_ms=%d, boards=%d, memberships=%d",
         duration_ms, snapshot.board_count, snapshot.membership_count,
@@ -548,4 +645,6 @@ def get_provider_info() -> dict[str, Any]:
         "source": "wencai",
         "query": WENCAI_QUERY,
         "max_retries": MAX_RETRIES,
+        "timeout_seconds": PROVIDER_TIMEOUT_SECONDS,
+        "industry_max_depth": MAX_INDUSTRY_DEPTH,
     }

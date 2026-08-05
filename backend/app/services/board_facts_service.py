@@ -232,6 +232,14 @@ def _coverage_ratio(run: BoardFactsRun) -> float:
     return (run.resolved_count or 0) / total
 
 
+def _count_boards_by_level(snapshot: Any, level: str) -> int:
+    """统计某一行业层级（L1/L2/L3）的 board 数量（纯函数）。"""
+    return sum(
+        1 for b in getattr(snapshot, "boards", [])
+        if b.get("type") == "industry" and b.get("hierarchy_level") == level
+    )
+
+
 async def _reuse_previous(
     db: AsyncSession,
     run: BoardFactsRun,
@@ -402,8 +410,18 @@ async def run_board_facts(
         snapshot_hash = _stable_snapshot_hash(snapshot)
         run.snapshot_hash = snapshot_hash
         run.raw_rows = snapshot.raw_rows
+        run.industry_l1_count = _count_boards_by_level(snapshot, "L1")
+        run.industry_l2_count = _count_boards_by_level(snapshot, "L2")
+        run.industry_l3_count = _count_boards_by_level(snapshot, "L3")
+        run.concept_count = sum(
+            1 for b in snapshot.boards if b.get("type") == "concept"
+        )
         run.diagnostics_json = {
             "unresolved_sample": snapshot.unresolved_symbols[:50],
+            "provider": {
+                **getattr(snapshot, "diagnostics", {}),
+                "source": "wencai",
+            },
         }
 
         # 4. 规范化 + 门禁 + PIT 写入（复用 board_sync_service.sync_boards）
@@ -431,8 +449,7 @@ async def run_board_facts(
         run.status = BOARD_FACTS_STATUS_PERSISTING
         run.resolved_count = sync_result.get("resolved")
         run.unresolved_count = sync_result.get("unresolved")
-        run.industry_l2_count = sync_result.get("industry_count")
-        run.concept_count = sync_result.get("concept_count")
+        # industry_l1/l2/l3_count 已在抓取阶段按层级从 snapshot 计算，勿用总 industry_count 覆盖
         run.membership_count = sync_result.get("membership_count")
         run.raw_rows = sync_result.get("raw_rows", run.raw_rows)
         run.coverage_json = {
