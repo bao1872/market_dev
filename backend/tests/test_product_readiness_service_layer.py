@@ -169,7 +169,9 @@ class _FakeDB:
             # 改为按查询谓词路由，与真实 SQL 契约一致且顺序无关。
             wc = str(stmt.whereclause)
             eligible, matched = (self._dsa + [0, 0])[:2]
-            if "dsa_projection" in wc:
+            # SQLAlchemy 将 JSONB has_key 渲染为 `summary_payload ? :param`（? 运算符），
+            # 不会内联字面量 "dsa_projection"，故按 ? 运算符判定 matched 查询。
+            if "?" in wc:
                 return matched
             if "source_run_id" in wc:
                 return eligible
