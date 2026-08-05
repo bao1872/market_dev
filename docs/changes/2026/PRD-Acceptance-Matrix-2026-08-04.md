@@ -1,6 +1,6 @@
 # PRD 完整验收矩阵
 
-**基线**: `6942a06000aa898945ceab3bcdc3bfc299913b86`
+**基线**: `26694bd5d0e95d528fbd8e3f0779d5c2c820fbdb`
 **生成日期**: 2026-08-04
 **目的**: 逐条核对所有 PRD 需求的实现状态、证据和剩余缺口
 **当前判断**: `code_ready = false`, `data_closed = false`
