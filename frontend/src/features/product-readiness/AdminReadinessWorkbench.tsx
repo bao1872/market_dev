@@ -68,6 +68,40 @@ const SOURCE_LABELS: Record<string, string> = {
   publication_pointer: '发布指针',
   run_status: 'run 状态',
   derived_from_stock_core: '派生自核心',
+  review_publication: '复盘发布',
+}
+
+// lineage 关键字段 → 中文标签（用于诊断明细展示）
+const LINEAGE_KEY_LABELS: Record<string, string> = {
+  source_type: '来源类型',
+  publication_id: '发布 ID',
+  pointer_data_run_id: '指针数据 run',
+  run_id: 'run ID',
+  review_run_id: '复盘 run',
+  source_core_run_id: '核心 run',
+  derived_from: '派生自',
+  algorithm_version: '算法版本',
+  coverage: '覆盖率',
+  reason_code: '原因码',
+  readiness: '就绪',
+  freshness: '新鲜度',
+}
+
+// 根据 reason_code / readiness 推导推荐恢复动作（admin 诊断提示，不触发写）
+function recommendedAction(lineage: Record<string, unknown> | undefined, readiness: string, freshness: string): string {
+  if (!lineage) return '—'
+  const rc = lineage.reason_code as string | undefined
+  if (rc === 'REUSED_PREVIOUS_RUN') return '重新触发板块事实计算以刷新指针'
+  if (rc === 'CHIP_PARTIAL') return '补齐筹码口径后重算 chip 共识'
+  if (rc === 'REVIEW_PUBLISHED') return '已发布，无需动作'
+  if (rc === 'UPGRADED_FROM_PARENT') return '已由核心升级派生，无需动作'
+  if (rc === 'PARENT_NOT_CONSUMABLE') return '等待核心就绪后派生'
+  if (rc === 'NO_PUBLICATION' || rc === 'NO_REVIEW_RUN' || rc === 'NO_CHIP_RUN' || rc === 'NO_AUCTION_RUN' || rc === 'NO_RUN')
+    return '运行对应任务或检查是否缺失'
+  if (readiness === 'unavailable') return '检查 run 终态与失败原因'
+  if (readiness === 'degraded') return '补齐依赖后重试'
+  if (freshness === 'stale') return '检查是否落后核心，必要时刷新'
+  return '无需动作'
 }
 
 export default function AdminReadinessWorkbench() {
@@ -143,20 +177,40 @@ export default function AdminReadinessWorkbench() {
               九节点状态
             </div>
             {data.products.map((p) => (
-              <div key={p.product} className="toggle-row">
+              <div key={p.product} className="toggle-row" style={{ alignItems: 'flex-start' }}>
                 <span>
                   {PRODUCT_LABELS[p.product] ?? p.product}
                   <span className="muted" style={{ fontSize: '0.8em' }}>
                     {' '}({p.product})
                   </span>
                 </span>
-                <b>
+                <b style={{ maxWidth: '70%', textAlign: 'right' }}>
                   <span className={`status-pill ${readinessPill(p.readiness)}`}>
                     {readinessText(p.readiness)}
                   </span>
                   <span className="muted" style={{ display: 'block', fontSize: '0.8em' }}>
                     新鲜度：{p.freshness} · 终态：{p.isTerminal ? '是' : '否'} · 可消费：
                     {p.isConsumable ? '是' : '否'} · 来源：{SOURCE_LABELS[p.dataSource] ?? p.dataSource}
+                  </span>
+                  {/* [H 修正] 展示真实 lineage 血缘字段 */}
+                  {p.lineage && Object.keys(p.lineage).length > 0 && (
+                    <span className="muted" style={{ display: 'block', fontSize: '0.78em', marginTop: '0.3em' }}>
+                      {Object.entries(p.lineage)
+                        .filter(([k]) => k !== 'source_type' && k !== 'readiness' && k !== 'freshness')
+                        .map(([k, v]) => `${LINEAGE_KEY_LABELS[k] ?? k}=${String(v)}`)
+                        .join(' · ')}
+                    </span>
+                  )}
+                  <span
+                    className="muted"
+                    style={{
+                      display: 'block',
+                      fontSize: '0.78em',
+                      marginTop: '0.3em',
+                      color: '#b45309',
+                    }}
+                  >
+                    动作：{recommendedAction(p.lineage, p.readiness, p.freshness)}
                   </span>
                 </b>
               </div>
@@ -166,12 +220,20 @@ export default function AdminReadinessWorkbench() {
             <div className="card-sub" style={{ marginTop: '1em' }}>
               治理报告
             </div>
-            <div className="toggle-row">
-              <span>数据来源（lineage）</span>
-              <b className="num" style={{ maxWidth: '70%', textAlign: 'right', fontSize: '0.85em' }}>
-                {Object.entries(data.governance.pointerLineage)
-                  .map(([k, v]) => `${PRODUCT_LABELS[k] ?? k}=${SOURCE_LABELS[v] ?? v}`)
-                  .join(' · ')}
+            {/* [H 修正] 真实 lineage 血缘：run_id / publication_id / pointer / coverage / reason_code */}
+            <div className="toggle-row" style={{ alignItems: 'flex-start' }}>
+              <span>数据血缘（lineage）</span>
+              <b className="num" style={{ maxWidth: '72%', textAlign: 'right', fontSize: '0.82em' }}>
+                {Object.entries(data.governance.pointerLineage).map(([k, v]) => (
+                  <div key={k} style={{ marginBottom: '0.2em' }}>
+                    <b>{PRODUCT_LABELS[k] ?? k}</b>
+                    {': '}
+                    {Object.entries(v as Record<string, unknown>)
+                      .filter(([fk]) => fk !== 'source_type' && fk !== 'readiness' && fk !== 'freshness')
+                      .map(([fk, fv]) => `${LINEAGE_KEY_LABELS[fk] ?? fk}=${String(fv)}`)
+                      .join(' · ')}
+                  </div>
+                ))}
               </b>
             </div>
             <div className="toggle-row">

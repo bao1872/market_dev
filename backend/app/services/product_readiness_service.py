@@ -87,6 +87,9 @@ class ProductReadinessState:
     - is_terminal：run 是否已达终态（succeeded/partial/skipped/failed/cancelled），不再运行
     - is_consumable：产品当前是否可安全消费（ready/ready_reused）
     - is_fully_fresh：既 ready 又 fresh
+    - lineage：真实数据血缘（G 修正）：run_id / publication_id / pointer_data_run_id /
+      source_core_run_id / algorithm_version / coverage / reason_code。
+      审计 API 必须返回真实父子关系，而非仅"数据来源类型"字符串。
     """
 
     product: str
@@ -94,6 +97,7 @@ class ProductReadinessState:
     freshness: str = "fresh"  # fresh / stale / reused
     is_mandatory: bool = True
     is_terminal: bool = False
+    lineage: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_consumable(self) -> bool:
@@ -267,10 +271,11 @@ _DERIVED_PRODUCTS = frozenset({"dsa_projection", "state_events"})
 
 @dataclass(frozen=True)
 class GovernanceReport:
-    """一次闭包评估的治理视图（Commit G）。
+    """一次闭包评估的治理视图（Commit G，已修正真实 lineage）。
 
-    - pointer_lineage: 每个产品的数据来源（publication_pointer / run_status /
-      derived_from_stock_core），用于审计"谁支撑该产品的 readiness"
+    - pointer_lineage: 每个产品的真实数据血缘 dict（run_id / publication_id /
+      pointer_data_run_id / source_core_run_id / algorithm_version / coverage /
+      reason_code / source_type），用于审计"谁支撑该产品的 readiness"
     - stale_children: freshness != fresh 的产品（stale / reused）
     - unmatched_active_children: 增强/派生产品仍 active（非终态）而其父
       stock_core 已可消费 → 表明子产品仍在运行、父已就绪的边缘态
@@ -279,7 +284,7 @@ class GovernanceReport:
     - degraded_reasons: 闭包评估产生的问题列表（含 code/severity）
     """
 
-    pointer_lineage: dict[str, str] = field(default_factory=dict)
+    pointer_lineage: dict[str, dict[str, Any]] = field(default_factory=dict)
     stale_children: list[str] = field(default_factory=list)
     unmatched_active_children: list[str] = field(default_factory=list)
     ready_products: list[str] = field(default_factory=list)
@@ -289,22 +294,37 @@ class GovernanceReport:
     degraded_reasons: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _product_data_source(product: str, state: ProductReadinessState) -> str:
-    """判定单个产品的 readiness 数据来源（pointer lineage 的一环）。"""
-    if product in _DERIVED_PRODUCTS:
-        return "derived_from_stock_core"
-    if state.readiness in CONSUMABLE_READINESS:
-        return "publication_pointer"
-    return "run_status"
+def _product_lineage(p: ProductReadinessState) -> dict[str, Any]:
+    """从产品就绪状态提取真实数据血缘（G 修正）。
+
+    返回真实 run_id / publication_id / pointer_data_run_id / source_core_run_id /
+    algorithm_version / coverage / reason_code / source_type，支撑真正的血统审计，
+    而非仅"数据来源类型"字符串。
+    """
+    base = {
+        "source_type": p.lineage.get("source_type", "unknown"),
+        "reason_code": p.lineage.get("reason_code", "NONE"),
+        "readiness": p.readiness,
+        "freshness": p.freshness,
+    }
+    for key in (
+        "publication_id", "pointer_data_run_id", "algorithm_version",
+        "coverage", "published_at", "run_id", "review_run_id",
+        "source_core_run_id", "derived_from",
+    ):
+        if key in p.lineage:
+            base[key] = p.lineage[key]
+    return base
 
 
 def evaluate_governance(
     products: list[ProductReadinessState],
     closure: ClosureEvaluation,
 ) -> GovernanceReport:
-    """纯函数：从产品就绪状态 + 闭包评估生成治理报告（Commit G）。
+    """纯函数：从产品就绪状态 + 闭包评估生成治理报告（Commit G，已修正真实 lineage）。
 
     不连接数据库；所有信号均由 ProductReadinessState 推导，可 PURE_UNIT_TEST 测试。
+    [G 修正] pointer_lineage 返回每个产品的真实数据血缘 dict，而非字符串来源类型。
 
     Args:
         products: 全部九节点产品状态
@@ -317,7 +337,7 @@ def evaluate_governance(
     stock_core = by_product.get("stock_core")
     core_consumable = stock_core is not None and stock_core.is_consumable
 
-    pointer_lineage: dict[str, str] = {}
+    pointer_lineage: dict[str, dict[str, Any]] = {}
     stale_children: list[str] = []
     unmatched_active_children: list[str] = []
     ready_products: list[str] = []
@@ -326,7 +346,7 @@ def evaluate_governance(
     unavailable_products: list[str] = []
 
     for p in products:
-        pointer_lineage[p.product] = _product_data_source(p.product, p)
+        pointer_lineage[p.product] = _product_lineage(p)
         if p.freshness != "fresh":
             stale_children.append(p.product)
         if not p.is_mandatory and not p.is_terminal and core_consumable:
@@ -438,8 +458,13 @@ class ProductReadinessService:
         *,
         is_mandatory: bool,
         scope_type: str = SCOPE_TYPE_MARKET,
+        source_core_run_id: str | None = None,
     ) -> ProductReadinessState | None:
-        """读取发布指针；存在则返回 ready（terminal=True），否则 None。"""
+        """读取发布指针；存在则返回 ready（terminal=True）并携带真实 lineage。
+
+        [G 修正] lineage 返回真实 run/publication/pointer/coverage/reason，
+        而非仅"数据来源类型"字符串，支撑真正的血统审计。
+        """
         from app.models.factor_publication import FactorPublication
 
         pub = await db.scalar(
@@ -452,9 +477,21 @@ class ProductReadinessService:
             .limit(1)
         )
         if pub is not None:
+            lineage = {
+                "source_type": "publication_pointer",
+                "publication_id": str(getattr(pub, "id", "")),
+                "pointer_data_run_id": str(getattr(pub, "data_run_id", "")),
+                "algorithm_version": getattr(pub, "algorithm_version", None),
+                "coverage": getattr(pub, "coverage_ratio", None),
+                "published_at": (
+                    pub.published_at.isoformat()
+                    if getattr(pub, "published_at", None) else None
+                ),
+                "source_core_run_id": source_core_run_id,
+            }
             return ProductReadinessState(
                 product, READINESS_READY, "fresh",
-                is_mandatory=is_mandatory, is_terminal=True,
+                is_mandatory=is_mandatory, is_terminal=True, lineage=lineage,
             )
         return None
 
@@ -478,6 +515,8 @@ class ProductReadinessService:
         """board_facts：以发布指针为准；latest run 单列（P0-2/P0-7）。
 
         P0-7：若指针 data_run 是 reused 旧 run，则 readiness=ready_reused（degraded）。
+        [G 修正] 填充真实 lineage（publication_id / pointer_data_run_id / algorithm_version /
+        coverage / reason_code）。
         """
         from app.models.factor_publication import FactorPublication
 
@@ -498,12 +537,27 @@ class ProductReadinessService:
                 .where(BoardFactsRun.id == pub.data_run_id)
                 .limit(1)
             )
-            if data_run is not None and data_run.status == "reused_previous":
+            reused = data_run is not None and data_run.status == "reused_previous"
+            lineage = {
+                "source_type": "publication_pointer",
+                "publication_id": str(getattr(pub, "id", "")),
+                "pointer_data_run_id": str(getattr(pub, "data_run_id", "")),
+                "algorithm_version": getattr(pub, "algorithm_version", None),
+                "coverage": getattr(pub, "coverage_ratio", None),
+                "published_at": (
+                    pub.published_at.isoformat()
+                    if getattr(pub, "published_at", None) else None
+                ),
+                "reason_code": "REUSED_PREVIOUS_RUN" if reused else "FRESH_PUBLICATION",
+            }
+            if reused:
                 return ProductReadinessState(
-                    "board_facts", READINESS_READY_REUSED, "reused", is_terminal=True,
+                    "board_facts", READINESS_READY_REUSED, "reused",
+                    is_terminal=True, lineage=lineage,
                 )
             return ProductReadinessState(
-                "board_facts", READINESS_READY, "fresh", is_terminal=True,
+                "board_facts", READINESS_READY, "fresh",
+                is_terminal=True, lineage=lineage,
             )
         from app.models.board_facts_run import BoardFactsRun
 
@@ -514,12 +568,23 @@ class ProductReadinessService:
             .limit(1)
         )
         if run is None:
-            return ProductReadinessState("board_facts", READINESS_PENDING, "fresh")
+            return ProductReadinessState(
+                "board_facts", READINESS_PENDING, "fresh",
+                lineage={"source_type": "run_status", "reason_code": "NO_RUN"},
+            )
         if run.status in TERMINAL_RUN_STATUS and run.status != RUN_STATUS_SUCCEEDED:
             return ProductReadinessState(
                 "board_facts", READINESS_UNAVAILABLE, "fresh", is_terminal=True,
+                lineage={
+                    "source_type": "run_status",
+                    "run_id": str(getattr(run, "id", "")),
+                    "reason_code": f"RUN_{run.status.upper()}",
+                },
             )
-        return ProductReadinessState("board_facts", READINESS_PENDING, "fresh")
+        return ProductReadinessState(
+            "board_facts", READINESS_PENDING, "fresh",
+            lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", ""))},
+        )
 
     async def _stock_core_state(
         self, db: Any, trade_date: date,
@@ -548,7 +613,10 @@ class ProductReadinessService:
     async def _review_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """review：MarketReviewRun published 即视为已发布（P0-2，以发布态为准）。"""
+        """review：MarketReviewRun published 即视为已发布（P0-2，以发布态为准）。
+
+        [G 修正] 填充真实 lineage（review_run_id / algorithm_version / reason_code）。
+        """
         from app.models.market_review import MarketReviewRun
 
         run = await db.scalar(
@@ -558,26 +626,60 @@ class ProductReadinessService:
             .limit(1)
         )
         if run is None:
-            return ProductReadinessState("review", READINESS_PENDING, "fresh")
+            return ProductReadinessState(
+                "review", READINESS_PENDING, "fresh",
+                lineage={"source_type": "run_status", "reason_code": "NO_REVIEW_RUN"},
+            )
         if run.status == "published":
-            return ProductReadinessState("review", READINESS_READY, "fresh", is_terminal=True)
+            return ProductReadinessState(
+                "review", READINESS_READY, "fresh", is_terminal=True,
+                lineage={
+                    "source_type": "review_publication",
+                    "review_run_id": str(getattr(run, "id", "")),
+                    "algorithm_version": getattr(run, "algorithm_version", None),
+                    "reason_code": "REVIEW_PUBLISHED",
+                },
+            )
         if run.status in TERMINAL_RUN_STATUS:
-            return ProductReadinessState("review", READINESS_UNAVAILABLE, "fresh", is_terminal=True)
-        return ProductReadinessState("review", READINESS_PENDING, "fresh")
+            return ProductReadinessState(
+                "review", READINESS_UNAVAILABLE, "fresh", is_terminal=True,
+                lineage={"source_type": "run_status",
+                          "review_run_id": str(getattr(run, "id", "")),
+                          "reason_code": f"REVIEW_{run.status.upper()}"},
+            )
+        return ProductReadinessState(
+            "review", READINESS_PENDING, "fresh",
+            lineage={"source_type": "run_status",
+                      "review_run_id": str(getattr(run, "id", ""))},
+        )
 
     @staticmethod
     def _derived_state(
         product: str, core: ProductReadinessState,
     ) -> ProductReadinessState:
-        """派生投影（dsa_projection/state_events）：随 stock_core 就绪（enhancement）。"""
+        """派生投影（dsa_projection/state_events）：随 stock_core 就绪（enhancement）。
+
+        [G 修正] 注入 derived_from_stock_core 真实父子关系 lineage。
+        """
         if core.is_consumable:
             return ProductReadinessState(
                 product, READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
+                lineage={
+                    "source_type": "derived_from_stock_core",
+                    "derived_from": "stock_core",
+                    "source_core_run_id": core.lineage.get("pointer_data_run_id"),
+                    "reason_code": "UPGRADED_FROM_PARENT",
+                },
             )
         return ProductReadinessState(
             product, READINESS_PENDING, "fresh",
             is_mandatory=False, is_terminal=False,
+            lineage={
+                "source_type": "derived_from_stock_core",
+                "derived_from": "stock_core",
+                "reason_code": "PARENT_NOT_CONSUMABLE",
+            },
         )
 
     async def _chip_state(
@@ -601,24 +703,33 @@ class ProductReadinessService:
         if run is None:
             return ProductReadinessState(
                 "chip", READINESS_PENDING, "fresh", is_mandatory=False,
+                lineage={"source_type": "run_status", "reason_code": "NO_CHIP_RUN"},
             )
         if run.status == "succeeded":
             return ProductReadinessState(
                 "chip", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
+                lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", "")),
+                          "algorithm_version": getattr(run, "algorithm_version", None),
+                          "reason_code": "CHIP_SUCCEEDED"},
             )
         if run.status == "partial":
             return ProductReadinessState(
                 "chip", READINESS_DEGRADED, "stale",
                 is_mandatory=False, is_terminal=True,
+                lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", "")),
+                          "reason_code": "CHIP_PARTIAL"},
             )
         if run.status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
                 "chip", READINESS_UNAVAILABLE, "fresh",
                 is_mandatory=False, is_terminal=True,
+                lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", "")),
+                          "reason_code": f"CHIP_{run.status.upper()}"},
             )
         return ProductReadinessState(
             "chip", READINESS_PENDING, "fresh", is_mandatory=False,
+            lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", ""))},
         )
 
     async def _auction_state(
@@ -643,11 +754,14 @@ class ProductReadinessService:
             return ProductReadinessState(
                 "auction_anchor", READINESS_PENDING, "fresh",
                 is_mandatory=False,
+                lineage={"source_type": "run_status", "reason_code": "NO_AUCTION_RUN"},
             )
         if run.status in ("succeeded", "structure_only"):
             return ProductReadinessState(
                 "auction_anchor", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
+                lineage={"source_type": "run_status", "run_id": str(getattr(run, "id", "")),
+                          "reason_code": f"AUCTION_{run.status.upper()}"},
             )
         if run.status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(

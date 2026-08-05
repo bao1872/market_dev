@@ -2728,6 +2728,8 @@ export interface ProductReadinessItem {
   isTerminal: boolean
   isConsumable: boolean
   dataSource: string
+  /** [H 修正] 真实数据血缘：run_id/publication_id/pointer_data_run_id/algorithm_version/coverage/reason_code 等 */
+  lineage: Record<string, unknown>
 }
 
 /** 闭包评估问题项 */
@@ -2738,9 +2740,10 @@ export interface BenefitsIssue {
   recommendedAction: string
 }
 
-/** 治理报告（Commit G） */
+/** 治理报告（Commit G，已修正真实 lineage） */
 export interface GovernanceReport {
-  pointerLineage: Record<string, string>
+  /** 每个产品的真实数据血缘 dict（run_id/publication_id/pointer/coverage/reason_code 等） */
+  pointerLineage: Record<string, Record<string, unknown>>
   staleChildren: string[]
   unmatchedActiveChildren: string[]
   readyProducts: string[]

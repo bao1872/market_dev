@@ -25,6 +25,7 @@ from app.services.product_readiness_service import (
     ProductReadinessState,
     evaluate_closure,
     evaluate_governance,
+    CLOSURE_PENDING,
 )
 
 
@@ -44,16 +45,52 @@ def _full_states() -> list[ProductReadinessState]:
 
 
 def test_pointer_lineage_full_ready():
-    """fully_ready：consumable 产品标 publication_pointer，派生标 derived_from_stock_core。"""
-    states = _full_states()
+    """fully_ready：[G 修正] pointer_lineage 返回真实血缘 dict，而非字符串来源类型。
+
+    consumable 产品带 publication_pointer 真实字段；派生产品带 derived_from_stock_core
+    与 source_core_run_id，支撑血统审计。
+    """
+    states = [
+        ProductReadinessState(
+            "daily_facts", READINESS_READY, "fresh",
+            lineage={"source_type": "publication_pointer", "publication_id": "pub-daily",
+                      "pointer_data_run_id": "run-daily", "algorithm_version": "v1"},
+        ),
+        ProductReadinessState(
+            "stock_core", READINESS_READY, "fresh",
+            lineage={"source_type": "publication_pointer", "publication_id": "pub-core",
+                      "pointer_data_run_id": "run-core", "algorithm_version": "v2"},
+        ),
+        ProductReadinessState(
+            "dsa_projection", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True,
+            lineage={"source_type": "derived_from_stock_core", "derived_from": "stock_core",
+                      "source_core_run_id": "run-core", "reason_code": "UPGRADED_FROM_PARENT"},
+        ),
+        ProductReadinessState(
+            "chip", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True,
+            lineage={"source_type": "publication_pointer", "publication_id": "pub-chip",
+                      "pointer_data_run_id": "run-chip", "algorithm_version": "v3", "coverage": 0.91},
+        ),
+    ]
     closure = evaluate_closure(states)
     gov = evaluate_governance(states, closure)
 
-    assert gov.pointer_lineage["stock_core"] == "publication_pointer"
-    assert gov.pointer_lineage["review"] == "publication_pointer"
-    assert gov.pointer_lineage["dsa_projection"] == "derived_from_stock_core"
-    assert gov.pointer_lineage["state_events"] == "derived_from_stock_core"
-    assert gov.pointer_lineage["chip"] == "publication_pointer"
+    sc = gov.pointer_lineage["stock_core"]
+    assert sc["source_type"] == "publication_pointer"
+    assert sc["publication_id"] == "pub-core"
+    assert sc["pointer_data_run_id"] == "run-core"
+    assert sc["algorithm_version"] == "v2"
+
+    ds = gov.pointer_lineage["dsa_projection"]
+    assert ds["source_type"] == "derived_from_stock_core"
+    assert ds["derived_from"] == "stock_core"
+    assert ds["source_core_run_id"] == "run-core"
+    assert ds["reason_code"] == "UPGRADED_FROM_PARENT"
+
+    chip = gov.pointer_lineage["chip"]
+    assert chip["source_type"] == "publication_pointer"
+    assert chip["coverage"] == 0.91
+    assert isinstance(gov.pointer_lineage["stock_core"], dict)
 
 
 def test_stale_reused_children():

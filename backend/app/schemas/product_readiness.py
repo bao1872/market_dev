@@ -38,7 +38,12 @@ class ProductReadinessDTO(BaseModel):
     isConsumable: bool = Field(False, description="是否可安全消费")
     dataSource: str = Field(
         "run_status",
-        description="readiness 数据来源：publication_pointer/run_status/derived_from_stock_core",
+        description="readiness 数据来源类型：publication_pointer/run_status/derived_from_stock_core/review_publication",
+    )
+    lineage: dict[str, object] = Field(
+        default_factory=dict,
+        description="[G 修正] 真实数据血缘：run_id/publication_id/pointer_data_run_id/"
+        "source_core_run_id/algorithm_version/coverage/reason_code 等，支撑血统审计",
     )
 
 
@@ -64,7 +69,7 @@ class GovernanceReportDTO(BaseModel):
     - degradedReasons: 闭包评估产生的问题列表
     """
 
-    pointerLineage: dict[str, str] = Field(default_factory=dict)
+    pointerLineage: dict[str, dict[str, object]] = Field(default_factory=dict)
     staleChildren: list[str] = Field(default_factory=list)
     unmatchedActiveChildren: list[str] = Field(default_factory=list)
     readyProducts: list[str] = Field(default_factory=list)

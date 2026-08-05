@@ -1816,6 +1816,40 @@ async def _chip_consensus_poll_once() -> bool:
                 exc_info=True,
             )
 
+    # 只有当前 owner 成功写入终态后才触发 chip consensus 发布 pointer。
+    # [D: 接入真实业务链] publish_chip_consensus 必须被 chip run 完成路径调用，
+    # 否则没有任何生产路径会在 chip run 完成后发布 stock_core pointer。
+    # 软失败：发布失败绝不反改 chip 终态或重算 core。
+    if (
+        finalized
+        and trade_date is not None
+        and chip_status in {"succeeded", "partial"}
+    ):
+        try:
+            from app.services.factor_publication_service import publish_chip_consensus
+
+            async with AsyncSessionLocal() as pub_db:
+                pub_result = await publish_chip_consensus(
+                    pub_db,
+                    trade_date=trade_date,
+                    core_run_id=core_run_id,
+                    chip_run_id=None,  # 领域 run 由 publish_chip_consensus 内部按 algorithm_version 解析
+                    worker_id=f"chip_consensus:{job_run_id}",
+                )
+                await pub_db.commit()
+            logger.info(
+                "[ChipConsensusWorker] chip 终态后发布 stock_core pointer: "
+                "trade_date=%s, chip_status=%s, status=%s, publication_id=%s",
+                trade_date, chip_status,
+                pub_result.get("status"), pub_result.get("publication_id"),
+            )
+        except Exception:
+            logger.warning(
+                "[ChipConsensusWorker] chip 终态后发布 pointer 失败（软失败）: trade_date=%s",
+                trade_date,
+                exc_info=True,
+            )
+
     return True
 
 

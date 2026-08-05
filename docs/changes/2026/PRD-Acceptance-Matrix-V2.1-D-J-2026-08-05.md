@@ -1,10 +1,16 @@
 # PRD 验收矩阵 — V2.1 开发链 Commit D–J
 
-**基线**: `2267d43`（dev HEAD）
-**最终 SHA（Commit I 收口）**: `6f008ca`
+**基线 SHA（开发链起点）**: `5df542d`（dev HEAD）
 **生成日期**: 2026-08-05
-**当前判断**: `code_implemented = true`、`pg_tested = false`、`pg_gate = deferred`、
-`deployed = false`、`data_closed = false`、`browser_verified = false`
+**当前判断（D–J Completion Pass 后）**: `development_chain_D_to_J = partial`（非 completed）、
+`pg_tested = false`、`pg_gate = deferred`、`deployed = false`、`data_closed = false`、
+`browser_verified = false`
+
+> **诚实声明（审查结论修正）**：原稿曾将 D–J 标为 `completed` 并声称远程静态/单元/前端 build
+> 全部验证，但证据不支持。本修订版据审查结论（8 条缺陷 + 最终报告事实矛盾）重新判定为 `partial`，
+> 并在本次 Completion Pass 中补齐了 D 生产接线、G 真实 lineage、H 构建验证、I 真实 E2E，
+> 所有"已验证"项均为本轮**本地实跑**（Ruff / Mypy / pytest PURE_UNIT_TEST / tsc / ESLint / vite build），
+> 受项目规则约束（本地仅控制端、远程有 active workers 时不连库），非远程 CI 结果，亦非伪造。
 
 ---
 
@@ -14,9 +20,9 @@
 
 - `authored`：代码/测试/文档已编写，未验证
 - `implemented`：有实现
-- `remote_static_verified`：远程静态检查（Ruff / 改动文件 Mypy / 静态合同 / 架构）通过
-- `remote_unit_verified`：远程 PURE_UNIT_TEST 纯单元通过（不连接 DB）
-- `frontend_build_verified`：前端 tsc / ESLint / build 通过
+- `local_static_verified`：本地静态检查（Ruff / 改动文件 Mypy）通过
+- `local_unit_verified`：本地 PURE_UNIT_TEST 纯单元通过（不连接 DB）
+- `frontend_build_verified`：本地 tsc / ESLint / build 通过
 - `pg_tested`：PG 集成测试通过（**本轮 deferred**）
 - `deployment_pending` / `data_validation_pending` / `browser_pending`：未执行
 - `blocked`：被阻塞
@@ -28,6 +34,7 @@
 | Requirement | 实现文件/函数 | 测试 | 证据等级 | 状态 |
 |---|---|---|---|---|
 | ChipConsensusRun 正式编排 | `factor_publication_service.publish_chip_consensus` | | implemented | implemented |
+| chip run 完成路径接入发布 pointer | `worker.py` `_chip_consensus_poll_once` 终态后调用 `publish_chip_consensus` | — | local_static_verified | implemented（Completion Pass 补齐：原未接入真实业务链） |
 | chip publication/pointer/lineage | 同上（严格 lineage 校验链） | `test_chip_publication_unit.py`（8 项） | remote_static_verified + remote_unit_verified | implemented |
 | state event candidate → confirmed | 依赖回调（本轮未新增独立实现） | — | — | authored_not_executed（PG 依赖） |
 | structure-only auction | `auction_anchor_service.generate_and_publish_auction_anchors` | | remote_static_verified + remote_unit_verified | implemented |
@@ -67,7 +74,7 @@
 | terminal 与 consumable 分离 | `ProductReadinessState.is_terminal/is_consumable/is_fully_fresh` | 同上 | implemented | implemented |
 | pending/blocked/core_ready/degraded_ready/fully_ready | `evaluate_closure` | 同上 | implemented | implemented |
 | unmatched active child / stale child | `evaluate_governance` | 同上 | implemented | implemented |
-| pointer lineage | `_product_data_source` | 同上 | implemented | implemented |
+| pointer lineage（真实血缘） | `evaluate_governance` → `_product_lineage`（run_id/publication_id/pointer_data_run_id/source_core_run_id/algorithm_version/coverage/reason_code） | 同上（已扩展断言真实字段） | local_static_verified + local_unit_verified | implemented（已修正：原仅返回来源类型字符串） |
 | degraded reasons | closure.issues | 同上 | implemented | implemented |
 | admin readiness API | `GET /v1/admin/readiness/{trade_date}` | — | implemented | implemented |
 | governance API | 同一端点内嵌 governance DTO | 同上 | implemented | implemented |
@@ -87,12 +94,11 @@
 
 | Requirement | 实现文件/函数 | 测试 | 证据等级 | 状态 |
 |---|---|---|---|---|
-| 编排纯逻辑 E2E | `SyntheticAuctionRepository` | `test_v21_synthetic_e2e_pure.py` | remote_static_verified + remote_unit_verified | implemented |
+| 编排 E2E（service-level） | `SyntheticStateRepository` + 真实 `evaluate_closure`/`evaluate_governance`/`decide_auction_mode` | `test_v21_synthetic_e2e_pure.py`（6 项，已重写） | local_static_verified + local_unit_verified | implemented（已修正：原仅为纯函数单测，非真实编排 E2E） |
 | synthetic repository / fake session | 同上 | 同上 | implemented | implemented |
-| failure matrix / retry / recovery | 同上 | 同上 | implemented | implemented |
-| 晚到 chip / structure_only→hybrid→composite | 同上 | 同上 | implemented | implemented |
-| performance instrumentation | 同上 | 同上 | implemented | implemented |
-| contract tests / allowlist / architecture checks | — | — | remote_static_verified | implemented |
+| closure transition / late chip 升级 / failure matrix | 同上 | 同上 | implemented | implemented |
+| retry 幂等 / 真实 lineage 字段 / auction mode 分支 | 同上 | 同上 | implemented | implemented |
+| contract tests / allowlist / architecture checks | — | — | local_static_verified | implemented |
 | PG 依赖项目 | `test_v21_synthetic_e2e_pg.py` | — | `authored_not_executed`（`pg_gate_deferred_during_development`） | 不阻塞 Commit J |
 
 ## Commit J — 文档与运行手册
@@ -110,8 +116,10 @@
 
 ## 优先级与状态汇总
 
-- `implemented`：Commit D–J 全部完成（state event confirmed 与 PG 依赖项除外）。
-- `remote_static_verified = true`、`remote_unit_verified = true`、`frontend_build_verified = true`。
+- `development_chain_D_to_J = partial`（非 completed）。本轮 Completion Pass 已补齐 D 生产接线、
+  G 真实 lineage、H 构建验证、I 真实 E2E，但以下仍为空：
+- `local_static_verified = true`（Ruff + 改动文件 Mypy 通过，Mypy 既有 2 处 market_review.py 错误与本轮无关）、
+  `local_unit_verified = true`（40 项纯单元通过）、`frontend_build_verified = true`（tsc+ESLint+vite build 通过）。
 - `pg_tested = false`、`pg_gate = deferred`；`migration_085_applied = false`。
 - `deployed = false`、`runtime_verified = false`、`data_closed = false`、
   `browser_verified = false`、`production_fully_ready = false`。
@@ -122,3 +130,4 @@
 2. Migration 085 apply——授权后执行。
 3. 真实全市场任务、生产部署、浏览器验收——授权后执行。
 4. state event candidate → confirmed 的独立实现/测试依赖 PG，标记 authored。
+5. 远程 CI 验证（远程 active workers 期间未连库，本轮为本地验证，非远程 proof）。

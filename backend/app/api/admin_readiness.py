@@ -43,8 +43,12 @@ router = APIRouter(
 )
 
 
-def _to_dto(state, data_source: str) -> ProductReadinessDTO:
-    """将 ProductReadinessState 映射为 API DTO。"""
+def _to_dto(state, lineage: dict) -> ProductReadinessDTO:
+    """将 ProductReadinessState 映射为 API DTO。
+
+    [G 修正] 直接透传真实 lineage dict（run_id/publication_id/pointer_data_run_id/
+    source_core_run_id/algorithm_version/coverage/reason_code），而非字符串来源类型。
+    """
     return ProductReadinessDTO(
         product=state.product,
         readiness=state.readiness,
@@ -52,7 +56,8 @@ def _to_dto(state, data_source: str) -> ProductReadinessDTO:
         isMandatory=state.is_mandatory,
         isTerminal=state.is_terminal,
         isConsumable=state.is_consumable,
-        dataSource=data_source,
+        dataSource=lineage.get("source_type", "unknown"),
+        lineage=lineage,
     )
 
 
@@ -97,9 +102,9 @@ async def get_product_readiness_endpoint(
     closure = evaluate_closure(states)
     governance = evaluate_governance(states, closure)
 
-    # 组装产品明细（含 data source lineage）
+    # 组装产品明细（含真实 lineage 血缘）
     products = [
-        _to_dto(state, governance.pointer_lineage.get(state.product, "run_status"))
+        _to_dto(state, governance.pointer_lineage.get(state.product, {}))
         for state in states
     ]
 
