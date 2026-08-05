@@ -40,7 +40,6 @@ from app.domain_status import (
 )
 from app.services.auction_mode_service import decide_auction_mode
 
-
 # =============================================================================
 # Synthetic repository
 # =============================================================================
@@ -346,14 +345,14 @@ class TestRetryAndIdempotency:
         def _flaky(**kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise _TransientFailure("transient timeout")
+                raise _TransientFailureError("transient timeout")
             return real(**kwargs)
 
         import app.services.auction_mode_service as ams
         monkeypatch.setattr(ams, "decide_auction_mode", _flaky)
 
         # 第一次调度抛瞬时异常
-        with pytest.raises(_TransientFailure):
+        with pytest.raises(_TransientFailureError):
             repo.next_batch()
 
         # 重试：同一状态再次调度 → 成功
@@ -377,7 +376,7 @@ class TestRetryAndIdempotency:
         assert [p.seq for p in repo.publications].count(existing_seq) == 1
 
 
-class _TransientFailure(Exception):
+class _TransientFailureError(Exception):
     """synthetic 瞬态失败（重试应恢复）。"""
 
 
