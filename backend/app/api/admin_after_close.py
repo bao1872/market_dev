@@ -54,10 +54,6 @@ from app.services.after_close_orchestrator import (
     reconcile_after_close_run,
     retry_after_close_run,
 )
-# [CP3] restart boundary 枚举单一真源，避免 API 层与 service 层枚举漂移。
-from app.services.granular_restart_service import (
-    ALL_BOUNDARIES as _ALL_RESTART_BOUNDARIES,
-)
 from app.services.after_close_pipeline_service import (
     create_pipeline_run,
     get_latest_pipeline,
@@ -65,6 +61,11 @@ from app.services.after_close_pipeline_service import (
     list_pipeline_runs,
 )
 from app.services.calendar_service import is_trading_day_async
+
+# [CP3] restart boundary 枚举单一真源，避免 API 层与 service 层枚举漂移。
+from app.services.granular_restart_service import (
+    ALL_BOUNDARIES as _ALL_RESTART_BOUNDARIES,
+)
 from app.services.job_run_event_service import list_events
 
 logger = logging.getLogger("admin_after_close")
@@ -667,14 +668,10 @@ async def force_advance_after_close_endpoint(
         HTTPException 400: 任务非盘后编排或 restart_from 值非法
         HTTPException 409: restart_from="daily_ready" 但覆盖率不足
     """
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
 
     from app.models.scheduler_job_run import SchedulerJobRun
     from app.services.after_close_orchestrator import (
-        _ORCHESTRATOR_LEASE_SECONDS,
         _parse_metadata,
-        _update_orchestrator_status,
     )
 
     # 校验 restart_from 取值

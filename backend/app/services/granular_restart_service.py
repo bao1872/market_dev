@@ -60,7 +60,7 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 from sqlalchemy import select
@@ -508,7 +508,7 @@ async def _handle_dsa_projection(
         # run 未持久化 parameter_hash 时，按 run 的算法版本 + 配置派生（与 core 计算同源）
         parameter_hash = CoreRunContext(
             trade_date=_as_date(trade_date),
-            run_calculated_at=core_run.started_at or datetime.now(timezone.utc),
+            run_calculated_at=core_run.started_at or datetime.now(UTC),
             algorithm_versions=dict(algorithm_versions),
             config=run_meta.get("config") or {},
             run_id=source_core_run_id,
@@ -1036,7 +1036,7 @@ async def dispatch_restart(
     # 子产品：本调用内同步执行真实重建 / 发布。
     try:
         child.status = "running"
-        child.started_at = datetime.now(timezone.utc)
+        child.started_at = datetime.now(UTC)
         await db.flush()
         target_run_id = await handler(
             db,
@@ -1048,7 +1048,7 @@ async def dispatch_restart(
             attempt=attempt,
         )
         child.status = "succeeded"
-        child.finished_at = datetime.now(timezone.utc)
+        child.finished_at = datetime.now(UTC)
         child_meta = json.loads(child.metadata_json or "{}")
         child_meta["target_run_id"] = str(target_run_id) if target_run_id else None
         child.metadata_json = json.dumps(child_meta, ensure_ascii=False)
@@ -1066,7 +1066,7 @@ async def dispatch_restart(
         )
     except Exception as exc:  # 真实 lineage/pointer 缺失等：记录真实原因，不 501、不伪造成功
         child.status = "failed"
-        child.finished_at = datetime.now(timezone.utc)
+        child.finished_at = datetime.now(UTC)
         child.error_code = "granular_restart_failed"
         child.error_message = f"{type(exc).__name__}: {exc}"
         await append_event(
