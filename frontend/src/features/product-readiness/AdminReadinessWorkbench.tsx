@@ -12,9 +12,10 @@ import { useState } from 'react'
 import { useAdminProductReadiness } from '@/hooks/useApi'
 
 // 闭包状态 → pill 颜色映射（与全局 status-pill 一致）
+// [CHANGE-20260806-005 / Phase 4 / 六态] 新增 mandatory_ready_enhancing。
 function closurePill(closure: string): string {
   if (closure === 'fully_ready') return 'ok'
-  if (closure === 'core_ready' || closure === 'degraded_ready') return 'warn'
+  if (closure === 'core_ready' || closure === 'mandatory_ready_enhancing' || closure === 'degraded_ready') return 'warn'
   if (closure === 'blocked') return 'off'
   return 'muted'
 }
@@ -24,6 +25,7 @@ function closureText(closure: string): string {
     pending: '待处理',
     blocked: '阻塞',
     core_ready: '核心就绪',
+    mandatory_ready_enhancing: '核心就绪·增强推进中',
     degraded_ready: '降级就绪',
     fully_ready: '完全就绪',
   }

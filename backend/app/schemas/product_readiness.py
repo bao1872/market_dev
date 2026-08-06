@@ -132,19 +132,28 @@ class GovernanceReportDTO(BaseModel):
 class ProductReadinessResponse(BaseModel):
     """GET /api/v1/admin/readiness/{trade_date} 响应。
 
-    - closure: 闭包状态（pending/blocked/core_ready/degraded_ready/fully_ready）
+    [CHANGE-20260806-005 / Phase 4 / 六态] 显式返回闭包判定所需全部字段，前端禁止
+    按时间/空值/颜色猜测 readiness：
+    - closure / productionClosure: 闭包状态（六态：pending/blocked/core_ready/
+      mandatory_ready_enhancing/degraded_ready/fully_ready）。productionClosure 为
+      面向生产的别名，closure 保留向后兼容。
     - mandatoryProductsReady: 全部 mandatory 产品可消费
     - mandatoryProductsFullyFresh: 全部 mandatory 产品 fully fresh
     - enhancementJobsTerminal: 全部 enhancement 产品已达终态
+    - allProductsReady: 全部九节点产品可消费（fully_ready 的充要信号）
+    - unreconciledChildren: 父任务下未对账（非终态）的增强子任务数（mandatory_ready_enhancing 依据）
     - products: 九节点就绪明细
     - governance: 治理报告
     """
 
     tradeDate: str = Field(..., description="业务交易日（ISO YYYY-MM-DD）")
-    closure: str = Field(..., description="闭包状态")
+    closure: str = Field(..., description="闭包状态（六态）")
+    productionClosure: str = Field(..., description="面向生产的闭包状态别名（= closure）")
     mandatoryProductsReady: bool = Field(False)
     mandatoryProductsFullyFresh: bool = Field(False)
     enhancementJobsTerminal: bool = Field(False)
+    allProductsReady: bool = Field(False)
+    unreconciledChildren: int = Field(0)
     products: list[ProductReadinessDTO] = Field(default_factory=list)
     governance: GovernanceReportDTO = Field(default_factory=GovernanceReportDTO)
 
@@ -154,9 +163,12 @@ if __name__ == "__main__":
     resp = ProductReadinessResponse(
         tradeDate="2026-08-05",
         closure="fully_ready",
+        productionClosure="fully_ready",
         mandatoryProductsReady=True,
         mandatoryProductsFullyFresh=True,
         enhancementJobsTerminal=True,
+        allProductsReady=True,
+        unreconciledChildren=0,
         products=[
             ProductReadinessDTO(
                 product="stock_core",

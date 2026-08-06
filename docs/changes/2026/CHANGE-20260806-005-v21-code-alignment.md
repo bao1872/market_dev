@@ -29,7 +29,7 @@ Phase 1–5 的主要代码合同收口已在 CP4A Pass1 落地（详见 `docs/c
 - `core_compute_once` = `implemented`（Phase 1：六类 kernel 独立计数在真实调用点、CoreRunContext 冻结 run_mode/source_cutoff/完整 config、artifact schema_version）
 - `stock_core_atomic_publication` = `implemented`（Phase 2：唯一入口 publish_stock_core_atomically + 真实 fencing + coverage SSOT 修复 + partial unique 原子事务）
 - `chip_run_level_15m` = `implemented_partial`（Phase 3：已新增运行级 refresh coordinator + 八个 canonical reason code + FUTURE_DATA/TIMESTAMP_INVALID；**剩余缺口**：每股 ChipConsensusRunItem 状态机接线、MDAS 15m 批读未实现，逐股仍 get_bars）
-- `closure_six_states` = `implemented_partial`（需 Phase 4 补齐）
+- `closure_six_states` = `implemented`（Phase 4：六态 closed、后端 DTO productionClosure/allProductsReady/unreconciledChildren、前端枚举/ViewModel/状态文案）
 - `seed_real_producers_only` = `implemented_partial`（需 Phase 5 核验）
 - `code_ready` = `false`
 - `remote_pg_verified` = `false`

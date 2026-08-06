@@ -92,9 +92,14 @@ ALL_ANCHOR_MODES = frozenset({
 })
 
 # ===== production closure（product readiness 聚合）=====
+# [CHANGE-20260806-005 / Phase 4 / 六态] 在 core_ready 与 degraded_ready 之间新增
+# mandatory_ready_enhancing：mandatory 产品已就绪，但 enhancement 产品未全部就绪。
+# 固定判定顺序：blocked → pending → core_ready → mandatory_ready_enhancing →
+# degraded_ready → fully_ready。
 CLOSURE_PENDING = "pending"
 CLOSURE_BLOCKED = "blocked"
 CLOSURE_CORE_READY = "core_ready"
+CLOSURE_MANDATORY_READY_ENHANCING = "mandatory_ready_enhancing"
 CLOSURE_DEGRADED_READY = "degraded_ready"
 CLOSURE_FULLY_READY = "fully_ready"
 
@@ -102,6 +107,7 @@ ALL_CLOSURE = frozenset({
     CLOSURE_PENDING,
     CLOSURE_BLOCKED,
     CLOSURE_CORE_READY,
+    CLOSURE_MANDATORY_READY_ENHANCING,
     CLOSURE_DEGRADED_READY,
     CLOSURE_FULLY_READY,
 })

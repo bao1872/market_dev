@@ -38,6 +38,7 @@ from app.domain_status import (
     CLOSURE_CORE_READY,
     CLOSURE_DEGRADED_READY,
     CLOSURE_FULLY_READY,
+    CLOSURE_MANDATORY_READY_ENHANCING,
     CLOSURE_PENDING,
     READINESS_BLOCKED,
     READINESS_DEGRADED,
@@ -168,13 +169,15 @@ def evaluate_closure(
 ) -> ClosureEvaluation:
     """评估一次产品 ready 集合的闭包状态（E08-T02/T03 修正版）。
 
-    [P0-4] 分阶段、以 stock_core 为轴心的判定顺序：
+    [P0-4 / CHANGE-20260806-005 Phase 4] 分阶段、以 stock_core 为轴心的**六态**判定顺序：
         1. blocked：任一 mandatory 产品 unavailable/blocked
         2. pending：stock_core 尚未形成（不可消费）
         3. core_ready：stock_core 可消费，但 board/review 等其他 mandatory 尚未完成
-        4. mandatory 全部可消费：
-           - fully fresh 且 enhancement 全部终态 → fully_ready
-           - 否则 → degraded_ready
+        4. mandatory_ready_enhancing：mandatory 全部可消费，但 enhancement 尚未全部终态
+           （增强任务仍在运行/pending）——核心已就绪、增强推进中
+        5. degraded_ready：mandatory 全部可消费，但存在非 fully fresh 或
+           enhancement 已终态但未真正就绪（chip partial / auction structure_only 等）
+        6. fully_ready：mandatory 全部 fully fresh 且 enhancement 全部真正就绪 + auction composite
 
     [P0-3] enhancement 终态用 is_terminal，而非 is_consumable，
     避免 chip 失败后永久表现为"仍在运行"。
@@ -240,6 +243,18 @@ def evaluate_closure(
             mandatory_products_ready=False,
             mandatory_products_full_fresh=False,
             enhancement_jobs_terminal=_enhancement_terminal(enhancement),
+            issues=issues,
+        )
+
+    # 3.5 [CHANGE-20260806-005 / Phase 4 / 六态] mandatory_ready_enhancing：
+    #     mandatory 全部可消费，但 enhancement 尚未全部终态（增强任务仍 running/pending）。
+    #     这是 core_ready 与 degraded_ready 之间的中间态：核心已就绪、增强推进中。
+    if not _enhancement_terminal(enhancement):
+        return ClosureEvaluation(
+            closure=CLOSURE_MANDATORY_READY_ENHANCING,
+            mandatory_products_ready=True,
+            mandatory_products_full_fresh=all(p.is_fully_fresh for p in mandatory),
+            enhancement_jobs_terminal=False,
             issues=issues,
         )
 

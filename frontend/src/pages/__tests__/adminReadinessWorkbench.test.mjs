@@ -74,6 +74,19 @@ test('展示闭包状态 + mandatory freshness 标志', () => {
   assert.ok(src.includes('enhancementJobsTerminal'), '必须展示增强任务终态')
 })
 
+// ===== 4b. [Phase 4] 六态闭包：mandatory_ready_enhancing 必须有明确文案 =====
+test('六态闭包：mandatory_ready_enhancing 有明确文案', () => {
+  const src = readSource(WORKBENCH_PATH)
+  assert.ok(
+    src.includes('mandatory_ready_enhancing'),
+    '必须覆盖 mandatory_ready_enhancing 闭包态',
+  )
+  assert.ok(
+    src.includes('核心就绪·增强推进中'),
+    'mandatory_ready_enhancing 必须有中文文案',
+  )
+})
+
 // ===== 5. 展示治理报告 =====
 test('展示治理报告（lineage/stale/unmatched/degraded）', () => {
   const src = readSource(WORKBENCH_PATH)

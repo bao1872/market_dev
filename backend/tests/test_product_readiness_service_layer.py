@@ -31,6 +31,7 @@ from app.domain_status import (
     CLOSURE_CORE_READY,
     CLOSURE_DEGRADED_READY,
     CLOSURE_FULLY_READY,
+    CLOSURE_MANDATORY_READY_ENHANCING,
     CLOSURE_PENDING,
     READINESS_PENDING,
     READINESS_READY,
@@ -418,11 +419,15 @@ async def test_review_pointer_present_ready():
 
 
 async def test_dsa_lineage_mismatch_not_ready():
-    """[Corrective-3.1 §P1] 当日有投影但均不归属当前 core run → degraded_ready，不得 fully_ready。"""
+    """[Corrective-3.1 §P1 / Phase 4] 当日有投影但均不归属当前 core run → 非 fully_ready。
+
+    dsa_projection lineage mismatch → 非 terminal 非 ready → enhancement 未全部终态，
+    六态下为 mandatory_ready_enhancing（核心就绪、增强推进中），不得 fully_ready。
+    """
     plan = _full_plan()
     plan["dsa_counts"] = (10, 0)                 # total>0, matched=0
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_MANDATORY_READY_ENHANCING
 
 
 async def test_dsa_exact_match_ready():
@@ -434,12 +439,16 @@ async def test_dsa_exact_match_ready():
 
 
 async def test_state_events_lineage_mismatch_not_ready():
-    """[Corrective-3.1 §P1] 当日有事件但均不归属当前 core run → degraded_ready，不得 fully_ready。"""
+    """[Corrective-3.1 §P1 / Phase 4] 当日有事件但均不归属当前 core run → 非 fully_ready。
+
+    state_events lineage mismatch → 非 terminal 非 ready → enhancement 未全部终态，
+    六态下为 mandatory_ready_enhancing，不得 fully_ready。
+    """
     plan = _full_plan()
     # 事件存在但与当前 core run 不匹配（source_run_id 不同）
     plan["state_event_rows"] = [("candidate", "old_run_id", 5)]
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_MANDATORY_READY_ENHANCING
 
 
 async def test_state_events_exact_match_ready():

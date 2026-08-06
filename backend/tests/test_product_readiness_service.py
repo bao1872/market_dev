@@ -17,11 +17,12 @@ from app.domain_status import (
     CLOSURE_CORE_READY,
     CLOSURE_DEGRADED_READY,
     CLOSURE_FULLY_READY,
+    CLOSURE_MANDATORY_READY_ENHANCING,
     CLOSURE_PENDING,
+    READINESS_DEGRADED,
     READINESS_PENDING,
     READINESS_READY,
     READINESS_READY_REUSED,
-    READINESS_DEGRADED,
     READINESS_UNAVAILABLE,
 )
 from app.services.product_readiness_service import (
@@ -144,14 +145,15 @@ def test_degraded_ready_when_board_reused():
 
 
 def test_enhancement_not_terminal_degrades():
-    """P0-3：enhancement（chip）未 terminal → 非 fully_ready（degraded_ready）。"""
+    """[Phase 4] enhancement（chip）未 terminal → mandatory_ready_enhancing（新六态中间态）。"""
     products = list(_MANDATORY.values())
     products.append(
         ProductReadinessState("chip", READINESS_PENDING, is_mandatory=False, is_terminal=False),
     )
     ev = evaluate_closure(products)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_MANDATORY_READY_ENHANCING
     assert ev.enhancement_jobs_terminal is False
+    assert ev.mandatory_products_ready is True
 
 
 def test_failed_enhancement_is_terminal_and_does_not_block():

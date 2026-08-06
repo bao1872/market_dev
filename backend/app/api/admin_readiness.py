@@ -118,12 +118,23 @@ async def get_product_readiness_endpoint(
         for state in states
     ]
 
+    # [CHANGE-20260806-005 / Phase 4 / 六态] allProductsReady = 全部九节点可消费；
+    # unreconciledChildren 取父任务下未对账增强子任务数（mandatory_ready_enhancing 依据）。
+    all_ready = all(s.is_consumable for s in states) if states else False
+    unreconciled = (
+        governance.scheduler.unreconciled_children
+        if governance.scheduler is not None
+        else 0
+    )
     return ProductReadinessResponse(
         tradeDate=trade_date_obj.isoformat(),
         closure=closure.closure,
+        productionClosure=closure.closure,
         mandatoryProductsReady=closure.mandatory_products_ready,
         mandatoryProductsFullyFresh=closure.mandatory_products_full_fresh,
         enhancementJobsTerminal=closure.enhancement_jobs_terminal,
+        allProductsReady=all_ready,
+        unreconciledChildren=unreconciled,
         products=products,
         governance=GovernanceReportDTO(
             pointerLineage=governance.pointer_lineage,

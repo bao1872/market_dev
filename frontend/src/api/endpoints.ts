@@ -2764,12 +2764,17 @@ export interface GovernanceReport {
 }
 
 /** ProductReadiness 响应（GET /v1/admin/readiness/{trade_date}） */
+// [CHANGE-20260806-005 / Phase 4 / 六态] 新增 productionClosure / allProductsReady /
+// unreconciledChildren；前端只按 DTO 字段展示，禁止猜 readiness。
 export interface ProductReadinessResponse {
   tradeDate: string
   closure: string
+  productionClosure: string
   mandatoryProductsReady: boolean
   mandatoryProductsFullyFresh: boolean
   enhancementJobsTerminal: boolean
+  allProductsReady: boolean
+  unreconciledChildren: number
   products: ProductReadinessItem[]
   governance: GovernanceReport
 }
