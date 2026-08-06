@@ -292,7 +292,7 @@ async def mark_item_succeeded(
     result = await session.execute(stmt)
     # 检查 rowcount（SQLAlchemy 2.0 返回 Result，需要 rowcount 属性）
     # 使用 fetchall 避免兼容性问题
-    return result.rowcount > 0  # type: ignore[union-attr]
+    return result.rowcount > 0  # type: ignore[attr-defined]
 
 
 async def mark_item_failed(
@@ -349,7 +349,7 @@ async def mark_item_failed(
         )
 
     result = await session.execute(stmt)
-    return result.rowcount > 0  # type: ignore[union-attr]
+    return result.rowcount > 0  # type: ignore[attr-defined]
 
 
 async def mark_item_skipped(
@@ -393,7 +393,7 @@ async def mark_item_skipped(
         )
 
     result = await session.execute(stmt)
-    return result.rowcount > 0  # type: ignore[union-attr]
+    return result.rowcount > 0  # type: ignore[attr-defined]
 
 
 async def get_run_progress(
@@ -523,7 +523,7 @@ async def recover_stale_running_items(
         )
     )
     result = await session.execute(stmt)
-    count = result.rowcount  # type: ignore[union-attr]
+    count = result.rowcount  # type: ignore[attr-defined]
     if count and count > 0:
         logger.info(
             "[RunItems] 恢复 %d 个 lease 过期 running items 为 pending: "

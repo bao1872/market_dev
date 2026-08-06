@@ -1086,7 +1086,7 @@ if __name__ == "__main__":
     for model_name, expected_set in _expected_uq.items():
         model_cls = next(m for _, m in _models if m.__name__ == model_name)
         actual_uq = {
-            c.name for c in model_cls.__table__.constraints
+            c.name for c in model_cls.__table__.constraints  # type: ignore[attr-defined]
             if c.name and c.name.startswith("uq_")
         }
         missing = expected_set - actual_uq
@@ -1115,7 +1115,7 @@ if __name__ == "__main__":
     for model_name, expected_set in _expected_checks.items():
         model_cls = next(m for _, m in _models if m.__name__ == model_name)
         actual_checks = {
-            c.name for c in model_cls.__table__.constraints
+            c.name for c in model_cls.__table__.constraints  # type: ignore[attr-defined]
             if c.name and c.name.endswith("_check")
         }
         missing = expected_set - actual_checks

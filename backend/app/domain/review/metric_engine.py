@@ -174,7 +174,7 @@ def _derive_scope_return_1d(flat_list: list[dict[str, Any]]) -> float | None:
     n = len(returns)
     if n % 2 == 1:
         return returns[n // 2]
-    return (returns[n // 2 - 1] + returns[n // 2]) / 2.0
+    return (returns[n // 2 - 1] + returns[n // 2]) / 2.0  # type: ignore[operator, index]
 
 
 def _derive_advance_ratio(flat_list: list[dict[str, Any]]) -> float | None:
@@ -439,13 +439,13 @@ def _derive_non_head_participation_ratio(
     ]
     if not valid:
         return None
-    valid.sort(key=lambda x: x[1], reverse=True)
+    valid.sort(key=lambda x: x[1], reverse=True)  # type: ignore[arg-type, return-value]
     n = len(valid)
     head_count = max(1, int(n * 0.3))
     non_head = valid[head_count:]
     if not non_head:
         return None
-    up = sum(1 for _, chg in non_head if chg > 0)
+    up = sum(1 for _, chg in non_head if chg > 0)  # type: ignore[misc, operator]
     return up / len(non_head)
 
 
@@ -511,7 +511,7 @@ def _derive_top5_contribution(flat_list: list[dict[str, Any]]) -> float | None:
     ]
     if not changes:
         return None
-    abs_changes = [(f, abs(chg)) for f, chg in changes]
+    abs_changes = [(f, abs(chg)) for f, chg in changes]  # type: ignore[arg-type]
     abs_changes.sort(key=lambda x: x[1], reverse=True)
     top5 = abs_changes[:5]
     total = sum(c for _, c in abs_changes)
@@ -558,7 +558,7 @@ def _derive_member_change_hhi(flat_list: list[dict[str, Any]]) -> float | None:
     ]
     if not changes:
         return None
-    abs_changes = [abs(c) for c in changes]
+    abs_changes = [abs(c) for c in changes]  # type: ignore[arg-type]
     total = sum(abs_changes)
     if total < _EPSILON:
         return None
@@ -583,8 +583,8 @@ def _derive_leader_median_diff(flat_list: list[dict[str, Any]]) -> float | None:
     if n % 2 == 1:
         median = changes[n // 2]
     else:
-        median = (changes[n // 2 - 1] + changes[n // 2]) / 2.0
-    return top1 - median
+        median = (changes[n // 2 - 1] + changes[n // 2]) / 2.0  # type: ignore[operator, index]
+    return top1 - median  # type: ignore[operator]
 
 
 def _derive_top5_amount_contribution(
@@ -599,10 +599,10 @@ def _derive_top5_amount_contribution(
     if len(amounts) < 5:
         return None
     amounts.sort(key=lambda x: x[1] if x[1] is not None else 0, reverse=True)
-    total = sum(a for _, a in amounts)
+    total = sum(a for _, a in amounts)  # type: ignore[misc]
     if total < _EPSILON:
         return None
-    return sum(a for _, a in amounts[:5]) / total
+    return sum(a for _, a in amounts[:5]) / total  # type: ignore[misc]
 
 
 def _derive_volume_expansion_ratio(
@@ -780,7 +780,7 @@ def _compute_component_raw(
         return None
     src = spec.field_source
     ready = 0
-    matched = 0
+    matched = 0.0
     for f in flat_list:
         val = f.get(src)
         if val is None:

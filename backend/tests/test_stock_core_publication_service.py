@@ -188,6 +188,11 @@ def test_orchestrator_wires_atomic_publication_service() -> None:
     assert "publish_stock_core(" not in src, (
         "orchestrator 不应再调用旧 publish_stock_core（two-phase）"
     )
+    # [P0-C] 正常链只保留一个 run 状态 owner（原子发布服务）；不应再有内联 phase-2 run-mark
+    # （publishing 步骤内独立调 finish_snapshot_run 标记 succeeded）
+    assert "Only mark snapshot succeeded" not in src, (
+        "正常链不应再有独立的 phase-2 run-mark 注释/逻辑"
+    )
 
 
 @pytest.mark.asyncio

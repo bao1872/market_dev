@@ -24,7 +24,7 @@ import json
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 # ===== 版本常量（集中治理，避免各处字符串漂移）=====
 DSA_ALGORITHM_VERSION = "dsa-v1"
@@ -337,7 +337,7 @@ async def resolve_core_run_context(
     *,
     trade_date: date,
     snapshot_run_id: Any,
-    eligible_instrument_ids: list[Any],
+    eligible_instrument_ids: Sequence[Any],
     run_calculated_at: datetime | None = None,
     resolver: ReleasedConfigResolver | None = None,
     execution_contract_version: str = CORE_EXECUTION_CONTRACT_VERSION,
