@@ -23,6 +23,7 @@ Create Date: 2026-08-06
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers
@@ -33,7 +34,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
     # 1. factor_publications 增加 supersede / fencing 列
     op.add_column(
         "factor_publications",
