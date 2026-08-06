@@ -302,6 +302,9 @@ def check(root: Path) -> list[str]:
     ):
         if signal not in verify_compose_text:
             errors.append(f"verification compose missing contract signal: {signal}")
+    verify_test_section = verify_compose_text.split("  verify-test:", 1)
+    if len(verify_test_section) != 2 or "MIGRATION_DATABASE_URL:" not in verify_test_section[1]:
+        errors.append("verification compose verify-test missing MIGRATION_DATABASE_URL")
     for token in ("down -v", '"down", "-v"', "--rmi", "docker cp", "pip install"):
         if token in verify_cleanup_code or token in verify_runner_code or token in verify_entry_code:
             errors.append(f"forbidden verification implementation: {token}")

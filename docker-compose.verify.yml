@@ -203,6 +203,7 @@ services:
       - /etc/market-dev/config.production.py:/app/config.production.py:ro
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL (bz_stock_verify_<sha>) is required}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: verification

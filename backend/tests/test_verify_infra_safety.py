@@ -176,6 +176,12 @@ def test_alembic_prefers_dedicated_sync_migration_url() -> None:
     assert 'os.environ.get("MIGRATION_DATABASE_URL")' in source
 
 
+def test_verify_test_receives_sync_migration_url() -> None:
+    compose = (_VERIFY_DIR.parents[1] / "docker-compose.verify.yml").read_text()
+    verify_test = compose.split("  verify-test:", 1)[1]
+    assert "MIGRATION_DATABASE_URL:" in verify_test
+
+
 def test_cleanup_source_never_uses_volume_delete() -> None:
     source = (_VERIFY_DIR / "cleanup_runner.py").read_text()
     assert '"down", "-v"' not in source

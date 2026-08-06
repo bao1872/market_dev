@@ -21,6 +21,8 @@ Migration、PG、Seed 和 closure E2E 都由一次性 `verify-test` 运行。治
 首次远程 attempt 在 Migration gate 暴露 asyncpg URL 被同步 Alembic engine 使用，触发
 `MissingGreenlet`。cleanup 已确认数据库、容器、网络和敏感文件均归零。修复为验证环境同时生成
 异步 `DATABASE_URL` 与同步 `MIGRATION_DATABASE_URL`，Alembic 明确优先后者；该失败证据不计入新 SHA。
+第二次 attempt 发现该变量误配到 backend 而未注入 `verify-test`；cleanup 同样完整归零。现已修正
+Compose 服务作用域，并将治理检查升级为 `verify-test.environment` 定点断言。
 
 ## 数据、验证与风险
 
