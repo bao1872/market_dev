@@ -2977,7 +2977,10 @@ async def execute_after_close_run(
                                     coverage_ratio=cov_data["coverage"],
                                     worker_id=worker_id or "scheduled",
                                     lease_epoch=_lease_epoch,
-                                    eligible_count=cov_data.get("expected_count", 0),
+                                    # [CHANGE-20260806-005 / Phase 2] coverage SSOT：compute_coverage
+                                    # 返回键为 "expected"（DB RunItem 统计），非 "expected_count"。
+                                    # 旧用 cov_data.get("expected_count", 0) 恒为 0 → quality gate 被绕过。
+                                    eligible_count=cov_data.get("expected", 0),
                                 )
                                 await pub_db.commit()
                                 logger.info(

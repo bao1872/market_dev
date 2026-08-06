@@ -157,7 +157,13 @@ async def publish_stock_core(
     threshold: float = CORE_PUBLICATION_MIN_COVERAGE,
     metadata: dict[str, Any] | None = None,
 ) -> FactorPublication:
-    """检查覆盖率门禁后原子切换 stock_core publication pointer。
+    """[LEGACY] 检查覆盖率门禁后切换 stock_core publication pointer。
+
+    [CHANGE-20260806-005 / Phase 2] 本函数为**旧 two-phase 发布**，不写 supersede 历史、
+    不审计、无 fencing。生产 scheduled 路径已统一到唯一原子入口
+    `app.services.stock_core_publication_service.publish_stock_core_atomically`
+    （quality gate + fencing + pointer + supersede + run 标记 + audit 同事务）。
+    本函数仅保留供向后兼容测试（test_incremental_publication）使用，生产代码**不得**调用。
 
     流程：
     1. 计算 coverage（如未传入）

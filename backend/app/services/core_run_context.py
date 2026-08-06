@@ -231,7 +231,7 @@ class CoreComputationArtifact:
     algorithm_versions: dict[str, str] = field(default_factory=dict)
     # [CHANGE-20260806-005 / Phase 1 / PC-11] artifact schema 版本：encode/decode 需无损
     # round-trip，schema 版本用于未来兼容演进。
-    schema_version: str = field(default=CORE_ARTIFACT_SCHEMA_VERSION)
+    schema_version: int = field(default=CORE_ARTIFACT_SCHEMA_VERSION)
 
     @property
     def is_available(self) -> bool:

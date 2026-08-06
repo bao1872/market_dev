@@ -75,6 +75,14 @@ def _mock_review_phase_boundary():
             "app.services.review_publication_service.get_published_review_run_id",
             new=AsyncMock(return_value=fake_review_run.id),
         ),
+        # [CHANGE-20260806-005 / Phase 2] 生产 orchestrator 用原子发布服务
+        # `publish_stock_core_atomically`（唯一入口）。模块级 mock 原子发布，
+        # 避免真实 quality gate 依赖 DB count 查询；stock_core 原子合同由
+        # tests/test_stock_core_publication_service.py 专门覆盖。
+        patch(
+            "app.services.stock_core_publication_service.publish_stock_core_atomically",
+            new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+        ),
     ):
         yield
 
