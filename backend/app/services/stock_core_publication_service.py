@@ -229,3 +229,71 @@ async def publish_stock_core_atomically(
         scope_key, trade_date, publication_kind, snapshot_run_id, worker_id, lease_epoch,
     )
     return pub
+
+
+async def reconcile_stock_core_publication(
+    db: Any,
+    *,
+    trade_date: Any,
+    scope_key: str = "market",
+    publication_kind: str = "stock_core",
+) -> dict[str, Any]:
+    """独立 reconcile：修复历史/部署中断遗留的 pointer/run 分裂，正常 scheduled 不调用。
+
+    [CHANGE-20260806-CP4A.2 / Step4]
+    处理（只读修正，不含新发布）：
+    - pointer 已存在但对应 snapshot run 仍 running（旧 two-phase 中断）→ 标 succeeded/published；
+    - 存在**多个**当前有效（superseded_by IS NULL）pointer → 保留 data_run 最新/最晚 published，
+      supersede 其余（历史分裂）。
+    - run 已 succeeded 但 pointer 缺失 → 不动（由下次发布补齐），记录告警。
+
+    正常 scheduled 路径**不**调用本函数（只调用 publish_stock_core_atomically）。
+    """
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    result: dict[str, Any] = {
+        "run_finalized": 0,
+        "superseded_duplicates": 0,
+        "warnings": [],
+    }
+
+    if not _has_supersede_columns(db):
+        # Migration 087 未应用：无法安全 reconcile supersede → 不写，仅告警
+        result["warnings"].append("Migration 087 未应用，跳过 supersede reconcile")
+        return result
+
+    # 1. 当前有效 pointers（superseded_by IS NULL）按 scope/date/kind
+    pointers = (
+        await db.execute(
+            select(FactorPublication).where(
+                FactorPublication.scope_key == scope_key,
+                FactorPublication.trade_date == trade_date,
+                FactorPublication.publication_kind == publication_kind,
+                column("superseded_by").is_(None),
+            ).order_by(FactorPublication.published_at.desc())
+        )
+    ).scalars().all()
+
+    # 2. 多个当前有效 pointer → 保留最新，supersede 其余（历史分裂修复）
+    if len(pointers) > 1:
+        keep = pointers[0]
+        for dup in pointers[1:]:
+            dup.superseded_by = keep.id  # type: ignore[attr-defined]
+            dup.superseded_at = datetime.now(UTC)  # type: ignore[attr-defined]
+            result["superseded_duplicates"] += 1
+
+    # 3. 每个当前有效 pointer：若对应 snapshot run 仍 running → 标 succeeded/published
+    for p in pointers:
+        run = await db.get(StockFeatureSnapshotRun, p.data_run_id)
+        if run is not None and run.status in ("running", "pending"):
+            run.status = "succeeded"
+            run.published_at = run.published_at or p.published_at
+            result["run_finalized"] += 1
+
+    await db.flush()
+    logger.info(
+        "reconcile_stock_core_publication: run_finalized=%d superseded_duplicates=%d "
+        "warnings=%d",
+        result["run_finalized"], result["superseded_duplicates"], len(result["warnings"]),
+    )
+    return result

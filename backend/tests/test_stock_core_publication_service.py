@@ -231,3 +231,54 @@ async def test_publish_failure_injection_audit_fails(monkeypatch) -> None:
             lease_epoch=1,
             eligible_count=10,
         )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_finalizes_stale_running_and_supersedes_duplicates(
+    monkeypatch,
+) -> None:
+    """[CP4A.2 Step4] reconcile：历史分裂 pointer→supersede 保留最新；stale running run→succeeded。
+
+    正常 scheduled 不调用 reconcile（只在部署中断/历史遗留后手动触发）。
+    """
+    import app.services.stock_core_publication_service as svc
+
+    monkeypatch.setattr(svc, "_has_supersede_columns", lambda db: True)
+
+    run_id_old, run_id_new = uuid.uuid4(), uuid.uuid4()
+    pointer_old, pointer_new = MagicMock(), MagicMock()
+    pointer_old.data_run_id = run_id_old
+    pointer_old.id = uuid.uuid4()
+    pointer_old.published_at = date(2026, 8, 5)
+    pointer_new.data_run_id = run_id_new
+    pointer_new.id = uuid.uuid4()
+    pointer_new.published_at = date(2026, 8, 6)
+
+    # 两个当前有效 pointer（旧/新）+ 一个 stale running run（新 pointer 对应）
+    pointers = [pointer_new, pointer_old]
+    stale_run = MagicMock()
+    stale_run.status = "running"
+    stale_run.published_at = None
+
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=stale_run)
+
+    async def _execute(stmt):
+        res = MagicMock()
+        # pointers select 返回 [new, old]（按 published_at 降序）
+        res.scalars.return_value.all.return_value = pointers
+        return res
+
+    db.execute = _execute
+    db.flush = AsyncMock()
+
+    result = await svc.reconcile_stock_core_publication(
+        db, trade_date=date(2026, 8, 6),
+    )
+
+    # 保留新 pointer，supersede 旧 pointer（历史分裂修复）
+    assert result["superseded_duplicates"] == 1
+    assert pointer_old.superseded_by == pointer_new.id
+    # stale running run → succeeded（pointer/run 分裂修复）
+    assert result["run_finalized"] == 1
+    assert stale_run.status == "succeeded"
