@@ -4,8 +4,8 @@
 - 计划审计基线：`c2b436a63e236b6319aa41f472a6e29d93c4cddf`（origin/dev，V2.1 完全对齐开发计划基线）
 - 历史诊断候选 SHA：`030e19e4f972d9ff965802d25fa31b233afd1af7`（已作废，仅诊断性证据）
 - 历史候选 SHA：`899f31508c58fcaf329b1e752a6a6dbcb1766b4c`（CP4A Amendment 提交，已并入基线）
-- 目标候选 SHA：`<40-char origin/dev SHA>`（待 Phase 6 本地门禁通过、提交推送后冻结）
-- 验证库：`bz_stock_verify_<target_sha>`（待 Pass 2 创建，隔离，DS-110）
+- 冻结 target_code_sha：`2299e7a7cbbf8c97682adccdd757ea94fa0d5a14`（Phase 6 本地门禁全过，2026-08-06 冻结；Phase 7 远程验证通过后确认候选资格）
+- 验证库：`bz_stock_verify_2299e7a7cbbf8c97682adccdd757ea94fa0d5a14`（待 Pass 2 创建，隔离，DS-110）
 - 约束：每命令前后断言 `current_database()` 为验证库，禁止访问生产库 `bz_stock`；访问 bz_stock 须获得明确授权并证明只读
 - 结论：**按《ref/开发计划.md》Phase 0-7 执行 V2.1 PRD 完全对齐。Phase 1-2 代码合同收口已完成并提交（08cf3dc）；Phase 3 运行级 refresh + 八个 canonical reason code 已完成（待提交）；剩余 Phase 4-5 补齐、Phase 6 本地门禁 + Phase 7 远程隔离验证（test_pg_*.py + Seed 幂等 + full synthetic E2E）全部通过后，方可关闭 CP4A。候选未验收前本矩阵保持待重验状态。**
 

@@ -52,7 +52,9 @@ Phase 1–5 的主要代码合同收口已在 CP4A Pass1 落地（详见 `docs/c
 ## 6. 当前候选 SHA
 
 - 计划执行起点：`c2b436a63e236b6319aa41f472a6e29d93c4cddf`
-- 目标候选 SHA：待 Phase 6 本地门禁通过、提交推送后冻结 `<40-char origin/dev SHA>`
+- **冻结 target_code_sha（Phase 6 本地门禁全过后）：`2299e7a7cbbf8c97682adccdd757ea94fa0d5a14`**（origin/dev，2026-08-06）
+  - 候选资格依赖 Phase 7 远程隔离 PG 验证全过；门禁失败则返回本地修复生成新 SHA，原 SHA 自动失去候选资格。
+  - 冻结后不得追加改变业务代码的提交。
 
 ## 7. 关闭前置
 
