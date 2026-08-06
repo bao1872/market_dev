@@ -62,6 +62,9 @@ canonical definition ID 后再写 version，使其在空库和已有前置事实
 第十四次 attempt 已完成首个 scenario 的 100 股 core run，DSA readiness 随后按 canonical A 股
 universe 过滤掉 `market='cn'` 的 synthetic instruments。600xxx 标的现标记为 `market='SH'`，与
 `stock_symbol_sql_filter` 及真实 instrument identity 合同一致，不绕过 readiness。
+第十五次 attempt 已完成 core、DSA projection 和 board-facts，chip 写入被 fenced lease 正确拒绝，
+因为 Seed 直接传递了未 claim 的 epoch 0。Seed 现通过 `claim_next_job_run` 领取 queued chip job，提交
+真实 worker/epoch 后才调用 executor；claim 身份与目标 job 不一致时 fail closed。
 
 ## 数据、验证与风险
 

@@ -65,6 +65,7 @@ from app.models.factor_publication import (
     PUBLICATION_KIND_STOCK_CORE,
 )
 from app.services.after_close_chip_consensus_service import (
+    CHIP_CONSENSUS_JOB_NAME,
     create_after_close_chip_consensus_job,
     execute_after_close_chip_consensus,
 )
@@ -83,6 +84,7 @@ from app.services.feature_snapshot_service import (
     create_snapshot_run,
     finish_snapshot_run,
 )
+from app.services.fenced_job_run_service import claim_next_job_run
 from app.services.product_readiness_service import (
     ProductReadinessService,
     evaluate_closure,
@@ -636,11 +638,21 @@ async def _run_chip_real(
         if job_run is None:
             print(f"[seed] chip job 创建失败（软失败）: {trade_date}")
             return
+        async with AsyncSessionLocal() as db:
+            claimed = await claim_next_job_run(
+                db,
+                job_name=CHIP_CONSENSUS_JOB_NAME,
+                worker_instance_id="verify-seed",
+                lease_seconds=3600,
+            )
+            await db.commit()
+        if claimed is None or claimed.token.job_run_id != job_run.id:
+            raise RuntimeError(f"chip job claim failed: job_run_id={job_run.id}")
         result = await execute_after_close_chip_consensus(
             job_run.id, trade_date, core_run_id,
             instrument_ids=targets,
-            worker_id="verify-seed",
-            lease_epoch=job_run.lease_epoch,
+            worker_id=claimed.token.worker_instance_id,
+            lease_epoch=claimed.token.lease_epoch,
         )
         print(f"[seed] chip real done: {trade_date} is_new={_is_new} result={result}")
     finally:
