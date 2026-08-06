@@ -26,10 +26,14 @@ from sqlalchemy import text
 
 _PURE_UNIT_TEST = os.environ.get("PURE_UNIT_TEST", "0") == "1"
 
-pytestmark = pytest.mark.skipif(
-    _PURE_UNIT_TEST,
-    reason="PG 原子 publication 故障注入测试需远程验证库（PANJI_REMOTE_VERIFY_DB_TEST=1）",
-)
+# [CHANGE-20260806-005 / Phase 5] 显式声明 postgres marker（不得只靠 conftest 扫描推断）。
+pytestmark = [
+    pytest.mark.postgres,
+    pytest.mark.skipif(
+        _PURE_UNIT_TEST,
+        reason="PG 原子 publication 故障注入测试需远程验证库（PANJI_REMOTE_VERIFY_DB_TEST=1）",
+    ),
+]
 
 
 async def _insert_old_publication(db, *, old_pub_id, trade_date) -> None:

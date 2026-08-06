@@ -25,10 +25,14 @@ from sqlalchemy import text
 
 _PURE_UNIT_TEST = os.environ.get("PURE_UNIT_TEST", "0") == "1"
 
-pytestmark = pytest.mark.skipif(
-    _PURE_UNIT_TEST,
-    reason="PG 100 股票真实计算测试需远程验证库（PANJI_REMOTE_VERIFY_DB_TEST=1）",
-)
+# [CHANGE-20260806-005 / Phase 5] 显式声明 postgres marker（不得只靠 conftest 扫描推断）。
+pytestmark = [
+    pytest.mark.postgres,
+    pytest.mark.skipif(
+        _PURE_UNIT_TEST,
+        reason="PG 100 股票真实计算测试需远程验证库（PANJI_REMOTE_VERIFY_DB_TEST=1）",
+    ),
+]
 
 
 async def _ensure_snapshot_run(db, snapshot_run_id: uuid.UUID, trade_date: date,
@@ -73,26 +77,33 @@ async def test_pg_100_stock_real_compute_call_counts(db_session) -> None:
     # spy 五类 kernel：统计各被调用次数
     kernel_calls = {"dsa": 0, "smc": 0, "bollinger": 0, "sqzmom": 0, "volume": 0}
 
-    # 用 patch 包裹结构/动量/波动率计算（compute-once 验证：per-stock 各调用一次）
-    from app.services import structural_factor_service as struct_svc
+    # [CHANGE-20260806-005 / Phase 5] 修正 spy 目标：canonical 主链经
+    # `compute_core_kernel_bundle` → `_compute_first_pyramid_raw_results` 调用
+    # first_pyramid_service 的五个 kernel 函数（compute_dsa_bundle / compute_smc_pine /
+    # compute_bollinger_features / compute_sqzmom_lb / compute_volume_context_series），
+    # 而非 structural_factor_service 的私有函数（原 spy 目标 _compute_smc_factors 不存在）。
+    from app.services import first_pyramid_service as fps
 
     def _wrap(attr, key):
-        orig = getattr(struct_svc, attr)
+        orig = getattr(fps, attr)
 
         def _patched(*a, **k):
             kernel_calls[key] += 1
             return orig(*a, **k)
 
-        setattr(struct_svc, attr, _patched)
+        setattr(fps, attr, _patched)
         return _patched
 
     # 记录原始引用，测试后恢复
     _wrapped = []
     for attr, key in [
-        ("_compute_volatility_momentum_factors", "bollinger"),
-        ("_compute_smc_factors", "smc"),
+        ("compute_dsa_bundle", "dsa"),
+        ("compute_smc_pine", "smc"),
+        ("compute_bollinger_features", "bollinger"),
+        ("compute_sqzmom_lb", "sqzmom"),
+        ("compute_volume_context_series", "volume"),
     ]:
-        _wrapped.append((struct_svc, attr, getattr(struct_svc, attr)))
+        _wrapped.append((fps, attr, getattr(fps, attr)))
         _wrap(attr, key)
 
     # 15m read 守卫：spy MDAS.get_bars 拦截 15m 请求
@@ -143,13 +154,12 @@ async def test_pg_100_stock_real_compute_call_counts(db_session) -> None:
     assert runtime_execute_calls["count"] == 0, (
         f"StrategyRuntime.execute 应为 0，实际={runtime_execute_calls['count']}"
     )
-    # kernel 调用计数（compute-once：结构/动量模块每股各算一次）
-    assert kernel_calls["bollinger"] == n, (
-        f"bollinger kernel 应为 {n}，实际={kernel_calls['bollinger']}"
-    )
-    assert kernel_calls["smc"] == n, (
-        f"smc kernel 应为 {n}，实际={kernel_calls['smc']}"
-    )
+    # kernel 调用计数（compute-once：五类 kernel 每股各算一次）
+    # [CHANGE-20260806-005 / Phase 5] 补齐五类 kernel 断言（dsa/smc/bollinger/sqzmom/volume）。
+    for key in ("dsa", "smc", "bollinger", "sqzmom", "volume"):
+        assert kernel_calls[key] == n, (
+            f"{key} kernel 应为 {n}，实际={kernel_calls[key]}"
+        )
 
 
 if __name__ == "__main__":
