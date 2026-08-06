@@ -59,6 +59,9 @@ SQLAlchemy bind 与 PostgreSQL 紧邻 cast 不兼容。` :manifest::jsonb` 已�
 第十三次 attempt 到达 DSA version 写入，暴露 definition `ON CONFLICT(strategy_key)` 后仍沿用候选
 UUID 的错误；基础 PG 已存在同 key 时该 UUID 并非真实父记录。Seed 现按 strategy key 回读数据库中的
 canonical definition ID 后再写 version，使其在空库和已有前置事实两种状态下均幂等。
+第十四次 attempt 已完成首个 scenario 的 100 股 core run，DSA readiness 随后按 canonical A 股
+universe 过滤掉 `market='cn'` 的 synthetic instruments。600xxx 标的现标记为 `market='SH'`，与
+`stock_symbol_sql_filter` 及真实 instrument identity 合同一致，不绕过 readiness。
 
 ## 数据、验证与风险
 

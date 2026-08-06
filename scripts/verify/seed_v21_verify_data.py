@@ -167,7 +167,7 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
             "id": str(inst_id),
             "symbol": f"{600000 + i:06d}",
             "name": f"验证股{i:02d}",
-            "market": "cn",
+            "market": "SH",
             "status": "active",
             "listing_date": date(2010, 1, 4),
         })
