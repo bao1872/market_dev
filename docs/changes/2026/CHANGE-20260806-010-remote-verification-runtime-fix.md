@@ -26,6 +26,10 @@ Compose 服务作用域，并将治理检查升级为 `verify-test.environment` 
 第三次 attempt 已通过 Migration round-trip、运行时与 SHA 身份 gate，但稳定运行镜像不含 pytest，
 PG runner 无法启动；cleanup 再次完整归零。现新增 Dockerfile `verification` target，在构建期安装
 锁定 `.[dev]` 依赖，使用目标 SHA 专属 tag，并由 runner trap 精确删除。
+第四次 attempt 的专用镜像和 Migration round-trip 均通过，但固定等待 5 秒后执行的身份探针在
+Backend 尚未就绪时失败；cleanup 已精确移除验证库、容器、网络、环境文件和专用镜像。身份探针
+现改为计划超时内的 bounded retry，并在超时前将脱敏后的 Compose 状态和 Backend 尾部日志纳入
+attempt 证据，避免服务启动失败只留下空 `curl` 错误。
 
 ## 数据、验证与风险
 

@@ -242,13 +242,26 @@ class VerifyAttempt:
         self.exporter.log("assert_identity: 开始")
         host_port = os.environ.get("VERIFY_BACKEND_HOST_PORT", "18000")
         url = f"http://localhost:{host_port}/v1/version"
-        code, out, err = _run(["curl", "-s", url], timeout=30)
-        if code != 0:
-            raise RuntimeError(f"assert_identity: 探针失败 {err.strip()}")
-        try:
-            data = json.loads(out)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"assert_identity: 非法 JSON 响应: {out[:200]}") from exc
+        deadline = time.monotonic() + self.plan.timeouts["runtime"]
+        code, out, err = 1, "", "runtime readiness timeout"
+        data: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            code, out, err = _run(
+                ["curl", "--fail", "--silent", "--show-error", url], timeout=10,
+            )
+            if code == 0:
+                try:
+                    candidate = json.loads(out)
+                except json.JSONDecodeError:
+                    candidate = None
+                if isinstance(candidate, dict):
+                    data = candidate
+                    break
+            time.sleep(2)
+        if data is None:
+            self._record_runtime_diagnostics()
+            detail = err.strip() or f"invalid response: {out[:200]}"
+            raise RuntimeError(f"assert_identity: 探针在时限内未就绪: {detail}")
         runtime_sha = data.get("runtime_git_sha")
         mode = data.get("deployment_mode")
         if runtime_sha != self.target_sha:
@@ -260,6 +273,22 @@ class VerifyAttempt:
         self.manifest["status"] = "identity_ok"
         self.exporter.record_gate("identity", True, detail=f"runtime_git_sha={runtime_sha} mode=live")
         self.exporter.log("assert_identity: 通过")
+
+    def _record_runtime_diagnostics(self) -> None:
+        """Record bounded, secret-redacted diagnostics before attempt cleanup."""
+        secrets = [
+            _read_env_value(self.env_file, key)
+            for key in ("DATABASE_URL", "MIGRATION_DATABASE_URL", "JWT_SECRET")
+        ]
+        for label, command in (
+            ("compose_ps", [*self.compose_base, "ps", "--all"]),
+            ("backend_logs", [*self.compose_base, "logs", "--no-color", "--tail", "120", "verify-backend"]),
+        ):
+            _code, stdout, stderr = _run(command, timeout=30)
+            diagnostic = (stdout + stderr)[-12000:]
+            for secret in secrets:
+                diagnostic = diagnostic.replace(secret, "[REDACTED]")
+            self.exporter.log(f"assert_identity {label}:\n{diagnostic}")
 
     def run_self_contained_pg_tests(self) -> None:
         """运行自包含 PG 测试（docker compose run --rm verify-test）。"""
