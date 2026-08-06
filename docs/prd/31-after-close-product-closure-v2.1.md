@@ -1,211 +1,225 @@
-# PRD 31 — 盘后数据生产、第一金字塔与复盘业务链（V2.1 产品闭环）
+# PRD 31 — 盘后数据生产与产品闭环总纲
 
-> **文档性质**：V2.1 盘后生产链、第一金字塔、DSA 兼容投影、chip 异步增强、板块市场聚合、市场复盘 Review、次日竞价锚点、产品 readiness 与管理后台的**正式业务架构、数据合同、状态语义与端到端验收事实源**。
-> **适用分支**：`dev`。**环境定位**：本地开发与质量验证；部署、Migration、运行时任务、真实数据闭环和最终浏览器验收在远程开发运行服务器（`panji-prod`）执行。
-> **产品边界**：不预测涨跌、不承诺收益、不替用户决策。
->
-> **吸收来源说明**：本 PRD 吸收 `ref/instruction.md`（参考源，仅人工阅读，非正式真源）中已确认的需求与决策，并按产品图 / 九节点 readiness / closure 定义 / Granular restart 正式枚举 / P1-3 readiness 完整性重新组织。凡引用 `ref/instruction.md` 处仅为历史溯源，不视为运行依赖。
+状态：已确认
+最后确认日期：2026-08-06
+对应 Maps：`../maps/20-quant-model.md`、`../maps/30-after-close.md`、`../maps/70-review.md`、`../maps/75-auction-analysis.md`
+需求所有权：盘后跨域依赖、canonical、publication lineage、产品 readiness 与闭环状态
 
-## 0. 文档优先级与不变量
+## 0. 文档定位
 
-发生冲突时优先级：`本 PRD 31` > 对应领域 Map > Acceptance Matrix > Change > Runbook > 历史注释。
-Change 不得替代当前 Map；测试文件存在不得替代行为证据。
+本 PRD 是盘后跨域总纲，只定义多个领域之间必须一致的边界。领域细节继续由唯一所属 PRD 负责：
 
-以下状态必须独立表达，不得互相推断：`code_ready`、`remote_deployed`、`runtime_verified`、`data_closed`、`browser_verified`、`mandatory_products_ready`、`enhancement_jobs_terminal`、`production_closure`。
+| 领域 | 权威 PRD |
+|---|---|
+| 行情周期、复权、数据来源与 readiness | [`10-market-data.md`](./10-market-data.md) |
+| 第一金字塔、DSA、SMC、动量、筹码语义 | [`20-quant-model.md`](./20-quant-model.md) |
+| 盘后触发、编排、恢复与父任务状态 | [`30-after-close.md`](./30-after-close.md) |
+| 行情列表、个股详情和第一金字塔展示 | [`40-market-stock-experience.md`](./40-market-stock-experience.md) |
+| Review P/Q/U/C/V、历史、归因、追踪与页面 | [`70-review.md`](./70-review.md) |
+| 竞价真值、锚点、分析与发布 | [`75-auction-analysis.md`](./75-auction-analysis.md) |
+| 本地开发、远程验证、稳定运行与部署 | [`80-system-runtime.md`](./80-system-runtime.md) |
 
-不变量：`remote_deployed != runtime_verified`、`runtime_verified != data_closed`、`data_closed != browser_verified`、`main_run_succeeded != fully_ready`、`HTTP_200 != browser_verified`、`degraded_ready != fully_ready`。
+本 PRD 不复制治理规则，不保存当前 SHA、运行进度、服务器身份、容器或数据库实例状态。实现状态和缺口写入 Maps，证据写入 Acceptance Matrix/Change，操作步骤写入 Runbooks。
 
-## 1. 产品图
+本 PRD 也不覆盖盘中监控算法对齐、DSA 选股规则全量对齐或通用 15m/1h/daily 行情管理的全部细节；这些分别归属 PRD 50、PRD 20 和 PRD 10。
+
+## 1. 最终业务链
 
 ```text
-daily_facts
-    ↓
-board_facts
-    ↓
-stock_core
-    ├── dsa_projection
-    ├── state_events
-    ├── chip
-    │     └── auction upgrade
-    └── board_aggregation
-            └── review
+市场事实
+→ CoreRunContext
+→ 每股统一 core 计算一次
+→ stock_core 原子发布
+→ 并行产品
+   ├─ dsa_projection（兼容投影）
+   ├─ state_events
+   ├─ chip_consensus（daily + 15m 异步增强）
+   ├─ auction_anchor（先 structure_only，后续可升级）
+   └─ board_aggregation → market_review
+→ ProductReadinessService 动态聚合
+→ 行情、详情、Review、竞价和管理后台消费正式结果
 ```
 
-说明：
+### PC-01 Canonical
 
-- `daily_facts`：刷新目标交易日日线、日线覆盖率与市场数据门禁。
-- `board_facts`：板块/概念源事实（行业 L1/L2/L3 与 concept 分离），只消费正式 stock_core 之前的外部源，不重算 daily。
-- `stock_core`：个股核心状态唯一 canonical 正式事实。`FirstPyramidCoreSnapshot`（trend+structure+momentum）+ DSA artifact，原子发布。
-- `dsa_projection`：第一金字塔趋势 artifact 的兼容投影，仅从持久化 core artifact 重建，禁止第二次 DSA 计算。
-- `state_events`：stock_core 派生增强，从当前 core artifact 重建 events。
-- `chip`：独立、非破坏、可恢复的异步增强，在 stock_core 原子发布后创建。
-- `auction`：structure-only / hybrid / composite 三种 publication，使用当前 core/chip pointer 重建 anchor。
-- `board_aggregation`：使用正式 core + board facts 重建 aggregation。
-- `review`：使用正式 core + aggregation 重建 Review，不等待 chip、不消费 auction 作为输入。
+- 个股核心唯一 canonical 是正式 `stock_core` pointer 指向的数据。
+- 第一金字塔 core 固定为 trend + structure + momentum。
+- chip 是非破坏异步增强，不得写回或覆盖已发布 stock_core。
+- 正式消费者不得用 `max(created_at)`、最新成功行或父任务 metadata 代替 publication/readiness。
 
-## 2. 九节点 readiness 定义
+### PC-02 Compute Once
 
-管理后台数据生产中心展示九个节点。每个产品节点至少定义：**mandatory / enhancement**、**terminal**、**consumable**、**freshness**、**coverage**、**lineage**、**失败与降级语义**。
+- scheduled core 中 DSA、SMC、Bollinger、SQZMOM 和 VolumeContext 每股每 core run 各计算一次。
+- scheduled DSA StrategyResult 只允许从持久化 core artifact 投影，禁止再次运行 StrategyRuntime。
+- 第一金字塔趋势与 DSA projection 必须消费同一个 released DSA config、输入 hash 和算法版本。
+- manual/replay DSA 可以使用明确指定的 StrategyVersion，但不得成为 scheduled stock_core 的 canonical 来源。
 
-| 节点 | mandatory/enhancement | terminal | consumable | freshness | coverage | lineage | 失败/降级 |
-|---|---|---|---|---|---|---|---|
-| daily_facts | mandatory | 日线覆盖率达标或门禁失败 | board_facts/stock_core 输入 | 目标交易日当日 | 覆盖率≥阈值 | 目标交易日 | 不达标→blocked |
-| board_facts | mandatory | 行业/概念源拉取完成或失败 | stock_core 不消费；board_aggregation 消费 | 目标交易日 | 行业覆盖≥99%、depth≤3、概念≤100 | 源版本 | 失败→reuse 旧值并标记 reused，不静默截断 |
-| stock_core | mandatory | 原子发布成功/失败 | 所有下游唯一 canon | run_calculated_at | 成功 coverage | CoreRunContext | 失败→blocked |
-| dsa_projection | enhancement（V2.1 默认 required_compatibility） | 投影成功/失败 | DSA 兼容 API | 同 core run | matched==eligible | source_core_run_id + 参数hash | 失败→父任务 partial_success，readiness=failed，可从 core artifact 重建 |
-| state_events | enhancement | events 完整/失败 | 详情/导出 | 同 core run | 事件生命周期完整 | source_core_run_id | 失败→readiness partial/failed，可重建 |
-| chip | enhancement | ready/partial/skipped/unavailable/failed/stale | 第一金字塔增强、auction 升级 | 发布时间 | eligible/ready/partial 统计 | ChipConsensusRun.id | 失败不影响 core；partial→degraded |
-| auction | enhancement | structure_only/hybrid/composite/unavailable/failed | 竞价页面 | 发布时间 | chip_ready_coverage | source_core_run_id + source_chip_run_id? | 失败不阻断 Review |
-| board_aggregation | mandatory | 聚合发布成功/失败 | Review 唯一输入 | 同 core run | 行业/概念分布完整 | source_core_run_id | 失败→阻断当次 Review，不撤销 core |
-| review | mandatory | Review 质量门通过/失败 | Review 页面、导出 | 同 core run | P/Q/U/C/V 非全空、历史门槛 | source_core_run_id + source_board_run_id | 失败保留旧 pointer |
+### PC-03 1d 与 15m 边界
 
-**ready 判定语义**：
+- daily-core 和 Review 只消费日线及其派生 canonical facts，15m 读取次数必须为 0。
+- chip 独立消费 daily + 15m；15m 不阻断 stock_core、board 或 Review。
+- current 模式先执行 run 级有界并发 15m refresh，再冻结逐股 source cutoff/readiness，最后批量读取 canonical 15m 并计算；不得在计算循环中无界逐股重复刷新。
+- historical replay 只允许使用覆盖目标日期的 point-in-time 已存 15m，禁止用当前刷新结果伪装历史事实。
 
-- `is_terminal`：节点达到可解释终态（含 failed/partial/unavailable/skipped），非 active/running/stale。
-- `is_truly_ready`：mandatory 节点要求 fresh 且通过质量门；enhancement 节点要求 terminal 且达到产品定义的 ready 条件（见 §5 P1-3）。
-- `auction_composite`：仅当 auction 节点 `is_terminal` 且其 `auction_mode == "composite"` 时为 True；非 terminal 时默认为 True（不阻塞），terminal 但非 composite 时阻塞 fully_ready。
+## 2. 九节点注册表
 
-## 3. closure 定义
+九节点名称、mandatory/enhancement 分类和 canonical 依据如下，后端 DTO、管理后台和验收矩阵必须引用同一注册表：
 
-`production_closure` 取值：
+| 节点 | 分类 | Canonical/readiness 依据 | 失败影响 |
+|---|---|---|---|
+| `daily_facts` | mandatory input | 目标交易日日线 readiness | 不达标阻断 core |
+| `board_facts` | mandatory input | 正式 board facts run/pointer 与 PIT membership | 不可用阻断对应聚合；复用必须显式 degraded |
+| `stock_core` | mandatory product | 正式 stock_core pointer | 失败则 closure blocked |
+| `dsa_projection` | required compatibility enhancement | 投影 run、source core、版本与 matched coverage | 不撤销 core，但形成 degraded/issue |
+| `state_events` | enhancement | source core、事件生命周期与 coverage | 不阻断 board/Review |
+| `chip_consensus` | enhancement | ChipConsensusRun、逐股 readiness、coverage 与正式 pointer | 不阻断 core/board/Review |
+| `auction_anchor` | enhancement | AuctionAnchorRun、mode、coverage 与正式 pointer | 不阻断 Review |
+| `board_aggregation` | mandatory product | 正式 market aggregation pointer | 失败阻断 Review |
+| `market_review` | mandatory product | 正式 Review pointer 与发布质量门 | 失败保留旧 pointer |
 
-| 状态 | 定义 |
+每个节点至少返回：`status/readiness/mandatory/runId/publicationId/sourceRunIds/coverage/processed/total/heartbeat/lease/isStale/reasonCode/reasonText/recommendedAction`。
+
+不是所有节点都必须使用 `factor_publications`；领域 PRD 必须明确该节点的 canonical run/pointer/read model，禁止为统一表面形式制造无意义 pointer。
+
+## 3. 运行对象与身份
+
+### PC-10 CoreRunContext
+
+run 开始时冻结：trade date、run mode、eligible universe/version、日线 cutoff、复权版本、DSA/SMC/momentum/volume config、算法版本和 parameter hash。单股不得自行重新解析配置。
+
+### PC-11 CoreComputationArtifact
+
+每股 artifact 至少保存 core snapshot、DSA projection payload/visual contract、state event candidates、field availability、input/bars/adjustment hashes、算法版本和 diagnostics。projection 和可重建增强只能消费该 artifact，不得重新计算 core。
+
+### PC-12 ChipConsensusRun
+
+ChipConsensusRun 是产品 lineage；SchedulerJobRun 只是调度、heartbeat、lease 和 retry 外壳。唯一身份必须覆盖：
+
+```text
+trade_date + run_mode + source_core_run_id + algorithm_version
++ config_hash + universe_version + input_contract_version
+```
+
+retry/resume 复用同一领域 run；新的输入、模式、算法或 config 必须产生新 run。逐股 run item 保存 refresh/readiness、input hash、source cutoff 和终态。
+
+## 4. Chip 15m 合同
+
+### PC-20 Refresh 阶段
+
+scheduled/manual current 在 chip compute 前对 frozen universe 执行独立 refresh phase：有界并发、可恢复、逐股记录结果；refresh 结束后再由 MDAS 批量读取 canonical、completed、point-in-time 15m。refresh 和 compute 必须可分别诊断，不能以旧缓存静默掩盖刷新失败。
+
+### PC-21 Readiness
+
+逐股至少校验：时间戳可解析且无冲突、最新 session 日期等于 trade date、当日至少 16 根、最后一根不早于 15:00、历史至少 500 根、无 future data。16/15:00 是当日完整性，500 是算法历史门槛，不得混淆。
+
+Canonical reason code：
+
+| 条件 | reason code | 状态 |
+|---|---|---|
+| refresh/provider 失败 | `M15_REFRESH_FAILED` | unavailable |
+| 无数据 | `M15_BARS_MISSING` | unavailable |
+| 时间戳非法/冲突 | `M15_TIMESTAMP_INVALID` | failed |
+| 最新交易日陈旧 | `M15_TRADE_DATE_STALE` | unavailable |
+| 当日少于 16 根 | `M15_SESSION_INCOMPLETE` | unavailable |
+| 缺 15:00 收盘 bar | `M15_CLOSE_BAR_MISSING` | unavailable |
+| 历史少于 500 根 | `M15_BARS_INSUFFICIENT` | skipped |
+| 存在 future data | `M15_FUTURE_DATA` | failed |
+
+旧 reason code 只允许在输入 adapter 做兼容映射；API、数据库新记录和前端输出统一使用上述 canonical 值。算法、数据库、lease、fencing 和持久化异常一律 failed，不得伪装成数据不足。
+
+## 5. Review 与竞价边界
+
+### PC-30 Review
+
+Review 的硬依赖只有正式 stock_core、正式 market aggregation 和历史 observations。chip/auction 不进入 Review 唯一键、P/Q/U/C/V 或发布门；chip 晚到不改写 Review run/pointer。P/Q/U/C/V 公式、60 日边界、PIT membership、bootstrap、归因和五阶段 UI 只以 PRD 70 为权威。
+
+### PC-31 Auction
+
+每股 anchor 为 `structure_only | composite | unavailable | failed`；批次 publication mode 为 `structure_only | hybrid | composite`。chip 部分可用必须形成 hybrid，不能冒充 composite。阈值配置化、版本化并写入 run；竞价真值双源和发布门以 PRD 75 为权威。
+
+## 6. Publication 与 lineage
+
+### PC-40 Pointer
+
+- 所有正式读取只通过该领域规定的正式 pointer/read model。
+- pointer 更新失败保留旧结果；published run 不原地修改；修正创建新 run 并 supersede。
+- publication、run published 状态、pointer 和审计必须处于同一事务或具有等价原子性。
+
+### PC-41 Lineage
+
+```text
+board.source_core_run_id == stock_core.pointer.data_run_id
+review.source_core_run_id == stock_core.pointer.data_run_id
+review.source_board_run_id == market_aggregation.pointer.data_run_id
+chip.source_core_run_id == stock_core.pointer.data_run_id
+auction.source_core_run_id == stock_core.pointer.data_run_id
+auction.source_chip_run_id == chip_consensus.pointer.data_run_id or null
+```
+
+bars、adjustment factor 和 membership 不得读取目标交易日以后；Review history 只读目标日期以前；manual/replay 不污染 scheduled current pointer。
+
+## 7. 父任务与产品闭环
+
+### PC-50 状态分离
+
+父 AfterCloseRun 终态、九节点 readiness、mandatory readiness、enhancement terminal 和整体 closure 必须独立表达。父任务 succeeded 不代表 chip 已完成，也不代表 fully ready。
+
+### PC-51 Closure
+
+| closure | 定义 |
 |---|---|
-| `pending` | 必选链仍在运行或尚未开始 |
-| `blocked` | stock_core 未形成或正式 publication 失败 |
-| `core_ready` | stock_core 已发布，但 board/Review 未全部完成 |
-| `degraded_ready` | 必选链 ready，增强链均已终结，但至少一个增强为 partial/skipped/unavailable/failed |
-| `fully_ready` | 必选链 ready，所有当前 required 增强产品完整 ready，不存在降级和未对账任务 |
+| `pending` | mandatory 链尚未形成 stock_core 或仍在运行 |
+| `blocked` | stock_core 或 mandatory publication 失败 |
+| `core_ready` | stock_core 已发布，但 board aggregation/Review 尚未全部 ready |
+| `mandatory_ready_enhancing` | mandatory 全部 ready，但仍有 active/stale 未对账增强任务 |
+| `degraded_ready` | mandatory 全部 ready、增强均终结，但至少一个 required enhancement 降级 |
+| `fully_ready` | mandatory 全部 ready、required enhancement 全部达到正式 ready 条件且无 active/stale/unreconciled child |
 
-`fully_ready` 必须同时满足：
+`mandatoryProductsReady`、`enhancementJobsTerminal` 独立返回；兼容字段 `allProductsReady = (productionClosure == "fully_ready")`。不得把 `mandatory_ready_enhancing` 或 `degraded_ready` 显示为“全部产品已就绪”。
 
-- mandatory 全部 fresh（stock_core / board_aggregation / review 已发布且有效）；
-- chip 真正 ready（not partial/skipped/unavailable/failed/stale）；
-- state_events 真正 ready（完整生命周期与 coverage，非仅一条记录）；
-- dsa_projection 完整（matched_count == eligible_count 或达正式 coverage 门槛，参数 hash / 算法版本 / source core run 一致）；
-- auction 为 `composite`；
-- 没有 active/stale/unreconciled child。
+### PC-52 动态 Read Model
 
-兼容字段：`allProductsReady = (productionClosure == "fully_ready")`；不得把 `degraded_ready` 显示为"全部产品已就绪"。
+ProductReadinessService 动态读取九节点 canonical、领域 run、child jobs、heartbeat/lease、coverage、reason 和 lineage。父 metadata 只能保存 enqueue 当时快照，不能成为异步产品最终真源。缓存或派生快照必须可重建。
 
-## 4. 总体目标与正式决策（吸收 instruction 已确认项）
+## 8. 编排与恢复
 
-单向事实链：`市场事实 → CoreRunContext → 个股核心 Compute Once → stock_core canonical → 并行数据产品（DSA 投影 / chip / state events / structure auction / board→Review）→ chip 晚到增强 → ProductReadinessService 聚合 → 用户查询与管理验收`。
+编排阶段固定为 `daily → core → post_core → board_review → finalize`，产品节点不等于编排阶段。stock_core publication 成功后应尽早并行创建 DSA projection、state events、chip 和 structure-only auction；board aggregation 成功后运行 Review。
 
-正式业务决策（已确认，不回退）：
+granular restart 边界：`daily_ready/core/stock_core_published/dsa_projection/state_events/chip/auction/board_aggregation/review`。恢复下游不得重算上游；chip 独立 retry；projection 只从 artifact 重建；force 创建新 run、保留历史、不绕过质量门并记录审计。
 
-- 个股核心 canonical = `stock_core`；第一金字塔 core = trend+structure+momentum；chip = 第一金字塔异步增强，不属于 core。
-- DSA 业务身份 = 第一金字塔趋势算法；scheduled DSA StrategyResult = 统一 artifact 的兼容投影；**scheduled after-close 不再二次计算 DSA**。
-- chip 不阻断 stock_core / board / Review；chip 不进入 Review 唯一键；chip 晚到不自动重算 Review；auction 不阻断 Review。
-- chip 启动时机：stock_core 原子发布成功后立即创建 child run；父任务 succeeded 不代表 chip 完成。
-- auction 批次模式：`structure_only | hybrid | composite`；每只股票 own anchor mode。
-- `allProductsReady` 仅作为 `productionClosure == fully_ready` 的兼容派生布尔。
+## 9. API 与用户状态
 
-禁止模式（scheduled after-close）：第一金字塔先算 DSA 后 StrategyRuntime 再算 DSA；core 与 projection 使用不同配置；从"最新成功行"隐式选择正式数据；chip 写回/覆盖/原地修改 stock_core；chip 晚到原地修改已发布 Review；board/Review 直接选 max(created_at)；前端通过时间/颜色/文案/空值推断业务状态；用父任务 metadata 作为异步 child job 最终事实源；用单一 succeeded 表示全部产品完整就绪。
+- 行情与详情只读正式 stock_core，并独立组装当前 chip 增强。
+- Review 明确展示 core + aggregation lineage，并将 chip 标为 external enhancement。
+- 竞价展示 publication mode、coverage、source core/chip runs 和原因。
+- 管理后台展示父任务、九节点、closure、child job、heartbeat/lease 和可执行治理动作。
+- 前端不得通过时间、颜色、空值或文案猜测 readiness。
 
-## 5. Readiness P1-3 完整性（补齐项）
+## 10. 验收合同
 
-DSA projection 与 state_events 的 readiness **不得只做存在性检查**，必须验证完整条件，不满足时返回 `pending / degraded / unavailable`，不得 ready。
+### PC-60 Pure unit
 
-**DSA projection 必须验证**：
+覆盖 compute once、artifact encode/decode、DSA projection、chip reason mapping、closure 全状态、pointer/lineage 纯逻辑和前端 ViewModel。daily-core/Review 的 15m forbidden spy 命中即失败，不能只靠源码文本搜索。
 
-- `eligible_count`：本次 core run 应投影股票数（来自 CoreRunContext eligible universe）；
-- `matched_count`：实际投影成功数；
-- `coverage = matched_count / eligible_count`，达到正式 coverage 门槛（默认 1.0，可配置化）；
-- `algorithm_version`、`parameter_hash`、`source_core_run_id` 与 core run 一致；
-- 参数 hash、算法版本、source core run 任一不一致 → `degraded` / `unavailable`，不 ready。
+### PC-61 Remote PG
 
-**State events 必须验证**：
+同一 target SHA 在远程验证库完成 Migration cycle、PG Integration 和 Synthetic E2E：raw facts → core → publication → projections/enhancements → board → Review → chip late arrival → auction upgrade → readiness DTO。断言 fencing、幂等、失败回滚、PIT、无第二次 DSA 和正式读取只走 pointer。
 
-- 事件生命周期完整：每个 instrument 的 required event_type 均有对应 `event_identity`；
-- `coverage`：已生成事件数 / eligible 数达到门槛；
-- `source_core_run_id` 绑定一致；
-- 仅有孤立一条记录但缺 lifecycle → `degraded`，不 ready。
+### PC-62 Seed
 
-**auction 必须验证**：`total_core_count`、`chip_eligible_count`、`chip_ready_count`、`chip_ready_coverage`；composite 要求 `chip_ready_coverage >= composite_threshold`（默认 0.98，配置化+版本化+写入 run）。
+Seed 只准备 instruments、raw bars、board/auction raw facts、历史 prerequisite 和受控故障输入。禁止直接写 succeeded/published、coverage=1、最终第一金字塔/Review payload、readiness 终态或固定成功失败计数。重复 seed 必须幂等，业务终态由真实 producer/Worker/质量门自然形成。
 
-## 6. Granular restart 正式枚举
+### PC-63 四类场景
 
-`restart_from` 枚举（用户计划推荐使用，替换原 `board` 歧义边界）：
-
-| Boundary | 输入 pointer | 允许重算内容 | 禁止重算内容 | 新建 run | 幂等 key | 发布 | 下游影响 |
-|---|---|---|---|---|---|---|---|
-| `daily_ready` | 已有日线 | 从 core 链开始（daily 跳过） | 不重跑 daily_facts | 新 StockFeatureSnapshotRun | trade_date+context hash | 原子发布 stock_core | 触发下游全部 |
-| `board_facts` | 当前 daily + 外部源 | 只重跑 Board Facts | 不重算 daily | 新 BoardAnalysisRun（facts 段） | trade_date+source hash | 更新 board_facts pointer | board_aggregation 可重建 |
-| `core` | 当前 daily_facts | 新建 core run，计算趋势/结构/动量 | 不重算 daily | 新 StockFeatureSnapshotRun | trade_date+context hash | 原子发布 stock_core | 下游全部重建 |
-| `stock_core_published` | 已通过门禁的 core run | 重试 publication | 不重算 core | 复用原 run | run_id | 切换 stock_core pointer | 下游重建 |
-| `dsa_projection` | 持久化 core artifact | 从 artifact 重建投影 | 禁止再次运行 DSA | 新 StrategyRun | source_core_run_id+hash | 发布 dsa_projection | dsa 兼容 API |
-| `state_events` | 当前 core artifact | 重建 events | 不重算 core | 新 events run | source_core_run_id | 发布 state_events | 详情/导出 |
-| `chip` | 当前 core pointer | 创建/恢复 chip domain run | 不重算 core | ChipConsensusRun | trade_date+source_core_run_id+algo+hash | 原子发布 chip_consensus | 第一金字塔增强、auction 升级 |
-| `auction` | 当前 core/chip pointer | 重建 anchor | 不重算 core/chip | AuctionAnchorRun | source_core_run_id+source_chip_run_id?+mode | 原子切换 auction pointer | 竞价页面 |
-| `board_aggregation` | 正式 core + board facts | 重建 aggregation | 不重算 core/daily | BoardAnalysisRun | source_core_run_id | 发布 market_aggregation | Review 重建 |
-| `review` | 正式 core + aggregation | 重建 Review | 不重算 core/board | MarketReviewRun | source_core_run_id+source_board_run_id+review_algo | 原子发布 market_review | Review 页面 |
-
-每个 restart 都必须具备：Admin API、`SchedulerJobRun`、`parent_job_run_id`、`operation`、`target_run_id`、幂等 key、权限检查、事件时间线、单元测试、PG 集成测试、前端按钮及反馈。**不允许任何 boundary 只接受枚举然后返回 `not_implemented`（501）**。
-
-## 7. 运行对象与状态机（吸收 instruction §3.4 / §13）
-
-运行对象：AfterCloseRun（编排必选链并可靠启动增强 child runs）、StockFeatureSnapshotRun、StrategyRun(dsa_selector)、ChipConsensusRun、SchedulerJobRun、BoardAnalysisRun、MarketReviewRun、AuctionAnchorRun。
-
-五个编排阶段：`daily / core / post_core / board_review / finalize`；产品节点单独展示（daily_facts、stock_core、dsa_projection、state_events、chip_consensus、auction_anchor、board_aggregation、market_review）。
-
-父任务终态：`succeeded`（必选链成功、required child 已可靠创建）/ `partial_success`（必选链成功但某增强失败/不可用）/ `failed` / `cancelled` / `interrupted`。child chip running 时父可 succeeded；child 后续失败不回写父历史终态；ProductReadinessService 反映后续实际闭环。
-
-通用治理：cancel（已发布不回滚，child 按策略处理）、reconcile（依据 worker/heartbeat/lease/run items/pointer/child jobs 对账，不唯父 status）、restart（上述枚举）、force（full rerun，新 run+supersede，不绕过质量门，需审计二次确认）。
-
-## 8. Publication 与 lineage 不变量（吸收 instruction §15）
-
-`publication_kind`：stock_core / dsa_projection / chip_consensus / market_aggregation / market_review / auction_anchor。
-
-lineage 不变量：
-
-- `board.source_core_run_id == stock_core.pointer.data_run_id`
-- `review.source_core_run_id == stock_core.pointer.data_run_id`
-- `review.source_board_run_id == market_aggregation.pointer.data_run_id`
-- `chip.source_core_run_id == stock_core.pointer.data_run_id`
-- `auction.source_core_run_id == stock_core.pointer.data_run_id`
-- `auction.source_chip_run_id == chip_consensus.pointer.data_run_id or null`
-
-pointer 规则：所有消费者只读正式 pointer；不直接 max(created_at)；pointer 更新失败保留旧结果；published 数据不可原地覆盖；修正必须新 run + 新 publication。
-
-point-in-time 不变量：bars/adj factor 不读目标交易日以后；Review history 只读目标日期之前；replay/manual run 不污染 scheduled current pointer。
-
-## 9. API 与前端合同（吸收 instruction §16，逐页）
-
-页面与必须验证的合同：
-
-| 页面 | 合同 |
+| 场景 | 预期 closure |
 |---|---|
-| Admin Data Production | 九节点、closure、lineage、heartbeat、lease、child jobs |
-| Admin Tasks | cancel / reconcile / resume / full restart / granular restart（全部 boundary） |
-| Market | 只读正式 stock_core pointer |
-| Stock Detail | source run、freshness、chip 状态、null 原因 |
-| Review | 不等待 chip，显示 core+aggregation lineage；chip 为 external enhancement |
-| Auction | structure-only / hybrid / composite |
-| Board | 行业 L1/L2/L3 与 concept 分离 |
-| 错误状态 | loading / null / degraded / failed / retryable |
+| mandatory 尚未完成 | pending/core_ready |
+| mandatory ready、chip 等增强仍运行 | mandatory_ready_enhancing |
+| mandatory ready、增强终结但部分不可用 | degraded_ready |
+| mandatory 与 required enhancement 全部完整 | fully_ready |
 
-前端不得自己推断业务动作，只展示后端返回的 `operation` 和 `recommendedAction`。业务错误返回 `stable_error_code / legacy_error_code / message / requestId / details / retryable / resumable / recommendedAction`；前端不得解析中文 message 决定业务分支。
+## 11. 完成定义
 
-## 10. 测试与验收矩阵（吸收 instruction §19，关键硬断言）
+`code_ready`、`verification_deployed`、`pg_verified`、`verification_runtime_verified`、`stable_deployed`、`data_closed`、`browser_verified` 必须分别记录，互不推断。目标代码、验证运行时和稳定运行代码必须是同一已推送 SHA；纯证据文档提交使用独立 evidence SHA。
 
-跨模块 synthetic E2E 覆盖：`Migration → Board Facts → CoreRunContext → DSA compute once → stock_core publication → DSA projection → state events → board aggregation → Review publication → structure-only auction → chip late arrival → hybrid/composite auction upgrade → ProductReadiness → Admin API DTO`。
-
-硬断言：DSA 每股每 core run 一次，不 backdate；Review 不等待 chip；chip 晚到不改变 Review source；旧 Worker 失去 lease 后不能发布；所有正式读取通过 pointer；structure-only/hybrid 不得 fully_ready；composite 才 fully_ready；degraded_ready != fully_ready；chip partial 产生 hybrid 不伪装 composite。
-
-四类验收场景（远程手动验收）：
-
-- A 完整成功：stock_core ready / dsa_projection ready / state_events ready / chip ready / auction composite / board_aggregation ready / review ready / closure fully_ready。
-- B 异步增强：stock_core ready / review ready / chip running / auction structure_only / closure core_ready。
-- C 降级：board_facts ready_reused / chip partial / auction hybrid / closure degraded_ready。
-- D 治理与恢复：publication missing / lease lost / retryable child / granular restart / reconcile。
-
-## 11. 完成定义（吸收 instruction §21，当前状态诚实标记）
-
-`code_ready=true` 必须同时满足：scheduled DSA 只计算一次；projection 不调用 StrategyRuntime；CoreRunContext config/version 统一；stock_core publication 原子；chip 在 stock_core 后立即创建；ChipConsensusRun 与 chip publication 完成；Review 与 chip 核心依赖分离；auction hybrid 合同完成；ProductReadinessService 完成；degraded_ready/fully_ready 语义完成；synthetic E2E 通过；后端/PG/前端/build/architecture/docs/governance 门通过；最终 SHA == origin/dev；工作树干净；Acceptance Matrix 基线满足治理窗口。
-
-> **当前诚实状态（2026-08-05 后）**：`code_ready=false`。原因：granular restart 大部分 boundary 后端未实现（PG E2E 未执行）；完整前端合同未验证；Migration 085/086 未在真实 PG 应用；本地禁止连 PG 仅 PURE_UNIT_TEST。详见 `docs/changes/2026/PRD-Acceptance-Matrix-V2.1-D-J-2026-08-05.md`。本 PRD 作为正式真源已建立，后续 Gate 2/3/4 在远程验证环境（`bz_stock_verify_<sha>`，见 `rules/80` DS-110）执行。
-
-## 12. 非目标（吸收 instruction §2.2）
-
-不要求：改造 Review P/Q/U/C/V 为 chip 驱动；用 chip 覆盖已发布 stock_core；为旧 DSA API 保留第二套盘后算法；前端自拼 canonical；本地 Vite/Uvicorn/Compose 作为最终部署；自动改 main；未经授权共享库写入；全量重算历史；manual/replay DSA 与 scheduled after-close 强行合并。
+本 PRD 完成只表示目标合同已确认，不表示代码、Migration、远程验证、稳定部署、真实数据或浏览器验收已经完成。具体状态以 Maps 和 Acceptance Matrix 为准。

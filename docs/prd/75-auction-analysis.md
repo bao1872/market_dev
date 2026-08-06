@@ -1,15 +1,14 @@
 # 竞价分析 PRD V1.0
 
-状态：已确认（CONFIRMED，已实现）
-最后更新：2026-07-30
+状态：已确认
+最后更新：2026-08-06
 对应 Map：`../maps/75-auction-analysis.md`
 条款前缀：`AU`
 需求所有权：竞价分析层的目标行为、锚点合同、分析定义与边界约束
 
-> **V2.1 升级合同**：`structure-only / hybrid / composite` 三种 publication 的升级路径与 `fully_ready` 判定（composite 才 fully_ready，structure-only/hybrid 不得 fully_ready）以 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §3 与 §6 为权威真源。本文件陈述的已确认 auction 链路仍需对齐 V2.1 closure 语义。
+> 本文件是竞价真值、锚点、扫描、聚合、publication、追踪和 Review 回流的唯一需求真源。[`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义竞价节点与盘后闭环的依赖和 lineage，不替代本文件的双源真值及发布门禁。
 
 > 本文件是竞价分析层的 PRD。竞价分析是一个独立的分析层，不属于第一金字塔或第二金字塔。
-> [CHANGE-20260730-018] 已实现完整链路：Migration 077+078、7张表、3个service、6个API端点、前端三级页面、248个单元测试+15个PG集成测试。
 
 ## 0. 背景与定位
 
@@ -153,7 +152,7 @@ formed → confirmed → weakened → failed → expired
 - 任一维度冲突时标记 `conflict`，不得进入 scan。
 - 配置了两个独立来源但个股报价缺失时标记 `partial`，不得正式发布。
 - 实际独立来源少于两个时标记 `blocked_external_auction_truth_source`。
-- 当前 mootdx/pytdx 属于同一通达信供应链，因此生产必须保持外部阻断。
+- 同一供应链的不同服务器不构成两个独立来源，不得用于满足双源门禁。
 
 ## 7. 编排与发布合同
 
@@ -172,6 +171,5 @@ market/industry/concept aggregate → `auction_analysis_publications` pointer。
 内部代码合同以 `verified` 为最高状态；生产整体只有在 migration、PG Integration、真实双源、
 正式交易日 scan/aggregate/publish 和三级页面 E2E 全部通过后才能称为闭环。
 
-当前候选版本状态：内部双源合同、门禁、迁移、三级页面和 Review 回流已实现并通过本地纯单元/
-合同验证；真实第二独立供应商缺失，因此生产状态必须为
-`blocked_external_auction_truth_source`，不得声称生产竞价闭环。
+缺少真实第二独立供应商时，生产状态必须为
+`blocked_external_auction_truth_source`，不得声称生产竞价闭环。具体供应商和实现验证状态只记录在 Map 与 Change。

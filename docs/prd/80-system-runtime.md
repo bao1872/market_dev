@@ -5,7 +5,7 @@
 对应 Map：`../maps/80-system-runtime.md`  
 需求所有权：本地原生开发、远程容器运行、Git、数据库、Redis、Scheduler、服务和部署边界
 
-> **远程验证基础设施**：远程临时验证数据库 `bz_stock_verify_<sha>` 与独立验证栈（verify-backend/frontend/workers）的合同见 [`rules/80-deployment-data-safety.md`](../../rules/80-deployment-data-safety.md) DS-110 / DS-111 / DS-112，以及 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §11。远程验证不等同于稳定运行部署，本地只发起控制命令与 SSH Tunnel。
+> 本文件拥有开发、验证和稳定运行三平面的产品要求。远程临时验证数据库 `bz_stock_verify_<sha>` 与独立验证栈的安全合同见 [`rules/80-deployment-data-safety.md`](../../rules/80-deployment-data-safety.md) DS-110 / DS-111 / DS-112；业务闭环的证据状态见 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §11。
 
 ## 1. 运行位置与承载方式
 
@@ -228,7 +228,7 @@ production 现有行为不得被意外改变。
 - 本地和 CI 不连接 `bz_stock` 运行测试；真实 PG 测试只在 `bz_stock_verify_<sha>` 运行。
 - 远程验证通过不会自动获得稳定运行部署或业务数据操作授权。
 - 本地任务不会进入远程队列。
-- 本地自动 Scheduler 关闭，但完整手动链路可用。
+- 本地自动 Scheduler 关闭；完整手动链路只在远程隔离验证环境可用。
 - 远程继续通过 Docker Compose 稳定运行正式服务。
 - 本地原生进程和远程容器复用同一业务代码和配置语义。
 - `dev` 推送不自动部署。

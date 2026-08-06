@@ -29,7 +29,7 @@
 |---|---|---|---|
 | AC-01 远程自动运行 | `backend/app/worker.py:scheduled_bars_refresh`（bars_scheduler Worker，CronTrigger 16:00）→ `after_close_orchestrator.create_after_close_run` | 已实现并核验 | `worker.py:L428-L480`；`after_close_orchestrator.py:L275-L352` |
 | AC-02 本地不自动调度 | `backend/app/main.py:lifespan` 不启动 Scheduler；Scheduler 仅在 `worker.py` 按 `WORKER_TYPE` 手动启动 | 已实现并核验 | Phase 2/3 本地启动日志；`config.py` 无自动 scheduler |
-| AC-03 本地完整手动调试 | `backend/app/api/admin_after_close.py` 创建/重试/恢复端点；`scripts/trigger_dsa_batch_small.py` | 已实现未运行核验 | API 路径存在；本地未启动 Worker 执行完整链路 |
+| AC-03 分平面调试与执行 | 本地 pure-unit/mock；远程验证栈运行 PG、Worker、migration 和完整链路 | 部分实现，远程待核验 | 本地不得启动真实盘后链；验证栈入口见 `scripts/ops/panji-verify-*` |
 | AC-04 日线盘后计算 | `after_close_orchestrator.py` 步骤 refreshing_daily + computing_features；checking_coverage 仅检查日线覆盖率 >= 0.9（Phase 5A 已移除 15m 阻塞） | 已实现并核验 | `after_close_orchestrator.py:L1277-L1334`；测试 `test_after_close_orchestrator.py::test_ac04_daily_ready_15m_missing_allows_proceed` / `::test_ac04_daily_missing_blocks` / `::test_ac04_no_intraday_readiness_in_after_close_source` |
 | AC-05 固定参数一次计算 | `dsa_selector.yaml` 参数 `allowed_scopes: [system]`；`create_batch_run` 使用 manifest 固定参数 | 已实现并核验 | `dsa_selector.yaml`；`strategy_batch_service.py` |
 | AC-06 Readiness 门槛 | `after_close_orchestrator.py:checking_coverage` → `BarsCoverageService.compute_daily_coverage`（Phase 5A：仅日线，15m intraday 工具保留在 `BarsCoverageService` 供其他链路使用，after-close 不再调用） | 已实现并核验 | `after_close_orchestrator.py:L1277-L1334`；测试同 AC-04 |
@@ -249,6 +249,8 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 | `NODE_CLUSTER_LOW_BARS` | `4000` | Node Cluster 完整质量门槛（250日×16根/日） | 个股详情实时计算 `compute_chip_status_for_stock` |
 
 - 000021 15m bars=354，不满足 500 最低门槛 → `chip_status=skipped + reason_code=M15_BARS_INSUFFICIENT + actual_bars=354 + required_bars=500`
+
+**目标差距（2026-08-06）**：当前实现仍在逐股计算前调用 `refresh_15min_bars`。PRD31 PC-20 与 PRD30 AC-18 要求改成“运行级有界 refresh → 冻结 cutoff/readiness → MDAS 批读 → 逐股计算”，因此该项不得标记为闭环。`15m` 必须继续更新，差距是刷新编排与批读方式，不是删除该周期。
 - 错误消息明确两个门槛的用途，避免混淆
 - 不修改门槛值，只统一文档与文案
 
@@ -751,6 +753,8 @@ _PIPELINE_STEPS（7步展示序列）：
 `degraded_ready` / `fully_ready`。关键判定顺序：blocked（mandatory 任一 unavailable）→
 pending（stock_core 未形成）→ core_ready（stock_core 就绪但其余 mandatory 未完成）→
 mandatory 全部就绪后分 fully_ready / degraded_ready。
+
+**目标差距（2026-08-06）**：PRD31 PC-51 新增 `mandatory_ready_enhancing`，用于 mandatory 已 ready 但增强任务仍 active/stale、尚未完成对账的阶段。当前 `evaluate_closure` 尚无该状态，容易过早落入 `degraded_ready`，需在后续代码修复及 DTO/前端合同中统一补齐。
 
 ### 13.3 chip 发布与血统（Commit D，[Corrective-3] 重写）
 

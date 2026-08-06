@@ -1,26 +1,25 @@
 # 复盘模块 PRD V1.0
 
 状态：已确认
-最后确认日期：2026-07-30
+最后确认日期：2026-08-06
 对应 Map：`../maps/70-review.md`
 需求所有权：复盘模块完整产品与工程合同（目标行为、数据契约、API、筛选器、归因、追踪、编排）
 
-> **V2.1 页面验收标准**：Review 页面必须满足 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §9 的"不等待 chip、显示 core+aggregation lineage"合同，以及 §10 的四类场景（尤其 B 异步增强、C 降级）。V2.1 真源为本文件引用的 31 PRD，不再引用参考源。
+> 本文件是 Review 指标、历史、横截面、归因、信号、发布和页面状态的唯一需求真源。[`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义 Review 与上游节点之间的依赖、lineage 和闭环场景，不替代本文件的 P/Q/U/C/V 公式及门禁。
 
 > 本文件是复盘模块的权威产品与工程合同。实现时不得根据页面方便性重新发明业务逻辑；前端不计算聚合变量、筛选器或归因结论。
 
-## 0. 背景与当前基线
+## 0. 领域输入
 
-现有系统已经具备：
+Review 依赖以下正式领域输入：
 
 - 个股第一金字塔：趋势、结构、动量为必选维度，筹码共识为可选维度；
-- 约250个交易日的第一金字塔历史状态；
-- board_analysis_snapshots：行业/概念板块的趋势、结构、动量、量能和事件分布；
-- factor_publications：核心和板块结果的发布指针；
-- /market 行情列表与 /stock/:symbol 个股详情；
-- BoardAnalysisPage.tsx：当前仅是板块分析列表与详情，不是完整复盘页。
+- 至少满足滚动窗口要求的第一金字塔历史状态和日线事实；
+- 行业/概念板块的趋势、结构、动量、量能、事件分布和 PIT membership；
+- 个股 core 与板块聚合的正式 publication lineage；
+- 行情列表、个股详情和板块详情的稳定导航身份。
 
-本需求不推翻现有板块聚合，而是在其上增加：
+Review 业务链为：
 
 第一金字塔与历史状态
 → 板块第二金字塔

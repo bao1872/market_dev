@@ -1,15 +1,15 @@
 # 盘后任务 PRD
 
-状态：已确认  
-最后确认日期：2026-07-26  
-对应 Map：`../maps/30-after-close.md`  
+状态：已确认
+最后确认日期：2026-08-06
+对应 Map：`../maps/30-after-close.md`
 需求所有权：盘后触发、readiness、编排、计算、校验、发布和补跑
 
-> **V2.1 正式真源**：本 PRD 的 V2.1 产品闭环（九节点 readiness、closure 定义、Granular restart 枚举、P1-3 readiness 完整性、端到端验收）的权威事实源为 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md)。本文件主要定义 `restart_from=daily_ready`（从 core 链开始），不替代 V2.1 完整 granular restart 合同；V2.1 临时验证库与验证栈见 `rules/80` DS-110/111/112。
+> 本文件拥有盘后触发、编排、恢复和发布行为；[`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只拥有跨域节点、运行身份、readiness、lineage 和产品闭环。两者冲突时按具体职责归属处理，不以总纲覆盖本文件编排细则。
 
 ## 1. 目标
 
-每个 A 股交易日完成所需数据准备、全市场日线因子和事件计算、结果校验和正式发布，并支持本地调试及远程补跑。
+每个 A 股交易日完成所需数据准备、全市场日线因子和事件计算、结果校验和正式发布，并支持本地纯单元调试及远程隔离验证、补跑。
 
 ## 2. 已确认需求
 
@@ -21,9 +21,9 @@
 
 本地自动 Scheduler 默认关闭。
 
-### AC-03 本地完整手动调试
+### AC-03 分平面调试与执行
 
-本地必须能够手动运行和调试完整盘后链路，包括单股、指定股票池和全市场。
+本地只用 pure unit、mock/fixture 调试单步骤和编排行为，不启动 Scheduler、正式 Worker、盘后编排或全市场任务。需要 PostgreSQL、跨 Worker、migration、发布指针或完整链路的验证，只能在按 SHA 隔离的远程验证环境执行；稳定运行补跑和业务数据写入必须另有明确授权。
 
 ### AC-04 日线盘后计算
 
@@ -111,7 +111,7 @@
 ## 3. 验收标准
 
 - 远程交易日任务可自动运行。
-- 本地不会因 Scheduler 自动触发，但可完整手动运行。
+- 本地不会因 Scheduler 自动触发，也不运行真实完整盘后链；完整手动验证在远程隔离验证环境执行。
 - 单股、股票池和全市场使用同一核心链路。
 - 未校验 run 不会成为正式发布结果。
 - 重复执行不会产生无法解释的重复发布。
@@ -223,7 +223,8 @@ V1 输入仅趋势、结构、动量、量能、结构事件和权威行业/概�
 
 ### AC-18：chip_consensus Worker
 
-- chip job 开始计算前必须刷新或确认目标交易日 `bars_15min` 已完成盘后更新，并校验最新 bar 交易日、预期时段覆盖和最低输入根数；
+- chip job 进入逐股计算前，必须先完成一次运行级、有界、可观测的 `bars_15min` 刷新阶段，再通过 MDAS 批量读取 canonical 数据；不得在逐股计算循环内执行无界全历史刷新；
+- 刷新阶段必须校验目标交易日、最后完成 bar、预期时段覆盖、最低输入根数及数据来源，并保存 coverage 和失败明细；
 - 15m 不新鲜或不足时必须记录结构化 reason、actual/required bars 和 source cutoff，不得回退到旧交易日 15m 或伪造成功；该结果只影响 chip readiness，不反改已经发布的 stock_core/review core；
 - chip_consensus 任务在现有 after-close worker 容器内领取执行，**不新增常驻容器**；
 - worker 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取 `queued` / `resume_queued` 的 `after_close_chip_consensus` 任务，`lease_epoch` fencing 防止旧 worker 覆盖新 worker 状态；

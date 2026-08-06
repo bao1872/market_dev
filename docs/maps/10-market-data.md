@@ -29,6 +29,8 @@
 | MD-09 | 存储分层待核验 | 未核验 | 未核验 |
 | MD-10 | 参见 `technical/data-storage.md` | 未核验 | 未核验 |
 | MD-11 | 修复和回填入口待核验 | 未核验 | 未核验 |
+| MD-12 | `bars_daily` / `bars_hourly` / `bars_15min` 及各 provider、刷新任务待完整核验 | 部分已知 | 现有表和调用路径存在；独立生命周期与来源合同未完整核验 |
+| MD-13 | 日线 core 见盘后编排；15m chip 见 `after_close_chip_consensus_service`；1h 消费方待核验 | 部分实现，有目标差距 | `maps/30-after-close.md` §11.7；PRD31 PC-03/PC-20 |
 
 ## 3. 数据源
 
@@ -82,4 +84,5 @@
 
 - pywencai 失败后曾使用管理员 CSV 路径；当前正式主备关系需核验。
 - 行业筛选不是仅限三级行业；当前标准化口径需核验。
-- 分钟线 readiness 是否仍参与盘后门槛需核验。
+- `15m` 不参与 stock core 门禁，但必须参与 chip 自身 readiness；当前逐股刷新尚未达到 PRD31 PC-20 的运行级有界刷新合同。
+- `1h` 的 provider、刷新频率、完整性和正式消费方尚未完成端到端核验。
