@@ -15,11 +15,31 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from dataclasses import dataclass, field
 from typing import Any
 
 # DSA projection codec schema 版本。bump 需新增 decode 分支并校验。
 CORE_ARTIFACT_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class DecodedCoreArtifact:
+    """codec 解码出的强类型 core artifact（替代 SimpleNamespace，供 map_dsa_projection 消费）。
+
+    [CHANGE-20260805-CP4A-CP3] 强类型约束：字段缺失在构造/解码时即失败，而非运行时。
+    """
+
+    payload: dict[str, Any]
+    visual: dict[str, Any]
+    availability: dict[str, str]
+    parameter_hash: str | None
+    source_core_run_id: str | None
+    algorithm_versions: dict[str, str]
+    hashes: dict[str, str | None] = field(default_factory=dict)
+    instrument_id: Any = None
+    trade_date: Any = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = CORE_ARTIFACT_SCHEMA_VERSION
 
 
 class CoreArtifactDecodeError(ValueError):
@@ -58,12 +78,14 @@ def encode_dsa_projection_to_summary(
 
 def decode_dsa_projection_from_summary(
     summary_payload: dict[str, Any],
-) -> SimpleNamespace:
-    """从 snapshot summary_payload 的 `dsaProjection` 重建 DSA projection artifact。
+    *,
+    instrument_id: Any = None,
+    trade_date: Any = None,
+) -> DecodedCoreArtifact:
+    """从 snapshot summary_payload 的 `dsaProjection` 重建强类型 DSA projection artifact。
 
-    返回 `map_dsa_projection` 兼容的 SimpleNamespace（属性访问）：
-        .payload={"dsa": {...}}  .visual={...}  .availability={...}
-        .hashes={...}  .parameter_hash  .source_core_run_id  .algorithm_versions
+    返回 `DecodedCoreArtifact`（强类型 dataclass，字段缺失在构造时即失败）。
+    instrument_id/trade_date 由调用方（snapshot 行）提供。
 
     Raises:
         CoreArtifactDecodeError: 缺 dsaProjection 块、schemaVersion 不匹配、lineage 缺失
@@ -83,7 +105,7 @@ def decode_dsa_projection_from_summary(
     if not lineage.get("sourceCoreRunId"):
         raise CoreArtifactDecodeError("dsaProjection lineage 缺 sourceCoreRunId")
 
-    return SimpleNamespace(
+    return DecodedCoreArtifact(
         payload={"dsa": dict(block.get("dsaProjectionPayload") or {})},
         visual=dict(block.get("dsaVisualContract") or {}),
         availability=dict(block.get("availability") or {}),
@@ -95,11 +117,13 @@ def decode_dsa_projection_from_summary(
         parameter_hash=lineage.get("parameterHash"),
         source_core_run_id=lineage.get("sourceCoreRunId"),
         algorithm_versions=dict(lineage.get("algorithmVersions") or {}),
+        instrument_id=instrument_id,
+        trade_date=trade_date,
     )
 
 
 def validate_lineage(
-    decoded: SimpleNamespace,
+    decoded: DecodedCoreArtifact,
     *,
     expected_core_run_id: str | None,
     expected_parameter_hash: str | None,

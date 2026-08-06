@@ -63,10 +63,11 @@ def test_codec_decoded_feeds_map_dsa_projection() -> None:
     from datetime import date
 
     summary = {"dsaProjection": _encode_summary()}
-    decoded = decode_dsa_projection_from_summary(summary)
-    # map_dsa_projection 需要 instrument_id/trade_date（来自 snapshot 行）
-    decoded.instrument_id = uuid.uuid4()
-    decoded.trade_date = date(2026, 7, 30)
+    decoded = decode_dsa_projection_from_summary(
+        summary,
+        instrument_id=uuid.uuid4(),
+        trade_date=date(2026, 7, 30),
+    )
     record = map_dsa_projection(
         decoded,
         requirement="required_compatibility",

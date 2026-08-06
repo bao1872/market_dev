@@ -2731,10 +2731,9 @@ async def execute_after_close_run(
                                 for snap in snap_rows:
                                     decoded = decode_dsa_projection_from_summary(
                                         snap.summary_payload or {},
+                                        instrument_id=snap.instrument_id,
+                                        trade_date=snap.trade_date,
                                     )
-                                    # map_dsa_projection 需要 instrument_id/trade_date
-                                    decoded.instrument_id = snap.instrument_id
-                                    decoded.trade_date = snap.trade_date
                                     artifacts[snap.instrument_id] = decoded
                                 from app.services.strategy_batch_service import (
                                     persist_precomputed_dsa_results,
