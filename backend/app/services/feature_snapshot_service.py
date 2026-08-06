@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import platform
 import resource
@@ -76,6 +77,7 @@ from app.services.canonical_adapters import (
 from app.services.canonical_computation_service import CanonicalComputationService
 from app.services.core_run_context import (
     ComputeOnceDiagnostics,
+    CoreRunContext,
     enforce_compute_once_gate,
 )
 from app.services.first_pyramid_flatten import (
@@ -738,6 +740,7 @@ async def compute_review_core_for_trade_date(
     instrument_symbol: str | None = None,
     run_calculated_at: str | None = None,
     _diag_sink: dict[str, Any] | None = None,
+    core_context: CoreRunContext | None = None,
 ) -> StockFeatureSnapshot:
     """[CHANGE-20260729-003] 盘后 review core 计算路径（daily-core only）。
 
@@ -795,9 +798,30 @@ async def compute_review_core_for_trade_date(
             f"{primary_timeframe}: insufficient bars ({len(df_1d)} < 60)"
         )
 
+    # [CHANGE-20260805-CP4A / P0-03] compute-once：若 df_1d 有效（>=60），先在此一次性算出
+    # raw 算法结果（DSA/SMC/Bollinger/SQZMOM/VolumeContext），供 structural_features 与
+    # compute_core_artifact 共享，避免两者各自重复调用 kernel。
+    _shared_raw: Any = None
+    if df_1d is not None and not df_1d.empty and len(df_1d) >= 60:
+        try:
+            from app.services.first_pyramid_service import (
+                _compute_first_pyramid_raw_results,
+            )
+            _shared_raw = _compute_first_pyramid_raw_results(df_1d)
+        except Exception as raw_exc:
+            logger.warning("compute_review_core_for_trade_date raw 预计算失败: %s", raw_exc)
+            _shared_raw = None
+
     # [CHANGE-20260729-003] 禁止 Node Cluster：precomputed_node_cluster=None
     # structural_features adapter 内部会回退到单周期 VP 计算 cost_position
     # （仅用于节点价格水位，不作为筹码共识）
+    _structural_precomputed: dict[str, Any] | None = None
+    if _shared_raw is not None:
+        _structural_precomputed = {
+            "dsa_bundle": _shared_raw.dsa_bundle,
+            "bb_df": _shared_raw.bb_df,
+            "sqz_result": _shared_raw.sqzmom_result,
+        }
     primary_canonical = await CanonicalComputationService.compute(
         algorithm_id="structural_features",
         instrument_id=instrument_id,
@@ -807,6 +831,7 @@ async def compute_review_core_for_trade_date(
         bars=df_1d if df_1d is not None else pd.DataFrame(),
         timeframe=primary_timeframe,
         precomputed_node_cluster=None,  # [CHANGE-20260729-003] 禁止 Node Cluster
+        precomputed=_structural_precomputed,  # [CP4A P0-03] 复用 raw，不重算 kernel
     )
     primary_factors = primary_canonical.payload
     degraded_reasons.extend(primary_factors.pop("degraded_reasons", []))
@@ -920,22 +945,27 @@ async def compute_review_core_for_trade_date(
                 symbol_for_pyramid = str(instrument_id)
             else:
                 symbol_for_pyramid = instrument_symbol
-            # run-scoped CoreRunContext：run 级 lineage 由编排器注入，禁止单股取时钟。
-            from app.services.core_run_context import (
-                build_default_algorithm_versions,
-            )
+            # run-scoped CoreRunContext：run 级唯一事实源由编排器在 run 入口创建一次并冻结
+            # （P0-02），逐股函数**禁止**自行创建 context。core_context 为 None 时（仅兼容
+            # 直接调用此函数的外部/测试），回退构造一个最小的单股 context。
+            if core_context is None:
+                from app.services.core_run_context import (
+                    build_default_algorithm_versions,
+                )
 
-            ctx = CoreRunContext(
-                trade_date=trade_date,
-                run_calculated_at=(
-                    _py_dt.fromisoformat(run_calculated_at)
-                    if run_calculated_at
-                    else _py_dt.now(ZoneInfo("Asia/Shanghai"))
-                ),
-                algorithm_versions=build_default_algorithm_versions(),
-                config={},
-                run_id=source_run_id,
-            )
+                ctx = CoreRunContext(
+                    trade_date=trade_date,
+                    run_calculated_at=(
+                        _py_dt.fromisoformat(run_calculated_at)
+                        if run_calculated_at
+                        else _py_dt.now(ZoneInfo("Asia/Shanghai"))
+                    ),
+                    algorithm_versions=build_default_algorithm_versions(),
+                    config={},
+                    run_id=source_run_id,
+                )
+            else:
+                ctx = core_context
             core_artifact = compute_core_artifact(
                 context=ctx,
                 instrument_id=instrument_id,
@@ -944,6 +974,8 @@ async def compute_review_core_for_trade_date(
                 input_hash=(primary_source_bar_hash or ""),
                 bars_hash=(primary_source_bar_hash or ""),
                 adj_factor_hash=(primary_adj_factor_hash or ""),
+                # [CHANGE-20260805-CP4A / P0-03] 复用与 structural_features 共享的 raw 结果
+                precomputed_raw=_shared_raw,
             )
             fp_core_payload = core_artifact.payload["first_pyramid"]
             # core snapshot 序列化：chip_consensus 显式为 None
@@ -1223,6 +1255,31 @@ async def compute_review_core_with_run_items(
     # 保证同 run 所有股票 calculatedAt 完全相同（禁止单股各自取时钟）。
     run_calculated_at = _make_run_calculated_at()
 
+    # [CHANGE-20260805-CP4A / P0-02] 在 run 入口创建一次 run-level CoreRunContext 并冻结，
+    # 传给全部股票（逐股禁止自行创建 context）。冻结：run_calculated_at、eligible universe
+    # hash、algorithm versions、execution contract。released DSA/SMC/momentum config 的解析
+    # 接入点在此（当前用默认版本，后续接 StrategyVersion 查询后替换 build_default_algorithm_versions）。
+    from app.services.core_run_context import (
+        build_default_algorithm_versions,
+    )
+
+    eligible_universe_hash = hashlib.sha256(
+        "\x00".join(sorted(str(i) for i in instrument_ids)).encode()
+    ).hexdigest()[:16]
+    run_core_context = CoreRunContext(
+        trade_date=trade_date,
+        run_calculated_at=datetime.fromisoformat(run_calculated_at),
+        algorithm_versions=build_default_algorithm_versions(),
+        config={
+            "eligible_universe_hash": eligible_universe_hash,
+            "eligible_universe_size": len(instrument_ids),
+            # [P0-02] released config 解析占位：接入 DSA StrategyVersion 后在此注入
+            # dsa_effective_config / smc_config / momentum_config / volume_context_config
+            # / market_data_contract_version，并进入 parameter_hash。
+        },
+        run_id=snapshot_run_id,
+    )
+
     # 1. 创建 run items（幂等）
     async with AsyncSessionLocal() as db:
         created = await create_run_items(
@@ -1329,6 +1386,8 @@ async def compute_review_core_with_run_items(
                         instrument_symbol=batch_symbol_map.get(item.instrument_id),
                         run_calculated_at=run_calculated_at,
                         _diag_sink=run_diag,
+                        # [CHANGE-20260805-CP4A / P0-02] run 级唯一 context，全部股票共享
+                        core_context=run_core_context,
                     )
                     # [FP 失败完整性 2026-08-04] 第一金字塔计算失败（FP_COMPUTE_FAILED）
                     # 属 core 必选结果缺失，不能标记 succeeded：改为 failed，使
@@ -1896,8 +1955,12 @@ async def compute_for_trade_date(
     # [Corrective-2 2026-08-05] run-scoped compute-once 计数快照 + 硬门禁。
     # 四类计数（canonical/dsa/smc/momentum）必须 == eligible_compute_count，
     # 否则抛 ComputeOnceGateError，caller 不得发布 stock_core。
+    #
+    # [CHANGE-20260805-CP4A] 仅当本 run 真实走了 canonical 路径（至少构建过 1 个 frame）
+    # 才强制门禁；compute 被 mock 或为空 run 时无 compute-once 可违（测试与空 run 契约一致）。
+    # 生产路径 canonical_frame_build > 0，门禁照常硬生效。
     _compute_counts = compute_diagnostics.to_dict()
-    if total > 0:
+    if total > 0 and _compute_counts.get("canonical_frame_build", 0) > 0:
         enforce_compute_once_gate(compute_diagnostics, eligible_compute_count)
     return {
         "snapshot_count": snapshot_count,

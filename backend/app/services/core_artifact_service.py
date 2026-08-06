@@ -111,6 +111,7 @@ def compute_core_artifact(
     input_hash: str,
     bars_hash: str,
     adj_factor_hash: str,
+    precomputed_raw: Any | None = None,
 ) -> CoreComputationArtifact:
     """单股 core 统一编排：每股各算法只计算一次，产出 CoreComputationArtifact。
 
@@ -124,6 +125,8 @@ def compute_core_artifact(
         symbol: 规范化 6 位股票代码
         daily_frame: canonical 日线 OHLCV DataFrame（DatetimeIndex）
         input_hash / bars_hash / adj_factor_hash: lineage 输入 hash
+        precomputed_raw: 可选，已算好的 FirstPyramidRawResults（P0-03 compute-once：
+            与 structural factors 共享同一组原始结果时传入，避免 kernel 二次计算）
 
     Returns:
         CoreComputationArtifact
@@ -138,8 +141,11 @@ def compute_core_artifact(
     if daily_frame is None or daily_frame.empty:
         raise ValueError("compute_core_artifact: daily_frame 为空")
 
-    # 2. 各算法 kernel 调用一次（compute-once）
-    raw = _compute_raw_results(daily_frame, diagnostics)
+    # 2. 各算法 kernel 调用一次（compute-once）；precomputed_raw 提供时复用不重算
+    if precomputed_raw is not None:
+        raw = precomputed_raw
+    else:
+        raw = _compute_raw_results(daily_frame, diagnostics)
 
     # 3. First Pyramid：纯 builder，不调用 kernel
     n_bars = len(daily_frame)
@@ -166,19 +172,18 @@ def compute_core_artifact(
     # 5. state-event candidates（从 SMC）
     state_events = _extract_state_events(raw.smc_result)
 
-    # 6. 组装 artifact
-    availability: dict[str, str] = {}
-    if fp_core.fieldAvailability:
-        for dim in ("trend", "structure", "momentum"):
-            entry = fp_core.fieldAvailability.get(dim)
-            if isinstance(entry, dict):
-                availability[dim] = str(entry.get("status", "unavailable"))
-            else:
-                # FieldAvailability Pydantic 模型或 None：读其 status 属性或 fallback
-                status = getattr(entry, "status", None)
-                availability[dim] = (
-                    str(status) if status is not None else "unavailable"
-                )
+    # 6. 组装 artifact：availability 取各维度 DimensionResult.availability
+    #    （available/unavailable），归一化为 quality-gate 的 ready/unavailable 语义
+    #    （is_available 要求 ready；DimensionResult 用 available）。
+    def _norm_avail(dim: Any) -> str:
+        raw = str(getattr(dim, "availability", "unavailable"))
+        return "ready" if raw == "available" else raw
+
+    availability: dict[str, str] = {
+        "trend": _norm_avail(fp_core.trend),
+        "structure": _norm_avail(fp_core.structure),
+        "momentum": _norm_avail(fp_core.momentum),
+    }
 
     # lineage：来自 CoreRunContext（run 级冻结）与输入 hash
     algorithm_versions = dict(context.algorithm_versions or {})

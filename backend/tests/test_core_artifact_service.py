@@ -152,3 +152,105 @@ def test_compute_core_artifact_empty_frame_raises() -> None:
             bars_hash="bars",
             adj_factor_hash="adj",
         )
+
+
+# ============================================================================
+# [CHANGE-20260805-CP4A / P0-03] compute-once spy：算法 kernel 每股只算一次
+# ============================================================================
+
+
+def test_compute_core_artifact_kernel_spy_once(monkeypatch) -> None:
+    """无 precomputed 时，每股 DSA/SMC/Bollinger/SQZMOM kernel 恰好一次。"""
+    from app.services import first_pyramid_service as fps
+
+    calls = {"dsa": 0, "smc": 0, "bollinger": 0, "sqz": 0}
+
+    real_dsa = fps.compute_dsa_bundle
+    real_smc = fps.compute_smc_pine
+    real_bb = fps.compute_bollinger_features
+    real_sqz = fps.compute_sqzmom_lb
+
+    def _spy_dsa(*a, **kw):
+        calls["dsa"] += 1
+        return real_dsa(*a, **kw)
+
+    def _spy_smc(*a, **kw):
+        calls["smc"] += 1
+        return real_smc(*a, **kw)
+
+    def _spy_bb(*a, **kw):
+        calls["bollinger"] += 1
+        return real_bb(*a, **kw)
+
+    def _spy_sqz(*a, **kw):
+        calls["sqz"] += 1
+        return real_sqz(*a, **kw)
+
+    monkeypatch.setattr(fps, "compute_dsa_bundle", _spy_dsa)
+    monkeypatch.setattr(fps, "compute_smc_pine", _spy_smc)
+    monkeypatch.setattr(fps, "compute_bollinger_features", _spy_bb)
+    monkeypatch.setattr(fps, "compute_sqzmom_lb", _spy_sqz)
+
+    compute_core_artifact(
+        context=_context(),
+        instrument_id="i1",
+        symbol="000001",
+        daily_frame=_synthetic_daily(),
+        input_hash="in",
+        bars_hash="bars",
+        adj_factor_hash="adj",
+    )
+
+    assert calls == {"dsa": 1, "smc": 1, "bollinger": 1, "sqz": 1}
+
+
+def test_compute_core_artifact_kernel_spy_reused(monkeypatch) -> None:
+    """提供 precomputed_raw 时，kernel 不再重算（P0-03：与 structural 共享 raw）。"""
+    from app.services import first_pyramid_service as fps
+    from app.services.first_pyramid_service import _compute_first_pyramid_raw_results
+
+    # 先无 spy 构建 raw（供后续传入 precomputed_raw）
+    df = _synthetic_daily()
+    raw = _compute_first_pyramid_raw_results(df)
+
+    calls = {"dsa": 0, "smc": 0, "bollinger": 0, "sqz": 0}
+    real_dsa = fps.compute_dsa_bundle
+    real_smc = fps.compute_smc_pine
+    real_bb = fps.compute_bollinger_features
+    real_sqz = fps.compute_sqzmom_lb
+
+    def _spy_dsa(*a, **kw):
+        calls["dsa"] += 1
+        return real_dsa(*a, **kw)
+
+    def _spy_smc(*a, **kw):
+        calls["smc"] += 1
+        return real_smc(*a, **kw)
+
+    def _spy_bb(*a, **kw):
+        calls["bollinger"] += 1
+        return real_bb(*a, **kw)
+
+    def _spy_sqz(*a, **kw):
+        calls["sqz"] += 1
+        return real_sqz(*a, **kw)
+
+    monkeypatch.setattr(fps, "compute_dsa_bundle", _spy_dsa)
+    monkeypatch.setattr(fps, "compute_smc_pine", _spy_smc)
+    monkeypatch.setattr(fps, "compute_bollinger_features", _spy_bb)
+    monkeypatch.setattr(fps, "compute_sqzmom_lb", _spy_sqz)
+
+    # 传入 precomputed_raw 后，compute_core_artifact 不得再调用任何 kernel
+    compute_core_artifact(
+        context=_context(),
+        instrument_id="i1",
+        symbol="000001",
+        daily_frame=df,
+        input_hash="in",
+        bars_hash="bars",
+        adj_factor_hash="adj",
+        precomputed_raw=raw,
+    )
+
+    # kernel 0 次：全部复用 precomputed_raw（structural 与 pyramid 共享同一份 raw）
+    assert calls == {"dsa": 0, "smc": 0, "bollinger": 0, "sqz": 0}

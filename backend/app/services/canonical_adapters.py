@@ -416,6 +416,7 @@ def compute_structural_features_adapter(
     *,
     precomputed_node_cluster: Any | None = None,
     diagnostics: Any | None = None,
+    precomputed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Structural Features 统一 adapter — wraps structural_factor_service._compute_all_factors_for_bars。
 
@@ -455,6 +456,7 @@ def compute_structural_features_adapter(
         warmup_notes,
         precomputed_node_cluster=precomputed_node_cluster,
         diagnostics=diagnostics,
+        precomputed=precomputed,
     )
     result["degraded_reasons"] = degraded_reasons
     result["warmup_notes"] = warmup_notes

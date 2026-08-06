@@ -158,7 +158,9 @@ def _compute_participation_factors(
 # 因子组 2：动量/波动 (BB + SQZMOM)
 # =============================================================================
 def _compute_volatility_momentum_factors(
-    bars: pd.DataFrame, atr: np.ndarray | None = None
+    bars: pd.DataFrame,
+    atr: np.ndarray | None = None,
+    precomputed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """计算动量/波动因子 (Bollinger Bands + SQZMOM_LB)。
 
@@ -198,11 +200,17 @@ def _compute_volatility_momentum_factors(
         else None
     )
 
-    # Bollinger Bands
-    mid, upper, lower = bollinger(bars, _BB_WIN, _BB_K)
-    mid_arr = mid.to_numpy(dtype=float)
-    upper_arr = upper.to_numpy(dtype=float)
-    lower_arr = lower.to_numpy(dtype=float)
+    # Bollinger Bands（P0-03 compute-once：precomputed 提供时复用，不重算 kernel）
+    if precomputed and precomputed.get("bb_df") is not None:
+        bb_df = precomputed["bb_df"]
+        mid_arr = bb_df["mid"].to_numpy(dtype=float)
+        upper_arr = bb_df["upper"].to_numpy(dtype=float)
+        lower_arr = bb_df["lower"].to_numpy(dtype=float)
+    else:
+        mid, upper, lower = bollinger(bars, _BB_WIN, _BB_K)
+        mid_arr = mid.to_numpy(dtype=float)
+        upper_arr = upper.to_numpy(dtype=float)
+        lower_arr = lower.to_numpy(dtype=float)
     last_mid = mid_arr[-1]
     last_upper = upper_arr[-1]
     last_lower = lower_arr[-1]
@@ -227,11 +235,14 @@ def _compute_volatility_momentum_factors(
                 (last_close - last_lower) / last_atr
             )
 
-    # SQZMOM_LB
-    opens = bars["open"].to_numpy(dtype=float) if "open" in bars.columns else closes
-    highs = bars["high"].to_numpy(dtype=float) if "high" in bars.columns else closes
-    lows = bars["low"].to_numpy(dtype=float) if "low" in bars.columns else closes
-    sqz = compute_sqzmom_lb(opens, highs, lows, closes)
+    # SQZMOM_LB（P0-03 compute-once：precomputed 提供时复用，不重算 kernel）
+    if precomputed and precomputed.get("sqz_result") is not None:
+        sqz = precomputed["sqz_result"]
+    else:
+        opens = bars["open"].to_numpy(dtype=float) if "open" in bars.columns else closes
+        highs = bars["high"].to_numpy(dtype=float) if "high" in bars.columns else closes
+        lows = bars["low"].to_numpy(dtype=float) if "low" in bars.columns else closes
+        sqz = compute_sqzmom_lb(opens, highs, lows, closes)
     val_list = sqz.get("val", [])
     # V1.8 sqz_on / sqz_off（bool 列表，取最后一根 bar）
     sqz_on_list = sqz.get("sqzOn", []) or []
@@ -1610,6 +1621,7 @@ def _compute_all_factors_for_bars(
     *,
     precomputed_node_cluster: NodeClusterProfileResult | None = None,
     diagnostics: Any | None = None,
+    precomputed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """计算单周期所有因子组，每组独立异常隔离。
 
@@ -1655,11 +1667,14 @@ def _compute_all_factors_for_bars(
         degraded_reasons.append(f"{timeframe}: atr failed: {exc}")
         logger.warning("%s ATR 计算失败: %s", timeframe, exc)
 
-    # 1. DSA 段质量
+    # 1. DSA 段质量（P0-03 compute-once：precomputed 提供时复用，不重算 kernel）
     try:
         if is_canonical and diagnostics is not None:
             diagnostics.bump("dsa")
-        dsa_bundle = compute_dsa_bundle(bars, {})
+        if precomputed and precomputed.get("dsa_bundle") is not None:
+            dsa_bundle = precomputed["dsa_bundle"]
+        else:
+            dsa_bundle = compute_dsa_bundle(bars, {})
         factors["dsa_segment"] = _compute_dsa_segment_factors(bars, dsa_bundle, atr)
     except Exception as exc:
         degraded_reasons.append(f"{timeframe}: dsa_segment failed: {exc}")
@@ -1681,11 +1696,13 @@ def _compute_all_factors_for_bars(
         degraded_reasons.append(f"{timeframe}: cost_position failed: {exc}")
         logger.warning("%s 成本/节点计算失败: %s", timeframe, exc)
 
-    # 4. 动量/波动
+    # 4. 动量/波动（P0-03 compute-once：precomputed 提供 bb_df/sqz_result 时复用）
     try:
         if is_canonical and diagnostics is not None:
             diagnostics.bump("momentum")
-        factors["volatility_momentum"] = _compute_volatility_momentum_factors(bars, atr)
+        factors["volatility_momentum"] = _compute_volatility_momentum_factors(
+            bars, atr, precomputed=precomputed
+        )
     except Exception as exc:
         degraded_reasons.append(f"{timeframe}: volatility_momentum failed: {exc}")
         logger.warning("%s 动量/波动计算失败: %s", timeframe, exc)
