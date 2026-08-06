@@ -351,7 +351,9 @@ def map_dsa_projection_with_context(
 
 
 def build_dsa_projection_payload(
-    artifact: CoreComputationArtifact,
+    # [CHANGE-20260806-CP4A.1 / Item 4] 接受结构兼容的 CoreComputationArtifact 或
+    # DecodedCoreArtifact（正常链与 restart 链共用同一 projection 合同）
+    artifact: Any,
     *,
     requirement: str = DSA_PROJECTION_REQUIREMENT_REQUIRED,
     expected_core_run_id: Any | None = None,

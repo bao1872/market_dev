@@ -22,9 +22,10 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
 
 # ===== 版本常量（集中治理，避免各处字符串漂移）=====
 DSA_ALGORITHM_VERSION = "dsa-v1"
