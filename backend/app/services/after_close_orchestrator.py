@@ -2711,39 +2711,24 @@ async def execute_after_close_run(
                                     )
                                 strategy_version_id = dsa_run_row.strategy_version_id
                                 # 从持久化 snapshot 重建 artifacts（不重算算法）
-                                from app.models.stock_feature_snapshot import (
-                                    StockFeatureSnapshot as _SnapModel,
+                                # [CHANGE-20260805-CP4A-CP3 / P0-04] 用正式 CoreArtifactRepository
+                                # 按固定批次（200）分页读取 snapshot + decode + persist projection，
+                                # 禁止一次把全市场装入内存。不再依赖 recovery 的 _artifact_from_snapshot。
+                                from app.services.core_artifact_repository import (
+                                    CoreArtifactRepository,
                                 )
-                                snap_rows = (
-                                    await db.execute(
-                                        select(_SnapModel).where(
-                                            _SnapModel.source_run_id == snapshot_run_id,
-                                        )
-                                    )
-                                ).scalars().all()
-                                # [CHANGE-20260805-CP4A-CP3 / P0-04] 用正式 CoreArtifactCodec
-                                # 从 versioned summary 重建 DSA projection，不再依赖 recovery 的
-                                # _artifact_from_snapshot。
-                                from app.services.core_artifact_codec import (
-                                    decode_dsa_projection_from_summary,
-                                )
-                                artifacts: dict[uuid.UUID, Any] = {}
-                                for snap in snap_rows:
-                                    decoded = decode_dsa_projection_from_summary(
-                                        snap.summary_payload or {},
-                                        instrument_id=snap.instrument_id,
-                                        trade_date=snap.trade_date,
-                                    )
-                                    artifacts[snap.instrument_id] = decoded
                                 from app.services.strategy_batch_service import (
                                     persist_precomputed_dsa_results,
                                 )
-                                await persist_precomputed_dsa_results(
-                                    db,
-                                    run_id=dsa_run_id,
-                                    artifacts=artifacts,
+                                repo = CoreArtifactRepository(
+                                    db, batch_size=200,
+                                )
+                                await repo.project_dsa_batch(
+                                    source_core_run_id=snapshot_run_id,
+                                    dsa_run_id=dsa_run_id,
                                     trade_date=trade_date,
                                     strategy_version_id=strategy_version_id,
+                                    persist_fn=persist_precomputed_dsa_results,
                                     job_run_id=job_run_id,
                                 )
                                 await db.commit()
