@@ -202,10 +202,18 @@ def _compute_volatility_momentum_factors(
 
     # Bollinger Bands（P0-03 compute-once：precomputed 提供时复用，不重算 kernel）
     if precomputed and precomputed.get("bb_df") is not None:
+        # [CHANGE-20260806 / PG-暴露缺陷] 复用 bundle 的 bb_df：compute_bollinger_features 输出
+        # 用 bb_mid/bb_upper/bb_lower 列名（与 _build_momentum_dimension 一致），非 mid/upper/lower。
+        # 同时兼容旧 bollinger() 返回的 mid/upper/lower 列名，避免 KeyError。
         bb_df = precomputed["bb_df"]
-        mid_arr = bb_df["mid"].to_numpy(dtype=float)
-        upper_arr = bb_df["upper"].to_numpy(dtype=float)
-        lower_arr = bb_df["lower"].to_numpy(dtype=float)
+        if "bb_mid" in bb_df.columns:
+            mid_arr = bb_df["bb_mid"].to_numpy(dtype=float)
+            upper_arr = bb_df["bb_upper"].to_numpy(dtype=float)
+            lower_arr = bb_df["bb_lower"].to_numpy(dtype=float)
+        else:
+            mid_arr = bb_df["mid"].to_numpy(dtype=float)
+            upper_arr = bb_df["upper"].to_numpy(dtype=float)
+            lower_arr = bb_df["lower"].to_numpy(dtype=float)
     else:
         mid, upper, lower = bollinger(bars, _BB_WIN, _BB_K)
         mid_arr = mid.to_numpy(dtype=float)

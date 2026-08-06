@@ -173,8 +173,26 @@ def decode_dsa_projection_from_summary(
     """
     block = (summary_payload or {}).get("dsaProjection")
     if not isinstance(block, dict):
+        # [CHANGE-20260806 / PG-暴露缺陷] 向后兼容：旧版本 snapshot（如 seed 写的）summary 只含
+        # first_pyramid.trend.continuousFactors，无 dsaProjection 块。从 first_pyramid 重建 DSA
+        # projection（dsa_vwap/regime_value/dsa_dir_bars 在 continuousFactors 中），避免硬失败。
+        fp = (summary_payload or {}).get("first_pyramid") or {}
+        trend = fp.get("trend") or {}
+        cf = trend.get("continuousFactors") or {}
+        if cf:
+            return DecodedCoreArtifact(
+                payload={"dsa": dict(cf)},
+                visual={"dsa_vwap": cf.get("dsa_vwap")},
+                availability=dict(fp.get("fieldAvailability") or {}),
+                hashes={},
+                parameter_hash=fp.get("parameterHash"),
+                source_core_run_id=fp.get("sourceRunId"),
+                algorithm_versions=dict(fp.get("algorithmVersions") or {}),
+                instrument_id=instrument_id,
+                trade_date=trade_date,
+            )
         raise CoreArtifactDecodeError(
-            "summary_payload 缺 dsaProjection 块（可能由旧版本写出，需重算）"
+            "summary_payload 缺 dsaProjection 块且无 first_pyramid 可回退（需重算）"
         )
     schema_version = block.get("schemaVersion")
     if schema_version != CORE_ARTIFACT_SCHEMA_VERSION:

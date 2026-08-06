@@ -35,18 +35,21 @@ class StockCorePublicationError(RuntimeError):
     """发布失败（quality/fencing/coverage 任一不满足）。"""
 
 
-def _has_supersede_columns(db: Any) -> bool:
-    """探测 factor_publications 是否已含 supersede/fencing 列（Migration 087 后为 True）。"""
+async def _has_supersede_columns(db: Any) -> bool:
+    """探测 factor_publications 是否已含 supersede/fencing 列（Migration 087 后为 True）。
+
+    [CHANGE-20260806 / PG-暴露缺陷] 原实现用**同步** db.execute 在 async session 上调用，
+    psycopg async 会话同步 execute 抛错 → 恒返回 False → Migration 087 被判未应用 →
+    真实盘后链 fail-closed 拒绝发布。改为 async await。
+    """
     try:
-        cols = {
-            row[0]
-            for row in db.execute(
-                text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'factor_publications'"
-                )
+        result = await db.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'factor_publications'"
             )
-        }
+        )
+        cols = {row[0] for row in result}
         return {"superseded_by", "publish_worker_id"}.issubset(cols)
     except Exception:  # noqa: BLE001
         return False
@@ -95,7 +98,7 @@ async def validate_fencing(
 
     依赖 Migration 087 的 publish_worker_id / publish_lease_epoch 列；未迁移时跳过 fencing。
     """
-    if not _has_supersede_columns(db):
+    if not await _has_supersede_columns(db):
         return
     row = (
         await db.execute(
@@ -150,9 +153,14 @@ async def publish_stock_core_atomically(
         publication_kind=publication_kind, worker_id=worker_id, lease_epoch=lease_epoch,
     )
 
-    has_sup = _has_supersede_columns(db)
+    has_sup = await _has_supersede_columns(db)
 
     # 3. 旧 pointer（当前有效）→ supersede
+    # [CHANGE-20260806-CP4A-Amendment / PG-暴露缺陷] FOR UPDATE 行锁：两个并发发布同时读到同一
+    # 旧 pointer，需先锁行再 supersede+insert。无锁时并发发布都会读到旧行并各自插入新行 → partial
+    # unique 冲突，但冲突结果不确定（谁赢取决于时序）。加行锁后事务串行化：先提交者 supersede 旧行并
+    # 插入新 current；后到者 FOR UPDATE 重新读取时旧行已 superseded（不再命中 superseded_by IS NULL），
+    # 返回 None → 不再 supersede，其 insert 新行与先提交者冲突 → 唯一约束拒绝 → **并发只成功一个**。
     old_row = (
         await db.execute(
             select(FactorPublication).where(
@@ -160,12 +168,20 @@ async def publish_stock_core_atomically(
                 FactorPublication.trade_date == trade_date,
                 FactorPublication.publication_kind == publication_kind,
                 column("superseded_by").is_(None),  # 动态列（Migration 087 后存在）
-            )
+            ).with_for_update()  # FOR UPDATE：锁定当前有效 pointer 行，串行化并发发布
         )
     ).scalar_one_or_none() if has_sup else None
 
-    # 4. 写新 publication pointer
+    # 4. 写新 publication pointer（partial unique：同一 scope/date/kind 仅一个 superseded_by IS NULL）
+    if not has_sup:
+        # [CHANGE-20260806 / P0-C] Migration 087 缺失 → fail-closed，禁止发布。
+        raise StockCorePublicationError(
+            "STOCK_CORE_PUBLICATION_SCHEMA_NOT_READY: "
+            "Migration 087 未应用（缺 supersede/fencing 列），禁止 stock_core 发布"
+        )
     pub = FactorPublication(
+        id=uuid4(),  # [PG-暴露缺陷] 预生成 id：先 supersede 旧行（写入 pub.id），再插入新行，
+        # 否则新行 superseded_by IS NULL 与旧行（也是 NULL）同时命中 partial unique 索引冲突。
         scope_type="market" if scope_key == "market" else "instrument",
         scope_key=scope_key,
         trade_date=trade_date,
@@ -174,23 +190,15 @@ async def publish_stock_core_atomically(
         data_run_id=snapshot_run_id,
         coverage_ratio=coverage_ratio,
         published_at=datetime.now(UTC),
+        publish_worker_id=worker_id,
+        publish_lease_epoch=int(lease_epoch),
     )
-    if has_sup:
-        pub.publish_worker_id = worker_id
-        pub.publish_lease_epoch = int(lease_epoch)
-        db.add(pub)
-        await db.flush()  # 生成 pub.id 供 supersede/audit 引用
-        if old_row is not None:
-            old_row.superseded_by = pub.id
-            old_row.superseded_at = datetime.now(UTC)
-    else:
-        # [CHANGE-20260806 / P0-C] Migration 087 缺失 → fail-closed，禁止发布。
-        # V2 合同要求原子发布（supersede+fencing+audit 同事务），不得退回旧的
-        # 非原子 upsert 路径（一半新一半旧违反 PRD）。
-        raise StockCorePublicationError(
-            "STOCK_CORE_PUBLICATION_SCHEMA_NOT_READY: "
-            "Migration 087 未应用（缺 supersede/fencing 列），禁止 stock_core 发布"
-        )
+    # 先 supersede 旧行（使其不再命中 partial unique WHERE superseded_by IS NULL）
+    if old_row is not None:
+        old_row.superseded_by = pub.id
+        old_row.superseded_at = datetime.now(UTC)
+    db.add(pub)
+    await db.flush()  # 插入新行（此时旧行已 superseded，partial unique 只命中新行）
 
     # 5. 标记 SnapshotRun published/succeeded（同一事务）
     from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
@@ -257,7 +265,7 @@ async def reconcile_stock_core_publication(
         "warnings": [],
     }
 
-    if not _has_supersede_columns(db):
+    if not await _has_supersede_columns(db):
         # Migration 087 未应用：无法安全 reconcile supersede → 不写，仅告警
         result["warnings"].append("Migration 087 未应用，跳过 supersede reconcile")
         return result

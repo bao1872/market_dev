@@ -19,11 +19,11 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Date, DateTime, Float, Index, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Date, DateTime, Float, Index, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models._table_meta import table_constraints, table_indexes
+from app.models._table_meta import table_indexes
 from app.models.base import Base
 
 # 发布类型枚举
@@ -65,9 +65,14 @@ class FactorPublication(Base):
     __tablename__ = "factor_publications"
 
     __table_args__ = (
-        UniqueConstraint(
+        # [CHANGE-20260806 / PG-暴露缺陷] 不可变发布历史 + supersede：唯一性改为
+        # **partial unique index**（WHERE superseded_by IS NULL），同一 scope/date/kind 仅一个
+        # 当前有效 pointer，历史 superseded 行可并存。所有 on_conflict 用 index_elements 指向它。
+        Index(
+            "uq_factor_publications_scope_date_kind",
             "scope_type", "scope_key", "trade_date", "publication_kind",
-            name="uq_factor_publications_scope_date_kind",
+            unique=True,
+            postgresql_where=text("superseded_by IS NULL"),
         ),
         Index("ix_factor_publications_kind_date", "publication_kind", "trade_date"),
         Index(
@@ -146,25 +151,34 @@ class FactorPublication(Base):
 
 if __name__ == "__main__":
     cols = FactorPublication.__table__.columns
+    # [CHANGE-20260806-CP4A-Amendment] 含 Migration 087 新增 supersede/fencing 列
     expected = {
         "id", "scope_type", "scope_key", "trade_date", "publication_kind",
         "algorithm_version", "data_run_id", "coverage_ratio", "published_at",
         "metadata_json", "created_at",
+        "superseded_by", "superseded_at", "publish_worker_id", "publish_lease_epoch",
     }
     actual = {c.name for c in cols}
     assert expected == actual, f"字段不匹配: {expected ^ actual}"
     print(f"OK: {FactorPublication.__tablename__} columns verified")
 
-    constraint_names = {
-        c.name for c in table_constraints(FactorPublication)
-        if hasattr(c, "name") and c.name
-    }
-    assert "uq_factor_publications_scope_date_kind" in constraint_names, (
-        f"缺少唯一约束: {constraint_names}"
-    )
-    print("unique constraint ✓")
-
+    # [CHANGE-20260806-CP4A-Amendment] 唯一性现为 **partial unique index**（在 indexes，非 constraints）。
+    # 断言存在名为 uq_factor_publications_scope_date_kind 的唯一 partial index 且带 postgresql_where。
     idx_names = {idx.name for idx in table_indexes(FactorPublication) if idx.name}
+    assert "uq_factor_publications_scope_date_kind" in idx_names, (
+        f"缺少 partial unique index: {idx_names}"
+    )
+    uq_idx = next(
+        idx for idx in table_indexes(FactorPublication)
+        if getattr(idx, "name", None) == "uq_factor_publications_scope_date_kind"
+    )
+    assert getattr(uq_idx, "unique", False) is True, "uq index 必须 unique"
+    pg_opts = getattr(uq_idx, "dialect_options", {}).get("postgresql", {})
+    assert pg_opts.get("where") is not None, (
+        "uq index 必须带 postgresql_where（superseded_by IS NULL）"
+    )
+    print("partial unique index ✓")
+
     expected_idx = {
         "ix_factor_publications_kind_date",
         "ix_factor_publications_scope_kind",

@@ -51,7 +51,9 @@ x-verify-live-python: &verify-live-python
     - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/app:/app/app:ro
     - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic:/app/alembic:ro
     - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic.ini:/app/alembic.ini:ro
-    - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/RUNTIME_SHA:/app/RUNTIME_SHA:ro
+    # [CHANGE-20260806-CP4A-Amendment] RUNTIME_SHA 来自 repo 外的 VERIFY_RUNTIME_DIR（部署脚本写入），
+    # 不再挂载 repo 内文件，避免与“工作区 clean”强校验自相矛盾。
+    - ${VERIFY_RUNTIME_DIR:?VERIFY_RUNTIME_DIR is required}/RUNTIME_SHA:/app/RUNTIME_SHA:ro
     - /etc/market-dev/config.production.py:/app/config.production.py:ro
 
 networks:
@@ -97,7 +99,8 @@ services:
       - verify-pg-network
       - panji-verify-internal
     ports:
-      - "127.0.0.1:8000:8000"
+      # [CHANGE-20260806-CP4A-Amendment] host 端口环境变量化，避免与稳定运行栈冲突
+      - "127.0.0.1:${VERIFY_BACKEND_HOST_PORT:-8000}:8000"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   verify-frontend:
@@ -110,7 +113,8 @@ services:
     networks:
       - panji-verify-internal
     ports:
-      - "127.0.0.1:8080:80"
+      # [CHANGE-20260806-CP4A-Amendment] host 端口环境变量化
+      - "127.0.0.1:${VERIFY_FRONTEND_HOST_PORT:-8080}:80"
 
   # 必要 Worker（不复用正式 Worker 容器，独立实例）
   verify-worker-after-close:

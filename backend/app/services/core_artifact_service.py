@@ -34,6 +34,7 @@ import logging
 from datetime import date
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from app.services.core_run_context import (
@@ -61,7 +62,34 @@ def _extract_dsa_metrics(dsa_bundle: dict[str, Any]) -> dict[str, Any]:
     last_row = dsa_bundle.get("last_row_metrics") or {}
     if not isinstance(last_row, dict):
         return {}
-    return {k: last_row[k] for k in DSA_PROJECTION_METRIC_KEYS if k in last_row}
+    return {
+        k: _json_safe_value(last_row[k])
+        for k in DSA_PROJECTION_METRIC_KEYS if k in last_row
+    }
+
+
+def _json_safe_value(val: Any) -> Any:
+    """递归把 numpy 标量/数组等转换为 JSON 可序列化的原生 Python 类型。
+
+    [CHANGE-20260806 / PG-暴露缺陷] 真实盘后链的 payload/visual 会含 numpy int64/float64，
+    psycopg JSONB 序列化失败（Object of type int64 is not JSON serializable）。
+    """
+    if isinstance(val, dict):
+        return {k: _json_safe_value(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_json_safe_value(v) for v in val]
+    if isinstance(val, np.integer):
+        return int(val)
+    if isinstance(val, np.floating):
+        f = float(val)
+        return f if np.isfinite(f) else None
+    if isinstance(val, np.bool_):
+        return bool(val)
+    if isinstance(val, np.ndarray):
+        return [_json_safe_value(v) for v in val.tolist()]
+    if isinstance(val, pd.Timestamp):
+        return val.isoformat()
+    return val
 
 
 def _extract_dsa_visual(dsa_bundle: dict[str, Any]) -> dict[str, Any]:
@@ -69,19 +97,21 @@ def _extract_dsa_visual(dsa_bundle: dict[str, Any]) -> dict[str, Any]:
     last_row = dsa_bundle.get("last_row_metrics") or {}
     visual: dict[str, Any] = {}
     if "dsa_vwap" in last_row:
-        visual["dsa_vwap"] = last_row["dsa_vwap"]
+        visual["dsa_vwap"] = _json_safe_value(last_row["dsa_vwap"])
     factor_per_bar = dsa_bundle.get("factor_per_bar")
     if isinstance(factor_per_bar, pd.DataFrame) and not factor_per_bar.empty:
         last = factor_per_bar.iloc[-1]
         for col in ("regime_id", "anchor_time", "dsa_vwap"):
             if col in last and pd.notna(last[col]):
                 visual[col] = (
-                    last[col].isoformat() if isinstance(last[col], pd.Timestamp) else last[col]
+                    last[col].isoformat()
+                    if isinstance(last[col], pd.Timestamp)
+                    else _json_safe_value(last[col])
                 )
     if dsa_bundle.get("pivot_labels"):
-        visual["pivot_labels"] = dsa_bundle["pivot_labels"]
+        visual["pivot_labels"] = _json_safe_value(dsa_bundle["pivot_labels"])
     if dsa_bundle.get("anchor"):
-        visual["anchor"] = dsa_bundle["anchor"]
+        visual["anchor"] = _json_safe_value(dsa_bundle["anchor"])
     return visual
 
 
@@ -206,17 +236,20 @@ def compute_core_artifact(
             "momentum": _ALGO_MOMENTUM,
         }
 
+    # [CHANGE-20260806 / PG-暴露缺陷] 全 payload/visual/events 递归 JSON 安全化：
+    # first_pyramid 的 model_dump 与 DSA 提取可能含 numpy/Timestamp 标量，psycopg JSONB
+    # 序列化会失败（Object of type int64/Timestamp is not JSON serializable）。
     artifact = CoreComputationArtifact(
         instrument_id=instrument_id,
         trade_date=(
             date.fromisoformat(trade_date)
         ),
-        payload={
+        payload=_json_safe_value({
             "first_pyramid": fp_core.model_dump(by_alias=False),
             "dsa": dsa_metrics,
-        },
-        visual=dsa_visual,
-        events=state_events,
+        }),
+        visual=_json_safe_value(dsa_visual),
+        events=_json_safe_value(state_events),
         availability=availability,
         hashes={
             "input_hash": input_hash,

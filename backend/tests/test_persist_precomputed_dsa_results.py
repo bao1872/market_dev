@@ -87,7 +87,7 @@ async def test_persist_derives_from_artifact_not_runtime() -> None:
         # db.execute 的 scalar_one_or_none 一律返回 item1：item 查询命中、result-id 查询返回其 id。
         # 本测试只验证"派生而非重算 + write_results 收到 projection 指标"，不关心 item 归属细节。
         db.execute = AsyncMock(
-            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=item1))
+            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=item1), scalar=MagicMock(return_value=0))
         )
 
         result = await persist_precomputed_dsa_results(
@@ -100,6 +100,7 @@ async def test_persist_derives_from_artifact_not_runtime() -> None:
 
     # 派生而非重算：write_results 收到 projection metrics（含 dsa_vwap）
     assert mock_write.await_count == 1
+    assert mock_write.await_args is not None
     call_args = mock_write.await_args.args
     assert call_args[0] is db
     assert call_args[1] == run_id
@@ -129,7 +130,8 @@ async def test_persist_projection_failure_marks_item_failed() -> None:
     # 返回一个 fake item，使单股 projection 失败被正确记为 failed（而非 skipped）
     db.execute = AsyncMock(
         return_value=MagicMock(
-            scalar_one_or_none=MagicMock(return_value=_fake_item(run_id, i1))
+            scalar_one_or_none=MagicMock(return_value=_fake_item(run_id, i1)),
+            scalar=MagicMock(return_value=0),
         )
     )
     db.flush = AsyncMock()
@@ -178,7 +180,7 @@ async def test_persist_failed_item_ready_for_retry() -> None:
         side_effect=lambda model, pk: run if getattr(model, "__name__", "") == "StrategyRun" else None
     )
     db.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=item))
+        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=item), scalar=MagicMock(return_value=0))
     )
     db.flush = AsyncMock()
 
@@ -220,7 +222,7 @@ async def test_persist_succeeded_item_skip_reuse() -> None:
         side_effect=lambda model, pk: run if getattr(model, "__name__", "") == "StrategyRun" else None
     )
     db.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=item))
+        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=item), scalar=MagicMock(return_value=0))
     )
     db.flush = AsyncMock()
 
@@ -254,7 +256,8 @@ async def test_persist_partial_failure_sets_run_status() -> None:
     )
     db.execute = AsyncMock(
         return_value=MagicMock(
-            scalar_one_or_none=MagicMock(return_value=_fake_item(run_id, i1))
+            scalar_one_or_none=MagicMock(return_value=_fake_item(run_id, i1)),
+            scalar=MagicMock(return_value=0),
         )
     )
     db.flush = AsyncMock()

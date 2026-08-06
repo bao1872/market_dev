@@ -1769,16 +1769,32 @@ async def persist_precomputed_dsa_results(
     await db.flush()
 
     # 4. 推进 StrategyRun 状态
+    # [CHANGE-20260806 / PG-暴露缺陷] 多批 projection（project_dsa_batch）下不能在本批就把 run 置为
+    # completed——否则下一批 write_results 因「运行已完成」拒绝写入。只有全部 run item 终态时才 finalize；
+    # 仍有 pending/running 项则保持 running（进度由 heartbeat/progress 推进）。
+    from sqlalchemy import func as _func
+    _pending = (
+        await db.execute(
+            select(_func.count()).select_from(StrategyRunItem).where(
+                StrategyRunItem.run_id == run_id,
+                StrategyRunItem.status.in_(("pending", "running")),
+            )
+        )
+    ).scalar() or 0
     run.succeeded_count = succeeded
     run.failed_count = failed
     run.skipped_count = skipped
-    run.finished_at = datetime.now(UTC)
-    if failed == 0 and results:
+    if _pending > 0:
+        # 仍有未处理项：保持 running（不 finalize），仅推进计数
+        run.status = "running"
+    elif failed == 0 and results:
         run.status = "completed"
     elif succeeded > 0:
         run.status = "partial_failed"
     else:
         run.status = "failed"
+    if _pending == 0:
+        run.finished_at = datetime.now(UTC)
     await db.flush()
 
     logger.info(

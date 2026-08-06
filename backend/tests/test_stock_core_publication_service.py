@@ -83,7 +83,9 @@ async def test_publish_fencing_rejects_foreign_worker(monkeypatch) -> None:
 
     db.execute = _execute
     # 强制认为 Migration 087 已应用（有 supersede/fencing 列），使 fencing 生效
-    monkeypatch.setattr(svc, "_has_supersede_columns", lambda db: True)
+    async def _sup_true(db):
+        return True
+    monkeypatch.setattr(svc, "_has_supersede_columns", _sup_true)
 
     with pytest.raises(StockCorePublicationError, match="fencing"):
         await publish_stock_core_atomically(
@@ -112,7 +114,9 @@ async def test_publish_fails_closed_without_migration(monkeypatch) -> None:
     db.get = AsyncMock(return_value=None)
 
     # Migration 087 缺失：_has_supersede_columns 返回 False
-    monkeypatch.setattr(svc, "_has_supersede_columns", lambda db: False)
+    async def _sup_false(db):
+        return False
+    monkeypatch.setattr(svc, "_has_supersede_columns", _sup_false)
 
     with pytest.raises(StockCorePublicationError, match="NOT_READY"):
         await publish_stock_core_atomically(
@@ -133,7 +137,9 @@ def _success_db(monkeypatch) -> MagicMock:
     """构造一个成功发布路径的 fake db（Migration 087 已应用）。"""
     import app.services.stock_core_publication_service as svc
 
-    monkeypatch.setattr(svc, "_has_supersede_columns", lambda db: True)
+    async def _sup_true(db):
+        return True
+    monkeypatch.setattr(svc, "_has_supersede_columns", _sup_true)
     db = MagicMock()
 
     async def _execute(stmt):
@@ -243,7 +249,9 @@ async def test_reconcile_finalizes_stale_running_and_supersedes_duplicates(
     """
     import app.services.stock_core_publication_service as svc
 
-    monkeypatch.setattr(svc, "_has_supersede_columns", lambda db: True)
+    async def _sup_true(db):
+        return True
+    monkeypatch.setattr(svc, "_has_supersede_columns", _sup_true)
 
     run_id_old, run_id_new = uuid.uuid4(), uuid.uuid4()
     pointer_old, pointer_new = MagicMock(), MagicMock()

@@ -1350,12 +1350,20 @@ def inject_field_availability_provenance(
         return availability
     out: dict[str, FieldAvailability] = {}
     for key, fa in availability.items():
-        out[key] = fa.model_copy(
-            update={
-                "sourceRunId": source_run_id,
-                "calculatedAt": calculated_at,
-            }
-        )
+        # [CHANGE-20260806 / PG-暴露缺陷] 兼容 Pydantic FieldAvailability 模型与已序列化 dict：
+        # 真实盘后链经 compute_core_artifact 的 payload dict 读出时是 dict，模型路径是 Pydantic。
+        if isinstance(fa, dict):
+            merged = dict(fa)
+            merged["sourceRunId"] = source_run_id
+            merged["calculatedAt"] = calculated_at
+            out[key] = merged
+        else:
+            out[key] = fa.model_copy(
+                update={
+                    "sourceRunId": source_run_id,
+                    "calculatedAt": calculated_at,
+                }
+            )
     return out
 
 

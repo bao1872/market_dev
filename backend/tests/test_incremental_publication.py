@@ -45,6 +45,9 @@ class TestConstantsAndImports:
     def test_publication_kind_constants(self) -> None:
         from app.models.factor_publication import (
             ALL_PUBLICATION_KINDS,
+            PUBLICATION_KIND_AUCTION_ANCHOR,
+            PUBLICATION_KIND_BOARD_FACTS,
+            PUBLICATION_KIND_CHIP_CONSENSUS,
             PUBLICATION_KIND_HISTORY_CROSS_SECTION,
             PUBLICATION_KIND_MARKET_AGGREGATION,
             PUBLICATION_KIND_STOCK_CORE,
@@ -52,7 +55,11 @@ class TestConstantsAndImports:
         assert PUBLICATION_KIND_STOCK_CORE == "stock_core"
         assert PUBLICATION_KIND_MARKET_AGGREGATION == "market_aggregation"
         assert PUBLICATION_KIND_HISTORY_CROSS_SECTION == "history_cross_section"
-        assert len(ALL_PUBLICATION_KINDS) == 3
+        # [V2.1 EPIC-01] 领域产品发布口径
+        assert PUBLICATION_KIND_BOARD_FACTS == "board_facts"
+        assert PUBLICATION_KIND_CHIP_CONSENSUS == "chip_consensus"
+        assert PUBLICATION_KIND_AUCTION_ANCHOR == "auction_anchor"
+        assert len(ALL_PUBLICATION_KINDS) == 6
 
     def test_run_item_status_constants(self) -> None:
         from app.models.stock_feature_snapshot_run_item import (
@@ -142,10 +149,12 @@ class TestORMModels:
     def test_factor_publication_columns(self) -> None:
         from app.models.factor_publication import FactorPublication
         cols = {c.name for c in FactorPublication.__table__.columns}
+        # [CHANGE-20260806-CP4A-Amendment] 含 Migration 087 新增 supersede/fencing 列
         expected = {
             "id", "scope_type", "scope_key", "trade_date", "publication_kind",
             "algorithm_version", "data_run_id", "coverage_ratio", "published_at",
             "metadata_json", "created_at",
+            "superseded_by", "superseded_at", "publish_worker_id", "publish_lease_epoch",
         }
         assert expected == cols
 

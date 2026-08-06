@@ -38,7 +38,12 @@ DB_NAME="bz_stock_verify_${SHA}"
 PROJECT="panji-verify"
 COMPOSE_FILE="docker-compose.verify.yml"
 VERIFY_CODE_DIR="/root/web_dev_verify"
+# [CHANGE-20260806-CP4A-Amendment] 运行时代码 SHA 放在 repo 外的专用目录（避免写进 repo 破坏
+# “工作区 clean”强校验）。默认 /root/.panji-verify/runtime，可用 VERIFY_RUNTIME_DIR 覆盖。
+VERIFY_RUNTIME_DIR="${VERIFY_RUNTIME_DIR:-/root/.panji-verify/runtime}"
 PG_CONTAINER="${PG_CONTAINER:-trading-postgres}"
+# [CHANGE-20260806-CP4A-Amendment] PG 用户可配置，默认与 create_verify_database.sh 一致（bz）
+VERIFY_PG_USER="${VERIFY_PG_USER:-bz}"
 READY_TIMEOUT="${READY_TIMEOUT:-180}"
 
 log() { echo "panji-verify-deploy: $*"; }
@@ -67,8 +72,11 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 log "代码 SHA 校验通过 HEAD=$HEAD_SHA"
 
-# RUNTIME_SHA 由本脚本按 HEAD 生成（Live Mount 依赖它决定 /v1/version.runtime_git_sha）
-printf '%s' "$SHA" > "$VERIFY_CODE_DIR/RUNTIME_SHA"
+# [CHANGE-20260806-CP4A-Amendment] RUNTIME_SHA 由本脚本按 HEAD 生成，写入 **repo 外** 的
+# VERIFY_RUNTIME_DIR（Live Mount 依赖它决定 /v1/version.runtime_git_sha）。不再写进 repo 目录，
+# 避免与上方“工作区 clean”强校验自相矛盾（写进 repo 会使下次部署检测到未提交改动）。
+mkdir -p "$VERIFY_RUNTIME_DIR"
+printf '%s' "$SHA" > "$VERIFY_RUNTIME_DIR/RUNTIME_SHA"
 
 # ------------------------------------------------- 3. env 文件与 DB 强校验
 [ -f "$ENV_FILE" ] || die "环境文件 $ENV_FILE 不存在" 5
@@ -93,7 +101,8 @@ grep -qE '^[[:space:]]*APP_ENV=verification[[:space:]]*$' "$ENV_FILE" \
   || die "环境文件 APP_ENV 非 verification，拒绝" 7
 
 # ------------------------------------------------- 4. 验证库必须已存在
-docker exec -i "$PG_CONTAINER" psql -U postgres -tAc \
+# [CHANGE-20260806-CP4A-Amendment] 用 VERIFY_PG_USER（默认 bz），不再硬编码 -U postgres
+docker exec -i "$PG_CONTAINER" psql -U "$VERIFY_PG_USER" -tAc \
   "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" 2>/dev/null | grep -q '^1$' \
   || die "验证库 $DB_NAME 不存在（应先由 create_verify_database.sh 创建）" 6
 
@@ -118,7 +127,7 @@ log "镜像底座 backend=$VERIFY_BACKEND_IMAGE frontend=$VERIFY_FRONTEND_IMAGE"
 [ -f "$VERIFY_CODE_DIR/frontend/dist/index.html" ] \
   || die "缺少 frontend/dist/index.html（请先在 $VERIFY_CODE_DIR/frontend 执行 npm ci && npm run build）" 9
 
-export VERIFY_CODE_DIR VERIFY_PG_NETWORK="$PG_NETWORK" VERIFY_BACKEND_IMAGE VERIFY_FRONTEND_IMAGE
+export VERIFY_CODE_DIR VERIFY_RUNTIME_DIR VERIFY_PG_NETWORK="$PG_NETWORK" VERIFY_BACKEND_IMAGE VERIFY_FRONTEND_IMAGE
 
 COMPOSE=(docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 
@@ -135,12 +144,18 @@ diagnose() {
 }
 
 # ------------------------------------------------- 10. P0-E 启动等待轮询
+# [CHANGE-20260806-CP4A-Amendment] 探针用 Python 标准库 urllib，不假定 backend 镜像含 curl。
+# _probe <path>：在 verify-backend 内用 python urllib GET http://127.0.0.1:8000<path>，
+# 200 且返回空正文（health）或正文非空（version）视为通过。
+_probe() {
+  local path="$1"
+  "${COMPOSE[@]}" exec -T verify-backend python3 -c "import sys,urllib.request;urllib.request.urlopen('http://127.0.0.1:8000${path}',timeout=5);sys.exit(0)" >/dev/null 2>&1
+}
 log "等待 verify-backend 就绪（超时 ${READY_TIMEOUT}s）..."
 deadline=$(( $(date +%s) + READY_TIMEOUT ))
 ready=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if "${COMPOSE[@]}" exec -T verify-backend \
-       curl -sf -m 5 http://127.0.0.1:8000/v1/health >/dev/null 2>&1; then
+  if _probe "/v1/health"; then
     ready=1
     break
   fi
@@ -154,7 +169,7 @@ log "/v1/health 通过"
 
 # ------------------------------------------------- 11. P0-B 运行时 SHA 校验
 VERSION_JSON="$("${COMPOSE[@]}" exec -T verify-backend \
-  curl -sf -m 10 http://127.0.0.1:8000/v1/version 2>/dev/null || echo "")"
+  python3 -c 'import sys,urllib.request;print(urllib.request.urlopen("http://127.0.0.1:8000/v1/version",timeout=10).read().decode())' 2>/dev/null || echo "")"
 [ -n "$VERSION_JSON" ] || { diagnose; die "GET /v1/version 无响应" 10; }
 
 RUNTIME_SHA="$(printf '%s' "$VERSION_JSON" | python3 -c \
@@ -195,9 +210,8 @@ if [ "$CURRENT_DB" != "$DB_NAME" ]; then
 fi
 log "current_database() 二次确认通过 db=$CURRENT_DB"
 
-# ------------------------------------------------- 13. ready 探针
-if ! "${COMPOSE[@]}" exec -T verify-backend \
-     curl -sf -m 10 http://127.0.0.1:8000/v1/health/ready >/dev/null 2>&1; then
+# ------------------------------------------------- 13. ready 探针（Python stdlib，不依赖 curl）
+if ! _probe "/v1/health/ready"; then
   diagnose
   die "/v1/health/ready 失败" 12
 fi

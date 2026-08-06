@@ -31,7 +31,7 @@ import logging
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -208,7 +208,8 @@ async def _publish_board_facts(
         metadata_json=json.dumps(meta, ensure_ascii=False),
     )
     stmt = stmt.on_conflict_do_update(
-        constraint="uq_factor_publications_scope_date_kind",
+        index_elements=["scope_type", "scope_key", "trade_date", "publication_kind"],
+        index_where=text("superseded_by IS NULL"),
         set_={
             "algorithm_version": stmt.excluded.algorithm_version,
             "data_run_id": stmt.excluded.data_run_id,
@@ -299,7 +300,8 @@ async def _ensure_pointer_points_to_reused(
         metadata_json=json.dumps(meta, ensure_ascii=False),
     )
     stmt = stmt.on_conflict_do_update(
-        constraint="uq_factor_publications_scope_date_kind",
+        index_elements=["scope_type", "scope_key", "trade_date", "publication_kind"],
+        index_where=text("superseded_by IS NULL"),
         set_={
             "algorithm_version": stmt.excluded.algorithm_version,
             "data_run_id": stmt.excluded.data_run_id,

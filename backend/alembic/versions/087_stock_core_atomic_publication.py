@@ -7,10 +7,15 @@ PRD 要求同一事务完成：publication / pointer / run published / supersede
 - publication audit event；
 - publish worker 身份与 lease epoch（fencing）。
 
-本迁移仅**补齐这些字段/表**，供后续原子 publication service 使用。升级/回滚语义：
+本迁移**补齐字段/表，并把唯一性改为 partial unique index**，供原子 publication service 使用。升级/回滚语义：
 - upgrade：给 factor_publications 增加 superseded_by / superseded_at / publish_worker_id /
-  publish_lease_epoch；新增 stock_core_publication_audit 表。
-- downgrade：drop audit 表并还原列。
+  publish_lease_epoch；drop 普通 UNIQUE 约束、建同名 partial unique index（WHERE superseded_by IS NULL）；
+  新增 stock_core_publication_audit 表。
+- downgrade：drop audit 表、还原 partial unique index 为普通 UNIQUE 约束、还原列。
+
+[CHANGE-20260806-CP4A-Amendment] 原 087 只加列/表，未处理 073 建的普通 UNIQUE 约束
+`uq_factor_publications_scope_date_kind`。普通 UNIQUE 禁止同一 scope/date/kind 的 superseded 旧行与
+新 current 行共存，与 immutable publication history 冲突。本迁移补齐：drop 约束 → 建 partial unique index。
 
 **注意**：本文件是静态产物，须经静态审查 + 迁移 DDL 单测通过后，才允许在隔离验证库
 （bz_stock_verify_<sha>）执行 upgrade→downgrade→upgrade→duplicate-upgrade。**当前不执行**。
@@ -56,7 +61,25 @@ def upgrade() -> None:
                   comment="发布 lease epoch（fencing，防并发覆盖）"),
     )
 
-    # 2. 发布审计表（同一事务写审计事件）
+    # 2. [CHANGE-20260806-CP4A-Amendment / PG-暴露缺陷] 唯一性从**普通 UNIQUE 约束**改为
+    #    **partial unique index**（WHERE superseded_by IS NULL）。
+    #    immutable publication history 需要同一 scope/date/kind 允许历史 superseded 行与当前行并存，
+    #    只有当前有效 pointer（superseded_by IS NULL）唯一。普通 UNIQUE 约束禁止新旧两行共存，与
+    #    supersede 模型冲突。drop 旧约束、建同名 partial unique index（on_conflict 按 index_elements 命中）。
+    op.drop_constraint(
+        "uq_factor_publications_scope_date_kind",
+        "factor_publications",
+        type_="unique",
+    )
+    op.create_index(
+        "uq_factor_publications_scope_date_kind",
+        "factor_publications",
+        ["scope_type", "scope_key", "trade_date", "publication_kind"],
+        unique=True,
+        postgresql_where=sa.text("superseded_by IS NULL"),
+    )
+
+    # 3. 发布审计表（同一事务写审计事件）
     op.create_table(
         "stock_core_publication_audit",
         sa.Column("id", sa.Uuid(), primary_key=True),
@@ -76,7 +99,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # 逆序回滚：先 drop audit 表，再还原 partial unique index 为普通 UNIQUE 约束
     op.drop_table("stock_core_publication_audit")
+    op.drop_index("uq_factor_publications_scope_date_kind", table_name="factor_publications")
+    op.create_unique_constraint(
+        "uq_factor_publications_scope_date_kind",
+        "factor_publications",
+        ["scope_type", "scope_key", "trade_date", "publication_kind"],
+    )
     op.drop_column("factor_publications", "publish_lease_epoch")
     op.drop_column("factor_publications", "publish_worker_id")
     op.drop_column("factor_publications", "superseded_at")
