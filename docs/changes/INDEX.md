@@ -10,6 +10,7 @@
 
 | Change ID | 日期 | 标题 | 类型 | 领域 | 状态 | 关联 PRD | 关联 Maps |
 |---|---|---|---|---|---|---|---|
+| CHANGE-20260806-011 | 2026-08-06 | ProductReadiness 六状态事实对齐 | verification-infrastructure+testing+governance | 盘后编排/closure/验证 Seed/合同测试 | `implemented_unconfirmed`（本地门禁全过；远程 full-closure 复验未执行） | — | — |
 | CHANGE-20260806-010 | 2026-08-06 | 正式远程验证运行时修复 | governance+verification-infrastructure+bugfix | 治理/远程验证/秘密/容器执行 | `implemented_pending_remote_verification` | `prd/80-system-runtime.md` | `maps/80-system-runtime.md` |
 | CHANGE-20260806-009 | 2026-08-06 | 受保护治理域与远程验证框架收口 | governance+verification-infrastructure+docs+quality-gate | 治理/远程验证/证据/资源清理 | `verified_code_pending_remote_execution` | `prd/80-system-runtime.md` | `maps/80-system-runtime.md` |
 | CHANGE-20260806-007 | 2026-08-06 | 同 SHA、自包含远程验证合同 | governance+verification-contract+quality-gate | 治理/PG测试/Migration/Seed/验证证据 | `governance_implemented_code_pending` | — | — |
