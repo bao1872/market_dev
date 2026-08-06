@@ -1492,7 +1492,7 @@ def _make_diagnostics() -> ComputeOnceDiagnostics:
 
 
 def test_real_compute_call_counts_1d_bumps_each_once() -> None:
-    """在 canonical(1d) 帧上调用 _compute_all_factors_for_bars，DSA/SMC/momentum/canonical 各计一次。"""
+    """在 canonical(1d) 帧上调用 _compute_all_factors_for_bars，五类 kernel + canonical 各计一次。"""
     bars = _build_bars(n=250)
     diag = _make_diagnostics()
     _compute_all_factors_for_bars(bars, "1d", [], [], diagnostics=diag)
@@ -1500,7 +1500,9 @@ def test_real_compute_call_counts_1d_bumps_each_once() -> None:
     assert counts["canonical_frame_build"] == 1
     assert counts["dsa"] == 1
     assert counts["smc"] == 1
-    assert counts["momentum"] == 1
+    assert counts["bollinger"] == 1
+    assert counts["sqzmom"] == 1
+    assert counts["volume_context"] == 1
 
 
 def test_real_compute_call_counts_15m_does_not_count() -> None:
@@ -1512,7 +1514,9 @@ def test_real_compute_call_counts_15m_does_not_count() -> None:
     assert counts["canonical_frame_build"] == 0
     assert counts["dsa"] == 0
     assert counts["smc"] == 0
-    assert counts["momentum"] == 0
+    assert counts["bollinger"] == 0
+    assert counts["sqzmom"] == 0
+    assert counts["volume_context"] == 0
 
 
 def test_real_compute_call_counts_diagnostics_none_does_not_count() -> None:

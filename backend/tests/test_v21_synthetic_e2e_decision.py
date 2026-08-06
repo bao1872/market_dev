@@ -69,19 +69,19 @@ def _make_board_snapshot(raw_rows, industry_count, concept_count, membership_cou
 def test_dsa_compute_once_gate_blocks_mismatch() -> None:
     """不变式 1：DSA 计算次数 != eligible 必须触发 ComputeOnceGateError。
 
-    compute-once 门禁要求 canonical_frame_build / dsa / smc / momentum 四者
-    计数均 == eligible_compute_count，否则禁止发布。
+    compute-once 门禁要求 canonical_frame_build / dsa / smc / bollinger / sqzmom /
+    volume_context 六者计数均 == eligible_compute_count，否则禁止发布。
     """
     from app.services.core_run_context import _COMPUTE_ONCE_KEYS
 
     diag = ComputeOnceDiagnostics()
-    # 只 bump dsa 两次，其余三种未 bump → 计数 != eligible
+    # 只 bump dsa 两次，其余未 bump → 计数 != eligible
     diag.bump("dsa")
     diag.bump("dsa")
-    # eligible=2 但 canonical_frame_build/smc/momentum=0 → 门禁失败
+    # eligible=2 但其余维度=0 → 门禁失败
     with pytest.raises(ComputeOnceGateError):
         enforce_compute_once_gate(diag, eligible_compute_count=2)
-    # 补齐全部四种计数到 eligible=2 后通过
+    # 补齐全部计数到 eligible=2 后通过
     for key in _COMPUTE_ONCE_KEYS:
         while diag.to_dict()[key] < 2:
             diag.bump(key)

@@ -801,11 +801,16 @@ async def compute_review_core_for_trade_date(
     # `compute_core_kernel_bundle` 一次性算出 raw 结果（DSA/SMC/Bollinger/SQZMOM/VolumeContext），
     # 供 structural_features 与 compute_core_artifact 共享。禁止上层调用私有
     # `_compute_first_pyramid_raw_results`。若 bundle 暴露了 smc/volume 结果也一并复用。
+    # [CHANGE-20260806-005 / Phase 1 / PC-02] 传入 run-scoped diagnostics（core_context 的
+    # compute_diagnostics），使五类 kernel 计数在实际调用点递增（compute-once 门禁依据）。
     _shared_raw: Any = None
     if df_1d is not None and not df_1d.empty and len(df_1d) >= 60:
         try:
             from app.services.core_artifact_service import compute_core_kernel_bundle
-            _shared_raw = compute_core_kernel_bundle(df_1d)
+            _kernel_diag = (
+                core_context.compute_diagnostics if core_context is not None else None
+            )
+            _shared_raw = compute_core_kernel_bundle(df_1d, _kernel_diag)
         except Exception as raw_exc:
             logger.warning("compute_review_core_for_trade_date raw 预计算失败: %s", raw_exc)
             _shared_raw = None
@@ -1048,7 +1053,9 @@ async def compute_review_core_for_trade_date(
         # 供正常链与 restart 链统一 decode（restart 不再从 continuousFactors 反向拼装）。
         from app.services.core_artifact_codec import encode_core_artifact_to_summary
         summary_payload["coreArtifact"] = encode_core_artifact_to_summary(
-            schema_version=1,
+            # [CHANGE-20260806-005 / Phase 1 / PC-11] 使用 artifact 自身的 schema_version
+            # （与 codec 的 CORE_ARTIFACT_SCHEMA_VERSION 单一真源一致），保证 round-trip 无损。
+            schema_version=getattr(_core_artifact, "schema_version", 1),
             first_pyramid_core=dict(_core_artifact.payload.get("first_pyramid") or {}),
             structural_payload=dict(structural_payload or {}),
             dsa_projection_payload=dict(_core_artifact.payload.get("dsa") or {}),
@@ -2042,7 +2049,9 @@ async def compute_for_trade_date(
         "frame_build_count": _compute_counts["canonical_frame_build"],
         "dsa_call_count": _compute_counts["dsa"],
         "smc_call_count": _compute_counts["smc"],
-        "momentum_call_count": _compute_counts["momentum"],
+        "bollinger_call_count": _compute_counts["bollinger"],
+        "sqzmom_call_count": _compute_counts["sqzmom"],
+        "volume_context_call_count": _compute_counts["volume_context"],
         "peak_batch_size": peak_batch_size,
         # [Performance Contract 2026-08-04] 阶段耗时/吞吐/回退指标（供 finish_snapshot_run 落库与基准对比）
         "read_duration": round(read_duration, 4),

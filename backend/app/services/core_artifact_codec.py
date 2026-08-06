@@ -18,8 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# DSA projection codec schema 版本。bump 需新增 decode 分支并校验。
-CORE_ARTIFACT_SCHEMA_VERSION = 1
+from app.services.core_run_context import CORE_ARTIFACT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)

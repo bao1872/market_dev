@@ -1705,9 +1705,13 @@ def _compute_all_factors_for_bars(
         logger.warning("%s 成本/节点计算失败: %s", timeframe, exc)
 
     # 4. 动量/波动（P0-03 compute-once：precomputed 提供 bb_df/sqz_result 时复用）
+    #    [CHANGE-20260806-005 / Phase 1 / PC-02] momentum 拆为 bollinger / sqzmom /
+    #    volume_context 三独立计数，与 canonical 主链的 compute-once 合同一致。
     try:
         if is_canonical and diagnostics is not None:
-            diagnostics.bump("momentum")
+            diagnostics.bump("bollinger")
+            diagnostics.bump("sqzmom")
+            diagnostics.bump("volume_context")
         factors["volatility_momentum"] = _compute_volatility_momentum_factors(
             bars, atr, precomputed=precomputed
         )

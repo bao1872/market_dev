@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 
 from app.services.core_run_context import (
+    CORE_ARTIFACT_SCHEMA_VERSION,
     ComputeOnceDiagnostics,
     CoreComputationArtifact,
     CoreRunContext,
@@ -132,16 +133,22 @@ def _extract_state_events(smc_result: dict[str, Any]) -> list[dict[str, Any]]:
     return events
 
 
-def compute_core_kernel_bundle(daily_frame: pd.DataFrame) -> Any:
+def compute_core_kernel_bundle(
+    daily_frame: pd.DataFrame,
+    diagnostics: ComputeOnceDiagnostics | None = None,
+) -> Any:
     """计算一次 DSA/SMC/Bollinger/SQZMOM/VolumeContext 的 raw bundle（P0-03 唯一 kernel owner）。
 
     [CHANGE-20260805-CP4A-CP3] 这是 canonical 主链**唯一**调用算法 kernel 的公开入口，
     structural adapter 与 compute_core_artifact 共享同一份 bundle，禁止上层调用私有
     `_compute_first_pyramid_raw_results`。返回 FirstPyramidRawResults。
+
+    [CHANGE-20260806-005 / Phase 1 / PC-02] 传入 run-scoped diagnostics 时，五类 kernel
+    计数在实际调用点（`_compute_first_pyramid_raw_results` 内）递增；不传则保持兼容不计数。
     """
     from app.services.first_pyramid_service import _compute_first_pyramid_raw_results
 
-    return _compute_first_pyramid_raw_results(daily_frame)
+    return _compute_first_pyramid_raw_results(daily_frame, diagnostics)
 
 
 def compute_core_artifact(
@@ -261,6 +268,7 @@ def compute_core_artifact(
         source_core_run_id=context.run_id,
         parameter_hash=context.parameter_hash,
         algorithm_versions=algorithm_versions,
+        schema_version=CORE_ARTIFACT_SCHEMA_VERSION,
     )
     return artifact
 
@@ -277,13 +285,10 @@ def _compute_raw_results(
 ) -> FirstPyramidRawResults:
     """调用各算法 kernel 一次，累计 compute-once 计数。
 
-    复用 first_pyramid_service 的 raw-results 计算，但在此处叠加诊断计数，
-    使 canonical 主链的算法调用计数统一埋在本唯一入口（P0-03/Step-3）。
+    复用 first_pyramid_service 的 raw-results 计算，并将 run-scoped diagnostics 传入，
+    使五类 kernel（volume_context/dsa/smc/bollinger/sqzmom）计数在实际调用点递增，
+    避免上层根据结果存在与否“补计数”（P0-03/Step-3 + Phase 1 PC-02）。
     """
     from app.services.first_pyramid_service import _compute_first_pyramid_raw_results
 
-    # 计数：DSA / SMC / momentum（Bollinger+SQZMOM）各一次；VolumeContext 并入 momentum 计数范畴
-    diagnostics.bump("dsa")
-    diagnostics.bump("smc")
-    diagnostics.bump("momentum")
-    return _compute_first_pyramid_raw_results(daily_frame)
+    return _compute_first_pyramid_raw_results(daily_frame, diagnostics)

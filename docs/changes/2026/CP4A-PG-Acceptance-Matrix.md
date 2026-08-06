@@ -1,11 +1,13 @@
 # CP4A PostgreSQL 验收矩阵
 
 - 日期：2026-08-06
-- 诊断候选 SHA：`030e19e4f972d9ff965802d25fa31b233afd1af7`（已作废，仅诊断性证据）
-- 当前候选 SHA：`899f31508c58fcaf329b1e752a6a6dbcb1766b4c`（CP4A Amendment 提交，origin/dev）
-- 验证库：`bz_stock_verify_899f31508c58fcaf329b1e752a6a6dbcb1766b4c`（待 Pass 2 创建，隔离，DS-110）
+- 计划审计基线：`c2b436a63e236b6319aa41f472a6e29d93c4cddf`（origin/dev，V2.1 完全对齐开发计划基线）
+- 历史诊断候选 SHA：`030e19e4f972d9ff965802d25fa31b233afd1af7`（已作废，仅诊断性证据）
+- 历史候选 SHA：`899f31508c58fcaf329b1e752a6a6dbcb1766b4c`（CP4A Amendment 提交，已并入基线）
+- 目标候选 SHA：`<40-char origin/dev SHA>`（待 Phase 6 本地门禁通过、提交推送后冻结）
+- 验证库：`bz_stock_verify_<target_sha>`（待 Pass 2 创建，隔离，DS-110）
 - 约束：每命令前后断言 `current_database()` 为验证库，禁止访问生产库 `bz_stock`；访问 bz_stock 须获得明确授权并证明只读
-- 结论：**CP4A Amendment 代码收口已完成（Pass 1，commit 899f315 已 push origin/dev），待 Pass 2 远程隔离验证通过后再关闭 CP4A。**
+- 结论：**按《ref/开发计划.md》Phase 0-7 执行 V2.1 PRD 完全对齐。Phase 1-5 代码合同收口已并入基线（c2b436a），待 Phase 6 本地全量门禁 + Phase 7 远程隔离验证（test_pg_*.py + Seed 幂等 + full synthetic E2E）全部通过后，方可关闭 CP4A。候选未验收前本矩阵保持待重验状态。**
 
 ## 状态说明（本次 CP4A Amendment）
 
@@ -54,10 +56,11 @@
 
 ## 待办（关闭 CP4A 前置）
 
-1. 提交本 Amendment → 生成新 SHA → 新建验证库 `bz_stock_verify_<new_sha>`。
-2. Pass 2 远程隔离验证：无业务 patch 重跑 Migration 087 闭环 + Steps 5-8（正式 `test_pg_*.py`）。
-3. Seed 两次幂等通过 + 四个 readiness 场景达到预期。
-4. 全部通过后关闭 CP4A，再连续执行 CP4B/C/D。
+1. 冻结基线（`c2b436a`）并建立唯一相关 Change `CHANGE-20260806-005`（status=`verified_code_pending_acceptance`）。
+2. Phase 1-5 代码合同核验/补齐（Compute Once、stock_core 原子发布 SSOT、chip 运行级 15m+RunItem、closure 六态、Seed 真实 producer + 四类场景硬断言 + PG 测试 `pytest.mark.postgres`）。
+3. Phase 6 本地全量门禁全过（PURE_UNIT 全量 + Ruff + Mypy changed + compileall + 架构 + allowlist + 治理 + docs + git diff --check；前端 typecheck/lint/contract/build）→ 提交推送 → 冻结 `target_code_sha`。
+4. Phase 7 远程隔离验证：新建验证库 `bz_stock_verify_<target_sha>` → Migration 087 闭环 → 100 股 compute → 原子 publication 故障注入 → projection 生命周期 → Seed 两次幂等 → full synthetic E2E → 每命令断言 `current_database()`。
+5. 全部通过后关闭 CP4A，再连续执行 CP4B/C/D。
 
 ## 诚实边界
 

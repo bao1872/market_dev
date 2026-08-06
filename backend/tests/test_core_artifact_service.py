@@ -2,7 +2,7 @@
 
 [CHANGE-20260805-CP4A]
 验证：
-- 每股 DSA/SMC/momentum/canonical_frame 各只计算一次（compute-once 计数）。
+- 每股 DSA/SMC/Bollinger/SQZMOM/VolumeContext/canonical_frame 各只计算一次（compute-once 计数）。
 - First Pyramid 由纯 builder 组装，本函数不重复调用算法 kernel。
 - dsa_vwap / regime / anchor 从 raw dsa_bundle 提取（round-trip，不解析中文摘要）。
 - lineage（parameter_hash / source_core_run_id / algorithm_versions）注入。
@@ -65,7 +65,9 @@ def test_compute_core_artifact_once_per_algorithm() -> None:
     assert counts["canonical_frame_build"] == 1
     assert counts["dsa"] == 1
     assert counts["smc"] == 1
-    assert counts["momentum"] == 1
+    assert counts["bollinger"] == 1
+    assert counts["sqzmom"] == 1
+    assert counts["volume_context"] == 1
 
 
 def test_compute_core_artifact_two_calls_accumulate() -> None:

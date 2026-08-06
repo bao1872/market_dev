@@ -98,9 +98,9 @@ async def test_scheduled_1_stock_kernels_once(monkeypatch) -> None:
     calls = {"bundle": 0, "dsa": 0, "smc": 0, "bb": 0, "sqz": 0, "vol": 0}
     _real_bundle = cas.compute_core_kernel_bundle
 
-    def _spy_bundle(df):
+    def _spy_bundle(df, diagnostics=None):
         calls["bundle"] += 1
-        return _real_bundle(df)  # 调用原函数，避免递归
+        return _real_bundle(df, diagnostics)  # 调用原函数，避免递归
 
     # feature_snapshot_service 内部 `from app.services.core_artifact_service import
     # compute_core_kernel_bundle` 解析到 core_artifact_service 模块属性，故 patch 这里。
@@ -152,9 +152,9 @@ async def test_scheduled_5_and_100_stocks_linear(monkeypatch) -> None:
     calls = {"bundle": 0, "dsa": 0, "smc": 0, "bb": 0, "sqz": 0, "vol": 0}
     _real_bundle = cas.compute_core_kernel_bundle
 
-    def _spy_bundle(df):
+    def _spy_bundle(df, diagnostics=None):
         calls["bundle"] += 1
-        return _real_bundle(df)
+        return _real_bundle(df, diagnostics)
 
     monkeypatch.setattr(
         "app.services.core_artifact_service.compute_core_kernel_bundle",

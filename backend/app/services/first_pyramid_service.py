@@ -1016,11 +1016,16 @@ def compute_first_pyramid_core_snapshot(
 
 def _compute_first_pyramid_raw_results(
     bars: pd.DataFrame,
+    diagnostics: Any | None = None,
 ) -> FirstPyramidRawResults:
     """调用 DSA/SMC/Bollinger/SQZMOM/VolumeContext 算法 kernel 各一次，返回原始结果。
 
     [P0-03] 算法调用计数埋点应放在唯一的 canonical adapter / kernel 入口
     （`compute_core_artifact`），本函数仅供非 canonical / 向后兼容路径使用。
+
+    [CHANGE-20260806-005 / Phase 1 / PC-02] 五类 kernel 计数在真实调用点递增：
+    当传入 run-scoped `diagnostics`（ComputeOnceDiagnostics）时，在 volume_context /
+    dsa / smc / bollinger / sqzmom 各 kernel 实际调用前 bump；不传时保持向后兼容不计数。
     """
     if bars is None or bars.empty:
         raise ValueError("bars 为空，无法计算第一金字塔核心快照")
@@ -1038,9 +1043,13 @@ def _compute_first_pyramid_raw_results(
     last_bar_index = n_bars - 1
 
     # Gate1：统一 VolumeContext（一次）
+    if diagnostics is not None:
+        diagnostics.bump("volume_context")
     vc_series = compute_volume_context_series(bars)
 
     # 1. DSA（一次）
+    if diagnostics is not None:
+        diagnostics.bump("dsa")
     dsa_config_dict: dict[str, Any] = {
         "min_dir_bars": MIN_DIR_BARS,
         "lookback": DSA_LOOKBACK,
@@ -1048,6 +1057,8 @@ def _compute_first_pyramid_raw_results(
     dsa_bundle = compute_dsa_bundle(bars, dsa_config_dict)
 
     # 2. SMC Pine core（一次）
+    if diagnostics is not None:
+        diagnostics.bump("smc")
     opens = bars["open"].astype(float).tolist()
     highs = bars["high"].astype(float).tolist()
     lows = bars["low"].astype(float).tolist()
@@ -1056,11 +1067,15 @@ def _compute_first_pyramid_raw_results(
     smc_result = compute_smc_pine(opens, highs, lows, closes, times, params=None)
 
     # 3. Bollinger + SQZMOM（各一次）
+    if diagnostics is not None:
+        diagnostics.bump("bollinger")
     bb_cfg = BBcfg(
         bb_win=_FIRST_PYRAMID_PARAMS["bollinger_config"]["bb_win"],
         bb_k=_FIRST_PYRAMID_PARAMS["bollinger_config"]["bb_k"],
     )
     bb_df = compute_bollinger_features(bars, bb_cfg)
+    if diagnostics is not None:
+        diagnostics.bump("sqzmom")
     sqzmom_result = compute_sqzmom_lb(
         opens=np.array(opens, dtype=float),
         highs=np.array(highs, dtype=float),

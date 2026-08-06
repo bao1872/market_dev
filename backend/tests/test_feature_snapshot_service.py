@@ -672,7 +672,9 @@ async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics(
     assert result["frame_build_count"] == 0
     assert result["dsa_call_count"] == 0
     assert result["smc_call_count"] == 0
-    assert result["momentum_call_count"] == 0
+    assert result["bollinger_call_count"] == 0
+    assert result["sqzmom_call_count"] == 0
+    assert result["volume_context_call_count"] == 0
     assert result["peak_batch_size"] == 2
     # [P0-2 2026-08-04] 固定 fixture：5 只 / batch_size=2 → 3 批（2/2/1）。
     # 二级周期 15m 为日内周期必退回逐股 get_bars，fallback 按标的计数（真实诊断）。

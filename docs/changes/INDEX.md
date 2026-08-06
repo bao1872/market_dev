@@ -10,6 +10,7 @@
 
 | Change ID | 日期 | 标题 | 类型 | 领域 | 状态 | 关联 PRD | 关联 Maps |
 |---|---|---|---|---|---|---|---|
+| CHANGE-20260806-005 | 2026-08-06 | V2.1 PRD 完全对齐代码收口（Phase 0-7：Compute Once / stock_core 原子发布 SSOT / chip 运行级 15m+RunItem / closure 六态 / Seed 真实 producer / 本地门禁 / 远程隔离 PG 验证） | behavior+contract+architecture+quality-gate | 行情/量化模型/盘后编排/closure/验证基础设施 | `verified_code_pending_acceptance`（Phase 1-5 代码合同待核验补齐、code_ready=false、remote_pg_verified=false、stable_deployed=false、data_closed=false、full_v2_1_closed=false） | `prd/10-market-data.md`、`prd/20-quant-model.md`、`prd/30-after-close.md`、`prd/31-after-close-product-closure-v2.1.md`、`prd/70-review.md`、`prd/75-auction-analysis.md`、`prd/80-system-runtime.md` | `maps/20-quant-model.md`、`maps/30-after-close.md` |
 | CHANGE-20260806-004 | 2026-08-06 | PRD、Maps 与 Runbooks 用户授权门 | governance+workflow+quality-gate | 治理/产品决策/实现记忆/操作流程 | `implemented_local_pending_user_acceptance` | — | — |
 | CHANGE-20260806-003 | 2026-08-06 | PRD 体系职责与盘后闭环校准 | product-contract+docs | PRD 全局/行情/量化/盘后/Review/竞价/运行 | `prd_confirmed`；实现差距已记录，未部署 | `prd/README.md`、`prd/10/20/30/31/70/75/80` | `maps/10-market-data.md`、`maps/30-after-close.md` |
 | CHANGE-20260806-002 | 2026-08-06 | 治理体系第一性原理收敛 | governance+contract+docs | 治理/测试/远程验证/稳定运行 | `implemented_local`；未部署 | `prd/80-system-runtime.md` | `maps/80-system-runtime.md` |

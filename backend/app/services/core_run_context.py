@@ -34,15 +34,42 @@ MOMENTUM_ALGORITHM_VERSION = "momentum-v1"
 BOLLINGER_ALGORITHM_VERSION = "bollinger-v1"
 SQZMOM_ALGORITHM_VERSION = "sqzmom-v1"
 CORE_EXECUTION_CONTRACT_VERSION = "core-exec-v1"
+# [CHANGE-20260806-005 / Phase 1 / PC-11] CoreComputationArtifact schema 版本（单一真源，
+# 与 core_artifact_codec.encode/decode 的 schemaVersion 保持一致）。bump 需新增 decode 分支并校验。
+CORE_ARTIFACT_SCHEMA_VERSION = 1
+
+# ===== [Phase 1 / PC-10] SMC/Bollinger/SQZMOM/VolumeContext 冻结 effective config =====
+# 当前这些算法无 released StrategyVersion，用与代码实现一致的冻结参数进入 parameter_hash。
+# 一旦接入 released resolver，应替换为 manifest 完整参数并移除此处代码常量。
+# （来源：first_pyramid_service._FIRST_PYRAMID_PARAMS 的快照，集中治理避免漂移。）
+_FROZEN_SMC_CONFIG: dict[str, Any] = {
+    "pine_mode": "smc-pine",
+}
+_FROZEN_BOLLINGER_CONFIG: dict[str, Any] = {
+    "bb_win": 20,
+    "bb_k": 2.0,
+}
+_FROZEN_SQZMOM_CONFIG: dict[str, Any] = {
+    "length": 20,
+    "mult": 2.0,
+}
+_FROZEN_VOLUME_CONTEXT_CONFIG: dict[str, Any] = {
+    "short_ma": 20,
+    "long_ma": 200,
+}
 
 # ===== compute-once 计数键（唯一 SSOT）=====
+# [CHANGE-20260806-005 / Phase 1 / PC-02] 五类 kernel + canonical frame 独立计数。
 # canonical_frame_build 代表 canonical(1d) 帧被消费计算一次；
-# dsa / smc / momentum 为该 canonical 帧上各维度计算调用次数。
+# dsa / smc / bollinger / sqzmom / volume_context 为该 canonical 帧上各算法 kernel 调用次数。
+# （PC-02：DSA、SMC、Bollinger、SQZMOM 和 VolumeContext 每股每 core run 各计算一次。）
 _COMPUTE_ONCE_KEYS: tuple[str, ...] = (
     "canonical_frame_build",
     "dsa",
     "smc",
-    "momentum",
+    "bollinger",
+    "sqzmom",
+    "volume_context",
 )
 
 
@@ -69,7 +96,9 @@ class ComputeOnceDiagnostics:
     canonical_frame_build: int = 0
     dsa: int = 0
     smc: int = 0
-    momentum: int = 0
+    bollinger: int = 0
+    sqzmom: int = 0
+    volume_context: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def bump(self, key: str) -> None:
@@ -86,7 +115,9 @@ class ComputeOnceDiagnostics:
                 "canonical_frame_build": self.canonical_frame_build,
                 "dsa": self.dsa,
                 "smc": self.smc,
-                "momentum": self.momentum,
+                "bollinger": self.bollinger,
+                "sqzmom": self.sqzmom,
+                "volume_context": self.volume_context,
             }
 
 
@@ -94,7 +125,7 @@ def enforce_compute_once_gate(
     diagnostics: ComputeOnceDiagnostics,
     eligible_compute_count: int,
 ) -> None:
-    """compute-once 硬门禁：四类计数都必须等于 eligible_compute_count。
+    """compute-once 硬门禁：五类 kernel + canonical frame 六类计数都必须等于 eligible_compute_count。
 
     任一不一致即抛 ComputeOnceGateError，调用方不得发布 stock_core。
 
@@ -134,6 +165,10 @@ class CoreRunContext:
     compute_diagnostics: ComputeOnceDiagnostics = field(
         default_factory=ComputeOnceDiagnostics
     )
+    # [CHANGE-20260806-005 / Phase 1 / PC-10] run 开始时冻结 run mode 与日线 cutoff：
+    # 单股不得自行重新解析配置；source_cutoff 代表日线数据截止（= trade date 的 PIT 截止）。
+    run_mode: str = field(default="after_close")
+    source_cutoff: str | None = field(default=None)
 
     @property
     def parameter_hash(self) -> str:
@@ -194,6 +229,9 @@ class CoreComputationArtifact:
     source_core_run_id: Any | None = field(default=None)
     parameter_hash: str = field(default="")
     algorithm_versions: dict[str, str] = field(default_factory=dict)
+    # [CHANGE-20260806-005 / Phase 1 / PC-11] artifact schema 版本：encode/decode 需无损
+    # round-trip，schema 版本用于未来兼容演进。
+    schema_version: str = field(default=CORE_ARTIFACT_SCHEMA_VERSION)
 
     @property
     def is_available(self) -> bool:
@@ -244,6 +282,7 @@ class CoreComputationArtifact:
             "source_core_run_id": str(self.source_core_run_id) if self.source_core_run_id is not None else None,
             "parameter_hash": self.parameter_hash,
             "algorithm_versions": self.algorithm_versions,
+            "schema_version": self.schema_version,
         }
 
 
@@ -342,6 +381,9 @@ async def resolve_core_run_context(
     run_calculated_at: datetime | None = None,
     resolver: ReleasedConfigResolver | None = None,
     execution_contract_version: str = CORE_EXECUTION_CONTRACT_VERSION,
+    run_mode: str = "after_close",
+    source_cutoff: str | None = None,
+    universe_version: str = "v1",
 ) -> CoreRunContext:
     """解析并冻结一次 scheduled stock_core run 的 run-level CoreRunContext。
 
@@ -386,25 +428,44 @@ async def resolve_core_run_context(
     algorithm_versions = build_default_algorithm_versions()
     algorithm_versions["dsa"] = dsa_cfg["dsa_version"]
 
-    # [CHANGE-20260806 / P0-A] 完整 CoreRunContext 合同：除 DSA 外，SMC/momentum/VolumeContext
-    # 的 effective config 与 adjustment/market-data/hash 全部进入 config（从而进入 parameter_hash）。
-    # SMC/momentum/volume 当前无 released StrategyVersion，用与 algorithm_versions 对应的
-    # 冻结配置（一旦这些算法建立 released version，接入 resolver 路径并移除代码常量回退）。
+    # [CHANGE-20260806-005 / Phase 1 / PC-10] 完整 CoreRunContext 合同：除 DSA 外，
+    # SMC/Bollinger/SQZMOM/VolumeContext 的 effective config 与 adjustment/market-data/
+    # cutoff/hash 全部进入 config（从而进入 parameter_hash）。SMC/momentum/volume 当前
+    # 无 released StrategyVersion，用与 algorithm_versions 对应的冻结配置（一旦这些算法
+    # 建立 released version，接入 resolver 路径并移除代码常量回退）。
+    # [CHANGE-20260806 / P0-A] 既有完整冻结：adjustment_as_of、universe hash/size、
+    # market-data/adjustment 合同版本、source_bar_hash/adj_factor_hash 占位。
     config: dict[str, Any] = {
         "dsa": dsa_cfg["dsa_effective_config"],
-        "smc": {"version": algorithm_versions.get("smc")},
+        "smc": {
+            "version": algorithm_versions.get("smc"),
+            # SMC effective config：当前以冻结代码常量（完整参数在 _FIRST_PYRAMID_PARAMS 等）
+            # 进入 parameter_hash；若后续接入 released resolver，此处替换为完整 manifest config。
+            "effective_config": _FROZEN_SMC_CONFIG,
+        },
         "momentum": {
             "version": algorithm_versions.get("momentum"),
             "bollinger_version": algorithm_versions.get("bollinger"),
             "sqzmom_version": algorithm_versions.get("sqzmom"),
+            # [Phase 1 / PC-10] Bollinger / SQZMOM effective config 完整冻结（进入 hash）。
+            "bollinger_effective_config": _FROZEN_BOLLINGER_CONFIG,
+            "sqzmom_effective_config": _FROZEN_SQZMOM_CONFIG,
         },
-        "volume_context": {"version": "vc-v1"},
+        "volume_context": {
+            "version": "vc-v1",
+            # [Phase 1 / PC-10] VolumeContext effective config 完整冻结（进入 hash）。
+            "effective_config": _FROZEN_VOLUME_CONTEXT_CONFIG,
+        },
         "eligible_universe_hash": universe_hash,
         "eligible_universe_size": len(eligible_instrument_ids),
+        "universe_version": universe_version,
         "market_data_contract_version": MARKET_DATA_CONTRACT_VERSION,
         "adjustment_contract_version": "adj-v1",
         # [P0-A] adjustment_as_of = run 交易日（复权基准日），作为合同一部分进入 hash
         "adjustment_as_of": trade_date.isoformat(),
+        # [Phase 1 / PC-10] run mode 与日线 cutoff 作为合同一部分进入 hash
+        "run_mode": run_mode,
+        "source_cutoff": source_cutoff,
         "dsa_build_hash": dsa_cfg.get("dsa_build_hash"),
         # [P0-A] lineage 输入 hash 占位（由上游传入时覆盖；缺省为 "" 保持 hash 可复现）
         "source_bar_hash": "",
@@ -418,6 +479,8 @@ async def resolve_core_run_context(
         config=config,
         execution_contract_version=execution_contract_version,
         run_id=snapshot_run_id,
+        run_mode=run_mode,
+        source_cutoff=source_cutoff,
     )
 
 
