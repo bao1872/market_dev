@@ -922,6 +922,9 @@ async def compute_review_core_for_trade_date(
     # builder 组装；DSA projection metrics/visual 一并提取（P0-05 round-trip）。
     # 不再单独调用 compute_first_pyramid_core_snapshot（会重复计算算法 kernel）。
     first_pyramid_dict: dict[str, Any] | None = None
+    # [CHANGE-20260805-CP4A-CP3 / P0-05] 持有一份 core artifact 引用，用于在 summary 持久化
+    # 完整 versioned DSA projection（dsaProjectionPayload/visual/availability/lineage）。
+    _core_artifact: Any | None = None
     try:
         from datetime import datetime as _py_dt
         from zoneinfo import ZoneInfo
@@ -977,6 +980,7 @@ async def compute_review_core_for_trade_date(
                 # [CHANGE-20260805-CP4A / P0-03] 复用与 structural_features 共享的 raw 结果
                 precomputed_raw=_shared_raw,
             )
+            _core_artifact = core_artifact
             fp_core_payload = core_artifact.payload["first_pyramid"]
             # core snapshot 序列化：chip_consensus 显式为 None
             first_pyramid_dict = dict(fp_core_payload)
@@ -1026,6 +1030,28 @@ async def compute_review_core_for_trade_date(
         summary_payload["first_pyramid_status"] = "FP_COMPUTE_FAILED"
     elif first_pyramid_dict is None:
         summary_payload["first_pyramid_status"] = "insufficient_history"
+
+    # [CHANGE-20260805-CP4A-CP3 / P0-05] 持久化完整 versioned DSA projection 载荷，
+    # 供 CoreArtifactCodec 直接从 summary 读取，不再从面向 UI 的 continuousFactors 反向拼装。
+    # 含：dsaProjectionPayload（指标）、dsaVisualContract、availability、lineage、schemaVersion。
+    if _core_artifact is not None:
+        summary_payload["dsaProjection"] = {
+            "schemaVersion": 1,
+            "dsaProjectionPayload": dict(_core_artifact.payload.get("dsa") or {}),
+            "dsaVisualContract": dict(_core_artifact.visual or {}),
+            "availability": dict(_core_artifact.availability or {}),
+            "lineage": {
+                "parameterHash": _core_artifact.parameter_hash,
+                "sourceCoreRunId": (
+                    str(_core_artifact.source_core_run_id)
+                    if _core_artifact.source_core_run_id is not None else None
+                ),
+                "algorithmVersions": dict(_core_artifact.algorithm_versions or {}),
+                "inputHash": (_core_artifact.hashes or {}).get("input_hash"),
+                "barsHash": (_core_artifact.hashes or {}).get("bars_hash"),
+                "adjFactorHash": (_core_artifact.hashes or {}).get("adj_factor_hash"),
+            },
+        }
 
     return StockFeatureSnapshot(
         instrument_id=instrument_id,

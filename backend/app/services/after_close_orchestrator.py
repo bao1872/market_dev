@@ -2721,25 +2721,21 @@ async def execute_after_close_run(
                                         )
                                     )
                                 ).scalars().all()
-                                from app.services.granular_restart_service import (
-                                    _artifact_from_snapshot,
+                                # [CHANGE-20260805-CP4A-CP3 / P0-04] 用正式 CoreArtifactCodec
+                                # 从 versioned summary 重建 DSA projection，不再依赖 recovery 的
+                                # _artifact_from_snapshot。
+                                from app.services.core_artifact_codec import (
+                                    decode_dsa_projection_from_summary,
                                 )
                                 artifacts: dict[uuid.UUID, Any] = {}
                                 for snap in snap_rows:
-                                    summary = snap.summary_payload or {}
-                                    fp = summary.get("first_pyramid") or {}
-                                    artifacts[snap.instrument_id] = (
-                                        _artifact_from_snapshot(
-                                            snap,
-                                            source_core_run_id=snapshot_run_id,
-                                            parameter_hash=(
-                                                fp.get("parameterHash") or ""
-                                            ),
-                                            algorithm_versions=(
-                                                fp.get("algorithmVersions") or {}
-                                            ),
-                                        )
+                                    decoded = decode_dsa_projection_from_summary(
+                                        snap.summary_payload or {},
                                     )
+                                    # map_dsa_projection 需要 instrument_id/trade_date
+                                    decoded.instrument_id = snap.instrument_id
+                                    decoded.trade_date = snap.trade_date
+                                    artifacts[snap.instrument_id] = decoded
                                 from app.services.strategy_batch_service import (
                                     persist_precomputed_dsa_results,
                                 )

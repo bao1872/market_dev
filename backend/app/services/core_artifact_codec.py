@@ -1,0 +1,128 @@
+"""CoreArtifactCodec — 正式、版本化的 artifact 投影编解码（P0-05/P0-04）。
+
+[CHANGE-20260805-CP4A-CP3]
+正常 scheduled 主链与 restart 链**共同依赖**本 codec，禁止主链直接依赖
+`granular_restart_service._artifact_from_snapshot`（那是 recovery 私有 helper）。
+
+职责：
+- encode：把 core artifact 的 DSA projection 持久化字段序列化进 snapshot summary_payload。
+- decode：从 snapshot summary_payload 重建 DSA projection artifact（供 map_dsa_projection）。
+- lineage 校验：schemaVersion、parameterHash、sourceCoreRunId、algorithmVersions 一致性。
+- 不再从面向 UI 的 `continuousFactors` 反向拼装 DSA projection。
+
+本模块为纯计算 + dict 编解码，不连数据库，可纯单元测试。
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+# DSA projection codec schema 版本。bump 需新增 decode 分支并校验。
+CORE_ARTIFACT_SCHEMA_VERSION = 1
+
+
+class CoreArtifactDecodeError(ValueError):
+    """artifact 编解码或 lineage 校验失败。"""
+
+
+def encode_dsa_projection_to_summary(
+    *,
+    schema_version: int,
+    dsa_projection_payload: dict[str, Any],
+    dsa_visual_contract: dict[str, Any],
+    availability: dict[str, str],
+    parameter_hash: str | None,
+    source_core_run_id: str | None,
+    algorithm_versions: dict[str, str],
+    input_hash: str | None,
+    bars_hash: str | None,
+    adj_factor_hash: str | None,
+) -> dict[str, Any]:
+    """把 artifact 的 DSA projection 字段编码为 versioned summary 块（P0-05）。"""
+    return {
+        "schemaVersion": schema_version,
+        "dsaProjectionPayload": dict(dsa_projection_payload or {}),
+        "dsaVisualContract": dict(dsa_visual_contract or {}),
+        "availability": dict(availability or {}),
+        "lineage": {
+            "parameterHash": parameter_hash,
+            "sourceCoreRunId": source_core_run_id,
+            "algorithmVersions": dict(algorithm_versions or {}),
+            "inputHash": input_hash,
+            "barsHash": bars_hash,
+            "adjFactorHash": adj_factor_hash,
+        },
+    }
+
+
+def decode_dsa_projection_from_summary(
+    summary_payload: dict[str, Any],
+) -> SimpleNamespace:
+    """从 snapshot summary_payload 的 `dsaProjection` 重建 DSA projection artifact。
+
+    返回 `map_dsa_projection` 兼容的 SimpleNamespace（属性访问）：
+        .payload={"dsa": {...}}  .visual={...}  .availability={...}
+        .hashes={...}  .parameter_hash  .source_core_run_id  .algorithm_versions
+
+    Raises:
+        CoreArtifactDecodeError: 缺 dsaProjection 块、schemaVersion 不匹配、lineage 缺失
+    """
+    block = (summary_payload or {}).get("dsaProjection")
+    if not isinstance(block, dict):
+        raise CoreArtifactDecodeError(
+            "summary_payload 缺 dsaProjection 块（可能由旧版本写出，需重算）"
+        )
+    schema_version = block.get("schemaVersion")
+    if schema_version != CORE_ARTIFACT_SCHEMA_VERSION:
+        raise CoreArtifactDecodeError(
+            f"dsaProjection schemaVersion 不匹配: {schema_version} != "
+            f"{CORE_ARTIFACT_SCHEMA_VERSION}"
+        )
+    lineage = block.get("lineage") or {}
+    if not lineage.get("sourceCoreRunId"):
+        raise CoreArtifactDecodeError("dsaProjection lineage 缺 sourceCoreRunId")
+
+    return SimpleNamespace(
+        payload={"dsa": dict(block.get("dsaProjectionPayload") or {})},
+        visual=dict(block.get("dsaVisualContract") or {}),
+        availability=dict(block.get("availability") or {}),
+        hashes={
+            "input_hash": lineage.get("inputHash"),
+            "bars_hash": lineage.get("barsHash"),
+            "adj_factor_hash": lineage.get("adjFactorHash"),
+        },
+        parameter_hash=lineage.get("parameterHash"),
+        source_core_run_id=lineage.get("sourceCoreRunId"),
+        algorithm_versions=dict(lineage.get("algorithmVersions") or {}),
+    )
+
+
+def validate_lineage(
+    decoded: SimpleNamespace,
+    *,
+    expected_core_run_id: str | None,
+    expected_parameter_hash: str | None,
+    expected_dsa_version: str | None,
+) -> None:
+    """lineage 一致性校验（P0-05 Step 5：version/config/hash 一致）。
+
+    Raises:
+        CoreArtifactDecodeError: 任一 lineage 字段与预期不匹配
+    """
+    if expected_core_run_id and decoded.source_core_run_id != expected_core_run_id:
+        raise CoreArtifactDecodeError(
+            "lineage sourceCoreRunId 不匹配: "
+            f"{decoded.source_core_run_id} != {expected_core_run_id}"
+        )
+    if expected_parameter_hash and decoded.parameter_hash != expected_parameter_hash:
+        raise CoreArtifactDecodeError(
+            "lineage parameterHash 不匹配: "
+            f"{decoded.parameter_hash} != {expected_parameter_hash}"
+        )
+    if expected_dsa_version:
+        actual = (decoded.algorithm_versions or {}).get("dsa")
+        if actual != expected_dsa_version:
+            raise CoreArtifactDecodeError(
+                f"lineage dsa version 不匹配: {actual} != {expected_dsa_version}"
+            )
