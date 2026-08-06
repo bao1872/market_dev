@@ -1236,6 +1236,49 @@ async def test_compute_once_gate_is_not_bypassable_in_production(
             )
 
 
+def test_compute_core_kernel_bundle_calls_each_kernel_once(monkeypatch) -> None:
+    """[CHANGE-20260805-CP4A-CP3] 唯一 kernel owner `compute_core_kernel_bundle`
+    每股对五类 kernel 各恰好调用一次（DSA/SMC/Bollinger/SQZMOM/VolumeContext）。
+    """
+    from app.services import first_pyramid_service as fps
+    from app.services.core_artifact_service import compute_core_kernel_bundle
+
+    calls = {"dsa": 0, "smc": 0, "bollinger": 0, "sqzmom": 0, "volume": 0}
+    spy_names = {
+        "compute_dsa_bundle": "dsa",
+        "compute_smc_pine": "smc",
+        "compute_bollinger_features": "bollinger",
+        "compute_sqzmom_lb": "sqzmom",
+        "compute_volume_context_series": "volume",
+    }
+    for fn, key in spy_names.items():
+        if not hasattr(fps, fn):
+            continue
+        real = getattr(fps, fn)
+
+        def _make_spy(n: str, r):
+            def _spy(*a, **kw):
+                calls[n] += 1
+                return r(*a, **kw)
+            return _spy
+
+        monkeypatch.setattr(fps, fn, _make_spy(key, real))
+
+    idx = pd.date_range("2026-01-01", periods=160, freq="B")
+    rng = np.random.default_rng(7)
+    close = 12 + np.cumsum(rng.normal(0, 0.15, 160))
+    daily = pd.DataFrame({
+        "open": close - 0.06, "high": close + 0.12, "low": close - 0.12,
+        "close": close, "volume": rng.integers(100000, 500000, 160).astype(float),
+        "amount": close * 400000,
+    }, index=idx)
+
+    compute_core_kernel_bundle(daily)
+
+    for key in spy_names.values():
+        assert calls[key] == 1, f"{key} calls={calls[key]}（唯一 owner 应各 1 次）"
+
+
 # ===== 6. P0-4: published snapshot 保护 =====
 
 

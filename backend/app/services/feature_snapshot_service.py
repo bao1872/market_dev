@@ -797,16 +797,15 @@ async def compute_review_core_for_trade_date(
             f"{primary_timeframe}: insufficient bars ({len(df_1d)} < 60)"
         )
 
-    # [CHANGE-20260805-CP4A / P0-03] compute-once：若 df_1d 有效（>=60），先在此一次性算出
-    # raw 算法结果（DSA/SMC/Bollinger/SQZMOM/VolumeContext），供 structural_features 与
-    # compute_core_artifact 共享，避免两者各自重复调用 kernel。
+    # [CHANGE-20260805-CP4A-CP3 / P0-03] compute-once：通过**唯一 kernel owner**
+    # `compute_core_kernel_bundle` 一次性算出 raw 结果（DSA/SMC/Bollinger/SQZMOM/VolumeContext），
+    # 供 structural_features 与 compute_core_artifact 共享。禁止上层调用私有
+    # `_compute_first_pyramid_raw_results`。若 bundle 暴露了 smc/volume 结果也一并复用。
     _shared_raw: Any = None
     if df_1d is not None and not df_1d.empty and len(df_1d) >= 60:
         try:
-            from app.services.first_pyramid_service import (
-                _compute_first_pyramid_raw_results,
-            )
-            _shared_raw = _compute_first_pyramid_raw_results(df_1d)
+            from app.services.core_artifact_service import compute_core_kernel_bundle
+            _shared_raw = compute_core_kernel_bundle(df_1d)
         except Exception as raw_exc:
             logger.warning("compute_review_core_for_trade_date raw 预计算失败: %s", raw_exc)
             _shared_raw = None
@@ -820,6 +819,17 @@ async def compute_review_core_for_trade_date(
             "dsa_bundle": _shared_raw.dsa_bundle,
             "bb_df": _shared_raw.bb_df,
             "sqz_result": _shared_raw.sqzmom_result,
+            # [CP4A-CP3] 若 structural 消费者需要 SMC/VolumeContext 结果，从同一 bundle 复用
+            **(
+                {"smc_result": _shared_raw.smc_result}
+                if getattr(_shared_raw, "smc_result", None) is not None
+                else {}
+            ),
+            **(
+                {"vc_series": _shared_raw.vc_series}
+                if getattr(_shared_raw, "vc_series", None) is not None
+                else {}
+            ),
         }
     primary_canonical = await CanonicalComputationService.compute(
         algorithm_id="structural_features",

@@ -102,6 +102,18 @@ def _extract_state_events(smc_result: dict[str, Any]) -> list[dict[str, Any]]:
     return events
 
 
+def compute_core_kernel_bundle(daily_frame: pd.DataFrame) -> Any:
+    """计算一次 DSA/SMC/Bollinger/SQZMOM/VolumeContext 的 raw bundle（P0-03 唯一 kernel owner）。
+
+    [CHANGE-20260805-CP4A-CP3] 这是 canonical 主链**唯一**调用算法 kernel 的公开入口，
+    structural adapter 与 compute_core_artifact 共享同一份 bundle，禁止上层调用私有
+    `_compute_first_pyramid_raw_results`。返回 FirstPyramidRawResults。
+    """
+    from app.services.first_pyramid_service import _compute_first_pyramid_raw_results
+
+    return _compute_first_pyramid_raw_results(daily_frame)
+
+
 def compute_core_artifact(
     *,
     context: CoreRunContext,
