@@ -1044,6 +1044,29 @@ async def compute_review_core_for_trade_date(
     # 供 CoreArtifactCodec 直接从 summary 读取，不再从面向 UI 的 continuousFactors 反向拼装。
     # 含：dsaProjectionPayload（指标）、dsaVisualContract、availability、lineage、schemaVersion。
     if _core_artifact is not None:
+        # [CHANGE-20260806-CP4A.1 / Item 5] 持久化完整 versioned core artifact（不止 DSA projection），
+        # 供正常链与 restart 链统一 decode（restart 不再从 continuousFactors 反向拼装）。
+        from app.services.core_artifact_codec import encode_core_artifact_to_summary
+        summary_payload["coreArtifact"] = encode_core_artifact_to_summary(
+            schema_version=1,
+            first_pyramid_core=dict(_core_artifact.payload.get("first_pyramid") or {}),
+            structural_payload=dict(structural_payload or {}),
+            dsa_projection_payload=dict(_core_artifact.payload.get("dsa") or {}),
+            dsa_visual_contract=dict(_core_artifact.visual or {}),
+            state_event_candidates=list(_core_artifact.events or []),
+            availability=dict(_core_artifact.availability or {}),
+            parameter_hash=_core_artifact.parameter_hash,
+            source_core_run_id=(
+                str(_core_artifact.source_core_run_id)
+                if _core_artifact.source_core_run_id is not None else None
+            ),
+            algorithm_versions=dict(_core_artifact.algorithm_versions or {}),
+            input_hash=(_core_artifact.hashes or {}).get("input_hash"),
+            bars_hash=(_core_artifact.hashes or {}).get("bars_hash"),
+            adj_factor_hash=(_core_artifact.hashes or {}).get("adj_factor_hash"),
+            diagnostics=dict(_core_artifact.diagnostics or {}),
+        )
+        # 保留 dsaProjection 块（旧 codec 兼容）
         summary_payload["dsaProjection"] = {
             "schemaVersion": 1,
             "dsaProjectionPayload": dict(_core_artifact.payload.get("dsa") or {}),

@@ -76,6 +76,52 @@ def encode_dsa_projection_to_summary(
     }
 
 
+def encode_core_artifact_to_summary(
+    *,
+    schema_version: int,
+    first_pyramid_core: dict[str, Any],
+    structural_payload: dict[str, Any],
+    dsa_projection_payload: dict[str, Any],
+    dsa_visual_contract: dict[str, Any],
+    state_event_candidates: list[dict[str, Any]],
+    availability: dict[str, str],
+    parameter_hash: str | None,
+    source_core_run_id: str | None,
+    algorithm_versions: dict[str, str],
+    input_hash: str | None,
+    bars_hash: str | None,
+    adj_factor_hash: str | None,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """把完整 CoreComputationArtifact 编码为 versioned summary 块（P0-05 full core）。
+
+    [CHANGE-20260806-CP4A.1 / Item 5] 正常链与 restart 链据此统一持久化完整 core artifact，
+    不只 DSA projection。schemaVersion 为独立 core artifact schema 版本。
+    """
+    return {
+        "coreArtifactSchemaVersion": schema_version,
+        "firstPyramidCore": dict(first_pyramid_core or {}),
+        "structuralPayload": dict(structural_payload or {}),
+        "dsaProjection": {
+            "dsaProjectionPayload": dict(dsa_projection_payload or {}),
+            "dsaVisualContract": dict(dsa_visual_contract or {}),
+        },
+        "stateEventCandidates": list(state_event_candidates or []),
+        "availability": dict(availability or {}),
+        "hashes": {
+            "inputHash": input_hash,
+            "barsHash": bars_hash,
+            "adjFactorHash": adj_factor_hash,
+        },
+        "lineage": {
+            "parameterHash": parameter_hash,
+            "sourceCoreRunId": source_core_run_id,
+            "algorithmVersions": dict(algorithm_versions or {}),
+        },
+        "diagnostics": dict(diagnostics or {}),
+    }
+
+
 def decode_dsa_projection_from_summary(
     summary_payload: dict[str, Any],
     *,
@@ -120,6 +166,27 @@ def decode_dsa_projection_from_summary(
         instrument_id=instrument_id,
         trade_date=trade_date,
     )
+
+
+def decode_core_artifact_from_summary(
+    summary_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """从 summary 的 `coreArtifact` 块读取完整 core artifact（含 firstPyramid/structural/
+    stateEvents/hashes/lineage/diagnostics）。
+
+    Raises:
+        CoreArtifactDecodeError: 缺 coreArtifact 块或 schemaVersion 不匹配
+    """
+    block = (summary_payload or {}).get("coreArtifact")
+    if not isinstance(block, dict):
+        raise CoreArtifactDecodeError("summary_payload 缺 coreArtifact 块")
+    schema_version = block.get("coreArtifactSchemaVersion")
+    if schema_version != CORE_ARTIFACT_SCHEMA_VERSION:
+        raise CoreArtifactDecodeError(
+            f"coreArtifact schemaVersion 不匹配: {schema_version} != "
+            f"{CORE_ARTIFACT_SCHEMA_VERSION}"
+        )
+    return dict(block)
 
 
 def validate_lineage(

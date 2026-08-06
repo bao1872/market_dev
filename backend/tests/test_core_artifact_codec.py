@@ -15,7 +15,9 @@ import pytest
 from app.services.core_artifact_codec import (
     CORE_ARTIFACT_SCHEMA_VERSION,
     CoreArtifactDecodeError,
+    decode_core_artifact_from_summary,
     decode_dsa_projection_from_summary,
+    encode_core_artifact_to_summary,
     encode_dsa_projection_to_summary,
     validate_lineage,
 )
@@ -77,6 +79,38 @@ def test_codec_decoded_feeds_map_dsa_projection() -> None:
     )
     assert record.payload["dsa_vwap"] == 10.5
     assert record.payload["dsa_dir_bars"] == 12
+
+
+def test_full_core_artifact_roundtrip() -> None:
+    """[Item 5] 完整 core artifact（firstPyramid/structural/dsaProjection/stateEvents/
+    availability/hashes/lineage/diagnostics）encode→decode 全字段一致。"""
+    block = encode_core_artifact_to_summary(
+        schema_version=CORE_ARTIFACT_SCHEMA_VERSION,
+        first_pyramid_core={"trend": {"availability": "ready"}, "nBars": 250},
+        structural_payload={"dsa_segment": {"seg": 1}},
+        dsa_projection_payload={"dsa_vwap": 10.5, "dsa_dir_bars": 12},
+        dsa_visual_contract={"dsa_vwap": 10.5},
+        state_event_candidates=[{"type": "structure_break", "t": "2026-07-30"}],
+        availability={"trend": "ready", "structure": "ready", "momentum": "ready"},
+        parameter_hash="ph-1",
+        source_core_run_id="core-run-1",
+        algorithm_versions={"dsa": "dsa-v1"},
+        input_hash="in-1",
+        bars_hash="bars-1",
+        adj_factor_hash="adj-1",
+        diagnostics={"dsa": 1, "smc": 1},
+    )
+    summary = {"coreArtifact": block}
+    decoded = decode_core_artifact_from_summary(summary)
+
+    assert decoded["firstPyramidCore"]["nBars"] == 250
+    assert decoded["structuralPayload"]["dsa_segment"]["seg"] == 1
+    assert decoded["dsaProjection"]["dsaProjectionPayload"]["dsa_vwap"] == 10.5
+    assert decoded["stateEventCandidates"][0]["type"] == "structure_break"
+    assert decoded["availability"]["trend"] == "ready"
+    assert decoded["hashes"]["inputHash"] == "in-1"
+    assert decoded["lineage"]["parameterHash"] == "ph-1"
+    assert decoded["diagnostics"]["dsa"] == 1
 
 
 def test_codec_missing_block_raises() -> None:
