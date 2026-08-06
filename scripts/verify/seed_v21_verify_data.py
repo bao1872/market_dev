@@ -5,20 +5,28 @@
 trading_calendar / board_membership / released dsa config）均为确定性合成（固定 seed
 + uuid5），确保两次运行幂等、结果可复现。
 
-[CHANGE-20260806-008] 四类场景全部通过**真实服务**编排，不伪造 succeeded / published /
-coverage / First Pyramid。chip 真实链走 `compute_chip_consensus_snapshot` +
+[CHANGE-20260806-008] 六态 canonical 场景全部通过**真实服务**编排，不伪造 succeeded /
+published / coverage / First Pyramid。chip 真实链走 `compute_chip_consensus_snapshot` +
 `chip_consensus_run_lifecycle`（真实算法 + RunItem 生命周期），但**绕过
 `execute_after_close_chip_consensus` 顶层的 `refresh_15m_batch`（联网 pytdx）**——
 synthetic 15m bars 已由 Seed 直接注入验证库，`_fetch_chip_bars(skip_refresh=True)`
 已支持只读已有 bars。如实标注：chip 真实链**不含运行级 refresh**。
 
-四类场景（closure 断言见 test_pg_seed_scenario_closures.py）：
-  A full_success (2026-07-28) → fully_ready（core+chip+board+auction+publication）
-  B async_enhance(2026-07-29) → core_ready（chip running + auction structure_only）
-  C degraded    (2026-07-30) → degraded_ready（board reused + chip partial + auction hybrid）
-  D governance  (2026-07-31) → blocked / degraded（publication missing / lease lost）
+六态 canonical 场景（closure 断言见 test_pg_seed_scenario_closures.py，与
+backend/tests/readiness_fixtures.py 共享唯一事实源）：
+  pending_no_core            (2026-07-28) → pending（stock_core 未发布）
+  blocked_mandatory_failure  (2026-07-29) → blocked（board_facts 人为 failed，reason=EXTERNAL_GATE_UNSATISFIED）
+  core_ready_waiting_mandatory (2026-07-30) → core_ready（stock_core 可消费，review 未发布）
+  mandatory_ready_enhancing (2026-07-31) → mandatory_ready_enhancing（mandatory 全 ready，enhancement 未全终态）
+  degraded_terminal_partial  (2026-08-01) → degraded_ready（mandatory 全消费，enhancement 终态但部分非 truly ready）
+  fully_ready_all_fresh      (2026-08-02) → fully_ready（mandatory 全 fresh + enhancement 全 truly ready + auction composite）
 
-新增资产（仅 synthetic）：4 个 MarketBoard + 全部 100 instruments 的成员关系；
+[用户选项B / 约束5+6+7] 单一放大的 full_market universe：220 行业 + 320 概念 board +
+≥5,200 instruments + ≥65,000 合法 memberships，使 Board Facts 绝对门禁合法通过，
+fully_ready 真实可达；blocked 用人为 failed BoardFactsRun 构造（不依赖规模不足），
+禁止跨 universe 无声拼接。
+
+新增资产（仅 synthetic）：220 行业 + 320 概念 MarketBoard + 全部 instruments 的成员关系；
 覆盖 2026-04-01..2026-08-31 的交易日历（scenario 日期均为交易日）。
 
 用法（远程验证库，PANJI_REMOTE_VERIFY_DB_TEST=1）：
@@ -58,17 +66,24 @@ from app.db import AsyncSessionLocal
 
 # [修正] CLOSURE_* 常量定义在 app.domain_status（product_readiness_service 亦从此导入）。
 from app.domain_status import (
+    CLOSURE_BLOCKED,
+    CLOSURE_CORE_READY,
     CLOSURE_DEGRADED_READY,
     CLOSURE_FULLY_READY,
+    CLOSURE_MANDATORY_READY_ENHANCING,
+    CLOSURE_PENDING,
 )
 from app.models.factor_publication import (
+    PUBLICATION_KIND_BOARD_FACTS,
     PUBLICATION_KIND_STOCK_CORE,
 )
+from app.models.market_review import MarketReviewRun
 from app.services.after_close_chip_consensus_service import (
     CHIP_CONSENSUS_JOB_NAME,
     create_after_close_chip_consensus_job,
     execute_after_close_chip_consensus,
 )
+from app.services.board_analysis_service import compute_all_boards
 from app.services.board_facts_service import (
     run_board_facts,
 )
@@ -97,27 +112,51 @@ from app.services.strategy_batch_service import (
     persist_precomputed_dsa_results,
 )
 from app.services.wencai_board_provider import BoardSnapshot
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 # ---------------------------------------------------------------------------
 # 确定性合成常量
 # ---------------------------------------------------------------------------
 _SYNTH_SEED = 20260806
 _NS = uuid.uuid5(uuid.NAMESPACE_DNS, "panji.verify.synthetic")
-N_INST = 100
+N_INST = 100  # 历史兼容；bars 子集构造等仍用 N_INST
+# [用户选项B / 约束5+6] full_market universe：≥5,200 唯一可解析 A 股 synthetic instruments
+FM_N_INST = 5200
 CAL_START = date(2026, 4, 1)
 CAL_END = date(2026, 8, 31)
+# [性能] full_market universe 下 instruments 放大到 5200，daily/60min bars 仅覆盖
+# scenario 窗口（与 15m 同窗口）以控制行数（5200×~13天 可控）。
+CORE_BARS_WINDOW_START = date(2026, 7, 20)
 # 15m 仅覆盖 scenario 窗口（含 07-28/29/30/31）以控制行数；07-30 仅部分标的注入 15m（natural partial）
 FIFTEEN_MIN_WINDOW_START = date(2026, 7, 20)
 PARTIAL_15M_DATE = date(2026, 7, 30)
 PARTIAL_15M_FRACTION = 0.3  # 仅 30% 标的在 07-30 有 15m → chip 自然 partial
 
+# [审查报告修订 / 六状态事实证明] 六态 canonical 场景，每个有独立输入事实与唯一预期 closure。
+# 单一放大的 full_market universe（见 _gen_synthetic_boards）：满足 Board Facts 门禁合法通过，
+# 使 fully_ready 真实可达（约束6）；blocked 用人为 failed BoardFactsRun 构造（约束2/7），
+# 不依赖规模不足，禁止跨 universe 无声拼接（约束5）。
 _SCENARIO_TRADE_DATES = {
-    "full_success": date(2026, 7, 28),
-    "async_enhance": date(2026, 7, 29),
-    "degraded": date(2026, 7, 30),
-    "governance": date(2026, 7, 31),
+    "pending_no_core": date(2026, 7, 28),
+    "blocked_mandatory_failure": date(2026, 7, 29),
+    "core_ready_waiting_mandatory": date(2026, 7, 30),
+    "mandatory_ready_enhancing": date(2026, 7, 31),
+    "degraded_terminal_partial": date(2026, 8, 1),
+    "fully_ready_all_fresh": date(2026, 8, 2),
 }
+
+# 唯一预期 closure（与 backend/tests/readiness_fixtures.py 对齐；审查第七节共享 fixture 只含事实与期望）
+_SCENARIO_EXPECTED_CLOSURE = {
+    "pending_no_core": CLOSURE_PENDING,
+    "blocked_mandatory_failure": CLOSURE_BLOCKED,
+    "core_ready_waiting_mandatory": CLOSURE_CORE_READY,
+    "mandatory_ready_enhancing": CLOSURE_MANDATORY_READY_ENHANCING,
+    "degraded_terminal_partial": CLOSURE_DEGRADED_READY,
+    "fully_ready_all_fresh": CLOSURE_FULLY_READY,
+}
+
+# [审查第六节] 结构化诊断输出目录（日志仅汇总数/lineage ID/失败节点/reason code/有界样本）
+_DIAG_DIR = os.environ.get("READINESS_DIAG_DIR", "/tmp/readiness-diagnostics")
 
 
 def _inst_uuid(i: int) -> uuid.UUID:
@@ -160,15 +199,20 @@ def _bar(t: datetime, o: Decimal) -> dict[str, Any]:
 # 合成数据生成（直接写验证库，不依赖 bz_stock）
 # ---------------------------------------------------------------------------
 async def _gen_synthetic_instruments_bars(verify_conn) -> None:
-    """建 100 instruments + 全窗口 daily/60min + scenario 窗口 15min（确定性）。"""
-    # instruments
+    """[用户选项B / full_market universe] 建 FM_N_INST(≥5200) instruments +
+    窗口内 daily/60min + scenario 窗口 15min（确定性）。
+
+    [性能] daily/60min 仅覆盖 CORE_BARS_WINDOW_START(2026-07-20) 起的交易日，
+    控制 5200 instruments 下的 bars 行数（5200×约30天 可控）。
+    """
+    # [用户选项B] instruments 放大到 FM_N_INST（≥5,200 唯一可解析 A 股 synthetic）
     inst_rows = []
-    for i in range(N_INST):
+    for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
         inst_rows.append({
             "id": str(inst_id),
             "symbol": f"{600000 + i:06d}",
-            "name": f"验证股{i:02d}",
+            "name": f"验证股{i:04d}",
             "market": "SH",
             "status": "active",
             "listing_date": date(2010, 1, 4),
@@ -197,12 +241,13 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
         cal_rows,
     )
 
-    # bars_daily + bars_60min 全窗口
+    # [性能] daily/60min 仅覆盖窗口内交易日
+    window_days = [d for d in _TRADING_DAYS if d >= CORE_BARS_WINDOW_START]
     daily_rows, min60_rows = [], []
-    for i in range(N_INST):
+    for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
         base = 10.0 + (i % 50)
-        for j, d in enumerate(_TRADING_DAYS):
+        for j, d in enumerate(window_days):
             o = _price(base, i, j)
             volume = Decimal(str(random.randint(10000, 90000)))
             daily_rows.append({
@@ -212,7 +257,7 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                 "adj_factor": Decimal("1.0"),
             })
             # 60min: 4 根（10:30,11:30,14:00,15:00）
-            for k, hhmm in enumerate([("10:30"), ("11:30"), ("14:00"), ("15:00")]):
+            for hhmm in [("10:30"), ("11:30"), ("14:00"), ("15:00")]:
                 t = datetime(d.year, d.month, d.day, int(hhmm[:2]), int(hhmm[3:]))  # noqa: DTZ001
                 b = _bar(t, o)
                 min60_rows.append({"instrument_id": str(inst_id), "trade_time": t,
@@ -241,12 +286,13 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
 
     # bars_15min 仅 scenario 窗口；07-30 仅部分标的（natural partial）
     min15_rows = []
-    for i in range(N_INST):
+    win_idx = {d: j for j, d in enumerate(window_days)}
+    for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
-        for d in _TRADING_DAYS:
+        for d in window_days:
             if d < FIFTEEN_MIN_WINDOW_START:
                 continue
-            if d == PARTIAL_15M_DATE and (i / N_INST) >= PARTIAL_15M_FRACTION:
+            if d == PARTIAL_15M_DATE and (i / FM_N_INST) >= PARTIAL_15M_FRACTION:
                 continue  # 70% 标的在 07-30 缺 15m → chip 自然 partial
             base = 10.0 + (i % 50)
             # 16 根收盘时间：09:45..11:30 + 13:15..15:00，末根 15:00。
@@ -255,7 +301,7 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                     d.year, d.month, d.day, 9 if slot < 8 else 13, 30 if slot < 8 else 0,
                 )
                 t = session_start + timedelta(minutes=15 * ((slot % 8) + 1))
-                o = _price(base, i, _TRADING_DAYS.index(d) * 16 + slot)
+                o = _price(base, i, win_idx[d] * 16 + slot)
                 b = _bar(t, o)
                 min15_rows.append({"instrument_id": str(inst_id), "trade_time": t,
                                    **{k2: b[k2] for k2 in (
@@ -272,17 +318,28 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
         min15_rows,
     )
     await verify_conn.commit()
-    print(f"[seed] instruments={N_INST} daily={len(daily_rows)} 60min={len(min60_rows)} 15min={len(min15_rows)}")
+    print(f"[seed] instruments={FM_N_INST} daily={len(daily_rows)} 60min={len(min60_rows)} 15min={len(min15_rows)}")
+
+
+# [用户选项B / 约束6] full_market universe board 规模：220 行业 + 320 概念 = 540 boards
+_FM_N_INDUSTRY = 220
+_FM_N_CONCEPT = 320
+_FM_BOARDS_PER_INST = 13  # 5200×13 = 67,600 ≥ 65,000 合法关系
 
 
 async def _gen_synthetic_boards(verify_conn) -> None:
-    """建 4 个 MarketBoard + 全部 100 instruments 的成员关系。"""
-    board_specs = [
-        ("IND_MAIN", "行业主板", "industry"),
-        ("CONCEPT_HOT", "概念热点", "concept"),
-        ("IND_CYB", "创业板行业", "industry"),
-        ("CONCEPT_VALUE", "价值概念", "concept"),
-    ]
+    """[用户选项B / full_market universe] 建 220 行业 + 320 概念 MarketBoard +
+    全部 FM_N_INST instruments 的成员关系（每只确定性加入 13 个 board → ≥65,000 关系）。
+
+    [约束4] 不修改任何 Board 门禁阈值、不 mock validate_snapshot、不直接写 readiness。
+    Board Facts 门禁（raw_rows≥5000/industry≥200/concept≥300/relation≥60000/coverage≥0.99）
+    由真实 sync_boards 基于本函数生成的合法 synthetic 统计真实通过。
+    """
+    board_specs: list[tuple[str, str, str]] = []
+    for k in range(_FM_N_INDUSTRY):
+        board_specs.append((f"IND_{k:03d}", f"行业{k:03d}", "industry"))
+    for k in range(_FM_N_CONCEPT):
+        board_specs.append((f"CON_{k:03d}", f"概念{k:03d}", "concept"))
     board_ids = {}
     for code, nm, typ in board_specs:
         bid = uuid.uuid5(_NS, f"board-{code}")
@@ -295,11 +352,13 @@ async def _gen_synthetic_boards(verify_conn) -> None:
             ),
             {"id": str(bid), "code": code, "nm": nm, "typ": typ},
         )
+    # 确定性成员关系：每只 instrument 加入 13 个 board（混合行业/概念，确定性散布）
     members = []
-    for i in range(N_INST):
+    n_boards = len(board_specs)
+    for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
-        # 每只股票加入 2 个板块（确定性）
-        for code in (board_specs[i % 2][0], board_specs[(i + 1) % 4][0]):
+        for b in range(_FM_BOARDS_PER_INST):
+            code = board_specs[(i * 7 + b * 13) % n_boards][0]
             members.append({"board_id": str(board_ids[code]), "instrument_id": str(inst_id)})
     await verify_conn.execute(
         text(
@@ -310,7 +369,7 @@ async def _gen_synthetic_boards(verify_conn) -> None:
         members,
     )
     await verify_conn.commit()
-    print(f"[seed] boards={len(board_specs)} memberships={len(members)}")
+    print(f"[seed] boards={n_boards} memberships={len(members)}")
 
 
 async def _gen_synthetic_released_dsa_config(verify_conn) -> uuid.UUID:
@@ -486,32 +545,38 @@ async def _add_projection_selector(trade_date: date, snapshot_run_id: uuid.UUID)
     print(f"[seed] projection selector done: {trade_date} result={result}")
 
 
-def _synthetic_board_snapshot() -> BoardSnapshot:
-    """把 Seed 合成的 4 板块 + 100 成员构造为真实 BoardSnapshot（不连 pywencai）。"""
-    board_specs = [
-        ("IND_MAIN", "行业主板", "industry"),
-        ("CONCEPT_HOT", "概念热点", "concept"),
-        ("IND_CYB", "创业板行业", "industry"),
-        ("CONCEPT_VALUE", "价值概念", "concept"),
-    ]
-    boards = [
-        {"external_code": code, "name": nm, "type": typ}
-        for code, nm, typ in board_specs
-    ]
-    memberships: dict[tuple[str, str], list[str]] = {
-        (code, typ): [] for code, _nm, typ in board_specs
-    }
-    spec_by_code = {code: (code, typ) for code, _nm, typ in board_specs}
-    for i in range(N_INST):
-        symbol = f"{600000 + i:06d}"
-        for code in (board_specs[i % 2][0], board_specs[(i + 1) % 4][0]):
-            memberships[spec_by_code[code]].append(symbol)
+async def _synthetic_board_snapshot() -> BoardSnapshot:
+    """[用户选项B / full_market universe] 动态读验证库 market_boards + memberships +
+    instruments，构造真实 BoardSnapshot（不连 pywencai）。
+
+    [约束4] 不 mock validate_snapshot；snapshot 直接来自已写入的合法 synthetic 事实，
+    使 sync_boards 真实计算 raw_rows/industry/concept/relation/coverage 并合法通过门禁。
+    """
+    async with AsyncSessionLocal() as db:
+        rows = await db.execute(
+            text(
+                "SELECT b.external_code, b.name, b.type, m.instrument_id, i.symbol "
+                "FROM market_board_memberships m "
+                "JOIN market_boards b ON b.id = m.board_id "
+                "JOIN instruments i ON i.id = m.instrument_id"
+            )
+        )
+        data = rows.all()
+    boards: list[dict[str, str]] = []
+    memberships: dict[tuple[str, str], list[str]] = {}
+    seen_boards: set[tuple[str, str]] = set()
+    for ext_code, nm, typ, _inst_id, symbol in data:
+        key = (ext_code, typ)
+        if key not in seen_boards:
+            seen_boards.add(key)
+            boards.append({"external_code": ext_code, "name": nm, "type": typ})
+        memberships.setdefault(key, []).append(symbol)
     return BoardSnapshot(
         boards=boards,
         memberships=memberships,
         raw_rows=sum(len(v) for v in memberships.values()),
         unresolved_symbols=[],
-        diagnostics={"source": "synthetic_seed"},
+        diagnostics={"source": "synthetic_seed_full_market"},
     )
 
 
@@ -525,7 +590,7 @@ async def _resolve_synthetic_symbols(symbols: list[str]) -> dict[str, uuid.UUID]
         return {row[0]: row[1] for row in rows}
 
 
-async def _add_board_prereq(trade_date: date) -> None:
+async def _add_board_prereq(trade_date: date) -> uuid.UUID:
     """真实 board facts 链：run_board_facts(db, trade_date, *, snapshot=..., instrument_resolver=...)。
 
     真实签名（board_facts_service.py:317）：
@@ -534,13 +599,16 @@ async def _add_board_prereq(trade_date: date) -> None:
     注入 snapshot 可避免联网 pywencai（DS-112）。内部会调用 board_sync_service.sync_boards
     （真实入口，签名 sync_boards(db, snapshot, instrument_resolver=None, *, effective_date=None)）。
 
-    [如实标注] board_sync_service 的绝对门禁按全市场标定
-    （raw_rows>=5000 / industry>=200 / concept>=300 / relation>=60000 / industry_coverage>=0.99），
-    100 只 synthetic 标的**必然触发 StagingValidationError**，run_board_facts 会捕获并转入
-    _try_reuse_previous_on_failure；无历史 published run 时该 run 终态为 failed/unavailable。
-    因此 board_facts 无法在纯 synthetic 100 标的下达到 fresh ready —— 见文末报告说明。
+    [用户选项B / 约束3+4] board_sync_service 的绝对门禁按全市场标定
+    （raw_rows>=5000 / industry>=200 / concept>=300 / relation>=60000 / industry_coverage>=0.99）。
+    full_market universe（FM_N_INST=5200 标的 / 220 行业 / 320 概念 / >=65,000 关系）由
+    _gen_synthetic_boards 合法生成，门禁由 sync_boards **真实计算并通过**——不改阈值、不 mock
+    validate_snapshot、不直接写 board_facts readiness。
+
+    Returns:
+        BoardFactsRun.id（Review 的 source_board_run_id lineage 输入，约束5）
     """
-    snapshot = _synthetic_board_snapshot()
+    snapshot = await _synthetic_board_snapshot()
     async with AsyncSessionLocal() as db:
         run = await run_board_facts(
             db, trade_date,
@@ -548,7 +616,194 @@ async def _add_board_prereq(trade_date: date) -> None:
             instrument_resolver=_resolve_synthetic_symbols,
         )
         await db.commit()
-    print(f"[seed] board facts done: {trade_date} run={run.id} status={run.status} readiness={run.readiness}")
+        run_id = run.id
+        status, readiness = run.status, run.readiness
+    print(f"[seed] board facts done: {trade_date} run={run_id} status={status} readiness={readiness}")
+    return run_id
+
+
+async def _seed_blocked_board_failure(trade_date: date) -> uuid.UUID:
+    """[审查第二节 / 约束2+7] blocked 场景的 mandatory terminal failure 构造。
+
+    不新增第七种 closure：这里让 board_facts 节点成为**终态失败且无 publication**，
+    使 ProductReadinessService._board_facts_state 判定
+    readiness=unavailable / is_terminal=True → evaluate_closure → blocked。
+
+    [如实标注 1] BoardFactsRun 表**没有 reason_code 列**（仅 BoardFactsRunItem 有）；
+    run 级别的原因载体是 error_code / error_message / gate_results_json，这里如实写入
+    error_code=EXTERNAL_GATE_UNSATISFIED 作为 DB 侧事实。
+
+    [如实标注 2] ProductReadinessState.lineage["reason_code"] 由 service 自行生成为
+    "RUN_FAILED"（product_readiness_service.py:937），**不读取** BoardFactsRun.error_code。
+    Seed 不修改 service 判定算法，因此断言侧的 reason_code 期望值是 RUN_FAILED；
+    EXTERNAL_GATE_UNSATISFIED 仅存在于 run 表事实层。
+
+    [如实标注 3] _board_facts_state 优先看 BOARD_FACTS publication；只要该日存在
+    publication 就判 ready。因此本函数必须**先删除**该日 BOARD_FACTS publication，
+    否则 failed run 不会生效。
+
+    [约束7] 不依赖"100 只标的规模不足"这一偶发原因；显式写入一个 failed BoardFactsRun，
+    使 blocked 语义稳定、与 universe 规模解耦。full_market universe 本身能合法通过门禁，
+    所以此处必须显式构造失败，否则该场景会退化成 fully_ready。
+    """
+    from app.models.board_facts_run import BoardFactsRun
+
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        # [如实标注 3] 清除该日 BOARD_FACTS publication，使 failed run 成为唯一事实来源。
+        # 仅限本场景的 synthetic 验证日期（幂等：重复执行结果相同）。
+        removed = len((await db.execute(text(
+            "DELETE FROM factor_publications "
+            "WHERE publication_kind = :kind AND trade_date = :td "
+            "RETURNING id"
+        ), {"kind": PUBLICATION_KIND_BOARD_FACTS, "td": trade_date})).all())
+        existing = (await db.execute(
+            select(BoardFactsRun)
+            .where(BoardFactsRun.trade_date == trade_date)
+            .order_by(BoardFactsRun.created_at.desc())
+        )).scalars().first()
+        if existing is not None:
+            existing.status = "failed"
+            existing.readiness = "unavailable"
+            existing.error_code = "EXTERNAL_GATE_UNSATISFIED"
+            existing.error_message = (
+                "synthetic mandatory terminal failure for blocked_mandatory_failure scenario"
+            )
+            existing.finished_at = existing.finished_at or now
+            run_id = existing.id
+        else:
+            run = BoardFactsRun(
+                id=uuid.uuid5(_NS, f"board-facts-blocked-{trade_date}"),
+                trade_date=trade_date,
+                run_mode="scheduled_current",
+                source="pywencai",
+                status="failed",
+                readiness="unavailable",
+                error_code="EXTERNAL_GATE_UNSATISFIED",
+                error_message=(
+                    "synthetic mandatory terminal failure for blocked_mandatory_failure scenario"
+                ),
+                started_at=now,
+                finished_at=now,
+            )
+            db.add(run)
+            await db.flush()
+            run_id = run.id
+        await db.commit()
+    print(
+        f"[seed] board facts BLOCKED (synthetic terminal failure): {trade_date} "
+        f"run={run_id} error_code=EXTERNAL_GATE_UNSATISFIED "
+        f"removed_publications={removed} (state reason_code 由 service 生成为 RUN_FAILED)"
+    )
+    return run_id
+
+
+async def _publish_board_aggregation(trade_date: date) -> uuid.UUID | None:
+    """真实 board aggregation 链：compute_all_boards(publish=True) → market_aggregation pointer。
+
+    真实签名（board_analysis_service.py:1649）：
+        compute_all_boards(session, trade_date, *, board_type=None, limit=None,
+            publish=True, algorithm_version=BOARD_ANALYSIS_ALGORITHM_VERSION) -> dict
+
+    [审查第四节修正] 原 Seed 只做单板块 compute 而**从不写 market_aggregation publication**，
+    导致 _board_aggregation_state 永远 unavailable。compute_all_boards 内部在
+    batch_run.status == "succeeded" 时才逐板块 publish_board_analysis 并调用
+    publish_market_aggregation（写 market_aggregation pointer），是唯一真实 producer。
+
+    [约束4+5] 不直接写 factor_publications；source_core_run_id 由 compute_all_boards 从
+    已发布 stock_core pointer 读取，与 Core 同 universe，lineage 天然一致。
+
+    Returns:
+        board_analysis_runs.id（成功发布时），否则 None（软失败，由 closure 断言暴露）
+    """
+    async with AsyncSessionLocal() as db:
+        result = await compute_all_boards(db, trade_date, publish=True)
+        await db.commit()
+    published = result.get("published", 0)
+    status = result.get("status")
+    run_id = result.get("board_analysis_run_id")
+    print(
+        f"[seed] board aggregation: {trade_date} run={run_id} status={status} "
+        f"succeeded={result.get('succeeded')} failed={result.get('failed')} "
+        f"published_boards={published} coverage_below={result.get('coverage_below_threshold')}"
+    )
+    if result.get("errors"):
+        print(f"        errors[:3]={result['errors'][:3]}")
+    if status != "succeeded":
+        return None
+    return uuid.UUID(str(run_id))
+
+
+async def _run_and_publish_review(
+    trade_date: date,
+    core_run_id: uuid.UUID,
+    board_run_id: uuid.UUID | None = None,
+) -> None:
+    """真实 review producer 链：create_run → compute_run → publish_run(force=False)。
+
+    真实签名（review_orchestrator_service.py）：
+        create_run(session, *, trade_date, source_core_run_id=None,
+            source_board_run_id=None, algorithm_version=None, ...) -> MarketReviewRun
+        compute_run(session, run, *, canary=False, symbols=None) -> dict
+        publish_run(session, run, *, force=False, operator=None,
+            idempotency_key=None) -> tuple[FactorPublication | None, list[str]]
+
+    [审查第四节修正] 原 Seed 只把 Review 当 observer（collect_states 只读），
+    从不产生 market_review publication，导致 mandatory 永远缺一节点。
+    这里让 Review 成为真正 producer。
+
+    [约束4] force=False：必须真实通过 evaluate_publish_gate（coverage 门禁），
+    不用 provisional 绕过。门禁失败抛 ReviewPublishBlockError → 这里捕获并如实打印，
+    由 closure 严格断言暴露，不静默兜底。
+
+    [约束5] source_core_run_id / source_board_run_id 显式传入，记录同 universe lineage。
+    """
+    from app.services.review_orchestrator_service import (
+        compute_run,
+        create_run,
+        publish_run,
+    )
+
+    async with AsyncSessionLocal() as db:
+        run = await create_run(
+            db,
+            trade_date=trade_date,
+            source_core_run_id=core_run_id,
+            source_board_run_id=board_run_id,
+            idempotency_key=f"verify-seed:{trade_date}",
+        )
+        await db.commit()
+        run_id = run.id
+
+    async with AsyncSessionLocal() as db:
+        compute_target = await db.get(MarketReviewRun, run_id)
+        if compute_target is None:
+            raise RuntimeError(f"review run 不存在: {run_id}")
+        summary = await compute_run(db, compute_target)
+        await db.commit()
+    print(f"[seed] review computed: {trade_date} run={run_id} summary={summary}")
+
+    async with AsyncSessionLocal() as db:
+        publish_target = await db.get(MarketReviewRun, run_id)
+        if publish_target is None:
+            raise RuntimeError(f"review run 不存在: {run_id}")
+        try:
+            pub, blockers = await publish_run(
+                db, publish_target, force=False, operator="verify-seed",
+                idempotency_key=f"verify-seed:{trade_date}",
+            )
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001 - 如实暴露门禁失败，不静默兜底
+            await db.rollback()
+            print(
+                f"[seed] review publish BLOCKED: {trade_date} run={run_id} "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            return
+    print(
+        f"[seed] review published: {trade_date} run={run_id} "
+        f"publication={None if pub is None else pub.id} blockers={blockers}"
+    )
 
 
 async def _add_review_prereq(trade_date: date) -> None:
@@ -660,53 +915,223 @@ async def _run_chip_real(
 
 
 # ---------------------------------------------------------------------------
-# 场景装配
+# 场景装配（六态 canonical；审查报告修正四个错位）
 # ---------------------------------------------------------------------------
 async def _seed_scenario(verify_conn, scenario: str) -> None:
     td = _SCENARIO_TRADE_DATES[scenario]
     # 所有场景共享：instruments/bars/calendar/board/config（一次性生成，幂等）
     # 由 seed_all 顶层生成，这里只做场景专属装配。
-    # [顺序修正] auction 锚点真实链要求当日 stock_core pointer 已发布
-    # （generate_auction_anchors 第 1 步即查 published stock_core pointer），
-    # 且 chip 可用才可能进入 hybrid/composite。故顺序为：
-    #   core → projection → board → chip → finish core run → publish core → auction。
-    if scenario == "full_success":
+    # producer 顺序（真实服务依赖方向）：
+    #   core → projection → board(publication) → chip → finish core run → publish core
+    #   → auction → board_aggregation(publication) → review(create→compute→publish)
+    # 约束5：同一场景内部 Core/Board/Aggregation/Review 必须使用同一 universe，禁止跨 universe 拼接。
+    if scenario == "pending_no_core":
+        # 只建 daily + instruments，stock_core 未发布 → closure=pending
+        await _add_instruments_prereq(td)
+    elif scenario == "blocked_mandatory_failure":
+        # mandatory 主链基本完成，但 board_facts 显式终态失败且无 publication
+        # → board_facts unavailable(terminal) → closure=blocked
+        # （run 表 error_code=EXTERNAL_GATE_UNSATISFIED；state.reason_code 由 service 生成为 RUN_FAILED）
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
-        await _add_board_prereq(td)
-        await _run_chip_real(td, core_run_id=core_run_id)  # 全 100 只（15m 齐全）→ full
+        board_run_id = await _seed_blocked_board_failure(td)
+        await _run_chip_real(td, core_run_id=core_run_id)
         await _finish_core_run(td, core_run_id)
         await _add_full_publication(td, core_run_id)
         await _add_auction_prereq(td, mode="composite")
-        await _add_review_prereq(td)
-    elif scenario == "async_enhance":
+        await _publish_board_aggregation(td)
+        await _run_and_publish_review(td, core_run_id, board_run_id)
+    elif scenario == "core_ready_waiting_mandatory":
+        # stock_core 可消费，但 review 未发布（mandatory 未完成）→ closure=core_ready
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
         await _add_board_prereq(td)
-        # chip 真实执行；不发布 core pointer → auction 缺前置，closure 停在 core_ready 之前
         await _run_chip_real(td, core_run_id=core_run_id)
-        await _add_auction_prereq(td, mode="structure_only")
-        await _add_review_prereq(td)
-        # 故意不发布 → 后续异步增强（core_ready）
-    elif scenario == "degraded":
+        await _finish_core_run(td, core_run_id)
+        await _add_full_publication(td, core_run_id)
+        await _add_auction_prereq(td, mode="composite")
+        await _publish_board_aggregation(td)
+        # 故意不发布 review → core_ready
+    elif scenario == "mandatory_ready_enhancing":
+        # mandatory 全部 ready（含已发布 stock_core），enhancement 部分未终态
+        # → closure=mandatory_ready_enhancing
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
-        await _add_board_prereq(td)
-        # chip 仅子集 15m 齐全（07-30 仅 30% 标的注入 15m）→ 自然 partial（real chain）
+        board_run_id = await _add_board_prereq(td)
+        await _run_chip_real(td, core_run_id=core_run_id)
+        await _finish_core_run(td, core_run_id)
+        await _add_full_publication(td, core_run_id)
+        await _add_auction_prereq(td, mode="composite")
+        await _publish_board_aggregation(td)
+        await _run_and_publish_review(td, core_run_id, board_run_id)
+        # enhancement（chip/auction）已完成；dsa_projection/state_events 留待异步增强未终态
+    elif scenario == "degraded_terminal_partial":
+        # mandatory 全部可消费；enhancement 全部终态但部分非 truly ready
+        # （chip partial + auction hybrid）→ closure=degraded_ready
+        core_run_id = await _add_instruments_prereq(td)
+        await _add_projection_selector(td, core_run_id)
+        board_run_id = await _add_board_prereq(td)
         subset = [_inst_uuid(i) for i in range(int(N_INST * PARTIAL_15M_FRACTION))]
-        await _run_chip_real(td, core_run_id=core_run_id, instrument_ids=subset)
-        await _add_auction_prereq(td, mode="hybrid")
-        await _add_review_prereq(td)
-        # 故意不发布 → degraded_ready
-    elif scenario == "governance":
+        await _run_chip_real(td, core_run_id=core_run_id, instrument_ids=subset)  # 部分 15m → partial
+        await _finish_core_run(td, core_run_id)
+        await _add_full_publication(td, core_run_id)
+        await _add_auction_prereq(td, mode="hybrid")  # 非 composite → 非 fully ready
+        await _publish_board_aggregation(td)
+        await _run_and_publish_review(td, core_run_id, board_run_id)
+    elif scenario == "fully_ready_all_fresh":
+        # mandatory 全 fresh + enhancement 全 truly ready + auction composite
+        # → closure=fully_ready（约束6：必须真实达到）
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
-        # 故意缺失 board / auction / chip / publication → blocked / degraded
-        await _add_review_prereq(td)
+        board_run_id = await _add_board_prereq(td)  # full_market universe 下门禁合法通过
+        await _run_chip_real(td, core_run_id=core_run_id)
+        await _finish_core_run(td, core_run_id)
+        await _add_full_publication(td, core_run_id)
+        await _add_auction_prereq(td, mode="composite")
+        await _publish_board_aggregation(td)
+        await _run_and_publish_review(td, core_run_id, board_run_id)
+    else:
+        raise ValueError(f"未知场景: {scenario}（合法值：{sorted(_SCENARIO_TRADE_DATES)}）")
 
 
-async def seed_all(verify_conn) -> None:
-    """一次性合成基础资产 + 四类场景装配。"""
+# ---------------------------------------------------------------------------
+# 结构化诊断 + 事实向量幂等（审查第五、六节）
+# ---------------------------------------------------------------------------
+def _write_diag(name: str, payload: Any) -> str:
+    """写结构化诊断 JSON（审查第六节：固定文件名，非自由日志）。"""
+    os.makedirs(_DIAG_DIR, exist_ok=True)
+    path = os.path.join(_DIAG_DIR, name)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+    print(f"[seed] diagnostics written: {path}")
+    return path
+
+
+def _state_row(st) -> dict[str, Any]:
+    """单节点事实行（含 lineage 关系，不含随机 UUID 之外的噪声）。"""
+    return {
+        "product": st.product,
+        "readiness": st.readiness,
+        "freshness": st.freshness,
+        "isMandatory": st.is_mandatory,
+        "isTerminal": st.is_terminal,
+        "isConsumable": st.is_consumable,
+        "isFullyFresh": st.is_fully_fresh,
+        "isProductReady": st.is_product_ready,
+        "auctionMode": st.auction_mode,
+        "reasonCode": st.lineage.get("reason_code"),
+        "lineage": {k: (str(v) if v is not None else None) for k, v in sorted(st.lineage.items())},
+    }
+
+
+async def _collect_scenario_matrix() -> dict[str, Any]:
+    """采集六场景九节点完整矩阵（真实入口：ProductReadinessService().collect_states）。"""
+    matrix: dict[str, Any] = {}
+    async with AsyncSessionLocal() as db:
+        svc = ProductReadinessService()
+        for sc, td in _SCENARIO_TRADE_DATES.items():
+            states = await svc.collect_states(db, td)
+            ev = evaluate_closure(states)
+            matrix[sc] = {
+                "tradeDate": str(td),
+                "expectedClosure": _SCENARIO_EXPECTED_CLOSURE[sc],
+                "actualClosure": ev.closure,
+                "match": ev.closure == _SCENARIO_EXPECTED_CLOSURE[sc],
+                "mandatoryProductsReady": ev.mandatory_products_ready,
+                "mandatoryProductsFullFresh": ev.mandatory_products_full_fresh,
+                "enhancementJobsTerminal": ev.enhancement_jobs_terminal,
+                "issues": ev.issues,
+                "nodes": {st.product: _state_row(st) for st in states},
+            }
+    return matrix
+
+
+def _closure_vector(matrix: dict[str, Any]) -> dict[str, str]:
+    return {sc: str(v["actualClosure"]) for sc, v in sorted(matrix.items())}
+
+
+# 审计时间字段：幂等 diff 中允许变化（审查第五节）
+_IDEMPOTENCY_IGNORED_KEYS = frozenset({
+    "created_at", "updated_at", "started_at", "finished_at",
+    "published_at", "computed_at", "generated_at", "observed_at",
+})
+
+
+async def _collect_fact_vector() -> dict[str, Any]:
+    """采集完整事实向量（审查第五节：run/item/snapshot/publication/pointer/closure）。
+
+    仅采集计数与关系型指纹，不含审计时间戳；两次 Seed 之间应逐字段相等。
+    """
+    counts_sql = {
+        "core_runs": "SELECT COUNT(*) FROM stock_feature_snapshot_runs",
+        "core_run_items": "SELECT COUNT(*) FROM stock_feature_snapshot_run_items",
+        "core_snapshots": "SELECT COUNT(*) FROM stock_feature_snapshots",
+        "publications": "SELECT COUNT(*) FROM factor_publications",
+        "publications_current": (
+            "SELECT COUNT(*) FROM factor_publications WHERE superseded_by IS NULL"
+        ),
+        "board_facts_runs": "SELECT COUNT(*) FROM board_facts_runs",
+        "board_analysis_runs": "SELECT COUNT(*) FROM board_analysis_runs",
+        "board_analysis_snapshots": "SELECT COUNT(*) FROM board_analysis_snapshots",
+        "market_review_runs": "SELECT COUNT(*) FROM market_review_runs",
+        "market_boards": "SELECT COUNT(*) FROM market_boards",
+        "board_memberships": "SELECT COUNT(*) FROM market_board_memberships",
+        "instruments": "SELECT COUNT(*) FROM instruments",
+    }
+    vector: dict[str, Any] = {"counts": {}, "pointers": {}, "naturalKeys": {}}
+    async with AsyncSessionLocal() as db:
+        for key, sql in counts_sql.items():
+            try:
+                vector["counts"][key] = int((await db.execute(text(sql))).scalar_one())
+            except Exception as exc:  # noqa: BLE001 - 表缺失如实记录，不静默为 0
+                await db.rollback()
+                vector["counts"][key] = f"ERROR:{type(exc).__name__}"
+        # pointer 向量：当前有效 publication 的 (kind, trade_date) → data_run_id 关系
+        try:
+            rows = (await db.execute(text(
+                "SELECT publication_kind, trade_date::text, data_run_id::text "
+                "FROM factor_publications WHERE superseded_by IS NULL "
+                "ORDER BY publication_kind, trade_date"
+            ))).all()
+            vector["pointers"] = {f"{r[0]}@{r[1]}": r[2] for r in rows}
+        except Exception as exc:  # noqa: BLE001
+            await db.rollback()
+            vector["pointers"] = {"ERROR": f"{type(exc).__name__}: {exc}"}
+        # natural key 向量：每个场景日期的 core run 标识
+        try:
+            rows = (await db.execute(text(
+                "SELECT trade_date::text, COUNT(*), MIN(status), MAX(status) "
+                "FROM stock_feature_snapshot_runs GROUP BY trade_date ORDER BY trade_date"
+            ))).all()
+            vector["naturalKeys"] = {
+                r[0]: {"runCount": int(r[1]), "minStatus": r[2], "maxStatus": r[3]}
+                for r in rows
+            }
+        except Exception as exc:  # noqa: BLE001
+            await db.rollback()
+            vector["naturalKeys"] = {"ERROR": f"{type(exc).__name__}: {exc}"}
+    return vector
+
+
+def _diff_fact_vectors(first: dict[str, Any], second: dict[str, Any]) -> list[dict[str, Any]]:
+    """结构化 diff（审查第五节：仅审计时间字段允许变化，其余任何差异都是幂等违规）。"""
+    diffs: list[dict[str, Any]] = []
+
+    def walk(path: str, a: Any, b: Any) -> None:
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in sorted(set(a) | set(b)):
+                if k in _IDEMPOTENCY_IGNORED_KEYS:
+                    continue
+                walk(f"{path}.{k}" if path else str(k), a.get(k), b.get(k))
+        elif a != b:
+            diffs.append({"path": path, "first": a, "second": b})
+
+    walk("", first, second)
+    return diffs
+
+
+async def seed_all(verify_conn, *, strict: bool = True) -> None:
+    """一次性合成基础资产 + 六态 canonical 场景装配 + 严格 closure 断言。"""
     await _gen_synthetic_instruments_bars(verify_conn)
     await _gen_synthetic_boards(verify_conn)
     await _gen_synthetic_released_dsa_config(verify_conn)
@@ -714,44 +1139,81 @@ async def seed_all(verify_conn) -> None:
         "SELECT DISTINCT trade_date FROM stock_feature_snapshot_runs "
         "WHERE trade_date = ANY(:dates)"
     ), {"dates": list(_SCENARIO_TRADE_DATES.values())})).scalars().all())
-    if completed_dates == set(_SCENARIO_TRADE_DATES.values()):
-        print("[seed] all scenario core runs already exist; validating closures only")
-        await _verify_closures()
-        return
-    for sc in ("full_success", "async_enhance", "degraded", "governance"):
-        await _seed_scenario(verify_conn, sc)
-    # 验证 closure 符合预期（只读断言，失败抛错阻断）
-    await _verify_closures()
-
-
-async def _verify_closures() -> None:
-    """只读报告四类场景的真实 closure（真实入口：ProductReadinessService().collect_states）。
-
-    [如实标注] 这里**只报告不硬断言**：closure 是否落到 fully_ready/degraded_ready
-    取决于 board_facts / auction / review 等节点能否在 100 只 synthetic 标的下真实达成
-    （board_sync 绝对门禁按全市场标定，见 _add_board_prereq）。硬断言由
-    tests/test_pg_seed_scenario_closures.py 在真实验证库上执行。
-    """
-    expectations = {
-        "full_success": CLOSURE_FULLY_READY,
-        "degraded": CLOSURE_DEGRADED_READY,
+    # pending_no_core 场景不产生 core run，幂等判定只看会产生 core run 的场景
+    core_bearing_dates = {
+        td for sc, td in _SCENARIO_TRADE_DATES.items() if sc != "pending_no_core"
     }
-    async with AsyncSessionLocal() as db:
-        svc = ProductReadinessService()
-        for sc, td in _SCENARIO_TRADE_DATES.items():
-            states = await svc.collect_states(db, td)
-            ev = evaluate_closure(states)
-            expected = expectations.get(sc)
-            flag = "" if expected is None else f" (预期 {expected})"
-            print(f"[seed] closure {sc} {td} → {ev.closure}{flag}")
-            if ev.issues:
-                print(f"        issues={ev.issues}")
+    if core_bearing_dates.issubset(completed_dates):
+        print("[seed] all scenario core runs already exist; validating closures only")
+    else:
+        for sc in _SCENARIO_TRADE_DATES:
+            await _seed_scenario(verify_conn, sc)
+    await _verify_closures(strict=strict)
+
+
+async def _verify_closures(*, strict: bool = True) -> None:
+    """六态严格 closure 断言 + 结构化诊断（真实入口：ProductReadinessService().collect_states）。
+
+    [审查第五节修订] 废弃「允许多个 closure」的宽松断言：每个场景有且仅有一个预期 closure。
+    strict=True 时任一场景不匹配即抛错阻断（Seed 失败 → 验证尝试失败）。
+
+    输出（审查第六节）：
+      - readiness-scenario-matrix.json：六场景 × 九节点完整事实矩阵
+      - readiness-lineage.json：每节点 lineage 关系（run/publication/source-core 指向）
+      - closure-decision.json：closure 判定输入与结论
+    """
+    matrix = await _collect_scenario_matrix()
+
+    _write_diag("readiness-scenario-matrix.json", matrix)
+    _write_diag("readiness-lineage.json", {
+        sc: {p: n["lineage"] for p, n in v["nodes"].items()} for sc, v in matrix.items()
+    })
+    _write_diag("closure-decision.json", {
+        sc: {
+            "tradeDate": v["tradeDate"],
+            "expectedClosure": v["expectedClosure"],
+            "actualClosure": v["actualClosure"],
+            "match": v["match"],
+            "mandatoryProductsReady": v["mandatoryProductsReady"],
+            "mandatoryProductsFullFresh": v["mandatoryProductsFullFresh"],
+            "enhancementJobsTerminal": v["enhancementJobsTerminal"],
+            "issues": v["issues"],
+        }
+        for sc, v in matrix.items()
+    })
+
+    mismatches: list[str] = []
+    for sc, v in matrix.items():
+        mark = "OK" if v["match"] else "MISMATCH"
+        print(
+            f"[seed] closure {sc} {v['tradeDate']} → {v['actualClosure']} "
+            f"(预期 {v['expectedClosure']}) [{mark}]"
+        )
+        if not v["match"]:
+            blocking = [
+                f"{p}={n['readiness']}"
+                + (f"/{n['reasonCode']}" if n["reasonCode"] else "")
+                for p, n in sorted(v["nodes"].items())
+                if not n["isConsumable"] or not n["isFullyFresh"]
+            ]
+            print(f"        blocking_nodes={blocking}")
+            mismatches.append(
+                f"{sc}@{v['tradeDate']}: expected={v['expectedClosure']} "
+                f"actual={v['actualClosure']} blocking={blocking}"
+            )
+
+    if mismatches and strict:
+        raise AssertionError(
+            "六态 closure 严格断言失败（详见 readiness-scenario-matrix.json）:\n  "
+            + "\n  ".join(mismatches)
+        )
 
 
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
-async def _amain(verify_db_url: str, scenario: str) -> None:
+async def _amain(verify_db_url: str, scenario: str, *, seed_twice: bool = False,
+                 strict: bool = True) -> None:
     """[CHANGE-20260806-008] 单一 DB 来源：所有合成 INSERT 与真实服务均经 AsyncSessionLocal
     （其底层 engine 在导入时绑定 DATABASE_URL）。为确保合成 INSERT 写入的库与真实服务读取的库
     完全一致，这里将 DATABASE_URL 强制对齐到 verify_db_url，并 lazy 重新取出会话工厂。
@@ -768,15 +1230,49 @@ async def _amain(verify_db_url: str, scenario: str) -> None:
     importlib.reload(_db_mod)
     session_factory = _db_mod.AsyncSessionLocal
 
-    async with session_factory() as s:
-        if scenario == "all":
-            await seed_all(s)
-        else:
-            # 单场景：先确保基础资产存在（幂等）
-            await _gen_synthetic_instruments_bars(s)
-            await _gen_synthetic_boards(s)
-            await _gen_synthetic_released_dsa_config(s)
-            await _seed_scenario(s, scenario)
+    async def _run_once() -> None:
+        async with session_factory() as s:
+            if scenario == "all":
+                await seed_all(s, strict=strict)
+            else:
+                # 单场景：先确保基础资产存在（幂等）
+                await _gen_synthetic_instruments_bars(s)
+                await _gen_synthetic_boards(s)
+                await _gen_synthetic_released_dsa_config(s)
+                await _seed_scenario(s, scenario)
+
+    if not seed_twice:
+        await _run_once()
+        return
+
+    # [审查第五节] Seed twice 严格事实向量幂等：两次运行的完整事实向量必须逐字段相等
+    print("[seed] === idempotency pass 1/2 ===")
+    await _run_once()
+    first = await _collect_fact_vector()
+    first["closureVector"] = _closure_vector(await _collect_scenario_matrix())
+
+    print("[seed] === idempotency pass 2/2 ===")
+    await _run_once()
+    second = await _collect_fact_vector()
+    second["closureVector"] = _closure_vector(await _collect_scenario_matrix())
+
+    diffs = _diff_fact_vectors(first, second)
+    _write_diag("seed-idempotency-diff.json", {
+        "first": first,
+        "second": second,
+        "diffs": diffs,
+        "idempotent": not diffs,
+        "ignoredKeys": sorted(_IDEMPOTENCY_IGNORED_KEYS),
+    })
+    if diffs:
+        print(f"[seed] idempotency VIOLATION: {len(diffs)} diffs (前 10 条)")
+        for d in diffs[:10]:
+            print(f"        {d['path']}: {d['first']!r} → {d['second']!r}")
+        raise AssertionError(
+            f"Seed twice 事实向量不幂等：{len(diffs)} 处差异"
+            "（详见 seed-idempotency-diff.json）"
+        )
+    print("[seed] idempotency OK: 两次运行事实向量完全一致")
 
 
 def main() -> None:
@@ -786,11 +1282,29 @@ def main() -> None:
         default=os.environ.get("DATABASE_URL"),
         help="bz_stock_verify_<sha> 异步连接串；默认读取受控验证容器 DATABASE_URL",
     )
-    ap.add_argument("--scenario", default="all", choices=["all", "full_success", "async_enhance", "degraded", "governance"])
+    ap.add_argument(
+        "--scenario",
+        default="all",
+        choices=["all", *sorted(_SCENARIO_TRADE_DATES)],
+        help="六态 canonical 场景；all 表示全部装配并做严格 closure 断言",
+    )
+    ap.add_argument(
+        "--seed-twice",
+        action="store_true",
+        help="运行两次并对完整事实向量做结构化 diff（审查第五节幂等证明）",
+    )
+    ap.add_argument(
+        "--no-strict",
+        action="store_true",
+        help="仅诊断：不因 closure 不匹配抛错（不得用于绿色验收）",
+    )
     args = ap.parse_args()
     if not args.verify_db_url:
         ap.error("--verify-db-url or DATABASE_URL is required")
-    asyncio.run(_amain(args.verify_db_url, args.scenario))
+    asyncio.run(_amain(
+        args.verify_db_url, args.scenario,
+        seed_twice=args.seed_twice, strict=not args.no_strict,
+    ))
 
 
 if __name__ == "__main__":
