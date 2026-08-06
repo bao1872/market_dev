@@ -167,7 +167,13 @@ def test_prepare_environment_keeps_secret_in_mode_600(
     assert output.stat().st_mode & 0o777 == 0o600
     content = output.read_text()
     assert f"bz_stock_verify_{FULL_SHA}" in content
+    assert "MIGRATION_DATABASE_URL=postgresql+psycopg://" in content
     assert "POSTGRES_PASSWORD" not in content
+
+
+def test_alembic_prefers_dedicated_sync_migration_url() -> None:
+    source = (_VERIFY_DIR.parents[1] / "backend" / "alembic" / "env.py").read_text()
+    assert 'os.environ.get("MIGRATION_DATABASE_URL")' in source
 
 
 def test_cleanup_source_never_uses_volume_delete() -> None:

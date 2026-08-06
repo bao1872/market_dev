@@ -296,7 +296,10 @@ def check(root: Path) -> list[str]:
     for signal in ("POSTGRES_PASSWORD", "chmod", "token_urlsafe", "trading-postgres"):
         if signal not in verify_env_builder_code:
             errors.append(f"verification environment builder missing contract signal: {signal}")
-    for signal in ("verify-test:", "127.0.0.1", "PANJI_REMOTE_VERIFY_DB_TEST"):
+    for signal in (
+        "verify-test:", "127.0.0.1", "PANJI_REMOTE_VERIFY_DB_TEST",
+        "MIGRATION_DATABASE_URL",
+    ):
         if signal not in verify_compose_text:
             errors.append(f"verification compose missing contract signal: {signal}")
     for token in ("down -v", '"down", "-v"', "--rmi", "docker cp", "pip install"):

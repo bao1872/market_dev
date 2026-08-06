@@ -53,11 +53,15 @@ def prepare(target_sha: str, output: Path) -> Path:
         f"postgresql+asyncpg://{quote(user, safe='')}:{quote(password, safe='')}"
         f"@trading-postgres:5432/{db_name}"
     )
+    migration_database_url = database_url.replace(
+        "postgresql+asyncpg://", "postgresql+psycopg://", 1
+    )
     runtime_dir = output.parent / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     (runtime_dir / "RUNTIME_SHA").write_text(target_sha, encoding="ascii")
     lines = {
         "DATABASE_URL": database_url,
+        "MIGRATION_DATABASE_URL": migration_database_url,
         "REDIS_URL": "redis://verify-redis:6379/0",
         "JWT_SECRET": secrets.token_urlsafe(48),
         "APP_ENV": "verification",

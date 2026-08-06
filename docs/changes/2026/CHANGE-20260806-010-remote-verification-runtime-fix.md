@@ -18,6 +18,10 @@ Migration、PG、Seed 和 closure E2E 都由一次性 `verify-test` 运行。治
 现已锁定 `tsx` 开发依赖，并将五个测试文件的 `import.meta.dirname` 改为标准
 `fileURLToPath(import.meta.url)`，使合同测试在 Node 20+ 可重复运行。
 
+首次远程 attempt 在 Migration gate 暴露 asyncpg URL 被同步 Alembic engine 使用，触发
+`MissingGreenlet`。cleanup 已确认数据库、容器、网络和敏感文件均归零。修复为验证环境同时生成
+异步 `DATABASE_URL` 与同步 `MIGRATION_DATABASE_URL`，Alembic 明确优先后者；该失败证据不计入新 SHA。
+
 ## 数据、验证与风险
 
 无 Migration，不接触 `bz_stock`。用户已单独授权精确删除 8 个历史 `bz_stock_verify_*` 数据库。

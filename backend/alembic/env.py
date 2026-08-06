@@ -26,7 +26,9 @@ config = context.config
 # 从应用配置读取 DATABASE_URL，覆盖 alembic.ini 中的默认值
 # 优先使用环境变量，便于 CI/CD 注入
 settings = get_settings()
-db_url = os.environ.get("DATABASE_URL", settings.database_url)
+db_url = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get(
+    "DATABASE_URL", settings.database_url
+)
 config.set_main_option("sqlalchemy.url", db_url)
 
 # 日志配置

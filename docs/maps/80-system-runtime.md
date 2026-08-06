@@ -74,6 +74,8 @@ upgrade/downgrade/upgrade/重复 upgrade；PG 由 Compose 的一次性 `verify-t
 `prepare_verify_environment.py`，从既有容器身份生成仓库外、权限 `0600` 的单次环境文件并设置
 trap 删除；数据库 URL 不进入 SSH 命令、进程参数、manifest 或 Git。建删库通过 PostgreSQL 容器，
 Migration、PG、Seed 与 Synthetic E2E 通过一次性 `verify-test` 执行，不依赖宿主机 Python/PG 工具。
+验证环境分别生成 asyncpg `DATABASE_URL` 与 psycopg `MIGRATION_DATABASE_URL`；Alembic 优先读取
+后者，应用与 PG 测试继续使用前者。
 
 实现边界：
 
