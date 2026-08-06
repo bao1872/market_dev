@@ -70,6 +70,11 @@ upgrade/downgrade/upgrade/重复 upgrade；PG 由 Compose 的一次性 `verify-t
 `evidence_exporter.py` 对日志和总证据设上限。以上为已通过本地合同测试和静态检查的代码事实，
 尚未在远程 PostgreSQL 完整实跑，因此 `remote_verification_verified=false`。
 
+正式入口只把 SHA 与登记计划交给 `run_remote_verification.sh`。后者调用
+`prepare_verify_environment.py`，从既有容器身份生成仓库外、权限 `0600` 的单次环境文件并设置
+trap 删除；数据库 URL 不进入 SSH 命令、进程参数、manifest 或 Git。建删库通过 PostgreSQL 容器，
+Migration、PG、Seed 与 Synthetic E2E 通过一次性 `verify-test` 执行，不依赖宿主机 Python/PG 工具。
+
 实现边界：
 
 - 本地入口只校验来源、运行 preflight，并让服务器先自举到目标 SHA 工作树，

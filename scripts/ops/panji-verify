@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 run --sha <FULL_SHA> [--plan full-closure] [--env-file FILE]" >&2
+  echo "usage: $0 run --sha <FULL_SHA> [--plan full-closure]" >&2
   exit 80
 }
 
@@ -11,12 +11,11 @@ usage() {
 shift
 SHA=""
 PLAN="full-closure"
-ENV_FILE="market.verify.env"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --sha) SHA="${2:-}"; shift 2 ;;
     --plan) PLAN="${2:-}"; shift 2 ;;
-    --env-file) ENV_FILE="${2:-}"; shift 2 ;;
+    --env-file) echo "panji-verify: --env-file is no longer accepted" >&2; exit 80 ;;
     *) usage ;;
   esac
 done
@@ -33,11 +32,5 @@ echo "$SHA" | grep -Eq '^[0-9a-f]{40}$' || {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/panji-prod-preflight" || exit 10
 
-REMOTE_PLAN="scripts/verify/plans/${PLAN}.json"
-"$SCRIPT_DIR/panji-prod-ssh" "cd /root/web_dev_verify && python scripts/verify/verify_attempt.py \
-  --target-sha '$SHA' \
-  --verify-db-url \"\${VERIFY_DB_URL:?VERIFY_DB_URL must be provided by the remote verification environment}\" \
-  --compose-project 'panji-verify-${SHA}' \
-  --env-file '$ENV_FILE' \
-  --compose-file docker-compose.verify.yml \
-  --plan '$REMOTE_PLAN'"
+"$SCRIPT_DIR/panji-prod-ssh" \
+  "cd /root/web_dev_verify && scripts/verify/run_remote_verification.sh '$SHA' '$PLAN'"

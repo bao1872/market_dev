@@ -21,7 +21,7 @@
 
 ### remote verification（远程验证，不等同于稳定运行部署）
 
-- 目标：把同一 SHA 部署到独立验证栈（`docker-compose.verify.yml` + `market.verify.env`），操作 `bz_stock_verify_<sha>`。
+- 目标：把同一 SHA 部署到独立验证栈；正式 runner 在仓库外生成单次环境文件，操作 `bz_stock_verify_<sha>`。
 - 约束（详见 `rules/80` DS-110/111/112）：
   - 独立 Compose project（`panji-verify`），不复用正式容器；
   - 端口仅绑定 `127.0.0.1`，只经 SSH Tunnel 访问；
@@ -36,11 +36,11 @@
 已准备好远程验证环境变量和用户授权后，从本地执行：
 
 ```bash
-scripts/ops/panji-verify run --sha <FULL_40_SHA> --plan full-closure \
-  --env-file market.verify.env
+scripts/ops/panji-verify run --sha <FULL_40_SHA> --plan full-closure
 ```
 
-入口先执行 preflight，再通过受控 SSH 调用远端编排器。`full-closure` 是当前唯一登记计划；不得
+入口先执行 preflight，再通过受控 SSH 调用目标 SHA 的远端 runner。无需也不得手工提供数据库
+URL 或验证环境文件；runner 创建 `0600` 单次文件并在退出时删除。`full-closure` 是当前唯一登记计划；不得
 添加临时命令、pytest 参数或插件。结束后检查 evidence 中 target/repo/runtime SHA、数据库、
 revision、gate 与 cleanup 状态；`blocked_cleanup` 时停止新的验证尝试并按精确资源名处理。
 

@@ -264,14 +264,21 @@ def check(root: Path) -> list[str]:
 
     verify_entry = root / "scripts/ops/panji-verify"
     verify_runner = root / "scripts/verify/verify_attempt.py"
+    verify_remote_runner = root / "scripts/verify/run_remote_verification.sh"
+    verify_env_builder = root / "scripts/verify/prepare_verify_environment.py"
     verify_plan = root / "scripts/verify/plans/full-closure.json"
     verify_compose = root / "docker-compose.verify.yml"
     verify_cleanup = root / "scripts/verify/cleanup_runner.py"
-    for path in (verify_entry, verify_runner, verify_plan, verify_compose, verify_cleanup):
+    for path in (
+        verify_entry, verify_runner, verify_remote_runner, verify_env_builder,
+        verify_plan, verify_compose, verify_cleanup,
+    ):
         if not path.is_file():
             errors.append(f"missing verification framework file: {path.relative_to(root)}")
     verify_entry_code = shell_code(verify_entry)
     verify_runner_code = read(verify_runner)
+    verify_remote_runner_code = shell_code(verify_remote_runner)
+    verify_env_builder_code = read(verify_env_builder)
     verify_cleanup_code = read(verify_cleanup)
     verify_compose_text = read(verify_compose)
     for signal in ("panji-prod-preflight", "panji-prod-ssh", "full-closure", "[0-9a-f]{40}"):
@@ -280,12 +287,30 @@ def check(root: Path) -> list[str]:
     for signal in ("VerificationPlan", "LOCK_NB", "downgrade", "blocked_cleanup"):
         if signal not in verify_runner_code:
             errors.append(f"verification runner missing contract signal: {signal}")
+    for signal in ("run_remote_verification.sh",):
+        if signal not in verify_entry_code:
+            errors.append(f"verification entry missing remote runner: {signal}")
+    for signal in ("prepare_verify_environment.py", "trap cleanup_sensitive", "git status --porcelain"):
+        if signal not in verify_remote_runner_code:
+            errors.append(f"verification remote runner missing contract signal: {signal}")
+    for signal in ("POSTGRES_PASSWORD", "chmod", "token_urlsafe", "trading-postgres"):
+        if signal not in verify_env_builder_code:
+            errors.append(f"verification environment builder missing contract signal: {signal}")
     for signal in ("verify-test:", "127.0.0.1", "PANJI_REMOTE_VERIFY_DB_TEST"):
         if signal not in verify_compose_text:
             errors.append(f"verification compose missing contract signal: {signal}")
     for token in ("down -v", '"down", "-v"', "--rmi", "docker cp", "pip install"):
         if token in verify_cleanup_code or token in verify_runner_code or token in verify_entry_code:
             errors.append(f"forbidden verification implementation: {token}")
+    if "VERIFY_DB_URL" in verify_entry_code or "--verify-db-url" in verify_entry_code:
+        errors.append("verification entry must not transport database credentials")
+    for pattern, label in (
+        (r"_run\(\[\s*[\"']psql[\"']", "host psql"),
+        (r"_run\(\[\s*[\"']alembic[\"']", "host alembic"),
+        (r"e2e_readiness_check\.py", "missing e2e script"),
+    ):
+        if re.search(pattern, verify_runner_code):
+            errors.append(f"verification runner contains host-only or missing dependency: {label}")
 
     deploy_runbooks = sorted(path.name for path in (root / "docs/runbooks").glob("*deployment*.md"))
     if deploy_runbooks != ["development-deployment.md"]:

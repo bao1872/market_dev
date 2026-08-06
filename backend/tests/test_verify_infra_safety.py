@@ -3,7 +3,7 @@
 仅测试 cleanup_runner / evidence_exporter 的**纯函数安全逻辑**与导出结构，不连库、不联网：
 - 验证库名正则（仅 bz_stock_verify_<7-40位sha> 合法）
 - 永久保护清单（bz_stock / postgres / trading-* / web_dev* / 基础镜像 拒绝）
-- _safe_drop_database 双校验（非法名 / 缺 url 拒绝）
+- _safe_drop_database 永久保护与容器内精确删除
 - cleanup_attempt 对受保护资源不删除、manifest 缺失标记 blocked_cleanup
 - EvidenceExporter 导出 manifest.json / gates.json / summary.md
 
@@ -26,6 +26,7 @@ if str(_VERIFY_DIR) not in sys.path:
 
 import cleanup_runner as cr  # noqa: E402
 from evidence_exporter import EvidenceExporter  # noqa: E402
+from prepare_verify_environment import prepare  # noqa: E402
 from verification_plan import load_plan  # noqa: E402
 
 FULL_SHA = "a3caf4b86bdc126fd110b1f1a148f4f2c508652b"
@@ -56,14 +57,20 @@ def test_permanent_protection_list() -> None:
 
 def test_safe_drop_database_rejects_illegal_name() -> None:
     # 非法名 → 拒绝（不连库）
-    res = cr._safe_drop_database("bz_stock", verify_db_url="postgresql+asyncpg://u:p@h:5432/x")
+    res = cr._safe_drop_database("bz_stock")
     assert res["dropped"] is False
     assert res["error"] is not None
 
-    # 合法名但缺 url → 拒绝（盲删保护）
-    res = cr._safe_drop_database(f"bz_stock_verify_{FULL_SHA}", verify_db_url=None)
-    assert res["dropped"] is False
-    assert "verify_db_url" in res["error"]
+
+def test_safe_drop_database_uses_exact_container_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(cr, "_run", lambda cmd, **_kwargs: (commands.append(cmd) or (0, "", "")))
+    result = cr._safe_drop_database(f"bz_stock_verify_{FULL_SHA}")
+    assert result["dropped"] is True
+    assert commands[0][:8] == [
+        "docker", "exec", "trading-postgres", "psql", "-U", "bz", "-d", "postgres",
+    ]
+    assert f'bz_stock_verify_{FULL_SHA}' in commands[0][-1]
 
 
 def test_cleanup_attempt_missing_manifest_blocks() -> None:
@@ -85,11 +92,7 @@ def test_cleanup_attempt_protected_compose_project() -> None:
         }
         mp = Path(tmp) / "manifest.json"
         mp.write_text(json.dumps(manifest))
-        summary = cr.cleanup_attempt(
-            mp,
-            verify_db_url="postgresql+asyncpg://u:p@h:5432/"
-            f"bz_stock_verify_{FULL_SHA}",
-        )
+        summary = cr.cleanup_attempt(mp)
         assert summary["blocked_cleanup"] is True
         assert any("compose" in r for r in summary["blocked_reasons"])
 
@@ -147,9 +150,24 @@ def test_plan_is_closed_and_registered(tmp_path: Path) -> None:
         load_plan(injected)
 
 
-def test_maintenance_url_never_targets_verify_database() -> None:
-    url = f"postgresql+asyncpg://u:p@host:5432/bz_stock_verify_{FULL_SHA}"
-    assert cr._maintenance_url(url) == "postgresql://u:p@host:5432/postgres"
+def test_prepare_environment_keeps_secret_in_mode_600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    objects = {
+        "trading-postgres": {
+            "Config": {"Env": ["POSTGRES_USER=bz", "POSTGRES_PASSWORD=secret"], "Image": "pg"},
+            "NetworkSettings": {"Networks": {"trading_default": {}}},
+        },
+        "trading-backend": {"Config": {"Env": [], "Image": "backend:sha"}},
+        "trading-frontend": {"Config": {"Env": [], "Image": "frontend:sha"}},
+    }
+    objects["trading-backend"]["NetworkSettings"] = {"Networks": {"trading_default": {}}}
+    monkeypatch.setattr("prepare_verify_environment._inspect", lambda name: objects[name])
+    output = prepare(FULL_SHA, tmp_path / "attempt" / "market.verify.env")
+    assert output.stat().st_mode & 0o777 == 0o600
+    content = output.read_text()
+    assert f"bz_stock_verify_{FULL_SHA}" in content
+    assert "POSTGRES_PASSWORD" not in content
 
 
 def test_cleanup_source_never_uses_volume_delete() -> None:

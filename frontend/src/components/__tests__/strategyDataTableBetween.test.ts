@@ -17,11 +17,15 @@
 
 import { strict as assert } from 'node:assert'
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 function readSrc(...segments: string[]): string {
-  return readFileSync(resolve(import.meta.dirname, '..', '..', ...segments), 'utf-8')
+  return readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', ...segments),
+    'utf-8',
+  )
 }
 
 const src = readSrc('components', 'StrategyDataTable.tsx')

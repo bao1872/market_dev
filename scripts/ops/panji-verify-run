@@ -6,5 +6,4 @@ if [ "$#" -lt 1 ]; then
   exit 80
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/panji-verify" run --sha "$1" --plan full-closure \
-  --env-file "${2:-market.verify.env}"
+exec "$SCRIPT_DIR/panji-verify" run --sha "$1" --plan full-closure

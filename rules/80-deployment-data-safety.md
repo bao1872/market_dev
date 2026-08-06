@@ -434,7 +434,7 @@ stock core 批量入口，该入口必须另行满足本合同的全部字段。
 ### DS-110 远程临时验证数据库
 
 - **命名**：`bz_stock_verify_<7到40位SHA>`，SHA 必须为待验收的 `origin/dev` 精确 commit。
-- **创建入口**：仅允许正式验证脚本（`scripts/verify/create_verify_database.sh`）在 `panji-prod` 已有 PostgreSQL 容器内创建；禁止新建 PostgreSQL 容器或 Volume。
+- **创建入口**：仅允许正式 runner 经 `docker exec trading-postgres` 在已有 PostgreSQL 容器内创建；`create_verify_database.sh` 只保留为同合同的精确维护入口。禁止新建 PostgreSQL 容器或 Volume。
 - **连接校验**：应用/测试连接建立后必须执行 `SELECT current_database(), current_user;` 并确认数据库名匹配验证库命名；若 `current_database()` 返回 `bz_stock`，立即中止并告警。
 - **禁止连接 `bz_stock`**：验证栈的所有连接字符串、Worker、测试、seed 脚本不得指向 `bz_stock`；任何写入 `bz_stock` 的动作视为越权。
 - **Migration 规则**：允许 DDL 与 Alembic，但只针对验证数据库，从确认 head 升级到目标 migration（含 085/086），可执行 upgrade→downgrade→upgrade 验证；不得触碰 `bz_stock` schema。
@@ -446,7 +446,7 @@ stock core 批量入口，该入口必须另行满足本合同的全部字段。
 
 - **Compose project 独立命名**：使用独立的 `docker-compose.verify.yml` 与 project 名（如 `panji-verify`），不得复用正式 `market-dev` project，避免容器名/网络冲突。
 - **端口仅绑定 `127.0.0.1`**：验证栈所有对外端口只绑定服务器回环地址，只通过 SSH Tunnel 给用户访问，不得暴露公网。
-- **独立环境文件**：使用独立的 `market.verify.env`，明确 `APP_ENV=verification`、`DATABASE_URL=<bz_stock_verify_<sha>>`、独立的 Redis DB 或 key 前缀，不读取正式 `market.env`。
+- **独立环境文件**：正式 runner 在仓库外按 attempt 生成权限 `0600` 的独立环境文件，明确 `APP_ENV=verification`、`DATABASE_URL=<bz_stock_verify_<sha>>` 和独立 Redis；秘密只从既有容器身份读取，不读取正式 `market.env`，不经 SSH 命令参数传输，并在结束时由 trap 删除。
 - **自动 Scheduler 关闭**：验证栈 `PANJI_SCHEDULER_ENABLED=false`（或等价），避免自动盘后编排干扰验收。
 - **只启动必要 Worker**：仅启动 after-close / chip / watchdog 等验收必需的 Worker，不得复用正式 Worker 容器，不得加入正式 Nginx 公网入口。
 - **运行 SHA 可检查**：验证栈必须暴露 `runtime_git_sha`、repo HEAD、镜像 SHA 三类证据，且均等于目标验收 SHA。
@@ -493,7 +493,9 @@ cleanup 必须输出 created/deleted/retained/failed 四份精确清单，并在
 
 - 唯一正式入口是 `scripts/ops/panji-verify`。入口只接受完整 40 位 SHA 和仓库登记的封闭验证计划；`panji-verify-run` 仅为兼容适配器，不得成为第二套合同。
 - `scripts/verify/verification_plan.py` 只解析固定 schema 和注册 profile；验证计划不得携带任意命令、插件路径、环境覆盖或 pytest 参数。
+- `scripts/verify/run_remote_verification.sh` 是目标 SHA 内的远端受控 runner；`prepare_verify_environment.py` 只生成单次仓库外 `0600` 环境文件。入口只传 SHA 与计划，禁止传数据库 URL、密码或任意环境覆盖。
 - Migration 只能由正式 runner 使用 target SHA checkout 中的 `backend/alembic` 和 `backend/alembic.ini` 执行；禁止使用旧运行镜像内置 migration。标准 round-trip 为 upgrade head → schema/revision 断言 → downgrade previous → downgrade 断言 → upgrade head → 重复 upgrade 幂等检查，每一步前后断言 `current_database()`。
+- 建删验证库必须通过 `docker exec trading-postgres` 的维护库连接；Migration、PG、Seed 和 Synthetic E2E 必须通过一次性 `verify-test` 容器运行，禁止依赖宿主机安装 `psql`、Alembic、pytest 或应用依赖。
 - PG tests 只能由一次性 `verify-test` 服务运行。该服务必须包含 target SHA 的 app/tests/pytest 配置/migration/scripts 和固定依赖，设置 `PANJI_REMOTE_VERIFY_DB_TEST=1`、`APP_ENV=verification`，只连接本轮验证库，运行结束退出。
 - 标准顺序固定为：本地修改范围门禁 → commit/push → 冻结 SHA → 远程 clean checkout → 创建验证库 → Migration round-trip → 启动验证栈 → SHA/DB/runtime 断言 → 自包含 PG tests → synthetic Seed 两次及幂等断言 → Synthetic E2E → 导出证据 → DS-113 cleanup。
 - 基础 PG tests 必须先于 Seed；依赖 synthetic 场景的测试只能在 Seed 后以 Synthetic E2E 身份运行。

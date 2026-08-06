@@ -35,6 +35,8 @@ def governance_repo(tmp_path: Path) -> Path:
         "scripts/verify/verify_attempt.py",
         "scripts/verify/cleanup_runner.py",
         "scripts/verify/verification_plan.py",
+        "scripts/verify/run_remote_verification.sh",
+        "scripts/verify/prepare_verify_environment.py",
         "scripts/verify/plans/full-closure.json",
         "docker-compose.prod.yml",
         "docker-compose.verify.yml",

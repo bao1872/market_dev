@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { canonicalizeFilterOperator } from '../../src/components/filterOperators.ts'
 import { decodeReviewUrl, encodeReviewUrl } from '../../src/features/review/urlState.ts'
 
-const ROOT = resolve(import.meta.dirname, '../..')
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const source = (path: string) => readFileSync(resolve(ROOT, path), 'utf8')
 
 test('legacy filter aliases normalize to canonical output names', () => {

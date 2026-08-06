@@ -80,6 +80,17 @@ def _assert_verify_db_name(db_name: str) -> None:
         raise RuntimeError(f"严重错误：命中保护库名 '{db_name}'，立即中止")
 
 
+def _read_env_value(path: str | Path, key: str) -> str:
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        candidate, value = line.split("=", 1)
+        if candidate == key:
+            return value
+    raise RuntimeError(f"verification environment is missing {key}")
+
+
 def _run(cmd: list[str], *, timeout: int = 600, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env)
@@ -94,35 +105,17 @@ def _db_name_from_url(url: str) -> str:
     return url.rsplit("/", 1)[-1].split("?")[0]
 
 
-def _current_database_assert(url: str, expected: str) -> None:
-    """fail-closed：连接后必须 current_database() == 验证库名（DS-110 双校验）。"""
-    # 用 psql 直接查询（与 app 解耦，stdlib 探针）
-    code, out, err = _run([
-        "psql", url.replace("postgresql+asyncpg://", "postgresql://"),
-        "-tAc", "SELECT current_database(), current_user;",
-    ])
-    if code != 0:
-        raise RuntimeError(f"current_database 断言失败（连接错误）: {err.strip()}")
-    line = out.strip().splitlines()[0] if out.strip() else ""
-    parts = [p.strip() for p in line.split("|")]
-    db = parts[0] if parts else ""
-    if db != expected:
-        raise RuntimeError(
-            f"current_database 断言失败：实际='{db}' 期望='{expected}'（DS-110 fail-closed）"
-        )
-
-
 class VerifyAttempt:
     """单次验证尝试编排器。"""
 
-    def __init__(self, *, target_sha: str, verify_db_url: str, compose_project: str,
+    def __init__(self, *, target_sha: str, compose_project: str,
                  env_file: str, compose_file: str, evidence_root: str,
                  plan: VerificationPlan) -> None:
         if len(target_sha) != 40 or any(ch not in "0123456789abcdef" for ch in target_sha):
             raise ValueError("target_sha must be a complete 40-character lowercase hex SHA")
         self.target_sha = target_sha
-        self.verify_db_url = verify_db_url
-        self.db_name = _db_name_from_url(verify_db_url)
+        self.verify_db_url = _read_env_value(env_file, "DATABASE_URL")
+        self.db_name = _db_name_from_url(self.verify_db_url)
         _assert_verify_db_name(self.db_name)
         if self.db_name != f"bz_stock_verify_{target_sha}":
             raise ValueError("verify database must be derived from the complete target SHA")
@@ -186,38 +179,40 @@ class VerifyAttempt:
     def create_verify_database(self) -> None:
         """创建验证库（DS-110：位于已有 PG 容器，不新建容器/Volume）。"""
         self.exporter.log(f"create_verify_database: {self.db_name}")
-        from cleanup_runner import _maintenance_url
-
-        maintenance_url = _maintenance_url(self.verify_db_url)
         code, _out, err = _run([
-            "psql", maintenance_url, "-v", "ON_ERROR_STOP=1", "-c",
+            "docker", "exec", "trading-postgres", "psql", "-U", "bz", "-d", "postgres",
+            "-v", "ON_ERROR_STOP=1", "-c",
             f'CREATE DATABASE "{self.db_name}" WITH TEMPLATE template0 ENCODING "UTF8";',
         ])
         if code != 0:
             raise RuntimeError(f"create_verify_database 失败: {err.strip()}")
         self.manifest["status"] = "db_created"
         self.exporter.record_resource("db", self.db_name)
-        _current_database_assert(self.verify_db_url, self.db_name)
+        code, out, err = _run([
+            "docker", "exec", "trading-postgres", "psql", "-U", "bz", "-d", self.db_name,
+            "-tAc", "SELECT current_database();",
+        ])
+        if code != 0 or out.strip() != self.db_name:
+            raise RuntimeError(f"created database identity assertion failed: {err.strip()}")
         self.exporter.record_gate("create_database", True, detail=f"库 {self.db_name} 就绪")
         self.exporter.log("create_verify_database: 完成")
 
     def run_migration_round_trip(self) -> None:
         """精确 SHA Migration：绑定目标 SHA alembic + 验证库，断言 revision。"""
         self.exporter.log("migration_round_trip: 开始")
-        _current_database_assert(self.verify_db_url, self.db_name)
-        migration_env = {**os.environ, "DATABASE_URL": self.verify_db_url}
         steps = (("upgrade", "head"), ("downgrade", "-1"), ("upgrade", "head"), ("upgrade", "head"))
         revisions: list[str] = []
         for operation, target in steps:
-            _current_database_assert(self.verify_db_url, self.db_name)
             code, _out, err = _run(
-                ["alembic", "-c", "backend/alembic.ini", operation, target],
-                timeout=self.plan.timeouts["migration"], env=migration_env,
+                [*self.compose_base, "run", "--rm", "verify-test", "alembic", "-c",
+                 "/app/alembic.ini", operation, target],
+                timeout=self.plan.timeouts["migration"],
             )
             if code != 0:
                 raise RuntimeError(f"migration {operation} {target} failed: {err.strip()}")
             code, out, err = _run(
-                ["alembic", "-c", "backend/alembic.ini", "current"], timeout=60, env=migration_env,
+                [*self.compose_base, "run", "--rm", "verify-test", "alembic", "-c",
+                 "/app/alembic.ini", "current"], timeout=60,
             )
             if code != 0 or not out.strip():
                 raise RuntimeError(f"migration revision assertion failed: {err.strip()}")
@@ -286,11 +281,11 @@ class VerifyAttempt:
         """运行 100% synthetic Seed 两次，验证幂等（第二次不冲突）。"""
         self.exporter.log("run_synthetic_seed_twice: 开始")
         for i in range(1, 3):
-            code, _out, err = _run([
-                "python", "scripts/verify/seed_v21_verify_data.py",
-                "--verify-db-url", self.verify_db_url,
-                "--scenario", "all",
-            ], timeout=self.plan.timeouts["seed"])
+            code, _out, err = _run(
+                [*self.compose_base, "run", "--rm", "verify-test", "python",
+                 "/app/scripts/verify/seed_v21_verify_data.py", "--scenario", "all"],
+                timeout=self.plan.timeouts["seed"],
+            )
             if code != 0:
                 self.exporter.record_gate(
                     "seed_twice", False, detail=f"第{i}次 seed 失败: {err.strip()[:500]}"
@@ -304,10 +299,11 @@ class VerifyAttempt:
     def run_synthetic_e2e(self) -> None:
         """端到端产品就绪评估（真实 product_readiness_service 评估 closure 六态）。"""
         self.exporter.log("run_synthetic_e2e: 开始")
-        code, _out, err = _run([
-            "python", "scripts/verify/e2e_readiness_check.py",
-            "--verify-db-url", self.verify_db_url,
-        ], timeout=self.plan.timeouts["e2e"])
+        code, _out, err = _run(
+            [*self.compose_base, "run", "--rm", "verify-test", "pytest", "-m", "postgres",
+             "tests/test_pg_seed_scenario_closures.py"],
+            timeout=self.plan.timeouts["e2e"],
+        )
         if code != 0:
             self.exporter.record_gate("e2e", False, detail=err.strip()[:500])
             raise RuntimeError(f"synthetic e2e 失败 (exit={code})")
@@ -324,9 +320,7 @@ class VerifyAttempt:
 
     def cleanup_exact_attempt_resources(self) -> bool:
         try:
-            summary = cleanup_attempt(
-                self.evidence_dir / "manifest.json", verify_db_url=self.verify_db_url
-            )
+            summary = cleanup_attempt(self.evidence_dir / "manifest.json")
             self.exporter.log(f"cleanup_exact_attempt_resources: blocked={summary['blocked_cleanup']}")
             return not summary["blocked_cleanup"]
         except Exception as exc:  # noqa: BLE001
@@ -337,9 +331,8 @@ class VerifyAttempt:
         """清理后校验：验证库已删、compose project 已下。失败记 blocked_cleanup。"""
         self.exporter.log("verify_cleanup: 开始")
         # 校验库已删
-        from cleanup_runner import _maintenance_url
         code, out, _ = _run([
-            "psql", _maintenance_url(self.verify_db_url),
+            "docker", "exec", "trading-postgres", "psql", "-U", "bz", "-d", "postgres",
             "-tAc", f"SELECT 1 FROM pg_database WHERE datname='{self.db_name}';",
         ])
         db_gone = (code != 0) or (out.strip() == "0" or out.strip() == "")
@@ -401,17 +394,15 @@ class VerifyAttempt:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--target-sha", required=True)
-    ap.add_argument("--verify-db-url", required=True)
     ap.add_argument("--compose-project", required=True)
     ap.add_argument("--env-file", required=True)
     ap.add_argument("--compose-file", required=True)
-    ap.add_argument("--evidence-root", default="/root/web_dev_verify/evidence")
+    ap.add_argument("--evidence-root", default="/root/.panji-verify/evidence")
     ap.add_argument("--plan", default="scripts/verify/plans/full-closure.json")
     args = ap.parse_args()
 
     attempt = VerifyAttempt(
         target_sha=args.target_sha,
-        verify_db_url=args.verify_db_url,
         compose_project=args.compose_project,
         env_file=args.env_file,
         compose_file=args.compose_file,

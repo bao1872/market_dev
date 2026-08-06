@@ -89,15 +89,6 @@ def _verify_db_re() -> re.Pattern:
     return re.compile(r"^bz_stock_verify_[0-9a-f]{40}$")
 
 
-def _maintenance_url(url: str) -> str:
-    """Return the same PostgreSQL DSN connected to the maintenance database."""
-    from urllib.parse import urlsplit, urlunsplit
-
-    normalized = url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    parsed = urlsplit(normalized)
-    return urlunsplit((parsed.scheme, parsed.netloc, "/postgres", parsed.query, parsed.fragment))
-
-
 def _run(cmd: list[str], *, check: bool = False) -> tuple[int, str, str]:
     """运行子命令，返回 (returncode, stdout, stderr)。"""
     try:
@@ -113,11 +104,10 @@ def _compose_project(manifest: dict) -> str | None:
     return manifest.get("compose_project")
 
 
-def _safe_drop_database(db_name: str, *, verify_db_url: str | None = None) -> dict:
+def _safe_drop_database(db_name: str) -> dict:
     """精确 drop 验证库（仅 bz_stock_verify_<sha>）。
 
-    fail-closed：库名非法或命中保护清单则拒绝。若提供 verify_db_url，先断言
-    current_database() 匹配目标库名（双保险）。
+    fail-closed：库名非法或命中保护清单则拒绝。删除只通过既有 PostgreSQL 容器执行。
     """
     result: dict[str, Any] = {"database": db_name, "dropped": False, "error": None}
     if not _verify_db_re().match(db_name):
@@ -126,12 +116,9 @@ def _safe_drop_database(db_name: str, *, verify_db_url: str | None = None) -> di
     if _is_protected(db_name, "database"):
         result["error"] = f"库名 '{db_name}' 命中永久保护清单，拒绝删除"
         return result
-    if verify_db_url is None:
-        result["error"] = "缺少 verify_db_url，拒绝盲删库"
-        return result
-    # DROP 必须连接维护库，不能连接正在删除的目标库。
     code, _out, err = _run([
-        "psql", _maintenance_url(verify_db_url), "-v", "ON_ERROR_STOP=1", "-c",
+        "docker", "exec", "trading-postgres", "psql", "-U", "bz", "-d", "postgres",
+        "-v", "ON_ERROR_STOP=1", "-c",
         f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE);',
     ])
     if code != 0:
@@ -141,9 +128,7 @@ def _safe_drop_database(db_name: str, *, verify_db_url: str | None = None) -> di
     return result
 
 
-def cleanup_attempt(
-    manifest_path: str | Path, *, verify_db_url: str | None = None
-) -> dict:
+def cleanup_attempt(manifest_path: str | Path) -> dict:
     """按 attempt manifest 精确清理。返回 cleanup 结果 dict（写入 cleanup.json）。
 
     步骤：
@@ -199,9 +184,9 @@ def cleanup_attempt(
             else:
                 summary["errors"].append(f"compose down 失败: {err.strip()}")
 
-    # 2) 精确 drop 验证库（双校验：manifest 库名 + verify_db_url current_database）
+    # 2) 精确 drop 验证库（manifest 精确库名 + 永久保护清单）
     if verify_database:
-        db_result = _safe_drop_database(verify_database, verify_db_url=verify_db_url)
+        db_result = _safe_drop_database(verify_database)
         summary["dropped_database"] = db_result
         if not db_result.get("dropped") and db_result.get("error"):
             summary["errors"].append(db_result["error"])
@@ -222,9 +207,8 @@ def cleanup_attempt(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", required=True, help="attempt manifest JSON 路径")
-    ap.add_argument("--verify-db-url", default=None)
     args = ap.parse_args()
-    summary = cleanup_attempt(args.manifest, verify_db_url=args.verify_db_url)
+    summary = cleanup_attempt(args.manifest)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 70 if summary["blocked_cleanup"] else 0
 

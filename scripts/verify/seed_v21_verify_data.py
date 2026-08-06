@@ -740,9 +740,15 @@ async def _amain(verify_db_url: str, scenario: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--verify-db-url", required=True, help="bz_stock_verify_<sha> 异步连接串")
+    ap.add_argument(
+        "--verify-db-url",
+        default=os.environ.get("DATABASE_URL"),
+        help="bz_stock_verify_<sha> 异步连接串；默认读取受控验证容器 DATABASE_URL",
+    )
     ap.add_argument("--scenario", default="all", choices=["all", "full_success", "async_enhance", "degraded", "governance"])
     args = ap.parse_args()
+    if not args.verify_db_url:
+        ap.error("--verify-db-url or DATABASE_URL is required")
     asyncio.run(_amain(args.verify_db_url, args.scenario))
 
 
