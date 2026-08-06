@@ -308,6 +308,9 @@ def _build_trend_dimension(
         "regime_value": regime_value,
         "dsa_dir_bars": dsa_dir_bars,
         "dsa_vwap_dev_pct": dsa_vwap_dev_pct,
+        # [CHANGE-20260805-CP4A / P0-05] 持久化 dsa_vwap 绝对值，保证
+        # artifact→snapshot→reload→DSA projection 的 round-trip 不丢字段。
+        "dsa_vwap": _safe_float(metrics.get("dsa_vwap")),
         # 趋势段信息（Gate1）
         "segment_start_time": segment_start_time,
         "segment_end_time": segment_end_time,

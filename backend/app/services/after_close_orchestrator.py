@@ -2692,24 +2692,69 @@ async def execute_after_close_run(
                         progress_callback=progress_callback,
                     )
 
-                    # [CHANGE-20260728-007] 修复 running→completed 闭环：
-                    # MFCS 只写入 snapshot，不写入 StrategyResult，也不推进 DSA run 状态。
-                    # 在 MFCS 完成后显式调用 execute_run 写入 StrategyResult 并完成状态机。
-                    # 不得在 publish 前伪造 completed；异常路径必须写 failed。
+                    # [CHANGE-20260728-007] 修复 running→completed 闭环。
+                    # [CHANGE-20260805-CP4A / P0-04+P0-06] DSA 改为预计算投影：
+                    # 从 StockFeatureSnapshot（按 source_run_id=snapshot_run_id）重建 artifact，
+                    # 经 persist_precomputed_dsa_results 派生 StrategyResult/推进 run 状态。
+                    # 正式链禁止调用 StrategyRuntime（batch_service.execute_run）。
                     if not dsa_already_completed and dsa_run_id is not None:
                         logger.info(
-                            "[AfterClose] 开始执行 DSA 策略（写入 StrategyResult + 推进状态）: "
+                            "[AfterClose] 开始持久化 DSA 预计算投影（StrategyResult + 状态推进）: "
                             "dsa_run_id=%s", dsa_run_id,
                         )
                         try:
                             async with AsyncSessionLocal() as db:
-                                await batch_service.execute_run(
-                                    db, dsa_run_id, job_run_id=job_run_id,
+                                dsa_run_row = await db.get(StrategyRun, dsa_run_id)
+                                if dsa_run_row is None:
+                                    raise RuntimeError(
+                                        f"DSA run 不存在 dsa_run_id={dsa_run_id}"
+                                    )
+                                strategy_version_id = dsa_run_row.strategy_version_id
+                                # 从持久化 snapshot 重建 artifacts（不重算算法）
+                                from app.models.stock_feature_snapshot import (
+                                    StockFeatureSnapshot as _SnapModel,
+                                )
+                                snap_rows = (
+                                    await db.execute(
+                                        select(_SnapModel).where(
+                                            _SnapModel.source_run_id == snapshot_run_id,
+                                        )
+                                    )
+                                ).scalars().all()
+                                from app.services.granular_restart_service import (
+                                    _artifact_from_snapshot,
+                                )
+                                artifacts: dict[uuid.UUID, Any] = {}
+                                for snap in snap_rows:
+                                    summary = snap.summary_payload or {}
+                                    fp = summary.get("first_pyramid") or {}
+                                    artifacts[snap.instrument_id] = (
+                                        _artifact_from_snapshot(
+                                            snap,
+                                            source_core_run_id=snapshot_run_id,
+                                            parameter_hash=(
+                                                fp.get("parameterHash") or ""
+                                            ),
+                                            algorithm_versions=(
+                                                fp.get("algorithmVersions") or {}
+                                            ),
+                                        )
+                                    )
+                                from app.services.strategy_batch_service import (
+                                    persist_precomputed_dsa_results,
+                                )
+                                await persist_precomputed_dsa_results(
+                                    db,
+                                    run_id=dsa_run_id,
+                                    artifacts=artifacts,
+                                    trade_date=trade_date,
+                                    strategy_version_id=strategy_version_id,
+                                    job_run_id=job_run_id,
                                 )
                                 await db.commit()
                         except Exception as dsa_exec_exc:
                             logger.error(
-                                "[AfterClose] DSA execute_run 失败: dsa_run_id=%s, error=%s",
+                                "[AfterClose] DSA 预计算投影失败: dsa_run_id=%s, error=%s",
                                 dsa_run_id, dsa_exec_exc, exc_info=True,
                             )
                             # 异常路径必须写 failed（不得在 publish 前伪造 completed）
@@ -2722,7 +2767,7 @@ async def execute_after_close_run(
                                 ):
                                     dsa_run_on_failure.status = "failed"
                                     dsa_run_on_failure.error_message = (
-                                        f"execute_run 失败: {dsa_exec_exc}"[:500]
+                                        f"DSA 预计算投影失败: {dsa_exec_exc}"[:500]
                                     )
                                     dsa_run_on_failure.finished_at = datetime.now(UTC)
                                     await db.commit()
