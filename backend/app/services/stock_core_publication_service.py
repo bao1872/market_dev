@@ -184,25 +184,13 @@ async def publish_stock_core_atomically(
             old_row.superseded_by = pub.id
             old_row.superseded_at = datetime.now(UTC)
     else:
-        # 无 supersede 列（Migration 087 未执行）：退化为 upsert（覆盖旧 pointer）
-        existing = (
-            await db.execute(
-                select(FactorPublication).where(
-                    FactorPublication.scope_key == scope_key,
-                    FactorPublication.trade_date == trade_date,
-                    FactorPublication.publication_kind == publication_kind,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            existing.data_run_id = snapshot_run_id
-            existing.algorithm_version = algorithm_version
-            existing.coverage_ratio = coverage_ratio
-            existing.published_at = datetime.now(UTC)
-            await db.flush()
-            return existing
-        db.add(pub)
-        await db.flush()
+        # [CHANGE-20260806 / P0-C] Migration 087 缺失 → fail-closed，禁止发布。
+        # V2 合同要求原子发布（supersede+fencing+audit 同事务），不得退回旧的
+        # 非原子 upsert 路径（一半新一半旧违反 PRD）。
+        raise StockCorePublicationError(
+            "STOCK_CORE_PUBLICATION_SCHEMA_NOT_READY: "
+            "Migration 087 未应用（缺 supersede/fencing 列），禁止 stock_core 发布"
+        )
 
     # 5. 标记 SnapshotRun published/succeeded（同一事务）
     from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun

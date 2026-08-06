@@ -101,38 +101,128 @@ async def test_publish_fencing_rejects_foreign_worker(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_degrades_to_upsert_without_migration(monkeypatch) -> None:
-    """无 supersede 列（Migration 087 未执行）→ 退化为 upsert，不抛错。"""
+async def test_publish_fails_closed_without_migration(monkeypatch) -> None:
+    """[P0-C] 无 supersede 列（Migration 087 未执行）→ fail-closed，禁止发布。
+
+    不得退回旧的非原子 upsert 路径。
+    """
     import app.services.stock_core_publication_service as svc
 
     db = _make_db(actual_count=10, has_sup=False)
-
-    # 无 supersede 列：_has_supersede_columns 返回 False
-    async def _exec_text(stmt, params=None):
-        res = MagicMock()
-        # information_schema 查询：返回不含 supersede 列的列集合
-        rows = [("id",), ("scope_key",), ("data_run_id",)]
-        res.fetchall.return_value = rows
-        return res
-
-    db.exec_driver_sql = _exec_text
     db.get = AsyncMock(return_value=None)
 
-    # 使 _has_supersede_columns 走 exec_driver_sql 探测
-    # （此处通过 monkeypatch 直接返回 False 更稳）
+    # Migration 087 缺失：_has_supersede_columns 返回 False
     monkeypatch.setattr(svc, "_has_supersede_columns", lambda db: False)
 
-    # 无已存在 pointer → 走 add+flush
-    pub = await publish_stock_core_atomically(
-        db,
-        scope_key="market",
-        trade_date=date(2026, 8, 6),
-        publication_kind="stock_core",
-        algorithm_version="v1",
-        snapshot_run_id=uuid.uuid4(),
-        coverage_ratio=1.0,
-        worker_id="w1",
-        lease_epoch=1,
-        eligible_count=10,
+    with pytest.raises(StockCorePublicationError, match="NOT_READY"):
+        await publish_stock_core_atomically(
+            db,
+            scope_key="market",
+            trade_date=date(2026, 8, 6),
+            publication_kind="stock_core",
+            algorithm_version="v1",
+            snapshot_run_id=uuid.uuid4(),
+            coverage_ratio=1.0,
+            worker_id="w1",
+            lease_epoch=1,
+            eligible_count=10,
+        )
+
+
+def _success_db(monkeypatch) -> MagicMock:
+    """构造一个成功发布路径的 fake db（Migration 087 已应用）。"""
+    import app.services.stock_core_publication_service as svc
+
+    monkeypatch.setattr(svc, "_has_supersede_columns", lambda db: True)
+    db = MagicMock()
+
+    async def _execute(stmt):
+        res = MagicMock()
+        res.scalar_one.return_value = 10  # coverage count
+        res.scalar_one_or_none.return_value = None  # 无旧 pointer
+        return res
+
+    db.execute = _execute
+    db.flush = AsyncMock()
+    db.get = AsyncMock(return_value=None)
+    return db
+
+
+@pytest.mark.asyncio
+async def test_publish_failure_injection_flush_fails(monkeypatch) -> None:
+    """[P0-C] publication insert 后 flush 失败 → 抛错，整体回滚（不写 pointer/run）。"""
+    db = _success_db(monkeypatch)
+
+    async def _boom():
+        raise RuntimeError("flush failed")
+
+    db.flush = _boom
+    with pytest.raises(RuntimeError, match="flush failed"):
+        await publish_stock_core_atomically(
+            db,
+            scope_key="market",
+            trade_date=date(2026, 8, 6),
+            publication_kind="stock_core",
+            algorithm_version="v1",
+            snapshot_run_id=uuid.uuid4(),
+            coverage_ratio=1.0,
+            worker_id="w1",
+            lease_epoch=1,
+            eligible_count=10,
+        )
+    # 未到达 run mark（flush 失败提前抛）→ run 未被标 published
+    assert db.get.await_count == 0
+
+
+def test_orchestrator_wires_atomic_publication_service() -> None:
+    """[P0-C] 正式 orchestrator 必须调用 publish_stock_core_atomically，且 scheduled 路径
+    不再调用旧的 two-phase publish_stock_core。"""
+    from pathlib import Path
+
+    _base = Path(__file__).resolve().parents[1]
+    src = (_base / "app/services/after_close_orchestrator.py").read_text(encoding="utf-8")
+    assert "publish_stock_core_atomically" in src, (
+        "orchestrator 应调用 publish_stock_core_atomically"
     )
-    assert pub is not None
+    # 旧 two-phase publish_stock_core 不应再被 scheduled 发布路径调用
+    assert "publish_stock_core(" not in src, (
+        "orchestrator 不应再调用旧 publish_stock_core（two-phase）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_failure_injection_audit_fails(monkeypatch) -> None:
+    """[P0-C] audit insert 失败 → 抛错（同事务，旧 pointer/run 不漂移）。"""
+    db = _success_db(monkeypatch)
+
+    async def _execute(stmt):
+        res = MagicMock()
+        res.scalar_one.return_value = 10
+        res.scalar_one_or_none.return_value = None
+        return res
+
+    db.execute = _execute
+
+    async def _audit_boom(stmt, params=None):
+        if "stock_core_publication_audit" in str(stmt):
+            raise RuntimeError("audit insert failed")
+        res = MagicMock()
+        res.scalar_one.return_value = 10
+        res.scalar_one_or_none.return_value = None
+        return res
+
+    db.execute = _audit_boom
+    db.flush = AsyncMock()
+    with pytest.raises(RuntimeError, match="audit insert failed"):
+        await publish_stock_core_atomically(
+            db,
+            scope_key="market",
+            trade_date=date(2026, 8, 6),
+            publication_kind="stock_core",
+            algorithm_version="v1",
+            snapshot_run_id=uuid.uuid4(),
+            coverage_ratio=1.0,
+            worker_id="w1",
+            lease_epoch=1,
+            eligible_count=10,
+        )

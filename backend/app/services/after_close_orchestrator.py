@@ -2913,10 +2913,8 @@ async def execute_after_close_run(
                         from app.models.factor_publication import PUBLICATION_KIND_STOCK_CORE
                         from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
                         from app.services.factor_publication_service import (
-                            CoverageBelowThresholdError,
                             compute_coverage,
                             get_publication,
-                            publish_stock_core,
                         )
 
                         existing_pub = await get_publication(
@@ -2957,37 +2955,45 @@ async def execute_after_close_run(
                             _stock_core_published_local = False
                             _stock_core_superseded_local = True
                         else:
+                            # [CHANGE-20260806 / P0-C] 用原子 publication service（同一事务：
+                            # quality gate + fencing + publication + supersede + run published +
+                            # audit），替换旧的 two-phase publish_stock_core。
                             cov_data = await compute_coverage(pub_db, snapshot_run_id)
+                            from app.services.stock_core_publication_service import (
+                                StockCorePublicationError,
+                                publish_stock_core_atomically,
+                            )
                             try:
-                                pub = await publish_stock_core(
-                                    session=pub_db,
+                                _lease_epoch = int(time.time())
+                                await publish_stock_core_atomically(
+                                    pub_db,
+                                    scope_key="market",
                                     trade_date=trade_date,
-                                    snapshot_run_id=snapshot_run_id,
+                                    publication_kind=PUBLICATION_KIND_STOCK_CORE,
                                     algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-                                    coverage=cov_data["coverage"],
-                                    metadata={
-                                        "source": "after_close_orchestrator",
-                                        "data_run_id": str(snapshot_run_id),
-                                        "coverage": cov_data["coverage"],
-                                    },
+                                    snapshot_run_id=snapshot_run_id,
+                                    coverage_ratio=cov_data["coverage"],
+                                    worker_id=worker_id or "scheduled",
+                                    lease_epoch=_lease_epoch,
+                                    eligible_count=cov_data.get("expected_count", 0),
                                 )
                                 await pub_db.commit()
                                 logger.info(
-                                    "[AfterClose] stock_core pointer published: "
-                                    "trade_date=%s, publication_id=%s, coverage=%.4f",
-                                    trade_date, pub.id, cov_data["coverage"],
+                                    "[AfterClose] stock_core 原子发布完成: trade_date=%s, "
+                                    "run=%s coverage=%.4f worker=%s",
+                                    trade_date, snapshot_run_id, cov_data["coverage"],
+                                    worker_id,
                                 )
                                 _stock_core_published_local = True
-                            except CoverageBelowThresholdError as cov_exc:
+                            except StockCorePublicationError as pub_exc:
                                 await pub_db.rollback()
                                 logger.error(
-                                    "[AfterClose] stock_core coverage below threshold: %s",
-                                    cov_exc,
+                                    "[AfterClose] stock_core 原子发布失败（回滚，旧 pointer 保留）: %s",
+                                    pub_exc,
                                 )
                                 raise RuntimeError(
-                                    f"stock_core publication failed: "
-                                    f"coverage below threshold: {cov_exc}"
-                                ) from cov_exc
+                                    f"stock_core publication failed: {pub_exc}"
+                                ) from pub_exc
 
                 return {
                     "published_run": _published_run,

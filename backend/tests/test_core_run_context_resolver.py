@@ -60,9 +60,43 @@ async def test_resolve_freezes_released_dsa_config() -> None:
     assert ctx.config["eligible_universe_size"] == 3
     assert ctx.config["market_data_contract_version"] == "mdc-v1"
     assert ctx.config["dsa_build_hash"] == "build-abc"
+    # [P0-A] SMC/momentum/VolumeContext/adjustment/hash 全部进入 config（从而进入 parameter_hash）
+    assert "smc" in ctx.config
+    assert "momentum" in ctx.config
+    assert "volume_context" in ctx.config
+    assert ctx.config["adjustment_as_of"] == "2026-08-05"
+    assert "source_bar_hash" in ctx.config
+    assert "adj_factor_hash" in ctx.config
     assert ctx.parameter_hash  # hash 由 config + versions + contract 派生
     assert ctx.run_id == run_id
     assert ctx.trade_date == date(2026, 8, 5)
+
+
+@pytest.mark.asyncio
+async def test_config_change_changes_parameter_hash() -> None:
+    """任一算法配置变化 → core_parameter_hash 改变（P0-A 合同可追溯）。"""
+    base = await resolve_core_run_context(
+        trade_date=date(2026, 8, 5),
+        snapshot_run_id=uuid.uuid4(),
+        eligible_instrument_ids=[uuid.uuid4()],
+        resolver=FakeReleasedResolver(),
+    )
+    # DSA 版本变化（模拟 released 升级）
+    class _NewResolver(FakeReleasedResolver):
+        async def resolve_released_dsa_config(self, *, trade_date):
+            return {
+                "dsa_version": "v4",
+                "dsa_build_hash": "build-abc",
+                "dsa_effective_config": {"min_dir_bars": 50, "max_lookback": 120},
+            }
+
+    new = await resolve_core_run_context(
+        trade_date=date(2026, 8, 5),
+        snapshot_run_id=uuid.uuid4(),
+        eligible_instrument_ids=[uuid.uuid4()],
+        resolver=_NewResolver(),
+    )
+    assert base.parameter_hash != new.parameter_hash
 
 
 @pytest.mark.asyncio

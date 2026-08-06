@@ -122,3 +122,60 @@ def test_synthetic_e2e_core_chain() -> None:
 
     # 7. state-event candidates 至少为空列表（不伪造事件）
     assert isinstance(artifact.events, list)
+
+
+def test_kernel_call_counts_1_5_100(monkeypatch) -> None:
+    """[P0-B] 唯一 owner 下五类 kernel 调用次数 == 股票数（1/5/100）。"""
+    from app.services import first_pyramid_service as fps
+    from app.services.core_artifact_service import compute_core_kernel_bundle
+
+    calls = {"dsa": 0, "smc": 0, "bollinger": 0, "sqzmom": 0, "volume": 0}
+    spy_names = {
+        "compute_dsa_bundle": "dsa",
+        "compute_smc_pine": "smc",
+        "compute_bollinger_features": "bollinger",
+        "compute_sqzmom_lb": "sqzmom",
+        "compute_volume_context_series": "volume",
+    }
+    for fn, key in spy_names.items():
+        if not hasattr(fps, fn):
+            continue
+        real = getattr(fps, fn)
+
+        def _mk(n, r):
+            def _spy(*a, **kw):
+                calls[n] += 1
+                return r(*a, **kw)
+            return _spy
+
+        monkeypatch.setattr(fps, fn, _mk(key, real))
+
+    daily = _daily_bars(250)
+    for _ in range(5):  # 5 股
+        compute_core_kernel_bundle(daily)
+
+    # 5 股 → 每类各 5 次
+    for key in spy_names.values():
+        assert calls[key] == 5, f"{key}={calls[key]} 应=5"
+
+    # 100 股 → 各 100 次
+    for _ in range(100):
+        compute_core_kernel_bundle(daily)
+    for key in spy_names.values():
+        assert calls[key] == 105, f"{key}={calls[key]} 应=105（5+100）"
+
+
+def test_scheduled_dsa_does_not_call_strategy_runtime() -> None:
+    """[P0-B] scheduled DSA projection 路径不调用 StrategyRuntime.execute（execute_run）。
+
+    通过调用图断言：orchestrator 的 DSA 步骤走 persist_precomputed_dsa_results，
+    scheduled 路径源码不得再出现 `batch_service.execute_run`。
+    """
+    from pathlib import Path
+
+    _base = Path(__file__).resolve().parents[1]
+    src = (_base / "app/services/after_close_orchestrator.py").read_text(encoding="utf-8")
+    # 断言可执行的调用（`batch_service.execute_run(`），而非注释中的文字
+    assert "batch_service.execute_run(" not in src, (
+        "orchestrator scheduled DSA 不应再调用 batch_service.execute_run("
+    )

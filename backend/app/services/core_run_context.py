@@ -385,13 +385,29 @@ async def resolve_core_run_context(
     algorithm_versions = build_default_algorithm_versions()
     algorithm_versions["dsa"] = dsa_cfg["dsa_version"]
 
+    # [CHANGE-20260806 / P0-A] 完整 CoreRunContext 合同：除 DSA 外，SMC/momentum/VolumeContext
+    # 的 effective config 与 adjustment/market-data/hash 全部进入 config（从而进入 parameter_hash）。
+    # SMC/momentum/volume 当前无 released StrategyVersion，用与 algorithm_versions 对应的
+    # 冻结配置（一旦这些算法建立 released version，接入 resolver 路径并移除代码常量回退）。
     config: dict[str, Any] = {
         "dsa": dsa_cfg["dsa_effective_config"],
+        "smc": {"version": algorithm_versions.get("smc")},
+        "momentum": {
+            "version": algorithm_versions.get("momentum"),
+            "bollinger_version": algorithm_versions.get("bollinger"),
+            "sqzmom_version": algorithm_versions.get("sqzmom"),
+        },
+        "volume_context": {"version": "vc-v1"},
         "eligible_universe_hash": universe_hash,
         "eligible_universe_size": len(eligible_instrument_ids),
         "market_data_contract_version": MARKET_DATA_CONTRACT_VERSION,
         "adjustment_contract_version": "adj-v1",
+        # [P0-A] adjustment_as_of = run 交易日（复权基准日），作为合同一部分进入 hash
+        "adjustment_as_of": trade_date.isoformat(),
         "dsa_build_hash": dsa_cfg.get("dsa_build_hash"),
+        # [P0-A] lineage 输入 hash 占位（由上游传入时覆盖；缺省为 "" 保持 hash 可复现）
+        "source_bar_hash": "",
+        "adj_factor_hash": "",
     }
 
     return CoreRunContext(
