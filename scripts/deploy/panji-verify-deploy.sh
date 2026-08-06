@@ -117,10 +117,16 @@ docker network inspect "$PG_NETWORK" >/dev/null 2>&1 \
 log "PostgreSQL 网络实测=$PG_NETWORK"
 
 # ------------------------------------------------- 6. 镜像底座必须已存在
-VERIFY_BACKEND_IMAGE="${VERIFY_BACKEND_IMAGE:-$(docker inspect -f '{{.Config.Image}}' market-dev-backend 2>/dev/null || echo "")}"
-VERIFY_FRONTEND_IMAGE="${VERIFY_FRONTEND_IMAGE:-$(docker inspect -f '{{.Config.Image}}' market-dev-frontend 2>/dev/null || echo "")}"
-[ -n "$VERIFY_BACKEND_IMAGE" ] || die "未找到 backend 镜像底座（设置 VERIFY_BACKEND_IMAGE 或确保 market-dev-backend 容器存在）" 9
-[ -n "$VERIFY_FRONTEND_IMAGE" ] || die "未找到 frontend 镜像底座（设置 VERIFY_FRONTEND_IMAGE 或确保 market-dev-frontend 容器存在）" 9
+# [CHANGE-20260806-005 Phase 7] `market-dev-backend`/`market-dev-frontend` 不是运行容器名，
+#   docker inspect 会对非容器名报错。改为探测实际运行中的 verify 容器（fallback 正式容器），
+#   以复用其镜像 tag 作为 Live Mount 依赖底座。
+_image_of() { docker inspect -f '{{.Config.Image}}' "$1" 2>/dev/null || echo ""; }
+VERIFY_BACKEND_IMAGE="${VERIFY_BACKEND_IMAGE:-$(_image_of verify-backend)}"
+[ -n "$VERIFY_BACKEND_IMAGE" ] || VERIFY_BACKEND_IMAGE="$(_image_of trading-backend)"
+VERIFY_FRONTEND_IMAGE="${VERIFY_FRONTEND_IMAGE:-$(_image_of verify-frontend)}"
+[ -n "$VERIFY_FRONTEND_IMAGE" ] || VERIFY_FRONTEND_IMAGE="$(_image_of trading-frontend)"
+[ -n "$VERIFY_BACKEND_IMAGE" ] || die "未找到 backend 镜像底座（设置 VERIFY_BACKEND_IMAGE 或确保 verify-backend/trading-backend 容器存在）" 9
+[ -n "$VERIFY_FRONTEND_IMAGE" ] || die "未找到 frontend 镜像底座（设置 VERIFY_FRONTEND_IMAGE 或确保 verify-frontend/trading-frontend 容器存在）" 9
 docker image inspect "$VERIFY_BACKEND_IMAGE" >/dev/null 2>&1 || die "backend 镜像 $VERIFY_BACKEND_IMAGE 不存在" 9
 docker image inspect "$VERIFY_FRONTEND_IMAGE" >/dev/null 2>&1 || die "frontend 镜像 $VERIFY_FRONTEND_IMAGE 不存在" 9
 log "镜像底座 backend=$VERIFY_BACKEND_IMAGE frontend=$VERIFY_FRONTEND_IMAGE"
