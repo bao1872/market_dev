@@ -276,31 +276,34 @@ class VerifyAttempt:
 
     def _record_runtime_diagnostics(self) -> None:
         """Record bounded, secret-redacted diagnostics before attempt cleanup."""
-        secrets = [
-            _read_env_value(self.env_file, key)
-            for key in ("DATABASE_URL", "MIGRATION_DATABASE_URL", "JWT_SECRET")
-        ]
         for label, command in (
             ("compose_ps", [*self.compose_base, "ps", "--all"]),
             ("backend_logs", [*self.compose_base, "logs", "--no-color", "--tail", "120", "verify-backend"]),
         ):
             _code, stdout, stderr = _run(command, timeout=30)
-            diagnostic = (stdout + stderr)[-12000:]
-            for secret in secrets:
-                diagnostic = diagnostic.replace(secret, "[REDACTED]")
+            diagnostic = self._redact_output(stdout, stderr)
             self.exporter.log(f"assert_identity {label}:\n{diagnostic}")
+
+    def _redact_output(self, stdout: str, stderr: str) -> str:
+        """Bound command evidence and remove every attempt-scoped secret value."""
+        diagnostic = (stdout + stderr)[-12000:]
+        for key in ("DATABASE_URL", "MIGRATION_DATABASE_URL", "JWT_SECRET"):
+            diagnostic = diagnostic.replace(
+                _read_env_value(self.env_file, key), "[REDACTED]",
+            )
+        return diagnostic
 
     def run_self_contained_pg_tests(self) -> None:
         """运行自包含 PG 测试（docker compose run --rm verify-test）。"""
         self.exporter.log("run_self_contained_pg_tests: 开始")
-        code, _out, err = _run(
+        code, out, err = _run(
             [*self.compose_base, "run", "--rm", "verify-test"],
             timeout=self.plan.timeouts["tests"],
         )
-        # 即使测试失败也导出报告
-        self.exporter.manifest["pytest_report_src"] = str(self.evidence_dir / "pytest-report.xml")
         if code != 0:
-            self.exporter.record_gate("pg_tests", False, detail=err.strip()[:500])
+            diagnostic = self._redact_output(out, err)
+            self.exporter.log(f"pg_tests failure output:\n{diagnostic}")
+            self.exporter.record_gate("pg_tests", False, detail=diagnostic[-2000:])
             raise RuntimeError(f"自包含 PG 测试失败 (exit={code})")
         self.manifest["status"] = "pg_tests_ok"
         self.exporter.record_gate("pg_tests", True, detail="atomic/projection/100-stock/closure 全过")
@@ -310,14 +313,16 @@ class VerifyAttempt:
         """运行 100% synthetic Seed 两次，验证幂等（第二次不冲突）。"""
         self.exporter.log("run_synthetic_seed_twice: 开始")
         for i in range(1, 3):
-            code, _out, err = _run(
+            code, out, err = _run(
                 [*self.compose_base, "run", "--rm", "verify-test", "python",
                  "/app/scripts/verify/seed_v21_verify_data.py", "--scenario", "all"],
                 timeout=self.plan.timeouts["seed"],
             )
             if code != 0:
+                diagnostic = self._redact_output(out, err)
+                self.exporter.log(f"seed 第{i}次 failure output:\n{diagnostic}")
                 self.exporter.record_gate(
-                    "seed_twice", False, detail=f"第{i}次 seed 失败: {err.strip()[:500]}"
+                    "seed_twice", False, detail=f"第{i}次 seed 失败: {diagnostic[-2000:]}"
                 )
                 raise RuntimeError(f"synthetic seed 第{i}次失败 (exit={code})")
             self.exporter.log(f"seed 第{i}次完成")
@@ -328,13 +333,15 @@ class VerifyAttempt:
     def run_synthetic_e2e(self) -> None:
         """端到端产品就绪评估（真实 product_readiness_service 评估 closure 六态）。"""
         self.exporter.log("run_synthetic_e2e: 开始")
-        code, _out, err = _run(
+        code, out, err = _run(
             [*self.compose_base, "run", "--rm", "verify-test", "pytest", "-m", "postgres",
              "tests/test_pg_seed_scenario_closures.py"],
             timeout=self.plan.timeouts["e2e"],
         )
         if code != 0:
-            self.exporter.record_gate("e2e", False, detail=err.strip()[:500])
+            diagnostic = self._redact_output(out, err)
+            self.exporter.log(f"e2e failure output:\n{diagnostic}")
+            self.exporter.record_gate("e2e", False, detail=diagnostic[-2000:])
             raise RuntimeError(f"synthetic e2e 失败 (exit={code})")
         self.manifest["status"] = "e2e_ok"
         self.exporter.record_gate("e2e", True, detail="closure 六态评估通过")

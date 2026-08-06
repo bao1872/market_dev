@@ -30,6 +30,9 @@ PG runner 无法启动；cleanup 再次完整归零。现新增 Dockerfile `veri
 Backend 尚未就绪时失败；cleanup 已精确移除验证库、容器、网络、环境文件和专用镜像。身份探针
 现改为计划超时内的 bounded retry，并在超时前将脱敏后的 Compose 状态和 Backend 尾部日志纳入
 attempt 证据，避免服务启动失败只留下空 `curl` 错误。
+第五次 attempt 已通过身份门禁并进入 PG tests，但 Compose/pytest 的失败正文位于 stdout，旧执行器
+只把 stderr 写入 gate，导致证据仅显示依赖容器状态。现统一合并、限长并脱敏 stdout/stderr，覆盖
+PG tests、Seed 和 E2E 失败路径，同时移除从未生成却反复尝试复制的伪 JUnit 报告引用。
 
 ## 数据、验证与风险
 
