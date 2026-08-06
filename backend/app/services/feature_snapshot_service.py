@@ -892,13 +892,21 @@ async def compute_review_core_for_trade_date(
     source_primary = _normalize_primary_bar_time(df_1d, trade_date)
     source_bar_time_str = source_primary.isoformat() if source_primary else None
 
-    # [CHANGE-20260729-003] review core：使用 compute_first_pyramid_core_snapshot
-    # first_pyramid 只含 trend/structure/momentum，chip_consensus=None
+    # [CHANGE-20260805-CP4A / P0-03] review core：经统一入口 compute_core_artifact
+    # 各算法（DSA/SMC/momentum/VolumeContext）每股只计算一次，First Pyramid 由纯
+    # builder 组装；DSA projection metrics/visual 一并提取（P0-05 round-trip）。
+    # 不再单独调用 compute_first_pyramid_core_snapshot（会重复计算算法 kernel）。
     first_pyramid_dict: dict[str, Any] | None = None
     try:
+        from datetime import datetime as _py_dt
+        from zoneinfo import ZoneInfo
+
+        from app.services.core_artifact_service import compute_core_artifact
+        from app.services.core_run_context import CoreRunContext
         from app.services.first_pyramid_service import (
-            compute_first_pyramid_core_snapshot,
+            inject_field_availability_provenance,
         )
+
         if df_1d is not None and not df_1d.empty and len(df_1d) >= 60:
             # [P0-symbol合同 2026-07-30] 公共 symbol 必须是规范化6位股票代码
             if instrument_symbol is None:
@@ -912,29 +920,45 @@ async def compute_review_core_for_trade_date(
                 symbol_for_pyramid = str(instrument_id)
             else:
                 symbol_for_pyramid = instrument_symbol
-            fp_core = compute_first_pyramid_core_snapshot(
-                bars=df_1d,
-                symbol=symbol_for_pyramid,
-                trade_date=trade_date.isoformat(),
+            # run-scoped CoreRunContext：run 级 lineage 由编排器注入，禁止单股取时钟。
+            from app.services.core_run_context import (
+                build_default_algorithm_versions,
             )
+
+            ctx = CoreRunContext(
+                trade_date=trade_date,
+                run_calculated_at=(
+                    _py_dt.fromisoformat(run_calculated_at)
+                    if run_calculated_at
+                    else _py_dt.now(ZoneInfo("Asia/Shanghai"))
+                ),
+                algorithm_versions=build_default_algorithm_versions(),
+                config={},
+                run_id=source_run_id,
+            )
+            core_artifact = compute_core_artifact(
+                context=ctx,
+                instrument_id=instrument_id,
+                symbol=symbol_for_pyramid,
+                daily_frame=df_1d,
+                input_hash=(primary_source_bar_hash or ""),
+                bars_hash=(primary_source_bar_hash or ""),
+                adj_factor_hash=(primary_adj_factor_hash or ""),
+            )
+            fp_core_payload = core_artifact.payload["first_pyramid"]
             # core snapshot 序列化：chip_consensus 显式为 None
-            first_pyramid_dict = fp_core.model_dump(by_alias=False)
+            first_pyramid_dict = dict(fp_core_payload)
             first_pyramid_dict["chipConsensus"] = None
             first_pyramid_dict["_review_core"] = True
             # [QM-62/QM-63 run 级来源合同 2026-08-04] 注入 run 级来源。
-            # 同一 run 的所有股票必须共享完全相同的 sourceRunId 与 calculatedAt，
-            # 由编排器统一传入，禁止单股各自取时钟。
+            # 同一 run 的所有股票必须共享完全相同的 sourceRunId 与 calculatedAt。
             first_pyramid_dict["sourceRunId"] = (
                 str(source_run_id) if source_run_id is not None else None
             )
             if run_calculated_at is not None:
                 first_pyramid_dict["calculatedAt"] = run_calculated_at
-            # [字段级 availability 合同 2026-08-04] 盘后主链必须持久化字段级原因，
-            # 且每个条目注入同一 run 的 sourceRunId/calculatedAt（PRD 溯源要求）。
-            from app.services.first_pyramid_service import (
-                inject_field_availability_provenance,
-            )
-            fp_avail = fp_core.fieldAvailability or {}
+            # [字段级 availability 合同 2026-08-04] 盘后主链必须持久化字段级原因。
+            fp_avail = fp_core_payload.get("fieldAvailability") or {}
             if fp_avail:
                 first_pyramid_dict["fieldAvailability"] = (
                     inject_field_availability_provenance(

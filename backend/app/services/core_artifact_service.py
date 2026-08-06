@@ -1,0 +1,245 @@
+"""CoreComputationArtifact 统一编排入口（compute-once SSOT）。
+
+[CHANGE-20260805-CP4A / P0-03 + P0-04 + P0-05]
+本模块是 **canonical 盘后主链** 唯一算法调用入口：
+    CoreRunContext
+    → compute_core_artifact()
+        ├─ canonical daily frame
+        ├─ DSA result（compute_dsa_bundle，一次）
+        ├─ SMC result（compute_smc_pine，一次）
+        ├─ momentum result（Bollinger + SQZMOM，各一次）
+        ├─ VolumeContext（一次）
+        ├─ FirstPyramidCoreSnapshot（纯 builder，不调用 kernel）
+        ├─ DSAProjectionPayload 所需 metrics/visual（从 raw dsa_bundle 提取，不解析中文摘要）
+        └─ StateEventCandidates（从 SMC/结构事件提取）
+
+消费者只做投影与持久化，禁止再调用任何算法 kernel：
+    CoreComputationArtifact
+    ├─ stock_core persistence
+    ├─ StrategyResult projection（dsa_projection_service.map_dsa_projection）
+    ├─ state events
+    └─ API read model
+
+硬约束：
+- DSA/SMC/Bollinger/SQZMOM/VolumeContext 在每股只计算一次（ComputeOnceDiagnostics 计数）。
+- First Pyramid **禁止**再调用算法 kernel（已收敛为纯 builder）。
+- dsa_vwap/regime/anchor 等 DSA 投影字段必须从 raw dsa_bundle 提取并写入 artifact，
+  禁止从中文摘要反解析（P0-05 round-trip）。
+- 本模块为纯计算，不连接数据库，可纯单元测试。
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date
+from typing import Any
+
+import pandas as pd
+
+from app.services.core_run_context import (
+    ComputeOnceDiagnostics,
+    CoreComputationArtifact,
+    CoreRunContext,
+)
+from app.services.first_pyramid_service import (
+    FirstPyramidRawResults,
+    build_first_pyramid_core_snapshot,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# DSA projection 标量指标 keys（与 dsa_projection_service 对齐，抽取 last_row_metrics）
+_DSA_METRIC_KEYS: frozenset[str] = frozenset({
+    "dsa_dir_bars",
+    "regime_value",
+    "regime_strength",
+    "dsa_vwap",
+    "dsa_vwap_dev_pct",
+    "vol_zscore",
+    "avg_amount_20d",
+})
+
+
+def _extract_dsa_metrics(dsa_bundle: dict[str, Any]) -> dict[str, Any]:
+    """从 raw dsa_bundle 提取 DSA projection 标量指标。
+
+    优先取 last_row_metrics，仅保留契约内 keys。禁止解析中文摘要。
+    """
+    last_row = dsa_bundle.get("last_row_metrics") or {}
+    return {k: last_row[k] for k in _DSA_METRIC_KEYS if k in last_row}
+
+
+def _extract_dsa_visual(dsa_bundle: dict[str, Any]) -> dict[str, Any]:
+    """从 raw dsa_bundle 提取 DSA 图表字段（P0-05 round-trip 直接映射）。"""
+    last_row = dsa_bundle.get("last_row_metrics") or {}
+    visual: dict[str, Any] = {}
+    if "dsa_vwap" in last_row:
+        visual["dsa_vwap"] = last_row["dsa_vwap"]
+    factor_per_bar = dsa_bundle.get("factor_per_bar")
+    if isinstance(factor_per_bar, pd.DataFrame) and not factor_per_bar.empty:
+        last = factor_per_bar.iloc[-1]
+        for col in ("regime_id", "anchor_time", "dsa_vwap"):
+            if col in last and pd.notna(last[col]):
+                visual[col] = (
+                    last[col].isoformat() if isinstance(last[col], pd.Timestamp) else last[col]
+                )
+    if dsa_bundle.get("pivot_labels"):
+        visual["pivot_labels"] = dsa_bundle["pivot_labels"]
+    if dsa_bundle.get("anchor"):
+        visual["anchor"] = dsa_bundle["anchor"]
+    return visual
+
+
+def _extract_state_events(smc_result: dict[str, Any]) -> list[dict[str, Any]]:
+    """从 SMC 结构结果提取结构事件候选（结构完成/破坏）。
+
+    当前作为轻量事件候选，由下游 state-event 消费。若 SMC 结果不含结构化事件，
+    返回空列表（不伪造事件）。
+    """
+    events: list[dict[str, Any]] = []
+    if isinstance(smc_result, dict):
+        # 优先读取结构化 events（若 kernel 已提供）
+        raw_events = smc_result.get("events") or smc_result.get("structure_events")
+        if isinstance(raw_events, list):
+            for ev in raw_events:
+                if isinstance(ev, dict):
+                    events.append(dict(ev))
+    return events
+
+
+def compute_core_artifact(
+    *,
+    context: CoreRunContext,
+    instrument_id: Any,
+    symbol: str,
+    daily_frame: pd.DataFrame,
+    input_hash: str,
+    bars_hash: str,
+    adj_factor_hash: str,
+) -> CoreComputationArtifact:
+    """单股 core 统一编排：每股各算法只计算一次，产出 CoreComputationArtifact。
+
+    这是 canonical 盘后主链的唯一算法入口。First Pyramid / DSA projection /
+    state events 全部消费本函数产出的 raw results，禁止再调用算法 kernel。
+
+    Args:
+        context: CoreRunContext（run 级唯一事实源，冻结 universe/config/版本；
+            run-scoped compute-once 计数由 context.compute_diagnostics 承载）
+        instrument_id: 标的 ID
+        symbol: 规范化 6 位股票代码
+        daily_frame: canonical 日线 OHLCV DataFrame（DatetimeIndex）
+        input_hash / bars_hash / adj_factor_hash: lineage 输入 hash
+
+    Returns:
+        CoreComputationArtifact
+
+    Raises:
+        ValueError: daily_frame 为空或数据不足，无法计算 core
+    """
+    # 1. canonical frame 消费计数（run-scoped，来自 context）
+    diagnostics = context.compute_diagnostics
+    diagnostics.bump("canonical_frame_build")
+
+    if daily_frame is None or daily_frame.empty:
+        raise ValueError("compute_core_artifact: daily_frame 为空")
+
+    # 2. 各算法 kernel 调用一次（compute-once）
+    raw = _compute_raw_results(daily_frame, diagnostics)
+
+    # 3. First Pyramid：纯 builder，不调用 kernel
+    n_bars = len(daily_frame)
+    last_bar_index = n_bars - 1
+    trade_date = (
+        daily_frame.index[-1].date().isoformat()
+    )
+    fp_core = build_first_pyramid_core_snapshot(
+        dsa_result=raw.dsa_bundle,
+        smc_result=raw.smc_result,
+        momentum_result={"bb_df": raw.bb_df, "sqzmom_result": raw.sqzmom_result},
+        volume_context=raw.vc_series,
+        bars=daily_frame,
+        symbol=symbol,
+        trade_date=trade_date,
+        n_bars=n_bars,
+        last_bar_index=last_bar_index,
+    )
+
+    # 4. DSA projection metrics/visual（从 raw dsa_bundle 提取，P0-05）
+    dsa_metrics = _extract_dsa_metrics(raw.dsa_bundle)
+    dsa_visual = _extract_dsa_visual(raw.dsa_bundle)
+
+    # 5. state-event candidates（从 SMC）
+    state_events = _extract_state_events(raw.smc_result)
+
+    # 6. 组装 artifact
+    availability: dict[str, str] = {}
+    if fp_core.fieldAvailability:
+        for dim in ("trend", "structure", "momentum"):
+            entry = fp_core.fieldAvailability.get(dim)
+            if isinstance(entry, dict):
+                availability[dim] = str(entry.get("status", "unavailable"))
+            else:
+                # FieldAvailability Pydantic 模型或 None：读其 status 属性或 fallback
+                status = getattr(entry, "status", None)
+                availability[dim] = (
+                    str(status) if status is not None else "unavailable"
+                )
+
+    # lineage：来自 CoreRunContext（run 级冻结）与输入 hash
+    algorithm_versions = dict(context.algorithm_versions or {})
+    if not algorithm_versions:
+        algorithm_versions = {
+            "dsa": _ALGO_DSA,
+            "smc": _ALGO_SMC,
+            "momentum": _ALGO_MOMENTUM,
+        }
+
+    artifact = CoreComputationArtifact(
+        instrument_id=instrument_id,
+        trade_date=(
+            date.fromisoformat(trade_date)
+        ),
+        payload={
+            "first_pyramid": fp_core.model_dump(by_alias=False),
+            "dsa": dsa_metrics,
+        },
+        visual=dsa_visual,
+        events=state_events,
+        availability=availability,
+        hashes={
+            "input_hash": input_hash,
+            "bars_hash": bars_hash,
+            "adj_factor_hash": adj_factor_hash,
+            "parameter_hash": context.parameter_hash,
+        },
+        diagnostics=dict(diagnostics.to_dict()),
+        source_core_run_id=context.run_id,
+        parameter_hash=context.parameter_hash,
+        algorithm_versions=algorithm_versions,
+    )
+    return artifact
+
+
+# 版本常量（回退：正常由 CoreRunContext 注入，这里仅用于 context 无算法版本时）
+_ALGO_DSA = "dsa-v1"
+_ALGO_SMC = "smc-v1"
+_ALGO_MOMENTUM = "momentum-v1"
+
+
+def _compute_raw_results(
+    daily_frame: pd.DataFrame,
+    diagnostics: ComputeOnceDiagnostics,
+) -> FirstPyramidRawResults:
+    """调用各算法 kernel 一次，累计 compute-once 计数。
+
+    复用 first_pyramid_service 的 raw-results 计算，但在此处叠加诊断计数，
+    使 canonical 主链的算法调用计数统一埋在本唯一入口（P0-03/Step-3）。
+    """
+    from app.services.first_pyramid_service import _compute_first_pyramid_raw_results
+
+    # 计数：DSA / SMC / momentum（Bollinger+SQZMOM）各一次；VolumeContext 并入 momentum 计数范畴
+    diagnostics.bump("dsa")
+    diagnostics.bump("smc")
+    diagnostics.bump("momentum")
+    return _compute_first_pyramid_raw_results(daily_frame)

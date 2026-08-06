@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -945,15 +946,43 @@ def _build_aggregate_status_text(
 # =============================================================================
 
 
+# =============================================================================
+# [CHANGE-20260805-CP4A / P0-03] Compute-once 重构：
+#   算法 kernel（DSA/SMC/Bollinger/SQZMOM/VolumeContext）只允许在
+#   `compute_core_artifact` 的唯一入口调用一次；First Pyramid 变成纯 builder，
+#   消费预计算 raw results，禁止再调用任何算法 kernel。
+#   `compute_first_pyramid_core_snapshot` 保留为向后兼容的薄封装（内部仍各算一次，
+#   供非 canonical 入口使用），canonical 路径一律走 `compute_core_artifact` +
+#   `build_first_pyramid_core_snapshot`。
+# =============================================================================
+
+
+@dataclass
+class FirstPyramidRawResults:
+    """First Pyramid 各维度所需的**原始算法结果**（由 compute_core_artifact 计算一次）。
+
+    纯数据容器，禁止在此处调用任何算法 kernel。
+    """
+
+    dsa_bundle: dict[str, Any]
+    smc_result: dict[str, Any]
+    bb_df: pd.DataFrame
+    sqzmom_result: Any
+    vc_series: pd.DataFrame
+    n_bars: int
+    last_bar_index: int
+
+
 def compute_first_pyramid_core_snapshot(
     bars: pd.DataFrame,
     symbol: str,
     trade_date: str | None = None,
 ) -> FirstPyramidCoreSnapshot:
-    """[CHANGE-20260729-003] 计算第一金字塔核心快照（trend/structure/momentum）。
+    """[CHANGE-20260729-003][P0-03] 计算第一金字塔核心快照（trend/structure/momentum）。
 
-    盘后 review core 关键路径使用本函数，禁止 Node Cluster 和 15m Node 输入。
-    core 的 inputHash/parameterHash 排除 Node 参数，与 chip 解耦。
+    向后兼容薄封装：内部调用算法 kernel 各一次得到 raw results，再交给纯 builder。
+    canonical 盘后主链不应走本函数（会重复计算），应经 `compute_core_artifact` +
+    `build_first_pyramid_core_snapshot`。
 
     Args:
         bars: 日线 OHLCV DataFrame（DatetimeIndex，含 open/high/low/close/volume/amount）
@@ -962,9 +991,33 @@ def compute_first_pyramid_core_snapshot(
 
     Returns:
         FirstPyramidCoreSnapshot（不含 chip_consensus）
+    """
+    raw = _compute_first_pyramid_raw_results(bars)
+    if trade_date is None:
+        trade_date = bars.index[-1].date().isoformat()
+    return build_first_pyramid_core_snapshot(
+        dsa_result=raw.dsa_bundle,
+        smc_result=raw.smc_result,
+        momentum_result={
+            "bb_df": raw.bb_df,
+            "sqzmom_result": raw.sqzmom_result,
+        },
+        volume_context=raw.vc_series,
+        bars=bars,
+        symbol=symbol,
+        trade_date=trade_date,
+        n_bars=raw.n_bars,
+        last_bar_index=raw.last_bar_index,
+    )
 
-    Raises:
-        ValueError: 前三维（trend/structure/momentum）任一缺失或数据不足
+
+def _compute_first_pyramid_raw_results(
+    bars: pd.DataFrame,
+) -> FirstPyramidRawResults:
+    """调用 DSA/SMC/Bollinger/SQZMOM/VolumeContext 算法 kernel 各一次，返回原始结果。
+
+    [P0-03] 算法调用计数埋点应放在唯一的 canonical adapter / kernel 入口
+    （`compute_core_artifact`），本函数仅供非 canonical / 向后兼容路径使用。
     """
     if bars is None or bars.empty:
         raise ValueError("bars 为空，无法计算第一金字塔核心快照")
@@ -978,35 +1031,28 @@ def compute_first_pyramid_core_snapshot(
         bars = bars.copy()
         bars.index = pd.to_datetime(bars.index)
 
-    if trade_date is None:
-        trade_date = bars.index[-1].date().isoformat()
-
     n_bars = len(bars)
     last_bar_index = n_bars - 1
 
-    # Gate1：统一 VolumeContext（计算一次，趋势/结构/动量复用）
+    # Gate1：统一 VolumeContext（一次）
     vc_series = compute_volume_context_series(bars)
-    last_vc = extract_last_volume_context(vc_series)
-    vc_schema = _vc_to_schema(last_vc)
 
-    # 1. 趋势维度（DSA SSOT）
+    # 1. DSA（一次）
     dsa_config_dict: dict[str, Any] = {
         "min_dir_bars": MIN_DIR_BARS,
         "lookback": DSA_LOOKBACK,
     }
     dsa_bundle = compute_dsa_bundle(bars, dsa_config_dict)
-    trend_dim = _build_trend_dimension(dsa_bundle, n_bars, vc_series)
 
-    # 2. 结构维度（SMC Pine core）
+    # 2. SMC Pine core（一次）
     opens = bars["open"].astype(float).tolist()
     highs = bars["high"].astype(float).tolist()
     lows = bars["low"].astype(float).tolist()
     closes = bars["close"].astype(float).tolist()
     times = [d.isoformat() for d in bars.index]
     smc_result = compute_smc_pine(opens, highs, lows, closes, times, params=None)
-    structure_dim = _build_structure_dimension(smc_result, n_bars, last_bar_index, vc_series)
 
-    # 3. 动量维度（Bollinger + SQZMOM）
+    # 3. Bollinger + SQZMOM（各一次）
     bb_cfg = BBcfg(
         bb_win=_FIRST_PYRAMID_PARAMS["bollinger_config"]["bb_win"],
         bb_k=_FIRST_PYRAMID_PARAMS["bollinger_config"]["bb_k"],
@@ -1019,11 +1065,68 @@ def compute_first_pyramid_core_snapshot(
         closes=np.array(closes, dtype=float),
         params=_FIRST_PYRAMID_PARAMS["sqzmom_config"],
     )
-    momentum_dim = _build_momentum_dimension(
-        bb_df, sqzmom_result, n_bars, last_bar_index, vc_series, bars
+
+    return FirstPyramidRawResults(
+        dsa_bundle=dsa_bundle,
+        smc_result=smc_result,
+        bb_df=bb_df,
+        sqzmom_result=sqzmom_result,
+        vc_series=vc_series,
+        n_bars=n_bars,
+        last_bar_index=last_bar_index,
     )
 
-    # 4. core hash（排除 Node 参数）
+
+def build_first_pyramid_core_snapshot(
+    *,
+    dsa_result: dict[str, Any],
+    smc_result: dict[str, Any],
+    momentum_result: dict[str, Any],
+    volume_context: pd.DataFrame,
+    bars: pd.DataFrame,
+    symbol: str,
+    trade_date: str,
+    n_bars: int,
+    last_bar_index: int,
+) -> FirstPyramidCoreSnapshot:
+    """[P0-03] 纯 builder：由预计算 raw results 组装 FirstPyramidCoreSnapshot。
+
+    本函数**禁止**调用任何算法 kernel（DSA/SMC/Bollinger/SQZMOM/VolumeContext）；
+    只做维度构建、hash 计算与封装。算法 kernel 由 `compute_core_artifact` 调用一次。
+
+    Args:
+        dsa_result: compute_dsa_bundle 的原始结果
+        smc_result: compute_smc_pine 的原始结果
+        momentum_result: {"bb_df":..., "sqzmom_result":...} 原始结果
+        volume_context: compute_volume_context_series 的全序列
+        bars: 日线 OHLCV DataFrame（用于 momentum 维度与 hash）
+        symbol / trade_date / n_bars / last_bar_index: 元数据
+    """
+    # 1. 趋势维度（消费预计算 DSA bundle）
+    trend_dim = _build_trend_dimension(dsa_result, n_bars, volume_context)
+
+    # 2. 结构维度（消费预计算 SMC）
+    structure_dim = _build_structure_dimension(
+        smc_result, n_bars, last_bar_index, volume_context
+    )
+
+    # 3. 动量维度（消费预计算 Bollinger + SQZMOM）
+    bb_df = momentum_result.get("bb_df")
+    sqzmom_result = momentum_result.get("sqzmom_result")
+    if sqzmom_result is None or not isinstance(sqzmom_result, dict):
+        raise ValueError(
+            "build_first_pyramid_core_snapshot: momentum_result 缺少 sqzmom_result "
+            "（compute_core_artifact 必须传入预计算 SQZMOM 结果）"
+        )
+    momentum_dim = _build_momentum_dimension(
+        bb_df, sqzmom_result, n_bars, last_bar_index, volume_context, bars
+    )
+
+    # 4. VolumeContext schema
+    last_vc = extract_last_volume_context(volume_context)
+    vc_schema = _vc_to_schema(last_vc)
+
+    # 5. core hash（排除 Node 参数）
     input_hash = _compute_input_hash(bars)
     parameter_hash = _compute_core_parameter_hash()
     aggregate_status = _build_aggregate_status_text(
@@ -1040,8 +1143,6 @@ def compute_first_pyramid_core_snapshot(
         volumeContext=vc_schema,
         inputHash=input_hash,
         parameterHash=parameter_hash,
-        # [字段级 availability 合同 2026-08-04] 盘后主链必须携带字段级原因；
-        # sourceRunId/calculatedAt 由编排器在持久化时按 run 注入（见 feature_snapshot_service）。
         fieldAvailability=_build_field_availability(momentum_dim),
         nBars=n_bars,
         lastBarIndex=last_bar_index,
