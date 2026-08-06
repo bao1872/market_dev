@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Files in this manifest form the protected governance change domain and require explicit current-task governance authorization.",
+  "exact_paths": [
+    "AGENTS.md",
+    "docker-compose.verify.yml",
+    "tools/check_governance_rules.py",
+    "tools/tests/test_check_governance_rules.py",
+    "backend/tests/test_verify_infra_safety.py",
+    "scripts/ops/panji-verify",
+    "scripts/ops/panji-verify-run"
+  ],
+  "path_prefixes": [
+    "rules/",
+    "scripts/verify/"
+  ]
+}

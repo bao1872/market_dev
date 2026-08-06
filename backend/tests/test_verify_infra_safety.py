@@ -26,14 +26,13 @@ if str(_VERIFY_DIR) not in sys.path:
 
 import cleanup_runner as cr  # noqa: E402
 from evidence_exporter import EvidenceExporter  # noqa: E402
+from verification_plan import load_plan  # noqa: E402
 
-# 显式标记：纯单元测试（不连库、不联网），属本地门禁“验证工具静态测试”项。
-pytestmark = pytest.mark.pure_unit
+FULL_SHA = "a3caf4b86bdc126fd110b1f1a148f4f2c508652b"
 
 
 def test_verify_db_name_regex() -> None:
-    assert cr._verify_db_re().match("bz_stock_verify_26544de") is not None
-    assert cr._verify_db_re().match("bz_stock_verify_26544de0a589d801df7f0aca958f1609f46c679") is not None
+    assert cr._verify_db_re().match(f"bz_stock_verify_{FULL_SHA}") is not None
     # 非法
     assert cr._verify_db_re().match("bz_stock") is None
     assert cr._verify_db_re().match("postgres") is None
@@ -51,7 +50,7 @@ def test_permanent_protection_list() -> None:
     assert cr._is_protected("web_dev", "container")
     assert cr._is_protected("panji-prod-foo", "container")
     # 非受保护（合法验证库）
-    assert not cr._is_protected("bz_stock_verify_26544de", "database")
+    assert not cr._is_protected(f"bz_stock_verify_{FULL_SHA}", "database")
     assert not cr._is_protected("verify-test-26544de", "container")
 
 
@@ -62,7 +61,7 @@ def test_safe_drop_database_rejects_illegal_name() -> None:
     assert res["error"] is not None
 
     # 合法名但缺 url → 拒绝（盲删保护）
-    res = cr._safe_drop_database("bz_stock_verify_26544de", verify_db_url=None)
+    res = cr._safe_drop_database(f"bz_stock_verify_{FULL_SHA}", verify_db_url=None)
     assert res["dropped"] is False
     assert "verify_db_url" in res["error"]
 
@@ -80,14 +79,17 @@ def test_cleanup_attempt_protected_compose_project() -> None:
         # 构造一个指向受保护 compose project 的 manifest
         manifest = {
             "attempt_id": "verify-test-abc",
-            "verify_database": "bz_stock_verify_26544de",
+            "verify_database": f"bz_stock_verify_{FULL_SHA}",
             "compose_project": "trading-prod",  # 受保护前缀
             "evidence_dir": str(Path(tmp) / "evidence"),
-            "verify_db_url": "postgresql+asyncpg://u:p@h:5432/bz_stock_verify_26544de",
         }
         mp = Path(tmp) / "manifest.json"
         mp.write_text(json.dumps(manifest))
-        summary = cr.cleanup_attempt(mp)
+        summary = cr.cleanup_attempt(
+            mp,
+            verify_db_url="postgresql+asyncpg://u:p@h:5432/"
+            f"bz_stock_verify_{FULL_SHA}",
+        )
         assert summary["blocked_cleanup"] is True
         assert any("compose" in r for r in summary["blocked_reasons"])
 
@@ -99,7 +101,7 @@ def test_evidence_exporter_writes_manifest_and_gates() -> None:
         exporter = EvidenceExporter(ev_dir, manifest)
         exporter.record_gate("preflight", True, detail="ok")
         exporter.log("hello")
-        exporter.record_resource("db", "bz_stock_verify_26544de")
+        exporter.record_resource("db", f"bz_stock_verify_{FULL_SHA}")
         out = exporter.export()
         assert (out / "manifest.json").exists()
         assert (out / "gates.json").exists()
@@ -121,3 +123,36 @@ def test_evidence_summary_reports_gate_counts() -> None:
         summary = (ev_dir / "summary.md").read_text()
         assert "通过 1" in summary
         assert "失败 1" in summary
+
+
+def test_plan_is_closed_and_registered(tmp_path: Path) -> None:
+    plan_path = _VERIFY_DIR / "plans" / "full-closure.json"
+    plan = load_plan(plan_path)
+    assert plan.name == "full-closure"
+    assert plan.test_profile == "pg_contract"
+    injected = tmp_path / "bad.json"
+    injected.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "name": "bad",
+            "runtime_profile": "after_close",
+            "test_profile": "pg_contract",
+            "seed_profile": "v21_synthetic",
+            "e2e_profile": "closure_v21",
+            "timeout_profile": "standard",
+            "command": "rm -rf /",
+        })
+    )
+    with pytest.raises(ValueError, match="unsupported plan keys"):
+        load_plan(injected)
+
+
+def test_maintenance_url_never_targets_verify_database() -> None:
+    url = f"postgresql+asyncpg://u:p@host:5432/bz_stock_verify_{FULL_SHA}"
+    assert cr._maintenance_url(url) == "postgresql://u:p@host:5432/postgres"
+
+
+def test_cleanup_source_never_uses_volume_delete() -> None:
+    source = (_VERIFY_DIR / "cleanup_runner.py").read_text()
+    assert '"down", "-v"' not in source
+    assert "docker volume prune" not in source

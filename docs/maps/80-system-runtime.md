@@ -56,6 +56,20 @@ scripts/ops/panji-test-deploy <FULL_SHA> [--dry-run]
   -> health / ready / version / mount / scheduler-singleton verification
 ```
 
+## 远程验证框架
+
+当前仓库的正式本地控制入口为 `scripts/ops/panji-verify`；旧
+`scripts/ops/panji-verify-run` 仅委托给该入口。`full-closure` 计划由
+`scripts/verify/plans/full-closure.json` 选择注册 profile，
+`scripts/verify/verification_plan.py` 拒绝未知字段与未注册值。
+
+远端编排位于 `scripts/verify/verify_attempt.py`：完整 SHA 派生精确数据库和 Compose project，
+全局非阻塞锁阻止并发 attempt；数据库创建和删除都通过维护库连接；Migration 执行
+upgrade/downgrade/upgrade/重复 upgrade；PG 由 Compose 的一次性 `verify-test` 运行；finally 导出
+证据、精确清理并复检。`cleanup_runner.py` 不执行 volume/image/global prune，证据目录不随清理删除；
+`evidence_exporter.py` 对日志和总证据设上限。以上为已通过本地合同测试和静态检查的代码事实，
+尚未在远程 PostgreSQL 完整实跑，因此 `remote_verification_verified=false`。
+
 实现边界：
 
 - 本地入口只校验来源、运行 preflight，并让服务器先自举到目标 SHA 工作树，

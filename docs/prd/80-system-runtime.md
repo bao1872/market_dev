@@ -278,3 +278,12 @@ production 现有行为不得被意外改变。
 3. 部署前必须通过本地修改范围测试；触及数据库、Worker/编排、发布指针、权限写入或跨服务链路时，还必须由同一 SHA 通过对应远程验证；
 4. 部署完成后，运行时版本端点返回的 `runtime_git_sha` 必须与目标 dev SHA 一致；
 5. 不得只在聊天输出声称部署成功，必须给出上述 2 项 SHA 核验证据。
+
+### SR-74 可重复远程验证框架
+
+正式远程验证必须由长期保留的单一框架执行，而不是为每次需求复制脚本。调用方只提交完整
+40 位 `target_code_sha` 和仓库登记的封闭计划；计划只能组合预注册 runtime/test/seed/e2e/
+timeout profile，不接受任意命令。每次 attempt 使用唯一数据库与 Compose project，冻结
+target/repo/runtime SHA、数据库、Alembic revision 和输入计划，按 Migration round-trip、运行身份、
+自包含 PG、synthetic seed 幂等及 Synthetic E2E 顺序执行。无论结果如何都精确清理本次临时资源，
+清理失败状态为 `blocked_cleanup`；有界且脱敏的证据必须保留供归因。

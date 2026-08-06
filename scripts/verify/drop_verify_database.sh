@@ -2,7 +2,7 @@
 # drop_verify_database.sh — 验收完成后删除远程验证库（DS-110）。
 #
 # 仅删除 bz_stock_verify_<sha>；禁止删除 bz_stock 或任何其他库。
-# fail-closed：库名必须匹配 bz_stock_verify_<7-40位SHA>；禁止连接 bz_stock。
+# fail-closed：库名必须匹配 bz_stock_verify_<40位SHA>；禁止连接 bz_stock。
 #
 # 用法：scripts/verify/drop_verify_database.sh <SHA>
 # 退出码：0=删除成功；非0=拒绝/失败
@@ -17,7 +17,7 @@ fi
 SHA="$1"
 DB_NAME="bz_stock_verify_${SHA}"
 
-if ! echo "$DB_NAME" | grep -Eq '^bz_stock_verify_[0-9a-f]{7,40}$'; then
+if ! echo "$DB_NAME" | grep -Eq '^bz_stock_verify_[0-9a-f]{40}$'; then
   echo "drop_verify_database: 非法库名 '$DB_NAME'" >&2
   exit 3
 fi

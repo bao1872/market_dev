@@ -40,7 +40,7 @@
 - `backend/tests/test_pg_projection_lifecycle.py` — 自建 StrategyDefinition/Version/Run/RunItems/CoreArtifacts；修复 `CoreArtifactRepository` / `project_dsa_batch` 真实签名；
 - `backend/tests/test_pg_seed_scenario_closures.py` — full_success 断言放宽至 (fully_ready / mandatory_ready_enhancing / degraded_ready)，记录 board_facts 门禁需全市场原始事实的诚实边界。
 
-本次**未修改** PRD、Maps、Runbooks、AGENTS.md、rules/** 或治理检查器。验证基础设施代码不属于治理层，仅实现 007 合同。
+本次当时未修改 PRD、Maps、Runbooks、AGENTS.md、rules/** 或治理检查器。其“验证基础设施代码不属于治理层”的判断已由 CHANGE-20260806-009 纠正：远程验证框架现属于受保护治理变更域。
 
 ## 3. 关键实现决策
 

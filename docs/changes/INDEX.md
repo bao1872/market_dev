@@ -10,6 +10,7 @@
 
 | Change ID | 日期 | 标题 | 类型 | 领域 | 状态 | 关联 PRD | 关联 Maps |
 |---|---|---|---|---|---|---|---|
+| CHANGE-20260806-009 | 2026-08-06 | 受保护治理域与远程验证框架收口 | governance+verification-infrastructure+docs+quality-gate | 治理/远程验证/证据/资源清理 | `verified_code_pending_remote_execution` | `prd/80-system-runtime.md` | `maps/80-system-runtime.md` |
 | CHANGE-20260806-007 | 2026-08-06 | 同 SHA、自包含远程验证合同 | governance+verification-contract+quality-gate | 治理/PG测试/Migration/Seed/验证证据 | `governance_implemented_code_pending` | — | — |
 | CHANGE-20260806-006 | 2026-08-06 | 远程验证尝试强制资源清理 | governance+resource-safety+quality-gate | 治理/远程验证/服务器资源/清理 | `implemented_local_pending_user_acceptance`；脚本实现待后续代码任务 | — | — |
 | CHANGE-20260806-005 | 2026-08-06 | V2.1 PRD 完全对齐代码收口（Phase 0-7：Compute Once / stock_core 原子发布 SSOT / chip 运行级 15m+RunItem / closure 六态 / Seed 真实 producer / 本地门禁 / 远程隔离 PG 验证） | behavior+contract+architecture+quality-gate | 行情/量化模型/盘后编排/closure/验证基础设施 | `verified_code_pending_acceptance`（Phase 1-5 代码合同待核验补齐、code_ready=false、remote_pg_verified=false、stable_deployed=false、data_closed=false、full_v2_1_closed=false） | `prd/10-market-data.md`、`prd/20-quant-model.md`、`prd/30-after-close.md`、`prd/31-after-close-product-closure-v2.1.md`、`prd/70-review.md`、`prd/75-auction-analysis.md`、`prd/80-system-runtime.md` | `maps/20-quant-model.md`、`maps/30-after-close.md` |

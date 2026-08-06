@@ -69,7 +69,6 @@ services:
   # 独立验证 Redis（方案 B：隔离更清楚，不暴露宿主机端口）
   verify-redis:
     image: redis:7-alpine
-    container_name: verify-redis
     logging: *default-logging
     command: redis-server --appendonly yes --port 6379
     networks:
@@ -78,7 +77,6 @@ services:
   # 验证 backend（Live Mount：镜像仅提供依赖，代码来自 VERIFY_CODE_DIR）
   verify-backend:
     image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
-    container_name: verify-backend
     logging: *default-logging
     <<: [*resource-app-heavy, *verify-live-python]
     environment:
@@ -105,7 +103,6 @@ services:
 
   verify-frontend:
     image: ${VERIFY_FRONTEND_IMAGE:?VERIFY_FRONTEND_IMAGE is required}
-    container_name: verify-frontend
     logging: *default-logging
     <<: *resource-app-light
     volumes:
@@ -119,7 +116,6 @@ services:
   # 必要 Worker（不复用正式 Worker 容器，独立实例）
   verify-worker-after-close:
     image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
-    container_name: verify-worker-after-close
     logging: *default-logging
     <<: [*resource-app-light, *verify-live-python]
     environment:
@@ -142,7 +138,6 @@ services:
 
   verify-worker-chip:
     image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
-    container_name: verify-worker-chip
     logging: *default-logging
     <<: [*resource-app-light, *verify-live-python]
     environment:
@@ -165,7 +160,6 @@ services:
 
   verify-worker-watchdog:
     image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
-    container_name: verify-worker-watchdog
     logging: *default-logging
     <<: [*resource-app-light, *verify-live-python]
     environment:
@@ -194,7 +188,6 @@ services:
   # 承载；在部署脚本中以 `run --rm` 触发（见 scripts/deploy/panji-verify-deploy.sh）。
   verify-test:
     image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
-    container_name: verify-test
     logging: *default-logging
     <<: *resource-app-light
     volumes:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from collections import Counter
@@ -54,6 +55,18 @@ BLOCKED_CLEANUP_MARKER = "任一残留或清理错误都标记 `blocked_cleanup`
 PG_SELF_CONTAINED_MARKER = "每个 PG 测试必须在自身 transaction/fixture 中创建最小完整前置数据"
 SYNTHETIC_VERIFY_MARKER = "标准验证 100% synthetic"
 VERIFY_EXECUTOR_MARKER = "PG tests 只能由一次性 `verify-test` 服务运行"
+PROTECTED_DOMAIN_MARKER = "受保护治理变更域"
+PROTECTED_MANIFEST = "rules/PROTECTED_GOVERNANCE_FILES.json"
+REQUIRED_PROTECTED_PATHS = {
+    "AGENTS.md",
+    "docker-compose.verify.yml",
+    "tools/check_governance_rules.py",
+    "tools/tests/test_check_governance_rules.py",
+    "backend/tests/test_verify_infra_safety.py",
+    "scripts/ops/panji-verify",
+    "scripts/ops/panji-verify-run",
+}
+REQUIRED_PROTECTED_PREFIXES = {"rules/", "scripts/verify/"}
 
 
 def read(path: Path) -> str:
@@ -83,6 +96,26 @@ def check(root: Path) -> list[str]:
         errors.append("AGENTS.md must reference rules/README.md")
     if GOVERNANCE_AUTHORIZATION_MARKER not in agents_text:
         errors.append("AGENTS.md missing explicit governance-change authorization gate")
+    if PROTECTED_DOMAIN_MARKER not in agents_text:
+        errors.append("AGENTS.md missing protected governance change domain")
+
+    manifest_path = root / PROTECTED_MANIFEST
+    try:
+        manifest = json.loads(read(manifest_path))
+    except (json.JSONDecodeError, TypeError):
+        manifest = {}
+        errors.append(f"invalid protected governance manifest: {PROTECTED_MANIFEST}")
+    exact_paths = set(manifest.get("exact_paths", []))
+    prefixes = set(manifest.get("path_prefixes", []))
+    if manifest.get("schema_version") != 1:
+        errors.append("protected governance manifest schema_version must be 1")
+    for relative in sorted(REQUIRED_PROTECTED_PATHS - exact_paths):
+        errors.append(f"protected governance manifest missing path: {relative}")
+    for prefix in sorted(REQUIRED_PROTECTED_PREFIXES - prefixes):
+        errors.append(f"protected governance manifest missing prefix: {prefix}")
+    for relative in sorted(exact_paths):
+        if not (root / relative).is_file():
+            errors.append(f"protected governance path does not exist: {relative}")
     for marker, label in (
         (PRD_AUTHORIZATION_MARKER, "PRD"),
         (MAPS_AUTHORIZATION_MARKER, "Maps"),
@@ -228,6 +261,31 @@ def check(root: Path) -> list[str]:
     for token in ("panji-test-deploy", "panji-deploy.sh", "ssh panji-prod"):
         if token in shell_code(workflow_dir / "ci.yml"):
             errors.append(f"ci.yml contains deployment action: {token}")
+
+    verify_entry = root / "scripts/ops/panji-verify"
+    verify_runner = root / "scripts/verify/verify_attempt.py"
+    verify_plan = root / "scripts/verify/plans/full-closure.json"
+    verify_compose = root / "docker-compose.verify.yml"
+    verify_cleanup = root / "scripts/verify/cleanup_runner.py"
+    for path in (verify_entry, verify_runner, verify_plan, verify_compose, verify_cleanup):
+        if not path.is_file():
+            errors.append(f"missing verification framework file: {path.relative_to(root)}")
+    verify_entry_code = shell_code(verify_entry)
+    verify_runner_code = read(verify_runner)
+    verify_cleanup_code = read(verify_cleanup)
+    verify_compose_text = read(verify_compose)
+    for signal in ("panji-prod-preflight", "panji-prod-ssh", "full-closure", "[0-9a-f]{40}"):
+        if signal not in verify_entry_code:
+            errors.append(f"verification entry missing contract signal: {signal}")
+    for signal in ("VerificationPlan", "LOCK_NB", "downgrade", "blocked_cleanup"):
+        if signal not in verify_runner_code:
+            errors.append(f"verification runner missing contract signal: {signal}")
+    for signal in ("verify-test:", "127.0.0.1", "PANJI_REMOTE_VERIFY_DB_TEST"):
+        if signal not in verify_compose_text:
+            errors.append(f"verification compose missing contract signal: {signal}")
+    for token in ("down -v", '"down", "-v"', "--rmi", "docker cp", "pip install"):
+        if token in verify_cleanup_code or token in verify_runner_code or token in verify_entry_code:
+            errors.append(f"forbidden verification implementation: {token}")
 
     deploy_runbooks = sorted(path.name for path in (root / "docs/runbooks").glob("*deployment*.md"))
     if deploy_runbooks != ["development-deployment.md"]:

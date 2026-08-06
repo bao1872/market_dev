@@ -29,9 +29,20 @@
   - 自动 Scheduler 关闭（`PANJI_SCHEDULER_ENABLED=false`）；
   - 只启动必要 Worker（after-close / chip / watchdog），不加入正式 Nginx 公网入口；
   - **绝不连接 `bz_stock`**。
-- 脚本：`scripts/ops/panji-verify-deploy`、`scripts/deploy/panji-verify-deploy.sh`、`scripts/verify/create_verify_database.sh`、`scripts/verify/drop_verify_database.sh`、`scripts/verify/seed_v21_verify_data.py`。
+- 唯一正式入口：`scripts/ops/panji-verify`；`panji-verify-run` 仅为兼容适配器，低层脚本不得被拼装成另一条正式流程。
 - 连接校验：验证栈启动后执行 `SELECT current_database()`，非 `bz_stock_verify_<sha>` 立即中止。
 - 验证栈不得替代正式运行栈；验收通过后才允许同 SHA 申请部署正式栈。验证授权不自动包含正式栈部署授权。
+
+已准备好远程验证环境变量和用户授权后，从本地执行：
+
+```bash
+scripts/ops/panji-verify run --sha <FULL_40_SHA> --plan full-closure \
+  --env-file market.verify.env
+```
+
+入口先执行 preflight，再通过受控 SSH 调用远端编排器。`full-closure` 是当前唯一登记计划；不得
+添加临时命令、pytest 参数或插件。结束后检查 evidence 中 target/repo/runtime SHA、数据库、
+revision、gate 与 cleanup 状态；`blocked_cleanup` 时停止新的验证尝试并按精确资源名处理。
 
 ## 部署前
 

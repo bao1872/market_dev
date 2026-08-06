@@ -29,8 +29,18 @@ def governance_repo(tmp_path: Path) -> Path:
     _copy_file(ROOT / ".github/workflows/ci.yml", target / ".github/workflows/ci.yml")
     for relative in (
         "scripts/ops/panji-test-deploy",
+        "scripts/ops/panji-verify",
+        "scripts/ops/panji-verify-run",
         "scripts/deploy/panji-deploy.sh",
+        "scripts/verify/verify_attempt.py",
+        "scripts/verify/cleanup_runner.py",
+        "scripts/verify/verification_plan.py",
+        "scripts/verify/plans/full-closure.json",
         "docker-compose.prod.yml",
+        "docker-compose.verify.yml",
+        "backend/tests/test_verify_infra_safety.py",
+        "tools/check_governance_rules.py",
+        "tools/tests/test_check_governance_rules.py",
         "docs/prd/80-system-runtime.md",
         "docs/maps/80-system-runtime.md",
         "docs/runbooks/development-deployment.md",
@@ -50,6 +60,10 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
     [
         ("role_file", "non-canonical rule file"),
         ("no_governance_auth", "missing explicit governance-change authorization gate"),
+        ("no_protected_domain", "missing protected governance change domain"),
+        ("unprotect_verify_entry", "protected governance manifest missing path"),
+        ("verify_short_sha", "verification entry missing contract signal"),
+        ("verify_destructive_cleanup", "forbidden verification implementation"),
         ("no_prd_auth", "missing explicit PRD authorization gate"),
         ("no_maps_auth", "missing explicit Maps authorization gate"),
         ("no_runbooks_auth", "missing explicit Runbooks authorization gate"),
@@ -221,6 +235,24 @@ def test_governance_regressions_are_rejected(
             ),
             encoding="utf-8",
         )
+    elif mutation == "no_protected_domain":
+        path = governance_repo / "AGENTS.md"
+        path.write_text(
+            read_text(path).replace(MODULE.PROTECTED_DOMAIN_MARKER, "unprotected domain"),
+            encoding="utf-8",
+        )
+    elif mutation == "unprotect_verify_entry":
+        path = governance_repo / MODULE.PROTECTED_MANIFEST
+        path.write_text(
+            read_text(path).replace('    "scripts/ops/panji-verify",\n', ""),
+            encoding="utf-8",
+        )
+    elif mutation == "verify_short_sha":
+        path = governance_repo / "scripts/ops/panji-verify"
+        path.write_text(read_text(path).replace("[0-9a-f]{40}", "[0-9a-f]{7,40}"), encoding="utf-8")
+    elif mutation == "verify_destructive_cleanup":
+        path = governance_repo / "scripts/verify/cleanup_runner.py"
+        path.write_text(read_text(path) + '\nFORBIDDEN = "down -v"\n', encoding="utf-8")
     elif mutation == "future_state":
         path = governance_repo / "rules/00-core-governance.md"
         path.write_text(read_text(path) + "\n> 状态：PLANNED\n", encoding="utf-8")

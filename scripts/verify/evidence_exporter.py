@@ -33,6 +33,8 @@ from typing import Any
 GATES_JSON = "gates.json"
 MANIFEST_JSON = "manifest.json"
 SUMMARY_MD = "summary.md"
+MAX_LOG_BYTES = 64 * 1024
+MAX_EVIDENCE_BYTES = 2 * 1024 * 1024
 
 
 def _utcnow() -> str:
@@ -78,7 +80,8 @@ class EvidenceExporter:
         )
 
         # logs.txt
-        (self.evidence_dir / "logs.txt").write_text("\n".join(self.logs), encoding="utf-8")
+        logs = "\n".join(self.logs).encode("utf-8")[-MAX_LOG_BYTES:]
+        (self.evidence_dir / "logs.txt").write_bytes(logs)
 
         # resources-<phase>.json（每个 phase 一个文件，便于精确清理核对）
         for phase, items in self.resources.items():
@@ -96,6 +99,9 @@ class EvidenceExporter:
 
         # summary.md
         self._write_summary()
+        total = sum(p.stat().st_size for p in self.evidence_dir.rglob("*") if p.is_file())
+        if total > MAX_EVIDENCE_BYTES:
+            raise RuntimeError(f"evidence exceeds {MAX_EVIDENCE_BYTES} byte budget: {total}")
         return self.evidence_dir
 
     def _write_summary(self) -> None:

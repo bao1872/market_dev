@@ -21,14 +21,14 @@ finally 合同（失败也必须执行）：
       run_preflight(); create_verify_database(); run_migration_round_trip()
       start_verify_runtime(); assert_identity()
       run_self_contained_pg_tests(); run_synthetic_seed_twice(); run_synthetic_e2e()
-  except BaseException:
-      result = "failed"; raise
+  except (KeyboardInterrupt, Exception):
+      result = "failed"
   finally:
       export_evidence(); cleanup_exact_attempt_resources(); verify_cleanup()
 
 退出码：0=成功闭环；非0=失败（细节在 evidence_dir/summary.md）。
 
-用法（由 scripts/ops/panji-verify-run 在远程容器内调用）：
+用法（由 scripts/ops/panji-verify 在远程环境调用）：
   python scripts/verify/verify_attempt.py \
       --target-sha <FULL_SHA> \
       --verify-db-url postgresql+asyncpg://bz:***@trading-postgres:5432/bz_stock_verify_<sha> \
@@ -39,6 +39,7 @@ finally 合同（失败也必须执行）：
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -47,7 +48,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 # 本文件与 cleanup_runner / evidence_exporter 同目录
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -55,6 +56,7 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cleanup_runner import _verify_db_re, cleanup_attempt
 from evidence_exporter import EvidenceExporter
+from verification_plan import VerificationPlan, load_plan
 
 VERIFY_DB_RE = _verify_db_re()
 
@@ -69,18 +71,18 @@ def _gen_attempt_id(target_sha: str) -> str:
 
 
 def _assert_verify_db_name(db_name: str) -> None:
-    """fail-closed：验证库名必须匹配 bz_stock_verify_<7-40位sha>。"""
+    """Fail closed: formal verification always uses the complete target SHA."""
     if not VERIFY_DB_RE.match(db_name):
         raise RuntimeError(
-            f"非法验证库名 '{db_name}'（必须 bz_stock_verify_<7-40位sha>，DS-110）"
+            f"非法验证库名 '{db_name}'（必须 bz_stock_verify_<40位sha>，DS-110）"
         )
     if db_name in {"postgres", "bz_stock", "template0", "template1"}:
         raise RuntimeError(f"严重错误：命中保护库名 '{db_name}'，立即中止")
 
 
-def _run(cmd: list[str], *, check: bool = False, timeout: int = 600) -> tuple[int, str, str]:
+def _run(cmd: list[str], *, timeout: int = 600, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env)
         return proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "command timeout"
@@ -114,15 +116,24 @@ class VerifyAttempt:
     """单次验证尝试编排器。"""
 
     def __init__(self, *, target_sha: str, verify_db_url: str, compose_project: str,
-                 env_file: str, compose_file: str, evidence_root: str) -> None:
+                 env_file: str, compose_file: str, evidence_root: str,
+                 plan: VerificationPlan) -> None:
+        if len(target_sha) != 40 or any(ch not in "0123456789abcdef" for ch in target_sha):
+            raise ValueError("target_sha must be a complete 40-character lowercase hex SHA")
         self.target_sha = target_sha
         self.verify_db_url = verify_db_url
         self.db_name = _db_name_from_url(verify_db_url)
         _assert_verify_db_name(self.db_name)
+        if self.db_name != f"bz_stock_verify_{target_sha}":
+            raise ValueError("verify database must be derived from the complete target SHA")
+        if compose_project != f"panji-verify-{target_sha}":
+            raise ValueError("compose project must be derived from the complete target SHA")
 
         self.compose_project = compose_project
         self.env_file = env_file
         self.compose_file = compose_file
+        self.plan = plan
+        self._lock_file: TextIO | None = None
         self.attempt_id = _gen_attempt_id(target_sha)
         self.evidence_dir = (
             Path(evidence_root) / self.attempt_id
@@ -131,12 +142,13 @@ class VerifyAttempt:
             "attempt_id": self.attempt_id,
             "target_sha": self.target_sha,
             "verify_database": self.db_name,
-            "verify_db_url": self.verify_db_url,
             "compose_project": self.compose_project,
             "compose_file": str(compose_file),
             "env_file": str(env_file),
             "evidence_dir": str(self.evidence_dir),
             "status": "created",
+            "plan": self.plan.name,
+            "runtime_mode": "verification",
             "created_at": _utcnow(),
         }
         self.exporter = EvidenceExporter(self.evidence_dir, self.manifest)
@@ -150,15 +162,18 @@ class VerifyAttempt:
     def run_preflight(self) -> None:
         """预检：RUNTIME_SHA 与 git HEAD 一致；compose config 通过；DB 名合法。"""
         self.exporter.log("preflight: 开始")
-        runtime_sha_path = Path(os.environ.get("RUNTIME_SHA_PATH", "/app/RUNTIME_SHA"))
-        if runtime_sha_path.exists():
-            runtime_sha = runtime_sha_path.read_text().strip()
-            if runtime_sha != self.target_sha:
-                raise RuntimeError(
-                    f"RUNTIME_SHA({runtime_sha}) != target_sha({self.target_sha})，拒绝运行"
-                )
-        else:
-            self.exporter.log("preflight: 警告 RUNTIME_SHA 缺失，仅做 SHA 格式校验")
+        lock_path = Path(os.environ.get("PANJI_VERIFY_LOCK", "/tmp/panji-verify.lock"))
+        self._lock_file = lock_path.open("a+")
+        try:
+            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("another verification attempt is active") from exc
+        code, head, err = _run(["git", "rev-parse", "HEAD"], timeout=30)
+        if code != 0 or head.strip() != self.target_sha:
+            raise RuntimeError(f"remote repo SHA mismatch: {head.strip()} {err.strip()}")
+        code, dirty, _ = _run(["git", "status", "--porcelain"], timeout=30)
+        if code != 0 or dirty.strip():
+            raise RuntimeError("remote verification checkout is not clean")
         if not VERIFY_DB_RE.match(self.db_name):
             raise RuntimeError(f"preflight: 非法验证库名 {self.db_name}")
         code, _out, err = _run([*self.compose_base, "config"], timeout=60)
@@ -171,15 +186,18 @@ class VerifyAttempt:
     def create_verify_database(self) -> None:
         """创建验证库（DS-110：位于已有 PG 容器，不新建容器/Volume）。"""
         self.exporter.log(f"create_verify_database: {self.db_name}")
-        _current_database_assert(self.verify_db_url, self.db_name)  # 预校验连接目标
+        from cleanup_runner import _maintenance_url
+
+        maintenance_url = _maintenance_url(self.verify_db_url)
         code, _out, err = _run([
-            "psql", self.verify_db_url.replace("postgresql+asyncpg://", "postgresql://"),
-            "-c", f'CREATE DATABASE "{self.db_name}" WITH TEMPLATE template0 ENCODING "UTF8";',
+            "psql", maintenance_url, "-v", "ON_ERROR_STOP=1", "-c",
+            f'CREATE DATABASE "{self.db_name}" WITH TEMPLATE template0 ENCODING "UTF8";',
         ])
-        if code != 0 and "already exists" not in err:
+        if code != 0:
             raise RuntimeError(f"create_verify_database 失败: {err.strip()}")
         self.manifest["status"] = "db_created"
         self.exporter.record_resource("db", self.db_name)
+        _current_database_assert(self.verify_db_url, self.db_name)
         self.exporter.record_gate("create_database", True, detail=f"库 {self.db_name} 就绪")
         self.exporter.log("create_verify_database: 完成")
 
@@ -187,28 +205,34 @@ class VerifyAttempt:
         """精确 SHA Migration：绑定目标 SHA alembic + 验证库，断言 revision。"""
         self.exporter.log("migration_round_trip: 开始")
         _current_database_assert(self.verify_db_url, self.db_name)
-        # alembic 升到 head（Live Mount 的 alembic.ini 指向验证库）
-        code, out, err = _run(
-            ["alembic", "-c", "alembic.ini", "upgrade", "head"],
-            timeout=300,
-        )
-        if code != 0:
-            raise RuntimeError(f"migration upgrade head 失败: {err.strip()}")
-        # 断言当前 revision 包含目标 SHA 标记（alembic 在 Live Mount 中以 SHA 命名版本）
-        code, out, err = _run(
-            ["alembic", "-c", "alembic.ini", "current"],
-            timeout=60,
-        )
+        migration_env = {**os.environ, "DATABASE_URL": self.verify_db_url}
+        steps = (("upgrade", "head"), ("downgrade", "-1"), ("upgrade", "head"), ("upgrade", "head"))
+        revisions: list[str] = []
+        for operation, target in steps:
+            _current_database_assert(self.verify_db_url, self.db_name)
+            code, _out, err = _run(
+                ["alembic", "-c", "backend/alembic.ini", operation, target],
+                timeout=self.plan.timeouts["migration"], env=migration_env,
+            )
+            if code != 0:
+                raise RuntimeError(f"migration {operation} {target} failed: {err.strip()}")
+            code, out, err = _run(
+                ["alembic", "-c", "backend/alembic.ini", "current"], timeout=60, env=migration_env,
+            )
+            if code != 0 or not out.strip():
+                raise RuntimeError(f"migration revision assertion failed: {err.strip()}")
+            revisions.append(out.strip())
         self.manifest["status"] = "migration_ok"
         self.exporter.record_gate(
-            "migration", True, detail="alembic upgrade head 成功", extra={"current": out.strip()}
+            "migration", True, detail="upgrade/downgrade/upgrade round-trip succeeded",
+            extra={"revisions": revisions},
         )
         self.exporter.log("migration_round_trip: 完成")
 
     def start_verify_runtime(self) -> None:
         """起验证运行时（backend + redis），等待就绪。"""
         self.exporter.log("start_verify_runtime: 开始")
-        code, _out, err = _run([*self.compose_base, "up", "-d", "verify-redis", "verify-backend"], timeout=300)
+        code, _out, err = _run([*self.compose_base, "up", "-d", "verify-redis", "verify-backend"], timeout=self.plan.timeouts["runtime"])
         if code != 0:
             raise RuntimeError(f"start_verify_runtime 失败: {err.strip()}")
         self.exporter.record_resource("compose", f"project={self.compose_project}")
@@ -236,8 +260,8 @@ class VerifyAttempt:
             raise RuntimeError(
                 f"assert_identity: runtime_git_sha({runtime_sha}) != target_sha({self.target_sha})"
             )
-        if mode != "live":
-            raise RuntimeError(f"assert_identity: deployment_mode={mode} != 'live'")
+        if mode != "live" or self.manifest["runtime_mode"] != "verification":
+            raise RuntimeError("verification runtime identity or live mount identity is invalid")
         self.manifest["status"] = "identity_ok"
         self.exporter.record_gate("identity", True, detail=f"runtime_git_sha={runtime_sha} mode=live")
         self.exporter.log("assert_identity: 通过")
@@ -247,7 +271,7 @@ class VerifyAttempt:
         self.exporter.log("run_self_contained_pg_tests: 开始")
         code, _out, err = _run(
             [*self.compose_base, "run", "--rm", "verify-test"],
-            timeout=900,
+            timeout=self.plan.timeouts["tests"],
         )
         # 即使测试失败也导出报告
         self.exporter.manifest["pytest_report_src"] = str(self.evidence_dir / "pytest-report.xml")
@@ -266,7 +290,7 @@ class VerifyAttempt:
                 "python", "scripts/verify/seed_v21_verify_data.py",
                 "--verify-db-url", self.verify_db_url,
                 "--scenario", "all",
-            ], timeout=900)
+            ], timeout=self.plan.timeouts["seed"])
             if code != 0:
                 self.exporter.record_gate(
                     "seed_twice", False, detail=f"第{i}次 seed 失败: {err.strip()[:500]}"
@@ -283,7 +307,7 @@ class VerifyAttempt:
         code, _out, err = _run([
             "python", "scripts/verify/e2e_readiness_check.py",
             "--verify-db-url", self.verify_db_url,
-        ], timeout=600)
+        ], timeout=self.plan.timeouts["e2e"])
         if code != 0:
             self.exporter.record_gate("e2e", False, detail=err.strip()[:500])
             raise RuntimeError(f"synthetic e2e 失败 (exit={code})")
@@ -298,35 +322,41 @@ class VerifyAttempt:
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write(f"[WARN] export_evidence 失败: {exc}\n")
 
-    def cleanup_exact_attempt_resources(self) -> None:
+    def cleanup_exact_attempt_resources(self) -> bool:
         try:
-            cleanup_attempt(self.evidence_dir / "manifest.json")
-            self.exporter.log("cleanup_exact_attempt_resources: 完成")
+            summary = cleanup_attempt(
+                self.evidence_dir / "manifest.json", verify_db_url=self.verify_db_url
+            )
+            self.exporter.log(f"cleanup_exact_attempt_resources: blocked={summary['blocked_cleanup']}")
+            return not summary["blocked_cleanup"]
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write(f"[WARN] cleanup 失败: {exc}\n")
+            return False
 
-    def verify_cleanup(self) -> None:
+    def verify_cleanup(self) -> bool:
         """清理后校验：验证库已删、compose project 已下。失败记 blocked_cleanup。"""
         self.exporter.log("verify_cleanup: 开始")
         # 校验库已删
+        from cleanup_runner import _maintenance_url
         code, out, _ = _run([
-            "psql", self.verify_db_url.replace("postgresql+asyncpg://", "postgresql://"),
+            "psql", _maintenance_url(self.verify_db_url),
             "-tAc", f"SELECT 1 FROM pg_database WHERE datname='{self.db_name}';",
         ])
         db_gone = (code != 0) or (out.strip() == "0" or out.strip() == "")
         if not db_gone:
-            self.exporter.log("verify_cleanup: 警告 验证库仍存在（可能 blocked_cleanup）")
+            return False
         # 校验 compose project 已下
         code, out, _ = _run([*self.compose_base, "ps", "-q"], timeout=60)
         containers = [c for c in out.splitlines() if c.strip()]
         if containers:
-            self.exporter.log("verify_cleanup: 警告 compose project 仍有容器")
+            return False
         self.exporter.log("verify_cleanup: 完成")
+        return True
 
     # -- 编排 --------------------------------------------------------------
 
     def run(self) -> int:
-        result = "success"
+        exit_code = 0
         try:
             self.run_preflight()
             self.create_verify_database()
@@ -336,23 +366,36 @@ class VerifyAttempt:
             self.run_self_contained_pg_tests()
             self.run_synthetic_seed_twice()
             self.run_synthetic_e2e()
-            self.manifest["status"] = "cleanup_completed"
-        except BaseException as exc:
-            result = "failed"
+        except KeyboardInterrupt as exc:
+            exit_code = 60
             self.manifest["status"] = "failed"
             self.exporter.record_gate(
                 "attempt", False,
                 detail=f"{type(exc).__name__}: {exc}",
             )
             self.exporter.log(f"attempt 失败: {type(exc).__name__}: {exc}")
-            # finally 仍会执行清理
-            raise
+        except Exception as exc:  # noqa: BLE001 - evidence must capture every gate failure
+            exit_code = 50
+            self.manifest["status"] = "failed"
+            self.exporter.record_gate(
+                "attempt", False,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            self.exporter.log(f"attempt 失败: {type(exc).__name__}: {exc}")
         finally:
             self.export_evidence()
-            self.cleanup_exact_attempt_resources()
-            self.verify_cleanup()
-            self.exporter.log(f"attempt 结果={result}")
-        return 0 if result == "success" else 1
+            cleanup_ok = self.cleanup_exact_attempt_resources() and self.verify_cleanup()
+            if not cleanup_ok:
+                exit_code = 70
+                self.manifest["status"] = "blocked_cleanup"
+            elif exit_code == 0:
+                self.manifest["status"] = "cleanup_completed"
+            self.exporter.log(f"attempt exit_code={exit_code}")
+            self.export_evidence()
+            if self._lock_file is not None:
+                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+                self._lock_file.close()
+        return exit_code
 
 
 def main() -> int:
@@ -363,6 +406,7 @@ def main() -> int:
     ap.add_argument("--env-file", required=True)
     ap.add_argument("--compose-file", required=True)
     ap.add_argument("--evidence-root", default="/root/web_dev_verify/evidence")
+    ap.add_argument("--plan", default="scripts/verify/plans/full-closure.json")
     args = ap.parse_args()
 
     attempt = VerifyAttempt(
@@ -372,6 +416,7 @@ def main() -> int:
         env_file=args.env_file,
         compose_file=args.compose_file,
         evidence_root=args.evidence_root,
+        plan=load_plan(args.plan),
     )
     return attempt.run()
 

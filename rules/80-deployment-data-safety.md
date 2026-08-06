@@ -491,16 +491,27 @@ cleanup 必须输出 created/deleted/retained/failed 四份精确清单，并在
 
 ### DS-115 正式验证执行器与顺序
 
+- 唯一正式入口是 `scripts/ops/panji-verify`。入口只接受完整 40 位 SHA 和仓库登记的封闭验证计划；`panji-verify-run` 仅为兼容适配器，不得成为第二套合同。
+- `scripts/verify/verification_plan.py` 只解析固定 schema 和注册 profile；验证计划不得携带任意命令、插件路径、环境覆盖或 pytest 参数。
 - Migration 只能由正式 runner 使用 target SHA checkout 中的 `backend/alembic` 和 `backend/alembic.ini` 执行；禁止使用旧运行镜像内置 migration。标准 round-trip 为 upgrade head → schema/revision 断言 → downgrade previous → downgrade 断言 → upgrade head → 重复 upgrade 幂等检查，每一步前后断言 `current_database()`。
 - PG tests 只能由一次性 `verify-test` 服务运行。该服务必须包含 target SHA 的 app/tests/pytest 配置/migration/scripts 和固定依赖，设置 `PANJI_REMOTE_VERIFY_DB_TEST=1`、`APP_ENV=verification`，只连接本轮验证库，运行结束退出。
 - 标准顺序固定为：本地修改范围门禁 → commit/push → 冻结 SHA → 远程 clean checkout → 创建验证库 → Migration round-trip → 启动验证栈 → SHA/DB/runtime 断言 → 自包含 PG tests → synthetic Seed 两次及幂等断言 → Synthetic E2E → 导出证据 → DS-113 cleanup。
 - 基础 PG tests 必须先于 Seed；依赖 synthetic 场景的测试只能在 Seed 后以 Synthetic E2E 身份运行。
+- 同一服务器同一时刻只允许一个正式验证 attempt；全局非阻塞锁冲突必须直接失败，不排队占用资源。
+- evidence 不得保存数据库口令或完整连接串，日志单文件和 attempt 总量必须设硬上限；清理证据在 attempt 结束后保留，不能由 cleanup 自删。
 
 ### DS-116 失败、新 SHA 与禁止远程修补
 
 业务代码、Migration、测试、Seed 或验证工具任一失败时，必须停止后续 gate，导出证据并执行 DS-113 cleanup。修复只能回到本地完成，经过本地门禁、commit 和 push 形成新 target SHA；新 SHA 使用新的精确验证库并从 Migration round-trip 重新开始。
 
 禁止远程修改仓库文件、容器内改码、手工修改验证库 Schema、复制 patched script 后继续沿用旧 SHA、把旧 SHA 结果累计到新 SHA，或失败后继续执行后续 gate 再统一宣称通过。cleanup 失败时优先处理资源残留，不得创建新验证环境。
+
+### DS-117 受保护验证框架
+
+远程验证框架是治理合同的可执行部分，属于 `rules/PROTECTED_GOVERNANCE_FILES.json` 定义的
+受保护治理变更域。普通功能、Bug、部署和测试任务不得修改其入口、计划、编排、清理、证据、
+Compose 或合同测试。只有用户在当前任务明确授权治理调整时，才允许联动修改规则与这些代码；
+合同变化必须通过 `tools/check_governance_rules.py` 和对应治理测试防回退。
 
 ## 分层发布与增量检查点纪律
 

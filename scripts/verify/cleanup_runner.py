@@ -86,7 +86,16 @@ def _is_protected(name: str, kind: str) -> bool:
 
 
 def _verify_db_re() -> re.Pattern:
-    return re.compile(r"^bz_stock_verify_[0-9a-f]{7,40}$")
+    return re.compile(r"^bz_stock_verify_[0-9a-f]{40}$")
+
+
+def _maintenance_url(url: str) -> str:
+    """Return the same PostgreSQL DSN connected to the maintenance database."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    normalized = url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    parsed = urlsplit(normalized)
+    return urlunsplit((parsed.scheme, parsed.netloc, "/postgres", parsed.query, parsed.fragment))
 
 
 def _run(cmd: list[str], *, check: bool = False) -> tuple[int, str, str]:
@@ -120,9 +129,10 @@ def _safe_drop_database(db_name: str, *, verify_db_url: str | None = None) -> di
     if verify_db_url is None:
         result["error"] = "缺少 verify_db_url，拒绝盲删库"
         return result
-    # 通过 psql 连接目标库并 drop（DS-110：位于 panji-prod 已有 PostgreSQL 容器内）
+    # DROP 必须连接维护库，不能连接正在删除的目标库。
     code, _out, err = _run([
-        "psql", verify_db_url, "-c", f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE);',
+        "psql", _maintenance_url(verify_db_url), "-v", "ON_ERROR_STOP=1", "-c",
+        f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE);',
     ])
     if code != 0:
         result["error"] = f"drop database 失败: {err.strip()}"
@@ -131,14 +141,16 @@ def _safe_drop_database(db_name: str, *, verify_db_url: str | None = None) -> di
     return result
 
 
-def cleanup_attempt(manifest_path: str | Path) -> dict:
+def cleanup_attempt(
+    manifest_path: str | Path, *, verify_db_url: str | None = None
+) -> dict:
     """按 attempt manifest 精确清理。返回 cleanup 结果 dict（写入 cleanup.json）。
 
     步骤：
       1. 读取 manifest，校验 attempt_id / verify_database / compose_project 齐全；
-      2. 删除本次尝试创建的 compose 资源（docker compose -p <project> down -v --rmi local）；
+      2. 删除本次尝试创建的 compose 容器和 network（永不带 -v）；
       3. 精确 drop 验证库（bz_stock_verify_<sha>，双校验）；
-      4. 删除本次尝试的临时目录（evidence_dir）；
+      4. 保留受限 evidence，临时运行目录由框架单独精确删除；
       5. 任一关键步骤失败 → blocked_cleanup=True，记录失败项但不继续新建资源。
     """
     manifest_path = Path(manifest_path)
@@ -169,9 +181,8 @@ def cleanup_attempt(manifest_path: str | Path) -> dict:
     verify_database = manifest.get("verify_database")
     compose_project = manifest.get("compose_project")
     evidence_dir = manifest.get("evidence_dir")
-    verify_db_url = manifest.get("verify_db_url")
 
-    # 1) 删除 compose 项目资源（--rmi local 仅删本地构建镜像，不动基础镜像）
+    # 1) 删除 compose 项目资源。禁止 -v，验证栈不得删除任何共享 Volume。
     if compose_project:
         if _is_protected(compose_project, "container"):
             summary["blocked_cleanup"] = True
@@ -181,7 +192,7 @@ def cleanup_attempt(manifest_path: str | Path) -> dict:
             cmd = ["docker", "compose", "-p", compose_project]
             if compose_file:
                 cmd += ["--env-file", manifest.get("env_file", ""), "-f", compose_file]
-            cmd += ["down", "-v", "--rmi", "local", "--remove-orphans"]
+            cmd += ["down", "--remove-orphans"]
             code, _out, err = _run(cmd)
             if code == 0:
                 summary["removed_compose_project"] = True
@@ -195,26 +206,10 @@ def cleanup_attempt(manifest_path: str | Path) -> dict:
         if not db_result.get("dropped") and db_result.get("error"):
             summary["errors"].append(db_result["error"])
 
-    # 3) 删除本次尝试临时目录（evidence_dir 必须是本次 attempt 专属路径，禁止删除共享目录）
-    if evidence_dir:
-        ev_path = Path(evidence_dir)
-        # 安全闸门：evidence_dir 必须存在且不是受保护根
-        protected_roots = {"/root", "/", "/app", "/Users", "/home"}
-        if ev_path.exists() and str(ev_path.resolve()) not in protected_roots:
-            try:
-                import shutil
-
-                shutil.rmtree(ev_path, ignore_errors=True)
-                summary["removed_evidence_dir"] = True
-            except Exception as exc:  # noqa: BLE001
-                summary["errors"].append(f"删除 evidence_dir 失败: {exc}")
-        else:
-            summary["errors"].append(f"拒绝删除疑似受保护路径: {evidence_dir}")
-
     if summary["errors"] or summary["blocked_reasons"]:
         summary["blocked_cleanup"] = True
 
-    # 写回 cleanup.json 到 evidence_dir 的父目录（若 evidence_dir 已删，写到 manifest 同目录）
+    # Evidence is intentionally retained under a strict size budget for retrieval.
     out_dir = Path(evidence_dir) if evidence_dir else manifest_path.parent
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -227,11 +222,11 @@ def cleanup_attempt(manifest_path: str | Path) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", required=True, help="attempt manifest JSON 路径")
+    ap.add_argument("--verify-db-url", default=None)
     args = ap.parse_args()
-    summary = cleanup_attempt(args.manifest)
+    summary = cleanup_attempt(args.manifest, verify_db_url=args.verify_db_url)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
-    # blocked_cleanup 仍返回 0（清理动作已尽力执行），失败细节在 summary.errors
-    return 0
+    return 70 if summary["blocked_cleanup"] else 0
 
 
 if __name__ == "__main__":

@@ -150,6 +150,11 @@ Fair Value Gap 已完全排除。
 
 ## 远程验证证据禁止项（2026-08-06）
 
+- 禁止绕过 `scripts/ops/panji-verify` 拼装正式验证流程，或把兼容适配器发展成第二入口；
+- 禁止验证计划携带任意 shell、pytest 参数、插件路径或环境覆盖；禁止短 SHA、复用已有验证库、跨 SHA 累计证据或并发正式 attempt；
+- 禁止 cleanup 使用 `down -v`、`--rmi`、全局 prune、模糊资源名，或删除本次 attempt 之外的资源；
+- 禁止 evidence 保存数据库口令、完整连接串或无界日志；
+- 禁止未获当轮治理授权修改 `rules/PROTECTED_GOVERNANCE_FILES.json` 所列受保护验证框架；
 - 禁止在验证或稳定运行容器内临时安装 pytest/测试依赖，禁止 `docker cp`、`/tmp` 或临时挂载注入测试代码，禁止临时设置 `PYTHONPATH` 拼出测试环境；
 - 禁止使用其他 SHA 的 venv、app、tests、pytest 配置、migration 或 scripts 生成当前 SHA 的验证证据；
 - 禁止基础 PG 测试依赖 Seed、测试顺序、历史残留或 `bz_stock` 数据；

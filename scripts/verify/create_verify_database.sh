@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # create_verify_database.sh — 在 panji-prod 的现有 PostgreSQL 容器内创建远程验证库。
 #
-# [rules/80 DS-110] 唯一允许的临时数据库：bz_stock_verify_<7-40位SHA>。
+# [rules/80 DS-110] 唯一允许的临时数据库：bz_stock_verify_<40位SHA>。
 # 不新建 PostgreSQL 容器或 Volume；不触碰 bz_stock。
 #
 # 用法：scripts/verify/create_verify_database.sh <SHA>
-#   SHA 必须是待验收的 origin/dev 精确 commit（40 位 hex，或任意 7-40 位前缀）。
+#   SHA 必须是待验收的 origin/dev 完整 40 位 commit。
 #
 # fail-closed：
 #   - SHA 不符合 bz_stock_verify_<7-40位SHA> 命名 → 拒绝
@@ -25,8 +25,8 @@ SHA="$1"
 DB_NAME="bz_stock_verify_${SHA}"
 
 # 命名校验（DS-110）
-if ! echo "$DB_NAME" | grep -Eq '^bz_stock_verify_[0-9a-f]{7,40}$'; then
-  echo "create_verify_database: 非法库名 '$DB_NAME'（必须 bz_stock_verify_<7-40位SHA>）" >&2
+if ! echo "$DB_NAME" | grep -Eq '^bz_stock_verify_[0-9a-f]{40}$'; then
+  echo "create_verify_database: 非法库名 '$DB_NAME'（必须 bz_stock_verify_<40位SHA>）" >&2
   exit 3
 fi
 
