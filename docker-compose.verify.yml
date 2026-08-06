@@ -185,3 +185,45 @@ services:
       - verify-pg-network
       - panji-verify-internal
     command: python -m app.worker
+
+  # 一次性自包含 PG 测试服务（P0-1 verify-test）。
+  # [CHANGE-20260806-008] 复用 backend 镜像作为依赖底座（不 --build、不 pip install、
+  # 不复制测试到 /tmp）。只读挂载 tests / pyproject.toml / alembic / scripts/verify /
+  # RUNTIME_SHA，运行 `pytest -m postgres`。`--rm` 退出即删容器；`restart: "no"`
+  # 保证单次执行不自动重启。测试由 verify_attempt.py 在容器内显式调用，本服务仅作
+  # 承载；在部署脚本中以 `run --rm` 触发（见 scripts/deploy/panji-verify-deploy.sh）。
+  verify-test:
+    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
+    container_name: verify-test
+    logging: *default-logging
+    <<: *resource-app-light
+    volumes:
+      # 只读挂载验证代码与测试资产，禁止运行时写入容器（--rm 后丢弃）。
+      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/app:/app/app:ro
+      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic:/app/alembic:ro
+      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic.ini:/app/alembic.ini:ro
+      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/tests:/app/tests:ro
+      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/pyproject.toml:/app/pyproject.toml:ro
+      - ${VERIFY_RUNTIME_DIR:?VERIFY_RUNTIME_DIR is required}/RUNTIME_SHA:/app/RUNTIME_SHA:ro
+      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/scripts/verify:/app/scripts/verify:ro
+      - /etc/market-dev/config.production.py:/app/config.production.py:ro
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL (bz_stock_verify_<sha>) is required}
+      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      APP_ENV: verification
+      TZ: Asia/Shanghai
+      CONFIG_FILE: /app/config.production.py
+      PANJI_SCHEDULER_ENABLED: "false"
+      # [DS-112] PG 集成测试标记：仅远程验证库运行，禁止连接 bz_stock。
+      PANJI_REMOTE_VERIFY_DB_TEST: "1"
+    depends_on:
+      - verify-redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - verify-pg-network
+      - panji-verify-internal
+    # 默认命令：运行自包含 postgres 标记的 PG 测试；由 verify_attempt.py 覆盖为目标测试。
+    command: pytest -m postgres tests/test_pg_atomic_publication.py tests/test_pg_projection_lifecycle.py tests/test_pg_100_stock_call_counts.py tests/test_pg_seed_scenario_closures.py
+    restart: "no"

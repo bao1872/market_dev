@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import date
 
 import pytest
 from sqlalchemy import text
@@ -33,17 +34,30 @@ pytestmark = [
 
 
 async def _create_strategy_version(db, strategy_version_id: uuid.UUID) -> None:
-    """为已存在的 dsa_selector 建一个唯一 strategy_versions 行。"""
+    """[CHANGE-20260806-008] 自包含：先确保 dsa_selector 定义存在（幂等），
+    再建唯一 strategy_versions 行，消除对 Seed 预置 strategy_definitions 的依赖。"""
+    await db.execute(
+        text(
+            "INSERT INTO strategy_definitions (id, strategy_key, kind, display_name, environment) "
+            "VALUES (gen_random_uuid(), 'dsa_selector', 'selector', 'DSA Selector', 'production') "
+            "ON CONFLICT (strategy_key) DO NOTHING"
+        ),
+    )
+    await db.flush()
+    def_id = (
+        await db.execute(
+            text("SELECT id FROM strategy_definitions WHERE strategy_key='dsa_selector'")
+        )
+    ).scalar_one()
     ver = f"verify-{uuid.uuid4().hex[:8]}"
     await db.execute(
         text(
             "INSERT INTO strategy_versions "
             "(id, strategy_definition_id, version, status, manifest, build_hash, released_at) "
-            "SELECT :id, id, :ver, 'released', '{}', 'build-1', now() "
-            "FROM strategy_definitions WHERE strategy_key='dsa_selector' "
+            "VALUES (:id, :did, :ver, 'released', '{}', 'build-1', now()) "
             "ON CONFLICT (id) DO NOTHING"
         ),
-        {"id": str(strategy_version_id), "ver": ver},
+        {"id": str(strategy_version_id), "did": str(def_id), "ver": ver},
     )
 
 
@@ -127,7 +141,7 @@ async def test_pg_projection_lifecycle(db_session) -> None:
     await _create_snapshots(db_session, snapshot_run_id, instrument_ids)
     await db_session.commit()
 
-    repo = CoreArtifactRepository(session=db_session)
+    repo = CoreArtifactRepository(db_session, batch_size=batch_size)
     progress_seen: list[int] = []
 
     async def heartbeat(processed: int, *_a, **_k) -> None:
@@ -136,7 +150,8 @@ async def test_pg_projection_lifecycle(db_session) -> None:
     await repo.project_dsa_batch(
         source_core_run_id=snapshot_run_id,
         persist_fn=persist_precomputed_dsa_results,
-        batch_size=batch_size,
+        trade_date=date(2026, 8, 6),
+        strategy_version_id=version_id,
         dsa_run_id=dsa_run_id,
         heartbeat=heartbeat,
     )
@@ -164,7 +179,8 @@ async def test_pg_projection_lifecycle(db_session) -> None:
         await repo.project_dsa_batch(
             source_core_run_id=snapshot_run_id,
             persist_fn=persist_precomputed_dsa_results,
-            batch_size=batch_size,
+            trade_date=date(2026, 8, 6),
+            strategy_version_id=version_id,
             dsa_run_id=dsa_run_id,
             heartbeat=heartbeat,
         )

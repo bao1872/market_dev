@@ -68,6 +68,49 @@ async def _current_pointer_state(db, *, trade_date) -> dict:
     return {"pointers": cur}
 
 
+# [CHANGE-20260806-008] 自包含前置：本文件不依赖 Seed，直接在事务内建
+# 5 instruments + 1 snapshot run + 5 StockFeatureSnapshot（source_run_id 一致），
+# 满足 validate_quality_gate 对 StockFeatureSnapshot 真实行数的查核（actual>=eligible）。
+async def _seed_self_contained(db, *, trade_date, snapshot_run_id) -> list[uuid.UUID]:
+    """建 5 instruments + snapshot run + 5 StockFeatureSnapshot，返回 instrument ids。"""
+    inst_ids: list[uuid.UUID] = []
+    for i in range(5):
+        inst_id = uuid.uuid4()
+        inst_ids.append(inst_id)
+        await db.execute(
+            text(
+                "INSERT INTO instruments (id, symbol, name, market, status, listing_date) "
+                "VALUES (:id, :sym, :nm, 'cn', 'active', '2010-01-04')"
+            ),
+            {"id": str(inst_id), "sym": f"{600000 + i:06d}", "nm": f"测试股{i}"},
+        )
+
+    await db.execute(
+        text(
+            "INSERT INTO stock_feature_snapshot_runs "
+            "(id, trade_date, run_type, status, expected_count, snapshot_count, failed_count, "
+            "skipped_count, failure_rate, started_at) "
+            "VALUES (:rid, :td, 'after_close', 'running', 5, 0, 0, 0, 0.0, now())"
+        ),
+        {"rid": str(snapshot_run_id), "td": trade_date},
+    )
+
+    for inst_id in inst_ids:
+        await db.execute(
+            text(
+                "INSERT INTO stock_feature_snapshots "
+                "(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, "
+                "schema_version, source_run_id, structural_payload, temporal_payload, "
+                "summary_payload) "
+                "VALUES (:iid, :td, '1d', '15m', 'qfq', 1, :rid, "
+                "'{\"ok\": true}'::jsonb, '{\"ok\": true}'::jsonb, '{\"ok\": true}'::jsonb)"
+            ),
+            {"iid": str(inst_id), "td": trade_date, "rid": str(snapshot_run_id)},
+        )
+    await db.flush()
+    return inst_ids
+
+
 async def _run_publish(db, *, trade_date, snapshot_run_id, worker_id, lease_epoch,
                        audit_fault: bool = False, pub_fault: bool = False) -> dict:
     """在给定故障模式下执行原子发布。audit_fault/publication_fault 用 savepoint 注入。"""
@@ -150,6 +193,7 @@ async def test_pg_atomic_publication_success(db_session) -> None:
     await db_session.flush()
 
     snapshot_run_id = uuid.uuid4()
+    await _seed_self_contained(db_session, trade_date=trade_date, snapshot_run_id=snapshot_run_id)
     result = await _run_publish(
         db_session, trade_date=trade_date, snapshot_run_id=snapshot_run_id,
         worker_id="w1", lease_epoch=1,
@@ -174,6 +218,7 @@ async def test_pg_atomic_publication_audit_fault_preserves_old_pointer(db_sessio
     await db_session.flush()
 
     snapshot_run_id = uuid.uuid4()
+    await _seed_self_contained(db_session, trade_date=trade_date, snapshot_run_id=snapshot_run_id)
     result = await _run_publish(
         db_session, trade_date=trade_date, snapshot_run_id=snapshot_run_id,
         worker_id="w1", lease_epoch=1, audit_fault=True,
@@ -199,6 +244,7 @@ async def test_pg_atomic_publication_pub_fault_preserves_old_pointer(db_session)
     await db_session.flush()
 
     snapshot_run_id = uuid.uuid4()
+    await _seed_self_contained(db_session, trade_date=trade_date, snapshot_run_id=snapshot_run_id)
     result = await _run_publish(
         db_session, trade_date=trade_date, snapshot_run_id=snapshot_run_id,
         worker_id="w1", lease_epoch=1, pub_fault=True,

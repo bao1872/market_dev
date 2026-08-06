@@ -144,8 +144,12 @@ export VERIFY_CODE_DIR VERIFY_RUNTIME_DIR VERIFY_PG_NETWORK="$PG_NETWORK" VERIFY
 
 COMPOSE=(docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 
-# ------------------------------------------------- 8. 静态 compose 校验
-"${COMPOSE[@]}" config >/dev/null || die "compose 配置静态验证失败" 9
+# ------------------------------------------------- 8a. verify-test 服务静态校验
+# [CHANGE-20260806-008] verify-test 服务复用 VERIFY_BACKEND_IMAGE（已在上文探测），
+# 无需额外变量；此处仅确认 compose config 对 verify-test 通过（镜像/挂载均存在）。
+if ! "${COMPOSE[@]}" config >/dev/null 2>&1; then
+  die "compose 配置静态验证失败（含 verify-test 服务）" 9
+fi
 
 # ------------------------------------------------- 9. 起栈（Live Mount，无 --build）
 "${COMPOSE[@]}" up -d

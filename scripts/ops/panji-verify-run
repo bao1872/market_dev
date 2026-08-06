@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# panji-verify-run — 本地控制脚本（CHANGE-20260806-008, Phase 1）
+#
+# 调用链：
+#   本地：scripts/ops/panji-verify-run <FULL_SHA> [env_file]
+#     → panji-prod-preflight
+#     → panji-prod-ssh 'cd /root/web_dev_verify && python scripts/verify/verify_attempt.py \
+#          --target-sha <SHA> --verify-db-url ... --compose-project panji-verify-<sha> \
+#          --env-file <env_file> --compose-file docker-compose.verify.yml'
+#
+# 本地脚本只负责：
+#   1. 解析 FULL_SHA（git rev-parse）并校验长度（7-40 位 hex）；
+#   2. 运行 preflight（DS-80 SSH SSOT）；
+#   3. 通过 panji-prod-ssh 在远程验证目录以目标 SHA 运行 verify_attempt.py；
+#   4. 远程脚本内部完成 attempt 编排 + finally 合同（evidence + cleanup + verify_cleanup）。
+#
+# 远程 verify_attempt.py 退出码：0=成功闭环；非0=失败。证据在远程 evidence_dir，
+# 由 verify_attempt.py 在 finally 中导出；清理失败会标记 blocked_cleanup。
+#
+# 用法：scripts/ops/panji-verify-run <FULL_SHA> [env_file]
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: $0 <FULL_SHA> [env_file]" >&2
+  exit 2
+fi
+
+SHA="$1"
+ENV_FILE="${2:-market.verify.env}"
+
+# FULL_SHA 格式校验（7-40 位 hex）
+if ! echo "$SHA" | grep -Eq '^[0-9a-f]{7,40}$'; then
+  echo "panji-verify-run: 非法 FULL_SHA '$SHA'（需 7-40 位 hex）" >&2
+  exit 2
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 部署前必跑 preflight（DS-80 远程开发运行服务器 SSH SSOT）
+"$SCRIPT_DIR/panji-prod-preflight" || {
+  echo "panji-verify-run: preflight 失败，中止" >&2
+  exit 4
+}
+
+# 远程执行验证尝试（verify_attempt.py 内部含 finally 合同）
+# [CHANGE-20260806-008] 直接调用 verify_attempt.py；compose-project 由 SHA 派生精确隔离。
+"$SCRIPT_DIR/panji-prod-ssh" "cd /root/web_dev_verify && python scripts/verify/verify_attempt.py \
+  --target-sha '$SHA' \
+  --verify-db-url \"\${VERIFY_DB_URL:-postgresql+asyncpg://bz:***@trading-postgres:5432/bz_stock_verify_${SHA}}\" \
+  --compose-project \"panji-verify-${SHA}\" \
+  --env-file '$ENV_FILE' \
+  --compose-file docker-compose.verify.yml"
+
+# 退出码透传远程 verify_attempt.py 的结果
+exit $?

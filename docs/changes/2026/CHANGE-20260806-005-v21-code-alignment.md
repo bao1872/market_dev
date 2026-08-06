@@ -62,3 +62,11 @@ Phase 1–5 的主要代码合同收口已在 CP4A Pass1 落地（详见 `docs/c
 2. Phase 6 本地全量门禁全过，提交并推送 dev，冻结 `target_code_sha`。
 3. Phase 7 远程隔离验证（新验证库、Migration 闭环、test_pg_*.py、Seed 幂等、full synthetic E2E）全部通过。
 4. 用户验收后，本 Change 状态方可转为已确认闭环；在此之前保持 `verified_code_pending_acceptance`，不得自动修改 Maps/Runbooks。
+
+## 8. 被 CHANGE-20260806-008 取代说明
+
+本 Change 的「验证基础设施」部分（§2 中 `scripts/verify/**`、`scripts/deploy/**`、`docker-compose.verify.yml`、部分 `test_pg_*.py`）已由 **CHANGE-20260806-008**（V2.1 远程验证执行器与 synthetic 闭环）实现并取代。008 状态为 `implemented_local_pending_remote_verification`。
+
+- 005 保持 `verified_code_pending_acceptance` 不变；其 Phase 1–5 业务代码合同收口仍有效。
+- 008 完成 Phase 10 远程隔离验证且 005 业务验收通过后，再由用户授权统一关闭两者。
+- 冻结 target_code_sha 以 008 提交生成的 SHA 为准（005 原 §6 冻结 SHA `2299e7a…` 已被 008 工作流取代，不作为候选）。
