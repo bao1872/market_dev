@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, Index, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Date, DateTime, Float, Index, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -114,6 +114,24 @@ class FactorPublication(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    # [CHANGE-20260805-CP4A-CP3 / P0-07] supersede lineage + publish fencing
+    # （Migration 087 落地；未迁移库上这些列不存在，但代码按原子发布合同准备）
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True,
+        comment="被哪个 publication 取代（supersede lineage，NULL=当前有效）",
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="取代发生时间",
+    )
+    publish_worker_id: Mapped[str | None] = mapped_column(
+        Text(), nullable=True,
+        comment="发布 worker 身份（fencing）",
+    )
+    publish_lease_epoch: Mapped[int | None] = mapped_column(
+        BigInteger(), nullable=True,
+        comment="发布 lease epoch（fencing，防并发覆盖）",
     )
 
     def __repr__(self) -> str:
