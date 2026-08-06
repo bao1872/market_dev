@@ -180,16 +180,15 @@ Live Mount 部署通过只读 bind mount 将运行时代码挂载到容器，实
 - 不可逆 migration 必须在变更说明中明确标注并提供 downgrade 步骤；
 - migration 不自动回滚。
 
-## 部署来源与阶段边界
+## 部署来源与三平面边界
 
-盘迹当前只关心**开发阶段**。有效治理只描述开发闭环（本地开发 → 修改范围测试 → 精确 commit → push origin/dev → 服务器 checkout 精确 SHA → Live Mount 同步运行代码 → 重启受影响服务 → health/version/业务 smoke → 停止）。
-
-禁止定义或保留其他阶段的工作流程，禁止新增 `development` / `runtime` / `formal_release` 等阶段状态机，禁止在有效治理文档中描述未来正式发布方式。
+当前运行模型只有三个平面：本地开发、远程隔离验证、远程稳定运行。三者不是发布状态机，不得互相冒充证据或复用授权。
 
 - `dev` 是 CI 与开发部署的唯一来源；
-- push `dev` 本身不触发 CI 或部署；CI 仅可手工触发且不作为部署前置条件；
-- 当前唯一部署模式为 **Live Mount 开发部署**（见 §Live Mount 部署规则 与 `docs/runbooks/development-deployment.md`）；
-- Release Gate / GHCR / Registry / immutable image release / formal release candidate / 多阶段 delivery phase / 未来正式发布流程 **不在当前治理范围内**，有效文档不得描述或保留它们。
+- push `dev` 本身不触发 CI、远程验证或稳定运行部署；CI 仅可手工触发；
+- 远程验证使用隔离验证栈，稳定运行部署使用 **Live Mount**，两者入口、数据库、状态和授权分离；
+- 触及数据库、Worker/编排、发布指针、权限写入或跨服务链路的变更，必须先以同一 SHA 通过相应远程验证，再申请稳定运行部署；
+- Release Gate / GHCR / Registry / immutable image release 当前未实现，禁止表述为可用路径。
 
 ## 远程开发运行服务器 SSH SSOT（CHANGE-20260730-015）
 

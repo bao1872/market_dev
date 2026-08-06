@@ -43,7 +43,7 @@
 ## 4. Migration 与数据操作边界
 
 - Migration 只能在远程服务器的受控部署流程中执行；
-- 禁止把本地连接共享数据库后执行 `alembic upgrade` 称为部署；
+- 禁止从本地连接业务数据库执行 `alembic upgrade`；
 - 本地不得连接共享业务数据库运行 pytest；获得明确授权的只读业务调试也不构成测试或部署完成；
 - stock_core、chip、Review、bootstrap、publish、pointer、withdrawal 等业务数据动作不是代码部署，必须单独授权并在远程运行环境执行。
 

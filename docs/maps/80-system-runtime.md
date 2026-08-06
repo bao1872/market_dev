@@ -181,7 +181,6 @@ SHA 谱系：`2267d43`（D–J 原始开发基线）→ `5df542d`（D–J 初次
 - `browser_verified = false`
 - `production_fully_ready = false`
 
-限制：本地仅允许代码/测试/Migration/文档 + git 操作；本地禁止 Ruff/Mypy/pytest/build/
-Migration 执行/数据库调试/部署/浏览器测试。远程允许安全静态/纯单元/前端检查；禁止创建
-PostgreSQL、连接 bz_stock 跑 PG 测试、Alembic upgrade、正式部署、真实全市场任务、生产
-浏览器验收。
+上述状态仅是对应 V2.1 任务在该 SHA 的历史验证证据，不定义当前环境权限。当前权限与运行边界以 `AGENTS.md`、`rules/40`、`rules/80` 和 `rules/81` 为准。
+
+当前实现缺口：本地 SSH Tunnel 与 development 配置仍可指向 `bz_stock`，尚未提供经核验的专用只读数据库凭据，因此该路径不得作为默认本地预览或测试入口；需要真实业务数据调试时必须单独授权并先证明连接只读。

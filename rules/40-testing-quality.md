@@ -200,31 +200,27 @@ Gov     python tools/check_governance_rules.py
 
 **文档一致性要求**：`rules/`、`docs/maps/`、`docs/prd/`、`docs/runbooks/`、`.github/workflows/` 的活跃内容中，不得出现描述上述本地/CI 禁止路径为**当前可用方案**的表述；但**不得再出现**"所有临时数据库永久禁止"的绝对表述（远程验证库为允许例外，见 DS-110）。历史 `docs/changes/` 记录与本条中明确标注为"禁止"的语句不受此限。该约束由 `tools/check_governance_rules.py` 自动断言。
 
-## 2026-08-02 收口：测试合同（开发与部署治理）
+## 测试、验证与部署证据合同
 
-> 来源：用户本轮治理指令（开发阶段收口）
-
-### TQ-90 测试合同（开发闭环内）
-
-盘迹当前只关心**开发阶段**。测试与部署的边界如下，禁止定义或保留其他阶段的工作流程：
+### TQ-90 分层验证合同
 
 1. **默认只运行修改范围单元测试和静态检查**：本地验证聚焦本次改动相关的测试 + Ruff/Mypy/TSC/Lint/Arch/Allow/Gov。
 2. **不默认运行全仓测试**：不把全仓测试作为普通开发的前置要求。
-3. **CI 不是普通开发部署的前置条件**：`ci.yml` 不得因 push dev 自动阻止服务器开发部署；CI 失败不阻断开发者按 Live Mount 合同部署 dev SHA。
-4. **CI 可保留为手工诊断工具**：CI 用于按需诊断（如分类测试、全量回归、集成测试），但不进入默认开发闭环，不作为部署门禁。
+3. **CI 是手工诊断证据，不是自动部署门禁**：push `dev` 不自动触发 CI 或部署；不得把“CI 未运行”单独当成部署失败，也不得忽略已经取得的 CI 失败证据。
+4. **远程验证是独立证据层**：涉及 Migration、ORM/SQL、真实 PG 语义、Worker/编排、发布指针、权限写入或跨服务业务链路的变更，稳定运行部署前必须由同一 SHA 在远程验证库完成相应 PG Integration/Synthetic E2E。纯文档、纯样式或经合同测试证明不触及上述边界的修改不强制运行 PG 验证。
 5. **本地测试失败时禁止部署**：见 TQ-82。
 6. **本地无法运行测试时如实报告**：见 TQ-82，不得用 CI 或服务器测试掩盖。
 
-### TQ-91 禁止的无关流程（当前不定义）
+### TQ-91 当前未采用的交付机制
 
-以下流程当前与盘迹开发阶段无关，**有效治理文档中不得描述、保留或改名为 deferred 后继续保留**：
+以下机制当前未实现，禁止在代码、文档或报告中冒充当前可用路径：
 
 - Release Gate（`.github/workflows/release.yml` 的 `Release Gate` job）；
 - GHCR / Registry / 镜像仓库推送；
 - Release Manifest / immutable image release / formal release candidate；
 - 服务器只 pull 不 build；
-- Fast CI 作为部署强制门禁；
-- 多阶段 delivery phase / 未来正式发布流程。
+- 自动 Fast CI 部署门禁；
+- 未落地的多阶段 delivery 状态机。
 
 > 上述工作流文件已删除，禁止恢复。任何当前部署行为以
 > `rules/80-deployment-data-safety.md`、`docs/maps/80-system-runtime.md` 和
@@ -237,13 +233,13 @@ Gov     python tools/check_governance_rules.py
 | 类别 | marker | 含义 | 运行位置 |
 |---|---|---|---|
 | PG 集成 | `postgres` | 需要真实 PostgreSQL | 仅远程验证库（`PANJI_REMOTE_VERIFY_DB_TEST=1`） |
-| 外部数据 | `external_data` | 依赖外部数据源 | CI（失败不阻断开发部署） |
+| 外部数据 | `external_data` | 依赖外部数据源 | 手工 CI 或受控远程验证 |
 | 纯单元 | 无 | 不连库、不联网 | 本地 `PURE_UNIT_TEST=1` + CI |
 
 约束：
 
 - 三类计数可对账：`postgres + 纯单元 = 总数`，`external_data` 与前两类正交。
-- `external_data` 失败属外部依赖问题，不阻断开发部署；连续多日失败需人工核查数据源。
+- `external_data` 失败不自动等同于代码失败；但当修改涉及该数据源、Adapter、行情合同或依赖其结果的业务链路时，失败必须阻断对应稳定运行部署。与修改范围无关的外部波动可以记录证据后排除。
 - 禁止把 `external_data` 当作"测试跑不过就贴上去"的免死金牌；断言逻辑缺陷必须修复。
 
 ### TQ-93 新增测试必须显式标注 marker

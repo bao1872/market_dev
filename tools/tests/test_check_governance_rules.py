@@ -49,6 +49,7 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
     ("mutation", "expected"),
     [
         ("role_file", "non-canonical rule file"),
+        ("no_governance_auth", "missing explicit governance-change authorization gate"),
         ("future_state", "future/staged governance state"),
         ("auto_ci", "automatic trigger"),
         ("old_deploy", "removed path restored"),
@@ -140,6 +141,15 @@ def test_governance_regressions_are_rejected(
         path.write_text(text, encoding="utf-8")
     elif mutation == "role_file":
         (governance_repo / "rules/60-trae-work.md").write_text("# role\n", encoding="utf-8")
+    elif mutation == "no_governance_auth":
+        path = governance_repo / "AGENTS.md"
+        path.write_text(
+            read_text(path).replace(
+                "只有用户在当前任务中明确要求调整治理体系",
+                "执行主体可以自行调整治理体系",
+            ),
+            encoding="utf-8",
+        )
     elif mutation == "future_state":
         path = governance_repo / "rules/00-core-governance.md"
         path.write_text(read_text(path) + "\n> 状态：PLANNED\n", encoding="utf-8")

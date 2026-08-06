@@ -16,20 +16,18 @@
 
 - Python 3.11+ 虚拟环境 `backend/.venv` 已创建，依赖已安装。
 - Node.js 20+ 和前端依赖 `frontend/node_modules` 已安装。
-- `~/.ssh/config` 中已配置 Host `panji-prod`（HostName 必须为 `43.136.118.82`）。
-- 建隧道前可运行 `ssh -G panji-prod` 校验解析出的 `hostname` 精确等于 `43.136.118.82`；不符合时禁止启动隧道。
-- 不得使用 `55-server`（解析到 `120.234.137.109`，不是盘迹远程开发运行服务器）。
-- `backend/.env` 已按 `backend/.env.example` 配置：
-  - `APP_ENV=development`
-  - `DATABASE_URL=postgresql+psycopg://***@127.0.0.1:15432/bz_stock`（共享开发业务数据库）
-  - `REDIS_URL=redis://127.0.0.1:16379/15`（本地隔离 DB，避免进入远程远程开发业务队列）
+- `~/.ssh/config` 中已配置 Host `panji-prod`，具体身份由 `scripts/ops/panji-prod-preflight` 校验；不得使用旧别名或原始 IP。
+- 纯单元和前端 fixture 预览不需要 SSH Tunnel。
+- 只有获得明确只读业务调试授权后，才配置 SSH Tunnel、`DATABASE_URL` 和隔离 Redis DB；连接建立后必须先证明数据库会话只读。
 
 > 注意：不要把真实密码写入仓库跟踪文件。`backend/.env` 已被 `.gitignore` 排除。
 > 禁止创建 `backend/.env.test` 或任何指向独立测试库的本地配置。
 
 ## 启动流程
 
-### 1. 启动 SSH 隧道
+### 1. 可选：启动只读调试隧道
+
+纯单元测试和 fixture 预览跳过本步骤。只有当前任务明确授权读取真实业务数据并确认只读凭据时执行：
 
 ```bash
 make tunnel
@@ -219,29 +217,14 @@ REDIS_URL 未设置
 
 ### 无法连接 SSH Host
 
-确认 `~/.ssh/config` 中存在 `Host panji-prod` 且 `HostName` 为 `43.136.118.82`：
-
-```text
-Host panji-prod
-    HostName 43.136.118.82
-    User root
-    Port 22
-    IdentityFile ~/.ssh/id_rsa
-```
-
-校验方式：
-
-```bash
-ssh -G panji-prod | grep hostname
-# 必须输出: hostname 43.136.118.82
-```
-
-不要设置 `StrictHostKeyChecking=no`，保持默认 host key 校验。禁止使用 `55-server`。
+远程身份和网络值不得从本 Runbook 或聊天记忆复制。执行
+`scripts/ops/panji-prod-preflight`，以 `docs/maps/80-system-runtime.md` 记录的身份和 preflight
+结果为准。不要设置 `StrictHostKeyChecking=no`，也不得使用旧别名或原始 IP。
 
 ## 安全边界
 
 - 本地开发不启动 Docker 或 Docker Compose 盘迹服务。
-- **本地固定连接共享开发业务数据库 `bz_stock`**；禁止连接任何独立测试库或创建新的独立/临时测试库。
+- **本地默认不连接 `bz_stock`**；明确授权的真实数据调试必须使用只读凭据，禁止写入、修复、回填或重算。
 - 不执行 Alembic migration、CREATE TABLE、TRUNCATE 或其他破坏性 SQL。
 - **禁止本地启动 Scheduler、远程常驻 Worker、盘后编排或全市场任务**；本地只启动 Backend、Frontend、Capture 和 SSH Tunnel。
 - 禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道。

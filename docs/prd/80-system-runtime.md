@@ -5,7 +5,7 @@
 对应 Map：`../maps/80-system-runtime.md`  
 需求所有权：本地原生开发、远程容器运行、Git、数据库、Redis、Scheduler、服务和部署边界
 
-> **V2.1 验证基础设施**：远程临时验证数据库 `bz_stock_verify_<sha>` 与独立验证栈（verify-backend/frontend/workers）的合同见 [`rules/80-deployment-data-safety.md`](../../rules/80-deployment-data-safety.md) DS-110 / DS-111 / DS-112，以及 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §11。验证栈仍属远程部署（`rules/81`），本地只发起控制命令与 SSH Tunnel。
+> **远程验证基础设施**：远程临时验证数据库 `bz_stock_verify_<sha>` 与独立验证栈（verify-backend/frontend/workers）的合同见 [`rules/80-deployment-data-safety.md`](../../rules/80-deployment-data-safety.md) DS-110 / DS-111 / DS-112，以及 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §11。远程验证不等同于稳定运行部署，本地只发起控制命令与 SSH Tunnel。
 
 ## 1. 运行位置与承载方式
 
@@ -107,13 +107,13 @@ GitHub Actions 不包含部署动作。详细合同见 `rules/80-deployment-data
 
 ## 3. PostgreSQL
 
-### SR-20 共享数据库
+### SR-20 数据库平面隔离
 
-本地和远程共享同一套 PostgreSQL 核心数据。
+本地测试不连接 PostgreSQL；远程验证只连接按 SHA 创建的 `bz_stock_verify_<sha>`；远程稳定运行只连接业务库 `bz_stock`。三个平面不得通过默认配置互相回退。
 
-### SR-21 本地可读写
+### SR-21 本地业务调试
 
-本地不是只读环境，可以读取、写入、修复、回填和重算，但必须保护长期核心数据。
+本地页面或 API 调试优先使用 fixture/mock。确需观察真实业务数据时，必须获得当前任务明确授权并使用只读凭据；本地不得写入、修复、回填或重算 `bz_stock`。任何业务写入只允许通过远程正式 service/CLI，在独立授权下执行。
 
 ### SR-22 Schema 兼容
 
@@ -167,15 +167,15 @@ production 现有行为不得被意外改变。
 
 远程稳定位置通过容器运行自动 Scheduler，并支持手动补跑和调试。
 
-### SR-43 本地启动默认不写入共享库
+### SR-43 本地禁止业务库写入
 
-本地 development 环境默认不得执行共享数据库维护写入，包括但不限于：
+本地 development 环境不得执行业务数据库写入，包括但不限于：
 
 - 僵尸任务恢复；
 - 策略种子；
 - 日历刷新。
 
-production 和其他环境保持原有行为。
+需要执行上述动作时，必须使用远程正式 service/CLI 并取得独立授权。
 
 ## 6. 服务一致性
 
@@ -234,13 +234,13 @@ production 和其他环境保持原有行为。
 - `dev` 推送不自动部署。
 - Map 能指向真实本地启动入口、远程 Compose、配置、CI 和版本核验入口。
 
-## 9. 开发部署 SSOT（dev SHA + Live Mount）
+## 9. 稳定运行部署 SSOT（dev SHA + Live Mount）
 
 ### SR-70 部署环境定位
 
 **当前 `panji-prod` 腾讯云物理机是盘迹唯一的远程运行环境，同时承担日常开发部署与业务运行。**
 
-盘迹当前只关心**开发阶段**。"部署"仅指：把 `dev` 上某个精确 SHA 的代码同步到服务器并重启受影响服务。不定义、不保留其他阶段的部署流程。
+稳定运行部署只指：把 `dev` 上已验证的精确 SHA 同步到稳定运行栈并重启受影响服务。远程验证、业务数据操作和稳定运行部署是三类独立动作，授权与证据不得互相替代。
 
 `dev` 是部署的唯一来源。禁止从 `main` / `experiments` / 任意本地未推送状态部署。
 
@@ -274,7 +274,7 @@ production 和其他环境保持原有行为。
 ### SR-73 部署与 CI 的关系
 
 1. CI（`.github/workflows/ci.yml`）是**人工诊断工具**，不是部署前置条件；
-2. push `dev` 不阻塞服务器开发部署；CI 未跑完或未全绿不阻止 `panji-test-deploy`；
-3. 部署的前置条件是**本地修改范围测试通过**；本地测试失败禁止部署；
+2. CI 未运行本身不阻止部署，但已取得的 CI 失败必须处理或明确证明与目标 SHA/修改范围无关；
+3. 部署前必须通过本地修改范围测试；触及数据库、Worker/编排、发布指针、权限写入或跨服务链路时，还必须由同一 SHA 通过对应远程验证；
 4. 部署完成后，运行时版本端点返回的 `runtime_git_sha` 必须与目标 dev SHA 一致；
 5. 不得只在聊天输出声称部署成功，必须给出上述 2 项 SHA 核验证据。
