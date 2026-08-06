@@ -53,6 +53,9 @@ PG gate 文案同步移除尚未执行的 closure 声明。
 第十一次 attempt 已写入 instruments、calendar、daily 和 60m，随后暴露旧 15m slot 算法会生成
 `09:60` 等非法时间。现按两个交易时段生成 09:45..11:30 与 13:15..15:00 共 16 个收盘时间，
 明确保证午间断档和末根 15:00。
+第十二次 attempt 已生成全部 synthetic 多周期行情和板块成员，随后在 DSA manifest 写入处暴露
+SQLAlchemy bind 与 PostgreSQL 紧邻 cast 不兼容。` :manifest::jsonb` 已改为可移植解析的
+`CAST(:manifest AS jsonb)`，并确认脚本内无其他同类 bind cast。
 
 ## 数据、验证与风险
 

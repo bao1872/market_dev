@@ -335,7 +335,8 @@ async def _gen_synthetic_released_dsa_config(verify_conn) -> uuid.UUID:
         text(
             "INSERT INTO strategy_versions "
             "(id, strategy_definition_id, version, status, manifest, build_hash, released_at) "
-            "VALUES (:id, :did, '1.0.0', 'released', :manifest::jsonb, 'synth-1', now()) "
+            "VALUES (:id, :did, '1.0.0', 'released', CAST(:manifest AS jsonb), "
+            "'synth-1', now()) "
             "ON CONFLICT (id) DO NOTHING"
         ),
         {"id": str(ver_id), "did": str(def_id), "manifest": manifest},
