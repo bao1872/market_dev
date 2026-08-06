@@ -2,10 +2,10 @@
 
 - 日期：2026-08-06
 - 诊断候选 SHA：`030e19e4f972d9ff965802d25fa31b233afd1af7`（已作废，仅诊断性证据）
-- 当前候选 SHA：**CP4A Amendment 后的新 SHA**（本 amendment 提交生成）
-- 验证库：`bz_stock_verify_<new_sha>`（隔离，位于 panji-prod 已有 PostgreSQL 容器，DS-110）
+- 当前候选 SHA：`899f31508c58fcaf329b1e752a6a6dbcb1766b4c`（CP4A Amendment 提交，origin/dev）
+- 验证库：`bz_stock_verify_899f31508c58fcaf329b1e752a6a6dbcb1766b4c`（待 Pass 2 创建，隔离，DS-110）
 - 约束：每命令前后断言 `current_database()` 为验证库，禁止访问生产库 `bz_stock`；访问 bz_stock 须获得明确授权并证明只读
-- 结论：**CP4A Amendment 代码收口已完成（Pass 1），待新 SHA 远程隔离验证（Pass 2）通过后再关闭 CP4A。**
+- 结论：**CP4A Amendment 代码收口已完成（Pass 1，commit 899f315 已 push origin/dev），待 Pass 2 远程隔离验证通过后再关闭 CP4A。**
 
 ## 状态说明（本次 CP4A Amendment）
 
