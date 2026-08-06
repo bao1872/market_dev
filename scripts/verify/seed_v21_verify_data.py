@@ -165,7 +165,7 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
             "name": f"验证股{i:02d}",
             "market": "cn",
             "status": "active",
-            "listing_date": "2010-01-04",
+            "listing_date": date(2010, 1, 4),
         })
     await verify_conn.execute(
         text(
@@ -178,7 +178,7 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
 
     # trading_calendar（market='A', status=OPEN）
     cal_rows = [
-        {"trade_date": d.isoformat(), "is_trading_day": True, "market": "A",
+        {"trade_date": d, "is_trading_day": True, "market": "A",
          "source": "MANUAL_OVERRIDE", "status": "OPEN"}
         for d in _TRADING_DAYS
     ]
@@ -199,7 +199,7 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
         for j, d in enumerate(_TRADING_DAYS):
             o = _price(base, i, j)
             daily_rows.append({
-                "instrument_id": str(inst_id), "trade_date": d.isoformat(),
+                "instrument_id": str(inst_id), "trade_date": d,
                 "open": o, "high": o + Decimal("0.2"), "low": o - Decimal("0.2"),
                 "close": o, "volume": Decimal(str(random.randint(10000, 90000))),
                 "adj": "qfq",
@@ -208,7 +208,7 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
             for k, hhmm in enumerate([("10:30"), ("11:30"), ("14:00"), ("15:00")]):
                 t = datetime(d.year, d.month, d.day, int(hhmm[:2]), int(hhmm[3:]))  # noqa: DTZ001
                 b = _bar(t, o)
-                min60_rows.append({"instrument_id": str(inst_id), "trade_time": t.isoformat(),
+                min60_rows.append({"instrument_id": str(inst_id), "trade_time": t,
                                    **{k2: b[k2] for k2 in ("open", "high", "low", "close", "volume")}})
     await verify_conn.execute(
         text(
@@ -244,7 +244,7 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                 t = datetime(d.year, d.month, d.day, hour, minute)  # noqa: DTZ001
                 o = _price(base, i, _TRADING_DAYS.index(d) * 16 + slot)
                 b = _bar(t, o)
-                min15_rows.append({"instrument_id": str(inst_id), "trade_time": t.isoformat(),
+                min15_rows.append({"instrument_id": str(inst_id), "trade_time": t,
                                    **{k2: b[k2] for k2 in ("open", "high", "low", "close", "volume")}})
     await verify_conn.execute(
         text(

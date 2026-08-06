@@ -44,6 +44,9 @@ Seed、每个测试自包含”的执行合同。
 而非目标 SHA live mount 导入 `app`，因 wheel 缺合同 JSON 而失败。Seed 现通过
 `python -m scripts.verify.seed_v21_verify_data` 从 `/app` 启动，确保脚本和应用代码都解析为目标 SHA；
 PG gate 文案同步移除尚未执行的 closure 声明。
+第九次 attempt 确认目标 SHA 导入路径生效，Seed 进入 synthetic instruments 写入后暴露 typed bind
+错误：脚本向 PostgreSQL `date/timestamp` 参数传入 ISO 字符串。现对 instrument listing date、交易日历、
+日线日期及 60m/15m 时间统一传递 Python `date/datetime`，与 asyncpg 的类型合同一致。
 
 ## 数据、验证与风险
 
