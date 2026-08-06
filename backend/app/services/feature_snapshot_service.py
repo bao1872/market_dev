@@ -1269,6 +1269,9 @@ async def compute_review_core_with_run_items(
     algorithm_version: str = "v1",
     input_hash: str | None = None,
     released_config_resolver: Any | None = None,
+    # [CHANGE-20260806-CP4A.2 / Step1] 依赖注入：测试可显式传 fake session factory /
+    # market_data provider / runtime，生产默认用正式实现。使完整 scheduled 链可真实执行。
+    session_factory: Any | None = None,
 ) -> dict[str, Any]:
     """[CHANGE-20260729-008] 单股×阶段检查点版 review core 计算。
 
@@ -1302,6 +1305,8 @@ async def compute_review_core_with_run_items(
         统计 dict（含 snapshot_count/failed_count/skipped_count/coverage 等）
     """
     from app.db import AsyncSessionLocal
+    # [CHANGE-20260806-CP4A.2 / Step1] 依赖注入的 session factory（测试传 fake；生产默认正式）
+    _sf = session_factory if session_factory is not None else AsyncSessionLocal
     from app.services.snapshot_run_item_service import (
         claim_items,
         create_run_items,
@@ -1333,7 +1338,7 @@ async def compute_review_core_with_run_items(
             resolver=released_config_resolver,
         )
     else:
-        async with AsyncSessionLocal() as cfg_db:
+        async with _sf() as cfg_db:
             run_core_context = await resolve_core_run_context(
                 trade_date=trade_date,
                 snapshot_run_id=snapshot_run_id,
@@ -1343,7 +1348,7 @@ async def compute_review_core_with_run_items(
             )
 
     # 1. 创建 run items（幂等）
-    async with AsyncSessionLocal() as db:
+    async with _sf() as db:
         created = await create_run_items(
             db, snapshot_run_id, instrument_ids,
             input_hash=input_hash,
@@ -1367,7 +1372,7 @@ async def compute_review_core_with_run_items(
 
     while True:
         # 2.1 claim 一批 items（独立 session）
-        async with AsyncSessionLocal() as db:
+        async with _sf() as db:
             items = await claim_items(
                 db, snapshot_run_id,
                 worker_instance_id=worker_id,
@@ -1418,7 +1423,7 @@ async def compute_review_core_with_run_items(
         for item in items:
             try:
                 # 计算在事务外（长事务避免锁竞争）
-                async with AsyncSessionLocal() as compute_db:
+                async with _sf() as compute_db:
                     # [AC-16] 从批读结果取 bars + 诊断 hash；失败/缺失则降级（bars=None
                     # 触发 compute_review_core_for_trade_date 内部逐股 _fetch_bars_from_db）
                     primary_result = primary_batch_results.get(item.instrument_id)
@@ -1529,7 +1534,7 @@ async def compute_review_core_with_run_items(
                 logger.warning("progress_callback 失败: %s", exc)
 
     # 3. 从 DB 统计最终 coverage
-    async with AsyncSessionLocal() as db:
+    async with _sf() as db:
         progress = await get_run_progress(db, snapshot_run_id)
 
     coverage = progress.get("coverage", 0.0)
