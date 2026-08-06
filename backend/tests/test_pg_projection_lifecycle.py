@@ -61,6 +61,33 @@ async def _create_strategy_version(db, strategy_version_id: uuid.UUID) -> None:
     )
 
 
+async def _create_projection_prerequisites(
+    db, snapshot_run_id: uuid.UUID, instrument_ids: list[uuid.UUID],
+) -> None:
+    """Create every instrument and snapshot-run FK owned by this test."""
+    for index, instrument_id in enumerate(instrument_ids):
+        await db.execute(
+            text(
+                "INSERT INTO instruments (id, symbol, name, market, status, listing_date) "
+                "VALUES (:id, :symbol, :name, 'cn', 'active', '2010-01-04')"
+            ),
+            {
+                "id": str(instrument_id),
+                "symbol": f"{990000 + index:06d}",
+                "name": f"Projection Verify {index}",
+            },
+        )
+    await db.execute(
+        text(
+            "INSERT INTO stock_feature_snapshot_runs "
+            "(id, trade_date, run_type, status, expected_count, snapshot_count, failed_count, "
+            "skipped_count, failure_rate, started_at) "
+            "VALUES (:id, '2026-08-06', 'after_close', 'running', :count, 0, 0, 0, 0.0, now())"
+        ),
+        {"id": str(snapshot_run_id), "count": len(instrument_ids)},
+    )
+
+
 async def _create_strategy_run(db, dsa_run_id: uuid.UUID, version_id: uuid.UUID,
                                instrument_ids: list[uuid.UUID]) -> None:
     await db.execute(
@@ -136,6 +163,7 @@ async def test_pg_projection_lifecycle(db_session) -> None:
     instrument_ids = [uuid.uuid4() for _ in range(4)]
     batch_size = 2
 
+    await _create_projection_prerequisites(db_session, snapshot_run_id, instrument_ids)
     await _create_strategy_version(db_session, version_id)
     await _create_strategy_run(db_session, dsa_run_id, version_id, instrument_ids)
     await _create_snapshots(db_session, snapshot_run_id, instrument_ids)

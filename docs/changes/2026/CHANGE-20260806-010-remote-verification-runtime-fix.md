@@ -33,6 +33,10 @@ attempt 证据，避免服务启动失败只留下空 `curl` 错误。
 第五次 attempt 已通过身份门禁并进入 PG tests，但 Compose/pytest 的失败正文位于 stdout，旧执行器
 只把 stderr 写入 gate，导致证据仅显示依赖容器状态。现统一合并、限长并脱敏 stdout/stderr，覆盖
 PG tests、Seed 和 E2E 失败路径，同时移除从未生成却反复尝试复制的伪 JUnit 报告引用。
+第六次 attempt 的有效证据显示：projection 生命周期测试漏建 `instruments` 和 snapshot run 外键前置；
+基础 PG runner 又提前执行了明确依赖 Seed 的 closure 测试。现补齐 projection 测试自有的完整前置
+数据，并将 closure 测试仅保留在两次 synthetic Seed 之后的 E2E gate，恢复“基础 PG 测试不依赖
+Seed、每个测试自包含”的执行合同。
 
 ## 数据、验证与风险
 

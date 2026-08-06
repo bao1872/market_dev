@@ -220,5 +220,5 @@ services:
       - verify-pg-network
       - panji-verify-internal
     # 默认命令：运行自包含 postgres 标记的 PG 测试；由 verify_attempt.py 覆盖为目标测试。
-    command: pytest -m postgres tests/test_pg_atomic_publication.py tests/test_pg_projection_lifecycle.py tests/test_pg_100_stock_call_counts.py tests/test_pg_seed_scenario_closures.py
+    command: pytest -m postgres tests/test_pg_atomic_publication.py tests/test_pg_projection_lifecycle.py tests/test_pg_100_stock_call_counts.py
     restart: "no"
