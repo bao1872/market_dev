@@ -50,6 +50,9 @@ PG gate 文案同步移除尚未执行的 closure 声明。
 第十次 attempt 继续暴露 Seed 使用旧行情 schema：`bars_daily.adj` 已不存在，主键也不包含复权类型。
 现按当前 Bar ORM 将日线、60m、15m 统一写入 `amount` 与 `adj_factor`，冲突键使用各表真实复合主键；
 量额由同一 synthetic close/volume 同量纲生成，保留筹码共识所需的 15m 量额事实。
+第十一次 attempt 已写入 instruments、calendar、daily 和 60m，随后暴露旧 15m slot 算法会生成
+`09:60` 等非法时间。现按两个交易时段生成 09:45..11:30 与 13:15..15:00 共 16 个收盘时间，
+明确保证午间断档和末根 15:00。
 
 ## 数据、验证与风险
 

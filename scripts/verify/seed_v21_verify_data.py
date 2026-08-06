@@ -247,11 +247,12 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
             if d == PARTIAL_15M_DATE and (i / N_INST) >= PARTIAL_15M_FRACTION:
                 continue  # 70% 标的在 07-30 缺 15m → chip 自然 partial
             base = 10.0 + (i % 50)
-            # 16 根：9:30..11:30（8 根）+ 13:00..15:00（8 根），末根 15:00
+            # 16 根收盘时间：09:45..11:30 + 13:15..15:00，末根 15:00。
             for slot in range(16):
-                hour = 9 if slot < 8 else 13
-                minute = (slot % 8) * 15 + (30 if slot < 8 else 0)
-                t = datetime(d.year, d.month, d.day, hour, minute)  # noqa: DTZ001
+                session_start = datetime(  # noqa: DTZ001
+                    d.year, d.month, d.day, 9 if slot < 8 else 13, 30 if slot < 8 else 0,
+                )
+                t = session_start + timedelta(minutes=15 * ((slot % 8) + 1))
                 o = _price(base, i, _TRADING_DAYS.index(d) * 16 + slot)
                 b = _bar(t, o)
                 min15_rows.append({"instrument_id": str(inst_id), "trade_time": t,
