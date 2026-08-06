@@ -102,7 +102,9 @@ grep -qE '^[[:space:]]*APP_ENV=verification[[:space:]]*$' "$ENV_FILE" \
 
 # ------------------------------------------------- 4. 验证库必须已存在
 # [CHANGE-20260806-CP4A-Amendment] 用 VERIFY_PG_USER（默认 bz），不再硬编码 -U postgres
-docker exec -i "$PG_CONTAINER" psql -U "$VERIFY_PG_USER" -tAc \
+# [CHANGE-20260806-005 Phase 7] 连接 pg_database 必须显式 -d postgres：否则 psql 默认连到与
+#   用户名同名的库（如 bz），该库不存在时 SELECT 1 FROM pg_database 报错，误判"验证库不存在"。
+docker exec -i "$PG_CONTAINER" psql -U "$VERIFY_PG_USER" -d postgres -tAc \
   "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" 2>/dev/null | grep -q '^1$' \
   || die "验证库 $DB_NAME 不存在（应先由 create_verify_database.sh 创建）" 6
 
