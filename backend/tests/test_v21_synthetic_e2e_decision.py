@@ -20,7 +20,7 @@ PRD 定义的 synthetic E2E 是完整业务链：
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 
 import pytest
 
@@ -33,9 +33,9 @@ from app.services.core_run_context import (
 from app.services.product_readiness_service import (
     CLOSURE_DEGRADED_READY,
     CLOSURE_FULLY_READY,
-    ProductReadinessState,
     READINESS_DEGRADED,
     READINESS_READY,
+    ProductReadinessState,
     evaluate_closure,
 )
 
@@ -93,15 +93,15 @@ def test_board_facts_no_backdate() -> None:
     snap = _make_board_snapshot(
         raw_rows=5500, industry_count=210, concept_count=320, membership_count=62000
     )
+    from app.services.board_sync_service import StagingValidationError
     future = date.today().replace(year=date.today().year + 1)
-    with pytest.raises(Exception):
+    with pytest.raises(StagingValidationError):
         validate_snapshot(snap, effective_date=future)
 
 
 def test_board_snapshot_depth_and_concept_gates() -> None:
     """不变式 2b：行业深度 >3 或单股概念 >100 必须被门禁拒绝。"""
     from app.services.wencai_board_provider import (
-        WencaiConceptLimitError,
         WencaiIndustryDepthError,
         _split_industry_path,
     )
@@ -111,7 +111,6 @@ def test_board_snapshot_depth_and_concept_gates() -> None:
         _split_industry_path("A-B-C-D")
 
     # 概念截断已被改为抛错
-    from app.services.wencai_board_provider import WencaiBoardProviderError
 
     class _BadSnap:
         raw_rows: int = 1
@@ -124,9 +123,10 @@ def test_board_snapshot_depth_and_concept_gates() -> None:
         unresolved_symbols: list[str] = []
         instrument_resolver = None
 
+    from app.services.board_sync_service import StagingValidationError
     snap = _BadSnap()
     # validate_snapshot 会统计 max_concepts_per_stock=101 > 100 → 门禁失败
-    with pytest.raises(Exception):
+    with pytest.raises(StagingValidationError):
         validate_snapshot(snap)  # type: ignore[arg-type]
 
 
