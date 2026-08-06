@@ -37,6 +37,9 @@ PG tests、Seed 和 E2E 失败路径，同时移除从未生成却反复尝试�
 基础 PG runner 又提前执行了明确依赖 Seed 的 closure 测试。现补齐 projection 测试自有的完整前置
 数据，并将 closure 测试仅保留在两次 synthetic Seed 之后的 E2E gate，恢复“基础 PG 测试不依赖
 Seed、每个测试自包含”的执行合同。
+第七次 attempt 将基础 PG failures 收敛为 projection 单项：测试快照仍手写已废弃的 `coreArtifact`
+包装，生产 codec 因缺少 canonical 顶层 `dsaProjection` 而跳过全部记录。测试现直接复用
+`encode_dsa_projection_to_summary` 生成合同数据，消除测试 payload 与生产 codec 的双重定义。
 
 ## 数据、验证与风险
 

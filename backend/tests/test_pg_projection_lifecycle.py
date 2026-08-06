@@ -21,6 +21,8 @@ from datetime import date
 import pytest
 from sqlalchemy import text
 
+from app.services.core_artifact_codec import encode_dsa_projection_to_summary
+
 _PURE_UNIT_TEST = os.environ.get("PURE_UNIT_TEST", "0") == "1"
 
 # [CHANGE-20260806-005 / Phase 5] 显式声明 postgres marker（不得只靠 conftest 扫描推断）。
@@ -115,28 +117,22 @@ async def _create_strategy_run(db, dsa_run_id: uuid.UUID, version_id: uuid.UUID,
 
 async def _create_snapshots(db, snapshot_run_id: uuid.UUID,
                             instrument_ids: list[uuid.UUID]) -> None:
-    """为每股创建带 coreArtifact summary 的真实 snapshot（供 decode DSA projection）。"""
+    """为每股创建带 canonical DSA summary 的真实 snapshot。"""
     for iid in instrument_ids:
-        summary = {
-            "coreArtifact": {
-                "schemaVersion": 1,
-                "firstPyramidCore": {"nBars": 250},
-                "structuralPayload": {},
-                "dsaProjectionPayload": {
-                    "dsa_vwap": 10.5, "regime_value": 1, "dsa_dir_bars": 5,
-                },
-                "dsaVisualContract": {"dsa_vwap": 10.5},
-                "stateEventCandidates": [],
-                "availability": {"structure": "ready"},
-                "parameterHash": "ph-1",
-                "sourceCoreRunId": str(snapshot_run_id),
-                "algorithmVersions": {"dsa": "dsa-v1"},
-                "inputHash": "in-1",
-                "barsHash": "bh-1",
-                "adjFactorHash": "ah-1",
-                "diagnostics": {},
-            }
-        }
+        summary = {"dsaProjection": encode_dsa_projection_to_summary(
+            schema_version=1,
+            dsa_projection_payload={
+                "dsa_vwap": 10.5, "regime_value": 1, "dsa_dir_bars": 5,
+            },
+            dsa_visual_contract={"dsa_vwap": 10.5},
+            availability={"trend": "ready"},
+            parameter_hash="ph-1",
+            source_core_run_id=str(snapshot_run_id),
+            algorithm_versions={"dsa": "dsa-v1"},
+            input_hash="in-1",
+            bars_hash="bh-1",
+            adj_factor_hash="ah-1",
+        )}
         await db.execute(
             text(
                 "INSERT INTO stock_feature_snapshots "
