@@ -40,6 +40,7 @@ def governance_repo(tmp_path: Path) -> Path:
         "scripts/verify/plans/full-closure.json",
         "docker-compose.prod.yml",
         "docker-compose.verify.yml",
+        "backend/Dockerfile",
         "backend/tests/test_verify_infra_safety.py",
         "tools/check_governance_rules.py",
         "tools/tests/test_check_governance_rules.py",

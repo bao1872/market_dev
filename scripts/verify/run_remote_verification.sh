@@ -18,9 +18,13 @@ ENV_FILE="${ATTEMPT_DIR}/market.verify.env"
 cleanup_sensitive() {
   rm -f "$ENV_FILE" "${ATTEMPT_DIR}/runtime/RUNTIME_SHA"
   rmdir "${ATTEMPT_DIR}/runtime" "$ATTEMPT_DIR" 2>/dev/null || true
+  docker image rm "panji-verify-test:${SHA}" >/dev/null 2>&1 || true
 }
 trap cleanup_sensitive EXIT INT TERM
 
+DOCKER_BUILDKIT=1 docker build --target verification \
+  --build-arg "GIT_SHA=${SHA}" \
+  -t "panji-verify-test:${SHA}" backend
 python scripts/verify/prepare_verify_environment.py \
   --target-sha "$SHA" --output "$ENV_FILE" >/dev/null
 python scripts/verify/verify_attempt.py \

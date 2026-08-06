@@ -168,6 +168,7 @@ def test_prepare_environment_keeps_secret_in_mode_600(
     content = output.read_text()
     assert f"bz_stock_verify_{FULL_SHA}" in content
     assert "MIGRATION_DATABASE_URL=postgresql+psycopg://" in content
+    assert f"VERIFY_TEST_IMAGE=panji-verify-test:{FULL_SHA}" in content
     assert "POSTGRES_PASSWORD" not in content
 
 
@@ -180,6 +181,17 @@ def test_verify_test_receives_sync_migration_url() -> None:
     compose = (_VERIFY_DIR.parents[1] / "docker-compose.verify.yml").read_text()
     verify_test = compose.split("  verify-test:", 1)[1]
     assert "MIGRATION_DATABASE_URL:" in verify_test
+    assert "image: ${VERIFY_TEST_IMAGE:" in verify_test
+
+
+def test_verification_image_installs_test_dependencies_at_build_time() -> None:
+    dockerfile = (_VERIFY_DIR.parents[1] / "backend" / "Dockerfile").read_text()
+    assert "FROM runtime AS verification" in dockerfile
+    assert dockerfile.rstrip().endswith("FROM runtime AS production")
+    assert 'pip install ".[dev]"' in dockerfile
+    runner = (_VERIFY_DIR / "run_remote_verification.sh").read_text()
+    assert "--target verification" in runner
+    assert 'docker image rm "panji-verify-test:${SHA}"' in runner
 
 
 def test_cleanup_source_never_uses_volume_delete() -> None:

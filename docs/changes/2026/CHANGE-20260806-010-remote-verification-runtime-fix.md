@@ -23,6 +23,9 @@ Migration、PG、Seed 和 closure E2E 都由一次性 `verify-test` 运行。治
 异步 `DATABASE_URL` 与同步 `MIGRATION_DATABASE_URL`，Alembic 明确优先后者；该失败证据不计入新 SHA。
 第二次 attempt 发现该变量误配到 backend 而未注入 `verify-test`；cleanup 同样完整归零。现已修正
 Compose 服务作用域，并将治理检查升级为 `verify-test.environment` 定点断言。
+第三次 attempt 已通过 Migration round-trip、运行时与 SHA 身份 gate，但稳定运行镜像不含 pytest，
+PG runner 无法启动；cleanup 再次完整归零。现新增 Dockerfile `verification` target，在构建期安装
+锁定 `.[dev]` 依赖，使用目标 SHA 专属 tag，并由 runner trap 精确删除。
 
 ## 数据、验证与风险
 

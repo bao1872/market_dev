@@ -188,7 +188,7 @@ services:
   # 保证单次执行不自动重启。测试由 verify_attempt.py 在容器内显式调用，本服务仅作
   # 承载；在部署脚本中以 `run --rm` 触发（见 scripts/deploy/panji-verify-deploy.sh）。
   verify-test:
-    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
+    image: ${VERIFY_TEST_IMAGE:?VERIFY_TEST_IMAGE is required}
     logging: *default-logging
     <<: *resource-app-light
     volumes:

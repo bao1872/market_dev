@@ -298,13 +298,21 @@ def check(root: Path) -> list[str]:
             errors.append(f"verification environment builder missing contract signal: {signal}")
     for signal in (
         "verify-test:", "127.0.0.1", "PANJI_REMOTE_VERIFY_DB_TEST",
-        "MIGRATION_DATABASE_URL",
+        "MIGRATION_DATABASE_URL", "VERIFY_TEST_IMAGE",
     ):
         if signal not in verify_compose_text:
             errors.append(f"verification compose missing contract signal: {signal}")
     verify_test_section = verify_compose_text.split("  verify-test:", 1)
     if len(verify_test_section) != 2 or "MIGRATION_DATABASE_URL:" not in verify_test_section[1]:
         errors.append("verification compose verify-test missing MIGRATION_DATABASE_URL")
+    if len(verify_test_section) != 2 or "image: ${VERIFY_TEST_IMAGE:" not in verify_test_section[1]:
+        errors.append("verification compose verify-test missing dedicated test image")
+    backend_dockerfile = read(root / "backend/Dockerfile")
+    for signal in (
+        "FROM runtime AS verification", "FROM runtime AS production", 'pip install ".[dev]"',
+    ):
+        if signal not in backend_dockerfile:
+            errors.append(f"verification Docker target missing contract signal: {signal}")
     for token in ("down -v", '"down", "-v"', "--rmi", "docker cp", "pip install"):
         if token in verify_cleanup_code or token in verify_runner_code or token in verify_entry_code:
             errors.append(f"forbidden verification implementation: {token}")

@@ -35,9 +35,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # 复制应用源码（代码变化只影响本层及之后）
 COPY app ./app
 
+# ===== Stage 1b: verification builder - 固定测试依赖，仅供正式 verify-test =====
+FROM builder AS verification-builder
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install ".[dev]"
+
 # ===== Stage 2: runtime - 精简运行时镜像 =====
 # 基础镜像 digest 固定（CHANGE-20260718-003）
-FROM python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3
+FROM python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3 AS runtime
 
 # 安装 Node.js 运行时（pywencai 的 get_token() 需要 node 执行 hexin-v.bundle.js 计算反爬 token）
 # 必须在版本 ARG 之前（CHANGE-20260718-003）：ARG 值变化会使后续所有层缓存失效，
@@ -80,3 +85,10 @@ EXPOSE 8000
 
 # 启动 uvicorn ASGI 服务
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# ===== Stage 3: verification - runtime 内容 + 锁定 dev/test 依赖 =====
+FROM runtime AS verification
+COPY --from=verification-builder /opt/venv /opt/venv
+
+# 默认构建仍保持精简运行镜像；只有显式 --target verification 才包含测试依赖。
+FROM runtime AS production

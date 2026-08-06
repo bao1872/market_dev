@@ -76,6 +76,8 @@ trap 删除；数据库 URL 不进入 SSH 命令、进程参数、manifest 或 G
 Migration、PG、Seed 与 Synthetic E2E 通过一次性 `verify-test` 执行，不依赖宿主机 Python/PG 工具。
 验证环境分别生成 asyncpg `DATABASE_URL` 与 psycopg `MIGRATION_DATABASE_URL`；Alembic 优先读取
 后者，应用与 PG 测试继续使用前者。
+`verify-test` 使用 `backend/Dockerfile` 的 `verification` target：继承运行镜像内容，但在构建阶段加入
+锁定的 `.[dev]` 测试依赖，tag 为 `panji-verify-test:<完整SHA>`，attempt 结束后精确删除。
 
 实现边界：
 

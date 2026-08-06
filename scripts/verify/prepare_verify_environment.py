@@ -72,6 +72,7 @@ def prepare(target_sha: str, output: Path) -> Path:
         "VERIFY_PG_NETWORK": networks[0],
         "VERIFY_BACKEND_IMAGE": backend["Config"]["Image"],
         "VERIFY_FRONTEND_IMAGE": frontend["Config"]["Image"],
+        "VERIFY_TEST_IMAGE": f"panji-verify-test:{target_sha}",
         "VERIFY_BACKEND_HOST_PORT": "18000",
         "VERIFY_FRONTEND_HOST_PORT": "18080",
     }

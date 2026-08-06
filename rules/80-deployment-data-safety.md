@@ -497,6 +497,7 @@ cleanup 必须输出 created/deleted/retained/failed 四份精确清单，并在
 - Migration 只能由正式 runner 使用 target SHA checkout 中的 `backend/alembic` 和 `backend/alembic.ini` 执行；禁止使用旧运行镜像内置 migration。标准 round-trip 为 upgrade head → schema/revision 断言 → downgrade previous → downgrade 断言 → upgrade head → 重复 upgrade 幂等检查，每一步前后断言 `current_database()`。
 - 建删验证库必须通过 `docker exec trading-postgres` 的维护库连接；Migration、PG、Seed 和 Synthetic E2E 必须通过一次性 `verify-test` 容器运行，禁止依赖宿主机安装 `psql`、Alembic、pytest 或应用依赖。
 - 验证环境必须分离异步应用 `DATABASE_URL` 与同步 Alembic `MIGRATION_DATABASE_URL`；`backend/alembic/env.py` 明确优先使用后者，禁止把 asyncpg URL 交给同步 Migration engine。
+- `verify-test` 必须使用目标 SHA 从 `backend/Dockerfile` 的 `verification` target 构建的专用镜像，测试依赖仅在构建期按 `.[dev]` 安装；禁止复用缺少 pytest 的稳定运行镜像或在容器启动后安装。attempt 结束后只删除本次精确 SHA tag。
 - PG tests 只能由一次性 `verify-test` 服务运行。该服务必须包含 target SHA 的 app/tests/pytest 配置/migration/scripts 和固定依赖，设置 `PANJI_REMOTE_VERIFY_DB_TEST=1`、`APP_ENV=verification`，只连接本轮验证库，运行结束退出。
 - 标准顺序固定为：本地修改范围门禁 → commit/push → 冻结 SHA → 远程 clean checkout → 创建验证库 → Migration round-trip → 启动验证栈 → SHA/DB/runtime 断言 → 自包含 PG tests → synthetic Seed 两次及幂等断言 → Synthetic E2E → 导出证据 → DS-113 cleanup。
 - 基础 PG tests 必须先于 Seed；依赖 synthetic 场景的测试只能在 Seed 后以 Synthetic E2E 身份运行。
