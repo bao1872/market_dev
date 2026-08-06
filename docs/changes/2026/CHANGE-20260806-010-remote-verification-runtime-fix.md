@@ -40,6 +40,10 @@ Seed、每个测试自包含”的执行合同。
 第七次 attempt 将基础 PG failures 收敛为 projection 单项：测试快照仍手写已废弃的 `coreArtifact`
 包装，生产 codec 因缺少 canonical 顶层 `dsaProjection` 而跳过全部记录。测试现直接复用
 `encode_dsa_projection_to_summary` 生成合同数据，消除测试 payload 与生产 codec 的双重定义。
+第八次 attempt 的基础 PG 门禁已全部通过。Seed 使用绝对脚本路径启动时，Python 却从镜像 wheel
+而非目标 SHA live mount 导入 `app`，因 wheel 缺合同 JSON 而失败。Seed 现通过
+`python -m scripts.verify.seed_v21_verify_data` 从 `/app` 启动，确保脚本和应用代码都解析为目标 SHA；
+PG gate 文案同步移除尚未执行的 closure 声明。
 
 ## 数据、验证与风险
 

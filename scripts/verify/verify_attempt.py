@@ -306,7 +306,7 @@ class VerifyAttempt:
             self.exporter.record_gate("pg_tests", False, detail=diagnostic[-2000:])
             raise RuntimeError(f"自包含 PG 测试失败 (exit={code})")
         self.manifest["status"] = "pg_tests_ok"
-        self.exporter.record_gate("pg_tests", True, detail="atomic/projection/100-stock/closure 全过")
+        self.exporter.record_gate("pg_tests", True, detail="atomic/projection/100-stock 全过")
         self.exporter.log("run_self_contained_pg_tests: 通过")
 
     def run_synthetic_seed_twice(self) -> None:
@@ -315,7 +315,7 @@ class VerifyAttempt:
         for i in range(1, 3):
             code, out, err = _run(
                 [*self.compose_base, "run", "--rm", "verify-test", "python",
-                 "/app/scripts/verify/seed_v21_verify_data.py", "--scenario", "all"],
+                 "-m", "scripts.verify.seed_v21_verify_data", "--scenario", "all"],
                 timeout=self.plan.timeouts["seed"],
             )
             if code != 0:
