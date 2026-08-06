@@ -1,16 +1,16 @@
 # 本地开发环境启动与停止
 
-本 Runbook 描述如何在本地以原生进程启动盘迹 Backend 和 Frontend，并通过 SSH 隧道安全连接远程共享 PostgreSQL / Redis。
+本 Runbook 描述如何在本地以原生进程启动盘迹 Backend 和 Frontend。本地测试不连接 PostgreSQL；SSH 隧道只用于获得明确授权的只读业务调试，不是测试路径。
 
 ## 核心数据架构规则（2026-07-28 起）
 
-- **本地固定连接正式数据源**：PostgreSQL=`bz_stock`，Redis 使用 `backend/.env` 中的正式运行配置（本地隔离 DB）。
+- **本地默认不连接业务数据源**：测试使用 pure-unit/mock；页面预览优先使用 fixture。
 - **永久禁止本地 / 远程开发运行环境创建或复用任何独立/临时测试库**；独立测试库已于 2026-07-28 DROP，不得重建。
 - **本地与服务器隔离边界是进程，不是数据复制**：本地只启动 Backend、Frontend、Capture 和 SSH Tunnel；Scheduler、远程常驻 Worker、盘后编排和全市场任务必须为 0。
 - **本地写入均为真实业务写入**：禁止创建测试用户、测试邀请码、测试权限、测试任务、测试快照或测试通知渠道；禁止清库、批量更新、Migration、删除正式数据。
 - **8752028@qq.com 为受保护 Owner 账户**：禁止修改其密码、邮箱、状态、角色、权限、订阅和业务数据。
 - **本地测试只能纯单元/mock**：必须设置 `PURE_UNIT_TEST=1`；禁止连接共享开发业务数据库 `bz_stock` 或任何持久测试库。
-- **已永久删除独立/临时测试数据库路线**；本地测试只允许 `PURE_UNIT_TEST=1`（纯单元）或 `PANJI_SHARED_DEV_DB_TEST=1`（经 SSH 隧道连共享开发业务数据库 `bz_stock` 的授权目标测试）。详见 `rules/40-testing-quality.md`。
+- **已永久删除本地独立/临时测试数据库与共享业务库 pytest 路线**；真实 PG 测试只在远程 `bz_stock_verify_<sha>` 执行。详见 `rules/40-testing-quality.md`。
 
 ## 前置条件
 

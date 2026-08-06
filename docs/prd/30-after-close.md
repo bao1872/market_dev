@@ -27,7 +27,7 @@
 
 ### AC-04 日线盘后计算
 
-当前盘后编排不再以 15m 数据作为主计算要求，主要基于日线计算趋势、结构和动量。
+盘后 core 主链不以 15m 数据作为发布门禁，趋势、结构、动量和 review core 主要基于日线计算。盘后仍必须刷新并保留 15m 行情，因为独立 `after_close_chip_consensus` 使用当日收盘后的 15m 数据计算筹码共识。15m 不得阻塞 stock_core 发布，但必须成为 chip 阶段自己的 readiness 输入。
 
 ### AC-05 固定参数一次计算
 
@@ -223,6 +223,8 @@ V1 输入仅趋势、结构、动量、量能、结构事件和权威行业/概�
 
 ### AC-18：chip_consensus Worker
 
+- chip job 开始计算前必须刷新或确认目标交易日 `bars_15min` 已完成盘后更新，并校验最新 bar 交易日、预期时段覆盖和最低输入根数；
+- 15m 不新鲜或不足时必须记录结构化 reason、actual/required bars 和 source cutoff，不得回退到旧交易日 15m 或伪造成功；该结果只影响 chip readiness，不反改已经发布的 stock_core/review core；
 - chip_consensus 任务在现有 after-close worker 容器内领取执行，**不新增常驻容器**；
 - worker 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取 `queued` / `resume_queued` 的 `after_close_chip_consensus` 任务，`lease_epoch` fencing 防止旧 worker 覆盖新 worker 状态；
 - worker 每约 30 秒以 job id、`status=running`、worker instance 和 `lease_epoch` 的完整 fencing 条件刷新 heartbeat 与 lease；刷新失败即失去所有权，旧 worker 不得再写 snapshot 或终态；

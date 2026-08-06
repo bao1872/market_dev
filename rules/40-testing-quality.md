@@ -139,12 +139,12 @@ Gov     python tools/check_governance_rules.py
 
 修改 migration 必须有 upgrade / downgrade / upgrade 验证。详见 `80-deployment-data-safety.md`。
 
-## 测试数据库与测试模式（CHANGE-20260728-004 / CHANGE-20260728-008 修订；2026-08-05 引入第三种模式）
+## 测试数据库与测试模式（2026-08-06 收敛为本地纯单元 + 远程验证库）
 
 > 引用修订（2026-08-02，CHANGE-20260802-003）：原文的悬空 Change 引用已移除；
 > 实际来源是 CHANGE-20260728-004（禁用临时测试库）与 CHANGE-20260728-008（删除持久测试库）。
-> 2026-08-05 补充：新增第三种模式 `PANJI_REMOTE_VERIFY_DB_TEST=1`（远程临时验证库），
-> 规则由禁止变为"本地/CI 永久禁止，远程验证库在 DS-110 条件下允许"。
+> 2026-08-05 引入 `PANJI_REMOTE_VERIFY_DB_TEST=1`；2026-08-06 进一步废止共享业务库 pytest，
+> 收敛为“本地/CI 纯单元，真实 PG 只在 DS-110 远程验证库运行”。
 
 > 来源：AGENTS.md §8 基础安全边界
 
@@ -155,41 +155,29 @@ Gov     python tools/check_governance_rules.py
 
 ### 测试模式规则
 
-- 三种模式见 TQ-100。非三种模式之一时，`conftest` 加载即失败。
-- 共享模式必须设置 `PANJI_SHARED_DEV_DB_TARGET`（唯一目标测试文件）、`APP_ENV=development`、`DATABASE_URL` 指向 `127.0.0.1/localhost` 的 `bz_stock`。
-- 共享模式 `TestAsyncSessionLocal` fail-closed（禁止测试自建独立 session/engine）。
+- 两种模式见 TQ-100。非两种模式之一时，`conftest` 加载即失败。
+- 本地和 CI 只运行纯单元、静态、合同及前端测试，不连接 PostgreSQL。
 - 远程验证模式必须在 `panji-prod` 运行，连接 `bz_stock_verify_<sha>`，`APP_ENV=verification`，且 `current_database()` 不得为 `bz_stock`。
+- 已删除共享业务库 pytest 兼容入口；不得重新引入连接 `bz_stock` 的测试模式。
 
 ### 新增测试规则
 
 - 新增测试优先写成纯单元测试（不连接数据库）。
-- 必须连接数据库的集成测试，必须使用 `db_session` fixture：
-  - 目标测试只能在 `PANJI_SHARED_DEV_DB_TEST=1` 共享开发库目标模式下运行；
-  - 完整 PG 集成 / E2E 只能在 `PANJI_REMOTE_VERIFY_DB_TEST=1` 远程验证库模式下运行。
+- 必须连接数据库的集成测试必须使用 `db_session` fixture，并且只能在 `PANJI_REMOTE_VERIFY_DB_TEST=1` 远程验证库模式下运行。
 - 不得在本地 Mac 创建持久测试库以运行集成测试。
 
 ### TQ-100 唯一测试模式合同
 
 > 本条是测试运行环境的**唯一权威**。任何文档、脚本、CI 配置、注释与本条冲突的，以本条为准。
 
-**三种允许的测试模式**：
+**两种允许的测试模式**：
 
 | 模式 | 触发变量 | 数据库 | 适用范围 |
 |---|---|---|---|
 | 纯单元 | `PURE_UNIT_TEST=1` | 不连接任何数据库、不联网 | 默认模式，绝大多数测试 |
-| 共享开发库目标测试 | `PANJI_SHARED_DEV_DB_TEST=1` | 经 SSH 隧道连共享开发业务库 `bz_stock` | 当轮明确授权的少量目标测试 |
 | 远程临时验证库 | `PANJI_REMOTE_VERIFY_DB_TEST=1` | `panji-prod` 上 `bz_stock_verify_<sha>` | Migration、PG 集成、完整 Synthetic E2E |
 
 两个变量均未设置时，`backend/tests/conftest.py` 必须在加载阶段 fail-closed 直接失败，不得回退到任何默认数据库。
-
-**共享模式的强制前置条件**（缺一即失败）：
-
-- `PANJI_SHARED_DEV_DB_TARGET` 指定唯一目标测试文件，禁止全量跑；
-- `APP_ENV=development`；
-- `DATABASE_URL` 指向 `127.0.0.1` / `localhost` 的 `bz_stock`（即经本地 SSH 隧道），禁止直连远程地址；
-- 仅使用 `db_session` / `client` fixture，`TestAsyncSessionLocal` fail-closed；
-- 全程 savepoint rollback，测试结束数据库无残留；
-- 禁止任何 DDL 与 Alembic 操作。
 
 **远程验证模式的强制前置条件**（fail-closed，任一不满足立即中止）：
 
@@ -248,7 +236,7 @@ Gov     python tools/check_governance_rules.py
 
 | 类别 | marker | 含义 | 运行位置 |
 |---|---|---|---|
-| PG 集成 | `postgres` | 需要真实 PostgreSQL | 仅共享开发库目标测试（`PANJI_SHARED_DEV_DB_TEST=1`，经 SSH 隧道） |
+| PG 集成 | `postgres` | 需要真实 PostgreSQL | 仅远程验证库（`PANJI_REMOTE_VERIFY_DB_TEST=1`） |
 | 外部数据 | `external_data` | 依赖外部数据源 | CI（失败不阻断开发部署） |
 | 纯单元 | 无 | 不连库、不联网 | 本地 `PURE_UNIT_TEST=1` + CI |
 
@@ -312,6 +300,6 @@ CI 是**手工诊断工具**（`workflow_dispatch`），不是部署门禁（见
 - 必须监控该**精确 commit SHA** 直到 Workflow 终态，不得用前一次 push 的 SHA 代替；
 - 查询降级顺序：GitHub 连接器 → 已认证 `gh` CLI → 公开 REST API（`/repos/{owner}/{repo}/actions/runs?head_sha={sha}`，无需认证）；
 - `gh` 未认证不能作为停止监控的理由；
-- 数据库目标测试不通过 CI 执行（独立/临时测试库已永久删除）；仅共享开发库目标测试（`PANJI_SHARED_DEV_DB_TEST=1`）在本地/授权环境经 SSH 隧道运行；
+- 数据库测试不通过 CI 执行；Migration、PG Integration 和 Synthetic E2E 只在远程验证库运行；
 - 必须按真实日志修复，不得凭猜测改代码；无法下载日志时仍须报告失败 Job 名称并运行其本地等价命令；
 - 报告须列出每个 Job 的 name 与 result，以及 `CI Gate` 的最终 conclusion；单个 Job 通过不能代替 `CI Gate` 结论。

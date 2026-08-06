@@ -1,4 +1,4 @@
-"""[V2.1 EPIC-01] 领域 run 模型与 publication pointer 真实行为测试（共享开发库目标测试）。
+"""[V2.1 EPIC-01] 领域 run 模型与 publication pointer 真实行为测试。
 
 覆盖：
 - board_facts / chip_consensus / auction_anchor 三个领域 run 模型可持久化、可回读；
@@ -7,13 +7,10 @@
 - publication 原子提交（同事务写入 run + pointer）；
 - publication 回滚保留旧 pointer（不误覆盖）。
 
-设计约束：共享开发库 bz_stock 含真实业务数据，本文件统一使用未来合成交易日 `_FUTURE`，
-该日期在共享库中不存在真实数据，测试自插记录即为该日期唯一结果，保证断言确定性与幂等
-（savepoint rollback，无残留）。
+设计约束：只在远程 `bz_stock_verify_<sha>` 验证库运行。
 
 用法：
-    PANJI_SHARED_DEV_DB_TEST=1 PANJI_SHARED_DEV_DB_TARGET=tests/test_domain_runs_publication_pg.py \
-        APP_ENV=development backend/.venv/bin/python -m pytest \
+    PANJI_REMOTE_VERIFY_DB_TEST=1 APP_ENV=verification backend/.venv/bin/python -m pytest \
         backend/tests/test_domain_runs_publication_pg.py -q -p no:cacheprovider
 """
 
@@ -31,9 +28,9 @@ from app.models.factor_publication import (
     FactorPublication,
 )
 
-pytestmark = pytest.mark.shared_dev_db
+pytestmark = pytest.mark.postgres
 
-# 未来合成交易日：共享开发库中不存在真实数据。
+# 未来合成交易日，避免与 seed 数据冲突。
 _FUTURE = _date(2099, 12, 31)
 
 
@@ -239,7 +236,7 @@ async def test_publication_rollback_keeps_old_pointer(db_session: AsyncSession) 
     old_pub_id = old_pub.id
 
     # 先把旧 pointer 提交到外层事务（savepoint release），使其在后续嵌套事务中可见且不受其回滚影响。
-    # shared_dev_db 的 db_session 使用 join_transaction_mode="create_savepoint"，
+    # db_session 使用 join_transaction_mode="create_savepoint"，
     # commit 仅把 savepoint 释放到外层连接事务，不污染共享库（fixture 退出时外层事务 rollback）。
     await db_session.commit()
 

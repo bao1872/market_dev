@@ -2,7 +2,7 @@
 
 [Corrective-2 2026-08-05 §10] 从原 test_board_sync.py 拆分出的**单元测试**部分：
 - 只含 validate_snapshot 绝对门禁 / 相对门禁纯函数测试
-- 不标记 shared_dev_db（该 marker 只属于 DB 集成测试，禁止把整个混合文件标记 shared_dev_db）
+- 本文件保持纯单元；真实 DB 集成测试使用 `postgres` marker 并在远程验证库运行
 - 可 PURE_UNIT_TEST=1 运行
 
 DB 集成测试见 test_board_sync_pg.py（使用 db_session fixture，命中 postgres 分类）。

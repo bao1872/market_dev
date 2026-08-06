@@ -143,7 +143,7 @@ Fair Value Gap 已完全排除。
 - 无用**镜像**：禁止通用 `docker image prune -a`；应走 `80-deployment-data-safety.md` DS-105 的旧 SHA 完整组精确回收（保留当前 / 上一成功 / rollback / 基础镜像）；
 - 无用**容器**：禁止通用 `container prune`；应走 DS-106 只读盘点，满足全部前置条件且当轮授权后定向删除，Volume 永不随容器删除；
 - **构建缓存 / 悬挂镜像**：仅在本轮实际构建镜像时允许 `docker builder prune -f` / `docker image prune -f`（见 DS-105 / 80 部署后回收）；
-- **测试库（本地 / CI）**：禁止在本地 / CI / Docker 容器创建或复用任何独立、临时、CI 测试数据库或测试专用容器；唯一允许的本地/CI 测试模式见 `40-testing-quality.md` TQ-100（`PURE_UNIT_TEST=1` 与 `PANJI_SHARED_DEV_DB_TEST=1`）。此本地/CI 路径已永久废弃，禁止恢复。
+- **测试库（本地 / CI）**：禁止在本地 / CI / Docker 容器创建或复用任何独立、临时、CI 测试数据库或测试专用容器；本地/CI 唯一允许的数据库无关测试模式是 `PURE_UNIT_TEST=1`。禁止恢复连接 `bz_stock` 的共享业务库 pytest 路径；真实 PG 测试只允许使用 TQ-100 的远程验证库模式。
 - **远程验证库例外**：唯一允许的临时数据库是 `rules/80-deployment-data-safety.md` DS-110 定义的远程验证数据库 `bz_stock_verify_<sha>`，仅存在于 `panji-prod` 已有 PostgreSQL 容器，由正式验证脚本创建/删除。这不属于"本地/CI 测试库"，不受上述禁止约束。
 
 ## 数据库备份禁止（AGENTS §七.10）

@@ -1,8 +1,8 @@
 """Board Sync DB 集成测试（原子切换 / 详细计数）。
 
 [Corrective-2 2026-08-05 §10/§11] 从原 test_board_sync.py 拆分出的 **DB 集成测试**：
-- 使用 conftest `db_session` fixture（命中 postgres 自动分类），**不**标记 shared_dev_db
-- 禁止把整个混合文件标记 shared_dev_db（纯单元已拆到 test_board_sync_unit.py）
+- 使用 conftest `db_session` fixture并显式标记 `postgres`
+- 纯单元已拆到 test_board_sync_unit.py
 - 只在**远程隔离 PostgreSQL** 运行（CI/部署 PG job），禁止再次连接共享 bz_stock 测试
 
 运行（隔离 PG，非 bz_stock）：

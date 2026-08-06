@@ -1,7 +1,7 @@
 """权限模型 V2 - 显式 capability 生命周期（纯单元可验证部分）。
 
 覆盖 access-profile 状态序列化（active/expired/revoked）与 default_route 必填合同。
-revoke/regrant/ensure 的完整 DB 交互验证需真实/共享开发数据库（后续 shared_dev_db 轮次）。
+revoke/regrant/ensure 的完整 DB 交互验证需远程验证数据库。
 """
 from __future__ import annotations
 

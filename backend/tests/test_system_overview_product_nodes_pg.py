@@ -1,8 +1,6 @@
-"""system_overview 数据生产六节点真实行为测试（P0-1，共享开发库目标测试）。
+"""system_overview 数据生产六节点真实行为测试（P0-1）。
 
-这些测试使用 `db_session`，属于真实 PostgreSQL 行为测试，必须经 SSH 隧道以
-`PANJI_SHARED_DEV_DB_TEST=1` 目标模式运行（本文件整体带 `shared_dev_db` marker，
-满足 conftest 对"目标测试文件全部用例带 marker"的强制要求）。
+这些测试使用 `db_session`，只在远程 `bz_stock_verify_<sha>` 验证库运行。
 
 设计约束：共享开发库 bz_stock 含真实业务数据（近期交易日均有正式 run / 发布指针）。
 `_compute_product_nodes` 的板块/第一金字塔/正式发布节点读取全局最新状态
@@ -17,8 +15,7 @@ trade_date：该日期在共享库中不存在任何真实数据，测试自己�
 - 正式发布：非 dsa_selector 的 published run 不得冒充、dsa_selector 才 ok。
 
 用法：
-    PANJI_SHARED_DEV_DB_TEST=1 PANJI_SHARED_DEV_DB_TARGET=tests/test_system_overview_product_nodes_pg.py \
-        APP_ENV=development backend/.venv/bin/python -m pytest \
+    PANJI_REMOTE_VERIFY_DB_TEST=1 APP_ENV=verification backend/.venv/bin/python -m pytest \
         backend/tests/test_system_overview_product_nodes_pg.py -q -p no:cacheprovider
 """
 
@@ -33,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.system_overview_service import _compute_product_nodes
 
-pytestmark = pytest.mark.shared_dev_db
+pytestmark = pytest.mark.postgres
 
 # 未来合成交易日：共享开发库中不存在真实数据，保证被测节点结果由本文件插入记录唯一决定。
 _FUTURE = _date(2099, 12, 31)

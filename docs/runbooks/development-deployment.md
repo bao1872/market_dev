@@ -11,15 +11,15 @@
 - 唯一运行方式是 `docker-compose.prod.yml` + `docker-compose.live.yml`；
 - 本 Runbook 不授权远程开发部署、migration 或业务数据操作，执行这些动作仍需用户在当前任务明确授权。
 
-## 两种部署子流程
+## 两条独立远程流程
 
-### primary development deployment（正式运行栈）
+### stable runtime deployment（稳定运行部署）
 
 - 目标：把已确认 SHA 部署到 `panji-prod` 正式运行栈（`docker-compose.prod.yml` + `docker-compose.live.yml`），操作 `bz_stock`。
 - 触发：用户明确授权后，且 V2.1 已在验证栈通过验收。
 - 前置：`panji-prod-preflight` + `panji-prod-ssh` 入口（见 `rules/80`）。
 
-### remote verification deployment（远程验证栈，V2.1 验收用）
+### remote verification（远程验证，不等同于稳定运行部署）
 
 - 目标：把同一 SHA 部署到独立验证栈（`docker-compose.verify.yml` + `market.verify.env`），操作 `bz_stock_verify_<sha>`。
 - 约束（详见 `rules/80` DS-110/111/112）：
@@ -31,7 +31,7 @@
   - **绝不连接 `bz_stock`**。
 - 脚本：`scripts/ops/panji-verify-deploy`、`scripts/deploy/panji-verify-deploy.sh`、`scripts/verify/create_verify_database.sh`、`scripts/verify/drop_verify_database.sh`、`scripts/verify/seed_v21_verify_data.py`。
 - 连接校验：验证栈启动后执行 `SELECT current_database()`，非 `bz_stock_verify_<sha>` 立即中止。
-- 验证栈不得替代正式运行栈；验收通过后才允许同 SHA 部署正式栈。
+- 验证栈不得替代正式运行栈；验收通过后才允许同 SHA 申请部署正式栈。验证授权不自动包含正式栈部署授权。
 
 ## 部署前
 

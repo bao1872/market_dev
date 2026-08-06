@@ -239,6 +239,8 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 
 ### 11.7 15m 门槛澄清（CHANGE-20260729-009）
 
+盘后 core 的 coverage 门禁已移除 15m，仅表示 stock_core/review core 不等待 15m；筹码共识仍消费 `bars_15min`。`after_close_chip_consensus_service` 在每只股票计算前调用 `refresh_15min_bars(count=4000)`，再由 MDAS 读取 canonical QFQ bars，并校验目标交易日 16 根、最后一根到 15:00、历史最少 500 根；刷新失败、日期陈旧、时段不完整和历史不足均写结构化 skipped，不反改 core。
+
 `first_pyramid_service.py` 中两个 15m 门槛的权威定义：
 
 | 常量 | 值 | 用途 | 使用位置 |

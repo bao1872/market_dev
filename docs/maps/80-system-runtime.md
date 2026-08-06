@@ -11,10 +11,10 @@
 | 默认分支 | `dev`，跟踪 `origin/dev` |
 | Backend | `backend/.venv` + Uvicorn，入口 `backend/app/main.py:app` |
 | Frontend | Node.js + Vite，配置入口 `frontend/vite.config.ts` |
-| PostgreSQL | 不在本地启动；应用开发可经 SSH Tunnel 连接正式 `bz_stock`，本地测试禁止连接任何数据库 |
+| PostgreSQL | 不在本地启动；本地测试禁止连接任何数据库；旧 SSH Tunnel 业务库调试路径仍存在，但不再是正式测试路径 |
 | Redis | 不在本地启动；开发连接使用隔离逻辑 DB，测试使用 mock |
 | Worker/Scheduler | 本地不得启动远程常驻 Worker、Scheduler、盘后编排或全市场任务 |
-| 测试 | 唯二模式 `PURE_UNIT_TEST=1`（默认）与 `PANJI_SHARED_DEV_DB_TEST=1`（当轮授权，经 SSH 隧道连 `bz_stock`）；见 `rules/40-testing-quality.md` TQ-100，禁止任何独立/临时/CI 测试库 |
+| 测试 | `conftest.py` 只允许 `PURE_UNIT_TEST=1` 与远程 `PANJI_REMOTE_VERIFY_DB_TEST=1`；共享业务库 pytest 分支已删除 |
 
 本地启动和隧道命令以 `docs/runbooks/local-development.md` 为准。本地进程隔离不能被
 解释为测试数据隔离；任何连接共享开发业务数据库的写入都是真实业务写入。

@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date
+from datetime import date, time
 from typing import Any
 
 import pandas as pd
@@ -65,6 +65,17 @@ _CHIP_BATCH_SIZE = 25
 
 # [CHANGE-20260729-008] 15m bars 最低数量门槛（不足则标记 skipped，如深科技 000021 仅 338 根）
 _CHIP_MIN_15M_BARS = 500
+_CHIP_EXPECTED_DAILY_15M_BARS = 16
+_CHIP_LAST_15M_TIME = time(15, 0)
+
+
+class Chip15mReadinessError(RuntimeError):
+    """目标交易日 15m 数据未达到 chip 计算门禁。"""
+
+    def __init__(self, reason_code: str, details: dict[str, Any]) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.details = details
 
 # chip 内部状态（写入 metadata.chip_status，不修改 SchedulerJobRun.status）
 CHIP_STATUS_QUEUED = "queued"
@@ -400,6 +411,34 @@ async def execute_after_close_chip_consensus(
                     error_message=None,
                 )
                 succeeded_count += 1
+            except Chip15mReadinessError as exc:
+                skipped_count += 1
+                payload = {"reason": exc.reason_code, **exc.details}
+                skipped_instruments.append({
+                    "instrument_id": str(instrument_id),
+                    **payload,
+                })
+                try:
+                    await _upsert_chip_snapshot(
+                        lease_token=lease_token,
+                        instrument_id=instrument_id,
+                        trade_date=trade_date,
+                        core_run_id=core_run_id,
+                        chip_hash="skipped",
+                        chip_payload=payload,
+                        status="skipped",
+                        error_message=exc.reason_code,
+                    )
+                except JobLeaseLostError:
+                    raise
+                except Exception as persist_exc:
+                    skipped_count -= 1
+                    failed_count += 1
+                    skipped_instruments.pop()
+                    failed_instruments.append({
+                        "instrument_id": str(instrument_id),
+                        "error": f"readiness persistence failed: {persist_exc}"[:500],
+                    })
             except JobLeaseLostError:
                 raise
             except Exception as exc:
@@ -483,12 +522,27 @@ async def _fetch_chip_bars(
         (daily_bars, bars_15m)：任一为空/None 表示数据不足
     """
     from app.db import AsyncSessionLocal
+    from app.repositories.bar_repository import refresh_15min_bars
     from app.services.market_data_aggregation_service import MarketDataAggregationService
 
     mdas = MarketDataAggregationService()
 
     try:
         async with AsyncSessionLocal() as db:
+            try:
+                await refresh_15min_bars(
+                    db,
+                    instrument_id,
+                    count=4000,
+                )
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                raise Chip15mReadinessError(
+                    "M15_REFRESH_FAILED",
+                    {"source_cutoff": None, "error": str(exc)[:300]},
+                ) from exc
+
             # daily: completed qfq，end_date=trade_date 保证 point-in-time
             daily_agg = await mdas.get_bars(
                 db,
@@ -512,13 +566,63 @@ async def _fetch_chip_bars(
             )
         daily_bars = daily_agg.bars if not daily_agg.bars.empty else None
         bars_15m = m15_agg.bars if not m15_agg.bars.empty else None
+        readiness = _assess_15m_readiness(bars_15m, trade_date)
+        if not readiness["ready"]:
+            raise Chip15mReadinessError(readiness["reason_code"], readiness)
         return daily_bars, bars_15m
+    except Chip15mReadinessError:
+        raise
     except Exception as exc:
         logger.warning(
             "[ChipConsensus] _fetch_chip_bars 失败: instrument_id=%s, error=%s",
             instrument_id, exc,
         )
         return None, None
+
+
+def _assess_15m_readiness(
+    bars_15m: pd.DataFrame | None,
+    trade_date: date,
+) -> dict[str, Any]:
+    """校验 chip 输入包含目标交易日完整收盘 15m 数据。"""
+    if bars_15m is None or bars_15m.empty:
+        return {
+            "ready": False,
+            "reason_code": "M15_BARS_MISSING",
+            "actual_session_bars": 0,
+            "required_session_bars": _CHIP_EXPECTED_DAILY_15M_BARS,
+            "source_cutoff": None,
+        }
+
+    if isinstance(bars_15m.index, pd.DatetimeIndex):
+        timestamps = pd.DatetimeIndex(bars_15m.index)
+    else:
+        time_column = "trade_time" if "trade_time" in bars_15m.columns else "datetime"
+        if time_column not in bars_15m.columns:
+            return {
+                "ready": False,
+                "reason_code": "M15_TIMESTAMP_MISSING",
+                "actual_session_bars": 0,
+                "required_session_bars": _CHIP_EXPECTED_DAILY_15M_BARS,
+                "source_cutoff": None,
+            }
+        timestamps = pd.DatetimeIndex(pd.to_datetime(bars_15m[time_column]))
+
+    target_mask = timestamps.date == trade_date
+    target_times = timestamps[target_mask]
+    cutoff = timestamps.max()
+    details = {
+        "actual_session_bars": len(target_times),
+        "required_session_bars": _CHIP_EXPECTED_DAILY_15M_BARS,
+        "source_cutoff": cutoff.isoformat(),
+    }
+    if cutoff.date() != trade_date:
+        return {"ready": False, "reason_code": "M15_TRADE_DATE_STALE", **details}
+    if len(target_times) < _CHIP_EXPECTED_DAILY_15M_BARS:
+        return {"ready": False, "reason_code": "M15_SESSION_INCOMPLETE", **details}
+    if target_times.max().time() < _CHIP_LAST_15M_TIME:
+        return {"ready": False, "reason_code": "M15_CLOSE_BAR_MISSING", **details}
+    return {"ready": True, "reason_code": None, **details}
 
 
 async def _upsert_chip_snapshot(

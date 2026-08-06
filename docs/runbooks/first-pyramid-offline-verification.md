@@ -132,7 +132,7 @@ from app.services.market_data_aggregation_service import MarketDataAggregationSe
 
 ### 5.2 RuntimeError: 测试必须在 APP_ENV=test 下运行
 - 原因：conftest.py 强制要求测试模式
-- 解决：使用 `PURE_UNIT_TEST=1` 纯单元模式（或经 SSH 隧道连共享开发业务数据库的 `PANJI_SHARED_DEV_DB_TEST=1` 目标测试）
+- 解决：离线验证使用 `PURE_UNIT_TEST=1`；必须连接真实 PostgreSQL 的断言转到远程 `bz_stock_verify_<sha>` 验证
 
 ### 5.3 FileNotFoundError: alembic
 - 原因：conftest.py 默认执行 alembic 迁移

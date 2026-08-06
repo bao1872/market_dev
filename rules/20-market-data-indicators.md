@@ -228,4 +228,6 @@ pywencai（`wencai_board_provider`）为唯一板块分类源。
 - 发布后只创建独立 `after_close_chip_consensus` job，不 await、不加入主 run 成功门禁；
 - chip 任务可失败/部分成功/单独重试，绝不反改主 run 或重算 core；
 - chip 使用独立 version/hash/run 关联；
+- chip 计算依赖当日已收盘的 `bars_15min`。独立 chip job 启动前必须刷新并校验目标交易日 15m 数据的新鲜度、完整性和最小输入根数；15m 不满足时只将 chip 标记为结构化 unavailable/skipped/failed，不得使用旧 15m 静默计算，也不得反向阻塞或改写已发布 core；
+- “review core 不依赖 Node/15m”只表示 core 主链不等待 15m，不表示盘后可以停止维护 15m 行情；
 - chip 持久化 migration 为下一阶段唯一 blocker，禁止用 Redis 冒充持久化、禁止未经验证新增 migration。

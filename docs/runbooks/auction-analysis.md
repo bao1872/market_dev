@@ -146,7 +146,7 @@ scan 不再读取 `bars_minute`。统一入口先把每个来源写入 `auction_
 ### 3.1 前置条件
 
 - 已有 dev/staging 环境（**禁止把 dev 直接部署生产"看效果"**）
-- 应用 Migration 077–082，并在共享开发库目标测试模式（`PANJI_SHARED_DEV_DB_TEST=1`，经 SSH 隧道连 `bz_stock`）完成 upgrade/downgrade/upgrade 验证（见 `rules/40-testing-quality.md` TQ-100）
+- 在远程 `bz_stock_verify_<sha>` 使用 `PANJI_REMOTE_VERIFY_DB_TEST=1` 应用 Migration 077–082，并完成 upgrade/downgrade/upgrade 验证（见 `rules/40-testing-quality.md` TQ-100）
 - 已按 §2.5 确认两个独立来源和容差
 
 ### 3.2 Canary 样本

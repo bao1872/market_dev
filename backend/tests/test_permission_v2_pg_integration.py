@@ -1,7 +1,6 @@
-"""权限模型 V2 - 共享开发数据库目标测试。
+"""权限模型 V2 - 远程验证数据库集成测试。
 
-运行模式：PANJI_SHARED_DEV_DB_TEST=1（经 SSH 隧道连共享开发业务数据库 bz_stock，
-不创建任何临时/测试库，禁止 DDL/Alembic，完整 rollback，测试结束无残留）。
+运行模式：PANJI_REMOTE_VERIFY_DB_TEST=1，仅连接 `bz_stock_verify_<sha>`。
 
 使用 conftest 的 `client` fixture（自动 override get_db 复用同一 db_session，
 不逃逸事务）。所有写入经统一 db_session，测试结束外层事务 rollback。
@@ -38,7 +37,7 @@ from app.services.subscription_service import (
     revoke_capability_from_user,
 )
 
-pytestmark = pytest.mark.shared_dev_db
+pytestmark = pytest.mark.postgres
 
 # 测试数据唯一前缀（结束必须无残留）
 _TEST_EMAIL_PREFIX = "pg-v2-test-"

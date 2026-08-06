@@ -375,7 +375,7 @@ Gate 2 在 Phase 5B-2 capability 模型基础上完成权限代码改造（非"�
 
 ### 13.5 shared_dev_db 目标测试（已通过）
 
-- 模式：`PANJI_SHARED_DEV_DB_TEST=1` + SSH 隧道连共享开发业务数据库 `bz_stock`（不创建临时/测试库）。
+- 历史证据使用过 `PANJI_SHARED_DEV_DB_TEST=1` 连接 `bz_stock`；该路径现已废止，不再作为当前测试方式。后续 PG 验证只在远程 `bz_stock_verify_<sha>` 执行。
 - `test_permission_v2_pg_integration.py` 5 项通过（self_selection 注册写 UserCapability、/me/access、login capabilities+next_route、API guard 200/403、admin 权限摘要）。
 - savepoint rollback，测试后无残留（pg-v2-test 用户/邀请码均 0）。
 - 当前阶段：开发测试阶段；当前代码待远程开发部署；backfill 未执行。

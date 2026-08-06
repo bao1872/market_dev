@@ -1,7 +1,7 @@
-"""共享测试 fixtures - pytest 集成测试基础设施。
+"""pytest 测试基础设施。
 
 提供：
-- 测试模式校验（只允许 PURE_UNIT_TEST=1 或 PANJI_SHARED_DEV_DB_TEST=1）
+- 测试模式校验（只允许 PURE_UNIT_TEST=1 或 PANJI_REMOTE_VERIFY_DB_TEST=1）
 - 测试专用 async_engine / TestAsyncSessionLocal
 - async DB session fixture（savepoint 模式，被测代码调用 commit 也不污染数据库）
 - 测试数据工厂 fixtures（用户、角色、订阅、邀请码、标的、策略、运行）
@@ -9,13 +9,12 @@
 
 约束（权限模型 V2 / 开发测试阶段）：
 - 已永久删除独立/临时测试数据库路线（独立测试库 URL 变量 / CI 临时数据库 / 独立测试库名）。
-- 只允许：A. PURE_UNIT_TEST=1（纯单元/mock）；B. PANJI_SHARED_DEV_DB_TEST=1
-  （经 SSH 隧道连共享开发业务数据库 bz_stock 的明确授权目标测试）。
-- 共享模式禁止 DDL/Alembic，savepoint rollback，测试结束无残留。
+- 只允许：A. PURE_UNIT_TEST=1（纯单元/mock）；B. PANJI_REMOTE_VERIFY_DB_TEST=1
+  （远程 panji-prod 的 bz_stock_verify_<sha> 验证库）。
+- 本地和 CI 禁止连接 bz_stock 运行 pytest；PG 集成只在远程验证库执行。
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 import uuid
@@ -58,10 +57,10 @@ if _PURE_UNIT and not os.environ.get("DATABASE_URL"):
     # fail-closed 硬校验（库名后缀/安全密钥）变为 no-op；不修改 app/config.py 合同。
     os.environ["APP_ENV"] = "pure-unit"
 
-from app.models.instrument import Instrument
-from app.models.invitation import InviteCode
-from app.models.subscription import Subscription
-from app.models.user import Role, User
+from app.models.instrument import Instrument  # noqa: E402 - env guard must run first
+from app.models.invitation import InviteCode  # noqa: E402 - env guard must run first
+from app.models.subscription import Subscription  # noqa: E402 - env guard must run first
+from app.models.user import Role, User  # noqa: E402 - env guard must run first
 
 # 异步工厂 fixture 返回类型：Callable[..., Coroutine[Any, Any, T]]
 # conftest 中的 *_factory / make_user_eligible 等 fixture 返回的是 async 函数，
@@ -91,24 +90,19 @@ def make_asgi_transport(app: FastAPI) -> httpx.ASGITransport:
 # ---------------------------------------------------------------------------
 
 _APP_ENV = os.environ.get("APP_ENV", "").lower()
-# [权限模型 V2 / V2.1 验收闭环] 三种测试模式：
+# 唯一测试模式：
 #   A. PURE_UNIT_TEST=1                 纯单元/mock，不连接数据库（默认）
-#   B. PANJI_SHARED_DEV_DB_TEST=1       经 SSH 隧道连共享开发业务库 bz_stock 的明确授权目标测试
-#   C. PANJI_REMOTE_VERIFY_DB_TEST=1    远程 panji-prod 上 bz_stock_verify_<sha> 验证库
+#   B. PANJI_REMOTE_VERIFY_DB_TEST=1    远程 panji-prod 上 bz_stock_verify_<sha> 验证库
 #      （Migration、PG 集成、完整 Synthetic E2E；本地/CI 禁用，详见 rules/80 DS-110）
-_SHARED_DEV_DB = (
-    os.environ.get("PANJI_SHARED_DEV_DB_TEST", "").lower() in ("1", "true", "yes")
-)
 _REMOTE_VERIFY_DB = (
     os.environ.get("PANJI_REMOTE_VERIFY_DB_TEST", "").lower() in ("1", "true", "yes")
 )
 
-if not _PURE_UNIT and not _SHARED_DEV_DB and not _REMOTE_VERIFY_DB:
+if not _PURE_UNIT and not _REMOTE_VERIFY_DB:
     raise RuntimeError(
-        "当前只允许三种测试模式：\n"
+        "当前只允许两种测试模式：\n"
         "  A. PURE_UNIT_TEST=1（纯单元/mock，不连接数据库）\n"
-        "  B. PANJI_SHARED_DEV_DB_TEST=1（经 SSH 隧道连共享开发业务数据库 bz_stock 的明确授权目标测试）\n"
-        "  C. PANJI_REMOTE_VERIFY_DB_TEST=1（远程 panji-prod 验证库 bz_stock_verify_<sha>，仅远程运行）\n"
+        "  B. PANJI_REMOTE_VERIFY_DB_TEST=1（远程 panji-prod 验证库 bz_stock_verify_<sha>，仅远程运行）\n"
         "本地/CI 永久禁止独立/临时测试数据库路线（独立测试库 URL 变量 / CI 临时数据库）。"
     )
 
@@ -141,47 +135,7 @@ if _REMOTE_VERIFY_DB:
     ).replace(
         "postgresql://", "postgresql+asyncpg://"
     )
-elif _SHARED_DEV_DB and not _PURE_UNIT:
-    # 共享开发库模式：禁止任何临时/测试库，只用现有共享 bz_stock（经 SSH 隧道）
-    # 独立测试库 URL 变量名（拼接避免 governance 误判为"使用"——此处是禁止检查）
-    _tdb_var = "TEST_" + "DATABASE_URL"
-    if os.environ.get(_tdb_var):
-        raise RuntimeError(
-            "PANJI_SHARED_DEV_DB_TEST=1 禁止设置独立测试库 URL 变量（不存在临时测试库路线）。"
-        )
-    # 必须显式指定唯一目标测试文件，禁止全仓/其他目录 pytest
-    _shared_target = os.environ.get("PANJI_SHARED_DEV_DB_TARGET", "")
-    if not _shared_target:
-        raise RuntimeError(
-            "PANJI_SHARED_DEV_DB_TEST=1 必须显式设置 PANJI_SHARED_DEV_DB_TARGET="
-            "（唯一允许的目标测试文件，如 tests/test_permission_v2_pg_integration.py）。"
-        )
-    if _APP_ENV != "development":
-        raise RuntimeError(
-            f"shared_dev_db 测试要求 APP_ENV=development，当前={_APP_ENV!r}。"
-        )
-    _shared_db_url = os.environ.get("DATABASE_URL", "")
-    if not _shared_db_url:
-        raise RuntimeError(
-            "shared_dev_db 测试要求 DATABASE_URL（本地开发配置，经 SSH 隧道指向共享 bz_stock）。"
-        )
-    _shared_parsed = urlparse(_shared_db_url)
-    if _shared_parsed.hostname not in ("127.0.0.1", "localhost"):
-        raise RuntimeError(
-            f"shared_dev_db DATABASE_URL 主机必须是 127.0.0.1/localhost（SSH 隧道），当前={_shared_parsed.hostname!r}"
-        )
-    _shared_db_name = (_shared_parsed.path or "").lstrip("/")
-    if _shared_db_name != "bz_stock":
-        raise RuntimeError(
-            f"shared_dev_db DATABASE_URL 库名必须精确为 bz_stock（共享开发业务数据库），当前={_shared_db_name!r}"
-        )
-    _TEST_ASYNC_URL = _shared_db_url.replace(
-        "postgresql+psycopg://", "postgresql+asyncpg://"
-    ).replace(
-        "postgresql://", "postgresql+asyncpg://"
-    )
-
-# 测试专用 engine / session factory（仅 shared_dev_db 模式建立连接）
+# 测试专用 engine / session factory（仅远程验证库模式建立连接）
 if not _PURE_UNIT:
     test_async_engine = create_async_engine(
         _TEST_ASYNC_URL,
@@ -190,25 +144,12 @@ if not _PURE_UNIT:
         pool_size=5,
         max_overflow=10,
     )
-    if _SHARED_DEV_DB:
-        # [第 5 部分加固] shared_dev_db 模式：TestAsyncSessionLocal 必须 fail-closed，
-        # 禁止测试自建独立 session/engine（只能使用 db_session/client fixture）。
-        def _shared_db_guard(*_args: Any, **_kwargs: Any) -> Any:
-            raise RuntimeError(
-                "shared_dev_db 模式禁止测试自建独立 session/engine（TestAsyncSessionLocal 已禁用）。"
-                "只能使用 conftest 的 db_session / client fixture（复用同一事务）。"
-            )
-
-        TestAsyncSessionLocal = _shared_db_guard  # type: ignore[assignment]
-    else:
-        # 纯远程验证库模式（DS-110）：允许 DDL/Alembic，测试可自建 session。
-        # 业务库保护由连接校验（库名必须 bz_stock_verify_<sha>）保证，不在此 guard。
-        TestAsyncSessionLocal = async_sessionmaker(
-            bind=test_async_engine,
-            class_=AsyncSession,
-            expire_on_commit=False,
-            autoflush=False,
-        )
+    TestAsyncSessionLocal = async_sessionmaker(
+        bind=test_async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
 else:
     # PURE_UNIT_TEST=1 下不建立任何数据库连接，但仍需保证「收集期不报错」。
     #
@@ -223,7 +164,7 @@ else:
     def _pure_unit_db_guard(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError(
             "当前处于 PURE_UNIT_TEST=1 纯单元测试模式，禁止建立数据库会话。\n"
-            "该测试依赖共享开发业务数据库，应经 SSH 隧道并设置 PANJI_SHARED_DEV_DB_TEST=1 目标测试。"
+            "该测试依赖真实 PostgreSQL，应在远程验证库设置 PANJI_REMOTE_VERIFY_DB_TEST=1。"
         )
 
     TestAsyncSessionLocal = _pure_unit_db_guard  # type: ignore[assignment]
@@ -335,27 +276,6 @@ def pytest_collection_modifyitems(config, items) -> None:  # type: ignore[no-unt
     """
     import pytest
 
-    # [第 5 部分加固] shared_dev_db 模式：强制唯一目标文件 + shared_dev_db marker
-    if _SHARED_DEV_DB and not _PURE_UNIT:
-        target_file = os.environ.get("PANJI_SHARED_DEV_DB_TARGET", "").strip()
-        expected_path = os.path.normpath(
-            os.path.join(os.path.dirname(__file__), "..", target_file)
-        ) if target_file else ""
-        for item in items:
-            item_path = str(getattr(item, "fspath", "") or "")
-            if item_path != expected_path:
-                pytest.exit(
-                    f"shared_dev_db 模式只允许运行目标文件 {target_file}（当前收集到 {item_path}）。"
-                    "禁止全仓 pytest 或其他目录。",
-                    returncode=2,
-                )
-            if "shared_dev_db" not in item.keywords:
-                pytest.exit(
-                    f"shared_dev_db 目标测试必须带 @pytest.mark.shared_dev_db（{item_path}）。",
-                    returncode=2,
-                )
-        return  # shared 模式不做 postgres 分类
-
     skip_pg = pytest.mark.skip(
         reason="需要真实 PostgreSQL；当前为 PURE_UNIT_TEST=1 纯单元测试模式"
     )
@@ -438,23 +358,13 @@ async def init_test_db():
 
     [权限模型 V2 / 开发测试阶段] 已永久删除独立/临时测试数据库路线：
     - PURE_UNIT_TEST=1：纯单元模式，不连接数据库，直接跳过；
-    - PANJI_SHARED_DEV_DB_TEST=1：共享开发库目标测试，禁止 DDL/Alembic，直接跳过。
-    任何情况下都不执行 Alembic upgrade（不修改共享 bz_stock schema）。
+    - PANJI_REMOTE_VERIFY_DB_TEST=1：远程验证库模式；Migration 由正式验证脚本执行。
     """
     if _PURE_UNIT:
         yield
         return
-    # shared_dev_db：跳过 Alembic（禁止 DDL），释放测试 engine
     yield
     await test_async_engine.dispose()
-
-
-def pytest_configure(config: Any) -> None:
-    """注册 shared_dev_db marker（避免 pyproject marker 定义触发 backend 环境构建）。"""
-    config.addinivalue_line(
-        "markers",
-        "shared_dev_db: 共享开发数据库目标测试（PANJI_SHARED_DEV_DB_TEST=1，经 SSH 隧道连 bz_stock，禁止临时/测试库）",
-    )
 
 
 @pytest_asyncio.fixture
