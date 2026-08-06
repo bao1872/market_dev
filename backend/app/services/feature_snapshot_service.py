@@ -1780,6 +1780,7 @@ async def compute_for_trade_date(
     failure_threshold: float = 0.3,
     progress_callback: Callable[..., Awaitable[None]] | None = None,
     source_run_id: uuid.UUID | None = None,
+    enforce_compute_once: bool = True,
 ) -> dict[str, Any]:
     """为给定 instrument 列表批量计算并 upsert 快照（不内部 commit）。
 
@@ -1956,11 +1957,11 @@ async def compute_for_trade_date(
     # 四类计数（canonical/dsa/smc/momentum）必须 == eligible_compute_count，
     # 否则抛 ComputeOnceGateError，caller 不得发布 stock_core。
     #
-    # [CHANGE-20260805-CP4A] 仅当本 run 真实走了 canonical 路径（至少构建过 1 个 frame）
-    # 才强制门禁；compute 被 mock 或为空 run 时无 compute-once 可违（测试与空 run 契约一致）。
-    # 生产路径 canonical_frame_build > 0，门禁照常硬生效。
+    # [CHANGE-20260805-CP4A-CP3] compute-once 门禁**不可绕过**：生产默认 enforce_compute_once=True
+    # 必然强制；仅单元测试 mock compute 时显式传 enforce_compute_once=False（测试契约与生产分开）。
+    # 禁止通过「计数为 0 自动跳过硬门禁」，否则 instrumentation 回归会静默放行重复计算。
     _compute_counts = compute_diagnostics.to_dict()
-    if total > 0 and _compute_counts.get("canonical_frame_build", 0) > 0:
+    if total > 0 and enforce_compute_once:
         enforce_compute_once_gate(compute_diagnostics, eligible_compute_count)
     return {
         "snapshot_count": snapshot_count,

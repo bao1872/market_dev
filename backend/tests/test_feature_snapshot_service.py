@@ -658,7 +658,7 @@ async def test_compute_for_trade_date_uses_mdas_batch_reads_and_reports_metrics(
         patch("app.services.feature_snapshot_service.upsert_snapshot", new_callable=AsyncMock) as upsert,
     ):
         batch_read.side_effect = _fake_batch
-        result = await compute_for_trade_date(session, date(2026, 1, 10), instrument_ids, batch_size=2, progress_callback=progress)
+        result = await compute_for_trade_date(session, date(2026, 1, 10), instrument_ids, batch_size=2, progress_callback=progress, enforce_compute_once=False)
     assert batch_read.await_count == 6
     assert upsert.await_count == 5
     assert progress.await_count == 3
@@ -990,6 +990,7 @@ async def test_compute_for_trade_date_single_failure_does_not_block(
             inst_ids,
             batch_size=10,
             failure_threshold=0.5,
+            enforce_compute_once=False,
         )
         # [Blocker2] - compute_for_trade_date 不再内部 commit，caller flush 使行可见
         await db_session.flush()
@@ -1069,6 +1070,7 @@ async def test_compute_for_trade_date_over_threshold_no_partial_after_rollback(
                 inst_ids,
                 batch_size=10,
                 failure_threshold=0.3,
+                enforce_compute_once=False,
             )
         # [Blocker2] - caller 负责 rollback（compute_for_trade_date 不内部 commit）
         await db_session.rollback()
@@ -1119,6 +1121,7 @@ async def test_compute_for_trade_date_failure_threshold_raises(
                 inst_ids,
                 batch_size=10,
                 failure_threshold=0.3,
+                enforce_compute_once=False,
             )
 
 
@@ -1179,6 +1182,7 @@ async def test_compute_for_trade_date_progress_callback_per_batch(
             batch_size=2,
             failure_threshold=0.3,
             progress_callback=progress_callback,
+            enforce_compute_once=False,
         )
         await db_session.flush()
 
@@ -1191,6 +1195,34 @@ async def test_compute_for_trade_date_progress_callback_per_batch(
     assert progress_calls[2]["processed"] == 5
     assert progress_calls[2]["snapshot_count"] == 5
     assert progress_calls[2]["failed_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_compute_once_gate_is_not_bypassable_in_production(
+    db_session: AsyncSession,
+) -> None:
+    """[CHANGE-20260805-CP4A-CP3] 生产默认 enforce_compute_once=True 时，即使 compute 被 mock
+    （计数为 0），compute-once 门禁也必须硬抛，不得因计数为 0 自动跳过。
+    """
+    from app.services.core_run_context import ComputeOnceGateError
+
+    instrument_ids = [uuid.uuid4() for _ in range(5)]
+
+    async def _mock_compute(*args: Any, **kwargs: Any) -> Any:
+        return MagicMock(spec=StockFeatureSnapshot)
+
+    with patch(
+        "app.services.feature_snapshot_service.compute_feature_snapshot_for_date",
+        side_effect=_mock_compute,
+    ):
+        with pytest.raises(ComputeOnceGateError):
+            await compute_for_trade_date(
+                db_session,
+                date(2026, 1, 10),
+                instrument_ids,
+                batch_size=2,
+                enforce_compute_once=True,
+            )
 
 
 # ===== 6. P0-4: published snapshot 保护 =====
