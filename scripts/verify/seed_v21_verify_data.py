@@ -322,6 +322,11 @@ async def _gen_synthetic_released_dsa_config(verify_conn) -> uuid.UUID:
         ),
         {"id": str(def_id)},
     )
+    def_id = (
+        await verify_conn.execute(
+            text("SELECT id FROM strategy_definitions WHERE strategy_key='dsa_selector'")
+        )
+    ).scalar_one()
     # released version
     ver_id = uuid.uuid5(_NS, "ver-dsa_selector")
     manifest = json.dumps({

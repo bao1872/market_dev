@@ -56,6 +56,9 @@ PG gate 文案同步移除尚未执行的 closure 声明。
 第十二次 attempt 已生成全部 synthetic 多周期行情和板块成员，随后在 DSA manifest 写入处暴露
 SQLAlchemy bind 与 PostgreSQL 紧邻 cast 不兼容。` :manifest::jsonb` 已改为可移植解析的
 `CAST(:manifest AS jsonb)`，并确认脚本内无其他同类 bind cast。
+第十三次 attempt 到达 DSA version 写入，暴露 definition `ON CONFLICT(strategy_key)` 后仍沿用候选
+UUID 的错误；基础 PG 已存在同 key 时该 UUID 并非真实父记录。Seed 现按 strategy key 回读数据库中的
+canonical definition ID 后再写 version，使其在空库和已有前置事实两种状态下均幂等。
 
 ## 数据、验证与风险
 
