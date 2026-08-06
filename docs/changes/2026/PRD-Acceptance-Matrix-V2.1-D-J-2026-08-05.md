@@ -31,7 +31,7 @@
 
 **Phase 4 目标 SHA（phase4_target_sha）**: `b3d114b25d229c484f3db8b0afcb226387c6709d` — 当前 origin/dev；GitHub 对比 `0bc7bfe → b3d114b` ahead_by=1，唯一变化为验收矩阵文档，业务代码/Compose/测试代码均未变化；完整门禁已在本 SHA 重跑全部通过。
 
-**基线**: `351b38d39c7a9b80c33b7c8bb99ff2e21d45d690`（CHANGE-20260806-005 V2.1 对齐 Phase 6 本地门禁核对时点 = Phase 6 提交后 current HEAD/origin/dev；Phase 7 远程验证通过后冻结 final SHA 时再同步）
+**基线**: `351b38dce8baf1402bef1af358aaefce5d33c8de`（CHANGE-20260806-005 V2.1 对齐 Phase 6 本地门禁核对时点 = Phase 6 提交后 current HEAD/origin/dev；Phase 7 远程验证通过后冻结 final SHA 时再同步）
 
 **生成日期**: 2026-08-05
 
