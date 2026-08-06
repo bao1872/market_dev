@@ -13,6 +13,14 @@ from app.services.after_close_chip_consensus_service import (
     _assess_15m_readiness,
     execute_after_close_chip_consensus,
 )
+from app.services.chip_bars_refresh_coordinator import ChipBarsRefreshResult
+
+# [CHANGE-20260806-005 / Phase 3] 运行级 refresh 独立协调器，单测中 mock 以聚焦 compute 终态。
+_REFRESH_MOCK_TARGET = "app.services.chip_bars_refresh_coordinator.refresh_15m_batch"
+
+
+def _mock_refresh(total: int = 1) -> AsyncMock:
+    return AsyncMock(return_value=ChipBarsRefreshResult(refreshed=total))
 
 
 @pytest.mark.asyncio
@@ -23,6 +31,8 @@ async def test_all_legal_skips_report_skipped() -> None:
     upsert = AsyncMock()
 
     with patch(
+        _REFRESH_MOCK_TARGET, new=_mock_refresh(total=2),
+    ), patch(
         "app.services.after_close_chip_consensus_service._fetch_chip_bars",
         new=AsyncMock(return_value=(daily, m15)),
     ), patch(
@@ -48,6 +58,8 @@ async def test_skip_persistence_failure_is_not_silently_swallowed() -> None:
     m15 = pd.DataFrame({"close": [1.0] * 10})
 
     with patch(
+        _REFRESH_MOCK_TARGET, new=_mock_refresh(total=1),
+    ), patch(
         "app.services.after_close_chip_consensus_service._fetch_chip_bars",
         new=AsyncMock(return_value=(daily, m15)),
     ), patch(
@@ -74,6 +86,8 @@ async def test_mixed_skip_and_system_failure_report_partial() -> None:
     fetch = AsyncMock(side_effect=[(daily, short_m15), (None, None)])
 
     with patch(
+        _REFRESH_MOCK_TARGET, new=_mock_refresh(total=2),
+    ), patch(
         "app.services.after_close_chip_consensus_service._fetch_chip_bars",
         new=fetch,
     ), patch(
@@ -115,6 +129,8 @@ async def test_15m_readiness_failure_is_structured_skip() -> None:
         {"source_cutoff": None, "error": "provider unavailable"},
     )
     with patch(
+        _REFRESH_MOCK_TARGET, new=_mock_refresh(total=1),
+    ), patch(
         "app.services.after_close_chip_consensus_service._fetch_chip_bars",
         new=AsyncMock(side_effect=error),
     ), patch(
@@ -131,3 +147,29 @@ async def test_15m_readiness_failure_is_structured_skip() -> None:
     assert result["status"] == "skipped"
     assert result["skipped_instruments"][0]["reason"] == "M15_REFRESH_FAILED"
     assert upsert.await_args.kwargs["chip_payload"]["error"] == "provider unavailable"
+
+
+def test_15m_readiness_future_data_detected() -> None:
+    """[Phase 3] 目标交易日收盘后混入未来 15m 数据 → M15_FUTURE_DATA，禁止计算。"""
+    trade_date = date(2026, 7, 31)
+    timestamps = list(pd.date_range("2026-07-31 09:45", periods=16, freq="15min"))
+    future = pd.DataFrame({"close": range(16)}, index=timestamps)
+    # 混入一条目标交易日之后（未来）的 15m bar
+    future.loc[pd.Timestamp("2026-08-03 10:00")] = {"close": 99}
+    assert _assess_15m_readiness(future, trade_date)["reason_code"] == "M15_FUTURE_DATA"
+
+
+def test_15m_readiness_timestamp_invalid() -> None:
+    """[Phase 3] 15m bars 缺时间列 → M15_TIMESTAMP_INVALID（取代 M15_TIMESTAMP_MISSING）。"""
+    trade_date = date(2026, 7, 31)
+    bars = pd.DataFrame({"close": range(16)})  # 无 trade_time/datetime 列
+    assert _assess_15m_readiness(bars, trade_date)["reason_code"] == "M15_TIMESTAMP_INVALID"
+
+
+def test_15m_readiness_reason_codes_are_canonical() -> None:
+    """[Phase 3] 所有 M15 readiness reason code 必须属于八个 canonical 集合。"""
+    from app.services.after_close_chip_consensus_service import CHIP_READINESS_REASON_CODES
+    assert "M15_FUTURE_DATA" in CHIP_READINESS_REASON_CODES
+    assert "M15_TIMESTAMP_INVALID" in CHIP_READINESS_REASON_CODES
+    assert "M15_TIMESTAMP_MISSING" not in CHIP_READINESS_REASON_CODES
+    assert len(CHIP_READINESS_REASON_CODES) == 8

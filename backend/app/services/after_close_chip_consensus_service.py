@@ -63,10 +63,28 @@ _CHIP_LEASE_SECONDS = 3600  # 1 小时
 # 批量大小（与主 after_close 保持一致）
 _CHIP_BATCH_SIZE = 25
 
+# [CHANGE-20260806-005 / Phase 3 / GAP-08] 运行级 refresh 的有界并发与每股超时
+_CHIP_REFRESH_CONCURRENCY = 8
+_CHIP_REFRESH_PER_STOCK_TIMEOUT = 30.0
+
 # [CHANGE-20260729-008] 15m bars 最低数量门槛（不足则标记 skipped，如深科技 000021 仅 338 根）
 _CHIP_MIN_15M_BARS = 500
 _CHIP_EXPECTED_DAILY_15M_BARS = 16
 _CHIP_LAST_15M_TIME = time(15, 0)
+
+# ===== [CHANGE-20260806-005 / Phase 3 / 八个 canonical 15m readiness reason code] =====
+# 集中定义（唯一 SSOT），避免散落字符串。每股 chip 失败/skip 的 reason_code 必须属于
+# 本集合；FUTURE_DATA 为新增，TIMESTAMP_INVALID 取代原 M15_TIMESTAMP_MISSING。
+CHIP_READINESS_REASON_CODES: frozenset[str] = frozenset({
+    "M15_REFRESH_FAILED",
+    "M15_BARS_MISSING",
+    "M15_TIMESTAMP_INVALID",
+    "M15_TRADE_DATE_STALE",
+    "M15_SESSION_INCOMPLETE",
+    "M15_CLOSE_BAR_MISSING",
+    "M15_BARS_INSUFFICIENT",
+    "M15_FUTURE_DATA",
+})
 
 
 class Chip15mReadinessError(RuntimeError):
@@ -320,6 +338,22 @@ async def execute_after_close_chip_consensus(
         lease_seconds=_CHIP_LEASE_SECONDS,
     )
 
+    # [CHANGE-20260806-005 / Phase 3 / GAP-08/10] 运行级 15m 刷新：compute loop 之前一次性
+    # 刷新全部标的（有界并发 + 每股超时 + 逐股 status），随后 compute loop 以 skip_refresh=True
+    # 读取已刷新 bars，不再逐股 refresh（per_stock_refresh_in_compute_loop=0）。
+    # 刷新失败的标的仍进入 compute，由 _assess_15m_readiness 判定为 M15_REFRESH_FAILED 并 skip。
+    from app.services.chip_bars_refresh_coordinator import refresh_15m_batch
+
+    refresh_result = await refresh_15m_batch(
+        instrument_ids,
+        trade_date,
+        concurrency=_CHIP_REFRESH_CONCURRENCY,
+        per_stock_timeout=_CHIP_REFRESH_PER_STOCK_TIMEOUT,
+    )
+    if _diag_sink is not None:
+        _diag_sink["run_level_refresh"] = refresh_result.to_dict()
+        _diag_sink["per_stock_refresh_in_compute_loop"] = 0
+
     succeeded_count = 0
     failed_count = 0
     skipped_count = 0
@@ -338,8 +372,9 @@ async def execute_after_close_chip_consensus(
                 ownership_check()
             try:
                 # 获取 daily + 15m bars（point-in-time <= trade_date）
+                # [Phase 3 / GAP-08] compute loop 不再逐股 refresh（运行级 refresh 已提前完成）
                 daily_bars, bars_15m = await _fetch_chip_bars(
-                    instrument_id, trade_date,
+                    instrument_id, trade_date, skip_refresh=True,
                 )
                 if daily_bars is None or daily_bars.empty:
                     failed_count += 1
@@ -508,15 +543,22 @@ async def execute_after_close_chip_consensus(
 async def _fetch_chip_bars(
     instrument_id: uuid.UUID,
     trade_date: date,
+    *,
+    skip_refresh: bool = False,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """获取 chip 计算所需的 daily + 15m bars（point-in-time <= trade_date）。
 
     [CHANGE-20260731-003] SSOT 合规：通过 MarketDataAggregationService (MDAS) 读取行情，
     不再直接导入 bar_repository 私有 _query_* 函数。MDAS 是行情读取唯一出口。
 
+    [CHANGE-20260806-005 / Phase 3 / GAP-08] 运行级 refresh 分离：compute loop 不再逐股
+    refresh。当 `skip_refresh=True`（运行级 refresh 已提前完成）时，本函数仅读取已刷新
+    bars，不调用 `refresh_15min_bars`（per_stock_refresh_in_compute_loop=0）。
+
     Args:
         instrument_id: 股票 ID
         trade_date: 交易日（point-in-time，只取 <= trade_date 的 bars）
+        skip_refresh: 是否跳过本股 refresh（运行级刷新已完成的 compute 阶段传 True）
 
     Returns:
         (daily_bars, bars_15m)：任一为空/None 表示数据不足
@@ -529,19 +571,20 @@ async def _fetch_chip_bars(
 
     try:
         async with AsyncSessionLocal() as db:
-            try:
-                await refresh_15min_bars(
-                    db,
-                    instrument_id,
-                    count=4000,
-                )
-                await db.commit()
-            except Exception as exc:
-                await db.rollback()
-                raise Chip15mReadinessError(
-                    "M15_REFRESH_FAILED",
-                    {"source_cutoff": None, "error": str(exc)[:300]},
-                ) from exc
+            if not skip_refresh:
+                try:
+                    await refresh_15min_bars(
+                        db,
+                        instrument_id,
+                        count=4000,
+                    )
+                    await db.commit()
+                except Exception as exc:
+                    await db.rollback()
+                    raise Chip15mReadinessError(
+                        "M15_REFRESH_FAILED",
+                        {"source_cutoff": None, "error": str(exc)[:300]},
+                    ) from exc
 
             # daily: completed qfq，end_date=trade_date 保证 point-in-time
             daily_agg = await mdas.get_bars(
@@ -601,12 +644,24 @@ def _assess_15m_readiness(
         if time_column not in bars_15m.columns:
             return {
                 "ready": False,
-                "reason_code": "M15_TIMESTAMP_MISSING",
+                "reason_code": "M15_TIMESTAMP_INVALID",
                 "actual_session_bars": 0,
                 "required_session_bars": _CHIP_EXPECTED_DAILY_15M_BARS,
                 "source_cutoff": None,
             }
         timestamps = pd.DatetimeIndex(pd.to_datetime(bars_15m[time_column]))
+
+    # [Phase 3] 未来数据检测：任何时间戳超出目标交易日收盘（15:00）视为 future data。
+    # 正常情况下 bars 已被 end_date=trade_date 截断；若上游数据漂移混入未来 15m，禁止计算。
+    last_close_marker = pd.Timestamp.combine(trade_date, _CHIP_LAST_15M_TIME)
+    if len(timestamps) > 0 and timestamps.max() > last_close_marker:
+        return {
+            "ready": False,
+            "reason_code": "M15_FUTURE_DATA",
+            "actual_session_bars": 0,
+            "required_session_bars": _CHIP_EXPECTED_DAILY_15M_BARS,
+            "source_cutoff": timestamps.max().isoformat(),
+        }
 
     target_mask = timestamps.date == trade_date
     target_times = timestamps[target_mask]

@@ -7,7 +7,7 @@
 - 目标候选 SHA：`<40-char origin/dev SHA>`（待 Phase 6 本地门禁通过、提交推送后冻结）
 - 验证库：`bz_stock_verify_<target_sha>`（待 Pass 2 创建，隔离，DS-110）
 - 约束：每命令前后断言 `current_database()` 为验证库，禁止访问生产库 `bz_stock`；访问 bz_stock 须获得明确授权并证明只读
-- 结论：**按《ref/开发计划.md》Phase 0-7 执行 V2.1 PRD 完全对齐。Phase 1-5 代码合同收口已并入基线（c2b436a），待 Phase 6 本地全量门禁 + Phase 7 远程隔离验证（test_pg_*.py + Seed 幂等 + full synthetic E2E）全部通过后，方可关闭 CP4A。候选未验收前本矩阵保持待重验状态。**
+- 结论：**按《ref/开发计划.md》Phase 0-7 执行 V2.1 PRD 完全对齐。Phase 1-2 代码合同收口已完成并提交（08cf3dc）；Phase 3 运行级 refresh + 八个 canonical reason code 已完成（待提交）；剩余 Phase 4-5 补齐、Phase 6 本地门禁 + Phase 7 远程隔离验证（test_pg_*.py + Seed 幂等 + full synthetic E2E）全部通过后，方可关闭 CP4A。候选未验收前本矩阵保持待重验状态。**
 
 ## 状态说明（本次 CP4A Amendment）
 

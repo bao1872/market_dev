@@ -23,12 +23,12 @@
 
 ## 3. 实现状态
 
-Phase 1–5 的主要代码合同收口已在 CP4A Pass1 落地（详见 `docs/changes/2026/CP4A-PG-Acceptance-Matrix.md`），本任务按计划核验合同收口完整性并补齐剩余 P0/P1 缺口。诚实状态（当前为计划执行起点，尚未完成 Phase 7 远程隔离验证）：
+Phase 1–5 的主要代码合同收口已在 CP4A Pass1 落地（详见 `docs/changes/2026/CP4A-PG-Acceptance-Matrix.md`），本任务按计划核验合同收口完整性并补齐剩余 P0/P1 缺口。诚实状态（截至 Phase 3 提交 08cf3dc 后继续推进，尚未完成 Phase 7 远程隔离验证）：
 
 - `prd_code_alignment` = `implemented_partial`（Phase 1–5 代码在库，待核验补齐）
-- `core_compute_once` = `implemented_partial`（需 Phase 1 核验）
-- `stock_core_atomic_publication` = `implemented_partial`（需 Phase 2 核验）
-- `chip_run_level_15m` = `implemented_partial`（需 Phase 3 补齐）
+- `core_compute_once` = `implemented`（Phase 1：六类 kernel 独立计数在真实调用点、CoreRunContext 冻结 run_mode/source_cutoff/完整 config、artifact schema_version）
+- `stock_core_atomic_publication` = `implemented`（Phase 2：唯一入口 publish_stock_core_atomically + 真实 fencing + coverage SSOT 修复 + partial unique 原子事务）
+- `chip_run_level_15m` = `implemented_partial`（Phase 3：已新增运行级 refresh coordinator + 八个 canonical reason code + FUTURE_DATA/TIMESTAMP_INVALID；**剩余缺口**：每股 ChipConsensusRunItem 状态机接线、MDAS 15m 批读未实现，逐股仍 get_bars）
 - `closure_six_states` = `implemented_partial`（需 Phase 4 补齐）
 - `seed_real_producers_only` = `implemented_partial`（需 Phase 5 核验）
 - `code_ready` = `false`
@@ -36,6 +36,8 @@ Phase 1–5 的主要代码合同收口已在 CP4A Pass1 落地（详见 `docs/c
 - `stable_deployed` = `false`
 - `data_closed` = `false`
 - `full_v2_1_closed` = `false`
+
+> Phase 3 诚实说明：运行级 refresh（有界并发+每股超时+逐股 status）与八个 canonical reason code 已实现并经单测验证；`ChipConsensusRunItem` 模型存在但 executor 尚未接线每股状态机，MDAS 15m 批读仍未实现（保留逐股 get_bars + 冻结 cutoff 占位）。这两项列入后续补齐。
 
 ## 4. 已执行验证
 
