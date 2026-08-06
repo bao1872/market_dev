@@ -31,7 +31,7 @@
 
 **Phase 4 目标 SHA（phase4_target_sha）**: `b3d114b25d229c484f3db8b0afcb226387c6709d` — 当前 origin/dev；GitHub 对比 `0bc7bfe → b3d114b` ahead_by=1，唯一变化为验收矩阵文档，业务代码/Compose/测试代码均未变化；完整门禁已在本 SHA 重跑全部通过。
 
-**基线**: `e4a6654f0a589d801df7f0aca958f1609f46c679`（文档一致性门禁的矩阵核对时点 = 当前 HEAD/origin/dev；**非** Phase 4 目标，Phase 4 统一使用 `b3d114b`）
+**基线**: `eb51c287787d70ffeb079e64734251a712f87b31`（文档一致性门禁的矩阵核对时点 = 本次治理修改前的 current HEAD/origin/dev；**非** Phase 4 目标，Phase 4 统一使用 `b3d114b`）
 
 **生成日期**: 2026-08-05
 
@@ -461,4 +461,3 @@ production_fully_ready               = false
 
 > 下一步：隔离 PG 集成（Gate 2）才允许 apply Migration 085/086 并验证并发幂等、board fetch/reuse 真实行为、scheduler 子任务聚合。
 > 之后交人工做前端逐页手动验证（P1-6），再考虑 PG synthetic E2E 执行。
-

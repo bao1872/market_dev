@@ -50,6 +50,10 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
     [
         ("role_file", "non-canonical rule file"),
         ("no_governance_auth", "missing explicit governance-change authorization gate"),
+        ("no_prd_auth", "missing explicit PRD authorization gate"),
+        ("no_maps_auth", "missing explicit Maps authorization gate"),
+        ("no_runbooks_auth", "missing explicit Runbooks authorization gate"),
+        ("no_plan_doc_gate", "missing explicit plan-scoped document authorization gate"),
         ("future_state", "future/staged governance state"),
         ("auto_ci", "automatic trigger"),
         ("old_deploy", "removed path restored"),
@@ -89,6 +93,30 @@ def test_governance_regressions_are_rejected(
         # 回潮：本地入口不再自举到目标 SHA，直接跑服务器当前工作树的脚本。
         path = local_entry
         path.write_text(read_text(path).replace("checkout -f --detach", "checkout -f"), encoding="utf-8")
+    elif mutation == "no_prd_auth":
+        path = governance_repo / "AGENTS.md"
+        path.write_text(
+            read_text(path).replace(MODULE.PRD_AUTHORIZATION_MARKER, "PRD authorization removed"),
+            encoding="utf-8",
+        )
+    elif mutation == "no_maps_auth":
+        path = governance_repo / "AGENTS.md"
+        path.write_text(
+            read_text(path).replace(MODULE.MAPS_AUTHORIZATION_MARKER, "Maps authorization removed"),
+            encoding="utf-8",
+        )
+    elif mutation == "no_runbooks_auth":
+        path = governance_repo / "AGENTS.md"
+        path.write_text(
+            read_text(path).replace(MODULE.RUNBOOKS_AUTHORIZATION_MARKER, "Runbooks authorization removed"),
+            encoding="utf-8",
+        )
+    elif mutation == "no_plan_doc_gate":
+        path = governance_repo / "AGENTS.md"
+        path.write_text(
+            read_text(path).replace(MODULE.PLAN_DOC_GATE_MARKER, "Plan document gate removed"),
+            encoding="utf-8",
+        )
     elif mutation == "no_head_restore":
         path = local_entry
         path.write_text(read_text(path).replace("trap restore_head EXIT", "# no trap"), encoding="utf-8")

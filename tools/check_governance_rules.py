@@ -45,6 +45,10 @@ TOOL_NAMES = ("TRAE CN", "TRAE Work", "CodeBuddy", "Codex", "Cursor", "Copilot")
 NEUTRAL_MARKERS = ("不按", "不区分", "同一套", "已删除", "已废弃", "禁止恢复", "原 `rules/")
 CHANGE_ID_RE = re.compile(r"CHANGE-\d{8}-\d{3}")
 GOVERNANCE_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求调整治理体系"
+PRD_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求新增、修改或校准 PRD"
+MAPS_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求更新 Maps"
+RUNBOOKS_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求更新 Runbooks"
+PLAN_DOC_GATE_MARKER = "计划授权不得隐式覆盖 PRD、Maps、Runbooks 或治理文档"
 
 
 def read(path: Path) -> str:
@@ -74,6 +78,14 @@ def check(root: Path) -> list[str]:
         errors.append("AGENTS.md must reference rules/README.md")
     if GOVERNANCE_AUTHORIZATION_MARKER not in agents_text:
         errors.append("AGENTS.md missing explicit governance-change authorization gate")
+    for marker, label in (
+        (PRD_AUTHORIZATION_MARKER, "PRD"),
+        (MAPS_AUTHORIZATION_MARKER, "Maps"),
+        (RUNBOOKS_AUTHORIZATION_MARKER, "Runbooks"),
+        (PLAN_DOC_GATE_MARKER, "plan-scoped document"),
+    ):
+        if marker not in agents_text:
+            errors.append(f"AGENTS.md missing explicit {label} authorization gate")
     for name in sorted(CANONICAL_RULES - {"README.md"}):
         if f"rules/{name}" not in agents_text:
             errors.append(f"AGENTS.md missing rule entry: rules/{name}")

@@ -6,6 +6,10 @@
 
 普通 Bug 与局部代码修改默认由 Git 历史记录。只有重要业务规则、契约、主要实现结构、运行方式或重大数据修复发生变化时，才在 `docs/changes/YYYY/` 新增一个 Change 并更新 `docs/changes/INDEX.md`。
 
+代码实现阶段的文档出口默认只有对应 Change。用户尚未验收候选实现时，Change 状态必须明确为
+`implemented_unconfirmed`、`verified_code_pending_acceptance` 或等价状态；不得据此自动修改 PRD、
+Maps 或 Runbooks，也不得把测试通过写成用户验收或正式闭环。
+
 CHANGE 必填字段：
 
 - 变更编号；

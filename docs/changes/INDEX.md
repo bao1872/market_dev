@@ -10,6 +10,7 @@
 
 | Change ID | 日期 | 标题 | 类型 | 领域 | 状态 | 关联 PRD | 关联 Maps |
 |---|---|---|---|---|---|---|---|
+| CHANGE-20260806-004 | 2026-08-06 | PRD、Maps 与 Runbooks 用户授权门 | governance+workflow+quality-gate | 治理/产品决策/实现记忆/操作流程 | `implemented_local_pending_user_acceptance` | — | — |
 | CHANGE-20260806-003 | 2026-08-06 | PRD 体系职责与盘后闭环校准 | product-contract+docs | PRD 全局/行情/量化/盘后/Review/竞价/运行 | `prd_confirmed`；实现差距已记录，未部署 | `prd/README.md`、`prd/10/20/30/31/70/75/80` | `maps/10-market-data.md`、`maps/30-after-close.md` |
 | CHANGE-20260806-002 | 2026-08-06 | 治理体系第一性原理收敛 | governance+contract+docs | 治理/测试/远程验证/稳定运行 | `implemented_local`；未部署 | `prd/80-system-runtime.md` | `maps/80-system-runtime.md` |
 | CHANGE-20260806-001 | 2026-08-06 | 开发、测试、部署三平面治理与盘后 15m 依赖校准 | governance+contract+code | 运行体系/测试/盘后行情/筹码共识 | `implemented_local`；共享测试代码与 chip 15m refresh/readiness 已实现；未远程验证、未部署 | `prd/30-after-close.md`、`prd/80-system-runtime.md` | `maps/30-after-close.md`、`maps/80-system-runtime.md` |
