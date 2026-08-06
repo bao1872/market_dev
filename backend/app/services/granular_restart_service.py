@@ -534,11 +534,15 @@ async def _handle_dsa_projection(
     failed: list[str] = []
     for snapshot in snapshots:
         try:
-            artifact = _artifact_from_snapshot(
-                snapshot,
-                source_core_run_id=source_core_run_id,
-                parameter_hash=parameter_hash,
-                algorithm_versions=algorithm_versions,
+            # [CHANGE-20260806-CP4A.1 / Item 4] restart 与正常链共用公开 CoreArtifactCodec，
+            # 不再依赖 recovery 私有 _artifact_from_snapshot（保证单一反序列化合同）。
+            from app.services.core_artifact_codec import (
+                decode_dsa_projection_from_summary,
+            )
+            artifact = decode_dsa_projection_from_summary(
+                getattr(snapshot, "summary_payload", None) or {},
+                instrument_id=snapshot.instrument_id,
+                trade_date=snapshot.trade_date,
             )
             payload = build_dsa_projection_payload(
                 artifact,
