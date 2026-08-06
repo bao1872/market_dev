@@ -808,9 +808,20 @@ async def test_review_core_with_run_items_uses_mdas_batch_read_and_metrics() -> 
             new_callable=AsyncMock,
         ) as upsert,
     ):
+        from app.services.core_run_context import ReleasedConfigResolver
+
+        class _FakeResolver(ReleasedConfigResolver):
+            async def resolve_released_dsa_config(self, *, trade_date):
+                return {
+                    "dsa_version": "v1",
+                    "dsa_build_hash": "build-x",
+                    "dsa_effective_config": {"min_dir_bars": 50},
+                }
+
         result = await compute_review_core_with_run_items(
             date_mod(2026, 7, 31), instrument_ids, snapshot_run_id,
             batch_size=2, failure_threshold=0.3,
+            released_config_resolver=_FakeResolver(),
         )
 
     # [CHANGE-20260804-FS] 数据库级批读：每个 claim 批只发起 1 次 bars SQL + 1 次

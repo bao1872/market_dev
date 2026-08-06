@@ -29,7 +29,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import platform
 import resource
@@ -1236,6 +1235,7 @@ async def compute_review_core_with_run_items(
     progress_callback: Callable[..., Awaitable[None]] | None = None,
     algorithm_version: str = "v1",
     input_hash: str | None = None,
+    released_config_resolver: Any | None = None,
 ) -> dict[str, Any]:
     """[CHANGE-20260729-008] 单股×阶段检查点版 review core 计算。
 
@@ -1281,30 +1281,33 @@ async def compute_review_core_with_run_items(
     # 保证同 run 所有股票 calculatedAt 完全相同（禁止单股各自取时钟）。
     run_calculated_at = _make_run_calculated_at()
 
-    # [CHANGE-20260805-CP4A / P0-02] 在 run 入口创建一次 run-level CoreRunContext 并冻结，
-    # 传给全部股票（逐股禁止自行创建 context）。冻结：run_calculated_at、eligible universe
-    # hash、algorithm versions、execution contract。released DSA/SMC/momentum config 的解析
-    # 接入点在此（当前用默认版本，后续接 StrategyVersion 查询后替换 build_default_algorithm_versions）。
+    # [CHANGE-20260805-CP4A-CP3 / P0-02] 在 run 入口创建一次 run-level CoreRunContext 并冻结，
+    # 传给全部股票（逐股禁止自行创建 context）。**released config 唯一来源**：scheduled 模式
+    # 必须解析 released dsa_selector StrategyVersion，无 released 时 fail-closed（禁止回退代码常量）。
+    # 冻结：run_calculated_at / eligible universe hash / released DSA config / market-data contract
+    # / adjustment contract / parameter hash / execution contract。
     from app.services.core_run_context import (
-        build_default_algorithm_versions,
+        SqlAlchemyReleasedConfigResolver,
+        resolve_core_run_context,
     )
 
-    eligible_universe_hash = hashlib.sha256(
-        "\x00".join(sorted(str(i) for i in instrument_ids)).encode()
-    ).hexdigest()[:16]
-    run_core_context = CoreRunContext(
-        trade_date=trade_date,
-        run_calculated_at=datetime.fromisoformat(run_calculated_at),
-        algorithm_versions=build_default_algorithm_versions(),
-        config={
-            "eligible_universe_hash": eligible_universe_hash,
-            "eligible_universe_size": len(instrument_ids),
-            # [P0-02] released config 解析占位：接入 DSA StrategyVersion 后在此注入
-            # dsa_effective_config / smc_config / momentum_config / volume_context_config
-            # / market_data_contract_version，并进入 parameter_hash。
-        },
-        run_id=snapshot_run_id,
-    )
+    if released_config_resolver is not None:
+        run_core_context = await resolve_core_run_context(
+            trade_date=trade_date,
+            snapshot_run_id=snapshot_run_id,
+            eligible_instrument_ids=instrument_ids,
+            run_calculated_at=datetime.fromisoformat(run_calculated_at),
+            resolver=released_config_resolver,
+        )
+    else:
+        async with AsyncSessionLocal() as cfg_db:
+            run_core_context = await resolve_core_run_context(
+                trade_date=trade_date,
+                snapshot_run_id=snapshot_run_id,
+                eligible_instrument_ids=instrument_ids,
+                run_calculated_at=datetime.fromisoformat(run_calculated_at),
+                resolver=SqlAlchemyReleasedConfigResolver(cfg_db),
+            )
 
     # 1. 创建 run items（幂等）
     async with AsyncSessionLocal() as db:

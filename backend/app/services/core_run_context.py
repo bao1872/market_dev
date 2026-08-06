@@ -23,8 +23,8 @@ import hashlib
 import json
 import threading
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from typing import Any
+from datetime import UTC, date, datetime
+from typing import Any, Protocol
 
 # ===== 版本常量（集中治理，避免各处字符串漂移）=====
 DSA_ALGORITHM_VERSION = "dsa-v1"
@@ -249,6 +249,159 @@ class CoreComputationArtifact:
 def make_parameter_hash(context: CoreRunContext) -> str:
     """便捷入口：返回 run context 的参数 hash。"""
     return context.parameter_hash
+
+
+# ===========================================================================
+# [CHANGE-20260805-CP4A-CP3 / P0-02] released-config 唯一来源
+# ===========================================================================
+# market-data contract 版本（canonical daily frame 的输入合同：adj + source bar hash）
+MARKET_DATA_CONTRACT_VERSION = "mdc-v1"
+
+
+class ReleasedConfigError(RuntimeError):
+    """released config 解析失败（无 released version / manifest 缺失等）。"""
+
+
+class ReleasedConfigResolver(Protocol):
+    """released 配置解析抽象（便于 fake repository 单测，不连真实 DB）。"""
+
+    async def resolve_released_dsa_config(
+        self,
+        *,
+        trade_date: date,
+    ) -> dict[str, Any]:
+        """解析 released dsa_selector StrategyVersion。
+
+        Returns:
+            {"dsa_version": str, "dsa_effective_config": dict, "dsa_build_hash": str}
+
+        Raises:
+            ReleasedConfigError: 无 released version 或 manifest 缺 parameters
+        """
+        ...
+
+
+class SqlAlchemyReleasedConfigResolver:
+    """默认 SQLAlchemy 实现：查询 released dsa_selector StrategyVersion。
+
+    使用 strategy_service.list_versions / release 语义；无 released version 时 fail-closed。
+    """
+
+    def __init__(self, db: Any) -> None:
+        self._db = db
+
+    async def resolve_released_dsa_config(
+        self,
+        *,
+        trade_date: date,
+    ) -> dict[str, Any]:
+        # 延迟 import 避免模块级 DB 依赖（纯模块可单测）
+        from sqlalchemy import select
+
+        from app.models.strategy import StrategyDefinition, StrategyVersion
+
+        stmt = (
+            select(StrategyVersion, StrategyDefinition.strategy_key)
+            .join(
+                StrategyDefinition,
+                StrategyDefinition.id == StrategyVersion.strategy_definition_id,
+            )
+            .where(
+                StrategyDefinition.strategy_key == "dsa_selector",
+                StrategyVersion.status == "released",
+            )
+            .order_by(StrategyVersion.version.desc())
+            .limit(1)
+        )
+        result = await self._db.execute(stmt)
+        row = result.first()
+        if row is None:
+            raise ReleasedConfigError(
+                "dsa_selector 无 released StrategyVersion（scheduled 模式禁止回退代码常量）"
+            )
+        version, _key = row
+        manifest = version.manifest or {}
+        parameters = manifest.get("parameters")
+        if not isinstance(parameters, dict):
+            raise ReleasedConfigError(
+                "released dsa_selector StrategyVersion 的 manifest 缺 parameters"
+            )
+        return {
+            "dsa_version": str(getattr(version, "version", "")),
+            "dsa_build_hash": str(getattr(version, "build_hash", "")),
+            "dsa_effective_config": dict(parameters),
+        }
+
+
+async def resolve_core_run_context(
+    *,
+    trade_date: date,
+    snapshot_run_id: Any,
+    eligible_instrument_ids: list[Any],
+    run_calculated_at: datetime | None = None,
+    resolver: ReleasedConfigResolver | None = None,
+    execution_contract_version: str = CORE_EXECUTION_CONTRACT_VERSION,
+) -> CoreRunContext:
+    """解析并冻结一次 scheduled stock_core run 的 run-level CoreRunContext。
+
+    [CHANGE-20260805-CP4A-CP3 / P0-02] scheduled 模式的 config 唯一来源：
+    - DSA：必须解析 released dsa_selector StrategyVersion；无 released 时 **fail-closed**，
+      禁止回退代码常量。
+    - SMC / momentum / volume：当前以冻结代码常量版本进入 config（与 DSA manifest 隔离），
+      后续若这些算法也有 released StrategyVersion，接入同一 resolver 路径。
+    - universe hash / market-data contract / adjustment contract 一并冻结。
+
+    Args:
+        trade_date: 交易日
+        snapshot_run_id: StockFeatureSnapshotRun id
+        eligible_instrument_ids: eligible universe（参与 core 计算的标的）
+        run_calculated_at: run 级时钟（默认 now）
+        resolver: released-config 解析器（默认 SqlAlchemyReleasedConfigResolver）
+        execution_contract_version: 执行合同版本
+
+    Returns:
+        冻结的 CoreRunContext
+
+    Raises:
+        ReleasedConfigError: 无 released dsa_selector StrategyVersion（fail-closed）
+    """
+    if run_calculated_at is None:
+        run_calculated_at = datetime.now(UTC)
+    if resolver is None:
+        raise ReleasedConfigError(
+            "resolve_core_run_context 需要 released-config resolver（scheduled 模式禁止"
+            "无 released 版本时回退代码常量）"
+        )
+
+    # 解析 released DSA（fail-closed）
+    dsa_cfg = await resolver.resolve_released_dsa_config(trade_date=trade_date)
+
+    # 冻结 universe hash（顺序无关）
+    universe_hash = hashlib.sha256(
+        "\x00".join(sorted(str(i) for i in eligible_instrument_ids)).encode()
+    ).hexdigest()[:16]
+
+    # 算法版本：DSA 用 released version；SMC/momentum/bollinger/sqzmom 冻结代码常量版本
+    algorithm_versions = build_default_algorithm_versions()
+    algorithm_versions["dsa"] = dsa_cfg["dsa_version"]
+
+    config: dict[str, Any] = {
+        "dsa": dsa_cfg["dsa_effective_config"],
+        "eligible_universe_hash": universe_hash,
+        "eligible_universe_size": len(eligible_instrument_ids),
+        "market_data_contract_version": MARKET_DATA_CONTRACT_VERSION,
+        "adjustment_contract_version": "adj-v1",
+        "dsa_build_hash": dsa_cfg.get("dsa_build_hash"),
+    }
+
+    return CoreRunContext(
+        trade_date=trade_date,
+        run_calculated_at=run_calculated_at,
+        algorithm_versions=algorithm_versions,
+        config=config,
+        execution_contract_version=execution_contract_version,
+        run_id=snapshot_run_id,
+    )
 
 
 if __name__ == "__main__":
