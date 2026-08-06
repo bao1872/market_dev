@@ -214,6 +214,8 @@ Gov     python tools/check_governance_rules.py
 4. **远程验证是独立证据层**：涉及 Migration、ORM/SQL、真实 PG 语义、Worker/编排、发布指针、权限写入或跨服务业务链路的变更，稳定运行部署前必须由同一 SHA 在远程验证库完成相应 PG Integration/Synthetic E2E。纯文档、纯样式或经合同测试证明不触及上述边界的修改不强制运行 PG 验证。
 5. **本地测试失败时禁止部署**：见 TQ-82。
 6. **本地无法运行测试时如实报告**：见 TQ-82，不得用 CI 或服务器测试掩盖。
+7. **远程验证尝试必须收尾**：每次 PG 测试、Migration round-trip、Synthetic E2E 或远程调试尝试，无论 pass、fail、cancelled、interrupted 或 timeout，都必须先导出必要日志与身份/资源证据，再执行正式清理；清理失败使本轮结果最多为 `blocked_cleanup`，不得继续创建下一套验证资源。
+8. **诊断证据与运行现场分离**：失败分析依赖已导出的文本日志、测试报告、SHA、数据库名、revision 和资源快照，不以长期保留容器或验证数据库作为默认诊断方式。
 
 ### TQ-91 当前未采用的交付机制
 

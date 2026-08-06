@@ -438,8 +438,8 @@ stock core 批量入口，该入口必须另行满足本合同的全部字段。
 - **连接校验**：应用/测试连接建立后必须执行 `SELECT current_database(), current_user;` 并确认数据库名匹配验证库命名；若 `current_database()` 返回 `bz_stock`，立即中止并告警。
 - **禁止连接 `bz_stock`**：验证栈的所有连接字符串、Worker、测试、seed 脚本不得指向 `bz_stock`；任何写入 `bz_stock` 的动作视为越权。
 - **Migration 规则**：允许 DDL 与 Alembic，但只针对验证数据库，从确认 head 升级到目标 migration（含 085/086），可执行 upgrade→downgrade→upgrade 验证；不得触碰 `bz_stock` schema。
-- **连接终止**：用户验收完成、验证资源清理阶段，验证脚本必须先断开验证栈连接再删除数据库。
-- **验收后删除**：用户确认通过后，由 `scripts/verify/drop_verify_database.sh` 删除 `bz_stock_verify_<sha>`。
+- **连接终止**：每次验证尝试结束后，清理脚本必须先停止并断开验证栈连接，再删除该次精确命名验证数据库。
+- **尝试后删除**：无论成功、失败、取消或超时，都由 `scripts/verify/drop_verify_database.sh` 在证据导出后删除 `bz_stock_verify_<sha>`；不得以等待验收或保留现场为由长期占用磁盘。
 - **无备份要求**：验证数据库不是业务数据库，不要求备份，删除不可逆但无业务影响。
 
 ### DS-111 远程验证栈
@@ -462,6 +462,23 @@ stock core 批量入口，该入口必须另行满足本合同的全部字段。
   3. 降级（degraded_ready，board reused / chip partial / hybrid）；
   4. 治理与恢复（publication missing / lease lost / retryable child）。
 - **不得写成一次性远程脚本**：seed 必须是仓库内可复跑的正式 CLI，受版本控制，支持重建验证库时幂等重跑。
+
+### DS-113 每次验证尝试强制清理
+
+每次远程验证、PG 测试、Migration round-trip、Synthetic E2E 或调试尝试都是一个有界资源单元。正式入口必须用 trap/finally 或等价机制保证 pass、fail、cancelled、interrupted、timeout 全路径进入 cleanup；不得依赖操作者记忆手工收尾。
+
+清理前必须导出到本地控制端或轻量持久证据目录：target/repo/runtime SHA、验证数据库名、Alembic revision、失败 gate、pytest/JUnit 摘要、关键日志尾部、`docker ps`、`docker stats --no-stream`、磁盘和内存快照。证据不得包含秘密、Owner 密码或完整业务数据。
+
+自动清理范围仅限本次尝试创建且可精确归属的资源：
+
+- `panji-verify-<sha>`（或合同规定的唯一 project）所属验证容器与 network，执行 `down` 时禁止 `-v`；
+- `bz_stock_verify_<sha>`，先终止该库连接，再由正式 drop 脚本按全名删除；
+- 本次创建的临时 env、挂载目录、测试报告中间文件、无消费者的测试容器和 BuildKit 临时缓存；
+- 仅在本次确实构建时，按精确 tag 删除该次验证专用镜像；复用的基础镜像、稳定运行镜像、当前/上一成功/rollback 镜像不得删除。
+
+永久禁止清理：`bz_stock`、共享 PostgreSQL/Redis/Umami Volume、稳定运行 `market-dev` 容器/network、基础镜像、受保护镜像、非本次创建或来源不明资源。禁止 `docker system prune`、`docker volume prune`、模糊数据库匹配和批量 drop。
+
+cleanup 必须输出 created/deleted/retained/failed 四份精确清单，并在清理后复检磁盘可用量、MemAvailable、验证容器/网络残留和验证数据库不存在。任一残留或清理错误都标记 `blocked_cleanup`，停止创建新验证库或验证栈，先修复清理问题。
 
 ## 分层发布与增量检查点纪律
 

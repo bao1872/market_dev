@@ -54,6 +54,9 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
         ("no_maps_auth", "missing explicit Maps authorization gate"),
         ("no_runbooks_auth", "missing explicit Runbooks authorization gate"),
         ("no_plan_doc_gate", "missing explicit plan-scoped document authorization gate"),
+        ("no_attempt_cleanup", "missing explicit per-attempt verification cleanup authorization gate"),
+        ("no_blocked_cleanup", "missing blocked_cleanup fail-closed gate"),
+        ("restore_acceptance_cleanup", "restored acceptance-delayed verification cleanup"),
         ("future_state", "future/staged governance state"),
         ("auto_ci", "automatic trigger"),
         ("old_deploy", "removed path restored"),
@@ -115,6 +118,25 @@ def test_governance_regressions_are_rejected(
         path = governance_repo / "AGENTS.md"
         path.write_text(
             read_text(path).replace(MODULE.PLAN_DOC_GATE_MARKER, "Plan document gate removed"),
+            encoding="utf-8",
+        )
+    elif mutation == "no_attempt_cleanup":
+        path = governance_repo / "AGENTS.md"
+        path.write_text(
+            read_text(path).replace(MODULE.ATTEMPT_CLEANUP_MARKER, "Attempt cleanup removed"),
+            encoding="utf-8",
+        )
+    elif mutation == "no_blocked_cleanup":
+        path = governance_repo / "rules/80-deployment-data-safety.md"
+        path.write_text(
+            read_text(path).replace(MODULE.BLOCKED_CLEANUP_MARKER, "Cleanup errors may continue"),
+            encoding="utf-8",
+        )
+    elif mutation == "restore_acceptance_cleanup":
+        path = governance_repo / "rules/80-deployment-data-safety.md"
+        path.write_text(
+            read_text(path)
+            + "\n用户确认通过后，由 `scripts/verify/drop_verify_database.sh` 删除验证库。\n",
             encoding="utf-8",
         )
     elif mutation == "no_head_restore":

@@ -49,6 +49,8 @@ PRD_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求新增、�
 MAPS_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求更新 Maps"
 RUNBOOKS_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求更新 Runbooks"
 PLAN_DOC_GATE_MARKER = "计划授权不得隐式覆盖 PRD、Maps、Runbooks 或治理文档"
+ATTEMPT_CLEANUP_MARKER = "每次远程验证或调试尝试结束后，无论成功、失败、取消或超时"
+BLOCKED_CLEANUP_MARKER = "任一残留或清理错误都标记 `blocked_cleanup`"
 
 
 def read(path: Path) -> str:
@@ -83,9 +85,23 @@ def check(root: Path) -> list[str]:
         (MAPS_AUTHORIZATION_MARKER, "Maps"),
         (RUNBOOKS_AUTHORIZATION_MARKER, "Runbooks"),
         (PLAN_DOC_GATE_MARKER, "plan-scoped document"),
+        (ATTEMPT_CLEANUP_MARKER, "per-attempt verification cleanup"),
     ):
         if marker not in agents_text:
             errors.append(f"AGENTS.md missing explicit {label} authorization gate")
+
+    deployment_rules = read(rules_dir / "80-deployment-data-safety.md")
+    if BLOCKED_CLEANUP_MARKER not in deployment_rules:
+        errors.append("rules/80 missing blocked_cleanup fail-closed gate")
+    for forbidden_cleanup_regression in (
+        "用户验收完成、验证资源清理阶段",
+        "用户确认通过后，由 `scripts/verify/drop_verify_database.sh`",
+    ):
+        if forbidden_cleanup_regression in deployment_rules:
+            errors.append(
+                "rules/80 restored acceptance-delayed verification cleanup: "
+                f"{forbidden_cleanup_regression}"
+            )
     for name in sorted(CANONICAL_RULES - {"README.md"}):
         if f"rules/{name}" not in agents_text:
             errors.append(f"AGENTS.md missing rule entry: rules/{name}")
