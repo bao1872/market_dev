@@ -383,6 +383,13 @@ class Settings(BaseSettings):
     # 运行环境
     app_env: str = Field(default="development", description="运行环境")
     log_level: str = Field(default="INFO", description="日志级别")
+    market_data_mode: str = Field(
+        default="production",
+        description=(
+            "行情模式：production（正式，可访问外部 pytdx）| "
+            "verification_replay（验证回放，只读验证库，禁止网络行情源）"
+        ),
+    )
 
     # 数据库（postgresql+psycopg://，环境变量优先，否则从配置文件读取）
     database_url: str = Field(

@@ -107,6 +107,53 @@ _TARGET_FREQ: dict[str, str] = {"15m": "15min", "1h": "60min"}
 _BAR_COLUMNS: list[str] = ["open", "high", "low", "close", "volume", "amount", "adj_factor"]
 
 
+class VerificationExternalFetchBlockedError(RuntimeError):
+    """verification_replay 模式下禁止外部网络行情源（pytdx），DB 数据不足时 fail-closed。
+
+    携带精确缺口诊断，便于定位是哪个条件让 DB bars 被判为不可用。
+    """
+
+    def __init__(
+        self,
+        *,
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        reason: str | None = None,
+        db_row_count: int | None = None,
+        completed_through: str | None = None,
+        required_end: str | None = None,
+        available_end: str | None = None,
+    ) -> None:
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.reason = reason
+        self.db_row_count = db_row_count
+        self.completed_through = completed_through
+        self.required_end = required_end
+        self.available_end = available_end
+        msg = (
+            "verification_replay 禁止外部行情源，DB 数据不足（fail-closed）: "
+            f"symbol={symbol}, timeframe={timeframe}, reason={reason}, "
+            f"db_row_count={db_row_count}, completed_through={completed_through}, "
+            f"required_end={required_end}, available_end={available_end}"
+        )
+        super().__init__(msg)
+
+
+def _market_data_mode() -> str:
+    """读取 MARKET_DATA_MODE（verification_replay / production），缓存避免重复 get_settings。"""
+    try:
+        from app.config import get_settings
+
+        return get_settings().market_data_mode
+    except Exception:
+        return "production"
+
+
+def _is_verification_replay() -> bool:
+    return _market_data_mode() == "verification_replay"
+
+
 @dataclass
 class BarAggregationResult:
     """行情聚合结果，包含 bars DataFrame 与数据源诊断字段。
@@ -1038,8 +1085,31 @@ async def _build_daily_aggregation(
     if not daily_df.empty:
         last_persisted_bar_time = pd.Timestamp(daily_df.index[-1])
 
-    need_tail = daily_df.empty or daily_df.index[-1].date() < expected  # type: ignore[attr-defined]
+    # [CHANGE-20260805-CP4A / P0-01] 历史点回放补尾判断统一为「预期最后完成日」与「请求 end」
+    # 的较小者（与单股 get_bars 路径一致）。生产 now==处理日，min 取 now_expected，行为不变；
+    # 回放时请求 end 在过去（如 07-30），min 取历史 end，DB 已完整覆盖则不触发 pytdx。
+    # 这比仅 verification_replay 特判更通用，也避免回放误判触发外部行情源。
+    now_expected = await _call_expected_last_completed_daily_bar(session, now) \
+        if expected is None else expected
+    effective_expected = min(now_expected, end)
+
+    need_tail = daily_df.empty or daily_df.index[-1].date() < effective_expected  # type: ignore[attr-defined]
     if need_tail:
+        if _is_verification_replay():
+            # 验证回放禁止外部行情源，DB 数据不足 → fail-closed 并输出精确缺口
+            available_end = (
+                pd.Timestamp(daily_df.index[-1]).date().isoformat()
+                if not daily_df.empty
+                else None
+            )
+            raise VerificationExternalFetchBlockedError(
+                timeframe=timeframe,
+                reason="DB 日线未覆盖到请求 end（verification_replay 禁止 pytdx）",
+                db_row_count=len(daily_df) if not daily_df.empty else 0,
+                completed_through=available_end,
+                required_end=end.isoformat(),
+                available_end=available_end,
+            )
         try:
             tail_df = await fetch_daily_bars(session, instrument_id, start, end)  # type: ignore[arg-type]
             if not tail_df.empty:
@@ -1404,7 +1474,12 @@ class MarketDataAggregationService:
             if not daily_df.empty:
                 last_persisted_bar_time = pd.Timestamp(daily_df.index[-1])
 
-            expected = await _call_expected_last_completed_daily_bar(session, now)
+            # [CHANGE-20260805-CP4A / P0-01] 历史点回放补尾判断必须取「预期最后完成日」与
+            # 「请求 end」的较小者：历史回放目标为过去某日时，不得拿真实 today 作为补尾基准
+            # （否则 DB 已完整覆盖到请求日仍会误触发 pytdx）。end 未提供（实时查询）时保持
+            # 原 expected 语义不变。此逻辑对单股/批量两条路径统一。
+            now_expected = await _call_expected_last_completed_daily_bar(session, now)
+            expected = min(now_expected, end) if end is not None else now_expected
             need_tail = daily_df.empty or daily_df.index[-1].date() < expected
 
             if need_tail:

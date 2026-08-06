@@ -206,6 +206,84 @@ async def test_daily_db_missing_tail_calls_pytdx(monkeypatch: pytest.MonkeyPatch
 
 
 # ============================================================
+# [CHANGE-20260805-CP4A / P0-01] 历史点回放：DB 已覆盖到请求 end 时不触发 pytdx
+# ============================================================
+
+
+async def test_daily_historical_request_does_not_trigger_pytdx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """历史回放目标（如 07-30）早于真实 today（08-05），DB 已完整覆盖到请求 end 时，
+    补尾基准应取 min(now_expected, requested_end) = requested_end，
+    不得拿真实 today 误判「未完成到预期」而触发 pytdx fallback（P0-01）。
+    """
+    service = mdas.MarketDataAggregationService()
+    # DB 只覆盖到历史请求 end 07-30（而非真实 today 08-05）
+    db_df = _build_daily_bars(["2026-07-28", "2026-07-29", "2026-07-30"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    # 真实 now 的「预期最后完成日」是 08-05（晚于请求 end 07-30）
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 8, 5),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+    pytdx_called = {"called": False}
+    monkeypatch.setattr(
+        mdas, "fetch_daily_bars",
+        lambda *a, **kw: _async_return(pytdx_called.update(called=True) or pd.DataFrame()),
+    )
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+        start_date=date(2026, 7, 28), end_date=date(2026, 7, 30),
+    )
+
+    assert result.data_source == "db"
+    assert not result.degraded
+    assert not pytdx_called["called"], (
+        "历史请求 DB 已覆盖到请求 end 时不应触发 pytdx fallback（P0-01）"
+    )
+    assert result.last_persisted_bar_time == pd.Timestamp("2026-07-30")
+
+
+async def test_daily_historical_request_short_db_still_needs_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """历史回放但 DB 未覆盖到请求 end（缺 07-30）时，仍应尝试 pytdx 补齐（P0-01）。
+    expected = min(now_expected=08-05, requested_end=07-30) = 07-30，DB 止于 07-29 < 07-30。
+    """
+    service = mdas.MarketDataAggregationService()
+    db_df = _build_daily_bars(["2026-07-28", "2026-07-29"])  # 缺 07-30
+    pytdx_tail = _build_daily_bars(["2026-07-30"], close_start=11.0)
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 8, 5),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+    monkeypatch.setattr(
+        mdas, "fetch_daily_bars",
+        lambda *a, **kw: _async_return(pytdx_tail.copy()),
+    )
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+        start_date=date(2026, 7, 28), end_date=date(2026, 7, 30),
+    )
+
+    assert result.data_source == "hybrid"
+    assert pd.Timestamp("2026-07-30") in result.bars.index
+
+
+# ============================================================
 # 日线去重：pytdx 15:00 与 DB 00:00 同日不产生重复 bar
 # ============================================================
 
