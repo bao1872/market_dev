@@ -49,25 +49,19 @@ from app.services.first_pyramid_service import (
 logger = logging.getLogger(__name__)
 
 
-# DSA projection 标量指标 keys（与 dsa_projection_service 对齐，抽取 last_row_metrics）
-_DSA_METRIC_KEYS: frozenset[str] = frozenset({
-    "dsa_dir_bars",
-    "regime_value",
-    "regime_strength",
-    "dsa_vwap",
-    "dsa_vwap_dev_pct",
-    "vol_zscore",
-    "avg_amount_20d",
-})
-
-
 def _extract_dsa_metrics(dsa_bundle: dict[str, Any]) -> dict[str, Any]:
     """从 raw dsa_bundle 提取 DSA projection 标量指标。
 
-    优先取 last_row_metrics，仅保留契约内 keys。禁止解析中文摘要。
+    优先取 last_row_metrics，仅保留 `dsa_projection_service.DSA_PROJECTION_METRIC_KEYS`
+    契约内的 keys（与 projection 必需指标门禁对齐），保证 map_dsa_projection 的
+    dsa_dir_bars/regime_value/dsa_vwap 等必需键齐全。禁止解析中文摘要。
     """
+    from app.services.dsa_projection_service import DSA_PROJECTION_METRIC_KEYS
+
     last_row = dsa_bundle.get("last_row_metrics") or {}
-    return {k: last_row[k] for k in _DSA_METRIC_KEYS if k in last_row}
+    if not isinstance(last_row, dict):
+        return {}
+    return {k: last_row[k] for k in DSA_PROJECTION_METRIC_KEYS if k in last_row}
 
 
 def _extract_dsa_visual(dsa_bundle: dict[str, Any]) -> dict[str, Any]:

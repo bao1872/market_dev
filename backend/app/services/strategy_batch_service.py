@@ -54,6 +54,7 @@ from app.models.strategy_run import (
 )
 from app.repositories import strategy_result_repository
 from app.services.calendar_service import is_trading_day_async
+from app.services.dsa_projection_service import map_dsa_projection
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 # [CHANGE-20260717-002 SSOT] - DSA 行情读取改走 MarketDataAggregationService 唯一出口，
@@ -65,6 +66,7 @@ from app.services.strategy_service import (
 )
 from app.strategy.budget import BudgetExceededError
 from app.strategy.runtime import MarketDataContext, StrategyLoader
+from app.strategy.runtime import StrategyResult as RuntimeStrategyResult
 
 logger = logging.getLogger("strategy_batch_service")
 
@@ -1636,6 +1638,166 @@ class StrategyBatchService:
                 f"策略执行失败 instrument_id={item.instrument_id}, "
                 f"symbol={symbol}: {exc}"
             ) from exc
+
+
+# =============================================================================
+# [CHANGE-20260805-CP4A / P0-06] persist_precomputed_dsa_results
+#   正式入口：scheduled DSA 由预计算投影写入，不再调用 runtime.execute / compute_dsa_bundle。
+#   DSA 已在 CoreComputationArtifact 算过一次，本函数从 artifact 派生 projection 直接持久化。
+#
+#   流程：
+#   1. 对每股 artifact 调用 map_dsa_projection（从 artifact 派生，不重算 DSA）；
+#   2. 构造 RuntimeStrategyResult 并经 strategy_result_repository.write_results 落库；
+#   3. 更新 StrategyRunItem 状态（succeeded/failed + result_id）；
+#   4. 汇总并推进 StrategyRun 状态（completed/partial_failed/failed）。
+#
+#   硬约束（P0-04）：本函数**禁止**调用 runtime.execute / compute_dsa_bundle / StrategyRuntime。
+# =============================================================================
+
+
+async def persist_precomputed_dsa_results(
+    db: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    artifacts: dict[uuid.UUID, Any],
+    trade_date: date,
+    strategy_version_id: uuid.UUID,
+    requirement: str = "required_compatibility",
+    job_run_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """从预计算 CoreComputationArtifact 持久化 DSA StrategyResult/Run/Item。
+
+    Args:
+        db: 异步 DB 会话
+        run_id: DSA StrategyRun id
+        artifacts: {instrument_id: CoreComputationArtifact}，每股一份（来自 compute_core_artifact）
+        trade_date: 交易日
+        strategy_version_id: 已发布的 DSA StrategyVersion id
+        requirement: DSA projection requirement（默认 required_compatibility）
+        job_run_id: 关联 JobRun id（可选，用于事件）
+
+    Returns:
+        {"status":..., "succeeded":..., "failed":..., "skipped":...}
+
+    Raises:
+        RuntimeError: run 不存在或写入失败
+    """
+    run = await db.get(StrategyRun, run_id)
+    if run is None:
+        raise RuntimeError(f"persist_precomputed_dsa_results: DSA run 不存在 run_id={run_id}")
+
+    # 1. 每股：从 artifact 派生 DSA projection → RuntimeStrategyResult
+    results: list[RuntimeStrategyResult] = []
+    item_updates: dict[uuid.UUID, tuple[str, str | None]] = {}
+    for instrument_id, artifact in artifacts.items():
+        try:
+            record = map_dsa_projection(
+                artifact,
+                requirement=requirement,
+                expected_core_run_id=artifact.source_core_run_id,
+                expected_core_parameter_hash=artifact.parameter_hash,
+                expected_dsa_version=artifact.algorithm_versions.get("dsa"),
+            )
+            metrics = dict(record.payload or {})
+            results.append(
+                RuntimeStrategyResult(
+                    instrument_id=instrument_id,
+                    strategy_version_id=strategy_version_id,
+                    trade_date=trade_date,
+                    matched=True,
+                    metrics=metrics,
+                    calculation_id=(
+                        str(artifact.source_core_run_id)
+                        if artifact.source_core_run_id is not None else None
+                    ),
+                )
+            )
+            item_updates[instrument_id] = ("succeeded", None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "persist_precomputed_dsa_results: 单股 projection 失败 instrument_id=%s: %s",
+                instrument_id, exc,
+            )
+            item_updates[instrument_id] = ("failed", f"dsa_projection_failed: {exc}")
+
+    # 2. 批量写入 StrategyResult + metrics
+    written = 0
+    if results:
+        try:
+            written = await strategy_result_repository.write_results(
+                db, run.id, run.strategy_version_id, results
+            )
+        except Exception as exc:
+            await db.rollback()
+            raise RuntimeError(
+                f"persist_precomputed_dsa_results 写入结果失败 run_id={run_id}: {exc}"
+            ) from exc
+
+    # 3. 更新 StrategyRunItem 状态 + result_id
+    succeeded = failed = skipped = 0
+    for instrument_id, (status, reason) in item_updates.items():
+        item = (
+            await db.execute(
+                select(StrategyRunItem).where(
+                    StrategyRunItem.run_id == run_id,
+                    StrategyRunItem.instrument_id == instrument_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if item is None:
+            skipped += 1
+            continue
+        if status == "succeeded":
+            succeeded += 1
+            # 回填 result_id（与 write_results 写出的 StrategyResult 对应）
+            from app.models.strategy_run import StrategyResult as _StrategyResultModel
+
+            rid_row = (
+                await db.execute(
+                    select(_StrategyResultModel.id).where(
+                        _StrategyResultModel.run_id == run_id,
+                        _StrategyResultModel.instrument_id == instrument_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            item.result_id = rid_row
+        else:
+            failed += 1
+            item.reason_code = reason
+        item.status = status
+        item.finished_at = datetime.now(UTC)
+    await db.flush()
+
+    # 4. 推进 StrategyRun 状态
+    run.succeeded_count = succeeded
+    run.failed_count = failed
+    run.skipped_count = skipped
+    run.finished_at = datetime.now(UTC)
+    if failed == 0 and results:
+        run.status = "completed"
+    elif succeeded > 0:
+        run.status = "partial_failed"
+    else:
+        run.status = "failed"
+    await db.flush()
+
+    logger.info(
+        "persist_precomputed_dsa_results: run_id=%s status=%s "
+        "succeeded=%d failed=%d skipped=%d written=%d",
+        run_id, run.status, succeeded, failed, skipped, written,
+    )
+    if job_run_id is not None:
+        logger.info(
+            "job_run_id=%s DSA precomputed results persisted (BATCH_DONE)", job_run_id,
+        )
+
+    return {
+        "status": run.status,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+        "written": written,
+    }
 
 
 if __name__ == "__main__":
