@@ -147,7 +147,11 @@ def _bar(t: datetime, o: Decimal) -> dict[str, Any]:
     c = o + Decimal(f"{random.Random(hash(t)).uniform(-0.4, 0.4):.2f}")
     h = max(o, c) + Decimal("0.1")
     l = min(o, c) - Decimal("0.1")
-    return {"trade_time": t, "open": o, "high": h, "low": l, "close": c, "volume": Decimal(str(random.randint(1000, 9000)))}
+    volume = Decimal(str(random.randint(1000, 9000)))
+    return {
+        "trade_time": t, "open": o, "high": h, "low": l, "close": c,
+        "volume": volume, "amount": volume * c, "adj_factor": Decimal("1.0"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -198,30 +202,36 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
         base = 10.0 + (i % 50)
         for j, d in enumerate(_TRADING_DAYS):
             o = _price(base, i, j)
+            volume = Decimal(str(random.randint(10000, 90000)))
             daily_rows.append({
                 "instrument_id": str(inst_id), "trade_date": d,
                 "open": o, "high": o + Decimal("0.2"), "low": o - Decimal("0.2"),
-                "close": o, "volume": Decimal(str(random.randint(10000, 90000))),
-                "adj": "qfq",
+                "close": o, "volume": volume, "amount": volume * o,
+                "adj_factor": Decimal("1.0"),
             })
             # 60min: 4 根（10:30,11:30,14:00,15:00）
             for k, hhmm in enumerate([("10:30"), ("11:30"), ("14:00"), ("15:00")]):
                 t = datetime(d.year, d.month, d.day, int(hhmm[:2]), int(hhmm[3:]))  # noqa: DTZ001
                 b = _bar(t, o)
                 min60_rows.append({"instrument_id": str(inst_id), "trade_time": t,
-                                   **{k2: b[k2] for k2 in ("open", "high", "low", "close", "volume")}})
+                                   **{k2: b[k2] for k2 in (
+                                       "open", "high", "low", "close", "volume", "amount", "adj_factor",
+                                   )}})
     await verify_conn.execute(
         text(
-            "INSERT INTO bars_daily (instrument_id, trade_date, open, high, low, close, volume, adj) "
-            "VALUES (:instrument_id, :trade_date, :open, :high, :low, :close, :volume, :adj) "
-            "ON CONFLICT (instrument_id, trade_date, adj) DO NOTHING"
+            "INSERT INTO bars_daily "
+            "(instrument_id, trade_date, open, high, low, close, volume, amount, adj_factor) "
+            "VALUES (:instrument_id, :trade_date, :open, :high, :low, :close, :volume, "
+            ":amount, :adj_factor) ON CONFLICT (instrument_id, trade_date) DO NOTHING"
         ),
         daily_rows,
     )
     await verify_conn.execute(
         text(
-            "INSERT INTO bars_60min (instrument_id, trade_time, open, high, low, close, volume) "
-            "VALUES (:instrument_id, :trade_time, :open, :high, :low, :close, :volume) "
+            "INSERT INTO bars_60min "
+            "(instrument_id, trade_time, open, high, low, close, volume, amount, adj_factor) "
+            "VALUES (:instrument_id, :trade_time, :open, :high, :low, :close, :volume, "
+            ":amount, :adj_factor) "
             "ON CONFLICT (instrument_id, trade_time) DO NOTHING"
         ),
         min60_rows,
@@ -245,11 +255,15 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                 o = _price(base, i, _TRADING_DAYS.index(d) * 16 + slot)
                 b = _bar(t, o)
                 min15_rows.append({"instrument_id": str(inst_id), "trade_time": t,
-                                   **{k2: b[k2] for k2 in ("open", "high", "low", "close", "volume")}})
+                                   **{k2: b[k2] for k2 in (
+                                       "open", "high", "low", "close", "volume", "amount", "adj_factor",
+                                   )}})
     await verify_conn.execute(
         text(
-            "INSERT INTO bars_15min (instrument_id, trade_time, open, high, low, close, volume) "
-            "VALUES (:instrument_id, :trade_time, :open, :high, :low, :close, :volume) "
+            "INSERT INTO bars_15min "
+            "(instrument_id, trade_time, open, high, low, close, volume, amount, adj_factor) "
+            "VALUES (:instrument_id, :trade_time, :open, :high, :low, :close, :volume, "
+            ":amount, :adj_factor) "
             "ON CONFLICT (instrument_id, trade_time) DO NOTHING"
         ),
         min15_rows,

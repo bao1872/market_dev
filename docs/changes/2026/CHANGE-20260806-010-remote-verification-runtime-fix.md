@@ -47,6 +47,9 @@ PG gate 文案同步移除尚未执行的 closure 声明。
 第九次 attempt 确认目标 SHA 导入路径生效，Seed 进入 synthetic instruments 写入后暴露 typed bind
 错误：脚本向 PostgreSQL `date/timestamp` 参数传入 ISO 字符串。现对 instrument listing date、交易日历、
 日线日期及 60m/15m 时间统一传递 Python `date/datetime`，与 asyncpg 的类型合同一致。
+第十次 attempt 继续暴露 Seed 使用旧行情 schema：`bars_daily.adj` 已不存在，主键也不包含复权类型。
+现按当前 Bar ORM 将日线、60m、15m 统一写入 `amount` 与 `adj_factor`，冲突键使用各表真实复合主键；
+量额由同一 synthetic close/volume 同量纲生成，保留筹码共识所需的 15m 量额事实。
 
 ## 数据、验证与风险
 
