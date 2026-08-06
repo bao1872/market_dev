@@ -65,6 +65,9 @@ universe 过滤掉 `market='cn'` 的 synthetic instruments。600xxx 标的现标
 第十五次 attempt 已完成 core、DSA projection 和 board-facts，chip 写入被 fenced lease 正确拒绝，
 因为 Seed 直接传递了未 claim 的 epoch 0。Seed 现通过 `claim_next_job_run` 领取 queued chip job，提交
 真实 worker/epoch 后才调用 executor；claim 身份与目标 job 不一致时 fail closed。
+第十六次 attempt 的第一遍四场景 Seed 已完整成功，第二遍因正确的 published-run 不可覆盖门禁失败。
+Seed 现仅在四个固定场景日期的 core runs 全部存在时进入幂等只读路径，并重新验证 closures；部分
+场景存在时不标记完成，避免把半成品误判为幂等成功。
 
 ## 数据、验证与风险
 

@@ -710,6 +710,14 @@ async def seed_all(verify_conn) -> None:
     await _gen_synthetic_instruments_bars(verify_conn)
     await _gen_synthetic_boards(verify_conn)
     await _gen_synthetic_released_dsa_config(verify_conn)
+    completed_dates = set((await verify_conn.execute(text(
+        "SELECT DISTINCT trade_date FROM stock_feature_snapshot_runs "
+        "WHERE trade_date = ANY(:dates)"
+    ), {"dates": list(_SCENARIO_TRADE_DATES.values())})).scalars().all())
+    if completed_dates == set(_SCENARIO_TRADE_DATES.values()):
+        print("[seed] all scenario core runs already exist; validating closures only")
+        await _verify_closures()
+        return
     for sc in ("full_success", "async_enhance", "degraded", "governance"):
         await _seed_scenario(verify_conn, sc)
     # 验证 closure 符合预期（只读断言，失败抛错阻断）
