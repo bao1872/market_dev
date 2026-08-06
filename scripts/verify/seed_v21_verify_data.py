@@ -419,6 +419,7 @@ async def _add_review_prereq(db, *, trade_date: date, core_run_id: uuid.UUID):
     发布与否由真实 publish_review 门禁评估（缺 scope 快照/P/Q/U/C/V 时如实阻塞）。
     """
     from app.models.market_review import MarketReviewRun
+    from app.services.review_orchestrator_service import RUN_STATUS_CREATED
     from app.services.snapshot_run_item_service import get_run_progress
 
     progress = await get_run_progress(db, core_run_id)
@@ -429,7 +430,9 @@ async def _add_review_prereq(db, *, trade_date: date, core_run_id: uuid.UUID):
     run = MarketReviewRun(
         trade_date=trade_date, source_core_run_id=core_run_id,
         source_board_run_id=core_run_id,
-        status="running",  # 由真实 publish_review 门禁推进终态，不伪造 published
+        # [CHANGE-20260806-005 / Phase 7] 用 RUN_STATUS_CREATED（"created"）：review_runs_status_check
+        # 约束允许集不含 "running"（created/computing/partial/...），由真实 publish_review 门禁推进终态。
+        status=RUN_STATUS_CREATED,
         algorithm_version="review-v1", filter_version="fv1",
         baseline_window=60, expected_scope_count=total, succeeded_scope_count=succeeded,
         failed_scope_count=total - succeeded, signal_count=0,
