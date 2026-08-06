@@ -51,6 +51,9 @@ RUNBOOKS_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求更�
 PLAN_DOC_GATE_MARKER = "计划授权不得隐式覆盖 PRD、Maps、Runbooks 或治理文档"
 ATTEMPT_CLEANUP_MARKER = "每次远程验证或调试尝试结束后，无论成功、失败、取消或超时"
 BLOCKED_CLEANUP_MARKER = "任一残留或清理错误都标记 `blocked_cleanup`"
+PG_SELF_CONTAINED_MARKER = "每个 PG 测试必须在自身 transaction/fixture 中创建最小完整前置数据"
+SYNTHETIC_VERIFY_MARKER = "标准验证 100% synthetic"
+VERIFY_EXECUTOR_MARKER = "PG tests 只能由一次性 `verify-test` 服务运行"
 
 
 def read(path: Path) -> str:
@@ -102,6 +105,16 @@ def check(root: Path) -> list[str]:
                 "rules/80 restored acceptance-delayed verification cleanup: "
                 f"{forbidden_cleanup_regression}"
             )
+
+    testing_rules = read(rules_dir / "40-testing-quality.md")
+    for marker, error in (
+        (PG_SELF_CONTAINED_MARKER, "rules/40 missing self-contained PG test contract"),
+        (SYNTHETIC_VERIFY_MARKER, "rules/80 missing synthetic-only verification contract"),
+        (VERIFY_EXECUTOR_MARKER, "rules/80 missing one-shot verify-test contract"),
+    ):
+        source = testing_rules if marker == PG_SELF_CONTAINED_MARKER else deployment_rules
+        if marker not in source:
+            errors.append(error)
     for name in sorted(CANONICAL_RULES - {"README.md"}):
         if f"rules/{name}" not in agents_text:
             errors.append(f"AGENTS.md missing rule entry: rules/{name}")

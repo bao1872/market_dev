@@ -453,9 +453,10 @@ stock core 批量入口，该入口必须另行满足本合同的全部字段。
 
 ### DS-112 验证数据合同
 
-- **不完整复制 `bz_stock`**：验证库不得 `pg_dump` 整个 `bz_stock`；只通过正式 seed CLI（`scripts/verify/seed_v21_verify_data.py`）写入有限数据。
-- **`bz_stock` 只读**：seed 脚本对 `bz_stock` 只做 SELECT，绝不写入；源数据读取走只读连接。
-- **复制范围**：仅复制验收必需的有限 instrument、bars（约 90–120 个交易日）、board membership（行业 L1/L2/L3 与 concept 分离）、以及必要基础数据（交易日历、板块定义）。
+- **标准验证 100% synthetic**：验证栈、PG tests、Seed 和 Synthetic E2E 不得连接、读取或复制 `bz_stock`；所有输入由目标 SHA 内受版本控制的 deterministic synthetic producer 生成。
+- **原始事实范围**：Seed 只创建有限 instruments、1d/1h/15m bars、released config、交易日历、board/auction raw facts、PIT membership、历史 prerequisite 和受控失败输入。
+- **禁止伪造终态**：Seed 不得直接写 `succeeded/published`、固定 coverage、固定成功/失败/跳过计数、最终 Review/chip/auction payload、publication pointer 或 ProductReadiness；终态必须由真实 producer、Worker 和质量门自然形成。
+- **业务数据抽样另立合同**：未来如需真实业务样本，必须由用户另行发起需求和授权，设计受控、脱敏、离线导出；验证栈仍不得直接连接 `bz_stock`，且该模式不得成为基础 PG 验证前置条件。
 - **四类场景支持**：seed 必须能生成至少四类代表状态数据：
   1. 完整成功（fully_ready）；
   2. 异步增强（core_ready，chip 异步）；
@@ -479,6 +480,27 @@ stock core 批量入口，该入口必须另行满足本合同的全部字段。
 永久禁止清理：`bz_stock`、共享 PostgreSQL/Redis/Umami Volume、稳定运行 `market-dev` 容器/network、基础镜像、受保护镜像、非本次创建或来源不明资源。禁止 `docker system prune`、`docker volume prune`、模糊数据库匹配和批量 drop。
 
 cleanup 必须输出 created/deleted/retained/failed 四份精确清单，并在清理后复检磁盘可用量、MemAvailable、验证容器/网络残留和验证数据库不存在。任一残留或清理错误都标记 `blocked_cleanup`，停止创建新验证库或验证栈，先修复清理问题。
+
+### DS-114 验证身份与证据
+
+正式远程验证开始前必须冻结完整 40 位 `target_code_sha`，并满足 target SHA 已提交、可从 `origin/dev` 解析、本地 `HEAD == origin/dev == target_code_sha`、工作树干净。该等式只约束候选验证时点，不约束日常编辑中的工作树。
+
+每个 gate 必须同时记录并核对：`target_code_sha`、`remote_repo_sha`、`runtime_sha`、`verify_database` 和 `alembic_revision`。target/repo/runtime 三个 SHA 必须完全相等，验证库必须精确为 `bz_stock_verify_<40位target SHA>`；任一不一致立即失败，旧 SHA 证据不得累计到新 SHA。
+
+验证栈必须明确表达 verification runtime 身份。`deployment_mode=live` 只能描述代码挂载方式，不能冒充运行平面；正式证据至少包含 `APP_ENV=verification` 或独立 `runtime_mode=verification`，并确认 Scheduler 关闭、端口只绑定回环地址、数据库不是 `bz_stock`。
+
+### DS-115 正式验证执行器与顺序
+
+- Migration 只能由正式 runner 使用 target SHA checkout 中的 `backend/alembic` 和 `backend/alembic.ini` 执行；禁止使用旧运行镜像内置 migration。标准 round-trip 为 upgrade head → schema/revision 断言 → downgrade previous → downgrade 断言 → upgrade head → 重复 upgrade 幂等检查，每一步前后断言 `current_database()`。
+- PG tests 只能由一次性 `verify-test` 服务运行。该服务必须包含 target SHA 的 app/tests/pytest 配置/migration/scripts 和固定依赖，设置 `PANJI_REMOTE_VERIFY_DB_TEST=1`、`APP_ENV=verification`，只连接本轮验证库，运行结束退出。
+- 标准顺序固定为：本地修改范围门禁 → commit/push → 冻结 SHA → 远程 clean checkout → 创建验证库 → Migration round-trip → 启动验证栈 → SHA/DB/runtime 断言 → 自包含 PG tests → synthetic Seed 两次及幂等断言 → Synthetic E2E → 导出证据 → DS-113 cleanup。
+- 基础 PG tests 必须先于 Seed；依赖 synthetic 场景的测试只能在 Seed 后以 Synthetic E2E 身份运行。
+
+### DS-116 失败、新 SHA 与禁止远程修补
+
+业务代码、Migration、测试、Seed 或验证工具任一失败时，必须停止后续 gate，导出证据并执行 DS-113 cleanup。修复只能回到本地完成，经过本地门禁、commit 和 push 形成新 target SHA；新 SHA 使用新的精确验证库并从 Migration round-trip 重新开始。
+
+禁止远程修改仓库文件、容器内改码、手工修改验证库 Schema、复制 patched script 后继续沿用旧 SHA、把旧 SHA 结果累计到新 SHA，或失败后继续执行后续 gate 再统一宣称通过。cleanup 失败时优先处理资源残留，不得创建新验证环境。
 
 ## 分层发布与增量检查点纪律
 

@@ -148,6 +148,16 @@ Fair Value Gap 已完全排除。
 - **验证尝试强制收尾**：禁止在 pass/fail/cancelled/interrupted/timeout 后保留验证容器、network 或验证数据库等待人工验收；必须按 DS-113 先导出轻量诊断证据再精确清理。禁止以“保留失败现场”为由无限期占用服务器资源。
 - **清理失败即阻断**：存在本轮验证资源残留、数据库 drop 失败或 cleanup 清单不完整时，禁止继续创建下一套验证资源；不得通过全局 prune、模糊匹配或删除 Volume 处理残留。
 
+## 远程验证证据禁止项（2026-08-06）
+
+- 禁止在验证或稳定运行容器内临时安装 pytest/测试依赖，禁止 `docker cp`、`/tmp` 或临时挂载注入测试代码，禁止临时设置 `PYTHONPATH` 拼出测试环境；
+- 禁止使用其他 SHA 的 venv、app、tests、pytest 配置、migration 或 scripts 生成当前 SHA 的验证证据；
+- 禁止基础 PG 测试依赖 Seed、测试顺序、历史残留或 `bz_stock` 数据；
+- 禁止验证栈、测试或 Seed 直接连接/读取 `bz_stock`；真实样本只能经未来另行授权的脱敏离线导出合同进入；
+- 禁止手工修改验证库 Schema、远程 patch 后沿用旧 SHA、旧 SHA 证据累计到新 SHA；
+- 禁止 Seed 直接写最终 publication/readiness、固定 coverage、固定计数或最终业务 payload；
+- 禁止把 `deployment_mode=live` 单独解释为 verification plane 身份，必须另有 `APP_ENV/runtime_mode=verification` 证据。
+
 ## 数据库备份禁止（AGENTS §七.10）
 
 - 测试期部署默认不备份数据库；

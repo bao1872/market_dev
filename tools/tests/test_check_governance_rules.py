@@ -57,6 +57,9 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
         ("no_attempt_cleanup", "missing explicit per-attempt verification cleanup authorization gate"),
         ("no_blocked_cleanup", "missing blocked_cleanup fail-closed gate"),
         ("restore_acceptance_cleanup", "restored acceptance-delayed verification cleanup"),
+        ("no_pg_self_contained", "missing self-contained PG test contract"),
+        ("no_synthetic_verify", "missing synthetic-only verification contract"),
+        ("no_verify_executor", "missing one-shot verify-test contract"),
         ("future_state", "future/staged governance state"),
         ("auto_ci", "automatic trigger"),
         ("old_deploy", "removed path restored"),
@@ -137,6 +140,24 @@ def test_governance_regressions_are_rejected(
         path.write_text(
             read_text(path)
             + "\n用户确认通过后，由 `scripts/verify/drop_verify_database.sh` 删除验证库。\n",
+            encoding="utf-8",
+        )
+    elif mutation == "no_pg_self_contained":
+        path = governance_repo / "rules/40-testing-quality.md"
+        path.write_text(
+            read_text(path).replace(MODULE.PG_SELF_CONTAINED_MARKER, "PG fixture contract removed"),
+            encoding="utf-8",
+        )
+    elif mutation == "no_synthetic_verify":
+        path = governance_repo / "rules/80-deployment-data-safety.md"
+        path.write_text(
+            read_text(path).replace(MODULE.SYNTHETIC_VERIFY_MARKER, "Synthetic contract removed"),
+            encoding="utf-8",
+        )
+    elif mutation == "no_verify_executor":
+        path = governance_repo / "rules/80-deployment-data-safety.md"
+        path.write_text(
+            read_text(path).replace(MODULE.VERIFY_EXECUTOR_MARKER, "Verify executor removed"),
             encoding="utf-8",
         )
     elif mutation == "no_head_restore":

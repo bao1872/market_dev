@@ -204,6 +204,14 @@ Gov     python tools/check_governance_rules.py
 
 **文档一致性要求**：`rules/`、`docs/maps/`、`docs/prd/`、`docs/runbooks/`、`.github/workflows/` 的活跃内容中，不得出现描述上述本地/CI 禁止路径为**当前可用方案**的表述；但**不得再出现**"所有临时数据库永久禁止"的绝对表述（远程验证库为允许例外，见 DS-110）。历史 `docs/changes/` 记录与本条中明确标注为"禁止"的语句不受此限。该约束由 `tools/check_governance_rules.py` 自动断言。
 
+### TQ-101 PostgreSQL 测试自包含合同
+
+- 每个 PG 测试必须在自身 transaction/fixture 中创建最小完整前置数据，并在测试边界内回收；不得依赖 Seed 已执行、前一个测试的写入、验证库历史数据、测试顺序或 `bz_stock` 中恰好存在的数据。
+- 基础 PG Integration 与原子性/幂等/fencing 测试必须在空白 migration head 验证库独立通过；需要完整 synthetic 场景的测试必须显式归类为 Synthetic E2E，不得混入基础 PG 测试冒充自包含。
+- fixture 声明的 expected/eligible/coverage 必须由数据库中真实创建的对应行支持；禁止只传计数或比例而不准备真实 prerequisite。
+- 正式 PG 证据只能由目标 SHA 的一次性 `verify-test` 服务产生；其 app、tests、pytest 配置、migration、scripts 和依赖必须全部来自同一 target SHA。
+- 在运行容器临时 `pip install`、`docker cp`/`/tmp` 注入测试、临时拼接 `PYTHONPATH`、复用其他 SHA 的 venv/app/tests、缺失 marker 注册或 pytest 配置所得结果一律无效。
+
 ## 测试、验证与部署证据合同
 
 ### TQ-90 分层验证合同
