@@ -30,11 +30,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import os
+import json
 import re
-import sys
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 VERIFY_DB_RE = re.compile(r"^bz_stock_verify_[0-9a-f]{7,40}$")
 
@@ -152,13 +151,56 @@ async def _copy_instruments_bars(biz_conn, verify_conn) -> tuple[list[dict], dic
     return instruments, bars
 
 
+async def _copy_released_dsa_config(biz_conn, verify_conn) -> None:
+    """从 bz_stock 只读复制 released `dsa_selector` StrategyDefinition + StrategyVersion 到验证库。
+
+    [CHANGE-20260806-005 / Phase 5 / Phase 7] scheduled 模式 fail-closed：
+    resolve_core_run_context 必须解析到 released dsa_selector StrategyVersion 且 manifest 含
+    parameters，否则抛 ReleasedConfigError。Seed 通过真实 compute_review_core_with_run_items
+    生成核心快照，因此必须先把该 released 配置复制到验证库（只读复制，保持不可变 released 内容）。
+    """
+    # 复制 dsa_selector 策略定义
+    def_rows = await biz_conn.fetch(
+        "SELECT id, strategy_key, kind, display_name, environment, is_user_visible, is_scheduled "
+        "FROM strategy_definitions WHERE strategy_key = 'dsa_selector'"
+    )
+    if not def_rows:
+        raise RuntimeError("bz_stock 无 dsa_selector strategy definition")
+    for r in def_rows:
+        await verify_conn.execute(
+            "INSERT INTO strategy_definitions (id, strategy_key, kind, display_name, environment, "
+            "is_user_visible, is_scheduled) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING",
+            r["id"], r["strategy_key"], r["kind"], r["display_name"], r["environment"],
+            r["is_user_visible"], r["is_scheduled"],
+        )
+
+    # 复制该定义下 released 版本（含 manifest.parameters，保证 fail-closed 校验通过）
+    for r in def_rows:
+        ver_rows = await biz_conn.fetch(
+            "SELECT id, strategy_definition_id, version, status, manifest, build_hash "
+            "FROM strategy_versions WHERE strategy_definition_id = $1 AND status = 'released' "
+            "ORDER BY version DESC",
+            r["id"],
+        )
+        for v in ver_rows:
+            await verify_conn.execute(
+                "INSERT INTO strategy_versions (id, strategy_definition_id, version, status, manifest, build_hash) "
+                "VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING",
+                v["id"], v["strategy_definition_id"], v["version"], v["status"],
+                # asyncpg 对 JSONB 列需显式 json.dumps（dict 直接作为参数会报 expected str）
+                json.dumps(v["manifest"], ensure_ascii=False),
+                v["build_hash"],
+            )
+    await verify_conn.execute("COMMIT")
+
+
 # ---------------------------------------------------------------------------
 # 通过真实 service 生成（SQLAlchemy 异步 session）
 # ---------------------------------------------------------------------------
 
 
 async def _make_session(verify_url: str):
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     engine = create_async_engine(verify_url, poolclass=__import__("sqlalchemy").pool.NullPool)
     Session = async_sessionmaker(engine, expire_on_commit=False)
@@ -297,14 +339,12 @@ async def _add_board_prereq(db, *, trade_date: date, core_run_id: uuid.UUID):
     coverage 从真实 core run 的 run_items 实时统计（get_run_progress），snapshot 数量用真实
     覆盖到的 instrument 数。若真实覆盖率未达门禁，由调用方如实反映（不伪造 fully_ready）。
     """
-    from sqlalchemy import select
 
     from app.models.board_analysis_snapshot import (
         BoardAnalysisRun,
         BoardAnalysisSnapshot,
     )
     from app.models.market_board import MarketBoard
-    from app.models.stock_feature_snapshot_run_item import StockFeatureSnapshotRunItem
     from app.services.snapshot_run_item_service import get_run_progress
 
     # coverage / succeeded_count 从真实 core run items 统计，不硬编码 1.0
@@ -383,7 +423,10 @@ async def _chip_full(db, *, trade_date: date, core_run_id: uuid.UUID, parent_id:
     [CHANGE-20260806-CP4A-Amendment / PRD 合规] succeeded/failed 从真实 core run items 统计，
     不硬编码 `chip_status="succeeded"`。覆盖率不足时 finalize 为 partial（如实反映）。
     """
-    from app.services.chip_consensus_run_lifecycle import finalize_chip_run, resolve_or_create_chip_run
+    from app.services.chip_consensus_run_lifecycle import (
+        finalize_chip_run,
+        resolve_or_create_chip_run,
+    )
     from app.services.factor_publication_service import publish_chip_consensus
     from app.services.snapshot_run_item_service import get_run_progress
 
@@ -417,7 +460,10 @@ async def _chip_running(db, *, trade_date: date, core_run_id: uuid.UUID, parent_
 
 
 async def _chip_partial(db, *, trade_date: date, core_run_id: uuid.UUID, parent_id: uuid.UUID):
-    from app.services.chip_consensus_run_lifecycle import finalize_chip_run, resolve_or_create_chip_run
+    from app.services.chip_consensus_run_lifecycle import (
+        finalize_chip_run,
+        resolve_or_create_chip_run,
+    )
     run = await resolve_or_create_chip_run(
         db, trade_date=trade_date, source_core_run_id=core_run_id,
         algorithm_version="chip-v1", scheduler_job_run_id=parent_id, expected_count=10,
@@ -447,7 +493,10 @@ async def _auction_mode(db, *, trade_date: date, core_run_id: uuid.UUID, mode: s
     db.add(run)
     await db.flush()
     if mode == "composite":
-        from app.services.auction_anchor_service import generate_auction_anchors, publish_auction_anchors
+        from app.services.auction_anchor_service import (
+            generate_auction_anchors,
+            publish_auction_anchors,
+        )
         # generate_auction_anchors 内部基于真实 snapshots 计算锚点；覆盖率不足抛 AnchorCoverageLowError
         result = await generate_auction_anchors(db, trade_date, worker_id="seed")
         sid = result.get("snapshot_id") if isinstance(result, dict) else None
@@ -514,7 +563,6 @@ async def _governance_lease_lost(db, *, core_run_id: uuid.UUID):
 
 
 async def seed_scenario(verify_db_url: str, biz_db_url: str, scenario: str) -> None:
-    from app.models.scheduler_job_run import SchedulerJobRun
     from app.services.after_close_orchestrator import create_after_close_run
 
     verify_conn = await _connect_verify(verify_db_url)
@@ -522,6 +570,9 @@ async def seed_scenario(verify_db_url: str, biz_db_url: str, scenario: str) -> N
     engine, Session = None, None
     try:
         instruments, _bars = await _copy_instruments_bars(biz_conn, verify_conn)
+        # [CHANGE-20260806-005 / Phase 5 / Phase 7] scheduled 模式 fail-closed：
+        # resolve_core_run_context 需 released dsa_selector manifest 含 parameters，先复制。
+        await _copy_released_dsa_config(biz_conn, verify_conn)
 
         # 每个场景用互不冲突的固定交易日（避免 snapshot 唯一约束跨场景串扰）
         fixed_date = {
@@ -550,7 +601,7 @@ async def seed_scenario(verify_db_url: str, biz_db_url: str, scenario: str) -> N
                 algorithm_version="dsa-v1",
             )
             # 真实父 SchedulerJobRun
-            parent, is_new = await create_after_close_run(db, trade_date)
+            parent, _is_new = await create_after_close_run(db, trade_date)
             parent_id = parent.id
 
             if scenario == SCENARIO_A_FULL_SUCCESS:
