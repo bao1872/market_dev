@@ -362,14 +362,27 @@ class SqlAlchemyReleasedConfigResolver:
         version, _key = row
         manifest = version.manifest or {}
         parameters = manifest.get("parameters")
-        if not isinstance(parameters, dict):
+        if isinstance(parameters, dict):
+            dsa_effective_config = dict(parameters)
+        elif isinstance(parameters, list):
+            # [CHANGE-20260806-005 / Phase 7] released dsa_selector manifest 的 parameters 是
+            # **参数 spec 数组**（每项 {key, type, default, description, ...}，见 strategy_service
+            # 的 manifest.get("parameters", [])），而非 {key: value} dict。DSASelector 以
+            # params.get("atr_rope.length", 14) 等点分 key 消费，故把 spec 数组映射为
+            # {key: default} 的 effective config 字典；缺 default 的项跳过。
+            dsa_effective_config = {}
+            for spec in parameters:
+                if not isinstance(spec, dict) or "key" not in spec or "default" not in spec:
+                    continue
+                dsa_effective_config[str(spec["key"])] = spec["default"]
+        else:
             raise ReleasedConfigError(
                 "released dsa_selector StrategyVersion 的 manifest 缺 parameters"
             )
         return {
             "dsa_version": str(getattr(version, "version", "")),
             "dsa_build_hash": str(getattr(version, "build_hash", "")),
-            "dsa_effective_config": dict(parameters),
+            "dsa_effective_config": dsa_effective_config,
         }
 
 

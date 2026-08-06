@@ -159,7 +159,11 @@ async def _copy_released_dsa_config(biz_conn, verify_conn) -> None:
     parameters，否则抛 ReleasedConfigError。Seed 通过真实 compute_review_core_with_run_items
     生成核心快照，因此必须先把该 released 配置复制到验证库（只读复制，保持不可变 released 内容）。
     """
-    # 复制 dsa_selector 策略定义
+    # 复制 dsa_selector 策略定义。
+    # 注意：验证库可能已存在 dsa_selector 定义（app 服务会自动创建该 strategy_key，id 用
+    # gen_random_uuid 与 bz_stock 不同）。因此必须先按 strategy_key 解析验证库已有的定义 id，
+    # 只有缺失时才用 bz_stock 的 id 插入；版本行必须引用验证库实际的 definition id，
+    # 否则 ON CONFLICT (strategy_key) 跳过插入时，版本行引用 bz_stock 的 id 会触发 FK 违例。
     def_rows = await biz_conn.fetch(
         "SELECT id, strategy_key, kind, display_name, environment, is_user_visible, is_scheduled "
         "FROM strategy_definitions WHERE strategy_key = 'dsa_selector'"
@@ -167,28 +171,48 @@ async def _copy_released_dsa_config(biz_conn, verify_conn) -> None:
     if not def_rows:
         raise RuntimeError("bz_stock 无 dsa_selector strategy definition")
     for r in def_rows:
-        await verify_conn.execute(
-            "INSERT INTO strategy_definitions (id, strategy_key, kind, display_name, environment, "
-            "is_user_visible, is_scheduled) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING",
-            r["id"], r["strategy_key"], r["kind"], r["display_name"], r["environment"],
-            r["is_user_visible"], r["is_scheduled"],
+        existing = await verify_conn.fetchrow(
+            "SELECT id FROM strategy_definitions WHERE strategy_key = $1", r["strategy_key"]
         )
+        if existing:
+            def_id = existing["id"]
+        else:
+            await verify_conn.execute(
+                "INSERT INTO strategy_definitions (id, strategy_key, kind, display_name, environment, "
+                "is_user_visible, is_scheduled) VALUES ($1,$2,$3,$4,$5,$6,$7) "
+                "ON CONFLICT (strategy_key) DO NOTHING",
+                r["id"], r["strategy_key"], r["kind"], r["display_name"], r["environment"],
+                r["is_user_visible"], r["is_scheduled"],
+            )
+            def_id = r["id"]
 
-    # 复制该定义下 released 版本（含 manifest.parameters，保证 fail-closed 校验通过）
-    for r in def_rows:
+        # 复制该定义下 released 版本（含 manifest.parameters，保证 fail-closed 校验通过）
         ver_rows = await biz_conn.fetch(
-            "SELECT id, strategy_definition_id, version, status, manifest, build_hash "
+            "SELECT id, version, status, manifest, build_hash "
             "FROM strategy_versions WHERE strategy_definition_id = $1 AND status = 'released' "
             "ORDER BY version DESC",
             r["id"],
         )
         for v in ver_rows:
+            # strategy_versions 对 (strategy_definition_id, version) 有唯一约束，且既有行可能是
+            # app 自动创建的（id 与 bz_stock 不同、manifest 可能缺 parameters），必须 UPSERT
+            # 覆盖为 bz_stock 的完整 released manifest（含 parameters），否则 fail-closed 校验
+            # 仍会因缺 parameters 抛 ReleasedConfigError。
+            # asyncpg 的 JSONB 参数要求 str（不接受 dict）。而 bz_stock SELECT 返回的
+            # manifest 可能是 dict 也可能是 str（取决于 codec）。统一先 json.loads 归一化为
+            # dict，再 json.dumps 为 JSON 对象字符串插入 JSONB 列，PG 解析后存为 JSONB 对象，
+            # 应用读回 version.manifest 才是 dict（core_run_context 才能 .get("parameters")）。
+            manifest_val = v["manifest"]
+            if isinstance(manifest_val, str):
+                manifest_val = json.loads(manifest_val)
+            manifest_json = json.dumps(dict(manifest_val), ensure_ascii=False)
             await verify_conn.execute(
                 "INSERT INTO strategy_versions (id, strategy_definition_id, version, status, manifest, build_hash) "
-                "VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING",
-                v["id"], v["strategy_definition_id"], v["version"], v["status"],
-                # asyncpg 对 JSONB 列需显式 json.dumps（dict 直接作为参数会报 expected str）
-                json.dumps(v["manifest"], ensure_ascii=False),
+                "VALUES ($1,$2,$3,$4,$5,$6) "
+                "ON CONFLICT (strategy_definition_id, version) DO UPDATE SET "
+                "status = excluded.status, manifest = excluded.manifest, build_hash = excluded.build_hash",
+                v["id"], def_id, v["version"], v["status"],
+                manifest_json,
                 v["build_hash"],
             )
     await verify_conn.execute("COMMIT")
