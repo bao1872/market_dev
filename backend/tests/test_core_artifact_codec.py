@@ -103,14 +103,15 @@ def test_full_core_artifact_roundtrip() -> None:
     summary = {"coreArtifact": block}
     decoded = decode_core_artifact_from_summary(summary)
 
-    assert decoded["firstPyramidCore"]["nBars"] == 250
-    assert decoded["structuralPayload"]["dsa_segment"]["seg"] == 1
-    assert decoded["dsaProjection"]["dsaProjectionPayload"]["dsa_vwap"] == 10.5
-    assert decoded["stateEventCandidates"][0]["type"] == "structure_break"
-    assert decoded["availability"]["trend"] == "ready"
-    assert decoded["hashes"]["inputHash"] == "in-1"
-    assert decoded["lineage"]["parameterHash"] == "ph-1"
-    assert decoded["diagnostics"]["dsa"] == 1
+    # 强类型 dataclass（CP4A.2 Step2）：属性访问，非 raw dict
+    assert decoded.first_pyramid_core["nBars"] == 250
+    assert decoded.structural_payload["dsa_segment"]["seg"] == 1
+    assert decoded.dsa_projection["dsaProjectionPayload"]["dsa_vwap"] == 10.5
+    assert decoded.state_event_candidates[0]["type"] == "structure_break"
+    assert decoded.availability["trend"] == "ready"
+    assert decoded.hashes["inputHash"] == "in-1"
+    assert decoded.lineage["parameterHash"] == "ph-1"
+    assert decoded.diagnostics["dsa"] == 1
 
 
 def test_codec_missing_block_raises() -> None:

@@ -28,7 +28,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
+from typing import Any, Protocol
 
 from app.domain_status import (
     ALL_DSA_PROJECTION_REQUIREMENTS,
@@ -99,6 +99,45 @@ DSA_PROJECTION_VISUAL_KEYS: frozenset[str] = frozenset({
 DSA_PROJECTION_CONTRACT_VERSION = "dsa-projection-v1"
 
 
+class DsaProjectionArtifact(Protocol):
+    """DSA projection 消费的 artifact 结构化接口。
+
+    [CHANGE-20260806-CP4A.2 / Step2] `CoreComputationArtifact` 与 `DecodedCoreArtifact`
+    都满足本 Protocol，使 build_dsa_projection_payload 不再退化为 Any。
+    """
+
+    # 只读属性（frozen dataclass / pydantic 均满足）
+    @property
+    def instrument_id(self) -> Any: ...
+
+    @property
+    def trade_date(self) -> Any: ...
+
+    @property
+    def source_core_run_id(self) -> Any: ...
+
+    @property
+    def payload(self) -> dict[str, Any]: ...
+
+    @property
+    def visual(self) -> dict[str, Any]: ...
+
+    @property
+    def parameter_hash(self) -> str | None: ...
+
+    @property
+    def algorithm_versions(self) -> dict[str, str]: ...
+
+    def validate_lineage(
+        self,
+        *,
+        expected_core_run_id: Any = None,
+        expected_core_parameter_hash: str | None = None,
+        expected_dsa_version: str | None = None,
+    ) -> None:
+        """lineage 校验（CoreComputationArtifact / DecodedCoreArtifact 都实现）。"""
+
+
 class DSAProjectionMappingError(ValueError):
     """DSA projection 映射失败（缺必需指标 / 版本不一致等）。"""
 
@@ -146,7 +185,7 @@ class DSAProjectionRecord:
         }
 
 
-def _extract_metrics(artifact: CoreComputationArtifact) -> dict[str, Any]:
+def _extract_metrics(artifact: DsaProjectionArtifact) -> dict[str, Any]:
     """从 artifact 提取 DSA 标量指标。
 
     优先取 artifact.payload["dsa"] 子字典（Agent 约定），否则回退到 artifact.payload
@@ -162,7 +201,7 @@ def _extract_metrics(artifact: CoreComputationArtifact) -> dict[str, Any]:
     return payload
 
 
-def _extract_visual(artifact: CoreComputationArtifact) -> dict[str, Any]:
+def _extract_visual(artifact: DsaProjectionArtifact) -> dict[str, Any]:
     """从 artifact.visual 提取 DSA 图表字段（直接映射）。"""
     visual = artifact.visual or {}
     return {
@@ -212,7 +251,9 @@ def reconcile_projection_parameter_hash(
 
 
 def map_dsa_projection(
-    artifact: CoreComputationArtifact,
+    # [CHANGE-20260806-CP4A.2 / Step2] 结构化 Protocol：正常链 CoreComputationArtifact 与
+    # restart 链 DecodedCoreArtifact 都满足
+    artifact: DsaProjectionArtifact,
     *,
     requirement: str = DSA_PROJECTION_REQUIREMENT_REQUIRED,
     expected_core_run_id: Any | None = None,
@@ -294,7 +335,7 @@ def map_dsa_projection(
 
 
 def map_dsa_projection_with_context(
-    artifact: CoreComputationArtifact,
+    artifact: DsaProjectionArtifact,
     run_context: CoreRunContext,
     *,
     requirement: str = DSA_PROJECTION_REQUIREMENT_REQUIRED,
@@ -351,9 +392,9 @@ def map_dsa_projection_with_context(
 
 
 def build_dsa_projection_payload(
-    # [CHANGE-20260806-CP4A.1 / Item 4] 接受结构兼容的 CoreComputationArtifact 或
-    # DecodedCoreArtifact（正常链与 restart 链共用同一 projection 合同）
-    artifact: Any,
+    # [CHANGE-20260806-CP4A.2 / Step2] 结构化 Protocol：正常链 CoreComputationArtifact 与
+    # restart 链 DecodedCoreArtifact 都满足，不再退化为 Any
+    artifact: DsaProjectionArtifact,
     *,
     requirement: str = DSA_PROJECTION_REQUIREMENT_REQUIRED,
     expected_core_run_id: Any | None = None,
@@ -415,7 +456,7 @@ if __name__ == "__main__":
         parameter_hash="abc",
         algorithm_versions={"dsa": "dsa-v1"},
     )
-    rec = map_dsa_projection(ctx)
+    rec = map_dsa_projection(ctx)  # type: ignore[arg-type]  # self-test：CoreComputationArtifact 结构兼容
     assert rec.projection_hash, "projection hash 不应为空"
     assert rec.requirement == DSA_PROJECTION_REQUIREMENT_REQUIRED
     assert is_projection_consumable(rec, artifact_available=True)

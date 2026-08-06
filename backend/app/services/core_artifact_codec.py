@@ -41,6 +41,41 @@ class DecodedCoreArtifact:
     diagnostics: dict[str, Any] = field(default_factory=dict)
     schema_version: int = CORE_ARTIFACT_SCHEMA_VERSION
 
+    def validate_lineage(
+        self,
+        *,
+        expected_core_run_id: Any = None,
+        expected_core_parameter_hash: str | None = None,
+        expected_dsa_version: str | None = None,
+    ) -> None:
+        """lineage 一致性校验（与 CoreComputationArtifact.validate_lineage 语义一致）。"""
+        validate_lineage(
+            self,
+            expected_core_run_id=expected_core_run_id,
+            expected_parameter_hash=expected_core_parameter_hash,
+            expected_dsa_version=expected_dsa_version,
+        )
+
+
+@dataclass(frozen=True)
+class DecodedCoreComputationArtifact:
+    """完整 core artifact 的强类型解码结果（P0-05 full core / CP4A.2 Step2）。
+
+    不再返回 raw dict：字段缺失在构造时即失败；schema/lineage/hashes 严格校验。
+    """
+
+    schema_version: int
+    first_pyramid_core: dict[str, Any]
+    structural_payload: dict[str, Any]
+    dsa_projection: dict[str, Any]
+    state_event_candidates: tuple[dict[str, Any], ...]
+    availability: dict[str, str]
+    hashes: dict[str, str | None]
+    lineage: dict[str, Any]
+    diagnostics: dict[str, Any]
+    instrument_id: Any = None
+    trade_date: Any = None
+
 
 class CoreArtifactDecodeError(ValueError):
     """artifact 编解码或 lineage 校验失败。"""
@@ -170,12 +205,16 @@ def decode_dsa_projection_from_summary(
 
 def decode_core_artifact_from_summary(
     summary_payload: dict[str, Any],
-) -> dict[str, Any]:
-    """从 summary 的 `coreArtifact` 块读取完整 core artifact（含 firstPyramid/structural/
-    stateEvents/hashes/lineage/diagnostics）。
+    *,
+    instrument_id: Any = None,
+    trade_date: Any = None,
+) -> DecodedCoreComputationArtifact:
+    """从 summary 的 `coreArtifact` 块解码**强类型**完整 core artifact（CP4A.2 Step2）。
+
+    返回 DecodedCoreComputationArtifact（frozen dataclass），字段缺失在构造时即失败。
 
     Raises:
-        CoreArtifactDecodeError: 缺 coreArtifact 块或 schemaVersion 不匹配
+        CoreArtifactDecodeError: 缺 coreArtifact 块 / schemaVersion 不匹配 / 必选字段缺失
     """
     block = (summary_payload or {}).get("coreArtifact")
     if not isinstance(block, dict):
@@ -186,7 +225,26 @@ def decode_core_artifact_from_summary(
             f"coreArtifact schemaVersion 不匹配: {schema_version} != "
             f"{CORE_ARTIFACT_SCHEMA_VERSION}"
         )
-    return dict(block)
+    lineage = block.get("lineage") or {}
+    if not lineage.get("sourceCoreRunId"):
+        raise CoreArtifactDecodeError("coreArtifact lineage 缺 sourceCoreRunId")
+    if not isinstance(block.get("stateEventCandidates"), list):
+        raise CoreArtifactDecodeError("coreArtifact 缺 stateEventCandidates")
+    return DecodedCoreComputationArtifact(
+        schema_version=schema_version,
+        first_pyramid_core=dict(block.get("firstPyramidCore") or {}),
+        structural_payload=dict(block.get("structuralPayload") or {}),
+        dsa_projection=dict(block.get("dsaProjection") or {}),
+        state_event_candidates=tuple(
+            e for e in block.get("stateEventCandidates") or [] if isinstance(e, dict)
+        ),
+        availability=dict(block.get("availability") or {}),
+        hashes=dict(block.get("hashes") or {}),
+        lineage=dict(lineage),
+        diagnostics=dict(block.get("diagnostics") or {}),
+        instrument_id=instrument_id,
+        trade_date=trade_date,
+    )
 
 
 def validate_lineage(
