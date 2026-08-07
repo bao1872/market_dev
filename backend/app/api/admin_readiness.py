@@ -132,6 +132,7 @@ async def get_product_readiness_endpoint(
         productionClosure=closure.closure,
         mandatoryProductsReady=closure.mandatory_products_ready,
         mandatoryProductsFullyFresh=closure.mandatory_products_full_fresh,
+        requiredCompatibilityReady=closure.required_compatibility_ready,
         enhancementJobsTerminal=closure.enhancement_jobs_terminal,
         allProductsReady=all_ready,
         unreconciledChildren=unreconciled,

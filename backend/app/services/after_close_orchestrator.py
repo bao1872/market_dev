@@ -2087,8 +2087,10 @@ async def _execute_review_step(
 def _is_terminal_review_short_circuit(review_step_status: str | None) -> bool:
     """[AC-CANCEL-01 2026-08-04] 判定 Review 步骤终态是否必须短路收尾。
 
-    Review step 为 cancelled / interrupted 时，主流程不得继续 chip 入队、
-    不得覆盖总任务终态：
+    Review step 为 cancelled / interrupted 时，主流程不得覆盖总任务终态：
+
+    [AUD-08 2026-08-07] 短路不再影响 chip：chip 入队已前移到 stock_core
+    发布成功之后（步骤 4.6），在本判定之前就已完成，不受 Review 成败/取消影响。
     - cancelled：管理员主动取消，保持 cancelled；
     - interrupted：旧 Worker 被接管，保持 interrupted，交由 reconcile/restart。
 
@@ -2590,6 +2592,8 @@ async def execute_after_close_run(
                     # 重新解析新的 active universe。
                     from app.models.stock_feature_snapshot_run_item import (
                         PHASE_CORE as _SNAP_PHASE_CORE,
+                    )
+                    from app.models.stock_feature_snapshot_run_item import (
                         StockFeatureSnapshotRunItem as _SnapshotRunItem,
                     )
                     frozen_rows = (
@@ -3326,6 +3330,32 @@ async def execute_after_close_run(
                     snapshot_run_id, event_exc, exc_info=True,
                 )
 
+        # ---- 步骤 4.6: enqueue_chip_job（stock_core 发布成功后立即分叉）----
+        # [AUD-08 2026-08-07] chip 入队原先位于 Review 之后（步骤 4.9），导致 chip
+        # 这一增强产品被绑定在 Review 生命周期上：Review 取消/中断触发短路时
+        # 直接 raise，chip 永远不会入队。chip 只依赖 stock_core，与 Review 无因果
+        # 关系，因此前移到与 state_events 同一层的 post-core 分叉点，判据复用
+        # stock_core 发布成功条件。
+        #
+        # 幂等性依据：create_after_close_chip_consensus_job 以
+        # (trade_date, core_run_id) 幂等，重复调用返回既有 job（chip_is_new=False），
+        # 故断点恢复重跑本段安全，不会产生重复 job。
+        _chip_enqueue_status: str = "skipped"
+        _chip_job_id: uuid.UUID | None = None
+        if snapshot_error is None and snapshot_run_id is not None and not publish_failed:
+            _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
+                job_run_id=job_run_id,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch,
+                trade_date=trade_date,
+                snapshot_run_id=snapshot_run_id,
+                expected_count=(
+                    len(cached_instrument_ids)
+                    if cached_instrument_ids is not None
+                    else None
+                ),
+            )
+
         # ---- 步骤 4.5: computing_review（复盘计算 + 发布） ----
         # [AC-02] 复盘业务体抽为 _execute_review_step，由统一执行器包装。
         # 软失败（gate_blocked/计算失败）不阻断主流程，仅标记 _review_failed
@@ -3402,7 +3432,7 @@ async def execute_after_close_run(
 
         # ---- 步骤 4.8.5: 取消/中断终态短路 ----
         # [AC-CANCEL-01 2026-08-04] Review step 为 cancelled/interrupted 时，
-        # 不得继续 chip 入队、不得覆盖总任务终态：
+        # 不得覆盖总任务终态（[AUD-08] chip 已在步骤 4.6 入队，不受此短路影响）：
         # - cancelled：管理员主动取消，保持 cancelled，交由用户/调度不再恢复；
         # - interrupted：旧 Worker 被接管，保持 interrupted，交由 reconcile/restart。
         # 两者均不应降级为 partial_success 而继续执行后续步骤。
@@ -3443,31 +3473,17 @@ async def execute_after_close_run(
                 await db.commit()
             logger.warning(
                 "[AfterClose] 复盘阶段终态短路: job_run_id=%s, status=%s, "
-                "不再执行 chip 入队（保留原检查点）",
-                job_run_id, _terminal_status.value,
+                "chip 已于 stock_core 发布后入队(status=%s)（保留原检查点）",
+                job_run_id, _terminal_status.value, _chip_enqueue_status,
             )
             # [AC-TERMINAL-01 P0#3] 抛信号异常，让外层 except 明确区分
             # "取消/中断"与"真实失败"，避免被覆写成 failed。
             raise AfterCloseCancelledError(_terminal_status)
 
-        # ---- 步骤 4.9: enqueue_chip_job（正式步骤，必须在主任务终态之前）----
-        # [Phase0-Fix#8] chip 原先在主任务终态提交之后创建，导致：
-        # 1) chip job 创建失败无法进入 partial_success；
-        # 2) chip 没有统一 step summary；
-        # 3) metadata 缺稳定的 chip job id / enqueue 状态。
-        # chip 本身仍是异步任务（不 await 其计算），这里只把"入队"做成正式步骤。
-        _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
-            job_run_id=job_run_id,
-            worker_id=worker_id,
-            lease_epoch=lease_epoch,
-            trade_date=trade_date,
-            snapshot_run_id=snapshot_run_id,
-            expected_count=(
-                len(cached_instrument_ids)
-                if cached_instrument_ids is not None
-                else None
-            ),
-        )
+        # [AUD-08 2026-08-07] 原步骤 4.9 的 chip 入队已前移至步骤 4.6
+        # （stock_core 发布成功后立即分叉），此处不再重复入队。
+        # [Phase0-Fix#8] 保持不变的性质：chip 入队仍是正式步骤、仍在主任务终态
+        # 之前完成、失败仍纳入 partial_success 判定（见下方 _optional_failed）。
 
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:

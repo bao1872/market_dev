@@ -90,6 +90,7 @@
 | CHANGE-20260803-004 | 2026-08-03 | 盘迹 PRD V1.0 代码收口 — 7 模块缺口修复与垂直切片提交 | behavior+contract+architecture | 盘后/量化模型/行情体验/复盘/管理后台 | 代码与本地合同待最终验证；无需部署或 migration | 7 PRD 模块收口 | `2026/CHANGE-20260803-004-after-close-fp-smc-nav-closure.md` |
 | CHANGE-20260803-005 | 2026-08-03 | 盘后状态机收口：全步骤迁移统一执行器 + Stale Watchdog 接线 + 状态合同扩展（partial_success/interrupted/cancelled + step 终态） | behavior+contract+architecture | 盘后编排状态机/管理后台 cancel·reconcile/状态查询 | `verified_code`（PURE_UNIT 3+2+12+1 passed、Ruff passed；PG 集成与端到端未运行）；未部署、未改共享库 | AC-02/AC-04 | `2026/CHANGE-20260803-005-after-close-step-migration-watchdog.md` |
 | CHANGE-20260803-006 | 2026-08-03 | Feature Snapshot 主链 MDAS 批读收口（AC-16）：compute_review_core_with_run_items 接入 get_bars_batch 批读 + 诊断 hash 传播 + batch_count/mdas_batch_read_count metrics | behavior+contract+performance | 盘后编排/特征快照/行情数据 | `verified_code`（feature snapshot 16 passed/11 skip；盘后相关 43 passed/30 skip；Ruff passed）；真实性能未基准、未部署、未连共享库 | AC-16 | `maps/30-after-close.md` |
+| CHANGE-20260807-001 | 2026-08-07 | Review 去 Chip 依赖并冻结 lineage（DO NOTHING）+ coverage 语义改真实有效样本覆盖率 + Chip 入队提前到 stock_core 发布后分叉 + ProductReadiness 三分类（required_compatibility） | behavior+contract | 复盘编排与发布门禁/盘后编排步骤顺序/产品就绪度 | `implemented_unconfirmed`（PURE_UNIT：受影响域 458 passed、全量 723 passed/341 skip；2 项 pre-existing 失败已核验与本次无关）；未部署、无 migration、远程验证未授权未执行 | AUD-04/05/06/07/08/10 | `2026/CHANGE-20260807-001-review-chip-decoupling-coverage-readiness.md` |
 
 ## 3. 状态说明
 

@@ -20,6 +20,8 @@
 
 约束：
 - 输入只读 stock_core 和 board_analysis 的 factor_publications pointer
+- [AUD-04/05] Review 输入身份不含 chip 等增强产品；create_run 零次 chip 查询，
+  且已存在的 run 不被后续 create_run 改写（on_conflict_do_nothing）
 - 历史基线默认 120 日、最低 60 日
 - 单 scope 失败不回滚其他 scope（写入 last_error 后继续）
 
@@ -53,8 +55,6 @@ from app.models.market_review import (
     MarketReviewRunItem,
     MarketReviewScopeSnapshot,
 )
-from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
-from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.review_attribution_service import (
     compute_signal_attributions,
@@ -182,21 +182,15 @@ async def create_run(
         source_board_run_id=source_board_run_id,
     )
 
-    # [QM-63 review 依赖矩阵 2026-08-04] 解析 chip 来源、降级原因与覆盖率
-    chip_run_id, degraded_reasons, chip_coverage = await _resolve_chip_dependency(
-        session,
-        trade_date=trade_date,
-        source_core_run_id=resolved_core_id,
-    )
-
+    # [AUD-04/05 2026-08-07] Review 输入身份仅由 stock_core + market_aggregation
+    # + 历史观测构成。chip 属增强产品，不参与 Review lineage：创建阶段零次 chip
+    # 查询，也不写入 source_chip_run_id / degraded_reasons / chip_coverage。
     if dry_run:
         # dry-run：不写 DB，返回一个非持久化的 run 对象供调用方打印
         return MarketReviewRun(
             trade_date=trade_date,
             source_core_run_id=resolved_core_id,
             source_board_run_id=resolved_board_id,
-            source_chip_run_id=chip_run_id,
-            degraded_reasons=degraded_reasons,
             algorithm_version=algo,
             filter_version=filt,
             baseline_window=baseline_window,
@@ -207,8 +201,6 @@ async def create_run(
                 "symbols": symbols,
                 "dry_run": True,
                 "idempotency_key": idempotency_key,
-                # [P0 2026-08-04] chip 真实覆盖率（非占位比例）
-                "chip_coverage": chip_coverage,
             },
         )
 
@@ -217,15 +209,11 @@ async def create_run(
         "canary": canary,
         "symbols": symbols,
         "idempotency_key": idempotency_key,
-        # [P0 2026-08-04] chip 真实覆盖率（非占位比例）
-        "chip_coverage": chip_coverage,
     }
     values = {
         "trade_date": trade_date,
         "source_core_run_id": resolved_core_id,
         "source_board_run_id": resolved_board_id,
-        "source_chip_run_id": chip_run_id,
-        "degraded_reasons": degraded_reasons,
         "algorithm_version": algo,
         "filter_version": filt,
         "baseline_window": baseline_window,
@@ -238,14 +226,12 @@ async def create_run(
         "metadata_json": meta,
     }
     stmt = pg_insert(MarketReviewRun).values(**values)
-    stmt = stmt.on_conflict_do_update(
+    # [AUD-05 2026-08-07] Review run 一经创建即不可变：晚到的增强产品（chip 等）
+    # 不得改写已存在的 run 行。DO NOTHING 是唯一能在 SQL 层保证
+    # “已有 run 不被后续 create_run 修改”的写法；已存在时由下方
+    # get_run_by_keys 读回原行，幂等语义不变。
+    stmt = stmt.on_conflict_do_nothing(
         constraint="uq_review_runs_date_core_board_algo_filter",
-        set_={
-            "metadata_json": stmt.excluded.metadata_json,
-            # [QM-63] 重新创建 run 时刷新 chip 来源与降级状态（chip 可能已异步完成）
-            "source_chip_run_id": stmt.excluded.source_chip_run_id,
-            "degraded_reasons": stmt.excluded.degraded_reasons,
-        },
     )
     await session.execute(stmt)
     await session.flush()
@@ -394,122 +380,13 @@ async def _resolve_source_run_ids(
     return resolved_core_id, resolved_board_id
 
 
-async def _resolve_chip_dependency(
-    session: AsyncSession,
-    *,
-    trade_date: date,
-    source_core_run_id: uuid.UUID,
-) -> tuple[uuid.UUID | None, list[str], dict[str, Any]]:
-    """[QM-63 review 依赖矩阵 2026-08-04] 解析 chip 来源与降级原因。
-
-    [P0 修复 2026-08-04] 覆盖率合同：以 stock_core run 的 expected_count 为分母，
-    对比 chip 实际落库的 succeeded/failed/skipped，计算真实覆盖率判定
-    ready/partial/unavailable。不再用“chip 表已有行”的占位比例冒充覆盖率，
-    也不再遗漏缺失股票（missing = expected - 已有行）。
-
-    依赖矩阵：
-    - expected 无法确定（core run 缺失 expected_count）或 succeeded == 0
-      → source_chip_run_id = None，降级 core-only，
-        degraded_reasons = ["CHIP_UNAVAILABLE"]；
-    - coverage >= 1.0（全部 expected 股票 chip succeeded）→ 无降级；
-    - 否则 → ["CHIP_PARTIAL"]。
-
-    source_chip_run_id 语义修正（[P0 2026-08-04]）：chip 无独立 run 记录，
-    只通过 core_run_id 挂靠 stock_core；因此不得把 core run id 冒充 chip run id。
-    这里恒返回 None，chip 质量由 degraded_reasons + coverage 表达。
-
-    Args:
-        session: 异步 DB 会话
-        trade_date: 业务交易日
-        source_core_run_id: stock_core run id（chip 的 core_run_id 与之相等）
-
-    Returns:
-        (source_chip_run_id, degraded_reasons, chip_coverage)
-        chip_coverage = {expected_count, succeeded_count, failed_count,
-                          skipped_count, missing_count, coverage}
-    """
-    # 1. chip 实际落库统计（按 status 分组）。
-    #    [P0 2026-08-04 算法版本隔离] chip 表唯一键含 algorithm_version，同一
-    #    (instrument, trade_date, core_run_id) 可同时存在不同 chip 版本记录；
-    #    必须按当前 chip 算法版本过滤，并用 COUNT(DISTINCT instrument_id) 去重，
-    #    否则可能重复计数、coverage 超 100%、旧版本行掩盖新版本失败。
-    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
-
-    stmt = (
-        select(
-            StockChipConsensusSnapshot.status,
-            func.count(
-                func.distinct(StockChipConsensusSnapshot.instrument_id)
-            ),
-        )
-        .where(
-            StockChipConsensusSnapshot.trade_date == trade_date,
-            StockChipConsensusSnapshot.core_run_id == source_core_run_id,
-            StockChipConsensusSnapshot.algorithm_version
-            == CHIP_CONSENSUS_ALGORITHM_VERSION,
-        )
-        .group_by(StockChipConsensusSnapshot.status)
-    )
-    rows = (await session.execute(stmt)).all()
-
-    counts: dict[str, int] = {"succeeded": 0, "failed": 0, "skipped": 0}
-    for status_val, cnt in rows:
-        key = status_val if status_val in counts else "failed"
-        counts[key] += cnt
-
-    # 2. 从 stock_core run 读取 expected_count（覆盖率分母）
-    expected_count = await _load_core_expected_count(session, source_core_run_id)
-
-    succeeded = counts["succeeded"]
-    failed = counts["failed"]
-    skipped = counts["skipped"]
-    existing = succeeded + failed + skipped
-    missing = max(0, (expected_count or 0) - existing)
-    coverage = (
-        succeeded / expected_count
-        if expected_count and expected_count > 0
-        else 0.0
-    )
-
-    chip_coverage = {
-        "expected_count": expected_count,
-        "succeeded_count": succeeded,
-        "failed_count": failed,
-        "skipped_count": skipped,
-        "missing_count": missing,
-        "coverage": round(coverage, 6),
-        # [P0 2026-08-04] 记录实际采用的 chip 算法版本（覆盖判定以它为隔离口径）
-        "algorithm_version": CHIP_CONSENSUS_ALGORITHM_VERSION,
-    }
-
-    # 3. 覆盖率判定（不再用占位比例，也不误称 core run 为 chip run）。
-    #    ready 要求：全部 expected 股票 succeeded，且无 failed/skipped/missing。
-    if expected_count is None or expected_count <= 0 or succeeded == 0:
-        return None, ["CHIP_UNAVAILABLE"], chip_coverage
-    if (
-        succeeded >= expected_count
-        and failed == 0
-        and skipped == 0
-        and missing == 0
-    ):
-        return None, [], chip_coverage
-    return None, ["CHIP_PARTIAL"], chip_coverage
-
-
-async def _load_core_expected_count(
-    session: AsyncSession,
-    source_core_run_id: uuid.UUID,
-) -> int | None:
-    """读取 stock_core run 的 expected_count（active A 股总数，覆盖率分母）。
-
-    expected_count 缺失时返回 None（无法确定覆盖率，按 unavailable 处理）。
-    """
-    stmt = (
-        select(StockFeatureSnapshotRun.expected_count)
-        .where(StockFeatureSnapshotRun.id == source_core_run_id)
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none()
+# [AUD-04/05 2026-08-07] `_resolve_chip_dependency` 与 `_load_core_expected_count`
+# 已退役并删除。理由：其 source_chip_run_id 恒为 None（chip 无独立 run，只经
+# core_run_id 挂靠 stock_core），唯一实际产出是把 chip 域的 degraded_reasons /
+# chip_coverage 写进 Review lineage，使 Review 在创建阶段依赖增强产品，并让晚到的
+# chip 通过 ON CONFLICT 改写已发布 Review。Review 的输入身份现仅由
+# stock_core + market_aggregation + 历史观测构成。
+# chip 就绪度改由 ProductReadiness / chip 域表达，不再经 Review 透出。
 
 
 async def _get_publication(
@@ -636,10 +513,9 @@ async def compute_run(
     run.succeeded_scope_count = succeeded
     run.failed_scope_count = failed
     run.completed_at = datetime.now(UTC)
-    if run.expected_scope_count > 0:
-        run.coverage_ratio = Decimal(str(succeeded / run.expected_scope_count))
-    else:
-        run.coverage_ratio = Decimal("0")
+    # [AUD-06 2026-08-07] coverage_ratio 表达真实有效样本覆盖率（数据口径），
+    # 不再是 scope 执行成功率；执行率由 succeeded/expected 两列独立表达。
+    run.coverage_ratio = await _aggregate_run_data_coverage(session, run.id)
 
     # 更新 signal_count（从 DB 实际统计）
     actual_signal_count = await update_run_signal_count(session, run)
@@ -664,7 +540,9 @@ async def compute_run(
         "failed_scope_count": failed,
         "signal_count": actual_signal_count,
         "tracking_evaluations": eval_count,
+        # [AUD-06] coverage_ratio = 真实有效样本覆盖率；执行率单独表达
         "coverage_ratio": float(run.coverage_ratio),
+        "scope_execution_rate": _scope_execution_rate(run),
     }
 
 
@@ -1238,8 +1116,8 @@ async def resume_run(
     final_succeeded, final_failed = await _count_scope_status(session, run.id)
     run.succeeded_scope_count = final_succeeded
     run.failed_scope_count = final_failed
-    if run.expected_scope_count > 0:
-        run.coverage_ratio = Decimal(str(final_succeeded / run.expected_scope_count))
+    # [AUD-06 2026-08-07] 与主路径同口径：真实有效样本覆盖率
+    run.coverage_ratio = await _aggregate_run_data_coverage(session, run.id)
 
     if final_failed == 0 and final_succeeded > 0:
         run.status = RUN_STATUS_SIGNALS_READY
@@ -1260,7 +1138,9 @@ async def resume_run(
         "failed": failed,
         "signal_count": actual_signal_count,
         "tracking_evaluations": eval_count,
+        # [AUD-06] coverage_ratio = 真实有效样本覆盖率；执行率单独表达
         "coverage_ratio": float(run.coverage_ratio),
+        "scope_execution_rate": _scope_execution_rate(run),
     }
 
 
@@ -1292,6 +1172,46 @@ async def _count_scope_status(
         elif item_status == ITEM_FAILED:
             failed += 1
     return succeeded, failed
+
+
+async def _aggregate_run_data_coverage(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+) -> Decimal:
+    """[AUD-06 2026-08-07] 聚合 run 级真实有效样本覆盖率。
+
+    语义：SUM(ready_count) / SUM(eligible_count)，跨该 run 全部 scope 快照。
+    回答的是“底层数据有多少是有效的”，而非“有多少 scope 跑完了”。
+
+    与 scope 执行成功率（succeeded_scope_count / expected_scope_count）严格区分：
+    10/10 个 scope 全部执行成功，但每个 scope 只有 80/100 成员有效时，
+    执行率为 1.0，而本函数返回 0.8。
+
+    分母为 0（无 scope 快照，或全部 scope 成员数为 0）时返回 Decimal("0")，
+    不得除零，也不得回落成执行率冒充数据覆盖。
+    """
+    stmt = select(
+        func.coalesce(func.sum(MarketReviewScopeSnapshot.ready_count), 0),
+        func.coalesce(func.sum(MarketReviewScopeSnapshot.eligible_count), 0),
+    ).where(MarketReviewScopeSnapshot.review_run_id == run_id)
+    row = (await session.execute(stmt)).one_or_none()
+    if row is None:
+        return Decimal("0")
+    ready_total, eligible_total = row
+    if not eligible_total or int(eligible_total) <= 0:
+        return Decimal("0")
+    return Decimal(str(int(ready_total) / int(eligible_total)))
+
+
+def _scope_execution_rate(run: MarketReviewRun) -> float:
+    """scope 执行成功率 = succeeded_scope_count / expected_scope_count。
+
+    [AUD-06] run.coverage_ratio 已改为真实数据覆盖率，执行率不再由该列承载，
+    改由本派生值在返回结构中显式表达，避免两种语义互相冒充。
+    """
+    if not run.expected_scope_count or run.expected_scope_count <= 0:
+        return 0.0
+    return run.succeeded_scope_count / run.expected_scope_count
 
 
 # =============================================================================
@@ -1450,7 +1370,9 @@ def _run_to_dict(run: MarketReviewRun) -> dict[str, Any]:
         "succeeded_scope_count": run.succeeded_scope_count,
         "failed_scope_count": run.failed_scope_count,
         "signal_count": run.signal_count,
+        # [AUD-06] coverage_ratio = 真实有效样本覆盖率；执行率单独表达
         "coverage_ratio": float(run.coverage_ratio) if run.coverage_ratio else None,
+        "scope_execution_rate": _scope_execution_rate(run),
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "published_at": run.published_at.isoformat() if run.published_at else None,

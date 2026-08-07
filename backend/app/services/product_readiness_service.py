@@ -65,6 +65,13 @@ _DSA_PROJECTION_COVERAGE_THRESHOLD = 1.0
 _STATE_EVENTS_COVERAGE_THRESHOLD = 1.0
 
 # 产品分类（P0-1：九节点完整纳入）
+# [AUD-10 2026-08-07] 由二分类扩展为三分类：mandatory / required_compatibility /
+# enhancement。原二分类把 dsa_projection 与 chip/state_events/auction_anchor 混为
+# 一谈，二者性质不同：
+# - enhancement（chip / state_events / auction_anchor）是独立增强产品，缺失只是
+#   少一块可选能力，不影响既有消费方；
+# - dsa_projection 是 stock_core 的派生兼容投影，存量消费方按它读数，缺失会让
+#   "核心已就绪"的表述对这些消费方失真。它不该阻断核心，但也不是可有可无。
 MANDATORY_PRODUCTS = frozenset({
     "daily_facts",
     "board_facts",
@@ -72,14 +79,35 @@ MANDATORY_PRODUCTS = frozenset({
     "board_aggregation",
     "review",
 })
-# dsa_projection 为 stock_core 的派生投影，随 stock_core 就绪，划为增强不阻断
-ENHANCEMENT_PRODUCTS = frozenset({
+# 必需兼容输出：随 stock_core 派生，不阻断核心，但未就绪时不得宣称完整就绪
+REQUIRED_COMPATIBILITY_PRODUCTS = frozenset({
     "dsa_projection",
+})
+ENHANCEMENT_PRODUCTS = frozenset({
     "chip",
     "state_events",
     "auction_anchor",
 })
-NINE_NODES = MANDATORY_PRODUCTS | ENHANCEMENT_PRODUCTS
+NINE_NODES = (
+    MANDATORY_PRODUCTS | REQUIRED_COMPATIBILITY_PRODUCTS | ENHANCEMENT_PRODUCTS
+)
+
+
+PRODUCT_CLASS_MANDATORY = "mandatory"
+PRODUCT_CLASS_REQUIRED_COMPATIBILITY = "required_compatibility"
+PRODUCT_CLASS_ENHANCEMENT = "enhancement"
+
+
+def classify_product(product: str) -> str:
+    """返回产品分类：mandatory / required_compatibility / enhancement。
+
+    未登记产品按 enhancement 处理（最保守：不阻断核心闭包）。
+    """
+    if product in MANDATORY_PRODUCTS:
+        return PRODUCT_CLASS_MANDATORY
+    if product in REQUIRED_COMPATIBILITY_PRODUCTS:
+        return PRODUCT_CLASS_REQUIRED_COMPATIBILITY
+    return PRODUCT_CLASS_ENHANCEMENT
 
 # readiness 可消费集合（ready / ready_reused）
 CONSUMABLE_READINESS = frozenset({READINESS_READY, READINESS_READY_REUSED})
@@ -136,17 +164,24 @@ class ProductReadinessState:
 class ClosureEvaluation:
     """闭包评估结果（E08-T02/T03）。
 
-    - closure: pending / blocked / core_ready / degraded_ready / fully_ready
+    - closure: pending / blocked / core_ready / mandatory_ready_enhancing /
+      degraded_ready / fully_ready
     - mandatory_products_ready: 全部 mandatory 产品 consumable
     - mandatory_products_full_fresh: 全部 mandatory 产品 is_fully_fresh
+    - required_compatibility_ready: 全部 required_compatibility 产品 is_truly_ready
     - enhancement_jobs_terminal: 全部 enhancement 产品 is_terminal
     - issues: 按产品生成的问题列表（code/severity/product/recommended_action）
+
+    [AUD-10 2026-08-07] 新增 required_compatibility_ready 维度。closure 取值集合
+    刻意保持不变：新增枚举值会破坏既有 API 消费方与前端映射，而"兼容输出未就绪"
+    这一事实通过独立布尔字段 + issues 条目即可无损表达。
     """
 
     closure: str
     mandatory_products_ready: bool
     mandatory_products_full_fresh: bool
     enhancement_jobs_terminal: bool
+    required_compatibility_ready: bool = True
     issues: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -190,10 +225,40 @@ def evaluate_closure(
     """
     by_product = {p.product: p for p in products}
     mandatory = [p for p in products if p.is_mandatory]
-    enhancement = [p for p in products if not p.is_mandatory]
+    # [AUD-10 2026-08-07] 三分类：在非 mandatory 中再切出 required_compatibility。
+    # 注意 is_mandatory 仍是 mandatory 与否的唯一权威判据（保持向后兼容），
+    # required_compatibility 只在非 mandatory 集合内部按产品名细分。
+    non_mandatory = [p for p in products if not p.is_mandatory]
+    required_compatibility = [
+        p for p in non_mandatory
+        if classify_product(p.product) == PRODUCT_CLASS_REQUIRED_COMPATIBILITY
+    ]
+    enhancement = [
+        p for p in non_mandatory
+        if classify_product(p.product) != PRODUCT_CLASS_REQUIRED_COMPATIBILITY
+    ]
     stock_core = by_product.get("stock_core")
 
+    # required_compatibility 就绪 = 全部兼容输出真正 ready（非仅 terminal）
+    required_compat_ready = all(p.is_truly_ready for p in required_compatibility)
+
     issues: list[dict[str, Any]] = []
+
+    # [AUD-10] 兼容输出未就绪：不阻断核心，但必须显式暴露且不得 fully_ready。
+    # 在所有分支之前生成，确保无论闭包最终落在哪个取值（core_ready /
+    # mandatory_ready_enhancing / degraded_ready），归因信息都不丢失 ——
+    # 否则"哪一类产品没好"这一关键事实会因提前 return 而被吞掉。
+    # 闭包时序本身不因三分类而变化，变化的只是原因可归因粒度。
+    for _rc in required_compatibility:
+        if not _rc.is_truly_ready:
+            issues.append(
+                _issue(
+                    _rc.product, "REQUIRED_COMPATIBILITY_NOT_READY", "warning",
+                    f"required compatibility product {_rc.product} 未就绪"
+                    f"（readiness={_rc.readiness}, freshness={_rc.freshness}）；"
+                    f"核心不受阻断，但兼容消费方读数可能不完整",
+                )
+            )
 
     # 1. blocked：mandatory 任一 unavailable/blocked
     for p in mandatory:
@@ -210,6 +275,7 @@ def evaluate_closure(
             mandatory_products_ready=False,
             mandatory_products_full_fresh=False,
             enhancement_jobs_terminal=_enhancement_terminal(enhancement),
+            required_compatibility_ready=required_compat_ready,
             issues=issues,
         )
 
@@ -220,6 +286,7 @@ def evaluate_closure(
             mandatory_products_ready=False,
             mandatory_products_full_fresh=False,
             enhancement_jobs_terminal=_enhancement_terminal(enhancement),
+            required_compatibility_ready=required_compat_ready,
             issues=issues,
         )
 
@@ -243,23 +310,32 @@ def evaluate_closure(
             mandatory_products_ready=False,
             mandatory_products_full_fresh=False,
             enhancement_jobs_terminal=_enhancement_terminal(enhancement),
+            required_compatibility_ready=required_compat_ready,
             issues=issues,
         )
 
     # 3.5 [CHANGE-20260806-005 / Phase 4 / 六态] mandatory_ready_enhancing：
-    #     mandatory 全部可消费，但 enhancement 尚未全部终态（增强任务仍 running/pending）。
+    #     mandatory 全部可消费，但非 mandatory 产品尚未全部终态（仍 running/pending）。
     #     这是 core_ready 与 degraded_ready 之间的中间态：核心已就绪、增强推进中。
-    if not _enhancement_terminal(enhancement):
+    #
+    # [AUD-10 2026-08-07] "是否仍在推进中"必须覆盖全部非 mandatory 产品
+    # （enhancement + required_compatibility）。若只看 enhancement，
+    # dsa_projection 仍在计算时会被判成 degraded_ready（"已降级定型"），
+    # 而事实是它还没跑完 —— 那是把"进行中"误报成"最终降级"。
+    # 保持与三分类改动前完全一致的闭包时序，只是原因归属更细。
+    if not _enhancement_terminal(non_mandatory):
         return ClosureEvaluation(
             closure=CLOSURE_MANDATORY_READY_ENHANCING,
             mandatory_products_ready=True,
             mandatory_products_full_fresh=all(p.is_fully_fresh for p in mandatory),
             enhancement_jobs_terminal=False,
+            required_compatibility_ready=required_compat_ready,
             issues=issues,
         )
 
     mandatory_full_fresh = all(p.is_fully_fresh for p in mandatory)
-    enhancement_terminal = _enhancement_terminal(enhancement)
+    # [AUD-10] 与上方 3.5 同口径：终态判定覆盖全部非 mandatory 产品
+    enhancement_terminal = _enhancement_terminal(non_mandatory)
     # [PRD Alignment Pass P0-1] enhancement 必须"真正就绪"，而非仅 run terminal。
     # failed/partial/cancelled 也 terminal 但不可消费，必须排除。
     enhancement_all_ready = all(e.is_truly_ready for e in enhancement)
@@ -272,12 +348,18 @@ def evaluate_closure(
         auction_composite = True
 
     # 4. fully_ready
-    if mandatory_full_fresh and enhancement_all_ready and auction_composite:
+    if (
+        mandatory_full_fresh
+        and required_compat_ready
+        and enhancement_all_ready
+        and auction_composite
+    ):
         return ClosureEvaluation(
             closure=CLOSURE_FULLY_READY,
             mandatory_products_ready=True,
             mandatory_products_full_fresh=True,
             enhancement_jobs_terminal=True,
+            required_compatibility_ready=True,
             issues=issues,
         )
 
@@ -287,6 +369,7 @@ def evaluate_closure(
         mandatory_products_ready=True,
         mandatory_products_full_fresh=mandatory_full_fresh,
         enhancement_jobs_terminal=enhancement_terminal,
+        required_compatibility_ready=required_compat_ready,
         issues=issues,
     )
 
@@ -961,17 +1044,60 @@ class ProductReadinessService:
     async def _board_aggregation_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """board_aggregation：market_aggregation 发布指针。"""
-        st = await self._publication_readiness(
-            db, trade_date, PUBLICATION_KIND_MARKET_AGGREGATION,
-            "board_aggregation", is_mandatory=True,
+        """board_aggregation：market_aggregation 发布指针 + **current-lineage 归属校验**。
+
+        [current-lineage validation] 除 pointer 存在性外，还须验证 pointer 指向的
+        BoardAnalysisRun.source_core_run_id == 当前 stock_core pointer.data_run_id；
+        不一致（如 Core 重跑后 board 仍基于旧 Core）→ BOARD_AGGREGATION_LINEAGE_MISMATCH，
+        不得 READY。
+        """
+        from app.models.board_analysis_snapshot import BoardAnalysisRun
+        from app.models.factor_publication import FactorPublication
+
+        pub = await db.scalar(
+            select(FactorPublication)
+            .where(
+                FactorPublication.trade_date == trade_date,
+                FactorPublication.publication_kind
+                == PUBLICATION_KIND_MARKET_AGGREGATION,
+            )
+            .limit(1)
         )
-        if st is not None:
-            return st
+        if pub is None:
+            return ProductReadinessState(
+                "board_aggregation", READINESS_PENDING, "fresh",
+                lineage={"source_type": "publication_pointer",
+                         "reason_code": "NO_PUBLICATION"},
+            )
+
+        board_run = await db.scalar(
+            select(BoardAnalysisRun)
+            .where(BoardAnalysisRun.id == pub.data_run_id)
+            .limit(1)
+        )
+        current_core = await self._current_stock_core_data_run_id(db, trade_date)
+        lineage = _publication_lineage(pub, board_run)
+        lineage["source_type"] = "market_aggregation_publication"
+        lineage["board_run_id"] = _sid(getattr(pub, "data_run_id", None))
+        lineage["reason_code"] = "BOARD_AGGREGATION_PUBLISHED"
+        if current_core is None or board_run is None \
+                or getattr(board_run, "source_core_run_id", None) != current_core:
+            # 当前 stock_core pointer 缺失，或 board run 的 source_core 与当前 Core 不一致
+            return ProductReadinessState(
+                "board_aggregation", READINESS_DEGRADED, "stale",
+                is_mandatory=True, is_terminal=False,
+                lineage={
+                    **lineage,
+                    "expected_source_core_run_id": _sid(current_core),
+                    "actual_source_core_run_id": _sid(
+                        getattr(board_run, "source_core_run_id", None),
+                    ),
+                    "reason_code": "BOARD_AGGREGATION_LINEAGE_MISMATCH",
+                },
+            )
         return ProductReadinessState(
-            "board_aggregation", READINESS_PENDING, "fresh",
-            lineage={"source_type": "publication_pointer",
-                     "reason_code": "NO_PUBLICATION"},
+            "board_aggregation", READINESS_READY, "fresh",
+            is_mandatory=True, is_terminal=True, lineage=lineage,
         )
 
     async def _review_state(
@@ -1007,6 +1133,25 @@ class ProductReadinessService:
             lineage = _publication_lineage(pub, pub_run)
             lineage["source_type"] = "review_publication"
             lineage["review_run_id"] = _sid(getattr(pub, "data_run_id", None))
+            # [current-lineage validation] review 必须归属当前上游：
+            #   source_core_run_id == 当前 stock_core pointer.data_run_id
+            #   source_board_run_id == 当前 market_aggregation pointer.data_run_id
+            # 任一不一致 → REVIEW_LINEAGE_MISMATCH，不得 READY。
+            current_core = await self._current_stock_core_data_run_id(db, trade_date)
+            current_board = await self._current_market_aggregation_data_run_id(
+                db, trade_date,
+            )
+            run_core = getattr(pub_run, "source_core_run_id", None)
+            run_board = getattr(pub_run, "source_board_run_id", None)
+            lineage["expected_source_core_run_id"] = _sid(current_core)
+            lineage["expected_source_board_run_id"] = _sid(current_board)
+            if pub_run is None or current_core is None or current_board is None \
+                    or run_core != current_core or run_board != current_board:
+                lineage["reason_code"] = "REVIEW_LINEAGE_MISMATCH"
+                return ProductReadinessState(
+                    "review", READINESS_DEGRADED, "stale",
+                    is_terminal=False, lineage=lineage,
+                )
             lineage["reason_code"] = "REVIEW_PUBLISHED"
             return ProductReadinessState(
                 "review", READINESS_READY, "fresh", is_terminal=True,
@@ -1503,6 +1648,31 @@ class ProductReadinessService:
             .where(
                 FactorPublication.trade_date == trade_date,
                 FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
+                FactorPublication.superseded_by.is_(None),
+            )
+            .order_by(FactorPublication.created_at.desc())
+            .limit(1)
+        )
+        if pub is None:
+            return None
+        return getattr(pub, "data_run_id", None)
+
+    async def _current_market_aggregation_data_run_id(
+        self, db: Any, trade_date: date,
+    ) -> Any | None:
+        """当前 market_aggregation pointer 的 data_run_id（与下游 review 对齐）。
+
+        作为 review 判定 source_board lineage 的权威 board run 标识。
+        优先取当日 MARKET_AGGREGATION 发布指针的 data_run_id（非 superseded）。
+        """
+        from app.models.factor_publication import FactorPublication
+
+        pub = await db.scalar(
+            select(FactorPublication)
+            .where(
+                FactorPublication.trade_date == trade_date,
+                FactorPublication.publication_kind
+                == PUBLICATION_KIND_MARKET_AGGREGATION,
                 FactorPublication.superseded_by.is_(None),
             )
             .order_by(FactorPublication.created_at.desc())

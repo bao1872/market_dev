@@ -4,8 +4,6 @@
     PURE_UNIT_TEST=1 python -m pytest tests/test_review_dependency_matrix.py -v
 
 覆盖计划 9 项中的可测场景：
-1. chip 不可用 → 降级 core-only + degraded_reasons=[CHIP_UNAVAILABLE]
-2. chip 部分成功 → source_chip_run_id 记录 + degraded_reasons=[CHIP_PARTIAL]
 3. auction 失败默认降级不阻断（门禁不因 auction 缺失而 block）
 4. 59 条历史 → insufficient_history（非 unavailable）；60 条 → normalized_ready
 5. 禁止读取未来数据（point-in-time 违规 → 门禁 block）
@@ -13,7 +11,15 @@
 7. all-null（P/Q/U/C/V 全 None）不可发布
 8. 原子发布失败保留旧 pointer（重复发布幂等，零写入）
 9. 非 ready 必须给出 reason（禁止无原因的不可用）
-10. API/schema 暴露合同：degraded_reasons + source_chip_run_id 透传
+
+[AUD-04/05 2026-08-07] 原第 1、2、10 项（chip 依赖矩阵与 chip 字段透传合同）已退役：
+它们保护的是"Review 依赖 chip"这一被判定为错误的合同 —— Review 在创建阶段查询
+chip、把 chip 降级原因写进 Review lineage、并允许晚到 chip 通过 ON CONFLICT 改写
+已发布 Review。该合同与 test_review_v21_dependency_contract.py 声明的
+"Review 只依赖 stock_core + market_aggregation" 直接矛盾（Test Contract Drift）。
+现 Review 已与 chip 解耦，`_resolve_chip_dependency` 已删除，故相关用例整体移除。
+替代保护见 test_review_v21_dependency_contract.py（create_run 层零 chip 查询）
+与 test_review_immutability_contract.py（晚到 chip 不改写已有 run）。
 """
 
 from __future__ import annotations
@@ -27,7 +33,6 @@ import pytest
 from sqlalchemy.dialects.postgresql.dml import Insert as PgInsert
 
 from app.models.market_review import MarketReviewRun, MarketReviewScopeSnapshot
-from app.services.review_orchestrator_service import _resolve_chip_dependency
 from app.services.review_publication_service import (
     evaluate_publish_gate,
     publish_review,
@@ -199,244 +204,6 @@ def _gate_pass_results(run: MarketReviewRun, *, future_obs_count: int = 0, marke
         _FakeResult(scalar=future_obs_count),  # future_obs count 查询
     ]
 
-
-# =============================================================================
-# 1-2. chip 依赖矩阵（_resolve_chip_dependency）
-# =============================================================================
-
-
-async def test_chip_unavailable_downgrades_to_core_only() -> None:
-    """chip 完全缺失 → source_chip_run_id=None, degraded_reasons=[CHIP_UNAVAILABLE]。
-
-    [P0 2026-08-04] 覆盖率合同：expected_count 存在但 succeeded==0 → unavailable。
-    """
-    run = _make_run()
-    session = _make_session([
-        _FakeResult(scalar_list=[]),  # 无任何 chip 快照
-        _FakeResult(scalar=5000),     # core run expected_count
-    ])
-    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
-        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-    assert chip_run_id is None  # 不把 core run 冒充 chip run
-    assert reasons == ["CHIP_UNAVAILABLE"]
-    assert coverage["expected_count"] == 5000
-    assert coverage["succeeded_count"] == 0
-    assert coverage["coverage"] == 0.0
-
-
-async def test_chip_partial_success_records_source_and_degraded() -> None:
-    """chip 覆盖不足 → degraded_reasons=[CHIP_PARTIAL]，真实覆盖率 <1。"""
-    run = _make_run()
-    # group_by 返回 (status, count)：succeeded=10, failed=5；expected=5000
-    session = _make_session([
-        _FakeResult(scalar_list=[("succeeded", 10), ("failed", 5)]),
-        _FakeResult(scalar=5000),
-    ])
-    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
-        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-    assert chip_run_id is None
-    assert reasons == ["CHIP_PARTIAL"]
-    assert coverage["expected_count"] == 5000
-    assert coverage["succeeded_count"] == 10
-    assert coverage["missing_count"] == 5000 - 15
-    assert coverage["coverage"] == 10 / 5000
-
-
-async def test_chip_coverage_partial_when_only_one_of_many() -> None:
-    """chip 表只有 1 只 succeeded 而 core 应有 5000 → CHIP_PARTIAL（原 P0 复现）。
-
-    旧逻辑只看“已有行全 succeeded”会误判 100% 覆盖；现以 expected_count 为分母。
-    """
-    run = _make_run()
-    session = _make_session([
-        _FakeResult(scalar_list=[("succeeded", 1)]),
-        _FakeResult(scalar=5000),
-    ])
-    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
-        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-    assert chip_run_id is None
-    assert reasons == ["CHIP_PARTIAL"]
-    assert coverage["succeeded_count"] == 1
-    assert coverage["missing_count"] == 4999
-    assert coverage["coverage"] == 1 / 5000
-
-
-async def test_chip_all_succeeded_full_coverage_no_degradation() -> None:
-    """chip 全量 succeeded 且覆盖全部 expected → 无降级。"""
-    run = _make_run()
-    session = _make_session([
-        _FakeResult(scalar_list=[("succeeded", 5000)]),
-        _FakeResult(scalar=5000),
-    ])
-    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
-        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-    assert chip_run_id is None
-    assert reasons == []
-    assert coverage["coverage"] == 1.0
-    assert coverage["missing_count"] == 0
-
-
-async def test_chip_all_failed_downgrades_to_core_only() -> None:
-    """chip 全部失败 → source_chip_run_id=None, degraded_reasons=[CHIP_UNAVAILABLE]。"""
-    run = _make_run()
-    session = _make_session([
-        _FakeResult(scalar_list=[("failed", 10)]),
-        _FakeResult(scalar=5000),
-    ])
-    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
-        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-    assert chip_run_id is None
-    assert reasons == ["CHIP_UNAVAILABLE"]
-    assert coverage["succeeded_count"] == 0
-
-
-async def test_chip_unavailable_when_expected_count_missing() -> None:
-    """core run 无 expected_count（None）→ 无法评估覆盖率 → CHIP_UNAVAILABLE。"""
-    run = _make_run()
-    session = _make_session([
-        _FakeResult(scalar_list=[("succeeded", 5000)]),
-        _FakeResult(scalar=None),  # expected_count 缺失
-    ])
-    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
-        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-    assert chip_run_id is None
-    assert reasons == ["CHIP_UNAVAILABLE"]
-    assert coverage["expected_count"] is None
-
-
-async def test_chip_query_isolated_by_algorithm_version_and_distinct() -> None:
-    """chip 覆盖查询必须按当前算法版本隔离，且按 instrument 去重。
-
-    [P0 2026-08-04] chip 表唯一键含 algorithm_version：同一
-    (instrument, trade_date, core_run_id) 可同时存在不同 chip 版本记录。
-    不隔离会重复计数、coverage 超 100%、旧版本行掩盖新版本失败。
-    """
-    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
-
-    run = _make_run()
-    _fake = _make_session([
-        _FakeResult(scalar_list=[("succeeded", 5000)]),
-        _FakeResult(scalar=5000),
-    ])
-    await _resolve_chip_dependency(
-        _fake, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-
-    # 捕获第一条 chip 统计查询，断言 WHERE 含 algorithm_version、投影用 DISTINCT
-    chip_stmt = _fake.execute.call_args_list[0][0][0]
-    sql = chip_stmt.compile(
-        compile_kwargs={"literal_binds": True}
-    ).string.lower()
-    assert "algorithm_version" in sql, (
-        "chip 覆盖查询必须按 algorithm_version 隔离（防止跨版本重复计数）"
-    )
-    assert "distinct" in sql, (
-        "chip 覆盖统计必须 COUNT(DISTINCT instrument_id)（防止同版本重复行）"
-    )
-    assert CHIP_CONSENSUS_ALGORITHM_VERSION in sql
-
-
-async def test_chip_coverage_records_algorithm_version() -> None:
-    """chip_coverage 元数据必须记录实际采用的 chip 算法版本。"""
-    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
-
-    run = _make_run()
-    session = _make_session([
-        _FakeResult(scalar_list=[("succeeded", 5000)]),
-        _FakeResult(scalar=5000),
-    ])
-    _, _, coverage = await _resolve_chip_dependency(
-        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-    assert coverage["algorithm_version"] == CHIP_CONSENSUS_ALGORITHM_VERSION
-
-
-async def test_chip_ready_requires_no_failed_skipped_missing() -> None:
-    """ready 必须 succeeded==expected 且 failed==0、skipped==0、missing==0。"""
-    run = _make_run()
-    # succeeded=5000 但有 failed=1 → 不得判为无降级
-    session = _make_session([
-        _FakeResult(scalar_list=[("succeeded", 5000), ("failed", 1)]),
-        _FakeResult(scalar=5000),
-    ])
-    chip_run_id, reasons, coverage = await _resolve_chip_dependency(
-        session, trade_date=run.trade_date, source_core_run_id=run.source_core_run_id,
-    )
-    assert chip_run_id is None
-    assert reasons == ["CHIP_PARTIAL"], (
-        "存在 failed 即使 succeeded 已达 expected 也不得判为无降级"
-    )
-
-
-# ---------------------------------------------------------------------------
-# [P0 2026-08-04] chip 覆盖率经 API/schema 暴露（前端显示真实覆盖率）
-# ---------------------------------------------------------------------------
-
-
-async def test_chip_coverage_exposed_via_review_overview_schema() -> None:
-    """ReviewOverviewResponse 必须承载 chipCoverage（真实覆盖率，非占位比例）。"""
-    from app.schemas.review import (
-        ReviewChipCoverageDTO,
-        ReviewOverviewResponse,
-    )
-
-    overview = ReviewOverviewResponse(
-        reviewRunId="00000000-0000-0000-0000-000000000001",
-        tradeDate="2026-08-04",
-        status="published",
-        sourceCoreRunId="00000000-0000-0000-0000-000000000002",
-        sourceBoardRunId="00000000-0000-0000-0000-000000000003",
-        algorithmVersion="review-1.0.0",
-        filterVersion="filters-1.0.0",
-        baselineWindow=120,
-        chipCoverage=ReviewChipCoverageDTO(
-            expectedCount=5000,
-            succeededCount=4500,
-            failedCount=100,
-            skippedCount=50,
-            missingCount=350,
-            coverage=0.9,
-        ),
-    )
-    assert overview.chipCoverage is not None
-    assert overview.chipCoverage.expectedCount == 5000
-    assert overview.chipCoverage.missingCount == 350
-    assert overview.chipCoverage.coverage == 0.9
-    # sourceChipRunId 不再冒充独立 chip run：恒为 None
-    assert overview.sourceChipRunId is None
-
-
-async def test_extract_chip_coverage_from_metadata() -> None:
-    """_extract_chip_coverage 从 run.metadata_json 提取 chip 真实覆盖率。"""
-    from app.api.review import _extract_chip_coverage
-
-    class _FakeRun:
-        def __init__(self, metadata):
-            self.metadata_json = metadata
-
-    run = _FakeRun({
-        "chip_coverage": {
-            "expected_count": 5000,
-            "succeeded_count": 1,
-            "failed_count": 0,
-            "skipped_count": 0,
-            "missing_count": 4999,
-            "coverage": 1 / 5000,
-        },
-    })
-    cov = _extract_chip_coverage(run)
-    assert cov is not None
-    assert cov.coverage == 1 / 5000
-    assert cov.missingCount == 4999
-
-    # 无 chip_coverage 元数据 → None（前端不展示虚报覆盖率）
-    assert _extract_chip_coverage(_FakeRun({})) is None
 
 
 # =============================================================================
@@ -653,56 +420,6 @@ async def test_non_ready_with_reason_passes_that_check() -> None:
     _, blockers = await evaluate_publish_gate(_make_session(results), run)
     assert not any("缺 reason" in b for b in blockers)
 
-
-# =============================================================================
-# 10. API / schema 暴露合同：degraded_reasons + source_chip_run_id 必须透传
-# =============================================================================
-
-
-async def test_overview_response_exposes_chip_dependency() -> None:
-    """ReviewOverviewResponse 必须返回 sourceChipRunId 与 degradedReasons。"""
-    from app.schemas.review import ReviewOverviewResponse
-
-    resp = ReviewOverviewResponse(
-        reviewRunId=str(uuid.uuid4()),
-        tradeDate="2026-08-04",
-        status="signals_ready",
-        sourceCoreRunId=str(uuid.uuid4()),
-        sourceBoardRunId=str(uuid.uuid4()),
-        sourceChipRunId=None,  # chip 不可用，core-only 降级
-        degradedReasons=["CHIP_UNAVAILABLE"],
-        algorithmVersion="v1",
-        filterVersion="f1",
-        baselineWindow=60,
-    )
-    payload = resp.model_dump(mode="json")
-    # 契约：sourceChipRunId=null 必须明确返回（不得省略导致前端当"未记录"）
-    assert "sourceChipRunId" in payload
-    assert payload["sourceChipRunId"] is None
-    assert payload["degradedReasons"] == ["CHIP_UNAVAILABLE"]
-
-
-async def test_run_response_exposes_degraded_reasons() -> None:
-    """ReviewRunResponse（管理端）必须返回 source_chip_run_id 与 degraded_reasons。"""
-    from app.schemas.review import ReviewRunResponse
-
-    resp = ReviewRunResponse(
-        id=str(uuid.uuid4()),
-        trade_date="2026-08-04",
-        source_core_run_id=str(uuid.uuid4()),
-        source_board_run_id=str(uuid.uuid4()),
-        source_chip_run_id=str(uuid.uuid4()),
-        degraded_reasons=["CHIP_PARTIAL"],
-        algorithm_version="v1",
-        filter_version="f1",
-        baseline_window=60,
-        status="signals_ready",
-        created_at="2026-08-04T15:00:00Z",
-        updated_at="2026-08-04T15:00:00Z",
-    )
-    payload = resp.model_dump(mode="json")
-    assert payload["source_chip_run_id"] is not None
-    assert payload["degraded_reasons"] == ["CHIP_PARTIAL"]
 
 
 # =============================================================================

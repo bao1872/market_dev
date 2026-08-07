@@ -129,7 +129,8 @@ async def create_after_close_chip_consensus_job(
 ) -> tuple[SchedulerJobRun | None, bool]:
     """[CHANGE-20260729-003] 创建盘后筹码共识独立任务（幂等，软失败）。
 
-    在 after_close_orchestrator 主 run 标记 succeeded 后调用。
+    [AUD-08 2026-08-07] 由 after_close_orchestrator 在 stock_core 发布成功后
+    立即调用（步骤 4.6），不再等待 Review 完成，也不受 Review 失败/取消影响。
     本函数只创建任务记录，不 await 执行（执行由独立 Worker 领取）。
 
     [P0-7 修复 2026-07-29] 软失败方式创建 chip job：

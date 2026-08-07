@@ -139,6 +139,9 @@ class ProductReadinessResponse(BaseModel):
       面向生产的别名，closure 保留向后兼容。
     - mandatoryProductsReady: 全部 mandatory 产品可消费
     - mandatoryProductsFullyFresh: 全部 mandatory 产品 fully fresh
+    - requiredCompatibilityReady: 全部 required_compatibility 产品（dsa_projection）
+      已真正就绪。[AUD-10] 三分类新增维度：兼容输出不阻断核心，但未就绪时
+      不得宣称完整就绪，需可归因
     - enhancementJobsTerminal: 全部 enhancement 产品已达终态
     - allProductsReady: 全部九节点产品可消费（fully_ready 的充要信号）
     - unreconciledChildren: 父任务下未对账（非终态）的增强子任务数（mandatory_ready_enhancing 依据）
@@ -151,6 +154,9 @@ class ProductReadinessResponse(BaseModel):
     productionClosure: str = Field(..., description="面向生产的闭包状态别名（= closure）")
     mandatoryProductsReady: bool = Field(False)
     mandatoryProductsFullyFresh: bool = Field(False)
+    requiredCompatibilityReady: bool = Field(
+        True, description="[AUD-10] 全部必需兼容输出（dsa_projection）已就绪"
+    )
     enhancementJobsTerminal: bool = Field(False)
     allProductsReady: bool = Field(False)
     unreconciledChildren: int = Field(0)

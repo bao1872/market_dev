@@ -41,6 +41,7 @@ from app.models.auction import (
     AuctionAnchorPublication,
     AuctionAnchorSnapshot,
 )
+from app.models.board_analysis_snapshot import BoardAnalysisRun
 from app.models.board_facts_run import BoardFactsRun
 from app.models.factor_publication import (
     PUBLICATION_KIND_AUCTION_ANCHOR,
@@ -94,7 +95,8 @@ class _FakeResult:
 _TABLE_TO_MODEL: dict[str, type] = {
     "factor_publications": FactorPublication,
     "board_facts_runs": BoardFactsRun,
-    "market_reviews": MarketReviewRun,
+    "board_analysis_runs": BoardAnalysisRun,
+    "market_review_runs": MarketReviewRun,
     "scheduler_job_runs": SchedulerJobRun,
     "stock_chip_consensus_snapshots": StockChipConsensusSnapshot,
     "auction_anchor_publications": AuctionAnchorPublication,
@@ -185,11 +187,18 @@ class _FakeDB:
         # [required compatibility projection identity] run/item 计数一致性：默认与 eligible
         # 一致（count_mismatch=False）；传入不同值可测试 PROJECTION_RUN_ITEM_COUNT_MISMATCH。
         self._dsa_total = plan.get("dsa_total_instruments")
+        # [current-lineage validation] 当前上游 pointer 的 pub 对象（供 _current_*_data_run_id）。
+        # 默认与 _full_plan 的 stock_core/market_aggregation pointer 一致（data_run_id=_DRID）。
+        self._current_pubs = plan.get("current_pubs", {})
 
     async def scalar(self, stmt):
         ent = _entity_class(stmt)
         if ent is FactorPublication:
             kind = _extract_kind(stmt)
+            # [current-lineage validation] _current_*_data_run_id 查询带 superseded_by.is_(None)，
+            # 应返回当前（非 superseded）上游 pointer pub 对象（data_run_id 供归属校验）。
+            if "superseded_by" in str(stmt.whereclause):
+                return self._current_pubs.get(kind)
             q = self._pubs.get(kind, [])
             return q.pop(0) if q else None
         if ent is StrategyRun:
@@ -300,11 +309,24 @@ def _bf_run(status="published", drid=_DRID):
                            coverage_ratio=0.99, finished_at=None, created_at=None)
 
 
-def _review_run(status="published", drid=_DRID):
+def _review_run(status="published", drid=_DRID, source_core=_DRID, source_board=_DRID):
     return SimpleNamespace(id=drid, status=status, data_run_id=drid,
                            algorithm_version="v1", filter_version="fv1",
                            coverage_ratio=0.99, published_at=None,
-                           completed_at=None, created_at=None)
+                           completed_at=None, created_at=None,
+                           source_core_run_id=source_core,
+                           source_board_run_id=source_board)
+
+
+def _board_agg_run(status="succeeded", drid=_DRID, source_core=_DRID):
+    """market_aggregation pointer 指向的 BoardAnalysisRun（source_core 默认=当前 stock_core）。"""
+    return SimpleNamespace(
+        id=drid, status=status, data_run_id=drid,
+        source_core_run_id=source_core,
+        source_board_run_id="b1",
+        algorithm_version="v1", coverage_ratio=0.99,
+        published_at=None, created_at=None,
+    )
 
 
 def _chip_job(status="succeeded", drid=_DRID, chip_status=None,
@@ -380,15 +402,24 @@ def _full_plan(**overrides) -> dict:
     }
     runs = {
         BoardFactsRun: [_bf_run("published")],
+        BoardAnalysisRun: [_board_agg_run("succeeded", source_core=_DRID)],
         MarketReviewRun: [_review_run("published")],
         SchedulerJobRun: [_chip_job("succeeded")],
         StockChipConsensusSnapshot: [10],  # 真实 snapshot 行数（lineage 对账）
         AuctionAnchorPublication: [_auction_pub("succeeded")],
         AuctionAnchorSnapshot: [_auction_snap("succeeded")],
     }
+    # [current-lineage validation] 当前上游 pointer（供 _current_*_data_run_id）。
+    # 默认与 _full_plan 的 stock_core/market_aggregation pointer 一致（data_run_id=_DRID），
+    # 使 board_aggregation/review 的 source 归属校验通过。
+    current_pubs = {
+        _STOCK_CORE: _pub(_STOCK_CORE),
+        _BOARD_AGG: _pub(_BOARD_AGG),
+    }
     plan = {
         "pubs": pubs,
         "runs": runs,
+        "current_pubs": current_pubs,
         "dsa_counts": (10, 10),
         # 默认 state_events 存在且归属当前 core run（_DRID == stock_core pointer_data_run_id），
         # 使 enhancement 全 terminal
@@ -658,6 +689,177 @@ async def test_state_events_exact_match_ready():
     plan["state_event_rows"] = [("candidate", _DRID, 5)]
     ev = await _evaluate(plan)
     assert ev.closure == CLOSURE_FULLY_READY
+
+
+async def test_board_aggregation_exact_lineage_ready():
+    """[current-lineage validation] market_aggregation pointer 指向的 BoardAnalysisRun
+    source_core_run_id == 当前 stock_core pointer.data_run_id → 就绪。
+    """
+    plan = _full_plan()  # board run source_core=_DRID == current stock_core(_DRID)
+    ev = await _evaluate(plan)
+    assert ev.closure == CLOSURE_FULLY_READY
+
+
+async def test_board_aggregation_stale_lineage_not_ready():
+    """[current-lineage validation] market_aggregation pointer 指向的 BoardAnalysisRun
+    source_core_run_id 与当前 stock_core pointer 不一致（如 Core 重跑后 board 基于旧 Core）
+    → BOARD_AGGREGATION_LINEAGE_MISMATCH，不得 READY。
+
+    board_aggregation 是 mandatory 节点，lineage mismatch 阻断闭包 → 不得 fully_ready。
+    """
+    plan = _full_plan()
+    # board run 基于旧 Core（source_core 与当前 stock_core _DRID 不一致）
+    plan["runs"] = {**plan["runs"], BoardAnalysisRun: [_board_agg_run("succeeded", source_core="old_core_id")]}
+    ev = await _evaluate(plan)
+    assert ev.closure == CLOSURE_CORE_READY  # mandatory board_aggregation 未就绪
+
+    # 且状态本身不得 READY（lineage mismatch → degraded, non-terminal）
+    # 注：_evaluate 会 pop 共享 plan 的 FIFO，需用 fresh plan 断言直接状态。
+    plan2 = _full_plan()
+    plan2["runs"] = {**plan2["runs"], BoardAnalysisRun: [_board_agg_run("succeeded", source_core="old_core_id")]}
+    db = _FakeDB(plan2)
+    service = ProductReadinessService()
+    st = await service._board_aggregation_state(db, date(2026, 8, 4))
+    assert st.readiness == READINESS_DEGRADED
+    assert st.lineage.get("reason_code") == "BOARD_AGGREGATION_LINEAGE_MISMATCH"
+
+
+async def test_review_exact_lineage_ready():
+    """[current-lineage validation] market_review pointer 指向的 MarketReviewRun
+    source_core_run_id == 当前 stock_core pointer 且 source_board_run_id == 当前
+    market_aggregation pointer → 就绪。
+    """
+    plan = _full_plan()  # review run source_core=_DRID, source_board=_DRID 与当前指针一致
+    ev = await _evaluate(plan)
+    assert ev.closure == CLOSURE_FULLY_READY
+
+
+async def test_review_stale_lineage_not_ready():
+    """[current-lineage validation] market_review pointer 指向的 MarketReviewRun
+    source_core_run_id 与当前 stock_core 不一致 → REVIEW_LINEAGE_MISMATCH，不得 READY。
+
+    review 是 mandatory 节点，lineage mismatch 阻断闭包 → 不得 fully_ready。
+    """
+    plan = _full_plan()
+    plan["runs"] = {
+        **plan["runs"],
+        MarketReviewRun: [_review_run("published", source_core="old_core_id", source_board=_DRID)],
+    }
+    ev = await _evaluate(plan)
+    assert ev.closure == CLOSURE_CORE_READY  # mandatory review 未就绪
+
+    # 且状态本身不得 READY（review lineage mismatch → degraded, non-terminal）
+    # 注：_evaluate 会 pop 共享 plan 的 FIFO，需用 fresh plan 断言直接状态。
+    plan2 = _full_plan()
+    plan2["runs"] = {
+        **plan2["runs"],
+        MarketReviewRun: [_review_run("published", source_core="old_core_id", source_board=_DRID)],
+    }
+    db = _FakeDB(plan2)
+    service = ProductReadinessService()
+    st = await service._review_state(db, date(2026, 8, 4))
+    assert st.readiness == READINESS_DEGRADED
+    assert st.lineage.get("reason_code") == "REVIEW_LINEAGE_MISMATCH"
+
+
+# =============================================================================
+# [AUD-10 2026-08-07] 产品三分类：mandatory / required_compatibility / enhancement
+# =============================================================================
+
+
+def test_product_classification_is_three_way():
+    """九节点必须被划入三类，且分类互斥、并集完整。"""
+    from app.services.product_readiness_service import (
+        ENHANCEMENT_PRODUCTS,
+        MANDATORY_PRODUCTS,
+        NINE_NODES,
+        REQUIRED_COMPATIBILITY_PRODUCTS,
+    )
+
+    assert REQUIRED_COMPATIBILITY_PRODUCTS == {"dsa_projection"}, (
+        "dsa_projection 是 stock_core 的派生兼容投影，既非可选增强、也不阻断核心"
+    )
+    # 互斥
+    assert not (MANDATORY_PRODUCTS & REQUIRED_COMPATIBILITY_PRODUCTS)
+    assert not (MANDATORY_PRODUCTS & ENHANCEMENT_PRODUCTS)
+    assert not (REQUIRED_COMPATIBILITY_PRODUCTS & ENHANCEMENT_PRODUCTS)
+    # 完整：仍是九节点
+    assert len(NINE_NODES) == 9
+    assert NINE_NODES == (
+        MANDATORY_PRODUCTS | REQUIRED_COMPATIBILITY_PRODUCTS | ENHANCEMENT_PRODUCTS
+    )
+    # dsa_projection 已移出 enhancement
+    assert "dsa_projection" not in ENHANCEMENT_PRODUCTS
+
+
+def test_classify_product_mapping():
+    """classify_product 对三类与未登记产品的映射。"""
+    from app.services.product_readiness_service import (
+        PRODUCT_CLASS_ENHANCEMENT,
+        PRODUCT_CLASS_MANDATORY,
+        PRODUCT_CLASS_REQUIRED_COMPATIBILITY,
+        classify_product,
+    )
+
+    assert classify_product("stock_core") == PRODUCT_CLASS_MANDATORY
+    assert classify_product("review") == PRODUCT_CLASS_MANDATORY
+    assert (
+        classify_product("dsa_projection") == PRODUCT_CLASS_REQUIRED_COMPATIBILITY
+    )
+    assert classify_product("chip") == PRODUCT_CLASS_ENHANCEMENT
+    assert classify_product("auction_anchor") == PRODUCT_CLASS_ENHANCEMENT
+    # 未登记产品按最保守处理：enhancement（不阻断核心）
+    assert classify_product("some_future_product") == PRODUCT_CLASS_ENHANCEMENT
+
+
+async def test_required_compatibility_ready_true_when_all_ready():
+    """全部产品就绪 → required_compatibility_ready=True 且 fully_ready。"""
+    ev = await _evaluate(_full_plan())
+    assert ev.closure == CLOSURE_FULLY_READY
+    assert ev.required_compatibility_ready is True
+
+
+async def test_required_compatibility_not_ready_is_attributable():
+    """[AUD-10 核心] dsa_projection 未就绪时：
+
+    1. 不得 fully_ready；
+    2. required_compatibility_ready=False（可与"增强未就绪"区分）；
+    3. issues 中给出专属归因 code，而非混在泛化的增强降级里。
+    """
+    plan = _full_plan()
+    # dsa 投影已终态但 lineage 不匹配（matched=0）→ 兼容输出未就绪
+    plan["dsa_counts"] = (10, 0)
+
+    ev = await _evaluate(plan)
+
+    assert ev.closure != CLOSURE_FULLY_READY, (
+        "必需兼容输出未就绪时不得宣称完整就绪"
+    )
+    assert ev.required_compatibility_ready is False, (
+        "必须能与'增强产品未就绪'区分开"
+    )
+    codes = {i.get("code") for i in ev.issues}
+    assert "REQUIRED_COMPATIBILITY_NOT_READY" in codes, (
+        f"必须给出专属归因 code，实际 issues codes={codes}"
+    )
+
+
+async def test_closure_enum_values_unchanged():
+    """[AUD-10] 三分类不得引入新的 closure 取值（避免破坏既有消费方）。"""
+    from app import domain_status
+
+    allowed = {
+        domain_status.CLOSURE_BLOCKED,
+        domain_status.CLOSURE_PENDING,
+        domain_status.CLOSURE_CORE_READY,
+        domain_status.CLOSURE_MANDATORY_READY_ENHANCING,
+        domain_status.CLOSURE_DEGRADED_READY,
+        domain_status.CLOSURE_FULLY_READY,
+    }
+    # 遍历若干典型场景，确认闭包取值始终落在既有集合内
+    for plan_factory in (_full_plan,):
+        ev = await _evaluate(plan_factory())
+        assert ev.closure in allowed
 
 
 if __name__ == "__main__":

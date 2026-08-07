@@ -398,10 +398,12 @@ async def get_latest_review(
 
 
 def _extract_chip_coverage(run: MarketReviewRun) -> ReviewChipCoverageDTO | None:
-    """[P0 2026-08-04] 从 run.metadata_json 提取 chip 真实覆盖率明细。
+    """从 run.metadata_json 提取 chip 覆盖率明细（历史 run 兼容读取）。
 
-    chip_coverage 由 create_run 时 _resolve_chip_dependency 写入 metadata_json，
-    以 stock_core expected_count 为分母；缺失时返回 None（前端不展示虚报的覆盖率）。
+    [AUD-04/05 2026-08-07] Review 已与 chip 解耦：create_run 不再写入
+    chip_coverage，新建 run 此处恒返回 None（前端按“不可用”降级展示）。
+    保留本函数仅为兼容解耦前已落库的历史 run。chip 就绪度应改由
+    ProductReadiness / chip 域提供。
     """
     raw = (run.metadata_json or {}).get("chip_coverage")
     if not raw or not isinstance(raw, dict):

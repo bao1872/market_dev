@@ -77,10 +77,11 @@ router = APIRouter(prefix="/v1/admin/review", tags=["admin-review"])
 
 
 def _extract_chip_coverage(run: Any) -> ReviewChipCoverageDTO | None:
-    """[P0 2026-08-04] 从 run.metadata_json 提取 chip 真实覆盖率明细。
+    """从 run.metadata_json 提取 chip 覆盖率明细（历史 run 兼容读取）。
 
-    chip_coverage 由 create_run 时 _resolve_chip_dependency 写入 metadata_json，
-    以 stock_core expected_count 为分母；缺失时返回 None。
+    [AUD-04/05 2026-08-07] Review 已与 chip 解耦：create_run 不再写入
+    chip_coverage，新建 run 此处恒返回 None。保留本函数仅为兼容解耦前
+    已落库的历史 run。
     """
     metadata = run.metadata_json if not isinstance(run, dict) else run.get("metadata_json")
     raw = (metadata or {}).get("chip_coverage") if isinstance(metadata, dict) else None

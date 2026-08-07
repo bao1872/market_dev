@@ -130,7 +130,10 @@ class MarketReviewRun(Base):
     coverage_ratio: Mapped[Decimal] = mapped_column(
         Numeric(),
         nullable=False,
-        comment="整体覆盖率 = succeeded_scope_count / expected_scope_count",
+        comment=(
+            "[AUD-06] 真实有效样本覆盖率 = SUM(scope.ready_count) / "
+            "SUM(scope.eligible_count)；非 scope 执行成功率"
+        ),
     )
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="计算开始时间",

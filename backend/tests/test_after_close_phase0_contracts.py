@@ -472,8 +472,11 @@ def test_review_executor_timeout_forces_partial_success():
 async def test_terminal_review_short_circuit_detection():
     """[AC-CANCEL-01 2026-08-04] Review 终态短路判定（真实行为，非正则）。
 
-    cancelled / interrupted 必须短路（保持终态、不继续 chip）；
+    cancelled / interrupted 必须短路（保持终态、不覆盖总任务终态）；
     succeeded / failed / timed_out / unavailable 不得短路（走 partial_success 判定）。
+
+    [AUD-08 2026-08-07] 短路语义已与 chip 解耦：chip 在 stock_core 发布后即入队，
+    早于本判定，短路不再影响 chip 是否存在。
     """
     from app.services.after_close_orchestrator import AfterCloseRunStatus
 
@@ -543,15 +546,20 @@ def test_completed_step_index_excludes_terminal_run_statuses():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_run_preserves_checkpoint_and_skips_chip():
+async def test_cancelled_run_preserves_checkpoint():
     """[P0 完整控制流] Review 返回 cancelled 时的端到端行为。
 
     验证链路：
       Review executor 返回 cancelled
-      → chip 未入队
       → job_run.status = cancelled
       → orchestrator_status = cancelled
       → last_completed_step 仍为 publishing（未被覆写）
+
+    [AUD-08 2026-08-07] 原用例名为 ..._and_skips_chip，断言取消时 chip 未入队。
+    该合同已被判定为错误：chip 只依赖 stock_core，与 Review 无因果关系，
+    不应因 Review 被取消而丢失。chip 现已前移到 stock_core 发布后入队，
+    取消场景下 chip 依然存在（见 test_chip_enqueued_before_review_step 与
+    test_chip_survives_review_failure_and_cancellation）。
     """
     from app.services import after_close_orchestrator as orch
     from app.services.after_close_orchestrator import AfterCloseRunStatus
@@ -632,6 +640,129 @@ def test_execute_after_close_run_short_circuit_uses_enum_and_none_checkpoint():
     assert "_enqueue_chip_job_step" not in body, (
         "终态短路后不得再执行 chip 入队"
     )
+
+
+# ---------------------------------------------------------------------------
+# Gate: chip_forks_after_core_publish
+# [AUD-08 2026-08-07] chip 只依赖 stock_core，不得绑定 Review 生命周期
+# ---------------------------------------------------------------------------
+
+
+def test_chip_enqueued_before_review_step():
+    """[AUD-08] chip 入队必须早于 Review 步骤。
+
+    改动前 chip 入队位于 Review 之后（步骤 4.9），使 chip 这一增强产品被
+    Review 的成败/取消所左右：Review 取消时短路块直接 raise，chip 永远不入队。
+    chip 只消费 stock_core，与 Review 无因果关系，必须在核心发布后立即分叉。
+
+    原合同（test_after_close_phase0_contracts 原第 6 条）只验证 chip 入队早于
+    "最终终态"，不足以阻止它被塞在 Review 之后 —— 本用例补上顺序约束。
+    """
+    import inspect
+
+    from app.services import after_close_orchestrator as orch
+
+    src = inspect.getsource(orch.execute_after_close_run)
+
+    chip_pos = src.find("_enqueue_chip_job_step(")
+    review_pos = src.find("_execute_review_step(")
+
+    assert chip_pos != -1, "未找到 chip 入队调用"
+    assert review_pos != -1, "未找到 review 步骤调用"
+    assert chip_pos < review_pos, (
+        "chip 入队必须早于 Review 步骤（chip 只依赖 stock_core，"
+        "不得因 Review 失败/取消而丢失）"
+    )
+
+
+def test_chip_enqueue_guarded_by_core_publish_success():
+    """[AUD-08] chip 入队的前置判据必须是 stock_core 发布成功，而非 Review 结果。"""
+    import inspect
+    import re
+
+    from app.services import after_close_orchestrator as orch
+
+    src = inspect.getsource(orch.execute_after_close_run)
+    chip_pos = src.find("_enqueue_chip_job_step(")
+    # 取 chip 调用之前最近的 if 守卫
+    preceding = src[:chip_pos]
+    guard = re.findall(
+        r'if ([^\n]*snapshot_error is None[^\n]*)', preceding,
+    )
+    assert guard, "chip 入队前必须有 stock_core 发布成功守卫"
+    last_guard = guard[-1]
+    assert "publish_failed" in last_guard, (
+        "chip 守卫必须包含 publish_failed 判据"
+    )
+    assert "snapshot_run_id" in last_guard, (
+        "chip 守卫必须包含 snapshot_run_id 判据"
+    )
+    assert "review" not in last_guard.lower(), (
+        "chip 守卫不得依赖任何 Review 状态"
+    )
+
+
+def test_chip_survives_review_failure_and_cancellation():
+    """[AUD-08] Review 短路块之后不得再有 chip 入队，且短路不撤销已入队 chip。
+
+    结构性保证：chip 入队位于短路块之前 → 无论短路是否触发，chip 都已入队。
+    """
+    import inspect
+    import re
+
+    from app.services import after_close_orchestrator as orch
+
+    src = inspect.getsource(orch.execute_after_close_run)
+
+    chip_pos = src.find("_enqueue_chip_job_step(")
+    short_circuit_pos = src.find("if _is_terminal_review_short_circuit(")
+
+    assert short_circuit_pos != -1, "未找到终态短路块"
+    assert chip_pos < short_circuit_pos, (
+        "chip 入队必须早于 Review 终态短路块，"
+        "否则 Review 取消/中断时 chip 永远不会入队"
+    )
+
+    # 短路块内不得有任何撤销/删除 chip 的动作
+    block = re.search(
+        r'if _is_terminal_review_short_circuit\(.*?raise AfterCloseCancelledError',
+        src,
+        re.DOTALL,
+    )
+    assert block is not None
+    body = block.group(0).lower()
+    for forbidden in ("cancel_chip", "delete_chip", "revoke_chip"):
+        assert forbidden not in body, (
+            f"短路块不得撤销已入队的 chip（发现 {forbidden}）"
+        )
+
+
+def test_chip_enqueue_is_idempotent_for_resume():
+    """[AUD-08] chip 前移的可行性依据：入队本身幂等，断点恢复重跑安全。
+
+    create_after_close_chip_consensus_job 通过确定性 run_key
+    （`chip_consensus:<trade_date>`）走 acquire_job_run_lock 取锁，
+    同日重复调用返回既有 job（is_new=False）而非新建 —— 这是允许 resume
+    路径重复执行步骤 4.6 的前提。
+    """
+    import inspect
+
+    from app.services.after_close_chip_consensus_service import (
+        create_after_close_chip_consensus_job,
+    )
+
+    src = inspect.getsource(create_after_close_chip_consensus_job)
+
+    # 1) run_key 必须由 trade_date 确定性派生（同日必然同 key）
+    assert "run_key = f" in src and "trade_date.isoformat()" in src, (
+        "chip job 的 run_key 必须由 trade_date 确定性派生，否则重复调用会新建"
+    )
+    # 2) 必须经统一取锁入口，由其保证同 key 幂等
+    assert "acquire_job_run_lock" in src, (
+        "chip job 创建必须走 acquire_job_run_lock 才能保证幂等"
+    )
+    # 3) 必须把"是否新建"作为结果返回，供调用方区分
+    assert "is_new" in src, "必须返回 is_new 以区分新建与复用"
 
 
 def test_outer_exception_handler_excludes_cancellation():
