@@ -787,21 +787,28 @@ async def _run_and_publish_review(
     [约束5] source_core_run_id / source_board_run_id 显式传入，记录同 universe lineage。
     """
     from app.services.review_orchestrator_service import (
+        ReviewOrchestratorError,
         compute_run,
         create_run,
         publish_run,
     )
 
     async with AsyncSessionLocal() as db:
-        run = await create_run(
-            db,
-            trade_date=trade_date,
-            source_core_run_id=core_run_id,
-            source_board_run_id=board_run_id,
-            idempotency_key=f"verify-seed:{trade_date}",
-        )
-        await db.commit()
-        run_id = run.id
+        try:
+            run = await create_run(
+                db,
+                trade_date=trade_date,
+                source_core_run_id=core_run_id,
+                source_board_run_id=board_run_id,
+                idempotency_key=f"verify-seed:{trade_date}",
+            )
+            await db.commit()
+            run_id = run.id
+        except ReviewOrchestratorError as exc:
+            # board 无已发布 pointer（如 blocked 场景）时 create_run 无法解析 board，
+            # 这是预期软失败：review 不发布，由 closure 严格断言暴露。不静默兜底为成功。
+            print(f"[seed] review create_run 软失败（无 board pointer）: {trade_date} {exc}")
+            return
 
     async with AsyncSessionLocal() as db:
         compute_target = await db.get(MarketReviewRun, run_id)
@@ -962,13 +969,15 @@ async def _seed_scenario(verify_conn, scenario: str) -> None:
         # （run 表 error_code=EXTERNAL_GATE_UNSATISFIED；state.reason_code 由 service 生成为 RUN_FAILED）
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
-        board_run_id = await _seed_blocked_board_failure(td)
+        await _seed_blocked_board_failure(td)
         await _run_chip_real(td, core_run_id=core_run_id)
         await _finish_core_run(td, core_run_id)
         await _add_full_publication(td, core_run_id)
         await _add_auction_prereq(td, mode="composite")
-        await _publish_board_aggregation(td)
-        await _run_and_publish_review(td, core_run_id, board_run_id)
+        # board aggregation 失败（无 cik/name → 不发布 market_aggregation pointer）
+        agg_run_id = await _publish_board_aggregation(td)
+        # blocked 场景 board 无指针 → review 仍尝试发布但会因无 board pointer 软失败（closure=blocked）
+        await _run_and_publish_review(td, core_run_id, agg_run_id)
     elif scenario == "core_ready_waiting_mandatory":
         # stock_core 可消费，但 review 未发布（mandatory 未完成）→ closure=core_ready
         core_run_id = await _add_instruments_prereq(td)
@@ -985,39 +994,39 @@ async def _seed_scenario(verify_conn, scenario: str) -> None:
         # → closure=mandatory_ready_enhancing
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
-        board_run_id = await _add_board_prereq(td)
+        await _add_board_prereq(td)
         await _run_chip_real(td, core_run_id=core_run_id)
         await _finish_core_run(td, core_run_id)
         await _add_full_publication(td, core_run_id)
         await _add_auction_prereq(td, mode="composite")
-        await _publish_board_aggregation(td)
-        await _run_and_publish_review(td, core_run_id, board_run_id)
+        agg_run_id = await _publish_board_aggregation(td)
+        await _run_and_publish_review(td, core_run_id, agg_run_id)
         # enhancement（chip/auction）已完成；dsa_projection/state_events 留待异步增强未终态
     elif scenario == "degraded_terminal_partial":
         # mandatory 全部可消费；enhancement 全部终态但部分非 truly ready
         # （chip partial + auction hybrid）→ closure=degraded_ready
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
-        board_run_id = await _add_board_prereq(td)
+        await _add_board_prereq(td)
         subset = [_inst_uuid(i) for i in range(int(N_INST * PARTIAL_15M_FRACTION))]
         await _run_chip_real(td, core_run_id=core_run_id, instrument_ids=subset)  # 部分 15m → partial
         await _finish_core_run(td, core_run_id)
         await _add_full_publication(td, core_run_id)
         await _add_auction_prereq(td, mode="hybrid")  # 非 composite → 非 fully ready
-        await _publish_board_aggregation(td)
-        await _run_and_publish_review(td, core_run_id, board_run_id)
+        agg_run_id = await _publish_board_aggregation(td)
+        await _run_and_publish_review(td, core_run_id, agg_run_id)
     elif scenario == "fully_ready_all_fresh":
         # mandatory 全 fresh + enhancement 全 truly ready + auction composite
         # → closure=fully_ready（约束6：必须真实达到）
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
-        board_run_id = await _add_board_prereq(td)  # full_market universe 下门禁合法通过
+        await _add_board_prereq(td)  # full_market universe 下门禁合法通过
         await _run_chip_real(td, core_run_id=core_run_id)
         await _finish_core_run(td, core_run_id)
         await _add_full_publication(td, core_run_id)
         await _add_auction_prereq(td, mode="composite")
-        await _publish_board_aggregation(td)
-        await _run_and_publish_review(td, core_run_id, board_run_id)
+        agg_run_id = await _publish_board_aggregation(td)
+        await _run_and_publish_review(td, core_run_id, agg_run_id)
     else:
         raise ValueError(f"未知场景: {scenario}（合法值：{sorted(_SCENARIO_TRADE_DATES)}）")
 
