@@ -198,52 +198,77 @@ def _bar(t: datetime, o: Decimal) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 合成数据生成（直接写验证库，不依赖 bz_stock）
 # ---------------------------------------------------------------------------
+# [性能 / 路径2] 分批写入批大小：控制单次 executemany 的内存峰值，避免全量 list 驻留 OOM。
+_BATCH = 500
+
+
+async def _exec_batch(verify_conn, sql: str, rows: list[dict[str, Any]]) -> None:
+    """分批执行 INSERT（每批 _BATCH 行），流式清空 rows 列表以释放内存。"""
+    for start in range(0, len(rows), _BATCH):
+        batch = rows[start:start + _BATCH]
+        await verify_conn.execute(text(sql), batch)
+    rows.clear()
+
+
 async def _gen_synthetic_instruments_bars(verify_conn) -> None:
     """[用户选项B / full_market universe] 建 FM_N_INST(≥5200) instruments +
     窗口内 daily/60min + scenario 窗口 15min（确定性）。
 
-    [性能] daily/60min 仅覆盖 CORE_BARS_WINDOW_START(2026-07-20) 起的交易日，
+    [性能 / 路径2] daily/60min 仅覆盖 CORE_BARS_WINDOW_START(2026-07-20) 起的交易日，
     控制 5200 instruments 下的 bars 行数（5200×约30天 可控）。
+    分批写入（每批 _BATCH 行）并流式清空缓冲区，避免 5200×30×N 全量 list 驻留导致 OOM。
     """
     # [用户选项B] instruments 放大到 FM_N_INST（≥5,200 唯一可解析 A 股 synthetic）
-    inst_rows = []
+    inst_rows: list[dict[str, Any]] = []
     for i in range(FM_N_INST):
-        inst_id = _inst_uuid(i)
         inst_rows.append({
-            "id": str(inst_id),
+            "id": str(_inst_uuid(i)),
             "symbol": f"{600000 + i:06d}",
             "name": f"验证股{i:04d}",
             "market": "SH",
             "status": "active",
             "listing_date": date(2010, 1, 4),
         })
-    await verify_conn.execute(
-        text(
-            "INSERT INTO instruments (id, symbol, name, market, status, listing_date) "
-            "VALUES (:id, :symbol, :name, :market, :status, :listing_date) "
-            "ON CONFLICT (id) DO NOTHING"
-        ),
+    await _exec_batch(
+        verify_conn,
+        "INSERT INTO instruments (id, symbol, name, market, status, listing_date) "
+        "VALUES (:id, :symbol, :name, :market, :status, :listing_date) "
+        "ON CONFLICT (id) DO NOTHING",
         inst_rows,
     )
 
-    # trading_calendar（market='A', status=OPEN）
+    # trading_calendar（market='A', status=OPEN），分批写入
     cal_rows = [
         {"trade_date": d, "is_trading_day": True, "market": "A",
          "source": "MANUAL_OVERRIDE", "status": "OPEN"}
         for d in _TRADING_DAYS
     ]
-    await verify_conn.execute(
-        text(
-            "INSERT INTO trading_calendar (trade_date, is_trading_day, market, source, status) "
-            "VALUES (:trade_date, :is_trading_day, :market, :source, :status) "
-            "ON CONFLICT (trade_date, market) DO NOTHING"
-        ),
+    await _exec_batch(
+        verify_conn,
+        "INSERT INTO trading_calendar (trade_date, is_trading_day, market, source, status) "
+        "VALUES (:trade_date, :is_trading_day, :market, :source, :status) "
+        "ON CONFLICT (trade_date, market) DO NOTHING",
         cal_rows,
     )
 
     # [性能] daily/60min 仅覆盖窗口内交易日
     window_days = [d for d in _TRADING_DAYS if d >= CORE_BARS_WINDOW_START]
-    daily_rows, min60_rows = [], []
+    win_idx = {d: j for j, d in enumerate(window_days)}
+    daily_rows: list[dict[str, Any]] = []
+    min60_rows: list[dict[str, Any]] = []
+    daily_sql = (
+        "INSERT INTO bars_daily "
+        "(instrument_id, trade_date, open, high, low, close, volume, amount, adj_factor) "
+        "VALUES (:instrument_id, :trade_date, :open, :high, :low, :close, :volume, "
+        ":amount, :adj_factor) ON CONFLICT (instrument_id, trade_date) DO NOTHING"
+    )
+    min60_sql = (
+        "INSERT INTO bars_60min "
+        "(instrument_id, trade_time, open, high, low, close, volume, amount, adj_factor) "
+        "VALUES (:instrument_id, :trade_time, :open, :high, :low, :close, :volume, "
+        ":amount, :adj_factor) "
+        "ON CONFLICT (instrument_id, trade_time) DO NOTHING"
+    )
     for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
         base = 10.0 + (i % 50)
@@ -264,29 +289,24 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                                    **{k2: b[k2] for k2 in (
                                        "open", "high", "low", "close", "volume", "amount", "adj_factor",
                                    )}})
-    await verify_conn.execute(
-        text(
-            "INSERT INTO bars_daily "
-            "(instrument_id, trade_date, open, high, low, close, volume, amount, adj_factor) "
-            "VALUES (:instrument_id, :trade_date, :open, :high, :low, :close, :volume, "
-            ":amount, :adj_factor) ON CONFLICT (instrument_id, trade_date) DO NOTHING"
-        ),
-        daily_rows,
-    )
-    await verify_conn.execute(
-        text(
-            "INSERT INTO bars_60min "
-            "(instrument_id, trade_time, open, high, low, close, volume, amount, adj_factor) "
-            "VALUES (:instrument_id, :trade_time, :open, :high, :low, :close, :volume, "
-            ":amount, :adj_factor) "
-            "ON CONFLICT (instrument_id, trade_time) DO NOTHING"
-        ),
-        min60_rows,
-    )
+            # 60min 与 daily 行数比为 4:1，每满 4 批 daily 即清一次 60min
+            if len(daily_rows) >= _BATCH * 4:
+                await _exec_batch(verify_conn, daily_sql, daily_rows)
+                await _exec_batch(verify_conn, min60_sql, min60_rows)
+    # 收尾：写入剩余 daily / 60min
+    await _exec_batch(verify_conn, daily_sql, daily_rows)
+    await _exec_batch(verify_conn, min60_sql, min60_rows)
 
     # bars_15min 仅 scenario 窗口；07-30 仅部分标的（natural partial）
-    min15_rows = []
-    win_idx = {d: j for j, d in enumerate(window_days)}
+    min15_sql = (
+        "INSERT INTO bars_15min "
+        "(instrument_id, trade_time, open, high, low, close, volume, amount, adj_factor) "
+        "VALUES (:instrument_id, :trade_time, :open, :high, :low, :close, :volume, "
+        ":amount, :adj_factor) "
+        "ON CONFLICT (instrument_id, trade_time) DO NOTHING"
+    )
+    min15_rows: list[dict[str, Any]] = []
+    n15 = 0
     for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
         for d in window_days:
@@ -307,18 +327,13 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                                    **{k2: b[k2] for k2 in (
                                        "open", "high", "low", "close", "volume", "amount", "adj_factor",
                                    )}})
-    await verify_conn.execute(
-        text(
-            "INSERT INTO bars_15min "
-            "(instrument_id, trade_time, open, high, low, close, volume, amount, adj_factor) "
-            "VALUES (:instrument_id, :trade_time, :open, :high, :low, :close, :volume, "
-            ":amount, :adj_factor) "
-            "ON CONFLICT (instrument_id, trade_time) DO NOTHING"
-        ),
-        min15_rows,
-    )
+                n15 += 1
+                if len(min15_rows) >= _BATCH:
+                    await _exec_batch(verify_conn, min15_sql, min15_rows)
+    await _exec_batch(verify_conn, min15_sql, min15_rows)
     await verify_conn.commit()
-    print(f"[seed] instruments={FM_N_INST} daily={len(daily_rows)} 60min={len(min60_rows)} 15min={len(min15_rows)}")
+    # 注意：daily/60min/15min 实际行数为分批写入累加值；此处仅打印 instruments 数与 15min 估算。
+    print(f"[seed] instruments={FM_N_INST} window_days={len(window_days)} 15min_est={n15}")
 
 
 # [用户选项B / 约束6] full_market universe board 规模：220 行业 + 320 概念 = 540 boards
@@ -353,23 +368,33 @@ async def _gen_synthetic_boards(verify_conn) -> None:
             {"id": str(bid), "code": code, "nm": nm, "typ": typ},
         )
     # 确定性成员关系：每只 instrument 加入 13 个 board（混合行业/概念，确定性散布）
-    members = []
+    # [性能 / 路径2] 分批写入（每批 _BATCH 行），流式清空 members 缓冲避免 67,600 行全量驻留 OOM。
+    members: list[dict[str, str]] = []
     n_boards = len(board_specs)
+    n_members = 0
     for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
         for b in range(_FM_BOARDS_PER_INST):
             code = board_specs[(i * 7 + b * 13) % n_boards][0]
             members.append({"board_id": str(board_ids[code]), "instrument_id": str(inst_id)})
-    await verify_conn.execute(
-        text(
-            "INSERT INTO market_board_memberships (board_id, instrument_id) "
-            "VALUES (:board_id, :instrument_id) "
-            "ON CONFLICT (board_id, instrument_id) DO NOTHING"
-        ),
+            n_members += 1
+            if len(members) >= _BATCH:
+                await _exec_batch(
+                    verify_conn,
+                    "INSERT INTO market_board_memberships (board_id, instrument_id) "
+                    "VALUES (:board_id, :instrument_id) "
+                    "ON CONFLICT (board_id, instrument_id) DO NOTHING",
+                    members,
+                )
+    await _exec_batch(
+        verify_conn,
+        "INSERT INTO market_board_memberships (board_id, instrument_id) "
+        "VALUES (:board_id, :instrument_id) "
+        "ON CONFLICT (board_id, instrument_id) DO NOTHING",
         members,
     )
     await verify_conn.commit()
-    print(f"[seed] boards={n_boards} memberships={len(members)}")
+    print(f"[seed] boards={n_boards} memberships={n_members}")
 
 
 async def _gen_synthetic_released_dsa_config(verify_conn) -> uuid.UUID:
@@ -552,29 +577,32 @@ async def _synthetic_board_snapshot() -> BoardSnapshot:
     [约束4] 不 mock validate_snapshot；snapshot 直接来自已写入的合法 synthetic 事实，
     使 sync_boards 真实计算 raw_rows/industry/concept/relation/coverage 并合法通过门禁。
     """
+    boards: list[dict[str, str]] = []
+    memberships: dict[tuple[str, str], list[str]] = {}
+    seen_boards: set[tuple[str, str]] = set()
+    raw_rows = 0
+    # [性能 / 路径2] 流式迭代（yield_per）而非 rows.all() 全量驻留：67,600 条 membership
+    # 一次性 materialize 会占用大量内存。逐行消费并累积到 memberships 字典。
     async with AsyncSessionLocal() as db:
-        rows = await db.execute(
+        result = await db.execute(
             text(
                 "SELECT b.external_code, b.name, b.type, m.instrument_id, i.symbol "
                 "FROM market_board_memberships m "
                 "JOIN market_boards b ON b.id = m.board_id "
                 "JOIN instruments i ON i.id = m.instrument_id"
-            )
+            ).execution_options(yield_per=500)
         )
-        data = rows.all()
-    boards: list[dict[str, str]] = []
-    memberships: dict[tuple[str, str], list[str]] = {}
-    seen_boards: set[tuple[str, str]] = set()
-    for ext_code, nm, typ, _inst_id, symbol in data:
-        key = (ext_code, typ)
-        if key not in seen_boards:
-            seen_boards.add(key)
-            boards.append({"external_code": ext_code, "name": nm, "type": typ})
-        memberships.setdefault(key, []).append(symbol)
+        for ext_code, nm, typ, _inst_id, symbol in result:
+            key = (ext_code, typ)
+            if key not in seen_boards:
+                seen_boards.add(key)
+                boards.append({"external_code": ext_code, "name": nm, "type": typ})
+            memberships.setdefault(key, []).append(symbol)
+            raw_rows += 1
     return BoardSnapshot(
         boards=boards,
         memberships=memberships,
-        raw_rows=sum(len(v) for v in memberships.values()),
+        raw_rows=raw_rows,
         unresolved_symbols=[],
         diagnostics={"source": "synthetic_seed_full_market"},
     )
