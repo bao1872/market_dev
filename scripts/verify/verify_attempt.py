@@ -266,9 +266,12 @@ class VerifyAttempt:
 
         # 7+8. current_database() 比对（psycopg 直连验证库）
         # fail-closed：当前连接必须是精确 verify DB，且不能是 bz_stock。
+        # [P0] psycopg.connect 需原生 DSN（postgresql://...），不能直接吃 SQLAlchemy driver URL
+        # （postgresql+asyncpg:// / postgresql+psycopg://）；用 MIGRATION_DATABASE_URL 去掉 +psycopg 同步前缀。
         pg_check = (
             "import psycopg,os,sys;"
-            "conn=psycopg.connect(os.environ['DATABASE_URL']);"
+            "dsn=os.environ['MIGRATION_DATABASE_URL'].replace('postgresql+psycopg://','postgresql://',1);"
+            "conn=psycopg.connect(dsn);"
             "cur=conn.cursor();cur.execute('SELECT current_database()');"
             "db=cur.fetchone()[0];"
             "conn.close();"
@@ -294,7 +297,7 @@ class VerifyAttempt:
             raise RuntimeError(f"assert_identity 失败 [Live Mount probe]: err='{err.strip()}'")
 
         self.manifest["status"] = "identity_ok"
-        self.exporter.record_gate("identity", True, detail="容器内 8 项自检通过（含 current_database 比对）")
+        self.exporter.record_gate("identity", True, detail="容器内 identity 自检通过（含 current_database 比对）")
         self.exporter.log("assert_identity: 通过")
 
     def _record_runtime_diagnostics(self) -> None:
