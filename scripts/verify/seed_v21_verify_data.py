@@ -786,7 +786,7 @@ async def _synthetic_board_snapshot() -> BoardSnapshot:
     boards: list[dict[str, str]] = []
     memberships: dict[tuple[str, str], list[str]] = {}
     seen_boards: set[tuple[str, str]] = set()
-    raw_rows = 0
+    all_symbols: set[str] = set()
     # [性能 / 路径2] 流式迭代（yield_per）而非 rows.all() 全量驻留：67,600 条 membership
     # 一次性 materialize 会占用大量内存。逐行消费并累积到 memberships 字典。
     async with AsyncSessionLocal() as db:
@@ -820,11 +820,16 @@ async def _synthetic_board_snapshot() -> BoardSnapshot:
                     "identity_contract_version": BOARD_IDENTITY_CONTRACT_VERSION,
                 })
             memberships.setdefault(key, []).append(symbol)
-            raw_rows += 1
+            all_symbols.add(symbol)
+    # [Group2-B2] raw_rows 语义 = 唯一股票数（正式 wencai provider 每行一个股票）。
+    # 旧实现把 membership 引用数（13×N，每只股票入 13 个 board）当作 raw_rows，
+    # 使 code_uniqueness_rate = unique_stock_count/raw_rows = N/(13N)=0.0769 < 0.999
+    # （MIN_CODE_UNIQUENESS_RATE），触发 sync_boards 质量门禁失败 → PIT 表不写 →
+    # board_aggregation bootstrap_unavailable。改为唯一股票数后 rate=1.0 合法通过。
     return BoardSnapshot(
         boards=boards,
         memberships=memberships,
-        raw_rows=raw_rows,
+        raw_rows=len(all_symbols),
         unresolved_symbols=[],
         diagnostics={"source": "synthetic_seed_full_market"},
     )
