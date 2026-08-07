@@ -403,15 +403,27 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
     await _exec_batch(verify_conn, min15_sql, min15_rows)
     await verify_conn.commit()
 
-    # [auction 结构锚点] 为核心 100 标的追加更长 15m 历史（FIFTEEN_MIN_WINDOW_START_EXT 起），
-    # 满足 first_pyramid 的 M15_BARS_INSUFFICIENT(≥500) 门槛，使正式 SMC 算法自然产出结构。
-    # 仅核心 100 标的；global_slot 连续累加，与 scenario 窗口 15m 衔接。
-    ext15_days = [d for d in _TRADING_DAYS
-                  if FIFTEEN_MIN_WINDOW_START_EXT <= d < FIFTEEN_MIN_WINDOW_START]
+    # [Full-market Universe Alignment] 为全部 FM_N_INST 标的补足 15m 历史到 chip 门槛以上。
+    # 只补"最小有效缺口"，且按时间演进制造 08-03 natural partial → 08-04 full：
+    #   - 前 30% degraded cohort（i<0.3*FM_N_INST，07-30 有 15m）：20 交易日 ext(320 根)
+    #     → 08-03: 176+320=496<500(skipped)，08-04: 192+320=512>=500(succeeded)
+    #   - 后 70%（i>=0.3*FM_N_INST，07-30 缺 15m）：25 交易日 ext(400 根)
+    #     → 08-03/08-04 均 >=500(succeeded)
+    # 这样 chip 对完整 5200 跑时（degraded 场景不传 subset），08-03 自然 succeeded(3640)<total(5200)
+    # → _check_chip_consensus_completed 判 partial → auction hybrid → closure=degraded_ready；
+    # 08-04 5200/5200 succeeded → full → composite → fully_ready。不伪造 chip 终态，仅构造
+    # 按时间演进的 raw bars。行数≈30%×5200×320+70%×5200×400≈195万（比统一 25 天 208 万更低）。
+    _chip_min_15m_bars = 500
+    _ext_70_pct_tdays = 25   # 后 70% 标的
+    _ext_30_cohort_tdays = 20  # 前 30% degraded cohort（精确计算使 08-03<500/08-04>=500）
+    _degraded_cohort_count = int(FM_N_INST * PARTIAL_15M_FRACTION)
+    pre_window = [d for d in _TRADING_DAYS if d < FIFTEEN_MIN_WINDOW_START]
     ext_min15_rows: list[dict[str, Any]] = []
-    for i in range(N_INST):
+    for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
         base = 10.0 + (i % 50)
+        _ext_tdays = (_ext_30_cohort_tdays if i < _degraded_cohort_count else _ext_70_pct_tdays)
+        ext15_days = pre_window[-_ext_tdays:]
         for day_idx, d in enumerate(ext15_days):
             for slot in range(16):
                 session_start = datetime(  # noqa: DTZ001
@@ -437,7 +449,10 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                 if FULLY_READY_DAILY_START <= d < CORE_BARS_WINDOW_START]
     ext_daily_rows: list[dict[str, Any]] = []
     ext_min60_rows: list[dict[str, Any]] = []
-    for i in range(N_INST):  # 仅核心 100 标的
+    # [Full-market Universe Alignment] 扩展日线/60min 覆盖全部 FM_N_INST 标的（原仅核心 100）。
+    # 全部 5200 标的都需要 ≥60 根日线供 First Pyramid/DSA/Chip/Auction 产出，否则扩 core 后
+    # board_aggregation coverage 与 DSA matched==eligible 仍无法达标。行数约 5200×~85 ≈ 44万。
+    for i in range(FM_N_INST):  # 市场级全量标的
         inst_id = _inst_uuid(i)
         base = 10.0 + (i % 50)
         for idx, d in enumerate(ext_days):
@@ -583,6 +598,10 @@ async def _gen_synthetic_released_dsa_config(verify_conn) -> uuid.UUID:
 # 四类场景（真实服务编排，PRD 合规）
 # ---------------------------------------------------------------------------
 _ALL_INSTRUMENT_IDS = [_inst_uuid(i) for i in range(N_INST)]
+# [Full-market Universe Alignment] full-closure 正式使用的市场级 universe（= FM_N_INST 标的）。
+# 与 _ALL_INSTRUMENT_IDS(核心100，历史/兼容用途) 明确区分：不把 N_INST 改成 5200，
+# 而是让 full-closure 的 Core/DSA/Board/Chip/Auction 统一消费 FM_N_INST=5200。
+_FULL_MARKET_INSTRUMENT_IDS = [_inst_uuid(i) for i in range(FM_N_INST)]
 
 
 async def _add_instruments_prereq(trade_date: date) -> uuid.UUID:
@@ -598,10 +617,14 @@ async def _add_instruments_prereq(trade_date: date) -> uuid.UUID:
     因此 core_run_id 由调用方持有的 snapshot_run_id 承担（chip / auction / review 的
     source_core_run_id 语义即 StockFeatureSnapshotRun.id）。
     """
+    # [Full-market Universe Alignment] core run 用市场级 universe（FM_N_INST=5200），
+    # 与 board 成员 / DSA / Chip / Auction 统一，使 board_aggregation coverage 与
+    # DSA matched==eligible 都能在 5200 规模下满足正式合同。
+    core_instrument_ids = _FULL_MARKET_INSTRUMENT_IDS
     async with AsyncSessionLocal() as db:
         run = await create_snapshot_run(
             db, trade_date, "after_close",
-            expected_count=len(_ALL_INSTRUMENT_IDS),
+            expected_count=len(core_instrument_ids),
             scope="full",
         )
         snapshot_run_id = run.id
@@ -609,7 +632,7 @@ async def _add_instruments_prereq(trade_date: date) -> uuid.UUID:
 
     stats = await compute_review_core_with_run_items(
         trade_date,
-        _ALL_INSTRUMENT_IDS,
+        core_instrument_ids,
         snapshot_run_id,
         worker_id="verify-seed",
         lease_epoch=1,
@@ -628,13 +651,13 @@ async def _add_daily_facts_prereq(trade_date: date) -> None:
             → finish_history_run
             → publish_history_cross_section（factor_publication_service，coverage>=0.98）
 
-    覆盖 universe：核心 100 标的（N_INST，seed 已为其写入 FULLY_READY_DAILY_START 起扩展日线，
-    ≥60 根满足 compute_first_pyramid_history 的 _MIN_BARS_FOR_REQUIRED_DIMS 门槛）。
-    全 5200 标的只有 scenario 窗口日线，不足以让 history 覆盖率达 0.98 门禁，故 history run
-    scope 限定核心 100。不手工 INSERT FirstPyramidHistoryRun / FactorPublication。
+    覆盖 universe：市场级 FM_N_INST=5200 标的（Full-market Universe Alignment 后 seed
+    已为全部 5200 标的写入 FULLY_READY_DAILY_START 起扩展日线，≥60 根满足
+    compute_first_pyramid_history 的 _MIN_BARS_FOR_REQUIRED_DIMS 门槛）。
+    不手工 INSERT FirstPyramidHistoryRun / FactorPublication。
     """
-    # history run 覆盖核心 100 标的（其日线足够）
-    instrument_ids = _ALL_INSTRUMENT_IDS
+    # history run 覆盖市场级 5200 标的（其扩展日线已足够）
+    instrument_ids = _FULL_MARKET_INSTRUMENT_IDS
     async with AsyncSessionLocal() as db:
         run, is_new = await create_history_run(
             db,
@@ -1251,7 +1274,8 @@ async def _run_chip_real(
     """
     import app.services.chip_bars_refresh_coordinator as _refresh_mod
 
-    targets = list(instrument_ids) if instrument_ids is not None else list(_ALL_INSTRUMENT_IDS)
+    # [Full-market Universe Alignment] 默认消费市场级 universe（FM_N_INST），与 core run 一致
+    targets = list(instrument_ids) if instrument_ids is not None else list(_FULL_MARKET_INSTRUMENT_IDS)
 
     async def _noop_refresh(*_a, **_k):
         return {"status": "skipped", "refreshed": 0, "failed": 0, "results": {}}
@@ -1377,8 +1401,10 @@ async def _seed_scenario(verify_conn, scenario: str) -> None:
         core_run_id = await _add_instruments_prereq(td)
         await _add_projection_selector(td, core_run_id)
         await _add_board_prereq(td)
-        subset = [_inst_uuid(i) for i in range(int(N_INST * PARTIAL_15M_FRACTION))]
-        await _run_chip_real(td, core_run_id=core_run_id, instrument_ids=subset)  # 部分 15m → partial
+        # [Full-market Universe Alignment] chip 面对完整 5200 core universe（不传 subset）。
+        # 通过 15m 数据的时间演进自然形成 partial：前 30% cohort(20 天 ext) 08-03 15m<500
+        # → skipped，后 70% succeeded → succeeded(3640)<total(5200) → chip partial → auction hybrid。
+        await _run_chip_real(td, core_run_id=core_run_id)  # 完整 5200 universe，自然 partial
         await _finish_core_run(td, core_run_id)
         await _add_full_publication(td, core_run_id)
         await _add_auction_prereq(td, mode="hybrid")  # 非 composite → 非 fully ready
