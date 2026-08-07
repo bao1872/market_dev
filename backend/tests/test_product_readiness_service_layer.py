@@ -33,12 +33,15 @@ from app.domain_status import (
     CLOSURE_FULLY_READY,
     CLOSURE_MANDATORY_READY_ENHANCING,
     CLOSURE_PENDING,
+    READINESS_DEGRADED,
     READINESS_PENDING,
     READINESS_READY,
 )
-from app.models.auction_anchor_run import AuctionAnchorRun
+from app.models.auction import (
+    AuctionAnchorPublication,
+    AuctionAnchorSnapshot,
+)
 from app.models.board_facts_run import BoardFactsRun
-from app.models.chip_consensus_run import ChipConsensusRun
 from app.models.factor_publication import (
     PUBLICATION_KIND_AUCTION_ANCHOR,
     PUBLICATION_KIND_BOARD_FACTS,
@@ -49,6 +52,8 @@ from app.models.factor_publication import (
     FactorPublication,
 )
 from app.models.market_review import MarketReviewRun
+from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
 from app.services.product_readiness_service import (
@@ -89,8 +94,10 @@ _TABLE_TO_MODEL: dict[str, type] = {
     "factor_publications": FactorPublication,
     "board_facts_runs": BoardFactsRun,
     "market_reviews": MarketReviewRun,
-    "chip_consensus_runs": ChipConsensusRun,
-    "auction_anchor_runs": AuctionAnchorRun,
+    "scheduler_job_runs": SchedulerJobRun,
+    "stock_chip_consensus_snapshots": StockChipConsensusSnapshot,
+    "auction_anchor_publications": AuctionAnchorPublication,
+    "auction_anchor_snapshots": AuctionAnchorSnapshot,
     "stock_feature_snapshots": StockFeatureSnapshot,
     "stock_state_events": StockStateEvent,
 }
@@ -233,19 +240,61 @@ def _review_run(status="published", drid=_DRID):
                            completed_at=None, created_at=None)
 
 
-def _chip_run(status="succeeded", drid=_DRID):
-    return SimpleNamespace(id=drid, status=status, data_run_id=drid,
-                           source_core_run_id="c1", source_board_run_id="b1",
-                           algorithm_version="v1", parameter_hash="ph1",
-                           coverage_ratio=0.99, finished_at=None, created_at=None)
+def _chip_job(status="succeeded", drid=_DRID, chip_status=None,
+              expected=10, succeeded=10):
+    """正式 chip 产物：SchedulerJobRun(after_close_chip_consensus) + metadata_json。
+
+    chip_status 由 chip worker 写入 metadata_json，是产品级状态真源；
+    StockChipConsensusSnapshot 只做真实产物/lineage 对账（此处以计数表达）。
+    """
+    import json as _json
+
+    if chip_status is None:
+        chip_status = status  # succeeded→succeeded；failed→failed
+    # chip worker 实际写入的分母键是 total_count（见 app/worker.py），
+    # expected_count 仅历史兼容；两者同时给出以贴近生产元数据。
+    meta = _json.dumps({
+        "chip_status": chip_status,
+        "total_count": expected,
+        "expected_count": expected,
+        "succeeded_count": succeeded,
+        "core_run_id": drid,
+    })
+    return SimpleNamespace(
+        id=drid,
+        job_name="after_close_chip_consensus",
+        business_date=date(2026, 8, 4).isoformat(),
+        status=status,
+        metadata_json=meta,
+        created_at=None,
+    )
 
 
-def _auction_run(status="succeeded", drid=_DRID, mode="composite"):
-    # [PRD Alignment Pass P0-1] mode 默认 composite（完整就绪）；structure_only/hybrid 用于负向测试
-    return SimpleNamespace(id=drid, status=status, data_run_id=drid,
-                           source_core_run_id="c1", source_board_run_id="b1",
-                           algorithm_version="v1", mode=mode,
-                           finished_at=None, created_at=None)
+def _auction_pub(status_snap="succeeded", drid=_DRID, snap_id="snap1", coverage=0.99):
+    """正式 auction 产物：AuctionAnchorPublication（最新，superseded_by=None）。"""
+    return SimpleNamespace(
+        id=drid,
+        trade_date=date(2026, 8, 4),
+        superseded_by=None,
+        snapshot_id=snap_id,
+        source_core_run_id=drid,
+        coverage_ratio=coverage,
+        algorithm_version="v1",
+        published_at=__import__("datetime").datetime(2026, 1, 1),
+    )
+
+
+def _auction_snap(status="succeeded", snap_id="snap1",
+                  composite=5, chip=5, structure=10):
+    """AuctionAnchorSnapshot：status 表达产品级状态（succeeded/partial/structure_only/...）。"""
+    return SimpleNamespace(
+        id=snap_id,
+        status=status,
+        composite_anchor_count=composite,
+        chip_anchor_count=chip,
+        structure_anchor_count=structure,
+        error_message=None,
+    )
 
 
 def _full_plan(**overrides) -> dict:
@@ -256,14 +305,19 @@ def _full_plan(**overrides) -> dict:
         _STOCK_CORE: [_pub(_STOCK_CORE)],
         _BOARD_AGG: [_pub(_BOARD_AGG)],
         _REVIEW: [_pub(_REVIEW)],
-        _CHIP: [_pub(_CHIP)],
-        _AUCTION: [_pub(_AUCTION)],
+        # chip 正式产物为 SchedulerJobRun + StockChipConsensusSnapshot，
+        # 不再经 FactorPublication(CHIP_CONSENSUS) pointer；故此处置 None，
+        # 由 job 元数据驱动 readiness。
+        _CHIP: [None],
+        _AUCTION: [None],
     }
     runs = {
         BoardFactsRun: [_bf_run("published")],
         MarketReviewRun: [_review_run("published")],
-        ChipConsensusRun: [_chip_run("succeeded")],
-        AuctionAnchorRun: [_auction_run("succeeded")],
+        SchedulerJobRun: [_chip_job("succeeded")],
+        StockChipConsensusSnapshot: [10],  # 真实 snapshot 行数（lineage 对账）
+        AuctionAnchorPublication: [_auction_pub("succeeded")],
+        AuctionAnchorSnapshot: [_auction_snap("succeeded")],
     }
     plan = {
         "pubs": pubs,
@@ -281,6 +335,14 @@ async def _evaluate(plan):
     db = _FakeDB(plan)
     service = ProductReadinessService()
     return await service.evaluate_for_trade_date(db, date(2026, 8, 4))
+
+
+async def _collect_product(plan, product: str):
+    """取单个产品的 ProductReadinessState（闭包结果不含产品级明细）。"""
+    db = _FakeDB(plan)
+    service = ProductReadinessService()
+    states = await service.collect_states(db, date(2026, 8, 4))
+    return next(s for s in states if s.product == product)
 
 
 # ----------------------------------------------------------------------------
@@ -341,12 +403,43 @@ async def test_failed_enhancement_terminal_fully_ready():
     """P0-3/P0-1：chip 失败（terminal+unavailable）→ 不阻断 mandatory chain，但 chip 非真正就绪，
     闭包为 degraded_ready（不得误判 fully_ready）。"""
     plan = _full_plan()
-    plan["pubs"][_CHIP] = [None]                 # chip 无 pointer
-    plan["runs"][ChipConsensusRun] = [_chip_run("failed")]  # latest run failed
+    plan["pubs"][_CHIP] = [None]                 # chip 无 publication pointer
+    plan["runs"][SchedulerJobRun] = [_chip_job("failed", chip_status="failed")]  # job failed
     ev = await _evaluate(plan)
     assert ev.closure == CLOSURE_DEGRADED_READY
     assert ev.mandatory_products_full_fresh is True
     assert ev.enhancement_jobs_terminal is True
+
+
+async def test_chip_succeeded_but_counts_incomplete_is_degraded():
+    """Case A：job=succeeded、chip_status=succeeded，但 5100/5200 计数不完整
+    → chip 必须 degraded，绝不能因两个字符串状态就判定 full/ready。"""
+    def _plan():
+        # _FakeDB 以 pop(0) 消费队列，每次评估须用全新 plan。
+        p = _full_plan()
+        p["pubs"][_CHIP] = [None]
+        p["runs"][SchedulerJobRun] = [
+            _chip_job("succeeded", chip_status="succeeded", expected=5200, succeeded=5100)
+        ]
+        return p
+
+    chip = await _collect_product(_plan(), "chip")
+    assert chip.is_product_ready is False
+    assert chip.readiness == READINESS_DEGRADED
+    ev = await _evaluate(_plan())
+    assert ev.closure == CLOSURE_DEGRADED_READY
+
+
+async def test_auction_partial_snapshot_yields_hybrid():
+    """Case B：AuctionAnchorSnapshot.status=partial 且 coverage>0
+    → publication 可形成，auction 推导为 hybrid（degraded 而非 unavailable）。"""
+    plan = _full_plan()
+    plan["runs"][AuctionAnchorSnapshot] = [
+        _auction_snap("partial", composite=60, chip=60, structure=40)
+    ]
+    auction = await _collect_product(plan, "auction_anchor")
+    assert auction.auction_mode == "hybrid"
+    assert auction.readiness == READINESS_DEGRADED
 
 
 async def test_stock_core_pointer_missing_pending():

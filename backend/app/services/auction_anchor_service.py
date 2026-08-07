@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import UTC, date, datetime
@@ -91,7 +92,7 @@ class AnchorSnapshotNotFoundError(ValueError):
 
 
 class AnchorSnapshotNotReadyError(ValueError):
-    """锚点快照状态不允许发布（非 succeeded/structure_only）。"""
+    """锚点快照状态不允许发布（非 succeeded/partial/structure_only）。"""
 
 
 class AnchorVersionMismatchError(ValueError):
@@ -855,19 +856,55 @@ async def _check_chip_consensus_completed(
     session: AsyncSession,
     trade_date: date,
     core_run_id: uuid.UUID,
-) -> bool:
-    """检查当日 chip_consensus 是否已完成（存在 succeeded 状态的 chip snapshot）。"""
-    stmt = (
-        select(func.count(StockChipConsensusSnapshot.id))
-        .where(
-            StockChipConsensusSnapshot.trade_date == trade_date,
-            StockChipConsensusSnapshot.core_run_id == core_run_id,
-            StockChipConsensusSnapshot.status == "succeeded",
-        )
+) -> str:
+    """判断当日当前 core 的 chip consensus 完成度，返回三态字符串。
+
+    返回：
+    - "full"：job.status == succeeded 且 metadata.chip_status == succeeded
+      且 succeeded_count == expected_count（expected_count > 0）
+    - "partial"：job.status == succeeded 且（chip_status == partial 或 succeeded < expected）
+    - "unavailable"：chip 未完成/不可用（无 job、跨 core、running、failed、计数缺失等）
+
+    full 判据必须包含计数完整性，不能只相信两个字符串状态；否则会出现
+    Chip readiness = degraded 而 Auction producer = full 的双结论分歧。
+
+    不再使用“任意 1 条 chip snapshot 成功即视为完成”的弱判据；改为读取
+    同日同 core 的 chip SchedulerJobRun 元数据（chip_status / succeeded_count /
+    expected_count），与正式盘后链产物对齐。
+    """
+    from app.services.after_close_chip_consensus_service import (
+        get_chip_consensus_job_for_date,
     )
-    result = await session.execute(stmt)
-    count = result.scalar_one_or_none() or 0
-    return count > 0
+
+    job = await get_chip_consensus_job_for_date(session, trade_date)
+    if job is None:
+        return "unavailable"
+    meta: dict[str, Any] = {}
+    if job.metadata_json:
+        try:
+            meta = json.loads(job.metadata_json)
+        except (ValueError, TypeError):
+            meta = {}
+    # 跨 core 不一致：不得用旧 core 的 chip 放行 auction
+    if meta.get("core_run_id") != str(core_run_id):
+        return "unavailable"
+    chip_status = meta.get("chip_status")
+    job_status = job.status
+    # chip worker 写入的分母键是 total_count（见 app/worker.py metadata_updates）；
+    # expected_count 仅作历史/兼容回退，不能作为主键读取，否则计数守卫永远失效。
+    expected = meta.get("total_count")
+    if expected is None:
+        expected = meta.get("expected_count")
+    succeeded = meta.get("succeeded_count")
+    # 计数缺失时不臆断不完整（与 ProductReadiness._chip_state 同一合同）；
+    # 计数存在时严格要求 succeeded >= expected。
+    counts_known = expected is not None and succeeded is not None
+    succeeded_full = (not counts_known) or succeeded >= expected
+    if job_status == "succeeded" and chip_status == "succeeded" and succeeded_full:
+        return "full"
+    if job_status == "succeeded" and (chip_status == "partial" or not succeeded_full):
+        return "partial"
+    return "unavailable"
 
 
 async def _load_chip_snapshot_map(
@@ -978,10 +1015,13 @@ async def generate_auction_anchors(
     source_core_run_id: uuid.UUID = core_publication.data_run_id
     price_adjustment_version = await _resolve_price_adjustment_version(db, source_core_run_id)
 
-    # 2. 检查 chip_consensus 是否完成
+    # 2. 检查 chip_consensus 完成度（三态：full / partial / unavailable）
     chip_completed = await _check_chip_consensus_completed(db, trade_date, source_core_run_id)
     # chip 批次标识：复用 core_run_id（chip snapshot 通过 core_run_id 关联）
-    source_chip_run_id: uuid.UUID | None = source_core_run_id if chip_completed else None
+    # chip 数据在 full 或 partial 时均可用（partial 仍有部分 chip 锚点）
+    source_chip_run_id: uuid.UUID | None = (
+        source_core_run_id if chip_completed in ("full", "partial") else None
+    )
 
     # 3. 创建 AuctionAnchorSnapshot（status=running）
     now = datetime.now(UTC)
@@ -1002,7 +1042,7 @@ async def generate_auction_anchors(
         # 4. 加载数据
         core_snapshots = await _load_core_snapshots(db, trade_date, source_core_run_id)
         chip_map: dict[uuid.UUID, StockChipConsensusSnapshot] = {}
-        if chip_completed:
+        if chip_completed in ("full", "partial"):
             chip_map = await _load_chip_snapshot_map(db, trade_date, source_core_run_id)
 
         # 5. 遍历生成锚点
@@ -1027,9 +1067,9 @@ async def generate_auction_anchors(
             )
             structure_total += len(structure_items)
 
-            # 筹码锚点（chip 可用时）
+            # 筹码锚点（chip 可用时：full 或 partial）
             chip_items: list[AuctionAnchorItem] = []
-            if chip_completed:
+            if chip_completed in ("full", "partial"):
                 chip_snap = chip_map.get(instrument_id)
                 if chip_snap is not None:
                     chip_items = _extract_chip_anchors(
@@ -1130,9 +1170,11 @@ async def generate_auction_anchors(
             len(active_instruments) / eligible_count if eligible_count > 0 else 0.0
         )
 
-        # 8. 决定最终状态
-        if chip_completed:
+        # 8. 决定最终状态（由 chip 完成度映射，不再用单一 bool）
+        if chip_completed == "full":
             final_status = "succeeded"
+        elif chip_completed == "partial":
+            final_status = "partial"
         else:
             final_status = "structure_only"
 
@@ -1203,7 +1245,9 @@ async def publish_auction_anchors(
     """发布锚点：校验 snapshot 状态与覆盖率后写入 auction_anchor_publications（幂等 upsert）。
 
     校验：
-    - snapshot 必须存在且 status 为 succeeded 或 structure_only
+    - snapshot 必须存在且 status 为 succeeded / partial / structure_only
+      （partial = chip 部分成功的 degraded 场景，仍需形成 publication 供
+      ProductReadiness 推导 hybrid 模式；running/failed 禁止发布）
     - snapshot.algorithm_version 必须等于当前 AUCTION_ANCHOR_ALGORITHM_VERSION
     - snapshot.source_core_run_id 必须等于当日已发布 stock_core pointer.data_run_id
       （旧/新 source run 不一致时禁止发布）
@@ -1221,10 +1265,10 @@ async def publish_auction_anchors(
     if snapshot is None:
         raise AnchorSnapshotNotFoundError(f"AuctionAnchorSnapshot not found: {snapshot_id}")
 
-    if snapshot.status not in ("succeeded", "structure_only"):
+    if snapshot.status not in ("succeeded", "partial", "structure_only"):
         raise AnchorSnapshotNotReadyError(
             f"AuctionAnchorSnapshot status={snapshot.status!r} 不允许发布"
-            f"（仅 succeeded/structure_only 可发布）"
+            f"（仅 succeeded/partial/structure_only 可发布）"
         )
 
     # 算法版本校验
@@ -1360,7 +1404,7 @@ async def generate_and_publish_auction_anchors(
         {
             "snapshot_id": uuid.UUID | None,
             "publication_id": uuid.UUID | None,
-            "status": str,  # succeeded/structure_only/failed/publish_failed
+            "status": str,  # succeeded/partial/structure_only/failed/publish_failed
             "structure_count": int,
             "chip_count": int,
             "composite_count": int,
@@ -1375,8 +1419,8 @@ async def generate_and_publish_auction_anchors(
     snapshot_id = gen_result.get("snapshot_id")
     gen_status = gen_result.get("status")
 
-    # 生成失败：无可发布 snapshot
-    if snapshot_id is None or gen_status not in ("succeeded", "structure_only"):
+    # 生成失败：无可发布 snapshot（partial 属 degraded 可发布态）
+    if snapshot_id is None or gen_status not in ("succeeded", "partial", "structure_only"):
         return {
             "snapshot_id": snapshot_id,
             "publication_id": None,

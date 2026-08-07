@@ -1495,7 +1495,7 @@ class ProductReadinessService:
                 },
             )
 
-        # 解析 job metadata（chip_status / expected_count / succeeded_count / coverage）
+        # 解析 job metadata（chip_status / expected_count / succeeded_count）
         chip_status = None
         expected_count = None
         succeeded_count = None
@@ -1505,34 +1505,44 @@ class ProductReadinessService:
             except (ValueError, TypeError):
                 meta = {}
             chip_status = meta.get("chip_status")
-            expected_count = meta.get("expected_count")
+            # 与 auction producer 保持同一分母键：chip worker 实际写入 total_count，
+            # expected_count 仅作兼容回退。
+            expected_count = meta.get("total_count")
+            if expected_count is None:
+                expected_count = meta.get("expected_count")
             succeeded_count = meta.get("succeeded_count")
 
-        # 覆盖率：优先 metadata counts，否则用真实 snapshot 行数估算
+        # 仅作 lineage 诊断用覆盖率（不作为放行门槛）
         coverage = 0.0
-        if expected_count and succeeded_count is not None:
-            coverage = (succeeded_count / expected_count) if expected_count > 0 else 0.0
-        elif expected_count and snap_rows:
-            coverage = (snap_rows / expected_count) if expected_count > 0 else 0.0
+        if expected_count and succeeded_count is not None and expected_count > 0:
+            coverage = succeeded_count / expected_count
 
-        CHIP_COVERAGE_FLOOR = 0.98
+        # 不自行发明 coverage 门槛：直接映射正式 job 状态。
+        # chip_status 由 chip worker 写入 metadata_json，是产品级状态真源。
+        # snapshot 行数只做真实产物/lineage 对账，不作为放行门槛。
         job_status = job.status if job is not None else None
         job_terminal = job_status in TERMINAL_RUN_STATUS
-        partial = chip_status == "partial"
         job_ok = job_status == "succeeded"
+        # 计数缺失时不臆断不完整（旧任务可能无计数元数据）；
+        # 计数存在时严格要求 succeeded >= expected，与 auction producer 同一合同。
+        counts_known = succeeded_count is not None and expected_count is not None
+        succeeded_full = (not counts_known) or succeeded_count >= expected_count
 
-        if job_ok and coverage >= CHIP_COVERAGE_FLOOR:
+        if job_ok and chip_status == "succeeded" and succeeded_full:
+            # full 判据必须含计数完整性，与 auction producer
+            # _check_chip_consensus_completed 的 "full" 合同保持一致；
+            # 不能只相信 job_status/chip_status 两个字符串。
             state = READINESS_READY
             fresh = "fresh"
             is_product_ready = True
             reason = "CHIP_SUCCEEDED"
-        elif partial or (job_ok and snap_rows > 0):
-            # job 成功但 coverage 不足 / 部分成功 → degraded(partial)
+        elif chip_status == "partial" or (job_ok and not succeeded_full):
+            # job 成功但 chip 部分完成 / 成功数不足 → degraded(partial)
             state = READINESS_DEGRADED
             fresh = "stale"
             is_product_ready = False
             reason = "CHIP_PARTIAL"
-        elif job_status == "failed":
+        elif job_status == "failed" or chip_status == "failed":
             state = READINESS_UNAVAILABLE
             fresh = "stale"
             is_product_ready = False
@@ -1545,7 +1555,6 @@ class ProductReadinessService:
 
         return ProductReadinessState(
             "chip", state, fresh, is_mandatory=False, is_terminal=job_terminal,
-            current_mode="consensus",
             is_product_ready=is_product_ready,
             lineage={
                 "source_type": "production_artifact",
@@ -1609,20 +1618,28 @@ class ProductReadinessService:
             .limit(1)
         )
 
-        # mode 推导
+        # 锚点计数只做 lineage/诊断，不再用于推断产品 mode。
+        # 产品级 mode 由 producer 的 snapshot.status 表达（status 已是产品级状态真源）。
         if snap is not None:
             composite_n = int(getattr(snap, "composite_anchor_count", 0) or 0)
             chip_n = int(getattr(snap, "chip_anchor_count", 0) or 0)
             structure_n = int(getattr(snap, "structure_anchor_count", 0) or 0)
+            snap_status = getattr(snap, "status", None)
         else:
             composite_n = chip_n = structure_n = 0
-        if composite_n > 0:
+            snap_status = None
+
+        # 由 snapshot.status 推导产品 mode（不再根据 anchor count 猜）
+        if snap_status == "succeeded":
             current_mode = "composite"
-        elif chip_n > 0:
+        elif snap_status == "partial":
             current_mode = "hybrid"
-        elif structure_n > 0:
+        elif snap_status == "structure_only":
             current_mode = "structure_only"
+        elif snap_status == "failed":
+            current_mode = None
         else:
+            # running / None：尚未定型
             current_mode = None
 
         # 归属校验：publication.source_core_run_id 应与当前 stock_core pointer 一致
@@ -1630,8 +1647,7 @@ class ProductReadinessService:
         aligned = (current_core_run_id is not None and pub_core_run_id == current_core_run_id)
         fresh = "fresh" if aligned else "stale"
 
-        # 状态映射（与既有语义一致）
-        snap_status = getattr(snap, "status", None) if snap is not None else "succeeded"
+        # 状态映射（以 snapshot.status 为产品级状态真源）
         coverage = float(getattr(pub, "coverage_ratio", 0.0) or 0.0)
         base = {
             "source_type": "production_artifact",
@@ -1656,14 +1672,20 @@ class ProductReadinessService:
                 lineage={**base, "reason_code": "AUCTION_STRUCTURE_ONLY", "mode": current_mode},
             )
         if snap_status == "succeeded":
-            is_ready = (current_mode == "composite")
             return ProductReadinessState(
                 "auction_anchor", READINESS_READY, fresh,
                 is_mandatory=False, is_terminal=True,
                 auction_mode=current_mode,
-                # 仅 composite 视为完整就绪；hybrid/structure_only 不算 fully_ready
-                is_product_ready=is_ready,
+                # producer status=succeeded 已表达 composite 完整就绪
+                is_product_ready=True,
                 lineage={**base, "reason_code": "AUCTION_SUCCEEDED", "mode": current_mode},
+            )
+        if snap_status == "partial":
+            return ProductReadinessState(
+                "auction_anchor", READINESS_DEGRADED, fresh,
+                is_mandatory=False, is_terminal=True,
+                auction_mode=current_mode, is_product_ready=False,
+                lineage={**base, "reason_code": "AUCTION_PARTIAL", "mode": current_mode},
             )
         if snap_status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
