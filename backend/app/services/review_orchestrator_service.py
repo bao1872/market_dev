@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -125,6 +126,53 @@ class ReviewOrchestratorError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class ReviewRunCreation:
+    """create_run 的返回合同（替代裸 tuple）。
+
+    [Phase4.1 corrective] 显式区分“本次新建”与“复用既有 run”：
+    - run: 创建或复用的 MarketReviewRun 对象
+    - created: True=本次新插入一行（可安全 compute）；False=复用既有 run
+      （可能已 published，调用方必须按不可变语义处理，禁止原地重算）
+
+    使用 dataclass 而非裸 tuple，避免调用方误把 (run, created) 当 run 使用，
+    并在 mypy 层强制解构。
+    """
+
+    run: MarketReviewRun
+    created: bool
+
+
+def check_run_scope_compatibility(
+    *,
+    existing_canary: bool,
+    existing_symbols: frozenset[str] | set[str] | list[str],
+    requested_canary: bool,
+    requested_symbols: frozenset[str] | set[str] | list[str],
+) -> bool:
+    """纯函数：判定既有 run 的 scope 是否允许复用给新请求。
+
+    scope 由 (canary, symbols) 二元组定义。两者都一致才算兼容（可安全复用/
+    自动 resume）；任一不一致即冲突，必须 fail-safe 拒绝复用（避免把
+    canary/debug 结果续成 formal run）。
+
+    覆盖五种行为：
+    - formal / formal（两者皆全市场）：兼容
+    - same canary（canary+相同 symbols）：兼容
+    - formal → canary（既有 formal、新请求 canary）：冲突
+    - canary → formal（既有 canary、新请求 formal）：冲突
+    - different symbols（canary 但 symbols 不同）：冲突
+
+    [Phase4.1 corrective / 临时安全限制] 当前无独立的 canary/formal DB
+    namespace，跨 scope reuse 一律 fail-safe reject。永久 run_mode/namespace
+    设计留待 Phase 5 / PRD 决策，不得宣称已彻底解决。
+    """
+    return (bool(existing_canary), frozenset(existing_symbols or [])) == (
+        bool(requested_canary),
+        frozenset(requested_symbols or []),
+    )
+
+
 # =============================================================================
 # Run 创建与查询
 # =============================================================================
@@ -143,7 +191,7 @@ async def create_run(
     symbols: list[str] | None = None,
     dry_run: bool = False,
     idempotency_key: str | None = None,
-) -> MarketReviewRun:
+) -> ReviewRunCreation:
     """创建或复用 review run（幂等：唯一键组合保证）。
 
     Args:
@@ -161,10 +209,14 @@ async def create_run(
         idempotency_key: 幂等键（写入 metadata，便于调用方追踪）
 
     Returns:
-        MarketReviewRun ORM 对象
+        ReviewRunCreation(run, created)
+        - created=True：本次新插入了一行（可安全 compute）
+        - created=False：复用既有 run（可能已 published，禁止原地重算）
 
     Raises:
-        ReviewOrchestratorError: 输入校验失败（缺 publication pointer 等）
+        ReviewOrchestratorError: 输入校验失败（缺 publication pointer 等）；
+            或 [Phase4.1] 既有 run 的 canary/symbols scope 与新请求不一致
+            （scope 冲突，避免 canary 结果续成 formal run）
     """
     if baseline_window < MIN_BASELINE_WINDOW:
         raise ReviewOrchestratorError(
@@ -187,24 +239,25 @@ async def create_run(
     # 查询，也不写入 source_chip_run_id / degraded_reasons / chip_coverage。
     if dry_run:
         # dry-run：不写 DB，返回一个非持久化的 run 对象供调用方打印
-        return MarketReviewRun(
-            trade_date=trade_date,
-            source_core_run_id=resolved_core_id,
-            source_board_run_id=resolved_board_id,
-            algorithm_version=algo,
-            filter_version=filt,
-            baseline_window=baseline_window,
-            status=RUN_STATUS_CREATED,
-            coverage_ratio=Decimal("0"),
-            metadata_json={
-                "canary": canary,
-                "symbols": symbols,
-                "dry_run": True,
-                "idempotency_key": idempotency_key,
-            },
+        return ReviewRunCreation(
+            run=MarketReviewRun(
+                trade_date=trade_date,
+                source_core_run_id=resolved_core_id,
+                source_board_run_id=resolved_board_id,
+                algorithm_version=algo,
+                filter_version=filt,
+                baseline_window=baseline_window,
+                status=RUN_STATUS_CREATED,
+                coverage_ratio=Decimal("0"),
+                metadata_json={
+                    "canary": canary,
+                    "symbols": symbols,
+                    "dry_run": True,
+                    "idempotency_key": idempotency_key,
+                },
+            ),
+            created=True,
         )
-
-    # upsert run（幂等：相同唯一键复用）
     meta: dict[str, Any] = {
         "canary": canary,
         "symbols": symbols,
@@ -228,13 +281,16 @@ async def create_run(
     stmt = pg_insert(MarketReviewRun).values(**values)
     # [AUD-05 2026-08-07] Review run 一经创建即不可变：晚到的增强产品（chip 等）
     # 不得改写已存在的 run 行。DO NOTHING 是唯一能在 SQL 层保证
-    # “已有 run 不被后续 create_run 修改”的写法；已存在时由下方
-    # get_run_by_keys 读回原行，幂等语义不变。
+    # “已有 run 不被后续 create_run 修改”的写法。RETURNING id 让我们可以区分
+    # “本事务新插入” vs “唯一键冲突被 DO NOTHING 跳过（复用既有行）”，从而对外
+    # 暴露 created 语义供调用方决定能否 compute（published run 严禁原地重算）。
     stmt = stmt.on_conflict_do_nothing(
         constraint="uq_review_runs_date_core_board_algo_filter",
-    )
-    await session.execute(stmt)
+    ).returning(MarketReviewRun.id)
+    insert_result = await session.execute(stmt)
     await session.flush()
+    inserted_row = insert_result.scalar_one_or_none()
+    created = inserted_row is not None
 
     # 读取 upsert 后的 run
     run = await get_run_by_keys(
@@ -250,7 +306,40 @@ async def create_run(
         raise ReviewOrchestratorError(
             f"create_run upsert 后读不到 run: trade_date={trade_date}",
         )
-    return run
+
+    # [Phase4.1 corrective] canary/debug 与 formal run identity 不得默认混用。
+    # 既有 run 的 scope（canary/symbols）与新请求的 scope 不一致时，禁止复用/自动
+    # resume（fail-safe），避免把 canary/debug 结果续成 formal run。现行 PRD 未明确
+    # 允许共享 identity，故采用 fail-safe：scope 冲突即报明确错误（等价 409）。
+    # scope 一致（含两者都是 formal 全市场）则复用是安全的，正常返回。
+    # 判定抽成纯函数 check_run_scope_compatibility，可直接单测五种行为。
+    if created is False:
+        compatible = check_run_scope_compatibility(
+            existing_canary=bool(run.metadata_json.get("canary", False)),
+            existing_symbols=run.metadata_json.get("symbols") or [],
+            requested_canary=bool(canary),
+            requested_symbols=symbols or [],
+        )
+        if not compatible:
+            existing_canary = bool(run.metadata_json.get("canary", False))
+            existing_symbols = frozenset(run.metadata_json.get("symbols") or [])
+            raise ReviewOrchestratorError(
+                f"create_run scope 冲突：既有 run {run.id} 的 "
+                f"canary={existing_canary}/symbols={sorted(existing_symbols)} "
+                f"与新请求 canary={bool(canary)}/symbols={sorted(symbols or [])} "
+                f"不一致；禁止跨 scope 复用同一 run identity（不得把 "
+                f"canary/debug 结果续成 formal run）。请改用不同 trade_date 或算法版本，"
+                f"或显式清理既有 run。",
+            )
+
+    return ReviewRunCreation(run=run, created=created)
+
+
+# [Phase4.1 收敛] 公共合同保持 create_run 返回 ReviewRunCreation（既有生产调用方
+# after_close_orchestrator / review_compute_cli / PG integration 已采用该返回形态，
+# 不再强制改造）。需要显式 created/reused 信息的调用方（如 Admin）使用
+# create_run_with_result，二者等价。
+create_run_with_result = create_run
 
 
 async def get_run(
@@ -444,6 +533,14 @@ async def compute_run(
     Returns:
         计算结果摘要 dict
     """
+    # [Phase4.1 corrective] 不可变守卫：已发布的 run 是最终事实，禁止任何原地重算
+    # （无论调用方是 Admin POST 复用既有 run，还是 canary/debug 误用正式 run 身份）。
+    # 这是服务层最后一道防线，与 Admin 端 created/reused/published 语义互为冗余。
+    if run.status == RUN_STATUS_PUBLISHED:
+        raise ReviewOrchestratorError(
+            f"run={run.id} 已发布（status=published），禁止原地重算；"
+            f"如确需重算请走新 trade_date 或新算法版本，而非复用已发布 run",
+        )
     run.started_at = datetime.now(UTC)
     run.status = RUN_STATUS_COMPUTING
     await session.flush()

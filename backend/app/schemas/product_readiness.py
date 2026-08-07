@@ -155,7 +155,8 @@ class ProductReadinessResponse(BaseModel):
     mandatoryProductsReady: bool = Field(False)
     mandatoryProductsFullyFresh: bool = Field(False)
     requiredCompatibilityReady: bool = Field(
-        True, description="[AUD-10] 全部必需兼容输出（dsa_projection）已就绪"
+        False, description="[Phase4.1 corrective] fail-safe 默认 False：调用方漏填时"
+        "不得自动报告 ready，避免掩盖 required_compatibility（dsa_projection）缺失"
     )
     enhancementJobsTerminal: bool = Field(False)
     allProductsReady: bool = Field(False)

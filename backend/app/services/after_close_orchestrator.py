@@ -1738,6 +1738,7 @@ async def _execute_review_step(
                         dry_run=False,
                         idempotency_key=f"after_close_orchestrator:{job_run_id}",
                     )
+                    review_run = review_run.run
                     _review_run_id = review_run.id
                     logger.info(
                         "[AfterClose] [Review] create_run 完成: run_id=%s, "
@@ -2135,6 +2136,41 @@ class AfterCloseCancelledError(Exception):
         super().__init__(f"after-close run terminated as {terminal_status.value}")
 
 
+async def resolve_stock_core_published(
+    session: AsyncSession,
+    trade_date: date,
+    snapshot_run_id: uuid.UUID | None,
+) -> tuple[bool, bool]:
+    """唯一权威判定：snapshot_run_id 是否为当前 stock_core publication pointer。
+
+    返回 (published, superseded)：
+    - published=True  : pointer 存在且 data_run_id == snapshot_run_id（本 run 是正式发布）
+    - superseded=True : pointer 存在但指向别的 run（本 run 被抢占）
+    - 两者皆 False    : 无 pointer（未发布）
+
+    这是 Chip 入队、auction anchor、board aggregation 的唯一判据来源。
+    normal publish 路径与 skip_publish=True resume 路径共用同一判定，
+    避免各自用局部布尔（publish_failed / snapshot_error）推断“已发布”而产生分叉。
+    """
+    if snapshot_run_id is None:
+        return (False, False)
+    from app.models.factor_publication import PUBLICATION_KIND_STOCK_CORE
+    from app.services.factor_publication_service import get_publication
+
+    existing_pub = await get_publication(
+        session,
+        scope_type="market",
+        scope_key="market",
+        trade_date=trade_date,
+        publication_kind=PUBLICATION_KIND_STOCK_CORE,
+    )
+    if existing_pub is None:
+        return (False, False)
+    if existing_pub.data_run_id == snapshot_run_id:
+        return (True, False)
+    return (False, True)
+
+
 async def execute_after_close_run(
     job_run_id: uuid.UUID,
     trade_date: date,
@@ -2187,6 +2223,14 @@ async def execute_after_close_run(
         LeaseEpochMismatchError: lease_epoch 不匹配（任务已被新 Worker 接管）
         异常向上传播（调用方应捕获并记录日志）
     """
+    # [Phase4.1 收敛] 提前在函数体层级初始化下游汇总需要的状态变量，
+    # 确保 normal publish 与 skip_publish 两条分支都会赋值，避免末尾汇总时
+    # UnboundLocalError（原 _auction_anchor_status 仅在某分支内初始化）。
+    _auction_anchor_status: str = "skipped"
+    _auction_publication_id: uuid.UUID | None = None
+    _aggregation_status: str = "skipped"
+    _chip_enqueue_status: str = "skipped"
+
     # [JOB-02] 设置 lease_epoch ContextVar，子任务（asyncio.create_task）自动继承
     # _update_heartbeat_and_step 读取此 ContextVar 决定是否使用 fenced UPDATE
     _current_lease_epoch.set(lease_epoch)
@@ -2986,6 +3030,12 @@ async def execute_after_close_run(
         # 在各自独立 session/事务中提交，非单一原子事务。故障恢复后通过 publish_run 幂等
         # 返回 + skip_publish 断点跳过达到最终一致。失败时 snapshot run 标记 failed。
         publish_failed = False
+        # [Phase4.1 corrective] _stock_core_published 是最权威的“本 snapshot_run_id
+        # 是否真正成为正式 stock_core publication pointer”判据。仅当发布原子提交成功、
+        # 且 pointer 确实指向本 run 时才为 True；superseded / 发布失败 / 未发布均为 False。
+        # 它不等价于“snapshot_error is None + snapshot_run_id 非空 + not publish_failed”，
+        # 后者在 superseded 场景下会错误地给出 True。Chip 入队守卫必须以它为准。
+        _stock_core_published = False
         if not skip_publish:
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -3040,28 +3090,21 @@ async def execute_after_close_run(
                 _stock_core_superseded_local = False
                 if snapshot_run_id is not None and snapshot_error is None:
                     async with AsyncSessionLocal() as pub_db:
-                        from app.models.factor_publication import PUBLICATION_KIND_STOCK_CORE
                         from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
-                        from app.services.factor_publication_service import (
-                            compute_coverage,
-                            get_publication,
-                        )
 
-                        existing_pub = await get_publication(
-                            pub_db,
-                            scope_type="market",
-                            scope_key="market",
-                            trade_date=trade_date,
-                            publication_kind=PUBLICATION_KIND_STOCK_CORE,
+                        _published_now, _superseded_now = await resolve_stock_core_published(
+                            pub_db, trade_date, snapshot_run_id
                         )
-
-                        if existing_pub is not None and existing_pub.data_run_id == snapshot_run_id:
+                        if _published_now:
+                            # 本 run 已是当前 pointer（断点恢复重入 / 并发抢占已达成）
                             _stock_core_published_local = True
-                        elif existing_pub is not None and existing_pub.data_run_id != snapshot_run_id:
+                            _stock_core_superseded_local = False
+                        elif _superseded_now:
+                            # pointer 指向别的 run → 本 run 被抢占，禁止发布、禁止聚合
                             logger.warning(
                                 "[AfterClose] stock_core pointer exists for different run: "
-                                "existing=%s, current=%s — NOT overwriting",
-                                existing_pub.data_run_id, snapshot_run_id,
+                                "current=%s is SUPERSEDED, will NOT publish or aggregate",
+                                snapshot_run_id,
                             )
                             await append_event(
                                 db=pub_db,
@@ -3070,24 +3113,25 @@ async def execute_after_close_run(
                                 level="warning",
                                 message=(
                                     f"stock_core pointer exists for different run: "
-                                    f"existing={existing_pub.data_run_id}, "
                                     f"current={snapshot_run_id} — current run is SUPERSEDED, "
                                     f"will NOT be marked published or aggregated"
                                 ),
-                                payload={
-                                    "existing_data_run_id": str(existing_pub.data_run_id),
-                                    "current_snapshot_run_id": str(snapshot_run_id),
-                                    "superseded": True,
-                                    "superseded_by_run_id": str(existing_pub.data_run_id),
-                                },
+                                payload={"current_snapshot_run_id": str(snapshot_run_id), "superseded": True},
                             )
                             await pub_db.commit()
                             _stock_core_published_local = False
                             _stock_core_superseded_local = True
                         else:
+                            from app.models.factor_publication import (
+                                PUBLICATION_KIND_STOCK_CORE,
+                            )
+                            from app.services.factor_publication_service import (
+                                compute_coverage,
+                            )
                             # [CHANGE-20260806 / P0-C] 用原子 publication service（同一事务：
                             # quality gate + fencing + publication + supersede + run published +
                             # audit），替换旧的 two-phase publish_stock_core。
+
                             cov_data = await compute_coverage(pub_db, snapshot_run_id)
                             from app.services.stock_core_publication_service import (
                                 StockCorePublicationError,
@@ -3117,7 +3161,12 @@ async def execute_after_close_run(
                                     trade_date, snapshot_run_id, cov_data["coverage"],
                                     worker_id,
                                 )
-                                _stock_core_published_local = True
+                                # 发布后再次核验 pointer 身份（与 skip_publish 路径共用同一判定）
+                                _published_now, _superseded_now = await resolve_stock_core_published(
+                                    pub_db, trade_date, snapshot_run_id
+                                )
+                                _stock_core_published_local = _published_now
+                                _stock_core_superseded_local = _superseded_now
                             except StockCorePublicationError as pub_exc:
                                 await pub_db.rollback()
                                 logger.error(
@@ -3158,7 +3207,25 @@ async def execute_after_close_run(
             _stock_core_published = _core_pub_out["stock_core_published"]
             _stock_core_superseded = _core_pub_out["stock_core_superseded"]
 
-            # [CHANGE-20260806-CP4A.1 / P0-C] 正常链不再有独立的 phase-2 run-mark。
+        else:
+            # [Phase4.1 corrective] skip_publish=True（断点恢复到 publishing 之后）：
+            # 本轮局部布尔变量不可信，必须重新核验线上真实 publication pointer 的真实身份。
+            # 只有当 pointer 确实存在且 data_run_id == snapshot_run_id 时，本 run 才是正式
+            # stock_core publication；否则（pointer 指向别人 / 不存在）一律视为未发布/被抢占，
+            # chip 不得入队。禁止用 publish_failed=False 等局部布尔推断“已发布”。
+            _stock_core_superseded = False
+            if snapshot_run_id is not None:
+                # 断点恢复：局部布尔不可信，复用唯一权威判定 resolve_stock_core_published
+                # （与 normal publish 路径共用），重新核验线上真实 publication pointer 身份。
+                async with AsyncSessionLocal() as verify_db:
+                    _stock_core_published, _stock_core_superseded = await resolve_stock_core_published(
+                        verify_db, trade_date, snapshot_run_id
+                    )
+            else:
+                _stock_core_published = False
+                _stock_core_superseded = False
+
+        # [CHANGE-20260806-CP4A.1 / P0-C] 正常链不再有独立的 phase-2 run-mark。
             # `publish_stock_core_atomically` 已在同一事务内标记 snapshot run published/succeeded，
             # 正常路径只存在**一个 run 状态 owner**（原子发布服务）。断点恢复场景的 run 终态
             # 由独立的 reconcile service 处理（reconcile_stock_core_publication），不在此内联。
@@ -3190,8 +3257,6 @@ async def execute_after_close_run(
             # [P0-1/P0-2 修复 2026-07-31] 主流程通过统一入口 generate_and_publish_auction_anchors
             # 完成生成+发布。chip 未完成时生成 structure_only 并发布；chip 完成后由
             # chip_consensus_service 回调重新生成完整锚点并原子切换 publication。
-            _auction_anchor_status = "skipped"
-            _auction_publication_id: uuid.UUID | None = None
             if _stock_core_published and snapshot_run_id is not None:
                 try:
                     from app.services.auction_anchor_service import (
@@ -3342,7 +3407,10 @@ async def execute_after_close_run(
         # 故断点恢复重跑本段安全，不会产生重复 job。
         _chip_enqueue_status: str = "skipped"
         _chip_job_id: uuid.UUID | None = None
-        if snapshot_error is None and snapshot_run_id is not None and not publish_failed:
+        if _stock_core_published:
+            # [Phase4.1 corrective] Chip 入队守卫以权威 publication pointer 身份为准：
+            # 仅当本 snapshot_run_id 真正成为正式 stock_core publication 时才入队；
+            # superseded run（pointer 指向别人）一律不入队。
             _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
                 job_run_id=job_run_id,
                 worker_id=worker_id,

@@ -59,9 +59,10 @@ from app.services.review_bootstrap_job_service import (
 from app.services.review_orchestrator_service import (
     DEFAULT_BASELINE_WINDOW,
     REVIEW_ALGORITHM_VERSION,
+    RUN_STATUS_PUBLISHED,
     ReviewOrchestratorError,
     compute_run,
-    create_run,
+    create_run_with_result,
     get_run,
     get_run_status,
     resume_run,
@@ -170,8 +171,8 @@ async def create_review_run(
     )
 
     try:
-        # 1. 创建或复用 run
-        run = await create_run(
+        # 1. 创建或复用 run —— ReviewRunCreation(run, created) 显式暴露 created 语义
+        creation = await create_run_with_result(
             db,
             trade_date=trade_date,
             source_core_run_id=source_core_run_id,
@@ -184,29 +185,54 @@ async def create_review_run(
             dry_run=payload.dry_run,
             idempotency_key=payload.idempotency_key,
         )
+        run = creation.run
+        created = creation.created
 
         if payload.dry_run:
             # dry-run：不写 DB，返回非持久化的 run 概要
             await db.rollback()
             return _run_to_response(run)
 
-        await db.commit()
-        await db.refresh(run)
-
-        # 2. 执行计算
-        compute_result = await compute_run(
-            db,
-            run,
-            canary=payload.canary,
-            symbols=payload.symbols,
-        )
-        await db.commit()
-        await db.refresh(run)
-
-        logger.info(
-            "[Admin] review run 计算完成: run_id=%s result=%s",
-            run.id, compute_result,
-        )
+        # [Phase4.1 corrective] 显式 created/reused 语义，杜绝 published run 原地重算：
+        # - created=True：本次新插入，可安全 compute（canary/symbols 按请求）
+        # - created=False 且 status==published：复用既有【已发布】run，严禁重算，
+        #   直接返回既有结果（不可变事实）
+        # - created=False 且 status!=published：复用未终态 run（in-progress/failed），
+        #   走 resume_run（只处理 pending/可重试 failed，不重复重算已 succeeded item）
+        if created:
+            compute_result = await compute_run(
+                db,
+                run,
+                canary=payload.canary,
+                symbols=payload.symbols,
+            )
+            await db.commit()
+            await db.refresh(run)
+            logger.info(
+                "[Admin] review run 新建并计算完成: run_id=%s result=%s",
+                run.id, compute_result,
+            )
+        elif run.status == RUN_STATUS_PUBLISHED:
+            # 已发布 run 不可变：不重算、不 commit 变更，原样返回
+            await db.rollback()
+            compute_result = {
+                "reused": True,
+                "immutable": True,
+                "status": run.status,
+                "message": "run 已发布，禁止原地重算，返回既有结果",
+            }
+            logger.info("[Admin] review run 复用已发布 run（不重算）: run_id=%s", run.id)
+        else:
+            # 未发布的既有 run：以 resume 安全续跑，而非整段重算
+            compute_result = await resume_run(
+                db, run, only_pending=False,
+            )
+            await db.commit()
+            await db.refresh(run)
+            logger.info(
+                "[Admin] review run 复用未发布 run（resume）: run_id=%s result=%s",
+                run.id, compute_result,
+            )
     except ReviewOrchestratorError as exc:
         await db.rollback()
         raise HTTPException(

@@ -862,6 +862,41 @@ async def test_closure_enum_values_unchanged():
         assert ev.closure in allowed
 
 
+def test_schema_required_compatibility_ready_default_is_fail_safe():
+    """[Phase4.1 corrective] requiredCompatibilityReady 默认必须为 fail-safe False：
+    调用方若漏填该字段，不得自动报告为 ready（否则会掩盖 dsa_projection 等
+    required_compatibility 产品缺失）。验证 schema 默认值与构造语义。"""
+    from app.schemas.product_readiness import ProductReadinessResponse
+
+    # 1) 构造时不显式传 requiredCompatibilityReady —— 默认必须是 False
+    resp = ProductReadinessResponse(
+        tradeDate="2026-08-05",
+        closure="fully_ready",
+        productionClosure="fully_ready",
+    )
+    assert resp.requiredCompatibilityReady is False, (
+        "schema 默认必须为 False（fail-safe），调用方漏填时禁止自动报告 ready"
+    )
+
+    # 2) 显式 False 也合法（缺兼容产品时如实反映）
+    resp2 = ProductReadinessResponse(
+        tradeDate="2026-08-05",
+        closure="degraded_ready",
+        productionClosure="degraded_ready",
+        requiredCompatibilityReady=False,
+    )
+    assert resp2.requiredCompatibilityReady is False
+
+    # 3) 仅当调用方显式 True 时才为 ready（service 层始终显式赋值）
+    resp3 = ProductReadinessResponse(
+        tradeDate="2026-08-05",
+        closure="fully_ready",
+        productionClosure="fully_ready",
+        requiredCompatibilityReady=True,
+    )
+    assert resp3.requiredCompatibilityReady is True
+
+
 if __name__ == "__main__":
     import pytest
 

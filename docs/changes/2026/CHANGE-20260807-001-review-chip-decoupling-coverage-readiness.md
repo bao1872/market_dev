@@ -131,6 +131,102 @@
 
 ---
 
+## 4.1 Phase 4.1 corrective — 收敛式重构（同轮补强）
+
+在完成 Phase 1–4 后，用户追加两项硬要求，并明确叫停"逐个追修脆弱 mock / source-inspection
+测试"的做法，改为先把可测试的业务边界抽成纯函数，再用直接行为测试验证。
+
+### 4.1.1 Chip current-stock-core 判定抽成唯一 helper
+
+`backend/app/services/after_close_orchestrator.py`
+
+- 新增 `resolve_stock_core_published(session, trade_date, snapshot_run_id)
+  -> tuple[bool, bool]`：以**权威 publication pointer 身份**为唯一判据
+  （`get_publication(kind=stock_core)` 后比对 `data_run_id == snapshot_run_id`），
+  返回 `(published, superseded)`。无 pointer → `(False, False)`；`snapshot_run_id`
+  为 None → 直接 `(False, False)` 不查库。
+- **normal publish 路径与 `skip_publish=True` resume 路径共用同一 helper**：
+  - normal publish：发布前先 `resolve_stock_core_published` 判定既有 pointer ——
+    命中则视为已发布（断点重入/并发抢占达成），被抢占则跳过发布，无 pointer 才走原子发布，
+    发布后再次 `resolve_stock_core_published` 复核身份（消除原先依赖局部布尔
+    `publish_failed`/`snapshot_error` 的分叉推断）。
+  - resume：`skip_publish=True` 不再信任本轮局部布尔，直接 `resolve_stock_core_published`
+    重新核验线上真实 pointer。
+- **Chip 入队守卫只依赖该 helper 结果**（`if _stock_core_published:`），与 Review 状态、
+  局部布尔彻底解耦。修复了原先 superseded 场景守卫可能误判为"已发布"而错误入队 chip 的漏洞。
+- 顺带修复一处既有 UnboundLocalError：原 `_auction_anchor_status` / `_aggregation_status` /
+  `_chip_enqueue_status` 仅在 `else`（skip_publish）分支内初始化，normal publish 分支走到
+  末尾汇总时引用会抛 `UnboundLocalError`；现统一在函数体层级初始化默认值
+  （`_auction_anchor_status` / `_auction_publication_id` / `_aggregation_status` /
+  `_chip_enqueue_status` 均为 `"skipped"` / `None`）。
+
+### 4.1.2 Canary / formal scope 兼容性抽成纯函数
+
+`backend/app/services/review_orchestrator_service.py`
+
+- 新增纯函数 `check_run_scope_compatibility(*, existing_canary, existing_symbols,
+  requested_canary, requested_symbols) -> bool`：scope 由 `(canary, frozenset(symbols))`
+  二元组定义，两者都一致才兼容。
+- `create_run()` 的 scope 冲突判据改为调用该纯函数，不再内联布尔比较。
+- **覆盖五种行为**（直接单测，不依赖复杂 AsyncSession mock）：
+  formal→formal（兼容）、same-canary（兼容）、formal→canary（冲突）、canary→formal
+  （冲突）、different-symbols（冲突）。冲突时 `create_run()` 抛 `ReviewOrchestratorError`
+  （等价 409），fail-safe 拒绝跨 scope 复用同一 run identity。
+- **临时安全限制（明确标记，非彻底解决）**：当前 **canary 与 formal 共享同一唯一键、
+  无独立 DB namespace**，canary persisted run 可能占用 formal 的 identity。本轮仅以
+  fail-safe reject 跨 scope reuse 兜底，**永久 run_mode / namespace 设计留待 Phase 5 / PRD
+  决策**，不得宣称已彻底解决。
+
+### 4.1.3 create_run 公共合同保持兼容
+
+- `create_run()` 公共返回合同保持 `MarketReviewRun`（既有生产调用方
+  `after_close_orchestrator` / `review_compute_cli` / PG integration 已采用该形态，
+  本轮**不强制改造**所有调用方）。
+- Admin POST `/review/runs` 需要 created/reused 信息，改用显式入口
+  `create_run_with_result()`（返回 `ReviewRunCreation(run, created)`）；
+  `create_run` 作为兼容 wrapper 等价委托，不破坏任何既有调用点。
+
+### 4.1.4 测试策略收敛
+
+- **删除本轮新增的 `inspect.getsource()` 式 Chip 合同测试**（`test_chip_enqueue_guarded_by_core_publish_success` /
+  `test_superseded_run_must_not_publish_chip_guard_true` /
+  `test_resume_skip_publish_reverifies_pointer_for_chip`），改用 `resolve_stock_core_published`
+  的直接行为测试（pointer match / mismatch / missing / none-snapshot 四种）。
+- **scope 兼容性改用 `check_run_scope_compatibility` 纯函数直接测试**五种行为，移除对
+  复杂 AsyncSession mock 的依赖。
+- 脆弱的 `test_created_true_on_fresh_insert` 改用与既有 immutability 测试一致的
+  `_FreshSession` 行为（SELECT 首次返回 None → INSERT → 再次 SELECT 返回新行），
+  不再依赖易 bleed 的 mock SELECT 行为。
+- `requiredCompatibilityReady` 保持 fail-safe 默认 `False`（schema 字段不改）。
+
+### 4.1.5 本轮验证（收敛后，与 §4 同事实基础）
+
+本地 `PURE_UNIT_TEST=1`（`backend/.venv/bin/python`）：
+
+| 测试 | 结果 |
+|---|---|
+| `test_review_immutability_contract.py`（改写：纯函数 scope + 行为化 chip helper，移除 source-inspection） | 22 passed |
+| `test_after_close_phase0_contracts.py`（改写：4 个 `resolve_stock_core_published` 行为测试 + 保留 chip 分叉顺序测试） | 20 passed |
+| `test_review_v21_dependency_contract.py` | 13 passed |
+| `test_product_readiness_service_layer.py` | 29 passed |
+| 受影响域整体（`-k "review or readiness or after_close or chip or closure or immutability or scope"`） | 通过 |
+| **全量 PURE_UNIT（排除 `test_calendar_v9_regression.py`，见下）** | **3179 passed / 1255 skipped / 0 xfail** |
+
+- **排除 `test_calendar_v9_regression.py`**：该文件在 pytest 收集/运行时触发 pytest 内部
+  **INTERNALERROR**（`RecursionError` / `_ast` 递归深度不匹配，环境级崩溃，非测试失败），
+  会中断整个会话并污染计数。该崩溃在 `HEAD`（本轮改动之前）同样存在，属环境/pytest 版本
+  问题，与 Phase 4.1 无关。已单独核验：baseline 与本轮改动下，全量（排除该文件）失败集合
+  **完全一致（同为 4 failed）**，证明本轮**未引入任何回归**。
+- **4 个失败全部为 pre-existing**（本轮前后相同，且与本次改动域正交）：
+  1. `test_incremental_publication.py::test_get_publication_no_pointer_returns_none`
+  2. `test_incremental_publication.py::test_get_published_snapshot_run_id_fallback`
+     （这两例在 isolation 下通过、全量下因其他测试的状态 bleed 失败；baseline 全量下同样失败）
+  3. `test_readiness_lineage_governance.py::test_dsa_counter_signature_requires_core_run`（陈旧测试）
+  4. `test_review_member_fact_metric_contract.py::test_orchestrator_finishes_cross_section_before_any_signal`（mock harness 问题）
+- Ruff：本轮 9 个改动文件 `ruff check` 全通过。
+
+---
+
 ## 5. 风险与遗留
 
 ### 5.1 发布门禁判据发生实质变化（需关注）

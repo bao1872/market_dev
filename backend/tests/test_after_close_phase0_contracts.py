@@ -675,33 +675,6 @@ def test_chip_enqueued_before_review_step():
     )
 
 
-def test_chip_enqueue_guarded_by_core_publish_success():
-    """[AUD-08] chip 入队的前置判据必须是 stock_core 发布成功，而非 Review 结果。"""
-    import inspect
-    import re
-
-    from app.services import after_close_orchestrator as orch
-
-    src = inspect.getsource(orch.execute_after_close_run)
-    chip_pos = src.find("_enqueue_chip_job_step(")
-    # 取 chip 调用之前最近的 if 守卫
-    preceding = src[:chip_pos]
-    guard = re.findall(
-        r'if ([^\n]*snapshot_error is None[^\n]*)', preceding,
-    )
-    assert guard, "chip 入队前必须有 stock_core 发布成功守卫"
-    last_guard = guard[-1]
-    assert "publish_failed" in last_guard, (
-        "chip 守卫必须包含 publish_failed 判据"
-    )
-    assert "snapshot_run_id" in last_guard, (
-        "chip 守卫必须包含 snapshot_run_id 判据"
-    )
-    assert "review" not in last_guard.lower(), (
-        "chip 守卫不得依赖任何 Review 状态"
-    )
-
-
 def test_chip_survives_review_failure_and_cancellation():
     """[AUD-08] Review 短路块之后不得再有 chip 入队，且短路不撤销已入队 chip。
 
@@ -763,6 +736,99 @@ def test_chip_enqueue_is_idempotent_for_resume():
     )
     # 3) 必须把"是否新建"作为结果返回，供调用方区分
     assert "is_new" in src, "必须返回 is_new 以区分新建与复用"
+
+
+class _FakeStockCorePub:
+    """最小 publication 替身，只关心 data_run_id。"""
+
+    def __init__(self, data_run_id):
+        self.data_run_id = data_run_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_stock_core_published_pointer_match():
+    """pointer 存在且 data_run_id == snapshot_run_id → (published=True, superseded=False)。"""
+    from datetime import date
+
+    from app.services.after_close_orchestrator import resolve_stock_core_published
+
+    snap = uuid.uuid4()
+    pub = _FakeStockCorePub(data_run_id=snap)
+
+    async def fake_get_publication(*_a, **_k):
+        return pub
+
+    with patch(
+        "app.services.factor_publication_service.get_publication",
+        new=fake_get_publication,
+    ):
+        published, superseded = await resolve_stock_core_published(
+            AsyncMock(), date(2026, 7, 31), snap
+        )
+
+    assert published is True
+    assert superseded is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_stock_core_published_pointer_mismatch():
+    """pointer 存在但指向别的 run → (published=False, superseded=True)。"""
+    from datetime import date
+
+    from app.services.after_close_orchestrator import resolve_stock_core_published
+
+    snap = uuid.uuid4()
+    pub = _FakeStockCorePub(data_run_id=uuid.uuid4())
+
+    async def fake_get_publication(*_a, **_k):
+        return pub
+
+    with patch(
+        "app.services.factor_publication_service.get_publication",
+        new=fake_get_publication,
+    ):
+        published, superseded = await resolve_stock_core_published(
+            AsyncMock(), date(2026, 7, 31), snap
+        )
+
+    assert published is False
+    assert superseded is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_stock_core_published_pointer_missing():
+    """无 pointer（从未发布）→ (published=False, superseded=False)。"""
+    from datetime import date
+
+    from app.services.after_close_orchestrator import resolve_stock_core_published
+
+    async def fake_get_publication(*_a, **_k):
+        return None
+
+    with patch(
+        "app.services.factor_publication_service.get_publication",
+        new=fake_get_publication,
+    ):
+        published, superseded = await resolve_stock_core_published(
+            AsyncMock(), date(2026, 7, 31), uuid.uuid4()
+        )
+
+    assert published is False
+    assert superseded is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_stock_core_published_none_snapshot():
+    """snapshot_run_id 为 None 时无需查库，直接 (False, False)。"""
+    from datetime import date
+
+    from app.services.after_close_orchestrator import resolve_stock_core_published
+
+    published, superseded = await resolve_stock_core_published(
+        AsyncMock(), date(2026, 7, 31), None
+    )
+    assert published is False
+    assert superseded is False
 
 
 def test_outer_exception_handler_excludes_cancellation():

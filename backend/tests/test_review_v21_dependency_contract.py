@@ -435,9 +435,10 @@ async def test_create_run_dry_run_has_no_chip_lineage() -> None:
     from app.services.review_orchestrator_service import create_run
 
     session = _build_recording_session(None)
-    run = await create_run(
+    creation = await create_run(
         session, trade_date=TRADE_DATE, dry_run=True,  # type: ignore[arg-type]
     )
+    run = creation.run
 
     assert run.source_chip_run_id is None
     assert not run.metadata_json.get("chip_coverage")
