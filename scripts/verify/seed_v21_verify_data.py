@@ -500,7 +500,13 @@ async def _gen_synthetic_boards(verify_conn) -> None:
             ),
             {"id": str(bid), "code": code, "nm": nm, "typ": typ},
         )
-    # 确定性成员关系：每只 instrument 加入 13 个 board（混合行业/概念，确定性散布）
+    # 确定性成员关系：每只 instrument 加入 13 个 board（混合行业/概念，确定性散布）。
+    # [Group2-B3] 第 0 个 board 强制为行业（IND_{i%220}），确保每只股票至少有一个
+    # industry board —— 否则 `(i*7+b*13)%540` 的散布会让约 30% 股票 13 个 board 全落在
+    # concept 区间（CON_220-539），industry_stock 不含它们 → industry_coverage=0.6981
+    # < MIN_INDUSTRY_COVERAGE=0.99（board_sync_service.py:50/255），触发 sync_boards 门禁
+    # 失败 → PIT 表不写 → board_aggregation bootstrap_unavailable。强制行业归属后
+    # industry_coverage=1.0 合法通过。
     # [性能 / 路径2] 分批写入（每批 _BATCH 行），流式清空 members 缓冲避免 67,600 行全量驻留 OOM。
     members: list[dict[str, str]] = []
     n_boards = len(board_specs)
@@ -508,7 +514,10 @@ async def _gen_synthetic_boards(verify_conn) -> None:
     for i in range(FM_N_INST):
         inst_id = _inst_uuid(i)
         for b in range(_FM_BOARDS_PER_INST):
-            code = board_specs[(i * 7 + b * 13) % n_boards][0]
+            if b == 0:
+                code = board_specs[i % _FM_N_INDUSTRY][0]  # 强制行业
+            else:
+                code = board_specs[(i * 7 + b * 13) % n_boards][0]
             members.append({"board_id": str(board_ids[code]), "instrument_id": str(inst_id)})
             n_members += 1
             if len(members) >= _BATCH:
