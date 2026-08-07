@@ -191,6 +191,9 @@ services:
     image: ${VERIFY_TEST_IMAGE:?VERIFY_TEST_IMAGE is required}
     logging: *default-logging
     <<: *resource-app-light
+    # [Phase8] Seed 六态全规模 synthetic 在 512m 下 OOM(exit=137)；提升到 2g 以通过 seed_twice。
+    mem_limit: 2g
+    mem_reservation: 1g
     volumes:
       # 只读挂载验证代码与测试资产，禁止运行时写入容器（--rm 后丢弃）。
       - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/app:/app/app:ro
