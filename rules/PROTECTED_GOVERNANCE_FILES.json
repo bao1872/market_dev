@@ -7,8 +7,7 @@
     "tools/check_governance_rules.py",
     "tools/tests/test_check_governance_rules.py",
     "backend/tests/test_verify_infra_safety.py",
-    "scripts/ops/panji-verify",
-    "scripts/ops/panji-verify-run"
+    "scripts/ops/panji-verify"
   ],
   "path_prefixes": [
     "rules/",

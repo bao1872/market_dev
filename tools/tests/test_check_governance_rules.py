@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import shutil
 from pathlib import Path
 
@@ -30,7 +31,6 @@ def governance_repo(tmp_path: Path) -> Path:
     for relative in (
         "scripts/ops/panji-test-deploy",
         "scripts/ops/panji-verify",
-        "scripts/ops/panji-verify-run",
         "scripts/deploy/panji-deploy.sh",
         "scripts/verify/verify_attempt.py",
         "scripts/verify/cleanup_runner.py",
@@ -67,6 +67,16 @@ def test_current_repository_contract_passes(governance_repo: Path) -> None:
         ("unprotect_verify_entry", "protected governance manifest missing path"),
         ("verify_short_sha", "verification entry missing contract signal"),
         ("verify_destructive_cleanup", "forbidden verification implementation"),
+        # [CHANGE-20260806-012] 单可复用运行时减法架构回归用例
+        ("verify_second_lock_runner", "verification runner missing contract signal"),
+        ("verify_no_prepare_env", "verification remote runner missing contract signal"),
+        ("verify_no_flock", "verification remote runner missing contract signal"),
+        ("verify_no_dep_hash_compare", "verification remote runner missing contract signal"),
+        ("verify_compose_per_sha_image", "verification compose missing contract signal"),
+        ("verify_compose_restore_verify_test", "forbidden verification compose topology"),
+        ("verify_compose_restore_backend", "forbidden verification compose topology"),
+        ("verify_dockerfile_no_dep_label", "verification Docker target missing contract signal"),
+        ("verify_cleanup_no_blocked", "verification cleanup missing contract signal"),
         ("no_prd_auth", "missing explicit PRD authorization gate"),
         ("no_maps_auth", "missing explicit Maps authorization gate"),
         ("no_runbooks_auth", "missing explicit Runbooks authorization gate"),
@@ -245,17 +255,81 @@ def test_governance_regressions_are_rejected(
             encoding="utf-8",
         )
     elif mutation == "unprotect_verify_entry":
+        # panji-verify 是 exact_paths 的最后一项（无尾逗号），需连同前一项的逗号一并移除。
         path = governance_repo / MODULE.PROTECTED_MANIFEST
-        path.write_text(
-            read_text(path).replace('    "scripts/ops/panji-verify",\n', ""),
-            encoding="utf-8",
-        )
+        manifest = json.loads(read_text(path))
+        manifest["exact_paths"] = [
+            p for p in manifest["exact_paths"] if p != "scripts/ops/panji-verify"
+        ]
+        path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     elif mutation == "verify_short_sha":
         path = governance_repo / "scripts/ops/panji-verify"
         path.write_text(read_text(path).replace("[0-9a-f]{40}", "[0-9a-f]{7,40}"), encoding="utf-8")
     elif mutation == "verify_destructive_cleanup":
         path = governance_repo / "scripts/verify/cleanup_runner.py"
         path.write_text(read_text(path) + '\nFORBIDDEN = "down -v"\n', encoding="utf-8")
+    elif mutation == "verify_second_lock_runner":
+        # 回潮：attempt 内重新引入第二层 env 注入之外的执行路径（丢失 verify_exec fresh process）。
+        path = governance_repo / "scripts/verify/verify_attempt.py"
+        path.write_text(read_text(path).replace("verify_exec", "legacy_runner"), encoding="utf-8")
+    elif mutation == "verify_no_prepare_env":
+        # 回潮：远程脚本不再生成 attempt.env，verify_attempt 将无 DATABASE_URL 可用。
+        path = governance_repo / "scripts/verify/run_remote_verification.sh"
+        path.write_text(
+            read_text(path).replace(
+                "python3 scripts/verify/prepare_verify_environment.py",
+                "python3 scripts/verify/legacy_env.py",
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "verify_no_flock":
+        # 回潮：删除最外层 single-flight 锁，允许并发 attempt 互相污染。
+        path = governance_repo / "scripts/verify/run_remote_verification.sh"
+        path.write_text(read_text(path).replace("flock", "nolock"), encoding="utf-8")
+    elif mutation == "verify_no_dep_hash_compare":
+        # 回潮：不再按 image label 两方比较依赖 hash，镜像可能与代码依赖漂移。
+        path = governance_repo / "scripts/verify/run_remote_verification.sh"
+        path.write_text(
+            read_text(path).replace("panji.verify.dependency-hash", "legacy.hash"),
+            encoding="utf-8",
+        )
+    elif mutation == "verify_compose_per_sha_image":
+        # 回潮：验证镜像退回 per-SHA tag，破坏单可复用运行时。
+        path = governance_repo / "docker-compose.verify.yml"
+        path.write_text(
+            read_text(path).replace(
+                "panji-verify-runtime:current", "panji-verify-runtime:${SHA}"
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "verify_compose_restore_verify_test":
+        # 回潮：恢复一次性 verify-test 服务与 per-SHA 测试镜像变量。
+        path = governance_repo / "docker-compose.verify.yml"
+        path.write_text(
+            read_text(path)
+            + "\n  verify-test:\n    image: ${VERIFY_TEST_IMAGE:-panji-verify-test:dev}\n",
+            encoding="utf-8",
+        )
+    elif mutation == "verify_compose_restore_backend":
+        # 回潮：重新启动 verify-backend（HTTP 探针路线），违反容器内自检合同。
+        path = governance_repo / "docker-compose.verify.yml"
+        path.write_text(
+            read_text(path) + "\n  verify-backend:\n    image: panji-verify-runtime:current\n",
+            encoding="utf-8",
+        )
+    elif mutation == "verify_dockerfile_no_dep_label":
+        # 回潮：verification stage 不再写入依赖 hash label，入口无法两方比较。
+        path = governance_repo / "backend/Dockerfile"
+        path.write_text(
+            read_text(path).replace("panji.verify.dependency-hash", "legacy.label"),
+            encoding="utf-8",
+        )
+    elif mutation == "verify_cleanup_no_blocked":
+        # 回潮：清理器不再 fail-closed 标记 blocked_cleanup。
+        path = governance_repo / "scripts/verify/cleanup_runner.py"
+        path.write_text(
+            read_text(path).replace("blocked_cleanup", "cleanup_warning"), encoding="utf-8"
+        )
     elif mutation == "future_state":
         path = governance_repo / "rules/00-core-governance.md"
         path.write_text(read_text(path) + "\n> 状态：PLANNED\n", encoding="utf-8")

@@ -90,7 +90,7 @@ Gov     python tools/check_governance_rules.py
 
 - 正式远程验证只能使用 `scripts/ops/panji-verify` 和仓库登记的封闭计划；计划只允许选择已注册 profile，不允许注入任意 shell、pytest 参数或插件。
 - 正式证据必须绑定完整 40 位 target/repo/runtime SHA、精确验证数据库、Compose project、Alembic revision、计划名和各 gate 结果；任一身份不一致立即失败。
-- 同一 SHA 的 PG 测试必须由一次性 `verify-test` 执行；本地模拟、临时容器修改或其他 SHA 的结果不具备正式证据资格。
+- 同一 SHA 的 PG 测试必须由单可复用验证运行时（`panji-verify-python` 容器经 `verify_exec.py` fresh process，镜像 `panji-verify-runtime:current`）执行；本地模拟、临时容器修改或其他 SHA 的结果不具备正式证据资格。
 - 每次尝试的日志和证据必须有单文件与总量上限；成功、失败、中断和超时都必须执行精确清理并保留有界证据。
 
 ## ref/ 隔离测试

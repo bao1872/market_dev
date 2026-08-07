@@ -472,10 +472,10 @@ stock core 批量入口，该入口必须另行满足本合同的全部字段。
 
 自动清理范围仅限本次尝试创建且可精确归属的资源：
 
-- `panji-verify-<sha>`（或合同规定的唯一 project）所属验证容器与 network，执行 `down` 时禁止 `-v`；
+- 固定 project `panji-verify` 的常驻 `panji-verify-python` 容器**不删除、不 `compose down`**；每次 attempt 仅清理其临时执行状态（异常时 `docker restart` 恢复干净环境）；
 - `bz_stock_verify_<sha>`，先终止该库连接，再由正式 drop 脚本按全名删除；
-- 本次创建的临时 env、挂载目录、测试报告中间文件、无消费者的测试容器和 BuildKit 临时缓存；
-- 仅在本次确实构建时，按精确 tag 删除该次验证专用镜像；复用的基础镜像、稳定运行镜像、当前/上一成功/rollback 镜像不得删除。
+- 本次创建的临时 env（`/root/.panji-verify/runtime/attempt.env`、`RUNTIME_SHA`）、挂载目录、测试报告中间文件；
+- 仅在 Python 依赖合同（`dependency_contract_hash`）变化时，按精确 label 重建的 `panji-verify-runtime:current` 镜像；复用的基础镜像、稳定运行镜像、上一成功镜像不得删除。
 
 永久禁止清理：`bz_stock`、共享 PostgreSQL/Redis/Umami Volume、稳定运行 `market-dev` 容器/network、基础镜像、受保护镜像、非本次创建或来源不明资源。禁止 `docker system prune`、`docker volume prune`、模糊数据库匹配和批量 drop。
 
@@ -491,15 +491,16 @@ cleanup 必须输出 created/deleted/retained/failed 四份精确清单，并在
 
 ### DS-115 正式验证执行器与顺序
 
-- 唯一正式入口是 `scripts/ops/panji-verify`。入口只接受完整 40 位 SHA 和仓库登记的封闭验证计划；`panji-verify-run` 仅为兼容适配器，不得成为第二套合同。
+- 唯一正式入口是 `scripts/ops/panji-verify`（废弃的第二入口 `panji-verify-run` 已删除，不得恢复）。入口只接受完整 40 位 SHA 和仓库登记的封闭验证计划。
 - `scripts/verify/verification_plan.py` 只解析固定 schema 和注册 profile；验证计划不得携带任意命令、插件路径、环境覆盖或 pytest 参数。
-- `scripts/verify/run_remote_verification.sh` 是目标 SHA 内的远端受控 runner；`prepare_verify_environment.py` 只生成单次仓库外 `0600` 环境文件。入口只传 SHA 与计划，禁止传数据库 URL、密码或任意环境覆盖。
+- `scripts/verify/run_remote_verification.sh` 是目标 SHA 内的远端受控 runner，持有最外层 single-flight `flock`（`/root/.panji-verify/verify.lock`），覆盖整个 remote lifecycle；`prepare_verify_environment.py` 只生成单次仓库外 `0600` 环境文件（`attempt.env`，写入固定 runtime 路径 `/root/.panji-verify/runtime/`）。入口只传 SHA 与计划，禁止传数据库 URL、密码或任意环境覆盖。
 - Migration 只能由正式 runner 使用 target SHA checkout 中的 `backend/alembic` 和 `backend/alembic.ini` 执行；禁止使用旧运行镜像内置 migration。标准 round-trip 为 upgrade head → schema/revision 断言 → downgrade previous → downgrade 断言 → upgrade head → 重复 upgrade 幂等检查，每一步前后断言 `current_database()`。
-- 建删验证库必须通过 `docker exec trading-postgres` 的维护库连接；Migration、PG、Seed 和 Synthetic E2E 必须通过一次性 `verify-test` 容器运行，禁止依赖宿主机安装 `psql`、Alembic、pytest 或应用依赖。
+- 建删验证库必须通过 `docker exec trading-postgres` 的维护库连接；PG tests 只能由 `panji-verify-python` 容器经 `verify_exec.py` 运行——Migration、PG、Seed 和 Synthetic E2E 必须通过长期 `panji-verify-python` 容器经 `verify_exec.py` 以 fresh process 运行（每个 gate `docker exec panji-verify-python verify_exec.py <cmd>`，attempt env 由 `verify_exec.py` 从 `attempt.env` 动态注入），禁止依赖宿主机安装 `psql`、Alembic、pytest 或应用依赖。
 - 验证环境必须分离异步应用 `DATABASE_URL` 与同步 Alembic `MIGRATION_DATABASE_URL`；`backend/alembic/env.py` 明确优先使用后者，禁止把 asyncpg URL 交给同步 Migration engine。
-- `verify-test` 必须使用目标 SHA 从 `backend/Dockerfile` 的 `verification` target 构建的专用镜像，测试依赖仅在构建期按 `.[dev]` 安装；禁止复用缺少 pytest 的稳定运行镜像或在容器启动后安装。attempt 结束后只删除本次精确 SHA tag。
-- PG tests 只能由一次性 `verify-test` 服务运行。该服务必须包含 target SHA 的 app/tests/pytest 配置/migration/scripts 和固定依赖，设置 `PANJI_REMOTE_VERIFY_DB_TEST=1`、`APP_ENV=verification`，只连接本轮验证库，运行结束退出。
-- 标准顺序固定为：本地修改范围门禁 → commit/push → 冻结 SHA → 远程 clean checkout → 创建验证库 → Migration round-trip → 启动验证栈 → SHA/DB/runtime 断言 → 自包含 PG tests → synthetic Seed 两次及幂等断言 → Synthetic E2E → 导出证据 → DS-113 cleanup。
+- 验证运行时为单可复用镜像 `panji-verify-runtime:current`，由 `backend/Dockerfile` 的 `verification` target 构建（测试依赖仅在构建期按 `.[dev]` 安装），并写入 Docker label `panji.verify.dependency-hash = SHA256(Dockerfile+pyproject+lockfile)`；入口以 `expected hash` 与运行容器 image label 两方比较，不一致才 rebuild 并 recreate 常驻 `panji-verify-python`。禁止每 SHA 重建独立镜像或 per-SHA compose project。
+- 单一长期验证容器 `panji-verify-python`（`command: sleep infinity` 常驻空闲，禁 Scheduler/Worker/Uvicorn/pytest/seed）；同一时刻只允许一个 attempt（最外层 single-flight 保证），各 gate 串行 fresh process；异常/timeout/interrupted 以 `docker restart panji-verify-python` 恢复干净环境，不删 container/image/network/PG/Redis/稳定栈。
+- 本轮（CHANGE-20260806-012 一次性审计结论）`full-closure` 验证执行路径完全不依赖 Redis，仅连 PostgreSQL；verification 不连接 Redis，不引入 `verify-redis` 容器，也不强制复用 `trading-redis`。如未来某 gate 确需 Redis，须单独评估并固化为合同，不得临时动态"智能决策"。
+- 标准顺序固定为：本地修改范围门禁 → commit/push → 冻结 SHA → 远程 clean checkout → 确保单可复用运行时就绪（hash 复用或 rebuild → recreate）→ 创建验证库 → Migration round-trip → 容器内身份自检（8 项，含 `current_database()` 比对）→ 自包含 PG tests → synthetic Seed 两次及幂等断言 → Synthetic E2E → 导出证据 → DS-113 cleanup。
 - 基础 PG tests 必须先于 Seed；依赖 synthetic 场景的测试只能在 Seed 后以 Synthetic E2E 身份运行。
 - 同一服务器同一时刻只允许一个正式验证 attempt；全局非阻塞锁冲突必须直接失败，不排队占用资源。
 - evidence 不得保存数据库口令或完整连接串，日志单文件和 attempt 总量必须设硬上限；清理证据在 attempt 结束后保留，不能由 cleanup 自删。

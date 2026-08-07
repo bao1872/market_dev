@@ -54,7 +54,7 @@ ATTEMPT_CLEANUP_MARKER = "每次远程验证或调试尝试结束后，无论成
 BLOCKED_CLEANUP_MARKER = "任一残留或清理错误都标记 `blocked_cleanup`"
 PG_SELF_CONTAINED_MARKER = "每个 PG 测试必须在自身 transaction/fixture 中创建最小完整前置数据"
 SYNTHETIC_VERIFY_MARKER = "标准验证 100% synthetic"
-VERIFY_EXECUTOR_MARKER = "PG tests 只能由一次性 `verify-test` 服务运行"
+VERIFY_EXECUTOR_MARKER = "PG tests 只能由 `panji-verify-python` 容器经 `verify_exec.py` 运行"
 PROTECTED_DOMAIN_MARKER = "受保护治理变更域"
 PROTECTED_MANIFEST = "rules/PROTECTED_GOVERNANCE_FILES.json"
 REQUIRED_PROTECTED_PATHS = {
@@ -64,7 +64,6 @@ REQUIRED_PROTECTED_PATHS = {
     "tools/tests/test_check_governance_rules.py",
     "backend/tests/test_verify_infra_safety.py",
     "scripts/ops/panji-verify",
-    "scripts/ops/panji-verify-run",
 }
 REQUIRED_PROTECTED_PREFIXES = {"rules/", "scripts/verify/"}
 
@@ -284,38 +283,81 @@ def check(root: Path) -> list[str]:
     for signal in ("panji-prod-preflight", "panji-prod-ssh", "full-closure", "[0-9a-f]{40}"):
         if signal not in verify_entry_code:
             errors.append(f"verification entry missing contract signal: {signal}")
-    for signal in ("VerificationPlan", "LOCK_NB", "downgrade", "blocked_cleanup"):
+    # [CHANGE-20260806-012] 单可复用运行时：固定容器 + verify_exec 动态 env 注入；
+    # single-flight 只在 run_remote_verification.sh 最外层 flock，runner 内不得再有第二层锁。
+    for signal in (
+        "VerificationPlan", "downgrade", "blocked_cleanup",
+        "panji-verify-python", "verify_exec",
+    ):
         if signal not in verify_runner_code:
             errors.append(f"verification runner missing contract signal: {signal}")
     for signal in ("run_remote_verification.sh",):
         if signal not in verify_entry_code:
             errors.append(f"verification entry missing remote runner: {signal}")
-    for signal in ("prepare_verify_environment.py", "trap cleanup_sensitive", "git status --porcelain"):
+    for signal in (
+        "prepare_verify_environment.py", "trap cleanup_on_exit", "git status --porcelain",
+        # single-flight：最外层独占锁 + 单可复用镜像/容器 + 依赖 hash 两方比较
+        "flock", "panji-verify-runtime:current", "panji-verify-python",
+        "panji.verify.dependency-hash", "--target verification",
+        # Compose 必填变量必须由本入口 export（否则 up 因 :? 必填变量缺失失败）
+        "export VERIFY_CODE_DIR", "export VERIFY_RUNTIME_DIR", "export VERIFY_PG_NETWORK",
+    ):
         if signal not in verify_remote_runner_code:
             errors.append(f"verification remote runner missing contract signal: {signal}")
     for signal in ("POSTGRES_PASSWORD", "chmod", "token_urlsafe", "trading-postgres"):
         if signal not in verify_env_builder_code:
             errors.append(f"verification environment builder missing contract signal: {signal}")
+    # [CHANGE-20260806-012] Compose 只描述单一常驻验证容器：固定镜像 tag、sleep infinity
+    # 空闲、runtime 只读 mount 注入 attempt 变量、复用已有 trading-postgres 外部网络。
     for signal in (
-        "verify-test:", "127.0.0.1", "PANJI_REMOTE_VERIFY_DB_TEST",
-        "MIGRATION_DATABASE_URL", "VERIFY_TEST_IMAGE",
+        "panji-verify-runtime:current", "verify-python", "sleep infinity",
+        "/run/panji-verify/", "external: true",
     ):
         if signal not in verify_compose_text:
             errors.append(f"verification compose missing contract signal: {signal}")
-    verify_test_section = verify_compose_text.split("  verify-test:", 1)
-    if len(verify_test_section) != 2 or "MIGRATION_DATABASE_URL:" not in verify_test_section[1]:
-        errors.append("verification compose verify-test missing MIGRATION_DATABASE_URL")
-    if len(verify_test_section) != 2 or "image: ${VERIFY_TEST_IMAGE:" not in verify_test_section[1]:
-        errors.append("verification compose verify-test missing dedicated test image")
+    # 旧 topology（一次性 verify-test / per-SHA 镜像 / 多服务栈）永久禁止回潮。
+    # 只扫描有效 YAML（剥离注释行），使头部“已删除 X”的说明性注释不误报。
+    verify_compose_code = shell_code(verify_compose)
+    for token, reason in (
+        ("verify-test:", "one-shot verify-test service"),
+        ("VERIFY_TEST_IMAGE", "per-SHA test image variable"),
+        ("verify-backend", "verify backend service"),
+        ("verify-frontend", "verify frontend service"),
+        ("verify-redis", "dedicated verify redis"),
+    ):
+        if token in verify_compose_code:
+            errors.append(f"forbidden verification compose topology ({reason}): {token}")
     backend_dockerfile = read(root / "backend/Dockerfile")
     for signal in (
         "FROM runtime AS verification", "FROM runtime AS production", 'pip install ".[dev]"',
+        # 依赖合同 hash 写入 image label，供入口两方比较决定是否 rebuild
+        "panji.verify.dependency-hash",
     ):
         if signal not in backend_dockerfile:
             errors.append(f"verification Docker target missing contract signal: {signal}")
+    # 清理器必须 fail-closed（blocked_cleanup），且不得引用已删除的 panji-verify-run 入口。
+    if "blocked_cleanup" not in verify_cleanup_code:
+        errors.append("verification cleanup missing contract signal: blocked_cleanup")
+    for code, label in (
+        (verify_cleanup_code, "verification cleanup"),
+        (verify_runner_code, "verification runner"),
+        (verify_entry_code, "verification entry"),
+        (verify_remote_runner_code, "verification remote runner"),
+    ):
+        if "panji-verify-run\n" in code or "panji-verify-run " in code:
+            errors.append(f"{label} references removed entry: scripts/ops/panji-verify-run")
     for token in ("down -v", '"down", "-v"', "--rmi", "docker cp", "pip install"):
         if token in verify_cleanup_code or token in verify_runner_code or token in verify_entry_code:
             errors.append(f"forbidden verification implementation: {token}")
+    # [CHANGE-20260806-012] 常驻容器不得被 cleanup 删除：禁止 compose down / --remove-orphans。
+    # 单可复用运行时（固定 project panji-verify + 常驻 panji-verify-python）在 attempt cleanup
+    # 中只 drop 验证库 + 删 attempt 临时状态，不 compose down、不删 Volume、不 FLUSHALL。
+    for token in ("compose down", "--remove-orphans", '"down"'):
+        if token in verify_cleanup_code:
+            errors.append(f"forbidden verification cleanup (destroys reusable runtime): {token}")
+    # PROTECTED_CONTAINERS 必须包含常驻验证容器（纵深防御，防 compose down / 误删）。
+    if "panji-verify-python" not in verify_cleanup_code:
+        errors.append("verification cleanup PROTECTED_CONTAINERS missing: panji-verify-python")
     if "VERIFY_DB_URL" in verify_entry_code or "--verify-db-url" in verify_entry_code:
         errors.append("verification entry must not transport database credentials")
     for pattern, label in (

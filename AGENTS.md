@@ -240,6 +240,17 @@ PRD、Maps 和 Runbooks 均采用用户主动发起、当轮有效的独立授�
 - 在命令、日志、浏览器自动化或报告中写入 Owner 真实密码；TRAE 不得自动登录 Owner 账户。
 - 使用 `panji-server`/`55-server`/原始 IP 或任何非 `panji-prod` 别名访问盘迹远程开发运行服务器；远程开发运行 SSH 入口唯一为 `scripts/ops/panji-prod-ssh`（`panji-prod` 是历史兼容技术标识，不表示当前处于生产发布阶段），部署前必须运行 `scripts/ops/panji-prod-preflight`（详见 `rules/80-deployment-data-safety.md` "远程开发运行服务器 SSH SSOT"）。
 
+### 远程验证运行时（单可复用，CHANGE-20260806-012）
+
+- 唯一正式入口 `scripts/ops/panji-verify`；废弃第二入口 `panji-verify-run` 已删除，不得恢复。
+- 单可复用验证镜像 `panji-verify-runtime:current`（由 `backend/Dockerfile` 的 `verification` target 构建），Docker label `panji.verify.dependency-hash = SHA256(Dockerfile+pyproject+lockfile)`；入口以 `expected hash` 与运行容器 image label 两方比较，不一致才 rebuild 并 recreate。
+- 单一长期容器 `panji-verify-python`（`command: sleep infinity` 常驻空闲，禁 Scheduler/Worker/Uvicorn/pytest/seed）；固定 Compose project `panji-verify`；不发布 host port；不每 SHA 重建镜像或 compose project。
+- 最外层 single-flight `flock`（`/root/.panji-verify/verify.lock`）覆盖整个 remote lifecycle，并发第二 attempt 直接 exit 75；attempt 内不再持有第二层锁。
+- attempt env（DATABASE_URL/MIGRATION_DATABASE_URL/TARGET_SHA/ATTEMPT_ID/JWT_SECRET 等）由 `prepare_verify_environment.py` 生成到固定 runtime 路径 `/root/.panji-verify/runtime/attempt.env`（0600），经 `verify_exec.py` 在每个 fresh process 动态注入；容器常驻 env 仅持有稳定变量（APP_ENV/PANJI_SCHEDULER_ENABLED/TZ）。
+- 各 gate（Migration/PG/Seed/E2E）串行以 `docker exec panji-verify-python verify_exec.py <cmd>` 运行 fresh process；异常/timeout/interrupted 以 `docker restart panji-verify-python` 恢复干净环境（不删 container/image/network/PG/Redis/稳定栈）。
+- 本轮（一次性审计结论）`full-closure` 验证执行路径完全不依赖 Redis，仅连 PostgreSQL；verification 不连接 Redis，不引入 `verify-redis` 容器，也不强制复用 `trading-redis`。
+- 验证库 `bz_stock_verify_<40位SHA>` 跑在已有 `trading-postgres` 容器内（DS-110），不新建 PG 容器/Volume；cleanup 只 drop 该库 + 删 attempt 临时状态，不 `compose down`、不删 Volume、不 `FLUSHALL`。
+
 ### 允许的远程临时验证数据库
 
 仅允许在以下**全部**条件成立时，由正式验证脚本在 `panji-prod` 已有 PostgreSQL 容器内创建 `bz_stock_verify_<7到40位SHA>`：

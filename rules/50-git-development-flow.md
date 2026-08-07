@@ -91,7 +91,7 @@
 - 调试截图 / 临时图片（非正式 baseline、非 UI 验收必须留存的证据图）；
 - 构建残留与各类缓存目录（`__pycache__/`、`.pytest_cache/`、`.mypy_cache/`、`.ruff_cache/`、临时 build 产物等）；
 - 本轮临时创建后已确认不再需要的文件（由创建记录可追溯）。
-- 本轮远程验证创建的验证容器、Compose network、临时 env、测试报告中间件、验证数据库和仅供该次验证使用的可重建缓存；成功、失败、取消和超时均清理。
+- 本轮远程验证创建的临时 env（`/root/.panji-verify/runtime/attempt.env`、`RUNTIME_SHA`）、测试报告中间件、验证数据库（`bz_stock_verify_<SHA>`）和仅供该次验证使用的可重建缓存；成功、失败、取消和超时均清理。固定 project `panji-verify` 的常驻 `panji-verify-python` 容器与 `panji-verify-runtime:current` 镜像不删（除非依赖合同变化才 rebuild），不执行 `compose down`、不删 Volume、不 `FLUSHALL`。
 
 ### 不得自动删除清单（即使满足部分条件也不得自动删）
 
