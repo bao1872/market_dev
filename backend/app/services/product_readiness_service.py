@@ -1408,164 +1408,277 @@ class ProductReadinessService:
                 "stale": 0, "by_type": {}, "algorithm_versions": [],
             }
 
+    async def _current_stock_core_data_run_id(
+        self, db: Any, trade_date: date,
+    ) -> Any | None:
+        """当前 stock_core pointer 的 data_run_id（与下游 core 对齐）。
+
+        作为 auction/chip 判定归属的权威 core run 标识。
+        优先取当日 STOCK_CORE 发布指针的 data_run_id。
+        """
+        from app.models.factor_publication import FactorPublication
+
+        pub = await db.scalar(
+            select(FactorPublication)
+            .where(
+                FactorPublication.trade_date == trade_date,
+                FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
+                FactorPublication.superseded_by.is_(None),
+            )
+            .order_by(FactorPublication.created_at.desc())
+            .limit(1)
+        )
+        if pub is None:
+            return None
+        return getattr(pub, "data_run_id", None)
+
     async def _chip_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """chip：增强产品，以 chip_consensus 发布指针为准。"""
+        """chip：增强产品。
+
+        [Corrective-1 2026-08-07] 对齐正式生产链真源：
+        正式 chip 产出 = SchedulerJobRun(after_close_chip_consensus)
+                       + StockChipConsensusSnapshot（单股级持久化）。
+        ChipConsensusRun 为未接入生产链的 orphan，本轮不引入、不读取。
+        若正式 chip publication 指针已存在则优先采用；否则以 job + snapshot 为准。
+        """
+        # 优先：正式 chip publication 指针（若 producer 已调用 publish_chip_consensus）
         st = await self._publication_readiness(
             db, trade_date, PUBLICATION_KIND_CHIP_CONSENSUS,
             "chip", is_mandatory=False,
         )
         if st is not None:
             return st
-        from app.models.chip_consensus_run import ChipConsensusRun
 
-        run = await db.scalar(
-            select(ChipConsensusRun)
-            .where(ChipConsensusRun.trade_date == trade_date)
-            .order_by(ChipConsensusRun.created_at.desc())
+        import json
+
+        from app.models.scheduler_job_run import SchedulerJobRun
+        from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
+
+        # 当前 stock_core pointer（与下游 core 对齐，用于校验 snapshot 归属）
+        current_core_run_id = await self._current_stock_core_data_run_id(db, trade_date)
+
+        # 正式 chip job（当日最新）
+        job = await db.scalar(
+            select(SchedulerJobRun)
+            .where(
+                SchedulerJobRun.job_name == "after_close_chip_consensus",
+                SchedulerJobRun.business_date == trade_date.isoformat(),
+            )
+            .order_by(SchedulerJobRun.created_at.desc())
             .limit(1)
         )
-        if run is None:
+
+        # 正式 chip snapshot 行数（按 current core run 对齐）
+        snap_rows = 0
+        if current_core_run_id is not None:
+            snap_rows = int(
+                await db.scalar(
+                    select(func.count())
+                    .select_from(StockChipConsensusSnapshot)
+                    .where(
+                        StockChipConsensusSnapshot.trade_date == trade_date,
+                        StockChipConsensusSnapshot.core_run_id == current_core_run_id,
+                    )
+                ) or 0
+            )
+
+        if job is None and snap_rows == 0:
             return ProductReadinessState(
                 "chip", READINESS_PENDING, "fresh", is_mandatory=False,
-                lineage={"source_type": "run_status", "reason_code": "NO_CHIP_RUN"},
+                lineage={
+                    "source_type": "production_artifact",
+                    "reason_code": "NO_CHIP_RUN",
+                    "detail": "no after_close_chip_consensus job or snapshot for trade_date",
+                    "trade_date": trade_date.isoformat(),
+                },
             )
-        base = {
-            "source_type": "domain_run",
-            "domain_run_id": _sid(getattr(run, "id", None)),
-            "run_id": _sid(getattr(run, "id", None)),
-            "source_core_run_id": _sid(getattr(run, "source_core_run_id", None)),
-            "algorithm_version": getattr(run, "algorithm_version", None),
-            "coverage": _num(getattr(run, "coverage_ratio", None)),
-            "status": run.status,
-            "calculated_at": _iso(
-                getattr(run, "finished_at", None) or getattr(run, "created_at", None),
-            ),
-        }
 
-        # [Corrective-3 §二.4] chip run 已成功但 publication 缺失 —— 必须可治理。
-        # 修复前：此分支返回 ready，运维完全看不到 chip pointer 未发布。
-        if run.status == "succeeded":
-            return ProductReadinessState(
-                "chip", READINESS_DEGRADED, "stale",
-                is_mandatory=False, is_terminal=True,
-                lineage={**base, "reason_code": "CHIP_PUBLICATION_MISSING"},
-            )
-        if run.status == "partial":
-            return ProductReadinessState(
-                "chip", READINESS_DEGRADED, "stale",
-                is_mandatory=False, is_terminal=True,
-                lineage={**base, "reason_code": "CHIP_PARTIAL"},
-            )
-        if run.status in TERMINAL_RUN_STATUS:
-            return ProductReadinessState(
-                "chip", READINESS_UNAVAILABLE, "fresh",
-                is_mandatory=False, is_terminal=True,
-                lineage={**base, "reason_code": f"CHIP_{run.status.upper()}"},
-            )
+        # 解析 job metadata（chip_status / expected_count / succeeded_count / coverage）
+        chip_status = None
+        expected_count = None
+        succeeded_count = None
+        if job is not None and job.metadata_json:
+            try:
+                meta = json.loads(job.metadata_json)
+            except (ValueError, TypeError):
+                meta = {}
+            chip_status = meta.get("chip_status")
+            expected_count = meta.get("expected_count")
+            succeeded_count = meta.get("succeeded_count")
+
+        # 覆盖率：优先 metadata counts，否则用真实 snapshot 行数估算
+        coverage = 0.0
+        if expected_count and succeeded_count is not None:
+            coverage = (succeeded_count / expected_count) if expected_count > 0 else 0.0
+        elif expected_count and snap_rows:
+            coverage = (snap_rows / expected_count) if expected_count > 0 else 0.0
+
+        CHIP_COVERAGE_FLOOR = 0.98
+        job_status = job.status if job is not None else None
+        job_terminal = job_status in TERMINAL_RUN_STATUS
+        partial = chip_status == "partial"
+        job_ok = job_status == "succeeded"
+
+        if job_ok and coverage >= CHIP_COVERAGE_FLOOR:
+            state = READINESS_READY
+            fresh = "fresh"
+            is_product_ready = True
+            reason = "CHIP_SUCCEEDED"
+        elif partial or (job_ok and snap_rows > 0):
+            # job 成功但 coverage 不足 / 部分成功 → degraded(partial)
+            state = READINESS_DEGRADED
+            fresh = "stale"
+            is_product_ready = False
+            reason = "CHIP_PARTIAL"
+        elif job_status == "failed":
+            state = READINESS_UNAVAILABLE
+            fresh = "stale"
+            is_product_ready = False
+            reason = "CHIP_FAILED"
+        else:
+            state = READINESS_PENDING
+            fresh = "unknown"
+            is_product_ready = False
+            reason = "CHIP_PENDING"
+
         return ProductReadinessState(
-            "chip", READINESS_PENDING, "fresh", is_mandatory=False,
-            lineage={**base, "reason_code": "CHIP_RUNNING"},
+            "chip", state, fresh, is_mandatory=False, is_terminal=job_terminal,
+            current_mode="consensus",
+            is_product_ready=is_product_ready,
+            lineage={
+                "source_type": "production_artifact",
+                "reason_code": reason,
+                "job_id": _sid(getattr(job, "id", None)),
+                "job_status": job_status,
+                "chip_status": chip_status,
+                "snapshot_rows": snap_rows,
+                "expected_count": expected_count,
+                "succeeded_count": succeeded_count,
+                "coverage": coverage,
+                "source_core_run_id": _sid(current_core_run_id),
+                "trade_date": trade_date.isoformat(),
+            },
         )
 
     async def _auction_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """auction_anchor：增强产品，以 auction_anchor 发布指针为准。
+        """auction_anchor：增强产品。
 
-        [PRD Alignment Pass P0-1] 无论经由 publication 还是 domain run，都读取 run.mode：
-        fully_ready 要求 auction mode == composite。publication 指针本身不存 mode，
-        故先取 domain run 的 mode 再与 publication 状态合并。
+        [Corrective-1 2026-08-07] 对齐正式生产链真源：
+        正式 auction producer（generate_and_publish_auction_anchors）写入
+        AuctionAnchorSnapshot + AuctionAnchorPublication，**不写** AuctionAnchorRun，
+        也不写 FactorPublication(AUCTION_ANCHOR)。故直接以 AuctionAnchorPublication 为真源，
+        联查 AuctionAnchorSnapshot 取 status 与锚点计数推导 mode。
+        mode 推导：composite_anchor_count>0 → composite；chip_anchor_count>0 → hybrid；
+        否则 structure_anchor_count>0 → structure_only。
         """
-        from app.models.auction_anchor_run import AuctionAnchorRun
+        from app.models.auction import AuctionAnchorPublication, AuctionAnchorSnapshot
 
-        run = await db.scalar(
-            select(AuctionAnchorRun)
-            .where(AuctionAnchorRun.trade_date == trade_date)
-            .order_by(AuctionAnchorRun.created_at.desc())
+        # 当前 stock_core pointer（与下游 core 对齐，判定 auction 归属）
+        current_core_run_id = await self._current_stock_core_data_run_id(db, trade_date)
+
+        # 正式 auction publication（最新，superseded 取当前）
+        pub = await db.scalar(
+            select(AuctionAnchorPublication)
+            .where(
+                AuctionAnchorPublication.trade_date == trade_date,
+                AuctionAnchorPublication.superseded_by.is_(None),
+            )
+            .order_by(AuctionAnchorPublication.published_at.desc())
             .limit(1)
         )
-        current_mode = getattr(run, "mode", None) if run is not None else None
-
-        st = await self._publication_readiness(
-            db, trade_date, PUBLICATION_KIND_AUCTION_ANCHOR,
-            "auction_anchor", is_mandatory=False,
-        )
-        if st is not None:
-            # publication 存在 → 附加 run.mode 供 fully_ready 判定（state 不可变，重建）
-            if run is not None and run.status == "succeeded":
-                is_ready = current_mode == "composite"
-            else:
-                is_ready = False
-            return ProductReadinessState(
-                "auction_anchor",
-                st.readiness,
-                st.freshness,
-                is_mandatory=False,
-                is_terminal=st.is_terminal,
-                auction_mode=current_mode,
-                is_product_ready=is_ready,
-                lineage={
-                    **st.lineage,
-                    "mode": current_mode,
-                    "reason_code": st.lineage.get("reason_code", "AUCTION_PUBLISHED"),
-                },
-            )
-        if run is None:
+        if pub is None:
             return ProductReadinessState(
                 "auction_anchor", READINESS_PENDING, "fresh",
-                is_mandatory=False,
-                lineage={"source_type": "run_status", "reason_code": "NO_AUCTION_RUN"},
+                is_mandatory=False, is_terminal=False,
+                lineage={
+                    "source_type": "production_artifact",
+                    "reason_code": "NO_AUCTION_RUN",
+                    "detail": "no AuctionAnchorPublication for trade_date",
+                    "trade_date": trade_date.isoformat(),
+                },
             )
+
+        # 联查 snapshot 取 status 与锚点计数
+        snap = await db.scalar(
+            select(AuctionAnchorSnapshot)
+            .where(AuctionAnchorSnapshot.id == getattr(pub, "snapshot_id", None))
+            .limit(1)
+        )
+
+        # mode 推导
+        if snap is not None:
+            composite_n = int(getattr(snap, "composite_anchor_count", 0) or 0)
+            chip_n = int(getattr(snap, "chip_anchor_count", 0) or 0)
+            structure_n = int(getattr(snap, "structure_anchor_count", 0) or 0)
+        else:
+            composite_n = chip_n = structure_n = 0
+        if composite_n > 0:
+            current_mode = "composite"
+        elif chip_n > 0:
+            current_mode = "hybrid"
+        elif structure_n > 0:
+            current_mode = "structure_only"
+        else:
+            current_mode = None
+
+        # 归属校验：publication.source_core_run_id 应与当前 stock_core pointer 一致
+        pub_core_run_id = getattr(pub, "source_core_run_id", None)
+        aligned = (current_core_run_id is not None and pub_core_run_id == current_core_run_id)
+        fresh = "fresh" if aligned else "stale"
+
+        # 状态映射（与既有语义一致）
+        snap_status = getattr(snap, "status", None) if snap is not None else "succeeded"
+        coverage = float(getattr(pub, "coverage_ratio", 0.0) or 0.0)
         base = {
-            "source_type": "domain_run",
-            "domain_run_id": _sid(getattr(run, "id", None)),
-            "run_id": _sid(getattr(run, "id", None)),
-            "source_core_run_id": _sid(getattr(run, "source_core_run_id", None)),
-            "algorithm_version": getattr(run, "algorithm_version", None),
-            "status": run.status,
-            "calculated_at": _iso(
-                getattr(run, "finished_at", None) or getattr(run, "created_at", None),
-            ),
+            "source_type": "production_artifact",
+            "publication_id": _sid(getattr(pub, "id", None)),
+            "snapshot_id": _sid(getattr(pub, "snapshot_id", None)),
+            "source_core_run_id": _sid(pub_core_run_id),
+            "algorithm_version": getattr(pub, "algorithm_version", None),
+            "status": snap_status,
+            "coverage": coverage,
+            "composite_anchor_count": composite_n,
+            "chip_anchor_count": chip_n,
+            "structure_anchor_count": structure_n,
+            "published_at": _iso(getattr(pub, "published_at", None)),
         }
 
-        # [Corrective-3 §三] structure_only 必须体现"等待 chip 升级"，
-        # 不得与 succeeded 一样呈现为 fresh/ready。
-        # [PRD Alignment Pass P0-1] auction_mode 暴露当前模式，fully_ready 要求 composite。
-        if run.status == "structure_only":
+        if snap_status == "structure_only":
+            # 等待 chip 升级，不构成 fully_ready
             return ProductReadinessState(
                 "auction_anchor", READINESS_DEGRADED, "stale",
                 is_mandatory=False, is_terminal=True,
-                auction_mode=current_mode,
-                is_product_ready=False,
+                auction_mode=current_mode, is_product_ready=False,
                 lineage={**base, "reason_code": "AUCTION_STRUCTURE_ONLY", "mode": current_mode},
             )
-        if run.status == "succeeded":
+        if snap_status == "succeeded":
+            is_ready = (current_mode == "composite")
             return ProductReadinessState(
-                "auction_anchor", READINESS_READY, "fresh",
+                "auction_anchor", READINESS_READY, fresh,
                 is_mandatory=False, is_terminal=True,
                 auction_mode=current_mode,
                 # 仅 composite 视为完整就绪；hybrid/structure_only 不算 fully_ready
-                is_product_ready=(current_mode == "composite"),
+                is_product_ready=is_ready,
                 lineage={**base, "reason_code": "AUCTION_SUCCEEDED", "mode": current_mode},
             )
-        # [Corrective-3 §三] terminal failure 必须包含 run_id 与 reason
-        if run.status in TERMINAL_RUN_STATUS:
+        if snap_status in TERMINAL_RUN_STATUS:
             return ProductReadinessState(
-                "auction_anchor", READINESS_UNAVAILABLE, "fresh",
+                "auction_anchor", READINESS_UNAVAILABLE, fresh,
                 is_mandatory=False, is_terminal=True,
-                auction_mode=current_mode,
-                is_product_ready=False,
+                auction_mode=current_mode, is_product_ready=False,
                 lineage={
                     **base,
-                    "reason_code": f"AUCTION_{run.status.upper()}",
+                    "reason_code": f"AUCTION_{snap_status.upper()}",
                     "mode": current_mode,
-                    "error_message": getattr(run, "error_message", None),
+                    "error_message": getattr(snap, "error_message", None),
                 },
             )
         return ProductReadinessState(
-            "auction_anchor", READINESS_PENDING, "fresh",
+            "auction_anchor", READINESS_PENDING, fresh,
             is_mandatory=False, is_terminal=False,
             auction_mode=current_mode,
             lineage={**base, "reason_code": "AUCTION_RUNNING", "mode": current_mode},
