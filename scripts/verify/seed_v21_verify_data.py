@@ -18,8 +18,11 @@ backend/tests/readiness_fixtures.py 共享唯一事实源）：
   blocked_mandatory_failure  (2026-07-29) → blocked（board_facts 人为 failed，reason=EXTERNAL_GATE_UNSATISFIED）
   core_ready_waiting_mandatory (2026-07-30) → core_ready（stock_core 可消费，review 未发布）
   mandatory_ready_enhancing (2026-07-31) → mandatory_ready_enhancing（mandatory 全 ready，enhancement 未全终态）
-  degraded_terminal_partial  (2026-08-01) → degraded_ready（mandatory 全消费，enhancement 终态但部分非 truly ready）
-  fully_ready_all_fresh      (2026-08-02) → fully_ready（mandatory 全 fresh + enhancement 全 truly ready + auction composite）
+  degraded_terminal_partial  (2026-08-03, 周一) → degraded_ready（mandatory 全消费，enhancement 终态但部分非 truly ready）
+  fully_ready_all_fresh      (2026-08-04, 周二) → fully_ready（mandatory 全 fresh + enhancement 全 truly ready + auction composite）
+
+  注：原 2026-08-01/02 为周末，trading_calendar 不标记 OPEN，create_batch_run 会拒绝
+  （非交易日）。两个 terminal 场景顺延到相邻交易日，保持同一语义与 closure 期望。
 
 [用户选项B / 约束5+6+7] 单一放大的 full_market universe：220 行业 + 320 概念 board +
 ≥5,200 instruments + ≥65,000 合法 memberships，使 Board Facts 绝对门禁合法通过，
@@ -150,8 +153,8 @@ _SCENARIO_TRADE_DATES = {
     "blocked_mandatory_failure": date(2026, 7, 29),
     "core_ready_waiting_mandatory": date(2026, 7, 30),
     "mandatory_ready_enhancing": date(2026, 7, 31),
-    "degraded_terminal_partial": date(2026, 8, 1),
-    "fully_ready_all_fresh": date(2026, 8, 2),
+    "degraded_terminal_partial": date(2026, 8, 3),
+    "fully_ready_all_fresh": date(2026, 8, 4),
 }
 
 # 唯一预期 closure（与 backend/tests/readiness_fixtures.py 对齐；审查第七节共享 fixture 只含事实与期望）
