@@ -135,6 +135,9 @@ CORE_BARS_WINDOW_START = date(2026, 7, 20)
 FULLY_READY_DAILY_START = date(2026, 4, 1)
 # 15m 仅覆盖 scenario 窗口（含 07-28/29/30/31）以控制行数；07-30 仅部分标的注入 15m（natural partial）
 FIFTEEN_MIN_WINDOW_START = date(2026, 7, 20)
+# [auction 结构锚点] first_pyramid 要求 ≥500 根 15m（M15_BARS_INSUFFICIENT 门槛），
+# 故为核心 100 标的追加更长 15m 历史，使正式 SMC 算法自然产出结构。
+FIFTEEN_MIN_WINDOW_START_EXT = date(2026, 6, 1)  # ≈45 交易日 ×16 ≈720 根，安全 >500
 PARTIAL_15M_DATE = date(2026, 7, 30)
 PARTIAL_15M_FRACTION = 0.3  # 仅 30% 标的在 07-30 有 15m → chip 自然 partial
 
@@ -377,6 +380,32 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                 if len(min15_rows) >= _BATCH:
                     await _exec_batch(verify_conn, min15_sql, min15_rows)
     await _exec_batch(verify_conn, min15_sql, min15_rows)
+    await verify_conn.commit()
+
+    # [auction 结构锚点] 为核心 100 标的追加更长 15m 历史（FIFTEEN_MIN_WINDOW_START_EXT 起），
+    # 满足 first_pyramid 的 M15_BARS_INSUFFICIENT(≥500) 门槛，使正式 SMC 算法自然产出结构。
+    # 仅核心 100 标的；global_slot 连续累加，与 scenario 窗口 15m 衔接。
+    ext15_days = [d for d in _TRADING_DAYS
+                  if FIFTEEN_MIN_WINDOW_START_EXT <= d < FIFTEEN_MIN_WINDOW_START]
+    ext_min15_rows: list[dict[str, Any]] = []
+    for i in range(N_INST):
+        inst_id = _inst_uuid(i)
+        base = 10.0 + (i % 50)
+        for day_idx, d in enumerate(ext15_days):
+            for slot in range(16):
+                session_start = datetime(  # noqa: DTZ001
+                    d.year, d.month, d.day, 9 if slot < 8 else 13, 30 if slot < 8 else 0,
+                )
+                t = session_start + timedelta(minutes=15 * ((slot % 8) + 1))
+                o = _price(base, i, day_idx * 16 + slot)
+                b = _bar(t, o)
+                ext_min15_rows.append({"instrument_id": str(inst_id), "trade_time": t,
+                                       **{k2: b[k2] for k2 in (
+                                           "open", "high", "low", "close", "volume", "amount", "adj_factor",
+                                       )}})
+                if len(ext_min15_rows) >= _BATCH:
+                    await _exec_batch(verify_conn, min15_sql, ext_min15_rows)
+    await _exec_batch(verify_conn, min15_sql, ext_min15_rows)
     await verify_conn.commit()
 
     # [auction 结构锚点] 为核心 100 标的（_ALL_INSTRUMENT_IDS）追加确定性多 regime 日线 +
@@ -983,8 +1012,8 @@ async def _diagnose_auction_anchors(trade_date: date) -> None:
       3) 当日已发布 stock_core pointer 是否存在（auction 正式入口的前置条件）。
     输出有界 JSON（汇总数 + 失败节点 + 有界样本，不泄露 UUID）。
     """
-    from app.models.chip_consensus import StockChipConsensusSnapshot
     from app.models.factor_publication import FactorPublication
+    from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
     from app.models.stock_feature_snapshot import StockFeatureSnapshot
     from app.services.auction_anchor_service import (
         PUBLICATION_KIND_STOCK_CORE,
