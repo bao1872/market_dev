@@ -1089,12 +1089,19 @@ class ProductReadinessService:
         eligible = int(counts["eligible"])
         matched = int(counts["matched"])
         stale = int(counts.get("stale", 0))
+        count_mismatch = bool(counts.get("count_mismatch", False))
+        run_status = counts.get("run_status")
+        strategy_version_id = counts.get("strategy_version_id")
 
         # [V2.1 P1-3 CP3] **精确**完整性：分母是冻结的 eligible universe（该 core run
         # 计算过的 distinct instrument），分子是真正产出 dsa_projection 的 instrument。
         # 不再使用自指的 matched/total 比值。
         coverage_ratio = (matched / eligible) if eligible > 0 else 0.0
         exact_complete = eligible > 0 and matched == eligible
+        # [required compatibility projection identity] READY 须满足 projection run 的正式
+        # published 终态。**仅 published 才 READY**：completed 表示已计算但待发布，不得 READY；
+        # queued/running/partial 等更不算正式完成。
+        run_terminal = run_status == "published"
         detail = {
             "projection_matched": matched,
             "projection_total": eligible + stale,
@@ -1104,13 +1111,27 @@ class ProductReadinessService:
             "coverage_ratio": round(coverage_ratio, 4),
             "coverage_threshold": _DSA_PROJECTION_COVERAGE_THRESHOLD,
             "algorithm_versions": counts.get("algorithm_versions", []),
+            "run_status": run_status,
+            "strategy_version_id": strategy_version_id,
+            "run_item_count_mismatch": count_mismatch,
             # exact = eligible universe 全覆盖；partial = 有产物但未全覆盖
             "p1_3_exact_completeness": (
                 "exact" if exact_complete
                 else ("partial" if matched > 0 else "not_complete")
             ),
         }
-        if exact_complete and coverage_ratio >= _DSA_PROJECTION_COVERAGE_THRESHOLD:
+        if count_mismatch:
+            # [required compatibility projection identity] run/item 计数不一致 → 数据缺陷，
+            # 不得 READY（fail-closed，非 terminal 以阻断闭包）。
+            return ProductReadinessState(
+                "dsa_projection", READINESS_DEGRADED, "stale",
+                is_mandatory=False, is_terminal=False,
+                lineage={**parent, **detail,
+                         "reason_code": "PROJECTION_RUN_ITEM_COUNT_MISMATCH",
+                         "coverage": matched, "status": "count_mismatch"},
+            )
+        if exact_complete and coverage_ratio >= _DSA_PROJECTION_COVERAGE_THRESHOLD \
+                and run_terminal:
             return ProductReadinessState(
                 "dsa_projection", READINESS_READY, "fresh",
                 is_mandatory=False, is_terminal=True,
@@ -1118,10 +1139,10 @@ class ProductReadinessService:
                          "coverage": matched, "status": "present"},
             )
         if matched > 0:
-            # 存在归属当前 core run 的投影，但覆盖率未达门槛（有残留或 lineage 不匹配）
+            # 存在归属当前 core run 的投影，但覆盖率未达门槛（有残留/lineage 不匹配/未正式终态）
             return ProductReadinessState(
                 "dsa_projection", READINESS_DEGRADED, "stale",
-                is_mandatory=False, is_terminal=True,
+                is_mandatory=False, is_terminal=False,
                 lineage={**parent, **detail,
                          "reason_code": "PROJECTION_PARTIAL_COVERAGE",
                          "coverage": matched, "status": "partial"},
@@ -1240,77 +1261,136 @@ class ProductReadinessService:
     async def _count_dsa_projections(
         db: Any, trade_date: date, source_core_run_id: Any = None,
     ) -> dict[str, Any]:
-        """[Corrective-3.1 §P1 / CP3 P1-3] 统计当日 DSA 投影的**精确** eligible/matched。
+        """[required compatibility projection identity] 统计当日 DSA 投影的**精确** eligible/matched。
 
-        CP2 缺陷：`eligible_count` 取 `total`（当日快照总数），而 `matched` 是同一张表的
-        子集计数，coverage=matched/total 是**自指**比值 —— 只要没有残留快照，
-        1 只股票也能得到 coverage=1.0。P1-3 要求的是"eligible universe 全覆盖"。
+        以 StrategyRun/StrategyRunItem/StrategyResult compatibility projection 生命周期为 SSOT，
+        **完全停止读取 `summary_payload["dsa_projection"]`**。
 
-        CP3 修正：
-        - **eligible universe（冻结）** = 归属当前 core run 的 distinct instrument 集合
-          （该 core run 实际计算过的股票全集，即 DSA 应当覆盖的分母）。
-        - **matched** = 上述 universe 中 `summary_payload` 真正含 `dsa_projection` 的
-          distinct instrument 数（真实产物存在性，不是快照存在性）。
-        - `stale_total` 保留"当日不属于当前 core run 的残留快照数"用于 lineage 诊断。
+        - **exact 解析**：按 `strategy_runs.input_overrides['source_core_run_id'] == core` +
+          `requirement == 'required_compatibility'` + `strategy_key == 'dsa_selector'` +
+          `trade_date` 唯一解析 projection run（策略版本取该 run 自身的 strategy_version_id），
+          **禁止 latest/max(created_at)**；仅对同一 source_core 的多次 attempt 取最新 attempt。
+        - **eligible** = 该 projection run 的 `strategy_run_items` distinct instrument 数。
+        - **count_mismatch** = `eligible != StrategyRun.total_instruments` 时置 True
+          （run/item 计数不一致，不得 READY）。
+        - **matched** = `strategy_run_items` 中 `status='succeeded'` 且 `result_id` 经
+          `StrategyResult.id` join 后，**校验 result 的 run_id / trade_date / strategy_version
+          与 projection run 精确一致**的 distinct instrument 数（真实投影产物存在性 +
+          result FK lineage）。
+        - **stale** = 当日存在 dsa_selector projection run 但不归属当前 source_core_run_id 的
+          残留（lineage 诊断）。
+        - **terminal/published**：返回 projection run 的正式终态 status
+          （published/completed 视为正式完成），供 READY 判定使用。
 
-        返回 {"eligible": int, "matched": int, "stale": int, "algorithm_versions": [...]}。
+        返回 {"eligible","matched","stale","count_mismatch","run_status",
+              "strategy_version_id","algorithm_versions"}。
         """
         try:
-            from app.models.stock_feature_snapshot import StockFeatureSnapshot
-
-            day_total = int(
-                await db.scalar(
-                    select(func.count())
-                    .select_from(StockFeatureSnapshot)
-                    .where(StockFeatureSnapshot.trade_date == trade_date)
-                ) or 0
+            from app.models.strategy_run import (
+                StrategyResult,
+                StrategyRun,
+                StrategyRunItem,
             )
+
             if source_core_run_id is None:
                 return {
-                    "eligible": 0, "matched": 0, "stale": day_total,
-                    "algorithm_versions": [],
+                    "eligible": 0, "matched": 0, "stale": 0,
+                    "count_mismatch": False, "run_status": None,
+                    "strategy_version_id": None, "algorithm_versions": [],
                 }
 
-            # 冻结 eligible universe：该 core run 计算过的 distinct instrument
+            # 1. 唯一解析归属当前 source_core 的 required compatibility projection run
+            #    （同一 source_core 允许多 attempt，取最新 attempt_no；禁止跨 core latest）
+            proj_run = (
+                await db.scalar(
+                    select(StrategyRun)
+                    .where(
+                        StrategyRun.trade_date == trade_date,
+                        StrategyRun.input_overrides["strategy_key"].astext == "dsa_selector",
+                        StrategyRun.input_overrides["source_core_run_id"].astext
+                        == str(source_core_run_id),
+                        StrategyRun.input_overrides["requirement"].astext
+                        == "required_compatibility",
+                    )
+                    .order_by(StrategyRun.attempt_no.desc())
+                    .limit(1)
+                )
+            )
+
+            # 2. 当日所有 dsa_selector projection run（含其他 core 的残留）
+            all_dsa_runs = (
+                await db.scalars(
+                    select(StrategyRun).where(
+                        StrategyRun.trade_date == trade_date,
+                        StrategyRun.input_overrides["strategy_key"].astext == "dsa_selector",
+                    )
+                )
+            ).all()
+
+            stale = sum(
+                1 for r in all_dsa_runs
+                if (r.input_overrides or {}).get("source_core_run_id")
+                != str(source_core_run_id)
+            )
+
+            if proj_run is None:
+                # 当前 core 无投影 run → matched=0, eligible 也无可归属（stale 已有）
+                return {
+                    "eligible": 0, "matched": 0, "stale": stale,
+                    "count_mismatch": False, "run_status": None,
+                    "strategy_version_id": None, "algorithm_versions": [],
+                }
+
+            run_status = proj_run.status
+            strategy_version_id = str(proj_run.strategy_version_id)
+
+            # 3. eligible = 该 projection run 的 distinct strategy_run_items.instrument_id
             eligible = int(
                 await db.scalar(
-                    select(func.count(func.distinct(StockFeatureSnapshot.instrument_id)))
-                    .where(
-                        StockFeatureSnapshot.trade_date == trade_date,
-                        StockFeatureSnapshot.source_run_id == source_core_run_id,
-                    )
+                    select(func.count(func.distinct(StrategyRunItem.instrument_id)))
+                    .where(StrategyRunItem.run_id == proj_run.id)
                 ) or 0
             )
-            # matched：universe 中真正产出 dsa_projection 的 distinct instrument
+            # 3.1 run/item 计数一致性校验：不一致 → count_mismatch（不得 READY）
+            count_mismatch = eligible != (proj_run.total_instruments or 0)
+
+            # 4. matched = succeeded item + result_id → StrategyResult.id join，
+            #    且校验 result 的 run_id / trade_date / strategy_version 与 projection run 精确一致。
             matched = int(
                 await db.scalar(
-                    select(func.count(func.distinct(StockFeatureSnapshot.instrument_id)))
-                    .where(
-                        StockFeatureSnapshot.trade_date == trade_date,
-                        StockFeatureSnapshot.source_run_id == source_core_run_id,
-                        StockFeatureSnapshot.summary_payload.has_key("dsa_projection"),  # noqa: W601
+                    select(func.count(func.distinct(StrategyRunItem.instrument_id)))
+                    .select_from(StrategyRunItem)
+                    .join(
+                        StrategyResult,
+                        StrategyRunItem.result_id == StrategyResult.id,
                     )
-                ) or 0
-            )
-            run_rows = int(
-                await db.scalar(
-                    select(func.count())
-                    .select_from(StockFeatureSnapshot)
                     .where(
-                        StockFeatureSnapshot.trade_date == trade_date,
-                        StockFeatureSnapshot.source_run_id == source_core_run_id,
+                        StrategyRunItem.run_id == proj_run.id,
+                        StrategyRunItem.status == "succeeded",
+                        StrategyRunItem.result_id.is_not(None),
+                        # result FK lineage：run_id / trade_date / strategy_version 精确一致
+                        StrategyResult.run_id == proj_run.id,
+                        StrategyResult.trade_date == trade_date,
+                        StrategyResult.strategy_version_id == proj_run.strategy_version_id,
                     )
                 ) or 0
             )
             return {
                 "eligible": eligible,
                 "matched": matched,
-                "stale": max(day_total - run_rows, 0),
+                "stale": stale,
+                "count_mismatch": count_mismatch,
+                "run_status": run_status,
+                "strategy_version_id": strategy_version_id,
                 "algorithm_versions": [],
             }
         except Exception:
             # fail-closed：统计失败不得被解读为"全覆盖"
-            return {"eligible": 0, "matched": 0, "stale": 0, "algorithm_versions": []}
+            return {
+                "eligible": 0, "matched": 0, "stale": 0,
+                "count_mismatch": False, "run_status": None,
+                "strategy_version_id": None, "algorithm_versions": [],
+            }
 
     @staticmethod
     async def _count_state_events(

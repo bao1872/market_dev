@@ -412,6 +412,136 @@ async def test_execute_run_preserves_pre_skipped_count(
     assert passed is True
 
 
+@pytest.mark.asyncio
+async def test_create_batch_run_source_core_identity_isolates_runs(
+    db_session: AsyncSession,
+    mock_data_readiness: None,
+) -> None:
+    """[required compatibility projection identity] 同 trade_date 传不同 source_core_run_id
+    必须创建不同 projection run（不复用旧 run），否则同日 Core A→Core B 会错误复用 Core A
+    的 published projection run。
+
+    - 传 source_core_run_id=A 创建 run1；
+    - 传 source_core_run_id=B 创建 run2（different identity，不得返回 run1）；
+    - 两者 input_overrides 持久化各自 source_core_run_id + requirement。
+    """
+    import uuid
+
+    await _create_dsa_selector(db_session)
+    trade_date = date(2026, 7, 3)
+    inst = await _create_instrument_with_bars(
+        db_session, "000001", bar_count=100, end_date=trade_date,
+    )
+
+    service = StrategyBatchService()
+    core_a = uuid.uuid4()
+    core_b = uuid.uuid4()
+
+    run_a = await service.create_batch_run(
+        db_session,
+        strategy_key="dsa_selector",
+        trade_date=trade_date,
+        run_type="scheduled",
+        instrument_ids=[inst.id],
+        source_core_run_id=core_a,
+        requirement="required_compatibility",
+    )
+    run_b = await service.create_batch_run(
+        db_session,
+        strategy_key="dsa_selector",
+        trade_date=trade_date,
+        run_type="scheduled",
+        instrument_ids=[inst.id],
+        source_core_run_id=core_b,
+        requirement="required_compatibility",
+    )
+
+    # 同 trade_date 不同 source_core → 必须创建独立 run（不复用）
+    assert run_a.id != run_b.id
+    assert run_a.input_overrides["source_core_run_id"] == str(core_a)
+    assert run_b.input_overrides["source_core_run_id"] == str(core_b)
+    assert run_a.input_overrides["requirement"] == "required_compatibility"
+    assert run_b.input_overrides["requirement"] == "required_compatibility"
+
+    # 幂等：同一 source_core 再次创建 → 复用（同 idempotency key）
+    run_a2 = await service.create_batch_run(
+        db_session,
+        strategy_key="dsa_selector",
+        trade_date=trade_date,
+        run_type="scheduled",
+        instrument_ids=[inst.id],
+        source_core_run_id=core_a,
+        requirement="required_compatibility",
+    )
+    assert run_a2.id == run_a.id
+
+
+@pytest.mark.asyncio
+async def test_create_batch_run_force_restart_new_attempt_for_published(
+    db_session: AsyncSession,
+    mock_data_readiness: None,
+) -> None:
+    """[granular restart new attempt] force_restart=True 时，published 的 compatibility run
+    也创建 attempt_no + 1（保留旧 run，不原地修改），而 queued/running 仍复用。
+
+    - published 的 projection run + force_restart=True → 新 attempt（attempt_no+1）。
+    - 同一 source_core 再次 force_restart → 再次 attempt_no+1（不复用已 published 的旧 run）。
+    - 旧 run 保留（不原地改 status）。
+    """
+    import uuid
+
+    await _create_dsa_selector(db_session)
+    trade_date = date(2026, 7, 4)
+    inst = await _create_instrument_with_bars(
+        db_session, "000002", bar_count=100, end_date=trade_date,
+    )
+    service = StrategyBatchService()
+    core = uuid.uuid4()
+
+    run1 = await service.create_batch_run(
+        db_session,
+        strategy_key="dsa_selector",
+        trade_date=trade_date,
+        run_type="scheduled",
+        instrument_ids=[inst.id],
+        source_core_run_id=core,
+        requirement="required_compatibility",
+    )
+    # 模拟正常链已完成并发布
+    run1.status = "published"
+    await db_session.flush()
+
+    # force_restart → published run 不再阻塞，创建 attempt_no+1
+    run2 = await service.create_batch_run(
+        db_session,
+        strategy_key="dsa_selector",
+        trade_date=trade_date,
+        run_type="scheduled",
+        instrument_ids=[inst.id],
+        source_core_run_id=core,
+        requirement="required_compatibility",
+        force_restart=True,
+    )
+    assert run2.id != run1.id, "force_restart 应创建新 attempt"
+    assert run2.attempt_no == (run1.attempt_no or 1) + 1
+    # 旧 run 保留（不原地修改 status）
+    assert run1.status == "published"
+
+    # 再次 force_restart → 再次 attempt_no+1
+    run3 = await service.create_batch_run(
+        db_session,
+        strategy_key="dsa_selector",
+        trade_date=trade_date,
+        run_type="scheduled",
+        instrument_ids=[inst.id],
+        source_core_run_id=core,
+        requirement="required_compatibility",
+        force_restart=True,
+    )
+    assert run3.id != run2.id
+    assert run3.attempt_no == (run2.attempt_no or 1) + 1
+
+
 if __name__ == "__main__":
     # 纯逻辑入口：仅验证默认常量（不连 DB）
     test_run_total_timeout_default_is_7200_seconds()

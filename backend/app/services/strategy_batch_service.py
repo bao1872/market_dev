@@ -311,6 +311,9 @@ class StrategyBatchService:
         instrument_ids: list[uuid.UUID] | None = None,
         *,
         claim_for_worker: str | None = None,
+        source_core_run_id: uuid.UUID | None = None,
+        requirement: str = "required_compatibility",
+        force_restart: bool = False,
     ) -> StrategyRun:
         """创建批量计算运行（status=queued 或 status=running 当 claim_for_worker 设置）。
 
@@ -319,9 +322,13 @@ class StrategyBatchService:
         2. 查找策略最新 released 版本
         3. 数据就绪检查（非交易日/数据未就绪则拒绝）
         4. 查询当天同 (strategy_version_id, trade_date, run_type) 的所有 runs
-        5. 若存在 published/completed/running/queued 状态 run，直接返回（幂等）
-        6. 若存在 failed/partial_failed/interrupted 状态 run，创建 attempt_no = max + 1
+           （compatibility 模式额外匹配 source_core_run_id + requirement）
+        5. 若存在 queued/running 状态 run，直接返回（幂等）；published/completed 在
+           force_restart=True（explicit compatibility restart）时创建新 attempt，
+           否则仍直接返回。
+        6. 对 failed/partial_failed/interrupted 状态 run，创建 attempt_no = max + 1（retry）
         7. 生成幂等键：strategy_key:strategy_version_id:trade_date:run_type:attempt_no
+           （compatibility 模式含 source_core + requirement）
         8. 创建 StrategyRun（status=queued, effective_config 从 manifest 读取）
            [Phase8A] claim_for_worker 非 None 时创建为 status=running + worker_id，
            原子 inline claim 避免 generic worker 抢先领取
@@ -335,6 +342,12 @@ class StrategyBatchService:
             instrument_ids: 指定标的列表（None 表示全市场活跃标的）
             claim_for_worker: [Phase8A] 非 None 时原子 inline claim，
                 创建为 status=running + worker_id，generic worker 无法领取。
+            source_core_run_id: [required compatibility projection identity] compatibility 模式
+                下投影 run 归属的 First Pyramid core run id；非空时 existing-run 查询与幂等键
+                均含该 identity（防同 trade_date 新 Core 复用旧 projection run）。
+            requirement: compatibility projection requirement 标识（默认 required_compatibility）。
+            force_restart: explicit restart（如 granular restart）时置 True：对 published/completed
+                run 创建 attempt_no + 1（保留旧 run，不原地修改）；queued/running 仍复用。
                 用于 after-close orchestrator 创建 DSA run。
 
         Returns:
@@ -350,7 +363,21 @@ class StrategyBatchService:
                 f"非法 run_type: {run_type}（合法值: {sorted(VALID_RUN_TYPES)})"
             )
 
-        # 2. 查找策略最新 released 版本
+        # [required compatibility projection identity] force_restart 仅允许
+        # required compatibility + source_core identity 场景（explicit restart）。
+        if force_restart and (source_core_run_id is None
+                              or requirement != "required_compatibility"):
+            raise ValueError(
+                "force_restart 仅允许 required_compatibility + source_core_run_id 场景，"
+                "禁止对普通/manual/replay run 强制重启"
+            )
+
+        # 2. 查找策略最新 released 版本。
+        # [version semantics] StrategyRun.strategy_version_id 与 Core artifact 的
+        #   algorithm_versions["dsa"] 属不同 version domain（runner 策略版本 vs DSA 算法版本），
+        #   无证据证明二者应相等，故 projection StrategyRun 版本 = released dsa_selector 版本；
+        #   Core DSA algorithm version 的精确一致由 map_dsa_projection expected_dsa_version
+        #   reconcile 强制（见 persist_precomputed_dsa_results）。
         version_id, version = await self._get_latest_released_version(
             db, strategy_key
         )
@@ -364,17 +391,33 @@ class StrategyBatchService:
             )
 
         # 4. 查询当天同 (version, date, run_type) 的所有 runs
+        # [required compatibility projection identity] compatibility 模式（source_core_run_id
+        # 非空）下，existing-run 查询必须同时匹配 source_core_run_id + requirement，否则同
+        # trade_date 新 Core 会错误复用旧 published projection run（source_core 复用缺陷）。
         runs_stmt = select(StrategyRun).where(
             StrategyRun.strategy_version_id == version_id,
             StrategyRun.trade_date == trade_date,
             StrategyRun.run_type == run_type,
         )
+        if source_core_run_id is not None:
+            runs_stmt = runs_stmt.where(
+                StrategyRun.input_overrides["source_core_run_id"].astext
+                == str(source_core_run_id),
+                StrategyRun.input_overrides["requirement"].astext == requirement,
+            )
         runs_result = await db.execute(runs_stmt)
         existing_runs = list(runs_result.scalars().all())
 
-        # 5. 存在进行中的 run（published/completed/running/queued），直接返回
+        # 5. 存在进行中的 run（queued/running 恒阻塞；published/completed 仅在非
+        #    force_restart 时阻塞）。explicit compatibility restart（force_restart=True）
+        #    对 published/completed 创建 attempt_no + 1，保留旧 run 不原地修改。
+        _blocking = _BLOCKING_STATUSES
+        if force_restart:
+            # [granular restart] 明确要求重建：published/completed 不再视为阻塞，
+            # 允许创建新 attempt（保留旧 run）。queued/running 仍阻塞（不并发抢跑）。
+            _blocking = {"running", "queued"}
         blocking_run = next(
-            (r for r in existing_runs if r.status in _BLOCKING_STATUSES), None
+            (r for r in existing_runs if r.status in _blocking), None
         )
         if blocking_run is not None:
             logger.info(
@@ -385,28 +428,38 @@ class StrategyBatchService:
             )
             return blocking_run
 
-        # 6. 失败运行不阻断当日重试：基于最大 attempt_no 创建新 attempt
-        # [StrategyRun] - _RETRYABLE_STATUSES={failed,partial_failed,interrupted} 允许重建，
-        # _BLOCKING_STATUSES={published,completed,running,queued} 已在步骤 5 跳过
+        # 6. 失败运行不阻断当日重试：基于最大 attempt_no 创建新 attempt。
+        #    force_restart 时把 published/completed 也纳入 attempt 递增（explicit restart）。
+        # [StrategyRun] - _RETRYABLE_STATUSES={failed,partial_failed,interrupted} 允许重建；
+        #    queued/running 恒阻塞；published/completed 默认阻塞，force_restart 时可重建。
         attempt_no = 1
-        retryable_runs = [
-            r for r in existing_runs if r.status in _RETRYABLE_STATUSES
+        _restartable = set(_RETRYABLE_STATUSES)
+        if force_restart:
+            _restartable |= {"published", "completed"}
+        restartable_runs = [
+            r for r in existing_runs if r.status in _restartable
         ]
-        if retryable_runs:
-            attempt_no = max((r.attempt_no or 1) for r in retryable_runs) + 1
+        if restartable_runs:
+            attempt_no = max((r.attempt_no or 1) for r in restartable_runs) + 1
             logger.info(
-                "[StrategyBatch] 检测到可重试运行，创建新 attempt: "
+                "[StrategyBatch] 检测到可重试/可重启运行，创建新 attempt: "
                 "strategy_key=%s, trade_date=%s, run_type=%s, "
                 "prev_attempts=%s, new_attempt_no=%d",
                 strategy_key, trade_date, run_type,
-                [(r.id, r.status, r.attempt_no) for r in retryable_runs],
+                [(r.id, r.status, r.attempt_no) for r in restartable_runs],
                 attempt_no,
             )
 
         # 7. 生成幂等键（含 strategy_version_id 与 attempt_no）
+        # [required compatibility projection identity] compatibility 模式（source_core_run_id
+        # 非空）下幂等键同时含 source_core_run_id + requirement，保证同一 source_core 才有
+        # 幂等命中，不同 Core 各自独立 projection run。普通 manual/replay 保持原合同。
+        _identity_suffix = ""
+        if source_core_run_id is not None:
+            _identity_suffix = f":{source_core_run_id}:{requirement}"
         idempotency_key = (
             f"{strategy_key}:{version_id}:{trade_date.isoformat()}:"
-            f"{run_type}:{attempt_no}"
+            f"{run_type}:{attempt_no}{_identity_suffix}"
         )
 
         # 防御并发：二次校验幂等键唯一性
@@ -471,6 +524,11 @@ class StrategyBatchService:
             "strategy_key": strategy_key,
             "instrument_count": len(instrument_ids),
         }
+        # [required compatibility projection identity] compatibility 模式持久化 source_core_run_id
+        # + requirement 到现有 JSONB 列（无 Migration），供 ProductReadiness 精确解析投影 run。
+        if source_core_run_id is not None:
+            _input_overrides["source_core_run_id"] = str(source_core_run_id)
+            _input_overrides["requirement"] = requirement
         # [Phase8A] 标记 after-close 所有权（claim_next_run 安全过滤用）
         if claim_for_worker is not None:
             _input_overrides["_owner"] = "after_close_orchestrator"

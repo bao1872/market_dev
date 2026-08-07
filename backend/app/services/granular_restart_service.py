@@ -473,23 +473,25 @@ async def _handle_dsa_projection(
 ) -> uuid.UUID | None:
     """[PRD §6] 从持久化 core artifact 重建 DSA projection，**禁止再次运行 DSA**。
 
+    [required compatibility projection identity] 复用正式 production compatibility-projection
+    lifecycle（create_batch_run + project_dsa_batch + persist_precomputed_dsa_results），
+    **不再写 snake_case `summary_payload["dsa_projection"]`**。DSA 只在 Core 内算一次，
+    projection 完全从同一 canonical DSA artifact 派生（source_core_run_id 精确归属）。
+
     真实路径：
     1. 加载当前 core run（stock_core pointer.data_run_id）的全部 StockFeatureSnapshot；
-    2. 逐股从持久化 payload 重建 CoreComputationArtifact（只读重组，不计算）；
-    3. `build_dsa_projection_payload(artifact, expected_core_run_id=..., ...)` 强制
-       source_core_run_id / parameter_hash / dsa version 三项对账；
-    4. 把 projection 写回该 snapshot 的 `summary_payload["dsa_projection"]`
-       （DSA projection 无独立表，正式持久化位置即 core snapshot payload）。
+    2. 调用 `create_batch_run(strategy_key="dsa_selector", source_core_run_id=..., ...)`
+       创建 required compatibility projection run（source_core identity 持久化到 input_overrides）；
+    3. `project_dsa_batch` + `persist_precomputed_dsa_results` 从持久化 core artifact
+       派生 projection 并写入 StrategyRun/StrategyRunItem/StrategyResult（同一 SSOT）；
+    4. 不再次运行 DSA（source_core_run_id / parameter_hash / dsa version 由 artifact 携带）。
     """
-    from sqlalchemy.orm.attributes import flag_modified
-
     from app.models.stock_feature_snapshot import StockFeatureSnapshot
     from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
     from app.services.core_run_context import (
         CoreRunContext,
         build_default_algorithm_versions,
     )
-    from app.services.dsa_projection_service import build_dsa_projection_payload
 
     if source_core_run_id is None:
         raise RuntimeError(
@@ -530,59 +532,74 @@ async def _handle_dsa_projection(
             f"core run {source_core_run_id} 无任何 StockFeatureSnapshot，无法重建 DSA projection"
         )
 
-    rebuilt = 0
-    failed: list[str] = []
-    for snapshot in snapshots:
-        try:
-            # [CHANGE-20260806-CP4A.1 / Item 4] restart 与正常链共用公开 CoreArtifactCodec，
-            # 不再依赖 recovery 私有 _artifact_from_snapshot（保证单一反序列化合同）。
-            from app.services.core_artifact_codec import (
-                decode_dsa_projection_from_summary,
-            )
-            artifact = decode_dsa_projection_from_summary(
-                getattr(snapshot, "summary_payload", None) or {},
-                instrument_id=snapshot.instrument_id,
-                trade_date=snapshot.trade_date,
-            )
-            payload = build_dsa_projection_payload(
-                artifact,
-                expected_core_run_id=source_core_run_id,
-                expected_core_parameter_hash=parameter_hash,
-                expected_dsa_version=algorithm_versions.get("dsa"),
-            )
-            summary = dict(getattr(snapshot, "summary_payload", None) or {})
-            summary["dsa_projection"] = payload
-            snapshot.summary_payload = summary
-            flag_modified(snapshot, "summary_payload")
-            rebuilt += 1
-        except Exception as exc:
-            failed.append(f"{snapshot.instrument_id}: {type(exc).__name__}: {exc}")
+    # [required compatibility projection identity] granular restart 停止写 snake_case
+    # summary_payload["dsa_projection"]，改为完整复用正式 production compatibility-projection
+    # lifecycle：create_batch_run(force_restart) → project_dsa_batch →
+    # persist_precomputed_dsa_results → publish_run，与正常 scheduled 链同一 SSOT
+    # （StrategyRun/StrategyRunItem/StrategyResult）。
+    # 仅从持久化 core artifact 派生，不再次运行 DSA（source_core_run_id 精确归属）。
+    from app.services.core_artifact_repository import CoreArtifactRepository
+    from app.services.strategy_batch_service import (
+        StrategyBatchService,
+        persist_precomputed_dsa_results,
+    )
 
+    svc = StrategyBatchService()
+    # explicit restart：即使旧 projection run 已 published/completed 也创建 attempt_no + 1
+    #（保留旧 run，不原地修改）；queued/running 仍复用。
+    dsa_run = await svc.create_batch_run(
+        db,
+        "dsa_selector",
+        _as_date(trade_date),
+        "scheduled",
+        claim_for_worker="granular-restart",
+        source_core_run_id=source_core_run_id,
+        requirement="required_compatibility",
+        force_restart=True,
+    )
     await db.flush()
 
+    repo = CoreArtifactRepository(db, batch_size=200)
+    result = await repo.project_dsa_batch(
+        source_core_run_id=source_core_run_id,
+        dsa_run_id=dsa_run.id,
+        trade_date=_as_date(trade_date),
+        strategy_version_id=dsa_run.strategy_version_id,
+        persist_fn=persist_precomputed_dsa_results,
+    )
+    await db.flush()
+
+    projected = int(result.get("projected", 0))
     eligible = len(snapshots)
-    coverage = rebuilt / eligible if eligible else 0.0
+    coverage = projected / eligible if eligible else 0.0
+    if projected == 0:
+        raise RuntimeError(
+            f"dsa_projection 重建全部失败（eligible={eligible}）: result={result}"
+        )
+
+    # [granular restart 复用正式 lifecycle] 全部 projection 持久化后调用 publish_run，
+    # 使新 attempt 进入正式 published 终态（readiness 的 terminal 条件依赖 published）。
+    published_run = await svc.publish_run(db, dsa_run.id)
+    await db.flush()
+
     await append_event(
         db,
         job_run_id=parent_job_run_id,
         step="manual_restart",
-        level="info" if not failed else "warning",
+        level="info",
         message=(
-            f"dsa_projection 重建完成: eligible={eligible}, rebuilt={rebuilt}, "
-            f"failed={len(failed)}, coverage={coverage:.4f}"
+            f"dsa_projection 重建完成并发布: eligible={eligible}, projected={projected}, "
+            f"coverage={coverage:.4f}, run_id={published_run.id}"
         ),
         payload={
             "source_core_run_id": str(source_core_run_id),
             "eligible_count": eligible,
-            "matched_count": rebuilt,
+            "matched_count": projected,
             "coverage_ratio": round(coverage, 4),
-            "failed_samples": failed[:5],
+            "strategy_run_id": str(published_run.id),
+            "strategy_run_status": published_run.status,
         },
     )
-    if rebuilt == 0:
-        raise RuntimeError(
-            f"dsa_projection 重建全部失败（eligible={eligible}）: {failed[:3]}"
-        )
     return source_core_run_id
 
 

@@ -44,6 +44,7 @@ from app.services.after_close_orchestrator import (
     retry_after_close_run,
 )
 from app.services.bars_scheduler_service import BarsSchedulerService, BatchResult
+from app.services.core_artifact_repository import CoreArtifactRepository
 from app.services.job_run_event_service import append_event
 from app.services.strategy_batch_service import StrategyBatchService
 
@@ -2922,6 +2923,10 @@ async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
 
 
 @pytest.mark.asyncio
+@patch.object(
+    CoreArtifactRepository, "project_dsa_batch",
+    new=AsyncMock(return_value={"projected": 1, "failed": 0}),
+)
 @patch(
     # [Phase0-Fix#8] chip 入队已成为主任务终态之前的正式步骤，入队失败会使主任务
     # 变 partial_success。本用例只验证 AC-04（15m 缺失不阻塞），故 mock 掉 chip 入队。
@@ -2962,6 +2967,9 @@ async def test_ac04_daily_ready_15m_missing_allows_proceed(_chip_mock) -> None:
     dsa_strategy_run = MagicMock()
     dsa_strategy_run.id = dsa_run_id
     dsa_strategy_run.status = "completed"
+    dsa_strategy_run.succeeded_count = 1
+    dsa_strategy_run.total_instruments = 1
+    dsa_strategy_run.failed_count = 0
 
     # 模拟 AsyncSessionLocal：async with 返回 mock session
     mock_session = MagicMock()
@@ -3002,6 +3010,10 @@ async def test_ac04_daily_ready_15m_missing_allows_proceed(_chip_mock) -> None:
     fake_snapshot_run = MagicMock()
     fake_snapshot_run.id = uuid.uuid4()
 
+    # [required compatibility projection identity] spy 记录 create_batch_run 的 kwargs，
+    # 断言 DSA compatibility run 在 snapshot_run_id 确定后创建且传 exact source_core_run_id。
+    create_batch_run_spy = AsyncMock(return_value=fake_dsa_run)
+
     with patch(
         "app.services.after_close_orchestrator.AsyncSessionLocal",
         new=fake_session_local,
@@ -3010,7 +3022,7 @@ async def test_ac04_daily_ready_15m_missing_allows_proceed(_chip_mock) -> None:
         new=AsyncMock(return_value=fake_batch_result),
     ), patch.object(
         StrategyBatchService, "create_batch_run",
-        new=AsyncMock(return_value=fake_dsa_run),
+        new=create_batch_run_spy,
     ), patch(
         "app.services.after_close_orchestrator._poll_dsa_run_status",
         new=AsyncMock(return_value="completed"),
@@ -3083,6 +3095,16 @@ async def test_ac04_daily_ready_15m_missing_allows_proceed(_chip_mock) -> None:
     assert job_run.status == "succeeded", (
         f"[AC-04] 日线就绪 + 15m 缺失时应 succeeded，实际={job_run.status}"
     )
+
+    # [required compatibility projection identity] orchestrator 应在 snapshot_run_id 确定后
+    # 创建 compatibility run，并传 exact source_core_run_id + requirement + claim_for_worker。
+    assert create_batch_run_spy.called, "orchestrator 应创建 DSA compatibility run"
+    create_kwargs = create_batch_run_spy.call_args.kwargs
+    assert create_kwargs.get("source_core_run_id") == fake_snapshot_run.id, (
+        "source_core_run_id 应 = snapshot_run_id（在 snapshot_run 创建后传入）"
+    )
+    assert create_kwargs.get("requirement") == "required_compatibility"
+    assert "orchestrator:" in str(create_kwargs.get("claim_for_worker"))
 
 
 @pytest.mark.asyncio

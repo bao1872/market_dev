@@ -56,6 +56,7 @@ from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_state_event import StockStateEvent
+from app.models.strategy_run import StrategyResult, StrategyRun, StrategyRunItem
 from app.services.product_readiness_service import (
     ProductReadinessService,
     evaluate_closure,
@@ -100,6 +101,8 @@ _TABLE_TO_MODEL: dict[str, type] = {
     "auction_anchor_snapshots": AuctionAnchorSnapshot,
     "stock_feature_snapshots": StockFeatureSnapshot,
     "stock_state_events": StockStateEvent,
+    "strategy_runs": StrategyRun,
+    "strategy_run_items": StrategyRunItem,
 }
 
 
@@ -107,12 +110,27 @@ def _entity_class(stmt):
     """从 select 语句提取查询的 ORM 实体类。
 
     本 SQLAlchemy 版本下 select(Model) 的 froms 直接是 Table（无 .entity），
-    故用表名映射到已注册模型类。
+    故用表名映射到已注册模型类。对 join 语句（如 matched 查询
+    StrategyRunItem JOIN StrategyResult），递归展开 Join.left/right 取首个已知表，
+    以便 _FakeDB 正确路由。
     """
-    for frm in stmt.get_final_froms():
+
+    def _first_model(frm):
+        if frm is None:
+            return None
         name = getattr(frm, "name", None)
         if name in _TABLE_TO_MODEL:
             return _TABLE_TO_MODEL[name]
+        left = getattr(frm, "left", None)
+        right = getattr(frm, "right", None)
+        if left is not None or right is not None:
+            return _first_model(left) or _first_model(right)
+        return None
+
+    for frm in stmt.get_final_froms():
+        model = _first_model(frm)
+        if model is not None:
+            return model
     return None
 
 
@@ -161,6 +179,12 @@ class _FakeDB:
         self._dsa = list(plan.get("dsa_counts", (10, 10)))
         self._state_events = plan.get("state_event_rows", [])
         self._dsa_idx = 0
+        # [required compatibility projection identity] projection run 的正式终态
+        #（published/completed → READY 满足 run_terminal；None 默认 published）
+        self._dsa_run_status = plan.get("dsa_run_status")
+        # [required compatibility projection identity] run/item 计数一致性：默认与 eligible
+        # 一致（count_mismatch=False）；传入不同值可测试 PROJECTION_RUN_ITEM_COUNT_MISMATCH。
+        self._dsa_total = plan.get("dsa_total_instruments")
 
     async def scalar(self, stmt):
         ent = _entity_class(stmt)
@@ -168,17 +192,51 @@ class _FakeDB:
             kind = _extract_kind(stmt)
             q = self._pubs.get(kind, [])
             return q.pop(0) if q else None
+        if ent is StrategyRun:
+            # [required compatibility projection identity] _count_dsa_projections 查投影 run：
+            #   select(StrategyRun).where(input_overrides source_core_run_id == core).limit(1)
+            # 当 dsa_counts.eligible > 0 时返回当前 core 的投影 run，否则 None（无投影）。
+            # 默认 status=published（正式终态，满足 READY 的 run_terminal 条件）。
+            if (self._dsa + [0, 0])[0] > 0:
+                total = (
+                    self._dsa_total if self._dsa_total is not None
+                    else self._dsa[0]
+                )
+                return SimpleNamespace(
+                    id="proj-run-1",
+                    total_instruments=total,
+                    status=self._dsa_run_status or "published",
+                    strategy_version_id="sv1",
+                    input_overrides={
+                        "strategy_key": "dsa_selector",
+                        "source_core_run_id": "c1",
+                        "requirement": "required_compatibility",
+                    },
+                )
+            return None
+        if ent is StrategyResult:
+            # [required compatibility projection identity] matched 查询经
+            #   StrategyRunItem.result_id → StrategyResult.id join（select_from(StrategyRunItem)
+            #   .join(StrategyResult, ...)），_entity_class 可能解析出 StrategyResult。
+            #   matched = eligible 中 succeeded + result_id 非空且 result lineage 一致的
+            #   distinct instrument 数（真实投影产物存在性）。
+            eligible, matched = (self._dsa + [0, 0])[:2]
+            return matched
+        if ent is StrategyRunItem:
+            # _count_dsa_projections 对 projection run 发两个 count：
+            #   - eligible：仅按 run_id（distinct instrument）
+            #   - matched：额外 status=='succeeded' AND result_id.is_not(None)
+            # status 值是参数化（不在 whereclause 文本），故用 result_id 关键字区分 matched。
+            eligible, matched = (self._dsa + [0, 0])[:2]
+            wc = str(stmt.whereclause)
+            if "result_id" in wc:
+                return matched
+            return eligible
         if ent is StockFeatureSnapshot:
-            # [CP3] _count_dsa_projections / _count_state_events 各发多个标量查询：
-            #   - day_total：无 source_run_id 过滤（当日快照总数）
-            #   - eligible / comparable / run_rows：带 source_run_id 过滤
-            #   - matched：额外带 summary_payload.has_key("dsa_projection")
-            # 旧 mock 用 2 元素 FIFO，第 3 次标量即越界触发服务层 fail-closed 降级。
-            # 改为按查询谓词路由，与真实 SQL 契约一致且顺序无关。
+            # [legacy] 仅 state_events 仍用 StockFeatureSnapshot scalar 计数。
+            # _count_dsa_projections 已改为查 StrategyRun/StrategyRunItem，不再走本分支。
             wc = str(stmt.whereclause)
             eligible, matched = (self._dsa + [0, 0])[:2]
-            # SQLAlchemy 将 JSONB has_key 渲染为 `summary_payload ? :param`（? 运算符），
-            # 不会内联字面量 "dsa_projection"，故按 ? 运算符判定 matched 查询。
             if "?" in wc:
                 return matched
             if "source_run_id" in wc:
@@ -186,6 +244,15 @@ class _FakeDB:
             return eligible  # day_total：简化取 eligible universe 规模
         q = self._runs.get(ent, [])
         return q.pop(0) if q else None
+
+    async def scalars(self, stmt):
+        """_count_dsa_projections stale 计算：当日所有 dsa_selector projection runs。
+
+        简化：返回空（无其他 core 残留 → stale=0）。matched=0 时 _dsa_projection_state
+        仍走 eligible>0 分支判 LINEAGE_MISMATCH，不依赖 stale。
+        返回带 .all() 的 ScalarResult 兼容对象（真实 session.scalars() 语义）。
+        """
+        return SimpleNamespace(all=lambda: [])
 
     async def execute(self, stmt):
         ent = _entity_class(stmt)
@@ -529,6 +596,46 @@ async def test_dsa_exact_match_ready():
     plan["dsa_counts"] = (10, 10)
     ev = await _evaluate(plan)
     assert ev.closure == CLOSURE_FULLY_READY
+
+
+async def test_dsa_run_item_count_mismatch_not_ready():
+    """[required compatibility projection identity] eligible != StrategyRun.total_instruments →
+    PROJECTION_RUN_ITEM_COUNT_MISMATCH → 不得 READY（数据缺陷，阻断闭包）。
+
+    六态下为 mandatory_ready_enhancing（增强未全部终态），不得 fully_ready。
+    """
+    plan = _full_plan()
+    plan["dsa_counts"] = (10, 10)
+    plan["dsa_total_instruments"] = 12  # eligible(10) != total_instruments(12)
+    ev = await _evaluate(plan)
+    assert ev.closure == CLOSURE_MANDATORY_READY_ENHANCING
+
+
+async def test_dsa_non_terminal_run_status_not_ready():
+    """[required compatibility projection identity] projection run 未达正式终态
+    （如 running/queued/partial）→ run_terminal=False → 不得 READY。
+
+    即使 matched==eligible，只要 run 非 published，enhancement 不 terminal。
+    """
+    plan = _full_plan()
+    plan["dsa_counts"] = (10, 10)
+    plan["dsa_run_status"] = "running"  # 未正式发布 → 不 READY
+    ev = await _evaluate(plan)
+    assert ev.closure == CLOSURE_MANDATORY_READY_ENHANCING
+
+
+async def test_dsa_completed_but_not_published_not_ready():
+    """[required compatibility projection identity] completed 表示已计算但待发布，
+    不得 READY；仅 published 才算正式终态。
+
+    即使 matched==eligible 且 coverage 达标，只要 run.status == "completed"（未发布），
+    enhancement 不 terminal → 不得 fully_ready。
+    """
+    plan = _full_plan()
+    plan["dsa_counts"] = (10, 10)
+    plan["dsa_run_status"] = "completed"  # 已计算但未 publish → 不 READY
+    ev = await _evaluate(plan)
+    assert ev.closure == CLOSURE_MANDATORY_READY_ENHANCING
 
 
 async def test_state_events_lineage_mismatch_not_ready():

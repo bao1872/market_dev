@@ -771,6 +771,152 @@ async def _get_strategy_run_or_raise(
     return run
 
 
+async def _claim_or_recover_dsa_run(
+    *,
+    db_session_local: Any,
+    dsa_run_id: uuid.UUID,
+    worker_id: str,
+    job_run_id: uuid.UUID,
+    lease_epoch: Any = None,
+) -> tuple[bool, uuid.UUID]:
+    """[AfterClose 2.2] inline claim / cross-worker fencing / recovery DSA run。
+
+    断点恢复已存在 DSA run 时，根据其状态：
+    - queued：legacy inline claim（防 worker 领取）；
+    - running：跨 worker fencing（条件原子 UPDATE，attempt_count 作 fencing token）；
+    - completed/published：已处理完成，跳过 DSA 写入（dsa_already_completed=True）；
+    - failed/partial_failed/max_retries_exceeded：调用正式 dsa_recovery_service 创建新 run。
+
+    抽成独立函数以避免在 computing_features 中整块 re-indent（减少无意义 diff churn）。
+
+    Returns:
+        (dsa_already_completed, dsa_run_id)
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    dsa_already_completed = False
+    async with db_session_local() as db:
+        dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
+        if dsa_run.status == "queued":
+            # Legacy/断点恢复：inline claim，防止 DSA worker 领取
+            dsa_run.status = "running"
+            dsa_run.started_at = _dt.now(_UTC)
+            dsa_run.heartbeat_at = _dt.now(_UTC)
+            dsa_run.worker_id = f"orchestrator:{worker_id}"
+            await db.commit()
+            logger.info(
+                "[AfterClose] legacy inline claim DSA run: run_id=%s, worker_id=%s",
+                dsa_run_id, dsa_run.worker_id,
+            )
+        elif dsa_run.status == "running":
+            # [Phase8A-correction] cross-worker recovery with real fencing
+            expected_worker = f"orchestrator:{worker_id}"
+            if dsa_run.worker_id != expected_worker:
+                old_worker_id = dsa_run.worker_id
+                old_attempt_count = dsa_run.attempt_count or 0
+                now_utc = _dt.now(_UTC)
+                new_lease_expires = now_utc + _td(minutes=30)
+
+                # 条件 UPDATE：status=running AND attempt_count=old（fencing token 匹配）
+                fence_stmt = (
+                    update(StrategyRun)
+                    .where(StrategyRun.id == dsa_run_id)
+                    .where(StrategyRun.status == "running")
+                    .where(StrategyRun.attempt_count == old_attempt_count)
+                    .values(
+                        worker_id=expected_worker,
+                        attempt_count=old_attempt_count + 1,
+                        heartbeat_at=now_utc,
+                        lease_expires_at=new_lease_expires,
+                    )
+                )
+                fence_result = await db.execute(fence_stmt)
+
+                # CursorResult.rowcount 在 Result 基类 typing 中缺失（SQLAlchemy 2.0 async 限制）
+                if fence_result.rowcount == 1:  # type: ignore[attr-defined]
+                    await db.commit()
+                    await db.refresh(dsa_run)
+                    logger.info(
+                        "[AfterClose] [Phase8A] 跨 worker fencing 成功: "
+                        "run_id=%s, old_worker=%s, new_worker=%s, "
+                        "attempt_count %d→%d, lease_expires=%s",
+                        dsa_run_id, old_worker_id, expected_worker,
+                        old_attempt_count, old_attempt_count + 1,
+                        new_lease_expires.isoformat(),
+                    )
+                else:
+                    # 条件更新失败：重新读取当前状态
+                    await db.rollback()
+                    dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
+                    if dsa_run.status in ("completed", "published"):
+                        dsa_already_completed = True
+                        logger.info(
+                            "[AfterClose] 跨 worker fencing 失败（DSA 已完成）: "
+                            "run_id=%s, status=%s",
+                            dsa_run_id, dsa_run.status,
+                        )
+                    elif dsa_run.worker_id == expected_worker:
+                        logger.info(
+                            "[AfterClose] 跨 worker fencing 跳过（已是当前 worker）: "
+                            "run_id=%s, worker_id=%s",
+                            dsa_run_id, dsa_run.worker_id,
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"跨 worker fencing 失败: run_id={dsa_run_id}, "
+                            f"current_worker={dsa_run.worker_id}, "
+                            f"current_attempt_count={dsa_run.attempt_count}, "
+                            f"expected_old_attempt_count={old_attempt_count}"
+                        )
+            else:
+                logger.info(
+                    "[AfterClose] DSA run 已原子 claim（Phase8A）: run_id=%s, worker_id=%s",
+                    dsa_run_id, dsa_run.worker_id,
+                )
+        elif dsa_run.status in ("completed", "published"):
+            # Worker 已完成（race condition），跳过 DSA 写入避免 DSA=2
+            dsa_already_completed = True
+            logger.info(
+                "[AfterClose] DSA run 已完成（worker 已处理），跳过 DSA 写入: run_id=%s status=%s",
+                dsa_run_id, dsa_run.status,
+            )
+        elif dsa_run.status in ("failed", "partial_failed", "max_retries_exceeded"):
+            # [P0-2 2026-07-30] DSA failed → 调用正式 recovery service 创建新 run
+            # 禁止把失败 run 改回 queued；原失败 run 保留审计
+            from app.services.dsa_recovery_service import (
+                DSARecoveryError,
+                recover_failed_dsa_run,
+            )
+
+            logger.warning(
+                "[AfterClose] DSA run 失败（%s），调用 recovery service: run_id=%s",
+                dsa_run.status, dsa_run_id,
+            )
+            try:
+                new_dsa_run, is_new = await recover_failed_dsa_run(
+                    db, job_run_id=job_run_id,
+                    worker_id=worker_id,
+                    lease_epoch=lease_epoch,
+                )
+                await db.commit()
+                dsa_run_id = new_dsa_run.id
+                logger.info(
+                    "[AfterClose] DSA recovery 成功: old=%s, new=%s, "
+                    "attempt_no=%s, is_new=%s",
+                    dsa_run.id, new_dsa_run.id,
+                    new_dsa_run.attempt_no, is_new,
+                )
+            except DSARecoveryError as recovery_exc:
+                logger.error(
+                    "[AfterClose] DSA recovery 失败: %s", recovery_exc,
+                )
+                raise
+
+    return dsa_already_completed, dsa_run_id
+
+
 async def _update_orchestrator_status(
     db: AsyncSession,
     job_run: SchedulerJobRun,
@@ -2396,31 +2542,22 @@ async def execute_after_close_run(
 
                 # [Phase8A] trigger_dsa=False 且覆盖率达标：在 computing_features 前创建 DSA run
                 # DSA 由 orchestrator 创建并原子 inline claim，避免 generic worker 抢先领取
+                # [required compatibility projection identity] DSA run 创建推迟到 computing_features
+                # 步骤（snapshot_run_id 确定后），使 source_core_run_id=snapshot_run_id 可在创建时
+                # 写入 input_overrides。此处仅更新状态说明"待 computing_features 创建 DSA run"，
+                # 不提前创建（避免无 source_core identity 的 StrategyRun）。
                 logger.info(
-                    "[AfterClose] [Phase8A] 覆盖率达标，orchestrator 创建 DSA run: "
-                    "trade_date=%s, coverage=%.1f%%",
+                    "[AfterClose] [Phase8A] 覆盖率达标，DSA run 将在 computing_features "
+                    "（snapshot_run_id 确定后）创建: trade_date=%s, coverage=%.1f%%",
                     trade_date, (batch_result.daily_coverage or 0) * 100,
                 )
-                from app.constants.strategy_keys import DSA_SELECTOR
                 async with AsyncSessionLocal() as db:
-                    dsa_run = await batch_service.create_batch_run(
-                        db=db,
-                        strategy_key=DSA_SELECTOR,
-                        trade_date=trade_date,
-                        run_type="scheduled",
-                        claim_for_worker=f"orchestrator:{worker_id}",
-                    )
-                    await db.commit()
-                    dsa_run_id = dsa_run.id
-                    # 更新 metadata 记录 dsa_run_id
                     job_run = await _get_job_run_or_raise(db, job_run_id)
                     await _update_orchestrator_status(
                         db=db,
                         job_run=job_run,
                         status=AfterCloseRunStatus.REFRESHING_DAILY,
-                        message=f"orchestrator 已创建 DSA run: dsa_run_id={dsa_run_id}",
-                        dsa_run_id=dsa_run_id,
-                        payload={"dsa_run_id": str(dsa_run_id)},
+                        message="DSA run 将在 computing_features 创建（待 snapshot_run_id）",
                     )
                     await _update_heartbeat_and_step(
                         db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
@@ -2431,38 +2568,76 @@ async def execute_after_close_run(
             # [Phase5] - 断点恢复跳过日线刷新，dsa_run_id 从 metadata 读取
             # [CHANGE-20260728-008] 原 dsa_only 模式已删除。
             # 当 skip_refresh=True 且 dsa_run_id=None 时（如 force?restart_from=daily_ready），
-            # 直接创建 DSA run（覆盖率已由 API 层校验）。
-            if dsa_run_id is None:
+            # 不在 refreshing_daily 阶段创建 DSA run；若 snapshot_run_id 已在 metadata 恢复，
+            # 直接在此用正确 source_core 创建；否则推迟到 computing_features 创建。
+            # [required compatibility projection identity] source_core_run_id 必须 =
+            # snapshot_run_id，故只在 snapshot_run_id 已知时才能创建 compatibility StrategyRun。
+            if dsa_run_id is None and snapshot_run_id is not None:
                 from app.constants.strategy_keys import DSA_SELECTOR
                 logger.info(
-                    "[AfterClose] 跳过日线刷新，直接创建 DSA run: "
-                    "job_run_id=%s, trade_date=%s, last_completed_step=%s",
-                    job_run_id, trade_date, last_completed_step,
+                    "[AfterClose] 跳过日线刷新，snapshot_run_id 已恢复，直接创建 DSA run: "
+                    "job_run_id=%s, trade_date=%s, snapshot_run_id=%s",
+                    job_run_id, trade_date, snapshot_run_id,
                 )
                 async with AsyncSessionLocal() as db:
-                    dsa_run = await batch_service.create_batch_run(
-                        db=db,
-                        strategy_key=DSA_SELECTOR,
-                        trade_date=trade_date,
-                        run_type="scheduled",
-                        claim_for_worker=f"orchestrator:{worker_id}",
+                    # [required compatibility projection identity] resume path 的 projection
+                    # universe 必须来自 source Core **frozen-input facts source**：
+                    # stock_feature_snapshot_run_items（phase='core'）。Core 计算开始时对
+                    # 全部 eligible instrument 预创建 core run item（create_run_items 幂等，
+                    # 无论单股 snapshot 是否完成），故该集合在任何 resume 状态（已创建 0
+                    # snapshot / partial snapshots）都是完整 frozen universe——不得用
+                    # StockFeatureSnapshot（只有已完成快照，partial 时会缩小）冒充，也不得
+                    # 重新解析新的 active universe。
+                    from app.models.stock_feature_snapshot_run_item import (
+                        PHASE_CORE as _SNAP_PHASE_CORE,
+                        StockFeatureSnapshotRunItem as _SnapshotRunItem,
                     )
-                    await db.commit()
-                    dsa_run_id = dsa_run.id
-                    # 更新 metadata 记录 dsa_run_id
-                    job_run = await _get_job_run_or_raise(db, job_run_id)
-                    await _update_orchestrator_status(
-                        db=db,
-                        job_run=job_run,
-                        status=AfterCloseRunStatus.REFRESHING_DAILY,
-                        message=f"已创建 DSA run（跳过日线刷新）: dsa_run_id={dsa_run_id}",
-                        dsa_run_id=dsa_run_id,
-                        payload={"dsa_run_id": str(dsa_run_id)},
-                    )
-                    await _update_heartbeat_and_step(
-                        db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
-                    )
-                    await db.commit()
+                    frozen_rows = (
+                        await db.execute(
+                            select(_SnapshotRunItem.instrument_id)
+                            .where(
+                                _SnapshotRunItem.snapshot_run_id == snapshot_run_id,
+                                _SnapshotRunItem.phase == _SNAP_PHASE_CORE,
+                            )
+                            .distinct()
+                        )
+                    ).scalars().all()
+                    if not frozen_rows:
+                        # 冻结 universe 尚未确立（computing_features 未创建 run items，
+                        # 如 resume 自更早阶段）→ 不得用空集合冒充，推迟到 2.3b 创建
+                        #（保持 dsa_run_id=None，2.3b 的 if dsa_run_id is None 会接管）。
+                        logger.info(
+                            "[AfterClose] resume: snapshot_run_id=%s 尚无 core run items，"
+                            "冻结 universe 未确立，推迟 DSA run 到 computing_features",
+                            snapshot_run_id,
+                        )
+                    else:
+                        dsa_run = await batch_service.create_batch_run(
+                            db=db,
+                            strategy_key=DSA_SELECTOR,
+                            trade_date=trade_date,
+                            run_type="scheduled",
+                            instrument_ids=list(frozen_rows),
+                            claim_for_worker=f"orchestrator:{worker_id}",
+                            source_core_run_id=snapshot_run_id,
+                            requirement="required_compatibility",
+                        )
+                        await db.commit()
+                        dsa_run_id = dsa_run.id
+                        # 更新 metadata 记录 dsa_run_id
+                        job_run = await _get_job_run_or_raise(db, job_run_id)
+                        await _update_orchestrator_status(
+                            db=db,
+                            job_run=job_run,
+                            status=AfterCloseRunStatus.REFRESHING_DAILY,
+                            message=f"已创建 DSA run（跳过日线刷新）: dsa_run_id={dsa_run_id}",
+                            dsa_run_id=dsa_run_id,
+                            payload={"dsa_run_id": str(dsa_run_id)},
+                        )
+                        await _update_heartbeat_and_step(
+                            db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
+                        )
+                        await db.commit()
 
         # ---- 步骤 2: computing_features (Phase 5: 收敛 waiting_dsa_worker + quality_gate + feature_snapshot) ----
         # [CHANGE-20260724-002 Phase 5] scheduled after-close DSA 接入 MFCS 统一计算服务：
@@ -2487,127 +2662,25 @@ async def execute_after_close_run(
 
             # 2.2 inline claim DSA run（防止 worker 领取）
             # [Phase8A] DSA run 通过 claim_for_worker 创建时已是 status=running + worker_id，
-            # 无需再次 claim；仅在 status=queued 时执行 legacy inline claim（断点恢复场景）
+            # 无需再次 claim；仅在 status=queued 时执行 legacy inline claim（断点恢复场景）。
+            # [required compatibility projection identity] 首次运行 dsa_run_id 尚未创建
+            # （推迟到 2.3 后以 snapshot_run_id 创建），此处仅在断点恢复已存在 DSA run 时
+            # 执行 claim/fencing/recovery（逻辑抽到 _claim_or_recover_dsa_run，避免整块 re-indent）。
             dsa_already_completed = False
-            async with AsyncSessionLocal() as db:
-                dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
-                if dsa_run.status == "queued":
-                    # Legacy/断点恢复：inline claim，防止 DSA worker 领取
-                    dsa_run.status = "running"
-                    dsa_run.started_at = datetime.now(UTC)
-                    dsa_run.heartbeat_at = datetime.now(UTC)
-                    dsa_run.worker_id = f"orchestrator:{worker_id}"
-                    await db.commit()
-                    logger.info(
-                        "[AfterClose] legacy inline claim DSA run: run_id=%s, worker_id=%s",
-                        dsa_run_id, dsa_run.worker_id,
-                    )
-                elif dsa_run.status == "running":
-                    # [Phase8A-correction] cross-worker recovery with real fencing
-                    # worker A 崩溃后 worker B 重新认领 child DSA
-                    # 使用条件原子 UPDATE：基于 attempt_count（租约恢复计数）作为 fencing token
-                    # 防止 worker A 恢复后使用旧 token 继续写入
-                    expected_worker = f"orchestrator:{worker_id}"
-                    if dsa_run.worker_id != expected_worker:
-                        old_worker_id = dsa_run.worker_id
-                        old_attempt_count = dsa_run.attempt_count or 0
-                        now_utc = datetime.now(UTC)
-                        new_lease_expires = now_utc + timedelta(minutes=30)
-
-                        # 条件 UPDATE：status=running AND attempt_count=old（fencing token 匹配）
-                        fence_stmt = (
-                            update(StrategyRun)
-                            .where(StrategyRun.id == dsa_run_id)
-                            .where(StrategyRun.status == "running")
-                            .where(StrategyRun.attempt_count == old_attempt_count)
-                            .values(
-                                worker_id=expected_worker,
-                                attempt_count=old_attempt_count + 1,
-                                heartbeat_at=now_utc,
-                                lease_expires_at=new_lease_expires,
-                            )
-                        )
-                        fence_result = await db.execute(fence_stmt)
-
-                        # CursorResult.rowcount 在 Result 基类 typing 中缺失（SQLAlchemy 2.0 async 限制）
-                        if fence_result.rowcount == 1:  # type: ignore[attr-defined]
-                            await db.commit()
-                            await db.refresh(dsa_run)
-                            logger.info(
-                                "[AfterClose] [Phase8A] 跨 worker fencing 成功: "
-                                "run_id=%s, old_worker=%s, new_worker=%s, "
-                                "attempt_count %d→%d, lease_expires=%s",
-                                dsa_run_id, old_worker_id, expected_worker,
-                                old_attempt_count, old_attempt_count + 1,
-                                new_lease_expires.isoformat(),
-                            )
-                        else:
-                            # 条件更新失败：重新读取当前状态
-                            await db.rollback()
-                            dsa_run = await _get_strategy_run_or_raise(db, dsa_run_id)
-                            if dsa_run.status in ("completed", "published"):
-                                dsa_already_completed = True
-                                logger.info(
-                                    "[AfterClose] 跨 worker fencing 失败（DSA 已完成）: "
-                                    "run_id=%s, status=%s",
-                                    dsa_run_id, dsa_run.status,
-                                )
-                            elif dsa_run.worker_id == expected_worker:
-                                logger.info(
-                                    "[AfterClose] 跨 worker fencing 跳过（已是当前 worker）: "
-                                    "run_id=%s, worker_id=%s",
-                                    dsa_run_id, dsa_run.worker_id,
-                                )
-                            else:
-                                raise RuntimeError(
-                                    f"跨 worker fencing 失败: run_id={dsa_run_id}, "
-                                    f"current_worker={dsa_run.worker_id}, "
-                                    f"current_attempt_count={dsa_run.attempt_count}, "
-                                    f"expected_old_attempt_count={old_attempt_count}"
-                                )
-                    else:
-                        logger.info(
-                            "[AfterClose] DSA run 已原子 claim（Phase8A）: run_id=%s, worker_id=%s",
-                            dsa_run_id, dsa_run.worker_id,
-                        )
-                elif dsa_run.status in ("completed", "published"):
-                    # Worker 已完成（race condition），跳过 DSA 写入避免 DSA=2
-                    dsa_already_completed = True
-                    logger.info(
-                        "[AfterClose] DSA run 已完成（worker 已处理），跳过 DSA 写入: run_id=%s status=%s",
-                        dsa_run_id, dsa_run.status,
-                    )
-                elif dsa_run.status in ("failed", "partial_failed", "max_retries_exceeded"):
-                    # [P0-2 2026-07-30] DSA failed → 调用正式 recovery service 创建新 run
-                    # 禁止把失败 run 改回 queued；原失败 run 保留审计
-                    from app.services.dsa_recovery_service import (
-                        DSARecoveryError,
-                        recover_failed_dsa_run,
-                    )
-
-                    logger.warning(
-                        "[AfterClose] DSA run 失败（%s），调用 recovery service: run_id=%s",
-                        dsa_run.status, dsa_run_id,
-                    )
-                    try:
-                        new_dsa_run, is_new = await recover_failed_dsa_run(
-                            db, job_run_id=job_run_id,
-                            worker_id=worker_id,
-                            lease_epoch=lease_epoch,
-                        )
-                        await db.commit()
-                        dsa_run_id = new_dsa_run.id
-                        logger.info(
-                            "[AfterClose] DSA recovery 成功: old=%s, new=%s, "
-                            "attempt_no=%s, is_new=%s",
-                            dsa_run.id, new_dsa_run.id,
-                            new_dsa_run.attempt_no, is_new,
-                        )
-                    except DSARecoveryError as recovery_exc:
-                        logger.error(
-                            "[AfterClose] DSA recovery 失败: %s", recovery_exc,
-                        )
-                        raise
+            if dsa_run_id is not None:
+                dsa_already_completed, dsa_run_id = await _claim_or_recover_dsa_run(
+                    db_session_local=AsyncSessionLocal,
+                    dsa_run_id=dsa_run_id,
+                    worker_id=worker_id,
+                    job_run_id=job_run_id,
+                    lease_epoch=lease_epoch,
+                )
+            else:
+                # 首次运行：DSA run 在 2.3 snapshot_run_id 确定后创建，此处跳过 claim。
+                logger.info(
+                    "[AfterClose] computing_features: dsa_run_id 未创建，"
+                    "将在 snapshot_run_id 确定后创建（source_core identity）",
+                )
 
             # 2.3 创建 snapshot run（复用原 feature_snapshot 步骤的 run 生命周期逻辑）
             snapshot_already_published = False
@@ -2654,6 +2727,57 @@ async def execute_after_close_run(
                     "skipped_already_published": True,
                 }
                 snapshot_already_published = True
+
+            # 2.3b [required compatibility projection identity] snapshot_run_id 已确定，
+            # 在此创建 required compatibility projection StrategyRun（首次运行 dsa_run_id 为 None）。
+            # source_core_run_id = snapshot_run_id，requirement = required_compatibility，
+            # claim_for_worker = orchestrator。DSA 算法仍只在 First Pyramid Core 内 Compute Once，
+            # 此 run 仅承接 projection（project_dsa_batch + persist_precomputed_dsa_results），
+            # 不运行第二套 DSA。
+            #
+            # instrument universe 必须与 snapshot_run_id 对应 Core 冻结 universe 完全一致：
+            # 复用 2.3 已解析并传给 snapshot run 的 cached_instrument_ids（同一 frozen universe），
+            # 不得在此重新解析新的 active universe（否则 DSA projection 与 Core 覆盖口径不一致）。
+            if dsa_run_id is None:
+                if snapshot_run_id is None:
+                    raise RuntimeError(
+                        "FEATURE_SNAPSHOT_RUN_ID_MISSING: DSA run 创建前 snapshot_run_id 未确定"
+                    )
+                from app.constants.strategy_keys import DSA_SELECTOR
+                async with AsyncSessionLocal() as db:
+                    dsa_run = await batch_service.create_batch_run(
+                        db=db,
+                        strategy_key=DSA_SELECTOR,
+                        trade_date=trade_date,
+                        run_type="scheduled",
+                        instrument_ids=cached_instrument_ids,
+                        claim_for_worker=f"orchestrator:{worker_id}",
+                        source_core_run_id=snapshot_run_id,
+                        requirement="required_compatibility",
+                    )
+                    await db.commit()
+                    dsa_run_id = dsa_run.id
+                    # 更新 metadata 记录 dsa_run_id（供断点恢复）
+                    job_run = await _get_job_run_or_raise(db, job_run_id)
+                    await _update_orchestrator_status(
+                        db=db,
+                        job_run=job_run,
+                        status=AfterCloseRunStatus.COMPUTING_FEATURES,
+                        message=(
+                            f"已创建 compatibility projection run: dsa_run_id={dsa_run_id}"
+                        ),
+                        dsa_run_id=dsa_run_id,
+                        payload={
+                            "dsa_run_id": str(dsa_run_id),
+                            "source_core_run_id": str(snapshot_run_id),
+                        },
+                    )
+                    await db.commit()
+                logger.info(
+                    "[AfterClose] 已创建 compatibility projection run: dsa_run_id=%s, "
+                    "source_core_run_id=%s",
+                    dsa_run_id, snapshot_run_id,
+                )
 
             # 2.4 写入 run_id 与 last_started_step（UI 不显示待执行，中断后知道从哪步恢复）
             async with AsyncSessionLocal() as db:
