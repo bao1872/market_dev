@@ -28,10 +28,15 @@
 ```text
 市场事实
 → CoreRunContext
-→ 每股统一 core 计算一次
-→ stock_core 原子发布
-→ 并行产品
-   ├─ dsa_projection（兼容投影）
+→ 第一金字塔 Core Compute Once
+   ├─ Trend = DSA
+   ├─ Structure = SMC
+   └─ Momentum
+→ CoreComputationArtifact
+   ├─ stock_core canonical publication
+   └─ DSA compatibility projection（同一 canonical DSA artifact，不重新计算）
+→ stock_core 发布
+→ post-core 产品
    ├─ state_events
    ├─ chip_consensus（daily + 15m 异步增强）
    ├─ auction_anchor（先 structure_only，后续可升级）
@@ -70,7 +75,7 @@
 | `daily_facts` | mandatory input | 目标交易日日线 readiness | 不达标阻断 core |
 | `board_facts` | mandatory input | 正式 board facts run/pointer 与 PIT membership | 不可用阻断对应聚合；复用必须显式 degraded |
 | `stock_core` | mandatory product | 正式 stock_core pointer | 失败则 closure blocked |
-| `dsa_projection` | required compatibility enhancement | 投影 run、source core、版本与 matched coverage | 不撤销 core，但形成 degraded/issue |
+| `dsa_projection` | required compatibility output | 投影 run、source core、版本与 matched coverage | 不撤销 core，但形成 degraded/issue |
 | `state_events` | enhancement | source core、事件生命周期与 coverage | 不阻断 board/Review |
 | `chip_consensus` | enhancement | ChipConsensusRun、逐股 readiness、coverage 与正式 pointer | 不阻断 core/board/Review |
 | `auction_anchor` | enhancement | AuctionAnchorRun、mode、coverage 与正式 pointer | 不阻断 Review |
@@ -78,6 +83,8 @@
 | `market_review` | mandatory product | 正式 Review pointer 与发布质量门 | 失败保留旧 pointer |
 
 每个节点至少返回：`status/readiness/mandatory/runId/publicationId/sourceRunIds/coverage/processed/total/heartbeat/lease/isStale/reasonCode/reasonText/recommendedAction`。
+
+`dsa_projection` 节点独立表达的是 projection 的 persistence / lineage / retry / compatibility readiness，**不代表独立 DSA 业务计算**。它属于"required compatibility output"，与 chip / state_events / auction 这类真正的业务增强（enhancement）不是同一类：业务分类不同，但兼容投影失败仍可能使系统不是 `fully_ready`（老接口兼容链未闭合），此时 reason 应表达为 `compatibility output incomplete`，而不是 "DSA enhancement failed"。
 
 不是所有节点都必须使用 `factor_publications`；领域 PRD 必须明确该节点的 canonical run/pointer/read model，禁止为统一表面形式制造无意义 pointer。
 
@@ -166,13 +173,28 @@ bars、adjustment factor 和 membership 不得读取目标交易日以后；Revi
 
 ### PC-51 Closure
 
+节点按业务角色分三层，避免把兼容输出误当业务增强：
+
+```text
+mandatory products:
+  stock_core / board_aggregation / market_review
+
+required compatibility outputs:
+  dsa_projection（仅对 canonical DSA artifact 做兼容投影，不代表独立 DSA 业务计算）
+
+optional / asynchronous enhancements:
+  state_events / chip_consensus / auction_anchor
+```
+
+业务分类改变不等于 readiness 结果改变：`dsa_projection` 兼容投影未闭合仍可使系统不是 `fully_ready`（老接口兼容链未闭合），但 reason 应表达为 `compatibility output incomplete`，而不是 "DSA enhancement failed"。
+
 | closure | 定义 |
 |---|---|
 | `pending` | mandatory 链尚未形成 stock_core 或仍在运行 |
 | `blocked` | stock_core 或 mandatory publication 失败 |
 | `core_ready` | stock_core 已发布，但 board aggregation/Review 尚未全部 ready |
 | `mandatory_ready_enhancing` | mandatory 全部 ready，但仍有 active/stale 未对账增强任务 |
-| `degraded_ready` | mandatory 全部 ready、增强均终结，但至少一个 required enhancement 降级 |
+| `degraded_ready` | mandatory 全部 ready、增强均终结，但至少一个 required compatibility output（如 dsa_projection）或 enhancement 降级 |
 | `fully_ready` | mandatory 全部 ready、required enhancement 全部达到正式 ready 条件且无 active/stale/unreconciled child |
 
 `mandatoryProductsReady`、`enhancementJobsTerminal` 独立返回；兼容字段 `allProductsReady = (productionClosure == "fully_ready")`。不得把 `mandatory_ready_enhancing` 或 `degraded_ready` 显示为“全部产品已就绪”。
@@ -215,8 +237,8 @@ Seed 只准备 instruments、raw bars、board/auction raw facts、历史 prerequ
 |---|---|
 | mandatory 尚未完成 | pending/core_ready |
 | mandatory ready、chip 等增强仍运行 | mandatory_ready_enhancing |
-| mandatory ready、增强终结但部分不可用 | degraded_ready |
-| mandatory 与 required enhancement 全部完整 | fully_ready |
+| mandatory ready、required compatibility output 或增强终结但部分不可用 | degraded_ready |
+| mandatory、required compatibility output 与增强全部完整 | fully_ready |
 
 ## 11. 完成定义
 

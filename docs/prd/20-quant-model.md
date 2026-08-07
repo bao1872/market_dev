@@ -39,6 +39,8 @@
 
 当前趋势由 DSA VWAP 体系承担，以日线为主。
 
+> **禁止性定义（2026-08-07 语义对齐）：DSA 是第一金字塔 Core 内部的趋势计算，不属于独立业务维度。`dsa_projection` 只是对已计算的 canonical DSA artifact 的兼容投影（compatibility projection），既不是第二套 DSA 计算，也不是第一金字塔之外的增强维度。任何列表、选股、板块或 Review 路径都不得另算一套 DSA。**
+
 ### QM-12 趋势段与成交量
 
 每段趋势至少记录：

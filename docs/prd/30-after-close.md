@@ -31,7 +31,7 @@
 
 ### AC-05 固定参数一次计算
 
-正式盘后 DSA 和相关因子每日以固定参数计算一次。页面只筛选已计算结果，不触发策略组合和重新计算。
+正式盘后统一 Core 每日以冻结参数计算一次。DSA 作为第一金字塔 Core 的 Trend 维度，与 SMC、Momentum 等在同一个 CoreRunContext 中 Compute Once；`dsa_projection` 只是对同一 canonical DSA artifact 的兼容投影，scheduled after-close 不存在第二次 DSA 计算。页面只筛选已计算结果，不触发策略组合和重新计算。
 
 ### AC-06 Readiness 门槛
 
@@ -98,7 +98,7 @@
 
 系统只允许 `job_name=after_close_orchestrator`、`run_type=full` 一种盘后任务类型。不得存在 `dsa_only` 独立端点、独立 `mode` 分支或独立 `run_type`。
 
-"从 DSA 阶段重算"通过现有 `force` 端点 + `restart_from="daily_ready"` 参数实现，仍是同一 `after_close` 任务，不创建 `dsa_only` 类型，不跳过后续特征/快照/发布步骤。仅 admin 可用；必须先验证日线覆盖率 ≥ 90%。显式 `restart_from` 必须属于允许的步骤并验证其前置步骤已完成；重启 run 在 `metadata_json` 保存 `parent_job_run_id`、`restart_from` 和重启次数，不新增数据库列。
+重算通过现有 `force` 端点 + `restart_from="daily_ready"` 参数实现，仍是同一 `after_close` 任务，不创建 `dsa_only` 类型，不跳过后续特征/快照/发布步骤。仅 admin 可用；必须先验证日线覆盖率 ≥ 90%。显式 `restart_from` 必须属于允许的步骤并验证其前置步骤已完成；重启 run 在 `metadata_json` 保存 `parent_job_run_id`、`restart_from` 和重启次数，不新增数据库列。`restart_from="daily_ready"` 的语义是重新进入 Core computation：DSA/SMC/Momentum 按统一 Core 合同重新计算一次，后续 projection / board / Review 等正常重建；不存在"从 DSA 阶段单独重算"这一步骤。
 
 状态链：`queued→running→refreshing_daily→syncing_boards→checking_coverage→computing_features→publishing→succeeded`；`StrategyRun` 状态链：`running→completed→published`，异常 → `failed`。不得在发布前伪造 `completed`。
 
@@ -116,7 +116,7 @@
 - 未校验 run 不会成为正式发布结果。
 - 重复执行不会产生无法解释的重复发布。
 - 系统不存在 `dsa_only` 独立端点、独立 mode 分支或独立 run_type。
-- `restart_from="daily_ready"` 从 DSA 阶段重算，仍执行完整后续链路。
+- `restart_from="daily_ready"` 重新进入 Core computation（DSA/SMC/Momentum 统一 Core 合同重新计算一次），仍执行完整后续链路，不存在独立 DSA 阶段重算。
 - Map 对 AC-01 至 AC-16 给出实现状态、入口和验证证据。
 
 ## 4. 增量发布架构需求（CHANGE-20260729-006/007）
