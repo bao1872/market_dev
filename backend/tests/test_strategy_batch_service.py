@@ -484,9 +484,10 @@ async def test_create_batch_run_force_restart_new_attempt_for_published(
     """[granular restart new attempt] force_restart=True 时，published 的 compatibility run
     也创建 attempt_no + 1（保留旧 run，不原地修改），而 queued/running 仍复用。
 
-    - published 的 projection run + force_restart=True → 新 attempt（attempt_no+1）。
-    - 同一 source_core 再次 force_restart → 再次 attempt_no+1（不复用已 published 的旧 run）。
-    - 旧 run 保留（不原地改 status）。
+    合同（Invariant 2）：
+    - run1(published) + force_restart → run2(attempt 2)：新 ID、旧 run1 保留（status 不变）。
+    - run2(queued) + force_restart → **复用 run2**（active run 仍复用，不得新建）。
+    - 将 run2 推进为 published 后再次 force_restart → run3(attempt 3)：新 ID、旧 run2 保留。
     """
     import uuid
 
@@ -511,7 +512,7 @@ async def test_create_batch_run_force_restart_new_attempt_for_published(
     run1.status = "published"
     await db_session.flush()
 
-    # force_restart → published run 不再阻塞，创建 attempt_no+1
+    # force_restart → published run1 不再阻塞，创建 attempt_no+1
     run2 = await service.create_batch_run(
         db_session,
         strategy_key="dsa_selector",
@@ -527,7 +528,22 @@ async def test_create_batch_run_force_restart_new_attempt_for_published(
     # 旧 run 保留（不原地修改 status）
     assert run1.status == "published"
 
-    # 再次 force_restart → 再次 attempt_no+1
+    # run2 当前为 queued（active run）：force_restart → 复用 run2，不新建
+    run2_again = await service.create_batch_run(
+        db_session,
+        strategy_key="dsa_selector",
+        trade_date=trade_date,
+        run_type="scheduled",
+        instrument_ids=[inst.id],
+        source_core_run_id=core,
+        requirement="required_compatibility",
+        force_restart=True,
+    )
+    assert run2_again.id == run2.id, "queued active run 应被复用（不得新建）"
+
+    # 将 run2 推进为 published 后再次 force_restart → attempt_no+1（run3）
+    run2.status = "published"
+    await db_session.flush()
     run3 = await service.create_batch_run(
         db_session,
         strategy_key="dsa_selector",
@@ -538,8 +554,10 @@ async def test_create_batch_run_force_restart_new_attempt_for_published(
         requirement="required_compatibility",
         force_restart=True,
     )
-    assert run3.id != run2.id
+    assert run3.id != run2.id, "published run2 + force_restart 应创建新 attempt"
     assert run3.attempt_no == (run2.attempt_no or 1) + 1
+    # 旧 run2 保留（不原地修改 status）
+    assert run2.status == "published"
 
 
 if __name__ == "__main__":
