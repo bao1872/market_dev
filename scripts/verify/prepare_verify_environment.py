@@ -13,10 +13,12 @@
 attempt.env 内容（最小必要）：
   DATABASE_URL / MIGRATION_DATABASE_URL  → 精确验证库 bz_stock_verify_<SHA>
   TARGET_SHA                            → exact 40 位 SHA
-  ATTEMPT_ID                            → 本次 attempt 标识（供 evidence 路径）
   JWT_SECRET                            → fresh 随机 secret（attempt scoped）
   APP_ENV / PANJI_SCHEDULER_ENABLED     → 稳定验证环境标志
   PANJI_VERIFY_PG_NETWORK               → 共享 PG 网络（供 fresh process 连接 trading-postgres）
+
+注意：attempt_id 由 VerifyAttempt 自身生成（_gen_attempt_id），不写入 attempt.env，
+避免 env 中冗余且未消费的标识（取消 process ownership 后 ATTEMPT_ID 已无意义）。
 """
 
 from __future__ import annotations
@@ -26,7 +28,6 @@ import json
 import secrets
 import stat
 import subprocess
-import uuid
 from pathlib import Path
 from urllib.parse import quote
 
@@ -81,13 +82,11 @@ def prepare(target_sha: str, output: Path) -> Path:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     (runtime_dir / "RUNTIME_SHA").write_text(target_sha, encoding="ascii")
 
-    attempt_id = uuid.uuid4().hex
     lines = {
         # attempt-specific（由 verify_exec.py 动态注入，不进 container create env）
         "DATABASE_URL": database_url,
         "MIGRATION_DATABASE_URL": migration_database_url,
         "TARGET_SHA": target_sha,
-        "ATTEMPT_ID": attempt_id,
         "JWT_SECRET": secrets.token_urlsafe(48),
         # 稳定标志（也写入 attempt.env 以便 fresh process 一致性；容器常驻 env 同样持有）
         "APP_ENV": "verification",

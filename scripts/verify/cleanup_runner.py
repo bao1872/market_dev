@@ -176,14 +176,17 @@ def cleanup_attempt(manifest_path: str | Path) -> dict:
     # 不 FLUSHALL。cleanup 只负责 attempt 精确资源：精确 drop 验证库 + 标记状态。
     # 常驻容器的临时执行状态恢复由 verify_attempt.recover_container（docker restart）负责。
     if compose_project:
-        if _is_protected(compose_project, "container"):
-            # 固定 project 常驻容器：受保护，绝不可删除
+        if compose_project == "panji-verify":
+            # [CHANGE-20260806-012] 单可复用运行时：固定 project 常驻，不删、不算 cleanup failure
+            pass
+        elif _is_protected(compose_project, "container"):
+            # 其他受保护 project：拒绝删除（纵深防御）
             summary["blocked_cleanup"] = True
             summary["blocked_reasons"].append(
                 f"compose project '{compose_project}' 受保护，拒绝删除常驻栈（防误删）"
             )
         else:
-            # 任何非常驻 compose project 都不允许 cleanup 触碰（纵深防御）
+            # 任何非常驻/未登记 compose project 都不允许 cleanup 触碰（纵深防御）
             summary["blocked_cleanup"] = True
             summary["blocked_reasons"].append(
                 f"compose project '{compose_project}' 未登记为可清理，拒绝删除"

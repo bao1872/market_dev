@@ -32,7 +32,6 @@ VERIFY_LOCK="/root/.panji-verify/verify.lock"
 RUNTIME_DIR="/root/.panji-verify/runtime"          # 固定 runtime 控制路径（只读 mount 进容器）
 ATTEMPT_ENV_FILE="${RUNTIME_DIR}/attempt.env"
 RUNTIME_SHA_FILE="${RUNTIME_DIR}/RUNTIME_SHA"
-DEP_HASH_FILE="${RUNTIME_DIR}/dependency_hash"      # 仅本地落盘缓存，非权威源（label 为准）
 EVIDENCE_ROOT="/root/.panji-verify/evidence"
 
 # Compose 必填变量（docker-compose.verify.yml 以 :? 声明，必须由本入口 export）
@@ -46,16 +45,32 @@ if [[ -z "${VERIFY_PG_NETWORK}" ]]; then
 fi
 
 # ───────────────────────────── 参数 ─────────────────────────────
+# 外部 CLI 合同：第二个参数为 plan name（仅接受 full-closure，由 scripts/ops/panji-verify 传入）。
+# 本入口内部把它映射为磁盘上的 plan 文件路径，不引入 plan registry / 动态扫描。
 SHA="${1:-}"
-PLAN_NAME="${2:-full-closure}"
+PLAN_NAME="${2:-}"
 if [[ -z "${SHA}" ]]; then
-  echo "usage: run_remote_verification.sh <40hex-sha> [plan]" >&2
+  echo "usage: run_remote_verification.sh <40hex-sha> [plan-name]" >&2
   exit 2
 fi
 if [[ ! "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "error: SHA 必须为 40 位 hex（received: ${SHA}）" >&2
   exit 2
 fi
+
+case "${PLAN_NAME}" in
+  full-closure)
+    PLAN_PATH="scripts/verify/plans/full-closure.json"
+    ;;
+  "")
+    echo "error: plan name 不能为空（传入 full-closure）" >&2
+    exit 80
+    ;;
+  *)
+    echo "error: unregistered plan '${PLAN_NAME}'" >&2
+    exit 80
+    ;;
+esac
 
 mkdir -p "${RUNTIME_DIR}" "${EVIDENCE_ROOT}"
 
@@ -138,9 +153,6 @@ ensure_verify_runtime() {
     fi
     echo "verify runtime ready (reused)"
   fi
-
-  # 落盘缓存（仅本地参考，非权威源；权威为 image label）
-  printf '%s' "${expected_hash}" > "${DEP_HASH_FILE}"
 }
 
 # ───────────────────────────── Single-Flight 最外层 ─────────────────────────────
@@ -151,11 +163,16 @@ if ! flock -n 9; then
 fi
 
 cleanup_on_exit() {
+  # 第一行保存 trap 触发点的退出码（主流程退出码），避免被后续命令重置
+  local rc=$?
   # 释放锁（保留容器/镜像/网络/PG/Redis，仅清 attempt 临时状态）
   rm -f "${ATTEMPT_ENV_FILE}" "${RUNTIME_SHA_FILE}" || true
-  # [CHANGE-20260806-012] SSH 断连/timeout 场景：持锁的最外层负责恢复常驻容器干净环境
-  # （杀容器内所有验证进程、不删 container/image/network/PG/Redis/稳定栈、保留 bind mount）
-  docker restart "${VERIFY_CONTAINER}" >/dev/null 2>&1 || true
+  # [CHANGE-20260806-012] 仅在异常/失败/中断时恢复常驻容器干净环境：
+  # 杀容器内所有验证进程、不删 container/image/network/PG/Redis/稳定栈、保留 bind mount。
+  # 成功闭环不 restart（避免与正常路径重复；verify_attempt 已自行清理临时状态）。
+  if [[ "${rc}" -ne 0 ]]; then
+    docker restart "${VERIFY_CONTAINER}" >/dev/null 2>&1 || true
+  fi
   echo "single-flight lock released"
 }
 trap cleanup_on_exit EXIT
@@ -195,7 +212,7 @@ ensure_verify_runtime || { echo "error: verification_environment_broken"; exit 3
 # VerifyAttempt 内不再持有第二层锁；attempt.env 已由 prepare_verify_environment.py 生成到 RUNTIME_DIR
 python3 scripts/verify/verify_attempt.py \
   --sha "${SHA}" \
-  --plan "${PLAN_NAME}" \
+  --plan "${PLAN_PATH}" \
   --runtime-dir "${RUNTIME_DIR}" \
   --evidence-root "${EVIDENCE_ROOT}" \
   --compose-project "${COMPOSE_PROJECT}" \

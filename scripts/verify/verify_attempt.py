@@ -316,11 +316,17 @@ class VerifyAttempt:
             self.exporter.log(f"assert_identity {label}:\n{diagnostic}")
 
     def run_self_contained_pg_tests(self) -> None:
-        """运行自包含 PG 测试（fresh process in panji-verify-python）。"""
+        """运行自包含基础 PG 测试（fresh process in panji-verify-python）。
+
+        基础 PG Gate 职责：atomic publication / projection lifecycle / 100-stock call counts。
+        closure 场景测试由 E2E Gate 负责，避免两道 Gate 重复同一测试（覆盖回退）。
+        """
         self.exporter.log("run_self_contained_pg_tests: 开始")
         code, out, err = _run(
             [*self.gate_base, "pytest", "-m", "postgres",
-             "tests/test_pg_seed_scenario_closures.py"],
+             "tests/test_pg_atomic_publication.py",
+             "tests/test_pg_projection_lifecycle.py",
+             "tests/test_pg_100_stock_call_counts.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:
@@ -329,7 +335,10 @@ class VerifyAttempt:
             self.exporter.record_gate("pg_tests", False, detail=diagnostic[-2000:])
             raise RuntimeError(f"自包含 PG 测试失败 (exit={code})")
         self.manifest["status"] = "pg_tests_ok"
-        self.exporter.record_gate("pg_tests", True, detail="atomic/projection/100-stock 全过")
+        self.exporter.record_gate(
+            "pg_tests", True,
+            detail="atomic_publication / projection_lifecycle / 100_stock_call_counts 全过",
+        )
         self.exporter.log("run_self_contained_pg_tests: 通过")
 
     def run_synthetic_seed_twice(self) -> None:
@@ -390,17 +399,19 @@ class VerifyAttempt:
             sys.stderr.write(f"[WARN] cleanup 失败: {exc}\n")
             return False
 
-    def recover_container(self) -> None:
-        """异常/timeout/interrupted 恢复：重启常驻容器杀掉所有验证进程。
+    def _clear_attempt_state(self) -> None:
+        """删除 attempt 临时状态文件（attempt.env / RUNTIME_SHA）。
 
-        保留 container/image/bind mount，不影响 PG/Redis/稳定栈。
+        必须在 verify_cleanup() 校验前执行，否则 verify_cleanup 会因文件尚在而返回 False。
+        不删 container/image/network/PG/Redis；不 compose down；不 FLUSHALL。
         """
-        self.exporter.log("recover_container: docker restart panji-verify-python")
-        _run(["docker", "restart", self.verify_container], timeout=120)
-        # 确认恢复
-        _, out, _ = _run(["docker", "ps", "--format", "{{.Names}}"], timeout=30)
-        if self.verify_container not in out.split():
-            self.exporter.log("recover_container: 容器未恢复（需人工介入）")
+        for f in (self.attempt_env_file, self.runtime_dir / "RUNTIME_SHA"):
+            try:
+                if f.exists():
+                    f.unlink()
+                    self.exporter.log(f"_clear_attempt_state: removed {f}")
+            except OSError as exc:
+                self.exporter.log(f"_clear_attempt_state: 删除 {f} 失败（{exc}）")
 
     def verify_cleanup(self) -> bool:
         """清理后校验（状态校验，不再要求 compose==0，因容器常驻）：
@@ -457,9 +468,11 @@ class VerifyAttempt:
             self.exporter.log(f"attempt 失败: {type(exc).__name__}: {exc}")
         finally:
             self.export_evidence()
-            # 异常/timeout/interrupted → restart 容器恢复干净环境
+            # 异常/timeout/interrupted → restart 容器恢复干净环境（仅失败路径，成功不 restart）
             if exit_code != 0:
                 self.recover_container()
+            # 先清 attempt 临时状态（attempt.env / RUNTIME_SHA），再校验 cleanup
+            self._clear_attempt_state()
             cleanup_ok = self.cleanup_exact_attempt_resources() and self.verify_cleanup()
             if not cleanup_ok:
                 exit_code = 70

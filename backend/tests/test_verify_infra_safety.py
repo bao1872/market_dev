@@ -201,7 +201,8 @@ def test_prepare_environment_keeps_secret_in_mode_600(
     # 本轮 verification 只连 PG，不连 Redis（CHANGE-012 一次性审计结论）
     assert "REDIS_URL" not in content
     # attempt-scoped 必要变量齐备，供 verify_exec.py 注入 fresh process
-    for required in ("DATABASE_URL=", f"TARGET_SHA={FULL_SHA}", "ATTEMPT_ID=", "JWT_SECRET="):
+    # [CHANGE-20260806-012] ATTEMPT_ID 已移除（不再下发，由 VerifyAttempt 内部自管）
+    for required in ("DATABASE_URL=", f"TARGET_SHA={FULL_SHA}", "JWT_SECRET="):
         assert required in content
     # RUNTIME_SHA 与 attempt.env 同处固定 runtime 目录（容器只读挂载 /run/panji-verify/）
     assert (output.parent / "RUNTIME_SHA").read_text() == FULL_SHA
