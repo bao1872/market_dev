@@ -696,7 +696,7 @@ async def _synthetic_board_snapshot() -> BoardSnapshot:
     # [性能 / 路径2] 流式迭代（yield_per）而非 rows.all() 全量驻留：67,600 条 membership
     # 一次性 materialize 会占用大量内存。逐行消费并累积到 memberships 字典。
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
+        result = await db.stream(
             text(
                 "SELECT b.external_code, b.name, b.type, m.instrument_id, i.symbol "
                 "FROM market_board_memberships m "
@@ -704,7 +704,7 @@ async def _synthetic_board_snapshot() -> BoardSnapshot:
                 "JOIN instruments i ON i.id = m.instrument_id"
             ).execution_options(yield_per=500)
         )
-        for ext_code, nm, typ, _inst_id, symbol in result:
+        async for ext_code, nm, typ, _inst_id, symbol in result:
             key = (ext_code, typ)
             if key not in seen_boards:
                 seen_boards.add(key)
