@@ -6,7 +6,7 @@
 基础镜像 / 来源不明资源；禁止全局 prune 与模糊 DB drop。清理失败标记 blocked_cleanup
 并停止新建资源（等价用户计划 §16 finally 合同的 cleanup 分支）。
 
-本模块被 verify_attempt.py 的 finally 调用，也可由 panji-verify-run 在超时/中断后单独调用
+本模块被 verify_attempt.py 的 finally 调用，也可在超时/中断后由运维手工单独调用
 （传入 attempt manifest 路径）完成补偿清理。
 
 用法：
@@ -37,6 +37,8 @@ PROTECTED_CONTAINERS = {
     "verify-redis",
     "web_dev",
     "web_dev_verify",
+    # [CHANGE-20260806-012] 单可复用验证运行时：常驻容器与固定 project 纵深防御
+    "panji-verify-python",
 }
 
 PROTECTED_IMAGES = {
@@ -62,6 +64,8 @@ PROTECTED_PREFIXES = (
     "web_dev",
     "panji-prod",
     "main-",
+    # [CHANGE-20260806-012] 固定 project panji-verify 常驻，禁止清理
+    "panji-verify",
 )
 
 CLEANUP_JSON_NAME = "cleanup.json"
@@ -167,24 +171,25 @@ def cleanup_attempt(manifest_path: str | Path) -> dict:
     compose_project = manifest.get("compose_project")
     evidence_dir = manifest.get("evidence_dir")
 
-    # 1) 删除 compose 项目资源。禁止 -v，验证栈不得删除任何共享 Volume。
+    # [CHANGE-20260806-012] 减法重构：单可复用运行时（固定 project panji-verify + 常驻
+    # panji-verify-python 容器）不在 attempt cleanup 中删除、不执行 compose 删除命令、不删 Volume、
+    # 不 FLUSHALL。cleanup 只负责 attempt 精确资源：精确 drop 验证库 + 标记状态。
+    # 常驻容器的临时执行状态恢复由 verify_attempt.recover_container（docker restart）负责。
     if compose_project:
         if _is_protected(compose_project, "container"):
+            # 固定 project 常驻容器：受保护，绝不可删除
             summary["blocked_cleanup"] = True
-            summary["blocked_reasons"].append(f"compose project '{compose_project}' 受保护")
+            summary["blocked_reasons"].append(
+                f"compose project '{compose_project}' 受保护，拒绝删除常驻栈（防误删）"
+            )
         else:
-            compose_file = manifest.get("compose_file")
-            cmd = ["docker", "compose", "-p", compose_project]
-            if compose_file:
-                cmd += ["--env-file", manifest.get("env_file", ""), "-f", compose_file]
-            cmd += ["down", "--remove-orphans"]
-            code, _out, err = _run(cmd)
-            if code == 0:
-                summary["removed_compose_project"] = True
-            else:
-                summary["errors"].append(f"compose down 失败: {err.strip()}")
+            # 任何非常驻 compose project 都不允许 cleanup 触碰（纵深防御）
+            summary["blocked_cleanup"] = True
+            summary["blocked_reasons"].append(
+                f"compose project '{compose_project}' 未登记为可清理，拒绝删除"
+            )
 
-    # 2) 精确 drop 验证库（manifest 精确库名 + 永久保护清单）
+    # 1) 精确 drop 验证库（manifest 精确库名 + 永久保护清单）
     if verify_database:
         db_result = _safe_drop_database(verify_database)
         summary["dropped_database"] = db_result

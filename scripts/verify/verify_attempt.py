@@ -1,54 +1,58 @@
 #!/usr/bin/env python3
-"""V2.1 远程验证尝试执行器（CHANGE-20260806-008, Phase 1）。
+"""单可复用验证运行时 attempt 执行器（CHANGE-20260806-012, 减法版）。
 
 [DS-110 / DS-112 / rules/80] 单次远程验证尝试的编排核心，运行于 panji-prod 已有
 PostgreSQL 容器内（Live Mount 只读挂载 backend/app + alembic + scripts/verify）。
 
-attempt 身份模型：
-  - target_sha       : 本次验证的代码精确 SHA（来自 git rev-parse HEAD，由 panji-verify-run 传入）
-  - attempt_id       : 本次尝试唯一 ID（target_sha 派生 + 时间戳）
-  - verify_database  : bz_stock_verify_<sha>（DS-110，位于已有 PG 容器，不新建容器/Volume）
-  - compose_project  : 本次尝试的 compose project（精确隔离，避免串扰）
-  - evidence_dir     : 本次尝试专属证据目录（精确删除，禁止删共享目录）
+架构（2026-08-06 减法重构）：
+  - 单可复用验证镜像 panji-verify-runtime:current
+  - 单一长期容器 panji-verify-python（常驻空闲，禁 Scheduler/Worker/Uvicorn/pytest/seed）
+  - 复用 trading-postgres（验证库 bz_stock_verify_<SHA>）
+  - 本轮 verification 不连接 Redis（一次性审计：full-closure 仅连 PG）
+  - attempt 仅隔离执行状态（SHA/DB/process/env/evidence）
+  - 最外层 single-flight flock 由 run_remote_verification.sh 持有，本文件不再加锁
+  - 每个 gate 用 fresh process：`docker exec panji-verify-python verify_exec.py <cmd>`
+    verify_exec.py 从 /run/panji-verify/attempt.env 动态注入 attempt env
+  - 异常/timeout/interrupted 恢复：`docker restart panji-verify-python`（杀容器所有验证进程、
+    不删 container/image、不影响 PG/Redis/稳定栈、保留 bind mount）
 
-状态机（等价用户计划 §16）：
-  created → preflight_passed → db_created → migration_ok → runtime_up →
-  identity_ok → pg_tests_ok → seed_twice_ok → e2e_ok → cleanup_completed
+状态机：
+  created → preflight_passed → db_created → migration_ok → identity_ok →
+  pg_tests_ok → seed_twice_ok → e2e_ok → cleanup_completed
   任一阶段异常 → failed → finally(export_evidence + cleanup_exact_attempt_resources + verify_cleanup)
 
 finally 合同（失败也必须执行）：
   try:
       run_preflight(); create_verify_database(); run_migration_round_trip()
-      start_verify_runtime(); assert_identity()
+      assert_identity()
       run_self_contained_pg_tests(); run_synthetic_seed_twice(); run_synthetic_e2e()
   except (KeyboardInterrupt, Exception):
       result = "failed"
   finally:
       export_evidence(); cleanup_exact_attempt_resources(); verify_cleanup()
 
-退出码：0=成功闭环；非0=失败（细节在 evidence_dir/summary.md）。
+退出码：0=成功闭环；60=KeyboardInterrupt；50=gate 失败；70=blocked_cleanup；
+       75=verification_busy（仅最外层锁持有）；异常可加 restart 恢复标记。
 
-用法（由 scripts/ops/panji-verify 在远程环境调用）：
+用法（由 scripts/verify/run_remote_verification.sh 在远程环境调用）：
   python scripts/verify/verify_attempt.py \
-      --target-sha <FULL_SHA> \
-      --verify-db-url postgresql+asyncpg://bz:***@trading-postgres:5432/bz_stock_verify_<sha> \
-      --compose-project panji-verify-<sha> \
-      --env-file /path/to/.env.verify \
-      --compose-file docker-compose.verify.yml
+      --sha <FULL_SHA> \
+      --plan full-closure \
+      --runtime-dir /root/.panji-verify/runtime \
+      --evidence-root /root/.panji-verify/evidence \
+      --compose-project panji-verify \
+      --verify-container panji-verify-python
 """
 from __future__ import annotations
 
 import argparse
-import fcntl
-import json
 import os
 import subprocess
 import sys
 import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 
 # 本文件与 cleanup_runner / evidence_exporter 同目录
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -60,6 +64,12 @@ from verification_plan import VerificationPlan, load_plan
 
 VERIFY_DB_RE = _verify_db_re()
 
+# 固定常量（与 run_remote_verification.sh 一致，不随 SHA 变化）
+COMPOSE_PROJECT = "panji-verify"
+VERIFY_CONTAINER = "panji-verify-python"
+VERIFY_EXEC = "/app/scripts/verify/verify_exec.py"  # Live Mount 内路径
+ATTEMPT_ENV_IN_CONTAINER = "/run/panji-verify/attempt.env"  # 只读 mount 进容器
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -67,7 +77,7 @@ def _utcnow() -> str:
 
 def _gen_attempt_id(target_sha: str) -> str:
     short = target_sha[:12]
-    return f"verify-{short}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    return f"verify-{short}-{int(time.time())}-{os.urandom(4).hex()}"
 
 
 def _assert_verify_db_name(db_name: str) -> None:
@@ -105,62 +115,71 @@ def _db_name_from_url(url: str) -> str:
     return url.rsplit("/", 1)[-1].split("?")[0]
 
 
-class VerifyAttempt:
-    """单次验证尝试编排器。"""
+def _redact_output(stdout: str, stderr: str, env_file: str) -> str:
+    """Bound command evidence and remove every attempt-scoped secret value."""
+    diagnostic = (stdout + stderr)[-12000:]
+    for key in ("DATABASE_URL", "MIGRATION_DATABASE_URL", "JWT_SECRET"):
+        try:
+            diagnostic = diagnostic.replace(_read_env_value(env_file, key), "[REDACTED]")
+        except RuntimeError:
+            pass
+    return diagnostic
 
-    def __init__(self, *, target_sha: str, compose_project: str,
-                 env_file: str, compose_file: str, evidence_root: str,
-                 plan: VerificationPlan) -> None:
+
+class VerifyAttempt:
+    """单次验证尝试编排器（单可复用运行时）。"""
+
+    def __init__(self, *, target_sha: str, runtime_dir: str, evidence_root: str,
+                 compose_project: str, verify_container: str, plan: VerificationPlan) -> None:
         if len(target_sha) != 40 or any(ch not in "0123456789abcdef" for ch in target_sha):
             raise ValueError("target_sha must be a complete 40-character lowercase hex SHA")
+
         self.target_sha = target_sha
-        self.verify_db_url = _read_env_value(env_file, "DATABASE_URL")
+        self.runtime_dir = Path(runtime_dir)
+        self.attempt_env_file = self.runtime_dir / "attempt.env"
+        if not self.attempt_env_file.is_file():
+            raise RuntimeError(f"attempt.env not found at {self.attempt_env_file}")
+        self.verify_db_url = _read_env_value(self.attempt_env_file, "DATABASE_URL")
         self.db_name = _db_name_from_url(self.verify_db_url)
         _assert_verify_db_name(self.db_name)
         if self.db_name != f"bz_stock_verify_{target_sha}":
             raise ValueError("verify database must be derived from the complete target SHA")
-        if compose_project != f"panji-verify-{target_sha}":
-            raise ValueError("compose project must be derived from the complete target SHA")
 
+        # 固定 project（不再 per-SHA）
+        if compose_project != COMPOSE_PROJECT:
+            raise ValueError(f"compose project must be fixed '{COMPOSE_PROJECT}'")
         self.compose_project = compose_project
-        self.env_file = env_file
-        self.compose_file = compose_file
+        self.verify_container = verify_container
         self.plan = plan
-        self._lock_file: TextIO | None = None
         self.attempt_id = _gen_attempt_id(target_sha)
-        self.evidence_dir = (
-            Path(evidence_root) / self.attempt_id
-        )
+        self.evidence_dir = Path(evidence_root) / self.attempt_id
         self.manifest: dict[str, Any] = {
             "attempt_id": self.attempt_id,
             "target_sha": self.target_sha,
             "verify_database": self.db_name,
             "compose_project": self.compose_project,
-            "compose_file": str(compose_file),
-            "env_file": str(env_file),
+            "verify_container": self.verify_container,
+            "attempt_env_file": str(self.attempt_env_file),
             "evidence_dir": str(self.evidence_dir),
             "status": "created",
             "plan": self.plan.name,
             "runtime_mode": "verification",
+            "uses_redis": False,
             "created_at": _utcnow(),
         }
         self.exporter = EvidenceExporter(self.evidence_dir, self.manifest)
-        self.compose_base = [
-            "docker", "compose", "-p", self.compose_project,
-            "--env-file", self.env_file, "-f", self.compose_file,
+        # fresh process 执行封装：docker exec <container> verify_exec.py <cmd>
+        # verify_exec.py 从 /run/panji-verify/attempt.env 动态注入 attempt env
+        self.gate_base = [
+            "docker", "exec", self.verify_container, "python3", VERIFY_EXEC,
         ]
 
     # -- 阶段实现 ----------------------------------------------------------
 
     def run_preflight(self) -> None:
-        """预检：RUNTIME_SHA 与 git HEAD 一致；compose config 通过；DB 名合法。"""
+        """预检：RUNTIME_SHA 与 git HEAD 一致；DB 名合法；容器存活。"""
         self.exporter.log("preflight: 开始")
-        lock_path = Path(os.environ.get("PANJI_VERIFY_LOCK", "/tmp/panji-verify.lock"))
-        self._lock_file = lock_path.open("a+")
-        try:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("another verification attempt is active") from exc
+        # single-flight 由最外层 flock 保证，本处不再加锁
         code, head, err = _run(["git", "rev-parse", "HEAD"], timeout=30)
         if code != 0 or head.strip() != self.target_sha:
             raise RuntimeError(f"remote repo SHA mismatch: {head.strip()} {err.strip()}")
@@ -169,11 +188,12 @@ class VerifyAttempt:
             raise RuntimeError("remote verification checkout is not clean")
         if not VERIFY_DB_RE.match(self.db_name):
             raise RuntimeError(f"preflight: 非法验证库名 {self.db_name}")
-        code, _out, err = _run([*self.compose_base, "config"], timeout=60)
-        if code != 0:
-            raise RuntimeError(f"preflight: compose config 失败: {err.strip()}")
+        # 容器存活检查（常驻 panji-verify-python）
+        code, out, _ = _run(["docker", "ps", "--format", "{{.Names}}"], timeout=30)
+        if self.verify_container not in out.split():
+            raise RuntimeError(f"preflight: 容器 {self.verify_container} 未运行")
         self.manifest["status"] = "preflight_passed"
-        self.exporter.record_gate("preflight", True, detail="RUNTIME_SHA 一致 + compose config 通过")
+        self.exporter.record_gate("preflight", True, detail="RUNTIME_SHA 一致 + 容器存活")
         self.exporter.log("preflight: 通过")
 
     def create_verify_database(self) -> None:
@@ -204,15 +224,13 @@ class VerifyAttempt:
         revisions: list[str] = []
         for operation, target in steps:
             code, _out, err = _run(
-                [*self.compose_base, "run", "--rm", "verify-test", "alembic", "-c",
-                 "/app/alembic.ini", operation, target],
+                [*self.gate_base, "alembic", "-c", "/app/alembic.ini", operation, target],
                 timeout=self.plan.timeouts["migration"],
             )
             if code != 0:
                 raise RuntimeError(f"migration {operation} {target} failed: {err.strip()}")
             code, out, err = _run(
-                [*self.compose_base, "run", "--rm", "verify-test", "alembic", "-c",
-                 "/app/alembic.ini", "current"], timeout=60,
+                [*self.gate_base, "alembic", "-c", "/app/alembic.ini", "current"], timeout=60,
             )
             if code != 0 or not out.strip():
                 raise RuntimeError(f"migration revision assertion failed: {err.strip()}")
@@ -224,84 +242,89 @@ class VerifyAttempt:
         )
         self.exporter.log("migration_round_trip: 完成")
 
-    def start_verify_runtime(self) -> None:
-        """起验证运行时（backend + redis），等待就绪。"""
-        self.exporter.log("start_verify_runtime: 开始")
-        code, _out, err = _run([*self.compose_base, "up", "-d", "verify-redis", "verify-backend"], timeout=self.plan.timeouts["runtime"])
-        if code != 0:
-            raise RuntimeError(f"start_verify_runtime 失败: {err.strip()}")
-        self.exporter.record_resource("compose", f"project={self.compose_project}")
-        # 探针：/v1/version 返回 runtime_git_sha + deployment_mode==live
-        time.sleep(5)
-        self.manifest["status"] = "runtime_up"
-        self.exporter.record_gate("runtime_up", True, detail="verify-backend + verify-redis 已起")
-        self.exporter.log("start_verify_runtime: 完成")
-
     def assert_identity(self) -> None:
-        """断言运行时 runtime_git_sha == target_sha 且 deployment_mode==live。"""
-        self.exporter.log("assert_identity: 开始")
-        host_port = os.environ.get("VERIFY_BACKEND_HOST_PORT", "18000")
-        url = f"http://localhost:{host_port}/v1/version"
-        deadline = time.monotonic() + self.plan.timeouts["runtime"]
-        code, out, err = 1, "", "runtime readiness timeout"
-        data: dict[str, Any] | None = None
-        while time.monotonic() < deadline:
-            code, out, err = _run(
-                ["curl", "--fail", "--silent", "--show-error", url], timeout=10,
-            )
-            if code == 0:
-                try:
-                    candidate = json.loads(out)
-                except json.JSONDecodeError:
-                    candidate = None
-                if isinstance(candidate, dict):
-                    data = candidate
-                    break
-            time.sleep(2)
-        if data is None:
-            self._record_runtime_diagnostics()
-            detail = err.strip() or f"invalid response: {out[:200]}"
-            raise RuntimeError(f"assert_identity: 探针在时限内未就绪: {detail}")
-        runtime_sha = data.get("runtime_git_sha")
-        mode = data.get("deployment_mode")
-        if runtime_sha != self.target_sha:
+        """容器内 8 项自检（不依赖 HTTP 探针 / 不启动 verify-backend）。
+
+        1. host git HEAD == target
+        2. /app/RUNTIME_SHA == target
+        3. import path 在 Live Mount（/app 可读）
+        4. mount probe 一致（RUNTIME_SHA 文件可读且 == target）
+        5. APP_ENV == verification（容器内常驻 env）
+        6. DATABASE_URL 指向精确 verify DB
+        7. current_database() == verify DB（psycopg 直连）
+        8. current_database() != bz_stock（fail-closed）
+        """
+        self.exporter.log("assert_identity: 开始（容器内 8 项自检）")
+        checks = [
+            # 1. host git HEAD
+            (["git", "rev-parse", "HEAD"], self.target_sha, "host HEAD == target"),
+            # 2. /run/panji-verify/RUNTIME_SHA（容器只读 mount，非 /app/RUNTIME_SHA）
+            (["cat", "/run/panji-verify/RUNTIME_SHA"], self.target_sha, "/run/panji-verify/RUNTIME_SHA == target"),
+            # 5. APP_ENV
+            (["sh", "-c", "echo $APP_ENV"], "verification", "APP_ENV == verification"),
+            # 6. DATABASE_URL 指向精确 verify DB
+            (["sh", "-c", "echo $DATABASE_URL"], self.verify_db_url, "DATABASE_URL == verify DB"),
+        ]
+        for cmd, expected, label in checks:
+            code, out, err = _run([*self.gate_base, *cmd], timeout=60)
+            if code != 0 or out.strip() != expected:
+                raise RuntimeError(
+                    f"assert_identity 失败 [{label}]: got='{out.strip()}' err='{err.strip()}'"
+                )
+
+        # 7+8. current_database() 比对（psycopg 直连验证库）
+        # fail-closed：当前连接必须是精确 verify DB，且不能是 bz_stock。
+        pg_check = (
+            "import psycopg,os,sys;"
+            "conn=psycopg.connect(os.environ['DATABASE_URL']);"
+            "cur=conn.cursor();cur.execute('SELECT current_database()');"
+            "db=cur.fetchone()[0];"
+            "conn.close();"
+            f"sys.exit(0 if (db=='{self.db_name}' and db!='bz_stock') else 1)"
+        )
+        code, out, err = _run(
+            [*self.gate_base, "python3", "-c", pg_check], timeout=60,
+        )
+        if code != 0:
             raise RuntimeError(
-                f"assert_identity: runtime_git_sha({runtime_sha}) != target_sha({self.target_sha})"
+                f"assert_identity 失败 [current_database 比对]: "
+                f"db!={self.db_name} 或误连 bz_stock; out='{out.strip()}' err='{err.strip()}'"
             )
-        if mode != "live" or self.manifest["runtime_mode"] != "verification":
-            raise RuntimeError("verification runtime identity or live mount identity is invalid")
+        # 3+4. import path + mount probe（/app 可读 + RUNTIME_SHA 一致）
+        probe = (
+            "import os,sys;"
+            f"assert os.path.isdir('/app'), '/app not mounted';"
+            f"sha=open('/run/panji-verify/RUNTIME_SHA').read().strip();"
+            f"sys.exit(0 if sha=='{self.target_sha}' else 1)"
+        )
+        code, out, err = _run([*self.gate_base, "python3", "-c", probe], timeout=60)
+        if code != 0:
+            raise RuntimeError(f"assert_identity 失败 [Live Mount probe]: err='{err.strip()}'")
+
         self.manifest["status"] = "identity_ok"
-        self.exporter.record_gate("identity", True, detail=f"runtime_git_sha={runtime_sha} mode=live")
+        self.exporter.record_gate("identity", True, detail="容器内 8 项自检通过（含 current_database 比对）")
         self.exporter.log("assert_identity: 通过")
 
     def _record_runtime_diagnostics(self) -> None:
         """Record bounded, secret-redacted diagnostics before attempt cleanup."""
         for label, command in (
-            ("compose_ps", [*self.compose_base, "ps", "--all"]),
-            ("backend_logs", [*self.compose_base, "logs", "--no-color", "--tail", "120", "verify-backend"]),
+            ("container_ps", ["docker", "ps", "--format", "{{.Names}}"]),
+            ("container_logs", ["docker", "logs", "--no-color", "--tail", "120", self.verify_container]),
         ):
             _code, stdout, stderr = _run(command, timeout=30)
-            diagnostic = self._redact_output(stdout, stderr)
+            diagnostic = _redact_output(stdout, stderr, str(self.attempt_env_file))
             self.exporter.log(f"assert_identity {label}:\n{diagnostic}")
 
-    def _redact_output(self, stdout: str, stderr: str) -> str:
-        """Bound command evidence and remove every attempt-scoped secret value."""
-        diagnostic = (stdout + stderr)[-12000:]
-        for key in ("DATABASE_URL", "MIGRATION_DATABASE_URL", "JWT_SECRET"):
-            diagnostic = diagnostic.replace(
-                _read_env_value(self.env_file, key), "[REDACTED]",
-            )
-        return diagnostic
-
     def run_self_contained_pg_tests(self) -> None:
-        """运行自包含 PG 测试（docker compose run --rm verify-test）。"""
+        """运行自包含 PG 测试（fresh process in panji-verify-python）。"""
         self.exporter.log("run_self_contained_pg_tests: 开始")
         code, out, err = _run(
-            [*self.compose_base, "run", "--rm", "verify-test"],
+            [*self.gate_base, "pytest", "-m", "postgres",
+             "tests/test_pg_seed_scenario_closures.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:
-            diagnostic = self._redact_output(out, err)
+            diagnostic = _redact_output(out, err, str(self.attempt_env_file))
             self.exporter.log(f"pg_tests failure output:\n{diagnostic}")
             self.exporter.record_gate("pg_tests", False, detail=diagnostic[-2000:])
             raise RuntimeError(f"自包含 PG 测试失败 (exit={code})")
@@ -314,12 +337,12 @@ class VerifyAttempt:
         self.exporter.log("run_synthetic_seed_twice: 开始")
         for i in range(1, 3):
             code, out, err = _run(
-                [*self.compose_base, "run", "--rm", "verify-test", "python",
-                 "-m", "scripts.verify.seed_v21_verify_data", "--scenario", "all"],
+                [*self.gate_base, "python", "-m", "scripts.verify.seed_v21_verify_data",
+                 "--scenario", "all"],
                 timeout=self.plan.timeouts["seed"],
             )
             if code != 0:
-                diagnostic = self._redact_output(out, err)
+                diagnostic = _redact_output(out, err, str(self.attempt_env_file))
                 self.exporter.log(f"seed 第{i}次 failure output:\n{diagnostic}")
                 self.exporter.record_gate(
                     "seed_twice", False, detail=f"第{i}次 seed 失败: {diagnostic[-2000:]}"
@@ -334,12 +357,12 @@ class VerifyAttempt:
         """端到端产品就绪评估（真实 product_readiness_service 评估 closure 六态）。"""
         self.exporter.log("run_synthetic_e2e: 开始")
         code, out, err = _run(
-            [*self.compose_base, "run", "--rm", "verify-test", "pytest", "-m", "postgres",
+            [*self.gate_base, "pytest", "-m", "postgres",
              "tests/test_pg_seed_scenario_closures.py"],
             timeout=self.plan.timeouts["e2e"],
         )
         if code != 0:
-            diagnostic = self._redact_output(out, err)
+            diagnostic = _redact_output(out, err, str(self.attempt_env_file))
             self.exporter.log(f"e2e failure output:\n{diagnostic}")
             self.exporter.record_gate("e2e", False, detail=diagnostic[-2000:])
             raise RuntimeError(f"synthetic e2e 失败 (exit={code})")
@@ -355,6 +378,10 @@ class VerifyAttempt:
             sys.stderr.write(f"[WARN] export_evidence 失败: {exc}\n")
 
     def cleanup_exact_attempt_resources(self) -> bool:
+        """清理 attempt 精确资源：drop verify DB + 删 attempt.env/RUNTIME_SHA。
+
+        不删 container/image/network/PG/Redis；不 compose down；不 FLUSHALL。
+        """
         try:
             summary = cleanup_attempt(self.evidence_dir / "manifest.json")
             self.exporter.log(f"cleanup_exact_attempt_resources: blocked={summary['blocked_cleanup']}")
@@ -363,8 +390,27 @@ class VerifyAttempt:
             sys.stderr.write(f"[WARN] cleanup 失败: {exc}\n")
             return False
 
+    def recover_container(self) -> None:
+        """异常/timeout/interrupted 恢复：重启常驻容器杀掉所有验证进程。
+
+        保留 container/image/bind mount，不影响 PG/Redis/稳定栈。
+        """
+        self.exporter.log("recover_container: docker restart panji-verify-python")
+        _run(["docker", "restart", self.verify_container], timeout=120)
+        # 确认恢复
+        _, out, _ = _run(["docker", "ps", "--format", "{{.Names}}"], timeout=30)
+        if self.verify_container not in out.split():
+            self.exporter.log("recover_container: 容器未恢复（需人工介入）")
+
     def verify_cleanup(self) -> bool:
-        """清理后校验：验证库已删、compose project 已下。失败记 blocked_cleanup。"""
+        """清理后校验（状态校验，不再要求 compose==0，因容器常驻）：
+
+        - verify DB 已删
+        - attempt.env / RUNTIME_SHA 已清
+        - panji-verify-python 仍健康（未被误删）
+        - trading-postgres 仍健康
+        失败记 blocked_cleanup。
+        """
         self.exporter.log("verify_cleanup: 开始")
         # 校验库已删
         code, out, _ = _run([
@@ -374,10 +420,15 @@ class VerifyAttempt:
         db_gone = (code != 0) or (out.strip() == "0" or out.strip() == "")
         if not db_gone:
             return False
-        # 校验 compose project 已下
-        code, out, _ = _run([*self.compose_base, "ps", "-q"], timeout=60)
-        containers = [c for c in out.splitlines() if c.strip()]
-        if containers:
+        # attempt 临时状态已清
+        if self.attempt_env_file.exists():
+            return False
+        # 常驻容器仍健康
+        code, out, _ = _run(["docker", "ps", "--format", "{{.Names}}"], timeout=30)
+        running = set(out.split())
+        if self.verify_container not in running:
+            return False
+        if "trading-postgres" not in running:
             return False
         self.exporter.log("verify_cleanup: 完成")
         return True
@@ -390,7 +441,6 @@ class VerifyAttempt:
             self.run_preflight()
             self.create_verify_database()
             self.run_migration_round_trip()
-            self.start_verify_runtime()
             self.assert_identity()
             self.run_self_contained_pg_tests()
             self.run_synthetic_seed_twice()
@@ -398,21 +448,18 @@ class VerifyAttempt:
         except KeyboardInterrupt as exc:
             exit_code = 60
             self.manifest["status"] = "failed"
-            self.exporter.record_gate(
-                "attempt", False,
-                detail=f"{type(exc).__name__}: {exc}",
-            )
+            self.exporter.record_gate("attempt", False, detail=f"{type(exc).__name__}: {exc}")
             self.exporter.log(f"attempt 失败: {type(exc).__name__}: {exc}")
         except Exception as exc:  # noqa: BLE001 - evidence must capture every gate failure
             exit_code = 50
             self.manifest["status"] = "failed"
-            self.exporter.record_gate(
-                "attempt", False,
-                detail=f"{type(exc).__name__}: {exc}",
-            )
+            self.exporter.record_gate("attempt", False, detail=f"{type(exc).__name__}: {exc}")
             self.exporter.log(f"attempt 失败: {type(exc).__name__}: {exc}")
         finally:
             self.export_evidence()
+            # 异常/timeout/interrupted → restart 容器恢复干净环境
+            if exit_code != 0:
+                self.recover_container()
             cleanup_ok = self.cleanup_exact_attempt_resources() and self.verify_cleanup()
             if not cleanup_ok:
                 exit_code = 70
@@ -421,28 +468,25 @@ class VerifyAttempt:
                 self.manifest["status"] = "cleanup_completed"
             self.exporter.log(f"attempt exit_code={exit_code}")
             self.export_evidence()
-            if self._lock_file is not None:
-                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
-                self._lock_file.close()
         return exit_code
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target-sha", required=True)
-    ap.add_argument("--compose-project", required=True)
-    ap.add_argument("--env-file", required=True)
-    ap.add_argument("--compose-file", required=True)
+    ap.add_argument("--sha", required=True)
+    ap.add_argument("--plan", default="full-closure")
+    ap.add_argument("--runtime-dir", required=True)
     ap.add_argument("--evidence-root", default="/root/.panji-verify/evidence")
-    ap.add_argument("--plan", default="scripts/verify/plans/full-closure.json")
+    ap.add_argument("--compose-project", default=COMPOSE_PROJECT)
+    ap.add_argument("--verify-container", default=VERIFY_CONTAINER)
     args = ap.parse_args()
 
     attempt = VerifyAttempt(
-        target_sha=args.target_sha,
-        compose_project=args.compose_project,
-        env_file=args.env_file,
-        compose_file=args.compose_file,
+        target_sha=args.sha,
+        runtime_dir=args.runtime_dir,
         evidence_root=args.evidence_root,
+        compose_project=args.compose_project,
+        verify_container=args.verify_container,
         plan=load_plan(args.plan),
     )
     return attempt.run()
