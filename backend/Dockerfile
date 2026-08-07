@@ -90,5 +90,11 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 FROM runtime AS verification
 COPY --from=verification-builder /opt/venv /opt/venv
 
+# [CHANGE-20260806-012] dependency contract hash：由 run_remote_verification.sh
+# 以 --build-arg DEP_HASH=<sha256(Dockerfile+pyproject+lock)> 传入，写入 Docker label。
+# 入口两方比较（expected vs image label）决定是否 rebuild 单可复用镜像。
+ARG DEP_HASH=unknown
+LABEL panji.verify.dependency-hash=${DEP_HASH}
+
 # 默认构建仍保持精简运行镜像；只有显式 --target verification 才包含测试依赖。
 FROM runtime AS production

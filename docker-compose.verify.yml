@@ -1,29 +1,15 @@
-# V2.1 远程验证栈 Compose（DS-111，Corrective Pass 3 修正）
+# V2.2 远程验证栈 Compose（CHANGE-20260806-012, 减法重构）
 #
-# [Corrective Pass 3 P0-A] 采用 **Live Mount 策略**，不使用 `up --build`：
-#   本文件没有任何 `build:` 段，`--build` 无效（CP2 缺陷）。改为复用**已存在的正式镜像**
-#   （market-dev-backend/market-dev-frontend），将 /root/web_dev_verify 下已 checkout 到
-#   目标 SHA 的运行时代码只读挂载进容器，并挂载 RUNTIME_SHA 使 /v1/version.runtime_git_sha
-#   等于目标 SHA（与 docker-compose.live.yml 的既有约定一致，见 CHANGE-20260724-004）。
+# 设计目标：单可复用验证运行时。
+#   - 只有一个长期容器 panji-verify-python（常驻空闲，禁 Scheduler/Worker/Uvicorn/pytest/seed）
+#   - 复用已有 trading-postgres（验证库 bz_stock_verify_<SHA>，DS-110）
+#   - 复用已有 trading-redis 网络连通性（本轮 verification 实际不连 Redis，见 CHANGE-012 审计结论）
+#   - 不再启动 verify-backend / verify-frontend / verify-worker-* / verify-redis / verify-test
+#   - 固定 project 名 panji-verify；不发布 host port；不依赖 VERIFY_TEST_IMAGE 等旧 topology 变量
+#   - attempt 变量经 /run/panji-verify/attempt.env 由 verify_exec.py 动态注入每个 fresh process
 #
-# 挂载矩阵（全部 :ro）：
-#   /root/web_dev_verify/backend/app          → /app/app
-#   /root/web_dev_verify/backend/alembic      → /app/alembic
-#   /root/web_dev_verify/backend/alembic.ini  → /app/alembic.ini
-#   /root/web_dev_verify/RUNTIME_SHA          → /app/RUNTIME_SHA
-#   /etc/market-dev/config.production.py      → /app/config.production.py
-#   /root/web_dev_verify/frontend/dist        → /usr/share/nginx/html   (frontend)
-#
-# 修复 P0-6/P0-7（CP2 保留）：
-#   - Redis 方案 B：独立 verify-redis，所有验证服务统一连接 redis://verify-redis:6379/0
-#   - 接入正式 PostgreSQL 所在 external network，使 trading-postgres 可解析
-#     网络名由 VERIFY_PG_NETWORK 提供（由部署脚本实测 trading-postgres 的真实网络后注入）
-#
-# 独立 project 名 panji-verify；端口仅绑定 127.0.0.1；Scheduler 关闭；只启动必要 Worker。
-# postgres 为 external（复用 trading-postgres 容器），验证库 bz_stock_verify_<sha>。
-#
-# 用法（在 panji-prod 的 /root/web_dev_verify 内，由 scripts/deploy/panji-verify-deploy.sh 调用）：
-#   docker compose -p panji-verify --env-file market.verify.env -f docker-compose.verify.yml up -d
+# 用法（在 panji-prod 的 /root/web_dev_verify 内，由 run_remote_verification.sh 调用）：
+#   docker compose -p panji-verify -f docker-compose.verify.yml up -d verify-python
 
 x-logging: &default-logging
   driver: json-file
@@ -31,197 +17,53 @@ x-logging: &default-logging
     max-size: "50m"
     max-file: "5"
 
-x-resource-app-light: &resource-app-light
-  mem_limit: 512m
-  mem_reservation: 256m
-  cpus: 1
-  pids_limit: 512
-  stop_grace_period: 30s
-
 x-resource-app-heavy: &resource-app-heavy
-  mem_limit: 1024m
-  mem_reservation: 512m
-  cpus: 1
+  mem_limit: 4g
+  mem_reservation: 2g
+  cpus: 2
   pids_limit: 1024
   stop_grace_period: 60s
 
-# Live Mount：验证代码目录只读挂载（VERIFY_CODE_DIR 由部署脚本注入，固定 /root/web_dev_verify）
+# Live Mount：验证代码目录只读挂载（VERIFY_CODE_DIR 由 run_remote_verification.sh 注入，固定 /root/web_dev_verify）
 x-verify-live-python: &verify-live-python
   volumes:
     - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/app:/app/app:ro
     - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic:/app/alembic:ro
     - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic.ini:/app/alembic.ini:ro
-    # [CHANGE-20260806-CP4A-Amendment] RUNTIME_SHA 来自 repo 外的 VERIFY_RUNTIME_DIR（部署脚本写入），
-    # 不再挂载 repo 内文件，避免与“工作区 clean”强校验自相矛盾。
-    - ${VERIFY_RUNTIME_DIR:?VERIFY_RUNTIME_DIR is required}/RUNTIME_SHA:/app/RUNTIME_SHA:ro
+    - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/tests:/app/tests:ro
+    - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/pyproject.toml:/app/pyproject.toml:ro
+    - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/scripts/verify:/app/scripts/verify:ro
+    # 固定 runtime 控制路径：RUNTIME_SHA + attempt.env（只读 mount 进容器）
+    - ${VERIFY_RUNTIME_DIR:?VERIFY_RUNTIME_DIR is required}:/run/panji-verify/:ro
     - /etc/market-dev/config.production.py:/app/config.production.py:ro
 
 networks:
   # 复用正式 PostgreSQL 所在网络，使验证服务可解析 trading-postgres
+  # 网络名由 VERIFY_PG_NETWORK 提供（由 prepare_verify_environment.py 实测后注入到 attempt.env）
   verify-pg-network:
     external: true
     name: ${VERIFY_PG_NETWORK:?VERIFY_PG_NETWORK is required}
-  # 验证栈内部网络（verify-redis + 各验证服务）
-  panji-verify-internal:
-    driver: bridge
 
 services:
-  # 独立验证 Redis（方案 B：隔离更清楚，不暴露宿主机端口）
-  verify-redis:
-    image: redis:7-alpine
-    logging: *default-logging
-    command: redis-server --appendonly yes --port 6379
-    networks:
-      - panji-verify-internal
-
-  # 验证 backend（Live Mount：镜像仅提供依赖，代码来自 VERIFY_CODE_DIR）
-  verify-backend:
-    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
+  # 唯一长期验证容器：panji-verify-python
+  # - 常驻空闲（sleep infinity），禁 Scheduler/Worker/Uvicorn/pytest/seed
+  # - 每个 gate 由 verify_exec.py 以 fresh process 执行（docker exec）
+  # - 异常恢复：docker restart panji-verify-python（杀容器所有验证进程，不删 infra）
+  verify-python:
+    image: panji-verify-runtime:current
+    # 固定容器名：run_remote_verification.sh 与 verify_attempt.py 均以此名 docker exec/restart
+    container_name: panji-verify-python
     logging: *default-logging
     <<: [*resource-app-heavy, *verify-live-python]
+    # 容器常驻 env 只持有稳定变量；attempt-specific 变量由 verify_exec.py 动态注入
     environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL (bz_stock_verify_<sha>) is required}
-      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       APP_ENV: verification
+      PANJI_SCHEDULER_ENABLED: "false"
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/config.production.py
-      PANJI_SCHEDULER_ENABLED: "false"
-      FRONTEND_BASE_URL: http://verify-frontend
-      CAPTURE_WORKER_URL: http://verify-worker-capture:8001
-    depends_on:
-      - verify-redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - verify-pg-network
-      - panji-verify-internal
-    ports:
-      # [CHANGE-20260806-CP4A-Amendment] host 端口环境变量化，避免与稳定运行栈冲突
-      - "127.0.0.1:${VERIFY_BACKEND_HOST_PORT:-8000}:8000"
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-  verify-frontend:
-    image: ${VERIFY_FRONTEND_IMAGE:?VERIFY_FRONTEND_IMAGE is required}
-    logging: *default-logging
-    <<: *resource-app-light
-    volumes:
-      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/frontend/dist:/usr/share/nginx/html:ro
-    networks:
-      - panji-verify-internal
-    ports:
-      # [CHANGE-20260806-CP4A-Amendment] host 端口环境变量化
-      - "127.0.0.1:${VERIFY_FRONTEND_HOST_PORT:-8080}:80"
-
-  # 必要 Worker（不复用正式 Worker 容器，独立实例）
-  verify-worker-after-close:
-    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
-    logging: *default-logging
-    <<: [*resource-app-light, *verify-live-python]
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
-      APP_ENV: verification
-      WORKER_TYPE: after_close
-      TZ: Asia/Shanghai
-      CONFIG_FILE: /app/config.production.py
-      PANJI_SCHEDULER_ENABLED: "false"
-    depends_on:
-      - verify-redis
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - verify-pg-network
-      - panji-verify-internal
-    command: python -m app.worker
-
-  verify-worker-chip:
-    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
-    logging: *default-logging
-    <<: [*resource-app-light, *verify-live-python]
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
-      APP_ENV: verification
-      WORKER_TYPE: chip
-      TZ: Asia/Shanghai
-      CONFIG_FILE: /app/config.production.py
-      PANJI_SCHEDULER_ENABLED: "false"
-    depends_on:
-      - verify-redis
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - verify-pg-network
-      - panji-verify-internal
-    command: python -m app.worker
-
-  verify-worker-watchdog:
-    image: ${VERIFY_BACKEND_IMAGE:?VERIFY_BACKEND_IMAGE is required}
-    logging: *default-logging
-    <<: [*resource-app-light, *verify-live-python]
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
-      APP_ENV: verification
-      WORKER_TYPE: watchdog
-      TZ: Asia/Shanghai
-      CONFIG_FILE: /app/config.production.py
-      PANJI_SCHEDULER_ENABLED: "false"
-    depends_on:
-      - verify-redis
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - verify-pg-network
-      - panji-verify-internal
-    command: python -m app.worker
-
-  # 一次性自包含 PG 测试服务（P0-1 verify-test）。
-  # [CHANGE-20260806-008] 复用 backend 镜像作为依赖底座（不 --build、不 pip install、
-  # 不复制测试到 /tmp）。只读挂载 tests / pyproject.toml / alembic / scripts/verify /
-  # RUNTIME_SHA，运行 `pytest -m postgres`。`--rm` 退出即删容器；`restart: "no"`
-  # 保证单次执行不自动重启。测试由 verify_attempt.py 在容器内显式调用，本服务仅作
-  # 承载；在部署脚本中以 `run --rm` 触发（见 scripts/deploy/panji-verify-deploy.sh）。
-  verify-test:
-    image: ${VERIFY_TEST_IMAGE:?VERIFY_TEST_IMAGE is required}
-    logging: *default-logging
-    <<: *resource-app-light
-    # [Phase8] Seed 六态全规模 synthetic 在 512m/2g 下均 OOM(exit=137)；提升到 4g 以通过 seed_twice。
-    mem_limit: 4g
-    mem_reservation: 2g
-    volumes:
-      # 只读挂载验证代码与测试资产，禁止运行时写入容器（--rm 后丢弃）。
-      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/app:/app/app:ro
-      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic:/app/alembic:ro
-      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/alembic.ini:/app/alembic.ini:ro
-      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/tests:/app/tests:ro
-      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/backend/pyproject.toml:/app/pyproject.toml:ro
-      - ${VERIFY_RUNTIME_DIR:?VERIFY_RUNTIME_DIR is required}/RUNTIME_SHA:/app/RUNTIME_SHA:ro
-      - ${VERIFY_CODE_DIR:?VERIFY_CODE_DIR is required}/scripts/verify:/app/scripts/verify:ro
-      - /etc/market-dev/config.production.py:/app/config.production.py:ro
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL (bz_stock_verify_<sha>) is required}
-      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:-redis://verify-redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
-      APP_ENV: verification
-      TZ: Asia/Shanghai
-      CONFIG_FILE: /app/config.production.py
-      PANJI_SCHEDULER_ENABLED: "false"
-      # [DS-112] PG 集成测试标记：仅远程验证库运行，禁止连接 bz_stock。
-      PANJI_REMOTE_VERIFY_DB_TEST: "1"
-    depends_on:
-      - verify-redis
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - verify-pg-network
-      - panji-verify-internal
-    # 默认命令：运行自包含 postgres 标记的 PG 测试；由 verify_attempt.py 覆盖为目标测试。
-    command: pytest -m postgres tests/test_pg_atomic_publication.py tests/test_pg_projection_lifecycle.py tests/test_pg_100_stock_call_counts.py
+    command: sleep infinity
     restart: "no"
