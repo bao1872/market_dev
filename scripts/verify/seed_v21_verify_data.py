@@ -93,7 +93,17 @@ from app.services.board_facts_service import (
 from app.services.core_artifact_repository import (
     CoreArtifactRepository,
 )
-from app.services.factor_publication_service import compute_coverage
+from app.services.factor_publication_service import (
+    HISTORY_CROSS_SECTION_MIN_COVERAGE,
+    compute_coverage,
+    publish_history_cross_section,
+)
+from app.models.first_pyramid_history_run import HISTORY_RUN_SUCCEEDED
+from app.services.first_pyramid_history_service import (
+    backfill_history_with_run_items,
+    create_history_run,
+    create_history_run_items,
+)
 
 # [修正] compute_review_core_with_run_items 真实位置是 feature_snapshot_service，
 # 且签名为 (trade_date, instrument_ids, snapshot_run_id, *, worker_id, lease_epoch, ...)。
@@ -114,7 +124,15 @@ from app.services.strategy_batch_service import (
     StrategyBatchService,
     persist_precomputed_dsa_results,
 )
-from app.services.wencai_board_provider import BoardSnapshot
+from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+from app.services.wencai_board_provider import (
+    BOARD_IDENTITY_CONTRACT_VERSION,
+    BOARD_SOURCE,
+    BOARD_TAXONOMY,
+    BOARD_TAXONOMY_COMPATIBILITY_KEY,
+    BOARD_TAXONOMY_VERSION,
+    BoardSnapshot,
+)
 from sqlalchemy import select, text
 
 # ---------------------------------------------------------------------------
@@ -591,6 +609,79 @@ async def _add_instruments_prereq(trade_date: date) -> uuid.UUID:
     return snapshot_run_id
 
 
+async def _add_daily_facts_prereq(trade_date: date) -> None:
+    """[Group2-Daily] 真实 daily_facts 链：走正式 history producer → publish history cross section。
+
+    正式链（ProductReadiness._daily_facts_state 依赖 HISTORY_CROSS_SECTION publication）：
+        FirstPyramidHistoryRun
+            → create_history_run + create_history_run_items（first_pyramid_history_service）
+            → backfill_history_with_run_items（正式 claim/compute/commit，DB-only 取数）
+            → finish_history_run
+            → publish_history_cross_section（factor_publication_service，coverage>=0.98）
+
+    覆盖 universe：核心 100 标的（N_INST，seed 已为其写入 FULLY_READY_DAILY_START 起扩展日线，
+    ≥60 根满足 compute_first_pyramid_history 的 _MIN_BARS_FOR_REQUIRED_DIMS 门槛）。
+    全 5200 标的只有 scenario 窗口日线，不足以让 history 覆盖率达 0.98 门禁，故 history run
+    scope 限定核心 100。不手工 INSERT FirstPyramidHistoryRun / FactorPublication。
+    """
+    # history run 覆盖核心 100 标的（其日线足够）
+    instrument_ids = _ALL_INSTRUMENT_IDS
+    async with AsyncSessionLocal() as db:
+        run, is_new = await create_history_run(
+            db,
+            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            output_bars=250,
+            scope="full",
+            instrument_ids=instrument_ids,
+        )
+        history_run_id = run.id
+        # create_history_run_items 本身幂等（ON CONFLICT DO NOTHING），复用已成功 run
+        # 时无副作用，始终调用。
+        await create_history_run_items(db, history_run_id, instrument_ids)
+        await db.commit()
+
+    # create_history_run 的幂等查找会复用 RUNNING/PARTIAL/SUCCEEDED 三种 run；不能用
+    # is_new 决定是否执行——中途断掉的 PARTIAL run 重跑时 is_new=False 但仍有 pending/
+    # failed/expired items 待 resume。仅当 run 已是 SUCCEEDED 时才跳过，否则通过正式
+    # run-item 链 resume/backfill（backfill_history_with_run_items 支持 pending 领取、
+    # failed/expired 重试、可恢复 run）。
+    if run.status != HISTORY_RUN_SUCCEEDED:
+        # 正式执行（DB-only，内部 AsyncSessionLocal）：backfill 内部按正式语义
+        # （全部成功→succeeded；部分成功→partial；无成功→failed）自动 finish_history_run，
+        # 无需 seed 手动收敛 run 状态。
+        stats = await backfill_history_with_run_items(
+            history_run_id=history_run_id,
+            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            output_bars=250,
+            worker_id="verify-seed",
+        )
+    else:
+        # 已成功 run，不重复 backfill；用 DB 全量进度作为发布依据
+        stats = {"succeeded_count": len(instrument_ids), "skipped_count": 0}
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await publish_history_cross_section(
+                db,
+                trade_date,
+                history_run_id,
+                FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+                threshold=HISTORY_CROSS_SECTION_MIN_COVERAGE,
+            )
+            await db.commit()
+            print(
+                f"[seed] daily_facts done: {trade_date} history_run={history_run_id} "
+                f"succeeded={stats['succeeded_count']}/{len(instrument_ids)} "
+                f"skipped={stats.get('skipped_count', 0)}"
+            )
+        except Exception as exc:  # noqa: BLE001 - seed 失败要如实暴露
+            print(
+                f"[seed] daily_facts publish FAILED: {trade_date} history_run={history_run_id} "
+                f"err={type(exc).__name__}: {exc}"
+            )
+            raise
+
+
 async def _finish_core_run(trade_date: date, snapshot_run_id: uuid.UUID) -> None:
     """真实 finish_snapshot_run：把 core run 收敛到 succeeded。
 
@@ -711,7 +802,23 @@ async def _synthetic_board_snapshot() -> BoardSnapshot:
             key = (ext_code, typ)
             if key not in seen_boards:
                 seen_boards.add(key)
-                boards.append({"external_code": ext_code, "name": nm, "type": typ})
+                # [Group2-B] 补齐正式 provider 合同字段（单一来源 wencai_board_provider 常量，
+                # 禁止 seed 手写版本字符串）。缺这些字段会触发 sync_boards 的 Corrective-2
+                # 强制校验（board_sync_service.py:477/614 要求 taxonomy/taxonomy_version/
+                # taxonomy_compatibility_key/identity_contract_version），导致 board_facts
+                # RUN_FAILED，且 _append_pit_history 从不执行 → BoardDefinitionVersion/
+                # BoardMembershipHistory 未写入 → board_aggregation 后续 resolve_board_membership_at
+                # 抛 bootstrap_unavailable。
+                boards.append({
+                    "external_code": ext_code,
+                    "name": nm,
+                    "type": typ,
+                    "taxonomy": BOARD_TAXONOMY,
+                    "source": BOARD_SOURCE,
+                    "taxonomy_version": BOARD_TAXONOMY_VERSION,
+                    "taxonomy_compatibility_key": BOARD_TAXONOMY_COMPATIBILITY_KEY,
+                    "identity_contract_version": BOARD_IDENTITY_CONTRACT_VERSION,
+                })
             memberships.setdefault(key, []).append(symbol)
             raw_rows += 1
     return BoardSnapshot(
@@ -1205,6 +1312,9 @@ async def _seed_scenario(verify_conn, scenario: str) -> None:
     #   core → projection → board(publication) → chip → finish core run → publish core
     #   → auction → board_aggregation(publication) → review(create→compute→publish)
     # 约束5：同一场景内部 Core/Board/Aggregation/Review 必须使用同一 universe，禁止跨 universe 拼接。
+    # [Group2-Daily] 所有场景期望 daily_facts=READY（readiness_fixtures 的 _mandatory()
+    # 默认 daily=READY），故统一先装配 daily_facts（正式 history producer，独立于 core run）。
+    await _add_daily_facts_prereq(td)
     if scenario == "pending_no_core":
         # 只建 daily + instruments，stock_core 未发布 → closure=pending
         await _add_instruments_prereq(td)
