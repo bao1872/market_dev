@@ -127,6 +127,12 @@ CAL_END = date(2026, 8, 31)
 # [性能] full_market universe 下 instruments 放大到 5200，daily/60min bars 仅覆盖
 # scenario 窗口（与 15m 同窗口）以控制行数（5200×~13天 可控）。
 CORE_BARS_WINDOW_START = date(2026, 7, 20)
+# [auction 结构锚点 / 事实对齐] 核心 100 标的（_ALL_INSTRUMENT_IDS）需要 ≥60 根日线，
+# 否则 feature_snapshot_service 判定 daily insufficient(<60) → first_pyramid=None →
+# 无 SMC structure（BOS/CHoCH/OB/trailing）→ AuctionAnchor coverage_ratio=0。
+# 故为这 100 标的追加一段确定性的多 regime 日线历史（2026-04-01 起），
+# 让正式 SMC 算法自然产出结构锚点。仅追加 core instruments，控制行数。
+FULLY_READY_DAILY_START = date(2026, 4, 1)
 # 15m 仅覆盖 scenario 窗口（含 07-28/29/30/31）以控制行数；07-30 仅部分标的注入 15m（natural partial）
 FIFTEEN_MIN_WINDOW_START = date(2026, 7, 20)
 PARTIAL_15M_DATE = date(2026, 7, 30)
@@ -193,6 +199,46 @@ def _bar(t: datetime, o: Decimal) -> dict[str, Any]:
         "trade_time": t, "open": o, "high": h, "low": l, "close": c,
         "volume": volume, "amount": volume * c, "adj_factor": Decimal("1.0"),
     }
+
+
+def _extended_daily_ohlc(base: float, idx: int, total: int) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """[auction 结构锚点] 为核心 100 标的生成确定性多 regime 日线 OHLC。
+
+    通过分段明确的上涨/下跌 regime（每段约 20 根切换方向），制造 HH/HL 与 LH/LL 腿，
+    使正式 SMC 算法（compute_smc_pine）自然产出 BOS/CHoCH/OB 与 trailing 结构——
+    不伪造 structure payload，仅提供确定性的 raw bars 输入。
+
+    idx: 扩展历史内的序号（0..total-1），从 FULLY_READY_DAILY_START 起算。
+    末根价格平滑收敛到窗口起点附近（base-5），避免与 scenario 窗口日线产生过大跳空。
+    """
+    # regime 切换：每段 20 根，方向交替（涨→跌→涨→跌…）
+    seg = idx // 20
+    pos_in_seg = idx % 20
+    direction = 1 if seg % 2 == 0 else -1
+    # 段内线性移动，每段幅度约 ±6；整体基线在 base-5 附近平稳过渡
+    drift = direction * pos_in_seg * 0.3
+    level = base - 5.0 + (seg % 2) * 6.0 + drift
+    # 末段（最后 10 根）向 base-5 收敛，消除与窗口起点的跳空
+    if total - idx <= 10:
+        level = base - 5.0 + (level - (base - 5.0)) * ((total - idx) / 10.0)
+    o = Decimal(f"{level:.2f}")
+    c = Decimal(f"{level + direction * 0.3:.2f}")
+    hi = max(o, c) + Decimal("0.4")
+    lo = min(o, c) - Decimal("0.4")
+    return o, hi, lo, c
+
+
+def _extended_60min_ohlc(base: float, idx: int, slot: int) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """[auction 结构锚点] 扩展日线历史的 60min 杆（4 根/日），沿用当日日线 regime 走势。"""
+    # 日内 4 根微调，制造小幅波动，方向与日线 regime 一致
+    seg = idx // 20
+    direction = 1 if seg % 2 == 0 else -1
+    level = base - 5.0 + (seg % 2) * 6.0 + idx * 0.3 + slot * 0.1 * direction
+    o = Decimal(f"{level:.2f}")
+    c = Decimal(f"{level + 0.1 * direction:.2f}")
+    hi = max(o, c) + Decimal("0.3")
+    lo = min(o, c) - Decimal("0.3")
+    return o, hi, lo, c
 
 
 # ---------------------------------------------------------------------------
@@ -332,8 +378,45 @@ async def _gen_synthetic_instruments_bars(verify_conn) -> None:
                     await _exec_batch(verify_conn, min15_sql, min15_rows)
     await _exec_batch(verify_conn, min15_sql, min15_rows)
     await verify_conn.commit()
+
+    # [auction 结构锚点] 为核心 100 标的（_ALL_INSTRUMENT_IDS）追加确定性多 regime 日线 +
+    # 60min 历史，从 FULLY_READY_DAILY_START 到 CORE_BARS_WINDOW_START 前一日。
+    # 目的：让正式 SMC 算法获得 ≥60 根日线，自然产出 BOS/CHoCH/OB/trailing 结构锚点，
+    # 使 AuctionAnchor coverage_ratio>0（禁止直接写 structure payload / AuctionAnchorItem）。
+    ext_days = [d for d in _TRADING_DAYS
+                if FULLY_READY_DAILY_START <= d < CORE_BARS_WINDOW_START]
+    ext_daily_rows: list[dict[str, Any]] = []
+    ext_min60_rows: list[dict[str, Any]] = []
+    for i in range(N_INST):  # 仅核心 100 标的
+        inst_id = _inst_uuid(i)
+        base = 10.0 + (i % 50)
+        for idx, d in enumerate(ext_days):
+            o, hi, lo, c = _extended_daily_ohlc(base, idx, len(ext_days))
+            volume = Decimal(str(random.randint(10000, 90000)))
+            ext_daily_rows.append({
+                "instrument_id": str(inst_id), "trade_date": d,
+                "open": o, "high": hi, "low": lo, "close": c,
+                "volume": volume, "amount": volume * c, "adj_factor": Decimal("1.0"),
+            })
+            for slot, hhmm in enumerate([("10:30"), ("11:30"), ("14:00"), ("15:00")]):
+                t = datetime(d.year, d.month, d.day, int(hhmm[:2]), int(hhmm[3:]))  # noqa: DTZ001
+                eo, ehi, elo, ec = _extended_60min_ohlc(base, idx, slot)
+                evolume = Decimal(str(random.randint(10000, 90000)))
+                ext_min60_rows.append({
+                    "instrument_id": str(inst_id), "trade_time": t,
+                    "open": eo, "high": ehi, "low": elo, "close": ec,
+                    "volume": evolume, "amount": evolume * ec, "adj_factor": Decimal("1.0"),
+                })
+            if len(ext_daily_rows) >= _BATCH:
+                await _exec_batch(verify_conn, daily_sql, ext_daily_rows)
+                await _exec_batch(verify_conn, min60_sql, ext_min60_rows)
+    await _exec_batch(verify_conn, daily_sql, ext_daily_rows)
+    await _exec_batch(verify_conn, min60_sql, ext_min60_rows)
+    await verify_conn.commit()
+
     # 注意：daily/60min/15min 实际行数为分批写入累加值；此处仅打印 instruments 数与 15min 估算。
-    print(f"[seed] instruments={FM_N_INST} window_days={len(window_days)} 15min_est={n15}")
+    print(f"[seed] instruments={FM_N_INST} window_days={len(window_days)} "
+          f"15min_est={n15} ext_daily_days={len(ext_days)} ext_core_inst={N_INST}")
 
 
 # [用户选项B / 约束6] full_market universe board 规模：220 行业 + 320 概念 = 540 boards
@@ -873,6 +956,10 @@ async def _add_auction_prereq(trade_date: date, *, mode: str) -> None:
         generate_and_publish_auction_anchors,
     )
 
+    # [auction 结构锚点 / 事实对齐] 结构化诊断：确认 BOS/CHoCH/OB/trailing 与
+    # POC/VAH/VAL 及 active-anchor 缺失原因。仅读取，不改变行为与发布结果。
+    await _diagnose_auction_anchors(trade_date)
+
     async with AsyncSessionLocal() as db:
         try:
             result = await generate_and_publish_auction_anchors(
@@ -885,6 +972,106 @@ async def _add_auction_prereq(trade_date: date, *, mode: str) -> None:
             await db.rollback()
             result = {"error": str(exc)}
     print(f"[seed] auction anchor done: {trade_date} expect_mode={mode} result={result}")
+
+
+async def _diagnose_auction_anchors(trade_date: date) -> None:
+    """[auction 结构锚点 / 事实对齐] 结构化诊断 active-anchor 缺失来源。
+
+    仅读核查（不影响发布）：
+      1) StockFeatureSnapshot.first_pyramid.structure：SMC BOS/CHoCH/OB/trailing 是否存在；
+      2) StockChipConsensusSnapshot.chip_payload.chip.continuousFactors：POC/VAH/VAL 是否存在；
+      3) 当日已发布 stock_core pointer 是否存在（auction 正式入口的前置条件）。
+    输出有界 JSON（汇总数 + 失败节点 + 有界样本，不泄露 UUID）。
+    """
+    from app.models.chip_consensus import StockChipConsensusSnapshot
+    from app.models.factor_publication import FactorPublication
+    from app.models.stock_feature_snapshot import StockFeatureSnapshot
+    from app.services.auction_anchor_service import (
+        PUBLICATION_KIND_STOCK_CORE,
+        SCOPE_TYPE_MARKET,
+    )
+
+    diag: dict[str, Any] = {
+        "trade_date": trade_date.isoformat(),
+        "structure_source": {},
+        "chip_source": {},
+        "stock_core_pointer": {},
+    }
+    try:
+        async with AsyncSessionLocal() as db:
+            # 3) 已发布 stock_core pointer
+            core_pub = (await db.execute(
+                select(FactorPublication.data_run_id)
+                .where(
+                    FactorPublication.scope_type == SCOPE_TYPE_MARKET,
+                    FactorPublication.scope_key == "market",
+                    FactorPublication.trade_date == trade_date,
+                    FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
+                )
+                .limit(1)
+            )).scalar_one_or_none()
+            diag["stock_core_pointer"] = {
+                "published": core_pub is not None,
+            }
+
+            # 1) SMC structure 来源
+            snaps = (await db.execute(
+                select(StockFeatureSnapshot.summary_payload)
+                .where(StockFeatureSnapshot.trade_date == trade_date)
+            )).all()
+            n_struct = 0
+            struct_sample: list[dict[str, Any]] = []
+            for (payload,) in snaps:
+                fp = (payload or {}).get("first_pyramid") or {}
+                struct = fp.get("structure") or {}
+                has = any(struct.get(k) for k in
+                          ("bos", "choch", "order_blocks", "trailing_top", "trailing_bottom"))
+                if has:
+                    n_struct += 1
+                if len(struct_sample) < 5:
+                    struct_sample.append({
+                        "has_bos": bool(struct.get("bos")),
+                        "has_choch": bool(struct.get("choch")),
+                        "has_ob": bool(struct.get("order_blocks")),
+                        "has_trailing_top": struct.get("trailing_top") is not None,
+                        "has_trailing_bottom": struct.get("trailing_bottom") is not None,
+                    })
+            diag["structure_source"] = {
+                "snapshot_count": len(snaps),
+                "with_structure_count": n_struct,
+                "sample": struct_sample,
+            }
+
+            # 2) Chip continuousFactors 来源
+            chips = (await db.execute(
+                select(StockChipConsensusSnapshot.chip_payload)
+                .where(StockChipConsensusSnapshot.trade_date == trade_date)
+            )).all()
+            n_chip = 0
+            chip_sample: list[dict[str, Any]] = []
+            for (payload,) in chips:
+                cf = (((payload or {}).get("chip") or {})
+                      .get("continuousFactors") or {})
+                has = all(cf.get(k) is not None for k in ("poc", "vah", "val"))
+                if has:
+                    n_chip += 1
+                if len(chip_sample) < 5:
+                    chip_sample.append({
+                        "has_poc": cf.get("poc") is not None,
+                        "has_vah": cf.get("vah") is not None,
+                        "has_val": cf.get("val") is not None,
+                    })
+            diag["chip_source"] = {
+                "snapshot_count": len(chips),
+                "with_continuous_factors_count": n_chip,
+                "sample": chip_sample,
+            }
+    except Exception as exc:  # noqa: BLE001 - 诊断失败不得影响主流程
+        diag["diagnostic_error"] = f"{type(exc).__name__}: {exc}"
+
+    # 用既有同步诊断写入器（与 _write_diag 一致，避免 async open lint）
+    out_path = _write_diag(f"auction-anchor-diagnostic-{trade_date.isoformat()}.json", diag)
+    return out_path
 
 
 async def _run_chip_real(
