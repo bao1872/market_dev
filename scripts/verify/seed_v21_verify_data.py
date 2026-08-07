@@ -210,46 +210,40 @@ def _bar(t: datetime, o: Decimal) -> dict[str, Any]:
 def _extended_daily_ohlc(base: float, idx: int, total: int) -> tuple[Decimal, Decimal, Decimal, Decimal]:
     """[auction 结构锚点] 为核心 100 标的生成确定性多 regime 日线 OHLC。
 
-    通过分段明确的上涨/下跌 regime（每段约 8 根切换方向），制造 HH/HL 与 LH/LL 腿，
+    通过分段明确的上涨/下跌 regime（每段约 20 根切换方向），制造 HH/HL 与 LH/LL 腿，
     使正式 SMC 算法（compute_smc_pine）自然产出 BOS/CHoCH/OB 与 trailing 结构——
     不伪造 structure payload，仅提供确定性的 raw bars 输入。
-
-    波动幅度的选型依据（已本地验证）：旧实现每段 20 根、步进 0.3，日线几乎是一条
-    平滑线，正式 SMC 在任意 bar 数下（85/200/500）都产出 events=0/ob=0/trailing=None，
-    AuctionAnchor 无 active anchor → coverage_ratio=0。需保证段内步进 ≥1.0 且每段
-    有足够 swing 高低点，SMC 才能识别 HH/HL/LH/LL 并触发 BOS/CHoCH/OB/trailing。
-    此处取每段 8 根、步进 1.5、regime 基线偏移 4.5，本地验证 events≥1 且结构齐全。
 
     idx: 扩展历史内的序号（0..total-1），从 FULLY_READY_DAILY_START 起算。
     末根价格平滑收敛到窗口起点附近（base-5），避免与 scenario 窗口日线产生过大跳空。
     """
-    # regime 切换：每段 8 根，方向交替（涨→跌→涨→跌…）
-    seg = idx // 8
-    pos_in_seg = idx % 8
+    # regime 切换：每段 20 根，方向交替（涨→跌→涨→跌…）
+    seg = idx // 20
+    pos_in_seg = idx % 20
     direction = 1 if seg % 2 == 0 else -1
-    # 段内线性移动，步进 1.5（制造可被 SMC swing 识别的高低点）；基线在 base-5 附近过渡
-    drift = direction * pos_in_seg * 1.5
-    level = base - 5.0 + (seg % 2) * 4.5 + drift
+    # 段内线性移动，每段幅度约 ±6；整体基线在 base-5 附近平稳过渡
+    drift = direction * pos_in_seg * 0.3
+    level = base - 5.0 + (seg % 2) * 6.0 + drift
     # 末段（最后 10 根）向 base-5 收敛，消除与窗口起点的跳空
     if total - idx <= 10:
         level = base - 5.0 + (level - (base - 5.0)) * ((total - idx) / 10.0)
     o = Decimal(f"{level:.2f}")
-    c = Decimal(f"{level + direction * 1.0:.2f}")
-    hi = max(o, c) + Decimal("1.2")
-    lo = min(o, c) - Decimal("1.2")
+    c = Decimal(f"{level + direction * 0.3:.2f}")
+    hi = max(o, c) + Decimal("0.4")
+    lo = min(o, c) - Decimal("0.4")
     return o, hi, lo, c
 
 
 def _extended_60min_ohlc(base: float, idx: int, slot: int) -> tuple[Decimal, Decimal, Decimal, Decimal]:
     """[auction 结构锚点] 扩展日线历史的 60min 杆（4 根/日），沿用当日日线 regime 走势。"""
-    # 日内 4 根微调，方向与日线 regime 一致（与 _extended_daily_ohlc 同步的 8 根段/4.5 偏移）
-    seg = idx // 8
+    # 日内 4 根微调，制造小幅波动，方向与日线 regime 一致
+    seg = idx // 20
     direction = 1 if seg % 2 == 0 else -1
-    level = base - 5.0 + (seg % 2) * 4.5 + idx * 1.5 + slot * 0.4 * direction
+    level = base - 5.0 + (seg % 2) * 6.0 + idx * 0.3 + slot * 0.1 * direction
     o = Decimal(f"{level:.2f}")
-    c = Decimal(f"{level + 0.4 * direction:.2f}")
-    hi = max(o, c) + Decimal("1.2")
-    lo = min(o, c) - Decimal("1.2")
+    c = Decimal(f"{level + 0.1 * direction:.2f}")
+    hi = max(o, c) + Decimal("0.3")
+    lo = min(o, c) - Decimal("0.3")
     return o, hi, lo, c
 
 
