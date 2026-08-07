@@ -91,6 +91,9 @@ def prepare(target_sha: str, output: Path) -> Path:
         # 稳定标志（也写入 attempt.env 以便 fresh process 一致性；容器常驻 env 同样持有）
         "APP_ENV": "verification",
         "PANJI_SCHEDULER_ENABLED": "false",
+        # [P0] backend/tests/conftest 仅允许 PURE_UNIT_TEST=1 或 PANJI_REMOTE_VERIFY_DB_TEST=1，
+        # 远程 verify 跑真实 PostgreSQL 集成测试，必须显式置 1（非 pure-unit）。
+        "PANJI_REMOTE_VERIFY_DB_TEST": "1",
         # fresh process 连接 trading-postgres 所需网络（容器内通过 docker network 已 join）
         "PANJI_VERIFY_PG_NETWORK": min(pg_networks),
     }

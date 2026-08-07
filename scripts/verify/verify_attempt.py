@@ -243,22 +243,14 @@ class VerifyAttempt:
         self.exporter.log("migration_round_trip: 完成")
 
     def assert_identity(self) -> None:
-        """容器内 8 项自检（不依赖 HTTP 探针 / 不启动 verify-backend）。
+        """容器内自检（不依赖 HTTP 探针 / 不启动 verify-backend）。
 
-        1. host git HEAD == target
-        2. /app/RUNTIME_SHA == target
-        3. import path 在 Live Mount（/app 可读）
-        4. mount probe 一致（RUNTIME_SHA 文件可读且 == target）
-        5. APP_ENV == verification（容器内常驻 env）
-        6. DATABASE_URL 指向精确 verify DB
-        7. current_database() == verify DB（psycopg 直连）
-        8. current_database() != bz_stock（fail-closed）
+        host git HEAD / git status 已由 run_preflight 在 host 上检查，容器内不重复
+        （Compose 不 mount .git）；此处只校验容器内可观测的身份与挂载。
         """
-        self.exporter.log("assert_identity: 开始（容器内 8 项自检）")
+        self.exporter.log("assert_identity: 开始（容器内自检）")
         checks = [
-            # 1. host git HEAD
-            (["git", "rev-parse", "HEAD"], self.target_sha, "host HEAD == target"),
-            # 2. /run/panji-verify/RUNTIME_SHA（容器只读 mount，非 /app/RUNTIME_SHA）
+            # 1. /run/panji-verify/RUNTIME_SHA（容器只读 mount，非 /app/RUNTIME_SHA）
             (["cat", "/run/panji-verify/RUNTIME_SHA"], self.target_sha, "/run/panji-verify/RUNTIME_SHA == target"),
             # 5. APP_ENV
             (["sh", "-c", "echo $APP_ENV"], "verification", "APP_ENV == verification"),
@@ -468,9 +460,8 @@ class VerifyAttempt:
             self.exporter.log(f"attempt 失败: {type(exc).__name__}: {exc}")
         finally:
             self.export_evidence()
-            # 异常/timeout/interrupted → restart 容器恢复干净环境（仅失败路径，成功不 restart）
-            if exit_code != 0:
-                self.recover_container()
+            # 失败路径的容器恢复由最外层 trap（run_remote_verification.sh cleanup_on_exit）统一负责，
+            # 此处只做 attempt 级临时状态清理与校验。
             # 先清 attempt 临时状态（attempt.env / RUNTIME_SHA），再校验 cleanup
             self._clear_attempt_state()
             cleanup_ok = self.cleanup_exact_attempt_resources() and self.verify_cleanup()
