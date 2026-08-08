@@ -3460,18 +3460,52 @@ async def execute_after_close_run(
                 )
 
                 async with AsyncSessionLocal() as agg_db:
+                    agg_result = None
                     agg_result = await compute_all_boards(
                         agg_db,
                         trade_date=trade_date,
                         publish=True,
                     )
                     await agg_db.commit()
-                _aggregation_status = "succeeded"
+                # [Phase 4.4.1 RB-01 收口] 不得因 compute_all_boards() 未抛异常
+                # 就写 "succeeded"。只有：
+                #   (1) batch 真正 succeeded 且
+                #   (2) 当前正式 market_aggregation pointer 已确认属于当前
+                #       snapshot_run_id（lineage 一致）时，
+                # 才设置 _aggregation_status="succeeded"。
+                # partial / failed / blocked_external_population / pointer
+                # mismatch 必须如实映射，Review 不得执行。
+                _agg_batch_status = (
+                    agg_result.get("status") if isinstance(agg_result, dict) else None
+                )
+                _agg_pointer_confirmed = (
+                    agg_result.get("pointer_confirmed")
+                    if isinstance(agg_result, dict)
+                    else False
+                )
+                if _agg_batch_status == "succeeded" and _agg_pointer_confirmed:
+                    # batch 真正 succeeded 且当前正式 market_aggregation pointer
+                    # 已确认属于当前 snapshot_run_id（lineage 一致）。
+                    _aggregation_status = "succeeded"
+                elif _agg_batch_status in (
+                    "partial", "failed", "blocked_external_population",
+                ):
+                    # 如实映射 batch 的非成功态。
+                    _aggregation_status = _agg_batch_status
+                elif _agg_batch_status == "succeeded" and not _agg_pointer_confirmed:
+                    # batch 计算成功但正式 pointer 未确认（live pointer 指向
+                    # 旧 core / 错误 run，或 reconciliation 未通过）→ 不得假绿。
+                    _aggregation_status = "pointer_mismatch"
+                else:
+                    # 兜底：status 未知或缺失（不预期路径），不得假绿。
+                    _aggregation_status = (
+                        _agg_batch_status if _agg_batch_status else "pointer_mismatch"
+                    )
                 logger.info(
                     "[AfterClose] board aggregation 完成: trade_date=%s, "
-                    "published=%s",
-                    trade_date,
-                    agg_result.get("published", 0),
+                    "batch_status=%s, pointer_confirmed=%s, aggregation_status=%s",
+                    trade_date, _agg_batch_status, _agg_pointer_confirmed,
+                    _aggregation_status,
                 )
             except Exception as agg_exc:
                 _aggregation_status = "failed"

@@ -90,7 +90,14 @@ def _install_patches(job_run, *, resolve_side_effect):
             "composite_count": 1,
         }
     )
-    spies["aggregation"] = AsyncMock(return_value={"published": 1})
+    # 默认返回「正式发布且 live pointer 已确认属于当前 lineage」的成功合同，
+    # 以匹配修复后的 orchestrator 语义（_aggregation_status 仅当
+    # status==succeeded 且 pointer_confirmed 才置 succeeded）。
+    spies["aggregation"] = AsyncMock(return_value={
+        "status": "succeeded",
+        "pointer_confirmed": True,
+        "published": 1,
+    })
     spies["events"] = AsyncMock(return_value={})
     spies["chip"] = AsyncMock(return_value=("succeeded", uuid.uuid4()))
     spies["compute_review_core"] = AsyncMock(return_value=MagicMock())
@@ -291,6 +298,107 @@ async def test_rb01_stock_core_not_published_still_skips_aggregation():
         await _run_orchestrator(job_run=job_run, skip_publish=True)
         assert not spies["aggregation"].called, (
             "stock_core 未发布时 board aggregation 仍不得执行"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+# ---------------------------------------------------------------------------
+# [Phase 4.4.1 RB-01 收口] Board Aggregation publication / pointer 闭环
+# orchestrator 不得因 compute_all_boards() 未抛异常就写 "succeeded"。
+# 只有 batch 真正 succeeded 且当前正式 market_aggregation pointer
+# 已确认属于当前 snapshot_run_id 时，才设置 _aggregation_status="succeeded"。
+# partial / failed / blocked_external_population / pointer mismatch 必须如实映射，
+# Review 不得执行。
+# ---------------------------------------------------------------------------
+async def test_rb011_aggregation_pointer_mismatch_blocks_review():
+    """compute_all_boards 返回 succeeded 但 live pointer 指向其它 run
+    （pointer_confirmed=False）→ 不得假绿，Review 不得执行。"""
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
+                            last_completed_step="publishing")
+    spies, patchers = _install_patches(
+        job_run, resolve_side_effect=_published_resolution)
+    spies["aggregation"].return_value = {
+        "status": "succeeded",
+        "pointer_confirmed": False,  # live pointer 指向旧 core / 错误 run
+        "published": 1,
+    }
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=True)
+        assert spies["aggregation"].called, "断点恢复应执行 board aggregation"
+        assert not spies["create_run"].called, (
+            "RB-01.1：live pointer 未确认属于当前 lineage 时不得假绿，"
+            "Review 前置条件不满足，必须跳过"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+async def test_rb011_aggregation_partial_status_blocks_review():
+    """compute_all_boards status=partial → _aggregation_status != succeeded，
+    Review 不得执行。"""
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
+                            last_completed_step="publishing")
+    spies, patchers = _install_patches(
+        job_run, resolve_side_effect=_published_resolution)
+    spies["aggregation"].return_value = {
+        "status": "partial",
+        "pointer_confirmed": False,
+        "published": 0,
+    }
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=True)
+        assert spies["aggregation"].called, "断点恢复应执行 board aggregation"
+        assert not spies["create_run"].called, (
+            "RB-01.1：partial aggregation 不得使 review 前置条件满足"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+async def test_rb011_aggregation_failed_status_blocks_review():
+    """compute_all_boards status=failed → _aggregation_status != succeeded，
+    Review 不得执行。"""
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
+                            last_completed_step="publishing")
+    spies, patchers = _install_patches(
+        job_run, resolve_side_effect=_published_resolution)
+    spies["aggregation"].return_value = {
+        "status": "failed",
+        "pointer_confirmed": False,
+        "published": 0,
+    }
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=True)
+        assert not spies["create_run"].called, (
+            "RB-01.1：failed aggregation 不得使 review 前置条件满足"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+async def test_rb011_aggregation_succeeded_pointer_confirmed_runs_review():
+    """publishing 断点恢复 happy path：status=succeeded 且 pointer_confirmed
+    → _aggregation_status="succeeded"，Review 必须执行（验证修复未误伤正常路径）。"""
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
+                            last_completed_step="publishing")
+    spies, patchers = _install_patches(
+        job_run, resolve_side_effect=_published_resolution)
+    spies["aggregation"].return_value = {
+        "status": "succeeded",
+        "pointer_confirmed": True,
+        "published": 1,
+    }
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=True)
+        assert spies["aggregation"].called, "断点恢复应执行 board aggregation"
+        assert spies["create_run"].called, (
+            "RB-01.1：succeeded + pointer_confirmed 时 review 前置条件满足，"
+            "Review 必须执行"
         )
     finally:
         _stop_patches(patchers)

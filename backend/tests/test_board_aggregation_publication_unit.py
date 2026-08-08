@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -308,3 +308,171 @@ def test_board_analysis_service_exposes_industry_concept_separation() -> None:
     source = inspect.getsource(board_analysis_service.list_board_analyses)
     assert 'board_type in ("industry", "concept")' in source
     assert "BoardAnalysisSnapshot.board_type == board_type" in source
+
+
+# -----------------------------------------------------------------------------
+# [Phase 4.4.1 RB-01 收口] compute_all_boards 的 live pointer reconciliation
+# 区分「historically published」(batch_run.published_at is not None) 与
+# 「currently published pointer」(factor_publications market_aggregation pointer)。
+# -----------------------------------------------------------------------------
+
+
+def _make_session_with_batch(batch_run: Mock) -> AsyncMock:
+    """构造一个 session，其 execute 按语句类型返回：
+    - MarketBoard 查询 → 空列表（formal_batch=True，不触发 membership 解析）
+    - run_stmt（BoardAnalysisRun）→ 给定 batch_run
+    - 其它 select(func.count) → 0
+    """
+    session = AsyncMock()
+
+    def _execute(stmt, *args, **kwargs):
+        sql = str(stmt).lower()
+        result = Mock()
+        if "board_analysis_run" in sql:
+            # run_stmt：热点指针对账查询，返回既有 batch_run
+            result.scalar_one_or_none.return_value = batch_run
+        elif "market_board" in sql:
+            # MarketBoard 查询：返回空列表（formal_batch=True，不触发 membership 解析）
+            result.scalars.return_value = _ScalarResult([])
+        else:
+            # select(func.count(...)) 等聚合 / population blocker / universe
+            # 定义查询：需要既可迭代（list(...)）又具备 .first()/.all()
+            result.scalars.return_value = _ScalarResult([])
+            result.scalar_one.return_value = 0
+            result.scalar.return_value = 0
+        return result
+
+    session.execute.side_effect = _execute
+    return session
+
+
+class _ScalarResult:
+    """可迭代且具备 .first()/.all() 的轻量 scalars 替身。"""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def first(self):
+        return self._rows[0] if self._rows else 0
+
+    def all(self):
+        return list(self._rows)
+
+
+def _make_existing_batch(
+    *,
+    status: str = "succeeded",
+    source_core_run_id: uuid.UUID,
+) -> Mock:
+    run = Mock()
+    run.id = uuid.uuid4()
+    run.trade_date = _TRADE_DATE
+    run.source_core_run_id = source_core_run_id
+    run.status = status
+    run.succeeded_count = 10
+    run.failed_count = 0
+    run.expected_count = 10
+    run.coverage_ratio = 1.0
+    run.blockers = []
+    run.published_at = datetime.now(UTC)  # historically published
+    return run
+
+
+@patch("app.services.board_analysis_service.publish_market_aggregation")
+@patch("app.services.board_analysis_service.get_publication")
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_reuse_when_live_pointer_matches(
+    mock_get_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+    mock_publish: AsyncMock,
+) -> None:
+    """现有 batch + live pointer 正确指向本 run + lineage 一致 → 幂等复用，
+    不重新 compute（publish_market_aggregation 不被调用）。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    batch_run = _make_existing_batch(source_core_run_id=source_core)
+    mock_get_publication.return_value = _make_core_pointer(data_run_id=batch_run.id)
+
+    session = _make_session_with_batch(batch_run)
+    result = await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=True,
+    )
+
+    assert result["idempotent_reuse"] is True
+    assert result["pointer_confirmed"] is True
+    assert result["pointer_status"] == "confirmed"
+    assert result["status"] == "succeeded"
+    mock_publish.assert_not_awaited(), "live pointer 已正确 → 不得重新 publish"
+
+
+@patch("app.services.board_analysis_service.publish_market_aggregation")
+@patch("app.services.board_analysis_service.get_publication")
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_recover_pointer_when_missing(
+    mock_get_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+    mock_publish: AsyncMock,
+) -> None:
+    """现有 succeeded batch + live pointer 缺失 → 只恢复 pointer，
+    不重算 Board 数据（publish_market_aggregation 被调用，但不重新 compute）。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    batch_run = _make_existing_batch(source_core_run_id=source_core)
+    mock_get_publication.return_value = None  # live pointer 缺失
+
+    session = _make_session_with_batch(batch_run)
+    result = await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=True,
+    )
+
+    assert result["idempotent_reuse"] is True
+    assert result["pointer_recovered"] is True
+    assert result["pointer_confirmed"] is True
+    assert result["status"] == "succeeded"
+    mock_publish.assert_awaited_once(), (
+        "pointer 缺失时必须恢复 publication pointer"
+    )
+
+
+@patch("app.services.board_analysis_service.publish_market_aggregation")
+@patch("app.services.board_analysis_service.get_publication")
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_pointer_mismatch_not_false_green(
+    mock_get_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+    mock_publish: AsyncMock,
+) -> None:
+    """现有 batch（lineage 匹配当前 core）但 live pointer 指向其它旧 run →
+    不得视为 current ready，必须走正式重算路径（publish 不被直接复用调用，
+    返回结果不携带 pointer_confirmed=True）。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    batch_run = _make_existing_batch(source_core_run_id=source_core)
+    # live pointer 指向一个不同的、错误的 run
+    mock_get_publication.return_value = _make_core_pointer(
+        data_run_id=uuid.uuid4(),
+    )
+
+    session = _make_session_with_batch(batch_run)
+    # 不重算分支会落入下方正式 precompute；此处仅验证不会被错误地当作
+    # confirmed reuse（即不会在不重算的情况下声称 pointer_confirmed）。
+    # 由于 precompute 需要 membership / board 数据，这里用 publish=False 隔离：
+    result = await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=False,
+    )
+    # 落入 precompute 分支：idempotent_reuse 应为 False，
+    # 且不会在不重算的情况下声称 pointer_confirmed。
+    assert result.get("idempotent_reuse") is not True
+    assert result.get("pointer_confirmed") is not True
