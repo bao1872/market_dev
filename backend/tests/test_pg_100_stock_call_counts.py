@@ -16,7 +16,9 @@
     - 五类 kernel（dsa_bundle / smc_pine / bollinger / sqzmom / volume_context）各 100 次
       （compute-once：不重复计算）；
     - daily-core 15m reads = 0（review core 只允许日线，不读 15m）；
-    - StrategyRuntime.execute = 0（DSA 只做投影，不重新执行策略）；
+    - StrategyLoader.load = 0（DSA 使用 precomputed projection，不得进入通用策略
+      runtime 执行链 StrategyLoader.load → runtime.execute；patch 抽象方法
+      StrategyRuntime.execute 无法可靠证明这一点）；
     - coverage 正确（snapshot_count == 100）。
 
 **不再因 instruments 不足而 SKIP**。savepoint 退出自动回滚，不污染验证库。
@@ -261,16 +263,25 @@ async def test_pg_100_stock_real_compute_call_counts(db_session, _db_connection)
 
     MarketDataAggregationService.get_bars = _patched_get_bars
 
-    # StrategyRuntime.execute 守卫
-    import app.services.strategy_batch_service
-    runtime_execute_calls = {"count": 0}
-    orig_execute = app.services.strategy_batch_service.StrategyRuntime.execute
+    # [R1.5b] StrategyLoader.load 守卫（替代 StrategyRuntime.execute）
+    # StrategyRuntime.execute 是 ABC 抽象方法，具体子类 override，patch 它无法可靠证明
+    # "没有任何策略 runtime 被重新执行"。真正要验证的是：daily Core 的 DSA 使用 precomputed
+    # projection，不得进入通用策略 runtime 执行链（StrategyBatchService 正式路径 =
+    # StrategyLoader.load(version) → runtime.execute(...)）。故守卫 StrategyLoader.load：
+    # 任何 load 调用本身就代表策略 runtime 被执行 → 立即 AssertionError，定位更清楚。
+    from app.strategy.runtime import StrategyLoader
+    strategy_loader_load_calls = {"count": 0}
+    # 取原始 classmethod descriptor（保持 descriptor 形式，严格匹配签名）
+    orig_strategy_loader_load = StrategyLoader.__dict__["load"]
 
-    async def _patched_execute(self, *a, **k):
-        runtime_execute_calls["count"] += 1
-        return await orig_execute(self, *a, **k)
+    async def _patched_strategy_loader_load(cls, version):
+        strategy_loader_load_calls["count"] += 1
+        raise AssertionError(
+            f"daily-core 不应加载 StrategyRuntime（应使用 precomputed projection）: {version}"
+        )
 
-    app.services.strategy_batch_service.StrategyRuntime.execute = _patched_execute
+    # patch 为 classmethod 以保留 descriptor/signature，不凭猜测 monkeypatch
+    StrategyLoader.load = classmethod(_patched_strategy_loader_load)
 
     try:
         result = await compute_review_core_with_run_items(
@@ -287,14 +298,17 @@ async def test_pg_100_stock_real_compute_call_counts(db_session, _db_connection)
         for svc_obj, attr, orig in _wrapped:
             setattr(svc_obj, attr, orig)
         MarketDataAggregationService.get_bars = orig_get_bars
-        app.services.strategy_batch_service.StrategyRuntime.execute = orig_execute
+        StrategyLoader.load = orig_strategy_loader_load
 
     # 硬断言
     snapshot_count = int(result.get("snapshot_count") or 0)
     assert snapshot_count == n, f"应生成 {n} 只快照，实际={snapshot_count}"
     assert calls_15m["count"] == 0, f"daily-core 15m reads 应为 0，实际={calls_15m['count']}"
-    assert runtime_execute_calls["count"] == 0, (
-        f"StrategyRuntime.execute 应为 0，实际={runtime_execute_calls['count']}"
+    # [R1.5b] daily Core 的 DSA 必须使用 precomputed projection，不得经
+    # StrategyLoader.load → runtime.execute 进入通用策略 runtime 执行链。
+    assert strategy_loader_load_calls["count"] == 0, (
+        f"StrategyLoader.load 应为 0（应使用 precomputed projection），"
+        f"实际={strategy_loader_load_calls['count']}"
     )
     # kernel 调用计数（compute-once：五类 kernel 每股各算一次）
     # [CHANGE-20260806-005 / Phase 5] 补齐五类 kernel 断言（dsa/smc/bollinger/sqzmom/volume）。
