@@ -310,9 +310,19 @@ class VerifyAttempt:
         self.exporter.log("create_verify_database: 完成")
 
     def run_migration_round_trip(self) -> None:
-        """精确 SHA Migration：绑定目标 SHA alembic + 验证库，断言 revision。"""
+        """精确 SHA Migration：绑定目标 SHA alembic + 验证库，断言 revision。
+
+        Plan-aware：`migration_profile=round_trip`（migration-roundtrip / full-closure）执行
+        upgrade/downgrade/upgrade 全往返；`migration_profile=upgrade_head`（targeted-pg）只
+        执行 `upgrade head` 一次并断言 revision（Exploration 默认轻量 Migration 证据）。
+        """
         self.exporter.log("migration_round_trip: 开始")
-        steps = (("upgrade", "head"), ("downgrade", "-1"), ("upgrade", "head"), ("upgrade", "head"))
+        if self.plan.needs_migration_round_trip:
+            steps = (("upgrade", "head"), ("downgrade", "-1"), ("upgrade", "head"), ("upgrade", "head"))
+            detail = "upgrade/downgrade/upgrade round-trip succeeded"
+        else:
+            steps = (("upgrade", "head"),)
+            detail = "upgrade head succeeded (targeted-pg migration_profile)"
         revisions: list[str] = []
         for operation, target in steps:
             code, _out, err = _run(
@@ -329,8 +339,7 @@ class VerifyAttempt:
             revisions.append(out.strip())
         self.manifest["status"] = "migration_ok"
         self.exporter.record_gate(
-            "migration", True, detail="upgrade/downgrade/upgrade round-trip succeeded",
-            extra={"revisions": revisions},
+            "migration", True, detail=detail, extra={"revisions": revisions},
         )
         self.exporter.log("migration_round_trip: 完成")
 
@@ -563,9 +572,16 @@ class VerifyAttempt:
             self.create_verify_database()
             self.run_migration_round_trip()
             self.assert_identity()
-            self.run_self_contained_pg_tests()
-            self.run_synthetic_seed_twice()
-            self.run_synthetic_e2e()
+            # Plan-driven gates: only run the profile-requested stage set.
+            # targeted-pg / migration-roundtrip do not force Seed/E2E; full-closure
+            # runs PG + Seed + E2E. This is Exploration default routing, not a loss
+            # of fail-closed semantics — each executed gate still enforces it.
+            if self.plan.requires_pg:
+                self.run_self_contained_pg_tests()
+            if self.plan.requires_seed:
+                self.run_synthetic_seed_twice()
+            if self.plan.requires_e2e:
+                self.run_synthetic_e2e()
         except KeyboardInterrupt as exc:
             exit_code = 60
             self.manifest["status"] = "failed"

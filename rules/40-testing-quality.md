@@ -1,322 +1,312 @@
 # 40 测试与质量
 
-> 来源：AGENTS.md §五、§七.20、§八、§六.6、§六.8、§七.8（测试部分）
+## 1. 总原则
 
-## CHANGE 规则
+**Fast Iteration 不是少测试。**
 
-普通 Bug 与局部代码修改默认由 Git 历史记录。只有重要业务规则、契约、主要实现结构、运行方式或重大数据修复发生变化时，才在 `docs/changes/YYYY/` 新增一个 Change 并更新 `docs/changes/INDEX.md`。
+Exploration 只减少与当前改动无关的测试和 release ceremony；受影响业务逻辑的测试仍是硬门。
 
-代码实现阶段的文档出口默认只有对应 Change。用户尚未验收候选实现时，Change 状态必须明确为
-`implemented_unconfirmed`、`verified_code_pending_acceptance` 或等价状态；不得据此自动修改 PRD、
-Maps 或 Runbooks，也不得把测试通过写成用户验收或正式闭环。
+任何代码修改必须回答：
 
-CHANGE 必填字段：
+1. 业务逻辑有没有做对？
+2. 代码逻辑有没有实现对？
+3. 哪些测试足以证明当前修改？
+4. 是否还需要真实数据 / PG / API / Frontend 技术证据？
 
-- 变更编号；
-- 任务名称；
-- 需求出处；
-- 修改前/后行为；
-- 影响模块；
-- 修改文件；
-- 文档更新；
-- 测试证据；
-- Git 分支；
-- Git Commit；
-- 数据库迁移；
-- 配置变化；
-- 风险；
-- 遗留问题。
+## 2. 默认验证层级
 
-禁止为同一闭环拆出多个重复 Change，也禁止新建报告或治理目录。
+### T0 — Syntax / Static
 
-## 文档目录与 CI 门禁
+按修改范围运行：
 
-`tools/check_docs_consistency.py` 必须通过。
+- Python：Ruff、py_compile；生产 Python 变更按现有项目策略运行 Mypy；
+- Frontend：TypeScript / lint；
+- Governance/Docs：仅在修改相关文件时运行对应 checker。
 
-规则包括：
+### T1 — Modified-Scope Unit
 
-- PRD、Maps、Changes 和 Runbooks 的本地链接有效；
-- `docs/current/` 保持 legacy 只读，不作为变更同步门禁；
-- 本地 Markdown 链接有效；
-- 无"待填写"占位符；
-- `feishu_webhook` 不得回退为当前方案；
-- open-decisions 不得把 Webhook vs Platform App 写回 OPEN；
-- CHANGE 引用必须可达；
-- ref/ 隔离文本扫描。
+**每个代码变更默认必须运行。**
 
-CI 应在文档职责、链接、禁止路径或已确认事实出现矛盾时失败；不得仅因普通代码 SHA 变化强制制造无意义文档变更。
+只跑与修改代码直接相关的 unit tests，不默认全仓。
 
-## 质量门禁
+算法、状态机、filter、flatten/read-model、API schema、错误处理等变化必须有对应 unit coverage。
 
-```
-Ruff    新增/修改 Python 文件零错误；历史债务由 tools/quality_baselines/ruff.json 管控
-Mypy    新增 backend/app Python 生产文件零错误；历史债务由 tools/quality_baselines/mypy.json 管控
-Docs    python tools/check_docs_consistency.py
-Arch    python tools/check_architecture.py
-Allow   python tools/check_test_allowlist.py
-Gov     python tools/check_governance_rules.py
-```
+### T2 — Contract
 
-禁止通过全局 ignore、批量 noqa、扩大 exclude、批量 `type: ignore` 或关闭检查掩盖新增问题。
+当修改以下内容时运行：
 
-前端：
+- API request/response；
+- DTO / schema；
+- frontend service/hook contract；
+- persistence shape；
+- canonical/read-model contract；
+- domain status mapping。
 
-- `tsc --noEmit`；
-- `npm run lint`；
-- `npm run build`；
-- `npm run test:contract`；
-- `npm run test:e2e`。
+### T3 — Targeted Business Chain
 
-## 报告与对话输出（2026-07-29 收口）
+当修改业务链时，验证当前 vertical slice 的关键调用关系。
 
-> 硬规则：禁止新建未经用户确认的报告/治理目录（如 `reports/`）。
-> 完整执行过程只在对话输出，不写入仓库；普通 Bug 由 Git 历史记录，只有重要行为变化才写一个 CHANGE。
-> `docs/current/` 标记为 legacy 只读，本轮起不得新增或修改其中文件，后续另行迁移；
-> CI 与规则中不再要求"代码变更必须同步 docs/current"。
+例如 H1：
 
-历史 `reports/` 目录已删除（见 CHANGE-20260729-004 配套提交），`tools/check_reports.py` 与 CI `Reports System` job 一并移除。
+`daily bars → Core → first pyramid → persistence → API → frontend binding`
 
-## 测试纪律
+只验证当前链，不自动扩大到 Board/Review/Chip/Auction。
+
+### T4 — Representative Real-Data Sampling
+
+算法/数据行为变化时，使用有意设计的代表性真实样本。
+
+默认建议：
+
+- 25–60 只股票；
+- strong / weak / range；
+- high / low volatility；
+- 关键 SMC / momentum case；
+- edge / insufficient history；
+- 用户熟悉、可人工判断的股票。
+
+不是纯随机抽样。
+
+### T5 — Targeted PG / Integration
+
+只有真实 PostgreSQL 语义、SQL、ORM、transaction、migration、publication、pointer 或跨服务持久化需要证明时运行。
+
+不因“有数据库表”就自动跑全套 PG。
+
+### T6 — Full PURE_UNIT
+
+**非默认。**
+
+仅在以下情况启用：
+
+- shared foundation；
+- broad schema/contract；
+- 大范围核心算法公共层；
+- 编排大重构；
+- milestone / hardening；
+- modified-scope 无法合理界定。
+
+### T7 — Remote PG / Synthetic E2E
+
+用于证明：
+
+- Migration；
+- 真实 PostgreSQL 行为；
+- 多服务/编排；
+- publication/pointer；
+- 当前 slice 的必要端到端。
+
+Exploration 只运行需要的 profile/gate，不默认 full-closure。
+
+当前注册远程验证计划：
+
+- `targeted-pg`：Exploration 默认 PostgreSQL 合同证据；
+- `migration-roundtrip`：Migration 专项；
+- `full-closure`：Hardening/Release。
+
+禁止通过任意 shell/pytest 参数注入绕过已注册 plan/profile。
+
+### T8 — Release Regression
+
+只在 `70-hardening-release.md` 启用。
+
+## 3. 默认 Exploration 测试链
+
+通常：
+
+`T0 → T1 → [T2] → [T3] → [T4] → [T5/T7 only if required] → Runtime/Frontend`
+
+方括号表示按风险选择。
+
+禁止默认追加：
+
+- full PURE_UNIT；
+- full Synthetic Closure；
+- production clone；
+- full regression；
+- 与当前 slice 无关的 E2E。
+
+## 4. 本地与远程测试模式
+
+### 本地 / CI
+
+默认：
+
+`PURE_UNIT_TEST=1`
+
+- 不连接 PostgreSQL；
+- 不联网的纯单元优先；
+- 可运行静态、合同和前端测试。
+
+### 远程 PostgreSQL
+
+真实 PG test 使用：
+
+`PANJI_REMOTE_VERIFY_DB_TEST=1`
+
+只允许连接 `panji-prod` 上正式创建的 `bz_stock_verify_<sha>`。
+
+必须 fail-closed 确认：
+
+- `APP_ENV=verification`；
+- `current_database()` 是验证库；
+- 不是 `bz_stock`。
+
+禁止恢复共享业务库 pytest。
+
+## 5. Marker
+
+需要真实 PostgreSQL 的测试显式：
+
+`@pytest.mark.postgres`
+
+依赖外部数据源的测试显式：
+
+`@pytest.mark.external_data`
+
+marker 不能作为失败免责机制；如果是代码断言错误仍必须修。
+
+## 6. 前端测试
+
+前端变更按范围选择：
+
+### 纯样式/布局
+
+- targeted component test（如已有）；
+- TypeScript / lint；
+- build（当变更可能影响构建）。
+
+### 数据绑定 / API
+
+必须验证：
+
+- endpoint；
+- request params；
+- HTTP status；
+- response schema；
+- hook/service mapping；
+- component consumed fields；
+- loading/error/unavailable 行为。
+
+### 产品逻辑展示
+
+如果页面状态会影响用户业务判断，必须使用真实 API/真实数据做远程技术闭环。
+
+不要求 IDE 替用户判断“页面好不好看”或“理论有没有价值”。
+
+## 7. API 变更纪律
+
+修改 API 时必须：
+
+- 检查所有实际前端调用；
+- 检查 response field rename/type/nullability；
+- 更新相应 contract test；
+- 验证至少一个真实/targeted response；
+- 禁止后端 PASS 但前端读旧字段。
+
+## 8. 算法测试纪律
+
+算法修改必须同时考虑：
+
+- 正向 case；
+- 反向/无信号 case；
+- 边界历史；
+- point-in-time；
+- 前缀不变性（如适用）；
+- no future leakage；
+- canonical determinism；
+- representative real-data sampling（当产品假设依赖算法输出）。
+
+## 9. Worker / Orchestrator
+
+修改 Worker/编排时检查：
+
+- 幂等；
+- heartbeat；
+- retry；
+- lease/fencing；
+- partial/failure status；
+- resume；
+- 不得 false-green。
+
+只审当前修改涉及的任务，不自动审所有 Worker。
+
+## 10. Migration 测试
+
+修改 Migration 时必须：
+
+- 静态审查 upgrade/downgrade；
+- 在允许的远程验证库进行 upgrade/downgrade/upgrade；
+- 检查约束对存量 fixture/测试数据的影响。
+
+是否需要生产数据 clone 由 `80-deployment-migration.md` 的风险等级决定，不是所有 migration 默认要求。
+
+## 11. 失败纪律
 
 - 删除测试以适配错误实现：禁止；
-- 修改 API 不检查前端调用：禁止；
-- 修改数据模型不检查 migration：禁止；
-- 修改 Worker 不检查幂等、心跳、重试：禁止；
-- 把 Mock E2E 说成真实生产 E2E：禁止；
-- 把 OPEN 问题写成最终结论：禁止；
-- 把临时实验写成永久规则：禁止。
+- 修改断言来掩盖业务错误：禁止；
+- 未运行写成 PASS：禁止；
+- 本地 modified-scope 失败时禁止进入部署；
+- 服务器 smoke 不能冒充 unit/regression；
+- Mock E2E 不能冒充真实数据 E2E；
+- 局部成功不能冒充整体成功。
 
-## 验证计划与证据资格
+## 12. 重跑纪律
 
-- 正式远程验证只能使用 `scripts/ops/panji-verify` 和仓库登记的封闭计划；计划只允许选择已注册 profile，不允许注入任意 shell、pytest 参数或插件。
-- 正式证据必须绑定完整 40 位 target/repo/runtime SHA、精确验证数据库、Compose project、Alembic revision、计划名和各 gate 结果；任一身份不一致立即失败。
-- 同一 SHA 的 PG 测试必须由单可复用验证运行时（`panji-verify-python` 容器经 `verify_exec.py` fresh process，镜像 `panji-verify-runtime:current`）执行；本地模拟、临时容器修改或其他 SHA 的结果不具备正式证据资格。
-- 每次尝试的日志和证据必须有单文件与总量上限；成功、失败、中断和超时都必须执行精确清理并保留有界证据。
+同一测试集默认最多运行两次：
 
-## ref/ 隔离测试
+1. 首次真实运行；
+2. 针对明确根因修复后的复跑。
 
-`ref/` 目录下所有文件仅供人工阅读参考，**禁止作为运行依赖**。
+第二次仍失败应 STOP 并报告 first real blocker，除非用户明确要求继续诊断。
 
-## 2026-08-01 收口：全局安装、baseline膨胀、局部Canary、部署黑名单（CHANGE-20260801-001 配套）
+## 13. 证据资格
 
-### TQ-80 禁止用户级/全局依赖安装
+“正式证据”要与结论范围匹配。
 
-- **禁止** `pip install <package>`、`npm install <package>`、`brew install <package>`、`conda install <package>` 四种用户级依赖安装，除非：
-  1. PRD 明确新增了依赖并在 `pyproject.toml` / `package.json` 声明；
-  2. 且本轮任务必须在本地真实运行该依赖（非 CI 替代）。
-- **禁止**绕过：`pip install --user` / `npm install -g` / 临时安装后不写入 package.json/pyproject.toml。
-- 依赖缺失 → 优先使用 py_compile / ast / 语法检查（后端）或交 CI 跑全量测试，不为了"本地跑测试"而装全局依赖。
+### Exploration
 
-### TQ-81 禁止 baseline 膨胀
+最低要求：
 
-- **Ruff / Mypy baseline**（`tools/quality_baselines/ruff.json` 与 `mypy.json`）：
-  1. 每轮任务 baseline 文件 **净增大** 不得超过 3 行；
-  2. 不得批量 `# noqa`、批量 `type: ignore`、扩大 `exclude` 目录；
-  3. CI 中 **Ruff 新增错误为 0** 是门禁；任何 "修改规则基线以适配错误代码" 行为必须在 CHANGE 中单独解释根因与修复计划。
-- **Playwright baseline 截图**：
-  1. 单轮变更 baseline 图片张数新增 ≤ 3；
-  2. 不得删除旧 baseline 图以"适配"视觉回归失败；必须解释视觉差异确实来自 UI 合法变化。
+- exact commit SHA；
+- test command / test set；
+- PASS/FAIL；
+- runtime target date / sample；
+- 关键 API/DB/前端绑定证据。
 
-### TQ-82 禁止用 CI 或服务器测试掩盖本地失败
+### Hardening
 
-- **本地测试失败时禁止部署**：修改范围内的单元测试或静态检查未通过，不得进入部署步骤。
-- **本地无法运行测试时如实报告**：若本地环境确实无法运行某类测试（如缺依赖、缺 DB），必须明确说明，不得用 "CI 会跑" 或 "服务器部署后验证" 掩盖未验证状态。
-- 禁止把未运行的测试说成已通过；禁止把服务器 smoke 当成完整回归。
+按 `70-hardening-release.md` 增加：
 
-### TQ-83 禁止局部 Canary 冒充整体成功
+- repo/runtime SHA；
+- DB revision；
+- full gate；
+- resource identity；
+- complete release evidence。
 
-- 整体功能（如竞价分析、review 五阶段、after_close 七步）不得把单组件/局部 Canary 通过写成整体完成：
-  - 例子 1：capture 服务启动 ≠ 竞价分析整体闭环（09:25真值/scan/aggregate/publish 未过）；
-  - 例子 2：stock_core publishing ≠ after_close watchlist_ready（review 阶段未跑）；
-  - 例子 3：1 个行业 review scope 成功 ≠ 全市场 ready。
-- 规则：整体 status = `min(各组件 status)`，任何一个未通过 → 整体不是"成功"；
-  - 正确写法：`partial_closed: quote_capture_only`、`review_in_progress: stock_core_ok_but_review_pointer_not_published`；
-  - 健康接口不得返回 `overall: "success"` 给以上部分成功情形。
+Exploration 不得为了证明一个局部 hypothesis 自动要求 Hardening 证据包。
 
-### TQ-84 部署黑名单方式永久禁止
+## 14. 质量工具
 
-见 `rules/80-deployment-data-safety.md` §部署永久黑名单。
+修改相关文件时，适用的 checker 必须通过。
 
-- 禁止 `scp` 单文件；禁止 `docker cp`；禁止 SSH 进容器 vi/sed 修改源码；禁止临时 `python -c` 执行业务脚本。
-- 所有部署 / review 恢复 / after_close 重跑 **必须** 走正式 CLI / orchestrator API / admin 后端 API。
+不得通过：
 
-- 生产代码、测试、工具、构建脚本在运行时不得 `import` / `open` / `read` / `glob` `ref/` 目录下任何文件；
-- SMC Pine parity 测试只读取 `backend/tests/fixtures/smc_pine/*.csv`；
-- 禁止从 DB 重新取 bar 或依赖 `ref/` 导出脚本；
-- `AGENTS.md` / `docs/maps/*.md` 不得把 `ref/` 文件称为"真源"、"合同"、"fixture 生成器"或"运行依赖"；应称为"参考源（人工阅读）"；
-- 算法真源必须是生产代码（如 `smc_pine_core`、`node_cluster_engine`、`indicator_contract`、`indicator_semantics`）。
+- 全局 ignore；
+- 批量 `noqa`；
+- 扩大 exclude；
+- 批量 `type: ignore`；
+- 删除测试；
+- 放宽 checker；
 
-## Migration 测试纪律
+来适配错误实现。
 
-修改 migration 必须有 upgrade / downgrade / upgrade 验证。详见 `80-deployment-data-safety.md`。
+不要求每个普通代码任务都运行与本次修改无关的 docs/governance checker。
 
-## 测试数据库与测试模式（2026-08-06 收敛为本地纯单元 + 远程验证库）
+## 15. ref/ 隔离
 
-> 引用修订（2026-08-02，CHANGE-20260802-003）：原文的悬空 Change 引用已移除；
-> 实际来源是 CHANGE-20260728-004（禁用临时测试库）与 CHANGE-20260728-008（删除持久测试库）。
-> 2026-08-05 引入 `PANJI_REMOTE_VERIFY_DB_TEST=1`；2026-08-06 进一步废止共享业务库 pytest，
-> 收敛为“本地/CI 纯单元，真实 PG 只在 DS-110 远程验证库运行”。
+`ref/` 仅供人工参考。
 
-> 来源：AGENTS.md §8 基础安全边界
+生产代码、测试、工具、构建脚本不得运行时读取 `ref/`。
 
-### 禁止范围（本地 / CI / Docker 容器）
-
-- **本地、CI、Docker 容器**：禁止创建或复用任何独立/临时测试数据库；禁止启动测试专用数据库容器（含 CI service container 与 `docker compose` 临时 Postgres）；禁止创建测试专用 Volume 或持久测试引擎；禁止引入 `TEST_DATABASE_URL` 一类独立测试库连接变量；禁止使用 `bz_stock_test` 一类独立测试库名；禁止在 CI 中为数据库测试挂载 `services: postgres`。
-- **唯一允许的临时数据库**是 `rules/80-deployment-data-safety.md` DS-110 定义的远程验证数据库 `bz_stock_verify_<sha>`，且仅在 `panji-prod` 已有 PostgreSQL 容器内、由正式验证脚本创建。
-
-### 测试模式规则
-
-- 两种模式见 TQ-100。非两种模式之一时，`conftest` 加载即失败。
-- 本地和 CI 只运行纯单元、静态、合同及前端测试，不连接 PostgreSQL。
-- 远程验证模式必须在 `panji-prod` 运行，连接 `bz_stock_verify_<sha>`，`APP_ENV=verification`，且 `current_database()` 不得为 `bz_stock`。
-- 已删除共享业务库 pytest 兼容入口；不得重新引入连接 `bz_stock` 的测试模式。
-
-### 新增测试规则
-
-- 新增测试优先写成纯单元测试（不连接数据库）。
-- 必须连接数据库的集成测试必须使用 `db_session` fixture，并且只能在 `PANJI_REMOTE_VERIFY_DB_TEST=1` 远程验证库模式下运行。
-- 不得在本地 Mac 创建持久测试库以运行集成测试。
-
-### TQ-100 唯一测试模式合同
-
-> 本条是测试运行环境的**唯一权威**。任何文档、脚本、CI 配置、注释与本条冲突的，以本条为准。
-
-**两种允许的测试模式**：
-
-| 模式 | 触发变量 | 数据库 | 适用范围 |
-|---|---|---|---|
-| 纯单元 | `PURE_UNIT_TEST=1` | 不连接任何数据库、不联网 | 默认模式，绝大多数测试 |
-| 远程临时验证库 | `PANJI_REMOTE_VERIFY_DB_TEST=1` | `panji-prod` 上 `bz_stock_verify_<sha>` | Migration、PG 集成、完整 Synthetic E2E |
-
-两个变量均未设置时，`backend/tests/conftest.py` 必须在加载阶段 fail-closed 直接失败，不得回退到任何默认数据库。
-
-**远程验证模式的强制前置条件**（fail-closed，任一不满足立即中止）：
-
-- 只能在远程 `panji-prod` 运行，禁止在本地 / CI 启用；
-- `APP_ENV=verification`；
-- `DATABASE_URL` 指向 `bz_stock_verify_<7到40位SHA>`（DS-110 命名规则）；
-- 连接建立后必须执行 `SELECT current_database()`，若返回 `bz_stock` 立即中止（禁止触碰业务库）；
-- 允许 DDL 与 Alembic，但只针对验证数据库；
-- 允许完整 PG 测试（Migration、PG 集成、Synthetic E2E）；
-- 禁止创建测试 PostgreSQL 容器与测试 Volume。
-
-**本地 / CI 永久禁止**（与第一种模式无关，仅约束本地/CI）：
-
-- 禁止在本地 / CI 创建或复用独立测试数据库、临时测试数据库；
-- 禁止启动测试专用数据库容器（含 CI service container 与 `docker compose` 临时 Postgres）；
-- 禁止创建测试专用 Volume 或持久测试引擎；
-- 禁止引入 `TEST_DATABASE_URL` 一类独立测试库连接变量；
-- 禁止使用 `bz_stock_test` 一类独立测试库名；
-- 禁止在 CI 中为数据库测试挂载 `services: postgres`。
-
-**文档一致性要求**：`rules/`、`docs/maps/`、`docs/prd/`、`docs/runbooks/`、`.github/workflows/` 的活跃内容中，不得出现描述上述本地/CI 禁止路径为**当前可用方案**的表述；但**不得再出现**"所有临时数据库永久禁止"的绝对表述（远程验证库为允许例外，见 DS-110）。历史 `docs/changes/` 记录与本条中明确标注为"禁止"的语句不受此限。该约束由 `tools/check_governance_rules.py` 自动断言。
-
-### TQ-101 PostgreSQL 测试自包含合同
-
-- 每个 PG 测试必须在自身 transaction/fixture 中创建最小完整前置数据，并在测试边界内回收；不得依赖 Seed 已执行、前一个测试的写入、验证库历史数据、测试顺序或 `bz_stock` 中恰好存在的数据。
-- 基础 PG Integration 与原子性/幂等/fencing 测试必须在空白 migration head 验证库独立通过；需要完整 synthetic 场景的测试必须显式归类为 Synthetic E2E，不得混入基础 PG 测试冒充自包含。
-- fixture 声明的 expected/eligible/coverage 必须由数据库中真实创建的对应行支持；禁止只传计数或比例而不准备真实 prerequisite。
-- 正式 PG 证据只能由目标 SHA 的一次性 `verify-test` 服务产生；其 app、tests、pytest 配置、migration、scripts 和依赖必须全部来自同一 target SHA。
-- 在运行容器临时 `pip install`、`docker cp`/`/tmp` 注入测试、临时拼接 `PYTHONPATH`、复用其他 SHA 的 venv/app/tests、缺失 marker 注册或 pytest 配置所得结果一律无效。
-
-## 测试、验证与部署证据合同
-
-### TQ-90 分层验证合同
-
-1. **默认只运行修改范围单元测试和静态检查**：本地验证聚焦本次改动相关的测试 + Ruff/Mypy/TSC/Lint/Arch/Allow/Gov。
-2. **不默认运行全仓测试**：不把全仓测试作为普通开发的前置要求。
-3. **CI 是手工诊断证据，不是自动部署门禁**：push `dev` 不自动触发 CI 或部署；不得把“CI 未运行”单独当成部署失败，也不得忽略已经取得的 CI 失败证据。
-4. **远程验证是独立证据层**：涉及 Migration、ORM/SQL、真实 PG 语义、Worker/编排、发布指针、权限写入或跨服务业务链路的变更，稳定运行部署前必须由同一 SHA 在远程验证库完成相应 PG Integration/Synthetic E2E。纯文档、纯样式或经合同测试证明不触及上述边界的修改不强制运行 PG 验证。
-5. **本地测试失败时禁止部署**：见 TQ-82。
-6. **本地无法运行测试时如实报告**：见 TQ-82，不得用 CI 或服务器测试掩盖。
-7. **远程验证尝试必须收尾**：每次 PG 测试、Migration round-trip、Synthetic E2E 或远程调试尝试，无论 pass、fail、cancelled、interrupted 或 timeout，都必须先导出必要日志与身份/资源证据，再执行正式清理；清理失败使本轮结果最多为 `blocked_cleanup`，不得继续创建下一套验证资源。
-8. **诊断证据与运行现场分离**：失败分析依赖已导出的文本日志、测试报告、SHA、数据库名、revision 和资源快照，不以长期保留容器或验证数据库作为默认诊断方式。
-
-### TQ-91 当前未采用的交付机制
-
-以下机制当前未实现，禁止在代码、文档或报告中冒充当前可用路径：
-
-- Release Gate（`.github/workflows/release.yml` 的 `Release Gate` job）；
-- GHCR / Registry / 镜像仓库推送；
-- Release Manifest / immutable image release / formal release candidate；
-- 服务器只 pull 不 build；
-- 自动 Fast CI 部署门禁；
-- 未落地的多阶段 delivery 状态机。
-
-> 上述工作流文件已删除，禁止恢复。任何当前部署行为以
-> `rules/80-deployment-data-safety.md`、`docs/maps/80-system-runtime.md` 和
-> `docs/runbooks/development-deployment.md` 为唯一权威。
-
-### TQ-92 测试分类（仅用于 CI 诊断，不影响部署）
-
-后端测试按执行环境依赖分为三类，由 `backend/tests/conftest.py` 的 `pytest_collection_modifyitems` 统一判定并输出 `[test-classification]` 摘要行，仅供 CI 诊断与对账：
-
-| 类别 | marker | 含义 | 运行位置 |
-|---|---|---|---|
-| PG 集成 | `postgres` | 需要真实 PostgreSQL | 仅远程验证库（`PANJI_REMOTE_VERIFY_DB_TEST=1`） |
-| 外部数据 | `external_data` | 依赖外部数据源 | 手工 CI 或受控远程验证 |
-| 纯单元 | 无 | 不连库、不联网 | 本地 `PURE_UNIT_TEST=1` + CI |
-
-约束：
-
-- 三类计数可对账：`postgres + 纯单元 = 总数`，`external_data` 与前两类正交。
-- `external_data` 失败不自动等同于代码失败；但当修改涉及该数据源、Adapter、行情合同或依赖其结果的业务链路时，失败必须阻断对应稳定运行部署。与修改范围无关的外部波动可以记录证据后排除。
-- 禁止把 `external_data` 当作"测试跑不过就贴上去"的免死金牌；断言逻辑缺陷必须修复。
-
-### TQ-93 新增测试必须显式标注 marker
-
-- 新增测试若需要真实数据库，**必须**由作者显式写 `@pytest.mark.postgres`；若依赖外部数据源，**必须**显式写 `@pytest.mark.external_data`。
-- `conftest.py` 中基于 fixture 闭包与源码文本的自动判定为过渡机制，配套漏标检查 `_DB_SUSPECT_PATTERN` **只报告、不自动补 marker**；出现嫌疑项必须人工确认并补显式 marker。
-- 存量归类稳定后应逐步移除源码文本扫描，改为纯显式 marker。
-
-## 2026-08-02 收口：验收证据与结论纪律（CHANGE-20260802-005 配套）
-
-> 来源：从已删除的工具专属角色文件中提炼的通用规则。
-
-### TQ-94 测试必须进入正式测试文件
-
-- 验收断言必须写入 `backend/tests/` 或 `frontend/src/**/__tests__/`；
-- 禁止仅以临时 `python -c` / `node -e` / 一次性脚本的输出作为验收证据；
-- 临时命令只能用于探查，不能替代可复跑的测试。
-
-### TQ-95 失败重跑上限
-
-- 同一测试集最多运行 2 次：第一次失败只修复相关问题，再复跑一次；
-- 第二次仍失败必须停止并报告真实失败原因，禁止无限重跑或反复微调直到偶然通过。
-
-### TQ-96 禁止用未验证结论冒充事实
-
-- 未取得证据前，禁止在对话输出、CHANGE 或文档中写 `DONE` / `SUCCESS` / `COMPLETED` / `PASSED` 等成功结论；
-- 未知、未验证、部分完成、阻塞和失败必须如实标记；
-- 局部通过不得写成整体通过（与 TQ-83 叠加）。
-
-### TQ-97 页面验收必须有三类证据
-
-涉及前端页面的变更，验收时必须真实在浏览器完成并记录：
-
-- **URL**：目标路由实际访问 URL（含 query 参数），确认 hydration 后不被默认值覆盖，前进/后退能正确恢复状态；
-- **Console**：是否存在 error / warning，异常必须定位根因或明确标注为已知无关警告；
-- **Network**：关键 API 请求的状态码与响应摘要，不得仅凭页面渲染成功推断 API 正常。
-
-禁止以 IDE 截图或静态代码审查代替行为核验。
-
-### TQ-98 成功判定三要素（涉及发布 pointer 的任务）
-
-判定发布类任务成功必须**同时**具备：
-
-- **pointer**：`factor_publications` 中对应 kind 的 pointer 已切换至目标 run，`data_run_id` 指向本轮 run；
-- **版本**：repo HEAD、`algorithm_version`、运行代码 SHA 一致；
-- **真实数据证据**：DB 查询或日志证明发布已生效。
-
-`/health=200` 或"页面能打开"只能作为辅助证据，不能单独判成功。
-
-### TQ-99 CI 结论读取纪律
-
-CI 是**手工诊断工具**（`workflow_dispatch`），不是部署门禁（见 TQ-90.3/TQ-90.4）。手动触发 CI 后：
-
-- 必须监控该**精确 commit SHA** 直到 Workflow 终态，不得用前一次 push 的 SHA 代替；
-- 查询降级顺序：GitHub 连接器 → 已认证 `gh` CLI → 公开 REST API（`/repos/{owner}/{repo}/actions/runs?head_sha={sha}`，无需认证）；
-- `gh` 未认证不能作为停止监控的理由；
-- 数据库测试不通过 CI 执行；Migration、PG Integration 和 Synthetic E2E 只在远程验证库运行；
-- 必须按真实日志修复，不得凭猜测改代码；无法下载日志时仍须报告失败 Job 名称并运行其本地等价命令；
-- 报告须列出每个 Job 的 name 与 result，以及 `CI Gate` 的最终 conclusion；单个 Job 通过不能代替 `CI Gate` 结论。
+正式算法 fixture 必须位于正式测试 fixture 目录。

@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "full-closure",
-  "runtime_profile": "after_close",
+  "migration_profile": "round_trip",
   "test_profile": "pg_contract",
   "seed_profile": "v21_synthetic",
   "e2e_profile": "closure_v21",

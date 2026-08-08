@@ -1,85 +1,68 @@
-# 00 核心治理
+# 00 — Core Governance
 
-> 来源：AGENTS.md 第 1、3、4 节
+## 1. 事实源优先级
 
-## 修改闭环
+- PRD 是目标行为的权威来源；
+- 代码、数据、日志和运行状态是当前执行事实的权威来源；
+- Maps 用于总结已核验的当前实现，并应与真实代码保持一致；
+- Changes 用于解释重要历史演化；
+- Runbooks 用于描述当前操作步骤。
 
-任何修改必须形成闭环：读取文档入口 → 理解系统地图 → 核对真实代码 → 判断任务类型与文档影响 → 明确修改/不修改范围 → 修改授权范围内的代码/测试/Change → 运行一致性检查 → 提交。只有重要业务规则、契约、主要结构或运行方式发生变化时才建立一个 CHANGE；普通 Bug 由 Git 历史记录。
+文档冲突时：先判断是目标行为还是当前实现；查看对应权威来源；用代码或运行证据核验；
+修正文档而不是自行猜测。不得把假设、计划或未验证结果表述为事实。
 
-完成标准按实际影响面闭环：代码必须与适用的 PRD、API/数据契约和测试证据一致；Map/Runbook 是否同步取决于用户验收后的单独授权，不是代码提交完成的自动条件。只有变更确实影响部署配置或运行方式时，部署配置才进入本任务完成标准。
+## 2. 阶段路由
 
-## 治理变更授权
+当前默认 `PROJECT_STAGE = EXPLORATION`。`AGENTS.md` 定义了 Exploration 默认执行链、Correctness Gates 和 Hardening Trigger。
 
-修改 `AGENTS.md`、`rules/`、治理检查器或治理测试，必须有用户在当前任务中的明确治理调整指令。发现冲突本身不构成修改授权；未获授权时只报告问题和建议。
+Exploration 只减少与当前 hypothesis 无关的全域验证与治理完备性，不减少正确性、测试、数据安全和真实运行证据。
 
-`rules/PROTECTED_GOVERNANCE_FILES.json` 是受保护治理变更域的唯一机器可读清单。清单中的
-治理文本、治理检查器、远程验证框架及其合同测试必须按同一治理授权管理。普通代码任务不得修改
-这些文件；合同变化必须同时核对规则、代码、静态检查和测试，不能让任一层单独漂移。清单新增、
-删减或改名本身属于治理变更，仍需用户当轮明确授权。
+## 3. Hypothesis Slice
 
-## 产品与实现文档授权
+任何影响产品/算法行为的任务，在实现前至少明确：
 
-- PRD：仅用户当前任务明确发起 PRD 更新时可修改；代码任务发现需求冲突只报告。
-- Maps：仅用户验收后明确要求同步，或当前任务直接明确要求更新 Maps 时可修改。
-- Runbooks：仅用户在真实操作验收后明确要求同步，或当前任务直接明确要求更新 Runbooks 时可修改。
-- Changes：重要代码、测试、Migration、契约或运行方式变化可随实现维护唯一 Change；未验收候选实现必须标记 pending acceptance。
-- 批准开发计划、要求完成闭环、要求更新文档，均不得隐式授权 PRD、Maps、Runbooks 或治理文档。
+- Hypothesis；
+- PRD Basis（对应条款，或明确标注尚未进入 PRD）；
+- Visible Outcome；
+- Vertical Slice（input → compute → persistence → API → frontend）；
+- Correctness Risks（future leakage、ownership、trade_date、canonical、fallback、安全）；
+- Required Tests；
+- Deferred。
 
-## 事实源优先级
+## 4. 修改前最小报告
 
-冲突时判断顺序（前者覆盖后者）：
+修改代码前，报告：
 
-1. 用户当前明确要求；
-2. 当前工作分支的代码、数据、日志与运行事实；
-3. `docs/prd/*.md`（已确认需求与目标行为）；
-4. `docs/maps/*.md`（已核验当前实现）；
-5. `docs/changes/INDEX.md` 及其指向的最新相关 Change；
-6. 测试与 CI 结果；
-7. 生产只读验证结果；
-8. archive 历史文档；
-9. 旧聊天记忆。
+- 当前要解决的问题或要验证的 hypothesis；
+- 计划修改的文件范围；
+- 修改会影响的模块 / 契约 / 数据 / 运行方式；
+- 计划执行的测试和真实运行验证；
+- 需要用户授权但尚未获得的部分。
 
-archive 和旧聊天不能覆盖 current。
+## 5. 严重度分级
 
-> 注（2026-07-29 收口）：`docs/current/` 已标记为 legacy 只读，不再作为事实源优先级入口；
-> 事实源以 `docs/prd/` 与 `docs/maps/` 为准。后续 `docs/current/` 将另行迁移。
-> 历史 `reports/` 目录已删除，不再作为读取入口。
+- **P0**：数据损坏、安全泄漏、契约破坏、时间因果错误、真实业务结果错误。不得在探索模式下静默兜底。
+- **P1**：功能缺口、主要流程错误、重要边界错误、明显技术债务。
+- **P2**：局部体验、次要一致性问题、与当前 slice 无关的标准化。
+- **P3**：低影响工程债务，触发条件满足前 Deferred。
 
-## 修改前最小报告
+## 6. 文档授权门
 
-执行主体动手前必须输出：
+- **PRD 门**：只有用户明确发起 PRD 任务才修改 `docs/prd/`。
+- **Maps 门**：只有用户验收后明确授权同步 Maps 才修改 `docs/maps/`。
+- **Runbooks 门**：只有真实操作验收后明确授权同步才修改 `docs/runbooks/`。
+- **Changes 通道**：重要行为/契约/Schema/运行方式变化时，代码任务可新增或更新唯一相关 Change，必须诚实标注实现/验收状态。
+- **治理门**：只有用户明确授权治理调整才修改 `AGENTS.md`、`rules/`、`tools/check_governance_rules.py` 及其治理测试，以及 `rules/PROTECTED_GOVERNANCE_FILES.json` 列出的受保护文件。
 
-- 任务目标；
-- 分支和 base commit；
-- 已读 `docs/prd` 与 `docs/maps`（`docs/current` 已 legacy 只读，不再要求读取）；
-- 当前代码入口（前端/API/Service/Repository/Worker）；
-- 涉及数据表；
-- 测试覆盖规则；
-- 文档与代码是否一致；
-- 本次准备修改什么；
-- 明确不修改什么；
-- 预计更新哪些 `docs/maps`；
-- 是否需要 CHANGE；需要时说明唯一文件。
+普通开发任务默认不修改 PRD/Maps/Runbooks/治理。
 
-发现冲突先列出，不得直接编码。
+## 7. Two-Strike Architecture Rule
 
-## 分层原则
+第一次遇到局部问题优先局部、清晰、可测试地解决；只有同类真实问题至少第二次出现，或已经存在两个明确消费者/重复场景时，才考虑新增通用 abstraction、framework 或治理层。安全与数据正确性问题不受此条限制。
 
-- API：认证、参数、响应；
-- Service：业务状态、事务、资格、幂等；
-- Repository：数据访问；
-- Kernel：计算；
-- Adapter：外部系统；
-- 前端：ViewModel 与展示，不重算后端业务。
+## 8. 闭环与证据
 
-## 单一代码源
-
-- 所有正式修改必须进入 Git 历史，并按任务授权推送；
-- 服务器运行目录不产生业务代码；
-- 开发部署只接受 `origin/dev` 上可解析的精确 commit。
-
-## 时间和因果
-
-- 业务时间 Asia/Shanghai；
-- 历史和盘后必须 point-in-time；
-- causal、confirmed_delay、hindsight、label 严格分离。
+- 未验证结果必须标记为未验证；
+- 不得用 mock 冒充真实结果；
+- 不得用“测试通过”掩盖真实运行错误；
+- 任何与真实数据、远程验证、migration、部署相关的结论，必须有对应证据或明确标注未执行。

@@ -8,16 +8,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).parents[2]
-SPEC = importlib.util.spec_from_file_location(
-    "check_governance_rules", ROOT / "tools/check_governance_rules.py"
-)
+SPEC = importlib.util.spec_from_file_location("check_governance_rules", ROOT / "tools/check_governance_rules.py")
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 check = MODULE.check
 
 
-def _copy_file(source: Path, target: Path) -> None:
+def _copy(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
 
@@ -25,443 +23,79 @@ def _copy_file(source: Path, target: Path) -> None:
 @pytest.fixture
 def governance_repo(tmp_path: Path) -> Path:
     target = tmp_path / "repo"
-    _copy_file(ROOT / "AGENTS.md", target / "AGENTS.md")
+    _copy(ROOT / "AGENTS.md", target / "AGENTS.md")
     shutil.copytree(ROOT / "rules", target / "rules")
-    _copy_file(ROOT / ".github/workflows/ci.yml", target / ".github/workflows/ci.yml")
     for relative in (
-        "scripts/ops/panji-test-deploy",
-        "scripts/ops/panji-verify",
-        "scripts/deploy/panji-deploy.sh",
-        "scripts/verify/verify_attempt.py",
-        "scripts/verify/cleanup_runner.py",
-        "scripts/verify/verification_plan.py",
-        "scripts/verify/run_remote_verification.sh",
-        "scripts/verify/prepare_verify_environment.py",
-        "scripts/verify/plans/full-closure.json",
-        "docker-compose.prod.yml",
-        "docker-compose.verify.yml",
-        "backend/Dockerfile",
-        "backend/tests/test_verify_infra_safety.py",
         "tools/check_governance_rules.py",
         "tools/tests/test_check_governance_rules.py",
-        "docs/prd/80-system-runtime.md",
-        "docs/maps/80-system-runtime.md",
-        "docs/runbooks/development-deployment.md",
-        "docs/changes/INDEX.md",
+        "backend/tests/test_verify_infra_safety.py",
+        "scripts/ops/panji-verify",
+        "scripts/verify/run_remote_verification.sh",
+        "scripts/verify/verification_plan.py",
+        "scripts/verify/verify_attempt.py",
+        "scripts/verify/plans/targeted-pg.json",
+        "scripts/verify/plans/migration-roundtrip.json",
+        "scripts/verify/plans/full-closure.json",
     ):
-        _copy_file(ROOT / relative, target / relative)
-    shutil.copytree(ROOT / "docs/changes/2026", target / "docs/changes/2026")
+        _copy(ROOT / relative, target / relative)
+    # Protected manifest references these unchanged repository files. Minimal placeholders
+    # make the fixture structurally equivalent without testing their implementation here.
+    for relative in ("docker-compose.verify.yml",):
+        p = target / relative
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# fixture\n", encoding="utf-8")
     return target
 
 
-def test_current_repository_contract_passes(governance_repo: Path) -> None:
+def test_current_stage_aware_contract_passes(governance_repo: Path) -> None:
     assert check(governance_repo) == []
 
 
-@pytest.mark.parametrize(
-    ("mutation", "expected"),
-    [
-        ("role_file", "non-canonical rule file"),
-        ("no_governance_auth", "missing explicit governance-change authorization gate"),
-        ("no_protected_domain", "missing protected governance change domain"),
-        ("unprotect_verify_entry", "protected governance manifest missing path"),
-        ("verify_short_sha", "verification entry missing contract signal"),
-        ("verify_destructive_cleanup", "forbidden verification implementation"),
-        # [CHANGE-20260806-012] 单可复用运行时减法架构回归用例
-        ("verify_second_lock_runner", "verification runner missing contract signal"),
-        ("verify_no_prepare_env", "verification remote runner missing contract signal"),
-        ("verify_no_flock", "verification remote runner missing contract signal"),
-        ("verify_no_dep_hash_compare", "verification remote runner missing contract signal"),
-        ("verify_compose_per_sha_image", "verification compose missing contract signal"),
-        ("verify_compose_restore_verify_test", "forbidden verification compose topology"),
-        ("verify_compose_restore_backend", "forbidden verification compose topology"),
-        ("verify_dockerfile_no_dep_label", "verification Docker target missing contract signal"),
-        ("verify_cleanup_no_blocked", "verification cleanup missing contract signal"),
-        ("no_prd_auth", "missing explicit PRD authorization gate"),
-        ("no_maps_auth", "missing explicit Maps authorization gate"),
-        ("no_runbooks_auth", "missing explicit Runbooks authorization gate"),
-        ("no_plan_doc_gate", "missing explicit plan-scoped document authorization gate"),
-        ("no_attempt_cleanup", "missing explicit per-attempt verification cleanup authorization gate"),
-        ("no_blocked_cleanup", "missing blocked_cleanup fail-closed gate"),
-        ("restore_acceptance_cleanup", "restored acceptance-delayed verification cleanup"),
-        ("no_pg_self_contained", "missing self-contained PG test contract"),
-        ("no_synthetic_verify", "missing synthetic-only verification contract"),
-        ("no_verify_executor", "missing one-shot verify-test contract"),
-        ("future_state", "future/staged governance state"),
-        ("auto_ci", "automatic trigger"),
-        ("old_deploy", "removed path restored"),
-        ("duplicate_change", "duplicate Change ID"),
-        ("no_bootstrap_detach", "local deploy entry missing contract signal"),
-        ("no_head_restore", "local deploy entry missing contract signal"),
-        ("no_previous_sha_tiers", "server deploy implementation missing contract signal"),
-        ("no_first_live_detect", "server deploy implementation missing contract signal"),
-        ("no_migration_state", "server deploy implementation missing contract signal"),
-        ("split_image_tag_group", "server deploy implementation missing contract signal"),
-        ("runtime_sha_rename", "breaks single-file bind mount inode"),
-        ("migration_failure_recreate", "must not recreate containers"),
-        ("global_prune", "global system prune"),
-        ("ci_db_test_flag", "forbidden standalone test-db"),
-        ("test_db_url", "forbidden standalone test-db"),
-        ("postgres_service", "forbidden standalone test-db"),
-        ("prod_server", "forbidden production-stage term"),
-        ("prod_deploy", "forbidden production-stage term"),
-        ("prod_db", "forbidden production-stage term"),
-        # [CHANGE-20260804] 四类新门禁回归用例
-        ("compose_missing_mem_limit", "缺少资源限制字段"),
-        ("compose_stateful_missing_healthcheck", "有状态服务缺少字段"),
-        ("deploy_missing_timeout", "统一长命令超时"),
-        ("deploy_skip_preflight", "preflight 绕过开关"),
-        ("deploy_missing_oom_check", "容器 OOM 检查"),
-        ("deploy_system_prune_exec", "system prune"),
-        ("cleanup_missing_disk_evidence", "清理前磁盘证据"),
-    ],
-)
-def test_governance_regressions_are_rejected(
-    governance_repo: Path, mutation: str, expected: str
-) -> None:
-    local_entry = governance_repo / "scripts/ops/panji-test-deploy"
-    server_impl = governance_repo / "scripts/deploy/panji-deploy.sh"
-
-    if mutation == "no_bootstrap_detach":
-        # 回潮：本地入口不再自举到目标 SHA，直接跑服务器当前工作树的脚本。
-        path = local_entry
-        path.write_text(read_text(path).replace("checkout -f --detach", "checkout -f"), encoding="utf-8")
-    elif mutation == "no_prd_auth":
-        path = governance_repo / "AGENTS.md"
-        path.write_text(
-            read_text(path).replace(MODULE.PRD_AUTHORIZATION_MARKER, "PRD authorization removed"),
-            encoding="utf-8",
-        )
-    elif mutation == "no_maps_auth":
-        path = governance_repo / "AGENTS.md"
-        path.write_text(
-            read_text(path).replace(MODULE.MAPS_AUTHORIZATION_MARKER, "Maps authorization removed"),
-            encoding="utf-8",
-        )
-    elif mutation == "no_runbooks_auth":
-        path = governance_repo / "AGENTS.md"
-        path.write_text(
-            read_text(path).replace(MODULE.RUNBOOKS_AUTHORIZATION_MARKER, "Runbooks authorization removed"),
-            encoding="utf-8",
-        )
-    elif mutation == "no_plan_doc_gate":
-        path = governance_repo / "AGENTS.md"
-        path.write_text(
-            read_text(path).replace(MODULE.PLAN_DOC_GATE_MARKER, "Plan document gate removed"),
-            encoding="utf-8",
-        )
-    elif mutation == "no_attempt_cleanup":
-        path = governance_repo / "AGENTS.md"
-        path.write_text(
-            read_text(path).replace(MODULE.ATTEMPT_CLEANUP_MARKER, "Attempt cleanup removed"),
-            encoding="utf-8",
-        )
-    elif mutation == "no_blocked_cleanup":
-        path = governance_repo / "rules/80-deployment-data-safety.md"
-        path.write_text(
-            read_text(path).replace(MODULE.BLOCKED_CLEANUP_MARKER, "Cleanup errors may continue"),
-            encoding="utf-8",
-        )
-    elif mutation == "restore_acceptance_cleanup":
-        path = governance_repo / "rules/80-deployment-data-safety.md"
-        path.write_text(
-            read_text(path)
-            + "\n用户确认通过后，由 `scripts/verify/drop_verify_database.sh` 删除验证库。\n",
-            encoding="utf-8",
-        )
-    elif mutation == "no_pg_self_contained":
-        path = governance_repo / "rules/40-testing-quality.md"
-        path.write_text(
-            read_text(path).replace(MODULE.PG_SELF_CONTAINED_MARKER, "PG fixture contract removed"),
-            encoding="utf-8",
-        )
-    elif mutation == "no_synthetic_verify":
-        path = governance_repo / "rules/80-deployment-data-safety.md"
-        path.write_text(
-            read_text(path).replace(MODULE.SYNTHETIC_VERIFY_MARKER, "Synthetic contract removed"),
-            encoding="utf-8",
-        )
-    elif mutation == "no_verify_executor":
-        path = governance_repo / "rules/80-deployment-data-safety.md"
-        path.write_text(
-            read_text(path).replace(MODULE.VERIFY_EXECUTOR_MARKER, "Verify executor removed"),
-            encoding="utf-8",
-        )
-    elif mutation == "no_head_restore":
-        path = local_entry
-        path.write_text(read_text(path).replace("trap restore_head EXIT", "# no trap"), encoding="utf-8")
-    elif mutation == "no_previous_sha_tiers":
-        # 回潮：删掉四级解析的兜底标识，退回「状态文件缺失即强制 migration」。
-        path = server_impl
-        path.write_text(read_text(path).replace("unknown_baseline", "legacy_missing"), encoding="utf-8")
-    elif mutation == "no_first_live_detect":
-        path = server_impl
-        path.write_text(
-            read_text(path).replace("detect_first_live_deploy()", "legacy_detect()"), encoding="utf-8"
-        )
-    elif mutation == "no_migration_state":
-        path = server_impl
-        path.write_text(
-            read_text(path).replace("handle_migration_failure()", "legacy_fail()"), encoding="utf-8"
-        )
-    elif mutation == "split_image_tag_group":
-        # 回潮：只构建"受影响的那一个"镜像，破坏共享 GIT_SHA tag 组。
-        path = server_impl
-        path.write_text(
-            read_text(path).replace(
-                "ENV_IMAGE_TAG_GROUP=(backend frontend worker-capture)",
-                "ENV_IMAGE_TAG_GROUP=(backend)",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "runtime_sha_rename":
-        # 回潮：用 rsync 覆盖 RUNTIME_SHA，单文件挂载 inode 失效。
-        path = server_impl
-        text = read_text(path).replace(
-            'printf \'%s\' "${TARGET_SHA}" > "${sha_file}" || fail "无法原地写入 ${sha_file}"',
-            'rsync -a /tmp/x "${LIVE_ROOT}/RUNTIME_SHA"',
-        )
-        path.write_text(text, encoding="utf-8")
-    elif mutation == "migration_failure_recreate":
-        path = server_impl
-        text = read_text(path).replace(
-            '    log "结论: migration_failed_requires_inspection"',
-            '    ${COMPOSE_CMD} up -d --force-recreate backend\n'
-            '    log "结论: migration_failed_requires_inspection"',
-        )
-        path.write_text(text, encoding="utf-8")
-    elif mutation == "global_prune":
-        path = server_impl
-        text = read_text(path).replace(
-            "    run_cmd docker builder prune -f",
-            "    run_cmd docker system prune -af",
-        )
-        path.write_text(text, encoding="utf-8")
-    elif mutation == "role_file":
-        (governance_repo / "rules/60-trae-work.md").write_text("# role\n", encoding="utf-8")
-    elif mutation == "no_governance_auth":
-        path = governance_repo / "AGENTS.md"
-        path.write_text(
-            read_text(path).replace(
-                "只有用户在当前任务中明确要求调整治理体系",
-                "执行主体可以自行调整治理体系",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "no_protected_domain":
-        path = governance_repo / "AGENTS.md"
-        path.write_text(
-            read_text(path).replace(MODULE.PROTECTED_DOMAIN_MARKER, "unprotected domain"),
-            encoding="utf-8",
-        )
-    elif mutation == "unprotect_verify_entry":
-        # panji-verify 是 exact_paths 的最后一项（无尾逗号），需连同前一项的逗号一并移除。
-        path = governance_repo / MODULE.PROTECTED_MANIFEST
-        manifest = json.loads(read_text(path))
-        manifest["exact_paths"] = [
-            p for p in manifest["exact_paths"] if p != "scripts/ops/panji-verify"
-        ]
-        path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    elif mutation == "verify_short_sha":
-        path = governance_repo / "scripts/ops/panji-verify"
-        path.write_text(read_text(path).replace("[0-9a-f]{40}", "[0-9a-f]{7,40}"), encoding="utf-8")
-    elif mutation == "verify_destructive_cleanup":
-        path = governance_repo / "scripts/verify/cleanup_runner.py"
-        path.write_text(read_text(path) + '\nFORBIDDEN = "down -v"\n', encoding="utf-8")
-    elif mutation == "verify_second_lock_runner":
-        # 回潮：attempt 内重新引入第二层 env 注入之外的执行路径（丢失 verify_exec fresh process）。
-        path = governance_repo / "scripts/verify/verify_attempt.py"
-        path.write_text(read_text(path).replace("verify_exec", "legacy_runner"), encoding="utf-8")
-    elif mutation == "verify_no_prepare_env":
-        # 回潮：远程脚本不再生成 attempt.env，verify_attempt 将无 DATABASE_URL 可用。
-        path = governance_repo / "scripts/verify/run_remote_verification.sh"
-        path.write_text(
-            read_text(path).replace(
-                "python3 scripts/verify/prepare_verify_environment.py",
-                "python3 scripts/verify/legacy_env.py",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "verify_no_flock":
-        # 回潮：删除最外层 single-flight 锁，允许并发 attempt 互相污染。
-        path = governance_repo / "scripts/verify/run_remote_verification.sh"
-        path.write_text(read_text(path).replace("flock", "nolock"), encoding="utf-8")
-    elif mutation == "verify_no_dep_hash_compare":
-        # 回潮：不再按 image label 两方比较依赖 hash，镜像可能与代码依赖漂移。
-        path = governance_repo / "scripts/verify/run_remote_verification.sh"
-        path.write_text(
-            read_text(path).replace("panji.verify.dependency-hash", "legacy.hash"),
-            encoding="utf-8",
-        )
-    elif mutation == "verify_compose_per_sha_image":
-        # 回潮：验证镜像退回 per-SHA tag，破坏单可复用运行时。
-        path = governance_repo / "docker-compose.verify.yml"
-        path.write_text(
-            read_text(path).replace(
-                "panji-verify-runtime:current", "panji-verify-runtime:${SHA}"
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "verify_compose_restore_verify_test":
-        # 回潮：恢复一次性 verify-test 服务与 per-SHA 测试镜像变量。
-        path = governance_repo / "docker-compose.verify.yml"
-        path.write_text(
-            read_text(path)
-            + "\n  verify-test:\n    image: ${VERIFY_TEST_IMAGE:-panji-verify-test:dev}\n",
-            encoding="utf-8",
-        )
-    elif mutation == "verify_compose_restore_backend":
-        # 回潮：重新启动 verify-backend（HTTP 探针路线），违反容器内自检合同。
-        path = governance_repo / "docker-compose.verify.yml"
-        path.write_text(
-            read_text(path) + "\n  verify-backend:\n    image: panji-verify-runtime:current\n",
-            encoding="utf-8",
-        )
-    elif mutation == "verify_dockerfile_no_dep_label":
-        # 回潮：verification stage 不再写入依赖 hash label，入口无法两方比较。
-        path = governance_repo / "backend/Dockerfile"
-        path.write_text(
-            read_text(path).replace("panji.verify.dependency-hash", "legacy.label"),
-            encoding="utf-8",
-        )
-    elif mutation == "verify_cleanup_no_blocked":
-        # 回潮：清理器不再 fail-closed 标记 blocked_cleanup。
-        path = governance_repo / "scripts/verify/cleanup_runner.py"
-        path.write_text(
-            read_text(path).replace("blocked_cleanup", "cleanup_warning"), encoding="utf-8"
-        )
-    elif mutation == "future_state":
-        path = governance_repo / "rules/00-core-governance.md"
-        path.write_text(read_text(path) + "\n> 状态：PLANNED\n", encoding="utf-8")
-    elif mutation == "auto_ci":
-        path = governance_repo / ".github/workflows/ci.yml"
-        path.write_text(read_text(path).replace("  workflow_dispatch:\n", "  push:\n  workflow_dispatch:\n", 1), encoding="utf-8")
-    elif mutation == "old_deploy":
-        path = governance_repo / "scripts/deploy_live_runtime.sh"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    elif mutation == "duplicate_change":
-        source = next((governance_repo / "docs/changes/2026").glob("CHANGE-*.md"))
-        duplicate = source.with_name(source.stem + "-duplicate.md")
-        shutil.copy2(source, duplicate)
-    elif mutation == "ci_db_test_flag":
-        # 回潮：rules/40 重新出现独立 CI 临时数据库开关
-        path = governance_repo / "rules/40-testing-quality.md"
-        path.write_text(read_text(path) + "\nPANJI_CI_DB_TEST=1 识别 CI 环境\n", encoding="utf-8")
-    elif mutation == "test_db_url":
-        # 回潮：rules/40 重新出现独立测试库 URL 变量
-        path = governance_repo / "rules/40-testing-quality.md"
-        path.write_text(read_text(path) + "\nTEST_DATABASE_URL=postgresql://.../bz_stock_test\n", encoding="utf-8")
-    elif mutation == "postgres_service":
-        # 回潮：ci.yml 重新出现 postgres:16 service
-        path = governance_repo / ".github/workflows/ci.yml"
-        path.write_text(
-            read_text(path) + "\nservices:\n  postgres:\n    image: postgres:16\n",
-            encoding="utf-8",
-        )
-    elif mutation == "prod_server":
-        # 回潮：AGENTS.md 重新出现"生产服务器"
-        path = governance_repo / "AGENTS.md"
-        path.write_text(read_text(path) + "\n部署到生产服务器。\n", encoding="utf-8")
-    elif mutation == "prod_deploy":
-        # 回潮：runbook 重新出现"生产部署"
-        path = governance_repo / "docs/runbooks/development-deployment.md"
-        path.write_text(read_text(path) + "\n执行生产部署。\n", encoding="utf-8")
-    elif mutation == "prod_db":
-        # 回潮：rules 重新出现"生产库"
-        path = governance_repo / "rules/80-deployment-data-safety.md"
-        path.write_text(read_text(path) + "\n写入生产库。\n", encoding="utf-8")
-    elif mutation == "compose_missing_mem_limit":
-        # 回潮：worker-strategy-batch 失去全部资源限制（移除 anchor 合并，DS-101）。
-        # 该 worker 的资源限制完全来自 `<<: *resource-app-heavy`，移除合并即无 mem_limit 等字段。
-        compose = governance_repo / "docker-compose.prod.yml"
-        batch_anchor = (
-            "    container_name: trading-worker-strategy-batch\n"
-            "    restart: unless-stopped\n"
-            "    logging: *default-logging\n"
-            "    <<: *resource-app-heavy\n"
-        )
-        compose.write_text(
-            read_text(compose).replace(batch_anchor, ""),
-            encoding="utf-8",
-        )
-    elif mutation == "compose_stateful_missing_healthcheck":
-        # 回潮：postgres 有状态服务缺失 healthcheck
-        compose = governance_repo / "docker-compose.prod.yml"
-        postgres_hc = (
-            '    healthcheck:\n'
-            '      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bz} -d ${POSTGRES_DB:-bz_stock}"]\n'
-            '      interval: 10s\n'
-            '      timeout: 5s\n'
-            '      retries: 10\n'
-            '      start_period: 20s\n'
-        )
-        compose.write_text(
-            read_text(compose).replace(postgres_hc, ""),
-            encoding="utf-8",
-        )
-    elif mutation == "deploy_missing_timeout":
-        # 回潮：部署脚本删除 run_with_timeout 统一超时（DS-103）
-        server_impl.write_text(
-            read_text(server_impl).replace(
-                "run_with_timeout",
-                "legacy_timeout",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "deploy_skip_preflight":
-        # 回潮：panji-test-deploy 重新出现 preflight 绕过开关
-        local_entry.write_text(
-            read_text(local_entry) + "\nPANJI_TEST_SKIP_PREFLIGHT=1 可跳过\n",
-            encoding="utf-8",
-        )
-    elif mutation == "deploy_missing_oom_check":
-        # 回潮：部署脚本删除 OOMKilled 检查（DS-104）
-        server_impl.write_text(
-            read_text(server_impl).replace(
-                "OOMKilled",
-                "oom_flag_removed",
-            ),
-            encoding="utf-8",
-        )
-    elif mutation == "deploy_system_prune_exec":
-        # 回潮：部署脚本在可执行代码里使用 system prune（非注释）
-        server_impl.write_text(
-            read_text(server_impl) + "\nrun_cmd docker system prune -af\n",
-            encoding="utf-8",
-        )
-    elif mutation == "cleanup_missing_disk_evidence":
-        # 回潮：清理合同缺失磁盘证据字段（DS-105）
-        server_impl.write_text(
-            read_text(server_impl).replace(
-                "cleanup_disk_before_mb",
-                "disk_before_missing",
-            ),
-            encoding="utf-8",
-        )
-
-    assert any(expected in error for error in check(governance_repo))
-
-
-def test_historical_technical_identifiers_allowed(governance_repo: Path) -> None:
-    """历史技术标识符（panji-prod / APP_ENV=production 等）不误报为生产阶段术语。"""
-    assert check(governance_repo) == []
-
-
-def test_after_close_runbook_legacy_flow_rejected(governance_repo: Path) -> None:
-    """盘后远程开发运行 Runbook 出现 dev→main 合并 / 自动部署 / main HEAD 时失败。"""
-    source = ROOT / "docs/runbooks/after-close-remote-development-run.md"
-    target = governance_repo / "docs/runbooks/after-close-remote-development-run.md"
-    _copy_file(source, target)
-    assert check(governance_repo) == []
-    # 注入 legacy 流程：dev 合并到 main + 自动部署
-    target.write_text(
-        read_text(target) + "\n本地 dev 合并到 main 后自动部署，运行版本以 main HEAD 为准。\n",
-        encoding="utf-8",
-    )
+def test_missing_exploration_stage_is_rejected(governance_repo: Path) -> None:
+    p = governance_repo / "AGENTS.md"
+    p.write_text(p.read_text().replace("PROJECT_STAGE = EXPLORATION", "PROJECT_STAGE = UNKNOWN"))
     errors = check(governance_repo)
-    assert any("forbidden runbook legacy flow" in e for e in errors)
+    assert any("missing stage marker" in error for error in errors)
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+def test_correctness_gate_cannot_be_removed(governance_repo: Path) -> None:
+    p = governance_repo / "AGENTS.md"
+    p.write_text(p.read_text().replace("单元测试必须完成", "单元测试可选"))
+    errors = check(governance_repo)
+    assert any("missing correctness gate" in error for error in errors)
+
+
+def test_compatibility_alias_cannot_become_second_authority(governance_repo: Path) -> None:
+    p = governance_repo / "rules/20-market-data-indicators.md"
+    p.write_text("# old authority\n" + "rule\n" * 30)
+    errors = check(governance_repo)
+    assert any("compatibility alias" in error for error in errors)
+
+
+def test_hardening_rule_must_remain_triggered_only(governance_repo: Path) -> None:
+    p = governance_repo / "rules/70-hardening-release.md"
+    p.write_text(p.read_text().replace("不是 Exploration 默认流程", "是 Exploration 默认流程"))
+    errors = check(governance_repo)
+    assert any("70-hardening-release" in error for error in errors)
+
+
+def test_registered_plan_set_is_required(governance_repo: Path) -> None:
+    (governance_repo / "scripts/verify/plans/targeted-pg.json").unlink()
+    errors = check(governance_repo)
+    assert any("missing registered verification plan" in error for error in errors)
+
+
+def test_protected_manifest_still_guards_verification(governance_repo: Path) -> None:
+    p = governance_repo / "rules/PROTECTED_GOVERNANCE_FILES.json"
+    data = json.loads(p.read_text())
+    data["exact_paths"] = [x for x in data["exact_paths"] if x != "scripts/ops/panji-verify"]
+    p.write_text(json.dumps(data))
+    errors = check(governance_repo)
+    assert any("protected manifest missing path" in error for error in errors)
+
+
+def test_tool_specific_governance_is_rejected(governance_repo: Path) -> None:
+    p = governance_repo / "rules/00-core-governance.md"
+    p.write_text(p.read_text() + "\nCodex 可以跳过单元测试。\n")
+    errors = check(governance_repo)
+    assert any("tool-specific governance" in error for error in errors)

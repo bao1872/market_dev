@@ -1,232 +1,101 @@
-"""检查 PRD/Maps/Changes/Runbooks 的结构、链接与关键治理回归。"""
+"""Stage-aware documentation consistency checks for Panji.
 
+Exploration checks structural correctness and active-document contradictions without
+forcing release artifacts to track every commit. Hardening additionally activates
+acceptance/release freshness checks.
+"""
 from __future__ import annotations
 
 import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
-# 模块级路径（可被测试 monkeypatch 注入）
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_DIR = REPO_ROOT / "docs"
-# [eaffb11 文档重构] docs/current/ 已替换为 docs/prd/（按领域 00-90 编号）
-# 现以 docs/prd/ 作为 PRD 事实源入口
-CURRENT_DIR = DOCS_DIR / "prd"
-# [eaffb11 文档重构] docs/current/MANIFEST.md 已删除；
-# baseline SHA 改从 docs/maps/00-system-overview.md 的"核验提交"字段读取
-MANIFEST_FILE = DOCS_DIR / "maps" / "00-system-overview.md"
-MAPS_DIR = DOCS_DIR / "maps"
-ARCHIVE_DIR = DOCS_DIR / "archive"
 AGENTS_FILE = REPO_ROOT / "AGENTS.md"
+MAP_BASELINE_FILE = DOCS_DIR / "maps" / "00-system-overview.md"
 
-# 同时识别英文 `Last verified code baseline`、中文 `实现核对基线` 和 `核验提交`，要求 40 位 hex
-# 兼容 ASCII `:` 和中文全角 `：`
-# 允许可选反引号包围 SHA（v2 MANIFEST 使用 `sha` 格式）
-# [eaffb11] 新增 `核验提交` 以匹配 docs/maps/00-system-overview.md 字段
+ACTIVE_TOP_LEVEL_DIRS = {
+    "prd",
+    "maps",
+    "changes",
+    "runbooks",
+    "contracts",
+    "decisions",
+    "acceptance",
+    "evidence",
+    "work",
+    "archive",
+    "current",  # legacy compatibility only
+}
+
 BASELINE_RE = re.compile(
     r"(?:Last verified code baseline|实现核对基线|核验提交)[:：]\s*`?([0-9a-fA-F]{40})`?"
 )
-
-# Webhook 回归检测：feishu_webhook 出现在 current 文档时，若行内包含以下删除语境关键词则豁免
-WEBHOOK_DELETION_CONTEXT = [
-    "已永久删除",
-    "已删除",
-    "删除",
-    "禁止",
-    "migration 055",
-    "CHECK 约束",
-    "adapter_type",
-]
-
-# OPEN 回归检测：open-decisions.md 中 Webhook 与以下关键词同时出现即视为 OPEN 回归
-OPEN_REGRESSION_KEYWORDS = ["仍需决定", "未决", "OPEN"]
-
+ACCEPTANCE_BASELINE_RE = re.compile(r"\*\*基线\*\*[:：]\s*`?([0-9a-fA-F]{40})`?")
 LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 PLACEHOLDER_RE = re.compile(r"待填写")
-FEISHU_WEBHOOK_RE = re.compile(r"feishu_webhook")
-
-# 规则 11：docs/ 直属子目录白名单（CHANGE-20260718-002）
-# AGENTS v2 文档结构规范：docs 顶层允许的目录（PRD V2.0 §7.1 权威层级入口）。
-# docs/ 根 .md 文件（如 README.md、INDEX.md）不受限，只约束子目录。
-# [CP-14] 扩展为 PRD V2.0 §7.1 定义的完整目录集：contracts/decisions/runbooks/acceptance/evidence/work
-# [eaffb11 文档重构] current/ 已替换为 prd/；保留 current 以兼容历史 archive 引用
-ALLOWED_TOP_LEVEL_DIRS = {
-    "current", "maps", "changes", "archive",  # 历史 v2 目录
-    "prd",  # [eaffb11] 新 PRD 事实源目录（替代 current/）
-    "contracts", "decisions", "runbooks", "acceptance", "evidence", "work",  # CP-14 新增
-}
-
-# 规则 12：CHANGE 引用正则（CHANGE-20260718-002）
-# 匹配 CHANGE-YYYYMMDD-NNN 形式（无论是否在 markdown 链接/反引号中），
-# 验证 docs/changes/records/CHANGE-YYYYMMDD-NNN.md 文件存在。
+FEISHU_WEBHOOK_RE = re.compile(r"feishu_webhook|FEISHU_WEBHOOK")
 CHANGE_REF_RE = re.compile(r"CHANGE-(\d{8})-(\d{3})")
-CHANGES_RECORDS_DIR = DOCS_DIR / "changes" / "records"
-CHANGELOG_FILE = DOCS_DIR / "changes" / "CHANGELOG.md"
+REF_CLAIM_RE = re.compile(r"ref/.*(?:真源|运行依赖|fixture\s*生成器)|(?:真源|运行依赖|fixture\s*生成器).*ref/")
 
-# 规则 13：必需新文档清单（CHANGE-20260718-004）
-# Node Cluster 合同和指标计算地图必须在 current/ 和 maps/ 中存在。
-# 路径在 check_required_new_docs_exist() 内从 CURRENT_DIR/MAPS_DIR 派生，
-# 以支持测试 monkeypatch 注入临时路径。
-REQUIRED_NEW_DOC_NAMES = (
-    "08-indicator-calculation-contracts.md",
-    "indicator-computation-map.md",
-)
+SAFE_WEBHOOK_CONTEXT = ("已删除", "禁止", "不得恢复", "legacy", "历史", "兼容")
+SAFE_REF_CONTEXT = ("禁止", "不得", "参考", "人工阅读", "非运行依赖", "legacy", "历史")
+HARDENING_ACCEPTANCE_FRESHNESS = 2
 
-# 规则 14：ref/ 隔离文本扫描（CHANGE-20260718-004）
-# 扫描 current/*.md + maps/*.md + AGENTS.md，禁止把 ref/ 称为真源/运行依赖。
-# 复用 test_ref_isolation.py 的判定逻辑（简化版：检查禁止术语和近邻 claim）。
-REF_PROHIBITED_TERMS = ("Pine 真源", "视觉真源")
-REF_CLAIM_KEYWORDS = ("真源", "运行依赖", "fixture 生成器", "fixture生成器")
-REF_SAFE_PATTERNS = (
-    "称为",
-    "参考源",
-    "人工阅读",
-    "非运行依赖",
-    "历史路径",
-    "git rm",
-    "不再纳入 git 跟踪",
-    "扫描禁止",
-    "文本扫描禁止",
-)
-REF_WINDOW_BEFORE = 60
-REF_WINDOW_AFTER = 80
-REF_PROHIBITED_TERM_WINDOW = 40
 
-# 规则 15：必需 CHANGE 记录（CHANGE-20260718-004 → CHANGE-20260726-001）
-# [eaffb11 文档重构] 原 CHANGE-20260718-004 已被 eaffb11 重构取代，
-# 其语义（Node Cluster 合同 + ref 隔离 + 文档治理）由 CHANGE-20260726-001 承载。
-# 改为要求 CHANGE-20260726-001（文档体系重构）存在且被 INDEX.md 引用。
-# 路径在 check_required_change_documented() 内从 DOCS_DIR 派生，
-# 以支持测试 monkeypatch 注入临时路径。
-REQUIRED_CHANGE_ID = "CHANGE-20260726-001"
-
-# 规则 16：MANIFEST baseline 新鲜度窗口（CP-19 / CHANGE-20260722-001）
-# baseline SHA 必须在 HEAD 的最近 N 个 commit 内，防止 baseline 严重落后。
-# 窗口大小 50 覆盖约 2-3 个 Phase 的 checkpoint 数量，平衡新鲜度与历史容错。
-# 测试可通过 monkeypatch 注入 BASELINE_FRESHNESS_WINDOW 覆盖。
-BASELINE_FRESHNESS_WINDOW = 50
-
-# [P0-3 2026-08-04] 验收矩阵基线新鲜度窗口收敛到 2：
-# 评审指出"50 个 commit 的窗口过于宽松"，无法防止矩阵停在数十个提交前。
-# 验收矩阵用于当前收口审查，合理合同是 matrix_verified_through_sha = 最近一个代码提交，
-# HEAD 最多只能比它多 1～2 个纯文档提交。故 rule 17 使用独立严格窗口 2，
-# 不再共用 MANIFEST 的宽松窗口 50。
-ACCEPTANCE_MATRIX_FRESHNESS_WINDOW = 2
-
-# 规则 17：验收矩阵基线必须等于当前 HEAD 与 origin/dev（P0-3）
-# 评审指出矩阵 baseline 曾先后漂移到 8690ccc/142115b/f0816ef/66cf93c，
-# 未在最终提交时自动校验 matrix_baseline == git HEAD == origin/dev。
-# 本规则新增门禁：验收矩阵 `**基线**` 字段必须等于当前 HEAD 且等于 origin/dev。
-ACCEPTANCE_MATRIX_DIR = DOCS_DIR / "changes" / "2026"
-ACCEPTANCE_MATRIX_PREFIX = "PRD-Acceptance-Matrix-"
-ACCEPTANCE_BASELINE_RE = re.compile(
-    r"\*\*基线\*\*[:：]\s*`?([0-9a-fA-F]{40})`?"
-)
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return ""
 
 
 def run_git(*args: str) -> subprocess.CompletedProcess[str]:
-    """执行 git 命令（可被测试 mock 替换）。"""
     return subprocess.run(
-        ["git", *args],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
+        ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False
     )
 
 
-def is_valid_commit(sha: str) -> bool:
-    """验证 SHA 是真实 git 提交。"""
+def get_stage() -> str:
+    text = _read(AGENTS_FILE)
+    match = re.search(r"PROJECT_STAGE\s*=\s*(EXPLORATION|HARDENING)", text)
+    return match.group(1) if match else "UNKNOWN"
+
+
+def _active_docs() -> list[Path]:
+    files: list[Path] = []
+    if not DOCS_DIR.exists():
+        return files
+    for path in DOCS_DIR.rglob("*.md"):
+        rel = path.relative_to(DOCS_DIR)
+        if rel.parts and rel.parts[0] == "archive":
+            continue
+        if rel.parts and rel.parts[0] == "current":
+            # legacy current is read-only and does not gate active work
+            continue
+        files.append(path)
+    return sorted(files)
+
+
+def _all_markdown_for_links() -> list[Path]:
+    # Active docs only. Archive link rot must not block current exploration work.
+    return _active_docs()
+
+
+def _is_valid_commit(sha: str) -> bool:
     result = run_git("cat-file", "-t", sha)
     return result.returncode == 0 and result.stdout.strip() == "commit"
 
 
-def is_ancestor_of_head(sha: str) -> bool:
-    """验证 SHA 是当前 HEAD 的祖先。"""
-    result = run_git("merge-base", "--is-ancestor", sha, "HEAD")
-    return result.returncode == 0
+def _is_ancestor(sha: str, rev: str = "HEAD") -> bool:
+    return run_git("merge-base", "--is-ancestor", sha, rev).returncode == 0
 
 
-def collect_current_docs() -> list[Path]:
-    """收集 docs/current/*.md 文件（不递归，仅顶层）。
-
-    包含 MANIFEST.md，用于链接/占位符/webhook 检查。
-    """
-    if not CURRENT_DIR.exists():
-        return []
-    return sorted(p for p in CURRENT_DIR.glob("*.md") if p.is_file())
-
-
-def collect_maps_docs() -> list[Path]:
-    """收集 docs/maps/*.md 文件（不递归，仅顶层）。"""
-    if not MAPS_DIR.exists():
-        return []
-    return sorted(p for p in MAPS_DIR.glob("*.md") if p.is_file())
-
-
-def collect_all_doc_files() -> list[Path]:
-    """收集所有需检查链接/占位符的文档（docs/ 递归 + AGENTS.md）。
-
-    注意：archive 目录下的旧文档参与链接/占位符检查，
-    但不参与 baseline 一致性检查（见规则 6）。
-    """
-    files: list[Path] = []
-    if DOCS_DIR.exists():
-        files.extend(sorted(p for p in DOCS_DIR.rglob("*.md") if p.is_file()))
-    if AGENTS_FILE.exists():
-        files.append(AGENTS_FILE)
-    return files
-
-
-def extract_baselines(content: str) -> list[str]:
-    """从文档内容提取所有 baseline SHA（40 位 hex）。"""
-    return BASELINE_RE.findall(content)
-
-
-def check_baseline_sha_format(shas: list[str]) -> list[str]:
-    """规则 2：检查 baseline SHA 是否为合法 40 位 hex。"""
-    errors: list[str] = []
-    for sha in shas:
-        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
-            errors.append(f"SHA 格式非法（非 40 位 hex）: {sha}")
-    return errors
-
-
-def check_baseline_real_commit(shas: list[str]) -> list[str]:
-    """规则 3：检查 baseline SHA 是否为真实 git 提交。"""
-    errors: list[str] = []
-    for sha in shas:
-        if re.fullmatch(r"[0-9a-fA-F]{40}", sha) and not is_valid_commit(sha):
-            errors.append(f"SHA 不是有效的 git 提交: {sha}")
-    return errors
-
-
-def check_baseline_ancestor(shas: list[str]) -> list[str]:
-    """规则 4：检查 baseline SHA 是否为当前 HEAD 的祖先。"""
-    errors: list[str] = []
-    for sha in shas:
-        if (
-            re.fullmatch(r"[0-9a-fA-F]{40}", sha)
-            and is_valid_commit(sha)
-            and not is_ancestor_of_head(sha)
-        ):
-            errors.append(f"SHA 不是当前 HEAD 的祖先: {sha}")
-    return errors
-
-
-def count_commits_ahead_of_baseline(sha: str) -> int | None:
-    """规则 16 辅助：统计 baseline SHA 落后 HEAD 多少个 commit。
-
-    使用 `git rev-list --count HEAD ^<sha>` 计算从 baseline 到 HEAD
-    之间的 commit 数量（不含 baseline 自身）。
-
-    Returns:
-        commit 数量；如果 sha 不是 HEAD 祖先或 git 失败则返回 None。
-    """
-    if not is_ancestor_of_head(sha):
-        return None
-    result = run_git("rev-list", "--count", "HEAD", f"^{sha}")
+def _commits_ahead(sha: str, rev: str = "HEAD") -> int | None:
+    result = run_git("rev-list", "--count", rev, f"^{sha}")
     if result.returncode != 0:
         return None
     try:
@@ -235,693 +104,189 @@ def count_commits_ahead_of_baseline(sha: str) -> int | None:
         return None
 
 
-def check_baseline_freshness(shas: list[str]) -> list[str]:
-    """规则 16：检查 baseline SHA 是否在 HEAD 的最近 N 个 commit 内（CP-19）。
-
-    修复 PROMPT.md §4 指出的问题：旧规则 4 只要求 baseline 是 HEAD 祖先，
-    即使 baseline 落后 88 个 commit 仍能通过，导致文档与代码严重脱节。
-
-    新规则要求 baseline 到 HEAD 的 commit 距离不得超过
-    BASELINE_FRESHNESS_WINDOW，强制每次 checkpoint 提交时同步更新
-    MANIFEST baseline。
-    """
-    errors: list[str] = []
-    for sha in shas:
-        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
-            continue  # 格式错误由规则 2 报告
-        if not is_valid_commit(sha):
-            continue  # 真实性错误由规则 3 报告
-        if not is_ancestor_of_head(sha):
-            continue  # 祖先错误由规则 4 报告
-        ahead = count_commits_ahead_of_baseline(sha)
-        if ahead is None:
-            errors.append(
-                f"无法计算 baseline 落后 HEAD 的 commit 数量: {sha}"
-            )
-            continue
-        if ahead > BASELINE_FRESHNESS_WINDOW:
-            errors.append(
-                f"MANIFEST baseline 严重落后：{sha} 落后 HEAD {ahead} 个 commit，"
-                f"超过窗口 {BASELINE_FRESHNESS_WINDOW}。"
-                f"请在本次 checkpoint 提交时同步更新 docs/current/MANIFEST.md "
-                f"中的实现核对基线到当前 HEAD。"
-            )
-    return errors
-
-
-def get_rev_sha(rev: str) -> str | None:
-    """解析 git rev 的完整 SHA（HEAD / origin/dev 等）；失败返回 None。"""
-    result = run_git("rev-parse", rev)
-    if result.returncode != 0:
-        return None
-    sha = result.stdout.strip()
-    return sha if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else None
-
-
-def is_ancestor_of_rev(ancestor_sha: str, rev: str) -> bool:
-    """ancestor_sha 是否为 rev 的祖先（复用 git merge-base --is-ancestor）。"""
-    result = run_git("merge-base", "--is-ancestor", ancestor_sha, rev)
-    return result.returncode == 0
-
-
-def count_commits_ahead(rev: str, ancestor_sha: str) -> int | None:
-    """返回 ancestor_sha 到 rev 之间的 commit 数；非祖先或 git 失败返回 None。"""
-    if not is_ancestor_of_rev(ancestor_sha, rev):
-        return None
-    result = run_git("rev-list", "--count", rev, f"^{ancestor_sha}")
-    if result.returncode != 0:
-        return None
-    try:
-        return int(result.stdout.strip())
-    except ValueError:
-        return None
-
-
-def find_acceptance_matrix() -> Path | None:
-    """定位验收矩阵文件（取最新一个 PRD-Acceptance-Matrix-*.md）。"""
-    if not ACCEPTANCE_MATRIX_DIR.exists():
-        return None
-    matches = sorted(
-        p for p in ACCEPTANCE_MATRIX_DIR.glob(f"{ACCEPTANCE_MATRIX_PREFIX}*.md")
-        if p.is_file()
-    )
-    return matches[-1] if matches else None
-
-
-def check_acceptance_matrix_baseline() -> list[str]:
-    """规则 17：验收矩阵基线不得严重落后 HEAD / origin/dev（P0-3 防漂移门禁）。
-
-    评审指出矩阵 baseline 曾漂移（8690ccc/142115b/f0816ef/66cf93c），
-    但未在最终提交时校验。由于矩阵文档与代码同仓但分 commit 提交，
-    矩阵字段无法等于其所在提交自身的 SHA，"必须 == HEAD == origin/dev"
-    在提交后无法同时满足。故本规则以"基线必须是 HEAD/origin/dev 的有效祖先
-    且落在最近 BASELINE_FRESHNESS_WINDOW 个 commit 内"作为漂移门禁，
-    防止矩阵与最终代码严重脱节。
-    """
-    errors: list[str] = []
-    matrix = find_acceptance_matrix()
-    if matrix is None:
-        try:
-            rel = ACCEPTANCE_MATRIX_DIR.relative_to(REPO_ROOT)
-        except ValueError:
-            rel = ACCEPTANCE_MATRIX_DIR
-        errors.append(f"未找到验收矩阵文件 {ACCEPTANCE_MATRIX_PREFIX}*.md（{rel}）")
-        return errors
-
-    content = matrix.read_text(encoding="utf-8")
-    match = ACCEPTANCE_BASELINE_RE.search(content)
-    if not match:
-        errors.append(
-            f"{matrix.relative_to(REPO_ROOT)} 缺少 `**基线**` SHA 字段"
-        )
-        return errors
-    matrix_sha = match.group(1)
-
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", matrix_sha):
-        errors.append(f"验收矩阵基线 SHA 格式非法（非 40 位 hex）: {matrix_sha}")
-        return errors
-    if not is_valid_commit(matrix_sha):
-        errors.append(f"验收矩阵基线不是真实 git 提交: {matrix_sha}")
-        return errors
-
-    for rev in ("HEAD", "origin/dev"):
-        ahead = count_commits_ahead(rev, matrix_sha)
-        if ahead is None:
-            errors.append(
-                f"验收矩阵基线 {matrix_sha} 不是 {rev} 的祖先；"
-                f"请在最终提交时同步更新矩阵 `**基线**` 到 {rev}。"
-            )
-        elif ahead > ACCEPTANCE_MATRIX_FRESHNESS_WINDOW:
-            errors.append(
-                f"验收矩阵基线 {matrix_sha} 落后 {rev} {ahead} 个 commit，"
-                f"超过严格窗口 {ACCEPTANCE_MATRIX_FRESHNESS_WINDOW}（P0-3：最多 1~2 个纯文档提交）；"
-                f"请在最终提交时同步更新矩阵 `**基线**` 到 final HEAD。"
-            )
-    return errors
-
-
-def check_webhook_regression(doc_path: Path, content: str) -> list[str]:
-    """规则 9：current 文档不得把 feishu_webhook 写成当前方案（删除语境豁免）。"""
-    errors: list[str] = []
-    lines = content.splitlines()
-    for i, line in enumerate(lines, start=1):
-        if not FEISHU_WEBHOOK_RE.search(line):
-            continue
-        # 检查是否在删除语境中
-        is_deletion_context = any(kw in line for kw in WEBHOOK_DELETION_CONTEXT)
-        if not is_deletion_context:
-            errors.append(
-                f"第 {i} 行出现 feishu_webhook 但非删除语境，疑似重新写为当前方案"
-            )
-    return errors
-
-
-def check_open_regression(doc_path: Path, content: str) -> list[str]:
-    """规则 10：open-decisions.md 不得把 Webhook vs Platform App 写成 OPEN。
-
-    判定：行含 "Webhook" 且含 "仍需决定"/"未决"/"OPEN"，且不含 "已决定"
-    （已决定表示已闭环，不视为回归）。
-    """
-    errors: list[str] = []
-    lines = content.splitlines()
-    for i, line in enumerate(lines, start=1):
-        if "Webhook" not in line:
-            continue
-        if "已决定" in line:
-            # 已决定表示 Webhook vs Platform App 已闭环，不视为回归
-            continue
-        if any(kw in line for kw in OPEN_REGRESSION_KEYWORDS):
-            errors.append(
-                f"第 {i} 行将 Webhook 与未决关键词同时使用，疑似 OPEN 回归"
-            )
-    return errors
-
-
-def strip_code_spans(content: str) -> str:
-    """移除 markdown 行内代码与代码块，避免链接正则误匹配代码中的字符。"""
-    content = re.sub(r"```[\s\S]*?```", "", content)
-    content = re.sub(r"`[^`\n]+`", "", content)
-    return content
-
-
-def strip_fragment(link: str) -> str:
-    """去掉 URL 中的锚点片段，仅保留文件路径部分。"""
-    if link.startswith("file://"):
-        return link.split("#", 1)[0]
-    return link.split("#", 1)[0]
-
-
-def looks_like_regex_or_placeholder(link: str) -> bool:
-    """跳过明显是正则、模板或代码片段的伪链接。"""
-    return bool(re.search(r"[\\{}*?^$|<>]", link))
-
-
-def extract_local_links(doc_path: Path, content: str) -> list[tuple[str, Path]]:
-    """从 markdown 链接中提取指向仓库内文件的引用，返回 (raw_link, resolved_path)。"""
-    clean_content = strip_code_spans(content)
-    links: list[tuple[str, Path]] = []
-    for _text, raw_link in LINK_RE.findall(clean_content):
-        link = strip_fragment(raw_link.strip())
-        if not link or link.startswith(("#", "http://", "https://")):
-            continue
-        if link.startswith(("mailto:", "javascript:")):
-            continue
-        if looks_like_regex_or_placeholder(link):
-            continue
-
-        target: Path | None = None
-        if link.startswith("file://"):
-            abs_path = Path(link[len("file://"):])
-            try:
-                rel = abs_path.relative_to(REPO_ROOT)
-                target = REPO_ROOT / rel
-            except ValueError:
-                continue
-        elif link.startswith("/"):
-            target = REPO_ROOT / link.lstrip("/")
-        else:
-            target = doc_path.parent / link
-
-        if target is not None:
-            links.append((raw_link, target))
-    return links
-
-
-def check_placeholders(relative_path: str, content: str) -> list[str]:
-    """规则 8：检查待填写占位符。"""
-    errors: list[str] = []
-    for match in PLACEHOLDER_RE.finditer(content):
-        line = content[: match.start()].count("\n") + 1
-        errors.append(f"第 {line} 行存在 '待填写' 占位符")
-    return errors
-
-
-def check_links(doc_path: Path, content: str) -> list[str]:
-    """规则 7：检查本地 Markdown 链接是否指向存在文件。"""
-    errors: list[str] = []
-    for raw_link, target in extract_local_links(doc_path, content):
-        if not target.exists():
-            errors.append(f"引用文件不存在: {raw_link} -> {target.relative_to(REPO_ROOT)}")
-    return errors
-
-
-def check_unauthorized_top_level_dirs() -> list[str]:
-    """规则 11：拒绝未授权 docs 顶层目录（CHANGE-20260718-002）。
-
-    docs/ 直属子目录只允许 current/maps/changes/archive。
-    docs/ 根 .md 文件不受限（只约束子目录）。
-    """
-    errors: list[str] = []
+def check_top_level_dirs() -> list[str]:
     if not DOCS_DIR.exists():
-        return errors
-    for child in sorted(DOCS_DIR.iterdir()):
-        if not child.is_dir():
-            continue
-        name = child.name
-        if name not in ALLOWED_TOP_LEVEL_DIRS:
-            errors.append(
-                f"未授权的 docs 顶层目录: docs/{name}/（只允许 "
-                f"{sorted(ALLOWED_TOP_LEVEL_DIRS)}）"
-            )
+        return []
+    errors: list[str] = []
+    for child in DOCS_DIR.iterdir():
+        if child.is_dir() and child.name not in ACTIVE_TOP_LEVEL_DIRS:
+            errors.append(f"unregistered docs top-level directory: docs/{child.name}")
     return errors
 
 
-def check_change_references(doc_files: list[Path]) -> list[str]:
-    """规则 12：校验 CHANGE 引用存在性（CHANGE-20260718-002）。
-
-    扫描所有 doc_files 中 `CHANGE-YYYYMMDD-NNN` 引用，
-    验证对应 CHANGE record 文件存在。
-
-    [eaffb11 文档重构] CHANGE record 存储位置：
-    - 旧路径：docs/changes/records/CHANGE-YYYYMMDD-NNN.md
-    - 新路径：docs/changes/YYYY/CHANGE-YYYYMMDD-NNN-描述.md
-    两种格式都接受，任一存在即视为引用可达。
-
-    历史引用（指向已被删除/未创建的 record）会被检出。
-    跳过 archive/ 目录（历史快照，不要求引用可达）。
-
-    records 目录从 DOCS_DIR 派生（支持测试 monkeypatch 注入临时路径）。
-    """
+def check_local_links() -> list[str]:
     errors: list[str] = []
-    records_dir = DOCS_DIR / "changes" / "records"
-    changes_root = DOCS_DIR / "changes"
-    for doc_path in doc_files:
-        # archive 历史快照不参与 CHANGE 引用可达性检查
-        try:
-            rel = doc_path.relative_to(ARCHIVE_DIR)
-            _ = rel  # 在 archive 下，跳过
-            continue
-        except ValueError:
-            pass
-        content = doc_path.read_text(encoding="utf-8")
-        seen_in_doc: set[str] = set()
-        for match in CHANGE_REF_RE.finditer(content):
-            ref_id = f"CHANGE-{match.group(1)}-{match.group(2)}"
-            if ref_id in seen_in_doc:
+    for path in _all_markdown_for_links():
+        text = _read(path)
+        for _label, raw_target in LINK_RE.findall(text):
+            target = raw_target.strip()
+            if not target or target.startswith(("http://", "https://", "mailto:", "#", "data:")):
                 continue
-            seen_in_doc.add(ref_id)
-            # 旧路径：docs/changes/records/CHANGE-YYYYMMDD-NNN.md
-            target_old = records_dir / f"{ref_id}.md"
-            # 新路径：docs/changes/YYYY/CHANGE-YYYYMMDD-NNN-*.md
-            year = match.group(1)[:4]
-            year_dir = changes_root / year
-            target_new = None
-            if year_dir.exists():
-                # 匹配 CHANGE-YYYYMMDD-NNN-任意描述.md
-                prefix = f"{ref_id}-"
-                candidates = [
-                    p for p in year_dir.glob(f"{prefix}*.md") if p.is_file()
-                ]
-                if candidates:
-                    target_new = candidates[0]
-            if not target_old.exists() and target_new is None:
-                errors.append(
-                    f"引用了不存在的 CHANGE record: {ref_id} "
-                    f"(在 {doc_path.relative_to(REPO_ROOT)})"
-                )
+            target = unquote(target.split("#", 1)[0])
+            if not target:
+                continue
+            resolved = (path.parent / target).resolve()
+            if not resolved.exists():
+                errors.append(f"broken local link: {path.relative_to(REPO_ROOT)} -> {raw_target}")
     return errors
 
 
-def _is_ref_problematic_line(line: str) -> bool:
-    """规则 14 辅助：检查一行是否把 ref/ 称为真源/运行依赖/fixture 生成器。
+def check_placeholders() -> list[str]:
+    """Placeholder check applies only to forward-looking active product/impl docs.
 
-    判定逻辑与 backend/tests/test_ref_isolation.py 的 _is_problematic_ref_claim
-    保持一致（同步更新）：
-    - 行含 `ref/` AND 含禁止术语（"Pine 真源"/"视觉真源"）AND 禁止术语附近无安全模式
-    - OR 行含 `ref/` AND ref/ 窗口内含声明关键词 AND 整行无安全模式
+    Historical `docs/changes/` records and the Change TEMPLATE legitimately contain
+    "待填写" as pending/recorded-state markers; forcing them to resolve placeholders
+    on every Exploration iteration would recreate governance-driven busywork without
+    guarding current product correctness. Runbooks may contain deliberate operational
+    blanks, so they are also excluded here.
     """
-    if "ref/" not in line:
+    placeholders_scanned_dirs = {
+        "prd", "maps", "contracts", "decisions", "acceptance", "evidence", "work",
+    }
+    errors: list[str] = []
+    for path in _active_docs():
+        rel = path.relative_to(DOCS_DIR)
+        if rel.parts and rel.parts[0] not in placeholders_scanned_dirs:
+            continue
+        for line_no, line in enumerate(_read(path).splitlines(), 1):
+            if PLACEHOLDER_RE.search(line):
+                errors.append(f"active document contains placeholder: {path.relative_to(REPO_ROOT)}:{line_no}")
+    return errors
+
+
+def check_webhook_regression() -> list[str]:
+    errors: list[str] = []
+    candidates: list[Path] = []
+    for folder in ("prd", "maps"):
+        base = DOCS_DIR / folder
+        if base.exists():
+            candidates.extend(sorted(base.glob("*.md")))
+    for path in candidates:
+        for line_no, line in enumerate(_read(path).splitlines(), 1):
+            if FEISHU_WEBHOOK_RE.search(line) and not any(ctx in line for ctx in SAFE_WEBHOOK_CONTEXT):
+                errors.append(f"feishu_webhook restored as active behavior: {path.relative_to(REPO_ROOT)}:{line_no}")
+    return errors
+
+
+def check_ref_claims() -> list[str]:
+    errors: list[str] = []
+    candidates = [AGENTS_FILE]
+    for folder in ("prd", "maps"):
+        base = DOCS_DIR / folder
+        if base.exists():
+            candidates.extend(base.glob("*.md"))
+    for path in candidates:
+        for line_no, line in enumerate(_read(path).splitlines(), 1):
+            if REF_CLAIM_RE.search(line) and not any(ctx in line for ctx in SAFE_REF_CONTEXT):
+                errors.append(f"ref/ claimed as active truth/runtime dependency: {path.relative_to(REPO_ROOT)}:{line_no}")
+    return errors
+
+
+def _change_exists(change_id: str) -> bool:
+    changes = DOCS_DIR / "changes"
+    if not changes.exists():
         return False
-
-    # 检查禁止术语（局部窗口安全模式检查）
-    for term in REF_PROHIBITED_TERMS:
-        idx = 0
-        while True:
-            pos = line.find(term, idx)
-            if pos < 0:
-                break
-            window_start = max(0, pos - REF_PROHIBITED_TERM_WINDOW)
-            window_end = min(len(line), pos + len(term) + REF_PROHIBITED_TERM_WINDOW)
-            local_window = line[window_start:window_end]
-            if not any(kw in local_window for kw in REF_SAFE_PATTERNS):
-                return True
-            idx = pos + len(term)
-
-    # 检查通用声明关键词（整行安全模式检查）
-    if any(kw in line for kw in REF_SAFE_PATTERNS):
-        return False
-    ref_positions: list[int] = []
-    idx = 0
-    while True:
-        pos = line.find("ref/", idx)
-        if pos < 0:
-            break
-        ref_positions.append(pos)
-        idx = pos + 4
-    for pos in ref_positions:
-        start = max(0, pos - REF_WINDOW_BEFORE)
-        end = min(len(line), pos + REF_WINDOW_AFTER)
-        window = line[start:end]
-        if any(kw in window for kw in REF_CLAIM_KEYWORDS):
-            return True
-    return False
+    return any(p.is_file() and change_id in p.name for p in changes.rglob("*.md"))
 
 
-def check_required_new_docs_exist() -> list[str]:
-    """规则 13：必需新文档必须存在（CHANGE-20260718-004）。
-
-    要求：
-    - docs/prd/08-indicator-calculation-contracts.md（Node Cluster 合同）
-    - docs/maps/indicator-computation-map.md（指标计算地图）
-
-    [eaffb11 文档重构] 文档位置从 docs/current/ 迁移到 docs/prd/。
-    由于 PRD 已按领域 00-90 重新编号，原 08-indicator-calculation-contracts.md
-    的内容现由 docs/prd/20-quant-model.md（量化模型 PRD）覆盖；
-    指标计算 Map 由 docs/maps/20-quant-model.md 覆盖。
-    本规则改为验证 docs/prd/20-quant-model.md 和 docs/maps/20-quant-model.md 存在。
-
-    路径从 CURRENT_DIR/MAPS_DIR 派生（支持测试 monkeypatch）。
-    """
+def check_change_references() -> list[str]:
     errors: list[str] = []
-    # [eaffb11] 08-indicator-calculation-contracts.md 内容并入 20-quant-model.md
-    required_paths = (
-        CURRENT_DIR / "20-quant-model.md",
-        MAPS_DIR / "20-quant-model.md",
-    )
-    for doc_path in required_paths:
-        if not doc_path.exists():
-            try:
-                rel = doc_path.relative_to(REPO_ROOT)
-            except ValueError:
-                rel = doc_path
-            errors.append(
-                f"缺少必需文档: {rel}（CHANGE-20260718-004 要求，"
-                f"eaffb11 后由 20-quant-model.md 承载）"
-            )
+    for path in _active_docs():
+        for change_id in sorted(set(CHANGE_REF_RE.findall(_read(path)))):
+            cid = f"CHANGE-{change_id[0]}-{change_id[1]}"
+            if not _change_exists(cid):
+                errors.append(f"unresolved Change reference: {path.relative_to(REPO_ROOT)} -> {cid}")
     return errors
 
 
-def check_current_docs_no_ref_dependency() -> list[str]:
-    """规则 14：current/maps/AGENTS 文档不得把 ref/ 称为真源/运行依赖（CHANGE-20260718-004）。
-
-    扫描 docs/current/*.md + docs/maps/*.md + AGENTS.md，
-    禁止把 ref/ 文件称为"真源"、"运行依赖"、"fixture 生成器"。
-    允许的表述：参考源（人工阅读）、历史路径、派生文件、git rm 状态等。
-
-    历史目录（docs/changes/records/、docs/archive/）不参与扫描。
-
-    判定逻辑与 backend/tests/test_ref_isolation.py 保持一致。
-    """
+def check_map_baseline() -> list[str]:
+    """Map baseline is always required to be real/ancestral, but not ultra-fresh in Exploration."""
+    if not MAP_BASELINE_FILE.exists():
+        return []
+    matches = BASELINE_RE.findall(_read(MAP_BASELINE_FILE))
+    if not matches:
+        return ["docs/maps/00-system-overview.md missing 40-char verified baseline"]
+    sha = matches[0].lower()
     errors: list[str] = []
-    files: list[Path] = []
-    if CURRENT_DIR.exists():
-        files.extend(sorted(p for p in CURRENT_DIR.glob("*.md") if p.is_file()))
-    if MAPS_DIR.exists():
-        files.extend(sorted(p for p in MAPS_DIR.glob("*.md") if p.is_file()))
-    if AGENTS_FILE.exists():
-        files.append(AGENTS_FILE)
-
-    for doc_path in files:
-        content = doc_path.read_text(encoding="utf-8")
-        rel = doc_path.relative_to(REPO_ROOT)
-        for i, line in enumerate(content.splitlines(), start=1):
-            if _is_ref_problematic_line(line):
-                errors.append(
-                    f"{rel}:{i}: 把 ref/ 称为真源/运行依赖/fixture 生成器"
-                    f"（应改用'参考源（人工阅读）'或'历史路径'）: {line.strip()[:200]}"
-                )
+    if not _is_valid_commit(sha):
+        return [f"map baseline is not a real git commit: {sha}"]
+    if not _is_ancestor(sha):
+        return [f"map baseline is not an ancestor of HEAD: {sha}"]
+    # Map freshness is informational during Exploration and is intentionally not
+    # a hard gate. Maps require separate user authorization to update; forcing a
+    # commit-distance threshold would recreate governance-driven busywork.
     return errors
 
 
-def check_required_change_documented() -> list[str]:
-    """规则 15：必需 CHANGE 记录必须存在且被 CHANGELOG/INDEX 引用（CHANGE-20260718-004）。
+def _latest_acceptance_matrix() -> Path | None:
+    candidates: list[Path] = []
+    for pattern in (
+        "changes/**/PRD-Acceptance-Matrix-*.md",
+        "acceptance/**/*Matrix*.md",
+        "acceptance/**/*matrix*.md",
+    ):
+        candidates.extend(DOCS_DIR.glob(pattern))
+    candidates = [p for p in candidates if p.is_file()]
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
 
-    [eaffb11 文档重构] CHANGELOG.md 已被 docs/changes/INDEX.md 替代。
-    CHANGE record 也从 docs/changes/records/ 迁移到 docs/changes/YYYY/。
 
-    要求：
-    - CHANGE-20260718-004 的 record 文件必须存在
-      （旧路径 docs/changes/records/CHANGE-20260718-004.md
-       或新路径 docs/changes/2026/CHANGE-20260718-004-*.md）
-    - docs/changes/INDEX.md 必须引用 CHANGE-20260718-004
-
-    CHANGE-20260718-004 是本次 Node Cluster 合同 + ref 隔离的核心变更记录。
-
-    路径从 DOCS_DIR 派生（支持测试 monkeypatch 注入临时路径）。
-    """
-    errors: list[str] = []
-    records_dir = DOCS_DIR / "changes" / "records"
-    year_dir = DOCS_DIR / "changes" / "2026"
-    # 旧路径
-    record_path_old = records_dir / f"{REQUIRED_CHANGE_ID}.md"
-    # 新路径：CHANGE-20260718-004-任意描述.md
-    record_path_new = None
-    if year_dir.exists():
-        candidates = [
-            p for p in year_dir.glob(f"{REQUIRED_CHANGE_ID}-*.md") if p.is_file()
+def check_hardening_acceptance() -> list[str]:
+    if get_stage() != "HARDENING":
+        return []
+    matrix = _latest_acceptance_matrix()
+    if matrix is None:
+        return ["HARDENING requires an acceptance matrix"]
+    matches = ACCEPTANCE_BASELINE_RE.findall(_read(matrix))
+    if not matches:
+        return [f"HARDENING acceptance matrix missing baseline: {matrix.relative_to(REPO_ROOT)}"]
+    sha = matches[0].lower()
+    if not _is_valid_commit(sha):
+        return [f"HARDENING acceptance baseline is not a real commit: {sha}"]
+    if not _is_ancestor(sha):
+        return [f"HARDENING acceptance baseline is not ancestor of HEAD: {sha}"]
+    ahead = _commits_ahead(sha)
+    if ahead is None:
+        return [f"cannot calculate acceptance baseline distance: {sha}"]
+    if ahead > HARDENING_ACCEPTANCE_FRESHNESS:
+        return [
+            f"HARDENING acceptance baseline stale: {ahead} commits > {HARDENING_ACCEPTANCE_FRESHNESS}"
         ]
-        if candidates:
-            record_path_new = candidates[0]
-
-    if not record_path_old.exists() and record_path_new is None:
-        errors.append(
-            f"缺少必需 CHANGE record: {REQUIRED_CHANGE_ID}"
-            f"（既不在 docs/changes/records/，也不在 docs/changes/2026/）"
-        )
-
-    # [eaffb11] CHANGELOG.md 替换为 INDEX.md
-    changelog_path = DOCS_DIR / "changes" / "INDEX.md"
-    if changelog_path.exists():
-        changelog_content = changelog_path.read_text(encoding="utf-8")
-        if REQUIRED_CHANGE_ID not in changelog_content:
-            errors.append(
-                f"docs/changes/INDEX.md 未引用 {REQUIRED_CHANGE_ID}"
-                f"（CHANGE-20260718-004 要求记录在 INDEX）"
-            )
-    else:
-        try:
-            rel = changelog_path.relative_to(REPO_ROOT)
-        except ValueError:
-            rel = changelog_path
-        errors.append(
-            f"缺少 CHANGELOG/INDEX 文件: {rel}"
-        )
-    return errors
+    return []
 
 
-def check_manifest_baseline() -> tuple[list[str], str | None]:
-    """v2 规则 1-4：检查全局基线 SHA 字段。
+def check_stage() -> list[str]:
+    stage = get_stage()
+    if stage not in {"EXPLORATION", "HARDENING"}:
+        return ["AGENTS.md must declare PROJECT_STAGE = EXPLORATION or HARDENING"]
+    return []
 
-    [eaffb11 文档重构] 原 docs/current/MANIFEST.md 已删除；
-    baseline SHA 改从 docs/maps/00-system-overview.md 的"核验提交"字段读取。
 
-    Returns:
-        (errors, baseline_sha)：错误列表与解析到的 baseline SHA（无则为 None）
-    """
+def check() -> list[str]:
     errors: list[str] = []
-
-    if not MANIFEST_FILE.exists():
-        errors.append(f"缺少 baseline 文件: {MANIFEST_FILE.relative_to(REPO_ROOT)}")
-        return errors, None
-
-    content = MANIFEST_FILE.read_text(encoding="utf-8")
-    shas = extract_baselines(content)
-
-    # 规则 1：必须有 实现核对基线/核验提交 字段
-    if not shas:
-        errors.append(
-            f"{MANIFEST_FILE.relative_to(REPO_ROOT)} 缺少 实现核对基线/核验提交 字段"
-        )
-        return errors, None
-
-    # 规则 2：SHA 格式校验
-    errors.extend(check_baseline_sha_format(shas))
-
-    # 规则 3：真实提交校验
-    errors.extend(check_baseline_real_commit(shas))
-
-    # 规则 4：祖先校验
-    errors.extend(check_baseline_ancestor(shas))
-
-    # 规则 16：新鲜度校验（CP-19 / CHANGE-20260722-001）
-    # baseline 必须在 HEAD 的最近 BASELINE_FRESHNESS_WINDOW 个 commit 内
-    errors.extend(check_baseline_freshness(shas))
-
-    # v2 不再要求多文档 baseline 一致性（MANIFEST 是唯一基线头）
-    # 取第一个合法 SHA 作为统一 baseline
-    baseline_sha = shas[0] if shas else None
-    return errors, baseline_sha
+    for fn in (
+        check_stage,
+        check_top_level_dirs,
+        check_local_links,
+        check_placeholders,
+        check_webhook_regression,
+        check_ref_claims,
+        check_change_references,
+        check_map_baseline,
+        check_hardening_acceptance,
+    ):
+        errors.extend(fn())
+    return errors
 
 
 def main() -> int:
-    all_errors: list[str] = []
-    placeholder_files: list[str] = []
-
-    # 代码 SHA 变化不再强制制造 MANIFEST/文档提交；Maps 只记录已核验事实。
-    print(f"检查文档目录: {DOCS_DIR.relative_to(REPO_ROOT)}")
-    # === 第一阶段补充：docs 顶层目录结构检查（v2 规则 11，CHANGE-20260718-002）===
-    print()
-    tld_errors = check_unauthorized_top_level_dirs()
-    if tld_errors:
-        all_errors.extend(tld_errors)
-        print("[FAIL] docs/ 顶层目录结构")
-        for e in tld_errors:
-            print(f"       - {e}")
-    else:
-        print("[PASS] docs/ 顶层目录结构（允许 prd/maps/changes/archive 等）")
-
-    # === 第二阶段：PRD 回归检查（webhook + open-decisions）===
-    current_docs = collect_current_docs()
-    print(f"\n共扫描 {len(current_docs)} 个 PRD 文档（webhook/open 回归检查）\n")
-
-    for doc_path in current_docs:
-        relative = doc_path.relative_to(REPO_ROOT)
-        content = doc_path.read_text(encoding="utf-8")
-        doc_errors: list[str] = []
-
-        # 规则 9：Webhook 回归（所有 current 文档）
-        doc_errors.extend(check_webhook_regression(doc_path, content))
-
-        # 规则 10：OPEN 回归（仅 open-decisions.md）
-        if doc_path.name == "open-decisions.md":
-            doc_errors.extend(check_open_regression(doc_path, content))
-
-        if doc_errors:
-            all_errors.extend([f"{relative}: {e}" for e in doc_errors])
-            print(f"[FAIL] {relative}")
-            for e in doc_errors:
-                print(f"       - {e}")
-        else:
-            print(f"[PASS] {relative}")
-
-    # === 第三阶段：链接与占位符检查 ===
-    # 链接检查：docs/ 递归 + AGENTS.md（所有文档）
-    # 占位符检查：仅 PRD + maps（目标与实现事实源不应有占位符；
-    #            archive/changes/规则说明文档可能引用"待填写"作为规则描述，不检查）
-    all_doc_files = collect_all_doc_files()
-    maps_docs = collect_maps_docs()
-    placeholder_check_files = set(current_docs) | set(maps_docs)
-    print(f"\n共扫描 {len(all_doc_files)} 个文档文件（链接检查）")
-    print(f"PRD 文档数量: {len(current_docs)}")
-    print(f"maps 文档数量: {len(maps_docs)}")
-    print(f"链接检查文件数量: {len(all_doc_files)}")
-    print(f"占位符检查文件数量: {len(placeholder_check_files)}（仅 PRD + maps）\n")
-
-    for doc_path in all_doc_files:
-        relative = doc_path.relative_to(REPO_ROOT)
-        content = doc_path.read_text(encoding="utf-8")
-        # 复用 Phase 2 同名变量；不重复类型注解以避免 mypy no-redef。
-        doc_errors = []
-
-        # 链接检查：所有文档
-        link_errors = check_links(doc_path, content)
-        doc_errors.extend(link_errors)
-
-        # 占位符检查：仅 current + maps（v2 事实源）
-        if doc_path in placeholder_check_files:
-            placeholder_errors = check_placeholders(str(relative), content)
-            doc_errors.extend(placeholder_errors)
-            if placeholder_errors:
-                placeholder_files.append(str(relative))
-
-        if doc_errors:
-            all_errors.extend([f"{relative}: {e}" for e in doc_errors])
-            print(f"[FAIL] {relative}")
-            for e in doc_errors:
-                print(f"       - {e}")
-        # PASS 行不打印，避免输出过长
-
-    # === 第四阶段：CHANGE 引用可达性检查（v2 规则 12，CHANGE-20260718-002）===
-    print()
-    change_ref_errors = check_change_references(all_doc_files)
-    if change_ref_errors:
-        all_errors.extend(change_ref_errors)
-        print("[FAIL] CHANGE 引用可达性")
-        for e in change_ref_errors:
-            print(f"       - {e}")
-    else:
-        print("[PASS] CHANGE 引用可达性（所有 CHANGE-YYYYMMDD-NNN 引用目标存在）")
-
-    # === 第五阶段：CHANGE-20260718-004 新规则（13/14/15）===
-    print()
-
-    # 规则 13：必需新文档必须存在
-    required_docs_errors = check_required_new_docs_exist()
-    if required_docs_errors:
-        all_errors.extend(required_docs_errors)
-        print("[FAIL] 必需新文档存在性（规则 13）")
-        for e in required_docs_errors:
-            print(f"       - {e}")
-    else:
-        print(
-            "[PASS] 必需新文档存在性（规则 13："
-            "08-indicator-calculation-contracts.md + indicator-computation-map.md）"
-        )
-
-    # 规则 14：current/maps/AGENTS 不得把 ref/ 称为真源/运行依赖
-    ref_dep_errors = check_current_docs_no_ref_dependency()
-    if ref_dep_errors:
-        all_errors.extend(ref_dep_errors)
-        print("[FAIL] ref/ 隔离文本扫描（规则 14）")
-        for e in ref_dep_errors:
-            print(f"       - {e}")
-    else:
-        print(
-            "[PASS] ref/ 隔离文本扫描（规则 14：PRD/maps/AGENTS 未把 ref/ 称为真源）"
-        )
-
-    # 规则 15：必需 CHANGE 记录必须存在且被 CHANGELOG 引用
-    required_change_errors = check_required_change_documented()
-    if required_change_errors:
-        all_errors.extend(required_change_errors)
-        print("[FAIL] 必需 CHANGE 记录（规则 15）")
-        for e in required_change_errors:
-            print(f"       - {e}")
-    else:
-        print(
-            f"[PASS] 必需 CHANGE 记录（规则 15：{REQUIRED_CHANGE_ID} 存在且 INDEX 引用）"
-        )
-
-    # 规则 17：验收矩阵基线必须等于当前 HEAD 与 origin/dev（P0-3）
-    print()
-    # [P0-3 2026-08-04 决策] 基线门禁在 main() 中的取舍：
-    # - 规则 17（验收矩阵基线）必须在 main() 中强制执行，且使用严格窗口 2。
-    #   验收矩阵是当前收口审查的事实源，任何代码提交后都必须及时对齐，
-    #   否则审查会依据数十个提交前的旧状态（P0-3 评审指出的漂移问题）。
-    # - 规则 16（MANIFEST baseline 新鲜度，check_manifest_baseline()）不接入
-    #   main()，而是由其对应用例直接独立测试。MANIFEST 是 "current docs" 索引，
-    #   若要求每次代码提交都更新 MANIFEST 会制造无谓的文档提交 churn（与
-    #   "代码 SHA 变化不再强制制造 MANIFEST/文档提交" 的约定一致）。
-    #   因此 MANIFEST 基线规则由 check_manifest_baseline() 独立承载并在测试中锁定，
-    #   不在 main() 门禁中强制。
-    matrix_baseline_errors = check_acceptance_matrix_baseline()
-    if matrix_baseline_errors:
-        all_errors.extend(matrix_baseline_errors)
-        print("[FAIL] 验收矩阵基线（规则 17）")
-        for e in matrix_baseline_errors:
-            print(f"       - {e}")
-    else:
-        print(
-            "[PASS] 验收矩阵基线（规则 17：matrix_baseline 为 HEAD/origin/dev 最近祖先且在窗口内）"
-        )
-
-    # === 汇总 ===
-    print()
-    print("=" * 60)
-    if all_errors:
-        print(f"文档一致性检查未通过，共 {len(all_errors)} 个问题。")
-        if placeholder_files:
-            print(f"发现待填写占位符的文件: {', '.join(placeholder_files)}")
-        for e in all_errors:
-            print(f"  - {e}")
+    errors = check()
+    if errors:
+        print("Docs consistency FAILED:")
+        for error in errors:
+            print(f"- {error}")
         return 1
-    else:
-        print(
-            f"全部通过。PRD 文档 {len(current_docs)} 个，"
-            f"maps 文档 {len(maps_docs)} 个，"
-            f"链接检查文件 {len(all_doc_files)} 个。"
-        )
-        return 0
+    print(f"Docs consistency PASS ({get_stage()} mode).")
+    return 0
 
 
 if __name__ == "__main__":

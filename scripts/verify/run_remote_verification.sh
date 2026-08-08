@@ -45,7 +45,7 @@ if [[ -z "${VERIFY_PG_NETWORK}" ]]; then
 fi
 
 # ───────────────────────────── 参数 ─────────────────────────────
-# 外部 CLI 合同：第二个参数为 plan name（仅接受 full-closure，由 scripts/ops/panji-verify 传入）。
+# 外部 CLI 合同：第二个参数为 plan name（仅接受三个注册 plan，由 scripts/ops/panji-verify 传入）。
 # 本入口内部把它映射为磁盘上的 plan 文件路径，不引入 plan registry / 动态扫描。
 SHA="${1:-}"
 PLAN_NAME="${2:-}"
@@ -59,11 +59,17 @@ if [[ ! "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 case "${PLAN_NAME}" in
+  targeted-pg)
+    PLAN_PATH="scripts/verify/plans/targeted-pg.json"
+    ;;
+  migration-roundtrip)
+    PLAN_PATH="scripts/verify/plans/migration-roundtrip.json"
+    ;;
   full-closure)
     PLAN_PATH="scripts/verify/plans/full-closure.json"
     ;;
   "")
-    echo "error: plan name 不能为空（传入 full-closure）" >&2
+    echo "error: plan name 不能为空（传入 targeted-pg | migration-roundtrip | full-closure）" >&2
     exit 80
     ;;
   *)

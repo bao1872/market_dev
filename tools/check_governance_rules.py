@@ -1,61 +1,45 @@
-"""Validate the repository's current governance and deployment contract."""
+"""Validate Panji's stage-aware governance contract.
 
+The checker protects stable correctness/safety rules and verifies that
+Exploration is the default routing mode while Hardening remains available
+as an explicitly triggered path. It intentionally does not turn every
+feature change into a release audit.
+"""
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
-from collections import Counter
 from pathlib import Path
 
-try:
-    import yaml
-except ImportError:  # pragma: no cover - yaml 缺失时 Compose 门禁跳过并告警
-    yaml = None
-
-CANONICAL_RULES = {
+ACTIVE_RULES = {
     "README.md",
     "00-core-governance.md",
     "10-product-domain-invariants.md",
-    "20-market-data-indicators.md",
-    "30-access-security.md",
+    "20-market-data-computation.md",
+    "30-security-data-safety.md",
     "40-testing-quality.md",
     "50-git-development-flow.md",
-    "80-deployment-data-safety.md",
-    "81-remote-deployment-only.md",
+    "60-runtime-frontend-acceptance.md",
+    "70-hardening-release.md",
+    "80-deployment-migration.md",
     "90-deprecated-forbidden.md",
 }
-REMOVED_PATHS = {
-    "rules/60-trae-work.md",
-    "rules/70-trae-cn.md",
-    "rules/85-server-directory-boundaries.md",
-    "rules/AGENTS-MIGRATION-MAP.md",
-    "scripts/ops/panji-deploy-remote.sh",
-    "scripts/deploy_live_runtime.sh",
-    "scripts/sync_live_runtime.sh",
-    ".github/workflows/deploy-production.yml",
-    ".github/workflows/nightly.yml",
-    ".github/workflows/release.yml",
+
+COMPATIBILITY_ALIASES = {
+    "20-market-data-indicators.md": "20-market-data-computation.md",
+    "30-access-security.md": "30-security-data-safety.md",
+    "80-deployment-data-safety.md": "80-deployment-migration.md",
+    "81-remote-deployment-only.md": "80-deployment-migration.md",
 }
-DEPLOY_FILES = {
-    "scripts/ops/panji-test-deploy",
-    "scripts/deploy/panji-deploy.sh",
+
+REMOVED_RULES = {
+    "60-trae-work.md",
+    "70-trae-cn.md",
+    "85-server-directory-boundaries.md",
+    "AGENTS-MIGRATION-MAP.md",
 }
-TOOL_NAMES = ("TRAE CN", "TRAE Work", "CodeBuddy", "Codex", "Cursor", "Copilot")
-NEUTRAL_MARKERS = ("不按", "不区分", "同一套", "已删除", "已废弃", "禁止恢复", "原 `rules/")
-CHANGE_ID_RE = re.compile(r"CHANGE-\d{8}-\d{3}")
-GOVERNANCE_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求调整治理体系"
-PRD_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求新增、修改或校准 PRD"
-MAPS_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求更新 Maps"
-RUNBOOKS_AUTHORIZATION_MARKER = "只有用户在当前任务中明确要求更新 Runbooks"
-PLAN_DOC_GATE_MARKER = "计划授权不得隐式覆盖 PRD、Maps、Runbooks 或治理文档"
-ATTEMPT_CLEANUP_MARKER = "每次远程验证或调试尝试结束后，无论成功、失败、取消或超时"
-BLOCKED_CLEANUP_MARKER = "任一残留或清理错误都标记 `blocked_cleanup`"
-PG_SELF_CONTAINED_MARKER = "每个 PG 测试必须在自身 transaction/fixture 中创建最小完整前置数据"
-SYNTHETIC_VERIFY_MARKER = "标准验证 100% synthetic"
-VERIFY_EXECUTOR_MARKER = "PG tests 只能由 `panji-verify-python` 容器经 `verify_exec.py` 运行"
-PROTECTED_DOMAIN_MARKER = "受保护治理变更域"
+
 PROTECTED_MANIFEST = "rules/PROTECTED_GOVERNANCE_FILES.json"
 REQUIRED_PROTECTED_PATHS = {
     "AGENTS.md",
@@ -67,630 +51,216 @@ REQUIRED_PROTECTED_PATHS = {
 }
 REQUIRED_PROTECTED_PREFIXES = {"rules/", "scripts/verify/"}
 
+REQUIRED_PLANS = {
+    "targeted-pg.json",
+    "migration-roundtrip.json",
+    "full-closure.json",
+}
 
-def read(path: Path) -> str:
+STAGE_MARKERS = (
+    "PROJECT_STAGE = EXPLORATION",
+    "FAST_ITERATION / EXPLORATION MODE",
+    "Hardening Trigger",
+)
+CORRECTNESS_MARKERS = (
+    "业务逻辑正确性必须确认",
+    "代码逻辑必须审查",
+    "单元测试必须完成",
+    "API → Frontend 技术绑定必须验证",
+    "禁止结果污染",
+)
+ROUTING_MARKERS = (
+    "Value Before Governance",
+    "Correctness Before Visibility",
+    "Hypothesis Slice 完成即 STOP",
+)
+
+TOOL_NAMES = ("TRAE CN", "TRAE Work", "CodeBuddy", "Codex", "Cursor", "Copilot")
+TOOL_NEUTRAL_CONTEXT = ("不按", "不区分", "同一套", "已废弃", "禁止恢复", "工具专属")
+
+FORBIDDEN_EXECUTABLE_TOKENS = (
+    "docker system prune -a",
+    "docker system prune -af",
+    "docker image prune -a",
+    "docker volume prune",
+    "down -v",
+)
+
+
+def _read(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return ""
 
 
-def shell_code(path: Path) -> str:
-    return "\n".join(line for line in read(path).splitlines() if not line.lstrip().startswith("#"))
+def _executable_shell(path: Path) -> str:
+    return "\n".join(
+        line for line in _read(path).splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _check_rule_layout(root: Path, errors: list[str]) -> None:
+    rules_dir = root / "rules"
+    actual = {p.name for p in rules_dir.glob("*.md")}
+    expected = ACTIVE_RULES | set(COMPATIBILITY_ALIASES)
+
+    for name in sorted(expected - actual):
+        errors.append(f"missing rule file: rules/{name}")
+    for name in sorted(actual - expected):
+        errors.append(f"unregistered rule file: rules/{name}")
+    for name in REMOVED_RULES:
+        if (rules_dir / name).exists():
+            errors.append(f"removed governance file restored: rules/{name}")
+
+    for alias, target in COMPATIBILITY_ALIASES.items():
+        text = _read(rules_dir / alias)
+        if "Compatibility Alias" not in text:
+            errors.append(f"compatibility alias lacks alias marker: rules/{alias}")
+        if f"rules/{target}" not in text:
+            errors.append(f"compatibility alias points to wrong target: rules/{alias}")
+        if len(text.splitlines()) > 20:
+            errors.append(f"compatibility alias contains duplicate authority: rules/{alias}")
+
+
+def _check_agents(root: Path, errors: list[str]) -> None:
+    text = _read(root / "AGENTS.md")
+    for marker in STAGE_MARKERS:
+        if marker not in text:
+            errors.append(f"AGENTS.md missing stage marker: {marker}")
+    for marker in CORRECTNESS_MARKERS:
+        if marker not in text:
+            errors.append(f"AGENTS.md missing correctness gate: {marker}")
+    for marker in ROUTING_MARKERS:
+        if marker not in text:
+            errors.append(f"AGENTS.md missing exploration routing marker: {marker}")
+
+    if "rules/README.md" not in text:
+        errors.append("AGENTS.md must reference rules/README.md")
+    for name in sorted(ACTIVE_RULES - {"README.md"}):
+        if f"rules/{name}" not in text:
+            errors.append(f"AGENTS.md missing active rule reference: rules/{name}")
+
+    if "项目阶段或治理模式的变化不得自动触发 PRD 重写" not in text:
+        errors.append("AGENTS.md missing governance-vs-PRD separation rule")
+
+
+def _check_protected_manifest(root: Path, errors: list[str]) -> None:
+    path = root / PROTECTED_MANIFEST
+    try:
+        manifest = json.loads(_read(path))
+    except json.JSONDecodeError:
+        errors.append(f"invalid JSON: {PROTECTED_MANIFEST}")
+        return
+
+    if manifest.get("schema_version") != 1:
+        errors.append("protected governance manifest schema_version must remain 1")
+    exact = set(manifest.get("exact_paths", []))
+    prefixes = set(manifest.get("path_prefixes", []))
+    for missing in sorted(REQUIRED_PROTECTED_PATHS - exact):
+        errors.append(f"protected manifest missing path: {missing}")
+    for missing in sorted(REQUIRED_PROTECTED_PREFIXES - prefixes):
+        errors.append(f"protected manifest missing prefix: {missing}")
+
+
+def _check_rule_semantics(root: Path, errors: list[str]) -> None:
+    rules = root / "rules"
+    required_markers = {
+        "00-core-governance.md": ("Hypothesis Slice", "P0", "Two-Strike Architecture Rule"),
+        "20-market-data-computation.md": ("future leakage", "Canonical", "daily Core 不依赖"),
+        "30-security-data-safety.md": ("Exploration 不降低安全门槛", "bz_stock"),
+        "40-testing-quality.md": ("Fast Iteration 不是少测试", "Modified-Scope Unit", "Full PURE_UNIT"),
+        "60-runtime-frontend-acceptance.md": ("API", "frontend", "用户负责"),
+        "70-hardening-release.md": ("不是 Exploration 默认流程", "Full RTM", "Release Decision"),
+        "80-deployment-migration.md": ("M1", "M2", "M3", "默认不要求 production clone"),
+        "90-deprecated-forbidden.md": ("每轮默认重型闭环", "不得用历史规则"),
+    }
+    for name, markers in required_markers.items():
+        text = _read(rules / name)
+        for marker in markers:
+            if marker not in text:
+                errors.append(f"rules/{name} missing contract marker: {marker}")
+
+
+def _check_tool_neutrality(root: Path, errors: list[str]) -> None:
+    for path in [root / "AGENTS.md", *(root / "rules").glob("*.md")]:
+        for idx, line in enumerate(_read(path).splitlines(), 1):
+            if any(name in line for name in TOOL_NAMES) and not any(
+                marker in line for marker in TOOL_NEUTRAL_CONTEXT
+            ):
+                errors.append(f"tool-specific governance: {path.relative_to(root)}:{idx}")
+
+
+def _check_verification_plans(root: Path, errors: list[str]) -> None:
+    plans_dir = root / "scripts/verify/plans"
+    actual = {p.name for p in plans_dir.glob("*.json")}
+    for name in sorted(REQUIRED_PLANS - actual):
+        errors.append(f"missing registered verification plan: scripts/verify/plans/{name}")
+
+    for name in REQUIRED_PLANS:
+        path = plans_dir / name
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(_read(path))
+        except json.JSONDecodeError:
+            errors.append(f"invalid verification plan JSON: {path.relative_to(root)}")
+            continue
+        if data.get("schema_version") != 2:
+            errors.append(f"verification plan must use schema_version=2: {path.relative_to(root)}")
+        if data.get("name") != name.removesuffix(".json"):
+            errors.append(f"verification plan name/path mismatch: {path.relative_to(root)}")
+
+    entry = _executable_shell(root / "scripts/ops/panji-verify")
+    for plan in ("targeted-pg", "migration-roundtrip", "full-closure"):
+        if plan not in entry:
+            errors.append(f"panji-verify does not register plan: {plan}")
+    if "[0-9a-f]{40}" not in entry:
+        errors.append("panji-verify must require complete 40-char SHA")
+
+    runner = _executable_shell(root / "scripts/verify/run_remote_verification.sh")
+    for marker in ("flock -n 9", "panji-verify-runtime:current", "panji-verify-python"):
+        if marker not in runner:
+            errors.append(f"verification runner missing safety marker: {marker}")
+    for token in FORBIDDEN_EXECUTABLE_TOKENS:
+        if token in runner:
+            errors.append(f"verification runner contains forbidden destructive command: {token}")
+
+
+def _check_ci_is_manual(root: Path, errors: list[str]) -> None:
+    ci_path = root / ".github/workflows/ci.yml"
+    if not ci_path.exists():
+        return  # package-level self-check may omit unchanged CI
+    text = _read(ci_path)
+    on_match = re.search(r"(?ms)^on:\s*\n(?P<body>(?:^[ \t]+.*\n?)*)", text)
+    body = on_match.group("body") if on_match else ""
+    if "workflow_dispatch:" not in body:
+        errors.append("ci.yml must keep workflow_dispatch")
+    if re.search(r"(?m)^\s+(push|pull_request|schedule):", body):
+        errors.append("ci.yml must not gain automatic triggers")
 
 
 def check(root: Path) -> list[str]:
     errors: list[str] = []
-    rules_dir = root / "rules"
-    agents = root / "AGENTS.md"
-
-    actual_rules = {path.name for path in rules_dir.glob("*.md")}
-    for name in sorted(CANONICAL_RULES - actual_rules):
-        errors.append(f"missing canonical rule: rules/{name}")
-    for name in sorted(actual_rules - CANONICAL_RULES):
-        errors.append(f"non-canonical rule file: rules/{name}")
-
-    agents_text = read(agents)
-    if "rules/README.md" not in agents_text:
-        errors.append("AGENTS.md must reference rules/README.md")
-    if GOVERNANCE_AUTHORIZATION_MARKER not in agents_text:
-        errors.append("AGENTS.md missing explicit governance-change authorization gate")
-    if PROTECTED_DOMAIN_MARKER not in agents_text:
-        errors.append("AGENTS.md missing protected governance change domain")
-
-    manifest_path = root / PROTECTED_MANIFEST
-    try:
-        manifest = json.loads(read(manifest_path))
-    except (json.JSONDecodeError, TypeError):
-        manifest = {}
-        errors.append(f"invalid protected governance manifest: {PROTECTED_MANIFEST}")
-    exact_paths = set(manifest.get("exact_paths", []))
-    prefixes = set(manifest.get("path_prefixes", []))
-    if manifest.get("schema_version") != 1:
-        errors.append("protected governance manifest schema_version must be 1")
-    for relative in sorted(REQUIRED_PROTECTED_PATHS - exact_paths):
-        errors.append(f"protected governance manifest missing path: {relative}")
-    for prefix in sorted(REQUIRED_PROTECTED_PREFIXES - prefixes):
-        errors.append(f"protected governance manifest missing prefix: {prefix}")
-    for relative in sorted(exact_paths):
-        if not (root / relative).is_file():
-            errors.append(f"protected governance path does not exist: {relative}")
-    for marker, label in (
-        (PRD_AUTHORIZATION_MARKER, "PRD"),
-        (MAPS_AUTHORIZATION_MARKER, "Maps"),
-        (RUNBOOKS_AUTHORIZATION_MARKER, "Runbooks"),
-        (PLAN_DOC_GATE_MARKER, "plan-scoped document"),
-        (ATTEMPT_CLEANUP_MARKER, "per-attempt verification cleanup"),
-    ):
-        if marker not in agents_text:
-            errors.append(f"AGENTS.md missing explicit {label} authorization gate")
-
-    deployment_rules = read(rules_dir / "80-deployment-data-safety.md")
-    if BLOCKED_CLEANUP_MARKER not in deployment_rules:
-        errors.append("rules/80 missing blocked_cleanup fail-closed gate")
-    for forbidden_cleanup_regression in (
-        "用户验收完成、验证资源清理阶段",
-        "用户确认通过后，由 `scripts/verify/drop_verify_database.sh`",
-    ):
-        if forbidden_cleanup_regression in deployment_rules:
-            errors.append(
-                "rules/80 restored acceptance-delayed verification cleanup: "
-                f"{forbidden_cleanup_regression}"
-            )
-
-    testing_rules = read(rules_dir / "40-testing-quality.md")
-    for marker, error in (
-        (PG_SELF_CONTAINED_MARKER, "rules/40 missing self-contained PG test contract"),
-        (SYNTHETIC_VERIFY_MARKER, "rules/80 missing synthetic-only verification contract"),
-        (VERIFY_EXECUTOR_MARKER, "rules/80 missing one-shot verify-test contract"),
-    ):
-        source = testing_rules if marker == PG_SELF_CONTAINED_MARKER else deployment_rules
-        if marker not in source:
-            errors.append(error)
-    for name in sorted(CANONICAL_RULES - {"README.md"}):
-        if f"rules/{name}" not in agents_text:
-            errors.append(f"AGENTS.md missing rule entry: rules/{name}")
-    for removed in sorted(REMOVED_PATHS):
-        if (root / removed).exists():
-            errors.append(f"removed path restored: {removed}")
-        if removed.startswith("rules/") and removed in agents_text:
-            errors.append(f"AGENTS.md references removed rule: {removed}")
-
-    effective_files = [agents, *sorted(rules_dir.glob("*.md"))]
-    future_state = re.compile(r"\bPLANNED\b|\bPhase\s*\d|^\s*>?\s*状态[：:]")
-    for path in effective_files:
-        doc_rel = path.relative_to(root)
-        for line_no, line in enumerate(read(path).splitlines(), 1):
-            if future_state.search(line):
-                errors.append(f"future/staged governance state: {doc_rel}:{line_no}")
-            if any(tool in line for tool in TOOL_NAMES) and not any(marker in line for marker in NEUTRAL_MARKERS):
-                errors.append(f"tool-specific governance: {doc_rel}:{line_no}")
-
-    local_entry = root / "scripts/ops/panji-test-deploy"
-    server_impl = root / "scripts/deploy/panji-deploy.sh"
-    for rel in sorted(DEPLOY_FILES):
-        if not (root / rel).is_file():
-            errors.append(f"missing deployment entry: {rel}")
-
-    local_code = shell_code(local_entry)
-    server_code = shell_code(server_impl)
-    required_local = (
-        "origin/dev",
-        "merge-base --is-ancestor",
-        "panji-prod-preflight",
-        "panji-prod-ssh",
-        # 首次 Live Mount 自举：必须先 detach 到目标 SHA 再执行目标工作树脚本
-        "checkout -f --detach",
-        "trap restore_head EXIT",
-    )
-    required_server = (
-        "origin/dev",
-        "merge-base --is-ancestor",
-        "docker-compose.prod.yml -f docker-compose.live.yml",
-        'git diff --name-only "${PREVIOUS_SHA}" "${TARGET_SHA}"',
-        "RUNTIME_SHA",
-        # 上一真实运行 SHA 解析（P0 修复：禁止用 checkout 后的 repo HEAD 当上一 SHA）
-        "resolve_previous_runtime_sha()",
-        "PREVIOUS_SHA_SOURCE",
-        "unknown_baseline",
-        "previous_runtime_sha_unknown",
-        "running_version",
-        "PANJI_BOOTSTRAP_PREVIOUS_SHA",
-        "_resolve_version_sha",
-        "_resolve_image_tag_sha",
-        # 首次 Live Mount 检测与同步范围提升
-        "detect_first_live_deploy()",
-        "apply_first_live_deploy_override()",
-        # migration 状态机与专用失败路径
-        "MIGRATION_ATTEMPTED",
-        "MIGRATION_SUCCEEDED",
-        "SERVICES_RESTARTED",
-        "handle_migration_failure()",
-        "migration_failed_requires_inspection",
-        # 环境镜像 tag 组整体构建
-        "ENV_IMAGE_TAG_GROUP=(backend frontend worker-capture)",
-    )
-    for signal in required_local:
-        if signal not in local_code:
-            errors.append(f"local deploy entry missing contract signal: {signal}")
-    for signal in required_server:
-        if signal not in server_code:
-            errors.append(f"server deploy implementation missing contract signal: {signal}")
-    forbidden_code = {
-        "COMPOSE_CMD_NO_LIVE": "compose without live overlay",
-        "DEPLOYMENT_MODE=image": "image deployment mode",
-        "origin/main": "main deployment source",
-        "HEAD~1": "single-commit change classification",
-        "down -v": "volume-destructive compose command",
-        # 资源清理边界：永不允许全局 prune 或删除持久卷
-        "image prune -a": "global image prune",
-        "system prune": "global system prune",
-        "volume prune": "volume prune",
-        "container prune": "unrelated container prune",
-    }
-    for token, reason in forbidden_code.items():
-        if token in local_code or token in server_code:
-            errors.append(f"forbidden deployment implementation ({reason}): {token}")
-    # RUNTIME_SHA 是单文件 bind mount 源：必须原地写入，rename/rsync 会换 inode
-    write_sha = re.search(r"(?ms)^write_runtime_sha\(\)\s*\{.*?^\}", server_code)
-    if write_sha is None:
-        errors.append("server deploy implementation missing write_runtime_sha()")
-    elif re.search(r"(?:rsync|mv)\s+[^\n]*RUNTIME_SHA", write_sha.group(0)):
-        errors.append("RUNTIME_SHA updated via rename/rsync breaks single-file bind mount inode")
-    # migration 失败路径不得触发任何容器重建
-    migration_fail = re.search(r"(?ms)^handle_migration_failure\(\)\s*\{.*?^\}", server_code)
-    if migration_fail is not None and re.search(r"up -d|force-recreate", migration_fail.group(0)):
-        errors.append("migration failure path must not recreate containers")
-    if re.search(r"\bssh\s+[^\n]*panji-prod", local_code):
-        errors.append("local deploy entry bypasses scripts/ops/panji-prod-ssh")
-    if re.search(r"https?://\d{1,3}(?:\.\d{1,3}){3}", local_code):
-        errors.append("local deploy entry accesses production by raw IP")
-
-    workflow_dir = root / ".github/workflows"
-    workflows = sorted(path.name for path in workflow_dir.glob("*.yml"))
-    if workflows != ["ci.yml"]:
-        errors.append(f"workflow set must be exactly ['ci.yml'], got {workflows}")
-    ci = read(workflow_dir / "ci.yml")
-    on_match = re.search(r"(?ms)^on:\s*\n(?P<body>(?:^[ \t]+.*\n?)*)", ci)
-    on_body = on_match.group("body") if on_match else ""
-    if "workflow_dispatch:" not in on_body:
-        errors.append("ci.yml must use workflow_dispatch")
-    if re.search(r"(?m)^\s+(push|pull_request|schedule):", on_body):
-        errors.append("ci.yml contains an automatic trigger")
-    for token in ("panji-test-deploy", "panji-deploy.sh", "ssh panji-prod"):
-        if token in shell_code(workflow_dir / "ci.yml"):
-            errors.append(f"ci.yml contains deployment action: {token}")
-
-    verify_entry = root / "scripts/ops/panji-verify"
-    verify_runner = root / "scripts/verify/verify_attempt.py"
-    verify_remote_runner = root / "scripts/verify/run_remote_verification.sh"
-    verify_env_builder = root / "scripts/verify/prepare_verify_environment.py"
-    verify_plan = root / "scripts/verify/plans/full-closure.json"
-    verify_compose = root / "docker-compose.verify.yml"
-    verify_cleanup = root / "scripts/verify/cleanup_runner.py"
-    for path in (
-        verify_entry, verify_runner, verify_remote_runner, verify_env_builder,
-        verify_plan, verify_compose, verify_cleanup,
-    ):
-        if not path.is_file():
-            errors.append(f"missing verification framework file: {path.relative_to(root)}")
-    verify_entry_code = shell_code(verify_entry)
-    verify_runner_code = read(verify_runner)
-    verify_remote_runner_code = shell_code(verify_remote_runner)
-    verify_env_builder_code = read(verify_env_builder)
-    verify_cleanup_code = read(verify_cleanup)
-    verify_compose_text = read(verify_compose)
-    for signal in ("panji-prod-preflight", "panji-prod-ssh", "full-closure", "[0-9a-f]{40}"):
-        if signal not in verify_entry_code:
-            errors.append(f"verification entry missing contract signal: {signal}")
-    # [CHANGE-20260806-012] 单可复用运行时：固定容器 + verify_exec 动态 env 注入；
-    # single-flight 只在 run_remote_verification.sh 最外层 flock，runner 内不得再有第二层锁。
-    for signal in (
-        "VerificationPlan", "downgrade", "blocked_cleanup",
-        "panji-verify-python", "verify_exec",
-    ):
-        if signal not in verify_runner_code:
-            errors.append(f"verification runner missing contract signal: {signal}")
-    for signal in ("run_remote_verification.sh",):
-        if signal not in verify_entry_code:
-            errors.append(f"verification entry missing remote runner: {signal}")
-    for signal in (
-        "prepare_verify_environment.py", "trap cleanup_on_exit", "git status --porcelain",
-        # single-flight：最外层独占锁 + 单可复用镜像/容器 + 依赖 hash 两方比较
-        "flock", "panji-verify-runtime:current", "panji-verify-python",
-        "panji.verify.dependency-hash", "--target verification",
-        # Compose 必填变量必须由本入口 export（否则 up 因 :? 必填变量缺失失败）
-        "export VERIFY_CODE_DIR", "export VERIFY_RUNTIME_DIR", "export VERIFY_PG_NETWORK",
-    ):
-        if signal not in verify_remote_runner_code:
-            errors.append(f"verification remote runner missing contract signal: {signal}")
-    for signal in ("POSTGRES_PASSWORD", "chmod", "token_urlsafe", "trading-postgres"):
-        if signal not in verify_env_builder_code:
-            errors.append(f"verification environment builder missing contract signal: {signal}")
-    # [CHANGE-20260806-012] Compose 只描述单一常驻验证容器：固定镜像 tag、sleep infinity
-    # 空闲、runtime 只读 mount 注入 attempt 变量、复用已有 trading-postgres 外部网络。
-    for signal in (
-        "panji-verify-runtime:current", "verify-python", "sleep infinity",
-        "/run/panji-verify/", "external: true",
-    ):
-        if signal not in verify_compose_text:
-            errors.append(f"verification compose missing contract signal: {signal}")
-    # 旧 topology（一次性 verify-test / per-SHA 镜像 / 多服务栈）永久禁止回潮。
-    # 只扫描有效 YAML（剥离注释行），使头部“已删除 X”的说明性注释不误报。
-    verify_compose_code = shell_code(verify_compose)
-    for token, reason in (
-        ("verify-test:", "one-shot verify-test service"),
-        ("VERIFY_TEST_IMAGE", "per-SHA test image variable"),
-        ("verify-backend", "verify backend service"),
-        ("verify-frontend", "verify frontend service"),
-        ("verify-redis", "dedicated verify redis"),
-    ):
-        if token in verify_compose_code:
-            errors.append(f"forbidden verification compose topology ({reason}): {token}")
-    backend_dockerfile = read(root / "backend/Dockerfile")
-    for signal in (
-        "FROM runtime AS verification", "FROM runtime AS production", 'pip install ".[dev]"',
-        # 依赖合同 hash 写入 image label，供入口两方比较决定是否 rebuild
-        "panji.verify.dependency-hash",
-    ):
-        if signal not in backend_dockerfile:
-            errors.append(f"verification Docker target missing contract signal: {signal}")
-    # 清理器必须 fail-closed（blocked_cleanup），且不得引用已删除的 panji-verify-run 入口。
-    if "blocked_cleanup" not in verify_cleanup_code:
-        errors.append("verification cleanup missing contract signal: blocked_cleanup")
-    for code, label in (
-        (verify_cleanup_code, "verification cleanup"),
-        (verify_runner_code, "verification runner"),
-        (verify_entry_code, "verification entry"),
-        (verify_remote_runner_code, "verification remote runner"),
-    ):
-        if "panji-verify-run\n" in code or "panji-verify-run " in code:
-            errors.append(f"{label} references removed entry: scripts/ops/panji-verify-run")
-    for token in ("down -v", '"down", "-v"', "--rmi", "docker cp", "pip install"):
-        if token in verify_cleanup_code or token in verify_runner_code or token in verify_entry_code:
-            errors.append(f"forbidden verification implementation: {token}")
-    # [CHANGE-20260806-012] 常驻容器不得被 cleanup 删除：禁止 compose down / --remove-orphans。
-    # 单可复用运行时（固定 project panji-verify + 常驻 panji-verify-python）在 attempt cleanup
-    # 中只 drop 验证库 + 删 attempt 临时状态，不 compose down、不删 Volume、不 FLUSHALL。
-    for token in ("compose down", "--remove-orphans", '"down"'):
-        if token in verify_cleanup_code:
-            errors.append(f"forbidden verification cleanup (destroys reusable runtime): {token}")
-    # PROTECTED_CONTAINERS 必须包含常驻验证容器（纵深防御，防 compose down / 误删）。
-    if "panji-verify-python" not in verify_cleanup_code:
-        errors.append("verification cleanup PROTECTED_CONTAINERS missing: panji-verify-python")
-    if "VERIFY_DB_URL" in verify_entry_code or "--verify-db-url" in verify_entry_code:
-        errors.append("verification entry must not transport database credentials")
-    for pattern, label in (
-        (r"_run\(\[\s*[\"']psql[\"']", "host psql"),
-        (r"_run\(\[\s*[\"']alembic[\"']", "host alembic"),
-        (r"e2e_readiness_check\.py", "missing e2e script"),
-    ):
-        if re.search(pattern, verify_runner_code):
-            errors.append(f"verification runner contains host-only or missing dependency: {label}")
-
-    deploy_runbooks = sorted(path.name for path in (root / "docs/runbooks").glob("*deployment*.md"))
-    if deploy_runbooks != ["development-deployment.md"]:
-        errors.append(
-            "current deployment runbook must be unique: "
-            f"expected development-deployment.md, got {deploy_runbooks}"
-        )
-    runbook = read(root / "docs/runbooks/development-deployment.md")
-    for signal in ("scripts/ops/panji-test-deploy", "scripts/deploy/panji-deploy.sh", "--dry-run"):
-        if signal not in runbook:
-            errors.append(f"deployment runbook missing signal: {signal}")
-
-    change_dir = root / "docs/changes/2026"
-    change_files = sorted(change_dir.glob("CHANGE-*.md"))
-    ids = [match.group(0) for path in change_files if (match := CHANGE_ID_RE.match(path.name))]
-    for change_id, count in Counter(ids).items():
-        if count > 1:
-            errors.append(f"duplicate Change ID: {change_id}")
-    known_ids = set(ids)
-    reference_files = [
-        agents,
-        *sorted(rules_dir.glob("*.md")),
-        root / "docs/prd/80-system-runtime.md",
-        root / "docs/maps/80-system-runtime.md",
-        root / "docs/runbooks/development-deployment.md",
-        root / "docs/changes/INDEX.md",
-        *change_files,
-    ]
-    dangling_exemptions = ("从未落库", "悬空引用", "已并入", "历史记录", "重编号", "撞号")
-    for path in reference_files:
-        if "docs/changes/records" in str(path):
-            continue
-        for line_no, line in enumerate(read(path).splitlines(), 1):
-            if any(marker in line for marker in dangling_exemptions):
-                continue
-            for change_id in CHANGE_ID_RE.findall(line):
-                if change_id not in known_ids:
-                    errors.append(f"dangling Change reference: {path.relative_to(root)}:{line_no} {change_id}")
-
-    # [权限模型 V2] 本地/CI 独立测试数据库路线永久禁止；远程验证库（DS-110）为唯一例外。
-    # 活跃文件：AGENTS / rules / docs(prd|maps|runbooks) / conftest / ci.yml / scripts
-    _FORBIDDEN_TEST_DB_TOKENS = {
-        "PANJI_CI_DB_TEST": "独立 CI 临时数据库开关",
-        "TEST_DATABASE_URL": "独立测试数据库 URL",
-        "bz_stock_test": "独立测试数据库名（验证库必须叫 bz_stock_verify_<sha>）",
-        "postgres-integration-tests": "CI 独立 PG 集成 job",
-        "CI 临时 Postgres": "CI 临时 Postgres 唯一例外",
-        "一次性临时 Postgres": "一次性临时 Postgres 路线",
-    }
-    # DS-110 远程验证库允许的 token（出现时不视为违规）
-    _VERIFY_DB_ALLOWED_TOKENS = (
-        "bz_stock_verify_",
-        "PANJI_REMOTE_VERIFY_DB_TEST",
-        "DS-110",
-        "远程验证数据库",
-        "远程临时验证数据库",
-    )
-    active_doc_paths = [
-        agents,
-        *sorted(rules_dir.glob("*.md")),
-        root / "docs/prd",
-        root / "docs/maps",
-        root / "docs/runbooks",
-        root / "backend/tests/conftest.py",
-        root / ".github/workflows/ci.yml",
-    ]
-    for base in active_doc_paths:
-        if base.is_dir():
-            files = sorted(base.rglob("*.md"))
-        elif base.is_file():
-            files = [base]
-        else:
-            continue
-        for path in files:
-            rel = path.relative_to(root)
-            # 跳过历史 CHANGE（docs/changes）
-            if "changes" in rel.parts:
-                continue
-            text = read(path)
-            # ci.yml：额外检测独立 postgres 测试 service 块（image: postgres:16）
-            if rel.name == "ci.yml" and re.search(
-                r"(?m)^\s*services:\s*\n\s*postgres:\s*\n\s*image:\s*postgres:16", text
-            ):
-                errors.append(
-                    f"forbidden standalone test-db (CI 独立 postgres:16 测试 service): {rel}"
-                )
-            # 逐行扫描并豁免「明确禁止」语句：禁止/不得/永不/排除等上下文中的 token 属于禁止清单本身，不误报。
-            # 活跃文档中这些 token 只允许出现在「明确禁止/不得」句子里，其余出现即视为违规。
-            prohibition_markers = (
-                "禁止", "不得", "永不", "排除", "已永久删除", "已删除",
-                "不允许", "禁止引入", "禁止创建", "禁止使用",
-                "例外", "唯一允许",
-            )
-            for line_no, line in enumerate(text.splitlines(), 1):
-                if any(marker in line for marker in prohibition_markers):
-                    continue
-                for token, reason in _FORBIDDEN_TEST_DB_TOKENS.items():
-                    if token in line and not any(
-                        a in line for a in _VERIFY_DB_ALLOWED_TOKENS
-                    ):
-                        errors.append(
-                            f"forbidden standalone test-db ({reason}): "
-                            f"{rel}:{line_no} contains {token}"
-                        )
-
-    # [V2.1 验收闭环] 活跃文档不得再出现"所有临时数据库永久禁止"的绝对表述，
-    # 因为 DS-110 已允许远程验证库 bz_stock_verify_<sha> 作为唯一例外。
-    # 允许出现"本地/CI 永久禁止"或"仅远程验证库例外"的精确表述。
-    _ABSOLUTE_FORBID_PHRASES = (
-        "所有独立临时数据库永久禁止",
-        "所有临时数据库永久禁止",
-        "所有临时数据库永久废弃",
-        "一律禁止任何独立/临时测试数据库",
-        "任何独立/临时测试数据库均禁止",
-    )
-    _ABSOLUTE_FORBID_EXEMPT = (
-        "DS-110", "远程验证库", "bz_stock_verify", "唯一允许", "例外",
-    )
-    for base in [agents, *sorted(rules_dir.glob("*.md")),
-                 root / "docs/prd", root / "docs/maps", root / "docs/runbooks"]:
-        if base.is_dir():
-            files = sorted(base.rglob("*.md"))
-        elif base.is_file():
-            files = [base]
-        else:
-            continue
-        for path in files:
-            rel = path.relative_to(root)
-            if "changes" in rel.parts:
-                continue
-            for line_no, line in enumerate(read(path).splitlines(), 1):
-                for phrase in _ABSOLUTE_FORBID_PHRASES:
-                    if phrase in line and not any(
-                        ex in line for ex in _ABSOLUTE_FORBID_EXEMPT
-                    ):
-                        errors.append(
-                            f"absolute temporary-db ban must reference DS-110 exception: "
-                            f"{rel}:{line_no} ({phrase})"
-                        )
-
-    # [V2.1 验收闭环] 活跃 PRD/Runbook 不得把 ref/instruction.md 当作正式真源引用。
-    # ref/ 仅允许人工阅读（AGENTS clause 59），正式需求真源必须是 docs/prd/ 下的文件。
-    # 允许：把 ref/instruction.md 称为"参考源/人工阅读/非正式"，或在 docs/changes 历史中引用。
-    _REF_INSTRUCTION_TOKENS = (
-        "ref/instruction.md",
-        "ref/instruction",
-    )
-    _REF_SOURCE_SAFE = (
-        "参考源", "人工阅读", "非正式", "非真源", "参考", "历史", "草稿",
-        "不作为", "不得作为", "不能作为", "废除", "不再作为",
-    )
-    for base in [root / "docs/prd", root / "docs/runbooks", root / "docs/maps"]:
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*.md")):
-            rel = path.relative_to(root)
-            if "changes" in rel.parts:
-                continue
-            for line_no, line in enumerate(read(path).splitlines(), 1):
-                if any(tok in line for tok in _REF_INSTRUCTION_TOKENS) and not any(
-                    s in line for s in _REF_SOURCE_SAFE
-                ):
-                    errors.append(
-                        f"ref/instruction.md must not be cited as authoritative source: "
-                        f"{rel}:{line_no}"
-                    )
-
-    # [开发测试阶段] 禁止当前有效文档使用"生产阶段"业务术语（历史技术标识符 panji-prod 等除外）
-    _FORBIDDEN_PROD_TERMS = (
-        "生产服务器",
-        "生产部署",
-        "生产库",
-        "正式库",
-        "生产入口",
-        "生产任务",
-        "生产队列",
-        "生产身份",
-        "生产修改与部署版本合同",
-    )
-    for base in [agents, *sorted(rules_dir.glob("*.md")),
-                 root / "docs/prd", root / "docs/maps", root / "docs/runbooks"]:
-        if base.is_dir():
-            files = sorted(base.rglob("*.md"))
-        elif base.is_file():
-            files = [base]
-        else:
-            continue
-        for path in files:
-            rel = path.relative_to(root)
-            # 排除历史 CHANGE / archive / 明确的历史技术标识符解释段
-            if "changes" in rel.parts or "archive" in rel.parts:
-                continue
-            text = read(path)
-            for term in _FORBIDDEN_PROD_TERMS:
-                if term in text:
-                    errors.append(
-                        f"forbidden production-stage term ({term}): {rel}（应为开发测试阶段术语，如远程开发运行服务器/共享开发业务数据库）"
-                    )
-
-    # [开发测试阶段] 盘后远程开发运行 Runbook 禁止 dev→main 合并 / 自动部署 / main HEAD 运行合同
-    # "不自动部署"/"禁止自动部署"是合规声明，不误报（用负向后顾排除"不/禁止"前缀）。
-    _FORBIDDEN_RUNBOOK_PATTERNS = (
-        (r"dev 合并到 main", "dev→main 合并"),
-        (r"(?<!不)(?<!禁止)自动部署", "自动部署流程"),
-        (r"main HEAD", "main HEAD 运行合同"),
-        (r"生产运行合同", "生产运行合同"),
-    )
-    after_close_runbook = root / "docs/runbooks/after-close-remote-development-run.md"
-    if after_close_runbook.exists():
-        runbook_text = read(after_close_runbook)
-        for pattern, reason in _FORBIDDEN_RUNBOOK_PATTERNS:
-            if re.search(pattern, runbook_text):
-                errors.append(
-                    f"forbidden runbook legacy flow ({reason}): docs/runbooks/after-close-remote-development-run.md"
-                )
-
-    # =========================================================================
-    # [CHANGE-20260804 / DS-101] Compose 容器资源硬预算门禁
-    #   每个运行时服务必须配置 mem_limit / mem_reservation / cpus / pids_limit /
-    #   logging / stop_grace_period；有状态服务（postgres/redis/umami）额外要求
-    #   restart / healthcheck / volumes。
-    # =========================================================================
-    compose_path = root / "docker-compose.prod.yml"
-    if compose_path.exists():
-        if yaml is None:
-            errors.append("Compose 资源门禁无法运行：缺少 PyYAML 依赖")
-        else:
-            try:
-                compose = yaml.safe_load(read(compose_path))
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"Compose 文件解析失败: {exc}")
-                compose = None
-            if compose:
-                svcs = (compose.get("services") or {})
-                stateful = {"postgres", "redis", "umami"}
-                for name, svc in (svcs.items() if isinstance(svcs, dict) else []):
-                    rel_svc = f"docker-compose.prod.yml service:{name}"
-                    if not isinstance(svc, dict):
-                        errors.append(f"{rel_svc} 不是字典")
-                        continue
-                    for field in (
-                        "mem_limit", "mem_reservation", "cpus", "pids_limit",
-                        "logging", "stop_grace_period",
-                    ):
-                        if field not in svc:
-                            errors.append(f"{rel_svc} 缺少资源限制字段: {field}")
-                    if name in stateful:
-                        for field in ("restart", "healthcheck", "volumes"):
-                            if field not in svc:
-                                errors.append(
-                                    f"{rel_svc} 有状态服务缺少字段: {field}"
-                                )
-
-    # =========================================================================
-    # [CHANGE-20260804 / DS-102/103/104] 部署脚本合同门禁
-    #   必须含串行、超时、部署后资源复检；不得含 preflight 绕过与通用 prune。
-    # =========================================================================
-    deploy_sh = root / "scripts/deploy/panji-deploy.sh"
-    if deploy_sh.exists():
-        deploy_text = read(deploy_sh)
-        required_signals = {
-            "COMPOSE_PARALLEL_LIMIT=1": "构建/重启串行",
-            "run_with_timeout": "统一长命令超时",
-            "post_deploy_resource_check": "部署后资源复检",
-            "OOMKilled": "容器 OOM 检查",
-            "RestartCount": "容器重启计数检查",
-            "docker stats --no-stream": "高水位采集",
-        }
-        for signal, reason in required_signals.items():
-            if signal not in deploy_text:
-                errors.append(f"部署脚本缺少 {reason} 断言: {signal}")
-
-        # 禁止项只扫描可执行代码（shell_code 剥离注释行），避免误判「永久禁止」注释。
-        forbidden_deploy = {
-            "PANJI_TEST_SKIP_PREFLIGHT": "preflight 绕过开关",
-            "docker system prune": "system prune（全局清理禁止）",
-            "docker volume prune": "volume prune（数据禁止）",
-            "docker container prune": "container prune（定向治理替代）",
-        }
-        deploy_code = shell_code(deploy_sh)
-        for token, reason in forbidden_deploy.items():
-            if token in deploy_code:
-                errors.append(f"部署脚本含禁止项 ({reason}): {token}")
-        # PANJI_TEST_SKIP_PREFLIGHT 绕过开关在本地入口（panji-test-deploy）同样永久禁止。
-        local_entry = root / "scripts/ops/panji-test-deploy"
-        if local_entry.exists():
-            local_code = shell_code(local_entry)
-            if "PANJI_TEST_SKIP_PREFLIGHT" in local_code:
-                errors.append(
-                    "部署入口含禁止项 (preflight 绕过开关): "
-                    "scripts/ops/panji-test-deploy"
-                )
-
-    # =========================================================================
-    # [CHANGE-20260804 / DS-105] 清理合同门禁
-    #   部署脚本须体现 IMAGES_BUILT 分档、保留当前与上一 SHA、禁删 Volume、
-    #   输出清理前后磁盘证据。
-    # =========================================================================
-    if deploy_sh.exists():
-        deploy_text = read(deploy_sh)
-        cleanup_required = {
-            "IMAGES_BUILT": "按是否构建镜像分档清理",
-            "cleanup_disk_before_mb": "清理前磁盘证据",
-            "cleanup_disk_after_mb": "清理后磁盘证据",
-            "docker rmi": "旧 SHA 镜像定向回收",
-        }
-        for signal, reason in cleanup_required.items():
-            if signal not in deploy_text:
-                errors.append(f"部署脚本清理合同缺少 {reason}: {signal}")
-
+    _check_rule_layout(root, errors)
+    _check_agents(root, errors)
+    _check_protected_manifest(root, errors)
+    _check_rule_semantics(root, errors)
+    _check_tool_neutrality(root, errors)
+    _check_verification_plans(root, errors)
+    _check_ci_is_manual(root, errors)
     return errors
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, default=Path(__file__).parent.parent)
-    args = parser.parse_args(argv)
-    errors = check(args.root.resolve())
+def main() -> int:
+    root = Path(__file__).resolve().parents[1]
+    errors = check(root)
     if errors:
-        print(f"Governance check failed ({len(errors)}):")
+        print("Governance check FAILED:")
         for error in errors:
-            print(f"  - {error}")
+            print(f"- {error}")
         return 1
-    print("Governance check passed.")
+    print("Governance check PASS: stage-aware Exploration/Hardening contract is consistent.")
     return 0
 
 
