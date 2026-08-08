@@ -1301,19 +1301,16 @@ async def _ensure_strategy_version_canonical(db, version_id: uuid.UUID) -> None:
     StrategyVersion 必须 status='released' 且 manifest 含 parameters，否则
     SqlAlchemyReleasedConfigResolver / strategy_version_id 解析 fail-closed。
     """
+    def_id = _cfixture("strategy_definition", "dsa_selector")
     await db.execute(
         text(
             "INSERT INTO strategy_definitions "
             "(id, strategy_key, kind, display_name, environment) "
             "VALUES (:id, 'dsa_selector', 'selector', 'DSA Selector', 'production') "
             "ON CONFLICT (strategy_key) DO NOTHING"
-        )
+        ),
+        {"id": str(def_id)},
     )
-    def_id = (
-        await db.execute(
-            text("SELECT id FROM strategy_definitions WHERE strategy_key='dsa_selector'")
-        )
-    ).scalar_one()
     await db.execute(
         text(
             "INSERT INTO strategy_versions "
@@ -1325,12 +1322,14 @@ async def _ensure_strategy_version_canonical(db, version_id: uuid.UUID) -> None:
         {
             "id": str(version_id),
             "did": str(def_id),
-            "manifest": {
+            # [R1.5c] asyncpg 无法直接把 dict 绑定给 CAST(:manifest AS jsonb)；
+            # 与项目惯例（seed _gen_synthetic_released_dsa_config）一致传 JSON 字符串。
+            "manifest": json.dumps({
                 "selector": "dsa_selector",
                 "parameters": [
                     {"key": "min_score", "default": 0.6, "type": "float"},
                 ],
-            },
+            }),
         },
     )
     await db.flush()
@@ -1439,9 +1438,10 @@ async def _ensure_stock_core_state(db, td: date, instrument_ids) -> tuple[uuid.U
             ),
             {
                 "id": str(snap_id), "iid": str(inst_id), "td": td, "run_id": str(run_id),
-                "struct": {"canonical": True},
-                "temporal": {"canonical": True},
-                "summary": {"index": i, "canonical": True},
+                # [R1.5c] asyncpg 无法直接把 dict 绑定给 jsonb，需 JSON 字符串。
+                "struct": json.dumps({"canonical": True}),
+                "temporal": json.dumps({"canonical": True}),
+                "summary": json.dumps({"index": i, "canonical": True}),
             },
         )
     await _ensure_publication(db, PUBLICATION_KIND_STOCK_CORE, td, run_id)
@@ -1553,11 +1553,12 @@ async def _ensure_dsa_projection_state(
         {
             "id": str(dsa_run_id), "version_id": str(version_id), "td": td,
             "status": run_status,
-            "overrides": {
+            # [R1.5c] asyncpg 无法直接把 dict 绑定给 jsonb，需 JSON 字符串。
+            "overrides": json.dumps({
                 "strategy_key": "dsa_selector",
                 "source_core_run_id": str(core_run_id),
                 "requirement": "required_compatibility",
-            },
+            }),
             "idemp_key": f"canonical-dsa-{td}-{core_run_id}",
             "n": n,
         },
@@ -1574,7 +1575,8 @@ async def _ensure_dsa_projection_state(
             {
                 "id": str(result_id), "run_id": str(dsa_run_id),
                 "version_id": str(version_id), "iid": str(inst_id), "td": td,
-                "payload": {"score": 0.7},
+                # [R1.5c] asyncpg 无法直接把 dict 绑定给 jsonb，需 JSON 字符串。
+                "payload": json.dumps({"score": 0.7}),
             },
         )
         item_id = _cfixture("dsa_item", f"{td}/{core_run_id}/{inst_id}")
