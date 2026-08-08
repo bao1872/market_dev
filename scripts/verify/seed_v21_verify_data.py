@@ -1438,16 +1438,17 @@ async def _ensure_stock_core_state(db, td: date, instrument_ids) -> tuple[uuid.U
         await db.execute(
             text(
                 "INSERT INTO stock_feature_snapshots "
-                "(id, instrument_id, trade_date, source_run_id, status, primary_timeframe, "
+                "(id, instrument_id, trade_date, source_run_id, primary_timeframe, "
                 "secondary_timeframe, adj, schema_version, structural_payload, "
                 "temporal_payload, summary_payload) "
-                "VALUES (:id, :iid, :td, :run_id, 'succeeded', '1d', '15m', 'qfq', 1, "
+                "VALUES (:id, :iid, :td, :run_id, '1d', '15m', 'qfq', 1, "
                 "CAST(:struct AS jsonb), CAST(:temporal AS jsonb), CAST(:summary AS jsonb)) "
                 "ON CONFLICT (id) DO NOTHING"
             ),
             {
                 "id": str(snap_id), "iid": str(inst_id), "td": td, "run_id": str(run_id),
                 # [R1.5c] asyncpg 无法直接把 dict 绑定给 jsonb，需 JSON 字符串。
+                # 注意：stock_feature_snapshots 无 status 列（status 在 run_items 上）。
                 "struct": json.dumps({"canonical": True}),
                 "temporal": json.dumps({"canonical": True}),
                 "summary": json.dumps({"index": i, "canonical": True}),
@@ -1497,10 +1498,10 @@ async def _ensure_board_aggregation_state(db, td: date, core_run_id: uuid.UUID) 
             "(id, trade_date, source_core_run_id, taxonomy_version, "
             "taxonomy_compatibility_key, membership_version, algorithm_version, "
             "expected_count, succeeded_count, failed_count, coverage_ratio, status, blockers, "
-            "started_at, published_at) "
+            "published_at) "
             "VALUES (:id, :td, :core_run_id, 'canonical-taxonomy', 'canonical-key', "
             "'canonical-membership', 'canonical-v1', :n, :n, 0, 1.0, 'succeeded', '[]', "
-            "now(), now()) ON CONFLICT (id) DO NOTHING"
+            "now()) ON CONFLICT (id) DO NOTHING"
         ),
         {"id": str(agg_run_id), "td": td, "core_run_id": str(core_run_id), "n": _CANONICAL_N},
     )
@@ -1522,15 +1523,17 @@ async def _ensure_review_state(db, td: date, core_run_id: uuid.UUID, agg_run_id:
             "(id, trade_date, source_core_run_id, source_board_run_id, degraded_reasons, "
             "algorithm_version, filter_version, baseline_window, status, "
             "expected_scope_count, succeeded_scope_count, failed_scope_count, signal_count, "
-            "coverage_ratio, industry_ratio, started_at, finished_at) "
+            "coverage_ratio, started_at, completed_at, published_at, metadata_json) "
             "VALUES (:id, :td, :core_run_id, :board_run_id, '[]', "
             "'canonical-review-v1', 'canonical-filters-v1', 120, 'published', "
-            ":n, :n, 0, 0, 1.0, 1.0, now(), now()) ON CONFLICT (id) DO NOTHING"
+            ":n, :n, 0, 0, 1.0, now(), now(), now(), "
+            "CAST(:meta AS jsonb)) ON CONFLICT (id) DO NOTHING"
         ),
         {
             "id": str(review_run_id), "td": td,
             "core_run_id": str(core_run_id), "board_run_id": str(agg_run_id),
             "n": _CANONICAL_N,
+            "meta": json.dumps({"canonical": True}),
         },
     )
     await _ensure_publication(db, "market_review", td, review_run_id)
