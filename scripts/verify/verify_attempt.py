@@ -105,8 +105,12 @@ def _run(cmd: list[str], *, timeout: int = 600, env: dict[str, str] | None = Non
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env)
         return proc.returncode, proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired:
-        return 124, "", "command timeout"
+    except subprocess.TimeoutExpired as exc:
+        # [R1.1b-E] TimeoutExpired 丢弃 partial stdout/stderr；保留已捕获的部分证据，
+        # 避免超时后 hotspot 阶段信息丢失（seed 超时定位必需）。
+        partial_out = exc.stdout if exc.stdout is not None else ""
+        partial_err = exc.stderr if exc.stderr is not None else ""
+        return 124, partial_out, partial_err or "command timeout"
     except FileNotFoundError as exc:
         return 127, "", str(exc)
 
@@ -341,7 +345,9 @@ class VerifyAttempt:
         self.exporter.log("run_synthetic_seed_twice: 开始")
         for i in range(1, 3):
             code, out, err = _run(
-                [*self.gate_base, "python", "-m", "scripts.verify.seed_v21_verify_data",
+                # [R1.1b-E] python -u 解除子进程 stdout 缓冲，使粗粒度 checkpoint
+                # 在超时发生时已落盘（配合 _run 保留 partial stdout）。
+                [*self.gate_base, "python", "-u", "-m", "scripts.verify.seed_v21_verify_data",
                  "--scenario", "all"],
                 timeout=self.plan.timeouts["seed"],
             )

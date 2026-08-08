@@ -94,15 +94,7 @@ from app.services.core_artifact_repository import (
     CoreArtifactRepository,
 )
 from app.services.factor_publication_service import (
-    HISTORY_CROSS_SECTION_MIN_COVERAGE,
     compute_coverage,
-    publish_history_cross_section,
-)
-from app.models.first_pyramid_history_run import HISTORY_RUN_SUCCEEDED
-from app.services.first_pyramid_history_service import (
-    backfill_history_with_run_items,
-    create_history_run,
-    create_history_run_items,
 )
 
 # [修正] compute_review_core_with_run_items 真实位置是 feature_snapshot_service，
@@ -124,7 +116,6 @@ from app.services.strategy_batch_service import (
     StrategyBatchService,
     persist_precomputed_dsa_results,
 )
-from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services.wencai_board_provider import (
     BOARD_IDENTITY_CONTRACT_VERSION,
     BOARD_SOURCE,
@@ -639,79 +630,6 @@ async def _add_instruments_prereq(trade_date: date) -> uuid.UUID:
     )
     print(f"[seed] core run done: {trade_date} run={snapshot_run_id} stats={stats}")
     return snapshot_run_id
-
-
-async def _add_daily_facts_prereq(trade_date: date) -> None:
-    """[Group2-Daily] 真实 daily_facts 链：走正式 history producer → publish history cross section。
-
-    正式链（ProductReadiness._daily_facts_state 依赖 HISTORY_CROSS_SECTION publication）：
-        FirstPyramidHistoryRun
-            → create_history_run + create_history_run_items（first_pyramid_history_service）
-            → backfill_history_with_run_items（正式 claim/compute/commit，DB-only 取数）
-            → finish_history_run
-            → publish_history_cross_section（factor_publication_service，coverage>=0.98）
-
-    覆盖 universe：市场级 FM_N_INST=5200 标的（Full-market Universe Alignment 后 seed
-    已为全部 5200 标的写入 FULLY_READY_DAILY_START 起扩展日线，≥60 根满足
-    compute_first_pyramid_history 的 _MIN_BARS_FOR_REQUIRED_DIMS 门槛）。
-    不手工 INSERT FirstPyramidHistoryRun / FactorPublication。
-    """
-    # history run 覆盖市场级 5200 标的（其扩展日线已足够）
-    instrument_ids = _FULL_MARKET_INSTRUMENT_IDS
-    async with AsyncSessionLocal() as db:
-        run, is_new = await create_history_run(
-            db,
-            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-            output_bars=250,
-            scope="full",
-            instrument_ids=instrument_ids,
-        )
-        history_run_id = run.id
-        # create_history_run_items 本身幂等（ON CONFLICT DO NOTHING），复用已成功 run
-        # 时无副作用，始终调用。
-        await create_history_run_items(db, history_run_id, instrument_ids)
-        await db.commit()
-
-    # create_history_run 的幂等查找会复用 RUNNING/PARTIAL/SUCCEEDED 三种 run；不能用
-    # is_new 决定是否执行——中途断掉的 PARTIAL run 重跑时 is_new=False 但仍有 pending/
-    # failed/expired items 待 resume。仅当 run 已是 SUCCEEDED 时才跳过，否则通过正式
-    # run-item 链 resume/backfill（backfill_history_with_run_items 支持 pending 领取、
-    # failed/expired 重试、可恢复 run）。
-    if run.status != HISTORY_RUN_SUCCEEDED:
-        # 正式执行（DB-only，内部 AsyncSessionLocal）：backfill 内部按正式语义
-        # （全部成功→succeeded；部分成功→partial；无成功→failed）自动 finish_history_run，
-        # 无需 seed 手动收敛 run 状态。
-        stats = await backfill_history_with_run_items(
-            history_run_id=history_run_id,
-            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-            output_bars=250,
-            worker_id="verify-seed",
-        )
-    else:
-        # 已成功 run，不重复 backfill；用 DB 全量进度作为发布依据
-        stats = {"succeeded_count": len(instrument_ids), "skipped_count": 0}
-
-    async with AsyncSessionLocal() as db:
-        try:
-            await publish_history_cross_section(
-                db,
-                trade_date,
-                history_run_id,
-                FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-                threshold=HISTORY_CROSS_SECTION_MIN_COVERAGE,
-            )
-            await db.commit()
-            print(
-                f"[seed] daily_facts done: {trade_date} history_run={history_run_id} "
-                f"succeeded={stats['succeeded_count']}/{len(instrument_ids)} "
-                f"skipped={stats.get('skipped_count', 0)}"
-            )
-        except Exception as exc:  # noqa: BLE001 - seed 失败要如实暴露
-            print(
-                f"[seed] daily_facts publish FAILED: {trade_date} history_run={history_run_id} "
-                f"err={type(exc).__name__}: {exc}"
-            )
-            raise
 
 
 async def _finish_core_run(trade_date: date, snapshot_run_id: uuid.UUID) -> None:
@@ -1350,9 +1268,9 @@ async def _seed_scenario(verify_conn, scenario: str) -> None:
     #   core → projection → board(publication) → chip → finish core run → publish core
     #   → auction → board_aggregation(publication) → review(create→compute→publish)
     # 约束5：同一场景内部 Core/Board/Aggregation/Review 必须使用同一 universe，禁止跨 universe 拼接。
-    # [Group2-Daily] 所有场景期望 daily_facts=READY（readiness_fixtures 的 _mandatory()
-    # 默认 daily=READY），故统一先装配 daily_facts（正式 history producer，独立于 core run）。
-    await _add_daily_facts_prereq(td)
+    # [R1.1b] daily_facts 不再由 history_cross_section producer 装配——target SHA 的
+    # ProductReadiness._daily_facts_state 直接以 BarsCoverageService.compute_daily_facts_detail
+    # （bars_daily 真实覆盖率）为 SSOT，所有场景统一可用，无需独立 daily_facts seed 步骤。
     if scenario == "pending_no_core":
         # 只建 daily + instruments，stock_core 未发布 → closure=pending
         await _add_instruments_prereq(td)
@@ -1564,9 +1482,16 @@ def _diff_fact_vectors(first: dict[str, Any], second: dict[str, Any]) -> list[di
 
 async def seed_all(verify_conn, *, strict: bool = True) -> None:
     """一次性合成基础资产 + 六态 canonical 场景装配 + 严格 closure 断言。"""
+    # [R1.1b-E] 粗粒度 checkpoints（无 per-stock 日志），便于超时定位热点阶段。
+    print("[seed] base_bars start")
     await _gen_synthetic_instruments_bars(verify_conn)
+    print("[seed] base_bars end")
+    print("[seed] boards start")
     await _gen_synthetic_boards(verify_conn)
+    print("[seed] boards end")
+    print("[seed] released_dsa_config start")
     await _gen_synthetic_released_dsa_config(verify_conn)
+    print("[seed] released_dsa_config end")
     completed_dates = set((await verify_conn.execute(text(
         "SELECT DISTINCT trade_date FROM stock_feature_snapshot_runs "
         "WHERE trade_date = ANY(:dates)"
@@ -1579,8 +1504,12 @@ async def seed_all(verify_conn, *, strict: bool = True) -> None:
         print("[seed] all scenario core runs already exist; validating closures only")
     else:
         for sc in _SCENARIO_TRADE_DATES:
+            print(f"[seed] scenario {sc} start")
             await _seed_scenario(verify_conn, sc)
+            print(f"[seed] scenario {sc} end")
+    print("[seed] verify_closures start")
     await _verify_closures(strict=strict)
+    print("[seed] verify_closures end")
 
 
 async def _verify_closures(*, strict: bool = True) -> None:

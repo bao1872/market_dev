@@ -945,35 +945,39 @@ from unittest.mock import AsyncMock, patch  # noqa: E402
 from app.services.bars_coverage_service import BarsCoverageService  # noqa: E402
 
 
-async def _daily_facts_state_with_coverage(coverage_result: dict) -> object:
-    """在 mock BarsCoverageService 的前提下取 daily_facts 的 ProductReadinessState。"""
+async def _daily_facts_state_with_detail(detail_result: dict) -> object:
+    """在 mock BarsCoverageService.compute_daily_facts_detail 的前提下取 daily_facts State。"""
     db = _FakeDB(_full_plan())
     service = ProductReadinessService()
     with patch.object(
-        BarsCoverageService, "compute_daily_coverage",
-        new=AsyncMock(return_value=coverage_result),
+        BarsCoverageService, "compute_daily_facts_detail",
+        new=AsyncMock(return_value=detail_result),
     ):
         return await service._daily_facts_state(db, date(2026, 8, 4))
 
 
 async def test_daily_facts_never_reads_history_cross_section():
-    """C3：history_cross_section publication 不得使 daily_facts ready。
+    """C3/R1.1b：history_cross_section publication 不得使 daily_facts ready。
 
     即便存在 history_cross_section pointer（_full_plan 默认带），daily_facts 也必须
-    由 BarsCoverageService 的真实覆盖率决定，且当前 canonical 不完整 → degraded、非 ready。
+    由 BarsCoverageService 的真实 bars 覆盖率决定；覆盖率不达标 → READY_REUSED。
     """
-    # 假设历史截面发布完整存在（_full_plan 默认含各 publication pointer）
     cov = {
-        "trade_date": date(2026, 8, 4),
-        "covered": 4980,
-        "total": 5000,
-        "coverage": 0.996,
+        "trade_date": "2026-08-04",
+        "eligible_count": 5000,
+        "daily_ready_count": 4980,
+        "daily_missing_count": 20,
+        "coverage_ratio": 0.996,
         "coverage_raw": 4980 / 5000,
+        "max_bar_date": "2026-08-04",
+        "future_data_count": 0,
+        "adj_factor_valid_count": 4980,
+        "adj_factor_total_count": 4980,
         "source": "bars_daily",
     }
-    state = await _daily_facts_state_with_coverage(cov)
+    state = await _daily_facts_state_with_detail(cov)
     assert state.product == "daily_facts"
-    # C3 最合适 enum：有真实覆盖率（可消费）但 canonical 不完整 → READY_REUSED（非 fully fresh）
+    # 覆盖率不达标（<1.0）→ 不得 READY/fresh，仍 READY_REUSED（可消费、非 fully fresh）
     assert state.readiness == READINESS_READY_REUSED
     assert state.freshness == "reused"
     assert state.is_fully_fresh is False
@@ -985,22 +989,54 @@ async def test_daily_facts_never_reads_history_cross_section():
     assert state.lineage.get("daily_ready_count") == 4980
 
 
-async def test_daily_facts_incomplete_source_not_false_green():
-    """C3 选项 B：即便覆盖率达标，canonical 不完整也不得 false-green。
+async def test_daily_facts_incomplete_adj_factor_not_false_green():
+    """R1.1b：bars 覆盖率达标但 adj_factor 不完整 → 不得 false-green。
 
-    直接验证 _daily_facts_state 不返回 READY（fully fresh），且 reason_code 稳定存在；
-    is_fully_fresh 恒为 False（闭包永远无法 fully_ready）。
+    覆盖率=1.0 且 daily_missing=0，但 adj_factor 非空且>0 的计数 < 总数
+    （R1.1b 简化：以现有真实 adj_factor 合法性替代不存在的 adjustment_as_of SSOT），
+    故 daily_facts 仍不可声明 fully fresh → READY_REUSED，is_fully_fresh=False。
     """
     cov_full = {
-        "trade_date": date(2026, 8, 4),
-        "covered": 5000,
-        "total": 5000,
-        "coverage": 1.0,
+        "trade_date": "2026-08-04",
+        "eligible_count": 5000,
+        "daily_ready_count": 5000,
+        "daily_missing_count": 0,
+        "coverage_ratio": 1.0,
         "coverage_raw": 1.0,
+        "max_bar_date": "2026-08-04",
+        "future_data_count": 0,
+        "adj_factor_valid_count": 0,   # 全部缺失/非法 → 不得 fully fresh
+        "adj_factor_total_count": 5000,
         "source": "bars_daily",
     }
-    state = await _daily_facts_state_with_coverage(cov_full)
+    state = await _daily_facts_state_with_detail(cov_full)
     assert state.readiness != READINESS_READY  # 不得 fully fresh → 不得 false-green
     assert state.readiness == READINESS_READY_REUSED
     assert state.is_fully_fresh is False
     assert state.lineage.get("reason_code") == "DAILY_FACTS_CANONICAL_INCOMPLETE"
+
+
+async def test_daily_facts_full_bars_yields_ready_fresh():
+    """R1.1b：目标交易日 bars 真正完整（覆盖率=1.0、无缺失、adj_factor 全部合法）
+    → daily_facts 诚实声明 READY/fresh，可支撑 fully_ready（非 false-green）。"""
+    detail = {
+        "trade_date": "2026-08-04",
+        "eligible_count": 5000,
+        "daily_ready_count": 5000,
+        "daily_missing_count": 0,
+        "coverage_ratio": 1.0,
+        "coverage_raw": 1.0,
+        "max_bar_date": "2026-08-04",
+        "future_data_count": 0,
+        "adj_factor_valid_count": 5000,
+        "adj_factor_total_count": 5000,
+        "source": "bars_daily",
+    }
+    state = await _daily_facts_state_with_detail(detail)
+    assert state.readiness == READINESS_READY
+    assert state.freshness == "fresh"
+    assert state.is_fully_fresh is True
+    assert state.lineage.get("reason_code") is None
+    assert state.lineage.get("coverage_ratio") == 1.0
+    assert state.lineage.get("daily_missing_count") == 0
+    assert state.lineage.get("adj_factor_valid_count") == 5000
