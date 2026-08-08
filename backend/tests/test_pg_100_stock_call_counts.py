@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from datetime import date, timedelta
@@ -90,7 +91,9 @@ async def _ensure_strategy_version(db) -> None:
             "id": str(uuid.uuid4()),
             "did": str(def_id),
             "ver": f"verify-{uuid.uuid4().hex[:8]}",
-            "manifest": manifest,
+            # [R1.5a] asyncpg 无法直接把 dict 绑定给 CAST(:manifest AS jsonb)；
+            # 与项目惯例（seed _gen_synthetic_released_dsa_config）一致传 JSON 字符串。
+            "manifest": json.dumps(manifest),
             "build_hash": "self-contained-build-1",
         },
     )
