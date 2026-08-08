@@ -42,16 +42,16 @@ from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.calendar_service import get_most_recent_trading_day_async
 from app.services.review_metric_observation_service import persist_metric_observations
-from app.utils.long_task_budget import (
-    LongTaskBudgetState,
-    LongTaskStopReason,
-    current_rss_mb,
-)
 from app.services.review_scope_service import (
     ScopeDefinition,
     ScopeSnapshotError,
     fetch_historical_member_facts,
     resolve_scope_members,
+)
+from app.utils.long_task_budget import (
+    LongTaskBudgetState,
+    LongTaskStopReason,
+    current_rss_mb,
 )
 
 logger = logging.getLogger("review_bootstrap_service")
@@ -233,8 +233,9 @@ async def list_bootstrap_eligible_dates(
         days_back: 回溯天数（默认 120）
 
     Returns:
-        ``[(trade_date, stock_core_run_id | None), ...]`` 按日期降序。
+        ``[(trade_date, stock_core_run_id | None), ...]`` 按日期升序（oldest → newest）。
         日期来源始终是 FP history；缺少 source identity 不删除该日期。
+        升序保证 bootstrap 按时间正序处理，normalized 基线不读取未来 observation。
     """
     if end_date is None:
         end_date = date.today()
@@ -250,7 +251,7 @@ async def list_bootstrap_eligible_dates(
             == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
         )
         .distinct()
-        .order_by(FirstPyramidHistoryDailyState.trade_date.desc())
+        .order_by(FirstPyramidHistoryDailyState.trade_date.asc())
     )
     dates = [row[0] for row in (await session.execute(history_stmt)).all()]
     if not dates:

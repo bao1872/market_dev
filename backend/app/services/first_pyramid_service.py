@@ -126,6 +126,53 @@ def _safe_float(v: Any) -> float | None:
         return None
 
 
+def _safe_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_str(v: Any) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, float) and (v != v):  # NaN
+        return None
+    return str(v) if not isinstance(v, str) else v
+
+
+def _price_position_120d(
+    closes: list[float],
+    lows: list[float],
+    highs: list[float],
+    i: int,
+) -> float | None:
+    """[CHANGE-20260808] 计算截至 bar i 的 120 日价格位置（prefix-causal）。
+
+    price_position = (close - low_120) / (high_120 - low_120)。
+    仅使用收盘/最低/最高序列前 i 根（含当前），不读取未来 bar。
+    """
+    try:
+        close = closes[i]
+    except (IndexError, TypeError):
+        return None
+    if close is None:
+        return None
+    lo = lows[max(0, i - 119): i + 1]
+    hi = highs[max(0, i - 119): i + 1]
+    lo_vals = [v for v in lo if v is not None]
+    hi_vals = [v for v in hi if v is not None]
+    if not lo_vals or not hi_vals:
+        return None
+    low_value = min(lo_vals)
+    high_value = max(hi_vals)
+    if high_value - low_value <= 1e-12:
+        return None
+    return (close - low_value) / (high_value - low_value)
+
+
 def _safe_iso_date(v: Any) -> str | None:
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return None
@@ -1686,6 +1733,50 @@ def compute_first_pyramid_history(
     smc_timeline_by_idx = {t["bar_index"]: t for t in smc_timeline}
     momentum_daily_by_idx = {d["bar_index"]: d for d in momentum_daily}
 
+    # [CHANGE-20260808] Review historical fact 扩展：前向维护 latest BOS/CHoCH/OB 游标
+    # freshness = 当前 bar_index - confirmed_index（相对已确认事件时间，禁止未来确认）
+    bos_choch_by_idx: dict[int, dict[str, Any]] = {}
+    for evt in smc_events:
+        idx = evt.get("confirmed_index")
+        if idx is None:
+            continue
+        bos_choch_by_idx[idx] = {
+            "type": evt.get("type", ""),
+            "direction": (
+                "up" if evt.get("bullish") else "down"
+                if evt.get("bullish") is False else None
+            ),
+            "internal": bool(evt.get("internal", False)),
+        }
+    ob_by_idx: dict[int, dict[str, Any]] = {}
+    for ob in ob_lifecycle_events:
+        ob_type = ob.get("type", "")
+        if ob_type == "OB_CREATED":
+            idx = ob.get("confirmed_index")
+        elif ob_type == "OB_ENTERED":
+            idx = ob.get("enter_index")
+        elif ob_type == "OB_MITIGATED":
+            idx = ob.get("mitigated_index")
+        else:
+            idx = None
+        if idx is None:
+            continue
+        ob_by_idx[idx] = {
+            "type": ob_type,
+            "direction": (
+                "up" if ob.get("bias") == 1 else "down"
+                if ob.get("bias") == -1 else None
+            ),
+            "internal": bool(ob.get("internal", False)),
+            "structure_level": ob.get("structure_level"),
+            "anchor_index": ob.get("anchor_index"),
+        }
+
+    # 当前 latest 游标（仅随 bar 前向推进，确保 prefix-causal）
+    latest_bos: dict[str, Any] | None = None
+    latest_choch: dict[str, Any] | None = None
+    latest_ob: dict[str, Any] | None = None
+
     for i in range(start_idx, n_total):
         row = factor_per_bar.iloc[i]
         bar_idx = i
@@ -1708,6 +1799,27 @@ def compute_first_pyramid_history(
         internal_bias = int(smc_t.get("internal_bias", 0))
         active_internal_ob_count = int(smc_t.get("active_internal_ob_count", 0))
         active_swing_ob_count = int(smc_t.get("active_swing_ob_count", 0))
+
+        # [CHANGE-20260808] Review 扩展：前向推进 latest BOS/CHoCH/OB 游标（prefix-causal）
+        if bar_idx in bos_choch_by_idx:
+            evt = bos_choch_by_idx[bar_idx]
+            if evt["type"] == "BOS":
+                latest_bos = {**evt, "confirmed_index": bar_idx}
+            elif evt["type"] == "CHoCH":
+                latest_choch = {**evt, "confirmed_index": bar_idx}
+        if bar_idx in ob_by_idx:
+            # OB 生命周期：CREATED/ENTERED 更新最近相关 OB；MITIGATED 标记 active 结束
+            latest_ob = {**ob_by_idx[bar_idx], "confirmed_index": bar_idx}
+
+        def _freshness(confirmed: int | None, cur: int) -> int | None:
+            return (cur - confirmed) if confirmed is not None else None
+
+        # structure_alignment（swing_bias / internal_bias 共振）
+        structure_alignment: str | None = None
+        if swing_bias != 0 and internal_bias != 0:
+            structure_alignment = (
+                "共振" if swing_bias == internal_bias else "背离"
+            )
 
         # 动量字段（从 momentum_daily 读取）
         m_daily = momentum_daily_by_idx.get(bar_idx, {})
@@ -1775,11 +1887,34 @@ def compute_first_pyramid_history(
             "regime_strength": regime_strength,
             "dsa_dir_bars": dsa_dir_bars,
             "dsa_vwap_dev_pct": dsa_vwap_dev_pct,
+            # [CHANGE-20260808] Review 扩展：DSA segment 原子特征（prefix-causal）
+            "segment_id": _safe_int(row.get("segment_id")),
+            "segment_direction": _safe_int(row.get("segment_direction")),
+            "segment_start_time": _safe_str(row.get("segment_start_time")),
+            "segment_start_bar_index": _safe_int(row.get("segment_start_bar_index")),
+            "segment_end_bar_index": _safe_int(row.get("segment_end_bar_index")),
+            "segment_bars": _safe_int(row.get("segment_bars")),
+            "segment_change_pct": _safe_float(row.get("segment_change_pct")),
+            "segment_slope": _safe_float(row.get("segment_slope")),
+            "current_vs_prev_volume_mean_ratio": _safe_float(row.get("current_vs_prev_volume_mean_ratio")),
+            "current_vs_prev_amount_mean_ratio": _safe_float(row.get("current_vs_prev_amount_mean_ratio")),
+            "current_segment_volume_mean": _safe_float(row.get("current_segment_volume_mean")),
+            "prev_segment_volume_mean": _safe_float(row.get("prev_segment_volume_mean")),
             # SMC 原子特征
             "swing_bias": swing_bias,
             "internal_bias": internal_bias,
+            "structure_alignment": structure_alignment,
             "active_internal_ob_count": active_internal_ob_count,
             "active_swing_ob_count": active_swing_ob_count,
+            # [CHANGE-20260808] Review 扩展：latest 结构事件摘要（freshness 相对已确认事件时间）
+            "latest_bos_direction": latest_bos.get("direction") if latest_bos else None,
+            "latest_bos_freshness": _freshness(latest_bos.get("confirmed_index"), bar_idx) if latest_bos else None,
+            "latest_choch_direction": latest_choch.get("direction") if latest_choch else None,
+            "latest_choch_freshness": _freshness(latest_choch.get("confirmed_index"), bar_idx) if latest_choch else None,
+            "latest_ob_direction": latest_ob.get("direction") if latest_ob else None,
+            "latest_ob_freshness": _freshness(latest_ob.get("confirmed_index"), bar_idx) if latest_ob else None,
+            "latest_ob_structure_level": latest_ob.get("structure_level") if latest_ob else None,
+            "latest_ob_active": bool(latest_ob and latest_ob.get("type") != "OB_MITIGATED"),
             # 动量原子特征
             "volatility_phase": volatility_phase,
             "momentum_direction": momentum_direction,
@@ -1789,6 +1924,8 @@ def compute_first_pyramid_history(
             "volume_ratio_20": vol_ratio_20,
             "volume_percentile_20": vol_pct_20,
             "volume_zscore_20": vol_zscore_20,
+            # [CHANGE-20260808] Review 扩展：120 日价格位置（prefix-causal，滚动到当前 bar）
+            "price_position_120d": _price_position_120d(closes, lows, highs, i),
             # [P0-1] 逐 bar readiness 细分（禁止依赖筹码，禁止用完整 n_input 判断过去日期）
             "available_bars": available_bars,
             "trend_ready": trend_ready,

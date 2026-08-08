@@ -48,14 +48,34 @@ def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
         trend = "down"
     else:
         trend = "sideways"
+    structure_alignment = state.get("structure_alignment")
+    if structure_alignment is None:
+        swing_b = state.get("swing_bias")
+        internal_b = state.get("internal_bias")
+        if swing_b != 0 and internal_b != 0:
+            structure_alignment = (
+                "共振" if swing_b == internal_b else "背离"
+            )
     return {
         "fp_trend_direction": trend,
         "fp_swing_direction": state.get("swing_bias"),
         "fp_internal_direction": state.get("internal_bias"),
+        "fp_structure_alignment": structure_alignment,
         "fp_momentum_direction": state.get("momentum_direction"),
         "fp_momentum_change": state.get("momentum_change"),
         "fp_volume_ratio20": state.get("volume_ratio_20"),
         "fp_volume_percentile20": state.get("volume_percentile_20"),
+        "review_price_position": state.get("price_position_120d"),
+        # [CHANGE-20260808] Review 扩展：latest 结构事件（freshness 相对已确认事件时间）
+        "fp_latest_bos_direction": state.get("latest_bos_direction"),
+        "fp_latest_bos_freshness": state.get("latest_bos_freshness"),
+        "fp_latest_choch_direction": state.get("latest_choch_direction"),
+        "fp_latest_choch_freshness": state.get("latest_choch_freshness"),
+        "fp_latest_ob_direction": state.get("latest_ob_direction"),
+        "fp_latest_ob_freshness": state.get("latest_ob_freshness"),
+        # [CHANGE-20260808] DSA segment 量能改善（V 的 trend_segment_volume_improvement）
+        "fp_segment_volume_ratio": state.get("current_vs_prev_volume_mean_ratio"),
+        "fp_prev_segment_volume": state.get("prev_segment_volume_mean"),
     }
 
 

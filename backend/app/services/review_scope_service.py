@@ -772,6 +772,132 @@ async def fetch_historical_member_facts(
     return facts
 
 
+async def load_day_fact_maps(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    instrument_ids: list[uuid.UUID] | None = None,
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """[CHANGE-20260808] Stage B day fact loader —— 每个 trade_date 一次批量加载。
+
+    设计目标（消除旧路径 date × scope × 400 日 bars 重复读取）：
+    - 本函数按 trade_date 只做固定 4 次批量查询：
+        1. 当日 FirstPyramidHistoryDailyState（提供非 Chip canonical facts，
+           含 rolling facts：volume_ratio_20/volume_percentile_20/volume_zscore_20）
+        2. 前一交易日 FirstPyramidHistoryDailyState（previous_first_pyramid）
+        3. 当日 bars_daily（算 review_return_1d/review_amount/review_volume）
+        4. 前一交易日 bars_daily（算 return_1d 的 prev_close）
+    - 每个 instrument 只构造一份 fact（facts_by_instrument），
+      多个 scope 通过 membership IDs 从内存 map 筛选，不再各自重复查询。
+    - 禁止在此重复读取 400 日行情：rolling facts 由 daily_state 提供，
+      这里只用当前/前一日 bar 计算 1d 收益率与当日成交额/量。
+
+    Args:
+        session: 异步 DB 会话
+        trade_date: 目标交易日
+        instrument_ids: 限制加载的 instrument 子集（None=全市场当日 FP state）
+
+    Returns:
+        {instrument_id: to_metric_input() dict}，供任意 scope membership 复用。
+    """
+    # 1. 当日 FP state
+    current_stmt = select(FirstPyramidHistoryDailyState).where(
+        FirstPyramidHistoryDailyState.trade_date == trade_date,
+        FirstPyramidHistoryDailyState.algorithm_version
+        == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+    )
+    if instrument_ids is not None:
+        current_stmt = current_stmt.where(
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+        )
+    current_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {
+        state.instrument_id: state
+        for state in (await session.execute(current_stmt)).scalars()
+    }
+    if not current_by_instrument:
+        return {}
+
+    ids = list(current_by_instrument.keys())
+
+    # 2. 前一交易日 FP state（distinct 每 instrument 最近一日）
+    previous_stmt = (
+        select(FirstPyramidHistoryDailyState)
+        .where(
+            FirstPyramidHistoryDailyState.instrument_id.in_(ids),
+            FirstPyramidHistoryDailyState.trade_date < trade_date,
+            FirstPyramidHistoryDailyState.algorithm_version
+            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        )
+        .distinct(FirstPyramidHistoryDailyState.instrument_id)
+        .order_by(
+            FirstPyramidHistoryDailyState.instrument_id.asc(),
+            FirstPyramidHistoryDailyState.trade_date.desc(),
+        )
+    )
+    previous_by_instrument = {
+        state.instrument_id: state.state_payload
+        for state in (await session.execute(previous_stmt)).scalars()
+    }
+
+    # 3. 当日 + 前一交易日 bars（仅算 return_1d / amount / volume，不读 400 日）
+    bar_stmt = (
+        select(BarDaily)
+        .where(
+            BarDaily.instrument_id.in_(ids),
+            BarDaily.trade_date <= trade_date,
+            BarDaily.trade_date >= trade_date - timedelta(days=10),
+        )
+        .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.desc())
+    )
+    bars_by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
+    for bar in (await session.execute(bar_stmt)).scalars():
+        bars_by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
+
+    # 4. instrument 身份（symbol/name）
+    identity_stmt = select(Instrument).where(Instrument.id.in_(ids))
+    identities = {
+        item.id: item for item in (await session.execute(identity_stmt)).scalars()
+    }
+
+    facts_by_instrument: dict[uuid.UUID, dict[str, Any]] = {}
+    for instrument_id, current_state in current_by_instrument.items():
+        identity = identities.get(instrument_id)
+        if identity is None:
+            continue
+        bar_list = bars_by_instrument.get(instrument_id) or []
+        # 当日 bar = 最新 trade_date==trade_date；prev = 前一条
+        ordered_desc = sorted(
+            (b for b in bar_list if b.trade_date <= trade_date),
+            key=lambda b: b.trade_date, reverse=True,
+        )
+        current = ordered_desc[0] if ordered_desc else None
+        previous = ordered_desc[1] if len(ordered_desc) >= 2 else None
+        close = current.close if current else None
+        prev_close = previous.close if previous else None
+        return_1d = (
+            (close - prev_close) / prev_close * 100.0
+            if close is not None and prev_close is not None and abs(prev_close) > 1e-12
+            else None
+        )
+        flat = previous_state_to_flat(current_state.state_payload)
+        flat.update({
+            "review_return_1d": return_1d,
+            "review_amount": current.amount if current else None,
+            "review_volume": current.volume if current else None,
+            "review_previous_first_pyramid": previous_state_to_flat(
+                previous_by_instrument.get(instrument_id),
+            ),
+            "_instrument_id": str(instrument_id),
+            "_instrument_symbol": identity.symbol,
+            "_instrument_name": identity.name,
+            "_history_state_id": str(current_state.id),
+            "_history_input_hash": current_state.input_hash,
+        })
+        facts_by_instrument[instrument_id] = flat
+
+    return facts_by_instrument
+
+
 if __name__ == "__main__":
     print(f"LEVEL1_SCOPE_TYPES = {LEVEL1_SCOPE_TYPES}")
     print(f"LEVEL2_SCOPE_TYPES = {LEVEL2_SCOPE_TYPES}")
