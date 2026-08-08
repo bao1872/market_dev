@@ -5,17 +5,27 @@
 trading_calendar / board_membership / released dsa config）均为确定性合成（固定 seed
 + uuid5），确保两次运行幂等、结果可复现。
 
-[CHANGE-20260806-008] 六态 canonical 场景全部通过**真实服务**编排，不伪造 succeeded /
-published / coverage / First Pyramid。chip 真实链走 `compute_chip_consensus_snapshot` +
-`chip_consensus_run_lifecycle`（真实算法 + RunItem 生命周期），但**绕过
-`execute_after_close_chip_consensus` 顶层的 `refresh_15m_batch`（联网 pytdx）**——
-synthetic 15m bars 已由 Seed 直接注入验证库，`_fetch_chip_bars(skip_refresh=True)`
-已支持只读已有 bars。如实标注：chip 真实链**不含运行级 refresh**。
+[R1.4b / 职责边界] 六态 canonical 场景的职责是：
+
+    canonical DB facts → ProductReadinessService.collect_states → evaluate_closure
+    → 六态严格一对一。
+
+它**不再负责证明生产算法正确性**（Core kernels / DSA / Board sync / Chip / Auction /
+Board Aggregation / Review）。这些行为由独立 targeted PG 测试负责（例如
+test_pg_100_stock_real_compute_call_counts 证明 real core kernels）。
+
+因此允许 verification-only、schema-valid、deterministic canonical fixtures 作为
+collect_states read-model 的 DB 输入（见下方 *_ensure_*_state helpers）。这些 fixture：
+  - 只存在 scripts/verify / backend/tests 范围，不入 production service；
+  - 不改 production schema / 不加新表 / 不加新 run type / 不加新 readiness enum；
+  - 必须包含 collect_states 真正读取的 identity/lineage/status 字段，不得为让
+    expected closure 变绿而省略必读字段；
+  - 不等于 producer correctness evidence。
 
 六态 canonical 场景（closure 断言见 test_pg_seed_scenario_closures.py，与
 backend/tests/readiness_fixtures.py 共享唯一事实源）：
   pending_no_core            (2026-07-28) → pending（stock_core 未发布）
-  blocked_mandatory_failure  (2026-07-29) → blocked（board_facts 人为 failed，reason=EXTERNAL_GATE_UNSATISFIED）
+  blocked_mandatory_failure  (2026-07-29) → blocked（board_facts terminal unavailable）
   core_ready_waiting_mandatory (2026-07-30) → core_ready（stock_core 可消费，review 未发布）
   mandatory_ready_enhancing (2026-07-31) → mandatory_ready_enhancing（mandatory 全 ready，enhancement 未全终态）
   degraded_terminal_partial  (2026-08-03, 周一) → degraded_ready（mandatory 全消费，enhancement 终态但部分非 truly ready）
@@ -24,10 +34,15 @@ backend/tests/readiness_fixtures.py 共享唯一事实源）：
   注：原 2026-08-01/02 为周末，trading_calendar 不标记 OPEN，create_batch_run 会拒绝
   （非交易日）。两个 terminal 场景顺延到相邻交易日，保持同一语义与 closure 期望。
 
-[用户选项B / 约束5+6+7] 单一放大的 full_market universe：220 行业 + 320 概念 board +
-≥5,200 instruments + ≥65,000 合法 memberships，使 Board Facts 绝对门禁合法通过，
-fully_ready 真实可达；blocked 用人为 failed BoardFactsRun 构造（不依赖规模不足），
-禁止跨 universe 无声拼接。
+[R1.4b-P3] universe 规模：九节点 closure 全部读**相对计数**（各自 universe 内
+eligible==matched 等），无节点要求绝对 5200 scale。5200 是旧"真实 producer 方案"为满足
+Board sync 绝对门禁（MIN_RAW_ROWS>=5000）才需要。切换到 canonical fixtures 后，选择最小
+deterministic universe N 满足所有 denominator/COUNT/coverage 计算非零且合法（见
+`_CANONICAL_N` 及 P3 证据）。
+
+[R1.4b-P7] seed_twice 验证 canonical fixtures 重复装配的幂等性：第一次 fact vector 必须
+== 第二次 fact vector；fixture ID / natural key deterministic（uuid5），第二次不得新增
+run/publication/item 数量。
 
 新增资产（仅 synthetic）：220 行业 + 320 概念 MarketBoard + 全部 instruments 的成员关系；
 覆盖 2026-04-01..2026-08-31 的交易日历（scenario 日期均为交易日）。

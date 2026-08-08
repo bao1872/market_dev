@@ -373,27 +373,43 @@ def test_run_timeout_without_output_keeps_str_contract(monkeypatch) -> None:
 
 
 def test_parse_pytest_summary_all_passed() -> None:
-    """[R1.4a] 3 passed, 0 skipped, 0 failed → 解析为 PASS。"""
+    """[R1.4b-P0-A] "3 passed in 42.5s"（真实全 PASS 无 skipped/failed 子句）→ accept。
+
+    旧 parser 要求 summary 必须同时含 skipped/failed/error 才匹配，导致真实全 PASS
+    "3 passed in 42.5s" 被误判为不可解析而 false-red。此处验证修复后接受。
+    """
     import verify_attempt as va
 
     out = (
         "tests/test_pg_atomic_publication.py::test_a PASSED\n"
         "tests/test_pg_projection_lifecycle.py::test_b PASSED\n"
         "tests/test_pg_100_stock_call_counts.py::test_100 PASSED\n"
-        "===== 3 passed, 0 skipped, 0 failed in 42.5s =====\n"
+        "===== 3 passed in 42.5s =====\n"
     )
     counts = va._parse_pytest_summary(out)
     assert counts == {"passed": 3, "skipped": 0, "failed": 0, "errors": 0}
 
 
+def test_parse_pytest_summary_accepts_warning() -> None:
+    """[R1.4b-P0-B] "3 passed, 1 warning in 42.5s" → accept（warning 不影响 PASS）。"""
+    import verify_attempt as va
+
+    out = "===== 3 passed, 1 warning in 42.5s =====\n"
+    counts = va._parse_pytest_summary(out)
+    assert counts["passed"] == 3
+    assert counts["skipped"] == 0
+    assert counts["failed"] == 0
+    assert counts["errors"] == 0
+
+
 def test_parse_pytest_summary_rejects_skip() -> None:
-    """[R1.4a] 2 passed, 1 skipped → skipped>0，调用方必须 fail-closed 拒绝。"""
+    """[R1.4b-P0-C] "2 passed, 1 skipped in 1.5s" → skipped>0，调用方必须 fail-closed 拒绝。"""
     import verify_attempt as va
 
     out = (
         "tests/test_pg_atomic_publication.py::test_a PASSED\n"
         "tests/test_pg_100_stock_call_counts.py::test_100 SKIPPED\n"
-        "===== 2 passed, 1 skipped, 0 failed in 1.5s =====\n"
+        "===== 2 passed, 1 skipped in 1.5s =====\n"
     )
     counts = va._parse_pytest_summary(out)
     assert counts == {"passed": 2, "skipped": 1, "failed": 0, "errors": 0}
@@ -401,7 +417,7 @@ def test_parse_pytest_summary_rejects_skip() -> None:
 
 
 def test_parse_pytest_summary_rejects_missing_summary() -> None:
-    """[R1.4a] 无可解析 summary → 返回 None（fail-closed）。"""
+    """[R1.4b-P0-E] 无可解析 summary → 返回 None（fail-closed）。"""
     import verify_attempt as va
 
     assert va._parse_pytest_summary("") is None
@@ -409,11 +425,88 @@ def test_parse_pytest_summary_rejects_missing_summary() -> None:
 
 
 def test_parse_pytest_summary_counts_failed_and_error() -> None:
-    """[R1.4a] failed/errors>0 亦必须被识别（顺序可变）。"""
+    """[R1.4b-P0-D] failed/errors>0 亦必须被识别（顺序可变）。"""
     import verify_attempt as va
 
-    out = "===== 1 passed, 2 failed, 1 error in 5.0s =====\n"
+    out = "===== 1 passed, 2 failed in 5.0s =====\n"
     counts = va._parse_pytest_summary(out)
     assert counts["passed"] == 1
     assert counts["failed"] == 2
-    assert counts["errors"] == 1
+    assert counts["errors"] == 0
+
+    out2 = "===== 1 passed, 1 error in 5.0s =====\n"
+    counts2 = va._parse_pytest_summary(out2)
+    assert counts2["passed"] == 1
+    assert counts2["errors"] == 1
+
+
+class _FakeExporter:
+    def __init__(self):
+        self.gates = []
+        self.logs = []
+
+    def log(self, msg):
+        self.logs.append(msg)
+
+    def record_gate(self, name, ok, detail=None):
+        self.gates.append((name, ok, detail))
+
+
+def _make_pg_tests_attempt(monkeypatch, code, out):
+    """构造一个仅含 run_self_contained_pg_tests 所需属性的 VerifyAttempt 测试替身。
+
+    [R1.4b-P0] gate-level targeted test：不建完整 VerifyAttempt（避免依赖真实
+    runtime/evidence/plan），用 object.__new__ 绕过 __init__，注入最小属性，并
+    monkeypatch 模块级 _run 返回固定 pytest stdout。
+    """
+    import verify_attempt as va
+
+    att = object.__new__(va.VerifyAttempt)
+    exporter = _FakeExporter()
+    att.exporter = exporter
+    att.gate_base = ["docker", "exec", "panji-verify-python", "python3", "verify_exec.py"]
+    att.attempt_env_file = "/tmp/fake-attempt.env"
+    att.manifest = {"status": "running"}
+
+    class _Plan:
+        timeouts = {"tests": 1800}
+
+    att.plan = _Plan()
+
+    def _fake_run(_cmd, *, timeout=600, env=None):
+        return code, out, ""
+
+    monkeypatch.setattr(va, "_run", _fake_run)
+    return att, exporter
+
+
+def test_pg_gate_all_passed_records_true(monkeypatch) -> None:
+    """[R1.4b-P0] mock _run 返回真实 "3 passed in 42.5s" → record_gate(pg_tests, True)。"""
+    out = (
+        "tests/test_pg_atomic_publication.py::test_a PASSED\n"
+        "tests/test_pg_projection_lifecycle.py::test_b PASSED\n"
+        "tests/test_pg_100_stock_call_counts.py::test_100 PASSED\n"
+        "===== 3 passed in 42.5s =====\n"
+    )
+    att, exporter = _make_pg_tests_attempt(monkeypatch, 0, out)
+    att.run_self_contained_pg_tests()
+    assert exporter.gates[-1][0] == "pg_tests"
+    assert exporter.gates[-1][1] is True  # 全真实 passed → PASS
+
+
+def test_pg_gate_with_skip_records_false_and_raises(monkeypatch) -> None:
+    """[R1.4b-P0] mock _run 返回 "2 passed, 1 skipped in 1.5s" → record_gate(False) + raise。"""
+    out = (
+        "tests/test_pg_atomic_publication.py::test_a PASSED\n"
+        "tests/test_pg_100_stock_call_counts.py::test_100 SKIPPED\n"
+        "===== 2 passed, 1 skipped in 1.5s =====\n"
+    )
+    att, exporter = _make_pg_tests_attempt(monkeypatch, 0, out)
+    try:
+        att.run_self_contained_pg_tests()
+        raise AssertionError("应 fail-closed 抛 RuntimeError")
+    except RuntimeError:
+        pass
+    assert exporter.gates[-1][0] == "pg_tests"
+    assert exporter.gates[-1][1] is False  # SKIP 假绿被拒绝
+    assert "skipped" in exporter.gates[-1][2]

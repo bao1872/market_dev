@@ -154,9 +154,15 @@ def _extract_pytest_summary(stdout: str) -> str:
 
 
 def _parse_pytest_summary(stdout: str) -> dict[str, int] | None:
-    """[R1.4a] 从 pytest summary 行解析 passed/skipped/failed/error 计数。
+    """[R1.4a/R1.4b-P0] 从 pytest summary 行解析 passed/skipped/failed/error 计数。
 
-    输入形如 "3 passed, 2 skipped, 1 failed, 0 error in 12.34s"（顺序可变）。
+    必须支持真实 pytest summary 的多种形态（顺序可变，且不要求同时出现 skipped/failed/
+    error）：
+        "3 passed in 42.5s"
+        "3 passed, 1 warning in 42.5s"
+        "2 passed, 1 skipped in 1.5s"
+        "1 passed, 2 failed in 5.0s"
+        "1 passed, 1 error in 5.0s"
     返回 {"passed","skipped","failed","errors"}；解析失败返回 None（fail-closed）。
     """
     import re
@@ -165,7 +171,9 @@ def _parse_pytest_summary(stdout: str) -> dict[str, int] | None:
     summary_line = None
     for line in reversed(lines):
         s = line.strip()
-        if "passed" in s and " in " in s and ("skipped" in s or "failed" in s or "error" in s):
+        # summary 行形如 "<计数列表> in <时长>"，其中必须含 "passed"，末尾含 " in "。
+        # 不要求同时含 skipped/failed/error（"3 passed in 42.5s" 也是合法全 PASS 行）。
+        if "passed" in s and " in " in s:
             summary_line = s
             break
     if summary_line is None:
@@ -420,7 +428,9 @@ class VerifyAttempt:
             detail = "pg_tests 退出码 0 但无法解析 pytest summary（fail-closed，见 logs）"
             self.exporter.record_gate("pg_tests", False, detail=detail)
             raise RuntimeError(detail)
-        if counts["failed"] > 0 or counts["errors"] > 0 or counts["skipped"] > 0:
+        # [R1.4b-P0] 规则：passed > 0 且 skipped == 0 且 failed == 0 且 errors == 0
+        # 才允许 PASS。不要求 pytest 显式输出 "0 skipped / 0 failed"。
+        if counts["passed"] <= 0 or counts["failed"] > 0 or counts["errors"] > 0 or counts["skipped"] > 0:
             detail = (
                 f"pg_tests mandatory tests 未全部真实 PASS（fail-closed）："
                 f"{counts['passed']} passed, {counts['skipped']} skipped, "
