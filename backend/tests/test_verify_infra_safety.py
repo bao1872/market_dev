@@ -312,6 +312,23 @@ def test_cleanup_source_never_uses_volume_delete() -> None:
     assert "docker volume prune" not in source
 
 
+def test_seed_canonical_fixture_id_deterministic() -> None:
+    """[R1.4b-P2/P7] 验证 canonical fixture ID 是 deterministic uuid5（seed_twice 幂等前提）。
+
+    seed_v21_verify_data._cfixture 用 `uuid.uuid5(_NS, f"canonical/{scope}/{name}")` 生成
+    deterministic ID；同一 (scope, name) 两次必须一致（第二次 seed 不新增数量），不同
+    name 必须不同。此处按同一实现内联验证（PURE_UNIT 下 seed 模块因需 DATABASE_URL 无法导入）。
+    """
+    import uuid
+
+    ns = uuid.uuid5(uuid.NAMESPACE_DNS, "panji.verify.synthetic")
+    a1 = uuid.uuid5(ns, "canonical/core_run/2026-08-04")
+    a2 = uuid.uuid5(ns, "canonical/core_run/2026-08-04")
+    b = uuid.uuid5(ns, "canonical/core_run/2026-08-05")
+    assert a1 == a2  # 同一 scope+name → 同一 ID（幂等）
+    assert a1 != b  # 不同 name → 不同 ID（独立 lineage）
+
+
 def test_cleanup_never_destroys_reusable_runtime() -> None:
     """常驻容器（固定 project panji-verify + panji-verify-python）不得被 cleanup 删除。"""
     source = (_VERIFY_DIR / "cleanup_runner.py").read_text()

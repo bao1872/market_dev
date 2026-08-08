@@ -93,6 +93,7 @@ from app.domain_status import (
 )
 from app.models.factor_publication import (
     PUBLICATION_KIND_BOARD_FACTS,
+    PUBLICATION_KIND_MARKET_AGGREGATION,
     PUBLICATION_KIND_STOCK_CORE,
 )
 from app.models.market_review import MarketReviewRun
@@ -149,6 +150,10 @@ _NS = uuid.uuid5(uuid.NAMESPACE_DNS, "panji.verify.synthetic")
 N_INST = 100  # 历史兼容；bars 子集构造等仍用 N_INST
 # [用户选项B / 约束5+6] full_market universe：≥5,200 唯一可解析 A 股 synthetic instruments
 FM_N_INST = 5200
+# [R1.4b-P3] canonical fixture universe：九节点 ProductReadiness closure 全部读相对计数，
+# 无节点要求绝对 scale。N=2 仅用于 ProductReadiness canonical DB-mapping verification，
+# 不代表 production universe / producer quality threshold / board-sync minimum / algorithm scale。
+_CANONICAL_N = 2
 CAL_START = date(2026, 4, 1)
 CAL_END = date(2026, 8, 31)
 # [性能] full_market universe 下 instruments 放大到 5200，daily/60min bars 仅覆盖
@@ -1275,83 +1280,502 @@ async def _run_chip_real(
 # ---------------------------------------------------------------------------
 # 场景装配（六态 canonical；审查报告修正四个错位）
 # ---------------------------------------------------------------------------
+# [R1.4b-P2/P4/P5] Verification-local canonical fixture helpers
+# ---------------------------------------------------------------------------
+# 这些 helper 只建 ProductReadinessService.collect_states 真正读取的 schema-valid
+# canonical DB facts（经 raw SQL INSERT），不运行任何 production algorithm，不新建
+# production service / table / run type / readiness enum。字段严格从 collect_states
+# 各节点实际查询反推（禁止猜字段）。ID 全部 deterministic（uuid5），seed_twice 幂等。
+# 它们只证明"canonical DB facts → collect_states → closure"，不证明任何 producer 正确性。
+# ---------------------------------------------------------------------------
+
+
+def _cfixture(scope: str, name: str) -> uuid.UUID:
+    """deterministic canonical fixture ID（uuid5，避免第二次 seed 新增数量）。"""
+    return uuid.uuid5(_NS, f"canonical/{scope}/{name}")
+
+
+async def _ensure_strategy_version_canonical(db, version_id: uuid.UUID) -> None:
+    """建 released dsa_selector StrategyVersion（collect_states / core resolver 读取）。
+
+    StrategyVersion 必须 status='released' 且 manifest 含 parameters，否则
+    SqlAlchemyReleasedConfigResolver / strategy_version_id 解析 fail-closed。
+    """
+    await db.execute(
+        text(
+            "INSERT INTO strategy_definitions "
+            "(id, strategy_key, kind, display_name, environment) "
+            "VALUES (:id, 'dsa_selector', 'selector', 'DSA Selector', 'production') "
+            "ON CONFLICT (strategy_key) DO NOTHING"
+        )
+    )
+    def_id = (
+        await db.execute(
+            text("SELECT id FROM strategy_definitions WHERE strategy_key='dsa_selector'")
+        )
+    ).scalar_one()
+    await db.execute(
+        text(
+            "INSERT INTO strategy_versions "
+            "(id, strategy_definition_id, version, status, manifest, build_hash, released_at) "
+            "VALUES (:id, :did, 'canonical-v1', 'released', "
+            "CAST(:manifest AS jsonb), 'canonical-build', now()) "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {
+            "id": str(version_id),
+            "did": str(def_id),
+            "manifest": {
+                "selector": "dsa_selector",
+                "parameters": [
+                    {"key": "min_score", "default": 0.6, "type": "float"},
+                ],
+            },
+        },
+    )
+    await db.flush()
+
+
+async def _ensure_canonical_universe(db, n: int) -> list[uuid.UUID]:
+    """复用顶层 synthetic instruments 的前 n 只作为 canonical universe。
+
+    [R1.4b-P3] 不新建 instruments（避免与顶层 FM_N_INST=5200 标的的 symbol 唯一约束冲突，
+    且避免 daily_facts eligible/ready 口径漂移——顶层 _gen_synthetic_instruments_bars 已为
+    全部 5200 标的生成覆盖各 scenario trade_date 的 daily bars，daily_facts 因此 READY）。
+    取 `_inst_uuid(i)`（i in [0, n)），ID deterministic，seed_twice 幂等。
+    """
+    return [_inst_uuid(i) for i in range(n)]
+
+
+async def _ensure_daily_bars_canonical(db, instrument_ids, td: date, n_days: int = 65) -> None:
+    """为 canonical universe 补 daily bars（含 adj_factor=1.0，覆盖到 td 当日）。
+
+    daily_facts 读 bars_daily 覆盖率：需 eligible>0 且全部 stock 当日有 bar 且 adj_factor
+    合法（非空且>0）才 READY/fresh。65 根 >= 60（feature_snapshot_service insufficient 阈值，
+    但 canonical 不需要 core，仅 daily_facts 读覆盖率）。顶层已为 scenario 窗口生成 bars，
+    这里为前 _CANONICAL_N 只补一段确定性历史，保证各 scenario trade_date 当日必有 bar。
+    """
+    days: list[date] = []
+    d = td
+    while len(days) < n_days:
+        if d.weekday() < 5:
+            days.append(d)
+        d = d - timedelta(days=1)
+    days.reverse()
+    for i, inst_id in enumerate(instrument_ids):
+        base = 10.0 + (i % 50)
+        for idx, day in enumerate(days):
+            close = base + (idx % 90) / 90.0
+            await db.execute(
+                text(
+                    "INSERT INTO bars_daily "
+                    "(instrument_id, trade_date, open, high, low, close, volume, amount, adj_factor) "
+                    "VALUES (:iid, :td, :o, :h, :l, :c, :v, :a, 1.0) "
+                    "ON CONFLICT (instrument_id, trade_date) DO NOTHING"
+                ),
+                {
+                    "iid": str(inst_id), "td": day, "o": close - 0.1, "h": close + 0.2,
+                    "l": close - 0.2, "c": close, "v": 10000 + idx, "a": (10000 + idx) * close,
+                },
+            )
+    await db.flush()
+
+
+async def _ensure_publication(
+    db, kind: str, td: date, data_run_id: uuid.UUID, version: str = "canonical-v1",
+    coverage: float = 1.0,
+) -> None:
+    """建 factor_publications 指针（collect_states _publication_readiness 读取）。
+
+    scope_type='market', scope_key='market', superseded_by=NULL（当前有效）。
+    """
+    pub_id = _cfixture("publication", f"{kind}/{td}")
+    await db.execute(
+        text(
+            "INSERT INTO factor_publications "
+            "(id, scope_type, scope_key, trade_date, publication_kind, algorithm_version, "
+            "data_run_id, coverage_ratio, published_at, metadata_json) "
+            "VALUES (:id, 'market', 'market', :td, :kind, :ver, :data_run_id, :cov, now(), '{}') "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {
+            "id": str(pub_id), "td": td, "kind": kind, "ver": version,
+            "data_run_id": str(data_run_id), "cov": coverage,
+        },
+    )
+    await db.flush()
+
+
+async def _ensure_stock_core_state(db, td: date, instrument_ids) -> tuple[uuid.UUID, uuid.UUID]:
+    """stock_core canonical：StockFeatureSnapshotRun + N snapshots + FactorPublication(stock_core)。
+
+    _stock_core_state 读 publication pointer (data_run_id) + _count_stock_snapshots
+    (StockFeatureSnapshot.source_run_id==pointer, trade_date==td) 作为 eligible。
+    """
+    run_id = _cfixture("core_run", f"{td}")
+    version_id = _cfixture("strategy_version", "dsa_selector")
+    await _ensure_strategy_version_canonical(db, version_id)
+    await db.execute(
+        text(
+            "INSERT INTO stock_feature_snapshot_runs "
+            "(id, trade_date, run_type, status, expected_count, snapshot_count, "
+            "failed_count, skipped_count, failure_rate, started_at, finished_at) "
+            "VALUES (:id, :td, 'after_close', 'succeeded', :n, :n, 0, 0, 0.0, now(), now()) "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {"id": str(run_id), "td": td, "n": len(instrument_ids)},
+    )
+    for i, inst_id in enumerate(instrument_ids):
+        snap_id = _cfixture("core_snapshot", f"{td}/{inst_id}")
+        await db.execute(
+            text(
+                "INSERT INTO stock_feature_snapshots "
+                "(id, instrument_id, trade_date, source_run_id, status, primary_timeframe, "
+                "secondary_timeframe, adj, schema_version, structural_payload, "
+                "temporal_payload, summary_payload) "
+                "VALUES (:id, :iid, :td, :run_id, 'succeeded', '1d', '15m', 'qfq', 1, "
+                "CAST(:struct AS jsonb), CAST(:temporal AS jsonb), CAST(:summary AS jsonb)) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {
+                "id": str(snap_id), "iid": str(inst_id), "td": td, "run_id": str(run_id),
+                "struct": {"canonical": True},
+                "temporal": {"canonical": True},
+                "summary": {"index": i, "canonical": True},
+            },
+        )
+    await _ensure_publication(db, PUBLICATION_KIND_STOCK_CORE, td, run_id)
+    await db.flush()
+    return run_id, version_id
+
+
+async def _ensure_board_facts_state(db, td: date, run_status: str = "succeeded") -> None:
+    """board_facts canonical：BoardFactsRun（succeeded/failed）+ 可选 FactorPublication(board_facts)。
+
+    _board_facts_state 读：publication pointer（无则回退 latest run status）。
+    run_status='failed'（terminal unavailable）→ blocked；'succeeded' + publication → READY/fresh。
+    """
+    run_id = _cfixture("board_facts_run", f"{td}")
+    await db.execute(
+        text(
+            "INSERT INTO board_facts_runs "
+            "(id, trade_date, run_mode, source, status, readiness, raw_rows, "
+            "resolved_count, concept_count, membership_count, started_at, finished_at) "
+            "VALUES (:id, :td, 'scheduled_current', 'pywencai', :status, :readiness, "
+            ":n, :n, :n, :n, now(), now()) ON CONFLICT (id) DO NOTHING"
+        ),
+        {
+            "id": str(run_id), "td": td, "status": run_status,
+            "readiness": "unavailable" if run_status == "failed" else "ready",
+            "n": _CANONICAL_N,
+        },
+    )
+    if run_status == "succeeded":
+        await _ensure_publication(db, PUBLICATION_KIND_BOARD_FACTS, td, run_id)
+    await db.flush()
+
+
+async def _ensure_board_aggregation_state(db, td: date, core_run_id: uuid.UUID) -> uuid.UUID:
+    """board_aggregation canonical：BoardAnalysisRun(source_core_run_id==core) + publication。
+
+    _board_aggregation_state 读 market_aggregation publication pointer(data_run_id) +
+    BoardAnalysisRun.source_core_run_id == current stock_core pointer。
+    """
+    agg_run_id = _cfixture("board_agg_run", f"{td}")
+    await db.execute(
+        text(
+            "INSERT INTO board_analysis_runs "
+            "(id, trade_date, source_core_run_id, taxonomy_version, "
+            "taxonomy_compatibility_key, membership_version, algorithm_version, "
+            "expected_count, succeeded_count, failed_count, coverage_ratio, status, blockers, "
+            "started_at, published_at) "
+            "VALUES (:id, :td, :core_run_id, 'canonical-taxonomy', 'canonical-key', "
+            "'canonical-membership', 'canonical-v1', :n, :n, 0, 1.0, 'succeeded', '[]', "
+            "now(), now()) ON CONFLICT (id) DO NOTHING"
+        ),
+        {"id": str(agg_run_id), "td": td, "core_run_id": str(core_run_id), "n": _CANONICAL_N},
+    )
+    await _ensure_publication(db, PUBLICATION_KIND_MARKET_AGGREGATION, td, agg_run_id)
+    await db.flush()
+    return agg_run_id
+
+
+async def _ensure_review_state(db, td: date, core_run_id: uuid.UUID, agg_run_id: uuid.UUID) -> None:
+    """review canonical：MarketReviewRun(source_core==core, source_board==agg) + publication。
+
+    _review_state 读 market_review publication pointer(data_run_id) + MarketReviewRun 的
+    source_core_run_id / source_board_run_id 与当前 pointer 对齐。
+    """
+    review_run_id = _cfixture("review_run", f"{td}")
+    await db.execute(
+        text(
+            "INSERT INTO market_review_runs "
+            "(id, trade_date, source_core_run_id, source_board_run_id, degraded_reasons, "
+            "algorithm_version, filter_version, baseline_window, status, "
+            "expected_scope_count, succeeded_scope_count, failed_scope_count, signal_count, "
+            "coverage_ratio, industry_ratio, started_at, finished_at) "
+            "VALUES (:id, :td, :core_run_id, :board_run_id, '[]', "
+            "'canonical-review-v1', 'canonical-filters-v1', 120, 'published', "
+            ":n, :n, 0, 0, 1.0, 1.0, now(), now()) ON CONFLICT (id) DO NOTHING"
+        ),
+        {
+            "id": str(review_run_id), "td": td,
+            "core_run_id": str(core_run_id), "board_run_id": str(agg_run_id),
+            "n": _CANONICAL_N,
+        },
+    )
+    await _ensure_publication(db, "market_review", td, review_run_id)
+    await db.flush()
+
+
+async def _ensure_dsa_projection_state(
+    db, td: date, core_run_id: uuid.UUID, version_id: uuid.UUID, instrument_ids,
+    run_status: str = "published",
+) -> None:
+    """dsa_projection canonical：StrategyRun + N items + N results（matched==eligible）。
+
+    _count_dsa_projections 读 StrategyRun(input_overrides 含 strategy_key/source_core_run_id/
+    requirement='required_compatibility', total_instruments, status) + strategy_run_items
+    (run_id, instrument_id, status='succeeded', result_id) + strategy_results
+    (id, run_id, trade_date, strategy_version_id 与 run 精确一致)。
+    """
+    dsa_run_id = _cfixture("dsa_run", f"{td}/{core_run_id}")
+    n = len(instrument_ids)
+    await db.execute(
+        text(
+            "INSERT INTO strategy_runs "
+            "(id, strategy_version_id, run_type, trade_date, status, input_overrides, "
+            "idempotency_key, total_instruments, succeeded_count, attempt_no, started_at, finished_at) "
+            "VALUES (:id, :version_id, 'scheduled', :td, :status, "
+            "CAST(:overrides AS jsonb), :idemp_key, :n, :n, 1, now(), now()) "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {
+            "id": str(dsa_run_id), "version_id": str(version_id), "td": td,
+            "status": run_status,
+            "overrides": {
+                "strategy_key": "dsa_selector",
+                "source_core_run_id": str(core_run_id),
+                "requirement": "required_compatibility",
+            },
+            "idemp_key": f"canonical-dsa-{td}-{core_run_id}",
+            "n": n,
+        },
+    )
+    for i, inst_id in enumerate(instrument_ids):
+        result_id = _cfixture("dsa_result", f"{td}/{core_run_id}/{inst_id}")
+        await db.execute(
+            text(
+                "INSERT INTO strategy_results "
+                "(id, run_id, strategy_version_id, instrument_id, trade_date, payload) "
+                "VALUES (:id, :run_id, :version_id, :iid, :td, CAST(:payload AS jsonb)) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {
+                "id": str(result_id), "run_id": str(dsa_run_id),
+                "version_id": str(version_id), "iid": str(inst_id), "td": td,
+                "payload": {"score": 0.7},
+            },
+        )
+        item_id = _cfixture("dsa_item", f"{td}/{core_run_id}/{inst_id}")
+        await db.execute(
+            text(
+                "INSERT INTO strategy_run_items "
+                "(id, run_id, instrument_id, status, attempt_count, result_id, started_at, finished_at) "
+                "VALUES (:id, :run_id, :iid, 'succeeded', 1, :result_id, now(), now()) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {
+                "id": str(item_id), "run_id": str(dsa_run_id), "iid": str(inst_id),
+                "result_id": str(result_id),
+            },
+        )
+    await db.flush()
+
+
+async def _ensure_chip_state(db, td: date, chip_status: str = "succeeded") -> None:
+    """chip canonical：SchedulerJobRun(after_close_chip_consensus, metadata.chip_status)。
+
+    _chip_state 读 SchedulerJobRun(job_name='after_close_chip_consensus',
+    business_date==td) 的 metadata_json.chip_status / total_count / succeeded_count。
+    chip_status='succeeded' → READY/fresh；'partial' → DEGRADED；'failed' → UNAVAILABLE。
+    """
+    job_id = _cfixture("chip_job", f"{td}")
+    status = "succeeded" if chip_status != "failed" else "failed"
+    meta = json.dumps({
+        "chip_status": chip_status,
+        "total_count": _CANONICAL_N,
+        "succeeded_count": _CANONICAL_N if chip_status == "succeeded" else 0,
+    })
+    await db.execute(
+        text(
+            "INSERT INTO scheduler_job_runs "
+            "(id, job_name, business_date, status, metadata_json, created_at) "
+            "VALUES (:id, 'after_close_chip_consensus', :bd, :status, :meta, now()) "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {"id": str(job_id), "bd": td.isoformat(), "status": status, "meta": meta},
+    )
+    await db.flush()
+
+
+async def _ensure_state_events_state(db, td: date, core_run_id: uuid.UUID, instrument_ids) -> None:
+    """state_events canonical：N StockStateEvent 归属当前 core run。
+
+    _count_state_events 读 StockStateEvent(current_as_of==td, source_run_id==core) 的
+    event_type 计数。需 eligible(universe)=N 且 matched=N 才 READY/fresh。
+    symbol 由 instruments 表反查（事件行含 symbol 冗余 NOT NULL 列）。
+    """
+    sym_rows = (await db.execute(text(
+        "SELECT id, symbol FROM instruments WHERE id = ANY(:ids)"
+    ), {"ids": [str(i) for i in instrument_ids]})).all()
+    symbol_by_id = {str(r[0]): r[1] for r in sym_rows}
+    for inst_id in instrument_ids:
+        ev_id = _cfixture("state_event", f"{td}/{inst_id}")
+        symbol = symbol_by_id.get(str(inst_id), str(inst_id))
+        await db.execute(
+            text(
+                "INSERT INTO stock_state_events "
+                "(id, instrument_id, symbol, source_run_id, algorithm_version, "
+                "occurred_at, current_as_of, event_type, title, description, idempotency_key) "
+                "VALUES (:id, :iid, :symbol, :core_run_id, 'canonical-v1', now(), :td, "
+                "'state_transition', 'canonical', 'canonical event', :idemp_key) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {
+                "id": str(ev_id), "iid": str(inst_id), "symbol": symbol,
+                "core_run_id": str(core_run_id), "td": td,
+                "idemp_key": f"{symbol}:{core_run_id}:canonical-v1",
+            },
+        )
+    await db.flush()
+
+
+async def _ensure_auction_state(db, td: date, core_run_id: uuid.UUID | None = None,
+                                mode: str = "composite") -> None:
+    """auction_anchor canonical：AuctionAnchorSnapshot + AuctionAnchorPublication。
+
+    _auction_state 读最新 AuctionAnchorPublication(superseded_by IS NULL)，经其
+    snapshot_id 联查 AuctionAnchorSnapshot.status 推导产品 mode：succeeded→composite、
+    partial→hybrid、structure_only→structure_only、failed→None。故 mode 映射到
+    snapshot.status（composite→succeeded / hybrid→partial / structure_only→structure_only）。
+    publication.source_core_run_id 须与当前 stock_core pointer 一致（归属校验）。
+    """
+    pub_id = _cfixture("auction_pub", f"{td}")
+    snapshot_id = _cfixture("auction_snap", f"{td}")
+    snap_status = {"composite": "succeeded", "hybrid": "partial",
+                   "structure_only": "structure_only"}.get(mode, "succeeded")
+    if mode == "composite":
+        composite, chip, structure = _CANONICAL_N, 0, 0
+    elif mode == "hybrid":
+        composite, chip, structure = 0, _CANONICAL_N, 0
+    else:  # structure_only
+        composite, chip, structure = 0, 0, _CANONICAL_N
+    await db.execute(
+        text(
+            "INSERT INTO auction_anchor_snapshots "
+            "(id, trade_date, source_core_run_id, algorithm_version, "
+            "price_adjustment_version, status, eligible_count, ready_count, "
+            "coverage_ratio, missing_count, missing_reasons, structure_anchor_count, "
+            "chip_anchor_count, composite_anchor_count) "
+            "VALUES (:id, :td, :core_run_id, 'canonical-v1', 'canonical-price', "
+            ":status, :n, :n, 1.0, 0, '{}', :structure, :chip, :composite) "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {
+            "id": str(snapshot_id), "td": td,
+            "core_run_id": str(core_run_id) if core_run_id else str(uuid.uuid4()),
+            "status": snap_status, "n": _CANONICAL_N,
+            "structure": structure, "chip": chip, "composite": composite,
+        },
+    )
+    await db.execute(
+        text(
+            "INSERT INTO auction_anchor_publications "
+            "(id, trade_date, snapshot_id, algorithm_version, source_core_run_id, "
+            "coverage_ratio, superseded_by, published_at) "
+            "VALUES (:id, :td, :snapshot_id, 'canonical-v1', :core_run_id, 1.0, NULL, now()) "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {
+            "id": str(pub_id), "td": td, "snapshot_id": str(snapshot_id),
+            "core_run_id": str(core_run_id) if core_run_id else str(uuid.uuid4()),
+        },
+    )
+    await db.flush()
+
+
+# ---------------------------------------------------------------------------
 async def _seed_scenario(verify_conn, scenario: str) -> None:
     td = _SCENARIO_TRADE_DATES[scenario]
-    # 所有场景共享：instruments/bars/calendar/board/config（一次性生成，幂等）
-    # 由 seed_all 顶层生成，这里只做场景专属装配。
-    # producer 顺序（真实服务依赖方向）：
-    #   core → projection → board(publication) → chip → finish core run → publish core
-    #   → auction → board_aggregation(publication) → review(create→compute→publish)
-    # 约束5：同一场景内部 Core/Board/Aggregation/Review 必须使用同一 universe，禁止跨 universe 拼接。
-    # [R1.1b] daily_facts 不再由 history_cross_section producer 装配——target SHA 的
-    # ProductReadiness._daily_facts_state 直接以 BarsCoverageService.compute_daily_facts_detail
-    # （bars_daily 真实覆盖率）为 SSOT，所有场景统一可用，无需独立 daily_facts seed 步骤。
-    if scenario == "pending_no_core":
-        # [R1.4 Part 3] 不再运行 5200 core（为证明"无 core"先算 5200 core 逻辑矛盾）。
-        # pending 判定（evaluate_closure 分支2）只看 stock_core 是否可消费：只要
-        # 本场景不发布 stock_core publication 即 NO_PUBLICATION → pending。
-        # daily_facts 由顶层 _gen_synthetic_instruments_bars 的 bars 覆盖率驱动（READY），
-        # 无需 core 参与。
-        pass
-    elif scenario == "blocked_mandatory_failure":
-        # [R1.4 Part 3] 移除与 blocked 判定无关的 core/projection/chip/auction/
-        # aggregation/review 链。evaluate_closure 的 blocked 分支（首个 terminal+unavailable
-        # mandatory）在 pending 分支之前判定，只看第一个 unavailable mandatory。
-        # 仅需：daily_facts ready（bars 覆盖率，顶层已建）+ 真实 board_facts 终态失败。
-        await _seed_blocked_board_failure(td)
-    elif scenario == "core_ready_waiting_mandatory":
-        # stock_core 可消费，但 review 未发布（mandatory 未完成）→ closure=core_ready
-        core_run_id = await _add_instruments_prereq(td)
-        await _add_projection_selector(td, core_run_id)
-        await _add_board_prereq(td)
-        await _run_chip_real(td, core_run_id=core_run_id)
-        await _finish_core_run(td, core_run_id)
-        await _add_full_publication(td, core_run_id)
-        await _add_auction_prereq(td, mode="composite")
-        await _publish_board_aggregation(td)
-        # 故意不发布 review → core_ready
-    elif scenario == "mandatory_ready_enhancing":
-        # mandatory 全部 ready（含已发布 stock_core），enhancement 部分未终态
-        # → closure=mandatory_ready_enhancing
-        core_run_id = await _add_instruments_prereq(td)
-        await _add_projection_selector(td, core_run_id)
-        await _add_board_prereq(td)
-        await _run_chip_real(td, core_run_id=core_run_id)
-        await _finish_core_run(td, core_run_id)
-        await _add_full_publication(td, core_run_id)
-        await _add_auction_prereq(td, mode="composite")
-        agg_run_id = await _publish_board_aggregation(td)
-        await _run_and_publish_review(td, core_run_id, agg_run_id)
-        # enhancement（chip/auction）已完成；dsa_projection/state_events 留待异步增强未终态
-    elif scenario == "degraded_terminal_partial":
-        # mandatory 全部可消费；enhancement 全部终态但部分非 truly ready
-        # （chip partial + auction hybrid）→ closure=degraded_ready
-        core_run_id = await _add_instruments_prereq(td)
-        await _add_projection_selector(td, core_run_id)
-        await _add_board_prereq(td)
-        # [Full-market Universe Alignment] chip 面对完整 5200 core universe（不传 subset）。
-        # 通过 15m 数据的时间演进自然形成 partial：前 30% cohort(20 天 ext) 08-03 15m<500
-        # → skipped，后 70% succeeded → succeeded(3640)<total(5200) → chip partial → auction hybrid。
-        await _run_chip_real(td, core_run_id=core_run_id)  # 完整 5200 universe，自然 partial
-        await _finish_core_run(td, core_run_id)
-        await _add_full_publication(td, core_run_id)
-        await _add_auction_prereq(td, mode="hybrid")  # 非 composite → 非 fully ready
-        agg_run_id = await _publish_board_aggregation(td)
-        await _run_and_publish_review(td, core_run_id, agg_run_id)
-    elif scenario == "fully_ready_all_fresh":
-        # mandatory 全 fresh + enhancement 全 truly ready + auction composite
-        # → closure=fully_ready（约束6：必须真实达到）
-        core_run_id = await _add_instruments_prereq(td)
-        await _add_projection_selector(td, core_run_id)
-        await _add_board_prereq(td)  # full_market universe 下门禁合法通过
-        await _run_chip_real(td, core_run_id=core_run_id)
-        await _finish_core_run(td, core_run_id)
-        await _add_full_publication(td, core_run_id)
-        await _add_auction_prereq(td, mode="composite")
-        agg_run_id = await _publish_board_aggregation(td)
-        await _run_and_publish_review(td, core_run_id, agg_run_id)
-    else:
-        raise ValueError(f"未知场景: {scenario}（合法值：{sorted(_SCENARIO_TRADE_DATES)}）")
+    # [R1.4b-P2/P4/P5] 六态场景只装配 canonical DB facts（见上方 *_ensure_*_state helpers），
+    # 不再运行任何 production algorithm（core/DSA/Chip/Auction/BoardAggregation/Review）。
+    # 每个 trade_date 独立，run_id/publication 全 deterministic（uuid5），seed_twice 幂等。
+    # daily_facts 由顶层 bars 覆盖率驱动（_daily_facts_state → BarsCoverageService），
+    # 所有场景需先建 canonical universe + daily bars 使 daily_facts READY。
+    async with AsyncSessionLocal() as db:
+        universe = await _ensure_canonical_universe(db, _CANONICAL_N)
+        await _ensure_daily_bars_canonical(db, universe, td)
+        await db.commit()
+
+        if scenario == "pending_no_core":
+            # daily_facts ready + 无 stock_core publication → pending
+            pass
+        elif scenario == "blocked_mandatory_failure":
+            # daily_facts ready + board_facts terminal unavailable → blocked
+            await _ensure_board_facts_state(db, td, run_status="failed")
+            await db.commit()
+        elif scenario == "core_ready_waiting_mandatory":
+            # stock_core ready/consumable + 至少一个后续 mandatory 不 ready（review 不发布）
+            # → core_ready
+            core_run_id, version_id = await _ensure_stock_core_state(db, td, universe)
+            await _ensure_board_facts_state(db, td, run_status="succeeded")
+            await _ensure_dsa_projection_state(
+                db, td, core_run_id, version_id, universe
+            )
+            await _ensure_chip_state(db, td, chip_status="succeeded")
+            await _ensure_state_events_state(db, td, core_run_id, universe)
+            await _ensure_auction_state(db, td, core_run_id, mode="composite")
+            # 故意不发布 review / board_aggregation → 至少一个 mandatory 不 ready
+            await db.commit()
+        elif scenario == "mandatory_ready_enhancing":
+            # 所有 mandatory ready + 至少一个 enhancement non-terminal/pending
+            # （不建 chip job → chip PENDING 非终态）→ mandatory_ready_enhancing
+            core_run_id, version_id = await _ensure_stock_core_state(db, td, universe)
+            await _ensure_board_facts_state(db, td, run_status="succeeded")
+            agg_run_id = await _ensure_board_aggregation_state(db, td, core_run_id)
+            await _ensure_review_state(db, td, core_run_id, agg_run_id)
+            await _ensure_dsa_projection_state(db, td, core_run_id, version_id, universe)
+            await _ensure_state_events_state(db, td, core_run_id, universe)
+            await _ensure_auction_state(db, td, core_run_id, mode="composite")
+            # chip 不建 job → CHIP_PENDING（enhancement non-terminal）
+            await db.commit()
+        elif scenario == "degraded_terminal_partial":
+            # mandatory 全 consumable + enhancement 全 terminal 但至少一个非 truly-ready
+            # （chip partial）→ degraded_ready
+            core_run_id, version_id = await _ensure_stock_core_state(db, td, universe)
+            await _ensure_board_facts_state(db, td, run_status="succeeded")
+            agg_run_id = await _ensure_board_aggregation_state(db, td, core_run_id)
+            await _ensure_review_state(db, td, core_run_id, agg_run_id)
+            await _ensure_dsa_projection_state(db, td, core_run_id, version_id, universe)
+            await _ensure_chip_state(db, td, chip_status="partial")  # 非 truly-ready
+            await _ensure_state_events_state(db, td, core_run_id, universe)
+            await _ensure_auction_state(db, td, core_run_id, mode="hybrid")
+            await db.commit()
+        elif scenario == "fully_ready_all_fresh":
+            # mandatory 全 READY/fresh + required compatibility ready + enhancement 全
+            # truly-ready + auction composite → fully_ready
+            core_run_id, version_id = await _ensure_stock_core_state(db, td, universe)
+            await _ensure_board_facts_state(db, td, run_status="succeeded")
+            agg_run_id = await _ensure_board_aggregation_state(db, td, core_run_id)
+            await _ensure_review_state(db, td, core_run_id, agg_run_id)
+            await _ensure_dsa_projection_state(db, td, core_run_id, version_id, universe)
+            await _ensure_chip_state(db, td, chip_status="succeeded")
+            await _ensure_state_events_state(db, td, core_run_id, universe)
+            await _ensure_auction_state(db, td, core_run_id, mode="composite")
+            await db.commit()
+        else:
+            raise ValueError(f"未知场景: {scenario}（合法值：{sorted(_SCENARIO_TRADE_DATES)}）")
 
 
 # ---------------------------------------------------------------------------
@@ -1502,24 +1926,14 @@ async def seed_all(verify_conn, *, strict: bool = True) -> None:
     print("[seed] released_dsa_config start")
     await _gen_synthetic_released_dsa_config(verify_conn)
     print("[seed] released_dsa_config end")
-    completed_dates = set((await verify_conn.execute(text(
-        "SELECT DISTINCT trade_date FROM stock_feature_snapshot_runs "
-        "WHERE trade_date = ANY(:dates)"
-    ), {"dates": list(_SCENARIO_TRADE_DATES.values())})).scalars().all())
-    # [R1.4 Part 3] pending_no_core 与 blocked_mandatory_failure 场景不产生 core run
-    # （pending 无 stock_core；blocked 只构造 board_facts 终态失败），幂等判定只看
-    # 会产生 core run 的场景（其余四态）。
-    _NO_CORE_SCENARIOS = {"pending_no_core", "blocked_mandatory_failure"}
-    core_bearing_dates = {
-        td for sc, td in _SCENARIO_TRADE_DATES.items() if sc not in _NO_CORE_SCENARIOS
-    }
-    if core_bearing_dates.issubset(completed_dates):
-        print("[seed] all scenario core runs already exist; validating closures only")
-    else:
-        for sc in _SCENARIO_TRADE_DATES:
-            print(f"[seed] scenario {sc} start")
-            await _seed_scenario(verify_conn, sc)
-            print(f"[seed] scenario {sc} end")
+    # [R1.4b-P7] 移除旧"core run 已存在 → 跳过整个 scenario assembly" shortcut。
+    # canonical fixtures 变轻后，每次 seed（含 seed_twice 两次）都真正重新调用
+    # deterministic *_ensure_*_state helpers；fact_vector(pass1)==fact_vector(pass2)。
+    # fixture ID / natural key 全 deterministic（uuid5），第二次不会新增 run/publication/item。
+    for sc in _SCENARIO_TRADE_DATES:
+        print(f"[seed] scenario {sc} start")
+        await _seed_scenario(verify_conn, sc)
+        print(f"[seed] scenario {sc} end")
     print("[seed] verify_closures start")
     await _verify_closures(strict=strict)
     print("[seed] verify_closures end")
