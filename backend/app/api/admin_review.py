@@ -258,6 +258,11 @@ async def create_review_run(
                 "run_id=%s status=%s result=%s",
                 run.id, run.status, compute_result,
             )
+    except HTTPException:
+        # 已构造好的 HTTP 异常（如 cancelled → 409）必须原样向上传递，
+        # 不得被下方通用 except Exception 二次包装成 500。
+        await db.rollback()
+        raise
     except ReviewOrchestratorError as exc:
         await db.rollback()
         raise HTTPException(

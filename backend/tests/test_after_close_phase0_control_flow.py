@@ -237,3 +237,97 @@ async def test_skip_publish_pointer_current_recovers_but_no_normal_publish_steps
         ), "skip_publish 不得推进 publishing 检查点"
     finally:
         _stop_patches(patchers)
+
+
+# ---------------------------------------------------------------------------
+# [P1-2 2026-08-07] post-core 依赖顺序收口（V2.1 PC-8）
+# Chip / State Events 不得等待 Board Aggregation：
+#   stock_core published
+#     ├─ state events
+#     ├─ enqueue chip
+#     ├─ auction anchor
+#     └─ DSA projection
+#           ↓
+#        board aggregation
+#           ↓
+#         review
+# ---------------------------------------------------------------------------
+def _install_patches_with_order(job_run, *, resolve_side_effect):
+    """与 _install_patches 相同，但记录各 step 的真实调用顺序到 return 元组。"""
+    record: list[str] = []
+    spies, patchers = _install_patches(job_run, resolve_side_effect=resolve_side_effect)
+
+    def _wrap(name, spy):
+        original = spy.side_effect
+
+        async def _side_effect(*args, **kwargs):
+            record.append(name)
+            if callable(original):
+                return await original(*args, **kwargs)
+            return spy.return_value
+
+        spy.side_effect = _side_effect
+
+    _wrap("auction", spies["auction"])
+    _wrap("aggregation", spies["aggregation"])
+    _wrap("events", spies["events"])
+    _wrap("chip", spies["chip"])
+    return spies, patchers, record
+
+
+async def test_p1_2_chip_enqueue_before_board_aggregation():
+    """normal stock_core publication：chip 入队必须发生在 board aggregation 之前。"""
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=uuid.uuid4())
+    spies, patchers, record = _install_patches_with_order(
+        job_run, resolve_side_effect=_published_resolution)
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=False)
+        assert spies["chip"].called, "normal publish 应入队 chip"
+        assert spies["aggregation"].called, "normal publish 应调用 board aggregation"
+        assert record.index("chip") < record.index("aggregation"), (
+            "chip 入队必须早于 board aggregation（PC-8：chip 不得等待 aggregation）"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+async def test_p1_2_state_events_before_board_aggregation():
+    """normal stock_core publication：state events 必须发生在 board aggregation 之前。"""
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=uuid.uuid4())
+    spies, patchers, record = _install_patches_with_order(
+        job_run, resolve_side_effect=_published_resolution)
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=False)
+        assert spies["events"].called, "normal publish 应生成 state events"
+        assert spies["aggregation"].called, "normal publish 应调用 board aggregation"
+        assert record.index("events") < record.index("aggregation"), (
+            "state events 必须早于 board aggregation（PC-8：events 不得等待 aggregation）"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+async def test_p1_2_superseded_does_not_trigger_events_chip_auction_aggregation():
+    """superseded run 仍然不得触发 events/chip/auction/aggregation（PC-8 / P0-1）。
+
+    注意：review 步骤的 skip_review 仅由断点恢复 completed 步骤决定，
+    与 superseded 无关；因此本断言只覆盖 P1-2 关注的 post-core 4 类副作用，
+    不约束 review 是否执行。
+    """
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id)
+    spies, patchers, record = _install_patches_with_order(
+        job_run, resolve_side_effect=_superseded_resolution)
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=False)
+        assert not spies["events"].called, "superseded run 不应生成 state events"
+        assert not spies["chip"].called, "superseded run 不应入队 chip"
+        assert not spies["auction"].called, "superseded run 不应调用 auction anchor"
+        assert not spies["aggregation"].called, "superseded run 不应调用 board aggregation"
+        # 这四类 post-core 副作用都不应出现在执行序列中
+        post_core = {"events", "chip", "auction", "aggregation"}
+        assert post_core.isdisjoint(set(record)), (
+            f"superseded run 不应执行任何 post-core 副作用，实际序列: {record}"
+        )
+    finally:
+        _stop_patches(patchers)

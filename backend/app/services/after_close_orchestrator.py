@@ -3032,6 +3032,12 @@ async def execute_after_close_run(
         # 它不等价于“snapshot_error is None + snapshot_run_id 非空 + not publish_failed”，
         # 后者在 superseded 场景下会错误地给出 True。Chip 入队守卫必须以它为准。
         _stock_core_published = False
+        # [P1-2 2026-08-07] chip 状态变量在此处统一声明默认值（位于 skip_publish
+        # 分支判定之前），保证 normal publish 分支（下方 post-core 分叉点赋值）与
+        # skip_publish 断点恢复分支（显式置 skipped）引用时均已定义，
+        # 避免 skip_publish 路径 UnboundLocalError。
+        _chip_enqueue_status: str = "skipped"
+        _chip_job_id: uuid.UUID | None = None
         if not skip_publish:
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -3300,38 +3306,27 @@ async def execute_after_close_run(
                         exc_info=True,
                     )
 
-            # Aggregation binds same source_core_run_id; failure only reruns
-            # aggregation, does NOT reverse core. Main run status distinguishes
-            # core_published vs optional_failure.
-            _aggregation_status = "skipped"
-            if _stock_core_published and snapshot_run_id is not None:
-                try:
-                    from app.services.board_analysis_service import (
-                        compute_all_boards,
-                    )
-
-                    async with AsyncSessionLocal() as agg_db:
-                        agg_result = await compute_all_boards(
-                            agg_db,
-                            trade_date=trade_date,
-                            publish=True,
-                        )
-                        await agg_db.commit()
-                    _aggregation_status = "succeeded"
-                    logger.info(
-                        "[AfterClose] board aggregation 完成: trade_date=%s, "
-                        "published=%s",
-                        trade_date,
-                        agg_result.get("published", 0),
-                    )
-                except Exception as agg_exc:
-                    _aggregation_status = "failed"
-                    logger.warning(
-                        "[AfterClose] board aggregation 失败（optional，不影响 core）: "
-                        "trade_date=%s, error=%s",
-                        trade_date, agg_exc,
-                        exc_info=True,
-                    )
+            # [P1-2 2026-08-07] post-core 依赖顺序收口（V2.1 PC-8）：
+            # stock_core 发布身份确认后，state events 与 chip 入队必须早于
+            # board aggregation —— Chip / State Events 不得等待 Board Aggregation。
+            # auction anchor 与之同属 post-core 层；chip/state events 不依赖
+            # auction 或 aggregation 的完成。Board Aggregation 完成后再 Review。
+            #
+            # 顺序：stock_core published
+            #         ├─ state events
+            #         ├─ enqueue chip
+            #         ├─ auction anchor
+            #         └─ DSA projection（保持现有 canonical projection 合同）
+            #               ↓
+            #            board aggregation
+            #               ↓
+            #             review
+            #
+            # state events / chip / board aggregation 已下移到本 if 块之后的
+            # top-level post-core 段（见下方 [P1-2] 段），以便：
+            #   - normal publish：auction → state events → chip → aggregation → review
+            #   - skip_publish 断点恢复：state events / chip 仍执行（chip 重新入队），
+            #     auction / aggregation 不执行（由 `if not skip_publish` 守卫）。
 
             # [Phase5] - publishing 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
@@ -3379,13 +3374,18 @@ async def execute_after_close_run(
             _aggregation_status = "skipped"
             _chip_enqueue_status = "skipped"
 
-        # C5: 事件生成在 publishing 成功之后（或 skip_publish 断点恢复时已发布）
-        # publishing 失败会抛异常跳过此处 → 不生成事件
-        # 独立 session + try/except：事件生成失败不影响 orchestrator 主流程
-        # [P1 corrective] 守卫以「当前正式 stock_core publication 判据」为准：
-        # 仅当本 snapshot_run_id 真正成为正式 stock_core publication（_stock_core_published
-        # 且未被 superseded）时才生成状态事件；禁止使用 snapshot_error / publish_failed
-        # 等局部布尔推断。superseded run 不得生成状态事件。
+        # [P1-2 2026-08-07] post-core 依赖顺序（top-level，normal 与 skip_publish 共用）：
+        # stock_core published
+        #   ├─ state events
+        #   ├─ enqueue chip
+        #   ├─ auction anchor（已在上方 if not skip_publish 块内）
+        #   └─ DSA projection（保持现有 canonical projection 合同）
+        #         ↓
+        #      board aggregation（仅 normal publish 执行）
+        #         ↓
+        #       review
+        # Chip / State Events 不等待 Board Aggregation；aggregation 以 `if not skip_publish`
+        # 守卫，故 skip_publish 断点恢复不执行 auction/aggregation，但仍 re-enqueue chip。
         if _stock_core_published and not _stock_core_superseded and snapshot_run_id is not None:
             try:
                 from app.services.state_event_service import (
@@ -3415,22 +3415,12 @@ async def execute_after_close_run(
                     snapshot_run_id, event_exc, exc_info=True,
                 )
 
-        # ---- 步骤 4.6: enqueue_chip_job（stock_core 发布成功后立即分叉）----
-        # [AUD-08 2026-08-07] chip 入队原先位于 Review 之后（步骤 4.9），导致 chip
-        # 这一增强产品被绑定在 Review 生命周期上：Review 取消/中断触发短路时
-        # 直接 raise，chip 永远不会入队。chip 只依赖 stock_core，与 Review 无因果
-        # 关系，因此前移到与 state_events 同一层的 post-core 分叉点，判据复用
-        # stock_core 发布成功条件。
-        #
-        # 幂等性依据：create_after_close_chip_consensus_job 以
-        # (trade_date, core_run_id) 幂等，重复调用返回既有 job（chip_is_new=False），
-        # 故断点恢复重跑本段安全，不会产生重复 job。
-        _chip_enqueue_status: str = "skipped"
-        _chip_job_id: uuid.UUID | None = None
+        # [P1-2] chip 入队（stock_core 发布成功后，早于 board aggregation）
+        # [AUD-08 2026-08-07] chip 只依赖 stock_core，与 Review 无因果关系，
+        # 前移到 post-core 段，判据复用 stock_core 发布成功条件。
+        # 幂等依据：create_after_close_chip_consensus_job 以
+        # (trade_date, core_run_id) 幂等，重复调用返回既有 job（chip_is_new=False）。
         if _stock_core_published:
-            # [Phase4.1 corrective] Chip 入队守卫以权威 publication pointer 身份为准：
-            # 仅当本 snapshot_run_id 真正成为正式 stock_core publication 时才入队；
-            # superseded run（pointer 指向别人）一律不入队。
             _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
                 job_run_id=job_run_id,
                 worker_id=worker_id,
@@ -3443,6 +3433,40 @@ async def execute_after_close_run(
                     else None
                 ),
             )
+
+        # Aggregation binds same source_core_run_id; failure only reruns
+        # aggregation, does NOT reverse core. Main run status distinguishes
+        # core_published vs optional_failure.
+        # [P1-2] 仅 normal publish 执行；skip_publish 断点恢复不重复 aggregation。
+        _aggregation_status = "skipped"
+        if not skip_publish and _stock_core_published and snapshot_run_id is not None:
+            try:
+                from app.services.board_analysis_service import (
+                    compute_all_boards,
+                )
+
+                async with AsyncSessionLocal() as agg_db:
+                    agg_result = await compute_all_boards(
+                        agg_db,
+                        trade_date=trade_date,
+                        publish=True,
+                    )
+                    await agg_db.commit()
+                _aggregation_status = "succeeded"
+                logger.info(
+                    "[AfterClose] board aggregation 完成: trade_date=%s, "
+                    "published=%s",
+                    trade_date,
+                    agg_result.get("published", 0),
+                )
+            except Exception as agg_exc:
+                _aggregation_status = "failed"
+                logger.warning(
+                    "[AfterClose] board aggregation 失败（optional，不影响 core）: "
+                    "trade_date=%s, error=%s",
+                    trade_date, agg_exc,
+                    exc_info=True,
+                )
 
         # ---- 步骤 4.5: computing_review（复盘计算 + 发布） ----
         # [AC-02] 复盘业务体抽为 _execute_review_step，由统一执行器包装。
