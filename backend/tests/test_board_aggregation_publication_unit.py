@@ -346,6 +346,28 @@ def _make_session_with_batch(batch_run: Mock) -> AsyncMock:
     return session
 
 
+def _make_session_with_batch_none() -> AsyncMock:
+    """构造一个 session：run_stmt 返回 None（没有既有 batch）→ 走正式 precompute。"""
+    session = AsyncMock()
+
+    def _execute(stmt, *args, **kwargs):  # type: ignore[no-untyped-def]
+        sql = str(stmt).lower()
+        result = Mock()
+        if "board_analysis_run" in sql:
+            # run_stmt：没有既有 batch
+            result.scalar_one_or_none.return_value = None
+        elif "market_board" in sql:
+            result.scalars.return_value = _ScalarResult([])
+        else:
+            result.scalars.return_value = _ScalarResult([])
+            result.scalar_one.return_value = 0
+            result.scalar.return_value = 0
+        return result
+
+    session.execute.side_effect = _execute
+    return session
+
+
 class _ScalarResult:
     """可迭代且具备 .first()/.all() 的轻量 scalars 替身。"""
 
@@ -428,6 +450,8 @@ async def test_cab_recover_pointer_when_missing(
     mock_get_core.return_value = source_core
     batch_run = _make_existing_batch(source_core_run_id=source_core)
     mock_get_publication.return_value = None  # live pointer 缺失
+    # publish_market_aggregation 成功返回指向本 batch 的 publication（事实确认）
+    mock_publish.return_value = _make_core_pointer(data_run_id=batch_run.id)
 
     session = _make_session_with_batch(batch_run)
     result = await board_analysis_service.compute_all_boards(
@@ -449,30 +473,127 @@ async def test_cab_recover_pointer_when_missing(
     "app.services.board_analysis_service.get_published_snapshot_run_id",
     new_callable=AsyncMock,
 )
-async def test_cab_pointer_mismatch_not_false_green(
+async def test_cab_pointer_mismatch_does_pointer_only_reconciliation(
     mock_get_core: AsyncMock,
     mock_get_publication: AsyncMock,
     mock_publish: AsyncMock,
 ) -> None:
-    """现有 batch（lineage 匹配当前 core）但 live pointer 指向其它旧 run →
-    不得视为 current ready，必须走正式重算路径（publish 不被直接复用调用，
-    返回结果不携带 pointer_confirmed=True）。"""
+    """[Phase 4.4.2 Fix 1] 现有 succeeded current-lineage batch 但 live pointer
+    指向其它旧 run → **只做 pointer-only reconciliation**（publish_market_aggregation
+    被调用以本 batch.id 重指 pointer），**绝不重算/修改已发布 artifact**（snapshot
+    upsert 不被调用；idempotent_reuse=True 表示复用已发布 batch，不重新 compute）。"""
     source_core = uuid.uuid4()
     mock_get_core.return_value = source_core
     batch_run = _make_existing_batch(source_core_run_id=source_core)
-    # live pointer 指向一个不同的、错误的 run
+    # live pointer 指向一个不同的、错误的 run（情况 C）
     mock_get_publication.return_value = _make_core_pointer(
         data_run_id=uuid.uuid4(),
     )
+    # publish_market_aggregation 返回指向本 batch 的 publication（事实确认成功）
+    mock_publish.return_value = _make_core_pointer(data_run_id=batch_run.id)
 
     session = _make_session_with_batch(batch_run)
-    # 不重算分支会落入下方正式 precompute；此处仅验证不会被错误地当作
-    # confirmed reuse（即不会在不重算的情况下声称 pointer_confirmed）。
-    # 由于 precompute 需要 membership / board 数据，这里用 publish=False 隔离：
+    result = await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=True,
+    )
+
+    # 复用已发布 batch，不重新 compute（不修改 immutable artifact）
+    assert result["idempotent_reuse"] is True
+    assert result["pointer_recovered"] is True
+    # 只恢复 pointer 到本 batch，不重算
+    mock_publish.assert_awaited_once()
+    _, pub_kwargs = mock_publish.call_args
+    assert pub_kwargs["aggregation_run_id"] == batch_run.id
+    assert result["pointer_confirmed"] is True
+    assert result["pointer_status"] == "recovered"
+    assert result["status"] == "succeeded"
+
+
+@patch("app.services.board_analysis_service.publish_market_aggregation")
+@patch("app.services.board_analysis_service.get_publication")
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_pointer_missing_publish_false_not_confirmed(
+    mock_get_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+    mock_publish: AsyncMock,
+) -> None:
+    """[Phase 4.4.2 Fix 2] 现有 succeeded batch + live pointer 缺失 + publish=False →
+    不调用 publish_market_aggregation；pointer_recovered=False /
+    pointer_confirmed=False / pointer_status="missing"。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    batch_run = _make_existing_batch(source_core_run_id=source_core)
+    mock_get_publication.return_value = None  # live pointer 缺失
+
+    session = _make_session_with_batch(batch_run)
     result = await board_analysis_service.compute_all_boards(
         session, _TRADE_DATE, publish=False,
     )
-    # 落入 precompute 分支：idempotent_reuse 应为 False，
-    # 且不会在不重算的情况下声称 pointer_confirmed。
-    assert result.get("idempotent_reuse") is not True
-    assert result.get("pointer_confirmed") is not True
+
+    mock_publish.assert_not_awaited(), "publish=False 时不得调用 publish"
+    assert result["idempotent_reuse"] is True
+    assert result["pointer_recovered"] is False
+    assert result["pointer_confirmed"] is False
+    assert result["pointer_status"] == "missing"
+    assert result["status"] == "succeeded"
+
+
+@patch("app.services.board_analysis_service.publish_market_aggregation")
+@patch("app.services.board_analysis_service.get_publication")
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_fresh_compute_publish_false_not_confirmed(
+    mock_get_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+    mock_publish: AsyncMock,
+) -> None:
+    """[Phase 4.4.2 Fix 2] 全新 precompute succeeded + publish=False →
+    pointer_confirmed=False，且 pointer_status 不得为 "published"。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    # 没有既有 batch：run_stmt 返回 None → 走正式 precompute
+    session = _make_session_with_batch_none()
+    result = await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=False,
+    )
+
+    mock_publish.assert_not_awaited()
+    assert result["pointer_confirmed"] is False
+    assert result["pointer_status"] != "published"
+
+
+@patch("app.services.board_analysis_service.publish_market_aggregation")
+@patch("app.services.board_analysis_service.get_publication")
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_publish_pointer_data_run_mismatch_not_false_green(
+    mock_get_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+    mock_publish: AsyncMock,
+) -> None:
+    """[Phase 4.4.2 Fix 2] publish=True 但 publish_market_aggregation 返回的
+    publication.data_run_id != batch_run.id → 事实确认失败，pointer_confirmed=False，
+    不得假绿。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    # 没有既有 batch：走正式 precompute 后发布
+    session = _make_session_with_batch_none()
+    # 返回的 publication 指向一个错误的 run
+    mock_publish.return_value = _make_core_pointer(data_run_id=uuid.uuid4())
+
+    result = await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=True,
+    )
+
+    # precompute 成功后才发布；验证事实确认拒绝假绿
+    assert result["pointer_confirmed"] is False
+    assert result["pointer_status"] == "missing"
+    # 不应声称 published
+    assert result["pointer_status"] != "published"

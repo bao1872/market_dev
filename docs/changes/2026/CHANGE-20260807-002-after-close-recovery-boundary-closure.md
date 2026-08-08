@@ -3,7 +3,7 @@
 - **日期**: 2026-08-07
 - **类型**: behavior（correctness bugfix）
 - **影响范围**: 盘后编排（after_close_orchestrator）断点恢复路径 / Board Aggregation / Review 前置条件
-- **状态**: `implemented_unconfirmed`（targeted PURE_UNIT 全过；未部署、无 migration、远程验证未授权未执行）
+- **状态**: `implemented_unconfirmed`（Phase 4.4.1 + 4.4.2 targeted PURE_UNIT 全过；未部署、无 migration、远程验证未授权未执行）
 - **来源**: `ref/代码审计.md` Phase 4.4 Recovery Boundary Closure，严重级 (P0) RB-01
 
 ## 1. 问题（RB-01 Recovery Boundary Collapse）
@@ -121,9 +121,12 @@ orchestrator 之间仍存在两个合同缺口：
   stock_core，但 **live pointer 缺失**（如发布记录丢失）→ **只恢复 publication pointer**
   （`publish_market_aggregation` 指向既有 batch_run），**不重算 Board 数据**；
   遵守「pointer retry 不重算数据」合同；返回 `pointer_recovered=True, pointer_confirmed=True`。
-- **情况 C（formal recompute）**：live pointer 指向旧 core / 错误 run（`data_run_id` 非本
-  batch）或 lineage 与当前 stock_core 不一致 → **不得视为 current ready**，落入下方正式
-  precompute + publication 路径按当前 lineage 重算并发布；不假绿。
+- **情况 C（pointer-only reconciliation，非重算）**：live pointer 指向旧 core / 错误 run
+  （`data_run_id` 非本 batch），但 batch 是 **current-lineage 且 `status=="succeeded"`**
+  （run_stmt 已按当前 `source_core`/taxonomy/algorithm/membership 过滤，命中的 batch 必然是
+  current-lineage）→ **只重指 publication pointer**（调用 `publish_market_aggregation(batch.id)`），
+  **绝不重新 compute / 修改该已发布 run 的 snapshots**。published run 内容必须 **immutable**；
+  pointer 可以改变，artifact 不可以原地重算。见 Phase 4.4.2 §7 的最终收口。
 - **withdrawal 语义**：Board / BoardAnalysisRun 无 intentional withdrawal 标记，按用户指示
   **不自行发明**；仅尊重 live `market_aggregation` pointer 与 `published_at` 标志。
 
@@ -168,6 +171,73 @@ Review 不执行。
   orchestrator / phase0_contracts / status_detail / worker / board_sync / idempotent_dsa_pipeline）：
   **74 passed, 51 skipped, 0 failed**
 - 未跑 full PURE_UNIT（按审计测试纪律只跑 targeted）。
+
+## 7. Phase 4.4.2 final closure：published run immutable + publish=False 语义
+
+基于已推送 `01bca67` 继续，不 reset/rewrite，不启动 Phase 5/7。
+
+Phase 4.4.1 的 Situation C 仍是「落入正式 precompute 重算」，会在 live pointer 指向错误 run
+时**使用同一 `board_analysis_run_id` 重新 compute / upsert 历史 published snapshots**，
+违反「已发布 run 内容 immutable」合同。同时 `pointer_confirmed` 在 precompute 路径被硬编码为
+`batch.status == "succeeded"`，与真实 live pointer 解耦。本次收口这两个最后边界。
+
+### 7.1 禁止重算 / 修改历史 published BoardAnalysisRun
+
+既有 batch（`published_at is not None`，且 run_stmt 已确认 current-lineage：`status=="succeeded"`
++ `source_core == current stock_core` + taxonomy/membership/algorithm 由 run identity 匹配）
+的三种 pointer 情形统一收口为：
+
+- **情况 A（confirmed reuse）**：`live pointer == batch.id` → 幂等复用，不触碰任何写。
+- **情况 B / C（pointer-only reconciliation）**：`live pointer missing` 或 `live pointer !=
+  batch.id` → **只调用 `publish_market_aggregation(batch.id)` 重指 pointer**，**绝不重新
+  compute、绝不修改该 published run 的 snapshots**。published run 内容必须 immutable；
+  pointer 可以改变，artifact 不可以原地重算。
+- **非 succeeded 的 published batch**（历史 partial/failed 却 `published_at` 非空）→ 没有
+  不可变 artifact 可复用，才落入下方正式 precompute 重算并发布（合法重算路径）。
+- 当前没有 intentional withdrawal 合同，不自行新增 withdrawal 语义。
+
+`compute_all_boards()` 的 published 分支现在显式区分 A / B·C，B·C 共享同一 `if publish:` 的
+pointer-only 重指逻辑（immutable 复用），不再 fall-through 到 precompute 重算。
+
+### 7.2 `pointer_confirmed` 必须表示真实已核验的 live pointer
+
+1. **pointer missing + publish=False** → 不调用 `publish_market_aggregation`；
+   `pointer_recovered=False / pointer_confirmed=False / pointer_status="missing"`。
+2. **fresh compute succeeded + publish=False** → `pointer_confirmed=False`，
+   且 `pointer_status` 不得为 `"published"`（改为 `"missing"`）。
+3. **publish=True + `publish_market_aggregation` 成功** → **使用其返回的 `FactorPublication`
+   的 `data_run_id` 做一次事实确认**（`pub.data_run_id == batch_run.id`），仅当确认成功才置
+   `pointer_confirmed=True` 并更新 `published_at`；不因为函数未抛异常就硬编码 `confirmed=True`。
+
+precompute 正式发布路径同步改造：捕获 `publish_market_aggregation` 返回值，以
+`pub.data_run_id == batch_run.id` 事实确认后才置 `pointer_confirmed=True` / `pointer_status="published"`；
+`publish=False` 或未确认则返回 `pointer_confirmed=False / pointer_status="missing"`。
+
+### 7.3 Phase 4.4.2 变更文件
+
+- `backend/app/services/board_analysis_service.py`
+  - published 分支重构为 A（confirmed reuse）/ B·C（pointer-only reconciliation，immutable 复用）；
+    非 succeeded 才 fall-through 重算。
+  - precompute 发布路径：捕获 `publish_market_aggregation` 返回并以 `data_run_id` 事实确认；
+    `pointer_confirmed` / `pointer_status` 去除 `"published"` 硬编码。
+- `backend/tests/test_board_aggregation_publication_unit.py`
+  - 重写 `test_cab_pointer_mismatch_*` 为 `test_cab_pointer_mismatch_does_pointer_only_reconciliation`
+    （B·C：只重指 pointer，不重算，返回 `pointer_confirmed=True`）。
+  - 新增：`test_cab_pointer_missing_publish_false_not_confirmed`（pointer missing + publish=False
+    → `pointer_confirmed=False/recovered=False/status="missing"`）、
+    `test_cab_fresh_compute_publish_false_not_confirmed`（fresh + publish=False → 不得 `"published"`）、
+    `test_cab_publish_pointer_data_run_mismatch_not_false_green`（publish 返回 data_run_id 不匹配
+    → `pointer_confirmed=False`，不假绿）。
+  - `test_cab_recover_pointer_when_missing` 补 mock `publish_market_aggregation` 成功返回。
+  - 新增 `_make_session_with_batch_none()` helper（run_stmt 返回 None → 走 precompute）。
+
+### 7.4 Phase 4.4.2 测试执行（`PURE_UNIT_TEST=1`，targeted）
+
+- 代码 compile：ok
+- 治理检查：`Governance check passed.`
+- `test_board_aggregation_publication_unit.py` + `test_after_close_phase0_control_flow.py`：
+  **31 passed**（含新增/重写），现有 recovery / superseded / partial / failed / happy path 全部保持通过。
+- 未跑 full PURE_UNIT（按审计报告测试纪律只跑 targeted）。
 
 ## 6. 限制与未完成
 

@@ -1788,13 +1788,11 @@ async def compute_all_boards(
         session.add(batch_run)
         await session.flush()
     elif batch_run.published_at is not None:
-        # [Phase 4.4.1 RB-01 收口] 仅 batch_run.published_at is not None 表示
+        # [Phase 4.4.2 final closure] 仅 batch_run.published_at is not None 表示
         # 「该 batch 历史上曾被发布」，但**不等于**当前正式 market_aggregation
-        # pointer 仍指向它。必须分开判断：
-        #   - historically published：batch_run.published_at is not None
-        #   - currently published pointer：factor_publications 中
-        #     scope=market / kind=market_aggregation 的 data_run_id
-        # 且必须校验当前 stock_core lineage 一致。
+        # pointer 仍指向它，也**不改变 published run 内容 immutable 的合同**。
+        # run_stmt 已按当前 source_core/taxonomy/algorithm/membership 过滤，
+        # 因此命中的 batch_run 必然是 current-lineage（lineage_matches_current 恒真）。
         live_pointer = await get_publication(
             session,
             scope_type=SCOPE_TYPE_MARKET,
@@ -1805,40 +1803,35 @@ async def compute_all_boards(
         live_pointer_run_id = (
             live_pointer.data_run_id if live_pointer is not None else None
         )
-        lineage_matches_current = batch_run.source_core_run_id == source_core_run_id
 
-        # 情况 A：live pointer 正确指向本 batch 且 lineage 一致 → 幂等复用，不重算。
-        if (
-            live_pointer_run_id == batch_run.id
-            and lineage_matches_current
-            and batch_run.status == "succeeded"
-        ):
-            return {
-                "board_analysis_run_id": str(batch_run.id),
-                "trade_date": trade_date.isoformat(),
-                "board_type_filter": board_type,
-                "status": batch_run.status,
-                "succeeded": batch_run.succeeded_count,
-                "failed": batch_run.failed_count,
-                "published": batch_run.succeeded_count,
-                "coverage_below_threshold": 0,
-                "details": [],
-                "errors": list(batch_run.blockers or []),
-                "idempotent_reuse": True,
-                "pointer_confirmed": True,
-                "pointer_status": "confirmed",
-            }
+        # 仅当 batch 为 succeeded 时，其 artifact 才是已核验不可变的，
+        # 可安全做 pointer-only reconciliation（复用已发布 artifact，绝不重算）。
+        if batch_run.status == "succeeded":
+            if live_pointer_run_id == batch_run.id:
+                # 情况 A：live pointer 已正确指向本 batch → 幂等复用，不触碰任何写。
+                return {
+                    "board_analysis_run_id": str(batch_run.id),
+                    "trade_date": trade_date.isoformat(),
+                    "board_type_filter": board_type,
+                    "status": batch_run.status,
+                    "succeeded": batch_run.succeeded_count,
+                    "failed": batch_run.failed_count,
+                    "published": batch_run.succeeded_count,
+                    "coverage_below_threshold": 0,
+                    "details": [],
+                    "errors": list(batch_run.blockers or []),
+                    "idempotent_reuse": True,
+                    "pointer_confirmed": True,
+                    "pointer_status": "confirmed",
+                }
 
-        # 情况 B：batch 已 succeeded/published、lineage 仍匹配当前 stock_core，
-        # 但 live pointer 缺失（如发布记录丢失）→ **只恢复 pointer，不重算数据**
-        # （遵守「pointer retry 不重算数据」合同）。
-        if (
-            live_pointer_run_id is None
-            and lineage_matches_current
-            and batch_run.status == "succeeded"
-        ):
+            # 情况 B / C：live pointer 缺失（B）或指向其它 run（C），但本 batch 是
+            # current-lineage succeeded 且 artifact immutable → **只做 pointer-only
+            # reconciliation**，重指向已发布的现有 batch；**绝不重算 / 修改 artifact**
+            # （published run 内容必须 immutable；pointer 可以改变，artifact 不可以
+            # 原地重算）。当前没有 intentional withdrawal 合同，不自行新增 withdrawal 语义。
             if publish:
-                await publish_market_aggregation(
+                pub = await publish_market_aggregation(
                     session,
                     trade_date=trade_date,
                     source_core_run_id=source_core_run_id,
@@ -1851,52 +1844,58 @@ async def compute_all_boards(
                         "membership_version": membership_version,
                     },
                 )
-                batch_run.published_at = datetime.now(UTC)
-                await session.flush()
-            return {
-                "board_analysis_run_id": str(batch_run.id),
-                "trade_date": trade_date.isoformat(),
-                "board_type_filter": board_type,
-                "status": batch_run.status,
-                "succeeded": batch_run.succeeded_count,
-                "failed": batch_run.failed_count,
-                "published": batch_run.succeeded_count,
-                "coverage_below_threshold": 0,
-                "details": [],
-                "errors": list(batch_run.blockers or []),
-                "idempotent_reuse": True,
-                "pointer_recovered": True,
-                "pointer_confirmed": True,
-                "pointer_status": "recovered",
-            }
+                # 事实确认：使用 publish_market_aggregation 返回的 publication 的
+                # data_run_id 校验，不因为函数未抛异常就硬编码 confirmed=True。
+                pointer_confirmed = (
+                    pub is not None and pub.data_run_id == batch_run.id
+                )
+                if pointer_confirmed:
+                    batch_run.published_at = datetime.now(UTC)
+                    await session.flush()
+                return {
+                    "board_analysis_run_id": str(batch_run.id),
+                    "trade_date": trade_date.isoformat(),
+                    "board_type_filter": board_type,
+                    "status": batch_run.status,
+                    "succeeded": batch_run.succeeded_count,
+                    "failed": batch_run.failed_count,
+                    "published": batch_run.succeeded_count,
+                    "coverage_below_threshold": 0,
+                    "details": [],
+                    "errors": list(batch_run.blockers or []),
+                    "idempotent_reuse": True,
+                    "pointer_recovered": True,
+                    "pointer_confirmed": pointer_confirmed,
+                    "pointer_status": "recovered" if pointer_confirmed else "missing",
+                }
+            else:
+                # publish=False：不调用 publish_market_aggregation；pointer 真实
+                # 状态为 missing（未经 publish 核验，不得声称 confirmed）。
+                return {
+                    "board_analysis_run_id": str(batch_run.id),
+                    "trade_date": trade_date.isoformat(),
+                    "board_type_filter": board_type,
+                    "status": batch_run.status,
+                    "succeeded": batch_run.succeeded_count,
+                    "failed": batch_run.failed_count,
+                    "published": batch_run.succeeded_count,
+                    "coverage_below_threshold": 0,
+                    "details": [],
+                    "errors": list(batch_run.blockers or []),
+                    "idempotent_reuse": True,
+                    "pointer_recovered": False,
+                    "pointer_confirmed": False,
+                    "pointer_status": "missing",
+                }
 
-        # 情况 C：live pointer 指向旧 core / 错误 run（lineage 不匹配，或
-        # pointer 指向非本 batch 的其它 run）→ 不得视为 current ready；
-        # 必须走下方正式 precompute + publication/reconciliation 路径
-        # 重新按当前 lineage 计算并发布，不得假绿。
-        if live_pointer_run_id is not None and live_pointer_run_id != batch_run.id:
-            logger.warning(
-                "[BoardAnalysis] live market_aggregation pointer 指向 run=%s，"
-                "但当前 lineage batch_run=%s（lineage 匹配当前 core=%s），"
-                "走正式重算路径恢复当前 lineage",
-                live_pointer_run_id, batch_run.id, lineage_matches_current,
-            )
-            # 不 return，落入下方 precompute 分支
-        elif not lineage_matches_current:
-            logger.warning(
-                "[BoardAnalysis] 既有 batch_run=%s 的 source_core=%s 与当前 "
-                "stock_core=%s 不一致，走正式重算路径",
-                batch_run.id, batch_run.source_core_run_id, source_core_run_id,
-            )
-            # 不 return，落入下方 precompute 分支
-        else:
-            # live pointer 指向本 batch 但 batch 非 succeeded（历史 partial/failed
-            # 却 published_at 非空）→ 同样走正式重算路径。
-            logger.warning(
-                "[BoardAnalysis] batch_run=%s status=%s 非 succeeded 但 "
-                "published_at 非空，走正式重算路径",
-                batch_run.id, batch_run.status,
-            )
+        # batch_run 非 succeeded（历史 partial/failed 却 published_at 非空）→
+        # 没有不可变 artifact 可复用，走下方正式 precompute 路径重算并发布。
+        logger.warning(
+            "[BoardAnalysis] batch_run=%s status=%s 非 succeeded 但 published_at "
+            "非空，走正式重算路径",
+            batch_run.id, batch_run.status,
+        )
+        # 不 return，落入下方 precompute 分支
     else:
         batch_run.status = "running"
         batch_run.expected_count = expected_count
@@ -1972,6 +1971,7 @@ async def compute_all_boards(
     else:
         batch_run.status = "succeeded"
 
+    _pointer_confirmed_flag = False
     if publish and batch_run.status == "succeeded":
         for detail in details:
             snapshot = detail.pop("snapshot", None)
@@ -1980,7 +1980,7 @@ async def compute_all_boards(
             if await publish_board_analysis(session, snapshot) is not None:
                 published += 1
                 detail["published"] = True
-        await publish_market_aggregation(
+        pub = await publish_market_aggregation(
             session,
             trade_date=trade_date,
             source_core_run_id=source_core_run_id,
@@ -1993,7 +1993,12 @@ async def compute_all_boards(
                 "membership_version": membership_version,
             },
         )
-        batch_run.published_at = datetime.now(UTC)
+        # 事实确认：使用 publish 返回的 publication 的 data_run_id 校验，
+        # 不因为函数未抛异常就硬编码 confirmed=True（data_run_id 必须指向本 batch）。
+        # 仅在确认后更新 published_at，避免假绿。
+        _pointer_confirmed_flag = pub is not None and pub.data_run_id == batch_run.id
+        if _pointer_confirmed_flag:
+            batch_run.published_at = datetime.now(UTC)
     else:
         for detail in details:
             detail.pop("snapshot", None)
@@ -2010,12 +2015,12 @@ async def compute_all_boards(
         "coverage_below_threshold": coverage_below,
         "details": details,
         "errors": errors,
-        # [Phase 4.4.1 RB-01] 正式 precompute 路径：publish=True 时 pointer 已
-        # 经 publish_market_aggregation 指向本 batch_run，lineage 即当前 stock_core，
-        # 故 pointer_confirmed 与 batch 真实 status 一致。
-        "pointer_confirmed": batch_run.status == "succeeded",
+        # [Phase 4.4.2] 正式 precompute 路径：
+        # - publish=True 且事实确认 data_run_id==batch_run.id → pointer_confirmed=True
+        # - publish=False 或未确认 → pointer_confirmed=False，不得返回 "published"
+        "pointer_confirmed": _pointer_confirmed_flag,
         "pointer_status": (
-            "published" if batch_run.status == "succeeded" else "pending"
+            "published" if _pointer_confirmed_flag else "missing"
         ),
     }
 
