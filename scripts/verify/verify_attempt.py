@@ -153,6 +153,33 @@ def _extract_pytest_summary(stdout: str) -> str:
     return "\n".join(summary_lines)[-2000:]
 
 
+def _parse_pytest_summary(stdout: str) -> dict[str, int] | None:
+    """[R1.4a] 从 pytest summary 行解析 passed/skipped/failed/error 计数。
+
+    输入形如 "3 passed, 2 skipped, 1 failed, 0 error in 12.34s"（顺序可变）。
+    返回 {"passed","skipped","failed","errors"}；解析失败返回 None（fail-closed）。
+    """
+    import re
+
+    lines = (stdout or "").splitlines()
+    summary_line = None
+    for line in reversed(lines):
+        s = line.strip()
+        if "passed" in s and " in " in s and ("skipped" in s or "failed" in s or "error" in s):
+            summary_line = s
+            break
+    if summary_line is None:
+        return None
+    counts = {"passed": 0, "skipped": 0, "failed": 0, "errors": 0}
+    # 形如 "N passed" / "N skipped" / "N failed" / "N errors" / "N error"
+    for label in ("passed", "skipped", "failed", "errors", "error"):
+        m = re.search(r"(\d+)\s+" + re.escape(label), summary_line)
+        if m:
+            key = "errors" if label == "error" else label
+            counts[key] = int(m.group(1))
+    return counts
+
+
 def _run(cmd: list[str], *, timeout: int = 600, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env)
@@ -386,13 +413,29 @@ class VerifyAttempt:
             self.exporter.log(f"pg_tests failure output:\n{diagnostic}")
             self.exporter.record_gate("pg_tests", False, detail=diagnostic[-2000:])
             raise RuntimeError(f"自包含 PG 测试失败 (exit={code})")
+        # [R1.4a] 三个 mandatory PG 测试禁止 SKIP 假绿：failed/errors/skipped>0 或
+        # summary 无法解析 → fail-closed，绝不 record_gate(True)。
+        counts = _parse_pytest_summary(out)
+        if counts is None:
+            detail = "pg_tests 退出码 0 但无法解析 pytest summary（fail-closed，见 logs）"
+            self.exporter.record_gate("pg_tests", False, detail=detail)
+            raise RuntimeError(detail)
+        if counts["failed"] > 0 or counts["errors"] > 0 or counts["skipped"] > 0:
+            detail = (
+                f"pg_tests mandatory tests 未全部真实 PASS（fail-closed）："
+                f"{counts['passed']} passed, {counts['skipped']} skipped, "
+                f"{counts['failed']} failed, {counts['errors']} error"
+            )
+            self.exporter.log(
+                f"run_self_contained_pg_tests: 拒绝假绿\n"
+                f"{_extract_pytest_summary(out)}\n{detail}"
+            )
+            self.exporter.record_gate("pg_tests", False, detail=detail)
+            raise RuntimeError(detail)
         self.manifest["status"] = "pg_tests_ok"
-        # [R1.4] 成功路径保留真实 pytest summary（bounded），不再硬编码"全过"。
-        # pytest 的 summary 形如 "3 passed, 2 skipped, 0 failed in 12.34s"，
-        # 落在输出末尾的 "===...===" 摘要块内。若某个自包含测试被 SKIP（如 100-stock
-        # 在空库下 skip），此处必须如实反映，避免把 SKIP 表述为 PASS。
+        # 全部真实 passed 才 PASS（保留 bounded 真实 summary，SKIP 已在上方 fail-closed）。
         summary = _extract_pytest_summary(out)
-        detail = summary if summary else "pg_tests 退出码 0（未提取到 pytest summary，见 logs）"
+        detail = summary if summary else f"{counts['passed']} passed, 0 skipped, 0 failed"
         self.exporter.log(f"run_self_contained_pg_tests: 通过，pytest summary:\n{detail}")
         self.exporter.record_gate("pg_tests", True, detail=detail)
 

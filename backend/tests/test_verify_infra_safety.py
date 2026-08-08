@@ -370,3 +370,50 @@ def test_run_timeout_without_output_keeps_str_contract(monkeypatch) -> None:
     assert code == 124
     assert out == ""
     assert err == "command timeout"
+
+
+def test_parse_pytest_summary_all_passed() -> None:
+    """[R1.4a] 3 passed, 0 skipped, 0 failed → 解析为 PASS。"""
+    import verify_attempt as va
+
+    out = (
+        "tests/test_pg_atomic_publication.py::test_a PASSED\n"
+        "tests/test_pg_projection_lifecycle.py::test_b PASSED\n"
+        "tests/test_pg_100_stock_call_counts.py::test_100 PASSED\n"
+        "===== 3 passed, 0 skipped, 0 failed in 42.5s =====\n"
+    )
+    counts = va._parse_pytest_summary(out)
+    assert counts == {"passed": 3, "skipped": 0, "failed": 0, "errors": 0}
+
+
+def test_parse_pytest_summary_rejects_skip() -> None:
+    """[R1.4a] 2 passed, 1 skipped → skipped>0，调用方必须 fail-closed 拒绝。"""
+    import verify_attempt as va
+
+    out = (
+        "tests/test_pg_atomic_publication.py::test_a PASSED\n"
+        "tests/test_pg_100_stock_call_counts.py::test_100 SKIPPED\n"
+        "===== 2 passed, 1 skipped, 0 failed in 1.5s =====\n"
+    )
+    counts = va._parse_pytest_summary(out)
+    assert counts == {"passed": 2, "skipped": 1, "failed": 0, "errors": 0}
+    assert counts["skipped"] > 0  # fail-closed 触发条件
+
+
+def test_parse_pytest_summary_rejects_missing_summary() -> None:
+    """[R1.4a] 无可解析 summary → 返回 None（fail-closed）。"""
+    import verify_attempt as va
+
+    assert va._parse_pytest_summary("") is None
+    assert va._parse_pytest_summary("tests/test_a.py::test_a PASSED\n") is None
+
+
+def test_parse_pytest_summary_counts_failed_and_error() -> None:
+    """[R1.4a] failed/errors>0 亦必须被识别（顺序可变）。"""
+    import verify_attempt as va
+
+    out = "===== 1 passed, 2 failed, 1 error in 5.0s =====\n"
+    counts = va._parse_pytest_summary(out)
+    assert counts["passed"] == 1
+    assert counts["failed"] == 2
+    assert counts["errors"] == 1
