@@ -86,13 +86,34 @@
 - 上/下共识区（upper/lower consensus zones）；
 - 主峰（main peak）。
 
-### 3.3.1 锚点模式与晚到筹码（V2.1 对齐 PRD31 §5 PC-41）
+### 3.3.1 锚点模式与晚到筹码（V2.1 对齐 PRD31 §5 PC-31 / §6 PC-40 / §6 PC-41）
 
-> 本条款为 PRD31 §5 竞价节点合同在同域 PRD 的显式传播，不引入新业务决策。
+> 本条款为 PRD31 竞价节点合同（模式：§5 PC-31；不可变：§6 PC-40；lineage：§6 PC-41）在同域 PRD 的显式传播，不引入新业务决策，不新增 PC 编号。
 
-- **三种锚点模式**：`structure_only`（仅 structure 锚点，`source_chip_run_id = NULL`）、`hybrid`（同时含 structure 与 chip 锚点）、`composite`（组合视图）。初始发布默认 `structure_only`，后续可在不破坏历史的前提下升级。
-- **晚到筹码创建新 `AuctionAnchorRun`**：当 chip 共识晚于 structure-only 锚点到达时，**必须创建新的 `AuctionAnchorRun`** 并补填 `source_chip_run_id`，不得原地修改已发布的 structure-only run。
-- **旧发布不可变**：已发布的 `AuctionAnchorRun` / `auction_analysis_publications` pointer 内容**不可原地修改**；任何修正（含 late chip 升级）必须创建新 run 并 supersede 旧发布，与 PRD31 §4 PC-40「published run 不原地修改」一致。
+必须明确区分两个不同层级的"模式"，禁止把 `hybrid` 写成单股 anchor mode：
+
+**A. 单股锚点模式（per-instrument anchor mode）** —— 对应 PRD31 §5 PC-31：
+
+- `structure_only`：仅 structure 锚点，`source_chip_run_id = NULL`；
+- `composite`：组合视图（结构 + 筹码在同一分析视图内聚合呈现）；
+- `unavailable`：筹码维度不可用，该维度整体缺失；
+- `failed`：筹码计算失败，该维度标记为失败。
+
+单股锚点模式描述**一枚锚点 / 一只股票**的维度可用性，**没有 `hybrid` 这一单股模式**。
+
+**B. 批次 `AuctionAnchorRun` 发布模式（batch publication mode）** —— 锚点集合的发布形态：
+
+- `structure_only`：批次内锚点均为 structure-only；
+- `hybrid`：`AuctionAnchorRun` 同时承载 structure 锚点与 chip 锚点（跨多股聚合的发布形态）；
+- `composite`：组合发布视图。
+
+`hybrid` 只用于批次 / run 发布层级，不用于描述单股锚点。
+
+**晚到筹码升级（late chip upgrade）** —— 对应 PRD31 §6 PC-40（不可变）/ §6 PC-41（lineage）：
+
+- 若已发布 `structure_only` 批次因 chip 共识晚到需要升级为含 chip 的形态，**必须创建新的 `AuctionAnchorRun`** 并补填 `source_chip_run_id`；旧的 run 与已发布 `auction_analysis_publications` historical publication **不可变**；
+- `current` pointer **原子切换到新正式 publication**（pointer 本来就需要切换，禁止写"pointer 内容不可修改"——pointer 切换是合法且必要的）；
+- 任何修正（含 late chip 升级）必须创建新 run 并 supersede 旧发布，与 PRD31 §6 PC-40「published run 不原地修改」一致；lineage 由新 run 的 `source_chip_run_id` 与 supersede 链记录，符合 PRD31 §6 PC-41。
 
 ### 3.4 新鲜度与有效性
 
@@ -112,17 +133,48 @@
 2. **历史参与（historical participation）**：历史上价格测试该锚点的次数与结果；
 3. **板块扩散（sector diffusion）**：同一板块内具有相同 `anchor_type` 的股票数量与比例。
 
-### 4.3 锚点生命周期
+### 4.3 竞价事件生命周期（7-state 合同，NON-LINEAR）
 
-```
-formed → confirmed → weakened → failed → expired
+> 本合同由 PRD75 owning（PRD31 不新增 lifecycle 条款）。状态集合与转换来自 `auction_scan_service` 当前实现，非线性、非单边推进。
+
+**状态集合（7）**：
+
+- `formed`：事件首次形成（创建时即 `lifecycle="formed"`）；
+- `confirmed`：开盘后价格测试维持触发条件，锚点被确认有效；
+- `continued`：已 `confirmed` 的突破 / 支撑 / 阻力类事件，在窗口末价仍维持触发条件（维持触发）；
+- `weakened`：价格自触发线回落至 2% 容差带内，强度衰减；
+- `failed`：价格突破失效线（回落 / 越过 >2%），锚点失效；
+- `transformed`：结构性变化（板块扩散失败 / 龙头孤立 / 指数背离），事件形态发生本质转变；
+- `expired`：超过有效期，不再参与分析（定义态；当前转换逻辑不产生该态，见下）。
+
+**活跃集与终态**：
+
+- 活跃集（参与 `update_event_lifecycle` 重算）：`{formed, confirmed, continued, weakened}`；
+- 终态（一旦进入不再被重算覆盖）：`{failed, transformed, expired}`。
+
+**NON-LINEAR 转换图**（源态 → 目标态，依据事件类型与开盘后窗口价）：
+
+```text
+                          ┌─────────────────────────────────────────────┐
+                          │  结构性变化（任意活跃态）                     │
+   formed ──价格维持触发──▶ confirmed ──窗口末价仍维持触发──▶ continued   │
+     │                      │  │                                          │
+     │                      │  └──窗口末价回落 2% 带 / 跌破失效线──▶ weakened / failed
+     │                      │                                             │
+     ├──回落 ≤2%──▶ weakened                                              │
+     ├──回落 >2% / 越线 >2%──▶ failed                                      │
+     └──无触发线事件（inside_open 等）──▶ formed（维持）                   │
+                          │                                             │
+                          └──────────────▶ transformed ◀───────────────┘
+                                       (sector_dispersion_failed /
+                                        leader_isolation /
+                                        index_divergence)
 ```
 
-- `formed`：锚点首次形成；
-- `confirmed`：价格测试后锚点被确认有效；
-- `weakened`：强度衰减或新鲜度变差；
-- `failed`：价格突破失效线，锚点失效；
-- `expired`：超过有效期，不再参与分析。
+- **`formed` 源**：突破类（dual_breakout / structure_breakout / chip_repricing）开盘价 ≥ 触发价 → `confirmed`；回落 ≤2% → `weakened`；回落 >2% → `failed`。支撑确认类开盘价 ≥ 触发价 → `confirmed`，回落 >2% → `failed`。阻力阻挡类开盘价 ≤ 触发价 → `confirmed`，越过 >2% → `failed`。测试类（test_upper/test_lower）达标 → `confirmed`，不达标 → `weakened`。无明确触发线的事件（inside_open / anchor_insufficient / anchor_expired / insufficient_participation）维持 `formed`。
+- **`confirmed` 源（窗口末价二次判定）**：突破 / 支撑 / 阻力类窗口末价仍维持触发 → `continued`；回落至 2% 容差带 → 保持 `confirmed`（不降级但未达 `continued`）；回落 >2% → `weakened` / `failed`。测试类窗口末价维持 → `continued`，否则保持 `confirmed`。
+- **`transformed` 最高优先级**：任意活跃态在结构性变化检测命中时一律转为 `transformed`，覆盖价格判定结果（证据：`sector_dispersion_failed` / `leader_isolation` / `index_divergence`）。
+- **`expired`**：当前 `update_event_lifecycle` 的转换逻辑（`_determine_lifecycle_transition` / `_classify_continued_lifecycle` / `_detect_structural_transformation`）均不产出 `expired`；该态为已定义的终态，但**当前转换路径未生成**（属于锚点 freshness 过期等外部逻辑，UNVERIFIED 本轮未做 code audit）。不得假设 `expired` 由开盘后窗口价转换产生。
 
 ### 4.4 明确排除
 

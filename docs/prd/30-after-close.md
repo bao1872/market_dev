@@ -243,20 +243,23 @@ V1 输入仅趋势、结构、动量、量能、结构事件和权威行业/概�
 - 聚合失败只重跑聚合，**不影响已发布 stock_core**；
 - 聚合 pointer 不得倒退到旧 run；不足门禁时保存 `partial` 结果但不切 pointer。
 
-### AC-20：Daily Facts / Board Facts 独立输入分支（V2.1 对齐 PRD31 §5 PC-37/PC-38/PC-39）
+### AC-20：Daily Facts / Board Facts 独立输入分支（V2.1 对齐 PRD31 §1 / §2 / §8）
 
-> 本条款为 PRD31 §5 输入依赖矩阵在同域 PRD 的显式传播，不引入新业务决策。
+> 本条款为 PRD31 跨域节点、运行身份与编排阶段在同域 PRD 的显式传播，不引入新业务决策，不新增 PC 编号。权威来源：
+> - 最终业务链与节点归属：PRD31 §1；
+> - 九节点注册表（`daily_facts` / `board_facts` 节点定义）：PRD31 §2；
+> - 编排与恢复（阶段顺序、readiness、lineage）：PRD31 §8。
 
-- **Daily Facts 与 Board Facts 是两条独立输入分支**：Daily Facts（`daily_facts` 产品节点）只承载目标交易日**日线** readiness；Board Facts（`board_facts` 产品节点）只承载板块成员 / 板块行情 / 板块 taxonomy readiness；二者不得合并或互相替代。
+- **Daily Facts 与 Board Facts 是两条独立输入分支**：Daily Facts（`daily_facts` 产品节点）只承载目标交易日**日线** readiness；Board Facts（`board_facts` 产品节点）只承载板块 **taxonomy / PIT membership / board-facts publication readiness**；二者不得合并或互相替代，也不得用模糊的"板块行情"概念混入其它领域事实。
 - **`stock_core` 只依赖 Daily Facts**：core 计算链的输入门禁只看 Daily Facts 是否达标，Board Facts 不参与 core 发布门禁，Board Facts 缺失或降级不得阻断 `stock_core` 发布。
-- **Board Aggregation 依赖正式 `stock_core` + usable Board Facts**：`board_analysis` 在 `stock_core` pointer 发布成功后触发，并以 usable board facts 为输入；Board Facts 不可用时应记录结构化 reason 并降级 / 暂缓，不得反改已发布 `stock_core`。
+- **Board Aggregation 依赖正式 `stock_core` + usable Board Facts**：`board_analysis` 在 `stock_core` pointer 发布成功后触发，并以 usable board facts（taxonomy / PIT membership / publication readiness）为输入；Board Facts 不可用时应记录结构化 reason 并降级 / 暂缓，不得反改已发布 `stock_core`。
 - **Review 依赖正式 `market_aggregation`**：`market_review_run` 创建需要 `stock_core` pointer 与 `board_analysis` pointer 均已发布（即 `market_aggregation` 已就绪）；Board Facts 通过 board aggregation 间接进入 Review，不绕过该 lineage。
 - 上述分支与 PRD31 §8 编排阶段 `daily → core → post_core → board_review → finalize` 一致：core 阶段只读 Daily Facts，board_review 阶段才消费 Board Facts。
 
 ## 复盘编排 (Review Orchestration)
 
 > 对应 PRD：`70-review.md` §11；对应 Map：`../maps/30-after-close.md` §复盘 pointer 与 run 关系。
-> 复盘编排是盘后链路 stock_core → board_analysis 之后的独立阶段，尚未实现。
+> 复盘编排是盘后链路 stock_core → board_analysis 之后的独立阶段。实现状态属于 Map，不在本 PRD 内陈述。
 
 ### RV-AC-01 触发条件
 
