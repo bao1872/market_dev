@@ -14,8 +14,8 @@
 | blocked_mandatory_failure     | 2026-07-29 | blocked                   |
 | core_ready_waiting_mandatory  | 2026-07-30 | core_ready                |
 | mandatory_ready_enhancing     | 2026-07-31 | mandatory_ready_enhancing |
-| degraded_terminal_partial     | 2026-08-01 | degraded_ready            |
-| fully_ready_all_fresh         | 2026-08-02 | fully_ready               |
+| degraded_terminal_partial     | 2026-08-03 | degraded_ready            |
+| fully_ready_all_fresh         | 2026-08-04 | fully_ready               |
 
 分层设计（审查第七节）：
 - **Pure Unit**（tests/test_product_readiness_service.py）：手工 ProductReadinessState[]
@@ -65,8 +65,8 @@ SCENARIO_TRADE_DATES: dict[str, date] = {
     "blocked_mandatory_failure": date(2026, 7, 29),
     "core_ready_waiting_mandatory": date(2026, 7, 30),
     "mandatory_ready_enhancing": date(2026, 7, 31),
-    "degraded_terminal_partial": date(2026, 8, 1),
-    "fully_ready_all_fresh": date(2026, 8, 2),
+    "degraded_terminal_partial": date(2026, 8, 3),
+    "fully_ready_all_fresh": date(2026, 8, 4),
 }
 
 # 唯一预期 closure（与 tests/readiness_fixtures.CANONICAL_SCENARIOS 对齐）。
