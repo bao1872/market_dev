@@ -267,3 +267,30 @@ def test_always_on_safety_workflow_set_no_second_workflow(governance_repo: Path)
     extra.write_text("name: deploy\n", encoding="utf-8")
     errors = check(governance_repo)
     assert any("workflow set must be exactly" in e for e in errors)
+
+
+def test_always_on_safety_workflow_yaml_bypass_is_detected(governance_repo: Path) -> None:
+    # GitHub Actions 同时支持 *.yml 与 *.yaml；新增 deploy.yaml 必须被检出。
+    p = governance_repo / ".github/workflows/ci.yml"
+    p.write_text("# placeholder\n")
+    extra = governance_repo / ".github/workflows/deploy.yaml"
+    extra.write_text("name: deploy\n", encoding="utf-8")
+    errors = check(governance_repo)
+    assert any("workflow set must be exactly" in e for e in errors)
+
+
+def test_always_on_safety_default_plan_must_be_targeted_pg(governance_repo: Path) -> None:
+    # 把默认赋值 PLAN="targeted-pg" 改回 PLAN="full-closure"，checker 必须 FAIL。
+    p = governance_repo / "scripts/ops/panji-verify"
+    p.write_text(p.read_text().replace('PLAN="targeted-pg"', 'PLAN="full-closure"'))
+    errors = check(governance_repo)
+    assert any("default plan must not be PLAN=\"full-closure\"" in e for e in errors)
+    assert any("default plan must be PLAN=\"targeted-pg\"" in e for e in errors)
+
+
+def test_always_on_safety_default_plan_assignment_required(governance_repo: Path) -> None:
+    # 删除默认赋值 PLAN="targeted-pg"（例如完全移除默认），checker 必须 FAIL。
+    p = governance_repo / "scripts/ops/panji-verify"
+    p.write_text(p.read_text().replace('PLAN="targeted-pg"', 'PLAN=""'))
+    errors = check(governance_repo)
+    assert any("default plan must be PLAN=\"targeted-pg\"" in e for e in errors)

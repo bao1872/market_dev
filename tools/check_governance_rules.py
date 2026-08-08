@@ -227,6 +227,16 @@ def _check_verification_plans(root: Path, errors: list[str]) -> None:
     if "[0-9a-f]{40}" not in entry:
         errors.append("panji-verify must require complete 40-char SHA")
 
+    # Exploration 默认 plan 必须是 targeted-pg。直接检查默认赋值：
+    # PLAN="targeted-pg" 必须存在，且 PLAN="full-closure" 不得是默认赋值。
+    # 不使用模糊 plan 名匹配；必须命中明确的 default assignment 表达式。
+    entry_raw = _read(root / "scripts/ops/panji-verify")
+    if 'PLAN="targeted-pg"' not in entry_raw:
+        errors.append('panji-verify default plan must be PLAN="targeted-pg"')
+    default_full = re.search(r'(?m)^\s*PLAN="full-closure"', entry_raw)
+    if default_full is not None:
+        errors.append('panji-verify default plan must not be PLAN="full-closure" (Exploration default is targeted-pg)')
+
     runner = _executable_shell(root / "scripts/verify/run_remote_verification.sh")
     for marker in ("flock -n 9", "panji-verify-runtime:current", "panji-verify-python"):
         if marker not in runner:
@@ -478,7 +488,12 @@ def _check_always_on_safety(root: Path, errors: list[str]) -> None:
         errors.append("verification cleanup references removed entry: panji-verify-run")
 
     # 19: workflow set must be exactly ['ci.yml'] (no second auto-deploy workflow).
-    workflows = sorted(p.name for p in (root / ".github/workflows").glob("*.yml"))
+    # GitHub Actions accepts both *.yml and *.yaml; collect both to prevent a
+    # deploy.yaml from bypassing the guard, then require exactly ['ci.yml'].
+    workflow_names = {
+        p.name for p in (root / ".github/workflows").glob("*.yml")
+    } | {p.name for p in (root / ".github/workflows").glob("*.yaml")}
+    workflows = sorted(workflow_names)
     if workflows != ["ci.yml"]:
         errors.append(f"workflow set must be exactly ['ci.yml'], got {workflows}")
 
