@@ -169,6 +169,19 @@ Exploration 要求：
 
 存在验证栈不意味着 Exploration 每轮必须 full-closure。
 
+### 9.1 验证执行安全合同（Always-On）
+
+远程验证执行遵守以下硬约束（单可复用运行时 CHANGE-20260806-012）：
+
+- 唯一正式入口 `scripts/ops/panji-verify`；废弃第二入口 `panji-verify-run` 不得恢复；
+- 单可复用验证容器 `panji-verify-python`，常驻空闲（`sleep infinity`），固定 Compose project `panji-verify`，不发布 host port；
+- attempt env 由 `prepare_verify_environment.py` 生成并注入 `attempt.env`（0600）；容器常驻 env 只持有稳定变量；
+- Migration / PG / Seed / E2E 各 gate 串行以 `docker exec panji-verify-python verify_exec.py <cmd>` 运行 fresh process；
+- 异常/timeout/interrupted 以 `docker restart panji-verify-python` 恢复干净环境，不删 container/image/network/PG/Redis/稳定栈；
+- 验证库 `bz_stock_verify_<sha>` 跑在已有 `trading-postgres` 容器内；cleanup 只 drop 该库 + 删 attempt 临时状态，不 `compose down`、不删 Volume、不 `FLUSHALL`；
+- **清理必须 fail-closed（`blocked_cleanup`）**：任一残留或清理错误都标记 `blocked_cleanup` 并阻止进入后续阶段；
+- 禁止：`down -v`、`--rmi`、`docker cp`、`--remove-orphans`、host 直接跑 psql/alembic、在清理/runner/entry 中引用已删除的 `panji-verify-run`。
+
 ## 10. Runtime Alignment
 
 当运行 SHA 明显落后当前需要验证的 target SHA：

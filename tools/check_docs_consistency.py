@@ -218,6 +218,21 @@ def check_map_baseline() -> list[str]:
     return errors
 
 
+ACCEPTANCE_MATRIX_DATE_RE = re.compile(r"(?:20\d{2}[-_]\d{1,2}[-_]\d{1,2})")
+
+
+def _acceptance_matrix_sort_key(path: Path) -> tuple:
+    """Deterministic ordering: (is_dated, date_tuple, name). Never relies on filesystem mtime."""
+    match = ACCEPTANCE_MATRIX_DATE_RE.search(path.name)
+    if match:
+        try:
+            year, month, day = (int(part) for part in re.split(r"[-_]", match.group(0)))
+            return (1, (year, month, day), path.name)
+        except ValueError:
+            pass
+    return (0, (0, 0, 0), path.name)
+
+
 def _latest_acceptance_matrix() -> Path | None:
     candidates: list[Path] = []
     for pattern in (
@@ -227,7 +242,10 @@ def _latest_acceptance_matrix() -> Path | None:
     ):
         candidates.extend(DOCS_DIR.glob(pattern))
     candidates = [p for p in candidates if p.is_file()]
-    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+    if not candidates:
+        return None
+    # 稳定命名规则：优先取带 YYYY-MM-DD 日期且日期最新者；不依赖文件系统 mtime。
+    return max(candidates, key=_acceptance_matrix_sort_key)
 
 
 def check_hardening_acceptance() -> list[str]:

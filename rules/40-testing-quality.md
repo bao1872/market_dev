@@ -98,6 +98,13 @@ Exploration 只减少与当前改动无关的测试和 release ceremony；受影
 
 Exploration 只运行需要的 profile/gate，不默认 full-closure。
 
+#### T7 安全合同（Always-On）
+
+- **PG 测试必须 self-contained**：每个 PG 测试必须在自身 transaction/fixture 中创建最小完整前置数据，不依赖共享业务库既有状态；
+- **PG 测试只能由 `panji-verify-python` 容器经 `verify_exec.py` 运行**：禁止 host 直接跑 psql/alembic，禁止 `docker cp` 注入源码，禁止任意 shell/pytest 参数注入；
+- **验证数据 100% synthetic**：标准验证使用 synthetic 数据，不读取 `bz_stock` 作为测试 fixture；
+- **远程 PG test 必须 fail-closed 确认 DB identity**：`current_database()` 必须是 `bz_stock_verify_<sha>`，不是 `bz_stock`。
+
 当前注册远程验证计划：
 
 - `targeted-pg`：Exploration 默认 PostgreSQL 合同证据；

@@ -84,3 +84,20 @@ def test_deleted_webhook_reference_is_allowed(tmp_path: Path, monkeypatch: pytes
     setup_repo(tmp_path, monkeypatch)
     (tmp_path / "docs/prd/00-product.md").write_text("feishu_webhook 已删除，不得恢复。\n")
     assert cdc.check_webhook_regression() == []
+
+
+def test_acceptance_matrix_selected_by_filename_date_not_mtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    setup_repo(tmp_path, monkeypatch, stage="HARDENING")
+    changes = tmp_path / "docs/changes/2026"
+    newer = changes / "PRD-Acceptance-Matrix-2026-08-08.md"
+    older = changes / "PRD-Acceptance-Matrix-2026-07-01.md"
+    newer.write_text(f"# Matrix\n**基线**: `{SHA}`\n", encoding="utf-8")
+    older.write_text(f"# Matrix\n**基线**: `{SHA}`\n", encoding="utf-8")
+    # 人为把较早文件 mtime 改新，验证选择不依赖 mtime，而按文件名日期取最新。
+    import os
+
+    old_mtime = os.stat(older).st_mtime
+    os.utime(older, (old_mtime + 100000, old_mtime + 100000))
+    latest = cdc._latest_acceptance_matrix()
+    assert latest is not None
+    assert "2026-08-08" in latest.name

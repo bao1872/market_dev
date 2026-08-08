@@ -10,7 +10,9 @@ usage() {
 [ "${1:-}" = "run" ] || usage
 shift
 SHA=""
-PLAN="full-closure"
+# Exploration 默认只做 targeted-pg（upgrade_head + pg_contract）。
+# full-closure（PG + Seed + E2E）属于 Hardening/Release，必须显式 --plan full-closure。
+PLAN="targeted-pg"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --sha) SHA="${2:-}"; shift 2 ;;
