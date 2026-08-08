@@ -321,3 +321,52 @@ def test_cleanup_never_destroys_reusable_runtime() -> None:
     assert '"down"' not in source
     # PROTECTED_CONTAINERS 必须包含常驻验证容器（纵深防御）
     assert "panji-verify-python" in source
+
+
+def test_run_timeout_normalizes_bytes_output_to_str(monkeypatch) -> None:
+    """[R1.1c-C1] TimeoutExpired 携带 bytes stdout/stderr 时，_run 必须归一为 str。
+
+    TimeoutExpired.stdout/stderr 即使在 text=True 下也可能是 bytes；_redact_output
+    按 str 拼接/replace，未归一会 TypeError 丢掉整条 timeout evidence。
+    断言：exit=124、stdout/stderr 均为 str、partial evidence 被保留。
+    """
+    import subprocess
+
+    import verify_attempt as va
+
+    def _fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=["python", "-u", "-m", "scripts.verify.seed_v21_verify_data"],
+            timeout=1800,
+            output=b"[seed] base_bars start\n[seed] base_bars end\n",
+            stderr=b"partial stderr\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    code, out, err = va._run(["python", "-u", "-m", "x"], timeout=1800)
+
+    assert code == 124
+    assert isinstance(out, str)
+    assert isinstance(err, str)
+    # partial evidence 必须保留（超时 hotspot 定位依赖它）
+    assert "[seed] base_bars start" in out
+    assert "partial stderr" in err
+    # 归一后可安全进入 _redact_output（原实现在 bytes 上会 TypeError）
+    assert isinstance((out + err), str)
+
+
+def test_run_timeout_without_output_keeps_str_contract(monkeypatch) -> None:
+    """[R1.1c-C1] TimeoutExpired 无 output 时仍必须返回 tuple[int, str, str]。"""
+    import subprocess
+
+    import verify_attempt as va
+
+    def _fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["x"], timeout=5)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    code, out, err = va._run(["x"], timeout=5)
+
+    assert code == 124
+    assert out == ""
+    assert err == "command timeout"

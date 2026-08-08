@@ -101,15 +101,31 @@ def _read_env_value(path: str | Path, key: str) -> str:
     raise RuntimeError(f"verification environment is missing {key}")
 
 
+def _as_text(value: object) -> str:
+    """[R1.1c-C1] 把 subprocess 输出统一成 str。
+
+    TimeoutExpired.stdout/stderr 即使在 text=True 下也可能是 bytes（CPython 在超时
+    路径返回原始缓冲），而 _redact_output 按 str 拼接/replace，会 TypeError 丢掉
+    整条 timeout evidence。此处做局部归一：None → ""，bytes → utf-8 replace 解码，
+    str → 原样。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return str(value)
+
+
 def _run(cmd: list[str], *, timeout: int = 600, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env)
-        return proc.returncode, proc.stdout, proc.stderr
+        return proc.returncode, _as_text(proc.stdout), _as_text(proc.stderr)
     except subprocess.TimeoutExpired as exc:
         # [R1.1b-E] TimeoutExpired 丢弃 partial stdout/stderr；保留已捕获的部分证据，
         # 避免超时后 hotspot 阶段信息丢失（seed 超时定位必需）。
-        partial_out = exc.stdout if exc.stdout is not None else ""
-        partial_err = exc.stderr if exc.stderr is not None else ""
+        # [R1.1c-C1] 归一化为 str，保证返回类型恒为 tuple[int, str, str]。
+        partial_out = _as_text(exc.stdout)
+        partial_err = _as_text(exc.stderr)
         return 124, partial_out, partial_err or "command timeout"
     except FileNotFoundError as exc:
         return 127, "", str(exc)

@@ -129,26 +129,25 @@ class BarsCoverageService:
         db: AsyncSession,
         trade_date: date | None = None,
     ) -> dict[str, Any]:
-        """[R1.1b DailyFacts minimal contract] 在 compute_daily_coverage 之上，
-        仅用现有 bars_daily / instruments 无副作用派生 V2.1 DailyFacts 字段，
-        不新增表 / migration / run / publication / pointer。
+        """[R1.1c DailyFacts minimal contract] 在 compute_daily_coverage 之上，
+        仅用现有 bars_daily / instruments 无副作用派生 target-date daily readiness
+        判定所需的最小事实，不新增表 / migration / run / publication / pointer。
 
-        字段来源（全部可直接从现有 DB 事实派生）：
+        字段来源（全部可直接从现有 DB 事实派生，且全部参与 readiness 判定）：
         - eligible_count     = active A 股标的数（= compute_daily_coverage 的 total）
         - daily_ready_count  = 当日有 bars_daily 的 A 股数（= covered）
         - daily_missing_count = total - covered（可派生，非缺 SSOT）
-        - coverage_ratio     = covered / total
-        - max_bar_date       = bars_daily 全局最大 trade_date（已有查询能力）
-        - future_data_count  = bars_daily.trade_date > trade_date 的 A 股 bar 数
-                               （数据质量信号，仅上报，不阻断 daily_facts 可用性）
+        - coverage_ratio / coverage_raw = covered / total
         - adj_factor_valid_count / adj_factor_total_count =
             当日 bars_daily 中 adj_factor 非空且 >0 的计数 / 总数
-            （R1.1b 简化：以现有真实事实 adj_factor 合法性替代不存在的
-             adjustment_as_of SSOT；不得伪造 as_of/version）
+            （以现有真实事实 adj_factor 合法性作为 adjustment 合同；不建立
+             AdjustmentRun / adjustment_as_of / adjustment version / 新表 / 新 pointer）
         - source = "bars_daily"
 
-        daily_invalid_count：PRD10 未定义 invalid bar 规则，不自行发明，
-        故本方法不计算（标记为真实缺失字段，外部不得假设其存在）。
+        [R1.1c-C3] PRD10 MD-08 / PRD31 daily_facts 只要求 target-date daily readiness，
+        未要求 max_bar_date / future_data_count / daily_invalid_count / adjustment_as_of。
+        故本方法不再查询 max_bar_date / future_data_count（避免为未使用字段额外扫
+        bars_daily），也不发明 daily_invalid_count（PRD10 未定义 invalid bar 规则）。
         """
         if trade_date is None:
             trade_date = shanghai_business_date()
@@ -169,22 +168,8 @@ class BarsCoverageService:
         )
         total = int(total_result.scalar() or 0)
 
-        # max_bar_date：bars_daily 全局最大 trade_date（已有查询能力，不过滤）
-        max_bar_result = await db.execute(select(func.max(BarDaily.trade_date)))
-        max_bar_date = max_bar_result.scalar()
-
-        # future_data_count：严格晚于 trade_date 的 A 股 bar 数（数据质量信号）
-        future_result = await db.execute(
-            select(func.count())
-            .select_from(BarDaily)
-            .join(Instrument, BarDaily.instrument_id == Instrument.id)
-            .where(BarDaily.trade_date > trade_date)
-            .where(stock_symbol_sql_filter(Instrument))
-        )
-        future_data_count = int(future_result.scalar() or 0)
-
         # adj_factor 合法性：当日 bars_daily 中 adj_factor 非空且 >0 的计数 / 总数
-        # （R1.1b 简化：以现有真实 adj_factor 事实替代 adjustment_as_of SSOT）
+        # （以现有真实 adj_factor 事实作为 adjustment 合同，不引入 adjustment_as_of）
         adj_total_result = await db.execute(
             select(func.count())
             .select_from(BarDaily)
@@ -213,8 +198,6 @@ class BarsCoverageService:
             "daily_missing_count": total - covered,
             "coverage_ratio": round(coverage, 4),
             "coverage_raw": coverage,
-            "max_bar_date": max_bar_date.isoformat() if max_bar_date else None,
-            "future_data_count": future_data_count,
             "adj_factor_valid_count": adj_valid,
             "adj_factor_total_count": adj_total,
             "source": "bars_daily",

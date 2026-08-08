@@ -37,6 +37,7 @@ from app.domain_status import (
     READINESS_PENDING,
     READINESS_READY,
     READINESS_READY_REUSED,
+    READINESS_UNAVAILABLE,
 )
 from app.models.auction import (
     AuctionAnchorPublication,
@@ -75,12 +76,20 @@ _REVIEW = PUBLICATION_KIND_MARKET_REVIEW
 
 _DRID = "00000000-0000-0000-0000-000000000001"
 
+# [R1.1c-C2] 聚合用例 `_full_plan()` 的 daily_facts 事实：**完整覆盖**（ready==eligible、
+# adj 全合法）→ daily_facts READY/fresh，成为"全就绪"基线的可消费锚点。这样各聚合用例
+# 只需覆盖各自关注的其它产品（board_facts/chip/review 等）来引入非 fresh/不可消费，
+# 而不被 daily_facts 语义变化拖累。daily_facts 各分支由文件末尾 targeted 用例精确覆盖。
+_FAKE_ELIGIBLE = 10
+_FAKE_DAILY_READY = 10
+
 
 class _FakeResult:
     """db.execute 的假结果，支持 .all() 返回元组列表。"""
 
-    def __init__(self, rows):
+    def __init__(self, rows, scalar_value=0):
         self._rows = list(rows)
+        self._scalar_value = scalar_value
 
     def all(self):
         return list(self._rows)
@@ -92,13 +101,12 @@ class _FakeResult:
         return self._rows[0] if self._rows else None
 
     def scalar(self):
-        """BarsCoverageService.compute_daily_coverage 使用 result.scalar()。
+        """[R1.1c-C2] bars 计数查询经 db.execute(...).scalar() 返回。
 
-        _FakeDB 场景下 bars_daily / instruments 不路由具体计数，统一返回 0：
-        covered=0 / total=0 → coverage 0.0，使 daily_facts 进入 degraded（C3 真源收口，
-        canonical 不完整）。不伪造覆盖率。
+        由 _FakeDB.execute 按查询形态显式给出计数（bars_daily / instruments 不在
+        _TABLE_TO_MODEL 中，无法按实体路由），默认 0。
         """
-        return 0
+        return self._scalar_value
 
 
 # 表名 → ORM 模型类（用于按查询实体路由，避免依赖 _raw_columns/mapper 的内部结构）
@@ -290,7 +298,30 @@ class _FakeDB:
                 else:
                     out.append((row[0], "v1", row[2]))
             return _FakeResult(out)
+        scalar_value = self._bars_scalar(stmt)
+        if scalar_value is not None:
+            return _FakeResult([], scalar_value=scalar_value)
         return _FakeResult([])
+
+    def _bars_scalar(self, stmt):
+        """[R1.1c-C2] compute_daily_facts_detail 的 4 个计数查询按形态路由。
+
+        bars_daily / instruments 不在 _TABLE_TO_MODEL 中，无法按实体路由，故按
+        from/where 文本区分。聚合用例统一给出"部分覆盖"事实（eligible=10、
+        ready=8），使 daily_facts 落入 DEGRADED（case B），与这些用例既有的
+        CLOSURE_DEGRADED_READY 断言一致；不伪造完整覆盖。
+        daily_facts 各分支由本文件末尾 targeted 用例以 mock detail 精确覆盖。
+        """
+        text = str(stmt)
+        if "bars_daily" not in text and "instruments" not in text:
+            return None
+        if "bars_daily" not in text:
+            return _FAKE_ELIGIBLE  # active A 股 universe 规模
+        if "adj_factor" in text:
+            # adj_factor_valid_count 带 adj_factor IS NOT NULL/ > 0 过滤，
+            # adj_factor_total_count 不带；两者均等于当日已落 bars 的数量。
+            return _FAKE_DAILY_READY
+        return _FAKE_DAILY_READY
 
 
 def _pub(kind=_DAILY, drid=_DRID):
@@ -458,15 +489,17 @@ async def _collect_product(plan, product: str):
 # ----------------------------------------------------------------------------
 
 async def test_full_chain_fully_ready():
-    """九节点全部就绪（除 daily_facts canonical 不完整）→ degraded_ready（不得 fully_ready）。
+    """[R1.1c-C2] 九节点全部就绪且 daily_facts 完整（eligible==ready==adj 全合法）
+    → fully_ready。
 
-    [Phase 5B.1 / C3] daily_facts 现由 BarsCoverageService 真实覆盖率驱动，canonical 不完整
-    → readiness=READY_REUSED（非 fully fresh）→ 闭包恒为 degraded_ready，绝不 false-green。
+    旧基线依赖"daily_facts canonical 不完整 → READY_REUSED（可消费非 fresh）→ degraded_ready"；
+    C2 已移除 daily_facts 的 READY_REUSED（无真实 reuse provenance），完整才 READY/fresh。
+    `_full_plan()` 现默认 daily_facts 完整 → 全链 fully_ready。
     """
     ev = await _evaluate(_full_plan())
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_FULLY_READY
     assert ev.mandatory_products_ready is True
-    assert ev.mandatory_products_full_fresh is False
+    assert ev.mandatory_products_full_fresh is True
     assert ev.enhancement_jobs_terminal is True
 
 
@@ -494,13 +527,14 @@ async def test_board_facts_unavailable_blocks():
 async def test_old_pointer_ignores_failed_retry():
     """P0-2：指针存在时，即使有 failed 重试 run，readiness 仍为 ready（latest attempt 单列）。
 
-    [Phase 5B.1 / C3] daily_facts canonical 不完整 → degraded_ready（非 fully_ready）。
+    [R1.1c-C2] daily_facts 完整（_full_plan 默认）→ 全链 fully_ready；failed 重试 run
+    不改变 board_facts 仍 ready 的事实。
     """
     plan = _full_plan()
     # board_facts 指针仍在（published run），另有 failed 重试 run 不应影响
     plan["runs"][BoardFactsRun] = [_bf_run("published"), _bf_run("failed")]
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_FULLY_READY
 
 
 async def test_no_publish_pending():
@@ -516,13 +550,16 @@ async def test_no_publish_pending():
 
 async def test_failed_enhancement_terminal_fully_ready():
     """P0-3/P0-1：chip 失败（terminal+unavailable）→ 不阻断 mandatory chain，但 chip 非真正就绪，
-    闭包为 degraded_ready（不得误判 fully_ready）。"""
+    闭包为 degraded_ready（不得误判 fully_ready）。
+
+    [R1.1c-C2] daily_facts 完整（_full_plan 默认）→ mandatory 全部 fully fresh；
+    降级来源是 enhancement chip 非真正就绪，而非 daily_facts。"""
     plan = _full_plan()
     plan["pubs"][_CHIP] = [None]                 # chip 无 publication pointer
     plan["runs"][SchedulerJobRun] = [_chip_job("failed", chip_status="failed")]  # job failed
     ev = await _evaluate(plan)
     assert ev.closure == CLOSURE_DEGRADED_READY
-    assert ev.mandatory_products_full_fresh is False  # daily_facts canonical 不完整
+    assert ev.mandatory_products_full_fresh is True  # mandatory 全 fresh；降级来自 enhancement chip
     assert ev.enhancement_jobs_terminal is True
 
 
@@ -620,13 +657,10 @@ async def test_review_requires_market_review_pointer():
 
 
 async def test_review_pointer_present_ready():
-    """[Corrective-3.1 §P1] 有正式 market_review pointer 且 run 一致 → degraded_ready。
-
-    [Phase 5B.1 / C3] daily_facts canonical 不完整 → 恒为 degraded_ready（非 fully_ready）。
-    """
+    """[Corrective-3.1 §P1] 有正式 market_review pointer 且 run 一致，daily_facts 完整 → fully_ready。"""
     plan = _full_plan()
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_FULLY_READY
 
 
 async def test_dsa_lineage_mismatch_not_ready():
@@ -642,14 +676,11 @@ async def test_dsa_lineage_mismatch_not_ready():
 
 
 async def test_dsa_exact_match_ready():
-    """[Corrective-3.1 §P1] 投影归属当前 core run（matched>0）→ degraded_ready（daily_facts 非 fully fresh）。
-
-    [Phase 5B.1 / C3] daily_facts canonical 不完整 → 恒为 degraded_ready（非 fully_ready）。
-    """
+    """[Corrective-3.1 §P1] 投影归属当前 core run（matched>0）且 daily_facts 完整 → fully_ready。"""
     plan = _full_plan()
     plan["dsa_counts"] = (10, 10)
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_FULLY_READY
 
 
 async def test_dsa_run_item_count_mismatch_not_ready():
@@ -706,26 +737,21 @@ async def test_state_events_lineage_mismatch_not_ready():
 
 
 async def test_state_events_exact_match_ready():
-    """[Corrective-3.1 §P1] 事件归属当前 core run（matched>0）→ degraded_ready（daily_facts 非 fully fresh）。
-
-    [Phase 5B.1 / C3] daily_facts canonical 不完整 → 恒为 degraded_ready（非 fully_ready）。
-    """
+    """[Corrective-3.1 §P1] 事件归属当前 core run（matched>0）且 daily_facts 完整 → fully_ready。"""
     plan = _full_plan()
     # 与当前 core run（stock_core pointer_data_run_id = _DRID）匹配
     plan["state_event_rows"] = [("candidate", _DRID, 5)]
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_FULLY_READY
 
 
 async def test_board_aggregation_exact_lineage_ready():
     """[current-lineage validation] market_aggregation pointer 指向的 BoardAnalysisRun
-    source_core_run_id == 当前 stock_core pointer.data_run_id → degraded_ready。
-
-    [Phase 5B.1 / C3] daily_facts canonical 不完整 → 恒为 degraded_ready（非 fully_ready）。
-    """
+    source_core_run_id == 当前 stock_core pointer.data_run_id，且 daily_facts 完整
+    → fully_ready。"""
     plan = _full_plan()  # board run source_core=_DRID == current stock_core(_DRID)
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_FULLY_READY
 
 
 async def test_board_aggregation_stale_lineage_not_ready():
@@ -755,13 +781,11 @@ async def test_board_aggregation_stale_lineage_not_ready():
 async def test_review_exact_lineage_ready():
     """[current-lineage validation] market_review pointer 指向的 MarketReviewRun
     source_core_run_id == 当前 stock_core pointer 且 source_board_run_id == 当前
-    market_aggregation pointer → degraded_ready。
-
-    [Phase 5B.1 / C3] daily_facts canonical 不完整 → 恒为 degraded_ready（非 fully_ready）。
+    market_aggregation pointer，且 daily_facts 完整 → fully_ready。
     """
     plan = _full_plan()  # review run source_core=_DRID, source_board=_DRID 与当前指针一致
     ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_FULLY_READY
 
 
 async def test_review_stale_lineage_not_ready():
@@ -843,12 +867,9 @@ def test_classify_product_mapping():
 
 
 async def test_required_compatibility_ready_true_when_all_ready():
-    """全部产品就绪（除 daily_facts canonical 不完整）→ required_compatibility_ready=True 且 degraded_ready。
-
-    [Phase 5B.1 / C3] daily_facts canonical 不完整 → 恒为 degraded_ready（非 fully_ready）。
-    """
+    """全部产品就绪（含 daily_facts 完整）→ required_compatibility_ready=True 且 fully_ready。"""
     ev = await _evaluate(_full_plan())
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    assert ev.closure == CLOSURE_FULLY_READY
     assert ev.required_compatibility_ready is True
 
 
@@ -956,83 +977,31 @@ async def _daily_facts_state_with_detail(detail_result: dict) -> object:
         return await service._daily_facts_state(db, date(2026, 8, 4))
 
 
-async def test_daily_facts_never_reads_history_cross_section():
-    """C3/R1.1b：history_cross_section publication 不得使 daily_facts ready。
+def _detail(eligible, ready, adj_total=None, adj_valid=None):
+    """[R1.1c-C3] 构造 DailyFacts 最小事实（仅保留参与 readiness 判定的字段）。
 
-    即便存在 history_cross_section pointer（_full_plan 默认带），daily_facts 也必须
-    由 BarsCoverageService 的真实 bars 覆盖率决定；覆盖率不达标 → READY_REUSED。
+    不再包含 max_bar_date / future_data_count / daily_invalid_count / adjustment_as_of。
     """
-    cov = {
+    adj_total = ready if adj_total is None else adj_total
+    adj_valid = adj_total if adj_valid is None else adj_valid
+    coverage = ready / eligible if eligible else 0.0
+    return {
         "trade_date": "2026-08-04",
-        "eligible_count": 5000,
-        "daily_ready_count": 4980,
-        "daily_missing_count": 20,
-        "coverage_ratio": 0.996,
-        "coverage_raw": 4980 / 5000,
-        "max_bar_date": "2026-08-04",
-        "future_data_count": 0,
-        "adj_factor_valid_count": 4980,
-        "adj_factor_total_count": 4980,
+        "eligible_count": eligible,
+        "daily_ready_count": ready,
+        "daily_missing_count": eligible - ready,
+        "coverage_ratio": round(coverage, 4),
+        "coverage_raw": coverage,
+        "adj_factor_valid_count": adj_valid,
+        "adj_factor_total_count": adj_total,
         "source": "bars_daily",
     }
-    state = await _daily_facts_state_with_detail(cov)
-    assert state.product == "daily_facts"
-    # 覆盖率不达标（<1.0）→ 不得 READY/fresh，仍 READY_REUSED（可消费、非 fully fresh）
-    assert state.readiness == READINESS_READY_REUSED
-    assert state.freshness == "reused"
-    assert state.is_fully_fresh is False
-    assert state.lineage.get("reason_code") == "DAILY_FACTS_CANONICAL_INCOMPLETE"
-    # 必须来自 bars_coverage_service，而非 history_cross_section publication pointer
-    assert state.lineage.get("source_type") == "bars_coverage_service"
-    assert state.lineage.get("coverage_ratio") == 0.996
-    assert state.lineage.get("eligible_count") == 5000
-    assert state.lineage.get("daily_ready_count") == 4980
-
-
-async def test_daily_facts_incomplete_adj_factor_not_false_green():
-    """R1.1b：bars 覆盖率达标但 adj_factor 不完整 → 不得 false-green。
-
-    覆盖率=1.0 且 daily_missing=0，但 adj_factor 非空且>0 的计数 < 总数
-    （R1.1b 简化：以现有真实 adj_factor 合法性替代不存在的 adjustment_as_of SSOT），
-    故 daily_facts 仍不可声明 fully fresh → READY_REUSED，is_fully_fresh=False。
-    """
-    cov_full = {
-        "trade_date": "2026-08-04",
-        "eligible_count": 5000,
-        "daily_ready_count": 5000,
-        "daily_missing_count": 0,
-        "coverage_ratio": 1.0,
-        "coverage_raw": 1.0,
-        "max_bar_date": "2026-08-04",
-        "future_data_count": 0,
-        "adj_factor_valid_count": 0,   # 全部缺失/非法 → 不得 fully fresh
-        "adj_factor_total_count": 5000,
-        "source": "bars_daily",
-    }
-    state = await _daily_facts_state_with_detail(cov_full)
-    assert state.readiness != READINESS_READY  # 不得 fully fresh → 不得 false-green
-    assert state.readiness == READINESS_READY_REUSED
-    assert state.is_fully_fresh is False
-    assert state.lineage.get("reason_code") == "DAILY_FACTS_CANONICAL_INCOMPLETE"
 
 
 async def test_daily_facts_full_bars_yields_ready_fresh():
-    """R1.1b：目标交易日 bars 真正完整（覆盖率=1.0、无缺失、adj_factor 全部合法）
-    → daily_facts 诚实声明 READY/fresh，可支撑 fully_ready（非 false-green）。"""
-    detail = {
-        "trade_date": "2026-08-04",
-        "eligible_count": 5000,
-        "daily_ready_count": 5000,
-        "daily_missing_count": 0,
-        "coverage_ratio": 1.0,
-        "coverage_raw": 1.0,
-        "max_bar_date": "2026-08-04",
-        "future_data_count": 0,
-        "adj_factor_valid_count": 5000,
-        "adj_factor_total_count": 5000,
-        "source": "bars_daily",
-    }
-    state = await _daily_facts_state_with_detail(detail)
+    """[R1.1c-C2 case 1] full bars + valid adj → READY / fully fresh。"""
+    state = await _daily_facts_state_with_detail(_detail(5000, 5000))
+    assert state.product == "daily_facts"
     assert state.readiness == READINESS_READY
     assert state.freshness == "fresh"
     assert state.is_fully_fresh is True
@@ -1040,3 +1009,59 @@ async def test_daily_facts_full_bars_yields_ready_fresh():
     assert state.lineage.get("coverage_ratio") == 1.0
     assert state.lineage.get("daily_missing_count") == 0
     assert state.lineage.get("adj_factor_valid_count") == 5000
+
+
+async def test_daily_facts_partial_coverage_is_degraded_not_consumable():
+    """[R1.1c-C2 case 2] partial coverage → DEGRADED / not consumable。
+
+    不得用 READY_REUSED 表示缺失：daily_facts 无真实 reuse provenance，
+    而 READY_REUSED 在系统语义中属于"可安全消费"。
+    """
+    state = await _daily_facts_state_with_detail(_detail(5000, 4980))
+    assert state.readiness == READINESS_DEGRADED
+    assert state.readiness != READINESS_READY_REUSED
+    assert state.freshness == "fresh"
+    assert state.is_consumable is False
+    assert state.is_fully_fresh is False
+    assert state.lineage.get("reason_code") == "DAILY_FACTS_CANONICAL_INCOMPLETE"
+    assert state.lineage.get("source_type") == "bars_coverage_service"
+    assert state.lineage.get("eligible_count") == 5000
+    assert state.lineage.get("daily_ready_count") == 4980
+
+
+async def test_daily_facts_full_coverage_invalid_adj_is_degraded():
+    """[R1.1c-C2 case 3] full coverage + invalid adj → DEGRADED / not consumable。
+
+    adjustment 合同 = target-date adj_factor 非空且 >0；不建立 adjustment_as_of。
+    """
+    state = await _daily_facts_state_with_detail(
+        _detail(5000, 5000, adj_total=5000, adj_valid=0)
+    )
+    assert state.readiness == READINESS_DEGRADED
+    assert state.readiness != READINESS_READY
+    assert state.is_consumable is False
+    assert state.is_fully_fresh is False
+    assert state.lineage.get("reason_code") == "DAILY_FACTS_CANONICAL_INCOMPLETE"
+
+
+async def test_daily_facts_zero_target_date_bars_is_unavailable():
+    """[R1.1c-C2 case 4] zero target-date bars → UNAVAILABLE / not consumable。"""
+    state = await _daily_facts_state_with_detail(_detail(5000, 0))
+    assert state.readiness == READINESS_UNAVAILABLE
+    assert state.readiness != READINESS_READY_REUSED
+    assert state.freshness == "fresh"
+    assert state.is_consumable is False
+    assert state.is_fully_fresh is False
+    assert state.lineage.get("reason_code") == "DAILY_FACTS_MISSING"
+
+
+async def test_daily_facts_never_reads_history_cross_section():
+    """[R1.1c-C2 case 5] history_cross_section 存在 → 不影响 daily_facts。
+
+    _full_plan 默认带 history_cross_section pointer；daily_facts 仍必须完全由
+    BarsCoverageService 的真实 bars 事实决定（此处部分覆盖 → DEGRADED）。
+    """
+    state = await _daily_facts_state_with_detail(_detail(5000, 4980))
+    assert state.lineage.get("source_type") == "bars_coverage_service"
+    assert state.readiness == READINESS_DEGRADED
+    assert state.is_consumable is False

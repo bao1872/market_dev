@@ -943,62 +943,82 @@ class ProductReadinessService:
     async def _daily_facts_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """daily_facts：target-trade-date canonical daily readiness（R1.1b truth closure）。
+        """daily_facts：target-trade-date canonical daily readiness（R1.1c truth closure）。
 
         真实 SSOT = BarsCoverageService.compute_daily_facts_detail（纯查询，无副作用，
         与 system_overview / after_close / bars_scheduler 共用同一口径）。
 
-        R1.1b DailyFacts 最小充分合同（全部可由现有 bars_daily / instruments 无副作用派生，
+        DailyFacts 最小充分合同（全部可由现有 bars_daily / instruments 无副作用派生，
         不新增表 / migration / run / publication / pointer）：
         - eligible_count / daily_ready_count / coverage_ratio：直接已有
         - daily_missing_count = eligible - ready：可派生
-        - max_bar_date / future_data_count：可由 bars_daily 派生
-        - adjustment 硬门：以现有真实事实 adj_factor 合法性（非空且 >0）替代不存在的
-          adjustment_as_of SSOT（R1.1b SPEC SIMPLIFICATION，不得伪造 as_of/version）
-        - daily_invalid_count：PRD10 未定义 invalid bar 规则，真实缺失，不计算不假设
+        - adjustment 合同：target-date adj_factor 非空且 >0（不建立 AdjustmentRun /
+          adjustment_as_of / adjustment version / 新表 / 新 pointer）
 
-        判定（fail-closed，绝不 false-green）：
-        - 当且仅当目标交易日 bars 真正完整（coverage_raw>=1.0 且 daily_missing=0 且
-          adj_factor 全部合法）时 → READINESS_READY / "fresh"，可支撑 fully_ready；
-        - 否则 → READINESS_READY_REUSED / "reused" + reason_code
-          DAILY_FACTS_CANONICAL_INCOMPLETE（is_fully_fresh=False → 闭包永远
-          无法 fully_ready）。
+        [R1.1c-C2] 状态规则（fail-closed，绝不 false-green，不新增 readiness enum）：
+        - A. target-date bars 完整（eligible>0 且 ready==eligible 且 missing==0 且
+          adj_total==ready 且 adj_valid==adj_total）→ READINESS_READY / "fresh"；
+        - B. 有部分 target-date bars 但不满足 A → READINESS_DEGRADED / "fresh"
+          + reason_code DAILY_FACTS_CANONICAL_INCOMPLETE（不可消费）；
+        - C. 完全没有 target-date bars → READINESS_UNAVAILABLE / "fresh"
+          + reason_code DAILY_FACTS_MISSING（不可消费）。
+
+        本方法不使用 READINESS_READY_REUSED：系统语义中 ready_reused 属于"可安全消费"，
+        而 daily_facts 当前不存在真实 reuse provenance（没有复用旧 canonical artifact 的
+        指针/血缘），用它表示缺失会把不完整状态误判为可消费。
+
         不再把 history_cross_section publication 当作 daily_facts（旧 false mapping 已移除）。
         """
         cov = await BarsCoverageService.compute_daily_facts_detail(db, trade_date)
-        coverage_raw = float(cov.get("coverage_raw") or 0.0)
+        eligible = int(cov.get("eligible_count") or 0)
+        daily_ready = int(cov.get("daily_ready_count") or 0)
         daily_missing = int(cov.get("daily_missing_count") or 0)
         adj_total = int(cov.get("adj_factor_total_count") or 0)
         adj_valid = int(cov.get("adj_factor_valid_count") or 0)
-        fully_fresh = (
-            coverage_raw >= 1.0
-            and daily_missing == 0
-            and adj_total > 0
-            and adj_valid == adj_total
-        )
         lineage = {
             "source_type": "bars_coverage_service",
-            "eligible_count": cov.get("eligible_count"),
-            "daily_ready_count": cov.get("daily_ready_count"),
+            "eligible_count": eligible,
+            "daily_ready_count": daily_ready,
             "daily_missing_count": daily_missing,
             "coverage_ratio": cov.get("coverage_ratio"),
-            "max_bar_date": cov.get("max_bar_date"),
-            "future_data_count": cov.get("future_data_count"),
             "adj_factor_valid_count": adj_valid,
             "adj_factor_total_count": adj_total,
             "source": cov.get("source"),
         }
-        if fully_fresh:
-            # 目标交易日 bars 真正完整 → 可诚实声明 READY/fresh，支撑 fully_ready
+        complete = (
+            eligible > 0
+            and daily_ready == eligible
+            and daily_missing == 0
+            and adj_total == daily_ready
+            and adj_valid == adj_total
+        )
+        if complete:
+            # A：目标交易日 bars 真正完整 → 可诚实声明 READY/fresh，支撑 fully_ready
             return ProductReadinessState(
-                "daily_facts", READINESS_READY, "fresh",
-                is_mandatory=True, lineage=lineage,
+                "daily_facts",
+                READINESS_READY,
+                "fresh",
+                is_mandatory=True,
+                lineage=lineage,
             )
-        # 部分事实或不完整 → 仍可消费但非 fully fresh（fail-closed，绝不 false-green）
+        if daily_ready <= 0:
+            # C：目标交易日完全没有 bars → 不可消费
+            lineage["reason_code"] = "DAILY_FACTS_MISSING"
+            return ProductReadinessState(
+                "daily_facts",
+                READINESS_UNAVAILABLE,
+                "fresh",
+                is_mandatory=True,
+                lineage=lineage,
+            )
+        # B：有部分 target-date bars 但不完整 → 不可消费（fail-closed，绝不 false-green）
         lineage["reason_code"] = "DAILY_FACTS_CANONICAL_INCOMPLETE"
         return ProductReadinessState(
-            "daily_facts", READINESS_READY_REUSED, "reused",
-            is_mandatory=True, lineage=lineage,
+            "daily_facts",
+            READINESS_DEGRADED,
+            "fresh",
+            is_mandatory=True,
+            lineage=lineage,
         )
 
     async def _board_facts_state(
