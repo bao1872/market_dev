@@ -205,6 +205,8 @@ async def test_pg_100_stock_real_compute_call_counts(db_session, _db_connection)
 
     [R1.4 repair] SELF-CONTAINED：自建 100 instruments + 65 根日线 + released dsa_selector，
     不再依赖 seed；savepoint 内真实 core，测试结束随外层事务 rollback。
+    [R1.5c] session topology：内部硬编码 app.db.AsyncSessionLocal 也临时指向同一
+    _db_connection savepoint factory，使 instruments/bars/run-item claim 状态可见。
     """
     # 自建 released dsa_selector + 100 instruments + daily bars（savepoint 内）
     await _ensure_strategy_version(db_session)
@@ -283,6 +285,17 @@ async def test_pg_100_stock_real_compute_call_counts(db_session, _db_connection)
     # patch 为 classmethod 以保留 descriptor/signature，不凭猜测 monkeypatch
     StrategyLoader.load = classmethod(_patched_strategy_loader_load)
 
+    # [R1.5c] TEST SESSION TOPOLOGY：compute_review_core_with_run_items 内部硬编码
+    # `from app.db import AsyncSessionLocal`，用于 symbol lookup / MDAS batch read /
+    # mark_item_succeeded / mark_item_failed。这些独立 connection 看不到 savepoint 中
+    # 未提交的 instruments/bars/run-item claim 状态（导致 "instrument 不存在" +
+    # "lease_epoch 不匹配"）。因此临时把 app_db.AsyncSessionLocal 指向同一个
+    # _db_connection 外层事务的 savepoint factory，使内部 session_factory 与
+    # AsyncSessionLocal 全部绑定同一 outer transaction。finally 必须恢复。
+    import app.db as app_db
+    orig_async_session_local = app_db.AsyncSessionLocal
+    app_db.AsyncSessionLocal = sf
+
     try:
         result = await compute_review_core_with_run_items(
             trade_date=_TRADE_DATE,
@@ -294,7 +307,8 @@ async def test_pg_100_stock_real_compute_call_counts(db_session, _db_connection)
             session_factory=sf,
         )
     finally:
-        # 恢复全部 spy
+        # 恢复全部 spy + app_db.AsyncSessionLocal（不留 global monkeypatch）
+        app_db.AsyncSessionLocal = orig_async_session_local
         for svc_obj, attr, orig in _wrapped:
             setattr(svc_obj, attr, orig)
         MarketDataAggregationService.get_bars = orig_get_bars
@@ -302,6 +316,9 @@ async def test_pg_100_stock_real_compute_call_counts(db_session, _db_connection)
 
     # 硬断言
     snapshot_count = int(result.get("snapshot_count") or 0)
+    failed_count = int(result.get("failed_count") or 0)
+    skipped_count = int(result.get("skipped_count") or 0)
+    coverage = float(result.get("coverage") or 0.0)
     assert snapshot_count == n, f"应生成 {n} 只快照，实际={snapshot_count}"
     assert calls_15m["count"] == 0, f"daily-core 15m reads 应为 0，实际={calls_15m['count']}"
     # [R1.5b] daily Core 的 DSA 必须使用 precomputed projection，不得经
@@ -310,6 +327,10 @@ async def test_pg_100_stock_real_compute_call_counts(db_session, _db_connection)
         f"StrategyLoader.load 应为 0（应使用 precomputed projection），"
         f"实际={strategy_loader_load_calls['count']}"
     )
+    # [R1.5c] 补充 coverage 事实断言（不为变绿降低断言）
+    assert failed_count == 0, f"failed_count 应为 0，实际={failed_count}"
+    assert skipped_count == 0, f"skipped_count 应为 0，实际={skipped_count}"
+    assert coverage >= 1.0, f"coverage 应为 1.0，实际={coverage}"
     # kernel 调用计数（compute-once：五类 kernel 每股各算一次）
     # [CHANGE-20260806-005 / Phase 5] 补齐五类 kernel 断言（dsa/smc/bollinger/sqzmom/volume）。
     for key in ("dsa", "smc", "bollinger", "sqzmom", "volume"):
