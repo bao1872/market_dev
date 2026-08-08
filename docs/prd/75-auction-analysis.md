@@ -86,6 +86,14 @@
 - 上/下共识区（upper/lower consensus zones）；
 - 主峰（main peak）。
 
+### 3.3.1 锚点模式与晚到筹码（V2.1 对齐 PRD31 §5 PC-41）
+
+> 本条款为 PRD31 §5 竞价节点合同在同域 PRD 的显式传播，不引入新业务决策。
+
+- **三种锚点模式**：`structure_only`（仅 structure 锚点，`source_chip_run_id = NULL`）、`hybrid`（同时含 structure 与 chip 锚点）、`composite`（组合视图）。初始发布默认 `structure_only`，后续可在不破坏历史的前提下升级。
+- **晚到筹码创建新 `AuctionAnchorRun`**：当 chip 共识晚于 structure-only 锚点到达时，**必须创建新的 `AuctionAnchorRun`** 并补填 `source_chip_run_id`，不得原地修改已发布的 structure-only run。
+- **旧发布不可变**：已发布的 `AuctionAnchorRun` / `auction_analysis_publications` pointer 内容**不可原地修改**；任何修正（含 late chip 升级）必须创建新 run 并 supersede 旧发布，与 PRD31 §4 PC-40「published run 不原地修改」一致。
+
 ### 3.4 新鲜度与有效性
 
 - `freshness`：基于锚点形成后经过的交易日数衰减；`expired` 锚点不再参与当日分析；
