@@ -226,15 +226,72 @@ async def test_skip_publish_pointer_current_recovers_but_no_normal_publish_steps
         await _run_orchestrator(job_run=job_run, skip_publish=True)
         # skip_publish 断点恢复：pointer 已恢复 → chip 重新入队
         assert spies["chip"].called, "skip_publish 恢复应重新入队 chip"
-        # 但 normal publish 专属步骤不得错误翻转到 resume
+        # normal publish 专属步骤（auction / publishing 检查点）不得错误翻转到 resume
         assert not spies["auction"].called, \
             "skip_publish 不得执行 auction anchor"
-        assert not spies["aggregation"].called, \
-            "skip_publish 不得执行 board aggregation"
         assert not any(
             len(c.args) >= 3 and c.args[2] == AfterCloseRunStatus.PUBLISHING.value
             for c in spies["heartbeat_step"].call_args_list
         ), "skip_publish 不得推进 publishing 检查点"
+    finally:
+        _stop_patches(patchers)
+
+
+# ---------------------------------------------------------------------------
+# [Phase 4.4 RB-01 2026-08-07] Recovery Boundary Closure
+# Board aggregation 是 mandatory 步骤，判据只依赖 stock_core pointer 是否已发布，
+# 不受 skip_publish 控制。publishing 检查点上的断点恢复必须补齐 aggregation，
+# 否则 review 前置条件（aggregation_status == "succeeded"）永不满足。
+# ---------------------------------------------------------------------------
+async def test_rb01_skip_publish_recovery_still_runs_mandatory_board_aggregation():
+    """publishing 检查点断点恢复：stock_core 已发布 → 必须补齐 board aggregation。"""
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
+                            last_completed_step="publishing")
+    spies, patchers = _install_patches(
+        job_run, resolve_side_effect=_published_resolution)
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=True)
+        assert spies["aggregation"].called, (
+            "RB-01：skip_publish 断点恢复下 mandatory board aggregation 必须执行，"
+            "不得因 skip_publish 被永久跳过"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+async def test_rb01_skip_publish_recovery_runs_review_after_aggregation():
+    """publishing 断点恢复：aggregation 成功后 review 前置条件满足，review 必须执行。"""
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
+                            last_completed_step="publishing")
+    spies, patchers, record = _install_patches_with_order(
+        job_run, resolve_side_effect=_published_resolution)
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=True)
+        assert spies["aggregation"].called, "断点恢复应执行 board aggregation"
+        assert spies["create_run"].called, (
+            "RB-01：aggregation 成功后 review 前置条件应满足，review 必须执行"
+        )
+        assert record.index("chip") < record.index("aggregation"), (
+            "断点恢复下 chip 仍必须早于 board aggregation（PC-8）"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+async def test_rb01_stock_core_not_published_still_skips_aggregation():
+    """stock_core 未发布（superseded）→ aggregation 仍必须跳过，修复不放宽边界。"""
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
+                            last_completed_step="publishing")
+    spies, patchers = _install_patches(
+        job_run, resolve_side_effect=_superseded_resolution)
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=True)
+        assert not spies["aggregation"].called, (
+            "stock_core 未发布时 board aggregation 仍不得执行"
+        )
     finally:
         _stop_patches(patchers)
 

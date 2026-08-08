@@ -2223,9 +2223,10 @@ async def execute_after_close_run(
         异常向上传播（调用方应捕获并记录日志）
     """
     # [Phase4.2 corrective] 不再以顶部 "skipped" 默认值掩盖业务步骤未执行。
-    # 这些状态变量由 normal publish 分支（执行 auction anchor / board aggregation /
-    # publishing checkpoint）或 skip_publish 分支（显式置 skipped）赋值，
-    # 不得用统一的默认值假装“已处理”。
+    # 这些状态变量由 normal publish 分支（执行 auction anchor / publishing checkpoint）
+    # 或 skip_publish 分支（显式置 skipped）赋值，不得用统一的默认值假装“已处理”。
+    # [Phase 4.4 RB-01] board aggregation 例外：它是 mandatory 步骤，
+    # _aggregation_status 在 top-level post-core 段按 stock_core 发布状态统一赋值。
 
     # [JOB-02] 设置 lease_epoch ContextVar，子任务（asyncio.create_task）自动继承
     # _update_heartbeat_and_step 读取此 ContextVar 决定是否使用 fenced UPDATE
@@ -3325,8 +3326,9 @@ async def execute_after_close_run(
             # state events / chip / board aggregation 已下移到本 if 块之后的
             # top-level post-core 段（见下方 [P1-2] 段），以便：
             #   - normal publish：auction → state events → chip → aggregation → review
-            #   - skip_publish 断点恢复：state events / chip 仍执行（chip 重新入队），
-            #     auction / aggregation 不执行（由 `if not skip_publish` 守卫）。
+            #   - skip_publish 断点恢复：state events / chip / board aggregation 仍执行
+            #     （chip 重新入队；aggregation 为 mandatory，见 [Phase 4.4 RB-01]），
+            #     仅 auction anchor 与 publishing 检查点不执行。
 
             # [Phase5] - publishing 完成，更新心跳 + 检查点
             async with AsyncSessionLocal() as db:
@@ -3355,8 +3357,9 @@ async def execute_after_close_run(
             # 只有当 pointer 确实存在且 data_run_id == snapshot_run_id 时，本 run 才是正式
             # stock_core publication；否则（pointer 指向别人 / 不存在）一律视为未发布/被抢占，
             # chip 不得入队。禁止用 publish_failed=False 等局部布尔推断“已发布”。
-            # 注意：上面的 normal publish 专属步骤（auction anchor / board aggregation /
-            # publishing checkpoint）**不**在 skip_publish 分支执行。
+            # 注意：上面的 normal publish 专属步骤（auction anchor / publishing checkpoint）
+            # **不**在 skip_publish 分支执行；board aggregation 是 mandatory 步骤，
+            # 在下方 top-level post-core 段按 stock_core 发布状态执行（[Phase 4.4 RB-01]）。
             _stock_core_superseded = False
             if snapshot_run_id is not None:
                 # 断点恢复：局部布尔不可信，复用唯一权威判定 resolve_stock_core_published
@@ -3369,6 +3372,8 @@ async def execute_after_close_run(
                 _stock_core_published = False
                 _stock_core_superseded = False
             # skip_publish 路径不执行 normal publish 专属步骤，显式置 skipped 以如实反映未执行。
+            # 注意：_aggregation_status 由下方 top-level post-core 段无条件重新赋值，
+            # 此处默认值仅为防御性初始化（[Phase 4.4 RB-01]：aggregation 不再受 skip_publish 控制）。
             _auction_anchor_status = "skipped"
             _auction_publication_id = None
             _aggregation_status = "skipped"
@@ -3381,11 +3386,12 @@ async def execute_after_close_run(
         #   ├─ auction anchor（已在上方 if not skip_publish 块内）
         #   └─ DSA projection（保持现有 canonical projection 合同）
         #         ↓
-        #      board aggregation（仅 normal publish 执行）
+        #      board aggregation（mandatory：normal 与 skip_publish 断点恢复均执行）
         #         ↓
         #       review
-        # Chip / State Events 不等待 Board Aggregation；aggregation 以 `if not skip_publish`
-        # 守卫，故 skip_publish 断点恢复不执行 auction/aggregation，但仍 re-enqueue chip。
+        # Chip / State Events 不等待 Board Aggregation；[Phase 4.4 RB-01] aggregation 只以
+        # stock_core 是否已发布为守卫，skip_publish 断点恢复同样补齐 aggregation 与 review，
+        # 仅 auction anchor 属 normal publish 专属。
         if _stock_core_published and not _stock_core_superseded and snapshot_run_id is not None:
             try:
                 from app.services.state_event_service import (
@@ -3437,9 +3443,17 @@ async def execute_after_close_run(
         # Aggregation binds same source_core_run_id; failure only reruns
         # aggregation, does NOT reverse core. Main run status distinguishes
         # core_published vs optional_failure.
-        # [P1-2] 仅 normal publish 执行；skip_publish 断点恢复不重复 aggregation。
+        # [Phase 4.4 RB-01 2026-08-07] Board aggregation 是 mandatory 步骤，
+        # 判据只依赖「当前 stock_core pointer 是否已正式发布」，不再受
+        # skip_publish 控制。skip_publish 仅表示"stock_core 已在上次尝试中发布，
+        # 本次不重复发布"，若据此跳过 aggregation，会使 publishing 检查点上的
+        # 断点恢复永久丢失 mandatory aggregation，并连带使 review 前置条件
+        # （aggregation_status == "succeeded"）永不满足。
+        # 重入安全：compute_all_boards 按 source_core_run_id + taxonomy /
+        # membership / algorithm_version 匹配既有 BoardAnalysisRun，
+        # published_at 非空时幂等复用，不重复聚合。
         _aggregation_status = "skipped"
-        if not skip_publish and _stock_core_published and snapshot_run_id is not None:
+        if _stock_core_published and snapshot_run_id is not None:
             try:
                 from app.services.board_analysis_service import (
                     compute_all_boards,
