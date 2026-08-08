@@ -395,3 +395,129 @@ class TestSmcEventCursor:
                 if val is not None and bi is not None:
                     # freshness = bi - confirmed_index >= 0，不可能引用未来
                     assert val >= 0
+
+
+# =============================================================================
+# 6. Exact Prefix Invariance Matrix（FullSeries[T] == Truncated[:T+1].last）
+# =============================================================================
+
+# DSA prefix 字段（要求 Full[T] == Truncated[:T].last）
+_DSA_PREFIX_FIELDS = [
+    "regime_value",
+    "trend_transition",
+    "dsa_dir_bars",
+    "dsa_vwap_dev_pct",
+    "segment_id",
+    "segment_direction",
+    "segment_start_bar_index",
+    "segment_bars",
+    "segment_change_pct",
+    "segment_slope",
+    "current_vs_prev_volume_mean_ratio",
+    "current_vs_prev_amount_mean_ratio",
+    "prev_segment_volume_mean",
+]
+
+# SMC prefix 字段
+_SMC_PREFIX_FIELDS = [
+    "swing_bias",
+    "internal_bias",
+    "latest_bos_direction",
+    "latest_bos_freshness",
+    "latest_choch_direction",
+    "latest_choch_freshness",
+    "latest_ob_direction",
+    "latest_ob_freshness",
+    "latest_ob_active",
+]
+
+# Momentum prefix 字段
+_MOMENTUM_PREFIX_FIELDS = [
+    "volatility_phase",
+    "sqzmom_val",
+    "sqzmom_delta",
+    "momentum_direction",
+    "momentum_change",
+]
+
+
+class TestExactPrefixInvariance:
+    """FullSeries[T] == TruncatedSeries[:T+1].last（exact equality，非 freshness>=0）。"""
+
+    def _compare_field(self, field: str, full_val, trunc_val, t: int) -> str | None:
+        """返回不一致描述；一致返回 None。"""
+        if full_val is None and trunc_val is None:
+            return None
+        if full_val != trunc_val:
+            return f"{field}@{t}: full={full_val!r} trunc={trunc_val!r}"
+        return None
+
+    def test_dsa_prefix_matrix(self) -> None:
+        """DSA 字段 prefix invariant（regime/trend/segment），在若干 T 上 exact equality。"""
+        bars = _trend_bars(n=260)
+        full = compute_first_pyramid_history(bars, symbol="T", output_bars=260)
+        full_by_idx = {s["bar_index"]: s for s in full["daily_state"]}
+        # 选择若干代表 T（含潜在翻转/确认附近 + 均匀分布）
+        test_ts = [80, 120, 130, 140, 150, 160, 180, 200, 220]
+        mismatches: list[str] = []
+        for t in test_ts:
+            if t not in full_by_idx:
+                continue
+            trunc_bars = bars.iloc[: t + 1]
+            trunc = compute_first_pyramid_history(
+                trunc_bars, symbol="T", output_bars=t + 1,
+            )
+            trunc_last = trunc["daily_state"][-1]
+            for field in _DSA_PREFIX_FIELDS:
+                mismatch = self._compare_field(
+                    field, full_by_idx[t].get(field), trunc_last.get(field), t,
+                )
+                if mismatch:
+                    mismatches.append(mismatch)
+        assert not mismatches, "DSA prefix mismatch:\n" + "\n".join(mismatches)
+
+    def test_smc_prefix_matrix(self) -> None:
+        """SMC 字段 prefix invariant（swing/internal/latest events），exact equality。"""
+        bars = _trend_bars(n=300)
+        full = compute_first_pyramid_history(bars, symbol="T", output_bars=300)
+        full_by_idx = {s["bar_index"]: s for s in full["daily_state"]}
+        test_ts = [90, 100, 110, 140, 170, 200, 230, 260]
+        mismatches: list[str] = []
+        for t in test_ts:
+            if t not in full_by_idx:
+                continue
+            trunc_bars = bars.iloc[: t + 1]
+            trunc = compute_first_pyramid_history(
+                trunc_bars, symbol="T", output_bars=t + 1,
+            )
+            trunc_last = trunc["daily_state"][-1]
+            for field in _SMC_PREFIX_FIELDS:
+                mismatch = self._compare_field(
+                    field, full_by_idx[t].get(field), trunc_last.get(field), t,
+                )
+                if mismatch:
+                    mismatches.append(mismatch)
+        assert not mismatches, "SMC prefix mismatch:\n" + "\n".join(mismatches)
+
+    def test_momentum_prefix_matrix(self) -> None:
+        """Momentum 字段 prefix invariant（volatility/squeeze/momentum），exact equality。"""
+        bars = _trend_bars(n=300)
+        full = compute_first_pyramid_history(bars, symbol="T", output_bars=300)
+        full_by_idx = {s["bar_index"]: s for s in full["daily_state"]}
+        test_ts = [80, 120, 160, 180, 200, 240, 260, 280]
+        mismatches: list[str] = []
+        for t in test_ts:
+            if t not in full_by_idx:
+                continue
+            trunc_bars = bars.iloc[: t + 1]
+            trunc = compute_first_pyramid_history(
+                trunc_bars, symbol="T", output_bars=t + 1,
+            )
+            trunc_last = trunc["daily_state"][-1]
+            for field in _MOMENTUM_PREFIX_FIELDS:
+                mismatch = self._compare_field(
+                    field, full_by_idx[t].get(field), trunc_last.get(field), t,
+                )
+                if mismatch:
+                    mismatches.append(mismatch)
+        assert not mismatches, "Momentum prefix mismatch:\n" + "\n".join(mismatches)

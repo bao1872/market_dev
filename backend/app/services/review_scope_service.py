@@ -854,6 +854,18 @@ async def load_day_fact_maps(
         for state in (await session.execute(previous_stmt)).scalars()
     }
 
+    # [CHANGE-20260808] previous state contract guard：previous 若存在，其
+    # history_contract_version 也必须匹配 required version。
+    # 禁止 current=v2 + previous=v1 进入 review_previous_first_pyramid（fail closed）。
+    for _prev in previous_by_instrument.values():
+        _ver = (_prev or {}).get("history_contract_version")
+        if _ver != _REVIEW_HISTORY_CONTRACT_VERSION:
+            raise ValueError(
+                f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
+                f"expected={_REVIEW_HISTORY_CONTRACT_VERSION} got={_ver!r} "
+                f"for trade_date={trade_date}"
+            )
+
     # 3. current BarDaily（trade_date == target_date）
     # [CHANGE-20260808] 固定 5 个 date-level batch queries（正确性优先）：
     #   current bar 精确 == target_date；previous bar 用 DISTINCT ON 取每 instrument

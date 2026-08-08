@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -315,3 +316,56 @@ class TestBuildEventId:
         id2 = _build_event_id(evt, "UNKNOWN")
         assert id1 == id2
         assert id1.startswith("UNKNOWN_")
+
+
+class TestHistoryContractRunIdentity:
+    """history_contract_version 必须进入 run identity（v1/v2 不复用 succeeded run）。"""
+
+    def test_parameter_hash_differs_by_contract_version(self) -> None:
+        """不同 history_contract_version → 不同 parameter_hash。"""
+        from app.services.first_pyramid_history_service import _compute_parameter_hash
+        h1 = _compute_parameter_hash(250, False, "review-history-v1")
+        h2 = _compute_parameter_hash(250, False, "review-history-v2")
+        assert h1 != h2
+
+    def test_parameter_hash_stable_same_version(self) -> None:
+        """同 history_contract_version → 稳定 parameter_hash。"""
+        from app.services.first_pyramid_history_service import _compute_parameter_hash
+        a = _compute_parameter_hash(250, True, "review-history-v2")
+        b = _compute_parameter_hash(250, True, "review-history-v2")
+        assert a == b
+
+    def test_create_history_run_writes_contract_version(self) -> None:
+        """create_history_run 将 history_contract_version 写入 run.metadata_json。"""
+        import json as _json
+
+        from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
+        from app.services.first_pyramid_history_service import create_history_run
+
+        mock_session = AsyncMock()
+        # 幂等查找无已有 run
+        exec_result = MagicMock()
+        exec_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = exec_result
+
+        iid = uuid.uuid4()
+
+        async def _run():
+            return await create_history_run(
+                mock_session,
+                algorithm_version="1.0.0-core-split",
+                output_bars=250,
+                scope="A",
+                instrument_ids=[iid],
+            )
+
+        run, is_new = asyncio.run(_run())
+        assert is_new is True
+        assert isinstance(run, FirstPyramidHistoryRun)
+        metadata = _json.loads(run.metadata_json or "{}")
+        assert metadata.get("history_contract_version") == "review-history-v2"
+        # parameter_hash 应含 contract version 影响（与 v1 不同）
+        from app.services.first_pyramid_history_service import _compute_parameter_hash
+        assert run.parameter_hash == _compute_parameter_hash(
+            250, False, "review-history-v2",
+        )

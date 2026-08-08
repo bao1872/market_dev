@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -250,9 +251,20 @@ _HISTORY_ITEM_LEASE_SECONDS = 300
 _HISTORY_MAX_ATTEMPT_COUNT = 3
 
 
-def _compute_parameter_hash(output_bars: int, include_chip: bool) -> str:
-    """计算历史回补参数 hash（output_bars + include_chip）。"""
-    raw = f"output_bars={output_bars};include_chip={include_chip}"
+def _compute_parameter_hash(
+    output_bars: int,
+    include_chip: bool,
+    history_contract_version: str,
+) -> str:
+    """计算历史回补参数 hash。
+
+    [CHANGE-20260808] 必须纳入 history_contract_version，使 review-history-v1 与
+    review-history-v2 不能复用同一个 succeeded history run（parameter_hash 不同）。
+    """
+    raw = (
+        f"output_bars={output_bars};include_chip={include_chip};"
+        f"history_contract_version={history_contract_version}"
+    )
     return hashlib.md5(raw.encode()).hexdigest()[:16]
 
 
@@ -280,7 +292,12 @@ async def create_history_run(
     Returns:
         (FirstPyramidHistoryRun, is_new)
     """
-    parameter_hash = _compute_parameter_hash(output_bars, include_chip)
+    # [CHANGE-20260808] 局部 import 避免循环依赖；HISTORY_CONTRACT_VERSION 进入 run identity
+    from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
+
+    parameter_hash = _compute_parameter_hash(
+        output_bars, include_chip, HISTORY_CONTRACT_VERSION,
+    )
 
     # 幂等查找：同 algorithm_version + parameter_hash + scope 的活跃 run
     existing_stmt = (
@@ -312,6 +329,11 @@ async def create_history_run(
         skipped_count=0,
         status=HISTORY_RUN_RUNNING,
         started_at=datetime.now(UTC),
+        # [CHANGE-20260808] history_contract_version 进入 run metadata
+        metadata_json=json.dumps(
+            {"history_contract_version": HISTORY_CONTRACT_VERSION},
+            sort_keys=True,
+        ),
     )
     session.add(run)
     await session.flush()

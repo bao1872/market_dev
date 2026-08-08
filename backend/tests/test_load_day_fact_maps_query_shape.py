@@ -54,6 +54,7 @@ class _Instrument:
 def _make_session(
     instruments, current_payload, bar_sets,
     previous_payload=None, contract_version="review-history-v2",
+    previous_contract_version=None,
 ):
     """构造 mock AsyncSession：按调用顺序返回 5 次 date-level 批量查询结果。"""
     session = MagicMock()
@@ -76,8 +77,13 @@ def _make_session(
                 __iter__=lambda self: iter(states),
             )
         elif n == 2:  # 前日 FP state
+            _prev_ver = previous_contract_version or contract_version
+            _prev_payload = {
+                "history_contract_version": _prev_ver,
+                **(previous_payload or {"regime_value": 1}),
+            }
             prev = [
-                _State(inst, date(2026, 8, 3), previous_payload or {"regime_value": 1})
+                _State(inst, date(2026, 8, 3), _prev_payload)
                 for inst in instruments
             ]
             fake_result.scalars.return_value = MagicMock(
@@ -191,3 +197,22 @@ class TestLoadDayFactMapsQueryShape:
                 )
             )
         assert "HISTORY_CONTRACT_VERSION_MISMATCH" in str(exc_info.value)
+
+    def test_mixed_previous_contract_version_rejected(self) -> None:
+        """current=v2 + previous=v1 必须 fail closed（previous state contract guard）。"""
+        ids = [uuid.uuid4()]
+        payload = {"regime_value": 1}
+        bar_sets = [(10.0, 9.8, 1000.0, 10000.0)]
+        # current=v2，previous=v1（旧版本）
+        session, _ = _make_session(
+            ids, payload, bar_sets,
+            contract_version="review-history-v2",
+            previous_contract_version="review-history-v1",
+        )
+        with pytest.raises(ValueError) as exc_info:
+            asyncio.run(
+                load_day_fact_maps(
+                    session, trade_date=date(2026, 8, 4), instrument_ids=ids,
+                )
+            )
+        assert "HISTORY_CONTRACT_VERSION_MISMATCH(previous)" in str(exc_info.value)
