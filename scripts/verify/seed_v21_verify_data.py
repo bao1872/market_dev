@@ -1272,23 +1272,18 @@ async def _seed_scenario(verify_conn, scenario: str) -> None:
     # ProductReadiness._daily_facts_state 直接以 BarsCoverageService.compute_daily_facts_detail
     # （bars_daily 真实覆盖率）为 SSOT，所有场景统一可用，无需独立 daily_facts seed 步骤。
     if scenario == "pending_no_core":
-        # 只建 daily + instruments，stock_core 未发布 → closure=pending
-        await _add_instruments_prereq(td)
+        # [R1.4 Part 3] 不再运行 5200 core（为证明"无 core"先算 5200 core 逻辑矛盾）。
+        # pending 判定（evaluate_closure 分支2）只看 stock_core 是否可消费：只要
+        # 本场景不发布 stock_core publication 即 NO_PUBLICATION → pending。
+        # daily_facts 由顶层 _gen_synthetic_instruments_bars 的 bars 覆盖率驱动（READY），
+        # 无需 core 参与。
+        pass
     elif scenario == "blocked_mandatory_failure":
-        # mandatory 主链基本完成，但 board_facts 显式终态失败且无 publication
-        # → board_facts unavailable(terminal) → closure=blocked
-        # （run 表 error_code=EXTERNAL_GATE_UNSATISFIED；state.reason_code 由 service 生成为 RUN_FAILED）
-        core_run_id = await _add_instruments_prereq(td)
-        await _add_projection_selector(td, core_run_id)
+        # [R1.4 Part 3] 移除与 blocked 判定无关的 core/projection/chip/auction/
+        # aggregation/review 链。evaluate_closure 的 blocked 分支（首个 terminal+unavailable
+        # mandatory）在 pending 分支之前判定，只看第一个 unavailable mandatory。
+        # 仅需：daily_facts ready（bars 覆盖率，顶层已建）+ 真实 board_facts 终态失败。
         await _seed_blocked_board_failure(td)
-        await _run_chip_real(td, core_run_id=core_run_id)
-        await _finish_core_run(td, core_run_id)
-        await _add_full_publication(td, core_run_id)
-        await _add_auction_prereq(td, mode="composite")
-        # board aggregation 失败（无 cik/name → 不发布 market_aggregation pointer）
-        agg_run_id = await _publish_board_aggregation(td)
-        # blocked 场景 board 无指针 → review 仍尝试发布但会因无 board pointer 软失败（closure=blocked）
-        await _run_and_publish_review(td, core_run_id, agg_run_id)
     elif scenario == "core_ready_waiting_mandatory":
         # stock_core 可消费，但 review 未发布（mandatory 未完成）→ closure=core_ready
         core_run_id = await _add_instruments_prereq(td)
@@ -1496,9 +1491,12 @@ async def seed_all(verify_conn, *, strict: bool = True) -> None:
         "SELECT DISTINCT trade_date FROM stock_feature_snapshot_runs "
         "WHERE trade_date = ANY(:dates)"
     ), {"dates": list(_SCENARIO_TRADE_DATES.values())})).scalars().all())
-    # pending_no_core 场景不产生 core run，幂等判定只看会产生 core run 的场景
+    # [R1.4 Part 3] pending_no_core 与 blocked_mandatory_failure 场景不产生 core run
+    # （pending 无 stock_core；blocked 只构造 board_facts 终态失败），幂等判定只看
+    # 会产生 core run 的场景（其余四态）。
+    _NO_CORE_SCENARIOS = {"pending_no_core", "blocked_mandatory_failure"}
     core_bearing_dates = {
-        td for sc, td in _SCENARIO_TRADE_DATES.items() if sc != "pending_no_core"
+        td for sc, td in _SCENARIO_TRADE_DATES.items() if sc not in _NO_CORE_SCENARIOS
     }
     if core_bearing_dates.issubset(completed_dates):
         print("[seed] all scenario core runs already exist; validating closures only")

@@ -116,6 +116,43 @@ def _as_text(value: object) -> str:
     return str(value)
 
 
+def _extract_pytest_summary(stdout: str) -> str:
+    """[R1.4] 从 pytest stdout 提取 bounded 的真实测试 summary。
+
+    pytest 的逐测试进度行形如 "tests/xxx.py::test_y ... SKIPPED / PASSED / FAILED"，
+    末尾汇总行形如 "3 passed, 2 skipped, 1 failed in 12.34s"。gate 成功路径需要
+    如实记录 passed/skipped/failed 数量，不能把 SKIP 表述为 PASS。
+
+    返回 bounded 摘要文本：取末尾汇总行 + 末尾 "===...===" 短摘要块 + 逐测试 SKIPPED
+    行（若有）。缺汇总行时返回 ""（调用方降级为通用文案）。
+    """
+    lines = [l for l in (stdout or "").splitlines() if l.strip()]
+    summary_lines: list[str] = []
+    # 从后往前收集末尾的 ==== 摘要块与汇总行（pytest 短摘要块在最后）。
+    for line in reversed(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("===") and "passed" in stripped:
+            summary_lines.append(stripped)
+            continue
+        if "passed" in stripped and ("skipped" in stripped or "failed" in stripped or "warning" in stripped):
+            summary_lines.append(stripped)
+            continue
+        if stripped in ("PASSED",) or "SKIPPED" in stripped or "ERROR" in stripped:
+            summary_lines.append(stripped)
+            continue
+        if stripped.startswith(("==", "FAILED", "ERROR")):
+            summary_lines.append(stripped)
+            continue
+        # 遇到非摘要内容即停止（摘要块在末尾连续区）
+        break
+    if not summary_lines:
+        return ""
+    summary_lines.reverse()
+    return "\n".join(summary_lines)[-2000:]
+
+
 def _run(cmd: list[str], *, timeout: int = 600, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env)
@@ -350,11 +387,14 @@ class VerifyAttempt:
             self.exporter.record_gate("pg_tests", False, detail=diagnostic[-2000:])
             raise RuntimeError(f"自包含 PG 测试失败 (exit={code})")
         self.manifest["status"] = "pg_tests_ok"
-        self.exporter.record_gate(
-            "pg_tests", True,
-            detail="atomic_publication / projection_lifecycle / 100_stock_call_counts 全过",
-        )
-        self.exporter.log("run_self_contained_pg_tests: 通过")
+        # [R1.4] 成功路径保留真实 pytest summary（bounded），不再硬编码"全过"。
+        # pytest 的 summary 形如 "3 passed, 2 skipped, 0 failed in 12.34s"，
+        # 落在输出末尾的 "===...===" 摘要块内。若某个自包含测试被 SKIP（如 100-stock
+        # 在空库下 skip），此处必须如实反映，避免把 SKIP 表述为 PASS。
+        summary = _extract_pytest_summary(out)
+        detail = summary if summary else "pg_tests 退出码 0（未提取到 pytest summary，见 logs）"
+        self.exporter.log(f"run_self_contained_pg_tests: 通过，pytest summary:\n{detail}")
+        self.exporter.record_gate("pg_tests", True, detail=detail)
 
     def run_synthetic_seed_twice(self) -> None:
         """运行 100% synthetic Seed 两次，验证幂等（第二次不冲突）。"""
