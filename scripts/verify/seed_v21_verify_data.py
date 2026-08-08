@@ -1311,6 +1311,15 @@ async def _ensure_strategy_version_canonical(db, version_id: uuid.UUID) -> None:
         ),
         {"id": str(def_id)},
     )
+    # [R1.5c] 若 dsa_selector 已存在（其它来源/先前 scenario），ON CONFLICT DO NOTHING
+    # 会跳过插入，导致 def_id 指向不存在的行 → strategy_versions FK 违例。
+    # 必须读取真实存在的 strategy_definitions.id（与 100-stock 测试 _ensure_strategy_version
+    # 的 SELECT 惯例一致），不能假设 _cfixture 与既有行 id 一致。
+    def_id = (
+        await db.execute(
+            text("SELECT id FROM strategy_definitions WHERE strategy_key='dsa_selector'")
+        )
+    ).scalar_one()
     await db.execute(
         text(
             "INSERT INTO strategy_versions "
