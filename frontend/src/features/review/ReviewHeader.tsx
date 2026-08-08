@@ -2,7 +2,7 @@
 // 展示：交易日与前后交易日 / Review发布状态 / Core/Board Run /
 //      股票与板块覆盖率 / 算法版本、筛选器版本、历史基线 / 数据质量入口
 // 顶部不得显示 AI 自由生成的市场结论
-import type { ReviewChipCoverage, ReviewOverview } from './types'
+import type { ReviewOverview } from './types'
 import styles from './review.module.scss'
 
 const RUN_STATUS_META: Record<string, { label: string; cls: string }> = {
@@ -21,23 +21,15 @@ const RUN_STATUS_META: Record<string, { label: string; cls: string }> = {
 
 // [QM-63 2026-08-04] 降级原因中文说明。
 // 未收录的 code 原样展示，不猜测、不静默丢弃。
+// [Phase 5B.1 / C2] Chip 为 external enhancement，不属于 Review core 降级范畴，
+// 故 CHIP_UNAVAILABLE / CHIP_PARTIAL 不再映射为中文“core-only 降级”表述。
 const DEGRADED_REASON_LABEL: Record<string, string> = {
-  CHIP_UNAVAILABLE: '筹码数据不可用（core-only 降级）',
-  CHIP_PARTIAL: '筹码数据部分成功（覆盖不完整）',
   AUCTION_UNAVAILABLE: '竞价数据不可用',
   AUCTION_FAILED: '竞价计算失败',
 }
 
 function degradedReasonText(code: string): string {
   return DEGRADED_REASON_LABEL[code] ?? code
-}
-
-// [P0 2026-08-04] chip 覆盖率悬浮说明：真实覆盖/成功/缺失明细
-function chipCoverageTitle(cov: ReviewChipCoverage): string {
-  return (
-    `chip 覆盖率 ${Math.round((cov.coverage ?? 0) * 100)}%` +
-    `（成功 ${cov.succeededCount}/${cov.expectedCount ?? 0}，缺失 ${cov.missingCount}）`
-  )
 }
 
 function CoverageItem({ label, ratio }: { label: string; ratio: number | null | undefined }) {
@@ -122,26 +114,9 @@ export default function ReviewHeader({
               <span className={styles.metaLabel}>Board Run:</span>
               <span className={styles.metaValue}>{overview.sourceBoardRunId.slice(0, 8)}</span>
             </span>
-            {/* [P0 2026-08-04] chip 覆盖率：chip 无独立 run 记录，sourceChipRunId
-                恒为 null，不得把 core run id 误称 Chip Run。展示真实覆盖率。 */}
-            <span className={styles.metaItem}>
-              <span className={styles.metaLabel}>Chip:</span>
-              {overview.chipCoverage && overview.chipCoverage.coverage !== null ? (
-                <span
-                  className={styles.metaValue}
-                  title={chipCoverageTitle(overview.chipCoverage)}
-                >
-                  {Math.round(overview.chipCoverage.coverage * 100)}%
-                </span>
-              ) : (
-                <span
-                  className={styles.metricUnavailable}
-                  title="chip 共识不可用，本次复盘降级为 core-only"
-                >
-                  不可用
-                </span>
-              )}
-            </span>
+            {/* [Phase 5B.1 / C2] Chip 是 external enhancement，不属于 Review P/Q/U/C/V 或发布门，
+                不再在 Review-core metadata 中展示 Chip 覆盖率 / “不可用” / “core-only 降级”。
+                Review P/Q/U/C/V、unique identity、publication pointer 均不变。 */}
           </div>
         )}
       </div>

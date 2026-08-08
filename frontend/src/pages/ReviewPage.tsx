@@ -326,6 +326,21 @@ export default function ReviewPage() {
         }}
       />
       <ReviewStageNav stage={urlState.stage} onChange={handleStageChange} />
+      {/* [Phase 5B.1 / C1] 竞价回流 auxiliary entry：复用既有 URL state（stage='auction'），
+          不新增 route / 页面 / navigation architecture。 */}
+      <div className={styles.auxEntry}>
+        <button
+          type="button"
+          className={
+            urlState.stage === 'auction'
+              ? `${styles.auxEntryBtn} ${styles.auxEntryBtnActive}`
+              : styles.auxEntryBtn
+          }
+          onClick={() => handleStageChange('auction')}
+        >
+          竞价回流
+        </button>
+      </div>
       {/* 面包屑 */}
       <div className={styles.breadcrumb}>
         {breadcrumb.map((part, i) => (

@@ -53,11 +53,11 @@ from app.models.factor_publication import (
     PUBLICATION_KIND_AUCTION_ANCHOR,
     PUBLICATION_KIND_BOARD_FACTS,
     PUBLICATION_KIND_CHIP_CONSENSUS,
-    PUBLICATION_KIND_HISTORY_CROSS_SECTION,
     PUBLICATION_KIND_MARKET_AGGREGATION,
     PUBLICATION_KIND_STOCK_CORE,
     SCOPE_TYPE_MARKET,
 )
+from app.services.bars_coverage_service import BarsCoverageService
 
 # [V2.1 P1-3] readiness 完整性门槛：matched/eligible 覆盖率须达门槛才 ready，
 # 仅 matched>0 不得判 ready（避免存在性检查）。默认 1.0（全量），可配置化。
@@ -943,17 +943,45 @@ class ProductReadinessService:
     async def _daily_facts_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """daily_facts：历史截面（history_cross_section）发布指针。"""
-        st = await self._publication_readiness(
-            db, trade_date, PUBLICATION_KIND_HISTORY_CROSS_SECTION,
-            "daily_facts", is_mandatory=True,
-        )
-        if st is not None:
-            return st
+        """daily_facts：target-trade-date canonical daily readiness（C3 truth closure）。
+
+        真实 SSOT = BarsCoverageService.compute_daily_coverage（纯查询，无副作用，
+        与 system_overview / after_close / bars_scheduler 共用同一口径）。
+
+        V2.1 要求的完整 canonical 字段中，该 helper 仅能提供部分：
+        - eligible_count   = total（active A 股标的数）
+        - daily_ready_count = covered（当日有 bars_daily 的 A 股数）
+        - coverage_ratio   = coverage
+        - source           = "bars_daily"
+        其余字段（daily_missing_count / daily_invalid_count / max_bar_date /
+        adjustment_as_of / future_data_count）当前系统无事实来源。
+
+        按 C3 选项 B：部分事实 → fail-closed：
+        - readiness = degraded（有真实 coverage，但 canonical 不完整，不得 false-green）；
+        - lineage 保留 proven coverage / source；
+        - reason_code = DAILY_FACTS_CANONICAL_INCOMPLETE；
+        - 不再把 history_cross_section publication 当作 daily_facts（旧 false mapping 已移除）。
+        """
+        cov = await BarsCoverageService.compute_daily_coverage(db, trade_date)
+        lineage = {
+            "source_type": "bars_coverage_service",
+            "reason_code": "DAILY_FACTS_CANONICAL_INCOMPLETE",
+            "eligible_count": cov.get("total"),
+            "daily_ready_count": cov.get("covered"),
+            "coverage_ratio": cov.get("coverage"),
+            "source": cov.get("source"),
+        }
+        # 真实 SSOT 仅提供部分 canonical 字段（coverage / eligible / source），
+        # V2.1 要求的 daily_missing_count / daily_invalid_count / max_bar_date /
+        # adjustment_as_of / future_data_count 当前系统无事实来源。
+        # 按 C3 选项 B（最合适 enum）：daily_facts 有真实覆盖率（可消费），但 canonical
+        # 不完整 → readiness=READY_REUSED（consumable、非 fully fresh），freshness=reused；
+        # 既不再把 history_cross_section 当 daily_facts，也绝不 false-green（is_fully_fresh
+        # 为 False → 闭包永远无法 fully_ready）。lineage 保留 proven coverage / source。
         return ProductReadinessState(
-            "daily_facts", READINESS_PENDING, "fresh",
-            lineage={"source_type": "publication_pointer",
-                     "reason_code": "NO_PUBLICATION"},
+            "daily_facts", READINESS_READY_REUSED, "reused",
+            is_mandatory=True,
+            lineage=lineage,
         )
 
     async def _board_facts_state(

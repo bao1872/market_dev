@@ -216,6 +216,36 @@
   color: v.$color-text-dim;
 }
 
+// ===== 竞价回流 auxiliary entry（Phase 5B.1 / C1）=====
+.auxEntry {
+  display: flex;
+  align-items: center;
+  padding: 6px 16px 0;
+}
+
+.auxEntryBtn {
+  padding: 4px 12px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 6px;
+  background: transparent;
+  color: v.$color-muted;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.auxEntryBtn:hover {
+  border-color: v.$color-primary;
+  color: v.$color-primary;
+}
+
+.auxEntryBtnActive {
+  border-color: v.$color-primary;
+  color: v.$color-primary;
+  background: v.$color-primary-soft;
+  font-weight: 600;
+}
+
 // ===== 主体区域 =====
 .main {
   flex: 1;
