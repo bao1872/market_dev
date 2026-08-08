@@ -66,6 +66,8 @@ $color-green: $color-down;        // 旧跌色 → V1.0 跌色
 $color-red: $color-up;            // 旧涨色 → V1.0 涨色
 $color-orange: $color-warning;    // 旧橙 → 预警橙
 $color-yellow: $color-warning;    // 旧黄 → 预警橙（合并）
+$color-primary: $color-brand;              // 旧主品牌色别名 → 品牌莹感绿
+$color-primary-soft: rgba(0, 246, 194, 0.14); // 旧主品牌淡色别名（与 chipBrand 淡色一致）
 // $color-purple 已在上方定义，保持不变
 
 // 同时导出为 CSS 自定义属性，便于在 CSS Modules 中通过 var() 使用，
