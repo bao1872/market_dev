@@ -509,6 +509,110 @@ async def test_cab_pointer_mismatch_does_pointer_only_reconciliation(
     assert result["status"] == "succeeded"
 
 
+@patch("app.services.board_analysis_service.compute_board_analysis")
+@patch("app.services.board_analysis_service.publish_market_aggregation")
+@patch("app.services.board_analysis_service.get_publication")
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_wrong_pointer_never_recomputes_artifact(
+    mock_get_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+    mock_publish: AsyncMock,
+    mock_compute: AsyncMock,
+) -> None:
+    """[Phase 4.4.3 强化] 现有 succeeded published batch + live pointer 指向错误 run →
+    必须只做 pointer-only reconciliation，**直接锁定历史 published artifact 不重算**：
+    patch compute_board_analysis 并断言其 **从未被调用**。不依赖空 boards fixture 间接证明。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    batch_run = _make_existing_batch(source_core_run_id=source_core)
+    mock_get_publication.return_value = _make_core_pointer(
+        data_run_id=uuid.uuid4(),  # 错误的旧 run（情况 C）
+    )
+    mock_publish.return_value = _make_core_pointer(data_run_id=batch_run.id)
+
+    session = _make_session_with_batch(batch_run)
+    result = await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=True,
+    )
+
+    # 直接断言：历史 published artifact 不被重算
+    mock_compute.assert_not_awaited(), (
+        "pointer-only reconciliation 不得重算历史 published artifact"
+    )
+    mock_publish.assert_awaited_once()
+    assert result["idempotent_reuse"] is True
+    assert result["pointer_confirmed"] is True
+
+
+@patch("app.services.board_analysis_service.publish_market_aggregation")
+@patch("app.services.board_analysis_service.get_publication")
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_pointer_reconcile_keeps_original_published_at(
+    mock_get_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+    mock_publish: AsyncMock,
+) -> None:
+    """[Phase 4.4.3 Fix 1] pointer-only reconciliation 不得修改历史
+    batch_run.published_at：live pointer missing 与 wrong pointer 两种情况下，
+    batch_run.published_at 必须保持 original_published_at 不变。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    batch_run = _make_existing_batch(source_core_run_id=source_core)
+    original_published_at = batch_run.published_at
+    mock_publish.return_value = _make_core_pointer(data_run_id=batch_run.id)
+
+    # 情形 B：live pointer 缺失
+    mock_get_publication.return_value = None
+    session = _make_session_with_batch(batch_run)
+    await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=True,
+    )
+    assert batch_run.published_at == original_published_at, (
+        "live pointer missing reconcile 后 published_at 不应改变"
+    )
+
+    # 情形 C：live pointer 指向错误 run
+    mock_get_publication.return_value = _make_core_pointer(
+        data_run_id=uuid.uuid4(),
+    )
+    session = _make_session_with_batch(batch_run)
+    await board_analysis_service.compute_all_boards(
+        session, _TRADE_DATE, publish=True,
+    )
+    assert batch_run.published_at == original_published_at, (
+        "wrong pointer reconcile 后 published_at 不应改变"
+    )
+
+
+@patch(
+    "app.services.board_analysis_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_cab_published_but_non_succeeded_fails_closed(
+    mock_get_core: AsyncMock,
+) -> None:
+    """[Phase 4.4.3 Fix 2 fail-closed] batch_run.published_at is not None 但
+    status != 'succeeded' → 不得 fall-through 用同一 batch_run.id 重算/upsert 历史
+    snapshots；必须抛出领域错误（fail-closed，留待人工治理）。"""
+    source_core = uuid.uuid4()
+    mock_get_core.return_value = source_core
+    # 历史 partial/failed 却 published_at 非空（异常状态）
+    batch_run = _make_existing_batch(
+        status="partial", source_core_run_id=source_core,
+    )
+    session = _make_session_with_batch(batch_run)
+    with pytest.raises(ValueError):
+        await board_analysis_service.compute_all_boards(
+            session, _TRADE_DATE, publish=True,
+        )
+
+
 @patch("app.services.board_analysis_service.publish_market_aggregation")
 @patch("app.services.board_analysis_service.get_publication")
 @patch(

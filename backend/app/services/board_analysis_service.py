@@ -1849,9 +1849,9 @@ async def compute_all_boards(
                 pointer_confirmed = (
                     pub is not None and pub.data_run_id == batch_run.id
                 )
-                if pointer_confirmed:
-                    batch_run.published_at = datetime.now(UTC)
-                    await session.flush()
+                # [Phase 4.4.3] pointer-only reconciliation 只修改 FactorPublication
+                # live pointer，**不得**覆盖已有 BoardAnalysisRun.published_at（历史发布
+                # 时间戳必须保持不变，即使 reconcile 成功也不更新）。
                 return {
                     "board_analysis_run_id": str(batch_run.id),
                     "trade_date": trade_date.isoformat(),
@@ -1888,14 +1888,18 @@ async def compute_all_boards(
                     "pointer_status": "missing",
                 }
 
-        # batch_run 非 succeeded（历史 partial/failed 却 published_at 非空）→
-        # 没有不可变 artifact 可复用，走下方正式 precompute 路径重算并发布。
-        logger.warning(
-            "[BoardAnalysis] batch_run=%s status=%s 非 succeeded 但 published_at "
-            "非空，走正式重算路径",
-            batch_run.id, batch_run.status,
+        # [Phase 4.4.3 fail-closed] batch_run.published_at is not None 但
+        # status != "succeeded"：这是异常状态（历史 partial/failed 却曾 published）。
+        # 不得 fall-through 用同一个 published batch_run.id 重算或 upsert 历史
+        # snapshots（会原地修改 immutable artifact）；也不为它创建复杂恢复机制。
+        # fail-closed：抛出领域错误，由 orchestrator 映射为 aggregation failed，
+        # Review 不执行；已有 BoardAnalysisRun / snapshots 不被修改，留待人工治理。
+        raise ValueError(
+            f"[BoardAnalysis] invariant violation: batch_run={batch_run.id} "
+            f"published_at is not None but status={batch_run.status!r} "
+            f"(expected 'succeeded'). Refusing to recompute or upsert immutable "
+            f"published artifact; requires manual governance intervention."
         )
-        # 不 return，落入下方 precompute 分支
     else:
         batch_run.status = "running"
         batch_run.expected_count = expected_count

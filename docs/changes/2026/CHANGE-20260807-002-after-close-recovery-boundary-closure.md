@@ -3,7 +3,7 @@
 - **日期**: 2026-08-07
 - **类型**: behavior（correctness bugfix）
 - **影响范围**: 盘后编排（after_close_orchestrator）断点恢复路径 / Board Aggregation / Review 前置条件
-- **状态**: `implemented_unconfirmed`（Phase 4.4.1 + 4.4.2 targeted PURE_UNIT 全过；未部署、无 migration、远程验证未授权未执行）
+- **状态**: `implemented_unconfirmed`（Phase 4.4.1 + 4.4.2 + 4.4.3 targeted PURE_UNIT 全过；未部署、无 migration、远程验证未授权未执行）
 - **来源**: `ref/代码审计.md` Phase 4.4 Recovery Boundary Closure，严重级 (P0) RB-01
 
 ## 1. 问题（RB-01 Recovery Boundary Collapse）
@@ -237,6 +237,54 @@ precompute 正式发布路径同步改造：捕获 `publish_market_aggregation` 
 - 治理检查：`Governance check passed.`
 - `test_board_aggregation_publication_unit.py` + `test_after_close_phase0_control_flow.py`：
   **31 passed**（含新增/重写），现有 recovery / superseded / partial / failed / happy path 全部保持通过。
+- 未跑 full PURE_UNIT（按审计报告测试纪律只跑 targeted）。
+
+## 8. Phase 4.4.3 immutable metadata final guard
+
+基于已推送 `40aa9b2` 继续，不 reset/rewrite，不启动 Phase 5/7。目标：完成 published
+BoardAnalysisRun 的最终 immutability，不扩大业务范围。
+
+### 8.1 Pointer-only reconciliation 不得修改历史 published_at
+
+`compute_all_boards` 的 B·C 分支在 `pointer_confirmed` 成功后原会覆盖
+`batch_run.published_at = datetime.now(UTC)`。本次**删除该覆盖**：pointer-only
+reconciliation 只修改 `FactorPublication` live pointer；已有 BoardAnalysisRun 的 original
+`published_at` 必须保持不变（即使 reconcile 成功也不更新）。
+
+### 8.2 异常状态 fail-safe
+
+若 `batch_run.published_at is not None` **且** `batch_run.status != "succeeded"`（历史
+partial/failed 却曾 published 的异常状态），**不得** fall-through 用同一个 published
+`batch_run.id` 重算或 upsert 历史 snapshots。采用 **fail-closed**：明确抛出 `ValueError`
+（领域错误），由 orchestrator 的 `except` 映射为 `_aggregation_status="failed"`，Review 不执行；
+不修改历史 BoardAnalysisRun / snapshots，留待人工治理。不为该异常状态创建复杂恢复机制。
+
+orchestrator 现状已满足：`compute_all_boards` 调用位于 `try/except` 中，任何异常均落入
+`_aggregation_status = "failed"`，Review 前置条件不满足，故不执行（无需改动 orchestrator）。
+
+### 8.3 强化测试
+
+- `test_cab_wrong_pointer_never_recomputes_artifact`：**patch `compute_board_analysis`**，
+  断言其 `assert_not_awaited()`，直接锁定「历史 published artifact 不重算」，不依赖空 boards
+  fixture 间接证明。
+- `test_cab_pointer_reconcile_keeps_original_published_at`：记录 `original_published_at`；
+  live pointer missing 与 wrong pointer 两种 reconcile 后均断言 `published_at == original`。
+- `test_cab_published_but_non_succeeded_fails_closed`：`status="partial"` 且 `published_at`
+  非空 → `pytest.raises(ValueError)`。
+
+### 8.4 Phase 4.4.3 变更文件
+
+- `backend/app/services/board_analysis_service.py`
+  - B·C 分支删除 `batch_run.published_at = datetime.now(UTC)` 覆盖。
+  - 非 succeeded published batch 改为 `raise ValueError(...)` fail-closed（原 fall-through 重算）。
+- `backend/tests/test_board_aggregation_publication_unit.py`（新增 3 项 + 强化 1 项，见 §8.3）
+
+### 8.5 Phase 4.4.3 测试执行（`PURE_UNIT_TEST=1`，targeted）
+
+- 代码 compile：ok
+- 治理检查：`Governance check passed.`
+- `test_board_aggregation_publication_unit.py` + `test_after_close_phase0_control_flow.py`：
+  **34 passed**（含新增/重写），现有 recovery / superseded / partial / failed / happy path 全部保持通过。
 - 未跑 full PURE_UNIT（按审计报告测试纪律只跑 targeted）。
 
 ## 6. 限制与未完成
