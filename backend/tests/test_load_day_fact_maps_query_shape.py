@@ -18,6 +18,8 @@ import uuid
 from datetime import date
 from unittest.mock import MagicMock
 
+import pytest
+
 from app.services.review_scope_service import load_day_fact_maps
 
 
@@ -49,8 +51,11 @@ class _Instrument:
         self.name = symbol
 
 
-def _make_session(instruments, current_payload, bar_sets, previous_payload=None):
-    """构造 mock AsyncSession：按调用顺序返回 4 次批量查询结果。"""
+def _make_session(
+    instruments, current_payload, bar_sets,
+    previous_payload=None, contract_version="review-history-v2",
+):
+    """构造 mock AsyncSession：按调用顺序返回 5 次 date-level 批量查询结果。"""
     session = MagicMock()
     call_count = {"n": 0}
 
@@ -59,8 +64,12 @@ def _make_session(instruments, current_payload, bar_sets, previous_payload=None)
         n = call_count["n"]
         fake_result = MagicMock()
         if n == 1:  # 当日 FP state
+            _payload = {
+                "history_contract_version": contract_version,
+                **(current_payload or {}),
+            }
             states = [
-                _State(inst, date(2026, 8, 4), current_payload)
+                _State(inst, date(2026, 8, 4), _payload)
                 for inst in instruments
             ]
             fake_result.scalars.return_value = MagicMock(
@@ -74,13 +83,21 @@ def _make_session(instruments, current_payload, bar_sets, previous_payload=None)
             fake_result.scalars.return_value = MagicMock(
                 __iter__=lambda self: iter(prev),
             )
-        elif n == 3:  # bars（当日 + 前一日两条，按 trade_date desc）
-            bars = []
-            for inst, (c, prev_c, vol, amt) in zip(instruments, bar_sets, strict=False):
-                # 前一日 bar（08-03）
-                bars.append(_Bar(inst, date(2026, 8, 3), prev_c, prev_c - 0.1, vol, amt))
-                # 当日 bar（08-04）
-                bars.append(_Bar(inst, date(2026, 8, 4), c, prev_c, vol, amt))
+        elif n == 3:  # current BarDaily（trade_date == target_date）
+            bars = [
+                _Bar(inst, date(2026, 8, 4), c, prev_c, vol, amt)
+                for inst, (c, prev_c, vol, amt)
+                in zip(instruments, bar_sets, strict=False)
+            ]
+            fake_result.scalars.return_value = MagicMock(
+                __iter__=lambda self: iter(bars),
+            )
+        elif n == 4:  # previous BarDaily（trade_date < target_date，每 instrument 最近 1 根）
+            bars = [
+                _Bar(inst, date(2026, 8, 3), prev_c, prev_c - 0.1, vol, amt)
+                for inst, (c, prev_c, vol, amt)
+                in zip(instruments, bar_sets, strict=False)
+            ]
             fake_result.scalars.return_value = MagicMock(
                 __iter__=lambda self: iter(bars),
             )
@@ -101,7 +118,7 @@ class TestLoadDayFactMapsQueryShape:
     """验证 load_day_fact_maps 的 query-shape 与 facts 构建。"""
 
     def test_fixed_query_count_regardless_instruments(self) -> None:
-        """同一 trade_date 无论多少 instrument，都只做 4 次批量查询。"""
+        """同一 trade_date 无论多少 instrument，都只做固定 5 次 date-level 批量查询。"""
         ids = [uuid.uuid4() for _ in range(3)]
         payload = {
             "regime_value": 1,
@@ -122,8 +139,8 @@ class TestLoadDayFactMapsQueryShape:
             )
         )
 
-        # 关键断言：无论 instrument 数多少，查询次数固定为 4
-        assert calls["n"] == 4
+        # 关键断言：无论 instrument 数多少，查询次数固定为 5（不随 scope/instrument 数增长）
+        assert calls["n"] == 5
         assert len(facts) == 3
 
     def test_facts_have_review_fields(self) -> None:
@@ -153,7 +170,24 @@ class TestLoadDayFactMapsQueryShape:
         assert abs(fact["review_return_1d"] - ((10.0 - 9.5) / 9.5 * 100.0)) < 1e-6
         assert fact["review_amount"] == 5000.0
         assert fact["review_volume"] == 500.0
-        assert fact["fp_trend_direction"] == "up"
+        assert fact["fp_trend_direction"] == "上行"
         assert fact["review_price_position"] == 0.7
-        assert fact["fp_latest_bos_direction"] == "up"
+        assert fact["fp_latest_bos_direction"] == "bullish"
         assert fact["fp_latest_bos_freshness"] == 1
+
+    def test_mixed_contract_version_rejected(self) -> None:
+        """旧 contract version 的 state 必须 fail closed（HISTORY_CONTRACT_VERSION_MISMATCH）。"""
+        ids = [uuid.uuid4()]
+        payload = {"regime_value": 1}
+        bar_sets = [(10.0, 9.8, 1000.0, 10000.0)]
+        # 旧 payload 无 history_contract_version 或版本不匹配
+        session, _ = _make_session(
+            ids, payload, bar_sets, contract_version="review-history-v1",
+        )
+        with pytest.raises(ValueError) as exc_info:
+            asyncio.run(
+                load_day_fact_maps(
+                    session, trade_date=date(2026, 8, 4), instrument_ids=ids,
+                )
+            )
+        assert "HISTORY_CONTRACT_VERSION_MISMATCH" in str(exc_info.value)

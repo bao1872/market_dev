@@ -286,7 +286,22 @@ class TestBuildEventId:
     def test_bar_index_priority(self):
         from app.services.first_pyramid_history_service import _build_event_id
         evt = {"type": "BOS", "bar_index": 50, "time": "2026-07-01"}
-        assert _build_event_id(evt, "BOS") == "BOS_50"
+        # [CHANGE-20260808] event_id 纳入 internal 区分字段（无 internal → swg）
+        assert _build_event_id(evt, "BOS") == "BOS_50_swg"
+
+    def test_same_index_internal_swing_distinct(self):
+        """同 bar internal BOS 与 swing BOS 生成不同 event_id（不互相覆盖）。"""
+        from app.services.first_pyramid_history_service import _build_event_id
+        int_evt = {"type": "BOS", "bar_index": 50, "internal": True}
+        swg_evt = {"type": "BOS", "bar_index": 50, "internal": False}
+        assert _build_event_id(int_evt, "BOS") != _build_event_id(swg_evt, "BOS")
+
+    def test_same_index_ob_lifecycle_distinct(self):
+        """同 bar 多个 OB 生命周期事件（不同 anchor）生成不同 event_id。"""
+        from app.services.first_pyramid_history_service import _build_event_id
+        ob1 = {"type": "OB_ENTERED", "bar_index": 60, "anchor_index": 10}
+        ob2 = {"type": "OB_ENTERED", "bar_index": 60, "anchor_index": 11}
+        assert _build_event_id(ob1, "OB_ENTERED") != _build_event_id(ob2, "OB_ENTERED")
 
     def test_anchor_time_fallback(self):
         from app.services.first_pyramid_history_service import _build_event_id

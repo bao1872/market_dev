@@ -69,10 +69,10 @@ class TestHistoricalAdapterContract:
             "swing_bias": 1,
             "internal_bias": 1,
             "structure_alignment": "共振",
-            "momentum_direction": "up",
-            "momentum_change": "improving",
             "volume_ratio_20": 1.5,
             "volume_percentile_20": 80.0,
+            "sqzmom_val": 1.0,
+            "sqzmom_delta": 0.3,
             "price_position_120d": 0.7,
             "latest_bos_direction": "up",
             "latest_bos_freshness": 3,
@@ -84,27 +84,27 @@ class TestHistoricalAdapterContract:
             "prev_segment_volume_mean": 1000.0,
         }
         flat = previous_state_to_flat(state)
-        assert flat["fp_trend_direction"] == "up"
+        assert flat["fp_trend_direction"] == "上行"
         assert flat["fp_swing_direction"] == "上行"
         assert flat["fp_internal_direction"] == "上行"
         assert flat["fp_structure_alignment"] == "共振"
-        assert flat["fp_momentum_direction"] == "up"
-        assert flat["fp_momentum_change"] == "improving"
+        assert flat["fp_momentum_direction"] == "扩张"  # sqzmom_val>0
+        assert flat["fp_momentum_change"] == 0.3  # numeric delta
         assert flat["review_price_position"] == 0.7
-        assert flat["fp_latest_bos_direction"] == "up"
+        assert flat["fp_latest_bos_direction"] == "bullish"  # LIVE event direction
         assert flat["fp_latest_bos_freshness"] == 3
-        assert flat["fp_latest_choch_direction"] == "down"
+        assert flat["fp_latest_choch_direction"] == "bearish"
         assert flat["fp_latest_choch_freshness"] == 10
-        assert flat["fp_latest_ob_direction"] == "up"
+        assert flat["fp_latest_ob_direction"] == "bullish"
         assert flat["fp_latest_ob_freshness"] == 5
         assert flat["fp_segment_volume_ratio"] == 1.3
         assert flat["fp_prev_segment_volume"] == 1000.0
 
     def test_trend_from_regime_value_confirmed(self) -> None:
-        """trend 必须由 confirmed regime_value 映射，禁止 raw dir 直接映射。"""
-        assert previous_state_to_flat({"regime_value": 1})["fp_trend_direction"] == "up"
-        assert previous_state_to_flat({"regime_value": -1})["fp_trend_direction"] == "down"
-        assert previous_state_to_flat({"regime_value": 0})["fp_trend_direction"] == "sideways"
+        """trend 必须由 confirmed regime_value 映射（中文标签），禁止 raw dir 直接映射。"""
+        assert previous_state_to_flat({"regime_value": 1})["fp_trend_direction"] == "上行"
+        assert previous_state_to_flat({"regime_value": -1})["fp_trend_direction"] == "下行"
+        assert previous_state_to_flat({"regime_value": 0})["fp_trend_direction"] == "震荡"
         assert previous_state_to_flat({"regime_value": None})["fp_trend_direction"] is None
 
     def test_structure_alignment_derived_when_missing(self) -> None:
@@ -365,23 +365,24 @@ class TestSmcEventCursor:
         ), "pre-window 事件未 seed 进 latest 游标"
 
     def test_same_index_multi_event_no_override_loss(self) -> None:
-        """同 confirmed_index 多事件不被覆盖丢失（cursor 用 list）。"""
-        bars = _trend_bars(n=300)
-        result = compute_first_pyramid_history(bars, symbol="T", output_bars=250)
-        events = result["events"]
-        # 统计同 confirmed_index 是否有多个 BOS/CHoCH 或 OB 事件
-        from collections import Counter
-        event_idx = [e.get("confirmed_index") for e in events if e.get("confirmed_index") is not None]
-        dup_count = sum(1 for v in Counter(event_idx).values() if v > 1)
-        # 只要 daily_state 计算正常（无异常），cursor 多事件不崩溃
-        assert len(result["daily_state"]) > 0
-        assert dup_count >= 0
-        # 若存在同 index 多事件，也不应导致 freshness 异常
-        for state in result["daily_state"]:
-            for key in ("latest_bos_freshness", "latest_choch_freshness", "latest_ob_freshness"):
-                val = state.get(key)
-                if val is not None:
-                    assert val >= 0
+        """同 confirmed_index 多事件（internal+swing）不互相覆盖。
+
+        [CHANGE-20260808] 真实构造同 bar internal BOS + swing BOS，
+        断言事件 identity 稳定区分（persistence ON CONFLICT 不互相吃掉）。
+        """
+        from app.services.first_pyramid_history_service import _build_event_id
+        int_evt = {"type": "BOS", "bar_index": 77, "internal": True}
+        swg_evt = {"type": "BOS", "bar_index": 77, "internal": False}
+        id_int = _build_event_id(int_evt, "BOS")
+        id_swg = _build_event_id(swg_evt, "BOS")
+        # 两条事件 identity 必须不同（同 bar internal vs swing）
+        assert id_int != id_swg
+        assert id_int == "BOS_77_int"
+        assert id_swg == "BOS_77_swg"
+        # 同 bar 多个 OB 生命周期事件（不同 anchor）也区分
+        ob1 = {"type": "OB_ENTERED", "bar_index": 80, "anchor_index": 12}
+        ob2 = {"type": "OB_ENTERED", "bar_index": 80, "anchor_index": 13}
+        assert _build_event_id(ob1, "OB_ENTERED") != _build_event_id(ob2, "OB_ENTERED")
 
     def test_no_future_observation_in_state(self) -> None:
         """daily_state 的 freshness 不引用未来确认（prefix-causal）。"""

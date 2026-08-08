@@ -59,6 +59,10 @@ logger = logging.getLogger("review_scope_service")
 DEFAULT_BASELINE_WINDOW = 120
 MIN_BASELINE_WINDOW = 60
 
+# [CHANGE-20260808] Historical daily_state payload 契约版本（与 first_pyramid_service 一致）。
+# Stage B 拒绝旧 payload 混入 replay（progressive backfill 期间防混用）。
+_REVIEW_HISTORY_CONTRACT_VERSION = "review-history-v2"
+
 # 单 scope 发布门禁（PRD §11.1）
 SCOPE_PUBLISH_MIN_COVERAGE = 0.95
 
@@ -817,6 +821,17 @@ async def load_day_fact_maps(
     if not current_by_instrument:
         return {}
 
+    # [CHANGE-20260808] Stage B validation：history_contract_version 必须匹配，
+    # 防止新旧 payload 混在同一 replay。任一 state 不匹配 → fail closed。
+    for _state in current_by_instrument.values():
+        _ver = (_state.state_payload or {}).get("history_contract_version")
+        if _ver != _REVIEW_HISTORY_CONTRACT_VERSION:
+            raise ValueError(
+                f"HISTORY_CONTRACT_VERSION_MISMATCH: "
+                f"expected={_REVIEW_HISTORY_CONTRACT_VERSION} got={_ver!r} "
+                f"for trade_date={trade_date}"
+            )
+
     ids = list(current_by_instrument.keys())
 
     # 2. 前一交易日 FP state（distinct 每 instrument 最近一日）
@@ -839,16 +854,28 @@ async def load_day_fact_maps(
         for state in (await session.execute(previous_stmt)).scalars()
     }
 
-    # 3. 当日 + 前一交易日 bars（仅算 return_1d / amount / volume，不读 400 日）
-    # [CHANGE-20260808] previous-bar contract：每 instrument 截至 target_date 的最近两根真实
-    # BarDaily（DISTINCT ON）。停牌可能超过 10 天，因此用较大的 400 日下界 + DISTINCT ON 精确取
-    # 最近两根，兼顾停牌安全与批量性能（不逐股票 SQL）。
-    bar_stmt = (
+    # 3. current BarDaily（trade_date == target_date）
+    # [CHANGE-20260808] 固定 5 个 date-level batch queries（正确性优先）：
+    #   current bar 精确 == target_date；previous bar 用 DISTINCT ON 取每 instrument
+    #   最近一根真实 BarDaily（trade_date < target_date，无自然日下界，支持长期停牌）。
+    #   previous 不设 10/400 天自然日下界（停牌可超 400 天）。
+    current_bar_stmt = (
         select(BarDaily)
         .where(
             BarDaily.instrument_id.in_(ids),
-            BarDaily.trade_date <= trade_date,
-            BarDaily.trade_date >= trade_date - timedelta(days=400),
+            BarDaily.trade_date == trade_date,
+        )
+    )
+    current_bars: dict[uuid.UUID, DailyBarFact] = {}
+    for bar in (await session.execute(current_bar_stmt)).scalars():
+        current_bars[bar.instrument_id] = DailyBarFact.from_row(bar)
+
+    # 4. previous BarDaily（trade_date < target_date，每 instrument 最近 1 根）
+    previous_bar_stmt = (
+        select(BarDaily)
+        .where(
+            BarDaily.instrument_id.in_(ids),
+            BarDaily.trade_date < trade_date,
         )
         .distinct(BarDaily.instrument_id)
         .order_by(
@@ -856,11 +883,11 @@ async def load_day_fact_maps(
             BarDaily.trade_date.desc(),
         )
     )
-    bars_by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
-    for bar in (await session.execute(bar_stmt)).scalars():
-        bars_by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
+    previous_bars: dict[uuid.UUID, DailyBarFact] = {}
+    for bar in (await session.execute(previous_bar_stmt)).scalars():
+        previous_bars[bar.instrument_id] = DailyBarFact.from_row(bar)
 
-    # 4. instrument 身份（symbol/name）
+    # 5. instrument 身份（symbol/name）
     identity_stmt = select(Instrument).where(Instrument.id.in_(ids))
     identities = {
         item.id: item for item in (await session.execute(identity_stmt)).scalars()
@@ -871,16 +898,14 @@ async def load_day_fact_maps(
         identity = identities.get(instrument_id)
         if identity is None:
             continue
-        bar_list = bars_by_instrument.get(instrument_id) or []
-        # 当日 bar = 最新 trade_date==trade_date；prev = 前一条
-        ordered_desc = sorted(
-            (b for b in bar_list if b.trade_date <= trade_date),
-            key=lambda b: b.trade_date, reverse=True,
-        )
-        current = ordered_desc[0] if ordered_desc else None
-        previous = ordered_desc[1] if len(ordered_desc) >= 2 else None
+        # [CHANGE-20260808] previous-bar P0 修复：
+        #   current = 精确 target_date bar（无则 None）
+        #   previous = 最近一根真实 BarDaily（trade_date < target_date，无自然日下界）
+        current = current_bars.get(instrument_id)
+        previous = previous_bars.get(instrument_id)
         close = current.close if current else None
         prev_close = previous.close if previous else None
+        # 有 current FP state 但 target_date 无 current bar → return_1d unavailable（不冒充）
         return_1d = (
             (close - prev_close) / prev_close * 100.0
             if close is not None and prev_close is not None and abs(prev_close) > 1e-12

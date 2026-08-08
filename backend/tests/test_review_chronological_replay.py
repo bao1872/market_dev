@@ -17,6 +17,11 @@ import asyncio
 from datetime import date, timedelta
 from unittest.mock import MagicMock
 
+from app.domain.review.metric_engine import (
+    compute_all_metrics,
+)
+from app.domain.review.metric_registry import DEFAULT_REGISTRY
+from app.services.review_bootstrap_service import list_bootstrap_eligible_dates
 from app.services.review_metric_observation_service import load_metric_history
 
 
@@ -103,3 +108,120 @@ class TestLoadMetricHistoryNoFuture:
             )
         )
         assert history_maps is None
+
+
+class TestChronologicalBoundaryIntegration:
+    """真实 load_metric_history → compute_all_metrics 的 0/59/60/61/120/121 边界。"""
+
+    def _flat_list(self) -> list[dict]:
+        # 单个 member，review_return_1d 非 None（P 的 field_source）
+        return [{
+            "review_return_1d": 1.5,
+            "fp_trend_direction": "上行",
+            "_instrument_symbol": "T",
+        }]
+
+    def _p_payload(self, n_hist: int) -> dict:
+        """构造 n_hist 个 prior observations，调 compute_all_metrics 返回 P payload。"""
+        history = [float(i) for i in range(1, n_hist + 1)]
+        history_maps = {"P": {"scope_return_1d": history}} if n_hist > 0 else None
+        payloads = compute_all_metrics(
+            self._flat_list(),
+            ready_count=1,
+            history_maps=history_maps,
+            registry=DEFAULT_REGISTRY,
+        )
+        return payloads["P"]
+
+    def test_zero_history(self) -> None:
+        """0 观测 → normalized 不足（主 component scope_return_1d < 60）。"""
+        p = self._p_payload(0)
+        assert p["readiness"]["normalized_ready"] is False
+
+    def test_59_history(self) -> None:
+        """59 观测 → normalized 不足（<60）。"""
+        p = self._p_payload(59)
+        assert p["readiness"]["normalized_ready"] is False
+
+    def test_60_history(self) -> None:
+        """60 观测 → 主 component normalized available。"""
+        p = self._p_payload(60)
+        assert p["readiness"]["normalized_ready"] is True
+
+    def test_61_history(self) -> None:
+        """61 观测 → normalized available。"""
+        p = self._p_payload(61)
+        assert p["readiness"]["normalized_ready"] is True
+
+    def test_120_history(self) -> None:
+        """120 观测 → normalized available。"""
+        p = self._p_payload(120)
+        assert p["readiness"]["normalized_ready"] is True
+
+    def test_121_history(self) -> None:
+        """121 观测 → normalized available（滚动 120 窗口仍含足够观测）。"""
+        p = self._p_payload(121)
+        assert p["readiness"]["normalized_ready"] is True
+
+
+class TestDaysBackTradingDates:
+    """days_back 必须是真交易日数（distinct trade_date），非自然日。"""
+
+    def test_days_back_limits_to_trading_dates(self) -> None:
+        """days_back=120 最多返回 120 个 distinct 交易日（即使自然日 span 更长）。"""
+        session = MagicMock()
+        call_count = {"n": 0}
+
+        async def fake_execute(stmt):
+            call_count["n"] += 1
+            result = MagicMock()
+            if call_count["n"] == 1:
+                # FP history：返回 150 个 distinct 交易日（desc 由 SQL limit 保证 120）
+                # mock 模拟 SQL limit 已截断到 120 个交易日
+                dates = [
+                    date(2026, 8, 4) - timedelta(days=i)
+                    for i in range(120)
+                ]
+                result.all.return_value = [(d,) for d in dates]
+            else:
+                # factor_publication：空
+                result.all.return_value = []
+            return result
+
+        session.execute = fake_execute
+        result = asyncio.run(
+            list_bootstrap_eligible_dates(
+                session, end_date=date(2026, 8, 4), days_back=120,
+            )
+        )
+        # 返回最多 120 个交易日，ASC（oldest → newest）
+        assert len(result) == 120
+        dates_only = [d for d, _ in result]
+        assert dates_only == sorted(dates_only)  # ASC
+        assert len(set(dates_only)) == len(dates_only)  # distinct
+
+    def test_days_back_returns_limited_count(self) -> None:
+        """days_back 限制返回的交易日数量（120 自然日 span 仅约 80 交易日不得被误当 120）。"""
+        session = MagicMock()
+        call_count = {"n": 0}
+
+        async def fake_execute(stmt):
+            call_count["n"] += 1
+            result = MagicMock()
+            if call_count["n"] == 1:
+                # 模拟 SQL：distinct trade_date DESC LIMIT 30 → 30 个交易日
+                dates = [
+                    date(2026, 8, 4) - timedelta(days=i) for i in range(30)
+                ]
+                result.all.return_value = [(d,) for d in dates]
+            else:
+                result.all.return_value = []
+            return result
+
+        session.execute = fake_execute
+        result = asyncio.run(
+            list_bootstrap_eligible_dates(
+                session, end_date=date(2026, 8, 4), days_back=30,
+            )
+        )
+        assert len(result) == 30

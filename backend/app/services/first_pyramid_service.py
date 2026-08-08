@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -119,6 +120,12 @@ _FIRST_PYRAMID_CORE_PARAMS: dict[str, Any] = {
 
 # 必选维度的最小 bar 数（前三维）
 _MIN_BARS_FOR_REQUIRED_DIMS = 60
+
+# [CHANGE-20260808] Historical daily_state payload 契约版本。
+# FIRST_PYRAMID_CORE_ALGORITHM_VERSION 未变，但 history payload contract 已扩展
+# （segment/latest event/rolling facts）。Stage B 必须拒绝旧 payload 混入，
+# 防止 progressive backfill 期间把未升级旧 state 当完整新 state。
+HISTORY_CONTRACT_VERSION = "review-history-v2"
 
 
 def _safe_float(v: Any) -> float | None:
@@ -1811,6 +1818,21 @@ def compute_first_pyramid_history(
         for evt in ob_by_idx[idx]:
             latest_ob = {**evt, "confirmed_index": idx}
 
+    # [CHANGE-20260808] 性能：用滑动窗口 deque 预保持最近 200+1 个 volume/amount，
+    # 避免每 bar 重建 volume_series[:i+1]（消除 O(N²)）。
+    _max_roll = 201  # 覆盖 amount_percentile200 的 200 prior + current
+    _vol_deque: deque = deque()
+    _amt_deque: deque = deque()
+    for _k in range(start_idx):
+        if _k < len(volume_series) and volume_series[_k] is not None:
+            _vol_deque.append(float(volume_series[_k]))
+        if _k < len(amount_series) and amount_series[_k] is not None:
+            _amt_deque.append(float(amount_series[_k]))
+    while len(_vol_deque) > _max_roll:
+        _vol_deque.popleft()
+    while len(_amt_deque) > _max_roll:
+        _amt_deque.popleft()
+
     for i in range(start_idx, n_total):
         row = factor_per_bar.iloc[i]
         bar_idx = i
@@ -1871,11 +1893,19 @@ def compute_first_pyramid_history(
             vol_zscore_20 = _safe_float(vc_row.get("volume_zscore_20"))
 
         # [CHANGE-20260808] Review rolling facts（共享 SSOT 公式，与 LIVE ReviewMemberFact.build 一致）
-        # 分母不含 current；使用截至当前 bar 的 volume/amount 序列。
-        _vol_hist = [v for v in volume_series[: i + 1] if v is not None]
-        _amt_hist = [v for v in amount_series[: i + 1] if v is not None]
+        # 分母不含 current；滑动窗口 deque 保持最近 200+1 个（消除 O(N²)）。
         _cur_vol = volume_series[i] if i < len(volume_series) else None
         _cur_amt = amount_series[i] if i < len(amount_series) else None
+        if _cur_vol is not None:
+            _vol_deque.append(float(_cur_vol))
+        if _cur_amt is not None:
+            _amt_deque.append(float(_cur_amt))
+        while len(_vol_deque) > _max_roll:
+            _vol_deque.popleft()
+        while len(_amt_deque) > _max_roll:
+            _amt_deque.popleft()
+        _vol_hist = list(_vol_deque)
+        _amt_hist = list(_amt_deque)
         review_volume_ratio20 = compute_ratio(_cur_vol, _vol_hist, 20)
         review_amount_ratio20 = compute_ratio(_cur_amt, _amt_hist, 20)
         review_volume_percentile20 = compute_percentile(_cur_vol, _vol_hist, 20)
@@ -1932,6 +1962,7 @@ def compute_first_pyramid_history(
         daily_state.append({
             "bar_index": bar_idx,
             "time": bar_time,
+            "history_contract_version": HISTORY_CONTRACT_VERSION,
             # 趋势原子特征
             "trend_transition": trend_transition,
             "regime_value": regime_value,
@@ -1971,6 +2002,7 @@ def compute_first_pyramid_history(
             "momentum_direction": momentum_direction,
             "momentum_change": momentum_change,
             "sqzmom_delta": sqzmom_delta,
+            "sqzmom_val": _safe_float(m_daily.get("sqzmom_val")),
             # VolumeContext 摘要
             "volume_ratio_20": vol_ratio_20,
             "volume_percentile_20": vol_pct_20,

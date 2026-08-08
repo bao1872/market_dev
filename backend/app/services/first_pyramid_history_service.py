@@ -931,19 +931,36 @@ async def _persist_history_result(
 def _build_event_id(evt: dict[str, Any], event_type: str) -> str:
     """构造事件稳定 ID（无自带 id 时使用）。
 
-    优先级：bar_index+type > time+type > anchor_time+type
+    [CHANGE-20260808] 修复同 bar 多事件碰撞：event_id 不能仅用 {type}_{bar_index}，
+    否则同 bar 的 internal BOS 与 swing BOS、同 bar 多个 OB 生命周期事件会互相覆盖
+    （persistence ON CONFLICT 吃掉一行）。
+
+    稳定 identity 纳入：
+        event_type + bar_index + internal + structure_level/anchor_index + direction/bias
+    保证同 bar 不同 internal/level/anchor 的事件生成不同 event_id。
+
+    优先级：bar_index+type+内部字段 > time+type > payload hash
     """
+    import hashlib
+    import json
+
     bar_index = evt.get("bar_index")
     if bar_index is not None:
-        return f"{event_type}_{bar_index}"
+        # 区分字段：internal（internal vs swing）、anchor_index、structure_level、direction
+        internal = "int" if evt.get("internal") else "swg"
+        anchor = evt.get("anchor_index")
+        anchor_s = f"_a{anchor}" if anchor is not None else ""
+        level = evt.get("structure_level") or evt.get("level")
+        level_s = f"_l{level}" if level is not None else ""
+        direction = evt.get("direction") or evt.get("bias")
+        dir_s = f"_d{direction}" if direction is not None else ""
+        return f"{event_type}_{bar_index}_{internal}{anchor_s}{level_s}{dir_s}"
 
     time_val = evt.get("time") or evt.get("anchor_time")
     if time_val:
         return f"{event_type}_{time_val}"
 
     # fallback: hash of payload
-    import hashlib
-    import json
     payload_str = json.dumps(evt, sort_keys=True, default=str)
     return f"{event_type}_{hashlib.md5(payload_str.encode()).hexdigest()[:12]}"
 

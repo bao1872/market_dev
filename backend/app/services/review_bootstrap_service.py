@@ -17,14 +17,19 @@ import json
 import logging
 import uuid
 from collections import Counter
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.review.metric_engine import compute_all_metrics
+from app.domain.review.metric_engine import (
+    STATUS_INSUFFICIENT_HISTORY,
+    STATUS_READY,
+    STATUS_UNAVAILABLE,
+    compute_all_metrics,
+)
 from app.domain.review.metric_registry import DEFAULT_REGISTRY
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
 from app.models.board_taxonomy import BoardDefinitionVersion
@@ -128,6 +133,41 @@ _SCOPE_STATUS_BUCKET = {
     "bootstrap_unavailable": "unavailable",
     "failed": "failed",
 }
+
+# [CHANGE-20260808] Review 关键五维 metric code
+_REVIEW_CORE_METRIC_CODES = ("P", "Q", "U", "C", "V")
+
+
+def _derive_scope_status(
+    payloads: dict[str, dict[str, Any]],
+) -> str:
+    """从 P/Q/U/C/V metric payload 推导真实 scope status。
+
+    规则（与 Review status contract 对齐）：
+    - 全部核心 metric ready → completed
+    - 存在核心 metric unavailable（P/Q/U 关键维度缺失）→ unavailable
+    - 全部 raw ready 但 normalized 不足（insufficient_history）→ insufficient_history
+    - 部分 ready / 部分不足 → partial
+    - 其他 → insufficient_history（冷启动兜底）
+    """
+    statuses = [
+        payloads.get(code, {}).get("status")
+        for code in _REVIEW_CORE_METRIC_CODES
+    ]
+    statuses = [s for s in statuses if s is not None]
+    if not statuses:
+        return "insufficient_history"
+    if all(s == STATUS_READY for s in statuses):
+        return "completed"
+    if any(s == STATUS_UNAVAILABLE for s in statuses):
+        return "unavailable"
+    if all(s == STATUS_INSUFFICIENT_HISTORY for s in statuses):
+        return "insufficient_history"
+    if all(s in (STATUS_READY, STATUS_INSUFFICIENT_HISTORY) for s in statuses):
+        return "insufficient_history" if all(
+            s == STATUS_INSUFFICIENT_HISTORY for s in statuses
+        ) else "partial"
+    return "partial"
 
 
 def compute_input_hash(
@@ -244,20 +284,23 @@ async def list_bootstrap_eligible_dates(
     if end_date is None:
         end_date = date.today()
 
-    start_date = end_date - timedelta(days=days_back)
-
+    # [CHANGE-20260808] days_back 必须是真交易日数（distinct trade_date），
+    # 而非自然日。120 自然日 span 可能仅约 80 交易日，不得误当 120 个 history observations。
+    # 从 canonical FP history 取 end_date 之前 days_back 个 distinct trade_date（DESC），
+    # 再 reverse 成 ASC（oldest → newest）。
     history_stmt = (
         select(FirstPyramidHistoryDailyState.trade_date)
         .where(
-            FirstPyramidHistoryDailyState.trade_date >= start_date,
             FirstPyramidHistoryDailyState.trade_date <= end_date,
             FirstPyramidHistoryDailyState.algorithm_version
             == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
         )
         .distinct()
-        .order_by(FirstPyramidHistoryDailyState.trade_date.asc())
+        .order_by(FirstPyramidHistoryDailyState.trade_date.desc())
+        .limit(days_back)
     )
-    dates = [row[0] for row in (await session.execute(history_stmt)).all()]
+    dates_desc = [row[0] for row in (await session.execute(history_stmt)).all()]
+    dates = list(reversed(dates_desc))
     if not dates:
         return []
     source_stmt = select(
@@ -351,7 +394,7 @@ async def bootstrap_single_date(
             registry=DEFAULT_REGISTRY,
         )
         coverage = ready_count / len(instrument_ids)
-        status = "insufficient_history"
+        status = _derive_scope_status(payloads)
         computed.append(
             (scope, flat_list, len(instrument_ids), ready_count, coverage, status, payloads),
         )

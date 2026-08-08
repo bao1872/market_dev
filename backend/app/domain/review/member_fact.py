@@ -10,8 +10,10 @@ from datetime import date
 from typing import Any
 
 from app.domain.first_pyramid_semantics import (
+    MomentumDirection,
     direction_display,
     direction_from_regime,
+    momentum_direction_display,
 )
 
 
@@ -84,15 +86,9 @@ def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
     """Map the history SSOT payload to the canonical flat keys used by semantics."""
     if not state:
         return {}
-    regime = _number(state.get("regime_value"))
-    if regime is None:
-        trend = None
-    elif regime > 0:
-        trend = "up"
-    elif regime < 0:
-        trend = "down"
-    else:
-        trend = "sideways"
+    # [CHANGE-20260808] LIVE parity：fp_trend_direction 用中文标签（与 first_pyramid_flatten
+    # _direction_label 一致："上行"/"下行"/"震荡"），复用 direction_display/direction_from_regime。
+    trend = direction_display(direction_from_regime(state.get("regime_value")))
     structure_alignment = state.get("structure_alignment")
     if structure_alignment is None:
         swing_b = state.get("swing_bias")
@@ -102,17 +98,39 @@ def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
                 "共振" if swing_b == internal_b else "背离"
             )
     # [CHANGE-20260808] LIVE parity：fp_swing/internal_direction 输出中文标签
-    # （与 first_pyramid_flatten._direction_label 一致："上行"/"下行"/"震荡"），
-    # 复用 app.domain.first_pyramid_semantics 的 direction_display/direction_from_regime。
+    # （与 first_pyramid_flatten._direction_label 一致："上行"/"下行"/"震荡"）。
     swing_dir = direction_display(direction_from_regime(state.get("swing_bias")))
     internal_dir = direction_display(direction_from_regime(state.get("internal_bias")))
+    # [CHANGE-20260808] LIVE parity：momentum direction/change
+    #   fp_momentum_direction = "扩张"/"收缩"/"平缓"（从 sqzmom_val 符号，momentum_direction_display）
+    #   fp_momentum_change = numeric sqzmom delta（round(sqz_val - sqz_prev, 6)）
+    sqz_val = state.get("sqzmom_val")
+    if isinstance(sqz_val, (int, float)) and sqz_val == sqz_val:  # 非 NaN
+        mom_dir = (
+            MomentumDirection.EXPANDING if sqz_val > 0
+            else MomentumDirection.CONTRACTING if sqz_val < 0
+            else MomentumDirection.FLAT
+        )
+        momentum_direction = momentum_direction_display(mom_dir)
+    else:
+        momentum_direction = None
+    sqz_delta = state.get("sqzmom_delta")
+    momentum_change = round(sqz_delta, 6) if isinstance(sqz_delta, (int, float)) else None
+    # [CHANGE-20260808] LIVE parity：latest event direction 用 "bullish"/"bearish"
+    # （与 first_pyramid_flatten 的事件 direction 语义一致），daily_state 存 up/down 时映射。
+    def _event_dir(val: Any) -> str | None:
+        if val in ("up", "bullish"):
+            return "bullish"
+        if val in ("down", "bearish"):
+            return "bearish"
+        return None
     return {
         "fp_trend_direction": trend,
         "fp_swing_direction": swing_dir,
         "fp_internal_direction": internal_dir,
         "fp_structure_alignment": structure_alignment,
-        "fp_momentum_direction": state.get("momentum_direction"),
-        "fp_momentum_change": state.get("momentum_change"),
+        "fp_momentum_direction": momentum_direction,
+        "fp_momentum_change": momentum_change,
         "fp_volume_ratio20": state.get("volume_ratio_20"),
         "fp_volume_percentile20": state.get("volume_percentile_20"),
         "review_price_position": state.get("price_position_120d"),
@@ -122,11 +140,11 @@ def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
         "review_volume_percentile20": state.get("review_volume_percentile20"),
         "review_amount_percentile200": state.get("review_amount_percentile200"),
         # [CHANGE-20260808] Review 扩展：latest 结构事件（freshness 相对已确认事件时间）
-        "fp_latest_bos_direction": state.get("latest_bos_direction"),
+        "fp_latest_bos_direction": _event_dir(state.get("latest_bos_direction")),
         "fp_latest_bos_freshness": state.get("latest_bos_freshness"),
-        "fp_latest_choch_direction": state.get("latest_choch_direction"),
+        "fp_latest_choch_direction": _event_dir(state.get("latest_choch_direction")),
         "fp_latest_choch_freshness": state.get("latest_choch_freshness"),
-        "fp_latest_ob_direction": state.get("latest_ob_direction"),
+        "fp_latest_ob_direction": _event_dir(state.get("latest_ob_direction")),
         "fp_latest_ob_freshness": state.get("latest_ob_freshness"),
         # [CHANGE-20260808] DSA segment 量能改善（V 的 trend_segment_volume_improvement）
         "fp_segment_volume_ratio": state.get("current_vs_prev_volume_mean_ratio"),
