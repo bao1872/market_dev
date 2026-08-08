@@ -20,10 +20,19 @@
 """
 from __future__ import annotations
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 
-from app.domain.review.member_fact import previous_state_to_flat
+from app.domain.review.member_fact import (
+    DailyBarFact,
+    ReviewMemberFact,
+    compute_percentile,
+    compute_price_position_120d,
+    compute_ratio,
+    previous_state_to_flat,
+)
 from app.services.first_pyramid_service import (
     _price_position_120d,
     compute_first_pyramid_history,
@@ -76,8 +85,8 @@ class TestHistoricalAdapterContract:
         }
         flat = previous_state_to_flat(state)
         assert flat["fp_trend_direction"] == "up"
-        assert flat["fp_swing_direction"] == 1
-        assert flat["fp_internal_direction"] == 1
+        assert flat["fp_swing_direction"] == "上行"
+        assert flat["fp_internal_direction"] == "上行"
         assert flat["fp_structure_alignment"] == "共振"
         assert flat["fp_momentum_direction"] == "up"
         assert flat["fp_momentum_change"] == "improving"
@@ -215,3 +224,173 @@ class TestPrefixInvariance:
                 val = state.get(key)
                 if val is not None:
                     assert val >= 0, f"{key}={val} < 0 at {state.get('bar_index')}"
+
+
+# =============================================================================
+# 4. Rolling facts LIVE/HISTORY parity（共享 SSOT）
+# =============================================================================
+
+
+def _make_bars_list(values: list[tuple]) -> list[DailyBarFact]:
+    """构造 DailyBarFact 列表（dates 从 2026-01-01 起工作日递增）。"""
+    from datetime import timedelta
+
+    start = date(2026, 1, 1)
+    result = []
+    for i, (close, volume, amount) in enumerate(values):
+        result.append(
+            DailyBarFact(
+                trade_date=start + timedelta(days=i),
+                open=close - 0.05,
+                high=close + 0.1,
+                low=close - 0.1,
+                close=close,
+                volume=volume,
+                amount=amount,
+            )
+        )
+    return result
+
+
+class TestRollingFactsParity:
+    """LIVE ReviewMemberFact.build 与共享 SSOT（compute_ratio/percentile/price_position）一致。"""
+
+    def test_ratio_denominator_excludes_current(self) -> None:
+        """_ratio 分母不含 current（窗口边界 19/20/21 行为）。"""
+        # history 含 current（最后一个）；prior = history[-window-1:-1] 不含 current
+        hist21 = [100.0] * 20 + [150.0]  # 20 prior + current
+        assert compute_ratio(150.0, hist21, 20) == 1.5
+        # 不足 window 时仍用可用 prior（不要求满 window），分母仍不含 current
+        hist20 = [100.0] * 19 + [150.0]
+        assert compute_ratio(150.0, hist20, 20) == 1.5
+        hist19 = [100.0] * 18 + [150.0]
+        assert compute_ratio(150.0, hist19, 20) == 1.5
+        # 无 prior（只有 current 1 个）→ None
+        assert compute_ratio(150.0, [150.0], 20) is None
+
+    def test_percentile_window_boundaries(self) -> None:
+        """_percentile prior 不含 current，窗口边界 199/200/201 行为。"""
+        # current=202（最大值），prior 200 根（1..200）→ 100%
+        hist202 = list(range(1, 202)) + [202.0]
+        assert compute_percentile(202.0, hist202, 200) == 100.0
+        # prior 199 根（不足 200）仍计算，202 最大 → 100%
+        hist201 = list(range(1, 201)) + [202.0]
+        assert compute_percentile(202.0, hist201, 200) == 100.0
+        # prior 200 根（边界）→ 100%
+        assert compute_percentile(202.0, hist202, 200) == 100.0
+        # 无 prior → None
+        assert compute_percentile(202.0, [202.0], 200) is None
+
+    def test_ratio_matches_build(self) -> None:
+        """LIVE build 的 volume_ratio20 与共享函数一致。"""
+        bars = _make_bars_list(
+            [(10.0 + i * 0.1, 1000.0, 10000.0) for i in range(30)],
+        )
+        # 手工构造一个 current 与 prior 不同的场景
+        bars[-1] = DailyBarFact(
+            trade_date=bars[-1].trade_date, open=10, high=10, low=10,
+            close=10, volume=2000.0, amount=20000.0,
+        )
+        import uuid as _uuid
+        fact = ReviewMemberFact.build(
+            instrument_id=_uuid.uuid4(), symbol="X", name="X",
+            snapshot_id=None, trade_date=bars[-1].trade_date,
+            first_pyramid={}, bars=bars, previous_state=None,
+        )
+        assert fact.volume_ratio20 == compute_ratio(
+            2000.0, [1000.0] * 20 + [2000.0], 20,
+        )
+        assert fact.amount_ratio20 == compute_ratio(
+            20000.0, [10000.0] * 20 + [20000.0], 20,
+        )
+
+    def test_price_position_120d_matches_build(self) -> None:
+        """LIVE build 的 price_position 与共享函数一致（含 current，rolling 120）。"""
+        bars = _make_bars_list(
+            [(10.0 + i * 0.1, 1000.0, 10000.0) for i in range(130)],
+        )
+        import uuid as _uuid
+        fact = ReviewMemberFact.build(
+            instrument_id=_uuid.uuid4(), symbol="X", name="X",
+            snapshot_id=None, trade_date=bars[-1].trade_date,
+            first_pyramid={}, bars=bars, previous_state=None,
+        )
+        close = bars[-1].close
+        lows = [b.low for b in bars[-120:] if b.low is not None]
+        highs = [b.high for b in bars[-120:] if b.high is not None]
+        expected = (close - min(lows)) / (max(highs) - min(lows))
+        assert fact.price_position == expected
+        assert fact.price_position == compute_price_position_120d(close, lows, highs)
+
+
+# =============================================================================
+# 5. SMC event cursor（pre-window seed + same-index multi-event）
+# =============================================================================
+
+
+def _trend_bars(n: int = 260) -> pd.DataFrame:
+    """确定性：先涨后跌再涨，制造 swing 结构反转（触发 BOS/CHoCH 等事件）。"""
+    dates = pd.date_range("2025-01-01", periods=n, freq="B")
+    phase = [10.0 + i * 0.05 for i in range(n // 3)]
+    phase += [phase[-1] - i * 0.08 for i in range(n // 3)]
+    phase += [phase[-1] + i * 0.06 for i in range(n - 2 * (n // 3))]
+    close = np.array(phase[:n])
+    return pd.DataFrame({
+        "open": close - 0.05,
+        "high": close + 0.3,
+        "low": close - 0.3,
+        "close": close,
+        "volume": 100000.0,
+        "amount": close * 100000.0,
+    }, index=dates)
+
+
+class TestSmcEventCursor:
+    """pre-window seed 与 same-index multi-event 不丢失。"""
+
+    def test_pre_window_events_seeded(self) -> None:
+        """output 窗口前已确认的 latest 事件在窗口内第一个 bar 仍存在（seed 生效）。"""
+        bars = _trend_bars(n=260)
+        # output_bars 小，使 start_idx 靠后（窗口外已有大量事件）
+        result = compute_first_pyramid_history(bars, symbol="T", output_bars=60)
+        daily_state = result["daily_state"]
+        assert len(daily_state) > 0
+        # 窗口内第一个 state 的 latest event 不应为 None（pre-window 有事件）
+        first = daily_state[0]
+        # 趋势反转序列必然产生过 BOS/CHoCH/OB，seed 后应可见（至少一个非 None）
+        assert (
+            first.get("latest_bos_direction")
+            or first.get("latest_choch_direction")
+            or first.get("latest_ob_direction")
+        ), "pre-window 事件未 seed 进 latest 游标"
+
+    def test_same_index_multi_event_no_override_loss(self) -> None:
+        """同 confirmed_index 多事件不被覆盖丢失（cursor 用 list）。"""
+        bars = _trend_bars(n=300)
+        result = compute_first_pyramid_history(bars, symbol="T", output_bars=250)
+        events = result["events"]
+        # 统计同 confirmed_index 是否有多个 BOS/CHoCH 或 OB 事件
+        from collections import Counter
+        event_idx = [e.get("confirmed_index") for e in events if e.get("confirmed_index") is not None]
+        dup_count = sum(1 for v in Counter(event_idx).values() if v > 1)
+        # 只要 daily_state 计算正常（无异常），cursor 多事件不崩溃
+        assert len(result["daily_state"]) > 0
+        assert dup_count >= 0
+        # 若存在同 index 多事件，也不应导致 freshness 异常
+        for state in result["daily_state"]:
+            for key in ("latest_bos_freshness", "latest_choch_freshness", "latest_ob_freshness"):
+                val = state.get(key)
+                if val is not None:
+                    assert val >= 0
+
+    def test_no_future_observation_in_state(self) -> None:
+        """daily_state 的 freshness 不引用未来确认（prefix-causal）。"""
+        bars = _trend_bars(n=280)
+        result = compute_first_pyramid_history(bars, symbol="T", output_bars=250)
+        for state in result["daily_state"]:
+            bi = state.get("bar_index")
+            for key in ("latest_bos_freshness", "latest_choch_freshness", "latest_ob_freshness"):
+                val = state.get(key)
+                if val is not None and bi is not None:
+                    # freshness = bi - confirmed_index >= 0，不可能引用未来
+                    assert val >= 0

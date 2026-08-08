@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from app.domain.first_pyramid_semantics import (
+    direction_display,
+    direction_from_regime,
+)
+
 
 def _number(value: Any) -> float | None:
     if value is None:
@@ -35,6 +40,46 @@ def _percentile(value: float | None, history: list[float], window: int) -> float
     return sum(item <= value for item in prior) / len(prior) * 100.0
 
 
+# [CHANGE-20260808] Review rolling facts 共享纯 SSOT。
+# LIVE ReviewMemberFact.build 与 Historical stock-major replay 消费同一公式，
+# 确保 parity（窗口边界 19/20/21、119/120/121、199/200/201 行为一致）。
+def compute_ratio(
+    value: float | None,
+    history: list[float],
+    window: int,
+) -> float | None:
+    """current / prior window mean（分母不含 current）。与 _ratio 一致。"""
+    return _ratio(value, history, window)
+
+
+def compute_percentile(
+    value: float | None,
+    history: list[float],
+    window: int,
+) -> float | None:
+    """prior window 中 <= current 的占比（分母不含 current）。与 _percentile 一致。"""
+    return _percentile(value, history, window)
+
+
+def compute_price_position_120d(
+    close: float | None,
+    recent_lows: list[float],
+    recent_highs: list[float],
+) -> float | None:
+    """120 日价格位置：(close - low_120) / (high_120 - low_120)，含 current。"""
+    if close is None:
+        return None
+    lows = [v for v in recent_lows if v is not None]
+    highs = [v for v in recent_highs if v is not None]
+    if not lows or not highs:
+        return None
+    low_value = min(lows)
+    high_value = max(highs)
+    if high_value - low_value <= 1e-12:
+        return None
+    return (close - low_value) / (high_value - low_value)
+
+
 def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
     """Map the history SSOT payload to the canonical flat keys used by semantics."""
     if not state:
@@ -56,16 +101,26 @@ def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
             structure_alignment = (
                 "共振" if swing_b == internal_b else "背离"
             )
+    # [CHANGE-20260808] LIVE parity：fp_swing/internal_direction 输出中文标签
+    # （与 first_pyramid_flatten._direction_label 一致："上行"/"下行"/"震荡"），
+    # 复用 app.domain.first_pyramid_semantics 的 direction_display/direction_from_regime。
+    swing_dir = direction_display(direction_from_regime(state.get("swing_bias")))
+    internal_dir = direction_display(direction_from_regime(state.get("internal_bias")))
     return {
         "fp_trend_direction": trend,
-        "fp_swing_direction": state.get("swing_bias"),
-        "fp_internal_direction": state.get("internal_bias"),
+        "fp_swing_direction": swing_dir,
+        "fp_internal_direction": internal_dir,
         "fp_structure_alignment": structure_alignment,
         "fp_momentum_direction": state.get("momentum_direction"),
         "fp_momentum_change": state.get("momentum_change"),
         "fp_volume_ratio20": state.get("volume_ratio_20"),
         "fp_volume_percentile20": state.get("volume_percentile_20"),
         "review_price_position": state.get("price_position_120d"),
+        # [CHANGE-20260808] Review rolling facts（共享 SSOT 公式，LIVE/HISTORY parity）
+        "review_volume_ratio20": state.get("review_volume_ratio20"),
+        "review_amount_ratio20": state.get("review_amount_ratio20"),
+        "review_volume_percentile20": state.get("review_volume_percentile20"),
+        "review_amount_percentile200": state.get("review_amount_percentile200"),
         # [CHANGE-20260808] Review 扩展：latest 结构事件（freshness 相对已确认事件时间）
         "fp_latest_bos_direction": state.get("latest_bos_direction"),
         "fp_latest_bos_freshness": state.get("latest_bos_freshness"),
@@ -155,12 +210,8 @@ class ReviewMemberFact:
         recent = ordered[-120:] if current is not None else []
         lows = [bar.low for bar in recent if bar.low is not None]
         highs = [bar.high for bar in recent if bar.high is not None]
-        price_position = None
-        if close is not None and lows and highs:
-            low_value = min(lows)
-            high_value = max(highs)
-            if high_value - low_value > 1e-12:
-                price_position = (close - low_value) / (high_value - low_value)
+        # [CHANGE-20260808] 复用共享纯 SSOT，确保与 Historical replay parity
+        price_position = compute_price_position_120d(close, lows, highs)
         volumes = [bar.volume for bar in ordered if bar.volume is not None]
         amounts = [bar.amount for bar in ordered if bar.amount is not None]
         volume = current.volume if current is not None else None
@@ -182,10 +233,10 @@ class ReviewMemberFact:
             price_position=price_position,
             volume=volume,
             amount=amount,
-            volume_ratio20=_ratio(volume, volumes, 20),
-            amount_ratio20=_ratio(amount, amounts, 20),
-            volume_percentile20=_percentile(volume, volumes, 20),
-            amount_percentile200=_percentile(amount, amounts, 200),
+            volume_ratio20=compute_ratio(volume, volumes, 20),
+            amount_ratio20=compute_ratio(amount, amounts, 20),
+            volume_percentile20=compute_percentile(volume, volumes, 20),
+            amount_percentile200=compute_percentile(amount, amounts, 200),
             weight=weight,
             weight_mode=weight_mode,
         )

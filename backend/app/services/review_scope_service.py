@@ -840,14 +840,21 @@ async def load_day_fact_maps(
     }
 
     # 3. 当日 + 前一交易日 bars（仅算 return_1d / amount / volume，不读 400 日）
+    # [CHANGE-20260808] previous-bar contract：每 instrument 截至 target_date 的最近两根真实
+    # BarDaily（DISTINCT ON）。停牌可能超过 10 天，因此用较大的 400 日下界 + DISTINCT ON 精确取
+    # 最近两根，兼顾停牌安全与批量性能（不逐股票 SQL）。
     bar_stmt = (
         select(BarDaily)
         .where(
             BarDaily.instrument_id.in_(ids),
             BarDaily.trade_date <= trade_date,
-            BarDaily.trade_date >= trade_date - timedelta(days=10),
+            BarDaily.trade_date >= trade_date - timedelta(days=400),
         )
-        .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.desc())
+        .distinct(BarDaily.instrument_id)
+        .order_by(
+            BarDaily.instrument_id.asc(),
+            BarDaily.trade_date.desc(),
+        )
     )
     bars_by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
     for bar in (await session.execute(bar_stmt)).scalars():

@@ -45,6 +45,11 @@ from app.constants.indicator_contract import (
     NODE_CLUSTER_LOW_BARS,
     NODE_CLUSTER_PRIMARY_BARS,
 )
+from app.domain.review.member_fact import (
+    compute_percentile,
+    compute_price_position_120d,
+    compute_ratio,
+)
 from app.schemas.first_pyramid import (
     CHIP_CONSENSUS_ALGORITHM_VERSION,
     FIRST_PYRAMID_ALGORITHM_VERSION,
@@ -1714,6 +1719,9 @@ def compute_first_pyramid_history(
     )
     # 使用 build_momentum_history 获取逐 bar 动量状态 + SQZ_RELEASE 事件
     volume_series = bars["volume"].astype(float).tolist()
+    amount_series = (
+        bars["amount"].astype(float).tolist() if "amount" in bars.columns else [None] * n_input
+    )
     momentum_history = build_momentum_history(
         sqzmom_result, volume_series=volume_series, times=times
     )
@@ -1735,20 +1743,29 @@ def compute_first_pyramid_history(
 
     # [CHANGE-20260808] Review historical fact 扩展：前向维护 latest BOS/CHoCH/OB 游标
     # freshness = 当前 bar_index - confirmed_index（相对已确认事件时间，禁止未来确认）
-    bos_choch_by_idx: dict[int, dict[str, Any]] = {}
+    # 同 confirmed_index 可能多个事件 → 用 dict[int, list[event]] 保留全部（同 bar internal+swing）
+    def _event_rank(evt_type: str) -> int:
+        return {"BOS": 0, "CHoCH": 1}.get(evt_type, 2)
+
+    bos_choch_by_idx: dict[int, list[dict[str, Any]]] = {}
     for evt in smc_events:
         idx = evt.get("confirmed_index")
         if idx is None:
             continue
-        bos_choch_by_idx[idx] = {
+        bos_choch_by_idx.setdefault(idx, []).append({
             "type": evt.get("type", ""),
             "direction": (
                 "up" if evt.get("bullish") else "down"
                 if evt.get("bullish") is False else None
             ),
             "internal": bool(evt.get("internal", False)),
-        }
-    ob_by_idx: dict[int, dict[str, Any]] = {}
+        })
+    # 同 index 多事件：内部排序稳定（同 index 内 BOS 优先于 CHoCH；同类型按出现顺序保留最新）
+    for idx in bos_choch_by_idx:
+        bos_choch_by_idx[idx].sort(
+            key=lambda e: (_event_rank(e["type"]), 0),
+        )
+    ob_by_idx: dict[int, list[dict[str, Any]]] = {}
     for ob in ob_lifecycle_events:
         ob_type = ob.get("type", "")
         if ob_type == "OB_CREATED":
@@ -1761,7 +1778,7 @@ def compute_first_pyramid_history(
             idx = None
         if idx is None:
             continue
-        ob_by_idx[idx] = {
+        ob_by_idx.setdefault(idx, []).append({
             "type": ob_type,
             "direction": (
                 "up" if ob.get("bias") == 1 else "down"
@@ -1770,12 +1787,29 @@ def compute_first_pyramid_history(
             "internal": bool(ob.get("internal", False)),
             "structure_level": ob.get("structure_level"),
             "anchor_index": ob.get("anchor_index"),
-        }
+        })
 
     # 当前 latest 游标（仅随 bar 前向推进，确保 prefix-causal）
     latest_bos: dict[str, Any] | None = None
     latest_choch: dict[str, Any] | None = None
     latest_ob: dict[str, Any] | None = None
+
+    # [CHANGE-20260808] pre-window seed：output 窗口从 start_idx 开始，
+    # 必须先处理 confirmed_index < start_idx 的事件，初始化 latest 游标，
+    # 否则窗口开始前已确认且仍是最新的事件会丢失。
+    for idx in sorted(
+        (k for k in bos_choch_by_idx if k < start_idx),
+    ):
+        for evt in bos_choch_by_idx[idx]:
+            if evt["type"] == "BOS":
+                latest_bos = {**evt, "confirmed_index": idx}
+            elif evt["type"] == "CHoCH":
+                latest_choch = {**evt, "confirmed_index": idx}
+    for idx in sorted(
+        (k for k in ob_by_idx if k < start_idx),
+    ):
+        for evt in ob_by_idx[idx]:
+            latest_ob = {**evt, "confirmed_index": idx}
 
     for i in range(start_idx, n_total):
         row = factor_per_bar.iloc[i]
@@ -1801,15 +1835,15 @@ def compute_first_pyramid_history(
         active_swing_ob_count = int(smc_t.get("active_swing_ob_count", 0))
 
         # [CHANGE-20260808] Review 扩展：前向推进 latest BOS/CHoCH/OB 游标（prefix-causal）
-        if bar_idx in bos_choch_by_idx:
-            evt = bos_choch_by_idx[bar_idx]
+        # 同 bar 可能多个事件（internal + swing），全部处理，保留最近确认事件。
+        for evt in bos_choch_by_idx.get(bar_idx, []):
             if evt["type"] == "BOS":
                 latest_bos = {**evt, "confirmed_index": bar_idx}
             elif evt["type"] == "CHoCH":
                 latest_choch = {**evt, "confirmed_index": bar_idx}
-        if bar_idx in ob_by_idx:
+        for evt in ob_by_idx.get(bar_idx, []):
             # OB 生命周期：CREATED/ENTERED 更新最近相关 OB；MITIGATED 标记 active 结束
-            latest_ob = {**ob_by_idx[bar_idx], "confirmed_index": bar_idx}
+            latest_ob = {**evt, "confirmed_index": bar_idx}
 
         def _freshness(confirmed: int | None, cur: int) -> int | None:
             return (cur - confirmed) if confirmed is not None else None
@@ -1835,6 +1869,23 @@ def compute_first_pyramid_history(
             vol_ratio_20 = _safe_float(vc_row.get("volume_ratio_20"))
             vol_pct_20 = _safe_float(vc_row.get("volume_percentile_20"))
             vol_zscore_20 = _safe_float(vc_row.get("volume_zscore_20"))
+
+        # [CHANGE-20260808] Review rolling facts（共享 SSOT 公式，与 LIVE ReviewMemberFact.build 一致）
+        # 分母不含 current；使用截至当前 bar 的 volume/amount 序列。
+        _vol_hist = [v for v in volume_series[: i + 1] if v is not None]
+        _amt_hist = [v for v in amount_series[: i + 1] if v is not None]
+        _cur_vol = volume_series[i] if i < len(volume_series) else None
+        _cur_amt = amount_series[i] if i < len(amount_series) else None
+        review_volume_ratio20 = compute_ratio(_cur_vol, _vol_hist, 20)
+        review_amount_ratio20 = compute_ratio(_cur_amt, _amt_hist, 20)
+        review_volume_percentile20 = compute_percentile(_cur_vol, _vol_hist, 20)
+        review_amount_percentile200 = compute_percentile(_cur_amt, _amt_hist, 200)
+        # price_position_120d（共享 SSOT，含 current，rolling 120）
+        _r_lows = lows[max(0, i - 119): i + 1]
+        _r_highs = highs[max(0, i - 119): i + 1]
+        review_price_position_120d = compute_price_position_120d(
+            closes[i], _r_lows, _r_highs,
+        )
 
         # [P0-1 修复 2026-07-29] 聚合有效性逐 bar 判定（禁止用完整 n_input 判断过去日期）
         # available_bars = i + 1（截至当前 bar 的可用 bar 数，含当前 bar）
@@ -1924,8 +1975,12 @@ def compute_first_pyramid_history(
             "volume_ratio_20": vol_ratio_20,
             "volume_percentile_20": vol_pct_20,
             "volume_zscore_20": vol_zscore_20,
-            # [CHANGE-20260808] Review 扩展：120 日价格位置（prefix-causal，滚动到当前 bar）
-            "price_position_120d": _price_position_120d(closes, lows, highs, i),
+            # [CHANGE-20260808] Review 扩展 rolling facts（共享 SSOT 公式，与 LIVE parity）
+            "review_volume_ratio20": review_volume_ratio20,
+            "review_amount_ratio20": review_amount_ratio20,
+            "review_volume_percentile20": review_volume_percentile20,
+            "review_amount_percentile200": review_amount_percentile200,
+            "price_position_120d": review_price_position_120d,
             # [P0-1] 逐 bar readiness 细分（禁止依赖筹码，禁止用完整 n_input 判断过去日期）
             "available_bars": available_bars,
             "trend_ready": trend_ready,

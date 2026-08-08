@@ -41,11 +41,15 @@ from app.models.market_review import (
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.calendar_service import get_most_recent_trading_day_async
-from app.services.review_metric_observation_service import persist_metric_observations
+from app.services.review_metric_observation_service import (
+    load_metric_history,
+    persist_metric_observations,
+)
 from app.services.review_scope_service import (
+    DEFAULT_BASELINE_WINDOW,
     ScopeDefinition,
     ScopeSnapshotError,
-    fetch_historical_member_facts,
+    load_day_fact_maps,
     resolve_scope_members,
 )
 from app.utils.long_task_budget import (
@@ -291,10 +295,22 @@ async def bootstrap_single_date(
     scopes = await _list_bootstrap_scopes(session, trade_date)
     computed: list[tuple[ScopeDefinition, list[dict[str, Any]], int, int, float, str, dict[str, dict[str, Any]]]] = []
     scope_results: list[dict[str, Any]] = []
+    # [CHANGE-20260808] Stage B：每 trade_date 只调一次 load_day_fact_maps，
+    # 所有 scope 从 facts_by_instrument 内存筛选，不再每 scope 重复查询 400 日 bars。
+    facts_by_instrument = await load_day_fact_maps(session, trade_date=trade_date)
+    if not facts_by_instrument:
+        return {
+            "trade_date": trade_date.isoformat(),
+            "run_id": None,
+            "status": "bootstrap_unavailable",
+            "reason": "no_historical_facts",
+            "scopes": [],
+            "written": False,
+        }
     for scope in scopes:
         try:
             if scope.scope_type == "market":
-                instrument_ids = await _market_history_members(session, trade_date)
+                instrument_ids = list(facts_by_instrument.keys())
             else:
                 instrument_ids, _ = await resolve_scope_members(
                     session, scope.scope_type, scope.scope_key, trade_date=trade_date,
@@ -305,17 +321,33 @@ async def bootstrap_single_date(
         if not instrument_ids:
             scope_results.append(_unavailable_scope(scope, "pit_membership_empty"))
             continue
-        flat_list = await fetch_historical_member_facts(
-            session, instrument_ids, trade_date=trade_date,
-        )
+        # 从内存 fact map 筛选，禁止再次读取历史 bars
+        flat_list = [
+            facts_by_instrument[iid]
+            for iid in instrument_ids
+            if iid in facts_by_instrument
+        ]
         if not flat_list:
             scope_results.append(_unavailable_scope(scope, "historical_member_facts_missing"))
             continue
         ready_count = sum(
             1 for fact in flat_list if fact.get("fp_trend_direction") is not None
         )
+        # [CHANGE-20260808] Chronological：载入当日之前已 persist 的观测（严格 < target_date），
+        # 传 history_maps/prev/prev5d，normalized baseline 才能真正形成。
+        history_maps, prev_values, prev5d_values = await load_metric_history(
+            session,
+            scope_type=scope.scope_type,
+            scope_key=scope.scope_key,
+            trade_date=trade_date,
+            algorithm_version=BOOTSTRAP_ALGORITHM_VERSION,
+            baseline_window=DEFAULT_BASELINE_WINDOW,
+        )
         payloads = compute_all_metrics(
-            flat_list, ready_count=ready_count, history_maps=None,
+            flat_list, ready_count=ready_count,
+            history_maps=history_maps,
+            prev_values=prev_values,
+            prev5d_values=prev5d_values,
             registry=DEFAULT_REGISTRY,
         )
         coverage = ready_count / len(instrument_ids)
