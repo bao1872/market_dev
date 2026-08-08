@@ -57,6 +57,16 @@ export function normalizeStage(raw: string | null | undefined): ReviewStage {
   return raw && STAGE_VALUES.has(raw) ? (raw as ReviewStage) : DEFAULT_REVIEW_STAGE
 }
 
+// 正式 Review 五阶段（Phase 5B 契约）：auction 为 auxiliary entry，不在此列。
+// 此列表为 stage 身份唯一权威来源，ReviewStageNav 从此派生正式导航项。
+export const REVIEW_FORMAL_STAGES: ReadonlyArray<ReviewStage> = [
+  'scan',
+  'signals',
+  'attribution',
+  'validation',
+  'tracking',
+]
+
 /** 归一化追踪 Tab 值 */
 export function normalizeTrackingTab(raw: string | null | undefined): TrackingTab {
   return raw && TRACKING_TAB_VALUES.has(raw)
