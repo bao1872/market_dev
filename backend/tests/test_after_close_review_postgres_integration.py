@@ -304,14 +304,14 @@ async def _make_review_run(
     trade_date: date = TRADE_DATE,
     algorithm_version: str | None = None,
 ) -> MarketReviewRun:
-    creation = await create_run(
+    # [Phase4.2 corrective] create_run 恢复 baseline 合同：直接返回 MarketReviewRun。
+    return await create_run(
         session,
         trade_date=trade_date,
         algorithm_version=algorithm_version,
         filter_version=REVIEW_FILTER_VERSION,
         idempotency_key=f"integration:{trade_date}:{algorithm_version or 'default'}",
     )
-    return creation.run
 
 
 async def test_real_after_close_review_flow_gate_publish_reuse_withdraw_and_force(

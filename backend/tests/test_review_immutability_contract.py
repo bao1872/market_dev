@@ -30,7 +30,7 @@ from app.services.review_orchestrator_service import (
     ReviewOrchestratorError,
     ReviewRunCreation,
     compute_run,
-    create_run,
+    create_run_with_result,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -133,7 +133,7 @@ async def test_late_chip_does_not_rewrite_existing_run() -> None:
     )
 
     # 第二次调用（模拟 chip 已完成后的重复触发）
-    creation = await create_run(
+    creation = await create_run_with_result(
         session,  # type: ignore[arg-type]
         trade_date=TRADE_DATE,
         idempotency_key="second-call-after-chip",
@@ -169,7 +169,7 @@ async def test_repeat_create_run_emits_do_nothing_not_do_update() -> None:
         existing=_make_existing(core_id, board_id),
     )
 
-    creation = await create_run(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
+    creation = await create_run_with_result(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
     created = creation.created
     assert created is False, "既有 run 被复用时 created 必须为 False"
 
@@ -196,7 +196,7 @@ async def test_metadata_of_existing_run_is_not_refreshed() -> None:
         core_id=core_id, board_id=board_id, existing=existing,
     )
 
-    creation = await create_run(
+    creation = await create_run_with_result(
         session,  # type: ignore[arg-type]
         trade_date=TRADE_DATE,
         idempotency_key="a-different-key",
@@ -348,7 +348,7 @@ async def test_created_true_on_fresh_insert_via_immutability_session() -> None:
         async def flush(self):
             return None
 
-    creation = await create_run(
+    creation = await create_run_with_result(
         _FreshSession(),  # type: ignore[arg-type]
         trade_date=TRADE_DATE,
     )
@@ -364,7 +364,7 @@ async def test_returns_review_run_creation_dataclass() -> None:
     session = _ImmutabilitySession(
         core_id=core_id, board_id=board_id, existing=existing,
     )
-    creation = await create_run(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
+    creation = await create_run_with_result(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
     assert isinstance(creation, ReviewRunCreation)
     assert isinstance(creation.run, MarketReviewRun)
     assert creation.created in (True, False)

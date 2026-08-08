@@ -59,7 +59,10 @@ from app.services.review_bootstrap_job_service import (
 from app.services.review_orchestrator_service import (
     DEFAULT_BASELINE_WINDOW,
     REVIEW_ALGORITHM_VERSION,
+    RUN_STATUS_CANCELLED,
+    RUN_STATUS_CREATED,
     RUN_STATUS_PUBLISHED,
+    RUN_STATUS_SIGNALS_READY,
     ReviewOrchestratorError,
     compute_run,
     create_run_with_result,
@@ -193,13 +196,16 @@ async def create_review_run(
             await db.rollback()
             return _run_to_response(run)
 
-        # [Phase4.1 corrective] 显式 created/reused 语义，杜绝 published run 原地重算：
-        # - created=True：本次新插入，可安全 compute（canary/symbols 按请求）
-        # - created=False 且 status==published：复用既有【已发布】run，严禁重算，
-        #   直接返回既有结果（不可变事实）
-        # - created=False 且 status!=published：复用未终态 run（in-progress/failed），
-        #   走 resume_run（只处理 pending/可重试 failed，不重复重算已 succeeded item）
-        if created:
+        # [Phase4.2 corrective] Admin Review reuse 状态机（显式 created/reused 语义）：
+        # - created=True（本次新插入）：compute_run（canary/symbols 按请求）
+        # - created=False 且 status==created（既有 created）：compute_run
+        # - created=False 且 status in (computing/partial/failed)：
+        #       resume_run(only_pending=True) —— 只处理 pending/可重试 failed，
+        #       不重算已 succeeded item（禁止 only_pending=False 整段重算）
+        # - created=False 且 status==signals_ready：原样返回（已就绪，不 recompute）
+        # - created=False 且 status==published：原样返回 immutable（禁止原地重算）
+        # - created=False 且 status==cancelled：409（已取消，不可复用）
+        if created or run.status == RUN_STATUS_CREATED:
             compute_result = await compute_run(
                 db,
                 run,
@@ -209,8 +215,8 @@ async def create_review_run(
             await db.commit()
             await db.refresh(run)
             logger.info(
-                "[Admin] review run 新建并计算完成: run_id=%s result=%s",
-                run.id, compute_result,
+                "[Admin] review run 新建/created 并计算完成: run_id=%s created=%s result=%s",
+                run.id, created, compute_result,
             )
         elif run.status == RUN_STATUS_PUBLISHED:
             # 已发布 run 不可变：不重算、不 commit 变更，原样返回
@@ -222,16 +228,35 @@ async def create_review_run(
                 "message": "run 已发布，禁止原地重算，返回既有结果",
             }
             logger.info("[Admin] review run 复用已发布 run（不重算）: run_id=%s", run.id)
+        elif run.status == RUN_STATUS_SIGNALS_READY:
+            # 已就绪：原样返回，不 recompute
+            await db.rollback()
+            compute_result = {
+                "reused": True,
+                "immutable": True,
+                "status": run.status,
+                "message": "run 已 signals_ready，禁止重算，返回既有结果",
+            }
+            logger.info("[Admin] review run 复用 signals_ready run（不重算）: run_id=%s", run.id)
+        elif run.status == RUN_STATUS_CANCELLED:
+            # 已取消：不可复用，明确 409
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"run 已取消(cancelled)，不可复用或重算: run_id={run.id}",
+            )
         else:
-            # 未发布的既有 run：以 resume 安全续跑，而非整段重算
+            # 未发布的既有非终态 run（computing/partial/failed）：
+            # 以 resume 安全续跑（only_pending=True），而非整段重算
             compute_result = await resume_run(
-                db, run, only_pending=False,
+                db, run, only_pending=True,
             )
             await db.commit()
             await db.refresh(run)
             logger.info(
-                "[Admin] review run 复用未发布 run（resume）: run_id=%s result=%s",
-                run.id, compute_result,
+                "[Admin] review run 复用未发布 run（resume only_pending=True）: "
+                "run_id=%s status=%s result=%s",
+                run.id, run.status, compute_result,
             )
     except ReviewOrchestratorError as exc:
         await db.rollback()

@@ -469,11 +469,11 @@ async def test_pg_chain_scenario_a_happy_path(db_session, _db_connection) -> Non
     # evaluate_publish_gate 判 insufficient_history 阻塞发布（review_publication:155-198）。
     await _seed_review_history(db_session, TRADE_DATE)
     from app.services.review_orchestrator_service import compute_run, create_run, publish_run
-    creation = await create_run(
+    # [Phase4.2 corrective] create_run 恢复 baseline 合同：直接返回 MarketReviewRun。
+    review_run = await create_run(
         db_session, trade_date=TRADE_DATE, source_core_run_id=snapshot_run_id,
         source_board_run_id=board_run_id, idempotency_key=f"chain-a:{TRADE_DATE}",
     )
-    review_run = creation.run
     await db_session.commit()
     await compute_run(db_session, review_run)
     await db_session.commit()

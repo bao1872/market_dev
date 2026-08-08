@@ -1738,7 +1738,6 @@ async def _execute_review_step(
                         dry_run=False,
                         idempotency_key=f"after_close_orchestrator:{job_run_id}",
                     )
-                    review_run = review_run.run
                     _review_run_id = review_run.id
                     logger.info(
                         "[AfterClose] [Review] create_run 完成: run_id=%s, "
@@ -2223,13 +2222,10 @@ async def execute_after_close_run(
         LeaseEpochMismatchError: lease_epoch 不匹配（任务已被新 Worker 接管）
         异常向上传播（调用方应捕获并记录日志）
     """
-    # [Phase4.1 收敛] 提前在函数体层级初始化下游汇总需要的状态变量，
-    # 确保 normal publish 与 skip_publish 两条分支都会赋值，避免末尾汇总时
-    # UnboundLocalError（原 _auction_anchor_status 仅在某分支内初始化）。
-    _auction_anchor_status: str = "skipped"
-    _auction_publication_id: uuid.UUID | None = None
-    _aggregation_status: str = "skipped"
-    _chip_enqueue_status: str = "skipped"
+    # [Phase4.2 corrective] 不再以顶部 "skipped" 默认值掩盖业务步骤未执行。
+    # 这些状态变量由 normal publish 分支（执行 auction anchor / board aggregation /
+    # publishing checkpoint）或 skip_publish 分支（显式置 skipped）赋值，
+    # 不得用统一的默认值假装“已处理”。
 
     # [JOB-02] 设置 lease_epoch ContextVar，子任务（asyncio.create_task）自动继承
     # _update_heartbeat_and_step 读取此 ContextVar 决定是否使用 fenced UPDATE
@@ -3207,25 +3203,20 @@ async def execute_after_close_run(
             _stock_core_published = _core_pub_out["stock_core_published"]
             _stock_core_superseded = _core_pub_out["stock_core_superseded"]
 
-        else:
-            # [Phase4.1 corrective] skip_publish=True（断点恢复到 publishing 之后）：
-            # 本轮局部布尔变量不可信，必须重新核验线上真实 publication pointer 的真实身份。
-            # 只有当 pointer 确实存在且 data_run_id == snapshot_run_id 时，本 run 才是正式
-            # stock_core publication；否则（pointer 指向别人 / 不存在）一律视为未发布/被抢占，
-            # chip 不得入队。禁止用 publish_failed=False 等局部布尔推断“已发布”。
-            _stock_core_superseded = False
-            if snapshot_run_id is not None:
-                # 断点恢复：局部布尔不可信，复用唯一权威判定 resolve_stock_core_published
-                # （与 normal publish 路径共用），重新核验线上真实 publication pointer 身份。
-                async with AsyncSessionLocal() as verify_db:
-                    _stock_core_published, _stock_core_superseded = await resolve_stock_core_published(
-                        verify_db, trade_date, snapshot_run_id
-                    )
-            else:
-                _stock_core_published = False
-                _stock_core_superseded = False
+            # normal publish 分支汇总前初始化；superseded 路径不执行 auction/aggregation
+            # /checkpoint/chip，这些状态如实置为 skipped（不掩盖未执行）。
+            _auction_anchor_status: str = "skipped"
+            _auction_publication_id: uuid.UUID | None = None
+            _aggregation_status: str = "skipped"
+            _chip_enqueue_status: str = "skipped"
 
-        # [CHANGE-20260806-CP4A.1 / P0-C] 正常链不再有独立的 phase-2 run-mark。
+            # ============================================================
+            # [P0 corrective] normal publish 专属步骤（superseded handling /
+            # auction anchor / board aggregation / publishing checkpoint）。
+            # 这些步骤属于「正常发布」分支，仅当 not skip_publish 时执行；
+            # skip_publish 断点恢复分支不得错误翻转到这些步骤。
+            # ============================================================
+            # [CHANGE-20260806-CP4A.1 / P0-C] 正常链不再有独立的 phase-2 run-mark。
             # `publish_stock_core_atomically` 已在同一事务内标记 snapshot run published/succeeded，
             # 正常路径只存在**一个 run 状态 owner**（原子发布服务）。断点恢复场景的 run 终态
             # 由独立的 reconcile service 处理（reconcile_stock_core_publication），不在此内联。
@@ -3363,10 +3354,39 @@ async def execute_after_close_run(
                 )
                 await db.commit()
 
+        else:
+            # [Phase4.2 corrective] skip_publish=True（断点恢复到 publishing 之后）：
+            # 本轮局部布尔变量不可信，必须重新核验线上真实 publication pointer 的真实身份。
+            # 只有当 pointer 确实存在且 data_run_id == snapshot_run_id 时，本 run 才是正式
+            # stock_core publication；否则（pointer 指向别人 / 不存在）一律视为未发布/被抢占，
+            # chip 不得入队。禁止用 publish_failed=False 等局部布尔推断“已发布”。
+            # 注意：上面的 normal publish 专属步骤（auction anchor / board aggregation /
+            # publishing checkpoint）**不**在 skip_publish 分支执行。
+            _stock_core_superseded = False
+            if snapshot_run_id is not None:
+                # 断点恢复：局部布尔不可信，复用唯一权威判定 resolve_stock_core_published
+                # （与 normal publish 路径共用），重新核验线上真实 publication pointer 身份。
+                async with AsyncSessionLocal() as verify_db:
+                    _stock_core_published, _stock_core_superseded = await resolve_stock_core_published(
+                        verify_db, trade_date, snapshot_run_id
+                    )
+            else:
+                _stock_core_published = False
+                _stock_core_superseded = False
+            # skip_publish 路径不执行 normal publish 专属步骤，显式置 skipped 以如实反映未执行。
+            _auction_anchor_status = "skipped"
+            _auction_publication_id = None
+            _aggregation_status = "skipped"
+            _chip_enqueue_status = "skipped"
+
         # C5: 事件生成在 publishing 成功之后（或 skip_publish 断点恢复时已发布）
         # publishing 失败会抛异常跳过此处 → 不生成事件
         # 独立 session + try/except：事件生成失败不影响 orchestrator 主流程
-        if snapshot_error is None and snapshot_run_id is not None and not publish_failed:
+        # [P1 corrective] 守卫以「当前正式 stock_core publication 判据」为准：
+        # 仅当本 snapshot_run_id 真正成为正式 stock_core publication（_stock_core_published
+        # 且未被 superseded）时才生成状态事件；禁止使用 snapshot_error / publish_failed
+        # 等局部布尔推断。superseded run 不得生成状态事件。
+        if _stock_core_published and not _stock_core_superseded and snapshot_run_id is not None:
             try:
                 from app.services.state_event_service import (
                     cleanup_old_events,

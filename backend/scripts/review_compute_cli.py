@@ -177,7 +177,10 @@ async def _run_create_and_compute(args: argparse.Namespace) -> int:
 
         try:
             # 1. 创建 run
-            creation = await create_run(
+            # [Phase4.2 corrective] create_run 恢复 baseline 合同：直接返回
+            # MarketReviewRun（不再是 ReviewRunCreation）。需要 created/reused
+            # 语义的调用方（Admin）才用 create_run_with_result。
+            run = await create_run(
                 db,
                 trade_date=trade_date,
                 baseline_window=args.baseline_window,
@@ -186,7 +189,6 @@ async def _run_create_and_compute(args: argparse.Namespace) -> int:
                 dry_run=args.dry_run,
                 idempotency_key=idem_key,
             )
-            run = creation.run
             if args.dry_run:
                 print("[DRY-RUN] 输入校验通过:")
                 print(f"  trade_date: {trade_date}")

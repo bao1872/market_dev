@@ -357,7 +357,7 @@ async def test_create_run_never_queries_chip() -> None:
     这是原合同的真实断言层级：chip 查询过去发生在 create_run 内部
     （_resolve_chip_dependency），只断言 _resolve_source_run_ids 会漏掉它。
     """
-    from app.services.review_orchestrator_service import create_run
+    from app.services.review_orchestrator_service import create_run_with_result
 
     existing = MarketReviewRun(
         trade_date=TRADE_DATE,
@@ -369,7 +369,7 @@ async def test_create_run_never_queries_chip() -> None:
     )
     session = _build_recording_session(existing)
 
-    await create_run(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
+    await create_run_with_result(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
 
     joined = "\n".join(session.sql_log).lower()
 
@@ -404,7 +404,7 @@ async def test_create_run_does_not_write_chip_columns() -> None:
     - source_chip_run_id 不出现在 INSERT 列清单（无显式赋值）；
     - degraded_reasons 即便因 ORM default=list 被物化，其值也必须是空列表。
     """
-    from app.services.review_orchestrator_service import create_run
+    from app.services.review_orchestrator_service import create_run_with_result
 
     existing = MarketReviewRun(
         trade_date=TRADE_DATE,
@@ -416,7 +416,7 @@ async def test_create_run_does_not_write_chip_columns() -> None:
     )
     session = _build_recording_session(existing)
 
-    await create_run(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
+    await create_run_with_result(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
 
     inserts = [s for s in session.sql_log if "insert into" in s.lower()]
     assert inserts, "create_run 必须执行一次 INSERT"
@@ -432,10 +432,10 @@ async def test_create_run_does_not_write_chip_columns() -> None:
 
 async def test_create_run_dry_run_has_no_chip_lineage() -> None:
     """dry_run 返回的 run 对象不得带 chip lineage 字段值。"""
-    from app.services.review_orchestrator_service import create_run
+    from app.services.review_orchestrator_service import create_run_with_result
 
     session = _build_recording_session(None)
-    creation = await create_run(
+    creation = await create_run_with_result(
         session, trade_date=TRADE_DATE, dry_run=True,  # type: ignore[arg-type]
     )
     run = creation.run
@@ -450,7 +450,7 @@ async def test_create_run_upsert_is_do_nothing() -> None:
     SQL 层必须是 ON CONFLICT DO NOTHING —— DO UPDATE 会让晚到的增强产品
     （chip 等）改写已发布 Review 的 lineage 与降级状态。
     """
-    from app.services.review_orchestrator_service import create_run
+    from app.services.review_orchestrator_service import create_run_with_result
 
     existing = MarketReviewRun(
         trade_date=TRADE_DATE,
@@ -462,7 +462,7 @@ async def test_create_run_upsert_is_do_nothing() -> None:
     )
     session = _build_recording_session(existing)
 
-    await create_run(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
+    await create_run_with_result(session, trade_date=TRADE_DATE)  # type: ignore[arg-type]
 
     inserts = [s for s in session.sql_log if "insert into" in s.lower()]
     insert_sql = "\n".join(inserts).lower()

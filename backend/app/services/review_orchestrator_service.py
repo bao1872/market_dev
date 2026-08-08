@@ -178,7 +178,7 @@ def check_run_scope_compatibility(
 # =============================================================================
 
 
-async def create_run(
+async def _create_run_impl(
     session: AsyncSession,
     *,
     trade_date: date,
@@ -191,8 +191,13 @@ async def create_run(
     symbols: list[str] | None = None,
     dry_run: bool = False,
     idempotency_key: str | None = None,
-) -> ReviewRunCreation:
-    """创建或复用 review run（幂等：唯一键组合保证）。
+) -> tuple[MarketReviewRun, bool]:
+    """创建或复用 review run（幂等：唯一键组合保证）的**内部实现**。
+
+    [Phase4.2 corrective] 恢复 baseline(76e1338) backward-compat 合同：
+    `create_run` 返回 **MarketReviewRun**（与全部既有生产调用方 after_close_orchestrator
+    / review_compute_cli / PG integration 一致）。需要显式 created/reused 信息的调用方
+    （如 Admin）改用 `create_run_with_result() -> ReviewRunCreation`。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
@@ -209,9 +214,11 @@ async def create_run(
         idempotency_key: 幂等键（写入 metadata，便于调用方追踪）
 
     Returns:
-        ReviewRunCreation(run, created)
+        tuple[MarketReviewRun, bool]：(run 对象, created)。
         - created=True：本次新插入了一行（可安全 compute）
         - created=False：复用既有 run（可能已 published，禁止原地重算）
+        公共入口 `create_run` 只返回 run；`create_run_with_result` 返回
+        ReviewRunCreation(run, created)。
 
     Raises:
         ReviewOrchestratorError: 输入校验失败（缺 publication pointer 等）；
@@ -238,9 +245,10 @@ async def create_run(
     # + 历史观测构成。chip 属增强产品，不参与 Review lineage：创建阶段零次 chip
     # 查询，也不写入 source_chip_run_id / degraded_reasons / chip_coverage。
     if dry_run:
-        # dry-run：不写 DB，返回一个非持久化的 run 对象供调用方打印
-        return ReviewRunCreation(
-            run=MarketReviewRun(
+        # dry-run：不写 DB，返回一个非持久化的 run 对象供调用方打印。
+        # created=False —— 未真正插入任何行，调用方不得据此触发 compute。
+        return (
+            MarketReviewRun(
                 trade_date=trade_date,
                 source_core_run_id=resolved_core_id,
                 source_board_run_id=resolved_board_id,
@@ -256,7 +264,7 @@ async def create_run(
                     "idempotency_key": idempotency_key,
                 },
             ),
-            created=True,
+            False,
         )
     meta: dict[str, Any] = {
         "canary": canary,
@@ -332,14 +340,109 @@ async def create_run(
                 f"或显式清理既有 run。",
             )
 
+    return run, created
+
+
+async def create_run(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    source_core_run_id: uuid.UUID | None = None,
+    source_board_run_id: uuid.UUID | None = None,
+    algorithm_version: str | None = None,
+    filter_version: str | None = None,
+    baseline_window: int = DEFAULT_BASELINE_WINDOW,
+    canary: bool = False,
+    symbols: list[str] | None = None,
+    dry_run: bool = False,
+    idempotency_key: str | None = None,
+) -> MarketReviewRun:
+    """创建或复用 review run（幂等：唯一键组合保证）。
+
+    [Phase4.2 corrective] 恢复 baseline(76e1338) backward-compat 合同：
+    `create_run` 返回 **MarketReviewRun**（与全部既有生产调用方 after_close_orchestrator
+    / review_compute_cli / PG integration 一致）。需要显式 created/reused 信息的调用方
+    （如 Admin）改用 `create_run_with_result() -> ReviewRunCreation`。
+
+    Args:
+        session: 异步 DB 会话（caller 控制 commit）
+        trade_date: 业务交易日
+        source_core_run_id: 输入 stock_core run_id（None 时从 publication 读取）
+        source_board_run_id: 输入 board_analysis 的 source_core_run_id
+            （None 时从 publication 读取 board_analysis_snapshot）
+        algorithm_version: 算法版本（默认 REVIEW_ALGORITHM_VERSION）
+        filter_version: 筛选器版本（默认 REVIEW_FILTER_VERSION）
+        baseline_window: 历史基线窗口（默认 120，最低 60）
+        canary: canary 模式（限定范围数，写入 metadata）
+        symbols: 限定股票列表（canary/debug 用，None=全市场）
+        dry_run: dry-run 模式（只校验输入，不写 run 记录）
+        idempotency_key: 幂等键（写入 metadata，便于调用方追踪）
+
+    Returns:
+        MarketReviewRun：本次新插入或复用的 run 对象。
+        复用既有 run（可能已 published）时返回既有对象，调用方必须按不可变语义
+        处理，禁止原地重算。
+
+    Raises:
+        ReviewOrchestratorError: 输入校验失败（缺 publication pointer 等）；
+            或 [Phase4.1] 既有 run 的 canary/symbols scope 与新请求不一致
+            （scope 冲突，避免 canary 结果续成 formal run）
+    """
+    run, _created = await _create_run_impl(
+        session,
+        trade_date=trade_date,
+        source_core_run_id=source_core_run_id,
+        source_board_run_id=source_board_run_id,
+        algorithm_version=algorithm_version,
+        filter_version=filter_version,
+        baseline_window=baseline_window,
+        canary=canary,
+        symbols=symbols,
+        dry_run=dry_run,
+        idempotency_key=idempotency_key,
+    )
+    return run
+
+
+async def create_run_with_result(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    source_core_run_id: uuid.UUID | None = None,
+    source_board_run_id: uuid.UUID | None = None,
+    algorithm_version: str | None = None,
+    filter_version: str | None = None,
+    baseline_window: int = DEFAULT_BASELINE_WINDOW,
+    canary: bool = False,
+    symbols: list[str] | None = None,
+    dry_run: bool = False,
+    idempotency_key: str | None = None,
+) -> ReviewRunCreation:
+    """创建或复用 review run，并返回显式的 created/reused 信息。
+
+    [Phase4.2 corrective] 真正的 create_run_with_result 入口（非 alias 冒充兼容层）。
+    内部复用 `create_run` 的真实实现，仅额外暴露 ReviewRunCreation(run, created) 合同，
+    供需要区分“本次新建 vs 复用既有”的调用方（如 Admin）使用。
+
+    Returns:
+        ReviewRunCreation(run, created)
+        - created=True：本次新插入了一行（可安全 compute）
+        - created=False：复用既有 run（可能已 published，禁止原地重算）
+    """
+    run, created = await _create_run_impl(
+        session,
+        trade_date=trade_date,
+        source_core_run_id=source_core_run_id,
+        source_board_run_id=source_board_run_id,
+        algorithm_version=algorithm_version,
+        filter_version=filter_version,
+        baseline_window=baseline_window,
+        canary=canary,
+        symbols=symbols,
+        dry_run=dry_run,
+        idempotency_key=idempotency_key,
+    )
     return ReviewRunCreation(run=run, created=created)
-
-
-# [Phase4.1 收敛] 公共合同保持 create_run 返回 ReviewRunCreation（既有生产调用方
-# after_close_orchestrator / review_compute_cli / PG integration 已采用该返回形态，
-# 不再强制改造）。需要显式 created/reused 信息的调用方（如 Admin）使用
-# create_run_with_result，二者等价。
-create_run_with_result = create_run
 
 
 async def get_run(
