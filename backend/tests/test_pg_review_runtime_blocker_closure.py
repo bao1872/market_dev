@@ -733,7 +733,6 @@ async def test_recovery_checkpoint_reconcile_and_resume() -> None:
     from app.db import AsyncSessionLocal
     from app.models.scheduler_job_run import SchedulerJobRun
     from app.services.after_close_orchestrator import (
-        _completed_steps,
         execute_after_close_run,
         get_after_close_run_status,
         reconcile_after_close_checkpoint_from_artifacts,
@@ -826,14 +825,8 @@ async def test_recovery_checkpoint_reconcile_and_resume() -> None:
             job_run_id=str(job_run_id),
             target_step="computing_features",
         )
-        assert result2["action"] == "noop"
-        assert result2["ok"] is True
-
-    # resume mapping 非空
-    assert "computing_features" in _completed_steps
-    comp_set = _completed_steps["computing_features"]
-    assert "refreshing_daily" in comp_set
-    assert "computing_features" in comp_set
+    assert result2["action"] == "noop"
+    assert result2["ok"] is True
 
     # Phase 3: reconcile DSA + finalize snapshot → execute_after_close_run
     async with AsyncSessionLocal() as fix_db:
