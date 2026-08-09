@@ -79,7 +79,7 @@
 | `state_events` | enhancement | source core、事件生命周期与 coverage | 不阻断 board/Review |
 | `chip_consensus` | enhancement | ChipConsensusRun、逐股 readiness、coverage 与正式 pointer | 不阻断 core/board/Review |
 | `auction_anchor` | enhancement | AuctionAnchorRun、mode、coverage 与正式 pointer | 不阻断 Review |
-| `board_aggregation` | mandatory product | 正式 market aggregation pointer | 失败阻断 Review |
+| `board_aggregation` | mandatory product | 正式 market aggregation pointer（READY 或 DEGRADED，见 PC-42） | **FAILED** 阻断 Review；**DEGRADED 不阻断** |
 | `market_review` | mandatory product | 正式 Review pointer 与发布质量门 | 失败保留旧 pointer |
 
 每个节点至少返回：`status/readiness/mandatory/runId/publicationId/sourceRunIds/coverage/processed/total/heartbeat/lease/isStale/reasonCode/reasonText/recommendedAction`。
@@ -162,6 +162,37 @@ chip.source_core_run_id == stock_core.pointer.data_run_id
 auction.source_core_run_id == stock_core.pointer.data_run_id
 auction.source_chip_run_id == chip_consensus.pointer.data_run_id or null
 ```
+
+### PC-42 Board aggregation degraded publication（CHANGE-20260809，Phase 4D.3）
+
+`board_aggregation` 是 mandatory product，但 **MANDATORY 不等于 PERFECT**。其产品状态区分三档：
+
+| 产品状态 | 条件 | 是否阻断 Review |
+|---|---|---|
+| `READY` | 正式 pointer 指向 `BoardAnalysisRun.status == succeeded` | 否 |
+| `DEGRADED` | 正式 pointer 指向满足下述 DEGRADED PUBLISHABLE CONTRACT 的 `status == partial` run | **否** |
+| `FAILED` / `BLOCKED` | 无合法正式 pointer，或 pointer 指向 failed / 非终态 run | **是** |
+
+**DEGRADED PUBLISHABLE CONTRACT**：`BoardAnalysisRun.status == partial` 允许正式发布
+`market_aggregation` pointer，当且仅当同时满足：
+
+- **A** run 已 terminal
+- **B** 所有 board_analysis 正式 in-scope board（industry + concept）都完成过计算并持久化 snapshot
+- **C** 没有 execution failure
+- **D** 没有 DB failure
+- **E** 没有 contract violation
+- **F** partial 原因仅属于已知 data completeness / member coverage degradation
+- **G** 每个 partial board 都有真实的 `coverage_ratio` / `eligible_count` / `ready_count` /
+  `missing_count` / `status`
+- **H** 不存在 UNKNOWN failure
+
+`degraded != failed`。**degraded pointer 仍然是正式的 `market_aggregation` pointer**，
+PC-40 与 PC-41 完全不变：Review 仍只消费正式 pointer，且必须满足
+`review.source_board_run_id == market_aggregation.pointer.data_run_id`。
+
+**禁止 Review 侧自行解析 board source**：不得增加 Review-side board resolver、fallback、
+"latest partial run" 或任何绕过 pointer 的路径。Review 接受的是「正式 pointer 指向的 degraded run」，
+而不是「自己挑一个 partial run」。
 
 bars、adjustment factor 和 membership 不得读取目标交易日以后；Review history 只读目标日期以前；manual/replay 不污染 scheduled current pointer。
 

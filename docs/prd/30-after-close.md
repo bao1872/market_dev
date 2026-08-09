@@ -162,6 +162,68 @@
 4. 数据不足股票进入 coverage 分母说明，但不参与有效统计
 5. 行业与概念分开计算；成员和股票因子必须同一 `trade_date`，禁止使用未来数据
 
+### BA-01B：Board Analysis V1 产品范围（CHANGE-20260809，Phase 4D.3 决策 A）
+
+Board Analysis V1 的**正式产品范围**只有两类板块实体：
+
+| scope_family | 来源 | 是否属于 Board Analysis V1 |
+|---|---|---|
+| `industry`（L1/L2/L3） | `market_boards.type == 'industry'` | **IN_SCOPE** |
+| `concept` | `market_boards.type == 'concept'` | **IN_SCOPE** |
+| `major_index`（csi300/csi500） | `universe_definitions` | **OUT_OF_SCOPE** |
+| `style`（large_cap/small_cap） | `universe_definitions` | **OUT_OF_SCOPE** |
+| `market` | Review scope，非 board 实体 | **OUT_OF_SCOPE** |
+
+`major_index` / `style` 仍是 **Review optional scopes**（PRD 70 §6.3），由 universe membership
+自己的正式链路负责，**不属于 Board Analysis V1 batch universe**。因此它们不得进入：
+
+- `BoardAnalysisRun.expected_count`
+- `BoardAnalysisRun.succeeded_count`
+- `BoardAnalysisRun.failed_count`
+- board batch 层的 population blockers
+- board `coverage_ratio` 分母
+
+`universe_definitions` 中的这些定义**保留**（不删除 seed，不改 migration 079 历史）；
+仅 board_analysis 不再消费这些 out-of-scope definitions。
+
+### BA-02B：BoardAnalysisRun batch status 语义（CHANGE-20260809，Phase 4D.3 决策 B）
+
+`BoardAnalysisRun.status` 的**完整合法取值**如下，不得再出现其他 batch-level 状态：
+
+| status | 终态 | 语义 |
+|---|---|---|
+| `pending` | 否 | 尚未开始 |
+| `running` | 否 | 计算中 |
+| `succeeded` | 是 | 所有 in-scope board 均完成计算，且全部达到 board ready contract（`coverage >= 0.95`） |
+| `partial` | 是 | 所有 in-scope board 均完成**正式计算**，不存在 execution / DB / contract failure，但至少一个 board `coverage < 0.95` 或存在其他明确的数据完整性 degradation |
+| `failed` | 是 | 存在 board compute exception、DB persistence failure、contract violation、无法完成 mandatory board computation 或其他 unexpected execution failure |
+
+`partial` 是 **terminal + truthful + degraded**，**不是** execution failure。
+
+**禁止**：`blocked_external_population` 不得作为 `BoardAnalysisRun.status` 使用。该语义只属于
+`UniverseDefinition.population_status` 与 scope-level population readiness，其 scope/universe
+层用法保持不变。
+
+**status 推导顺序（显式，execution failure 优先）**：
+
+```text
+if execution_failure:        -> failed
+elif not all in-scope boards completed -> partial（未达 ready contract 的终态）
+elif any board snapshot partial        -> partial
+else                                   -> succeeded
+```
+
+population 相关分支**不得**置于 execution failure 之前，以免掩盖真实 failure。
+
+**counter 基数统一**：`expected_count` / `succeeded_count` / `failed_count` 必须是**同一实体基数
+= in-scope MarketBoard（industry + concept）**，不得混入 universe blockers。
+
+- `expected_count` = in-scope board 数量
+- `succeeded_count` = 达到 ready contract 的 board snapshot 数量
+- `failed_count` = **execution failure 的 board 数量**（coverage 不足的 partial board **不计入**）
+- `partial_count`（coverage 不足的 board 数）当前 schema 无持久化列，从 snapshot statuses 派生，
+  在 metadata / diagnostics / readiness DTO 中表达
+
 ### BA-02：数据模型
 
 新增 `board_analysis_snapshots` 表（migration `074_board_analysis_v1`）：
@@ -192,6 +254,19 @@ V1 输入仅趋势、结构、动量、量能、结构事件和权威行业/概�
 - 不足时保存 `partial` 结果但不切 pointer（可重复计算，幂等）
 - 发布只做小事务原子切换指针，不复制数据
 - pointer 不得倒退到旧 run
+
+**batch 级 pointer 发布（CHANGE-20260809，Phase 4D.3 决策 C）**：`market_aggregation` pointer
+允许指向 `status == succeeded` 或 `status == partial` 的 `BoardAnalysisRun`，但 `partial`
+必须满足 **DEGRADED PUBLISHABLE CONTRACT**（见 PRD 31 §PC-42）。
+
+本轮**不引入新的 batch coverage 阈值**（如 90%/92%/94%/95%）。原因：
+`coverage_ratio = succeeded_count / expected_count` 只是 **board readiness ratio**，
+不是 member-weighted 数据覆盖率，不能机械决定整个 batch 是否 publishable。
+degraded eligibility 由「全部执行完成 + 无 execution failure + partial 原因可解释」决定。
+未来若产品需要 batch quality threshold，单独定义。
+
+pointer 本身**不得把 partial run 伪装成 succeeded**：`pointer.data_run_id` 可以指向 partial run，
+消费者通过 `run.status` + readiness DTO / diagnostics 得知 DEGRADED。
 
 ### BA-05：API 与 UI
 
