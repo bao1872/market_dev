@@ -750,6 +750,16 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
         audit_txn=False,
     )
     await db_session.flush()
+    # metadata_.scope 必须设为 full，get_published_full_run / has_succeeded_snapshot_run
+    # 均检查 metadata_["scope"].astext == "full"（真实 orchestrator 在创建 run 时写入）
+    from sqlalchemy import text as sa_text
+    await db_session.execute(
+        sa_text(
+            "UPDATE stock_feature_snapshot_runs SET metadata_ = :md WHERE id = :rid"
+        ),
+        {"md": '{"scope": "full"}', "rid": str(snap.id)},
+    )
+    await db_session.flush()
     await db_session.refresh(snap)
     assert snap.published_at is not None
 
