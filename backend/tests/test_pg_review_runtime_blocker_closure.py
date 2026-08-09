@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, date, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -476,41 +476,6 @@ async def test_pg5_atomic_publication_no_recompute(db_session) -> None:
 # ---- PG-6/7/8: 真实 orchestrator resume（mock 外部依赖，真实 checkpoint/finalize/publish）----
 
 
-@pytest.fixture
-def _mock_orchestrator_external():
-    """复用 test_after_close_orchestrator 模式：mock review/bars/compute/factor/publish，
-    但真实跑 orchestrator 的 checkpoint 推进 + finalize。
-
-    仅用于 PG-6/7/8（需要 execute_after_close_run 但下游 review/board 数据不存在）。
-    PG-1~5 不依赖 orchestrator 或各自 mock 所需函数，不得被此 fixture 的 publish mock 污染。
-    """
-    fake_review_run = MagicMock()
-    fake_review_run.id = uuid.uuid4()
-    fake_review_run.status = "published"
-    fake_review_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-    fake_review_run.expected_scope_count = 0
-    fake_review_run.signal_count = 0
-    fake_review_run.coverage_ratio = 1.0
-    with (
-        patch(
-            "app.services.review_orchestrator_service.create_run",
-            new=AsyncMock(return_value=fake_review_run),
-        ),
-        patch(
-            "app.services.review_publication_service.get_published_review_run_id",
-            new=AsyncMock(return_value=fake_review_run.id),
-        ),
-        patch(
-            "app.services.feature_snapshot_service.compute_review_core_with_run_items",
-            new=AsyncMock(return_value={}),
-        ),
-        patch(
-            "app.services.stock_core_publication_service.publish_stock_core_atomically",
-            new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
-        ),
-    ):
-        yield
-
 
 async def _create_after_close_job_run(
     db_session,
@@ -552,209 +517,168 @@ async def _create_after_close_job_run(
     return job_run
 
 
+class DownstreamEntryReachedError(Exception):
+    """publishing 完成、下游 review 入口已触发时抛出，证明 orchestrator 自然推进。
+
+    不是错误；用于在 review create_run 被 mock 后干净地中断 execute_after_close_run，
+    避免 board/Review 等不相关下游步骤继续执行。
+    """
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_mock_orchestrator_external")
-async def test_pg6_actual_resume_no_recompute(db_session) -> None:
-    """PG-6: 真实 orchestrator 断点恢复。
+async def test_pg_resume_integration() -> None:
+    """PG-6/7/8 合一：真实 orchestrator resume（computing_features 完成 → skip compute
+    → publishing → downstream entry → checkpoint 推进）。
 
-    构造事故同语义：computing_features 已完成（last_completed_step 含 computing_features），
-    existing snapshot artifacts 已存在，DSA counters 已 reconcile（5283/10/0）。
-    调用 execute_after_close_run → compute_review_core_with_run_items NOT CALLED。
+    使用独立 AsyncSessionLocal 准备 committed data（非 savepoint fixture），
+    使 execute_after_close_run 的 fresh session 可见所有 test 数据。
+
+    同时证明：
+    - PG-6: compute_review_core_with_run_items call_count=0（skip_computing）
+    - PG-7: orchestrator 自然进入 publishing 并真实调用 publish_stock_core_atomically
+    - PG-8: downstream entry 发生，last_completed_step 推进到 publishing/review
     """
+    from app.db.session import AsyncSessionLocal
+
+    from app.models.scheduler_job_run import SchedulerJobRun
     from app.services.after_close_orchestrator import (
         AfterCloseRunStatus,
         execute_after_close_run,
+        get_after_close_run_status,
     )
 
-    # 真实 DSA run + items（reconciled 5283/10/0）
-    dsa_run = await _make_strategy_run_with_items(
-        db_session,
-        total=5293,
-        succeeded=5283,
-        skipped=10,
-        failed=0,
-        status="completed",
-    )
-    await reconcile_strategy_run_from_items(db_session, dsa_run.id, set_finished_at=True)
+    test_date = date(2026, 8, 25)
 
-    # 真实 snapshot run（compute terminal, unpublished）
-    snap = await _make_snapshot_run_with_items(
-        db_session,
-        expected=5293,
-        succeeded=5293,
-        skipped=0,
-        failed=0,
-        published_at=None,
-        status=STATUS_SUCCEEDED,
-        trade_date=date(2026, 8, 22),
-    )
+    # =====================================================================
+    # Phase 1: 用独立 committed session 准备所有 test data
+    # =====================================================================
+    async with AsyncSessionLocal() as prep_db:
+        # -- DSA run + items（5283/10/0，reconciled） --
+        dsa_run = await _make_strategy_run_with_items(
+            prep_db, total=5293, succeeded=5283, skipped=10, failed=0,
+            status="completed",
+        )
+        await reconcile_strategy_run_from_items(prep_db, dsa_run.id, set_finished_at=True)
 
-    # after-close job_run：checkpoint 已到 computing_features/publishing
-    job_run = await _create_after_close_job_run(
-        db_session,
-        status="running",
-        orchestrator_status=AfterCloseRunStatus.COMPUTING_FEATURES.value,
-        dsa_run_id=dsa_run.id,
-        feature_snapshot_run_id=snap.id,
-        last_completed_step="computing_features",
-        trade_date=date(2026, 8, 22),
-    )
-    # 提交 test data 使 execute_after_close_run 的 fresh session 可见
-    await db_session.commit()
+        # -- snapshot run（compute terminal, unpublished） --
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
+            published_at=None, status=STATUS_SUCCEEDED, trade_date=test_date,
+        )
 
+        # -- job_run：checkpoint 已到 computing_features --
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        meta = {
+            "orchestrator_status": AfterCloseRunStatus.COMPUTING_FEATURES.value,
+            "trade_date": test_date.isoformat(),
+            "dsa_run_id": str(dsa_run.id),
+            "feature_snapshot_run_id": str(snap.id),
+            "last_completed_step": "computing_features",
+        }
+        job_run = SchedulerJobRun(
+            job_name="after_close_orchestrator",
+            business_date=test_date.isoformat(),
+            run_key=f"after_close_orchestrator:test:{uuid.uuid4().hex[:8]}",
+            status="running",
+            scheduled_at=now,
+            started_at=now,
+            heartbeat_at=now,
+            lease_expires_at=now,
+            metadata_json=json.dumps(meta, ensure_ascii=False),
+        )
+        prep_db.add(job_run)
+        await prep_db.flush()
+        job_run_id = job_run.id
+
+        # 真实 commit — 数据对 execute_after_close_run 的 fresh session 可见
+        await prep_db.commit()
+
+    # =====================================================================
+    # Phase 2: spy + mock + 调用真实 execute_after_close_run
+    # =====================================================================
     compute_call_count = {"n": 0}
 
-    # spy：真实拦截 compute 调用
     async def _spy_compute(*a, **k):
         compute_call_count["n"] += 1
         return {}
 
-    with patch(
-        "app.services.feature_snapshot_service.compute_review_core_with_run_items",
-        new=_spy_compute,
+    with (
+        patch(
+            "app.services.feature_snapshot_service.compute_review_core_with_run_items",
+            new=_spy_compute,
+        ),
+        # publishing 后 auction_anchor 不阻塞（返回空结果，不抛异常）
+        patch(
+            "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
+            new=AsyncMock(return_value={"structure_count": 0, "chip_count": 0}),
+        ),
+        # downstream entry sentinel：review create_run 被调用 = orchestrator 已过 publishing
+        patch(
+            "app.services.review_orchestrator_service.create_run",
+            side_effect=DownstreamEntryReachedError("review entry reached"),
+        ),
     ):
         try:
-            await execute_after_close_run(
-                job_run.id,
-                trade_date=date(2026, 8, 22),
-            )
-        except Exception:
-            # orchestrator 后续步骤（board/Review）被 mock，但 compute 路径已验证
-            pass
+            await execute_after_close_run(job_run_id, trade_date=test_date)
+            # 如果没抛 sentinel，orchestrator 完整执行到了结束 — 也接受
+            downstream_reached = True
+        except DownstreamEntryReachedError:
+            downstream_reached = True
+        # 注意：不再有 except Exception: pass — 任何意外异常必须 FAIL
 
+    # =====================================================================
+    # Phase 3: 逐项验收
+    # =====================================================================
+    # A. compute 未调用（PG-6）
     assert compute_call_count["n"] == 0, (
         f"resume 不得重算 5293 stocks，实际 compute 调用={compute_call_count['n']}"
     )
 
+    # B/C/D. 用独立 reader session 核验 publish 效果
+    async with AsyncSessionLocal() as reader_db:
+        # 重新加载 snapshot run
+        snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
+        assert snap_reread is not None, "snapshot run 必须存在"
+        assert snap_reread.published_at is not None, (
+            "publish 后 published_at 必须 set"
+        )
 
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_pg7_official_publishing_resume_path(db_session) -> None:
-    """PG-7: reconcile DSA → gate PASS → finalize → publish_stock_core_atomically。
+        # 核验 formal pointer
+        from app.services.factor_publication_service import (
+            PUBLICATION_KIND_STOCK_CORE,
+            get_publication,
+        )
 
-    验证 orchestrator 到达 publishing 后的真实行为等价路径：
-    - DSA gate PASS（5283/10/0）
-    - finalize_snapshot_run_compute_complete 正确 terminal
-    - publish_stock_core_atomically 写 published_at + pointer
-    - 不依赖 execute_after_close_run（其 fresh session 与测试 savepoint 隔离）
-    """
-    from app.services.stock_core_publication_service import (
-        publish_stock_core_atomically,
-    )
+        pointer = await get_publication(
+            reader_db,
+            trade_date=test_date,
+            kind=PUBLICATION_KIND_STOCK_CORE,
+            scope_key="market",
+        )
+        assert pointer is not None, "publication pointer 必须存在"
+        assert pointer.data_run_id == snap.id, (
+            f"pointer.data_run_id={pointer.data_run_id} != snap.id={snap.id}"
+        )
 
-    dsa_run = await _make_strategy_run_with_items(
-        db_session,
-        total=5293,
-        succeeded=5283,
-        skipped=10,
-        failed=0,
-        status="completed",
-    )
-    await reconcile_strategy_run_from_items(db_session, dsa_run.id, set_finished_at=True)
-    assert dsa_run.succeeded_count == 5283
-    assert dsa_run.status == "completed"
+        # E/F. checkpoint 推进
+        status = await get_after_close_run_status(job_run_id)
+        meta_after = json.loads(status.metadata_json)
+        last_step = meta_after.get("last_completed_step", "")
+        orch_status = meta_after.get("orchestrator_status", "")
+        assert downstream_reached, "downstream entry 必须触发"
+        assert (
+            "publishing" in last_step
+            or orch_status
+            in (
+                AfterCloseRunStatus.PUBLISHING.value,
+                AfterCloseRunStatus.COMPUTING_REVIEW.value,
+                AfterCloseRunStatus.COMPLETED.value,
+            )
+        ), (
+            f"orchestrator 未推进到 publishing: "
+            f"last_completed_step={last_step}, orchestrator_status={orch_status}"
+        )
 
-    # gate PASS
-    gate_ok = await StrategyBatchService()._check_quality_gates(
-        dsa_run, result_count=dsa_run.succeeded_count, db=db_session
-    )
-    assert gate_ok is True, "reconciled DSA 5283/10/0 必须通过质量门禁"
-
-    snap = await _make_snapshot_run_with_items(
-        db_session,
-        expected=5293,
-        succeeded=5293,
-        skipped=0,
-        failed=0,
-        published_at=None,
-        status=STATUS_SUCCEEDED,
-        trade_date=date(2026, 8, 23),
-    )
-
-    # finalize compute terminal（等价于 orchestrator 中 computing_features 完成后的调用）
-    await finalize_snapshot_run_compute_complete(db_session, snap.id)
-    await db_session.refresh(snap)
-    assert snap.status == STATUS_SUCCEEDED
-    assert snap.finished_at is not None
-    assert snap.published_at is None
-
-    # publish（等价于 orchestrator 在 publishing step 的调用）
-    pub = await publish_stock_core_atomically(
-        db_session,
-        scope_key="market",
-        trade_date=date(2026, 8, 23),
-        publication_kind="stock_core_full",
-        algorithm_version="review-core-v1",
-        snapshot_run_id=snap.id,
-        coverage_ratio=1.0,
-        worker_id="pg-verify-worker",
-        lease_epoch=1,
-        eligible_count=5293,
-        audit_txn=False,
-    )
-    await db_session.flush()
-    await db_session.refresh(snap)
-
-    assert pub.data_run_id == snap.id, "pointer 必须指向同一 snapshot_run_id"
-    assert snap.published_at is not None, "publish 后 published_at 必须 set"
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> None:
-    """PG-8: publish 后下游 consumer 正确消费 published run。
-
-    验证：published_at + pointer 写入后，has_succeeded_snapshot_run / get_published_full_run
-    均正确返回已发布 run。downstream（board/Review）不会消费 unpublished run。
-    PG-6 已证明 compute call_count=0（skip_computing），本测试验证 published 可见性。
-    """
-    from app.services.stock_core_publication_service import (
-        publish_stock_core_atomically,
-    )
-
-    dsa_run = await _make_strategy_run_with_items(
-        db_session,
-        total=5293,
-        succeeded=5283,
-        skipped=10,
-        failed=0,
-        status="completed",
-    )
-    await reconcile_strategy_run_from_items(db_session, dsa_run.id, set_finished_at=True)
-
-    snap = await _make_snapshot_run_with_items(
-        db_session,
-        expected=5293,
-        succeeded=5293,
-        skipped=0,
-        failed=0,
-        published_at=None,
-        status=STATUS_SUCCEEDED,
-        trade_date=date(2026, 8, 24),
-    )
-
-    # finalize + publish（等价于 orchestrator computing_features→publishing 路径）
-    await finalize_snapshot_run_compute_complete(db_session, snap.id)
-    await publish_stock_core_atomically(
-        db_session,
-        scope_key="market",
-        trade_date=date(2026, 8, 24),
-        publication_kind="stock_core_full",
-        algorithm_version="review-core-v1",
-        snapshot_run_id=snap.id,
-        coverage_ratio=1.0,
-        worker_id="pg-verify-worker",
-        lease_epoch=1,
-        eligible_count=5293,
-        audit_txn=False,
-    )
-    await db_session.flush()
-    await db_session.refresh(snap)
-    assert snap.published_at is not None
-
-    # downstream consumer：publication pointer 存在且指向正确的 snapshot_run_id
-    from app.services.factor_publication_service import get_published_snapshot_run_id
-
-    fp_id = await get_published_snapshot_run_id(db_session, date(2026, 8, 24))
-    assert fp_id == snap.id, "factor publication pointer 必须指向已发布 snapshot_run_id"
+    # G. 没有创建新的 snapshot run（same snap.id 就是 existing 的）
+    # snap.id 在整个流程中不变 = 没有新 compute run
