@@ -1022,17 +1022,9 @@ class StrategyBatchService:
                     ) from exc
 
             # 6. 汇总统计，更新 run status
-            run.succeeded_count = succeeded
-            run.failed_count = failed
-            run.skipped_count = skipped
-            run.finished_at = datetime.now(UTC)
-
-            if failed == 0:
-                run.status = "completed"
-            elif succeeded > 0:
-                run.status = "partial_failed"
-            else:
-                run.status = "failed"
+            # [REVIEW-RUNTIME-BLOCKER / 2026-08-09] 统一改用 authoritative reconcile，
+            # 不再用 batch-local 计数覆写 run 级 summary（多批/断点恢复安全）。
+            _recon = await reconcile_strategy_run_from_items(db, run_id, set_finished_at=True)
 
             try:
                 await db.flush()
@@ -1839,21 +1831,10 @@ async def persist_precomputed_dsa_results(
             )
         )
     ).scalar() or 0
-    run.succeeded_count = succeeded
-    run.failed_count = failed
-    run.skipped_count = skipped
-    if _pending > 0:
-        # 仍有未处理项：保持 running（不 finalize），仅推进计数
-        run.status = "running"
-    elif failed == 0 and results:
-        run.status = "completed"
-    elif succeeded > 0:
-        run.status = "partial_failed"
-    else:
-        run.status = "failed"
-    if _pending == 0:
-        run.finished_at = datetime.now(UTC)
-    await db.flush()
+    # [REVIEW-RUNTIME-BLOCKER / 2026-08-09] 不再用 batch-local 计数覆盖 run 级 summary。
+    # 改为基于 StrategyRunItem.status 的 authoritative reconcile（幂等，多批安全）。
+    # 本地 succeeded/failed/skipped 仅用于本函数返回值 / diagnostics。
+    _recon = await reconcile_strategy_run_from_items(db, run_id, set_finished_at=(_pending == 0))
 
     logger.info(
         "persist_precomputed_dsa_results: run_id=%s status=%s "
@@ -1871,6 +1852,87 @@ async def persist_precomputed_dsa_results(
         "failed": failed,
         "skipped": skipped,
         "written": written,
+    }
+
+
+# =============================================================================
+# [REVIEW-RUNTIME-BLOCKER / 2026-08-09] 唯一 authoritative DSA run counter owner。
+#
+# 旧有缺陷：persist_precomputed_dsa_results / project_dsa_batch 用「当前 batch 的
+# local item_updates 计数」直接覆盖 run 级 succeeded/failed/skipped，导致多批 projection
+# 最后一次 batch 的 local 计数覆盖为 run 级 summary（如 93），而实际 StrategyResult 已
+# 累计 5283 → 质量门禁读取错误计数器失败。
+#
+# 本 helper 以 StrategyRunItem.status 为唯一真源聚合 run 级 counters，幂等，重复调用结果一致。
+# persist_precomputed_dsa_results / project_dsa_batch 的 finalize 必须调用本函数，
+# 不得再用 batch-local 计数覆写 run 级 summary。
+# =============================================================================
+async def reconcile_strategy_run_from_items(
+    db: AsyncSession,
+    run_id: uuid.UUID,
+    *,
+    set_finished_at: bool = True,
+) -> dict[str, Any]:
+    """基于 StrategyRunItem.status 聚合并写回 StrategyRun 的 authoritative counters。
+
+    幂等：重复调用结果一致。仅读取 item 表真实状态，不依赖任何 batch-local 计数。
+
+    Args:
+        db: 异步 DB 会话
+        run_id: StrategyRun id
+        set_finished_at: True 时若所有 item 已 terminal 则写 finished_at
+
+    Returns:
+        {"succeeded":int,"failed":int,"skipped":int,"pending":int,"status":str}
+    """
+    run = await db.get(StrategyRun, run_id)
+    if run is None:
+        raise RuntimeError(f"reconcile_strategy_run_from_items: run 不存在 run_id={run_id}")
+
+    rows = (
+        await db.execute(
+            select(StrategyRunItem.status, func.count())
+            .where(StrategyRunItem.run_id == run_id)
+            .group_by(StrategyRunItem.status)
+        )
+    ).all()
+    counts: dict[str, int] = dict(rows)
+
+    succeeded = counts.get("succeeded", 0)
+    skipped = counts.get("skipped", 0)
+    failed = counts.get("failed", 0)
+    pending = counts.get("pending", 0) + counts.get("running", 0)
+
+    run.succeeded_count = succeeded
+    run.skipped_count = skipped
+    run.failed_count = failed
+
+    if pending == 0:
+        # 所有 item 已 terminal：据此决定 run 终态（不改变已 published 语义）
+        if failed == 0 and (succeeded + skipped) > 0:
+            run.status = "completed"
+        elif succeeded > 0:
+            run.status = "partial_failed"
+        else:
+            run.status = "failed"
+        if set_finished_at and run.finished_at is None:
+            run.finished_at = datetime.now(UTC)
+    else:
+        # 仍有未处理项：保持 running（进度由 heartbeat/progress 推进）
+        run.status = "running"
+
+    await db.flush()
+    logger.info(
+        "reconcile_strategy_run_from_items: run_id=%s status=%s "
+        "succeeded=%d failed=%d skipped=%d pending=%d",
+        run_id, run.status, succeeded, failed, skipped, pending,
+    )
+    return {
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+        "pending": pending,
+        "status": run.status,
     }
 
 

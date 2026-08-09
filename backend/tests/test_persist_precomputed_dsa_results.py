@@ -60,6 +60,15 @@ def _fake_item(run_id: uuid.UUID, instrument_id: uuid.UUID) -> MagicMock:
     return item
 
 
+def _combined_result(item: MagicMock, group_rows):
+    """同时支持 item 查询(scalar_one_or_none) 与 reconcile GROUP BY(status,.all())。"""
+    res = MagicMock()
+    res.scalar_one_or_none = MagicMock(return_value=item)
+    res.scalar = MagicMock(return_value=0)
+    res.all = MagicMock(return_value=group_rows)
+    return res
+
+
 @pytest.mark.asyncio
 async def test_persist_derives_from_artifact_not_runtime() -> None:
     """scheduled DSA 从 artifact 派生（map_dsa_projection），不调用 runtime.execute。"""
@@ -86,8 +95,9 @@ async def test_persist_derives_from_artifact_not_runtime() -> None:
     ):
         # db.execute 的 scalar_one_or_none 一律返回 item1：item 查询命中、result-id 查询返回其 id。
         # 本测试只验证"派生而非重算 + write_results 收到 projection 指标"，不关心 item 归属细节。
+        # reconcile GROUP BY 返回 2 succeeded（两 artifact 均成功）。
         db.execute = AsyncMock(
-            return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=item1), scalar=MagicMock(return_value=0))
+            return_value=_combined_result(item1, [("succeeded", 2), ("failed", 0), ("skipped", 0)])
         )
 
         result = await persist_precomputed_dsa_results(
@@ -222,7 +232,7 @@ async def test_persist_succeeded_item_skip_reuse() -> None:
         side_effect=lambda model, pk: run if getattr(model, "__name__", "") == "StrategyRun" else None
     )
     db.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=item), scalar=MagicMock(return_value=0))
+        return_value=_combined_result(item, [("succeeded", 1), ("failed", 0), ("skipped", 0)])
     )
     db.flush = AsyncMock()
 
@@ -255,9 +265,9 @@ async def test_persist_partial_failure_sets_run_status() -> None:
         side_effect=lambda model, pk: run if getattr(model, "__name__", "") == "StrategyRun" else None
     )
     db.execute = AsyncMock(
-        return_value=MagicMock(
-            scalar_one_or_none=MagicMock(return_value=_fake_item(run_id, i1)),
-            scalar=MagicMock(return_value=0),
+        return_value=_combined_result(
+            _fake_item(run_id, i1),
+            [("succeeded", 1), ("failed", 1), ("skipped", 0)],
         )
     )
     db.flush = AsyncMock()

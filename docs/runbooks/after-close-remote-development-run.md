@@ -72,6 +72,15 @@ scripts/ops/panji-prod-ssh "docker logs --tail 50 trading-worker 2>&1 | tail -20
 scripts/ops/panji-prod-ssh "free -h | head -2 && docker stats --no-stream | head -10"
 ```
 
+### 3.4 RUNNING LONG ≠ STALLED（liveness 判断准则）
+
+判断 long-running business step（如 `refreshing_daily` 全市场刷新，耗时随 instrument count / backfill window / provider throughput 变化）是否异常，**优先看 progress，不是只看 elapsed time**：
+
+- **正常进行中**：监控 `progress`（已处理 / 预期）、`completed batches/items`、`last real progress` 是否在推进。只要持续产生 valid progress，允许其按实际所需时间自然完成（40min / 80min / 2h 均属正常），**不得仅因总耗时超过某固定秒数判失败**。
+- **疑似卡死**：`now - last_real_progress` 持续无推进，且无 CPU / 网络 / 日志活动。
+- heartbeat 单独存在**不足以**证明有进展：当 step 处于 CPU-bound 或 blocking provider call 无法刷新真实 progress 时，heartbeat 可能仍在刷新但业务实际停滞。需结合真实 progress signal 判断。
+- 业务截止时间（business deadline）仅在权威 PRD 明确写明时才构成失败条件；本 runbook 默认盘后 after-close 无此类硬截止。
+
 ## 4. 停止条件
 
 若出现以下任一情况，**停止继续操作并报告**：
@@ -109,6 +118,9 @@ scripts/ops/panji-prod-ssh "curl -s -X POST -H 'Authorization: Bearer <admin_tok
 - 禁止 DELETE 历史 `dsa_only` 记录；通过正式 cancel/interrupted/retry 服务处理。
 - 禁止关闭或重启 worker 容器以"重置"任务。
 - 禁止启动 nohup 临时脚本轮询任务状态。
+- **禁止在 long-running step 仍有真实 progress 时 cancel / retrigger / 跳步**：`refreshing_daily` 等随负载变化的长任务，只要 `progress` 仍在推进即视为正常，不得因总耗时过长手动中断。
+- 仅当确认达到正式 **stall / no-progress** 条件（持续无真实 progress 且超过治理认定的 stall 阈值）时，才走既有 interrupt / recovery / resume 正式路径。
+- 禁止直接 SQL UPDATE 手工改 step 状态、手工写 pointer 或绕过编排从下游续跑。
 
 ## 增量发布 canary / resume 命令（CHANGE-20260729-008）
 

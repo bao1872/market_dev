@@ -54,6 +54,7 @@ from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
     PublishedSnapshotRunExistsError,
     create_snapshot_run,
+    finalize_snapshot_run_compute_complete,
     finish_snapshot_run,
     get_active_a_share_instruments,
 )
@@ -2993,6 +2994,26 @@ async def execute_after_close_run(
                 snapshot_result.get("failed_count") if snapshot_result else 0,
                 snapshot_result.get("dsa_succeeded") if snapshot_result else 0,
             )
+
+            # [REVIEW-RUNTIME-BLOCKER / 2026-08-09] 计算终态与发布可见性分离。
+            # 计算（run-items）已全 terminal 后，立即记录 compute truth（status=succeeded +
+            # finished_at），不写 published_at / 不动 pointer。质量门禁失败只阻止发布，
+            # 不得使本已完成的 compute run 继续显示 running（COMPUTATION TERMINALITY PRINCIPLE）。
+            if snapshot_run_id is not None:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        await finalize_snapshot_run_compute_complete(db, snapshot_run_id)
+                        await db.commit()
+                    logger.info(
+                        "[AfterClose] snapshot compute 已终态(finalize,未发布): "
+                        "snapshot_run_id=%s, trade_date=%s",
+                        snapshot_run_id, trade_date,
+                    )
+                except Exception as fin_exc:
+                    logger.error(
+                        "[AfterClose] snapshot compute 终态标记失败（不阻断后续门禁）: %s",
+                        fin_exc, exc_info=True,
+                    )
 
             # 2.6 组合质量门禁（DSA + continuous + event freshness）
             # continuous + event freshness 已在 compute_for_trade_date 内部检查：

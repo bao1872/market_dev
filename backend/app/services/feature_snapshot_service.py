@@ -2333,6 +2333,81 @@ async def finish_snapshot_run(
     return run
 
 
+# [REVIEW-RUNTIME-BLOCKER / 2026-08-09] 计算终态与发布可见性分离。
+# finish_snapshot_run(succeeded) 会写 published_at（发布语义），不得在计算刚完成、
+# 质量门禁尚未 PASS 之前调用，否则会 premature publish。
+# 本函数仅记录「计算已完成」这一 durable truth：status=succeeded + finished_at，
+# 不动 published_at / pointer。正确状态：run=succeeded 但 published_at=null、
+# stock_core pointer 不变（质量门禁未 PASS 时）。门禁失败只阻止发布，不抹掉计算真相。
+async def finalize_snapshot_run_compute_complete(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    *,
+    finished_at: datetime | None = None,
+) -> StockFeatureSnapshotRun | None:
+    """标记 snapshot 计算完成（compute terminal），与发布可见性解耦。
+
+    [REVIEW-RUNTIME-BLOCKER §2/§3/§4] 计算终态必须基于
+    ``stock_feature_snapshot_run_items`` 的权威事实（item truth），而非仅因
+    ``compute_review_core_with_run_items`` 正常 return 就宣布整个 run succeeded。
+    复用 :func:`get_run_progress` 作为唯一 item-truth 来源（单一所有权：
+    item truth → run summary，而非 control flow → run summary）。
+
+    - pending/running > 0：不得 terminalize，status 保持 running。
+    - failed > 0：按现有 snapshot run failure semantics（STATUS_FAILED + finished_at）。
+    - 全部 terminal 且 acceptable（succeeded + skipped，无 failed）：STATUS_SUCCEEDED。
+    - 本次 5293 expected / 5293 succeeded / 0 failed → compute terminal = succeeded。
+
+    不写 published_at / 不动 pointer。已发布 run 不回滚（§8 不变量）。
+
+    Returns:
+        更新后的 run 对象；run 不存在返回 None
+    """
+    run = await session.get(StockFeatureSnapshotRun, run_id)
+    if run is None:
+        logger.warning("finalize_snapshot_run_compute_complete: run 不存在 run_id=%s", run_id)
+        return None
+
+    # 已发布：保持发布语义，不回退
+    if run.published_at is not None:
+        return run
+
+    from app.services.snapshot_run_item_service import get_run_progress
+
+    progress = await get_run_progress(session, run_id)
+    succeeded = progress.get("succeeded", 0)
+    skipped = progress.get("skipped", 0)
+    failed = progress.get("failed", 0)
+    pending = progress.get("pending", 0)
+    running = progress.get("running", 0)
+    pending_or_running = pending + running
+
+    ts = finished_at or datetime.now(UTC)
+    if pending_or_running > 0:
+        # 仍有未完成 item：不得 terminalize
+        run.status = STATUS_RUNNING
+    elif failed > 0:
+        # 存在执行/DB/contract failure：按现有 snapshot run failure semantics
+        run.status = STATUS_FAILED
+        if run.finished_at is None:
+            run.finished_at = ts
+    else:
+        # 全部 terminal 且 acceptable（succeeded + skipped，无 failed）
+        if run.status != STATUS_SUCCEEDED:
+            run.status = STATUS_SUCCEEDED
+        if run.finished_at is None:
+            run.finished_at = ts
+
+    await session.flush()
+    logger.info(
+        "snapshot compute 终态(finalize,未发布): run_id=%s status=%s published_at=%s "
+        "progress(succeeded=%s skipped=%s failed=%s pending=%s running=%s)",
+        run.id, run.status, run.published_at,
+        succeeded, skipped, failed, pending, running,
+    )
+    return run
+
+
 async def has_succeeded_snapshot_run(
     session: AsyncSession,
     trade_date: date,
