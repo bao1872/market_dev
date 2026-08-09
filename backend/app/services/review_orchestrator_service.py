@@ -547,18 +547,28 @@ async def _resolve_source_run_ids(
         resolved_core_id = source_core_run_id
 
     # 2. 解析 source_board_run_id
-    if source_board_run_id is None:
-        board_pub = await _get_publication(
-            session, trade_date, PUBLICATION_KIND_MARKET_AGGREGATION,
+    #
+    # [PC-40/PC-41] Review 只消费正式 market_aggregation pointer：pointer 必须存在，
+    # 且无论 source_board_run_id 是自动解析还是调用方显式传入，都必须严格等于
+    # pointer.data_run_id。Review **不得**自行挑选 board run
+    # （无 fallback / 无 latest-partial / 无绕 pointer 路径）。
+    board_pub = await _get_publication(
+        session, trade_date, PUBLICATION_KIND_MARKET_AGGREGATION,
+    )
+    if board_pub is None:
+        raise ReviewOrchestratorError(
+            f"trade_date={trade_date} 无已发布 board_analysis pointer，"
+            f"必须先完成板块分析并发布",
         )
-        if board_pub is None:
-            raise ReviewOrchestratorError(
-                f"trade_date={trade_date} 无已发布 board_analysis pointer，"
-                f"必须先完成板块分析并发布",
-            )
-        resolved_board_id = board_pub.data_run_id
-    else:
-        resolved_board_id = source_board_run_id
+    resolved_board_id = (
+        board_pub.data_run_id if source_board_run_id is None else source_board_run_id
+    )
+    if resolved_board_id != board_pub.data_run_id:
+        raise ReviewOrchestratorError(
+            f"[PC-41] source_board_run_id={resolved_board_id} 与正式 "
+            f"market_aggregation pointer.data_run_id="
+            f"{board_pub.data_run_id} 不一致",
+        )
 
     board_run = await session.get(BoardAnalysisRun, resolved_board_id)
     if board_run is None:
@@ -569,7 +579,11 @@ async def _resolve_source_run_ids(
         raise ReviewOrchestratorError("Board batch trade_date 与 Review 不一致")
     if board_run.source_core_run_id != resolved_core_id:
         raise ReviewOrchestratorError("Board batch 与 stock_core pointer 不同源")
-    if board_run.status != "succeeded":
+    # [PRD 31 PC-42] board_aggregation 是 mandatory product，但 MANDATORY != PERFECT。
+    # 正式 pointer 指向的 run 可以是 succeeded（READY）或 degraded-publishable 的
+    # partial（DEGRADED）；DEGRADED 不阻断 Review，FAILED / 非终态阻断。
+    # 这里接受的是「正式 pointer 指向的 degraded run」，而不是 Review 自己挑 partial run。
+    if board_run.status not in ("succeeded", "partial"):
         raise ReviewOrchestratorError(
             f"Board batch 非 ready: status={board_run.status}",
         )

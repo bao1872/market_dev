@@ -1160,9 +1160,34 @@ class ProductReadinessService:
                     "reason_code": "BOARD_AGGREGATION_LINEAGE_MISMATCH",
                 },
             )
+        # [Phase 4D.3 / PRD 31 PC-42] board_aggregation 是 mandatory product，但
+        # MANDATORY != PERFECT。正式 pointer 可以指向 succeeded(READY) 或
+        # degraded-publishable 的 partial(DEGRADED)。DEGRADED 仍是**可消费**的正式
+        # 产品（不阻断 Review），因此复用 READINESS_READY + freshness="degraded"
+        # 表达；READINESS_DEGRADED 在本 evaluator 中保留给 lineage 失配等
+        # **不可消费** 的降级（见上方分支），不改变其既有语义。
+        board_status = getattr(board_run, "status", None)
+        if board_status == "partial":
+            degradation = {}
+            metadata = getattr(pub, "metadata_json", None)
+            if isinstance(metadata, dict):
+                raw = metadata.get("board_degradation")
+                if isinstance(raw, dict):
+                    degradation = raw
+            return ProductReadinessState(
+                "board_aggregation", READINESS_READY, "degraded",
+                is_mandatory=True, is_terminal=True,
+                lineage={
+                    **lineage,
+                    "board_run_status": board_status,
+                    "board_degradation": degradation,
+                    "reason_code": "BOARD_AGGREGATION_PUBLISHED_DEGRADED",
+                },
+            )
         return ProductReadinessState(
             "board_aggregation", READINESS_READY, "fresh",
-            is_mandatory=True, is_terminal=True, lineage=lineage,
+            is_mandatory=True, is_terminal=True,
+            lineage={**lineage, "board_run_status": board_status},
         )
 
     async def _review_state(

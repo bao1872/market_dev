@@ -56,9 +56,7 @@ from app.services.board_membership_service import (
     PITMembership,
     PITMembershipUnavailableError,
     batch_version,
-    list_universe_definitions_at,
     resolve_board_membership_at,
-    resolve_universe_membership_at,
 )
 from app.services.factor_publication_service import (
     PUBLICATION_KIND_MARKET_AGGREGATION,
@@ -1655,6 +1653,72 @@ async def get_published_board_snapshot_id(
 # =============================================================================
 
 
+def _evaluate_degraded_publishable(
+    *,
+    status: str,
+    formal_batch: bool,
+    expected_count: int,
+    computed_boards: int,
+    execution_failed: int,
+    not_computed: int,
+    details: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """[PRD 31 PC-42] 判定 BoardAnalysisRun 是否可正式发布 market_aggregation pointer。
+
+    合同（最小 helper，不做通用框架）：
+    - ``succeeded``                                        -> True
+    - ``partial`` + degradation-only + 无 execution failure -> True
+    - ``failed`` / ``pending`` / ``running``                -> False
+
+    degraded publishable 的全部条件（A-H）：
+    A run 已 terminal；B 所有 in-scope board 都完成计算并持久化 snapshot；
+    C 无 execution failure；D 无 DB failure；E 无 contract violation；
+    F partial 原因仅属于已知 data completeness degradation；
+    G 每个 partial board 都有真实 coverage/eligible/ready/missing；H 无 UNKNOWN failure。
+
+    Returns:
+        ``(publishable, reason)``；reason 在不可发布时说明首个违反的条件。
+    """
+    if status == "succeeded":
+        return True, "succeeded"
+    if status != "partial":
+        # pending / running / failed 均不可发布（A + C）。
+        return False, f"status={status!r} is not publishable"
+    if not formal_batch:
+        return False, "filtered/limited batch is not a formal batch"
+    if expected_count == 0:
+        return False, "no in-scope board"
+    if execution_failed:
+        # C：存在 execution / DB / contract failure。
+        return False, f"execution_failed={execution_failed}"
+    if not_computed:
+        # B：并非所有 in-scope board 都完成计算并持久化 snapshot。
+        return False, f"not_computed={not_computed}"
+    if computed_boards != expected_count:
+        return False, (
+            f"computed_boards={computed_boards} != expected_count={expected_count}"
+        )
+    # F/G/H：逐个 partial board 必须携带真实、可解释的 degradation 证据。
+    for detail in details:
+        if detail.get("status") == "succeeded":
+            continue
+        snapshot = detail.get("snapshot")
+        if snapshot is None:
+            return False, f"partial board {detail.get('board_id')} missing snapshot"
+        if getattr(snapshot, "status", None) != "partial":
+            # 只接受已知的 data-completeness degradation，UNKNOWN 一律 fail closed。
+            return False, (
+                f"partial board {detail.get('board_id')} has unknown snapshot "
+                f"status={getattr(snapshot, 'status', None)!r}"
+            )
+        for field in ("coverage_ratio", "eligible_count", "ready_count", "missing_count"):
+            if getattr(snapshot, field, None) is None:
+                return False, (
+                    f"partial board {detail.get('board_id')} missing {field}"
+                )
+    return True, "degradation_only"
+
+
 async def compute_all_boards(
     session: AsyncSession,
     trade_date: date,
@@ -1716,50 +1780,11 @@ async def compute_all_boards(
                 "reason": str(exc),
             })
 
-    universe_definitions = (
-        await list_universe_definitions_at(session, trade_date)
-        if formal_batch
-        else []
-    )
-    universe_memberships: list[PITMembership] = []
-    universe_details: list[dict[str, Any]] = []
-    for definition in universe_definitions:
-        universe_membership: PITMembership | None
-        try:
-            _definition, resolved_universe_membership = (
-                await resolve_universe_membership_at(
-                    session, definition.universe_key, trade_date,
-                )
-            )
-            universe_membership = resolved_universe_membership
-            reason = resolved_universe_membership.population_status
-        except PITMembershipUnavailableError as exc:
-            universe_membership = None
-            reason = str(exc)
-        ready = bool(
-            universe_membership is not None
-            and universe_membership.population_status == "ready"
-            and universe_membership.instrument_ids
-        )
-        universe_details.append({
-            "scope_type": definition.universe_type,
-            "scope_key": definition.universe_key,
-            "scope_name": definition.name,
-            "status": "succeeded" if ready else "blocked_external_population",
-            "population_status": reason,
-            "published": False,
-        })
-        if ready and universe_membership is not None:
-            universe_memberships.append(universe_membership)
-        else:
-            blockers.append({
-                "code": "blocked_external_population",
-                "scope_type": definition.universe_type,
-                "scope_key": definition.universe_key,
-                "reason": reason,
-            })
-
-    all_memberships = [*memberships.values(), *universe_memberships]
+    # [Phase 4D.3 / PRD 30 BA-01B] Board Analysis V1 正式产品范围 = industry + concept。
+    # `universe_definitions`（major_index / style）属于 Review optional scopes，由 universe
+    # membership 自己的正式链路负责，**不进入** board batch 的 expected/succeeded/failed/
+    # blockers/coverage 分母。seed 与 migration 079 保持原样，只是 board_analysis 不再消费。
+    all_memberships = list(memberships.values())
     taxonomy_version = batch_version(
         [m.taxonomy_version for m in all_memberships], prefix="taxonomy",
     )
@@ -1769,7 +1794,7 @@ async def compute_all_boards(
     membership_version = batch_version(
         [m.membership_version for m in all_memberships], prefix="membership",
     )
-    expected_count = len(boards) + len(universe_definitions)
+    expected_count = len(boards)
     run_stmt = select(BoardAnalysisRun).where(
         BoardAnalysisRun.trade_date == trade_date,
         BoardAnalysisRun.source_core_run_id == source_core_run_id,
@@ -1813,9 +1838,10 @@ async def compute_all_boards(
             live_pointer.data_run_id if live_pointer is not None else None
         )
 
-        # 仅当 batch 为 succeeded 时，其 artifact 才是已核验不可变的，
-        # 可安全做 pointer-only reconciliation（复用已发布 artifact，绝不重算）。
-        if batch_run.status == "succeeded":
+        # 仅当 batch 已被合法发布（succeeded，或 [PC-42] degraded-publishable partial）
+        # 时，其 artifact 才是已核验不可变的，可安全做 pointer-only reconciliation
+        # （复用已发布 artifact，绝不重算）。
+        if batch_run.status in ("succeeded", "partial"):
             if live_pointer_run_id == batch_run.id:
                 # 情况 A：live pointer 已正确指向本 batch → 幂等复用，不触碰任何写。
                 return {
@@ -1897,32 +1923,37 @@ async def compute_all_boards(
                     "pointer_status": "missing",
                 }
 
-        # [Phase 4.4.3 fail-closed] batch_run.published_at is not None 但
-        # status != "succeeded"：这是异常状态（历史 partial/failed 却曾 published）。
-        # 不得 fall-through 用同一个 published batch_run.id 重算或 upsert 历史
-        # snapshots（会原地修改 immutable artifact）；也不为它创建复杂恢复机制。
-        # fail-closed：抛出领域错误，由 orchestrator 映射为 aggregation failed，
-        # Review 不执行；已有 BoardAnalysisRun / snapshots 不被修改，留待人工治理。
+        # [Phase 4.4.3 fail-closed] batch_run.published_at is not None 但 status
+        # 不属于合法可发布终态（succeeded / [PC-42] degraded partial）：这是异常状态
+        # （历史 failed / 非终态却曾 published）。不得 fall-through 用同一个 published
+        # batch_run.id 重算或 upsert 历史 snapshots（会原地修改 immutable artifact）；
+        # 也不为它创建复杂恢复机制。fail-closed：抛出领域错误，由 orchestrator 映射为
+        # aggregation failed，Review 不执行；已有 run / snapshots 不被修改，留待人工治理。
         raise ValueError(
             f"[BoardAnalysis] invariant violation: batch_run={batch_run.id} "
             f"published_at is not None but status={batch_run.status!r} "
-            f"(expected 'succeeded'). Refusing to recompute or upsert immutable "
-            f"published artifact; requires manual governance intervention."
+            f"(expected 'succeeded' or 'partial'). Refusing to recompute or upsert "
+            f"immutable published artifact; requires manual governance intervention."
         )
     else:
         batch_run.status = "running"
         batch_run.expected_count = expected_count
         batch_run.blockers = blockers
 
+    # [Phase 4D.3 / PRD 30 BA-02B] counter 基数统一为 in-scope MarketBoard：
+    # - execution_failed = 真实 execution/DB/contract failure 的 board 数（failed_count）
+    # - coverage_below   = 完成计算但 coverage < 阈值的 partial board 数（不是 failure）
+    # - not_computed     = 因 board-level population 不可用而未能完成计算的 board 数
     population_blockers = [
         item for item in blockers
         if item.get("code") == "blocked_external_population"
     ]
     succeeded_boards = 0
-    failed = len(population_blockers)
+    execution_failed = 0
     published = 0
     coverage_below = 0
-    details: list[dict[str, Any]] = list(universe_details)
+    computed_boards = 0
+    details: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = list(blockers)
     for board in boards:
         board_membership = memberships.get(board.id)
@@ -1936,10 +1967,10 @@ async def compute_all_boards(
                 pit_membership=board_membership,
                 algorithm_version=algorithm_version,
             )
+            computed_boards += 1
             if snapshot.status == "succeeded":
                 succeeded_boards += 1
             else:
-                failed += 1
                 coverage_below += 1
             details.append({
                 "board_id": str(board.id),
@@ -1951,7 +1982,7 @@ async def compute_all_boards(
                 "snapshot": snapshot,
             })
         except Exception as exc:
-            failed += 1
+            execution_failed += 1
             errors.append({
                 "code": "board_compute_failed",
                 "board_id": str(board.id),
@@ -1960,32 +1991,62 @@ async def compute_all_boards(
             })
             logger.exception("[BoardAnalysis] 计算失败: board=%s/%s", board.type, board.name)
 
-    succeeded = succeeded_boards + len(universe_memberships)
+    succeeded = succeeded_boards
+    # 未能完成计算的 in-scope board（board-level population 不可用），既不是 succeeded
+    # 也不是 execution failure，但会阻止 batch 达到 succeeded 或 degraded-publishable。
+    not_computed = len(boards) - computed_boards - execution_failed
     batch_run.succeeded_count = succeeded
-    batch_run.failed_count = failed
+    batch_run.failed_count = execution_failed
     batch_run.coverage_ratio = succeeded / expected_count if expected_count else 0.0
-    if population_blockers:
-        batch_run.status = "blocked_external_population"
-    elif not formal_batch:
-        batch_run.status = "partial"
-    elif expected_count == 0:
-        batch_run.status = "blocked_external_population"
+
+    # [Phase 4D.3 / PRD 30 BA-02B] 显式 status 推导，execution failure 优先。
+    # 禁止 `blocked_external_population` 作为 batch status（属 scope/universe 层语义）。
+    if expected_count == 0:
+        # 没有任何 in-scope board 可计算：这是 catalog 层的真实 failure，不是 degradation。
         empty_blocker = {
-            "code": "blocked_external_population",
+            "code": "board_catalog_empty",
             "scope_type": "board_catalog",
             "scope_key": "all",
-            "reason": "no configured Board or universe definitions",
+            "reason": "no configured in-scope Board (industry/concept)",
         }
         batch_run.blockers = [*blockers, empty_blocker]
         errors.append(empty_blocker)
+        batch_run.status = "failed"
         batch_run.failed_count = 1
-    elif failed:
+    elif execution_failed:
         batch_run.status = "partial" if succeeded else "failed"
+    elif not formal_batch:
+        # filtered/limited 请求本身不是正式 batch，永远不可发布。
+        batch_run.status = "partial"
+    elif not_computed or coverage_below:
+        batch_run.status = "partial"
     else:
         batch_run.status = "succeeded"
 
+    # [Phase 4D.3 / PRD 31 PC-42] degraded 诊断（无 migration，写 metadata/diagnostics）。
+    degradation = {
+        "in_scope_board_count": len(boards),
+        "computed_board_count": computed_boards,
+        "ready_board_count": succeeded_boards,
+        "partial_board_count": coverage_below,
+        "not_computed_board_count": not_computed,
+        "execution_failed_board_count": execution_failed,
+        "board_population_blocker_count": len(population_blockers),
+    }
+    publishable, publishable_reason = _evaluate_degraded_publishable(
+        status=batch_run.status,
+        formal_batch=formal_batch,
+        expected_count=expected_count,
+        computed_boards=computed_boards,
+        execution_failed=execution_failed,
+        not_computed=not_computed,
+        details=details,
+    )
+    degradation["degraded_publishable"] = publishable
+    degradation["degraded_publishable_reason"] = publishable_reason
+
     _pointer_confirmed_flag = False
-    if publish and batch_run.status == "succeeded":
+    if publish and publishable:
         for detail in details:
             snapshot = detail.pop("snapshot", None)
             if snapshot is None:
@@ -2004,6 +2065,10 @@ async def compute_all_boards(
                 "taxonomy_version": taxonomy_version,
                 "taxonomy_compatibility_key": compatibility_key,
                 "membership_version": membership_version,
+                # [PC-42] pointer 不把 partial 伪装成 succeeded：显式携带真实 run status
+                # 与 degradation 证据，消费者据此判定 READY / DEGRADED。
+                "board_run_status": batch_run.status,
+                "board_degradation": degradation,
             },
         )
         # 事实确认：使用 publish 返回的 publication 的 data_run_id 校验，
@@ -2026,6 +2091,12 @@ async def compute_all_boards(
         "failed": batch_run.failed_count,
         "published": published,
         "coverage_below_threshold": coverage_below,
+        # [Phase 4D.3] 显式区分 execution failure 与 coverage degradation。
+        "expected": expected_count,
+        "partial_count": coverage_below,
+        "execution_failed": execution_failed,
+        "degradation": degradation,
+        "degraded_publishable": publishable,
         "details": details,
         "errors": errors,
         # [Phase 4.4.2] 正式 precompute 路径：

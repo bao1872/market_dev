@@ -1694,8 +1694,16 @@ async def _execute_review_step(
     prereq_missing: bool = False
 
     if not skip_review:
-        # 仅在 stock_core + board_analysis 均已正式发布时执行 review
-        if stock_core_published and aggregation_status == "succeeded" and snapshot_run_id is not None:
+        # 仅在 stock_core + board_analysis 均已正式发布时执行 review。
+        # [Phase 4D.3 / PRD 31 PC-42] board_aggregation 为 mandatory product，
+        # 但 MANDATORY != PERFECT：`succeeded`(READY) 与 `degraded`(正式 pointer 指向
+        # degraded-publishable partial run) 都允许 Review 执行；`failed` / 非终态 /
+        # pointer_mismatch 阻断。Review 仍只消费正式 pointer（PC-40/PC-41 不变）。
+        if (
+            stock_core_published
+            and aggregation_status in ("succeeded", "degraded")
+            and snapshot_run_id is not None
+        ):
             # 断点恢复：先从 metadata 读取已有 review_run_id
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -3473,8 +3481,10 @@ async def execute_after_close_run(
                 #   (2) 当前正式 market_aggregation pointer 已确认属于当前
                 #       snapshot_run_id（lineage 一致）时，
                 # 才设置 _aggregation_status="succeeded"。
-                # partial / failed / blocked_external_population / pointer
-                # mismatch 必须如实映射，Review 不得执行。
+                # failed / 非终态 / pointer mismatch 必须如实映射，Review 不得执行。
+                # [Phase 4D.3 / PRD 31 PC-42] degraded-publishable 的 partial batch
+                # 若已确认写入正式 pointer，则 board_aggregation = DEGRADED，
+                # **不阻断 Review**（MANDATORY != PERFECT）。
                 _agg_batch_status = (
                     agg_result.get("status") if isinstance(agg_result, dict) else None
                 )
@@ -3487,10 +3497,11 @@ async def execute_after_close_run(
                     # batch 真正 succeeded 且当前正式 market_aggregation pointer
                     # 已确认属于当前 snapshot_run_id（lineage 一致）。
                     _aggregation_status = "succeeded"
-                elif _agg_batch_status in (
-                    "partial", "failed", "blocked_external_population",
-                ):
-                    # 如实映射 batch 的非成功态。
+                elif _agg_batch_status == "partial" and _agg_pointer_confirmed:
+                    # [PC-42] degraded 但已正式发布 pointer → Review 可继续。
+                    _aggregation_status = "degraded"
+                elif _agg_batch_status in ("partial", "failed"):
+                    # 如实映射 batch 的非成功态（未确认 pointer 的 partial 仍阻断）。
                     _aggregation_status = _agg_batch_status
                 elif _agg_batch_status == "succeeded" and not _agg_pointer_confirmed:
                     # batch 计算成功但正式 pointer 未确认（live pointer 指向
