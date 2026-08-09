@@ -51,18 +51,23 @@ def _utcnow() -> datetime:
 
 
 async def _make_instruments(db_session, *, n: int) -> list[uuid.UUID]:
-    """创建 n 个真实 Instrument 行（满足 strategy/snapshot run_items 外键）。"""
+    """创建 n 个真实 Instrument 行（满足 strategy/snapshot run_items 外键）。
+
+    使用 UUID 派生的唯一 symbol，避免与 verify DB 既有 instruments 或同 session 其他
+    test 创建的 symbol 冲突（symbol 有 UNIQUE 约束）。
+    """
     from app.models.instrument import Instrument
 
     ids: list[uuid.UUID] = []
     for i in range(n):
         inst_id = uuid.uuid4()
+        sym = f"T{uuid.uuid4().hex[:9]}"  # 保证唯一且合法（字母+数字，非真实 A 股代码）
         db_session.add(
             Instrument(
                 id=inst_id,
-                symbol=f"{700000 + i:06d}",
+                symbol=sym,
                 name=f"closure_test_{i}",
-                market="cn",
+                market="SZ",
                 status="active",
                 listing_date=date(2010, 1, 4),
             )
