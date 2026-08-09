@@ -173,11 +173,17 @@ async def _make_snapshot_run_with_items(
     running: int = 0,
     published_at=None,
     status: str = STATUS_RUNNING,
+    trade_date: date = date(2026, 8, 7),
 ) -> StockFeatureSnapshotRun:
-    """构造带 StockFeatureSnapshotRunItems 的真实 snapshot run。"""
+    """构造带 StockFeatureSnapshotRunItems 的真实 snapshot run。
+
+    trade_date 默认 2026-08-07；调用方必须保证同 session 内不重复
+    （unique key: trade_date+schema_version+primary_timeframe+secondary_timeframe+adj+run_type），
+    否则传递不同 trade_date。
+    """
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     run = StockFeatureSnapshotRun(
-        trade_date=date(2026, 8, 7),
+        trade_date=trade_date,
         schema_version=1,
         primary_timeframe="1d",
         secondary_timeframe="15m",
@@ -323,6 +329,7 @@ async def test_pg3_snapshot_compute_terminal_truth(db_session) -> None:
         failed=0,
         published_at=None,
         status=STATUS_RUNNING,
+        trade_date=date(2026, 8, 7),
     )
     out_a = await finalize_snapshot_run_compute_complete(db_session, run_a.id)
     await db_session.refresh(run_a)
@@ -340,6 +347,7 @@ async def test_pg3_snapshot_compute_terminal_truth(db_session) -> None:
         failed=0,
         pending=4293,
         status=STATUS_RUNNING,
+        trade_date=date(2026, 8, 8),
     )
     await finalize_snapshot_run_compute_complete(db_session, run_b.id)
     await db_session.refresh(run_b)
@@ -354,6 +362,7 @@ async def test_pg3_snapshot_compute_terminal_truth(db_session) -> None:
         skipped=0,
         failed=293,
         status=STATUS_RUNNING,
+        trade_date=date(2026, 8, 9),
     )
     await finalize_snapshot_run_compute_complete(db_session, run_c.id)
     await db_session.refresh(run_c)
@@ -373,8 +382,9 @@ async def test_pg4_succeeded_unpublished_isolation(db_session) -> None:
         failed=0,
         published_at=None,
         status=STATUS_SUCCEEDED,  # compute terminal 但 unpublished
+        trade_date=date(2026, 8, 20),
     )
-    td = date(2026, 8, 7)
+    td = date(2026, 8, 20)
 
     # has_succeeded_snapshot_run（watchlist gate）：要求 published_at IS NOT NULL
     hs = await has_succeeded_snapshot_run(db_session, td)
@@ -411,6 +421,7 @@ async def test_pg5_atomic_publication_no_recompute(db_session) -> None:
         failed=0,
         published_at=None,
         status=STATUS_SUCCEEDED,
+        trade_date=date(2026, 8, 21),
     )
 
     compute_spy = {"called": False}
@@ -426,7 +437,7 @@ async def test_pg5_atomic_publication_no_recompute(db_session) -> None:
         pub = await publish_stock_core_atomically(
             db_session,
             scope_key="market",
-            trade_date=date(2026, 8, 7),
+            trade_date=date(2026, 8, 21),
             publication_kind="stock_core_full",
             algorithm_version="review-core-v1",
             snapshot_run_id=run.id,
@@ -554,6 +565,7 @@ async def test_pg6_actual_resume_no_recompute(db_session) -> None:
         failed=0,
         published_at=None,
         status=STATUS_SUCCEEDED,
+        trade_date=date(2026, 8, 22),
     )
 
     # after-close job_run：checkpoint 已到 computing_features/publishing
@@ -564,7 +576,10 @@ async def test_pg6_actual_resume_no_recompute(db_session) -> None:
         dsa_run_id=dsa_run.id,
         feature_snapshot_run_id=snap.id,
         last_completed_step="computing_features",
+        trade_date=date(2026, 8, 22),
     )
+    # 提交 test data 使 execute_after_close_run 的 fresh session 可见
+    await db_session.commit()
 
     compute_call_count = {"n": 0}
 
@@ -580,7 +595,7 @@ async def test_pg6_actual_resume_no_recompute(db_session) -> None:
         try:
             await execute_after_close_run(
                 job_run.id,
-                trade_date=date(2026, 8, 7),
+                trade_date=date(2026, 8, 22),
             )
         except Exception:
             # orchestrator 后续步骤（board/Review）被 mock，但 compute 路径已验证
@@ -623,6 +638,7 @@ async def test_pg7_official_publishing_resume_path(db_session) -> None:
         failed=0,
         published_at=None,
         status=STATUS_SUCCEEDED,
+        trade_date=date(2026, 8, 23),
     )
 
     job_run = await _create_after_close_job_run(
@@ -632,7 +648,10 @@ async def test_pg7_official_publishing_resume_path(db_session) -> None:
         dsa_run_id=dsa_run.id,
         feature_snapshot_run_id=snap.id,
         last_completed_step="computing_features",
+        trade_date=date(2026, 8, 23),
     )
+    # 提交 test data 使 execute_after_close_run 的 fresh session 可见
+    await db_session.commit()
 
     publish_called = {"n": 0}
 
@@ -645,7 +664,7 @@ async def test_pg7_official_publishing_resume_path(db_session) -> None:
         new=_spy_publish,
     ):
         try:
-            await execute_after_close_run(job_run.id, trade_date=date(2026, 8, 7))
+            await execute_after_close_run(job_run.id, trade_date=date(2026, 8, 23))
         except Exception:
             pass
 
@@ -694,6 +713,7 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
         failed=0,
         published_at=None,
         status=STATUS_SUCCEEDED,
+        trade_date=date(2026, 8, 24),
     )
 
     job_run = await _create_after_close_job_run(
@@ -703,7 +723,10 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
         dsa_run_id=dsa_run.id,
         feature_snapshot_run_id=snap.id,
         last_completed_step="computing_features",
+        trade_date=date(2026, 8, 24),
     )
+    # 提交 test data 使 execute_after_close_run 的 fresh session 可见
+    await db_session.commit()
 
     compute_calls = {"n": 0}
 
@@ -717,7 +740,7 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
         new=_spy_compute,
     ):
         try:
-            await execute_after_close_run(job_run.id, trade_date=date(2026, 8, 7))
+            await execute_after_close_run(job_run.id, trade_date=date(2026, 8, 24))
         except Exception:
             pass
 
@@ -728,7 +751,7 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
         new=_spy_compute,
     ):
         try:
-            await execute_after_close_run(job_run.id, trade_date=date(2026, 8, 7))
+            await execute_after_close_run(job_run.id, trade_date=date(2026, 8, 24))
         except Exception:
             pass
 
