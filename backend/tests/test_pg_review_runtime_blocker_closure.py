@@ -662,10 +662,9 @@ async def test_pg_resume_integration() -> None:
         )
 
         # E/F. checkpoint 推进
-        status = await get_after_close_run_status(job_run_id)
-        meta_after = json.loads(status.metadata_json)
-        last_step = meta_after.get("last_completed_step", "")
-        orch_status = meta_after.get("orchestrator_status", "")
+        status = await get_after_close_run_status(reader_db, job_run_id)
+        last_step = status.get("last_completed_step", "")
+        orch_status = status.get("orchestrator_status", "")
         assert downstream_reached, "downstream entry 必须触发"
         assert (
             "publishing" in last_step
