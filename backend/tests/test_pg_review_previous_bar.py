@@ -23,14 +23,14 @@ import pytest
 pytestmark = pytest.mark.pg
 
 
-def _insert_bar(
+async def _insert_bar(
     session, instrument_id: uuid.UUID, trade_date: date,
     close: float, volume: float = 1000.0, amount: float = 10000.0,
 ) -> None:
     """向 bars_daily 写入一条真实 bar（测试 fixture，verify DB 内）。"""
     from sqlalchemy import text
 
-    session.execute(
+    await session.execute(
         text(
             """INSERT INTO bars_daily
                (instrument_id, trade_date, open, high, low, close, volume, amount, qfq_close)
@@ -88,8 +88,8 @@ async def test_previous_bar_t_plus_t_minus_1():
                 FirstPyramidHistoryDailyState.instrument_id == iid,
             )
         )
-        _insert_bar(session, iid, target, close=10.0)          # T
-        _insert_bar(session, iid, target - timedelta(days=1), close=9.5)  # T-1
+        await _insert_bar(session, iid, target, close=10.0)          # T
+        await _insert_bar(session, iid, target - timedelta(days=1), close=9.5)  # T-1
         # 写入 current FP state（含 history_contract_version + source_history_run_id）
         session.add(FirstPyramidHistoryDailyState(
             instrument_id=iid, trade_date=target,
@@ -160,8 +160,8 @@ async def test_previous_bar_suspended_over_400_days():
         await session.flush()
         src_run = run.id
         await session.commit()
-        _insert_bar(session, iid, target, close=12.0)          # T
-        _insert_bar(session, iid, prev_date, close=10.0)       # previous（>400 天前）
+        await _insert_bar(session, iid, target, close=12.0)          # T
+        await _insert_bar(session, iid, prev_date, close=10.0)       # previous（>400 天前）
         session.add(FirstPyramidHistoryDailyState(
             instrument_id=iid, trade_date=target,
             algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
@@ -228,7 +228,7 @@ async def test_no_current_bar_return_1d_unavailable():
         src_run = run.id
         await session.commit()
         # 只有 previous bar，无 current bar（target 无当日 bar）
-        _insert_bar(session, iid, target - timedelta(days=1), close=9.5)
+        await _insert_bar(session, iid, target - timedelta(days=1), close=9.5)
         session.add(FirstPyramidHistoryDailyState(
             instrument_id=iid, trade_date=target,
             algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,

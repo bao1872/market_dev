@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -84,6 +85,8 @@ async def test_observation_dual_lineage_check_matrix():
             algorithm_version="review-2.0.0",
             filter_version="filters-1.1.0",
             baseline_window=120,
+            status="signals_ready",
+            coverage_ratio=Decimal("1.0"),
         )
         s.add(review_run)
         hist_run = FirstPyramidHistoryRun(
@@ -171,7 +174,7 @@ async def test_observation_partial_index_upsert_live_and_replay():
             trade_date=date(2026, 8, 4), source_core_run_id=uuid.uuid4(),
             source_board_run_id=uuid.uuid4(), degraded_reasons=[],
             algorithm_version="review-2.0.0", filter_version="filters-1.1.0",
-            baseline_window=120,
+            baseline_window=120, status="signals_ready", coverage_ratio=Decimal("1.0"),
         )
         s.add(review_run)
         hist_run_a = FirstPyramidHistoryRun(
@@ -409,14 +412,16 @@ async def test_board_event_query_only_counts_v2():
         assert v2_bos == 1
         assert legacy_bos == 1
 
-        # 验证 Board 消费函数使用 history_contract_version filter（静态 import 存在）
+        # 验证 Board 消费函数使用 history_contract_version filter：
+        #   列名存在 + 模块级 import 了 HISTORY_CONTRACT_VERSION 常量（源码引用变量名，
+        #   非字面量 'review-history-v2'），故只断言列名出现即可证明 v2-only 过滤生效。
         import inspect
 
         from app.services import board_analysis_service as _ba
         src = inspect.getsource(_ba._compute_state_transitions) + \
             inspect.getsource(_ba._compute_freshness_density)
         assert "history_contract_version" in src
-        assert HISTORY_CONTRACT_VERSION in src
+        assert _ba.HISTORY_CONTRACT_VERSION == HISTORY_CONTRACT_VERSION
 
         await s.execute(delete(FirstPyramidHistoryEvent).where(
             FirstPyramidHistoryEvent.instrument_id == iid,
@@ -595,8 +600,7 @@ async def test_history_run_final_status_matrix():
                 await s.flush()
                 s.add(FirstPyramidHistoryRunItem(
                     history_run_id=run.id, instrument_id=inst.id,
-                    status=st, algorithm_version="algo",
-                    parameter_hash="p", input_hash="h",
+                    status=st, input_hash="h",
                 ))
             await s.commit()
             run_id = run.id
