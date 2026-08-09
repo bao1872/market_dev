@@ -902,3 +902,321 @@ async def test_recovery_checkpoint_reconcile_and_resume() -> None:
         assert pointer.data_run_id == snap.id, (
             f"pointer.data_run_id={pointer.data_run_id} != snap.id={snap.id}"
         )
+
+
+# =====================================================================
+# RECOVERY-CHECKPOINT-01 negative / idempotency tests
+# =====================================================================
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_recovery_checkpoint_refuse_missing_snapshot_item() -> None:
+    """CASE D: snapshot expected=5293 但 run-items succeeded=5292 → REFUSE。"""
+    from app.db import AsyncSessionLocal
+    from app.models.scheduler_job_run import SchedulerJobRun
+    from app.services.after_close_orchestrator import (
+        reconcile_after_close_checkpoint_from_artifacts,
+    )
+
+    test_date = date(2026, 8, 30)
+    async with AsyncSessionLocal() as prep_db:
+        all_ids = await _make_instruments(prep_db, n=5293)
+        dsa_ids = all_ids[:5283] + all_ids[5283:5293]
+        dsa_run = await _make_strategy_run_with_items(
+            prep_db, total=5293, succeeded=5283, skipped=10, failed=0,
+            status="completed", instrument_ids=dsa_ids,
+        )
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5292, skipped=1, failed=0,
+            published_at=None, status=STATUS_RUNNING, trade_date=test_date,
+            instrument_ids=all_ids,
+        )
+        meta = {
+            "orchestrator_status": "running",
+            "trade_date": test_date.isoformat(),
+            "dsa_run_id": str(dsa_run.id),
+            "feature_snapshot_run_id": str(snap.id),
+            "last_completed_step": "refreshing_daily",
+            "step_summary": {
+                "computing_features": {"status": "succeeded", "elapsed_seconds": 1},
+            },
+        }
+        job_run = await _create_after_close_job_run(
+            prep_db, status="failed",
+            orchestrator_status="refreshing_daily",
+            dsa_run_id=dsa_run.id,
+            feature_snapshot_run_id=snap.id,
+            last_completed_step="refreshing_daily",
+            trade_date=test_date,
+        )
+        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+        await prep_db.flush()
+        job_run_id = job_run.id
+        await prep_db.commit()
+
+    compute_calls = {"n": 0}
+
+    async def _spy(*a, **k):
+        compute_calls["n"] += 1
+        return {}
+
+    async with AsyncSessionLocal() as reader_db:
+        with patch(
+            "app.services.feature_snapshot_service.compute_review_core_with_run_items",
+            new=_spy,
+        ), patch(
+            "app.services.stock_core_publication_service.publish_stock_core_atomically",
+            new=_spy,
+        ):
+            result = await reconcile_after_close_checkpoint_from_artifacts(
+                reader_db, job_run_id=str(job_run_id),
+            )
+
+    assert result["ok"] is False, f"预期 REFUSE，实际={result}"
+    assert "5292" in str(result.get("refuse", ""))
+    assert compute_calls["n"] == 0
+
+    async with AsyncSessionLocal() as reader_db:
+        job = await reader_db.get(SchedulerJobRun, job_run_id)
+        meta_after = json.loads(job.metadata_json)
+        assert meta_after.get("last_completed_step") == "refreshing_daily"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_recovery_checkpoint_refuse_step_summary_not_succeeded() -> None:
+    """CASE E: durable artifacts 完整但 step_summary.computing_features != succeeded → REFUSE。"""
+    from app.db import AsyncSessionLocal
+    from app.models.scheduler_job_run import SchedulerJobRun
+    from app.services.after_close_orchestrator import (
+        reconcile_after_close_checkpoint_from_artifacts,
+    )
+
+    test_date = date(2026, 8, 31)
+    async with AsyncSessionLocal() as prep_db:
+        all_ids = await _make_instruments(prep_db, n=5293)
+        dsa_ids = all_ids[:5283] + all_ids[5283:5293]
+        dsa_run = await _make_strategy_run_with_items(
+            prep_db, total=5293, succeeded=5283, skipped=10, failed=0,
+            status="completed", instrument_ids=dsa_ids,
+        )
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
+            published_at=None, status=STATUS_RUNNING, trade_date=test_date,
+            instrument_ids=all_ids,
+        )
+        meta = {
+            "orchestrator_status": "running",
+            "trade_date": test_date.isoformat(),
+            "dsa_run_id": str(dsa_run.id),
+            "feature_snapshot_run_id": str(snap.id),
+            "last_completed_step": "refreshing_daily",
+            "step_summary": {
+                "computing_features": {"status": "failed", "error": "timeout"},
+            },
+        }
+        job_run = await _create_after_close_job_run(
+            prep_db, status="failed",
+            orchestrator_status="refreshing_daily",
+            dsa_run_id=dsa_run.id,
+            feature_snapshot_run_id=snap.id,
+            last_completed_step="refreshing_daily",
+            trade_date=test_date,
+        )
+        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+        await prep_db.flush()
+        job_run_id = job_run.id
+        await prep_db.commit()
+
+    async with AsyncSessionLocal() as reader_db:
+        result = await reconcile_after_close_checkpoint_from_artifacts(
+            reader_db, job_run_id=str(job_run_id),
+        )
+
+    assert result["ok"] is False
+    assert "computing_features" in str(result.get("refuse", ""))
+
+    async with AsyncSessionLocal() as reader_db:
+        job = await reader_db.get(SchedulerJobRun, job_run_id)
+        meta_after = json.loads(job.metadata_json)
+        assert meta_after.get("last_completed_step") == "refreshing_daily"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_recovery_checkpoint_refuse_dsa_failed_item() -> None:
+    """CASE F: DSA failed item = 1 → REFUSE。"""
+    from app.db import AsyncSessionLocal
+    from app.models.scheduler_job_run import SchedulerJobRun
+    from app.services.after_close_orchestrator import (
+        reconcile_after_close_checkpoint_from_artifacts,
+    )
+
+    test_date = date(2026, 9, 1)
+    async with AsyncSessionLocal() as prep_db:
+        all_ids = await _make_instruments(prep_db, n=5293)
+        dsa_ids = all_ids[:5282] + all_ids[5282:5293]
+        dsa_run = await _make_strategy_run_with_items(
+            prep_db, total=5293, succeeded=5282, skipped=10, failed=1,
+            status="completed", instrument_ids=dsa_ids,
+        )
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
+            published_at=None, status=STATUS_RUNNING, trade_date=test_date,
+            instrument_ids=all_ids,
+        )
+        meta = {
+            "orchestrator_status": "running",
+            "trade_date": test_date.isoformat(),
+            "dsa_run_id": str(dsa_run.id),
+            "feature_snapshot_run_id": str(snap.id),
+            "last_completed_step": "refreshing_daily",
+            "step_summary": {
+                "computing_features": {"status": "succeeded", "elapsed_seconds": 1},
+            },
+        }
+        job_run = await _create_after_close_job_run(
+            prep_db, status="failed",
+            orchestrator_status="refreshing_daily",
+            dsa_run_id=dsa_run.id,
+            feature_snapshot_run_id=snap.id,
+            last_completed_step="refreshing_daily",
+            trade_date=test_date,
+        )
+        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+        await prep_db.flush()
+        job_run_id = job_run.id
+        await prep_db.commit()
+
+    async with AsyncSessionLocal() as reader_db:
+        result = await reconcile_after_close_checkpoint_from_artifacts(
+            reader_db, job_run_id=str(job_run_id),
+        )
+
+    assert result["ok"] is False
+    assert "failed" in str(result.get("refuse", "")).lower()
+
+    async with AsyncSessionLocal() as reader_db:
+        job = await reader_db.get(SchedulerJobRun, job_run_id)
+        meta_after = json.loads(job.metadata_json)
+        assert meta_after.get("last_completed_step") == "refreshing_daily"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_recovery_checkpoint_idempotent_noop() -> None:
+    """CASE B: current=computing_features → no-op。"""
+    from app.db import AsyncSessionLocal
+    from app.models.scheduler_job_run import SchedulerJobRun
+    from app.services.after_close_orchestrator import (
+        reconcile_after_close_checkpoint_from_artifacts,
+    )
+
+    test_date = date(2026, 9, 2)
+    async with AsyncSessionLocal() as prep_db:
+        all_ids = await _make_instruments(prep_db, n=5293)
+        dsa_ids = all_ids[:5283] + all_ids[5283:5293]
+        dsa_run = await _make_strategy_run_with_items(
+            prep_db, total=5293, succeeded=5283, skipped=10, failed=0,
+            status="completed", instrument_ids=dsa_ids,
+        )
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
+            published_at=None, status=STATUS_RUNNING, trade_date=test_date,
+            instrument_ids=all_ids,
+        )
+        meta = {
+            "orchestrator_status": "running",
+            "trade_date": test_date.isoformat(),
+            "dsa_run_id": str(dsa_run.id),
+            "feature_snapshot_run_id": str(snap.id),
+            "last_completed_step": "computing_features",
+            "step_summary": {
+                "computing_features": {"status": "succeeded", "elapsed_seconds": 1},
+            },
+        }
+        job_run = await _create_after_close_job_run(
+            prep_db, status="running",
+            orchestrator_status="computing_features",
+            dsa_run_id=dsa_run.id,
+            feature_snapshot_run_id=snap.id,
+            last_completed_step="computing_features",
+            trade_date=test_date,
+        )
+        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+        await prep_db.flush()
+        job_run_id = job_run.id
+        await prep_db.commit()
+
+    async with AsyncSessionLocal() as reader_db:
+        result = await reconcile_after_close_checkpoint_from_artifacts(
+            reader_db, job_run_id=str(job_run_id),
+        )
+
+    assert result["ok"] is True
+    assert result.get("action") == "noop"
+
+    async with AsyncSessionLocal() as reader_db:
+        job = await reader_db.get(SchedulerJobRun, job_run_id)
+        meta_after = json.loads(job.metadata_json)
+        assert meta_after.get("last_completed_step") == "computing_features"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_recovery_checkpoint_no_regression_later_checkpoint() -> None:
+    """CASE C: current=publishing（later than computing_features）→ 不得倒退。"""
+    from app.db import AsyncSessionLocal
+    from app.models.scheduler_job_run import SchedulerJobRun
+    from app.services.after_close_orchestrator import (
+        reconcile_after_close_checkpoint_from_artifacts,
+    )
+
+    test_date = date(2026, 9, 3)
+    async with AsyncSessionLocal() as prep_db:
+        all_ids = await _make_instruments(prep_db, n=5293)
+        dsa_ids = all_ids[:5283] + all_ids[5283:5293]
+        dsa_run = await _make_strategy_run_with_items(
+            prep_db, total=5293, succeeded=5283, skipped=10, failed=0,
+            status="completed", instrument_ids=dsa_ids,
+        )
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
+            published_at=None, status=STATUS_RUNNING, trade_date=test_date,
+            instrument_ids=all_ids,
+        )
+        meta = {
+            "orchestrator_status": "running",
+            "trade_date": test_date.isoformat(),
+            "dsa_run_id": str(dsa_run.id),
+            "feature_snapshot_run_id": str(snap.id),
+            "last_completed_step": "publishing",
+            "step_summary": {
+                "computing_features": {"status": "succeeded", "elapsed_seconds": 1},
+            },
+        }
+        job_run = await _create_after_close_job_run(
+            prep_db, status="running",
+            orchestrator_status="publishing",
+            dsa_run_id=dsa_run.id,
+            feature_snapshot_run_id=snap.id,
+            last_completed_step="publishing",
+            trade_date=test_date,
+        )
+        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+        await prep_db.flush()
+        job_run_id = job_run.id
+        await prep_db.commit()
+
+    async with AsyncSessionLocal() as reader_db:
+        result = await reconcile_after_close_checkpoint_from_artifacts(
+            reader_db, job_run_id=str(job_run_id),
+        )
+
+    assert result["ok"] is False
+    assert "later" in str(result.get("refuse", "")).lower()
+
+    async with AsyncSessionLocal() as reader_db:
+        job = await reader_db.get(SchedulerJobRun, job_run_id)
+        meta_after = json.loads(job.metadata_json)
+        assert meta_after.get("last_completed_step") == "publishing"

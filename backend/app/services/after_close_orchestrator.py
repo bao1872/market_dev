@@ -4519,8 +4519,9 @@ async def reconcile_after_close_checkpoint_from_artifacts(
     if dsa_item_map.get("pending", 0) + dsa_item_map.get("running", 0) != 0:
         return {"ok": False, "refuse": "DSA items still pending/running"}
 
-    # skip reason allowlist
-    canonical_allowlist = {"insufficient_history", "bootstrap_unavailable", "compute_error"}
+    # skip reason allowlist — 复用 canonical StrategyBatchService._SKIPPED_REASON_ALLOWLIST
+    from app.services.strategy_batch_service import StrategyBatchService
+    canonical_allowlist = StrategyBatchService._SKIPPED_REASON_ALLOWLIST
     skip_stmt = select(StrategyRunItem.reason_code, func.count()).where(
         StrategyRunItem.run_id == uuid.UUID(dsa_run_id),
         StrategyRunItem.status == "skipped",
