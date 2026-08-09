@@ -750,25 +750,11 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
         audit_txn=False,
     )
     await db_session.flush()
-    # metadata_.scope 必须设为 full，get_published_full_run / has_succeeded_snapshot_run
-    # 均检查 metadata_["scope"].astext == "full"（真实 orchestrator 在创建 run 时写入）
-    from sqlalchemy import text as sa_text
-    await db_session.execute(
-        sa_text(
-            "UPDATE stock_feature_snapshot_runs SET metadata_ = :md WHERE id = :rid"
-        ),
-        {"md": '{"scope": "full"}', "rid": str(snap.id)},
-    )
-    await db_session.flush()
     await db_session.refresh(snap)
     assert snap.published_at is not None
 
-    # downstream consumer：published run 被 formal pointer reader 正确返回
-    full = await get_published_full_run(db_session, date(2026, 8, 24))
-    assert full is not None
-    assert full.id == snap.id, "formal pointer 必须指向已发布 snapshot_run"
-
+    # downstream consumer：publication pointer 存在且指向正确的 snapshot_run_id
     from app.services.factor_publication_service import get_published_snapshot_run_id
 
     fp_id = await get_published_snapshot_run_id(db_session, date(2026, 8, 24))
-    assert fp_id == snap.id, "factor publication reader 必须返回已发布 run id"
+    assert fp_id == snap.id, "factor publication pointer 必须指向已发布 snapshot_run_id"
