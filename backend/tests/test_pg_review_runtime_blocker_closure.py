@@ -708,3 +708,181 @@ async def test_pg_resume_integration() -> None:
 
     # G. 没有创建新的 snapshot run（same snap.id 就是 existing 的）
     # snap.id 在整个流程中不变 = 没有新 compute run
+
+
+# =============================================================================
+# RECOVERY-CHECKPOINT-01: Checkpoint Reconciliation + Resume Integration
+# =============================================================================
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_recovery_checkpoint_reconcile_and_resume() -> None:
+    """RECOVERY-CHECKPOINT-01: reconcile checkpoint from durable artifacts → resume。
+
+    构造 production-style drift：
+    - last_completed_step = refreshing_daily
+    - step_summary.computing_features.status = succeeded
+    - DSA durable truth: 5283 succeeded + 10 skipped
+    - snapshot durable truth: 5293 items + 5293 StockFeatureSnapshot
+    - published_at = null, pointer absent
+
+    1. reconcile_after_close_checkpoint_from_artifacts → computing_features
+    2. reconcile DSA + finalize snapshot
+    3. execute_after_close_run → compute call_count=0, real publish, pointer correct
+    """
+    from app.db import AsyncSessionLocal
+    from app.models.scheduler_job_run import SchedulerJobRun
+    from app.services.after_close_orchestrator import (
+        _completed_steps,
+        execute_after_close_run,
+        get_after_close_run_status,
+        reconcile_after_close_checkpoint_from_artifacts,
+    )
+    from app.services.factor_publication_service import (
+        PUBLICATION_KIND_STOCK_CORE,
+        get_publication,
+    )
+
+    test_date = date(2026, 8, 26)
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    # Phase 1: 用 committed session 准备 production-style drift
+    async with AsyncSessionLocal() as prep_db:
+        dsa_run = await _make_strategy_run_with_items(
+            prep_db, total=5293, succeeded=5283, skipped=10, failed=0,
+            status="completed",
+        )
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
+            published_at=None, status=STATUS_RUNNING, trade_date=test_date,
+        )
+        step_summary = {
+            "refreshing_daily": {"status": "succeeded", "elapsed_seconds": 4000},
+            "syncing_boards": {"status": "failed", "elapsed_seconds": 120},
+            "checking_coverage": {"status": "succeeded", "elapsed_seconds": 0},
+            "computing_features": {"status": "succeeded", "elapsed_seconds": 7000},
+        }
+        meta = {
+            "orchestrator_status": "failed",
+            "trade_date": test_date.isoformat(),
+            "dsa_run_id": str(dsa_run.id),
+            "feature_snapshot_run_id": str(snap.id),
+            "last_completed_step": "refreshing_daily",
+            "step_summary": step_summary,
+        }
+        job_run = SchedulerJobRun(
+            job_name="after_close_orchestrator",
+            business_date=test_date.isoformat(),
+            run_key=f"after_close_orchestrator:recovery:{uuid.uuid4().hex[:8]}",
+            status="failed",
+            scheduled_at=now,
+            started_at=now,
+            finished_at=now,
+            heartbeat_at=now,
+            lease_expires_at=now,
+            metadata_json=json.dumps(meta, ensure_ascii=False),
+        )
+        prep_db.add(job_run)
+        await prep_db.flush()
+        job_run_id = job_run.id
+        await prep_db.commit()
+
+    # Phase 2: reconcile checkpoint — refreshing_daily → computing_features
+    compute_spy = {"n": 0}
+
+    async def _spy_recon_compute(*a, **k):
+        compute_spy["n"] += 1
+        return {}
+
+    async with AsyncSessionLocal() as recon_db:
+        with patch(
+            "app.services.feature_snapshot_service.compute_review_core_with_run_items",
+            new=_spy_recon_compute,
+        ):
+            result = await reconcile_after_close_checkpoint_from_artifacts(
+                recon_db,
+                job_run_id=str(job_run_id),
+                target_step="computing_features",
+            )
+            await recon_db.commit()
+
+    assert result["ok"] is True, f"reconcile REFUSE: {result.get('refuse', 'unknown')}"
+    assert result["action"] == "advanced"
+    assert result["before"] == "refreshing_daily"
+    assert result["after"] == "computing_features"
+    assert compute_spy["n"] == 0, "reconcile 不得调用 compute"
+
+    # 验证 checkpoint 已推进
+    async with AsyncSessionLocal() as check_db:
+        status = await get_after_close_run_status(check_db, job_run_id)
+        assert status.get("last_completed_step") == "computing_features", (
+            f"checkpoint 未推进: {status.get('last_completed_step')}"
+        )
+
+    # idempotency: 重复调用 noop
+    async with AsyncSessionLocal() as idem_db:
+        result2 = await reconcile_after_close_checkpoint_from_artifacts(
+            idem_db,
+            job_run_id=str(job_run_id),
+            target_step="computing_features",
+        )
+        assert result2["action"] == "noop"
+        assert result2["ok"] is True
+
+    # resume mapping 非空
+    assert "computing_features" in _completed_steps
+    comp_set = _completed_steps["computing_features"]
+    assert "refreshing_daily" in comp_set
+    assert "computing_features" in comp_set
+
+    # Phase 3: reconcile DSA + finalize snapshot → execute_after_close_run
+    async with AsyncSessionLocal() as fix_db:
+        await reconcile_strategy_run_from_items(fix_db, dsa_run.id, set_finished_at=True)
+        await finalize_snapshot_run_compute_complete(fix_db, snap.id)
+        await fix_db.commit()
+
+    compute_resume = {"n": 0}
+
+    async def _spy_resume(*a, **k):
+        compute_resume["n"] += 1
+        return {}
+
+    with (
+        patch(
+            "app.services.feature_snapshot_service.compute_review_core_with_run_items",
+            new=_spy_resume,
+        ),
+        patch(
+            "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
+            new=AsyncMock(return_value={"structure_count": 0, "chip_count": 0}),
+        ),
+        patch(
+            "app.services.review_orchestrator_service.create_run",
+            side_effect=DownstreamEntryReachedError("review entry reached"),
+        ),
+    ):
+        try:
+            await execute_after_close_run(job_run_id, trade_date=test_date)
+        except DownstreamEntryReachedError:
+            pass
+
+    # Phase 4: 验收
+    assert compute_resume["n"] == 0, (
+        f"resume 不得重算，实际 compute 调用={compute_resume['n']}"
+    )
+
+    async with AsyncSessionLocal() as reader_db:
+        snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
+        assert snap_reread.published_at is not None, "publish 后 published_at 必须 set"
+
+        pointer = await get_publication(
+            reader_db,
+            scope_type="market",
+            scope_key="market",
+            trade_date=test_date,
+            publication_kind=PUBLICATION_KIND_STOCK_CORE,
+        )
+        assert pointer is not None, "publication pointer 必须存在"
+        assert pointer.data_run_id == snap.id, (
+            f"pointer.data_run_id={pointer.data_run_id} != snap.id={snap.id}"
+        )

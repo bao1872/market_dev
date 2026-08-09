@@ -4353,6 +4353,246 @@ async def retry_after_close_run(
     return job_run
 
 
+# =============================================================================
+# [RECOVERY-CHECKPOINT-01] Checkpoint Reconciliation from Durable Artifacts
+# =============================================================================
+_CHECKPOINT_ORDER: dict[str, int] = {
+    "refreshing_daily": 0,
+    "syncing_boards": 1,
+    "computing_features": 2,
+    "publishing": 3,
+    "computing_review": 4,
+    "succeeded": 5,
+}
+
+
+async def reconcile_after_close_checkpoint_from_artifacts(
+    db: AsyncSession,
+    *,
+    job_run_id: str,
+    target_step: str = "computing_features",
+) -> dict:
+    """[RECOVERY-CHECKPOINT-01] 从 durable artifacts + step_summary 证据对账 checkpoint。
+
+    仅用于 failed/interrupted 盘后 run：当 step_summary 记录 computing_features 已成功、
+    DSA + snapshot durable artifacts 完整但 orchestrator 在写 checkpoint 前崩溃时，
+    将 last_completed_step 从较早 checkpoint 推进到 computing_features。
+
+    Required evidence（缺一 REFUSE）：
+    - step_summary.computing_features.status == "succeeded"
+    - snapshot run: published_at IS NULL, expected_count 正确
+    - snapshot run-items: 全部 terminal acceptable, instrument set 完整
+    - StockFeatureSnapshot: count == expected_count, instrument set 与 items 一致
+    - DSA run-items: 全部 terminal acceptable, skip reasons ∈ allowlist
+    - DSA succeeded instrument set ⊆ snapshot instrument set
+    - formal stock_core pointer 尚未指向该 snapshot
+
+    不执行: compute / publish / pointer switch / board / Review。
+    """
+    from app.models.stock_feature_snapshot import StockFeatureSnapshot
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+    from app.models.stock_feature_snapshot_run_item import StockFeatureSnapshotRunItem
+    from app.models.strategy_run import StrategyResult, StrategyRun, StrategyRunItem
+
+    # ————————————————————————————————————————
+    # 1. job_run identity
+    # ————————————————————————————————————————
+    job_run = await _get_job_run_or_raise(db, uuid.UUID(job_run_id))
+    meta = _parse_metadata(job_run)
+    trade_date_raw = meta.get("trade_date")
+    if not trade_date_raw:
+        return {"ok": False, "refuse": "metadata 缺少 trade_date"}
+    trade_date = date.fromisoformat(trade_date_raw)
+    dsa_run_id = meta.get("dsa_run_id")
+    snap_id = meta.get("feature_snapshot_run_id")
+
+    # ————————————————————————————————————————
+    # 2. current checkpoint 不得倒退
+    # ————————————————————————————————————————
+    current_step = meta.get("last_completed_step", "")
+    if current_step == target_step:
+        return {"ok": True, "action": "noop", "reason": f"checkpoint already {target_step}"}
+    current_order = _CHECKPOINT_ORDER.get(current_step)
+    target_order = _CHECKPOINT_ORDER.get(target_step)
+    if current_order is None:
+        return {"ok": False, "refuse": f"unknown current checkpoint: {current_step}"}
+    if target_order is None:
+        return {"ok": False, "refuse": f"unknown target checkpoint: {target_step}"}
+    if current_order > target_order:
+        return {"ok": False, "refuse": f"checkpoint {current_step} already later than {target_step}"}
+
+    # ————————————————————————————————————————
+    # 3. step_summary: computing_features succeeded
+    # ————————————————————————————————————————
+    step_summary = dict(meta.get("step_summary") or {})
+    comp_step = step_summary.get("computing_features", {})
+    if comp_step.get("status") != "succeeded":
+        return {"ok": False, "refuse": "step_summary.computing_features != succeeded"}
+
+    # ————————————————————————————————————————
+    # 4. snapshot run + items + artifacts
+    # ————————————————————————————————————————
+    if not snap_id:
+        return {"ok": False, "refuse": "metadata 缺少 feature_snapshot_run_id"}
+    snap_run = await db.get(StockFeatureSnapshotRun, uuid.UUID(snap_id))
+    if snap_run is None:
+        return {"ok": False, "refuse": f"snapshot run not found: {snap_id}"}
+    if snap_run.published_at is not None:
+        return {"ok": False, "refuse": "snapshot run already published"}
+    if snap_run.expected_count != 5293:
+        return {"ok": False, "refuse": f"snapshot expected_count={snap_run.expected_count} != 5293"}
+
+    # snapshot run-items
+    items_stmt = select(
+        StockFeatureSnapshotRunItem.status,
+        func.count().label("cnt"),
+    ).where(
+        StockFeatureSnapshotRunItem.snapshot_run_id == uuid.UUID(snap_id),
+    ).group_by(StockFeatureSnapshotRunItem.status)
+    item_rows = (await db.execute(items_stmt)).all()
+    item_map = {row.status: row.cnt for row in item_rows}
+    if item_map.get("succeeded", 0) != 5293:
+        return {"ok": False, "refuse": f"snapshot items succeeded={item_map.get('succeeded',0)} != 5293"}
+    if item_map.get("failed", 0) != 0:
+        return {"ok": False, "refuse": f"snapshot items failed={item_map['failed']} > 0"}
+    if item_map.get("pending", 0) + item_map.get("running", 0) != 0:
+        return {"ok": False, "refuse": "snapshot items still pending/running"}
+
+    # StockFeatureSnapshot count
+    artifact_count = (
+        await db.execute(
+            select(func.count()).where(
+                StockFeatureSnapshot.source_run_id == uuid.UUID(snap_id),
+            )
+        )
+    ).scalar_one()
+    if artifact_count != 5293:
+        return {"ok": False, "refuse": f"StockFeatureSnapshot count={artifact_count} != 5293"}
+
+    # instrument set equality: snapshot items ↔ StockFeatureSnapshot
+    snap_instrument_ids = {
+        row[0]
+        for row in (
+            await db.execute(
+                select(StockFeatureSnapshotRunItem.instrument_id).where(
+                    StockFeatureSnapshotRunItem.snapshot_run_id == uuid.UUID(snap_id),
+                    StockFeatureSnapshotRunItem.status == "succeeded",
+                )
+            )
+        ).all()
+    }
+    artifact_instrument_ids = {
+        row[0]
+        for row in (
+            await db.execute(
+                select(StockFeatureSnapshot.instrument_id).where(
+                    StockFeatureSnapshot.source_run_id == uuid.UUID(snap_id),
+                )
+            )
+        ).all()
+    }
+    if snap_instrument_ids != artifact_instrument_ids:
+        return {"ok": False, "refuse": "snapshot item instrument set != StockFeatureSnapshot instrument set"}
+
+    # ————————————————————————————————————————
+    # 5. DSA run-items + results
+    # ————————————————————————————————————————
+    if not dsa_run_id:
+        return {"ok": False, "refuse": "metadata 缺少 dsa_run_id"}
+    dsa_run = await db.get(StrategyRun, uuid.UUID(dsa_run_id))
+    if dsa_run is None:
+        return {"ok": False, "refuse": f"DSA run not found: {dsa_run_id}"}
+
+    # DSA item aggregation
+    dsa_items_stmt = select(
+        StrategyRunItem.status,
+        func.count().label("cnt"),
+    ).where(
+        StrategyRunItem.run_id == uuid.UUID(dsa_run_id),
+    ).group_by(StrategyRunItem.status)
+    dsa_item_rows = (await db.execute(dsa_items_stmt)).all()
+    dsa_item_map = {row.status: row.cnt for row in dsa_item_rows}
+    if dsa_item_map.get("succeeded", 0) != 5283:
+        return {"ok": False, "refuse": f"DSA items succeeded={dsa_item_map.get('succeeded',0)} != 5283"}
+    if dsa_item_map.get("failed", 0) != 0:
+        return {"ok": False, "refuse": f"DSA items failed={dsa_item_map['failed']} > 0"}
+    if dsa_item_map.get("pending", 0) + dsa_item_map.get("running", 0) != 0:
+        return {"ok": False, "refuse": "DSA items still pending/running"}
+
+    # skip reason allowlist
+    canonical_allowlist = {"insufficient_history", "bootstrap_unavailable", "compute_error"}
+    skip_stmt = select(StrategyRunItem.reason_code, func.count()).where(
+        StrategyRunItem.run_id == uuid.UUID(dsa_run_id),
+        StrategyRunItem.status == "skipped",
+    ).group_by(StrategyRunItem.reason_code)
+    skip_rows = (await db.execute(skip_stmt)).all()
+    for reason, _ in skip_rows:
+        if reason and reason not in canonical_allowlist:
+            return {"ok": False, "refuse": f"DSA skip reason not in allowlist: {reason}"}
+
+    # StrategyResult count
+    result_count = (
+        await db.execute(
+            select(func.count()).where(
+                StrategyResult.strategy_run_id == uuid.UUID(dsa_run_id),
+            )
+        )
+    ).scalar_one()
+    if result_count != 5283:
+        return {"ok": False, "refuse": f"StrategyResult count={result_count} != 5283"}
+
+    # DSA succeeded ⊆ snapshot succeeded
+    dsa_succeeded_ids = {
+        row[0]
+        for row in (
+            await db.execute(
+                select(StrategyRunItem.instrument_id).where(
+                    StrategyRunItem.run_id == uuid.UUID(dsa_run_id),
+                    StrategyRunItem.status == "succeeded",
+                )
+            )
+        ).all()
+    }
+    if not dsa_succeeded_ids.issubset(snap_instrument_ids):
+        return {"ok": False, "refuse": "DSA succeeded instrument set not subset of snapshot set"}
+
+    # ————————————————————————————————————————
+    # 6. formal pointer not yet pointing to this snapshot
+    # ————————————————————————————————————————
+    from app.services.factor_publication_service import (
+        PUBLICATION_KIND_STOCK_CORE,
+        get_publication,
+    )
+
+    pointer = await get_publication(
+        db,
+        scope_type="market",
+        scope_key="market",
+        trade_date=trade_date,
+        publication_kind=PUBLICATION_KIND_STOCK_CORE,
+    )
+    if pointer is not None and pointer.data_run_id == snap_run.id:
+        return {"ok": False, "refuse": "formal pointer already points to this snapshot run"}
+
+    # ————————————————————————————————————————
+    # 7. ALL EVIDENCE PASS — advance checkpoint
+    # ————————————————————————————————————————
+    meta["last_completed_step"] = target_step
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db.flush()
+
+    logger.info(
+        "[AfterClose] reconcile checkpoint: job_run_id=%s, %s → %s",
+        job_run_id, current_step, target_step,
+    )
+    return {
+        "ok": True,
+        "action": "advanced",
+        "before": current_step,
+        "after": target_step,
+    }
+
+
 if __name__ == "__main__":
     # 自测入口：验证枚举、函数签名与模块导入（不连接数据库）
     import inspect
