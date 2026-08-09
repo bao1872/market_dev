@@ -85,6 +85,7 @@ async def _make_strategy_run_with_items(
     skipped: int,
     failed: int,
     status: str = "running",
+    instrument_ids: list[uuid.UUID] | None = None,
 ) -> StrategyRun:
     """构造带 StrategyRunItems 的真实 DSA StrategyRun（满足外键）。"""
     from app.models.strategy import StrategyDefinition, StrategyVersion
@@ -128,7 +129,10 @@ async def _make_strategy_run_with_items(
 
     # 构造 run-items（authoritative truth），instrument_id 指向真实存在的 Instrument 行
     from app.models.strategy_run import StrategyResult
-    inst_ids = await _make_instruments(db_session, n=succeeded + skipped + failed)
+    if instrument_ids is not None:
+        inst_ids = instrument_ids
+    else:
+        inst_ids = await _make_instruments(db_session, n=succeeded + skipped + failed)
     idx = 0
     for _ in range(succeeded):
         db_session.add(
@@ -184,6 +188,7 @@ async def _make_snapshot_run_with_items(
     published_at=None,
     status: str = STATUS_RUNNING,
     trade_date: date = date(2026, 8, 7),
+    instrument_ids: list[uuid.UUID] | None = None,
 ) -> StockFeatureSnapshotRun:
     """构造带 StockFeatureSnapshotRunItems 的真实 snapshot run。
 
@@ -220,7 +225,10 @@ async def _make_snapshot_run_with_items(
         "running": running,
     }
     total_items = sum(counts.values())
-    inst_ids = await _make_instruments(db_session, n=total_items)
+    if instrument_ids is not None:
+        inst_ids = instrument_ids
+    else:
+        inst_ids = await _make_instruments(db_session, n=total_items)
     idx = 0
     for st, n in counts.items():
         for _ in range(n):
@@ -757,13 +765,18 @@ async def test_recovery_checkpoint_reconcile_and_resume() -> None:
 
     # Phase 1: 用 committed session 准备 production-style drift
     async with AsyncSessionLocal() as prep_db:
+        # 创建共享 instrument IDs（DSA succeeded ⊆ snapshot）
+        all_instruments = await _make_instruments(prep_db, n=5293)
+        dsa_ids = all_instruments[:5283] + all_instruments[5283:5293]  # 5283+10
+
         dsa_run = await _make_strategy_run_with_items(
             prep_db, total=5293, succeeded=5283, skipped=10, failed=0,
-            status="completed",
+            status="completed", instrument_ids=dsa_ids,
         )
         snap = await _make_snapshot_run_with_items(
             prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
             published_at=None, status=STATUS_RUNNING, trade_date=test_date,
+            instrument_ids=all_instruments,
         )
         step_summary = {
             "refreshing_daily": {"status": "succeeded", "elapsed_seconds": 4000},
