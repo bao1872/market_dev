@@ -80,9 +80,14 @@ _HEARTBEAT_INTERVAL_SECONDS = 10
 
 # [Step Contract 2026-08-03] 每个顶层步骤的硬性超时（秒）。
 # watchdog 据此判断步骤 stale/超时；execute_orchestrator_step 据此 wait_for。
-# 值需覆盖正常耗时 + 合理缓冲（refreshing_daily 约 13 分钟，computing_features 约 7 小时）。
-_STEP_TIMEOUT_SECONDS: dict[str, float] = {
-    "refreshing_daily": 3600,      # 约 13 分钟，留足缓冲
+# 值需覆盖正常耗时 + 合理缓冲（computing_features 约 7 小时）。
+# [Phase 4D.4] refreshing_daily 是 workload-variant long-running business step：
+# 耗时随 instrument count / backfill window / provider throughput 变化，不由 fixed
+# generic absolute wall-clock 上限决定成败（PRD 31 PC-43 / rules/80 §13.1）。
+# 其值为 None —— 无 absolute timeout，由 stale watchdog（lease 过期 + heartbeat 不健康）
+# 依据真实无进展判定 stalled，而非总耗时过长。
+_STEP_TIMEOUT_SECONDS: dict[str, float | None] = {
+    "refreshing_daily": None,      # workload-variant long-running：无 absolute 上限
     "syncing_boards": 1800,
     "checking_coverage": 300,
     "computing_features": 28800,   # 约 7 小时主链
@@ -94,8 +99,12 @@ _STEP_TIMEOUT_SECONDS: dict[str, float] = {
 }
 
 
-def _step_timeout(step: str) -> float:
-    """返回步骤超时（默认 _DEFAULT_STEP_TIMEOUT_SECONDS）。"""
+def _step_timeout(step: str) -> float | None:
+    """返回步骤超时（默认 _DEFAULT_STEP_TIMEOUT_SECONDS）。
+
+    [Phase 4D.4] 返回 None 表示该步骤无 absolute timeout（long-running business step，
+    由 stale watchdog 依据真实无进展判定，而非总耗时）。
+    """
     return _STEP_TIMEOUT_SECONDS.get(step, _DEFAULT_STEP_TIMEOUT_SECONDS)
 
 
@@ -191,7 +200,10 @@ async def execute_orchestrator_step(
                     )
             summary["elapsed_seconds"] = max(0.0, (now - started_at).total_seconds())
             summary["heartbeat_at"] = now.isoformat()
-            summary["last_progress_at"] = now.isoformat()
+            # [Phase 4D.4] last_progress_at 不得由 heartbeat 时间冒充：
+            # heartbeat 在 CPU-bound / blocking provider call 时仍会刷新，不能证明业务有进展。
+            # last_progress_at 只在业务真正推进时由 progress callback 更新；当前 step 无业务
+            # progress 注入时保持 started_at，finally 时更新为 finished_at，避免 false-liveness。
             if progress is not None:
                 try:
                     await progress(dict(summary))
@@ -230,7 +242,7 @@ async def execute_orchestrator_step(
     except TimeoutError:
         summary.update(
             status="timed_out", error_code="STEP_TIMEOUT",
-            error_message=f"{step} timed out after {timeout_seconds}s",
+            error_message=f"{step} timed out after {timeout_seconds if timeout_seconds is not None else 'no-limit'}s",
         )
         if not optional:
             raise
@@ -273,7 +285,7 @@ _CANCEL_POLL_INTERVAL_SECONDS = 5.0
 async def _run_with_cancellation(
     operation: Callable[[], Awaitable[Any]],
     cancellation_check: Callable[[], Awaitable[bool]],
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     poll_interval: float = _CANCEL_POLL_INTERVAL_SECONDS,
 ) -> Any:
     """运行 operation，并在运行期间周期性调用 cancellation_check。
@@ -284,10 +296,12 @@ async def _run_with_cancellation(
     - 命中取消 → cancel operation task 并 await 其真正结束（保证业务写入停止），
       随后抛出 _StepCancelledError；
     - 总耗时超过 timeout_seconds → cancel task 并抛 TimeoutError；
-    - 保持原有超时语义。
+    - [Phase 4D.4] timeout_seconds=None 时**不设 absolute deadline**：仅保留协作取消，
+      由 stale watchdog（lease 过期 + heartbeat 不健康）防护无进展卡死，不在意总耗时。
     """
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_seconds
+    has_deadline = timeout_seconds is not None
+    deadline = (loop.time() + timeout_seconds) if has_deadline else None
     op_task = asyncio.ensure_future(operation())
 
     async def _finalize(exc: BaseException) -> None:
@@ -299,10 +313,15 @@ async def _run_with_cancellation(
 
     try:
         while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                await _finalize(TimeoutError())
-            wait_slice = min(poll_interval, remaining)
+            if has_deadline:
+                assert deadline is not None
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    await _finalize(TimeoutError())
+                wait_slice = min(poll_interval, remaining)
+            else:
+                # 无 absolute 上限：仅按 poll_interval 轮询取消状态
+                wait_slice = poll_interval
             done, _pending = await asyncio.wait({op_task}, timeout=wait_slice)
             if done:
                 return await op_task
