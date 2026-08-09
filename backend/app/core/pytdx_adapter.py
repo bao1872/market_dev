@@ -79,6 +79,10 @@ PYTDX_SERVERS: list[tuple[str, int]] = [
 MARKET_NAME_TO_CODE: dict[str, int] = {
     "SH": 1,
     "SZ": 0,
+    # 注意：不把 "BJ" 加入此 dict —— get_stock_list(None) 会遍历其 keys 并对每个
+    # 市场调用 get_security_list（用 get_security_count 分页），而 pytdx 的
+    # get_security_count 不支持 BSE（market=2）。BJ 股票由 get_stock_list 里的
+    # BJ_STOCKS 静态表补充，不经由此 dict。
 }
 
 MARKET_CODE_TO_NAME: dict[int, str] = {v: k for k, v in MARKET_NAME_TO_CODE.items()}
@@ -262,15 +266,25 @@ _FETCH_BATCH = 800
 def market_from_code(code: str) -> int:
     """根据股票代码判断市场。
 
-    与原 ref/交易/datasource/pytdx_client.py 一致：6 开头为 SH（market=1），其余为 SZ（market=0）。
+    与原 ref/交易/datasource/pytdx_client.py 一致：6 开头为 SH（market=1）。
+
+    [Phase 3D] 北交所/新三板代码（92x/43x/83x/87x/88x）返回 market=2（BSE）。
+    此前它们被当作 SZ（market=0）查询，pytdx 在 SZ 市场找不到这些代码 → 返回空，
+    导致全市场 BJ 日线从未 ingest（root cause of DATA_INGESTION_GAP）。
 
     Args:
-        code: 股票代码（如 '000001', '600519'）
+        code: 股票代码（如 '000001', '600519', '920002'）
 
     Returns:
-        1 表示 SH，0 表示 SZ
+        1 表示 SH，0 表示 SZ，2 表示 BJ/BSE
     """
-    return 1 if str(code).startswith("6") else 0
+    code = str(code)
+    if code.startswith("6"):
+        return 1
+    # BJ/BSE 代码前缀（与 stock_symbol_sql_filter 的 BJ 分支一致）
+    if code.startswith(("92", "43", "83", "87", "88")):
+        return 2
+    return 0
 
 
 class PytdxAdapter(Exchange):
