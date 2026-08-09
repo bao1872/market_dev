@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,7 +94,16 @@ async def persist_metric_observations(
     for row in rows:
         stmt = pg_insert(MarketReviewMetricObservation).values(**row)
         stmt = stmt.on_conflict_do_update(
-            constraint="uq_review_obs_live_run_scope_component",
+            # [CHANGE-20260808] partial unique INDEX（非 CONSTRAINT）：
+            # 用 index_elements + index_where 做 index inference。
+            index_elements=[
+                MarketReviewMetricObservation.review_run_id,
+                MarketReviewMetricObservation.scope_type,
+                MarketReviewMetricObservation.scope_key,
+                MarketReviewMetricObservation.metric_code,
+                MarketReviewMetricObservation.component_name,
+            ],
+            index_where=text("source_kind = 'live'"),
             set_={
                 "raw_value": stmt.excluded.raw_value,
                 "denominator": stmt.excluded.denominator,
@@ -188,7 +197,18 @@ async def persist_history_replay_observations(
     for row in rows:
         stmt = pg_insert(MarketReviewMetricObservation).values(**row)
         stmt = stmt.on_conflict_do_update(
-            constraint="uq_review_obs_replay_run_date_scope_component",
+            # [CHANGE-20260808] partial unique INDEX（非 CONSTRAINT）：
+            # 必须用 index_elements + index_where 做 index inference，
+            # 禁止 ON CONFLICT ON CONSTRAINT <partial-index-name>。
+            index_elements=[
+                MarketReviewMetricObservation.source_history_run_id,
+                MarketReviewMetricObservation.trade_date,
+                MarketReviewMetricObservation.scope_type,
+                MarketReviewMetricObservation.scope_key,
+                MarketReviewMetricObservation.metric_code,
+                MarketReviewMetricObservation.component_name,
+            ],
+            index_where=text("source_kind = 'history_replay'"),
             set_={
                 "raw_value": stmt.excluded.raw_value,
                 "denominator": stmt.excluded.denominator,
@@ -213,6 +233,8 @@ async def load_metric_history(
     trade_date: date,
     algorithm_version: str,
     baseline_window: int,
+    required_history_contract_version: str | None = None,
+    required_taxonomy_compatibility_key: str | None = None,
 ) -> tuple[
     dict[str, dict[str, list[float]]] | None,
     dict[str, float] | None,
@@ -223,10 +245,15 @@ async def load_metric_history(
     [CHANGE-20260808] Canonical baseline precedence（M2 dual lineage）：
     同一 logical (date, scope, metric, component) 可能存在 LIVE 与 HISTORY_REPLAY 两条
     observation。只选一条 canonical：
-        1. published/succeeded canonical LIVE（review_run_id -> MarketReviewRun published + succeeded）
-        2. valid HISTORY_REPLAY（source_kind='history_replay'）
-        3. failed/partial/unpublished LIVE 不得覆盖 replay baseline（排除）
+        1. published canonical LIVE（review_run_id -> MarketReviewRun published_at + status='published'）
+        2. valid HISTORY_REPLAY（source_kind='history_replay' + history_contract_version==required +
+           taxonomy compatibility==required）
+        3. 其他 live（signals_ready/partial/failed/unpublished）不得覆盖 replay baseline（排除）
     严格 trade_date < target_date，每 date×scope×metric×component baseline 最多 1 条。
+
+    required_history_contract_version / required_taxonomy_compatibility_key：
+    replay candidate 必须 source_kind=='history_replay' 且 history_contract_version==required
+    且 taxonomy compatibility==required，否则排除（compatible-series 隔离）。
 
     注：本轮 M2 migration 未 apply；source_kind / source_history_run_id 列在模型已定义，
     若 DB 尚无列则 getattr 兼容（旧 schema 无 source_kind → 视为 live）。
@@ -264,19 +291,42 @@ async def load_metric_history(
         }
 
     def _canonical_rank(o: MarketReviewMetricObservation) -> int:
-        """越小越优先。rank 0 = published/succeeded live；1 = history_replay；2 = 其他 live（排除）。"""
+        """越小越优先。rank 0 = published live（run.status='published' + published_at）；
+        1 = history_replay；2 = 其他 live（signals_ready/partial/failed/unpublished → 排除）。
+
+        MarketReviewRun 真实状态机：created/computing/partial/signals_ready/published/
+        completed_with_errors/failed/cancelled。canonical live = published + published_at。
+        """
         kind = getattr(o, "source_kind", "live")
         if kind == "history_replay":
             return 1
         if o.review_run_id is not None:
             published, status = run_status.get(o.review_run_id, (False, ""))
-            if published and status == "succeeded":
+            if published and status == "published":
                 return 0
-        return 2  # failed/partial/unpublished live → 排除（rank 2 被过滤）
+        return 2  # 非 canonical live → 排除
 
-    # 按 canonical key 选最低 rank；rank==2 的 live 排除
+    # [CHANGE-20260808] replay compatible-series 过滤（§6）：
+    # replay candidate 必须 source_kind=='history_replay' 且 history_contract_version==required
+    # 且 taxonomy compatibility==required，否则排除。不简单要求 membership_version 每日相等。
+    def _replay_compatible(o: MarketReviewMetricObservation) -> bool:
+        if getattr(o, "source_kind", "live") != "history_replay":
+            return True  # live 走 canonical rank
+        if required_history_contract_version is not None:
+            ver = getattr(o, "history_contract_version", None)
+            if ver != required_history_contract_version:
+                return False
+        if required_taxonomy_compatibility_key is not None:
+            taxo = getattr(o, "taxonomy_compatibility_key", None)
+            if taxo != required_taxonomy_compatibility_key:
+                return False
+        return True
+
+    # 按 canonical key 选最低 rank；rank==2 的 live 排除；不兼容 replay 排除
     canonical: dict[tuple, MarketReviewMetricObservation] = {}
     for o in observations:
+        if not _replay_compatible(o):
+            continue
         rank = _canonical_rank(o)
         if rank >= 2:
             continue

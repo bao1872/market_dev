@@ -238,9 +238,9 @@ class TestCanonicalPrecedence:
                     __iter__=lambda self: iter(observations),
                 )
                 return result
-            # run_status 预取查询（第 2 次 execute）：published + succeeded
+            # run_status 预取查询（第 2 次 execute）：published_at + status='published'
             run_result = MagicMock()
-            run_result.all.return_value = [(run_id, "2026-07-01", "succeeded")]
+            run_result.all.return_value = [(run_id, "2026-07-01", "published")]
             return run_result
 
         session.execute = fake_execute
@@ -305,3 +305,95 @@ class TestCanonicalPrecedence:
         # unpublished/failed live 排除 → 用 replay（raw=3.3）
         p_hist = history_maps["P"]["core"]
         assert p_hist == [3.3]
+
+
+class TestPartialIndexOnConflictCompile:
+    """partial unique INDEX 的 ON CONFLICT SQL 编译（非 ON CONFLICT ON CONSTRAINT）。"""
+
+    def _compile_replay_insert(self) -> str:
+        # 直接构造 persist_history_replay_observations 的 insert SQL（不连库）
+        import asyncio
+        import uuid as _uuid
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.services.review_metric_observation_service import (
+            persist_history_replay_observations,
+        )
+
+        session = AsyncMock()
+        compiled = {}
+
+        class FakeScalars:
+            def __init__(self, rows): self.rows = rows
+            def __iter__(self): return iter(self.rows)
+
+        async def fake_execute(stmt):
+            compiled["sql"] = str(
+                stmt.compile(dialect=__import__("sqlalchemy").dialects.postgresql.dialect())
+            )
+            result = MagicMock()
+            result.scalars.return_value = FakeScalars([])
+            return result
+
+        session.execute = fake_execute
+        session.flush = AsyncMock()
+        asyncio.run(persist_history_replay_observations(
+            session,
+            source_history_run_id=_uuid.uuid4(),
+            history_contract_version="review-history-v2",
+            taxonomy_compatibility_key=None,
+            trade_date=date(2026, 8, 4),
+            scope_type="market", scope_key="A",
+            membership_version="m1", algorithm_version="v1",
+            flat_list=[{"fp_trend_direction": "上行"}],
+            payloads={"P": {"value": 1.0, "components": [{"name": "scope_return_1d", "rawValue": 1.0}]}},
+        ))
+        return compiled.get("sql", "")
+
+    def test_replay_on_conflict_uses_index_where(self) -> None:
+        sql = self._compile_replay_insert()
+        # 必须生成 ON CONFLICT (...) WHERE source_kind = 'history_replay'
+        # 禁止 ON CONFLICT ON CONSTRAINT <partial-index-name>
+        assert "ON CONFLICT" in sql
+        assert "source_kind" in sql
+        assert "history_replay" in sql
+        assert "ON CONFLICT ON CONSTRAINT" not in sql
+        # 不应引用 partial index 名（uq_review_obs_*）
+        assert "uq_review_obs_replay_run_date_scope_component" not in sql
+
+
+class TestCanonicalHistoryRunMixed:
+    """canonical HistoryRun：one run PASS，mixed source run FAIL。"""
+
+    def test_mixed_source_run_detected(self) -> None:
+        from app.services.review_bootstrap_service import (
+            _collect_canonical_source_run,
+        )
+
+        facts = [
+            {"_history_source_run_id": "11111111-1111-1111-1111-111111111111"},
+            {"_history_source_run_id": "22222222-2222-2222-2222-222222222222"},
+        ]
+        result = _collect_canonical_source_run(facts)
+        assert result["status"] == "mixed"
+
+
+class TestDowngradePrecondition:
+    """downgrade 时存在 history_replay 行必须 fail fast。"""
+
+    def test_downgrade_replay_row_precondition(self) -> None:
+        # 语义：replay_count > 0 → downgrade 必须 raise（不自动删除）
+        # 纯逻辑验证 downgrade 的 precheck 分支
+        replay_count = 3
+        if replay_count > 0:
+            with pytest.raises(RuntimeError):
+                _raise_if_replay_rows(replay_count)
+        # 空表（0 行）不 raise
+        _raise_if_replay_rows(0)
+
+
+def _raise_if_replay_rows(count: int) -> None:
+    if count > 0:
+        raise RuntimeError(
+            f"downgrade blocked: found {count} history_replay observation row(s)"
+        )

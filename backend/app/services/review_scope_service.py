@@ -945,6 +945,9 @@ async def load_day_fact_maps(
             "_instrument_name": identity.name,
             "_history_state_id": str(current_state.id),
             "_history_input_hash": current_state.input_hash,
+            "_history_source_run_id": str(current_state.source_history_run_id)
+            if current_state.source_history_run_id is not None
+            else None,
         })
         facts_by_instrument[instrument_id] = flat
 

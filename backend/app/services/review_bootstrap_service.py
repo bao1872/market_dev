@@ -46,9 +46,10 @@ from app.models.market_review import (
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.calendar_service import get_most_recent_trading_day_async
+from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
 from app.services.review_metric_observation_service import (
     load_metric_history,
-    persist_metric_observations,
+    persist_history_replay_observations,
 )
 from app.services.review_scope_service import (
     DEFAULT_BASELINE_WINDOW,
@@ -168,6 +169,28 @@ def _derive_scope_status(
             s == STATUS_INSUFFICIENT_HISTORY for s in statuses
         ) else "partial"
     return "partial"
+
+
+def _collect_canonical_source_run(
+    facts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """[CHANGE-20260808] 收集所有 participating current facts 的 canonical source history run。
+
+    返回 {"status": "one"|"mixed"|"missing", "run_id": uuid.UUID | None}。
+    - one：所有 fact 来自同一 canonical run → 返回 run_id
+    - mixed：多个不同 run → fail closed（HISTORY_SOURCE_RUN_MIXED）
+    - missing：无任何 fact 带 source_history_run_id → fail closed
+    """
+    source_run_ids = {
+        fact.get("_history_source_run_id")
+        for fact in facts
+        if fact.get("_history_source_run_id") is not None
+    }
+    if not source_run_ids:
+        return {"status": "missing", "run_id": None}
+    if len(source_run_ids) > 1:
+        return {"status": "mixed", "run_id": None}
+    return {"status": "one", "run_id": uuid.UUID(next(iter(source_run_ids)))}
 
 
 def compute_input_hash(
@@ -385,6 +408,8 @@ async def bootstrap_single_date(
             trade_date=trade_date,
             algorithm_version=BOOTSTRAP_ALGORITHM_VERSION,
             baseline_window=DEFAULT_BASELINE_WINDOW,
+            required_history_contract_version=HISTORY_CONTRACT_VERSION,
+            required_taxonomy_compatibility_key=scope.taxonomy_compatibility_key,
         )
         payloads = compute_all_metrics(
             flat_list, ready_count=ready_count,
@@ -415,15 +440,6 @@ async def bootstrap_single_date(
             "scopes": scope_results,
             "written": False,
         }
-    if source_core_run_id is None or source_board_run_id is None:
-        return {
-            "trade_date": trade_date.isoformat(),
-            "run_id": None,
-            "status": "bootstrap_unavailable",
-            "reason": "source_run_identity_missing",
-            "scopes": scope_results,
-            "written": False,
-        }
     if not computed:
         return {
             "trade_date": trade_date.isoformat(),
@@ -434,32 +450,41 @@ async def bootstrap_single_date(
             "written": False,
         }
 
-    run_id = await _upsert_bootstrap_run(
-        session,
-        trade_date=trade_date,
-        source_core_run_id=source_core_run_id,
-        source_board_run_id=source_board_run_id,
-        expected_scope_count=len(scopes),
-        succeeded_scope_count=len(computed),
-        failed_scope_count=len(scopes) - len(computed),
-        scope_results=scope_results,
-        audit=audit,
-    )
-    for scope, flat_list, eligible_count, ready_count, coverage, status, payloads in computed:
-        await _upsert_bootstrap_scope_snapshot(
+    # [CHANGE-20260808] Historical baseline apply（M2 dual lineage）：
+    # 不再伪造 stock_core/board publication 或 MarketReviewRun。
+    # 使用 canonical HistoryRun（source_history_run_id）。
+    # 所有 participating current facts 必须来自同一个 canonical history run，
+    # 否则 HISTORY_SOURCE_RUN_MIXED fail closed。
+    canonical_collect = _collect_canonical_source_run(list(facts_by_instrument.values()))
+    if canonical_collect["status"] == "missing":
+        return {
+            "trade_date": trade_date.isoformat(),
+            "run_id": None,
+            "status": "bootstrap_unavailable",
+            "reason": "history_source_run_missing",
+            "scopes": scope_results,
+            "written": False,
+        }
+    if canonical_collect["status"] == "mixed":
+        return {
+            "trade_date": trade_date.isoformat(),
+            "run_id": None,
+            "status": "failed",
+            "reason": "history_source_run_mixed",
+            "scopes": scope_results,
+            "written": False,
+        }
+    canonical_source_run_id = canonical_collect["run_id"]
+    history_contract_version = HISTORY_CONTRACT_VERSION
+
+    for scope, flat_list, _eligible_count, _ready_count, _coverage, _status, payloads in computed:
+        # [CHANGE-20260808] HISTORY_REPLAY observation（review_run_id=NULL，
+        # source_history_run_id=canonical run，history_contract_version=required）。
+        await persist_history_replay_observations(
             session,
-            review_run_id=run_id,
-            trade_date=trade_date,
-            scope=scope,
-            eligible_count=eligible_count,
-            ready_count=ready_count,
-            coverage_ratio=coverage,
-            status=status,
-            payloads=payloads,
-        )
-        await persist_metric_observations(
-            session,
-            review_run_id=run_id,
+            source_history_run_id=canonical_source_run_id,
+            history_contract_version=history_contract_version,
+            taxonomy_compatibility_key=scope.taxonomy_compatibility_key,
             trade_date=trade_date,
             scope_type=scope.scope_type,
             scope_key=scope.scope_key,
@@ -471,7 +496,7 @@ async def bootstrap_single_date(
 
     return {
         "trade_date": trade_date.isoformat(),
-        "run_id": str(run_id),
+        "run_id": str(canonical_source_run_id),
         "status": "completed",
         "scopes": scope_results,
         "written": True,

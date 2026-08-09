@@ -61,6 +61,12 @@ def upgrade() -> None:
         _STATE_TABLE,
         sa.Column("history_contract_version", sa.Text(), nullable=True),
     )
+    # [CHANGE-20260808] event contract isolation（§7）：旧 NULL/v1 事件与 v2 事件
+    # 双计防护。新 review-history-v2 events 必须写 review-history-v2。
+    op.add_column(
+        "first_pyramid_history_events",
+        sa.Column("history_contract_version", sa.Text(), nullable=True),
+    )
 
     # ---- 2. observation dual lineage ----
     op.add_column(
@@ -79,7 +85,8 @@ def upgrade() -> None:
         sa.Column(
             "source_history_run_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey(_HIST_RUN_TABLE + ".id", ondelete="SET NULL"),
+            # FK delete=RESTRICT：lineage source 不得静默消失（否则破坏 replay CHECK 溯源）。
+            sa.ForeignKey(_HIST_RUN_TABLE + ".id", ondelete="RESTRICT"),
             nullable=True,
         ),
     )
@@ -122,6 +129,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # [CHANGE-20260808] downgrade precondition（§9）：
+    # 若已存在 source_kind='history_replay' observation（review_run_id=NULL），
+    # downgrade 到 review_run_id NOT NULL 不可逆。fail fast，不自动删除 replay 数据。
+    bind = op.get_bind()
+    replay_count = bind.execute(
+        sa.text(
+            "SELECT COUNT(*) FROM " + _OBS_TABLE + " WHERE source_kind = 'history_replay'"
+        )
+    ).scalar()
+    if replay_count and replay_count > 0:
+        raise RuntimeError(
+            f"downgrade blocked: found {replay_count} history_replay observation "
+            "row(s) (review_run_id NULL). Downgrade would break replay lineage; "
+            "delete replay data explicitly before downgrade."
+        )
+
     # ---- 2. observation dual lineage 逆序 ----
     op.drop_index(_REPLAY_IDX, table_name=_OBS_TABLE)
     op.drop_index(_LIVE_IDX, table_name=_OBS_TABLE)

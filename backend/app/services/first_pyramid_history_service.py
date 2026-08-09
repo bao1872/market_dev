@@ -955,6 +955,7 @@ async def _persist_history_result(
             event_type=event_type,
             event_id=str(event_id),
             event_time=str(event_time) if event_time else None,
+            history_contract_version=history_contract_version,
             event_payload=evt,
         )
         stmt = stmt.on_conflict_do_nothing(

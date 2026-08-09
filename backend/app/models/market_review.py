@@ -445,7 +445,10 @@ class MarketReviewMetricObservation(Base):
     )
     source_history_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("first_pyramid_history_runs.id", ondelete="SET NULL"),
+        # [CHANGE-20260808] FK delete=RESTRICT：lineage source 不得静默消失。
+        # 若 source run 删除会破坏 CHECK（replay 要求 source_history_run_id NOT NULL）且
+        # 破坏 replay baseline 溯源。SET NULL 会导致 replay 行 lineage 断裂。
+        ForeignKey("first_pyramid_history_runs.id", ondelete="RESTRICT"),
         nullable=True,
         comment="HISTORY_REPLAY 来源 HistoryRun ID（source_kind=history_replay 时非空）",
     )

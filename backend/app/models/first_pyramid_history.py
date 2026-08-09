@@ -166,6 +166,14 @@ class FirstPyramidHistoryEvent(Base):
         nullable=True,
         comment="事件发生时间（ISO 字符串，对应 bar time）",
     )
+    # [CHANGE-20260808] History Contract Isolation（M2）：新 review-history-v2 events 必须写
+    # history_contract_version；Board event consumer 只消费指定 canonical contract，防止
+    # 旧 NULL/v1 事件与 v2 事件在相同 instrument/date 双计。
+    history_contract_version: Mapped[str | None] = mapped_column(
+        Text(),
+        nullable=True,
+        comment="history payload contract version（review-history-v2；M2；旧事件 NULL）",
+    )
     event_payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB(astext_type=Text()),
         nullable=False,
@@ -220,7 +228,8 @@ if __name__ == "__main__":
     ev_cols = FirstPyramidHistoryEvent.__table__.columns
     ev_expected = {
         "id", "instrument_id", "algorithm_version", "event_type",
-        "event_id", "event_time", "event_payload", "created_at",
+        "event_id", "event_time", "history_contract_version", "event_payload",
+        "created_at",
     }
     ev_actual = {c.name for c in ev_cols}
     assert ev_expected == ev_actual, f"events 字段不匹配: {ev_expected ^ ev_actual}"
