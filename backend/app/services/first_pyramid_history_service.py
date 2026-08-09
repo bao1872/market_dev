@@ -559,6 +559,79 @@ async def mark_history_item_skipped(
     return result.rowcount > 0  # type: ignore[union-attr]
 
 
+def _classify_history_zero_output(
+    n_input: int,
+    daily_state_rows: Sequence[Any],
+    required_bars: int,
+    meta_error: str | None = None,
+) -> tuple[str, str]:
+    """分类 history compute 的 zero-output 语义（避免 false-success）。
+
+    返回 (decision, reason)：
+    - ("process", "")：有输出，正常持久化
+    - ("skip", reason)：INSUFFICIENT_HISTORY —— input bars 不足阈值，合法 zero-output
+    - ("fail", reason)：COMPUTE_EMPTY_UNEXPECTED —— bars 足够但 compute 异常返回空，
+      fail closed（不得 silently skipped，避免算法 bug 被掩盖）
+    """
+    if not daily_state_rows and n_input < required_bars:
+        return (
+            "skip",
+            f"INSUFFICIENT_HISTORY: input_bars={n_input} required_bars={required_bars}",
+        )
+    if not daily_state_rows:
+        return (
+            "fail",
+            "COMPUTE_EMPTY_UNEXPECTED: "
+            f"input_bars={n_input} >= {required_bars} "
+            f"但 daily_state 为空; meta={meta_error}",
+        )
+    return ("process", "")
+
+
+async def requeue_history_items(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+    instrument_ids: Sequence[uuid.UUID],
+) -> int:
+    """把指定 instrument 的 history run items 重新置为 pending（targeted requeue）。
+
+    [Phase 3D] 用于：
+    - 原 skipped（如 BJ 无 bars，补齐 bars 后重新处理）
+    - 原 false-success（旧语义标 succeeded 但零输出，需按新语义重新分类）
+
+    只处理该 run 内、命中 instrument_ids 的 skipped/succeeded/failed/pending 项，
+    不新建 run、不触碰其他 run、不重置已完成且有真实输出的 succeeded item。
+
+    语义：
+    - 保留 canonical history_run_id / input_hash（仅清 status/last_error/lease）
+    - 保持 attempt/lease 字段可被 claim_history_items 正常接管
+    - 不允许跨 run 重排
+    """
+    if not instrument_ids:
+        return 0
+    now = datetime.now(UTC)
+    stmt = (
+        update(FirstPyramidHistoryRunItem)
+        .where(
+            FirstPyramidHistoryRunItem.history_run_id == history_run_id,
+            FirstPyramidHistoryRunItem.instrument_id.in_(list(instrument_ids)),
+        )
+        .values(
+            status="pending",
+            last_error=None,
+            attempt_count=0,
+            lease_epoch=0,
+            worker_instance_id=None,
+            started_at=None,
+            heartbeat_at=None,
+            lease_expires_at=None,
+            updated_at=now,
+        )
+    )
+    result = await session.execute(stmt)
+    return result.rowcount or 0
+
+
 async def get_history_run_progress(
     session: AsyncSession,
     history_run_id: uuid.UUID,
@@ -690,6 +763,7 @@ async def backfill_history_with_run_items(
     """
     from app.db import AsyncSessionLocal
     from app.services.first_pyramid_service import (
+        _MIN_BARS_FOR_REQUIRED_DIMS,
         HISTORY_CONTRACT_VERSION,
         compute_first_pyramid_history,
     )
@@ -723,7 +797,7 @@ async def backfill_history_with_run_items(
                     )
 
                 if bars is None or bars.empty:
-                    # 数据不足 → skipped（不算失败）
+                    # 无任何 daily bars → skipped（NO_DAILY_BARS 类别）
                     async with AsyncSessionLocal() as skip_db:
                         await mark_history_item_skipped(
                             skip_db, item.id, "daily bars 为空（DB-only）",
@@ -740,6 +814,34 @@ async def backfill_history_with_run_items(
                     output_bars=output_bars,
                     include_chip=False,
                 )
+
+                # 2.2.1 zero-output 分类（INSUFFICIENT_HISTORY vs COMPUTE_EMPTY_UNEXPECTED）
+                decision, zr_reason = _classify_history_zero_output(
+                    len(bars),
+                    history.get("daily_state") or [],
+                    required_bars=_MIN_BARS_FOR_REQUIRED_DIMS,
+                    meta_error=history.get("meta", {}).get("error"),
+                )
+                if decision == "skip":
+                    # 数据量不足 → skipped（明确原因，非失败、非 NO_DAILY_BARS）
+                    async with AsyncSessionLocal() as skip_db:
+                        await mark_history_item_skipped(
+                            skip_db, item.id, zr_reason,
+                            lease_epoch=item.lease_epoch,
+                        )
+                        await skip_db.commit()
+                    skipped_count += 1
+                    continue
+                if decision == "fail":
+                    # bars 足够但 compute 异常返回空 → fail closed（不得 silently skipped）
+                    async with AsyncSessionLocal() as fail_db:
+                        await mark_history_item_failed(
+                            fail_db, item.id, zr_reason,
+                            lease_epoch=item.lease_epoch,
+                        )
+                        await fail_db.commit()
+                    failed_count += 1
+                    continue
 
                 # 2.3 持久化（独立短事务）
                 async with AsyncSessionLocal() as persist_db:
