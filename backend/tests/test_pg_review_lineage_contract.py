@@ -49,45 +49,69 @@ def _mk_payloads(value: float = 60.0) -> dict:
 
 @pytest.mark.asyncio
 async def test_observation_dual_lineage_check_matrix():
-    """§4 真实 PG 验证 ck_review_observation_dual_lineage CHECK（A-F）。"""
-    from sqlalchemy import delete, text
+    """§4 真实 PG 验证 ck_review_observation_dual_lineage CHECK（A-F）。
+
+    用真实父记录（MarketReviewRun / FirstPyramidHistoryRun）满足 FK，再测 CHECK。
+    """
+    from sqlalchemy import delete, insert
 
     from app.db import AsyncSessionLocal
-    from app.models.market_review import MarketReviewMetricObservation
+    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
+    from app.models.market_review import MarketReviewMetricObservation, MarketReviewRun
 
     async with AsyncSessionLocal() as s:
         await s.execute(delete(MarketReviewMetricObservation))
+        await s.execute(delete(MarketReviewRun).where(
+            MarketReviewRun.trade_date == date(2026, 8, 4),
+        ))
+        await s.execute(delete(FirstPyramidHistoryRun))
+        # 创建真实父记录（满足 observation FK）
+        review_run = MarketReviewRun(
+            trade_date=date(2026, 8, 4),
+            source_core_run_id=uuid.uuid4(),
+            source_board_run_id=uuid.uuid4(),
+            degraded_reasons=[],
+            algorithm_version="review-2.0.0",
+            filter_version="filters-1.1.0",
+            baseline_window=120,
+        )
+        s.add(review_run)
+        hist_run = FirstPyramidHistoryRun(
+            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            parameter_hash="p", output_bars=250, scope="all_a_share",
+            status="running",
+        )
+        s.add(hist_run)
+        await s.flush()
+        run_id = review_run.id
+        src_run_id = hist_run.id
         await s.commit()
 
-    # 辅助：直接插入 raw row 触发 CHECK。
-    async def _insert(kind: str | None, run_id, src_run_id) -> bool:
+    # 完整 NOT NULL 列的最小 observation row 模板。
+    def _row(kind: str, run, src) -> dict:
+        return {
+            "id": uuid.uuid4(), "source_kind": kind, "review_run_id": run,
+            "source_history_run_id": src,
+            "trade_date": date(2026, 8, 4), "scope_type": "market",
+            "scope_key": "market", "metric_code": "P",
+            "component_name": "_metric_value", "raw_value": "60",
+            "field_source_json": {"fieldSource": "test"}, "weight_mode": "derived",
+            "algorithm_version": _BOOTSTRAP_ALGO, "input_hash": "h",
+            "membership_version": "v1", "status": "ready",
+        }
+
+    async def _insert(kind: str, run, src) -> bool:
         async with AsyncSessionLocal() as s:
             try:
-                await s.execute(
-                    text(
-                        """INSERT INTO market_review_metric_observations
-                           (source_kind, review_run_id, source_history_run_id,
-                            trade_date, scope_type, scope_key, metric_code,
-                            component_name, raw_value, algorithm_version,
-                            membership_version, status, field_source_json)
-                           VALUES (:kind, :run, :src, :td, :scope, :key, :code,
-                                   :comp, :raw, :algo, :mv, :st, '{}'::jsonb)"""
-                    ),
-                    {
-                        "kind": kind, "run": run_id, "src": src_run_id,
-                        "td": date(2026, 8, 4), "scope": "market", "key": "market",
-                        "code": "P", "comp": "_metric_value", "raw": "60",
-                        "algo": _BOOTSTRAP_ALGO, "mv": "v1", "st": "ready",
-                    },
-                )
+                await s.execute(insert(MarketReviewMetricObservation).values(
+                    **_row(kind, run, src),
+                ))
                 await s.commit()
                 return True
             except Exception:
                 await s.rollback()
                 return False
 
-    run_id = uuid.uuid4()
-    src_run_id = uuid.uuid4()
     # A. valid LIVE：source_kind=live, review_run_id != NULL, src_run_id NULL → PASS
     assert await _insert("live", run_id, None) is True
     # B. valid HISTORY_REPLAY：source_kind=history_replay, review_run_id NULL, src != NULL → PASS
@@ -104,16 +128,21 @@ async def test_observation_dual_lineage_check_matrix():
     # 清理
     async with AsyncSessionLocal() as s:
         await s.execute(delete(MarketReviewMetricObservation))
+        await s.execute(delete(MarketReviewRun).where(
+            MarketReviewRun.trade_date == date(2026, 8, 4),
+        ))
+        await s.execute(delete(FirstPyramidHistoryRun))
         await s.commit()
 
 
 @pytest.mark.asyncio
 async def test_observation_partial_index_upsert_live_and_replay():
     """§5 persist_metric_observations / persist_history_replay_observations 真实 upsert。"""
-    from sqlalchemy import func, select
+    from sqlalchemy import delete, func, select
 
     from app.db import AsyncSessionLocal
-    from app.models.market_review import MarketReviewMetricObservation
+    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
+    from app.models.market_review import MarketReviewMetricObservation, MarketReviewRun
     from app.services.review_metric_observation_service import (
         persist_history_replay_observations,
         persist_metric_observations,
@@ -123,11 +152,33 @@ async def test_observation_partial_index_upsert_live_and_replay():
         await s.execute(
             MarketReviewMetricObservation.__table__.delete()
         )
+        await s.execute(delete(MarketReviewRun).where(
+            MarketReviewRun.trade_date == date(2026, 8, 4),
+        ))
+        await s.execute(delete(FirstPyramidHistoryRun))
+        # 创建真实父记录（observation FK 要求真实 run 存在）
+        review_run = MarketReviewRun(
+            trade_date=date(2026, 8, 4), source_core_run_id=uuid.uuid4(),
+            source_board_run_id=uuid.uuid4(), degraded_reasons=[],
+            algorithm_version="review-2.0.0", filter_version="filters-1.1.0",
+            baseline_window=120,
+        )
+        s.add(review_run)
+        hist_run_a = FirstPyramidHistoryRun(
+            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            parameter_hash="p", output_bars=250, scope="all_a_share", status="running",
+        )
+        hist_run_b = FirstPyramidHistoryRun(
+            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            parameter_hash="p", output_bars=250, scope="all_a_share", status="running",
+        )
+        s.add_all([hist_run_a, hist_run_b])
+        await s.flush()
+        run_id = review_run.id
+        src_run_a = hist_run_a.id
+        src_run_b = hist_run_b.id
         await s.commit()
 
-    run_id = uuid.uuid4()
-    src_run_a = uuid.uuid4()
-    src_run_b = uuid.uuid4()
     flat_list = [{"_instrument_id": str(uuid.uuid4()), "fp_trend_direction": "上行"}]
 
     async with AsyncSessionLocal() as s:
@@ -211,6 +262,7 @@ async def test_event_legacy_v2_coexistence_and_idempotency():
 
     from app.db import AsyncSessionLocal
     from app.models.first_pyramid_history import FirstPyramidHistoryEvent
+    from app.models.instrument import Instrument
     from app.services.first_pyramid_history_service import _persist_history_result
 
     iid = uuid.uuid4()
@@ -220,6 +272,12 @@ async def test_event_legacy_v2_coexistence_and_idempotency():
     async with AsyncSessionLocal() as s:
         await s.execute(delete(FirstPyramidHistoryEvent).where(
             FirstPyramidHistoryEvent.instrument_id == iid,
+        ))
+        await s.execute(delete(Instrument).where(Instrument.id == iid))
+        # 真实 Instrument 满足 events FK
+        s.add(Instrument(
+            id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-ev",
+            market="SH", status="active",
         ))
         await s.commit()
 
@@ -287,6 +345,7 @@ async def test_board_event_query_only_counts_v2():
 
     from app.db import AsyncSessionLocal
     from app.models.first_pyramid_history import FirstPyramidHistoryEvent
+    from app.models.instrument import Instrument
 
     iid = uuid.uuid4()
     algo = FIRST_PYRAMID_CORE_ALGORITHM_VERSION
@@ -294,6 +353,11 @@ async def test_board_event_query_only_counts_v2():
     async with AsyncSessionLocal() as s:
         await s.execute(delete(FirstPyramidHistoryEvent).where(
             FirstPyramidHistoryEvent.instrument_id == iid,
+        ))
+        await s.execute(delete(Instrument).where(Instrument.id == iid))
+        s.add(Instrument(
+            id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-bd",
+            market="SH", status="active",
         ))
         # legacy BOS + v2 BOS（同 event_id 语义，但不同 contract 行）
         s.add_all([
@@ -354,6 +418,7 @@ async def test_daily_state_lineage_load_day_fact_maps():
 
     from app.db import AsyncSessionLocal
     from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
+    from app.models.instrument import Instrument
     from app.services.review_scope_service import load_day_fact_maps
 
     iid = uuid.uuid4()
@@ -363,6 +428,11 @@ async def test_daily_state_lineage_load_day_fact_maps():
     async with AsyncSessionLocal() as s:
         await s.execute(delete(FirstPyramidHistoryDailyState).where(
             FirstPyramidHistoryDailyState.instrument_id == iid,
+        ))
+        await s.execute(delete(Instrument).where(Instrument.id == iid))
+        s.add(Instrument(
+            id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-st",
+            market="SH", status="active",
         ))
         # current + previous 同源 v2
         s.add(FirstPyramidHistoryDailyState(
@@ -404,6 +474,7 @@ async def test_daily_state_previous_source_run_mismatch_fails_closed():
 
     from app.db import AsyncSessionLocal
     from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
+    from app.models.instrument import Instrument
     from app.services.review_scope_service import load_day_fact_maps
 
     iid = uuid.uuid4()
@@ -414,6 +485,11 @@ async def test_daily_state_previous_source_run_mismatch_fails_closed():
     async with AsyncSessionLocal() as s:
         await s.execute(delete(FirstPyramidHistoryDailyState).where(
             FirstPyramidHistoryDailyState.instrument_id == iid,
+        ))
+        await s.execute(delete(Instrument).where(Instrument.id == iid))
+        s.add(Instrument(
+            id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-st",
+            market="SH", status="active",
         ))
         s.add(FirstPyramidHistoryDailyState(
             instrument_id=iid, trade_date=target,
