@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import date
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -486,150 +486,277 @@ class TestPreviousSourceRunParity:
 
 
 class TestHistoryRunReadiness:
-    """§5 canonical HistoryRun readiness contract。"""
+    """§5 CANONICAL_HISTORY_RUN_READY contract。
 
-    def _make_run(self, scope, status, contract):
+    [CHANGE-20260809] Phase 4B.1：canonical readiness 不再等价于
+    ``run.status == 'succeeded'``。``status`` 是 execution outcome
+    （``skipped > 0`` 永久 ``partial``），readiness 是 consumer eligibility。
+    """
+
+    REQUIRED_CONTRACT = "review-history-v2"
+
+    def _make_run(
+        self,
+        scope="all_a_share",
+        status="succeeded",
+        contract="review-history-v2",
+        expected=100,
+        succeeded=100,
+        skipped=0,
+        failed=0,
+    ):
         class Run:
             def __init__(self):
                 self.scope = scope
                 self.status = status
+                self.expected_count = expected
+                self.succeeded_count = succeeded
+                self.skipped_count = skipped
+                self.failed_count = failed
                 self.metadata_json = (
                     f'{{"history_contract_version": "{contract}"}}'
                     if contract is not None else None
                 )
         return Run()
 
-    def test_succeeded_all_a_share_v2_ok(self) -> None:
+    def _run_predicate(
+        self,
+        run,
+        *,
+        item_status_counts=None,
+        skip_reasons=(),
+        missing_state_count=0,
+    ):
+        """按 predicate 的实际查询顺序提供 sequenced fake results。
+
+        顺序：run → item status group-by → (skip reasons) → missing-state count。
+        """
         import asyncio
 
-        from app.services.review_bootstrap_service import _validate_canonical_history_run
+        from app.services.review_bootstrap_service import (
+            validate_canonical_history_run_readiness,
+        )
 
+        if item_status_counts is None and run is not None:
+            item_status_counts = {
+                "succeeded": int(run.succeeded_count or 0),
+                "skipped": int(run.skipped_count or 0),
+                "failed": int(run.failed_count or 0),
+            }
+        item_status_counts = {
+            k: v for k, v in (item_status_counts or {}).items() if v
+        }
+
+        calls = {"n": 0}
         session = MagicMock()
 
         async def fake_execute(stmt):
+            calls["n"] += 1
             result = MagicMock()
-            result.scalar_one_or_none.return_value = self._make_run(
-                "all_a_share", "succeeded", "review-history-v2",
-            )
+            if calls["n"] == 1:
+                result.scalar_one_or_none.return_value = run
+                return result
+            if calls["n"] == 2:
+                result.all.return_value = list(item_status_counts.items())
+                return result
+            # skip-reason 查询只在 skipped_count > 0 时发生
+            if int(run.skipped_count or 0) > 0 and calls["n"] == 3:
+                result.all.return_value = [(r,) for r in skip_reasons]
+                return result
+            result.scalar_one.return_value = missing_state_count
             return result
 
         session.execute = fake_execute
-        res = asyncio.run(_validate_canonical_history_run(
-            session, uuid.uuid4(), "review-history-v2",
-        ))
+        return asyncio.run(
+            validate_canonical_history_run_readiness(
+                session, uuid.uuid4(), self.REQUIRED_CONTRACT,
+            )
+        )
+
+    # --- A. clean succeeded --------------------------------------------------
+
+    def test_a_succeeded_clean_accepts(self) -> None:
+        """succeeded + failed=0 + terminal + contract + invariant → ACCEPT。"""
+        res = self._run_predicate(self._make_run(status="succeeded"))
         assert res["status"] == "ok"
 
-    def test_running_fails(self) -> None:
-        import asyncio
+    # --- B. partial with INSUFFICIENT_HISTORY only ---------------------------
 
-        from app.services.review_bootstrap_service import _validate_canonical_history_run
+    def test_b_partial_insufficient_history_accepts(self) -> None:
+        """合法 partial（仅 INSUFFICIENT_HISTORY skip）必须被接受。
 
-        session = MagicMock()
+        这是生产 canonical run be56dcd2 的真实形态。
+        """
+        run = self._make_run(
+            status="partial", expected=100, succeeded=91, skipped=9,
+        )
+        res = self._run_predicate(
+            run,
+            skip_reasons=[
+                "INSUFFICIENT_HISTORY: input_bars=31 required_bars=60"
+            ] * 9,
+        )
+        assert res["status"] == "ok"
+        assert res["skipped_count"] == 9
+        assert res["run_status"] == "partial"
 
-        async def fake_execute(stmt):
-            result = MagicMock()
-            result.scalar_one_or_none.return_value = self._make_run(
-                "all_a_share", "running", "review-history-v2",
-            )
-            return result
+    # --- C. partial with NO_DAILY_BARS ---------------------------------------
 
-        session.execute = fake_execute
-        res = asyncio.run(_validate_canonical_history_run(
-            session, uuid.uuid4(), "review-history-v2",
-        ))
+    def test_c_partial_no_daily_bars_accepts(self) -> None:
+        """NO_DAILY_BARS（含 legacy 中文 reason）属于已知 non-blocking skip。"""
+        run = self._make_run(
+            status="partial", expected=100, succeeded=90, skipped=10,
+        )
+        res = self._run_predicate(
+            run,
+            skip_reasons=(
+                ["INSUFFICIENT_HISTORY: input_bars=21 required_bars=60"] * 9
+                + ["daily bars 为空（DB-only）"]
+            ),
+        )
+        assert res["status"] == "ok"
+
+    def test_c2_partial_no_daily_bars_canonical_token_accepts(self) -> None:
+        """新格式 NO_DAILY_BARS token 同样被接受（不 hardcode symbol）。"""
+        run = self._make_run(
+            status="partial", expected=100, succeeded=99, skipped=1,
+        )
+        res = self._run_predicate(run, skip_reasons=["NO_DAILY_BARS: empty"])
+        assert res["status"] == "ok"
+
+    # --- D. unknown skip reason ----------------------------------------------
+
+    def test_d_partial_unknown_skip_reason_rejects(self) -> None:
+        """未知 skip 原因可能是 systemic gap → 必须 fail closed。"""
+        run = self._make_run(
+            status="partial", expected=100, succeeded=99, skipped=1,
+        )
+        res = self._run_predicate(
+            run, skip_reasons=["some unexpected exclusion"],
+        )
         assert res["status"] == "not_ready"
-        assert "not_succeeded" in res["reason"]
+        assert "unknown_skip_reason" in res["reason"]
 
-    def test_partial_fails(self) -> None:
-        """partial run 不得作为 canonical HistoryRun（非 terminal succeeded）。"""
-        import asyncio
-
-        from app.services.review_bootstrap_service import _validate_canonical_history_run
-
-        session = MagicMock()
-
-        async def fake_execute(stmt):
-            result = MagicMock()
-            result.scalar_one_or_none.return_value = self._make_run(
-                "all_a_share", "partial", "review-history-v2",
-            )
-            return result
-
-        session.execute = fake_execute
-        res = asyncio.run(_validate_canonical_history_run(
-            session, uuid.uuid4(), "review-history-v2",
-        ))
+    def test_d2_empty_skip_reason_rejects(self) -> None:
+        """空/NULL skip reason 不得被当作合法 non-blocking skip。"""
+        run = self._make_run(
+            status="partial", expected=100, succeeded=99, skipped=1,
+        )
+        res = self._run_predicate(run, skip_reasons=[None])
         assert res["status"] == "not_ready"
-        assert "not_succeeded" in res["reason"]
+        assert "unknown_skip_reason" in res["reason"]
 
-    def test_failed_fails(self) -> None:
-        """failed run 不得作为 canonical HistoryRun（非 terminal succeeded）。"""
-        import asyncio
+    # --- E. failures ----------------------------------------------------------
 
-        from app.services.review_bootstrap_service import _validate_canonical_history_run
-
-        session = MagicMock()
-
-        async def fake_execute(stmt):
-            result = MagicMock()
-            result.scalar_one_or_none.return_value = self._make_run(
-                "all_a_share", "failed", "review-history-v2",
-            )
-            return result
-
-        session.execute = fake_execute
-        res = asyncio.run(_validate_canonical_history_run(
-            session, uuid.uuid4(), "review-history-v2",
-        ))
+    def test_e_failed_items_reject(self) -> None:
+        run = self._make_run(
+            status="partial", expected=100, succeeded=98, skipped=0, failed=2,
+        )
+        res = self._run_predicate(run)
         assert res["status"] == "not_ready"
-        assert "not_succeeded" in res["reason"]
+        assert "has_failures" in res["reason"]
 
-    def test_wrong_scope_fails(self) -> None:
-        import asyncio
+    # --- F. non-terminal ------------------------------------------------------
 
-        from app.services.review_bootstrap_service import _validate_canonical_history_run
-
-        session = MagicMock()
-
-        async def fake_execute(stmt):
-            result = MagicMock()
-            result.scalar_one_or_none.return_value = self._make_run(
-                "sample", "succeeded", "review-history-v2",
-            )
-            return result
-
-        session.execute = fake_execute
-        res = asyncio.run(_validate_canonical_history_run(
-            session, uuid.uuid4(), "review-history-v2",
-        ))
+    def test_f_pending_items_reject(self) -> None:
+        run = self._make_run(status="running", expected=100, succeeded=50)
+        res = self._run_predicate(
+            run, item_status_counts={"succeeded": 50, "pending": 50},
+        )
         assert res["status"] == "not_ready"
-        assert "wrong_scope" in res["reason"]
+        assert "not_terminal:pending" in res["reason"]
 
-    def test_wrong_contract_fails(self) -> None:
-        import asyncio
+    def test_f2_running_items_reject(self) -> None:
+        run = self._make_run(status="running", expected=100, succeeded=50)
+        res = self._run_predicate(
+            run, item_status_counts={"succeeded": 50, "running": 50},
+        )
+        assert res["status"] == "not_ready"
+        assert "not_terminal:running" in res["reason"]
 
-        from app.services.review_bootstrap_service import _validate_canonical_history_run
+    # --- G. SUCCESS_SET == CANONICAL_STATE_SET -------------------------------
 
-        session = MagicMock()
+    def test_g_succeeded_item_without_canonical_state_rejects(self) -> None:
+        """succeeded 但无 canonical daily state → 违反 hard invariant。"""
+        res = self._run_predicate(
+            self._make_run(status="succeeded"), missing_state_count=3,
+        )
+        assert res["status"] == "not_ready"
+        assert "success_state_mismatch" in res["reason"]
 
-        async def fake_execute(stmt):
-            result = MagicMock()
-            result.scalar_one_or_none.return_value = self._make_run(
-                "all_a_share", "succeeded", "review-history-v1",
-            )
-            return result
+    # --- H. count reconciliation ---------------------------------------------
 
-        session.execute = fake_execute
-        res = asyncio.run(_validate_canonical_history_run(
-            session, uuid.uuid4(), "review-history-v2",
-        ))
+    def test_h_count_mismatch_rejects(self) -> None:
+        run = self._make_run(
+            status="partial", expected=100, succeeded=80, skipped=10,
+        )
+        res = self._run_predicate(run)
+        assert res["status"] == "not_ready"
+        assert "count_mismatch" in res["reason"]
+
+    def test_h2_zero_succeeded_rejects(self) -> None:
+        run = self._make_run(
+            status="partial", expected=10, succeeded=0, skipped=10,
+        )
+        res = self._run_predicate(
+            run,
+            skip_reasons=["INSUFFICIENT_HISTORY: input_bars=1 required_bars=60"] * 10,
+        )
+        assert res["status"] == "not_ready"
+        assert "no_succeeded_items" in res["reason"]
+
+    # --- I. pre-v2 rejection（放宽 status 不得开洞）---------------------------
+
+    def test_i_pre_v2_succeeded_null_contract_rejects(self) -> None:
+        """真实存在的 5e222b38 形态：succeeded + all_a_share 但 contract=NULL。"""
+        res = self._run_predicate(
+            self._make_run(status="succeeded", contract=None),
+        )
         assert res["status"] == "not_ready"
         assert "wrong_contract" in res["reason"]
 
-    def test_not_found_fails(self) -> None:
+    # --- J/K. scope + contract ------------------------------------------------
+
+    def test_j_wrong_scope_rejects(self) -> None:
+        res = self._run_predicate(self._make_run(scope="sample"))
+        assert res["status"] == "not_ready"
+        assert "wrong_scope" in res["reason"]
+
+    def test_k_wrong_contract_rejects(self) -> None:
+        res = self._run_predicate(
+            self._make_run(contract="review-history-v1"),
+        )
+        assert res["status"] == "not_ready"
+        assert "wrong_contract" in res["reason"]
+
+    def test_not_found_rejects(self) -> None:
         import asyncio
 
-        from app.services.review_bootstrap_service import _validate_canonical_history_run
+        from app.services.review_bootstrap_service import (
+            validate_canonical_history_run_readiness,
+        )
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = None
+            return result
+
+        session.execute = fake_execute
+        res = asyncio.run(validate_canonical_history_run_readiness(
+            session, uuid.uuid4(), self.REQUIRED_CONTRACT,
+        ))
+        assert res["status"] == "not_ready"
+        assert "not_found" in res["reason"]
+
+    def test_legacy_alias_delegates(self) -> None:
+        """``_validate_canonical_history_run`` 仍是可用别名，行为一致。"""
+        import asyncio
+
+        from app.services.review_bootstrap_service import (
+            _validate_canonical_history_run,
+        )
 
         session = MagicMock()
 
@@ -640,10 +767,58 @@ class TestHistoryRunReadiness:
 
         session.execute = fake_execute
         res = asyncio.run(_validate_canonical_history_run(
-            session, uuid.uuid4(), "review-history-v2",
+            session, uuid.uuid4(), self.REQUIRED_CONTRACT,
         ))
         assert res["status"] == "not_ready"
-        assert "not_found" in res["reason"]
+
+
+class TestHistorySkipReasonClassifier:
+    """Allowed skip contract：只接受显式已知 category，UNKNOWN fail closed。"""
+
+    def test_insufficient_history_classified(self) -> None:
+        from app.services.first_pyramid_history_service import (
+            classify_history_skip_reason,
+        )
+
+        assert classify_history_skip_reason(
+            "INSUFFICIENT_HISTORY: input_bars=31 required_bars=60"
+        ) == "INSUFFICIENT_HISTORY"
+
+    def test_legacy_no_daily_bars_classified(self) -> None:
+        from app.services.first_pyramid_history_service import (
+            classify_history_skip_reason,
+        )
+
+        assert classify_history_skip_reason(
+            "daily bars 为空（DB-only）"
+        ) == "NO_DAILY_BARS"
+
+    def test_canonical_no_daily_bars_classified(self) -> None:
+        from app.services.first_pyramid_history_service import (
+            classify_history_skip_reason,
+        )
+
+        assert classify_history_skip_reason(
+            "NO_DAILY_BARS: provider returned nothing"
+        ) == "NO_DAILY_BARS"
+
+    def test_unknown_and_empty_are_unknown(self) -> None:
+        from app.services.first_pyramid_history_service import (
+            classify_history_skip_reason,
+        )
+
+        for value in (None, "", "   ", "delisted?", "random failure"):
+            assert classify_history_skip_reason(value) == "UNKNOWN"
+
+    def test_unknown_not_in_allowed_set(self) -> None:
+        from app.services.first_pyramid_history_service import (
+            ALLOWED_NON_BLOCKING_SKIP_CATEGORIES,
+        )
+
+        assert "UNKNOWN" not in ALLOWED_NON_BLOCKING_SKIP_CATEGORIES
+        assert ALLOWED_NON_BLOCKING_SKIP_CATEGORIES == frozenset(
+            {"INSUFFICIENT_HISTORY", "NO_DAILY_BARS"}
+        )
 
 
 class TestMigrationDowngradeSymmetry:
@@ -1114,3 +1289,105 @@ class TestEventDowngradePrecondition:
             _raise_if_v2_events(2)
         # 空表（无 versioned event）不 raise
         _raise_if_v2_events(0)
+
+
+class TestBootstrapScopeSelector:
+    """§8/§9 optional scope selector：默认行为不变，market-only 可显式选择。"""
+
+    def test_normalize_none_preserves_default(self) -> None:
+        """None → None，即保持既有「全部 scope」生产默认行为。"""
+        from app.services.review_bootstrap_service import _normalize_scope_types
+
+        assert _normalize_scope_types(None) is None
+
+    def test_normalize_market_only(self) -> None:
+        from app.services.review_bootstrap_service import _normalize_scope_types
+
+        assert _normalize_scope_types({"market"}) == frozenset({"market"})
+
+    def test_unknown_scope_type_fails_fast(self) -> None:
+        """未知 scope_type 必须 fail-fast，不得静默返回空集造成 false-green。"""
+        import pytest
+
+        from app.services.review_bootstrap_service import _normalize_scope_types
+
+        with pytest.raises(ValueError, match="unknown bootstrap scope_types"):
+            _normalize_scope_types({"market", "not_a_scope"})
+
+    def test_empty_selector_fails_fast(self) -> None:
+        import pytest
+
+        from app.services.review_bootstrap_service import _normalize_scope_types
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            _normalize_scope_types(set())
+
+    def test_known_scope_types_cover_market(self) -> None:
+        from app.services.review_bootstrap_service import (
+            KNOWN_BOOTSTRAP_SCOPE_TYPES,
+        )
+
+        assert "market" in KNOWN_BOOTSTRAP_SCOPE_TYPES
+        assert {"major_index", "style", "concept", "industry_l1"} <= (
+            KNOWN_BOOTSTRAP_SCOPE_TYPES
+        )
+
+    def test_bootstrap_single_date_accepts_scope_types_kwarg(self) -> None:
+        """bootstrap_single_date 暴露 optional scope_types，默认 None。"""
+        import inspect
+
+        from app.services.review_bootstrap_service import bootstrap_single_date
+
+        sig = inspect.signature(bootstrap_single_date)
+        assert "scope_types" in sig.parameters
+        assert sig.parameters["scope_types"].default is None
+
+    def test_list_bootstrap_scopes_filters_market_only(self) -> None:
+        """market-only selector 只返回 market scope（其他 scope 被过滤掉）。"""
+        import asyncio
+
+        from app.services.review_bootstrap_service import _list_bootstrap_scopes
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.all.return_value = []
+            return result
+
+        session.execute = fake_execute
+
+        with patch(
+            "app.services.review_bootstrap_service.list_universe_definitions_at",
+            new=AsyncMock(return_value=[]),
+        ):
+            scopes = asyncio.run(
+                _list_bootstrap_scopes(
+                    session, date(2026, 2, 6), scope_types={"market"},
+                )
+            )
+        assert [s.scope_type for s in scopes] == ["market"]
+
+    def test_list_bootstrap_scopes_default_keeps_market(self) -> None:
+        """默认 None 时行为不变（market 仍在，且不因 selector 被裁剪）。"""
+        import asyncio
+
+        from app.services.review_bootstrap_service import _list_bootstrap_scopes
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.all.return_value = []
+            return result
+
+        session.execute = fake_execute
+
+        with patch(
+            "app.services.review_bootstrap_service.list_universe_definitions_at",
+            new=AsyncMock(return_value=[]),
+        ):
+            scopes = asyncio.run(
+                _list_bootstrap_scopes(session, date(2026, 2, 6))
+            )
+        assert "market" in [s.scope_type for s in scopes]

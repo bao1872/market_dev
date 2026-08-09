@@ -255,6 +255,63 @@ _HISTORY_ITEM_LEASE_SECONDS = 300
 _HISTORY_MAX_ATTEMPT_COUNT = 3
 
 
+# =============================================================================
+# Skip reason contract（CHANGE-20260809 / Phase 4B.1）
+# =============================================================================
+#
+# Stage A 的 skipped 是 execution outcome 的一部分：某些 instrument 天然无法产出
+# canonical history（历史 bar 不足 / provider 完全无日线数据）。这些 skip 不损害
+# 已产出 canonical state 的 PIT 正确性，因此对 Stage B 是 non-blocking 的。
+#
+# 但「skip 是 non-blocking」必须是**显式白名单**，不能因为 failed==0 就默认放行：
+# 未知 skip 原因可能代表 systemic data gap 或未预期排除，此时 run 不得作为
+# canonical source 被消费。
+#
+# 分类结果只有三种，UNKNOWN 一律视为 canonical-blocking。
+
+HISTORY_SKIP_INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+HISTORY_SKIP_NO_DAILY_BARS = "NO_DAILY_BARS"
+HISTORY_SKIP_UNKNOWN = "UNKNOWN"
+
+# 已知 non-blocking skip category（显式白名单）
+ALLOWED_NON_BLOCKING_SKIP_CATEGORIES: frozenset[str] = frozenset(
+    {
+        HISTORY_SKIP_INSUFFICIENT_HISTORY,
+        HISTORY_SKIP_NO_DAILY_BARS,
+    }
+)
+
+# legacy reason 文本（历史 run 已经写入 DB，无法重写）→ 显式兼容读取。
+# 注意：这是**精确前缀匹配**，不是「包含任意子串即通过」。
+_LEGACY_NO_DAILY_BARS_REASONS: tuple[str, ...] = (
+    "daily bars 为空（DB-only）",
+    "daily bars 为空",
+)
+
+
+def classify_history_skip_reason(reason: str | None) -> str:
+    """将 Stage A run item 的 skip reason 归类为已知 category。
+
+    [CHANGE-20260809] Phase 4B.1 canonical readiness contract 的组成部分。
+
+    只识别显式已知形态；任何无法识别的字符串（含 None / 空串）都返回 UNKNOWN，
+    由调用方 fail closed。禁止 hardcode 具体 symbol。
+    """
+    if reason is None:
+        return HISTORY_SKIP_UNKNOWN
+    text = reason.strip()
+    if not text:
+        return HISTORY_SKIP_UNKNOWN
+    if text.startswith(HISTORY_SKIP_INSUFFICIENT_HISTORY):
+        return HISTORY_SKIP_INSUFFICIENT_HISTORY
+    if text.startswith(HISTORY_SKIP_NO_DAILY_BARS):
+        return HISTORY_SKIP_NO_DAILY_BARS
+    for legacy in _LEGACY_NO_DAILY_BARS_REASONS:
+        if text.startswith(legacy):
+            return HISTORY_SKIP_NO_DAILY_BARS
+    return HISTORY_SKIP_UNKNOWN
+
+
 def _compute_parameter_hash(
     output_bars: int,
     include_chip: bool,
