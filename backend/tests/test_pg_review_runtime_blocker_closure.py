@@ -50,6 +50,28 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+async def _make_instruments(db_session, *, n: int) -> list[uuid.UUID]:
+    """创建 n 个真实 Instrument 行（满足 strategy/snapshot run_items 外键）。"""
+    from app.models.instrument import Instrument
+
+    ids: list[uuid.UUID] = []
+    for i in range(n):
+        inst_id = uuid.uuid4()
+        db_session.add(
+            Instrument(
+                id=inst_id,
+                symbol=f"{700000 + i:06d}",
+                name=f"closure_test_{i}",
+                market="cn",
+                status="active",
+                listing_date=date(2010, 1, 4),
+            )
+        )
+        ids.append(inst_id)
+    await db_session.flush()
+    return ids
+
+
 async def _make_strategy_run_with_items(
     db_session,
     *,
@@ -99,33 +121,38 @@ async def _make_strategy_run_with_items(
     db_session.add(run)
     await db_session.flush()
 
-    # 构造 run-items（authoritative truth）
+    # 构造 run-items（authoritative truth），instrument_id 指向真实存在的 Instrument 行
+    inst_ids = await _make_instruments(db_session, n=succeeded + skipped + failed)
+    idx = 0
     for _ in range(succeeded):
         db_session.add(
             StrategyRunItem(
                 run_id=run.id,
-                instrument_id=uuid.uuid4(),
+                instrument_id=inst_ids[idx],
                 status="succeeded",
             )
         )
+        idx += 1
     for _ in range(skipped):
         db_session.add(
             StrategyRunItem(
                 run_id=run.id,
-                instrument_id=uuid.uuid4(),
+                instrument_id=inst_ids[idx],
                 status="skipped",
                 reason_code="insufficient_history",
             )
         )
+        idx += 1
     for _ in range(failed):
         db_session.add(
             StrategyRunItem(
                 run_id=run.id,
-                instrument_id=uuid.uuid4(),
+                instrument_id=inst_ids[idx],
                 status="failed",
                 reason_code="compute_error",
             )
         )
+        idx += 1
     await db_session.flush()
     return run
 
@@ -170,15 +197,19 @@ async def _make_snapshot_run_with_items(
         "pending": pending,
         "running": running,
     }
+    total_items = sum(counts.values())
+    inst_ids = await _make_instruments(db_session, n=total_items)
+    idx = 0
     for st, n in counts.items():
         for _ in range(n):
             db_session.add(
                 StockFeatureSnapshotRunItem(
                     run_id=run.id,
-                    instrument_id=uuid.uuid4(),
+                    instrument_id=inst_ids[idx],
                     status=st,
                 )
             )
+            idx += 1
     await db_session.flush()
     return run
 
