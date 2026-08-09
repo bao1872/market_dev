@@ -5,10 +5,13 @@
 - data_run_id 指向 market_review_runs.id
 - 切换失败只重试发布，不重算（PRD §11）
 
-发布门禁（PRD §11.1 整套 Review）：
-- market 范围必须 ready
-- 配置的主要指数和风格范围必须 ready
-- 一级行业 ready 比例达到配置门槛
+发布门禁（PRD §11.1 + §6.3.8 渐进式 scope readiness）：
+- MANDATORY: market 范围必须 ready（missing/not ready/coverage 不足 → CLOSED）
+- PROGRESSIVE OPTIONAL: industry_l1 / major_index / style 不可用（PIT unavailable /
+  insufficient_history / blocked_external_population / skipped）仅记为 scope-level
+  diagnostic，不阻塞整套 Review MVP 发布
+- UNEXPECTED EXECUTION FAILURE 仍阻塞：任何 run item 处于 failed/pending/running → CLOSED
+- 禁止 current membership × historical date 回填 / latest snapshot forward-fill
 - signal evaluation 无系统性异常
 - source_core_run_id 和 source_board_run_id 均指向当前正式 pointer
 

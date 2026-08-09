@@ -744,6 +744,120 @@ class TestProgressiveScopeReadiness:
         # optional scope 错误态（status=error）作为诊断保留，不影响发布（非 blocker）
         assert any("industry_l1" in d for d in diag)
 
+    # =========================================================================
+    # [R6 直接证据 Phase4C 2026-08-09]
+    # OPTIONAL_UNAVAILABLE vs UNEXPECTED_EXECUTION_FAILURE 是两个不同合同：
+    #   - optional scope 数据源不可用（skipped）→ diagnostic only → OPEN
+    #   - 任何 run item 处于 failed / pending / running（真实执行异常或非终态）
+    #     → whole Review publication CLOSED
+    # 注意：以下测试全部保持 market ready + 真实全量 counter
+    # （expected_scope_count=4），不伪造 expected=1 来迎合 market-only gate。
+    # =========================================================================
+
+    def _run_item(self, run: MarketReviewRun, status: str, last_error: str | None = None):
+        """构造 MarketReviewRunItem（真实 ORM 对象，非 mock）。"""
+        from app.models.market_review import MarketReviewRunItem
+
+        return MarketReviewRunItem(
+            id=uuid.uuid4(),
+            review_run_id=run.id,
+            scope_type="industry_l1",
+            scope_key="board-1",
+            phase="metrics",
+            status=status,
+            attempt_count=1,
+            last_error=last_error,
+        )
+
+    def _results_with_run_items(
+        self, run: MarketReviewRun, items: list,
+    ) -> list[_FakeResult]:
+        """market ready + optional unavailable，第 7 个查询返回给定 incomplete items。
+
+        evaluate_publish_gate 的第 7 个 execute 是
+        `MarketReviewRunItem.status.in_(("failed","pending","running"))`，
+        因此这里注入的就是 DB 真实会返回的未成功终态项集合。
+        skipped 状态不在该查询条件内，故 skipped item 场景注入空列表。
+        """
+        results = self._results_market_ready_optional_unavailable(run)
+        results[6] = _FakeResult(scalar_list=items)
+        return results
+
+    async def test_optional_skipped_item_is_diagnostic_only_gate_open(self):
+        """R6-1: market ready + optional scope item = skipped → OPEN。
+
+        skipped 是 optional scope 数据源不可用的诊断性终态，
+        不属于 failed/pending/running 查询范围，不阻塞 whole Review。
+        """
+        run = self._make_market_ready_run()
+        # skipped item 不会出现在 incomplete-items 查询结果里（真实 DB 语义）
+        results = self._results_with_run_items(run, [])
+        assert run.expected_scope_count == 4  # 真实全量 counter，未伪造
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is True
+        assert not any("未成功终态项" in b for b in blockers)
+
+    async def test_optional_failed_item_unexpected_execution_failure_gate_closed(self):
+        """R6-2: market ready + optional scope item = failed（非预期执行异常）→ CLOSED。
+
+        这是与 R6-1 的关键区分：optional 语义只豁免"数据源不可用"，
+        不豁免"执行异常"。failed item 必须阻塞整套 Review 发布。
+        """
+        run = self._make_market_ready_run()
+        failed_item = self._run_item(
+            run, "failed",
+            last_error="TypeError: unexpected execution error in scope metrics",
+        )
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(self._results_with_run_items(run, [failed_item])), run,
+        )
+        assert publishable is False
+        assert any("未成功终态项" in b for b in blockers)
+        # 必须是 execution-failure blocker，而不是 market mandatory blocker
+        assert not any("market 范围快照缺失" in b for b in blockers)
+
+    async def test_pending_item_non_terminal_state_gate_closed(self):
+        """R6-3: market ready + 存在 pending item（非终态）→ CLOSED。"""
+        run = self._make_market_ready_run()
+        pending_item = self._run_item(run, "pending")
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(self._results_with_run_items(run, [pending_item])), run,
+        )
+        assert publishable is False
+        assert any("未成功终态项" in b for b in blockers)
+        assert not any("market 范围快照缺失" in b for b in blockers)
+
+    async def test_running_item_non_terminal_state_gate_closed(self):
+        """R6-4: market ready + 存在 running item（非终态）→ CLOSED。"""
+        run = self._make_market_ready_run()
+        running_item = self._run_item(run, "running")
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(self._results_with_run_items(run, [running_item])), run,
+        )
+        assert publishable is False
+        assert any("未成功终态项" in b for b in blockers)
+        assert not any("market 范围快照缺失" in b for b in blockers)
+
+    async def test_incomplete_items_query_targets_only_execution_failure_states(self):
+        """R6-5: 门禁的 execution-failure 查询条件必须精确为 failed/pending/running。
+
+        直接断言 SQL 语义，防止未来把 skipped 误并入 execution failure，
+        或把 failed 误移出 blocker 集合（回归保护）。
+        """
+        run = self._make_market_ready_run()
+        session = _make_session(self._results_with_run_items(run, []))
+        await evaluate_publish_gate(session, run)
+        # 第 7 个 execute 即 incomplete run items 查询
+        sql = str(_executed_statements(session)[6].compile(
+            compile_kwargs={"literal_binds": True},
+        ))
+        assert "failed" in sql
+        assert "pending" in sql
+        assert "running" in sql
+        assert "skipped" not in sql
+
     async def test_forbidden_current_pit_fallback_contract_unchanged(self):
         """G: 既有禁止 current/PIT fallback 的 contract 不变（market 仍强制当前日可计算、
         可选 scope 状态不被伪装为 ready）。market coverage 低于门槛 → CLOSED。"""
