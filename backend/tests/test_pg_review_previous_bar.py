@@ -69,11 +69,13 @@ async def test_previous_bar_t_plus_t_minus_1():
         await session.execute(
             delete(Instrument).where(Instrument.id == iid),
         )
-        # 真实 Instrument 满足 FK
+        await session.commit()
+        # 真实 Instrument 满足 FK（先独立提交父记录）
         session.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-prev",
             market="SH", status="active",
         ))
+        await session.commit()
         await session.execute(
             delete(FirstPyramidHistoryDailyState).where(
                 FirstPyramidHistoryDailyState.instrument_id == iid,
@@ -138,10 +140,12 @@ async def test_previous_bar_suspended_over_400_days():
         await session.execute(
             delete(Instrument).where(Instrument.id == iid),
         )
+        await session.commit()
         session.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-prev",
             market="SH", status="active",
         ))
+        await session.commit()
         _insert_bar(session, iid, target, close=12.0)          # T
         _insert_bar(session, iid, prev_date, close=10.0)       # previous（>400 天前）
         session.add(FirstPyramidHistoryDailyState(
@@ -196,10 +200,12 @@ async def test_no_current_bar_return_1d_unavailable():
         await session.execute(
             delete(Instrument).where(Instrument.id == iid),
         )
+        await session.commit()
         session.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-prev",
             market="SH", status="active",
         ))
+        await session.commit()
         # 只有 previous bar，无 current bar（target 无当日 bar）
         _insert_bar(session, iid, target - timedelta(days=1), close=9.5)
         session.add(FirstPyramidHistoryDailyState(

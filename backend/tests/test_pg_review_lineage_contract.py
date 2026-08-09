@@ -274,7 +274,8 @@ async def test_event_legacy_v2_coexistence_and_idempotency():
             FirstPyramidHistoryEvent.instrument_id == iid,
         ))
         await s.execute(delete(Instrument).where(Instrument.id == iid))
-        # 真实 Instrument 满足 events FK
+        await s.commit()
+        # 真实 Instrument 满足 events FK（先独立提交父记录）
         s.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-ev",
             market="SH", status="active",
@@ -355,10 +356,12 @@ async def test_board_event_query_only_counts_v2():
             FirstPyramidHistoryEvent.instrument_id == iid,
         ))
         await s.execute(delete(Instrument).where(Instrument.id == iid))
+        await s.commit()
         s.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-bd",
             market="SH", status="active",
         ))
+        await s.commit()
         # legacy BOS + v2 BOS（同 event_id 语义，但不同 contract 行）
         s.add_all([
             FirstPyramidHistoryEvent(
@@ -430,10 +433,13 @@ async def test_daily_state_lineage_load_day_fact_maps():
             FirstPyramidHistoryDailyState.instrument_id == iid,
         ))
         await s.execute(delete(Instrument).where(Instrument.id == iid))
+        await s.commit()
+        # 先独立提交 Instrument（保证 FK 父记录已持久化）
         s.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-st",
             market="SH", status="active",
         ))
+        await s.commit()
         # current + previous 同源 v2
         s.add(FirstPyramidHistoryDailyState(
             instrument_id=iid, trade_date=target,
@@ -487,10 +493,12 @@ async def test_daily_state_previous_source_run_mismatch_fails_closed():
             FirstPyramidHistoryDailyState.instrument_id == iid,
         ))
         await s.execute(delete(Instrument).where(Instrument.id == iid))
+        await s.commit()
         s.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-st",
             market="SH", status="active",
         ))
+        await s.commit()
         s.add(FirstPyramidHistoryDailyState(
             instrument_id=iid, trade_date=target,
             algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
