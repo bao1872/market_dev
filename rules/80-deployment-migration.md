@@ -221,6 +221,29 @@ Exploration 要求：
 - 不因内存不足静默截断；
 - 不通过随意扩大机器资源掩盖实现缺陷。
 
+### 13.1 超时与 liveness 政策（四类隔离）
+
+长任务的失败判定必须区分以下四类，不得混用：
+
+- **A. 基础设施命令超时**（deploy / rsync / compose / verification gate / migration command / 短基础设施操作）：允许 absolute wall-clock timeout 作为 Always-On Safety。此类超时继续有效，不受本政策影响。
+- **B. 长任务业务绝对超时**：对于工作量随 instrument count / backfill window / provider throughput 变化的 long-running business batch（全市场 refresh、backfill、bootstrap、盘后重计算），**禁止仅因 generic fixed absolute elapsed time 判 failed**。此类任务只要持续产生 valid progress，即允许其按实际所需时间自然完成。
+- **C. 卡死 / 无进展（stall / no-progress）**：long-running batch 真正防卡死的依据是「持续无真实业务 progress」，而非「总耗时过长」。stall watchdog 基于 `now - last_real_progress`，不计 `total_elapsed`。
+- **D. 业务截止时间（business deadline）**：只有当权威 PRD 明确存在 business cutoff / deadline 时，才允许 total deadline 成为业务失败条件。
+
+### 13.2 progress / heartbeat 正确性
+
+- 长任务必须存在可观察的真实 progress signal（chunk / batch / item 完成数 / checkpoint / last real progress），复用现有 `long_task_budget` 的 checkpoint / resume 能力，不新建 observability framework。
+- heartbeat / lease 刷新**不得**被当作业务 progress 的唯一依据：当 step 处于 CPU-bound 或 blocking provider call 无法刷新真实 progress 时，heartbeat 单独存在不构成「有进展」，不得据此排除 stall。
+- stall 阈值、heartbeat interval、watchdog 实现属于 Code / Config / Runbook，**不写进规则文件作为实现数字**。
+
+### 13.3 resume / data safety 不变
+
+本政策下的 timeout / liveness 调整不得削弱现有 `long_task_budget`（DS-107）的 idempotent / resumable / checkpoint-safe 约束，亦不得削弱 resume、data safety 与 lineage 正确性。
+
+### 13.4 边界
+
+本规则**不意味着全系统取消 timeout**：A 类基础设施命令超时、verification plan timeout、deploy safety timeout 继续允许。仅当发现某基础设施超时错误复用了 B 类 long-running business policy 时才需纠正。
+
 ## 14. Exploration 部署完成
 
 当前 hypothesis slice 的远程部署/运行只需证明：

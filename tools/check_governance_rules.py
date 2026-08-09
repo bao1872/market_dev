@@ -181,7 +181,11 @@ def _check_rule_semantics(root: Path, errors: list[str]) -> None:
         "40-testing-quality.md": ("Fast Iteration 不是少测试", "Modified-Scope Unit", "Full PURE_UNIT"),
         "60-runtime-frontend-acceptance.md": ("API", "frontend", "用户负责"),
         "70-hardening-release.md": ("不是 Exploration 默认流程", "Full RTM", "Release Decision"),
-        "80-deployment-migration.md": ("M1", "M2", "M3", "默认不要求 production clone"),
+        "80-deployment-migration.md": (
+            "M1", "M2", "M3", "默认不要求 production clone",
+            # [Phase 4D.4] long-running business batch 不得由 generic fixed absolute timeout 判失败
+            "long-running business batch",
+        ),
         "90-deprecated-forbidden.md": ("每轮默认重型闭环", "不得用历史规则"),
     }
     for name, markers in required_markers.items():
