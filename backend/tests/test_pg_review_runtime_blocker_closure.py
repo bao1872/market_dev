@@ -198,6 +198,7 @@ async def _make_snapshot_run_with_items(
     db_session.add(run)
     await db_session.flush()
 
+    from app.models.stock_feature_snapshot import StockFeatureSnapshot
     from app.models.stock_feature_snapshot_run_item import StockFeatureSnapshotRunItem
 
     counts = {
@@ -218,6 +219,22 @@ async def _make_snapshot_run_with_items(
                     instrument_id=inst_ids[idx],
                     phase="core",
                     status=st,
+                )
+            )
+            # 同时创建 StockFeatureSnapshot 行（publish_stock_core_atomically 的
+            # validate_quality_gate 检查 source_run_id 对应行数 >= eligible_count）
+            db_session.add(
+                StockFeatureSnapshot(
+                    instrument_id=inst_ids[idx],
+                    trade_date=trade_date,
+                    primary_timeframe="1d",
+                    secondary_timeframe="15m",
+                    adj="qfq",
+                    schema_version=1,
+                    source_run_id=run.id,
+                    structural_payload={"ok": True},
+                    temporal_payload={"ok": True},
+                    summary_payload={"ok": True},
                 )
             )
             idx += 1
@@ -260,9 +277,9 @@ async def test_pg1_dsa_authoritative_reconcile_idempotent(db_session) -> None:
 
     # 幂等：再次调用结果完全一致
     rec2 = await reconcile_strategy_run_from_items(db_session, run.id, set_finished_at=True)
-    assert rec2["succeeded_count"] == 283
-    assert rec2["skipped_count"] == 10
-    assert rec2["failed_count"] == 0
+    assert rec2["succeeded"] == 283
+    assert rec2["skipped"] == 10
+    assert rec2["failed"] == 0
 
 
 @pytest.mark.postgres
