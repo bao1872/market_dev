@@ -651,9 +651,10 @@ async def test_pg_resume_integration() -> None:
 
         pointer = await get_publication(
             reader_db,
-            trade_date=test_date,
-            kind=PUBLICATION_KIND_STOCK_CORE,
+            scope_type="market",
             scope_key="market",
+            trade_date=test_date,
+            publication_kind=PUBLICATION_KIND_STOCK_CORE,
         )
         assert pointer is not None, "publication pointer 必须存在"
         assert pointer.data_run_id == snap.id, (
