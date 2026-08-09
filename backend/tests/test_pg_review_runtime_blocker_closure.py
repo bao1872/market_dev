@@ -594,7 +594,17 @@ async def test_pg_resume_integration() -> None:
         await prep_db.commit()
 
     # =====================================================================
-    # Phase 2: spy + mock + 调用真实 execute_after_close_run
+    # Phase 2: 读取 before checkpoint 状态
+    # =====================================================================
+    async with AsyncSessionLocal() as before_db:
+        before_status = await get_after_close_run_status(before_db, job_run_id)
+    before_last_step = before_status.get("last_completed_step", "")
+    assert before_last_step == "computing_features", (
+        f"before_last_completed_step 应为 computing_features，实际={before_last_step}"
+    )
+
+    # =====================================================================
+    # Phase 3: spy + mock + 调用真实 execute_after_close_run
     # =====================================================================
     compute_call_count = {"n": 0}
 
@@ -627,14 +637,14 @@ async def test_pg_resume_integration() -> None:
         # 注意：不再有 except Exception: pass — 任何意外异常必须 FAIL
 
     # =====================================================================
-    # Phase 3: 逐项验收
+    # Phase 4: 逐项验收
     # =====================================================================
     # A. compute 未调用（PG-6）
     assert compute_call_count["n"] == 0, (
         f"resume 不得重算 5293 stocks，实际 compute 调用={compute_call_count['n']}"
     )
 
-    # B/C/D. 用独立 reader session 核验 publish 效果
+    # B/C/D/E/F. 用独立 reader session 核验所有 after 状态
     async with AsyncSessionLocal() as reader_db:
         # 重新加载 snapshot run
         snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
@@ -661,24 +671,39 @@ async def test_pg_resume_integration() -> None:
             f"pointer.data_run_id={pointer.data_run_id} != snap.id={snap.id}"
         )
 
-        # E/F. checkpoint 推进
+        # ---- checkpoint 推进（PG-8 核心） ----
         status = await get_after_close_run_status(reader_db, job_run_id)
-        last_step = status.get("last_completed_step", "")
-        orch_status = status.get("orchestrator_status", "")
+        after_last_step = status.get("last_completed_step", "")
+        after_orch_status = status.get("orchestrator_status", "")
         assert downstream_reached, "downstream entry 必须触发"
-        # orchestrator 应推进到 publishing 或其后（partial_success 表示核心发布完成但下游部分跳过）
-        acceptable_statuses = {
+
+        # orchestrator_status: 允许 partial_success（测试故意 mock 下游）
+        assert after_orch_status in {
             AfterCloseRunStatus.PUBLISHING.value,
             AfterCloseRunStatus.COMPUTING_REVIEW.value,
             AfterCloseRunStatus.SUCCEEDED.value,
             AfterCloseRunStatus.PARTIAL_SUCCESS.value,
+        }, (
+            f"orchestrator_status 异常: {after_orch_status}"
+        )
+
+        # last_completed_step: 必须是 _completed_steps 中的合法 pipeline checkpoint
+        # 引用仓库现有 mapping（与 resume 逻辑同一来源）
+        legal_checkpoints = {
+            "refreshing_daily",
+            "syncing_boards",
+            "computing_features",
+            "publishing",
+            "computing_review",
+            "succeeded",
         }
-        assert (
-            "publishing" in last_step
-            or orch_status in acceptable_statuses
-        ), (
-            f"orchestrator 未推进到 publishing: "
-            f"last_completed_step={last_step}, orchestrator_status={orch_status}"
+        assert after_last_step in legal_checkpoints, (
+            f"last_completed_step={after_last_step} 不在合法 pipeline checkpoint 集合中。\n"
+            f"合法值: {sorted(legal_checkpoints)}\n"
+            f"orchestrator_status={after_orch_status}\n"
+            f"before_last_step={before_last_step}\n"
+            f"如果 after_last_step 是 orchestrator_status 值（如 partial_success），"
+            f"说明代码将终端状态写入了断点恢复检查点字段 → CHECKPOINT-SEMANTICS-01"
         )
 
     # G. 没有创建新的 snapshot run（same snap.id 就是 existing 的）
