@@ -491,18 +491,22 @@ class TestExactPrefixInvariance:
         t: int,
         fields: list[str],
         mismatches: list[str],
-    ) -> None:
-        """对单个事件边界 T 验证 FullSeries[T] == Truncated[:T+1].last。"""
+    ) -> str:
+        """对单个事件边界 T 验证 FullSeries[T] == Truncated[:T+1].last。
+
+        返回：
+            "VALIDATED" —— 完成 T-1/T/T+1 exact comparison
+            "NOT_VALIDATABLE_WARMUP" —— T 过小（历史不足无法重算，非 PASS 也非 FAIL）
+        """
         if t not in full_by_idx:
-            return
+            return "NOT_VALIDATABLE_WARMUP"
         trunc_bars = bars.iloc[: t + 1]
         trunc = compute_first_pyramid_history(
             trunc_bars, symbol="T", output_bars=t + 1,
         )
-        # T 过小导致无法重算（历史不足，无 daily_state）时跳过；
-        # 这是技术限制（prefix 测试需可重算的 T），非 silently skip 事件类型。
+        # T 过小导致无法重算（历史不足，无 daily_state）→ NOT_VALIDATABLE_WARMUP
         if not trunc["daily_state"]:
-            return
+            return "NOT_VALIDATABLE_WARMUP"
         trunc_last = trunc["daily_state"][-1]
         for field in fields:
             mismatch = self._compare_field(
@@ -510,6 +514,7 @@ class TestExactPrefixInvariance:
             )
             if mismatch:
                 mismatches.append(mismatch)
+        return "VALIDATED"
 
     def test_dsa_event_boundary_prefix(self) -> None:
         """DSA：在真实 regime_value 变化 / segment_id 变化点测 T-1/T/T+1。"""
@@ -546,25 +551,44 @@ class TestExactPrefixInvariance:
         )
 
     def test_smc_event_boundary_prefix(self) -> None:
-        """SMC：在真实 BOS/OB_CREATED/OB_ENTERED 事件点测 T-1/T/T+1。"""
+        """SMC：在真实 BOS/CHoCH/OB 事件 bar_index 点测 T-1/T/T+1。
+
+        事件 T 使用 evt["bar_index"]（BOS/CHoCH=confirmed_index、OB_CREATED=confirmed_index、
+        OB_ENTERED=enter_index、OB_MITIGATED=mitigated_index）；anchor_index 只是历史结构锚点，
+        不作为 event confirmation boundary。
+        """
         bars = _zigzag_bars(n=300)
         full = compute_first_pyramid_history(bars, symbol="T", output_bars=300)
         full_by_idx = {s["bar_index"]: s for s in full["daily_state"]}
         events = full["events"]
-        # 自动找事件 anchor_index（事件定位）
-        event_ts: list[int] = []
+        # 按事件类型收集 bar_index（真实 confirmation boundary）
+        required_types = ["BOS", "CHoCH", "OB_CREATED", "OB_ENTERED", "OB_MITIGATED"]
+        coverage_by_type: dict[str, list[int]] = {t: [] for t in required_types}
         for evt in events:
-            anchor = evt.get("anchor_index")
-            if anchor is not None:
-                event_ts.append(int(anchor))
-        # 必须有真实事件；若 CHoCH/OB_MITIGATED 未产生 → 明确 FAIL（不 silently skip）
-        assert event_ts, "fixture 未产生任何 SMC 事件（测试 FAIL，不 silently skip）"
+            etype = evt.get("type")
+            bi = evt.get("bar_index")
+            if etype in coverage_by_type and bi is not None:
+                coverage_by_type[etype].append(int(bi))
+        # 事件类型覆盖统计：synthetic fixture 产生的事件类型必须至少 1 个可验证事件
+        validated_count = 0
         mismatches: list[str] = []
-        for t in sorted(set(event_ts)):
-            for dt in (-1, 0, 1):
-                self._assert_prefix_at(
-                    full_by_idx, bars, t + dt, _SMC_PREFIX_FIELDS, mismatches,
-                )
+        for etype in required_types:
+            for t in sorted(set(coverage_by_type[etype])):
+                statuses = []
+                for dt in (-1, 0, 1):
+                    statuses.append(
+                        self._assert_prefix_at(
+                            full_by_idx, bars, t + dt, _SMC_PREFIX_FIELDS, mismatches,
+                        ),
+                    )
+                if "VALIDATED" in statuses:
+                    validated_count += 1
+        # 至少 BOS 与 OB lifecycle 有可验证事件（fixture 应产生）
+        assert coverage_by_type["BOS"], "fixture 未产生 BOS（测试 FAIL）"
+        assert (
+            coverage_by_type["OB_CREATED"] or coverage_by_type["OB_ENTERED"]
+        ), "fixture 未产生 OB lifecycle 事件（测试 FAIL）"
+        assert validated_count > 0, "无任何 SMC 事件通过 warmup 完成 T-1/T/T+1 验证"
         assert not mismatches, "SMC event-boundary prefix mismatch:\n" + "\n".join(
             mismatches,
         )
