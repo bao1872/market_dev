@@ -18,10 +18,20 @@ import pytest
 pytestmark = pytest.mark.pg
 
 # 复用的算法版本常量（避免硬编码漂移）
+from app.models.first_pyramid_history_run import FirstPyramidHistoryRun  # noqa: E402
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION  # noqa: E402
 from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION  # noqa: E402
 
 _BOOTSTRAP_ALGO = "review-bootstrap-v2"
+
+
+def _mk_history_run(scope: str = "all_a_share") -> FirstPyramidHistoryRun:
+    """构造真实 FirstPyramidHistoryRun（满足 daily_state/observation FK）。"""
+
+    return FirstPyramidHistoryRun(
+        algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        parameter_hash="p", output_bars=250, scope=scope, status="running",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +277,6 @@ async def test_event_legacy_v2_coexistence_and_idempotency():
 
     iid = uuid.uuid4()
     algo = FIRST_PYRAMID_CORE_ALGORITHM_VERSION
-    src_run = uuid.uuid4()
 
     async with AsyncSessionLocal() as s:
         await s.execute(delete(FirstPyramidHistoryEvent).where(
@@ -275,11 +284,15 @@ async def test_event_legacy_v2_coexistence_and_idempotency():
         ))
         await s.execute(delete(Instrument).where(Instrument.id == iid))
         await s.commit()
-        # 真实 Instrument 满足 events FK（先独立提交父记录）
+        # 真实 Instrument + HistoryRun 满足 events/daily_state FK（先独立提交父记录）
         s.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-ev",
             market="SH", status="active",
         ))
+        run = _mk_history_run()
+        s.add(run)
+        await s.flush()
+        src_run = run.id
         await s.commit()
 
     history_v2 = {
@@ -425,7 +438,6 @@ async def test_daily_state_lineage_load_day_fact_maps():
     from app.services.review_scope_service import load_day_fact_maps
 
     iid = uuid.uuid4()
-    src_run = uuid.uuid4()
     target = date(2026, 8, 4)
 
     async with AsyncSessionLocal() as s:
@@ -434,11 +446,15 @@ async def test_daily_state_lineage_load_day_fact_maps():
         ))
         await s.execute(delete(Instrument).where(Instrument.id == iid))
         await s.commit()
-        # 先独立提交 Instrument（保证 FK 父记录已持久化）
+        # 先独立提交 Instrument + HistoryRun（保证 FK 父记录已持久化）
         s.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-st",
             market="SH", status="active",
         ))
+        run = _mk_history_run()
+        s.add(run)
+        await s.flush()
+        src_run = run.id
         await s.commit()
         # current + previous 同源 v2
         s.add(FirstPyramidHistoryDailyState(
@@ -484,8 +500,6 @@ async def test_daily_state_previous_source_run_mismatch_fails_closed():
     from app.services.review_scope_service import load_day_fact_maps
 
     iid = uuid.uuid4()
-    run_a = uuid.uuid4()
-    run_b = uuid.uuid4()
     target = date(2026, 8, 4)
 
     async with AsyncSessionLocal() as s:
@@ -498,6 +512,12 @@ async def test_daily_state_previous_source_run_mismatch_fails_closed():
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-st",
             market="SH", status="active",
         ))
+        run_a_obj = _mk_history_run()
+        run_b_obj = _mk_history_run()
+        s.add_all([run_a_obj, run_b_obj])
+        await s.flush()
+        run_a = run_a_obj.id
+        run_b = run_b_obj.id
         await s.commit()
         s.add(FirstPyramidHistoryDailyState(
             instrument_id=iid, trade_date=target,

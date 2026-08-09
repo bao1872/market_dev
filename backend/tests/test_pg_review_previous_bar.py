@@ -57,24 +57,31 @@ async def test_previous_bar_t_plus_t_minus_1():
 
     from app.db import AsyncSessionLocal
     from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
+    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
     from app.models.instrument import Instrument
     from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
     from app.services.review_scope_service import load_day_fact_maps
 
     iid = uuid.uuid4()
     target = date(2026, 8, 4)
-    src_run = uuid.uuid4()
     async with AsyncSessionLocal() as session:
         # 清理（仅本次测试数据）
         await session.execute(
             delete(Instrument).where(Instrument.id == iid),
         )
         await session.commit()
-        # 真实 Instrument 满足 FK（先独立提交父记录）
+        # 真实 Instrument + HistoryRun 满足 FK（先独立提交父记录）
         session.add(Instrument(
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-prev",
             market="SH", status="active",
         ))
+        run = FirstPyramidHistoryRun(
+            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            parameter_hash="p", output_bars=250, scope="all_a_share", status="running",
+        )
+        session.add(run)
+        await session.flush()
+        src_run = run.id
         await session.commit()
         await session.execute(
             delete(FirstPyramidHistoryDailyState).where(
@@ -122,6 +129,7 @@ async def test_previous_bar_suspended_over_400_days():
 
     from app.db import AsyncSessionLocal
     from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
+    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
     from app.models.instrument import Instrument
     from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
     from app.services.review_scope_service import load_day_fact_maps
@@ -130,7 +138,6 @@ async def test_previous_bar_suspended_over_400_days():
     target = date(2026, 8, 4)
     # 停牌 >400 自然日：previous bar 在 target 前 500 天
     prev_date = target - timedelta(days=500)
-    src_run = uuid.uuid4()
     async with AsyncSessionLocal() as session:
         await session.execute(
             delete(FirstPyramidHistoryDailyState).where(
@@ -145,6 +152,13 @@ async def test_previous_bar_suspended_over_400_days():
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-prev",
             market="SH", status="active",
         ))
+        run = FirstPyramidHistoryRun(
+            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            parameter_hash="p", output_bars=250, scope="all_a_share", status="running",
+        )
+        session.add(run)
+        await session.flush()
+        src_run = run.id
         await session.commit()
         _insert_bar(session, iid, target, close=12.0)          # T
         _insert_bar(session, iid, prev_date, close=10.0)       # previous（>400 天前）
@@ -184,13 +198,13 @@ async def test_no_current_bar_return_1d_unavailable():
 
     from app.db import AsyncSessionLocal
     from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
+    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
     from app.models.instrument import Instrument
     from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
     from app.services.review_scope_service import load_day_fact_maps
 
     iid = uuid.uuid4()
     target = date(2026, 8, 4)
-    src_run = uuid.uuid4()
     async with AsyncSessionLocal() as session:
         await session.execute(
             delete(FirstPyramidHistoryDailyState).where(
@@ -205,6 +219,13 @@ async def test_no_current_bar_return_1d_unavailable():
             id=iid, symbol=f"PGVB{iid.hex[:8]}", name="verify-prev",
             market="SH", status="active",
         ))
+        run = FirstPyramidHistoryRun(
+            algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            parameter_hash="p", output_bars=250, scope="all_a_share", status="running",
+        )
+        session.add(run)
+        await session.flush()
+        src_run = run.id
         await session.commit()
         # 只有 previous bar，无 current bar（target 无当日 bar）
         _insert_bar(session, iid, target - timedelta(days=1), close=9.5)
