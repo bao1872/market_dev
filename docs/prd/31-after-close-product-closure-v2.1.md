@@ -194,6 +194,24 @@ PC-40 与 PC-41 完全不变：Review 仍只消费正式 pointer，且必须满�
 "latest partial run" 或任何绕过 pointer 的路径。Review 接受的是「正式 pointer 指向的 degraded run」，
 而不是「自己挑一个 partial run」。
 
+### PC-43 Long-running step liveness contract（Phase 4D.4）
+
+工作量会随 **instrument count / backfill window / provider throughput** 变化的 long-running step，
+其业务成败**不得由单一 fixed generic absolute wall-clock 上限决定**。
+
+- **long-running business step 的失败条件只限**：
+  - 显式 execution failure（异常、DB 失败、contract violation）；
+  - 正式运行治理认定的 **no-progress / stalled**（基于真实业务 progress signal，而非总耗时）；
+  - 权威 PRD 明确写明的 **business deadline / cutoff**（仅当该 deadline 确实存在时）。
+- **禁止**仅因 `total_elapsed > 固定 generic duration` 将仍在正常产生 valid progress 的 long-running business step 判为失败。
+- 长任务必须存在**可观察的真实 progress signal**（chunk / batch / item 完成数 / checkpoint / last real progress），
+  stall watchdog 的依据是 `now - last_real_progress`，不是 `total_elapsed`。
+- heartbeat / lease 刷新**不得**被当作业务 progress 的唯一依据：当 step 处于 CPU-bound 或 blocking provider call
+  而无法刷新真实 progress 时，heartbeat 单独存在不构成「有进展」。
+- 本契约**不取消**基础设施命令超时（deploy / rsync / compose / verification gate / migration / 短基础设施操作），
+  那些属于 Always-On Safety，与 long-running business batch 的 liveness 政策相互独立。
+- 具体 stall 阈值、heartbeat interval、watchdog 实现属于 Rules / Config / Runbook / Code，**不在此 PRD 写实现数字**。
+
 bars、adjustment factor 和 membership 不得读取目标交易日以后；Review history 只读目标日期以前；manual/replay 不污染 scheduled current pointer。
 
 ## 7. 父任务与产品闭环

@@ -102,7 +102,7 @@
 
 状态链：`queued→running→refreshing_daily→syncing_boards→checking_coverage→computing_features→publishing→succeeded`；`StrategyRun` 状态链：`running→completed→published`，异常 → `failed`。不得在发布前伪造 `completed`。
 
-顶层步骤使用统一执行合同：开始时写步骤状态、进度和 heartbeat，执行受明确 timeout 约束；成功、失败、超时、取消和合法不可用均写结构化 `step_summary`；`finally` 必须停止 heartbeat 并保存结束时间。可选步骤失败使主 run 成为 `partial_success`，不得伪装全成功；`auction_anchor` 超时或无数据统一记为 `skipped_unavailable`，默认非阻断，不得仅因此阻断 Review。
+顶层步骤使用统一执行合同：开始时写步骤状态、进度和 heartbeat，执行受明确 timeout 约束；成功、失败、超时、取消和合法不可用均写结构化 `step_summary`；`finally` 必须停止 heartbeat 并保存结束时间。可选步骤失败使主 run 成为 `partial_success`，不得伪装全成功；`auction_anchor` 超时或无数据统一记为 `skipped_unavailable`，默认非阻断，不得仅因此阻断 Review。long-running business step 的 liveness 政策以 [PRD 31 PC-43](../prd/31-after-close-product-closure-v2.1.md) 为准：工作负载随 instrument count / backfill window / provider throughput 变化的长任务，不得仅因 fixed generic absolute elapsed 被判失败，其失败条件只限显式 execution failure、正式治理认定的 no-progress / stalled，或权威 PRD 明确写明的 business deadline。
 
 管理 API 的 cancel 与 reconcile 必须幂等：重复 cancel 不改变终态；reconcile 只依据现有任务事实修复派生状态，不启动真实数据任务。stale watchdog 同时检查 heartbeat 与步骤级 timeout，避免长 lease 掩盖已失联或已超时的步骤；健康 heartbeat 的长任务不得被接管。
 
