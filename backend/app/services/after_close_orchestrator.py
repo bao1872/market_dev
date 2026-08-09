@@ -3765,8 +3765,16 @@ async def execute_after_close_run(
             )
             job_run.status = final_status.value
             job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+            # [CHECKPOINT-SEMANTICS-01] partial_success 是运行结果状态，
+            # 不是 pipeline checkpoint。与 INTERRUPTED/CANCELLED 一致：
+            # 传 None 保留当前 last_completed_step，仅刷新心跳/租约。
+            _step = (
+                None
+                if final_status == AfterCloseRunStatus.PARTIAL_SUCCESS
+                else final_status.value
+            )
             await _update_heartbeat_and_step(
-                db, job_run, final_status.value, worker_id,
+                db, job_run, _step, worker_id,
             )
             await db.commit()
 

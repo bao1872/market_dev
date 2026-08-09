@@ -172,6 +172,7 @@ async def _create_dsa_strategy_run(
     return dsa_run, version.id
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_create_after_close_run_writes_queued_event(db_session) -> None:
     """测试 1：create_after_close_run 创建任务并写入 queued 事件。
@@ -223,6 +224,7 @@ async def test_create_after_close_run_writes_queued_event(db_session) -> None:
     assert "盘后编排" in queued_events[0].message
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_create_after_close_run_returns_existing_on_duplicate(db_session) -> None:
     """测试 1.1：create_after_close_run 在 acquire_job_run_lock 返回 (existing, False) 时直接返回已有任务。
@@ -260,6 +262,7 @@ async def test_create_after_close_run_returns_existing_on_duplicate(db_session) 
     assert result.status == "running"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_get_after_close_run_status_returns_events(db_session) -> None:
     """测试 2：get_after_close_run_status 返回编排状态 + 事件时间线。
@@ -315,6 +318,7 @@ async def test_get_after_close_run_status_returns_events(db_session) -> None:
     assert result["events"][2]["step"] == AfterCloseRunStatus.QUEUED.value
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_retry_after_close_run_writes_event(db_session) -> None:
     """测试 3：retry_after_close_run 重置 failed 任务并写入 queued 事件。
@@ -348,6 +352,7 @@ async def test_retry_after_close_run_writes_event(db_session) -> None:
     assert "重试" in queued_events[-1].message
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_cancel_after_close_run_idempotent_on_terminal_state(db_session) -> None:
     """cancel 对终态任务幂等返回当前事实，不重复改状态、不抛错。
@@ -377,6 +382,7 @@ async def test_cancel_after_close_run_idempotent_on_terminal_state(db_session) -
     assert meta["orchestrator_status"] != AfterCloseRunStatus.CANCELLED.value
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_cancel_after_close_run_fences_worker_and_records_audit(db_session) -> None:
     """cancel 运行中任务：fence 旧 Worker（lease_epoch+1）+ 记录 actor/reason/request_id。
@@ -414,6 +420,7 @@ async def test_cancel_after_close_run_fences_worker_and_records_audit(db_session
     assert meta["cancel_request_id"] == "req-cancel-1"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_reconcile_running_with_stale_heartbeat_becomes_interrupted(db_session) -> None:
     """reconcile 运行中但心跳 stale 的任务 → 标记 interrupted + fence 旧 Worker。
@@ -448,6 +455,7 @@ async def test_reconcile_running_with_stale_heartbeat_becomes_interrupted(db_ses
     assert meta["reconcile_request_id"] == "req-reconcile-1"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_reconcile_running_with_fresh_heartbeat_stays_running(db_session) -> None:
     """reconcile 心跳新鲜的任务 → 保持 running，不误判 interrupted。
@@ -475,6 +483,7 @@ async def test_reconcile_running_with_fresh_heartbeat_stays_running(db_session) 
     assert result.lease_epoch == 1
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_writes_status_events(db_session) -> None:
     """测试 4：execute_after_close_run 成功路径写入各步骤事件。
@@ -586,6 +595,7 @@ async def test_execute_writes_status_events(db_session) -> None:
     assert job_run.finished_at is not None
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_failure_writes_failed_event(db_session) -> None:
     """测试 5：execute_after_close_run 失败路径写入 failed 事件。
@@ -642,6 +652,7 @@ async def test_execute_failure_writes_failed_event(db_session) -> None:
     assert job_run.finished_at is not None
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_feature_snapshot_failure_skips_publishing(db_session) -> None:
     """测试 5.1：feature_snapshot 失败比例超阈值时不应进入 publishing。
@@ -753,6 +764,7 @@ async def test_execute_feature_snapshot_failure_skips_publishing(db_session) -> 
     )
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_feature_snapshot_success_creates_succeeded_run(db_session) -> None:
     """[Phase7 测试 6] after_close feature_snapshot 成功写 run.status='succeeded'。
@@ -862,6 +874,7 @@ async def test_execute_feature_snapshot_success_creates_succeeded_run(db_session
     assert run.failed_count == 0
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_compute_for_trade_date_not_passed_dsa_run_id_kwarg(db_session) -> None:
     """[BUGFIX] 验证 compute_for_trade_date 不接收 dsa_run_id / strategy_version_id kwargs。
@@ -978,6 +991,7 @@ async def test_compute_for_trade_date_not_passed_dsa_run_id_kwarg(db_session) ->
     assert "snapshot_run_id" in call_kwargs, "应传递 snapshot_run_id"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_feature_snapshot_failure_creates_failed_run(db_session) -> None:
     """[Phase7 测试 7] after_close feature_snapshot 失败写 run.status='failed' 且不 publishing。
@@ -1094,6 +1108,7 @@ async def test_execute_feature_snapshot_failure_creates_failed_run(db_session) -
     assert job_run.status == "failed"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> None:
     """测试 6：长阶段（refresh_all_instruments）执行期间应启动后台心跳任务，防止 watchdog 误判 stale。
@@ -1217,6 +1232,7 @@ async def test_execute_starts_heartbeat_loop_during_long_refresh(db_session) -> 
     assert refresh_started.is_set(), "refresh_all_instruments 应被调用"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
     """[Heartbeat] feature_snapshot 阶段应启动后台心跳任务，防止租约过期。
@@ -1333,6 +1349,7 @@ async def test_feature_snapshot_stage_starts_heartbeat_loop(db_session) -> None:
     assert snapshot_started.is_set(), "compute_for_trade_date 应被调用"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata(
     db_session,
@@ -1455,6 +1472,7 @@ async def test_feature_snapshot_progress_callback_updates_heartbeat_and_metadata
     assert meta["last_started_step"] == AfterCloseRunStatus.COMPUTING_FEATURES.value
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_repair_stale_snapshot_run_marks_failed_when_orchestrator_interrupted(
     db_session,
@@ -1547,6 +1565,7 @@ async def test_repair_stale_snapshot_run_marks_failed_when_orchestrator_interrup
     assert snapshot_run.metadata_.get("reason") == "orchestrator_interrupted_or_lease_expired"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_repair_stale_snapshot_run_succeeds_when_enough_snapshots(
     db_session,
@@ -1633,6 +1652,7 @@ async def test_repair_stale_snapshot_run_succeeds_when_enough_snapshots(
     assert snapshot_run.published_at is not None
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_repair_skips_running_orchestrator(db_session) -> None:
     """[Repair] orchestrator 仍在 running 时不应修复 snapshot_run。"""
@@ -1667,6 +1687,7 @@ async def test_repair_skips_running_orchestrator(db_session) -> None:
     assert snapshot_run.status == STATUS_RUNNING
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_repair_skips_fresh_running_snapshot_run(db_session) -> None:
     """[Repair] 刚启动的 running snapshot_run 不应被修复（未超过 stale 阈值）。"""
@@ -1702,6 +1723,7 @@ async def test_repair_skips_fresh_running_snapshot_run(db_session) -> None:
     assert snapshot_run.status == STATUS_RUNNING
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_repair_clears_stuck_run_before_new_after_close(db_session) -> None:
     """[Repair] stuck running snapshot_run 不应阻塞新的 after_close 执行。
@@ -1826,6 +1848,7 @@ async def test_repair_clears_stuck_run_before_new_after_close(db_session) -> Non
     assert len(succeeded_runs) == 1
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_calls_repair_at_start(db_session) -> None:
     """[Repair] execute_after_close_run 启动时会先调用 repair_stale_after_close_snapshot_runs。"""
@@ -1914,6 +1937,7 @@ async def test_execute_calls_repair_at_start(db_session) -> None:
 # =============================================================================
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_c5_publishing_failure_skips_event_generation(db_session) -> None:
     """C5: publishing 失败时不生成状态事件。
@@ -2009,6 +2033,7 @@ async def test_c5_publishing_failure_skips_event_generation(db_session) -> None:
     )
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_c5_publishing_success_generates_events_once(db_session) -> None:
     """C5: publishing 成功后生成状态事件且仅生成一次。
@@ -2114,6 +2139,7 @@ async def test_c5_publishing_success_generates_events_once(db_session) -> None:
     assert job_run.status == "succeeded"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_p0_publish_failure_marks_snapshot_run_failed_no_events(
     db_session,
@@ -2233,6 +2259,7 @@ async def test_p0_publish_failure_marks_snapshot_run_failed_no_events(
     assert run.published_at is None, "failed run 不应写 published_at"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_p0_publish_success_finalizes_snapshot_run_succeeded(
     db_session,
@@ -2364,6 +2391,7 @@ async def test_p0_publish_success_finalizes_snapshot_run_succeeded(
 # =============================================================================
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_repair_counts_by_source_run_id_only(db_session) -> None:
     """[P0-1] repair 统计实际行数必须限定 source_run_id == snapshot_run.id。
@@ -2463,6 +2491,7 @@ async def test_repair_counts_by_source_run_id_only(db_session) -> None:
     assert repaired_b[0]["action"] == "failed"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_repair_does_not_succeed_when_dsa_not_published(db_session) -> None:
     """[P0-2] DSA 未 publish 时不得把 running snapshot run 标记 succeeded。
@@ -2548,6 +2577,7 @@ async def test_repair_does_not_succeed_when_dsa_not_published(db_session) -> Non
     assert snapshot_run.published_at is None, "DSA 未 publish 时不得写 published_at"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_repair_returns_resume_pending_for_tracked_run(db_session) -> None:
     """[P0-2] metadata 中 feature_snapshot_run_id 匹配的 running snapshot run →
@@ -2637,6 +2667,7 @@ async def test_repair_returns_resume_pending_for_tracked_run(db_session) -> None
     assert snapshot_run.published_at is None
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_resume_from_feature_snapshot_reads_actual_count(db_session) -> None:
     """[P0-3] 断点从 last_completed_step='feature_snapshot' 恢复发布时，
@@ -2784,6 +2815,7 @@ async def test_resume_from_feature_snapshot_reads_actual_count(db_session) -> No
     assert snapshot_run.expected_count == expected_count, "expected_count 应保留"
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
     """[P0-4/5] queued 同一 job 恢复且不新建 run + 已完成阶段不重复执行。
@@ -2922,6 +2954,7 @@ async def test_resume_skips_completed_steps_no_new_run(db_session) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 @patch.object(
     CoreArtifactRepository, "project_dsa_batch",
@@ -3107,6 +3140,7 @@ async def test_ac04_daily_ready_15m_missing_allows_proceed(_chip_mock) -> None:
     assert "orchestrator:" in str(create_kwargs.get("claim_for_worker"))
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_ac04_daily_missing_blocks() -> None:
     """[AC-04] 日线未就绪 → 阻塞 after-close run。
@@ -3244,6 +3278,7 @@ def test_ac04_no_intraday_readiness_in_after_close_source() -> None:
     )
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_run_called_after_mfcs_transitions_dsa_to_completed(db_session) -> None:
     """[CHANGE-20260728-007] 验证 running→completed 闭环：MFCS 后调用 execute_run。
@@ -3361,6 +3396,7 @@ async def test_execute_run_called_after_mfcs_transitions_dsa_to_completed(db_ses
     )
 
 
+@pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_execute_run_failure_marks_dsa_failed_skips_publish(db_session) -> None:
     """[CHANGE-20260728-007] 验证 execute_run 失败时 DSA run 标记 failed，不调用 publish_run。
@@ -3444,6 +3480,158 @@ async def test_execute_run_failure_marks_dsa_failed_skips_publish(db_session) ->
     # 2. publish_run 不得被调用（不得在 publish 前伪造 completed）
     assert not publish_run_spy.called, (
         "execute_run 失败后不得调用 publish_run（不得在 publish 前伪造 completed）"
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_checkpoint_semantics_partial_success_preserves_last_step(db_session) -> None:
+    """CHECKPOINT-SEMANTICS-01 CASE A: partial_success 不得覆写 last_completed_step。
+
+    当前 checkpoint="publishing"，final_status=PARTIAL_SUCCESS 时：
+    - orchestrator_status → "partial_success"
+    - last_completed_step → "publishing"（保留，不被 "partial_success" 覆盖）
+
+    对比 INTERRUPTED/CANCELLED 路径已有的 preserve 语义（传 None）。
+    """
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        _update_heartbeat_and_step,
+    )
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.PUBLISHING.value,
+    )
+    meta = json.loads(job_run.metadata_json)
+    meta["last_completed_step"] = "publishing"
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db_session.flush()
+
+    # 模拟 partial_success 终态写入路径
+    job_run.status = AfterCloseRunStatus.PARTIAL_SUCCESS.value
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    step = (
+        None
+        if AfterCloseRunStatus.PARTIAL_SUCCESS == AfterCloseRunStatus.PARTIAL_SUCCESS
+        else "unreachable"
+    )
+    await _update_heartbeat_and_step(db_session, job_run, step, "test-worker")
+    await db_session.flush()
+
+    meta_after = json.loads(job_run.metadata_json)
+    assert meta_after.get("last_completed_step") == "publishing", (
+        f"partial_success 不得覆写 last_completed_step，"
+        f"实际={meta_after.get('last_completed_step')}"
+    )
+    assert job_run.status == AfterCloseRunStatus.PARTIAL_SUCCESS.value
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_checkpoint_semantics_partial_success_preserves_computing_review(
+    db_session,
+) -> None:
+    """CHECKPOINT-SEMANTICS-01 CASE B: checkpoint="computing_review" + partial_success。
+
+    验证无论当前 checkpoint 是什么，partial_success 都不覆写。
+    """
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        _update_heartbeat_and_step,
+    )
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.COMPUTING_REVIEW.value,
+    )
+    meta = json.loads(job_run.metadata_json)
+    meta["last_completed_step"] = "computing_review"
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db_session.flush()
+
+    job_run.status = AfterCloseRunStatus.PARTIAL_SUCCESS.value
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await _update_heartbeat_and_step(db_session, job_run, None, "test-worker")
+    await db_session.flush()
+
+    meta_after = json.loads(job_run.metadata_json)
+    assert meta_after.get("last_completed_step") == "computing_review", (
+        "partial_success 不得覆写 computing_review checkpoint"
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_checkpoint_semantics_succeeded_still_advances_checkpoint(
+    db_session,
+) -> None:
+    """CHECKPOINT-SEMANTICS-01 CASE C: normal succeeded 仍推进 last_completed_step。
+
+    非 partial_success 的正常终态，last_completed_step 按原 contract 推进。
+    """
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        _update_heartbeat_and_step,
+    )
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.PUBLISHING.value,
+    )
+    meta = json.loads(job_run.metadata_json)
+    meta["last_completed_step"] = "publishing"
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db_session.flush()
+
+    job_run.status = AfterCloseRunStatus.SUCCEEDED.value
+    job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await _update_heartbeat_and_step(
+        db_session, job_run, AfterCloseRunStatus.SUCCEEDED.value, "test-worker",
+    )
+    await db_session.flush()
+
+    meta_after = json.loads(job_run.metadata_json)
+    assert meta_after.get("last_completed_step") == "succeeded", (
+        "succeeded 终态必须推进 last_completed_step"
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_checkpoint_semantics_interrupted_preserves_checkpoint(
+    db_session,
+) -> None:
+    """CHECKPOINT-SEMANTICS-01 CASE D: INTERRUPTED/CANCELLED preserve 不回归。
+
+    验证已有的 preserve 语义（传 None）在 interrupted/cancelled 路径不受影响。
+    """
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        _update_heartbeat_and_step,
+    )
+
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="running",
+        orchestrator_status=AfterCloseRunStatus.PUBLISHING.value,
+    )
+    meta = json.loads(job_run.metadata_json)
+    meta["last_completed_step"] = "publishing"
+    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+    await db_session.flush()
+
+    # 模拟 INTERRUPTED 路径：传 None 保留检查点
+    await _update_heartbeat_and_step(db_session, job_run, None, "test-worker")
+    await db_session.flush()
+
+    meta_after = json.loads(job_run.metadata_json)
+    assert meta_after.get("last_completed_step") == "publishing", (
+        "INTERRUPTED 路径必须保留原检查点（不得回归）"
     )
 
 
