@@ -875,18 +875,51 @@ stock_core published
 
 ### 11.1 发布门禁
 
+本节与 §6.3.8「Review MVP 发布就绪门禁（Phase 4C 校正）」构成同一份合同；
+§6.3.8 为语义定义，本节为门禁判定规则。两者不得出现相反规则。
+
 单scope：
 
 - underlying coverage >= 0.95
 - P/Q/U/C/V必要组件状态可用
 
-整套Review：
+整套Review（渐进式 scope readiness）：
 
-- market范围必须ready；
-- 配置的主要指数和风格范围必须ready；
-- 一级行业ready比例达到配置门槛；
+**1. MANDATORY — market（HARD GATE）**
+
+- `market` scope 必须存在且状态 `ready`，并满足 market coverage/quality 要求
+  （含 P/Q/U/C/V 五项 `normalized_ready`）；
+- market missing / not ready / coverage 低于强制门槛
+  → **whole Review publication CLOSED**。
+
+**2. PROGRESSIVE OPTIONAL — industry_l1 / major_index / style**
+
+- 真实就绪 → 正常参与产品输出；
+- PIT unavailable / `insufficient_history` / `blocked_external_population` /
+  `bootstrap_unavailable` / skipped
+  → 记录为 **scope-level diagnostic / unavailable**，保留真实状态；
+- 上述 optional unavailable **不得阻塞** whole Review MVP publication；
+- 禁止把 optional scope 状态伪装成 `ready`。
+
+**3. UNEXPECTED EXECUTION FAILURE 仍然阻塞**
+
+- 任何 scope（含 optional）出现非预期执行失败或非终态
+  （`failed` / `pending` / `running`）
+  → **whole Review publication CLOSED**；
+- optional 语义只豁免「数据源不可用」，不豁免「执行异常」。
+
+**4. 数据来源硬约束**
+
+- 禁止 current membership × historical date 回填；
+- 禁止 latest snapshot backfill / forward-fill 冒充 PIT 成员。
+
+**5. 其他整套条件（不变）**
+
 - signal evaluation无系统性异常；
 - source_core_run_id和source_board_run_id均指向当前正式pointer。
+
+> 说明：Phase 4C 之前的旧规则「配置的主要指数和风格范围必须ready 
+> / 一级行业ready比例达到配置门槛」已按 §6.3.8 废止，不再作为 whole-Review 硬门。
 
 ## 12. API合同
 
