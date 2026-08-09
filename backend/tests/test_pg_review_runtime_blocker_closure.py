@@ -433,7 +433,7 @@ def _mock_external_phase_boundary():
             new=AsyncMock(return_value=fake_review_run.id),
         ),
         patch(
-            "app.services.after_close_orchestrator.compute_review_core_with_run_items",
+            "app.services.feature_snapshot_service.compute_review_core_with_run_items",
             new=AsyncMock(return_value={}),
         ),
         patch(
@@ -538,7 +538,7 @@ async def test_pg6_actual_resume_no_recompute(db_session) -> None:
         return {}
 
     with patch(
-        "app.services.after_close_orchestrator.compute_review_core_with_run_items",
+        "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=_spy_compute,
     ):
         try:
@@ -677,7 +677,7 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
 
     # 第一次执行（可能中断，但 compute 已跳过）
     with patch(
-        "app.services.after_close_orchestrator.compute_review_core_with_run_items",
+        "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=_spy_compute,
     ):
         try:
@@ -688,7 +688,7 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
     first_calls = compute_calls["n"]
     # 第二次 resume：last_completed_step 应已推进，compute 仍不调用
     with patch(
-        "app.services.after_close_orchestrator.compute_review_core_with_run_items",
+        "app.services.feature_snapshot_service.compute_review_core_with_run_items",
         new=_spy_compute,
     ):
         try:
