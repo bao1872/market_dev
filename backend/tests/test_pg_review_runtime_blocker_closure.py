@@ -666,14 +666,16 @@ async def test_pg_resume_integration() -> None:
         last_step = status.get("last_completed_step", "")
         orch_status = status.get("orchestrator_status", "")
         assert downstream_reached, "downstream entry 必须触发"
+        # orchestrator 应推进到 publishing 或其后（partial_success 表示核心发布完成但下游部分跳过）
+        acceptable_statuses = {
+            AfterCloseRunStatus.PUBLISHING.value,
+            AfterCloseRunStatus.COMPUTING_REVIEW.value,
+            AfterCloseRunStatus.SUCCEEDED.value,
+            AfterCloseRunStatus.PARTIAL_SUCCESS.value,
+        }
         assert (
             "publishing" in last_step
-            or orch_status
-            in (
-                AfterCloseRunStatus.PUBLISHING.value,
-                AfterCloseRunStatus.COMPUTING_REVIEW.value,
-                AfterCloseRunStatus.SUCCEEDED.value,
-            )
+            or orch_status in acceptable_statuses
         ), (
             f"orchestrator 未推进到 publishing: "
             f"last_completed_step={last_step}, orchestrator_status={orch_status}"
