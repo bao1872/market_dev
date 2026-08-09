@@ -672,7 +672,7 @@ async def test_pg_resume_integration() -> None:
             in (
                 AfterCloseRunStatus.PUBLISHING.value,
                 AfterCloseRunStatus.COMPUTING_REVIEW.value,
-                AfterCloseRunStatus.COMPLETED.value,
+                AfterCloseRunStatus.SUCCEEDED.value,
             )
         ), (
             f"orchestrator 未推进到 publishing: "
