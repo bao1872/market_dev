@@ -208,8 +208,9 @@ async def _make_snapshot_run_with_items(
         for _ in range(n):
             db_session.add(
                 StockFeatureSnapshotRunItem(
-                    run_id=run.id,
+                    snapshot_run_id=run.id,
                     instrument_id=inst_ids[idx],
+                    phase="core",
                     status=st,
                 )
             )
