@@ -1094,7 +1094,8 @@ async def test_recovery_checkpoint_refuse_dsa_failed_item() -> None:
         )
 
     assert result["ok"] is False
-    assert "failed" in str(result.get("refuse", "")).lower()
+    assert result["ok"] is False
+    assert "5282" in str(result.get("refuse", ""))
 
     async with AsyncSessionLocal() as reader_db:
         job = await reader_db.get(SchedulerJobRun, job_run_id)
