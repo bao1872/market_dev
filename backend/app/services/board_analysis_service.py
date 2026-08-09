@@ -67,6 +67,7 @@ from app.services.factor_publication_service import (
     publish_market_aggregation,
 )
 from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
+from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
 
 logger = logging.getLogger("board_analysis_service")
 
@@ -680,6 +681,10 @@ async def _compute_state_transitions(
                 FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
                 FirstPyramidHistoryEvent.event_time.isnot(None),
                 FirstPyramidHistoryEvent.event_time.like(date_prefix),
+                # [CHANGE-20260808] event contract isolation：只消费指定 canonical
+                # history contract（BOS/CHoCH/SQZ_RELEASE 计数），禁止旧 NULL/v1 + v2 双计。
+                FirstPyramidHistoryEvent.history_contract_version
+                == HISTORY_CONTRACT_VERSION,
             )
         )
     ).all()
@@ -774,6 +779,10 @@ async def _compute_freshness_density(
                 FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
                 FirstPyramidHistoryEvent.event_time.isnot(None),
                 FirstPyramidHistoryEvent.event_time >= start_iso,
+                # [CHANGE-20260808] event contract isolation：freshness density 只计
+                # 指定 canonical history contract，禁止旧 NULL/v1 + v2 双计。
+                FirstPyramidHistoryEvent.history_contract_version
+                == HISTORY_CONTRACT_VERSION,
             )
         )
     ).all()

@@ -193,6 +193,60 @@ def _collect_canonical_source_run(
     return {"status": "one", "run_id": uuid.UUID(next(iter(source_run_ids)))}
 
 
+async def _validate_canonical_history_run(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    required_history_contract_version: str,
+) -> dict[str, Any]:
+    """[CHANGE-20260808] §5 canonical HistoryRun runtime contract。
+
+    要求（全部满足才 ok）：
+    - run exists
+    - run.scope == 'all_a_share'
+    - run.status == 'succeeded'
+    - run.metadata_json.history_contract_version == required
+
+    不满足 → 返回 {status:'not_ready', reason: ...}（fail closed）。
+    不机械要求 succeeded_count == expected_count（由 HistoryRun status contract 保证）。
+    """
+    import json as _json
+
+    from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
+
+    run = (
+        await session.execute(
+            select(FirstPyramidHistoryRun).where(FirstPyramidHistoryRun.id == run_id)
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        return {"status": "not_ready", "reason": "history_source_run_not_found"}
+    if run.scope != "all_a_share":
+        return {
+            "status": "not_ready",
+            "reason": f"history_source_run_wrong_scope:{run.scope}",
+        }
+    if run.status != "succeeded":
+        return {
+            "status": "not_ready",
+            "reason": f"history_source_run_not_succeeded:{run.status}",
+        }
+    meta = {}
+    if isinstance(run.metadata_json, str) and run.metadata_json:
+        try:
+            meta = _json.loads(run.metadata_json)
+        except ValueError:
+            meta = {}
+    elif isinstance(run.metadata_json, dict):
+        meta = run.metadata_json
+    run_contract = meta.get("history_contract_version")
+    if run_contract != required_history_contract_version:
+        return {
+            "status": "not_ready",
+            "reason": f"history_source_run_wrong_contract:{run_contract}",
+        }
+    return {"status": "ok", "run_id": run_id}
+
+
 def compute_input_hash(
     *,
     end_date: date,
@@ -340,7 +394,7 @@ async def bootstrap_single_date(
     session: AsyncSession,
     *,
     trade_date: date,
-    source_core_run_id: uuid.UUID | None,
+    source_core_run_id: uuid.UUID | None = None,
     source_board_run_id: uuid.UUID | None = None,
     dry_run: bool = True,
     audit: dict[str, Any] | None = None,
@@ -373,6 +427,44 @@ async def bootstrap_single_date(
             "scopes": [],
             "written": False,
         }
+
+    # [CHANGE-20260808] §4/§5：load_day_fact_maps 后立即确定 canonical source run
+    # 并校验 HistoryRun readiness，然后才进入 scope loop / load_metric_history。
+    # historical normalization 从第一步就知道自己属于哪一个 canonical HistoryRun。
+    canonical_collect = _collect_canonical_source_run(list(facts_by_instrument.values()))
+    if canonical_collect["status"] == "missing":
+        return {
+            "trade_date": trade_date.isoformat(),
+            "run_id": None,
+            "status": "bootstrap_unavailable",
+            "reason": "history_source_run_missing",
+            "scopes": [],
+            "written": False,
+        }
+    if canonical_collect["status"] == "mixed":
+        return {
+            "trade_date": trade_date.isoformat(),
+            "run_id": None,
+            "status": "failed",
+            "reason": "history_source_run_mixed",
+            "scopes": [],
+            "written": False,
+        }
+    canonical_source_run_id = canonical_collect["run_id"]
+    history_contract_version = HISTORY_CONTRACT_VERSION
+    readiness = await _validate_canonical_history_run(
+        session, canonical_source_run_id, history_contract_version,
+    )
+    if readiness["status"] != "ok":
+        return {
+            "trade_date": trade_date.isoformat(),
+            "run_id": None,
+            "status": "bootstrap_unavailable",
+            "reason": readiness["reason"],
+            "scopes": [],
+            "written": False,
+        }
+
     for scope in scopes:
         try:
             if scope.scope_type == "market":
@@ -410,6 +502,7 @@ async def bootstrap_single_date(
             baseline_window=DEFAULT_BASELINE_WINDOW,
             required_history_contract_version=HISTORY_CONTRACT_VERSION,
             required_taxonomy_compatibility_key=scope.taxonomy_compatibility_key,
+            required_source_history_run_id=canonical_source_run_id,
         )
         payloads = compute_all_metrics(
             flat_list, ready_count=ready_count,
@@ -451,32 +544,8 @@ async def bootstrap_single_date(
         }
 
     # [CHANGE-20260808] Historical baseline apply（M2 dual lineage）：
+    # canonical_source_run_id 已在 scope loop 前确定并校验（§4/§5），此处直接使用。
     # 不再伪造 stock_core/board publication 或 MarketReviewRun。
-    # 使用 canonical HistoryRun（source_history_run_id）。
-    # 所有 participating current facts 必须来自同一个 canonical history run，
-    # 否则 HISTORY_SOURCE_RUN_MIXED fail closed。
-    canonical_collect = _collect_canonical_source_run(list(facts_by_instrument.values()))
-    if canonical_collect["status"] == "missing":
-        return {
-            "trade_date": trade_date.isoformat(),
-            "run_id": None,
-            "status": "bootstrap_unavailable",
-            "reason": "history_source_run_missing",
-            "scopes": scope_results,
-            "written": False,
-        }
-    if canonical_collect["status"] == "mixed":
-        return {
-            "trade_date": trade_date.isoformat(),
-            "run_id": None,
-            "status": "failed",
-            "reason": "history_source_run_mixed",
-            "scopes": scope_results,
-            "written": False,
-        }
-    canonical_source_run_id = canonical_collect["run_id"]
-    history_contract_version = HISTORY_CONTRACT_VERSION
-
     for scope, flat_list, _eligible_count, _ready_count, _coverage, _status, payloads in computed:
         # [CHANGE-20260808] HISTORY_REPLAY observation（review_run_id=NULL，
         # source_history_run_id=canonical run，history_contract_version=required）。

@@ -40,6 +40,7 @@ async def persist_metric_observations(
     algorithm_version: str,
     flat_list: list[dict[str, Any]],
     payloads: dict[str, dict[str, Any]],
+    taxonomy_compatibility_key: str | None = None,
 ) -> int:
     """Idempotently persist every component raw value and the normalized metric value."""
     input_hash = build_member_input_hash(flat_list)
@@ -53,6 +54,7 @@ async def persist_metric_observations(
                 {
                     "source_kind": "live",
                     "review_run_id": review_run_id,
+                    "taxonomy_compatibility_key": taxonomy_compatibility_key,
                     "trade_date": trade_date,
                     "scope_type": scope_type,
                     "scope_key": scope_key,
@@ -75,6 +77,7 @@ async def persist_metric_observations(
             {
                 "source_kind": "live",
                 "review_run_id": review_run_id,
+                "taxonomy_compatibility_key": taxonomy_compatibility_key,
                 "trade_date": trade_date,
                 "scope_type": scope_type,
                 "scope_key": scope_key,
@@ -112,6 +115,7 @@ async def persist_metric_observations(
                 "algorithm_version": stmt.excluded.algorithm_version,
                 "input_hash": stmt.excluded.input_hash,
                 "membership_version": stmt.excluded.membership_version,
+                "taxonomy_compatibility_key": stmt.excluded.taxonomy_compatibility_key,
                 "status": stmt.excluded.status,
             },
         )
@@ -217,6 +221,10 @@ async def persist_history_replay_observations(
                 "algorithm_version": stmt.excluded.algorithm_version,
                 "input_hash": stmt.excluded.input_hash,
                 "membership_version": stmt.excluded.membership_version,
+                # [CHANGE-20260808] §8：rerun 后同步更新 compatible-series metadata，
+                # 防止残留旧值。
+                "history_contract_version": stmt.excluded.history_contract_version,
+                "taxonomy_compatibility_key": stmt.excluded.taxonomy_compatibility_key,
                 "status": stmt.excluded.status,
             },
         )
@@ -235,6 +243,7 @@ async def load_metric_history(
     baseline_window: int,
     required_history_contract_version: str | None = None,
     required_taxonomy_compatibility_key: str | None = None,
+    required_source_history_run_id: uuid.UUID | None = None,
 ) -> tuple[
     dict[str, dict[str, list[float]]] | None,
     dict[str, float] | None,
@@ -303,6 +312,13 @@ async def load_metric_history(
         if o.review_run_id is not None:
             published, status = run_status.get(o.review_run_id, (False, ""))
             if published and status == "published":
+                # [CHANGE-20260808] §7：published LIVE 只有在 taxonomy compatibility
+                # 与 target required 兼容时才 rank=0。不兼容 published LIVE 不得覆盖
+                # compatible HISTORY_REPLAY（其 taxonomy 由 _replay_compatible 已保证）。
+                if required_taxonomy_compatibility_key is not None:
+                    live_taxo = getattr(o, "taxonomy_compatibility_key", None)
+                    if live_taxo != required_taxonomy_compatibility_key:
+                        return 2  # 不兼容 live → 排除（让 replay rank=1 胜出）
                 return 0
         return 2  # 非 canonical live → 排除
 
@@ -312,6 +328,10 @@ async def load_metric_history(
     def _replay_compatible(o: MarketReviewMetricObservation) -> bool:
         if getattr(o, "source_kind", "live") != "history_replay":
             return True  # live 走 canonical rank
+        if required_source_history_run_id is not None:
+            src_run = getattr(o, "source_history_run_id", None)
+            if src_run != required_source_history_run_id:
+                return False
         if required_history_contract_version is not None:
             ver = getattr(o, "history_contract_version", None)
             if ver != required_history_contract_version:

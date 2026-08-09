@@ -165,3 +165,7 @@ def downgrade() -> None:
     # ---- 1. daily_state lineage ----
     op.drop_column(_STATE_TABLE, "history_contract_version")
     op.drop_column(_STATE_TABLE, "source_history_run_id")
+
+    # [CHANGE-20260808] event contract isolation（§7）逆序：drop event contract column，
+    # 保证 087 → upgrade 088 → downgrade 真实恢复 087 schema。
+    op.drop_column("first_pyramid_history_events", "history_contract_version")

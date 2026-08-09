@@ -858,22 +858,42 @@ async def load_day_fact_maps(
             FirstPyramidHistoryDailyState.trade_date.desc(),
         )
     )
-    previous_by_instrument = {
-        state.instrument_id: state.state_payload
-        for state in (await session.execute(previous_stmt)).scalars()
+    # [CHANGE-20260808] §3：保留 previous 的 ORM state（不立即转 payload），
+    # 以便校验 source_history_run_id 与 current 相同。
+    previous_states = list((await session.execute(previous_stmt)).scalars())
+    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {
+        state.instrument_id: state for state in previous_states
     }
 
-    # [CHANGE-20260808] previous state contract guard：previous 若存在，其
-    # history_contract_version 也必须匹配 required version。
-    # 禁止 current=v2 + previous=v1 进入 review_previous_first_pyramid（fail closed）。
-    for _prev in previous_by_instrument.values():
-        _ver = (_prev or {}).get("history_contract_version")
+    # [CHANGE-20260808] previous state source-run guard（§3）：
+    # previous 若存在：history_contract_version == required 且
+    # source_history_run_id == current.source_history_run_id。
+    # 禁止 current=v2 + previous=v1，或 previous 来自不同 source run。
+    for _state in current_by_instrument.values():
+        _prev = previous_by_instrument.get(_state.instrument_id)
+        if _prev is None:
+            continue
+        _cur_run = getattr(_state, "source_history_run_id", None)
+        _prev_run = getattr(_prev, "source_history_run_id", None)
+        if _cur_run is None or _prev_run != _cur_run:
+            raise ValueError(
+                f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: current source run="
+                f"{_cur_run!r} previous source run={_prev_run!r} "
+                f"for instrument={_state.instrument_id} trade_date={trade_date}"
+            )
+        _ver = getattr(_prev, "history_contract_version", None) or (
+            _prev.state_payload or {}
+        ).get("history_contract_version")
         if _ver != _REVIEW_HISTORY_CONTRACT_VERSION:
             raise ValueError(
                 f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
                 f"expected={_REVIEW_HISTORY_CONTRACT_VERSION} got={_ver!r} "
                 f"for trade_date={trade_date}"
             )
+    # 校验通过后，previous 转 payload 供 adapter 消费
+    previous_payloads: dict[uuid.UUID, dict[str, Any]] = {
+        iid: state.state_payload for iid, state in previous_by_instrument.items()
+    }
 
     # 3. current BarDaily（trade_date == target_date）
     # [CHANGE-20260808] 固定 5 个 date-level batch queries（正确性优先）：
@@ -938,7 +958,7 @@ async def load_day_fact_maps(
             "review_amount": current.amount if current else None,
             "review_volume": current.volume if current else None,
             "review_previous_first_pyramid": previous_state_to_flat(
-                previous_by_instrument.get(instrument_id),
+                previous_payloads.get(instrument_id),
             ),
             "_instrument_id": str(instrument_id),
             "_instrument_symbol": identity.symbol,

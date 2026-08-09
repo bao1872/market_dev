@@ -24,15 +24,20 @@ from app.services.review_scope_service import load_day_fact_maps
 
 
 class _State:
-    def __init__(self, instrument_id: uuid.UUID, trade_date: date, payload: dict) -> None:
+    def __init__(
+        self, instrument_id: uuid.UUID, trade_date: date, payload: dict,
+        source_history_run_id: uuid.UUID | None = None,
+    ) -> None:
         self.id = uuid.uuid4()
         self.instrument_id = instrument_id
         self.trade_date = trade_date
         self.state_payload = payload
         self.input_hash = "hash-x"
         # [CHANGE-20260808] M2 lineage columns
-        self.source_history_run_id = uuid.uuid4()
-        self.history_contract_version = "review-history-v2"
+        self.source_history_run_id = source_history_run_id or uuid.uuid4()
+        self.history_contract_version = (
+            payload.get("history_contract_version") if payload else None
+        )
 
 
 class _Bar:
@@ -62,6 +67,8 @@ def _make_session(
     """构造 mock AsyncSession：按调用顺序返回 5 次 date-level 批量查询结果。"""
     session = MagicMock()
     call_count = {"n": 0}
+    # [CHANGE-20260808] §3：current 与 previous 复用同一 canonical source run
+    shared_run_id = uuid.uuid4()
 
     async def fake_execute(stmt):
         call_count["n"] += 1
@@ -73,7 +80,7 @@ def _make_session(
                 **(current_payload or {}),
             }
             states = [
-                _State(inst, date(2026, 8, 4), _payload)
+                _State(inst, date(2026, 8, 4), _payload, source_history_run_id=shared_run_id)
                 for inst in instruments
             ]
             fake_result.scalars.return_value = MagicMock(
@@ -86,7 +93,7 @@ def _make_session(
                 **(previous_payload or {"regime_value": 1}),
             }
             prev = [
-                _State(inst, date(2026, 8, 3), _prev_payload)
+                _State(inst, date(2026, 8, 3), _prev_payload, source_history_run_id=shared_run_id)
                 for inst in instruments
             ]
             fake_result.scalars.return_value = MagicMock(

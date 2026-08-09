@@ -397,3 +397,413 @@ def _raise_if_replay_rows(count: int) -> None:
         raise RuntimeError(
             f"downgrade blocked: found {count} history_replay observation row(s)"
         )
+
+
+class TestPreviousSourceRunParity:
+    """§3 previous state source-run parity：current run A / previous 必须同 run。"""
+
+    def test_previous_source_run_mismatch_detected(self) -> None:
+        """current run A + previous run B（同 contract）→ fail closed。"""
+        import asyncio
+
+        from app.services.review_scope_service import load_day_fact_maps
+
+        run_a = uuid.uuid4()
+        run_b = uuid.uuid4()
+        shared_iid = uuid.uuid4()  # current 与 previous 同一 instrument
+        executed = {"n": 0}
+
+        class State:
+            def __init__(self, run_id, date_val):
+                self.id = uuid.uuid4()
+                self.instrument_id = shared_iid
+                self.trade_date = date_val
+                self.state_payload = {"regime_value": 1}
+                self.input_hash = "h"
+                self.source_history_run_id = run_id
+                self.history_contract_version = "review-history-v2"
+
+        class FakeScalars:
+            def __init__(self, rows): self.rows = rows
+            def __iter__(self): return iter(self.rows)
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            executed["n"] += 1
+            if executed["n"] == 1:  # current（run A）
+                return MagicMock(scalars=lambda: FakeScalars([State(run_a, date(2026, 8, 4))]))
+            if executed["n"] == 2:  # previous（run B → mismatch）
+                return MagicMock(scalars=lambda: FakeScalars([State(run_b, date(2026, 8, 3))]))
+            return MagicMock(scalars=lambda: FakeScalars([]))
+
+        session.execute = fake_execute
+        with pytest.raises(ValueError) as exc_info:
+            asyncio.run(load_day_fact_maps(session, trade_date=date(2026, 8, 4)))
+        assert "HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH" in str(exc_info.value)
+
+    def test_previous_source_run_same_passes(self) -> None:
+        """current run A + previous run A → PASS（不 raise）。"""
+        import asyncio
+
+        from app.services.review_scope_service import load_day_fact_maps
+
+        run_a = uuid.uuid4()
+        executed = {"n": 0}
+
+        class State:
+            def __init__(self, date_val):
+                self.id = uuid.uuid4()
+                self.instrument_id = uuid.uuid4()
+                self.trade_date = date_val
+                self.state_payload = {"regime_value": 1}
+                self.input_hash = "h"
+                self.source_history_run_id = run_a
+                self.history_contract_version = "review-history-v2"
+
+        class FakeScalars:
+            def __init__(self, rows): self.rows = rows
+            def __iter__(self): return iter(self.rows)
+
+        # 构造当前 + previous 同 run
+        current = State(date(2026, 8, 4))
+        previous = State(date(2026, 8, 3))
+        previous.instrument_id = current.instrument_id  # 同 instrument
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            executed["n"] += 1
+            if executed["n"] == 1:
+                return MagicMock(scalars=lambda: FakeScalars([current]))
+            if executed["n"] == 2:
+                return MagicMock(scalars=lambda: FakeScalars([previous]))
+            return MagicMock(scalars=lambda: FakeScalars([]))
+
+        session.execute = fake_execute
+        # 不应 raise（same source run）
+        asyncio.run(load_day_fact_maps(session, trade_date=date(2026, 8, 4)))
+
+
+class TestHistoryRunReadiness:
+    """§5 canonical HistoryRun readiness contract。"""
+
+    def _make_run(self, scope, status, contract):
+        class Run:
+            def __init__(self):
+                self.scope = scope
+                self.status = status
+                self.metadata_json = (
+                    f'{{"history_contract_version": "{contract}"}}'
+                    if contract is not None else None
+                )
+        return Run()
+
+    def test_succeeded_all_a_share_v2_ok(self) -> None:
+        import asyncio
+
+        from app.services.review_bootstrap_service import _validate_canonical_history_run
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = self._make_run(
+                "all_a_share", "succeeded", "review-history-v2",
+            )
+            return result
+
+        session.execute = fake_execute
+        res = asyncio.run(_validate_canonical_history_run(
+            session, uuid.uuid4(), "review-history-v2",
+        ))
+        assert res["status"] == "ok"
+
+    def test_running_fails(self) -> None:
+        import asyncio
+
+        from app.services.review_bootstrap_service import _validate_canonical_history_run
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = self._make_run(
+                "all_a_share", "running", "review-history-v2",
+            )
+            return result
+
+        session.execute = fake_execute
+        res = asyncio.run(_validate_canonical_history_run(
+            session, uuid.uuid4(), "review-history-v2",
+        ))
+        assert res["status"] == "not_ready"
+        assert "not_succeeded" in res["reason"]
+
+    def test_wrong_scope_fails(self) -> None:
+        import asyncio
+
+        from app.services.review_bootstrap_service import _validate_canonical_history_run
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = self._make_run(
+                "sample", "succeeded", "review-history-v2",
+            )
+            return result
+
+        session.execute = fake_execute
+        res = asyncio.run(_validate_canonical_history_run(
+            session, uuid.uuid4(), "review-history-v2",
+        ))
+        assert res["status"] == "not_ready"
+        assert "wrong_scope" in res["reason"]
+
+    def test_wrong_contract_fails(self) -> None:
+        import asyncio
+
+        from app.services.review_bootstrap_service import _validate_canonical_history_run
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = self._make_run(
+                "all_a_share", "succeeded", "review-history-v1",
+            )
+            return result
+
+        session.execute = fake_execute
+        res = asyncio.run(_validate_canonical_history_run(
+            session, uuid.uuid4(), "review-history-v2",
+        ))
+        assert res["status"] == "not_ready"
+        assert "wrong_contract" in res["reason"]
+
+    def test_not_found_fails(self) -> None:
+        import asyncio
+
+        from app.services.review_bootstrap_service import _validate_canonical_history_run
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = None
+            return result
+
+        session.execute = fake_execute
+        res = asyncio.run(_validate_canonical_history_run(
+            session, uuid.uuid4(), "review-history-v2",
+        ))
+        assert res["status"] == "not_ready"
+        assert "not_found" in res["reason"]
+
+
+class TestMigrationDowngradeSymmetry:
+    """§1 migration 088 upgrade/downgrade 对称（event column 也 drop）。"""
+
+    def test_event_contract_column_dropped_in_downgrade(self) -> None:
+        """downgrade 必须 DROP first_pyramid_history_events.history_contract_version。"""
+        import ast
+
+        path = (
+            "backend/alembic/versions/088_review_historical_lineage.py"
+        )
+        # 从仓库根相对解析
+        import os
+        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        full = os.path.join(repo, path)
+        with open(full) as f:
+            tree = ast.parse(f.read())
+
+        def _collect(func_name):
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == func_name:
+                    ops = []
+                    for stmt in ast.walk(node):
+                        if isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Attribute):
+                            ops.append((stmt.func.attr, ast.dump(stmt)))
+                    return ops
+            return []
+
+        downgrade_ops = _collect("downgrade")
+        # downgrade 必须含 drop_column（对 events 表）
+        drop_events = [
+            o for o in downgrade_ops
+            if o[0] == "drop_column" and "first_pyramid_history_events" in o[1]
+        ]
+        assert drop_events, "downgrade 缺少 DROP first_pyramid_history_events.history_contract_version"
+
+
+class TestReplayRequiredSourceRunSelection:
+    """§6 required_source_history_run_id 锁定 replay baseline。"""
+
+    def test_required_source_run_selects_only_matching(self) -> None:
+        """同 date/algorithm/contract/taxonomy，required_source_run=A → 只选 A。"""
+        import asyncio
+
+        from app.services.review_metric_observation_service import load_metric_history
+
+        run_a = uuid.uuid4()
+        run_b = uuid.uuid4()
+
+        class Obs:
+            def __init__(self, run_id, raw):
+                self.trade_date = date(2026, 8, 3)
+                self.metric_code = "P"
+                self.raw_value = raw
+                self.component_name = "core"
+                self.scope_type = "market"
+                self.scope_key = "A"
+                self.source_kind = "history_replay"
+                self.review_run_id = None
+                self.source_history_run_id = run_id
+                self.history_contract_version = "review-history-v2"
+                self.taxonomy_compatibility_key = "taxo-B"
+
+        obs_a = Obs(run_a, 1.0)
+        obs_b = Obs(run_b, 9.0)  # 同 date/scope，不同 run
+        observations = [obs_a, obs_b]
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalars.return_value = MagicMock(
+                __iter__=lambda self: iter(observations),
+            )
+            # run_status 预取：无 live observation（run_ids 空）→ 不触发
+            return result
+
+        session.execute = fake_execute
+        history_maps, _, _ = asyncio.run(
+            load_metric_history(
+                session, scope_type="market", scope_key="A",
+                trade_date=date(2026, 8, 4), algorithm_version="v1",
+                baseline_window=120,
+                required_history_contract_version="review-history-v2",
+                required_taxonomy_compatibility_key="taxo-B",
+                required_source_history_run_id=run_a,
+            )
+        )
+        # 只选 run A（raw=1.0），排除 run B（9.0）
+        p_hist = history_maps["P"]["core"]
+        assert p_hist == [1.0]
+
+
+class TestLiveTaxonomyCompatibility:
+    """§7 LIVE taxonomy compatibility：不兼容 published live 不得覆盖 replay。"""
+
+    def test_incompatible_live_cannot_override_replay(self) -> None:
+        """target taxonomy=B，published LIVE taxonomy=A + replay taxonomy=B → replay wins。"""
+        import asyncio
+
+        from app.services.review_metric_observation_service import load_metric_history
+
+        run_id = uuid.uuid4()
+
+        class Obs:
+            def __init__(self, kind, raw, run=None, taxo=None):
+                self.trade_date = date(2026, 8, 3)
+                self.metric_code = "P"
+                self.raw_value = raw
+                self.component_name = "core"
+                self.scope_type = "market"
+                self.scope_key = "A"
+                self.source_kind = kind
+                self.review_run_id = run
+                self.source_history_run_id = None if kind == "live" else uuid.uuid4()
+                self.history_contract_version = "review-history-v2" if kind == "history_replay" else None
+                self.taxonomy_compatibility_key = taxo
+
+        live_a = Obs("live", 9.9, run=run_id, taxo="taxo-A")  # published 但不兼容
+        replay_b = Obs("history_replay", 3.3, taxo="taxo-B")  # 兼容 replay
+        observations = [live_a, replay_b]
+
+        session = MagicMock()
+        call_count = {"n": 0}
+
+        async def fake_execute(stmt):
+            call_count["n"] += 1
+            result = MagicMock()
+            if call_count["n"] == 1:
+                result.scalars.return_value = MagicMock(
+                    __iter__=lambda self: iter(observations),
+                )
+                return result
+            # run_status：published
+            run_result = MagicMock()
+            run_result.all.return_value = [(run_id, "2026-07-01", "published")]
+            return run_result
+
+        session.execute = fake_execute
+        history_maps, _, _ = asyncio.run(
+            load_metric_history(
+                session, scope_type="market", scope_key="A",
+                trade_date=date(2026, 8, 4), algorithm_version="v1",
+                baseline_window=120,
+                required_history_contract_version="review-history-v2",
+                required_taxonomy_compatibility_key="taxo-B",
+            )
+        )
+        # 不兼容 published live（taxo-A）排除 → replay（taxo-B, raw=3.3）胜出
+        p_hist = history_maps["P"]["core"]
+        assert p_hist == [3.3]
+
+    def test_compatible_published_live_wins(self) -> None:
+        """target taxonomy=B，published LIVE taxonomy=B + replay taxonomy=B → live wins。"""
+        import asyncio
+
+        from app.services.review_metric_observation_service import load_metric_history
+
+        run_id = uuid.uuid4()
+
+        class Obs:
+            def __init__(self, kind, raw, run=None, taxo=None):
+                self.trade_date = date(2026, 8, 3)
+                self.metric_code = "P"
+                self.raw_value = raw
+                self.component_name = "core"
+                self.scope_type = "market"
+                self.scope_key = "A"
+                self.source_kind = kind
+                self.review_run_id = run
+                self.source_history_run_id = None if kind == "live" else uuid.uuid4()
+                self.history_contract_version = "review-history-v2" if kind == "history_replay" else None
+                self.taxonomy_compatibility_key = taxo
+
+        live_b = Obs("live", 5.5, run=run_id, taxo="taxo-B")  # published 兼容
+        replay_b = Obs("history_replay", 3.3, taxo="taxo-B")  # 兼容 replay
+        observations = [live_b, replay_b]
+
+        session = MagicMock()
+        call_count = {"n": 0}
+
+        async def fake_execute(stmt):
+            call_count["n"] += 1
+            result = MagicMock()
+            if call_count["n"] == 1:
+                result.scalars.return_value = MagicMock(
+                    __iter__=lambda self: iter(observations),
+                )
+                return result
+            run_result = MagicMock()
+            run_result.all.return_value = [(run_id, "2026-07-01", "published")]
+            return run_result
+
+        session.execute = fake_execute
+        history_maps, _, _ = asyncio.run(
+            load_metric_history(
+                session, scope_type="market", scope_key="A",
+                trade_date=date(2026, 8, 4), algorithm_version="v1",
+                baseline_window=120,
+                required_history_contract_version="review-history-v2",
+                required_taxonomy_compatibility_key="taxo-B",
+            )
+        )
+        # compatible published live（raw=5.5）胜出（rank 0 < replay rank 1）
+        p_hist = history_maps["P"]["core"]
+        assert p_hist == [5.5]
