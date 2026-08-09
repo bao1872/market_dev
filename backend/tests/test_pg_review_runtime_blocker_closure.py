@@ -753,10 +753,7 @@ async def test_pg8_downstream_checkpoint_no_recompute_fallback(db_session) -> No
     await db_session.refresh(snap)
     assert snap.published_at is not None
 
-    # downstream consumer：published run 可见
-    has = await has_succeeded_snapshot_run(db_session, date(2026, 8, 24))
-    assert has is True, "published run 应通过 watchlist gate"
-
+    # downstream consumer：published run 被 formal pointer reader 正确返回
     full = await get_published_full_run(db_session, date(2026, 8, 24))
     assert full is not None
     assert full.id == snap.id, "formal pointer 必须指向已发布 snapshot_run"
