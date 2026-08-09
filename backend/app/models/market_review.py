@@ -37,6 +37,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -427,10 +428,36 @@ class MarketReviewMetricObservation(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
     )
-    review_run_id: Mapped[uuid.UUID] = mapped_column(
+    # [CHANGE-20260808] Historical Lineage（M2）：dual lineage。
+    # LIVE: review_run_id NOT NULL + source_history_run_id NULL
+    # HISTORY_REPLAY: review_run_id NULL + source_history_run_id NOT NULL
+    source_kind: Mapped[str] = mapped_column(
+        Text(),
+        nullable=False,
+        server_default="live",
+        comment="lineage kind: live | history_replay",
+    )
+    review_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("market_review_runs.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+        comment="LIVE ReviewRun ID（source_kind=live 时非空）",
+    )
+    source_history_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("first_pyramid_history_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="HISTORY_REPLAY 来源 HistoryRun ID（source_kind=history_replay 时非空）",
+    )
+    history_contract_version: Mapped[str | None] = mapped_column(
+        Text(),
+        nullable=True,
+        comment="history payload contract version（review-history-v2；replay 时记录）",
+    )
+    taxonomy_compatibility_key: Mapped[str | None] = mapped_column(
+        Text(),
+        nullable=True,
+        comment="compatible series/taxonomy compatibility key（隔离不兼容 membership 系列）",
     )
     trade_date: Mapped[date] = mapped_column(Date(), nullable=False)
     scope_type: Mapped[str] = mapped_column(Text(), nullable=False)
@@ -456,13 +483,40 @@ class MarketReviewMetricObservation(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
+        # [CHANGE-20260808] dual lineage CHECK：
+        # LIVE: review_run_id NOT NULL + source_history_run_id NULL
+        # HISTORY_REPLAY: review_run_id NULL + source_history_run_id NOT NULL
+        # 禁止两者同时 NULL 或同时非 NULL。
+        CheckConstraint(
+            "(source_kind = 'live' AND review_run_id IS NOT NULL "
+            "AND source_history_run_id IS NULL) OR "
+            "(source_kind = 'history_replay' AND review_run_id IS NULL "
+            "AND source_history_run_id IS NOT NULL)",
+            name="ck_review_observation_dual_lineage",
+        ),
+        # [CHANGE-20260808] LIVE partial unique（每 ReviewRun 每 scope/metric/component 唯一）
+        Index(
+            "uq_review_obs_live_run_scope_component",
             "review_run_id",
             "scope_type",
             "scope_key",
             "metric_code",
             "component_name",
-            name="uq_review_metric_observation_run_scope_component",
+            unique=True,
+            postgresql_where=text("source_kind = 'live'"),
+        ),
+        # [CHANGE-20260808] HISTORY_REPLAY partial unique
+        # （每 source_history_run_id + trade_date + scope/metric/component 唯一）
+        Index(
+            "uq_review_obs_replay_run_date_scope_component",
+            "source_history_run_id",
+            "trade_date",
+            "scope_type",
+            "scope_key",
+            "metric_code",
+            "component_name",
+            unique=True,
+            postgresql_where=text("source_kind = 'history_replay'"),
         ),
         Index(
             "ix_review_metric_observation_history",

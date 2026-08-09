@@ -30,6 +30,9 @@ class _State:
         self.trade_date = trade_date
         self.state_payload = payload
         self.input_hash = "hash-x"
+        # [CHANGE-20260808] M2 lineage columns
+        self.source_history_run_id = uuid.uuid4()
+        self.history_contract_version = "review-history-v2"
 
 
 class _Bar:

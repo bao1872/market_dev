@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import date, timedelta
 from unittest.mock import MagicMock
 
@@ -33,6 +34,10 @@ class _Obs:
         self.component_name = "core"
         self.scope_type = "market"
         self.scope_key = "A"
+        # [CHANGE-20260808] M2 dual lineage（canonical selection）
+        self.source_kind = "history_replay"
+        self.review_run_id = None
+        self.source_history_run_id = uuid.uuid4()
 
 
 def _make_session(observations):

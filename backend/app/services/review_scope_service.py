@@ -821,14 +821,23 @@ async def load_day_fact_maps(
     if not current_by_instrument:
         return {}
 
-    # [CHANGE-20260808] Stage B validation：history_contract_version 必须匹配，
-    # 防止新旧 payload 混在同一 replay。任一 state 不匹配 → fail closed。
+    # [CHANGE-20260808] Stage B validation：history_contract_version 优先用显式 column
+    # （M2：state.history_contract_version），且 current v2 replay 必须 source_history_run_id 非空。
+    # 任一 state 不匹配 → fail closed（HISTORY_CONTRACT_VERSION_MISMATCH）。
     for _state in current_by_instrument.values():
-        _ver = (_state.state_payload or {}).get("history_contract_version")
+        _ver = getattr(_state, "history_contract_version", None) or (
+            _state.state_payload or {}
+        ).get("history_contract_version")
         if _ver != _REVIEW_HISTORY_CONTRACT_VERSION:
             raise ValueError(
                 f"HISTORY_CONTRACT_VERSION_MISMATCH: "
                 f"expected={_REVIEW_HISTORY_CONTRACT_VERSION} got={_ver!r} "
+                f"for trade_date={trade_date}"
+            )
+        _src = getattr(_state, "source_history_run_id", None)
+        if _src is None:
+            raise ValueError(
+                f"HISTORY_SOURCE_RUN_MISSING: source_history_run_id 为空 "
                 f"for trade_date={trade_date}"
             )
 

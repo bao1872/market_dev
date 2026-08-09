@@ -65,6 +65,19 @@ class FirstPyramidHistoryDailyState(Base):
         nullable=False,
         comment="输入 bars hash（用于校验重跑一致性）",
     )
+    # [CHANGE-20260808] Historical Lineage（M2）：source run + contract version 独立列。
+    # 旧行允许 NULL；新 review-history-v2 replay 必须写入。
+    source_history_run_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("first_pyramid_history_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="来源 HistoryRun ID（M2；HISTORY_REPLAY 线所有 daily_state 溯源）",
+    )
+    history_contract_version: Mapped[str | None] = mapped_column(
+        Text(),
+        nullable=True,
+        comment="history payload contract version（review-history-v2；M2）",
+    )
     state_payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB(astext_type=Text()),
         nullable=False,
@@ -196,7 +209,8 @@ if __name__ == "__main__":
     ds_cols = FirstPyramidHistoryDailyState.__table__.columns
     ds_expected = {
         "id", "instrument_id", "trade_date", "algorithm_version",
-        "input_hash", "state_payload", "created_at", "updated_at",
+        "input_hash", "source_history_run_id", "history_contract_version",
+        "state_payload", "created_at", "updated_at",
     }
     ds_actual = {c.name for c in ds_cols}
     assert ds_expected == ds_actual, f"daily_state 字段不匹配: {ds_expected ^ ds_actual}"

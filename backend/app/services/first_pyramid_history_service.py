@@ -86,6 +86,8 @@ async def backfill_first_pyramid_history_batch(
     output_bars: int = _DEFAULT_OUTPUT_BARS,
     progress_callback: Callable[..., Awaitable[None]] | None = None,
     _fetch_bars_func: Callable[..., Awaitable[pd.DataFrame | None]] | None = None,
+    source_history_run_id: uuid.UUID | None = None,
+    history_contract_version: str | None = None,
 ) -> dict[str, Any]:
     """[P0-11] 第一金字塔非筹码历史回补批量入口。
 
@@ -157,6 +159,8 @@ async def backfill_first_pyramid_history_batch(
                     instrument_id=instrument_id,
                     history=history,
                     algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+                    source_history_run_id=source_history_run_id,
+                    history_contract_version=history_contract_version,
                 )
 
                 if persisted["daily_state_count"] == 0:
@@ -682,7 +686,10 @@ async def backfill_history_with_run_items(
         统计 dict
     """
     from app.db import AsyncSessionLocal
-    from app.services.first_pyramid_service import compute_first_pyramid_history
+    from app.services.first_pyramid_service import (
+        HISTORY_CONTRACT_VERSION,
+        compute_first_pyramid_history,
+    )
 
     total_processed = 0
     succeeded_count = 0
@@ -738,6 +745,8 @@ async def backfill_history_with_run_items(
                         instrument_id=item.instrument_id,
                         history=history,
                         algorithm_version=algorithm_version,
+                        source_history_run_id=history_run_id,
+                        history_contract_version=HISTORY_CONTRACT_VERSION,
                     )
                     await persist_db.commit()
 
@@ -863,17 +872,25 @@ async def _persist_history_result(
     instrument_id: uuid.UUID,
     history: dict[str, Any],
     algorithm_version: str,
+    *,
+    source_history_run_id: uuid.UUID | None = None,
+    history_contract_version: str | None = None,
 ) -> dict[str, int]:
     """持久化 history SSOT 结果到两张表。
 
-    - daily_state: upsert（on_conflict_do_update），更新 state_payload
+    - daily_state: upsert（on_conflict_do_update），更新 state_payload + lineage
     - events: insert on_conflict_do_nothing（不可变，重跑不覆盖）
+
+    [CHANGE-20260808] Historical Lineage（M2）：source_history_run_id + history_contract_version
+    写入 daily_state 显式列（新 review-history-v2 replay 必须）。从 run.id 传，不从 metadata 猜。
 
     Args:
         session: 异步 DB 会话（不 commit，由 caller 控制）
         instrument_id: 股票 ID
         history: compute_first_pyramid_history 返回的 dict
         algorithm_version: 算法版本
+        source_history_run_id: 来源 HistoryRun ID（M2）
+        history_contract_version: history payload contract version（M2）
 
     Returns:
         {"daily_state_count": int, "events_count": int}
@@ -901,12 +918,16 @@ async def _persist_history_result(
             trade_date=trade_date_val,
             algorithm_version=algorithm_version,
             input_hash=input_hash,
+            source_history_run_id=source_history_run_id,
+            history_contract_version=history_contract_version,
             state_payload=state,
         )
         stmt = stmt.on_conflict_do_update(
             constraint="uq_first_pyramid_history_daily_state_instr_date_ver",
             set_={
                 "input_hash": stmt.excluded.input_hash,
+                "source_history_run_id": stmt.excluded.source_history_run_id,
+                "history_contract_version": stmt.excluded.history_contract_version,
                 "state_payload": stmt.excluded.state_payload,
                 "updated_at": func.now(),
             },
