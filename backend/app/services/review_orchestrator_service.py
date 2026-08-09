@@ -50,6 +50,7 @@ from app.models.factor_publication import (
     PUBLICATION_KIND_STOCK_CORE,
     FactorPublication,
 )
+from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
 from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewRun,
@@ -57,9 +58,13 @@ from app.models.market_review import (
     MarketReviewScopeSnapshot,
 )
 from app.services.board_membership_service import list_universe_definitions_at
+from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
 from app.services.review_attribution_service import (
     compute_signal_attributions,
     compute_signal_instruments,
+)
+from app.services.review_bootstrap_service import (
+    validate_canonical_history_run_readiness,
 )
 from app.services.review_publication_service import (
     REVIEW_PUBLISH_MIN_COVERAGE,
@@ -655,6 +660,15 @@ async def compute_run(
     run.expected_scope_count = len(scopes)
     await session.flush()
 
+    # [Phase4C 2026-08-09 P0-B] 绑定 canonical history source（生命周期不漂移）：
+    # - run.metadata_json 已有绑定 → 复用（resume/retry 绝不重新解析 latest ready run）
+    # - 无绑定 → 解析当时最新合法 canonical source 并立即写入 metadata
+    # - bound source 不存在 / contract mismatch / 非 canonical-compatible → fail closed
+    (
+        canonical_source_run_id,
+        canonical_contract_version,
+    ) = await _bind_or_reuse_canonical_history_source(session, run)
+
     succeeded = 0
     failed = 0
     signals_total = 0
@@ -664,7 +678,13 @@ async def compute_run(
     # 2. 第一遍：全部 scope 只计算 raw/normalized metrics。
     for scope in scopes:
         try:
-            snapshot = await _compute_scope_metrics_phase(session, run, scope)
+            snapshot = await _compute_scope_metrics_phase(
+                session,
+                run,
+                scope,
+                required_history_contract_version=canonical_contract_version,
+                required_source_history_run_id=canonical_source_run_id,
+            )
             succeeded += 1
             if snapshot is not None:
                 metric_results.append((scope, snapshot))
@@ -905,6 +925,9 @@ async def _build_scope_history(
     trade_date: date,
     algorithm_version: str,
     baseline_window: int,
+    required_history_contract_version: str | None = None,
+    required_taxonomy_compatibility_key: str | None = None,
+    required_source_history_run_id: uuid.UUID | None = None,
 ) -> tuple[
     dict[str, dict[str, list[float]]] | None,
     dict[str, float] | None,
@@ -912,12 +935,23 @@ async def _build_scope_history(
 ]:
     """从同算法版本的 observation SSOT 构建历史序列（PRD §7.1）。
 
+    [Phase4C 2026-08-09] 绑定 canonical history lineage（P0-B）：
+    必须显式传入 ``required_history_contract_version`` /
+    ``required_taxonomy_compatibility_key`` / ``required_source_history_run_id``，
+    由调用方从正式 canonical history readiness contract 解析得到（**禁止硬编码
+    生产 run id**；market scope 的 taxonomy key 可为 None = canonical market series）。
+
     Args:
         session: 异步 DB 会话
         scope: 当前 scope 定义
         trade_date: 当前交易日（排除当日，只用历史）
         algorithm_version: 当前 Review 算法版本（禁止混用旧版本）
         baseline_window: 历史窗口长度（默认 120）
+        required_history_contract_version: 允许的 history contract 版本
+        required_taxonomy_compatibility_key: 允许兼容的 taxonomy key
+            （market=None 表示接受 canonical market series）
+        required_source_history_run_id: 正式 canonical HistoryRun id
+            （来自 readiness contract，禁止 latest arbitrary / pre-v2 fallback）
 
     Returns:
         (history_maps, prev_values, prev5d_values)
@@ -937,7 +971,95 @@ async def _build_scope_history(
         trade_date=trade_date,
         algorithm_version=algorithm_version,
         baseline_window=baseline_window,
+        required_history_contract_version=required_history_contract_version,
+        required_taxonomy_compatibility_key=required_taxonomy_compatibility_key,
+        required_source_history_run_id=required_source_history_run_id,
     )
+
+
+async def _resolve_canonical_history_source(
+    session: AsyncSession,
+) -> tuple[uuid.UUID | None, str]:
+    """[Phase4C 2026-08-09] 解析正式 canonical HistoryRun（P0-B）。
+
+    通过 canonical history readiness contract 从运行数据解析 source run id，
+    **禁止硬编码生产 run id**（如 be56dcd2...）。contract 版本使用算法常量
+    ``HISTORY_CONTRACT_VERSION``（版本字符串，非具体 run id）。
+
+    Returns:
+        (source_history_run_id, history_contract_version)
+        - 若找不到就绪的 canonical run：source_history_run_id=None，
+          contract 版本仍为当前算法版本（load_metric_history 会据此返回 unavailable）。
+    """
+    contract_version = HISTORY_CONTRACT_VERSION
+    # 找到 scope=all_a_share 的候选 run（contract 由 readiness contract 在 Python 侧解析
+    # metadata_json 校验，避免依赖 Text 列的 JSON 操作符），再经 readiness contract 验证
+    candidate_stmt = (
+        select(FirstPyramidHistoryRun)
+        .where(FirstPyramidHistoryRun.scope == "all_a_share")
+        .order_by(FirstPyramidHistoryRun.created_at.desc())
+    )
+    candidates = list((await session.execute(candidate_stmt)).scalars())
+    for run in candidates:
+        result = await validate_canonical_history_run_readiness(
+            session, run.id, contract_version,
+        )
+        if result.get("status") == "ok":
+            return run.id, contract_version
+    return None, contract_version
+
+
+async def _bind_or_reuse_canonical_history_source(
+    session: AsyncSession,
+    run: MarketReviewRun,
+) -> tuple[uuid.UUID | None, str]:
+    """[Phase4C 2026-08-09 P0-B] 解析并绑定 canonical history source（生命周期不漂移）。
+
+    Lifecycle（B1~B3）：
+    - run.metadata_json["canonical_history_source_run_id"] 已存在
+      → 直接复用（resume / retry 绝不重新解析 latest ready run，防止 A→B 漂移）。
+    - 无绑定 → 解析当时最新合法 canonical source，并立即写入 metadata_json
+      （不迁移 schema；字段命名遵循项目 metadata 约定）。
+    - bound source 不存在 / contract mismatch / 不再 canonical-compatible
+      → fail closed（raise），不自动切换到新 source。
+
+    Returns:
+        (source_history_run_id, history_contract_version)
+    """
+    metadata = run.metadata_json or {}
+    bound_run_id = metadata.get("canonical_history_source_run_id")
+    bound_contract = metadata.get("canonical_history_contract_version")
+
+    if bound_run_id is not None:
+        # resume / retry：校验 bound source 仍然合法，否则 fail closed
+        bound_uuid = uuid.UUID(str(bound_run_id))
+        contract_version = bound_contract or HISTORY_CONTRACT_VERSION
+        result = await validate_canonical_history_run_readiness(
+            session, bound_uuid, contract_version,
+        )
+        if result.get("status") != "ok":
+            raise ReviewOrchestratorError(
+                f"run={run.id} 已绑定 canonical history source="
+                f"{bound_uuid}（contract={contract_version}），但当前不再 "
+                f"canonical-compatible（{result.get('reason')}）；禁止自动切换 "
+                f"source，fail closed。",
+            )
+        return bound_uuid, contract_version
+
+    # 新 run：解析当时最新合法 canonical source 并立即绑定到 metadata
+    source_run_id, contract_version = await _resolve_canonical_history_source(session)
+    if source_run_id is None:
+        logger.warning(
+            "[ReviewOrchestrator] 未找到就绪的 canonical HistoryRun；"
+            "history lineage 将回退为 contract 级 unavailable（不阻塞 market scope）",
+        )
+    metadata["canonical_history_source_run_id"] = (
+        str(source_run_id) if source_run_id is not None else None
+    )
+    metadata["canonical_history_contract_version"] = contract_version
+    run.metadata_json = metadata
+    await session.flush()
+    return source_run_id, contract_version
 
 
 async def _fetch_pyramid_v2_for_scope(
@@ -980,8 +1102,14 @@ async def _compute_scope_metrics_phase(
     session: AsyncSession,
     run: MarketReviewRun,
     scope: ScopeDefinition,
+    *,
+    required_history_contract_version: str | None = None,
+    required_source_history_run_id: uuid.UUID | None = None,
 ) -> MarketReviewScopeSnapshot | None:
-    """Compute and persist raw/normalized metrics for one scope."""
+    """Compute and persist raw/normalized metrics for one scope.
+
+    [Phase4C 2026-08-09] 透传 canonical history lineage 过滤条件（P0-B）。
+    """
     # === metrics phase ===
     await _upsert_run_item(
         session,
@@ -1036,6 +1164,9 @@ async def _compute_scope_metrics_phase(
         trade_date=run.trade_date,
         algorithm_version=run.algorithm_version,
         baseline_window=run.baseline_window,
+        required_history_contract_version=required_history_contract_version,
+        required_taxonomy_compatibility_key=scope.taxonomy_compatibility_key,
+        required_source_history_run_id=required_source_history_run_id,
     )
 
     try:
@@ -1220,12 +1351,31 @@ async def _compute_scope_pipeline(
     run: MarketReviewRun,
     scope: ScopeDefinition,
 ) -> int:
-    """Resume-compatible single-scope pipeline using the same two ordered phases."""
-    snapshot = await _compute_scope_metrics_phase(session, run, scope)
+    """Resume-compatible single-scope pipeline using the same two ordered phases.
+
+    [Phase4C 2026-08-09 P0-B] resume 必须复用 run 已绑定的 canonical history source，
+    绝不重新解析 latest ready run（防止 A→B lineage 漂移）。
+    """
+    canonical_source_run_id, canonical_contract_version = (
+        await _bind_or_reuse_canonical_history_source(session, run)
+    )
+    # 从正式 scope 解析补全 taxonomy_compatibility_key（resume 重建的 ScopeDefinition 缺此字段）
+    resolved = await _resolve_level1_scopes(session, run)
+    full_scope = next(
+        (s for s in resolved if s.scope_type == scope.scope_type and s.scope_key == scope.scope_key),
+        scope,
+    )
+    snapshot = await _compute_scope_metrics_phase(
+        session,
+        run,
+        full_scope,
+        required_history_contract_version=canonical_contract_version,
+        required_source_history_run_id=canonical_source_run_id,
+    )
     if snapshot is None:
         return 0
     await apply_cross_section_percentiles(session, run.id)
-    return await _compute_scope_signal_pipeline(session, run, scope, snapshot)
+    return await _compute_scope_signal_pipeline(session, run, full_scope, snapshot)
 
 
 # =============================================================================

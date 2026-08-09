@@ -122,7 +122,11 @@ async def evaluate_publish_gate(
         publishable=True 表示可发布；blockers 为失败原因列表
     """
     blockers: list[str] = []
-    metadata = run.metadata_json or {}
+    # 绑定到 run.metadata_json 本身（而非新建局部 dict），确保后续写入
+    # （optional_scope_diagnostics / canary / provisional 审计）能回写到 run。
+    if run.metadata_json is None:
+        run.metadata_json = {}
+    metadata = run.metadata_json
     provisional = metadata.get("provisional_publication") or {}
     if run.algorithm_version != REVIEW_ALGORITHM_VERSION:
         blockers.append(
@@ -142,16 +146,16 @@ async def evaluate_publish_gate(
             f"run coverage {float(run.coverage_ratio):.4f} < 门槛 "
             f"{REVIEW_PUBLISH_MIN_COVERAGE}",
         )
+    # [Phase4C 2026-08-09 P0-A] scope counter semantics 修正：
+    # expected_scope_count / succeeded_scope_count / failed_scope_count 保留为
+    # **事实型全量计数器**（反映本次 run 计划/实际处理的全部 level-1 scope，含 optional），
+    # 不再伪造 expected=1，也**不**再作为 whole-review hard gate。
+    # whole-review 可发布性由 market mandatory readiness 单独决定（见 §1），
+    # optional scope 的 unavailable / skipped / 比例不足仅记为诊断（见 §2~4）。
+    # 唯一的 execution-failure blocker 来自 §5：run items 存在未成功终态
+    # （failed/pending/running，即真实执行异常 / system-level failure）。
     if run.expected_scope_count <= 0:
         blockers.append("expected_scope_count=0，无任何范围被处理")
-    if run.succeeded_scope_count != run.expected_scope_count:
-        blockers.append(
-            "scope 完成数不一致: "
-            f"succeeded={run.succeeded_scope_count}, "
-            f"expected={run.expected_scope_count}",
-        )
-    if run.failed_scope_count != 0:
-        blockers.append(f"failed_scope_count={run.failed_scope_count} 非零")
 
     # 1. market 范围必须 ready，且 P/Q/U/C/V 五项 normalized_ready
     # [P0-6 2026-07-30] readiness 四态区分（PRD §11.1）：
@@ -205,31 +209,34 @@ async def evaluate_publish_gate(
                 )
             # raw_ready=True, normalized_ready=True, value 非空 → 可发布，不阻塞
 
-    # 2. 主要指数和风格实际范围必须全部 ready；配置完整性在下方精确核对。
+    # 2~4. major_index / style / industry_l1 为 OPTIONAL 渐进式 scope（Phase 4C §6.3.8）。
+    # 其不可用（bootstrap_unavailable / insufficient_history / blocked_external_population /
+    # PIT unavailable）仅记为诊断，不阻塞整个 Market Review MVP 发布。
     actual_by_type: dict[str, list[MarketReviewScopeSnapshot]] = {}
+    optional_blockers: list[str] = []
     for scope_type in ("major_index", "style"):
         snaps = await _list_scope_snapshots(session, run.id, scope_type)
         actual_by_type[scope_type] = snaps
         for snap in snaps:
-            _validate_scope_ready(snap, blockers)
+            _validate_scope_ready(snap, optional_blockers)
 
-    # 3. 一级行业 ready 比例达到门槛（且必须有 industry scope）
+    # 3. 一级行业：可选 scope；缺失或 ready 比例不足仅记为诊断。
     industry_snaps = await _list_scope_snapshots(session, run.id, "industry_l1")
     actual_by_type["industry_l1"] = industry_snaps
     if not industry_snaps:
-        blockers.append("一级行业范围快照全部缺失")
+        optional_blockers.append("一级行业范围快照全部缺失（可选 scope，仅诊断）")
     else:
         ready_count = sum(1 for s in industry_snaps if s.status == "ready")
         ratio = ready_count / len(industry_snaps)
         if ratio < REVIEW_PUBLISH_MIN_INDUSTRY_RATIO:
-            blockers.append(
+            optional_blockers.append(
                 f"一级行业 ready 比例 {ratio:.4f} < 门槛 "
-                f"{REVIEW_PUBLISH_MIN_INDUSTRY_RATIO}",
+                f"{REVIEW_PUBLISH_MIN_INDUSTRY_RATIO}（可选 scope，仅诊断）",
             )
         for snap in industry_snaps:
-            _validate_scope_ready(snap, blockers)
+            _validate_scope_ready(snap, optional_blockers)
 
-    # 4. Configured level-1 scope sets must match the PIT definitions exactly.
+    # 4. 配置完整性仅对 optional scope 做一致性核对（缺失/未 populated 不阻塞）。
     universe_stmt = select(UniverseDefinition).where(
         UniverseDefinition.universe_type.in_(("major_index", "style")),
         UniverseDefinition.effective_from <= run.trade_date,
@@ -245,7 +252,7 @@ async def evaluate_publish_gate(
             for item in definitions if item.universe_type == scope_type
         }
         actual = {item.scope_key for item in actual_by_type[scope_type]}
-        _compare_scope_keys(scope_type, expected, actual, blockers)
+        _compare_scope_keys(scope_type, expected, actual, optional_blockers)
         blocked_populations = sorted(
             item.universe_key
             for item in definitions
@@ -253,8 +260,9 @@ async def evaluate_publish_gate(
             and item.population_status != "ready"
         )
         if blocked_populations:
-            blockers.append(
-                f"{scope_type} population 非 ready: {blocked_populations}",
+            optional_blockers.append(
+                f"{scope_type} population 非 ready: {blocked_populations}"
+                "（可选 scope，仅诊断）",
             )
 
     expected_industry_stmt = (
@@ -274,7 +282,7 @@ async def evaluate_publish_gate(
         "industry_l1",
         expected_industries,
         {item.scope_key for item in industry_snaps},
-        blockers,
+        optional_blockers,
     )
     actual_level1_count = (
         (1 if market_snap is not None else 0)
@@ -283,12 +291,20 @@ async def evaluate_publish_gate(
         + len(industry_snaps)
     )
     if actual_level1_count != run.expected_scope_count:
-        blockers.append(
+        optional_blockers.append(
             "level-1 scope snapshot 数量不一致: "
-            f"actual={actual_level1_count}, expected={run.expected_scope_count}",
+            f"actual={actual_level1_count}, expected={run.expected_scope_count}"
+            "（可选 scope，仅诊断）",
         )
+    # optional scope 诊断写入 run metadata，不加入 blockers（market 仍为唯一强制 scope）
+    if optional_blockers:
+        diagnostic = metadata.setdefault("optional_scope_diagnostics", [])
+        diagnostic.extend(optional_blockers)
 
-    # 5. No run item may remain failed, pending, or running.
+    # 5. [Phase4C 2026-08-09 P0-A] UNEXPECTED_EXECUTION_FAILURE 仍阻塞：
+    # 仅 failed/pending/running 的真实执行异常项阻塞 whole-review。
+    # skipped（optional scope 不可用 / 空成员 / PIT unavailable / bootstrap_unavailable）
+    # 是诊断性终态，不阻塞（见 §2 诊断路径）。
     from app.models.market_review import MarketReviewRunItem
     incomplete_items_stmt = (
         select(MarketReviewRunItem)
@@ -302,7 +318,8 @@ async def evaluate_publish_gate(
     ).scalars().all()
     if incomplete_items:
         blockers.append(
-            f"run items 存在 {len(incomplete_items)} 个未成功终态项",
+            f"run items 存在 {len(incomplete_items)} 个未成功终态项"
+            "（真实执行异常 / system-level failure，阻塞发布）",
         )
 
     # 6. Both source identities must still be the current formal pointers.

@@ -457,6 +457,10 @@ Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
   `membership_version`，与 `taxonomy_compatibility_key` 保持一致。
 - **历史修正**：source 后续修正时，新 version 不得覆盖已被 Stage B observation 引用的
   `taxonomy_compatibility_key`；如需变更必须 bump version 并标记 lineage。
+- **Tushare 永久禁止**：Tushare **永远不是允许的数据源**；不得推荐、接入或依赖 Tushare
+  作为任何 Review / 板块 / 指数 / 风格成员来源。
+- **申万行业来源**：若需申万行业分类，优先扩展现有 `pywencai` 问句（使用“申万行业”相关关键词）
+  获取；此扩展**不代表允许 current membership 回填历史**——历史 PIT 缺口仍须 `bootstrap_unavailable`。
 
 #### 6.3.2 各 family 来源状态（Phase 4A3 结论）
 
@@ -522,6 +526,26 @@ Idempotency 以现有 unique constraint 为准：
 
 第一阶段只要求完整覆盖 `2026-02-06 → 2026-08-07`（当前 120 交易日 baseline）。
 不要求 10 年历史，除非来源免费自然提供且不显著增加复杂度。
+
+#### 6.3.8 Review MVP 发布就绪门禁（Phase 4C 校正）
+
+原 §11.1 发布门禁将 `major_index` / `style` / `industry_l1` readiness 作为 whole-Review
+硬性阻塞项。Phase 4C（2026-08-09）按产品决策校正为 **渐进式 scope readiness**：
+
+- **MARKET = Review MVP 强制历史基线（HARD GATE）**：
+  - 必须存在、状态 `ready`、满足现有 market coverage/quality 要求（含 P/Q/U/C/V 五项
+    `normalized_ready`）；
+  - 不满足 → 发布门禁 CLOSED。
+- **industry_l1 / major_index / style = 渐进式可选 scope（OPTIONAL）**：
+  - 真实就绪 → 正常参与产品输出；
+  - `bootstrap_unavailable` / `insufficient_history` / `blocked_external_population` /
+    PIT unavailable → 保留真实状态与诊断，但**不加入 whole-product blocker**；
+  - 禁止把 optional scope 状态伪装成 `ready`；
+  - 禁止 current membership × historical date / latest snapshot 回填 / forward-fill。
+- **Concept = AUXILIARY_DEFERRED**；**BJ = DEFERRED**。
+- 此校正**不改变指标公式**：仅调整 scope readiness / publication readiness 语义。
+- 实现约束（`review_publication_service.evaluate_publish_gate`）：market 仍为唯一强制 scope；
+  optional scope 不可用仅记为诊断，不阻塞整个 Market Review MVP 发布。
 
 ## 7. P/Q/U/C/V指标合同
 

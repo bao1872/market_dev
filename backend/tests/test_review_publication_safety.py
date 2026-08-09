@@ -272,7 +272,12 @@ class TestFormalGateCompleteness:
         assert "canary run 不可正式发布" in blockers
         assert "provisional run 不可正式发布" in blockers
 
-    async def test_configured_universe_missing_from_run_blocks_publish(self):
+    async def test_configured_universe_missing_from_run_is_optional_diagnostic_not_blocker(
+        self,
+    ):
+        """[Phase4C §6.3.8] major_index/style PIT 不可用（blocked_external_population）
+        仅记为诊断，不阻塞整个 Market Review MVP 发布。market ready → 门禁 OPEN。
+        """
         run = _make_run()
         results = _gate_pass_results(run)
         results[4] = _FakeResult(scalar_list=[SimpleNamespace(
@@ -283,9 +288,10 @@ class TestFormalGateCompleteness:
         publishable, blockers = await evaluate_publish_gate(
             _make_session(results), run,
         )
-        assert publishable is False
-        assert any("major_index 配置范围缺失" in item for item in blockers)
-        assert any("population 非 ready" in item for item in blockers)
+        assert publishable is True
+        assert not any("population 非 ready" in item for item in blockers)
+        diag = run.metadata_json.get("optional_scope_diagnostics", [])
+        assert any("population 非 ready" in item for item in diag)
 
     async def test_both_source_pointers_are_required(self):
         run = _make_run()
@@ -549,6 +555,208 @@ class TestWithdrawal:
             )
         apply_session.delete.assert_not_called()
         apply_session.flush.assert_not_called()
+
+
+class TestProgressiveScopeReadiness:
+    """[Phase4C §6.3.8] market=HARD GATE；industry/index/style=OPTIONAL 渐进 scope。
+
+    可选 scope 不可用（bootstrap_unavailable / insufficient_history /
+    blocked_external_population / PIT unavailable）仅记为诊断，不阻塞整个
+    Market Review MVP 发布。
+    """
+
+    def _make_market_ready_run(self) -> MarketReviewRun:
+        run = _make_run()
+        # [Phase4C P0-A 修正] 真实全量 level-1 counters（不伪造 expected=1）：
+        # 4 个 level-1 scope（market + industry_l1 + major_index + style），
+        # 仅 market ready，3 个 optional 全部 unavailable（走 skipped/diagnostic）。
+        run.expected_scope_count = 4
+        run.succeeded_scope_count = 1
+        run.failed_scope_count = 0
+        return run
+
+    def _market_snap(self, run: MarketReviewRun) -> MarketReviewScopeSnapshot:
+        return MarketReviewScopeSnapshot(
+            id=uuid.uuid4(),
+            review_run_id=run.id,
+            trade_date=run.trade_date,
+            scope_type="market",
+            scope_key="market",
+            scope_name="全市场",
+            status="ready",
+            coverage_ratio=Decimal("1.0"),
+            p_payload=_ready_payload(),
+            q_payload=_ready_payload(),
+            u_payload=_ready_payload(),
+            c_payload=_ready_payload(),
+            v_payload=_ready_payload(),
+        )
+
+    def _results_market_ready_optional_unavailable(
+        self, run: MarketReviewRun,
+    ) -> list[_FakeResult]:
+        # 查询顺序与 evaluate_publish_gate 严格一致：
+        # 1 market / 2 major_index / 3 style / 4 industry / 5 universe defs /
+        # 6 expected L1 / 7 incomplete items / 8 stock_core pointer /
+        # 9 board pointer / [published] live / future_obs count
+        core_pub = SimpleNamespace(data_run_id=run.source_core_run_id)
+        board_pub = SimpleNamespace(data_run_id=run.source_board_run_id)
+        return [
+            _FakeResult(scalar=self._market_snap(run)),  # 1 market ready
+            _FakeResult(scalar_list=[]),  # 2 major_index (unavailable)
+            _FakeResult(scalar_list=[]),  # 3 style (unavailable)
+            _FakeResult(scalar_list=[]),  # 4 industry (unavailable)
+            _FakeResult(scalar_list=[]),  # 5 universe defs
+            _FakeResult(scalar_list=[]),  # 6 expected L1 industries
+            _FakeResult(scalar_list=[]),  # 7 incomplete items
+            _FakeResult(scalar=core_pub),  # 8 stock_core pointer
+            _FakeResult(scalar=board_pub),  # 9 board pointer
+            _FakeResult(scalar=0),  # future_obs count
+        ]
+
+    def _opt_snap(self, scope_type: str, scope_key: str, status: str) -> MarketReviewScopeSnapshot:
+        return MarketReviewScopeSnapshot(
+            id=uuid.uuid4(),
+            review_run_id=uuid.uuid4(),
+            trade_date=date(2026, 7, 31),
+            scope_type=scope_type,
+            scope_key=scope_key,
+            scope_name=scope_key,
+            status=status,
+            coverage_ratio=Decimal("1.0"),
+        )
+
+    def _results_market_ready_optional_ready(self, run: MarketReviewRun) -> list[_FakeResult]:
+        core_pub = SimpleNamespace(data_run_id=run.source_core_run_id)
+        board_pub = SimpleNamespace(data_run_id=run.source_board_run_id)
+        return [
+            _FakeResult(scalar=self._market_snap(run)),
+            _FakeResult(scalar_list=[self._opt_snap("major_index", "csi300", "ready")]),
+            _FakeResult(scalar_list=[self._opt_snap("style", "large_cap_style", "ready")]),
+            _FakeResult(scalar_list=[self._opt_snap("industry_l1", "board-1", "ready")]),
+            _FakeResult(scalar_list=[]),
+            _FakeResult(scalar_list=[]),
+            _FakeResult(scalar_list=[]),
+            _FakeResult(scalar=core_pub),
+            _FakeResult(scalar=board_pub),
+            _FakeResult(scalar=0),
+        ]
+
+    async def test_market_ready_optional_unavailable_gate_open(self):
+        """A: market ready + 可选 scope 不可用 → 门禁 OPEN。"""
+        run = self._make_market_ready_run()
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(self._results_market_ready_optional_unavailable(run)), run,
+        )
+        assert publishable is True
+        assert not any("population 非 ready" in b for b in blockers)
+        diag = run.metadata_json.get("optional_scope_diagnostics", [])
+        assert isinstance(diag, list)
+
+    async def test_market_missing_gate_closed(self):
+        """B: market 缺失 → CLOSED。"""
+        run = self._make_market_ready_run()
+        run.expected_scope_count = 0
+        results = self._results_market_ready_optional_unavailable(run)
+        results[0] = _FakeResult(scalar=None)  # no market snapshot
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is False
+        assert any("market 范围快照缺失" in b for b in blockers)
+
+    async def test_market_not_ready_gate_closed(self):
+        """C: market 存在但未 ready → CLOSED。"""
+        run = self._make_market_ready_run()
+        results = self._results_market_ready_optional_unavailable(run)
+        # 真实 MarketReviewScopeSnapshot，status 非 ready（coverage 兜底达标以免干扰）
+        not_ready_snap = MarketReviewScopeSnapshot(
+            id=uuid.uuid4(),
+            review_run_id=run.id,
+            trade_date=run.trade_date,
+            scope_type="market",
+            scope_key="market",
+            scope_name="全市场",
+            status="insufficient_history",
+            coverage_ratio=Decimal("1.0"),
+            p_payload=_ready_payload(),
+            q_payload=_ready_payload(),
+            u_payload=_ready_payload(),
+            c_payload=_ready_payload(),
+            v_payload=_ready_payload(),
+        )
+        results[0] = _FakeResult(scalar=not_ready_snap)
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is False
+        assert any("market" in b for b in blockers)
+
+    async def test_market_coverage_below_threshold_closed(self):
+        """D: market coverage 低于强制门槛 → CLOSED。"""
+        run = self._make_market_ready_run()
+        results = self._results_market_ready_optional_unavailable(run)
+        low_cov_snap = MarketReviewScopeSnapshot(
+            id=uuid.uuid4(),
+            review_run_id=run.id,
+            trade_date=run.trade_date,
+            scope_type="market",
+            scope_key="market",
+            scope_name="全市场",
+            status="ready",
+            coverage_ratio=Decimal("0.5"),
+            p_payload=_ready_payload(),
+            q_payload=_ready_payload(),
+            u_payload=_ready_payload(),
+            c_payload=_ready_payload(),
+            v_payload=_ready_payload(),
+        )
+        results[0] = _FakeResult(scalar=low_cov_snap)
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is False
+        assert any("coverage" in b for b in blockers)
+
+    async def test_market_ready_optional_ready_open(self):
+        """E: market ready + 可选 scope 也 ready → OPEN（无 market blocker）。"""
+        run = self._make_market_ready_run()
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(self._results_market_ready_optional_ready(run)), run,
+        )
+        assert publishable is True
+        # 可选 scope 即使 ready 也不应产生 market 阻塞
+        assert not any("market" in b for b in blockers)
+
+    async def test_market_ready_optional_error_keeps_diagnostic_open(self):
+        """F: market ready + 可选 scope 错误/unavailable → OPEN 且诊断保留。"""
+        run = self._make_market_ready_run()
+        results = self._results_market_ready_optional_unavailable(run)
+        # industry 快照存在但 status 非 ready（error 态）
+        results[3] = _FakeResult(
+            scalar_list=[self._opt_snap("industry_l1", "board-1", "error")],
+        )
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is True
+        diag = run.metadata_json.get("optional_scope_diagnostics", [])
+        # optional scope 错误态（status=error）作为诊断保留，不影响发布（非 blocker）
+        assert any("industry_l1" in d for d in diag)
+
+    async def test_forbidden_current_pit_fallback_contract_unchanged(self):
+        """G: 既有禁止 current/PIT fallback 的 contract 不变（market 仍强制当前日可计算、
+        可选 scope 状态不被伪装为 ready）。market coverage 低于门槛 → CLOSED。"""
+        run = self._make_market_ready_run()
+        results = self._results_market_ready_optional_unavailable(run)
+        # market coverage 低于强制门槛，必须阻塞（禁止伪装 ready）
+        m = results[0].scalar()
+        m.coverage_ratio = Decimal("0.5")
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is False
+        assert any("coverage" in b for b in blockers)
 
     async def test_expected_run_id_mismatch_is_zero_write(self):
         run = _make_run(status="published", published_at=datetime.now(UTC))
