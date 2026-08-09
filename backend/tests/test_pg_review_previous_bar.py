@@ -33,8 +33,8 @@ async def _insert_bar(
     await session.execute(
         text(
             """INSERT INTO bars_daily
-               (instrument_id, trade_date, open, high, low, close, volume, amount, qfq_close)
-               VALUES (:iid, :td, :o, :h, :l, :c, :v, :a, :c)
+               (instrument_id, trade_date, open, high, low, close, volume, amount, adj_factor)
+               VALUES (:iid, :td, :o, :h, :l, :c, :v, :a, 1.0)
                ON CONFLICT DO NOTHING"""
         ),
         {
