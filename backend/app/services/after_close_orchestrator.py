@@ -4534,7 +4534,7 @@ async def reconcile_after_close_checkpoint_from_artifacts(
     result_count = (
         await db.execute(
             select(func.count()).where(
-                StrategyResult.strategy_run_id == uuid.UUID(dsa_run_id),
+                StrategyResult.run_id == uuid.UUID(dsa_run_id),
             )
         )
     ).scalar_one()
