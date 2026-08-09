@@ -141,6 +141,7 @@ async def _make_strategy_run_with_items(
         db_session.add(
             StrategyResult(
                 run_id=run.id,
+                strategy_version_id=run.strategy_version_id,
                 instrument_id=inst_ids[idx],
                 payload={"result": "ok"},
             )
