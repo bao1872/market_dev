@@ -539,8 +539,7 @@ async def test_pg_resume_integration() -> None:
     - PG-7: orchestrator 自然进入 publishing 并真实调用 publish_stock_core_atomically
     - PG-8: downstream entry 发生，last_completed_step 推进到 publishing/review
     """
-    from app.db.session import AsyncSessionLocal
-
+    from app.db import AsyncSessionLocal
     from app.models.scheduler_job_run import SchedulerJobRun
     from app.services.after_close_orchestrator import (
         AfterCloseRunStatus,
