@@ -187,7 +187,7 @@ async def _make_snapshot_run_with_items(
     db_session.add(run)
     await db_session.flush()
 
-    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRunItem
+    from app.models.stock_feature_snapshot_run_item import StockFeatureSnapshotRunItem
 
     counts = {
         "succeeded": succeeded,
