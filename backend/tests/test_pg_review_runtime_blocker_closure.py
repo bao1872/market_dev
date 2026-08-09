@@ -127,6 +127,7 @@ async def _make_strategy_run_with_items(
     await db_session.flush()
 
     # 构造 run-items（authoritative truth），instrument_id 指向真实存在的 Instrument 行
+    from app.models.strategy_run import StrategyResult
     inst_ids = await _make_instruments(db_session, n=succeeded + skipped + failed)
     idx = 0
     for _ in range(succeeded):
@@ -135,6 +136,13 @@ async def _make_strategy_run_with_items(
                 run_id=run.id,
                 instrument_id=inst_ids[idx],
                 status="succeeded",
+            )
+        )
+        db_session.add(
+            StrategyResult(
+                run_id=run.id,
+                instrument_id=inst_ids[idx],
+                payload={"result": "ok"},
             )
         )
         idx += 1
