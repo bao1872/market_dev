@@ -194,6 +194,7 @@ async def _make_snapshot_run_with_items(
         published_at=published_at,
         started_at=now,
         finished_at=now if status != STATUS_RUNNING else None,
+        metadata_={"scope": "full"},
     )
     db_session.add(run)
     await db_session.flush()
