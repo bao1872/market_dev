@@ -140,12 +140,46 @@ def test_sync_deactivates_projection_and_preserves_history() -> None:
     assert ".values(effective_to=effective_date)" in history_source
 
 
-def test_formal_batch_blocks_unpopulated_universes() -> None:
+def test_board_scope_excludes_universe_definitions() -> None:
+    """[Phase 4D.3 / PRD 30 BA-01B] Board Analysis V1 范围 = industry + concept。
+
+    `universe_definitions`（major_index / style）是 Review optional scopes，
+    不得进入 board batch 的 expected/succeeded/failed/blockers/coverage 分母。
+    """
     source = inspect.getsource(board_analysis_service.compute_all_boards)
-    assert "list_universe_definitions_at" in source
-    assert "resolve_universe_membership_at" in source
-    assert '"blocked_external_population"' in source
-    assert "expected_count = len(boards) + len(universe_definitions)" in source
+    # A/B/C：universe definitions 完全不参与 board expected scope 构造
+    assert "list_universe_definitions_at" not in source
+    assert "resolve_universe_membership_at" not in source
+    assert "expected_count = len(boards)" in source
+    assert "expected_count = len(boards) + len(universe_definitions)" not in source
+    # D：placeholder 出现不会改变 expected_count —— 模块已不再 import 该解析器
+    module_source = inspect.getsource(board_analysis_service)
+    assert "list_universe_definitions_at" not in module_source
+
+
+def test_board_batch_status_never_blocked_external_population() -> None:
+    """[Phase 4D.3 / PRD 30 BA-02B] 禁止 `blocked_external_population` 作 batch status。"""
+    source = inspect.getsource(board_analysis_service.compute_all_boards)
+    assert 'batch_run.status = "blocked_external_population"' not in source
+    for status in ("succeeded", "partial", "failed"):
+        assert f'batch_run.status = "{status}"' in source
+
+
+def test_board_status_derivation_puts_execution_failure_first() -> None:
+    """[PRD 30 BA-02B] execution failure 优先，不得被 population/degradation 吞掉。"""
+    source = inspect.getsource(board_analysis_service.compute_all_boards)
+    idx_exec = source.index("elif execution_failed:")
+    idx_degr = source.index("elif not_computed or coverage_below:")
+    assert idx_exec < idx_degr
+
+
+def test_board_counters_exclude_universe_blockers() -> None:
+    """[PRD 30 BA-02B] counter 基数统一为 in-scope board；failed_count = execution failure。"""
+    source = inspect.getsource(board_analysis_service.compute_all_boards)
+    assert "batch_run.failed_count = execution_failed" in source
+    # coverage 不足的 partial board 不得被计为 execution failure
+    assert "failed = len(population_blockers)" not in source
+    assert "coverage_below += 1" in source
 
 
 def test_batch_version_is_deterministic_and_order_independent() -> None:
