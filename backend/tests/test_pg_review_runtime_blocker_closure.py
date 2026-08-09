@@ -177,7 +177,6 @@ async def _make_snapshot_run_with_items(
         primary_timeframe="1d",
         secondary_timeframe="15m",
         adj="qfq",
-        scope="full",
         run_type="after_close",
         status=status,
         expected_count=expected,
