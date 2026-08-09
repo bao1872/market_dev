@@ -438,6 +438,91 @@ market → style/index/industry_l1
 - coverage达到门禁；
 - 不允许为展示而扫描所有无关概念。
 
+### 6.3 Historical Membership Source Contract（Phase 4A3 新增）
+
+本小节定义 `major_index` / `style` / `industry_l1` 历史 PIT membership 的数据来源合同。
+Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
+（`BoardDefinitionVersion` + `BoardMembershipHistory`，`UniverseDefinition` + `UniverseMembership`，
+均由 migration `079_board_hierarchy_batch_identity` 建立）**已完全支持 PIT 半开区间**
+`[effective_from, effective_to)`，无需新增表或 migration。缺口仅为**来源数据填充**。
+
+#### 6.3.1 硬规则（禁止项）
+
+- **PIT 唯一性**：历史日期 T 只能使用 T 日 `effective` 的 membership；禁止 `latest` / `current` 回填历史区间。
+- **禁止手工伪造**：无来源数据时必须输出 `bootstrap_unavailable`，不得构造 member 列表。
+- **禁止静默 fallback**：`blocked_external_population` / `unpopulated` 状态下不得假装 `ready`。
+- **来源授权前置**：新增 external provider（含 tushare / akshare / 交易所爬取 / 第三方 API）
+  必须先修改本 PRD 获得授权，禁止在代码中私自接入（`rules/90 §11`、`rules/20 §180-184`）。
+- **来源 lineage**：每条 membership 必须记录 `source` + `source_key` + `taxonomy_version` /
+  `membership_version`，与 `taxonomy_compatibility_key` 保持一致。
+- **历史修正**：source 后续修正时，新 version 不得覆盖已被 Stage B observation 引用的
+  `taxonomy_compatibility_key`；如需变更必须 bump version 并标记 lineage。
+
+#### 6.3.2 各 family 来源状态（Phase 4A3 结论）
+
+| family | 当前状态 | 授权来源 | 历史窗口 2026-02-06→2026-08-07 可用性 |
+|---|---|---|---|
+| industry_l1 | 官方来源 = `pywencai`（wencai），**current-only**；`BoardMembershipHistory` 仅在两次 sync 间发生变更时才产生新版本，首 sync 之前无历史快照 | `wencai`（rules/90 唯一授权） | **SOURCE_NOT_AVAILABLE**（授权来源无法提供历史窗口；见 §6.3.3） |
+| csi300 | migration `079` 已建 placeholder `UniverseDefinition`（key=`csi300`，`population_status=blocked_external_population`，`source=authoritative-provider-required`），无已填充 connector | 待授权（候选见 §6.3.4） | **SOURCE_SELECTION_REQUIRED**（候选存在但未授权） |
+| csi500 | 同上（key=`csi500`） | 待授权（候选见 §6.3.4） | **SOURCE_SELECTION_REQUIRED** |
+| style（large_cap / small_cap） | migration `079` 已建 placeholder（`large_cap_style` / `small_cap_style`，`blocked_external_population`），PRD §6.1 称“使用已有、版本化的风格股票池定义”，但**项目内无任何 origin / 构造规则** | 无 | **STYLE_PRODUCT_DECISION_REQUIRED**（产品定义缺口，非 ingestion bug） |
+
+#### 6.3.3 industry_l1 决策
+
+- `pywencai` 是 rules/90 唯一授权的板块来源，固定查询 `"同花顺概念，行业分类"`，
+  返回**单一当前快照**，无 `as_of` / `trade_date` / 历史参数 → 确认 current-only。
+- 因此对于 Review MVP 所需的 `2026-02-06 → 2026-08-07` 历史 PIT 窗口，
+  授权来源**无法提供** → 结论 **SOURCE_NOT_AVAILABLE**。
+- 可选出路（需用户决策，不在此擅自选择）：
+  1. MVP 接受 industry_l1 **仅 forward-only**（自 2026-08-09 起每日 snapshot），历史窗口标记为 `bootstrap_unavailable`；
+  2. 授权一个具备历史行业分类的替代来源（需先改本 PRD）。
+
+#### 6.3.4 csi300 / csi500 候选矩阵（需授权后选用）
+
+候选按 §10 优先级（现有已授权 > 官方 > 新依赖）排序：
+
+1. **CSIndex 官方 constituent 下载**（www.csindex.com.cn）：提供成分股及 effective date，
+   PIT 语义最干净；官方一级来源，优先推荐。
+2. **交易所官网（SSE/SZSE）成分公告**：官方但需解析公告，cadence 不规整。
+3. **Tushare `index_member` / `index_weight`**（需 token，项目当前未依赖）：
+   具备 `start_date`/`end_date` PIT 查询，但属新增 external dependency，需 PRD 授权。
+
+当前均**未授权**，故 csi300/csi500 = **SOURCE_SELECTION_REQUIRED**。
+
+#### 6.3.5 style 产品决策缺口（OPEN DECISION）
+
+- PRD §6.1 仅声明“使用已有、版本化的风格股票池定义”，未定义：
+  - large_cap / small_cap 的**来源**（官方风格指数？自定义池？）；
+  - 还是**运行时按市值排名构造**（top N / 分位）。
+- 禁止自行发明 `top300=large` / `top20%=small` / market-cap threshold（§8）。
+- 此为 **PRODUCT_DEFINITION_GAP**，必须由用户决定产品定义后，才能确定 source 或构造规则。
+- PRD 此处标记为 **OPEN DECISION**，不补规则。
+
+#### 6.3.6 最小 normalized shape（与现有表对齐）
+
+INDUSTRY（→ `BoardMembershipHistory`）：
+
+```
+instrument_id, board_id, taxonomy_version, membership_version,
+effective_from, effective_to, source, source_key
+```
+
+INDEX / STYLE（→ `UniverseMembership`）：
+
+```
+universe_definition_id, instrument_id, effective_from, effective_to,
+weight, source, source_key
+```
+
+Idempotency 以现有 unique constraint 为准：
+`uq_board_membership_history_identity`（board_id, instrument_id, effective_from）；
+`uq_universe_memberships_identity`（universe_definition_id, instrument_id, effective_from）。
+
+#### 6.3.7 Required historical coverage
+
+第一阶段只要求完整覆盖 `2026-02-06 → 2026-08-07`（当前 120 交易日 baseline）。
+不要求 10 年历史，除非来源免费自然提供且不显著增加复杂度。
+
 ## 7. P/Q/U/C/V指标合同
 
 ### 7.1 通用结构
