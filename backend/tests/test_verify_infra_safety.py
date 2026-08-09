@@ -527,3 +527,43 @@ def test_pg_gate_with_skip_records_false_and_raises(monkeypatch) -> None:
     assert exporter.gates[-1][0] == "pg_tests"
     assert exporter.gates[-1][1] is False  # SKIP 假绿被拒绝
     assert "skipped" in exporter.gates[-1][2]
+
+
+def test_pg_contract_list_includes_closure_suite() -> None:
+    """[VERIFY-COVERAGE-01] 静态断言 targeted-pg 的 pg_contract curated 列表包含已授权 closure suite。
+
+    仅做 AST 静态检查：解析 verify_attempt.py，定位 run_self_contained_pg_tests 方法内
+    `pytest -m postgres` 的参数列表，确认 test_pg_review_runtime_blocker_closure.py 存在。
+    不执行真实 pytest、不连库。防止 closure suite 被意外移出 curated 列表（false-green 回归）。
+    """
+    import verify_attempt as va
+
+    src = Path(va.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    closure_file = "tests/test_pg_review_runtime_blocker_closure.py"
+    found = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_self_contained_pg_tests":
+            # 收集该方法内所有字符串常量，检查 closure 文件是否被 pytest 参数引用
+            strings = [
+                n.value
+                for n in ast.walk(node)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            ]
+            found = closure_file in strings
+            break
+
+    assert found, (
+        f"pg_contract curated 列表缺少已授权 closure suite: {closure_file}。"
+        "VERIFY-COVERAGE-01 要求该文件必须被 targeted-pg 的 pg_tests gate 注册。"
+    )
+    # 同时确认原 3 个基线文件仍保留（最小追加，不替换）
+    baseline = {
+        "tests/test_pg_atomic_publication.py",
+        "tests/test_pg_projection_lifecycle.py",
+        "tests/test_pg_100_stock_call_counts.py",
+    }
+    src_all = src
+    for b in baseline:
+        assert b in src_all, f"pg_contract 不应删除基线文件: {b}"

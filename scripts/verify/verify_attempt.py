@@ -415,14 +415,18 @@ class VerifyAttempt:
         """运行自包含基础 PG 测试（fresh process in panji-verify-python）。
 
         基础 PG Gate 职责：atomic publication / projection lifecycle / 100-stock call counts。
-        closure 场景测试由 E2E Gate 负责，避免两道 Gate 重复同一测试（覆盖回退）。
+        closure 场景测试（PG-1~PG-8 runtime-blocker 收口）由 VERIFY-COVERAGE-01 注册进本 gate，
+        作为已授权 closure suite 的一部分（最小追加，不扩大为全量 -m postgres）。
         """
         self.exporter.log("run_self_contained_pg_tests: 开始")
         code, out, err = _run(
             [*self.gate_base, "pytest", "-m", "postgres",
              "tests/test_pg_atomic_publication.py",
              "tests/test_pg_projection_lifecycle.py",
-             "tests/test_pg_100_stock_call_counts.py"],
+             "tests/test_pg_100_stock_call_counts.py",
+             # [VERIFY-COVERAGE-01 / 2026-08-09] 注册已授权的 PG-1~PG-8 closure suite。
+             # 仅追加，不删除/不替换原 3 文件；不改为动态 discovery 或全量 -m postgres。
+             "tests/test_pg_review_runtime_blocker_closure.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:
