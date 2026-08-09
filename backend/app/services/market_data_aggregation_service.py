@@ -833,6 +833,7 @@ def _cache_key(
     limit: int | None,
     warmup_bars: int,
     adjustment_as_of: date | None,
+    allow_backfill: bool = True,
 ) -> str:
     """构建缓存键，包含所有影响结果的参数 + 契约版本（自动隔离新旧缓存）。"""
     start = start_date.isoformat() if start_date is not None else "_"
@@ -843,6 +844,7 @@ def _cache_key(
         f"{_REDIS_CACHE_PREFIX}:"
         f"{instrument_id}:{timeframe}:{adj}:{include_realtime}:{completed_only}:"
         f"{start}:{end}:{limit_str}:{warmup_bars}:{as_of_str}:"
+        f"{int(allow_backfill)}:"
         f"{_MARKET_DATA_CONTRACT_VERSION}"
     )
 
@@ -1385,6 +1387,7 @@ class MarketDataAggregationService:
         limit: int | None = None,
         warmup_bars: int = 0,
         adjustment_as_of: date | None = None,
+        allow_backfill: bool = True,
     ) -> BarAggregationResult:
         """获取行情聚合结果（v2 契约，CHANGE-20260717-002）。
 
@@ -1400,6 +1403,10 @@ class MarketDataAggregationService:
             limit: 返回最近 N 根（服务端截取，保证 source_bar_hash 稳定）
             warmup_bars: 额外预热根数（>0 时返回 warmup_bars_full 含完整计算集）
             adjustment_as_of: 复权锚点（None=最新；date=point-in-time，禁止未来除权事件泄漏）
+            allow_backfill: [CHANGE-20260808] 是否允许外部 provider 回补（default True）。
+                False = strict DB-only：DB 有 completed qfq bars 则返回，DB 无则返回空
+                （由 caller 标 skipped），绝不调用 external provider / realtime / 15m。
+                production history replay / canary 必须使用 strict DB-only。
 
         Returns:
             BarAggregationResult（含 bars、warmup_bars_full、hash、contract_version 等诊断字段）
@@ -1418,10 +1425,11 @@ class MarketDataAggregationService:
         if completed_only:
             include_realtime = False
 
-        # [mdas] - 先查 Redis 短缓存（11 参数 + 契约版本）
+        # [mdas] - 先查 Redis 短缓存（参数 + 契约版本）
         cache_key = _cache_key(
             instrument_id, timeframe, adj, include_realtime, completed_only,
             start_date, end_date, limit, warmup_bars, adjustment_as_of,
+            allow_backfill,
         )
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -1482,7 +1490,10 @@ class MarketDataAggregationService:
             expected = min(now_expected, end) if end is not None else now_expected
             need_tail = daily_df.empty or daily_df.index[-1].date() < expected
 
-            if need_tail:
+            # [CHANGE-20260808] strict DB-only：allow_backfill=False 时绝不调用外部
+            # provider 回补（external provider / realtime / 15m 均 zero calls）。
+            # 仅返回 DB 已有 completed bars；DB 无数据则返回空，由 caller 标 skipped。
+            if need_tail and allow_backfill:
                 try:
                     tail_df = await fetch_daily_bars(
                         session, instrument_id, start, end  # type: ignore[arg-type]
@@ -1994,7 +2005,7 @@ if __name__ == "__main__":
         "latest_daily_quote 在 Redis 序列化/反序列化后必须完整保留"
     print("latest_daily_quote 序列化/反序列化 ✓")
 
-    # 9. 验证 _cache_key 含契约版本（11 参数）
+    # 9. 验证 _cache_key 含契约版本 + allow_backfill（12 参数）
     ck = _cache_key(
         uuid.UUID("00000000-0000-0000-0000-000000000001"), "1d", "qfq", True, False,
         None, None, 4000, 1000, None,
@@ -2003,5 +2014,12 @@ if __name__ == "__main__":
     assert ck.endswith(expected_suffix), \
         f"缓存键应含契约版本后缀 {expected_suffix!r}, got {ck}"
     print(f"_cache_key 含契约版本 ✓ (suffix={expected_suffix})")
+    # allow_backfill 不同 → 缓存键不同（strict DB-only 与可回补结果隔离）
+    ck_bf = _cache_key(
+        uuid.UUID("00000000-0000-0000-0000-000000000001"), "1d", "qfq", True, False,
+        None, None, 4000, 1000, None, allow_backfill=False,
+    )
+    assert ck_bf != ck, "allow_backfill 必须参与缓存键隔离"
+    print("_cache_key 隔离 allow_backfill ✓")
 
     print("OK")

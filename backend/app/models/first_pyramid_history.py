@@ -22,7 +22,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, Text, UniqueConstraint, func
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -187,11 +187,30 @@ class FirstPyramidHistoryEvent(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint(
+        # [CHANGE-20260808] 事件唯一性 contract-aware：普通 UNIQUE 无法表达
+        # "旧 NULL/v1 event 与 v2 event 若 event_id 相同可共存"。改为两个 partial
+        # unique index：
+        #   - legacy：UNIQUE(instrument_id, algorithm_version, event_id)
+        #             WHERE history_contract_version IS NULL
+        #   - versioned：UNIQUE(instrument_id, algorithm_version, history_contract_version, event_id)
+        #             WHERE history_contract_version IS NOT NULL
+        # 保证旧 NULL X + v2 X 可共存；v2 X 重跑仍幂等。
+        Index(
+            "uq_first_pyramid_history_events_instr_ver_evid",
             "instrument_id",
             "algorithm_version",
             "event_id",
-            name="uq_first_pyramid_history_events_instr_ver_evid",
+            unique=True,
+            postgresql_where=text("history_contract_version IS NULL"),
+        ),
+        Index(
+            "uq_first_pyramid_history_events_instr_ver_cv_evid",
+            "instrument_id",
+            "algorithm_version",
+            "history_contract_version",
+            "event_id",
+            unique=True,
+            postgresql_where=text("history_contract_version IS NOT NULL"),
         ),
         Index(
             "ix_first_pyramid_history_events_instr_type",

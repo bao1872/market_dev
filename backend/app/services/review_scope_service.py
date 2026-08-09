@@ -380,6 +380,7 @@ async def compute_scope_metrics(
         algorithm_version=algorithm_version,
         flat_list=flat_list,
         payloads=payloads,
+        taxonomy_compatibility_key=scope.taxonomy_compatibility_key,
     )
 
     logger.info(

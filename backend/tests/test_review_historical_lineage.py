@@ -540,6 +540,50 @@ class TestHistoryRunReadiness:
         assert res["status"] == "not_ready"
         assert "not_succeeded" in res["reason"]
 
+    def test_partial_fails(self) -> None:
+        """partial run 不得作为 canonical HistoryRun（非 terminal succeeded）。"""
+        import asyncio
+
+        from app.services.review_bootstrap_service import _validate_canonical_history_run
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = self._make_run(
+                "all_a_share", "partial", "review-history-v2",
+            )
+            return result
+
+        session.execute = fake_execute
+        res = asyncio.run(_validate_canonical_history_run(
+            session, uuid.uuid4(), "review-history-v2",
+        ))
+        assert res["status"] == "not_ready"
+        assert "not_succeeded" in res["reason"]
+
+    def test_failed_fails(self) -> None:
+        """failed run 不得作为 canonical HistoryRun（非 terminal succeeded）。"""
+        import asyncio
+
+        from app.services.review_bootstrap_service import _validate_canonical_history_run
+
+        session = MagicMock()
+
+        async def fake_execute(stmt):
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = self._make_run(
+                "all_a_share", "failed", "review-history-v2",
+            )
+            return result
+
+        session.execute = fake_execute
+        res = asyncio.run(_validate_canonical_history_run(
+            session, uuid.uuid4(), "review-history-v2",
+        ))
+        assert res["status"] == "not_ready"
+        assert "not_succeeded" in res["reason"]
+
     def test_wrong_scope_fails(self) -> None:
         import asyncio
 
@@ -630,12 +674,103 @@ class TestMigrationDowngradeSymmetry:
             return []
 
         downgrade_ops = _collect("downgrade")
-        # downgrade 必须含 drop_column（对 events 表）
+        # downgrade 必须含 drop_column（对 events 表）。migration 用 _EVENTS_TABLE 常量
+        # （值="first_pyramid_history_events"），测试同时匹配常量名与字面量。
         drop_events = [
             o for o in downgrade_ops
-            if o[0] == "drop_column" and "first_pyramid_history_events" in o[1]
+            if o[0] == "drop_column"
+            and "_EVENTS_TABLE" in o[1] and "history_contract_version" in o[1]
         ]
         assert drop_events, "downgrade 缺少 DROP first_pyramid_history_events.history_contract_version"
+
+    def test_downgrade_reverses_event_partial_indexes(self) -> None:
+        """downgrade 必须 drop 两个 event partial unique index，并恢复旧三字段 UNIQUE。"""
+        import ast
+        import os
+
+        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        full = os.path.join(repo, "backend/alembic/versions/088_review_historical_lineage.py")
+        with open(full) as f:
+            tree = ast.parse(f.read())
+
+        def _collect(func_name):
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == func_name:
+                    ops = []
+                    for stmt in ast.walk(node):
+                        if isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Attribute):
+                            ops.append((stmt.func.attr, ast.dump(stmt)))
+                    return ops
+            return []
+
+        upgrade_ops = _collect("upgrade")
+        downgrade_ops = _collect("downgrade")
+
+        # migration 用常量：_OLD_EVENT_UQ/_LEGACY_EVENT_IDX = "uq_...instr_ver_evid"，
+        # _VERSIONED_EVENT_IDX = "uq_...instr_ver_cv_evid"。
+        # upgrade 必须 drop 旧 UNIQUE（_OLD_EVENT_UQ）+ create 两个 partial index
+        upgrade_drop_uq = [
+            o for o in upgrade_ops
+            if o[0] == "drop_constraint" and "_OLD_EVENT_UQ" in o[1]
+        ]
+        upgrade_create_versioned = [
+            o for o in upgrade_ops
+            if o[0] == "create_index" and "_VERSIONED_EVENT_IDX" in o[1]
+        ]
+        upgrade_create_legacy = [
+            o for o in upgrade_ops
+            if o[0] == "create_index" and "_LEGACY_EVENT_IDX" in o[1]
+        ]
+        assert upgrade_drop_uq, "upgrade 缺少 DROP 旧事件 UNIQUE 约束"
+        assert upgrade_create_versioned, "upgrade 缺少 versioned partial unique index"
+        assert upgrade_create_legacy, "upgrade 缺少 legacy partial unique index"
+
+        # downgrade 必须 drop 两个 partial index + 重建旧 UNIQUE（对称）
+        downgrade_drop_versioned = [
+            o for o in downgrade_ops
+            if o[0] == "drop_index" and "_VERSIONED_EVENT_IDX" in o[1]
+        ]
+        downgrade_drop_legacy = [
+            o for o in downgrade_ops
+            if o[0] == "drop_index" and "_LEGACY_EVENT_IDX" in o[1]
+        ]
+        downgrade_recreate_uq = [
+            o for o in downgrade_ops
+            if o[0] == "create_unique_constraint" and "_OLD_EVENT_UQ" in o[1]
+        ]
+        assert downgrade_drop_versioned, "downgrade 缺少 DROP versioned event partial index"
+        assert downgrade_drop_legacy, "downgrade 缺少 DROP legacy event partial index"
+        assert downgrade_recreate_uq, "downgrade 缺少重建旧事件 UNIQUE 约束"
+
+    def test_downgrade_has_v2_event_precondition(self) -> None:
+        """downgrade 必须先检查 versioned event（history_contract_version IS NOT NULL），fail fast。"""
+        import ast
+        import os
+
+        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        full = os.path.join(repo, "backend/alembic/versions/088_review_historical_lineage.py")
+        with open(full) as f:
+            tree = ast.parse(f.read())
+
+        def _collect(func_name):
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == func_name:
+                    ops = []
+                    for stmt in ast.walk(node):
+                        if isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Attribute):
+                            ops.append((stmt.func.attr, ast.dump(stmt)))
+                    return ops
+            return []
+
+        downgrade_ops = _collect("downgrade")
+        # 检查 downgrade 中包含对 first_pyramid_history_events（_EVENTS_TABLE 常量）WHERE
+        # history_contract_version IS NOT NULL 的 COUNT 查询
+        has_v2_precheck = any(
+            "_EVENTS_TABLE" in o[1]
+            and "history_contract_version IS NOT NULL" in o[1]
+            for o in downgrade_ops
+        )
+        assert has_v2_precheck, "downgrade 缺少 versioned event downgrade precondition"
 
 
 class TestReplayRequiredSourceRunSelection:
@@ -807,3 +942,175 @@ class TestLiveTaxonomyCompatibility:
         # compatible published live（raw=5.5）胜出（rank 0 < replay rank 1）
         p_hist = history_maps["P"]["core"]
         assert p_hist == [5.5]
+
+
+class TestHistoryRunFinalStatus:
+    """§2 HistoryRun final status 由 DB canonical progress 决定（非 local counters）。"""
+
+    def _derive(self, **kw):
+        from app.services.first_pyramid_history_service import _derive_run_final_status
+
+        progress = {
+            "total": kw.get("total", 0),
+            "succeeded": kw.get("succeeded", 0),
+            "failed": kw.get("failed", 0),
+            "pending": kw.get("pending", 0),
+            "running": kw.get("running", 0),
+            "skipped": kw.get("skipped", 0),
+        }
+        return _derive_run_final_status(progress)
+
+    def test_a_all_succeeded(self) -> None:
+        assert self._derive(total=10, succeeded=10) == "succeeded"
+
+    def test_b_succeeded_plus_skipped_partial(self) -> None:
+        assert self._derive(total=10, succeeded=8, skipped=2) == "partial"
+
+    def test_c_succeeded_plus_failed_partial(self) -> None:
+        assert self._derive(total=10, succeeded=7, failed=3) == "partial"
+
+    def test_d_previous_failed_no_new_failure_still_partial(self) -> None:
+        # 当前 invocation 无新失败，但 DB progress 含 previous failed → 仍 partial
+        assert self._derive(total=10, succeeded=9, failed=1) == "partial"
+
+    def test_e_other_worker_running_not_succeeded(self) -> None:
+        # running>0 → 不得 finalize succeeded（并发 worker）
+        assert self._derive(total=10, succeeded=10, running=1) == "partial"
+        # pending>0 同理
+        assert self._derive(total=10, succeeded=10, pending=2) == "partial"
+
+    def test_f_all_failed_or_skipped_failed(self) -> None:
+        assert self._derive(total=5, failed=5) == "failed"
+        assert self._derive(total=5, skipped=5) == "failed"
+
+    def test_all_failed_model_contract(self) -> None:
+        # 全部 failed → failed（无成功）
+        assert self._derive(total=4, failed=4) == "failed"
+
+
+class TestEventContractAwareUniqueness:
+    """§3 FirstPyramidHistoryEvent 唯一性 contract-aware（legacy + versioned partial index）。"""
+
+    def test_orm_has_two_partial_unique_indexes(self) -> None:
+        from app.models.first_pyramid_history import FirstPyramidHistoryEvent
+
+        indexes = {
+            idx.name: idx
+            for idx in FirstPyramidHistoryEvent.__table__.indexes
+        }
+        legacy = indexes.get("uq_first_pyramid_history_events_instr_ver_evid")
+        versioned = indexes.get("uq_first_pyramid_history_events_instr_ver_cv_evid")
+        assert legacy is not None and legacy.unique is True
+        assert versioned is not None and versioned.unique is True
+
+        # legacy 只含 3 列，不依赖 history_contract_version 列
+        legacy_cols = [c.name for c in legacy.columns]
+        assert "history_contract_version" not in legacy_cols
+        assert legacy_cols == ["instrument_id", "algorithm_version", "event_id"]
+
+        # versioned 含 history_contract_version（4 列）
+        versioned_cols = [c.name for c in versioned.columns]
+        assert "history_contract_version" in versioned_cols
+
+    def test_orm_no_plain_unique_constraint(self) -> None:
+        from app.models.first_pyramid_history import FirstPyramidHistoryEvent
+
+        # 旧普通 UNIQUE 约束必须已移除（改 partial index）
+        constraint_names = {
+            c.name for c in FirstPyramidHistoryEvent.__table__.constraints
+        }
+        assert "uq_first_pyramid_history_events_instr_ver_evid" not in constraint_names
+
+    def test_legacy_and_versioned_index_where(self) -> None:
+        from app.models.first_pyramid_history import FirstPyramidHistoryEvent
+
+        indexes = {
+            idx.name: idx
+            for idx in FirstPyramidHistoryEvent.__table__.indexes
+        }
+        legacy = indexes["uq_first_pyramid_history_events_instr_ver_evid"]
+        versioned = indexes["uq_first_pyramid_history_events_instr_ver_cv_evid"]
+        # partial predicate 编译含 history_contract_version IS NULL / IS NOT NULL
+        legacy_sql = str(legacy.dialect_options["postgresql"].get("where"))
+        assert legacy_sql is not None and "IS NULL" in legacy_sql
+        versioned_sql = str(versioned.dialect_options["postgresql"].get("where"))
+        assert versioned_sql is not None and "IS NOT NULL" in versioned_sql
+
+
+class TestEventPersistenceIndexInference:
+    """§4 新 v2 event persistence 用 partial-index inference（禁 ON CONSTRAINT）。"""
+
+    def _compile_event_insert(self, contract: str | None) -> str:
+        import asyncio as _asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from sqlalchemy.dialects import postgresql as _pg
+
+        from app.services.first_pyramid_history_service import _persist_history_result
+
+        class FakeScalars:
+            def __init__(self, rows): self.rows = rows
+            def __iter__(self): return iter(self.rows)
+
+        compiled = {}
+
+        async def fake_execute(stmt):
+            compiled["sql"] = str(
+                stmt.compile(dialect=_pg.dialect())
+            )
+            result = MagicMock()
+            result.scalars.return_value = FakeScalars([])
+            return result
+
+        session = MagicMock()
+        session.execute = fake_execute
+        session.flush = AsyncMock()
+
+        history = {
+            "daily_state": [{
+                "time": "2026-07-01", "regime_value": 1, "bar_index": 5,
+            }],
+            "events": [{
+                "type": "BOS",
+                "event_id": "X",
+                "bar_index": 5,
+                "direction": "bullish",
+            }],
+            "meta": {"input_hash": "h"},
+        }
+        _asyncio.run(_persist_history_result(
+            session, uuid.uuid4(), history, "1.0.0-core-split",
+            source_history_run_id=uuid.uuid4(),
+            history_contract_version=contract,
+        ))
+        return compiled.get("sql", "")
+
+    def test_v2_event_uses_versioned_index_inference(self) -> None:
+        sql = self._compile_event_insert("review-history-v2")
+        assert "ON CONFLICT" in sql
+        # 必须用 index_elements+index_where 生成 ON CONFLICT (... WHERE ...)
+        assert "history_contract_version IS NOT NULL" in sql
+        assert "ON CONFLICT ON CONSTRAINT" not in sql
+
+    def test_legacy_event_uses_legacy_index_inference(self) -> None:
+        sql = self._compile_event_insert(None)
+        assert "ON CONFLICT" in sql
+        assert "history_contract_version IS NULL" in sql
+        assert "ON CONFLICT ON CONSTRAINT" not in sql
+
+
+class TestEventDowngradePrecondition:
+    """§5 event downgrade precondition：存在 versioned event 必须 fail fast。"""
+
+    def test_versioned_event_blocks_downgrade(self) -> None:
+        def _raise_if_v2_events(count: int) -> None:
+            if count > 0:
+                raise RuntimeError(
+                    f"downgrade blocked: found {count} versioned "
+                    "first_pyramid_history_events row(s)"
+                )
+
+        with pytest.raises(RuntimeError):
+            _raise_if_v2_events(2)
+        # 空表（无 versioned event）不 raise
+        _raise_if_v2_events(0)

@@ -494,3 +494,88 @@ async def test_combination_legit_run_own_observations_pass_publish_gate() -> Non
     publishable, blockers = await evaluate_publish_gate(_make_session(gate_results), run)
     assert publishable is True, f"合法 Review 应通过发布门，blockers={blockers}"
     assert not any("未来" in b for b in blockers)
+
+
+# =============================================================================
+# 12. [CHANGE-20260808] LIVE taxonomy formal path：
+#     compute_scope_metrics 必须把 scope.taxonomy_compatibility_key 显式传给
+#     persist_metric_observations（LIVE observation 不得静默写 NULL taxonomy）。
+# =============================================================================
+
+
+async def _run_scope_metrics_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    scope: ScopeDefinition,
+) -> dict:
+    """运行 compute_scope_metrics 并捕获 persist_metric_observations 收到的 kwargs。
+
+    compute_scope_metrics 在函数体内 `from ... import persist_metric_observations`
+    （local import），因此必须 patch 定义模块 app.services.review_metric_observation_service
+    的符号；同时 mock upsert_scope_snapshot 让流程走到 persist 调用。
+    """
+    from app.services.review_scope_service import compute_scope_metrics
+
+    captured: dict = {}
+
+    async def _fake_persist(session, **kwargs):
+        captured.update(kwargs)
+        return 2
+
+    from app.services import review_metric_observation_service as _obs_mod
+    monkeypatch.setattr(_obs_mod, "persist_metric_observations", _fake_persist)
+
+    async def _fake_upsert(*a, **kw):
+        return object()  # 返回任意 snapshot ORM 占位
+
+    monkeypatch.setattr(
+        "app.services.review_scope_service.upsert_scope_snapshot", _fake_upsert,
+    )
+
+    run = _make_run()
+    compute_session = AsyncMock()
+    compute_session.flush = AsyncMock()
+    async def _capture(*args, **kwargs):
+        return _FakeResult(scalar=None)
+    compute_session.execute = AsyncMock(side_effect=_capture)
+
+    await compute_scope_metrics(
+        compute_session,
+        run.id,
+        run.trade_date,
+        scope,
+        _make_flat_list(),
+        algorithm_version=run.algorithm_version,
+        eligible_count=1,
+    )
+    return captured
+
+
+async def test_live_taxonomy_key_propagates_to_observation(monkeypatch) -> None:
+    """industry scope taxonomy=B → LIVE observation 必须持久化 taxonomy=B。"""
+    scope = ScopeDefinition(
+        scope_type="industry_l1",
+        scope_key="board-1",
+        scope_name="行业",
+        taxonomy_version="taxo-v3",
+        taxonomy_compatibility_key="taxo-B",
+        membership_version="pit-v1",
+    )
+    captured = await _run_scope_metrics_capture(monkeypatch, scope)
+    # taxonomy key 必须显式传到 observation 持久化（非 NULL）
+    assert captured.get("taxonomy_compatibility_key") == "taxo-B"
+    assert captured.get("scope_type") == "industry_l1"
+
+
+async def test_market_taxonomy_none_explicit(monkeypatch) -> None:
+    """market scope taxonomy=None → 显式传 None（不得静默省略）。"""
+    scope = ScopeDefinition(
+        scope_type="market",
+        scope_key="market",
+        scope_name="全市场",
+        taxonomy_version=None,
+        taxonomy_compatibility_key=None,
+        membership_version="v1",
+    )
+    captured = await _run_scope_metrics_capture(monkeypatch, scope)
+    assert "taxonomy_compatibility_key" in captured
+    assert captured["taxonomy_compatibility_key"] is None

@@ -284,6 +284,88 @@ async def test_daily_historical_request_short_db_still_needs_tail(
 
 
 # ============================================================
+# [CHANGE-20260808] strict DB-only：allow_backfill=False 零外部 provider 调用
+# ============================================================
+
+
+async def test_strict_db_only_never_calls_external_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """allow_backfill=False 时，即使 DB 有尾部缺口也绝不调用外部 provider
+    （pytdx/realtime/15m 均 zero calls）。只返回 DB 已有 completed bars。
+    """
+    service = mdas.MarketDataAggregationService()
+    # DB 只到 06-17，缺口到 expected 06-18 → 通常需要 pytdx 补尾
+    db_df = _build_daily_bars(["2026-06-16", "2026-06-17"])
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(db_df.copy()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+
+    external_called = {"count": 0}
+
+    async def _raise_on_call(*a, **kw):  # 若被调用立即 raise
+        external_called["count"] += 1
+        raise AssertionError("external provider 不得在 strict DB-only 下被调用")
+
+    monkeypatch.setattr(mdas, "fetch_daily_bars", _raise_on_call)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+        completed_only=True,
+        allow_backfill=False,
+    )
+
+    assert external_called["count"] == 0, "strict DB-only 下外部 provider 调用次数必须为 0"
+    # 只返回 DB 已有 bars（不补齐 06-18）
+    assert result.data_source == "db"
+    assert not result.degraded
+    assert len(result.bars) == 2
+    assert pd.Timestamp("2026-06-18") not in result.bars.index
+
+
+async def test_strict_db_only_empty_db_returns_empty_not_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """strict DB-only 且 DB 无数据 → 返回空（不触发外部 provider），由 caller 标 skipped。"""
+    service = mdas.MarketDataAggregationService()
+
+    monkeypatch.setattr(
+        mdas, "_query_daily_bars",
+        lambda *a, **kw: _async_return(pd.DataFrame()),
+    )
+    monkeypatch.setattr(
+        mdas, "_expected_last_completed_daily_bar",
+        lambda session, now: date(2026, 6, 18),
+    )
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: False)
+
+    external_called = {"count": 0}
+
+    async def _raise_on_call(*a, **kw):
+        external_called["count"] += 1
+        raise AssertionError("external provider 不得在 strict DB-only 下被调用")
+
+    monkeypatch.setattr(mdas, "fetch_daily_bars", _raise_on_call)
+
+    result = await service.get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID, timeframe="1d", adj="none",
+        completed_only=True,
+        allow_backfill=False,
+    )
+
+    assert external_called["count"] == 0
+    assert result.data_source == "db"
+    assert result.bars is None or result.bars.empty
+
+
+# ============================================================
 # 日线去重：pytdx 15:00 与 DB 00:00 同日不产生重复 bar
 # ============================================================
 

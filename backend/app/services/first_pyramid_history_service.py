@@ -624,12 +624,14 @@ async def _fetch_db_only_daily_bars(
     *,
     output_bars: int,
 ) -> pd.DataFrame | None:
-    """[CHANGE-20260731-003] SSOT 合规：通过 MDAS 读取日线行情。
+    """[CHANGE-20260731-003 / 20260808] SSOT 合规 strict DB-only 读日线行情。
 
     原实现直接调用 bar_repository._query_daily_bars 违反 SSOT 架构，
     改为通过 MarketDataAggregationService (MDAS) 统一出口。
     completed_only=True 保证只读取已完成 bar；include_realtime=False 禁用实时补充。
-    若 DB 无数据，MDAS 会按 SSOT 标准行为尝试回补；返回空时 caller 标 skipped。
+    [CHANGE-20260808] allow_backfill=False 强制 strict DB-only：即使 DB 缺尾也绝不调用
+    external provider / realtime / 15m。DB 无 completed qfq bars → 返回 None（caller 标 skipped）。
+    production history replay / canary 必须使用 strict DB-only。
     """
     from app.services.market_data_aggregation_service import MarketDataAggregationService
 
@@ -641,6 +643,7 @@ async def _fetch_db_only_daily_bars(
         adj="qfq",
         include_realtime=False,
         completed_only=True,
+        allow_backfill=False,
         limit=output_bars * 2,  # 留余量，history SSOT 内部会截取 output_bars
     )
     df = agg.bars
@@ -799,23 +802,25 @@ async def backfill_history_with_run_items(
                 except Exception as cb_exc:
                     logger.warning("progress_callback 失败: %s", cb_exc)
 
-    # 3. 从 DB 统计最终进度
+    # 3. 从 DB 统计最终进度（canonical source of truth）
     async with AsyncSessionLocal() as db:
         progress = await get_history_run_progress(db, history_run_id)
 
-    # 4. 更新 run 最终状态
-    final_status = (
-        HISTORY_RUN_SUCCEEDED if failed_count == 0 and succeeded_count > 0
-        else HISTORY_RUN_PARTIAL if succeeded_count > 0
-        else HISTORY_RUN_FAILED
-    )
+    # 4. 更新 run 最终状态 —— 必须由 DB canonical progress 决定，不得用本
+    #    worker invocation 的 local counters（并发 worker 下会误判）：
+    #     - pending > 0 或 running > 0：其他 worker 仍在 running，不得 finalize succeeded
+    #     - 全部成功（succeeded==total 且无 failed/skipped/pending/running）：succeeded
+    #     - 有成功且有 failed/skipped/pending/running 残留：partial
+    #     - 无成功（全 failed/skipped）：failed
+    final_status = _derive_run_final_status(progress)
     async with AsyncSessionLocal() as db:
         await finish_history_run(db, history_run_id, status=final_status)
         await db.commit()
 
     logger.info(
         "[HistoryBackfill] run=%s 完成: status=%s, succeeded=%d, failed=%d, skipped=%d",
-        history_run_id, final_status, succeeded_count, failed_count, skipped_count,
+        history_run_id, final_status, progress["succeeded"], progress["failed"],
+        progress["skipped"],
     )
 
     return {
@@ -823,12 +828,51 @@ async def backfill_history_with_run_items(
         "algorithm_version": algorithm_version,
         "output_bars": output_bars,
         "status": final_status,
-        "succeeded_count": succeeded_count,
-        "failed_count": failed_count,
-        "skipped_count": skipped_count,
+        "succeeded_count": progress["succeeded"],
+        "failed_count": progress["failed"],
+        "skipped_count": progress["skipped"],
         "total_processed": total_processed,
         "progress": progress,
     }
+
+
+def _derive_run_final_status(progress: dict[str, Any]) -> str:
+    """[CHANGE-20260808] 由 DB canonical progress 决定 run final status。
+
+    HistoryRun model 语义：
+      succeeded = 全部成功
+      partial   = 部分成功 / failed / skipped
+      failed    = 无成功
+
+    并发安全：pending > 0 或 running > 0 时其他 worker 可能仍在处理，不得 finalize
+    succeeded（也避免把仍在跑标记为完成）。
+    """
+    total = progress.get("total", 0)
+    succeeded = progress.get("succeeded", 0)
+    failed = progress.get("failed", 0)
+    pending = progress.get("pending", 0)
+    running = progress.get("running", 0)
+    skipped = progress.get("skipped", 0)
+
+    if pending > 0 or running > 0:
+        # 有其他 worker 仍在处理 / 还有未领取 item → 不得视为 succeeded
+        return HISTORY_RUN_PARTIAL
+
+    if (
+        total > 0
+        and succeeded == total
+        and failed == 0
+        and skipped == 0
+        and pending == 0
+        and running == 0
+    ):
+        return HISTORY_RUN_SUCCEEDED
+
+    if succeeded > 0:
+        return HISTORY_RUN_PARTIAL
+
+    # 无成功：全部 failed / skipped（按 model contract：failed）
+    return HISTORY_RUN_FAILED
 
 
 # =============================================================================
@@ -958,9 +1002,30 @@ async def _persist_history_result(
             history_contract_version=history_contract_version,
             event_payload=evt,
         )
-        stmt = stmt.on_conflict_do_nothing(
-            constraint="uq_first_pyramid_history_events_instr_ver_evid",
-        )
+        # [CHANGE-20260808] 事件唯一性 contract-aware：普通 UNIQUE 约束已拆成两个 partial
+        # unique index（legacy WHERE history_contract_version IS NULL / versioned WHERE
+        # history_contract_version IS NOT NULL）。on_conflict 必须用 index_elements +
+        # index_where 做 index inference，禁止 ON CONFLICT ON CONSTRAINT <partial-index-name>，
+        # 保证旧 NULL X + v2 X 可共存、v2 X 重跑仍幂等。
+        if history_contract_version is not None:
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=[
+                    FirstPyramidHistoryEvent.instrument_id,
+                    FirstPyramidHistoryEvent.algorithm_version,
+                    FirstPyramidHistoryEvent.history_contract_version,
+                    FirstPyramidHistoryEvent.event_id,
+                ],
+                index_where=text("history_contract_version IS NOT NULL"),
+            )
+        else:
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=[
+                    FirstPyramidHistoryEvent.instrument_id,
+                    FirstPyramidHistoryEvent.algorithm_version,
+                    FirstPyramidHistoryEvent.event_id,
+                ],
+                index_where=text("history_contract_version IS NULL"),
+            )
         await session.execute(stmt)
         events_count += 1
 

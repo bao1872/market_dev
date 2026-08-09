@@ -593,6 +593,7 @@ async def test_review_metric_observations_are_migrated_and_idempotent(
         "algorithm_version": "review-2.0.0",
         "flat_list": [{"_instrument_id": str(uuid.uuid4()), "review_return_1d": 1.25}],
         "payloads": payloads,
+        "taxonomy_compatibility_key": None,
     }
     assert await persist_metric_observations(db_session, **kwargs) == 2
     assert await persist_metric_observations(db_session, **kwargs) == 2

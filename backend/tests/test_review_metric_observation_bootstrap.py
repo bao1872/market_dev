@@ -49,16 +49,19 @@ def test_member_input_hash_is_order_stable_and_ignores_snapshot_projection() -> 
 async def test_history_reader_is_version_exact_and_strictly_pit() -> None:
     observations = [
         SimpleNamespace(
-            trade_date=date(2026, 7, 30), metric_code="P",
-            component_name="scope_return_1d", raw_value=Decimal("2.5"),
+            trade_date=date(2026, 7, 30), scope_type="market", scope_key="market",
+            metric_code="P", component_name="scope_return_1d", raw_value=Decimal("2.5"),
+            source_kind="history_replay",
         ),
         SimpleNamespace(
-            trade_date=date(2026, 7, 30), metric_code="P",
-            component_name="_metric_value", raw_value=Decimal("70"),
+            trade_date=date(2026, 7, 30), scope_type="market", scope_key="market",
+            metric_code="P", component_name="_metric_value", raw_value=Decimal("70"),
+            source_kind="history_replay",
         ),
         SimpleNamespace(
-            trade_date=date(2026, 7, 29), metric_code="P",
-            component_name="scope_return_1d", raw_value=Decimal("1.5"),
+            trade_date=date(2026, 7, 29), scope_type="market", scope_key="market",
+            metric_code="P", component_name="scope_return_1d", raw_value=Decimal("1.5"),
+            source_kind="history_replay",
         ),
     ]
     session = AsyncMock()
@@ -110,6 +113,7 @@ async def test_observation_persistence_emits_idempotent_component_rows() -> None
                 }],
             },
         },
+        taxonomy_compatibility_key=None,
     )
     assert count == 2
     assert session.execute.call_count == 2
@@ -157,8 +161,9 @@ async def test_historical_member_fact_uses_target_and_previous_pit_state() -> No
 
     assert len(facts) == 1
     assert facts[0]["review_return_1d"] == pytest.approx(10.0)
-    assert facts[0]["fp_trend_direction"] == "up"
-    assert facts[0]["review_previous_first_pyramid"]["fp_trend_direction"] == "sideways"
+    # [CHANGE-20260808] LIVE parity：fp_trend_direction 用中文标签（上行/下行/震荡）
+    assert facts[0]["fp_trend_direction"] == "上行"
+    assert facts[0]["review_previous_first_pyramid"]["fp_trend_direction"] == "震荡"
     assert facts[0]["_history_state_id"] == str(current_state.id)
     assert facts[0]["_history_input_hash"] == "current"
 
@@ -171,18 +176,38 @@ async def test_bootstrap_dry_run_is_strictly_read_only(
     instrument_id = uuid.uuid4()
     fact = {
         "_instrument_id": str(instrument_id),
-        "fp_trend_direction": "up",
+        "fp_trend_direction": "上行",
         "review_return_1d": 1.0,
     }
+    src_run_id = uuid.uuid4()
+    # [CHANGE-20260808] 当前 bootstrap_single_date 用 load_day_fact_maps + canonical
+    # source run + persist_history_replay_observations（不再用旧 _market_history_members
+    # / fetch_historical_member_facts / persist_metric_observations）。
     monkeypatch.setattr(bootstrap, "_list_bootstrap_scopes", AsyncMock(return_value=[scope]))
-    monkeypatch.setattr(bootstrap, "_market_history_members", AsyncMock(return_value=[instrument_id]))
     monkeypatch.setattr(
-        bootstrap, "fetch_historical_member_facts", AsyncMock(return_value=[fact]),
+        bootstrap, "load_day_fact_maps",
+        AsyncMock(return_value={instrument_id: fact}),
     )
+    # _collect_canonical_source_run 是 sync；_validate_canonical_history_run 是 async
+    monkeypatch.setattr(
+        bootstrap, "_collect_canonical_source_run",
+        lambda *a, **kw: {"status": "one", "run_id": src_run_id},
+    )
+    monkeypatch.setattr(
+        bootstrap, "_validate_canonical_history_run",
+        AsyncMock(return_value={"status": "ok", "run_id": src_run_id}),
+    )
+    monkeypatch.setattr(
+        bootstrap, "load_metric_history",
+        AsyncMock(return_value=({}, {}, {})),
+    )
+    monkeypatch.setattr(bootstrap, "compute_all_metrics", lambda *a, **kw: {
+        "P": {"value": 60.0, "status": "ready", "components": []},
+    })
     write_run = AsyncMock(side_effect=AssertionError("dry-run wrote a run"))
     write_observation = AsyncMock(side_effect=AssertionError("dry-run wrote observations"))
     monkeypatch.setattr(bootstrap, "_upsert_bootstrap_run", write_run)
-    monkeypatch.setattr(bootstrap, "persist_metric_observations", write_observation)
+    monkeypatch.setattr(bootstrap, "persist_history_replay_observations", write_observation)
 
     result = await bootstrap.bootstrap_single_date(
         AsyncMock(),
@@ -250,19 +275,22 @@ async def test_history_sequence_spans_multiple_membership_versions() -> None:
     """同一 scope 跨多个 membership_version 的历史必须连续可比。"""
     observations = [
         SimpleNamespace(
-            trade_date=date(2026, 7, 30), metric_code="P",
-            component_name="_metric_value", raw_value=Decimal("70"),
+            trade_date=date(2026, 7, 30), scope_type="industry_l1", scope_key="board-1",
+            metric_code="P", component_name="_metric_value", raw_value=Decimal("70"),
             membership_version="pit-v3",
+            source_kind="history_replay",
         ),
         SimpleNamespace(
-            trade_date=date(2026, 7, 29), metric_code="P",
-            component_name="_metric_value", raw_value=Decimal("65"),
+            trade_date=date(2026, 7, 29), scope_type="industry_l1", scope_key="board-1",
+            metric_code="P", component_name="_metric_value", raw_value=Decimal("65"),
             membership_version="pit-v2",
+            source_kind="history_replay",
         ),
         SimpleNamespace(
-            trade_date=date(2026, 7, 28), metric_code="P",
-            component_name="_metric_value", raw_value=Decimal("60"),
+            trade_date=date(2026, 7, 28), scope_type="industry_l1", scope_key="board-1",
+            metric_code="P", component_name="_metric_value", raw_value=Decimal("60"),
             membership_version="pit-v1",
+            source_kind="history_replay",
         ),
     ]
     session = AsyncMock()
@@ -313,6 +341,7 @@ async def test_observation_persist_stores_membership_version() -> None:
                 }],
             },
         },
+        taxonomy_compatibility_key=None,
     )
 
     stmt = session.execute.call_args_list[0].args[0]

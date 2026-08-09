@@ -40,9 +40,14 @@ async def persist_metric_observations(
     algorithm_version: str,
     flat_list: list[dict[str, Any]],
     payloads: dict[str, dict[str, Any]],
-    taxonomy_compatibility_key: str | None = None,
+    taxonomy_compatibility_key: str | None,
 ) -> int:
-    """Idempotently persist every component raw value and the normalized metric value."""
+    """Idempotently persist every component raw value and the normalized metric value.
+
+    [CHANGE-20260808] taxonomy_compatibility_key 是显式 required keyword（无 silent default）。
+    所有 callsite 必须明确传 scope.taxonomy_compatibility_key 或 None，禁止依赖函数默认参数
+    隐藏遗漏，否则 LIVE observation 会静默写 NULL taxonomy。
+    """
     input_hash = build_member_input_hash(flat_list)
     membership = membership_version or "unversioned"
     rows: list[dict[str, Any]] = []
