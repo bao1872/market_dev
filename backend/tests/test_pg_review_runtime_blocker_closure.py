@@ -143,6 +143,7 @@ async def _make_strategy_run_with_items(
                 run_id=run.id,
                 strategy_version_id=run.strategy_version_id,
                 instrument_id=inst_ids[idx],
+                trade_date=run.trade_date,
                 payload={"result": "ok"},
             )
         )
