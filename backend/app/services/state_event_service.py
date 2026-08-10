@@ -363,7 +363,7 @@ async def _batch_get_previous_snapshots(
     result = await session.execute(stmt)
     # C4: 首行保留（ORDER BY 已确保最新 run 在前，同 instrument 后续行跳过）
     prev_map: dict[UUID, tuple[StockFeatureSnapshot, StockFeatureSnapshotRun]] = {}
-    for snap, run in result.all():
+    for snap, run in result.yield_per(100):
         if snap.instrument_id not in prev_map:
             prev_map[snap.instrument_id] = (snap, run)
     return prev_map
