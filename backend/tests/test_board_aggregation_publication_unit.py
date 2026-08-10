@@ -176,21 +176,52 @@ async def test_market_agg_lineage_mismatch_rejected(
     "app.services.factor_publication_service.get_published_snapshot_run_id",
     new_callable=AsyncMock,
 )
-async def test_market_agg_rejects_non_succeeded_batch(
+async def test_market_agg_succeeded_publishes(
     mock_published_core: AsyncMock,
     mock_get_publication: AsyncMock,
 ) -> None:
-    """Board batch 非 succeeded → ValueError（partial 不能发布 market pointer）。"""
+    """[CASE A] status=succeeded → publication PASS，保持原行为。"""
+    source_core = uuid.uuid4()
+    mock_published_core.return_value = source_core
+    mock_get_publication.return_value = Mock()
+    session = AsyncMock()
+    board_run = _make_board_run(
+        status="succeeded", source_core_run_id=source_core,
+        expected_count=10, succeeded_count=10, failed_count=0,
+    )
+    session.get.return_value = board_run
+
+    pub = await factor_publication_service.publish_market_aggregation(
+        session, _TRADE_DATE,
+        source_core_run_id=source_core,
+        aggregation_run_id=board_run.id,
+        algorithm_version="board-v1",
+    )
+    assert pub is not None
+    # status 不被改写为 succeeded 之外的值（本例本来就是 succeeded）。
+    assert board_run.status == "succeeded"
+
+
+@patch("app.services.factor_publication_service.get_publication")
+@patch(
+    "app.services.factor_publication_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_market_agg_succeeded_with_failed_items_rejected(
+    mock_published_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+) -> None:
+    """[CASE A2] status=succeeded 但 failed_count>0 → REJECT（state 不一致）。"""
     source_core = uuid.uuid4()
     mock_published_core.return_value = source_core
     session = AsyncMock()
     board_run = _make_board_run(
-        status="partial", source_core_run_id=source_core,
-        expected_count=10, succeeded_count=5, failed_count=5,
+        status="succeeded", source_core_run_id=source_core,
+        expected_count=10, succeeded_count=10, failed_count=1,
     )
     session.get.return_value = board_run
 
-    with pytest.raises(ValueError, match="非 succeeded"):
+    with pytest.raises(ValueError, match="state 不一致"):
         await factor_publication_service.publish_market_aggregation(
             session, _TRADE_DATE,
             source_core_run_id=source_core,
@@ -204,21 +235,143 @@ async def test_market_agg_rejects_non_succeeded_batch(
     "app.services.factor_publication_service.get_published_snapshot_run_id",
     new_callable=AsyncMock,
 )
-async def test_market_agg_rejects_failed_items(
+async def test_market_agg_succeeded_incomplete_count_rejected(
     mock_published_core: AsyncMock,
     mock_get_publication: AsyncMock,
 ) -> None:
-    """Board batch 存在 failed item → ValueError。"""
+    """[CASE A3] status=succeeded 但 succeeded_count != expected_count → REJECT。"""
     source_core = uuid.uuid4()
     mock_published_core.return_value = source_core
     session = AsyncMock()
     board_run = _make_board_run(
         status="succeeded", source_core_run_id=source_core,
-        expected_count=10, succeeded_count=9, failed_count=1,
+        expected_count=10, succeeded_count=8, failed_count=0,
     )
     session.get.return_value = board_run
 
-    with pytest.raises(ValueError, match="failed item"):
+    with pytest.raises(ValueError, match="state 不一致"):
+        await factor_publication_service.publish_market_aggregation(
+            session, _TRADE_DATE,
+            source_core_run_id=source_core,
+            aggregation_run_id=board_run.id,
+            algorithm_version="board-v1",
+        )
+
+
+@patch("app.services.factor_publication_service.get_publication")
+@patch(
+    "app.services.factor_publication_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_market_agg_partial_degraded_publishable_publishes(
+    mock_published_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+) -> None:
+    """[CASE B] status=partial + degraded_publishable=True + degradation_only
+    → publication PASS → pointer created → status 仍为 partial。"""
+    source_core = uuid.uuid4()
+    mock_published_core.return_value = source_core
+    mock_get_publication.return_value = Mock()
+    session = AsyncMock()
+    board_run = _make_board_run(
+        status="partial", source_core_run_id=source_core,
+        expected_count=10, succeeded_count=9, failed_count=0,
+    )
+    session.get.return_value = board_run
+
+    pub = await factor_publication_service.publish_market_aggregation(
+        session, _TRADE_DATE,
+        source_core_run_id=source_core,
+        aggregation_run_id=board_run.id,
+        algorithm_version="board-v1",
+        degraded_publishable=True,
+    )
+    assert pub is not None
+    # [PC-42] 合法 partial 被发布后，status 必须保留 partial，不得伪装 succeeded。
+    assert board_run.status == "partial"
+
+
+@patch("app.services.factor_publication_service.get_publication")
+@patch(
+    "app.services.factor_publication_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_market_agg_partial_not_degraded_rejected(
+    mock_published_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+) -> None:
+    """[CASE C] status=partial + degraded_publishable=False → REJECT。"""
+    source_core = uuid.uuid4()
+    mock_published_core.return_value = source_core
+    session = AsyncMock()
+    board_run = _make_board_run(
+        status="partial", source_core_run_id=source_core,
+        expected_count=10, succeeded_count=5, failed_count=5,
+    )
+    session.get.return_value = board_run
+
+    with pytest.raises(ValueError, match="不可发布"):
+        await factor_publication_service.publish_market_aggregation(
+            session, _TRADE_DATE,
+            source_core_run_id=source_core,
+            aggregation_run_id=board_run.id,
+            algorithm_version="board-v1",
+            degraded_publishable=False,
+        )
+
+
+@patch("app.services.factor_publication_service.get_publication")
+@patch(
+    "app.services.factor_publication_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_market_agg_partial_execution_failed_rejected(
+    mock_published_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+) -> None:
+    """[CASE D] status=partial 但属 execution failure（无 canonical degraded
+    证据）→ REJECT。"""
+    source_core = uuid.uuid4()
+    mock_published_core.return_value = source_core
+    session = AsyncMock()
+    # execution failure 的 partial：failed_count>0，但调用方不会把
+    # degraded_publishable 置 True（_evaluate_degraded_publishable 已判为不可发布）。
+    board_run = _make_board_run(
+        status="partial", source_core_run_id=source_core,
+        expected_count=10, succeeded_count=3, failed_count=7,
+    )
+    session.get.return_value = board_run
+
+    with pytest.raises(ValueError, match="不可发布"):
+        await factor_publication_service.publish_market_aggregation(
+            session, _TRADE_DATE,
+            source_core_run_id=source_core,
+            aggregation_run_id=board_run.id,
+            algorithm_version="board-v1",
+            degraded_publishable=False,
+        )
+
+
+@patch("app.services.factor_publication_service.get_publication")
+@patch(
+    "app.services.factor_publication_service.get_published_snapshot_run_id",
+    new_callable=AsyncMock,
+)
+async def test_market_agg_failed_rejected(
+    mock_published_core: AsyncMock,
+    mock_get_publication: AsyncMock,
+) -> None:
+    """[CASE E] status=failed → REJECT。"""
+    source_core = uuid.uuid4()
+    mock_published_core.return_value = source_core
+    session = AsyncMock()
+    board_run = _make_board_run(
+        status="failed", source_core_run_id=source_core,
+        expected_count=10, succeeded_count=0, failed_count=10,
+    )
+    session.get.return_value = board_run
+
+    with pytest.raises(ValueError, match="不可发布"):
         await factor_publication_service.publish_market_aggregation(
             session, _TRADE_DATE,
             source_core_run_id=source_core,

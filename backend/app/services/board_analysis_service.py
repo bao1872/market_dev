@@ -2150,6 +2150,9 @@ async def compute_all_boards(
             source_core_run_id=source_core_run_id,
             aggregation_run_id=batch_run.id,
             algorithm_version=algorithm_version,
+            # [PC-42] 直接复用 board aggregation layer 已经算出的 canonical
+            # publishability 证据，不重新判定。
+            degraded_publishable=publishable,
             metadata={
                 "board_analysis_run_id": str(batch_run.id),
                 "taxonomy_version": taxonomy_version,

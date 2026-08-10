@@ -118,8 +118,11 @@ def test_new_publications_target_real_board_batch() -> None:
     )
     assert "data_run_id=snapshot.board_analysis_run_id" in board_publish
     assert "session.get(BoardAnalysisRun, aggregation_run_id)" in market_publish
-    assert 'board_run.status != "succeeded"' in market_publish
-    assert "board_run.failed_count != 0" in market_publish
+    # [PC-42] publication layer 消费 canonical degraded_publishable 证据，
+    # 不再以 board_run.status != "succeeded" 或 failed_count 作为唯一阻断。
+    assert "degraded_publishable" in market_publish
+    assert 'board_run.status == "succeeded" or (' in market_publish
+    assert "_agg_publishable" in market_publish
 
 
 def test_legacy_snapshot_pointer_reader_is_preserved() -> None:

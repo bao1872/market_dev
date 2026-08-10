@@ -251,13 +251,28 @@ async def publish_market_aggregation(
     aggregation_run_id: uuid.UUID,
     algorithm_version: str,
     *,
+    degraded_publishable: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> FactorPublication:
     """切换 market_aggregation publication pointer。
 
-    前置条件（[CHANGE-20260729-007] 严格校验）：
+    前置条件（[CHANGE-20260729-007] 严格校验 + PC-42 DEGRADED PUBLISHABLE）：
     - source_core_run_id 必须等于该日期已发布的 stock_core pointer.data_run_id
     - 聚合失败只重跑聚合，不回滚核心
+    - Canonical publishability 由 board aggregation layer 的
+      _evaluate_degraded_publishable 决定，并经 degraded_publishable 显式传入。
+      本函数只消费该已确定的可发布证据，不在内部复制 degraded 判定逻辑。
+
+    接受条件（PC-42）：
+    - succeeded：完全成功批次，正常发布。
+    - partial AND degraded_publishable=True：board aggregation 已判定为
+      degradation_only 的可降级发布批次（每 board 真实 coverage/eligible/
+      ready/missing，无 execution/DB/contract failure，无 UNKNOWN）。
+      合法 partial 被发布后，board_run.status 仍保留 partial，不得改写为
+      succeeded；market pointer 只代表 formal/current/publishable，不代表
+      所有 board 都 succeeded。
+    - 其余一律拒绝：failed / blocked / execution-failed partial /
+      not-computed partial / 无 canonical degraded_publishable 证据的 partial。
 
     Args:
         session: 异步 DB 会话
@@ -265,10 +280,13 @@ async def publish_market_aggregation(
         source_core_run_id: 源 stock_core snapshot_run_id（必须匹配已发布 pointer）
         aggregation_run_id: 真实 board_analysis_runs.id
         algorithm_version: 算法版本
+        degraded_publishable: 由 board aggregation layer 判定并传入的
+            canonical 可降级发布证据（status=partial 时生效）
         metadata: 额外元数据
 
     Raises:
         ValueError: source_core_run_id 与已发布 stock_core pointer 不匹配
+        ValueError: board batch 不满足发布前置条件
     """
     import json
 
@@ -300,18 +318,42 @@ async def publish_market_aggregation(
         raise ValueError("market_aggregation 发布失败: Board batch trade_date 不匹配")
     if board_run.source_core_run_id != source_core_run_id:
         raise ValueError("market_aggregation 发布失败: Board batch core run 不匹配")
-    if board_run.status != "succeeded":
+
+    # [PC-42] Canonical publishability 由 board aggregation layer 决定并经
+    # degraded_publishable 传入；本层只做语义等价的接受条件判断。
+    # 不再以 failed_count / succeeded_count != expected_count 作为阻断条件，
+    # 因为合法 degraded partial 天然 succeeded_count < expected_count
+    # （data completeness 缺失），这些由 _evaluate_degraded_publishable 已判定
+    # 为 degradation_only，不属于 execution/DB/contract failure。
+    _agg_publishable = board_run.status == "succeeded" or (
+        board_run.status == "partial" and degraded_publishable
+    )
+    if not _agg_publishable:
         raise ValueError(
-            "market_aggregation 发布失败: Board batch 非 succeeded，"
-            f"status={board_run.status}"
+            "market_aggregation 发布失败: Board batch 不可发布，"
+            f"status={board_run.status} degraded_publishable={degraded_publishable}；"
+            f"只允许 succeeded 或 degraded-publishable 的 partial"
         )
-    if board_run.failed_count != 0:
-        raise ValueError("market_aggregation 发布失败: Board batch 存在 failed item")
-    if board_run.succeeded_count != board_run.expected_count:
-        raise ValueError(
-            "market_aggregation 发布失败: Board batch 未达到完整 expected count "
-            f"succeeded={board_run.succeeded_count} expected={board_run.expected_count}",
-        )
+
+    # [SUCCESS-CONSISTENCY-INVARIANT] 对 status=="succeeded" 必须内部一致：
+    # 全 in-scope board 必须全部成功、无失败、达成 expected count。
+    # 这不是 degraded publishability 的第二套计算逻辑，而是 succeeded state
+    # 自身的一致性 invariant（执行/DB/contract 失败绝不可伪装成 succeeded）。
+    if board_run.status == "succeeded":
+        if board_run.failed_count != 0:
+            raise ValueError(
+                "market_aggregation 发布失败: succeeded batch 存在 failed item "
+                f"failed_count={board_run.failed_count}，state 不一致"
+            )
+        if board_run.succeeded_count != board_run.expected_count:
+            raise ValueError(
+                "market_aggregation 发布失败: succeeded batch 未达成 expected count "
+                f"succeeded={board_run.succeeded_count} expected={board_run.expected_count}，"
+                f"state 不一致"
+            )
+    # 注意：status=="partial" AND degraded_publishable=True 路径
+    # 不要求 succeeded_count == expected_count（合法 coverage-degraded partial
+    # 可存在未 succeeded board），status 保持 partial，不改写为 succeeded。
 
     now = datetime.now(UTC)
     meta_payload = {
