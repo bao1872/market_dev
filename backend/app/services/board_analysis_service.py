@@ -30,6 +30,7 @@ import logging
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -1545,7 +1546,7 @@ async def _upsert_snapshot(
 
 async def publish_board_analysis(
     session: AsyncSession,
-    snapshot: BoardAnalysisSnapshot,
+    snapshot: BoardPublicationInput,
     *,
     threshold: float = BOARD_ANALYSIS_MIN_COVERAGE,
 ) -> FactorPublication | None:
@@ -1553,9 +1554,12 @@ async def publish_board_analysis(
 
     coverage_ratio < threshold 时不发布，返回 None。
 
+    BOARD-MEMORY-01：入参改为轻量 BoardPublicationInput（scalar 字段），
+    不持有完整 BoardAnalysisSnapshot ORM entity / payload JSONB。
+
     Args:
         session: 异步 DB 会话
-        snapshot: 已计算完成的板块分析快照
+        snapshot: 已计算完成的板块分析轻量发布输入（scalar 字段）
         threshold: 发布门禁（默认 0.95）
 
     Returns:
@@ -1661,6 +1665,34 @@ async def get_published_board_snapshot_id(
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class BoardPublicationInput:
+    """BOARD-MEMORY-01：board finalize 的轻量 publication/validation 输入。
+
+    只保存 publish_board_analysis 与 _evaluate_degraded_publishable 真正消费的
+    scalar/metadata 字段，**不持有完整 BoardAnalysisSnapshot ORM entity 或 payload
+    JSONB**，避免 415 个 board 的 heavy payload 被 details 强引用驻留到 finalize
+    造成 1GB cgroup OOM。
+    """
+
+    id: uuid.UUID
+    board_analysis_run_id: uuid.UUID
+    board_id: uuid.UUID
+    board_name: str
+    board_type: str
+    trade_date: date
+    algorithm_version: str
+    source_core_run_id: uuid.UUID
+    status: str
+    coverage_ratio: float
+    ready_count: int
+    eligible_count: int
+    missing_count: int
+    taxonomy_version: str
+    taxonomy_compatibility_key: str
+    membership_version: str
+
+
 def _evaluate_degraded_publishable(
     *,
     status: str,
@@ -1707,20 +1739,21 @@ def _evaluate_degraded_publishable(
             f"computed_boards={computed_boards} != expected_count={expected_count}"
         )
     # F/G/H：逐个 partial board 必须携带真实、可解释的 degradation 证据。
+    # BOARD-MEMORY-01：从 BoardPublicationInput（轻量 scalar 描述符）读取，不持有完整 snapshot。
     for detail in details:
         if detail.get("status") == "succeeded":
             continue
-        snapshot = detail.get("snapshot")
-        if snapshot is None:
-            return False, f"partial board {detail.get('board_id')} missing snapshot"
-        if getattr(snapshot, "status", None) != "partial":
+        pin = detail.get("publication_input")
+        if pin is None:
+            return False, f"partial board {detail.get('board_id')} missing publication_input"
+        if getattr(pin, "status", None) != "partial":
             # 只接受已知的 data-completeness degradation，UNKNOWN 一律 fail closed。
             return False, (
                 f"partial board {detail.get('board_id')} has unknown snapshot "
-                f"status={getattr(snapshot, 'status', None)!r}"
+                f"status={getattr(pin, 'status', None)!r}"
             )
         for field in ("coverage_ratio", "eligible_count", "ready_count", "missing_count"):
-            if getattr(snapshot, field, None) is None:
+            if getattr(pin, field, None) is None:
                 return False, (
                     f"partial board {detail.get('board_id')} missing {field}"
                 )
@@ -1981,6 +2014,9 @@ async def compute_all_boards(
                 succeeded_boards += 1
             else:
                 coverage_below += 1
+            # BOARD-MEMORY-01：details 只保留轻量 publication/validation 输入
+            # （BoardPublicationInput scalar 字段），**不持有完整 BoardAnalysisSnapshot
+            # ORM entity / payload JSONB**，消除 415 个 board 的 heavy payload 强引用。
             details.append({
                 "board_id": str(board.id),
                 "board_name": board.name,
@@ -1988,7 +2024,24 @@ async def compute_all_boards(
                 "status": snapshot.status,
                 "coverage": snapshot.coverage_ratio,
                 "published": False,
-                "snapshot": snapshot,
+                "publication_input": BoardPublicationInput(
+                    id=snapshot.id,
+                    board_analysis_run_id=snapshot.board_analysis_run_id,
+                    board_id=snapshot.board_id,
+                    board_name=snapshot.board_name,
+                    board_type=snapshot.board_type,
+                    trade_date=snapshot.trade_date,
+                    algorithm_version=snapshot.algorithm_version,
+                    source_core_run_id=snapshot.source_core_run_id,
+                    status=snapshot.status,
+                    coverage_ratio=snapshot.coverage_ratio,
+                    ready_count=snapshot.ready_count,
+                    eligible_count=snapshot.eligible_count,
+                    missing_count=snapshot.missing_count,
+                    taxonomy_version=snapshot.taxonomy_version,
+                    taxonomy_compatibility_key=snapshot.taxonomy_compatibility_key,
+                    membership_version=snapshot.membership_version,
+                ),
             })
         except Exception as exc:
             execution_failed += 1
@@ -2066,10 +2119,10 @@ async def compute_all_boards(
             time.perf_counter() - _board_loop_start, os.getpid(),
         )
         for detail in details:
-            snapshot = detail.pop("snapshot", None)
-            if snapshot is None:
+            publication_input = detail.pop("publication_input", None)
+            if publication_input is None:
                 continue
-            if await publish_board_analysis(session, snapshot) is not None:
+            if await publish_board_analysis(session, publication_input) is not None:
                 published += 1
                 detail["published"] = True
             _publish_done += 1
@@ -2121,7 +2174,7 @@ async def compute_all_boards(
             batch_run.published_at = datetime.now(UTC)
     else:
         for detail in details:
-            detail.pop("snapshot", None)
+            detail.pop("publication_input", None)
 
     _final_flush_start = time.perf_counter()
     await session.flush()

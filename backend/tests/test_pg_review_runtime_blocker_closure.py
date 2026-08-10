@@ -1541,3 +1541,118 @@ async def test_state_event_bulk_insert_no_per_chunk_commit() -> None:
         assert "simulated mid-chunk failure" in str(exc)
 
     assert raised, "中间 chunk 失败应向上传播，不得被吞掉"
+
+
+# =====================================================================
+# BOARD-MEMORY-01: details 轻量 publication_input 保留 contract tests
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_board_memory_details_retains_no_full_snapshot() -> None:
+    """BOARD-MEMORY-01 CASE B: board detail 只保留轻量 publication_input scalar，
+    不持有 BoardAnalysisSnapshot ORM instance / payload / missing_reasons。"""
+    from app.services.board_analysis_service import BoardPublicationInput
+
+    # 构造一个 board detail（模拟 details.append 结构）
+    pin = BoardPublicationInput(
+        id=uuid.uuid4(),
+        board_analysis_run_id=uuid.uuid4(),
+        board_id=uuid.uuid4(),
+        board_name="test_board",
+        board_type="concept",
+        trade_date=date(2026, 8, 7),
+        algorithm_version="test-v1",
+        source_core_run_id=uuid.uuid4(),
+        status="succeeded",
+        coverage_ratio=1.0,
+        ready_count=10,
+        eligible_count=10,
+        missing_count=0,
+        taxonomy_version="legacy-v1",
+        taxonomy_compatibility_key="qstock-board-v1",
+        membership_version="legacy-projection",
+    )
+    detail = {
+        "board_id": str(pin.board_id),
+        "board_name": pin.board_name,
+        "board_type": pin.board_type,
+        "status": pin.status,
+        "coverage": pin.coverage_ratio,
+        "published": False,
+        "publication_input": pin,
+    }
+
+    # 结构 contract：detail 中不得出现 BoardAnalysisSnapshot / payload / missing_reasons
+    assert "snapshot" not in detail, "detail 不得再持有完整 snapshot key"
+    assert "payload" not in detail, "detail 不得携带 payload"
+    assert "missing_reasons" not in detail, "detail 不得携带 missing_reasons"
+    pin2 = detail["publication_input"]
+    assert not hasattr(pin2, "payload"), "publication_input 不得有 payload"
+    assert not hasattr(pin2, "missing_reasons"), "publication_input 不得有 missing_reasons"
+    # 保留 scalar 字段齐全
+    assert pin2.status == "succeeded"
+    assert pin2.coverage_ratio == 1.0
+    assert pin2.eligible_count == 10
+    assert pin2.board_analysis_run_id is not None
+
+
+@pytest.mark.asyncio
+async def test_board_memory_publication_semantics_equivalence() -> None:
+    """BOARD-MEMORY-01 CASE A: publish_board_analysis 用 BoardPublicationInput
+    与原 BoardAnalysisSnapshot-shaped 输入产生相同 publication 语义。
+
+    覆盖 succeeded（发布）与 degradation-only partial（不发布，status != succeeded）。
+    用 mock session 验证：succeeded+coverage>=threshold → 触发 pg_insert（发布）；
+    partial → 返回 None（不发布）。
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services.board_analysis_service import (
+        BoardPublicationInput,
+        publish_board_analysis,
+    )
+
+    # 构造轻量 publication_input（succeeded, coverage=1.0）
+    pin = BoardPublicationInput(
+        id=uuid.uuid4(),
+        board_analysis_run_id=uuid.uuid4(),
+        board_id=uuid.uuid4(),
+        board_name="sem_equiv",
+        board_type="concept",
+        trade_date=date(2026, 8, 7),
+        algorithm_version="test-v1",
+        source_core_run_id=uuid.uuid4(),
+        status="succeeded",
+        coverage_ratio=1.0,
+        ready_count=10,
+        eligible_count=10,
+        missing_count=0,
+        taxonomy_version="legacy-v1",
+        taxonomy_compatibility_key="qstock-board-v1",
+        membership_version="legacy-projection",
+    )
+
+    mock_session = MagicMock()
+    mock_session.execute = AsyncMock()
+    mock_session.flush = AsyncMock()
+
+    # mock get_publication 返回一个 FactorPublication-like 对象（data_run_id 匹配）
+    with patch(
+        "app.services.board_analysis_service.get_publication",
+        new=AsyncMock(return_value=MagicMock(data_run_id=pin.board_analysis_run_id)),
+    ):
+        result = await publish_board_analysis(mock_session, pin)
+
+    assert result is not None, "succeeded + coverage>=threshold 应发布"
+    # 确认触发了 pg_insert（execute 被调用）
+    assert mock_session.execute.called, "发布应触发 DB insert"
+
+    # degradation-only partial：status != succeeded → 不发布，返回 None
+    pin_partial = BoardPublicationInput(
+        **{**vars(pin), "status": "partial", "coverage_ratio": 0.8},
+    )
+    mock_session2 = MagicMock()
+    mock_session2.execute = AsyncMock()
+    result2 = await publish_board_analysis(mock_session2, pin_partial)
+    assert result2 is None, "partial 不满足 status=='succeeded'，不得发布"
+    assert not mock_session2.execute.called, "partial 不应触发发布 insert"

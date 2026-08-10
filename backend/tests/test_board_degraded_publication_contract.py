@@ -41,7 +41,8 @@ def _snapshot(
 
 
 def _detail(board_id: str, snapshot: Mock | None, *, status: str) -> dict:
-    return {"board_id": board_id, "status": status, "snapshot": snapshot}
+    # BOARD-MEMORY-01：details 改用 lightweight publication_input（scalar 描述符）。
+    return {"board_id": board_id, "status": status, "publication_input": snapshot}
 
 
 def _ready_details(n: int) -> list[dict]:
@@ -126,11 +127,11 @@ def test_pub_e_partial_with_unknown_snapshot_status_is_not_publishable() -> None
 
 
 def test_pub_missing_snapshot_evidence_is_not_publishable() -> None:
-    """PC-42 条件 G：partial board 缺 snapshot 证据 → 不可发布。"""
+    """PC-42 条件 G：partial board 缺 snapshot/evidence → 不可发布。"""
     details = [*_ready_details(645), _detail("nosnap", None, status="partial")]
     ok, reason = _evaluate_degraded_publishable(**_kwargs(details=details))
     assert ok is False
-    assert "missing snapshot" in reason
+    assert "missing" in reason and "publication_input" in reason
 
 
 @pytest.mark.parametrize(
