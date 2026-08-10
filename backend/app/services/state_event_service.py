@@ -246,9 +246,25 @@ async def _batch_get_run_snapshots_with_symbol(
     """批量获取 run 对应的所有快照 + instrument symbol（单条 JOIN 查询）。
 
     按 source_run_id 精确查询（P0-3），消除日期+参数猜归属的歧义。
+
+    STATE-EVENT-01 修复：使用 explicit column projection 代替 select(ORM entity)，
+    避免 SQLAlchemy ORM 对 5293 行的 JSONB 列做全量 ORM 对象构造。
+    consumer（build_stock_state）仅需要 scalar 列 + structural_payload + temporal_payload；
+    summary_payload 不被使用。
     """
     stmt = (
-        select(StockFeatureSnapshot, Instrument.symbol)
+        select(
+            StockFeatureSnapshot.id,
+            StockFeatureSnapshot.instrument_id,
+            StockFeatureSnapshot.trade_date,
+            StockFeatureSnapshot.primary_timeframe,
+            StockFeatureSnapshot.structural_payload,
+            StockFeatureSnapshot.temporal_payload,
+            StockFeatureSnapshot.degraded_reasons,
+            StockFeatureSnapshot.source_primary_bar_time,
+            StockFeatureSnapshot.updated_at,
+            Instrument.symbol,
+        )
         .join(Instrument, StockFeatureSnapshot.instrument_id == Instrument.id)
         .where(StockFeatureSnapshot.source_run_id == run.id)
     )
@@ -258,7 +274,9 @@ async def _batch_get_run_snapshots_with_symbol(
         "[QUERY2-M1] query2-execute-returned run_id=%s elapsed=%.4fs pid=%s",
         run_id, time.perf_counter() - _tq2, os.getpid(),
     )
-    return [(row[0], row[1]) for row in result.all()]
+    # Row 对象支持 attribute 访问（row.trade_date / row.structural_payload），
+    # consumer 中 curr_snapshot.trade_date 等访问兼容。
+    return [(row, row.symbol) for row in result.all()]
 
 
 async def _batch_get_previous_snapshots(
