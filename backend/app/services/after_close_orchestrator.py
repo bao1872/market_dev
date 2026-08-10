@@ -32,6 +32,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -3413,8 +3414,17 @@ async def execute_after_close_run(
                 # 断点恢复：局部布尔不可信，复用唯一权威判定 resolve_stock_core_published
                 # （与 normal publish 路径共用），重新核验线上真实 publication pointer 身份。
                 async with AsyncSessionLocal() as verify_db:
+                    logger.info(
+                        "[BOUNDARY-P1] before resolve job=%s trade=%s pid=%s",
+                        str(job_run_id), trade_date, os.getpid(),
+                    )
                     _stock_core_published, _stock_core_superseded = await resolve_stock_core_published(
                         verify_db, trade_date, snapshot_run_id
+                    )
+                    logger.info(
+                        "[BOUNDARY-P2] after resolve job=%s published=%s superseded=%s snap=%s pid=%s",
+                        str(job_run_id), _stock_core_published, _stock_core_superseded,
+                        snapshot_run_id, os.getpid(),
                     )
             else:
                 _stock_core_published = False
@@ -3441,6 +3451,10 @@ async def execute_after_close_run(
         # stock_core 是否已发布为守卫，skip_publish 断点恢复同样补齐 aggregation 与 review，
         # 仅 auction anchor 属 normal publish 专属。
         if _stock_core_published and not _stock_core_superseded and snapshot_run_id is not None:
+            logger.info(
+                "[BOUNDARY-P3] before state-events job=%s trade=%s pid=%s",
+                str(job_run_id), trade_date, os.getpid(),
+            )
             try:
                 from app.services.state_event_service import (
                     cleanup_old_events,
@@ -3462,6 +3476,10 @@ async def execute_after_close_run(
                     cleanup_stats.get("deleted_count", 0),
                     cleanup_stats.get("duration_ms", 0),
                 )
+                logger.info(
+                    "[BOUNDARY-P4] after state-events job=%s count=%s pid=%s",
+                    str(job_run_id), event_stats.get("event_count", 0), os.getpid(),
+                )
             except Exception as event_exc:
                 logger.warning(
                     "[AfterClose] 状态事件生成失败（不影响主流程）: "
@@ -3469,6 +3487,10 @@ async def execute_after_close_run(
                     snapshot_run_id, event_exc, exc_info=True,
                 )
 
+        logger.info(
+            "[BOUNDARY-P5] before chip-enqueue job=%s trade=%s pid=%s",
+            str(job_run_id), trade_date, os.getpid(),
+        )
         # [P1-2] chip 入队（stock_core 发布成功后，早于 board aggregation）
         # [AUD-08 2026-08-07] chip 只依赖 stock_core，与 Review 无因果关系，
         # 前移到 post-core 段，判据复用 stock_core 发布成功条件。
@@ -3487,6 +3509,10 @@ async def execute_after_close_run(
                     else None
                 ),
             )
+            logger.info(
+                "[BOUNDARY-P6] after chip-enqueue job=%s chip_status=%s pid=%s",
+                str(job_run_id), _chip_enqueue_status, os.getpid(),
+            )
 
         # Aggregation binds same source_core_run_id; failure only reruns
         # aggregation, does NOT reverse core. Main run status distinguishes
@@ -3502,6 +3528,10 @@ async def execute_after_close_run(
         # published_at 非空时幂等复用，不重复聚合。
         _aggregation_status = "skipped"
         if _stock_core_published and snapshot_run_id is not None:
+            logger.info(
+                "[BOUNDARY-P7] before board-aggregation job=%s trade=%s snap=%s pid=%s",
+                str(job_run_id), trade_date, snapshot_run_id, os.getpid(),
+            )
             try:
                 from app.services.board_analysis_service import (
                     compute_all_boards,
@@ -3558,6 +3588,10 @@ async def execute_after_close_run(
                     trade_date, _agg_batch_status, _agg_pointer_confirmed,
                     _aggregation_status,
                 )
+                logger.info(
+                    "[BOUNDARY-P8] after board-aggregation job=%s result=%s pid=%s",
+                    str(job_run_id), _aggregation_status, os.getpid(),
+                )
             except Exception as agg_exc:
                 _aggregation_status = "failed"
                 logger.warning(
@@ -3568,6 +3602,10 @@ async def execute_after_close_run(
                 )
 
         # ---- 步骤 4.5: computing_review（复盘计算 + 发布） ----
+        logger.info(
+            "[BOUNDARY-P9] before computing_review job=%s trade=%s snap=%s pid=%s",
+            str(job_run_id), trade_date, snapshot_run_id, os.getpid(),
+        )
         # [AC-02] 复盘业务体抽为 _execute_review_step，由统一执行器包装。
         # 软失败（gate_blocked/计算失败）不阻断主流程，仅标记 _review_failed
         # 收 partial_success；step summary 如实反映业务状态，失败不推进检查点。
