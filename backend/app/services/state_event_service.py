@@ -272,7 +272,7 @@ async def _batch_get_run_snapshots_with_symbol(
     result = await session.execute(stmt)
     logger.info(
         "[QUERY2-M1] query2-execute-returned run_id=%s elapsed=%.4fs pid=%s",
-        run_id, time.perf_counter() - _tq2, os.getpid(),
+        run.id, time.perf_counter() - _tq2, os.getpid(),
     )
     # Row 对象支持 attribute 访问（row.trade_date / row.structural_payload），
     # consumer 中 curr_snapshot.trade_date 等访问兼容。
