@@ -252,7 +252,12 @@ async def _batch_get_run_snapshots_with_symbol(
         .join(Instrument, StockFeatureSnapshot.instrument_id == Instrument.id)
         .where(StockFeatureSnapshot.source_run_id == run.id)
     )
+    _tq2 = time.perf_counter()
     result = await session.execute(stmt)
+    logger.info(
+        "[QUERY2-M1] query2-execute-returned run_id=%s elapsed=%.4fs pid=%s",
+        run_id, time.perf_counter() - _tq2, os.getpid(),
+    )
     return [(row[0], row[1]) for row in result.all()]
 
 
