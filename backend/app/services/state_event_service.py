@@ -417,6 +417,10 @@ async def generate_events_for_run(
             "run_id": str(run_id),
         }
 
+    logger.info(
+        "[READ-M1] after Query2 before Query3 run_id=%s q2_rows=%s pid=%s",
+        run_id, len(snapshots_with_symbol), os.getpid(),
+    )
     # Query 3: 批量获取前一兼容快照 + 其所属成功 run
     instrument_ids = [snap.instrument_id for snap, _ in snapshots_with_symbol]
     prev_data = await _batch_get_previous_snapshots(
