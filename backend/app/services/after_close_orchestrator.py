@@ -3461,10 +3461,38 @@ async def execute_after_close_run(
                     generate_events_for_run,
                 )
                 async with AsyncSessionLocal() as event_db:
+                    logger.info(
+                        "[BOUNDARY-S1] before generate_events_for_run job=%s snap=%s pid=%s",
+                        str(job_run_id), snapshot_run_id, os.getpid(),
+                    )
                     event_stats = await generate_events_for_run(event_db, snapshot_run_id)
+                    logger.info(
+                        "[BOUNDARY-S2] after generate_events_for_run job=%s events=%s skipped=%s failed=%s pid=%s",
+                        str(job_run_id),
+                        event_stats.get("event_count", 0),
+                        event_stats.get("skipped_count", 0),
+                        event_stats.get("failed_count", 0),
+                        os.getpid(),
+                    )
                     # 90 天清理（P1-2）：事件生成后执行，失败不阻断主发布
+                    logger.info(
+                        "[BOUNDARY-S3] before cleanup_old_events job=%s pid=%s",
+                        str(job_run_id), os.getpid(),
+                    )
                     cleanup_stats = await cleanup_old_events(event_db)
+                    logger.info(
+                        "[BOUNDARY-S4] after cleanup_old_events job=%s deleted=%s pid=%s",
+                        str(job_run_id), cleanup_stats.get("deleted_count", 0), os.getpid(),
+                    )
+                    logger.info(
+                        "[BOUNDARY-S5] before commit job=%s pid=%s",
+                        str(job_run_id), os.getpid(),
+                    )
                     await event_db.commit()
+                    logger.info(
+                        "[BOUNDARY-S6] after commit job=%s pid=%s",
+                        str(job_run_id), os.getpid(),
+                    )
                 logger.info(
                     "[AfterClose] 状态事件生成完成: run_id=%s, "
                     "event_count=%s, skipped=%s, failed=%s, "
