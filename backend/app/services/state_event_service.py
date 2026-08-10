@@ -30,6 +30,7 @@ import logging
 import os
 import time
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -47,6 +48,29 @@ from app.models.stock_state_event import StockStateEvent
 from app.schemas.stock_state import StateValue, StockState, build_stock_state
 
 logger = logging.getLogger(__name__)
+
+
+
+def _snapshot_from_row(row):
+    """从 projected Row mapping 创建轻量 snapshot wrapper。"""
+    return SimpleNamespace(
+        id=row["id"],
+        instrument_id=row["instrument_id"],
+        trade_date=row["trade_date"],
+        primary_timeframe=row["primary_timeframe"],
+        structural_payload=row["structural_payload"],
+        temporal_payload=row["temporal_payload"],
+        degraded_reasons=row["degraded_reasons"],
+        source_primary_bar_time=row["source_primary_bar_time"],
+        updated_at=row["updated_at"],
+    )
+
+def _run_from_row(row):
+    """从 projected Row mapping 创建轻量 run wrapper。"""
+    return SimpleNamespace(
+        id=row["run_id"],
+        schema_version=row["schema_version"],
+    )
 
 _CLEANUP_DAYS = 90
 _EVENT_TYPE_TRANSITION = "state_transition"
@@ -333,7 +357,19 @@ async def _batch_get_previous_snapshots(
     # C4: ORDER BY published_at DESC NULLS LAST, finished_at DESC NULLS LAST
     # 确定性选择最新批次，配合首行保留逻辑。
     stmt = (
-        select(StockFeatureSnapshot, StockFeatureSnapshotRun)
+        select(
+            StockFeatureSnapshot.id,
+            StockFeatureSnapshot.instrument_id,
+            StockFeatureSnapshot.trade_date,
+            StockFeatureSnapshot.primary_timeframe,
+            StockFeatureSnapshot.structural_payload,
+            StockFeatureSnapshot.temporal_payload,
+            StockFeatureSnapshot.degraded_reasons,
+            StockFeatureSnapshot.source_primary_bar_time,
+            StockFeatureSnapshot.updated_at,
+            StockFeatureSnapshotRun.id.label("run_id"),
+            StockFeatureSnapshotRun.schema_version,
+        )
         .join(
             max_date_subq,
             and_(
@@ -362,8 +398,10 @@ async def _batch_get_previous_snapshots(
     )
     result = await session.execute(stmt)
     # C4: 首行保留（ORDER BY 已确保最新 run 在前，同 instrument 后续行跳过）
-    prev_map: dict[UUID, tuple[StockFeatureSnapshot, StockFeatureSnapshotRun]] = {}
-    for snap, run in result.yield_per(100):
+    prev_map: dict[UUID, tuple] = {}
+    for row in result.mappings().all():
+        snap = _snapshot_from_row(row)
+        run = _run_from_row(row)
         if snap.instrument_id not in prev_map:
             prev_map[snap.instrument_id] = (snap, run)
     return prev_map
