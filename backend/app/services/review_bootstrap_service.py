@@ -237,6 +237,7 @@ async def validate_canonical_history_run_readiness(
     session: AsyncSession,
     run_id: uuid.UUID,
     required_history_contract_version: str,
+    required_trade_date: date | None = None,
 ) -> dict[str, Any]:
     """CANONICAL_HISTORY_RUN_READY predicate。
 
@@ -262,6 +263,21 @@ async def validate_canonical_history_run_readiness(
     G. SUCCESS_SET == CANONICAL_STATE_SET：每个 succeeded run item 都至少有一条
        ``source_history_run_id == run.id`` 且 contract 匹配的 daily state
     H. 所有 skip reason 都属于已知 non-blocking category（UNKNOWN → reject）
+
+    [HISTORY-CURRENT-DATE-LIFECYCLE-01 §9/§11] 新增可选 predicate：
+
+    I. 当 ``required_trade_date`` 非 None 时，
+       ``TARGET_DATE_ELIGIBLE_SET == TARGET_DATE_STATE_SET``，其中
+
+       - ELIGIBLE = canonical SUCCESS_SET ∩ 在 required_trade_date 有 completed daily bar
+       - STATE    = ``source_history_run_id == run.id`` ∧ contract 匹配
+                    ∧ ``trade_date == required_trade_date``
+
+       刻意**不使用** ``MAX(trade_date)``，也**不使用** ``target rows > 0``：
+       前者无法发现部分 instrument 缺 target state，后者会让 1 行冒充全量覆盖。
+       停牌/退市（target date 无 completed bar）不要求 target state，因此不会误判 not_ready。
+
+    ``required_trade_date=None``（默认）时行为与扩展前完全一致（backward compatible）。
 
     任何一项不满足 → ``{status:'not_ready', reason: ...}``（fail closed）。
     """
@@ -391,7 +407,87 @@ async def validate_canonical_history_run_readiness(
             f"history_source_run_success_state_mismatch:missing={int(missing_state_count)}"
         )
 
-    return {
+    # --- I. TARGET_DATE_ELIGIBLE_SET == TARGET_DATE_STATE_SET ---------------
+    # [HISTORY-CURRENT-DATE-LIFECYCLE-01 §9/§11] 只在 caller 显式要求 target date 时生效。
+    target_date_eligible_count: int | None = None
+    target_date_state_count: int | None = None
+    if required_trade_date is not None:
+        from app.models.bar import BarDaily
+
+        # ELIGIBLE = SUCCESS_SET ∩ 在 required_trade_date 有 completed daily bar
+        # （停牌/退市 instrument 当日无 bar → 不进 ELIGIBLE → 不要求 target state）
+        target_eligible = (
+            select(FirstPyramidHistoryRunItem.instrument_id)
+            .join(
+                BarDaily,
+                BarDaily.instrument_id == FirstPyramidHistoryRunItem.instrument_id,
+            )
+            .where(
+                FirstPyramidHistoryRunItem.history_run_id == run_id,
+                FirstPyramidHistoryRunItem.status == "succeeded",
+                BarDaily.trade_date == required_trade_date,
+                BarDaily.close.is_not(None),
+            )
+        )
+        target_state = select(FirstPyramidHistoryDailyState.instrument_id).where(
+            FirstPyramidHistoryDailyState.source_history_run_id == run_id,
+            FirstPyramidHistoryDailyState.history_contract_version
+            == required_history_contract_version,
+            FirstPyramidHistoryDailyState.trade_date == required_trade_date,
+        )
+
+        target_date_eligible_count = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(
+                        target_eligible.distinct().subquery()
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        target_date_state_count = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(
+                        target_state.distinct().subquery()
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+
+        # 双向差集：既拒绝缺 target state，也拒绝多出不该有的 target state
+        missing_target = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(
+                        target_eligible.except_(target_state).subquery()
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        extra_target = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(
+                        target_state.except_(target_eligible).subquery()
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        if missing_target > 0 or extra_target > 0:
+            return _not_ready(
+                "history_source_run_target_date_state_mismatch:"
+                f"date={required_trade_date.isoformat()},"
+                f"eligible={target_date_eligible_count},"
+                f"state={target_date_state_count},"
+                f"missing={missing_target},extra={extra_target}"
+            )
+
+    result: dict[str, Any] = {
         "status": "ok",
         "run_id": run_id,
         "expected_count": expected_count,
@@ -399,6 +495,11 @@ async def validate_canonical_history_run_readiness(
         "skipped_count": skipped_count,
         "run_status": run.status,
     }
+    if required_trade_date is not None:
+        result["required_trade_date"] = required_trade_date.isoformat()
+        result["target_date_eligible_count"] = target_date_eligible_count
+        result["target_date_state_count"] = target_date_state_count
+    return result
 
 
 async def _validate_canonical_history_run(

@@ -35,7 +35,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -782,6 +782,45 @@ async def _fetch_db_only_daily_bars(
     return df
 
 
+async def _fetch_pit_daily_bars_for_target(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    *,
+    output_bars: int,
+    target_trade_date: date,
+) -> pd.DataFrame | None:
+    """[HISTORY-CURRENT-DATE-LIFECYCLE-01 §5] target-aware PIT strict DB-only 读日线。
+
+    与 ``_fetch_db_only_daily_bars`` 的唯一差异：显式传 MDAS 已有的 PIT 参数
+    ``end_date`` / ``adjustment_as_of``，保证：
+
+    - ``max(bars.trade_date) <= target_trade_date``（不读未来 bar）
+    - 复权锚点固定在 target_trade_date（禁止未来除权事件泄漏）
+
+    其余契约与 backfill 完全一致（同一 MDAS 出口、strict DB-only、completed_only），
+    因此 target-date state 与既有历史 state 由同一数据口径产出。
+    """
+    from app.services.market_data_aggregation_service import MarketDataAggregationService
+
+    mdas = MarketDataAggregationService()
+    agg = await mdas.get_bars(
+        session,
+        instrument_id,
+        timeframe="1d",
+        adj="qfq",
+        include_realtime=False,
+        completed_only=True,
+        allow_backfill=False,
+        end_date=target_trade_date,
+        adjustment_as_of=target_trade_date,
+        limit=output_bars * 2,
+    )
+    df = agg.bars
+    if df is None or df.empty:
+        return None
+    return df
+
+
 async def backfill_history_with_run_items(
     *,
     history_run_id: uuid.UUID,
@@ -1193,6 +1232,240 @@ async def _persist_history_result(
     return {
         "daily_state_count": daily_state_count,
         "events_count": events_count,
+    }
+
+
+def _max_bar_trade_date(bars: pd.DataFrame) -> date | None:
+    """[HISTORY-CURRENT-DATE-LIFECYCLE-01 §5] 取 bars 最大交易日（PIT 断言用）。
+
+    history SSOT 的 bars 契约是 DatetimeIndex；兼容退化的 ``time`` 列形态。
+    """
+    if bars is None or bars.empty:
+        return None
+    try:
+        if isinstance(bars.index, pd.DatetimeIndex):
+            return bars.index.max().date()
+        if "time" in bars.columns:
+            return pd.to_datetime(bars["time"]).max().date()
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return None
+
+
+async def _persist_target_daily_state(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    state: dict[str, Any],
+    algorithm_version: str,
+    *,
+    trade_date_val: date,
+    input_hash: str,
+    source_history_run_id: uuid.UUID,
+    history_contract_version: str,
+) -> None:
+    """[HISTORY-CURRENT-DATE-LIFECYCLE-01 §7] 只写单个 target-date canonical daily state。
+
+    刻意**不复用** ``_persist_history_result``：后者会把整个 250-day window 全部
+    upsert（250x write amplification）并连带写 events 表。本 helper：
+
+    - 只 upsert 1 行 (instrument_id, target_trade_date, algorithm_version)
+    - 完全不触碰历史日期行（08-07 及更早 payload/lineage 保持 byte-identical）
+    - 完全不写 first_pyramid_history_events
+
+    复用既有 ON CONFLICT DO UPDATE contract（同一 unique constraint、同一 set_ 字段集），
+    保证 target-date 行与 backfill 产出的行结构/lineage 语义一致。
+    """
+    stmt = pg_insert(FirstPyramidHistoryDailyState).values(
+        instrument_id=instrument_id,
+        trade_date=trade_date_val,
+        algorithm_version=algorithm_version,
+        input_hash=input_hash,
+        source_history_run_id=source_history_run_id,
+        history_contract_version=history_contract_version,
+        state_payload=state,
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_first_pyramid_history_daily_state_instr_date_ver",
+        set_={
+            "input_hash": stmt.excluded.input_hash,
+            "source_history_run_id": stmt.excluded.source_history_run_id,
+            "history_contract_version": stmt.excluded.history_contract_version,
+            "state_payload": stmt.excluded.state_payload,
+            "updated_at": func.now(),
+        },
+    )
+    await session.execute(stmt)
+
+
+async def advance_history_to_trade_date(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+    trade_date: date,
+    *,
+    output_bars: int = 250,
+    batch_size: int = 25,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+) -> dict[str, Any]:
+    """[HISTORY-CURRENT-DATE-LIFECYCLE-01 §4] 把 canonical history dataset 推进到 target trade date。
+
+    语义（**canonical dataset advancement，不是重跑 backfill run**）：
+
+    - HistoryRun 是「一个 algorithm+contract+scope 的 canonical dataset lineage 身份」
+      （create_history_run 幂等复用 + daily_state upsert 覆盖 lineage 共同证明），
+      因此推进数据集 = 在**同一个 run id** 下补齐 target-date state，
+      而不是新建 run X 全量 replay（那会把 ~1.32M 历史行 lineage 改写成 X）。
+    - 只写 target_trade_date 一行/instrument（1x write amplification，非 250x）
+    - 不 claim / 不修改任何 run item（5283 succeeded + 10 skipped 的 execution history 冻结）
+    - 不写 events 表（formal Review 不消费 FirstPyramidHistoryEvent；见 CASE A 审计）
+    - PIT：bars 经 MDAS ``end_date=trade_date`` + ``adjustment_as_of=trade_date``
+
+    participating set = run 现有 succeeded run-item set（§8），
+    不把历史 skipped instrument 拉进来（HISTORY-SKIP-REEVALUATION-01 已 DEFER）。
+
+    Args:
+        session: 异步 DB 会话
+        history_run_id: canonical history run id（lineage 保持不变）
+        trade_date: target trade date
+        output_bars: history SSOT window（与 backfill 保持一致，默认 250）
+        batch_size: 每批 commit 的 instrument 数（顺序执行，不并发）
+        progress_callback: 可选进度回调
+
+    Returns:
+        {"run_id", "trade_date", "processed", "target_state_count",
+         "no_bar", "no_target_state", "failed", "failed_instruments"}
+
+    Raises:
+        ValueError: run 不存在 / scope 不兼容 / contract 版本不匹配
+    """
+    from app.services.first_pyramid_service import (
+        HISTORY_CONTRACT_VERSION,
+        compute_first_pyramid_history,
+    )
+
+    run = await session.get(FirstPyramidHistoryRun, history_run_id)
+    if run is None:
+        raise ValueError(f"history run not found: {history_run_id}")
+
+    run_meta = run.metadata_json or {}
+    run_contract = run_meta.get("history_contract_version")
+    if run_contract != HISTORY_CONTRACT_VERSION:
+        raise ValueError(
+            "history run contract mismatch: "
+            f"run={run_contract!r} required={HISTORY_CONTRACT_VERSION!r}"
+        )
+
+    algorithm_version = run.algorithm_version
+
+    # §8 participating set = 现有 succeeded run items（不含 skipped）
+    item_rows = await session.execute(
+        select(FirstPyramidHistoryRunItem.instrument_id)
+        .where(
+            FirstPyramidHistoryRunItem.history_run_id == history_run_id,
+            FirstPyramidHistoryRunItem.status == "succeeded",
+        )
+        .order_by(FirstPyramidHistoryRunItem.instrument_id)
+    )
+    instrument_ids = [row[0] for row in item_rows.all()]
+
+    processed = 0
+    target_state_count = 0
+    no_bar = 0
+    no_target_state = 0
+    failed = 0
+    failed_instruments: list[dict[str, Any]] = []
+
+    for offset in range(0, len(instrument_ids), batch_size):
+        batch = instrument_ids[offset : offset + batch_size]
+        for instrument_id in batch:
+            processed += 1
+            try:
+                bars = await _fetch_pit_daily_bars_for_target(
+                    session,
+                    instrument_id,
+                    output_bars=output_bars,
+                    target_trade_date=trade_date,
+                )
+                if bars is None or bars.empty:
+                    no_bar += 1
+                    continue
+
+                # §5 PIT 硬断言：绝不允许未来 bar 进入 compute input
+                max_bar_date = _max_bar_trade_date(bars)
+                if max_bar_date is not None and max_bar_date > trade_date:
+                    raise ValueError(
+                        f"PIT violation: max bar date {max_bar_date} > target {trade_date}"
+                    )
+
+                # §6 唯一 SSOT，算法不改
+                history = compute_first_pyramid_history(
+                    bars=bars,
+                    symbol=str(instrument_id),
+                    output_bars=output_bars,
+                    include_chip=False,
+                )
+                meta = history.get("meta") or {}
+                input_hash = meta.get("input_hash") or ""
+
+                target_state = None
+                for state in history.get("daily_state") or []:
+                    time_str = state.get("time")
+                    if not time_str:
+                        continue
+                    try:
+                        state_date = pd.to_datetime(time_str).date()
+                    except (ValueError, TypeError):
+                        continue
+                    if state_date == trade_date:
+                        target_state = state
+                        break
+
+                if target_state is None:
+                    # instrument 在 target date 无 completed bar（停牌/退市/未上市）
+                    no_target_state += 1
+                    continue
+
+                await _persist_target_daily_state(
+                    session,
+                    instrument_id,
+                    target_state,
+                    algorithm_version,
+                    trade_date_val=trade_date,
+                    input_hash=input_hash,
+                    source_history_run_id=history_run_id,
+                    history_contract_version=HISTORY_CONTRACT_VERSION,
+                )
+                target_state_count += 1
+            except Exception as exc:  # noqa: BLE001 - 单股失败不阻塞整体
+                failed += 1
+                failed_instruments.append(
+                    {"instrument_id": str(instrument_id), "error": str(exc)}
+                )
+                logger.warning(
+                    "advance_history_to_trade_date instrument failed: %s (%s)",
+                    instrument_id,
+                    exc,
+                )
+
+        await session.commit()
+        if progress_callback is not None:
+            await progress_callback(
+                {
+                    "processed": processed,
+                    "total": len(instrument_ids),
+                    "target_state_count": target_state_count,
+                }
+            )
+
+    return {
+        "run_id": str(history_run_id),
+        "trade_date": trade_date.isoformat(),
+        "total": len(instrument_ids),
+        "processed": processed,
+        "target_state_count": target_state_count,
+        "no_bar": no_bar,
+        "no_target_state": no_target_state,
+        "failed": failed,
+        "failed_instruments": failed_instruments,
     }
 
 

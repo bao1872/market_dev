@@ -993,12 +993,17 @@ async def _build_scope_history(
 
 async def _resolve_canonical_history_source(
     session: AsyncSession,
+    required_trade_date: date | None = None,
 ) -> tuple[uuid.UUID | None, str]:
     """[Phase4C 2026-08-09] 解析正式 canonical HistoryRun（P0-B）。
 
     通过 canonical history readiness contract 从运行数据解析 source run id，
     **禁止硬编码生产 run id**（如 be56dcd2...）。contract 版本使用算法常量
     ``HISTORY_CONTRACT_VERSION``（版本字符串，非具体 run id）。
+
+    [HISTORY-CURRENT-DATE-LIFECYCLE-01 §9/§10] ``required_trade_date`` 非 None 时，
+    候选 run 还必须满足 TARGET_DATE_ELIGIBLE_SET == TARGET_DATE_STATE_SET，
+    避免 latest state 停留在旧交易日的 run 对当日 Review 误判 ready。
 
     Returns:
         (source_history_run_id, history_contract_version)
@@ -1017,6 +1022,7 @@ async def _resolve_canonical_history_source(
     for run in candidates:
         result = await validate_canonical_history_run_readiness(
             session, run.id, contract_version,
+            required_trade_date=required_trade_date,
         )
         if result.get("status") == "ok":
             return run.id, contract_version
@@ -1044,12 +1050,17 @@ async def _bind_or_reuse_canonical_history_source(
     bound_run_id = metadata.get("canonical_history_source_run_id")
     bound_contract = metadata.get("canonical_history_contract_version")
 
+    # [HISTORY-CURRENT-DATE-LIFECYCLE-01 §9/§10] canonical source 必须覆盖本次 Review
+    # 的 trade_date：latest state 停留在旧交易日的 run 不得对当日 Review 返回 ready。
+    required_trade_date = run.trade_date
+
     if bound_run_id is not None:
         # resume / retry：校验 bound source 仍然合法，否则 fail closed
         bound_uuid = uuid.UUID(str(bound_run_id))
         contract_version = bound_contract or HISTORY_CONTRACT_VERSION
         result = await validate_canonical_history_run_readiness(
             session, bound_uuid, contract_version,
+            required_trade_date=required_trade_date,
         )
         if result.get("status") != "ok":
             raise ReviewOrchestratorError(
@@ -1061,7 +1072,9 @@ async def _bind_or_reuse_canonical_history_source(
         return bound_uuid, contract_version
 
     # 新 run：解析当时最新合法 canonical source 并立即绑定到 metadata
-    source_run_id, contract_version = await _resolve_canonical_history_source(session)
+    source_run_id, contract_version = await _resolve_canonical_history_source(
+        session, required_trade_date=required_trade_date,
+    )
     if source_run_id is None:
         logger.warning(
             "[ReviewOrchestrator] 未找到就绪的 canonical HistoryRun；"

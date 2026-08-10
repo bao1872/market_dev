@@ -146,7 +146,7 @@ class TestCanonicalSourceResolver:
         async def fake_execute(stmt):
             return type("R", (), {"scalars": lambda self: [ready_run]})()
 
-        async def fake_validate(session, run_id, contract):
+        async def fake_validate(session, run_id, contract, required_trade_date=None):
             return {"status": "ok", "run_id": str(run_id)}
 
         session = AsyncMock()
@@ -167,12 +167,13 @@ class TestRunBoundHistoryLifecycle:
     新 ReviewRun 可解析当时最新合法 source；bound source 缺失/contract 不符 → fail closed。
     """
 
-    def _make_run(self, metadata=None):
+    def _make_run(self, metadata=None, trade_date=date(2026, 8, 10)):
         return type(
             "R",
             (),
             {
                 "id": uuid.uuid4(),
+                "trade_date": trade_date,
                 "metadata_json": metadata if metadata is not None else {},
             },
         )()
