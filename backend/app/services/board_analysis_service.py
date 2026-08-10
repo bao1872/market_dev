@@ -1123,24 +1123,30 @@ async def _compute_peer_metrics(
     注：peer avg_strength 取自 V1 payload.trend_strength.avg（数值字段，
     不受 fp 方向标签本地化影响）。
     """
-    stmt = select(BoardAnalysisSnapshot).where(
-        BoardAnalysisSnapshot.trade_date == trade_date,
-        BoardAnalysisSnapshot.algorithm_version == algorithm_version,
-        BoardAnalysisSnapshot.status == "succeeded",
-        BoardAnalysisSnapshot.board_id != board_id,
+    # STATE-EVENT-01 同款修复（BOARD-RUNTIME-01）：显式投影代替 select(full ORM entity)。
+    # 这里只 SELECT payload['trend_strength']['avg'] 的文本值（`->>` 返回 TEXT，避免 JSONB
+    # 全量拉回 Python），再由 _safe_float 在 Python 端解析 —— 与原实现对非数值/NaN/缺失
+    # 的处理完全一致。count 仍按匹配行总数计（与原 rows 长度一致），不因 avg 无效而丢弃行。
+    stmt = (
+        select(
+            BoardAnalysisSnapshot.payload["trend_strength"]["avg"].as_string().label("avg_raw")
+        )
+        .where(
+            BoardAnalysisSnapshot.trade_date == trade_date,
+            BoardAnalysisSnapshot.algorithm_version == algorithm_version,
+            BoardAnalysisSnapshot.status == "succeeded",
+            BoardAnalysisSnapshot.board_id != board_id,
+        )
     )
     if by_type:
         stmt = stmt.where(BoardAnalysisSnapshot.board_type == board_type)
-    rows = (await session.execute(stmt)).scalars().all()
+    rows = (await session.execute(stmt)).all()
     if not rows:
         return None
 
     strengths: list[float] = []
-    for snap in rows:
-        pl = snap.payload if isinstance(snap.payload, dict) else {}
-        ts_raw = pl.get("trend_strength")
-        ts = ts_raw if isinstance(ts_raw, dict) else {}
-        avg_ts = _safe_float(ts.get("avg"))
+    for row in rows:
+        avg_ts = _safe_float(row[0])
         if avg_ts is not None:
             strengths.append(avg_ts)
     return {

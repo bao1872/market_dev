@@ -1281,3 +1281,54 @@ async def test_query2_projected_result_supports_build_stock_state() -> None:
         assert state is not None
         assert state.symbol == symbol
         assert state.instrument_id == snapshot.instrument_id
+
+
+# =====================================================================
+# BOARD-RUNTIME-01: _compute_peer_metrics projected query equivalence test
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_peer_metrics_projected_query_semantics() -> None:
+    """BOARD-RUNTIME-01: 验证 _compute_peer_metrics 的显式 JSON projection
+    在 Python 端解析后与原 ORM 语义等价（count=匹配行数，avg_strength=有效 avg 均值）。
+
+    不依赖真实 board_analysis_snapshots 行（FK 图复杂），直接 mock session.execute
+    返回 projected Row（row[0] = payload['trend_strength']['avg'] 文本值），
+    验证 _safe_float 解析 + _avg 聚合逻辑正确，且缺失/非数值 avg 不计入但计入 count。
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services.board_analysis_service import _compute_peer_metrics
+
+    # Row 对象：row[0] 为 payload->'trend_strength'->>'avg' 的文本值（None 表示 JSON NULL/缺失）
+    def _mk_row(avg_text):
+        row = MagicMock()
+        row.__getitem__ = lambda self, idx: avg_text
+        return row
+
+    # 构造 5 个匹配行：avg = ['12.5', '7.25', None(缺失), 'non-numeric', '10.0']
+    # 原语义：count=5（全部匹配行）；有效 float 均值为 (12.5+7.25+10.0)/3=9.9166...
+    rows = [_mk_row("12.5"), _mk_row("7.25"), _mk_row(None), _mk_row("abc"), _mk_row("10.0")]
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.all.return_value = rows
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    with patch("app.services.board_analysis_service.select") as mock_select:
+        mock_select.return_value = MagicMock()  # stmt（此处不真正编译）
+        result = await _compute_peer_metrics(
+            mock_session,
+            trade_date=date(2026, 8, 7),
+            algorithm_version="test-v1",
+            board_id=uuid.uuid4(),
+            board_type="concept",
+            by_type=True,
+        )
+
+    assert result is not None
+    assert result["count"] == 5, f"count 应为全部匹配行 5，实际 {result['count']}"
+    expected_avg = (12.5 + 7.25 + 10.0) / 3
+    assert abs(result["avg_strength"] - expected_avg) < 1e-9, (
+        f"avg_strength 应为 {expected_avg}，实际 {result['avg_strength']}"
+    )
