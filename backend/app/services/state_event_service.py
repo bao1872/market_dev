@@ -27,6 +27,8 @@ PRD V1.1 §7.3 核心实现：
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -398,6 +400,11 @@ async def generate_events_for_run(
         }
 
     # Query 2: 批量获取快照 + symbol
+    _t0 = time.time()
+    logger.info(
+        "[EVENT-E1] before batch-read run_id=%s pid=%s",
+        run_id, os.getpid(),
+    )
     snapshots_with_symbol = await _batch_get_run_snapshots_with_symbol(session, run)
     if not snapshots_with_symbol:
         logger.info("run 无快照: run_id=%s", run_id)
@@ -422,6 +429,11 @@ async def generate_events_for_run(
         run.adj,
     )
 
+    logger.info(
+        "[EVENT-E2] after batch-read run_id=%s current_snapshots=%s prev_snapshots=%s elapsed=%.2fs pid=%s",
+        run_id, len(snapshots_with_symbol), len(prev_data),
+        time.time() - _t0, os.getpid(),
+    )
     # 检测时间：run.published_at 或 finished_at
     detected_at = run.published_at or run.finished_at or datetime.now(UTC)
 
@@ -434,6 +446,12 @@ async def generate_events_for_run(
     failed_count = 0
     events_to_insert: list[dict[str, Any]] = []
 
+    _t1 = time.time()
+    _loop_total = len(snapshots_with_symbol)
+    logger.info(
+        "[EVENT-E3] before python-loop run_id=%s instruments=%s pid=%s",
+        run_id, _loop_total, os.getpid(),
+    )
     for curr_snapshot, symbol in snapshots_with_symbol:
         try:
             # 构建当前 StockState
@@ -494,9 +512,19 @@ async def generate_events_for_run(
                 curr_snapshot.instrument_id, run_id, exc, exc_info=True,
             )
 
+    logger.info(
+        "[EVENT-E4] after loop run_id=%s processed=%s generated=%s failed=%s elapsed=%.2fs pid=%s",
+        run_id, _loop_total, event_count, failed_count,
+        time.time() - _t1, os.getpid(),
+    )
     # Query 4: 批量 INSERT ON CONFLICT DO NOTHING
     inserted_count = 0
     if events_to_insert:
+        _t2 = time.time()
+        logger.info(
+            "[EVENT-E5] before bulk-write run_id=%s rows=%s pid=%s",
+            run_id, len(events_to_insert), os.getpid(),
+        )
         stmt = pg_insert(StockStateEvent).values(events_to_insert).on_conflict_do_nothing(
             constraint="uq_state_events_idempotency_key",
         )
@@ -504,6 +532,10 @@ async def generate_events_for_run(
         # rowcount 可能 None（某些驱动），fallback 为 candidates 数量
         rc = getattr(result, "rowcount", None)
         inserted_count = rc if rc is not None and rc >= 0 else len(events_to_insert)
+    logger.info(
+        "[EVENT-E6] after bulk-write run_id=%s inserted=%s elapsed=%.2fs pid=%s",
+        run_id, inserted_count, time.time() - _t2, os.getpid(),
+    )
 
     logger.info(
         "事件生成完成 run_id=%s candidate=%d inserted=%d event_count=%d skipped=%d failed=%d",
