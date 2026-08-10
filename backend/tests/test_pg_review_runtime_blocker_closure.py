@@ -1221,3 +1221,63 @@ async def test_recovery_checkpoint_no_regression_later_checkpoint() -> None:
         job = await reader_db.get(SchedulerJobRun, job_run_id)
         meta_after = json.loads(job.metadata_json)
         assert meta_after.get("last_completed_step") == "publishing"
+
+
+# =====================================================================
+# STATE-EVENT-01: Query2 projected result contract test
+# =====================================================================
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_query2_projected_result_supports_build_stock_state() -> None:
+    """STATE-EVENT-01: 验证 explicit column projection 返回的 Row 对象
+    支持 consumer（build_stock_state）所需的所有字段访问。
+
+    不测试未使用字段（summary_payload）。
+    """
+    from app.db import AsyncSessionLocal
+    from app.schemas.stock_state import build_stock_state
+    from app.services.state_event_service import (
+        _batch_get_run_snapshots_with_symbol,
+    )
+
+    test_date = date(2026, 9, 10)
+    async with AsyncSessionLocal() as prep_db:
+        all_ids = await _make_instruments(prep_db, n=5)
+        dsa_ids = all_ids[:5]
+        await _make_strategy_run_with_items(
+            prep_db, total=5, succeeded=5, skipped=0, failed=0,
+            status="completed", instrument_ids=dsa_ids,
+        )
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5, succeeded=5, skipped=0, failed=0,
+            published_at=datetime.now(ZoneInfo("Asia/Shanghai")),
+            status=STATUS_SUCCEEDED, trade_date=test_date,
+            instrument_ids=all_ids,
+        )
+        await prep_db.commit()
+
+    async with AsyncSessionLocal() as reader_db:
+        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+        run = await reader_db.get(StockFeatureSnapshotRun, snap.id)
+        result = await _batch_get_run_snapshots_with_symbol(reader_db, run)
+
+    assert len(result) == 5, f"预期 5 行，实际 {len(result)}"
+
+    for snapshot, symbol in result:
+        # 验证 scalar 字段可访问
+        assert snapshot.instrument_id is not None
+        assert snapshot.trade_date == test_date
+        assert snapshot.primary_timeframe == "1d"
+        # 验证 JSONB 字段可访问（consumer 需要）
+        assert snapshot.structural_payload is not None
+        assert snapshot.temporal_payload is not None
+        # 验证 symbol binding
+        assert isinstance(symbol, str)
+        assert symbol.startswith("T")  # _make_instruments 生成 T<hex>
+
+        # 验证可以传入 build_stock_state（不抛异常即通过）
+        state = build_stock_state(snapshot, symbol)
+        assert state is not None
+        assert state.symbol == symbol
+        assert state.instrument_id == snapshot.instrument_id
