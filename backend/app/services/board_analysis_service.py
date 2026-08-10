@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import time
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -1961,6 +1963,7 @@ async def compute_all_boards(
     computed_boards = 0
     details: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = list(blockers)
+    _board_loop_start = time.perf_counter()
     for board in boards:
         board_membership = memberships.get(board.id)
         if board_membership is None:
@@ -2053,6 +2056,15 @@ async def compute_all_boards(
 
     _pointer_confirmed_flag = False
     if publish and publishable:
+        _publish_loop_start = time.perf_counter()
+        _publish_total = len(details)
+        _publish_done = 0
+        logger.info(
+            "[BF1] before publish_board_analysis loop job=%s trade=%s details=%s "
+            "elapsed_since_board_start=%.1fs pid=%s",
+            trade_date, trade_date, _publish_total,
+            time.perf_counter() - _board_loop_start, os.getpid(),
+        )
         for detail in details:
             snapshot = detail.pop("snapshot", None)
             if snapshot is None:
@@ -2060,6 +2072,25 @@ async def compute_all_boards(
             if await publish_board_analysis(session, snapshot) is not None:
                 published += 1
                 detail["published"] = True
+            _publish_done += 1
+            # 轻量 progress：每 25% 报一次（避免逐条打印）
+            _threshold = max(1, _publish_total // 4) if _publish_total else 1
+            if _publish_done % _threshold == 0 or _publish_done == _publish_total:
+                _el = time.perf_counter() - _publish_loop_start
+                logger.info(
+                    "[BF2p] publish progress job=%s trade=%s completed=%s/%s "
+                    "published=%s elapsed=%.1fs bpm=%.1f last_board=%s pid=%s",
+                    trade_date, trade_date, _publish_done, _publish_total, published,
+                    _el, (_publish_done / (_el / 60)) if _el > 0 else 0.0,
+                    detail.get("board_name", "?"), os.getpid(),
+                )
+        logger.info(
+            "[BF2] after publish_board_analysis loop job=%s trade=%s published=%s "
+            "elapsed_publish_loop=%.1fs pid=%s",
+            trade_date, trade_date, published,
+            time.perf_counter() - _publish_loop_start, os.getpid(),
+        )
+        _market_agg_start = time.perf_counter()
         pub = await publish_market_aggregation(
             session,
             trade_date=trade_date,
@@ -2080,6 +2111,11 @@ async def compute_all_boards(
         # 事实确认：使用 publish 返回的 publication 的 data_run_id 校验，
         # 不因为函数未抛异常就硬编码 confirmed=True（data_run_id 必须指向本 batch）。
         # 仅在确认后更新 published_at，避免假绿。
+        logger.info(
+            "[BF3] after publish_market_aggregation job=%s trade=%s elapsed=%.1fs pid=%s",
+            trade_date, trade_date,
+            time.perf_counter() - _market_agg_start, os.getpid(),
+        )
         _pointer_confirmed_flag = pub is not None and pub.data_run_id == batch_run.id
         if _pointer_confirmed_flag:
             batch_run.published_at = datetime.now(UTC)
@@ -2087,7 +2123,13 @@ async def compute_all_boards(
         for detail in details:
             detail.pop("snapshot", None)
 
+    _final_flush_start = time.perf_counter()
     await session.flush()
+    logger.info(
+        "[BF4] after final flush job=%s trade=%s elapsed=%.1fs pid=%s",
+        trade_date, trade_date,
+        time.perf_counter() - _final_flush_start, os.getpid(),
+    )
     return {
         "board_analysis_run_id": str(batch_run.id),
         "trade_date": trade_date.isoformat(),
