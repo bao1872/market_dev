@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date
 from pathlib import Path
@@ -73,12 +74,21 @@ def _history_with_states(dates: list[date]) -> dict[str, Any]:
 
 
 class _FakeRun:
-    def __init__(self, run_id: uuid.UUID, contract: str = CONTRACT):
+    def __init__(
+        self,
+        run_id: uuid.UUID,
+        contract: str | None = CONTRACT,
+        *,
+        scope: str = "all_a_share",
+        metadata_as_str: bool = True,
+    ):
         self.id = run_id
-        self.scope = "all_a_share"
+        self.scope = scope
         self.status = "partial"
         self.algorithm_version = "fp-v1"
-        self.metadata_json = {"history_contract_version": contract}
+        # 生产 schema 中 metadata_json 是 Text 列 → 真实取到的是 JSON 字符串。
+        meta = {"history_contract_version": contract} if contract else {}
+        self.metadata_json = json.dumps(meta) if metadata_as_str else meta
 
 
 class _FakeSession:
@@ -277,6 +287,35 @@ class TestRunItemsFrozen:
         run_id = uuid.uuid4()
         session = _FakeSession(_FakeRun(run_id, contract="review-history-v1"), [])
         with pytest.raises(ValueError, match="contract mismatch"):
+            await advance_history_to_trade_date(session, run_id, TARGET)
+
+    async def test_metadata_json_text_column_parsed(self):
+        """metadata_json 是 Text 列（生产 schema）→ 必须按 JSON 字符串解析。
+
+        真实 08-10 首次执行即被此形态击中（'str' object has no attribute 'get'），
+        本测试锁定回归。
+        """
+        run_id = uuid.uuid4()
+        run = _FakeRun(run_id, metadata_as_str=True)
+        assert isinstance(run.metadata_json, str)  # 前提：确实是字符串
+        session = _FakeSession(run, [])
+        summary = await advance_history_to_trade_date(session, run_id, TARGET)
+        assert summary["total"] == 0  # 无 run item，但未因解析失败抛错
+
+    async def test_metadata_json_dict_still_supported(self):
+        """metadata_json 已是 dict（ORM JSON 变体）→ 同样可用。"""
+        run_id = uuid.uuid4()
+        run = _FakeRun(run_id, metadata_as_str=False)
+        assert isinstance(run.metadata_json, dict)
+        session = _FakeSession(run, [])
+        summary = await advance_history_to_trade_date(session, run_id, TARGET)
+        assert summary["total"] == 0
+
+    async def test_non_canonical_scope_rejected(self):
+        """scope != all_a_share（如 canary/sample）→ ValueError（§4 guard）。"""
+        run_id = uuid.uuid4()
+        session = _FakeSession(_FakeRun(run_id, scope="canary"), [])
+        with pytest.raises(ValueError, match="scope not canonical"):
             await advance_history_to_trade_date(session, run_id, TARGET)
 
     async def test_missing_run_rejected(self):

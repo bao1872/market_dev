@@ -1346,12 +1346,27 @@ async def advance_history_to_trade_date(
     if run is None:
         raise ValueError(f"history run not found: {history_run_id}")
 
-    run_meta = run.metadata_json or {}
+    # metadata_json 是 Text 列（既有 schema），可能是 JSON 字符串或已解析 dict；
+    # 与 validate_canonical_history_run_readiness 使用同一解析口径。
+    run_meta: dict[str, Any] = {}
+    if isinstance(run.metadata_json, str) and run.metadata_json:
+        try:
+            parsed = json.loads(run.metadata_json)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            run_meta = parsed
+    elif isinstance(run.metadata_json, dict):
+        run_meta = run.metadata_json
     run_contract = run_meta.get("history_contract_version")
     if run_contract != HISTORY_CONTRACT_VERSION:
         raise ValueError(
             "history run contract mismatch: "
             f"run={run_contract!r} required={HISTORY_CONTRACT_VERSION!r}"
+        )
+    if run.scope != "all_a_share":
+        raise ValueError(
+            f"history run scope not canonical: {run.scope!r} (required 'all_a_share')"
         )
 
     algorithm_version = run.algorithm_version
