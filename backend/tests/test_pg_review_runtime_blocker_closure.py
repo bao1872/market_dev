@@ -19,6 +19,7 @@ CREDENTIAL/SAFETY：本文件只在 PANJI_REMOTE_VERIFY_DB_TEST=1 的远程验�
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, patch
@@ -1332,3 +1333,211 @@ async def test_peer_metrics_projected_query_semantics() -> None:
     assert abs(result["avg_strength"] - expected_avg) < 1e-9, (
         f"avg_strength 应为 {expected_avg}，实际 {result['avg_strength']}"
     )
+
+
+# =====================================================================
+# STATE-EVENT-PERSIST-01: state-event bulk INSERT chunking tests
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_state_event_bulk_insert_chunked_large_batch() -> None:
+    """STATE-EVENT-PERSIST-01 CASE A: 大批量 events 被分批 INSERT，
+    避免单条多行 VALUES 超过 asyncpg 32767 bind-arg 上限。
+
+    模拟 generate_events_for_run 生成 >2520 条事件（单条语句会超 32767），
+    断言 bulk-write 被拆成多个 chunk，每个 chunk 的行数远低于上限，
+    且所有行最终都成功写入（累计 inserted == 生成数）。
+    """
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4 as _uuid4
+
+    from app.services.state_event_service import generate_events_for_run
+    from tests.test_stock_state_and_events import (
+        _make_mock_run,
+        _make_mock_snapshot,
+    )
+
+    run_id = _uuid4()
+    mock_run = _make_mock_run(run_id=run_id)
+
+    # 构造 N=3000 个 curr snapshot，各自相对 prev 有状态变化（sqzmom 正→负）→ 各产生 1 条事件
+    n_instruments = 3000  # 单条语句 3000*13=39000 > 32767，旧实现必溢出
+    curr_snapshots = []
+    prev_data = {}
+    for i in range(n_instruments):
+        iid = _uuid4()
+        prev_s = _make_mock_snapshot(trade_date=date(2026, 7, 9), sqzmom_val=0.001)
+        prev_s.instrument_id = iid
+        prev_run = _make_mock_run(trade_date=date(2026, 7, 9))
+        prev_data[iid] = (prev_s, prev_run)
+        curr_s = _make_mock_snapshot(trade_date=date(2026, 7, 10), sqzmom_val=-0.001)
+        curr_s.instrument_id = iid
+        curr_snapshots.append((curr_s, f"6{i:06d}"))
+
+    mock_session = MagicMock()
+
+    async def mock_get(model, obj_id):
+        if model.__name__ == "StockFeatureSnapshotRun":
+            return mock_run
+        return None
+    mock_session.get = AsyncMock(side_effect=mock_get)
+
+    insert_calls = []
+
+    async def mock_execute(stmt):
+        # 批量 INSERT（chunked）：每次 Insert 都成功写入（rowcount 由实际 chunk 行数决定，
+        # 但这里不做 statement 内部值反查，改用固定 chunk 语义——generate_events_for_run
+        # 按 1000/行 chunk 拆分，3000 行 → 3 个 Insert 调用）
+        if type(stmt).__name__ == "Insert":
+            insert_calls.append(stmt)
+            mock_result = MagicMock()
+            mock_result.rowcount = 1000  # 每 chunk 1000 行（最后 chunk 可能是余数）
+            return mock_result
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_result.scalars.return_value.all.return_value = []
+        return mock_result
+    mock_session.execute = AsyncMock(side_effect=mock_execute)
+
+    # 关键：generate_events_for_run 调用 _batch_get_previous_snapshots，需让它返回 prev_data dict
+    # 直接 patch 该 helper，避免依赖 execute 分支判定
+    from unittest.mock import patch as _patch
+
+    import app.services.state_event_service as _ses
+
+    async def fake_prev(*a, **k):
+        return prev_data
+    async def fake_curr(*a, **k):
+        return curr_snapshots
+
+    with _patch.object(_ses, "_batch_get_run_snapshots_with_symbol", fake_curr), \
+         _patch.object(_ses, "_batch_get_previous_snapshots", fake_prev):
+        result = await generate_events_for_run(mock_session, run_id)
+
+    assert result["event_count"] == n_instruments, f"预期 {n_instruments} 条事件，实际 {result}"
+    # 大批量被拆成多个 chunk（单条语句 3000*13=39000 > 32767 必溢出，旧实现单次 execute）
+    assert len(insert_calls) >= 2, f"大批量应被拆成多个 chunk，实际 insert 次数 {len(insert_calls)}"
+    # 每 chunk 行数 = ceil(n/chunks) <= 1000（远低于 32767/13≈2520 上限）
+    per_chunk = math.ceil(n_instruments / len(insert_calls))
+    assert per_chunk <= 1000, f"chunk 行数 {per_chunk} 应 <= 1000"
+    # 累计写入 == 生成数（无 InterfaceError，全部成功）
+    assert result["inserted_count"] == n_instruments, (
+        f"累计写入应为 {n_instruments}，实际 {result['inserted_count']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_state_event_bulk_insert_no_per_chunk_commit() -> None:
+    """STATE-EVENT-PERSIST-01 CASE B: chunked INSERT 不得 per-chunk commit。
+
+    所有 chunk 仍属同一 transaction：bulk-write 期间不调用 session.commit()，
+    且中间 chunk 失败时异常按现有语义向上传播（不吞掉、不制造半批持久化）。
+    """
+    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import patch as _patch
+    from uuid import uuid4 as _uuid4
+
+    import app.services.state_event_service as _ses
+    from app.services.state_event_service import generate_events_for_run
+    from tests.test_stock_state_and_events import (
+        _make_mock_run,
+        _make_mock_snapshot,
+    )
+
+    run_id = _uuid4()
+    mock_run = _make_mock_run(run_id=run_id)
+
+    n_instruments = 2500  # 分成 3 个 chunk（1000/1000/500）
+    curr_snapshots = []
+    prev_data = {}
+    for i in range(n_instruments):
+        iid = _uuid4()
+        prev_s = _make_mock_snapshot(trade_date=date(2026, 7, 9), sqzmom_val=0.001)
+        prev_s.instrument_id = iid
+        prev_run = _make_mock_run(trade_date=date(2026, 7, 9))
+        prev_data[iid] = (prev_s, prev_run)
+        curr_s = _make_mock_snapshot(trade_date=date(2026, 7, 10), sqzmom_val=-0.001)
+        curr_s.instrument_id = iid
+        curr_snapshots.append((curr_s, f"6{i:06d}"))
+
+    mock_session = MagicMock()
+    commit_calls = {"n": 0}
+
+    async def mock_get(model, obj_id):
+        if model.__name__ == "StockFeatureSnapshotRun":
+            return mock_run
+        return None
+    mock_session.get = AsyncMock(side_effect=mock_get)
+    mock_session.commit = AsyncMock(side_effect=lambda: commit_calls.__setitem__("n", commit_calls["n"] + 1))
+
+    insert_calls = []
+    # 2500 行按 1000/行 chunk → [1000, 1000, 500]
+    _chunk_rows = 1000
+    _expected_chunks = [
+        min(_chunk_rows, n_instruments - i * _chunk_rows)
+        for i in range(0, math.ceil(n_instruments / _chunk_rows))
+    ]
+    _chunk_idx = {"i": 0}
+
+    async def mock_execute(stmt):
+        if type(stmt).__name__ == "Insert":
+            insert_calls.append(stmt)
+            mock_result = MagicMock()
+            mock_result.rowcount = _expected_chunks[_chunk_idx["i"]]
+            _chunk_idx["i"] += 1
+            return mock_result
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        return mock_result
+    mock_session.execute = AsyncMock(side_effect=mock_execute)
+
+    async def fake_prev(*a, **k):
+        return prev_data
+    async def fake_curr(*a, **k):
+        return curr_snapshots
+
+    with _patch.object(_ses, "_batch_get_run_snapshots_with_symbol", fake_curr), \
+         _patch.object(_ses, "_batch_get_previous_snapshots", fake_prev):
+        result = await generate_events_for_run(mock_session, run_id)
+
+    assert result["event_count"] == n_instruments
+    # 关键断言：bulk-write 期间绝无 per-chunk commit
+    assert commit_calls["n"] == 0, (
+        f"chunked INSERT 不得 per-chunk commit，实际 commit 次数 {commit_calls['n']}"
+    )
+    # 多 chunk 已执行
+    assert len(insert_calls) >= 2, f"2500 行应拆成多个 chunk，实际 {len(insert_calls)}"
+    assert result["inserted_count"] == n_instruments
+
+    # 中间 chunk 失败必须向上传播（不吞掉、不 commit 半批）
+    calls = {"n": 0}
+
+    async def mock_execute_fail(stmt):
+        if type(stmt).__name__ == "Insert":
+            calls["n"] += 1
+            if calls["n"] == 2:  # 第 2 个 chunk 失败
+                raise RuntimeError("simulated mid-chunk failure")
+            mock_result = MagicMock()
+            mock_result.rowcount = _expected_chunks[calls["n"] - 1]
+            return mock_result
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        return mock_result
+
+    mock_session2 = MagicMock()
+    async def mock_get2(model, obj_id):
+        return mock_run if model.__name__ == "StockFeatureSnapshotRun" else None
+    mock_session2.get = AsyncMock(side_effect=mock_get2)
+    mock_session2.commit = AsyncMock(side_effect=lambda: commit_calls.__setitem__("n", commit_calls["n"] + 1))
+    mock_session2.execute = AsyncMock(side_effect=mock_execute_fail)
+
+    try:
+        with _patch.object(_ses, "_batch_get_run_snapshots_with_symbol", fake_curr), \
+             _patch.object(_ses, "_batch_get_previous_snapshots", fake_prev):
+            await generate_events_for_run(mock_session2, run_id)
+        raised = False
+    except RuntimeError as exc:
+        raised = True
+        assert "simulated mid-chunk failure" in str(exc)
+
+    assert raised, "中间 chunk 失败应向上传播，不得被吞掉"

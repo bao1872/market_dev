@@ -583,6 +583,10 @@ async def generate_events_for_run(
         time.time() - _t1, os.getpid(),
     )
     # Query 4: 批量 INSERT ON CONFLICT DO NOTHING
+    # STATE-EVENT-PERSIST-01：单条多行 VALUES INSERT 的 bind-arg 总数受 asyncpg 32767 上限约束。
+    # 每条 event 12 bind columns → 单条语句最多 ~2730 行。这里按安全 chunk 分批执行，
+    # 所有 chunk 仍属于当前同一个 transaction（不 per-chunk commit），任一分批失败按
+    # 现有异常语义传播，保持外层 rollback/失败契约。
     inserted_count = 0
     if events_to_insert:
         _t2 = time.time()
@@ -590,13 +594,23 @@ async def generate_events_for_run(
             "[EVENT-E5] before bulk-write run_id=%s rows=%s pid=%s",
             run_id, len(events_to_insert), os.getpid(),
         )
-        stmt = pg_insert(StockStateEvent).values(events_to_insert).on_conflict_do_nothing(
-            constraint="uq_state_events_idempotency_key",
-        )
-        result = await session.execute(stmt)
-        # rowcount 可能 None（某些驱动），fallback 为 candidates 数量
-        rc = getattr(result, "rowcount", None)
-        inserted_count = rc if rc is not None and rc >= 0 else len(events_to_insert)
+        _bind_columns = 13  # 每条 event dict 的 INSERT 列数（instrument_id..idempotency_key）
+        _max_rows = 32767 // _bind_columns  # ~2520
+        _chunk_rows = 1000  # 13*1000=13000 << 32767，留安全余量
+        for chunk in (
+            events_to_insert[i : i + _chunk_rows]
+            for i in range(0, len(events_to_insert), _chunk_rows)
+        ):
+            stmt = pg_insert(StockStateEvent).values(chunk).on_conflict_do_nothing(
+                constraint="uq_state_events_idempotency_key",
+            )
+            result = await session.execute(stmt)
+            # rowcount 可能 None（某些驱动），fallback 为 candidates 数量
+            rc = getattr(result, "rowcount", None)
+            if rc is not None and rc >= 0:
+                inserted_count += rc
+            else:
+                inserted_count += len(chunk)
     logger.info(
         "[EVENT-E6] after bulk-write run_id=%s inserted=%s elapsed=%.2fs pid=%s",
         run_id, inserted_count, time.time() - _t2, os.getpid(),
