@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.filter_operators import canonicalize_filter_operator
+from app.domain.first_pyramid.ob_selection import select_latest_ob
 from app.domain.first_pyramid_semantics import (
     MomentumDirection,
     SqueezeState,
@@ -735,12 +736,21 @@ def _latest_event_by_type(
     events: list[dict[str, Any]],
     event_types: set[str],
 ) -> dict[str, Any] | None:
-    """从事件列表中取指定类型的最新事件（freshnessBars 最小或列表最后一个）。"""
+    """从事件列表中取指定类型的最新事件。
+
+    [REVIEW-FACT-PARITY-02] 使用 canonical ordering（barIndex 最大，同 bar 取列表
+    最后一个）选取，与 history 路径的 latest-OB 游标语义一致；不再依赖调用方
+    是否已按时间排序。
+    """
     candidates = [e for e in events if e.get("type") in event_types]
     if not candidates:
         return None
-    # 列表按时间升序，最后一个为最新
-    return candidates[-1]
+    selected = select_latest_ob(
+        candidates,
+        bar_index_getter=lambda e: _safe_int(e.get("barIndex")),
+    )
+    # 全部事件缺少 barIndex 时退回列表顺序（旧快照兼容）。
+    return selected if selected is not None else candidates[-1]
 
 
 def _structure_alignment(swing: Any, internal: Any) -> str | None:

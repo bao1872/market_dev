@@ -46,6 +46,10 @@ from app.constants.indicator_contract import (
     NODE_CLUSTER_LOW_BARS,
     NODE_CLUSTER_PRIMARY_BARS,
 )
+from app.domain.first_pyramid.ob_selection import (
+    ob_event_bar_index,
+    ob_event_time,
+)
 from app.domain.review.member_fact import (
     compute_percentile,
     compute_price_position_120d,
@@ -520,17 +524,13 @@ def _build_structure_dimension(
         evt_type = ob_evt.get("type", "")
         # [QM-63 canonical] 方向由 bias(1/-1) 经唯一 producer 归一
         ob_bias = ob_evt.get("bias")
-        # 事件发生 bar：CREATED 用 confirmed_index；ENTERED 用 enter_index；MITIGATED 用 mitigated_index
-        bar_index = (
-            ob_evt.get("enter_index")
-            or ob_evt.get("mitigated_index")
-            or ob_evt.get("confirmed_index")
-        )
-        occurred_at = _safe_iso_date(
-            ob_evt.get("enter_time")
-            or ob_evt.get("mitigated_time")
-            or ob_evt.get("confirmed_time")
-        )
+        # [REVIEW-FACT-PARITY-02] 事件发生 bar 由 canonical helper 唯一定位：
+        # CREATED 用 confirmed_index；ENTERED 用 enter_index；MITIGATED 用 mitigated_index。
+        # 旧 `or` 链会让 OB_MITIGATED 错误盖上 enter bar（MITIGATED 同时携带
+        # enter_index 用于 entered_before_mitigation），造成与 history 路径的
+        # bar_index / freshness 分叉。禁止恢复 `or` 回退。
+        bar_index = ob_event_bar_index(ob_evt)
+        occurred_at = _safe_iso_date(ob_event_time(ob_evt))
         ob_high = _safe_float(ob_evt.get("bar_high"))
         ob_low = _safe_float(ob_evt.get("bar_low"))
         # 价格：CREATED 用 anchor 端点；ENTERED/MITIGATED 用对应 bar 的 high/low（无则用 OB 边界）
@@ -1775,14 +1775,8 @@ def compute_first_pyramid_history(
     ob_by_idx: dict[int, list[dict[str, Any]]] = {}
     for ob in ob_lifecycle_events:
         ob_type = ob.get("type", "")
-        if ob_type == "OB_CREATED":
-            idx = ob.get("confirmed_index")
-        elif ob_type == "OB_ENTERED":
-            idx = ob.get("enter_index")
-        elif ob_type == "OB_MITIGATED":
-            idx = ob.get("mitigated_index")
-        else:
-            idx = None
+        # [REVIEW-FACT-PARITY-02] 与 snapshot 路径共用 canonical 定位 helper。
+        idx = ob_event_bar_index(ob)
         if idx is None:
             continue
         ob_by_idx.setdefault(idx, []).append({
@@ -2046,21 +2040,15 @@ def compute_first_pyramid_history(
 
     # OB 生命周期事件
     for ob_evt in ob_lifecycle_events:
-        # CREATED/ENTERED/MITIGATED 分别用不同 index 字段定位
+        # [REVIEW-FACT-PARITY-02] CREATED/ENTERED/MITIGATED 由 canonical helper 定位；
+        # time 必须与 bar_index 同一根 bar（旧 `or` 链会取到 enter_time）。
         evt_type = ob_evt.get("type", "")
-        if evt_type == "OB_CREATED":
-            evt_idx = ob_evt.get("confirmed_index")
-        elif evt_type == "OB_ENTERED":
-            evt_idx = ob_evt.get("enter_index")
-        elif evt_type == "OB_MITIGATED":
-            evt_idx = ob_evt.get("mitigated_index")
-        else:
-            evt_idx = None
+        evt_idx = ob_event_bar_index(ob_evt)
         if evt_idx is not None and start_idx <= evt_idx < n_total:
             events.append({
                 "type": evt_type,
                 "bar_index": int(evt_idx),
-                "time": ob_evt.get("enter_time") or ob_evt.get("mitigated_time") or ob_evt.get("confirmed_time"),
+                "time": ob_event_time(ob_evt),
                 "direction": "up" if ob_evt.get("bias") == 1 else "down" if ob_evt.get("bias") == -1 else None,
                 "internal": bool(ob_evt.get("internal", False)),
                 "anchor_index": ob_evt.get("anchor_index"),
