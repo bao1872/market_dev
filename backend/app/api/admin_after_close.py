@@ -227,8 +227,8 @@ def _action_response(job_run, message: str) -> AfterCloseRunCreateResponse:
 @router.post("/after-close-runs/{run_id}/cancel", response_model=AfterCloseRunCreateResponse)
 async def cancel_after_close_run_endpoint(
     run_id: str,
+    request: Request,
     payload: AfterCloseRunActionRequest | None = None,
-    request: Request = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> AfterCloseRunCreateResponse:
@@ -255,8 +255,8 @@ async def cancel_after_close_run_endpoint(
 @router.post("/after-close-runs/{run_id}/reconcile", response_model=AfterCloseRunCreateResponse)
 async def reconcile_after_close_run_endpoint(
     run_id: str,
+    request: Request,
     payload: AfterCloseRunActionRequest | None = None,
-    request: Request = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> AfterCloseRunCreateResponse:
