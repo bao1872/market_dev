@@ -50,6 +50,7 @@ from app.models.market_review import (
     MarketReviewRun,
     MarketReviewScopeSnapshot,
     MarketReviewSignal,
+    MarketReviewTracking,
 )
 
 logger = logging.getLogger("review_signal_service")
@@ -177,10 +178,20 @@ async def generate_signals_for_scope(
     history_extras: dict[str, float | int] | None = None,
     filters: list[FilterDefinition] | None = None,
 ) -> list[MarketReviewSignal]:
-    """为单个 scope 运行筛选器并生成信号记录。
+    """为单个 scope 运行筛选器并生成信号记录（replace-set 语义）。
 
     幂等：相同 (review_run_id, filter_family, signal_type, scope_type, scope_key)
-    的信号不重复创建（on_conflict_do_update）。
+    的信号不重复创建（on_conflict_do_update），保留稳定 ID。
+
+    关键不变量（replace-set）：本函数完成后，该 (review_run_id, scope_type,
+    scope_key) 下持久化的信号集合 **必须恰好等于** 当前筛选命中集合。
+    即：先 upsert 当前全部命中（保留存活 ID），再删除「此前存在但当前不再命中」
+    的 stale 信号。stale 信号若被 MarketReviewTracking 引用则 fail-closed 中止
+    删除（绝不静默 SET NULL 引用）。
+
+    事务顺序：evaluate → upsert 全部当前命中 → 计算 stale 集 → tracking 守卫
+    → 删除 stale → 返回当前信号。evaluate/upsert 失败则 stale 对账不执行
+    （caller 拥有事务所有权）。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
@@ -191,16 +202,17 @@ async def generate_signals_for_scope(
         filters: 筛选器列表（None=DEFAULT_FILTERS）
 
     Returns:
-        命中并 upsert 的 MarketReviewSignal 列表
+        命中并 upsert 的 MarketReviewSignal 列表（= 当前命中集）
+
+    Raises:
+        SignalGenerationError: stale 信号被 MarketReviewTracking 引用时
+            （machine-readable 前缀 STALE_SIGNAL_REFERENCED_BY_TRACKING）
     """
     if filters is None:
         filters = DEFAULT_FILTERS
 
     context = build_filter_context(snapshot, history_extras=history_extras)
     hits = evaluate_filters(context, filters=filters)
-
-    if not hits:
-        return []
 
     # 查询前序信号（如未传入）
     if previous_signals is None:
@@ -213,6 +225,9 @@ async def generate_signals_for_scope(
         )
 
     created: list[MarketReviewSignal] = []
+    # [FIX] 当前命中身份键集合（persisted identity = filter_family + signal_type）。
+    # 不发明新的信号身份维度；scope_type/scope_key/review_run_id 已由调用上下文固定。
+    current_hit_keys: set[tuple[str, str]] = set()
     for filt in hits:
         # 找同 signal_type 的前序
         prev = find_previous_same_signal_type(
@@ -269,6 +284,7 @@ async def generate_signals_for_scope(
             payloads=payloads,
         )
         created.append(signal)
+        current_hit_keys.add((filt.family.value, filt.signal_type))
 
         logger.info(
             "[ReviewSignal] %s/%s %s status=%s consecutive=%d",
@@ -276,7 +292,77 @@ async def generate_signals_for_scope(
             filt.signal_type, status, consecutive_days,
         )
 
+    # [FIX] replace-set 对账：删除此前存在但当前不再命中的 stale 信号。
+    # 仅在全部当前命中 upsert 成功后执行。
+    await _reconcile_stale_signals(
+        session,
+        run=run,
+        snapshot=snapshot,
+        current_hit_keys=current_hit_keys,
+    )
+
     return created
+
+
+async def _reconcile_stale_signals(
+    session: AsyncSession,
+    *,
+    run: MarketReviewRun,
+    snapshot: MarketReviewScopeSnapshot,
+    current_hit_keys: set[tuple[str, str]],
+) -> None:
+    """replace-set 对账：删除本 (run, scope) 下非当前命中的 stale 信号。
+
+    - 先查询本 (review_run_id, scope_type, scope_key) 现有全部信号。
+    - stale = 现有身份键 − 当前命中身份键（当前命中为空 → 全部 stale）。
+    - 若任一 stale 信号被 MarketReviewTracking.source_signal_id 引用 →
+      fail-closed 抛 SignalGenerationError（前缀 STALE_SIGNAL_REFERENCED_BY_TRACKING），
+      不删除、不改 tracking。
+    - 否则仅删除 stale 信号；其 attribution / instrument 子表由 DB FK 级联删除。
+    """
+    existing_stmt = (
+        select(MarketReviewSignal)
+        .where(
+            MarketReviewSignal.review_run_id == run.id,
+            MarketReviewSignal.scope_type == snapshot.scope_type,
+            MarketReviewSignal.scope_key == snapshot.scope_key,
+        )
+    )
+    existing = list((await session.execute(existing_stmt)).scalars())
+
+    if not existing:
+        return
+
+    stale = [
+        sig for sig in existing
+        if (sig.filter_family, sig.signal_type) not in current_hit_keys
+    ]
+    if not stale:
+        return
+
+    stale_ids = [sig.id for sig in stale]
+
+    # FIX 4 — tracking 守卫（fail-closed）
+    track_stmt = (
+        select(MarketReviewTracking.id)
+        .where(MarketReviewTracking.source_signal_id.in_(stale_ids))
+        .limit(1)
+    )
+    referencing = (await session.execute(track_stmt)).scalar_one_or_none()
+    if referencing is not None:
+        raise SignalGenerationError(
+            "STALE_SIGNAL_REFERENCED_BY_TRACKING:"
+            f" review_run_id={run.id}"
+            f" scope_type={snapshot.scope_type}"
+            f" scope_key={snapshot.scope_key}"
+            f" stale_signal_count={len(stale_ids)}"
+            f" tracking_count>=1"
+        )
+
+    # FIX 5 — 仅删除 stale 信号（FK 级联删除 attribution / instrument）
+    for sig in stale:
+        await session.delete(sig)
+    await session.flush()
 
 
 async def _upsert_signal(
