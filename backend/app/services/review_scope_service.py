@@ -82,6 +82,63 @@ class ScopeSnapshotError(Exception):
     pass
 
 
+# [REVIEW-OPTIONAL-SCOPE-TERMINALIZATION-01 2026-08-10]
+# publication contract（review_publication_service §2~4）已把
+# major_index / style / industry_l1 定义为 PROGRESSIVE OPTIONAL scope：
+# 其 PIT membership 不可用（blocked_external_population / bootstrap_unavailable /
+# 无 PIT membership 版本）只应记为 scope-level diagnostic，
+# 合法终态是 SKIPPED，而不是 RUNNING 残留或 FAILED。
+#
+# 该 scope_type 集合与 publication contract 的 optional 集合保持一致；
+# market 不在其中——market 的任何 membership/data 不可用仍必须 FAILED，不得静默 SKIP。
+OPTIONAL_UNAVAILABLE_SCOPE_TYPES: frozenset[str] = frozenset(
+    {"major_index", "style", "industry_l1"},
+)
+
+
+class OptionalScopeUnavailableError(ScopeSnapshotError):
+    """Optional scope 的 PIT membership 合法不可用（非执行异常）。
+
+    仅用于 publication contract 中标记为 optional 的 scope_type
+    （见 ``OPTIONAL_UNAVAILABLE_SCOPE_TYPES``）在 PIT membership 不可用时。
+
+    orchestrator 捕获本异常后把 metrics run item 终态化为 ``skipped``，
+    不当作执行失败。**不得**用于：
+    - scope_type mismatch / hierarchy mismatch（配置或代码错误）
+    - 非法 UUID scope_key（调用方错误）
+    - board_not_found（数据引用错误）
+    - 任何未预期 DB / 实现异常
+    以上仍是正常 failure，必须以 ScopeSnapshotError 或原始异常传播。
+
+    禁止通过字符串匹配（如 ``"blocked_external_population" in str(exc)``）
+    判定该语义；调用方必须依赖本类型。
+    """
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        scope_type: str,
+        scope_key: str,
+        population_status: str | None = None,
+        trade_date: date | None = None,
+    ) -> None:
+        self.reason = reason
+        self.scope_type = scope_type
+        self.scope_key = scope_key
+        self.population_status = population_status
+        self.trade_date = trade_date
+        detail = (
+            f"optional_scope_unavailable: reason={reason} "
+            f"scope={scope_type}/{scope_key}"
+        )
+        if population_status is not None:
+            detail += f" population_status={population_status}"
+        if trade_date is not None:
+            detail += f" trade_date={trade_date}"
+        super().__init__(detail)
+
+
 # =============================================================================
 # Scope 定义
 # =============================================================================
@@ -477,6 +534,37 @@ def _classify_missing_reasons(
 # =============================================================================
 
 
+def _optional_unavailable_or_failure(
+    *,
+    reason: str,
+    scope_type: str,
+    scope_key: str,
+    trade_date: date,
+    fallback_message: str,
+    population_status: str | None = None,
+) -> ScopeSnapshotError:
+    """按 publication contract 决定 membership 不可用是 optional 还是 failure。
+
+    [REVIEW-OPTIONAL-SCOPE-TERMINALIZATION-01 2026-08-10]
+
+    - optional scope（major_index / style / industry_l1）：返回
+      ``OptionalScopeUnavailableError``，orchestrator 会终态化为 skipped。
+    - 其他 scope（market / industry_l2 / industry_l3 / concept / instrument）：
+      返回普通 ``ScopeSnapshotError``，保持 failure 语义，不得静默 SKIP。
+
+    返回异常对象而非抛出，由调用点 ``raise ... from exc`` 保留原始因果链。
+    """
+    if scope_type in OPTIONAL_UNAVAILABLE_SCOPE_TYPES:
+        return OptionalScopeUnavailableError(
+            reason=reason,
+            scope_type=scope_type,
+            scope_key=scope_key,
+            population_status=population_status,
+            trade_date=trade_date,
+        )
+    return ScopeSnapshotError(fallback_message)
+
+
 async def resolve_scope_members(
     session: AsyncSession,
     scope_type: str,
@@ -512,16 +600,32 @@ async def resolve_scope_members(
                 session, scope_key, trade_date,
             )
         except PITMembershipUnavailableError as exc:
-            raise ScopeSnapshotError(str(exc)) from exc
+            # [REVIEW-OPTIONAL-SCOPE-TERMINALIZATION-01] optional scope 无 PIT
+            # membership 版本是合法不可用，不是执行异常。
+            raise _optional_unavailable_or_failure(
+                reason="pit_membership_unavailable",
+                scope_type=scope_type,
+                scope_key=scope_key,
+                trade_date=trade_date,
+                fallback_message=str(exc),
+            ) from exc
+        # scope_type mismatch 是配置/代码错误，仍为正常 failure，不得 SKIP。
         if definition.universe_type != expected_type:
             raise ScopeSnapshotError(
                 f"scope_type mismatch: {scope_type} key={scope_key} "
                 f"universe_type={definition.universe_type}",
             )
         if membership.population_status != "ready":
-            raise ScopeSnapshotError(
-                f"{membership.population_status}: {scope_type}={scope_key} "
-                f"trade_date={trade_date}",
+            raise _optional_unavailable_or_failure(
+                reason="population_not_ready",
+                scope_type=scope_type,
+                scope_key=scope_key,
+                trade_date=trade_date,
+                population_status=membership.population_status,
+                fallback_message=(
+                    f"{membership.population_status}: {scope_type}={scope_key} "
+                    f"trade_date={trade_date}"
+                ),
             )
         return list(membership.instrument_ids), definition.name
 
@@ -557,11 +661,24 @@ async def resolve_scope_members(
                 session, board_uuid, trade_date,
             )
         except PITMembershipUnavailableError as exc:
-            raise ScopeSnapshotError(str(exc)) from exc
+            raise _optional_unavailable_or_failure(
+                reason="pit_membership_unavailable",
+                scope_type=scope_type,
+                scope_key=scope_key,
+                trade_date=trade_date,
+                fallback_message=str(exc),
+            ) from exc
         if membership.population_status != "ready":
-            raise ScopeSnapshotError(
-                f"{membership.population_status}: board={scope_key} "
-                f"trade_date={trade_date}",
+            raise _optional_unavailable_or_failure(
+                reason="population_not_ready",
+                scope_type=scope_type,
+                scope_key=scope_key,
+                trade_date=trade_date,
+                population_status=membership.population_status,
+                fallback_message=(
+                    f"{membership.population_status}: board={scope_key} "
+                    f"trade_date={trade_date}"
+                ),
             )
         return list(membership.instrument_ids), board.name
 

@@ -74,6 +74,7 @@ from app.services.review_publication_service import (
 )
 from app.services.review_scope_service import (
     LEVEL1_SCOPE_TYPES,
+    OptionalScopeUnavailableError,
     ScopeDefinition,
     ScopeSnapshotError,
     apply_cross_section_percentiles,
@@ -1182,9 +1183,41 @@ async def _compute_scope_metrics_phase(
     )
 
     # 解析范围成员
-    instrument_ids, _resolved_name = await resolve_scope_members(
-        session, scope.scope_type, scope.scope_key, trade_date=run.trade_date,
-    )
+    #
+    # [REVIEW-OPTIONAL-SCOPE-TERMINALIZATION-01 2026-08-10]
+    # optional scope（major_index / style / industry_l1）的 PIT membership 合法
+    # 不可用不是执行失败：publication contract 已把它定义为 scope-level diagnostic。
+    # 此处是唯一 ownership point——RUNNING item 建立后必须被确定性终态化为
+    # SKIPPED 并回填 completed_at，否则异常逃逸到外层会留下 RUNNING 残留，
+    # 进而永久阻塞 evaluate_publish_gate（running 是硬 blocker）。
+    #
+    # 在此处（而非 compute_run / resume_run 各自）处理，使两条路径共享同一行为。
+    # 只捕获 typed OptionalScopeUnavailableError；其他 ScopeSnapshotError
+    # （scope_type mismatch / 非法 UUID / board_not_found）和未预期异常继续传播为 failure。
+    try:
+        instrument_ids, _resolved_name = await resolve_scope_members(
+            session, scope.scope_type, scope.scope_key, trade_date=run.trade_date,
+        )
+    except OptionalScopeUnavailableError as exc:
+        logger.info(
+            "[ReviewOrchestrator] optional scope 不可用，终态化为 skipped: "
+            "%s/%s reason=%s population_status=%s",
+            exc.scope_type,
+            exc.scope_key,
+            exc.reason,
+            exc.population_status,
+        )
+        await _upsert_run_item(
+            session,
+            run_id=run.id,
+            scope_type=scope.scope_type,
+            scope_key=scope.scope_key,
+            phase=PHASE_METRICS,
+            status=ITEM_SKIPPED,
+            last_error=str(exc)[:500],
+            completed_at=datetime.now(UTC),
+        )
+        return None
     if not instrument_ids:
         # 空范围：跳过 metrics，标记 succeeded 但无数据
         await _upsert_run_item(
