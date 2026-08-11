@@ -217,7 +217,7 @@ def _action_response(job_run, message: str) -> AfterCloseRunCreateResponse:
         job_run_id=str(job_run.id),
         status=job_run.status,
         orchestrator_status=meta.get("orchestrator_status", job_run.status),
-        trade_date=str(job_run.scheduled_for),
+        trade_date=meta.get("trade_date") or (job_run.business_date or ""),
         message=message,
         parent_job_run_id=meta.get("parent_job_run_id"),
         restart_from=meta.get("restart_from"),

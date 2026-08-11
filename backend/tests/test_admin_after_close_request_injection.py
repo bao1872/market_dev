@@ -49,15 +49,23 @@ def _fake_admin_user():
     )
 
 
-def _fake_job_run(status: str = "cancelled"):
-    """构造供 _action_response 使用的伪 job_run。"""
-    from datetime import date
+def _fake_job_run(
+    status: str = "cancelled",
+    business_date: str = "2026-08-11",
+    metadata: dict | None = None,
+):
+    """构造与真实 SchedulerJobRun 合同一致的伪 job_run。
+
+    仅使用实际 ORM 字段：business_date / metadata_json（+ id / status）。
+    刻意**不**包含不存在的 scheduled_for，避免掩盖生产缺陷。
+    """
+    import json
 
     return SimpleNamespace(
         id=uuid.uuid4(),
         status=status,
-        scheduled_for=date(2026, 8, 11),
-        metadata_json=None,
+        business_date=business_date,
+        metadata_json=json.dumps(metadata) if metadata is not None else None,
     )
 
 
@@ -218,3 +226,102 @@ async def test_cancel_reads_x_request_id_from_headers(http_client):
         )
     assert resp.status_code == 200, resp.text
     assert mock_cancel.await_args.kwargs["request_id"] == "req-contract-trace"
+
+
+# ============================================================
+# FIX C — ACTION-RESPONSE MODEL DRIFT response contract tests
+# 使用真实 SchedulerJobRun 形状（business_date/metadata_json），
+# 不得引入不存在的 scheduled_for。
+# ============================================================
+
+
+async def test_cancel_returns_200_with_actual_model_shape(http_client):
+    """POST cancel 用真实模型形状的 job_run 返回 HTTP 200。"""
+    job_run = _fake_job_run(business_date="2026-08-11")
+    with patch(
+        "app.api.admin_after_close.cancel_after_close_run",
+        new=AsyncMock(return_value=job_run),
+    ):
+        resp = await http_client.post(
+            "/v1/admin/after-close-runs/00000000-0000-0000-0000-000000000000/cancel",
+            json={"reason": "contract"},
+        )
+    assert resp.status_code == 200, resp.text
+
+
+async def test_cancel_response_trade_date_business_date_fallback(http_client):
+    """metadata.trade_date 缺失时，trade_date 回退到 business_date。"""
+    job_run = _fake_job_run(business_date="2026-08-11", metadata=None)
+    with patch(
+        "app.api.admin_after_close.cancel_after_close_run",
+        new=AsyncMock(return_value=job_run),
+    ):
+        resp = await http_client.post(
+            "/v1/admin/after-close-runs/00000000-0000-0000-0000-000000000000/cancel",
+            json={"reason": "contract"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["trade_date"] == "2026-08-11"
+
+
+async def test_cancel_response_trade_date_from_metadata(http_client):
+    """metadata.trade_date 存在时优先使用 metadata 的 trade_date。"""
+    job_run = _fake_job_run(
+        business_date="2026-08-11",
+        metadata={"trade_date": "2026-08-11", "orchestrator_status": "cancelled"},
+    )
+    with patch(
+        "app.api.admin_after_close.cancel_after_close_run",
+        new=AsyncMock(return_value=job_run),
+    ):
+        resp = await http_client.post(
+            "/v1/admin/after-close-runs/00000000-0000-0000-0000-000000000000/cancel",
+            json={"reason": "contract"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["trade_date"] == "2026-08-11"
+    assert body["orchestrator_status"] == "cancelled"
+
+
+async def test_reconcile_returns_200_with_actual_model_shape(http_client):
+    """POST reconcile 用真实模型形状的 job_run 返回 HTTP 200 + 正确 trade_date。"""
+    job_run = _fake_job_run(
+        status="interrupted",
+        business_date="2026-08-11",
+        metadata={"trade_date": "2026-08-11", "orchestrator_status": "interrupted"},
+    )
+    with patch(
+        "app.api.admin_after_close.reconcile_after_close_run",
+        new=AsyncMock(return_value=job_run),
+    ):
+        resp = await http_client.post(
+            "/v1/admin/after-close-runs/00000000-0000-0000-0000-000000000000/reconcile",
+            json={"reason": "contract"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["trade_date"] == "2026-08-11"
+    assert body["orchestrator_status"] == "interrupted"
+
+
+async def test_reconcile_response_business_date_fallback(http_client):
+    """reconcile 在 metadata.trade_date 缺失时回退到 business_date。"""
+    job_run = _fake_job_run(status="interrupted", business_date="2026-08-11")
+    with patch(
+        "app.api.admin_after_close.reconcile_after_close_run",
+        new=AsyncMock(return_value=job_run),
+    ):
+        resp = await http_client.post(
+            "/v1/admin/after-close-runs/00000000-0000-0000-0000-000000000000/reconcile",
+            json={"reason": "contract"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["trade_date"] == "2026-08-11"
+
+
+def test_response_fake_has_no_scheduled_for():
+    """测试伪对象必须符合真实 SchedulerJobRun 合同，不得含不存在的 scheduled_for。"""
+    job_run = _fake_job_run(business_date="2026-08-11")
+    assert hasattr(job_run, "business_date")
+    assert not hasattr(job_run, "scheduled_for")
