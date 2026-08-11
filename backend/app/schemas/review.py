@@ -837,3 +837,22 @@ if __name__ == "__main__":
     assert boot_status.scope_results_total == 0
     print(f"OK: ReviewBootstrapStatusResponse status={boot_status.status}")
     print("OK: review schemas verified")
+
+
+# =============================================================================
+# [V2] Discovery API schemas
+# =============================================================================
+
+
+class ReviewDiscoveryListResponse(BaseModel):
+    trade_date: str
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+    items: list[dict[str, Any]]
+
+
+class ReviewDiscoveryDetailResponse(BaseModel):
+    trade_date: str
+    discovery: dict[str, Any]

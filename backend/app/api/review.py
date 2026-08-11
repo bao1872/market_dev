@@ -97,6 +97,8 @@ from app.services.review_tracking_service import (
     list_trackings,
     update_tracking,
 )
+from app.services import review_discovery_service
+from app.schemas import review as review_schemas  # noqa: F811 — Discovery DTOs
 
 logger = logging.getLogger("api.review")
 
@@ -945,6 +947,199 @@ async def list_tracking_evaluations(
 # =============================================================================
 # 管理员辅助接口（include_partial 用，路径在 admin_review.py 中定义主流程）
 # =============================================================================
+
+
+# =============================================================================
+# [V2] Discovery endpoints
+# =============================================================================
+
+
+@router.get(
+    "/{trade_date}/discoveries",
+    response_model=ReviewDiscoveryListResponse,
+)
+async def list_discoveries(
+    trade_date: date,
+    scope_type: str | None = Query(None, description="范围类型过滤"),
+    scope_family: str | None = Query(None, description="范围族过滤"),
+    status: str | None = Query(None, description="生命周期状态过滤"),
+    sort: str | None = Query(None, description="排序方式"),
+    include_partial: bool = Query(False, description="admin 调试用"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
+) -> ReviewDiscoveryListResponse:
+    """[V2] Discovery 列表（primary user-level finding endpoint）。
+
+    全量 rank → paginate。
+    """
+    if include_partial and not ctx.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="include_partial 仅管理员可用",
+        )
+
+    run = await _get_published_run_or_404(db, trade_date)
+    if run is None:
+        return ReviewDiscoveryListResponse(
+            trade_date=trade_date.isoformat(),
+            total=0,
+            page=page,
+            page_size=page_size,
+            has_more=False,
+            items=[],
+        )
+
+    discoveries = await review_discovery_service.build_discoveries_for_run(db, run)
+    relations = await review_discovery_service.compute_cross_scope_relations(
+        discoveries, session=db,
+    )
+
+    # 应用 filter
+    if scope_type:
+        discoveries = [d for d in discoveries if d.scope_type == scope_type]
+    if scope_family:
+        discoveries = [d for d in discoveries if d.scope_type.startswith(scope_family)]
+    if status:
+        discoveries = [d for d in discoveries if d.status == status]
+
+    # Global rank → paginate
+    ranked = review_discovery_service.rank_discoveries(discoveries, relations)
+
+    # Attach relations to discoveries
+    relation_map: dict[str, list[dict]] = {}
+    for r in relations:
+        rd = r.to_dict()
+        relation_map.setdefault(r.source_scope, []).append(rd)
+    for d in ranked:
+        d.related_scopes = relation_map.get(d.discovery_id, [])
+
+    total = len(ranked)
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = [d.to_dict() for d in ranked[start:end]]
+
+    return ReviewDiscoveryListResponse(
+        trade_date=trade_date.isoformat(),
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=end < total,
+        items=items,
+    )
+
+
+@router.get(
+    "/discoveries/{discovery_id}",
+    response_model=ReviewDiscoveryDetailResponse,
+)
+async def get_discovery_detail(
+    discovery_id: str,
+    trade_date: date | None = Query(None, description="交易日（可选，默认最新）"),
+    include_partial: bool = Query(False, description="admin 调试用"),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
+) -> ReviewDiscoveryDetailResponse:
+    """[V2] Discovery 详情。"""
+    if include_partial and not ctx.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="include_partial 仅管理员可用",
+        )
+
+    discovery = await review_discovery_service.get_discovery_by_id(
+        db, discovery_id, trade_date=trade_date,
+    )
+    if discovery is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Discovery {discovery_id} 未找到",
+        )
+
+    # Attach relations
+    relations = await review_discovery_service.compute_cross_scope_relations(
+        [discovery], session=db,
+    )
+    discovery.related_scopes = [r.to_dict() for r in relations]
+
+    return ReviewDiscoveryDetailResponse(
+        trade_date=discovery.trade_date,
+        discovery=discovery.to_dict(),
+    )
+
+
+@router.get(
+    "/discoveries/{discovery_id}/attributions",
+)
+async def list_discovery_attributions(
+    discovery_id: str,
+    trade_date: date | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
+):
+    """[V2] Discovery 的归因（复用 Signal attribution engine）。"""
+    discovery = await review_discovery_service.get_discovery_by_id(
+        db, discovery_id, trade_date=trade_date,
+    )
+    if discovery is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Discovery 未找到")
+
+    # 从 supporting signal IDs 聚合 attribution
+    all_attributions: list[dict] = []
+    for sig_id in discovery.supporting_signal_ids:
+        try:
+            signal_uuid = uuid.UUID(sig_id)
+            attribs = await review_signal_service.list_signal_attributions(
+                db, signal_uuid, page=1, page_size=200,
+            )
+            all_attributions.extend([a.model_dump() if hasattr(a, 'model_dump') else a for a in attribs])
+        except (ValueError, Exception):
+            continue
+
+    return {
+        "discoveryId": discovery_id,
+        "total": len(all_attributions),
+        "items": all_attributions,
+    }
+
+
+@router.get(
+    "/discoveries/{discovery_id}/instruments",
+)
+async def list_discovery_instruments(
+    discovery_id: str,
+    trade_date: date | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
+):
+    """[V2] Discovery 的代表个股（复用 Signal instrument evidence）。"""
+    discovery = await review_discovery_service.get_discovery_by_id(
+        db, discovery_id, trade_date=trade_date,
+    )
+    if discovery is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Discovery 未找到")
+
+    all_instruments: list[dict] = []
+    for sig_id in discovery.supporting_signal_ids:
+        try:
+            signal_uuid = uuid.UUID(sig_id)
+            insts = await review_signal_service.list_signal_instruments(
+                db, signal_uuid, page=1, page_size=200,
+            )
+            all_instruments.extend([i.model_dump() if hasattr(i, 'model_dump') else i for i in insts])
+        except (ValueError, Exception):
+            continue
+
+    return {
+        "discoveryId": discovery_id,
+        "total": len(all_instruments),
+        "items": all_instruments,
+    }
 
 
 # 注意：admin 路由统一在 admin_review.py 中定义；

@@ -1407,27 +1407,35 @@ def _build_history_extras(
 ) -> dict[str, float | int]:
     """[CR-01] 从历史序列构建 filter engine 所需的 history_extras。
 
-    使用 point-in-time 原则：history_maps 来自 _build_scope_history，
-    已确保 trade_date < run.trade_date。
-
-    Args:
-        snapshot: 当前 scope 的 metric snapshot（含 P/Q/U/C/V payloads）
-        history_maps: {metric_code: {component_name: [raw_value 序列]}} 或 None
-
-    Returns:
-        dict 含 filter engine 消费的字段：
-        _pq_diff_history_pct / _q_delta1d_history_pct / _u_delta1d_history_pct /
-        _v_delta1d_history_pct / _structure_breakdown_not_rising /
-        _c_rising / _c_high_anomaly
+    Production observation shape:
+    - history_maps: {metric_code: {component_name: [raw_value 序列]}}
+    - 每个 metric_code 下必有 "_metric_value" component（归一化 metric value）
+    - 各 component 的序列按 trade_date 升序，且已对齐同一 scope 的观察历史
+    - PIT: trade_date < run.trade_date（由 load_metric_history 保证）
     """
     extras: dict[str, float | int] = {}
 
     if history_maps is None:
         return extras
 
-    # P-Q 历史分位
-    pq_diff_series = _extract_metric_series(history_maps, "P", "Q")
-    if pq_diff_series is not None:
+    # CR01-A: Q/U/V delta1d historical percentile — 使用 _metric_value
+    for metric_code, key in [("Q", "_q_delta1d_history_pct"),
+                               ("U", "_u_delta1d_history_pct"),
+                               ("V", "_v_delta1d_history_pct")]:
+        payload = getattr(snapshot, f"{metric_code.lower()}_payload") or {}
+        delta = payload.get("delta1d")
+        if not isinstance(delta, (int, float)):
+            continue
+        delta_series = _extract_delta_series_from_metric_value(history_maps, metric_code)
+        if delta_series:
+            extras[key] = _percentile_rank(delta, delta_series)
+
+    # CR01-B: P-Q history percentile — 使用各 trade_date 的 _metric_value 差
+    p_series = _get_metric_value_series(history_maps, "P")
+    q_series = _get_metric_value_series(history_maps, "Q")
+    if p_series and q_series:
+        min_len = min(len(p_series), len(q_series))
+        pq_diff_series = [p_series[i] - q_series[i] for i in range(min_len)]
         p_payload = snapshot.p_payload or {}
         q_payload = snapshot.q_payload or {}
         p_val = p_payload.get("value")
@@ -1437,69 +1445,41 @@ def _build_history_extras(
                 p_val - q_val, pq_diff_series,
             )
 
-    # Q/U/V delta1d 历史分位
-    for metric_code, key in [("Q", "_q_delta1d_history_pct"),
-                               ("U", "_u_delta1d_history_pct"),
-                               ("V", "_v_delta1d_history_pct")]:
-        payload = getattr(snapshot, f"{metric_code.lower()}_payload") or {}
-        delta = payload.get("delta1d")
-        if not isinstance(delta, (int, float)):
-            continue
-        delta_series = _extract_delta_series(history_maps, metric_code)
-        if delta_series is not None:
-            extras[key] = _percentile_rank(delta, delta_series)
-
-    # Structure breakdown not rising
-    extras["_structure_breakdown_not_rising"] = _check_structure_breakdown_not_rising(
-        snapshot, history_maps,
+    # CR01-C: structure_breakdown_not_rising — 使用 Q.structure_breakdown_diffusion
+    extras["_structure_breakdown_not_rising"] = (
+        _check_structure_breakdown_diffusion_not_rising(history_maps)
     )
 
-    # C rising / C high anomaly
+    # CR01-D: C context
     c_payload = snapshot.c_payload or {}
     c_delta1d = c_payload.get("delta1d")
     extras["_c_rising"] = 1 if isinstance(c_delta1d, (int, float)) and c_delta1d > 0 else 0
-    c_series = _extract_metric_series(history_maps, "C", "C")
-    if c_series is not None:
-        c_val = c_payload.get("value")
-        if isinstance(c_val, (int, float)):
-            extras["_c_high_anomaly"] = 1 if _percentile_rank(c_val, c_series) >= 80 else 0
+    # 使用已计算的 historyPercentile120d 而非重新发明历史算法
+    c_history_pct = c_payload.get("historyPercentile120d")
+    extras["_c_high_anomaly"] = (
+        1 if isinstance(c_history_pct, (int, float)) and c_history_pct >= 80 else 0
+    )
 
     return extras
 
 
-def _extract_metric_series(
+def _get_metric_value_series(
     history_maps: dict[str, dict[str, list[float]]],
     metric_code: str,
-    component: str | None = None,
 ) -> list[float] | None:
-    """从 history_maps 中提取某 metric 的合并 value 序列。
-
-    若指定 component，取该 component 的序列；否则合并所有 component 的平均值。
-    """
+    """获取某 metric 的 _metric_value 历史序列（按 trade_date 升序）。"""
     components = history_maps.get(metric_code)
     if not components:
         return None
-    if component and component in components:
-        return components[component]
-    # 合并所有 component：每个时间点取平均值
-    all_series = list(components.values())
-    if not all_series:
-        return None
-    min_len = min(len(s) for s in all_series)
-    if min_len == 0:
-        return None
-    return [
-        sum(s[i] for s in all_series) / len(all_series)
-        for i in range(min_len)
-    ]
+    return components.get("_metric_value")
 
 
-def _extract_delta_series(
+def _extract_delta_series_from_metric_value(
     history_maps: dict[str, dict[str, list[float]]],
     metric_code: str,
 ) -> list[float] | None:
-    """从 history_maps 的 value 序列计算 delta1d 序列。"""
-    values = _extract_metric_series(history_maps, metric_code)
+    """从 _metric_value 序列计算 delta1d 序列。"""
+    values = _get_metric_value_series(history_maps, metric_code)
     if values is None or len(values) < 2:
         return None
     return [values[i] - values[i - 1] for i in range(1, len(values))]
@@ -1513,32 +1493,23 @@ def _percentile_rank(value: float, series: list[float]) -> float:
     return round(below / len(series) * 100, 1)
 
 
-def _check_structure_breakdown_not_rising(
-    snapshot: MarketReviewScopeSnapshot,
+def _check_structure_breakdown_diffusion_not_rising(
     history_maps: dict[str, dict[str, list[float]]] | None,
 ) -> int:
-    """检查结构破坏扩散率是否不再继续上升。
+    """CR01-C: 检查 Q.structure_breakdown_diffusion 是否不再继续上升。
 
-    从 U payload 的 components 中读取 structure_breakdown 指标，
-    比较最近两日的变化趋势。
+    从 history_maps["Q"]["structure_breakdown_diffusion"] 取最后两个值比较。
+    structure_breakdown_diffusion 是反向 component（值越大 Q 越差），
+    因此 "not rising" = 当前值 <= 前值。
     """
-    u_payload = snapshot.u_payload or {}
-    components = u_payload.get("components", {})
-    if isinstance(components, dict):
-        breakdown = components.get("structure_breakdown")
-        if isinstance(breakdown, dict):
-            current = breakdown.get("value")
-            prev = breakdown.get("previousValue")
-            if isinstance(current, (int, float)) and isinstance(prev, (int, float)):
-                return 1 if current <= prev else 0
-
     if history_maps is None:
         return 0
-    # Fallback: use history_maps U component data
-    u_components = history_maps.get("U", {})
-    breakdown_series = u_components.get("structure_breakdown")
-    if breakdown_series and len(breakdown_series) >= 2:
-        return 1 if breakdown_series[-1] <= breakdown_series[-2] else 0
+    q_components = history_maps.get("Q")
+    if not q_components:
+        return 0
+    series = q_components.get("structure_breakdown_diffusion")
+    if series and len(series) >= 2:
+        return 1 if series[-1] <= series[-2] else 0
     return 0
 
 
