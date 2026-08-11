@@ -149,10 +149,10 @@
 - chip 严格按 instrument_id + trade_date + snapshot_run_id + algorithm_version + status=succeeded 匹配。
 
 #### AC-14b：ENHANCEMENT EXECUTION ISOLATION（增量强化，2026-08-11）
-- `chip_consensus` 等 low-priority / enhancement long-running job 不得占用
-  mandatory after-close / Review 的**唯一 executor**。
+- `chip_consensus`、`review_bootstrap` 等 low-priority / enhancement long-running job
+  不得占用 mandatory after-close / Review 的**唯一 executor**。
 - 必须保证：当 mandatory after-close run 进入 `queued` / `resume_queued` 时，
-  其启动不得等待一个已领取的 Chip job 自然完成。
+  其启动不得等待一个已领取的 Chip / Bootstrap job 自然完成。
 - 合法实现包括（等价即可）：
   - independent async executor/task（如 `run_after_close_orchestrator_worker`
     内以独立 co-process 运行 `run_chip_consensus_worker`，mandatory 主循环独立领取）；

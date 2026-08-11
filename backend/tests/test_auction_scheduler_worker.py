@@ -103,9 +103,9 @@ def test_worker_module_starts_auction_co_process_in_after_close_worker() -> None
     )
     # 2. run_after_close_orchestrator_worker 内必须 create_task 启动它
     assert "_run_auction_scheduler_co_process" in content
-    # 3. 必须有 finally 块 drain（通过 asyncio.wait_for 或 await）
-    # 简化检查：搜索 wait_for(_auction_co_process_task 或类似变量
-    assert "wait_for(_auction_co_process_task" in content, (
+    # 3. 必须有 finally 块 drain（通过 _drain_co_process，禁止裸 Task.cancel）
+    # 简化检查：搜索 _drain_co_process(_auction_co_process_task
+    assert "_drain_co_process(_auction_co_process_task" in content, (
         "run_after_close_orchestrator_worker 必须在 finally 块 drain Auction co-process"
     )
 

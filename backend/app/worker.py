@@ -33,10 +33,13 @@
   只负责 mandatory after-close orchestrator 主循环（`_after_close_poll_once`）。
 - Chip consensus 以**独立 co-process** 在同一进程内运行（复用 `run_chip_consensus_worker`），
   拥有自己的执行 loop，绝不串行阻塞 mandatory orchestrator。
+- Review bootstrap 以**独立 co-process** 在同一进程内运行（复用 `run_review_bootstrap_worker`），
+  拥有自己的执行 loop，绝不串行阻塞 mandatory orchestrator。
 - Auction Scheduler 以独立 co-process 运行（`_run_auction_scheduler_co_process`）。
-- 三个 loop 各自独立 `while not _shutdown`，共享 `_shutdown`，SIGTERM 时统一 drain。
-- 禁止恢复"每轮 core → chip → bootstrap 串行 fallback"的旧结构 —— 那会让长时 chip
-  任务占用 mandatory executor，造成 head-of-line blocking。
+- 四个 loop 各自独立 `while not _shutdown`，共享 `_shutdown`，SIGTERM 时统一 drain 到当前
+  业务 item terminal（禁止裸 Task.cancel 遗留 ownership 不清的 running job）。
+- 禁止恢复"每轮 core → chip → bootstrap 串行 fallback"的旧结构 —— 那会让长时 chip /
+  review bootstrap 任务占用 mandatory executor，造成 head-of-line blocking。
 """
 
 from __future__ import annotations
@@ -1479,6 +1482,25 @@ async def _after_close_poll_once() -> bool:
     return True
 
 
+async def _drain_co_process(
+    task: asyncio.Task[None] | None,
+    name: str,
+) -> None:
+    """[SIGTERM drain] 等待一个 co-process 自然退出（drain 到当前业务 item terminal）。
+
+    co-process 各自检查共享 `_shutdown`，在当前业务 item 完成后退出循环。
+    本函数**不**调用 Task.cancel()：long-running secondary job（chip / review
+    bootstrap）的当前 item 必须 drain 到 terminal，避免在 DB 中遗留 ownership
+    不清的 running job（naked orphan）。异常仅记录，不阻断其它 drain。
+    """
+    if task is None or task.done():
+        return
+    try:
+        await task
+    except Exception as exc:
+        logger.warning("[AfterCloseWorker] %s co-process 退出异常: %s", name, exc)
+
+
 async def run_after_close_orchestrator_worker() -> None:
     """[AfterCloseWorker] - 盘后编排独立 Worker：领取 queued 任务并执行。
 
@@ -1509,14 +1531,23 @@ async def run_after_close_orchestrator_worker() -> None:
       当新的 after_close orchestrator 进入 queued / resume_queued 时，主循环可直接领取，
       无需等待 chip 任务自然完成（executor-level execution isolation）。
     - Chip co-process 独立 while 循环、共享 _shutdown、异常隔离在 co-process 内。
-    - SIGTERM 时 mandatory 与两个 co-process（Auction / Chip）统一 drain。
+    - SIGTERM 时 mandatory 与三个 co-process（Auction / Chip / ReviewBootstrap）统一 drain。
 
-    [SIGTERM drain] - 优雅退出（不强制中断当前 run）：
+    [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2] Review bootstrap 独立 co-process：
+    - 本进程同时启动 Review bootstrap co-process（_bootstrap_co_process_task），复用已有
+      run_review_bootstrap_worker（其内部每轮调用 _review_bootstrap_poll_once）。
+    - mandatory 主循环不再串行 fallback 到 _review_bootstrap_poll_once，
+      因此长时 bootstrap 回填不占用 mandatory after-close / Review executor。
+    - 与 Chip 相同的 executor-level execution isolation 语义。
+
+    [SIGTERM drain] - 优雅退出（不强制中断当前 run，drain 到当前业务 item terminal）：
     - SIGTERM/SIGINT 由 _handle_shutdown 设置 _shutdown=True（全局标志）
     - 主循环在领取新任务前检查 _shutdown，若为 True 则不再领取新 item
     - 当前正在执行的 execute_after_close_run 完成后才退出（同步 await，不强制中断）；
       checkpoint（run status + heartbeat）由 execute_after_close_run 内部写入
-    - Auction co-process 同步退出（_shutdown 标志共享）
+    - 各 co-process（Auction / Chip / ReviewBootstrap）检查 _shutdown 后，在各自当前业务
+      item 完成后退出（drain 到 terminal）；父进程对它们只 await，不裸 Task.cancel，
+      避免在 DB 中遗留 ownership 不清的 running job（naked orphan）。
     - 完成后立即退出（不再 sleep），退出码 0（main 自然退出）
     - 日志: "SIGTERM drain complete, finished current item"
     """
@@ -1542,6 +1573,15 @@ async def run_after_close_orchestrator_worker() -> None:
         "[AfterCloseWorker] Chip consensus co-process 已启动（独立执行 loop，不阻塞 mandatory orchestrator）",
     )
 
+    # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2]
+    # 启动 Review bootstrap 独立 co-process（复用 run_review_bootstrap_worker）。
+    # mandatory 主循环不再串行 fallback 到 _review_bootstrap_poll_once，
+    # 长时 bootstrap 回填不占用 mandatory after-close / Review executor。
+    _bootstrap_co_process_task = asyncio.create_task(run_review_bootstrap_worker())
+    logger.info(
+        "[AfterCloseWorker] Review bootstrap co-process 已启动（独立执行 loop，不阻塞 mandatory orchestrator）",
+    )
+
     # 启动恢复：清理上次崩溃残留的 running 任务 + 自动恢复 interrupted 任务
     try:
         async with AsyncSessionLocal() as db:
@@ -1560,17 +1600,13 @@ async def run_after_close_orchestrator_worker() -> None:
     try:
         while not _shutdown:
             try:
-                # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING]
+                # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2]
                 # mandatory 主循环只领取/执行 after_close_orchestrator。
-                # Chip 已由独立 co-process 执行，不再在此串行 fallback。
-                # Review bootstrap 仍作为最低优先级回填（不抢占盘后主链），
-                # 其自身 executor isolation 另行登记（见 guide FIX C，本轮不改）。
-                claimed = await _after_close_poll_once()
-                if not claimed:
-                    claimed = await _review_bootstrap_poll_once()
+                # Chip / Review bootstrap 均为独立 co-process，不在此串行 fallback，
+                # 因此任何 long-running secondary job 都不占用 mandatory executor。
+                await _after_close_poll_once()
             except Exception as exc:
-                # _after_close_poll_once / _review_bootstrap_poll_once
-                # 内部已捕获执行异常，此处仅捕获领取阶段的意外异常
+                # _after_close_poll_once 内部已捕获执行异常，此处仅捕获领取阶段的意外异常
                 logger.exception("[AfterCloseWorker] 轮询异常: %s", exc)
             if _shutdown:
                 # [SIGTERM drain] 当前 run 已完成（或无任务），不再领取新 item
@@ -1579,32 +1615,13 @@ async def run_after_close_orchestrator_worker() -> None:
                 break
             await asyncio.sleep(WORKER_INTERVAL)
     finally:
-        # [SIGTERM drain] 确保 Auction co-process 退出
-        # co-process 检查 _shutdown 后自然退出，此处 await 确保不遗留悬空任务
-        if not _auction_co_process_task.done():
-            try:
-                await asyncio.wait_for(_auction_co_process_task, timeout=35)
-            except TimeoutError:
-                _auction_co_process_task.cancel()
-                try:
-                    await _auction_co_process_task
-                except asyncio.CancelledError:
-                    pass
-            except Exception as exc:
-                logger.warning("[AfterCloseWorker] Auction co-process 退出异常: %s", exc)
-
-        # [SIGTERM drain] 确保 Chip consensus co-process 退出（共享 _shutdown）
-        if not _chip_co_process_task.done():
-            try:
-                await asyncio.wait_for(_chip_co_process_task, timeout=35)
-            except TimeoutError:
-                _chip_co_process_task.cancel()
-                try:
-                    await _chip_co_process_task
-                except asyncio.CancelledError:
-                    pass
-            except Exception as exc:
-                logger.warning("[AfterCloseWorker] Chip co-process 退出异常: %s", exc)
+        # [SIGTERM drain] 逐个等待 co-process 自然退出（drain 到当前业务 item terminal）。
+        # 禁止裸 Task.cancel()：长时 chip / review bootstrap 当前 item 必须到达 terminal，
+        # 避免在 DB 中遗留 ownership 不清的 running job（naked orphan）。
+        # 各 co-process 检查共享 _shutdown 后在当前 item 完成后退出循环。
+        await _drain_co_process(_auction_co_process_task, "Auction")
+        await _drain_co_process(_chip_co_process_task, "Chip")
+        await _drain_co_process(_bootstrap_co_process_task, "ReviewBootstrap")
 
     # [SIGTERM drain complete] - 当前 item 已完成，worker 正常退出（退出码 0）
     logger.info("[AfterCloseWorker] SIGTERM drain complete, finished current item")
@@ -2539,12 +2556,11 @@ async def main() -> None:
     if WORKER_TYPE in ("auction_scheduler", "all"):
         tasks.append(asyncio.create_task(run_auction_scheduler_worker()))
 
-    # [2026-08-02] review bootstrap 已接入 run_after_close_orchestrator_worker
-    # （mandatory 主循环中作为最低优先级回填，不抢占盘后主链；其独立 executor
-    # isolation 另行登记，见 guide FIX C）。
-    # 生产没有 WORKER_TYPE=all 容器，after-close 容器跑 after_close_orchestrator，
-    # 因此这里只在 WORKER_TYPE=review_bootstrap 时启动独立 worker（调试/独立部署），
-    # 避免 all 模式下与 after-close 循环重复领取同一批任务。
+    # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2]
+    # WORKER_TYPE=after_close_orchestrator 在 run_after_close_orchestrator_worker 内
+    # 同时启动 Chip / Review bootstrap 独立 co-process（复用各自 worker loop），
+    # mandatory 主循环不再串行 fallback，避免 long-running secondary job 阻塞 mandatory。
+    # WORKER_TYPE=review_bootstrap 仅用于调试/独立部署，避免与 after-close 重复领取。
     if WORKER_TYPE == "review_bootstrap":
         tasks.append(asyncio.create_task(run_review_bootstrap_worker()))
 
