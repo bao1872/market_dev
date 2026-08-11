@@ -173,19 +173,16 @@ def _gate_pass_results(
     board_pub = AsyncMock()
     board_pub.data_run_id = run.source_board_run_id
     results = [
-        _FakeResult(scalar=market_snap),          # 1. market scope
-        _FakeResult(scalar_list=[]),              # 2. major_index
-        _FakeResult(scalar_list=[]),              # 3. style
-        _FakeResult(scalar_list=[industry_snap]),  # 4. industry_l1
-        _FakeResult(scalar_list=[]),              # 5. PIT universe definitions
-        _FakeResult(scalar_list=[(board_id,)]),   # 6. expected L1 industries
-        _FakeResult(scalar_list=[]),              # 7. incomplete run items
-        _FakeResult(scalar=core_pub),             # 8. stock_core pointer
-        _FakeResult(scalar=board_pub),            # 9. board pointer
+        _FakeResult(scalar=market_snap),                        # 1. market scope
+        _FakeResult(scalar_list=[industry_snap]),                # 2. all non-market scopes [V2]
+        _FakeResult(scalar_list=[]),                            # 3. PIT universe definitions
+        _FakeResult(scalar_list=[]),                            # 4. incomplete run items
+        _FakeResult(scalar=core_pub),                           # 5. stock_core pointer
+        _FakeResult(scalar=board_pub),                          # 6. board pointer
     ]
     if run.status == "published":
         results.append(_FakeResult(scalar=live_review_pointer))
-    results.append(_FakeResult(scalar=future_obs_count))  # future_obs count
+    results.append(_FakeResult(scalar=future_obs_count))        # future_obs count
     return results
 
 
@@ -193,11 +190,8 @@ def _gate_fail_results() -> list[_FakeResult]:
     """门禁失败的查询结果（market snap 缺失 + 无行业快照）。"""
     return [
         _FakeResult(scalar=None),       # market snap 缺失 → blocker
-        _FakeResult(scalar_list=[]),    # major_index
-        _FakeResult(scalar_list=[]),    # style
-        _FakeResult(scalar_list=[]),    # industry → blocker
+        _FakeResult(scalar_list=[]),    # all non-market scopes [V2]
         _FakeResult(scalar_list=[]),    # PIT universe definitions
-        _FakeResult(scalar_list=[]),    # expected L1 industries
         _FakeResult(scalar_list=[]),    # incomplete run items
         _FakeResult(scalar=None),       # stock_core pointer
         _FakeResult(scalar=None),       # board pointer
@@ -280,7 +274,7 @@ class TestFormalGateCompleteness:
         """
         run = _make_run()
         results = _gate_pass_results(run)
-        results[4] = _FakeResult(scalar_list=[SimpleNamespace(
+        results[2] = _FakeResult(scalar_list=[SimpleNamespace(
             universe_type="major_index",
             universe_key="csi300",
             population_status="blocked_external_population",
@@ -602,16 +596,13 @@ class TestProgressiveScopeReadiness:
         core_pub = SimpleNamespace(data_run_id=run.source_core_run_id)
         board_pub = SimpleNamespace(data_run_id=run.source_board_run_id)
         return [
-            _FakeResult(scalar=self._market_snap(run)),  # 1 market ready
-            _FakeResult(scalar_list=[]),  # 2 major_index (unavailable)
-            _FakeResult(scalar_list=[]),  # 3 style (unavailable)
-            _FakeResult(scalar_list=[]),  # 4 industry (unavailable)
-            _FakeResult(scalar_list=[]),  # 5 universe defs
-            _FakeResult(scalar_list=[]),  # 6 expected L1 industries
-            _FakeResult(scalar_list=[]),  # 7 incomplete items
-            _FakeResult(scalar=core_pub),  # 8 stock_core pointer
-            _FakeResult(scalar=board_pub),  # 9 board pointer
-            _FakeResult(scalar=0),  # future_obs count
+            _FakeResult(scalar=self._market_snap(run)),   # 1 market ready
+            _FakeResult(scalar_list=[]),                   # 2 all non-market scopes [V2]
+            _FakeResult(scalar_list=[]),                   # 3 universe defs
+            _FakeResult(scalar_list=[]),                   # 4 incomplete items
+            _FakeResult(scalar=core_pub),                  # 5 stock_core pointer
+            _FakeResult(scalar=board_pub),                 # 6 board pointer
+            _FakeResult(scalar=0),                         # future_obs count
         ]
 
     def _opt_snap(self, scope_type: str, scope_key: str, status: str) -> MarketReviewScopeSnapshot:
@@ -631,12 +622,13 @@ class TestProgressiveScopeReadiness:
         board_pub = SimpleNamespace(data_run_id=run.source_board_run_id)
         return [
             _FakeResult(scalar=self._market_snap(run)),
-            _FakeResult(scalar_list=[self._opt_snap("major_index", "csi300", "ready")]),
-            _FakeResult(scalar_list=[self._opt_snap("style", "large_cap_style", "ready")]),
-            _FakeResult(scalar_list=[self._opt_snap("industry_l1", "board-1", "ready")]),
-            _FakeResult(scalar_list=[]),
-            _FakeResult(scalar_list=[]),
-            _FakeResult(scalar_list=[]),
+            _FakeResult(scalar_list=[
+                self._opt_snap("major_index", "csi300", "ready"),
+                self._opt_snap("style", "large_cap_style", "ready"),
+                self._opt_snap("industry_l1", "board-1", "ready"),
+            ]),                                     # 2 all non-market scopes [V2]
+            _FakeResult(scalar_list=[]),             # 3 universe defs
+            _FakeResult(scalar_list=[]),             # 4 incomplete items
             _FakeResult(scalar=core_pub),
             _FakeResult(scalar=board_pub),
             _FakeResult(scalar=0),
@@ -733,7 +725,7 @@ class TestProgressiveScopeReadiness:
         run = self._make_market_ready_run()
         results = self._results_market_ready_optional_unavailable(run)
         # industry 快照存在但 status 非 ready（error 态）
-        results[3] = _FakeResult(
+        results[1] = _FakeResult(
             scalar_list=[self._opt_snap("industry_l1", "board-1", "error")],
         )
         publishable, blockers = await evaluate_publish_gate(
@@ -780,7 +772,7 @@ class TestProgressiveScopeReadiness:
         skipped 状态不在该查询条件内，故 skipped item 场景注入空列表。
         """
         results = self._results_market_ready_optional_unavailable(run)
-        results[6] = _FakeResult(scalar_list=items)
+        results[3] = _FakeResult(scalar_list=items)
         return results
 
     async def test_optional_skipped_item_is_diagnostic_only_gate_open(self):

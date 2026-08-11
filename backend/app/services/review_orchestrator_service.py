@@ -1,9 +1,10 @@
-"""复盘编排服务 - 端到端编排 review run（PRD §11）。
+"""复盘编排服务 - 端到端编排 review run（PRD70 V2 §11）。
 
-职责（PRD §11 编排顺序）：
+职责（PRD70 V2 编排顺序）：
 1. create_run: 创建或复用 MarketReviewRun（幂等：唯一键 trade_date+source_runs+版本）
 2. compute_run: 执行完整流程
-   - 解析 level-1 范围列表
+   - [V2] 解析全部 Discovery scope 列表（market / major_index / style / 
+     industry_l1 / industry_l2 / industry_l3 / concept 平行独立）
    - 每个范围：metrics → signals → attribution（短事务、独立 item）
    - 一个 scope 失败不阻塞其他 scope
    - 全部完成后 evaluate_active_trackings
@@ -73,6 +74,7 @@ from app.services.review_publication_service import (
     publish_review,
 )
 from app.services.review_scope_service import (
+    ALL_DISCOVERY_SCOPE_TYPES,
     LEVEL1_SCOPE_TYPES,
     OptionalScopeUnavailableError,
     ScopeDefinition,
@@ -669,8 +671,8 @@ async def compute_run(
     run.status = RUN_STATUS_COMPUTING
     await session.flush()
 
-    # 1. 解析 level-1 范围列表
-    scopes = await _resolve_level1_scopes(
+    # 1. [V2] 解析全部 Discovery scope 列表（平行独立参与 observation）
+    scopes = await _resolve_all_discovery_scopes(
         session, run, canary=canary, symbols=symbols,
     )
     run.expected_scope_count = len(scopes)
@@ -802,17 +804,20 @@ async def compute_run(
     }
 
 
-async def _resolve_level1_scopes(
+async def _resolve_all_discovery_scopes(
     session: AsyncSession,
     run: MarketReviewRun,
     *,
     canary: bool = False,
     symbols: list[str] | None = None,
 ) -> list[ScopeDefinition]:
-    """解析 level-1 范围列表（PRD §6.1）。
+    """[V2] 解析全部 Discovery scope 列表（PRD70 §6.1-6.2 平行扫描模型）。
 
-    level-1 范围：market / major_index / style / industry_l1
-    canary 模式下限定范围数（仅 market + 少量 industry_l1）。
+    所有 scope family 在发现阶段独立平行参与 observation：
+    market / major_index / style / industry_l1 / industry_l2 / industry_l3 / concept
+
+    Industry taxonomy hierarchy 不成为 discovery eligibility gate。
+    canary 模式下限定范围数。
     symbols 模式下额外注入 instrument 范围（debug 用）。
 
     Returns:
@@ -829,29 +834,53 @@ async def _resolve_level1_scopes(
         ),
     )
 
-    # major_index 范围（PRD §6.1：配置中的主要指数，从 market_boards 读取）
-    # [P0 2026-07-30] 补全 major_index/style 范围，否则发布门禁永远 block
+    # major_index 范围
     major_index_scopes = await _list_major_index_scopes(session, run.trade_date)
     if canary:
-        # canary 模式：限定 3 个指数
         major_index_scopes = major_index_scopes[:3]
     scopes.extend(major_index_scopes)
 
-    # style 范围（PRD §6.1：风格股票池）
+    # style 范围
     style_scopes = await _list_style_scopes(session, run.trade_date)
     if canary:
-        # canary 模式：限定 2 个风格
         style_scopes = style_scopes[:2]
     scopes.extend(style_scopes)
 
-    # industry_l1 范围（从 board_analysis_snapshot 读取当日已计算的板块）
-    industry_scopes = await _list_industry_l1_scopes(
+    # industry_l1 范围
+    industry_l1_scopes = await _list_board_scopes_by_hierarchy(
         session, run.trade_date, run.source_board_run_id,
+        board_type="industry", hierarchy_level="L1",
     )
     if canary:
-        # canary 模式：限定 5 个行业
-        industry_scopes = industry_scopes[:5]
-    scopes.extend(industry_scopes)
+        industry_l1_scopes = industry_l1_scopes[:5]
+    scopes.extend(industry_l1_scopes)
+
+    # [V2] industry_l2 范围（平行独立参与 discovery）
+    industry_l2_scopes = await _list_board_scopes_by_hierarchy(
+        session, run.trade_date, run.source_board_run_id,
+        board_type="industry", hierarchy_level="L2",
+    )
+    if canary:
+        industry_l2_scopes = industry_l2_scopes[:3]
+    scopes.extend(industry_l2_scopes)
+
+    # [V2] industry_l3 范围（平行独立参与 discovery）
+    industry_l3_scopes = await _list_board_scopes_by_hierarchy(
+        session, run.trade_date, run.source_board_run_id,
+        board_type="industry", hierarchy_level="L3",
+    )
+    if canary:
+        industry_l3_scopes = industry_l3_scopes[:3]
+    scopes.extend(industry_l3_scopes)
+
+    # [V2] concept 范围（平行独立参与 discovery，不依赖 industry 命中）
+    concept_scopes = await _list_board_scopes_by_hierarchy(
+        session, run.trade_date, run.source_board_run_id,
+        board_type="concept", hierarchy_level=None,
+    )
+    if canary:
+        concept_scopes = concept_scopes[:5]
+    scopes.extend(concept_scopes)
 
     # symbols 模式：额外注入 instrument 范围（debug 用）
     if symbols:
@@ -865,6 +894,59 @@ async def _resolve_level1_scopes(
             )
 
     return scopes
+
+
+async def _list_board_scopes_by_hierarchy(
+    session: AsyncSession,
+    trade_date: date,
+    source_board_run_id: uuid.UUID,
+    *,
+    board_type: str,
+    hierarchy_level: str | None,
+) -> list[ScopeDefinition]:
+    """从 board_analysis_snapshots 读取当日已计算的板块（通用）。
+    
+    Args:
+        session: 异步 DB 会话
+        trade_date: 业务交易日
+        source_board_run_id: board_analysis_runs.id
+        board_type: "industry" 或 "concept"
+        hierarchy_level: "L1"/"L2"/"L3"（concept 为 None）
+    """
+    stmt = (
+        select(BoardAnalysisSnapshot)
+        .join(MarketBoard, MarketBoard.id == BoardAnalysisSnapshot.board_id)
+        .where(
+            BoardAnalysisSnapshot.trade_date == trade_date,
+            BoardAnalysisSnapshot.board_type == board_type,
+            BoardAnalysisSnapshot.board_analysis_run_id == source_board_run_id,
+        )
+        .order_by(BoardAnalysisSnapshot.board_name.asc())
+    )
+    if hierarchy_level is not None:
+        stmt = stmt.where(MarketBoard.hierarchyLevel == hierarchy_level)
+    result = await session.execute(stmt)
+    scope_type_map = {
+        ("industry", "L1"): "industry_l1",
+        ("industry", "L2"): "industry_l2",
+        ("industry", "L3"): "industry_l3",
+        ("concept", None): "concept",
+    }
+    scope_type = scope_type_map[(board_type, hierarchy_level)]
+    out: list[ScopeDefinition] = []
+    for snap in result.scalars():
+        out.append(
+            ScopeDefinition(
+                scope_type=scope_type,
+                scope_key=str(snap.board_id),
+                scope_name=snap.board_name,
+                source_board_snapshot_id=snap.id,
+                taxonomy_version=snap.taxonomy_version,
+                taxonomy_compatibility_key=snap.taxonomy_compatibility_key,
+                membership_version=snap.membership_version,
+            ),
+        )
+    return out
 
 
 async def _list_industry_l1_scopes(
@@ -1496,7 +1578,7 @@ async def _compute_scope_pipeline(
         day_fact_map = day_fact_cache["facts"]
 
     # 从正式 scope 解析补全 taxonomy_compatibility_key（resume 重建的 ScopeDefinition 缺此字段）
-    resolved = await _resolve_level1_scopes(session, run)
+    resolved = await _resolve_all_discovery_scopes(session, run)
     full_scope = next(
         (s for s in resolved if s.scope_type == scope.scope_type and s.scope_key == scope.scope_key),
         scope,

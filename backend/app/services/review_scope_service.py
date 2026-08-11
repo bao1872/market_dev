@@ -1,10 +1,17 @@
-"""复盘范围扫描服务 - 一级与二级范围 scope snapshot（PRD §6、§7）。
+"""复盘范围扫描服务 - Discovery scope snapshot（PRD70 V2 §6）。
 
-PRD §6 范围定义：
-- 第一级扫描：market / major_index / style / industry_l1
-- 第二级下钻（仅对命中信号的父范围扫描）：
-  industry_l2 / industry_l3 / concept / instrument
-- 下钻必须保留父子路径：market → style/index/industry_l1 → industry_l2/l3 or related concept → instrument
+[V2] 平行扫描模型（PRD70 §6.1-6.2）：
+- 所有 Scope Family 在发现阶段独立平行参与 observation：
+  market / major_index / style / industry_l1 / industry_l2 / industry_l3 / concept
+- Industry taxonomy hierarchy 不成为 discovery eligibility gate
+- Concept 不依赖 Industry 命中
+
+[V2] Comparable peer cohort（PRD70 §6.4.1）：
+- industry_l1 ↔ industry_l1
+- industry_l2 ↔ industry_l2
+- industry_l3 ↔ industry_l3
+- concept ↔ concept
+- market: 无 peer cohort（使用自身历史基线）
 
 输入：
 - 已发布 stock_core pointer（factor_publications.data_run_id）
@@ -66,14 +73,16 @@ _REVIEW_HISTORY_CONTRACT_VERSION = "review-history-v2"
 # 单 scope 发布门禁（PRD §11.1）
 SCOPE_PUBLISH_MIN_COVERAGE = 0.95
 
-# 第一级范围类型
-LEVEL1_SCOPE_TYPES: tuple[str, ...] = (
-    "market", "major_index", "style", "industry_l1",
+# [V2] 所有正式 Discovery scope 类型（平行独立参与 observation/discovery）
+ALL_DISCOVERY_SCOPE_TYPES: tuple[str, ...] = (
+    "market", "major_index", "style",
+    "industry_l1", "industry_l2", "industry_l3",
+    "concept",
 )
-# 第二级范围类型
-LEVEL2_SCOPE_TYPES: tuple[str, ...] = (
-    "industry_l2", "industry_l3", "concept", "instrument",
-)
+# Legacy 兼容：第一级范围类型（V1 两级扫描模型，保留向后兼容引用）
+LEVEL1_SCOPE_TYPES: tuple[str, ...] = ALL_DISCOVERY_SCOPE_TYPES
+# Legacy 兼容：第二级范围类型（V1 下钻模型，保留向后兼容引用；instrument 仅 debug 用）
+LEVEL2_SCOPE_TYPES: tuple[str, ...] = ("instrument",)
 
 
 class ScopeSnapshotError(Exception):
@@ -91,8 +100,14 @@ class ScopeSnapshotError(Exception):
 #
 # 该 scope_type 集合与 publication contract 的 optional 集合保持一致；
 # market 不在其中——market 的任何 membership/data 不可用仍必须 FAILED，不得静默 SKIP。
+# [V2] 渐进式 scope readiness：market 是唯一 hard gate；
+# major_index/style/industry_l1 = progressive optional；
+# industry_l2/l3/concept = parallel independent scope。
+# 以上 scope 数据源不可用仅记诊断，不阻塞 Review publication。
 OPTIONAL_UNAVAILABLE_SCOPE_TYPES: frozenset[str] = frozenset(
-    {"major_index", "style", "industry_l1"},
+    {"major_index", "style",
+     "industry_l1", "industry_l2", "industry_l3",
+     "concept"},
 )
 
 
@@ -449,8 +464,21 @@ async def compute_scope_metrics(
 
 
 def _scope_family(scope_type: str) -> str:
-    if scope_type.startswith("industry_"):
-        return "industry"
+    """[V2] Comparable peer cohort for cross-sectional percentile.
+    
+    Each taxonomy level is an independent peer cohort:
+    - industry_l1 ↔ industry_l1
+    - industry_l2 ↔ industry_l2
+    - industry_l3 ↔ industry_l3
+    - concept ↔ concept
+    - major_index ↔ major_index
+    - style ↔ style
+    - market: no peer cohort (uses self-historical baseline)
+    """
+    if scope_type == "market":
+        # market is the whole-market baseline; single-element cross-sectional
+        # percentile is meaningless. Return a sentinel that produces no peers.
+        return "__market_no_cross_section__"
     return scope_type
 
 

@@ -334,7 +334,7 @@ async def test_real_after_close_review_flow_gate_publish_reuse_withdraw_and_forc
     # 真实 compute/resume：只把成员查询替换为 empty population，仍让
     # orchestrator 写入 run item、更新状态和 coverage。
     with patch(
-        "app.services.review_orchestrator_service._resolve_level1_scopes",
+        "app.services.review_orchestrator_service._resolve_all_discovery_scopes",
         new=AsyncMock(return_value=[ScopeDefinition("market", "market", "全市场")]),
     ), patch(
         "app.services.review_orchestrator_service.resolve_scope_members",

@@ -95,7 +95,7 @@ class TestHistoryBindingForwarding:
             "app.services.review_orchestrator_service._build_scope_history",
             fake_build,
         ), patch(
-            "app.services.review_orchestrator_service._resolve_level1_scopes",
+            "app.services.review_orchestrator_service._resolve_all_discovery_scopes",
             AsyncMock(return_value=[scope]),
         ), patch(
             "app.services.review_orchestrator_service.resolve_scope_members",

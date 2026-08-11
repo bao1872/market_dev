@@ -212,34 +212,20 @@ async def evaluate_publish_gate(
                 )
             # raw_ready=True, normalized_ready=True, value 非空 → 可发布，不阻塞
 
-    # 2~4. major_index / style / industry_l1 为 OPTIONAL 渐进式 scope（Phase 4C §6.3.8）。
+    # 2~4. [V2] 所有非 market scope 为渐进式 scope。
     # 其不可用（bootstrap_unavailable / insufficient_history / blocked_external_population /
     # PIT unavailable）仅记为诊断，不阻塞整个 Market Review MVP 发布。
+    # 动态查询所有 scope snapshot 并按类型分组（不硬编码 scope type 列表）。
+    all_snaps = await _list_all_scope_snapshots(session, run.id)
     actual_by_type: dict[str, list[MarketReviewScopeSnapshot]] = {}
     optional_blockers: list[str] = []
-    for scope_type in ("major_index", "style"):
-        snaps = await _list_scope_snapshots(session, run.id, scope_type)
-        actual_by_type[scope_type] = snaps
-        for snap in snaps:
-            _validate_scope_ready(snap, optional_blockers)
+    for snap in all_snaps:
+        if snap.scope_type == "market":
+            continue  # market 已在 §1 独立处理
+        actual_by_type.setdefault(snap.scope_type, []).append(snap)
+        _validate_scope_ready(snap, optional_blockers)
 
-    # 3. 一级行业：可选 scope；缺失或 ready 比例不足仅记为诊断。
-    industry_snaps = await _list_scope_snapshots(session, run.id, "industry_l1")
-    actual_by_type["industry_l1"] = industry_snaps
-    if not industry_snaps:
-        optional_blockers.append("一级行业范围快照全部缺失（可选 scope，仅诊断）")
-    else:
-        ready_count = sum(1 for s in industry_snaps if s.status == "ready")
-        ratio = ready_count / len(industry_snaps)
-        if ratio < REVIEW_PUBLISH_MIN_INDUSTRY_RATIO:
-            optional_blockers.append(
-                f"一级行业 ready 比例 {ratio:.4f} < 门槛 "
-                f"{REVIEW_PUBLISH_MIN_INDUSTRY_RATIO}（可选 scope，仅诊断）",
-            )
-        for snap in industry_snaps:
-            _validate_scope_ready(snap, optional_blockers)
-
-    # 4. 配置完整性仅对 optional scope 做一致性核对（缺失/未 populated 不阻塞）。
+    # 3. [V2] 配置完整性仅对 optional scope 做一致性核对（缺失/未 populated 不阻塞）。
     universe_stmt = select(UniverseDefinition).where(
         UniverseDefinition.universe_type.in_(("major_index", "style")),
         UniverseDefinition.effective_from <= run.trade_date,
@@ -254,7 +240,7 @@ async def evaluate_publish_gate(
             item.universe_key
             for item in definitions if item.universe_type == scope_type
         }
-        actual = {item.scope_key for item in actual_by_type[scope_type]}
+        actual = {item.scope_key for item in actual_by_type.get(scope_type, [])}
         _compare_scope_keys(scope_type, expected, actual, optional_blockers)
         blocked_populations = sorted(
             item.universe_key
@@ -268,35 +254,15 @@ async def evaluate_publish_gate(
                 "（可选 scope，仅诊断）",
             )
 
-    expected_industry_stmt = (
-        select(BoardAnalysisSnapshot.board_id)
-        .join(MarketBoard, MarketBoard.id == BoardAnalysisSnapshot.board_id)
-        .where(
-            BoardAnalysisSnapshot.board_analysis_run_id == run.source_board_run_id,
-            BoardAnalysisSnapshot.trade_date == run.trade_date,
-            BoardAnalysisSnapshot.board_type == "industry",
-            MarketBoard.hierarchyLevel == "L1",
-        )
-    )
-    expected_industries = {
-        str(row[0]) for row in (await session.execute(expected_industry_stmt)).all()
-    }
-    _compare_scope_keys(
-        "industry_l1",
-        expected_industries,
-        {item.scope_key for item in industry_snaps},
-        optional_blockers,
-    )
-    actual_level1_count = (
+    # [V2] expected_scope_count 包含全部 parallel scope（含 L2/L3/concept）
+    total_scope_count = (
         (1 if market_snap is not None else 0)
-        + len(actual_by_type["major_index"])
-        + len(actual_by_type["style"])
-        + len(industry_snaps)
+        + sum(len(snaps) for snaps in actual_by_type.values())
     )
-    if actual_level1_count != run.expected_scope_count:
+    if run.expected_scope_count > 0 and total_scope_count != run.expected_scope_count:
         optional_blockers.append(
-            "level-1 scope snapshot 数量不一致: "
-            f"actual={actual_level1_count}, expected={run.expected_scope_count}"
+            "scope snapshot 数量不一致: "
+            f"actual={total_scope_count}, expected={run.expected_scope_count}"
             "（可选 scope，仅诊断）",
         )
     # optional scope 诊断写入 run metadata，不加入 blockers（market 仍为唯一强制 scope）
@@ -864,6 +830,19 @@ async def _list_scope_snapshots(
             MarketReviewScopeSnapshot.review_run_id == review_run_id,
             MarketReviewScopeSnapshot.scope_type == scope_type,
         )
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars())
+
+
+async def _list_all_scope_snapshots(
+    session: AsyncSession,
+    review_run_id: uuid.UUID,
+) -> list[MarketReviewScopeSnapshot]:
+    """[V2] 列出 run 的所有 scope snapshot（不分类型）。"""
+    stmt = (
+        select(MarketReviewScopeSnapshot)
+        .where(MarketReviewScopeSnapshot.review_run_id == review_run_id)
     )
     result = await session.execute(stmt)
     return list(result.scalars())

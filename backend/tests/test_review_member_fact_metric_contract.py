@@ -170,7 +170,7 @@ async def test_orchestrator_finishes_cross_section_before_any_signal(
     async def _zero(*_args: Any, **_kwargs: Any) -> int:
         return 0
 
-    monkeypatch.setattr(orchestrator, "_resolve_level1_scopes", _scopes)
+    monkeypatch.setattr(orchestrator, "_resolve_all_discovery_scopes", _scopes)
     monkeypatch.setattr(orchestrator, "_compute_scope_metrics_phase", _metrics)
     monkeypatch.setattr(orchestrator, "apply_cross_section_percentiles", _cross)
     monkeypatch.setattr(orchestrator, "_compute_scope_signal_pipeline", _signals)
