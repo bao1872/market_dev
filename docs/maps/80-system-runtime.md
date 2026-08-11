@@ -134,17 +134,24 @@ strategy、calendar、monitor、strategy-batch、outbox、delivery、after-close
 > 2026-08-04 治理垂直切片落地 `docker-compose.prod.yml` 容器级资源限制（DS-101）。
 > 以下为**初始保守宽松值**，全部经环境变量 `${PANJI_<SERVICE>_<FIELD>:-default}` 可配置，可在
 > `/etc/market-dev/market.env` 覆盖收紧。初始值依据服务器 7.4G 内存为宿主机保留 ≥1G 余量规划。
+>
+> **重要修正（2026-08-11，REVIEW_RESOURCE_BUDGET_CALIBRATION_DEFECT）**：`backend` 与 `trading-worker-after-close`
+> 的 `mem_limit` 初值 `1024m` 是**未经生产验证的初始值**，已被 2026-08-11 生产 cgroup OOM 证据**证伪**
+> （REVIEW FULL compute_run 在 ~970MB RSS 处被 `CONSTRAINT_MEMCG` 杀死，`oom_kill=4`）。两者 Review 能力
+> 上限已校准为 `4096m`（仍低于 7.4G 宿主余量规划，未触碰宿主机保留）。该修正**不改变** strategy-batch、
+> capture 及其他 heavy/light 服务的 `mem_limit`，也未触碰 PRD 语义、算法或 Migration。
 
-| 服务 | mem_limit 初值 | mem_reservation | cpus | pids_limit | 类别 |
-|---|---|---|---|---|---|
-| postgres | 1536m | 1024m | 2 | 512 | 数据服务 |
-| redis | 256m | 128m | 1 | 256 | 数据服务 |
-| backend | 1024m | 512m | 2 | 1024 | 应用服务 |
-| capture | 768m | 384m | 2 | 512 | 应用服务 |
-| 重 Worker（review/feature/stock core 等） | 1024m | 512m | 1 | 1024 | 应用服务 |
-| 轻 Worker / scheduler / watchdog | 512m | 256m | 1 | 512 | 应用服务 |
-| frontend（Nginx 静态） | 128m | 64m | 1 | 256 | 应用服务 |
-| umami | 384m | 128m | 1 | 512 | 应用服务 |
+| 服务 | mem_limit 初值 | mem_limit 当前值 | mem_reservation | cpus | pids_limit | 类别 |
+|---|---|---|---|---|---|---|
+| postgres | 1536m | 1536m | 1024m | 2 | 512 | 数据服务 |
+| redis | 256m | 256m | 128m | 1 | 256 | 数据服务 |
+| backend | 1024m（证伪） | **4096m** | 512m | 2 | 1024 | 应用服务（Review-capable） |
+| capture | 768m | 768m | 384m | 2 | 512 | 应用服务 |
+| strategy-batch | 1024m | 1024m（不变） | 512m | 1 | 1024 | 应用服务 |
+| after-close（review/feature/stock core） | 1024m（证伪） | **4096m** | 512m | 1 | 1024 | 应用服务（Review-capable） |
+| 轻 Worker / scheduler / watchdog | 512m | 512m | 256m | 1 | 512 | 应用服务 |
+| frontend（Nginx 静态） | 128m | 128m | 64m | 1 | 256 | 应用服务 |
+| umami | 384m | 384m | 128m | 1 | 512 | 应用服务 |
 
 **硬约束（DS-107 规则，尚未实现）**：重任务服务（review / feature / stock core）的应用级
 `memory_budget_mb` 必须**显著低于**其所在容器 `mem_limit`（禁止等于或高于上限）。该数值关系为**规则要求**，

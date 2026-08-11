@@ -100,7 +100,9 @@ services:
     restart: unless-stopped
     logging: *default-logging
     <<: *resource-app-heavy
-    mem_limit: ${PANJI_BACKEND_MEM_LIMIT:-1024m}
+    # [REVIEW-V2] Backend Review-capable limit raised to 4096m: production cgroup OOM
+    # evidence (2026-08-11) disproved the original unverified 1024m ceiling.
+    mem_limit: ${PANJI_BACKEND_MEM_LIMIT:-4096m}
     mem_reservation: ${PANJI_BACKEND_MEM_RESERVATION:-512m}
     cpus: ${PANJI_BACKEND_CPUS:-2}
     pids_limit: ${PANJI_BACKEND_PIDS_LIMIT:-1024}
@@ -328,6 +330,9 @@ services:
     restart: unless-stopped
     logging: *default-logging
     <<: *resource-app-heavy
+    # [REVIEW-V2] After-close Review-capable limit raised to 4096m: production cgroup OOM
+    # evidence (2026-08-11) disproved the original unverified 1024m ceiling.
+    mem_limit: ${PANJI_AFTER_CLOSE_MEM_LIMIT:-4096m}
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
