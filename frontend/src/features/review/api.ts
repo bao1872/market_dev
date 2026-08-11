@@ -241,3 +241,43 @@ export async function getTrackingEvaluations(
   )
   return data
 }
+
+// =========================================================================
+// [V2] Discovery API
+// =========================================================================
+
+import type {
+  DiscoveryListResponse,
+  DiscoveryDetailResponse,
+} from './types'
+
+/** GET /v1/review/{tradeDate}/discoveries */
+export async function getDiscoveries(
+  tradeDate: string,
+  params: {
+    scope_type?: string
+    scope_family?: string
+    status?: string
+    sort?: string
+    page?: number
+    page_size?: number
+  } = {},
+): Promise<DiscoveryListResponse> {
+  const { data } = await apiClient.get<DiscoveryListResponse>(
+    `/v1/review/${tradeDate}/discoveries`,
+    { params },
+  )
+  return data
+}
+
+/** GET /v1/review/discoveries/{discoveryId} */
+export async function getDiscoveryDetail(
+  discoveryId: string,
+  tradeDate?: string,
+): Promise<DiscoveryDetailResponse> {
+  const { data } = await apiClient.get<DiscoveryDetailResponse>(
+    `/v1/review/discoveries/${discoveryId}`,
+    { params: tradeDate ? { trade_date: tradeDate } : {} },
+  )
+  return data
+}

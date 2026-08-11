@@ -414,3 +414,135 @@ export const REVIEW_RUN_STATUSES = [
 
 /** 处于计算中、需要轮询的状态 */
 export const COMPUTING_STATUSES = new Set<string>(['created', 'computing', 'signals_ready'])
+
+// =========================================================================
+// [V2] Discovery types
+// =========================================================================
+
+export interface DiscoveryMetricState {
+  value: number | null
+  historyPercentile: number | null
+  crossSectionPercentile: number | null
+}
+
+export interface DiscoveryMetricChange {
+  delta1d: number | null
+  delta5d: number | null
+}
+
+export interface DiscoveryConcentrationState {
+  hhi: number | null
+  top5Contribution: number | null
+  leaderMedianGap: number | null
+}
+
+export interface DiscoveryConcentrationChange {
+  direction: string | null
+  delta1d: number | null
+}
+
+export interface DiscoveryInternalStructure {
+  trendBreadth: number | null
+  structureBreadth: number | null
+  momentumBreadth: number | null
+  structureBreakdownDiffusion: number | null
+  synchronizedImprovement: boolean
+}
+
+export interface DiscoveryState {
+  metrics: Record<string, DiscoveryMetricState>
+  concentration: DiscoveryConcentrationState
+  internalStructure: DiscoveryInternalStructure
+}
+
+export interface DiscoveryChange {
+  metrics: Record<string, DiscoveryMetricChange>
+  concentration: DiscoveryConcentrationChange
+}
+
+export interface DiscoveryAnomaly {
+  selfHistorical: Record<string, number | null>
+  crossSectional: Record<string, number | null>
+}
+
+export interface DiscoveryScope {
+  type: string
+  key: string
+  name: string
+}
+
+export interface DiscoveryRelatedScope {
+  sourceScopeId: string
+  targetScopeId: string
+  relationType: string
+  evidence: Record<string, unknown>
+}
+
+export interface DiscoveryRepresentativeInstrument {
+  instrumentId: string
+  boardRole: string | null
+  relationToScope: string | null
+  contributionValue: number | null
+  contributionRank: number | null
+  contributionPayload: unknown
+  roleEvidence: unknown
+}
+
+export interface DiscoveryLifecycle {
+  status: string
+  firstSeen: string | null
+  duration: number
+}
+
+export interface DiscoveryDataQuality {
+  coverage: number
+  readyCount: number
+}
+
+export interface DiscoveryRankKey {
+  anomaly: number
+  change: number
+  evidenceConsistency: number
+  crossScopeConfirmation: number
+  coverage: number
+  duration: number
+  breadth: number
+}
+
+export interface Discovery {
+  discoveryId: string
+  reviewRunId: string
+  tradeDate: string
+  scope: DiscoveryScope
+  state: DiscoveryState
+  change: DiscoveryChange
+  anomaly: DiscoveryAnomaly
+  keyEvidence: string[]
+  supportingSignalIds: string[]
+  relatedScopes: DiscoveryRelatedScope[]
+  representativeInstruments: DiscoveryRepresentativeInstrument[]
+  lifecycle: DiscoveryLifecycle
+  dataQuality: DiscoveryDataQuality
+  rankKey: DiscoveryRankKey
+}
+
+export interface DiscoveryListResponse {
+  trade_date: string
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+  items: Discovery[]
+}
+
+export interface DiscoveryDetailResponse {
+  trade_date: string
+  discovery: Discovery
+}
+
+// [CR-03] Update ReviewInstrument with contributionPayload and roleEvidence
+// Override the existing interface to add the missing fields
+export interface ReviewInstrumentV2 extends ReviewInstrument {
+  contributionPayload: unknown
+  roleEvidence: unknown
+}

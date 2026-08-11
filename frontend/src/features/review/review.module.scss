@@ -817,3 +817,183 @@
 .fpDotUp { background: v.$color-up; }
 .fpDotDown { background: v.$color-down; }
 .fpDotNeutral { background: v.$color-text-dim; }
+
+// =========================================================================
+// [V2] Discovery Workspace
+// =========================================================================
+
+.discovery-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+}
+
+.discovery-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  h2 { margin: 0; font-size: 1.2rem; }
+  .discovery-trade-date { color: v.$color-text-dim; font-size: 0.9rem; }
+  .discovery-status {
+    padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;
+    &.published { background: rgba(0, 200, 100, 0.15); color: #0c8; }
+  }
+}
+
+.discovery-filters {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  button {
+    padding: 4px 12px; border: 1px solid v.$color-border;
+    border-radius: 16px; background: transparent; color: v.$color-text;
+    cursor: pointer; font-size: 0.85rem;
+    &:hover { background: rgba(255,255,255,0.05); }
+    &.active { background: v.$color-primary; border-color: v.$color-primary; color: #000; }
+  }
+}
+
+.review-empty-state {
+  text-align: center; padding: 40px 16px; color: v.$color-text-dim;
+  p { margin: 8px 0; }
+  .review-degraded { font-size: 0.85rem; color: #fa0; }
+  .review-empty-hint { font-size: 0.8rem; opacity: 0.6; }
+}
+
+.review-loading, .review-empty {
+  text-align: center; padding: 40px; color: v.$color-text-dim;
+}
+
+.discovery-list {
+  display: flex; flex-direction: column; gap: 12px;
+}
+
+.discovery-card {
+  padding: 16px; border: 1px solid v.$color-border; border-radius: 8px;
+  cursor: pointer; transition: border-color 0.2s;
+  &:hover { border-color: v.$color-primary; }
+  &-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+    .discovery-scope-type { font-size: 0.75rem; color: v.$color-text-dim; }
+    .discovery-scope-name { font-weight: 600; }
+    .discovery-lifecycle {
+      padding: 1px 6px; border-radius: 3px; font-size: 0.75rem;
+      &.new { background: rgba(0,180,255,0.15); color: #0bf; }
+      &.continuing { background: rgba(0,200,100,0.15); color: #0c8; }
+      &.confirmed { background: rgba(0,200,100,0.25); color: #0f8; }
+      &.weakened { background: rgba(255,180,0,0.15); color: #fa0; }
+      &.invalidated { background: rgba(255,80,80,0.15); color: #f55; }
+    }
+  }
+  &-state, &-change {
+    font-size: 0.85rem; margin-bottom: 4px;
+    .label { color: v.$color-text-dim; margin-right: 4px; }
+  }
+  &-evidence { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px; }
+  &-footer {
+    display: flex; justify-content: space-between;
+    font-size: 0.75rem; color: v.$color-text-dim;
+  }
+}
+
+.evidence-tag {
+  padding: 1px 6px; border-radius: 3px; font-size: 0.7rem;
+  background: rgba(255,255,255,0.06); color: v.$color-text-dim;
+}
+
+.discovery-pagination {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 12px 0;
+  button {
+    padding: 4px 12px; border: 1px solid v.$color-border; border-radius: 4px;
+    background: transparent; color: v.$color-text; cursor: pointer;
+    &:disabled { opacity: 0.4; cursor: not-allowed; }
+  }
+}
+
+// Detail
+.discovery-detail {
+  display: flex; flex-direction: column; gap: 16px; padding: 16px;
+  &-header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    h2 { margin: 0; }
+    .back-btn {
+      padding: 4px 12px; border: 1px solid v.$color-border; border-radius: 4px;
+      background: transparent; color: v.$color-text; cursor: pointer;
+    }
+    .scope-type-tag { font-size: 0.8rem; color: v.$color-text-dim; }
+    .lifecycle-tag {
+      padding: 2px 8px; border-radius: 3px; font-size: 0.8rem;
+      &.new { background: rgba(0,180,255,0.15); color: #0bf; }
+      &.continuing { background: rgba(0,200,100,0.15); color: #0c8; }
+      &.confirmed { background: rgba(0,200,100,0.25); color: #0f8; }
+      &.weakened { background: rgba(255,180,0,0.15); color: #fa0; }
+      &.invalidated { background: rgba(255,80,80,0.15); color: #f55; }
+    }
+    .duration-tag, .first-seen-tag { font-size: 0.8rem; color: v.$color-text-dim; }
+  }
+}
+
+.discovery-section {
+  padding: 12px; border: 1px solid v.$color-border; border-radius: 6px;
+  h3 { margin: 0 0 8px; font-size: 1rem; }
+  .signal-count { font-size: 0.8rem; color: v.$color-text-dim; margin-top: 4px; }
+}
+
+.state-panel {
+  .state-subsection {
+    margin-bottom: 12px;
+    h4 { margin: 0 0 4px; font-size: 0.9rem; color: v.$color-text-dim; }
+  }
+}
+
+.evidence-table {
+  width: 100%; border-collapse: collapse; font-size: 0.85rem;
+  th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  th { color: v.$color-text-dim; font-weight: 500; }
+}
+
+.concentration-state, .concentration-change, .internal-structure {
+  font-size: 0.8rem; color: v.$color-text-dim; margin-top: 4px;
+}
+
+.rank-key {
+  &-bars { display: flex; flex-direction: column; gap: 6px; }
+  &-item { display: flex; align-items: center; gap: 8px; }
+  &-label { width: 120px; font-size: 0.8rem; color: v.$color-text-dim; }
+  &-bar {
+    flex: 1; height: 8px; background: rgba(255,255,255,0.05); border-radius: 4px;
+    overflow: hidden;
+  }
+  &-fill { height: 100%; background: v.$color-primary; border-radius: 4px; transition: width 0.3s; }
+  &-value { width: 40px; font-size: 0.8rem; text-align: right; }
+}
+
+.related-scopes {
+  .relation-list { display: flex; flex-direction: column; gap: 8px; }
+  .relation-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border-radius: 4px; font-size: 0.85rem;
+    background: rgba(255,255,255,0.03);
+    &.theme_led { border-left: 3px solid #0bf; }
+    &.industry_led { border-left: 3px solid #0c8; }
+    &.broad_confirmation { border-left: 3px solid #0f8; }
+    &.isolated_theme { border-left: 3px solid #fa0; }
+    &.style_led { border-left: 3px solid #f0f; }
+    &.conflicting { border-left: 3px solid #f55; }
+  }
+  .relation-type { font-weight: 600; min-width: 100px; }
+  .relation-scope-id { font-size: 0.8rem; color: v.$color-text-dim; }
+  .relation-evidence {
+    display: flex; gap: 6px; font-size: 0.75rem; color: v.$color-text-dim;
+  }
+}
+
+.instruments-table {
+  width: 100%; border-collapse: collapse; font-size: 0.85rem;
+  th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  th { color: v.$color-text-dim; }
+}
+
+.data-quality {
+  display: flex; gap: 16px; font-size: 0.85rem; color: v.$color-text-dim;
+}

@@ -42,4 +42,13 @@ export const reviewKeys = {
     [...reviewKeys.all, 'tracking', trackingId] as const,
   evaluations: (trackingId: string, filters: { page?: number; page_size?: number } = {}) =>
     [...reviewKeys.all, 'evaluations', trackingId, filters] as const,
+
+  // [V2] Discovery
+  discoveries: (tradeDate: string, filters: Record<string, unknown> = {}) =>
+    [...reviewKeys.all, 'discoveries', tradeDate, filters] as const,
+  discovery: (discoveryId: string) =>
+    [...reviewKeys.all, 'discovery', discoveryId] as const,
 } as const
+
+/** 导出方便组件使用 */
+export { reviewKeys as queryKeys }
