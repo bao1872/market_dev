@@ -79,6 +79,7 @@ from app.services.review_scope_service import (
     apply_cross_section_percentiles,
     compute_scope_metrics,
     fetch_member_flat_list,
+    load_day_fact_maps,
     resolve_scope_members,
 )
 from app.services.review_signal_service import (
@@ -683,6 +684,25 @@ async def compute_run(
         canonical_contract_version,
     ) = await _bind_or_reuse_canonical_history_source(session, run)
 
+    # [REVIEW-FACT-PARITY-02 §10] load-once：整个 compute_run 只调用一次
+    # load_day_fact_maps，scope loop 只按 instrument_id 从内存 map 取**引用**。
+    # 禁止每 scope 再调 fetch_member_flat_list（date × scope × 400 日 bars 重复读取
+    # 是此前 Review OOM 的主因），禁止 deepcopy / JSON roundtrip / per-scope rebuild。
+    # lineage 由 §11 guard 在 loader 内 fail closed。
+    day_fact_map = await load_day_fact_maps(
+        session,
+        trade_date=run.trade_date,
+        required_source_history_run_id=canonical_source_run_id,
+        required_history_contract_version=canonical_contract_version,
+    )
+    logger.info(
+        "[ReviewOrchestrator] load_day_fact_maps once: trade_date=%s facts=%d "
+        "source_history_run_id=%s",
+        run.trade_date,
+        len(day_fact_map),
+        canonical_source_run_id,
+    )
+
     succeeded = 0
     failed = 0
     signals_total = 0
@@ -698,6 +718,7 @@ async def compute_run(
                 scope,
                 required_history_contract_version=canonical_contract_version,
                 required_source_history_run_id=canonical_source_run_id,
+                day_fact_map=day_fact_map,
             )
             succeeded += 1
             if snapshot is not None:
@@ -724,7 +745,7 @@ async def compute_run(
     for scope, snapshot in metric_results:
         try:
             signals_total += await _compute_scope_signal_pipeline(
-                session, run, scope, snapshot,
+                session, run, scope, snapshot, day_fact_map=day_fact_map,
             )
         except Exception as exc:  # noqa: BLE001
             succeeded -= 1
@@ -1132,10 +1153,16 @@ async def _compute_scope_metrics_phase(
     *,
     required_history_contract_version: str | None = None,
     required_source_history_run_id: uuid.UUID | None = None,
+    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
 ) -> MarketReviewScopeSnapshot | None:
     """Compute and persist raw/normalized metrics for one scope.
 
     [Phase4C 2026-08-09] 透传 canonical history lineage 过滤条件（P0-B）。
+
+    [REVIEW-FACT-PARITY-02 §10] ``day_fact_map`` 由 ``compute_run`` 一次性加载并
+    传入；本函数只按 instrument_id 取**引用**组装 flat_list，不再调用
+    ``fetch_member_flat_list``，也不做 deepcopy / JSON roundtrip。
+    仅当 ``day_fact_map is None``（非正式路径，如独立调试）才回退旧 loader。
     """
     # === metrics phase ===
     await _upsert_run_item(
@@ -1170,12 +1197,22 @@ async def _compute_scope_metrics_phase(
     # scope.scope_name 已在 ScopeDefinition 中设置，compute_scope_metrics 直接读取
 
     # 拉取成员 first_pyramid_flat
-    flat_list = await fetch_member_flat_list(
-        session,
-        instrument_ids,
-        run.source_core_run_id,
-        trade_date=run.trade_date,
-    )
+    if day_fact_map is not None:
+        # [REVIEW-FACT-PARITY-02 §10] 只按 membership 从已加载 day fact map 取引用。
+        # 共享引用是有意的（多 scope 重叠成员复用同一 fact 对象）；下游只读，
+        # 禁止任何 in-place mutation。
+        flat_list = [
+            fact
+            for fact in (day_fact_map.get(iid) for iid in instrument_ids)
+            if fact is not None
+        ]
+    else:
+        flat_list = await fetch_member_flat_list(
+            session,
+            instrument_ids,
+            run.source_core_run_id,
+            trade_date=run.trade_date,
+        )
 
     # [P0 2026-07-30] 构建 history_maps/prev_values/prev5d_values
     # PRD §7.1：历史基线默认 120 日、最低 60 日；先保存 rawValue，
@@ -1246,8 +1283,14 @@ async def _compute_scope_signal_pipeline(
     run: MarketReviewRun,
     scope: ScopeDefinition,
     snapshot: MarketReviewScopeSnapshot,
+    *,
+    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
 ) -> int:
-    """Evaluate signals and attribution after the cross-section pass is complete."""
+    """Evaluate signals and attribution after the cross-section pass is complete.
+
+    [REVIEW-FACT-PARITY-02 §10] ``day_fact_map`` 透传给 attribution，
+    使 signal × child_scope 归因不再重复加载当日 facts。
+    """
 
     # === signals phase ===
     await _upsert_run_item(
@@ -1340,6 +1383,7 @@ async def _compute_scope_signal_pipeline(
                 parent_ready_count=parent_ready_count,
                 source_core_run_id=run.source_core_run_id,
                 source_board_run_id=run.source_board_run_id,
+                day_fact_map=day_fact_map,
             )
             await compute_signal_instruments(
                 session,
@@ -1347,6 +1391,7 @@ async def _compute_scope_signal_pipeline(
                 parent_metrics=parent_metrics,
                 parent_ready_count=parent_ready_count,
                 source_core_run_id=run.source_core_run_id,
+                day_fact_map=day_fact_map,
             )
         except Exception as exc:  # noqa: BLE001
             attribution_errors.append(f"{signal.signal_type}: {exc}")
@@ -1377,15 +1422,40 @@ async def _compute_scope_pipeline(
     session: AsyncSession,
     run: MarketReviewRun,
     scope: ScopeDefinition,
+    *,
+    day_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] | None = None,
 ) -> int:
     """Resume-compatible single-scope pipeline using the same two ordered phases.
 
     [Phase4C 2026-08-09 P0-B] resume 必须复用 run 已绑定的 canonical history source，
     绝不重新解析 latest ready run（防止 A→B lineage 漂移）。
+
+    [REVIEW-FACT-PARITY-02 §10] ``day_fact_cache`` 是 ``resume_run`` 传入的跨 scope
+    可变缓存：当日 facts 只在第一个 scope 处加载一次，后续 scope 直接复用同一份
+    内存 map（共享引用，无 copy）。为 None 时（独立调用）不启用 load-once。
     """
     canonical_source_run_id, canonical_contract_version = (
         await _bind_or_reuse_canonical_history_source(session, run)
     )
+    # [REVIEW-FACT-PARITY-02 §10] resume load-once：facts 只在首个 scope 加载一次。
+    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None
+    if day_fact_cache is not None:
+        if "facts" not in day_fact_cache:
+            day_fact_cache["facts"] = await load_day_fact_maps(
+                session,
+                trade_date=run.trade_date,
+                required_source_history_run_id=canonical_source_run_id,
+                required_history_contract_version=canonical_contract_version,
+            )
+            logger.info(
+                "[ReviewOrchestrator] resume load_day_fact_maps once: "
+                "trade_date=%s facts=%d source_history_run_id=%s",
+                run.trade_date,
+                len(day_fact_cache["facts"]),
+                canonical_source_run_id,
+            )
+        day_fact_map = day_fact_cache["facts"]
+
     # 从正式 scope 解析补全 taxonomy_compatibility_key（resume 重建的 ScopeDefinition 缺此字段）
     resolved = await _resolve_level1_scopes(session, run)
     full_scope = next(
@@ -1398,11 +1468,14 @@ async def _compute_scope_pipeline(
         full_scope,
         required_history_contract_version=canonical_contract_version,
         required_source_history_run_id=canonical_source_run_id,
+        day_fact_map=day_fact_map,
     )
     if snapshot is None:
         return 0
     await apply_cross_section_percentiles(session, run.id)
-    return await _compute_scope_signal_pipeline(session, run, full_scope, snapshot)
+    return await _compute_scope_signal_pipeline(
+        session, run, full_scope, snapshot, day_fact_map=day_fact_map,
+    )
 
 
 # =============================================================================
@@ -1459,6 +1532,12 @@ async def resume_run(
         key = (item.scope_type, item.scope_key)
         scopes_to_redo.setdefault(key, set()).add(item.phase)
 
+    # [REVIEW-FACT-PARITY-02 §10] resume 同样 load-once：当日 facts 只在第一个
+    # scope 处惰性加载一次，之后所有待重算 scope 共享同一份内存 map。
+    # 用可变 cache 传入，避免在此重复调用 _bind_or_reuse_canonical_history_source
+    # （binding 已在 _compute_scope_pipeline 内完成，重复调用会多做一次 DB 解析）。
+    resume_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] = {}
+
     # 对每个需要重处理的 scope，重新执行 pipeline
     succeeded = 0
     failed = 0
@@ -1469,7 +1548,9 @@ async def resume_run(
             scope_name=scope_key,
         )
         try:
-            await _compute_scope_pipeline(session, run, scope)
+            await _compute_scope_pipeline(
+                session, run, scope, day_fact_cache=resume_fact_cache
+            )
             succeeded += 1
         except Exception as exc:  # noqa: BLE001
             failed += 1

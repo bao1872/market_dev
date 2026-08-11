@@ -72,6 +72,31 @@ class ChildScopeCandidate:
     membership_version: str
 
 
+async def _member_flat_list(
+    session: AsyncSession,
+    member_ids: list[uuid.UUID],
+    source_core_run_id: uuid.UUID,
+    *,
+    trade_date,
+    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """[REVIEW-FACT-PARITY-02 §10] 统一成员 fact 获取入口。
+
+    ``day_fact_map`` 非 None（正式 Review load-once 路径）时只做内存筛选并返回
+    **共享引用**（下游只读，禁止 in-place mutation）；为 None 时（独立调试/
+    非正式路径）回退旧的 per-scope loader。
+    """
+    if day_fact_map is None:
+        return await fetch_member_flat_list(
+            session, member_ids, source_core_run_id, trade_date=trade_date,
+        )
+    return [
+        fact
+        for fact in (day_fact_map.get(iid) for iid in member_ids)
+        if fact is not None
+    ]
+
+
 # =============================================================================
 # 子范围归因
 # =============================================================================
@@ -87,11 +112,16 @@ async def compute_signal_attributions(
     source_board_run_id: uuid.UUID,
     child_scope_types: tuple[str, ...] = ("industry_l2", "industry_l3", "concept"),
     top_n: int | None = None,
+    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
 ) -> list[MarketReviewSignalAttribution]:
     """Compute every eligible second-level attribution using PIT memberships.
 
     ``top_n`` is retained only for explicit administrative sampling. Normal runs persist
     every result so API pagination can retrieve both positive and negative contributors.
+
+    [REVIEW-FACT-PARITY-02 §10] ``day_fact_map`` 由正式 ``compute_run`` 一次性加载
+    并透传；非 None 时按 member ids 取内存引用，不再对每个 child scope 调用
+    ``fetch_member_flat_list``（signal × child_scope 量级的重复读取）。
     """
     parent_ids, _ = await resolve_scope_members(
         session,
@@ -118,11 +148,12 @@ async def compute_signal_attributions(
             eligible_count = len(child.member_ids)
             if eligible_count == 0:
                 continue
-            flat_list = await fetch_member_flat_list(
+            flat_list = await _member_flat_list(
                 session,
                 list(child.member_ids),
                 source_core_run_id,
                 trade_date=signal.trade_date,
+                day_fact_map=day_fact_map,
             )
             ready_count = sum(
                 1 for flat in flat_list
@@ -346,6 +377,7 @@ async def compute_signal_instruments(
     parent_ready_count: int,
     source_core_run_id: uuid.UUID,
     top_n: int | None = None,
+    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
 ) -> list[MarketReviewSignalInstrument]:
     """为信号计算个股归因并持久化。
 
@@ -356,6 +388,7 @@ async def compute_signal_instruments(
         parent_ready_count: 父范围有效成员数
         source_core_run_id: stock_core run_id
         top_n: 保留前 N 项（按综合贡献绝对值排序）
+        day_fact_map: [REVIEW-FACT-PARITY-02 §10] 正式路径一次性加载的当日 facts
 
     Returns:
         持久化的 MarketReviewSignalInstrument 列表
@@ -367,11 +400,12 @@ async def compute_signal_instruments(
     if not instrument_ids:
         return []
 
-    flat_list = await fetch_member_flat_list(
+    flat_list = await _member_flat_list(
         session,
         instrument_ids,
         source_core_run_id,
         trade_date=signal.trade_date,
+        day_fact_map=day_fact_map,
     )
     if not flat_list:
         return []

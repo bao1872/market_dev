@@ -782,6 +782,8 @@ async def load_day_fact_maps(
     *,
     trade_date: date,
     instrument_ids: list[uuid.UUID] | None = None,
+    required_source_history_run_id: uuid.UUID | None = None,
+    required_history_contract_version: str | None = None,
 ) -> dict[uuid.UUID, dict[str, Any]]:
     """[CHANGE-20260808] Stage B day fact loader —— 每个 trade_date 一次批量加载。
 
@@ -801,10 +803,19 @@ async def load_day_fact_maps(
         session: 异步 DB 会话
         trade_date: 目标交易日
         instrument_ids: 限制加载的 instrument 子集（None=全市场当日 FP state）
+        required_source_history_run_id: [REVIEW-FACT-PARITY-02 §11] 正式 Review
+            绑定的 canonical history source run；非 None 时每条 state 的
+            source_history_run_id 必须与之相等，否则 fail closed。防止 load-once
+            阶段重新解析到另一个 history run 造成 lineage drift。
+        required_history_contract_version: 同上，显式要求的 history contract
+            version；None 时回退到模块级 canonical 常量。
 
     Returns:
         {instrument_id: to_metric_input() dict}，供任意 scope membership 复用。
     """
+    _required_version = (
+        required_history_contract_version or _REVIEW_HISTORY_CONTRACT_VERSION
+    )
     # 1. 当日 FP state
     current_stmt = select(FirstPyramidHistoryDailyState).where(
         FirstPyramidHistoryDailyState.trade_date == trade_date,
@@ -829,10 +840,10 @@ async def load_day_fact_maps(
         _ver = getattr(_state, "history_contract_version", None) or (
             _state.state_payload or {}
         ).get("history_contract_version")
-        if _ver != _REVIEW_HISTORY_CONTRACT_VERSION:
+        if _ver != _required_version:
             raise ValueError(
                 f"HISTORY_CONTRACT_VERSION_MISMATCH: "
-                f"expected={_REVIEW_HISTORY_CONTRACT_VERSION} got={_ver!r} "
+                f"expected={_required_version} got={_ver!r} "
                 f"for trade_date={trade_date}"
             )
         _src = getattr(_state, "source_history_run_id", None)
@@ -840,6 +851,17 @@ async def load_day_fact_maps(
             raise ValueError(
                 f"HISTORY_SOURCE_RUN_MISSING: source_history_run_id 为空 "
                 f"for trade_date={trade_date}"
+            )
+        # [REVIEW-FACT-PARITY-02 §11] lineage guard：正式 Review 已绑定 canonical
+        # source run 时，load-once 不得混入其他 history run 的 state。
+        if (
+            required_source_history_run_id is not None
+            and _src != required_source_history_run_id
+        ):
+            raise ValueError(
+                f"HISTORY_SOURCE_RUN_MISMATCH: required="
+                f"{required_source_history_run_id!r} got={_src!r} "
+                f"for instrument={_state.instrument_id} trade_date={trade_date}"
             )
 
     ids = list(current_by_instrument.keys())
@@ -885,10 +907,10 @@ async def load_day_fact_maps(
         _ver = getattr(_prev, "history_contract_version", None) or (
             _prev.state_payload or {}
         ).get("history_contract_version")
-        if _ver != _REVIEW_HISTORY_CONTRACT_VERSION:
+        if _ver != _required_version:
             raise ValueError(
                 f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
-                f"expected={_REVIEW_HISTORY_CONTRACT_VERSION} got={_ver!r} "
+                f"expected={_required_version} got={_ver!r} "
                 f"for trade_date={trade_date}"
             )
     # 校验通过后，previous 转 payload 供 adapter 消费
