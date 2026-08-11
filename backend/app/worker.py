@@ -40,6 +40,11 @@
   业务 item terminal（禁止裸 Task.cancel 遗留 ownership 不清的 running job）。
 - 禁止恢复"每轮 core → chip → bootstrap 串行 fallback"的旧结构 —— 那会让长时 chip /
   review bootstrap 任务占用 mandatory executor，造成 head-of-line blocking。
+- **边界（勿过度声称）**：应用层 `_drain_co_process` 只保证 SIGTERM 到达 Python 后不裸取消
+  活跃业务任务，它**不能**单独保证生产无界优雅停机——Docker `stop_grace_period`（默认 60s）
+  到期仍可能 SIGKILL 进程。完整受控部署保证 = 部署前置活跃任务门禁（拒绝在 worker-after-close
+  拥有 running 长任务时变更 backend runtime / 重启）+ 应用 drain + 既有 Docker stop 策略。
+  该门禁由 `scripts/deploy/panji-deploy.sh` 的 `guard_active_after_close_jobs` 实现。
 """
 
 from __future__ import annotations

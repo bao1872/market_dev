@@ -956,7 +956,113 @@ _check_scheduler_single_instance() {
 RESTARTED_PYTHON=false
 RESTARTED_FRONTEND=false
 
+# =============================================================================
+# [DEPLOY-GATE] 活跃盘后长任务 fail-closed 门禁（ref/guide.md REOPEN NARROW RUNTIME-SAFETY FIX）
+# =============================================================================
+# 目标：当本次部署会变更 backend runtime / 重启 Python 服务（含 force-recreate
+# worker-after-close）时，在任何 live runtime mutation 之前，检查 worker-after-close
+# 当前是否拥有活跃的 long-running business item。若活跃 → 立即拒绝部署（fail-closed），
+# 避免 Docker stop_grace_period 到期后 SIGKILL 仍在执行的 chip/bootstrap/auction/after-close
+# 任务，造成 ownership 不清的 running job。
+#
+# 活跃定义（来自 SchedulerJobRun 当前状态机真值，非容器/心跳/日志推断）：status='running'。
+#   queued / resume_queued 不是活跃执行，不机械阻塞（见 guide ACTIVE DEFINITION）。
+#
+# 该 job_name 集合 = 所有在 worker-after-close 进程内执行的业务任务：
+#   - after_close_orchestrator
+#   - after_close_chip_consensus
+#   - review_bootstrap
+#   - auction_final
+#   - auction_open_confirmation
+#
+# 注意：本门禁只读、fail-fast，绝不等待业务任务完成（FIX C），也绝不扩大
+#   PANJI_APP_HEAVY_STOP_GRACE / PANJI_TIMEOUT_COMPOSE_UP_SECONDS 为业务任务超时（FIX D）。
+ACTIVE_AFTER_CLOSE_JOB_NAMES=(
+    after_close_orchestrator
+    after_close_chip_consensus
+    review_bootstrap
+    auction_final
+    auction_open_confirmation
+)
+
+# 本次部署是否会变更 backend runtime / 重启 Python 服务（含 worker-after-close）。
+# 仅在为 true 时才启用活跃盘后任务门禁；frontend-only 部署不受无关活跃任务阻塞（FIX F CASE 6）。
+_backend_runtime_will_mutate() {
+    [[ "${BACKEND_RUNTIME_CHANGED}" == "true" \
+        || "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" \
+        || "${MIGRATION_CHANGED}" == "true" ]]
+}
+
+# 从 ENV_FILE 读取 compose 的 POSTGRES_USER / POSTGRES_DB（未定义时回退默认 bz / bz_stock）。
+_pg_conn_var() {
+    local key="$1"
+    local default="$2"
+    grep -E "^${key}=" "${ENV_FILE}" | head -n1 | cut -d= -f2- | tr -d '[:space:]' \
+        || echo "${default}"
+}
+
+# [DEPLOY-GATE] 只读活跃盘后任务检查。
+# - 无业务写入，无直接状态变更。
+# - 查询失败（无法连接/解析 psql 失败）→ fail-closed 拒绝部署。
+# - 存在 status='running' 的活跃任务 → 打印结构化证据并 fail（ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY）。
+guard_active_after_close_jobs() {
+    if ! _backend_runtime_will_mutate; then
+        log "backend runtime 不变化（不重启 Python 服务），跳过活跃盘后任务门禁"
+        return 0
+    fi
+
+    log "部署将变更 backend runtime / 重启 Python 服务，检查 worker-after-close 活跃长任务..."
+
+    local pg_user pg_db
+    pg_user="$(_pg_conn_var "POSTGRES_USER" "bz")"
+    pg_db="$(_pg_conn_var "POSTGRES_DB" "bz_stock")"
+    if [[ -z "${pg_user}" || -z "${pg_db}" ]]; then
+        fail "ACTIVE_AFTER_CLOSE_JOB_GATE_UNAVAILABLE: 无法从 ${ENV_FILE} 读取 POSTGRES_USER/POSTGRES_DB，拒绝部署（fail-closed）"
+    fi
+
+    # 构造 IN 列表：'a','b',...
+    local quoted=()
+    local name
+    for name in "${ACTIVE_AFTER_CLOSE_JOB_NAMES[@]}"; do
+        quoted+=("'${name}'")
+    done
+    local job_filter
+    job_filter="$(IFS=,; echo "${quoted[*]}")"
+
+    # 只读查询；psql 失败视为无法确认活跃状态，fail-closed（不打印凭据，stderr 丢弃）。
+    local psql_out=""
+    if ! psql_out="$(docker exec trading-postgres psql -U "${pg_user}" -d "${pg_db}" \
+        -tA -F ' | ' \
+        -c "SELECT id, job_name, status, business_date, started_at, heartbeat_at \
+            FROM scheduler_job_runs \
+            WHERE status = 'running' AND job_name IN (${job_filter}) \
+            ORDER BY started_at" 2>/dev/null)"; then
+        fail "ACTIVE_AFTER_CLOSE_JOB_GATE_UNAVAILABLE: 无法查询 scheduler_job_runs（psql 失败），拒绝部署（fail-closed）"
+    fi
+
+    if [[ -n "${psql_out}" ]]; then
+        log "!!! 检测到 worker-after-close 活跃长任务，拒绝部署（fail-closed） !!!"
+        log "错误码: ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY"
+        log "请等待业务任务完成，或使用权威恢复操作（如 /v1/admin/review/bootstrap/{id}/resume）后再部署"
+        log "active_jobs:"
+        while IFS= read -r row; do
+            [[ -n "${row}" ]] && log "  ${row}"
+        done <<< "${psql_out}"
+        fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY: worker-after-close 存在活跃长任务，部署已在任何 runtime mutation 之前停止"
+    fi
+
+    log "无活跃盘后长任务，继续部署"
+}
+
 deploy() {
+    # 0. 活跃盘后任务 fail-closed 门禁（FIX B）：
+    #    仅在 backend runtime 会变更时启用，并在任何 live runtime mutation
+    #    （update_env_file / sync_backend_runtime / write_runtime_sha / migration / restart）
+    #    以及替换 /opt/panji-live/backend/app 之前执行。活跃任务 → 立即停止部署。
+    FAILURE_STAGE="active_job_gate"
+    guard_active_after_close_jobs
+
     # 1. 运行环境镜像：任意 environment_changed → 按同一 GIT_SHA tag 组整体构建。
     #    无 environment_changed → 零构建，GIT_SHA 保持不变。
     FAILURE_STAGE="environment_images"
