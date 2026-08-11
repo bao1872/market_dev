@@ -187,6 +187,9 @@ async def backfill_first_pyramid_history_batch(
                     include_chip=False,
                 )
 
+                # 2.2 PIT normalization（HISTORY-BACKFILL-PIT-01）
+                _apply_pit_normalization(bars, history)
+
                 # 3. 持久化 daily_state + events
                 persisted = await _persist_history_result(
                     session=session,

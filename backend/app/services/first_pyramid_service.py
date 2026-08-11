@@ -2167,24 +2167,38 @@ def normalize_history_result_to_pit(
     if factor_series is None or factor_series.empty or pd.isna(anchor_factor) or anchor_factor == 0:
         return history
 
-    # 预处理 factor lookup：按 date 建 dict（ffill 语义已由 caller 保证）
+    # 预处理 factor lookup：按 date 建 dict
     factor_by_date: dict[str, float] = {}
+    first_factor_date: str | None = None
+    first_factor_value: float | None = None
     for idx, val in factor_series.items():
         d = idx.date().isoformat() if hasattr(idx, "date") else str(idx)[:10]
         if d and not pd.isna(val):
+            if first_factor_date is None or d < first_factor_date:
+                first_factor_date = d
+                first_factor_value = float(val)
             factor_by_date[d] = float(val)
 
     def _factor_at(date_str: str) -> float | None:
-        """查找 trade_date 对应的 factor（ffill 语义由 factor_by_date 预建）。"""
-        # 精确匹配
+        """查找 trade_date 对应的 factor（与 adj_factor.py _compute_denominator_factor 同语义）。
+
+        - 精确匹配 → 返回对应 factor
+        - date 在两个 factor 日期之间 → ffill（返回 <= date_str 的最近 factor）
+        - date 早于第一个 factor 日期 → 返回第一个 factor（与 authority 一致）
+        """
         if date_str in factor_by_date:
             return factor_by_date[date_str]
-        # 回退到 <= date_str 的最近日期
+        # ffill：回退到 <= date_str 的最近日期
         best_key: str | None = None
         for k in factor_by_date:
             if k <= date_str and (best_key is None or k > best_key):
                 best_key = k
-        return factor_by_date.get(best_key) if best_key else None
+        if best_key is not None:
+            return factor_by_date[best_key]
+        # date 早于第一个 factor 日期 → 用第一个 factor
+        if first_factor_value is not None and first_factor_value != 0:
+            return first_factor_value
+        return None
 
     # 1. 归一化 daily_state
     daily_state = history.get("daily_state") or []

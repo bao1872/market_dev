@@ -348,8 +348,8 @@ def test_factor_lookup_ffill():
 
 
 def test_factor_lookup_before_first_factor():
-    """早于第一个 factor 的日期 → 跳过（不修改）"""
-    factor = _make_factor_series({"2026-05-20": 1.0})
+    """早于第一个 factor 的日期 → 使用第一个 factor（与 adj_factor.py authority 一致）"""
+    factor = _make_factor_series({"2026-05-20": 0.9})
     history = _make_history(sqzmom_val=10.0, sqzmom_delta=0.0)
     history["daily_state"][0]["time"] = "2026-05-01T00:00:00"  # before first factor
 
@@ -358,8 +358,9 @@ def test_factor_lookup_before_first_factor():
     )
     state = result["daily_state"][0]
 
-    # 早于第一个 factor → f_t is None → skip normalization
-    assert state["sqzmom_val"] == 10.0
+    # 早于第一个 factor → 用第一个 factor=0.9, K_t = 1.0/0.9
+    k_factor = 1.0 / 0.9
+    assert abs(state["sqzmom_val"] - 10.0 * k_factor) < 1e-10
 
 
 # =============================================================================
