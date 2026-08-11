@@ -68,7 +68,7 @@
 
 ## 2. 九节点注册表
 
-九节点名称、mandatory/enhancement 分类和 canonical 依据如下，后端 DTO、管理后台和验收矩阵必须引用同一注册表：
+节点名称、mandatory/enhancement 分类和 canonical 依据如下，后端 DTO、管理后台和验收矩阵必须引用同一注册表：
 
 | 节点 | 分类 | Canonical/readiness 依据 | 失败影响 |
 |---|---|---|---|
@@ -83,6 +83,8 @@
 | `market_review` | mandatory product | 正式 Review pointer 与发布质量门 | 失败保留旧 pointer |
 
 每个节点至少返回：`status/readiness/mandatory/runId/publicationId/sourceRunIds/coverage/processed/total/heartbeat/lease/isStale/reasonCode/reasonText/recommendedAction`。
+
+`market_review` 的正式业务结果包含 Review domain 内部的 scope observations、signals、discoveries、cross-scope relation evidence、attribution 和 tracking。这些属于 Review domain internal artifacts / read models，不要求独立 product node、独立 run、独立 publication 或独立 pointer。Discovery 的详细语义以 [`70-review.md`](./70-review.md) 为权威。
 
 `dsa_projection` 节点独立表达的是 projection 的 persistence / lineage / retry / compatibility readiness，**不代表独立 DSA 业务计算**。它属于"required compatibility output"，与 chip / state_events / auction 这类真正的业务增强（enhancement）不是同一类：业务分类不同，但兼容投影失败仍可能使系统不是 `fully_ready`（老接口兼容链未闭合），此时 reason 应表达为 `compatibility output incomplete`，而不是 "DSA enhancement failed"。
 
@@ -138,7 +140,7 @@ Canonical reason code：
 
 ### PC-30 Review
 
-Review 的硬依赖只有正式 stock_core、正式 market aggregation 和历史 observations。chip/auction 不进入 Review 唯一键、P/Q/U/C/V 或发布门；chip 晚到不改写 Review run/pointer。P/Q/U/C/V 公式、60 日边界、PIT membership、bootstrap、归因和五阶段 UI 只以 PRD 70 为权威。
+Review 的硬依赖只有正式 stock_core、正式 market aggregation 和历史 observations。chip/auction 不进入 Review 唯一键、P/Q/U/C/V 或发布门；chip 晚到不改写 Review run/pointer。P/Q/U/C/V 公式、60 日边界、PIT membership、bootstrap、Discovery、Cross-Scope Relation、归因和 Discovery Workspace UI 只以 PRD 70 为权威。
 
 ### PC-31 Auction
 

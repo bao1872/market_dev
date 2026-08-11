@@ -340,20 +340,26 @@ pointer 本身**不得把 partial run 伪装成 succeeded**：`pointer.data_run_
 
 当 `stock_core` pointer 和 `board_analysis` pointer 均已发布后，创建 `market_review_run`。两个输入 pointer 缺一不可。
 
-### RV-AC-02 编排顺序
+### RV-AC-02 编排顺序（平行扫描模型）
 
 ```text
 stock_core published
 → board_analysis published
 → create market_review_run
-→ compute level-1 scope metrics（market / major_index / style / industry_l1）
-→ evaluate filters（A/B/C 三类偏差筛选器）
-→ compute level-2 attribution（仅对命中信号的父范围下钻）
-→ map representative instruments
+→ compute ALL scope metrics 并行：
+    market / major_index/* / style/*
+    / industry_l1/* / industry_l2/* / industry_l3/* / concept/*
+→ evaluate filters（A/B/C/D 作为 Evidence Engine）
+→ generate Signal records（atomic evidence）
+→ aggregate Discovery candidates
+→ compute Cross-Scope Relations
+→ compute attributions + representative instruments
 → evaluate active trackings
 → quality gate
 → publish review pointer
 ```
+
+> **已废弃**：旧两级扫描模型（Level-1 → 命中 → Level-2 drilldown）。所有 Scope Family 在发现阶段独立平行计算。详见 `docs/prd/70-review.md` §6。
 
 ### RV-AC-03 隔离与恢复
 

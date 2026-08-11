@@ -1,11 +1,12 @@
-# 复盘模块 PRD V1.0
+# 复盘模块 PRD V2.0 — Review Discovery Model
 
 状态：已确认
-最后确认日期：2026-08-06
+最后确认日期：2026-08-11
 对应 Map：`../maps/70-review.md`
-需求所有权：复盘模块完整产品与工程合同（目标行为、数据契约、API、筛选器、归因、追踪、编排）
+需求所有权：复盘模块完整产品与工程合同（目标行为、数据契约、API、Discovery、信号、归因、Cross-Scope Relation、追踪、编排）
+需求变更输入：`ref/需求变更.md` CHANGE-20260811-001
 
-> 本文件是 Review 指标、历史、横截面、归因、信号、发布和页面状态的唯一需求真源。[`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义 Review 与上游节点之间的依赖、lineage 和闭环场景，不替代本文件的 P/Q/U/C/V 公式及门禁。
+> 本文件是 Review 指标、历史、横截面、Discovery、信号、Cross-Scope Relation、归因、发布和页面状态的唯一需求真源。[`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义 Review 与上游节点之间的依赖、lineage 和闭环场景，不替代本文件的 P/Q/U/C/V 公式、Discovery 定义及门禁。
 
 > 本文件是复盘模块的权威产品与工程合同。实现时不得根据页面方便性重新发明业务逻辑；前端不计算聚合变量、筛选器或归因结论。
 
@@ -15,34 +16,36 @@ Review 依赖以下正式领域输入：
 
 - 个股第一金字塔：趋势、结构、动量为必选维度，筹码共识为可选维度；
 - 至少满足滚动窗口要求的第一金字塔历史状态和日线事实；
-- 行业/概念板块的趋势、结构、动量、量能、事件分布和 PIT membership；
+- Board Analysis 提供的行业/概念板块 P/Q/U/C/V、pyramid_v2 和第二金字塔数据；
 - 个股 core 与板块聚合的正式 publication lineage；
 - 行情列表、个股详情和板块详情的稳定导航身份。
 
-Review 业务链为：
+Review 新业务链为：
 
 第一金字塔与历史状态
 → 板块第二金字塔
-→ P/Q/U/C/V聚合变量
-→ 三类偏差筛选器
-→ 两级范围扫描
-→ 板块归因
-→ 个股验证
+→ P/Q/U/C/V聚合变量（所有 Scope Family 独立平行计算）
+→ State / Change / Anomaly 分离评估
+→ Filter Evidence 生成（Signal = atomic evidence）
+→ Discovery 聚合（Discovery = user-level market finding）
+→ Cross-Scope Relation 分析
+→ 归因与个股验证
 → 用户追踪
 → 次日状态复核与历史反馈
 
 ## 1. 产品目标与边界
 
-### 1.1 页面目标
+### 1.1 产品目标
 
-复盘页必须让用户完成以下固定流程：
+Review 系统回答以下核心问题：
 
-- 找到今天哪里发生异常；
-- 查看命中的偏差类型和证据；
-- 下钻到行业、概念和成员股票，解释异常来源；
-- 用个股第一金字塔验证代表股票；
-- 将信号、板块或股票加入追踪；
-- 查看过去信号今天是确认、持续、减弱、失效还是转化。
+1. **今天市场最明显的结构变化在哪里？**
+2. **它是行业、主题、风格还是多轴共振？**
+3. **这是静态强，还是今天正在增强/减弱？**
+4. **是少数龙头驱动，还是参与正在扩散？**
+5. **哪些股票贡献最大？**
+6. **这个现象是今天第一次出现，还是已经持续？**
+7. **每一个结论的底层证据是什么？**
 
 ### 1.2 不做的内容
 
@@ -53,7 +56,10 @@ Review 业务链为：
 - 不把全部99个第一金字塔字段塞入复盘页；
 - 不把通用板块排行榜当作复盘主流程；
 - 不以自然语言总结替代结构化证据；
-- 不建立第二套K线或行情筛选器。
+- 不建立第二套K线或行情筛选器；
+- 不依赖新闻、研报、LLM 推理作为 Discovery 成立的必要条件；
+- 不引入 AI 主营业务分类、人工真实概念标签、新闻 NLP 分类、唯一炒作逻辑；
+- 不构造唯一 `primary trading category`。
 
 ## 2. 权威业务链
 
@@ -62,21 +68,26 @@ A. 已发布 stock_core pointer
 B. 已发布 board_analysis / market_aggregation pointer
 C. 第一金字塔历史基线（默认120个交易日，最低60日）
         ↓
-市场/指数/风格/一级行业范围聚合
+所有 Scope Family 独立平行计算：
+  market / major_index/* / style/* / industry_l1/* / industry_l2/* / industry_l3/* / concept/*
         ↓
-生成每个范围的 P/Q/U/C/V 当前值、变化与历史分位
+生成每个 Scope 的 P/Q/U/C/V 当前值、变化、历史分位与横截面分位
         ↓
-运行三类偏差筛选器
+State / Change / Anomaly 分离评估
         ↓
-对命中范围进行第二级下钻
+运行 Filter Engine（A/B/C/D 作为内部 Evidence Family）
         ↓
-生成板块与成员归因
+Signal = atomic evidence 生成
         ↓
-生成个股与板块关系
+Discovery 聚合（多个 Signal → 一个 Discovery）
+        ↓
+Cross-Scope Relation 分析
+        ↓
+归因与个股验证
         ↓
 发布 Review Run
         ↓
-前端五阶段工作台
+前端 Discovery Workspace
         ↓
 用户保存追踪
         ↓
@@ -390,55 +401,144 @@ created_at
 tracking_id + trade_date
 ```
 
-## 6. 范围定义与两级扫描
+## 6. Scope Discovery 模型
 
-### 6.1 第一级扫描范围
+### 6.1 Scope Family 平行发现轴
 
-固定只扫描：
+Review Discovery 层正式定义以下 Scope Family 为**平行观察轴**：
+
+```
+Market
+Major Index
+Style
+Industry
+Concept
+```
+
+五类 Scope Family 在**发现阶段互相独立、平行计算**。
+
+其中 Industry 内部保留 taxonomy hierarchy：
+
+```
+Industry L1
+Industry L2
+Industry L3
+```
+
+但必须明确：
+
+> **Discovery topology ≠ Taxonomy topology**
+
+Industry L1 / L2 / L3 都可以独立进入 Discovery。Concept 必须独立进入 Discovery。
+
+**正式废弃以下旧模型：**
+
+- ~~`Level 1 scope → 命中 → Level 2 drilldown → concept`~~ 作为 Discovery gate 的模型。
+- ~~L1 命中后才能扫描 L2~~
+- ~~L2 命中后才能扫描 L3~~
+- ~~Industry 命中后才能扫描 Concept~~
+
+分类父子关系只能用于：
+
+- taxonomy（行业分类学）；
+- 导航（Scope Browser 中 L1→L2→L3 浏览）；
+- 上下钻（归因时 drill-down）；
+- attribution（行业内部 parent/child contribution）；
+- relationship explanation（解释为何某 L2 与 L1 共享特征）。
+
+不得作为 signal/discovery eligibility gate。
+
+### 6.2 第一阶段必须独立扫描的 Scope
+
+正式 Review run 应独立生成以下 scope observations：
 
 ```
 market
-major_index
-style
-industry_l1
+
+major_index/*
+style/*
+
+industry_l1/*
+industry_l2/*
+industry_l3/*
+
+concept/*
 ```
 
-范围来源：
-
-- market：全部有效A股；
-- major_index：复用现有指数成分服务；
-- style：使用已有、版本化的风格股票池定义；
-- industry_l1：复用现有行业板块成员关系。
-
-禁止在第一级直接扫描全部概念和全部股票。
-
-### 6.2 第二级下钻范围
-
-仅对命中信号的父范围扫描：
+每个 Scope independently：
 
 ```
-industry_l2
-industry_l3
-concept
-instrument
+members
+   ↓
+第一金字塔成员事实
+   ↓
+P/Q/U/C/V
+   ↓
+State / Change / 历史位置 / 横截面位置
+   ↓
+Discovery Evidence
 ```
 
-下钻必须保留父子路径：
+任何 scope 都不得因为另一个 scope 未命中、无异常、未发布 discovery 而失去自身参与发现的资格。
 
-```
-market → style/index/industry_l1
-→ industry_l2/l3 or related concept
-→ instrument
-```
+### 6.3 Membership 与 Discovery 分离
 
-概念范围只有满足以下条件才参与：
+Scope membership 只回答：
 
-- 与命中父范围存在成员交集；
-- ready_count达到最小样本数；
-- coverage达到门禁；
-- 不允许为展示而扫描所有无关概念。
+> **哪些股票属于这个范围？**
 
-### 6.3 Historical Membership Source Contract（Phase 4A3 新增）
+不得回答：
+
+> **这只股票今天主要在炒什么？**
+
+股票允许同时属于多个 Industry、Concept、Style、Index。
+
+系统不得通过 Industry membership 排除 Concept discovery，也不得通过 Concept membership 改写股票的行业归属。
+
+多重归属不是数据污染，而是市场事实。
+
+不得引入唯一 `primary trading category` 作为前置计算条件。
+
+### 6.4 Scope Observation 合同
+
+每一个正式 discovery scope 都必须独立产生：
+
+- P / Q / U / C / V（聚合变量）
+- current value（当前归一化值）
+- raw value（原始聚合值）
+- delta1d（1日变化）
+- delta5d（5日变化）
+- self historical percentile（自身历史分位）
+- same-family cross-sectional percentile（同类横截面分位）
+- component evidence（组件证据）
+- coverage（覆盖率）
+- readiness / data quality（就绪状态与数据质量）
+
+#### 6.4.1 Comparable Peer Cohort（横截面对比合同）
+
+横截面比较必须 within **comparable peer cohort**。Taxonomy level ≠ comparable statistical cohort。
+
+正式 peer cohort 定义：
+
+| Scope | Peer Cohort | 说明 |
+|---|---|---|
+| `market` | 无 peer cohort | 全市场是基准范围，不构造一元素横截面 percentile；异常判断主要使用自身历史基线和正式市场事实 |
+| `major_index` | 同 `major_index` cohort | 指数之间比较 |
+| `style` | 同 `style` cohort | 风格之间比较 |
+| `industry_l1` | **仅** `industry_l1` | 一级行业之间比较 |
+| `industry_l2` | **仅** `industry_l2` | 二级行业之间比较 |
+| `industry_l3` | **仅** `industry_l3` | 三级行业之间比较 |
+| `concept` | 同 `concept` cohort | 概念之间比较 |
+
+**禁止**：
+
+- `industry_l1 + industry_l2 + industry_l3` 混合在同一个 cross-sectional percentile pool；
+- `concept` 与 `industry` 混合；
+- `style` 与 `major_index` 混合。
+
+本 PRD 只定义 comparable cohort，不规定具体统计公式（percentile rank / z-score / winsorization 等由算法版本控制）。
+
+### 6.5 Historical Membership Source Contract（原 §6.3，Phase 4A3）
 
 本小节定义 `major_index` / `style` / `industry_l1` 历史 PIT membership 的数据来源合同。
 Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
@@ -446,7 +546,7 @@ Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
 均由 migration `079_board_hierarchy_batch_identity` 建立）**已完全支持 PIT 半开区间**
 `[effective_from, effective_to)`，无需新增表或 migration。缺口仅为**来源数据填充**。
 
-#### 6.3.1 硬规则（禁止项）
+#### 6.5.1 硬规则（禁止项）
 
 - **PIT 唯一性**：历史日期 T 只能使用 T 日 `effective` 的 membership；禁止 `latest` / `current` 回填历史区间。
 - **禁止手工伪造**：无来源数据时必须输出 `bootstrap_unavailable`，不得构造 member 列表。
@@ -462,7 +562,7 @@ Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
 - **申万行业来源**：若需申万行业分类，优先扩展现有 `pywencai` 问句（使用“申万行业”相关关键词）
   获取；此扩展**不代表允许 current membership 回填历史**——历史 PIT 缺口仍须 `bootstrap_unavailable`。
 
-#### 6.3.2 各 family 来源状态（Phase 4A3 结论）
+#### 6.5.2 各 family 来源状态（Phase 4A3 结论）
 
 | family | 当前状态 | 授权来源 | 历史窗口 2026-02-06→2026-08-07 可用性 |
 |---|---|---|---|
@@ -471,7 +571,7 @@ Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
 | csi500 | 同上（key=`csi500`） | 待授权（候选见 §6.3.4） | **SOURCE_SELECTION_REQUIRED** |
 | style（large_cap / small_cap） | migration `079` 已建 placeholder（`large_cap_style` / `small_cap_style`，`blocked_external_population`），PRD §6.1 称“使用已有、版本化的风格股票池定义”，但**项目内无任何 origin / 构造规则** | 无 | **STYLE_PRODUCT_DECISION_REQUIRED**（产品定义缺口，非 ingestion bug） |
 
-#### 6.3.3 industry_l1 决策
+#### 6.5.3 industry_l1 决策
 
 - `pywencai` 是 rules/90 唯一授权的板块来源，固定查询 `"同花顺概念，行业分类"`，
   返回**单一当前快照**，无 `as_of` / `trade_date` / 历史参数 → 确认 current-only。
@@ -481,7 +581,7 @@ Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
   1. MVP 接受 industry_l1 **仅 forward-only**（自 2026-08-09 起每日 snapshot），历史窗口标记为 `bootstrap_unavailable`；
   2. 授权一个具备历史行业分类的替代来源（需先改本 PRD）。
 
-#### 6.3.4 csi300 / csi500 候选矩阵（需授权后选用）
+#### 6.5.4 csi300 / csi500 候选矩阵（需授权后选用）
 
 候选按 §10 优先级（现有已授权 > 官方 > 新依赖）排序：
 
@@ -493,7 +593,7 @@ Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
 
 当前均**未授权**，故 csi300/csi500 = **SOURCE_SELECTION_REQUIRED**。
 
-#### 6.3.5 style 产品决策缺口（OPEN DECISION）
+#### 6.5.5 style 产品决策缺口（OPEN DECISION）
 
 - PRD §6.1 仅声明“使用已有、版本化的风格股票池定义”，未定义：
   - large_cap / small_cap 的**来源**（官方风格指数？自定义池？）；
@@ -502,7 +602,7 @@ Phase 4A3（2026-08-09）完成 source selection 与授权分析；当前 schema
 - 此为 **PRODUCT_DEFINITION_GAP**，必须由用户决定产品定义后，才能确定 source 或构造规则。
 - PRD 此处标记为 **OPEN DECISION**，不补规则。
 
-#### 6.3.6 最小 normalized shape（与现有表对齐）
+#### 6.5.6 最小 normalized shape（与现有表对齐）
 
 INDUSTRY（→ `BoardMembershipHistory`）：
 
@@ -522,12 +622,12 @@ Idempotency 以现有 unique constraint 为准：
 `uq_board_membership_history_identity`（board_id, instrument_id, effective_from）；
 `uq_universe_memberships_identity`（universe_definition_id, instrument_id, effective_from）。
 
-#### 6.3.7 Required historical coverage
+#### 6.5.7 Required historical coverage
 
 第一阶段只要求完整覆盖 `2026-02-06 → 2026-08-07`（当前 120 交易日 baseline）。
 不要求 10 年历史，除非来源免费自然提供且不显著增加复杂度。
 
-#### 6.3.8 Review MVP 发布就绪门禁（Phase 4C 校正）
+#### 6.5.8 Review MVP 发布就绪门禁（Phase 4C 校正）
 
 原 §11.1 发布门禁将 `major_index` / `style` / `industry_l1` readiness 作为 whole-Review
 硬性阻塞项。Phase 4C（2026-08-09）按产品决策校正为 **渐进式 scope readiness**：
@@ -649,9 +749,11 @@ C越高表示越集中，不表示越好。
 
 所有除法使用明确epsilon并过滤异常值。
 
-## 8. 三类筛选器
+## 8. Filter Engine（内部 Evidence Family）
 
-筛选器必须由版本化配置驱动，建议：
+A/B/C/D 继续作为**内部算法 family**，但不再作为用户前端一级信息架构。
+
+筛选器必须由版本化配置驱动：
 
 ```
 backend/config/review_filters.yaml
@@ -660,6 +762,13 @@ backend/config/review_filters.yaml
 并使用Pydantic schema校验。不得把阈值散落在多个service。
 
 初始工程默认值仅用于形成可运行基线，上线前必须用历史回放校准；配置变化必须升级filter_version。
+
+**定位变更（2026-08-11）：**
+
+- A/B/C/D 是 Filter Engine 内部的算法分类，不是前端一级产品结构。
+- 前端不再按 A/B/C/D 分组展示，转用用户语义（状态/改善/恶化/扩散/收缩/异常/共振）。
+- D Family（state migration / freshness / diffusion / concentration / relative strength）定位为 **Discovery Evidence Family**，不是独立 Signal Family。
+- `MarketReviewSignal` 保留为 atomic evidence record；新的 `Discovery` domain object 负责 user-level finding 聚合。
 
 ### 8.1 A类：表面表现与内部质量偏差
 
@@ -725,11 +834,11 @@ V变化分位>=70
 C未处于异常高位或未继续上升
 ```
 
-### 8.4 D类：第二金字塔维度偏差
+### 8.4 D类：第二金字塔 Evidence Family
 
-> [P0-7 2026-07-30] 新增 D 族筛选器，对应 PRD §24 第二金字塔 6 维度。
 > D 族只在 industry/concept scope 评估（需 pyramid_v2 数据）；
 > market/major_index/style scope 无 board_analysis，D 族不命中。
+> D 族输出的是 **Discovery Evidence**，不是独立用户 Finding。
 
 **D1 state_migration_positive**
 
@@ -760,6 +869,16 @@ hhi >= 0.1 或 top5_contribution >= 0.4
 leader_median_gap > 0
 ```
 
+> **Concentration 语义校正（2026-08-11）**：`concentration_high` 是 **State**，不是 **Anomaly**。
+> 必须区分：
+> - `concentration_state_high`：当前集中度高（背景状态）
+> - `concentration_rising`：集中度正在上升（Change）
+> - `concentration_abnormal`：集中度相对历史异常（Anomaly）
+> - `concentration_broadening`：集中度正在扩散（Change，反向）
+> - `concentration_narrowing`：集中度正在收缩（Change，反向）
+>
+> 用户 Discovery 优先消费 Change/Anomaly 变体。仅 `concentration_state_high` 不得单独生成高价值 Discovery。
+
 **D5 relative_strength_strong**
 
 ```
@@ -767,36 +886,79 @@ vs_market.ratio >= 1.1
 equal_weight_diff > 0
 ```
 
-### 8.5 信号排序
+### 8.5 Discovery 排序
 
-不生成综合黑箱分。排序键依次为：
+Discovery 必须进行**全量排序后再分页**。
 
-- 偏差历史分位；
-- 当日变化分位；
-- 持续日数；
-- coverage；
-- scope_type固定优先级；
-- scope_name稳定第二键。
+禁止：
+```
+DB LIMIT 50 → 再在这50条中排序
+```
 
-rank_key必须把上述分项保存下来。
+正确逻辑：
+```
+全部 eligible discovery → 统一 rank → Top N → pagination
+```
 
-## 9. 板块归因逻辑
+排名必须可解释，不生成不可追溯黑箱总分。
 
-筛选器只负责发现，归因负责解释。
+排序至少考虑：
 
-### 9.1 子范围贡献
+- 异常程度（anomaly strength）
+- 变化强度（change strength）
+- 参与宽度（breadth / participation）
+- 证据一致性（evidence consistency）
+- 持续时间（lifecycle / duration）
+- coverage
+- cross-scope confirmation
 
-对每个命中信号：
+具体算法权重另由算法版本控制。`rank_key` 必须把上述分项保存下来。
 
-- 找到父范围的直接子范围和关联概念；
-- 计算子范围对父范围P/Q/U/C/V变化的贡献；
+**已废弃**：`scope_type` 固定优先级作为排序键（平行发现后 scope family 平等）。
+
+## 9. 归因（Attribution）与 Cross-Scope Relation
+
+筛选器只负责发现 evidence，归因负责解释。
+
+Attribution 正式区分三层业务语义：
+
+### 9.1 ATTR-1：Taxonomy Hierarchical Attribution
+
+用于 Industry taxonomy 内部的层级贡献：
+
+```
+L1 ↔ L2
+L2 ↔ L3
+```
+
+回答：一个行业范围内部，哪些下级 taxonomy scope 对上级状态/变化产生主要贡献。
+
+对每个 Discovery：
+
+- 识别相关的下级 taxonomy scope（industry L2 对 L1、industry L3 对 L2）；
+- 计算下级 scope 对上级 P/Q/U/C/V 变化的贡献；
 - 保留正贡献和负贡献；
 - 按绝对贡献排序；
 - 保存前N项，但API支持分页读取全部。
 
 归因不得仅按涨幅排序。
 
-### 9.2 个股贡献
+**注意**：这是 attribution，不是 discovery gate。不得恢复"L1 命中 → 才允许扫描 L2/L3"。
+
+### 9.2 ATTR-2：Member Attribution
+
+回答某个 Scope / Discovery 内：哪些 instrument 是主要贡献成员。
+
+至少可表达：
+
+- P/Q/U/C/V contribution
+- board/scope role（core / second_line / elasticity / follower / laggard）
+- relation to scope（synchronized_strengthening / instrument_leads_scope / etc.）
+- fresh event evidence
+- contributionPayload
+- roleEvidence
+
+PRD 定义业务合同，具体 ranking weight 由算法版本控制。
 
 每只成员计算：
 
@@ -810,9 +972,196 @@ rank_key必须把上述分项保存下来。
 
 角色分类与因子状态分开保存。角色可使用相对贡献和历史稳定性生成，但必须保留role_evidence。
 
-## 10. 信号生命周期与追踪状态机
+### 9.3 ATTR-3：Cross-Scope Relation
 
-### 10.1 系统信号
+平行扫描完成后，增加独立的 **Cross-Scope Relation** 阶段。
+
+该阶段不是重新计算第一金字塔，而是比较各 Scope Discovery 的：
+
+- 成员交集（membership overlap）
+- P/Q/U/C/V 状态
+- 变化方向
+- 异常强度
+- 结构事件
+- 扩散程度
+- 代表股票
+
+目标是识别：**今天不同分类体系是否在描述同一股市场资金行为。**
+
+#### 第一阶段支持的 Relation Type
+
+至少支持：
+
+```
+concept ↔ industry
+concept ↔ concept
+concept ↔ style
+industry ↔ style
+industry ↔ industry
+```
+
+#### Relation 输出语义
+
+禁止输出模糊"相关"。至少区分：
+
+- **THEME_LED**：概念明显强于所属传统行业（Concept ↑↑，Industry →）
+- **INDUSTRY_LED**：行业整体出现一致改善，多个相关概念同步
+- **BROAD_CONFIRMATION**：行业 + 概念 + 风格出现共同确认
+- **ISOLATED_THEME**：单一概念异常，行业和相关概念没有确认，参与宽度有限
+- **STYLE_LED**：多个不同行业同时出现相同风格特征（小盘/高弹性/低位修复）
+- **CONFLICTING**：不同 Scope 指向相互冲突的状态（Concept 强但 Industry Q/U 恶化），必须保留，不得强行合并
+
+#### Relation 数据来源
+
+第一阶段只使用已有结构化事实：
+
+```
+membership overlap
+price
+first pyramid
+P/Q/U/C/V
+pyramid_v2
+history
+```
+
+不得依赖新闻、研报、公告语义或 LLM 推理作为 Relation 成立的必要条件。
+
+Relation 是 Discovery 后的关系解释，不是 Scope 之间新的计算 gate。
+
+## 10. State / Change / Anomaly 分离
+
+这是 Review Discovery 的 P0 原则。
+
+### 10.1 State（状态）
+
+State 描述：**现在是什么样。**
+
+例如：
+- 集中度高
+- 趋势向上
+- 量能活跃
+- 价格处于高位
+- 内部结构较强
+
+State 可以作为证据。但：**静态 State 不得默认生成用户可见 Discovery。**
+
+### 10.2 Change（变化）
+
+Change 描述：**今天相对昨天发生了什么。**
+
+例如：
+- 集中度快速上升
+- 参与度扩张
+- 结构破坏开始扩散
+- 动量增强成员增加
+- 龙头与跟随开始同步
+
+Change 可以形成 Discovery Candidate。
+
+### 10.3 Anomaly（异常）
+
+Anomaly 描述：**这个变化相对自身历史或同类范围是否异常。**
+
+最低应允许以下比较维度：
+- 1D change
+- 5D change
+- self historical percentile
+- same-day cross-sectional percentile
+
+### 10.4 Discovery 成立条件
+
+一个用户可见 Discovery 原则上应至少包含：
+- State + Change
+- 或 State + Historical/Cross-sectional Anomaly
+
+而不是只有 State。
+
+## 10A. Signal 与 Discovery 分层
+
+### 10A.1 正式定义
+
+- **Signal = atomic evidence**（原子证据）：Filter Engine 命中的单条技术信号，包含触发条件、metric 值和历史分位。
+- **Discovery = user-level market finding**（用户级市场发现）：聚合多个 Signal 形成的一条用户可理解的市场发现。
+
+### 10A.2 关系
+
+一个 Scope 可以同时命中多个内部 Signal：
+
+例如：
+```
+low_level_repair
+breadth_expansion
+synchronized_expansion
+event_freshness_high
+relative_strength_strong
+```
+
+用户侧应聚合成一个 Discovery，而不是五条重复 Signal。
+
+例如：
+> **玻璃基板：内部参与扩张，结构修复加速，相对市场强度上升。**
+
+下钻后才能查看哪些 filter 命中、哪些 metric 贡献、哪些 component 支持、哪些股票贡献。
+
+### 10A.3 Discovery Domain Object
+
+Review domain 正式业务结构可以表达为：
+
+```
+Market Review
+├─ Scope Observations
+├─ Signals（atomic evidence）
+├─ Discoveries（user-level finding）
+├─ Cross-Scope Relations
+├─ Attribution
+└─ Tracking
+```
+
+这是逻辑/domain ownership，不是强制物理 storage topology。
+
+建议新增正式 Discovery domain object：
+
+```yaml
+discovery:
+  trade_date:
+  scope_type:
+  scope_key:
+  scope_name:
+
+  state:
+  change:
+  anomaly:
+
+  key_evidence:        # 聚合后的关键证据
+  related_scopes:      # Cross-Scope Relation 结果
+  representative_instruments:
+
+  lifecycle:
+  first_seen:
+  duration:
+  status:
+
+  data_quality:
+```
+
+PRD 不要求 Discovery 必须拥有：
+- 独立 database table（可以是 view / materialized view / 内存聚合）
+- 独立 publication pointer
+- 独立 scheduler job
+- 独立 ProductReadiness node
+- 独立 mandatory product status
+
+这些属于后续 implementation design，除非另有正式需求。
+
+Signal 继续负责算法命中、证据、版本追踪。Discovery 聚合多个 evidence。不要求立即破坏性删除历史 signal schema（additive migration）。
+
+### 10A.4 历史兼容
+
+原有 `MarketReviewSignal` 和 A/B/C/D filter family 允许保留。新的 Discovery 应 consume existing/new signals as evidence，而不是强制把 Signal schema 一次性废弃。迁移优先采用 additive 而不是 destructive。
+
+## 10B. 信号生命周期与追踪状态机
+
+### 10B.1 系统信号
 
 ```
 new
@@ -833,11 +1182,11 @@ new
 
 禁止前端根据颜色自行判断状态。
 
-### 10.2 用户追踪
+### 10B.2 用户追踪
 
 用户可以追踪：
 
-- 一条信号；
+- 一条 Discovery；
 - 一个命中范围；
 - 一只代表股票。
 
@@ -845,16 +1194,18 @@ new
 
 ## 11. 任务编排与发布
 
-盘后顺序：
+盘后顺序（平行扫描模型）：
 
 ```
 stock_core published
 → board_analysis published
 → create market_review_run
-→ compute level-1 scope metrics
-→ evaluate filters
-→ compute level-2 attribution for matched signals
-→ map representative instruments
+→ compute ALL scope metrics 并行（market / major_index/* / style/* / industry_l1/* / industry_l2/* / industry_l3/* / concept/*）
+→ evaluate filters（A/B/C/D 作为 Evidence Engine）
+→ generate Signal records（atomic evidence）
+→ aggregate Discovery candidates
+→ compute Cross-Scope Relations
+→ compute attributions + representative instruments
 → evaluate active trackings
 → quality gate
 → publish review pointer
@@ -875,8 +1226,7 @@ stock_core published
 
 ### 11.1 发布门禁
 
-本节与 §6.3.8「Review MVP 发布就绪门禁（Phase 4C 校正）」构成同一份合同；
-§6.3.8 为语义定义，本节为门禁判定规则。两者不得出现相反规则。
+本节与 §6.5.8「Review MVP 发布就绪门禁（Phase 4C 校正）」构成同一份合同。
 
 单scope：
 
@@ -887,39 +1237,39 @@ stock_core published
 
 **1. MANDATORY — market（HARD GATE）**
 
-- `market` scope 必须存在且状态 `ready`，并满足 market coverage/quality 要求
-  （含 P/Q/U/C/V 五项 `normalized_ready`）；
-- market missing / not ready / coverage 低于强制门槛
-  → **whole Review publication CLOSED**。
+- `market` scope 必须存在且状态 `ready`，并满足 market coverage/quality 要求（含 P/Q/U/C/V 五项 `normalized_ready`）；
+- market missing / not ready / coverage 低于强制门槛 → **whole Review publication CLOSED**。
 
 **2. PROGRESSIVE OPTIONAL — industry_l1 / major_index / style**
 
 - 真实就绪 → 正常参与产品输出；
-- PIT unavailable / `insufficient_history` / `blocked_external_population` /
-  `bootstrap_unavailable` / skipped
-  → 记录为 **scope-level diagnostic / unavailable**，保留真实状态；
+- PIT unavailable / `insufficient_history` / `blocked_external_population` / `bootstrap_unavailable` / skipped → 记录为 **scope-level diagnostic / unavailable**，保留真实状态；
 - 上述 optional unavailable **不得阻塞** whole Review MVP publication；
 - 禁止把 optional scope 状态伪装成 `ready`。
 
-**3. UNEXPECTED EXECUTION FAILURE 仍然阻塞**
+**3. PARALLEL SCOPES — industry_l2 / industry_l3 / concept**
 
-- 任何 scope（含 optional）出现非预期执行失败或非终态
-  （`failed` / `pending` / `running`）
-  → **whole Review publication CLOSED**；
-- optional 语义只豁免「数据源不可用」，不豁免「执行异常」。
+- 各自独立 readiness，不阻塞其他 scope；
+- 真实就绪 → 正常参与 Discovery；
+- 不可用 → 记录诊断，不影响其他 scope 的 Discovery 发布。
 
-**4. 数据来源硬约束**
+**4. UNEXPECTED EXECUTION FAILURE 仍然阻塞**
+
+- 任何 scope（含 optional / parallel）出现非预期执行失败或非终态（`failed` / `pending` / `running`）→ **whole Review publication CLOSED**；
+- optional/parallel 语义只豁免「数据源不可用」，不豁免「执行异常」。
+
+**5. 数据来源硬约束**
 
 - 禁止 current membership × historical date 回填；
 - 禁止 latest snapshot backfill / forward-fill 冒充 PIT 成员。
 
-**5. 其他整套条件（不变）**
+**6. 其他整套条件（不变）**
 
 - signal evaluation无系统性异常；
 - source_core_run_id和source_board_run_id均指向当前正式pointer。
 
 > 说明：Phase 4C 之前的旧规则「配置的主要指数和风格范围必须ready 
-> / 一级行业ready比例达到配置门槛」已按 §6.3.8 废止，不再作为 whole-Review 硬门。
+> / 一级行业ready比例达到配置门槛」已按 §6.5.8 废止，不再作为 whole-Review 硬门。
 
 ## 12. API合同
 
@@ -1045,15 +1395,18 @@ frontend/src/features/review/
   queryKeys.ts
   urlState.ts
   ReviewHeader.tsx
-  ReviewStageNav.tsx
-  MarketScanPanel.tsx
-  FilterDiscoveryPanel.tsx
-  BoardAttributionPanel.tsx
-  StockValidationPanel.tsx
-  TrackingReviewPanel.tsx
-  EvidenceDrawer.tsx
+  ScopeBrowser.tsx           # Scope Family 平行切换浏览器
+  DiscoveryList.tsx           # Discovery 列表（替代旧 SignalCard 列表）
+  DiscoveryCard.tsx           # 单条 Discovery 卡片
+  DiscoveryDetail.tsx         # Discovery 详情页
+  ScopeDetailPanel.tsx        # Scope 详情面板
+  InternalStructurePanel.tsx  # 内部结构展示
+  PyramidV2Panel.tsx          # Pyramid V2 面板
+  CrossScopeRelationPanel.tsx # Cross-Scope Relation 面板
+  InstrumentEvidencePanel.tsx # 个股证据面板
+  TrackingPanel.tsx           # 追踪面板
+  EvidenceDrawer.tsx          # 结构化证据抽屉
   ScopeMetricsTable.tsx
-  SignalCard.tsx
   AttributionTable.tsx
   ReviewInstrumentTable.tsx
   ReviewDataQualityBadge.tsx
@@ -1062,7 +1415,7 @@ frontend/src/features/review/
 frontend/src/pages/ReviewPage.tsx
 ```
 
-现有BoardAnalysisPage.tsx不删除。应抽取可复用的：
+现有 `BoardAnalysisPage.tsx` 不删除。应抽取可复用的：
 
 - BoardMetricsSummary
 - BoardDistributionPanel
@@ -1070,7 +1423,23 @@ frontend/src/pages/ReviewPage.tsx
 
 供板块分析页和复盘归因阶段共同使用，禁止复制两套计算和展示逻辑。
 
-## 14. 页面信息架构
+## 14. 页面信息架构（Discovery Workspace）
+
+**已废弃**：旧五阶段 UI（市场扫描 / 筛选发现 / 板块归因 / 个股验证 / 追踪复核）不再作为用户信息架构的强制要求。
+
+新用户主路径调整为**市场结构工作台**语义：
+
+```
+市场发现 / 今日结构
+    ↓
+异常发现 / Discovery Workspace
+    ↓
+Discovery 详情（Scope + Evidence + Relation + Instruments）
+    ↓
+我的追踪
+```
+
+后台仍然可以保留 `scope / filter / signal / attribution / tracking` 作为内部 domain object，但用户不需要理解系统执行了几个 pipeline phase。
 
 ### 14.1 固定顶部
 
@@ -1079,118 +1448,141 @@ frontend/src/pages/ReviewPage.tsx
 - 交易日与前后交易日；
 - Review发布状态；
 - Core/Board Run；
-- 股票与板块覆盖率；
+- 覆盖率；
 - 算法版本、筛选器版本、历史基线；
 - 数据质量入口。
 
 顶部不得显示AI自由生成的市场结论。
 
-### 14.2 五阶段导航
+### 14.2 Scope 浏览器
 
-1. 市场扫描
-2. 筛选发现
-3. 板块归因
-4. 个股验证
-5. 追踪复核
-
-阶段共享同一上下文。顶部面包屑显示：
+Scope Family 必须允许平行切换：
 
 ```
-全市场 > 科技风格 > 电子 > 光模块 > 000021
+全市场
+主要指数
+风格
+行业
+概念
 ```
 
-### 14.3 阶段一：市场扫描
+Industry 内再选择 L1 / L2 / L3（仅浏览维度，不是 discovery gate）。
 
-主表字段：
+不得重新引入"先选择 Industry → 才能看 Concept"的隐式 gate。
 
-- 范围名称
-- 范围类型
-- P/Q/U/C/V当前值
-- 1日变化
-- 120日分位
-- 命中数量
+### 14.3 市场发现首页
+
+首页首要回答：**今天市场发生了什么？**
+
+建议最小结构：
+
+```
+今日市场状态
+
+主要发现
+────────────────
+玻璃基板
+主题驱动 · 新增
+参与扩张 ↑  结构质量 ↑  量能 ↑  集中度 →
+18 / 22 成员确认
+
+机器人
+行业+概念共振 · 持续3日
+...
+
+军工
+上涨但内部质量减弱
+...
+```
+
+不得首先展示 A/B/C/D 分类。
+
+### 14.4 Discovery 详情必需信息
+
+每一个 Discovery 至少必须能下钻看到：
+
+#### Scope
+- family / type / name
+- members
 - coverage
-- 数据状态
 
-每个变量单元格显示：
+#### Current State
+- P / Q / U / C / V
 
-- 值 + 方向箭头 + 历史分位细条
+#### Change
+- 1D / 5D
 
-不使用雷达图。
+#### Position
+- historical percentile
+- cross-sectional percentile
 
-点击一行：
+#### Internal Structure
+应尽可能消费现有后端 component：
+- trend breadth
+- structure breadth
+- momentum breadth
+- synchronized improvement
+- structure breakdown
+- non-leader participation
+- HHI
+- Top5 contribution
+- volume expansion
 
-- 更新URL scope；
-- 进入该范围信号列表；
-- 不直接跳转个股。
+#### Pyramid V2
+若 scope 可用：
+- migration
+- freshness
+- diffusion
+- concentration
+- relative strength
 
-### 14.4 阶段二：筛选发现
+#### Related Scopes
+Cross-Scope Relation（THEME_LED / INDUSTRY_LED / BROAD_CONFIRMATION 等）
 
-固定三组：
+#### Representative Instruments
+- first pyramid
+- fresh events
+- contribution payload
+- role（core / second_line / elasticity / follower / laggard）
+- role evidence
+- relation to scope
 
-- A 表面/质量偏差
-- B 状态/速度偏差
-- C 成交/参与偏差
+### 14.5 Evidence Drawer（结构化证据解释器）
 
-一张SignalCard必须显示：
+Evidence Drawer 是**结构化证据解释器**，不是 JSON Debugger。
 
-- 范围；
-- 信号类型；
-- 生命周期状态；
-- 首次出现日期和持续日数；
-- 触发变量；
-- 历史分位；
-- coverage；
-- 结构化解释；
-- 查看归因、查看历史、加入追踪。
+正式用户页面禁止直接将 `JSON.stringify(payload)` 作为主要展示。
 
-不显示黑箱总分。
+Raw JSON 仅允许 admin/debug mode。
 
-### 14.5 阶段三：板块归因
+普通用户必须转换为结构化展示：
 
-页面分四块：
+- metric（指标名称）
+- value（当前值）
+- change（变化）
+- percentile（历史位置）
+- denominator（分母）
+- coverage
+- source / component（来源）
+- trigger reason（触发原因）
+- member contribution（成员贡献）
 
-- 信号证据链；
-- 第二金字塔：趋势、结构、动量、内部分布；
-- 子范围贡献表；
-- 代表股票预览。
+### 14.6 个股证据
 
-归因说明由模板根据结构化字段生成，例如：
+个股下钻必须展示：
 
-```
-P保持高位 → Q下降 → U收缩 → C上升
-```
+- First Pyramid
+- Fresh Events
+- P/Q/U/C/V contribution（contributionPayload）
+- Board Role
+- Role Evidence（roleEvidence）
+- Relation To Scope
 
-禁止调用大模型自由编写结论作为唯一依据。
+不得只展示单一 `contributionValue`。个股"为什么重要"必须可解释。
 
-### 14.6 阶段四：个股验证
+### 14.7 追踪
 
-精简表字段：
-
-- 股票
-- 板块角色
-- 与板块关系
-- 趋势
-- 主要结构
-- 短线结构
-- 动量
-- 量能
-- 新鲜事件
-- 贡献
-- 自选 +/-
-
-操作：
-
-- 打开/stock/:symbol；
-- 加入/移除自选；
-- 加入本信号追踪；
-- "查看全部"跳转/market并传递标准筛选参数。
-
-复盘页不得重新实现99字段列设置和导出。
-
-### 14.7 阶段五：追踪复核
-
-内部三个子Tab：
+内部子Tab：
 
 - 过去发现
 - 自选映射
@@ -1199,37 +1591,12 @@ P保持高位 → Q下降 → U收缩 → C上升
 "过去发现"字段：
 
 - 首次日期
-- 信号
+- Discovery
 - 范围
 - 当前状态
 - 连续天数
 - 状态变化
 - 后续证据
-
-"自选映射"回答：
-
-- 自选股属于哪些今日命中范围；
-- 个股与板块同步还是背离；
-- 今日新增结构/动量事件；
-- 是否进入确认或失效条件。
-
-### 14.8 证据抽屉
-
-右侧统一EvidenceDrawer，由任何指标、信号、归因或股票打开。
-
-内容：
-
-- 定义
-- 当前值/昨日值/5日变化
-- 120日历史分位
-- 分母与coverage
-- components
-- 底层字段来源
-- 贡献板块/股票
-- 缺失原因
-- source run与算法版本
-
-主页面保持简洁，但所有结论可追溯。
 
 ## 15. 前端数据与状态规则
 
@@ -1356,19 +1723,80 @@ Review只传：
 - /market与/stock跳转正确；
 - 次日tracking状态可重复计算。
 
-## 20. 验收标准
+## 20. 验收标准与场景
+
+### 20.1 验收场景
+
+#### Case 1 — Concept 独立发现（京东方 / 玻璃基板）
+
+假设：
+- 京东方属于显示面板行业；
+- 同时属于玻璃基板 Concept；
+- 显示面板行业无明显异常；
+- 玻璃基板 Concept 出现明显 P/Q/U/V + migration + volume 改善。
+
+PRD 必须保证：玻璃基板可以独立被发现。不得因为显示面板没命中而漏掉。
+
+#### Case 2 — 小行业局部强
+
+假设：
+- Industry L1 整体普通；
+- 某 Industry L2/L3 显著改善。
+
+PRD 必须保证：L2/L3 可以独立产生 Discovery。
+
+#### Case 3 — 高集中但长期如此
+
+假设：
+- HHI 高；
+- Top5 contribution 高；
+- 但与历史相比无明显变化。
+
+不得仅因为 `concentration_high` 生成高价值 Discovery。
+
+#### Case 4 — 集中度快速恶化
+
+假设：
+- U下降；
+- C快速上升；
+- leader-median gap扩大。
+
+应能形成"行情向少数龙头收缩"类 Discovery。
+
+#### Case 5 — 多轴共振
+
+Industry + Concept + Style 同时改善。
+
+不得生成三个互不相关的重复 Finding。应允许形成 BROAD_CONFIRMATION。
+
+#### Case 6 — Theme Led
+
+Concept 强、Industry 普通。
+
+应允许输出 THEME_LED。
+
+#### Case 7 — Conflict
+
+Concept 表面很强，但 Industry Q/U 恶化。
+
+不得强行合并成 bullish conclusion。应保留 CONFLICTING relation。
+
+### 20.2 完整验收标准
 
 完整验收必须满足：
 
-- 页面五阶段与后台业务链一一对应；
+- 所有 Scope Family 独立平行参与 Discovery；
+- Concept / L2 / L3 不受 Industry L1 的 discovery gate；
 - 前端没有P/Q/U/C/V或筛选器计算代码；
 - 同一页面不混合不同run；
-- 三类筛选器均能给出结构化证据；
-- 信号可下钻到子范围和股票；
-- 个股第一金字塔与板块关系可解释；
-- 信号可保存追踪并在下一交易日产生evaluation；
-- 过去信号可显示确认/持续/减弱/失效/转化；
+- Filter Engine 均能给出结构化证据；
+- Discovery 可下钻到子范围、Cross-Scope Relation 和股票；
+- 个股第一金字塔与板块关系可解释（含 contributionPayload 和 roleEvidence）；
+- Discovery 可保存追踪并在下一交易日产生evaluation；
+- 过去发现可显示确认/持续/减弱/失效/转化；
 - coverage、历史不足和partial不被伪装成完成；
+- Evidence Drawer 展示结构化证据，非 Raw JSON；
+- 全量 rank → paginate，非 paginate → rank；
 - 真实登录浏览器完成URL、页面、Console和Network验收。
 
 ## 21. 文档与记忆系统
@@ -1390,27 +1818,33 @@ Review只传：
 - 不新增重复治理目录；
 - AGENTS.md只保留入口，不扩写业务细节。
 
-## 22. 推荐实施顺序
+## 22. 推荐实施顺序（Discovery Model Refactor）
 
-**Phase 0：输入门禁**
+**P0-A：Scope 平行化 + A/B/C Corrective + 排序修复**
 
-先确保第一金字塔、板块分析、行情完整性和发布pointer可靠。
+- 扩展 scope scanning 到所有 scope family 平行计算（industry_l2/l3/concept 独立）
+- A/B/C history context 闭环（CR-01）
+- Global ranking before pagination（CR-02）
+- Frontend/API contract alignment（CR-03/CR-04）
 
-**Phase 1：Review后端骨架**
+**P0-B：Discovery Domain + State/Change/Anomaly**
 
-迁移、模型、scope snapshot、P/Q/U/C/V、run/item、API overview/scopes。
+- 新增 Discovery domain object（Signal → Discovery 聚合）
+- State/Change/Anomaly 分离
+- Concentration 语义校正（state vs change vs anomaly）
 
-**Phase 2：筛选器与归因**
+**P0-C：Cross-Scope Relation**
 
-A/B/C筛选器、signals、attributions、instrument mapping、发布门禁。
+- Cross-Scope Relation 计算阶段
+- THEME_LED / INDUSTRY_LED / BROAD_CONFIRMATION / ISOLATED_THEME / STYLE_LED / CONFLICTING
 
-**Phase 3：五阶段前端**
+**P1：前端 Discovery Workspace 重构**
 
-ReviewPage、URL状态、市场扫描、筛选发现、板块归因、个股验证。
-
-**Phase 4：追踪闭环**
-
-tracking、daily evaluation、过去发现、自选映射、事件演化。
+- Scope Browser 平行切换
+- Discovery 列表替代旧 SignalCard 分组
+- Discovery 详情页（Scope + Evidence + Relation + Instruments）
+- Evidence Drawer 结构化展示
+- 追踪面板重构
 
 **Phase 5：历史回放与阈值校准**
 
@@ -1418,7 +1852,7 @@ tracking、daily evaluation、过去发现、自选映射、事件演化。
 
 ## 23. P0 强化条款（review-1.1.0）
 
-> 本章节为 review-1.1.0 算法版本（CHANGE-20260730-014）追加的强制条款，是对 §7（P/Q/U/C/V 指标合同）、§11（任务编排与发布）、§6（范围定义与两级扫描）的补强。本章节条款优先级高于历史 §7/§11 的所有冲突描述。
+> 本章节为 review-1.1.0 算法版本（CHANGE-20260730-014）追加的强制条款，是对 §7（P/Q/U/C/V 指标合同）、§11（任务编排与发布）、§6（Scope Discovery 模型）的补强。本章节条款优先级高于历史 §7/§11 的所有冲突描述。
 
 ### 23.1 历史原始组件 bootstrap 合同
 
@@ -1444,15 +1878,21 @@ tracking、daily evaluation、过去发现、自选映射、事件演化。
 - canary run 的结果可由 admin 通过 `include_partial=true` 或显式 `run_id` 查看，但必须返回 `is_provisional=true` 标记，避免与正式发布结果混淆。
 - 上一轮 canary run（`run_id=3e1db415-2266-4cc5-9453-d8561d799b43`，`trade_date=2026-07-29`，`force=True`，`signal_count=0`）保留为审计记录，不修改历史数据；该 run 已写入 `factor_publications`，后续 review-1.1.0 修复后必须通过新 run 切换 pointer，不得复用该 run 重发。
 
-### 23.4 完整第一级范围合同
+### 23.4 完整 Scope 合同（平行扫描）
 
-第一级扫描必须完整覆盖以下四类范围，缺一不可：
+Discovery 阶段必须独立覆盖以下全部 Scope Family，缺一不可：
 
 ```
 market
-major_index
-style
-industry_l1
+
+major_index/*
+style/*
+
+industry_l1/*
+industry_l2/*
+industry_l3/*
+
+concept/*
 ```
 
 合同要求：
@@ -1460,16 +1900,20 @@ industry_l1
 - **market**：全市场有效 A 股，必须使用当日 active 股票，`eligible_count` 不得小于 4500（A 股正常交易日）；
 - **major_index**：必须覆盖配置的全部主要指数成分（不少于 2 个），每个指数成分来源以版本化服务为准；
 - **style**：必须覆盖配置的全部风格池（不少于 2 个），不得只算部分风格；
-- **industry_l1**：必须覆盖全部一级行业（不少于 25 个），不得只算 canary 子集。
+- **industry_l1**：必须覆盖全部一级行业（不少于 25 个），不得只算 canary 子集；
+- **industry_l2**：全部二级行业独立参与 Discovery，不受 L1 命中 gate；
+- **industry_l3**：全部三级行业独立参与 Discovery，不受 L1/L2 命中 gate；
+- **concept**：全部概念独立参与 Discovery，不受 Industry 命中 gate。
 
 `scope_key` 命名规范：
 
 - `market`：`scope_key="market"`（固定）；
 - `major_index`：`scope_key=<index_code>`（指数代码，不含空格）；
 - `style`：`scope_key=<style_code>`（风格代码，不含空格）；
-- `industry_l1`：`scope_key=<board_id>`（统一使用 `board_id`，禁止混用 `industry_name`、`industry_code`、`board_name`）。
+- `industry_l1/l2/l3`：`scope_key=<board_id>`（统一使用 `board_id`，禁止混用 `industry_name`、`industry_code`、`board_name`）；
+- `concept`：`scope_key=<board_id>`。
 
-`industry_l1` 的 `scope_key` 必须与 `board_analysis_snapshots.board_id` 对齐，便于 Review 阶段三归因直接 JOIN 板块分析结果，禁止出现 `scope_key=electronics` 与 `scope_key=<uuid>` 混用的情况。
+`industry_*` 和 `concept` 的 `scope_key` 必须与 `board_analysis_snapshots.board_id` 对齐，便于 Review 归因直接 JOIN 板块分析结果。
 
 ### 23.5 禁止 force 发布不可用数据
 
@@ -1587,13 +2031,15 @@ force=True 时跳过 1-6 门禁，但必须（2026-08-01 安全收口，已按�
 
 ## 最终原则
 
-- 筛选器是发现引擎；
-- 第二金字塔是解释引擎；
-- 第一金字塔是验证引擎；
-- 自选与盘中监控是追踪引擎；
-- 历史复核是反馈引擎。
+- Filter Engine（A/B/C/D）是 **Evidence Engine**（证据引擎）；
+- 第二金字塔是 **Explanation Engine**（解释引擎）；
+- 第一金字塔是 **Verification Engine**（验证引擎）；
+- Discovery 聚合是 **User Finding Engine**（用户发现引擎）；
+- Cross-Scope Relation 是 **Market Understanding Engine**（市场理解引擎）；
+- 自选与盘中监控是 **Tracking Engine**（追踪引擎）；
+- 历史复核是 **Feedback Engine**（反馈引擎）。
 
-复盘页必须把这五个引擎连接成一个可解释、可下钻、可追踪、可复现的工作台。
+复盘页必须把这七个引擎连接成一个可解释、可下钻、可追踪、可复现的市场结构工作台。
 
 ## 25. raw与normalized分离 + 冷启动展示 + bootstrap 生效范围（CHANGE-20260801-001）
 
@@ -1724,3 +2170,72 @@ Review run 创建时必须显式解析上游依赖状态，并把结果固化到
 - 对**已是当前正式 pointer** 的 published run 重复发布：返回既有 publication，
   **零写入**（不插入新行、不 flush、不 delete、不改写 `run.status` 与 `run.published_at`）；
 - 已 published 但**已非**当前正式 pointer 的旧 run：禁止原地重发。
+
+## 28. Corrective Requirements（实现修正，非新产品功能）
+
+以下项目不定义为新产品功能，而是现有设计的实现修正。
+
+### CR-01 A/B/C History Context 闭环
+
+必须正式生成并注入：
+
+```
+P-Q historical percentile
+Q delta1d historical percentile
+U delta1d historical percentile
+V delta1d historical percentile
+
+structure breakdown change
+C rising
+C anomaly state
+```
+
+否则任何依赖这些字段的 filter 不得被声明为 production-ready。
+
+### CR-02 Global Ranking Before Pagination
+
+所有 Signal / Discovery：
+
+```
+全部 eligible → 统一 rank → Top N → pagination
+```
+
+禁止：
+```
+DB LIMIT 50 → 再在这50条中排序
+```
+
+### CR-03 Frontend/API Contract Alignment
+
+前端必须完整接收后端 DTO。特别包括：
+
+```
+contributionPayload
+roleEvidence
+```
+
+当前后端 API 已返回，前端 `ReviewInstrument` contract 必须完整承载。
+
+### CR-04 Signal Payload Rendering
+
+前端读取的数据结构必须与后端真实合同一致。不得假定 `triggerPayload.metrics = Array` 当后端实际合同为 `triggerPayload.metrics = {P,Q,U,C,V}`。
+
+## 29. 不在本次范围
+
+明确不做：
+
+- LLM自动判断股票炒作逻辑
+- 新闻NLP自动分类
+- 概念可信度模型
+- 主营业务真实性评分
+- 自动预测涨跌
+- 买卖建议 / 组合推荐
+- 实时盘中Review
+- 自动交易
+- AI 主营业务分类
+- 人工真实概念标签
+- 新闻 NLP 分类
+- 唯一炒作逻辑
+- Economic Exposure 数据库
+
+本次只解决：**如何更准确地从已有市场结构数据里发现"哪里正在发生变化"。**
