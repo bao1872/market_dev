@@ -915,17 +915,32 @@ restart_services() {
 
     _wave_up backend "${_wave_backend[@]}" || return 1
     if [[ ${#_wave_backend[@]} -gt 0 ]]; then
-        _wait_health
+        _wait_health || return 1
     fi
     _wave_up frontend "${_wave_frontend[@]}" || return 1
     _wave_up scheduler "${_wave_scheduler[@]}" || return 1
     if [[ ${#_wave_scheduler[@]} -gt 0 ]]; then
-        _check_scheduler_single_instance
+        _check_scheduler_single_instance || return 1
     fi
     _wave_up workers "${_wave_workers[@]}" || return 1
     _wave_up recovery "${_wave_recovery[@]}" || return 1
     _wave_up capture "${_wave_capture[@]}" || return 1
     return 0
+}
+
+# [ROUND2 / P1-B] Compose-only 运行时配置对账：不 --force-recreate，交给 Docker
+# Compose 自身判断哪些服务配置变化并仅重创那些。与 restart_services 的 force-recreate
+# 语义解耦（后者仍用于真正的代码/环境/Migration 重启）。不重启数据服务。
+reconcile_compose_runtime() {
+    local services=("$@")
+    if [[ ${#services[@]} -eq 0 ]]; then
+        log "无需 Compose 配置对账"
+        return 0
+    fi
+    log "Compose 配置对账（不强制重建，由 Compose 自行判断变更服务）: ${services[*]}"
+    cd "${REPO_ROOT}"
+    run_with_timeout "compose_reconcile" "${TIMEOUT_COMPOSE_UP_SECONDS}" -- \
+        ${COMPOSE_CMD} up -d --no-build "${services[@]}" || return 1
 }
 
 # 等待 backend /v1/health 就绪（限时）。
@@ -1178,23 +1193,28 @@ deploy() {
         RESTARTED_FRONTEND=true
     fi
 
-    # [REVIEW-V2] Compose runtime config change (prod/live overlay) is an application
-    # runtime mutation: recreate app containers so the new container config takes effect.
-    # Does NOT set need_backend/need_frontend (no code sync), does NOT trigger image build
-    # (STEP 5) and does NOT trigger migration (STEP 6). Reuse existing restart_services path;
-    # scope stays PYTHON_SERVICES + frontend (postgres/redis/umami never restart).
+    # [ROUND2 / P1-B] Compose 运行配置变化（prod/live overlay）属纯配置对账，
+    # 不应 --force-recreate（否则会强制重建即便配置未变的容器，且可能因镜像缺失而失败）。
+    # 交给 reconcile_compose_runtime：docker compose up -d --no-build <services>，
+    # 由 Compose 自身判断哪些服务配置变化并仅重创那些（postgres/redis/umami 永不重启）。
+    # 不触发镜像构建（STEP 5）、不触发 Migration（STEP 6）。
     if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then
-        restart_list+=("${PYTHON_SERVICES[@]}")
-        restart_list+=(frontend)
         RESTARTED_PYTHON=true
         RESTARTED_FRONTEND=true
-        log "  Compose 运行配置变化：应用容器将以新 Compose 配置重建（PYTHON_SERVICES + frontend）"
+        log "  Compose 运行配置变化：应用容器将以新 Compose 配置对账（PYTHON_SERVICES + frontend，不 force-recreate）"
     fi
 
     if [[ ${#restart_list[@]} -eq 0 ]]; then
-        log "无运行代码变化，不重启任何服务（仅刷新 RUNTIME_SHA 与核验）"
+        # 无实际代码/环境/Migration 运行变化：若仅是 Compose 配置变化，走轻量对账。
+        if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then
+            reconcile_compose_runtime "${PYTHON_SERVICES[@]}" frontend || return 1
+        else
+            log "无运行代码变化，不重启任何服务（仅刷新 RUNTIME_SHA 与核验）"
+        fi
     else
-        restart_services "${restart_list[@]}"
+        # 有实际运行变化：restart_services（force-recreate）为权威路径，
+        # 其已覆盖 Compose 配置变化的服务，无需再重复对账（避免双重启）。
+        restart_services "${restart_list[@]}" || return 1
     fi
 
     FAILURE_STAGE=""

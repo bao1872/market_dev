@@ -299,15 +299,29 @@ if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then ok "CASE2 仅 live overlay
 reset_flags $'docker-compose.prod.yml'
 if _backend_runtime_will_mutate; then ok "CASE3 compose 运行配置变化 → _backend_runtime_will_mutate=true"; else bad "CASE3 compose 运行配置变化 → _backend_runtime_will_mutate=true"; fi
 
-# CASE 4：compose 运行配置变化 → 重启路径包含 backend + 全部 PYTHON_SERVICES + frontend
-# （重启装配为 main 内联逻辑，非独立函数；此处用结构断言验证分支挂载范围）
-if code_of "${SERVER_SCRIPT}" \
-    | grep -qE 'if \[\[ "\$\{COMPOSE_RUNTIME_CHANGED\}" == "true" \]\]; then' \
-    && code_of "${SERVER_SCRIPT}" | grep -qE 'restart_list\+=\("\$\{PYTHON_SERVICES\[@\]\}"\)' \
-    && code_of "${SERVER_SCRIPT}" | grep -qE 'restart_list\+=\(frontend\)'; then
-    ok "CASE4 compose 变化重启分支挂载 PYTHON_SERVICES + frontend"
+# CASE 4：compose 运行配置变化 → 走 Compose 配置对账（reconcile_compose_runtime），
+# 命令含 --no-build，且不得含 --force-recreate（P1-B：不过度重建）。
+assert_code_contains "CASE4 compose 变化走 reconcile（含 reconcile_compose_runtime 定义）" \
+    'reconcile_compose_runtime\(' "${SERVER_SCRIPT}"
+assert_code_contains "CASE4 reconcile 命令含 --no-build" \
+    '\$\{COMPOSE_CMD\} up -d --no-build' "${SERVER_SCRIPT}"
+assert_code_absent "CASE4 reconcile 命令不含 --force-recreate" \
+    '\$\{COMPOSE_CMD\} up -d --no-build.*--force-recreate' "${SERVER_SCRIPT}"
+# 对账 application scope 仍为 PYTHON_SERVICES + frontend（不含 postgres/redis/umami）
+assert_code_contains "CASE4 reconcile 范围 = PYTHON_SERVICES + frontend" \
+    'reconcile_compose_runtime "\$\{PYTHON_SERVICES\[@\]\}" frontend' "${SERVER_SCRIPT}"
+# 纯 Compose 变化分支（COMPOSE_RUNTIME_CHANGED==true 块）不再向 restart_list 追加
+# PYTHON_SERVICES/frontend（避免 force-recreate）。注意：实际运行代码变化（need_backend）
+# 分支仍合法 append restart_list，故只断言 COMPOSE_RUNTIME_CHANGED 分支内不含 append。
+if code_of "${SERVER_SCRIPT}" | awk '
+    /if \[\[ "\$\{COMPOSE_RUNTIME_CHANGED\}" == "true" \]\]; then/ {in_block=1; next}
+    in_block && /^    fi$/ {in_block=0}
+    in_block && /restart_list\+=/ {found=1}
+    END{exit found}
+'; then
+    ok "CASE4 纯 Compose 分支不再 append 到 restart_list（不 force-recreate）"
 else
-    bad "CASE4 compose 变化重启分支挂载 PYTHON_SERVICES + frontend"
+    bad "CASE4 纯 Compose 分支不再 append 到 restart_list（不 force-recreate）"
 fi
 
 # CASE 5：compose 运行配置变化 → 不自动触发镜像构建 / migration
@@ -327,6 +341,33 @@ if [[ "${BACKEND_RUNTIME_CHANGED}" == "false" && "${FRONTEND_RUNTIME_CHANGED}" =
     ok "CASE6 仅 docs 变化不产生新重启/迁移行为"
 else
     bad "CASE6 仅 docs 变化不产生新重启/迁移行为"
+fi
+
+# CASE 7-8：P1-C 失败传播结构性断言（不实际执行部署，仅校验源码是否含传播点）。
+# 7：restart_services 调用点必须显式 || return 1
+assert_code_contains "CASE7 restart_services 调用显式 || return 1（失败传播到 deploy）" \
+    'restart_services "\$\{restart_list\[@\]\}" \|\| return 1' "${SERVER_SCRIPT}"
+# 7b：reconcile_compose_runtime 调用点必须显式 || return 1
+assert_code_contains "CASE7 reconcile_compose_runtime 调用显式 || return 1（失败传播到 deploy）" \
+    'reconcile_compose_runtime "\$\{PYTHON_SERVICES\[@\]\}" frontend \|\| return 1' "${SERVER_SCRIPT}"
+# 8：_wait_health 与 _check_scheduler_single_instance 在 restart_services 内显式 || return 1
+assert_code_contains "CASE8 restart_services 内 _wait_health 显式 || return 1" \
+    '_wait_health \|\| return 1' "${SERVER_SCRIPT}"
+assert_code_contains "CASE8 restart_services 内 _check_scheduler_single_instance 显式 || return 1" \
+    '_check_scheduler_single_instance \|\| return 1' "${SERVER_SCRIPT}"
+# 8b：_wave_up 仍保留 || return 1（既有 force-recreate 波次失败传播不变）
+assert_code_contains "CASE8 _wave_up 仍保留 || return 1" \
+    '_wave_up .* \|\| return 1' "${SERVER_SCRIPT}"
+# 9：main 仍以 if ! deploy 捕获部署失败
+assert_code_contains "CASE9 main 以 if ! deploy 捕获部署失败" \
+    'if ! deploy; then' "${SERVER_SCRIPT}"
+# 10：reconcile_compose_runtime 定义内不含 --force-recreate（纯对账语义；
+# 全文件仍允许 force-recreate，因为它是 restart_services 既有 force-recreate 波次语义）。
+if code_of "${SERVER_SCRIPT}" \
+    | awk '/^reconcile_compose_runtime\(\)/,/^}/{if(/force-recreate/)found=1} END{exit !found}'; then
+    bad "CASE10 reconcile_compose_runtime 定义内含 --force-recreate"
+else
+    ok "CASE10 reconcile_compose_runtime 定义不含 --force-recreate"
 fi
 
 rm -f "${_DEPLOY_FIXTURE}"
