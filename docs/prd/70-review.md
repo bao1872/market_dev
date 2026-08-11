@@ -4,7 +4,7 @@
 最后确认日期：2026-08-11
 对应 Map：`../maps/70-review.md`
 需求所有权：复盘模块完整产品与工程合同（目标行为、数据契约、API、Discovery、信号、归因、Cross-Scope Relation、追踪、编排）
-需求变更输入：`ref/需求变更.md` CHANGE-20260811-001
+需求变更依据：`ref/需求变更.md`（2026-08-11 Review Discovery Model Refactor）
 
 > 本文件是 Review 指标、历史、横截面、Discovery、信号、Cross-Scope Relation、归因、发布和页面状态的唯一需求真源。[`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义 Review 与上游节点之间的依赖、lineage 和闭环场景，不替代本文件的 P/Q/U/C/V 公式、Discovery 定义及门禁。
 
