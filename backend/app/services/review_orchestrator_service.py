@@ -1084,7 +1084,7 @@ async def _build_scope_history(
     """
     from app.services.review_metric_observation_service import load_metric_history
 
-    return await load_metric_history(
+    result = await load_metric_history(
         session,
         scope_type=scope.scope_type,
         scope_key=scope.scope_key,
@@ -1095,6 +1095,10 @@ async def _build_scope_history(
         required_taxonomy_compatibility_key=required_taxonomy_compatibility_key,
         required_source_history_run_id=required_source_history_run_id,
     )
+    if len(result) == 4:
+        return result
+    # Backward compat: 3-tuple → add None date_indexed
+    return result[0], result[1], result[2], None
 
 
 async def _resolve_canonical_history_source(
@@ -1248,6 +1252,9 @@ async def _compute_scope_metrics_phase(
 ) -> tuple[MarketReviewScopeSnapshot | None, dict[str, dict[str, list[float]]] | None]:
     """Compute and persist raw/normalized metrics for one scope.
 
+    Returns (snapshot, history_maps). date_indexed is passed through history_maps
+    as a sentinel key '_date_indexed' for CR-01 date-aligned computations.
+
     [Phase4C 2026-08-09] 透传 canonical history lineage 过滤条件（P0-B）。
 
     [REVIEW-FACT-PARITY-02 §10] ``day_fact_map`` 由 ``compute_run`` 一次性加载并
@@ -1345,7 +1352,7 @@ async def _compute_scope_metrics_phase(
     # - 从 market_review_scope_snapshots 读取历史已发布同 scope 的 raw_value 序列
     # - 若无历史 review 数据（首次运行），history_maps=None，component status=insufficient_history
     # - prev_values/prev5d_values 从最近 1/5 个交易日的 scope_snapshot 读取
-    history_maps, prev_values, prev5d_values = await _build_scope_history(
+    history_maps, prev_values, prev5d_values, date_indexed = await _build_scope_history(
         session,
         scope=scope,
         trade_date=run.trade_date,
@@ -1398,6 +1405,10 @@ async def _compute_scope_metrics_phase(
         completed_at=datetime.now(UTC),
     )
 
+    # Embed date_indexed into history_maps for CR-01 date-aligned computations
+    if history_maps is not None and date_indexed is not None:
+        history_maps["_date_indexed"] = date_indexed  # type: ignore[assignment]
+
     return snapshot, history_maps
 
 
@@ -1407,18 +1418,19 @@ def _build_history_extras(
 ) -> dict[str, float | int]:
     """[CR-01] 从历史序列构建 filter engine 所需的 history_extras。
 
-    Production observation shape:
-    - history_maps: {metric_code: {component_name: [raw_value 序列]}}
-    - 每个 metric_code 下必有 "_metric_value" component（归一化 metric value）
-    - 各 component 的序列按 trade_date 升序，且已对齐同一 scope 的观察历史
-    - PIT: trade_date < run.trade_date（由 load_metric_history 保证）
+    CR01-D true date alignment:
+    - history_maps["_date_indexed"] = {trade_date: {metric_code: {component_name: raw_value}}}
+    - P-Q 仅在 P 和 Q 同时存在的 trade_date 计算
+    - structure_breakdown 比较当前 snapshot vs 最近 canonical trade_date
     """
     extras: dict[str, float | int] = {}
 
     if history_maps is None:
         return extras
 
-    # CR01-A: Q/U/V delta1d historical percentile — 使用 _metric_value
+    date_indexed = history_maps.get("_date_indexed")
+
+    # CR01-A: Q/U/V delta1d historical percentile
     for metric_code, key in [("Q", "_q_delta1d_history_pct"),
                                ("U", "_u_delta1d_history_pct"),
                                ("V", "_v_delta1d_history_pct")]:
@@ -1430,31 +1442,34 @@ def _build_history_extras(
         if delta_series:
             extras[key] = _percentile_rank(delta, delta_series)
 
-    # CR01-B: P-Q history percentile — 使用各 trade_date 的 _metric_value 差
-    p_series = _get_metric_value_series(history_maps, "P")
-    q_series = _get_metric_value_series(history_maps, "Q")
-    if p_series and q_series:
-        min_len = min(len(p_series), len(q_series))
-        pq_diff_series = [p_series[i] - q_series[i] for i in range(min_len)]
-        p_payload = snapshot.p_payload or {}
-        q_payload = snapshot.q_payload or {}
-        p_val = p_payload.get("value")
-        q_val = q_payload.get("value")
-        if isinstance(p_val, (int, float)) and isinstance(q_val, (int, float)):
-            extras["_pq_diff_history_pct"] = _percentile_rank(
-                p_val - q_val, pq_diff_series,
-            )
+    # CR01-B: P-Q date-aligned — only on trade_dates where both P and Q exist
+    if isinstance(date_indexed, dict):
+        pq_diffs = []
+        for td in sorted(date_indexed.keys()):
+            entry = date_indexed[td]
+            p_entry = entry.get("P", {})
+            q_entry = entry.get("Q", {})
+            p_val = p_entry.get("_metric_value")
+            q_val = q_entry.get("_metric_value")
+            if p_val is not None and q_val is not None:
+                pq_diffs.append(p_val - q_val)
+        if pq_diffs:
+            p_payload = snapshot.p_payload or {}
+            q_payload = snapshot.q_payload or {}
+            p_val = p_payload.get("value")
+            q_val = q_payload.get("value")
+            if isinstance(p_val, (int, float)) and isinstance(q_val, (int, float)):
+                extras["_pq_diff_history_pct"] = _percentile_rank(p_val - q_val, pq_diffs)
 
-    # CR01-C: structure_breakdown_not_rising — 使用 Q.structure_breakdown_diffusion
+    # CR01-C: structure_breakdown — current snapshot vs most recent canonical trade_date
     extras["_structure_breakdown_not_rising"] = (
-        _check_structure_breakdown_diffusion_not_rising(history_maps)
+        _check_structure_breakdown_vs_previous(snapshot, date_indexed)
     )
 
-    # CR01-D: C context
+    # CR01-D: C context — use existing historyPercentile120d
     c_payload = snapshot.c_payload or {}
     c_delta1d = c_payload.get("delta1d")
     extras["_c_rising"] = 1 if isinstance(c_delta1d, (int, float)) and c_delta1d > 0 else 0
-    # 使用已计算的 historyPercentile120d 而非重新发明历史算法
     c_history_pct = c_payload.get("historyPercentile120d")
     extras["_c_high_anomaly"] = (
         1 if isinstance(c_history_pct, (int, float)) and c_history_pct >= 80 else 0
@@ -1467,7 +1482,6 @@ def _get_metric_value_series(
     history_maps: dict[str, dict[str, list[float]]],
     metric_code: str,
 ) -> list[float] | None:
-    """获取某 metric 的 _metric_value 历史序列（按 trade_date 升序）。"""
     components = history_maps.get(metric_code)
     if not components:
         return None
@@ -1478,7 +1492,6 @@ def _extract_delta_series_from_metric_value(
     history_maps: dict[str, dict[str, list[float]]],
     metric_code: str,
 ) -> list[float] | None:
-    """从 _metric_value 序列计算 delta1d 序列。"""
     values = _get_metric_value_series(history_maps, metric_code)
     if values is None or len(values) < 2:
         return None
@@ -1486,30 +1499,44 @@ def _extract_delta_series_from_metric_value(
 
 
 def _percentile_rank(value: float, series: list[float]) -> float:
-    """计算 value 在 series 中的百分位 (0-100)。"""
     if not series:
         return 0.0
     below = sum(1 for v in series if v < value)
     return round(below / len(series) * 100, 1)
 
 
-def _check_structure_breakdown_diffusion_not_rising(
-    history_maps: dict[str, dict[str, list[float]]] | None,
+def _check_structure_breakdown_vs_previous(
+    snapshot: MarketReviewScopeSnapshot,
+    date_indexed: dict | None,
 ) -> int:
-    """CR01-C: 检查 Q.structure_breakdown_diffusion 是否不再继续上升。
+    """CR01-C: 比较当前 snapshot structure_breakdown_diffusion vs 最近 canonical trade_date。
 
-    从 history_maps["Q"]["structure_breakdown_diffusion"] 取最后两个值比较。
-    structure_breakdown_diffusion 是反向 component（值越大 Q 越差），
-    因此 "not rising" = 当前值 <= 前值。
+    使用 date_indexed 获取最近 trade_date 的 Q.structure_breakdown_diffusion 值。
     """
-    if history_maps is None:
+    # Get current value from snapshot Q payload components
+    q_payload = snapshot.q_payload or {}
+    components = q_payload.get("components", [])
+    current = None
+    if isinstance(components, list):
+        for c in components:
+            if isinstance(c, dict) and c.get("name") == "structure_breakdown_diffusion":
+                current = c.get("rawValue")
+                if isinstance(current, (int, float)):
+                    current = float(current)
+                break
+
+    if current is None:
         return 0
-    q_components = history_maps.get("Q")
-    if not q_components:
-        return 0
-    series = q_components.get("structure_breakdown_diffusion")
-    if series and len(series) >= 2:
-        return 1 if series[-1] <= series[-2] else 0
+
+    # Get previous value from date_indexed
+    if isinstance(date_indexed, dict) and date_indexed:
+        most_recent_date = max(date_indexed.keys())
+        entry = date_indexed[most_recent_date]
+        q_entry = entry.get("Q", {})
+        prev = q_entry.get("structure_breakdown_diffusion")
+        if isinstance(prev, (int, float)):
+            return 1 if current <= prev else 0
+
     return 0
 
 

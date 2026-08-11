@@ -1,43 +1,30 @@
-"""Review V2 Discovery service.
-
-Orchestrates Discovery aggregation from atomic Signal evidence,
-State/Change/Anomaly projection, Cross-Scope Relation, and global ranking.
-"""
+"""Review V2 Discovery service."""
 
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.review.cross_scope_relation import (
-    CrossScopeRelation,
-    compute_relations,
-)
-from app.domain.review.discovery import (
-    Discovery,
-    build_discovery,
-)
+from app.domain.review.cross_scope_relation import CrossScopeRelation, compute_relations
+from app.domain.review.discovery import Discovery, build_discovery
 from app.models.market_review import (
     MarketReviewRun,
     MarketReviewScopeSnapshot,
     MarketReviewSignal,
+    MarketReviewSignalInstrument,
+    MarketReviewSignalAttribution,
 )
+from app.models.board_taxonomy import BoardMembershipHistory
 
 
 async def build_discoveries_for_run(
     session: AsyncSession,
     run: MarketReviewRun,
 ) -> list[Discovery]:
-    """为指定 Review Run 构建全部 Discovery。
-
-    消费所有 scope snapshot 和 signal，聚合为 Discovery。
-    返回空列表表示无 scope 满足 eligibility 条件（合法状态）。
-    """
-    # 加载所有 scope snapshots
     snap_stmt = (
         select(MarketReviewScopeSnapshot)
         .where(MarketReviewScopeSnapshot.review_run_id == run.id)
@@ -45,7 +32,6 @@ async def build_discoveries_for_run(
     snap_result = await session.execute(snap_stmt)
     snapshots = list(snap_result.scalars())
 
-    # 加载所有 signals（atomic evidence）
     sig_stmt = (
         select(MarketReviewSignal)
         .where(MarketReviewSignal.review_run_id == run.id)
@@ -53,19 +39,20 @@ async def build_discoveries_for_run(
     sig_result = await session.execute(sig_stmt)
     signals = list(sig_result.scalars())
 
-    # 按 scope 分组 signals
-    signals_by_scope: dict[tuple[str, str], list[str]] = {}
+    signals_by_scope: dict[tuple[str, str], list[MarketReviewSignal]] = {}
     for sig in signals:
         key = (sig.scope_type, sig.scope_key)
-        signals_by_scope.setdefault(key, []).append(str(sig.id))
+        signals_by_scope.setdefault(key, []).append(sig)
 
-    # 为每个 scope 构建 Discovery
     discoveries: list[Discovery] = []
     trade_date_str = run.trade_date.isoformat() if isinstance(run.trade_date, date) else str(run.trade_date)
 
     for snap in snapshots:
         if snap.scope_type == "market":
-            continue  # market 是全市场基准，不产生独立 Discovery
+            continue
+
+        scope_signals = signals_by_scope.get((snap.scope_type, snap.scope_key), [])
+        signal_ids = [str(s.id) for s in scope_signals]
 
         discovery = build_discovery(
             run_id=str(run.id),
@@ -78,88 +65,125 @@ async def build_discoveries_for_run(
             u_payload=snap.u_payload,
             c_payload=snap.c_payload,
             v_payload=snap.v_payload,
-            signal_ids=signals_by_scope.get((snap.scope_type, snap.scope_key), []),
-            coverage=snap.coverage_ratio or 0.0,
+            signal_ids=signal_ids,
+            coverage=float(snap.coverage_ratio) if snap.coverage_ratio else 0.0,
             ready_count=snap.ready_count or 0,
         )
-        if discovery is not None:
-            discoveries.append(discovery)
+        if discovery is None:
+            continue
+
+        # Lifecycle from signals
+        _apply_lifecycle(discovery, scope_signals)
+        # Representative instruments
+        discovery.representative_instruments = await _collect_representative_instruments(
+            session, signal_ids,
+        )
+        discoveries.append(discovery)
 
     return discoveries
+
+
+async def build_scope_memberships(
+    session: AsyncSession,
+    run: MarketReviewRun,
+    scope_keys: set[str],
+) -> dict[str, set[str]]:
+    """为指定 scope_key 集合加载 PIT membership。"""
+    if not scope_keys:
+        return {}
+    stmt = (
+        select(BoardMembershipHistory)
+        .where(
+            BoardMembershipHistory.board_id.in_([uuid.UUID(k) for k in scope_keys
+                                                   if _is_uuid(k)]),
+            BoardMembershipHistory.effective_from <= run.trade_date,
+            (BoardMembershipHistory.effective_to.is_(None)
+             | (BoardMembershipHistory.effective_to > run.trade_date)),
+        )
+    )
+    result = await session.execute(stmt)
+    memberships: dict[str, set[str]] = {}
+    for m in result.scalars():
+        key = str(m.board_id)
+        memberships.setdefault(key, set()).add(str(m.instrument_id))
+    return memberships
+
+
+def _is_uuid(s: str) -> bool:
+    try:
+        uuid.UUID(s)
+        return True
+    except ValueError:
+        return False
 
 
 async def compute_cross_scope_relations(
     discoveries: list[Discovery],
     session: AsyncSession | None = None,
+    run: MarketReviewRun | None = None,
 ) -> list[CrossScopeRelation]:
-    """为 Discovery 列表计算 Cross-Scope Relation。"""
     discovery_dicts = [d.to_dict() for d in discoveries]
 
-    # Membership overlap: simplified — use representative_instruments overlap
-    membership_overlap: dict[tuple[str, str], float] = {}
-    for i, d1 in enumerate(discoveries):
-        for j, d2 in enumerate(discoveries):
-            if i >= j:
-                continue
-            k1 = (d1.scope_type, d1.scope_key)
-            k2 = (d2.scope_type, d2.scope_key)
-            inst1 = {ri.get("instrumentId") for ri in d1.representative_instruments if ri.get("instrumentId")}
-            inst2 = {ri.get("instrumentId") for ri in d2.representative_instruments if ri.get("instrumentId")}
-            if inst1 and inst2:
-                overlap = len(inst1 & inst2) / max(len(inst1 | inst2), 1)
-                membership_overlap[(d1.scope_key, d2.scope_key)] = overlap
+    scope_keys = {d.scope_key for d in discoveries}
+    memberships: dict[str, set[str]] = {}
+    if session and run and scope_keys:
+        memberships = await build_scope_memberships(session, run, scope_keys)
 
-    return compute_relations(discovery_dicts, membership_overlap)
+    return compute_relations(discovery_dicts, scope_memberships=memberships)
 
 
 def rank_discoveries(
     discoveries: list[Discovery],
     relations: list[CrossScopeRelation] | None = None,
-) -> list[Discovery]:
-    """Global rank → sort。先全量 rank，再返回排序后列表。
-
-    rank_key 可解释维度：anomaly, change, breadth, evidence, cross-scope confirmation。
-    """
-    scored: list[tuple[Discovery, float]] = []
-    relation_set: dict[str, set[str]] = {}
+) -> list[tuple[Discovery, dict[str, float]]]:
+    """Global rank before pagination. Returns (discovery, rank_details)."""
+    relation_map: dict[str, set[str]] = {}
     if relations:
         for r in relations:
-            relation_set.setdefault(r.source_scope, set()).add(r.relation_type)
-            relation_set.setdefault(r.target_scope, set()).add(r.relation_type)
+            relation_map.setdefault(r.source_scope, set()).add(r.relation_type)
+            relation_map.setdefault(r.target_scope, set()).add(r.relation_type)
 
+    scored: list[tuple[Discovery, float, dict[str, float]]] = []
     for d in discoveries:
-        score = 0.0
-        # Anomaly strength (0-40)
-        max_anomaly = 0.0
+        details: dict[str, float] = {}
+
+        # Anomaly (0-40)
+        anomaly_score = 0.0
         for v in d.anomaly.self_historical.values():
             if v is not None:
-                max_anomaly = max(max_anomaly, abs(v - 50) * 0.8)
-        score += min(max_anomaly, 40)
+                anomaly_score = max(anomaly_score, abs(v - 50) * 0.8)
+        details["anomaly"] = round(min(anomaly_score, 40), 1)
 
-        # Change strength (0-25)
-        max_delta = 0.0
+        # Change (0-25)
+        change_score = 0.0
         for m in d.change.metrics.values():
             if m.delta1d is not None:
-                max_delta = max(max_delta, abs(m.delta1d))
-        score += min(max_delta * 500, 25)
+                change_score = max(change_score, abs(m.delta1d))
+        details["change"] = round(min(change_score * 2.5, 25), 1)
 
-        # Breadth / evidence consistency (0-15)
-        score += min(len(d.key_evidence) * 3, 15)
+        # Evidence consistency (0-15)
+        details["evidenceConsistency"] = round(min(len(d.supporting_signal_ids) * 3, 15), 1)
 
         # Cross-scope confirmation (0-10)
-        rel_types = relation_set.get(d.discovery_id, set())
+        rel_types = relation_map.get(d.discovery_id, set())
         if "BROAD_CONFIRMATION" in rel_types:
-            score += 10
+            details["crossScopeConfirmation"] = 10.0
         elif "INDUSTRY_LED" in rel_types or "THEME_LED" in rel_types:
-            score += 5
+            details["crossScopeConfirmation"] = 5.0
+        else:
+            details["crossScopeConfirmation"] = 0.0
 
         # Coverage (0-10)
-        score += min(d.coverage * 10, 10)
+        details["coverage"] = round(min(d.coverage * 10, 10), 1)
 
-        scored.append((d, round(score, 1)))
+        # Duration (0-5)
+        details["duration"] = min(d.duration * 1.0, 5.0)
+
+        total = sum(details.values())
+        scored.append((d, total, details))
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [d for d, _ in scored]
+    return [(d, details) for d, _, details in scored]
 
 
 async def get_discovery_by_id(
@@ -167,9 +191,6 @@ async def get_discovery_by_id(
     discovery_id: str,
     trade_date: date | None = None,
 ) -> Discovery | None:
-    """按 discovery_id 查找 Discovery（从已发布的 Review Run 重建）。"""
-    # Discovery identity 是 run_id:scope_type:scope_key 的 hash
-    # 从 identity 反查需要 scan published runs + snapshots
     if trade_date:
         run_stmt = (
             select(MarketReviewRun)
@@ -197,3 +218,164 @@ async def get_discovery_by_id(
         if d.discovery_id == discovery_id:
             return d
     return None
+
+
+async def list_discovery_attributions(
+    session: AsyncSession,
+    signal_ids: list[str],
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[MarketReviewSignalAttribution], int]:
+    """从 supporting signal IDs 聚合并去重 attribution。"""
+    if not signal_ids:
+        return [], 0
+    try:
+        ids = [uuid.UUID(sid) for sid in signal_ids]
+    except ValueError:
+        return [], 0
+
+    subq = (
+        select(
+            MarketReviewSignalAttribution.id,
+            func.row_number().over(
+                partition_by=MarketReviewSignalAttribution.child_scope_key,
+                order_by=MarketReviewSignalAttribution.contribution_rank,
+            ).label("rn"),
+        )
+        .where(MarketReviewSignalAttribution.signal_id.in_(ids))
+        .subquery()
+    )
+    stmt = (
+        select(MarketReviewSignalAttribution)
+        .join(subq, MarketReviewSignalAttribution.id == subq.c.id)
+        .where(subq.c.rn == 1)
+        .order_by(MarketReviewSignalAttribution.contribution_rank)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    result = await session.execute(stmt)
+    items = list(result.scalars())
+    count_stmt = (
+        select(func.count(func.distinct(MarketReviewSignalAttribution.child_scope_key)))
+        .where(MarketReviewSignalAttribution.signal_id.in_(ids))
+    )
+    total = (await session.execute(count_stmt)).scalar() or 0
+    return items, total
+
+
+async def list_discovery_instruments(
+    session: AsyncSession,
+    signal_ids: list[str],
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[MarketReviewSignalInstrument], int]:
+    """从 supporting signal IDs 聚合并去重 instrument evidence。"""
+    if not signal_ids:
+        return [], 0
+    try:
+        ids = [uuid.UUID(sid) for sid in signal_ids]
+    except ValueError:
+        return [], 0
+
+    subq = (
+        select(
+            MarketReviewSignalInstrument.id,
+            func.row_number().over(
+                partition_by=MarketReviewSignalInstrument.instrument_id,
+                order_by=MarketReviewSignalInstrument.contribution_rank,
+            ).label("rn"),
+        )
+        .where(MarketReviewSignalInstrument.signal_id.in_(ids))
+        .subquery()
+    )
+    stmt = (
+        select(MarketReviewSignalInstrument)
+        .join(subq, MarketReviewSignalInstrument.id == subq.c.id)
+        .where(subq.c.rn == 1)
+        .order_by(MarketReviewSignalInstrument.contribution_rank)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    result = await session.execute(stmt)
+    items = list(result.scalars())
+    count_stmt = (
+        select(func.count(func.distinct(MarketReviewSignalInstrument.instrument_id)))
+        .where(MarketReviewSignalInstrument.signal_id.in_(ids))
+    )
+    total = (await session.execute(count_stmt)).scalar() or 0
+    return items, total
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _apply_lifecycle(discovery: Discovery, signals: list[MarketReviewSignal]) -> None:
+    if not signals:
+        discovery.status = "new"
+        return
+    statuses = {s.status for s in signals}
+    if "confirmed" in statuses:
+        discovery.status = "confirmed"
+    elif "weakened" in statuses:
+        discovery.status = "weakened"
+    elif "invalidated" in statuses:
+        discovery.status = "invalidated"
+    elif "transformed" in statuses:
+        discovery.status = "transformed"
+    elif "continuing" in statuses:
+        discovery.status = "continuing"
+    else:
+        discovery.status = "new"
+
+    created_ats = [s.created_at for s in signals if s.created_at]
+    if created_ats:
+        discovery.first_seen = min(created_ats).isoformat() if hasattr(min(created_ats), 'isoformat') else str(min(created_ats))
+        discovery.duration = len({s.trade_date for s in signals if s.trade_date})
+
+
+async def _collect_representative_instruments(
+    session: AsyncSession,
+    signal_ids: list[str],
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    if not signal_ids:
+        return []
+    try:
+        ids = [uuid.UUID(sid) for sid in signal_ids]
+    except ValueError:
+        return []
+
+    subq = (
+        select(
+            MarketReviewSignalInstrument.id,
+            func.row_number().over(
+                partition_by=MarketReviewSignalInstrument.instrument_id,
+                order_by=MarketReviewSignalInstrument.contribution_rank,
+            ).label("rn"),
+        )
+        .where(MarketReviewSignalInstrument.signal_id.in_(ids))
+        .subquery()
+    )
+    stmt = (
+        select(MarketReviewSignalInstrument)
+        .join(subq, MarketReviewSignalInstrument.id == subq.c.id)
+        .where(subq.c.rn == 1)
+        .order_by(MarketReviewSignalInstrument.contribution_rank)
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    instruments = list(result.scalars())
+    return [
+        {
+            "instrumentId": str(i.instrument_id),
+            "boardRole": i.board_role,
+            "relationToScope": i.relation_to_scope,
+            "contributionValue": float(i.contribution_value) if i.contribution_value else None,
+            "contributionRank": i.contribution_rank,
+            "contributionPayload": i.contribution_payload,
+            "roleEvidence": i.role_evidence,
+        }
+        for i in instruments
+    ]

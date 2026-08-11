@@ -381,7 +381,24 @@ async def load_metric_history(
             ] = value
     prev = metric_values_by_date.get(dates[0]) if dates else None
     prev5 = metric_values_by_date.get(dates[4]) if len(dates) >= 5 else None
-    return history or None, prev or None, prev5 or None
+
+    # [CR-01] Build date-indexed history for trade-date-aligned computations
+    date_indexed: dict[date, dict[str, dict[str, float]]] = {}
+    for observation in reversed(canonical_obs):
+        if observation.trade_date not in allowed_dates:
+            continue
+        try:
+            raw_val = float(observation.raw_value) if observation.raw_value is not None else None
+        except (TypeError, ValueError):
+            raw_val = None
+        if raw_val is None:
+            continue
+        entry = date_indexed.setdefault(observation.trade_date, {})
+        entry.setdefault(observation.metric_code, {})[
+            observation.component_name
+        ] = raw_val
+
+    return history or None, prev or None, prev5 or None, date_indexed or None
 
 
 def _decimal(value: Any) -> Decimal | None:

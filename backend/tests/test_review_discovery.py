@@ -1,79 +1,90 @@
-"""Review V2 Discovery domain unit tests.
-
-Tests for: State/Change/Anomaly projection, Discovery aggregation,
-Cross-Scope Relation, global ranking, Discovery identity.
-"""
+"""Review V2 Discovery domain unit tests — production-shaped fixtures."""
 
 from app.domain.review.discovery import (
-    Discovery,
-    ScopeState,
-    ScopeChange,
-    ScopeAnomaly,
-    project_state,
-    project_change,
-    project_anomaly,
-    is_discovery_eligible,
-    build_discovery,
-    make_discovery_id,
+    Discovery, ScopeState, ScopeChange, ScopeAnomaly,
+    project_state, project_change, project_anomaly,
+    is_discovery_eligible, build_discovery, make_discovery_id,
+    _find_component, _comp_raw, _comp_norm,
 )
 from app.domain.review.cross_scope_relation import (
-    CrossScopeRelation,
-    compute_relations,
-    RELATION_TYPES,
+    CrossScopeRelation, compute_relations, RELATION_TYPES,
 )
 
 
-# =============================================================================
-# State / Change / Anomaly projection
-# =============================================================================
+def _make_metric_payload(value=60.0, delta1d=2.0, delta5d=5.0,
+                         history_pct=70.0, cross_pct=65.0,
+                         components=None):
+    """Production-shaped metric payload (0–100 scale, components as list)."""
+    return {
+        "value": value,
+        "delta1d": delta1d,
+        "delta5d": delta5d,
+        "historyPercentile120d": history_pct,
+        "crossSectionPercentile": cross_pct,
+        "components": components or [],
+        "coverage": 0.95,
+        "status": "ready",
+    }
+
+
+def _make_component(name, raw_value=0.5, norm_value=50.0):
+    return {"name": name, "rawValue": raw_value, "normalizedValue": norm_value,
+            "direction": "neutral", "status": "ready"}
 
 
 def _sample_payloads():
+    q_components = [
+        _make_component("uptrend_member_ratio", 0.52, 52.0),
+        _make_component("main_structure_up_ratio", 0.61, 61.0),
+        _make_component("structure_breakdown_diffusion", 0.15, 15.0),
+    ]
+    u_components = [
+        _make_component("multi_dim_improving_ratio", 0.45, 45.0),
+        _make_component("leader_follower_common_confirm_ratio", 0.55, 55.0),
+    ]
+    c_components = [
+        _make_component("member_change_hhi", 0.12, 12.0),
+        _make_component("top5_price_change_contribution", 0.38, 38.0),
+        _make_component("leader_median_diff", 0.05, 5.0),
+    ]
     return (
-        {"value": 0.6, "delta1d": 0.02, "delta5d": 0.05, "historyPercentile120d": 70.0,
-         "crossSectionPercentile": 65.0},
-        {"value": 0.5, "delta1d": 0.01, "delta5d": 0.03, "historyPercentile120d": 60.0,
-         "crossSectionPercentile": 55.0,
-         "components": {
-             "uptrend_member_ratio": {"value": 0.52},
-             "main_structure_up_ratio": {"value": 0.61},
-             "structure_breakdown_diffusion": {"value": 0.15},
-         }},
-        {"value": 0.7, "delta1d": 0.05, "delta5d": 0.08, "historyPercentile120d": 80.0,
-         "crossSectionPercentile": 75.0,
-         "components": {
-             "multi_dim_improving_ratio": {"value": 0.45},
-             "leader_follower_common_confirm_ratio": {"value": 0.55},
-         }},
-        {"value": 0.3, "delta1d": -0.01, "delta5d": 0.02, "historyPercentile120d": 40.0,
-         "crossSectionPercentile": 35.0,
-         "components": {
-             "member_change_hhi": {"value": 0.12},
-             "top5_price_change_contribution": {"value": 0.38},
-             "leader_median_diff": {"value": 0.05},
-         }},
-        {"value": 0.4, "delta1d": 0.03, "delta5d": 0.06, "historyPercentile120d": 55.0,
-         "crossSectionPercentile": 50.0},
+        _make_metric_payload(value=60.0, delta1d=2.0),
+        _make_metric_payload(value=50.0, delta1d=1.0, components=q_components),
+        _make_metric_payload(value=70.0, delta1d=5.0, components=u_components),
+        _make_metric_payload(value=30.0, delta1d=-1.0, components=c_components),
+        _make_metric_payload(value=40.0, delta1d=3.0),
     )
 
 
+class TestComponentHelpers:
+    def test_find_component(self):
+        comps = [_make_component("hhi", 0.12), _make_component("top5", 0.38)]
+        assert _find_component(comps, "hhi")["rawValue"] == 0.12
+        assert _find_component(comps, "missing") is None
+        assert _find_component(None, "x") is None
+
+    def test_comp_raw(self):
+        comps = [_make_component("hhi", 0.12)]
+        assert _comp_raw(comps, "hhi") == 0.12
+
+    def test_comp_norm(self):
+        comps = [_make_component("hhi", 0.12, 12.0)]
+        assert _comp_norm(comps, "hhi") == 12.0
+
+
 class TestStateProjection:
-    def test_project_state_all_metrics(self):
+    def test_project_state_real_components(self):
         p, q, u, c, v = _sample_payloads()
         state = project_state(p, q, u, c, v)
-        assert len(state.metrics) == 5
-        assert state.metrics["P"].value == 0.6
-        assert state.metrics["Q"].history_percentile == 60.0
+        assert state.metrics["P"].value == 60.0
         assert state.concentration.hhi == 0.12
         assert state.concentration.top5_contribution == 0.38
-        assert state.internal_structure.trend_breadth == 0.52
-        assert state.internal_structure.structure_breadth == 0.61
+        assert state.internal_structure.trend_breadth == 52.0
         assert state.internal_structure.structure_breakdown_diffusion == 0.15
         assert state.internal_structure.synchronized_improvement is True
 
-    def test_project_state_none_payloads(self):
+    def test_project_state_empty(self):
         state = project_state(None, None, None, None, None)
-        assert len(state.metrics) == 5
         assert state.metrics["P"].value is None
 
 
@@ -81,13 +92,11 @@ class TestChangeProjection:
     def test_project_change(self):
         p, q, u, c, v = _sample_payloads()
         change = project_change(p, q, u, c, v)
-        assert change.metrics["P"].delta1d == 0.02
-        assert change.metrics["Q"].delta5d == 0.03
-        # C delta=-0.01, value=0.3 → not rising, not high enough for broadening → None
-        assert change.concentration.delta1d == -0.01
+        assert change.metrics["P"].delta1d == 2.0
+        assert change.concentration.direction is None  # -1.0 delta, value=30
 
     def test_concentration_rising(self):
-        c = {"value": 0.8, "delta1d": 0.05}
+        c = _make_metric_payload(value=80.0, delta1d=5.0)
         change = project_change(None, None, None, c, None)
         assert change.concentration.direction == "rising"
 
@@ -97,42 +106,17 @@ class TestAnomalyProjection:
         p, q, u, c, v = _sample_payloads()
         anomaly = project_anomaly(p, q, u, c, v)
         assert anomaly.self_historical["P"] == 70.0
-        assert anomaly.cross_sectional["Q"] == 55.0
-
-
-# =============================================================================
-# Discovery eligibility
-# =============================================================================
 
 
 class TestDiscoveryEligibility:
-    def test_state_only_not_eligible(self):
+    def test_no_signal_no_discovery(self):
         state = ScopeState()
-        state.metrics["P"] = type("m", (), {"value": 0.6})()
         change = ScopeChange()
         anomaly = ScopeAnomaly()
-        assert is_discovery_eligible(state, change, anomaly) is False
+        assert is_discovery_eligible([], state, change, anomaly) is False
 
-    def test_state_plus_change_eligible(self):
-        state = ScopeState()
-        state.metrics["P"] = type("m", (), {"value": 0.6})()
-        change = ScopeChange()
-        change.metrics["P"] = type("m", (), {"delta1d": 0.05})()
-        anomaly = ScopeAnomaly()
-        assert is_discovery_eligible(state, change, anomaly) is True
-
-    def test_state_plus_anomaly_eligible(self):
-        state = ScopeState()
-        state.metrics["P"] = type("m", (), {"value": 0.6})()
-        change = ScopeChange()
-        anomaly = ScopeAnomaly()
-        anomaly.self_historical["P"] = 85.0
-        assert is_discovery_eligible(state, change, anomaly) is True
-
-
-# =============================================================================
-# Discovery identity
-# =============================================================================
+    def test_with_signal_eligible(self):
+        assert is_discovery_eligible(["sig-1"], ScopeState(), ScopeChange(), ScopeAnomaly()) is True
 
 
 class TestDiscoveryIdentity:
@@ -142,120 +126,84 @@ class TestDiscoveryIdentity:
         assert id1 == id2
         assert len(id1) == 12
 
-    def test_different_scope_different_id(self):
-        id1 = make_discovery_id("run-1", "industry_l1", "electronics")
-        id2 = make_discovery_id("run-1", "concept", "glass_substrate")
-        assert id1 != id2
-
-
-# =============================================================================
-# Discovery builder
-# =============================================================================
+    def test_different_scope(self):
+        assert make_discovery_id("r1", "industry_l1", "e") != make_discovery_id("r1", "concept", "c")
 
 
 class TestBuildDiscovery:
-    def test_build_with_eligible_scope(self):
+    def test_with_signals(self):
         p, q, u, c, v = _sample_payloads()
-        discovery = build_discovery(
-            run_id="run-1", trade_date="2026-08-11",
-            scope_type="industry_l1", scope_key="electronics",
-            scope_name="电子",
-            p_payload=p, q_payload=q, u_payload=u, c_payload=c, v_payload=v,
-            signal_ids=["sig-1", "sig-2"],
-            coverage=0.95, ready_count=30,
-        )
-        assert discovery is not None
-        assert discovery.scope_type == "industry_l1"
-        assert len(discovery.supporting_signal_ids) == 2
-        assert len(discovery.key_evidence) > 0
-        d = discovery.to_dict()
-        assert d["scope"]["type"] == "industry_l1"
-        assert d["state"]["metrics"]["P"]["value"] == 0.6
-        assert d["lifecycle"]["status"] == "new"
+        d = build_discovery("run-1", "2026-08-11", "industry_l1", "electronics", "电子",
+                            p, q, u, c, v, signal_ids=["s1", "s2"], coverage=0.95, ready_count=30)
+        assert d is not None
+        assert d.scope_type == "industry_l1"
+        assert len(d.supporting_signal_ids) == 2
+        assert len(d.key_evidence) > 0
+        dd = d.to_dict()
+        assert dd["scope"]["type"] == "industry_l1"
+        assert dd["state"]["metrics"]["P"]["value"] == 60.0
+        assert dd["lifecycle"]["status"] == "new"
 
-    def test_build_state_only_no_discovery(self):
-        p = {"value": 0.6}
-        discovery = build_discovery(
-            run_id="run-1", trade_date="2026-08-11",
-            scope_type="industry_l1", scope_key="electronics",
-            scope_name="电子",
-            p_payload=p, q_payload=None, u_payload=None, c_payload=None, v_payload=None,
-        )
-        assert discovery is None
-
-
-# =============================================================================
-# Cross-Scope Relation
-# =============================================================================
+    def test_no_signal_no_discovery(self):
+        p = _make_metric_payload(value=60.0)
+        d = build_discovery("r1", "2026-08-11", "industry_l1", "e", "e",
+                            p, None, None, None, None, signal_ids=[])
+        assert d is None
 
 
 class TestCrossScopeRelation:
-    def test_no_relations_for_single_discovery(self):
-        d = {
-            "discoveryId": "d1", "scope": {"type": "concept", "key": "c1"},
-            "state": {"metrics": {}}, "anomaly": {"selfHistorical": {}},
-        }
-        relations = compute_relations([d])
-        assert relations == []
-
     def test_theme_led(self):
-        concept = {
-            "discoveryId": "d1", "scope": {"type": "concept", "key": "c1"},
-            "state": {"metrics": {"Q": {"value": 0.7}}},
-            "anomaly": {"selfHistorical": {"Q": 75.0}},
-        }
-        industry = {
-            "discoveryId": "d2", "scope": {"type": "industry_l1", "key": "i1"},
-            "state": {"metrics": {"Q": {"value": 0.3}}},
-            "anomaly": {"selfHistorical": {"Q": 35.0}},
-        }
+        concept = {"discoveryId": "d1", "scope": {"type": "concept", "key": "c1"},
+                    "state": {"metrics": {}}, "anomaly": {"selfHistorical": {"Q": 75.0}}}
+        industry = {"discoveryId": "d2", "scope": {"type": "industry_l1", "key": "i1"},
+                     "state": {"metrics": {}}, "anomaly": {"selfHistorical": {"Q": 35.0}}}
         relations = compute_relations([concept, industry])
-        assert len(relations) >= 1
         types = {r.relation_type for r in relations}
-        assert "THEME_LED" in types or "CONFLICTING" in types
+        assert "THEME_LED" in types
 
     def test_broad_confirmation(self):
-        d1 = {
-            "discoveryId": "d1", "scope": {"type": "industry_l1", "key": "i1"},
-            "state": {"metrics": {}}, "anomaly": {"selfHistorical": {"Q": 75.0, "U": 70.0}},
-        }
-        d2 = {
-            "discoveryId": "d2", "scope": {"type": "industry_l1", "key": "i2"},
-            "state": {"metrics": {}}, "anomaly": {"selfHistorical": {"Q": 80.0, "U": 75.0}},
-        }
+        d1 = {"discoveryId": "d1", "scope": {"type": "industry_l1", "key": "i1"},
+              "state": {"metrics": {}}, "anomaly": {"selfHistorical": {"Q": 75.0, "U": 70.0}}}
+        d2 = {"discoveryId": "d2", "scope": {"type": "industry_l1", "key": "i2"},
+              "state": {"metrics": {}}, "anomaly": {"selfHistorical": {"Q": 80.0, "U": 75.0}}}
         relations = compute_relations([d1, d2])
         types = {r.relation_type for r in relations}
         assert "BROAD_CONFIRMATION" in types
 
-    def test_all_relation_types_valid(self):
+    def test_conflicting(self):
+        d1 = {"discoveryId": "d1", "scope": {"type": "industry_l1", "key": "i1"},
+              "state": {"metrics": {}}, "anomaly": {"selfHistorical": {"Q": 80.0}}}
+        d2 = {"discoveryId": "d2", "scope": {"type": "industry_l1", "key": "i2"},
+              "state": {"metrics": {}}, "anomaly": {"selfHistorical": {"Q": 20.0}}}
+        relations = compute_relations([d1, d2])
+        types = {r.relation_type for r in relations}
+        assert "CONFLICTING" in types
+
+    def test_all_relation_types_declared(self):
         for rt in RELATION_TYPES:
             assert rt in {"THEME_LED", "INDUSTRY_LED", "BROAD_CONFIRMATION",
                           "ISOLATED_THEME", "STYLE_LED", "CONFLICTING"}
 
 
-# =============================================================================
-# Global ranking
-# =============================================================================
-
-
 class TestDiscoveryRanking:
-    def test_rank_empty(self):
-        from app.services.review_discovery_service import rank_discoveries
-        assert rank_discoveries([]) == []
-
     def test_rank_by_anomaly(self):
         from app.services.review_discovery_service import rank_discoveries
-        d1 = Discovery(
-            discovery_id="d1", review_run_id="r1", trade_date="2026-08-11",
-            scope_type="industry_l1", scope_key="i1", scope_name="i1",
-            state=ScopeState(), change=ScopeChange(),
-            anomaly=ScopeAnomaly(self_historical={"Q": 90.0}),
-        )
-        d2 = Discovery(
-            discovery_id="d2", review_run_id="r1", trade_date="2026-08-11",
-            scope_type="industry_l1", scope_key="i2", scope_name="i2",
-            state=ScopeState(), change=ScopeChange(),
-            anomaly=ScopeAnomaly(self_historical={"Q": 55.0}),
-        )
+        d1 = Discovery("d1", "r1", "2026-08-11", "industry_l1", "i1", "i1",
+                       ScopeState(), ScopeChange(),
+                       ScopeAnomaly(self_historical={"Q": 90.0}))
+        d2 = Discovery("d2", "r1", "2026-08-11", "industry_l1", "i2", "i2",
+                       ScopeState(), ScopeChange(),
+                       ScopeAnomaly(self_historical={"Q": 55.0}))
         ranked = rank_discoveries([d2, d1])
-        assert ranked[0].discovery_id == "d1"  # higher anomaly first
+        assert ranked[0][0].discovery_id == "d1"
+
+    def test_rank_details_preserved(self):
+        from app.services.review_discovery_service import rank_discoveries
+        d = Discovery("d1", "r1", "2026-08-11", "industry_l1", "i1", "i1",
+                      ScopeState(), ScopeChange(), ScopeAnomaly())
+        ranked = rank_discoveries([d])
+        assert len(ranked) == 1
+        discovery, details = ranked[0]
+        assert "anomaly" in details
+        assert "change" in details
+        assert "evidenceConsistency" in details

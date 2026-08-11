@@ -1,5 +1,10 @@
 """Review V2 Discovery domain: State/Change/Anomaly projection and Discovery aggregation.
 
+Production metric payload contract:
+- value: normalized metric value (0–100 scale)
+- delta1d/delta5d: normalized metric value difference
+- components: LIST of dicts with name, rawValue, normalizedValue, direction, status, etc.
+
 Discovery = user-level market finding, aggregated from atomic Signal evidence.
 State/Change/Anomaly are projected from existing scope observations.
 """
@@ -11,14 +16,51 @@ from typing import Any
 
 
 # =============================================================================
+# Component lookup helper
+# =============================================================================
+
+
+def _find_component(components: list[dict] | None, name: str) -> dict | None:
+    """从 production component list 中按 name 查找 component。"""
+    if not components or not isinstance(components, list):
+        return None
+    for c in components:
+        if isinstance(c, dict) and c.get("name") == name:
+            return c
+    return None
+
+
+def _comp_raw(components: list[dict] | None, name: str) -> float | None:
+    c = _find_component(components, name)
+    if c is None:
+        return None
+    v = c.get("rawValue")
+    return float(v) if isinstance(v, (int, float)) else None
+
+
+def _comp_norm(components: list[dict] | None, name: str) -> float | None:
+    c = _find_component(components, name)
+    if c is None:
+        return None
+    v = c.get("normalizedValue")
+    return float(v) if isinstance(v, (int, float)) else None
+
+
+def _extract_components(payload: dict | None) -> list[dict]:
+    if payload is None:
+        return []
+    c = payload.get("components", [])
+    return c if isinstance(c, list) else []
+
+
+# =============================================================================
 # State / Change / Anomaly domain projection
 # =============================================================================
 
 
 @dataclass
 class MetricState:
-    """当前 metric 的状态投影。"""
-    code: str  # P/Q/U/C/V
+    code: str
     value: float | None = None
     history_percentile: float | None = None
     cross_section_percentile: float | None = None
@@ -26,7 +68,6 @@ class MetricState:
 
 @dataclass
 class MetricChange:
-    """metric 的变化投影。"""
     code: str
     delta1d: float | None = None
     delta5d: float | None = None
@@ -34,7 +75,6 @@ class MetricChange:
 
 @dataclass
 class ConcentrationState:
-    """集中度状态。"""
     hhi: float | None = None
     top5_contribution: float | None = None
     leader_median_gap: float | None = None
@@ -42,14 +82,12 @@ class ConcentrationState:
 
 @dataclass
 class ConcentrationChange:
-    """集中度变化。"""
-    direction: str | None = None  # "rising" / "broadening" / "narrowing" / None
+    direction: str | None = None
     delta1d: float | None = None
 
 
 @dataclass
 class InternalStructure:
-    """内部结构摘要。"""
     trend_breadth: float | None = None
     structure_breadth: float | None = None
     momentum_breadth: float | None = None
@@ -59,7 +97,6 @@ class InternalStructure:
 
 @dataclass
 class ScopeState:
-    """Scope 当前状态投影。"""
     metrics: dict[str, MetricState] = field(default_factory=dict)
     concentration: ConcentrationState = field(default_factory=ConcentrationState)
     internal_structure: InternalStructure = field(default_factory=InternalStructure)
@@ -67,14 +104,12 @@ class ScopeState:
 
 @dataclass
 class ScopeChange:
-    """Scope 变化投影。"""
     metrics: dict[str, MetricChange] = field(default_factory=dict)
     concentration: ConcentrationChange = field(default_factory=ConcentrationChange)
 
 
 @dataclass
 class ScopeAnomaly:
-    """Scope 异常投影。"""
     self_historical: dict[str, float | None] = field(default_factory=dict)
     cross_sectional: dict[str, float | None] = field(default_factory=dict)
 
@@ -86,35 +121,28 @@ class ScopeAnomaly:
 
 @dataclass
 class Discovery:
-    """V2 user-level market finding."""
     discovery_id: str
     review_run_id: str
     trade_date: str
 
-    # Scope
     scope_type: str
     scope_key: str
     scope_name: str
 
-    # State / Change / Anomaly
     state: ScopeState
     change: ScopeChange
     anomaly: ScopeAnomaly
 
-    # Evidence
     key_evidence: list[str] = field(default_factory=list)
     supporting_signal_ids: list[str] = field(default_factory=list)
 
-    # Related
     related_scopes: list[dict[str, Any]] = field(default_factory=list)
     representative_instruments: list[dict[str, Any]] = field(default_factory=list)
 
-    # Lifecycle
     status: str = "new"
     first_seen: str | None = None
     duration: int = 0
 
-    # Quality
     coverage: float = 0.0
     ready_count: int = 0
     data_quality: dict[str, Any] = field(default_factory=dict)
@@ -150,7 +178,7 @@ class Discovery:
 
 
 # =============================================================================
-# Projection builders
+# Projection builders — production component shape
 # =============================================================================
 
 
@@ -161,7 +189,6 @@ def project_state(
     c_payload: dict | None,
     v_payload: dict | None,
 ) -> ScopeState:
-    """从 snapshot payloads 投影 ScopeState。"""
     state = ScopeState()
 
     for code, payload in [("P", p_payload), ("Q", q_payload), ("U", u_payload),
@@ -175,27 +202,22 @@ def project_state(
             cross_section_percentile=payload.get("crossSectionPercentile"),
         )
 
-    # Concentration state from C components
-    c = c_payload or {}
-    components = c.get("components", {}) if isinstance(c.get("components"), dict) else {}
+    c_components = _extract_components(c_payload)
     state.concentration = ConcentrationState(
-        hhi=_component_value(components, "member_change_hhi"),
-        top5_contribution=_component_value(components, "top5_price_change_contribution"),
-        leader_median_gap=_component_value(components, "leader_median_diff"),
+        hhi=_comp_raw(c_components, "member_change_hhi"),
+        top5_contribution=_comp_raw(c_components, "top5_price_change_contribution"),
+        leader_median_gap=_comp_raw(c_components, "leader_median_diff"),
     )
 
-    # Internal structure from Q/U components
-    q = q_payload or {}
-    u = u_payload or {}
-    q_components = q.get("components", {}) if isinstance(q.get("components"), dict) else {}
-    u_components = u.get("components", {}) if isinstance(u.get("components"), dict) else {}
+    q_components = _extract_components(q_payload)
+    u_components = _extract_components(u_payload)
     state.internal_structure = InternalStructure(
-        trend_breadth=_component_value(q_components, "uptrend_member_ratio"),
-        structure_breadth=_component_value(q_components, "main_structure_up_ratio"),
-        momentum_breadth=_component_value(u_components, "multi_dim_improving_ratio"),
-        structure_breakdown_diffusion=_component_value(q_components, "structure_breakdown_diffusion"),
+        trend_breadth=_comp_norm(q_components, "uptrend_member_ratio"),
+        structure_breadth=_comp_norm(q_components, "main_structure_up_ratio"),
+        momentum_breadth=_comp_norm(u_components, "multi_dim_improving_ratio"),
+        structure_breakdown_diffusion=_comp_raw(q_components, "structure_breakdown_diffusion"),
         synchronized_improvement=bool(
-            _component_value(u_components, "leader_follower_common_confirm_ratio", 0) > 0.5
+            (_comp_raw(u_components, "leader_follower_common_confirm_ratio") or 0) > 0.5
         ),
     )
 
@@ -209,7 +231,6 @@ def project_change(
     c_payload: dict | None,
     v_payload: dict | None,
 ) -> ScopeChange:
-    """从 snapshot payloads 投影 ScopeChange。"""
     change = ScopeChange()
 
     for code, payload in [("P", p_payload), ("Q", q_payload), ("U", u_payload),
@@ -222,16 +243,15 @@ def project_change(
             delta5d=payload.get("delta5d"),
         )
 
-    # Concentration change from C delta
     c = c_payload or {}
     c_delta = c.get("delta1d")
     if isinstance(c_delta, (int, float)):
-        if c_delta > 0.01:
+        direction = None
+        if c_delta > 1.0:
             direction = "rising"
-        elif c_delta < -0.01:
-            direction = "broadening" if c.get("value", 0) > 0.5 else "narrowing"
-        else:
-            direction = None
+        elif c_delta < -1.0:
+            c_val = c.get("value", 0)
+            direction = "broadening" if (c_val or 0) > 50 else "narrowing"
         change.concentration = ConcentrationChange(direction=direction, delta1d=c_delta)
 
     return change
@@ -244,53 +264,35 @@ def project_anomaly(
     c_payload: dict | None,
     v_payload: dict | None,
 ) -> ScopeAnomaly:
-    """从 snapshot payloads 投影 ScopeAnomaly。"""
     anomaly = ScopeAnomaly()
-
     for code, payload in [("P", p_payload), ("Q", q_payload), ("U", u_payload),
                            ("C", c_payload), ("V", v_payload)]:
         if payload is None:
             payload = {}
         anomaly.self_historical[code] = payload.get("historyPercentile120d")
         anomaly.cross_sectional[code] = payload.get("crossSectionPercentile")
-
     return anomaly
 
 
 # =============================================================================
-# Discovery eligibility
+# Discovery eligibility — signal evidence based
 # =============================================================================
 
 
 def is_discovery_eligible(
+    signal_ids: list[str],
     state: ScopeState,
     change: ScopeChange,
     anomaly: ScopeAnomaly,
 ) -> bool:
-    """判断 scope 是否有资格产生 Discovery。
+    """Discovery 必须有 supporting atomic evidence (Signal)。
 
-    Discovery 成立条件（PRD70 §10.4）：
-    原则上应至少包含 State + Change 或 State + Anomaly。
-    仅有静态 State 不得产生 Discovery。
+    有 Signal 的 scope 才能成为 Discovery candidate。
+    纯 State/Change/Anomaly 无 Signal 不产生 Discovery。
     """
-    has_change = _has_meaningful_change(change)
-    has_anomaly = _has_meaningful_anomaly(anomaly)
-    has_state = _has_meaningful_state(state)
-    return has_state and (has_change or has_anomaly)
-
-
-def _has_meaningful_state(state: ScopeState) -> bool:
-    for m in state.metrics.values():
-        if m.value is not None:
-            return True
-    return False
-
-
-def _has_meaningful_change(change: ScopeChange) -> bool:
-    for m in change.metrics.values():
-        if m.delta1d is not None and abs(m.delta1d) > 0.001:
-            return True
-    return False
+    if not signal_ids:
+        return False
+    return True
 
 
 def _has_meaningful_anomaly(anomaly: ScopeAnomaly) -> bool:
@@ -309,7 +311,6 @@ def _has_meaningful_anomaly(anomaly: ScopeAnomaly) -> bool:
 
 
 def make_discovery_id(run_id: str, scope_type: str, scope_key: str) -> str:
-    """Deterministic Discovery logical identity from run + scope."""
     import hashlib
     raw = f"{run_id}:{scope_type}:{scope_key}"
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
@@ -335,15 +336,13 @@ def build_discovery(
     coverage: float = 0.0,
     ready_count: int = 0,
 ) -> Discovery | None:
-    """从 scope snapshot + signals 构建 Discovery。
+    signal_ids = signal_ids or []
 
-    返回 None 如果 scope 不满足 eligibility 条件。
-    """
     state = project_state(p_payload, q_payload, u_payload, c_payload, v_payload)
     change = project_change(p_payload, q_payload, u_payload, c_payload, v_payload)
     anomaly = project_anomaly(p_payload, q_payload, u_payload, c_payload, v_payload)
 
-    if not is_discovery_eligible(state, change, anomaly):
+    if not is_discovery_eligible(signal_ids, state, change, anomaly):
         return None
 
     return Discovery(
@@ -356,8 +355,8 @@ def build_discovery(
         state=state,
         change=change,
         anomaly=anomaly,
-        key_evidence=_build_key_evidence(state, change, anomaly),
-        supporting_signal_ids=signal_ids or [],
+        key_evidence=_build_key_evidence(signal_ids, state, change, anomaly),
+        supporting_signal_ids=signal_ids,
         coverage=coverage,
         ready_count=ready_count,
         data_quality={"coverage": coverage, "readyCount": ready_count},
@@ -365,39 +364,43 @@ def build_discovery(
 
 
 # =============================================================================
-# Helpers
+# Key evidence from signals + state/change/anomaly
 # =============================================================================
 
 
-def _component_value(components: dict, name: str, default: Any = None) -> Any:
-    item = components.get(name)
-    if isinstance(item, dict):
-        return item.get("value", default)
-    return default
-
-
 def _build_key_evidence(
+    signal_ids: list[str],
     state: ScopeState,
     change: ScopeChange,
     anomaly: ScopeAnomaly,
 ) -> list[str]:
     evidence: list[str] = []
-    # High/low state
+    evidence.append(f"signals:{len(signal_ids)}")
+
     for code, m in state.metrics.items():
-        if m.history_percentile is not None and m.history_percentile >= 80:
-            evidence.append(f"{code}_high")
-        elif m.history_percentile is not None and m.history_percentile <= 20:
-            evidence.append(f"{code}_low")
-    # Strong change
+        if m.history_percentile is not None:
+            if m.history_percentile >= 80:
+                evidence.append(f"{code}_high_state")
+            elif m.history_percentile <= 20:
+                evidence.append(f"{code}_low_state")
+
     for code, m in change.metrics.items():
-        if m.delta1d is not None and abs(m.delta1d) > 0.03:
+        if m.delta1d is not None and abs(m.delta1d) > 2.0:
             direction = "up" if m.delta1d > 0 else "down"
             evidence.append(f"{code}_{direction}")
-    # Anomaly
-    for code, v in anomaly.self_historical.items():
-        if v is not None and v >= 90:
-            evidence.append(f"{code}_historical_extreme")
+
+    if change.concentration.direction:
+        evidence.append(f"concentration_{change.concentration.direction}")
+
+    if state.internal_structure.synchronized_improvement:
+        evidence.append("synchronized_improvement")
+
     return evidence
+
+
+# =============================================================================
+# Serialization helpers
+# =============================================================================
 
 
 def _state_to_dict(state: ScopeState) -> dict:
