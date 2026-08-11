@@ -135,7 +135,7 @@ export default function TrackingReviewPanel({
             <div className={styles.stateBox}>
               <div className={styles.stateTitle}>暂无追踪</div>
               <div className={styles.stateDesc}>
-                在「筛选发现」或「个股验证」阶段将信号、范围或股票加入追踪，次日复盘将自动生成 evaluation
+                在市场发现阶段可将发现、范围或信号加入追踪，次日复盘将自动生成 evaluation
               </div>
             </div>
           ) : (
@@ -167,7 +167,9 @@ export default function TrackingReviewPanel({
                             ? `范围 ${t.scopeType ?? ''}/${t.scopeKey ?? ''}`
                             : t.trackingType === 'instrument' && t.instrumentId
                               ? `个股 ${t.instrumentId.slice(0, 8)}`
-                              : '-'}
+                              : t.trackingType === 'discovery' && t.discoveryId
+                                ? `发现 ${t.discoveryId.slice(0, 8)}${t.scopeType && t.scopeKey ? ` · ${t.scopeType}/${t.scopeKey}` : ''}`
+                                : '-'}
                       </td>
                       <td>
                         <span className={`${styles.chip} ${styles[meta.cls]}`}>{meta.label}</span>

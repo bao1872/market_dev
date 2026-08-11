@@ -45,6 +45,7 @@ from app.models.market_review import (
     MarketReviewTracking,
     MarketReviewTrackingEvaluation,
 )
+from app.services.review_discovery_service import build_discoveries_for_run
 
 logger = logging.getLogger("review_tracking_service")
 
@@ -290,9 +291,20 @@ async def evaluate_tracking_for_run(
     )
     previous_state = prev_eval.current_state if prev_eval else None
 
-    # 查找当前 run 中关联的信号
+    # 查找当前 run 中关联的信号 / Discovery，形成当前 tracking context。
+    # context 允许做最小 additive extension（target_type / discovery_present / ...），
+    # 但状态判断一律复用现有 determine_tracking_status 状态机。
+    context: dict[str, Any] | None = None
     current_signal_status: str | None = None
-    if tracking.source_signal_id is not None:
+
+    if tracking.tracking_type == "discovery":
+        # Discovery target：以 scope_type/scope_key 作为跨日 evaluation context，
+        # 在当前 run 的正式 Discovery read model 中查找对应 scope Discovery。
+        # 有 Discovery → 用其生命周期状态 + supporting evidence；无 → 明确 absence context。
+        current_signal_status, context = await _evaluate_discovery_tracking(
+            session, tracking, run,
+        )
+    elif tracking.source_signal_id is not None:
         sig = await _find_signal_in_run(
             session, tracking.source_signal_id, run.id,
         )
@@ -306,13 +318,13 @@ async def evaluate_tracking_for_run(
             if sig is not None:
                 current_signal_status = sig.status
 
-    # 决策当前追踪状态
+    # 决策当前追踪状态（复用现有 tracking state machine）
     new_status = determine_tracking_status(
         current_tracking_status=tracking.status,
         current_signal_status=current_signal_status,
         confirmation_conditions=tracking.confirmation_conditions,
         invalidation_conditions=tracking.invalidation_conditions,
-        context=None,  # 完整 context 由 service 层根据需要注入
+        context=context,
     )
 
     # 同步更新 tracking.status（终态除外）
@@ -331,6 +343,9 @@ async def evaluate_tracking_for_run(
             run.trade_date,
         ),
     }
+    if tracking.tracking_type == "discovery" and context is not None:
+        # Discovery evaluation 留可解释证据/lineage，不复刻完整 Discovery payload。
+        eval_payload["discovery"] = context
 
     # upsert evaluation（幂等：tracking_id + trade_date 唯一）
     record = await _upsert_evaluation(
@@ -428,6 +443,68 @@ async def _get_previous_evaluation(
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def _evaluate_discovery_tracking(
+    session: AsyncSession,
+    tracking: MarketReviewTracking,
+    run: MarketReviewRun,
+) -> tuple[str | None, dict[str, Any]]:
+    """Discovery tracking evaluation：在当前 run 的正式 Discovery read model 中，
+    按 scope_type/scope_key（跨日 evaluation context）查找对应 scope Discovery。
+
+    Returns (current_signal_status, discovery_context)。
+
+    - 当前 run 有对应 Discovery → 用其生命周期状态（与 signal 同词表）映射到
+      state machine，并携带 supporting evidence pointer。
+    - 当前 run 无对应 Discovery → 形成明确的 absence context（非查询失败），
+      由现有 tracking state machine 作 deterministic 判断。
+    """
+    if tracking.scope_type is None or tracking.scope_key is None:
+        # 无跨日 scope context → 明确 absence（而非查询失败）
+        return None, _discovery_absence_context(tracking, reason="no_scope_context")
+
+    discoveries = await build_discoveries_for_run(session, run)
+    discovery = next(
+        (
+            d for d in discoveries
+            if d.scope_type == tracking.scope_type and d.scope_key == tracking.scope_key
+        ),
+        None,
+    )
+    if discovery is None:
+        return None, _discovery_absence_context(tracking, reason="no_current_discovery")
+
+    context: dict[str, Any] = {
+        "target_type": "discovery",
+        "source_discovery_id": tracking.discovery_id,
+        "scope_type": tracking.scope_type,
+        "scope_key": tracking.scope_key,
+        "current_discovery_present": True,
+        "current_discovery_id": discovery.discovery_id,
+        "current_discovery_status": discovery.status,
+        "supporting_signal_ids": discovery.supporting_signal_ids,
+    }
+    return discovery.status, context
+
+
+def _discovery_absence_context(
+    tracking: MarketReviewTracking,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """构造当前 run 无对应 Discovery 的可解释 absence context。"""
+    return {
+        "target_type": "discovery",
+        "source_discovery_id": tracking.discovery_id,
+        "scope_type": tracking.scope_type,
+        "scope_key": tracking.scope_key,
+        "current_discovery_present": False,
+        "current_discovery_id": None,
+        "current_discovery_status": None,
+        "supporting_signal_ids": [],
+        "absence_reason": reason,
+    }
 
 
 async def _find_signal_in_run(
