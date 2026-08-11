@@ -987,73 +987,131 @@ async def load_day_fact_maps(
         required_history_contract_version or _REVIEW_HISTORY_CONTRACT_VERSION
     )
 
-    # [FIX] 2. HISTORY FP state（trade_date <= T，每 instrument 按 trade_date 组织）。
-    #    在装配 CURRENT FP 之前先取，供 history_state 模式取 == T 作 CURRENT FP、
-    #    stock_core 模式取 < T 作 previous。统一一次查询，保持 load-once 固定批量。
-    history_state_stmt = (
+    # [P1-D1 FIX] HISTORY FP state 查询必须 bounded：绝不做 trade_date <= T 全历史扫描。
+    #   - history_state 模式：CURRENT(== T) 单独查询；PREVIOUS(< T) DISTINCT ON 每 instrument 一行。
+    #   - stock_core 模式：只查 PREVIOUS(< T) DISTINCT ON（CURRENT 来自 StockFeatureSnapshot）。
+    # "load-once" 是 scope 级规则，不是 "只能有 1 条 SQL"；两条 bounded 查询可接受。
+    if current_source == "history_state":
+        current_hist_stmt = (
+            select(FirstPyramidHistoryDailyState)
+            .where(
+                FirstPyramidHistoryDailyState.trade_date == trade_date,
+                FirstPyramidHistoryDailyState.algorithm_version
+                == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            )
+        )
+        if instrument_ids is not None:
+            current_hist_stmt = current_hist_stmt.where(
+                FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            )
+        current_hist_states = list((await session.execute(current_hist_stmt)).scalars())
+        latest_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {
+            s.instrument_id: s for s in current_hist_states
+        }
+    else:
+        latest_by_instrument = {}
+
+    previous_hist_stmt = (
         select(FirstPyramidHistoryDailyState)
         .where(
-            FirstPyramidHistoryDailyState.trade_date <= trade_date,
+            FirstPyramidHistoryDailyState.trade_date < trade_date,
             FirstPyramidHistoryDailyState.algorithm_version
             == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
         )
+        .distinct(FirstPyramidHistoryDailyState.instrument_id)
+        .order_by(
+            FirstPyramidHistoryDailyState.instrument_id,
+            FirstPyramidHistoryDailyState.trade_date.desc(),
+        )
     )
     if instrument_ids is not None:
-        history_state_stmt = history_state_stmt.where(
+        previous_hist_stmt = previous_hist_stmt.where(
             FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
         )
-    history_state_stmt = history_state_stmt.order_by(
-        FirstPyramidHistoryDailyState.instrument_id.asc(),
-        FirstPyramidHistoryDailyState.trade_date.desc(),
-    )
-    history_states = list((await session.execute(history_state_stmt)).scalars())
-    # 每 instrument 保留最新（==T，若有）与次新（<T）两行
-    latest_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {}
-    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {}
-    for state in history_states:
-        if state.trade_date < trade_date:
-            if state.instrument_id not in previous_by_instrument:
-                previous_by_instrument[state.instrument_id] = state
-        else:  # == T
-            latest_by_instrument[state.instrument_id] = state
+    previous_hist_states = list((await session.execute(previous_hist_stmt)).scalars())
+    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {
+        s.instrument_id: s for s in previous_hist_states
+    }
 
-    # [REVIEW-FACT-PARITY-02 §11] previous state source-run guard（§3）：
-    # previous 若存在：history_contract_version == required 且
-    # source_history_run_id == 绑定 canonical source run。
-    # 禁止 previous 来自不同 source run / 不同 contract version。
-    if required_source_history_run_id is not None:
-        for _iid, _prev in previous_by_instrument.items():
-            _prev_run = getattr(_prev, "source_history_run_id", None)
-            if _prev_run != required_source_history_run_id:
+    # [P1-C FIX] lineage authority 按模式区分，禁止合并两种权威：
+    #   - history_state 模式：CURRENT T 状态本身即 lineage 权威。要求
+    #       current.source_history_run_id IS NOT NULL
+    #       current.history_contract_version == required/current 版本
+    #       若提供 required_source_history_run_id，current 必须 == 它（fail closed）
+    #       previous(< T) 必须 shared current 的 source run + contract version
+    #   - stock_core 模式：previous 必须匹配绑定的 canonical history source（旧逻辑）。
+    if current_source == "history_state":
+        for _iid, _cur in latest_by_instrument.items():
+            _cur_run = getattr(_cur, "source_history_run_id", None)
+            if _cur_run is None:
                 raise ValueError(
-                    f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: required="
-                    f"{required_source_history_run_id!r} got={_prev_run!r} "
-                    f"for instrument={_iid} trade_date={trade_date}"
+                    f"HISTORY_STATE_CURRENT_SOURCE_RUN_NULL: instrument={_iid} "
+                    f"trade_date={trade_date}（history_state 模式 CURRENT T 状态 "
+                    f"必须携带 source_history_run_id）"
                 )
-            _ver = getattr(_prev, "history_contract_version", None) or (
-                _prev.state_payload or {}
-            ).get("history_contract_version")
-            if _ver != _required_version:
+            if getattr(_cur, "history_contract_version", None) != _required_version:
                 raise ValueError(
-                    f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
-                    f"expected={_required_version} got={_ver!r} "
-                    f"for trade_date={trade_date}"
+                    f"HISTORY_STATE_CURRENT_CONTRACT_MISMATCH: instrument={_iid} "
+                    f"expected={_required_version} got="
+                    f"{getattr(_cur, 'history_contract_version', None)!r}"
                 )
+            if (
+                required_source_history_run_id is not None
+                and _cur_run != required_source_history_run_id
+            ):
+                raise ValueError(
+                    f"HISTORY_STATE_CURRENT_SOURCE_RUN_MISMATCH: instrument={_iid} "
+                    f"required={required_source_history_run_id!r} got={_cur_run!r}"
+                )
+            _prev = previous_by_instrument.get(_iid)
+            if _prev is not None:
+                _prev_run = getattr(_prev, "source_history_run_id", None)
+                if _prev_run != _cur_run:
+                    raise ValueError(
+                        f"HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH: instrument={_iid} "
+                        f"current={_cur_run!r} previous={_prev_run!r} "
+                        f"（history_state 模式 previous 必须与 CURRENT T 同 source run）"
+                    )
+                if getattr(_prev, "history_contract_version", None) != _required_version:
+                    raise ValueError(
+                        f"HISTORY_STATE_PREVIOUS_CONTRACT_MISMATCH: instrument={_iid} "
+                        f"current={_required_version!r} previous="
+                        f"{getattr(_prev, 'history_contract_version', None)!r}"
+                    )
+    else:
+        # [REVIEW-FACT-PARITY-02 §11] stock_core 模式：previous 必须匹配绑定 canonical source。
+        if required_source_history_run_id is not None:
+            for _iid, _prev in previous_by_instrument.items():
+                _prev_run = getattr(_prev, "source_history_run_id", None)
+                if _prev_run != required_source_history_run_id:
+                    raise ValueError(
+                        f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: required="
+                        f"{required_source_history_run_id!r} got={_prev_run!r} "
+                        f"for instrument={_iid} trade_date={trade_date}"
+                    )
+                _ver = getattr(_prev, "history_contract_version", None) or (
+                    _prev.state_payload or {}
+                ).get("history_contract_version")
+                if _ver != _required_version:
+                    raise ValueError(
+                        f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
+                        f"expected={_required_version} got={_ver!r} "
+                        f"for trade_date={trade_date}"
+                    )
 
     previous_payloads: dict[uuid.UUID, dict[str, Any]] = {
         iid: state.state_payload for iid, state in previous_by_instrument.items()
     }
 
     # [FIX] 1. CURRENT First Pyramid：来源由 current_source 决定。
-    #    为保持 load-once 固定批量，history state 查询（query #2）在两种模式都执行
-    #    （<= T），其中 == T 行供 history_state 模式作 CURRENT FP，< T 行供
-    #    previous FP；stock_core 模式跳过 history_state 的 CURRENT FP 装配，用
-    #    StockFeatureSnapshot 作 CURRENT FP。
+    #    history state 查询（P1-D1 已改为 bounded：== T 取 CURRENT，< T DISTINCT ON 取 PREVIOUS）
+    #    在两种模式都执行；stock_core 模式用 StockFeatureSnapshot 作 CURRENT FP。
     current_flat_by_instrument: dict[uuid.UUID, dict[str, Any]] = {}
     snap_trade_date_by_instrument: dict[uuid.UUID, date] = {}
     if current_source == "stock_core":
         # 正式 Review：来自当日正式 stock_core 指针。
         # StockFeatureSnapshot WHERE source_run_id == source_core_run_id，
+        # [P2] 额外 WHERE trade_date == trade_date 收窄，绝不静默消费其他日期快照。
         # 读取 summary_payload.first_pyramid_flat。
         if source_core_run_id is None:
             return {}
@@ -1069,12 +1127,21 @@ async def load_day_fact_maps(
             current_snap_stmt = current_snap_stmt.where(
                 StockFeatureSnapshot.instrument_id.in_(instrument_ids),
             )
+        current_snap_stmt = current_snap_stmt.where(
+            StockFeatureSnapshot.trade_date == trade_date,
+        )
         current_snap_rows = (await session.execute(current_snap_stmt)).all()
         if not current_snap_rows:
             # 当日 stock_core 指针无快照：返回空映射（上层 scope phase 用
             # insufficient_history / 空范围处理）。真实数据缺失，非 lineage 漂移。
             return {}
         for _iid, _snap_td, _summary in current_snap_rows:
+            # [P2] 防御性 fail-closed：SQL 已收窄，仍显式校验不消费其他日期。
+            if _snap_td != trade_date:
+                raise ValueError(
+                    f"STOCK_CORE_SNAPSHOT_TRADE_DATE_MISMATCH: instrument={_iid} "
+                    f"snapshot_trade_date={_snap_td} review_trade_date={trade_date}"
+                )
             if not isinstance(_summary, dict):
                 continue
             _flat = _summary.get("first_pyramid_flat") or {}
@@ -1086,7 +1153,7 @@ async def load_day_fact_maps(
         # 历史回放 / bootstrap 路径：回放历史日期时无 live stock_core 指针，
         # CURRENT FP 来自 canonical history source 自身的 daily state（trade_date == T）。
         # 该分支**仅用于历史回放**，正式 Review 绝不走此路径。
-        # 直接用 query #2 的 latest_by_instrument（== T 行）。
+        # 直接用 latest_by_instrument（== T 行，P1-D1 bounded 查询所得）。
         for _iid, _state in latest_by_instrument.items():
             _flat = previous_state_to_flat(_state.state_payload)
             if not _flat:
@@ -1103,9 +1170,9 @@ async def load_day_fact_maps(
 
     # [FIX] history lineage 校验：绑定源作为历史 baseline 必须合法（contract 匹配 /
     # 源存在 / canonical-compatible）。形式 Review **不要求**该 source 覆盖目标日 T
-    # （历史 state <= T-1 即接受），故不传 required_trade_date（见 FIX 4）。
+    # （历史 state < T 即接受），故不传 required_trade_date（见 FIX 4）。
     # 该 readiness 校验仅用于**形式 Review（stock_core 来源）**；history_state 回放
-    # 路径读的是 canonical source 自身，由调用方负责可信源，不在此连 DB 校验。
+    # 路径读的是 canonical source 自身（CURRENT T 状态即权威），由调用方负责可信源，不在此连 DB 校验。
     # 延迟导入避免与 review_bootstrap_service 形成循环依赖。
     if required_source_history_run_id is not None and current_source == "stock_core":
         from app.services.review_bootstrap_service import (
@@ -1129,18 +1196,34 @@ async def load_day_fact_maps(
     #    percentile20/percentile200 所需的完整序列可用，且与 Historical replay
     #    严格 parity。绝不能用「只取 target_date 当根 + 最近 1 根 previous」的
     #    双 bar 近似——那会令 120/200 日滚动统计失效（source-drift 的本质来源）。
-    full_bar_stmt = (
-        select(BarDaily)
-        .where(
-            BarDaily.instrument_id.in_(ids),
-            BarDaily.trade_date <= trade_date,
-            BarDaily.trade_date >= trade_date - timedelta(days=400),
-        )
-        .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
-    )
+    # 3. [P1-A FIX A1] 完整 BarDaily 历史窗口（trade_date - 400d .. target_date）。
+    #    与 fetch_member_flat_list / bootstrap replay load-once 使用**同一 400 日窗口**，
+    #    保证 ReviewMemberFact.build 内部派生 price_position(120d)/ratio20(20d)/
+    #    percentile20/percentile200 所需的完整序列可用，且与 Historical replay
+    #    严格 parity。绝不能用「只取 target_date 当根 + 最近 1 根 previous」的
+    #    双 bar 近似——那会令 120/200 日滚动统计失效（source-drift 的本质来源）。
+    # [P1-D2 FIX] 不一次性把全市场 400 日 bar 同时物化进内存：按固定 instrument 块
+    # 分块加载，每块只取本块标的的窗口 bar，装配完即释放。query count 随
+    # ceil(instrument_count / chunk_size) 增长，与 scope 数量无关（load-once scope 级）。
+    bar_window_chunk_size = 256  # [P1-D2] 内存分块大小（不一次物化全市场 bar）
     full_bars_by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
-    for bar in (await session.execute(full_bar_stmt)).scalars():
-        full_bars_by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
+    _window_start = trade_date - timedelta(days=400)
+    for _chunk_start in range(0, len(ids), bar_window_chunk_size):
+        _chunk_ids = ids[_chunk_start : _chunk_start + bar_window_chunk_size]
+        _chunk_bar_stmt = (
+            select(BarDaily)
+            .where(
+                BarDaily.instrument_id.in_(_chunk_ids),
+                BarDaily.trade_date <= trade_date,
+                BarDaily.trade_date >= _window_start,
+            )
+            .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
+        )
+        for bar in (await session.execute(_chunk_bar_stmt)).scalars():
+            full_bars_by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
+        # 释放本块 bar 结构
+        del _chunk_ids
+        del _chunk_bar_stmt
 
     # 5. instrument 身份（symbol/name）
     identity_stmt = select(Instrument).where(Instrument.id.in_(ids))
@@ -1187,16 +1270,30 @@ async def load_day_fact_maps(
         )
         flat = fact.to_metric_input()
         # 补充 loader 专属 lineage 元数据（不属 ReviewMemberFact 业务字段）。
+        # [P1-C3 FIX] history_state 模式：lineage 来自 CURRENT T 状态本身
+        #   （state id / input_hash / source_history_run_id）。
+        # stock_core 模式：lineage 来自绑定的 canonical history source。
+        # 绝不合成 lineage ID。
         _snap_td = snap_trade_date_by_instrument.get(instrument_id)
-        flat.update({
-            "_snapshot_trade_date": _snap_td.isoformat() if _snap_td is not None else None,
-            "_history_state_id": str(previous_by_instrument[instrument_id].id)
-            if instrument_id in previous_by_instrument
-            else None,
-            "_history_source_run_id": str(required_source_history_run_id)
-            if required_source_history_run_id is not None
-            else None,
-        })
+        if current_source == "history_state" and instrument_id in latest_by_instrument:
+            _cur_state = latest_by_instrument[instrument_id]
+            flat.update({
+                "_snapshot_trade_date": _snap_td.isoformat() if _snap_td is not None else None,
+                "_history_state_id": str(_cur_state.id),
+                "_history_input_hash": _cur_state.input_hash,
+                "_history_source_run_id": str(_cur_state.source_history_run_id)
+                if _cur_state.source_history_run_id is not None
+                else None,
+            })
+        else:
+            flat.update({
+                "_snapshot_trade_date": _snap_td.isoformat() if _snap_td is not None else None,
+                "_history_state_id": None,
+                "_history_input_hash": None,
+                "_history_source_run_id": str(required_source_history_run_id)
+                if required_source_history_run_id is not None
+                else None,
+            })
         facts_by_instrument[instrument_id] = flat
 
     return facts_by_instrument

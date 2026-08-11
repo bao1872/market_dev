@@ -159,10 +159,11 @@ class TestDailyStatePersistenceRunId:
 
 
 class TestDayFactSourceRunGuard:
-    """load_day_fact_maps 要求 source_history_run_id != NULL（fail closed）。"""
+    """load_day_fact_maps（history_state 模式）要求 CURRENT T state 的
+    source_history_run_id != NULL（fail closed，P1-C1）。"""
 
     @pytest.mark.asyncio
-    async def test_missing_source_run_fails(self) -> None:
+    async def test_missing_source_run_fails_closed(self) -> None:
         from app.services.review_scope_service import load_day_fact_maps
 
         iid = uuid.uuid4()
@@ -173,36 +174,30 @@ class TestDayFactSourceRunGuard:
                 self.id = uuid.uuid4()
                 self.instrument_id = iid
                 self.trade_date = date(2026, 8, 4)
-                self.state_payload = {"history_contract_version": "review-history-v2"}
+                self.state_payload = {"first_pyramid_flat": {"dfx_score": 1}}
                 self.input_hash = "h"
-                self.source_history_run_id = None  # 缺 run → 应 fail
+                self.source_history_run_id = None  # 缺 run → 必须 fail closed
                 self.history_contract_version = "review-history-v2"
 
         class FakeScalars:
             def __init__(self, rows): self.rows = rows
             def __iter__(self): return iter(self.rows)
 
-        class FakeResult:
-            def scalars(self): return FakeScalars([])
-
         session = MagicMock()
 
         async def fake_execute(stmt):
             executed["n"] += 1
-            # 第 1 次（current FP state）返回一个缺 source_history_run_id 的 state
+            # 第 1 次（CURRENT T state 查询 == T）返回缺 source_history_run_id 的 state
             if executed["n"] == 1:
                 return MagicMock(scalars=lambda: FakeScalars([State()]))
-            return FakeResult()
+            return MagicMock(scalars=lambda: FakeScalars([]))
 
         session.execute = fake_execute
-        # [REVIEW-CURRENT-FACT-SOURCE-DRIFT FIX] 形式 Review 的 CURRENT FP 不再从
-        # FirstPyramidHistoryDailyState(T) 读取，故 history_state 回放路径下当前 state
-        # 缺失 source_history_run_id 不再 fail closed（旧 HISTORY_SOURCE_RUN_MISSING 已移除）。
-        # 此处验证：函数正常返回 dict，不抛异常（旧的 fail-closed 行为已被修正移除）。
-        facts = await load_day_fact_maps(
-            session, trade_date=date(2026, 8, 4), current_source="history_state",
-        )
-        assert isinstance(facts, dict)
+        # [P1-C1] history_state 模式 CURRENT T 状态 source_history_run_id 为 NULL → fail closed
+        with pytest.raises(ValueError, match="HISTORY_STATE_CURRENT_SOURCE_RUN_NULL"):
+            await load_day_fact_maps(
+                session, trade_date=date(2026, 8, 4), current_source="history_state",
+            )
 
 
 class TestCanonicalPrecedence:
@@ -405,97 +400,81 @@ def _raise_if_replay_rows(count: int) -> None:
 
 
 class TestPreviousSourceRunParity:
-    """§3 previous state source-run parity：current run A / previous 必须同 run。"""
+    """§3 previous state source-run parity（history_state 模式）：
+    CURRENT T 状态(source A) 的 previous(<T) 必须同 run。
+    查询模型：call #1 = CURRENT(==T)，call #2 = PREVIOUS(<T DISTINCT ON)。
+    """
 
-    def test_previous_source_run_mismatch_detected(self) -> None:
-        """current run A + previous run B（同 contract）→ fail closed。"""
-        import asyncio
+    def _session(self, current_rows, previous_rows):
+        from unittest.mock import MagicMock
 
         from app.services.review_scope_service import load_day_fact_maps
 
-        run_a = uuid.uuid4()
-        run_b = uuid.uuid4()
-        shared_iid = uuid.uuid4()  # current 与 previous 同一 instrument
         executed = {"n": 0}
-
-        class State:
-            def __init__(self, run_id, date_val):
-                self.id = uuid.uuid4()
-                self.instrument_id = shared_iid
-                self.trade_date = date_val
-                self.state_payload = {"regime_value": 1}
-                self.input_hash = "h"
-                self.source_history_run_id = run_id
-                self.history_contract_version = "review-history-v2"
 
         class FakeScalars:
             def __init__(self, rows): self.rows = rows
             def __iter__(self): return iter(self.rows)
 
-        # P1-A 修正后：history state 统一一次 <= T 查询（call #1 返回 current==T + previous<T）
-        current = State(run_a, date(2026, 8, 4))
-        previous = State(run_b, date(2026, 8, 3))
-
         session = MagicMock()
 
         async def fake_execute(stmt):
             executed["n"] += 1
-            if executed["n"] == 1:  # 合并查询：current(run A, ==T) + previous(run B, <T)
-                return MagicMock(scalars=lambda: FakeScalars([current, previous]))
+            if executed["n"] == 1:  # CURRENT(==T)
+                return MagicMock(scalars=lambda: FakeScalars(current_rows))
+            if executed["n"] == 2:  # PREVIOUS(<T)
+                return MagicMock(scalars=lambda: FakeScalars(previous_rows))
             return MagicMock(scalars=lambda: FakeScalars([]))
 
         session.execute = fake_execute
-        with pytest.raises(ValueError) as exc_info:
+        return session, load_day_fact_maps
+
+    def _state(self, iid, run_id, date_val):
+        class State:
+            def __init__(self):
+                self.id = uuid.uuid4()
+                self.instrument_id = iid
+                self.trade_date = date_val
+                self.state_payload = {"first_pyramid_flat": {"dfx_score": 1}}
+                self.input_hash = "h"
+                self.source_history_run_id = run_id
+                self.history_contract_version = "review-history-v2"
+        return State()
+
+    def test_previous_source_run_mismatch_detected(self) -> None:
+        """current run A + previous run B（同 contract）→ fail closed。"""
+        import asyncio
+
+        run_a = uuid.uuid4()
+        run_b = uuid.uuid4()
+        iid = uuid.uuid4()
+        current = self._state(iid, run_a, date(2026, 8, 4))
+        previous = self._state(iid, run_b, date(2026, 8, 3))
+        session, fn = self._session([current], [previous])
+
+        with pytest.raises(ValueError, match="HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH"):
             asyncio.run(
-                load_day_fact_maps(
+                fn(
                     session,
                     trade_date=date(2026, 8, 4),
                     current_source="history_state",
                     required_source_history_run_id=run_a,
                 )
             )
-        assert "HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH" in str(exc_info.value)
 
     def test_previous_source_run_same_passes(self) -> None:
         """current run A + previous run A → PASS（不 raise）。"""
         import asyncio
 
-        from app.services.review_scope_service import load_day_fact_maps
-
         run_a = uuid.uuid4()
-        executed = {"n": 0}
+        iid = uuid.uuid4()
+        current = self._state(iid, run_a, date(2026, 8, 4))
+        previous = self._state(iid, run_a, date(2026, 8, 3))
+        session, fn = self._session([current], [previous])
 
-        class State:
-            def __init__(self, date_val):
-                self.id = uuid.uuid4()
-                self.instrument_id = uuid.uuid4()
-                self.trade_date = date_val
-                self.state_payload = {"regime_value": 1}
-                self.input_hash = "h"
-                self.source_history_run_id = run_a
-                self.history_contract_version = "review-history-v2"
-
-        class FakeScalars:
-            def __init__(self, rows): self.rows = rows
-            def __iter__(self): return iter(self.rows)
-
-        # 构造当前 + previous 同 run
-        current = State(date(2026, 8, 4))
-        previous = State(date(2026, 8, 3))
-        previous.instrument_id = current.instrument_id  # 同 instrument
-
-        session = MagicMock()
-
-        async def fake_execute(stmt):
-            executed["n"] += 1
-            if executed["n"] == 1:  # 合并查询：current + previous 同 run
-                return MagicMock(scalars=lambda: FakeScalars([current, previous]))
-            return MagicMock(scalars=lambda: FakeScalars([]))
-
-        session.execute = fake_execute
         # 不应 raise（same source run）
         asyncio.run(
-            load_day_fact_maps(
+            fn(
                 session, trade_date=date(2026, 8, 4),
                 current_source="history_state",
                 required_source_history_run_id=run_a,

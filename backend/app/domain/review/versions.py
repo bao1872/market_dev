@@ -1,8 +1,7 @@
 """Version constants shared by Review compute, history, and publication."""
 
-# review-2.0.1: [REVIEW-CURRENT-FACT-SOURCE-DRIFT FIX] CURRENT First Pyramid facts
-# 来源从 FirstPyramidHistoryDailyState(T) 改为当日正式 stock_core 指针
-# (StockFeatureSnapshot.summary_payload.first_pyramid_flat, by source_core_run_id)；
-# 历史 baseline 仅取 trade_date < T。其它算法/契约/PRD 语义不变。
-REVIEW_ALGORITHM_VERSION = "review-2.0.1"
-
+# review-2.0.0: Review-v2 正式算法/契约版本。
+# source-drift correction (825525e) 不改变 P/Q/U/C/V 公式、归一化、filter、
+# Discovery 语义或历史 observation 契约，因此版本号保持 review-2.0.0，
+# 不创建不必要的 history-series 隔离。
+REVIEW_ALGORITHM_VERSION = "review-2.0.0"
