@@ -984,36 +984,18 @@ async def list_discoveries(
             total=0, page=page, page_size=page_size, has_more=False, items=[],
         )
 
-    discoveries = await review_discovery_service.build_discoveries_for_run(db, run)
-    relations = await review_discovery_service.compute_cross_scope_relations(
-        discoveries, session=db, run=run,
-    )
+    # Unified read model assembly
+    ranked, relations, _ = await review_discovery_service.build_ranked_read_model(db, run)
 
     if scope_type:
-        discoveries = [d for d in discoveries if d.scope_type == scope_type]
+        ranked = [d for d in ranked if d.scope_type == scope_type]
     if scope_family:
-        discoveries = [d for d in discoveries if d.scope_type.startswith(scope_family)]
+        ranked = [d for d in ranked if d.scope_type.startswith(scope_family)]
     if lifecycle_status:
-        discoveries = [d for d in discoveries if d.status == lifecycle_status]
+        ranked = [d for d in ranked if d.status == lifecycle_status]
     if sort and sort != "rank":
         raise HTTPException(status_code=400, detail=f"不支持的 sort 值: {sort}（仅支持 rank）")
 
-    ranked_with_details = review_discovery_service.rank_discoveries(discoveries, relations)
-
-    # Attach rankKey to each discovery
-    for d, details in ranked_with_details:
-        d.rank_key = details
-
-    # Attach relations to BOTH source and target
-    relation_map: dict[str, list[dict]] = {}
-    for r in relations:
-        rd = r.to_dict()
-        relation_map.setdefault(r.source_scope, []).append(rd)
-        relation_map.setdefault(r.target_scope, []).append(rd)
-    for d, _ in ranked_with_details:
-        d.related_scopes = relation_map.get(d.discovery_id, [])
-
-    ranked = [d for d, _ in ranked_with_details]
     total = len(ranked)
     start = (page - 1) * page_size
     end = start + page_size
@@ -1040,34 +1022,23 @@ async def get_discovery_detail(
     if include_partial and not ctx.is_admin:
         raise HTTPException(status_code=403, detail="include_partial 仅管理员可用")
 
-    discovery = await review_discovery_service.get_discovery_by_id(
-        db, discovery_id, trade_date=trade_date,
-    )
-    if discovery is None:
-        raise HTTPException(status_code=404, detail=f"Discovery {discovery_id} 未找到")
-
-    # Rebuild run-level discoveries to get real relations
+    # Try to resolve the run for this discovery
     if trade_date:
         run = await _get_published_run_or_404(db, trade_date)
     else:
-        run_stmt = (
-            select(MarketReviewRun)
-            .where(MarketReviewRun.status == "published")
-            .order_by(MarketReviewRun.trade_date.desc()).limit(1)
-        )
+        run_stmt = select(MarketReviewRun).where(
+            MarketReviewRun.status == "published",
+        ).order_by(MarketReviewRun.trade_date.desc()).limit(1)
         run = (await db.execute(run_stmt)).scalar_one_or_none()
 
-    if run:
-        all_discoveries = await review_discovery_service.build_discoveries_for_run(db, run)
-        relations = await review_discovery_service.compute_cross_scope_relations(
-            all_discoveries, session=db, run=run,
-        )
-        relation_map: dict[str, list[dict]] = {}
-        for r in relations:
-            rd = r.to_dict()
-            relation_map.setdefault(r.source_scope, []).append(rd)
-            relation_map.setdefault(r.target_scope, []).append(rd)
-        discovery.related_scopes = relation_map.get(discovery_id, [])
+    if run is None:
+        raise HTTPException(status_code=404, detail="无已发布的 Review Run")
+
+    # Use unified read model to get consistent rankKey/lifecycle/relations
+    _, _, discovery_by_id = await review_discovery_service.build_ranked_read_model(db, run)
+    discovery = discovery_by_id.get(discovery_id)
+    if discovery is None:
+        raise HTTPException(status_code=404, detail=f"Discovery {discovery_id} 未找到")
 
     return ReviewDiscoveryDetailResponse(
         trade_date=discovery.trade_date, discovery=discovery.to_dict(),
