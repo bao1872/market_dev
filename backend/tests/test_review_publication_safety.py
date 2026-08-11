@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.dialects.postgresql.dml import Insert as PgInsert
 
+from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
 from app.models.market_review import MarketReviewRun, MarketReviewScopeSnapshot
 from app.services.review_publication_service import (
     ReviewWithdrawalBlockError,
@@ -95,7 +96,7 @@ def _make_run(
         trade_date=date(2026, 7, 31),
         source_core_run_id=uuid.uuid4(),
         source_board_run_id=uuid.uuid4(),
-        algorithm_version="review-2.0.0",
+        algorithm_version=REVIEW_ALGORITHM_VERSION,
         filter_version="filters-1.1.0",
         baseline_window=120,
         status=status,

@@ -695,6 +695,7 @@ async def compute_run(
     day_fact_map = await load_day_fact_maps(
         session,
         trade_date=run.trade_date,
+        source_core_run_id=run.source_core_run_id,
         required_source_history_run_id=canonical_source_run_id,
         required_history_contract_version=canonical_contract_version,
     )
@@ -1160,9 +1161,14 @@ async def _bind_or_reuse_canonical_history_source(
     bound_run_id = metadata.get("canonical_history_source_run_id")
     bound_contract = metadata.get("canonical_history_contract_version")
 
-    # [HISTORY-CURRENT-DATE-LIFECYCLE-01 §9/§10] canonical source 必须覆盖本次 Review
-    # 的 trade_date：latest state 停留在旧交易日的 run 不得对当日 Review 返回 ready。
-    required_trade_date = run.trade_date
+    # [REVIEW-CURRENT-FACT-SOURCE-DRIFT FIX] 形式 Review 的 canonical history source
+    # 是**历史 baseline 仅**，只需提供 trade_date < T 的 previous First Pyramid state，
+    # **不要求**该 source 覆盖目标日 T 的 daily state（历史 state <= T-1 即接受）。
+    # 因此不传 required_trade_date（默认值 None）：保留 contract/source/缺失的
+    # fail-closed，但去掉 target-date 生命周期约束。其他 history/bootstrap 流程
+    # 仍可能通过 validate_canonical_history_run_readiness(required_trade_date=...)
+    # 显式要求目标日覆盖（该函数本身保留不变）。
+    required_trade_date = None
 
     if bound_run_id is not None:
         # resume / retry：校验 bound source 仍然合法，否则 fail closed
@@ -1182,6 +1188,8 @@ async def _bind_or_reuse_canonical_history_source(
         return bound_uuid, contract_version
 
     # 新 run：解析当时最新合法 canonical source 并立即绑定到 metadata
+    # [REVIEW-CURRENT-FACT-SOURCE-DRIFT FIX] 形式 Review 不要求目标日 history state
+    # 覆盖，故传 required_trade_date=None（历史 baseline 即可）。
     source_run_id, contract_version = await _resolve_canonical_history_source(
         session, required_trade_date=required_trade_date,
     )
@@ -1308,7 +1316,10 @@ async def _compute_scope_metrics_phase(
             last_error=str(exc)[:500],
             completed_at=datetime.now(UTC),
         )
-        return None
+        # [FIX 5] OptionalScopeUnavailableError 合法不可用时返回 (None, None) 二元组，
+        # 与正常分支 (_compute_scope_metrics 返回 (snapshot, history_maps)) 契约一致，
+        # 关闭 "cannot unpack non-iterable NoneType" 生产错误。
+        return None, None
     if not instrument_ids:
         # 空范围：跳过 metrics，标记 succeeded 但无数据
         await _upsert_run_item(
@@ -1321,7 +1332,8 @@ async def _compute_scope_metrics_phase(
             last_error="范围成员为空",
             completed_at=datetime.now(UTC),
         )
-        return None
+        # [FIX 5] 空范围同样返回 (None, None) 二元组，保持 unpack 契约。
+        return None, None
 
     # 使用调用方传入的 scope_name（resolve_scope_members 可能返回 generic name）
     # scope.scope_name 已在 ScopeDefinition 中设置，compute_scope_metrics 直接读取
@@ -1736,6 +1748,7 @@ async def _compute_scope_pipeline(
             day_fact_cache["facts"] = await load_day_fact_maps(
                 session,
                 trade_date=run.trade_date,
+                source_core_run_id=run.source_core_run_id,
                 required_source_history_run_id=canonical_source_run_id,
                 required_history_contract_version=canonical_contract_version,
             )

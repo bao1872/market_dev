@@ -195,9 +195,14 @@ class TestDayFactSourceRunGuard:
             return FakeResult()
 
         session.execute = fake_execute
-        with pytest.raises(ValueError) as exc_info:
-            await load_day_fact_maps(session, trade_date=date(2026, 8, 4))
-        assert "HISTORY_SOURCE_RUN_MISSING" in str(exc_info.value)
+        # [REVIEW-CURRENT-FACT-SOURCE-DRIFT FIX] 形式 Review 的 CURRENT FP 不再从
+        # FirstPyramidHistoryDailyState(T) 读取，故 history_state 回放路径下当前 state
+        # 缺失 source_history_run_id 不再 fail closed（旧 HISTORY_SOURCE_RUN_MISSING 已移除）。
+        # 此处验证：函数正常返回 dict，不抛异常（旧的 fail-closed 行为已被修正移除）。
+        facts = await load_day_fact_maps(
+            session, trade_date=date(2026, 8, 4), current_source="history_state",
+        )
+        assert isinstance(facts, dict)
 
 
 class TestCanonicalPrecedence:
@@ -439,7 +444,14 @@ class TestPreviousSourceRunParity:
 
         session.execute = fake_execute
         with pytest.raises(ValueError) as exc_info:
-            asyncio.run(load_day_fact_maps(session, trade_date=date(2026, 8, 4)))
+            asyncio.run(
+                load_day_fact_maps(
+                    session,
+                    trade_date=date(2026, 8, 4),
+                    current_source="history_state",
+                    required_source_history_run_id=run_a,
+                )
+            )
         assert "HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH" in str(exc_info.value)
 
     def test_previous_source_run_same_passes(self) -> None:
@@ -482,7 +494,13 @@ class TestPreviousSourceRunParity:
 
         session.execute = fake_execute
         # 不应 raise（same source run）
-        asyncio.run(load_day_fact_maps(session, trade_date=date(2026, 8, 4)))
+        asyncio.run(
+            load_day_fact_maps(
+                session, trade_date=date(2026, 8, 4),
+                current_source="history_state",
+                required_source_history_run_id=run_a,
+            )
+        )
 
 
 class TestHistoryRunReadiness:

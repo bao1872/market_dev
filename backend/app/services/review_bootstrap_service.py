@@ -692,7 +692,11 @@ async def bootstrap_single_date(
     scope_results: list[dict[str, Any]] = []
     # [CHANGE-20260808] Stage B：每 trade_date 只调一次 load_day_fact_maps，
     # 所有 scope 从 facts_by_instrument 内存筛选，不再每 scope 重复查询 400 日 bars。
-    facts_by_instrument = await load_day_fact_maps(session, trade_date=trade_date)
+    # [REVIEW-CURRENT-FACT-SOURCE-DRIFT FIX] 历史回放/bootstrap 路径无 live stock_core
+    # 指针，CURRENT FP 来自 canonical history source 自身的 daily state（trade_date == T）。
+    facts_by_instrument = await load_day_fact_maps(
+        session, trade_date=trade_date, current_source="history_state",
+    )
     if not facts_by_instrument:
         return {
             "trade_date": trade_date.isoformat(),

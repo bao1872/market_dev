@@ -107,11 +107,13 @@ async def _run_metrics_phase(scope: ScopeDefinition, resolve_side_effect):
     ), patch.object(
         orch, "_fetch_pyramid_v2_for_scope", AsyncMock(return_value=None),
     ), patch.object(
-        orch, "compute_scope_metrics", AsyncMock(return_value=object()),
+        orch, "compute_scope_metrics", AsyncMock(return_value=(object(), None)),
     ), patch.object(
         orch, "fetch_member_flat_list", AsyncMock(return_value=[]),
     ):
-        snapshot = await _compute_scope_metrics_phase(
+        # [FIX 5] _compute_scope_metrics_phase 统一返回 (snapshot, history_maps) 二元组，
+        # OptionalScopeUnavailableError / 空范围分支返回 (None, None)。
+        snapshot, _history = await _compute_scope_metrics_phase(
             AsyncMock(),
             run,
             scope,
