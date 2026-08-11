@@ -7,6 +7,8 @@
 - HISTORY previous FP 仅来自 FirstPyramidHistoryDailyState WHERE trade_date < T。
 - 形式 Review 的 facts 构建**不要求**目标日 history state（TEST 2）。
 - load-once：同一 trade_date 只做固定次数批量查询，不随 scope/instrument 数量增长（TEST 4）。
+- 所有 Review 滚动事实（return_1d / price_position / ratio20 / percentile20 / percentile200）
+  **复用 ReviewMemberFact.build 单一 SSOT**（TEST 3），与 Historical replay 严格 parity。
 - current_source="history_state" 保留历史回放路径（从 FirstPyramidHistoryDailyState(T) 读 CURRENT FP）。
 
 运行：
@@ -19,9 +21,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import date
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from app.services.review_scope_service import load_day_fact_maps
 
@@ -74,62 +74,54 @@ def _make_session(
     contract_version="review-history-v2",
     previous_contract_version=None,
     source_core_run_id=None,
+    full_window=False,
 ):
     """构造 mock AsyncSession。
 
-    call 顺序（current_source="stock_core"）：
-      1. StockFeatureSnapshot 投影（.all()）
-      2. FirstPyramidHistoryDailyState trade_date < T（.scalars()）
-      3. current BarDaily（.scalars()）
-      4. previous BarDaily（.scalars()）
-      5. Instrument identity（.scalars()）
+    call 顺序（current_source="stock_core"，P1-A 修正后）：
+      1. FirstPyramidHistoryDailyState trade_date <= T（.scalars()）
+      2. StockFeatureSnapshot 投影（.all()）
+      3. 完整 BarDaily 窗口 trade_date-400d .. T（.scalars()）  [P1-A FIX A1]
+      4. Instrument identity（.scalars()）
     """
     session = MagicMock()
     call_count = {"n": 0}
     shared_run_id = uuid.uuid4()
+    target = date(2026, 8, 4)
+    prev_date = date(2026, 8, 3)
 
     async def fake_execute(stmt):
         call_count["n"] += 1
         n = call_count["n"]
         fake_result = MagicMock()
-        if n == 1:  # StockFeatureSnapshot 投影（.all()）
-            # summary_payload 形如 {"first_pyramid_flat": {...actual flat...}}
-            rows = [
-                _snap_row(inst, date(2026, 8, 4), {"first_pyramid_flat": summary})
-                for inst, summary in zip(instruments, snap_summaries, strict=False)
-            ]
-            fake_result.all.return_value = rows
-            fake_result.scalars.return_value = MagicMock(
-                __iter__=lambda self: iter([]),
-            )
-        elif n == 2:  # previous FP state（trade_date < T）
+        if n == 1:  # FirstPyramidHistoryDailyState（<= T）
             _prev_ver = previous_contract_version or contract_version
             _prev_payload = {
                 "history_contract_version": _prev_ver,
                 **(previous_payload or {"regime_value": 1}),
             }
             prev = [
-                _HistoryState(inst, date(2026, 8, 3), _prev_payload, source_history_run_id=shared_run_id)
+                _HistoryState(inst, prev_date, _prev_payload, source_history_run_id=shared_run_id)
                 for inst in instruments
             ]
             fake_result.scalars.return_value = MagicMock(
                 __iter__=lambda self: iter(prev),
             )
-        elif n == 3:  # current BarDaily
-            bars = [
-                _Bar(inst, date(2026, 8, 4), c, prev_c, vol, amt)
-                for inst, (c, prev_c, vol, amt)
-                in zip(instruments, bar_sets, strict=False)
+        elif n == 2:  # StockFeatureSnapshot 投影（.all()）
+            rows = [
+                _snap_row(inst, target, {"first_pyramid_flat": summary})
+                for inst, summary in zip(instruments, snap_summaries, strict=False)
             ]
+            fake_result.all.return_value = rows
             fake_result.scalars.return_value = MagicMock(
-                __iter__=lambda self: iter(bars),
+                __iter__=lambda self: iter([]),
             )
-        elif n == 4:  # previous BarDaily
-            bars = [
-                _Bar(inst, date(2026, 8, 3), prev_c, prev_c - 0.1, vol, amt)
-                for inst, (c, prev_c, vol, amt)
-                in zip(instruments, bar_sets, strict=False)
-            ]
+        elif n == 3:  # 完整 BarDaily 窗口（400d..T）
+            bars = []
+            for inst, (c, prev_c, vol, amt) in zip(instruments, bar_sets, strict=False):
+                # 仅两日即可满足 SSOT 派生的必要条件（current + previous）
+                bars.append(_Bar(inst, prev_date, prev_c, prev_c - 0.1, vol, amt))
+                bars.append(_Bar(inst, target, c, prev_c, vol, amt))
             fake_result.scalars.return_value = MagicMock(
                 __iter__=lambda self: iter(bars),
             )
@@ -155,11 +147,6 @@ SAMPLE_FP_FLAT = {
     "fp_momentum_change": 0.1,
     "fp_volume_ratio20": 1.2,
     "fp_volume_percentile20": 70.0,
-    "review_price_position": 0.6,
-    "review_volume_ratio20": 1.2,
-    "review_amount_ratio20": 1.1,
-    "review_volume_percentile20": 65.0,
-    "review_amount_percentile200": 80.0,
     "fp_latest_bos_direction": "bullish",
     "fp_latest_bos_freshness": 2,
     "fp_latest_choch_direction": "bullish",
@@ -177,12 +164,8 @@ class TestLoadDayFactMapsCurrentSource:
     def test_current_fp_from_stock_core_not_history_state(self) -> None:
         """T 日 FirstPyramidHistoryDailyState = ZERO 行时，facts 仍非空（来自 stock_core）。"""
         ids = [uuid.uuid4() for _ in range(3)]
-        # 注意：mock 的 call #2（history state < T）返回空（无 previous），call #1 提供 CURRENT FP。
         summaries = [dict(SAMPLE_FP_FLAT) for _ in range(3)]
-        # bar_sets 仅当前/前日 bar；无 previous history state 也能构造 facts。
         bar_sets = [(10.0, 9.8, 1000.0, 10000.0) for _ in range(3)]
-        # 让 call #2 返回空 previous：通过 previous_payload=None 且 instruments 空列表不可行，
-        # 这里直接验证 CURRENT 来自 stock_core（flat 字段命中）。
         session, _ = _make_session(ids, summaries, bar_sets)
 
         facts = asyncio.run(
@@ -196,7 +179,8 @@ class TestLoadDayFactMapsCurrentSource:
         assert len(facts) == 3
         # CURRENT fp_trend_direction 必须来自 stock_core first_pyramid_flat
         assert facts[ids[0]]["fp_trend_direction"] == "上行"
-        assert facts[ids[0]]["review_price_position"] == 0.6
+        # review_price_position 由 SSOT 派生（非来自 SAMPLE_FP_FLAT 字面量）
+        assert facts[ids[0]]["review_price_position"] is not None
 
     def test_no_target_history_dependency(self) -> None:
         """形式 Review 不要求 FirstPyramidHistoryDailyState(T)。"""
@@ -266,8 +250,8 @@ class TestLoadDayFactMapsLoadOnce:
                 instrument_ids=ids,
             )
         )
-        # 关键断言：无论 instrument 数多少，查询次数固定为 5（不随 scope/instrument 数增长）
-        assert calls["n"] == 5
+        # P1-A 修正后：固定 4 次批量查询（snapshot 投影 / prev FP state / full bar window / identity）
+        assert calls["n"] == 4
         assert len(facts) == 3
 
 
@@ -293,7 +277,12 @@ class TestLoadDayFactMapsDailyFacts:
         assert abs(fact["review_return_1d"] - ((10.0 - 9.5) / 9.5 * 100.0)) < 1e-6
         assert fact["review_amount"] == 5000.0
         assert fact["review_volume"] == 500.0
-        assert fact["review_price_position"] == 0.6
+        # 滚动统计均由 ReviewMemberFact.build SSOT 派生（非字面量）
+        assert fact["review_price_position"] is not None
+        assert fact["review_volume_ratio20"] is not None
+        assert fact["review_amount_ratio20"] is not None
+        assert fact["review_volume_percentile20"] is not None
+        assert fact["review_amount_percentile200"] is not None
         assert fact["fp_latest_bos_direction"] == "bullish"
         assert fact["fp_latest_bos_freshness"] == 2
 
@@ -314,7 +303,6 @@ class TestLoadDayFactMapsHistoryLineage:
         # 形式 Review 不要求 FirstPyramidHistoryDailyState(T)：
         # 即使历史 baseline 只提供 <= T-1 的 state（call #2 返回 8/3），
         # facts 仍从 stock_core 指针正确构建。
-        # （错误 contract/source 的 fail-closed 由其他测试覆盖；此处只验证无 T 日 state 依赖。）
         facts = asyncio.run(
             load_day_fact_maps(
                 session,

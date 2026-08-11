@@ -432,14 +432,16 @@ class TestPreviousSourceRunParity:
             def __init__(self, rows): self.rows = rows
             def __iter__(self): return iter(self.rows)
 
+        # P1-A 修正后：history state 统一一次 <= T 查询（call #1 返回 current==T + previous<T）
+        current = State(run_a, date(2026, 8, 4))
+        previous = State(run_b, date(2026, 8, 3))
+
         session = MagicMock()
 
         async def fake_execute(stmt):
             executed["n"] += 1
-            if executed["n"] == 1:  # current（run A）
-                return MagicMock(scalars=lambda: FakeScalars([State(run_a, date(2026, 8, 4))]))
-            if executed["n"] == 2:  # previous（run B → mismatch）
-                return MagicMock(scalars=lambda: FakeScalars([State(run_b, date(2026, 8, 3))]))
+            if executed["n"] == 1:  # 合并查询：current(run A, ==T) + previous(run B, <T)
+                return MagicMock(scalars=lambda: FakeScalars([current, previous]))
             return MagicMock(scalars=lambda: FakeScalars([]))
 
         session.execute = fake_execute
@@ -486,10 +488,8 @@ class TestPreviousSourceRunParity:
 
         async def fake_execute(stmt):
             executed["n"] += 1
-            if executed["n"] == 1:
-                return MagicMock(scalars=lambda: FakeScalars([current]))
-            if executed["n"] == 2:
-                return MagicMock(scalars=lambda: FakeScalars([previous]))
+            if executed["n"] == 1:  # 合并查询：current + previous 同 run
+                return MagicMock(scalars=lambda: FakeScalars([current, previous]))
             return MagicMock(scalars=lambda: FakeScalars([]))
 
         session.execute = fake_execute
