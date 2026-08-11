@@ -108,9 +108,10 @@ URL参数：
 
 ```
 /review?date=2026-07-29
-       &stage=signals
+       &stage=discoveries
        &scopeType=industry_l1
        &scopeKey=electronics
+       &discoveryId=<uuid>
        &signalId=<uuid>
        &boardId=<uuid>
        &symbol=000021
@@ -121,7 +122,7 @@ URL参数：
 
 - URL是页面状态的唯一可分享入口；
 - 首次加载先解析URL，再写入组件状态，禁止 hydration 后被默认值覆盖；
-- 切换阶段、信号、板块、股票时更新URL；
+- 切换 Discovery、Signal、板块、股票时更新URL；
 - 浏览器前进/后退必须正确恢复状态；
 - URL不得携带算法内部阈值或大段JSON。
 
@@ -309,15 +310,15 @@ review_run_id + filter_family + signal_type + scope_type + scope_key
 
 ### 5.5 market_review_signal_attributions
 
-保存第二级范围下钻结果。
+保存子范围归因与 Cross-Scope Relation 结果。
 
 ```
 id UUID PK
 signal_id UUID FK
-child_scope_type VARCHAR
-child_scope_key VARCHAR
-child_scope_name VARCHAR
-relation_type VARCHAR
+related_scope_type VARCHAR     # 子范围或关联 scope 类型
+related_scope_key VARCHAR
+related_scope_name VARCHAR
+relation_type VARCHAR           # ATTR-1: contribution / ATTR-3: THEME_LED 等
 contribution_value NUMERIC
 contribution_rank INTEGER
 metrics_payload JSONB
@@ -642,10 +643,14 @@ Idempotency 以现有 unique constraint 为准：
     PIT unavailable → 保留真实状态与诊断，但**不加入 whole-product blocker**；
   - 禁止把 optional scope 状态伪装成 `ready`；
   - 禁止 current membership × historical date / latest snapshot 回填 / forward-fill。
-- **Concept = AUXILIARY_DEFERRED**；**BJ = DEFERRED**。
+- **Concept / industry_l2 / industry_l3 = PARALLEL DISCOVERY SCOPE**：
+  - 产品 eligibility：Concept 是正式 parallel Discovery scope，与 Industry 平等参与发现；
+  - 数据/历史 readiness：若 Concept PIT/history 当前不足，真实输出 `bootstrap_unavailable` / `insufficient_history` / `unavailable`，不阻塞其他 scope；
+  - 不得把"当前数据未就绪"写成"Concept 产品能力 deferred"。
+- **BJ = DEFERRED**（保持原决定）。
 - 此校正**不改变指标公式**：仅调整 scope readiness / publication readiness 语义。
 - 实现约束（`review_publication_service.evaluate_publish_gate`）：market 仍为唯一强制 scope；
-  optional scope 不可用仅记为诊断，不阻塞整个 Market Review MVP 发布。
+  optional/parallel scope 不可用仅记为诊断，不阻塞整个 Market Review MVP 发布。
 
 ## 7. P/Q/U/C/V指标合同
 
@@ -1305,15 +1310,26 @@ overview返回：
     "styles": 1.0,
     "industryL1": 0.98
   },
-  "signalSummary": {
-    "new": 5,
-    "continuing": 3,
+  "discoverySummary": {
+    "total": 12,
+    "new": 4,
+    "continuing": 5,
     "confirmed": 2,
     "weakened": 1,
+    "invalidated": 0
+  },
+  "signalSummary": {
+    "total": 47,
+    "new": 15,
+    "continuing": 20,
+    "confirmed": 7,
+    "weakened": 3,
     "invalidated": 2
   }
 }
 ```
+
+overview 中 `discoverySummary` 是用户一级摘要；`signalSummary` 作为 evidence diagnostics 保留。
 
 ### 12.2 市场扫描
 
@@ -1324,8 +1340,7 @@ GET /api/v1/review/{trade_date}/scopes
 参数：
 
 - scope_type
-- parent_scope_type
-- parent_scope_key
+- scope_family
 - sort
 - page
 - page_size
@@ -1333,7 +1348,7 @@ GET /api/v1/review/{trade_date}/scopes
 
 返回每个范围的P/Q/U/C/V、变化、历史分位和命中数量。
 
-### 12.3 信号
+### 12.3 信号（Signal = atomic evidence）
 
 ```
 GET /api/v1/review/{trade_date}/signals
@@ -1349,11 +1364,46 @@ GET /api/v1/review/signals/{signal_id}
 - scope_key
 - page/page_size
 
+Signal endpoint 定位为 **evidence / debug / drilldown**。保留用于兼容和算法调试，不作为用户一级发现入口。
+
+### 12.3A Discovery（用户一级发现入口，新增）
+
+```
+GET /api/v1/review/{trade_date}/discoveries
+GET /api/v1/review/discoveries/{discovery_id}
+```
+
+Discovery 是 primary user-level finding endpoint。筛选参数：
+
+- scope_type
+- scope_family
+- status（new / continuing / confirmed / weakened / invalidated / transformed）
+- sort（按 rank_key 排序）
+- page / page_size
+
+Discovery detail 必须返回或可导航到：
+
+- scope（type / key / name / members / coverage）
+- state（当前状态摘要）
+- change（1D / 5D 变化）
+- anomaly（historical / cross-sectional percentile）
+- keyEvidence（聚合后的关键证据）
+- relatedScopes（Cross-Scope Relation 结果）
+- representativeInstruments（含 contributionPayload / roleEvidence）
+- lifecycle（firstSeen / duration / status）
+- dataQuality（coverage / readiness / reason）
+
+Attribution 和 instrument evidence 以 Discovery 为用户入口。
+
+前端不得从 Signal endpoint 自行聚合 Discovery。
+
 ### 12.4 归因与个股
 
 ```
-GET /api/v1/review/signals/{signal_id}/attributions
-GET /api/v1/review/signals/{signal_id}/instruments
+GET /api/v1/review/discoveries/{discovery_id}/attributions
+GET /api/v1/review/discoveries/{discovery_id}/instruments
+GET /api/v1/review/signals/{signal_id}/attributions       # 兼容：signal-level evidence drilldown
+GET /api/v1/review/signals/{signal_id}/instruments         # 兼容
 ```
 
 股票接口支持：
@@ -1605,7 +1655,7 @@ Raw JSON 仅允许 admin/debug mode。
 - 已发布历史复盘使用较长staleTime，不每30秒刷新；
 - 最新交易日处于computing时仅轮询run status，发布后停止；
 - 页面组件不得拼接不同Review Run；
-- 切换signal时取消无效请求；
+- 切换 Discovery 时取消无效请求；
 - 后端返回partial/stale/unavailable时必须显示具体状态；
 - 禁止无限"加载中"；请求超时、404、422、500分别显示明确错误和request_id。
 
@@ -1617,7 +1667,7 @@ Raw JSON 仅允许 admin/debug mode。
 
 Review跳转参数：
 
-- reviewSignalId
+- reviewDiscoveryId
 - tradeDate
 - sourceCoreRunId
 - boardId
@@ -1631,7 +1681,7 @@ Review跳转参数：
 Review只传：
 
 - from=review
-- signalId
+- discoveryId
 - boardId
 - tradeDate
 
@@ -1646,19 +1696,21 @@ Review只传：
 - 当日Review尚未计算；
 - 计算中；
 - partial未发布；
-- 已发布但无信号；
+- 已发布但无 Discovery（"今日无满足当前 Discovery 条件的市场发现"，可下钻查看 signal/evidence diagnostics）；
+- 已发布有 Discovery 但无 Signal（"今日无独立 Signal 命中，所有 Discovery 来自历史持续或结构聚合"）；
 - scope coverage不足；
 - 历史不足无法计算分位；
-- signal无可归因子范围；
+- Discovery 无可归因子范围/个股；
 - 个股无第一金字塔；
 - 用户无复盘权限；
 - API超时或版本不一致。
 
-"无信号"应显示"今日未命中已配置偏差筛选器"，不能显示"暂无数据"。
+用户主空态："今日无满足当前 Discovery 条件的市场发现"（可下钻查看 signal/evidence diagnostics）。
+Signal 空态（evidence 层）："今日未命中已配置偏差筛选器"。
 
 ## 18. 性能与缓存
 
-- 页面首屏只加载overview、一级scope摘要和信号摘要；
+- 页面首屏只加载overview、Discovery 摘要和 scope 摘要；
 - 归因和股票列表按需加载；
 - 所有长列表服务端分页；
 - 不一次返回几千只成员；
@@ -1674,9 +1726,14 @@ Review只传：
 - component registry映射；
 - P/Q/U/C/V计算；
 - 历史分位不足；
-- A/B/C各筛选器正反例；
-- signal生命周期；
-- attribution排序；
+- State / Change / Anomaly 分离；
+- Signal → Discovery 聚合；
+- A/B/C/D 各 Evidence 正反例（含 D concentration state/change/anomaly 语义）；
+- Signal 生命周期；
+- Discovery 生命周期（new / continuing / confirmed / weakened / invalidated / transformed）；
+- Cross-Scope Relation 计算与 relation type 分类；
+- ATTR-1（taxonomy hierarchical attribution）/ ATTR-2（member attribution）/ ATTR-3（cross-scope relation）；
+- global rank before pagination；
 - tracking状态机；
 - 模板化解释。
 
@@ -1687,9 +1744,12 @@ Review只传：
 - migration upgrade/downgrade/upgrade；
 - run/item并发claim；
 - 相同输入幂等；
-- signal唯一约束；
+- Signal 唯一约束；
+- Discovery identity / idempotency（若实现选择 persistence）；
+- Signal ↔ Discovery evidence lineage；
 - pointer不混run；
 - published与partial隔离；
+- Discovery pagination / ranking；
 - attribution和instrument分页；
 - tracking evaluation逐日唯一；
 - 用户权限隔离。
@@ -1697,14 +1757,16 @@ Review只传：
 ### 19.3 前端目标测试
 
 - URL hydration与前进/后退；
-- 五阶段切换；
-- MarketScan表排序；
-- SignalCard证据和状态；
-- 归因下钻；
+- Scope Browser 平行导航（全市场/指数/风格/行业/概念独立切换，无 Industry→Concept gate）；
+- Discovery 列表与详情；
+- Discovery evidence drilldown（从 Discovery 下钻到 Signal/metric/component/member）；
+- Cross-Scope Relation 展示；
+- representative instrument evidence（含 contributionPayload / roleEvidence）；
+- 追踪面板；
+- 结构化 Evidence Drawer（metric / value / change / percentile / denominator / coverage / source / trigger reason / member contribution）；
+- 加载 / 空态 / degraded / 错误状态（Discovery 空态："今日无满足当前 Discovery 条件的市场发现"）；
 - 个股跳转参数；
-- 加入追踪；
-- 无信号、partial、历史不足、API错误；
-- EvidenceDrawer字段来源。
+- 加入追踪。
 
 ### 19.4 生产canary
 
@@ -1714,11 +1776,16 @@ Review只传：
 - 2个主要指数
 - 2个风格范围
 - 5个一级行业
+- 5个概念
+- 3个二级行业
+- 3个三级行业
 
 验证：
 
 - P/Q/U/C/V值可复算；
-- 至少一条正向和一条风险信号；
+- 至少一条正向和一条风险 Discovery；
+- Concept 独立产生 Discovery（不依赖 Industry 命中）；
+- Cross-Scope Relation 可生成；
 - 下钻路径和成员归因一致；
 - /market与/stock跳转正确；
 - 次日tracking状态可重复计算。
@@ -1869,7 +1936,7 @@ Concept 表面很强，但 Industry Q/U 恶化。
 - 任意 P/Q/U/C/V 聚合变量的 `value` 与 `historyPercentile120d` 必须在累计达到 60 个有效历史观测后才能生成；不足 60 日时 `status=insufficient_history`，且 `value` / `normalizedValue` / `historyPercentile120d` / `delta1d` / `delta5d` 必须为 `null`。
 - `status=insufficient_history` 不得伪造分位，不得使用样本外分位、不得使用 cross-section 分位替代历史分位。
 - `delta1d` / `delta5d` 必须基于 `normalizedValue` 计算；`normalizedValue` 为 `null` 时 `delta*` 也必须为 `null`。
-- 该合同同时适用于 market、major_index、style、industry_l1 第一级范围，以及 industry_l2 / industry_l3 / concept / instrument 第二级范围。
+- 该合同同时适用于所有 scope family：market、major_index、style、industry_l1、industry_l2、industry_l3、concept。
 
 ### 23.3 canary 不得切正式 market_review pointer
 

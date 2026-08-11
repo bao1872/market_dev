@@ -372,18 +372,23 @@ stock_core published
 
 ### RV-AC-04 发布门禁
 
+Review 发布门禁以 [`70-review.md` §11.1`](./70-review.md) 为权威，本条款只传播其 readiness ownership，不拥有第二套规则。
+
 单 scope：
+- underlying coverage >= 0.95
+- P/Q/U/C/V 必要组件状态可用
 
-- underlying coverage >= 0.95；
-- P/Q/U/C/V 必要组件状态可用。
+整套 Review（渐进式 scope readiness）：
 
-整套 Review：
+**MANDATORY — market（HARD GATE）**：market scope 必须 ready，不满足 → CLOSED。
 
-- market 范围必须 ready；
-- 配置的主要指数和风格范围必须 ready；
-- 一级行业 ready 比例达到配置门槛；
-- signal evaluation 无系统性异常；
-- `source_core_run_id` 和 `source_board_run_id` 均指向当前正式 pointer。
+**PROGRESSIVE OPTIONAL — industry_l1 / major_index / style**：数据源 unavailable / bootstrap_unavailable / insufficient_history 不阻塞发布。
+
+**PARALLEL OPTIONAL/DIAGNOSTIC — industry_l2 / industry_l3 / concept**：各自独立 readiness；不可用记录诊断，不影响其他 scope Discovery 发布。
+
+**UNEXPECTED EXECUTION FAILURE 仍然阻塞**：任何 scope 出现 `failed` / `pending` / `running` → CLOSED。
+
+> 旧规则「配置的主要指数和风格范围必须 ready / 一级行业 ready 比例达到配置门槛」已按 PRD70 §6.5.8 废止。
 
 ## 17. 正式盘后含review阶段 + 时间线负耗时修复（CHANGE-20260801-001）
 
