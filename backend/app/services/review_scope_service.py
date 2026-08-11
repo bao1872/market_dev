@@ -1120,11 +1120,16 @@ async def load_day_fact_maps(
         # 读取 summary_payload.first_pyramid_flat。
         if source_core_run_id is None:
             return {}
+        # [P1-A] 仅投影 summary_payload["first_pyramid_flat"]，不再把整个
+        # summary_payload（含 DSA/SMC/Bollinger/SQZMOM 等 structural factors）物化
+        # 进 Python。正式 Review 只消费 first_pyramid_flat；全量 payload 物化是
+        # REVIEW_FULL_COMPUTE_OOM_AT_4G 的主导候选区（294 MiB full vs 19.6 MiB flat）。
+        first_pyramid_expr = StockFeatureSnapshot.summary_payload["first_pyramid_flat"]
         current_snap_stmt = (
             select(
                 StockFeatureSnapshot.instrument_id,
                 StockFeatureSnapshot.trade_date,
-                StockFeatureSnapshot.summary_payload,
+                first_pyramid_expr.label("first_pyramid_flat"),
             )
             .where(StockFeatureSnapshot.source_run_id == source_core_run_id)
         )
@@ -1140,16 +1145,15 @@ async def load_day_fact_maps(
             # 当日 stock_core 指针无快照：返回空映射（上层 scope phase 用
             # insufficient_history / 空范围处理）。真实数据缺失，非 lineage 漂移。
             return {}
-        for _iid, _snap_td, _summary in current_snap_rows:
+        for _iid, _snap_td, _flat in current_snap_rows:
             # [P2] 防御性 fail-closed：SQL 已收窄，仍显式校验不消费其他日期。
             if _snap_td != trade_date:
                 raise ValueError(
                     f"STOCK_CORE_SNAPSHOT_TRADE_DATE_MISMATCH: instrument={_iid} "
                     f"snapshot_trade_date={_snap_td} review_trade_date={trade_date}"
                 )
-            if not isinstance(_summary, dict):
+            if not isinstance(_flat, dict):
                 continue
-            _flat = _summary.get("first_pyramid_flat") or {}
             if not _flat:
                 continue
             current_flat_by_instrument[_iid] = _flat

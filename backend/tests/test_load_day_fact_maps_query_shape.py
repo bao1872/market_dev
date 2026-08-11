@@ -131,8 +131,10 @@ def _make_session(
                 rows = current_states
             fake.scalars.return_value = MagicMock(__iter__=lambda self: iter(rows))
         elif "stock_feature_snapshot" in sql:
+            # [P1-A] 正式 stock_core 查询现在只投影 summary_payload["first_pyramid_flat"]，
+            # 第三列直接是 flat 字典（不再是含 first_pyramid_flat 键的全量 summary）。
             rows = [
-                (inst, snap_trade_date, {"first_pyramid_flat": s})
+                (inst, snap_trade_date, s)
                 for inst, s in zip(instruments, snap_summaries, strict=False)
             ]
             fake.all.return_value = rows
@@ -525,3 +527,141 @@ class TestMemoryBound:
             f"chunk2 bar query happened after only {chunk_query_positions[1]} builds; "
             "completed chunk1 facts should be built before querying chunk2"
         )
+
+
+# =====================================================================
+# P1-A REVIEW_CURRENT_SNAPSHOT_OVERFETCH
+# =====================================================================
+class TestReviewCurrentSnapshotOverfetch:
+    def _capture_snapshot_stmt(self, instruments, snap_summaries):
+        """捕获正式 stock_core 路径发出的 StockFeatureSnapshot 语句字符串。"""
+        captured: dict[str, str] = {}
+
+        class _CaptureSession:
+            def __init__(self) -> None:
+                self._shared_run = uuid.uuid4()
+                self._instruments = instruments
+                self._snap_summaries = snap_summaries
+
+            async def execute(self, stmt):
+                sql = str(stmt)
+                fake = MagicMock()
+                if "stock_feature_snapshot" in sql:
+                    captured["snapshot_stmt"] = sql
+                    # 第三列现在是投影出的 flat（非全量 summary）
+                    rows = [
+                        (inst, TARGET, s)
+                        for inst, s in zip(instruments, snap_summaries, strict=False)
+                    ]
+                    fake.all.return_value = rows
+                    fake.scalars.return_value = MagicMock(
+                        __iter__=lambda self: iter([])
+                    )
+                elif "first_pyramid_history_daily_state" in sql:
+                    if "trade_date <" in sql:
+                        rows = []
+                    else:
+                        rows = []
+                    fake.scalars.return_value = MagicMock(__iter__=lambda self: iter(rows))
+                elif "bars_daily" in sql:
+                    bars = []
+                    for inst, (c, prev_c, vol, amt) in zip(
+                        instruments, [(10.0, 9.5, 500.0, 5000.0)] * len(instruments),
+                        strict=False,
+                    ):
+                        bars.append(_Bar(inst, TARGET, c, prev_c, vol, amt))
+                    fake.scalars.return_value = MagicMock(__iter__=lambda self: iter(bars))
+                elif "instruments" in sql:
+                    idents = [
+                        _Instrument(inst, f"SYM{i}")
+                        for i, inst in enumerate(instruments)
+                    ]
+                    fake.scalars.return_value = MagicMock(__iter__=lambda self: iter(idents))
+                else:
+                    fake.scalars.return_value = MagicMock(__iter__=lambda self: iter([]))
+                return fake
+
+        return _CaptureSession(), captured
+
+    def test_a1_snapshot_query_projects_only_first_pyramid_flat(self) -> None:
+        """A1：正式 stock_core loader 只投影 summary_payload['first_pyramid_flat']，
+        不得把整个 summary_payload 作为 payload 结果返回/选择。"""
+        ids = [uuid.uuid4() for _ in range(3)]
+        session, captured = self._capture_snapshot_stmt(
+            ids, [dict(SAMPLE_FP_FLAT) for _ in range(3)]
+        )
+        asyncio.run(load_day_fact_maps(
+            session, trade_date=TARGET,
+            source_core_run_id=uuid.uuid4(), instrument_ids=ids,
+        ))
+        assert "snapshot_stmt" in captured, "stock_core snapshot 语句未被发出"
+        sql = captured["snapshot_stmt"]
+        # 投影了 first_pyramid_flat
+        assert "first_pyramid_flat" in sql
+        # 不得直接选择整个 summary_payload 列（[...] 索引投影除外）
+        # summary_payload 在 SQL 中仅应作为 JSONB 索引表达式的源，而非独立 SELECT 列。
+        # 通过断言不存在独立的 "summary_payload" 裸列选择来捕捉 overfetch。
+        # 投影表达式形如 summary_payload -> 'first_pyramid_flat' 或
+        # summary_payload['first_pyramid_flat']，索引表达式内可含 summary_payload。
+        # 关键：不能出现把整列当结果的语义（即 "summary_payload" 作为 SELECT 目标且无索引）。
+        self._assert_no_full_payload_select(sql)
+
+    @staticmethod
+    def _assert_no_full_payload_select(sql: str) -> None:
+        # 归一化：移除空白、转为小写
+        norm = " ".join(sql.lower().split())
+        # 投影表达式用 json 索引；裸 "summary_payload" 列选择（无 -> / [）视为 overfetch。
+        import re
+        # 匹配作为 SELECT 列目标的 summary_payload（前面是逗号或 select，后面不是 -> 或 [）
+        pattern = re.compile(r"(?:select|,)\s*summary_payload(?![\[\->])")
+        assert not pattern.search(norm), (
+            f"snapshot 查询选择了整个 summary_payload 列（overfetch）：{sql}"
+        )
+
+    def test_a2_unrelated_summary_keys_excluded(self) -> None:
+        """A2：fixture summary 概念上含无关大 payload，loader 输出必须精确使用
+        first_pyramid_flat，无关 summary 键不得进入 current fact。"""
+        ids = [uuid.uuid4() for _ in range(2)]
+        expected_flat = dict(SAMPLE_FP_FLAT)
+        # 模拟 DB 投影出的 first_pyramid_flat 与原始 summary 无结构关联：
+        # fixture 概念上含 large_unrelated_payload 等无关键，但 loader 只接收投影出的 flat。
+        snap_summaries = [expected_flat, expected_flat]
+        session = _make_session(
+            ids, snap_summaries=snap_summaries,
+            bar_sets=[(10.0, 9.5, 500.0, 5000.0) for _ in range(2)],
+        )
+        facts = asyncio.run(load_day_fact_maps(
+            session, trade_date=TARGET,
+            source_core_run_id=uuid.uuid4(), instrument_ids=ids,
+        ))
+        assert len(facts) == 2
+        for _iid in ids:
+            fact = facts[_iid]
+            # 派生事实来自 first_pyramid_flat（SSOT），而非无关 payload
+            assert fact["fp_trend_direction"] == expected_flat["fp_trend_direction"]
+            # 无关键绝不进入 fact
+            assert "large_unrelated_payload" not in fact
+            assert "summary_payload" not in fact
+
+    def test_a3_source_run_and_trade_date_filter_preserved(self) -> None:
+        """A3：保留 source_run_id 过滤、trade_date == T 过滤、空结果行为。"""
+        ids = [uuid.uuid4() for _ in range(1)]
+        session, captured = self._capture_snapshot_stmt(
+            ids, [dict(SAMPLE_FP_FLAT)]
+        )
+        # 无 source_core_run_id → 立即返回空映射（不触 DB）
+        assert asyncio.run(load_day_fact_maps(
+            session, trade_date=TARGET, source_core_run_id=None,
+            instrument_ids=ids,
+        )) == {}
+        # 有 run id：语句必须含 source_run_id 与 trade_date 过滤
+        session, captured = self._capture_snapshot_stmt(
+            ids, [dict(SAMPLE_FP_FLAT)]
+        )
+        asyncio.run(load_day_fact_maps(
+            session, trade_date=TARGET,
+            source_core_run_id=uuid.uuid4(), instrument_ids=ids,
+        ))
+        sql = captured["snapshot_stmt"]
+        assert "source_run_id" in sql
+        assert "trade_date" in sql
