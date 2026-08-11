@@ -148,6 +148,22 @@
 - chip.core_run_id = snapshot_run_id（不指向 SchedulerJobRun.id）。
 - chip 严格按 instrument_id + trade_date + snapshot_run_id + algorithm_version + status=succeeded 匹配。
 
+#### AC-14b：ENHANCEMENT EXECUTION ISOLATION（增量强化，2026-08-11）
+- `chip_consensus` 等 low-priority / enhancement long-running job 不得占用
+  mandatory after-close / Review 的**唯一 executor**。
+- 必须保证：当 mandatory after-close run 进入 `queued` / `resume_queued` 时，
+  其启动不得等待一个已领取的 Chip job 自然完成。
+- 合法实现包括（等价即可）：
+  - independent async executor/task（如 `run_after_close_orchestrator_worker`
+    内以独立 co-process 运行 `run_chip_consensus_worker`，mandatory 主循环独立领取）；
+  - independent worker process / container；
+  - cooperative yielding / preemption；
+  - 或其它等效隔离。
+- **仅有 poll / claim 顺序（core → chip）不能视为满足“不阻塞”合同。** 若 chip
+  领取后被串行 `await` 到 terminal（head-of-line blocking），则 mandatory
+  after-close / Review 启动会受阻，违反本条合同。
+- 本条不改变 AC-04 / PRD31「chip 不阻断 Review」语义，仅将其落为 executor 级硬合同。
+
 ## 5. 板块分析 V1（CHANGE-20260730-011）
 
 ### BA-01：定位与门禁

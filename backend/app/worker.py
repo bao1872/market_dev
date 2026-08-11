@@ -27,6 +27,16 @@
 - Outbox Relay 不再直接投递渠道，而是为每个渠道创建 MessageDelivery 记录
 - Delivery Worker 负责实际渠道投递与失败重试
 - [P0-3] chip_consensus 与 after_close_orchestrator 可在同一容器运行（独立 WORKER_TYPE 分支）
+
+架构（2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING 修复后）：
+- `run_after_close_orchestrator_worker`（WORKER_TYPE=after_close_orchestrator，生产唯一入口）
+  只负责 mandatory after-close orchestrator 主循环（`_after_close_poll_once`）。
+- Chip consensus 以**独立 co-process** 在同一进程内运行（复用 `run_chip_consensus_worker`），
+  拥有自己的执行 loop，绝不串行阻塞 mandatory orchestrator。
+- Auction Scheduler 以独立 co-process 运行（`_run_auction_scheduler_co_process`）。
+- 三个 loop 各自独立 `while not _shutdown`，共享 `_shutdown`，SIGTERM 时统一 drain。
+- 禁止恢复"每轮 core → chip → bootstrap 串行 fallback"的旧结构 —— 那会让长时 chip
+  任务占用 mandatory executor，造成 head-of-line blocking。
 """
 
 from __future__ import annotations
@@ -1490,6 +1500,17 @@ async def run_after_close_orchestrator_worker() -> None:
     - Auction 轮询异常隔离在 co-process 内，不影响主 Worker
     - SIGTERM 时 _shutdown=True，co-process 检查后退出，主 Worker await drain
 
+    [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING] Chip 独立 co-process：
+    - 本进程同时启动 Chip consensus co-process（_chip_co_process_task），复用已有
+      run_chip_consensus_worker（其内部每轮调用 _chip_consensus_poll_once）。
+    - mandatory 主循环**只**领取/执行 after_close_orchestrator，
+      不再串行 fallback 到 _chip_consensus_poll_once。
+    - 因此一个长时 chip 任务不得占用 mandatory after-close / Review 唯一 executor：
+      当新的 after_close orchestrator 进入 queued / resume_queued 时，主循环可直接领取，
+      无需等待 chip 任务自然完成（executor-level execution isolation）。
+    - Chip co-process 独立 while 循环、共享 _shutdown、异常隔离在 co-process 内。
+    - SIGTERM 时 mandatory 与两个 co-process（Auction / Chip）统一 drain。
+
     [SIGTERM drain] - 优雅退出（不强制中断当前 run）：
     - SIGTERM/SIGINT 由 _handle_shutdown 设置 _shutdown=True（全局标志）
     - 主循环在领取新任务前检查 _shutdown，若为 True 则不再领取新 item
@@ -1511,6 +1532,16 @@ async def run_after_close_orchestrator_worker() -> None:
         "[AfterCloseWorker] Auction Scheduler co-process 已启动（生产入口，无需单独 WORKER_TYPE=auction_scheduler）",
     )
 
+    # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING]
+    # 启动 Chip consensus 独立 co-process（同进程，共享 _shutdown）。
+    # 复用已有 run_chip_consensus_worker（内部独立 while 循环每轮 _chip_consensus_poll_once）。
+    # mandatory 主循环不再串行 fallback 到 _chip_consensus_poll_once，
+    # 因此长时 chip 任务不会阻塞 mandatory after-close / Review executor。
+    _chip_co_process_task = asyncio.create_task(run_chip_consensus_worker())
+    logger.info(
+        "[AfterCloseWorker] Chip consensus co-process 已启动（独立执行 loop，不阻塞 mandatory orchestrator）",
+    )
+
     # 启动恢复：清理上次崩溃残留的 running 任务 + 自动恢复 interrupted 任务
     try:
         async with AsyncSessionLocal() as db:
@@ -1529,21 +1560,16 @@ async def run_after_close_orchestrator_worker() -> None:
     try:
         while not _shutdown:
             try:
-                # [P0-3 2026-07-30] 每轮优先领取 core orchestrator；
-                # 没有 core 任务时领取一个 chip consensus 任务
-                # Auction 轮询由 co-process 独立处理，不在此阻塞 core/chip
+                # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING]
+                # mandatory 主循环只领取/执行 after_close_orchestrator。
+                # Chip 已由独立 co-process 执行，不再在此串行 fallback。
+                # Review bootstrap 仍作为最低优先级回填（不抢占盘后主链），
+                # 其自身 executor isolation 另行登记（见 guide FIX C，本轮不改）。
                 claimed = await _after_close_poll_once()
-                if not claimed:
-                    claimed = await _chip_consensus_poll_once()
-                # [2026-08-02] 最低优先级：core 与 chip 都空闲时才领取 review
-                # 历史回填。生产没有 WORKER_TYPE=all 容器，bootstrap 必须挂在
-                # after-close 容器内才有执行者，否则任务会永远停在 queued。
-                # 放在最后保证回填不抢占当日盘后主链资源。
                 if not claimed:
                     claimed = await _review_bootstrap_poll_once()
             except Exception as exc:
-                # _after_close_poll_once / _chip_consensus_poll_once /
-                # _review_bootstrap_poll_once
+                # _after_close_poll_once / _review_bootstrap_poll_once
                 # 内部已捕获执行异常，此处仅捕获领取阶段的意外异常
                 logger.exception("[AfterCloseWorker] 轮询异常: %s", exc)
             if _shutdown:
@@ -1566,6 +1592,19 @@ async def run_after_close_orchestrator_worker() -> None:
                     pass
             except Exception as exc:
                 logger.warning("[AfterCloseWorker] Auction co-process 退出异常: %s", exc)
+
+        # [SIGTERM drain] 确保 Chip consensus co-process 退出（共享 _shutdown）
+        if not _chip_co_process_task.done():
+            try:
+                await asyncio.wait_for(_chip_co_process_task, timeout=35)
+            except TimeoutError:
+                _chip_co_process_task.cancel()
+                try:
+                    await _chip_co_process_task
+                except asyncio.CancelledError:
+                    pass
+            except Exception as exc:
+                logger.warning("[AfterCloseWorker] Chip co-process 退出异常: %s", exc)
 
     # [SIGTERM drain complete] - 当前 item 已完成，worker 正常退出（退出码 0）
     logger.info("[AfterCloseWorker] SIGTERM drain complete, finished current item")
@@ -2489,9 +2528,10 @@ async def main() -> None:
     if WORKER_TYPE in ("after_close_orchestrator", "all"):
         tasks.append(asyncio.create_task(run_after_close_orchestrator_worker()))
 
-    # [P0-3 2026-07-30] chip consensus 已接入 run_after_close_orchestrator_worker（每轮优先 core，无 core 时领 chip）
-    # 仅 WORKER_TYPE=chip_consensus 时启动独立 chip worker（用于调试/独立部署）
-    # WORKER_TYPE=after_close_orchestrator 和 all 由 run_after_close_orchestrator_worker 统一处理
+    # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING]
+    # WORKER_TYPE=after_close_orchestrator 在 run_after_close_orchestrator_worker 内
+    # 同时启动 Chip 独立 co-process（复用 run_chip_consensus_worker），不再串行 fallback。
+    # WORKER_TYPE=chip_consensus 仅用于调试/独立部署，避免与 after-close 重复领取。
     if WORKER_TYPE == "chip_consensus":
         tasks.append(asyncio.create_task(run_chip_consensus_worker()))
 
@@ -2500,7 +2540,8 @@ async def main() -> None:
         tasks.append(asyncio.create_task(run_auction_scheduler_worker()))
 
     # [2026-08-02] review bootstrap 已接入 run_after_close_orchestrator_worker
-    # （每轮 core → chip → bootstrap，最低优先级，不抢占盘后主链）。
+    # （mandatory 主循环中作为最低优先级回填，不抢占盘后主链；其独立 executor
+    # isolation 另行登记，见 guide FIX C）。
     # 生产没有 WORKER_TYPE=all 容器，after-close 容器跑 after_close_orchestrator，
     # 因此这里只在 WORKER_TYPE=review_bootstrap 时启动独立 worker（调试/独立部署），
     # 避免 all 模式下与 after-close 循环重复领取同一批任务。
