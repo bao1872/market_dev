@@ -92,6 +92,7 @@ MIGRATION_CHANGED=false
 BACKEND_ENVIRONMENT_CHANGED=false
 FRONTEND_ENVIRONMENT_CHANGED=false
 CAPTURE_ENVIRONMENT_CHANGED=false
+COMPOSE_RUNTIME_CHANGED=false
 
 # 首次 Live Mount 部署：核心应用容器尚未挂载 LIVE_ROOT。
 # 需要强制建立挂载，但**不得**因此把 migration_changed 设为 true。
@@ -535,12 +536,23 @@ classify_changes() {
         CAPTURE_ENVIRONMENT_CHANGED=true
     fi
 
+    # [REVIEW-V2] Application runtime Compose config change detection.
+    # Compose (prod / live overlay) is runtime topology/config SSOT. A changed Compose file
+    # MUST recreate app containers — otherwise RUNTIME_SHA advances while containers keep the
+    # previous container config (FIRST_BLOCKER = COMPOSE_ONLY_RUNTIME_CONFIG_NOT_APPLIED_BY_DEPLOY).
+    # Classified as application runtime mutation: does NOT set *_ENVIRONMENT_CHANGED (no image build)
+    # and does NOT set MIGRATION_CHANGED (no alembic).
+    if echo "${changed_files}" | grep -qE '^docker-compose\.(prod|live)\.yml$'; then
+        COMPOSE_RUNTIME_CHANGED=true
+    fi
+
     log "  backend_runtime_changed=${BACKEND_RUNTIME_CHANGED}"
     log "  frontend_runtime_changed=${FRONTEND_RUNTIME_CHANGED}"
     log "  migration_changed=${MIGRATION_CHANGED}"
     log "  backend_environment_changed=${BACKEND_ENVIRONMENT_CHANGED}"
     log "  frontend_environment_changed=${FRONTEND_ENVIRONMENT_CHANGED}"
     log "  capture_environment_changed=${CAPTURE_ENVIRONMENT_CHANGED}"
+    log "  compose_runtime_changed=${COMPOSE_RUNTIME_CHANGED}"
 }
 
 # 首次 Live Mount 部署强制覆盖：必须完整同步 Python 与前端运行代码并重建挂载，
@@ -1003,7 +1015,8 @@ _backend_runtime_will_mutate() {
     [[ "${BACKEND_RUNTIME_CHANGED}" == "true" \
         || "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
         || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" \
-        || "${MIGRATION_CHANGED}" == "true" ]]
+        || "${MIGRATION_CHANGED}" == "true" \
+        || "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]
 }
 
 # 从 ENV_FILE 读取 compose 的 POSTGRES_USER / POSTGRES_DB（未定义时回退默认 bz / bz_stock）。
@@ -1163,6 +1176,19 @@ deploy() {
     if [[ "${need_frontend}" == "true" ]]; then
         restart_list+=(frontend)
         RESTARTED_FRONTEND=true
+    fi
+
+    # [REVIEW-V2] Compose runtime config change (prod/live overlay) is an application
+    # runtime mutation: recreate app containers so the new container config takes effect.
+    # Does NOT set need_backend/need_frontend (no code sync), does NOT trigger image build
+    # (STEP 5) and does NOT trigger migration (STEP 6). Reuse existing restart_services path;
+    # scope stays PYTHON_SERVICES + frontend (postgres/redis/umami never restart).
+    if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then
+        restart_list+=("${PYTHON_SERVICES[@]}")
+        restart_list+=(frontend)
+        RESTARTED_PYTHON=true
+        RESTARTED_FRONTEND=true
+        log "  Compose 运行配置变化：应用容器将以新 Compose 配置重建（PYTHON_SERVICES + frontend）"
     fi
 
     if [[ ${#restart_list[@]} -eq 0 ]]; then

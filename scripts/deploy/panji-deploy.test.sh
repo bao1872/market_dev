@@ -246,5 +246,92 @@ assert_code_absent "禁止删除 node:20-alpine" 'rmi .*node:20-alpine|node:20-a
 assert_code_absent "禁止清理无关容器" 'container prune' "${SERVER_SCRIPT}"
 
 echo "----------------------------------------"
+
+# ---------------------------------------------------------------------------
+echo "== 9/9 COMPOSE_RUNTIME_CHANGED 部署契约（控制流） =="
+# 提取 panji-deploy.sh 中 main() 之前的全部定义作为 fixture（避免执行 main）。
+# 通过 PATH 上的 git stub（读取 MOCK_DIFF_FILES 环境变量）驱动 classify_changes 的真实控制流。
+_DEPLOY_FIXTURE="$(mktemp -t panji-deploy-fixture.XXXXXX.sh)"
+awk '/^main\(\) \{/{exit} {print}' "${SERVER_SCRIPT}" > "${_DEPLOY_FIXTURE}"
+
+# PATH 上的 git stub：仅响应 `git diff --name-only ...`，回显 MOCK_DIFF_FILES 内容。
+_GIT_STUB_DIR="$(mktemp -d -t panji-git-stub.XXXXXX)"
+cat > "${_GIT_STUB_DIR}/git" <<'GITEOF'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "diff --name-only" ]]; then
+    printf '%s\n' "${MOCK_DIFF_FILES:-}"
+fi
+GITEOF
+chmod +x "${_GIT_STUB_DIR}/git"
+PATH="${_GIT_STUB_DIR}:${PATH}"
+
+# 仅 source fixture 一次（fixture 内 set -euo pipefail 会继承到当前 shell，
+# 故先 set +e 防止 classify_changes 中任何非零返回提前退出）。
+set +e
+export PANJI_REPO_ROOT="$(pwd)"
+source "${_DEPLOY_FIXTURE}"
+set -e
+
+reset_flags() {
+    export MOCK_DIFF_FILES="$1"
+    PREVIOUS_SHA="abc1234abc1234abc1234abc1234abc1234abc1"
+    TARGET_SHA="def5678def5678def5678def5678def5678def5"
+    PREVIOUS_SHA_SOURCE="git_diff"
+    BACKEND_RUNTIME_CHANGED=false
+    FRONTEND_RUNTIME_CHANGED=false
+    MIGRATION_CHANGED=false
+    BACKEND_ENVIRONMENT_CHANGED=false
+    FRONTEND_ENVIRONMENT_CHANGED=false
+    CAPTURE_ENVIRONMENT_CHANGED=false
+    COMPOSE_RUNTIME_CHANGED=false
+    classify_changes
+}
+
+# CASE 1：仅 docker-compose.prod.yml 变化 → COMPOSE_RUNTIME_CHANGED=true
+reset_flags $'docker-compose.prod.yml'
+if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then ok "CASE1 仅 prod compose 变化 → COMPOSE_RUNTIME_CHANGED=true"; else bad "CASE1 仅 prod compose 变化 → COMPOSE_RUNTIME_CHANGED=true"; fi
+
+# CASE 2：仅 docker-compose.live.yml 变化 → COMPOSE_RUNTIME_CHANGED=true
+reset_flags $'docker-compose.live.yml'
+if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then ok "CASE2 仅 live overlay 变化 → COMPOSE_RUNTIME_CHANGED=true"; else bad "CASE2 仅 live overlay 变化 → COMPOSE_RUNTIME_CHANGED=true"; fi
+
+# CASE 3：COMPOSE_RUNTIME_CHANGED=true → _backend_runtime_will_mutate=true
+reset_flags $'docker-compose.prod.yml'
+if _backend_runtime_will_mutate; then ok "CASE3 compose 运行配置变化 → _backend_runtime_will_mutate=true"; else bad "CASE3 compose 运行配置变化 → _backend_runtime_will_mutate=true"; fi
+
+# CASE 4：compose 运行配置变化 → 重启路径包含 backend + 全部 PYTHON_SERVICES + frontend
+# （重启装配为 main 内联逻辑，非独立函数；此处用结构断言验证分支挂载范围）
+if code_of "${SERVER_SCRIPT}" \
+    | grep -qE 'if \[\[ "\$\{COMPOSE_RUNTIME_CHANGED\}" == "true" \]\]; then' \
+    && code_of "${SERVER_SCRIPT}" | grep -qE 'restart_list\+=\("\$\{PYTHON_SERVICES\[@\]\}"\)' \
+    && code_of "${SERVER_SCRIPT}" | grep -qE 'restart_list\+=\(frontend\)'; then
+    ok "CASE4 compose 变化重启分支挂载 PYTHON_SERVICES + frontend"
+else
+    bad "CASE4 compose 变化重启分支挂载 PYTHON_SERVICES + frontend"
+fi
+
+# CASE 5：compose 运行配置变化 → 不自动触发镜像构建 / migration
+reset_flags $'docker-compose.prod.yml'
+if [[ "${BACKEND_ENVIRONMENT_CHANGED}" == "false" && "${FRONTEND_ENVIRONMENT_CHANGED}" == "false" && "${CAPTURE_ENVIRONMENT_CHANGED}" == "false" ]]; then
+    ok "CASE5 compose 变化不置 *_ENVIRONMENT_CHANGED（不自动构建镜像）"
+else
+    bad "CASE5 compose 变化不置 *_ENVIRONMENT_CHANGED（不自动构建镜像）"
+fi
+if [[ "${MIGRATION_CHANGED}" == "false" ]]; then ok "CASE5 compose 变化不置 MIGRATION_CHANGED（不自动 migration）"; else bad "CASE5 compose 变化不置 MIGRATION_CHANGED"; fi
+
+# CASE 6：无关 docs-only 变化 → COMPOSE_RUNTIME_CHANGED=false，无新重启行为
+reset_flags $'docs/maps/foo.md
+README.md'
+if [[ "${COMPOSE_RUNTIME_CHANGED}" == "false" ]]; then ok "CASE6 仅 docs 变化 → COMPOSE_RUNTIME_CHANGED=false"; else bad "CASE6 仅 docs 变化 → COMPOSE_RUNTIME_CHANGED=false"; fi
+if [[ "${BACKEND_RUNTIME_CHANGED}" == "false" && "${FRONTEND_RUNTIME_CHANGED}" == "false" && "${MIGRATION_CHANGED}" == "false" ]]; then
+    ok "CASE6 仅 docs 变化不产生新重启/迁移行为"
+else
+    bad "CASE6 仅 docs 变化不产生新重启/迁移行为"
+fi
+
+rm -f "${_DEPLOY_FIXTURE}"
+rm -rf "${_GIT_STUB_DIR}"
+
+echo "----------------------------------------"
 echo "部署脚本结构契约测试：${PASS} 通过 / ${FAIL} 失败"
 [[ "${FAIL}" -eq 0 ]] && exit 0 || exit 1

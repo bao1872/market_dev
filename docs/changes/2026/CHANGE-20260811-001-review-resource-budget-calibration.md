@@ -10,7 +10,7 @@
 ## 1. 问题（FIRST_BLOCKER = REVIEW_RESOURCE_BUDGET_CALIBRATION_DEFECT）
 
 REVIEW-V2 FINAL RUNTIME ACCEPTANCE 链在 STEP 6（FULL `compute_run` SAME `d12a384c`）被执行通道前景运行，
-进程在启动后约 1 秒内被 SIGKILL（exit 137）。只读根因诊断（2026-08-11）确认：
+FULL Review compute 执行被 backend 内存 cgroup OOM killer 终止（SIGKILL / exit 137）。只读根因诊断（2026-08-11）确认：
 
 - cgroup `memory.max = 1GiB`；`memory.peak ≈ 1GiB`；`memory.events.oom_kill = 4`
 - `docker inspect trading-backend` → `State.OOMKilled = true`
