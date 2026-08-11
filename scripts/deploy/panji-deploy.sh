@@ -968,21 +968,33 @@ RESTARTED_FRONTEND=false
 # 活跃定义（来自 SchedulerJobRun 当前状态机真值，非容器/心跳/日志推断）：status='running'。
 #   queued / resume_queued 不是活跃执行，不机械阻塞（见 guide ACTIVE DEFINITION）。
 #
-# 该 job_name 集合 = 所有在 worker-after-close 进程内执行的业务任务：
-#   - after_close_orchestrator
-#   - after_close_chip_consensus
+# 该 job_name 集合 = 所有在 worker-after-close 进程内执行的业务任务，但按
+# 部署中断语义分治（[REVIEW-V2 / DEPLOY-GATE-REINTRODUCES-CHIP-PRIORITY-INVERSION]）：
+#
+# BLOCKING_AFTER_CLOSE_JOB_NAMES（强制阻塞类，运行即 fail-closed）：
+#   - after_close_orchestrator   # mandatory after-close / Review 链路
 #   - review_bootstrap
 #   - auction_final
 #   - auction_open_confirmation
+#   PRD30 AC-14/AC-14b、PRD31 PC-03/PC-30：不得为部署中断正在运行的强制盘后/Review 任务。
+#
+# PREEMPTIBLE_AFTER_CLOSE_JOB_NAMES（可抢占增强类，运行不阻塞部署，仅记录）：
+#   - after_close_chip_consensus # Chip 是 enhancement，不阻塞 stock_core/board/Review；
+#                                其执行可随 worker-after-close 重建而中断，并复用
+#                                resume_queued 重跑已成功的标的（FIX C 复用既有语义）。
+# 本回合只豁免 Chip；review_bootstrap/auction_final/auction_open_confirmation 的中断语义
+# 不在本 blocker 范围内，不得自动豁免。
 #
 # 注意：本门禁只读、fail-fast，绝不等待业务任务完成（FIX C），也绝不扩大
 #   PANJI_APP_HEAVY_STOP_GRACE / PANJI_TIMEOUT_COMPOSE_UP_SECONDS 为业务任务超时（FIX D）。
-ACTIVE_AFTER_CLOSE_JOB_NAMES=(
+BLOCKING_AFTER_CLOSE_JOB_NAMES=(
     after_close_orchestrator
-    after_close_chip_consensus
     review_bootstrap
     auction_final
     auction_open_confirmation
+)
+PREEMPTIBLE_AFTER_CLOSE_JOB_NAMES=(
+    after_close_chip_consensus
 )
 
 # 本次部署是否会变更 backend runtime / 重启 Python 服务（含 worker-after-close）。
@@ -1005,7 +1017,22 @@ _pg_conn_var() {
 # [DEPLOY-GATE] 只读活跃盘后任务检查。
 # - 无业务写入，无直接状态变更。
 # - 查询失败（无法连接/解析 psql 失败）→ fail-closed 拒绝部署。
-# - 存在 status='running' 的活跃任务 → 打印结构化证据并 fail（ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY）。
+# - 强制阻塞类（BLOCKING_AFTER_CLOSE_JOB_NAMES）存在 status='running' 的活跃任务
+#   → 打印结构化证据并 fail（ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY）。
+# - 可抢占增强类（PREEMPTIBLE_AFTER_CLOSE_JOB_NAMES，仅 after_close_chip_consensus）
+#   运行时不阻塞部署（PRD30 AC-14b / PRD31 PC-30：Chip 是 enhancement，不阻塞
+#   stock_core/board/Review），仅记录 PREEMPTIBLE_ENHANCEMENT_ACTIVE 并继续。
+
+# 将数组名引用的 job_name 列表拼成 SQL IN 字面量：'a','b',...
+_job_name_filter() {
+    local -n _arr="$1"
+    local quoted=() name
+    for name in "${_arr[@]}"; do
+        quoted+=("'${name}'")
+    done
+    IFS=,; echo "${quoted[*]}"
+}
+
 guard_active_after_close_jobs() {
     if ! _backend_runtime_will_mutate; then
         log "backend runtime 不变化（不重启 Python 服务），跳过活跃盘后任务门禁"
@@ -1022,37 +1049,52 @@ guard_active_after_close_jobs() {
     fi
 
     # 构造 IN 列表：'a','b',...
-    local quoted=()
-    local name
-    for name in "${ACTIVE_AFTER_CLOSE_JOB_NAMES[@]}"; do
-        quoted+=("'${name}'")
-    done
-    local job_filter
-    job_filter="$(IFS=,; echo "${quoted[*]}")"
-
-    # 只读查询；psql 失败视为无法确认活跃状态，fail-closed（不打印凭据，stderr 丢弃）。
-    local psql_out=""
-    if ! psql_out="$(docker exec trading-postgres psql -U "${pg_user}" -d "${pg_db}" \
+    local blocking_filter
+    blocking_filter="$(_job_name_filter BLOCKING_AFTER_CLOSE_JOB_NAMES)"
+    local blocking_out=""
+    if ! blocking_out="$(docker exec trading-postgres psql -U "${pg_user}" -d "${pg_db}" \
         -tA -F ' | ' \
-        -c "SELECT id, job_name, status, business_date, started_at, heartbeat_at \
+        -c "SELECT id, job_name, business_date, heartbeat_at \
             FROM scheduler_job_runs \
-            WHERE status = 'running' AND job_name IN (${job_filter}) \
+            WHERE status = 'running' AND job_name IN (${blocking_filter}) \
             ORDER BY started_at" 2>/dev/null)"; then
         fail "ACTIVE_AFTER_CLOSE_JOB_GATE_UNAVAILABLE: 无法查询 scheduler_job_runs（psql 失败），拒绝部署（fail-closed）"
     fi
 
-    if [[ -n "${psql_out}" ]]; then
-        log "!!! 检测到 worker-after-close 活跃长任务，拒绝部署（fail-closed） !!!"
+    if [[ -n "${blocking_out}" ]]; then
+        log "!!! 检测到强制阻塞类 worker-after-close 活跃长任务，拒绝部署（fail-closed） !!!"
         log "错误码: ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY"
         log "请等待业务任务完成，或使用权威恢复操作（如 /v1/admin/review/bootstrap/{id}/resume）后再部署"
-        log "active_jobs:"
+        log "blocking_active_jobs:"
         while IFS= read -r row; do
             [[ -n "${row}" ]] && log "  ${row}"
-        done <<< "${psql_out}"
-        fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY: worker-after-close 存在活跃长任务，部署已在任何 runtime mutation 之前停止"
+        done <<< "${blocking_out}"
+        fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY: worker-after-close 存在强制阻塞类活跃长任务，部署已在任何 runtime mutation 之前停止"
     fi
 
-    log "无活跃盘后长任务，继续部署"
+    # (2) 可抢占增强类（仅 Chip）：运行不阻塞部署，仅记录并继续（不 fail）。
+    local preempt_filter
+    preempt_filter="$(_job_name_filter PREEMPTIBLE_AFTER_CLOSE_JOB_NAMES)"
+    local preempt_out=""
+    if ! preempt_out="$(docker exec trading-postgres psql -U "${pg_user}" -d "${pg_db}" \
+        -tA -F ' | ' \
+        -c "SELECT id, job_name, business_date, heartbeat_at \
+            FROM scheduler_job_runs \
+            WHERE status = 'running' AND job_name IN (${preempt_filter}) \
+            ORDER BY started_at" 2>/dev/null)"; then
+        fail "ACTIVE_AFTER_CLOSE_JOB_GATE_UNAVAILABLE: 无法查询 scheduler_job_runs（psql 失败），拒绝部署（fail-closed）"
+    fi
+
+    if [[ -n "${preempt_out}" ]]; then
+        log "PREEMPTIBLE_ENHANCEMENT_ACTIVE"
+        log "Chip(after_close_chip_consensus) 为增强类任务，可随 worker-after-close 重建而中断并重试，不阻塞部署"
+        log "preemptible_active_jobs:"
+        while IFS= read -r row; do
+            [[ -n "${row}" ]] && log "  ${row}"
+        done <<< "${preempt_out}"
+    fi
+
+    log "无强制阻塞盘后长任务，继续部署"
 }
 
 deploy() {

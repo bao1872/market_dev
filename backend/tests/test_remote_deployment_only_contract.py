@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -169,29 +168,102 @@ def test_active_job_gate_runs_before_worker_after_close_recreate() -> None:
 
 
 def test_gate_fail_closed_blocks_and_allows_when_no_active_jobs() -> None:
-    """CASE 5: 无活跃任务 → 门禁继续部署；有活跃任务 → fail-closed 带证据停止。"""
+    """CASE 4: 无活跃任务 → 门禁继续部署；有强制阻塞活跃任务 → fail-closed 带证据停止。"""
     body = _guard_body()
     assert "status = 'running'" in body, "活跃过滤必须以 SchedulerJobRun.status='running' 为真值"
     assert "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY" in body
-    # 无活跃任务时有明确的继续路径（非 fail），而不是任何非空都拒绝。
-    assert "无活跃盘后长任务，继续部署" in body
+    # 无强制阻塞活跃任务时有明确的继续路径（非 fail），而不是任何非空都拒绝。
+    assert "无强制阻塞盘后长任务，继续部署" in body
     # 查询为只读 SELECT，不允许业务写入。
     for forbidden in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER"):
         assert forbidden not in body, f"门禁查询不得包含写操作: {forbidden}"
-    # 失败路径仅在检测到活跃任务时触发。
+    # 失败路径仅在检测到强制阻塞活跃任务时触发。
     fail_idx = _line(body, 'fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY')
-    active_idx = _line(body, '[[ -n "${psql_out}" ]]')
-    assert active_idx < fail_idx, "fail 必须位于活跃检测分支之后"
+    active_idx = _line(body, '[[ -n "${blocking_out}" ]]')
+    assert active_idx < fail_idx, "fail 必须位于强制阻塞活跃检测分支之后"
 
 
-def test_gate_guards_only_backend_runtime_mutation_not_frontend_only() -> None:
-    """CASE 6: frontend-only 部署不受无关 worker-after-close 活跃任务阻塞。"""
+# =============================================================================
+# [REVIEW-V2 / DEPLOY-GATE-REINTRODUCES-CHIP-PRIORITY-INVERSION] 优先级分治门禁
+# =============================================================================
+# Chip(after_close_chip_consensus) = enhancement，运行不阻塞部署；
+# mandatory after_close_orchestrator 运行 = 强制阻塞（fail-closed）。
+
+def _script() -> str:
+    return _read("scripts/deploy/panji-deploy.sh")
+
+
+def test_gate_splits_blocking_and_preemptible_job_sets() -> None:
+    """FIX A/B：Chip 归入 PREEMPTIBLE；强制任务归入 BLOCKING；两者均定义。"""
+    script = _script()
+    assert "BLOCKING_AFTER_CLOSE_JOB_NAMES=" in script
+    assert "PREEMPTIBLE_AFTER_CLOSE_JOB_NAMES=" in script
+    # 强制阻塞集合必须含 mandatory orchestrator，且不含 Chip。
+    blocking_arr = script.split("BLOCKING_AFTER_CLOSE_JOB_NAMES=(")[1].split(")")[0]
+    preempt_arr = script.split("PREEMPTIBLE_AFTER_CLOSE_JOB_NAMES=(")[1].split(")")[0]
+    assert "after_close_orchestrator" in blocking_arr
+    assert "after_close_chip_consensus" not in blocking_arr
+    assert "after_close_chip_consensus" in preempt_arr
+    # 门禁函数体只引用集合名，不内联 Chip/orchestrator 字面量到失败分支。
+    body = _guard_body()
+    assert "PREEMPTIBLE_ENHANCEMENT_ACTIVE" in body
+    # 函数体内唯一的 fail 仅由 BLOCKING 检测触发（blocking_out），PREEMPTIBLE 分支不 fail。
+    assert 'fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY' in body
+    assert "[[ -n \"${blocking_out}\" ]]" in body
+    # PREEMPTIBLE 分支不得包含任何 fail 调用。
+    preempt_section = body.split("PREEMPTIBLE_ENHANCEMENT_ACTIVE")[1]
+    assert "fail " not in preempt_section, "PREEMPTIBLE 分支不得触发 fail"
+
+
+def test_gate_allows_when_only_chip_running() -> None:
+    """CASE 1: 仅 after_close_chip_consensus = running → 部署门禁不 fail。"""
+    body = _guard_body()
+    # Chip 仅出现在可抢占分支（PREEMPTIBLE 集合），不在 blocking 失败触发条件内。
+    assert "PREEMPTIBLE_AFTER_CLOSE_JOB_NAMES" in body
+    assert "BLOCKING_AFTER_CLOSE_JOB_NAMES" in body
+    # blocking 失败路径只依赖 blocking_out；preempt 分支只 log 不 fail。
+    assert "[[ -n \"${blocking_out}\" ]]" in body
+    assert "PREEMPTIBLE_ENHANCEMENT_ACTIVE" in body
+
+
+def test_gate_fail_closed_when_orchestrator_running() -> None:
+    """CASE 2: after_close_orchestrator = running → 部署门禁 fail-closed。"""
+    script = _script()
+    # orchestrator 属于 BLOCKING 集合，其 running 命中 blocking_out → fail。
+    blocking_arr = script.split("BLOCKING_AFTER_CLOSE_JOB_NAMES=(")[1].split(")")[0]
+    assert "after_close_orchestrator" in blocking_arr
+    body = _guard_body()
+    assert "BLOCKING_AFTER_CLOSE_JOB_NAMES" in body
+    # 失败证据必须包含 orchestrator 类任务并触发 fail。
+    fail_idx = _line(body, 'fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY')
+    assert fail_idx >= 0
+
+
+def test_gate_allows_when_chip_running_and_orchestrator_queued() -> None:
+    """CASE 3: Chip running + orchestrator queued（当前真实 runtime 情形）→ 允许部署。"""
+    body = _guard_body()
+    # queued 不是活跃执行（status='running' 过滤），故 blocking_out 为空 → 不 fail；
+    # Chip running 命中 preempt 分支 → 仅记录 PREEMPTIBLE_ENHANCEMENT_ACTIVE 并继续。
+    assert "status = 'running'" in body
+    assert "PREEMPTIBLE_ENHANCEMENT_ACTIVE" in body
+    # 失败分支仅由 blocking_out 驱动；Chip 运行不会使 blocking_out 非空。
+    assert "[[ -n \"${blocking_out}\" ]]" in body
+
+
+def test_gate_allows_when_no_active_jobs() -> None:
+    """CASE 4: 无活跃任务 → 部署允许。"""
+    body = _guard_body()
+    assert "无强制阻塞盘后长任务，继续部署" in body
+
+
+def test_gate_frontend_only_unchanged() -> None:
+    """CASE 5: frontend-only 部署不受 worker-after-close 活跃任务阻塞（不变）。"""
     body = _guard_body()
     assert "_backend_runtime_will_mutate" in body, "门禁必须由 backend mutation 判定守卫"
     guard_idx = _line(body, "_backend_runtime_will_mutate")
     query_idx = _line(body, "psql")
     assert guard_idx < query_idx, "必须在执行查询前先判定本次是否变更 backend runtime"
     # 门禁覆盖全部 worker-after-close 业务任务（FIX A）：job_name 集合定义在脚本内。
-    script = _read("scripts/deploy/panji-deploy.sh")
+    script = _script()
     for name in _EXPECTED_ACTIVE_JOB_NAMES:
         assert name in script, f"门禁缺少活跃 job_name: {name}"
