@@ -941,6 +941,11 @@ class MarketReviewTracking(Base):
         nullable=True,
         comment="关联 instruments.id（追踪 instrument 时填充）",
     )
+    discovery_id: Mapped[str | None] = mapped_column(
+        Text(),
+        nullable=True,
+        comment="Discovery logical identity（追踪 discovery 时填充；scope_type/scope_key 仅作 evaluation context）",
+    )
     status: Mapped[str] = mapped_column(
         Text(),
         nullable=False,
@@ -968,7 +973,7 @@ class MarketReviewTracking(Base):
         Index("ix_review_trackings_signal", "source_signal_id"),
         Index("ix_review_trackings_instrument", "instrument_id"),
         CheckConstraint(
-            "tracking_type IN ('signal','scope','instrument')",
+            "tracking_type IN ('signal','scope','instrument','discovery')",
             name="review_trackings_tracking_type_check",
         ),
         CheckConstraint(
@@ -1111,7 +1116,7 @@ if __name__ == "__main__":
         },
         "market_review_trackings": {
             "id", "user_id", "source_signal_id", "tracking_type",
-            "scope_type", "scope_key", "instrument_id", "status",
+            "scope_type", "scope_key", "instrument_id", "discovery_id", "status",
             "confirmation_conditions", "invalidation_conditions", "note",
             "created_at", "closed_at",
         },

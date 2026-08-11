@@ -852,10 +852,15 @@
   }
 }
 
+.discovery-filter-active {
+  background: v.$color-primary; border-color: v.$color-primary; color: #000;
+}
+
 .review-empty-state {
   text-align: center; padding: 40px 16px; color: v.$color-text-dim;
   p { margin: 8px 0; }
   .review-degraded { font-size: 0.85rem; color: #fa0; }
+  .review-degraded-item { margin: 2px 0; }
   .review-empty-hint { font-size: 0.8rem; opacity: 0.6; }
 }
 
@@ -893,6 +898,10 @@
     display: flex; justify-content: space-between;
     font-size: 0.75rem; color: v.$color-text-dim;
   }
+}
+
+.evidence-tags {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;
 }
 
 .evidence-tag {
@@ -996,4 +1005,49 @@
 
 .data-quality {
   display: flex; gap: 16px; font-size: 0.85rem; color: v.$color-text-dim;
+}
+
+// =========================================================================
+// [V2] Discovery Workspace — CSS Module exposure & additive styles
+// =========================================================================
+
+// lifecycle status 作为顶层 module class 暴露，供 styles[...] 动态引用
+.discovery-lifecycle-new { background: rgba(0,180,255,0.15); color: #0bf; }
+.discovery-lifecycle-continuing { background: rgba(0,200,100,0.15); color: #0c8; }
+.discovery-lifecycle-confirmed { background: rgba(0,200,100,0.25); color: #0f8; }
+.discovery-lifecycle-weakened { background: rgba(255,180,0,0.15); color: #fa0; }
+.discovery-lifecycle-invalidated { background: rgba(255,80,80,0.15); color: #f55; }
+
+// 结构化 evidence rendering（CR-03/CR-04）
+.evidence-block {
+  padding: 8px; border: 1px solid rgba(255,255,255,0.06); border-radius: 4px;
+  background: rgba(255,255,255,0.02); margin-top: 6px;
+}
+.evidence-label {
+  font-size: 0.8rem; font-weight: 600; color: v.$color-text-dim; margin-bottom: 4px;
+}
+.evidence-row {
+  display: flex; gap: 8px; font-size: 0.8rem; padding: 1px 0;
+  border-bottom: 1px dashed rgba(255,255,255,0.04);
+  &:last-child { border-bottom: none; }
+}
+.evidence-key { color: v.$color-text-dim; min-width: 160px; }
+.evidence-value { word-break: break-word; }
+
+// Discovery detail 追踪操作
+.tracking-actions {
+  display: flex; gap: 8px; margin-top: 4px;
+  .tracking-btn {
+    padding: 4px 12px; border: 1px solid v.$color-border; border-radius: 4px;
+    background: transparent; color: v.$color-text; cursor: pointer; font-size: 0.8rem;
+    &:hover { border-color: v.$color-primary; }
+    &:disabled { opacity: 0.5; cursor: not-allowed; }
+    &.primary { background: v.$color-primary; border-color: v.$color-primary; color: #000; }
+  }
+}
+
+// workspace 顶层容器/header/filters 用 module class（见 .discovery-* 已有定义）
+.discovery-error {
+  padding: 12px; border: 1px solid rgba(255,80,80,0.3); border-radius: 6px;
+  font-size: 0.85rem; color: #f66;
 }

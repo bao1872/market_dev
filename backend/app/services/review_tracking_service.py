@@ -69,6 +69,7 @@ async def create_tracking(
     scope_type: str | None = None,
     scope_key: str | None = None,
     instrument_id: uuid.UUID | None = None,
+    discovery_id: str | None = None,
     confirmation_conditions: dict[str, Any] | None = None,
     invalidation_conditions: dict[str, Any] | None = None,
     note: str | None = None,
@@ -79,10 +80,11 @@ async def create_tracking(
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         user_id: 用户 ID
-        tracking_type: 追踪类型 signal/scope/instrument
+        tracking_type: 追踪类型 signal/scope/instrument/discovery
         source_signal_id: 关联信号 ID（追踪 signal 时必填）
-        scope_type/scope_key: 范围（追踪 scope 时必填）
+        scope_type/scope_key: 范围（追踪 scope 时必填；discovery 时作 evaluation context）
         instrument_id: 个股 ID（追踪 instrument 时必填）
+        discovery_id: Discovery logical identity（追踪 discovery 时必填）
         confirmation_conditions: 用户自定义确认条件
         invalidation_conditions: 用户自定义失效条件
         note: 用户备注
@@ -95,7 +97,7 @@ async def create_tracking(
         TrackingError: 参数校验失败
     """
     # 参数校验
-    if tracking_type not in ("signal", "scope", "instrument"):
+    if tracking_type not in ("signal", "scope", "instrument", "discovery"):
         raise TrackingError(f"非法 tracking_type: {tracking_type}")
     if tracking_type == "signal" and source_signal_id is None:
         raise TrackingError("追踪 signal 必须提供 source_signal_id")
@@ -103,6 +105,8 @@ async def create_tracking(
         raise TrackingError("追踪 scope 必须提供 scope_type 和 scope_key")
     if tracking_type == "instrument" and instrument_id is None:
         raise TrackingError("追踪 instrument 必须提供 instrument_id")
+    if tracking_type == "discovery" and discovery_id is None:
+        raise TrackingError("追踪 discovery 必须提供 discovery_id")
 
     # 幂等键：未提供时根据关键字段生成稳定 hash
     if idempotency_key is None:
@@ -111,6 +115,7 @@ async def create_tracking(
             str(source_signal_id) if source_signal_id else "",
             scope_type or "", scope_key or "",
             str(instrument_id) if instrument_id else "",
+            discovery_id or "",
         ]
         idempotency_key = hashlib.sha256(
             "|".join(key_parts).encode("utf-8"),
@@ -130,6 +135,7 @@ async def create_tracking(
         scope_type=scope_type,
         scope_key=scope_key,
         instrument_id=instrument_id,
+        discovery_id=discovery_id,
         status=TRACKING_STATUS_ACTIVE,
         confirmation_conditions=confirmation_conditions,
         invalidation_conditions=invalidation_conditions,

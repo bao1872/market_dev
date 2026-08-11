@@ -1,6 +1,7 @@
 // [ReviewUrlState] - 描述: /review URL 状态解析/编码纯函数（PRD §3.1、§15）
 // URL 是页面状态的唯一可分享入口（SSOT）：
 //   /review?date=&stage=&scopeType=&scopeKey=&signalId=&boardId=&symbol=&trackingTab=
+//   [V2] view=&discoveryId=&scopeFamily=&status=
 // 规则：
 // - 首次加载先解析 URL，再写入组件状态，禁止 hydration 后被默认值覆盖
 // - 切换阶段、信号、板块、股票时更新 URL
@@ -9,9 +10,13 @@
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行
 import type { ReviewStage, TrackingTab } from './types'
 
+export type ReviewView = 'discovery' | 'stages'
+
 export interface ReviewUrlState {
   /** 交易日（YYYY-MM-DD） */
   date: string | null
+  /** 产品视图：discovery（默认，Discovery-first）/ stages（旧五阶段 debug drilldown） */
+  view: ReviewView
   /** 五阶段：scan/signals/attribution/validation/tracking */
   stage: ReviewStage
   /** 范围类型（market/major_index/style/industry_l1/...） */
@@ -31,11 +36,21 @@ export interface ReviewUrlState {
   symbol: string | null
   /** 追踪复核子 Tab：history/watchlist/events */
   trackingTab: TrackingTab
+  /** [V2] 当前打开的 Discovery 身份（存在即 detail 模式） */
+  discoveryId: string | null
+  /** [V2] Discovery 范围族过滤 */
+  scopeFamily: string | null
+  /** [V2] Discovery 生命周期状态过滤 */
+  status: string | null
 }
 
+/** 默认视图：Discovery-first 产品工作区 */
+export const DEFAULT_REVIEW_VIEW: ReviewView = 'discovery'
 /** 默认阶段：市场扫描 */
 export const DEFAULT_REVIEW_STAGE: ReviewStage = 'scan'
 export const DEFAULT_TRACKING_TAB: TrackingTab = 'history'
+
+const VIEW_VALUES: ReadonlySet<string> = new Set(['discovery', 'stages'])
 
 const STAGE_VALUES: ReadonlySet<string> = new Set([
   'scan',
@@ -55,6 +70,11 @@ const TRACKING_TAB_VALUES: ReadonlySet<string> = new Set([
 /** 归一化阶段值，非法值回退到默认 scan */
 export function normalizeStage(raw: string | null | undefined): ReviewStage {
   return raw && STAGE_VALUES.has(raw) ? (raw as ReviewStage) : DEFAULT_REVIEW_STAGE
+}
+
+/** 归一化视图值，非法值回退到默认 discovery */
+export function normalizeView(raw: string | null | undefined): ReviewView {
+  return raw && VIEW_VALUES.has(raw) ? (raw as ReviewView) : DEFAULT_REVIEW_VIEW
 }
 
 // 正式 Review 五阶段（Phase 5B 契约）：auction 为 auxiliary entry，不在此列。
@@ -78,6 +98,7 @@ export function normalizeTrackingTab(raw: string | null | undefined): TrackingTa
 export function decodeReviewUrl(params: URLSearchParams): ReviewUrlState {
   return {
     date: params.get('date'),
+    view: normalizeView(params.get('view')),
     stage: normalizeStage(params.get('stage')),
     scopeType: params.get('scopeType') || null,
     scopeKey: params.get('scopeKey') || null,
@@ -88,6 +109,9 @@ export function decodeReviewUrl(params: URLSearchParams): ReviewUrlState {
     boardId: params.get('boardId') || null,
     symbol: params.get('symbol') || null,
     trackingTab: normalizeTrackingTab(params.get('trackingTab')),
+    discoveryId: params.get('discoveryId') || null,
+    scopeFamily: params.get('scopeFamily') || null,
+    status: params.get('status') || null,
   }
 }
 
@@ -96,6 +120,9 @@ export function encodeReviewUrl(state: ReviewUrlState): URLSearchParams {
   const params = new URLSearchParams()
   if (state.date) {
     params.set('date', state.date)
+  }
+  if (state.view !== DEFAULT_REVIEW_VIEW) {
+    params.set('view', state.view)
   }
   if (state.stage !== DEFAULT_REVIEW_STAGE) {
     params.set('stage', state.stage)
@@ -126,6 +153,15 @@ export function encodeReviewUrl(state: ReviewUrlState): URLSearchParams {
   }
   if (state.trackingTab !== DEFAULT_TRACKING_TAB) {
     params.set('trackingTab', state.trackingTab)
+  }
+  if (state.discoveryId) {
+    params.set('discoveryId', state.discoveryId)
+  }
+  if (state.scopeFamily) {
+    params.set('scopeFamily', state.scopeFamily)
+  }
+  if (state.status) {
+    params.set('status', state.status)
   }
   return params
 }

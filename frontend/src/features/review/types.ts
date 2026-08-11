@@ -280,7 +280,7 @@ export type ReviewInstrumentListResponse = ReviewPagedResponse<ReviewInstrument>
 // 追踪（PRD §12.5）
 // ============================================================
 
-export type ReviewTrackingType = 'signal' | 'scope' | 'instrument'
+export type ReviewTrackingType = 'signal' | 'scope' | 'instrument' | 'discovery'
 export type ReviewTrackingStatus = 'active' | 'confirmed' | 'invalidated' | 'closed'
 
 export interface ReviewTracking {
@@ -291,6 +291,8 @@ export interface ReviewTracking {
   scopeType: string | null
   scopeKey: string | null
   instrumentId: string | null
+  /** [V2] Discovery logical identity（追踪 discovery 时填充） */
+  discoveryId: string | null
   status: ReviewTrackingStatus | string
   confirmationConditions: Record<string, unknown>
   invalidationConditions: Record<string, unknown>
@@ -308,6 +310,8 @@ export interface ReviewTrackingCreateRequest {
   scope_type?: string | null
   scope_key?: string | null
   instrument_id?: string | null
+  /** [V2] Discovery logical identity（追踪 discovery 时必填） */
+  discovery_id?: string | null
   confirmation_conditions?: Record<string, unknown>
   invalidation_conditions?: Record<string, unknown>
   note?: string | null

@@ -1,10 +1,19 @@
 /** [V2] Discovery Card — single discovery in the list. */
 
 import type { Discovery } from './types'
+import styles from './review.module.scss'
 
 interface Props {
   discovery: Discovery
   onClick: () => void
+}
+
+const LIFECYCLE_LABELS: Record<string, string> = {
+  new: '新增',
+  continuing: '持续',
+  confirmed: '确认',
+  weakened: '减弱',
+  invalidated: '失效',
 }
 
 export function DiscoveryCard({ discovery, onClick }: Props) {
@@ -23,43 +32,39 @@ export function DiscoveryCard({ discovery, onClick }: Props) {
     .join(' ')
 
   return (
-    <div className="discovery-card" onClick={onClick} role="button" tabIndex={0}
+    <div className={styles.discoveryCard} onClick={onClick} role="button" tabIndex={0}
          onKeyDown={e => e.key === 'Enter' && onClick()}>
-      <div className="discovery-card-header">
-        <span className="discovery-scope-type">{scope.type}</span>
-        <span className="discovery-scope-name">{scope.name}</span>
-        <span className={`discovery-lifecycle ${lifecycle.status}`}>
-          {lifecycle.status === 'new' && '新增'}
-          {lifecycle.status === 'continuing' && '持续'}
-          {lifecycle.status === 'confirmed' && '确认'}
-          {lifecycle.status === 'weakened' && '减弱'}
-          {lifecycle.status === 'invalidated' && '失效'}
+      <div className={styles.discoveryCardHeader}>
+        <span className={styles.discoveryScopeType}>{scope.type}</span>
+        <span className={styles.discoveryScopeName}>{scope.name}</span>
+        <span className={`${styles.discoveryLifecycle} ${styles[`discoveryLifecycle${capitalize(lifecycle.status)}`] ?? ''}`}>
+          {LIFECYCLE_LABELS[lifecycle.status] ?? lifecycle.status}
         </span>
       </div>
 
       {stateSummary && (
-        <div className="discovery-card-state">
-          <span className="label">状态</span> {stateSummary}
+        <div className={styles.discoveryCardState}>
+          <span className={styles.label}>状态</span> {stateSummary}
         </div>
       )}
 
       {changeSummary && (
-        <div className="discovery-card-change">
-          <span className="label">变化</span> {changeSummary}
+        <div className={styles.discoveryCardChange}>
+          <span className={styles.label}>变化</span> {changeSummary}
         </div>
       )}
 
-      <div className="discovery-card-evidence">
+      <div className={styles.discoveryCardEvidence}>
         {keyEvidence.slice(0, 4).map((e, i) => (
-          <span key={i} className="evidence-tag">{e}</span>
+          <span key={i} className={styles.evidenceTag}>{e}</span>
         ))}
       </div>
 
       {lifecycle.duration > 0 && (
-        <div className="discovery-card-footer">
+        <div className={styles.discoveryCardFooter}>
           <span>持续 {lifecycle.duration} 日</span>
           {rankKey && (
-            <span className="rank-key">
+            <span className={styles.rankKey}>
               排序: {Object.entries(rankKey).filter(([,v]) => v > 0).slice(0,3)
                 .map(([k]) => k).join(', ')}
             </span>
@@ -68,4 +73,8 @@ export function DiscoveryCard({ discovery, onClick }: Props) {
       )}
     </div>
   )
+}
+
+function capitalize(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s
 }

@@ -1,8 +1,14 @@
 // [ReviewPage] - 描述: 复盘工作台主页面（PRD §3、§14、§15）
 // 路由 /review；URL 参数：date/stage/scopeType/scopeKey/signalId/boardId/symbol/trackingTab
+//   [V2] view/discoveryId/scopeFamily/status
 // URL 是状态 SSOT（前进后退可恢复）；React Query 数据获取；禁止自由 AI 结论
 // 只轮询 computing 状态；404/422/500 显示明确原因及 request_id
-// 阶段四个股跳转 /market 和 /stock/:symbol；保留 /boards/analysis
+//
+// [REVIEW-V2-B3] Discovery-first：默认产品视图 view=discovery 渲染 DiscoveryWorkspace。
+// 旧五阶段（Market Scan / Filter Discovery / Attribution / Validation / Tracking）
+// 降级为 secondary/debug drilldown（view=stages），不再是用户一级主导航。
+// Auction 保留 auxiliary 语义，仅在 stages 视图作为辅助入口。
+// tradeDate 来自正式 Review URL state（?date=），传给 DiscoveryWorkspace（单一 SSOT）。
 import { useMemo, useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -18,6 +24,7 @@ import {
 import { COMPUTING_STATUSES } from '@/features/review/types'
 import ReviewHeader from '@/features/review/ReviewHeader'
 import ReviewStageNav from '@/features/review/ReviewStageNav'
+import { DiscoveryWorkspace } from '@/features/review/DiscoveryWorkspace'
 import MarketScanPanel from '@/features/review/MarketScanPanel'
 import FilterDiscoveryPanel from '@/features/review/FilterDiscoveryPanel'
 import BoardAttributionPanel from '@/features/review/BoardAttributionPanel'
@@ -77,7 +84,7 @@ export default function ReviewPage() {
 
   const handleDateChange = useCallback(
     (date: string) => {
-      // 切换日期：清除 scope/signal/symbol（避免跨日残留）
+      // 切换日期：清除 scope/signal/symbol/discovery（避免跨日残留）
       patchUrl({
         date,
         scopeType: null,
@@ -87,6 +94,7 @@ export default function ReviewPage() {
         parentScopeKey: null,
         signalId: null,
         symbol: null,
+        discoveryId: null,
       })
     },
     [patchUrl],
@@ -161,7 +169,7 @@ export default function ReviewPage() {
     [patchUrl, urlState.scopeType, urlState.scopeKey],
   )
 
-  // 6. 面包屑（PRD §14.2：全市场 > 风格 > 行业 > 个股）
+  // 6. 面包屑（PRD §14.2：全市场 > 风格 > 行业 > 个股）—— 仅 stages 视图
   const breadcrumb = useMemo(() => {
     const scopeTypeLabel: Record<string, string> = {
       market: '全市场',
@@ -186,23 +194,46 @@ export default function ReviewPage() {
     return parts
   }, [urlState.parentScopeType, urlState.parentScopeKey, urlState.scopeType, urlState.scopeKey, urlState.scopeName, urlState.symbol])
 
-  // 7. 加载/异常态（PRD §17）
-  const renderContent = () => {
-    // 日期未确定
+  // 7. 日期门（两视图共用）：日期未确定时的加载/异常/无发布
+  const renderDatesGate = () => {
+    if (datesQuery.isLoading) {
+      return <StateBox title="加载复盘日期" desc="正在获取已发布复盘交易日..." />
+    }
+    if (datesQuery.isError) {
+      const err = extractReviewError(datesQuery.error)
+      return <StateBox title="复盘日期加载失败" desc={err.message} requestId={err.requestId} />
+    }
+    return (
+      <StateBox
+        title="尚无已发布复盘"
+        desc="系统尚未发布任何复盘 run，盘后编排完成后将自动生成"
+      />
+    )
+  }
+
+  // 8. Discovery-first 产品视图（默认）
+  const renderDiscoveryView = () => {
+    if (!tradeDate) return renderDatesGate()
+    return (
+      <DiscoveryWorkspace
+        tradeDate={tradeDate}
+        discoveryId={urlState.discoveryId}
+        scopeType={urlState.scopeType}
+        scopeFamily={urlState.scopeFamily}
+        status={urlState.status}
+        overview={overviewQuery.data}
+        onDiscoveryOpen={(id) => patchUrl({ discoveryId: id })}
+        onDiscoveryClose={() => patchUrl({ discoveryId: null })}
+        onFilterChange={(patch) => patchUrl(patch)}
+        showToast={showToast}
+      />
+    )
+  }
+
+  // 9. 旧五阶段（secondary/debug drilldown）
+  const renderStagesContent = () => {
     if (!tradeDate) {
-      if (datesQuery.isLoading) {
-        return <StateBox title="加载复盘日期" desc="正在获取已发布复盘交易日..." />
-      }
-      if (datesQuery.isError) {
-        const err = extractReviewError(datesQuery.error)
-        return <StateBox title="复盘日期加载失败" desc={err.message} requestId={err.requestId} />
-      }
-      return (
-        <StateBox
-          title="尚无已发布复盘"
-          desc="系统尚未发布任何复盘 run，盘后编排完成后将自动生成"
-        />
-      )
+      return renderDatesGate()
     }
 
     // 总览加载
@@ -213,7 +244,6 @@ export default function ReviewPage() {
     // 总览异常
     if (overviewQuery.isError) {
       const err = extractReviewError(overviewQuery.error)
-      // 404：当日尚未计算/未发布
       if (err.status === 404) {
         return (
           <StateBox
@@ -235,11 +265,7 @@ export default function ReviewPage() {
         />
       )
     }
-    // partial / completed_with_errors
-    if (status === 'partial' || status === 'completed_with_errors') {
-      // 仍展示各阶段数据（部分可用）
-      // 不在此 return，继续渲染阶段内容
-    }
+    // partial / completed_with_errors 继续渲染阶段内容
 
     // 按阶段渲染
     switch (urlState.stage) {
@@ -304,6 +330,8 @@ export default function ReviewPage() {
     }
   }
 
+  const isDiscovery = urlState.view === 'discovery'
+
   return (
     <div className={styles.reviewPage}>
       <ReviewHeader
@@ -325,37 +353,65 @@ export default function ReviewPage() {
           }
         }}
       />
-      <ReviewStageNav stage={urlState.stage} onChange={handleStageChange} />
-      {/* [Phase 5B.1 / C1] 竞价回流 auxiliary entry：复用既有 URL state（stage='auction'），
-          不新增 route / 页面 / navigation architecture。 */}
       <div className={styles.auxEntry}>
-        <button
-          type="button"
-          className={
-            urlState.stage === 'auction'
-              ? `${styles.auxEntryBtn} ${styles.auxEntryBtnActive}`
-              : styles.auxEntryBtn
-          }
-          onClick={() => handleStageChange('auction')}
-        >
-          竞价回流
-        </button>
+        {isDiscovery ? (
+          <button
+            type="button"
+            className={styles.auxEntryBtn}
+            onClick={() => patchUrl({ view: 'stages', discoveryId: null })}
+          >
+            Signal diagnostics
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={styles.auxEntryBtn}
+            onClick={() => patchUrl({ view: 'discovery' })}
+          >
+            返回市场发现
+          </button>
+        )}
       </div>
-      {/* 面包屑 */}
-      <div className={styles.breadcrumb}>
-        {breadcrumb.map((part, i) => (
-          <span key={i}>
-            <span className={i === breadcrumb.length - 1 ? styles.breadcrumbCurrent : styles.breadcrumbItem}>
-              {part}
-            </span>
-            {i < breadcrumb.length - 1 && <span className={styles.breadcrumbSep}> › </span>}
-          </span>
-        ))}
-      </div>
-      <div className={styles.main}>
-        <div className={styles.contentArea}>{renderContent()}</div>
-        <EvidenceDrawer target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
-      </div>
+      {isDiscovery ? (
+        <div className={styles.main}>
+          <div className={styles.contentArea}>{renderDiscoveryView()}</div>
+          <EvidenceDrawer target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+        </div>
+      ) : (
+        <>
+          <ReviewStageNav stage={urlState.stage} onChange={handleStageChange} />
+          {/* [Phase 5B.1 / C1] 竞价回流 auxiliary entry：复用既有 URL state（stage='auction'），
+              不新增 route / 页面 / navigation architecture。 */}
+          <div className={styles.auxEntry}>
+            <button
+              type="button"
+              className={
+                urlState.stage === 'auction'
+                  ? `${styles.auxEntryBtn} ${styles.auxEntryBtnActive}`
+                  : styles.auxEntryBtn
+              }
+              onClick={() => handleStageChange('auction')}
+            >
+              竞价回流
+            </button>
+          </div>
+          {/* 面包屑 */}
+          <div className={styles.breadcrumb}>
+            {breadcrumb.map((part, i) => (
+              <span key={i}>
+                <span className={i === breadcrumb.length - 1 ? styles.breadcrumbCurrent : styles.breadcrumbItem}>
+                  {part}
+                </span>
+                {i < breadcrumb.length - 1 && <span className={styles.breadcrumbSep}> › </span>}
+              </span>
+            ))}
+          </div>
+          <div className={styles.main}>
+            <div className={styles.contentArea}>{renderStagesContent()}</div>
+            <EvidenceDrawer target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
+          </div>
+        </>
+      )}
     </div>
   )
 }

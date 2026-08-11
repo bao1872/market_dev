@@ -446,10 +446,11 @@ class ReviewTrackingResponse(BaseModel):
     id: str = Field(..., description="追踪 ID（UUID）")
     userId: str = Field(..., description="用户 ID")
     sourceSignalId: str | None = Field(None, description="关联信号 ID")
-    trackingType: str = Field(..., description="追踪类型：signal/scope/instrument")
+    trackingType: str = Field(..., description="追踪类型：signal/scope/instrument/discovery")
     scopeType: str | None = Field(None, description="范围类型（追踪 scope 时填充）")
     scopeKey: str | None = Field(None, description="范围标识（追踪 scope 时填充）")
     instrumentId: str | None = Field(None, description="instruments.id（追踪 instrument 时填充）")
+    discoveryId: str | None = Field(None, description="Discovery logical identity（追踪 discovery 时填充）")
     status: str = Field(..., description="状态：active/confirmed/invalidated/closed")
     confirmationConditions: dict[str, Any] = Field(
         default_factory=dict, description="确认条件 JSON",
@@ -475,11 +476,12 @@ class ReviewTrackingListResponse(BaseModel):
 class ReviewTrackingCreateRequest(BaseModel):
     """POST /api/v1/review/trackings 请求体。"""
 
-    tracking_type: str = Field(..., description="追踪类型：signal/scope/instrument")
+    tracking_type: str = Field(..., description="追踪类型：signal/scope/instrument/discovery")
     source_signal_id: str | None = Field(None, description="信号 ID（追踪 signal 时必填）")
     scope_type: str | None = Field(None, description="范围类型（追踪 scope 时必填）")
     scope_key: str | None = Field(None, description="范围标识（追踪 scope 时必填）")
     instrument_id: str | None = Field(None, description="instruments.id（追踪 instrument 时必填）")
+    discovery_id: str | None = Field(None, description="Discovery logical identity（追踪 discovery 时必填）")
     confirmation_conditions: dict[str, Any] = Field(
         default_factory=dict, description="确认条件 JSON",
     )

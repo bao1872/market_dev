@@ -1,141 +1,176 @@
-/** [V2] Discovery Workspace — Discovery-first market structure workbench. */
+/** [V2] Discovery Workspace — Discovery-first market structure workbench.
+ *
+ * URL 是 SSOT（由 ReviewPage 拥有 canonical /review URL state）：
+ * - tradeDate 来自正式 Review URL state（?date=），不新建第二套 trade date state
+ * - discoveryId 存在即 detail 模式，否则 overview/list（无独立 local viewMode）
+ * - scopeType / scopeFamily / status 作为 filter 保留在 URL
+ *
+ * Detail 消费真实 Detail API（GET /v1/review/discoveries/{id}），
+ * 不依赖当前 page 的 paginated list 查找（deep link 独立于分页）。
+ *
+ * 状态明确区分：loading / empty / API error（error != empty）。
+ */
 
-import { useState, useMemo } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getDiscoveries, getReviewOverview, getReviewLatest } from './api'
+import { getDiscoveries, getDiscoveryDetail, extractReviewError } from './api'
 import { reviewKeys } from './queryKeys'
-import type { Discovery } from './types'
+import type { ReviewOverview } from './types'
 import { DiscoveryCard } from './DiscoveryCard'
 import { DiscoveryDetail } from './DiscoveryDetail'
+import styles from './review.module.scss'
 
-type ViewMode = 'overview' | 'detail'
+export interface DiscoveryFilterPatch {
+  scopeType?: string | null
+  scopeFamily?: string | null
+  status?: string | null
+}
 
-export function DiscoveryWorkspace() {
-  const { tradeDate: routeTradeDate } = useParams<{ tradeDate?: string }>()
-  const [searchParams, setSearchParams] = useSearchParams()
-  const discoveryId = searchParams.get('discoveryId') || undefined
-  const scopeFilter = searchParams.get('scopeType') || undefined
-  const scopeFamily = searchParams.get('scopeFamily') || undefined
-  const statusFilter = searchParams.get('status') || undefined
+interface DiscoveryWorkspaceProps {
+  /** 正式 Review URL state 的交易日 */
+  tradeDate: string
+  /** URL discoveryId（存在即 detail） */
+  discoveryId: string | null
+  scopeType: string | null
+  scopeFamily: string | null
+  status: string | null
+  /** 当日总览（status 展示用） */
+  overview: ReviewOverview | undefined
+  onDiscoveryOpen: (id: string) => void
+  onDiscoveryClose: () => void
+  onFilterChange: (patch: DiscoveryFilterPatch) => void
+  showToast: (title: string, desc?: string) => void
+}
+
+export function DiscoveryWorkspace({
+  tradeDate,
+  discoveryId,
+  scopeType,
+  scopeFamily,
+  status,
+  overview,
+  onDiscoveryOpen,
+  onDiscoveryClose,
+  onFilterChange,
+  showToast,
+}: DiscoveryWorkspaceProps) {
   const [page, setPage] = useState(1)
   const pageSize = 20
 
-  // Resolve trade date
-  const { data: latest } = useQuery({
-    queryKey: reviewKeys.latest(),
-    queryFn: getReviewLatest,
-  })
-  const tradeDate = routeTradeDate || latest?.trade_date || ''
-  const [viewMode, setViewMode] = useState<ViewMode>(discoveryId ? 'detail' : 'overview')
+  // URL discoveryId presence → detail mode（无独立 viewMode SSOT）
+  const isDetail = !!discoveryId
 
-  // Overview
-  const { data: overview } = useQuery({
-    queryKey: reviewKeys.overview(tradeDate),
-    queryFn: () => getReviewOverview(tradeDate),
-    enabled: !!tradeDate,
-  })
-
-  // Discoveries
-  const { data: discoveryData, isLoading } = useQuery({
-    queryKey: reviewKeys.discoveries(tradeDate, { scopeFilter, scopeFamily, statusFilter, page, pageSize }),
+  // Overview list（detail 时不请求，避免无谓分页加载）
+  const listQuery = useQuery({
+    queryKey: reviewKeys.discoveries(tradeDate, { scopeType, scopeFamily, status, page, pageSize }),
     queryFn: () => getDiscoveries(tradeDate, {
-      scope_type: scopeFilter,
-      scope_family: scopeFamily,
-      status: statusFilter,
+      scope_type: scopeType || undefined,
+      scope_family: scopeFamily || undefined,
+      status: status || undefined,
       sort: 'rank',
       page,
       page_size: pageSize,
     }),
-    enabled: !!tradeDate,
+    enabled: !!tradeDate && !isDetail,
   })
 
-  const discoveries = discoveryData?.items || []
-  const total = discoveryData?.total || 0
+  // Detail via real Detail API（deep link 独立于分页）
+  const detailQuery = useQuery({
+    queryKey: reviewKeys.discovery(discoveryId ?? '', tradeDate),
+    queryFn: () => getDiscoveryDetail(discoveryId as string, tradeDate),
+    enabled: isDetail,
+  })
+
+  const discoveries = listQuery.data?.items || []
+  const total = listQuery.data?.total || 0
 
   const scopeFamilies = useMemo(() => {
     const families = new Set<string>()
     discoveries.forEach(d => families.add(d.scope.type))
     return ['market', 'major_index', 'style', 'industry_l1', 'industry_l2', 'industry_l3', 'concept']
-      .filter(f => families.has(f) || scopeFilter === f)
-  }, [discoveries, scopeFilter])
+      .filter(f => families.has(f) || scopeType === f)
+  }, [discoveries, scopeType])
 
-  const selectedDiscovery = useMemo(() => {
-    if (!discoveryId || !discoveries.length) return null
-    return discoveries.find(d => d.discoveryId === discoveryId) || null
-  }, [discoveryId, discoveries])
-
-  const navigateToDetail = (d: Discovery) => {
-    setSearchParams(prev => {
-      prev.set('discoveryId', d.discoveryId)
-      return prev
-    })
-    setViewMode('detail')
-  }
-
-  const navigateBack = () => {
-    setSearchParams(prev => {
-      prev.delete('discoveryId')
-      return prev
-    })
-    setViewMode('overview')
-  }
-
-  const setFilter = (key: string, value: string | undefined) => {
-    setSearchParams(prev => {
-      if (value) prev.set(key, value)
-      else prev.delete(key)
-      return prev
-    })
+  const setFilter = (key: 'scopeType' | 'scopeFamily' | 'status', value: string | undefined) => {
+    onFilterChange({ [key]: value || null } as DiscoveryFilterPatch)
     setPage(1)
   }
 
-  // Loading
-  if (!tradeDate) {
-    return <div className="review-empty">等待加载交易日数据...</div>
-  }
-
-  if (isLoading) {
-    return <div className="review-loading">加载中...</div>
-  }
-
-  // Detail view
-  if (viewMode === 'detail' && selectedDiscovery) {
+  // ------------------------------------------------------------------
+  // Detail branch
+  // ------------------------------------------------------------------
+  if (isDetail) {
+    if (detailQuery.isLoading) {
+      return <div className={styles.reviewLoading}>加载 Discovery 详情...</div>
+    }
+    if (detailQuery.isError) {
+      const err = extractReviewError(detailQuery.error)
+      return (
+        <div className={styles.discoveryError}>
+          <div>Discovery 详情加载失败</div>
+          <div>{err.message}{err.requestId ? `（request_id=${err.requestId}）` : ''}</div>
+        </div>
+      )
+    }
+    const detail = detailQuery.data?.discovery
+    if (!detail) {
+      return <div className={styles.discoveryError}>Discovery 详情为空</div>
+    }
     return (
       <DiscoveryDetail
-        discovery={selectedDiscovery}
-        onBack={navigateBack}
+        discovery={detail}
+        onBack={onDiscoveryClose}
         tradeDate={tradeDate}
+        showToast={showToast}
       />
     )
   }
 
-  // Overview + List
+  // ------------------------------------------------------------------
+  // Overview / List branch
+  // ------------------------------------------------------------------
+  if (listQuery.isLoading) {
+    return <div className={styles.reviewLoading}>加载市场发现...</div>
+  }
+
+  if (listQuery.isError) {
+    // API error ≠ empty：不能显示成「今日无市场发现」
+    const err = extractReviewError(listQuery.error)
+    return (
+      <div className={styles.discoveryError}>
+        <div>市场发现加载失败</div>
+        <div>{err.message}{err.requestId ? `（request_id=${err.requestId}）` : ''}</div>
+      </div>
+    )
+  }
+
   return (
-    <div className="discovery-workspace">
+    <div className={styles.discoveryWorkspace}>
       {/* Header */}
-      <div className="discovery-header">
+      <div className={styles.discoveryHeader}>
         <h2>市场发现</h2>
-        <span className="discovery-trade-date">{tradeDate}</span>
+        <span className={styles.discoveryTradeDate}>{tradeDate}</span>
         {overview?.status && (
-          <span className={`discovery-status ${overview.status}`}>
+          <span className={`${styles.discoveryStatus} ${overview.status}`}>
             {overview.status === 'published' ? '已发布' : overview.status}
           </span>
         )}
       </div>
 
       {/* Scope family filters */}
-      <div className="discovery-filters">
+      <div className={styles.discoveryFilters}>
         <button
-          className={!scopeFamily ? 'active' : ''}
+          type="button"
+          className={!scopeFamily ? styles.discoveryFilterActive : ''}
           onClick={() => setFilter('scopeFamily', undefined)}
         >
           全部 ({total})
         </button>
         {scopeFamilies.map(f => (
           <button
+            type="button"
             key={f}
-            className={scopeFamily === f ? 'active' : ''}
+            className={scopeFamily === f ? styles.discoveryFilterActive : ''}
             onClick={() => setFilter('scopeFamily', f)}
           >
             {f}
@@ -143,40 +178,40 @@ export function DiscoveryWorkspace() {
         ))}
       </div>
 
-      {/* Empty state */}
+      {/* Empty state（仅当 API 成功且 0 条） */}
       {discoveries.length === 0 && (
-        <div className="review-empty-state">
+        <div className={styles.reviewEmptyState}>
           <p>今日无满足当前 Discovery 条件的市场发现</p>
           {overview?.degradedReasons && overview.degradedReasons.length > 0 && (
-            <div className="review-degraded">
+            <div className={styles.reviewDegraded}>
               {overview.degradedReasons.map((r, i) => (
-                <p key={i} className="review-degraded-item">{r}</p>
+                <p key={i} className={styles.reviewDegradedItem}>{r}</p>
               ))}
             </div>
           )}
-          <p className="review-empty-hint">
+          <p className={styles.reviewEmptyHint}>
             可查看 Signal evidence diagnostics 了解详细信号命中情况
           </p>
         </div>
       )}
 
       {/* Discovery cards */}
-      <div className="discovery-list">
+      <div className={styles.discoveryList}>
         {discoveries.map(d => (
           <DiscoveryCard
             key={d.discoveryId}
             discovery={d}
-            onClick={() => navigateToDetail(d)}
+            onClick={() => onDiscoveryOpen(d.discoveryId)}
           />
         ))}
       </div>
 
       {/* Pagination */}
       {total > pageSize && (
-        <div className="discovery-pagination">
-          <button disabled={page <= 1} onClick={() => setPage(p => p - 1)}>上一页</button>
+        <div className={styles.discoveryPagination}>
+          <button type="button" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>上一页</button>
           <span>第 {page} 页 / 共 {Math.ceil(total / pageSize)} 页</span>
-          <button disabled={page * pageSize >= total} onClick={() => setPage(p => p + 1)}>下一页</button>
+          <button type="button" disabled={page * pageSize >= total} onClick={() => setPage(p => p + 1)}>下一页</button>
         </div>
       )}
     </div>

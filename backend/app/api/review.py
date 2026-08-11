@@ -309,6 +309,7 @@ def _tracking_to_dto(tracking: MarketReviewTracking) -> ReviewTrackingResponse:
         instrumentId=(
             str(tracking.instrument_id) if tracking.instrument_id else None
         ),
+        discoveryId=tracking.discovery_id,
         status=tracking.status,
         confirmationConditions=tracking.confirmation_conditions or {},
         invalidationConditions=tracking.invalidation_conditions or {},
@@ -798,6 +799,7 @@ async def create_my_tracking(
             scope_type=payload.scope_type,
             scope_key=payload.scope_key,
             instrument_id=instrument_id,
+            discovery_id=payload.discovery_id,
             confirmation_conditions=payload.confirmation_conditions or None,
             invalidation_conditions=payload.invalidation_conditions or None,
             note=payload.note,

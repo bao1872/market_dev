@@ -46,8 +46,8 @@ export const reviewKeys = {
   // [V2] Discovery
   discoveries: (tradeDate: string, filters: Record<string, unknown> = {}) =>
     [...reviewKeys.all, 'discoveries', tradeDate, filters] as const,
-  discovery: (discoveryId: string) =>
-    [...reviewKeys.all, 'discovery', discoveryId] as const,
+  discovery: (discoveryId: string, tradeDate?: string) =>
+    [...reviewKeys.all, 'discovery', discoveryId, tradeDate] as const,
 } as const
 
 /** 导出方便组件使用 */
