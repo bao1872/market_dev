@@ -331,10 +331,14 @@ class TestBuildHistoryExtras:
                 date(2026, 7, 20): {
                     "P": {"_metric_value": 55.0},
                     "Q": {"_metric_value": 45.0, "structure_breakdown_diffusion": 0.20},
+                    "U": {"_metric_value": 60.0},
+                    "V": {"_metric_value": 35.0},
                 },
                 date(2026, 7, 30): {
                     "P": {"_metric_value": 58.0},
                     "Q": {"_metric_value": 48.0, "structure_breakdown_diffusion": 0.10},
+                    "U": {"_metric_value": 63.0},
+                    "V": {"_metric_value": 38.0},
                 },
             },
         }

@@ -963,6 +963,7 @@ async def list_discoveries(
     scope_type: str | None = Query(None, description="范围类型过滤"),
     scope_family: str | None = Query(None, description="范围族过滤"),
     lifecycle_status: str | None = Query(None, alias="status", description="生命周期状态过滤"),
+    sort: str | None = Query(None, description="排序方式（仅支持 rank）"),
     include_partial: bool = Query(False, description="admin 调试用"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -994,9 +995,14 @@ async def list_discoveries(
         discoveries = [d for d in discoveries if d.scope_type.startswith(scope_family)]
     if lifecycle_status:
         discoveries = [d for d in discoveries if d.status == lifecycle_status]
+    if sort and sort != "rank":
+        raise HTTPException(status_code=400, detail=f"不支持的 sort 值: {sort}（仅支持 rank）")
 
     ranked_with_details = review_discovery_service.rank_discoveries(discoveries, relations)
-    ranked = [d for d, _ in ranked_with_details]
+
+    # Attach rankKey to each discovery
+    for d, details in ranked_with_details:
+        d.rank_key = details
 
     # Attach relations to BOTH source and target
     relation_map: dict[str, list[dict]] = {}
@@ -1004,9 +1010,10 @@ async def list_discoveries(
         rd = r.to_dict()
         relation_map.setdefault(r.source_scope, []).append(rd)
         relation_map.setdefault(r.target_scope, []).append(rd)
-    for d in ranked:
+    for d, _ in ranked_with_details:
         d.related_scopes = relation_map.get(d.discovery_id, [])
 
+    ranked = [d for d, _ in ranked_with_details]
     total = len(ranked)
     start = (page - 1) * page_size
     end = start + page_size

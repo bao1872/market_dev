@@ -1430,7 +1430,7 @@ def _build_history_extras(
 
     date_indexed = history_maps.get("_date_indexed")
 
-    # CR01-A: Q/U/V delta1d historical percentile
+    # CR01-A: Q/U/V delta1d historical percentile — true date-aligned
     for metric_code, key in [("Q", "_q_delta1d_history_pct"),
                                ("U", "_u_delta1d_history_pct"),
                                ("V", "_v_delta1d_history_pct")]:
@@ -1438,7 +1438,8 @@ def _build_history_extras(
         delta = payload.get("delta1d")
         if not isinstance(delta, (int, float)):
             continue
-        delta_series = _extract_delta_series_from_metric_value(history_maps, metric_code)
+        # Use date_indexed for true 1D deltas (only adjacent canonical dates with data)
+        delta_series = _extract_date_aligned_delta_series(date_indexed, metric_code)
         if delta_series:
             extras[key] = _percentile_rank(delta, delta_series)
 
@@ -1496,6 +1497,28 @@ def _extract_delta_series_from_metric_value(
     if values is None or len(values) < 2:
         return None
     return [values[i] - values[i - 1] for i in range(1, len(values))]
+
+
+def _extract_date_aligned_delta_series(
+    date_indexed: dict | None,
+    metric_code: str,
+) -> list[float] | None:
+    """从 date_indexed 计算真正的日期对齐 1D delta 序列。
+
+    只在相邻 canonical trade_dates 且两天都有 _metric_value 时才计算。
+    """
+    if not isinstance(date_indexed, dict):
+        return None
+    dates = sorted(date_indexed.keys())
+    deltas = []
+    for i in range(1, len(dates)):
+        prev_entry = date_indexed.get(dates[i - 1], {})
+        curr_entry = date_indexed.get(dates[i], {})
+        prev_val = prev_entry.get(metric_code, {}).get("_metric_value")
+        curr_val = curr_entry.get(metric_code, {}).get("_metric_value")
+        if prev_val is not None and curr_val is not None:
+            deltas.append(curr_val - prev_val)
+    return deltas if deltas else None
 
 
 def _percentile_rank(value: float, series: list[float]) -> float:
