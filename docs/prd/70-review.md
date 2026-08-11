@@ -310,15 +310,15 @@ review_run_id + filter_family + signal_type + scope_type + scope_key
 
 ### 5.5 market_review_signal_attributions
 
-保存子范围归因与 Cross-Scope Relation 结果。
+保存子范围归因结果（ATTR-1 taxonomy hierarchical attribution）。
 
 ```
 id UUID PK
 signal_id UUID FK
-related_scope_type VARCHAR     # 子范围或关联 scope 类型
-related_scope_key VARCHAR
-related_scope_name VARCHAR
-relation_type VARCHAR           # ATTR-1: contribution / ATTR-3: THEME_LED 等
+child_scope_type VARCHAR       # 子范围类型（industry_l2 / industry_l3 / concept）
+child_scope_key VARCHAR
+child_scope_name VARCHAR
+relation_type VARCHAR           # contribution（ATTR-1）
 contribution_value NUMERIC
 contribution_rank INTEGER
 metrics_payload JSONB
@@ -326,6 +326,8 @@ evidence_payload JSONB
 coverage_ratio NUMERIC
 created_at
 ```
+
+> 注：`child_scope_*` 在 ATTR-1 taxonomy attribution 中是合法语义。ATTR-3 Cross-Scope Relation 为 logical/domain requirement，其 physical persistence ownership DEFER 到实现阶段。不要求为此改名或新增表。
 
 ### 5.6 market_review_signal_instruments
 
@@ -371,16 +373,19 @@ unconfirmed
 ```
 id UUID PK
 user_id UUID
-source_signal_id UUID
-tracking_type VARCHAR     # signal / scope / instrument
+source_signal_id UUID NULL     # legacy Signal tracking，兼容保留
+source_discovery_id UUID NULL  # Discovery tracking（logical identity）
+tracking_type VARCHAR          # discovery / scope / instrument / signal（legacy）
 scope_type/scope_key NULL
 instrument_id NULL
-status VARCHAR            # active / confirmed / invalidated / closed
+status VARCHAR                 # active / confirmed / invalidated / closed
 confirmation_conditions JSONB
 invalidation_conditions JSONB
 note TEXT NULL
 created_at / closed_at
 ```
+
+> 注：`source_discovery_id` 和 `tracking_type=discovery` 为 logical requirement。具体 schema/migration DEFER 到实现阶段。
 
 ### 5.8 market_review_tracking_evaluations
 
@@ -1128,6 +1133,8 @@ Market Review
 
 ```yaml
 discovery:
+  discovery_id:        # 稳定 logical identity，在一个正式 Review Run 范围内可唯一定位
+  review_run_id:       # 所属 Review Run
   trade_date:
   scope_type:
   scope_key:
@@ -1149,14 +1156,18 @@ discovery:
   data_quality:
 ```
 
+Discovery 必须有稳定 logical identity。API（`/discoveries/{discovery_id}`）、tracking、evidence drilldown 使用同一 logical identity。
+
 PRD 不要求 Discovery 必须拥有：
 - 独立 database table（可以是 view / materialized view / 内存聚合）
 - 独立 publication pointer
 - 独立 scheduler job
 - 独立 ProductReadiness node
 - 独立 mandatory product status
+- 特定 UUID/hash 生成算法
+- source_signal_ids 字段或 foreign key
 
-这些属于后续 implementation design，除非另有正式需求。
+Discovery 必须可追溯到 supporting evidence。具体 lineage representation DEFER 到实现阶段。
 
 Signal 继续负责算法命中、证据、版本追踪。Discovery 聚合多个 evidence。不要求立即破坏性删除历史 signal schema（additive migration）。
 
@@ -1189,13 +1200,17 @@ new
 
 ### 10B.2 用户追踪
 
-用户可以追踪：
+Tracking target 必须支持：
 
-- 一条 Discovery；
-- 一个命中范围；
-- 一只代表股票。
+- Discovery（使用 Discovery logical identity）
+- Scope
+- Instrument
+
+Legacy Signal tracking 可以兼容保留。
 
 每天Review Run完成后自动生成evaluation。用户关闭追踪不删除历史。
+
+实现阶段必须采用 additive-compatible 方式支持 Discovery tracking。具体 schema/migration DEFER 到实现阶段。
 
 ## 11. 任务编排与发布
 
