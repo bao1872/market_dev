@@ -67,6 +67,11 @@ logger = logging.getLogger("review_scope_service")
 DEFAULT_BASELINE_WINDOW = 120
 MIN_BASELINE_WINDOW = 60
 
+# [P1-D2] BarDaily 400 日窗口按 instrument 分块加载的内存分块大小。
+# 峰值 bar 驻留 = REVIEW_BAR_INSTRUMENT_CHUNK_SIZE × 400 日窗口，而非全市场 × 400 日。
+# 模块级常量以便测试 monkeypatch（不引入配置系统）。
+REVIEW_BAR_INSTRUMENT_CHUNK_SIZE = 256
+
 # [CHANGE-20260808] Historical daily_state payload 契约版本（与 first_pyramid_service 一致）。
 # Stage B 拒绝旧 payload 混入 replay（progressive backfill 期间防混用）。
 _REVIEW_HISTORY_CONTRACT_VERSION = "review-history-v2"
@@ -1196,20 +1201,19 @@ async def load_day_fact_maps(
     #    percentile20/percentile200 所需的完整序列可用，且与 Historical replay
     #    严格 parity。绝不能用「只取 target_date 当根 + 最近 1 根 previous」的
     #    双 bar 近似——那会令 120/200 日滚动统计失效（source-drift 的本质来源）。
-    # 3. [P1-A FIX A1] 完整 BarDaily 历史窗口（trade_date - 400d .. target_date）。
-    #    与 fetch_member_flat_list / bootstrap replay load-once 使用**同一 400 日窗口**，
-    #    保证 ReviewMemberFact.build 内部派生 price_position(120d)/ratio20(20d)/
-    #    percentile20/percentile200 所需的完整序列可用，且与 Historical replay
-    #    严格 parity。绝不能用「只取 target_date 当根 + 最近 1 根 previous」的
-    #    双 bar 近似——那会令 120/200 日滚动统计失效（source-drift 的本质来源）。
     # [P1-D2 FIX] 不一次性把全市场 400 日 bar 同时物化进内存：按固定 instrument 块
-    # 分块加载，每块只取本块标的的窗口 bar，装配完即释放。query count 随
-    # ceil(instrument_count / chunk_size) 增长，与 scope 数量无关（load-once scope 级）。
-    bar_window_chunk_size = 256  # [P1-D2] 内存分块大小（不一次物化全市场 bar）
-    full_bars_by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
+    # 分块加载，每块只取本块标的的窗口 bar，装配成 fact 后立即释放本块 bar。
+    # 峰值 bar 驻留 = instrument_chunk_size × 400 日窗口，而非全市场 × 400 日。
+    # 5. instrument 身份（symbol/name）紧凑全局映射（约 5k 行，非 OOM 主因，不分块）。
+    identity_stmt = select(Instrument).where(Instrument.id.in_(ids))
+    identities = {
+        item.id: item for item in (await session.execute(identity_stmt)).scalars()
+    }
+
     _window_start = trade_date - timedelta(days=400)
-    for _chunk_start in range(0, len(ids), bar_window_chunk_size):
-        _chunk_ids = ids[_chunk_start : _chunk_start + bar_window_chunk_size]
+    facts_by_instrument: dict[uuid.UUID, dict[str, Any]] = {}
+    for _chunk_start in range(0, len(ids), REVIEW_BAR_INSTRUMENT_CHUNK_SIZE):
+        _chunk_ids = ids[_chunk_start : _chunk_start + REVIEW_BAR_INSTRUMENT_CHUNK_SIZE]
         _chunk_bar_stmt = (
             select(BarDaily)
             .where(
@@ -1219,82 +1223,68 @@ async def load_day_fact_maps(
             )
             .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
         )
+        # 仅本块标的内聚合；本块装配完毕即随 chunk_bars_by_instrument 释放。
+        chunk_bars_by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
         for bar in (await session.execute(_chunk_bar_stmt)).scalars():
-            full_bars_by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
-        # 释放本块 bar 结构
-        del _chunk_ids
-        del _chunk_bar_stmt
+            chunk_bars_by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
 
-    # 5. instrument 身份（symbol/name）
-    identity_stmt = select(Instrument).where(Instrument.id.in_(ids))
-    identities = {
-        item.id: item for item in (await session.execute(identity_stmt)).scalars()
-    }
+        for _iid in _chunk_ids:
+            current_flat = current_flat_by_instrument.get(_iid)
+            if current_flat is None:
+                continue
+            identity = identities.get(_iid)
+            if identity is None:
+                continue
+            # [P1-A FIX A2] 所有 Review 滚动事实必须**复用 ReviewMemberFact.build
+            # 单一 SSOT**（与 Historical replay 严格 parity），严禁 inline 硬编码公式。
+            # 唯一允许的分支是 lineage 元数据来源（history_state vs stock_core），
+            # 派生公式本身共享不复制。
+            bars = chunk_bars_by_instrument.get(_iid, [])
+            # 无 target_date 当根 Bar（停牌/无数据）→ 与 Historical replay 同一
+            # 口径跳过该成员（不进入 facts），避免单只股票崩溃整体 Review。
+            if not bars or bars[-1].trade_date != trade_date:
+                continue
+            fact = ReviewMemberFact.build(
+                instrument_id=_iid,
+                symbol=identity.symbol,
+                name=identity.name,
+                snapshot_id=None,
+                trade_date=trade_date,
+                first_pyramid=current_flat,
+                bars=bars,
+                previous_state=previous_payloads.get(_iid),
+                weight=1.0,
+                weight_mode="equal_weight",
+            )
+            flat = fact.to_metric_input()
+            # 补充 loader 专属 lineage 元数据（不属 ReviewMemberFact 业务字段）。
+            # [P1-C3 FIX] history_state 模式：lineage 来自 CURRENT T 状态本身；
+            # stock_core 模式：lineage 来自绑定的 canonical history source。
+            # 绝不合成 lineage ID。
+            _snap_td = snap_trade_date_by_instrument.get(_iid)
+            if current_source == "history_state" and _iid in latest_by_instrument:
+                _cur_state = latest_by_instrument[_iid]
+                flat.update({
+                    "_snapshot_trade_date": _snap_td.isoformat() if _snap_td is not None else None,
+                    "_history_state_id": str(_cur_state.id),
+                    "_history_input_hash": _cur_state.input_hash,
+                    "_history_source_run_id": str(_cur_state.source_history_run_id)
+                    if _cur_state.source_history_run_id is not None
+                    else None,
+                })
+            else:
+                flat.update({
+                    "_snapshot_trade_date": _snap_td.isoformat() if _snap_td is not None else None,
+                    "_history_state_id": None,
+                    "_history_input_hash": None,
+                    "_history_source_run_id": str(required_source_history_run_id)
+                    if required_source_history_run_id is not None
+                    else None,
+                })
+            facts_by_instrument[_iid] = flat
 
-    facts_by_instrument: dict[uuid.UUID, dict[str, Any]] = {}
-    for instrument_id, current_flat in current_flat_by_instrument.items():
-        identity = identities.get(instrument_id)
-        if identity is None:
-            continue
-        # [P1-A FIX A2] 所有 Review 滚动事实（return_1d / price_position /
-        # volume_ratio20 / amount_ratio20 / volume_percentile20 /
-        # amount_percentile200 等）必须**复用 ReviewMemberFact.build 单一 SSOT**，
-        # 由 member_fact.py 的共享纯函数派生，与 Historical replay 严格 parity。
-        # 严禁在此处 inline 硬编码部分公式（旧实现只算了 return_1d/amount/volume，
-        # 漏算 price_position/ratio20/percentile20/percentile200，且 current bar
-        # 只取 target_date 当根、previous 只取最近一根，与 SSOT 的 120 日窗口/
-        # 排序口径不一致 → REVIEW-CURRENT-FACT-SOURCE-DRIFT 的本质来源）。
-        # 此处为 load-once 的单一构造点：所有 scope 从内存 map 取**引用**复用。
-        # bars 为 [target_date-400d .. target_date] 升序完整序列（FIX A1 已加载），
-        # ReviewMemberFact.build 内部只取 target_date 当根与最近一根 previous，
-        # 并基于 ordered 序列派生 120 日 price_position / 20 日 ratio / 200 日
-        # percentile（纯函数 SSOT）。
-        previous_state_payload = previous_payloads.get(instrument_id)
-        bars = full_bars_by_instrument.get(instrument_id, [])
-        # 无 target_date 当根 Bar（停牌/无数据）→ 与 Historical replay 同一
-        # 口径跳过该成员（不进入 facts），避免单只股票崩溃整体 Review，且保持
-        # load-once 内存复用一致。有 bar 的成员统一经 SSOT 派生全部滚动事实。
-        if not bars or bars[-1].trade_date != trade_date:
-            continue
-        fact = ReviewMemberFact.build(
-            instrument_id=instrument_id,
-            symbol=identity.symbol,
-            name=identity.name,
-            snapshot_id=None,
-            trade_date=trade_date,
-            first_pyramid=current_flat,
-            bars=bars,
-            previous_state=previous_state_payload,
-            weight=1.0,
-            weight_mode="equal_weight",
-        )
-        flat = fact.to_metric_input()
-        # 补充 loader 专属 lineage 元数据（不属 ReviewMemberFact 业务字段）。
-        # [P1-C3 FIX] history_state 模式：lineage 来自 CURRENT T 状态本身
-        #   （state id / input_hash / source_history_run_id）。
-        # stock_core 模式：lineage 来自绑定的 canonical history source。
-        # 绝不合成 lineage ID。
-        _snap_td = snap_trade_date_by_instrument.get(instrument_id)
-        if current_source == "history_state" and instrument_id in latest_by_instrument:
-            _cur_state = latest_by_instrument[instrument_id]
-            flat.update({
-                "_snapshot_trade_date": _snap_td.isoformat() if _snap_td is not None else None,
-                "_history_state_id": str(_cur_state.id),
-                "_history_input_hash": _cur_state.input_hash,
-                "_history_source_run_id": str(_cur_state.source_history_run_id)
-                if _cur_state.source_history_run_id is not None
-                else None,
-            })
-        else:
-            flat.update({
-                "_snapshot_trade_date": _snap_td.isoformat() if _snap_td is not None else None,
-                "_history_state_id": None,
-                "_history_input_hash": None,
-                "_history_source_run_id": str(required_source_history_run_id)
-                if required_source_history_run_id is not None
-                else None,
-            })
-        facts_by_instrument[instrument_id] = flat
+        # 释放本块 bar（已完成本块所有成员 fact 装配）
+        del chunk_bars_by_instrument
 
     return facts_by_instrument
 

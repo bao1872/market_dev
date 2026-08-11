@@ -382,21 +382,15 @@ class TestMemoryBound:
         assert len(facts) == 2
 
     def test_bar_window_chunked(self, monkeypatch) -> None:
-        """P1-D2: BarDaily 400 日加载按 instrument 块分块（query count 随 chunk 增长）。"""
-        from app.services import review_scope_service as rs
-        # 通过 monkeypatch 缩小块大小（原函数内 _BAR_WINDOW_CHUNK_SIZE 为局部常量）
-        original = rs.load_day_fact_maps
-
-        async def patched(session, *, trade_date, **kw):
-            # 临时把块大小改成 2：重写内联常量无法 monkeypatch，这里直接测量 bar 查询次数
-            return await original(session, trade_date=trade_date, **kw)
-
-        monkeypatch.setattr(rs, "load_day_fact_maps", patched)
-        ids = [uuid.uuid4() for _ in range(4)]
+        """P1-D2 TRUE MULTI-CHUNK: 块大小=2，5 instrument → 3 次 BarDaily 查询。"""
+        import app.services.review_scope_service as rs
+        # 把模块内块大小常量缩到 2，使 5 个 instrument 真实跨 3 块。
+        monkeypatch.setattr(rs, "REVIEW_BAR_INSTRUMENT_CHUNK_SIZE", 2)
+        ids = [uuid.uuid4() for _ in range(5)]
         bar_queries = {"n": 0}
         session = _make_session(
-            ids, snap_summaries=[dict(SAMPLE_FP_FLAT) for _ in range(4)],
-            bar_sets=[(10.0, 9.5, 500.0, 5000.0) for _ in range(4)],
+            ids, snap_summaries=[dict(SAMPLE_FP_FLAT) for _ in range(5)],
+            bar_sets=[(10.0, 9.5, 500.0, 5000.0) for _ in range(5)],
         )
         original_exec = session.execute
 
@@ -406,12 +400,12 @@ class TestMemoryBound:
             return await original_exec(stmt)
 
         session.execute = spy
-        # 直接用原实现（块大小 256），4 个 instrument < 256 → 1 块 = 1 次 bar 查询
         facts = asyncio.run(load_day_fact_maps(
             session, trade_date=TARGET,
             source_core_run_id=uuid.uuid4(), instrument_ids=ids))
-        assert bar_queries["n"] == 1
-        assert len(facts) == 4
+        # ceil(5/2) = 3 块 → 3 次 bar 查询
+        assert bar_queries["n"] == 3
+        assert len(facts) == 5
 
     def test_query_count_not_scope_dependent(self) -> None:
         """bar query count 取决于 chunk 数而非 scope 数（load-once scope 级）。"""
@@ -434,3 +428,100 @@ class TestMemoryBound:
             source_core_run_id=uuid.uuid4(), instrument_ids=ids))
         assert bar_queries["n"] == 1  # 10 < 256 → 单块
         assert len(facts) == 10
+
+    def test_execution_order_build_before_next_chunk(self, monkeypatch) -> None:
+        """P1-D2 MEMORY RESIDENCY CONTRACT: 每块 bar 查询后立即 build 本块 fact，
+        再查下一块 bar。事件顺序必须是：query chunk1 → build chunk1 → query chunk2
+        而非 query all → build all（那会令全市场 bar 同时驻留）。
+        """
+        import app.services.review_scope_service as rs
+        from app.domain.review import member_fact as mf
+        # 块大小=2，3 instrument → 2 块，强制 chunk1 完整 build 后才进入 chunk2。
+        monkeypatch.setattr(rs, "REVIEW_BAR_INSTRUMENT_CHUNK_SIZE", 2)
+        ids = [uuid.uuid4() for _ in range(3)]
+        session = _make_session(
+            ids, snap_summaries=[dict(SAMPLE_FP_FLAT) for _ in range(3)],
+            bar_sets=[(10.0, 9.5, 500.0, 5000.0) for _ in range(3)],
+        )
+        events: list[str] = []
+        original_exec = session.execute
+
+        async def spy(stmt):
+            sql = str(stmt)
+            if "bars_daily" in sql:
+                # 记录当前块的首标的，区分 chunk1/chunk2 查询
+                events.append("QUERY_BAR_CHUNK")
+            return await original_exec(stmt)
+
+        session.execute = spy
+
+        # patch ReviewMemberFact.build 仅在它实际被调用（即真正装配 fact）时记录，
+        # 且 build 必须在对应块 bar 查询之后立即发生。
+        original_build = mf.ReviewMemberFact.build
+
+        def build_spy(*args, **kwargs):
+            events.append("BUILD_FACT_CHUNK")
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(mf.ReviewMemberFact, "build", staticmethod(build_spy))
+
+        facts = asyncio.run(load_day_fact_maps(
+            session, trade_date=TARGET,
+            source_core_run_id=uuid.uuid4(), instrument_ids=ids))
+
+        assert len(facts) == 3
+        # 期望事件序列（chunk 大小 2，3 instrument → 2 块）：
+        #   QUERY_BAR_CHUNK, BUILD(×2), QUERY_BAR_CHUNK, BUILD(×1)
+        expected = [
+            "QUERY_BAR_CHUNK",
+            "BUILD_FACT_CHUNK", "BUILD_FACT_CHUNK",
+            "QUERY_BAR_CHUNK",
+            "BUILD_FACT_CHUNK",
+        ]
+        assert events == expected, f"execution order violation: {events}"
+
+    def test_completed_chunk_bars_not_retained(self, monkeypatch) -> None:
+        """P1-D2 MEMORY RESIDENCY CONTRACT (struct): 跨块不构成全局 bar 累积结构。
+        patch ReviewMemberFact.build 使 chunk N+1 的 build 调用时，chunk N 的 build
+        已经发生过——证明装配发生在每块的 bar 查询之后、下一块查询之前，而非全部查询后。
+        """
+        import app.services.review_scope_service as rs
+        from app.domain.review import member_fact as mf
+        monkeypatch.setattr(rs, "REVIEW_BAR_INSTRUMENT_CHUNK_SIZE", 2)
+        ids = [uuid.uuid4() for _ in range(4)]
+        session = _make_session(
+            ids, snap_summaries=[dict(SAMPLE_FP_FLAT) for _ in range(4)],
+            bar_sets=[(10.0, 9.5, 500.0, 5000.0) for _ in range(4)],
+        )
+        build_order: list[int] = []  # 记录每次 build 的调用序号
+        original_build = mf.ReviewMemberFact.build
+        call_counter = {"n": 0}
+        chunk_query_positions: list[int] = []
+        original_exec = session.execute
+
+        async def spy(stmt):
+            if "bars_daily" in str(stmt):
+                chunk_query_positions.append(call_counter["n"])
+            return await original_exec(stmt)
+
+        session.execute = spy
+
+        def build_spy(*args, **kwargs):
+            call_counter["n"] += 1
+            build_order.append(call_counter["n"])
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(mf.ReviewMemberFact, "build", staticmethod(build_spy))
+
+        facts = asyncio.run(load_day_fact_maps(
+            session, trade_date=TARGET,
+            source_core_run_id=uuid.uuid4(), instrument_ids=ids))
+        assert len(facts) == 4
+        # 第 1 块（2 instrument）build 序号必须早于第 2 块 bar 查询所对应的 build。
+        # chunk_query_positions[1] 是第 2 块 bar 查询发生时已发生的 build 调用数。
+        assert len(chunk_query_positions) >= 2
+        # 第 2 块 bar 查询前必须已经完成第 1 块 2 个成员的 build。
+        assert chunk_query_positions[1] >= 2, (
+            f"chunk2 bar query happened after only {chunk_query_positions[1]} builds; "
+            "completed chunk1 facts should be built before querying chunk2"
+        )
