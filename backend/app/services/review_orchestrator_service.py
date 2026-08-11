@@ -1101,11 +1101,17 @@ async def _bind_or_reuse_canonical_history_source(
             "[ReviewOrchestrator] 未找到就绪的 canonical HistoryRun；"
             "history lineage 将回退为 contract 级 unavailable（不阻塞 market scope）",
         )
-    metadata["canonical_history_source_run_id"] = (
-        str(source_run_id) if source_run_id is not None else None
-    )
-    metadata["canonical_history_contract_version"] = contract_version
-    run.metadata_json = metadata
+    # [REVIEW-FACT-PARITY-02 §11] JSONB 必须整体重新赋值为**新 dict**：
+    # `metadata` 与 run.metadata_json 是同一对象时，就地改键不会被 SQLAlchemy
+    # 判定为脏数据，flush 静默丢弃绑定 → 下次 resume 会重新解析 latest，
+    # 造成 lineage drift（实测 run=653b26c4 绑定未落库）。
+    run.metadata_json = {
+        **metadata,
+        "canonical_history_source_run_id": (
+            str(source_run_id) if source_run_id is not None else None
+        ),
+        "canonical_history_contract_version": contract_version,
+    }
     await session.flush()
     return source_run_id, contract_version
 

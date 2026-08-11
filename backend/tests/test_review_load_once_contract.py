@@ -241,6 +241,22 @@ def test_load_day_fact_maps_accepts_lineage_guard_params() -> None:
     assert "required_history_contract_version" in params
 
 
+def test_canonical_history_binding_reassigns_new_jsonb_dict() -> None:
+    """§11：绑定必须整体赋新 dict，否则 SQLAlchemy 不判脏、绑定静默丢失。
+
+    实测 run=653b26c4 首次 compute_run 后 metadata_json 中
+    canonical_history_source_run_id 缺失 → resume 会重新解析 latest → lineage drift。
+    """
+    import inspect
+
+    src = inspect.getsource(orch._bind_or_reuse_canonical_history_source)
+    # 禁止就地改键后直接赋回同一对象
+    assert "run.metadata_json = metadata" not in src, (
+        "不得把同一 dict 对象赋回 metadata_json（就地修改不会被判脏）"
+    )
+    assert "**metadata" in src, "必须展开为新 dict 以触发 JSONB 变更检测"
+
+
 def test_scope_metrics_phase_accepts_day_fact_map() -> None:
     """§10：scope 阶段必须能接收预加载 fact map（否则无法 load-once）。"""
     import inspect
