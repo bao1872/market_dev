@@ -73,6 +73,40 @@ _DEFAULT_BATCH_SIZE = 25
 _FAILURE_THRESHOLD = 0.3
 
 
+def _apply_pit_normalization(bars: pd.DataFrame, history: dict[str, Any]) -> None:
+    """[HISTORY-BACKFILL-PIT-01] 将 one-pass history 归一化到 date-specific PIT。
+
+    从 bars.adj_factor 列提取因子序列，计算 K_t = anchor_factor / factor(t)，
+    对 LINEAR_SCALE_COVARIANT 字段应用 post-rescale。
+
+    anchor_factor = 全局 one-pass 的复权分母 = bars 中最新 adj_factor（与
+    _fetch_db_only_daily_bars 的 adjustment_as_of=None 语义一致：MDAS 用
+    latest_adj 做分母）。
+
+    factor(t) = adj_factor 序列中 trade_date <= t 的最后一个（ffill，与
+    adj_factor.py _compute_denominator_factor 同语义）。
+
+    如果 bars 无 adj_factor 列或全 null → 无公司行为 → 跳过归一化。
+    """
+    from app.services.first_pyramid_service import normalize_history_result_to_pit
+
+    if "adj_factor" not in bars.columns:
+        return
+
+    factor_series = bars["adj_factor"].dropna()
+    if factor_series.empty:
+        return
+
+    # anchor_factor = 全局锚点的复权分母 = 最新 adj_factor
+    anchor_factor = float(factor_series.iloc[-1])
+
+    normalize_history_result_to_pit(
+        history,
+        factor_series=factor_series,
+        anchor_factor=anchor_factor,
+    )
+
+
 # =============================================================================
 # 主入口
 # =============================================================================
@@ -938,6 +972,13 @@ async def backfill_history_with_run_items(
                         await fail_db.commit()
                     failed_count += 1
                     continue
+
+                # 2.2.2 PIT normalization：将全局锚点结果归一化到 date-specific PIT
+                # bars 来自 _fetch_db_only_daily_bars，adjustment_as_of 未显式传
+                # → MDAS 使用 latest_adj 作为复权分母。
+                # 对 scale-covariant 字段（sqzmom_val/delta + event prices）
+                # 乘以 K_t = anchor_factor / factor(t) 恢复严格 date-specific PIT。
+                _apply_pit_normalization(bars, history)
 
                 # 2.3 持久化（独立短事务）
                 async with AsyncSessionLocal() as persist_db:

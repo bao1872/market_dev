@@ -2139,6 +2139,92 @@ def compute_first_pyramid_history(
     }
 
 
+def normalize_history_result_to_pit(
+    history: dict[str, Any],
+    *,
+    factor_series: pd.Series,
+    anchor_factor: float,
+) -> dict[str, Any]:
+    """将 one-pass history 结果归一化到 date-specific PIT。
+
+    backfill 使用单一全局复权锚点 X 计算所有 250 个 daily_state，
+    导致各 target_date t 的 price-valued fields 使用 X 而非 t 的复权分母。
+    本函数对 LINEAR_SCALE_COVARIANT 字段乘以 K_t = anchor_factor / factor(t)
+    恢复严格 date-specific PIT。
+
+    不修改 SCALE_INVARIANT 字段（trend/structure/momentum/volume/readiness）。
+
+    Args:
+        history: compute_first_pyramid_history 返回的 dict
+        factor_series: pd.Series indexed by trade_date，值为 adj_factor
+            （与 adj_factor.py _compute_denominator_factor 同语义：
+             latest factor whose trade_date <= date，ffill）
+        anchor_factor: 全局 one-pass 使用的复权分母（backfill = latest_adj）
+
+    Returns:
+        归一化后的 history dict（原地修改 daily_state 和 events 后返回同一引用）
+    """
+    if factor_series is None or factor_series.empty or pd.isna(anchor_factor) or anchor_factor == 0:
+        return history
+
+    # 预处理 factor lookup：按 date 建 dict（ffill 语义已由 caller 保证）
+    factor_by_date: dict[str, float] = {}
+    for idx, val in factor_series.items():
+        d = idx.date().isoformat() if hasattr(idx, "date") else str(idx)[:10]
+        if d and not pd.isna(val):
+            factor_by_date[d] = float(val)
+
+    def _factor_at(date_str: str) -> float | None:
+        """查找 trade_date 对应的 factor（ffill 语义由 factor_by_date 预建）。"""
+        # 精确匹配
+        if date_str in factor_by_date:
+            return factor_by_date[date_str]
+        # 回退到 <= date_str 的最近日期
+        best_key: str | None = None
+        for k in factor_by_date:
+            if k <= date_str and (best_key is None or k > best_key):
+                best_key = k
+        return factor_by_date.get(best_key) if best_key else None
+
+    # 1. 归一化 daily_state
+    daily_state = history.get("daily_state") or []
+    for state in daily_state:
+        time_str = state.get("time")
+        if not time_str:
+            continue
+        state_date = time_str[:10]
+        f_t = _factor_at(state_date)
+        if f_t is None or f_t == 0:
+            continue
+        k_t = anchor_factor / f_t
+
+        # 只修改 LINEAR_SCALE_COVARIANT 字段
+        for field in ("sqzmom_val", "sqzmom_delta"):
+            v = state.get(field)
+            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                state[field] = float(v) * k_t
+
+    # 2. 归一化 events
+    events = history.get("events") or []
+    for event in events:
+        evt_time = event.get("time")
+        if not evt_time:
+            continue
+        event_date = evt_time[:10]
+        f_e = _factor_at(event_date)
+        if f_e is None or f_e == 0:
+            continue
+        k_e = anchor_factor / f_e
+
+        # 只修改 LINEAR_SCALE_COVARIANT 事件字段
+        for field in ("level", "bar_high", "bar_low", "from_val", "to_val"):
+            v = event.get(field)
+            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                event[field] = float(v) * k_e
+
+    return history
+
+
 # 模块自测
 if __name__ == "__main__":
     # 构造最小测试 fixture：60 根上涨 bars
