@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.models.market_review import MarketReviewScopeSnapshot
 from app.services.review_orchestrator_service import (
     ScopeDefinition,
     _bind_or_reuse_canonical_history_source,
@@ -285,3 +286,145 @@ class TestRunBoundHistoryLifecycle:
         ):
             with pytest.raises(Exception):
                 await _bind_or_reuse_canonical_history_source(session, run)
+
+
+# =============================================================================
+# [CR-01] history_extras pipeline
+# =============================================================================
+
+
+class TestBuildHistoryExtras:
+    """[CR-01] 验证 _build_history_extras 正确从历史序列计算 filter 所需字段。"""
+
+    @staticmethod
+    def _make_snapshot(
+        p_val=0.6, q_val=0.5, u_val=0.7, c_val=0.3, v_val=0.4,
+        p_delta=0.02, q_delta=0.01, u_delta=0.05, c_delta=-0.01, v_delta=0.03,
+        breakdown_current=0.15, breakdown_prev=0.20,
+    ):
+        return MarketReviewScopeSnapshot(
+            p_payload={
+                "value": p_val, "delta1d": p_delta,
+                "historyPercentile120d": 70.0,
+            },
+            q_payload={
+                "value": q_val, "delta1d": q_delta,
+                "historyPercentile120d": 60.0,
+            },
+            u_payload={
+                "value": u_val, "delta1d": u_delta,
+                "historyPercentile120d": 80.0,
+                "components": {
+                    "structure_breakdown": {
+                        "value": breakdown_current,
+                        "previousValue": breakdown_prev,
+                    },
+                },
+            },
+            c_payload={
+                "value": c_val, "delta1d": c_delta,
+                "historyPercentile120d": 40.0,
+            },
+            v_payload={
+                "value": v_val, "delta1d": v_delta,
+                "historyPercentile120d": 55.0,
+            },
+        )
+
+    @staticmethod
+    def _make_history_maps():
+        """构造 10 个历史观测的 P/Q/U/C/V 序列。"""
+        return {
+            "P": {"P": [0.55, 0.56, 0.57, 0.58, 0.59, 0.60, 0.58, 0.57, 0.56, 0.58]},
+            "Q": {"Q": [0.45, 0.46, 0.47, 0.48, 0.49, 0.50, 0.48, 0.47, 0.46, 0.48]},
+            "U": {
+                "U": [0.60, 0.61, 0.62, 0.63, 0.64, 0.65, 0.63, 0.62, 0.61, 0.63],
+                "structure_breakdown": [0.20, 0.19, 0.18, 0.17, 0.16, 0.15, 0.14, 0.13, 0.12, 0.11],
+            },
+            "C": {"C": [0.25, 0.26, 0.27, 0.28, 0.29, 0.30, 0.28, 0.27, 0.26, 0.28]},
+            "V": {"V": [0.35, 0.36, 0.37, 0.38, 0.39, 0.40, 0.38, 0.37, 0.36, 0.38]},
+        }
+
+    def test_history_extras_none_when_no_history(self):
+        """无历史数据时返回空 dict。"""
+        from app.services.review_orchestrator_service import _build_history_extras
+        snapshot = self._make_snapshot()
+        extras = _build_history_extras(snapshot, None)
+        assert extras == {}
+
+    def test_pq_diff_history_pct_computed(self):
+        """_pq_diff_history_pct 从历史 (P-Q) 序列正确计算。"""
+        from app.services.review_orchestrator_service import _build_history_extras
+        snapshot = self._make_snapshot(p_val=0.6, q_val=0.5)
+        history = self._make_history_maps()
+        extras = _build_history_extras(snapshot, history)
+        assert "_pq_diff_history_pct" in extras
+        assert 0 <= extras["_pq_diff_history_pct"] <= 100
+
+    def test_delta1d_history_percentiles_computed(self):
+        """Q/U/V delta1d 历史分位正确计算。"""
+        from app.services.review_orchestrator_service import _build_history_extras
+        snapshot = self._make_snapshot(q_delta=0.01, u_delta=0.05, v_delta=0.03)
+        history = self._make_history_maps()
+        extras = _build_history_extras(snapshot, history)
+        assert "_q_delta1d_history_pct" in extras
+        assert "_u_delta1d_history_pct" in extras
+        assert "_v_delta1d_history_pct" in extras
+        for key in ["_q_delta1d_history_pct", "_u_delta1d_history_pct", "_v_delta1d_history_pct"]:
+            assert 0 <= extras[key] <= 100, f"{key}={extras[key]}"
+
+    def test_structure_breakdown_not_rising_from_snapshot_components(self):
+        """structure_breakdown_not_rising 从 snapshot U payload components 正确读取。"""
+        from app.services.review_orchestrator_service import _build_history_extras
+        # breakdown_current=0.15 <= breakdown_prev=0.20 → not rising = 1
+        snapshot = self._make_snapshot(breakdown_current=0.15, breakdown_prev=0.20)
+        extras = _build_history_extras(snapshot, {})
+        assert "_structure_breakdown_not_rising" in extras
+        assert extras["_structure_breakdown_not_rising"] == 1
+
+        # breakdown_current=0.25 > breakdown_prev=0.20 → not rising = 0
+        snapshot2 = self._make_snapshot(breakdown_current=0.25, breakdown_prev=0.20)
+        extras2 = _build_history_extras(snapshot2, {})
+        assert extras2["_structure_breakdown_not_rising"] == 0
+
+    def test_c_rising_from_delta(self):
+        """_c_rising 从 C.delta1d 正确判断。"""
+        from app.services.review_orchestrator_service import _build_history_extras
+        # c_delta=-0.01 → not rising
+        snapshot = self._make_snapshot(c_delta=-0.01)
+        extras = _build_history_extras(snapshot, {})
+        assert extras["_c_rising"] == 0
+
+        # c_delta=0.05 → rising
+        snapshot2 = self._make_snapshot(c_delta=0.05)
+        extras2 = _build_history_extras(snapshot2, {})
+        assert extras2["_c_rising"] == 1
+
+    def test_c_high_anomaly_from_history(self):
+        """_c_high_anomaly 从历史 C 序列正确计算。"""
+        from app.services.review_orchestrator_service import _build_history_extras
+        # C=0.3, history C series [0.25..0.30] → ~100 percentile → anomaly=1
+        snapshot = self._make_snapshot(c_val=0.30)
+        history = self._make_history_maps()
+        extras = _build_history_extras(snapshot, history)
+        assert "_c_high_anomaly" in extras
+
+    def test_history_extras_integrate_with_signal_context(self):
+        """验证 history_extras 注入 filter context 后字段正确传递。"""
+        from app.services.review_orchestrator_service import _build_history_extras
+        from app.services.review_signal_service import build_filter_context
+        snapshot = self._make_snapshot()
+        snapshot.coverage_ratio = 1.0
+        snapshot.ready_count = 10
+        history = self._make_history_maps()
+        extras = _build_history_extras(snapshot, history)
+
+        context = build_filter_context(snapshot, history_extras=extras)
+        # 确认 CR-01 字段进入 context
+        assert "_pq_diff_history_pct" in context
+        assert "_q_delta1d_history_pct" in context
+        assert "_u_delta1d_history_pct" in context
+        assert "_v_delta1d_history_pct" in context
+        assert "_structure_breakdown_not_rising" in context
+        assert "_c_rising" in context
+        assert "_c_high_anomaly" in context

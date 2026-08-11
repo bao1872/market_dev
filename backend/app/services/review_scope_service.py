@@ -80,9 +80,9 @@ ALL_DISCOVERY_SCOPE_TYPES: tuple[str, ...] = (
     "concept",
 )
 # Legacy 兼容：第一级范围类型（V1 两级扫描模型，保留向后兼容引用）
-LEVEL1_SCOPE_TYPES: tuple[str, ...] = ALL_DISCOVERY_SCOPE_TYPES
-# Legacy 兼容：第二级范围类型（V1 下钻模型，保留向后兼容引用；instrument 仅 debug 用）
-LEVEL2_SCOPE_TYPES: tuple[str, ...] = ("instrument",)
+# Legacy 兼容：V1 两级扫描模型的常量语义（保留向后兼容引用）
+LEVEL1_SCOPE_TYPES: tuple[str, ...] = ("market", "major_index", "style", "industry_l1")
+LEVEL2_SCOPE_TYPES: tuple[str, ...] = ("industry_l2", "industry_l3", "concept", "instrument")
 
 
 class ScopeSnapshotError(Exception):
@@ -463,7 +463,7 @@ async def compute_scope_metrics(
     return snapshot
 
 
-def _scope_family(scope_type: str) -> str:
+def _scope_family(scope_type: str) -> str | None:
     """[V2] Comparable peer cohort for cross-sectional percentile.
     
     Each taxonomy level is an independent peer cohort:
@@ -473,12 +473,12 @@ def _scope_family(scope_type: str) -> str:
     - concept ↔ concept
     - major_index ↔ major_index
     - style ↔ style
-    - market: no peer cohort (uses self-historical baseline)
+    - market: None (no peer cohort — uses self-historical baseline)
+
+    Returns None for market to signal no cross-section computation.
     """
     if scope_type == "market":
-        # market is the whole-market baseline; single-element cross-sectional
-        # percentile is meaningless. Return a sentinel that produces no peers.
-        return "__market_no_cross_section__"
+        return None
     return scope_type
 
 
@@ -506,6 +506,8 @@ async def apply_cross_section_percentiles(
     peers: dict[tuple[str, str], list[float]] = defaultdict(list)
     for snapshot in snapshots:
         family = _scope_family(snapshot.scope_type)
+        if family is None:
+            continue  # market: no peer cohort
         for code, field in fields.items():
             payload = getattr(snapshot, field)
             value = payload.get("value") if isinstance(payload, dict) else None
@@ -521,13 +523,17 @@ async def apply_cross_section_percentiles(
                 continue
             payload = dict(original)
             value = payload.get("value")
-            peer_values = peers.get((family, code), [])
-            percentile = (
-                _cross_section_percentile(float(value), peer_values)
-                if isinstance(value, (int, float)) and peer_values
-                else None
-            )
-            payload["crossSectionPercentile"] = percentile
+            if family is None:
+                # market: crossSectionPercentile is always None
+                payload["crossSectionPercentile"] = None
+            else:
+                peer_values = peers.get((family, code), [])
+                percentile = (
+                    _cross_section_percentile(float(value), peer_values)
+                    if isinstance(value, (int, float)) and peer_values
+                    else None
+                )
+                payload["crossSectionPercentile"] = percentile
             setattr(snapshot, field, payload)
         updated += 1
     await session.flush()

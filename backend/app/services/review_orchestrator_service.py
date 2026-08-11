@@ -710,12 +710,12 @@ async def compute_run(
     failed = 0
     signals_total = 0
 
-    metric_results: list[tuple[ScopeDefinition, MarketReviewScopeSnapshot]] = []
+    metric_results: list[tuple[ScopeDefinition, MarketReviewScopeSnapshot, dict[str, dict[str, list[float]]] | None]] = []
 
     # 2. 第一遍：全部 scope 只计算 raw/normalized metrics。
     for scope in scopes:
         try:
-            snapshot = await _compute_scope_metrics_phase(
+            snapshot, history_maps = await _compute_scope_metrics_phase(
                 session,
                 run,
                 scope,
@@ -725,7 +725,7 @@ async def compute_run(
             )
             succeeded += 1
             if snapshot is not None:
-                metric_results.append((scope, snapshot))
+                metric_results.append((scope, snapshot, history_maps))
         except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.exception(
@@ -745,10 +745,12 @@ async def compute_run(
 
     # 3. 第二遍：同日同 family 横截面分位，完成后才能评估 signal。
     await apply_cross_section_percentiles(session, run.id)
-    for scope, snapshot in metric_results:
+    for scope, snapshot, history_maps in metric_results:
         try:
             signals_total += await _compute_scope_signal_pipeline(
-                session, run, scope, snapshot, day_fact_map=day_fact_map,
+                session, run, scope, snapshot,
+                day_fact_map=day_fact_map,
+                history_maps=history_maps,
             )
         except Exception as exc:  # noqa: BLE001
             succeeded -= 1
@@ -1243,7 +1245,7 @@ async def _compute_scope_metrics_phase(
     required_history_contract_version: str | None = None,
     required_source_history_run_id: uuid.UUID | None = None,
     day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
-) -> MarketReviewScopeSnapshot | None:
+) -> tuple[MarketReviewScopeSnapshot | None, dict[str, dict[str, list[float]]] | None]:
     """Compute and persist raw/normalized metrics for one scope.
 
     [Phase4C 2026-08-09] 透传 canonical history lineage 过滤条件（P0-B）。
@@ -1396,7 +1398,148 @@ async def _compute_scope_metrics_phase(
         completed_at=datetime.now(UTC),
     )
 
-    return snapshot
+    return snapshot, history_maps
+
+
+def _build_history_extras(
+    snapshot: MarketReviewScopeSnapshot,
+    history_maps: dict[str, dict[str, list[float]]] | None,
+) -> dict[str, float | int]:
+    """[CR-01] 从历史序列构建 filter engine 所需的 history_extras。
+
+    使用 point-in-time 原则：history_maps 来自 _build_scope_history，
+    已确保 trade_date < run.trade_date。
+
+    Args:
+        snapshot: 当前 scope 的 metric snapshot（含 P/Q/U/C/V payloads）
+        history_maps: {metric_code: {component_name: [raw_value 序列]}} 或 None
+
+    Returns:
+        dict 含 filter engine 消费的字段：
+        _pq_diff_history_pct / _q_delta1d_history_pct / _u_delta1d_history_pct /
+        _v_delta1d_history_pct / _structure_breakdown_not_rising /
+        _c_rising / _c_high_anomaly
+    """
+    extras: dict[str, float | int] = {}
+
+    if history_maps is None:
+        return extras
+
+    # P-Q 历史分位
+    pq_diff_series = _extract_metric_series(history_maps, "P", "Q")
+    if pq_diff_series is not None:
+        p_payload = snapshot.p_payload or {}
+        q_payload = snapshot.q_payload or {}
+        p_val = p_payload.get("value")
+        q_val = q_payload.get("value")
+        if isinstance(p_val, (int, float)) and isinstance(q_val, (int, float)):
+            extras["_pq_diff_history_pct"] = _percentile_rank(
+                p_val - q_val, pq_diff_series,
+            )
+
+    # Q/U/V delta1d 历史分位
+    for metric_code, key in [("Q", "_q_delta1d_history_pct"),
+                               ("U", "_u_delta1d_history_pct"),
+                               ("V", "_v_delta1d_history_pct")]:
+        payload = getattr(snapshot, f"{metric_code.lower()}_payload") or {}
+        delta = payload.get("delta1d")
+        if not isinstance(delta, (int, float)):
+            continue
+        delta_series = _extract_delta_series(history_maps, metric_code)
+        if delta_series is not None:
+            extras[key] = _percentile_rank(delta, delta_series)
+
+    # Structure breakdown not rising
+    extras["_structure_breakdown_not_rising"] = _check_structure_breakdown_not_rising(
+        snapshot, history_maps,
+    )
+
+    # C rising / C high anomaly
+    c_payload = snapshot.c_payload or {}
+    c_delta1d = c_payload.get("delta1d")
+    extras["_c_rising"] = 1 if isinstance(c_delta1d, (int, float)) and c_delta1d > 0 else 0
+    c_series = _extract_metric_series(history_maps, "C", "C")
+    if c_series is not None:
+        c_val = c_payload.get("value")
+        if isinstance(c_val, (int, float)):
+            extras["_c_high_anomaly"] = 1 if _percentile_rank(c_val, c_series) >= 80 else 0
+
+    return extras
+
+
+def _extract_metric_series(
+    history_maps: dict[str, dict[str, list[float]]],
+    metric_code: str,
+    component: str | None = None,
+) -> list[float] | None:
+    """从 history_maps 中提取某 metric 的合并 value 序列。
+
+    若指定 component，取该 component 的序列；否则合并所有 component 的平均值。
+    """
+    components = history_maps.get(metric_code)
+    if not components:
+        return None
+    if component and component in components:
+        return components[component]
+    # 合并所有 component：每个时间点取平均值
+    all_series = list(components.values())
+    if not all_series:
+        return None
+    min_len = min(len(s) for s in all_series)
+    if min_len == 0:
+        return None
+    return [
+        sum(s[i] for s in all_series) / len(all_series)
+        for i in range(min_len)
+    ]
+
+
+def _extract_delta_series(
+    history_maps: dict[str, dict[str, list[float]]],
+    metric_code: str,
+) -> list[float] | None:
+    """从 history_maps 的 value 序列计算 delta1d 序列。"""
+    values = _extract_metric_series(history_maps, metric_code)
+    if values is None or len(values) < 2:
+        return None
+    return [values[i] - values[i - 1] for i in range(1, len(values))]
+
+
+def _percentile_rank(value: float, series: list[float]) -> float:
+    """计算 value 在 series 中的百分位 (0-100)。"""
+    if not series:
+        return 0.0
+    below = sum(1 for v in series if v < value)
+    return round(below / len(series) * 100, 1)
+
+
+def _check_structure_breakdown_not_rising(
+    snapshot: MarketReviewScopeSnapshot,
+    history_maps: dict[str, dict[str, list[float]]] | None,
+) -> int:
+    """检查结构破坏扩散率是否不再继续上升。
+
+    从 U payload 的 components 中读取 structure_breakdown 指标，
+    比较最近两日的变化趋势。
+    """
+    u_payload = snapshot.u_payload or {}
+    components = u_payload.get("components", {})
+    if isinstance(components, dict):
+        breakdown = components.get("structure_breakdown")
+        if isinstance(breakdown, dict):
+            current = breakdown.get("value")
+            prev = breakdown.get("previousValue")
+            if isinstance(current, (int, float)) and isinstance(prev, (int, float)):
+                return 1 if current <= prev else 0
+
+    if history_maps is None:
+        return 0
+    # Fallback: use history_maps U component data
+    u_components = history_maps.get("U", {})
+    breakdown_series = u_components.get("structure_breakdown")
+    if breakdown_series and len(breakdown_series) >= 2:
+        return 1 if breakdown_series[-1] <= breakdown_series[-2] else 0
+    return 0
 
 
 async def _compute_scope_signal_pipeline(
@@ -1406,11 +1549,14 @@ async def _compute_scope_signal_pipeline(
     snapshot: MarketReviewScopeSnapshot,
     *,
     day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
+    history_maps: dict[str, dict[str, list[float]]] | None = None,
 ) -> int:
     """Evaluate signals and attribution after the cross-section pass is complete.
 
     [REVIEW-FACT-PARITY-02 §10] ``day_fact_map`` 透传给 attribution，
     使 signal × child_scope 归因不再重复加载当日 facts。
+
+    [CR-01] ``history_maps`` 用于构建 history_extras 注入 filter evaluation。
     """
 
     # === signals phase ===
@@ -1425,6 +1571,9 @@ async def _compute_scope_signal_pipeline(
     )
 
     try:
+        # [CR-01] 从历史序列构建 filter 所需的 history_extras
+        history_extras = _build_history_extras(snapshot, history_maps)
+
         previous_signals = await find_previous_signals(
             session,
             scope_type=scope.scope_type,
@@ -1437,6 +1586,7 @@ async def _compute_scope_signal_pipeline(
             run=run,
             snapshot=snapshot,
             previous_signals=previous_signals,
+            history_extras=history_extras,
         )
     except SignalGenerationError as exc:
         await _upsert_run_item(
@@ -1583,7 +1733,7 @@ async def _compute_scope_pipeline(
         (s for s in resolved if s.scope_type == scope.scope_type and s.scope_key == scope.scope_key),
         scope,
     )
-    snapshot = await _compute_scope_metrics_phase(
+    snapshot, history_maps = await _compute_scope_metrics_phase(
         session,
         run,
         full_scope,
@@ -1595,7 +1745,9 @@ async def _compute_scope_pipeline(
         return 0
     await apply_cross_section_percentiles(session, run.id)
     return await _compute_scope_signal_pipeline(
-        session, run, full_scope, snapshot, day_fact_map=day_fact_map,
+        session, run, full_scope, snapshot,
+        day_fact_map=day_fact_map,
+        history_maps=history_maps,
     )
 
 
