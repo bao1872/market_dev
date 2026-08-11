@@ -370,12 +370,13 @@ unconfirmed
 
 保存用户追踪。
 
+现有兼容 baseline：
+
 ```
 id UUID PK
 user_id UUID
-source_signal_id UUID NULL     # legacy Signal tracking，兼容保留
-source_discovery_id UUID NULL  # Discovery tracking（logical identity）
-tracking_type VARCHAR          # discovery / scope / instrument / signal（legacy）
+source_signal_id UUID         # legacy Signal tracking
+tracking_type VARCHAR          # signal / scope / instrument（现有）
 scope_type/scope_key NULL
 instrument_id NULL
 status VARCHAR                 # active / confirmed / invalidated / closed
@@ -385,7 +386,16 @@ note TEXT NULL
 created_at / closed_at
 ```
 
-> 注：`source_discovery_id` 和 `tracking_type=discovery` 为 logical requirement。具体 schema/migration DEFER 到实现阶段。
+V2 logical requirement：
+
+Tracking domain 必须能够表达以下 target 类型：
+- **Discovery**（使用 Discovery logical identity）
+- **Scope**
+- **Instrument**
+
+Legacy Signal target 可以兼容保留。
+
+具体如何实现 Discovery target reference（是否新增 `source_discovery_id`、是否改 `tracking_type` 枚举、是否使用 generic `target_type`/`target_id`、FK 结构、nullable 规则、migration shape）全部属于 implementation design。本 PRD 当前不选择其中任何一种。
 
 ### 5.8 market_review_tracking_evaluations
 
