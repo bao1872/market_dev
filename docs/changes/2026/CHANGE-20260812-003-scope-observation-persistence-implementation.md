@@ -170,3 +170,22 @@ Publication / API / Frontend：
   - 两次 manual attempt 创建的验证库（`bz_stock_verify_4105a2b...`、`bz_stock_verify_9c319fd...`）
     与 attempt.env / RUNTIME_SHA 已按 §8 清理。
 - `REVIEW_OBSERVATION_ROUND1C_CORRECTED_SHA`（origin/dev）= `9c319fd4fafd2eb9dd24bfdf977f2dad35e9ca90`。
+
+### 6.5 Parent targeted-pg baseline confirmation（prompt §10，BASELINE_CONFIRMED）
+
+- 通过唯一正式入口 `scripts/ops/panji-verify run --sha 1490d60... --plan targeted-pg`
+  在 **parent SHA `1490d60332d89e9ae885b3bf209aec31d066c085`** 上实际运行相同 standard
+  targeted-pg plan，而非仅依据"文件未修改"推断 pre-existing。
+- 结果：preflight / create_database / migration（upgrade head → `089_review_discovery_tracking (head)`）/
+  identity 全 PASS；`pg_tests` gate **fail**，唯一失败为
+  `test_pg_review_runtime_blocker_closure.py::test_query2_projected_result_supports_build_stock_state`，
+  root cause 与当前 dev 完全一致：
+  `TypeError: build_stock_state() missing 1 required positional argument: 'symbol'`
+  （测试仍按旧签名 `build_stock_state(snapshot, symbol)` 调用，而当前签名已是
+  `build_stock_state(snapshot, run, symbol)`）。**1 failed, 17 passed, 5 deselected**。
+- 结论：**BASELINE_CONFIRMED** —— 该失败在 parent `1490d60` 即以同一 root cause 存在，
+  与 Round 1C 修正无调用链关系，非本轮回归；Round 1C 未触碰该 closure 测试或
+  `stock_state.py`。
+- 证据保留于远程 `/root/.panji-verify/evidence/verify-1490d60332d8-1786578044-0320331d/`
+  （gates.json / logs.txt / summary.md）；验证库 `bz_stock_verify_1490d60...` 已按 §8 清理
+  （cleanup.json dropped=true，无 blocked）。
