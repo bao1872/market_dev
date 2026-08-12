@@ -84,12 +84,14 @@ export function DiscoveryWorkspace({
   const discoveries = listQuery.data?.items || []
   const total = listQuery.data?.total || 0
 
+  // [P1-A] Scope family filter chips come from the canonical full-scope taxonomy
+  // (authoritative source), NOT from the current paginated Discovery items.
+  // Pagination must never make a valid scope family disappear.
   const scopeFamilies = useMemo(() => {
-    const families = new Set<string>()
-    discoveries.forEach(d => families.add(d.scope.type))
-    return ['market', 'major_index', 'style', 'industry_l1', 'industry_l2', 'industry_l3', 'concept']
-      .filter(f => families.has(f) || scopeType === f)
-  }, [discoveries, scopeType])
+    const canonical = ['market', 'major_index', 'style', 'industry_l1', 'industry_l2', 'industry_l3', 'concept']
+    // Keep the currently-selected family visible even if current page has no items of it.
+    return scopeType && !canonical.includes(scopeType) ? [scopeType, ...canonical] : canonical
+  }, [scopeType])
 
   const setFilter = (key: 'scopeType' | 'scopeFamily' | 'status', value: string | undefined) => {
     onFilterChange({ [key]: value || null } as DiscoveryFilterPatch)

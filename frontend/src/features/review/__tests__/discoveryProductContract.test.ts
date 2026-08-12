@@ -289,3 +289,34 @@ test('13. CSS module class 由组件引用且存在于 module 导出集', () => 
     assert.ok(found, `SCSS module 必须定义组件引用的 class: .${kebab}（styles.${camel}）`)
   }
 })
+
+// ============================================================
+// 14. [P1-A] Scope family filter 必须来自 canonical 全量 taxonomy，
+//     不得从当前分页 Discovery 列表派生产生 → 翻页不得令 scope 选项消失。
+// ============================================================
+
+test('14. [P1-A] scopeFamilies 来自 canonical taxonomy，不依赖当前分页 discoveries', () => {
+  const ws = read('DiscoveryWorkspace.tsx')
+  // 不得再出现「从 discoveries 派生产生 family 集合」的旧逻辑
+  assert.ok(
+    !/discoveries\.forEach\(\s*d\s*=>\s*families\.add\(d\.scope\.type\)/.test(ws),
+    'scopeFamilies 不得从 discoverys 列表派生产生 family 集合',
+  )
+  assert.ok(
+    !/families\.has\(f\)/.test(ws),
+    'scopeFamilies 不得用 families.has 来过滤 canonical taxonomy（会随分页消失）',
+  )
+  // canonical 全量 taxonomy 必须作为权威来源出现
+  assert.match(
+    ws,
+    /\['market', 'major_index', 'style', 'industry_l1', 'industry_l2', 'industry_l3', 'concept'\]/,
+    'scopeFamilies 必须以 canonical 全量 scope-type taxonomy 为来源',
+  )
+  // 即便当前页无某 family 的 Discovery，该 family 仍应出现在选项中
+  // （通过 canonical 常量直接返回，而非基于当前页 items 计算）
+  assert.ok(
+    /scopeFamilies = useMemo\(\(\) => \{[\s\S]*canonical[\s\S]*\}, \[scopeType\]\)/.test(ws)
+    || /scopeFamilies = useMemo\(\(\) => \{[\s\S]*canonical[\s\S]*return scopeType[\s\S]*canonical/.test(ws),
+    'scopeFamilies useMemo 依赖仅含 scopeType（不依赖 discoveries），始终返回 canonical taxonomy',
+  )
+})
