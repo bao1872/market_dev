@@ -155,4 +155,4 @@ Publication / API / Frontend：
   governance check PASS；Round 1A/1B/1C pure unit 全绿。
 - 待 remote isolated verification（新 frozen SHA）确认 migration round-trip / PG targeted /
   contract validation / seeded legacy isolation 后更新为全绿。
-- 已记录 `REVIEW_OBSERVATION_ROUND1C_CORRECTED_SHA`（见 commit）。
+- `REVIEW_OBSERVATION_ROUND1C_CORRECTED_SHA`（origin/dev）= `4105a2bf9971d6a6bd7948d8177fb5c1b0564ac5`。
