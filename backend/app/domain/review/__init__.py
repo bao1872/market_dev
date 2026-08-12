@@ -3,6 +3,7 @@
 子模块：
 - metric_registry: P/Q/U/C/V component 字段映射（PRD §7）
 - metric_engine: P/Q/U/C/V 计算引擎
+- scope_observation: Canonical Scope Observation Core（PRD §7，family-agnostic）
 - filter_definitions: A/B/C 三类筛选器 Pydantic schema（PRD §8）
 - filter_engine: 筛选器执行引擎
 - attribution_engine: 子范围与个股归因（PRD §9）
