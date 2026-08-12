@@ -27,6 +27,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -417,6 +418,97 @@ class MarketReviewScopeSnapshot(Base):
             f"review_run_id={self.review_run_id!r}, "
             f"scope_type={self.scope_type!r}, scope_key={self.scope_key!r}, "
             f"status={self.status!r}, coverage_ratio={self.coverage_ratio!r})>"
+        )
+
+
+class ReviewScopeObservationFact(Base):
+    """Canonical Scope Observation Fact snapshot（PRD §7.9 / Round 1C）。
+
+    保存由 Canonical Scope Observation Core 计算完成的每日客观事实快照。
+
+    唯一业务 grain：``trade_date + scope_type + scope_key`` → one daily fact snapshot。
+
+    只保存 objective facts（Core output 原样）；不保存 score / 机会 / 风险 / 强弱 /
+    推荐 / ranking / Filter / Discovery 判断。Persistence 只 serialize / validate /
+    upsert，不重新计算任何事实（不重算 ratio / HHI / transition / percentile，
+    不解释 NULL，不把 unavailable 转 0）。
+    """
+
+    __tablename__ = "review_scope_observation_facts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    trade_date: Mapped[date] = mapped_column(
+        Date(), nullable=False, comment="业务交易日",
+    )
+    scope_type: Mapped[str] = mapped_column(
+        Text(), nullable=False, comment="范围类型（industry_l1/l2/l3/concept）",
+    )
+    scope_key: Mapped[str] = mapped_column(
+        Text(), nullable=False, comment="范围标识",
+    )
+    scope_name: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="范围名称（冗余展示元数据）",
+    )
+    canonical_t1: Mapped[date | None] = mapped_column(
+        Date(), nullable=True, comment="实际使用的 T-1 交易日",
+    )
+    pit_member_count: Mapped[int] = mapped_column(
+        Integer(), nullable=False, comment="PIT(T) 成员数（denominator）",
+    )
+    pit_member_count_t1: Mapped[int | None] = mapped_column(
+        Integer(), nullable=True, comment="PIT(T-1) 成员数",
+    )
+    provided_member_count: Mapped[int | None] = mapped_column(
+        Integer(), nullable=True, comment="实际提供的成员观察数",
+    )
+    t1_membership_available: Mapped[bool] = mapped_column(
+        Boolean(), nullable=False, default=False,
+        comment="T-1 PIT membership 是否真实可用",
+    )
+    pit_status_t: Mapped[str] = mapped_column(
+        Text(), nullable=False, comment="PIT(T) 状态：historical_pit/ready/unavailable 等",
+    )
+    pit_status_t1: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="PIT(T-1) 状态",
+    )
+    readiness: Mapped[str] = mapped_column(
+        Text(), nullable=False, comment="snapshot-level readiness（现有明确状态导出，无阈值）",
+    )
+    observation_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, comment="Canonical Observation Core output 原样（PRD §7.9.3）",
+    )
+    diagnostics: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, comment="准备/计算诊断信息",
+    )
+    algorithm_version: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, comment="算法版本（仅 metadata/lineage，不作为唯一键）",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_date",
+            "scope_type",
+            "scope_key",
+            name="uq_review_scope_observation_facts_day_scope",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ReviewScopeObservationFact("
+            f"trade_date={self.trade_date!r}, scope_type={self.scope_type!r}, "
+            f"scope_key={self.scope_key!r}, readiness={self.readiness!r})>"
         )
 
 

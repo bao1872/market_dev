@@ -27,6 +27,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.scope_observation import compute_scope_observation
 from app.services.observation_prep import check_observation_invariants
+from app.services.review_observation_persistence_service import (
+    save_scope_observation_fact,
+)
 from app.services.review_observation_prep_service import (
     PreparedScope,
     list_recent_trading_days,
@@ -68,8 +71,19 @@ async def run_shadow_scope(
     spec: ShadowScopeSpec,
     trade_date: date,
     out_dir: Path,
+    *,
+    write_session: AsyncSession | None = None,
 ) -> dict[str, Any]:
-    """Prepare + compute one scope/date and write evidence JSON."""
+    """Prepare + compute one scope/date and write evidence JSON.
+
+    ``session`` is the READ session (real canonical data, read-only).  When
+    ``write_session`` is provided (e.g. the isolated verification DB), the
+    canonical observation result is also persisted via
+    ``save_scope_observation_fact`` (prompt §14 chain:
+    prepare_scope -> compute_scope_observation -> save_scope_observation_fact).
+    When ``write_session`` is None, persistence is skipped (shadow evidence only,
+    never writes production data).
+    """
     prep = await prepare_scope(session, spec.scope_type, spec.scope_key, trade_date)
     if prep.pit_status_t == "unavailable" or not prep.members:
         evidence = _evidence(prep, {"status": "skipped_no_members"}, [])
@@ -88,6 +102,13 @@ async def run_shadow_scope(
     )
     checks = check_observation_invariants(obs)
     evidence = _evidence(prep, obs, checks)
+    if write_session is not None:
+        # Persist into the isolated write session (never production bz_stock).
+        saved = await save_scope_observation_fact(write_session, prep, obs)
+        evidence["_persisted"] = {
+            "fact_id": str(saved.id),
+            "readiness": saved.readiness,
+        }
     return _write(evidence, out_dir, spec, trade_date)
 
 
