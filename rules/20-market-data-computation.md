@@ -70,6 +70,24 @@
 
 相同 canonical input 必须具有确定性结果。
 
+## 6.1 Canonical Scope Observation
+
+正式逻辑链：
+
+```text
+PIT member set + target trade date + canonical member facts → canonical Scope Observation
+```
+
+硬规则：
+
+1. **同一 Observation fact 不得存在多个 production owner**（跨 market / industry / concept / style / index 复用同一 owner）；
+2. **不得按 Scope Family 重复实现核心 Observation calculator**（Price / Trend / Structure / Momentum / Participation / Concentration 计算不分 Family 复制）；
+3. **Family-specific adapter 只负责** membership / metadata / cohort / readiness；
+4. **exact canonical T-1、no-future leakage、transition denominator 等核心时间/因果口径对所有 Family 一致**；
+5. **确需 Family-specific computation 必须先有正式 PRD 授权**，不得在实现中自行增加 family branch。
+
+架构细节见 `docs/prd/70-review.md` §7.8。
+
 ## 7. 第一金字塔 Core
 
 daily Core 的正式链：

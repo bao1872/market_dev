@@ -819,6 +819,90 @@ chip-like historical field 数据不足（Q7 INCONCLUSIVE）。
 Scope Observation facts 是 Evidence / Signal / Discovery 的底层事实来源。Filter 与 Discovery 只消费
 **structured Observation Evidence**，不依赖 P/Q/U/C/V score。
 
+### 7.8 Scope Architecture Contract（Scope Family 可扩展性与 Canonical Observation ownership）
+
+> **2026-08-12 领域收口（Scope Architecture PRD + Governance Closure）**：本小节正式冻结
+> **Scope Family extensibility** 与 **Canonical Scope Observation ownership** 两个长期架构决策。
+> 输入为「Review Observation Model — PRD → Code Impact Audit」（2026-08-12）。
+> 本小节只收口架构契约，**不** 重新设计 §7 Observation 指标、**不** 决定 persistence/API/filter 实现形状。
+
+#### 7.8.1 Scope logical contract
+
+每个 Scope（无论属于哪个 Family）必须具备以下逻辑属性：
+
+- **scope identity**：稳定、可追溯的身份（scope_type + scope_key + 版本化来源）；
+- **PIT membership at T**：目标交易日 `T` 的 point-in-time member set；
+- **peer cohort**：用于横截面比较的同类范围集合；
+- **metadata / readiness**：taxonomy 元数据与 source / readiness 状态。
+
+#### 7.8.2 Scope Family 是平行、可扩展的观察对象
+
+`market` / `major_index` / `style` / `industry` / `concept` 均为**平行 Scope Family**。
+
+Family 之间的差异**主要**属于：
+
+- membership resolver（如何 resolve PIT member set）；
+- metadata / taxonomy（board 分类、层级、命名）；
+- peer cohort（横截面比较范围）；
+- source / readiness（数据来源与就绪状态）。
+
+Family 差异**不得默认**属于：
+
+- Price calculation；
+- Trend calculation；
+- Structure calculation；
+- Momentum calculation；
+- Participation calculation；
+- Concentration calculation。
+
+即：不同 Family **不得**各自复制一套核心 Observation calculator。
+
+#### 7.8.3 Canonical Observation ownership
+
+正式逻辑链：
+
+```text
+Scope Identity
++ PIT Member Set(T)
++ target trade date
++ canonical Member Atomic Facts
+        ↓
+Canonical Scope Observation
+        ↓
+PRICE / TREND / STRUCTURE / MOMENTUM / PARTICIPATION / CHIP-if-available
+```
+
+- **同一个 Observation fact 只有一个 canonical production owner。**
+- 不得为 `industry / concept / style / index / market` 分别复制核心 Observation 计算。
+- **允许 Family-specific adapter**，但 adapter 只处理：
+  membership / metadata / peer cohort / readiness（source availability）。
+- 若未来某 Scope Family 确实需要特殊 Observation computation：必须有明确业务语义依据，
+  **先修改正式 PRD**，不得在实现中自行增加 family branch。
+
+#### 7.8.4 Scope maturity
+
+正式区分三个不同维度，**不得混为一谈**：
+
+- **architecture support**：架构支持一个 Family（≠ 产品假设已 VALIDATED）；
+- **product validation**：产品假设已被用户通过真实结果确认（≠ STABLE / RELEASED）；
+- **release maturity**：进入正式长期兼容与发布治理。
+
+不同 Scope Family 允许处于不同成熟度。新 Family 可以通过实验逐步接入，
+但默认复用同一 Observation Engine。
+
+#### 7.8.5 Peer cohort 属于 Scope contract
+
+- Observation Engine **消费** resolved peer cohort；
+- Observation Engine **不得**自己根据 scope_type 猜 comparison universe；
+- 例如：`concept → concept cohort`、`industry_l1 → industry_l1 cohort`、
+  `major_index → major_index cohort`、`style → style cohort`、`market → no cross-sectional peer`。
+
+#### 7.8.6 Persistence boundary
+
+Scope Observation 的 persistence 形状（单个 `observation_payload` JSONB / 多个 payload column /
+新表 / migration shape）**继续 DEFER**（见 §5.3）。本小节只冻结 **logical canonical
+Observation ownership**，不决定任何 DB schema 或 migration。
+
 ---
 
 ## 8. Filter Engine（内部 Evidence Family）

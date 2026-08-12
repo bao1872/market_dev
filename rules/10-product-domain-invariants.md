@@ -62,6 +62,16 @@ Auction 回流是辅助输入/增强，不是第六阶段。
 
 Review 的 identity、核心过滤和阶段状态不得依赖 Chip 是否完成。
 
+### 3.1 Scope Family 可扩展性
+
+- **Scope Family 是平行、可扩展的观察对象**（market / major_index / style / industry / concept 同为平行 Family）；
+- **taxonomy hierarchy ≠ Discovery gate hierarchy**（板块分类层级不等价于 Discovery / 观察资格层级）；
+- **architecture support ≠ product validation**（架构支持一个 Family 不等于产品假设已 VALIDATED）；
+- 不同 Family 可处于不同 `EXPERIMENTAL / VALIDATED / STABLE / RELEASED` 状态；
+- 新 Family **不得**因其他 Family 未命中 / 未 ready 而失去独立观察资格。
+
+具体 Scope logical contract 与 Canonical Observation ownership 见 `docs/prd/70-review.md` §7.8。
+
 ## 4. ProductReadiness 分类
 
 当前产品分类：
