@@ -29,6 +29,7 @@ from app.domain.review.scope_observation import compute_scope_observation
 from app.services.observation_prep import check_observation_invariants
 from app.services.review_observation_persistence_service import (
     save_scope_observation_fact,
+    validate_scope_observation_payload,
 )
 from app.services.review_observation_prep_service import (
     PreparedScope,
@@ -103,6 +104,23 @@ async def run_shadow_scope(
     checks = check_observation_invariants(obs)
     evidence = _evidence(prep, obs, checks)
     if write_session is not None:
+        # Round 1C correction Blocker #2: invariant failure must never persist.
+        # Fail-fast — do not call save_scope_observation_fact when the canonical
+        # result fails an invariant, regardless of whether an axis is partial.
+        if not evidence["sanity_all_pass"]:
+            raise ScopeObservationInvariantError(
+                f"refusing to persist {spec.scope_type}/{spec.scope_key} "
+                f"{trade_date.isoformat()}: invariant check failed "
+                f"({_failed_checks(checks)})"
+            )
+        # Contract validation is enforced inside save_scope_observation_fact; the
+        # shadow path also fails fast here so an invalid payload is never written.
+        validate_scope_observation_payload(
+            obs,
+            scope_type=prep.scope_type,
+            scope_key=prep.scope_key,
+            trade_date=prep.trade_date,
+        )
         # Persist into the isolated write session (never production bz_stock).
         saved = await save_scope_observation_fact(write_session, prep, obs)
         evidence["_persisted"] = {
@@ -110,6 +128,14 @@ async def run_shadow_scope(
             "readiness": saved.readiness,
         }
     return _write(evidence, out_dir, spec, trade_date)
+
+
+class ScopeObservationInvariantError(Exception):
+    """Raised when a canonical result fails an invariant and persistence is requested."""
+
+
+def _failed_checks(checks: list[dict[str, Any]]) -> list[str]:
+    return [c["name"] for c in checks if not c["ok"]]
 
 
 def _write(

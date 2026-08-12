@@ -2,7 +2,7 @@
 
 - **类型**：behavior+contract+architecture（Canonical Observation Fact 持久化；新表 + ORM + persistence service + shadow wiring）
 - **领域**：复盘模块 / Scope Observation Model / Canonical Scope Observation Facts persistence
-- **状态**：`implemented_unconfirmed`（本地 pure/unit、ruff、mypy-changed、compileall 通过；remote isolated verification + real-data→isolated persistence smoke **已执行通过**，见 §4；仍待外部审计/验收）
+- **状态**：`implemented_unconfirmed`（本地 pure/unit、ruff、mypy-changed、compileall 通过；remote isolated verification + real-data→isolated persistence smoke **已执行通过**，见 §4；外部审计提出 2 个 blocker，已按 §6 修正，仍待外部复审/验收）
 - **关联 PRD**：`docs/prd/70-review.md`（§7.9 Canonical Scope Observation Facts — Exploration Persistence Contract；由 CHANGE-20260812-002 收口）
 - **关联 Maps**：`docs/maps/70-review.md`（未修改；Map 继续描述 legacy implementation，待实现验收后单独授权同步）
 - **关联 Rules**：无（本轮不修改治理；AGENTS.md / rules/10* / rules/20* / governance checker 均未改动，governance check PASS）
@@ -108,3 +108,51 @@ Exploration persistence contract（PRD §7.9）。本轮为 **Round 1C implement
 
 - 已记录 `REVIEW_OBSERVATION_ROUND1C_SHA = 55ef285c57a996795401e7c0141911d75639d2f1`（origin/dev）。
 - 保持 Map 描述 legacy implementation；待外部审计/验收后单独授权同步 Maps。
+
+## 6. Round 1C Correction（外部审计 2 个 blocker）
+
+外部审计对 Round 1C 给出 `PARTIAL / CORRECTION REQUIRED`，提出 2 个 blocker。本修正只补这两点，
+**不改变已确认的业务语义 / schema / 激活范围 / 幂等 grain**，仍不触发 Filter / Discovery /
+Publication / API / Frontend：
+
+### 6.1 Blocker #1 — Canonical payload contract 校验缺失（§6-A..I）
+
+- `app/services/review_observation_persistence_service.py` 新增
+  `CANONICAL_TOP_LEVEL_SECTIONS`（唯一合法顶层集合 = scope/price/amount/trend/structure/
+  momentum/participation/chip）与 `validate_scope_observation_payload()`：
+  - 顶层键集合必须**精确等于** canonical 集合（缺 canonical 段或含任何额外主观键如
+    opportunity_score / marker 都拒绝）；
+  - 每个 canonical 段必须是 dict；
+  - `scope` 段身份（scope_type / scope_key / trade_date）必须与 PreparedScope 一致。
+- `save_scope_observation_fact` 在写库前调用该校验器，非法 payload 抛
+  `ScopeObservationPayloadValidationError`，**不写任何行**（Blocker #1/#3）。
+- 合法 partial axis（如空 price universe、某 axis unavailable）保留完整 canonical 结构即通过——
+  只校验合同形状，不重算任何事实（save-only ownership，prompt §4/§11）。
+
+### 6.2 Blocker #2 — invariant 失败不得持久化（§8）
+
+- `app/services/review_observation_shadow.py` 的 `run_shadow_scope` 在
+  `check_observation_invariants(obs)` 返回任一失败时，若提供了 `write_session` 则
+  **fail-fast 抛 `ScopeObservationInvariantError`**，绝不调用 `save_scope_observation_fact`
+  （`sanity_all_pass == False` → 拒绝持久化，无论 axis 是否 partial）。
+
+### 6.3 测试补强
+
+- `tests/test_review_observation_persistence.py` 新增 validator A..I（全 canonical PASS /
+  缺 price / 缺 trend / arbitrary payload / 额外主观键 / scope_type / scope_key / trade_date
+  不匹配 / 合法 partial PASS / 非 dict 段），以及
+  `test_shadow_invariant_fail_does_not_persist`（invariant 失败时 shadow 写路径不触达 DB）。
+- `tests/test_review_observation_persistence_pg.py`：
+  - 所有 payload fixture 改用真实 `compute_scope_observation` 输出（合法 canonical shape）；
+  - 新增 `test_save_rejects_non_canonical_payload`、`test_save_rejects_scope_identity_mismatch`、
+    `test_legal_partial_payload_persists`；
+  - 新增 `test_seeded_legacy_pqucv_unchanged`（§9）：预置 legacy `market_review_scope_snapshots`
+    的 P/Q/U/C/V，保存 canonical fact 后重读 legacy 各行 P/Q/U/C/V 完全不变。
+
+### 6.4 验证状态（本次修正）
+
+- 本地（Mac）：compileall OK；ruff OK；mypy-changed 无新增（既有 baseline 错误在未修改文件）；
+  governance check PASS；Round 1A/1B/1C pure unit 全绿。
+- 待 remote isolated verification（新 frozen SHA）确认 migration round-trip / PG targeted /
+  contract validation / seeded legacy isolation 后更新为全绿。
+- 已记录 `REVIEW_OBSERVATION_ROUND1C_CORRECTED_SHA`（见 commit）。

@@ -37,9 +37,85 @@ MARKET_PERSISTENCE_DIAGNOSTIC = (
     "market is current active universe, not historical PIT; fact not persisted"
 )
 
+# The ONLY legal top-level sections of a Canonical Observation payload.  Any
+# extra key (e.g. a subjective opportunity_score / marker / ranking) or a
+# missing canonical section must be rejected before persistence (Round 1C
+# correction Blocker #1).  This is the contract shape, not a semantic recompute.
+CANONICAL_TOP_LEVEL_SECTIONS: frozenset[str] = frozenset(
+    {"scope", "price", "amount", "trend", "structure", "momentum", "participation", "chip"}
+)
+
 
 class ScopePersistenceNotActivatedError(Exception):
     """Raised when a non-activated scope type is passed to persistence."""
+
+
+class ScopeObservationPayloadValidationError(Exception):
+    """Raised when a payload is not a valid Canonical Observation payload.
+
+    Used for both top-level contract-shape violations (missing / extra section,
+    non-dict section) and scope identity mismatch (scope_type / scope_key /
+    trade_date).  This is contract validation only — never a recompute of
+    ratio / HHI / transition / percentile / breadth / readiness / state.
+    """
+
+
+def validate_scope_observation_payload(
+    observation: dict[str, Any],
+    *,
+    scope_type: str,
+    scope_key: str,
+    trade_date: date,
+) -> None:
+    """Contract-validate that a payload is a complete, identity-consistent
+    Canonical Observation (Round 1C correction Blocker #1 / #3).
+
+    Only checks:
+    - top-level key set == the exact canonical section set (no extra subjective
+      key, no missing canonical section);
+    - every canonical section is a dict;
+    - ``observation["scope"]`` identity (scope_type / scope_key / trade_date)
+      matches the PreparedScope.
+
+    It does NOT recompute any fact (save-only ownership, prompt §4): a legal
+    partial axis (e.g. an empty denominator, an unavailable axis) is accepted as
+    long as the full canonical structure and identity are intact.
+    """
+    if not isinstance(observation, dict):
+        raise ScopeObservationPayloadValidationError(
+            f"observation must be a dict, got {type(observation).__name__}"
+        )
+    actual = set(observation)
+    if actual != CANONICAL_TOP_LEVEL_SECTIONS:
+        missing = sorted(CANONICAL_TOP_LEVEL_SECTIONS - actual)
+        extra = sorted(actual - CANONICAL_TOP_LEVEL_SECTIONS)
+        raise ScopeObservationPayloadValidationError(
+            "non-canonical top-level payload: "
+            f"missing={missing or 'none'} extra={extra or 'none'}"
+        )
+    for section in CANONICAL_TOP_LEVEL_SECTIONS:
+        if not isinstance(observation[section], dict):
+            raise ScopeObservationPayloadValidationError(
+                f"canonical section {section!r} must be a dict"
+            )
+
+    scope = observation["scope"]
+    if not isinstance(scope, dict):
+        raise ScopeObservationPayloadValidationError("scope section must be a dict")
+    if scope.get("scope_type") != scope_type:
+        raise ScopeObservationPayloadValidationError(
+            f"scope_type mismatch: payload={scope.get('scope_type')!r} "
+            f"expected={scope_type!r}"
+        )
+    if scope.get("scope_key") != scope_key:
+        raise ScopeObservationPayloadValidationError(
+            f"scope_key mismatch: payload={scope.get('scope_key')!r} expected={scope_key!r}"
+        )
+    if scope.get("trade_date") != trade_date.isoformat():
+        raise ScopeObservationPayloadValidationError(
+            f"trade_date mismatch: payload={scope.get('trade_date')!r} "
+            f"expected={trade_date.isoformat()!r}"
+        )
 
 
 def _snapshot_readiness(prep: PreparedScope) -> str:
@@ -105,6 +181,10 @@ async def save_scope_observation_fact(
       generic loop passes them in (prompt §16 / §17).
     - failure semantics: PIT(T) unavailable or no members -> not written, raises
       ``ValueError`` (never a fake ``observation_payload={}``) (prompt §19A).
+    - contract validation: ``observation`` must be a complete, identity-consistent
+      Canonical Observation payload (exact canonical top-level set + scope
+      identity match); otherwise ``ScopeObservationPayloadValidationError``
+      (Round 1C correction Blocker #1 / #3).
     """
     if prep.scope_type not in ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES:
         raise ScopePersistenceNotActivatedError(
@@ -115,6 +195,12 @@ async def save_scope_observation_fact(
             "cannot persist fact for unavailable/incomplete scope: "
             f"pit_status_t={prep.pit_status_t!r}, provided_member_count={len(prep.members)}"
         )
+    validate_scope_observation_payload(
+        observation,
+        scope_type=prep.scope_type,
+        scope_key=prep.scope_key,
+        trade_date=prep.trade_date,
+    )
 
     values = _build_fact_values(prep, observation, algorithm_version)
     stmt = pg_insert(ReviewScopeObservationFact).values(**values)

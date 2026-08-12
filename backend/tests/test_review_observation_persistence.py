@@ -11,18 +11,59 @@ from datetime import date
 
 import pytest
 
+from app.domain.first_pyramid_semantics import Direction, MomentumDirection
+from app.domain.review.scope_observation import MemberObservation, compute_scope_observation
 from app.services.review_observation_persistence_service import (
     ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES,
+    CANONICAL_TOP_LEVEL_SECTIONS,
     MARKET_PERSISTENCE_DIAGNOSTIC,
+    ScopeObservationPayloadValidationError,
     ScopePersistenceNotActivatedError,
     _build_fact_values,
     _snapshot_readiness,
     save_scope_observation_fact,
+    validate_scope_observation_payload,
 )
 from app.services.review_observation_prep_service import PreparedScope
 
 T = date(2026, 8, 11)
 T1 = date(2026, 8, 10)
+
+
+def _canonical_obs(
+    *,
+    scope_type: str = "concept",
+    scope_key: str = "A",
+    trade_date: date = T,
+    price_candidate: bool = True,
+) -> dict:
+    """Build a minimal but legal Canonical Observation payload via the real Core.
+
+    Uses ``compute_scope_observation`` so the payload is a genuine canonical
+    shape (exact top-level section set), never an invented second semantics.
+    ``price_candidate=False`` yields a legal partial axis (empty price universe)
+    while keeping the complete canonical structure.
+    """
+    members = [
+        MemberObservation(
+            member_id="m1",
+            price_candidate=price_candidate,
+            return_1d=0.01 if price_candidate else None,
+            amount=100.0,
+            trend=Direction.UP,
+            swing=Direction.SIDEWAYS,
+            internal=Direction.DOWN,
+            momentum=MomentumDirection.FLAT,
+        )
+    ]
+    return compute_scope_observation(
+        scope_type=scope_type,
+        scope_key=scope_key,
+        trade_date=trade_date,
+        pit_member_ids=["m1"],
+        pit_member_ids_t1=["m1"],
+        members=members,
+    )
 
 
 class _FakeSession:
@@ -65,6 +106,101 @@ def test_activation_set_exact() -> None:
     assert "market" not in ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES
     assert "major_index" not in ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES
     assert "style" not in ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES
+
+
+def test_canonical_top_level_sections_exact() -> None:
+    # Blocker #1: the canonical table only accepts the exact canonical set.
+    assert CANONICAL_TOP_LEVEL_SECTIONS == frozenset(
+        {"scope", "price", "amount", "trend", "structure", "momentum", "participation", "chip"}
+    )
+
+
+# ── Round 1C correction Blocker #1 — canonical payload contract validator ──
+# Prompt §6 tests A..I are mapped to lowercase function names below.
+
+def test_validator_accepts_full_canonical_payload() -> None:  # prompt §6-A
+    obs = _canonical_obs()
+    validate_scope_observation_payload(
+        obs, scope_type="concept", scope_key="A", trade_date=T
+    )
+
+
+def test_validator_rejects_missing_price() -> None:  # prompt §6-B
+    obs = _canonical_obs()
+    del obs["price"]
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        validate_scope_observation_payload(
+            obs, scope_type="concept", scope_key="A", trade_date=T
+        )
+
+
+def test_validator_rejects_missing_trend() -> None:  # prompt §6-C
+    obs = _canonical_obs()
+    del obs["trend"]
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        validate_scope_observation_payload(
+            obs, scope_type="concept", scope_key="A", trade_date=T
+        )
+
+
+def test_validator_rejects_arbitrary_payload() -> None:  # prompt §6-D
+    # {"scope": {...}, "marker": "x"} — non-canonical top-level keys.
+    obs: dict = {"scope": {"scope_type": "concept", "scope_key": "A"}, "marker": "x"}
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        validate_scope_observation_payload(
+            obs, scope_type="concept", scope_key="A", trade_date=T
+        )
+
+
+def test_validator_rejects_extra_subjective_key() -> None:  # prompt §6-E
+    obs = _canonical_obs()
+    obs["opportunity_score"] = 0.9
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        validate_scope_observation_payload(
+            obs, scope_type="concept", scope_key="A", trade_date=T
+        )
+
+
+def test_validator_rejects_scope_type_mismatch() -> None:  # prompt §6-F
+    obs = _canonical_obs(scope_type="concept", scope_key="A")
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        validate_scope_observation_payload(
+            obs, scope_type="industry_l1", scope_key="A", trade_date=T
+        )
+
+
+def test_validator_rejects_scope_key_mismatch() -> None:  # prompt §6-G
+    obs = _canonical_obs(scope_type="concept", scope_key="A")
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        validate_scope_observation_payload(
+            obs, scope_type="concept", scope_key="B", trade_date=T
+        )
+
+
+def test_validator_rejects_trade_date_mismatch() -> None:  # prompt §6-H
+    obs = _canonical_obs(scope_type="concept", scope_key="A", trade_date=T)
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        validate_scope_observation_payload(
+            obs, scope_type="concept", scope_key="A", trade_date=T1
+        )
+
+
+def test_validator_accepts_legal_partial_axis_full_structure() -> None:  # prompt §6-I
+    # A legal partial axis (empty price universe) keeps the full canonical
+    # structure and passes; partialness is not an invariant failure here.
+    obs = _canonical_obs(price_candidate=False)
+    validate_scope_observation_payload(
+        obs, scope_type="concept", scope_key="A", trade_date=T
+    )
+
+
+def test_validator_rejects_non_dict_section() -> None:
+    obs = _canonical_obs()
+    obs["price"] = "not-a-dict"
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        validate_scope_observation_payload(
+            obs, scope_type="concept", scope_key="A", trade_date=T
+        )
 
 
 @pytest.mark.parametrize("scope_type", ["market", "major_index", "style"])
@@ -123,16 +259,86 @@ def test_build_fact_values_does_not_modify_core_output() -> None:
 def test_partial_facts_can_be_saved() -> None:
     # Core returned normally but some axis is unavailable/partial -> still saved
     # as-is, readiness stays "ready" (persistence never judges completeness,
-    # prompt §19C / §20).  No threshold-derived downgrade.
+    # prompt §19C / §20).  No threshold-derived downgrade.  A legal partial axis
+    # keeps the FULL canonical structure (Round 1C correction test I).
     prep = _prep()
-    partial_obs = {
-        "scope": {"scope_type": "concept"},
-        "price": {"return": {"mean": None}},
-        "trend": {"state": {"denominator": 0}},
-    }
+    partial_obs = _canonical_obs(price_candidate=False)
     values = _build_fact_values(prep, partial_obs, None)
     assert values["observation_payload"] is partial_obs
     assert values["readiness"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_invalid_payload_before_persist() -> None:
+    # Blocker #1: an arbitrary (non-canonical) payload must be rejected at the
+    # save path before any DB write (FakeSession would raise if reached).
+    prep = _prep()
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        await save_scope_observation_fact(
+            _FakeSession(), prep, {"scope": {"scope_type": "concept"}, "marker": "x"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_identity_mismatch_payload() -> None:
+    # Blocker #3: prep=concept/A but payload scope=concept/B -> must not persist.
+    prep = _prep(scope_type="concept", scope_key="A")
+    obs = _canonical_obs(scope_type="concept", scope_key="B")
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        await save_scope_observation_fact(_FakeSession(), prep, obs)
+
+
+@pytest.mark.asyncio
+async def test_shadow_invariant_fail_does_not_persist(monkeypatch) -> None:
+    """Round 1C correction §8: when the canonical result fails an invariant, the
+    shadow write path must NOT call persistence (fail-fast)."""
+    from pathlib import Path
+
+    from app.services import review_observation_shadow as shadow
+    from app.services.review_observation_persistence_service import (
+        save_scope_observation_fact as real_save,
+    )
+
+    prep = _prep()
+    spec = shadow.ShadowScopeSpec(scope_type="concept", scope_key="A", scope_name="A")
+
+    # Stub DB-backed prepare_scope so the pure guard path is exercised.
+    async def fake_prepare(session, scope_type, scope_key, trade_date):  # noqa: ARG001
+        return prep
+
+    monkeypatch.setattr(shadow, "prepare_scope", fake_prepare)
+    # Provide a legal Core output so the only injected failure is the invariant.
+    monkeypatch.setattr(
+        shadow, "compute_scope_observation", lambda **kw: _canonical_obs()
+    )
+    # Force an invariant failure (breadth count != denominator) and prove that
+    # save_scope_observation_fact is never reached.
+    monkeypatch.setattr(
+        shadow,
+        "check_observation_invariants",
+        lambda obs: [{"name": "price_breadth_sums_denominator", "ok": False, "detail": "1 != 2"}],
+    )
+
+    class _WriteProbe:
+        def __init__(self) -> None:
+            self.saved = False
+
+        async def execute(self, *a, **k):  # pragma: no cover - must not be called
+            self.saved = True
+            raise AssertionError("persistence reached despite invariant failure")
+
+    # Even the real save would never be invoked because run_shadow_scope raises
+    # before reaching it; use a probe to be explicit.
+    def _blocked_save(*a, **k):  # pragma: no cover - must not be reached
+        raise AssertionError("save_scope_observation_fact called on invariant failure")
+
+    monkeypatch.setattr(shadow, "save_scope_observation_fact", _blocked_save)
+
+    with pytest.raises(shadow.ScopeObservationInvariantError):
+        await shadow.run_shadow_scope(
+            None, spec, T, Path("/tmp/nonexistent_out"), write_session=_WriteProbe()
+        )
+    assert real_save is not None  # sanity: reference still imported
 
 
 def test_snapshot_readiness_mapping() -> None:
