@@ -152,7 +152,21 @@ Publication / API / Frontend：
 ### 6.4 验证状态（本次修正）
 
 - 本地（Mac）：compileall OK；ruff OK；mypy-changed 无新增（既有 baseline 错误在未修改文件）；
-  governance check PASS；Round 1A/1B/1C pure unit 全绿。
-- 待 remote isolated verification（新 frozen SHA）确认 migration round-trip / PG targeted /
-  contract validation / seeded legacy isolation 后更新为全绿。
-- `REVIEW_OBSERVATION_ROUND1C_CORRECTED_SHA`（origin/dev）= `4105a2bf9971d6a6bd7948d8177fb5c1b0564ac5`。
+  governance check PASS；Round 1A/1B/1C pure unit 全绿（74 passed）。
+- **Registered targeted-pg（代码 SHA `4105a2b`）**：preflight / create_database / migration（
+  upgrade head → `090_scope_observation_facts (head)`）/ identity 全 PASS；`pg_tests` gate 仅因
+  **既有 baseline failure**（`test_pg_review_runtime_blocker_closure.py::test_query2_...
+  build_stock_state` 签名不匹配，§4 已记录，非本轮回归）失败；registered plan 的固定
+  pg_contract 文件列表不含本修正新增的 `test_review_observation_persistence_pg.py`。
+- **Manual isolated verification（最终 SHA `9c319fd4fafd2eb9dd24bfdf977f2dad35e9ca90`，isolated DB
+  `bz_stock_verify_9c319fd...`）**：
+  - migration `upgrade head` → `090_scope_observation_facts (head)`；
+  - identity（`current_database` == 验证库，非 `bz_stock`）通过；
+  - `tests/test_review_observation_persistence_pg.py` **12 passed**：insert / idempotent
+    update（row_count=1）/ date / scope / family isolation / diagnostics+readiness round-trip /
+    legacy `market_review_scope_snapshots` 零写入 / save 拒绝非 canonical payload / save 拒绝
+    scope identity 不匹配 / legal partial payload persists / **seeded legacy P/Q/U/C/V 保存后不变** /
+    list filters；
+  - 两次 manual attempt 创建的验证库（`bz_stock_verify_4105a2b...`、`bz_stock_verify_9c319fd...`）
+    与 attempt.env / RUNTIME_SHA 已按 §8 清理。
+- `REVIEW_OBSERVATION_ROUND1C_CORRECTED_SHA`（origin/dev）= `9c319fd4fafd2eb9dd24bfdf977f2dad35e9ca90`。
