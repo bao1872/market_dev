@@ -1,14 +1,16 @@
-# 复盘模块 PRD V2.0 — Review Discovery Model
+# 复盘模块 PRD V2.0 — Review Observation Model（Scope Observation Model）
 
 状态：已确认
-最后确认日期：2026-08-11
+最后确认日期：2026-08-12
 对应 Map：`../maps/70-review.md`
-需求所有权：复盘模块完整产品与工程合同（目标行为、数据契约、API、Discovery、信号、归因、Cross-Scope Relation、追踪、编排）
-需求变更依据：`ref/需求变更.md`（2026-08-11 Review Discovery Model Refactor）
+需求所有权：复盘模块完整产品与工程合同（目标行为、数据契约、API、Discovery、信号、Scope Observation Model、Cross-Scope Relation、追踪、编排）
+需求变更依据：`ref/需求变更.md`（2026-08-12 Review Observation Model Refactor；Scope Observation Experiment 收口）
 
-> 本文件是 Review 指标、历史、横截面、Discovery、信号、Cross-Scope Relation、归因、发布和页面状态的唯一需求真源。[`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义 Review 与上游节点之间的依赖、lineage 和闭环场景，不替代本文件的 P/Q/U/C/V 公式、Discovery 定义及门禁。
+> 本文件是 Review 指标、历史、横截面、Discovery、信号、Scope Observation Model、Cross-Scope Relation、归因、发布和页面状态的唯一需求真源。[`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义 Review 与上游节点之间的依赖、lineage 和闭环场景，不替代本文件的 Scope Observation Model 合同、Discovery 定义及门禁。
 
 > 本文件是复盘模块的权威产品与工程合同。实现时不得根据页面方便性重新发明业务逻辑；前端不计算聚合变量、筛选器或归因结论。
+
+> **2026-08-12 领域收口（Scope Observation Model）**：Review 的 **first-layer observation model 从 P/Q/U/C/V 评分模型正式替换为 Scope Observation Model**（见 §7）。P/Q/U/C/V 不再作为 scope first-layer fact、discovery prerequisite、State/Change 前置输入、板块综合事实或底层 score。本文件旧 §7 的 P/Q/U/C/V 内容及其在 §6.4/§8/§9/§10/§11/§12/§23/§24/§25/§26/§27 中作为 first-layer observation 的依赖，全部视为 **legacy implementation baseline / IMPLEMENTATION_REDESIGN_REQUIRED**，需在后续 Implementation Design 中映射到新 Observation Model。本文件新增 §7 为 Scope Observation Model 的权威语义合同。
 
 ## 0. 领域输入
 
@@ -16,17 +18,18 @@ Review 依赖以下正式领域输入：
 
 - 个股第一金字塔：趋势、结构、动量为必选维度，筹码共识为可选维度；
 - 至少满足滚动窗口要求的第一金字塔历史状态和日线事实；
-- Board Analysis 提供的行业/概念板块 P/Q/U/C/V、pyramid_v2 和第二金字塔数据；
+- Board Analysis 提供的行业/概念板块 Scope PIT membership、Price/Amount 事实与第二金字塔数据；
 - 个股 core 与板块聚合的正式 publication lineage；
 - 行情列表、个股详情和板块详情的稳定导航身份。
 
 Review 新业务链为：
 
 第一金字塔与历史状态
-→ 板块第二金字塔
-→ P/Q/U/C/V聚合变量（所有 Scope Family 独立平行计算）
-→ State / Change / Anomaly 分离评估
-→ Filter Evidence 生成（Signal = atomic evidence）
+→ Scope PIT membership
+→ Price / Amount facts
+→ Scope Observation（PRICE / TREND / STRUCTURE / MOMENTUM / PARTICIPATION / CHIP-if-available）
+→ State / Transition / Diffusion + Contribution / Concentration facts
+→ Evidence
 → Discovery 聚合（Discovery = user-level market finding）
 → Cross-Scope Relation 分析
 → 归因与个股验证
@@ -52,7 +55,8 @@ Review 系统回答以下核心问题：
 - 不预测明日涨跌；
 - 不生成买卖建议；
 - 不做黑箱"机会分""风险分"或板块综合总分；
-- 不在前端重算P/Q/U/C/V、筛选条件或归因；
+- **不恢复 P/Q/U/C/V 作为 underlying observation model**（见 §7；UI 摘要属 presentation layer）；
+- 不在前端重算 Scope Observation facts、筛选条件或归因；
 - 不把全部99个第一金字塔字段塞入复盘页；
 - 不把通用板块排行榜当作复盘主流程；
 - 不以自然语言总结替代结构化证据；
@@ -67,15 +71,20 @@ Review 系统回答以下核心问题：
 A. 已发布 stock_core pointer
 B. 已发布 board_analysis / market_aggregation pointer
 C. 第一金字塔历史基线（默认120个交易日，最低60日）
+D. Scope PIT membership（per-trade-date，point-in-time）
         ↓
 所有 Scope Family 独立平行计算：
   market / major_index/* / style/* / industry_l1/* / industry_l2/* / industry_l3/* / concept/*
         ↓
-生成每个 Scope 的 P/Q/U/C/V 当前值、变化、历史分位与横截面分位
+生成每个 Scope 的 Observation facts：
+  PRICE（Return Level / Distribution / Breadth / Contribution / Concentration / Amount）
+  TREND / STRUCTURE / MOMENTUM（State+Breadth / Transition / Diffusion[PROVISIONAL]）
+  PARTICIPATION（Volume / Amount threshold-free distribution）
+  CHIP（if available；否则 UNRESOLVED）
         ↓
-State / Change / Anomaly 分离评估
+State / Transition / Diffusion + Contribution / Concentration facts
         ↓
-运行 Filter Engine（A/B/C/D 作为内部 Evidence Family）
+运行 Filter Engine（A/B/C/D 作为内部 Evidence Family；threshold 依赖 Observation Evidence）
         ↓
 Signal = atomic evidence 生成
         ↓
@@ -244,7 +253,15 @@ review_run_id + scope_type + scope_key + phase
 
 ### 5.3 market_review_scope_snapshots
 
-保存每个市场范围的P/Q/U/C/V和证据。
+保存每个市场范围的 **Scope Observation facts 与证据**。
+
+> **数据模型语义收口（2026-08-12）**：`p_payload / q_payload / u_payload / c_payload / v_payload`
+> 现有 physical persistence shape 属于 **legacy implementation baseline**，与新 Scope Observation
+> semantic contract 需要在后续 **Implementation Design** 中完成映射/迁移设计。
+> 本轮 **不** 设计新 DB schema（不决定是单个 `observation_payload` JSONB、多个 payload column、
+> 还是新表），全部 **DEFER** 到 implementation design。
+> 逻辑层明确：Scope Snapshot 必须能够表达新 Observation Model（PRICE / TREND / STRUCTURE /
+> MOMENTUM / PARTICIPATION / CHIP-if-available）。
 
 ```
 id UUID PK
@@ -260,11 +277,11 @@ eligible_count INTEGER
 ready_count INTEGER
 coverage_ratio NUMERIC
 status VARCHAR
-p_payload JSONB
-q_payload JSONB
-u_payload JSONB
-c_payload JSONB
-v_payload JSONB
+p_payload JSONB      # legacy baseline；Observation 映射 DEFER 到 implementation
+q_payload JSONB      # legacy baseline
+u_payload JSONB      # legacy baseline
+c_payload JSONB      # legacy baseline
+v_payload JSONB      # legacy baseline
 data_quality_json JSONB
 created_at / updated_at
 ```
@@ -488,9 +505,9 @@ members
    ↓
 第一金字塔成员事实
    ↓
-P/Q/U/C/V
+Scope Observation facts（PRICE / TREND / STRUCTURE / MOMENTUM / PARTICIPATION / CHIP-if-available）
    ↓
-State / Change / 历史位置 / 横截面位置
+State / Transition / Diffusion + 历史位置 / 横截面位置
    ↓
 Discovery Evidence
 ```
@@ -517,16 +534,19 @@ Scope membership 只回答：
 
 ### 6.4 Scope Observation 合同
 
+> **2026-08-12 语义收口**：每一个正式 discovery scope 必须独立产生 **Scope Observation facts**
+> （见 §7 Scope Observation Model），**不再以 P/Q/U/C/V 聚合变量作为 first-layer observation**。
+
 每一个正式 discovery scope 都必须独立产生：
 
-- P / Q / U / C / V（聚合变量）
-- current value（当前归一化值）
-- raw value（原始聚合值）
-- delta1d（1日变化）
-- delta5d（5日变化）
-- self historical percentile（自身历史分位）
-- same-family cross-sectional percentile（同类横截面分位）
-- component evidence（组件证据）
+- **PRICE** facts：Return Level / Return Distribution / Price Breadth / Signed Return Contribution / Price Concentration / Amount Contribution·Concentration
+- **TREND / STRUCTURE / MOMENTUM** facts：State+Breadth（categorical distribution）· Transition（ratio）· Diffusion（PROVISIONAL）
+- **PARTICIPATION** facts：Volume / Amount threshold-free distribution
+- **CHIP**：if available；否则 UNRESOLVED
+- 每个 Observation fact 的 raw value（原始聚合值）、delta1d（1日变化）、delta5d（5日变化）
+- self historical percentile（自身历史分位；仅对可历史归一的 facts）
+- same-family cross-sectional percentile（同类横截面分位；仅对可比 facts）
+- component / member evidence（组件/成员证据）
 - coverage（覆盖率）
 - readiness / data quality（就绪状态与数据质量）
 
@@ -649,8 +669,8 @@ Idempotency 以现有 unique constraint 为准：
 硬性阻塞项。Phase 4C（2026-08-09）按产品决策校正为 **渐进式 scope readiness**：
 
 - **MARKET = Review MVP 强制历史基线（HARD GATE）**：
-  - 必须存在、状态 `ready`、满足现有 market coverage/quality 要求（含 P/Q/U/C/V 五项
-    `normalized_ready`）；
+  - 必须存在、状态 `ready`、满足现有 market coverage/quality 要求（含 §7 CORE Observation facts
+    就绪；旧 P/Q/U/C/V 五项 `normalized_ready` 为 legacy baseline，映射 DEFER 到 implementation）；
   - 不满足 → 发布门禁 CLOSED。
 - **industry_l1 / major_index / style = 渐进式可选 scope（OPTIONAL）**：
   - 真实就绪 → 正常参与产品输出；
@@ -667,107 +687,139 @@ Idempotency 以现有 unique constraint 为准：
 - 实现约束（`review_publication_service.evaluate_publish_gate`）：market 仍为唯一强制 scope；
   optional/parallel scope 不可用仅记为诊断，不阻塞整个 Market Review MVP 发布。
 
-## 7. P/Q/U/C/V指标合同
+## 7. Scope Observation Model（Review 第一层 Observation 模型）
 
-### 7.1 通用结构
+> **2026-08-12 领域收口（Scope Observation Experiment，S3 = PASS）**：Review 的
+> **first-layer observation model 正式从 P/Q/U/C/V 评分模型替换为 Scope Observation Model**。
+> 旧的 §7「P/Q/U/C/V 指标合同」内容不再作为 underlying observation truth，被本 §7 取代。
 
-每个聚合变量返回：
+### 7.0 P/Q/U/C/V 正式处置
 
-```json
-{
-  "value": 63.4,
-  "rawValue": 0.572,
-  "delta1d": -4.1,
-  "delta5d": 6.7,
-  "historyPercentile120d": 78.2,
-  "crossSectionPercentile": 84.0,
-  "historyObservationCount": 120,
-  "components": [],
-  "coverage": 0.982,
-  "status": "ready"
-}
+**P/Q/U/C/V 不再是 Review underlying observation model。** 不得继续作为：
+
+- scope first-layer fact；
+- discovery prerequisite；
+- State/Change 前置输入；
+- 板块综合事实；
+- 底层 score。
+
+原因（Scope Observation Experiment 结论）：实验没有发现任何必须通过 P/Q/U/C/V score 才能表达、
+而直接 Observation facts 无法表达的重要语义。P/Q/U/C/V 只是对 CORE Observation facts 的聚合，不新增信息。
+
+如果未来 UI 需要 summary：**属于 presentation layer**，不得反向成为 underlying observation truth。
+**PRD 不需要设计任何新的 summary score。**
+
+### 7.1 Scope Observation Model 结构
+
+每一个 Scope 直接观察以下对象（**不新增其他顶层维度**）：
+
+```text
+SCOPE OBSERVATION
+
+PRICE
+  - Return Level
+  - Return Distribution
+  - Price Breadth
+  - Signed Return Contribution
+  - Price Concentration
+  - Amount Contribution / Concentration
+
+TREND
+  - State + Breadth
+  - Transition
+  - Diffusion [PROVISIONAL]
+
+STRUCTURE
+  - State + Breadth
+  - Transition
+  - Diffusion [PROVISIONAL]
+
+MOMENTUM
+  - State + Breadth
+  - Transition
+  - Diffusion [PROVISIONAL]
+
+PARTICIPATION
+  - Volume Participation Distribution
+  - Amount Participation Distribution
+
+CHIP
+  - UNRESOLVED
+  - CHIP / PARTICIPATION RELATION = PENDING DATA
 ```
 
-规范：
+> **说明**：Concentration / Contribution 直接属于 PRICE 内部事实，**不** 单列第二个
+> `CONCENTRATION_CONTRIBUTION` 顶层模块，避免重复模型入口。
 
-- value范围0—100；
-- 默认按该范围自身120日历史分位归一化；
-- 历史少于60日时status=insufficient_history，不得伪造分位；
-- delta1d/delta5d使用归一化值变化；
-- 每个component必须保留原始值、方向、分母、字段来源和权重；
-- 所有字段映射必须通过ReviewMetricComponentRegistry引用现有权威扁平字段，禁止在业务代码中散落JSON path。
+### 7.2 PRICE — 结果事实层
 
-聚合方式：
+PRICE 是 Review 的 **最上层结果事实层**（result fact layer，不是 Trend score）。
 
-```
-value = available component normalized values 的版本化加权平均
-```
+- **Return Level**：`equal_weight_return_mean`（CORE）。`return_median` 与 `return_p50` 视为同一事实，只保留一个产品字段。
+- **Return Distribution**：`return_p25 / p50 / p75`（CORE，描述同一个 distribution object；`p10/p90` 为 EXPLANATORY 尾部）。P25/P50/P75 是一个 distribution object 的描述，不是三个独立维度。
+- **Price Breadth**：`advance_ratio / decline_ratio / unchanged_ratio`（threshold-free，return>0 / <0 / ==0）。
+  **Price Breadth ≠ Trend State/Breadth**（语义不同，禁止合并）。
+- **Signed Return Contribution**（EXPLANATORY）：`signed_return_contribution` 回答"谁推动 / 拖累 Scope return"。
+  计算基于 **exact canonical T-1** return：`return = close(T) / close(T-1) - 1`，经两次 bars JOIN；exact T-1 缺 bar → return UNAVAILABLE，**禁止**用更早 bar 回退（禁止 instrument-level LAG(close) 充当 1D return）。
+- **Price Concentration**（CORE）：`price_contribution_hhi`（raw）与 `price_contribution_hhi_normalized`。
+  raw HHI 保留单 Scope 时间变化解释价值；normalized HHI 用于跨不同成员数 Scope 比较。**不得平均二者，不制造 Concentration Score。**
+- **Amount Contribution / Concentration**（CORE）：`amount_share` 与 `amount_contribution_hhi`（raw + normalized）。
+  Amount universe 独立（仅需 amount 非空，不要求 T-1 return）。
 
-初始权重可全部为1，但必须在registry中显式配置并写入algorithm_version；不得隐藏在函数内部。
+**三者语义必须分开、禁止混为一个指标**：
+- signed return contribution（谁推动/拖累收益）；
+- abs price share / price HHI（价格变化是否集中）；
+- amount share / amount HHI（成交额是否集中）。
 
-### 7.2 P：价格表现强度
+### 7.3 TREND / STRUCTURE / MOMENTUM — 各 horizon 轴的 observation grammar
 
-初始components：
+三个轴共享同一 observation grammar：
 
-- scope_return_1d：优先官方指数/板块价格序列；无官方序列时使用成员等权中位数，并记录price_source=member_equal_weight；
-- advance_ratio = change_pct > 0 的成员数 / ready_count；
-- trend_price_alignment_ratio = 趋势向上且当日上涨成员数 / ready_count；
-- new_high_ratio：进入可配置近期高位区间的成员比例；
-- price_position_median：成员价格在自身滚动区间的位置中位数。
+- **State + Breadth（CORE）**：State categorical distribution **本身即 Breadth**。例如 Trend 的
+  Up / Neutral / Down，Scope observation 使用各状态成员占比。**不再定义独立 Breadth Score。**
+  同理 Structure、Momentum 使用各自合法 categorical state 的完整分布。`neutral` / `flat` 是合法状态，不是 invalid。
+- **Transition（CORE）**：`Transition = member exact canonical T-1 → T state migration`。
+  跨 Scope 主表达为 **transition ratio**。raw count 可作为 evidence/explanation，**不是跨 Scope 比较 primitive**。
+  新增/删除 membership 不得算成 transition；denominator = T 与 T-1 的 common valid members。
+- **Diffusion（PROVISIONAL）**：当前候选 `D1 / D3 / D5`，定义为 State/Breadth distribution 随时间的变化。
+  **不删除、不宣布完全验证、不在正式 PRD 选择最佳 horizon。** 原因：历史 PIT membership 数据不足（Q3 INCONCLUSIVE）。
 
-P只描述表面表现，不等价于内部质量。
+### 7.4 PARTICIPATION
 
-### 7.3 Q：内部结构质量
+正式定义：**threshold-free distribution**。
 
-初始components：
+- **Volume**：`vol_ratio20_p25 / p50 / p75` 等 distribution descriptors；
+- **Amount**：`amt_ratio20_p25 / p50 / p75` 等 distribution descriptors。
 
-- 上行趋势成员比例；
-- 主要结构向上比例；
-- 短线结构向上比例；
-- 趋势、结构、动量一致性比例；
-- structure_net_event_rate = bullish结构事件率 - bearish结构事件率；
-- 结构破坏扩散率，作为反向component。
+**不要定义**：`>1 active`、`>1.5 strong`、`high/low`、Participation Score。
+P25/P50/P75 是一个 distribution object 的描述，不是三个独立维度。
 
-结构事件必须使用已落库事件和新鲜度，不得按前端当前状态猜测。
+### 7.5 CHIP
 
-### 7.4 U：参与范围
+正式状态：**UNRESOLVED**。
 
-初始components：
+当前不得定义 `Chip == Participation`，也不得定义 `Chip != Participation`。原因：当前实验窗口
+chip-like historical field 数据不足（Q7 INCONCLUSIVE）。
 
-- 至少两个核心维度同步改善的成员比例；
-- 正动量或动量增强覆盖率；
-- 新鲜结构事件覆盖率；
-- 非头部成员参与比例；
-- 龙头、二线与普通成员共同确认比例。
+在 PRD 保留 slot：`CHIP / PARTICIPATION RELATION — PENDING DATA`。此 slot **不阻塞 Review**。
 
-U表示宽度，不使用成交额权重替代成员参与。
+### 7.6 Scope Observation 就绪状态与诊断
 
-### 7.5 C：集中程度
+每个 Observation fact 保留真实就绪状态与诊断（含 exact-T1 口径）：
 
-C越高表示越集中，不表示越好。
+- `price_candidate_count` = PIT ∩ valid FP ∩ close(T) available；
+- `price_valid_count` = 其中 exact canonical T-1 close 也 available；
+- `missing_exact_t1_count` = price_candidate_count − price_valid_count（审计停牌/缺 bar 影响）；
+- `amount_valid_count` = PIT ∩ valid FP ∩ amount(T) non-null（不要求 T-1 return）；
+- 历史少于 60 日：该 fact 的 historical percentile 不生成（`insufficient_history`），保留 raw；
+- 不得用 cross-section percentile 替代缺失的历史 percentile。
 
-初始components：
+### 7.7 Observation Model 与 Evidence
 
-- 绝对价格变化贡献Top5占比；
-- 事件贡献Top10%成员占比；
-- 成员绝对变化贡献HHI；
-- 龙头与成员中位数表现差；
-- 有可靠成交额数据时加入Top5成交额占比。
+Scope Observation facts 是 Evidence / Signal / Discovery 的底层事实来源。Filter 与 Discovery 只消费
+**structured Observation Evidence**，不依赖 P/Q/U/C/V score。
 
-无官方权重时使用等权成员贡献并明确weight_mode=equal，不得伪装为官方指数贡献。
-
-### 7.6 V：成交活跃与效率
-
-初始components：
-
-- 放量成员比例；
-- 成交额扩张成员比例；
-- 成员20日成交量分位中位数；
-- 成员200日成交额分位中位数；
-- 趋势段平均量相对前段改善比例；
-- 价格变化/相对成交额的效率中位数。
-
-所有除法使用明确epsilon并过滤异常值。
+---
 
 ## 8. Filter Engine（内部 Evidence Family）
 
@@ -790,11 +842,28 @@ backend/config/review_filters.yaml
 - D Family（state migration / freshness / diffusion / concentration / relative strength）定位为 **Discovery Evidence Family**，不是独立 Signal Family。
 - `MarketReviewSignal` 保留为 atomic evidence record；新的 `Discovery` domain object 负责 user-level finding 聚合。
 
-### 8.1 A类：表面表现与内部质量偏差
+**Observation Model 收口（2026-08-12）：**
+
+- Filter / Discovery **只消费 structured Observation Evidence**（§7 Scope Observation Model），
+  不得依赖 P/Q/U/C/V score 作为 first-layer observation。
+- 以下 **A/B/C 初始阈值**（§8.1–8.3）当前以 `P/Q/U/C/V` 分位/`value` 表达，属于对
+  P/Q/U/C/V first-layer 的硬依赖，**标记 `IMPLEMENTATION_REDESIGN_REQUIRED`**：
+  必须在 Implementation Design 中把条件改写为对 Observation facts（PRICE Return
+  Level/Distribution/Breadth、Concentration、PARTICIPATION distributions 等）的 structured
+  条件，**不得现场发明新 P/Q/U/C/V 阈值**。
+- D 族（state migration / freshness / diffusion / concentration / relative strength）消费
+  **第二金字塔 raw evidence**（非 P/Q/U/C/V score），保持不变。
+
+### 8.1 A类：表面表现与内部质量偏差 — IMPLEMENTATION_REDESIGN_REQUIRED
+
+> **2026-08-12**：A 类条件原以 `P.value / P.historyPercentile120d / Q.delta1d / U.delta1d`
+> 表达，依赖已废弃的 P/Q/U/C/V first-layer。需改写为对 §7 Observation facts 的条件
+> （surface strong = PRICE Return Level/Breadth 高；internal weak = State+Breadth 恶化等）。
+> 本 PRD **不** 定义新阈值；具体条件在 Implementation Design 中确定。
 
 **A1 surface_strong_internal_weak**
 
-初始条件：
+初始条件（legacy P/Q/U/C/V 表达，REDESIGN REQUIRED）：
 
 ```
 P.historyPercentile120d >= 70
@@ -805,6 +874,8 @@ coverage >= 0.95
 
 **A2 surface_weak_internal_improving**
 
+初始条件（legacy P/Q/U/C/V 表达，REDESIGN REQUIRED）：
+
 ```
 P.historyPercentile120d <= 40
 Q.delta1d 的历史分位 >= 70
@@ -812,7 +883,10 @@ U.delta1d 的历史分位 >= 60
 coverage >= 0.95
 ```
 
-### 8.2 B类：当前状态与变化速度偏差
+### 8.2 B类：当前状态与变化速度偏差 — IMPLEMENTATION_REDESIGN_REQUIRED
+
+> **2026-08-12**：B 类依赖 P/Q/U/C/V 历史分位与 1 日变化分位，需改写为对 Observation facts
+> 的状态与 Transition 条件。本 PRD **不** 定义新阈值；REDESIGN REQUIRED。
 
 **B1 high_level_slowing**
 
@@ -829,7 +903,10 @@ Q与U的1日变化分位>=70
 结构破坏扩散率不再继续上升
 ```
 
-### 8.3 C类：成交、参与与集中度偏差
+### 8.3 C类：成交、参与与集中度偏差 — IMPLEMENTATION_REDESIGN_REQUIRED
+
+> **2026-08-12**：C 类依赖 V/U/C 分位，需改写为对 PARTICIPATION distributions 与 Price/Amount
+> Concentration facts 的条件。本 PRD **不** 定义新阈值；REDESIGN REQUIRED。
 
 **C1 volume_without_breadth**
 
@@ -956,7 +1033,8 @@ L2 ↔ L3
 对每个 Discovery：
 
 - 识别相关的下级 taxonomy scope（industry L2 对 L1、industry L3 对 L2）；
-- 计算下级 scope 对上级 P/Q/U/C/V 变化的贡献；
+- 计算下级 scope 对上级 **Scope Observation facts** 变化的贡献（如 Return Level/Distribution、
+  State+Breadth、Transition、Concentration 等；**不再以 P/Q/U/C/V score 为贡献对象**）；
 - 保留正贡献和负贡献；
 - 按绝对贡献排序；
 - 保存前N项，但API支持分页读取全部。
@@ -971,7 +1049,8 @@ L2 ↔ L3
 
 至少可表达：
 
-- P/Q/U/C/V contribution
+- **Observation contribution**（对 Return Level / State+Breadth / Concentration / Participation 等
+  Observation facts 的贡献；**不再以 P/Q/U/C/V score 为贡献对象**）
 - board/scope role（core / second_line / elasticity / follower / laggard）
 - relation to scope（synchronized_strengthening / instrument_leads_scope / etc.）
 - fresh event evidence
@@ -982,11 +1061,11 @@ PRD 定义业务合同，具体 ranking weight 由算法版本控制。
 
 每只成员计算：
 
-- 对P的表面变化贡献；
-- 对Q的趋势/结构/动量贡献；
-- 对U的参与确认；
-- 对C的集中度贡献；
-- 对V的成交贡献；
+- 对 Return Level/Distribution 的表面变化贡献；
+- 对 Trend/Structure/Momentum State+Breadth 与 Transition 的贡献；
+- 对 Participation 的参与确认；
+- 对 Price/Amount Concentration 的集中度贡献；
+- 对 Volume/Amount Participation 的成交贡献；
 - 新鲜结构/动量事件；
 - 与板块状态的关系。
 
@@ -999,7 +1078,7 @@ PRD 定义业务合同，具体 ranking weight 由算法版本控制。
 该阶段不是重新计算第一金字塔，而是比较各 Scope Discovery 的：
 
 - 成员交集（membership overlap）
-- P/Q/U/C/V 状态
+- Scope Observation facts（PRICE / State+Breadth / Transition / Participation）
 - 变化方向
 - 异常强度
 - 结构事件
@@ -1029,7 +1108,7 @@ industry ↔ industry
 - **BROAD_CONFIRMATION**：行业 + 概念 + 风格出现共同确认
 - **ISOLATED_THEME**：单一概念异常，行业和相关概念没有确认，参与宽度有限
 - **STYLE_LED**：多个不同行业同时出现相同风格特征（小盘/高弹性/低位修复）
-- **CONFLICTING**：不同 Scope 指向相互冲突的状态（Concept 强但 Industry Q/U 恶化），必须保留，不得强行合并
+- **CONFLICTING**：不同 Scope 指向相互冲突的状态（Concept 强但 Industry State+Breadth / Participation 恶化），必须保留，不得强行合并
 
 #### Relation 数据来源
 
@@ -1039,10 +1118,13 @@ industry ↔ industry
 membership overlap
 price
 first pyramid
-P/Q/U/C/V
+Scope Observation facts（PRICE / State+Breadth / Transition / Participation）
 pyramid_v2
 history
 ```
+
+> **2026-08-12**：`P/Q/U/C/V` 已从 Relation 数据来源中移除，替换为 Scope Observation facts。
+> `CONFLICTING` 示例中的 "Industry Q/U 恶化" 语义改写为 "Industry State+Breadth / Participation 恶化"。
 
 不得依赖新闻、研报、公告语义或 LLM 推理作为 Relation 成立的必要条件。
 
@@ -1051,6 +1133,14 @@ Relation 是 Discovery 后的关系解释，不是 Scope 之间新的计算 gate
 ## 10. State / Change / Anomaly 分离
 
 这是 Review Discovery 的 P0 原则。
+
+> **2026-08-12 Observation Model 收口**：State / Change / Anomaly **不再定义为 P/Q/U/C/V score
+> 的变化**，改以结构化 Observation facts 表达（§7）：
+> - **State** = 当前 structured Observation（如 Price Breadth、State+Breadth categorical distribution、Concentration、Participation distribution）；
+> - **Change** = Transition / Diffusion / observation change facts（member exact T-1 → T 状态迁移、分布随时间变化）；
+> - **Anomaly** = 相对于历史 / comparable cohort 的异常 evidence。
+> **不设计新的 anomaly score**；具体统计公式（1D/5D change、历史分位、横截面分位）如尚未验证，
+> **DEFER 到 algorithm implementation**。
 
 ### 10.1 State（状态）
 
@@ -1258,16 +1348,22 @@ stock_core published
 
 本节与 §6.5.8「Review MVP 发布就绪门禁（Phase 4C 校正）」构成同一份合同。
 
+> **2026-08-12 Observation Model 收口**：发布门禁就绪性改以 **Scope Observation facts**（§7）
+> 表达，**不再以 P/Q/U/C/V 五项 `normalized_ready` 作为 first-layer 门禁对象**。旧 P/Q/U/C/V
+> gate 引用标记为 **legacy baseline / IMPLEMENTATION_REDESIGN_REQUIRED**（见 §23.5 等 legacy 契约）。
+
 单scope：
 
 - underlying coverage >= 0.95
-- P/Q/U/C/V必要组件状态可用
+- **必要 Observation facts 状态可用**（market 至少含 PRICE Return Level/Distribution/Breadth、
+  State+Breadth 等 CORE facts；具体字段集在 Implementation Design 确定）
 
 整套Review（渐进式 scope readiness）：
 
 **1. MANDATORY — market（HARD GATE）**
 
-- `market` scope 必须存在且状态 `ready`，并满足 market coverage/quality 要求（含 P/Q/U/C/V 五项 `normalized_ready`）；
+- `market` scope 必须存在且状态 `ready`，并满足 market coverage/quality 要求（含 §7 **CORE Observation
+  facts** 就绪；旧 P/Q/U/C/V 五项 `normalized_ready` 为 legacy baseline，映射 DEFER 到 implementation）；
 - market missing / not ready / coverage 低于强制门槛 → **whole Review publication CLOSED**。
 
 **2. PROGRESSIVE OPTIONAL — industry_l1 / major_index / style**
@@ -1371,7 +1467,8 @@ GET /api/v1/review/{trade_date}/scopes
 - page_size
 - include_partial=false
 
-返回每个范围的P/Q/U/C/V、变化、历史分位和命中数量。
+返回每个范围的 **Scope Observation facts**（§7：PRICE / State+Breadth / Transition / Diffusion /
+Participation）、变化、历史分位和命中数量。（旧 P/Q/U/C/V 聚合变量不作为 first-layer observation 返回。）
 
 ### 12.3 信号（Signal = atomic evidence）
 
@@ -1582,10 +1679,12 @@ Industry 内再选择 L1 / L2 / L3（仅浏览维度，不是 discovery gate）�
 - coverage
 
 #### Current State
-- P / Q / U / C / V
+- **Scope Observation facts**（§7）：PRICE（Return Level / Distribution / Breadth / Concentration）、
+  State+Breadth（Trend/Structure/Momentum categorical distribution）、Participation distribution
+- （旧 P/Q/U/C/V 不作为 first-layer observation 展示；如需 summary 属 presentation layer）
 
 #### Change
-- 1D / 5D
+- Transition（member exact T-1 → T 状态迁移）ratio、1D / 5D observation change
 
 #### Position
 - historical percentile
@@ -1648,7 +1747,8 @@ Raw JSON 仅允许 admin/debug mode。
 
 - First Pyramid
 - Fresh Events
-- P/Q/U/C/V contribution（contributionPayload）
+- **Observation contribution**（contributionPayload：对 Return Level / State+Breadth / Concentration /
+  Participation 等 Observation facts 的贡献；旧 P/Q/U/C/V contribution 为 legacy baseline）
 - Board Role
 - Role Evidence（roleEvidence）
 - Relation To Scope
@@ -1749,7 +1849,8 @@ Signal 空态（evidence 层）："今日未命中已配置偏差筛选器"。
 ### 19.1 后端单元测试
 
 - component registry映射；
-- P/Q/U/C/V计算；
+- **Scope Observation facts 计算**（§7：PRICE / State+Breadth / Transition / Diffusion / Participation；
+  旧 P/Q/U/C/V 计算为 legacy baseline，映射 DEFER 到 implementation）；
 - 历史分位不足；
 - State / Change / Anomaly 分离；
 - Signal → Discovery 聚合；
@@ -1807,7 +1908,7 @@ Signal 空态（evidence 层）："今日未命中已配置偏差筛选器"。
 
 验证：
 
-- P/Q/U/C/V值可复算；
+- **Scope Observation facts 值可复算**（§7；旧 P/Q/U/C/V 复算为 legacy baseline）；
 - 至少一条正向和一条风险 Discovery；
 - Concept 独立产生 Discovery（不依赖 Industry 命中）；
 - Cross-Scope Relation 可生成；
@@ -1879,7 +1980,7 @@ Concept 表面很强，但 Industry Q/U 恶化。
 
 - 所有 Scope Family 独立平行参与 Discovery；
 - Concept / L2 / L3 不受 Industry L1 的 discovery gate；
-- 前端没有P/Q/U/C/V或筛选器计算代码；
+- 前端没有 Scope Observation facts 或筛选器计算代码（旧 P/Q/U/C/V 亦不计算）；
 - 同一页面不混合不同run；
 - Filter Engine 均能给出结构化证据；
 - Discovery 可下钻到子范围、Cross-Scope Relation 和股票；
@@ -1945,6 +2046,13 @@ Concept 表面很强，但 Industry Q/U 恶化。
 ## 23. P0 强化条款（review-1.1.0）
 
 > 本章节为 review-1.1.0 算法版本（CHANGE-20260730-014）追加的强制条款，是对 §7（P/Q/U/C/V 指标合同）、§11（任务编排与发布）、§6（Scope Discovery 模型）的补强。本章节条款优先级高于历史 §7/§11 的所有冲突描述。
+
+> **2026-08-12 Observation Model 收口**：本章节及其后的 §24/§25/§26/§27 中所有 `P/Q/U/C/V`
+> 引用（含 §23.5 发布门禁 market P/Q/U/C/V value 非空、§24.3 P/Q/U/C/V 就绪状态合同、§25 raw/
+> normalized 双值、§26/§27 相关）都属于 **legacy implementation baseline**：它们是既有实现/历史的
+> persistence 与 gate 契约，**不** 复活 P/Q/U/C/V 作为 first-layer observation model（§7.0）。
+> 这些 legacy 契约与 §7 Scope Observation Model 的映射（gate 就绪对象、就绪字段、schema shape）
+> 全部 **DEFER 到 Implementation Design**。本节不现场重写这些 legacy 契约。
 
 ### 23.1 历史原始组件 bootstrap 合同
 
@@ -2264,6 +2372,11 @@ Review run 创建时必须显式解析上游依赖状态，并把结果固化到
 - 已 published 但**已非**当前正式 pointer 的旧 run：禁止原地重发。
 
 ## 28. Corrective Requirements（实现修正，非新产品功能）
+
+> **2026-08-12**：本节的 Corrective Requirements 属于 **legacy A/B/C filter 实现** 的修正
+> （依赖 P/Q/U/C/V history context）。因 A/B/C filters 已标记 `IMPLEMENTATION_REDESIGN_REQUIRED`
+> （§8），这些 CR 在 Observation Model 改写后需一并纳入 redesign；不构成对 P/Q/U/C/V first-layer
+> 的复活。
 
 以下项目不定义为新产品功能，而是现有设计的实现修正。
 

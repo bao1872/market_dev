@@ -1,12 +1,18 @@
 # 复盘模块 Map
 
 核验状态：080/081 候选实现已通过同一 SHA CI 与临时 PostgreSQL；远程开发部署/发布未执行
-最后核验日期：2026-08-01
+最后核验日期：2026-08-01（当前实现 baseline；2026-08-12 PRD 语义收口后映射未实现）
 核验分支：`codex/panji-full-closure-20260801`
 核验提交：`c6abcc1`；CI Run `30731828236`
 核验范围：层级归因、P/Q/U/C/V、PIT bootstrap、发布门禁、withdrawal 安全与五阶段 UI
 对应 PRD：`../prd/70-review.md`（含 §23 P0 强化条款）
-事实所有权：复盘模块当前实现状态、已存在入口、数据/API 合同摘要
+
+> **2026-08-12 PRD 语义收口（Scope Observation Model）**：`docs/prd/70-review.md` 已将 Review
+> first-layer observation model 从 P/Q/U/C/V 替换为 Scope Observation Model（§7）。本 Map 描述的
+> 是 **当前 legacy implementation baseline**（P/Q/U/C/V 引擎/表/API/gate）。New Observation semantic
+> contract 与现有实现（`metric_engine`、`market_review_scope_snapshots` 的 p_payload..v_payload、
+> 发布门禁、§23-§27 legacy 契约）的映射/迁移 **DEFER 到后续 Implementation Design**；届时本 Map 需
+> 同步更新。
 
 ## 1. PRD 实现映射
 
