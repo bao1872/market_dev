@@ -162,7 +162,8 @@ async def test_date_isolation(db_session: AsyncSession) -> None:
     await db_session.commit()
     t1_fact = await get_scope_observation_fact(db_session, T1, "concept", "A")
     assert t1_fact is not None
-    assert t1_fact.observation_payload["price"]["return"]["mean"] == pytest.approx(0.01)
+    # T1 只写入过 marker_mean=0.01 → 计算 mean = 0.01+0.01 = 0.02；更新 T 不影响 T1。
+    assert t1_fact.observation_payload["price"]["return"]["mean"] == pytest.approx(0.02)
 
 
 async def test_scope_isolation(db_session: AsyncSession) -> None:
@@ -174,7 +175,8 @@ async def test_scope_isolation(db_session: AsyncSession) -> None:
     await db_session.commit()
     b_fact = await get_scope_observation_fact(db_session, T, "concept", "B")
     assert b_fact is not None
-    assert b_fact.observation_payload["price"]["return"]["mean"] == pytest.approx(0.02)
+    # B 只写入过 marker_mean=0.02 → 计算 mean = 0.02+0.01 = 0.03；更新 A 不影响 B。
+    assert b_fact.observation_payload["price"]["return"]["mean"] == pytest.approx(0.03)
 
 
 async def test_family_isolation(db_session: AsyncSession) -> None:
@@ -192,7 +194,8 @@ async def test_family_isolation(db_session: AsyncSession) -> None:
     await db_session.commit()
     ind_fact = await get_scope_observation_fact(db_session, T, "industry_l1", "A")
     assert ind_fact is not None
-    assert ind_fact.observation_payload["price"]["return"]["mean"] == pytest.approx(0.02)
+    # industry_l1/A 只写入过 marker_mean=0.02 → 计算 mean = 0.02+0.01 = 0.03；更新 concept/A 不影响。
+    assert ind_fact.observation_payload["price"]["return"]["mean"] == pytest.approx(0.03)
 
 
 async def test_diagnostics_readiness_roundtrip(db_session: AsyncSession) -> None:
@@ -285,7 +288,7 @@ async def test_seeded_legacy_pqucv_unchanged(db_session: AsyncSession) -> None:
             " succeeded_scope_count, failed_scope_count, signal_count, coverage_ratio, "
             " metadata_json) "
             "VALUES (gen_random_uuid(), :d, gen_random_uuid(), gen_random_uuid(), 'review-1.0.0', "
-            " 'filters-1.0.0', 120, 'ready', 1, 1, 0, 0, 1.0, '{}'::jsonb) "
+            " 'filters-1.0.0', 120, 'published', 1, 1, 0, 0, 1.0, '{}'::jsonb) "
             "RETURNING id"
         ),
         {"d": T},
