@@ -315,12 +315,14 @@ def test_service_exact_t1_historical_pit_run(monkeypatch) -> None:
     assert by_id[str(id_a)].return_1d == pytest.approx(10.0 / 9.0 - 1.0)
 
 
-def test_service_market_current_snapshot_no_historical_t1(monkeypatch) -> None:
+def test_service_market_historical_guard_skips_shadow(monkeypatch) -> None:
     import asyncio
 
     id_a = uuid.uuid4()
 
     def resolve(scope_type, scope_key, trade_date):
+        # resolve_scope_members("market") returns current active universe and
+        # ignores trade_date — exactly the behavior the guard must reject.
         return ([id_a], "全市场")
 
     state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 0, "sqzmom_val": 1.0}
@@ -335,12 +337,14 @@ def test_service_market_current_snapshot_no_historical_t1(monkeypatch) -> None:
         return await prepare_scope(_FakeSession(), "market", "market", T)
 
     prep = asyncio.run(scenario())
-    assert prep.pit_status_t == "current_snapshot"
-    # market has no historical PIT(T-1): current is NOT substituted.
+    # Historical Market shadow must NOT be computed from current active universe.
+    assert prep.pit_status_t == "unavailable"
+    assert prep.pit_member_ids == ()
+    assert prep.members == ()
     assert prep.t1_membership_available is False
-    assert prep.pit_member_ids_t1 == ()
-    assert any("market_historical_pit_t1_unavailable" in d for d in prep.diagnostics)
-    assert len(prep.members) == 1
+    assert any(
+        "historical_market_membership_unresolved" in d for d in prep.diagnostics
+    )
 
 
 def test_service_pit_unavailable_industry(monkeypatch) -> None:

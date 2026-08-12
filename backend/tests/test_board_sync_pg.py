@@ -19,8 +19,13 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.board_taxonomy import BoardDefinitionVersion, BoardMembershipHistory
 from app.models.instrument import Instrument
 from app.models.market_board import MarketBoard, MarketBoardMembership
+from app.services.board_membership_service import (
+    PITMembershipUnavailableError,
+    resolve_board_membership_at,
+)
 from app.services.board_sync_service import (
     MIN_CONCEPT_COUNT,
     MIN_INDUSTRY_COUNT,
@@ -337,3 +342,72 @@ class TestGetCurrentDetailedCounts:
         assert counts["industry_count"] == 0
         assert counts["concept_count"] == 0
         assert counts["stock_count"] == 0
+
+
+class TestPITMembershipContinuation:
+    """Round 1B closure: effective_from <= T AND (effective_to IS NULL OR effective_to > T).
+
+    A board definition version with effective_from=2026-08-05 and effective_to=NULL
+    continues to cover 08-05, 08-06, 08-07, 08-10 (the later dates are NOT a
+    membership gap).  The true gap is *before* the version's effective_from
+    (e.g. 08-01 has no historical PIT bootstrap), which must raise
+    PITMembershipUnavailableError rather than fall back.
+    """
+
+    @pytest.mark.asyncio
+    async def test_effective_to_null_definition_continues_after_0805(
+        self, db_session: AsyncSession,
+    ) -> None:
+        from datetime import date
+
+        inst = Instrument(symbol="600001", name="延续测试", market="SH", status="active")
+        db_session.add(inst)
+        await db_session.flush()
+
+        board = MarketBoard(
+            externalCode="wc:i:continuation_001",
+            name="延续板块",
+            type="industry",
+            updatedAt=datetime.now(UTC),
+        )
+        db_session.add(board)
+        await db_session.flush()
+
+        definition = BoardDefinitionVersion(
+            board_id=board.id,
+            taxonomy="wencai",
+            source="wencai",
+            taxonomy_version="wencai-hierarchy-v1",
+            taxonomy_compatibility_key="wencai-board-v1",
+            identity_contract_version="wencai-identity-v1",
+            board_type="industry",
+            hierarchy_level="L1",
+            membership_version="continuation-v1",
+            effective_from=date(2026, 8, 5),
+            effective_to=None,  # open-ended -> covers all later dates
+            definition_hash="continuation",
+        )
+        db_session.add(definition)
+        await db_session.flush()
+
+        db_session.add(
+            BoardMembershipHistory(
+                board_definition_version_id=definition.id,
+                instrument_id=inst.id,
+                membership_version="continuation-v1",
+                effective_from=date(2026, 8, 5),
+                effective_to=None,
+            )
+        )
+        await db_session.commit()
+
+        # Same definition continues covering the days after effective_from.
+        for day in (date(2026, 8, 5), date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10)):
+            mem = await resolve_board_membership_at(db_session, board.id, day)
+            assert inst.id in mem.instrument_ids, f"continuation failed at {day}"
+            assert mem.membership_version == "continuation-v1"
+
+        # True gap: no definition effective before 08-05 -> PIT unavailable.
+        with pytest.raises(PITMembershipUnavailableError):
+            await resolve_board_membership_at(db_session, board.id, date(2026, 8, 1))
+

@@ -37,9 +37,15 @@ logger = logging.getLogger("review_observation_prep_service")
 _RATIO_WINDOW = 20
 _BAR_LOOKBACK_DAYS = 400
 
-# Market has no historical PIT membership table (universe_memberships empty);
-# T-1 market membership is unavailable by contract — never substitute current.
-HISTORICAL_PIT_UNAVAILABLE_SCOPE_TYPES: frozenset[str] = frozenset({"market"})
+# Historical market membership is unresolvable this round: ``resolve_scope_members
+# ("market", ...)`` returns the CURRENT active universe and ignores trade_date.
+# Market shadow is therefore skipped (see the guard in ``prepare_scope``); it is
+# never computed from a current snapshot against a historical trade_date.
+MARKET_SKIP_DIAGNOSTIC = (
+    "historical_market_membership_unresolved: "
+    "market membership is current active universe, not historical PIT; "
+    "Market observation skipped this round"
+)
 
 
 @dataclass(frozen=True)
@@ -139,6 +145,22 @@ async def prepare_scope(
     diagnostics: list[str] = []
     t1 = await calendar_service.get_previous_trading_day_async(session, trade_date)
 
+    # ---- Market historical guard (Round 1B closure) ----
+    # ``resolve_scope_members("market")`` returns the current active universe and
+    # ignores trade_date.  Using current universe x historical trade_date for a
+    # Market Observation is a semantic error (current-snapshot applied to
+    # history).  Market historical membership is unresolvable this round, so the
+    # shadow is skipped with an explicit diagnostic — never current_snapshot.
+    if scope_type == "market":
+        return PreparedScope(
+            scope_type=scope_type, scope_key=scope_key, scope_name=scope_key,
+            trade_date=trade_date, canonical_t1=t1,
+            pit_member_ids=(), pit_member_ids_t1=(),
+            members=(), t1_membership_available=False,
+            pit_status_t="unavailable", pit_status_t1="unavailable",
+            diagnostics=(MARKET_SKIP_DIAGNOSTIC,),
+        )
+
     # ---- PIT(T) ----
     pit_ids_t: list[uuid.UUID] = []
     scope_name = scope_key
@@ -147,12 +169,7 @@ async def prepare_scope(
         pit_ids_t, scope_name = await review_scope_service.resolve_scope_members(
             session, scope_type, scope_key, trade_date=trade_date,
         )
-        if scope_type in HISTORICAL_PIT_UNAVAILABLE_SCOPE_TYPES:
-            # market PIT(T) = current active universe (canonical production source),
-            # but it is a current snapshot, not true historical PIT.
-            pit_status_t = "current_snapshot"
-        else:
-            pit_status_t = "historical_pit"
+        pit_status_t = "historical_pit"
     except (PITMembershipUnavailableError, review_scope_service.OptionalScopeUnavailableError) as exc:
         pit_status_t = "unavailable"
         diagnostics.append(f"pit_unavailable_T:{scope_type}/{scope_key} {exc}")
@@ -164,13 +181,7 @@ async def prepare_scope(
     pit_ids_t1: list[uuid.UUID] = []
     t1_membership_available = False
     pit_status_t1 = "unavailable"
-    if scope_type in HISTORICAL_PIT_UNAVAILABLE_SCOPE_TYPES:
-        pit_status_t1 = "unavailable"
-        diagnostics.append(
-            "market_historical_pit_t1_unavailable: "
-            "no historical market membership source; current not substituted"
-        )
-    elif t1 is not None and pit_status_t != "unavailable":
+    if t1 is not None and pit_status_t != "unavailable":
         try:
             pit_ids_t1, _ = await review_scope_service.resolve_scope_members(
                 session, scope_type, scope_key, trade_date=t1,
