@@ -2,7 +2,7 @@
 
 - **类型**：behavior+contract+architecture（Canonical Observation Fact 持久化；新表 + ORM + persistence service + shadow wiring）
 - **领域**：复盘模块 / Scope Observation Model / Canonical Scope Observation Facts persistence
-- **状态**：`implemented_unconfirmed`（本地 pure/unit、ruff、mypy-changed、compileall 通过；**remote PG verification / real-data→isolated persistence smoke 未执行**，见 §4）
+- **状态**：`implemented_unconfirmed`（本地 pure/unit、ruff、mypy-changed、compileall 通过；remote isolated verification + real-data→isolated persistence smoke **已执行通过**，见 §4；仍待外部审计/验收）
 - **关联 PRD**：`docs/prd/70-review.md`（§7.9 Canonical Scope Observation Facts — Exploration Persistence Contract；由 CHANGE-20260812-002 收口）
 - **关联 Maps**：`docs/maps/70-review.md`（未修改；Map 继续描述 legacy implementation，待实现验收后单独授权同步）
 - **关联 Rules**：无（本轮不修改治理；AGENTS.md / rules/10* / rules/20* / governance checker 均未改动，governance check PASS）
@@ -82,11 +82,29 @@ Exploration persistence contract（PRD §7.9）。本轮为 **Round 1C implement
 
 - 本地（Mac）：compileall OK；ruff OK；mypy-changed 无新增错误（既有 baseline 错误在未修改文件）；
   governance check PASS；Round 1A/1B/1C pure unit `60 passed`（PG tests 在纯单元模式自动跳过）。
-- **未执行**：remote isolated verification（migration upgrade / targeted PG tests / downgrade roundtrip）、
-  real-data→isolated persistence smoke、industry_l2/l3 smoke → 待 frozen SHA push 后 remote verification plane 执行。
+- **Remote isolated verification（frozen SHA `55ef285c57a996795401e7c0141911d75639d2f1`，isolated DB `bz_stock_verify_<SHA>`）**：
+  - migration `upgrade head` → 达到 `090_scope_observation_facts (head)`，新表 schema + 唯一约束
+    `uq_review_scope_observation_facts_day_scope` 全部就位；
+  - migration `downgrade -1` → 表 drop（`to_regclass` 为空），再 `upgrade head` → 表重建，round-trip PASS；
+  - targeted PG persistence tests `tests/test_review_observation_persistence_pg.py`：**8 passed**（insert /
+    idempotent update row_count=1 / date / scope / family isolation / diagnostics+readiness round-trip /
+    legacy `market_review_scope_snapshots` 零写入 / list filters）；
+  - **real-data→isolated persistence smoke**（真实 bz_stock READ-ONLY → prep/Core → 写入 isolated verify DB）：
+    `industry_l1/6d7bff29...`（pit=5, provided=5）与 `concept/bc73d2c4...`（pit=99, provided=99），
+    sanity all_pass、persisted、read-back 成功，observation_payload 顶层键 = scope/price/amount/trend/
+    structure/momentum/participation/chip；重复运行 row_count 保持 2（幂等）；
+    `industry_l2` / `industry_l3` 真实 PIT scope 当前不存在 → **NOT_OBSERVED**（未伪造）；
+  - legacy isolation：`market_review_scope_snapshots` count=0，未触发 Filter/Discovery/Publication；
+  - **未写 production `bz_stock`**（仅 READ-ONLY 作为输入事实；写路径全部进入 isolated verify DB）；
+  - 验证库与 /tmp 临时脚本/证据已按 §8 清理。
+- **已知 pre-existing baseline failure（与本轮无关）**：标准 `targeted-pg` plan 的
+  `test_pg_review_runtime_blocker_closure.py::test_query2_projected_result_supports_build_stock_state`
+  调用 `build_stock_state(snapshot, symbol)`，而当前签名已是 `build_stock_state(snapshot, run, symbol)`，
+  导致该 closure 测试失败。该测试文件与 `stock_state.py` 的最近改动 commit 均早于本提交（`538bc95` /
+  `9c651a6`），本轮 commit `55ef285` 未触碰这两个文件 —— 属于既有 baseline 失败，非本轮回归。
+  此为本轮唯一未达绿的 remote gate，且与 Round 1C persistence 无调用链关系。
 
 ## 5. 后续
 
-- push origin/dev 后记录 `REVIEW_OBSERVATION_ROUND1C_SHA`，针对该 SHA 在 isolated verification DB
-  执行 migration + targeted PG tests + real-data→isolated persistence smoke + L2/L3 smoke。
+- 已记录 `REVIEW_OBSERVATION_ROUND1C_SHA = 55ef285c57a996795401e7c0141911d75639d2f1`（origin/dev）。
 - 保持 Map 描述 legacy implementation；待外部审计/验收后单独授权同步 Maps。
