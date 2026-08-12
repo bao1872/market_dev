@@ -905,6 +905,143 @@ Observation ownership**，不决定任何 DB schema 或 migration。
 
 ---
 
+### 7.9 Canonical Scope Observation Facts — Exploration Persistence Contract
+
+> **2026-08-12 需求收口（Round 1C-0，docs-only）**：本小节正式冻结 **Canonical Scope
+> Observation Facts** 的 **Exploration-stage persistence contract**。这是 **需求收口**，
+> 不是 production implementation、不是 migration、不是 DB design round，也不是
+> Filter / Discovery redesign。任何 physical schema / migration / API / frontend 形状
+> 仍 DEFER（见 §5.3 / §7.8.6）。
+> 输入为 Round 1A（Canonical Observation Core）与 Round 1B（Real-Data Shadow
+> Verification，external verdict = PASS）已验证的客观事实。
+
+#### 7.9.1 Persistence purpose
+
+当前 persistence 的目的只有一个：**保存已经由 Canonical Scope Observation Core 计算完成的
+客观事实快照**。
+
+Persistence **不** 保存 / **不** 承担：
+
+- opportunity / risk；
+- strong / weak；
+- bullish / bearish recommendation；
+- ranking / score / grade；
+- filter judgment / Discovery judgment。
+
+Persistence **不** 解释、**不** 判断。它只负责**承载客观事实**。
+
+#### 7.9.2 Snapshot grain
+
+当前最小业务粒度：
+
+```text
+trade_date + scope_type + scope_key  →  one Canonical Observation Fact Snapshot
+```
+
+表示：**某一个 Scope 在某一个交易日的一份客观事实观察结果**。
+
+本轮**不**增加：
+
+- revision graph；
+- publication version / active version；
+- immutable generation；
+- 复杂 snapshot lineage model。
+
+#### 7.9.3 Persisted facts（第一阶段）
+
+第一阶段只保存 Round 1A / 1B 已验证过的 **objective facts**。逻辑对象至少包括：
+
+- **PRICE**：return level、return distribution、price breadth、price concentration、amount concentration；
+- **TREND**：State + Breadth、Transition；
+- **STRUCTURE**：Swing State + Breadth、Swing Transition、Internal State + Breadth、Internal Transition；
+- **MOMENTUM**：State + Breadth、Transition；
+- **PARTICIPATION**：volume distribution、amount distribution；
+- **CHIP**：仅 unresolved / unavailable status（不保存主观解读）。
+
+以及必要元数据：
+
+- denominator；
+- eligible / valid count；
+- readiness；
+- diagnostics。
+
+**Diffusion 当前不要求 persistence**（仍 PROVISIONAL 且未实现）。
+
+**Signed Return Contribution 继续 `PRD_CLARIFICATION_REQUIRED`**，不得在 persistence closure
+中自行定义其语义或字段。
+
+#### 7.9.4 No subjective persistence
+
+第一阶段 snapshot **明确禁止** 保存：
+
+- opportunity / risk；
+- strong / weak；
+- bullish / bearish recommendation；
+- ranking / score / grade；
+- filter result；
+- Discovery label；
+- Anomaly conclusion。
+
+若未来 Filter / Discovery 需要输出以上结果，它们属于**后续 layer**，**不是** Canonical
+Observation Fact Snapshot。
+
+#### 7.9.5 Scope activation
+
+第一阶段 persistence **activation**：
+
+```text
+industry_l1 / industry_l2 / industry_l3 / concept
+```
+
+原因：这些 Scope 已有 PIT membership contract，且 Industry / Concept 已经过真实 shadow 验证。
+
+**Market**：架构支持，但 historical Market membership unresolved。当前为
+`NOT ACTIVATED FOR HISTORICAL OBSERVATION PERSISTENCE`。**禁止** `current active universe`
+× `historical trade_date`。
+
+**Major Index / Style**：架构支持，但尚未完成对应实验验证。当前 `NOT ACTIVATED`。
+本轮**不**定义其最终 universe。
+
+#### 7.9.6 Idempotency
+
+Exploration 阶段只要求：对同一 `trade_date + scope_type + scope_key`，重复计算时
+**安全更新同一份事实快照**。
+
+**不**建设：
+
+- V1/V2 coexistence；
+- immutable revision history；
+- publication pointer / active observation version；
+- revision chain。
+
+若现有表天然有 `algorithm_version` / lineage 字段，可保留为兼容字段，但**不得**扩展成
+新的版本治理系统。
+
+#### 7.9.7 Persistence ownership
+
+- **Canonical Scope Observation Core 是事实唯一计算 owner**；
+- Persistence 层只做：**serialize、validate contract shape、upsert/save**；
+- Persistence 层**禁止**重新计算：ratio / HHI / transition / percentile / 重新解释 NULL /
+  把 unavailable 转成 0 / 生成 score。
+
+相同 Observation fact **不得出现第二个 compute owner**。
+
+#### 7.9.8 与现有 layers 的关系
+
+当前 persistence 不改变 legacy：P/Q/U/C/V、Filter、Discovery、Publication、API、Frontend。
+Round 1C 初期仍为 **shadow path**：Canonical Observation Fact Snapshot **暂不**成为上述
+consumer 的正式输入。
+
+#### 7.9.9 Exploration boundary
+
+Observation Model 本身未来仍可能调整甚至被推翻。因此当前持久化设计原则：
+
+- **保存尽量原始、可重新解释的事实**；
+- 避免保存主观判断；
+- 避免为未来未知需求建设复杂版本治理。
+
+---
+
 ## 8. Filter Engine（内部 Evidence Family）
 
 A/B/C/D 继续作为**内部算法 family**，但不再作为用户前端一级信息架构。
