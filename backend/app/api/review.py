@@ -52,6 +52,8 @@ from app.schemas.review import (
     ReviewAttributionResponse,
     ReviewChipCoverageDTO,
     ReviewDatesResponse,
+    ReviewDiscoveryDetailResponse,
+    ReviewDiscoveryListResponse,
     ReviewInstrumentListResponse,
     ReviewInstrumentResponse,
     ReviewLatestResponse,
@@ -69,6 +71,7 @@ from app.schemas.review import (
     ReviewTrackingPatchRequest,
     ReviewTrackingResponse,
 )
+from app.services import review_discovery_service
 from app.services.access_control_service import (
     AccessContext,
     require_admin,
@@ -97,8 +100,6 @@ from app.services.review_tracking_service import (
     list_trackings,
     update_tracking,
 )
-from app.services import review_discovery_service
-from app.schemas.review import ReviewDiscoveryListResponse, ReviewDiscoveryDetailResponse
 
 logger = logging.getLogger("api.review")
 
@@ -159,6 +160,22 @@ async def _get_published_run(
             detail=f"trade_date={trade_date} 无任何 review run（含 partial）",
         )
     return run
+
+
+async def _get_published_run_or_404(
+    session: AsyncSession,
+    trade_date: date,
+) -> MarketReviewRun | None:
+    """读取已发布 review run；无已发布 run 时返回 None（不抛 404）。
+
+    供 Discovery 列表/详情端点使用：列表端点在无发布 run 时返回空列表
+    （HTTP 200），详情端点随后显式抛 404。与 _get_published_run 的区别是
+    本函数对“无已发布 run”返回 None 而非抛异常。
+    """
+    try:
+        return await _get_published_run(session, trade_date)
+    except HTTPException:
+        return None
 
 
 async def _load_signal_or_404(
