@@ -8,10 +8,27 @@ branch is allowed in any calculation (PRD §7.8.2 / §7.8.3).
 Scope-Family specificity (membership / metadata / peer cohort / readiness)
 is a separate concern and is NOT handled here.
 
+PIT enforcement
+---------------
+- Every current fact is consumed only from members whose ``member_id`` belongs
+  to ``pit_member_ids`` (PIT(T)).  A member outside PIT(T) is rejected with a
+  ``ValueError`` (fail-fast), never silently mixed in.
+- A duplicate ``member_id`` in ``members`` is rejected with a ``ValueError``,
+  otherwise denominators / HHI / breadth would be double counted.
+- Transitions additionally require membership in BOTH PIT(T) and PIT(T-1)
+  (``pit_member_ids_t1``).  T-1 categorical-state existence is never used as a
+  proxy for previous Scope membership.  Price return does NOT require PIT(T-1):
+  it only needs PIT(T) + a price candidate(T) + an exact T-1 bar return.
+
+Exact-T1 boundary
+-----------------
+- The Core does NOT query dates / bars.  ``return_1d`` and ``t1_*`` states are
+  already-prepared exact-T1 facts; their provenance is owned by the Round 1B
+  data-preparation owner.  The Core never falls back to an earlier bar.
+
 This module does NOT:
 - query the database, resolve membership, load bars, or guess the canonical
-  previous trading day (those are orchestration / data-preparation concerns);
-- fall back to an earlier bar when the exact canonical T-1 is missing;
+  previous trading day;
 - reuse legacy P/Q/U/C/V scores, ``_normalize_component``, historyPercentile120d,
   crossSectionPercentile, or any 0-100 score.
 
@@ -47,18 +64,27 @@ class MemberObservation:
     """One member's already-prepared canonical facts for the target trade date.
 
     The exact canonical T-1 resolution (which bar is T-1) is an orchestration /
-    data-preparation concern.  This Core only consumes the resolved facts below;
-    a member whose exact T-1 is missing simply carries ``None`` / ``False`` for
-    the corresponding T-1 fields and is excluded from the affected denominators.
+    data-preparation concern owned by the Round 1B data-preparation layer.  This
+    Core only consumes the resolved facts below; a member whose exact T-1 is
+    missing simply carries ``None`` / ``False`` for the corresponding T-1 fields
+    and is excluded from the affected denominators.  The Core never falls back.
+
+    ``price_candidate`` = PIT(T) ∩ valid FP ∩ close(T) available.  A member with
+    ``price_candidate=False`` is excluded from the price universe even if a
+    ``return_1d`` happens to be present (it must not enter price denominator).
+
+    Numeric validity: ``return_1d`` / ``amount`` / ``vol_ratio20`` /
+    ``amt_ratio20`` must be finite (NaN / ±inf are unavailable).  ``amount``
+    must additionally be non-negative; zero amount is valid.
     """
 
     member_id: str
-    # PRICE — ``price_candidate`` = PIT ∩ valid FP ∩ close(T) available.
+    # PRICE — candidate(T) flag.
     price_candidate: bool
     # ``return_1d`` = close(T) / close(T-1) - 1 via exact canonical T-1.
-    # ``None`` ⇔ exact T-1 close unavailable (never fall back to an earlier bar).
+    # ``None``/non-finite ⇔ exact T-1 unavailable (never fall back).
     return_1d: float | None
-    # AMOUNT — independent universe, no T-1 requirement.
+    # AMOUNT — independent universe, no T-1 requirement.  Must be finite & >= 0.
     amount: float | None
     # Current categorical states (canonical, already normalized at the boundary).
     trend: Direction | None
@@ -95,6 +121,13 @@ def _percentile(sorted_values: Sequence[float], q: float) -> float | None:
         return sorted_values[lower]
     frac = position - lower
     return sorted_values[lower] * (1.0 - frac) + sorted_values[upper] * frac
+
+
+def _finite_or_none(value: float | None) -> float | None:
+    """Return ``value`` if it is a finite number, else ``None`` (unavailable)."""
+    if value is None or not math.isfinite(value):
+        return None
+    return value
 
 
 def _return_distribution(returns: Sequence[float]) -> dict[str, Any]:
@@ -197,8 +230,8 @@ def _transition_distribution(
     """exact T-1 -> T state migration counts/ratios over the common-valid denominator.
 
     A member that is stable (same state) is inside the denominator but yields no
-    transition key.  Membership add/remove is excluded at the boundary: an added
-    member has no exact T-1 state and is therefore not in the denominator.
+    transition key.  Membership add/remove is handled at the boundary via
+    ``pit_member_ids_t1``: only members in PIT(T) ∩ PIT(T-1) are passed in here.
     """
     denominator = len(current)
     transitions: dict[tuple[str, str], int] = {}
@@ -232,60 +265,95 @@ def _participation_distribution(values: Sequence[float]) -> dict[str, Any]:
     }
 
 
+def _reject_if_invalid_members(
+    member_list: list[MemberObservation],
+    pit_set: set[str],
+) -> None:
+    """Boundary validation: every member belongs to PIT(T), no duplicates."""
+    seen: set[str] = set()
+    for member in member_list:
+        if member.member_id in seen:
+            raise ValueError(f"duplicate member_id in members: {member.member_id}")
+        seen.add(member.member_id)
+        if member.member_id not in pit_set:
+            raise ValueError(
+                f"member {member.member_id} is not in the PIT(T) member set"
+            )
+
+
 def compute_scope_observation(
     *,
     scope_type: str,
     scope_key: str,
     trade_date: date,
     pit_member_ids: Iterable[str],
+    pit_member_ids_t1: Iterable[str] | None = None,
     members: Iterable[MemberObservation],
 ) -> dict[str, Any]:
     """Compute objective Canonical Scope Observation facts (PRD §7).
 
     ``scope_type`` / ``scope_key`` only identify the scope; they never branch
-    the calculation path.  ``pit_member_ids`` is the PIT member set (lineage /
-    membership metadata); the provided ``members`` carry the canonical facts.
+    the calculation path.  ``pit_member_ids`` is PIT(T); ``pit_member_ids_t1``
+    is the previous PIT member set (used only for Transition).  The provided
+    ``members`` carry the current canonical facts and must all belong to PIT(T).
     """
     member_list = list(members)
-    pit_ids = list(pit_member_ids)
+    pit_set = set(pit_member_ids)
+    t1_set = set(pit_member_ids_t1) if pit_member_ids_t1 is not None else set()
+    _reject_if_invalid_members(member_list, pit_set)
 
-    # PRICE universe — current value + exact canonical T-1.
+    # PRICE universe — PIT(T) ∩ price candidate(T) ∩ finite exact-T1 return.
     price_candidate_count = sum(1 for m in member_list if m.price_candidate)
-    price_returns = [m.return_1d for m in member_list if m.return_1d is not None]
+    price_returns = [
+        finite
+        for m in member_list
+        if m.price_candidate and (finite := _finite_or_none(m.return_1d)) is not None
+    ]
     price_valid_count = len(price_returns)
+    # candidate_count >= valid_count always; difference is never negative.
     missing_exact_t1_count = price_candidate_count - price_valid_count
 
-    # AMOUNT universe — independent, no T-1 requirement.
-    amounts = [m.amount for m in member_list if m.amount is not None]
+    # AMOUNT universe — PIT(T) ∩ finite & non-negative amount (0 allowed, no T-1).
+    amounts = [
+        finite
+        for m in member_list
+        if (finite := _finite_or_none(m.amount)) is not None and finite >= 0.0
+    ]
     amount_valid_count = len(amounts)
 
-    # Categorical axes — state denominators are axis-specific.
+    # Categorical axes — state denominators are axis-specific (no T-1 needed).
     trend_values = [m.trend for m in member_list if m.trend is not None]
     swing_values = [m.swing for m in member_list if m.swing is not None]
     internal_values = [m.internal for m in member_list if m.internal is not None]
     momentum_values = [m.momentum for m in member_list if m.momentum is not None]
 
-    # Transition axes — exact T-1 -> T common-valid denominators.
+    # Transition axes — PIT(T) ∩ PIT(T-1) ∩ valid state(T) ∩ valid state(T-1).
     trend_transition = [
         (m.trend, m.t1_trend) for m in member_list
-        if m.trend is not None and m.t1_trend is not None
+        if m.member_id in t1_set and m.trend is not None and m.t1_trend is not None
     ]
     swing_transition = [
         (m.swing, m.t1_swing) for m in member_list
-        if m.swing is not None and m.t1_swing is not None
+        if m.member_id in t1_set and m.swing is not None and m.t1_swing is not None
     ]
     internal_transition = [
         (m.internal, m.t1_internal) for m in member_list
-        if m.internal is not None and m.t1_internal is not None
+        if m.member_id in t1_set and m.internal is not None and m.t1_internal is not None
     ]
     momentum_transition = [
         (m.momentum, m.t1_momentum) for m in member_list
-        if m.momentum is not None and m.t1_momentum is not None
+        if m.member_id in t1_set and m.momentum is not None and m.t1_momentum is not None
     ]
 
-    # PARTICIPATION universe — threshold-free, no T-1 requirement.
-    vol_ratios = [m.vol_ratio20 for m in member_list if m.vol_ratio20 is not None]
-    amt_ratios = [m.amt_ratio20 for m in member_list if m.amt_ratio20 is not None]
+    # PARTICIPATION universe — threshold-free, finite only, no T-1 requirement.
+    vol_ratios = [
+        finite for m in member_list
+        if (finite := _finite_or_none(m.vol_ratio20)) is not None
+    ]
+    amt_ratios = [
+        finite for m in member_list
+        if (finite := _finite_or_none(m.amt_ratio20)) is not None
+    ]
 
     direction_labels = {
         Direction.UP: _STATE_LABELS[Direction.UP],
@@ -303,7 +371,8 @@ def compute_scope_observation(
             "scope_type": scope_type,
             "scope_key": scope_key,
             "trade_date": trade_date.isoformat(),
-            "pit_member_count": len(set(pit_ids)),
+            "pit_member_count": len(pit_set),
+            "pit_member_count_t1": len(t1_set),
             "provided_member_count": len(member_list),
         },
         "price": {

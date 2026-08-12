@@ -1,10 +1,12 @@
-"""Modified-scope pure/unit tests for the Canonical Scope Observation Core (Round 1A).
+"""Modified-scope pure/unit tests for the Canonical Scope Observation Core (Round 1A + Correction).
 
-Covers the 23 required contracts from `ref/prompt.md` §18.  No DB, no network.
+Covers the 23 required contracts from `ref/prompt.md` §18 plus the 16 correction
+regression contracts from §11.  No DB, no network.
 """
 
 from __future__ import annotations
 
+import math
 from datetime import date
 from typing import Any
 
@@ -59,18 +61,22 @@ def _run(
     *,
     scope_type: str = "industry",
     scope_key: str = "electronics",
+    pit_member_ids: list[str] | None = None,
+    pit_member_ids_t1: list[str] | None = None,
 ) -> dict[str, Any]:
+    ids = pit_member_ids if pit_member_ids is not None else [m.member_id for m in members]
     return compute_scope_observation(
         scope_type=scope_type,
         scope_key=scope_key,
         trade_date=TRADE_DATE,
-        pit_member_ids=[m.member_id for m in members],
+        pit_member_ids=ids,
+        pit_member_ids_t1=pit_member_ids_t1,
         members=members,
     )
 
 
 # ---------------------------------------------------------------------------
-# 1. industry and concept share the same canonical calculation path
+# §18.1 — industry and concept share the same canonical calculation path
 # ---------------------------------------------------------------------------
 
 
@@ -80,31 +86,27 @@ def test_industry_and_concept_share_same_calculation_path() -> None:
     concept = _run(members, scope_type="concept", scope_key="chip")
     assert industry["scope"]["scope_type"] == "industry"
     assert concept["scope"]["scope_type"] == "concept"
-    # Every observation object (beyond scope identity) must be identical.
     for obj in ("price", "amount", "trend", "structure", "momentum", "participation", "chip"):
         assert industry[obj] == concept[obj], f"family divergence in {obj}"
 
 
 # ---------------------------------------------------------------------------
-# 2. deterministic output
+# §18.2 — deterministic output
 # ---------------------------------------------------------------------------
 
 
 def test_deterministic_output() -> None:
     members = [_m("a", return_1d=2.0), _m("b", return_1d=-1.0, trend=Direction.DOWN)]
-    first = _run(members)
-    second = _run(members)
-    assert first == second
+    assert _run(members) == _run(members)
 
 
 # ---------------------------------------------------------------------------
-# 3 / 4 / 5. neutral / flat are valid states
+# §18.3/4/5 — neutral / flat are valid states
 # ---------------------------------------------------------------------------
 
 
 def test_trend_neutral_is_valid() -> None:
-    out = _run([_m("a", trend=Direction.SIDEWAYS)])
-    state = out["trend"]["state"]
+    state = _run([_m("a", trend=Direction.SIDEWAYS)])["trend"]["state"]
     assert state["denominator"] == 1
     assert state["neutral_count"] == 1
     assert state["neutral_ratio"] == pytest.approx(1.0)
@@ -120,22 +122,20 @@ def test_structure_neutral_is_valid() -> None:
 
 
 def test_momentum_flat_is_valid() -> None:
-    out = _run([_m("a", momentum=MomentumDirection.FLAT)])
-    state = out["momentum"]["state"]
+    state = _run([_m("a", momentum=MomentumDirection.FLAT)])["momentum"]["state"]
     assert state["denominator"] == 1
     assert state["flat_count"] == 1
     assert state["flat_ratio"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
-# 6 / 7. categorical counts sum denominator, ratios sum ~= 1
+# §18.6/7 — categorical counts sum denominator, ratios sum ~= 1
 # ---------------------------------------------------------------------------
 
 
 def _assert_counts_sum_denominator(state: dict[str, Any]) -> None:
     count_keys = [k for k in state if k.endswith("_count")]
-    total = sum(state[k] for k in count_keys)
-    assert total == state["denominator"]
+    assert sum(state[k] for k in count_keys) == state["denominator"]
 
 
 def _assert_ratios_sum_one(state: dict[str, Any]) -> None:
@@ -168,44 +168,41 @@ def test_categorical_counts_sum_denominator_and_ratios_sum_one() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8 / 10. member missing exact T-1 excluded from price denominator, no fallback
+# §18.8/10 — missing exact T-1 excluded from price denominator, no fallback
 # ---------------------------------------------------------------------------
 
 
 def test_missing_exact_t1_not_in_price_denominator_and_no_fallback() -> None:
     members = [
-        _m("a", return_1d=2.0),                       # valid
-        _m("b", price_candidate=True, return_1d=None),  # T-1 missing, close(T) ok
-        _m("c", price_candidate=False, return_1d=None),  # close(T) missing too
+        _m("a", return_1d=2.0),
+        _m("b", price_candidate=True, return_1d=None),
+        _m("c", price_candidate=False, return_1d=None),
     ]
-    out = _run(members)
-    price = out["price"]
+    price = _run(members)["price"]
     assert price["candidate_count"] == 2
     assert price["valid_count"] == 1
     assert price["missing_exact_t1_count"] == 1
-    # Only the single valid member contributes; no fallback to earlier bar.
     assert price["return"]["valid_count"] == 1
     assert price["return"]["mean"] == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------------------------
-# 9. member missing exact T-1 excluded from transition denominator
+# §18.9 — missing exact T-1 excluded from transition denominator
 # ---------------------------------------------------------------------------
 
 
 def test_missing_exact_t1_not_in_transition_denominator() -> None:
     members = [
-        _m("a", trend=Direction.UP, t1_trend=Direction.SIDEWAYS),  # real transition
-        _m("b", trend=Direction.UP, t1_trend=None),                # missing T-1
+        _m("a", trend=Direction.UP, t1_trend=Direction.SIDEWAYS),
+        _m("b", trend=Direction.UP, t1_trend=None),
     ]
-    out = _run(members)
-    transition = out["trend"]["transition"]
+    transition = _run(members, pit_member_ids_t1=["a"])["trend"]["transition"]
     assert transition["denominator"] == 1
     assert transition["Neutral→Up"]["count"] == 1
 
 
 # ---------------------------------------------------------------------------
-# 11. one member missing T-1 does not make the whole scope unavailable
+# §18.11 — one member missing T-1 does not make the whole scope unavailable
 # ---------------------------------------------------------------------------
 
 
@@ -217,61 +214,54 @@ def test_missing_t1_does_not_make_scope_unavailable() -> None:
     out = _run(members)
     assert out["price"]["valid_count"] == 1
     assert out["price"]["return"]["mean"] == pytest.approx(2.0)
-    assert out["trend"]["state"]["denominator"] == 2  # trend state does not need T-1
+    assert out["trend"]["state"]["denominator"] == 2
 
 
 # ---------------------------------------------------------------------------
-# 12 / 13. membership add / remove are not transitions
+# §18.12/13 — membership add / remove are not transitions
 # ---------------------------------------------------------------------------
 
 
 def test_added_member_not_counted_as_transition() -> None:
     members = [
-        _m("a", trend=Direction.UP, t1_trend=Direction.SIDEWAYS),  # real Neutral->Up
-        _m("b", trend=Direction.UP, t1_trend=None),                # added (no T-1)
-        _m("c", trend=Direction.DOWN, t1_trend=Direction.UP),      # real Up->Down
+        _m("a", trend=Direction.UP, t1_trend=Direction.SIDEWAYS),
+        _m("b", trend=Direction.UP, t1_trend=None),
+        _m("c", trend=Direction.DOWN, t1_trend=Direction.UP),
     ]
-    out = _run(members)
-    transition = out["trend"]["transition"]
-    # Only a and c are common-valid; b is excluded from the denominator.
+    transition = _run(members, pit_member_ids_t1=["a", "c"])["trend"]["transition"]
     assert transition["denominator"] == 2
     assert transition["Neutral→Up"]["count"] == 1
     assert transition["Up→Down"]["count"] == 1
 
 
 def test_removed_member_not_counted_as_transition() -> None:
-    # A removed member is not part of the current member facts, so it can never
-    # appear in any transition.  The transition denominator reflects only the
-    # current members with an exact T-1 state.
     members = [_m("a", trend=Direction.UP, t1_trend=Direction.SIDEWAYS)]
-    out = _run(members)
-    assert out["trend"]["transition"]["denominator"] == 1
-    assert out["trend"]["transition"]["Neutral→Up"]["count"] == 1
-    # A member that was removed (present at T-1, absent at T) is not part of the
-    # current member facts, so it contributes nothing to the transition counts.
+    transition = _run(members, pit_member_ids_t1=["a"])["trend"]["transition"]
+    assert transition["denominator"] == 1
+    assert transition["Neutral→Up"]["count"] == 1
     assert sum(
-        v["count"] for k, v in out["trend"]["transition"].items() if k != "denominator"
+        v["count"] for k, v in transition.items() if k != "denominator"
     ) == 1
 
 
 # ---------------------------------------------------------------------------
-# 14. price universe separate from amount universe
+# §18.14 — price universe separate from amount universe
 # ---------------------------------------------------------------------------
 
 
 def test_price_and_amount_universes_are_separate() -> None:
     members = [
         _m("a", return_1d=1.0, amount=100.0),
-        _m("b", return_1d=None, amount=50.0),   # price invalid but amount valid
+        _m("b", return_1d=None, amount=50.0),
         _m("c", price_candidate=True, return_1d=None, amount=None),
     ]
     out = _run(members)
     assert out["price"]["valid_count"] == 1
-    assert out["amount"]["valid_count"] == 2  # amount does not require T-1 return
+    assert out["amount"]["valid_count"] == 2
 
 
 # ---------------------------------------------------------------------------
-# 15. advance + decline + unchanged == price denominator
+# §18.15 — advance + decline + unchanged == price denominator
 # ---------------------------------------------------------------------------
 
 
@@ -285,30 +275,27 @@ def test_price_breadth_counts_sum_denominator() -> None:
     ]
     breadth = _run(members)["price"]["breadth"]
     assert breadth["denominator"] == 4
-    total = breadth["advance_count"] + breadth["decline_count"] + breadth["unchanged_count"]
-    assert total == breadth["denominator"]
+    assert (
+        breadth["advance_count"] + breadth["decline_count"] + breadth["unchanged_count"]
+        == breadth["denominator"]
+    )
     assert breadth["advance_count"] == 2
     assert breadth["decline_count"] == 1
     assert breadth["unchanged_count"] == 1
-    total_ratio = (
+    assert (
         breadth["advance_ratio"] + breadth["decline_ratio"] + breadth["unchanged_ratio"]
+        == pytest.approx(1.0)
     )
-    assert total_ratio == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
-# 16 / 17. abs price shares sum ~= 1; raw price HHI present with member_count
+# §18.16/17 — abs price shares sum ~= 1; raw price HHI present with member_count
 # ---------------------------------------------------------------------------
 
 
 def test_abs_price_shares_sum_one_and_raw_hhi_present() -> None:
-    members = [
-        _m("a", return_1d=1.0),
-        _m("b", return_1d=2.0),
-        _m("c", return_1d=3.0),
-    ]
+    members = [_m("a", return_1d=1.0), _m("b", return_1d=2.0), _m("c", return_1d=3.0)]
     conc = _run(members)["price"]["concentration"]
-    # abs returns = [1,2,3]; shares sum to 1 by construction; expected hhi:
     expected = (1 / 6) ** 2 + (2 / 6) ** 2 + (3 / 6) ** 2
     assert conc["raw_hhi"] == pytest.approx(expected)
     assert conc["member_count"] == 3
@@ -316,15 +303,14 @@ def test_abs_price_shares_sum_one_and_raw_hhi_present() -> None:
 
 
 def test_raw_price_hhi_requires_abs_return_sum_positive() -> None:
-    members = [_m("a", return_1d=0.0), _m("b", return_1d=0.0)]
-    conc = _run(members)["price"]["concentration"]
+    conc = _run([_m("a", return_1d=0.0), _m("b", return_1d=0.0)])["price"]["concentration"]
     assert conc["raw_hhi"] is None
     assert conc["member_count"] == 2
     assert conc["status"] == "zero_abs_return"
 
 
 # ---------------------------------------------------------------------------
-# 18 / 19. amount shares sum ~= 1; raw amount HHI consistent with amount-valid
+# §18.18/19 — amount shares sum ~= 1; raw amount HHI consistent with amount-valid
 # ---------------------------------------------------------------------------
 
 
@@ -333,11 +319,10 @@ def test_amount_shares_sum_one_and_raw_hhi_consistent() -> None:
         _m("a", amount=100.0),
         _m("b", amount=300.0),
         _m("c", amount=200.0),
-        _m("d", return_1d=None, amount=0.0),  # price invalid but amount valid
+        _m("d", return_1d=None, amount=0.0),
     ]
     out = _run(members)
     conc = out["amount"]["concentration"]
-    # amount universe = 4 (amount non-null regardless of T-1).  total = 600.
     assert out["amount"]["valid_count"] == 4
     assert conc["member_count"] == 4
     expected = (1 / 6) ** 2 + (1 / 2) ** 2 + (1 / 3) ** 2 + 0.0
@@ -345,7 +330,7 @@ def test_amount_shares_sum_one_and_raw_hhi_consistent() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 20. Participation is a distribution with no >1 / >1.5 canonical threshold
+# §18.20 — Participation is a distribution with no >1 / >1.5 canonical threshold
 # ---------------------------------------------------------------------------
 
 
@@ -359,13 +344,12 @@ def test_participation_is_threshold_free_distribution() -> None:
     for key in ("volume", "amount"):
         assert part[key]["valid_count"] == 3
         assert "p25" in part[key] and "p50" in part[key] and "p75" in part[key]
-        # No canonical active/expansion threshold output.
         assert "active_ratio" not in part[key]
         assert "expansion_ratio" not in part[key]
 
 
 # ---------------------------------------------------------------------------
-# 21 / 22. Core does not generate P/Q/U/C/V or call legacy normalization
+# §18.21/22 — Core does not generate P/Q/U/C/V or call legacy normalization
 # ---------------------------------------------------------------------------
 
 
@@ -379,7 +363,7 @@ def test_core_does_not_generate_pqucv_or_normalization() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 23. Chip unavailable does not block other outputs
+# §18.23 — Chip unavailable does not block other outputs
 # ---------------------------------------------------------------------------
 
 
@@ -388,3 +372,171 @@ def test_chip_unavailable_does_not_block_other_outputs() -> None:
     assert out["chip"]["status"] == "unavailable"
     assert out["price"]["valid_count"] == 1
     assert out["trend"]["state"]["denominator"] == 1
+
+
+# ===========================================================================
+# Correction regression tests (§11)
+# ===========================================================================
+
+
+def test_non_pit_current_member_rejected() -> None:
+    members = [_m("a"), _m("rogue")]
+    with pytest.raises(ValueError, match="not in the PIT\\(T\\)"):
+        _run(members, pit_member_ids=["a"])
+
+
+def test_duplicate_member_id_rejected() -> None:
+    members = [_m("a"), _m("a")]
+    with pytest.raises(ValueError, match="duplicate member_id"):
+        _run(members, pit_member_ids=["a"])
+
+
+def test_candidate_false_return_non_null_excluded() -> None:
+    members = [
+        _m("a", price_candidate=True, return_1d=1.0),
+        _m("b", price_candidate=False, return_1d=99.0),  # must be fully excluded
+    ]
+    price = _run(members)["price"]
+    assert price["candidate_count"] == 1
+    assert price["valid_count"] == 1
+    assert price["return"]["valid_count"] == 1
+    assert price["return"]["mean"] == pytest.approx(1.0)
+    assert price["breadth"]["denominator"] == 1
+    assert price["concentration"]["member_count"] == 1
+
+
+def test_valid_count_never_exceeds_candidate_count() -> None:
+    members = [
+        _m("a", price_candidate=True, return_1d=1.0),
+        _m("b", price_candidate=True, return_1d=None),
+        _m("c", price_candidate=False, return_1d=5.0),
+    ]
+    price = _run(members)["price"]
+    assert price["valid_count"] <= price["candidate_count"]
+
+
+def test_missing_exact_t1_count_never_negative() -> None:
+    members = [
+        _m("a", price_candidate=True, return_1d=1.0),
+        _m("b", price_candidate=True, return_1d=None),
+        _m("c", price_candidate=False, return_1d=5.0),
+    ]
+    price = _run(members)["price"]
+    assert price["candidate_count"] == 2
+    assert price["valid_count"] == 1
+    assert price["missing_exact_t1_count"] == 1
+    assert price["missing_exact_t1_count"] >= 0
+
+
+def test_t_added_member_with_valid_t1_state_excluded_from_transition() -> None:
+    # "b" is newly added at T (not in PIT(T-1)) but carries a valid t1 state.
+    members = [
+        _m("a", trend=Direction.UP, t1_trend=Direction.SIDEWAYS),
+        _m("b", trend=Direction.DOWN, t1_trend=Direction.UP),
+    ]
+    transition = _run(members, pit_member_ids_t1=["a"])["trend"]["transition"]
+    assert transition["denominator"] == 1
+    assert transition["Neutral→Up"]["count"] == 1
+    # b's Up->Down must NOT appear: b is not in PIT(T-1).
+    assert "Up→Down" not in transition
+
+
+def test_common_pit_member_included_in_transition() -> None:
+    members = [
+        _m("a", trend=Direction.UP, t1_trend=Direction.SIDEWAYS),
+        _m("b", trend=Direction.DOWN, t1_trend=Direction.UP),
+    ]
+    transition = _run(members, pit_member_ids_t1=["a", "b"])["trend"]["transition"]
+    assert transition["denominator"] == 2
+    assert transition["Neutral→Up"]["count"] == 1
+    assert transition["Up→Down"]["count"] == 1
+
+
+def test_removed_member_excluded_from_transition() -> None:
+    # "gone" is in PIT(T-1) but removed at T: not part of current facts, so it
+    # can never appear in any current transition.
+    members = [_m("a", trend=Direction.UP, t1_trend=Direction.SIDEWAYS)]
+    transition = _run(
+        members,
+        pit_member_ids_t1=["a", "gone"],
+    )["trend"]["transition"]
+    assert transition["denominator"] == 1
+    assert sum(v["count"] for k, v in transition.items() if k != "denominator") == 1
+
+
+def test_newly_added_member_with_exact_t1_price_enters_price() -> None:
+    # "b" added at T (not in PIT(T-1)) but has an exact T-1 price bar:
+    # it still enters PRICE return/breadth (price does not require T-1 membership).
+    members = [
+        _m("a", return_1d=1.0),
+        _m("b", return_1d=3.0),
+    ]
+    price = _run(members, pit_member_ids_t1=["a"])["price"]
+    assert price["valid_count"] == 2
+    assert price["return"]["valid_count"] == 2
+    assert price["return"]["mean"] == pytest.approx(2.0)
+
+
+def test_nan_return_excluded() -> None:
+    members = [
+        _m("a", return_1d=1.0),
+        _m("b", return_1d=math.nan),
+    ]
+    price = _run(members)["price"]
+    assert price["valid_count"] == 1
+    assert price["return"]["valid_count"] == 1
+    assert price["return"]["mean"] == pytest.approx(1.0)
+
+
+def test_inf_return_excluded() -> None:
+    members = [
+        _m("a", return_1d=1.0),
+        _m("b", return_1d=math.inf),
+    ]
+    price = _run(members)["price"]
+    assert price["valid_count"] == 1
+    assert price["return"]["mean"] == pytest.approx(1.0)
+
+
+def test_nan_amount_excluded() -> None:
+    members = [
+        _m("a", amount=100.0),
+        _m("b", amount=math.nan),
+    ]
+    out = _run(members)
+    assert out["amount"]["valid_count"] == 1
+    assert out["amount"]["concentration"]["member_count"] == 1
+
+
+def test_negative_amount_excluded() -> None:
+    members = [
+        _m("a", amount=100.0),
+        _m("b", amount=-50.0),
+    ]
+    out = _run(members)
+    assert out["amount"]["valid_count"] == 1
+    assert out["amount"]["concentration"]["member_count"] == 1
+
+
+def test_zero_amount_is_valid() -> None:
+    members = [
+        _m("a", amount=100.0),
+        _m("b", amount=0.0),
+    ]
+    out = _run(members)
+    assert out["amount"]["valid_count"] == 2
+    conc = out["amount"]["concentration"]
+    assert conc["member_count"] == 2
+    assert conc["status"] == "ready"
+
+
+def test_nan_participation_excluded() -> None:
+    members = [
+        _m("a", vol_ratio20=1.0, amt_ratio20=1.0),
+        _m("b", vol_ratio20=math.nan, amt_ratio20=math.inf),
+    ]
+    part = _run(members)["participation"]
+    assert part["volume"]["valid_count"] == 1
+    assert part["amount"]["valid_count"] == 1
+    assert part["volume"]["p50"] == pytest.approx(1.0)
+    assert part["amount"]["p50"] == pytest.approx(1.0)
