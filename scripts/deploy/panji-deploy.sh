@@ -937,6 +937,10 @@ reconcile_compose_runtime() {
         log "无需 Compose 配置对账"
         return 0
     fi
+    # 标记必须在首次实际发起 compose up 之前置位：一旦 up 开始，容器状态即可能已被改变。
+    # 与 restart_services 相同的安全语义，避免部分 Compose 变更后命令失败时
+    # 被误分类为「服务未重启」（main 据此决定容器级回滚 vs 仅文件恢复）。
+    SERVICES_RESTARTED=true
     log "Compose 配置对账（不强制重建，由 Compose 自行判断变更服务）: ${services[*]}"
     cd "${REPO_ROOT}"
     run_with_timeout "compose_reconcile" "${TIMEOUT_COMPOSE_UP_SECONDS}" -- \
@@ -1204,17 +1208,19 @@ deploy() {
         log "  Compose 运行配置变化：应用容器将以新 Compose 配置对账（PYTHON_SERVICES + frontend，不 force-recreate）"
     fi
 
-    if [[ ${#restart_list[@]} -eq 0 ]]; then
-        # 无实际代码/环境/Migration 运行变化：若仅是 Compose 配置变化，走轻量对账。
-        if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then
-            reconcile_compose_runtime "${PYTHON_SERVICES[@]}" frontend || return 1
-        else
-            log "无运行代码变化，不重启任何服务（仅刷新 RUNTIME_SHA 与核验）"
-        fi
-    else
-        # 有实际运行变化：restart_services（force-recreate）为权威路径，
-        # 其已覆盖 Compose 配置变化的服务，无需再重复对账（避免双重启）。
+    # 代码/环境/Migration 运行变化：restart_services（force-recreate）为权威路径。
+    if [[ ${#restart_list[@]} -gt 0 ]]; then
         restart_services "${restart_list[@]}" || return 1
+    fi
+
+    # Compose 运行配置变化（prod/live overlay）属纯配置对账，必须单独应用：
+    # 即使 restart_list 已覆盖部分服务，仍可能有 backend/worker-after-close 等
+    # Compose-only 变更未被 restart 命中。reconcile 使用 up -d --no-build（无
+    # --force-recreate），Compose 会跳过已是最新的服务、只应用剩余 config-only 差异。
+    if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then
+        reconcile_compose_runtime "${PYTHON_SERVICES[@]}" frontend || return 1
+    elif [[ ${#restart_list[@]} -eq 0 ]]; then
+        log "无运行代码变化，不重启任何服务（仅刷新 RUNTIME_SHA 与核验）"
     fi
 
     FAILURE_STAGE=""

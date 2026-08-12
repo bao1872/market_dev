@@ -370,6 +370,65 @@ else
     ok "CASE10 reconcile_compose_runtime 定义不含 --force-recreate"
 fi
 
+# ---------------------------------------------------------------------------
+echo "== 10/10 COMPOSE 对账缺陷修正（Defect 1 & Defect 2） =="
+
+# DEFECT 1：reconcile_compose_runtime 必须在首次 compose up 之前置 SERVICES_RESTARTED=true，
+# 否则部分 Compose 变更后命令失败时会被 main 误分类为「服务未重启」（影响回滚决策）。
+# 校验：在 reconcile_compose_runtime 函数体内，SERVICES_RESTARTED=true 的行号 < up -d --no-build 的行号。
+if code_of "${SERVER_SCRIPT}" | awk '
+/^reconcile_compose_runtime\(\)/{f=1; next}
+f && /^}/{exit}
+f && /SERVICES_RESTARTED=true/ && !u {sr=NR}
+f && /\$\{COMPOSE_CMD\} up -d --no-build/ && !u {u=NR}
+END{ if(sr>0 && u>0 && sr<u) exit 0; exit 1 }
+'; then
+    ok "DEFECT1 reconcile 在首次 compose up 之前置 SERVICES_RESTARTED=true"
+else
+    bad "DEFECT1 reconcile 必须在首次 compose up 之前置 SERVICES_RESTARTED=true"
+fi
+
+# DEFECT 1（CASE D 反向）：SERVICES_RESTARTED=true 不得仅在空参早返回分支被置位。
+# 即非空参数路径（实际发起 up 前）必须置位。上面已覆盖「前置于 up」语义。
+assert_code_contains "DEFECT1 reconcile 非空路径置位 SERVICES_RESTARTED=true" \
+    'SERVICES_RESTARTED=true' "${SERVER_SCRIPT}"
+
+# DEFECT 2：Mixed case 控制流——restart_services（代码/环境/Migration）与
+# reconcile_compose_runtime（Compose-only 配置对账）为两个独立、顺序执行的 if 分支，
+# 二者不被彼此嵌套。校验：deploy() 内 restart_services 调用行号 < reconcile 调用行号。
+_mrestart="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{exit} f&&/restart_services "\$\{restart_list\[@\]\}" \|\| return 1/{print NR; exit}')"
+_mrec="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{exit} f&&/reconcile_compose_runtime "\$\{PYTHON_SERVICES\[@\]\}" frontend \|\| return 1/{print NR; exit}')"
+if [[ -n "${_mrestart}" && -n "${_mrec}" && "${_mrestart}" -lt "${_mrec}" ]]; then
+    ok "DEFECT2 deploy 控制流：restart_services 在 reconcile_compose_runtime 之前（顺序执行）"
+else
+    bad "DEFECT2 deploy 控制流：restart_services 应先于 reconcile_compose_runtime"
+fi
+
+# DEFECT 2（CASE B/C 结构）：reconcile 的 if 分支与 restart_list 的 -gt 0 守卫为平级兄弟，
+# 不相互嵌套。校验：在 deploy() 内，reconcile 调用行不在 restart_list -gt 0 守卫闭合之内。
+assert_code_contains "DEFECT2 restart_list 非零守卫使用 -gt 0" \
+    '\$\{#restart_list\[@\]\} -gt 0' "${SERVER_SCRIPT}"
+assert_code_contains "DEFECT2 reconcile 仍显式 || return 1（无回归）" \
+    'reconcile_compose_runtime "\$\{PYTHON_SERVICES\[@\]\}" frontend \|\| return 1' "${SERVER_SCRIPT}"
+# 在 deploy() 函数体内校验：reconcile 不被包裹在 restart_list 守卫的 else 中。
+if code_of "${SERVER_SCRIPT}" | awk '
+/^deploy\(\)/{f=1; next}
+f && /^}/{f=0}
+f && /if \[\[ \$\{#restart_list\[@\]\} -gt 0 \]\]; then/{in_restart=1; next}
+in_restart && /reconcile_compose_runtime/{found=1}
+in_restart && /^    fi$/{in_restart=0}
+END{exit !found}
+'; then
+    bad "DEFECT2 reconcile 不得嵌套在 restart_list 守卫内（mixed case 必须独立执行）"
+else
+    ok "DEFECT2 reconcile 独立于 restart_list 守卫（mixed case 始终执行）"
+fi
+
+# DEFECT 2（CASE F 反向/CASE A 反向）：纯 Compose 变化（restart_list 为空）仍执行 reconcile。
+# 已通过 CASE4（reconcile 调用存在 + 不含 force-recreate）与上面「reconcile 独立执行」覆盖。
+assert_code_contains "DEFECT2 纯 Compose 变化走 reconcile（CASE A）" \
+    'if \[\[ "\$\{COMPOSE_RUNTIME_CHANGED\}" == "true" \]\]; then' "${SERVER_SCRIPT}"
+
 rm -f "${_DEPLOY_FIXTURE}"
 rm -rf "${_GIT_STUB_DIR}"
 
