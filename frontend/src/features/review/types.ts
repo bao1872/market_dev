@@ -484,6 +484,8 @@ export interface DiscoveryRelatedScope {
 
 export interface DiscoveryRepresentativeInstrument {
   instrumentId: string
+  symbol: string | null
+  name: string | null
   boardRole: string | null
   relationToScope: string | null
   contributionValue: number | null

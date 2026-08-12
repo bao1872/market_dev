@@ -291,32 +291,111 @@ test('13. CSS module class 由组件引用且存在于 module 导出集', () => 
 })
 
 // ============================================================
-// 14. [P1-A] Scope family filter 必须来自 canonical 全量 taxonomy，
-//     不得从当前分页 Discovery 列表派生产生 → 翻页不得令 scope 选项消失。
+// 14. [P1-A] Scope FAMILY chips 必须表示 5 个语义家族（MARKET/INDEX/STYLE/
+//     INDUSTRY/CONCEPT），使用 scope_type 前缀作为 wire value，且独立于当前
+//     分页 Discovery items —— 翻页不得令 scope family 选项消失。
 // ============================================================
 
-test('14. [P1-A] scopeFamilies 来自 canonical taxonomy，不依赖当前分页 discoveries', () => {
+test('14. [P1-A] scope family 使用 5 语义家族 + scope_type 前缀 wire value，独立于分页', () => {
   const ws = read('DiscoveryWorkspace.tsx')
   // 不得再出现「从 discoveries 派生产生 family 集合」的旧逻辑
   assert.ok(
     !/discoveries\.forEach\(\s*d\s*=>\s*families\.add\(d\.scope\.type\)/.test(ws),
-    'scopeFamilies 不得从 discoverys 列表派生产生 family 集合',
+    'scope family 不得从 discoverys 列表派生产生 family 集合',
   )
   assert.ok(
     !/families\.has\(f\)/.test(ws),
-    'scopeFamilies 不得用 families.has 来过滤 canonical taxonomy（会随分页消失）',
+    'scope family 不得用 families.has 来过滤（会随分页消失）',
   )
-  // canonical 全量 taxonomy 必须作为权威来源出现
+  // 5 个语义家族的 wire value 必须是 scope_type 前缀
   assert.match(
     ws,
-    /\['market', 'major_index', 'style', 'industry_l1', 'industry_l2', 'industry_l3', 'concept'\]/,
-    'scopeFamilies 必须以 canonical 全量 scope-type taxonomy 为来源',
+    /SCOPE_FAMILIES[\s\S]*'market'[\s\S]*'major_index'[\s\S]*'style'[\s\S]*'industry'[\s\S]*'concept'/,
+    'SCOPE_FAMILIES 必须包含 5 个语义家族 wire value: market/major_index/style/industry/concept',
   )
-  // 即便当前页无某 family 的 Discovery，该 family 仍应出现在选项中
-  // （通过 canonical 常量直接返回，而非基于当前页 items 计算）
+  // 不得把 industry_l1/l2/l3 当作独立 family（INDUSTRY 由前缀 industry 覆盖）
+  const famStart = ws.indexOf('const SCOPE_FAMILIES')
+  const typeStart = ws.indexOf('const SCOPE_TYPES')
+  assert.ok(famStart >= 0, 'SCOPE_FAMILIES 常量必须存在')
+  const between = ws.slice(famStart, typeStart >= 0 ? typeStart : ws.length)
   assert.ok(
-    /scopeFamilies = useMemo\(\(\) => \{[\s\S]*canonical[\s\S]*\}, \[scopeType\]\)/.test(ws)
-    || /scopeFamilies = useMemo\(\(\) => \{[\s\S]*canonical[\s\S]*return scopeType[\s\S]*canonical/.test(ws),
-    'scopeFamilies useMemo 依赖仅含 scopeType（不依赖 discoveries），始终返回 canonical taxonomy',
+    !/industry_l1|industry_l2|industry_l3/.test(between),
+    'SCOPE_FAMILIES 不得将 industry_l1/l2/l3 当作独立 family（INDUSTRY 前缀覆盖）',
+  )
+  // 精确的 scope_type 选择器保持独立（7 种），不与 family 合并
+  assert.match(
+    ws,
+    /SCOPE_TYPES[\s\S]*'industry_l1'[\s\S]*'industry_l2'[\s\S]*'industry_l3'/,
+    'SCOPE_TYPES 必须保留 7 个精确 scope_type（含 industry_l1/l2/l3），与 family 分离',
+  )
+  // 两者都通过 useMemo 渲染，且都不依赖 discoveries
+  assert.ok(
+    /SCOPE_FAMILIES[\s\S]*useMemo/.test(ws) && /SCOPE_TYPES[\s\S]*useMemo/.test(ws),
+    'SCOPE_FAMILIES 与 SCOPE_TYPES 均以 useMemo 声明',
+  )
+  assert.ok(
+    !/setFilter\('scopeFamily'[\s\S]*scopeType/.test(ws) || /SCOPE_FAMILIES\.map/.test(ws),
+    'scope family 与 scope_type 渲染来自各自独立常量',
+  )
+})
+
+// ============================================================
+// 15. [P1-A] family→scope_type 映射契约：major_index→INDEX；industry_l1/l2/l3→INDUSTRY
+// ============================================================
+
+test('15. [P1-A] family wire value 映射正确（major_index→INDEX, industry*→INDUSTRY）', () => {
+  const ws = read('DiscoveryWorkspace.tsx')
+  // 语义映射注释或常量结构应体现：major_index 对应 INDEX, industry 前缀对应 INDUSTRY
+  assert.ok(
+    /major_index[\s\S]*INDEX/.test(ws) && /'industry'[\s\S]*INDUSTRY/.test(ws),
+    'major_index 映射 INDEX, industry 前缀映射 INDUSTRY（注释或 label 体现语义）',
+  )
+})
+
+// ============================================================
+// 16. [P1-C] 代表个股投影必须暴露 symbol/name，且结构化字段保留
+// ============================================================
+
+test('16. [P1-C] backend 投影暴露 symbol/name，保留既有字段', () => {
+  const svc = read('../../../../backend/app/services/review_discovery_service.py')
+  assert.match(
+    svc,
+    /"symbol":\s*i\.symbol/,
+    'representative instrument 投影必须包含 symbol = row.symbol',
+  )
+  assert.match(
+    svc,
+    /"name":\s*i\.name/,
+    'representative instrument 投影必须包含 name = row.name',
+  )
+  // 既有字段不得丢失
+  for (const f of ['instrumentId', 'boardRole', 'relationToScope', 'contributionValue',
+    'contributionRank', 'contributionPayload', 'roleEvidence']) {
+    assert.ok(new RegExp(`"${f}":`).test(svc), `投影必须保留既有字段: ${f}`)
+  }
+})
+
+test('17. [P1-C] 前端 DiscoveryRepresentativeInstrument 含 symbol/name 且 InstrumentsPanel 导航 /stock/:symbol', () => {
+  const types = read('types.ts')
+  assert.match(
+    types,
+    /interface DiscoveryRepresentativeInstrument[\s\S]*symbol:\s*string \| null[\s\S]*name:\s*string \| null/,
+    'DiscoveryRepresentativeInstrument 必须含 symbol/name（string|null）',
+  )
+  const panel = read('InstrumentsPanel.tsx')
+  assert.ok(/import \{ Link \}/.test(panel), 'InstrumentsPanel 必须引入 Link 做 canonical 导航')
+  assert.match(
+    panel,
+    /\/stock\/\$\{encodeURIComponent\(symbol\)\}/,
+    'InstrumentsPanel 必须使用 /stock/:symbol 做 canonical 个股导航',
+  )
+  // symbol 缺失时不得伪造路由
+  assert.ok(
+    /hasSymbol[\s\S]*stockHref/.test(panel),
+    'InstrumentsPanel 必须基于 symbol 是否存在决定导航，缺失时不伪造路由',
+  )
+  assert.ok(
+    /hasSymbol \? \([\s\S]*<Link to=\{stockHref[\s\S]*\) : \([\s\S]*<span>\{inst\.instrumentId\}/.test(panel),
+    'symbol 缺失时回退为不导航的 instrumentId 文本',
   )
 })

@@ -1051,3 +1051,31 @@
   padding: 12px; border: 1px solid rgba(255,80,80,0.3); border-radius: 6px;
   font-size: 0.85rem; color: #f66;
 }
+
+// [P1-C] 代表个股 → 个股详情页导航链接
+.stockLink {
+  color: v.$color-primary;
+  text-decoration: none;
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+// [P1-A] Scope family / scope_type filter chips
+.discoveryFilters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+}
+.discoveryFilterHint {
+  font-size: 0.8rem;
+  color: v.$color-text-muted;
+  margin-right: 4px;
+}
+.discoveryFilterActive {
+  background: v.$color-primary;
+  border-color: v.$color-primary;
+  color: #000;
+}

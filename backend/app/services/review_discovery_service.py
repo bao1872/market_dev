@@ -234,7 +234,8 @@ async def _collect_representative_instruments(session, signal_ids, limit=10):
         subq, MarketReviewSignalInstrument.id == subq.c.id,
     ).where(subq.c.rn == 1).order_by(MarketReviewSignalInstrument.contribution_rank).limit(limit)
     instruments = list((await session.execute(stmt)).scalars())
-    return [{"instrumentId": str(i.instrument_id), "boardRole": i.board_role,
+    return [{"instrumentId": str(i.instrument_id), "symbol": i.symbol, "name": i.name,
+             "boardRole": i.board_role,
              "relationToScope": i.relation_to_scope,
              "contributionValue": float(i.contribution_value) if i.contribution_value else None,
              "contributionRank": i.contribution_rank,

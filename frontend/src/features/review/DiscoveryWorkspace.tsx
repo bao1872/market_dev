@@ -84,14 +84,35 @@ export function DiscoveryWorkspace({
   const discoveries = listQuery.data?.items || []
   const total = listQuery.data?.total || 0
 
-  // [P1-A] Scope family filter chips come from the canonical full-scope taxonomy
-  // (authoritative source), NOT from the current paginated Discovery items.
-  // Pagination must never make a valid scope family disappear.
-  const scopeFamilies = useMemo(() => {
-    const canonical = ['market', 'major_index', 'style', 'industry_l1', 'industry_l2', 'industry_l3', 'concept']
-    // Keep the currently-selected family visible even if current page has no items of it.
-    return scopeType && !canonical.includes(scopeType) ? [scopeType, ...canonical] : canonical
-  }, [scopeType])
+  // [P1-A] Scope FAMILY chips represent the 5 semantic families, NOT raw scope
+  // types. Wire values are scope_type prefixes accepted by the backend
+  // (review.py: scope_type.startswith(scope_family)). They are derived from the
+  // canonical full-scope taxonomy — independent of the current paginated
+  // Discovery items, so pagination never makes a valid family chip disappear.
+  const SCOPE_FAMILIES: { value: string; label: string }[] = useMemo(
+    () => [
+      { value: 'market', label: '市场' }, // MARKET
+      { value: 'major_index', label: '指数' }, // INDEX
+      { value: 'style', label: '风格' }, // STYLE
+      { value: 'industry', label: '行业' }, // INDUSTRY (covers all industry levels via prefix)
+      { value: 'concept', label: '概念' }, // CONCEPT
+    ],
+    [],
+  )
+
+  // Precise scope_type selector stays separate (7 raw types), never merged with family.
+  const SCOPE_TYPES: { value: string; label: string }[] = useMemo(
+    () => [
+      { value: 'market', label: '市场' },
+      { value: 'major_index', label: '指数' },
+      { value: 'style', label: '风格' },
+      { value: 'industry_l1', label: '一级行业' },
+      { value: 'industry_l2', label: '二级行业' },
+      { value: 'industry_l3', label: '三级行业' },
+      { value: 'concept', label: '概念' },
+    ],
+    [],
+  )
 
   const setFilter = (key: 'scopeType' | 'scopeFamily' | 'status', value: string | undefined) => {
     onFilterChange({ [key]: value || null } as DiscoveryFilterPatch)
@@ -159,7 +180,7 @@ export function DiscoveryWorkspace({
         )}
       </div>
 
-      {/* Scope family filters */}
+      {/* Scope FAMILY filters (5 semantic families; wire value = scope_type prefix) */}
       <div className={styles.discoveryFilters}>
         <button
           type="button"
@@ -168,14 +189,36 @@ export function DiscoveryWorkspace({
         >
           全部 ({total})
         </button>
-        {scopeFamilies.map(f => (
+        {SCOPE_FAMILIES.map(f => (
           <button
             type="button"
-            key={f}
-            className={scopeFamily === f ? styles.discoveryFilterActive : ''}
-            onClick={() => setFilter('scopeFamily', f)}
+            key={f.value}
+            className={scopeFamily === f.value ? styles.discoveryFilterActive : ''}
+            onClick={() => setFilter('scopeFamily', f.value)}
           >
-            {f}
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Precise scope_type selector — kept separate from family (never merged) */}
+      <div className={styles.discoveryFilters}>
+        <span className={styles.discoveryFilterHint}>范围类型：</span>
+        <button
+          type="button"
+          className={!scopeType ? styles.discoveryFilterActive : ''}
+          onClick={() => setFilter('scopeType', undefined)}
+        >
+          全部
+        </button>
+        {SCOPE_TYPES.map(t => (
+          <button
+            type="button"
+            key={t.value}
+            className={scopeType === t.value ? styles.discoveryFilterActive : ''}
+            onClick={() => setFilter('scopeType', t.value)}
+          >
+            {t.label}
           </button>
         ))}
       </div>

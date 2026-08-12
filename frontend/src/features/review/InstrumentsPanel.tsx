@@ -5,6 +5,7 @@
  * 不使用 JSON.stringify 整块 payload；Raw JSON 仅作 debug fallback。
  */
 
+import { Link } from 'react-router-dom'
 import type { DiscoveryRepresentativeInstrument } from './types'
 import styles from './review.module.scss'
 
@@ -70,7 +71,7 @@ export function InstrumentsPanel({ instruments }: Props) {
       <table className={styles.instrumentsTable}>
         <thead>
           <tr>
-            <th>ID</th>
+            <th>个股</th>
             <th>角色</th>
             <th>关系</th>
             <th>贡献值</th>
@@ -79,19 +80,33 @@ export function InstrumentsPanel({ instruments }: Props) {
           </tr>
         </thead>
         <tbody>
-          {instruments.map((inst, i) => (
-            <tr key={inst.instrumentId || i}>
-              <td>{inst.instrumentId}</td>
-              <td>{inst.boardRole || '-'}</td>
-              <td>{inst.relationToScope || '-'}</td>
-              <td>{inst.contributionValue?.toFixed(3) ?? '-'}</td>
-              <td>{inst.contributionRank ?? '-'}</td>
-              <td>
-                <StructuredEvidence label="贡献" data={inst.contributionPayload} />
-                <StructuredEvidence label="角色证据" data={inst.roleEvidence} />
-              </td>
-            </tr>
-          ))}
+          {instruments.map((inst, i) => {
+            const symbol = inst.symbol
+            const hasSymbol = symbol != null && symbol.trim() !== ''
+            const stockHref = hasSymbol ? `/stock/${encodeURIComponent(symbol)}` : null
+            return (
+              <tr key={inst.instrumentId || i}>
+                <td>
+                  {hasSymbol ? (
+                    <Link to={stockHref!} className={styles.stockLink}>
+                      {symbol}
+                      {inst.name ? ` · ${inst.name}` : ''}
+                    </Link>
+                  ) : (
+                    <span>{inst.instrumentId}</span>
+                  )}
+                </td>
+                <td>{inst.boardRole || '-'}</td>
+                <td>{inst.relationToScope || '-'}</td>
+                <td>{inst.contributionValue?.toFixed(3) ?? '-'}</td>
+                <td>{inst.contributionRank ?? '-'}</td>
+                <td>
+                  <StructuredEvidence label="贡献" data={inst.contributionPayload} />
+                  <StructuredEvidence label="角色证据" data={inst.roleEvidence} />
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </section>
