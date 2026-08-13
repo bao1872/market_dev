@@ -5,7 +5,7 @@
 - 领域：复盘模块 / Scope Observation Model / Canonical Observation Core（L1）
 - Baseline SHA：`19eab75f103fb28c081d961cfccc12953037698b`（dev HEAD == origin/dev）
 - PRD Basis：CHANGE-011（L1 合同补全）、CHANGE-012（L1 合同最终收口）
-- Status：`verified_code_pending_acceptance`（PURE_UNIT PASS 64/64；targeted-pg pending_remote_verification）
+- Status：`verified_code_pending_acceptance`（PURE_UNIT PASS 64/64；targeted-pg BLOCKED_BY_VERIFY_INFRA_AND_PRE_EXISTING_FAILURE，非代码回归）
 
 ## 1. Hypothesis / Vertical Slice
 
@@ -82,9 +82,24 @@
 
 ### 4.2 Targeted PG Verification（panji-verify targeted-pg，bz_stock_verify_<SHA>）
 
-- 计划：仅跑 `tests/test_review_observation_persistence_pg.py`。
-- 验证项：insert / read-back / idempotent update / canonical shape validation / legacy top-level amount reject / price.amount normalized HHI round-trip / legacy P/Q/U/C/V isolation。
-- 状态：**pending_remote_verification**（需先 commit+push 当前 SHA 后方可由 panji-verify 拉取远程执行；本轮代码尚未 push，故 PG 证据待补）。
+- 已执行：`panji-verify run --sha 10dac74... --plan targeted-pg`（EXIT=50，fail-closed）。
+- **关键事实 1（测试覆盖缺口）**：`verify_attempt.py::run_self_contained_pg_tests` 的 registered suite **硬编码**只跑 4 个文件
+  （`test_pg_atomic_publication.py` / `test_pg_projection_lifecycle.py` / `test_pg_100_stock_call_counts.py` /
+  `test_pg_review_runtime_blocker_closure.py`）。本轮新增的 `tests/test_review_observation_persistence_pg.py`
+  **不在 registered suite 内**，因此 targeted-pg 实际**未运行**我的 L1 PG 测试（insert / read-back / idempotent /
+  legacy top-level amount reject / price.amount normalized HHI round-trip / legacy P/Q/U/C/V isolation）。
+- **关键事实 2（pre-existing 无关 failure）**：gate 报告的唯一失败是
+  `test_pg_review_runtime_blocker_closure.py::test_query2_projected_result_supports_build_stock_state`，
+  错误 `build_stock_state() missing 1 required positional argument: 'symbol'`。
+  该 test 最近修改于 `538bc95`（远早于本轮 baseline 19eab75），`build_stock_state` 当前签名为
+  `(snapshot, run, symbol)`（见 `app/schemas/stock_state.py:445`），test 仍用旧调用 `(snapshot, symbol)`。
+  **此为与本轮 L1 Canonical Observation 无关的 pre-existing 测试漂移，非本轮 regression**。
+- **结论**：targeted-pg gate 因 registered suite 中的 pre-existing 无关 failure 而 fail-closed；我的 L1 代码
+  未被该 gate 实际验证（测试未被收集）。PG 证据状态：**blocked_by_verify_infra_and_pre_existing_failure**，
+  非代码缺陷。
+- **待用户授权**：将 `test_review_observation_persistence_pg.py` 注册进 `verify_attempt.py` 的 registered
+  PG suite（属受保护治理域 `scripts/verify/`，修改需用户显式授权），或授权在 `bz_stock_verify_<SHA>` 上
+  通过 `verify_exec.py` 手动运行该文件以取得真实 PG 证据。
 
 ## 5. 历史数据处理
 
