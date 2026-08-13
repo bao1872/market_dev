@@ -2,8 +2,9 @@
 
 - **类型**：behavior+architecture（Objective Evidence Engine；query-time derived，无新表、无 migration）
 - **领域**：复盘模块 / Canonical Scope Observation Facts → Objective Evidence（L2-A）
-- **状态**：`verified_code_pending_acceptance`（本地 pure/unit 24、L1 74 无回归、ruff、mypy-changed、compileall、governance 均通过；remote isolated Concept peer verification 通过；待用户产品/理论验收后再收口）
+- **状态**：`verified_code_pending_acceptance`（本地 pure/unit 24、L1 74 无回归、ruff、mypy-changed、compileall、governance 均通过；remote clean isolated Concept peer verification 通过：real_concept_generated=389 == DB row=389，peer_count=389，无污染；待用户产品/理论验收后再收口）
 - **修正**：CHANGE-20260812-004 于 2026-08-12 经外部审计判定 ROUND 2A = PARTIAL / MINOR CORRECTION REQUIRED，执行最小 correction（§8），不进入 Round 2B
+- **修正 SHA**：`REVIEW_OBJECTIVE_EVIDENCE_ROUND2A_CORRECTED_SHA` = `0a8c754835ec9ccb3823bd22c4c4694e49d408d5`（已 push origin/dev）
 - **关联 PRD**：`docs/prd/70-review.md`（§7.6 min-sample=60 / §7.9 Canonical Facts；本轮不新增主观产品语义）
 - **关联 Maps**：`docs/maps/70-review.md`（未修改；待实现验收后单独授权同步）
 - **关联 Rules**：无（本轮不修改治理；AGENTS.md / rules/* / governance checker 均未改动，governance check PASS）
@@ -162,6 +163,30 @@ Filter / Candidate / Discovery / 不做新架构设计。
   （不要求等于总 Concept 数，因 primitive 可能 unavailable），并解释 total real rows /
   finite peer rows / target included；
 - 排除 synth_min60 / PG test seed / dummy scope / manual fake scope。
+
+**实际 clean Concept peer verification 结果（isolated DB `bz_stock_verify_0a8c754…`，production bz_stock READ ONLY）：**
+
+- `read_current_database` = bz_stock（只读确认）；`write_current_database` =
+  `bz_stock_verify_0a8c754835…`（isolated verify DB）
+- `discovered_concept_specs` = 389；`real_concept_generated_count` = 389；
+  `real_concept_skipped` = 0；`errors` = []（无 invariant / 契约错误）
+- `db_concept_row_count_on_target` = 389；`db_concept_keys_count` = 389；
+  `generated_matches_db` = **true**（389 == 389）
+- 独立 DB 复核：`SELECT scope_type, count(*), count(DISTINCT scope_key) … GROUP BY scope_type`
+  → `concept | 389 | 389`
+- 污染扫描：0 行匹配 `synth|seed|dummy|fake` 或 `test%`；`contamination_keys` = []；
+  `no_synthetic_or_test_rows` = **true**
+- 真实 Concept Evidence（target `bc73d2c4-e728-4761-bfdd-7ba1556c988a`，`price_return_mean`）：
+  - `current_status` = ready；`peer_status` = ready
+  - `peer_count` = **389**（total real rows = 389，finite real peer rows = 389，
+    target included；该 primitive 对所有真实 concept 均 finite，故 peer_count == 总 Concept 数）
+  - `peer_percentile` = 51.41
+  - `historical_status` = `insufficient_history`（`sample_count` = 0：真实库仅 1 个交易日
+    的 L1 facts，无 prior 历史样本；真实 >=60 仍 DATA_BLOCKED，见 §8.6）
+
+**结论**：clean isolated verify DB 内 Concept peer 无污染，`real_concept_generated_count ==
+DB row_count == 389`，peer_count == 389 == finite real peer count，无 synthetic / test /
+dummy / fake row。
 
 ### 8.5 Industry L1
 
