@@ -7,7 +7,7 @@
 - **领域**：复盘模块 / Objective Evidence（L2-A）/ PRD 70-review.md（§7.3 / §7.7 / §7.8.5 / §7.9）
 - **状态**：`verified_code`（PURE_UNIT 87 passed / 0 failed；ruff / compileall PASS；无 migration、未改 L1、未进 Discovery/Filter/Signal、未改 API/前端）
 - **baseline SHA**：`d95410bac7252e6f4a83261d1fa777d586a45372`
-- **final SHA**：（待 commit 后填入）
+- **final SHA**：`c64aebff76fd5ee2add940fb3c0c1c95ae6d47a5`
 - **关联 PRD**：`docs/prd/70-review.md`（§7.3 追加 Transition→Evidence 合同；§7.7 / §7.8.5 / §7.9）
 - **关联 Maps**：`docs/maps/70-review.md`（未修改；L2 实现已 cutover 但 Maps 同步需用户验收后授权）
 - **关联 CHANGE**：CHANGE-013（L1 Code Alignment + PG closure）、CHANGE-014（4A CORE fact coverage，29 scalar）
