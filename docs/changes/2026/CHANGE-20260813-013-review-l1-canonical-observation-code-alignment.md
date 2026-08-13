@@ -5,7 +5,7 @@
 - 领域：复盘模块 / Scope Observation Model / Canonical Observation Core（L1）
 - Baseline SHA：`19eab75f103fb28c081d961cfccc12953037698b`（dev HEAD == origin/dev）
 - PRD Basis：CHANGE-011（L1 合同补全）、CHANGE-012（L1 合同最终收口）
-- Status：`verified_code_pending_acceptance`（PURE_UNIT PASS 64/64；targeted-pg BLOCKED_BY_VERIFY_INFRA_AND_PRE_EXISTING_FAILURE，非代码回归）
+- Status：`verified_code`（L1 Core + Persistence 经 formal targeted-pg 验证；PURE_UNIT 65/65；targeted-pg 32 passed / 0 failed / 0 error / 0 skipped，attempt verify-dec7246732da-1786598370-158a8abd）
 
 ## 1. Hypothesis / Vertical Slice
 
@@ -144,6 +144,16 @@
 ## 9. Formal PG Registration Closure（第 3C 验证闭环轮，同 implementation slice）
 
 - Status（本段写入时）：`PENDING_FORMAL_PG`。**未提前写 PASS**。
+- **F. formal PG 最终闭环（attempt verify-dec7246732da-1786598370-158a8abd，SHA dec7246）**
+  - `pg_tests` gate：**passed = true**。
+  - pytest 汇总：**32 passed, 5 deselected, 1 warning**（failed=0, error=0, skipped=0）。
+  - `test_review_observation_persistence_pg.py` 已被 collected 并全部通过（注册生效）。
+  - 原 stale `build_stock_state` test 现 PASS（32 passed 较首次 31 多 1）。
+  - verify DB：`bz_stock_verify_dec7246732dad2ac14637eb4c1f2144bc38f4862`；migration head `090_scope_observation_facts`；runtime `panji-verify-python`。
+  - **PG PASS**：L1 Core + Persistence 经 formal targeted-pg 验证通过。
+  - 本轮共 2 次 formal targeted-pg（首次 31 passed/1 failed 暴露 stale test 字段断言缺陷 → 二次修复后 32 passed 全绿），符合 Two-Strike 同 attempt 内修复闭环。
+  - 生产业务代码（含 `StockState` / `build_stock_state` / `scope_observation.py` / `review_observation_persistence_service.py`）零修改。
+  - CHANGE-013 状态收口为 `verified_code`。
 - **A. verification coverage 修复（用户明确授权最小 verify governance 修改）**
   - 文件：`scripts/verify/verify_attempt.py::run_self_contained_pg_tests`
   - 将 `tests/test_review_observation_persistence_pg.py` 显式追加注册进现有 `pg_contract` curated suite。
