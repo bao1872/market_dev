@@ -33,24 +33,93 @@ from typing import Any
 # PRD §7.6: fewer than 60 valid historical samples -> insufficient_history.
 HISTORICAL_MIN_SAMPLE = 60
 
-# Phase-1 Evidence primitives: explicit path mapping into the canonical payload
-# (prompt §10 / §14).  No JSONPath / DSL — an explicit, closed mapping.
+# CORE Evidence primitives: explicit path mapping into the canonical L1 payload
+# (4A §3).  No JSONPath / DSL — an explicit, closed mapping.  These are the
+# scope-level numeric facts L1 already computes and persists; L2 now consumes
+# all of them instead of only 6.  State/Breadth ratios cover the complete
+# up/neutral/down distribution; Participation covers full volume/amount p25/p50/p75.
 PRIMITIVE_PATHS: dict[str, tuple[str, ...]] = {
+    # -------------------------------------------------
+    # PRICE — Return Level / Distribution
+    # -------------------------------------------------
     "price_return_mean": ("price", "return", "mean"),
+    "price_return_median": ("price", "return", "median"),
+    "price_return_p25": ("price", "return", "p25"),
+    "price_return_p75": ("price", "return", "p75"),
+
+    # -------------------------------------------------
+    # PRICE — Breadth
+    # -------------------------------------------------
     "price_advance_ratio": ("price", "breadth", "advance_ratio"),
-    "trend_up_ratio": ("trend", "state", "up_ratio"),
-    "momentum_expanding_ratio": ("momentum", "state", "expanding_ratio"),
-    "participation_volume_p50": ("participation", "volume", "p50"),
+    "price_decline_ratio": ("price", "breadth", "decline_ratio"),
+    "price_unchanged_ratio": ("price", "breadth", "unchanged_ratio"),
+
+    # -------------------------------------------------
+    # PRICE — Concentration
+    # -------------------------------------------------
     "price_raw_hhi": ("price", "concentration", "raw_hhi"),
+    "price_normalized_hhi": ("price", "concentration", "normalized_hhi"),
+
+    # -------------------------------------------------
+    # PRICE → Amount Concentration
+    # -------------------------------------------------
+    "amount_raw_hhi": ("price", "amount", "concentration", "raw_hhi"),
+    "amount_normalized_hhi": ("price", "amount", "concentration", "normalized_hhi"),
+
+    # -------------------------------------------------
+    # TREND — complete State/Breadth distribution
+    # -------------------------------------------------
+    "trend_up_ratio": ("trend", "state", "up_ratio"),
+    "trend_neutral_ratio": ("trend", "state", "neutral_ratio"),
+    "trend_down_ratio": ("trend", "state", "down_ratio"),
+
+    # -------------------------------------------------
+    # STRUCTURE — Swing State/Breadth
+    # -------------------------------------------------
+    "structure_swing_up_ratio": ("structure", "swing", "state", "up_ratio"),
+    "structure_swing_neutral_ratio": ("structure", "swing", "state", "neutral_ratio"),
+    "structure_swing_down_ratio": ("structure", "swing", "state", "down_ratio"),
+
+    # -------------------------------------------------
+    # STRUCTURE — Internal State/Breadth
+    # -------------------------------------------------
+    "structure_internal_up_ratio": ("structure", "internal", "state", "up_ratio"),
+    "structure_internal_neutral_ratio": ("structure", "internal", "state", "neutral_ratio"),
+    "structure_internal_down_ratio": ("structure", "internal", "state", "down_ratio"),
+
+    # -------------------------------------------------
+    # MOMENTUM — complete State/Breadth distribution
+    # -------------------------------------------------
+    "momentum_expanding_ratio": ("momentum", "state", "expanding_ratio"),
+    "momentum_flat_ratio": ("momentum", "state", "flat_ratio"),
+    "momentum_contracting_ratio": ("momentum", "state", "contracting_ratio"),
+
+    # -------------------------------------------------
+    # PARTICIPATION — Volume Distribution
+    # -------------------------------------------------
+    "participation_volume_p25": ("participation", "volume", "p25"),
+    "participation_volume_p50": ("participation", "volume", "p50"),
+    "participation_volume_p75": ("participation", "volume", "p75"),
+
+    # -------------------------------------------------
+    # PARTICIPATION — Amount Distribution
+    # -------------------------------------------------
+    "participation_amount_p25": ("participation", "amount", "p25"),
+    "participation_amount_p50": ("participation", "amount", "p50"),
+    "participation_amount_p75": ("participation", "amount", "p75"),
 }
 
 # Phase-1 primitive order for deterministic iteration / output.
 PRIMITIVE_NAMES: tuple[str, ...] = tuple(PRIMITIVE_PATHS)
 
 # raw HHI is not normalized by member count -> not cross-scope comparable
-# (PRD §7.9.3, prompt §15).  Only CURRENT/D1/D3/D5/HISTORICAL_POSITION are
-# allowed; PEER_POSITION must be disabled.
-RAW_HHI_PEER_DISABLED_REASON = "raw_hhi_not_cross_scope_comparable"
+# (PRD §7.9.3, 4A §4).  Both price and amount raw_hhi share this rule; only
+# CURRENT/D1/D3/D5/HISTORICAL_POSITION are allowed; PEER_POSITION must be
+# disabled.  normalized_hhi is cross-scope comparable and is NOT listed here.
+PEER_DISABLED_REASON_BY_PRIMITIVE: dict[str, str] = {
+    "price_raw_hhi": "raw_hhi_not_cross_scope_comparable",
+    "amount_raw_hhi": "raw_hhi_not_cross_scope_comparable",
+}
 
 
 def _finite_number(value: Any) -> float | None:

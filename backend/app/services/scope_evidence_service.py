@@ -26,15 +26,37 @@ from app.services.review_observation_persistence_service import (
     list_scope_observation_facts,
 )
 
-# Market has no peer cohort (prompt §14): it is excluded from peer context.
-MARKET_HAS_NO_PEER = "market_has_no_peer_cohort"
+# Peer cohort contract (PRD §7.8.5, 4A §5): each scope_type maps to the
+# same-family cohort it is compared against.  ``market`` has no cross-sectional
+# peer; ``major_index`` / ``style`` are architecturally supported (same-family
+# peer exists in principle) but their persistence is not yet activated — when no
+# persisted peer facts exist they naturally yield unavailable with peer_count 0,
+# NOT ``no_cross_sectional_peer``.  No peer registry/fallback is built.
+PEER_COHORT_SCOPE_TYPE: dict[str, str | None] = {
+    "market": None,
+    "major_index": "major_index",
+    "style": "style",
+    "industry_l1": "industry_l1",
+    "industry_l2": "industry_l2",
+    "industry_l3": "industry_l3",
+    "concept": "concept",
+}
 
-# Same-family peer cohorts are exactly the activated persistence families.  The
-# scope_type itself expresses the family cohort; no peer registry is built
-# (prompt §14).  Market is excluded because no peer cohort is defined for it.
-PEER_SCOPE_TYPES: frozenset[str] = frozenset(
-    {"concept", "industry_l1", "industry_l2", "industry_l3"}
-)
+MARKET_HAS_NO_PEER = "no_cross_sectional_peer"
+
+
+def _resolve_peer_scope_type(scope_type: str) -> str | None:
+    """Return the same-family peer scope_type, or None for market.
+
+    Raises ValueError on an unknown scope_type so the contract cannot silently
+    drift (4A §5).
+    """
+    try:
+        return PEER_COHORT_SCOPE_TYPE[scope_type]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported scope_type for evidence: {scope_type}"
+        ) from exc
 
 
 async def _nth_previous_trading_day(
@@ -111,8 +133,17 @@ async def compute_scope_evidence(
     )
 
     # Same-day same-family peers (current scope included when present).
-    peer_facts = await list_scope_observation_facts(
-        session, scope_type=scope_type, from_date=trade_date, to_date=trade_date
+    # market -> no peer cohort; other families query their own cohort scope_type.
+    peer_scope_type = _resolve_peer_scope_type(scope_type)
+    peer_facts = (
+        []
+        if peer_scope_type is None
+        else await list_scope_observation_facts(
+            session,
+            scope_type=peer_scope_type,
+            from_date=trade_date,
+            to_date=trade_date,
+        )
     )
 
     primitives: dict[str, Any] = {}
@@ -122,7 +153,7 @@ async def compute_scope_evidence(
             ref_facts,
             hist_facts,
             peer_facts,
-            scope_type,
+            peer_scope_type,
             primitive,
         )
 
@@ -138,7 +169,7 @@ def _compute_primitive(
     ref_facts: dict[str, tuple[date | None, ReviewScopeObservationFact | None]],
     hist_facts: list[ReviewScopeObservationFact],
     peer_facts: list[ReviewScopeObservationFact],
-    scope_type: str,
+    peer_scope_type: str | None,
     primitive: str,
 ) -> dict[str, Any]:
     payload = fact.observation_payload
@@ -170,30 +201,22 @@ def _compute_primitive(
     )
 
     # Peer cohort: same-day same-family finite values (current included).
-    if scope_type not in PEER_SCOPE_TYPES:
+    if peer_scope_type is None:
         out["peer"] = {
             "status": "unavailable",
             "percentile": None,
             "peer_count": 0,
             "reason": MARKET_HAS_NO_PEER,
         }
-    elif primitive == "price_raw_hhi":
+    else:
+        disabled_reason = scope_evidence.PEER_DISABLED_REASON_BY_PRIMITIVE.get(primitive)
         peer_values = [
             v
             for p in peer_facts
             if (v := _extract_finite(p.observation_payload, primitive)) is not None
         ]
         out["peer"] = scope_evidence.build_peer_context(
-            current,
-            peer_values,
-            disabled_reason=scope_evidence.RAW_HHI_PEER_DISABLED_REASON,
+            current, peer_values, disabled_reason=disabled_reason
         )
-    else:
-        peer_values = [
-            v
-            for p in peer_facts
-            if (v := _extract_finite(p.observation_payload, primitive)) is not None
-        ]
-        out["peer"] = scope_evidence.build_peer_context(current, peer_values)
 
     return out
