@@ -1057,8 +1057,14 @@ Exploration 阶段只要求：对同一 `trade_date + scope_type + scope_key`，
 
 当前 persistence 不改变 legacy：P/Q/U/C/V、Filter、Discovery、Publication、API、Frontend。
 Canonical Observation Fact Snapshot 已实现并写入 `review_scope_observation_facts`，但 legacy consumer
-（Filter / Discovery / Publication / API / Frontend）**尚未正式 cutover** 到该 canonical path；
-这属 **consumer cutover pending**（DEFER），**不是** persistence schema pending。
+**尚未正式 consume** 该 canonical path。
+说明（2026-08-12 Round 2C-1 follow-up）：
+
+1. Canonical Observation persistence **已实现并冻结**（见 §7.9）。
+2. 当前 legacy consumers（Filter / Discovery / Publication / API / Frontend）继续保持 **legacy compatibility**，不要求立即 cutover。
+3. **是否**以及**哪些** Discovery-side consumers 未来消费 Objective Evidence，必须等 **Discovery Product Design 冻结后决定**，不属于本轮或当前 V2 目标合同。
+4. **不得**把 legacy Filter / Signal cutover 表述成 V2 mandatory pending work；Filter/Signal 是否存在本身仍 NOT YET FROZEN。
+5. 若 Publication / API / Frontend 存在**独立于 Discovery** 的 canonical fact consumer（如直接读取 Observation/Evidence 的事实展示），其真实 pending 状态可单独保留，但**不绑定到 Filter/Signal** 路径。
 
 #### 7.9.9 Exploration boundary
 
@@ -1097,7 +1103,7 @@ A/B/C/D 当前作为**内部算法 family** 继续存在以维持现有实现兼
 - A/B/C/D 是 legacy Filter Engine 内部的算法分类，不是前端一级产品结构。
 - 前端不再按 A/B/C/D 分组展示，转用用户语义（状态/改善/恶化/扩散/收缩/异常/共振）。
 - D Family（state migration / freshness / diffusion / concentration / relative strength）定位为 legacy **Discovery Evidence Family**，不是独立 Signal Family。
-- `MarketReviewSignal` 保留为 legacy atomic evidence record；新的 `Discovery` domain object 负责 user-level finding 聚合。
+- `MarketReviewSignal` 保留为 legacy atomic evidence record；在**历史设计**中，`Discovery` 曾被定义为聚合 legacy Signal 的 user-level finding 结构。该历史结构**仅作 legacy implementation reference**，**不构成 V2 target architecture**，且 Signal/Discovery 是否保留该聚合关系仍 NOT YET FROZEN（见 §10A）。
 
 **Observation Model 收口（2026-08-12）：**
 
@@ -1488,9 +1494,14 @@ legacy 用户侧聚合成一个 Discovery，而不是五条重复 Signal。
 
 下钻后才能查看哪些 filter 命中、哪些 metric 贡献、哪些 component 支持、哪些股票贡献。
 
-### 10A.3 Discovery Domain Object
+### 10A.3 Discovery Domain Object（历史提案 / PRODUCT DESIGN INPUT / NOT CURRENT V2 TARGET SPEC）
 
-Review domain 正式业务结构可以表达为：
+> **2026-08-12（Round 2C-1 follow-up）**：以下为**历史 Discovery Domain Proposal**，**非当前冻结的
+> schema / domain contract**。仅保存为 Discovery Product Design 的**设计历史输入**。后续 Discovery
+> 产品设计可以参考、修改或**完全放弃**本结构；本结构**不构成 V2 target requirement**。
+> §10A.1 已明确：Signal 是否必须存在、Discovery 是否由 Signal 聚合全部 NOT YET FROZEN。
+
+历史提案中曾将 Review domain 表达为：
 
 ```
 Market Review
@@ -1502,38 +1513,40 @@ Market Review
 └─ Tracking
 ```
 
-这是逻辑/domain ownership，不是强制物理 storage topology。
+这是**历史逻辑/domain ownership 提案**，不是当前强制物理 storage topology，也**不得作为 V2 target contract**。
 
-建议新增正式 Discovery domain object：
+历史建议的 Discovery domain object 草图（仅供后续 Product Design 参考，非当前冻结 schema）：
 
 ```yaml
 discovery:
-  discovery_id:        # 稳定 logical identity，在一个正式 Review Run 范围内可唯一定位
-  review_run_id:       # 所属 Review Run
+  discovery_id:        # 稳定 logical identity（历史提案）
+  review_run_id:
   trade_date:
   scope_type:
   scope_key:
   scope_name:
-
   state:
   change:
   anomaly:
-
-  key_evidence:        # 聚合后的关键证据
-  related_scopes:      # Cross-Scope Relation 结果
+  key_evidence:
+  related_scopes:
   representative_instruments:
-
   lifecycle:
   first_seen:
   duration:
   status:
-
   data_quality:
 ```
 
-Discovery 必须有稳定 logical identity。API（`/discoveries/{discovery_id}`）、tracking、evidence drilldown 使用同一 logical identity。
+历史提案中「Discovery 必须有稳定 logical identity，API/tracking/evidence drilldown 共用」可作为后续
+Discovery Product Design 的参考输入之一，但**当前未冻结**。
 
-PRD 不要求 Discovery 必须拥有：
+> **以下句子曾是历史 target requirement，本轮明确不再作为 V2 target contract**：
+> - ~~Signal 继续负责算法命中、证据、版本追踪~~ → Signal 是否存在 NOT YET FROZEN；
+> - ~~Discovery 聚合多个 evidence~~ → Discovery 是否由 Signal 聚合 NOT YET FROZEN；
+> - ~~新 Discovery 应 consume existing/new signals~~ → 见 §10A.4。
+
+PRD 不要求 Discovery 必须拥有（历史提案中的开放项，仍可作设计参考）：
 - 独立 database table（可以是 view / materialized view / 内存聚合）
 - 独立 publication pointer
 - 独立 scheduler job
@@ -1542,17 +1555,25 @@ PRD 不要求 Discovery 必须拥有：
 - 特定 UUID/hash 生成算法
 - source_signal_ids 字段或 foreign key
 
-Discovery 必须可追溯到 supporting evidence。具体 lineage representation DEFER 到实现阶段。
+Discovery 必须可追溯到 supporting evidence（V2 已冻结原则）。具体 lineage representation DEFER 到 Discovery Product Design。
 
-Signal 继续负责算法命中、证据、版本追踪。Discovery 聚合多个 evidence。不要求立即破坏性删除历史 signal schema（additive migration）。
+### 10A.4 历史兼容（Legacy Implementation Compatibility / NOT V2 TARGET REQUIREMENT）
 
-### 10A.4 历史兼容
+> **2026-08-12（Round 2C-1 follow-up）**：本节为 **legacy implementation compatibility**，不构成 V2 target requirement。
 
-原有 `MarketReviewSignal` 和 A/B/C/D filter family 允许保留。新的 Discovery 应 consume existing/new signals as evidence，而不是强制把 Signal schema 一次性废弃。迁移优先采用 additive 而不是 destructive。
+- 原有 `MarketReviewSignal` 和 A/B/C/D filter family **可以继续存在**于 legacy runtime；
+- **是否**成为未来 Discovery 的输入，**尚未决定**（NOT YET FROZEN），不要求 V2 consume 它们；
+- 历史曾提议「新的 Discovery 应 consume existing/new signals as evidence」——该句属历史方案，**不作为当前 V2 target requirement**；
+- 迁移优先采用 **additive 而非 destructive**，但**不要求**立即执行任何 cleanup；
+- 后续 Discovery Product Design 冻结后，再决定 legacy signal schema 的去留。
 
-## 10B. 信号生命周期与追踪状态机
+## 10B. 信号生命周期与追踪状态机（LEGACY IMPLEMENTATION COMPATIBILITY / NOT V2 TARGET REQUIREMENT）
 
-### 10B.1 系统信号
+> **2026-08-12（Round 2C-1 follow-up）**：本节描述的 Signal lifecycle 状态机属于 **legacy implementation
+> compatibility**，**不得**作为未来 Discovery 生命周期的默认模板。Discovery identity / schema / lifecycle
+> 的具体实现**继续 NOT YET FROZEN**，待 Discovery Product Design 冻结后决定。
+
+### 10B.1 系统信号（legacy）
 
 ```
 new
@@ -1563,7 +1584,7 @@ new
 → transformed
 ```
 
-规则：
+规则（legacy）：
 
 - 同一scope同一signal_type连续命中：continuing；
 - 达到filter配置中的确认条件：confirmed；
@@ -1617,7 +1638,8 @@ stock_core published
 - 一个scope失败不回滚其他scope；
 - 重启只处理pending/可重试failed/过期running；
 - 相同输入hash和版本的succeeded item不得重算；
-- 信号和归因幂等；
+- **Attribution 幂等**（若 Attribution 属已确认目标，可保留其幂等要求）；
+- Signal 幂等仅属于 **legacy path compatibility**，不作为 V2 future architecture requirement（Signal 是否存在 NOT YET FROZEN）；
 - pointer切换失败只重试发布，不重算；
 - 依赖按矩阵解析：`stock_core` 是必需依赖，板块依赖缺失时允许明确的 `core_only` 降级；run 元数据必须记录每项来源 pointer/run、解析方式与降级原因；
 - 指标同时保留 raw 与 normalized；历史读取必须满足 `observation.trade_date < run.trade_date`，并按算法版本、scope 类型、scope key 及兼容版本隔离，禁止未来数据和跨范围污染；
@@ -1671,8 +1693,12 @@ stock_core published
 
 **6. 其他整套条件（不变）**
 
-- signal evaluation无系统性异常；
 - source_core_run_id和source_board_run_id均指向当前正式pointer。
+
+> **2026-08-12（Round 2C-1 follow-up）**：旧发布门禁中的「signal evaluation 无系统性异常」**从 V2 target
+> publication gate 中移除**（Signal 是否存在 NOT YET FROZEN，不得解释为 V2 Signal mandatory requirement）。
+> 若现有 legacy runtime 仍依赖 signal evaluation，该条件仅作为 **Legacy compatibility runtime condition**，
+> 不构成 V2 future gate。本轮**不发明**新的 Discovery gate。
 
 > 说明：Phase 4C 之前的旧规则「配置的主要指数和风格范围必须ready 
 > / 一级行业ready比例达到配置门槛」已按 §6.5.8 废止，不再作为 whole-Review 硬门。
@@ -2270,7 +2296,6 @@ Concept 强、Industry 普通。
 - Concept / L2 / L3 不受 Industry L1 的 discovery gate；
 - 前端没有 Scope Observation facts 或筛选器计算代码（旧 P/Q/U/C/V 亦不计算）；
 - 同一页面不混合不同run；
-- Filter Engine 均能给出结构化证据；
 - Discovery 可下钻到子范围、Cross-Scope Relation 和股票；
 - 个股第一金字塔与板块关系可解释（含 contributionPayload 和 roleEvidence）；
 - Discovery 可保存追踪并在下一交易日产生evaluation；
@@ -2320,20 +2345,25 @@ Concept 强、Industry 普通。
 - API / Frontend cutover（Discovery Workspace / Evidence Drawer / Representative Instruments —— 待 Discovery 设计冻结后）
 - Legacy P/Q/U/C/V Filter / Discovery cleanup（待新路径验收后）
 
-**P0-A：Scope 平行化 + A/B/C Corrective + 排序修复**
+> **>>> HISTORICAL ROADMAP / SUPERSEDED AS CURRENT EXECUTION PLAN（2026-08-12 Round 2C-1 follow-up）**
+> 以下 P0-A / P0-B / P0-C / P1 / Phase 5 为**历史 roadmap**，**仅保存历史上下文，不再是当前 NEXT**。
+> 其中凡涉及 Filter / Signal / Signal→Discovery 聚合的部分，**必须等待 Discovery Product Design 决策后重新确认**，
+> 不得作为当前 V2 执行计划。IDE **不得**从该历史 roadmap 自动生成开发任务。
+
+**P0-A：Scope 平行化 + A/B/C Corrective + 排序修复（HISTORICAL）**
 
 - 扩展 scope scanning 到所有 scope family 平行计算（industry_l2/l3/concept 独立）
 - A/B/C history context 闭环（CR-01）
 - Global ranking before pagination（CR-02）
 - Frontend/API contract alignment（CR-03/CR-04）
 
-**P0-B：Discovery Domain + State/Change/Anomaly**
+**P0-B：Discovery Domain + State/Change/Anomaly（HISTORICAL）**
 
-- 新增 Discovery domain object（Signal → Discovery 聚合）
-- State/Change/Anomaly 分离
+- ~~新增 Discovery domain object（Signal → Discovery 聚合）~~ → **历史方案，非当前 P0-B**；Discovery domain object 的聚合方式（是否经 Signal）仍 NOT YET FROZEN，待 Discovery Product Design 决定。
+- State/Change/Anomaly 分离（State/Change/Anomaly 重锚见 §10，已部分冻结）
 - Concentration 语义校正（state vs change vs anomaly）
 
-**P0-C：Cross-Scope Relation**
+**P0-C：Cross-Scope Relation（HISTORICAL）**
 
 - Cross-Scope Relation 计算阶段
 - THEME_LED / INDUSTRY_LED / BROAD_CONFIRMATION / ISOLATED_THEME / STYLE_LED / CONFLICTING
@@ -2346,7 +2376,11 @@ Concept 强、Industry 普通。
 - Evidence Drawer 结构化展示
 - 追踪面板重构
 
-**Phase 5：历史回放与阈值校准**
+**Phase 5：历史回放与阈值校准（HISTORICAL / LEGACY FILTER ROADMAP）**
+
+> **2026-08-12（Round 2C-1 follow-up）**：本 Phase 5 属 **legacy filter roadmap**，**不是当前 V2 future phase**。
+> 「使用历史 Review Run 验证筛选器稳定性」「阈值变化升级 filter_version」均不得作为当前 V2 future requirement
+> （Filter 是否存在、filter_version 是否保留均 NOT YET FROZEN）。
 
 使用历史Review Run验证筛选器稳定性；阈值变化升级filter_version，不覆盖旧信号。
 
