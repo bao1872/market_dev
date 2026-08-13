@@ -1261,6 +1261,7 @@ async def test_query2_projected_result_supports_build_stock_state() -> None:
     async with AsyncSessionLocal() as reader_db:
         from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
         run = await reader_db.get(StockFeatureSnapshotRun, snap.id)
+        assert run is not None
         result = await _batch_get_run_snapshots_with_symbol(reader_db, run)
 
     assert len(result) == 5, f"预期 5 行，实际 {len(result)}"
@@ -1277,8 +1278,9 @@ async def test_query2_projected_result_supports_build_stock_state() -> None:
         assert isinstance(symbol, str)
         assert symbol.startswith("T")  # _make_instruments 生成 T<hex>
 
-        # 验证可以传入 build_stock_state（不抛异常即通过）
-        state = build_stock_state(snapshot, symbol)
+        # 验证可以传入 build_stock_state（不抛异常即通过）。
+        # 生产函数签名 (snapshot, run, symbol) —— 与 test drift 修复保持一致。
+        state = build_stock_state(snapshot, run, symbol)
         assert state is not None
         assert state.symbol == symbol
         assert state.instrument_id == snapshot.instrument_id

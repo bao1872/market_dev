@@ -140,3 +140,21 @@
 - 本轮**未**执行 targeted-pg（避免违反 Two-Strike 的重复无效执行；registered suite 的 pre-existing 无关 failure 仍存在）。
 - 本轮**未**修改受保护治理域 `scripts/verify/*` 与 `scripts/ops/panji-verify`。
 - PURE_UNIT 复跑：`65 passed`（较上轮 64 +1，新增 unequal-distribution 回归）。
+
+## 9. Formal PG Registration Closure（第 3C 验证闭环轮，同 implementation slice）
+
+- Status（本段写入时）：`PENDING_FORMAL_PG`。**未提前写 PASS**。
+- **A. verification coverage 修复（用户明确授权最小 verify governance 修改）**
+  - 文件：`scripts/verify/verify_attempt.py::run_self_contained_pg_tests`
+  - 将 `tests/test_review_observation_persistence_pg.py` 显式追加注册进现有 `pg_contract` curated suite。
+  - 仍为**显式注册文件**列表（非动态 discovery、非 `pytest -m postgres tests/`、非 glob、未新增 CLI 参数/plan/DB 生命周期/cleanup/evidence exporter/migration/seed 改动），保持 closed + registered suite。
+  - 更新该函数 docstring，职责补上 "Review Canonical Observation L1 persistence contract"。
+- **B. pre-existing stale test 修复**
+  - 文件：`backend/tests/test_pg_review_runtime_blocker_closure.py::test_query2_projected_result_supports_build_stock_state`
+  - 原错误调用 `build_stock_state(snapshot, symbol)` 与生产签名 drift；修正为 `build_stock_state(snapshot, run, symbol)` 并增加 `assert run is not None`。
+  - **生产业务函数未修改**（签名已是 `(snapshot, run, symbol)`）。
+  - 不得 xfail/skip/删 test/捕获后 pass。属 test drift 修复，非业务改动。
+- **C. 核心 L1 业务代码本轮零修改**：`scope_observation.py` / `review_observation_persistence_service.py` / `scope_evidence.py` / `member_fact.py` 均未动。
+- **D. formal PG 执行（待跑）**
+  - push 后使用新 40 位 SHA 跑：`scripts/ops/panji-verify run --sha <SHA> --plan targeted-pg`。
+  - 须从 evidence 确认 `test_review_observation_persistence_pg.py` 被 collected；该文件 failed=errors=skipped=0；关键合同（insert / idempotent update / date|scope|family isolation / diagnostics+readiness round-trip / legacy P/Q/U/C/V isolation / price.amount topology / normalized HHI JSONB round-trip / legacy top-level amount rejected）逐项通过；原 stale `build_stock_state` test 现 PASS；整体 gate passed>0 且 skipped=failed=errors=0 方为 PG PASS。

@@ -417,6 +417,8 @@ class VerifyAttempt:
         基础 PG Gate 职责：atomic publication / projection lifecycle / 100-stock call counts。
         closure 场景测试（PG-1~PG-8 runtime-blocker 收口）由 VERIFY-COVERAGE-01 注册进本 gate，
         作为已授权 closure suite 的一部分（最小追加，不扩大为全量 -m postgres）。
+        Review Canonical Observation L1 persistence contract 由 3C 轮最小追加注册（显式文件，
+        不动态 discovery、不改为全量 pytest -m postgres）。
         """
         self.exporter.log("run_self_contained_pg_tests: 开始")
         code, out, err = _run(
@@ -426,7 +428,15 @@ class VerifyAttempt:
              "tests/test_pg_100_stock_call_counts.py",
              # [VERIFY-COVERAGE-01 / 2026-08-09] 注册已授权的 PG-1~PG-8 closure suite。
              # 仅追加，不删除/不替换原 3 文件；不改为动态 discovery 或全量 -m postgres。
-             "tests/test_pg_review_runtime_blocker_closure.py"],
+             "tests/test_pg_review_runtime_blocker_closure.py",
+
+             # [3C / CHANGE-013] Review Canonical Observation L1 persistence contract:
+             # insert / read-back / idempotent update / date|scope|family isolation /
+             # diagnostics+readiness round-trip / legacy P/Q/U/C/V isolation /
+             # canonical new payload uses price.amount / normalized HHI JSONB round-trip /
+             # legacy top-level amount save rejected. 显式注册文件；不改 verification plan
+             # schema；不改 CLI；不动态 discovery；不扩大为全量 -m postgres。
+             "tests/test_review_observation_persistence_pg.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:
