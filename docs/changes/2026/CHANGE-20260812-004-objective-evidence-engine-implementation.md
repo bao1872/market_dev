@@ -2,7 +2,7 @@
 
 - **类型**：behavior+architecture（Objective Evidence Engine；query-time derived，无新表、无 migration）
 - **领域**：复盘模块 / Canonical Scope Observation Facts → Objective Evidence（L2-A）
-- **状态**：`implemented_unconfirmed`（本地 pure/unit、ruff、mypy-changed、compileall、governance 通过；remote isolated verification + real-data short-window / historical / peer 验证待 §24-§27 完成后更新）
+- **状态**：`verified_code_pending_acceptance`（本地 pure/unit 22、L1 74 无回归、ruff、mypy-changed、compileall、governance 均通过；remote isolated verification + PG contract 4 passed + real-data short-window / historical / peer 验证全部通过。待用户产品/理论验收后再收口）
 - **关联 PRD**：`docs/prd/70-review.md`（§7.6 min-sample=60 / §7.9 Canonical Facts；本轮不新增主观产品语义）
 - **关联 Maps**：`docs/maps/70-review.md`（未修改；待实现验收后单独授权同步）
 - **关联 Rules**：无（本轮不修改治理；AGENTS.md / rules/* / governance checker 均未改动，governance check PASS）
@@ -88,5 +88,29 @@ Discovery / Ranking / Score / Grade / Recommendation。
 
 ## 6. 外部验证（远程 isolated verification + real-data）
 
-> 由 frozen SHA 在 isolated verification DB 完成（不写 production bz_stock）。验证结果在本 Change
-> 于远程验证完成后更新。
+在 frozen SHA `3aa82840badf1e1eaecfb24098b8a54ebc29fe4e` 的 isolated verification DB
+（`bz_stock_verify_3aa82840...`，跑在既有 `trading-postgres` 容器内，不写 production `bz_stock`）
+完成。验证结果全部通过：
+
+- **PG query contract**：`tests/test_review_scope_evidence_pg.py` 4 passed（evidence 不写行、
+  exact D1/D3/D5、missing exact date→unavailable no fallback、peer same-family isolation、
+  raw HHI peer disabled）。
+- **Short window（§25）**：2 concept + 2 industry_l1，T0=2026-08-10。全部 `current_status=ready`，
+  D1/D3/D5 `ready`，D1 reference_date=2026-08-07，delta 按原生单位计算（含 0 delta 与正值）。
+- **Historical <60（§26）**：真实数据仅 6 个交易日，sample_count=5 → `insufficient_history`，
+  percentile=null（真实数据不足以触发 ≥60 分支，如实保留）。
+- **Historical ≥60（§26）**：真实数据仅 6 天，无法天然到达 min60；在**隔离验证库**写入 65 个
+  synthetic canonical facts（`concept/synth_min60_*`）演示 ≥60 分支：`historical_status=ready`，
+  sample_count=65，percentile=56.92。真实 ≥60 为 `DATA_BLOCKED`（数据不足，非实现缺陷）。
+- **Peer cohort（§27）**：concept 389/389 facts generated（full_cohort_verified=true，
+  peer_count=390，percentile=82.56）；industry_l1 257/257（peer_count=257，percentile=68.87）。
+  仅 same-family 入 cohort，market 无 peer cohort。
+
+**数据可用性记录**：`review_scope_observation_facts` 在真实 `bz_stock` 中不存在（L1 facts 仅写入
+验证库）；短期真实数据受 PIT membership 可用性限制（08-03..08-10 共 6 个交易日）。CHANGE 状态保持
+`verified_code_pending_acceptance`，待用户做产品/理论验收。
+
+## 7. 清理
+
+验证结束已删除本轮创建的 verify 库与临时文件（见 §8 清理执行）。未触碰 production `bz_stock`、
+共享 PostgreSQL/Redis 卷、稳定运行容器或受保护镜像。
