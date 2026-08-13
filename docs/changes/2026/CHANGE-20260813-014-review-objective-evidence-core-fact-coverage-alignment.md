@@ -7,7 +7,7 @@
 - **领域**：复盘模块 / Objective Evidence（L2-A）/ PRD 70-review.md（§7.1/§7.2/§7.3/§7.4/§7.6/§7.7/§7.8.5/§7.9）
 - **状态**：`verified_code`（PURE_UNIT 75 passed / 0 failed；ruff / compileall PASS；无 migration、未扩 L1、未进 Discovery/Filter/Signal、未改 API/前端）
 - **baseline SHA**：`ce01d3cfabaf06421e55923dc85aff57f81c7737`
-- **final SHA**：（待 commit 后填入）
+- **final SHA**：`b68003b90ec0b7b6e84cc3dd591ae2b7f8357a83`
 - **关联 PRD**：`docs/prd/70-review.md`（§7.1/§7.2/§7.3/§7.4/§7.6/§7.7/§7.8.5/§7.9）
 - **关联 Maps**：`docs/maps/70-review.md`（未修改；L2 实现已 cutover 但 Maps 同步需用户验收后授权）
 
