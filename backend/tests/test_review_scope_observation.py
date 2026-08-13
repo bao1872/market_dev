@@ -86,8 +86,10 @@ def test_industry_and_concept_share_same_calculation_path() -> None:
     concept = _run(members, scope_type="concept", scope_key="chip")
     assert industry["scope"]["scope_type"] == "industry"
     assert concept["scope"]["scope_type"] == "concept"
-    for obj in ("price", "amount", "trend", "structure", "momentum", "participation", "chip"):
+    for obj in ("price", "trend", "structure", "momentum", "participation", "chip"):
         assert industry[obj] == concept[obj], f"family divergence in {obj}"
+    assert "amount" not in industry
+    assert "amount" in industry["price"]
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +259,7 @@ def test_price_and_amount_universes_are_separate() -> None:
     ]
     out = _run(members)
     assert out["price"]["valid_count"] == 1
-    assert out["amount"]["valid_count"] == 2
+    assert out["price"]["amount"]["valid_count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -322,11 +324,30 @@ def test_amount_shares_sum_one_and_raw_hhi_consistent() -> None:
         _m("d", return_1d=None, amount=0.0),
     ]
     out = _run(members)
-    conc = out["amount"]["concentration"]
-    assert out["amount"]["valid_count"] == 4
+    price_amount = out["price"]["amount"]
+    conc = price_amount["concentration"]
+    assert price_amount["valid_count"] == 4
+    assert price_amount["total_amount"] == pytest.approx(600.0)
     assert conc["member_count"] == 4
+
+    # Single canonical owner: amount_share vector drives BOTH the shares AND the HHI.
+    from app.domain.review.scope_observation import compute_member_amount_contributions
+
+    facts = compute_member_amount_contributions(members)
+    assert facts.valid_count == 4
+    assert facts.total_amount == pytest.approx(600.0)
+    by_id = {m.member_id: m for m in facts.members}
+    assert by_id["a"].amount_share == pytest.approx(1 / 6)
+    assert by_id["b"].amount_share == pytest.approx(1 / 2)
+    assert by_id["c"].amount_share == pytest.approx(1 / 3)
+    assert by_id["d"].amount_share == pytest.approx(0.0)
+    share_sum = sum(m.amount_share for m in facts.members if m.amount_share is not None)
+    assert share_sum == pytest.approx(1.0)
+
+    # amount HHI must equal sum of squared shares from the same owner (no 2nd formula).
     expected = (1 / 6) ** 2 + (1 / 2) ** 2 + (1 / 3) ** 2 + 0.0
     assert conc["raw_hhi"] == pytest.approx(expected)
+    assert conc["normalized_hhi"] == pytest.approx((expected - 0.25) / 0.75)
 
 
 # ---------------------------------------------------------------------------
@@ -355,8 +376,9 @@ def test_participation_is_threshold_free_distribution() -> None:
 
 def test_core_does_not_generate_pqucv_or_normalization() -> None:
     out = _run([_m("a"), _m("b", trend=Direction.DOWN)])
-    for obj in ("price", "amount", "trend", "structure", "momentum", "participation"):
+    for obj in ("price", "trend", "structure", "momentum", "participation"):
         assert not any(k in out[obj] for k in ("P", "Q", "U", "C", "V", "value", "score")), obj
+    assert "amount" not in out
     flat = repr(out)
     for forbidden in ("normalizedValue", "historyPercentile120d", "crossSectionPercentile"):
         assert forbidden not in flat
@@ -504,8 +526,8 @@ def test_nan_amount_excluded() -> None:
         _m("b", amount=math.nan),
     ]
     out = _run(members)
-    assert out["amount"]["valid_count"] == 1
-    assert out["amount"]["concentration"]["member_count"] == 1
+    assert out["price"]["amount"]["valid_count"] == 1
+    assert out["price"]["amount"]["concentration"]["member_count"] == 1
 
 
 def test_negative_amount_excluded() -> None:
@@ -514,8 +536,18 @@ def test_negative_amount_excluded() -> None:
         _m("b", amount=-50.0),
     ]
     out = _run(members)
-    assert out["amount"]["valid_count"] == 1
-    assert out["amount"]["concentration"]["member_count"] == 1
+    assert out["price"]["amount"]["valid_count"] == 1
+    assert out["price"]["amount"]["concentration"]["member_count"] == 1
+
+
+def test_inf_amount_excluded() -> None:
+    members = [
+        _m("a", amount=100.0),
+        _m("b", amount=math.inf),
+    ]
+    out = _run(members)
+    assert out["price"]["amount"]["valid_count"] == 1
+    assert out["price"]["amount"]["concentration"]["member_count"] == 1
 
 
 def test_zero_amount_is_valid() -> None:
@@ -524,8 +556,8 @@ def test_zero_amount_is_valid() -> None:
         _m("b", amount=0.0),
     ]
     out = _run(members)
-    assert out["amount"]["valid_count"] == 2
-    conc = out["amount"]["concentration"]
+    assert out["price"]["amount"]["valid_count"] == 2
+    conc = out["price"]["amount"]["concentration"]
     assert conc["member_count"] == 2
     assert conc["status"] == "ready"
 
@@ -540,3 +572,69 @@ def test_nan_participation_excluded() -> None:
     assert part["amount"]["valid_count"] == 1
     assert part["volume"]["p50"] == pytest.approx(1.0)
     assert part["amount"]["p50"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# §18.21 — normalized HHI boundaries (ACCEPTED CONTRACT, CHANGE-012)
+# ---------------------------------------------------------------------------
+
+
+def test_normalized_hhi_equal_distribution_is_zero() -> None:
+    # price: equal abs returns -> raw=0.25, normalized=0
+    out = _run([_m("a", return_1d=1.0), _m("b", return_1d=1.0), _m("c", return_1d=1.0), _m("d", return_1d=1.0)])
+    pc = out["price"]["concentration"]
+    assert pc["raw_hhi"] == pytest.approx(0.25)
+    assert pc["normalized_hhi"] == pytest.approx(0.0)
+    # amount: equal amounts -> raw=0.25, normalized=0 (same owner)
+    amt = out["price"]["amount"]["concentration"]
+    assert amt["normalized_hhi"] == pytest.approx(0.0)
+
+
+def test_normalized_hhi_concentrated_distribution_is_one() -> None:
+    # price: one dominant abs return -> raw=1, normalized=1
+    out = _run([_m("a", return_1d=10.0), _m("b", return_1d=0.0), _m("c", return_1d=0.0), _m("d", return_1d=0.0)])
+    pc = out["price"]["concentration"]
+    assert pc["raw_hhi"] == pytest.approx(1.0)
+    assert pc["normalized_hhi"] == pytest.approx(1.0)
+    # amount: one dominant amount -> raw=1, normalized=1 (same owner)
+    out2 = _run([_m("a", return_1d=1.0, amount=100.0), _m("b", return_1d=1.0, amount=0.0), _m("c", return_1d=1.0, amount=0.0), _m("d", return_1d=1.0, amount=0.0)])
+    amt = out2["price"]["amount"]["concentration"]
+    assert amt["raw_hhi"] == pytest.approx(1.0)
+    assert amt["normalized_hhi"] == pytest.approx(1.0)
+
+
+def test_normalized_hhi_single_member_none() -> None:
+    out = _run([_m("a", return_1d=1.0)])
+    pc = out["price"]["concentration"]
+    assert pc["raw_hhi"] == pytest.approx(1.0)
+    assert pc["normalized_hhi"] is None
+    assert pc["status"] == "insufficient_member_count"
+
+    amt = out["price"]["amount"]["concentration"]
+    assert amt["raw_hhi"] == pytest.approx(1.0)
+    assert amt["normalized_hhi"] is None
+    assert amt["status"] == "insufficient_member_count"
+
+
+def test_zero_total_price_normalized_none() -> None:
+    out = _run([_m("a", return_1d=0.0), _m("b", return_1d=0.0)])
+    pc = out["price"]["concentration"]
+    assert pc["raw_hhi"] is None
+    assert pc["normalized_hhi"] is None
+    assert pc["status"] == "zero_abs_return"
+
+
+def test_zero_total_amount_normalized_none() -> None:
+    out = _run([_m("a", return_1d=1.0, amount=0.0), _m("b", return_1d=1.0, amount=0.0)])
+    amt = out["price"]["amount"]
+    assert amt["total_amount"] == pytest.approx(0.0)
+    conc = amt["concentration"]
+    assert conc["raw_hhi"] is None
+    assert conc["normalized_hhi"] is None
+    assert conc["status"] == "zero_amount"
+    # total=0 -> every valid member amount_share is None (verified via owner)
+    from app.domain.review.scope_observation import compute_member_amount_contributions
+
+    facts = compute_member_amount_contributions([_m("a", amount=0.0), _m("b", amount=0.0)])
+    assert facts.total_amount == pytest.approx(0.0)
+    assert all(m.amount_share is None for m in facts.members)

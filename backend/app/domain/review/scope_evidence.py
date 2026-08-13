@@ -13,8 +13,8 @@ evidence math (current / delta / percentile / context status).
 
 Explicit exclusions (prompt §1 / §29): no Opportunity / Risk / Strong / Weak /
 Candidate / Filter / Discovery / Ranking / Score / Grade / Recommendation.
-Diffusion remains PROVISIONAL; only raw breadth D1/D3/D5 deltas are exposed here
-(prompt §18).
+State / Breadth D1 / D3 / D5 changes are continuous Objective Evidence; Diffusion
+is not an independent canonical state / primitive (PRD §7, CHANGE-011 / 012).
 
 Percentile primitive (prompt §6 / §7): this module does NOT import or reuse
 ``scope_observation._percentile`` (a quantile-value calculator for P25/P50/P75),

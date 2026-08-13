@@ -58,8 +58,8 @@ def _payload(
                 "unchanged_ratio": None,
             },
             "concentration": {"raw_hhi": price_raw_hhi, "status": "ready"},
+            "amount": {"valid_count": 1, "total_amount": 100.0, "concentration": {"raw_hhi": None, "status": "ready"}},
         },
-        "amount": {"valid_count": 1, "concentration": {"raw_hhi": None}},
         "trend": {"state": {"up_ratio": trend_up_ratio}, "transition": {}},
         "structure": {
             "swing": {"state": {"up_ratio": None, "down_ratio": None}, "transition": {}},

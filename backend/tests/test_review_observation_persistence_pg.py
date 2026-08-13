@@ -348,3 +348,29 @@ async def test_list_scope_observation_facts_filters(db_session: AsyncSession) ->
         db_session, scope_type="concept", from_date=T, to_date=T
     )
     assert {r.scope_key for r in rows_t} == {"A", "B"}
+
+
+async def test_persisted_payload_uses_price_amount_topology(db_session: AsyncSession) -> None:
+    """New canonical writer (from this SHA) only writes price.amount shape."""
+    await save_scope_observation_fact(db_session, _prep(scope_key="A"), _canonical_obs(marker_mean=0.01))
+    await db_session.commit()
+    fact = await get_scope_observation_fact(db_session, T, "concept", "A")
+    assert fact is not None
+    payload = fact.observation_payload
+    assert "amount" not in payload
+    assert "amount" in payload["price"]
+    assert payload["price"]["amount"]["valid_count"] == 2
+    assert payload["price"]["amount"]["total_amount"] == pytest.approx(300.0)
+    assert payload["price"]["amount"]["concentration"]["raw_hhi"] == pytest.approx(0.5)
+    assert payload["price"]["amount"]["concentration"]["normalized_hhi"] == pytest.approx(0.0)
+
+
+async def test_save_rejects_legacy_top_level_amount(db_session: AsyncSession) -> None:
+    """A legacy top-level `amount` must be rejected at save (no silent fallback)."""
+    prep = _prep(scope_type="concept", scope_key="A")
+    obs = _canonical_obs(marker_mean=0.01)
+    # simulate a legacy writer that emitted top-level amount
+    obs["amount"] = obs["price"].pop("amount")
+    with pytest.raises(ScopeObservationPayloadValidationError):
+        await save_scope_observation_fact(db_session, prep, obs)
+    assert await _count(db_session, "concept", "A", T) == 0

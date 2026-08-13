@@ -180,29 +180,201 @@ def _raw_hhi(shares: Sequence[float]) -> float:
     return sum(share * share for share in shares)
 
 
+def _normalized_hhi(
+    raw_hhi: float | None,
+    member_count: int,
+) -> float | None:
+    """Member-count-normalized HHI (ACCEPTED CONTRACT, PRD §7.2).
+
+    ``normalized_hhi = (raw_hhi - 1/N) / (1 - 1/N)``, N = member_count > 1.
+
+    Equal distribution -> 0; single-member-dominant -> 1; removes the mechanical
+    lower bound that raw HHI imposes on a larger N.  Boundaries (frozen):
+    - ``raw_hhi is None`` -> None (unavailable upstream);
+    - ``member_count <= 1`` -> None (no internal concentration space, denominator 0);
+    - ``1 - 1/N <= _EPSILON`` -> None (numerical degenerate floor);
+    - ``raw_hhi`` out of [0, 1] after extraction -> ``ValueError`` (never silent).
+    Only floating-point rounding near the endpoints is clamped to [0, 1]; a
+    genuinely out-of-range value is a real error and must surface.
+    """
+    if raw_hhi is None:
+        return None
+
+    if member_count <= 1:
+        return None
+
+    floor = 1.0 / member_count
+    denominator = 1.0 - floor
+
+    if denominator <= _EPSILON:
+        return None
+
+    value = (raw_hhi - floor) / denominator
+
+    # Only float-rounding near endpoints; must NOT mask an algorithmic error.
+    if value < 0.0 and value >= -_EPSILON:
+        value = 0.0
+    elif value > 1.0 and value <= 1.0 + _EPSILON:
+        value = 1.0
+
+    if value < 0.0 or value > 1.0:
+        raise ValueError(
+            f"normalized HHI out of range: "
+            f"raw_hhi={raw_hhi}, member_count={member_count}, value={value}"
+        )
+
+    return value
+
+
 def _price_concentration(returns: Sequence[float]) -> dict[str, Any]:
-    """abs-price-change share based raw HHI. Raw HHI is NOT cross-scope normalized."""
+    """abs-price-change share based raw + normalized HHI over the price universe.
+
+    A zero-return member is still a valid price-concentration universe member, so
+    ``member_count = len(returns)`` (all price-valid members), NOT the
+    positive-return count.
+    """
     abs_returns = [abs(r) for r in returns]
+    member_count = len(returns)
     total = sum(abs_returns)
+
     if total <= _EPSILON:
-        return {"raw_hhi": None, "member_count": len(returns), "status": "zero_abs_return"}
-    shares = [a / total for a in abs_returns]
+        return {
+            "raw_hhi": None,
+            "normalized_hhi": None,
+            "member_count": member_count,
+            "status": "zero_abs_return",
+        }
+
+    shares = [value / total for value in abs_returns]
+    raw_hhi = _raw_hhi(shares)
+
+    if member_count <= 1:
+        return {
+            "raw_hhi": raw_hhi,
+            "normalized_hhi": None,
+            "member_count": member_count,
+            "status": "insufficient_member_count",
+        }
+
     return {
-        "raw_hhi": _raw_hhi(shares),
-        "member_count": len(returns),
+        "raw_hhi": raw_hhi,
+        "normalized_hhi": _normalized_hhi(raw_hhi, member_count),
+        "member_count": member_count,
         "status": "ready",
     }
 
 
-def _amount_concentration(amounts: Sequence[float]) -> dict[str, Any]:
-    """amount-share based raw HHI over the independent amount universe."""
-    total = sum(amounts)
-    if total <= _EPSILON:
-        return {"raw_hhi": None, "member_count": len(amounts), "status": "zero_amount"}
-    shares = [a / total for a in amounts]
+@dataclass(frozen=True)
+class MemberAmountContribution:
+    """Member-level canonical amount contribution evidence (L1 fact, PRD §7.2).
+
+    ``amount_share`` is scope-relative (member amount / scope valid amount total);
+    it is NOT an instrument-level fact and is intentionally NOT stored on
+    ``ReviewMemberFact``.  The complete member vector is not persisted into the
+    scope observation payload (physical persistence = IMPLEMENTATION DESIGN REQUIRED).
+    """
+
+    member_id: str
+    amount: float
+    amount_share: float | None
+
+
+@dataclass(frozen=True)
+class AmountContributionFacts:
+    """Scope aggregate of member amount contributions (single canonical owner)."""
+
+    valid_count: int
+    total_amount: float
+    members: tuple[MemberAmountContribution, ...]
+
+
+def compute_member_amount_contributions(
+    members: Sequence[MemberObservation],
+) -> AmountContributionFacts:
+    """Single canonical owner of L1 member-level amount contribution (PRD §7.2).
+
+    Rules:
+    - amount None / NaN / inf / negative -> unavailable, excluded;
+    - amount == 0 is a legal member (contributes 0 share when total > 0);
+    - total_amount > 0 -> every valid member's ``amount_share`` sums ~= 1;
+    - total_amount == 0 -> every valid member's ``amount_share`` is None;
+    - no ranking / TopN / strong-weak; no DB write; no legacy attribution.
+    """
+    valid: list[tuple[str, float]] = []
+
+    for member in members:
+        amount = _finite_or_none(member.amount)
+        if amount is None or amount < 0.0:
+            continue
+        valid.append((member.member_id, amount))
+
+    total_amount = sum(amount for _, amount in valid)
+
+    if total_amount <= _EPSILON:
+        contributions = tuple(
+            MemberAmountContribution(
+                member_id=member_id,
+                amount=amount,
+                amount_share=None,
+            )
+            for member_id, amount in valid
+        )
+    else:
+        contributions = tuple(
+            MemberAmountContribution(
+                member_id=member_id,
+                amount=amount,
+                amount_share=amount / total_amount,
+            )
+            for member_id, amount in valid
+        )
+
+    return AmountContributionFacts(
+        valid_count=len(valid),
+        total_amount=total_amount,
+        members=contributions,
+    )
+
+
+def _amount_concentration(
+    contribution_facts: AmountContributionFacts,
+) -> dict[str, Any]:
+    """amount-share based raw + normalized HHI reusing the single canonical shares.
+
+    Must NOT recompute shares from raw amounts: ``amount_share`` and the amount HHI
+    come from the same ``compute_member_amount_contributions`` owner (no second
+    share formula).
+    """
+    member_count = contribution_facts.valid_count
+
+    shares = [
+        item.amount_share
+        for item in contribution_facts.members
+        if item.amount_share is not None
+    ]
+
+    if contribution_facts.total_amount <= _EPSILON:
+        return {
+            "raw_hhi": None,
+            "normalized_hhi": None,
+            "member_count": member_count,
+            "status": "zero_amount",
+        }
+
+    raw_hhi = _raw_hhi(shares)
+
+    if member_count <= 1:
+        return {
+            "raw_hhi": raw_hhi,
+            "normalized_hhi": None,
+            "member_count": member_count,
+            "status": "insufficient_member_count",
+        }
+
     return {
-        "raw_hhi": _raw_hhi(shares),
-        "member_count": len(amounts),
+        "raw_hhi": raw_hhi,
+        "normalized_hhi": _normalized_hhi(raw_hhi, member_count),
+        "member_count": member_count,
         "status": "ready",
     }
 
@@ -313,13 +485,9 @@ def compute_scope_observation(
     # candidate_count >= valid_count always; difference is never negative.
     missing_exact_t1_count = price_candidate_count - price_valid_count
 
-    # AMOUNT universe — PIT(T) ∩ finite & non-negative amount (0 allowed, no T-1).
-    amounts = [
-        finite
-        for m in member_list
-        if (finite := _finite_or_none(m.amount)) is not None and finite >= 0.0
-    ]
-    amount_valid_count = len(amounts)
+    # AMOUNT universe — single canonical owner of member-level amount contribution.
+    # amount_share AND amount HHI both derive from this owner (no second share formula).
+    amount_contribution = compute_member_amount_contributions(member_list)
 
     # Categorical axes — state denominators are axis-specific (no T-1 needed).
     trend_values = [m.trend for m in member_list if m.trend is not None]
@@ -383,10 +551,11 @@ def compute_scope_observation(
             "breadth": _price_breadth(price_returns, price_valid_count),
             "concentration": _price_concentration(price_returns),
             "signed_contribution": {"status": "prd_clarification_required"},
-        },
-        "amount": {
-            "valid_count": amount_valid_count,
-            "concentration": _amount_concentration(amounts),
+            "amount": {
+                "valid_count": amount_contribution.valid_count,
+                "total_amount": amount_contribution.total_amount,
+                "concentration": _amount_concentration(amount_contribution),
+            },
         },
         "trend": {
             "state": _categorical_state_distribution(trend_values, direction_labels),

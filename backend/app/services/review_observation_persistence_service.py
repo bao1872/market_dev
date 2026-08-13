@@ -38,11 +38,14 @@ MARKET_PERSISTENCE_DIAGNOSTIC = (
 )
 
 # The ONLY legal top-level sections of a Canonical Observation payload.  Any
-# extra key (e.g. a subjective opportunity_score / marker / ranking) or a
-# missing canonical section must be rejected before persistence (Round 1C
-# correction Blocker #1).  This is the contract shape, not a semantic recompute.
+# extra key (e.g. a subjective opportunity_score / marker / ranking, or a legacy
+# top-level "amount") or a missing canonical section must be rejected before
+# persistence (Round 1C correction Blocker #1).  This is the contract shape, not
+# a semantic recompute.  The canonical amount lives under ``price.amount``; a
+# top-level ``amount`` is a legacy topology and is explicitly rejected (no silent
+# compatibility fallback, no topology migration, no re-normalization here).
 CANONICAL_TOP_LEVEL_SECTIONS: frozenset[str] = frozenset(
-    {"scope", "price", "amount", "trend", "structure", "momentum", "participation", "chip"}
+    {"scope", "price", "trend", "structure", "momentum", "participation", "chip"}
 )
 
 
