@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.domain.review import scope_evidence as scope_evidence
 from app.domain.review.scope_evidence import (
     PEER_DISABLED_REASON_BY_PRIMITIVE,
     PRIMITIVE_NAMES,
@@ -80,7 +81,11 @@ def _payload(
                 "neutral_ratio": 0.39,
                 "down_ratio": 0.30,
             },
-            "transition": {},
+            "transition": {
+                "Neutral→Up": {"count": 2, "ratio": 0.2},
+                "Down→Up": {"count": 1, "ratio": 0.1},
+                "denominator": 10,
+            },
         },
         "structure": {
             "swing": {
@@ -89,7 +94,10 @@ def _payload(
                     "neutral_ratio": 0.35,
                     "down_ratio": 0.25,
                 },
-                "transition": {},
+                "transition": {
+                    "Up→Down": {"count": 1, "ratio": 0.1},
+                    "denominator": 10,
+                },
             },
             "internal": {
                 "state": {
@@ -97,7 +105,10 @@ def _payload(
                     "neutral_ratio": 0.40,
                     "down_ratio": 0.25,
                 },
-                "transition": {},
+                "transition": {
+                    "Down→Neutral": {"count": 3, "ratio": 0.3},
+                    "denominator": 10,
+                },
             },
         },
         "momentum": {
@@ -106,7 +117,10 @@ def _payload(
                 "flat_ratio": 0.35,
                 "contracting_ratio": 0.25,
             },
-            "transition": {},
+            "transition": {
+                "Flat→Contracting": {"count": 2, "ratio": 0.2},
+                "denominator": 10,
+            },
         },
         "participation": {
             "volume": {
@@ -513,7 +527,7 @@ def test_input_payload_not_mutated() -> None:
 
 
 def test_core_evidence_primitive_coverage() -> None:
-    """Freeze the 29 CORE scalar extraction paths (4A §9, Test 1)."""
+    """Freeze the 29 CORE scalar extraction paths (4A §9, Test 1; preserved after 4B)."""
     expected = {
         "price_return_mean",
         "price_return_median",
@@ -545,7 +559,8 @@ def test_core_evidence_primitive_coverage() -> None:
         "participation_amount_p50",
         "participation_amount_p75",
     }
-    assert set(PRIMITIVE_NAMES) == expected
+    # 4B adds 24 Transition primitives on top; the CORE scalar set is unchanged.
+    assert set(scope_evidence.PRIMITIVE_PATHS) == expected
 
 
 def test_all_paths_extract_from_canonical_payload() -> None:
@@ -776,6 +791,202 @@ def test_no_subjective_fields_in_primitives() -> None:
     }
     flattened = _flatten_keys(sample)
     assert not (flattened & banned)
+
+
+# ---------------------------------------------------------------------------
+# 4B §11 — Transition Objective Evidence tests
+# ---------------------------------------------------------------------------
+
+
+def test_transition_primitive_contract() -> None:
+    """Freeze the 24 Transition ratio primitives (4B §11, Test 1)."""
+    assert len(scope_evidence.TRANSITION_PRIMITIVE_SPECS) == 24
+    expected = {
+        "trend_transition_up_to_neutral_ratio",
+        "trend_transition_up_to_down_ratio",
+        "trend_transition_neutral_to_up_ratio",
+        "trend_transition_neutral_to_down_ratio",
+        "trend_transition_down_to_up_ratio",
+        "trend_transition_down_to_neutral_ratio",
+        "structure_swing_transition_up_to_neutral_ratio",
+        "structure_swing_transition_up_to_down_ratio",
+        "structure_swing_transition_neutral_to_up_ratio",
+        "structure_swing_transition_neutral_to_down_ratio",
+        "structure_swing_transition_down_to_up_ratio",
+        "structure_swing_transition_down_to_neutral_ratio",
+        "structure_internal_transition_up_to_neutral_ratio",
+        "structure_internal_transition_up_to_down_ratio",
+        "structure_internal_transition_neutral_to_up_ratio",
+        "structure_internal_transition_neutral_to_down_ratio",
+        "structure_internal_transition_down_to_up_ratio",
+        "structure_internal_transition_down_to_neutral_ratio",
+        "momentum_transition_expanding_to_flat_ratio",
+        "momentum_transition_expanding_to_contracting_ratio",
+        "momentum_transition_flat_to_expanding_ratio",
+        "momentum_transition_flat_to_contracting_ratio",
+        "momentum_transition_contracting_to_expanding_ratio",
+        "momentum_transition_contracting_to_flat_ratio",
+    }
+    assert set(scope_evidence.TRANSITION_PRIMITIVE_SPECS) == expected
+
+
+def test_total_evidence_fact_count_is_53() -> None:
+    """Objective Evidence total = 29 CORE + 24 Transition = 53 (4B §11, Test 2)."""
+    names = set(PRIMITIVE_NAMES)
+    assert len(PRIMITIVE_NAMES) == 53
+    assert len(names) == 53
+    assert set(scope_evidence.PRIMITIVE_PATHS) | set(scope_evidence.TRANSITION_PRIMITIVE_SPECS) == names
+
+
+def test_explicit_transition_ratio_extraction() -> None:
+    """Neutral→Up = 0.2 extracts correctly (4B §11, Test 3)."""
+    payload = _payload()
+    assert extract_primitive(payload, "trend_transition_neutral_to_up_ratio") == 0.2
+    assert extract_primitive(payload, "trend_transition_down_to_up_ratio") == 0.1
+
+
+def test_legal_transition_absent_is_zero() -> None:
+    """Legal transition key absent + denominator>0 -> 0.0 (4B §11, Test 4)."""
+    payload = _payload()
+    # trend.transition has Neutral→Up/Down→Up but NOT Up→Down
+    assert extract_primitive(payload, "trend_transition_up_to_down_ratio") == 0.0
+
+
+def test_transition_denominator_zero_is_unavailable() -> None:
+    """denominator <= 0 -> None even if key absent (4B §11, Test 5)."""
+    payload = _payload(overrides={"trend.transition.denominator": 0})
+    assert extract_primitive(payload, "trend_transition_up_to_down_ratio") is None
+    assert extract_primitive(payload, "trend_transition_neutral_to_up_ratio") is None
+
+
+def test_all_four_transition_families_extract() -> None:
+    """Trend / Structure Swing / Structure Internal / Momentum all decode (4B §11, Test 6)."""
+    payload = _payload()
+    assert extract_primitive(payload, "structure_swing_transition_up_to_down_ratio") == 0.1
+    assert extract_primitive(payload, "structure_internal_transition_down_to_neutral_ratio") == 0.3
+    assert extract_primitive(payload, "momentum_transition_flat_to_contracting_ratio") == 0.2
+
+
+async def test_transition_d1_d3_d5_are_deltas_only(monkeypatch) -> None:
+    """Transition D1/D3/D5 remain plain deltas, no improving/accelerating label (4B §11, Test 7)."""
+    # current Neutral→Up = 0.20 (from fixture)
+    # D1 = 0.10, D3 = 0.05, D5 = 0.15
+    d1_payload = _payload(overrides={"trend.transition.Neutral→Up": {"count": 1, "ratio": 0.10}})
+    d3_payload = _payload(overrides={"trend.transition.Neutral→Up": {"count": 1, "ratio": 0.05}})
+    d5_payload = _payload(overrides={"trend.transition.Neutral→Up": {"count": 2, "ratio": 0.15}})
+
+    async def get(db, td, st, sk):
+        if td == T:
+            return _fact(T, scope_type=st, scope_key=sk)
+        if td == _D1:
+            return _fact(_D1, scope_type=st, scope_key=sk, payload=d1_payload)
+        if td == _D3:
+            return _fact(_D3, scope_type=st, scope_key=sk, payload=d3_payload)
+        if td == _D5:
+            return _fact(_D5, scope_type=st, scope_key=sk, payload=d5_payload)
+        return None
+
+    async def list_(db, *, scope_type, scope_key=None, from_date=None, to_date=None):
+        return []
+
+    await _patch_all(monkeypatch, prev=lambda d: _prev_map().get(d), get=get, list_=list_)
+    result = await compute_scope_evidence(AsyncMock(), T, "concept", "A")
+    prim = result["primitives"]["trend_transition_neutral_to_up_ratio"]
+    assert prim["current"]["value"] == pytest.approx(0.20)
+    assert prim["d1"]["delta"] == pytest.approx(0.10)
+    assert prim["d3"]["delta"] == pytest.approx(0.15)
+    assert prim["d5"]["delta"] == pytest.approx(0.05)
+    # none of the deltas carry a subjective label
+    for ctx in ("d1", "d3", "d5"):
+        assert set(prim[ctx]) <= {"status", "reference_date", "reference_value", "delta"}
+
+
+async def test_transition_historical_ready(monkeypatch) -> None:
+    """Transition historical with >=60 samples is ready (4B §11, Test 8)."""
+    prev = _prev_map()
+    hist_payloads = [
+        _payload(overrides={"trend.transition.Neutral→Up": {"count": 1, "ratio": 0.10 + i * 0.001}})
+        for i in range(60)
+    ]
+    hist_facts = [_fact(_D5 + timedelta(days=i), payload=hist_payloads[i]) for i in range(60)]
+
+    async def get(db, td, st, sk):
+        if td == T:
+            return _fact(T, scope_type=st, scope_key=sk)
+        return None
+
+    async def list_(db, *, scope_type, scope_key=None, from_date=None, to_date=None):
+        # history query: same scope, to_date == T - 1 day, with scope_key set
+        if scope_key is not None and to_date == T - timedelta(days=1):
+            return hist_facts
+        return []
+
+    await _patch_all(monkeypatch, prev=lambda d: prev.get(d), get=get, list_=list_)
+    result = await compute_scope_evidence(AsyncMock(), T, "concept", "A")
+    hist = result["primitives"]["trend_transition_neutral_to_up_ratio"]["historical"]
+    assert hist["status"] == "ready"
+    assert hist["sample_count"] == 60
+    assert hist["percentile"] is not None
+
+
+async def test_transition_peer_percentile(monkeypatch) -> None:
+    """concept peer A/B/C Neutral→Up = 0.10/0.20/0.30; B peer ready count=3 (4B §11, Test 9)."""
+    async def get(db, td, st, sk):
+        return _fact(T, scope_type=st, scope_key=sk)
+
+    def _peer(scope_key: str, ratio: float) -> SimpleNamespace:
+        return _fact(
+            T,
+            scope_type="concept",
+            scope_key=scope_key,
+            payload=_payload(overrides={"trend.transition.Neutral→Up": {"count": 1, "ratio": ratio}}),
+        )
+
+    async def list_(db, *, scope_type, scope_key=None, from_date=None, to_date=None):
+        if scope_key is None:
+            return [_peer("A", 0.10), _peer("B", 0.20), _peer("C", 0.30)]
+        return []
+
+    await _patch_all(monkeypatch, prev=lambda d: _prev_map().get(d), get=get, list_=list_)
+    result = await compute_scope_evidence(AsyncMock(), T, "concept", "A")
+    peer = result["primitives"]["trend_transition_neutral_to_up_ratio"]["peer"]
+    assert peer["status"] == "ready"
+    assert peer["peer_count"] == 3
+    assert peer["percentile"] is not None
+
+
+def test_transition_count_not_a_primitive() -> None:
+    """No *_count transition primitive exists (4B §11, Test 10)."""
+    assert not any(name.endswith("_count") for name in PRIMITIVE_NAMES)
+
+
+def test_no_stable_transition_primitive() -> None:
+    """Stable identity transitions are absent (4B §11, Test 11)."""
+    banned = {
+        "trend_transition_up_to_up_ratio",
+        "trend_transition_neutral_to_neutral_ratio",
+        "trend_transition_down_to_down_ratio",
+        "structure_swing_transition_up_to_up_ratio",
+        "structure_internal_transition_down_to_down_ratio",
+        "momentum_transition_expanding_to_expanding_ratio",
+        "momentum_transition_flat_to_flat_ratio",
+        "momentum_transition_contracting_to_contracting_ratio",
+    }
+    assert not (banned & set(PRIMITIVE_NAMES))
+
+
+async def test_no_diffusion_state_in_output(monkeypatch) -> None:
+    """No diffusion/scope-state keys in a full evidence output (4B §11, Test 12)."""
+    async def get(db, td, st, sk):
+        return _fact(T, scope_type=st, scope_key=sk)
+
+    async def list_(db, *, scope_type, scope_key=None, from_date=None, to_date=None):
+        return []
+
+    await _patch_all(monkeypatch, prev=lambda d: _prev_map().get(d), get=get, list_=list_)
+    result = await compute_scope_evidence(AsyncMock(), T, "concept", "A")
+    banned = {"diffusion", "expanding_scope", "contracting_scope", "stable_scope"}
+    assert not (banned & _flatten_keys(result))
 
 
 # ---------------------------------------------------------------------------

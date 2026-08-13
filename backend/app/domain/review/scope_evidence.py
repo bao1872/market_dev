@@ -112,10 +112,76 @@ PRIMITIVE_PATHS: dict[str, tuple[str, ...]] = {
 # Phase-1 primitive order for deterministic iteration / output.
 PRIMITIVE_NAMES: tuple[str, ...] = tuple(PRIMITIVE_PATHS)
 
+# ---------------------------------------------------------------------------
+# Transition primitives (4B §3/§4)
+# ---------------------------------------------------------------------------
+# L1 Transition = member exact canonical T-1 -> T categorical migration; the
+# cross-scope primary expression is the transition RATIO (raw count is
+# explanation/audit only, never a cross-scope primitive).  L1 uses SPARSE
+# encoding: only actually-occurring non-identity migrations are stored as
+# ``"<From>→<To>": {"count": ..., "ratio": ...}`` under a ``transition``
+# container that also carries ``denominator`` (T & T-1 common valid members).
+#
+# Decoding rules (4B §2.4, frozen):
+#   A. denominator > 0 and transition key ABSENT  -> ratio = 0.0 (zero members
+#      made this migration; NOT "no data").
+#   B. denominator <= 0 or denominator unavailable -> ratio = None (unavailable).
+#
+# Stable (identity) migrations Up→Up / Neutral→Neutral / Down→Down (and
+# Momentum Expanding→Expanding / Flat→Flat / Contracting→Contracting) are NOT
+# transition events and are intentionally absent from this spec.  Transition
+# count is never a primitive.
+TRANSITION_PRIMITIVE_SPECS: dict[
+    str,
+    tuple[tuple[str, ...], str],
+] = {
+    # TREND (Up / Neutral / Down)
+    "trend_transition_up_to_neutral_ratio": (("trend", "transition"), "Up→Neutral"),
+    "trend_transition_up_to_down_ratio": (("trend", "transition"), "Up→Down"),
+    "trend_transition_neutral_to_up_ratio": (("trend", "transition"), "Neutral→Up"),
+    "trend_transition_neutral_to_down_ratio": (("trend", "transition"), "Neutral→Down"),
+    "trend_transition_down_to_up_ratio": (("trend", "transition"), "Down→Up"),
+    "trend_transition_down_to_neutral_ratio": (("trend", "transition"), "Down→Neutral"),
+
+    # STRUCTURE — SWING (Up / Neutral / Down)
+    "structure_swing_transition_up_to_neutral_ratio": (("structure", "swing", "transition"), "Up→Neutral"),
+    "structure_swing_transition_up_to_down_ratio": (("structure", "swing", "transition"), "Up→Down"),
+    "structure_swing_transition_neutral_to_up_ratio": (("structure", "swing", "transition"), "Neutral→Up"),
+    "structure_swing_transition_neutral_to_down_ratio": (("structure", "swing", "transition"), "Neutral→Down"),
+    "structure_swing_transition_down_to_up_ratio": (("structure", "swing", "transition"), "Down→Up"),
+    "structure_swing_transition_down_to_neutral_ratio": (("structure", "swing", "transition"), "Down→Neutral"),
+
+    # STRUCTURE — INTERNAL (Up / Neutral / Down)
+    "structure_internal_transition_up_to_neutral_ratio": (("structure", "internal", "transition"), "Up→Neutral"),
+    "structure_internal_transition_up_to_down_ratio": (("structure", "internal", "transition"), "Up→Down"),
+    "structure_internal_transition_neutral_to_up_ratio": (("structure", "internal", "transition"), "Neutral→Up"),
+    "structure_internal_transition_neutral_to_down_ratio": (("structure", "internal", "transition"), "Neutral→Down"),
+    "structure_internal_transition_down_to_up_ratio": (("structure", "internal", "transition"), "Down→Up"),
+    "structure_internal_transition_down_to_neutral_ratio": (("structure", "internal", "transition"), "Down→Neutral"),
+
+    # MOMENTUM (Expanding / Flat / Contracting)
+    "momentum_transition_expanding_to_flat_ratio": (("momentum", "transition"), "Expanding→Flat"),
+    "momentum_transition_expanding_to_contracting_ratio": (("momentum", "transition"), "Expanding→Contracting"),
+    "momentum_transition_flat_to_expanding_ratio": (("momentum", "transition"), "Flat→Expanding"),
+    "momentum_transition_flat_to_contracting_ratio": (("momentum", "transition"), "Flat→Contracting"),
+    "momentum_transition_contracting_to_expanding_ratio": (("momentum", "transition"), "Contracting→Expanding"),
+    "momentum_transition_contracting_to_flat_ratio": (("momentum", "transition"), "Contracting→Flat"),
+}
+
+# Deterministic merge: 29 CORE scalar facts + 24 transition ratio facts = 53.
+# This is the full set of internal numeric evidence extraction facts (NOT a
+# "53 product indicators" UI structure, NOT a score).
+PRIMITIVE_NAMES: tuple[str, ...] = (
+    *PRIMITIVE_PATHS.keys(),
+    *TRANSITION_PRIMITIVE_SPECS.keys(),
+)
+
 # raw HHI is not normalized by member count -> not cross-scope comparable
 # (PRD §7.9.3, 4A §4).  Both price and amount raw_hhi share this rule; only
 # CURRENT/D1/D3/D5/HISTORICAL_POSITION are allowed; PEER_POSITION must be
 # disabled.  normalized_hhi is cross-scope comparable and is NOT listed here.
+# Transition ratios are cross-scope comparable ratios (not raw counts) and are
+# intentionally NOT listed here.
 PEER_DISABLED_REASON_BY_PRIMITIVE: dict[str, str] = {
     "price_raw_hhi": "raw_hhi_not_cross_scope_comparable",
     "amount_raw_hhi": "raw_hhi_not_cross_scope_comparable",
@@ -161,20 +227,75 @@ def _clamp_0_100(value: float) -> float:
     return min(100.0, max(0.0, value))
 
 
-def extract_primitive(observation_payload: dict[str, Any], primitive: str) -> float | None:
-    """Extract one Phase-1 primitive from a canonical observation payload.
+def _extract_transition_ratio(
+    observation_payload: dict[str, Any],
+    container_path: tuple[str, ...],
+    transition_key: str,
+) -> float | None:
+    """Decode a transition ratio from L1's sparse transition container (4B §5).
 
-    Returns the finite numeric value, or None when the path is missing /
-    non-numeric / boolean / non-finite (-> unavailable, never 0).
+    Rules (frozen):
+      - walk ``container_path``; missing container -> None (unavailable);
+      - ``denominator`` absent / not finite / <= 0 -> None (unavailable);
+      - transition_key absent but denominator > 0 -> 0.0 (zero members migrated);
+      - transition_key present but malformed / ratio absent / non-finite -> None;
+      - ratio outside [0, 1] -> None.
+
+    L2 never recomputes ratio from count/denominator; it only interprets L1's
+    canonical sparse encoding.
     """
-    if primitive not in PRIMITIVE_PATHS:
-        raise KeyError(f"unknown evidence primitive: {primitive}")
     node: Any = observation_payload
-    for key in PRIMITIVE_PATHS[primitive]:
+    for key in container_path:
         if not isinstance(node, dict) or key not in node:
             return None
         node = node[key]
-    return _finite_number(node)
+    if not isinstance(node, dict):
+        return None
+
+    denominator = _finite_number(node.get("denominator"))
+    if denominator is None or denominator <= 0:
+        return None
+
+    item = node.get(transition_key)
+    if item is None:
+        # Sparse encoding: legal transition with valid denominator but no stored
+        # key means zero members made this migration.
+        return 0.0
+    if not isinstance(item, dict):
+        return None
+
+    ratio = _finite_number(item.get("ratio"))
+    if ratio is None:
+        return None
+    if ratio < 0.0 or ratio > 1.0:
+        return None
+    return ratio
+
+
+def extract_primitive(observation_payload: dict[str, Any], primitive: str) -> float | None:
+    """Extract one primitive (CORE scalar or Transition ratio) from a canonical payload.
+
+    Returns the finite numeric value, or None when the path is missing /
+    non-numeric / boolean / non-finite / denominator invalid (-> unavailable).
+    Sparse transition keys absent with a valid denominator decode to 0.0, not None.
+    """
+    scalar_path = PRIMITIVE_PATHS.get(primitive)
+    if scalar_path is not None:
+        node: Any = observation_payload
+        for key in scalar_path:
+            if not isinstance(node, dict) or key not in node:
+                return None
+            node = node[key]
+        return _finite_number(node)
+
+    transition_spec = TRANSITION_PRIMITIVE_SPECS.get(primitive)
+    if transition_spec is not None:
+        container_path, transition_key = transition_spec
+        return _extract_transition_ratio(
+            observation_payload, container_path, transition_key
+        )
+
+    raise KeyError(f"unknown evidence primitive: {primitive}")
 
 
 def compute_delta(current: float | None, reference: float | None) -> float | None:

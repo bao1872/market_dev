@@ -846,6 +846,22 @@ PRICE 是 Review 的 **最上层结果事实层**（result fact layer，不是 T
   跨 Scope 主表达为 **transition ratio**。raw count 可作为 evidence/explanation，**不是跨 Scope 比较 primitive**。
   新增/删除 membership 不得算成 transition；denominator = T 与 T-1 的 common valid members。
 
+  **Transition → Objective Evidence 合同（2026-08-13，第四阶段B 收口）**：
+
+  1. L1 Transition 不变：`Transition = member exact canonical T-1 → T categorical migration`，跨 Scope 主表达为 transition ratio；raw count 仅用于解释 / audit，不是跨 Scope 比较基础事实。
+  2. L2 Objective Evidence 对每个**合法 transition ratio** 计算：`Current` / `D1` / `D3` / `D5` / `Historical Position` / `Peer Position`。
+     - **Current**：今天 T-1 → T 的迁移比例。
+     - **D1/D3/D5**：今天该迁移比例 减去 exact D1/D3/D5 交易日对应的迁移比例（连续数值变化，不得命名为 acceleration / diffusion / improving 等状态）。
+     - **Historical**：今天该 transition ratio 在本 Scope 历史 transition ratio 中的位置。
+     - **Peer**：今天该 transition ratio 在同 family Scope 中的位置。
+  3. **合法 Transition 集合**（方向三状态 / Momentum 三状态，仅保留有方向变化的 6 项）：
+     Trend / Structure Swing / Structure Internal 各 6 项（Up→Neutral、Up→Down、Neutral→Up、Neutral→Down、Down→Up、Down→Neutral），Momentum 6 项（Expanding→Flat、Expanding→Contracting、Flat→Expanding、Flat→Contracting、Contracting→Expanding、Contracting→Flat）；共 **18 + 6 = 24** 个 transition ratio primitive。
+  4. **zero-transition 编码规则（冻结）**：L1 使用 sparse encoding（仅实际发生的非同态迁移产生 `"<From>→<To>": {"count":..., "ratio":...}`，容器另含 `denominator`）。
+     - A. `transition.denominator > 0` 且 key **不存在** → `count = 0`、`ratio = 0.0`（零成员发生该迁移，**不是**「没有数据」）。
+     - B. `transition.denominator <= 0` 或 denominator unavailable → `ratio = unavailable / None`。
+  5. **Stable state 不属于 Transition primitive**：`Up→Up` / `Neutral→Neutral` / `Down→Down`（Momentum 同理 Expanding→Expanding / Flat→Flat / Contracting→Contracting）已体现在 denominator 中，但**不是 transition event**，不得新增 stable ratio；transition **count 不进入** Evidence primitive。
+  6. 本轮**不创造**：improving / deteriorating、expanding / contracting diffusion label、strong / weak、opportunity / risk、score、ranking、Filter / Signal / Discovery。
+
 > **Diffusion 不作为独立 Observation / Change 概念（2026-08-12 正式移除）**：所谓「扩散 / 收缩」
 > 客观上是 State/Breadth 的 **D1/D3/D5 连续数值变化**，属于 **L2 Objective Evidence**：
 > 例如 Trend Up Breadth `T=0.62`、`T-1=0.54`，则 `D1 change = +0.08`。该连续变化已完整表达
