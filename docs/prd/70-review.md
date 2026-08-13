@@ -916,13 +916,16 @@ bullish-bearish / filter judgment / Discovery judgment。
 
 ---
 
-### 7.9 Canonical Scope Observation Facts — Exploration Persistence Contract
+### 7.9 Canonical Scope Observation Facts — Persistence Contract
 
-> **2026-08-12 需求收口（Round 1C-0，docs-only）**：本小节正式冻结 **Canonical Scope
-> Observation Facts** 的 **Exploration-stage persistence contract**。这是 **需求收口**，
-> 不是 production implementation、不是 migration、不是 DB design round，也不是
-> Filter / Discovery redesign。任何 physical schema / migration / API / frontend 形状
-> 仍 DEFER（见 §5.3 / §7.8.6）。
+> **2026-08-12 状态收口（Round 1C-0，docs-only）**：本小节描述 **Canonical Scope
+> Observation Facts** 的 **当前 Persistence Contract**。
+> Canonical Observation Fact Persistence **已经实现**（Round 1C = PASS），落地为
+> `review_scope_observation_facts`，business grain = `trade_date + scope_type + scope_key`；
+> 已完成 serialize / contract validation / upsert / read / idempotency（与 §7.8.6 一致）。
+> 本小节**不是新 schema 设计、不是 migration、不是 Filter / Discovery redesign**。
+> 仍 DEFER 的是 **consumer cutover**：legacy Filter / Discovery / Publication / API / Frontend
+> 尚未正式消费该 canonical path（见 §7.9.8），但 **persistence schema 本身已落地，不再 pending**。
 > 输入为 Round 1A（Canonical Observation Core）与 Round 1B（Real-Data Shadow
 > Verification，external verdict = PASS）已验证的客观事实。
 
@@ -1040,8 +1043,9 @@ Exploration 阶段只要求：对同一 `trade_date + scope_type + scope_key`，
 #### 7.9.8 与现有 layers 的关系
 
 当前 persistence 不改变 legacy：P/Q/U/C/V、Filter、Discovery、Publication、API、Frontend。
-Round 1C 初期仍为 **shadow path**：Canonical Observation Fact Snapshot **暂不**成为上述
-consumer 的正式输入。
+Canonical Observation Fact Snapshot 已实现并写入 `review_scope_observation_facts`，但 legacy consumer
+（Filter / Discovery / Publication / API / Frontend）**尚未正式 cutover** 到该 canonical path；
+这属 **consumer cutover pending**（DEFER），**不是** persistence schema pending。
 
 #### 7.9.9 Exploration boundary
 
@@ -2152,7 +2156,11 @@ Signal 空态（evidence 层）："今日未命中已配置偏差筛选器"。
 - 京东方属于显示面板行业；
 - 同时属于玻璃基板 Concept；
 - 显示面板行业无明显异常；
-- 玻璃基板 Concept 出现明显 P/Q/U/V + migration + volume 改善。
+- 玻璃基板 Concept 出现可解释的结构改善 Evidence，例如：
+  - PRICE Breadth 改善；
+  - TREND / STRUCTURE / MOMENTUM 的 State+Breadth / Transition 改善；
+  - PARTICIPATION 改善。
+  - 具体哪些 Evidence 成立、是否 mandatory，由 Filter / Discovery 正式条件决定（本场景不重新定义 threshold）。
 
 PRD 必须保证：玻璃基板可以独立被发现。不得因为显示面板没命中而漏掉。
 
@@ -2176,11 +2184,15 @@ PRD 必须保证：L2/L3 可以独立产生 Discovery。
 #### Case 4 — 集中度快速恶化
 
 假设：
-- Concentration 中 price/amount 集中度（HHI、Top5 contribution）相对稳定或下降；
-- PARTICIPATION 快速上升（成交/参与向少数 leader 集中，Volume/Amount 分布上移）；
+- PRICE / Trend breadth 收缩，或内部参与减弱；
+- PARTICIPATION 弱化（扩张不再成立，成交/参与向少数 leader 集中，Volume/Amount 分布上移）；
+- Price / Amount Concentration（HHI、Top5 contribution）上升；
 - leader-median gap（龙头与中位数在 Return Level / Breadth 上的差距）扩大。
 
 应能形成"行情向少数龙头收缩"类 Discovery。
+
+> 方向语义仅定义方向：breadth / participation 弱化 + concentration 上升 + leader-median gap 扩大。
+> 不定义具体 numeric threshold；不发明新的 HHI normalization；raw HHI 不用于跨 Scope absolute comparison。
 
 #### Case 5 — 多轴共振
 
@@ -2285,7 +2297,9 @@ Concept 强、Industry 普通。
 
 ## 23. P0 强化条款（review-1.1.0）
 
-> 本章节为 review-1.1.0 算法版本（CHANGE-20260730-014）追加的强制条款，是对 §7（P/Q/U/C/V 指标合同）、§11（任务编排与发布）、§6（Scope Discovery 模型）的补强。本章节条款优先级高于历史 §7/§11 的所有冲突描述。
+> 本章节为 review-1.1.0 算法版本（CHANGE-20260730-014）追加的强制条款，是对 §7（P/Q/U/C/V 指标合同）、§11（任务编排与发布）、§6（Scope Discovery 模型）的补强。本章节条款优先级高于历史 §7/§11 的**P/Q/U/C/V legacy baseline** 冲突描述。
+>
+> **2026-08-12 当前 authoritative publication contract**：当本 §23 legacy gate 与 §6.5.8 / §11.1 的 2026-08-12 当前 contract（含 industry_l1 / major_index / style 属 PROGRESSIVE OPTIONAL、数据不可用不阻塞 whole Review publication）冲突时，**以 §6.5.8 / §11.1 为当前 authoritative publication contract**。本 §23 不得重新覆盖 §6.5.8 / §11.1 的 progressive readiness 合同。
 
 > **2026-08-12 Observation Model 收口**：本章节及其后的 §24/§25/§26/§27 中所有 `P/Q/U/C/V`
 > 引用（含 §23.5 发布门禁 market P/Q/U/C/V value 非空、§24.3 P/Q/U/C/V 就绪状态合同、§25 raw/
@@ -2370,7 +2384,12 @@ concept/*
 3. **source_core_run_id 一致**：`market_review_runs.source_core_run_id` 必须等于当日已发布的 `stock_core` pointer 的 `data_run_id`；不一致拒绝发布。
 4. **无 failed signals**：`market_review_signals` 中不得存在 `status=failed` 的记录；存在 failed signal 拒绝发布。
 5. **无 failed run_items**：`market_review_run_items` 中不得存在 `status=failed` 的记录（`skipped` 允许，但必须记录原因）。
-6. **coverage_ratio >= 0.95**：market 范围 `coverage_ratio >= 0.95`，且 `industry_l1` ready 比例达到配置门槛。
+6. **coverage_ratio >= 0.95**：market 范围 `coverage_ratio >= 0.95`（market coverage hard gate）。
+
+   > **2026-08-12 progressive readiness 对齐（§11.1）**：`industry_l1` / `major_index` / `style`
+   > 属于 **PROGRESSIVE OPTIONAL**；其数据不可用**不得**阻塞 whole Review publication。旧规则
+   > "一级行业 ready 比例达到配置门槛"已**废止**。本条仅保留 market coverage hard gate，不再要求
+   > `industry_l1` ready 比例门槛。
 
 > **[P0 2026-08-04] 无未来数据门（历史基线 point-in-time）**：
 > 本 run 正常落库的当日观测（`trade_date == run.trade_date`）是**合法行为**，
