@@ -109,9 +109,6 @@ PRIMITIVE_PATHS: dict[str, tuple[str, ...]] = {
     "participation_amount_p75": ("participation", "amount", "p75"),
 }
 
-# Phase-1 primitive order for deterministic iteration / output.
-PRIMITIVE_NAMES: tuple[str, ...] = tuple(PRIMITIVE_PATHS)
-
 # ---------------------------------------------------------------------------
 # Transition primitives (4B §3/§4)
 # ---------------------------------------------------------------------------

@@ -769,11 +769,11 @@ CHIP
 >     concentration: ...
 > ```
 >
-> **禁止** 将其提升为独立顶层 `amount` canonical section。当前实现中存在 top-level `amount`
-> 属于 **已确认的 Architecture Drift / PRD→Code CONTRACT CONFLICT**（persistence 白名单
+> **禁止** 将其提升为独立顶层 `amount` canonical section。独立顶层 `amount` 曾为
+> **Architecture Drift / PRD→Code CONTRACT CONFLICT**（persistence 白名单
 > `CANONICAL_TOP_LEVEL_SECTIONS` 冻结了 top-level `amount` 只是实现历史，不能证明合规）。
-> 后续代码 slice 需要迁移：`top-level amount` → `price.amount`，并同步
-> core / persistence validator / tests / evidence paths；本轮仅冻结 target contract，不改动代码。
+> 该迁移 **已实现**：canonical top-level `amount` 已切除，Amount Contribution / Concentration
+> 归属 `price.amount` 嵌套结构；persistence validator 拒绝 legacy top-level `amount`；formal PG 已验证。
 
 ### 7.2 PRICE — 结果事实层
 
@@ -807,7 +807,7 @@ PRICE 是 Review 的 **最上层结果事实层**（result fact layer，不是 T
 > - zero_abs_return → raw + normalized = None
 > - zero_amount_total → raw + normalized = None
 > - 实现允许极小浮点误差在数学容差内 clamp 到 [0,1]，但**不得用 clamp 掩盖真实公式错误**。
-> 状态：**ACCEPTED**（已进入实现范围，第三阶段B 按此落地）。
+> 状态：**ACCEPTED 且已实现**（已进入实现范围并落地）。
 
 > **amount_share — MEMBER-LEVEL CANONICAL CONTRIBUTION EVIDENCE（2026-08-13 收口）**：
 > 1. **业务语义**：`amount_share` = member amount / Scope valid amount total（Scope 内有效成员 amount 之和）。**不是** amount concentration HHI，二者语义分开、禁止混淆。
@@ -827,7 +827,7 @@ PRICE 是 Review 的 **最上层结果事实层**（result fact layer，不是 T
 >      ```
 >      `price.amount` **不** 包含单个 `amount_share` scalar（未来若需 Top-N contribution summary，属单独产品/实现设计，不在本轮定义）。
 >    - **B. Member-level canonical contribution evidence**：`(member_id, amount, amount_share)` 属 **L1 客观事实体系**，但完整 member amount_share vector **不** 存进 `review_scope_observation_facts.observation_payload`；应由既有 member/component evidence ownership 承载（如 `ReviewMemberFact` 已有 `amount` 字段，可派生 amount_share），后续 Implementation Design 复用现有 member evidence，**不新建重复事实 owner、不新建表**。
-> 4. **当前状态**：Core 仅在内部 HHI 计算时产生 shares，尚无正式 `amount_share` 输出字段 → 属 L1 实现缺口，待第三阶段B 代码对齐（physical persistence owner 标记 **IMPLEMENTATION DESIGN REQUIRED**）。
+> 4. **当前状态**：Canonical Scope Core 已实现 `compute_member_amount_contributions()`；（`member_id`, `amount`, `amount_share`）已有唯一 Scope-relative compute owner；Amount HHI 复用同一份 `amount_share`，不存在第二套 share 计算。完整 member vector 仍**不** 进 `review_scope_observation_facts.observation_payload`；member-level physical persistence 仍标 **IMPLEMENTATION DESIGN REQUIRED**（计算 owner 已完成，持久化 owner 尚未定义，二者必须分开）。
 
 **三者语义必须分开、禁止混为一个指标**：
 - signed return contribution（谁推动/拖累收益）；
@@ -1076,10 +1076,10 @@ Observation persistence。L1 persistence 不保存任何独立 diffusion object�
 **Signed Return Contribution 继续 `PRD_CLARIFICATION_REQUIRED`**，不得在 persistence closure
 中自行定义其语义或字段。其代码 `status = prd_clarification_required` 与本条一致，属 **PASS-DEFERRED / PRD_CLARIFICATION_REQUIRED**，**不** 误报为 PRD→Code CONFLICT。
 
-> **L1 Canonical Observation 合同缺口（2026-08-13 收口，待第三阶段B 代码对齐）**：
-> - **Amount payload topology**：Amount Contribution / Concentration **必须** 归属 `price.amount` 嵌套结构，禁止独立顶层 `amount`（当前 top-level `amount` 为已确认 Architecture Drift；本轮仅冻结 target contract，不改代码）。
-> - **normalized HHI**：**ACCEPTED CONTRACT**（公式 `(raw_hhi - 1/N)/(1 - 1/N)`，边界已冻结 N=0/N=1/zero-total 均 unavailable）；第三阶段B 按此实现。
-> - **amount_share**：**MEMBER-LEVEL canonical contribution evidence**（`member_id, amount, amount_share`）；逻辑归属 PRICE→Amount Contribution，但完整 member vector 不进 scope observation_payload，复用既有 member evidence owner（如 `ReviewMemberFact`）；physical persistence 标 **IMPLEMENTATION DESIGN REQUIRED**。
+> **L1 Canonical Observation 合同收口状态（2026-08-13 收口，本论更新实现状态）**：
+> - **Amount payload topology**：Amount Contribution / Concentration **已** 归属 `price.amount` 嵌套结构，独立顶层 `amount` 已删除；canonical top-level amount 已切除；persistence validator 拒绝 legacy top-level amount；formal PG 已验证。
+> - **normalized HHI**：**ACCEPTED CONTRACT 已实现**（公式 `(raw_hhi - 1/N)/(1 - 1/N)`，边界 N<=1 / zero-total 均 unavailable 已落地并测试）；Price / Amount 均保存 raw + normalized。
+> - **amount_share**：**MEMBER-LEVEL canonical contribution evidence**（`member_id, amount, amount_share`）；逻辑归属 PRICE→Amount Contribution，完整 member vector 不进 scope observation_payload，复用既有 member evidence owner（如 `ReviewMemberFact`）；**compute owner 已完成**，member-level physical persistence 仍标 **IMPLEMENTATION DESIGN REQUIRED**。
 
 #### 7.9.4 No subjective persistence
 
