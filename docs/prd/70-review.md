@@ -27,14 +27,20 @@ Review 新业务链为：
 第一金字塔与历史状态
 → Scope PIT membership
 → Price / Amount facts
-→ Scope Observation（PRICE / TREND / STRUCTURE / MOMENTUM / PARTICIPATION / CHIP-if-available）
-→ State / Transition / Diffusion + Contribution / Concentration facts
-→ Evidence
-→ Discovery 聚合（Discovery = user-level market finding）
+→ Canonical Scope Observation（PRICE / TREND / STRUCTURE / MOMENTUM / PARTICIPATION / CHIP-if-available）
+→ Objective Evidence（Current / D1 / D3 / D5 / Historical Position / Same-family Peer Position）
+→ [Discovery Product Design — NOT YET FROZEN]
 → Cross-Scope Relation 分析
 → 归因与个股验证
 → 用户追踪
 → 次日状态复核与历史反馈
+
+> **2026-08-12 边界收口（Round 2C-0/2C-1）**：Review V2 当前正式冻结的事实链只到
+> **Canonical Scope Observation → Objective Evidence**。Observation / Evidence 层只记录和派生
+> **客观事实**，不把连续事实过早离散化。Objective Evidence 之后如何组织成 Discovery，
+> **当前未冻结（PRODUCT DESIGN REQUIRED / NOT YET FROZEN）**，不在本轮或任何实现轮次中
+> 自行补成 "Filter Engine → threshold condition → matched/unmatched → Atomic Signal → A/B/C/D family"
+> 的必经目标架构。实现阶段不得从 legacy 架构推导 "Filter 是下一必做模块"。
 
 ## 1. 产品目标与边界
 
@@ -76,19 +82,17 @@ D. Scope PIT membership（per-trade-date，point-in-time）
 所有 Scope Family 独立平行计算：
   market / major_index/* / style/* / industry_l1/* / industry_l2/* / industry_l3/* / concept/*
         ↓
-生成每个 Scope 的 Observation facts：
+生成每个 Scope 的 Canonical Observation facts：
   PRICE（Return Level / Distribution / Breadth / Contribution / Concentration / Amount）
-  TREND / STRUCTURE / MOMENTUM（State+Breadth / Transition / Diffusion[PROVISIONAL]）
+  TREND / STRUCTURE / MOMENTUM（State+Breadth / Transition）
   PARTICIPATION（Volume / Amount threshold-free distribution）
   CHIP（if available；否则 UNRESOLVED）
         ↓
-State / Transition / Diffusion + Contribution / Concentration facts
+L1 Canonical Observation 只保存目标交易日 T 的原始客观事实（不保存 D1/D3/D5 变化、历史/横截面分位、diffusion state、score、Filter/Discovery 判定）
         ↓
-运行 Filter Engine（A/B/C/D 作为内部 Evidence Family；threshold 依赖 Observation Evidence）
+Objective Evidence 派生（Current / D1 / D3 / D5 / Historical Position / Same-family Peer Position；连续数值变化，不离散化为独立 Diffusion 对象）
         ↓
-Signal = atomic evidence 生成
-        ↓
-Discovery 聚合（多个 Signal → 一个 Discovery）
+[Discovery Product Design — NOT YET FROZEN]
         ↓
 Cross-Scope Relation 分析
         ↓
@@ -507,9 +511,9 @@ members
    ↓
 Scope Observation facts（PRICE / TREND / STRUCTURE / MOMENTUM / PARTICIPATION / CHIP-if-available）
    ↓
-State / Transition / Diffusion + 历史位置 / 横截面位置
+State/Breadth + Transition + 历史位置 / 横截面位置（由 L2 Objective Evidence 派生）
    ↓
-Discovery Evidence
+[Discovery Product Design — NOT YET FROZEN]
 ```
 
 任何 scope 都不得因为另一个 scope 未命中、无异常、未发布 discovery 而失去自身参与发现的资格。
@@ -540,7 +544,7 @@ Scope membership 只回答：
 每一个正式 discovery scope 都必须独立产生：
 
 - **PRICE** facts：Return Level / Return Distribution / Price Breadth / Signed Return Contribution / Price Concentration / Amount Contribution·Concentration
-- **TREND / STRUCTURE / MOMENTUM** facts：State+Breadth（categorical distribution）· Transition（ratio）· Diffusion（PROVISIONAL）
+- **TREND / STRUCTURE / MOMENTUM** facts：State+Breadth（categorical distribution）· Transition（ratio）
 - **PARTICIPATION** facts：Volume / Amount threshold-free distribution
 - **CHIP**：if available；否则 UNRESOLVED
 - 每个 Observation fact 的 raw value（当前日原始聚合值）
@@ -732,17 +736,14 @@ PRICE
 TREND
   - State + Breadth
   - Transition
-  - Diffusion [PROVISIONAL]
 
 STRUCTURE
   - State + Breadth
   - Transition
-  - Diffusion [PROVISIONAL]
 
 MOMENTUM
   - State + Breadth
   - Transition
-  - Diffusion [PROVISIONAL]
 
 PARTICIPATION
   - Volume Participation Distribution
@@ -783,11 +784,18 @@ PRICE 是 Review 的 **最上层结果事实层**（result fact layer，不是 T
 - **State + Breadth（CORE）**：State categorical distribution **本身即 Breadth**。例如 Trend 的
   Up / Neutral / Down，Scope observation 使用各状态成员占比。**不再定义独立 Breadth Score。**
   同理 Structure、Momentum 使用各自合法 categorical state 的完整分布。`neutral` / `flat` 是合法状态，不是 invalid。
+  State/Breadth 是 **L1 当前日原始分布**，只保存在 Canonical Observation 中。
 - **Transition（CORE）**：`Transition = member exact canonical T-1 → T state migration`。
   跨 Scope 主表达为 **transition ratio**。raw count 可作为 evidence/explanation，**不是跨 Scope 比较 primitive**。
   新增/删除 membership 不得算成 transition；denominator = T 与 T-1 的 common valid members。
-- **Diffusion（PROVISIONAL）**：当前候选 `D1 / D3 / D5`，定义为 State/Breadth distribution 随时间的变化。
-  **不删除、不宣布完全验证、不在正式 PRD 选择最佳 horizon。** 原因：历史 PIT membership 数据不足（Q3 INCONCLUSIVE）。
+
+> **Diffusion 不作为独立 Observation / Change 概念（2026-08-12 正式移除）**：所谓「扩散 / 收缩」
+> 客观上是 State/Breadth 的 **D1/D3/D5 连续数值变化**，属于 **L2 Objective Evidence**：
+> 例如 Trend Up Breadth `T=0.62`、`T-1=0.54`，则 `D1 change = +0.08`。该连续变化已完整表达
+> 所谓「扩散 / 收缩」，不得再将其离散化为 `EXPANDING / CONTRACTING / STABLE` 的
+> **diffusion state**，不得定义 **diffusion threshold / diffusion score / diffusion persistence object**。
+> 「参与正在扩散」「集中度扩散」等**可作为未来用户解释语言（Discovery / Presentation layer）**，
+> 但不得反向创建新的 Canonical Observation primitive，也不得规定多少 pct 才算扩散。
 
 ### 7.4 PARTICIPATION
 
@@ -821,8 +829,12 @@ chip-like historical field 数据不足（Q7 INCONCLUSIVE）。
 
 ### 7.7 Observation Model 与 Evidence
 
-Scope Observation facts 是 Evidence / Signal / Discovery 的底层事实来源。Filter 与 Discovery 只消费
-**structured Observation Evidence**，不依赖 P/Q/U/C/V score。
+Scope Observation facts 是 **Objective Evidence** 的底层事实来源（L1 → L2）。L2 Objective Evidence
+只消费 structured Observation facts，**不依赖 P/Q/U/C/V score**。
+
+> **Filter / Signal 不是 V2 必经目标架构（2026-08-12）**：Objective Evidence 之后如何组织成
+> Discovery 当前 **NOT YET FROZEN**。本 PRD 不预设必须经过 Filter Engine / threshold condition /
+> matched-unmatched / Atomic Signal / A/B/C/D family（详见 §8）。
 
 ### 7.8 Scope Architecture Contract（Scope Family 可扩展性与 Canonical Observation ownership）
 
@@ -979,7 +991,8 @@ trade_date + scope_type + scope_key  →  one Canonical Observation Fact Snapsho
 - readiness；
 - diagnostics。
 
-**Diffusion 当前不要求 persistence**（仍 PROVISIONAL 且未实现）。
+跨期 State/Breadth change（D1/D3/D5 等连续数值变化）属于 **L2 Objective Evidence**，不属于 L1 Canonical
+Observation persistence。L1 persistence 不保存任何独立 diffusion object。
 
 **Signed Return Contribution 继续 `PRD_CLARIFICATION_REQUIRED`**，不得在 persistence closure
 中自行定义其语义或字段。
@@ -1057,39 +1070,55 @@ Canonical Observation Fact Persistence 已实现并冻结（`review_scope_observ
 
 ---
 
-## 8. Filter Engine（内部 Evidence Family）
+## 8. Legacy Filter / Signal Compatibility（非 V2 目标架构）
 
-A/B/C/D 继续作为**内部算法 family**，但不再作为用户前端一级信息架构。
+> **2026-08-12 架构降级（Round 2C-1 Specification Repair）**：本节所述 A/B/C/D Filter、`filter_engine`、
+> `MarketReviewSignal` 等属于 **legacy implementation compatibility**，**不定义** Scope Observation Model V2
+> 的目标发现架构。当前 V2 正式冻结边界停在：
+>
+> **Canonical Scope Observation → Objective Evidence**
+>
+> 以下全部 **NOT YET FROZEN（PRODUCT DESIGN REQUIRED）**，不在本轮冻结、也不在实现轮次中自行推导：
+> - 是否需要独立 Filter Engine；
+> - 是否需要 threshold condition；
+> - 是否需要 matched / unmatched；
+> - 是否必须存在 Atomic Signal；
+> - Discovery 是否必须聚合 Signal；
+> - 是否继续使用 A/B/C/D family；
+> - Discovery 的排序 / 聚类 / 异常组织机制。
+>
+> **禁止 Implementation 阶段从 legacy 架构推导「Filter 是下一必做模块」。**
 
-**定位变更（2026-08-11）：**
+A/B/C/D 当前作为**内部算法 family** 继续存在以维持现有实现兼容，但不再作为用户前端一级信息架构，
+也不作为 V2 目标发现路径。
 
-- A/B/C/D 是 Filter Engine 内部的算法分类，不是前端一级产品结构。
+**历史定位（2026-08-11，仅作 legacy 说明）：**
+
+- A/B/C/D 是 legacy Filter Engine 内部的算法分类，不是前端一级产品结构。
 - 前端不再按 A/B/C/D 分组展示，转用用户语义（状态/改善/恶化/扩散/收缩/异常/共振）。
-- D Family（state migration / freshness / diffusion / concentration / relative strength）定位为 **Discovery Evidence Family**，不是独立 Signal Family。
-- `MarketReviewSignal` 保留为 atomic evidence record；新的 `Discovery` domain object 负责 user-level finding 聚合。
+- D Family（state migration / freshness / diffusion / concentration / relative strength）定位为 legacy **Discovery Evidence Family**，不是独立 Signal Family。
+- `MarketReviewSignal` 保留为 legacy atomic evidence record；新的 `Discovery` domain object 负责 user-level finding 聚合。
 
 **Observation Model 收口（2026-08-12）：**
 
-- Filter / Discovery **只消费 structured Observation Evidence**（§7 Scope Observation Model），
+- Legacy Filter / Discovery 应只消费 structured Observation Evidence（§7 Scope Observation Model），
   不得依赖 P/Q/U/C/V score 作为 first-layer observation。
 - 以下 **A/B/C 初始阈值**（§8.1–8.3）当前以 `P/Q/U/C/V` 分位/`value` 表达，属于对
-  P/Q/U/C/V first-layer 的硬依赖，**标记 `IMPLEMENTATION_REDESIGN_REQUIRED`**：
-  必须在 Implementation Design 中把条件改写为对 Observation facts（PRICE Return
-  Level/Distribution/Breadth、Concentration、PARTICIPATION distributions 等）的 structured
-  条件，**不得现场发明新 P/Q/U/C/V 阈值**。
+  P/Q/U/C/V first-layer 的硬依赖，**标记 `LEGACY IMPLEMENTATION REFERENCE / NOT V2 TARGET SPEC`**：
+  它们是既有实现的历史说明，**不得作为新实现要求**，不得现场发明新 P/Q/U/C/V 阈值。
 - D 族（state migration / freshness / diffusion / concentration / relative strength）消费
-  **第二金字塔 raw evidence**（非 P/Q/U/C/V score），保持不变。
+  **第二金字塔 raw evidence**（非 P/Q/U/C/V score），保持不变（legacy）。
 - 具体 Observation-based Filter 条件（含任何 threshold / archetype）若 PRD 当前尚未正式冻结定义，
-  明确标记为 **IMPLEMENTATION_DESIGN_REQUIRED** / **NOT YET FROZEN**，由后续实现设计在真实数据回放基础上确定；
-  本 PRD **不** 自行定义 `BREADTH_EXPANSION` / `PARTICIPATION_CONFIRMATION` / `delta > 0` 等未经
-  accepted experiment 验证的具体规则（这些曾于 Round 2B-0 Design Audit 提议，不属于当前 accepted 业务结论）。
+  明确标记为 **IMPLEMENTATION_DESIGN_REQUIRED / NOT YET FROZEN**，由后续 **Discovery Product Design**
+  在真实数据回放基础上确定；本 PRD **不** 自行定义 `BREADTH_EXPANSION` / `PARTICIPATION_CONFIRMATION` / `delta > 0`
+  等未经 accepted experiment 验证的具体规则（这些曾于 Round 2B-0 Design Audit 提议，不属于当前 accepted 业务结论）。
 
 ### 8.1 A类：表面表现与内部质量偏差 — IMPLEMENTATION_REDESIGN_REQUIRED
 
-> **2026-08-12**：A 类条件原以 `P.value / P.historyPercentile120d / Q.delta1d / U.delta1d`
-> 表达，依赖已废弃的 P/Q/U/C/V first-layer。需改写为对 §7 Observation facts 的条件
-> （surface strong = PRICE Return Level/Breadth 高；internal weak = State+Breadth 恶化等）。
-> 本 PRD **不** 定义新阈值；具体条件在 Implementation Design 中确定。
+> **2026-08-12（LEGACY IMPLEMENTATION REFERENCE / NOT V2 TARGET SPEC）**：A 类条件原以
+> `P.value / P.historyPercentile120d / Q.delta1d / U.delta1d` 表达，依赖已废弃的 P/Q/U/C/V
+> first-layer。这是 **legacy 实现历史说明，不得作为新实现要求**。新 V2 是否仍有 A 类条件、
+> 条件形态如何，属于 NOT YET FROZEN 的 Discovery Product Design，本 PRD 不定义新阈值。
 
 **A1 surface_strong_internal_weak**
 
@@ -1115,8 +1144,9 @@ coverage >= 0.95
 
 ### 8.2 B类：当前状态与变化速度偏差 — IMPLEMENTATION_REDESIGN_REQUIRED
 
-> **2026-08-12**：B 类依赖 P/Q/U/C/V 历史分位与 1 日变化分位，需改写为对 Observation facts
-> 的状态与 Transition 条件。本 PRD **不** 定义新阈值；REDESIGN REQUIRED。
+> **2026-08-12（LEGACY IMPLEMENTATION REFERENCE / NOT V2 TARGET SPEC）**：B 类依赖 P/Q/U/C/V 历史分位与
+> 1 日变化分位，是 legacy 实现历史说明，**不得作为新实现要求**。新 V2 是否仍有 B 类条件属于 NOT YET
+> FROZEN 的 Discovery Product Design，本 PRD 不定义新阈值。
 
 **B1 high_level_slowing**
 
@@ -1135,8 +1165,9 @@ Q与U的1日变化分位>=70
 
 ### 8.3 C类：成交、参与与集中度偏差 — IMPLEMENTATION_REDESIGN_REQUIRED
 
-> **2026-08-12**：C 类依赖 V/U/C 分位，需改写为对 PARTICIPATION distributions 与 Price/Amount
-> Concentration facts 的条件。本 PRD **不** 定义新阈值；REDESIGN REQUIRED。
+> **2026-08-12（LEGACY IMPLEMENTATION REFERENCE / NOT V2 TARGET SPEC）**：C 类依赖 V/U/C 分位是 legacy
+> 实现历史说明，**不得作为新实现要求**。新 V2 是否仍有 C 类条件属于 NOT YET FROZEN 的 Discovery Product
+> Design，本 PRD 不定义新阈值。
 
 **C1 volume_without_breadth**
 
@@ -1364,11 +1395,15 @@ Relation 是 Discovery 后的关系解释，不是 Scope 之间新的计算 gate
 
 这是 Review Discovery 的 P0 原则。
 
-> **2026-08-12 Observation Model 收口**：State / Change / Anomaly **不再定义为 P/Q/U/C/V score
-> 的变化**，改以结构化 Observation facts 表达（§7）：
-> - **State** = 当前 structured Observation（如 Price Breadth、State+Breadth categorical distribution、Concentration、Participation distribution）；
-> - **Change** = Transition / Diffusion / observation change facts（member exact T-1 → T 状态迁移、分布随时间变化）；
-> - **Anomaly** = 相对于历史 / comparable cohort 的异常 evidence。
+> **2026-08-12 Observation Model 收口（Diffusion 已移除）**：State / Change / Anomaly **不再定义为
+> P/Q/U/C/V score 的变化**，改以结构化 Observation facts 表达（§7）：
+> - **State** = 当前 Canonical Observation 客观事实（如 Price Breadth、State+Breadth categorical
+>   distribution、Concentration、Participation distribution）；
+> - **Change** = 两类客观变化：
+>   1. **exact canonical T-1 → T member Transition**（member 状态迁移）；
+>   2. **同一 Observation fact 在 exact historical horizons 上的连续数值变化**（D1 / D3 / D5 等，由 L2 Objective Evidence 表达）。
+>   不得存在独立的 **diffusion state**；所谓「扩散 / 收缩」是 State/Breadth 跨期连续变化的解释性语言，不是 underlying observation primitive。
+> - **Anomaly** = 当前事实或变化相对于 **自身历史** 或 **same-family comparable peer cohort** 的相对位置。
 > **不设计新的 anomaly score**；具体统计公式（1D/5D change、历史分位、横截面分位）如尚未验证，
 > **DEFER 到 algorithm implementation**。
 
@@ -1390,13 +1425,12 @@ State 可以作为证据。但：**静态 State 不得默认生成用户可见 D
 Change 描述：**今天相对昨天发生了什么。**
 
 例如：
-- 集中度快速上升
-- 参与度扩张
-- 结构破坏开始扩散
-- 动量增强成员增加
-- 龙头与跟随开始同步
+- 集中度快速上升（Concentration State/Breadth 的 D1/D3/D5 连续变化）
+- 参与度扩张（Participation distribution 跨期连续变化）
+- 动量增强成员增加（Momentum State/Breadth 跨期连续变化）
+- 龙头与跟随开始同步（Transition ratio 跨期变化）
 
-Change 可以形成 Discovery Candidate。
+Change 可以形成 Discovery Candidate。上述「扩张 / 上升」均指 **L2 Objective Evidence 的连续数值变化**，不得离散化为独立 diffusion state。
 
 ### 10.3 Anomaly（异常）
 
@@ -1418,14 +1452,25 @@ Anomaly 描述：**这个变化相对自身历史或同类范围是否异常。*
 
 ## 10A. Signal 与 Discovery 分层
 
-### 10A.1 正式定义
+### 10A.1 历史定义（Legacy Compatibility，非 V2 强制架构）
 
-- **Signal = atomic evidence**（原子证据）：Filter Engine 命中的单条技术信号，包含触发条件、metric 值和历史分位。
-- **Discovery = user-level market finding**（用户级市场发现）：聚合多个 Signal 形成的一条用户可理解的市场发现。
+> **2026-08-12（Round 2C-1 降级）**：以下 Signal / Discovery 分层定义属于 **legacy implementation
+> compatibility**。**V2 当前只正式定义 Discovery = user-level market finding，且必须能够追溯到
+> Canonical Observation / Objective Evidence**。以下全部 **NOT YET FROZEN**：
+> - Discovery 是否必须由 Signal 聚合；
+> - Signal 是否必须存在；
+> - Signal 是否由 Filter 产生；
+> - Filter 是否存在；
+> - Evidence aggregation topology。
+>
+> 现有 `MarketReviewSignal` 可继续兼容，但**不得反向约束**新 V2 architecture。
 
-### 10A.2 关系
+- **Signal（legacy）** = atomic evidence：legacy Filter Engine 命中的单条技术信号，包含触发条件、metric 值和历史分位。
+- **Discovery = user-level market finding**（用户级市场发现）：可追溯到 Objective Evidence 的用户可理解市场发现。
 
-一个 Scope 可以同时命中多个内部 Signal：
+### 10A.2 关系（Legacy 说明）
+
+在 legacy 实现中，一个 Scope 可同时命中多个内部 Signal：
 
 例如：
 ```
@@ -1436,7 +1481,7 @@ event_freshness_high
 relative_strength_strong
 ```
 
-用户侧应聚合成一个 Discovery，而不是五条重复 Signal。
+legacy 用户侧聚合成一个 Discovery，而不是五条重复 Signal。
 
 例如：
 > **玻璃基板：内部参与扩张，结构修复加速，相对市场强度上升。**
@@ -1550,16 +1595,21 @@ Legacy Signal tracking 可以兼容保留。
 stock_core published
 → board_analysis published
 → create market_review_run
-→ compute ALL scope metrics 并行（market / major_index/* / style/* / industry_l1/* / industry_l2/* / industry_l3/* / concept/*）
-→ evaluate filters（A/B/C/D 作为 Evidence Engine）
-→ generate Signal records（atomic evidence）
-→ aggregate Discovery candidates
+→ compute ALL scope Canonical Observations 并行（market / major_index/* / style/* / industry_l1/* / industry_l2/* / industry_l3/* / concept/*）
+→ persist Canonical Observation Facts
+→ compute Objective Evidence（Current / D1 / D3 / D5 / Historical Position / Same-family Peer Position）
+→ [Discovery consumer path — NOT YET FROZEN]
 → compute Cross-Scope Relations
 → compute attributions + representative instruments
 → evaluate active trackings
 → quality gate
 → publish review pointer
 ```
+
+> **2026-08-12（Round 2C-1）**：上述 target behavior 中 `persist Canonical Observation Facts` 与
+> `compute Objective Evidence` 已正式冻结；`[Discovery consumer path]` **未冻结**，实现阶段不得
+> 假装中间 Discovery algorithm（Filter / Signal / 聚合）已经冻结，不得强制 evaluate filters →
+> generate Signal → aggregate Discovery 为必经步骤。
 
 要求：
 
@@ -1697,8 +1747,8 @@ GET /api/v1/review/{trade_date}/scopes
 - page_size
 - include_partial=false
 
-返回每个范围的 **Scope Observation facts**（§7：PRICE / State+Breadth / Transition / Diffusion /
-Participation）、变化、历史分位和命中数量。（旧 P/Q/U/C/V 聚合变量不作为 first-layer observation 返回。）
+返回每个范围的 **Scope Observation facts**（§7：PRICE / State+Breadth / Transition /
+Participation）、Objective Evidence（D1/D3/D5 / Historical / Peer 连续变化）与命中数量。（旧 P/Q/U/C/V 聚合变量不作为 first-layer observation 返回。）
 
 ### 12.3 信号（Signal = atomic evidence）
 
@@ -2079,7 +2129,7 @@ Signal 空态（evidence 层）："今日未命中已配置偏差筛选器"。
 ### 19.1 后端单元测试
 
 - component registry映射；
-- **Scope Observation facts 计算**（§7：PRICE / State+Breadth / Transition / Diffusion / Participation；
+- **Scope Observation facts 计算**（§7：PRICE / State+Breadth / Transition / Participation；
   旧 P/Q/U/C/V 计算为 legacy baseline，映射 DEFER 到 implementation）；
 - 历史分位不足；
 - State / Change / Anomaly 分离；
@@ -2257,13 +2307,18 @@ Concept 强、Industry 普通。
 - Canonical Observation Fact Persistence（`review_scope_observation_facts`，trade_date + scope_type + scope_key）
 - L2 Objective Evidence Engine（CURRENT / D1 / D3 / D5 / HISTORICAL POSITION / PEER POSITION，Round 2A = PASS）
 
-**NEXT：**
+**NEXT（Product Design Question，非 Implementation Task）：**
 
-- Filter Engine redesign（legacy A/B/C 改写到 Observation-based structured conditions；具体条件 IMPLEMENTATION_DESIGN_REQUIRED / NOT YET FROZEN）
-- Signal / Discovery integration（atomic `MarketReviewSignal` → user-level `Discovery` 聚合）
-- Cross-Scope Relation / Attribution
-- API / Frontend cutover（Discovery Workspace / Evidence Drawer / Representative Instruments）
-- Legacy P/Q/U/C/V Filter / Discovery cleanup
+> **2026-08-12（Round 2C-1）**：当前下一产品阶段应表述为
+> **「Objective Evidence / 全市场事实表达完整性收口，并进入 Discovery 产品问题定义」**。
+> 本轮**不得开始设计 Discovery**。Discovery Product Design = **NEXT PRODUCT DESIGN QUESTION**，
+> **不是**「Filter Implementation = NEXT IMPLEMENTATION TASK」。V2 正式冻结边界停在
+> Canonical Observation → Objective Evidence。
+
+- Discovery 产品问题定义（如何从 Objective Evidence 组织出 user-level finding；是否需 Filter/Signal、聚合拓扑、排序聚类机制 —— 全部 NOT YET FROZEN）
+- Cross-Scope Relation / Attribution（可独立于 Discovery 设计推进）
+- API / Frontend cutover（Discovery Workspace / Evidence Drawer / Representative Instruments —— 待 Discovery 设计冻结后）
+- Legacy P/Q/U/C/V Filter / Discovery cleanup（待新路径验收后）
 
 **P0-A：Scope 平行化 + A/B/C Corrective + 排序修复**
 
