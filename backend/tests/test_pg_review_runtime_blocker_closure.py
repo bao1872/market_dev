@@ -1282,8 +1282,9 @@ async def test_query2_projected_result_supports_build_stock_state() -> None:
         # 生产函数签名 (snapshot, run, symbol) —— 与 test drift 修复保持一致。
         state = build_stock_state(snapshot, run, symbol)
         assert state is not None
+        # StockState 真实字段为 symbol / sourceRunId / ...（无 instrument_id）。
         assert state.symbol == symbol
-        assert state.instrument_id == snapshot.instrument_id
+        assert state.sourceRunId == str(run.id)
 
 
 # =====================================================================

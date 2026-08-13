@@ -158,3 +158,11 @@
 - **D. formal PG 执行（待跑）**
   - push 后使用新 40 位 SHA 跑：`scripts/ops/panji-verify run --sha <SHA> --plan targeted-pg`。
   - 须从 evidence 确认 `test_review_observation_persistence_pg.py` 被 collected；该文件 failed=errors=skipped=0；关键合同（insert / idempotent update / date|scope|family isolation / diagnostics+readiness round-trip / legacy P/Q/U/C/V isolation / price.amount topology / normalized HHI JSONB round-trip / legacy top-level amount rejected）逐项通过；原 stale `build_stock_state` test 现 PASS；整体 gate passed>0 且 skipped=failed=errors=0 方为 PG PASS。
+- **E. 首次 formal PG 结果（attempt verify-7721119efe59-1786598112-8ae67179，SHA 7721119）**
+  - `pg_tests` gate：FAIL，**1 failed, 31 passed, 5 deselected**。
+  - **关键确认**：`test_review_observation_persistence_pg.py` 已被 collected 并运行（31 passed 含其全部用例）→ 注册生效，非"未被收集"。
+  - **唯一失败**：`test_pg_review_runtime_blocker_closure.py::test_query2_projected_result_supports_build_stock_state`。
+  - **根因（本轮 stale test 修复不完整，属 XII-B）**：该 test 除签名漂移外，还有错误历史字段断言 `assert state.instrument_id == snapshot.instrument_id`；但生产 `StockState`（`backend/app/schemas/stock_state.py`）真实字段为 `symbol / asOf / sourceRunId / version / computedAt / structure / momentum / volatility / evidence / degradedReasons`，**无 `instrument_id`**。签名修复后该行仍 AttributeError。
+  - **二次 test 修复（仅改 test，不改动生产业务代码）**：删除 `state.instrument_id` 断言，改为 `assert state.symbol == symbol` 与 `assert state.sourceRunId == str(run.id)`（均为 `StockState` 真实字段）。
+  - **生产业务代码零修改**（含 `StockState`、`build_stock_state` 均未动）。
+  - 待二次 push 后重跑同一 SHA 的 targeted-pg 以确认 gate 全绿。
