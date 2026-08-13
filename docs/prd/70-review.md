@@ -757,6 +757,24 @@ CHIP
 > **说明**：Concentration / Contribution 直接属于 PRICE 内部事实，**不** 单列第二个
 > `CONCENTRATION_CONTRIBUTION` 顶层模块，避免重复模型入口。
 
+> **Canonical payload topology（2026-08-13 合同冻结）**：
+> Amount Contribution / Concentration 是 **PRICE 内部事实**，其 canonical payload 位置
+> **必须** 嵌套在 `price` 之下，即：
+>
+> ```text
+> price:
+>   ...
+>   amount:
+>     contribution: ...
+>     concentration: ...
+> ```
+>
+> **禁止** 将其提升为独立顶层 `amount` canonical section。当前实现中存在 top-level `amount`
+> 属于 **已确认的 Architecture Drift / PRD→Code CONTRACT CONFLICT**（persistence 白名单
+> `CANONICAL_TOP_LEVEL_SECTIONS` 冻结了 top-level `amount` 只是实现历史，不能证明合规）。
+> 后续代码 slice 需要迁移：`top-level amount` → `price.amount`，并同步
+> core / persistence validator / tests / evidence paths；本轮仅冻结 target contract，不改动代码。
+
 ### 7.2 PRICE — 结果事实层
 
 PRICE 是 Review 的 **最上层结果事实层**（result fact layer，不是 Trend score）。
@@ -771,6 +789,24 @@ PRICE 是 Review 的 **最上层结果事实层**（result fact layer，不是 T
   raw HHI 保留单 Scope 时间变化解释价值；normalized HHI 用于跨不同成员数 Scope 比较。**不得平均二者，不制造 Concentration Score。**
 - **Amount Contribution / Concentration**（CORE）：`amount_share` 与 `amount_contribution_hhi`（raw + normalized）。
   Amount universe 独立（仅需 amount 非空，不要求 T-1 return）。
+
+> **normalized HHI 公式状态 — PROPOSED FOR PRODUCT CONFIRMATION（2026-08-13）**：
+> 全仓库检索：**未发现已被正式采用的 normalized HHI 数学定义**（`scope_evidence.py` 仅注释
+> "raw HHI is not normalized by member count → not cross-scope comparable"，无公式）。
+> 因此本轮**不擅自**将以下公式标为最终 accepted contract，仅作为最小候选供产品确认：
+>
+> 对于 N > 1：
+> ```text
+> normalized_hhi = (raw_hhi - 1/N) / (1 - 1/N)
+> ```
+> 目标语义：equal contribution → 0；single-member concentration → 1；去除 scope member-count 对 raw HHI 下限的机械影响；用于不同成员数 Scope 比较。
+> 候选边界（待确认）：N = 0 → UNAVAILABLE；N = 1 → normalized_hhi = 1（或 UNAVAILABLE，待定）；zero_abs_return / zero_amount → raw_hhi = None → normalized = None；raw_hhi unavailable → normalized = None。
+> **FORMULA_CONFIRMATION_REQUIRED**：用户确认前，上述公式仅为 PROPOSED，不得进入实现或伪装为 accepted。
+
+> **amount_share 合同冻结（2026-08-13）**：
+> 1. **业务语义**：`amount_share` = member amount / Scope valid amount total（Scope 内有效成员 amount 之和），**不是** amount concentration HHI，二者语义分开、禁止混淆。
+> 2. **owner**：`amount_share` 是 Scope aggregate payload 的 PRICE 内部事实（位于 `price.amount.contribution`），**不** 在 Canonical Observation payload 中持久化完整 member share vector。完整 member-level share 事实应优先复用已有 member evidence ownership（如 per-member amount 已在 member evidence 中），避免重复保存同一份成员事实；physical representation 标 **IMPLEMENTATION DESIGN**，本轮不发明复杂 schema。
+> 3. **当前状态**：Core 仅在内部 HHI 计算时产生 shares，尚无正式 `amount_share` 输出字段 → 属 L1 实现缺口，待第三阶段B 代码对齐。
 
 **三者语义必须分开、禁止混为一个指标**：
 - signed return contribution（谁推动/拖累收益）；
@@ -995,7 +1031,12 @@ trade_date + scope_type + scope_key  →  one Canonical Observation Fact Snapsho
 Observation persistence。L1 persistence 不保存任何独立 diffusion object。
 
 **Signed Return Contribution 继续 `PRD_CLARIFICATION_REQUIRED`**，不得在 persistence closure
-中自行定义其语义或字段。
+中自行定义其语义或字段。其代码 `status = prd_clarification_required` 与本条一致，属 **PASS-DEFERRED / PRD_CLARIFICATION_REQUIRED**，**不** 误报为 PRD→Code CONFLICT。
+
+> **L1 Canonical Observation 合同缺口（2026-08-13 冻结，待第三阶段B 代码对齐）**：
+> - **Amount payload topology**：Amount Contribution / Concentration **必须** 归属 `price.amount` 嵌套结构，禁止独立顶层 `amount`（当前 top-level `amount` 为已确认 Architecture Drift；本轮仅冻结 target contract，不改代码）。
+> - **normalized HHI**：PRD 已命名 `price_contribution_hhi_normalized` / `amount_contribution_hhi_normalized`，但**公式未定**——本轮提供 PROPOSED 候选（`(raw_hhi - 1/N)/(1 - 1/N)`），状态 **FORMULA_CONFIRMATION_REQUIRED**，未确认前不得进入实现。
+> - **amount_share**：语义冻结为 member amount / Scope valid amount total，owner 为 `price.amount.contribution`；physical representation 标 **IMPLEMENTATION DESIGN**，不在 payload 持久化完整 member share vector。
 
 #### 7.9.4 No subjective persistence
 
