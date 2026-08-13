@@ -163,11 +163,25 @@ def build_historical_context(
     (trade_date < T; current is excluded upstream).  The 60-sample PRD gate is
     enforced here; a short sample yields ``insufficient_history`` (never replaced
     by peer percentile).
+
+    Status precedence (Round 2A correction):
+      A. current value is None -> ``unavailable`` (percentile=None), regardless of
+         sample size; sample_count / history_start_date / history_end_date are kept;
+      B. current available but sample_count < 60 -> ``insufficient_history``;
+      C. current available and sample_count >= 60 -> ``ready``.
     """
     count = len(sample_values)
-    if value is None or count < HISTORICAL_MIN_SAMPLE:
+    if value is None:
         return {
-            "status": "insufficient_history" if count < HISTORICAL_MIN_SAMPLE else "unavailable",
+            "status": "unavailable",
+            "percentile": None,
+            "sample_count": count,
+            "history_start_date": history_start_date.isoformat() if history_start_date else None,
+            "history_end_date": history_end_date.isoformat() if history_end_date else None,
+        }
+    if count < HISTORICAL_MIN_SAMPLE:
+        return {
+            "status": "insufficient_history",
             "percentile": None,
             "sample_count": count,
             "history_start_date": history_start_date.isoformat() if history_start_date else None,

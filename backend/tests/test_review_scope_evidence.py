@@ -272,6 +272,36 @@ def test_historical_at_least_60_ready() -> None:
 
 
 # ---------------------------------------------------------------------------
+# K2. historical status precedence (Round 2A correction)
+#   A. current=None, history=5  -> unavailable (not insufficient_history)
+#   B. current=None, history=60 -> unavailable
+#   C. current valid, history=5 -> insufficient_history  (covered by K above)
+#   D. current valid, history=60-> ready                 (covered by L above)
+# ---------------------------------------------------------------------------
+
+
+def test_historical_current_none_small_sample_unavailable() -> None:
+    """A: current value None + history < 60 -> unavailable (not insufficient)."""
+    samples = [float(i) for i in range(5)]
+    ctx = build_historical_context(None, samples, date(2026, 1, 1), date(2026, 6, 1))
+    assert ctx["status"] == "unavailable"
+    assert ctx["percentile"] is None
+    # sample metadata still preserved
+    assert ctx["sample_count"] == 5
+    assert ctx["history_start_date"] == "2026-01-01"
+    assert ctx["history_end_date"] == "2026-06-01"
+
+
+def test_historical_current_none_large_sample_unavailable() -> None:
+    """B: current value None even with history >= 60 -> unavailable."""
+    samples = [float(i) for i in range(60)]
+    ctx = build_historical_context(None, samples, date(2026, 1, 1), date(2026, 6, 1))
+    assert ctx["status"] == "unavailable"
+    assert ctx["percentile"] is None
+    assert ctx["sample_count"] == 60
+
+
+# ---------------------------------------------------------------------------
 # M. current excluded from historical sample (service-level)
 # ---------------------------------------------------------------------------
 

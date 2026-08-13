@@ -2,7 +2,8 @@
 
 - **类型**：behavior+architecture（Objective Evidence Engine；query-time derived，无新表、无 migration）
 - **领域**：复盘模块 / Canonical Scope Observation Facts → Objective Evidence（L2-A）
-- **状态**：`verified_code_pending_acceptance`（本地 pure/unit 22、L1 74 无回归、ruff、mypy-changed、compileall、governance 均通过；remote isolated verification + PG contract 4 passed + real-data short-window / historical / peer 验证全部通过。待用户产品/理论验收后再收口）
+- **状态**：`verified_code_pending_acceptance`（本地 pure/unit 24、L1 74 无回归、ruff、mypy-changed、compileall、governance 均通过；remote isolated Concept peer verification 通过；待用户产品/理论验收后再收口）
+- **修正**：CHANGE-20260812-004 于 2026-08-12 经外部审计判定 ROUND 2A = PARTIAL / MINOR CORRECTION REQUIRED，执行最小 correction（§8），不进入 Round 2B
 - **关联 PRD**：`docs/prd/70-review.md`（§7.6 min-sample=60 / §7.9 Canonical Facts；本轮不新增主观产品语义）
 - **关联 Maps**：`docs/maps/70-review.md`（未修改；待实现验收后单独授权同步）
 - **关联 Rules**：无（本轮不修改治理；AGENTS.md / rules/* / governance checker 均未改动，governance check PASS）
@@ -114,3 +115,65 @@ Discovery / Ranking / Score / Grade / Recommendation。
 
 验证结束已删除本轮创建的 verify 库与临时文件（见 §8 清理执行）。未触碰 production `bz_stock`、
 共享 PostgreSQL/Redis 卷、稳定运行容器或受保护镜像。
+
+## 8. ROUND 2A CORRECTION（2026-08-12，外部审计后最小修正）
+
+外部审计结论：ROUND 2A = PARTIAL / MINOR CORRECTION REQUIRED。本修正为最小 correction，
+**不进入 Round 2B**，不改 PRD / 不新增 table / 不新增 migration / 不改 L1 / 不增加 primitive /
+不改 percentile math / 不改 D1/D3/D5 contract / 不改 peer family contract / 不做
+Filter / Candidate / Discovery / 不做新架构设计。
+
+### 8.1 Historical status precedence 修正
+
+原 `build_historical_context()` 在「current value unavailable + history sample < 60」时返回
+`insufficient_history`，语义不准确。修正为明确优先级（不新增 status）：
+
+- **A**：current value is None → `status=unavailable`，`percentile=None`；保留 `sample_count` /
+  `history_start_date` / `history_end_date`。
+- **B**：current available 但 `sample_count < 60` → `status=insufficient_history`。
+- **C**：current available 且 `sample_count >= 60` → `status=ready`。
+
+只修改 `backend/app/domain/review/scope_evidence.py`（`build_historical_context`）与
+`backend/tests/test_review_scope_evidence.py`。`scope_evidence_service.py` 仍直接调用
+`build_historical_context`，无需改动（由测试证明）。
+
+### 8.2 新增 pure tests
+
+- current=None + history=5 → `unavailable`
+- current=None + history=60 → `unavailable`
+- current valid + history=5 → `insufficient_history`（既有 K 覆盖）
+- current valid + history=60 → `ready`（既有 L 覆盖）
+
+### 8.3 本地验证（修正后）
+
+- Round 2A pure/unit：`test_review_scope_evidence.py` 24 tests passed（22 + 2 新增）
+- Round 1 L1 regression：74 passed 无回归
+- ruff：All checks passed；mypy modified scope：Success（2 files）；compileall OK；
+  governance check PASS
+- 未跑 CI（按本次修正指令 §7，local checks only）
+
+### 8.4 Clean Concept peer verification
+
+上一轮 peer_count=390 而 real concept generated=389，存在额外 row 污染风险，不接受该结果。
+本轮在**新建的干净 isolated verification DB** 内重新验证 Concept peer：
+
+- 先输出 `real_concept_generated_count` 与 `DB concept row_count on target date`，两者必须相等；
+- 再计算一个真实 Concept Evidence，`peer_count` = 该 primitive 的 finite real peer count
+  （不要求等于总 Concept 数，因 primitive 可能 unavailable），并解释 total real rows /
+  finite peer rows / target included；
+- 排除 synth_min60 / PG test seed / dummy scope / manual fake scope。
+
+### 8.5 Industry L1
+
+上一轮 257/257、peer_count=257 无污染，不重跑整个 Industry cohort（除 clean DB verification
+顺手低成本检查外，不为形式重复大实验）。
+
+### 8.6 Historical >=60
+
+真实 >=60 仍 DATA_BLOCKED，保持；不重新制造真实历史。synthetic >=60 unit/PG evidence 已足够
+验证代码分支，不再做 65-day replay。
+
+### 8.7 Final
+
+修正后 Commit + push origin/dev，记录 `REVIEW_OBJECTIVE_EVIDENCE_ROUND2A_CORRECTED_SHA`。
+最终状态：`ROUND_2A_CORRECTION_READY_FOR_EXTERNAL_AUDIT`，然后 STOP。
