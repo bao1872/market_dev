@@ -543,12 +543,17 @@ Scope membership 只回答：
 - **TREND / STRUCTURE / MOMENTUM** facts：State+Breadth（categorical distribution）· Transition（ratio）· Diffusion（PROVISIONAL）
 - **PARTICIPATION** facts：Volume / Amount threshold-free distribution
 - **CHIP**：if available；否则 UNRESOLVED
-- 每个 Observation fact 的 raw value（原始聚合值）、delta1d（1日变化）、delta5d（5日变化）
-- self historical percentile（自身历史分位；仅对可历史归一的 facts）
-- same-family cross-sectional percentile（同类横截面分位；仅对可比 facts）
+- 每个 Observation fact 的 raw value（当前日原始聚合值）
 - component / member evidence（组件/成员证据）
 - coverage（覆盖率）
 - readiness / data quality（就绪状态与数据质量）
+
+> **L1 / L2 ownership 边界（2026-08-12）**：上述列表为 **L1 Canonical Observation facts**（只回答
+> “这个 Scope 今天发生了什么？”）。`delta1d` / `delta5d`（相对各自 canonical reference 的变化）、
+> `self historical percentile`（自身历史分位）、`same-family cross-sectional percentile`（同类横截面分位）
+> 不属于 L1，属于 **L2 Objective Evidence**（见 §7.5），由 Evidence Engine 在 L1 之上计算并独立 ownership。
+> L1 只保存当前日原始事实，不保存变化量 / 分位。Discovery 与第二金字塔 Evidence 可以**消费** L2 Evidence，
+> 但 Evidence 不回流进 L1 Observation payload。
 
 #### 6.4.1 Comparable Peer Cohort（横截面对比合同）
 
@@ -899,9 +904,15 @@ PRICE / TREND / STRUCTURE / MOMENTUM / PARTICIPATION / CHIP-if-available
 
 #### 7.8.6 Persistence boundary
 
-Scope Observation 的 persistence 形状（单个 `observation_payload` JSONB / 多个 payload column /
-新表 / migration shape）**继续 DEFER**（见 §5.3）。本小节只冻结 **logical canonical
-Observation ownership**，不决定任何 DB schema 或 migration。
+Canonical Scope Observation Fact Persistence **当前已实现**（Round 1C = PASS），落地为
+`review_scope_observation_facts`，business grain = `trade_date + scope_type + scope_key`，ownership 归
+**Canonical Observation Core**（唯一 compute owner）。Persistence 只负责 serialize / validate / upsert / read，
+**不重新计算** ratio / HHI / transition / percentile / score，也**不保存** opportunity / risk / score / ranking /
+bullish-bearish / filter judgment / Discovery judgment。
+
+> 历史 `market_review_scope_snapshots`（`p/q/u/c/v` payload）仍作为 **legacy implementation compatibility** 保留
+> （见 §5.3）；其新 Observation 映射 / migration shape 的收口仍 DEFER 到 Implementation Design，
+> 但**不得**再表述为“新 Canonical Observation 尚未决定如何 persistence”。
 
 ---
 
@@ -1034,10 +1045,10 @@ consumer 的正式输入。
 
 #### 7.9.9 Exploration boundary
 
-Observation Model 本身未来仍可能调整甚至被推翻。因此当前持久化设计原则：
+Canonical Observation Fact Persistence 已实现并冻结（`review_scope_observation_facts`）。其持久化设计原则：
 
-- **保存尽量原始、可重新解释的事实**；
-- 避免保存主观判断；
+- **保存尽量原始、可重新解释的事实**（当前日 objective Observation facts + readiness + diagnostics + 必要 counts / denominators）；
+- **不保存**主观判断 / score / ranking / opportunity / risk / bullish-bearish / filter judgment / Discovery judgment；
 - 避免为未来未知需求建设复杂版本治理。
 
 ---
@@ -1045,130 +1056,6 @@ Observation Model 本身未来仍可能调整甚至被推翻。因此当前持�
 ## 8. Filter Engine（内部 Evidence Family）
 
 A/B/C/D 继续作为**内部算法 family**，但不再作为用户前端一级信息架构。
-
-### 8.0 Experimental Filter Redesign Contract（Round 2B，Exploration / Shadow）
-
-> **前置**：ROUND 1C = PASS、ROUND 2A = PASS、Round 2B-0 Design Audit = READY_FOR_ROUND_2B。
-> 本轮为 **docs-only requirement closure**（PRD–Code Alignment），不进入 Implementation，不修改
-> `filter_definitions.py` / `filter_engine.py` / `review_signal_service.py`，不新增表 / migration / API / 前端。
-
-**8.0.1 定位（Candidate 不是新的永久产品层）**
-
-Round 2B Experimental Filter 是 §8 Filter Engine 从 legacy `P/Q/U/C/V` payload
-迁移到 Structured Observation Evidence 过程中的 **shadow / exploration stage**。
-
-- 正式产品链已定义：`Scope Observation → Evidence → Filter Engine → Signal → Discovery`。
-- Round 2B 的 `CandidateResult` **只是** Filter Engine redesign 在 Exploration / Shadow 阶段产生的
-  **实验结果**，**不代表新增永久 domain layer**。
-- 不得新增一条永久产品层：`Evidence → Candidate → Filter → Signal`。
-- 未来路径：`new Experimental Filter shadow → verify → decide formal Filter migration →
-  Signal/Discovery cutover → legacy cleanup later`（legacy 当前继续存在）。
-
-**8.0.2 输入 / 输出 / 目的**
-
-- **输入**：仅 L2-A Objective Evidence（`compute_scope_evidence` 输出；CURRENT / D1 / D3 / D5 / PEER POSITION；
-  historical percentile 仅 optional，见 §8.0.5）。**不得**重新读取 `market_review_scope_snapshots` 的
-  `p_payload/q_payload/u_payload/c_payload/v_payload`，**不得**直接从 bars 重算底层事实。
-- **输出**：temporary `CandidateResult` / experimental match result。
-- **目的**：验证透明 Evidence conditions 是否值得进入未来正式 Filter / Signal；**不是**产品 Finding、
-  Signal、Discovery、推荐、机会判断。
-
-**8.0.3 CandidateResult 语义（transient，非永久业务层）**
-
-允许 implementation 内部使用 `CandidateResult`，但 PRD 明确其为 **Experimental Filter evaluation result**，
-不代表新增永久业务层。最低语义：
-
-- `scope` identity（`scope_type` / `scope_key`）
-- `trade_date`
-- `experiment_id`
-- `evaluation_status`（`evaluable` / `not_evaluable`）
-- `matched`（`true` / `false`）
-- `conditions`：每条 `condition_id` + `status`（`matched` / `not_matched` / `unavailable`）+ `evidence`
-- `supporting_evidence`
-- `diagnostics`（`mandatory_missing` / `optional_missing`）
-
-**禁止**：`score` / `grade` / `rank` / `recommendation` / `bullish/bearish` / `opportunity/risk conclusion` /
-任何 0–100 ranking / composite score。
-
-**8.0.4 缺失语义（MATCHED / NOT_MATCHED / NOT_EVALUABLE 三态）**
-
-- `MATCHED`：所有 mandatory condition 满足。
-- `NOT_MATCHED`：至少一个 mandatory condition 不满足（且 mandatory Evidence 可用）。
-- `NOT_EVALUABLE`：mandatory Evidence 不可用 → **不能**当 `NOT_MATCHED`。
-- `optional` Evidence 不可用：archetype 仍 `evaluable`，仅少一条 supporting evidence。
-- `missing`：**不得**当 `0`；不把 unavailable 当 0 值参与比较。
-
-**8.0.5 Historical Evidence（optional，不阻塞 Phase-1）**
-
-当前真实 PIT history 不足 60 个有效样本（`DATA_BLOCKED`），因此 Phase-1：
-
-- `historical percentile` **不得**作为 mandatory condition。
-- ready 时：允许作为 optional evidence。
-- `insufficient_history`：**不阻塞** Phase-1 Experimental Filter。
-- 不修改 `min60` contract；不制造历史。
-
-**8.0.6 Threshold = Experiment Configuration**
-
-所有 Phase-1 threshold 属于 **Experiment Configuration**，不属于 Canonical Observation Fact / Objective
-Evidence / 永久产品真理。
-
-- PRD **不写具体数字阈值**（如 `trend delta > 0.05`、`peer percentile > 80`、`participation > 1.2`）。
-- 具体 threshold 由 Round 2B implementation 的 experiment config **显式传入**。
-- 不要求 generic version platform / YAML rule engine / database config platform；简单 typed dict/dataclass
-  或 repo 最小 convention 即可。
-
-**8.0.7 Phase-1 archetype scope（两个，anchor-based）**
-
-Phase-1 只保留两个 archetype；使用 Round 2A 的 D1/D3/D5 结构（含 `reference_value` 与 `delta = current − reference_value`），
-必须显式引用 `d1.delta` / `d3.delta` / `d5.delta` 或 `reference_value`，**禁止**模糊写 "D5 > D3 > D1"，
-**不得**声称每日连续单调扩张。
-
-- **A. `BREADTH_EXPANSION`**：发现 Scope 内 Trend breadth + Price breadth 在几个明确 historical anchor 相对当前
-  出现 **anchor-based broadening pattern**（用 `d1.delta` / `d3.delta` / `d5.delta` 描述相对各自 reference 的扩张，
-  非逐日单调）。
-- **B. `PARTICIPATION_CONFIRMATION`**：观察 `participation change` 是否与 `breadth change` 形成同步确认；
-  同样显式使用 `current` / `d1.delta` / `d3.delta` / `d5.delta`，不模糊使用 D1/D3/D5 名称。
-
-`momentum_expanding_ratio` 与 `price_return_mean` 本轮**不作**独立 archetype；允许 implementation 作为 optional
-supporting Evidence（若真实实验需要）。不扩 Phase-1 rule 数量。
-
-**8.0.8 Concentration 暂缓（Phase-1 DEFER）**
-
-Round 2B-0 提议的 `PRICE_CONCENTRATION_DIVERGENCE` 在 Phase-1 **DEFER**：
-
-- `price_raw_hhi` 未按 member count normalized，不能对不同 Scope 使用统一 absolute current threshold 作为
-  cross-scope Candidate rule。
-- PRD 已区分 `concentration_state_high` / `concentration_change` / `concentration_abnormal`；仅 `state_high`
-  不得自动成为高价值 Discovery evidence。
-- 本轮**不实现** normalized HHI，也**不修改** L1。
-
-**8.0.9 Scope activation**
-
-Phase-1 真实实验：`concept` + `industry_l1`。`industry_l2` / `industry_l3`：架构兼容，真实数据存在时 smoke。
-`Market` / `Major Index` / `Style`：**不激活**。
-
-**8.0.10 Persistence / Consumer（Phase-1 = runtime only）**
-
-- **NO NEW TABLE**；**NO migration**；**NO Candidate persistence**；**NO Signal persistence**；
-  **NO Discovery consumer**；**NO API**；**NO Frontend**。
-- runtime evaluate only；consumer cutover 属后续 Round。
-
-**8.0.11 Legacy 共存**
-
-`filter_definitions.py` / `filter_engine.py` / `review_signal_service.py`（legacy，仍直接消费 `P/Q/U/C/V`
-payload、`historyPercentile120d`、`delta1d` 及其历史分位衍生量，PRD 已标记
-`legacy implementation baseline` + `IMPLEMENTATION_REDESIGN_REQUIRED`）本轮 **不改**，继续存在。
-本 §8.0 不把 legacy implementation 描述成已完成 Observation Evidence migration。
-
-筛选器必须由版本化配置驱动：
-
-```
-backend/config/review_filters.yaml
-```
-
-并使用Pydantic schema校验。不得把阈值散落在多个service。
-
-初始工程默认值仅用于形成可运行基线，上线前必须用历史回放校准；配置变化必须升级filter_version。
 
 **定位变更（2026-08-11）：**
 
@@ -1188,6 +1075,10 @@ backend/config/review_filters.yaml
   条件，**不得现场发明新 P/Q/U/C/V 阈值**。
 - D 族（state migration / freshness / diffusion / concentration / relative strength）消费
   **第二金字塔 raw evidence**（非 P/Q/U/C/V score），保持不变。
+- 具体 Observation-based Filter 条件（含任何 threshold / archetype）若 PRD 当前尚未正式冻结定义，
+  明确标记为 **IMPLEMENTATION_DESIGN_REQUIRED** / **NOT YET FROZEN**，由后续实现设计在真实数据回放基础上确定；
+  本 PRD **不** 自行定义 `BREADTH_EXPANSION` / `PARTICIPATION_CONFIRMATION` / `delta > 0` 等未经
+  accepted experiment 验证的具体规则（这些曾于 Round 2B-0 Design Audit 提议，不属于当前 accepted 业务结论）。
 
 ### 8.1 A类：表面表现与内部质量偏差 — IMPLEMENTATION_REDESIGN_REQUIRED
 
@@ -2285,9 +2176,9 @@ PRD 必须保证：L2/L3 可以独立产生 Discovery。
 #### Case 4 — 集中度快速恶化
 
 假设：
-- U下降；
-- C快速上升；
-- leader-median gap扩大。
+- Concentration 中 price/amount 集中度（HHI、Top5 contribution）相对稳定或下降；
+- PARTICIPATION 快速上升（成交/参与向少数 leader 集中，Volume/Amount 分布上移）；
+- leader-median gap（龙头与中位数在 Return Level / Breadth 上的差距）扩大。
 
 应能形成"行情向少数龙头收缩"类 Discovery。
 
@@ -2305,7 +2196,7 @@ Concept 强、Industry 普通。
 
 #### Case 7 — Conflict
 
-Concept 表面很强，但 Industry Q/U 恶化。
+- Concept 表面 Observation 很强（PRICE Breadth / TREND State+Breadth 高），但 Industry L1 的 TREND/STRUCTURE/MOMENTUM State+Breadth 与 PARTICIPATION 恶化。
 
 不得强行合并成 bullish conclusion。应保留 CONFLICTING relation。
 
@@ -2347,6 +2238,20 @@ Concept 表面很强，但 Industry Q/U 恶化。
 - AGENTS.md只保留入口，不扩写业务细节。
 
 ## 22. 推荐实施顺序（Discovery Model Refactor）
+
+**DONE（2026-08-12 已验收）：**
+
+- Canonical Observation Core（Scope Observation Model，Round 1A/1B/1C = PASS）
+- Canonical Observation Fact Persistence（`review_scope_observation_facts`，trade_date + scope_type + scope_key）
+- L2 Objective Evidence Engine（CURRENT / D1 / D3 / D5 / HISTORICAL POSITION / PEER POSITION，Round 2A = PASS）
+
+**NEXT：**
+
+- Filter Engine redesign（legacy A/B/C 改写到 Observation-based structured conditions；具体条件 IMPLEMENTATION_DESIGN_REQUIRED / NOT YET FROZEN）
+- Signal / Discovery integration（atomic `MarketReviewSignal` → user-level `Discovery` 聚合）
+- Cross-Scope Relation / Attribution
+- API / Frontend cutover（Discovery Workspace / Evidence Drawer / Representative Instruments）
+- Legacy P/Q/U/C/V Filter / Discovery cleanup
 
 **P0-A：Scope 平行化 + A/B/C Corrective + 排序修复**
 
@@ -2456,7 +2361,11 @@ concept/*
 
 整套 Review 发布门禁（force=False 时强制校验）：
 
-1. **market P/Q/U/C/V value 非空**：market 范围的 P / Q / U / C / V 五项 `value` 必须全部非 `null` 且 `status=ready`；任一为 `null` 或 `status=insufficient_history` 拒绝发布。
+1. **market Canonical Observation facts 就绪（新发布门禁）**：market 范围的 Canonical Scope Observation Facts（`review_scope_observation_facts`，business grain = `trade_date + scope_type + scope_key`）必须已成功计算且 `readiness` 通过；任一 required Canonical Observation fact 为 `null` / `status=insufficient` / `status=not_ready` 拒绝发布。
+   > **LEGACY 历史兼容**：旧 `market_review_scope_snapshots.p/q/u/c/v` payload `value` 非空门禁仅作为
+   > **legacy implementation compatibility** 保留，**不得**继续作为新发布链路（Observation → Evidence →
+   > Filter → Signal → Discovery）的 hard gate。新门禁以 required Canonical Observation facts readiness +
+   > coverage / execution / lineage 现行合同为准。
 2. **source_board_run_id 一致**：`market_review_runs.source_board_run_id` 必须等于当日已发布的 `market_aggregation`（`publication_kind=market_aggregation`、`scope_type=board`）pointer 的 `data_run_id`；不一致拒绝发布。
 3. **source_core_run_id 一致**：`market_review_runs.source_core_run_id` 必须等于当日已发布的 `stock_core` pointer 的 `data_run_id`；不一致拒绝发布。
 4. **无 failed signals**：`market_review_signals` 中不得存在 `status=failed` 的记录；存在 failed signal 拒绝发布。
