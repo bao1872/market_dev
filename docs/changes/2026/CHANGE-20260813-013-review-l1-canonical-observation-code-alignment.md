@@ -121,3 +121,22 @@
 
 - 上游合同：CHANGE-011、CHANGE-012（PRD §7.1/§7.2/§7.9.2.1/§7.9.3）。
 - 下游（未本轮）：第三阶段B 代码收口后，member-level `amount_share` physical persistence 仍 `IMPLEMENTATION DESIGN REQUIRED`；major_index/style peer 对齐留第五阶段。
+
+## 8. External Audit Correction（第 3C 轮，同 implementation slice，非新 CHANGE）
+
+- Status 保持：`verified_code_pending_acceptance`。
+- **审计发现 PG test expectation defect**：
+  - `tests/test_review_observation_persistence_pg.py::test_persisted_payload_uses_price_amount_topology`
+    fixture 两个成员 amount = 100 / 200 → total=300 → shares 1/3, 2/3。
+  - 正确 raw HHI = (1/3)² + (2/3)² = 5/9 ≈ 0.5556；正确 normalized HHI = (5/9 − 1/2)/(1 − 1/2) = 1/9 ≈ 0.1111。
+  - 原测试错误写成 `raw_hhi == 0.5`、`normalized_hhi == 0.0`。
+  - 该测试此前**未被** registered PG suite 收集（见 §4.2 关键事实 1），因此错误未被运行暴露。
+  - 已修复测试：改为 `amount_concentration["raw_hhi"] == pytest.approx(5.0/9.0)`、`["normalized_hhi"] == pytest.approx(1.0/9.0)`。
+- **补充 PURE_UNIT 回归**：`tests/test_review_scope_observation.py::test_amount_hhi_two_member_unequal_distribution`
+  直接固化 amount 100/200 的数学期望（valid_count=2, total=300, raw=5/9, normalized=1/9, member_count=2, status=ready），
+  作为单一真相，防止 PG fixture 再次写错。不创建第二套 HHI helper。
+- **核心业务实现未因该问题修改**：`scope_observation.py` / `review_observation_persistence_service.py` 本轮零改动（审计确认 `_normalized_hhi` / `_amount_concentration` / `compute_member_amount_contributions` 实现正确，错误仅在测试期望值）。
+- **PG execution evidence 仍为 UNVERIFIED**：原因同上轮 §4.2，即 verification registration gap（registered suite 仍不含该 PG 文件），非代码缺陷。
+- 本轮**未**执行 targeted-pg（避免违反 Two-Strike 的重复无效执行；registered suite 的 pre-existing 无关 failure 仍存在）。
+- 本轮**未**修改受保护治理域 `scripts/verify/*` 与 `scripts/ops/panji-verify`。
+- PURE_UNIT 复跑：`65 passed`（较上轮 64 +1，新增 unequal-distribution 回归）。

@@ -361,8 +361,10 @@ async def test_persisted_payload_uses_price_amount_topology(db_session: AsyncSes
     assert "amount" in payload["price"]
     assert payload["price"]["amount"]["valid_count"] == 2
     assert payload["price"]["amount"]["total_amount"] == pytest.approx(300.0)
-    assert payload["price"]["amount"]["concentration"]["raw_hhi"] == pytest.approx(0.5)
-    assert payload["price"]["amount"]["concentration"]["normalized_hhi"] == pytest.approx(0.0)
+    amount_concentration = payload["price"]["amount"]["concentration"]
+    # m1=100, m2=200 -> shares 1/3, 2/3 -> raw_hhi = 5/9, normalized = 1/9
+    assert amount_concentration["raw_hhi"] == pytest.approx(5.0 / 9.0)
+    assert amount_concentration["normalized_hhi"] == pytest.approx(1.0 / 9.0)
 
 
 async def test_save_rejects_legacy_top_level_amount(db_session: AsyncSession) -> None:

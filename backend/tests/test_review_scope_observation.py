@@ -638,3 +638,27 @@ def test_zero_total_amount_normalized_none() -> None:
     facts = compute_member_amount_contributions([_m("a", amount=0.0), _m("b", amount=0.0)])
     assert facts.total_amount == pytest.approx(0.0)
     assert all(m.amount_share is None for m in facts.members)
+
+
+def test_amount_hhi_two_member_unequal_distribution() -> None:
+    # Single canonical truth for the amount 100/200 fixture used in PG tests.
+    # shares = 1/3, 2/3 -> raw_hhi = 5/9, normalized = 1/9.
+    out = _run([
+        _m("a", amount=100.0),
+        _m("b", amount=200.0),
+    ])
+
+    amount = out["price"]["amount"]
+    concentration = amount["concentration"]
+
+    assert amount["valid_count"] == 2
+    assert amount["total_amount"] == pytest.approx(300.0)
+
+    # shares = 1/3, 2/3
+    assert concentration["raw_hhi"] == pytest.approx(5.0 / 9.0)
+
+    # normalized = (5/9 - 1/2) / (1 - 1/2) = 1/9
+    assert concentration["normalized_hhi"] == pytest.approx(1.0 / 9.0)
+
+    assert concentration["member_count"] == 2
+    assert concentration["status"] == "ready"
