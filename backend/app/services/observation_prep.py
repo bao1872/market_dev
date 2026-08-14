@@ -111,8 +111,8 @@ class RawMemberFacts:
     close_t: float | None
     amount_t: float | None
     volume_t: float | None = None
-    volume_history: tuple[float, ...] = ()
-    amount_history: tuple[float, ...] = ()
+    volume_history: tuple[float | None, ...] = ()
+    amount_history: tuple[float | None, ...] = ()
     flat_t1: Mapping[str, Any] | None = None
     close_t1: float | None = None
     # Continuous member facts from the history FirstPyramidHistoryDailyState

@@ -11,6 +11,7 @@ The pure semantic mapping lives in ``app.services.observation_prep``; the Core
 
 Shadow only: this service is never wired into Filter / Discovery / publication.
 """
+
 from __future__ import annotations
 
 import logging
@@ -118,7 +119,7 @@ _SNAPSHOT_RUN_CONSUMABLE_STATUS = "succeeded"
 
 async def _load_current_only_snapshot_facts(
     session: AsyncSession,
-    instrument_ids: list[str],
+    instrument_ids: list[uuid.UUID],
     trade_date: date,
 ) -> dict[str, dict[str, object]]:
     """Load exact-T Current-only canonical facts per member.
@@ -215,19 +216,12 @@ async def _load_states(
     """Canonical First Pyramid daily_state payloads at the exact ``trade_date``."""
     if not instrument_ids or trade_date is None:
         return {}
-    stmt = (
-        select(FirstPyramidHistoryDailyState)
-        .where(
-            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
-            FirstPyramidHistoryDailyState.trade_date == trade_date,
-            FirstPyramidHistoryDailyState.algorithm_version
-            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-        )
+    stmt = select(FirstPyramidHistoryDailyState).where(
+        FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+        FirstPyramidHistoryDailyState.trade_date == trade_date,
+        FirstPyramidHistoryDailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
     )
-    return {
-        row.instrument_id: row.state_payload
-        for row in (await session.execute(stmt)).scalars()
-    }
+    return {row.instrument_id: row.state_payload for row in (await session.execute(stmt)).scalars()}
 
 
 async def _load_bar_facts(
@@ -273,15 +267,11 @@ async def _load_structure_events(
     # version, and the T-day prefix on event_time (contract-aware, avoids v1/NULL
     # legacy events double-counting).
     date_prefix = trade_date.isoformat()
-    stmt = (
-        select(FirstPyramidHistoryEvent)
-        .where(
-            FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
-            FirstPyramidHistoryEvent.algorithm_version
-            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-            FirstPyramidHistoryEvent.history_contract_version == HISTORY_CONTRACT_VERSION,
-            FirstPyramidHistoryEvent.event_time.startswith(date_prefix),
-        )
+    stmt = select(FirstPyramidHistoryEvent).where(
+        FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
+        FirstPyramidHistoryEvent.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        FirstPyramidHistoryEvent.history_contract_version == HISTORY_CONTRACT_VERSION,
+        FirstPyramidHistoryEvent.event_time.startswith(date_prefix),
     )
     events: list[StructureEvent] = []
     for row in (await session.execute(stmt)).scalars():
@@ -302,91 +292,54 @@ async def _load_structure_events(
                 member_id=str(row.instrument_id),
                 event_type=etype,
                 direction=direction,
-                level=(
-                    float(level) if isinstance(level, (int, float)) else None
-                ),
+                level=(float(level) if isinstance(level, (int, float)) else None),
                 internal=internal,
                 release_volume_ratio=(
-                    float(release_ratio)
-                    if isinstance(release_ratio, (int, float))
-                    else None
+                    float(release_ratio) if isinstance(release_ratio, (int, float)) else None
                 ),
             )
         )
     return events
 
 
-async def prepare_scope(
+async def prepare_scope_from_member_ids(
     session: AsyncSession,
     scope_type: str,
     scope_key: str,
+    scope_name: str,
     trade_date: date,
+    member_ids: list[uuid.UUID],
+    *,
+    pit_member_ids_t1: list[uuid.UUID] | None = None,
+    pit_status_t: str = "current_static",
+    pit_status_t1: str = "current_static",
+    t1_membership_available: bool = True,
+    diagnostics: tuple[str, ...] = (),
+    load_current_only: bool = True,
 ) -> PreparedScope:
-    """Prepare canonical MemberObservation inputs for one scope on ``trade_date``."""
-    diagnostics: list[str] = []
+    """Prepare canonical MemberObservation inputs from explicitly-given members.
+
+    Used by the current-universe historical reconstruction: the caller fixes the
+    membership once (CURRENT STATIC MEMBERSHIP) and reuses it for every
+    historical trade date.  This function never resolves membership itself — it
+    only prepares member facts at ``trade_date`` (T) and its exact canonical T-1
+    via the single canonical loaders shared with ``prepare_scope``.
+
+    ``pit_member_ids_t1`` defaults to the same current member set (the fixed
+    universe is valid at T-1 too), so scope transitions stay inside the fixed
+    current universe.  Historical facts are read strictly at T / exact T-1.
+
+    ``load_current_only`` gates the Current-only snapshot loader.  The current
+    path (``prepare_scope``) keeps it enabled (current-only facts served for the
+    current day).  The historical reconstruction passes ``False``: the
+    reconstruction is built ONLY from FP history + bars + FP events, never from
+    the current-day snapshot store, so current-only facts stay ``None`` (PRD
+    v2.3) and the large ``summary_payload`` JSONB is never transferred.
+    """
     t1 = await calendar_service.get_previous_trading_day_async(session, trade_date)
 
-    # ---- Market historical guard (Round 1B closure) ----
-    # ``resolve_scope_members("market")`` returns the current active universe and
-    # ignores trade_date.  Using current universe x historical trade_date for a
-    # Market Observation is a semantic error (current-snapshot applied to
-    # history).  Market historical membership is unresolvable this round, so the
-    # shadow is skipped with an explicit diagnostic — never current_snapshot.
-    if scope_type == "market":
-        return PreparedScope(
-            scope_type=scope_type, scope_key=scope_key, scope_name=scope_key,
-            trade_date=trade_date, canonical_t1=t1,
-            pit_member_ids=(), pit_member_ids_t1=(),
-            members=(), t1_membership_available=False,
-            pit_status_t="unavailable", pit_status_t1="unavailable",
-            diagnostics=(MARKET_SKIP_DIAGNOSTIC,),
-        )
-
-    # ---- PIT(T) ----
-    pit_ids_t: list[uuid.UUID] = []
-    scope_name = scope_key
-    pit_status_t = "ready"
-    try:
-        pit_ids_t, scope_name = await review_scope_service.resolve_scope_members(
-            session, scope_type, scope_key, trade_date=trade_date,
-        )
-        pit_status_t = "historical_pit"
-    except (PITMembershipUnavailableError, review_scope_service.OptionalScopeUnavailableError) as exc:
-        pit_status_t = "unavailable"
-        diagnostics.append(f"pit_unavailable_T:{scope_type}/{scope_key} {exc}")
-    except review_scope_service.ScopeSnapshotError as exc:
-        pit_status_t = "unavailable"
-        diagnostics.append(f"scope_error_T:{scope_type}/{scope_key} {exc}")
-
-    # ---- PIT(T-1) ----
-    pit_ids_t1: list[uuid.UUID] = []
-    t1_membership_available = False
-    pit_status_t1 = "unavailable"
-    if t1 is not None and pit_status_t != "unavailable":
-        try:
-            pit_ids_t1, _ = await review_scope_service.resolve_scope_members(
-                session, scope_type, scope_key, trade_date=t1,
-            )
-            pit_status_t1 = "historical_pit"
-            t1_membership_available = True
-        except (PITMembershipUnavailableError, review_scope_service.OptionalScopeUnavailableError) as exc:
-            pit_status_t1 = "unavailable"
-            diagnostics.append(f"pit_unavailable_T1:{scope_type}/{scope_key} {exc}")
-        except review_scope_service.ScopeSnapshotError as exc:
-            pit_status_t1 = "unavailable"
-            diagnostics.append(f"scope_error_T1:{scope_type}/{scope_key} {exc}")
-    elif t1 is None:
-        diagnostics.append("canonical_t1_unavailable: no previous trading day")
-
-    if pit_status_t == "unavailable":
-        return PreparedScope(
-            scope_type=scope_type, scope_key=scope_key, scope_name=scope_name,
-            trade_date=trade_date, canonical_t1=t1,
-            pit_member_ids=(), pit_member_ids_t1=tuple(str(i) for i in pit_ids_t1),
-            members=(), t1_membership_available=t1_membership_available,
-            pit_status_t=pit_status_t, pit_status_t1=pit_status_t1,
-            diagnostics=tuple(diagnostics), events=(),
-        )
+    pit_ids_t = list(member_ids)
+    t1_ids = list(pit_member_ids_t1) if pit_member_ids_t1 is not None else list(pit_ids_t)
 
     # ---- Facts ----
     states_t = await _load_states(session, pit_ids_t, trade_date)
@@ -396,9 +349,14 @@ async def prepare_scope(
     # Canonical immutable structure events for T (PRD §7.4 D).
     structure_events = await _load_structure_events(session, pit_ids_t, trade_date)
     # Current-only canonical facts from the exact-T snapshot (see
-    # ``_load_current_only_snapshot_facts``).  Absent member -> None (unavailable).
-    current_only_facts = await _load_current_only_snapshot_facts(
-        session, pit_ids_t, trade_date
+    # ``_load_current_only_snapshot_facts``).  The historical reconstruction
+    # passes ``load_current_only=False``: current-only facts have no FP-history
+    # source and must stay None for historical T (PRD v2.3) — never fetched from
+    # the snapshot store, never a current backfill.
+    current_only_facts = (
+        await _load_current_only_snapshot_facts(session, pit_ids_t, trade_date)
+        if load_current_only
+        else {}
     )
 
     members: list[MemberObservation] = []
@@ -433,8 +391,7 @@ async def prepare_scope(
                     volume_history=tuple(volumes),
                     amount_history=tuple(amounts),
                     flat_t1=(
-                        previous_state_to_flat(states_t1[inst_id])
-                        if inst_id in states_t1 else None
+                        previous_state_to_flat(states_t1[inst_id]) if inst_id in states_t1 else None
                     ),
                     close_t1=t1_bar.close if t1_bar else None,
                     # Continuous Trend/Structure/Momentum/Volume facts (PRD §7.3-§7.6)
@@ -450,13 +407,131 @@ async def prepare_scope(
         )
 
     return PreparedScope(
-        scope_type=scope_type, scope_key=scope_key, scope_name=scope_name,
-        trade_date=trade_date, canonical_t1=t1,
+        scope_type=scope_type,
+        scope_key=scope_key,
+        scope_name=scope_name,
+        trade_date=trade_date,
+        canonical_t1=t1,
         pit_member_ids=tuple(str(i) for i in pit_ids_t),
-        pit_member_ids_t1=tuple(str(i) for i in pit_ids_t1),
+        pit_member_ids_t1=tuple(str(i) for i in t1_ids),
         members=tuple(members),
         t1_membership_available=t1_membership_available,
-        pit_status_t=pit_status_t, pit_status_t1=pit_status_t1,
+        pit_status_t=pit_status_t,
+        pit_status_t1=pit_status_t1,
         diagnostics=tuple(diagnostics),
         events=tuple(structure_events),
+    )
+
+
+async def prepare_scope(
+    session: AsyncSession,
+    scope_type: str,
+    scope_key: str,
+    trade_date: date,
+) -> PreparedScope:
+    """Prepare canonical MemberObservation inputs for one scope on ``trade_date``."""
+    diagnostics: list[str] = []
+    t1 = await calendar_service.get_previous_trading_day_async(session, trade_date)
+
+    # ---- Market historical guard (Round 1B closure) ----
+    # ``resolve_scope_members("market")`` returns the current active universe and
+    # ignores trade_date.  Using current universe x historical trade_date for a
+    # Market Observation is a semantic error (current-snapshot applied to
+    # history).  Market historical membership is unresolvable this round, so the
+    # shadow is skipped with an explicit diagnostic — never current_snapshot.
+    if scope_type == "market":
+        return PreparedScope(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            scope_name=scope_key,
+            trade_date=trade_date,
+            canonical_t1=t1,
+            pit_member_ids=(),
+            pit_member_ids_t1=(),
+            members=(),
+            t1_membership_available=False,
+            pit_status_t="unavailable",
+            pit_status_t1="unavailable",
+            diagnostics=(MARKET_SKIP_DIAGNOSTIC,),
+        )
+
+    # ---- PIT(T) ----
+    pit_ids_t: list[uuid.UUID] = []
+    scope_name = scope_key
+    pit_status_t = "ready"
+    try:
+        pit_ids_t, scope_name = await review_scope_service.resolve_scope_members(
+            session,
+            scope_type,
+            scope_key,
+            trade_date=trade_date,
+        )
+        pit_status_t = "historical_pit"
+    except (
+        PITMembershipUnavailableError,
+        review_scope_service.OptionalScopeUnavailableError,
+    ) as exc:
+        pit_status_t = "unavailable"
+        diagnostics.append(f"pit_unavailable_T:{scope_type}/{scope_key} {exc}")
+    except review_scope_service.ScopeSnapshotError as exc:
+        pit_status_t = "unavailable"
+        diagnostics.append(f"scope_error_T:{scope_type}/{scope_key} {exc}")
+
+    # ---- PIT(T-1) ----
+    pit_ids_t1: list[uuid.UUID] = []
+    t1_membership_available = False
+    pit_status_t1 = "unavailable"
+    if t1 is not None and pit_status_t != "unavailable":
+        try:
+            pit_ids_t1, _ = await review_scope_service.resolve_scope_members(
+                session,
+                scope_type,
+                scope_key,
+                trade_date=t1,
+            )
+            pit_status_t1 = "historical_pit"
+            t1_membership_available = True
+        except (
+            PITMembershipUnavailableError,
+            review_scope_service.OptionalScopeUnavailableError,
+        ) as exc:
+            pit_status_t1 = "unavailable"
+            diagnostics.append(f"pit_unavailable_T1:{scope_type}/{scope_key} {exc}")
+        except review_scope_service.ScopeSnapshotError as exc:
+            pit_status_t1 = "unavailable"
+            diagnostics.append(f"scope_error_T1:{scope_type}/{scope_key} {exc}")
+    elif t1 is None:
+        diagnostics.append("canonical_t1_unavailable: no previous trading day")
+
+    if pit_status_t == "unavailable":
+        return PreparedScope(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            scope_name=scope_name,
+            trade_date=trade_date,
+            canonical_t1=t1,
+            pit_member_ids=(),
+            pit_member_ids_t1=tuple(str(i) for i in pit_ids_t1),
+            members=(),
+            t1_membership_available=t1_membership_available,
+            pit_status_t=pit_status_t,
+            pit_status_t1=pit_status_t1,
+            diagnostics=tuple(diagnostics),
+            events=(),
+        )
+
+    # ---- Facts (single canonical path, shared with current-universe
+    #      reconstruction via ``prepare_scope_from_member_ids``) ----
+    return await prepare_scope_from_member_ids(
+        session,
+        scope_type,
+        scope_key,
+        scope_name,
+        trade_date,
+        pit_ids_t,
+        pit_member_ids_t1=pit_ids_t1,
+        pit_status_t=pit_status_t,
+        pit_status_t1=pit_status_t1,
+        t1_membership_available=t1_membership_available,
+        diagnostics=tuple(diagnostics),
     )
