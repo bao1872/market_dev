@@ -21,7 +21,6 @@ resolution, no historical query, no First Pyramid / VolumeContext compute.
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -151,16 +150,6 @@ L2_GROUP_SPECS: tuple[ObservationGroupSpec, ...] = (
 _BREAK_TURN_EVENT_TYPES = frozenset({"BOS", "CHoCH"})
 _EVOLUTION_EVENT_TYPES = frozenset({"OB_CREATED", "OB_ENTERED", "OB_MITIGATED", "EQH", "EQL"})
 
-# L1 event cell keys preserved verbatim (no recompute / renormalize).
-_EVENT_CELL_PRESERVE_KEYS = (
-    "event_type",
-    "direction",
-    "structure_level",
-    "member_count",
-    "member_ratio",
-    "event_count",
-)
-
 # Forbidden L2 product-semantics keys (prompt §5.F / §9 TEST 11).
 _FORBIDDEN_L2_SEMANTICS = frozenset(
     {"score", "opportunity", "risk", "recommendation", "signal", "rank"}
@@ -190,22 +179,57 @@ def project_event_cells_by_type(
     structure_events: dict[str, Any] | None,
     allowed_event_types: frozenset[str],
 ) -> dict[str, Any]:
-    """Thin projection: filter existing structure-event cells by event type.
+    """Thin projection: filter canonical L1 structure-event cells by event type.
 
-    Must NOT recompute denominator / member_count / ratio / direction /
-    structure_level (prompt §6).  Cells are passed through verbatim; only the
-    ``cells`` list is filtered to ``allowed_event_types``.  If the input has no
-    cells, returns the input unchanged (empty subset, not a fabricated 0-fact).
+    Consumes the REAL L1 canonical shape produced by
+    ``scope_observation._aggregate_structure_events``::
+
+        {"cells": {"leveled": {<cell_name>: {...}}, "extreme": {<event_type>: {...}}},
+         "denominator": N}
+
+    and returns the SAME topology with only the allowed event types retained::
+
+        {"cells": {"leveled": {...}, "extreme": {...}}, "denominator": <L1 value>}
+
+    L2 is a projection, not a second event representation: cells are never
+    flattened into a list and never re-keyed.  Each retained cell object is
+    passed through BY REFERENCE, so ``event_type`` / ``direction`` /
+    ``structure_level`` / ``event_count`` / ``member_count`` / ``member_ratio``
+    are structurally identical to L1.  ``denominator`` is copied verbatim from
+    L1 and never recomputed from the filtered subset (prompt §6).
+
+    Cell-type resolution follows L1 exactly:
+    - ``leveled`` cells carry an explicit ``event_type`` field;
+    - ``extreme`` cells are keyed BY the event type itself (EQH / EQL /
+      SQZ_RELEASE) and carry no ``event_type`` field.
+
+    ``SQZ_RELEASE`` therefore lives in ``extreme`` and is excluded from both
+    structure groups simply by not being an allowed type.
     """
     if not isinstance(structure_events, dict):
         return {}
+
     cells = structure_events.get("cells")
-    if not isinstance(cells, list):
-        return deepcopy(structure_events) if structure_events else {}
-    filtered = [
-        cell for cell in cells if isinstance(cell, dict) and cell.get("event_type") in allowed_event_types
-    ]
-    return {**structure_events, "cells": filtered}
+    leveled_in = cells.get("leveled") if isinstance(cells, dict) else None
+    extreme_in = cells.get("extreme") if isinstance(cells, dict) else None
+
+    leveled_out: dict[str, Any] = {}
+    if isinstance(leveled_in, dict):
+        for cell_name, cell in leveled_in.items():
+            if isinstance(cell, dict) and cell.get("event_type") in allowed_event_types:
+                leveled_out[cell_name] = cell
+
+    extreme_out: dict[str, Any] = {}
+    if isinstance(extreme_in, dict):
+        for event_type, cell in extreme_in.items():
+            if event_type in allowed_event_types:
+                extreme_out[event_type] = cell
+
+    projected: dict[str, Any] = {
+        **structure_events,
+        "cells": {"leveled": leveled_out, "extreme": extreme_out},
+    }
+    return projected
 
 
 def _project_group_facts(

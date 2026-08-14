@@ -1,21 +1,48 @@
 """Contract tests for L2 Observation Groups (v2.3 §7.7 / plan §9).
 
 These tests verify that L2 is a pure deterministic projection of L1 canonical
-facts — no recompute, no score, no mutation.  They build minimal L1-shaped
-payloads (no DB) and assert the 8-group structure and exact source mapping.
+facts — no recompute, no score, no mutation.
+
+Round 2 (Fix & Verify) correction: the structure-event fixtures no longer
+hand-write a shape that differs from production.  The canonical L1 event shape
+produced by ``scope_observation._aggregate_structure_events`` is::
+
+    structure.events = {
+        "cells": {
+            "leveled": {"<cell_name>": {event_type, direction, structure_level,
+                                        event_count, member_count, member_ratio}},
+            "extreme": {"<event_type>": {event_count, member_count, member_ratio}},
+        },
+        "denominator": N,
+    }
+
+The dict fixture below mirrors that exactly, and the REAL-L1 tests at the bottom
+drive ``compute_scope_observation(...)`` and feed its true output into
+``build_l2_observation_groups(...)`` so the tested chain is
+``real L1 Core -> L2 projection`` rather than ``fake fixture -> L2 helper``.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date
 
+from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.observation_groups import (
     L2_GROUP_SPECS,
     build_l2_observation_groups,
     project_event_cells_by_type,
 )
+from app.domain.review.scope_observation import (
+    MemberObservation,
+    StructureEvent,
+    compute_scope_observation,
+)
 
-# --- minimal L1-shaped payload fixture ---------------------------------------
+# --- canonical-shaped L1 payload fixture -------------------------------------
+#
+# ``structure.events`` uses the EXACT production topology (cells.leveled /
+# cells.extreme / denominator), including SQZ_RELEASE living in ``extreme``.
 
 
 def _make_l1_payload() -> dict:
@@ -62,24 +89,42 @@ def _make_l1_payload() -> dict:
         },
         "structure": {
             "events": {
-                "cells": [
-                    {"event_type": "BOS", "direction": "up", "structure_level": "Swing",
-                     "member_count": 4, "member_ratio": 0.4, "event_count": 4},
-                    {"event_type": "CHoCH", "direction": "down", "structure_level": "Internal",
-                     "member_count": 3, "member_ratio": 0.3, "event_count": 3},
-                    {"event_type": "OB_CREATED", "direction": "up", "structure_level": "Swing",
-                     "member_count": 2, "member_ratio": 0.2, "event_count": 2},
-                    {"event_type": "OB_ENTERED", "direction": "up", "structure_level": "Swing",
-                     "member_count": 1, "member_ratio": 0.1, "event_count": 1},
-                    {"event_type": "OB_MITIGATED", "direction": "down", "structure_level": "Internal",
-                     "member_count": 1, "member_ratio": 0.1, "event_count": 1},
-                    {"event_type": "EQH", "direction": "up", "structure_level": "Internal",
-                     "member_count": 2, "member_ratio": 0.2, "event_count": 2},
-                    {"event_type": "EQL", "direction": "down", "structure_level": "Internal",
-                     "member_count": 2, "member_ratio": 0.2, "event_count": 2},
-                    {"event_type": "SQZ_RELEASE", "direction": "up", "structure_level": "Swing",
-                     "member_count": 5, "member_ratio": 0.5, "event_count": 5},
-                ]
+                "cells": {
+                    "leveled": {
+                        "BOS_up_Swing": {
+                            "event_type": "BOS", "direction": "up", "structure_level": "Swing",
+                            "event_count": 4, "member_count": 4, "member_ratio": 0.4,
+                        },
+                        "CHoCH_down_Internal": {
+                            "event_type": "CHoCH", "direction": "down",
+                            "structure_level": "Internal",
+                            "event_count": 3, "member_count": 3, "member_ratio": 0.3,
+                        },
+                        "OB_CREATED_up_Swing": {
+                            "event_type": "OB_CREATED", "direction": "up",
+                            "structure_level": "Swing",
+                            "event_count": 2, "member_count": 2, "member_ratio": 0.2,
+                        },
+                        "OB_ENTERED_up_Swing": {
+                            "event_type": "OB_ENTERED", "direction": "up",
+                            "structure_level": "Swing",
+                            "event_count": 1, "member_count": 1, "member_ratio": 0.1,
+                        },
+                        "OB_MITIGATED_down_Internal": {
+                            "event_type": "OB_MITIGATED", "direction": "down",
+                            "structure_level": "Internal",
+                            "event_count": 1, "member_count": 1, "member_ratio": 0.1,
+                        },
+                    },
+                    "extreme": {
+                        "EQH": {"event_count": 2, "member_count": 2, "member_ratio": 0.2},
+                        "EQL": {"event_count": 2, "member_count": 2, "member_ratio": 0.2},
+                        "SQZ_RELEASE": {
+                            "event_count": 5, "member_count": 5, "member_ratio": 0.5,
+                        },
+                    },
+                },
+                "denominator": 10,
             },
             "alignment": {"status": "available", "value": "aligned_up"},
             "distance_to_trailing_top_pct": {"median": 0.08, "valid_count": 10, "denominator": 10},
@@ -194,7 +239,7 @@ def test_group_4_duplicate_reference_identical_to_group_3():
     assert g4["momentum_volume_relation"] == payload["momentum"]["momentum_volume_relation"]
 
 
-# --- TEST 5: structure event filtering --------------------------------------
+# --- TEST 5: structure event filtering (canonical topology) ------------------
 
 
 def test_structure_event_filtering_by_group():
@@ -202,34 +247,87 @@ def test_structure_event_filtering_by_group():
     l2 = build_l2_observation_groups(payload)
 
     g5 = l2["structure_break_turn"]["facts"]["bos_choch_events"]
-    g5_types = {c["event_type"] for c in g5["cells"]}
-    assert g5_types == {"BOS", "CHoCH"}
-
     g6 = l2["structure_evolution_position"]["facts"]["ob_and_eq_events"]
-    g6_types = {c["event_type"] for c in g6["cells"]}
-    assert g6_types == {"OB_CREATED", "OB_ENTERED", "OB_MITIGATED", "EQH", "EQL"}
+
+    # topology preserved: cells.leveled / cells.extreme / denominator
+    assert set(g5.keys()) == {"cells", "denominator"}
+    assert set(g5["cells"].keys()) == {"leveled", "extreme"}
+    assert set(g6["cells"].keys()) == {"leveled", "extreme"}
+
+    # Group 5: only BOS / CHoCH in leveled, extreme empty
+    assert {c["event_type"] for c in g5["cells"]["leveled"].values()} == {"BOS", "CHoCH"}
+    assert g5["cells"]["extreme"] == {}
+
+    # Group 6: only OB_* in leveled, only EQH / EQL in extreme
+    assert {c["event_type"] for c in g6["cells"]["leveled"].values()} == {
+        "OB_CREATED", "OB_ENTERED", "OB_MITIGATED",
+    }
+    assert set(g6["cells"]["extreme"].keys()) == {"EQH", "EQL"}
 
     # SQZ_RELEASE enters neither group
-    assert "SQZ_RELEASE" not in g5_types
-    assert "SQZ_RELEASE" not in g6_types
+    assert "SQZ_RELEASE" not in g5["cells"]["extreme"]
+    assert "SQZ_RELEASE" not in g6["cells"]["extreme"]
+    assert "SQZ_RELEASE" not in g5["cells"]["leveled"]
+    assert "SQZ_RELEASE" not in g6["cells"]["leveled"]
 
-    # preserved verbatim: member_count / member_ratio / event_count / direction / structure_level
-    cell = g5["cells"][0]
-    for k in ("event_type", "direction", "structure_level", "member_count", "member_ratio", "event_count"):
-        assert cell[k] == {"event_type": "BOS", "direction": "up", "structure_level": "Swing",
-                           "member_count": 4, "member_ratio": 0.4, "event_count": 4}[k]
+    # denominator copied verbatim from L1 (never recomputed from the subset)
+    assert g5["denominator"] == payload["structure"]["events"]["denominator"] == 10
+    assert g6["denominator"] == payload["structure"]["events"]["denominator"] == 10
+
+
+def test_structure_event_cells_unchanged_field_by_field():
+    """Every retained cell must be structurally identical to its L1 origin."""
+    payload = _make_l1_payload()
+    l1_events = payload["structure"]["events"]
+    l2 = build_l2_observation_groups(payload)
+
+    g5 = l2["structure_break_turn"]["facts"]["bos_choch_events"]
+    g6 = l2["structure_evolution_position"]["facts"]["ob_and_eq_events"]
+
+    leveled_checks = {
+        "BOS_up_Swing": g5,
+        "CHoCH_down_Internal": g5,
+        "OB_CREATED_up_Swing": g6,
+        "OB_ENTERED_up_Swing": g6,
+        "OB_MITIGATED_down_Internal": g6,
+    }
+    for cell_name, group in leveled_checks.items():
+        src = l1_events["cells"]["leveled"][cell_name]
+        out = group["cells"]["leveled"][cell_name]
+        for field in (
+            "event_type", "direction", "structure_level",
+            "event_count", "member_count", "member_ratio",
+        ):
+            assert out[field] == src[field], f"{cell_name}.{field} changed"
+        # passed through by reference — no copy, no recompute
+        assert out is src
+
+    for event_type in ("EQH", "EQL"):
+        src = l1_events["cells"]["extreme"][event_type]
+        out = g6["cells"]["extreme"][event_type]
+        for field in ("event_count", "member_count", "member_ratio"):
+            assert out[field] == src[field], f"{event_type}.{field} changed"
+        assert out is src
 
 
 def test_structure_event_empty_when_no_matching_cells():
     payload = _make_l1_payload()
-    # events contain only SQZ_RELEASE -> empty subset, not fabricated 0-fact
-    payload["structure"]["events"] = {"cells": [
-        {"event_type": "SQZ_RELEASE", "direction": "up", "structure_level": "Swing",
-         "member_count": 5, "member_ratio": 0.5, "event_count": 5}
-    ]}
+    # events contain only SQZ_RELEASE -> empty subset, denominator still verbatim
+    payload["structure"]["events"] = {
+        "cells": {
+            "leveled": {},
+            "extreme": {"SQZ_RELEASE": {"event_count": 5, "member_count": 5, "member_ratio": 0.5}},
+        },
+        "denominator": 10,
+    }
     l2 = build_l2_observation_groups(payload)
-    assert l2["structure_break_turn"]["facts"]["bos_choch_events"]["cells"] == []
-    assert l2["structure_evolution_position"]["facts"]["ob_and_eq_events"]["cells"] == []
+
+    g5 = l2["structure_break_turn"]["facts"]["bos_choch_events"]
+    g6 = l2["structure_evolution_position"]["facts"]["ob_and_eq_events"]
+    assert g5["cells"] == {"leveled": {}, "extreme": {}}
+    assert g6["cells"] == {"leveled": {}, "extreme": {}}
+    assert g5["denominator"] == 10
+    assert g6["denominator"] == 10
 
 
 # --- TEST 6: Group 6 excludes Active OB -------------------------------------
@@ -240,8 +338,6 @@ def test_group_6_excludes_active_ob_count():
     # even if L1 mistakenly carried active_ob_count, L2 must not surface it as a key
     payload["structure"]["active_ob_count"] = {"status": "unavailable"}
     l2 = build_l2_observation_groups(payload)
-    assert "active_ob_count" not in l2["structure_evolution_position"]["facts"]
-    # the structure section itself never had that key either
     assert "active_ob_count" not in l2["structure_evolution_position"]["facts"]
 
 
@@ -260,6 +356,7 @@ def test_group_7_release_volume_ratio_member_first():
 
     # Release ratio must NOT be derived from structure.events
     assert g7["release_volume_ratio"] is not payload["structure"]["events"]
+    assert g7["release_volume_ratio"] is payload["momentum"]["release_volume_ratio"]
 
 
 # --- TEST 8: Group 8 complete six-fact vector ------------------------------
@@ -334,17 +431,244 @@ def test_l2_has_no_forbidden_product_semantics():
 
 
 def test_project_event_cells_by_type_filters_only():
-    events = {"cells": [
-        {"event_type": "BOS", "member_count": 1},
-        {"event_type": "OB_CREATED", "member_count": 2},
-    ]}
+    events = {
+        "cells": {
+            "leveled": {
+                "BOS_up_Swing": {"event_type": "BOS", "direction": "up",
+                                 "structure_level": "Swing", "member_count": 1,
+                                 "member_ratio": 0.1, "event_count": 1},
+                "OB_CREATED_up_Swing": {"event_type": "OB_CREATED", "direction": "up",
+                                        "structure_level": "Swing", "member_count": 2,
+                                        "member_ratio": 0.2, "event_count": 2},
+            },
+            "extreme": {"EQH": {"member_count": 3, "member_ratio": 0.3, "event_count": 3}},
+        },
+        "denominator": 10,
+    }
     out = project_event_cells_by_type(events, frozenset({"BOS"}))
-    assert [c["event_type"] for c in out["cells"]] == ["BOS"]
-    # non-cells metadata preserved, not recomputed
-    assert out.get("member_count") == events.get("member_count") or "member_count" not in out
+    assert list(out["cells"]["leveled"].keys()) == ["BOS_up_Swing"]
+    assert out["cells"]["extreme"] == {}
+    # denominator preserved verbatim, not recomputed
+    assert out["denominator"] == 10
+    # input not mutated
+    assert set(events["cells"]["leveled"].keys()) == {"BOS_up_Swing", "OB_CREATED_up_Swing"}
+    assert events["cells"]["extreme"] == {
+        "EQH": {"member_count": 3, "member_ratio": 0.3, "event_count": 3}
+    }
 
 
 def test_project_event_cells_by_type_passthrough_when_no_cells():
     events = {"status": "unavailable", "reason": "x"}
     out = project_event_cells_by_type(events, frozenset({"BOS"}))
-    assert out == events
+    assert out["status"] == "unavailable"
+    assert out["reason"] == "x"
+    assert out["cells"] == {"leveled": {}, "extreme": {}}
+
+
+# ===========================================================================
+# REAL L1 -> L2 contract tests (Round 2)
+#
+# These drive the real canonical Core (``compute_scope_observation``) and feed
+# its true output into the L2 projection.  No hand-written L1 shape.
+# ===========================================================================
+
+_REAL_TRADE_DATE = date(2026, 8, 13)
+
+
+def _real_member(mid: str) -> MemberObservation:
+    """A member carrying every fact needed by the 8 groups (real Core input)."""
+    return MemberObservation(
+        member_id=mid,
+        price_candidate=True,
+        return_1d=1.5,
+        amount=1_000_000.0,
+        trend=Direction.UP,
+        swing=Direction.UP,
+        internal=Direction.UP,
+        momentum=MomentumDirection.EXPANDING,
+        t1_trend=Direction.SIDEWAYS,
+        t1_swing=Direction.UP,
+        t1_internal=Direction.UP,
+        t1_momentum=MomentumDirection.FLAT,
+        vol_ratio20=1.2,
+        amt_ratio20=1.1,
+        volume_t=500_000.0,
+        vol_ratio200=1.3,
+        vol_pct20=70.0,
+        vol_pct200=65.0,
+        vol_zscore20=0.8,
+        vol_zscore200=0.6,
+        regime_strength=0.55,
+        dsa_dir_bars=6.0,
+        dsa_vwap_dev_pct=0.7,
+        segment_id=None,
+        segment_direction=1.0,
+        segment_bars=9.0,
+        segment_change_pct=4.2,
+        segment_slope=0.35,
+        seg_vol_ratio=1.15,
+        seg_amt_ratio=1.05,
+        seg_vol_mean=1.25,
+        seg_amt_mean_prev=1.18,
+        structure_alignment_categorical="aligned",
+        active_internal_ob_count=2.0,
+        active_swing_ob_count=1.0,
+        volatility_phase=1.0,
+        momentum_direction_raw=1.0,
+        momentum_change=1.0,
+        sqzmom_delta=0.4,
+        sqzmom_val=0.9,
+        release_volume_ratio=1.45,
+        momentum_volume_relation="共振",
+        bb_position=0.62,
+        bb_width=0.048,
+        vwap_ret_total=3.1,
+        trailing_top_pct=-2.5,
+        trailing_bottom_pct=8.4,
+    )
+
+
+def _real_events(member_ids: list[str]) -> list[StructureEvent]:
+    """Cover all 8 canonical event types across real members."""
+    m0, m1, m2 = member_ids[0], member_ids[1], member_ids[2]
+    return [
+        StructureEvent(member_id=m0, event_type="BOS", direction="up",
+                       level=10.0, internal=False),
+        StructureEvent(member_id=m1, event_type="CHoCH", direction="down",
+                       level=9.5, internal=True),
+        StructureEvent(member_id=m0, event_type="OB_CREATED", direction="up",
+                       level=10.2, internal=False),
+        StructureEvent(member_id=m1, event_type="OB_ENTERED", direction="up",
+                       level=10.1, internal=True),
+        StructureEvent(member_id=m2, event_type="OB_MITIGATED", direction="down",
+                       level=9.9, internal=False),
+        StructureEvent(member_id=m0, event_type="EQH"),
+        StructureEvent(member_id=m2, event_type="EQL"),
+        StructureEvent(member_id=m1, event_type="SQZ_RELEASE", release_volume_ratio=1.7),
+    ]
+
+
+def _real_l1_payload() -> dict:
+    member_ids = ["000001", "000002", "000003", "000004"]
+    members = [_real_member(mid) for mid in member_ids]
+    return compute_scope_observation(
+        scope_type="industry_l1",
+        scope_key="I11",
+        trade_date=_REAL_TRADE_DATE,
+        pit_member_ids=member_ids,
+        pit_member_ids_t1=member_ids,
+        members=members,
+        events=_real_events(member_ids),
+    )
+
+
+def test_real_l1_structure_events_project_into_groups_5_and_6():
+    """real Core -> L2: Group 5 = BOS/CHoCH only, Group 6 = OB_*/EQ only."""
+    l1 = _real_l1_payload()
+    l1_events = l1["structure"]["events"]
+
+    # sanity: the real Core really produced the canonical dict topology
+    assert set(l1_events["cells"].keys()) == {"leveled", "extreme"}
+    assert isinstance(l1_events["cells"]["leveled"], dict)
+    assert isinstance(l1_events["cells"]["extreme"], dict)
+    # all 8 event types present in real L1
+    assert {c["event_type"] for c in l1_events["cells"]["leveled"].values()} == {
+        "BOS", "CHoCH", "OB_CREATED", "OB_ENTERED", "OB_MITIGATED",
+    }
+    assert set(l1_events["cells"]["extreme"].keys()) == {"EQH", "EQL", "SQZ_RELEASE"}
+
+    l2 = build_l2_observation_groups(l1)
+    g5 = l2["structure_break_turn"]["facts"]["bos_choch_events"]
+    g6 = l2["structure_evolution_position"]["facts"]["ob_and_eq_events"]
+
+    # Group 5: leveled only BOS + CHoCH, extreme empty
+    assert {c["event_type"] for c in g5["cells"]["leveled"].values()} == {"BOS", "CHoCH"}
+    assert g5["cells"]["extreme"] == {}
+
+    # Group 6: leveled only OB_*, extreme only EQH + EQL
+    assert {c["event_type"] for c in g6["cells"]["leveled"].values()} == {
+        "OB_CREATED", "OB_ENTERED", "OB_MITIGATED",
+    }
+    assert set(g6["cells"]["extreme"].keys()) == {"EQH", "EQL"}
+
+    # SQZ_RELEASE absent from both
+    for group in (g5, g6):
+        assert "SQZ_RELEASE" not in group["cells"]["extreme"]
+        assert all(
+            c["event_type"] != "SQZ_RELEASE" for c in group["cells"]["leveled"].values()
+        )
+
+    # denominator verbatim from real L1
+    assert g5["denominator"] == l1_events["denominator"]
+    assert g6["denominator"] == l1_events["denominator"]
+
+
+def test_real_l1_event_cell_values_unchanged_by_projection():
+    """Every real L1 cell field survives projection bit-identically."""
+    l1 = _real_l1_payload()
+    l1_events = l1["structure"]["events"]
+    l2 = build_l2_observation_groups(l1)
+
+    g5 = l2["structure_break_turn"]["facts"]["bos_choch_events"]
+    g6 = l2["structure_evolution_position"]["facts"]["ob_and_eq_events"]
+
+    projected_leveled = {**g5["cells"]["leveled"], **g6["cells"]["leveled"]}
+    for cell_name, out in projected_leveled.items():
+        src = l1_events["cells"]["leveled"][cell_name]
+        for field in (
+            "event_type", "direction", "structure_level",
+            "event_count", "member_count", "member_ratio",
+        ):
+            assert out[field] == src[field], f"{cell_name}.{field} changed"
+
+    for event_type, out in g6["cells"]["extreme"].items():
+        src = l1_events["cells"]["extreme"][event_type]
+        for field in ("event_count", "member_count", "member_ratio"):
+            assert out[field] == src[field], f"{event_type}.{field} changed"
+
+
+def test_real_l1_topology_compatible_with_all_8_groups():
+    """Every L2 source path must be readable from a REAL L1 output."""
+    l1 = _real_l1_payload()
+    l2 = build_l2_observation_groups(l1)
+
+    assert len(l2) == 8
+    assert list(l2.keys()) == [s.group_key for s in L2_GROUP_SPECS]
+
+    # Groups 1/2/3/4/7/8: every declared source path resolves in the real payload.
+    event_projection_keys = {"bos_choch_events", "ob_and_eq_events"}
+    for spec in L2_GROUP_SPECS:
+        facts = l2[spec.group_key]["facts"]
+        assert set(facts.keys()) == {ref.key for ref in spec.facts}
+        for ref in spec.facts:
+            if ref.key in event_projection_keys:
+                continue
+            node = l1
+            for part in ref.source_path:
+                assert isinstance(node, dict), (
+                    f"{spec.group_key}.{ref.key}: real L1 path {ref.source_path} broken at {part!r}"
+                )
+                assert part in node, (
+                    f"{spec.group_key}.{ref.key}: real L1 has no path {ref.source_path}"
+                )
+                node = node[part]
+            # projected value IS the real L1 object at that path
+            assert facts[ref.key] is node
+
+
+def test_real_l1_duplicate_fact_identical_across_groups():
+    """Same L1 fact referenced by Group 3 and Group 4 stays the same object."""
+    l1 = _real_l1_payload()
+    l2 = build_l2_observation_groups(l1)
+
+    g3 = l2["trend_progress"]["facts"]
+    g4 = l2["trend_volume_confirmation"]["facts"]
+    assert g4["segment_volume_mean_ratio"] is g3["segment_volume_mean_ratio"]
+    assert g4["segment_amount_mean_ratio"] is g3["segment_amount_mean_ratio"]
+
+
+def test_real_l1_projection_does_not_mutate_core_output():
+    l1 = _real_l1_payload()
+    before = deepcopy(l1)
+    _ = build_l2_observation_groups(l1)
+    assert l1 == before

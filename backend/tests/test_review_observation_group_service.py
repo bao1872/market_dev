@@ -46,12 +46,27 @@ def _l1_payload() -> dict:
             },
         },
         "structure": {
-            "events": {"cells": [
-                {"event_type": "BOS", "direction": "up", "structure_level": "Swing",
-                 "member_count": 4, "member_ratio": 0.4, "event_count": 4},
-                {"event_type": "OB_CREATED", "direction": "up", "structure_level": "Swing",
-                 "member_count": 2, "member_ratio": 0.2, "event_count": 2},
-            ]},
+            # canonical L1 shape (cells.leveled / cells.extreme / denominator)
+            "events": {
+                "cells": {
+                    "leveled": {
+                        "BOS_up_Swing": {
+                            "event_type": "BOS", "direction": "up", "structure_level": "Swing",
+                            "event_count": 4, "member_count": 4, "member_ratio": 0.4,
+                        },
+                        "OB_CREATED_up_Swing": {
+                            "event_type": "OB_CREATED", "direction": "up",
+                            "structure_level": "Swing",
+                            "event_count": 2, "member_count": 2, "member_ratio": 0.2,
+                        },
+                    },
+                    "extreme": {
+                        "EQH": {"event_count": 1, "member_count": 1, "member_ratio": 0.1},
+                        "SQZ_RELEASE": {"event_count": 3, "member_count": 3, "member_ratio": 0.3},
+                    },
+                },
+                "denominator": 10,
+            },
             "alignment": {"status": "available", "value": "aligned_up"},
             "distance_to_trailing_top_pct": {"median": 0.08, "valid_count": 10, "denominator": 10},
             "distance_to_trailing_bottom_pct": {"median": -0.05, "valid_count": 10, "denominator": 10},
@@ -106,3 +121,12 @@ async def test_service_projects_persisted_payload(monkeypatch):
     assert list(out.keys()) == [s.group_key for s in L2_GROUP_SPECS]
     assert out["price_capital"]["facts"]["equal_weight_return"] == payload["price"]["equal_weight_return"]
     assert out["volume_anomaly"]["facts"]["volume_ratio20"] == payload["participation"]["volume"]["ratio20"]
+
+    # canonical event topology is projected (not passed through whole)
+    g5 = out["structure_break_turn"]["facts"]["bos_choch_events"]
+    g6 = out["structure_evolution_position"]["facts"]["ob_and_eq_events"]
+    assert set(g5["cells"]["leveled"].keys()) == {"BOS_up_Swing"}
+    assert g5["cells"]["extreme"] == {}
+    assert set(g6["cells"]["leveled"].keys()) == {"OB_CREATED_up_Swing"}
+    assert set(g6["cells"]["extreme"].keys()) == {"EQH"}
+    assert g5["denominator"] == 10
