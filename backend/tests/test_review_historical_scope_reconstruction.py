@@ -97,23 +97,29 @@ def test_current_membership_fixed_across_dates(monkeypatch) -> None:
     )
     seen: list[tuple[date, tuple]] = []
 
-    async def fake_prepare(
-        session, scope_type, scope_key, scope_name, trade_date, member_ids, **kw
+    async def fake_prepare_series(
+        session, scope_type, scope_key, scope_name, trade_dates, member_ids, **kw
     ):
-        seen.append((trade_date, tuple(member_ids)))
-        return _prepared(
-            scope_type,
-            scope_key,
-            trade_date,
-            [str(m) for m in member_ids],
-            [_member(str(m)) for m in member_ids],
-        )
+        for d in trade_dates:
+            seen.append((d, tuple(member_ids)))
+        return [
+            _prepared(
+                scope_type,
+                scope_key,
+                d,
+                [str(m) for m in member_ids],
+                [_member(str(m)) for m in member_ids],
+            )
+            for d in trade_dates
+        ]
 
     async def fake_resolve(session, scope_type, scope_key, *, asof_date):
         return mem
 
     monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
-    monkeypatch.setattr(reconstruct, "prepare_scope_from_member_ids", fake_prepare)
+    monkeypatch.setattr(
+        reconstruct, "prepare_scope_series_from_member_ids", fake_prepare_series
+    )
 
     async def scenario():
         return await reconstruct.reconstruct_scope_series(
@@ -152,22 +158,27 @@ def test_historical_membership_never_consulted(monkeypatch) -> None:
         pit_calls.append((scope_type, scope_key, trade_date))
         return ([uuid.uuid4()], "historical-different")
 
-    async def fake_prepare(
-        session, scope_type, scope_key, scope_name, trade_date, member_ids, **kw
+    async def fake_prepare_series(
+        session, scope_type, scope_key, scope_name, trade_dates, member_ids, **kw
     ):
-        return _prepared(
-            scope_type,
-            scope_key,
-            trade_date,
-            [str(m) for m in member_ids],
-            [_member(str(m)) for m in member_ids],
-        )
+        return [
+            _prepared(
+                scope_type,
+                scope_key,
+                d,
+                [str(m) for m in member_ids],
+                [_member(str(m)) for m in member_ids],
+            )
+            for d in trade_dates
+        ]
 
     async def fake_resolve(session, scope_type, scope_key, *, asof_date):
         return mem
 
     monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
-    monkeypatch.setattr(reconstruct, "prepare_scope_from_member_ids", fake_prepare)
+    monkeypatch.setattr(
+        reconstruct, "prepare_scope_series_from_member_ids", fake_prepare_series
+    )
     # The historical PIT membership owner must NOT be reached by reconstruction.
     monkeypatch.setattr(
         "app.services.review_scope_service.resolve_scope_members",
@@ -202,23 +213,28 @@ def test_member_facts_date_exact(monkeypatch) -> None:
     )
     dates_seen: list[date] = []
 
-    async def fake_prepare(
-        session, scope_type, scope_key, scope_name, trade_date, member_ids, **kw
+    async def fake_prepare_series(
+        session, scope_type, scope_key, scope_name, trade_dates, member_ids, **kw
     ):
-        dates_seen.append(trade_date)
-        return _prepared(
-            scope_type,
-            scope_key,
-            trade_date,
-            [str(m) for m in member_ids],
-            [_member(str(m)) for m in member_ids],
-        )
+        dates_seen.extend(trade_dates)
+        return [
+            _prepared(
+                scope_type,
+                scope_key,
+                d,
+                [str(m) for m in member_ids],
+                [_member(str(m)) for m in member_ids],
+            )
+            for d in trade_dates
+        ]
 
     async def fake_resolve(session, scope_type, scope_key, *, asof_date):
         return mem
 
     monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
-    monkeypatch.setattr(reconstruct, "prepare_scope_from_member_ids", fake_prepare)
+    monkeypatch.setattr(
+        reconstruct, "prepare_scope_series_from_member_ids", fake_prepare_series
+    )
 
     async def scenario():
         return await reconstruct.reconstruct_scope_series(
@@ -230,7 +246,8 @@ def test_member_facts_date_exact(monkeypatch) -> None:
         )
 
     asyncio.run(scenario())
-    assert dates_seen == [T1, T2]  # strictly T1 then T2, never the current date
+    # The exact requested dates are passed to the batch prep, never the current day.
+    assert dates_seen == [T1, T2]
 
 
 # ---------------------------------------------------------------------------

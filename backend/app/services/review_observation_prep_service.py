@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import logging
 import uuid
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -30,6 +32,7 @@ from app.domain.review.member_fact import (
 )
 from app.domain.review.scope_observation import MemberObservation, StructureEvent
 from app.models.bar import BarDaily
+from app.models.calendar import TradingCalendar
 from app.models.first_pyramid_history import (
     FirstPyramidHistoryDailyState,
     FirstPyramidHistoryEvent,
@@ -302,6 +305,68 @@ async def _load_structure_events(
     return events
 
 
+def _build_member_observations(
+    pit_ids_t: list[uuid.UUID],
+    *,
+    trade_date: date,
+    t1: date | None,
+    states_t: dict[uuid.UUID, dict],
+    states_t1: dict[uuid.UUID, dict],
+    bar_facts: dict[uuid.UUID, list[DailyBarFact]],
+    t1_facts: dict[uuid.UUID, list[DailyBarFact]],
+    current_only_facts: dict[str, dict[str, object]],
+) -> list[MemberObservation]:
+    """Build canonical ``MemberObservation`` inputs shared by the per-date and the
+    batch replay path (single member-construction owner).
+
+    ``bar_facts`` / ``t1_facts`` are the bar-aligned per-member lists for the
+    date's ``[T-400d, T]`` / ``[t1-400d, t1]`` windows (ascending).  STRICT-PRIOR
+    history: ``facts`` includes T (window ``<= T``), so T is excluded here —
+    ``volume_t`` / ``amount_t`` carry T separately and the canonical volume owner
+    appends it exactly once.  Both series are built from the SAME prior bars so
+    index i stays aligned to one trade_date across volume and amount.
+    """
+    members: list[MemberObservation] = []
+    for inst_id in pit_ids_t:
+        state_t = states_t.get(inst_id)
+        if state_t is None:
+            # Not a valid canonical First Pyramid member/fact at T -> not provided.
+            continue
+        facts = bar_facts.get(inst_id, [])
+        current = facts[-1] if facts and facts[-1].trade_date == trade_date else None
+        prior_bars = [b for b in facts if b.trade_date != trade_date]
+        volumes = [b.volume for b in prior_bars]
+        amounts = [b.amount for b in prior_bars]
+        t1_bars = t1_facts.get(inst_id, [])
+        t1_bar = t1_bars[-1] if t1_bars and t1_bars[-1].trade_date == t1 else None
+        members.append(
+            build_member_observation(
+                RawMemberFacts(
+                    member_id=str(inst_id),
+                    flat_t=previous_state_to_flat(state_t),
+                    close_t=current.close if current else None,
+                    amount_t=current.amount if current else None,
+                    volume_t=current.volume if current else None,
+                    volume_history=tuple(volumes),
+                    amount_history=tuple(amounts),
+                    flat_t1=(
+                        previous_state_to_flat(states_t1[inst_id]) if inst_id in states_t1 else None
+                    ),
+                    close_t1=t1_bar.close if t1_bar else None,
+                    # Continuous Trend/Structure/Momentum/Volume facts (PRD §7.3-§7.6)
+                    # that the history state_payload carries but previous_state_to_flat
+                    # does not surface. Additive passthrough; missing -> None.
+                    continuous=state_to_continuous(state_t),
+                    # Current-only canonical facts from the exact-T snapshot.  These
+                    # have no member-day history series; Historical Dynamics stays
+                    # unavailable while Current is served (PRD v2.3).
+                    current_only=current_only_facts.get(str(inst_id)),
+                )
+            )
+        )
+    return members
+
+
 async def prepare_scope_from_member_ids(
     session: AsyncSession,
     scope_type: str,
@@ -359,52 +424,16 @@ async def prepare_scope_from_member_ids(
         else {}
     )
 
-    members: list[MemberObservation] = []
-    for inst_id in pit_ids_t:
-        state_t = states_t.get(inst_id)
-        if state_t is None:
-            # Not a valid canonical First Pyramid member/fact at T -> not provided.
-            continue
-        facts = bar_facts.get(inst_id, [])
-        current = facts[-1] if facts and facts[-1].trade_date == trade_date else None
-        # STRICT-PRIOR history, bar-aligned.  ``facts`` is ordered ascending and
-        # includes T (loader uses ``trade_date <= T``), so T must be excluded here:
-        # ``volume_t`` / ``amount_t`` carry T separately and the canonical volume
-        # owner appends it exactly once.  Filtering volume and amount independently
-        # would desynchronise the two series whenever a bar has one but not the
-        # other, and ``zip_longest`` downstream cannot recover the date pairing.
-        # Therefore both series are built from the SAME prior bars, keeping index
-        # i aligned to one trade_date across volume and amount.
-        prior_bars = [b for b in facts if b.trade_date != trade_date]
-        volumes = [b.volume for b in prior_bars]
-        amounts = [b.amount for b in prior_bars]
-        t1_bars = t1_facts.get(inst_id, [])
-        t1_bar = t1_bars[-1] if t1_bars and t1_bars[-1].trade_date == t1 else None
-        members.append(
-            build_member_observation(
-                RawMemberFacts(
-                    member_id=str(inst_id),
-                    flat_t=previous_state_to_flat(state_t),
-                    close_t=current.close if current else None,
-                    amount_t=current.amount if current else None,
-                    volume_t=current.volume if current else None,
-                    volume_history=tuple(volumes),
-                    amount_history=tuple(amounts),
-                    flat_t1=(
-                        previous_state_to_flat(states_t1[inst_id]) if inst_id in states_t1 else None
-                    ),
-                    close_t1=t1_bar.close if t1_bar else None,
-                    # Continuous Trend/Structure/Momentum/Volume facts (PRD §7.3-§7.6)
-                    # that the history state_payload carries but previous_state_to_flat
-                    # does not surface. Additive passthrough; missing -> None.
-                    continuous=state_to_continuous(state_t),
-                    # Current-only canonical facts from the exact-T snapshot.  These
-                    # have no member-day history series; Historical Dynamics stays
-                    # unavailable while Current is served (PRD v2.3).
-                    current_only=current_only_facts.get(str(inst_id)),
-                )
-            )
-        )
+    members = _build_member_observations(
+        pit_ids_t,
+        trade_date=trade_date,
+        t1=t1,
+        states_t=states_t,
+        states_t1=states_t1,
+        bar_facts=bar_facts,
+        t1_facts=t1_facts,
+        current_only_facts=current_only_facts,
+    )
 
     return PreparedScope(
         scope_type=scope_type,
@@ -421,6 +450,261 @@ async def prepare_scope_from_member_ids(
         diagnostics=tuple(diagnostics),
         events=tuple(structure_events),
     )
+
+
+# ----------------------------------------------------------------------------
+# BATCH historical reconstruction: ONE bulk read of the whole member x date
+# window, then replay per T (no per-date reload).  The per-date loaders above
+# stay as the canonical SQL owners; the batch loaders read the SAME canonical
+# tables once and the replay reproduces exactly the per-date windows so the
+# resulting PreparedScope is byte-identical to the per-date path.
+# ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _InstrumentBarSeries:
+    """Ascending per-instrument daily bar facts for the whole batch window."""
+
+    facts: tuple[DailyBarFact, ...]
+    dates: tuple[date, ...]
+
+    def window(self, hi: date, lo_days: int = _BAR_LOOKBACK_DAYS) -> list[DailyBarFact]:
+        """Facts with ``hi - lo_days <= trade_date <= hi`` (ascending), reproducing
+        ``_load_bar_facts`` for one replay date ``hi`` exactly."""
+        lo = hi - timedelta(days=lo_days)
+        start = bisect_left(self.dates, lo)
+        end = bisect_right(self.dates, hi)
+        return list(self.facts[start:end])
+
+
+def _build_t1_map(
+    trade_dates: Sequence[date],
+    trading_days: Sequence[date],
+) -> dict[date, date | None]:
+    """Map each requested date to its strictly-lower trading-day predecessor.
+
+    Same predicates as ``calendar_service.get_previous_trading_day_async``
+    (strictly < ref_date, is_trading_day, market A) over the caller-supplied
+    ``trading_days`` window.
+    """
+    days = sorted(trading_days)
+    out: dict[date, date | None] = {}
+    for t in trade_dates:
+        idx = bisect_left(days, t)
+        out[t] = days[idx - 1] if idx > 0 else None
+    return out
+
+
+async def _load_batch_calendar(
+    session: AsyncSession,
+    trade_dates: list[date],
+) -> dict[date, date | None]:
+    """All A-market trading days across ``[first-400d, last]`` once; map each
+    requested date to its exact canonical T-1 (single query for the whole series)."""
+    if not trade_dates:
+        return {}
+    first, last = trade_dates[0], trade_dates[-1]
+    rows = (
+        await session.execute(
+            select(TradingCalendar.trade_date)
+            .where(
+                TradingCalendar.trade_date >= first - timedelta(days=_BAR_LOOKBACK_DAYS),
+                TradingCalendar.trade_date <= last,
+                TradingCalendar.is_trading_day.is_(True),
+                TradingCalendar.market == "A",
+            )
+            .order_by(TradingCalendar.trade_date.asc())
+        )
+    ).scalars()
+    return _build_t1_map(trade_dates, list(rows))
+
+
+async def _load_batch_states(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    trade_dates: list[date],
+    t1_by_date: dict[date, date | None],
+) -> dict[date, dict[uuid.UUID, dict]]:
+    """First Pyramid daily_state payloads for every requested T and its exact T-1
+    (one query), grouped by trade_date -> {instrument_id: state_payload}."""
+    if not instrument_ids or not trade_dates:
+        return {}
+    dates = set(trade_dates)
+    dates.update(d for d in t1_by_date.values() if d is not None)
+    stmt = select(FirstPyramidHistoryDailyState).where(
+        FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+        FirstPyramidHistoryDailyState.trade_date.in_(sorted(dates)),
+        FirstPyramidHistoryDailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+    )
+    out: dict[date, dict[uuid.UUID, dict]] = defaultdict(dict)
+    for row in (await session.execute(stmt)).scalars():
+        out[row.trade_date][row.instrument_id] = row.state_payload
+    return dict(out)
+
+
+async def _load_batch_bars(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    trade_dates: list[date],
+) -> dict[uuid.UUID, _InstrumentBarSeries]:
+    """All daily bars across ``[first-400d, last]`` once (one query), grouped per
+    instrument ascending.  Per-date windows are sliced in memory at replay."""
+    if not instrument_ids or not trade_dates:
+        return {}
+    first, last = trade_dates[0], trade_dates[-1]
+    stmt = (
+        select(BarDaily)
+        .where(
+            BarDaily.instrument_id.in_(instrument_ids),
+            BarDaily.trade_date >= first - timedelta(days=_BAR_LOOKBACK_DAYS),
+            BarDaily.trade_date <= last,
+        )
+        .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
+    )
+    by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
+    for bar in (await session.execute(stmt)).scalars():
+        by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
+    out: dict[uuid.UUID, _InstrumentBarSeries] = {}
+    for inst, facts in by_instrument.items():
+        out[inst] = _InstrumentBarSeries(
+            facts=tuple(facts),
+            dates=tuple(f.trade_date for f in facts),
+        )
+    return out
+
+
+async def _load_batch_events(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    trade_dates: list[date],
+) -> dict[date, list[StructureEvent]]:
+    """Canonical immutable FP structure events across ``[first, last+1d)`` once
+    (one query), grouped by the T prefix of ``event_time`` — identical membership
+    to the per-date ``event_time.startswith(T.isoformat())`` filter."""
+    if not instrument_ids or not trade_dates:
+        return {}
+    first, last = trade_dates[0], trade_dates[-1]
+    after_last = last + timedelta(days=1)
+    stmt = select(FirstPyramidHistoryEvent).where(
+        FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
+        FirstPyramidHistoryEvent.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        FirstPyramidHistoryEvent.history_contract_version == HISTORY_CONTRACT_VERSION,
+        FirstPyramidHistoryEvent.event_time >= first.isoformat(),
+        FirstPyramidHistoryEvent.event_time < after_last.isoformat(),
+    )
+    grouped: dict[str, list[StructureEvent]] = defaultdict(list)
+    for row in (await session.execute(stmt)).scalars():
+        payload = row.event_payload or {}
+        # Canonical boundary normalization (identical to ``_load_structure_events``).
+        etype = _normalize_event_type(row.event_type)
+        direction = payload.get("direction")
+        level = payload.get("level")
+        internal_raw = payload.get("internal")
+        internal = bool(internal_raw) if isinstance(internal_raw, bool) else None
+        release_ratio = payload.get("release_volume_ratio")
+        event_time = row.event_time
+        if not event_time:
+            # The query bounds ``event_time`` to [first, last+1d), so a NULL here
+            # would be a data anomaly; skip rather than crash or mis-group.
+            continue
+        grouped[event_time[:10]].append(
+            StructureEvent(
+                member_id=str(row.instrument_id),
+                event_type=etype,
+                direction=direction,
+                level=(float(level) if isinstance(level, (int, float)) else None),
+                internal=internal,
+                release_volume_ratio=(
+                    float(release_ratio) if isinstance(release_ratio, (int, float)) else None
+                ),
+            )
+        )
+    return {
+        date.fromisoformat(prefix): events
+        for prefix, events in grouped.items()
+        if date.fromisoformat(prefix) in set(trade_dates)
+    }
+
+
+async def prepare_scope_series_from_member_ids(
+    session: AsyncSession,
+    scope_type: str,
+    scope_key: str,
+    scope_name: str,
+    trade_dates: list[date],
+    member_ids: list[uuid.UUID],
+    *,
+    pit_member_ids_t1: list[uuid.UUID] | None = None,
+    pit_status_t: str = "current_static",
+    pit_status_t1: str = "current_static",
+    t1_membership_available: bool = True,
+    diagnostics: tuple[str, ...] = (),
+    load_current_only: bool = False,
+) -> list[PreparedScope]:
+    """Batch prepare one historical Scope Observation per date in one bulk read.
+
+    The whole member x date window is loaded ONCE (calendar, FP states, bars,
+    FP events) and replayed per ``trade_date`` — reproducing exactly the
+    per-date ``prepare_scope_from_member_ids`` windows, so each returned
+    :class:`PreparedScope` is identical to the per-date path (membership is
+    caller-fixed CURRENT STATIC, facts come from exact T / exact canonical T-1,
+    never current-day backfill).
+
+    ``load_current_only`` defaults to ``False`` (this is the historical-series
+    path: current-only snapshot facts have no FP-history source and stay None
+    per PRD v2.3).
+    """
+    if not trade_dates:
+        return []
+    t1_by_date = await _load_batch_calendar(session, trade_dates)
+    states_by_date = await _load_batch_states(session, member_ids, trade_dates, t1_by_date)
+    bars = await _load_batch_bars(session, member_ids, trade_dates)
+    events_by_date = await _load_batch_events(session, member_ids, trade_dates)
+
+    pit_ids_t = list(member_ids)
+    t1_ids = list(pit_member_ids_t1) if pit_member_ids_t1 is not None else list(pit_ids_t)
+
+    out: list[PreparedScope] = []
+    for t in trade_dates:
+        t1 = t1_by_date.get(t)
+        states_t = states_by_date.get(t, {})
+        states_t1 = states_by_date.get(t1, {}) if t1 else {}
+        bar_facts = {inst: series.window(t) for inst, series in bars.items()}
+        t1_facts = {inst: series.window(t1) for inst, series in bars.items()} if t1 else {}
+        structure_events = events_by_date.get(t, [])
+        current_only_facts = (
+            await _load_current_only_snapshot_facts(session, pit_ids_t, t)
+            if load_current_only
+            else {}
+        )
+        members = _build_member_observations(
+            pit_ids_t,
+            trade_date=t,
+            t1=t1,
+            states_t=states_t,
+            states_t1=states_t1,
+            bar_facts=bar_facts,
+            t1_facts=t1_facts,
+            current_only_facts=current_only_facts,
+        )
+        out.append(
+            PreparedScope(
+                scope_type=scope_type,
+                scope_key=scope_key,
+                scope_name=scope_name,
+                trade_date=t,
+                canonical_t1=t1,
+                pit_member_ids=tuple(str(i) for i in pit_ids_t),
+                pit_member_ids_t1=tuple(str(i) for i in t1_ids),
+                members=tuple(members),
+                t1_membership_available=t1_membership_available,
+                pit_status_t=pit_status_t,
+                pit_status_t1=pit_status_t1,
+                diagnostics=tuple(diagnostics),
+                events=tuple(structure_events),
+            )
+        )
+    return out
 
 
 async def prepare_scope(

@@ -35,6 +35,7 @@ from app.services.review_observation_persistence_service import (
 from app.services.review_observation_prep_service import (
     PreparedScope,
     prepare_scope_from_member_ids,
+    prepare_scope_series_from_member_ids,
 )
 
 logger = logging.getLogger("review_historical_scope_reconstruction")
@@ -190,24 +191,51 @@ async def reconstruct_scope_series(
     *,
     asof_date: date,
 ) -> dict[str, Any]:
-    """Rebuild an ordered historical Scope Observation series.
+    """Rebuild an ordered historical Scope Observation series (BATCH path).
 
-    Membership is resolved once (CURRENT STATIC) and reused for every historical
-    date.  Provenance lives OUTSIDE the canonical payloads.
+    Membership is resolved once (CURRENT STATIC).  The whole member x date
+    window is read in ONE bulk pass (``prepare_scope_series_from_member_ids``)
+    and replayed per T, then each observation is produced by the single
+    canonical owner ``compute_scope_observation`` and contract-validated.
+    Provenance lives OUTSIDE the canonical payloads.
     """
     membership = await resolve_current_membership(
         session, scope_type, scope_key, asof_date=asof_date
     )
+    prepared_list = await prepare_scope_series_from_member_ids(
+        session,
+        scope_type,
+        scope_key,
+        membership.scope_name,
+        trade_dates,
+        list(membership.member_ids),
+        # Historical reconstruction is built ONLY from FP history + bars + FP
+        # events.  Current-only snapshot facts stay None for historical T (PRD
+        # v2.3) and the large summary_payload JSONB is never transferred.
+        load_current_only=False,
+    )
     series: list[dict[str, Any]] = []
-    for trade_date in trade_dates:
-        rec = await reconstruct_scope_observation(
-            session, scope_type, scope_key, trade_date, membership
+    for prepared in prepared_list:
+        observation = compute_scope_observation(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            trade_date=prepared.trade_date,
+            pit_member_ids=prepared.pit_member_ids,
+            pit_member_ids_t1=prepared.pit_member_ids_t1,
+            members=prepared.members,
+            events=prepared.events,
+        )
+        validate_scope_observation_payload(
+            observation,
+            scope_type=scope_type,
+            scope_key=scope_key,
+            trade_date=prepared.trade_date,
         )
         series.append(
             {
-                "trade_date": trade_date.isoformat(),
-                "provided_member_count": rec.provided_member_count,
-                "observation": rec.observation,
+                "trade_date": prepared.trade_date.isoformat(),
+                "provided_member_count": observation["scope"]["provided_member_count"],
+                "observation": observation,
             }
         )
     return {
