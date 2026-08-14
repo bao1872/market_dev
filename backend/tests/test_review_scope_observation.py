@@ -10,6 +10,8 @@ import math
 from datetime import date
 from typing import Any
 
+import json
+
 import pytest
 
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
@@ -846,8 +848,9 @@ def test_structure_alignment_and_active_ob_count() -> None:
     assert align["aligned_count"] == 2
     assert align["divergent_count"] == 1
     assert align.get("neutral_count", 0) == 0
-    # active OB count = sum of (internal + swing) across members = 3+1+0 = 4
-    assert structure["active_ob_count"] == pytest.approx(4.0)
+    # REVIEW-V23-A-CORRECTION-2: active_ob_count is a v2.3 non-target fact -> removed
+    # from canonical Scope aggregation; reported unavailable, never as a number.
+    assert structure["active_ob_count"]["status"] == "unavailable"
     # Distance-to-trailing facts are live-snapshot-only -> unavailable, not 0.
     assert structure["distance_to_trailing_top_pct"]["status"] == "unavailable"
     assert structure["distance_to_trailing_bottom_pct"]["status"] == "unavailable"
@@ -900,28 +903,31 @@ def test_structure_events_no_level_for_extremes() -> None:
 
 
 def test_sqz_release_volume_ratio_median_from_events() -> None:
-    # 2026-08-13 CORRECTION: release volume ratio 先按 member 归一（同一 member
-    # 多个 release event 取均值，不重复加权），再做 Scope median。
+    # REVIEW-V23-A-CORRECTION-2: Release Volume Ratio consumes the canonical
+    # First Pyramid member-day release_volume_ratio DIRECTLY (one value per
+    # SQZ_RELEASE event) and takes the Scope Median over these canonical values.
+    # Review does NOT invent member-day normalization (mean/median/first-event).
+    # No member-dedupe: each canonical release event is one value.
     events = [
         StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=1.5),
         StructureEvent("b", "SQZ_RELEASE", release_volume_ratio=2.5),
         StructureEvent("c", "SQZ_RELEASE", release_volume_ratio=0.5),
-        # 同一 member a 第二个 release event -> 先 member 归一（均值）
+        # same member a fires a second release -> BOTH canonical event values enter
+        # the Scope Median (no Review-local member weighting).
         StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=2.5),
     ]
     rel = _run(
         [_m("a"), _m("b"), _m("c")], pit_member_ids=["a", "b", "c"], events=events
     )["momentum"]["release_volume_ratio"]
-    # member a 归一 = (1.5+2.5)/2 = 2.0; values = [2.0, 2.5, 0.5]
-    # median of [0.5, 2.0, 2.5] = 2.0
+    # canonical values = [1.5, 2.5, 0.5, 2.5]; sorted = [0.5, 1.5, 2.5, 2.5]
+    # median of even-length = mean(middle two) = (1.5 + 2.5)/2 = 2.0
     assert rel["median"] == pytest.approx(2.0)
-    assert rel["valid_count"] == 3
+    assert rel["valid_count"] == 4
 
 
 def test_momentum_squeeze_state_and_relation() -> None:
-    # 2026-08-13 CORRECTION: Squeeze State / Momentum-Volume Relation 直接继承
-    # canonical fact（First Pyramid volatility_phase / momentum_direction 字符串 token），
-    # Review 不再用 numeric phase 重推导。
+    # 2026-08-13 CORRECTION: Squeeze State 直接继承 canonical fact（First Pyramid
+    # volatility_phase / momentum_direction 字符串 token），Review 不再用 numeric phase 重推导。
     members = [
         _m("a", volatility_phase="released", momentum_direction_raw="up"),
         _m("b", volatility_phase="no_squeeze", momentum_direction_raw="down"),
@@ -936,8 +942,13 @@ def test_momentum_squeeze_state_and_relation() -> None:
     # BB position / width are live-snapshot-only -> unavailable.
     assert mom["bb_position"]["status"] == "unavailable"
     assert mom["bb_width"]["status"] == "unavailable"
+    # REVIEW-V23-A-CORRECTION-2: Momentum/Volume Relation requires a canonical
+    # First Pyramid member-day source, which does NOT exist (vol_divergence is
+    # snapshot-only).  Review MUST NOT synthesize a squeeze x momentum cross, so the
+    # field is unavailable / ALGORITHM_MAPPING_REQUIRED.
     relation = mom["momentum_volume_relation"]
-    assert relation["denominator"] == 3
+    assert relation["status"] == "unavailable"
+    assert "ALGORITHM_MAPPING_REQUIRED" in relation["reason"]
 
 
 def test_volume_20_200_six_fact_medians() -> None:
@@ -961,7 +972,9 @@ def test_volume_20_200_six_fact_medians() -> None:
 def test_unavailable_is_not_zero() -> None:
     out = _run([_m("a")])
     # None of the "unavailable" markers should be coerced to 0.
-    assert out["price"]["turnover"]["status"] == "unavailable"
+    # REVIEW-V23-A-CORRECTION-2: turnover is removed from the v2.3 canonical
+    # Scope payload entirely (no longer a target fact); it must not be present.
+    assert "turnover" not in out["price"]
     assert out["trend"]["continuous"]["vwap_ret_total"] is None
     assert out["structure"]["distance_to_trailing_top_pct"]["status"] == "unavailable"
     assert out["momentum"]["bb_position"]["status"] == "unavailable"
@@ -975,3 +988,74 @@ def test_persistence_section_keys_passthrough_no_recompute() -> None:
                    momentum=MomentumDirection.EXPANDING, return_1d=0.01, amount=100.0)])
     for section in ("price", "trend", "structure", "momentum", "participation", "chip", "scope"):
         assert section in out
+
+
+# === REVIEW-V23-A-CORRECTION-2: contract tests for the four contract deviations ===
+
+
+def test_momentum_volume_relation_unavailable_without_canonical_source() -> None:
+    # PRD §7.5.4: Momentum/Volume Relation is a canonical First Pyramid member-level
+    # fact.  No canonical member-day source exists (vol_divergence is snapshot-only),
+    # so Review MUST NOT synthesize a squeeze x momentum cross.  The field must be
+    # reported unavailable / ALGORITHM_MAPPING_REQUIRED, never a derived string.
+    members = [
+        _m("a", volatility_phase="released", momentum_direction_raw="up"),
+        _m("b", volatility_phase="squeeze", momentum_direction_raw="down"),
+        _m("c", volatility_phase="no_squeeze", momentum_direction_raw="up"),
+    ]
+    rel = _run(members)["momentum"]["momentum_volume_relation"]
+    assert rel["status"] == "unavailable"
+    assert "ALGORITHM_MAPPING_REQUIRED" in rel["reason"]
+    # A synthesized "Release·Up" / "Squeeze·Down" cross must NOT appear anywhere.
+    payload = json.dumps(_run(members))
+    assert "Release·Up" not in payload
+    assert "Squeeze·Down" not in payload
+
+
+def test_release_volume_ratio_no_self_weighting() -> None:
+    # PRD §7.5.3: Release Volume Ratio = canonical member-day event value -> Scope
+    # Median.  Review must NOT invent member-day normalization (mean/median/first of
+    # a member's raw events).  Each canonical SQZ_RELEASE event is one value.
+    events = [
+        StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=1.0),
+        StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=9.0),
+        StructureEvent("b", "SQZ_RELEASE", release_volume_ratio=5.0),
+    ]
+    rel = _run(
+        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events
+    )["momentum"]["release_volume_ratio"]
+    # canonical values = [1.0, 9.0, 5.0]; median = 5.0.  A member-day mean of a
+    # (1.0+9.0)/2 = 5.0 would ALSO give 5.0 here, so use an asymmetric set:
+    # if Review mean'd member a first, values would be [5.0, 5.0] -> median 5.0.
+    # To prove no member-day weighting, use 3 events on one member with a skew.
+    events2 = [
+        StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=1.0),
+        StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=2.0),
+        StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=3.0),
+        StructureEvent("b", "SQZ_RELEASE", release_volume_ratio=10.0),
+    ]
+    rel2 = _run(
+        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events2
+    )["momentum"]["release_volume_ratio"]
+    # canonical values = [1.0, 2.0, 3.0, 10.0]; median = (2.0+3.0)/2 = 2.5.
+    # member-a mean (1+2+3)/3 = 2.0 -> [2.0, 10.0] median = 6.0 (WRONG if weighted).
+    assert rel2["median"] == pytest.approx(2.5)
+    assert rel2["valid_count"] == 4
+
+
+def test_canonical_scope_payload_excludes_active_ob_count() -> None:
+    # PRD v2.3 removes Active OB Count from the canonical Scope aggregation.
+    out = _run([_m("a", active_internal_ob_count=2.0, active_swing_ob_count=1.0)])
+    # Active OB Count is not a v2.3 target fact -> reported unavailable, never a number.
+    assert out["structure"]["active_ob_count"]["status"] == "unavailable"
+    # And the raw numeric field must not appear in the canonical payload.
+    payload = json.dumps(out)
+    assert '"active_ob_count": 3' not in payload
+
+
+def test_canonical_scope_payload_excludes_turnover() -> None:
+    # PRD v2.3 removes Turnover Rate from the canonical Scope payload entirely.
+    out = _run([_m("a")])
+    assert "turnover" not in out["price"]
+    payload = json.dumps(out)
+    assert '"turnover"' not in payload

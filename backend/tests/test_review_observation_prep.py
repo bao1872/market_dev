@@ -154,9 +154,13 @@ def test_amount_independent_universe() -> None:
 
 
 def test_vol_amt_ratio20_shared_ssot() -> None:
+    # canonical rolling INCLUDES T in the 20D window.  2 priors + T (3 bars) =>
+    # window = [10, 20, 30], mean = 20, ratio = 30/20 = 1.5.  Review must match the
+    # canonical owner (no second formula).
     mo = build_member_observation(_raw(volume_t=30.0, amount_t=30.0))
-    assert mo.vol_ratio20 == pytest.approx(2.0)  # 30 / mean(10,20)
-    assert mo.amt_ratio20 == pytest.approx(2.0)
+    canon = _canonical_series_row([10.0, 20.0, 30.0], amts=[10.0, 20.0, 30.0])
+    assert mo.vol_ratio20 == pytest.approx(canon.volume_ratio_20, abs=1e-9)
+    assert mo.amt_ratio20 == pytest.approx(canon.amount_ratio_20, abs=1e-9)
 
     # no history -> None
     mo2 = build_member_observation(_raw(volume_history=(), amount_history=()))
@@ -411,59 +415,131 @@ def test_service_preparation_deterministic(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_volume_context_from_series_six_facts() -> None:
-    from app.services.volume_context import compute_volume_context_from_series
+def _canonical_series_row(vols, amts=None):
+    """T row of the canonical First Pyramid VolumeContext owner for the given bars.
 
-    # 25 prior volumes (>= SHORT_WINDOW=20) ascending 10..34; current 50.
-    history = tuple(float(v) for v in range(10, 35))
-    current = 50.0
-    vc = compute_volume_context_from_series(current, history)
-    assert vc is not None
-    # 2026-08-13 CORRECTION: readiness_20 满足，但 readiness_200 不满足（history<200）
-    assert vc.readiness_20 is True
-    assert vc.readiness_200 is False
-    assert vc.readiness is False
-    # SSOT rolling windows EXCLUDE the current bar. mean20 = mean(last 20 prior).
-    mean20 = sum(history[-20:]) / 20
-    # ratio20: current / trailing-20 mean (prior only).
-    assert vc.volume_ratio_20 == pytest.approx(current / mean20)
-    # ratio200: 200D 窗口不足 -> None（禁止 25D history 产生 200D fact）
-    assert vc.volume_ratio_200 is None
-    assert vc.volume_percentile_200 is None
-    assert vc.volume_zscore_200 is None
-    # percentile: count strictly below current within trailing window / len(window).
-    below20 = sum(1 for x in history[-20:] if x < current)
-    assert vc.volume_percentile_20 == pytest.approx(below20 / 20 * 100.0)
-    # z-score over trailing-20 window (prior only).
-    var = sum((x - mean20) ** 2 for x in history[-20:]) / 20
-    std = var ** 0.5
-    assert vc.volume_zscore_20 == pytest.approx((current - mean20) / std)
+    The LAST bar is T; compute_volume_context_series uses a rolling window that
+    EXCLUDES the current bar, so the last (T) row's window = the strict-prior bars.
+    """
+    import pandas as pd
+
+    from app.services.volume_context import (
+        compute_volume_context_series,
+        extract_last_volume_context,
+    )
+
+    v = [float(x) for x in vols]
+    a = [float(x) for x in amts] if amts is not None else [float("nan")] * len(v)
+    df = pd.DataFrame({"volume": v, "amount": a})
+    return extract_last_volume_context(compute_volume_context_series(df))
 
 
-def test_volume_context_200_window_full() -> None:
-    from app.services.volume_context import compute_volume_context_from_series
-
-    # >=200 根 history -> readiness_200 满足，200D facts 产出。
-    history = tuple(float(v) for v in range(10, 210))
-    current = 50.0
-    vc = compute_volume_context_from_series(current, history)
-    assert vc is not None
-    assert vc.readiness_20 is True
-    assert vc.readiness_200 is True
-    assert vc.readiness is True
-    mean200 = sum(history[-200:]) / 200
-    assert vc.volume_ratio_200 == pytest.approx(current / mean200)
-    assert vc.volume_percentile_200 is not None
-    assert vc.volume_zscore_200 is not None
+def _review_member_volume(vols, amts=None):
+    """Review MemberObservation volume facts produced by build_member_observation."""
+    if amts is None:
+        amts = [100.0] * len(vols)
+    raw = _raw(volume_t=vols[-1], volume_history=tuple(vols[:-1]),
+              amount_t=amts[-1], amount_history=tuple(amts[:-1]))
+    mo = build_member_observation(raw)
+    return mo
 
 
-def test_volume_context_from_series_too_short_returns_none() -> None:
-    from app.services.volume_context import compute_volume_context_from_series
+# REVIEW-V23-A-CORRECTION-2: Volume SSOT parity contract.  Review T facts MUST be
+# bit-identical to compute_volume_context_series(bars) T row.  No second rolling
+# formula, no 19/20 or 199/200 one-bar drift, no divergent 0/negative handling.
+def _assert_volume_parity(vols, amts=None, *, allow_200=False) -> None:
+    canon = _canonical_series_row(vols, amts)
+    mo = _review_member_volume(vols, amts)
+    # readiness is inferred from whether the 20D/200D fields were produced.
+    mo_ready20 = mo.vol_ratio20 is not None
+    assert canon.readiness_20 == mo_ready20, "readiness_20 mismatch"
+    if allow_200:
+        mo_ready200 = mo.vol_ratio200 is not None
+        assert canon.readiness_200 == mo_ready200, "readiness_200 mismatch"
+        assert _approx(canon.volume_ratio_200, mo.vol_ratio200)
+        assert _approx(canon.volume_percentile_200, mo.vol_pct200)
+        assert _approx(canon.volume_zscore_200, mo.vol_zscore200)
+    else:
+        assert mo.vol_ratio200 is None
+        assert mo.vol_pct200 is None
+        assert mo.vol_zscore200 is None
+    assert _approx(canon.volume_ratio_20, mo.vol_ratio20)
+    assert _approx(canon.volume_percentile_20, mo.vol_pct20)
+    assert _approx(canon.volume_zscore_20, mo.vol_zscore20)
 
-    # fewer than 20 history values -> cannot form the 20-window -> None.
-    assert compute_volume_context_from_series(40.0, (10.0, 20.0)) is None
-    # non-finite current -> None (never 0).
-    assert compute_volume_context_from_series(None, (10.0,) * 25) is None
+
+def _approx(a, b) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return pytest.approx(a) == b
+
+
+def test_volume_parity_19_bars() -> None:
+    # 18 priors + T (19 bars) -> 20D window NOT satisfiable -> Review unavailable.
+    # NOTE: canonical rolling INCLUDES the current bar in the window, so an N-bar
+    # series satisfies the 20D window when N >= 20.  19 bars => 20D not satisfied.
+    vols = [float(10 + i) for i in range(19)]
+    canon = _canonical_series_row(vols)
+    mo = _review_member_volume(vols)
+    assert canon.readiness_20 is False
+    assert mo.vol_ratio20 is None
+    assert mo.vol_ratio200 is None
+
+
+def test_volume_parity_20_bars() -> None:
+    # 19 priors + T (20 bars) -> 20D window satisfied, 200D not.
+    vols = [float(10 + i) for i in range(20)]
+    _assert_volume_parity(vols, allow_200=False)
+
+
+def test_volume_parity_21_bars() -> None:
+    vols = [float(10 + i) for i in range(21)]
+    _assert_volume_parity(vols, allow_200=False)
+
+
+def test_volume_parity_199_bars() -> None:
+    # 198 priors + T (199 bars) -> 200D window NOT satisfied (needs >=200 bars).
+    vols = [float(10 + i) for i in range(199)]
+    _assert_volume_parity(vols, allow_200=False)
+
+
+def test_volume_parity_200_bars() -> None:
+    # 199 priors + T (200 bars) -> 200D window satisfied.
+    vols = [float(10 + i) for i in range(200)]
+    _assert_volume_parity(vols, allow_200=True)
+
+
+def test_volume_parity_201_bars() -> None:
+    vols = [float(10 + i) for i in range(202)]
+    _assert_volume_parity(vols, allow_200=True)
+
+
+def test_volume_parity_zero_volume() -> None:
+    # canonical rolling keeps 0-volume bars (no >0 filtering); Review must match.
+    vols = [float(10 + i) for i in range(21)]
+    vols[5] = 0.0
+    vols[15] = 0.0
+    _assert_volume_parity(vols, allow_200=False)
+
+
+def test_volume_parity_constant_volume() -> None:
+    vols = [20.0] * 21
+    _assert_volume_parity(vols, allow_200=False)
+
+
+def test_volume_parity_normal_varying() -> None:
+    import math
+
+    vols = [float(100 + 50 * math.sin(i / 3.0)) for i in range(201)]
+    _assert_volume_parity(vols, allow_200=True)
+
+
+def test_volume_parity_percentile_ratio_zscore_readiness() -> None:
+    # explicit small set to lock percentile/ratio/zscore/readiness semantics.
+    vols = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
+            11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
+            35.0]  # 20 priors + T(35)
+    _assert_volume_parity(vols, allow_200=False)
 
 
 def test_prep_carries_continuous_trend_facts() -> None:
@@ -532,12 +608,16 @@ def test_prep_volume_200_requires_full_window() -> None:
     assert mo.vol_ratio200 is None  # 禁止 25D history 产生 200D fact
     assert mo.vol_pct200 is None
     assert mo.vol_zscore200 is None
-    # >=200 根 history -> 200D 可用。
+    # >=200 根 history -> 200D 可用。  canonical rolling INCLUDES T in the window,
+    # so the 200D ratio = T / mean(199 prior + T).  Compute the expected value from
+    # the canonical owner directly (do NOT hand-derive the window).
     history200 = tuple(float(v) for v in range(10, 210))  # 200 priors
     mo2 = build_member_observation(_raw(volume_t=50.0, volume_history=history200))
     assert mo2.vol_ratio200 is not None
-    prior_mean = sum(history200) / len(history200)
-    assert mo2.vol_ratio200 == pytest.approx(50.0 / prior_mean, abs=1e-6)
+    canon200 = _canonical_series_row(
+        [float(v) for v in history200] + [50.0]
+    )
+    assert mo2.vol_ratio200 == pytest.approx(canon200.volume_ratio_200, abs=1e-9)
     assert mo2.vol_pct200 is not None
     assert mo2.vol_zscore200 is not None
     assert mo2.vol_ratio20 is not None

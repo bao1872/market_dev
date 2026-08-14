@@ -59,6 +59,7 @@ class VolumeContextData:
     # 不允许 25D history 产生 200D fact。
     readiness_20: bool = False
     readiness_200: bool = False
+    amount_ratio_20: float | None = None  # canonical owner 的 amount 维度 20D ratio
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -204,79 +205,6 @@ def compute_volume_context_series(bars: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def compute_volume_context_from_series(
-    current_volume: float | None,
-    history_volumes: Sequence[float | None],
-) -> VolumeContextData | None:
-    """Pure, DB-free VolumeContext for a single current bar + its prior history.
-
-    Reuses the exact SSOT semantics of :func:`compute_volume_context_series`
-    (MA20 / MA200 ratio, ddof=0 z-score, count-below percentile with the >=5
-    valid-values gate) but operates on an already-prepared ``(current_volume,
-    history_volumes)`` pair instead of a database-backed bar DataFrame.  This is
-    the single canonical volume-math owner for the Review scope-prep path; no
-    second rolling formula is introduced.
-
-    ``history_volumes`` are the volumes strictly BEFORE the current bar, in
-    ascending chronological order.  ``current_volume`` is the T-bar volume.
-
-    Returns ``None`` only when the required windows cannot be formed; otherwise
-    returns a ``VolumeContextData`` whose per-field ``None`` marks an
-    individually-unavailable fact (sample too small for that statistic).
-    """
-
-    if current_volume is None or not math.isfinite(current_volume):
-        return None
-
-    prior = [
-        v for v in history_volumes
-        if v is not None and math.isfinite(v) and v > 0
-    ]
-    n_prior = len(prior)
-    # 2026-08-13 CORRECTION: 20D / 200D readiness 分别严格满足完整窗口。
-    # 不允许 25D history 产生 200D fact。
-    readiness_20 = n_prior >= SHORT_WINDOW
-    readiness_200 = n_prior >= LONG_WINDOW
-    if not readiness_20:
-        # 20D 窗口都不足时整体不可用（与历史行为一致）。
-        return None
-
-    # SSOT rolling windows EXCLUDE the current bar (pandas rolling at index i uses
-    # vals[max(0, i-window):i]); the current bar is only the compare value inside
-    # _pct.  So all windows are slices of ``prior`` (history before T).
-    last20 = prior[-SHORT_WINDOW:]
-    last200 = prior[-LONG_WINDOW:] if readiness_200 else []
-
-    mean20 = sum(last20) / len(last20)
-    mean200 = sum(last200) / len(last200) if readiness_200 else None
-
-    ratio_20 = current_volume / mean20 if mean20 > 0 else None
-    ratio_200 = current_volume / mean200 if (readiness_200 and mean200 and mean200 > 0) else None
-
-    zscore_20 = _zscore(current_volume, last20)
-    zscore_200 = _zscore(current_volume, last200) if readiness_200 else None
-
-    pct_20 = _position_pct(current_volume, last20)
-    pct_200 = _position_pct(current_volume, last200) if readiness_200 else None
-
-    return VolumeContextData(
-        volume=current_volume,
-        amount=None,
-        turnover_rate=None,
-        volume_ma_20=mean20,
-        volume_ma_200=mean200,
-        volume_ratio_20=ratio_20,
-        volume_ratio_200=ratio_200,
-        volume_percentile_20=pct_20,
-        volume_percentile_200=pct_200,
-        volume_zscore_20=zscore_20,
-        volume_zscore_200=zscore_200,
-        readiness=readiness_20 and readiness_200,
-        readiness_20=readiness_20,
-        readiness_200=readiness_200,
-    )
-
-
 def extract_volume_context_at(
     vc_series: pd.DataFrame, bar_index: int | None = None
 ) -> VolumeContextData | None:
@@ -299,6 +227,11 @@ def extract_volume_context_at(
 
     row = vc_series.iloc[bar_index]
     readiness = bool(row.get("readiness", False)) if pd.notna(row.get("readiness")) else False
+    # 2026-08-13 CORRECTION (REVIEW-V23-A-CORRECTION-2): expose per-window readiness
+    # so consumers (e.g. Review scope-prep) can distinguish a satisfied 20D window
+    # from a satisfied 200D window — a 25D history must NOT yield 200D facts.
+    readiness_20 = _safe_float(row.get("volume_ratio_20")) is not None
+    readiness_200 = _safe_float(row.get("volume_ratio_200")) is not None
 
     return VolumeContextData(
         volume=_safe_float(row.get("volume")),
@@ -308,11 +241,14 @@ def extract_volume_context_at(
         volume_ma_200=_safe_float(row.get("volume_ma_200")),
         volume_ratio_20=_safe_float(row.get("volume_ratio_20")),
         volume_ratio_200=_safe_float(row.get("volume_ratio_200")),
+        amount_ratio_20=_safe_float(row.get("amount_ratio_20")),
         volume_percentile_20=_safe_float(row.get("volume_percentile_20")),
         volume_percentile_200=_safe_float(row.get("volume_percentile_200")),
         volume_zscore_20=_safe_float(row.get("volume_zscore_20")),
         volume_zscore_200=_safe_float(row.get("volume_zscore_200")),
         readiness=readiness,
+        readiness_20=readiness_20,
+        readiness_200=readiness_200,
     )
 
 

@@ -33,11 +33,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import pandas as pd
+
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
-from app.domain.review.member_fact import compute_ratio
 from app.domain.review.scope_observation import MemberObservation
 from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
-from app.services.volume_context import compute_volume_context_from_series
+from app.services.volume_context import (
+    compute_volume_context_series,
+    extract_last_volume_context,
+)
 
 
 def _finite(value: float | None) -> float | None:
@@ -98,16 +102,63 @@ class RawMemberFacts:
     continuous: Mapping[str, Any] = field(default_factory=dict)
 
 
+def _compute_volume_context_canonical(raw: RawMemberFacts):
+    """Hand the prepared bars (strict-prior history + T) to the canonical First
+    Pyramid VolumeContext owner and return the T row.
+
+    This is the ONLY volume-math owner for the Review scope-prep path.  Review
+    never re-implements rolling MA / percentile / z-score; it reuses
+    ``compute_volume_context_series`` verbatim so that Review T facts are
+    bit-identical to the canonical series T row (no 19/20 or 199/200 one-bar
+    drift, no divergent 0/negative-volume handling).
+    """
+    vol_hist = [_finite(v) for v in raw.volume_history]
+    amt_hist = [_finite(v) for v in raw.amount_history]
+    vol_t = _finite(raw.volume_t)
+    amt_t = _finite(raw.amount_t)
+    # Build a T-inclusive bar series.  Volume is the mandatory dimension: a bar is
+    # included only if its VOLUME is finite.  A missing/invalid amount for an
+    # included bar becomes NaN (NOT dropped), so volume is never truncated by a
+    # shorter amount history.  We pair volume/amount bar-by-bar with zip_longest so a
+    # length-mismatched amount history cannot discard valid volume bars.
+    # compute_volume_context_series uses a rolling window that EXCLUDES the current
+    # bar (vals[max(0, i-w):i]); the last row is T, so its window = the strict-prior
+    # history, exactly matching the prior semantics.
+    from itertools import zip_longest
+
+    vols: list[float] = []
+    amts: list[float] = []
+    for v, a in zip_longest(vol_hist, amt_hist):
+        if v is None:
+            continue
+        vols.append(float(v))
+        amts.append(float(a) if a is not None else float("nan"))
+    if vol_t is not None:
+        vols.append(float(vol_t))
+        amts.append(float(amt_t) if amt_t is not None else float("nan"))
+    if not vols:
+        return None
+    df = pd.DataFrame({"volume": vols, "amount": amts})
+    series = compute_volume_context_series(df)
+    return extract_last_volume_context(series)
+
+
 def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
     """Build a ``MemberObservation`` from already-resolved canonical facts."""
     trend, swing, internal, momentum = _flat_semantics(raw.flat_t)
     t1_trend, t1_swing, t1_internal, t1_momentum = _flat_semantics(raw.flat_t1)
     close_t = _finite(raw.close_t)
     cont = raw.continuous or {}
-    vc = compute_volume_context_from_series(_finite(raw.volume_t), list(raw.volume_history))
+    # VOLUME SSOT (REVIEW-V23-A-CORRECTION-2): Review does NOT own a second rolling
+    # formula.  The prepared bars through T are handed to the canonical First Pyramid
+    # VolumeContext owner; we extract the last (T) row.  This guarantees identical
+    # MA20/MA200 window semantics, 0/negative-volume handling, percentile gate and
+    # readiness to compute_volume_context_series (no 19/20 or 199/200 one-bar drift).
+    vc = _compute_volume_context_canonical(raw)
     # 2026-08-13 CORRECTION: 200D facts 仅在 readiness_200 满足（完整 >=200 根
-    # history）时产出；25D history 不得产生 200D fact。
-    vc_ready_200 = vc.readiness_200 if vc else False
+    # history）时产出；25D history 不得产生 200D fact。  Readiness is taken from the
+    # canonical owner's produced 200D fields (None => window not satisfied).
+    vc_ready_200 = vc.readiness_200 if (vc and vc.readiness_200) else False
     ratio200 = vc.volume_ratio_200 if (vc and vc_ready_200) else None
     pct20 = vc.volume_percentile_20 if vc else None
     pct200 = vc.volume_percentile_200 if (vc and vc_ready_200) else None
@@ -127,8 +178,10 @@ def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
         t1_swing=t1_swing,
         t1_internal=t1_internal,
         t1_momentum=t1_momentum,
-        vol_ratio20=compute_ratio(_finite(raw.volume_t), list(raw.volume_history), 20),
-        amt_ratio20=compute_ratio(_finite(raw.amount_t), list(raw.amount_history), 20),
+        # VOLUME SSOT (REVIEW-V23-A-CORRECTION-2): 20D/200D facts all come from the
+        # single canonical VolumeContext owner (vc).  No Review-local compute_ratio.
+        vol_ratio20=vc.volume_ratio_20 if vc else None,
+        amt_ratio20=vc.amount_ratio_20 if (vc and vc.amount_ratio_20 is not None) else None,
         # TOTAL VOLUME (PRD §7.2) — raw bar volume, summed at scope level.
         volume_t=_finite(raw.volume_t),
         # VOLUME 20D/200D six-fact vector (PRD §7.5) — single canonical owner.

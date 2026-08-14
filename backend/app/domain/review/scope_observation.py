@@ -576,7 +576,11 @@ def _aggregate_structure_events(
       member_ratio (structure_level = Swing/Internal from the ``internal`` flag; numeric
       price ``level`` is preserved as evidence but NOT used in the cell key);
     - EQH / EQL: ``(event_type)`` -> member_count, member_ratio (no level/direction);
-    - SQZ_RELEASE: ``release_volume_ratio`` is collected per-member (median) only.
+    - SQZ_RELEASE: ``release_volume_ratio`` is taken directly from the canonical
+      First Pyramid member-day event fact.  Scope median is computed over these
+      canonical per-event values (one value per release event), WITHOUT any
+      Review-local member weighting (mean/median/first-event).  Review does NOT
+      invent event weighting — it consumes the canonical member-day ratios as-is.
 
     ``member_count`` dedupes by member_id (a member firing the same cell multiple
     times in one day still counts once).  Events whose ``member_id`` is not in
@@ -584,9 +588,9 @@ def _aggregate_structure_events(
     """
     cells: dict[tuple, set[str]] = {}
     cells_event_count: dict[tuple, int] = {}
-    # 2026-08-13 CORRECTION: release volume ratio 先按 member 归一（同一 member
-    # 多个 release event 取均值，不得重复加权），再做 Scope median。
-    release_by_member: dict[str, list[float]] = {}
+    # REVIEW-V23-A-CORRECTION-2: canonical member-day release volume ratio values
+    # (one per SQZ_RELEASE event).  No Review-local member-day normalization.
+    release_event_values: list[float] = []
 
     # member_ratio denominator is PIT(T) member count (PRD §7.4 D grammar), not the
     # event count.  Events whose member is not PIT(T) are ignored.
@@ -598,7 +602,7 @@ def _aggregate_structure_events(
         if etype in _RELEASE_EVENTS:
             ratio = _finite_or_none(event.release_volume_ratio)
             if ratio is not None:
-                release_by_member.setdefault(event.member_id, []).append(ratio)
+                release_event_values.append(ratio)
             continue
         if etype in _LEVELLED_EVENTS:
             # Structure Level 来自独立的 categorical 维度（internal 标志），
@@ -638,15 +642,13 @@ def _aggregate_structure_events(
                 "member_ratio": _safe_ratio(member_count, denominator),
             }
 
-    # 同一 member 多 event -> 先 member 归一（均值），再 Scope median。
-    release_values = [
-        _median(ratios) for ratios in release_by_member.values() if ratios
-    ]
+    # REVIEW-V23-A-CORRECTION-2: Scope median directly over canonical member-day
+    # release volume ratio values (one value per event).  No Review-local weighting.
     return {
         "cells": cells_out,
         "release_volume_ratio": {
-            "median": _median(release_values),
-            "valid_count": len(release_values),
+            "median": _median(release_event_values),
+            "valid_count": len(release_event_values),
         },
         "denominator": denominator,
     }
@@ -802,12 +804,6 @@ def compute_scope_observation(
         if m.structure_alignment_categorical is not None
         and FirstPyramidSemanticAdapter.alignment(m.structure_alignment_categorical) is not None
     ]
-    active_ob_count = _sum(
-        [
-            (m.active_internal_ob_count or 0) + (m.active_swing_ob_count or 0)
-            for m in member_list
-        ]
-    )
 
     # MOMENTUM canonical facts (PRD §7.5) — inherited from First Pyramid through the
     # canonical adapter.  Review does NOT re-derive squeeze/momentum locally.
@@ -817,18 +813,11 @@ def compute_scope_observation(
         and FirstPyramidSemanticAdapter.squeeze(m.volatility_phase) is not None
     ]
     # BB Position / BB Width live-snapshot-only -> upstream unavailable here.
-    # Momentum / Volume Relation — cross of two CANONICAL facts (squeeze state x
-    # momentum direction) already resolved by the adapter.  Review does not
-    # re-derive the squeeze phase or momentum direction from raw numeric inputs.
-    momentum_volume_relation_values: list[str] = []
-    for m in member_list:
-        sqz = FirstPyramidSemanticAdapter.squeeze(m.volatility_phase)
-        mom = FirstPyramidSemanticAdapter.momentum_direction_value(m.momentum_direction_raw)
-        if sqz is None or mom is None:
-            continue
-        relation = _momentum_volume_relation_canonical(sqz, mom)
-        if relation is not None:
-            momentum_volume_relation_values.append(relation)
+    # Momentum / Volume Relation — REVIEW-V23-A-CORRECTION-2: PRD §7.5.4 requires a
+    # canonical First Pyramid member-level fact.  No canonical member-day source
+    # exists in the history state contract, so Review MUST NOT synthesize a
+    # squeeze x momentum cross.  The field is reported unavailable in the output;
+    # no local derivation collects values here.
 
     # STRUCTURE EVENTS (PRD §7.4 D) — canonical immutable event stream.
     event_facts = _aggregate_structure_events(
@@ -877,10 +866,6 @@ def compute_scope_observation(
             "amount_weighted_return_universe_count": len(aw_pairs),
             "return_dispersion": return_dispersion,
             "total_volume": total_volume,
-            "turnover": {
-                "status": "unavailable",
-                "reason": "no reliable free-float / turnover denominator in history state payload",
-            },
             "signed_contribution": {"status": "prd_clarification_required"},
             "amount": {
                 "valid_count": amount_contribution.valid_count,
@@ -921,7 +906,10 @@ def compute_scope_observation(
                 structure_alignment_values,
                 {"aligned": "Aligned", "divergent": "Divergent"},
             ),
-            "active_ob_count": active_ob_count,
+            "active_ob_count": {
+                "status": "unavailable",
+                "reason": "v2.3 non-target fact; Active OB Count removed from canonical Scope aggregation",
+            },
             "distance_to_trailing_top_pct": {
                 "status": "unavailable",
                 "reason": "live-snapshot-only fact; not in history state payload",
@@ -949,10 +937,19 @@ def compute_scope_observation(
                 "reason": "live-snapshot-only fact; not in history state payload",
             },
             "release_volume_ratio": event_facts["release_volume_ratio"],
-            "momentum_volume_relation": _categorical_state_distribution(
-                momentum_volume_relation_values,
-                {v: v for v in sorted(set(momentum_volume_relation_values))},
-            ),
+            # REVIEW-V23-A-CORRECTION-2: Momentum/Volume Relation is a canonical
+            # First Pyramid member-level fact (PRD §7.5.4).  No canonical member-day
+            # source exists in the history/snapshot state contracts (vol_divergence is
+            # a snapshot-only flatten field, not a member-day history fact).  Review
+            # MUST NOT invent a squeeze x momentum cross.  Marked unavailable /
+            # ALGORITHM_MAPPING_REQUIRED until a canonical source is wired.
+            "momentum_volume_relation": {
+                "status": "unavailable",
+                "reason": "ALGORITHM_MAPPING_REQUIRED: no canonical member-day "
+                "Momentum/Volume Relation source in First Pyramid history state "
+                "contract (vol_divergence is snapshot-only); Review must not "
+                "synthesize squeeze x momentum cross",
+            },
         },
         "participation": {
             "volume": {
@@ -973,17 +970,16 @@ def _momentum_volume_relation_canonical(
     squeeze: "SqueezeState",
     momentum: "MomentumDirection",
 ) -> str | None:
-    """Cross of two CANONICAL facts (squeeze state × momentum direction).
+    """REMOVED in REVIEW-V23-A-CORRECTION-2.
 
-    PRD §7.5: Momentum/Volume Relation is inherited from First Pyramid, NOT
-    re-derived by Review.  Both inputs are already-resolved canonical enums.
+    PRD §7.5.4: Momentum/Volume Relation is a canonical First Pyramid member-level
+    fact and MUST NOT be synthesized by Review from a squeeze x momentum cross.  No
+    canonical member-day source exists in the history state contract, so the field
+    is reported unavailable (ALGORITHM_MAPPING_REQUIRED) in compute_scope_observation.
+    This stub is retained only to keep the symbol importable for transitional
+    callers; it must not be used to produce a value.
     """
-    if squeeze is None or momentum is None:
-        return None
-    squeeze_label = "Release" if squeeze == SqueezeState.RELEASED else "Squeeze"
-    mom_label = {
-        MomentumDirection.EXPANDING: "Up",
-        MomentumDirection.FLAT: "Neutral",
-        MomentumDirection.CONTRACTING: "Down",
-    }.get(momentum, "Neutral")
-    return f"{squeeze_label}·{mom_label}"
+    raise NotImplementedError(
+        "momentum_volume_relation must be consumed from a canonical First Pyramid "
+        "member-day source; Review must not synthesize it (PRD §7.5.4)"
+    )
