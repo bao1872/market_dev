@@ -33,6 +33,12 @@ L1 output shapes (verified against ``scope_observation.compute_scope_observation
 
     price.equal_weight_return             -> float scalar
     price.amount_weighted_return          -> float scalar
+    price.breadth.advance_ratio           -> float scalar (or None)
+    price.breadth.decline_ratio           -> float scalar (or None)
+    price.breadth.unchanged_ratio         -> float scalar (or None)
+    price.return_dispersion               -> float scalar (or None)
+    price.concentration.normalized_hhi    -> float scalar (or None)
+    price.amount.concentration.normalized_hhi -> float scalar (or None)
     trend.continuous.regime_strength      -> float scalar
     participation.volume.ratio20          -> dict {p25, p50, p75, valid_count}
     participation.volume.ratio200         -> dict {p25, p50, p75, valid_count}
@@ -130,6 +136,36 @@ OBSERVATION_PRIMITIVES: dict[str, ObservationPrimitiveSpec] = {
         ObservationPrimitiveSpec(
             "amount_weighted_return",
             ("price", "amount_weighted_return"),
+            _scalar_direct,
+        ),
+        ObservationPrimitiveSpec(
+            "advance_ratio",
+            ("price", "breadth", "advance_ratio"),
+            _scalar_direct,
+        ),
+        ObservationPrimitiveSpec(
+            "decline_ratio",
+            ("price", "breadth", "decline_ratio"),
+            _scalar_direct,
+        ),
+        ObservationPrimitiveSpec(
+            "unchanged_ratio",
+            ("price", "breadth", "unchanged_ratio"),
+            _scalar_direct,
+        ),
+        ObservationPrimitiveSpec(
+            "return_dispersion",
+            ("price", "return_dispersion"),
+            _scalar_direct,
+        ),
+        ObservationPrimitiveSpec(
+            "price_normalized_hhi",
+            ("price", "concentration", "normalized_hhi"),
+            _scalar_direct,
+        ),
+        ObservationPrimitiveSpec(
+            "amount_normalized_hhi",
+            ("price", "amount", "concentration", "normalized_hhi"),
             _scalar_direct,
         ),
         ObservationPrimitiveSpec(
