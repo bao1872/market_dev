@@ -500,6 +500,109 @@ L2 不是算法层，不是评分层。固定为：
 每组必须列出其包含的 L1 Facts（见上）。L2 只做：组织 / 导航 / 解释上下文。
 不得：产生综合 score；隐藏原始 L1；创建 opportunity / risk。
 
+### 7.7.5 Analysis Foundation — Observation Series Contract
+
+本节定义下游分析模块共同消费的共享输入契约。Cross-sectional（§7.8）、Historical Dynamics（§7.9）、Internal Structure Dynamics（§7.10）均消费同一份 `ObservationSeries`，由 Analysis Foundation Layer 统一产出。
+
+#### Ownership boundary
+
+**History Service**（已实现，commit 471dfa4 的 `review_observation_history_service.py`）：
+
+- 提供按 `trade_date` 排序的历史快照序列；
+- 提供可用性元数据（availability）；
+- 不计算任何分析。
+
+**Observation Primitive Registry**（已实现，commit de30606 的 `observation_primitives.py`）：
+
+- 拥有 canonical primitive 定义（`key`）；
+- 拥有 L1 payload 路径映射（`l1_path`）；
+- 拥有标量提取规则（`extract`）。
+
+**Observation Series Builder**（Analysis Foundation Layer，实现待定）：
+
+- 将快照序列转换为 primitive series；
+- 仅执行提取（调用 registry 的 `extract`）；
+- 不计算：
+  - percentile；
+  - velocity；
+  - acceleration；
+  - persistence；
+  - regime；
+  - structure change；
+  - signals。
+
+#### 数据契约（冻结）
+
+**ObservationSeries**
+
+字段：
+
+- `scope_type`
+- `scope_key`
+- `query_window`
+  - `from_date`
+  - `to_date`
+- `availability`
+- `primitives`
+
+**PrimitiveSeries**
+
+字段：
+
+- `key`
+- `l1_path`
+- `points`
+
+**PrimitivePoint**
+
+字段：
+
+- `trade_date`
+- `readiness`
+- `value`
+- `available`
+
+#### 可用性语义（冻结）
+
+`available` 含义：
+
+> 「primitive extractor 返回了一个有限标量（finite scalar）。」
+
+它**独立于**快照 `readiness`。
+
+规则：
+
+- `readiness` 仅为元数据；
+- 不得按 `readiness` 过滤 points；
+- `partial` 快照仍可有 `available` 的 primitive 值；
+- `ready` 快照仍可有 `unavailable` 的 primitive 值（`value = None`）；
+- `None` 不等价于 `0`。
+
+#### 窗口语义（冻结）
+
+两个独立概念：
+
+**Series Query Window**
+
+归属历史层：
+
+- `from_date`
+- `to_date`
+
+定义检索哪些快照。
+
+**Analysis Window**
+
+归属下游分析算法，本节不定义。
+
+例如：
+
+- percentile lookback；
+- EMA window；
+- persistence window。
+
+均保持：**IMPLEMENTATION DESIGN REQUIRED**。
+
 ### 7.8 Analysis A — Cross-sectional
 
 核心：Cross-sectional Percentile。
@@ -623,6 +726,8 @@ C1 **不产生**：
 
 ### 7.9 Analysis B — Historical Dynamics
 
+Historical Dynamics 消费 §7.7.5 定义的 Observation Series 契约（共享输入边界）。
+
 删除 D1 / D3 / D5 作为目标核心时序表达。统一采用：
 
 ```
@@ -665,6 +770,8 @@ Historical Dynamics 用户语言固定为：
 ```
 
 ### 7.10 Analysis C — Internal Structure Dynamics
+
+Internal Structure Dynamics 消费 §7.7.5 定义的 Observation Series 契约（共享输入边界）。
 
 固定四条：
 
