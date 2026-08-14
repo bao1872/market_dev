@@ -140,6 +140,26 @@ class MemberObservation:
     momentum_change: float | None = None
     sqzmom_delta: float | None = None
     sqzmom_val: float | None = None
+    # ------------------------------------------------------------------
+    # CURRENT-ONLY canonical facts (REVIEW-V23-A-CORRECTION-3)
+    # ------------------------------------------------------------------
+    # Source ownership: these facts have NO point-in-time member-day history
+    # series in the First Pyramid history contract.  They are consumed from the
+    # exact-T ``StockFeatureSnapshot`` (``summary_payload.first_pyramid_flat``)
+    # through the canonical snapshot run gate.  Per PRD v2.3 the absence of a
+    # historical series MUST NOT suppress the Current fact: "Current ready +
+    # Historical missing" is a legal state.  Historical Dynamics (Position /
+    # Velocity / Acceleration / Persistence) stays unavailable for these facts.
+    #
+    # ``None`` here means the exact-T snapshot was absent / not consumable / the
+    # field was missing.  There is NEVER a fallback to a T+1 or "latest" snapshot.
+    release_volume_ratio: float | None = None
+    momentum_volume_relation: str | None = None
+    bb_position: float | None = None
+    bb_width: float | None = None
+    vwap_ret_total: float | None = None
+    trailing_top_pct: float | None = None
+    trailing_bottom_pct: float | None = None
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float | None:
@@ -507,6 +527,71 @@ def _transition_distribution(
     return out
 
 
+def _current_only_distribution(values: Sequence[float | None]) -> dict[str, Any]:
+    """Scope distribution for a CURRENT-ONLY numeric member fact.
+
+    Used for facts sourced from the exact-T snapshot that have no member-day
+    history series (Release Volume Ratio, BB Position/Width, VWAP Return Total,
+    trailing distances).  ``values`` carries at most ONE value per member, so the
+    median is member-weighted by construction — never event-weighted.
+
+    When no member has a consumable exact-T value the fact reports
+    ``unavailable`` with ``CURRENT_SOURCE_UNAVAILABLE``: this reflects a missing
+    Current SOURCE for every member, not a missing algorithm.  Historical
+    Dynamics for these facts is independently unavailable (PRD v2.3).
+    """
+    finite = [v for v in values if v is not None and math.isfinite(v)]
+    if not finite:
+        return {
+            "status": "unavailable",
+            "reason": (
+                "CURRENT_SOURCE_UNAVAILABLE: no member has a consumable exact-T "
+                "canonical snapshot value for this fact"
+            ),
+            "valid_count": 0,
+        }
+    ordered = sorted(finite)
+    return {
+        "median": _percentile(ordered, 0.50),
+        "p25": _percentile(ordered, 0.25),
+        "p75": _percentile(ordered, 0.75),
+        "valid_count": len(finite),
+        "denominator": len(values),
+    }
+
+
+def _open_categorical_distribution(values: Sequence[Any]) -> dict[str, Any]:
+    """Member-ratio distribution over an OPEN categorical fact.
+
+    Unlike ``_categorical_state_distribution`` this does not require a fixed label
+    map: the categories are whatever the canonical producer emits (Review does not
+    own the category vocabulary and must not silently drop unknown categories).
+
+    ``denominator`` is the number of members with a consumable value, so the
+    ratios describe the observed distribution.  Empty -> unavailable with
+    ``CURRENT_SOURCE_UNAVAILABLE`` (missing source, not missing algorithm).
+    """
+    present = [str(v) for v in values if v is not None and str(v).strip() != ""]
+    if not present:
+        return {
+            "status": "unavailable",
+            "reason": (
+                "CURRENT_SOURCE_UNAVAILABLE: no member has a consumable exact-T "
+                "canonical snapshot value for this fact"
+            ),
+            "denominator": 0,
+        }
+    counts: dict[str, int] = {}
+    for value in present:
+        counts[value] = counts.get(value, 0) + 1
+    denominator = len(present)
+    out: dict[str, Any] = {"denominator": denominator}
+    for category in sorted(counts):
+        out[f"{category}_count"] = counts[category]
+        out[f"{category}_ratio"] = _safe_ratio(counts[category], denominator)
+    return out
+
+
 def _participation_distribution(values: Sequence[float | None]) -> dict[str, Any]:
     """Threshold-free distribution descriptors (P25/P50/P75) of a participation ratio."""
     finite = [v for v in values if v is not None and math.isfinite(v)]
@@ -576,11 +661,18 @@ def _aggregate_structure_events(
       member_ratio (structure_level = Swing/Internal from the ``internal`` flag; numeric
       price ``level`` is preserved as evidence but NOT used in the cell key);
     - EQH / EQL: ``(event_type)`` -> member_count, member_ratio (no level/direction);
-    - SQZ_RELEASE: ``release_volume_ratio`` is taken directly from the canonical
-      First Pyramid member-day event fact.  Scope median is computed over these
-      canonical per-event values (one value per release event), WITHOUT any
-      Review-local member weighting (mean/median/first-event).  Review does NOT
-      invent event weighting — it consumes the canonical member-day ratios as-is.
+    - SQZ_RELEASE: aggregated as an event cell only (member_count / member_ratio /
+      event_count).  This function does NOT produce the Release Volume Ratio.
+
+    REVIEW-V23-A-CORRECTION-3 — Release Volume Ratio is NOT derived here.  PRD
+    freezes it as a MEMBER-FIRST fact: at most ONE Release Volume Ratio fact per
+    member per day.  A member may fire several SQZ_RELEASE raw events in one day,
+    so taking a Scope median over per-EVENT values silently re-weights members by
+    their event count (a member with 3 events would count 3x against a member with
+    1).  Review must not invent that weighting.  The Current Release Volume Ratio
+    is therefore computed from the canonical per-member snapshot fact
+    (``MemberObservation.release_volume_ratio``) in ``compute_scope_observation``.
+    The event stream is retained here purely as structure-event EVIDENCE.
 
     ``member_count`` dedupes by member_id (a member firing the same cell multiple
     times in one day still counts once).  Events whose ``member_id`` is not in
@@ -588,9 +680,6 @@ def _aggregate_structure_events(
     """
     cells: dict[tuple, set[str]] = {}
     cells_event_count: dict[tuple, int] = {}
-    # REVIEW-V23-A-CORRECTION-2: canonical member-day release volume ratio values
-    # (one per SQZ_RELEASE event).  No Review-local member-day normalization.
-    release_event_values: list[float] = []
 
     # member_ratio denominator is PIT(T) member count (PRD §7.4 D grammar), not the
     # event count.  Events whose member is not PIT(T) are ignored.
@@ -600,9 +689,11 @@ def _aggregate_structure_events(
             continue
         etype = event.event_type
         if etype in _RELEASE_EVENTS:
-            ratio = _finite_or_none(event.release_volume_ratio)
-            if ratio is not None:
-                release_event_values.append(ratio)
+            # Evidence only: member_count/member_ratio dedupe by member, so a member
+            # firing multiple releases is counted once.  No ratio math here.
+            key = (etype,)
+            cells.setdefault(key, set()).add(event.member_id)
+            cells_event_count[key] = cells_event_count.get(key, 0) + 1
             continue
         if etype in _LEVELLED_EVENTS:
             # Structure Level 来自独立的 categorical 维度（internal 标志），
@@ -642,14 +733,11 @@ def _aggregate_structure_events(
                 "member_ratio": _safe_ratio(member_count, denominator),
             }
 
-    # REVIEW-V23-A-CORRECTION-2: Scope median directly over canonical member-day
-    # release volume ratio values (one value per event).  No Review-local weighting.
+    # REVIEW-V23-A-CORRECTION-3: no ``release_volume_ratio`` key here.  The Release
+    # Volume Ratio is a member-first Current fact owned by compute_scope_observation
+    # (from the canonical per-member snapshot fact), never an event-weighted median.
     return {
         "cells": cells_out,
-        "release_volume_ratio": {
-            "median": _median(release_event_values),
-            "valid_count": len(release_event_values),
-        },
         "denominator": denominator,
     }
 
@@ -773,6 +861,29 @@ def compute_scope_observation(
     vol_zscore20 = _collect([m.vol_zscore20 for m in member_list])
     vol_zscore200 = _collect([m.vol_zscore200 for m in member_list])
 
+    # ------------------------------------------------------------------
+    # CURRENT-ONLY canonical facts (REVIEW-V23-A-CORRECTION-3)
+    # ------------------------------------------------------------------
+    # These facts are sourced from the exact-T canonical snapshot and carry AT MOST
+    # ONE value per member per day.  Collecting them per member (never per event)
+    # is what makes the Scope aggregate member-weighted, satisfying the PRD
+    # member-first freeze for Release Volume Ratio.
+    #
+    # PRD v2.3: the absence of a member-day HISTORY series for these facts affects
+    # only Historical Dynamics (Position/Velocity/Acceleration/Persistence).  It
+    # MUST NOT suppress the Current fact.  Review does not own any of these
+    # algorithms; values are consumed verbatim from the canonical producer.
+    release_volume_ratio_values = [m.release_volume_ratio for m in member_list]
+    bb_position_values = [m.bb_position for m in member_list]
+    bb_width_values = [m.bb_width for m in member_list]
+    vwap_ret_total_values = [m.vwap_ret_total for m in member_list]
+    trailing_top_values = [m.trailing_top_pct for m in member_list]
+    trailing_bottom_values = [m.trailing_bottom_pct for m in member_list]
+    # Momentum/Volume Relation is CATEGORICAL: consumed verbatim, no local cross.
+    momentum_volume_relation_values = [
+        m.momentum_volume_relation for m in member_list
+    ]
+
     # TREND continuous facts (PRD §7.3) — comparable continuous -> median.
     trend_continuous: dict[str, Any] = {
         "regime_strength": _median([m.regime_strength for m in member_list]),
@@ -785,10 +896,11 @@ def compute_scope_observation(
         "segment_amount_mean_ratio": _median([m.seg_amt_ratio for m in member_list]),
         "segment_volume_mean": _median([m.seg_vol_mean for m in member_list]),
         "segment_amount_mean_prev": _median([m.seg_amt_mean_prev for m in member_list]),
-        # VWAP Return Total is only in the LIVE snapshot, NOT the history state
-        # payload consumed here -> genuine upstream gap at this contract boundary.
-        "vwap_ret_total": None,
-        "vwap_ret_total_status": "upstream_unavailable_history_state",
+        # VWAP Return Total (REVIEW-V23-A-CORRECTION-3): a CURRENT-ONLY fact sourced
+        # from the exact-T canonical snapshot.  It has no member-day history series,
+        # which per PRD v2.3 affects only Historical Dynamics and must NOT suppress
+        # the Current value.  Member-weighted median (one value per member).
+        "vwap_ret_total": _median(vwap_ret_total_values),
     }
     # Trend Segment Direction — categorical member-ratio.
     segment_direction_values = [
@@ -812,13 +924,6 @@ def compute_scope_observation(
         if m.volatility_phase is not None
         and FirstPyramidSemanticAdapter.squeeze(m.volatility_phase) is not None
     ]
-    # BB Position / BB Width live-snapshot-only -> upstream unavailable here.
-    # Momentum / Volume Relation — REVIEW-V23-A-CORRECTION-2: PRD §7.5.4 requires a
-    # canonical First Pyramid member-level fact.  No canonical member-day source
-    # exists in the history state contract, so Review MUST NOT synthesize a
-    # squeeze x momentum cross.  The field is reported unavailable in the output;
-    # no local derivation collects values here.
-
     # STRUCTURE EVENTS (PRD §7.4 D) — canonical immutable event stream.
     event_facts = _aggregate_structure_events(
         list(events) if events is not None else [], pit_set
@@ -906,18 +1011,15 @@ def compute_scope_observation(
                 structure_alignment_values,
                 {"aligned": "Aligned", "divergent": "Divergent"},
             ),
-            "active_ob_count": {
-                "status": "unavailable",
-                "reason": "v2.3 non-target fact; Active OB Count removed from canonical Scope aggregation",
-            },
-            "distance_to_trailing_top_pct": {
-                "status": "unavailable",
-                "reason": "live-snapshot-only fact; not in history state payload",
-            },
-            "distance_to_trailing_bottom_pct": {
-                "status": "unavailable",
-                "reason": "live-snapshot-only fact; not in history state payload",
-            },
+            # REVIEW-V23-A-CORRECTION-3: ``active_ob_count`` is FORMALLY REMOVED from
+            # the canonical v2.3 Scope payload (PRD).  The key is absent entirely —
+            # not present with status="unavailable" — exactly like Turnover.
+            "distance_to_trailing_top_pct": _current_only_distribution(
+                trailing_top_values
+            ),
+            "distance_to_trailing_bottom_pct": _current_only_distribution(
+                trailing_bottom_values
+            ),
             "events": event_facts,
         },
         "momentum": {
@@ -928,28 +1030,23 @@ def compute_scope_observation(
                 momentum_labels,
             ),
             "squeeze_state": _categorical_state_distribution(squeeze_state_values, squeeze_labels),
-            "bb_position": {
-                "status": "unavailable",
-                "reason": "live-snapshot-only fact; not in history state payload",
-            },
-            "bb_width": {
-                "status": "unavailable",
-                "reason": "live-snapshot-only fact; not in history state payload",
-            },
-            "release_volume_ratio": event_facts["release_volume_ratio"],
-            # REVIEW-V23-A-CORRECTION-2: Momentum/Volume Relation is a canonical
-            # First Pyramid member-level fact (PRD §7.5.4).  No canonical member-day
-            # source exists in the history/snapshot state contracts (vol_divergence is
-            # a snapshot-only flatten field, not a member-day history fact).  Review
-            # MUST NOT invent a squeeze x momentum cross.  Marked unavailable /
-            # ALGORITHM_MAPPING_REQUIRED until a canonical source is wired.
-            "momentum_volume_relation": {
-                "status": "unavailable",
-                "reason": "ALGORITHM_MAPPING_REQUIRED: no canonical member-day "
-                "Momentum/Volume Relation source in First Pyramid history state "
-                "contract (vol_divergence is snapshot-only); Review must not "
-                "synthesize squeeze x momentum cross",
-            },
+            "bb_position": _current_only_distribution(bb_position_values),
+            "bb_width": _current_only_distribution(bb_width_values),
+            # REVIEW-V23-A-CORRECTION-3: MEMBER-FIRST Scope median over the canonical
+            # per-member snapshot fact (at most one value per member per day).  NOT an
+            # event-weighted median — see ``_aggregate_structure_events``.
+            "release_volume_ratio": _current_only_distribution(
+                release_volume_ratio_values
+            ),
+            # REVIEW-V23-A-CORRECTION-3: Momentum/Volume Relation is a canonical
+            # First Pyramid member-level CATEGORICAL fact (PRD §7.5.4) consumed
+            # verbatim from the exact-T snapshot.  Review still does NOT own the
+            # algorithm (no squeeze x momentum cross).  The absence of a member-day
+            # HISTORY series only makes Historical Dynamics unavailable; per PRD v2.3
+            # it must NOT suppress this Current fact.
+            "momentum_volume_relation": _open_categorical_distribution(
+                momentum_volume_relation_values
+            ),
         },
         "participation": {
             "volume": {
@@ -964,22 +1061,3 @@ def compute_scope_observation(
         },
         "chip": {"status": "unavailable"},
     }
-
-
-def _momentum_volume_relation_canonical(
-    squeeze: "SqueezeState",
-    momentum: "MomentumDirection",
-) -> str | None:
-    """REMOVED in REVIEW-V23-A-CORRECTION-2.
-
-    PRD §7.5.4: Momentum/Volume Relation is a canonical First Pyramid member-level
-    fact and MUST NOT be synthesized by Review from a squeeze x momentum cross.  No
-    canonical member-day source exists in the history state contract, so the field
-    is reported unavailable (ALGORITHM_MAPPING_REQUIRED) in compute_scope_observation.
-    This stub is retained only to keep the symbol importable for transitional
-    callers; it must not be used to produce a value.
-    """
-    raise NotImplementedError(
-        "momentum_volume_relation must be consumed from a canonical First Pyramid "
-        "member-day source; Review must not synthesize it (PRD §7.5.4)"
-    )

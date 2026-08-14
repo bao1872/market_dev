@@ -248,6 +248,7 @@ async def _install_mocks(
     states_t1=None,
     bar_facts=None,
     t1_bar_facts=None,
+    current_only=None,
 ) -> None:
     async def _fake_previous(session, ref_date):
         return t1
@@ -270,6 +271,9 @@ async def _install_mocks(
     async def _fake_load_structure_events(session, ids, trade_date):
         return []
 
+    async def _fake_load_current_only(session, ids, trade_date):
+        return current_only or {}
+
     monkeypatch.setattr(
         "app.services.calendar_service.get_previous_trading_day_async",
         _fake_previous,
@@ -281,6 +285,11 @@ async def _install_mocks(
     monkeypatch.setattr(prep_service, "_load_bar_facts", _fake_load_bar_facts)
     monkeypatch.setattr(
         prep_service, "_load_structure_events", _fake_load_structure_events
+    )
+    monkeypatch.setattr(
+        prep_service,
+        "_load_current_only_snapshot_facts",
+        _fake_load_current_only,
     )
 
 
@@ -673,3 +682,281 @@ async def test_loader_passes_internal_as_structure_level(monkeypatch) -> None:
     assert cell["member_count"] == 1
     assert "level" not in cell  # price level 已从聚合 key 移除
     assert cell["structure_level"] == "Internal"
+
+
+# ---------------------------------------------------------------------------
+# REVIEW-V23-A-CORRECTION-3 — END-TO-END volume boundary parity
+# ---------------------------------------------------------------------------
+# The previous round only compared the helper against the canonical owner using
+# hand-built inputs (``history = vols[:-1]``, ``current = vols[-1]``).  That does
+# NOT exercise how the real ``prepare_scope`` actually passes the series, so a
+# production-path defect (T counted twice, or volume/amount desynchronised) could
+# pass unit tests while being wrong end to end.
+#
+# These tests drive the REAL path:
+#   _load_bar_facts (mocked at the DB edge only)
+#     -> prepare_scope
+#       -> build_member_observation
+#         -> canonical VolumeContext owner
+# and assert exact parity against ``compute_volume_context_series`` computed over
+# the SAME bars, whose last row is T.
+
+
+def _volume_parity_expected(volumes: list[float]) -> dict[str, float | None]:
+    """Canonical expectation for the T row, from the canonical owner."""
+    import pandas as pd
+
+    from app.services.volume_context import compute_volume_context_series
+
+    series = compute_volume_context_series(pd.DataFrame({"volume": volumes}))
+    row = series.iloc[-1]
+
+    def _v(key: str) -> float | None:
+        value = row[key]
+        return None if pd.isna(value) else float(value)
+
+    return {
+        "ratio20": _v("volume_ratio_20"),
+        "ratio200": _v("volume_ratio_200"),
+        "pct20": _v("volume_percentile_20"),
+        "pct200": _v("volume_percentile_200"),
+        "z20": _v("volume_zscore_20"),
+        "z200": _v("volume_zscore_200"),
+    }
+
+
+def _run_prepare_scope_with_bars(monkeypatch, bars: list[DailyBarFact]):
+    """Drive the real prepare_scope with a member whose bar history is ``bars``."""
+    import asyncio
+
+    id_a = uuid.uuid4()
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 1, "sqzmom_val": 1.0}
+
+    def resolve(scope_type, scope_key, trade_date):
+        return ([id_a], "s")
+
+    async def scenario():
+        await _install_mocks(
+            monkeypatch, resolve=resolve, t1=T1,
+            states_t={id_a: state}, states_t1={id_a: state},
+            # The real loader uses ``trade_date <= T``, so the T bar IS included.
+            bar_facts={id_a: bars},
+            t1_bar_facts={id_a: [b for b in bars if b.trade_date == T1]},
+        )
+        return await prepare_scope(_FakeSession(), "industry_l1", "k", T)
+
+    prep = asyncio.run(scenario())
+    assert len(prep.members) == 1
+    return prep.members[0]
+
+
+@pytest.mark.parametrize("n_bars", [19, 20, 21, 199, 200, 201])
+def test_prepare_scope_volume_parity_end_to_end(monkeypatch, n_bars: int) -> None:
+    """Real prepare_scope path must match the canonical owner exactly.
+
+    Critically this also proves T is counted EXACTLY ONCE: if ``prepare_scope``
+    passed a history that still contained T (while ``volume_t`` re-appended it),
+    the effective window would be shifted and these medians would diverge.
+    """
+    id_a = uuid.uuid4()
+    # Ascending bars ending at T; varying volumes so ratio/zscore/percentile differ.
+    volumes = [100.0 + 7.0 * i for i in range(n_bars)]
+    bars: list[DailyBarFact] = []
+    for i, vol in enumerate(volumes):
+        # Only the LAST bar is T; the one before it is T1.
+        if i == n_bars - 1:
+            d = T
+        elif i == n_bars - 2:
+            d = T1
+        else:
+            d = date(2026, 1, 1) + __import__("datetime").timedelta(days=i)
+        bars.append(_bar(id_a, d, close=10.0, amount=vol * 10.0, volume=vol))
+
+    member = _run_prepare_scope_with_bars(monkeypatch, bars)
+    expected = _volume_parity_expected(volumes)
+
+    assert member.volume_t == pytest.approx(volumes[-1])
+
+    # 20D facts follow the canonical owner directly.
+    for attr, key in (
+        ("vol_ratio20", "ratio20"),
+        ("vol_pct20", "pct20"),
+        ("vol_zscore20", "z20"),
+    ):
+        actual = getattr(member, attr)
+        if expected[key] is None:
+            assert actual is None, f"{attr} must be None when window insufficient"
+        else:
+            assert actual == pytest.approx(expected[key]), attr
+
+    # 200D facts additionally honour the readiness_200 gate kept from the previous
+    # round: a short history must NOT emit 200D facts even though the canonical
+    # percentile helper only needs 5 values.  readiness_200 is defined by
+    # volume_ratio_200 being produced (i.e. a full 200-bar window).
+    ready_200 = expected["ratio200"] is not None
+    for attr, key in (
+        ("vol_ratio200", "ratio200"),
+        ("vol_pct200", "pct200"),
+        ("vol_zscore200", "z200"),
+    ):
+        actual = getattr(member, attr)
+        if not ready_200:
+            assert actual is None, f"{attr} must be gated off without a 200D window"
+        else:
+            assert actual == pytest.approx(expected[key]), attr
+
+
+def test_prepare_scope_volume_amount_stay_bar_aligned(monkeypatch) -> None:
+    """A bar missing ``amount`` must NOT desynchronise the volume/amount series.
+
+    Filtering volume and amount independently (``[b.volume for b in facts if
+    b.volume is not None]`` / same for amount) silently drops different positions
+    from each series, so index ``i`` no longer refers to the same trade_date and
+    the amount facts get computed against a shifted window.  Building both series
+    from the SAME prior bars keeps them aligned.
+    """
+    id_a = uuid.uuid4()
+    n = 25
+    volumes = [100.0 + 5.0 * i for i in range(n)]
+    bars: list[DailyBarFact] = []
+    for i, vol in enumerate(volumes):
+        if i == n - 1:
+            d = T
+        elif i == n - 2:
+            d = T1
+        else:
+            d = date(2026, 1, 1) + __import__("datetime").timedelta(days=i)
+        # One mid-history bar has volume but NO amount -> the desync trigger.
+        amount = None if i == 5 else vol * 10.0
+        bars.append(_bar(id_a, d, close=10.0, amount=amount, volume=vol))
+
+    member = _run_prepare_scope_with_bars(monkeypatch, bars)
+
+    # Volume facts must still match the canonical owner over the full volume series:
+    # the missing amount must not truncate or shift the volume series at all.
+    expected = _volume_parity_expected(volumes)
+    assert member.vol_ratio20 == pytest.approx(expected["ratio20"])
+    assert member.vol_zscore20 == pytest.approx(expected["z20"])
+    assert member.vol_pct20 == pytest.approx(expected["pct20"])
+    assert member.volume_t == pytest.approx(volumes[-1])
+
+    # Direct assertion on the prep boundary contract: both series are built from the
+    # SAME strict-prior bars, so they have EQUAL length and index i refers to the
+    # same trade_date in both.  The amount gap is carried in place (as a hole) rather
+    # than shortening the amount series -- which is what used to shift every later
+    # amount value onto the wrong trade_date.
+    prior_bars = [b for b in bars if b.trade_date != T]
+    raw = _raw(
+        volume_history=tuple(b.volume for b in prior_bars),
+        amount_history=tuple(b.amount for b in prior_bars),
+        volume_t=volumes[-1],
+    )
+    assert len(raw.volume_history) == len(raw.amount_history)
+    assert len(raw.volume_history) == len(prior_bars)
+    # The hole sits at its own original index, not collapsed away.
+    assert raw.amount_history[5] is None
+    assert raw.volume_history[5] == pytest.approx(volumes[5])
+
+
+# ---------------------------------------------------------------------------
+# REVIEW-V23-A-CORRECTION-3 — Current-only exact-T source wiring
+# ---------------------------------------------------------------------------
+
+
+def test_current_only_snapshot_fields_match_flatten_producer_keys() -> None:
+    """The wiring must reference the producer's ACTUAL flat keys.
+
+    A typo here would silently degrade every Current-only fact to unavailable
+    (a false-negative that no aggregate assertion would notice), so the mapping is
+    pinned against the real flatten producer.
+    """
+    from app.services.first_pyramid_flatten import FP_QUERY_FIELD_SPECS
+    from app.services.review_observation_prep_service import (
+        _CURRENT_ONLY_SNAPSHOT_FIELDS,
+    )
+
+    for attr, flat_key in _CURRENT_ONLY_SNAPSHOT_FIELDS.items():
+        assert flat_key in FP_QUERY_FIELD_SPECS, (
+            f"{attr} -> {flat_key} is not produced by first_pyramid_flatten"
+        )
+
+    # And every mapped attribute must exist on MemberObservation.
+    import dataclasses
+
+    from app.domain.review.scope_observation import MemberObservation
+
+    observation_fields = {f.name for f in dataclasses.fields(MemberObservation)}
+    for attr in _CURRENT_ONLY_SNAPSHOT_FIELDS:
+        assert attr in observation_fields, attr
+
+
+def test_current_only_facts_flow_into_member_observation(monkeypatch) -> None:
+    """Exact-T snapshot facts must reach MemberObservation through prepare_scope."""
+    import asyncio
+
+    id_a = uuid.uuid4()
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 1}
+
+    def resolve(scope_type, scope_key, trade_date):
+        return ([id_a], "s")
+
+    async def scenario():
+        await _install_mocks(
+            monkeypatch, resolve=resolve, t1=T1,
+            states_t={id_a: state}, states_t1={id_a: state},
+            bar_facts={id_a: [_bar(id_a, T1, 9.0), _bar(id_a, T, 10.0)]},
+            current_only={
+                str(id_a): {
+                    "release_volume_ratio": 2.5,
+                    "momentum_volume_relation": "共振",
+                    "bb_position": 0.75,
+                    "bb_width": 0.12,
+                    "vwap_ret_total": 3.5,
+                    "trailing_top_pct": -2.0,
+                    "trailing_bottom_pct": 8.0,
+                }
+            },
+        )
+        return await prepare_scope(_FakeSession(), "industry_l1", "k", T)
+
+    member = asyncio.run(scenario()).members[0]
+    assert member.release_volume_ratio == pytest.approx(2.5)
+    assert member.momentum_volume_relation == "共振"
+    assert member.bb_position == pytest.approx(0.75)
+    assert member.bb_width == pytest.approx(0.12)
+    assert member.vwap_ret_total == pytest.approx(3.5)
+    assert member.trailing_top_pct == pytest.approx(-2.0)
+    assert member.trailing_bottom_pct == pytest.approx(8.0)
+
+
+def test_current_only_facts_absent_snapshot_yields_none(monkeypatch) -> None:
+    """No exact-T snapshot -> None (unavailable).  NEVER a fallback value.
+
+    This is the time-key guard: a member without an exact-T snapshot must not
+    inherit a "latest"/T+1 value, which would be future leakage.
+    """
+    import asyncio
+
+    id_a = uuid.uuid4()
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 1}
+
+    def resolve(scope_type, scope_key, trade_date):
+        return ([id_a], "s")
+
+    async def scenario():
+        await _install_mocks(
+            monkeypatch, resolve=resolve, t1=T1,
+            states_t={id_a: state}, states_t1={id_a: state},
+            bar_facts={id_a: [_bar(id_a, T1, 9.0), _bar(id_a, T, 10.0)]},
+            current_only={},  # no consumable exact-T snapshot for this member
+        )
+        return await prepare_scope(_FakeSession(), "industry_l1", "k", T)
+
+    member = asyncio.run(scenario()).members[0]
+    assert member.release_volume_ratio is None
+    assert member.momentum_volume_relation is None
+    assert member.bb_position is None
+    assert member.bb_width is None
+    assert member.vwap_ret_total is None
+    assert member.trailing_top_pct is None
+    assert member.trailing_bottom_pct is None

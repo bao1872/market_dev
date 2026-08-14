@@ -33,6 +33,8 @@ from app.models.first_pyramid_history import (
     FirstPyramidHistoryDailyState,
     FirstPyramidHistoryEvent,
 )
+from app.models.stock_feature_snapshot import StockFeatureSnapshot
+from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services import calendar_service, review_scope_service
 from app.services.board_membership_service import PITMembershipUnavailableError
@@ -79,6 +81,88 @@ def _normalize_event_type(raw: str | None) -> str:
         return ""
     token = raw.strip().lower()
     return _EVENT_TYPE_NORMALIZATION.get(token, raw.strip().upper())
+
+
+# ----------------------------------------------------------------------------
+# CURRENT-ONLY canonical source (REVIEW-V23-A-CORRECTION-3)
+# ----------------------------------------------------------------------------
+# Source ownership split enforced by this module:
+#   * Historical-capable facts -> ``FirstPyramidHistoryDailyState`` exact T.
+#   * Current-only facts       -> ``StockFeatureSnapshot`` exact T, via
+#     ``summary_payload.first_pyramid_flat``.
+#
+# The Current-only facts below have NO point-in-time member-day history series in
+# the First Pyramid history contract.  Per PRD v2.3 a missing historical series
+# MUST NOT suppress the Current fact, so they are read from the exact-T snapshot.
+#
+# Hard invariant: exact ``trade_date == T`` only.  There is NO fallback to a
+# "latest" snapshot, and no fallback to T+1 — that would be a time-key violation
+# (future leakage) under AGENTS.md §8.  A member whose exact-T snapshot is absent
+# or not consumable simply yields ``None`` for these facts.
+_CURRENT_ONLY_SNAPSHOT_FIELDS: dict[str, str] = {
+    # MemberObservation attribute  ->  first_pyramid_flat key
+    "release_volume_ratio": "fp_release_volume_ratio",
+    "momentum_volume_relation": "fp_momentum_volume_relation",
+    "bb_position": "fp_bb_position",
+    "bb_width": "fp_bb_width",
+    "vwap_ret_total": "fp_vwap_ret_total",
+    "trailing_top_pct": "fp_distance_to_trailing_top_pct",
+    "trailing_bottom_pct": "fp_distance_to_trailing_bottom_pct",
+}
+
+# Snapshot run gate: only a published, succeeded run may be consumed.  This
+# mirrors the existing snapshot consumption gate (feature_snapshot_service /
+# review_scope_service) rather than inventing a second selection policy.
+_SNAPSHOT_RUN_CONSUMABLE_STATUS = "succeeded"
+
+
+async def _load_current_only_snapshot_facts(
+    session: AsyncSession,
+    instrument_ids: list[str],
+    trade_date: date,
+) -> dict[str, dict[str, object]]:
+    """Load exact-T Current-only canonical facts per member.
+
+    Returns ``{instrument_id: {MemberObservation attr: value}}`` for members that
+    have a consumable exact-T snapshot.  Members without one are simply absent
+    from the mapping, which downstream maps to ``None`` (unavailable) — never to a
+    fallback snapshot from another trade date.
+    """
+    if not instrument_ids:
+        return {}
+
+    # Exact-T only, joined against the run gate (succeeded + published).
+    stmt = (
+        select(
+            StockFeatureSnapshot.instrument_id,
+            StockFeatureSnapshot.summary_payload,
+        )
+        .join(
+            StockFeatureSnapshotRun,
+            StockFeatureSnapshot.source_run_id == StockFeatureSnapshotRun.id,
+        )
+        .where(
+            StockFeatureSnapshot.trade_date == trade_date,
+            StockFeatureSnapshot.instrument_id.in_(instrument_ids),
+            StockFeatureSnapshotRun.trade_date == trade_date,
+            StockFeatureSnapshotRun.status == _SNAPSHOT_RUN_CONSUMABLE_STATUS,
+            StockFeatureSnapshotRun.published_at.isnot(None),
+        )
+    )
+    rows = (await session.execute(stmt)).all()
+
+    out: dict[str, dict[str, object]] = {}
+    for instrument_id, summary_payload in rows:
+        flat = (summary_payload or {}).get("first_pyramid_flat")
+        if not isinstance(flat, dict):
+            continue
+        facts: dict[str, object] = {}
+        for attr, flat_key in _CURRENT_ONLY_SNAPSHOT_FIELDS.items():
+            if flat_key in flat:
+                facts[attr] = flat[flat_key]
+        if facts:
+            out[str(instrument_id)] = facts
+    return out
 
 
 @dataclass(frozen=True)
@@ -311,6 +395,11 @@ async def prepare_scope(
     t1_facts = await _load_bar_facts(session, pit_ids_t, t1) if t1 else {}
     # Canonical immutable structure events for T (PRD §7.4 D).
     structure_events = await _load_structure_events(session, pit_ids_t, trade_date)
+    # Current-only canonical facts from the exact-T snapshot (see
+    # ``_load_current_only_snapshot_facts``).  Absent member -> None (unavailable).
+    current_only_facts = await _load_current_only_snapshot_facts(
+        session, pit_ids_t, trade_date
+    )
 
     members: list[MemberObservation] = []
     for inst_id in pit_ids_t:
@@ -320,8 +409,17 @@ async def prepare_scope(
             continue
         facts = bar_facts.get(inst_id, [])
         current = facts[-1] if facts and facts[-1].trade_date == trade_date else None
-        volumes = [b.volume for b in facts if b.volume is not None]
-        amounts = [b.amount for b in facts if b.amount is not None]
+        # STRICT-PRIOR history, bar-aligned.  ``facts`` is ordered ascending and
+        # includes T (loader uses ``trade_date <= T``), so T must be excluded here:
+        # ``volume_t`` / ``amount_t`` carry T separately and the canonical volume
+        # owner appends it exactly once.  Filtering volume and amount independently
+        # would desynchronise the two series whenever a bar has one but not the
+        # other, and ``zip_longest`` downstream cannot recover the date pairing.
+        # Therefore both series are built from the SAME prior bars, keeping index
+        # i aligned to one trade_date across volume and amount.
+        prior_bars = [b for b in facts if b.trade_date != trade_date]
+        volumes = [b.volume for b in prior_bars]
+        amounts = [b.amount for b in prior_bars]
         t1_bars = t1_facts.get(inst_id, [])
         t1_bar = t1_bars[-1] if t1_bars and t1_bars[-1].trade_date == t1 else None
         members.append(
@@ -343,6 +441,10 @@ async def prepare_scope(
                     # that the history state_payload carries but previous_state_to_flat
                     # does not surface. Additive passthrough; missing -> None.
                     continuous=state_to_continuous(state_t),
+                    # Current-only canonical facts from the exact-T snapshot.  These
+                    # have no member-day history series; Historical Dynamics stays
+                    # unavailable while Current is served (PRD v2.3).
+                    current_only=current_only_facts.get(str(inst_id)),
                 )
             )
         )

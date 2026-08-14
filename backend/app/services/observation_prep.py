@@ -67,6 +67,19 @@ def compute_exact_return(close_t: float | None, close_t1: float | None) -> float
     return current / previous - 1.0
 
 
+def _categorical(value: Any) -> str | None:
+    """Normalize a canonical categorical fact to a non-empty string or ``None``.
+
+    Used for Current-only categorical facts (e.g. Momentum/Volume Relation) that
+    Review consumes verbatim from the canonical producer.  Blank/absent -> None so
+    the fact reports unavailable instead of surfacing an empty category.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _flat_semantics(
     flat: Mapping[str, Any] | None,
 ) -> tuple[Direction | None, Direction | None, Direction | None, MomentumDirection | None]:
@@ -82,9 +95,15 @@ class RawMemberFacts:
     """Resolved canonical raw facts for one member on trade date T.
 
     ``close_t1`` / ``flat_t1`` are the EXACT canonical T-1 facts; when the exact
-    T-1 is missing they are ``None`` (never an earlier bar).  ``volume_history``
-    / ``amount_history`` are ascending bar histories (including the current bar)
-    used only for the shared ``vol/amt_ratio20`` SSOT.
+    T-1 is missing they are ``None`` (never an earlier bar).
+
+    ``volume_history`` / ``amount_history`` are ascending **STRICT-PRIOR** bar
+    histories: they EXCLUDE the current bar T.  T is carried separately by
+    ``volume_t`` / ``amount_t`` and is appended exactly once by the canonical
+    volume owner.  Including T in the history as well would double-count it.
+    Both series MUST be built from the same prior bars so that index ``i`` refers
+    to the same trade_date in both (bar-aligned); they are used only for the
+    shared ``vol/amt_ratio20`` SSOT.
     """
 
     member_id: str
@@ -100,6 +119,12 @@ class RawMemberFacts:
     # state_payload (PRD §7.3-§7.6).  Additive: defaults empty; missing keys yield
     # None (never 0) at the observation boundary.
     continuous: Mapping[str, Any] = field(default_factory=dict)
+    # Current-only canonical facts resolved from the exact-T StockFeatureSnapshot
+    # (``summary_payload.first_pyramid_flat``).  These facts have no member-day
+    # history series, so Current is served while Historical Dynamics stays
+    # unavailable (PRD v2.3).  ``None``/absent -> the fact is unavailable; there is
+    # never a fallback to a "latest"/T+1 snapshot.
+    current_only: Mapping[str, Any] | None = None
 
 
 def _compute_volume_context_canonical(raw: RawMemberFacts):
@@ -149,6 +174,7 @@ def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
     t1_trend, t1_swing, t1_internal, t1_momentum = _flat_semantics(raw.flat_t1)
     close_t = _finite(raw.close_t)
     cont = raw.continuous or {}
+    current_only = raw.current_only or {}
     # VOLUME SSOT (REVIEW-V23-A-CORRECTION-2): Review does NOT own a second rolling
     # formula.  The prepared bars through T are handed to the canonical First Pyramid
     # VolumeContext owner; we extract the last (T) row.  This guarantees identical
@@ -219,6 +245,20 @@ def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
         momentum_change=cont.get("momentum_change"),
         sqzmom_delta=cont.get("sqzmom_delta"),
         sqzmom_val=cont.get("sqzmom_val"),
+        # CURRENT-ONLY canonical facts from the exact-T StockFeatureSnapshot
+        # (REVIEW-V23-A-CORRECTION-3).  Numeric facts are finite-guarded; the
+        # Momentum/Volume Relation is a canonical categorical string consumed
+        # verbatim (Review does NOT own that algorithm and must not re-derive it).
+        # Absent snapshot / absent field -> None -> the fact reports unavailable.
+        release_volume_ratio=_finite(current_only.get("release_volume_ratio")),
+        momentum_volume_relation=_categorical(
+            current_only.get("momentum_volume_relation")
+        ),
+        bb_position=_finite(current_only.get("bb_position")),
+        bb_width=_finite(current_only.get("bb_width")),
+        vwap_ret_total=_finite(current_only.get("vwap_ret_total")),
+        trailing_top_pct=_finite(current_only.get("trailing_top_pct")),
+        trailing_bottom_pct=_finite(current_only.get("trailing_bottom_pct")),
     )
 
 
