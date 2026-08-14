@@ -1,20 +1,29 @@
-# Review Scope Observation v2.2 — 产品合同（权威 PRD）
+# Review Scope Observation v2.3 — Final Product Contract
 
 > **2026-08-13 SUPERSESSION NOTICE**
 >
-> 2026-08-13 Scope Observation v2.2 产品重设计**正式取代** 2026-08-12 冻结的：
-> - 旧 L1/L2 ownership；
-> - Objective Evidence 作为 L2；
-> - D1/D3/D5 核心时序；
-> - 24 Transition 一级 Evidence；
-> - CHIP Scope Observation slot；
-> - Discovery NOT YET FROZEN 边界。
+> 2026-08-13 Scope Observation v2.3 **正式取代** v2.2 中仍存在的未明确 L1 聚合口径，包括：
+> - Turnover Rate；
+> - Active OB Count；
+> - Amount-weighted Return joint-valid universe；
+> - Return Dispersion；
+> - Segment Volume / Amount Mean Ratio Scope aggregation；
+> - Structure Event Level semantics；
+> - categorical-state preservation；
+> - VolumeContext ownership；
+> - Current vs Historical availability semantics；
+> - Release Volume Ratio member-first semantics。
 >
 > 旧代码实现状态继续作为 **CURRENT IMPLEMENTATION BASELINE**（见 §7.17），
 > **不再作为 TARGET PRODUCT CONTRACT**。
 >
 > 最后确认日期：2026-08-13。
 > 本文档是 Review 唯一产品真相源（Single Product Source of Truth）。
+>
+> **PRODUCT CONTRACT = FINAL**。
+> 但 Dynamics Phase / Internal Structure Type / Trading Context 的 exact threshold、
+> conflict priority、tie-break 仍属于 **ALGORITHM MAPPING REQUIRED**。
+> 这不代表 Product Contract 未冻结。
 
 ---
 
@@ -23,7 +32,12 @@
 Review Scope Observation 的输入：
 
 1. **第一金字塔（First Pyramid）**：个股层面的趋势 / 结构 / 动量 / 量能 / 事件 canonical 状态。
-2. **行情（Market Data）**：日线 OHLC、成交量、成交额、换手率、复权因子、VWAP。
+2. **行情（Market Data）**：日线 OHLC、成交量、成交额、复权因子、VWAP。
+
+> **v2.3 输入清理**：Turnover Rate 不再列为 v2.3 必需的 Scope Observation 输入。
+> 若底层数据源未来存在 `turnover_rate`，可继续作为 upstream raw data，
+> 但 v2.3 Scope Observation **不消费 Turnover Rate**。
+> 不得因此删除第一金字塔或其他模块可能存在的 turnover raw field。
 3. **Scope PIT membership**：每个交易日 point-in-time 有效的 Scope 成员关系
    （industry_l1 / industry_l2 / industry_l3 / concept / major_index / style / market）。
 
@@ -143,7 +157,7 @@ URL 状态：
 
 > **v2.2 实现重对齐要求（IMPLEMENTATION_REALIGNMENT_REQUIRED，见 §7.17）**：
 > 上述模块当前承载的是旧 Objective Evidence / D1/D3/D5 / 24 Transition 实现，
-> 需要在下一轮 PRD→CODE Impact Audit 中按 v2.2 目标合同重对齐，不得反向约束产品定义。
+> 需要在下一轮 PRD→CODE Impact Audit 中按 v2.3 目标合同重对齐，不得反向约束产品定义。
 
 ---
 
@@ -243,7 +257,7 @@ Peer Cohort 逻辑保留，但明确它归属于 **Cross-sectional Analysis**，
 
 ---
 
-## 7. Scope Observation Product Model（v2.2 目标产品合同）
+## 7. Scope Observation Product Model（v2.3 Final Product Contract）
 
 ### 7.1 产品分层与术语
 
@@ -257,7 +271,7 @@ Peer Cohort 逻辑保留，但明确它归属于 **Cross-sectional Analysis**，
 | MA | Member Attribution | 成员下钻 |
 
 术语冻结原则：分类名称和语义 = FROZEN PRODUCT CONTRACT。
-若 v2.2 未定义某个精确数值 threshold / 冲突优先级 / 多条件 tie-break，不自行发明，标 `ALGORITHM MAPPING REQUIRED`（代表实现规则未冻结，不代表产品层重新变成 NOT YET FROZEN）。
+若 v2.3 未定义某个精确数值 threshold / 冲突优先级 / 多条件 tie-break，不自行发明，标 `ALGORITHM MAPPING REQUIRED`（代表实现规则未冻结，不代表产品层重新变成 NOT YET FROZEN）。
 
 ### 7.2 L1 — Price / Capital
 
@@ -267,16 +281,48 @@ Peer Cohort 逻辑保留，但明确它归属于 **Cross-sectional Analysis**，
 | Amount-weighted Return | 当天主要成交资金所交易成员整体表现 | Scope 金额加权收益 |
 | Total Volume | 成员成交量合计 | Scope total |
 | Total Amount | 成员成交额合计 | Scope total |
-| Turnover Rate | 换手率合计 / 均值 | Scope 聚合 |
 | Price Raw HHI | 价格维度原始赫芬达尔指数 | Scope scalar |
 | Price Normalized HHI | 价格维度归一化 HHI | Scope scalar |
 | Amount Raw HHI | 成交额维度原始 HHI | Scope scalar |
 | Amount Normalized HHI | 成交额维度归一化 HHI | Scope scalar |
 
 - Equal-weight Return 与 Amount-weighted Return **必须同时保留**；
+- **Turnover Rate 已正式删除（v2.3）**：Volume Ratio / Percentile / Z-score 已描述成员自身历史量能异常，Total Amount / Amount HHI 已描述 Scope 资金规模与集中度；Scope Turnover Rate 在当前产品中的增量信息不足，且会引入额外 denominator / aggregation 语义，因此 v2.3 不作为 Scope Fact。
 - Capital Tilt **不进入 L1**：`Capital Tilt = Amount-weighted Return − Equal-weight Return`，属于 Internal Structure Analysis（§7.10）；
 - 保留 normalized HHI 既有已确认数学合同；
 - 不得把 Price HHI / Amount HHI / Capital Tilt 压成一个综合 Concentration Score。
+
+#### 7.2.1 Equal-weight Return
+
+使用 **price-valid member universe** 的 1D Return 等权平均。缺失 / 非 finite Return 不进入 valid universe。不得因为 Amount 缺失把成员从 Equal-weight Return 中删除。
+
+#### 7.2.2 Amount-weighted Return
+
+冻结数学合同：
+
+```
+AW_VALID =
+  成员属于 price-valid universe
+  AND amount finite
+  AND amount >= 0
+
+Amount-weighted Return =
+  Σ(Return_i × Amount_i)
+  /
+  Σ(Amount_i)
+```
+
+权重只在 `AW_VALID` universe 内重新归一。明确：
+
+- Return valid + Amount missing → 留在 EW，退出 AW；
+- Amount valid + Return missing → 不进入 AW；
+- Amount = 0 → 合法，但权重为 0；
+- joint-valid total amount <= 0 → unavailable；
+- 不得使用 Amount HHI universe 代替 AW joint-valid universe。
+
+#### 7.2.3 HHI
+
+Price / Amount Raw + Normalized HHI 继续复用既有已冻结数学合同。本轮不重新设计 HHI。
 
 ### 7.3 L1 — Trend
 
@@ -284,19 +330,33 @@ Peer Cohort 逻辑保留，但明确它归属于 **Cross-sectional Analysis**，
 |---|---|---|
 | Trend Direction Member Ratio | Up / Neutral / Down 成员占比 | Categorical → Member Ratio |
 | Trend Strength | 可跨成员比较的连续事实 | Member Median |
-| Current Segment Bars | 当前趋势段持续 bar 数 | Scope 表达趋势进程 |
+| Current Segment Bars | 当前趋势段持续 bar 数 | Member Median |
 | DSA-VWAP Deviation % | 当前趋势段相对 VWAP 偏离 | Member Median |
 | Segment Change % | 趋势段变化百分比 | Member Median |
 | Segment Slope | 趋势段斜率 | Member Median |
-| Segment Volume Mean Ratio | 当前段均量 / 上一完整段均量 | Scope ratio |
-| Segment Amount Mean Ratio | 当前段均额 / 上一完整段均额 | Scope ratio |
+| Segment Volume Mean Ratio | 当前段均量 / 上一完整段均量 | Member Median |
+| Segment Amount Mean Ratio | 当前段均额 / 上一完整段均额 | Member Median |
 | VWAP Return Total | 相对 VWAP 的总收益 | Member Median |
 
-- Trend Direction 使用 Up / Neutral / Down Member Ratio；
-- Trend Strength 等可跨成员比较的连续事实，Scope 主表达采用成员 Median；
-- Current Segment Bars 表达趋势进程；
-- 趋势段量能正式口径：`当前趋势段平均成交量 / 上一完整趋势段平均成交量` 以及 `当前趋势段平均成交额 / 上一完整趋势段平均成交额`；
-- 禁止恢复 sum/sum 语义。
+- Trend Direction 是 First Pyramid canonical categorical state，Scope 用 Member Ratio 表达；
+- 其余连续量（含 VWAP Return Total）均为 comparable continuous member fact，Scope 主表达**全部为 Member Median**；
+- 不得把所有 trend 量压成一个综合 Trend Score。
+
+#### 7.3.1 Segment Slope
+
+canonical definition：`Segment Slope = Segment Change % / Segment Bars`。单位为 `% / bar`，是无量纲价格尺度下的趋势速度，允许跨股票比较并取 Member Median。**禁止重新归一化**。
+
+#### 7.3.2 Segment Volume Mean Ratio
+
+member fact：`Current Segment Average Volume / Previous Completed Segment Average Volume`。Scope fact = `Median(member Segment Volume Mean Ratio)`。明确禁止 `Σ Current Segment Volume / Σ Previous Segment Volume`。
+
+#### 7.3.3 Segment Amount Mean Ratio
+
+member fact：`Current Segment Average Amount / Previous Completed Segment Average Amount`。Scope fact = `Median(member Segment Amount Mean Ratio)`。明确：Amount ratio 的 denominator **必须是 Previous Segment Average Amount**，不能错误引用 Previous Segment Average Volume。
+
+#### 7.3.4 VWAP Return Total
+
+必须消费 First Pyramid canonical member fact：**VWAP Return Total**；Scope = Member Median。禁止：用 DSA-VWAP Deviation % 代理 VWAP Return Total；禁止 Review 自行创造替代公式。若 Current canonical source 有该 fact，Current L1 可以显示；若 historical daily fact 尚未覆盖，只有 Historical Dynamics unavailable，不得把 Current L1 一并判 unavailable。
 
 ### 7.4 L1 — Structure
 
@@ -304,28 +364,47 @@ Peer Cohort 逻辑保留，但明确它归属于 **Cross-sectional Analysis**，
 
 | Event | 表达 |
 |---|---|
-| BOS | Event Type × Direction × Level → Member Ratio |
-| CHoCH | Event Type × Direction × Level → Member Ratio |
-| OB_CREATED | Event Type × Direction × Level → Member Ratio |
-| OB_ENTERED | Event Type × Direction × Level → Member Ratio |
-| OB_MITIGATED | Event Type × Direction × Level → Member Ratio |
+| BOS | Event Type × Direction × Structure Level → Member Ratio |
+| CHoCH | Event Type × Direction × Structure Level → Member Ratio |
+| OB_CREATED | Event Type × Direction × Structure Level → Member Ratio |
+| OB_ENTERED | Event Type × Direction × Structure Level → Member Ratio |
+| OB_MITIGATED | Event Type × Direction × Structure Level → Member Ratio |
 | EQH | EQH Member Ratio |
 | EQL | EQL Member Ratio |
 
-- 不使用 Freshness 作为 Scope 核心事实；
-- 对 BOS / CHoCH / OB_CREATED / OB_ENTERED / OB_MITIGATED 使用 Event Type × Direction × Level，核心 Scope 表达 = Member Ratio；
-- Event Count / Member Count 可作为 evidence，但跨 Scope 与时序主分析优先消费 Member Ratio；
-- Direction 与 Level 不单独拆成独立分布；
-- EQH / EQL：没有可靠 Swing / Internal level 不得人为补齐，只保留 EQH / EQL Member Ratio。
+#### 7.4.1 Level 正式定义
 
-**B. Current Structure State**
+Structure Event 中的 **Level = STRUCTURE LEVEL**，只允许 `Swing` / `Internal`。Level 绝不是 event price、break price、OB high/low、numeric level。numeric event price 可以作为底层 evidence，但不得参与 `Event Type × Direction × Level` 的 Scope aggregation key。
 
-| Fact | 定义 |
-|---|---|
-| Structure Alignment | 结构对齐状态 |
-| Active OB Count | 活跃 OB 数量 |
-| Distance to Trailing Top % | 距 trailing 顶部百分比 |
-| Distance to Trailing Bottom % | 距 trailing 底部百分比 |
+#### 7.4.2 BOS / CHoCH
+
+Scope cell：`Event Type × Direction × Structure Level`。Structure Level 来自 canonical：`internal=true → Internal`，`internal=false → Swing`。**不得使用事件价格作为 Level**。
+
+#### 7.4.3 OB lifecycle
+
+OB_CREATED / OB_ENTERED / OB_MITIGATED 同样使用 `Event Type × Direction × Structure Level`，Structure Level 必须来自 First Pyramid canonical（`structure_level` / equivalent canonical semantics），不得从 numeric level 推断。
+
+#### 7.4.4 EQH / EQL
+
+EQH / EQL：只生成 Member Ratio，不定义 Swing / Internal，不人为补 Structure Level。
+
+#### 7.4.5 Member Ratio denominator
+
+Member Ratio denominator = `PIT(T)` ∩ 具有该日有效 canonical First Pyramid event coverage 的成员（缺事件 ≠ 没发生事件）。如果成员该日 canonical event capability 本身不可用，不得把它作为"未发生"进入分母。
+
+同一成员在同一个 Event Cell 内当天发生多次：`event_count` 可以 > 1，`member_count` 只能计 1 次。Scope 主分析消费 `member_ratio`；Event Count / Member Count 只作为 supporting evidence。
+
+#### 7.4.6 Current Structure State
+
+| Fact | 定义 | Scope 主表达 |
+|---|---|---|
+| Structure Alignment | 结构对齐状态 | Member Ratio |
+| Distance to Trailing Top % | 距 trailing 顶部百分比 | Member Median |
+| Distance to Trailing Bottom % | 距 trailing 底部百分比 | Member Median |
+
+- **Active OB Count 已正式删除（v2.3）**：Scope Active OB Count 无论 Sum 还是 Median，当前产品解释价值都不足；Sum 还会明显受 Scope member count 污染。个股 First Pyramid 仍然可以保留 Active OB Count，不得删除个股 First Pyramid fact。
+- Structure Alignment 是 canonical categorical state，Scope 主表达 Member Ratio，不得转换为 numeric continuous fact、不得计算 Median、不得自行重新编码。
+- Distance to Trailing Top % / Bottom % 属于 Comparable Continuous Member Fact，Scope = Member Median；Current source available 时 Current 可以显示；historical fact 缺失时只 Historical Dynamics unavailable，不能把 Current 一并 suppress。
 
 ### 7.5 L1 — Momentum / Volume
 
@@ -341,23 +420,46 @@ Peer Cohort 逻辑保留，但明确它归属于 **Cross-sectional Analysis**，
 
 - SQZMOM Raw Value **不进入** Scope L1（原始值存在绝对价格尺度问题，不能直接跨成员 Median 后解释为统一 Scope 动量）。
 
+#### 7.5.1 Squeeze State
+
+Squeeze State 是 First Pyramid canonical categorical state，Scope = Member Ratio。Review 不得把字符串状态强转数字、不得自行重新编码状态、不得根据其他字段发明另一套 Squeeze State。
+
+#### 7.5.2 BB Position / BB Width
+
+必须消费 canonical First Pyramid fact；Scope = Member Median。Current source available → Current L1 显示；Historical source unavailable → 只阻塞其 Historical Dynamics。不得因为 history daily_state 未保存就把 Current 标成 upstream unavailable。
+
+#### 7.5.3 Release Volume Ratio
+
+member-level continuous fact。Scope = `Median(member daily Release Volume Ratio)`。产品语义：每个成员每天最多对 Scope aggregation 贡献一个 Release Volume Ratio fact。禁止直接把所有 SQZ_RELEASE event 放进 Scope median 导致一天事件更多的股票权重更高。
+
+如果一个成员同日存在多个 raw release event：Review 不自行发明 event weighting；必须先按 First Pyramid canonical daily semantics 解析成一个 member-day fact，再进入 Scope Median。若当前 First Pyramid 尚未冻结 member-day 多事件解析规则，标 **ALGORITHM MAPPING REQUIRED**，但 member-first 原则已冻结。
+
+#### 7.5.4 Momentum / Volume Relation
+
+First Pyramid canonical categorical fact，Scope = Member Ratio。Review 不得根据 volatility phase × momentum direction × 任意 volume indicator 自行发明 Momentum / Volume Relation。若 canonical member fact Current 可用则 Current L1 可显示；若 history 不可用则 Historical Dynamics unavailable。
+
 **Volume**
 
-| Fact | 定义 |
-|---|---|
-| Volume Ratio 20D | 量比 20 日 |
-| Volume Ratio 200D | 量比 200 日 |
-| Volume Percentile 20D | 量分位 20 日 |
-| Volume Percentile 200D | 量分位 200 日 |
-| Volume Z-score 20D | 量 Z 分 20 日 |
-| Volume Z-score 200D | 量 Z 分 200 日 |
+| Fact | 定义 | Scope 主表达 |
+|---|---|---|
+| Volume Ratio 20D | 量比 20 日 | Member Median |
+| Volume Ratio 200D | 量比 200 日 | Member Median |
+| Volume Percentile 20D | 量分位 20 日 | Member Median |
+| Volume Percentile 200D | 量分位 200 日 | Member Median |
+| Volume Z-score 20D | 量 Z 分 20 日 | Member Median |
+| Volume Z-score 200D | 量 Z 分 200 日 | Member Median |
 
-- 20D / 200D 同时保留；
-- Ratio / Percentile / Z-score 同时保留，三者语义不同，不做去重。
+#### 7.5.5 Volume Single Source of Truth
+
+Volume 20D / 200D 必须严格消费 First Pyramid canonical VolumeContext（或与其完全相同的 canonical owner）。Review 不得：复制一套 rolling formula；放宽窗口；改变 ddof；改变 percentile semantics；自行把短样本当成 200D。
+
+#### 7.5.6 Volume Readiness
+
+每个 Volume fact 的 availability 完全继承 canonical VolumeContext 的 readiness contract。特别明确：200D Fact 只有在 canonical 200D Fact ready 时可用。禁止 25D / 60D 等短历史被 Review 重新解释成 200D。`unavailable ≠ 0`。
 
 ### 7.6 Scope Aggregation Grammar
 
-产品聚合原则：
+产品聚合原则（FINAL GRAMMAR）：
 
 | 输入类型 | Scope 主表达 |
 |---|---|
@@ -366,8 +468,13 @@ Peer Cohort 逻辑保留，但明确它归属于 **Cross-sectional Analysis**，
 | Return | Equal-weight + Amount-weighted |
 | Total Amount / Volume | Scope total |
 | Concentration | HHI |
-| 可比较 Continuous Member Fact | Median |
+| 可比较 Continuous Member Fact | Member Median |
 | 不可跨成员比较的 Raw Fact | 不生成 Scope scalar |
+
+删除任何 Turnover Rate aggregation；删除 Active OB Count aggregation。同时增加两条：
+
+1. Categorical canonical state 必须保持 categorical semantics，不得因工程方便数值化。
+2. Member Ratio 的 denominator 必须是对应 fact 的 valid member universe，不能把"数据 unavailable"解释为"状态未发生"。
 
 不得因为第一金字塔存在某字段，就强行创建 Scope Fact。
 
@@ -375,14 +482,16 @@ Peer Cohort 逻辑保留，但明确它归属于 **Cross-sectional Analysis**，
 
 L2 不是算法层，不是评分层。固定为：
 
-1. **价格与资金表现**（Price / Capital：Equal-weight Return、Amount-weighted Return、Total Volume、Total Amount、Turnover Rate、Price/Amount HHI）
+1. **价格与资金表现**（Price / Capital：Equal-weight Return、Amount-weighted Return、Total Volume、Total Amount、Price/Amount HHI）
 2. **趋势状态**（Trend Direction Member Ratio、Trend Strength、DSA-VWAP Deviation %）
 3. **趋势进程**（Current Segment Bars、Segment Change %、Segment Slope、Segment Volume/Amount Mean Ratio、VWAP Return Total）
 4. **趋势量能确认**（Segment Volume/Amount Mean Ratio + Momentum/Volume Relation）
 5. **结构突破与转折**（BOS / CHoCH Member Ratio + Direction/Level 分布）
-6. **结构演化与位置**（OB_CREATED / OB_ENTERED / OB_MITIGATED Member Ratio、Current Structure State、EQH/EQL Member Ratio）
+6. **结构演化与位置**（OB_CREATED / OB_ENTERED / OB_MITIGATED Member Ratio、Structure Alignment、Distance to Trailing Top %、Distance to Trailing Bottom %、EQH/EQL Member Ratio）
 7. **动量与压缩释放**（Squeeze State、BB Position、BB Width、Release Volume Ratio）
 8. **量能异常**（Volume Ratio/Percentile/Z-score 20D/200D）
+
+> v2.3 修改：Group 1 删除 Turnover Rate；Group 6 删除 Active OB Count，最终消费 OB_CREATED/OB_ENTERED/OB_MITIGATED、Structure Alignment、Distance to Trailing Top %/Bottom %、EQH/EQL。
 
 每组必须列出其包含的 L1 Facts（见上）。L2 只做：组织 / 导航 / 解释上下文。
 不得：产生综合 score；隐藏原始 L1；创建 opportunity / risk。
@@ -450,6 +559,10 @@ Historical Dynamics 用户语言固定为：
 3. **Concentration**：Price Normalized HHI、Amount Normalized HHI；
 4. **Leadership Migration**：判断主导 Scope 的成员是否正在换人（成员贡献同时考虑 `Amount Share × Return`，通过连续交易日成员贡献排序稳定性表达；不发明黑盒 Leadership Score）。
 
+**Return Dispersion 冻结（v2.3）**：price-valid member 1D Return 的 **population standard deviation**；公式语义 `sqrt( Σ(Return_i − mean(Return))² / N )`。`N < 2` 时 unavailable。不是 sample std、不是 MAD、不是 IQR、不是 variance。
+
+**Capital Tilt / Concentration / Leadership Migration 语义冻结（v2.3）**：Capital Tilt 保持 `Amount-weighted Return − Equal-weight Return`；Concentration 保持 Price/Amount Normalized HHI；Leadership Migration 产品语义冻结为 `member contribution = Amount Share × Return` 比较连续交易日成员贡献排名是否稳定/迁移，但 exact rank-stability algorithm（Spearman / Top-N overlap / 其他 method）继续标 **ALGORITHM MAPPING REQUIRED**，不要在 PRD 里现在选一个未经数据验证的公式。
+
 这四类 Internal Structure Fact 同样可以消费 Position / Velocity / Acceleration / Persistence，形成内部结构时序。
 
 ### 7.11 Interpretation
@@ -477,8 +590,15 @@ Dynamics Phase（6 类） × Internal Structure Type（5 类）
 - Fragmenting
 - Balanced
 
-产品语义按 v2.2 固定。分类名称和语义 = FROZEN PRODUCT CONTRACT。
-若 v2.2 未定义精确数值 threshold / 冲突优先级 / tie-break，标 `ALGORITHM MAPPING REQUIRED`。
+产品语义按 v2.3 固定。分类名称和语义 = FROZEN PRODUCT CONTRACT。
+若 v2.3 未定义精确数值 threshold / 冲突优先级 / tie-break，标 `ALGORITHM MAPPING REQUIRED`。
+
+#### 7.11.1 Algorithm Mapping 边界（v2.3）
+
+Dynamics Phase 六类 / Internal Structure Type 五类 / Trading Context 五类继续冻结。
+exact threshold、conflict priority、tie-break 必须在 **L1 + Historical Dynamics + Internal Structure 真实历史数据产生后**，通过 distribution inspection + representative case replay 冻结 Algorithm Mapping。Implementation 不得现在自行发明 `Position > 70`、`Acceleration > X` 等 arbitrary threshold。
+
+这不阻塞 L1 / L2 / Cross-sectional / Historical Dynamics / Internal Structure 的开发。
 
 ### 7.12 Trading Context
 
@@ -492,7 +612,7 @@ Dynamics Phase（6 类） × Internal Structure Type（5 类）
 
 Trading Context 回答：「当前市场结构下，应该采用什么交易研究模式？」
 
-明确：不是 Buy / Sell；不是 Opportunity / Risk；不是仓位建议；不是收益预测。
+明确：不是 Buy / Sell；不是 Opportunity / Risk；不是仓位建议；不是收益预测。Trading Context 五类的 exact threshold / conflict priority / tie-break 同样属于 ALGORITHM MAPPING REQUIRED。
 
 ### 7.13 Member Attribution
 
@@ -522,7 +642,7 @@ Scope 分析不是终点。完整链：
 不再定义「24 个 Transition ratio = 一级 L2 Objective Evidence 产品体系」。
 旧代码可以暂时存在，后续 Implementation Audit 决定复用、删除或适配。
 
-### 7.15 Historical / Data Quality Contract
+### 7.15 Current vs Historical Availability Contract
 
 继续保留：
 
@@ -535,8 +655,15 @@ Scope 分析不是终点。完整链：
 
 **不得用 0 代替 unavailable。**
 
-Historical Dynamics 要求：对应 Scope Fact 必须存在连续、点时正确的历史。
-如果只有 Current：
+#### 7.15.1 两个独立维度（v2.3 强化）
+
+Current Availability 和 Historical Availability 是两个独立维度。正式规则：如果一个 member / Scope Fact **Current canonical source = ready**，则 **Current L1 可以显示**。即使 historical daily series = insufficient / unavailable，也只导致 Historical Position / Velocity / Acceleration / Persistence unavailable。**禁止 `history missing → Current L1 upstream unavailable`**。
+
+典型适用：VWAP Return Total、Distance to Trailing Top %、Distance to Trailing Bottom %、BB Position、BB Width、Momentum / Volume Relation 等。
+
+同时明确：Current-only 不允许使用 current snapshot 倒填历史。禁止 future leakage。
+
+Historical Dynamics 要求：对应 Scope Fact 必须存在连续、点时正确的历史。如果只有 Current：
 
 - Current 可以显示；
 - 但 Position / Velocity / Acceleration / Persistence 必须 unavailable。
@@ -559,7 +686,7 @@ PRD 不要求新建 Scope history table。产品要求只是：新版 Scope Fact
 
 ### 7.17 Legacy Supersession / Current Implementation Gap
 
-**TARGET PRODUCT CONTRACT** = v2.2 新模型（本文档 §0–§7.16）。
+**TARGET PRODUCT CONTRACT** = v2.3 Final Product Contract（本文档 §0–§7.16）。
 
 **CURRENT IMPLEMENTATION BASELINE** = 现有旧 Scope Observation / Objective Evidence 实现，包括但不限于：
 
@@ -576,14 +703,21 @@ PRD 不要求新建 Scope history table。产品要求只是：新版 Scope Fact
 
 不要删除代码状态历史，也不要让它继续污染新产品定义。
 
-已知实现影响（只列，不设计 schema）：
+**Implementation Realignment（当前实现必须对齐 v2.3 final contract，只记录，不写修复代码）**：
 
-1. Amount-weighted Return → implementation required；
-2. Return Dispersion → implementation required；
-3. Leadership Migration → implementation required；
-4. 部分新版 First Pyramid Historical Fact 需要补齐历史覆盖；
-5. Structure Event Scope 聚合应消费 canonical immutable event evidence，不应依赖 latest-event 摘要模拟全量事件；
-6. Market / Major Index / Style 等 Scope Family 保持真实 PIT / readiness 状态，不得为完整产品表面伪造历史 membership。
+1. Remove Scope Turnover Rate target consumption.
+2. Remove Scope Active OB Count target aggregation.
+3. Amount-weighted Return must use joint-valid universe.
+4. Return Dispersion must use population std.
+5. Segment Volume / Amount Mean Ratio = member ratio → Scope Median.
+6. Structure Event Level = Swing / Internal, never numeric price.
+7. Canonical categorical states must remain categorical.
+8. Volume 20D/200D must reuse canonical VolumeContext readiness and math.
+9. Release Volume Ratio must be member-first before Scope Median.
+10. Current source availability must not be suppressed by missing historical coverage.
+11. Structure Events continue consuming canonical immutable event evidence.
+
+明确：当前已经存在的代码实现不是 PRD authority。下一轮必须从 v2.3 Final 重新做 implementation correction / verification。
 
 不要在这里：新建历史表设计；新建 member vector persistence；定 schema；写 migration。
 
@@ -1322,9 +1456,9 @@ Concept 表面 Observation 很强（PRICE Breadth / TREND State Member Ratio 高
 
 **NEXT（Product Design Question，非 Implementation Task）：**
 
-> **2026-08-13（v2.2 重定向）**：当前下一产品阶段应表述为 **「Scope Observation v2.2 目标合同落地：L1/L2/Analysis/Interpretation/Trading Context/Member Attribution 实现重对齐」**。v2.2 产品链（§2 / §7）已冻结，不再处于 NOT YET FROZEN 状态；未冻结的仅是 Discovery consumer path（Filter/Signal 聚合拓扑）与 exact algorithm mapping（Dynamics Phase threshold 等，标 ALGORITHM MAPPING REQUIRED）。
+> **2026-08-13（v2.3 重定向）**：当前下一产品阶段应表述为 **「Scope Observation v2.3 Final Product Contract 落地：L1/L2/Analysis/Interpretation/Trading Context/Member Attribution 实现重对齐」**。v2.3 产品链（§2 / §7）已冻结为 FINAL PRODUCT CONTRACT，不再处于 NOT YET FROZEN 状态；未冻结的仅是 Discovery consumer path（Filter/Signal 聚合拓扑）与 exact algorithm mapping（Dynamics Phase threshold 等，标 ALGORITHM MAPPING REQUIRED）。
 
-- v2.2 L1/L2/Analysis 实现重对齐（按 §7.17 已知实现影响）
+- v2.3 L1/L2/Analysis 实现重对齐（按 §7.17 已知实现影响）
 - Interpretation / Trading Context / Member Attribution 前端与算法映射
 - Cross-Scope Relation / Attribution（可独立于 Discovery 设计推进）
 - API / Frontend cutover（Discovery Workspace / Evidence Drawer / Representative Instruments）
