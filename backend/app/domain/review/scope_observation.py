@@ -99,12 +99,86 @@ class MemberObservation:
     # PARTICIPATION — threshold-free distribution descriptors.
     vol_ratio20: float | None = None
     amt_ratio20: float | None = None
+    # TOTAL VOLUME — raw bar volume (summed at scope level; not a distribution).
+    volume_t: float | None = None
+    # VOLUME 20D/200D six-fact vector (PRD §7.5), computed once at the prep
+    # boundary from the bar volume history (single canonical VolumeContext owner).
+    vol_ratio200: float | None = None
+    vol_pct20: float | None = None
+    vol_pct200: float | None = None
+    vol_zscore20: float | None = None
+    vol_zscore200: float | None = None
+    # TREND continuous facts (PRD §7.3) — from history state_payload passthrough.
+    regime_strength: float | None = None
+    dsa_dir_bars: float | None = None
+    dsa_vwap_dev_pct: float | None = None
+    segment_id: float | None = None
+    segment_direction: float | None = None
+    segment_bars: float | None = None
+    segment_change_pct: float | None = None
+    segment_slope: float | None = None
+    seg_vol_ratio: float | None = None
+    seg_amt_ratio: float | None = None
+    seg_vol_mean: float | None = None
+    seg_amt_mean_prev: float | None = None
+    # STRUCTURE continuous facts (PRD §7.4 B).
+    structure_alignment: float | None = None
+    active_internal_ob_count: float | None = None
+    active_swing_ob_count: float | None = None
+    # MOMENTUM continuous facts (PRD §7.5).
+    volatility_phase: float | None = None
+    momentum_direction_raw: float | None = None
+    momentum_change: float | None = None
+    sqzmom_delta: float | None = None
+    sqzmom_val: float | None = None
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float | None:
     if denominator <= 0:
         return None
     return numerator / denominator
+
+
+def _median(values: Sequence[float | None]) -> float | None:
+    """Median of a finite subsequence (PRD §7.3/§7.5 comparable-continuous rule).
+
+    Returns ``None`` when empty or all-non-finite; never 0 for "no data".
+    """
+    finite = [v for v in values if v is not None and math.isfinite(v)]
+    if not finite:
+        return None
+    ordered = sorted(finite)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _sum(values: Sequence[float | None]) -> float | None:
+    """Sum of a finite subsequence (PRD §7.2 Total rule). None when empty."""
+    finite = [v for v in values if v is not None and math.isfinite(v)]
+    if not finite:
+        return None
+    return sum(finite)
+
+
+def _stdev(values: Sequence[float]) -> float | None:
+    """Population stdev over a finite subsequence (used for Return Dispersion).
+
+    Returns ``None`` when fewer than 2 finite values (no dispersion space).
+    """
+    finite = [v for v in values if v is not None and math.isfinite(v)]
+    n = len(finite)
+    if n < 2:
+        return None
+    mean = sum(finite) / n
+    var = sum((x - mean) ** 2 for x in finite) / n
+    return var ** 0.5
+
+
+def _collect(values: Sequence[float | None]) -> list[float]:
+    return [v for v in values if v is not None and math.isfinite(v)]
 
 
 def _percentile(sorted_values: Sequence[float], q: float) -> float | None:
@@ -424,16 +498,120 @@ def _transition_distribution(
     return out
 
 
-def _participation_distribution(values: Sequence[float]) -> dict[str, Any]:
+def _participation_distribution(values: Sequence[float | None]) -> dict[str, Any]:
     """Threshold-free distribution descriptors (P25/P50/P75) of a participation ratio."""
-    if not values:
+    finite = [v for v in values if v is not None and math.isfinite(v)]
+    if not finite:
         return {"p25": None, "p50": None, "p75": None, "valid_count": 0}
-    ordered = sorted(values)
+    ordered = sorted(finite)
     return {
         "p25": _percentile(ordered, 0.25),
         "p50": _percentile(ordered, 0.50),
         "p75": _percentile(ordered, 0.75),
-        "valid_count": len(values),
+        "valid_count": len(finite),
+    }
+
+
+@dataclass(frozen=True)
+class StructureEvent:
+    """One canonical First Pyramid immutable structure event for trade date T.
+
+    Produced by the canonical FP history event owner (``FirstPyramidHistoryEvent``);
+    NOT ``fp_latest_*`` summaries, NOT a flattened array.  ``direction`` / ``level``
+    are None for EQH/EQL (no swing/internal level is assigned to extremes).
+    ``release_volume_ratio`` is populated only for SQZ_RELEASE, else None.
+    """
+
+    member_id: str
+    event_type: str
+    direction: str | None = None
+    level: float | None = None
+    release_volume_ratio: float | None = None
+
+
+# Event types that carry an (event_type, direction, level) cell.
+_LEVELLED_EVENTS = frozenset(
+    {"BOS", "CHoCH", "OB_CREATED", "OB_ENTERED", "OB_MITIGATED"}
+)
+# Event types that carry only (event_type) membership (no level/direction).
+_EXTREME_EVENTS = frozenset({"EQH", "EQL"})
+_RELEASE_EVENTS = frozenset({"SQZ_RELEASE"})
+
+
+def _aggregate_structure_events(
+    events: Sequence[StructureEvent],
+    pit_set: set[str],
+) -> dict[str, Any]:
+    """Aggregate T-day canonical immutable events into member-ratio facts (PRD §7.4 D).
+
+    Cells:
+    - BOS / CHoCH / OB_CREATED / OB_ENTERED / OB_MITIGATED:
+      ``(event_type, direction, level)`` -> event_count, member_count, member_ratio;
+    - EQH / EQL: ``(event_type)`` -> member_count, member_ratio (no level/direction);
+    - SQZ_RELEASE: ``release_volume_ratio`` is collected per-member (median) only.
+
+    ``member_count`` dedupes by member_id (a member firing the same cell multiple
+    times in one day still counts once).  Events whose ``member_id`` is not in
+    PIT(T) are ignored.  ``event_count`` may exceed ``member_count``.
+    """
+    cells: dict[tuple, set[str]] = {}
+    cells_event_count: dict[tuple, int] = {}
+    release_values: list[float] = []
+
+    # member_ratio denominator is PIT(T) member count (PRD §7.4 D grammar), not the
+    # event count.  Events whose member is not PIT(T) are ignored.
+    denominator = len(pit_set)
+    for event in events:
+        if event.member_id not in pit_set:
+            continue
+        etype = event.event_type
+        if etype in _RELEASE_EVENTS:
+            ratio = _finite_or_none(event.release_volume_ratio)
+            if ratio is not None:
+                release_values.append(ratio)
+            continue
+        if etype in _LEVELLED_EVENTS:
+            key: tuple[Any, ...] = (etype, event.direction, event.level)
+        elif etype in _EXTREME_EVENTS:
+            key = (etype,)
+        else:
+            continue
+        cells.setdefault(key, set()).add(event.member_id)
+        cells_event_count[key] = cells_event_count.get(key, 0) + 1
+
+    cells_out: dict[str, Any] = {
+        "leveled": {},
+        "extreme": {},
+    }
+    for key, members in cells.items():
+        member_count = len(members)
+        event_count = cells_event_count[key]
+        if len(key) == 3:
+            cell_type = key[0]
+            cell_name = f"{key[0]}_{key[1]}_{key[2]}"
+            cells_out["leveled"][cell_name] = {
+                "event_type": cell_type,
+                "direction": key[1],
+                "level": key[2],
+                "event_count": event_count,
+                "member_count": member_count,
+                "member_ratio": _safe_ratio(member_count, denominator),
+            }
+        else:
+            cell_type = key[0]
+            cells_out["extreme"][cell_type] = {
+                "event_count": event_count,
+                "member_count": member_count,
+                "member_ratio": _safe_ratio(member_count, denominator),
+            }
+
+    return {
+        "cells": cells_out,
+        "release_volume_ratio": {
+            "median": _median(release_values),
+            "valid_count": len(release_values),
+        },
+        "denominator": denominator,
     }
 
 
@@ -461,13 +639,16 @@ def compute_scope_observation(
     pit_member_ids: Iterable[str],
     pit_member_ids_t1: Iterable[str] | None = None,
     members: Iterable[MemberObservation],
+    events: Iterable[StructureEvent] | None = None,
 ) -> dict[str, Any]:
-    """Compute objective Canonical Scope Observation facts (PRD §7).
+    """Compute objective Canonical Scope Observation facts (PRD §7.2-§7.7).
 
     ``scope_type`` / ``scope_key`` only identify the scope; they never branch
     the calculation path.  ``pit_member_ids`` is PIT(T); ``pit_member_ids_t1``
     is the previous PIT member set (used only for Transition).  The provided
     ``members`` carry the current canonical facts and must all belong to PIT(T).
+    ``events`` are the canonical First Pyramid immutable structure events for T
+    (PRD §7.4 D); ``None`` / empty yields an empty event aggregation.
     """
     member_list = list(members)
     pit_set = set(pit_member_ids)
@@ -484,6 +665,29 @@ def compute_scope_observation(
     price_valid_count = len(price_returns)
     # candidate_count >= valid_count always; difference is never negative.
     missing_exact_t1_count = price_candidate_count - price_valid_count
+
+    # Amount-weighted return uses a JOINT-VALID universe:
+    #   return_1d finite  AND  amount finite >= 0.
+    # Weights are renormalized INSIDE the joint universe (never the amount-HHI
+    # universe).  Equal-weight return uses the price-valid universe above.
+    aw_pairs: list[tuple[float, float]] = []
+    for m in member_list:
+        r = _finite_or_none(m.return_1d)
+        a = _finite_or_none(m.amount)
+        if r is not None and a is not None and a >= 0.0:
+            aw_pairs.append((r, a))
+    aw_total_amount = sum(a for _, a in aw_pairs)
+    if aw_total_amount > _EPSILON and aw_pairs:
+        aw_return = sum(r * a for r, a in aw_pairs) / aw_total_amount
+    else:
+        aw_return = None
+
+    # Return Dispersion — standard deviation over the price-valid returns.
+    # A single/empty price universe has no dispersion space -> None (not 0).
+    return_dispersion = _stdev(price_returns)
+
+    # Total Volume — raw bar volume sum (PRD §7.2, Total rule).
+    total_volume = _sum([m.volume_t for m in member_list])
 
     # AMOUNT universe — single canonical owner of member-level amount contribution.
     # amount_share AND amount HHI both derive from this owner (no second share formula).
@@ -514,7 +718,7 @@ def compute_scope_observation(
     ]
 
     # PARTICIPATION universe — threshold-free, finite only, no T-1 requirement.
-    vol_ratios = [
+    vol_ratios20 = [
         finite for m in member_list
         if (finite := _finite_or_none(m.vol_ratio20)) is not None
     ]
@@ -522,6 +726,65 @@ def compute_scope_observation(
         finite for m in member_list
         if (finite := _finite_or_none(m.amt_ratio20)) is not None
     ]
+    # VOLUME 20D/200D six-fact vector (PRD §7.5) — each fact its own comparable
+    # continuous series -> median per PRD grammar.
+    vol_ratio200 = _collect([m.vol_ratio200 for m in member_list])
+    vol_pct20 = _collect([m.vol_pct20 for m in member_list])
+    vol_pct200 = _collect([m.vol_pct200 for m in member_list])
+    vol_zscore20 = _collect([m.vol_zscore20 for m in member_list])
+    vol_zscore200 = _collect([m.vol_zscore200 for m in member_list])
+
+    # TREND continuous facts (PRD §7.3) — comparable continuous -> median.
+    trend_continuous: dict[str, Any] = {
+        "regime_strength": _median([m.regime_strength for m in member_list]),
+        "dsa_dir_bars": _median([m.dsa_dir_bars for m in member_list]),
+        "dsa_vwap_dev_pct": _median([m.dsa_vwap_dev_pct for m in member_list]),
+        "segment_bars": _median([m.segment_bars for m in member_list]),
+        "segment_change_pct": _median([m.segment_change_pct for m in member_list]),
+        "segment_slope": _median([m.segment_slope for m in member_list]),
+        "segment_volume_mean_ratio": _median([m.seg_vol_ratio for m in member_list]),
+        "segment_amount_mean_ratio": _median([m.seg_amt_ratio for m in member_list]),
+        "segment_volume_mean": _median([m.seg_vol_mean for m in member_list]),
+        "segment_amount_mean_prev": _median([m.seg_amt_mean_prev for m in member_list]),
+        # VWAP Return Total is only in the LIVE snapshot, NOT the history state
+        # payload consumed here -> genuine upstream gap at this contract boundary.
+        "vwap_ret_total": None,
+        "vwap_ret_total_status": "upstream_unavailable_history_state",
+    }
+    # Trend Segment Direction — categorical member-ratio.
+    segment_direction_values = [
+        m.segment_direction for m in member_list if m.segment_direction is not None
+    ]
+
+    # STRUCTURE continuous facts (PRD §7.4 B).
+    structure_alignment_values = [
+        m.structure_alignment for m in member_list if m.structure_alignment is not None
+    ]
+    active_ob_count = _sum(
+        [
+            (m.active_internal_ob_count or 0) + (m.active_swing_ob_count or 0)
+            for m in member_list
+        ]
+    )
+
+    # MOMENTUM continuous facts (PRD §7.5).
+    # Squeeze State — mapped from the history volatility_phase (categorical).
+    squeeze_state_values = [
+        _squeeze_state_from_phase(m.volatility_phase) for m in member_list
+        if m.volatility_phase is not None and _squeeze_state_from_phase(m.volatility_phase) is not None
+    ]
+    # BB Position / BB Width live-snapshot-only -> upstream unavailable here.
+    # Momentum / Volume Relation — cross of squeeze phase × momentum direction.
+    momentum_volume_relation_values: list[str] = []
+    for m in member_list:
+        relation = _momentum_volume_relation(m.volatility_phase, m.momentum_direction_raw)
+        if relation is not None:
+            momentum_volume_relation_values.append(relation)
+
+    # STRUCTURE EVENTS (PRD §7.4 D) — canonical immutable event stream.
+    event_facts = _aggregate_structure_events(
+        list(events) if events is not None else [], pit_set
+    )
 
     direction_labels = {
         Direction.UP: _STATE_LABELS[Direction.UP],
@@ -533,6 +796,12 @@ def compute_scope_observation(
         MomentumDirection.FLAT: _STATE_LABELS[MomentumDirection.FLAT],
         MomentumDirection.CONTRACTING: _STATE_LABELS[MomentumDirection.CONTRACTING],
     }
+    segment_direction_labels = {
+        1.0: _STATE_LABELS[Direction.UP],
+        -1.0: _STATE_LABELS[Direction.DOWN],
+        0.0: _STATE_LABELS[Direction.SIDEWAYS],
+    }
+    squeeze_labels = {"SQUEEZE_RELEASE": "SqueezeRelease", "NON_SQUEEZE": "NonSqueeze"}
 
     return {
         "scope": {
@@ -550,6 +819,15 @@ def compute_scope_observation(
             "return": _return_distribution(price_returns),
             "breadth": _price_breadth(price_returns, price_valid_count),
             "concentration": _price_concentration(price_returns),
+            "equal_weight_return": _return_distribution(price_returns)["mean"],
+            "amount_weighted_return": aw_return,
+            "amount_weighted_return_universe_count": len(aw_pairs),
+            "return_dispersion": return_dispersion,
+            "total_volume": total_volume,
+            "turnover": {
+                "status": "unavailable",
+                "reason": "no reliable free-float / turnover denominator in history state payload",
+            },
             "signed_contribution": {"status": "prd_clarification_required"},
             "amount": {
                 "valid_count": amount_contribution.valid_count,
@@ -563,6 +841,10 @@ def compute_scope_observation(
                 [c for c, _ in trend_transition],
                 [p for _, p in trend_transition],
                 direction_labels,
+            ),
+            "continuous": trend_continuous,
+            "segment_direction": _categorical_state_distribution(
+                segment_direction_values, segment_direction_labels
             ),
         },
         "structure": {
@@ -582,6 +864,20 @@ def compute_scope_observation(
                     direction_labels,
                 ),
             },
+            "alignment": _categorical_state_distribution(
+                structure_alignment_values,
+                {1.0: "Aligned", 0.0: "Neutral", -1.0: "Divergent"},
+            ),
+            "active_ob_count": active_ob_count,
+            "distance_to_trailing_top_pct": {
+                "status": "unavailable",
+                "reason": "live-snapshot-only fact; not in history state payload",
+            },
+            "distance_to_trailing_bottom_pct": {
+                "status": "unavailable",
+                "reason": "live-snapshot-only fact; not in history state payload",
+            },
+            "events": event_facts,
         },
         "momentum": {
             "state": _categorical_state_distribution(momentum_values, momentum_labels),
@@ -590,10 +886,67 @@ def compute_scope_observation(
                 [p for _, p in momentum_transition],
                 momentum_labels,
             ),
+            "squeeze_state": _categorical_state_distribution(squeeze_state_values, squeeze_labels),
+            "bb_position": {
+                "status": "unavailable",
+                "reason": "live-snapshot-only fact; not in history state payload",
+            },
+            "bb_width": {
+                "status": "unavailable",
+                "reason": "live-snapshot-only fact; not in history state payload",
+            },
+            "release_volume_ratio": event_facts["release_volume_ratio"],
+            "momentum_volume_relation": _categorical_state_distribution(
+                momentum_volume_relation_values,
+                {v: v for v in sorted(set(momentum_volume_relation_values))},
+            ),
         },
         "participation": {
-            "volume": _participation_distribution(vol_ratios),
+            "volume": {
+                "ratio20": _participation_distribution(vol_ratios20),
+                "ratio200": _participation_distribution(vol_ratio200),
+                "percentile20": _participation_distribution(vol_pct20),
+                "percentile200": _participation_distribution(vol_pct200),
+                "zscore20": _participation_distribution(vol_zscore20),
+                "zscore200": _participation_distribution(vol_zscore200),
+            },
             "amount": _participation_distribution(amt_ratios),
         },
         "chip": {"status": "unavailable"},
     }
+
+
+def _squeeze_state_from_phase(volatility_phase: Any) -> str | None:
+    """Map the history volatility_phase to the PRD §7.5 Squeeze State label."""
+    try:
+        phase = float(volatility_phase)
+    except (TypeError, ValueError):
+        return None
+    # PRD §7.5: SQUEEZE_RELEASE is the released state; NON_SQUEEZE otherwise.
+    return "SQUEEZE_RELEASE" if phase in (3.0, 4.0) else "NON_SQUEEZE"
+
+
+def _momentum_volume_relation(
+    volatility_phase: Any,
+    momentum_direction_raw: Any,
+) -> str | None:
+    """Cross of squeeze status × momentum direction (PRD §7.5 Momentum/Volume Relation).
+
+    Produces one of the four categorical cells.  Missing either axis -> None.
+    """
+    squeeze = _squeeze_state_from_phase(volatility_phase)
+    if squeeze is None:
+        return None
+    if momentum_direction_raw is None:
+        return None
+    try:
+        direction = float(momentum_direction_raw)
+    except (TypeError, ValueError):
+        return None
+    if direction > 0:
+        mom = "Up"
+    elif direction < 0:
+        mom = "Down"
+    else:
+        mom = "Neutral"
+    return f"{'Release' if squeeze == 'SQUEEZE_RELEASE' else 'NonSqueeze'}·{mom}"

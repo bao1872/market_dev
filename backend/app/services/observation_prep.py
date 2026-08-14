@@ -30,13 +30,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.member_fact import compute_ratio
 from app.domain.review.scope_observation import MemberObservation
 from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
+from app.services.volume_context import compute_volume_context_from_series
 
 
 def _finite(value: float | None) -> float | None:
@@ -91,6 +92,10 @@ class RawMemberFacts:
     amount_history: tuple[float, ...] = ()
     flat_t1: Mapping[str, Any] | None = None
     close_t1: float | None = None
+    # Continuous member facts from the history FirstPyramidHistoryDailyState
+    # state_payload (PRD §7.3-§7.6).  Additive: defaults empty; missing keys yield
+    # None (never 0) at the observation boundary.
+    continuous: Mapping[str, Any] = field(default_factory=dict)
 
 
 def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
@@ -98,6 +103,13 @@ def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
     trend, swing, internal, momentum = _flat_semantics(raw.flat_t)
     t1_trend, t1_swing, t1_internal, t1_momentum = _flat_semantics(raw.flat_t1)
     close_t = _finite(raw.close_t)
+    cont = raw.continuous or {}
+    vc = compute_volume_context_from_series(_finite(raw.volume_t), list(raw.volume_history))
+    ratio200 = vc.volume_ratio_200 if vc else None
+    pct20 = vc.volume_percentile_20 if vc else None
+    pct200 = vc.volume_percentile_200 if vc else None
+    z20 = vc.volume_zscore_20 if vc else None
+    z200 = vc.volume_zscore_200 if vc else None
     return MemberObservation(
         member_id=raw.member_id,
         # candidate = close(T) available, independent of return availability.
@@ -114,6 +126,37 @@ def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
         t1_momentum=t1_momentum,
         vol_ratio20=compute_ratio(_finite(raw.volume_t), list(raw.volume_history), 20),
         amt_ratio20=compute_ratio(_finite(raw.amount_t), list(raw.amount_history), 20),
+        # TOTAL VOLUME (PRD §7.2) — raw bar volume, summed at scope level.
+        volume_t=_finite(raw.volume_t),
+        # VOLUME 20D/200D six-fact vector (PRD §7.5) — single canonical owner.
+        vol_ratio200=ratio200,
+        vol_pct20=pct20,
+        vol_pct200=pct200,
+        vol_zscore20=z20,
+        vol_zscore200=z200,
+        # TREND continuous facts (PRD §7.3).
+        regime_strength=cont.get("regime_strength"),
+        dsa_dir_bars=cont.get("dsa_dir_bars"),
+        dsa_vwap_dev_pct=cont.get("dsa_vwap_dev_pct"),
+        segment_id=cont.get("segment_id"),
+        segment_direction=cont.get("segment_direction"),
+        segment_bars=cont.get("segment_bars"),
+        segment_change_pct=cont.get("segment_change_pct"),
+        segment_slope=cont.get("segment_slope"),
+        seg_vol_ratio=cont.get("current_vs_prev_volume_mean_ratio"),
+        seg_amt_ratio=cont.get("current_vs_prev_amount_mean_ratio"),
+        seg_vol_mean=cont.get("current_segment_volume_mean"),
+        seg_amt_mean_prev=cont.get("prev_segment_volume_mean"),
+        # STRUCTURE continuous facts (PRD §7.4 B).
+        structure_alignment=cont.get("structure_alignment"),
+        active_internal_ob_count=cont.get("active_internal_ob_count"),
+        active_swing_ob_count=cont.get("active_swing_ob_count"),
+        # MOMENTUM continuous facts (PRD §7.5).
+        volatility_phase=cont.get("volatility_phase"),
+        momentum_direction_raw=cont.get("momentum_direction"),
+        momentum_change=cont.get("momentum_change"),
+        sqzmom_delta=cont.get("sqzmom_delta"),
+        sqzmom_val=cont.get("sqzmom_val"),
     )
 
 
@@ -207,7 +250,10 @@ def check_observation_invariants(obs: Mapping[str, Any]) -> list[dict[str, Any]]
         add(f"{axis}_transition_den_le_common", tden <= common_pit,
             f"{tden} <= {common_pit}")
 
-    for kind, conc in (("price", price["concentration"]), ("amount", obs["amount"]["concentration"])):
+    for kind, conc in (
+        ("price", price["concentration"]),
+        ("amount", price["amount"]["concentration"]),
+    ):
         if conc.get("status") == "ready":
             hhi = conc.get("raw_hhi")
             add(f"{kind}_hhi_in_range", hhi is not None and 0.0 < hhi <= 1.0 + 1e-9, hhi)
@@ -216,7 +262,7 @@ def check_observation_invariants(obs: Mapping[str, Any]) -> list[dict[str, Any]]
 
     # All numeric outputs finite (deep, cheap scan over scalars).
     bad: list[str] = []
-    for section in ("price", "amount", "trend", "structure", "momentum", "participation"):
+    for section in ("price", "trend", "structure", "momentum", "participation"):
         _scan_finite(obs[section], section, bad)
     add("all_numeric_finite", not bad, bad[:10])
 

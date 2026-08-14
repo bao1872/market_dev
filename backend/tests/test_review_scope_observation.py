@@ -15,6 +15,7 @@ import pytest
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.scope_observation import (
     MemberObservation,
+    StructureEvent,
     compute_scope_observation,
 )
 
@@ -37,6 +38,31 @@ def _m(
     t1_momentum: MomentumDirection | None = None,
     vol_ratio20: float | None = 1.0,
     amt_ratio20: float | None = 1.0,
+    volume_t: float | None = None,
+    vol_ratio200: float | None = None,
+    vol_pct20: float | None = None,
+    vol_pct200: float | None = None,
+    vol_zscore20: float | None = None,
+    vol_zscore200: float | None = None,
+    regime_strength: float | None = None,
+    dsa_dir_bars: float | None = None,
+    dsa_vwap_dev_pct: float | None = None,
+    segment_bars: float | None = None,
+    segment_change_pct: float | None = None,
+    segment_slope: float | None = None,
+    seg_vol_ratio: float | None = None,
+    seg_amt_ratio: float | None = None,
+    seg_vol_mean: float | None = None,
+    seg_amt_mean_prev: float | None = None,
+    segment_direction: float | None = None,
+    structure_alignment: float | None = None,
+    active_internal_ob_count: float | None = None,
+    active_swing_ob_count: float | None = None,
+    volatility_phase: float | None = None,
+    momentum_direction_raw: float | None = None,
+    momentum_change: float | None = None,
+    sqzmom_delta: float | None = None,
+    sqzmom_val: float | None = None,
 ) -> MemberObservation:
     return MemberObservation(
         member_id=mid,
@@ -53,6 +79,32 @@ def _m(
         t1_momentum=t1_momentum,
         vol_ratio20=vol_ratio20,
         amt_ratio20=amt_ratio20,
+        volume_t=volume_t,
+        vol_ratio200=vol_ratio200,
+        vol_pct20=vol_pct20,
+        vol_pct200=vol_pct200,
+        vol_zscore20=vol_zscore20,
+        vol_zscore200=vol_zscore200,
+        regime_strength=regime_strength,
+        dsa_dir_bars=dsa_dir_bars,
+        dsa_vwap_dev_pct=dsa_vwap_dev_pct,
+        segment_id=None,
+        segment_direction=segment_direction,
+        segment_bars=segment_bars,
+        segment_change_pct=segment_change_pct,
+        segment_slope=segment_slope,
+        seg_vol_ratio=seg_vol_ratio,
+        seg_amt_ratio=seg_amt_ratio,
+        seg_vol_mean=seg_vol_mean,
+        seg_amt_mean_prev=seg_amt_mean_prev,
+        structure_alignment=structure_alignment,
+        active_internal_ob_count=active_internal_ob_count,
+        active_swing_ob_count=active_swing_ob_count,
+        volatility_phase=volatility_phase,
+        momentum_direction_raw=momentum_direction_raw,
+        momentum_change=momentum_change,
+        sqzmom_delta=sqzmom_delta,
+        sqzmom_val=sqzmom_val,
     )
 
 
@@ -63,6 +115,7 @@ def _run(
     scope_key: str = "electronics",
     pit_member_ids: list[str] | None = None,
     pit_member_ids_t1: list[str] | None = None,
+    events: list[StructureEvent] | None = None,
 ) -> dict[str, Any]:
     ids = pit_member_ids if pit_member_ids is not None else [m.member_id for m in members]
     return compute_scope_observation(
@@ -72,6 +125,7 @@ def _run(
         pit_member_ids=ids,
         pit_member_ids_t1=pit_member_ids_t1,
         members=members,
+        events=events or [],
     )
 
 
@@ -362,11 +416,21 @@ def test_participation_is_threshold_free_distribution() -> None:
         _m("c", vol_ratio20=2.0, amt_ratio20=0.5),
     ]
     part = _run(members)["participation"]
-    for key in ("volume", "amount"):
-        assert part[key]["valid_count"] == 3
-        assert "p25" in part[key] and "p50" in part[key] and "p75" in part[key]
-        assert "active_ratio" not in part[key]
-        assert "expansion_ratio" not in part[key]
+    # Amount participation remains a threshold-free distribution (PRD Participation).
+    assert part["amount"]["valid_count"] == 3
+    assert "p25" in part["amount"] and "p50" in part["amount"] and "p75" in part["amount"]
+    assert "active_ratio" not in part["amount"]
+    assert "expansion_ratio" not in part["amount"]
+    # Volume participation is the §7.7 six-fact vector; each fact is its own
+    # comparable-continuous distribution — no >1 / >1.5 threshold anywhere.
+    # (Only ratio20 is populated by these members; the other five are empty here
+    #  but the keys must all exist and carry no threshold fields.)
+    for key in ("ratio20", "ratio200", "percentile20", "percentile200", "zscore20", "zscore200"):
+        assert key in part["volume"]
+        if key == "ratio20":
+            assert part["volume"][key]["valid_count"] == 3
+        assert "active_ratio" not in part["volume"][key]
+        assert "expansion_ratio" not in part["volume"][key]
 
 
 # ---------------------------------------------------------------------------
@@ -568,9 +632,9 @@ def test_nan_participation_excluded() -> None:
         _m("b", vol_ratio20=math.nan, amt_ratio20=math.inf),
     ]
     part = _run(members)["participation"]
-    assert part["volume"]["valid_count"] == 1
+    assert part["volume"]["ratio20"]["valid_count"] == 1
     assert part["amount"]["valid_count"] == 1
-    assert part["volume"]["p50"] == pytest.approx(1.0)
+    assert part["volume"]["ratio20"]["p50"] == pytest.approx(1.0)
     assert part["amount"]["p50"] == pytest.approx(1.0)
 
 
@@ -662,3 +726,238 @@ def test_amount_hhi_two_member_unequal_distribution() -> None:
 
     assert concentration["member_count"] == 2
     assert concentration["status"] == "ready"
+
+
+# ===========================================================================
+# Wave 1A — L1 §7.2-§7.6 data-contract closure (REVIEW-V22-W1A-L1-CONTRACT-CLOSURE)
+# ===========================================================================
+
+
+def test_amount_weighted_return_joint_valid_universe() -> None:
+    # Joint-valid universe: return finite AND amount finite >= 0.
+    # Member c: valid return but amount is None -> excluded from AW (not price).
+    # Member d: amount valid but return None -> excluded from AW (weight=0).
+    # Weights renormalized INSIDE the joint universe, never the amount-HHI universe.
+    members = [
+        _m("a", return_1d=0.10, amount=100.0),
+        _m("b", return_1d=0.20, amount=300.0),
+        _m("c", return_1d=0.50, amount=None),
+        _m("d", return_1d=None, amount=200.0),
+    ]
+    price = _run(members)["price"]
+    # EW return uses price-valid universe (a, b, c): c has a finite return and is
+    # price-candidate even though its amount is None -> it stays in EW, not AW.
+    # (0.10 + 0.20 + 0.50) / 3
+    assert price["equal_weight_return"] == pytest.approx(0.26666666666666666)
+    # AW return: JOINT-valid universe (a, b only; c dropped for missing amount),
+    # weights renormalized inside the joint universe: 100/(100+300), 300/(100+300).
+    aw = price["amount_weighted_return"]
+    assert aw == pytest.approx((0.10 * 100 + 0.20 * 300) / 400)
+    assert price["amount_weighted_return_universe_count"] == 2
+
+
+def test_amount_weighted_return_negative_amount_excluded() -> None:
+    members = [
+        _m("a", return_1d=0.10, amount=100.0),
+        _m("b", return_1d=0.20, amount=-50.0),
+    ]
+    price = _run(members)["price"]
+    # b's negative amount -> not in joint universe -> AW uses a only.
+    assert price["amount_weighted_return"] == pytest.approx(0.10)
+    assert price["amount_weighted_return_universe_count"] == 1
+
+
+def test_total_volume_sum() -> None:
+    members = [
+        _m("a", volume_t=1000.0),
+        _m("b", volume_t=2500.0),
+        _m("c", volume_t=None),
+    ]
+    assert _run(members)["price"]["total_volume"] == pytest.approx(3500.0)
+
+
+def test_return_dispersion_std() -> None:
+    # returns 0.0, 0.02, -0.02 -> population std = sqrt((0.0004+0+0.0004)/3)
+    members = [
+        _m("a", return_1d=0.0),
+        _m("b", return_1d=0.02),
+        _m("c", return_1d=-0.02),
+    ]
+    disp = _run(members)["price"]["return_dispersion"]
+    expected = (0.0004 / 3 + 0.0 / 3 + 0.0004 / 3) ** 0.5
+    assert disp == pytest.approx(expected)
+
+
+def test_return_dispersion_single_member_none() -> None:
+    # No dispersion space with a single value.
+    assert _run([_m("a", return_1d=0.01)])["price"]["return_dispersion"] is None
+
+
+def test_trend_continuous_facts_median() -> None:
+    members = [
+        _m("a", regime_strength=0.2, segment_bars=5.0, dsa_vwap_dev_pct=-1.0,
+           segment_change_pct=2.0, segment_slope=0.5, seg_vol_ratio=1.1,
+           seg_amt_ratio=1.2, seg_vol_mean=100.0, seg_amt_mean_prev=90.0),
+        _m("b", regime_strength=0.8, segment_bars=15.0, dsa_vwap_dev_pct=2.0,
+           segment_change_pct=-3.0, segment_slope=-0.3, seg_vol_ratio=0.7,
+           seg_amt_ratio=0.9, seg_vol_mean=80.0, seg_amt_mean_prev=110.0),
+        _m("c", regime_strength=0.5, segment_bars=10.0, dsa_vwap_dev_pct=0.5,
+           segment_change_pct=0.0, segment_slope=0.1, seg_vol_ratio=1.0,
+           seg_amt_ratio=1.0, seg_vol_mean=95.0, seg_amt_mean_prev=95.0),
+    ]
+    cont = _run(members)["trend"]["continuous"]
+    assert cont["regime_strength"] == pytest.approx(0.5)
+    assert cont["segment_bars"] == pytest.approx(10.0)
+    assert cont["dsa_vwap_dev_pct"] == pytest.approx(0.5)
+    assert cont["segment_change_pct"] == pytest.approx(0.0)
+    assert cont["segment_slope"] == pytest.approx(0.1)
+    assert cont["segment_volume_mean_ratio"] == pytest.approx(1.0)
+    # VWAP Return Total is a genuine history-state gap -> not faked.
+    assert cont["vwap_ret_total"] is None
+    assert cont["vwap_ret_total_status"] == "upstream_unavailable_history_state"
+
+
+def test_trend_segment_direction_categorical() -> None:
+    members = [
+        _m("a", segment_direction=1.0),
+        _m("b", segment_direction=-1.0),
+        _m("c", segment_direction=0.0),
+        _m("c2", segment_direction=1.0),
+    ]
+    seg = _run(members)["trend"]["segment_direction"]
+    assert seg["denominator"] == 4
+    assert seg["up_count"] == 2
+    assert seg["down_count"] == 1
+    assert seg["neutral_count"] == 1
+
+
+def test_structure_alignment_and_active_ob_count() -> None:
+    members = [
+        _m("a", structure_alignment=1.0, active_internal_ob_count=2.0, active_swing_ob_count=1.0),
+        _m("b", structure_alignment=-1.0, active_internal_ob_count=1.0, active_swing_ob_count=0.0),
+        _m("c", structure_alignment=0.0, active_internal_ob_count=0.0, active_swing_ob_count=0.0),
+    ]
+    structure = _run(members)["structure"]
+    align = structure["alignment"]
+    assert align["denominator"] == 3
+    assert align["aligned_count"] == 1
+    assert align["divergent_count"] == 1
+    assert align["neutral_count"] == 1
+    # active OB count = sum of (internal + swing) across members = 3+1+0 = 4
+    assert structure["active_ob_count"] == pytest.approx(4.0)
+    # Distance-to-trailing facts are live-snapshot-only -> unavailable, not 0.
+    assert structure["distance_to_trailing_top_pct"]["status"] == "unavailable"
+    assert structure["distance_to_trailing_bottom_pct"]["status"] == "unavailable"
+
+
+def test_structure_events_member_dedupe_and_cells() -> None:
+    events = [
+        StructureEvent("a", "BOS", direction="Up", level=10.0),
+        StructureEvent("a", "BOS", direction="Up", level=10.0),  # same cell twice same day
+        StructureEvent("b", "BOS", direction="Up", level=10.0),
+        StructureEvent("c", "OB_CREATED", direction="Down", level=8.0),
+        StructureEvent("d", "EQH"),
+        StructureEvent("e", "EQL"),
+        StructureEvent("a", "EQH"),  # extreme: no level, member_count dedup by member
+    ]
+    # Member "x" is NOT PIT(T) -> must be ignored.
+    events.append(StructureEvent("x", "BOS", direction="Up", level=10.0))
+    structure = _run(
+        [_m("a"), _m("b"), _m("c"), _m("d"), _m("e")],
+        pit_member_ids=["a", "b", "c", "d", "e"],
+        events=events,
+    )["structure"]
+    cells = structure["events"]["cells"]
+    bos = cells["leveled"]["BOS_Up_10.0"]
+    assert bos["event_count"] == 3  # a×2 + b×1
+    assert bos["member_count"] == 2  # a, b dedup
+    assert bos["member_ratio"] == pytest.approx(2 / 5)
+    ob = cells["leveled"]["OB_CREATED_Down_8.0"]
+    assert ob["event_count"] == 1 and ob["member_count"] == 1
+    assert cells["extreme"]["EQH"]["member_count"] == 2  # d, a
+    assert cells["extreme"]["EQH"]["member_ratio"] == pytest.approx(2 / 5)
+    assert cells["extreme"]["EQL"]["member_count"] == 1
+
+
+def test_structure_events_no_level_for_extremes() -> None:
+    events = [
+        StructureEvent("a", "EQH"),
+        StructureEvent("b", "EQL"),
+    ]
+    cells = _run(
+        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events
+    )["structure"]["events"]["cells"]
+    assert "EQH" in cells["extreme"]
+    assert cells["extreme"]["EQH"]["event_count"] == 1
+    # Ensure extreme cells carry no direction/level payload.
+    assert "direction" not in cells["extreme"]["EQH"]
+    assert "level" not in cells["extreme"]["EQH"]
+
+
+def test_sqz_release_volume_ratio_median_from_events() -> None:
+    events = [
+        StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=1.5),
+        StructureEvent("b", "SQZ_RELEASE", release_volume_ratio=2.5),
+        StructureEvent("c", "SQZ_RELEASE", release_volume_ratio=0.5),
+    ]
+    rel = _run(
+        [_m("a"), _m("b"), _m("c")], pit_member_ids=["a", "b", "c"], events=events
+    )["momentum"]["release_volume_ratio"]
+    # median of [0.5, 1.5, 2.5] = 1.5
+    assert rel["median"] == pytest.approx(1.5)
+    assert rel["valid_count"] == 3
+
+
+def test_momentum_squeeze_state_and_relation() -> None:
+    members = [
+        _m("a", volatility_phase=4.0, momentum_direction_raw=1.0),
+        _m("b", volatility_phase=1.0, momentum_direction_raw=-1.0),
+        _m("c", volatility_phase=3.0, momentum_direction_raw=0.0),
+    ]
+    mom = _run(members)["momentum"]
+    squeeze = mom["squeeze_state"]
+    assert squeeze["denominator"] == 3
+    assert squeeze["squeezerelease_count"] == 2  # a, c (phase 3/4)
+    assert squeeze["nonsqueeze_count"] == 1  # b
+    # BB position / width are live-snapshot-only -> unavailable.
+    assert mom["bb_position"]["status"] == "unavailable"
+    assert mom["bb_width"]["status"] == "unavailable"
+    relation = mom["momentum_volume_relation"]
+    assert relation["denominator"] == 3
+
+
+def test_volume_20_200_six_fact_medians() -> None:
+    members = [
+        _m("a", vol_ratio20=0.8, vol_ratio200=1.1, vol_pct20=20.0,
+           vol_pct200=30.0, vol_zscore20=-1.0, vol_zscore200=-0.5),
+        _m("b", vol_ratio20=1.2, vol_ratio200=0.9, vol_pct20=70.0,
+           vol_pct200=40.0, vol_zscore20=0.5, vol_zscore200=0.2),
+        _m("c", vol_ratio20=2.0, vol_ratio200=1.5, vol_pct20=90.0,
+           vol_pct200=80.0, vol_zscore20=1.5, vol_zscore200=1.0),
+    ]
+    vol = _run(members)["participation"]["volume"]
+    assert vol["ratio20"]["p50"] == pytest.approx(1.2)
+    assert vol["ratio200"]["p50"] == pytest.approx(1.1)
+    assert vol["percentile20"]["p50"] == pytest.approx(70.0)
+    assert vol["percentile200"]["p50"] == pytest.approx(40.0)
+    assert vol["zscore20"]["p50"] == pytest.approx(0.5)
+    assert vol["zscore200"]["p50"] == pytest.approx(0.2)
+
+
+def test_unavailable_is_not_zero() -> None:
+    out = _run([_m("a")])
+    # None of the "unavailable" markers should be coerced to 0.
+    assert out["price"]["turnover"]["status"] == "unavailable"
+    assert out["trend"]["continuous"]["vwap_ret_total"] is None
+    assert out["structure"]["distance_to_trailing_top_pct"]["status"] == "unavailable"
+    assert out["momentum"]["bb_position"]["status"] == "unavailable"
+    assert out["chip"]["status"] == "unavailable"
+
+
+def test_persistence_section_keys_passthrough_no_recompute() -> None:
+    # The persistence layer just stores the canonical payload; this test verifies
+    # the Core output carries all top-level L1 sections without recomputation.
+    out = _run([_m("a", trend=Direction.UP, swing=Direction.UP, internal=Direction.UP,
+                   momentum=MomentumDirection.EXPANDING, return_1d=0.01, amount=100.0)])
+    for section in ("price", "trend", "structure", "momentum", "participation", "chip", "scope"):
+        assert section in out

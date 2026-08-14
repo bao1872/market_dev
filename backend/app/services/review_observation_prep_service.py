@@ -22,14 +22,24 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.review.member_fact import DailyBarFact, previous_state_to_flat
-from app.domain.review.scope_observation import MemberObservation
+from app.domain.review.member_fact import (
+    DailyBarFact,
+    previous_state_to_flat,
+    state_to_continuous,
+)
+from app.domain.review.scope_observation import MemberObservation, StructureEvent
 from app.models.bar import BarDaily
-from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
+from app.models.first_pyramid_history import (
+    FirstPyramidHistoryDailyState,
+    FirstPyramidHistoryEvent,
+)
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services import calendar_service, review_scope_service
 from app.services.board_membership_service import PITMembershipUnavailableError
 from app.services.observation_prep import RawMemberFacts, build_member_observation
+
+# History payload contract version for canonical immutable events (M2 isolation).
+HISTORY_CONTRACT_VERSION = "review-history-v2"
 
 logger = logging.getLogger("review_observation_prep_service")
 
@@ -64,6 +74,7 @@ class PreparedScope:
     pit_status_t: str
     pit_status_t1: str
     diagnostics: tuple[str, ...]
+    events: tuple[StructureEvent, ...] = ()
 
 
 async def list_recent_trading_days(
@@ -135,6 +146,61 @@ async def _load_bar_facts(
     return dict(by_instrument)
 
 
+async def _load_structure_events(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    trade_date: date | None,
+) -> list[StructureEvent]:
+    """Canonical immutable First Pyramid structure events for ``trade_date``.
+
+    Source is ``FirstPyramidHistoryEvent`` (the immutable event stream), NOT
+    ``fp_latest_*`` summaries and NOT a flattened array.  Each event is mapped to
+    a :class:`StructureEvent`, carrying ``direction`` / ``level`` for leveled
+    events (BOS / CHoCH / OB_*) and leaving them ``None`` for EQH/EQL extremes.
+    ``release_volume_ratio`` is carried only for SQZ_RELEASE.
+    """
+    if not instrument_ids or trade_date is None:
+        return []
+    # Events carry event_time (ISO string) + history_contract_version, NOT a
+    # trade_date column.  Filter by canonical algorithm version + history contract
+    # version, and the T-day prefix on event_time (contract-aware, avoids v1/NULL
+    # legacy events double-counting).
+    date_prefix = trade_date.isoformat()
+    stmt = (
+        select(FirstPyramidHistoryEvent)
+        .where(
+            FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
+            FirstPyramidHistoryEvent.algorithm_version
+            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            FirstPyramidHistoryEvent.history_contract_version == HISTORY_CONTRACT_VERSION,
+            FirstPyramidHistoryEvent.event_time.startswith(date_prefix),
+        )
+    )
+    events: list[StructureEvent] = []
+    for row in (await session.execute(stmt)).scalars():
+        payload = row.event_payload or {}
+        etype = (row.event_type or "").upper()
+        direction = payload.get("direction")
+        level = payload.get("level")
+        release_ratio = payload.get("release_volume_ratio")
+        events.append(
+            StructureEvent(
+                member_id=str(row.instrument_id),
+                event_type=etype,
+                direction=direction,
+                level=(
+                    float(level) if isinstance(level, (int, float)) else None
+                ),
+                release_volume_ratio=(
+                    float(release_ratio)
+                    if isinstance(release_ratio, (int, float))
+                    else None
+                ),
+            )
+        )
+    return events
+
+
 async def prepare_scope(
     session: AsyncSession,
     scope_type: str,
@@ -204,7 +270,7 @@ async def prepare_scope(
             pit_member_ids=(), pit_member_ids_t1=tuple(str(i) for i in pit_ids_t1),
             members=(), t1_membership_available=t1_membership_available,
             pit_status_t=pit_status_t, pit_status_t1=pit_status_t1,
-            diagnostics=tuple(diagnostics),
+            diagnostics=tuple(diagnostics), events=(),
         )
 
     # ---- Facts ----
@@ -212,6 +278,8 @@ async def prepare_scope(
     states_t1 = await _load_states(session, pit_ids_t, t1) if t1 else {}
     bar_facts = await _load_bar_facts(session, pit_ids_t, trade_date)
     t1_facts = await _load_bar_facts(session, pit_ids_t, t1) if t1 else {}
+    # Canonical immutable structure events for T (PRD §7.4 D).
+    structure_events = await _load_structure_events(session, pit_ids_t, trade_date)
 
     members: list[MemberObservation] = []
     for inst_id in pit_ids_t:
@@ -240,6 +308,10 @@ async def prepare_scope(
                         if inst_id in states_t1 else None
                     ),
                     close_t1=t1_bar.close if t1_bar else None,
+                    # Continuous Trend/Structure/Momentum/Volume facts (PRD §7.3-§7.6)
+                    # that the history state_payload carries but previous_state_to_flat
+                    # does not surface. Additive passthrough; missing -> None.
+                    continuous=state_to_continuous(state_t),
                 )
             )
         )
@@ -253,4 +325,5 @@ async def prepare_scope(
         t1_membership_available=t1_membership_available,
         pit_status_t=pit_status_t, pit_status_t1=pit_status_t1,
         diagnostics=tuple(diagnostics),
+        events=tuple(structure_events),
     )

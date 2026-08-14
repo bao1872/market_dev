@@ -26,6 +26,8 @@
 """
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -66,6 +68,33 @@ def _safe_float(v: Any) -> float | None:
         return f if np.isfinite(f) else None
     except (TypeError, ValueError):
         return None
+
+
+def _zscore(value: float, window: Sequence[float]) -> float | None:
+    """ddof=0 z-score of ``value`` within ``window`` (mirrors VolumeContext SSOT)."""
+    n = len(window)
+    if n < 2:
+        return None
+    mean = sum(window) / n
+    if mean == 0:
+        return None
+    var = sum((x - mean) ** 2 for x in window) / n
+    if var <= 0:
+        return None
+    std = var ** 0.5
+    return (value - mean) / std
+
+
+def _position_pct(value: float, window: Sequence[float]) -> float | None:
+    """0-100 empirical percentile of ``value`` within ``window`` (>=5 values gate).
+
+    ``count(strictly below) / count`` × 100, matching the rolling percentile
+    semantics used by :func:`compute_volume_context_series`.
+    """
+    if len(window) < 5:
+        return None
+    below = sum(1 for x in window if x < value)
+    return below / len(window) * 100.0
 
 
 def _rolling_percentile(series: pd.Series, window: int) -> pd.Series:
@@ -169,6 +198,72 @@ def compute_volume_context_series(bars: pd.DataFrame) -> pd.DataFrame:
         result["turnover_rate"] = np.nan
 
     return result
+
+
+def compute_volume_context_from_series(
+    current_volume: float | None,
+    history_volumes: Sequence[float | None],
+) -> VolumeContextData | None:
+    """Pure, DB-free VolumeContext for a single current bar + its prior history.
+
+    Reuses the exact SSOT semantics of :func:`compute_volume_context_series`
+    (MA20 / MA200 ratio, ddof=0 z-score, count-below percentile with the >=5
+    valid-values gate) but operates on an already-prepared ``(current_volume,
+    history_volumes)`` pair instead of a database-backed bar DataFrame.  This is
+    the single canonical volume-math owner for the Review scope-prep path; no
+    second rolling formula is introduced.
+
+    ``history_volumes`` are the volumes strictly BEFORE the current bar, in
+    ascending chronological order.  ``current_volume`` is the T-bar volume.
+
+    Returns ``None`` only when the required windows cannot be formed; otherwise
+    returns a ``VolumeContextData`` whose per-field ``None`` marks an
+    individually-unavailable fact (sample too small for that statistic).
+    """
+
+    if current_volume is None or not math.isfinite(current_volume):
+        return None
+
+    prior = [
+        v for v in history_volumes
+        if v is not None and math.isfinite(v) and v > 0
+    ]
+    if len(prior) < SHORT_WINDOW:
+        # Not enough history to form MA20 / percentile20 windows.
+        return None
+
+    # SSOT rolling windows EXCLUDE the current bar (pandas rolling at index i uses
+    # vals[max(0, i-window):i]); the current bar is only the compare value inside
+    # _pct.  So all windows are slices of ``prior`` (history before T).
+    last20 = prior[-SHORT_WINDOW:]
+    last200 = prior[-LONG_WINDOW:]
+
+    mean20 = sum(last20) / len(last20)
+    mean200 = sum(last200) / len(last200)
+
+    ratio_20 = current_volume / mean20 if mean20 > 0 else None
+    ratio_200 = current_volume / mean200 if mean200 > 0 else None
+
+    zscore_20 = _zscore(current_volume, last20)
+    zscore_200 = _zscore(current_volume, last200)
+
+    pct_20 = _position_pct(current_volume, last20)
+    pct_200 = _position_pct(current_volume, last200)
+
+    return VolumeContextData(
+        volume=current_volume,
+        amount=None,
+        turnover_rate=None,
+        volume_ma_20=mean20,
+        volume_ma_200=mean200,
+        volume_ratio_20=ratio_20,
+        volume_ratio_200=ratio_200,
+        volume_percentile_20=pct_20,
+        volume_percentile_200=pct_200,
+        volume_zscore_20=zscore_20,
+        volume_zscore_200=zscore_200,
+        readiness=True,
+    )
 
 
 def extract_volume_context_at(

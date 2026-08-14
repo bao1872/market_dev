@@ -152,6 +152,52 @@ def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+# Mapping of the history FirstPyramidHistoryDailyState.state_payload keys that
+# carry the *continuous* member facts required by PRD §7.3-§7.6 (Trend /
+# Structure / Momentum / Volume).  These are present in the history payload but
+# were not surfaced through previous_state_to_flat, which only emits categorical
+# states.  This passthrough is additive and does NOT alter previous_state_to_flat.
+_CONTINUOUS_STATE_KEYS = (
+    "regime_strength",
+    "dsa_dir_bars",
+    "dsa_vwap_dev_pct",
+    "segment_id",
+    "segment_direction",
+    "segment_bars",
+    "segment_change_pct",
+    "segment_slope",
+    "current_vs_prev_volume_mean_ratio",
+    "current_vs_prev_amount_mean_ratio",
+    "current_segment_volume_mean",
+    "prev_segment_volume_mean",
+    "structure_alignment",
+    "active_internal_ob_count",
+    "active_swing_ob_count",
+    "volatility_phase",
+    "momentum_direction",
+    "momentum_change",
+    "sqzmom_delta",
+    "sqzmom_val",
+    "volume_ratio_20",
+    "volume_percentile_20",
+    "volume_zscore_20",
+    "available_bars",
+)
+
+
+def state_to_continuous(state: dict[str, Any] | None) -> dict[str, Any]:
+    """Map the history SSOT payload to the continuous member facts for PRD §7.3-§7.6.
+
+    Unlike :func:`previous_state_to_flat` (categorical states only), this surfaces
+    the numeric Trend / Structure / Momentum / Volume continuous fields that the
+    Scope L1 aggregation consumes.  Missing / non-numeric keys become ``None``
+    (unavailable), never 0.  Additive: does not affect existing consumers.
+    """
+    if not state:
+        return dict.fromkeys(_CONTINUOUS_STATE_KEYS)
+    return {key: _number(state.get(key)) for key in _CONTINUOUS_STATE_KEYS}
+
+
 @dataclass(frozen=True)
 class DailyBarFact:
     trade_date: date

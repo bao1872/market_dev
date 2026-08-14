@@ -100,6 +100,7 @@ async def run_shadow_scope(
         pit_member_ids=prep.pit_member_ids,
         pit_member_ids_t1=pit_t1,
         members=prep.members,
+        events=prep.events,
     )
     checks = check_observation_invariants(obs)
     evidence = _evidence(prep, obs, checks)

@@ -22,6 +22,7 @@ from app.services.observation_prep import (
     compute_exact_return,
 )
 from app.services.review_observation_prep_service import prepare_scope
+from app.services.volume_context import LONG_WINDOW
 
 T = date(2026, 8, 11)
 T1 = date(2026, 8, 10)
@@ -52,6 +53,7 @@ def _raw(
     volume_history: tuple[float, ...] = (10.0, 20.0, 30.0),
     amount_history: tuple[float, ...] = (10.0, 20.0, 30.0),
     flat_t1: dict | None = None,
+    continuous: dict | None = None,
 ) -> RawMemberFacts:
     return RawMemberFacts(
         member_id=mid,
@@ -63,6 +65,7 @@ def _raw(
         volume_history=volume_history,
         amount_history=amount_history,
         flat_t1=flat_t1,
+        continuous=continuous if continuous is not None else {},
     )
 
 
@@ -260,6 +263,9 @@ async def _install_mocks(
             return bar_facts or {}
         return t1_bar_facts or {}
 
+    async def _fake_load_structure_events(session, ids, trade_date):
+        return []
+
     monkeypatch.setattr(
         "app.services.calendar_service.get_previous_trading_day_async",
         _fake_previous,
@@ -269,6 +275,9 @@ async def _install_mocks(
     )
     monkeypatch.setattr(prep_service, "_load_states", _fake_load_states)
     monkeypatch.setattr(prep_service, "_load_bar_facts", _fake_load_bar_facts)
+    monkeypatch.setattr(
+        prep_service, "_load_structure_events", _fake_load_structure_events
+    )
 
 
 def test_service_exact_t1_historical_pit_run(monkeypatch) -> None:
@@ -395,3 +404,115 @@ def test_service_preparation_deterministic(monkeypatch) -> None:
     assert p1.pit_member_ids == p2.pit_member_ids
     assert p1.members == p2.members
     assert [m.member_id for m in p1.members] == [m.member_id for m in p2.members]
+
+
+# ---------------------------------------------------------------------------
+# Wave 1A — L1 §7.2-§7.6 data-contract closure at the prep boundary
+# ---------------------------------------------------------------------------
+
+
+def test_volume_context_from_series_six_facts() -> None:
+    from app.services.volume_context import compute_volume_context_from_series
+
+    # 25 prior volumes (>= SHORT_WINDOW=20) ascending 10..34; current 50.
+    history = tuple(float(v) for v in range(10, 35))
+    current = 50.0
+    vc = compute_volume_context_from_series(current, history)
+    assert vc is not None
+    # SSOT rolling windows EXCLUDE the current bar. mean20 = mean(last 20 prior).
+    mean20 = sum(history[-20:]) / 20
+    mean200 = sum(history[-LONG_WINDOW:]) / len(history[-LONG_WINDOW:])
+    # ratio20: current / trailing-20 mean (prior only).
+    assert vc.volume_ratio_20 == pytest.approx(current / mean20)
+    # ratio200: current / trailing-200 mean (prior only).
+    assert vc.volume_ratio_200 == pytest.approx(current / mean200)
+    # percentile: count strictly below current within trailing window / len(window).
+    below20 = sum(1 for x in history[-20:] if x < current)
+    assert vc.volume_percentile_20 == pytest.approx(below20 / 20 * 100.0)
+    below200 = sum(1 for x in history[-LONG_WINDOW:] if x < current)
+    assert vc.volume_percentile_200 == pytest.approx(below200 / len(history[-LONG_WINDOW:]) * 100.0)
+    # z-score over trailing-20 window (prior only).
+    var = sum((x - mean20) ** 2 for x in history[-20:]) / 20
+    std = var ** 0.5
+    assert vc.volume_zscore_20 == pytest.approx((current - mean20) / std)
+
+
+def test_volume_context_from_series_too_short_returns_none() -> None:
+    from app.services.volume_context import compute_volume_context_from_series
+
+    # fewer than 20 history values -> cannot form the 20-window -> None.
+    assert compute_volume_context_from_series(40.0, (10.0, 20.0)) is None
+    # non-finite current -> None (never 0).
+    assert compute_volume_context_from_series(None, (10.0,) * 25) is None
+
+
+def test_prep_carries_continuous_trend_facts() -> None:
+    cont = {
+        "regime_strength": 0.7,
+        "dsa_dir_bars": 3.0,
+        "dsa_vwap_dev_pct": -1.5,
+        "segment_id": 2.0,
+        "segment_direction": 1.0,
+        "segment_bars": 8.0,
+        "segment_change_pct": 2.5,
+        "segment_slope": 0.4,
+        "current_vs_prev_volume_mean_ratio": 1.1,
+        "current_vs_prev_amount_mean_ratio": 1.2,
+        "current_segment_volume_mean": 120.0,
+        "prev_segment_volume_mean": 100.0,
+        "structure_alignment": 1.0,
+        "active_internal_ob_count": 2.0,
+        "active_swing_ob_count": 1.0,
+        "volatility_phase": 4.0,
+        "momentum_direction": 1.0,
+        "momentum_change": 1.0,
+        "sqzmom_delta": 0.5,
+        "sqzmom_val": 1.0,
+        "volume_ratio_20": 1.3,
+        "volume_percentile_20": 55.0,
+        "volume_zscore_20": 0.2,
+        "available_bars": 250,
+    }
+    mo = build_member_observation(_raw(continuous=cont))
+    assert mo.regime_strength == pytest.approx(0.7)
+    assert mo.dsa_dir_bars == pytest.approx(3.0)
+    assert mo.dsa_vwap_dev_pct == pytest.approx(-1.5)
+    assert mo.segment_bars == pytest.approx(8.0)
+    assert mo.segment_change_pct == pytest.approx(2.5)
+    assert mo.segment_slope == pytest.approx(0.4)
+    assert mo.seg_vol_ratio == pytest.approx(1.1)
+    assert mo.seg_amt_ratio == pytest.approx(1.2)
+    assert mo.seg_vol_mean == pytest.approx(120.0)
+    assert mo.seg_amt_mean_prev == pytest.approx(100.0)
+    assert mo.structure_alignment == pytest.approx(1.0)
+    assert mo.active_internal_ob_count == pytest.approx(2.0)
+    assert mo.active_swing_ob_count == pytest.approx(1.0)
+    assert mo.volatility_phase == pytest.approx(4.0)
+    assert mo.momentum_direction_raw == pytest.approx(1.0)
+    assert mo.momentum_change == pytest.approx(1.0)
+    assert mo.sqzmom_delta == pytest.approx(0.5)
+    assert mo.sqzmom_val == pytest.approx(1.0)
+
+
+def test_prep_no_continuous_defaults_to_none() -> None:
+    mo = build_member_observation(_raw())  # continuous={}
+    assert mo.regime_strength is None
+    assert mo.segment_bars is None
+    assert mo.structure_alignment is None
+    assert mo.volatility_phase is None
+
+
+def test_prep_volume_200_computed_from_history() -> None:
+    # 25 prior volumes to satisfy the 20-window, current volume 50.0.
+    history = tuple(float(v) for v in range(10, 35))  # 10..34 ascending
+    mo = build_member_observation(_raw(volume_t=50.0, volume_history=history))
+    assert mo.vol_ratio200 is not None
+    # SSOT rolling: ratio200 = current / mean(trailing-200 prior window).
+    # Here history has 25 priors (<200), so the window is the full prior mean = 22.
+    prior_mean = sum(history) / len(history)
+    assert mo.vol_ratio200 == pytest.approx(50.0 / prior_mean, abs=1e-6)
+    assert mo.vol_pct200 is not None
+    assert mo.vol_zscore200 is not None
+    assert mo.vol_ratio20 is not None
+    assert mo.vol_pct20 is not None
+    assert mo.vol_zscore20 is not None
