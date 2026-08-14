@@ -85,6 +85,17 @@ from app.services.review_scope_service import (
     load_day_fact_maps,
     resolve_scope_members,
 )
+# [2026-08-13 双轨并存] 规范 Scope Observation 事实层（PRD §7.2-§7.17 v2.3）。
+# 以下三者在 shadow 路径已被真实数据验证契约/invariant/readiness；
+# 此处仅把它们接入 compute 主流程写入 ReviewScopeObservationFact，
+# 供 EvidenceDrawer / scope_evidence_service 消费。Discovery/筛选器/信号管线
+# 仍走 legacy P/Q/U/C/V（本轮不动），二者双轨并存。
+from app.domain.review.scope_observation import compute_scope_observation
+from app.services.observation_prep import check_observation_invariants
+from app.services.review_observation_prep_service import prepare_scope
+from app.services.review_observation_persistence_service import (
+    save_scope_observation_fact,
+)
 from app.services.review_signal_service import (
     SignalGenerationError,
     find_previous_signals,
@@ -1421,7 +1432,71 @@ async def _compute_scope_metrics_phase(
     if history_maps is not None and date_indexed is not None:
         history_maps["_date_indexed"] = date_indexed  # type: ignore[assignment]
 
+    # === 规范 Scope Observation 事实层双写（PRD §7.2-§7.17 v2.3）===
+    # [2026-08-13 双轨并存] 不替换 legacy P/Q/U/C/V：Discovery/筛选器/信号管线
+    # 仍消费 MarketReviewScopeSnapshot（本轮不动）。此处仅把七段 Canonical
+    # Observation 写入 ReviewScopeObservationFact，供 EvidenceDrawer /
+    # scope_evidence_service 消费。双写失败不得影响 legacy metrics/signal，
+    # 故隔离在 try/except 内，仅记录 diagnostic。
+    # prepare_scope 对 market/major_index/style 返回 unavailable 自动跳过，
+    # 仅 industry_l1/l2/l3 + concept（activated scope）会实际写入。
+    try:
+        await _persist_canonical_scope_observation(session, run, scope)
+    except Exception as exc:  # noqa: BLE001 - 隔离双写失败，不破坏 Discovery
+        logger.warning(
+            "[ReviewOrchestrator] 规范事实层双写失败（不影响 legacy signal）: "
+            "%s/%s trade_date=%s err=%s",
+            scope.scope_type, scope.scope_key, run.trade_date, exc,
+        )
+
     return snapshot, history_maps
+
+
+async def _persist_canonical_scope_observation(
+    session: AsyncSession,
+    run: MarketReviewRun,
+    scope: ScopeDefinition,
+) -> None:
+    """双写规范 Scope Observation 七段事实到 ReviewScopeObservationFact。
+
+    仅对 activated scope（industry_l1/l2/l3 + concept）生效；market/major_index/
+    style 由 prepare_scope 返回 unavailable 自动跳过（不抛错、不写表）。
+
+    不依赖本 phase 已加载的 day_fact_map——prepare_scope 内部独立加载 canonical
+    FirstPyramidHistory / structure events（与 shadow 路径一致，避免算法漂移）。
+    compute_scope_observation 输出经 check_observation_invariants 校验，非法
+    payload 由 save_scope_observation_fact 的 validate_scope_observation_payload
+    在落库前 fail-fast 拒绝（延续 Round 1C Blocker #1/#2/#3）。
+    """
+    prep = await prepare_scope(
+        session, scope.scope_type, scope.scope_key, run.trade_date,
+    )
+    if prep.pit_status_t == "unavailable" or not prep.members:
+        logger.info(
+            "[ReviewOrchestrator] 规范事实层跳过 unavailable/空范围: "
+            "%s/%s pit_status_t=%s member_count=%d",
+            scope.scope_type, scope.scope_key, prep.pit_status_t, len(prep.members),
+        )
+        return
+
+    observation = compute_scope_observation(
+        scope_type=prep.scope_type,
+        scope_key=prep.scope_key,
+        trade_date=prep.trade_date,
+        pit_member_ids=prep.pit_member_ids,
+        pit_member_ids_t1=prep.pit_member_ids_t1 if prep.t1_membership_available else None,
+        members=prep.members,
+        events=prep.events,
+    )
+    checks = check_observation_invariants(observation)
+    failed = [c for c in checks if not c["ok"]]
+    if failed:
+        raise ValueError(
+            f"scope observation invariant failed: {failed!r}"
+        )
+    await save_scope_observation_fact(
+        session, prep, observation, algorithm_version=run.algorithm_version,
+    )
 
 
 def _build_history_extras(
