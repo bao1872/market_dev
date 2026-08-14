@@ -44,9 +44,10 @@ RETRY_WAIT_SECONDS = 5
 
 # provider 整体超时（含重试与 to_thread 包装），防止 io 阻塞拖垮事件循环。
 # 注：[PRD Alignment Pass P1-1] PRD instruction.md 未强制具体秒数；
-# 120s 为工程取值（单次交易日拉取上限），与 PRD 无数值冲突。
+# worker 实测单次 pywencai.get() 约 259s，盘后同步曾因 120s 超时被杀导致失败；
+# 调整为 600s（10 分钟）以容纳真实拉取耗时，与 PRD 无数值冲突。
 # 若后续 PRD 明确外层总超时阈值，应在此对齐并记录 Change。
-PROVIDER_TIMEOUT_SECONDS = 120
+PROVIDER_TIMEOUT_SECONDS = 600
 
 # 必需字段（股票代码、股票简称、所属概念、所属同花顺行业）
 # 问财返回的列名可能略有差异，按包含关系匹配
