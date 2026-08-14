@@ -44,7 +44,12 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from app.domain.first_pyramid_semantics import Direction, MomentumDirection
+from app.domain.first_pyramid_semantics import (
+    Direction,
+    MomentumDirection,
+    SqueezeState,
+)
+from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 
 _EPSILON = 1e-12
 
@@ -121,13 +126,17 @@ class MemberObservation:
     seg_amt_ratio: float | None = None
     seg_vol_mean: float | None = None
     seg_amt_mean_prev: float | None = None
-    # STRUCTURE continuous facts (PRD §7.4 B).
-    structure_alignment: float | None = None
+    # STRUCTURE categorical fact (PRD §7.4 B): canonical Structure Alignment value
+    # as stored by First Pyramid ("aligned" / "divergent" / None).  Carried
+    # verbatim; Scope maps via the canonical adapter.  NOT a numeric cast.
+    structure_alignment_categorical: str | None = None
     active_internal_ob_count: float | None = None
     active_swing_ob_count: float | None = None
-    # MOMENTUM continuous facts (PRD §7.5).
-    volatility_phase: float | None = None
-    momentum_direction_raw: float | None = None
+    # MOMENTUM canonical facts (PRD §7.5): inherited from First Pyramid, NOT
+    # re-derived by Review.  ``volatility_phase`` / ``momentum_direction`` are the
+    # canonical stored values consumed through FirstPyramidSemanticAdapter.
+    volatility_phase: str | float | None = None
+    momentum_direction_raw: str | float | None = None
     momentum_change: float | None = None
     sqzmom_delta: float | None = None
     sqzmom_val: float | None = None
@@ -525,17 +534,34 @@ class StructureEvent:
     member_id: str
     event_type: str
     direction: str | None = None
+    # ``level`` is the numeric price-level evidence (from canonical event_payload),
+    # NOT the PRD-frozen Structure Level.  It is NOT used in Scope aggregation.
     level: float | None = None
+    # PRD §7.4 D: Structure Level = Swing / Internal, an independent categorical
+    # dimension carried by the canonical ``internal`` flag.  False -> Swing,
+    # True -> Internal.  This MUST be present for BOS/CHoCH/OB_* events.
+    internal: bool | None = None
     release_volume_ratio: float | None = None
 
 
-# Event types that carry an (event_type, direction, level) cell.
+# Event types that carry an (event_type, direction, structure_level) cell.
 _LEVELLED_EVENTS = frozenset(
     {"BOS", "CHoCH", "OB_CREATED", "OB_ENTERED", "OB_MITIGATED"}
 )
 # Event types that carry only (event_type) membership (no level/direction).
 _EXTREME_EVENTS = frozenset({"EQH", "EQL"})
 _RELEASE_EVENTS = frozenset({"SQZ_RELEASE"})
+
+
+def _structure_level_label(internal: bool | None) -> str | None:
+    """PRD-frozen Structure Level categorical: Internal if internal=True else Swing.
+
+    ``None`` only when the canonical event does not carry a structure-level
+    dimension (e.g. extremes).
+    """
+    if internal is None:
+        return None
+    return "Internal" if internal else "Swing"
 
 
 def _aggregate_structure_events(
@@ -546,7 +572,9 @@ def _aggregate_structure_events(
 
     Cells:
     - BOS / CHoCH / OB_CREATED / OB_ENTERED / OB_MITIGATED:
-      ``(event_type, direction, level)`` -> event_count, member_count, member_ratio;
+      ``(event_type, direction, structure_level)`` -> event_count, member_count,
+      member_ratio (structure_level = Swing/Internal from the ``internal`` flag; numeric
+      price ``level`` is preserved as evidence but NOT used in the cell key);
     - EQH / EQL: ``(event_type)`` -> member_count, member_ratio (no level/direction);
     - SQZ_RELEASE: ``release_volume_ratio`` is collected per-member (median) only.
 
@@ -556,7 +584,9 @@ def _aggregate_structure_events(
     """
     cells: dict[tuple, set[str]] = {}
     cells_event_count: dict[tuple, int] = {}
-    release_values: list[float] = []
+    # 2026-08-13 CORRECTION: release volume ratio 先按 member 归一（同一 member
+    # 多个 release event 取均值，不得重复加权），再做 Scope median。
+    release_by_member: dict[str, list[float]] = {}
 
     # member_ratio denominator is PIT(T) member count (PRD §7.4 D grammar), not the
     # event count.  Events whose member is not PIT(T) are ignored.
@@ -568,10 +598,13 @@ def _aggregate_structure_events(
         if etype in _RELEASE_EVENTS:
             ratio = _finite_or_none(event.release_volume_ratio)
             if ratio is not None:
-                release_values.append(ratio)
+                release_by_member.setdefault(event.member_id, []).append(ratio)
             continue
         if etype in _LEVELLED_EVENTS:
-            key: tuple[Any, ...] = (etype, event.direction, event.level)
+            # Structure Level 来自独立的 categorical 维度（internal 标志），
+            # 与 price-level evidence (event.level) 分离。
+            slevel = _structure_level_label(event.internal)
+            key: tuple[Any, ...] = (etype, event.direction, slevel)
         elif etype in _EXTREME_EVENTS:
             key = (etype,)
         else:
@@ -592,7 +625,7 @@ def _aggregate_structure_events(
             cells_out["leveled"][cell_name] = {
                 "event_type": cell_type,
                 "direction": key[1],
-                "level": key[2],
+                "structure_level": key[2],
                 "event_count": event_count,
                 "member_count": member_count,
                 "member_ratio": _safe_ratio(member_count, denominator),
@@ -605,6 +638,10 @@ def _aggregate_structure_events(
                 "member_ratio": _safe_ratio(member_count, denominator),
             }
 
+    # 同一 member 多 event -> 先 member 归一（均值），再 Scope median。
+    release_values = [
+        _median(ratios) for ratios in release_by_member.values() if ratios
+    ]
     return {
         "cells": cells_out,
         "release_volume_ratio": {
@@ -756,9 +793,14 @@ def compute_scope_observation(
         m.segment_direction for m in member_list if m.segment_direction is not None
     ]
 
-    # STRUCTURE continuous facts (PRD §7.4 B).
+    # STRUCTURE categorical fact (PRD §7.4 B) — canonical Structure Alignment value
+    # inherited verbatim from First Pyramid, mapped via the canonical adapter.
+    # Review does NOT re-derive alignment from any numeric cast.
     structure_alignment_values = [
-        m.structure_alignment for m in member_list if m.structure_alignment is not None
+        FirstPyramidSemanticAdapter.alignment(m.structure_alignment_categorical)
+        for m in member_list
+        if m.structure_alignment_categorical is not None
+        and FirstPyramidSemanticAdapter.alignment(m.structure_alignment_categorical) is not None
     ]
     active_ob_count = _sum(
         [
@@ -767,17 +809,24 @@ def compute_scope_observation(
         ]
     )
 
-    # MOMENTUM continuous facts (PRD §7.5).
-    # Squeeze State — mapped from the history volatility_phase (categorical).
+    # MOMENTUM canonical facts (PRD §7.5) — inherited from First Pyramid through the
+    # canonical adapter.  Review does NOT re-derive squeeze/momentum locally.
     squeeze_state_values = [
-        _squeeze_state_from_phase(m.volatility_phase) for m in member_list
-        if m.volatility_phase is not None and _squeeze_state_from_phase(m.volatility_phase) is not None
+        FirstPyramidSemanticAdapter.squeeze(m.volatility_phase) for m in member_list
+        if m.volatility_phase is not None
+        and FirstPyramidSemanticAdapter.squeeze(m.volatility_phase) is not None
     ]
     # BB Position / BB Width live-snapshot-only -> upstream unavailable here.
-    # Momentum / Volume Relation — cross of squeeze phase × momentum direction.
+    # Momentum / Volume Relation — cross of two CANONICAL facts (squeeze state x
+    # momentum direction) already resolved by the adapter.  Review does not
+    # re-derive the squeeze phase or momentum direction from raw numeric inputs.
     momentum_volume_relation_values: list[str] = []
     for m in member_list:
-        relation = _momentum_volume_relation(m.volatility_phase, m.momentum_direction_raw)
+        sqz = FirstPyramidSemanticAdapter.squeeze(m.volatility_phase)
+        mom = FirstPyramidSemanticAdapter.momentum_direction_value(m.momentum_direction_raw)
+        if sqz is None or mom is None:
+            continue
+        relation = _momentum_volume_relation_canonical(sqz, mom)
         if relation is not None:
             momentum_volume_relation_values.append(relation)
 
@@ -801,7 +850,11 @@ def compute_scope_observation(
         -1.0: _STATE_LABELS[Direction.DOWN],
         0.0: _STATE_LABELS[Direction.SIDEWAYS],
     }
-    squeeze_labels = {"SQUEEZE_RELEASE": "SqueezeRelease", "NON_SQUEEZE": "NonSqueeze"}
+    squeeze_labels = {
+        SqueezeState.SQUEEZE: "Squeeze",
+        SqueezeState.RELEASED: "Squeeze_Release",
+        SqueezeState.NORMAL: "Non_Squeeze",
+    }
 
     return {
         "scope": {
@@ -866,7 +919,7 @@ def compute_scope_observation(
             },
             "alignment": _categorical_state_distribution(
                 structure_alignment_values,
-                {1.0: "Aligned", 0.0: "Neutral", -1.0: "Divergent"},
+                {"aligned": "Aligned", "divergent": "Divergent"},
             ),
             "active_ob_count": active_ob_count,
             "distance_to_trailing_top_pct": {
@@ -916,37 +969,21 @@ def compute_scope_observation(
     }
 
 
-def _squeeze_state_from_phase(volatility_phase: Any) -> str | None:
-    """Map the history volatility_phase to the PRD §7.5 Squeeze State label."""
-    try:
-        phase = float(volatility_phase)
-    except (TypeError, ValueError):
-        return None
-    # PRD §7.5: SQUEEZE_RELEASE is the released state; NON_SQUEEZE otherwise.
-    return "SQUEEZE_RELEASE" if phase in (3.0, 4.0) else "NON_SQUEEZE"
-
-
-def _momentum_volume_relation(
-    volatility_phase: Any,
-    momentum_direction_raw: Any,
+def _momentum_volume_relation_canonical(
+    squeeze: "SqueezeState",
+    momentum: "MomentumDirection",
 ) -> str | None:
-    """Cross of squeeze status × momentum direction (PRD §7.5 Momentum/Volume Relation).
+    """Cross of two CANONICAL facts (squeeze state × momentum direction).
 
-    Produces one of the four categorical cells.  Missing either axis -> None.
+    PRD §7.5: Momentum/Volume Relation is inherited from First Pyramid, NOT
+    re-derived by Review.  Both inputs are already-resolved canonical enums.
     """
-    squeeze = _squeeze_state_from_phase(volatility_phase)
-    if squeeze is None:
+    if squeeze is None or momentum is None:
         return None
-    if momentum_direction_raw is None:
-        return None
-    try:
-        direction = float(momentum_direction_raw)
-    except (TypeError, ValueError):
-        return None
-    if direction > 0:
-        mom = "Up"
-    elif direction < 0:
-        mom = "Down"
-    else:
-        mom = "Neutral"
-    return f"{'Release' if squeeze == 'SQUEEZE_RELEASE' else 'NonSqueeze'}·{mom}"
+    squeeze_label = "Release" if squeeze == SqueezeState.RELEASED else "Squeeze"
+    mom_label = {
+        MomentumDirection.EXPANDING: "Up",
+        MomentumDirection.FLAT: "Neutral",
+        MomentumDirection.CONTRACTING: "Down",
+    }.get(momentum, "Neutral")
+    return f"{squeeze_label}·{mom_label}"

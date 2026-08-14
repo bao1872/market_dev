@@ -55,7 +55,7 @@ def _m(
     seg_vol_mean: float | None = None,
     seg_amt_mean_prev: float | None = None,
     segment_direction: float | None = None,
-    structure_alignment: float | None = None,
+    structure_alignment_categorical: str | None = None,
     active_internal_ob_count: float | None = None,
     active_swing_ob_count: float | None = None,
     volatility_phase: float | None = None,
@@ -97,7 +97,7 @@ def _m(
         seg_amt_ratio=seg_amt_ratio,
         seg_vol_mean=seg_vol_mean,
         seg_amt_mean_prev=seg_amt_mean_prev,
-        structure_alignment=structure_alignment,
+        structure_alignment_categorical=structure_alignment_categorical,
         active_internal_ob_count=active_internal_ob_count,
         active_swing_ob_count=active_swing_ob_count,
         volatility_phase=volatility_phase,
@@ -832,17 +832,20 @@ def test_trend_segment_direction_categorical() -> None:
 
 
 def test_structure_alignment_and_active_ob_count() -> None:
+    # 2026-08-13 CORRECTION: structure_alignment 使用 canonical categorical 语义
+    # （First Pyramid 存储的 "aligned" / "divergent"），不再使用 numeric cast。
     members = [
-        _m("a", structure_alignment=1.0, active_internal_ob_count=2.0, active_swing_ob_count=1.0),
-        _m("b", structure_alignment=-1.0, active_internal_ob_count=1.0, active_swing_ob_count=0.0),
-        _m("c", structure_alignment=0.0, active_internal_ob_count=0.0, active_swing_ob_count=0.0),
+        _m("a", structure_alignment_categorical="aligned", active_internal_ob_count=2.0, active_swing_ob_count=1.0),
+        _m("b", structure_alignment_categorical="divergent", active_internal_ob_count=1.0, active_swing_ob_count=0.0),
+        _m("c", structure_alignment_categorical="aligned", active_internal_ob_count=0.0, active_swing_ob_count=0.0),
     ]
     structure = _run(members)["structure"]
     align = structure["alignment"]
+    # denominator = 带 canonical alignment 的成员数（categorical 无 neutral 类别）。
     assert align["denominator"] == 3
-    assert align["aligned_count"] == 1
+    assert align["aligned_count"] == 2
     assert align["divergent_count"] == 1
-    assert align["neutral_count"] == 1
+    assert align.get("neutral_count", 0) == 0
     # active OB count = sum of (internal + swing) across members = 3+1+0 = 4
     assert structure["active_ob_count"] == pytest.approx(4.0)
     # Distance-to-trailing facts are live-snapshot-only -> unavailable, not 0.
@@ -851,28 +854,30 @@ def test_structure_alignment_and_active_ob_count() -> None:
 
 
 def test_structure_events_member_dedupe_and_cells() -> None:
+    # 2026-08-13 CORRECTION: cell key 使用独立的 Structure Level categorical
+    # (Swing/Internal)，与 numeric price level 分离；price level 不再参与聚合。
     events = [
-        StructureEvent("a", "BOS", direction="Up", level=10.0),
-        StructureEvent("a", "BOS", direction="Up", level=10.0),  # same cell twice same day
-        StructureEvent("b", "BOS", direction="Up", level=10.0),
-        StructureEvent("c", "OB_CREATED", direction="Down", level=8.0),
+        StructureEvent("a", "BOS", direction="Up", level=10.0, internal=False),
+        StructureEvent("a", "BOS", direction="Up", level=10.0, internal=False),  # same cell twice same day
+        StructureEvent("b", "BOS", direction="Up", level=10.0, internal=False),
+        StructureEvent("c", "OB_CREATED", direction="Down", level=8.0, internal=True),
         StructureEvent("d", "EQH"),
         StructureEvent("e", "EQL"),
         StructureEvent("a", "EQH"),  # extreme: no level, member_count dedup by member
     ]
     # Member "x" is NOT PIT(T) -> must be ignored.
-    events.append(StructureEvent("x", "BOS", direction="Up", level=10.0))
+    events.append(StructureEvent("x", "BOS", direction="Up", level=10.0, internal=False))
     structure = _run(
         [_m("a"), _m("b"), _m("c"), _m("d"), _m("e")],
         pit_member_ids=["a", "b", "c", "d", "e"],
         events=events,
     )["structure"]
     cells = structure["events"]["cells"]
-    bos = cells["leveled"]["BOS_Up_10.0"]
+    bos = cells["leveled"]["BOS_Up_Swing"]
     assert bos["event_count"] == 3  # a×2 + b×1
     assert bos["member_count"] == 2  # a, b dedup
     assert bos["member_ratio"] == pytest.approx(2 / 5)
-    ob = cells["leveled"]["OB_CREATED_Down_8.0"]
+    ob = cells["leveled"]["OB_CREATED_Down_Internal"]
     assert ob["event_count"] == 1 and ob["member_count"] == 1
     assert cells["extreme"]["EQH"]["member_count"] == 2  # d, a
     assert cells["extreme"]["EQH"]["member_ratio"] == pytest.approx(2 / 5)
@@ -895,30 +900,39 @@ def test_structure_events_no_level_for_extremes() -> None:
 
 
 def test_sqz_release_volume_ratio_median_from_events() -> None:
+    # 2026-08-13 CORRECTION: release volume ratio 先按 member 归一（同一 member
+    # 多个 release event 取均值，不重复加权），再做 Scope median。
     events = [
         StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=1.5),
         StructureEvent("b", "SQZ_RELEASE", release_volume_ratio=2.5),
         StructureEvent("c", "SQZ_RELEASE", release_volume_ratio=0.5),
+        # 同一 member a 第二个 release event -> 先 member 归一（均值）
+        StructureEvent("a", "SQZ_RELEASE", release_volume_ratio=2.5),
     ]
     rel = _run(
         [_m("a"), _m("b"), _m("c")], pit_member_ids=["a", "b", "c"], events=events
     )["momentum"]["release_volume_ratio"]
-    # median of [0.5, 1.5, 2.5] = 1.5
-    assert rel["median"] == pytest.approx(1.5)
+    # member a 归一 = (1.5+2.5)/2 = 2.0; values = [2.0, 2.5, 0.5]
+    # median of [0.5, 2.0, 2.5] = 2.0
+    assert rel["median"] == pytest.approx(2.0)
     assert rel["valid_count"] == 3
 
 
 def test_momentum_squeeze_state_and_relation() -> None:
+    # 2026-08-13 CORRECTION: Squeeze State / Momentum-Volume Relation 直接继承
+    # canonical fact（First Pyramid volatility_phase / momentum_direction 字符串 token），
+    # Review 不再用 numeric phase 重推导。
     members = [
-        _m("a", volatility_phase=4.0, momentum_direction_raw=1.0),
-        _m("b", volatility_phase=1.0, momentum_direction_raw=-1.0),
-        _m("c", volatility_phase=3.0, momentum_direction_raw=0.0),
+        _m("a", volatility_phase="released", momentum_direction_raw="up"),
+        _m("b", volatility_phase="no_squeeze", momentum_direction_raw="down"),
+        _m("c", volatility_phase="squeeze", momentum_direction_raw="up"),
     ]
     mom = _run(members)["momentum"]
     squeeze = mom["squeeze_state"]
     assert squeeze["denominator"] == 3
-    assert squeeze["squeezerelease_count"] == 2  # a, c (phase 3/4)
-    assert squeeze["nonsqueeze_count"] == 1  # b
+    assert squeeze["squeeze_release_count"] == 1  # a
+    assert squeeze["squeeze_count"] == 1  # c
+    assert squeeze["non_squeeze_count"] == 1  # b
     # BB position / width are live-snapshot-only -> unavailable.
     assert mom["bb_position"]["status"] == "unavailable"
     assert mom["bb_width"]["status"] == "unavailable"

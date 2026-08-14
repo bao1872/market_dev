@@ -58,6 +58,29 @@ MARKET_SKIP_DIAGNOSTIC = (
 )
 
 
+# Canonical event-type casing.  CHoCH/CHOCH/... are storage-case artifacts, NOT a
+# product distinction.  Scope Core must not perceive "CHoCH" vs "CHOCH".  This is
+# the single normalization boundary; producer storage values are left untouched.
+_EVENT_TYPE_NORMALIZATION: dict[str, str] = {
+    "choch": "CHoCH",
+    "bos": "BOS",
+    "ob_created": "OB_CREATED",
+    "ob_entered": "OB_ENTERED",
+    "ob_mitigated": "OB_MITIGATED",
+    "eqh": "EQH",
+    "eql": "EQL",
+    "sqz_release": "SQZ_RELEASE",
+}
+
+
+def _normalize_event_type(raw: str | None) -> str:
+    """Normalize canonical event_type at the loader boundary (case-insensitive)."""
+    if not raw:
+        return ""
+    token = raw.strip().lower()
+    return _EVENT_TYPE_NORMALIZATION.get(token, raw.strip().upper())
+
+
 @dataclass(frozen=True)
 class PreparedScope:
     """Prepared canonical inputs for one scope/date observation."""
@@ -179,9 +202,16 @@ async def _load_structure_events(
     events: list[StructureEvent] = []
     for row in (await session.execute(stmt)).scalars():
         payload = row.event_payload or {}
-        etype = (row.event_type or "").upper()
+        # Canonical boundary normalization: CHoCH casing is a storage artifact, NOT a
+        # product distinction.  Normalize case-insensitively so Scope Core never
+        # perceives "CHoCH" vs "CHOCH".  Additive-only; other known types unaffected.
+        etype = _normalize_event_type(row.event_type)
         direction = payload.get("direction")
         level = payload.get("level")
+        # ``internal`` is the canonical Structure Level dimension (False=Swing,
+        # True=Internal).  Stored in the event payload; NOT re-derived by Scope.
+        internal_raw = payload.get("internal")
+        internal = bool(internal_raw) if isinstance(internal_raw, bool) else None
         release_ratio = payload.get("release_volume_ratio")
         events.append(
             StructureEvent(
@@ -191,6 +221,7 @@ async def _load_structure_events(
                 level=(
                     float(level) if isinstance(level, (int, float)) else None
                 ),
+                internal=internal,
                 release_volume_ratio=(
                     float(release_ratio)
                     if isinstance(release_ratio, (int, float))

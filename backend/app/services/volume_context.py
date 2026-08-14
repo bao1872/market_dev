@@ -54,7 +54,11 @@ class VolumeContextData:
     volume_percentile_200: float | None  # 0-100
     volume_zscore_20: float | None
     volume_zscore_200: float | None
-    readiness: bool  # True=数据充分；False=窗口不足
+    readiness: bool  # True = 20D 与 200D 窗口均充分；保留向后兼容
+    # 2026-08-13 CORRECTION: 20D / 200D readiness 分别严格满足完整窗口。
+    # 不允许 25D history 产生 200D fact。
+    readiness_20: bool = False
+    readiness_200: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -228,27 +232,32 @@ def compute_volume_context_from_series(
         v for v in history_volumes
         if v is not None and math.isfinite(v) and v > 0
     ]
-    if len(prior) < SHORT_WINDOW:
-        # Not enough history to form MA20 / percentile20 windows.
+    n_prior = len(prior)
+    # 2026-08-13 CORRECTION: 20D / 200D readiness 分别严格满足完整窗口。
+    # 不允许 25D history 产生 200D fact。
+    readiness_20 = n_prior >= SHORT_WINDOW
+    readiness_200 = n_prior >= LONG_WINDOW
+    if not readiness_20:
+        # 20D 窗口都不足时整体不可用（与历史行为一致）。
         return None
 
     # SSOT rolling windows EXCLUDE the current bar (pandas rolling at index i uses
     # vals[max(0, i-window):i]); the current bar is only the compare value inside
     # _pct.  So all windows are slices of ``prior`` (history before T).
     last20 = prior[-SHORT_WINDOW:]
-    last200 = prior[-LONG_WINDOW:]
+    last200 = prior[-LONG_WINDOW:] if readiness_200 else []
 
     mean20 = sum(last20) / len(last20)
-    mean200 = sum(last200) / len(last200)
+    mean200 = sum(last200) / len(last200) if readiness_200 else None
 
     ratio_20 = current_volume / mean20 if mean20 > 0 else None
-    ratio_200 = current_volume / mean200 if mean200 > 0 else None
+    ratio_200 = current_volume / mean200 if (readiness_200 and mean200 and mean200 > 0) else None
 
     zscore_20 = _zscore(current_volume, last20)
-    zscore_200 = _zscore(current_volume, last200)
+    zscore_200 = _zscore(current_volume, last200) if readiness_200 else None
 
     pct_20 = _position_pct(current_volume, last20)
-    pct_200 = _position_pct(current_volume, last200)
+    pct_200 = _position_pct(current_volume, last200) if readiness_200 else None
 
     return VolumeContextData(
         volume=current_volume,
@@ -262,7 +271,9 @@ def compute_volume_context_from_series(
         volume_percentile_200=pct_200,
         volume_zscore_20=zscore_20,
         volume_zscore_200=zscore_200,
-        readiness=True,
+        readiness=readiness_20 and readiness_200,
+        readiness_20=readiness_20,
+        readiness_200=readiness_200,
     )
 
 

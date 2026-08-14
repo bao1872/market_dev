@@ -1479,24 +1479,28 @@ async def _persist_canonical_scope_observation(
         )
         return
 
-    observation = compute_scope_observation(
-        scope_type=prep.scope_type,
-        scope_key=prep.scope_key,
-        trade_date=prep.trade_date,
-        pit_member_ids=prep.pit_member_ids,
-        pit_member_ids_t1=prep.pit_member_ids_t1 if prep.t1_membership_available else None,
-        members=prep.members,
-        events=prep.events,
-    )
-    checks = check_observation_invariants(observation)
-    failed = [c for c in checks if not c["ok"]]
-    if failed:
-        raise ValueError(
-            f"scope observation invariant failed: {failed!r}"
+    # CORRECTION: 规范事实层双写必须在 nested transaction / savepoint 内执行。
+    # 若 canonical DB flush 失败，仅回滚该 savepoint，外层 legacy transaction
+    # （metrics/signal）仍可继续提交，互不污染。
+    async with session.begin_nested():
+        observation = compute_scope_observation(
+            scope_type=prep.scope_type,
+            scope_key=prep.scope_key,
+            trade_date=prep.trade_date,
+            pit_member_ids=prep.pit_member_ids,
+            pit_member_ids_t1=prep.pit_member_ids_t1 if prep.t1_membership_available else None,
+            members=prep.members,
+            events=prep.events,
         )
-    await save_scope_observation_fact(
-        session, prep, observation, algorithm_version=run.algorithm_version,
-    )
+        checks = check_observation_invariants(observation)
+        failed = [c for c in checks if not c["ok"]]
+        if failed:
+            raise ValueError(
+                f"scope observation invariant failed: {failed!r}"
+            )
+        await save_scope_observation_fact(
+            session, prep, observation, algorithm_version=run.algorithm_version,
+        )
 
 
 def _build_history_extras(

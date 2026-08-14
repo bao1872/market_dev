@@ -419,22 +419,42 @@ def test_volume_context_from_series_six_facts() -> None:
     current = 50.0
     vc = compute_volume_context_from_series(current, history)
     assert vc is not None
+    # 2026-08-13 CORRECTION: readiness_20 满足，但 readiness_200 不满足（history<200）
+    assert vc.readiness_20 is True
+    assert vc.readiness_200 is False
+    assert vc.readiness is False
     # SSOT rolling windows EXCLUDE the current bar. mean20 = mean(last 20 prior).
     mean20 = sum(history[-20:]) / 20
-    mean200 = sum(history[-LONG_WINDOW:]) / len(history[-LONG_WINDOW:])
     # ratio20: current / trailing-20 mean (prior only).
     assert vc.volume_ratio_20 == pytest.approx(current / mean20)
-    # ratio200: current / trailing-200 mean (prior only).
-    assert vc.volume_ratio_200 == pytest.approx(current / mean200)
+    # ratio200: 200D 窗口不足 -> None（禁止 25D history 产生 200D fact）
+    assert vc.volume_ratio_200 is None
+    assert vc.volume_percentile_200 is None
+    assert vc.volume_zscore_200 is None
     # percentile: count strictly below current within trailing window / len(window).
     below20 = sum(1 for x in history[-20:] if x < current)
     assert vc.volume_percentile_20 == pytest.approx(below20 / 20 * 100.0)
-    below200 = sum(1 for x in history[-LONG_WINDOW:] if x < current)
-    assert vc.volume_percentile_200 == pytest.approx(below200 / len(history[-LONG_WINDOW:]) * 100.0)
     # z-score over trailing-20 window (prior only).
     var = sum((x - mean20) ** 2 for x in history[-20:]) / 20
     std = var ** 0.5
     assert vc.volume_zscore_20 == pytest.approx((current - mean20) / std)
+
+
+def test_volume_context_200_window_full() -> None:
+    from app.services.volume_context import compute_volume_context_from_series
+
+    # >=200 根 history -> readiness_200 满足，200D facts 产出。
+    history = tuple(float(v) for v in range(10, 210))
+    current = 50.0
+    vc = compute_volume_context_from_series(current, history)
+    assert vc is not None
+    assert vc.readiness_20 is True
+    assert vc.readiness_200 is True
+    assert vc.readiness is True
+    mean200 = sum(history[-200:]) / 200
+    assert vc.volume_ratio_200 == pytest.approx(current / mean200)
+    assert vc.volume_percentile_200 is not None
+    assert vc.volume_zscore_200 is not None
 
 
 def test_volume_context_from_series_too_short_returns_none() -> None:
@@ -459,8 +479,7 @@ def test_prep_carries_continuous_trend_facts() -> None:
         "current_vs_prev_volume_mean_ratio": 1.1,
         "current_vs_prev_amount_mean_ratio": 1.2,
         "current_segment_volume_mean": 120.0,
-        "prev_segment_volume_mean": 100.0,
-        "structure_alignment": 1.0,
+        "prev_segment_amount_mean": 100.0,
         "active_internal_ob_count": 2.0,
         "active_swing_ob_count": 1.0,
         "volatility_phase": 4.0,
@@ -473,7 +492,9 @@ def test_prep_carries_continuous_trend_facts() -> None:
         "volume_zscore_20": 0.2,
         "available_bars": 250,
     }
-    mo = build_member_observation(_raw(continuous=cont))
+    # structure_alignment_categorical 来自 raw flat_t（canonical categorical 字符串），
+    # 非 numeric continuous cast。
+    mo = build_member_observation(_raw(continuous=cont, flat_t={"structure_alignment": "aligned"}))
     assert mo.regime_strength == pytest.approx(0.7)
     assert mo.dsa_dir_bars == pytest.approx(3.0)
     assert mo.dsa_vwap_dev_pct == pytest.approx(-1.5)
@@ -484,7 +505,7 @@ def test_prep_carries_continuous_trend_facts() -> None:
     assert mo.seg_amt_ratio == pytest.approx(1.2)
     assert mo.seg_vol_mean == pytest.approx(120.0)
     assert mo.seg_amt_mean_prev == pytest.approx(100.0)
-    assert mo.structure_alignment == pytest.approx(1.0)
+    assert mo.structure_alignment_categorical == "aligned"
     assert mo.active_internal_ob_count == pytest.approx(2.0)
     assert mo.active_swing_ob_count == pytest.approx(1.0)
     assert mo.volatility_phase == pytest.approx(4.0)
@@ -498,21 +519,77 @@ def test_prep_no_continuous_defaults_to_none() -> None:
     mo = build_member_observation(_raw())  # continuous={}
     assert mo.regime_strength is None
     assert mo.segment_bars is None
-    assert mo.structure_alignment is None
+    assert mo.structure_alignment_categorical is None
     assert mo.volatility_phase is None
 
 
-def test_prep_volume_200_computed_from_history() -> None:
-    # 25 prior volumes to satisfy the 20-window, current volume 50.0.
-    history = tuple(float(v) for v in range(10, 35))  # 10..34 ascending
+def test_prep_volume_200_requires_full_window() -> None:
+    # 2026-08-13 CORRECTION: 200D fact 仅在完整 >=200 根 history 时产出。
+    # 25 根 history (>=20 但 <200) -> 20D 可用，200D 必须 None。
+    history = tuple(float(v) for v in range(10, 35))  # 10..34, 25 priors
     mo = build_member_observation(_raw(volume_t=50.0, volume_history=history))
-    assert mo.vol_ratio200 is not None
-    # SSOT rolling: ratio200 = current / mean(trailing-200 prior window).
-    # Here history has 25 priors (<200), so the window is the full prior mean = 22.
-    prior_mean = sum(history) / len(history)
-    assert mo.vol_ratio200 == pytest.approx(50.0 / prior_mean, abs=1e-6)
-    assert mo.vol_pct200 is not None
-    assert mo.vol_zscore200 is not None
     assert mo.vol_ratio20 is not None
-    assert mo.vol_pct20 is not None
-    assert mo.vol_zscore20 is not None
+    assert mo.vol_ratio200 is None  # 禁止 25D history 产生 200D fact
+    assert mo.vol_pct200 is None
+    assert mo.vol_zscore200 is None
+    # >=200 根 history -> 200D 可用。
+    history200 = tuple(float(v) for v in range(10, 210))  # 200 priors
+    mo2 = build_member_observation(_raw(volume_t=50.0, volume_history=history200))
+    assert mo2.vol_ratio200 is not None
+    prior_mean = sum(history200) / len(history200)
+    assert mo2.vol_ratio200 == pytest.approx(50.0 / prior_mean, abs=1e-6)
+    assert mo2.vol_pct200 is not None
+    assert mo2.vol_zscore200 is not None
+    assert mo2.vol_ratio20 is not None
+    assert mo2.vol_pct20 is not None
+    assert mo2.vol_zscore20 is not None
+
+
+def test_event_type_normalization_compatibility() -> None:
+    # 2026-08-13 CORRECTION: CHoCH 大小写是存储 artifact，非产品区分。Scope Core
+    # 不应感知 "CHoCH" / "CHOCH" 差异——统一在 loader 边界 normalize。
+    assert prep_service._normalize_event_type("CHoCH") == "CHoCH"
+    assert prep_service._normalize_event_type("CHOCH") == "CHoCH"
+    assert prep_service._normalize_event_type("choch") == "CHoCH"
+    assert prep_service._normalize_event_type("BOS") == "BOS"
+    assert prep_service._normalize_event_type("ob_entered") == "OB_ENTERED"
+    assert prep_service._normalize_event_type("SQZ_RELEASE") == "SQZ_RELEASE"
+    assert prep_service._normalize_event_type(None) == ""
+    assert prep_service._normalize_event_type("") == ""
+
+
+@pytest.mark.asyncio
+async def test_loader_passes_internal_as_structure_level(monkeypatch) -> None:
+    # 2026-08-13 CORRECTION: canonical event 的 ``internal`` 标志（Swing/Internal 独立
+    # categorical 维度）必须在 loader 边界透传给 StructureEvent，不修改 producer。
+    from app.domain.review.scope_observation import StructureEvent, _aggregate_structure_events
+
+    async def _fake_load(session, ids, trade_date):
+        # 模拟 loader 从 canonical FirstPyramidHistoryEvent row 构造 StructureEvent：
+        #  - event_type 经 _normalize_event_type 归一（CHoCH 大小写）；
+        #  - internal 标志从 payload 透传为 Structure Level 维度。
+        return [
+            StructureEvent(
+                member_id="INST1",
+                event_type=prep_service._normalize_event_type("CHoCH"),
+                direction="Up",
+                level=12.34,  # price-level evidence 保留
+                internal=True,  # Swing/Internal 维度
+            )
+        ]
+
+    monkeypatch.setattr(prep_service, "_load_structure_events", _fake_load)
+
+    events = await prep_service._load_structure_events(None, ["INST1"], T)
+    ev = events[0]
+    assert isinstance(ev, StructureEvent)
+    assert ev.internal is True  # Swing/Internal 维度透传
+    assert ev.level == 12.34  # price-level evidence 保留，不参与聚合
+    assert ev.event_type == "CHoCH"  # 大小写已 normalize
+
+    # 内部事件聚合为 Internal；price level 不进入 cell key。
+    agg = _aggregate_structure_events(events=events, pit_set={"INST1"})
+    cell = agg["cells"]["leveled"]["CHoCH_Up_Internal"]
+    assert cell["member_count"] == 1
+    assert "level" not in cell  # price level 已从聚合 key 移除
+    assert cell["structure_level"] == "Internal"

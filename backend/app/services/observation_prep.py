@@ -105,11 +105,14 @@ def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
     close_t = _finite(raw.close_t)
     cont = raw.continuous or {}
     vc = compute_volume_context_from_series(_finite(raw.volume_t), list(raw.volume_history))
-    ratio200 = vc.volume_ratio_200 if vc else None
+    # 2026-08-13 CORRECTION: 200D facts 仅在 readiness_200 满足（完整 >=200 根
+    # history）时产出；25D history 不得产生 200D fact。
+    vc_ready_200 = vc.readiness_200 if vc else False
+    ratio200 = vc.volume_ratio_200 if (vc and vc_ready_200) else None
     pct20 = vc.volume_percentile_20 if vc else None
-    pct200 = vc.volume_percentile_200 if vc else None
+    pct200 = vc.volume_percentile_200 if (vc and vc_ready_200) else None
     z20 = vc.volume_zscore_20 if vc else None
-    z200 = vc.volume_zscore_200 if vc else None
+    z200 = vc.volume_zscore_200 if (vc and vc_ready_200) else None
     return MemberObservation(
         member_id=raw.member_id,
         # candidate = close(T) available, independent of return availability.
@@ -146,12 +149,18 @@ def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
         seg_vol_ratio=cont.get("current_vs_prev_volume_mean_ratio"),
         seg_amt_ratio=cont.get("current_vs_prev_amount_mean_ratio"),
         seg_vol_mean=cont.get("current_segment_volume_mean"),
-        seg_amt_mean_prev=cont.get("prev_segment_volume_mean"),
-        # STRUCTURE continuous facts (PRD §7.4 B).
-        structure_alignment=cont.get("structure_alignment"),
+        seg_amt_mean_prev=cont.get("prev_segment_amount_mean"),
+        # STRUCTURE categorical fact (PRD §7.4 B) — canonical Structure Alignment
+        # value verbatim from the raw state payload ("aligned" / "divergent" / None).
+        # NOT the numeric continuous cast.
+        structure_alignment_categorical=raw.flat_t.get("structure_alignment")
+        if raw.flat_t
+        else None,
         active_internal_ob_count=cont.get("active_internal_ob_count"),
         active_swing_ob_count=cont.get("active_swing_ob_count"),
-        # MOMENTUM continuous facts (PRD §7.5).
+        # MOMENTUM canonical facts (PRD §7.5) — inherited from First Pyramid.
+        # ``volatility_phase`` / ``momentum_direction`` are the canonical stored
+        # values; Review maps them through FirstPyramidSemanticAdapter (no re-derive).
         volatility_phase=cont.get("volatility_phase"),
         momentum_direction_raw=cont.get("momentum_direction"),
         momentum_change=cont.get("momentum_change"),

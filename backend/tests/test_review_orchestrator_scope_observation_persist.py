@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -37,6 +37,24 @@ def _scope(scope_type: str, scope_key: str) -> object:
     definition.scope_type = scope_type
     definition.scope_key = scope_key
     return definition
+
+
+def _mock_session() -> AsyncMock:
+    """AsyncSession mock whose begin_nested() is a real async context manager.
+
+    Mirrors production async SQLAlchemy ``AsyncSession.begin_nested`` so the
+    savepoint protocol (CORRECTION: nested transaction isolation) is exercised.
+    """
+    session = AsyncMock()
+    # 用 Mock 记录调用，同时返回真正的 async context manager（符合生产 async SQLAlchemy API）。
+    begin_nested_cm = AsyncMock()
+    begin_nested_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
+    begin_nested_cm.__aexit__ = AsyncMock(return_value=False)
+
+    begin_nested = MagicMock(return_value=begin_nested_cm)
+
+    session.begin_nested = begin_nested
+    return session
 
 
 def _prep(scope_type: str, scope_key: str, *, unavailable: bool = False) -> PreparedScope:
@@ -90,7 +108,7 @@ async def test_activated_scope_persists_fact():
         orch, "save_scope_observation_fact", AsyncMock(return_value=object()),
     ) as mock_save:
         await orch._persist_canonical_scope_observation(
-            AsyncMock(), run, scope,  # type: ignore[arg-type]
+            _mock_session(), run, scope,  # type: ignore[arg-type]
         )
 
     mock_prepare.assert_awaited_once()
@@ -118,7 +136,7 @@ async def test_unavailable_scope_returns_without_persist():
             orch, "save_scope_observation_fact", AsyncMock(),
         ) as mock_save:
             await orch._persist_canonical_scope_observation(
-                AsyncMock(), run, scope,  # type: ignore[arg-type]
+                _mock_session(), run, scope,  # type: ignore[arg-type]
             )
 
         mock_prepare.assert_awaited_once()
@@ -144,6 +162,36 @@ async def test_invariants_failed_raises_value_error():
     ) as mock_save:
         with pytest.raises(ValueError, match="scope observation invariant failed"):
             await orch._persist_canonical_scope_observation(
-                AsyncMock(), run, scope,  # type: ignore[arg-type]
+                _mock_session(), run, scope,  # type: ignore[arg-type]
             )
         mock_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_canonical_db_failure_propagates_within_savepoint():
+    """CORRECTION: canonical 双写必须在 nested transaction/savepoint 内执行。
+
+    save_scope_observation_fact 抛 DB 错误时，异常必须向上传播（由上层
+    _compute_scope_metrics_phase 的 try/except 降级为 warning），且 begin_nested
+    已被进入（savepoint 隔离，外层 legacy transaction 可继续提交）。
+    """
+    run = _make_run()
+    scope = _scope("industry_l3", str(uuid.uuid4()))
+    fake_prep = _prep("industry_l3", "x")
+
+    session = _mock_session()
+    save_error = RuntimeError("psycopg2: deadlock detected")
+
+    with patch.object(
+        orch, "prepare_scope", AsyncMock(return_value=fake_prep),
+    ), patch.object(
+        orch, "compute_scope_observation", return_value=OBSERVATION,
+    ), patch.object(
+        orch, "check_observation_invariants", return_value=[{"ok": True, "name": "all"}],
+    ), patch.object(
+        orch, "save_scope_observation_fact", AsyncMock(side_effect=save_error),
+    ):
+        with pytest.raises(RuntimeError, match="deadlock detected"):
+            await orch._persist_canonical_scope_observation(session, run, scope)
+        # savepoint 已建立并回滚，异常向外传播（由上层 catch 处理，不污染 legacy）。
+        assert session.begin_nested.called
