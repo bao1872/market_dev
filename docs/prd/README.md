@@ -72,7 +72,7 @@ PRD 只使用：
 | `50-market-data-quality.md` | 行情缺口扫描、修复、验证和 resume 合同 |
 | `60-permissions-admin.md` | 邀请码、权限和管理后台 |
 | `70-review.md` | 复盘指标、历史、归因、信号、发布和用户状态 |
-| `75-auction-analysis.md` | 竞价真值、锚点、扫描、聚合、发布和 Review 回流 |
+| `75-auction-analysis.md` | 竞价重新定价观测（次日 9:25 Gap/Amount 事实与历史异常、静态横截面、个股/Scope 状态迁移、注意力再分配、Review 依赖、发布与 lineage）；旧 AuctionAnchor 产品合同已废止（见 PRD75 §23） |
 | `80-system-runtime.md` | 本地/远程、Git、数据库、Redis、Scheduler 和部署边界 |
 | `90-system-wide-requirements.md` | 跨模块统一时间、状态、标识、来源和非功能要求 |
 

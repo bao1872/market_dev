@@ -1,10 +1,21 @@
 # 竞价分析 Map
 
 核验状态：代码、PG Integration 与同一 SHA CI 已验证；生产双源仍阻断
-最后更新：2026-08-01
+最后更新：2026-08-01（2026-08-14 PRD 语义收口后映射未实现）
 核验分支：`codex/panji-full-closure-20260801`
 对应 PRD：`../prd/75-auction-analysis.md`
 事实所有权：竞价分析层实现状态
+
+> **2026-08-14 PRD 语义收口（Overnight Repricing Observation）**：`docs/prd/75-auction-analysis.md` 已重写为
+> 新 Auction 合同（次日 9:25 Gap/Amount 事实、历史异常、静态横截面、个股/Scope 状态迁移、注意力再分配；
+> 移除 structure/chip anchor 语义，见 PRD75 §22/§23）。本 Map 描述的仍是 **当前 legacy implementation baseline**
+> （旧 AuctionAnchor 产品：盘后 `auction_anchor` 生成、`auction_mode_service` structure_only/hybrid/composite、
+> 锚点位置扫描 7-state lifecycle、`auction_scan`/`auction_aggregation`、三级页面与 Review 竞价回流）。
+> 新合同与现有实现（`auction_anchor_service`/`auction_scan_service`/`auction_aggregation_service`/
+> `auction_mode_service`/`auction_scheduler_service`、`auction_*` 表与 API、`/auction` 前端）的映射/迁移
+> **DEFER 到后续 Code Alignment Round**；届时本 Map 需同步更新。旧产品语义在 PRD75 §23 已显式标记 DEPRECATED。
+> 当前 9:25 基建事实（`auction_final_quotes` 已含 `final_price/prev_close/amount`、09:25:05/10:00 Scheduler 窗口、
+> 双源真值门禁）可复用于新 Auction 的 raw fact 采集，但语义归属以新 PRD75 为准。
 
 > [CHANGE-20260801-002] scan/aggregate/三级页面已有实现；本轮补齐独立来源真值门禁、
 > 共识报价、专属 analysis pointer 和恢复幂等。当前仅有 mootdx/pytdx 同一供应链，

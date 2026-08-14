@@ -1902,6 +1902,8 @@ Review run 创建时必须显式解析上游依赖状态，并把结果固化到
 | auction 竞价 | 失败 / 不可用 | **默认降级，不阻断** | 由 auction 自身 readiness 表达 |
 | 历史基线 | <60 日 | 保留 raw，normalized 不就绪 | `status=insufficient_history` |
 
+> **[DEPRECATED 2026-08-14，PRD75 §23]** 依赖矩阵中 `auction 竞价` 行描述旧 AuctionAnchor 产品的 Review 竞价回流依赖。新 Auction 是次日 9:25 产品、消费 Review 正式 snapshot（Review(t-1) → Auction(t)），Review 不依赖新 Auction，方向见 [PRD75 §14](./75-auction-analysis.md)。该行保留为 legacy 依赖记录。
+
 > **[P0 2026-08-04] chip 覆盖率合同**：chip 无独立 run 记录，只通过 `core_run_id` 挂靠 stock_core。`source_chip_run_id` 恒为 `NULL`，不得把 stock_core 的 run id 写成 source_chip_run_id 冒充 chip run。chip 质量改由真实覆盖率判定。
 
 ### RV-27-02 发布质量硬门（在既有门禁基础上新增）

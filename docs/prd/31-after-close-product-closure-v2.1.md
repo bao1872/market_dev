@@ -39,7 +39,7 @@
 → post-core 产品
    ├─ state_events
    ├─ chip_consensus（daily + 15m 异步增强）
-   ├─ auction_anchor（先 structure_only，后续可升级）
+   ├─ auction_anchor（legacy AuctionAnchor，DEPRECATED，见 [PRD75 §23](../prd/75-auction-analysis.md#23-legacy-auctionanchor-deprecation--migration-gap)；新 Auction 是次日 9:25 产品，不属于盘后编排节点）
    └─ board_aggregation → market_review
 → ProductReadinessService 动态聚合
 → 行情、详情、Review、竞价和管理后台消费正式结果
@@ -79,6 +79,7 @@
 | `state_events` | enhancement | source core、事件生命周期与 coverage | 不阻断 board/Review |
 | `chip_consensus` | enhancement | ChipConsensusRun、逐股 readiness、coverage 与正式 pointer | 不阻断 core/board/Review |
 | `auction_anchor` | enhancement | AuctionAnchorRun、mode、coverage 与正式 pointer | 不阻断 Review |
+| `auction`（新，未来节点） | 次日 9:25 竞价重新定价观测 | 非盘后编排节点；见 [PRD75](./75-auction-analysis.md) | 非本轮 P0 实现 |
 | `board_aggregation` | mandatory product | 正式 market aggregation pointer（READY 或 DEGRADED，见 PC-42） | **FAILED** 阻断 Review；**DEGRADED 不阻断** |
 | `market_review` | mandatory product | 正式 Review pointer 与发布质量门 | 失败保留旧 pointer |
 
@@ -144,6 +145,8 @@ Review 的硬依赖只有正式 stock_core、正式 market aggregation 和历史
 
 ### PC-31 Auction
 
+> **DEPRECATED PRODUCT CONTRACT（2026-08-14，PRD75 §23）**：本条款描述旧 AuctionAnchor 产品（每股 anchor `structure_only | composite | unavailable | failed`，批次 mode `structure_only | hybrid | composite`）。该产品语义已被 [PRD75](./75-auction-analysis.md) 新 Auction（次日 9:25 Overnight Repricing Observation）取代，不再属于新 Auction P0 目标合同；代码迁移/删除由后续 Code Alignment Round 处理。
+
 每股 anchor 为 `structure_only | composite | unavailable | failed`；批次 publication mode 为 `structure_only | hybrid | composite`。chip 部分可用必须形成 hybrid，不能冒充 composite。阈值配置化、版本化并写入 run；竞价真值双源和发布门以 PRD 75 为权威。
 
 ## 6. Publication 与 lineage
@@ -164,6 +167,8 @@ chip.source_core_run_id == stock_core.pointer.data_run_id
 auction.source_core_run_id == stock_core.pointer.data_run_id
 auction.source_chip_run_id == chip_consensus.pointer.data_run_id or null
 ```
+
+> 上述 `auction.*` lineage 为**旧 AuctionAnchor 产品**的 lineage（DEPRECATED，见 PRD75 §23）。新 Auction（次日 9:25）的 lineage 以 [PRD75](./75-auction-analysis.md) §17 为准，不在此列。
 
 ### PC-42 Board aggregation degraded publication（CHANGE-20260809，Phase 4D.3）
 
