@@ -511,6 +511,105 @@ L2 不是算法层，不是评分层。固定为：
 规模敏感 raw fact（Total Amount / Total Volume / Event Count / Member Count / Raw HHI）不得无条件跨不可比 Scope 排名。
 如果没有合理 peer universe：Cross-sectional = unavailable。
 
+#### 7.8.1 C1 Cross-sectional Analysis — Implementation Contract（v2.3 实现闭环）
+
+本小节是 §7.8 的实现契约，用于关闭 REVIEW-V23-C1。本轮只定义 contract，不落地代码、不新增 migration / table / API / frontend。
+
+C1 属于 **Analysis 派生视图（derived view）**：输入 L1 Canonical Facts + L2 Observation Groups，输出横截面位置证据；**不** recompute metric、**不**修改 fact、**不**创建新 technical indicator。
+
+##### A. Peer Input Contract
+
+| 层 | 责任 | 禁止 |
+|---|---|---|
+| **Domain**（`app/domain/review/analysis/cross_sectional.py`） | 纯确定性 projection。输入 = ①当前 scope 的 L1 payload（`observation_payload` dict）+ L2 groups（由 `build_l2_observation_groups` 生成）；②**外部预取好的 peer-fact 集合**：`dict[scope_key, peer_l1_payload]`（同族、同 trade_date 的其他 Scope 的 L1 payload）。输出 = cross-sectional facts。 | **不访问 DB**。不读 bars / tick / first-pyramid raw / indicators。 |
+| **Service**（`app/services/review_cross_sectional_service.py`） | 1) 用 `get_scope_observation_fact(db, trade_date, scope_type, scope_key)` 读当前 scope L1；2) 用已有 `list_scope_observation_facts(db, scope_type=scope_type, from_date=trade_date, to_date=trade_date)` 取**同族同 trade_date 全量**（含当前 scope），按 `scope_key` 建 peer dict；3) 调 domain projection；4) 不重新计算任何 L1/L2 数值。 | 不新建 query / 不新增表读取路径；`list_scope_observation_facts` 已存在，仅复用。 |
+| **Persistence** | 无新增责任。C1 不落库（derived view）。 | 不新增 schema / migration。 |
+
+Peer universe 边界（来自 §6.4.1 same-family）：`industry_l1`↔`industry_l1`、`industry_l2`↔`industry_l2`、`industry_l3`↔`industry_l3`、`concept`↔`concept`、`style`↔`style`、`major_index`↔`major_index`；`market` 无 peer → C1 直接 `unavailable`，不进 projection。
+
+##### B. Cross-sectional Comparison Definition
+
+- **数学定义（empirical percentile rank）**：对某一可比字段 `f`，令 `v = current_scope[f]`（标量），`P = {peer[f] : peer ∈ peer universe, peer[f] is finite AND peer[f] status == ready}`（即仅 valid peer facts）。
+  `percentile = (count(p < v) + 0.5 * count(p == v)) / valid_peer_count * 100`，取值 `[0, 100]`；`valid_peer_count == 0` → unavailable。
+  等价表述：`percentile` = 当前 scope 的 `f` 值在 **valid peer 同字段经验分布**中的相对位置（含自身参与，与 L1 自身分布 percentile 同一约定）。
+  **percentile 的分母必须是 `valid_peer_count`，never `peer_count`** —— peer universe 中可能含 unavailable / missing facts 的 peer，这些 peer 不进入 percentile 分母，percentile 只基于 valid peer facts 计算。`peer_count` 与 `valid_peer_count` 必须分别记录（见 §D）。
+- **不使用 ranking / score**：`percentile` 是 **position evidence**（位置证据），不是 score、不是 rank、不暗示优劣方向。它只回答「当前 scope 的 f 值在可比群体中处于什么位置」。
+- 输出结构（每可比字段）：
+  `{"field": f, "value": v, "percentile": float|None, "peer_count": N, "valid_peer_count": M, "status": "ready"|"unavailable", "reason": ...}`
+- **仅做 position，不做差异显著性、不做 hypothesis test、不生成任何 direction 语义（higher/lower 优劣由消费层解释，C1 不判定）。**
+
+##### C. Comparable Field Whitelist
+
+**C1 v1 字段范围（收紧）**：第一版 C1 **不使用**「所有 scale-invariant 字段」，仅允许以下显式 `C1_CORE_FIELDS` 类别。其余字段一律不进入 v1（见下「暂不进入 C1 v1」）。
+
+**C1_CORE_FIELDS（v1 允许）**：
+
+| 类别 | 字段（L1/L2 path） | 来源段 | 原因 |
+|---|---|---|---|
+| Price | `equal_weight_return` | price | 等权收益率，无量纲，跨同族 Scope 可比 |
+| Price | `amount_weighted_return` | price | 金额加权收益率，无量纲，跨同族 Scope 可比 |
+| Trend | `trend.continuous.regime_strength` | trend | 单位化连续强度量，跨同族可比 |
+| Participation | `participation.volume.ratio20` / `ratio200` | participation | 量能相对量（自身历史比率），无量纲 |
+| Momentum | `momentum.bb_position` | momentum | 无量纲布林位置量 |
+| Momentum | `momentum.bb_width` | momentum | 无量纲布林宽度量 |
+
+**暂不进入 C1 v1（需单独定义，不在 v1 范围）**：
+
+| 字段 | 原因 |
+|---|---|
+| `structure.distance_to_trailing_top_pct` / `distance_to_trailing_bottom_pct` | 结构字段存在上下文依赖（trailing window / 相对参照），需单独定义比较语义 |
+| `structure.alignment.Aligned_ratio` | 结构字段上下文依赖，需单独定义 |
+| 任何 `_events`（BOS / CHoCH / OB_* / EQH / EQL cell）及 event statistics | 事件计数规模敏感，且属 L2 event evidence，非横截面量；raw event statistics 暂不进入 |
+| `return_1d` / `return_5d` / `return_20d`（price 单期收益） | v1 仅取 equal/amount 加权聚合收益，单期成员收益分位后续单独评估 |
+| `breadth.*_ratio` / `concentration.normalized_hhi` / `squeeze_state` ratio / `trend.state _ratio` 等 | 第一版聚焦核心四类，其余 scale-invariant 字段留待后续版本扩展（fail-closed：未列即禁止） |
+
+> **注意**：`C1_CORE_FIELDS` 之外、且不在「暂不进入」清单的字段，默认**禁止**比较（fail-closed），需单独 PRD 确认后才加入白名单。
+
+**永久禁止比较字段（规模敏感 / 不可跨 Scope 排名，所有版本适用）**：
+
+| 字段 | 原因 |
+|---|---|
+| `price.total_volume` | 规模敏感 raw，跨不可比 Scope 无意义（§6.4.1 / §7.8） |
+| `price.amount.total_amount` | 规模敏感 raw（绝对金额） |
+| 各类 `event_count` / `member_count` | 规模敏感计数，取决于成员基数 |
+| `price.concentration.raw_hhi` | 未归一化，受 member_count 机械下界影响 |
+| `amount.total_amount` 等绝对量 | 规模敏感 raw |
+
+##### D. Availability Contract（复用 L1 availability 风格）
+
+字段（与 L1 每个 fact 的 `status` / `valid_count` / `denominator` 同风格）：
+
+- `peer_count`：peer universe 中**同族同 trade_date** Scope 的总数（含当前 scope 自身）。
+- `valid_peer_count`：peer universe 中该字段值 finite（且非 unavailable）的 peer 数（**不含**当前 scope 自身；当前 scope 的 `value` 单独记录）。
+- **minimum_valid_peer_count = 5**（minimum valid peer sample）：C1 v1 要求至少 5 个 valid peer 才能构成有意义的横截面分布。
+- **unavailable 条件**（任一触发 → `status="unavailable"`）：
+  1. `scope_type == "market"`（无 peer）；
+  2. 当前 scope 该字段 `value is None` / `unavailable`；
+  3. `valid_peer_count < minimum_valid_peer_count`（即 `< 5`）→ `reason = INSUFFICIENT_PEER_SAMPLE`。
+     （注：不再使用 `peer_count >= 2` 作为阈值；`peer_count` 仍记录，但有效性判定只基于 `valid_peer_count`。`valid_peer_count == 0` 是 `< 5` 的特例，同样归入 `INSUFFICIENT_PEER_SAMPLE`。）
+- `status` 取值：`"ready"` / `"unavailable"`；`unavailable` 必须带 `reason`（枚举式字符串，沿用 L1 风格如 `NO_PEER_UNIVERSE` / `INSUFFICIENT_PEER_SAMPLE` / `CURRENT_VALUE_UNAVAILABLE`）。
+- 不引入新 status 词汇表；沿用 L1 `unavailable` + `reason` 约定。
+
+##### E. 禁止事项（C1 输出硬约束）
+
+C1 **不产生**：
+
+- `score`（任何 0–100 / 字母 / 综合分）；
+- `rank`（排序名次 / 排名列表）；
+- `signal`（买卖 / 方向性触发）；
+- `opportunity`（机会判定）；
+- `risk`（风险判定 / 风险等级）。
+
+输出只含：每可比字段的 `value` + `percentile`（position evidence）+ availability 元信息。C1 是事实投影，不是结论生成器。
+
+##### C1 Ownership Decision（实现闭环用）
+
+- **输入 owner**：L1 `ReviewScopeObservationFact.observation_payload`（canonical SSOT）+ L2 `build_l2_observation_groups(...)` 输出（8 组）。仅限这两层。
+- **输出 owner**：`app/domain/review/analysis/cross_sectional.py`（纯 projection）+ `app/services/review_cross_sectional_service.py`（复用 `get_scope_observation_fact` / `list_scope_observation_facts`）。
+- **Persistence**：不需要（derived view，禁止 schema/migration）。
+- **Derived view**：是。
+- **无新 metric / 新 signal / opportunity / risk / ranking**。
+
 ### 7.9 Analysis B — Historical Dynamics
 
 删除 D1 / D3 / D5 作为目标核心时序表达。统一采用：
