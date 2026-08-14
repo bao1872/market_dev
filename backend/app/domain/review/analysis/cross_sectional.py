@@ -24,91 +24,45 @@ or fallback is performed: a missing path produces ``unavailable``.
 
 from __future__ import annotations
 
-import math
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from app.domain.review.observation_primitives import (
+    OBSERVATION_PRIMITIVES,
+    ObservationPrimitiveSpec,
+)
 
 # ---------------------------------------------------------------------------
 # C1_CORE_FIELDS — the ONLY allowed comparable fields (PRD §7.8.1 C).
 # ---------------------------------------------------------------------------
 #
-# For each field we record:
-#   * ``l1_path``  — exact L1 canonical payload dict path (verified against
-#                    ``scope_observation.compute_scope_observation`` output).
-#   * ``extract``  — how to obtain the comparable *scalar* from the L1 node.
+# These are a subset of the shared ``OBSERVATION_PRIMITIVES`` registry, in the
+# fixed C1 order.  Each entry is an ``ObservationPrimitiveSpec`` carrying the
+# canonical ``key`` (PRD-facing dotted path), ``path`` (L1 payload deep-read
+# tuple), and ``extract`` (comparable scalar rule).  The registry is the single
+# source of truth for path + extraction; C1 does not redefine them.
 #
-# L1 output shapes (verified):
-#   price.equal_weight_return             -> float scalar
-#   price.amount_weighted_return          -> float scalar
-#   trend.continuous.regime_strength      -> float scalar
-#   participation.volume.ratio20          -> dict {p25, p50, p75, valid_count}
-#   participation.volume.ratio200         -> dict {p25, p50, p75, valid_count}
-#   momentum.bb_position                  -> dict {median, p25, p50, p75, ...}
-#   momentum.bb_width                     -> dict {median, p25, p50, p75, ...}
-#
-# Distribution-valued fields are compared by their central tendency ``p50``
-# (equal to ``median`` in the L1 producer).  This is the single, explicit,
-# fail-closed scalar extraction — no other key is consulted.
-#
-# The L1 path *string* used as the stable ``field`` key in the output is the
-# PRD-facing dotted path (e.g. ``participation.volume.ratio20``), distinct from
-# the internal tuple used to deep-read the payload.
+# Backward-compatible aliases kept so existing call sites (and tests) that read
+# ``spec.field_key`` / ``spec.l1_path`` continue to work:
+#   ``field_key`` -> ``ObservationPrimitiveSpec.key``
+#   ``l1_path``   -> ``ObservationPrimitiveSpec.path``
 
 _MINIMUM_VALID_PEER_COUNT = 5
 
-
-def _scalar_direct(node: Any) -> float | None:
-    """Return the node itself if it is a finite number, else None."""
-    if isinstance(node, (int, float)) and not isinstance(node, bool):
-        value = float(node)
-        if math.isfinite(value):
-            return value
-    return None
-
-
-def _scalar_p50(node: Any) -> float | None:
-    """Extract the comparable scalar (p50) from an L1 distribution dict.
-
-    Returns None when the node is not a dict or its ``p50`` is missing/non-finite.
-    """
-    if not isinstance(node, dict):
-        return None
-    return _scalar_direct(node.get("p50"))
-
-
-@dataclass(frozen=True)
-class _C1FieldSpec:
-    """Single comparable field contract."""
-
-    field_key: str
-    l1_path: tuple[str, ...]
-    extract: Callable[[Any], float | None]
-
-
-C1_CORE_FIELDS: tuple[_C1FieldSpec, ...] = (
-    _C1FieldSpec("equal_weight_return", ("price", "equal_weight_return"), _scalar_direct),
-    _C1FieldSpec("amount_weighted_return", ("price", "amount_weighted_return"), _scalar_direct),
-    _C1FieldSpec(
-        "trend.continuous.regime_strength",
-        ("trend", "continuous", "regime_strength"),
-        _scalar_direct,
-    ),
-    _C1FieldSpec(
-        "participation.volume.ratio20",
-        ("participation", "volume", "ratio20"),
-        _scalar_p50,
-    ),
-    _C1FieldSpec(
-        "participation.volume.ratio200",
-        ("participation", "volume", "ratio200"),
-        _scalar_p50,
-    ),
-    _C1FieldSpec("momentum.bb_position", ("momentum", "bb_position"), _scalar_p50),
-    _C1FieldSpec("momentum.bb_width", ("momentum", "bb_width"), _scalar_p50),
+# C1 consumes these registry keys, in this fixed order.
+_C1_PRIMITIVE_KEYS: tuple[str, ...] = (
+    "equal_weight_return",
+    "amount_weighted_return",
+    "trend.continuous.regime_strength",
+    "participation.volume.ratio20",
+    "participation.volume.ratio200",
+    "momentum.bb_position",
+    "momentum.bb_width",
 )
 
-_C1_FIELD_INDEX: dict[str, _C1FieldSpec] = {spec.field_key: spec for spec in C1_CORE_FIELDS}
+C1_CORE_FIELDS: tuple[ObservationPrimitiveSpec, ...] = tuple(
+    OBSERVATION_PRIMITIVES[key] for key in _C1_PRIMITIVE_KEYS
+)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +166,7 @@ def compute_cross_sectional(
 
 
 def _compute_field(
-    spec: _C1FieldSpec,
+    spec: ObservationPrimitiveSpec,
     current_payload: dict[str, Any],
     peer_payloads: dict[str, dict[str, Any]],
     current_scope_key: str,
@@ -287,6 +241,11 @@ def _compute_field(
         status="ready",
         reason=None,
     )
+
+
+_C1_FIELD_INDEX: dict[str, ObservationPrimitiveSpec] = {
+    spec.key: spec for spec in C1_CORE_FIELDS
+}
 
 
 def is_known_c1_field(field_key: str) -> bool:
