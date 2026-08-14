@@ -565,6 +565,17 @@ Peer universe 边界（来自 §6.4.1 same-family）：`industry_l1`↔`industry
 
 > **注意**：`C1_CORE_FIELDS` 之外、且不在「暂不进入」清单的字段，默认**禁止**比较（fail-closed），需单独 PRD 确认后才加入白名单。
 
+**Distribution-valued `C1_CORE_FIELDS` 标量提取（v2.3 实现闭环澄清）**：
+
+L1 Canonical payload 中，`participation.volume.ratio20` / `ratio200` 与 `momentum.bb_position` / `bb_width` 并非标量，而是**分布对象**（`{p25, p50, p75, valid_count, ...}`）。C1 比较这些字段时，只取该分布对象的中心趋势 **`p50`** 作为 comparable scalar：
+
+- `comparable scalar = p50`；
+- `p50` 缺失 / 非 finite → 该 peer 视为 invalid，不进入 `valid_peer_count`，也不进入 percentile 分母；
+- 当前 scope 自身 `p50` 缺失 / 非 finite → 该字段 `status = "unavailable"`，`reason = CURRENT_FIELD_UNAVAILABLE`；
+- 不取 `p25` / `p75` / `median` / `valid_count` 等其他键；提取规则唯一、fail-closed，不自行语义映射。
+
+（注：`trend.continuous.regime_strength` 在 L1 中为标量 median，直接比较，不取分布；`price.*` 同为标量。）
+
 **永久禁止比较字段（规模敏感 / 不可跨 Scope 排名，所有版本适用）**：
 
 | 字段 | 原因 |

@@ -77,6 +77,7 @@ async def get_cross_sectional(
     return compute_cross_sectional(
         current_payload=current_payload,
         peer_payloads=peer_payloads,
+        current_scope_key=scope_key,
     )
 
 

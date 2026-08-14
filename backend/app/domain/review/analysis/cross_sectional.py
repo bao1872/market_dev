@@ -179,6 +179,7 @@ def compute_cross_sectional(
     *,
     current_payload: dict[str, Any],
     peer_payloads: dict[str, dict[str, Any]],
+    current_scope_key: str,
 ) -> dict[str, Any]:
     """Compute cross-sectional position evidence for the current scope.
 
@@ -189,6 +190,10 @@ def compute_cross_sectional(
         peer_payloads: mapping ``scope_key -> L1 payload`` for the comparable
             peer cohort (same family, same trade_date), INCLUDING the current
             scope itself.  ``peer_count`` is ``len(peer_payloads)``.
+        current_scope_key: the ``scope_key`` of the current scope, used to
+            exclude the current scope from ``valid_peer_count`` (PRD §7.8.1 D:
+            ``valid_peer_count`` excludes the current scope; the percentile
+            denominator still includes it per §7.8.1 B "含自身参与").
 
     Returns:
         ``{"fields": [CrossSectionalFieldResult.to_dict(), ...]}`` in the fixed
@@ -198,7 +203,9 @@ def compute_cross_sectional(
 
     results: list[CrossSectionalFieldResult] = []
     for spec in C1_CORE_FIELDS:
-        result = _compute_field(spec, current_payload, peer_payloads, peer_count)
+        result = _compute_field(
+            spec, current_payload, peer_payloads, current_scope_key, peer_count
+        )
         results.append(result)
 
     return {"fields": [r.to_dict() for r in results]}
@@ -208,6 +215,7 @@ def _compute_field(
     spec: _C1FieldSpec,
     current_payload: dict[str, Any],
     peer_payloads: dict[str, dict[str, Any]],
+    current_scope_key: str,
     peer_count: int,
 ) -> CrossSectionalFieldResult:
     """Compute one field's cross-sectional result (fail-closed)."""
@@ -226,17 +234,25 @@ def _compute_field(
             reason="CURRENT_FIELD_UNAVAILABLE",
         )
 
-    # 2. Valid peer scalars (finite only), across the whole peer cohort.
-    valid_peers: list[float] = []
-    for payload in peer_payloads.values():
+    # 2. Peer scalars (finite only), split by whether the payload belongs to the
+    #    current scope.  Per PRD §7.8.1 D, ``valid_peer_count`` counts valid
+    #    peers EXCLUDING the current scope; the percentile denominator (§B
+    #    "含自身参与") includes current.
+    valid_peer_excl_current: list[float] = []
+    valid_with_current: list[float] = []
+    for scope_key, payload in peer_payloads.items():
         node = _deep_get(payload, spec.l1_path)
         scalar = spec.extract(node)
-        if scalar is not None:
-            valid_peers.append(scalar)
+        if scalar is None:
+            continue
+        valid_with_current.append(scalar)
+        if scope_key != current_scope_key:
+            valid_peer_excl_current.append(scalar)
 
-    valid_peer_count = len(valid_peers)
+    valid_peer_count = len(valid_peer_excl_current)
 
-    # 3. Availability gate (PRD §7.8.1 D): minimum valid peer sample.
+    # 3. Availability gate (PRD §7.8.1 D): minimum valid peer sample
+    #    (current scope excluded).
     if peer_count == 0:
         return CrossSectionalFieldResult(
             field=spec.field_key,
@@ -259,8 +275,8 @@ def _compute_field(
             reason="INSUFFICIENT_PEER_SAMPLE",
         )
 
-    # 4. Percentile denominator is valid_peer_count ONLY (never peer_count).
-    percentile = _empirical_percentile_rank(current_value, valid_peers)
+    # 4. Percentile denominator includes the current scope (§7.8.1 B).
+    percentile = _empirical_percentile_rank(current_value, valid_with_current)
 
     return CrossSectionalFieldResult(
         field=spec.field_key,
