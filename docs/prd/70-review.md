@@ -155,7 +155,7 @@ URL 状态：
 - `review_publication_service`：发布与撤销；
 - `tracking`：用户追踪。
 
-> **v2.2 实现重对齐要求（IMPLEMENTATION_REALIGNMENT_REQUIRED，见 §7.17）**：
+> **v2.3 实现重对齐要求（IMPLEMENTATION_REALIGNMENT_REQUIRED，见 §7.17）**：
 > 上述模块当前承载的是旧 Objective Evidence / D1/D3/D5 / 24 Transition 实现，
 > 需要在下一轮 PRD→CODE Impact Audit 中按 v2.3 目标合同重对齐，不得反向约束产品定义。
 
@@ -214,9 +214,13 @@ Member Attribution（成员下钻）
 
 ### 6.3 PIT membership（保持）
 
-- `industry_l1` = `SOURCE_NOT_AVAILABLE`；
-- `csi300` / `csi500` = `SOURCE_SELECTION_REQUIRED`（seed placeholder）；
-- `style` = `STYLE_PRODUCT_DECISION_REQUIRED`；
+> v2.3 明确区分 **Product Family 冻结** 与 **Membership Source Readiness**。
+> market / major_index / style / industry / concept 均为已冻结的平行 Scope Family；
+> 当前未冻结的是各自正式 PIT membership taxonomy / canonical source。
+
+- `industry_l1` = `PRODUCT_FAMILY_FROZEN / MEMBERSHIP_SOURCE_NOT_AVAILABLE`：Industry L1 产品语义已冻结；缺的是 PIT membership source；source 不可用时真实 unavailable；不得伪造 historical membership。
+- `csi300` / `csi500` = `MEMBERSHIP_SOURCE_DEFERRED`：Major Index 作为 Scope Family 已冻结；当前缺口是 PIT membership canonical source；source 未 ready → unavailable；不得 current membership 回填历史；不阻塞其他 family。
+- `style` = `MEMBERSHIP_SOURCE_DEFERRED`：Style 作为 Scope Family 已是 v2.3 FINAL CONTRACT；当前未冻结的是 Style 的正式 membership taxonomy / source；在 source 未 ready 前 Style 可真实返回 unavailable；Implementation 不得自行定义 Style 分类；不得用当前主观分类、临时标签或后验结果伪造历史 Style membership；该问题不阻塞其他 Scope Family 开发。
 - 缺 PIT 成员写 `bootstrap_unavailable`，禁止 current×historical / latest backfill / forward-fill。
 
 ### 6.4 Scope 合同（重写 ownership 描述）
@@ -225,7 +229,7 @@ Member Attribution（成员下钻）
 
 新版合同：
 
-- **L1** = 当前 Scope 客观事实（PRICE / TREND / STRUURE / MOMENTUM / VOLUME 等 member 聚合量）；
+- **L1** = 当前 Scope 客观事实（PRICE / TREND / STRUCTURE / MOMENTUM / VOLUME 等 member 聚合量）；
 - **L2** = 对 L1 的市场逻辑组织（8 个 Observation Groups，仅组织 / 导航 / 解释上下文，不产生 score）；
 - **Analysis** = 对事实做横截面、历史动力、内部结构分析。
 
@@ -726,9 +730,9 @@ PRD 不要求新建 Scope history table。产品要求只是：新版 Scope Fact
 ## 8. Legacy Filter / Signal Compatibility（非 V2 目标架构）
 
 > **2026-08-13 架构降级更新**：本节所述 A/B/C/D Filter、`filter_engine`、`MarketReviewSignal` 等属于
-> **legacy implementation compatibility**，不定义 Scope Observation v2.2 的目标发现架构。
+> **legacy implementation compatibility**，不定义 Scope Observation v2.3 的目标发现架构。
 >
-> v2.2 目标产品链已冻结至：
+> v2.3 目标产品链已冻结至：
 > **L1 Scope Facts → L2 8 Observation Groups → Analysis → Interpretation → Trading Context → Member Attribution**。
 >
 > 以下全部 **NOT YET FROZEN（PRODUCT DESIGN REQUIRED）**，不在本轮冻结、也不在实现轮次中自行推导：
@@ -753,7 +757,7 @@ A/B/C/D 当前作为**内部算法 family** 继续存在以维持现有实现兼
 
 **Observation Model 收口（2026-08-12，2026-08-13 重定向）：**
 
-- Legacy Filter / Discovery 应只消费 structured Observation Evidence（§7 Scope Observation Model v2.2），不得依赖 P/Q/U/C/V score 作为 first-layer observation；
+- Legacy Filter / Discovery 应只消费 structured Observation Evidence（§7 Scope Observation Model v2.3），不得依赖 P/Q/U/C/V score 作为 first-layer observation；
 - 以下 A/B/C 初始阈值（§8.1–8.3）当前以 `P/Q/U/C/V` 分位 / `value` 表达，属于对 P/Q/U/C/V first-layer 的硬依赖，标记 `LEGACY IMPLEMENTATION REFERENCE / NOT V2 TARGET SPEC`：它们是既有实现的历史说明，不得作为新实现要求，不得现场发明新 P/Q/U/C/V 阈值；
 - D 族（state migration / freshness / diffusion / concentration / relative strength）消费第二金字塔 raw evidence（非 P/Q/U/C/V score），保持不变（legacy）；
 - 具体 Observation-based Filter 条件（含任何 threshold / archetype）若 PRD 当前尚未正式冻结定义，明确标记为 **IMPLEMENTATION_DESIGN_REQUIRED / NOT YET FROZEN**，由后续 Discovery Product Design 在真实数据回放基础上确定。
@@ -1044,7 +1048,7 @@ stock_core published
 → publish review pointer
 ```
 
-> **2026-08-13（v2.2 重定向）**：上述 target behavior 中 `persist L1 Scope Facts` 与 `organize L2 Observation Groups` 已正式冻结为 v2.2 目标合同；`[Discovery consumer path]` 未冻结，实现阶段不得假装中间 Discovery algorithm（Filter / Signal / 聚合）已经冻结，不得强制 evaluate filters → generate Signal → aggregate Discovery 为必经步骤。
+> **2026-08-13（v2.3 重定向）**：上述 target behavior 中 `persist L1 Scope Facts` 与 `organize L2 Observation Groups` 已正式冻结为 v2.3 目标合同；`[Discovery consumer path]` 未冻结，实现阶段不得假装中间 Discovery algorithm（Filter / Signal / 聚合）已经冻结，不得强制 evaluate filters → generate Signal → aggregate Discovery 为必经步骤。
 
 要求：
 
@@ -1064,7 +1068,7 @@ stock_core published
 
 本节与 §6.5「Review MVP 发布就绪门禁（Phase 4C 校正）」构成同一份合同。
 
-> **2026-08-13 Observation Model 收口（v2.2 重定向）**：发布门禁就绪性改以 **Scope Observation facts（§7 v2.2）** 表达，不再以 P/Q/U/C/V 五项 `normalized_ready` 作为 first-layer 门禁对象。旧 P/Q/U/C/V gate 引用标记为 legacy baseline / IMPLEMENTATION_REDESIGN_REQUIRED。
+> **2026-08-13 Observation Model 收口（v2.2 重定向）**：发布门禁就绪性改以 **Scope Observation facts（§7 v2.3）** 表达，不再以 P/Q/U/C/V 五项 `normalized_ready` 作为 first-layer 门禁对象。旧 P/Q/U/C/V gate 引用标记为 legacy baseline / IMPLEMENTATION_REDESIGN_REQUIRED。
 
 单 scope：
 
@@ -1131,7 +1135,7 @@ GET /api/v1/review/{trade_date}/scopes
 
 参数：scope_type / scope_family / sort / page / page_size / include_partial=false。
 
-返回每个范围的 **Scope Observation facts（§7 v2.2：PRICE / TREND / STRUCTURE / MOMENTUM / VOLUME）**、L2 Observation Groups（8 组）、Analysis（Cross-sectional / Historical Dynamics / Internal Structure）与命中数量。（旧 P/Q/U/C/V 聚合变量不作为 first-layer observation 返回。）
+返回每个范围的 **Scope Observation facts（§7 v2.3：PRICE / TREND / STRUCTURE / MOMENTUM / VOLUME）**、L2 Observation Groups（8 组）、Analysis（Cross-sectional / Historical Dynamics / Internal Structure）与命中数量。（旧 P/Q/U/C/V 聚合变量不作为 first-layer observation 返回。）
 
 ### 12.3 信号（Signal = atomic evidence）
 
@@ -1262,7 +1266,7 @@ Scope Family 必须允许平行切换：全市场 / 主要指数 / 风格 / 行�
 - family / type / name / members / coverage
 
 #### Current State
-- **Scope Observation facts（§7 v2.2）**：PRICE（Return Level / Distribution / Breadth / Concentration）、Trend/Structure/Momentum State Member Ratio、Participation distribution（旧 P/Q/U/C/V 不作为 first-layer observation 展示；如需 summary 属 presentation layer）
+- **Scope Observation facts（§7 v2.3）**：PRICE（Return Level / Distribution / Breadth / Concentration）、Trend/Structure/Momentum State Member Ratio、Participation distribution（旧 P/Q/U/C/V 不作为 first-layer observation 展示；如需 summary 属 presentation layer）
 
 #### Change
 - Member State Migration（member exact T-1 → T 状态迁移）ratio、1D / 5D observation change
@@ -1352,7 +1356,7 @@ Evidence Drawer 是结构化证据解释器，不是 JSON Debugger。正式用�
 ### 19.1 后端单元测试
 
 - component registry 映射；
-- **Scope Observation facts 计算（§7 v2.2：PRICE / TREND / STRUCTURE / MOMENTUM / VOLUME / Internal Structure）**；旧 P/Q/U/C/V 计算为 legacy baseline，映射 DEFER 到 implementation；
+- **Scope Observation facts 计算（§7 v2.3：PRICE / TREND / STRUCTURE / MOMENTUM / VOLUME / Internal Structure）**；旧 P/Q/U/C/V 计算为 legacy baseline，映射 DEFER 到 implementation；
 - Historical Dynamics Position/Velocity/Acceleration/Persistence 计算；
 - Dynamics Phase / Internal Structure Type 分类可解释性；
 - State / Change / Anomaly 分离；
@@ -1388,7 +1392,7 @@ Evidence Drawer 是结构化证据解释器，不是 JSON Debugger。正式用�
 
 先固定：全市场 / 2 个主要指数 / 2 个风格范围 / 5 个一级行业 / 5 个概念 / 3 个二级行业 / 3 个三级行业。
 
-验证：Scope Observation facts 值可复算（§7 v2.2）；至少一条正向和一条风险 Discovery；Concept 独立产生 Discovery；Cross-Scope Relation 可生成；下钻路径和成员归因一致；/market 与 /stock 跳转正确；次日 tracking 状态可重复计算。
+验证：Scope Observation facts 值可复算（§7 v2.3）；至少一条正向和一条风险 Discovery；Concept 独立产生 Discovery；Cross-Scope Relation 可生成；下钻路径和成员归因一致；/market 与 /stock 跳转正确；次日 tracking 状态可重复计算。
 
 ---
 
@@ -1499,7 +1503,7 @@ Concept 表面 Observation 很强（PRICE Breadth / TREND State Member Ratio 高
 >
 > **2026-08-13 当前 authoritative publication contract**：当本 §23 legacy gate 与 §6.5 / §11.1 的 2026-08-13 当前 contract（含 industry_l1 / major_index / style 属 PROGRESSIVE OPTIONAL、数据不可用不阻塞 whole Review publication）冲突时，以 §6.5 / §11.1 为当前 authoritative publication contract。本 §23 不得重新覆盖 §6.5 / §11.1 的 progressive readiness 合同。
 
-> **2026-08-13 Observation Model 收口（v2.2 重定向）**：本章节及其后的 §24/§25/§26/§27 中所有 `P/Q/U/C/V` 引用都属于 **legacy implementation baseline**：它们是既有实现 / 历史的 persistence 与 gate 契约，不复活 P/Q/U/C/V 作为 first-layer observation model（§7 v2.2）。这些 legacy 契约与 §7 Scope Observation Model 的映射（gate 就绪对象、就绪字段、schema shape）全部 DEFER 到 Implementation Design。本节不现场重写这些 legacy 契约。
+> **2026-08-13 Observation Model 收口（v2.2 重定向）**：本章节及其后的 §24/§25/§26/§27 中所有 `P/Q/U/C/V` 引用都属于 **legacy implementation baseline**：它们是既有实现 / 历史的 persistence 与 gate 契约，不复活 P/Q/U/C/V 作为 first-layer observation model（§7 v2.3）。这些 legacy 契约与 §7 Scope Observation Model 的映射（gate 就绪对象、就绪字段、schema shape）全部 DEFER 到 Implementation Design。本节不现场重写这些 legacy 契约。
 
 ### 23.1 历史原始组件 bootstrap 合同
 
