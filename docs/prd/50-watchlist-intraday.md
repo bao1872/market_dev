@@ -25,14 +25,16 @@
 
 ### WI-05 自选成员 canonical owner 与单一变更源（CHANGE-20260815-004）
 
-所有入口（全局股票搜索、个股详情、自选 workspace、行情页自选行内入口）对自选成员的 add/remove 必须复用**同一个 canonical 自选成员 owner**：
+所有入口（全局股票搜索、个股详情、自选 workspace、行情页自选行内入口）对自选成员的 add/remove 必须复用**同一个 canonical persisted 自选成员 owner**：
 
-- 后端 canonical owner：`backend/app/api/watchlist.py` + `backend/app/models/watchlist.py`（`WatchlistItem` / `WatchlistMembership`），经 `GET /v1/watchlist` 读取、`POST /v1/watchlist/{instrument_id}` 添加、`DELETE /v1/watchlist/{instrument_id}` 移除。
-- 前端 canonical hook：`frontend/src/hooks/useApi.ts` 的 `useWatchlist`（读取）与 `useToggleWatchlist`（变更）。
+- persisted canonical membership 是唯一 source of truth；
+- client cache / optimistic state 不得成为独立事实源；
+- mutation 完成后客户端状态必须与 canonical persisted membership 收敛；
+- 所有入口使用同一 mutation contract。
 
-禁止任何页面维护 page-local duplicate 自选 state 作为 source of truth；所有变更必须通过 canonical owner 落库，UI 仅消费 canonical 读取结果（含乐观更新后回读 canonical）。
+禁止任何页面维护 page-local duplicate 自选 state 作为第二 membership source of truth。具体后端 owner、模型、endpoint 与前端 hook 名称见 CHANGE-20260815-004 §3 Code Owner Map 与对应 Map。
 
-自选范围（scope=watchlist）的 base universe 由该 canonical membership 决定（见 MX-08）。
+自选范围的 base universe 由该 canonical membership 决定（见 MX-08）。
 
 ## 2. 盘中监控
 

@@ -36,15 +36,26 @@
 
 盘迹 workspace 页面采用三层责任结构，PRD 只定义语义层级，不锁定像素或 CSS：
 
-- **Global Header**：跨 workspace 的全局层（含全局股票搜索、账户/能力入口），不绑定任何单一 workspace。
-- **Module Navigation**：承担 行情 / 自选 / 复盘 / 竞价 切换；当前正式实现为 Global Header 内 `行情｜自选｜复盘` 切换（竞价为独立入口），两者复用同一路由 `/market`，差异仅在 `scope` 参数（`market`/`watchlist`）。
-- **Workspace Controls / Content**：仅影响当前 workspace（行业/概念/表格筛选、列设置、排序、分页等）。
+- **Global Header**：跨 workspace 的全局层，不绑定任何单一 workspace。承载一个可输入检索的 **Stock Search**。
+- **Module Navigation**：承担 行情 / 自选 / 复盘 / 竞价 切换。
+- **Workspace Controls / Content**：仅影响当前 workspace，承载一个 **Industry Search** 与一个 **Concept Search**，以及其它表格筛选、排序、分页、列设置等。
 
-新增的 Global Stock Search 属于 Global Header 层级，不属于任何 workspace 的局部筛选器。
+盘迹只有三个用户可见的搜索输入：Global Header 的 Stock Search、Workspace Controls 的 Industry Search 与 Concept Search。Industry Search 与 Concept Search 是两个独立、可输入检索的控件，不承担个股详情导航、不负责自选 add/remove、不改变任何 workspace 的 base universe、不升级为 Universal Query Builder。PRD 只定义语义层级与职责，不锁定像素、宽度或颜色。
+
+新增的 Global Stock Search 位于 Global Header 层级，不属于任何 workspace 的局部筛选器。
 
 ### MX-07 全局股票搜索（CHANGE-20260815-004）
 
-全局股票搜索是从 Market workspace 局部筛选**提升**的全局证券定位能力，属于 Global Header 层（MX-06），不是 `/market` 表格内置搜索的替代品。
+Global Stock Search 是现有 Market-local 股票搜索 UI 的 **RELOCATION + RESPONSIBILITY CHANGE**：
+
+- 股票搜索 UI 从 Market workspace 移到 Global Header；
+- 它不再作为 Market / Watchlist 表格筛选器；
+- 点击股票进入 canonical 个股详情；
+- 可以 add/remove canonical 自选成员（见 WI-05）。
+
+Market workspace 不得再保留第二个用户可见的 stock-search input。盘迹至多只有三个用户可见搜索输入（见 MX-06）。
+
+注意：UI ownership 迁移与底层后端 query capability（如 keyword/筛选能力）是否保留是两个独立问题；本合同时不要求删除任何已有后端检索能力。
 
 搜索支持当前正式数据能力已有的匹配维度：
 
@@ -57,10 +68,9 @@
 - A. 进入 canonical 个股详情（复用 MX-10~MX-12 的 canonical 详情导航合同）；
 - B. 通过 canonical 自选成员路径（见 WI-05）添加/删除自选。
 
-全局股票搜索 MUST NOT：
+Global Stock Search MUST NOT：
 
-- 修改 Market 表格筛选（`/market` 的 `keyword`/`filters`/`industry`/`concept`）；
-- 修改 Watchlist 表格筛选；
+- mutate 当前 workspace 的 filter state（Market 或 Watchlist）；
 - 缩小当前 workspace 的 base universe；
 - 创建第二套股票详情导航（route builder）；
 - 创建第二套自选状态（watchlist state）。
@@ -73,22 +83,27 @@
 WorkspaceResult = BaseUniverse ∩ ActiveWorkspaceFilters
 ```
 
-- **Market base universe** = 当前正式 market query universe（`/market/stocks` 的 `scope=market` / `universe=all`）；用途是全市场发现、扫描与横截面对比。Market workspace 的 industry / concept / 表格筛选只能在 Market base universe 内过滤。
-- **Watchlist base universe** = 当前 authenticated user 的 canonical 自选成员 universe（`/market/stocks` 的 `scope=watchlist` / `universe=watchlist`，等价于 `GET /v1/watchlist` 的 active 成员）；任何筛选条件不得把非自选股票引入 Watchlist 结果。
+- **Market base universe** = canonical market universe（全市场发现、扫描与横截面对比）。Market workspace 的 industry / concept / 表格筛选只能在 Market base universe 内过滤。
+- **Watchlist base universe** = 当前 authenticated user 的 canonical active 自选成员 universe。任何筛选条件不得把非自选股票引入 Watchlist 结果。
+
+（具体 query 参数、scope/ universe 取值等实现细节见 CHANGE-20260815-004 §3 Code Owner Map 与对应 Map。）
 
 ### MX-09 行业 / 概念筛选范围（CHANGE-20260815-004）
 
-保留两个独立 workspace 筛选控件：
+Workspace Controls 提供两个独立、可输入检索的 search controls：
 
-- **行业**：只负责当前 workspace 行业过滤；
-- **概念**：只负责当前 workspace 概念过滤。
+- **Industry Search**：只负责当前 workspace 行业过滤；
+- **Concept Search**：只负责当前 workspace 概念过滤。
 
 两者：
 
+- 是独立的检索控件，不是 dropdown / command palette / universal search 的替身；
 - 不承担个股详情导航；
 - 不负责 add/remove 自选；
 - 不改变 base universe（MX-08）；
 - 不升级为 Universal Query Builder。
+
+单选/多选的 selection semantics 按已有正式能力执行；本轮不新增 multi-select contract。
 
 单选/多选：先按 ACTUAL 记录（当前 MX-03 已确认行业筛选不得错误限制为单一层级；具体 multi-select contract 以 ACTUAL 为准）。本轮不新增尚未成熟的 multi-select 合同。
 
@@ -141,7 +156,7 @@ WorkspaceResult = BaseUniverse ∩ ActiveWorkspaceFilters
 
 列设置按分组展示；99 列全部可显示、隐藏、拖拽排序。复用现有 `TableViewPreset` 的 `hiddenColumns`/`columnOrder` 保存，不新建配置表。保存、刷新、重新登录后顺序和显隐恢复；旧配置缺新字段时兼容。
 
-Market workspace 与 Watchlist workspace 的列偏好相互独立：两者 base universe 与任务不同，列配置通过 `TableViewPreset.table_id`（当前为 `screener` / `watchlist` 两个正式 key）隔离。用户在某 workspace 的显隐/顺序修改不影响另一 workspace。列设置不改变底层数据语义与 MX-08 的筛选合同。
+Market workspace 与 Watchlist workspace 的列偏好相互独立：两者 base universe 与任务不同，列配置经由同一 canonical TableViewPreset preference owner 按 workspace 维度隔离。用户在某 workspace 的显隐/顺序修改不影响另一 workspace。列设置不改变底层数据语义与 MX-08 的筛选合同。
 
 默认只打开基础列 + 约 20 个核心金字塔列，其余默认隐藏。null 统一显示"—"，不得补 0；方向用中文标签和 A 股颜色；分位/BB 位置用小轨道；事件显示最近一次。
 
