@@ -601,7 +601,7 @@ L2 不是算法层，不是评分层。固定为：
 - EMA window（EMA numerical contract 已冻结于 §7.9）；
 - persistence window。
 
-**Position percentile lookback**（默认历史窗口 120 observations、最低有效历史 60 observations、baseline strictly pre-T、no future leakage，§7.9 Position contract，Position Foundation 已 CLOSED）与 **EMA numerical contract** 均已在 §7.9 **FROZEN**。**persistence window / 其余 persistence implementation semantics 仍保持：IMPLEMENTATION DESIGN REQUIRED**（除非 §7.9 已明确冻结某具体项，不得扩大解释）。不得把 Persistence / Dynamics Phase / Leadership / Interpretation thresholds 一并标成 ready。
+**Position percentile lookback**（默认历史窗口 120 observations、最低有效历史 60 observations、baseline strictly pre-T、no future leakage，§7.9 Position contract，Position Foundation 已 CLOSED）与 **EMA numerical contract** 均已在 §7.9 **FROZEN**。**Persistence**（20D Historical Position Occupancy numerical / availability contract）已冻结于 §7.9 **Persistence Numerical Contract（FROZEN）**。**Dynamics Phase / Leadership / Interpretation thresholds** 仍保持 **IMPLEMENTATION DESIGN REQUIRED**。不得把 Dynamics Phase / Leadership / Interpretation thresholds 一并标成 ready。
 
 ### 7.8 Analysis A — Cross-sectional
 
@@ -879,9 +879,96 @@ Derived fact 的 availability propagation **必须基于 upstream `status`，不
 - **Example E**：`Velocity(T)=insufficient_history` → `Signal(T)=insufficient_history`（**不是** 仅因 `Velocity.value=null` 判 `unavailable_current`）；
 - **EMA 自身（与 Position Foundation 现有 contract 一致）**：`EMA5` 只有 3 个 valid Position 且 `Position(T)=None` → `unavailable_current`（不是 `insufficient_history`）；`Position(T)` valid → `insufficient_history`。
 
+#### Persistence Numerical Contract（FROZEN）
+
+本节冻结 Persistence（20D Historical Position Occupancy）的全部数值与 availability 语义，消除下一轮 implementation 的 numerical semantic ambiguity。**Persistence 直接消费 Position series（trade_date ascending），不是 Velocity / Signal / Acceleration**；它是与 Velocity / Signal / Acceleration 同层的 Historical Dynamics 派生结果。
+
+**A. Window contract**
+
+`PERSISTENCE_WINDOW_SIZE = 20`。
+
+`Persistence(T)` 使用以 T 为右端、**包含 T** 的最近最多 20 个 trading observations：`[T-19, T]`。若 series 尚不足 20 observations，只使用实际已有 observations，不得向未来补齐。
+
+禁止：向更早历史寻找 20 个 valid Position；dropna 后压缩成 20 valid observations；使用 T+1。
+
+- `window_size = 20`；
+- `candidate_count = min(20, available observations through T)`（**不得硬编码为 20**）。
+
+**B. Current-day inclusion**
+
+`Persistence(T)` 包含 `Position(T)`。产品含义：截至 T（含 T），当前状态在最近 20 trading observations 中是否持续出现。这与 Position percentile 的 pre-T baseline 不同；**不得把 Position 的 pre-T rule 复制到 Persistence**。
+
+**C. Valid Position**
+
+valid Position observation 定义：upstream `Position.status == ready` **且** `Position.position` 为 finite numeric value。Position owner 合法值域为 `[0, 100]`。
+
+如果 `status == ready` 但 `position` 为 None / NaN / inf / 越界 → 这是 **upstream contract violation**，Implementation 必须 **fail fast**，不得把它静默转成 historical missing。禁止：zero fill、forward fill、clamp、silent drop。
+
+**D. Historical missing**
+
+窗口内部、但不是当前 T 的 observation，若 `Position.status` 为 `unavailable_current` 或 `insufficient_history`：该 observation **仍占一个 trading-window slot**，但**不进入 Upper numerator、不进入 Lower numerator、不进入 valid denominator**。不得向窗口之前补找 valid Position。
+
+**E. Denominator**
+
+- `valid_count` = 当前 20-slot trading window 内 valid Position observation 数；
+- `upper_count` = valid Position ≥ 80 的数量；
+- `lower_count` = valid Position ≤ 20 的数量；
+- `upper_occupancy = upper_count / valid_count`；
+- `lower_occupancy = lower_count / valid_count`。
+
+禁止固定 `denominator = 20`（fixed20 会把 missing 隐式当成 middle Position）。
+
+**F. Minimum valid contract**
+
+`PERSISTENCE_MINIMUM_VALID_COUNT = 15`。目标 20D 窗口要求 `valid_count >= 15` 才允许 Persistence ready（等价目标 coverage `valid_count / 20 >= 0.75`）。这是 frozen product algorithm threshold，必须是 exact `15`（不得写成「大约 75%」「通常 15」「建议 15」）。
+
+若 `valid_count < 15` 且当前 Position 本身不是 `unavailable_current`：`status = insufficient_history`、`upper_occupancy = null`、`lower_occupancy = null`。
+
+**G. Current status precedence**
+
+Persistence 自己的 availability precedence（**current upstream availability 优先于 historical-window coverage**）：
+
+1. 若 `Position(T).status == unavailable_current` → `Persistence(T).status = unavailable_current`，Upper / Lower = null。即使历史窗口 valid_count ≥ 15 **也不得输出旧 Persistence**；
+2. 否则若 `Position(T).status == insufficient_history` → `Persistence(T).status = insufficient_history`，Upper / Lower = null；
+3. 否则若 `Position(T).status == ready` 但 `valid_count < 15` → `insufficient_history`；
+4. 否则（`Position(T).status == ready` 且 `valid_count >= 15`）→ `ready`。
+
+**H. Upper / Lower contract**
+
+- `upper_count = count(valid Position >= 80)`；
+- `lower_count = count(valid Position <= 20)`；
+- 边界 inclusive：**80 属于 Upper，20 属于 Lower**；
+- 由于 80 > 20，同一 Position 不可能同时属于 Upper 和 Lower；
+- `Upper + Lower` **不要求 = 1**。例如所有 Position 均为 50：Upper = 0、Lower = 0，Persistence 仍可 `ready`（只要 valid_count ≥ 15）；
+- **不新增** Middle Occupancy 作为 v2.3 product fact。
+
+**I. Metadata**
+
+Persistence fact 至少透明输出：`window_size = 20`、`minimum_valid_count = 15`、`candidate_count`（实际窗口 observation 数，≤ 20）、`valid_count`、`coverage = valid_count / window_size`（即 `valid_count / 20`）、`upper_count`、`lower_count`、`upper_occupancy`、`lower_occupancy`、`status`。
+
+`coverage` 的 denominator 是 target `window_size = 20`，**不是 candidate_count**。原因：Persistence 是 20D target horizon；series 开头不足 20 observations 时不能显示成 100% coverage。
+
+**J. No Future Leakage**
+
+`Persistence(T)` 只允许读取 `<= T` 的 Position observations。T+1 / T+2 不得改变 `Persistence(T)` 的 `upper_count` / `lower_count` / `valid_count` / `coverage` / Upper Occupancy / Lower Occupancy。
+
+**K. Status vocabulary**
+
+只复用 `ready` / `insufficient_history` / `unavailable_current`。不得新增 `partial` / `low_coverage` / `warming` / `stale` / `gap` / `paused`。
+
+**Deterministic examples（FROZEN）**：
+
+- **Case A**：20 slots、20 valid、5 upper、5 lower → `ready`，Upper = 0.25，Lower = 0.25；
+- **Case B**：20 slots、16 valid、16 upper、4 historical missing、current T ready → `ready`，Upper = 1.0，Lower = 0，coverage = 0.80；
+- **Case C**：20 slots、14 valid、current T ready → `insufficient_history`，Upper / Lower = null；
+- **Case D**：20 slots、19 valid、但 `Position(T)=unavailable_current` → `unavailable_current`，Upper / Lower = null；
+- **Case E**：20 slots、19 valid、但 `Position(T)=insufficient_history` → `insufficient_history`；
+- **Case F**：20 valid Position 全部在 20~80 之间 → `ready`，Upper = 0，Lower = 0；
+- **Case G**：series 开头只有 10 observations → `candidate_count = 10`、`window_size = 20`、coverage ≤ 0.5（不得伪报 `candidate_count = 20`）。
+
 #### Implementation Ownership
 
-Historical Dynamics EMA math 属于 **Analysis B pure domain owner**。下一轮预计为 `app/domain/review/analysis/historical_dynamics.py`（或遵循最终 implementation naming）。该模块：不访问 DB、不负责 reconstruction、不负责 membership、不持久化、不做 Interpretation。
+Historical Dynamics EMA math 与 **Persistence（20D Historical Position Occupancy）** 均属于 **Analysis B pure domain owner**。下一轮应扩展 `app/domain/review/analysis/historical_dynamics.py`（或遵循最终 implementation naming）。Persistence **直接消费 Position series**（不是 Velocity / Signal / Acceleration），与 Velocity / Signal / Acceleration 同层。该模块：不访问 DB、不负责 reconstruction、不负责 membership、不持久化、不访问 API、不做 Interpretation。
 
 Historical Dynamics 用户语言固定为：
 
