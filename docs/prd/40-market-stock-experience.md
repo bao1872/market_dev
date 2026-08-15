@@ -1,9 +1,10 @@
 # 行情与个股体验 PRD
 
 状态：已确认  
-最后确认日期：2026-07-28  
+最后确认日期：2026-08-15
 对应 Map：`../maps/40-market-stock-experience.md`  
-需求所有权：行情页、个股详情、图层、筛选、排序和导航上下文
+
+需求所有权：行情页、个股详情、图层、筛选、排序、导航上下文、全局股票搜索、Workspace 层级与 base universe 合同、列设置（显隐/顺序持久化）
 
 ## 1. 行情列表
 
@@ -30,6 +31,66 @@
 ### MX-05 筛选上下文保持
 
 从筛选后的行情列表进入个股详情时，详情页的来源列表必须保持原筛选和排序上下文，不得自动切换为自选列表。
+
+### MX-06 三层 Workspace 责任层级（CHANGE-20260815-004）
+
+盘迹 workspace 页面采用三层责任结构，PRD 只定义语义层级，不锁定像素或 CSS：
+
+- **Global Header**：跨 workspace 的全局层（含全局股票搜索、账户/能力入口），不绑定任何单一 workspace。
+- **Module Navigation**：承担 行情 / 自选 / 复盘 / 竞价 切换；当前正式实现为 Global Header 内 `行情｜自选｜复盘` 切换（竞价为独立入口），两者复用同一路由 `/market`，差异仅在 `scope` 参数（`market`/`watchlist`）。
+- **Workspace Controls / Content**：仅影响当前 workspace（行业/概念/表格筛选、列设置、排序、分页等）。
+
+新增的 Global Stock Search 属于 Global Header 层级，不属于任何 workspace 的局部筛选器。
+
+### MX-07 全局股票搜索（CHANGE-20260815-004）
+
+全局股票搜索是从 Market workspace 局部筛选**提升**的全局证券定位能力，属于 Global Header 层（MX-06），不是 `/market` 表格内置搜索的替代品。
+
+搜索支持当前正式数据能力已有的匹配维度：
+
+- 股票代码
+- 股票名称
+- 拼音/首字母（**仅当 ACTUAL 已支持时；当前未确认 ACTUAL 支持，标 FUTURE，不得虚构**）
+
+搜索结果允许两类动作：
+
+- A. 进入 canonical 个股详情（复用 MX-10~MX-12 的 canonical 详情导航合同）；
+- B. 通过 canonical 自选成员路径（见 WI-05）添加/删除自选。
+
+全局股票搜索 MUST NOT：
+
+- 修改 Market 表格筛选（`/market` 的 `keyword`/`filters`/`industry`/`concept`）；
+- 修改 Watchlist 表格筛选；
+- 缩小当前 workspace 的 base universe；
+- 创建第二套股票详情导航（route builder）；
+- 创建第二套自选状态（watchlist state）。
+
+### MX-08 Workspace Base Universe 合同（CHANGE-20260815-004）
+
+形式化语义：
+
+```
+WorkspaceResult = BaseUniverse ∩ ActiveWorkspaceFilters
+```
+
+- **Market base universe** = 当前正式 market query universe（`/market/stocks` 的 `scope=market` / `universe=all`）；用途是全市场发现、扫描与横截面对比。Market workspace 的 industry / concept / 表格筛选只能在 Market base universe 内过滤。
+- **Watchlist base universe** = 当前 authenticated user 的 canonical 自选成员 universe（`/market/stocks` 的 `scope=watchlist` / `universe=watchlist`，等价于 `GET /v1/watchlist` 的 active 成员）；任何筛选条件不得把非自选股票引入 Watchlist 结果。
+
+### MX-09 行业 / 概念筛选范围（CHANGE-20260815-004）
+
+保留两个独立 workspace 筛选控件：
+
+- **行业**：只负责当前 workspace 行业过滤；
+- **概念**：只负责当前 workspace 概念过滤。
+
+两者：
+
+- 不承担个股详情导航；
+- 不负责 add/remove 自选；
+- 不改变 base universe（MX-08）；
+- 不升级为 Universal Query Builder。
+
+单选/多选：先按 ACTUAL 记录（当前 MX-03 已确认行业筛选不得错误限制为单一层级；具体 multi-select contract 以 ACTUAL 为准）。本轮不新增尚未成熟的 multi-select 合同。
 
 ## 2. 个股详情
 
@@ -79,6 +140,8 @@
 后端唯一扁平化函数（`first_pyramid_flatten.flatten_first_pyramid`）和前端唯一 ColumnRegistry（`firstPyramidColumns.tsx`）必须覆盖 99 个 `fp_` 键，分为 8 组：快照 7 / 趋势 18 / 结构 8 / 结构事件 21 / 动量 13 / 动量事件 9 / 筹码 10 / 量能 13。所有键必须可选，不能少、不能改名。
 
 列设置按分组展示；99 列全部可显示、隐藏、拖拽排序。复用现有 `TableViewPreset` 的 `hiddenColumns`/`columnOrder` 保存，不新建配置表。保存、刷新、重新登录后顺序和显隐恢复；旧配置缺新字段时兼容。
+
+Market workspace 与 Watchlist workspace 的列偏好相互独立：两者 base universe 与任务不同，列配置通过 `TableViewPreset.table_id`（当前为 `screener` / `watchlist` 两个正式 key）隔离。用户在某 workspace 的显隐/顺序修改不影响另一 workspace。列设置不改变底层数据语义与 MX-08 的筛选合同。
 
 默认只打开基础列 + 约 20 个核心金字塔列，其余默认隐藏。null 统一显示"—"，不得补 0；方向用中文标签和 A 股颜色；分位/BB 位置用小轨道；事件显示最近一次。
 
