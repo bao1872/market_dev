@@ -597,11 +597,11 @@ L2 不是算法层，不是评分层。固定为：
 
 例如：
 
-- percentile lookback；
-- EMA window；
+- percentile lookback（Position percentile lookback 已冻结于 §7.9）；
+- EMA window（EMA numerical contract 已冻结于 §7.9）；
 - persistence window。
 
-percentile lookback 与 persistence window 仍保持：**IMPLEMENTATION DESIGN REQUIRED**；EMA window 的 numerical contract 已冻结于 §7.9（见下方 EMA Numerical Contract）。不得把 Persistence / Dynamics Phase / Leadership 一并标成 ready。
+**Position percentile lookback**（默认历史窗口 120 observations、最低有效历史 60 observations、baseline strictly pre-T、no future leakage，§7.9 Position contract，Position Foundation 已 CLOSED）与 **EMA numerical contract** 均已在 §7.9 **FROZEN**。**persistence window / 其余 persistence implementation semantics 仍保持：IMPLEMENTATION DESIGN REQUIRED**（除非 §7.9 已明确冻结某具体项，不得扩大解释）。不得把 Persistence / Dynamics Phase / Leadership / Interpretation thresholds 一并标成 ready。
 
 ### 7.8 Analysis A — Cross-sectional
 
@@ -792,7 +792,7 @@ EMA_N(first_valid) = x(first_valid)
 - EMA5：至少累计 5 个 valid inputs 后 ready；
 - EMA20：至少累计 20 个 valid inputs 后 ready。
 
-warmup 未满足时：`value = null`、`status = insufficient_history`。注意：内部 EMA state 已存在，只是输出尚未 ready；不得理解为「第 20 个 observation 才开始 seed」。
+warmup 未满足时：`value = null`、`status = insufficient_history`（若当前 input 同时 unavailable，按下方 Availability Status precedence 归 `unavailable_current`）。注意：内部 EMA state 已存在，只是输出尚未 ready；不得理解为「第 20 个 observation 才开始 seed」。
 
 **D. Valid-observation clock**
 
@@ -842,9 +842,32 @@ ready iff：`Velocity(T)` ready AND `Signal(T)` ready；否则 `null`。
 
 复用 Position 已有 availability 语义：`ready` / `insufficient_history` / `unavailable_current`。**不得创建** `warming` / `gap` / `paused` / `stale` 等新 status。
 
-- warmup 不足 → `insufficient_history`；
-- 当前 input unavailable → `unavailable_current`；
-- 满足条件 → `ready`。
+##### Historical Dynamics derived-fact availability precedence（FROZEN）
+
+以下 precedence 统一适用于 **EMA5 / EMA20 / Velocity / Signal / Acceleration** 全部 derived fact（不在各 fact 重复书写）：
+
+1. 如果当前 required input unavailable：
+   - `status = unavailable_current`
+   - `value = null`
+2. 否则，如果当前 input valid，但 required valid-history / warmup count 尚不足：
+   - `status = insufficient_history`
+   - `value = null`
+3. 否则：
+   - `status = ready`
+
+即：**`unavailable_current` 优先于 `insufficient_history`**。当前 input unavailable 时，即使 warmup / valid-history 不足，也归 `unavailable_current`，不得降级为 `insufficient_history`。
+
+各 fact 的 required input：
+
+- EMA5 / EMA20：`Position(T)`；
+- Velocity：`Fast(T)` 与 `Slow(T)`（即 `EMA5(Position)(T)` 与 `EMA20(Position)(T)`）；
+- Signal：`Velocity(T)`；
+- Acceleration：`Velocity(T)` 与 `Signal(T)`。
+
+示例（与 Position Foundation 现有 contract 一致）：
+
+- EMA5 只有 3 个 valid Position 且 `Position(T) = None` → `unavailable_current`（不是 `insufficient_history`）；
+- EMA5 只有 3 个 valid Position 但 `Position(T)` valid → `insufficient_history`。
 
 #### Implementation Ownership
 

@@ -53,6 +53,26 @@ Position Foundation = CLOSED；EMA Contract Audit = ALGORITHM_MAPPING_REQUIRED �
 - Persistence 原合同不改。
 - Dynamics Phase / Internal Structure / Trading Context / Interpretation 未修改。
 
+## Consistency Correction（2026-08-15 immediate audit correction）
+
+Independent remote audit of commit `815d0e6` found two PRD consistency gaps；本轮 docs-only 修正，**不改变任何已冻结数值合同**（alpha / recursive / seed / min valid inputs / valid-observation clock / state-preserve missing / no decay / no reset / Velocity / Signal / Acceleration formula / No Future Leakage 全部不变）。
+
+### GAP 1 — §7.7.5 Position lookback 状态与 §7.9 冲突
+
+- **before**：§7.7.5 写「percentile lookback 与 persistence window 仍 IMPLEMENTATION DESIGN REQUIRED；EMA window 已冻结」——与 §7.9 Position contract 已冻结（Position Foundation CLOSED）冲突。
+- **after**：§7.7.5 明确 **Position percentile lookback**（默认历史窗口 120 observations、最低有效历史 60 observations、baseline strictly pre-T、no future leakage）与 **EMA numerical contract** 均 **FROZEN in §7.9**；仅 **persistence window / 其余 persistence implementation semantics 仍 IMPLEMENTATION DESIGN REQUIRED**；Persistence / Dynamics Phase / Leadership / Interpretation thresholds 未标 ready。
+
+### GAP 2 — Availability precedence 未冻结
+
+- **before**：§7.9 Availability Status 仅列三态映射，未定义 `unavailable_current` 与 `insufficient_history` 的优先级。
+- **after**：§7.9 新增 **Historical Dynamics derived-fact availability precedence（FROZEN）**，统一适用于 EMA5 / EMA20 / Velocity / Signal / Acceleration：
+  1. 当前 required input unavailable → `unavailable_current`、`value = null`；
+  2. 否则 input valid 但 required valid-history / warmup count 不足 → `insufficient_history`、`value = null`；
+  3. 否则 → `ready`。
+  - **`unavailable_current` 优先于 `insufficient_history`**（示例：EMA5 仅 3 个 valid Position 且 `Position(T)=None` → `unavailable_current`；`Position(T)` valid → `insufficient_history`）。
+  - 各 fact required input：EMA5/EMA20=`Position(T)`；Velocity=`Fast(T)`+`Slow(T)`；Signal=`Velocity(T)`；Acceleration=`Velocity(T)`+`Signal(T)`。
+  - Warmup 子句 C 追加 pointer，确保与 precedence 内部一致。
+
 ## 验证
 
 - `git diff --check`：EXIT=0（无空白错误）。
