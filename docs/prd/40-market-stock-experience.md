@@ -50,12 +50,25 @@ Global Stock Search 是现有 Market-local 股票搜索 UI 的 **RELOCATION + RE
 
 - 股票搜索 UI 从 Market workspace 移到 Global Header；
 - 它不再作为 Market / Watchlist 表格筛选器；
-- 点击股票进入 canonical 个股详情；
+- 点击股票代码/名称 **MUST 进入 Market**（复用 canonical 个股详情导航，originScope 固定为 `market`；见 MX-10~MX-12）；
 - 可以 add/remove canonical 自选成员（见 WI-05）。
 
 Market workspace 不得再保留第二个用户可见的 stock-search input。盘迹至多只有三个用户可见搜索输入（见 MX-06）。
 
 注意：UI ownership 迁移与底层后端 query capability（如 keyword/筛选能力）是否保留是两个独立问题；本合同时不要求删除任何已有后端检索能力。
+
+**主点击与自选变更是两个独立 action（硬约束）：**
+
+- 搜索结果中「股票主体（代码/名称）」与「☆/★ 自选按钮」必须是两个独立可触发的控件；
+- 点击股票主体 → 进入 Market（导航 action），不执行任何 add/remove 自选；
+- 点击 ☆/★ → add/remove canonical 自选成员（见 WI-05），不触发导航；
+- 落点不因当前页面、不因该股票是否已自选而改变：始终 Market。
+
+**权限门控（合同 owner 见 PRD 60）：**
+
+- 股票主点击进入 Market 受 **Market access** 权限控制（无 Market access 时按 PRD 60 既有 insufficient-permission 行为执行，不自行 fallback 到 Watchlist）；
+- ☆/★ 受 **Watchlist Management** 权限控制（含 watchlist quantity limit）；
+- 两者是不同 permission action，不得合并为单一权限判断。
 
 搜索支持当前正式数据能力已有的匹配维度：
 
@@ -63,17 +76,15 @@ Market workspace 不得再保留第二个用户可见的 stock-search input。�
 - 股票名称
 - 拼音/首字母（**仅当 ACTUAL 已支持时；当前未确认 ACTUAL 支持，标 FUTURE，不得虚构**）
 
-搜索结果允许两类动作：
-
-- A. 进入 canonical 个股详情（复用 MX-10~MX-12 的 canonical 详情导航合同）；
-- B. 通过 canonical 自选成员路径（见 WI-05）添加/删除自选。
-
 Global Stock Search MUST NOT：
 
 - mutate 当前 workspace 的 filter state（Market 或 Watchlist）；
 - 缩小当前 workspace 的 base universe；
+- 将搜索股票解释为「Market 表格只显示这一只」；
+- 根据 membership / 当前页面导航到 Watchlist；
 - 创建第二套股票详情导航（route builder）；
-- 创建第二套自选状态（watchlist state）。
+- 创建第二套自选状态（watchlist state）；
+- 建立独立于 行情/自选/复盘/竞价 之外的第五个一级业务模块。
 
 ### MX-08 Workspace Base Universe 合同（CHANGE-20260815-004）
 

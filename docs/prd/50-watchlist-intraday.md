@@ -36,6 +36,8 @@
 
 自选范围的 base universe 由该 canonical membership 决定（见 MX-08）。
 
+Watchlist Management 权限与 watchlist quantity limit 的语义 owner 为 PRD 60（PA-02 / PV2 系列）：limit 属 entitlement，由后端在 add 时 enforce（达上限返回错误），前端仅展示与交互；permission / invite / limit 的完整闭环见 PRD 60，不在本 PRD 重新定义。
+
 ## 2. 盘中监控
 
 ### WI-10 权限归属
