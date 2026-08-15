@@ -36,11 +36,19 @@
 
 盘迹 workspace 页面采用三层责任结构，PRD 只定义语义层级，不锁定像素或 CSS：
 
-- **Global Header**：跨 workspace 的全局层，不绑定任何单一 workspace。承载一个可输入检索的 **Stock Search**。
+- **Global Header**：跨模块存在的全局层，不绑定任何单一 workspace。承载一个可输入检索的 **Global Stock Search**。
 - **Module Navigation**：承担 行情 / 自选 / 复盘 / 竞价 切换。
-- **Workspace Controls / Content**：仅影响当前 workspace，承载一个 **Industry Search** 与一个 **Concept Search**，以及其它表格筛选、排序、分页、列设置等。
+- **Market / Watchlist Workspace Controls / Content**：仅影响当前 workspace，承载 **Industry Search** 与 **Concept Search**，以及其它表格筛选、排序、分页、列设置等既有 Market/Watchlist 控件。
 
-盘迹只有三个用户可见的搜索输入：Global Header 的 Stock Search、Workspace Controls 的 Industry Search 与 Concept Search。Industry Search 与 Concept Search 是两个独立、可输入检索的控件，不承担个股详情导航、不负责自选 add/remove、不改变任何 workspace 的 base universe、不升级为 Universal Query Builder。PRD 只定义语义层级与职责，不锁定像素、宽度或颜色。
+在 Market / Watchlist 工作界面中，与本次需求相关的三个搜索入口为：
+
+1. **Global Stock Search**（Global Header 层，跨模块存在）；
+2. **Industry Search**（Market / Watchlist 局部）；
+3. **Concept Search**（Market / Watchlist 局部）。
+
+Industry Search 与 Concept Search 只属于 Market / Watchlist，是两个独立、可输入检索的控件，不承担个股详情导航、不负责自选 add/remove、不改变任何 workspace 的 base universe、不升级为 Universal Query Builder。PRD 只定义语义层级与职责，不锁定像素、宽度或颜色。
+
+该数量合同不得解释为限制 Review / Auction / Admin / 其他模块自身已有或未来独立确认的搜索能力。本次业务改动只作用于 Market 与 Watchlist；不得因为本 PRD 给 Review 增加 Industry Search / Concept Search，也不得给 Auction 增加它们，更不得修改 Review / Auction 业务 controls。
 
 新增的 Global Stock Search 位于 Global Header 层级，不属于任何 workspace 的局部筛选器。
 
@@ -50,10 +58,10 @@ Global Stock Search 是现有 Market-local 股票搜索 UI 的 **RELOCATION + RE
 
 - 股票搜索 UI 从 Market workspace 移到 Global Header；
 - 它不再作为 Market / Watchlist 表格筛选器；
-- 点击股票代码/名称 **MUST 进入 Market**（复用 canonical 个股详情导航，originScope 固定为 `market`；见 MX-10~MX-12）；
+- 点击股票代码/名称 **MUST 进入 Market**（复用 canonical 个股详情导航；进入 Market 的具体实现参数 `originScope='market'` 见 MX-10~MX-12，由 CHANGE-006 §3 Code Owner Map / future implementation design 记录）；
 - 可以 add/remove canonical 自选成员（见 WI-05）。
 
-Market workspace 不得再保留第二个用户可见的 stock-search input。盘迹至多只有三个用户可见搜索输入（见 MX-06）。
+Market workspace 不得再保留第二个用户可见的 stock-search input。
 
 注意：UI ownership 迁移与底层后端 query capability（如 keyword/筛选能力）是否保留是两个独立问题；本合同时不要求删除任何已有后端检索能力。
 
@@ -70,11 +78,16 @@ Market workspace 不得再保留第二个用户可见的 stock-search input。�
 - ☆/★ 受 **Watchlist Management** 权限控制（含 watchlist quantity limit）；
 - 两者是不同 permission action，不得合并为单一权限判断。
 
-搜索支持当前正式数据能力已有的匹配维度：
+搜索支持本 CHANGE 强制要求的匹配维度：
 
 - 股票代码
 - 股票名称
-- 拼音/首字母（**仅当 ACTUAL 已支持时；当前未确认 ACTUAL 支持，标 FUTURE，不得虚构**）
+
+拼音 / 首字母：
+
+- 如果已有正式能力可以直接复用，则允许继续使用；
+- 本 CHANGE 不要求新增拼音检索能力；
+- 不得为了本需求新增搜索索引、后端搜索体系或数据链。
 
 Global Stock Search MUST NOT：
 
@@ -84,7 +97,12 @@ Global Stock Search MUST NOT：
 - 根据 membership / 当前页面导航到 Watchlist；
 - 创建第二套股票详情导航（route builder）；
 - 创建第二套自选状态（watchlist state）；
-- 建立独立于 行情/自选/复盘/竞价 之外的第五个一级业务模块。
+- 建立独立于 行情/自选/复盘/竞价 之外的第五个一级业务模块；
+- 给 Review 增加 Industry Search / Concept Search 或任何 Review 业务改动；
+- 给 Auction 增加 Industry Search / Concept Search 或任何 Auction 业务改动；
+- 修改 Review / Auction 的 filters / tags / query / data / permissions。
+
+本次 Industry Search / Concept Search 只影响 Market / Watchlist；Review / Auction 无业务改动。
 
 ### MX-08 Workspace Base Universe 合同（CHANGE-20260815-004）
 
@@ -103,20 +121,19 @@ WorkspaceResult = BaseUniverse ∩ ActiveWorkspaceFilters
 
 Workspace Controls 提供两个独立、可输入检索的 search controls：
 
-- **Industry Search**：只负责当前 workspace 行业过滤；
-- **Concept Search**：只负责当前 workspace 概念过滤。
+- **Industry Search**：Market / Watchlist 局部，只负责当前 workspace 行业过滤；
+- **Concept Search**：Market / Watchlist 局部，只负责当前 workspace 概念过滤。
 
 两者：
 
 - 是独立的检索控件，不是 dropdown / command palette / universal search 的替身；
+- 只属于 Market / Watchlist，不给 Review / Auction 增加；
 - 不承担个股详情导航；
 - 不负责 add/remove 自选；
 - 不改变 base universe（MX-08）；
 - 不升级为 Universal Query Builder。
 
-单选/多选的 selection semantics 按已有正式能力执行；本轮不新增 multi-select contract。
-
-单选/多选：先按 ACTUAL 记录（当前 MX-03 已确认行业筛选不得错误限制为单一层级；具体 multi-select contract 以 ACTUAL 为准）。本轮不新增尚未成熟的 multi-select 合同。
+允许不同正式 workspace filter 条件（如 Industry Search + Concept Search + 其它既有筛选）共同作用。「filter stacking」不等于「单个 Industry / Concept 输入支持 multi-select」；本 CHANGE 不引入 Industry 多选 / Concept 多选 / single-multi selection redesign。
 
 ## 2. 个股详情
 
