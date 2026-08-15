@@ -1,154 +1,162 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useState, useRef, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useMarketStocks } from '@/hooks/useApi'
-import {
-  useWatchlist,
-  useAddToWatchlist,
-  useRemoveFromWatchlist,
-} from '@/hooks/useApi'
-import { useAuthStore } from '@/store/auth'
-import { useToast } from '@/store/toast'
-import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNavigation'
+import { useMarketStocks } from '../../hooks/useApi'
+import { useWatchlist, useAddToWatchlist, useRemoveFromWatchlist } from '../../hooks/useApi'
+import { useAuthStore } from '../../store/auth'
+import { useToast } from '../../store/toast'
+import { buildStockDetailUrl } from '../../features/stock-research/stockDetailNavigation'
 import styles from './GlobalStockSearch.module.scss'
 
-/**
- * GlobalStockSearch — Global Header 单一股票搜索入口。
- *
- * 职责边界（PRD 40 MX-07）：
- * - 位于 Global Header，跨模块存在；
- * - 查询源固定为 Market（universe=market），不依赖当前 workspace scope；
- * - 主点击进入 Market-source 个股详情，复用 canonical buildStockDetailUrl；
- * - ☆/★ 与股票主点击为两个独立 action，复用 canonical watchlist mutation；
- * - 不写回任何 workspace keyword / filter / sort / page。
- */
-export default function GlobalStockSearch() {
+interface StockSearchItem {
+  symbol: string
+  name: string
+  instrument_id: string
+  market?: string
+}
+
+export function GlobalStockSearch() {
   const navigate = useNavigate()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState('')
   const [open, setOpen] = useState(false)
-  const containerRef = useRef<HTMLDivElement>(null)
 
   const isAdmin = useAuthStore((s) => s.user?.is_admin === true)
   const capabilities = useAuthStore((s) => s.user?.capabilities)
   const canAccessStockDetail = isAdmin || !!capabilities?.market_data?.active
   const canManageWatchlist = isAdmin || !!capabilities?.self_selection?.active
 
-  const { data, isFetching } = useMarketStocks({
-    scope: 'market',
-    query: input || undefined,
-    page: 1,
-    page_size: 8,
-  })
-
-  const { data: watchlistData } = useWatchlist()
   const addToWatchlist = useAddToWatchlist()
   const removeFromWatchlist = useRemoveFromWatchlist()
 
-  const watchlistInstrumentIds = useMemo(() => {
-    const items = watchlistData?.items ?? []
-    return new Set(
-      items.filter((item) => item.active).map((item) => item.instrument_id),
-    )
-  }, [watchlistData])
+  const searchQuery = input.trim()
 
-  const results = data?.items ?? []
+  const { data, isFetching } = useMarketStocks(
+    {
+      scope: 'market',
+      query: searchQuery || undefined,
+      page: 1,
+      page_size: 8,
+    },
+    {
+      enabled: searchQuery.length > 0,
+    },
+  )
+
+  const { data: watchlistData } = useWatchlist({
+    enabled: canManageWatchlist,
+  })
+
+  const watchlistInstrumentIds = useMemo(() => {
+    const set = new Set<string>()
+    for (const item of watchlistData?.items ?? []) {
+      if (item.instrument_id) set.add(item.instrument_id)
+    }
+    return set
+  }, [watchlistData?.items])
+
+  const results: StockSearchItem[] = (data?.items ?? []) as StockSearchItem[]
 
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (
-        containerRef.current &&
-        !containerRef.current.contains(event.target as Node)
-      ) {
+    function onDocClick(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false)
       }
     }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
   }, [])
 
-  function handleMainClick(symbol: string) {
+  const handleMainClick = (item: StockSearchItem) => {
     if (!canAccessStockDetail) {
-      useToast
-        .getState()
-        .show({ title: '无权限', message: '当前账户无权查看个股详情' })
+      useToast.getState().show('无权限', '当前账户无权查看个股详情')
       return
     }
-    setOpen(false)
-    setInput('')
-    navigate(buildStockDetailUrl(symbol, { originScope: 'market' }))
+    const url = buildStockDetailUrl(item.symbol, { originScope: 'market' })
+    navigate(url)
   }
 
-  function handleWatchlistToggle(
-    event: React.MouseEvent,
-    instrumentId: string,
-  ) {
-    event.stopPropagation()
+  const handleStarClick = (item: StockSearchItem, e: React.MouseEvent) => {
+    e.stopPropagation()
     if (!canManageWatchlist) {
-      useToast
-        .getState()
-        .show({ title: '无权限', message: '当前账户无权管理自选股' })
+      useToast.getState().show('无权限', '当前账户无权管理自选股')
       return
     }
-    if (watchlistInstrumentIds.has(instrumentId)) {
-      removeFromWatchlist.mutate(instrumentId)
+    const isWatched = watchlistInstrumentIds.has(item.instrument_id)
+    const onError = (err: unknown) => {
+      let message = '自选操作失败'
+      const resp = (err as { response?: { data?: { detail?: string; message?: string } } })?.response
+      const payload = resp?.data
+      if (payload) {
+        message = payload.detail ?? payload.message ?? '自选操作失败'
+      }
+      useToast.getState().show('操作失败', message)
+    }
+    if (isWatched) {
+      removeFromWatchlist.mutate(item.instrument_id, { onError })
     } else {
       addToWatchlist.mutate(
-        { instrument_id: instrumentId },
-        {
-          onError: (err: unknown) => {
-            const message =
-              (err as { response?: { data?: { message?: string } } })?.response
-                ?.data?.message ?? '自选操作失败'
-            useToast.getState().show({ title: '操作失败', message })
-          },
-        },
+        { instrument_id: item.instrument_id },
+        { onError },
       )
     }
   }
 
+  const showStar = canManageWatchlist
+  const showList = open && searchQuery.length > 0
+
   return (
     <div className={styles.container} ref={containerRef}>
-      <input
-        className={styles.input}
-        type="text"
-        placeholder="搜索股票代码 / 名称"
-        value={input}
-        onChange={(e) => {
-          setInput(e.target.value)
-          setOpen(true)
-        }}
-        onFocus={() => setOpen(true)}
-      />
-      {open && input.trim() !== '' && (
-        <div className={styles.resultPanel}>
-          {isFetching && <div className={styles.hint}>搜索中…</div>}
-          {!isFetching && results.length === 0 && (
-            <div className={styles.hint}>无匹配结果</div>
-          )}
-          {!isFetching &&
-            results.map((stock) => {
-              const isStarred = watchlistInstrumentIds.has(stock.instrument_id)
+      <div className={styles.inputWrap}>
+        <input
+          ref={inputRef}
+          className={styles.input}
+          placeholder="搜索股票 / 代码"
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value)
+            setOpen(true)
+          }}
+          onFocus={() => setOpen(true)}
+        />
+        {isFetching && <span className={styles.spinner} />}
+      </div>
+
+      {showList && (
+        <div className={styles.resultPanel} role="listbox">
+          {results.length === 0 ? (
+            <div className={styles.empty}>无匹配结果</div>
+          ) : (
+            results.map((item) => {
+              const watched = watchlistInstrumentIds.has(item.instrument_id)
               return (
                 <div
-                  key={stock.instrument_id}
+                  key={item.instrument_id}
                   className={styles.resultItem}
-                  onClick={() => handleMainClick(stock.symbol)}
+                  role="option"
+                  aria-selected={false}
+                  onClick={() => handleMainClick(item)}
                 >
-                  <span className={styles.symbol}>{stock.symbol}</span>
-                  <span className={styles.name}>{stock.name}</span>
-                  <button
-                    type="button"
-                    className={styles.starButton}
-                    disabled={!canManageWatchlist}
-                    title={isStarred ? '移除自选' : '加入自选'}
-                    onClick={(e) => handleWatchlistToggle(e, stock.instrument_id)}
-                  >
-                    {isStarred ? '★' : '☆'}
-                  </button>
+                  <span className={styles.symbol}>{item.symbol}</span>
+                  <span className={styles.name}>{item.name}</span>
+                  {showStar && (
+                    <button
+                      type="button"
+                      className={styles.starBtn}
+                      aria-label={watched ? '取消自选' : '加入自选'}
+                      onClick={(e) => handleStarClick(item, e)}
+                    >
+                      {watched ? '★' : '☆'}
+                    </button>
+                  )}
                 </div>
               )
-            })}
+            })
+          )}
         </div>
       )}
     </div>
   )
 }
+
+export default GlobalStockSearch

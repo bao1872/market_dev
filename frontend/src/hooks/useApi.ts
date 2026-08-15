@@ -602,11 +602,12 @@ export function useRetryMessageDelivery() {
 // ============================================================
 
 /** 查询当前用户的自选列表（1 分钟缓存） */
-export function useWatchlist() {
+export function useWatchlist(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ['watchlist'],
     queryFn: api.getWatchlist,
     staleTime: STALE_WATCHLIST,
+    enabled: options?.enabled ?? true,
   })
 }
 

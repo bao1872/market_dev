@@ -242,7 +242,7 @@ export default function MarketWorkspacePage() {
 
   // 自选列表（页面只请求一次，按 instrument_id 建 Set）
   // watchlist scope 依赖此数据；market scope 也需要判断行是否已自选
-  const watchlistQuery = useWatchlist()
+  const watchlistQuery = useWatchlist({ enabled: canAccessWatchlist })
   const serverWatchlistInstrumentIds = useMemo(() => {
     const set = new Set<string>()
     for (const item of watchlistQuery.data?.items ?? []) {

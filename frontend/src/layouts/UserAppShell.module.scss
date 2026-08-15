@@ -8,6 +8,7 @@
 .userShell {
   :global(.topbar) {
     left: 0;
+    z-index: 1000;
   }
 
   :global(.main) {
@@ -28,7 +29,7 @@
   align-items: center;
   gap: 4px;
   padding: 0 20px;
-  background: v.$color-bg-1;
+  background: v.$color-bg;
   border-bottom: 1px solid v.$color-border;
 }
 
