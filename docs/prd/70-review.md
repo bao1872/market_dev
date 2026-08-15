@@ -601,7 +601,7 @@ L2 不是算法层，不是评分层。固定为：
 - EMA window；
 - persistence window。
 
-均保持：**IMPLEMENTATION DESIGN REQUIRED**。
+percentile lookback 与 persistence window 仍保持：**IMPLEMENTATION DESIGN REQUIRED**；EMA window 的 numerical contract 已冻结于 §7.9（见下方 EMA Numerical Contract）。不得把 Persistence / Dynamics Phase / Leadership 一并标成 ready。
 
 ### 7.8 Analysis A — Cross-sectional
 
@@ -742,7 +742,7 @@ Position → Velocity → Acceleration → Persistence
 
 **Velocity**：
 
-- Fast EMA = 5D，Slow EMA = 20D；
+- Fast EMA = 5，Slow EMA = 20（**产品简称 EMA5 / EMA20**；精确算法为 span=5 / span=20 valid input observations，见下方 EMA Numerical Contract）；
 - `Velocity = EMA5(Position) − EMA20(Position)`；
 - Velocity > 0 → 短期历史位置高于中期，向上迁移；
 - Velocity < 0 → 短期历史位置低于中期，向下迁移。
@@ -759,6 +759,96 @@ Position → Velocity → Acceleration → Persistence
 - 20D Historical Position Occupancy；
 - Upper Occupancy = 最近 20 日 Position ≥ 80 的占比；
 - Lower Occupancy = 最近 20 日 Position ≤ 20 的占比。
+
+#### EMA Numerical Contract（FROZEN）
+
+本节冻结 EMA 的全部数值语义，消除下一轮 implementation 的 numerical semantic ambiguity。**PRD 公式本身是 owner，不得依赖 pandas 等库的 hidden defaults**（可与之数值对应，但不得以库默认行为替代本合同）。
+
+**A. Standard span definition**
+
+对 span = N：
+
+```
+alpha_N = 2 / (N + 1)
+EMA_N(t) = alpha_N * x(t) + (1 - alpha_N) * EMA_N(previous_valid)
+```
+
+这等价于 standard span recursive EMA（可与 `pandas.ewm(span=N, adjust=False)` 数值对应），但本公式为唯一 owner。
+
+**B. Seed**
+
+第一条 valid input：
+
+```
+EMA_N(first_valid) = x(first_valid)
+```
+
+内部 EMA state 从第一条 valid input 开始建立。
+
+**C. Warmup**
+
+内部 state 允许从第一条 valid observation 开始更新，但输出 readiness：
+
+- EMA5：至少累计 5 个 valid inputs 后 ready；
+- EMA20：至少累计 20 个 valid inputs 后 ready。
+
+warmup 未满足时：`value = null`、`status = insufficient_history`。注意：内部 EMA state 已存在，只是输出尚未 ready；不得理解为「第 20 个 observation 才开始 seed」。
+
+**D. Valid-observation clock**
+
+EMA span 的推进单位是 **valid input observation**，不是绝对 calendar day。EMA5 / EMA20 是产品简称，精确语义为 span=5 / span=20 valid observations。input 完整连续时等价于 5 / 20 个 trading observations；某 trading day input unavailable 时，该日**不推进 EMA clock**。
+
+**E. Missing input**
+
+当 `Position(T) = unavailable / None`：
+
+- `EMA5(T) = null`、`EMA20(T) = null`、`status = unavailable_current`；
+- 保留 previous internal EMA state；
+- 下一条 valid Position 到来后，直接从 previous_valid EMA state 继续递归。
+
+禁止：forward-fill、zero-fill、synthetic value、daily decay、dropna 后改变日期输出对齐、gap reset。
+
+**F. Gap**
+
+普通单日或连续多日 unavailable：**不 reset EMA**；不定义 3-day / 5-day / 20-day reset 之类任意阈值。缺失期间：不 update、不 decay、不推进 valid_count。
+
+**G. Velocity**
+
+```
+Fast(T) = EMA5(Position)(T)
+Slow(T) = EMA20(Position)(T)
+Velocity(T) = Fast(T) − Slow(T)
+```
+
+Velocity ready iff：1) `Position(T)` ready；2) `Fast(T)` ready；3) `Slow(T)` ready。任意条件不满足 → `Velocity(T) = null`。Velocity 不 forward-fill。
+
+**H. Signal**
+
+`Signal = EMA5(Velocity)`，使用完全相同 EMA contract：alpha=2/(5+1)、recursive、first-valid seed、min valid inputs=5、valid-observation clock、missing state-preserve。Signal ready iff：`Velocity(T)` ready AND 累计至少 5 个 valid Velocity observations。
+
+**I. Acceleration**
+
+```
+Acceleration(T) = Velocity(T) − Signal(T)
+```
+
+ready iff：`Velocity(T)` ready AND `Signal(T)` ready；否则 `null`。
+
+**J. No Future Leakage**
+
+所有 EMA 只使用当前和过去已存在的 input。未来 observation 永远不能影响历史 EMA / Velocity / Signal / Acceleration。
+
+#### Availability Status（FROZEN）
+
+复用 Position 已有 availability 语义：`ready` / `insufficient_history` / `unavailable_current`。**不得创建** `warming` / `gap` / `paused` / `stale` 等新 status。
+
+- warmup 不足 → `insufficient_history`；
+- 当前 input unavailable → `unavailable_current`；
+- 满足条件 → `ready`。
+
+#### Implementation Ownership
+
+Historical Dynamics EMA math 属于 **Analysis B pure domain owner**。下一轮预计为 `app/domain/review/analysis/historical_dynamics.py`（或遵循最终 implementation naming）。该模块：不访问 DB、不负责 reconstruction、不负责 membership、不持久化、不做 Interpretation。
 
 Historical Dynamics 用户语言固定为：
 
