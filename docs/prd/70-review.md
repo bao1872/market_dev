@@ -21,7 +21,8 @@
 > 本文档是 Review 唯一产品真相源（Single Product Source of Truth）。
 >
 > **PRODUCT CONTRACT = FINAL**。
-> 但 Dynamics Phase / Internal Structure Type / Trading Context 的 exact threshold、
+> Dynamics Phase 六类的 exact numerical contract 已冻结（见 §7.11「Dynamics Phase Numerical Contract（FROZEN）」）。
+> Internal Structure Type / Trading Context 的 exact threshold、
 > conflict priority、tie-break 仍属于 **ALGORITHM MAPPING REQUIRED**。
 > 这不代表 Product Contract 未冻结。
 
@@ -1076,16 +1077,134 @@ Confirmation 不得通过多数投票 / 加权 score / 综合分重新产生 Pha
 - **Case C**：EW lifecycle repairing、Volume participation weakening → Phase lifecycle 不被 volume 改写；Volume = absent / weak confirmation evidence。
 - **Case D**：HHI rapidly rising、EW lifecycle flat → **HHI 不得投票把 Phase 变成 Strengthening**。
 
+#### Dynamics Phase Numerical Contract（FROZEN）
+
+Dynamics Phase 六类分类的 exact numerical contract 已基于真实历史数据（distribution inspection + representative / event replay + sensitivity + mutual-exclusion verification）冻结。Implementation 必须使用下列精确常量与 boolean 条件，不得引入任何额外阈值、优先级链或综合分。
+
+**冻结常量（exact，不得写成约数）**：
+
+```
+DYNAMICS_PHASE_VELOCITY_GATE         = 2.0
+DYNAMICS_PHASE_ACCELERATION_GATE     = 1.0
+DYNAMICS_PHASE_POSITION_HIGH         = 70.0
+DYNAMICS_PHASE_UPPER_OCCUPANCY_GATE  = 0.20
+DYNAMICS_PHASE_LOWER_OCCUPANCY_GATE  = 0.30
+```
+
+**Exact state definitions（numerical states，不是新 Phase）**：
+
+```
+V_NEG : velocity <= -2.0
+V_MID : -2.0 < velocity <= 2.0
+V_POS : velocity > 2.0
+
+A_NEG : acceleration <= -1.0
+A_ZERO: -1.0 < acceleration <= 1.0
+A_POS : acceleration > 1.0
+```
+
+**HIGH_REGIME**：
+
+```
+HIGH_REGIME = position >= 70.0 AND upper_occupancy >= 0.20
+```
+
+产品语义：historical upper regime 已形成，且 current Position 仍与 high regime 相容。`position == 70.0` 属于 HIGH_REGIME（前提 upper_occupancy >= 0.20 同时满足）。
+
+**BOTTOM_RECOVERY_CONTEXT**：
+
+```
+BOTTOM_RECOVERY_CONTEXT = position < 70.0 AND lower_occupancy >= 0.30
+```
+
+产品语义：historical lower-regime evidence 存在，且 current observation 尚未进入 high position region。它是 **joint eligibility context**，不是 raw Position low-zone 定义（禁止写成 `Position < 70 = bottom`）。
+
+**Exact phase conditions（by construction mutually exclusive）**：
+
+| Phase | Boolean condition |
+|---|---|
+| Weakening | `velocity <= -2.0`（Position / Acceleration / Persistence 不 gate） |
+| Decelerating | `HIGH_REGIME AND velocity > -2.0 AND acceleration <= -1.0` |
+| Sustained | `HIGH_REGIME AND velocity > -2.0 AND -1.0 < acceleration <= 1.0` |
+| Early Lift | `BOTTOM_RECOVERY_CONTEXT AND velocity > 2.0 AND acceleration > 1.0` |
+| Repairing | `BOTTOM_RECOVERY_CONTEXT AND velocity > -2.0 AND acceleration <= 1.0` |
+| Strengthening | `velocity > 2.0 AND acceleration > 1.0 AND NOT BOTTOM_RECOVERY_CONTEXT` |
+
+明确：
+- **Repairing 不需要 `velocity <= 2.0`**：允许 `velocity > 2.0` 但 `acceleration <= 1.0`，即 bottom recovery 但尚未达到 Early Lift 的明确加速确认；
+- **Strengthening 必须写出完整 boolean `NOT BOTTOM_RECOVERY_CONTEXT`**，不得简写为「non-bottom」。
+
+**Mutual exclusion（priority = NONE）**：六类规则按数学条件 **mutually exclusive**；一个 ready observation 最多匹配一个 Phase。**不存在 priority chain**（不得写 `Weakening > Decelerating > ...`）；当前 final contract 无需 priority 即可唯一分类，tie-break 不需要。
+
+**Ready but unclassified**：四个 required inputs 全部 ready，但六个 Phase 条件均不满足 → `analysis status = ready`、`phase = null`。这不是第七类 Phase，也不是 unavailable；不得强制全覆盖。
+
+**Availability / status propagation**：Required inputs = EW Position / EW Velocity / EW Acceleration / EW Persistence。
+- 任一 required input status = `unavailable_current` → Phase status = `unavailable_current`、`phase = null`；
+- 否则任一 required input status = `insufficient_history` → Phase status = `insufficient_history`、`phase = null`；
+- 否则 Phase status = `ready`，再执行六类 classifier；ready + no match → `phase = null`。
+- 不得新增 status vocabulary。
+
+**Boundary ownership（exact，只写当前实际 threshold）**：
+
+```
+velocity == -2.0
+→ Weakening
+
+velocity just above -2.0
+→ 不属于 Weakening，由其他 context / acceleration 条件判断
+
+acceleration == -1.0 + HIGH_REGIME + velocity > -2
+→ Decelerating
+
+acceleration just above -1.0 + HIGH_REGIME + velocity > -2
+→ Sustained
+
+acceleration == 1.0 + HIGH_REGIME + velocity > -2
+→ Sustained
+
+acceleration == 1.0 + BOTTOM_RECOVERY_CONTEXT + velocity > -2
+→ Repairing
+
+position == 70.0 + upper_occupancy >= .20
+→ HIGH_REGIME
+
+position just below 70 + lower_occupancy >= .30 + velocity > 2 + acceleration > 1
+→ Early Lift
+
+lower_occupancy == .30 + position < 70
+→ BOTTOM_RECOVERY_CONTEXT
+```
+
+删除 / 不引入旧实验边界（如 `pos==30 mid`）。
+
+**Deterministic cases（PRD examples）**：
+
+- **Case A**：`velocity == -2.0` → **Weakening**。
+- **Case B**：`HIGH_REGIME AND velocity > -2 AND acceleration == -1` → **Decelerating**。
+- **Case C**：`HIGH_REGIME AND velocity > -2 AND acceleration == 1` → **Sustained**。
+- **Case D**：`BOTTOM_RECOVERY_CONTEXT AND velocity > 2 AND acceleration > 1` → **Early Lift**。
+- **Case E**：`BOTTOM_RECOVERY_CONTEXT AND velocity > 2 AND acceleration == 1` → **Repairing**。
+- **Case F**：`velocity > 2 AND acceleration > 1 AND NOT BOTTOM_RECOVERY_CONTEXT` → **Strengthening**。
+- **Case G**：all required inputs ready 但无规则匹配 → `status = ready` / `phase = null`。
+
+**Output contract（domain output semantics）**：Phase analysis output 至少包含 `trade_date` / `phase` / `status`；建议透明 evidence：`position` / `velocity` / `acceleration` / `upper_occupancy` / `lower_occupancy`；可选 derived states：`velocity_state` / `acceleration_state` / `high_regime` / `bottom_recovery_context`。**禁止** `phase_score` / `confidence_score` / `strength_score` / `composite_score`。本轮只冻结 domain output semantics，不设计 API schema。
+
 #### 7.11.1 Algorithm Mapping 边界（v2.3）
 
-Dynamics Phase 六类 / Internal Structure Type 五类 / Trading Context 五类继续冻结。
-exact threshold、conflict priority、tie-break 必须基于真实历史数据，通过 distribution inspection + representative case replay 冻结 Algorithm Mapping。Implementation 不得现在自行发明 `Position > 70`、`Acceleration > X` 等 arbitrary threshold。
+Dynamics Phase 六类的 exact numerical contract 已冻结（见 §7.11「Dynamics Phase Numerical Contract（FROZEN）」）；Internal Structure Type 五类 / Trading Context 五类继续冻结。
+尚未冻结部分的 exact threshold、conflict priority、tie-break 必须基于真实历史数据，通过 distribution inspection + representative case replay 冻结 Algorithm Mapping。Implementation 不得自行发明 `Position > 70`、`Acceleration > X` 等 arbitrary threshold。
 
 Mapping 依赖按层级拆解，**互不阻塞、各自独立 ready**：
 
-- **A. Dynamics Phase Algorithm Mapping 依赖**：L1 canonical facts + EW Historical Dynamics（Position / Velocity / Acceleration / Persistence）真实历史数据。依赖链：L1 → EW Historical Dynamics → 六类 Phase 分类 Algorithm Mapping。EW Historical Dynamics ready 即解锁本层 mapping；不等待 Internal Structure / Trading Context。
-- **B. Internal Structure Type Mapping 依赖**：Internal Structure 四类事实（Breadth / Capital Tilt / Concentration / Leadership Migration）真实数据。依赖链：L1 → Internal Structure facts → 五类 Internal Structure Type 分类 Algorithm Mapping。与 Dynamics Phase mapping 并行独立，不等待 A。
-- **C. Trading Context Mapping 依赖**：Dynamics Phase（A）与 Internal Structure Type（B）均 ready 后，再冻结五类 Trading Context 的 mapping。Trading Context 消费 Phase × Type 组合，因此是**最晚**解锁的一层；但 A / B 未 ready 不阻塞 L1 / L2 / Cross-sectional / Historical Dynamics 开发。
+- **A. Dynamics Phase Algorithm Mapping = FROZEN / CLOSED**：依赖 L1 canonical facts + EW Historical Dynamics（Position / Velocity / Acceleration / Persistence）真实历史数据。依赖链：L1 → EW Historical Dynamics → 六类 Phase 分类。本层已冻结：
+  - exact thresholds 已冻结（「Dynamics Phase Numerical Contract（FROZEN）」五个常量）；
+  - boolean conditions 已冻结（六类 exact boolean conditions）；
+  - mutual exclusion 已冻结（数学条件 mutually exclusive）；
+  - priority = NONE（无 priority chain）；
+  - tie-break 不需要（一个 ready observation 最多匹配一个 Phase）；
+  - ready-but-unclassified 已冻结（status = ready / phase = null）。
+- **B. Internal Structure Type Mapping 依赖 = ALGORITHM MAPPING REQUIRED**：Internal Structure 四类事实（Breadth / Capital Tilt / Concentration / Leadership Migration）真实数据。依赖链：L1 → Internal Structure facts → 五类 Internal Structure Type 分类 Algorithm Mapping。与 Dynamics Phase mapping 并行独立，不等待 A。其中 Leadership Migration 的 exact rank-stability algorithm（Spearman / Top-N overlap / 其他 method）仍标 ALGORITHM MAPPING REQUIRED，不要在 PRD 里现在选一个未经数据验证的公式。
+- **C. Trading Context Mapping 依赖 = ALGORITHM MAPPING REQUIRED**：Dynamics Phase（A）与 Internal Structure Type（B）均 ready 后，再冻结五类 Trading Context 的 mapping。Trading Context 消费 Phase × Type 组合，因此是**最晚**解锁的一层；但 A / B 未 ready 不阻塞 L1 / L2 / Cross-sectional / Historical Dynamics 开发。
 
 分层原则：三者 mapping 各自独立 ready，任一层的 threshold 数据尚未产生时，其余层不得被该层阻塞；已 ready 层可以先行冻结，无需等待全链。
 
