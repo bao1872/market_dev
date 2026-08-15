@@ -979,6 +979,31 @@ Historical Dynamics 用户语言固定为：
 是否持续？（Persistence）
 ```
 
+#### Interpretation Input Ownership（FROZEN）
+
+Scope Dynamics Phase 的 **lifecycle primary owner = Equal-weight Return（EW）Historical Dynamics**。
+
+Phase 的核心输入固定为：
+
+- EW Position；
+- EW Velocity；
+- EW Acceleration；
+- EW Persistence。
+
+产品语义：EW = 普通成员整体表现，用于描述 Scope **整体动力生命周期**（「现在在哪里 / 往哪里走 / 是否加速 / 是否持续」）。
+
+**明确禁止**的表达方式：
+
+- 11 primitive voting（每个 primitive 一票表决）→ 见 §7.11「11 primitive ≠ 11 phase」；
+- multi-factor score / weighted composite / 综合分；
+- EW/AW dual-primary（两条平行主轴）。
+
+**Amount-weighted Return（AW）Historical Dynamics 不是第二条 Phase lifecycle primary axis**：它属于 **Capital Confirmation**（见 §7.11），回答「主要成交资金所交易成员是否确认 EW 所表达的整体生命周期」。EW/AW 背离不得删除或覆盖 EW Phase。
+
+**Persistence owner**：Phase 使用 **EW Persistence** 作为 persistence owner；AW Persistence 只属于 Capital Confirmation supporting evidence；不得定义 EW/AW joint Persistence。
+
+其余 primitives 的 Historical Dynamics 作为 objective dynamics evidence 保留，其 Interpretation 层角色（parallel confirmation / structure-only / excluded）见 §7.11。
+
 ### 7.10 Analysis C — Internal Structure Dynamics
 
 Internal Structure Dynamics 消费 §7.7.5 定义的 Observation Series 契约（共享输入边界）。
@@ -1024,12 +1049,45 @@ Dynamics Phase（6 类） × Internal Structure Type（5 类）
 产品语义按 v2.3 固定。分类名称和语义 = FROZEN PRODUCT CONTRACT。
 若 v2.3 未定义精确数值 threshold / 冲突优先级 / tie-break，标 `ALGORITHM MAPPING REQUIRED`。
 
+#### Scope Dynamics Phase 输入架构（FROZEN）
+
+**Phase label 语义边界**：Dynamics Phase（六类）**只描述 Scope 的动力生命周期阶段**（Position「现在在哪里」/ Velocity「往哪里走」/ Acceleration「是否加速」/ Persistence「是否持续」）。Phase owner 不得扩大为「综合所有确认后的整体市场状态」。
+
+**Lifecycle primary owner**：EW Historical Dynamics（见 §7.9「Interpretation Input Ownership」）。Phase 核心输入 = EW Position / EW Velocity / EW Acceleration / EW Persistence。AW / Breadth / Volume / 结构事实**均不是第二条主轴**。
+
+**Parallel confirmation evidence（不得改写 Phase label）**：
+
+- **Capital Confirmation**：Amount-weighted Return Historical Dynamics。回答「主要成交资金所交易成员是否确认 EW 所表达的整体生命周期」。EW/AW 背离 → `not confirmed / divergence evidence`，不得删除或覆盖 EW Phase。
+- **Breadth Confirmation**：`advance_ratio` 为 canonical confirmation axis；`decline_ratio` / `unchanged_ratio` 为 supporting evidence，**不得作为额外独立 vote**。Breadth 本身仍属 §7.10 Internal Structure 正式组成部分；此处只定义其同时可作为 parallel Phase confirmation evidence。
+- **Volume Participation Confirmation**：`participation.volume.ratio20` / `participation.volume.ratio200`。回答「当前 EW lifecycle 是否得到量能参与支持」。它们**没有价格方向 owner 权限**——Volume positive 不得自动等于 Phase Strengthening。
+
+Confirmation 不得通过多数投票 / 加权 score / 综合分重新产生 Phase。Parallel confirmations 后续由 **Internal Structure、Trading Context、explanation** 消费。
+
+**Structure-only inputs（不参与 Dynamics Phase v1 label）**：`return_dispersion`、`price_normalized_hhi`、`amount_normalized_hhi`、Capital Tilt、Leadership Migration。它们属于 Internal Structure context。
+
+**Excluded from Phase v1**：`trend.continuous.regime_strength`。原因：其 **Phase directional ownership 尚未冻结**；Historical Dynamics 可以继续存在，但 Phase v1 **fail-closed 不消费**。不删除该 primitive。
+
+**11 primitive ≠ 11 phase**：Historical Dynamics 对多个 primitive 形成 objective dynamics evidence，**不意味着每个 primitive 各自产生一个产品 Dynamics Phase**。产品层：每个 Scope / trade_date **最多一个 Dynamics Phase**；Phase synthesis owner 遵循本节冻结架构。
+
+**Deterministic architecture cases（FROZEN，只冻结架构，不冻结 confirmation label enum / threshold）**：
+
+- **Case A**：EW lifecycle 明显向上、AW lifecycle 向下 → Phase 由 EW 决定；AW = capital divergence evidence；**不因为 AW 反向而把 Phase null**。
+- **Case B**：EW lifecycle strengthening、Breadth deteriorating → Phase 仍由 EW lifecycle 决定；Breadth = negative / weakening confirmation evidence；**Breadth 不重写 Phase**。
+- **Case C**：EW lifecycle repairing、Volume participation weakening → Phase lifecycle 不被 volume 改写；Volume = absent / weak confirmation evidence。
+- **Case D**：HHI rapidly rising、EW lifecycle flat → **HHI 不得投票把 Phase 变成 Strengthening**。
+
 #### 7.11.1 Algorithm Mapping 边界（v2.3）
 
 Dynamics Phase 六类 / Internal Structure Type 五类 / Trading Context 五类继续冻结。
-exact threshold、conflict priority、tie-break 必须在 **L1 + Historical Dynamics + Internal Structure 真实历史数据产生后**，通过 distribution inspection + representative case replay 冻结 Algorithm Mapping。Implementation 不得现在自行发明 `Position > 70`、`Acceleration > X` 等 arbitrary threshold。
+exact threshold、conflict priority、tie-break 必须基于真实历史数据，通过 distribution inspection + representative case replay 冻结 Algorithm Mapping。Implementation 不得现在自行发明 `Position > 70`、`Acceleration > X` 等 arbitrary threshold。
 
-这不阻塞 L1 / L2 / Cross-sectional / Historical Dynamics / Internal Structure 的开发。
+Mapping 依赖按层级拆解，**互不阻塞、各自独立 ready**：
+
+- **A. Dynamics Phase Algorithm Mapping 依赖**：L1 canonical facts + EW Historical Dynamics（Position / Velocity / Acceleration / Persistence）真实历史数据。依赖链：L1 → EW Historical Dynamics → 六类 Phase 分类 Algorithm Mapping。EW Historical Dynamics ready 即解锁本层 mapping；不等待 Internal Structure / Trading Context。
+- **B. Internal Structure Type Mapping 依赖**：Internal Structure 四类事实（Breadth / Capital Tilt / Concentration / Leadership Migration）真实数据。依赖链：L1 → Internal Structure facts → 五类 Internal Structure Type 分类 Algorithm Mapping。与 Dynamics Phase mapping 并行独立，不等待 A。
+- **C. Trading Context Mapping 依赖**：Dynamics Phase（A）与 Internal Structure Type（B）均 ready 后，再冻结五类 Trading Context 的 mapping。Trading Context 消费 Phase × Type 组合，因此是**最晚**解锁的一层；但 A / B 未 ready 不阻塞 L1 / L2 / Cross-sectional / Historical Dynamics 开发。
+
+分层原则：三者 mapping 各自独立 ready，任一层的 threshold 数据尚未产生时，其余层不得被该层阻塞；已 ready 层可以先行冻结，无需等待全链。
 
 ### 7.12 Trading Context
 
