@@ -249,9 +249,6 @@ def _compute_acceleration(
 
 def compute_historical_dynamics_series(
     position_series: Sequence[dict[str, Any]],
-    *,
-    span_fast: int = EMA_FAST_SPAN,
-    span_slow: int = EMA_SLOW_SPAN,
 ) -> dict[str, list[dict[str, Any]]]:
     """Compute the full Historical Dynamics chain for ONE Position series.
 
@@ -260,8 +257,10 @@ def compute_historical_dynamics_series(
             by ``historical_position.compute_position_series``), trade_date
             ASCENDING.  Each item must carry ``trade_date``, ``position``
             (float | None), ``status`` and ``history``.
-        span_fast / span_slow: EMA spans (defaults 5 / 20, the frozen PRD
-            numbers).  Signal reuses ``span_fast`` (Signal = EMA5(Velocity)).
+
+    Frozen spans (PRD §7.9): the product contract is hard-coded here — Fast =
+    EMA5 (``EMA_FAST_SPAN``), Slow = EMA20 (``EMA_SLOW_SPAN``), Signal =
+    EMA5(Velocity) (``SIGNAL_SPAN``).  No caller-overridable span parameters.
 
     Returns (date-aligned, one entry per input day — never compressed):
         ``{"position", "ema5", "ema20", "velocity", "signal", "acceleration"}``
@@ -269,10 +268,10 @@ def compute_historical_dynamics_series(
         series carries ``trade_date`` + ``value`` + ``status`` (EMA entries also
         carry ``valid_count`` + ``span``).
     """
-    ema5 = compute_ema_series(_ema_input(position_series, "position"), span=span_fast)
-    ema20 = compute_ema_series(_ema_input(position_series, "position"), span=span_slow)
+    ema5 = compute_ema_series(_ema_input(position_series, "position"), span=EMA_FAST_SPAN)
+    ema20 = compute_ema_series(_ema_input(position_series, "position"), span=EMA_SLOW_SPAN)
     velocity = _compute_velocity(position_series, ema5, ema20)
-    signal = compute_ema_series(_ema_input(velocity, "value"), span=span_fast)
+    signal = compute_ema_series(_ema_input(velocity, "value"), span=SIGNAL_SPAN)
     acceleration = _compute_acceleration(velocity, signal)
     return {
         "position": list(position_series),
@@ -286,18 +285,18 @@ def compute_historical_dynamics_series(
 
 def compute_historical_dynamics(
     position_series_by_primitive: Mapping[str, Sequence[dict[str, Any]]],
-    *,
-    span_fast: int = EMA_FAST_SPAN,
-    span_slow: int = EMA_SLOW_SPAN,
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
     """Compute Historical Dynamics for every eligible primitive (thin loop).
 
     ``position_series_by_primitive`` is the output of
     ``historical_position.compute_historical_positions`` (keys inherit the 11
     historical-ready primitives); there is NO second primitive registry here.
+
+    Frozen spans: every primitive uses the same hard-coded product contract
+    (Fast 5 / Slow 20 / Signal 5) — no caller-overridable span parameters.
     """
     return {
-        key: compute_historical_dynamics_series(series, span_fast=span_fast, span_slow=span_slow)
+        key: compute_historical_dynamics_series(series)
         for key, series in position_series_by_primitive.items()
     }
 

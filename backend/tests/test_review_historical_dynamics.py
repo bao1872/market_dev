@@ -17,12 +17,14 @@ Covers the frozen PRD §7.9 contracts:
 
 from __future__ import annotations
 
+import inspect
 import math
 from datetime import date, timedelta
 from typing import Any
 
 import pytest
 
+import app.domain.review.analysis.historical_dynamics as historical_dynamics_module
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.analysis.historical_dynamics import (
     EMA_FAST_SPAN,
@@ -574,3 +576,45 @@ def test_frozen_spans_constants() -> None:
     assert EMA_FAST_SPAN == 5
     assert EMA_SLOW_SPAN == 20
     assert SIGNAL_SPAN == 5
+
+
+# ---------------------------------------------------------------------------
+# Frozen-span contract enforcement (remote-audit correction round)
+# ---------------------------------------------------------------------------
+
+
+def test_series_api_signature_has_no_span_parameters() -> None:
+    """Test A: the canonical series API must NOT expose span_fast / span_slow."""
+    params = list(inspect.signature(compute_historical_dynamics_series).parameters)
+    assert "span_fast" not in params
+    assert "span_slow" not in params
+
+
+def test_multi_api_signature_has_no_span_parameters() -> None:
+    """Test B: the canonical multi-primitive API must NOT expose
+    span_fast / span_slow."""
+    params = list(inspect.signature(compute_historical_dynamics).parameters)
+    assert "span_fast" not in params
+    assert "span_slow" not in params
+
+
+def test_product_owner_consumes_frozen_spans(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test C: spy on the generic EMA owner and prove the product chain actually
+    consumes Fast=5, Slow=20, Signal=5 in that order — not just the constants."""
+    calls: list[int] = []
+    original = historical_dynamics_module.compute_ema_series
+
+    def _spy(input_series: Any, span: int) -> list[dict[str, Any]]:
+        calls.append(span)
+        return original(input_series, span)
+
+    monkeypatch.setattr(historical_dynamics_module, "compute_ema_series", _spy)
+
+    days = _trading_days(date(2026, 1, 5), 130)
+    rets = [0.01 * (i % 7) for i in range(130)]
+    series = _real_series(days, rets)
+    pos = compute_position_series(series, "equal_weight_return")
+    compute_historical_dynamics_series(pos)
+    # EMA5(Position) -> 5, EMA20(Position) -> 20, EMA5(Velocity) -> 5.
+    assert calls == [EMA_FAST_SPAN, EMA_SLOW_SPAN, SIGNAL_SPAN]
+    assert calls == [5, 20, 5]
