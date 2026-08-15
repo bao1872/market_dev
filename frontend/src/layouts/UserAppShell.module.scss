@@ -12,7 +12,24 @@
 
   :global(.main) {
     margin-left: 0;
+    // 两行 header：Global Header (58px) + Module Navigation (50px)
+    padding-top: 108px;
   }
+}
+
+.moduleNav {
+  position: fixed;
+  top: 58px;
+  left: 0;
+  right: 0;
+  z-index: 900;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 20px;
+  background: v.$color-bg-1;
+  border-bottom: 1px solid v.$color-border;
 }
 
 .brandLink {

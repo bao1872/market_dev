@@ -532,8 +532,6 @@ export default function MarketWorkspacePage() {
   return (
     <div className={styles.marketPage}>
       <MarketToolbar
-        keyword={keyword}
-        onKeywordChange={handleKeywordChange}
         industry={industry}
         onIndustryChange={handleIndustryChange}
         concept={concept}

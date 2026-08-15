@@ -11,15 +11,12 @@
 //
 // boards.available=false 时禁用输入，文案"板块数据暂不可用"；
 // boards.stale=true 时显示"沿用上次板块数据"提示，控件仍可用。
-import { useState, useEffect, useMemo } from 'react'
+import { useMemo } from 'react'
 import type { MarketBoardItem } from '@/api/endpoints'
 import { BoardFilterCombobox } from './BoardFilterCombobox'
 import styles from './MarketWorkspace.module.scss'
 
 interface MarketToolbarProps {
-  // 顶部搜索框受控 keyword（单一真源，由 MarketWorkspacePage 持有并同步到 URL）
-  keyword: string
-  onKeywordChange: (keyword: string) => void
   // 行业/概念筛选（CHANGE-20260713-006）
   // industry 语义（CHANGE-20260716-007）：行业关键词（不再要求精确完整路径）
   industry: string
@@ -30,28 +27,15 @@ interface MarketToolbarProps {
   boards:
     | { items: MarketBoardItem[]; available: boolean; stale?: boolean }
     | undefined
-  // placeholder（缺省时使用默认文案）
-  searchPlaceholder?: string
 }
 
 export function MarketToolbar({
-  keyword,
-  onKeywordChange,
   industry,
   onIndustryChange,
   concept,
   onConceptChange,
   boards,
-  searchPlaceholder = '搜索股票代码/名称/拼音首字母',
 }: MarketToolbarProps) {
-  // 顶部搜索框本地输入（与 industry/concept 不同，搜索框仍保留本地 state）
-  const [keywordInput, setKeywordInput] = useState(keyword)
-
-  // 外部值变化时（URL hydration、preset 应用、清空）同步到本地输入
-  useEffect(() => {
-    setKeywordInput(keyword)
-  }, [keyword])
-
   const boardsAvailable = boards?.available ?? false
   const boardsStale = boards?.stale ?? false
   const industryOptions = useMemo(
@@ -78,26 +62,6 @@ export function MarketToolbar({
 
   return (
     <div className={styles.toolbar}>
-      <input
-        type="search"
-        className={styles.searchInput}
-        placeholder={searchPlaceholder}
-        value={keywordInput}
-        onChange={(e) => {
-          const v = e.target.value
-          setKeywordInput(v)
-          // 清空立即提交（空串是明确意图，无需等 Enter/blur）
-          if (v === '') onKeywordChange('')
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault()
-            onKeywordChange(keywordInput)
-          }
-        }}
-        onBlur={() => onKeywordChange(keywordInput)}
-        aria-label="搜索股票"
-      />
       <BoardFilterCombobox
         value={industry}
         onChange={onIndustryChange}

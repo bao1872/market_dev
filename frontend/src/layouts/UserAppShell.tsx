@@ -20,6 +20,7 @@ import {
 import { useAuthStore } from '@/store/auth'
 import BrandLogo from '@/components/BrandLogo'
 import AccountMenu from '@/components/AccountMenu'
+import GlobalStockSearch from '@/features/market-workspace/GlobalStockSearch'
 import clsx from 'clsx'
 import styles from './UserAppShell.module.scss'
 
@@ -85,30 +86,31 @@ export default function UserAppShell({ children }: { children?: ReactNode }) {
           <NavLink to="/market" className={styles.brandLink} aria-label="盘迹行情首页">
             <BrandLogo variant="sidebar" />
           </NavLink>
-          <nav className={styles.nav} aria-label="主导航">
-            {visibleNavItems.map((item) => {
-              const to = buildNavTo(item.path)
-              const active = resolveActiveNav(location.pathname, searchParams, item.path)
-              return (
-                <NavLink
-                  key={item.path}
-                  to={to}
-                  className={clsx(styles.navLink, active && styles.navLinkActive)}
-                >
-                  {item.label}
-                </NavLink>
-              )
-            })}
-          </nav>
+        </div>
+        <GlobalStockSearch />
+        <div className="top-right">
           <div className="top-status">
             <i className={marketStatus?.is_trading_hours ? 'dot ok' : 'dot'}></i>
             A股{marketStatus?.status_text ?? '加载中'} · {currentTime}
           </div>
-        </div>
-        <div className="top-right">
           <AccountMenu variant="user" />
         </div>
       </header>
+      <nav className={styles.moduleNav} aria-label="模块导航">
+        {visibleNavItems.map((item) => {
+          const to = buildNavTo(item.path)
+          const active = resolveActiveNav(location.pathname, searchParams, item.path)
+          return (
+            <NavLink
+              key={item.path}
+              to={to}
+              className={clsx(styles.navLink, active && styles.navLinkActive)}
+            >
+              {item.label}
+            </NavLink>
+          )
+        })}
+      </nav>
       <main className="main">
         <div className="content">{children ?? <Outlet />}</div>
       </main>
