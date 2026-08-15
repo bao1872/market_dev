@@ -19,9 +19,10 @@ import uuid
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
+import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,7 +43,18 @@ from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services import calendar_service, review_scope_service
 from app.services.board_membership_service import PITMembershipUnavailableError
-from app.services.observation_prep import RawMemberFacts, build_member_observation
+from app.services.observation_prep import (
+    RawMemberFacts,
+    build_member_observation,
+    build_member_observation_from_facts,
+)
+from app.services.volume_context import (
+    LONG_WINDOW,
+    SHORT_WINDOW,
+    VectorizedVolumeContext,
+    compute_volume_context_vectorized,
+    vectorized_context_at,
+)
 
 # History payload contract version for canonical immutable events (M2 isolation).
 HISTORY_CONTRACT_VERSION = "review-history-v2"
@@ -315,6 +327,7 @@ def _build_member_observations(
     bar_facts: dict[uuid.UUID, list[DailyBarFact]],
     t1_facts: dict[uuid.UUID, list[DailyBarFact]],
     current_only_facts: dict[str, dict[str, object]],
+    vec_volume: dict[uuid.UUID, _VectorizedMemberVolume] | None = None,
 ) -> list[MemberObservation]:
     """Build canonical ``MemberObservation`` inputs shared by the per-date and the
     batch replay path (single member-construction owner).
@@ -325,6 +338,15 @@ def _build_member_observations(
     ``volume_t`` / ``amount_t`` carry T separately and the canonical volume owner
     appends it exactly once.  Both series are built from the SAME prior bars so
     index i stays aligned to one trade_date across volume and amount.
+
+    ``vec_volume`` (batch replay only) precomputes each member's VolumeContext
+    series once across the whole window with the vectorized owner.  When the
+    member's ``[T-400d, T]`` window holds ``>= SHORT_WINDOW`` finite-volume bars
+    (and the 200D row is either window-contained or unavailable in BOTH paths),
+    the T row is indexed from that precomputed series and the strict-prior
+    history is NOT rebuilt (numeric work done once per member, not once per
+    member x T).  Otherwise the canonical per-date owner is used, which requires
+    the strict-prior history — semantics stay byte-identical either way.
     """
     members: list[MemberObservation] = []
     for inst_id in pit_ids_t:
@@ -334,36 +356,63 @@ def _build_member_observations(
             continue
         facts = bar_facts.get(inst_id, [])
         current = facts[-1] if facts and facts[-1].trade_date == trade_date else None
-        prior_bars = [b for b in facts if b.trade_date != trade_date]
-        volumes = [b.volume for b in prior_bars]
-        amounts = [b.amount for b in prior_bars]
         t1_bars = t1_facts.get(inst_id, [])
         t1_bar = t1_bars[-1] if t1_bars and t1_bars[-1].trade_date == t1 else None
-        members.append(
-            build_member_observation(
-                RawMemberFacts(
-                    member_id=str(inst_id),
-                    flat_t=previous_state_to_flat(state_t),
-                    close_t=current.close if current else None,
-                    amount_t=current.amount if current else None,
-                    volume_t=current.volume if current else None,
-                    volume_history=tuple(volumes),
-                    amount_history=tuple(amounts),
-                    flat_t1=(
-                        previous_state_to_flat(states_t1[inst_id]) if inst_id in states_t1 else None
-                    ),
-                    close_t1=t1_bar.close if t1_bar else None,
-                    # Continuous Trend/Structure/Momentum/Volume facts (PRD §7.3-§7.6)
-                    # that the history state_payload carries but previous_state_to_flat
-                    # does not surface. Additive passthrough; missing -> None.
-                    continuous=state_to_continuous(state_t),
-                    # Current-only canonical facts from the exact-T snapshot.  These
-                    # have no member-day history series; Historical Dynamics stays
-                    # unavailable while Current is served (PRD v2.3).
-                    current_only=current_only_facts.get(str(inst_id)),
-                )
-            )
+        raw = RawMemberFacts(
+            member_id=str(inst_id),
+            flat_t=previous_state_to_flat(state_t),
+            close_t=current.close if current else None,
+            amount_t=current.amount if current else None,
+            volume_t=current.volume if current else None,
+            flat_t1=(
+                previous_state_to_flat(states_t1[inst_id]) if inst_id in states_t1 else None
+            ),
+            close_t1=t1_bar.close if t1_bar else None,
+            # Continuous Trend/Structure/Momentum/Volume facts (PRD §7.3-§7.6)
+            # that the history state_payload carries but previous_state_to_flat
+            # does not surface. Additive passthrough; missing -> None.
+            continuous=state_to_continuous(state_t),
+            # Current-only canonical facts from the exact-T snapshot.  These
+            # have no member-day history series; Historical Dynamics stays
+            # unavailable while Current is served (PRD v2.3).
+            current_only=current_only_facts.get(str(inst_id)),
         )
+        vv = vec_volume.get(inst_id) if vec_volume else None
+        if vv is not None:
+            # Index the precomputed series at the member's last finite-volume bar
+            # <= T.  The row is canonical-equivalent to the per-date compact-array
+            # row for T per-window, not per full-200 gate:
+            #   * 20D windows (MA20/ratio20/zscore20/percentile20, INCLUDE current
+            #     bar) are contained in [T-400d, T] iff ``w >= SHORT_WINDOW``;
+            #   * 200D windows are contained iff ``w >= LONG_WINDOW``.  When
+            #     ``w < LONG_WINDOW`` the canonical owner yields unavailable 200D
+            #     facts (MA200 min_periods not met), and the vectorized series
+            #     yields the SAME unavailable row as long as the member has fewer
+            #     than LONG_WINDOW finite-volume bars up to ``hi`` in the batch
+            #     window (``hi < LONG_WINDOW - 1``) — i.e. neither path ever has a
+            #     200-bar window to drift on.  This keeps the vectorized path
+            #     engaged for real data whose history is shorter than 200 bars.
+            hi = bisect_right(vv.dates, trade_date) - 1
+            if hi >= 0:
+                lo = bisect_left(vv.dates, trade_date - timedelta(days=_BAR_LOOKBACK_DAYS))
+                w = hi - lo + 1
+                if w >= SHORT_WINDOW and (w >= LONG_WINDOW or hi < LONG_WINDOW - 1):
+                    members.append(
+                        build_member_observation_from_facts(
+                            raw, vectorized_context_at(vv.context, hi)
+                        )
+                    )
+                    continue
+        # Canonical per-date owner (oracle) — window-bound edge case (fewer than
+        # LONG_WINDOW finite-volume bars in the 400d lookback, or no finite-volume
+        # bar <= T).  It needs the strict-prior history, so build it now.
+        prior_bars = [b for b in facts if b.trade_date != trade_date]
+        raw = replace(
+            raw,
+            volume_history=tuple(b.volume for b in prior_bars),
+            amount_history=tuple(b.amount for b in prior_bars),
+        )
+        members.append(build_member_observation(raw))
     return members
 
 
@@ -458,7 +507,68 @@ async def prepare_scope_from_member_ids(
 # stay as the canonical SQL owners; the batch loaders read the SAME canonical
 # tables once and the replay reproduces exactly the per-date windows so the
 # resulting PreparedScope is byte-identical to the per-date path.
+#
+# Vectorized preprocessing: each member's VolumeContext series is computed ONCE
+# across the whole window with the numpy owner (``compute_volume_context_vectorized``),
+# then the per-T replay only indexes the precomputed row — the pandas rolling /
+# percentile work that the per-date path repeats for every (member, T) is done a
+# single time per member.  The canonical per-date owner remains the oracle and is
+# used as fallback for the window-bound edge case (see ``_build_member_observations``).
 # ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _VectorizedMemberVolume:
+    """Precomputed per-member VolumeContext over the whole batch bar window.
+
+    ``dates`` / ``volumes`` are the member's finite-volume daily bars across
+    ``[first-400d, last]`` ascending (the batch window); ``context`` is the
+    vectorized VolumeContext series with one row per volume (row ``i`` == the
+    canonical series row for the bar at ``dates[i]``).  The per-T row is resolved
+    by index; a T whose ``[T-400d, T]`` window holds fewer than ``LONG_WINDOW``
+    finite-volume bars falls back to the canonical per-date owner (window-bound
+    equivalence, no semantic drift).
+    """
+
+    dates: tuple[date, ...]
+    volumes: np.ndarray
+    context: VectorizedVolumeContext
+
+
+def _precompute_vectorized_volume(
+    bars: dict[uuid.UUID, _InstrumentBarSeries],
+) -> dict[uuid.UUID, _VectorizedMemberVolume]:
+    """Compute the whole-member vectorized VolumeContext series once per member.
+
+    Members with no finite-volume bar are simply absent (their facts stay
+    unavailable, matching the canonical owner).  Missing / non-finite volume is
+    filtered (mirroring the canonical ``_finite`` compact-array construction),
+    so ``dates`` / ``volumes`` reproduce the canonical finite-only array exactly.
+    """
+    out: dict[uuid.UUID, _VectorizedMemberVolume] = {}
+    for inst_id, series in bars.items():
+        vols: list[float] = []
+        dates: list[date] = []
+        for fact in series.facts:
+            if fact.volume is None:
+                continue
+            value = float(fact.volume)
+            if not np.isfinite(value):
+                # Mirror the canonical finite-only compact array: non-finite
+                # volume is unavailable, not a real bar.
+                continue
+            vols.append(value)
+            dates.append(fact.trade_date)
+        if not vols:
+            continue
+        arr = np.asarray(vols, dtype=float)
+        context = compute_volume_context_vectorized(arr)
+        out[inst_id] = _VectorizedMemberVolume(
+            dates=tuple(dates),
+            volumes=arr,
+            context=context,
+        )
+    return out
 
 
 @dataclass(frozen=True)
@@ -660,6 +770,9 @@ async def prepare_scope_series_from_member_ids(
     states_by_date = await _load_batch_states(session, member_ids, trade_dates, t1_by_date)
     bars = await _load_batch_bars(session, member_ids, trade_dates)
     events_by_date = await _load_batch_events(session, member_ids, trade_dates)
+    # Vectorized preprocessing: per-member VolumeContext series computed once,
+    # indexed by the per-T replay (see ``_build_member_observations``).
+    vec_volume = _precompute_vectorized_volume(bars)
 
     pit_ids_t = list(member_ids)
     t1_ids = list(pit_member_ids_t1) if pit_member_ids_t1 is not None else list(pit_ids_t)
@@ -686,6 +799,7 @@ async def prepare_scope_series_from_member_ids(
             bar_facts=bar_facts,
             t1_facts=t1_facts,
             current_only_facts=current_only_facts,
+            vec_volume=vec_volume,
         )
         out.append(
             PreparedScope(

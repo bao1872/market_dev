@@ -39,6 +39,7 @@ from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.scope_observation import MemberObservation
 from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 from app.services.volume_context import (
+    VolumeContextData,
     compute_volume_context_series,
     extract_last_volume_context,
 )
@@ -169,18 +170,38 @@ def _compute_volume_context_canonical(raw: RawMemberFacts):
 
 
 def build_member_observation(raw: RawMemberFacts) -> MemberObservation:
-    """Build a ``MemberObservation`` from already-resolved canonical facts."""
+    """Build a ``MemberObservation`` from already-resolved canonical facts.
+
+    Resolves the volume context via the canonical owner and delegates the
+    construction to :func:`build_member_observation_from_facts` (single
+    member-construction owner shared with the vectorized batch path).
+    """
+    vc = _compute_volume_context_canonical(raw)
+    return build_member_observation_from_facts(raw, vc)
+
+
+def build_member_observation_from_facts(
+    raw: RawMemberFacts, vc: VolumeContextData | None
+) -> MemberObservation:
+    """Build a ``MemberObservation`` from raw facts and a pre-resolved canonical
+    volume context (``VolumeContextData``).
+
+    Single member-construction owner.  The per-date path calls it with the
+    context produced by ``_compute_volume_context_canonical``; the vectorized
+    batch path calls it with a context precomputed once per member across the
+    whole date window (``volume_context.vectorized_context_at``), so the numeric
+    work is computed once instead of once per (member, T).
+    """
     trend, swing, internal, momentum = _flat_semantics(raw.flat_t)
     t1_trend, t1_swing, t1_internal, t1_momentum = _flat_semantics(raw.flat_t1)
     close_t = _finite(raw.close_t)
     cont = raw.continuous or {}
     current_only = raw.current_only or {}
-    # VOLUME SSOT (REVIEW-V23-A-CORRECTION-2): Review does NOT own a second rolling
-    # formula.  The prepared bars through T are handed to the canonical First Pyramid
-    # VolumeContext owner; we extract the last (T) row.  This guarantees identical
-    # MA20/MA200 window semantics, 0/negative-volume handling, percentile gate and
-    # readiness to compute_volume_context_series (no 19/20 or 199/200 one-bar drift).
-    vc = _compute_volume_context_canonical(raw)
+    # VOLUME SSOT (REVIEW-V23-A-CORRECTION-2): the canonical VolumeContext owner
+    # resolved ``vc`` (per-date path) or the vectorized batch precomputed it once
+    # per member across the whole date window.  Both are the same canonical owner
+    # semantics: identical MA20/MA200 window, 0/negative-volume handling,
+    # percentile gate and readiness (no 19/20 or 199/200 one-bar drift).
     # 2026-08-13 CORRECTION: 200D facts 仅在 readiness_200 满足（完整 >=200 根
     # history）时产出；25D history 不得产生 200D fact。  Readiness is taken from the
     # canonical owner's produced 200D fields (None => window not satisfied).

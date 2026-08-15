@@ -26,7 +26,6 @@
 """
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -128,6 +127,190 @@ def _rolling_percentile(series: pd.Series, window: int) -> pd.Series:
         if len(window_vals) >= 5:  # 至少 5 个有效值
             result.iloc[i] = _pct(vals[i], window_vals)
     return result
+
+
+# ----------------------------------------------------------------------------
+# Vectorized VolumeContext (REVIEW v2.3 vectorized batch optimization)
+# ----------------------------------------------------------------------------
+# ``compute_volume_context_series`` is the canonical SSOT implementation (pandas,
+# per-bar Python percentile loop).  For the historical reconstruction we need the
+# whole member x date window computed ONCE per member instead of once per
+# (member, T) — the pandas path recomputes the full rolling series for every T.
+#
+# ``compute_volume_context_vectorized`` is the SAME formula as the SSOT, expressed
+# as NumPy sliding-window operations.  It is NOT a second volume formula: it must
+# stay bit-identical to ``compute_volume_context_series`` (MA20/MA200 window
+# semantics, 0/negative-volume handling, ddof=0 z-score, percentile excludes the
+# current bar, >=5 finite gate, NaN/missing = unavailable).  Equivalence is
+# enforced by unit tests (test_review_vectorized_facts).  The canonical per-date
+# path keeps using ``compute_volume_context_series`` and is the test oracle.
+
+
+def _rolling_mean_np(vals: np.ndarray, window: int) -> np.ndarray:
+    """Mirror ``pandas.Series.rolling(window, min_periods=window).mean()``.
+
+    Only finite values count toward the window (pandas ``min_periods`` counts
+    non-NaN observations); rows with fewer than ``window`` finite values -> NaN.
+    """
+    n = len(vals)
+    out = np.full(n, np.nan)
+    if n >= window:
+        sw = np.lib.stride_tricks.sliding_window_view(vals, window)
+        f = np.isfinite(sw)
+        cnt = f.sum(axis=1)
+        s = np.where(f, sw, 0.0).sum(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean = np.where(cnt >= window, s / cnt, np.nan)
+        out[window - 1:] = mean
+    return out
+
+
+def _rolling_std_np(vals: np.ndarray, window: int) -> np.ndarray:
+    """Mirror ``pandas.Series.rolling(window, min_periods=window).std(ddof=0)``."""
+    n = len(vals)
+    out = np.full(n, np.nan)
+    if n >= window:
+        sw = np.lib.stride_tricks.sliding_window_view(vals, window)
+        f = np.isfinite(sw)
+        cnt = f.sum(axis=1)
+        ok = cnt >= window
+        mean = np.where(f, sw, 0.0).sum(axis=1) / np.maximum(cnt, 1)
+        var = np.where(f, (sw - mean[:, None]) ** 2, 0.0).sum(axis=1) / np.maximum(cnt, 1)
+        out[window - 1:] = np.where(ok, np.sqrt(var), np.nan)
+    return out
+
+
+def _rolling_percentile_np(vals: np.ndarray, window: int) -> np.ndarray:
+    """Mirror :func:`_rolling_percentile` exactly.
+
+    Percentile of the current bar among the strict-PRIOR ``window`` bars
+    (EXCLUDES the current bar), finite-filtered, ``>=5`` finite gate:
+    ``count(prior < current) / len(prior) * 100``.  Rows before index 1 -> NaN.
+    """
+    n = len(vals)
+    out = np.full(n, np.nan)
+    if n < 2:
+        return out
+    if n > window:
+        # row k of the sliding view = vals[k:k+window]; aligned to index i = k+window
+        sw = np.lib.stride_tricks.sliding_window_view(vals[:-1], window)
+        f = np.isfinite(sw)
+        cnt = f.sum(axis=1)
+        cur = vals[window:]
+        cur_f = np.isfinite(cur)
+        less = np.where(f, sw < cur[:, None], False).sum(axis=1)
+        ok = (cnt >= 5) & cur_f
+        out[window:] = np.where(ok, less / np.maximum(cnt, 1) * 100.0, np.nan)
+    # Head region (i in [1, window)): variable-length prior window vals[0:i].
+    for i in range(1, min(window, n)):
+        wv = vals[0:i]
+        wv = wv[np.isfinite(wv)]
+        if len(wv) >= 5 and np.isfinite(vals[i]):
+            out[i] = np.sum(wv < vals[i]) / len(wv) * 100.0
+    return out
+
+
+@dataclass(frozen=True)
+class VectorizedVolumeContext:
+    """Per-row VolumeContext arrays for one member's compact bar series.
+
+    Row ``i`` mirrors the row ``compute_volume_context_series`` would produce for
+    the same compact series at index ``i`` (NaN = window not satisfied / value
+    unavailable).  Convert a row to the canonical ``VolumeContextData`` with
+    :func:`vectorized_context_at`.
+    """
+
+    volume: np.ndarray
+    volume_ma_20: np.ndarray
+    volume_ma_200: np.ndarray
+    volume_ratio_20: np.ndarray
+    volume_ratio_200: np.ndarray
+    volume_zscore_20: np.ndarray
+    volume_zscore_200: np.ndarray
+    volume_percentile_20: np.ndarray
+    volume_percentile_200: np.ndarray
+
+
+def compute_volume_context_vectorized(vol: np.ndarray) -> VectorizedVolumeContext:
+    """Compute the full VolumeContext series for one compact volume array.
+
+    Same formula as :func:`compute_volume_context_series` (MA/ratio/z-score
+    windows INCLUDE the current bar; percentile EXCLUDES it).  ``vol`` is the
+    member's compact bar volume series; non-finite entries are treated as missing
+    exactly like pandas NaN handling.  Returns a ``VectorizedVolumeContext`` with
+    one row per input bar.
+    """
+    v = np.asarray(vol, dtype=float)
+
+    ma20 = _rolling_mean_np(v, SHORT_WINDOW)
+    ma200 = _rolling_mean_np(v, LONG_WINDOW)
+
+    ratio20 = np.full_like(v, np.nan)
+    ratio200 = np.full_like(v, np.nan)
+    np.divide(v, ma20, out=ratio20, where=ma20 != 0)
+    np.divide(v, ma200, out=ratio200, where=ma200 != 0)
+
+    m20 = _rolling_mean_np(v, SHORT_WINDOW)
+    s20 = _rolling_std_np(v, SHORT_WINDOW)
+    m200 = _rolling_mean_np(v, LONG_WINDOW)
+    s200 = _rolling_std_np(v, LONG_WINDOW)
+    z20 = np.full_like(v, np.nan)
+    z200 = np.full_like(v, np.nan)
+    np.divide(v - m20, s20, out=z20, where=s20 != 0)
+    np.divide(v - m200, s200, out=z200, where=s200 != 0)
+
+    pct20 = _rolling_percentile_np(v, SHORT_WINDOW)
+    pct200 = _rolling_percentile_np(v, LONG_WINDOW)
+
+    return VectorizedVolumeContext(
+        volume=v,
+        volume_ma_20=ma20,
+        volume_ma_200=ma200,
+        volume_ratio_20=ratio20,
+        volume_ratio_200=ratio200,
+        volume_zscore_20=z20,
+        volume_zscore_200=z200,
+        volume_percentile_20=pct20,
+        volume_percentile_200=pct200,
+    )
+
+
+def vectorized_context_at(
+    vc: VectorizedVolumeContext, bar_index: int
+) -> VolumeContextData | None:
+    """Build the canonical :class:`VolumeContextData` for one row of a
+    ``VectorizedVolumeContext`` (NaN -> None), mirroring
+    :func:`extract_volume_context_at`."""
+    if vc is None or bar_index < 0 or bar_index >= len(vc.volume):
+        return None
+    ratio20 = vc.volume_ratio_20[bar_index]
+    ratio200 = vc.volume_ratio_200[bar_index]
+    # 2026-08-13 CORRECTION: per-window readiness mirrors extract_volume_context_at
+    # (readiness_20/200 = the corresponding ratio row is finite).
+    return VolumeContextData(
+        volume=_safe_float(vc.volume[bar_index]),
+        amount=None,
+        turnover_rate=None,
+        volume_ma_20=_safe_float(vc.volume_ma_20[bar_index]),
+        volume_ma_200=_safe_float(vc.volume_ma_200[bar_index]),
+        volume_ratio_20=_safe_float(ratio20),
+        volume_ratio_200=_safe_float(ratio200),
+        amount_ratio_20=None,
+        volume_percentile_20=_safe_float(vc.volume_percentile_20[bar_index]),
+        volume_percentile_200=_safe_float(vc.volume_percentile_200[bar_index]),
+        volume_zscore_20=_safe_float(vc.volume_zscore_20[bar_index]),
+        volume_zscore_200=_safe_float(vc.volume_zscore_200[bar_index]),
+        # Overall readiness mirrors ``compute_volume_context_series`` exactly: it is
+        # derived from the MA rows being non-NaN (not from the ratio rows), so an
+        # all-zero-volume window yields readiness=True like the canonical owner.
+        # Per-window readiness_20/200 are still the ratio-based gates consumers use.
+        readiness=bool(
+            np.isfinite(vc.volume_ma_20[bar_index])
+            and np.isfinite(vc.volume_ma_200[bar_index])
+        ),
+        readiness_20=bool(np.isfinite(ratio20)),
+        readiness_200=bool(np.isfinite(ratio200)),
+    )
 
 
 def compute_volume_context_series(bars: pd.DataFrame) -> pd.DataFrame:
