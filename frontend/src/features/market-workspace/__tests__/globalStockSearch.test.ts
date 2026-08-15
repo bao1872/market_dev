@@ -57,11 +57,15 @@ test('GlobalStockSearch 主点击使用 originScope=market 的 canonical navigat
 })
 
 // ===== 3. 主点击不触发 watchlist mutation =====
+// fail-closed：先断言两个 handler 真实存在且顺序正确，
+// 否则 slice 会得到空串/错误区间，导致假阳性 PASS。
 test('GlobalStockSearch 主点击不调用 add/remove watchlist mutation', () => {
   const src = readSource(SEARCH_PATH)
-  const mainClickIdx = src.indexOf('function handleMainClick')
-  const starIdx = src.indexOf('function handleStarClick')
-  const region = mainClickIdx >= 0 ? src.slice(mainClickIdx, starIdx) : ''
+  const mainClickIdx = src.indexOf('handleMainClick =')
+  const starIdx = src.indexOf('handleStarClick =')
+  assert.ok(mainClickIdx >= 0, '必须找到 handleMainClick handler 定义')
+  assert.ok(starIdx > mainClickIdx, 'handleStarClick 必须位于 handleMainClick 之后')
+  const region = src.slice(mainClickIdx, starIdx)
   assert.ok(
     !region.includes('addToWatchlist.mutate') &&
       !region.includes('removeFromWatchlist.mutate'),
