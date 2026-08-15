@@ -1,4 +1,5 @@
-"""Tests for Analysis B Historical Dynamics Velocity / Signal / Acceleration.
+"""Tests for Analysis B Historical Dynamics Velocity / Signal / Acceleration /
+Persistence.
 
 Covers the frozen PRD §7.9 contracts:
 
@@ -9,10 +10,13 @@ Covers the frozen PRD §7.9 contracts:
 14. Status propagation: PRD deterministic examples A-E (upstream status drives
     downstream status; ``value is None`` is never an availability cause).
 15. Future leakage: T+1 / T+2 mutations never move EMA5/EMA20/Velocity/Signal/
-    Acceleration at T.
+    Acceleration/Persistence at T.
 16. Real Position series: first-ready thresholds on a series produced by the
     real canonical producer (Position -> EMA5 -> EMA20 -> Velocity -> Signal ->
-    Acceleration).
+    Acceleration -> Persistence).
+17. Persistence: PRD deterministic cases A-G, window metadata, boundary
+    inclusivity, contract-violation fail-fast, historical gaps occupying
+    window slots, no future leakage, no caller-overridable contract params.
 """
 
 from __future__ import annotations
@@ -29,10 +33,15 @@ from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.analysis.historical_dynamics import (
     EMA_FAST_SPAN,
     EMA_SLOW_SPAN,
+    LOWER_POSITION_THRESHOLD,
+    PERSISTENCE_MINIMUM_VALID_COUNT,
+    PERSISTENCE_WINDOW_SIZE,
     SIGNAL_SPAN,
+    UPPER_POSITION_THRESHOLD,
     compute_ema_series,
     compute_historical_dynamics,
     compute_historical_dynamics_series,
+    compute_persistence_series,
 )
 from app.domain.review.analysis.historical_position import compute_position_series
 from app.domain.review.scope_observation import (
@@ -487,7 +496,15 @@ def test_future_leakage_golden() -> None:
     after_pos = compute_position_series(mutated, "equal_weight_return")
     after = compute_historical_dynamics_series(after_pos)
 
-    for fact_key in ("position", "ema5", "ema20", "velocity", "signal", "acceleration"):
+    for fact_key in (
+        "position",
+        "ema5",
+        "ema20",
+        "velocity",
+        "signal",
+        "acceleration",
+        "persistence",
+    ):
         assert after[fact_key][t_idx] == base[fact_key][t_idx], fact_key
 
 
@@ -542,7 +559,15 @@ def test_multi_primitive_loop_uses_position_keys() -> None:
     dynamics = compute_historical_dynamics(positions)
     assert set(dynamics) == {"equal_weight_return", "advance_ratio"}
     for key in ("equal_weight_return", "advance_ratio"):
-        for fact_key in ("position", "ema5", "ema20", "velocity", "signal", "acceleration"):
+        for fact_key in (
+            "position",
+            "ema5",
+            "ema20",
+            "velocity",
+            "signal",
+            "acceleration",
+            "persistence",
+        ):
             assert len(dynamics[key][fact_key]) == len(days), (key, fact_key)
 
 
@@ -618,3 +643,318 @@ def test_product_owner_consumes_frozen_spans(monkeypatch: pytest.MonkeyPatch) ->
     # EMA5(Position) -> 5, EMA20(Position) -> 20, EMA5(Velocity) -> 5.
     assert calls == [EMA_FAST_SPAN, EMA_SLOW_SPAN, SIGNAL_SPAN]
     assert calls == [5, 20, 5]
+
+
+# ---------------------------------------------------------------------------
+# Test 17 — Persistence (PRD §7.9 Persistence Numerical Contract)
+# ---------------------------------------------------------------------------
+
+
+def test_persistence_frozen_constants() -> None:
+    """The frozen PRD Persistence numbers are the canonical constants."""
+    assert PERSISTENCE_WINDOW_SIZE == 20
+    assert PERSISTENCE_MINIMUM_VALID_COUNT == 15
+    assert UPPER_POSITION_THRESHOLD == 80.0
+    assert LOWER_POSITION_THRESHOLD == 20.0
+
+
+def test_persistence_output_shape_exact() -> None:
+    """Persistence facts expose exactly the transparent metadata fields — no
+    reason / label / phase / middle / score."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    series = [_position_fact(d, 50.0, "ready") for d in days]
+    fact = compute_persistence_series(series)[19]
+    assert set(fact) == {
+        "trade_date",
+        "window_size",
+        "minimum_valid_count",
+        "candidate_count",
+        "valid_count",
+        "coverage",
+        "upper_count",
+        "lower_count",
+        "upper_occupancy",
+        "lower_occupancy",
+        "status",
+    }
+
+
+def test_persistence_case_a() -> None:
+    """20 slots / 20 valid / 5 upper / 5 lower -> ready, Upper=.25, Lower=.25."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    positions = [50.0] * 20
+    for i in range(5):
+        positions[i] = 90.0  # upper
+    for i in range(5, 10):
+        positions[i] = 10.0  # lower
+    series = [_position_fact(d, v, "ready") for d, v in zip(days, positions, strict=True)]
+    fact = compute_persistence_series(series)[19]
+    assert fact["status"] == "ready"
+    assert fact["candidate_count"] == 20
+    assert fact["valid_count"] == 20
+    assert fact["coverage"] == pytest.approx(1.0)
+    assert fact["upper_count"] == 5
+    assert fact["lower_count"] == 5
+    assert fact["upper_occupancy"] == pytest.approx(0.25)
+    assert fact["lower_occupancy"] == pytest.approx(0.25)
+
+
+def test_persistence_case_b() -> None:
+    """16 valid (all >=80) + 4 historical missing, current T ready -> ready,
+    Upper=1.0, Lower=0, coverage=.8 (no back-fill for the missing slots)."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    series = []
+    for i, d in enumerate(days):
+        if i < 4:
+            series.append(_position_fact(d, None, "insufficient_history"))
+        else:
+            series.append(_position_fact(d, 90.0, "ready"))
+    fact = compute_persistence_series(series)[19]
+    assert fact["status"] == "ready"
+    assert fact["candidate_count"] == 20
+    assert fact["valid_count"] == 16
+    assert fact["coverage"] == pytest.approx(0.8)
+    assert fact["upper_count"] == 16
+    assert fact["lower_count"] == 0
+    assert fact["upper_occupancy"] == pytest.approx(1.0)
+    assert fact["lower_occupancy"] == pytest.approx(0.0)
+
+
+def test_persistence_case_c() -> None:
+    """14 valid + 6 historical missing, current T ready -> insufficient_history,
+    Upper/Lower=None, valid_count=14, coverage=.7."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    series = []
+    for i, d in enumerate(days):
+        if i < 6:
+            series.append(_position_fact(d, None, "insufficient_history"))
+        else:
+            series.append(_position_fact(d, 50.0, "ready"))
+    fact = compute_persistence_series(series)[19]
+    assert fact["status"] == "insufficient_history"
+    assert fact["upper_occupancy"] is None
+    assert fact["lower_occupancy"] is None
+    assert fact["valid_count"] == 14
+    assert fact["coverage"] == pytest.approx(0.7)
+
+
+def test_persistence_case_d() -> None:
+    """19 valid candidates but Position(T)=unavailable_current ->
+    unavailable_current, Upper/Lower=None; window metadata stays transparent."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    series = [_position_fact(d, 50.0, "ready") for d in days[:19]] + [
+        _position_fact(days[19], None, "unavailable_current")
+    ]
+    fact = compute_persistence_series(series)[19]
+    assert fact["status"] == "unavailable_current"
+    assert fact["upper_occupancy"] is None
+    assert fact["lower_occupancy"] is None
+    # Even though historical window coverage would be enough, no old
+    # Persistence is emitted; metadata remains transparent.
+    assert fact["candidate_count"] == 20
+    assert fact["valid_count"] == 19
+    assert fact["coverage"] == pytest.approx(0.95)
+
+
+def test_persistence_case_e() -> None:
+    """19 valid candidates but Position(T)=insufficient_history ->
+    insufficient_history (current upstream status is not overridden by the
+    19 other ready window positions)."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    series = [_position_fact(d, 50.0, "ready") for d in days[:19]] + [
+        _position_fact(days[19], None, "insufficient_history")
+    ]
+    fact = compute_persistence_series(series)[19]
+    assert fact["status"] == "insufficient_history"
+    assert fact["upper_occupancy"] is None
+    assert fact["lower_occupancy"] is None
+    assert fact["valid_count"] == 19
+
+
+def test_persistence_case_f() -> None:
+    """20 valid Positions all 50.0 -> ready, Upper=0, Lower=0 (Upper+Lower need
+    NOT sum to 1)."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    series = [_position_fact(d, 50.0, "ready") for d in days]
+    fact = compute_persistence_series(series)[19]
+    assert fact["status"] == "ready"
+    assert fact["upper_count"] == 0
+    assert fact["lower_count"] == 0
+    assert fact["upper_occupancy"] == pytest.approx(0.0)
+    assert fact["lower_occupancy"] == pytest.approx(0.0)
+
+
+def test_persistence_case_g_short_series() -> None:
+    """Series beginning with only 10 observations -> candidate_count=10,
+    window_size=20, valid_count=10, coverage=.5, insufficient_history (never
+    a fake candidate_count=20 / coverage=1.0)."""
+    days = _trading_days(date(2026, 1, 5), 10)
+    series = [_position_fact(d, 50.0, "ready") for d in days]
+    fact = compute_persistence_series(series)[9]
+    assert fact["window_size"] == 20
+    assert fact["candidate_count"] == 10
+    assert fact["valid_count"] == 10
+    assert fact["coverage"] == pytest.approx(0.5)
+    assert fact["status"] == "insufficient_history"
+    assert fact["upper_occupancy"] is None
+    assert fact["lower_occupancy"] is None
+
+
+def test_persistence_boundaries_inclusive() -> None:
+    """80.0 -> Upper, 20.0 -> Lower; 79.999 / 20.001 do NOT cross the boundary."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    positions = [50.0] * 20
+    positions[0] = 80.0
+    positions[1] = 20.0
+    positions[2] = 79.999
+    positions[3] = 20.001
+    series = [_position_fact(d, v, "ready") for d, v in zip(days, positions, strict=True)]
+    fact = compute_persistence_series(series)[19]
+    assert fact["status"] == "ready"
+    assert fact["upper_count"] == 1  # only 80.0
+    assert fact["lower_count"] == 1  # only 20.0
+    assert fact["upper_occupancy"] == pytest.approx(1 / 20)
+    assert fact["lower_occupancy"] == pytest.approx(1 / 20)
+
+
+@pytest.mark.parametrize(
+    "bad_position",
+    [None, float("nan"), float("inf"), float("-inf"), -0.1, 100.1],
+)
+def test_persistence_contract_violation_fails_fast(bad_position: Any) -> None:
+    """status=ready with a non-finite / out-of-range position is an upstream
+    contract violation -> ValueError (never silently treated as missing)."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    series = [_position_fact(d, 50.0, "ready") for d in days]
+    series[10] = _position_fact(days[10], bad_position, "ready")
+    with pytest.raises(ValueError):
+        compute_persistence_series(series)
+
+
+def test_persistence_non_ready_statuses_with_none_position_are_legal() -> None:
+    """unavailable_current / insufficient_history with position=None are legal
+    (occupy a slot) but never count as valid."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    series = [_position_fact(d, 50.0, "ready") for d in days]
+    series[5] = _position_fact(days[5], None, "unavailable_current")
+    series[6] = _position_fact(days[6], None, "insufficient_history")
+    fact = compute_persistence_series(series)[19]
+    assert fact["status"] == "ready"
+    assert fact["candidate_count"] == 20
+    assert fact["valid_count"] == 18
+    assert fact["upper_occupancy"] == pytest.approx(0.0)
+    assert fact["lower_occupancy"] == pytest.approx(0.0)
+
+
+def test_persistence_historical_gap_occupies_slot() -> None:
+    """3 consecutive unavailable days inside the window: they still occupy the
+    20-slot window, candidate_count is unchanged, valid_count drops by 3 and no
+    back-fill is performed."""
+    days = _trading_days(date(2026, 1, 5), 22)
+    series = [_position_fact(d, 50.0, "ready") for d in days]
+    for i in (14, 15, 16):
+        series[i] = _position_fact(days[i], None, "unavailable_current")
+    per = compute_persistence_series(series)
+    for i in (14, 15, 16):
+        assert per[i]["status"] == "unavailable_current"
+    fact = per[21]
+    assert fact["candidate_count"] == 20
+    assert fact["valid_count"] == 17  # 20 slots - 3 gap days
+    assert fact["status"] == "ready"
+    assert fact["coverage"] == pytest.approx(0.85)
+
+
+def test_persistence_future_leakage_direct() -> None:
+    """Mutating T+1 / T+2 / T+3 Position facts (Position 0 / 100 / unavailable)
+    leaves Persistence(T) bit-identical."""
+    days = _trading_days(date(2026, 1, 5), 23)
+    base = [_position_fact(d, 50.0, "ready") for d in days]
+    t = 19
+    snapshot = dict(compute_persistence_series(base)[t])
+    mutated = list(base)
+    mutated[20] = _position_fact(days[20], 0.0, "ready")
+    mutated[21] = _position_fact(days[21], 100.0, "ready")
+    mutated[22] = _position_fact(days[22], None, "unavailable_current")
+    after = compute_persistence_series(mutated)
+    assert after[t] == snapshot
+
+
+def test_persistence_first_ready_real_series() -> None:
+    """On a real canonical series, Position first becomes ready at the 61st
+    observation (index 60); Persistence first becomes ready at the 15th ready
+    Position (index 74), when the 20-slot window holds valid_count == 15."""
+    days = _trading_days(date(2026, 1, 5), 130)
+    rets = [0.01 * (i % 7) for i in range(130)]
+    series = _real_series(days, rets)
+    pos = compute_position_series(series, "equal_weight_return")
+    per = compute_persistence_series(pos)
+    assert pos[60]["status"] == "ready"
+    assert pos[59]["status"] == "insufficient_history"
+    assert per[73]["status"] == "insufficient_history"
+    assert per[74]["status"] == "ready"
+    assert per[74]["valid_count"] == 15
+    assert per[74]["coverage"] == pytest.approx(0.75)
+
+
+def test_persistence_derived_directly_from_position() -> None:
+    """The integrated chain's persistence equals compute_persistence_series on
+    the Position series alone (never derived from Velocity / Signal /
+    Acceleration)."""
+    days = _trading_days(date(2026, 1, 5), 130)
+    rets = [0.01 * (i % 7) for i in range(130)]
+    series = _real_series(days, rets)
+    pos = compute_position_series(series, "equal_weight_return")
+    chain = compute_historical_dynamics_series(pos)
+    assert chain["persistence"] == compute_persistence_series(pos)
+    assert len(chain["persistence"]) == len(days)
+
+
+def test_persistence_empty_series() -> None:
+    """Empty input -> empty output (no crash, no phantom facts)."""
+    assert compute_persistence_series([]) == []
+
+
+def test_persistence_fails_fast_on_non_ascending() -> None:
+    """Duplicate / descending trade dates fail fast (never silently re-sorted)."""
+    series = [
+        _position_fact(date(2026, 8, 2), 50.0, "ready"),
+        _position_fact(date(2026, 8, 1), 50.0, "ready"),
+    ]
+    with pytest.raises(ValueError, match="ascending"):
+        compute_persistence_series(series)
+
+
+def test_persistence_fails_fast_on_unknown_status() -> None:
+    """Unknown upstream status fails fast."""
+    series = [_position_fact(date(2026, 8, 1), 50.0, "nope")]
+    with pytest.raises(ValueError, match="unknown upstream status"):
+        compute_persistence_series(series)
+
+
+def test_persistence_api_has_no_contract_overrides() -> None:
+    """The canonical product API must NOT expose window / threshold overrides
+    (frozen 20 / 15 / 80 / 20)."""
+    params = list(inspect.signature(compute_persistence_series).parameters)
+    assert "window_size" not in params
+    assert "minimum_valid_count" not in params
+    assert "upper_threshold" not in params
+    assert "lower_threshold" not in params
+
+
+def test_multi_primitive_persistence_date_aligned() -> None:
+    """Every input primitive gets an equal-length, date-aligned persistence
+    series in the multi-primitive wrapper (no second primitive registry)."""
+    days = _trading_days(date(2026, 1, 5), 130)
+    rets = [0.01 * (i % 7) for i in range(130)]
+    series = _real_series(days, rets)
+    positions = {
+        key: compute_position_series(series, key)
+        for key in ("equal_weight_return", "advance_ratio")
+    }
+    dynamics = compute_historical_dynamics(positions)
+    for key in ("equal_weight_return", "advance_ratio"):
+        per = dynamics[key]["persistence"]
+        assert len(per) == len(days)
+        assert [p["trade_date"] for p in per] == [
+            p["trade_date"] for p in dynamics[key]["position"]
+        ]

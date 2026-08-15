@@ -1,9 +1,13 @@
-"""Analysis B — Historical Dynamics Velocity / Signal / Acceleration (PRD §7.9).
+"""Analysis B — Historical Dynamics Velocity / Signal / Acceleration / Persistence.
 
 Position Foundation = CLOSED.  This module is the next layer of the frozen
 PRD §7.9 chain:
 
     Position -> EMA5 / EMA20 -> Velocity -> Signal -> Acceleration
+    Position -> Persistence (20D Historical Position Occupancy)
+
+Persistence is a same-layer derived result that consumes the Position series
+DIRECTLY (not Velocity / Signal / Acceleration).
 
 Frozen contracts consumed here (PRD §7.9 + task spec):
 
@@ -12,12 +16,22 @@ Frozen contracts consumed here (PRD §7.9 + task spec):
   min valid inputs (EMA5 >= 5 / EMA20 >= 20), valid-observation clock, missing
   state-preserve (no decay / no reset / no forward-fill / no zero-fill), gap
   never advances the clock, No Future Leakage.
+- **Persistence Numerical Contract (FROZEN)**: window = the latest 20 trading
+  observations ending at AND including T (``[T-19, T]``, never pre-T only /
+  dropna-compressed / back-filled / future); valid Position = ``status == ready``
+  AND finite AND ``0 <= position <= 100`` (a ``ready`` fact with a non-finite /
+  out-of-range position is an upstream contract violation -> fail fast); missing
+  observations occupy a window slot but never enter valid_count / upper_count /
+  lower_count; denominator = ``valid_count``; ``PERSISTENCE_MINIMUM_VALID_COUNT
+  = 15`` required for ready; current status precedence ``unavailable_current >
+  insufficient_history > coverage``; ``coverage = valid_count / 20``.
 - **Status Propagation Contract (FROZEN)**: derived-fact availability MUST be
   derived from upstream ``status`` (never from ``value is None``); precedence
   ``unavailable_current > insufficient_history > ready`` applies uniformly to
   EMA5 / EMA20 / Velocity / Signal / Acceleration.
 - **Velocity / Signal / Acceleration formulas (FROZEN)**: no interpretation
   label, no threshold, no phase, no score.
+- **Persistence has no score / phase / label / Middle Occupancy**.
 
 Ownership boundary
 ------------------
@@ -45,6 +59,13 @@ from typing import Any
 EMA_FAST_SPAN = 5
 EMA_SLOW_SPAN = 20
 SIGNAL_SPAN = EMA_FAST_SPAN
+
+# PRD §7.9 frozen Persistence contract (20D Historical Position Occupancy).
+# Canonical product numbers — never caller-overridable.
+PERSISTENCE_WINDOW_SIZE = 20
+PERSISTENCE_MINIMUM_VALID_COUNT = 15
+UPPER_POSITION_THRESHOLD = 80.0
+LOWER_POSITION_THRESHOLD = 20.0
 
 # The exact frozen availability vocabulary (same strings as Position facts).
 STATUS_READY = "ready"
@@ -202,6 +223,136 @@ def compute_ema_series(
 
 
 # ---------------------------------------------------------------------------
+# Persistence (20D Historical Position Occupancy — direct Position consumer)
+# ---------------------------------------------------------------------------
+
+
+def _valid_positions(window: Sequence[tuple[date, Mapping[str, Any]]]) -> list[float]:
+    """Valid Position values inside one window (fail-fast on violations).
+
+    An observation is valid iff ``status == ready`` AND finite AND
+    ``0 <= position <= 100``.  A ``ready`` fact with a non-finite or
+    out-of-range ``position`` is an upstream contract violation and fails fast
+    (never zero-filled / forward-filled / clamped / silently dropped).
+    ``unavailable_current`` / ``insufficient_history`` observations occupy a
+    window slot but never enter the numerator or denominator.
+    """
+    valid: list[float] = []
+    for _, item in window:
+        status = item["status"]
+        if status == STATUS_READY:
+            position = _finite(item.get("position"))
+            if position is None:
+                raise ValueError(
+                    "status=ready with non-finite position at "
+                    f"{item['trade_date']}"
+                )
+            if not 0.0 <= position <= 100.0:
+                raise ValueError(
+                    "status=ready with out-of-range position "
+                    f"{position} at {item['trade_date']}"
+                )
+            valid.append(position)
+        elif status in (STATUS_INSUFFICIENT, STATUS_UNAVAILABLE):
+            continue
+        else:
+            raise ValueError(f"unknown upstream status: {status!r}")
+    return valid
+
+
+def compute_persistence_series(
+    position_series: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Compute the frozen Persistence series (20D Historical Position Occupancy).
+
+    Args:
+        position_series: the Position fact series for one primitive (as produced
+            by ``historical_position.compute_position_series``), trade_date
+            ASCENDING.  Each item must carry ``trade_date``, ``position``
+            (float | None), ``status`` and ``history``.
+
+    Contract (PRD §7.9 Persistence Numerical Contract):
+        - window = the latest 20 trading observations ending at AND including T
+          (``[T-19, T]``); never pre-T only, never dropna-compressed, never
+          reaches back for valid Positions, never consults future rows;
+        - valid Position = ``status == ready`` AND finite AND
+          ``0 <= position <= 100``; ``ready`` with a non-finite / out-of-range
+          position fails fast;
+        - missing observations occupy a window slot but never enter
+          ``valid_count`` / ``upper_count`` / ``lower_count``;
+        - denominator = ``valid_count``; ``coverage = valid_count / 20``
+          (never the candidate count);
+        - ``valid_count >= PERSISTENCE_MINIMUM_VALID_COUNT (15)`` required for
+          ``ready``; current status precedence ``unavailable_current >
+          insufficient_history > coverage``;
+        - No Future Leakage: only observations ``<= T`` are read;
+        - trade dates must be strictly ascending (fail fast, never re-sort).
+
+    Returns:
+        One fact per input day, date-aligned (never compressed):
+        ``{"trade_date", "window_size", "minimum_valid_count", "candidate_count",
+        "valid_count", "coverage", "upper_count", "lower_count",
+        "upper_occupancy" (float | None), "lower_occupancy" (float | None),
+        "status"}``.  ``upper_occupancy`` / ``lower_occupancy`` are only
+        non-null when ``status == ready``; the window metadata (counts /
+        coverage) stays transparent regardless of status.
+    """
+    if not position_series:
+        return []
+    pairs: list[tuple[date, Mapping[str, Any]]] = [
+        (_trade_date(item["trade_date"]), item) for item in position_series
+    ]
+    for prev, cur in zip(pairs, pairs[1:], strict=False):
+        if not prev[0] < cur[0]:
+            raise ValueError(
+                "position_series must be strictly ascending by trade_date; "
+                f"got {prev[0]} -> {cur[0]}"
+            )
+    out: list[dict[str, Any]] = []
+    for i, (td, item) in enumerate(pairs):
+        window = pairs[max(0, i - (PERSISTENCE_WINDOW_SIZE - 1)) : i + 1]
+        valid = _valid_positions(window)
+        valid_count = len(valid)
+        upper_count = sum(1 for p in valid if p >= UPPER_POSITION_THRESHOLD)
+        lower_count = sum(1 for p in valid if p <= LOWER_POSITION_THRESHOLD)
+        coverage = valid_count / PERSISTENCE_WINDOW_SIZE
+        # Current upstream availability always takes priority over window
+        # coverage (frozen precedence — this is NOT an EMA derived-fact merge).
+        current_status = item["status"]
+        if current_status == STATUS_UNAVAILABLE:
+            status = STATUS_UNAVAILABLE
+        elif current_status == STATUS_INSUFFICIENT:
+            status = STATUS_INSUFFICIENT
+        elif current_status == STATUS_READY:
+            status = (
+                STATUS_READY
+                if valid_count >= PERSISTENCE_MINIMUM_VALID_COUNT
+                else STATUS_INSUFFICIENT
+            )
+        else:
+            raise ValueError(f"unknown upstream status: {current_status!r}")
+        fact: dict[str, Any] = {
+            "trade_date": td.isoformat(),
+            "window_size": PERSISTENCE_WINDOW_SIZE,
+            "minimum_valid_count": PERSISTENCE_MINIMUM_VALID_COUNT,
+            "candidate_count": len(window),
+            "valid_count": valid_count,
+            "coverage": coverage,
+            "upper_count": upper_count,
+            "lower_count": lower_count,
+            "status": status,
+        }
+        if status == STATUS_READY:
+            fact["upper_occupancy"] = upper_count / valid_count
+            fact["lower_occupancy"] = lower_count / valid_count
+        else:
+            fact["upper_occupancy"] = None
+            fact["lower_occupancy"] = None
+        out.append(fact)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Derived facts (Velocity / Acceleration)
 # ---------------------------------------------------------------------------
 
@@ -260,19 +411,24 @@ def compute_historical_dynamics_series(
 
     Frozen spans (PRD §7.9): the product contract is hard-coded here — Fast =
     EMA5 (``EMA_FAST_SPAN``), Slow = EMA20 (``EMA_SLOW_SPAN``), Signal =
-    EMA5(Velocity) (``SIGNAL_SPAN``).  No caller-overridable span parameters.
+    EMA5(Velocity) (``SIGNAL_SPAN``), Persistence = 20D Position Occupancy
+    (``PERSISTENCE_WINDOW_SIZE``).  No caller-overridable span / window
+    parameters.
 
     Returns (date-aligned, one entry per input day — never compressed):
-        ``{"position", "ema5", "ema20", "velocity", "signal", "acceleration"}``
-        where ``position`` is the input series passthrough and every derived
-        series carries ``trade_date`` + ``value`` + ``status`` (EMA entries also
-        carry ``valid_count`` + ``span``).
+        ``{"position", "ema5", "ema20", "velocity", "signal", "acceleration",
+        "persistence"}`` where ``position`` is the input series passthrough and
+        every derived series carries ``trade_date`` + ``value`` + ``status``
+        (EMA entries also carry ``valid_count`` + ``span``; Persistence carries
+        the full window metadata and derives DIRECTLY from the Position series —
+        never from Velocity / Signal / Acceleration).
     """
     ema5 = compute_ema_series(_ema_input(position_series, "position"), span=EMA_FAST_SPAN)
     ema20 = compute_ema_series(_ema_input(position_series, "position"), span=EMA_SLOW_SPAN)
     velocity = _compute_velocity(position_series, ema5, ema20)
     signal = compute_ema_series(_ema_input(velocity, "value"), span=SIGNAL_SPAN)
     acceleration = _compute_acceleration(velocity, signal)
+    persistence = compute_persistence_series(position_series)
     return {
         "position": list(position_series),
         "ema5": ema5,
@@ -280,6 +436,7 @@ def compute_historical_dynamics_series(
         "velocity": velocity,
         "signal": signal,
         "acceleration": acceleration,
+        "persistence": persistence,
     }
 
 
@@ -305,7 +462,12 @@ __all__ = [
     "EMA_FAST_SPAN",
     "EMA_SLOW_SPAN",
     "SIGNAL_SPAN",
+    "PERSISTENCE_WINDOW_SIZE",
+    "PERSISTENCE_MINIMUM_VALID_COUNT",
+    "UPPER_POSITION_THRESHOLD",
+    "LOWER_POSITION_THRESHOLD",
     "compute_ema_series",
+    "compute_persistence_series",
     "compute_historical_dynamics_series",
     "compute_historical_dynamics",
 ]
