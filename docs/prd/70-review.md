@@ -844,30 +844,40 @@ ready iff：`Velocity(T)` ready AND `Signal(T)` ready；否则 `null`。
 
 ##### Historical Dynamics derived-fact availability precedence（FROZEN）
 
-以下 precedence 统一适用于 **EMA5 / EMA20 / Velocity / Signal / Acceleration** 全部 derived fact（不在各 fact 重复书写）：
+以下 precedence 统一适用于 **EMA5 / EMA20 / Velocity / Signal / Acceleration** 全部 derived fact（不在各 fact 重复书写）。
 
-1. 如果当前 required input unavailable：
-   - `status = unavailable_current`
+**Status propagation 基础规则（FROZEN）**：
+
+Derived fact 的 availability propagation **必须基于 upstream `status`，不得只基于 upstream `value == null`**。`null` 是结果值（result value），不是 availability 原因；availability 原因必须由 `status` 传播。当 upstream `value = null` 时，可能来自 `unavailable_current` 或 `insufficient_history`，Implementation 必须读取 upstream `status` 才能确定 downstream status，**禁止仅凭 `value is None` 推断原因**。
+
+**统一 precedence**：
+
+1. 如果任一 required upstream fact `status = unavailable_current`：
+   - current fact：`status = unavailable_current`
    - `value = null`
-2. 否则，如果当前 input valid，但 required valid-history / warmup count 尚不足：
-   - `status = insufficient_history`
+2. 否则，如果任一 required upstream fact `status = insufficient_history`，或 current fact 自身 warmup / valid-count 不足：
+   - current fact：`status = insufficient_history`
    - `value = null`
-3. 否则：
+3. 否则，所有 required upstream `status = ready` 且本 fact 自身 readiness 满足：
    - `status = ready`
 
-即：**`unavailable_current` 优先于 `insufficient_history`**。当前 input unavailable 时，即使 warmup / valid-history 不足，也归 `unavailable_current`，不得降级为 `insufficient_history`。
+即：**`unavailable_current` > `insufficient_history` > `ready`**。任一 required upstream `unavailable_current` 即终止并覆盖 downstream；`insufficient_history` 仅在无 `unavailable_current` 时生效。
 
-各 fact 的 required input：
+**各 fact 的 upstream status propagation（FROZEN；不复制第二套 status enum）**：
 
-- EMA5 / EMA20：`Position(T)`；
-- Velocity：`Fast(T)` 与 `Slow(T)`（即 `EMA5(Position)(T)` 与 `EMA20(Position)(T)`）；
-- Signal：`Velocity(T)`；
-- Acceleration：`Velocity(T)` 与 `Signal(T)`。
+- **EMA5 / EMA20**：upstream owner = `Position(T)` status；
+- **Velocity**：upstream statuses = `Position(T)` + `Fast(T)` + `Slow(T)`（Fast/Slow 为直接 required facts；若 Fast/Slow 已严格继承 Position status，propagation 仍必须保留 cause，可追溯到 Position）；
+- **Signal**：upstream status = `Velocity(T)`；
+- **Acceleration**：upstream statuses = `Velocity(T)` + `Signal(T)`。
 
-示例（与 Position Foundation 现有 contract 一致）：
+**Deterministic examples（FROZEN）**：
 
-- EMA5 只有 3 个 valid Position 且 `Position(T) = None` → `unavailable_current`（不是 `insufficient_history`）；
-- EMA5 只有 3 个 valid Position 但 `Position(T)` valid → `insufficient_history`。
+- **Example A**：`Position(T)=ready`、`EMA5(T)=ready`、`EMA20(T)=insufficient_history` → `Velocity(T)=insufficient_history`（**不是** `unavailable_current`）；
+- **Example B**：`Position(T)=unavailable_current` → `EMA5(T)/EMA20(T)=unavailable_current` → `Velocity(T)=unavailable_current`；
+- **Example C**：`Velocity(T)=ready`、`Signal(T)=insufficient_history` → `Acceleration(T)=insufficient_history`；
+- **Example D**：`Velocity(T)=unavailable_current` → `Signal(T)=unavailable_current` → `Acceleration(T)=unavailable_current`；
+- **Example E**：`Velocity(T)=insufficient_history` → `Signal(T)=insufficient_history`（**不是** 仅因 `Velocity.value=null` 判 `unavailable_current`）；
+- **EMA 自身（与 Position Foundation 现有 contract 一致）**：`EMA5` 只有 3 个 valid Position 且 `Position(T)=None` → `unavailable_current`（不是 `insufficient_history`）；`Position(T)` valid → `insufficient_history`。
 
 #### Implementation Ownership
 

@@ -73,6 +73,18 @@ Independent remote audit of commit `815d0e6` found two PRD consistency gaps；�
   - 各 fact required input：EMA5/EMA20=`Position(T)`；Velocity=`Fast(T)`+`Slow(T)`；Signal=`Velocity(T)`；Acceleration=`Velocity(T)`+`Signal(T)`。
   - Warmup 子句 C 追加 pointer，确保与 precedence 内部一致。
 
+### GAP 3 — Status propagation 未冻结（commit 75b6d03 audit correction）
+
+Independent remote audit of `75b6d03` confirmed GAP1/GAP2 closed，但发现 remaining ambiguity：derived fact 可能混淆「value=null 因为 unavailable_current」与「value=null 因为 insufficient_history」。Upstream `value=null` 可能来自两者之一，Implementation 不得仅凭 `value is None` 判断 downstream status。
+
+- **before**：Availability precedence 定义了三态优先级与 required input，但未定义 downstream status 如何由 upstream status 传播（未明确禁止凭 `value==null` 推断）。
+- **after**：§7.9 precedence 新增：
+  - **Status propagation 基础规则**：derived fact availability propagation 必须基于 upstream `status`，不得只基于 upstream `value==null`；`null` 是结果值不是 availability 原因。
+  - **统一 precedence**：① 任一 required upstream `unavailable_current` → current `unavailable_current`+null；② 否则任一 upstream `insufficient_history` 或自身 warmup/valid-count 不足 → current `insufficient_history`+null；③ 否则全部 upstream `ready` 且自身 readiness 满足 → `ready`。`unavailable_current` > `insufficient_history` > `ready`。
+  - **各 fact upstream propagation**（不复制第二套 status enum）：EMA5/EMA20=`Position(T)`；Velocity=`Position(T)`+`Fast(T)`+`Slow(T)`（propagation 保留 cause）；Signal=`Velocity(T)`；Acceleration=`Velocity(T)`+`Signal(T)`。
+  - **Deterministic examples A–E**：A）EMA20=`insufficient_history` → Velocity=`insufficient_history`（非 unavailable_current）；B）Position=`unavailable_current` → EMA5/EMA20/Velocity=`unavailable_current`；C）Signal=`insufficient_history` → Acceleration=`insufficient_history`；D）Velocity=`unavailable_current` → Signal/Acceleration=`unavailable_current`；E）Velocity=`insufficient_history` → Signal=`insufficient_history`（非仅因 value=null 判 unavailable_current）。
+  - 数值合同（alpha / recursive / seed / warmup count / valid-observation clock / state-preserve / gap / Velocity/Signal/Acceleration formula / future leakage）全部未改变。
+
 ## 验证
 
 - `git diff --check`：EXIT=0（无空白错误）。
