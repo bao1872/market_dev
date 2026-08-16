@@ -1134,12 +1134,18 @@ class PytdxAdapter(Exchange):
         - zongguben: 总股本（股）
         - liutongguben: 流通股本（股）
         - updated_date: 数据更新日期（YYYYMMDD int）
+        - ipo_date: 上市日期（YYYYMMDD int，来自 pytdx raw 'ipo_date' 字段）
+
+        CHANGE-20260816-002: 额外解析 ipo_date，作为 Instrument.listing_date 的
+        authoritative source（用于 Auction 120D PIT population 的 listing boundary）。
+        归一化由调用方/ instrument_lifecycle_service.normalize_pytdx_ipo_date 负责。
 
         Args:
             symbol: 股票代码（如 '000001'）
 
         Returns:
-            dict with keys: total_share, float_share, share_as_of (date | None)
+            dict with keys: total_share, float_share, share_as_of (date | None),
+            ipo_date_raw (int | None，YYYYMMDD 原值，未经日历校验)
             无数据时返回 None
 
         Raises:
@@ -1162,6 +1168,7 @@ class PytdxAdapter(Exchange):
                 zongguben = raw.get("zongguben")
                 liutongguben = raw.get("liutongguben")
                 updated_date_raw = raw.get("updated_date")
+                ipo_date_raw = raw.get("ipo_date")
                 # updated_date 是 YYYYMMDD int（如 20260425）
                 share_as_of: date_cls | None = None
                 if updated_date_raw and isinstance(updated_date_raw, (int, float)):
@@ -1170,10 +1177,19 @@ class PytdxAdapter(Exchange):
                         share_as_of = date_cls(d_int // 10000, (d_int // 100) % 100, d_int % 100)
                     except (ValueError, OverflowError):
                         share_as_of = None
+                # ipo_date 是 YYYYMMDD int（如 19910403）；仅透传原值，
+                # 日历合法性校验交给 normalize_pytdx_ipo_date，避免此处猜边界。
+                ipo_date_value: int | None = None
+                if ipo_date_raw and isinstance(ipo_date_raw, (int, float)):
+                    try:
+                        ipo_date_value = int(ipo_date_raw)
+                    except (ValueError, OverflowError):
+                        ipo_date_value = None
                 return {
                     "total_share": float(zongguben) if zongguben else None,
                     "float_share": float(liutongguben) if liutongguben else None,
                     "share_as_of": share_as_of,
+                    "ipo_date_raw": ipo_date_value,
                 }
             except (RuntimeError, Exception) as exc:
                 last_exc = exc
