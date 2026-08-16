@@ -1064,8 +1064,14 @@ async def _build_daily_aggregation(
     limit: int | None,
     warmup_bars: int,
     adjustment_as_of: date | None,
+    allow_backfill: bool = True,
 ) -> BarAggregationResult:
     """[CHANGE-20260804-FS] 从预批量读取的 daily_df / factor_df 构造日线类聚合结果。
+
+    allow_backfill: [CHANGE-20260816-003] 与单股 get_bars 对齐的 strict DB-only 开关
+    （batch 默认 True）。False 时 DB historical daily 数据不足也绝不调用 external
+    daily provider（fetch_daily_bars zero calls），按现有 MDAS contract fail-closed，
+    避免 backfill 偷偷启动第二个 pytdx source connection。
 
     复用 get_bars 日线路径的完整 bars/复权/诊断合同，但不触发任何 per-instrument
     DB 查询（bars 与 adj_factor 已由调用方批量读取）。仅在 need_tail（今日 partial
@@ -1096,7 +1102,9 @@ async def _build_daily_aggregation(
     effective_expected = min(now_expected, end)
 
     need_tail = daily_df.empty or daily_df.index[-1].date() < effective_expected  # type: ignore[attr-defined]
-    if need_tail:
+    # [CHANGE-20260816-003] strict DB-only：allow_backfill=False 时绝不调用 external
+    # daily provider（与单股 get_bars 合同一致），避免 backfill 启动第二个 pytdx 连接。
+    if need_tail and allow_backfill:
         if _is_verification_replay():
             # 验证回放禁止外部行情源，DB 数据不足 → fail-closed 并输出精确缺口
             available_end = (
@@ -1291,6 +1299,8 @@ class MarketDataAggregationService:
         limit = kwargs.get("limit")
         warmup_bars = kwargs.get("warmup_bars", 0)
         adjustment_as_of = kwargs.get("adjustment_as_of")
+        # [CHANGE-20260816-003] batch 与单股 get_bars 对齐：strict DB-only 开关透传
+        allow_backfill = kwargs.get("allow_backfill", True)
 
         now = now_shanghai()
         start, end = _resolve_date_range(timeframe, start_date, end_date, limit=limit)
@@ -1369,6 +1379,7 @@ class MarketDataAggregationService:
                     limit=limit,
                     warmup_bars=warmup_bars,
                     adjustment_as_of=adjustment_as_of,
+                    allow_backfill=allow_backfill,
                 )
             except Exception as exc:
                 results[instrument_id] = exc

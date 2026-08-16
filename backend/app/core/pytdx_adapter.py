@@ -320,6 +320,9 @@ class PytdxAdapter(Exchange):
         self._api: TdxHq_API | None = None
         self.max_retries = max_retries
         self.retry_delay: float = retry_delay
+        # [B2] 连接诊断计数
+        self.successful_connect_count: int = 0
+        self.reconnect_count: int = 0
         # [P0-5] I/O 锁：覆盖所有底层读取与重连。
         # 单例 adapter 在 asyncio.to_thread 调用方并发时，TdxHq_API 的 connect/disconnect/
         # _fetch_bars 共享同一 socket，必须串行；锁必须在 adapter 内部，不得只在调用方加局部锁。
@@ -344,11 +347,18 @@ class PytdxAdapter(Exchange):
     def connect(self) -> None:
         """连接 pytdx 服务器，依次尝试服务器列表。
 
+        [B1] 幂等：外部重复调用 connect() 时，若已连接则 NO-OP（不重新扫描 server list / 不新建 socket）。
+        [B2] 诊断：首次连接成功 successful_connect_count += 1；真实 source failure 后
+        disconnect → reconnect 成功时 successful_connect_count += 1 且 reconnect_count += 1。
+
         Raises:
             RuntimeError: 所有服务器连接均失败时抛出，包含最近 5 条错误信息。
         """
         # [P0-5] I/O 锁覆盖 connect：防止并发调用方同时建连导致 _api 状态错乱
         with self._io_lock:
+            # [B1] 幂等 hardening：已连接则直接返回，绝不重复建连
+            if self._api is not None:
+                return
             last_errors: list[str] = []
             for host, port in self._servers:
                 try:
@@ -356,6 +366,9 @@ class PytdxAdapter(Exchange):
                     if api.connect(host, port, time_out=5):
                         logger.info("pytdx 连接成功：%s:%d", host, port)
                         self._api = api
+                        self.successful_connect_count += 1
+                        if self.successful_connect_count > 1:
+                            self.reconnect_count += 1
                         return
                 except TdxConnectionError as exc:
                     last_errors.append(f"{host}:{port} TdxConnectionError: {exc}")
@@ -376,6 +389,67 @@ class PytdxAdapter(Exchange):
                     logger.warning("pytdx 断开连接时出现异常（已忽略）：%s", exc)
                 finally:
                     self._api = None
+
+    def get_history_transaction_page(
+        self,
+        symbol: str,
+        trade_date: date,
+        offset: int,
+        count: int,
+    ) -> list[dict]:
+        """[B3] Managed historical transaction page — thin owner of
+        ``adapter.api.get_history_transaction_data(...)``。
+
+        职责只包括：market_from_code / YYYYMMDD conversion / _io_lock /
+        复用已有 managed connection / retry-reconnect / context-rich RuntimeError。
+
+        不做：canonicalize、解释 09:25、解释 volume、任何 Auction business logic。
+
+        正常调用只复用已有 ``self._api``（单长连接生命周期，禁止 per-call 新连接）；
+        只有真实 socket/source failure 才 disconnect → reconnect（计入
+        successful_connect_count / reconnect_count 诊断）。
+
+        Args:
+            symbol: 股票代码（如 '000001', '600519'）
+            trade_date: 交易日
+            offset: pytdx start offset（0=当天后段，offset 增大向当天更早移动）
+            count: 单页请求条数
+
+        Returns:
+            list[dict]：原始 transaction 记录（空列表表示无数据）
+
+        Raises:
+            RuntimeError: 重试 max_retries 次后仍失败（含 symbol/date/offset 上下文）
+        """
+        market_int = market_from_code(symbol)
+        date_int = int(trade_date.strftime("%Y%m%d"))
+        last_exc: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                # 复用已有 managed connection；未连接才 connect（connect 幂等）
+                if self._api is None:
+                    self.connect()
+                with self._io_lock:
+                    rows = self.api.get_history_transaction_data(
+                        market_int, symbol, offset, count, date_int
+                    )
+                return list(rows) if rows else []
+            except (RuntimeError, Exception) as exc:
+                last_exc = exc
+                logger.warning(
+                    "get_history_transaction_page 失败 symbol=%s date=%s "
+                    "offset=%d attempt=%d/%d: %s",
+                    symbol, trade_date.isoformat(), offset, attempt,
+                    self.max_retries, exc,
+                )
+                self.disconnect()
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay)
+        raise RuntimeError(
+            f"get_history_transaction_page 重试 {self.max_retries} 次后仍失败 "
+            f"symbol={symbol} trade_date={trade_date.isoformat()} "
+            f"offset={offset} count={count}: {last_exc}"
+        )
 
     def get_security_list(self, market: str, max_count: int | None = None) -> pd.DataFrame:
         """拉取指定市场的全部股票列表（参考 chanlun-pro all_stocks() 设计）。

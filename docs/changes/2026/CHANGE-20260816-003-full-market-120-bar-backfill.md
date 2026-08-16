@@ -168,3 +168,117 @@
 - `M experiments/pytdx_auction_history/tests/test_auction_history_semantics_validation.py`（仅 FIX 6 direct qfq degraded regression）
 
 PRD 不再修改（120-bar wording 已正确）。
+
+## 15. Round 3B-D — PERFORMANCE + EXECUTION GOVERNANCE CLOSURE（2026-08-16）
+
+性能根因确认：validation pipeline（`run_single_observation` → `fetch_full_day_transactions_paginated`
+从 offset=0 逐页抓全天逐笔 + full-day volume evidence + per-symbol MDAS get_bars×2）适合 source
+validation，不适合 600k+ 历史 Member Facts。正式 backfill **不再调用** `run_single_observation()`
+/ `fetch_full_day_transactions_paginated`（保留为 source-validation reference implementation，不删除）。
+
+### PYTDX CONNECTION CONTRACT（锁死）
+- ONE PROCESS = ONE `PytdxAdapter` INSTANCE = ONE NORMAL HEALTHY CONNECTION。
+- 禁止 per-stock/per-bar/per-function `PytdxAdapter()`、nested `with`、`get_pytdx_adapter()` 第二条连接。
+- 禁止 multiprocessing / pytdx process/thread pool / 并发共享多 Tdx sockets（本轮不考虑多进程方向）。
+- [B1] `connect()` 幂等：已连接则 NO-OP（不重复扫描 server list / 新建 socket）。
+- [B2] 只读诊断：`successful_connect_count` / `reconnect_count`（首次连接 success +1；真实 source
+  failure 后 disconnect→reconnect success 再 +1 且 reconnect_count +1）。
+- [B3] `get_history_transaction_page(symbol, trade_date, offset, count)` thin managed owner：
+  market_from_code / YYYYMMDD / _io_lock / 复用已有 managed connection / retry-reconnect /
+  context-rich RuntimeError；不做 canonicalize / 解释 09:25 / volume / Auction business logic。
+
+### TARGETED 09:25 SOURCE FETCH（kernel）
+- 新增 `auction_member_fact_backfill_kernel.py`：
+  - `fetch_auction_0925_targeted(adapter, symbol, trade_date, offset_hint=None)`：
+    hint-first + exponential search + boundary binary search，只覆盖 09:25:00～09:25:59 window，
+    不线性扫全天；C3 边界安全读取 adjacent page（previous/target/next）按 raw record identity 去重。
+  - `build_historical_member_fact(...)` 纯函数：target source → canonicalization → Lane A → Lane B
+    → Member Fact；不 new PytdxAdapter / 不调用 MDAS / 不查 DB / 不分页全天。
+- 冻结 backfill-specific `source_status`（不谎称 full-day COMPLETE）：
+  `TARGET_WINDOW_COMPLETE`（仅表示 09:25 minute 被完整 bracket/覆盖）/
+  `SOURCE_EMPTY` / `SOURCE_ERROR` / `TARGET_SEARCH_STALLED` / `TARGET_SEARCH_LIMIT_REACHED`。
+- 只有 `source_status == TARGET_WINDOW_COMPLETE` 才允许 canonicalize。
+- C6/C7 offset hint cache：`offset_hints_by_symbol`（上一 bar resolved offset → 下一 bar warm
+  probe）；每 bar COMPLETED 后 atomic 写 `offset_hints.json`，resume 加载。hint 只影响 transport
+  efficiency，不改变 source/canonical result。
+
+### BATCH MDAS
+- 每 bar 只做两次 batch contract：`adj=none ×1` + `adj=qfq ×1（adjustment_as_of=T）`，
+  `completed_only=True, allow_backfill=False`（strict DB-only，不触发第二个 pytdx 连接）。
+- [E3] `get_bars_batch(... allow_backfill=True default)` 完整把合同传到 `_build_daily_aggregation`
+  （新增 `allow_backfill` 参数）：`allow_backfill=False` 且 DB historical daily 数据不足时
+  **不得调用 external daily provider**（fetch_daily_bars zero calls），按 MDAS fail-closed 返回
+  empty/degraded evidence。
+- [E4] batch 诊断写入 partition data_quality：`raw_batch_repository_query_count`（≈2）/
+  `qfq_batch_repository_query_count`（≈3）/ `raw_batch_symbol_count` / `qfq_batch_symbol_count`。
+
+### POPULATION LOAD-ONCE + LISTING COVERAGE GATE
+- `load_population_once(session)`：startup 一次读取 CURRENT CANONICAL SH/SZ identity +
+  listing_date 放入内存；120 bars 只做 `filter_population_at` in-memory `listing_date <= T`。
+- 修复 gate denominator：先统计 `current_shsz_total`（current canonical AND SH/SZ AND stock-symbol
+  identity），再统计 `listing_date_present / listing_date_missing`；不能先过滤 listing 再证明 missing=0。
+- missing symbols 显式写入 root manifest（`listing_date_unavailable_count` /
+  `listing_date_unavailable_symbols`），不 silent exclusion；不 first-bar/today fallback / guess IPO。
+- 已知真实 DB 约 6 个 SH/SZ current identities 仍无 listing_date，不阻塞研究。
+
+### STREAM OUTPUT + PROGRESS + ATOMIC FINALIZE
+- `member_facts.jsonl.tmp` 每完成一个 Member Fact stream append（不整 bar 放 RAM）。
+- 每 100 stocks 或 30 秒 atomic 写 `progress.json`（trade_date/bar_index/eligible/processed/percent/
+  elapsed_seconds/pytdx_requests/pytdx_requests_per_symbol/source/canonical/lane_b/current_symbol 等）。
+- COMPLETED：fsync → `.tmp` atomic rename → `member_facts.jsonl` → partition_manifest.status=COMPLETED；
+  失败 `.tmp` 保留、status=FAILED；resume 仍 whole-bar rerun。
+
+### RUN-LEVEL LOCK
+- `run.lock`（O_CREAT | O_EXCL）：同一 run_id 只允许一个 writer；owner PID active →
+  `RUN_ALREADY_ACTIVE`；stale（owner 不存在）须显式 `--recover-stale-lock` 才继续。
+
+### TRACKED CLI
+- 彻底禁止 untracked launcher（`_live_backfill_runner_3bc.py`）。
+- `full_market_member_fact_backfill.py` argparse：`--mode benchmark|live` / `--as-of` / `--run-id` /
+  `--benchmark-bars` / `--benchmark-symbols` / `--output-root` / `--recover-stale-lock` /
+  `--require-listing-coverage`。`code_sha` 自动取 `git rev-parse HEAD`，禁止 CLI 伪造。
+- CLI 只允许一次 `with PytdxAdapter()`；健康 run 诊断 `adapter_instance_count=1 /
+  successful_connect_count=1 / reconnect_count=0`。
+
+### PERFORMANCE INSTRUMENTATION（Part K）
+- root/partition manifest 增加：`pytdx_request_count` / `pytdx_target_search_cold_count` /
+  `pytdx_target_search_hint_count` / `avg_requests_per_symbol` / `max_requests_per_symbol` /
+  `successful_connect_count` / `reconnect_count` / `raw_mdas_batch_queries` /
+  `qfq_mdas_batch_queries` / `processing_seconds` / `symbols_per_second`。仅 performance evidence，
+  不改变业务结论。
+
+### TESTS（Part J：P1-P22 + 回归）
+- 新增 `backend/tests/test_pytdx_adapter_v3.py`：P1 connect 幂等 / P2 healthy 连续 N 页
+  successful_connect_count==1 reconnect_count==0 / P3 page 失败走 managed reconnect-retry。
+- 新增 `experiments/pytdx_auction_history/tests/test_auction_member_fact_backfill_kernel.py`：
+  P4 cold search 找到 09:25 / P5 跨 page boundary 完整 / P6 hinted==cold raw records /
+  P7 warm 请求数显著低于 cold / P8 仅 TARGET_WINDOW_COMPLETE 才 canonicalize /
+  P9 source empty 非 business zero。
+- 更新 `experiments/pytdx_auction_history/tests/test_full_market_member_fact_backfill.py`（B1-B13 +
+  FIX 1-10 适配新接口 + P10-P22）：
+  P10 kernel 不调用 fetch_full_day_transactions_paginated / P11 无 full-day volume evidence /
+  P12 每 bar 只 MDAS batch none×1+qfq×1 / P13 batch allow_backfill=False DB missing 不触发
+  external provider / P14 population load-once / P15 coverage denominator / P16 listing 缺失显式记录 /
+  P17 stream tmp append / P18 atomic rename / P19 RUN_ALREADY_ACTIVE / P20 stale lock 显式 recover /
+  P21 resume 加载 offset hints / P22 resume fresh/skipped root totals 一致。
+- 回归：Auction semantics（69）+ kernel（P4-P9）+ backfill（B+FIX+P，36）+ pytdx adapter（P1-P3 等）+
+  instrument lifecycle（29）+ MDAS batch（strict DB-only 回归）全部 PASS。
+
+### VERIFICATION
+- experiments/tests 全目录 **113 passed**；backend pytdx/MDAS/lifecycle 回归 **77 passed, 4 skipped**。
+- `git diff --check` PASS。
+- LIVE 120-BAR FULL-MARKET = **NOT RUN**（待 ChatGPT independent audit 后才允许）。
+- PRD：NONE（业务语义无变化；120-bar wording 已正确）。
+
+### CHANGED FILES（Round 3B-D）
+- `M backend/app/core/pytdx_adapter.py`（B1 幂等 / B2 诊断 / B3 managed history page）
+- `M backend/app/services/market_data_aggregation_service.py`（get_bars_batch → _build_daily_aggregation allow_backfill）
+- `A experiments/pytdx_auction_history/auction_member_fact_backfill_kernel.py`
+- `M experiments/pytdx_auction_history/full_market_member_fact_backfill.py`
+- `A backend/tests/test_pytdx_adapter_v3.py`
+- `A experiments/pytdx_auction_history/tests/test_auction_member_fact_backfill_kernel.py`
+- `M experiments/pytdx_auction_history/tests/test_full_market_member_fact_backfill.py`
+- `M docs/changes/2026/CHANGE-20260816-003-full-market-120-bar-backfill.md`
+
+不要修改：Instrument model / Scope / Review / frontend / API；不删除
+`auction_history_semantics_validation.py` 的 source-validation functions。
