@@ -146,21 +146,26 @@ async def resolve_sample_instruments(
     session: AsyncSession,
     samples: list[SampleInstrument],
 ) -> tuple[list[SampleInstrument], list[dict]]:
-    """按 (market, symbol) 解析真实 instrument_id。
+    """按 (market, symbol) 解析真实 instrument_id，并校验 canonical universe 成员。
 
+    权威 universe 成员 = get_active_a_share_instruments(session)。
     任何 UUID(0) 未解析即 fail-fast INTERNAL_IDENTITY_ERROR。
     同一 (market, symbol) 命中多个 active 行 → IDENTITY_AMBIGUOUS。
+    解析到的 UUID 不在 canonical universe → SAMPLE_NOT_IN_CANONICAL_UNIVERSE。
     """
     resolved: list[SampleInstrument] = []
     skipped: list[dict] = []
 
-    # 去重查询键
+    # 权威 universe 成员（唯一 membership authority）
+    canonical_ids = set(await get_active_a_share_instruments(session))
+
+    # 去重查询键（identity resolution 仅负责 (market, symbol) → UUID）
     keys = {(s.market, s.symbol) for s in samples}
     rows_by_key: dict[tuple[str, str], list[dict]] = {}
     for market, symbol in keys:
         stmt = text(
             "SELECT market, symbol, id FROM instruments "
-            "WHERE market = :market AND symbol = :symbol AND is_active = true"
+            "WHERE market = :market AND symbol = :symbol"
         )
         result = await session.execute(stmt, {"market": market, "symbol": symbol})
         rows = [dict(r) for r in result.mappings().all()]
@@ -182,6 +187,11 @@ async def resolve_sample_instruments(
             raise RuntimeError(
                 f"INTERNAL_IDENTITY_ERROR: resolved id is UUID(0) for "
                 f"{s.market}/{s.symbol}")
+        if rid not in canonical_ids:
+            skipped.append({"symbol": s.symbol, "market": s.market,
+                            "instrument_id": str(rid),
+                            "reason": "SAMPLE_NOT_IN_CANONICAL_UNIVERSE"})
+            continue
         resolved.append(SampleInstrument(
             symbol=s.symbol, market=s.market, instrument_id=rid,
             board=s.board, coverage_tag=s.coverage_tag, cohort=s.cohort,
@@ -526,9 +536,13 @@ async def next_trading_day_after(session, T: date) -> Optional[date]:
 
 
 async def previous_trading_dates(session, T: date, n: int) -> list[date]:
-    """inclusive helper（仅 routine 使用），保留以兼容既有测试。"""
-    out = [T]
-    cur = T - timedelta(days=1)
+    """返回 T 及之前最多 n-1 个正式交易日。
+
+    若 T 本身是交易日则包含 T；否则从最近 previous official trading day 开始。
+    禁止假定 as_of 一定是交易日（MOD7）。
+    """
+    out: list[date] = []
+    cur = T
     while len(out) < n and cur > T - timedelta(days=400):
         if await is_trading_day_async(session, cur):
             out.append(cur)
@@ -546,7 +560,10 @@ async def resolve_corporate_cases(
     as_of: date,
     lookback_days: int,
 ) -> list[dict]:
-    """MOD1：入参必须是已 resolve 的 corporate（instrument_id 非 UUID(0)）。"""
+    """MOD1：入参必须是已 resolve 的 corporate（instrument_id 非 UUID(0)）。
+
+    RESOLVED case 必须包含真实 factor_before / factor_after（MOD3）。
+    """
     out = []
     for inst in resolved_corporate:
         if inst.instrument_id == UUID_ZERO:
@@ -555,9 +572,9 @@ async def resolve_corporate_cases(
                 f"still has UUID(0) — must be resolved before corporate resolution")
         df = await adj_service.get_factor_series(
             session, inst.instrument_id, as_of=as_of)
-        # 真实 corporate event T 发现（仅挑选，不自行算 QFQ）
-        event_date = _discover_event_date(df, as_of, lookback_days)
-        if event_date is None:
+        # 真实 corporate event T + factor_before/factor_after 发现（仅挑选）
+        event = _discover_event_date(df, as_of, lookback_days)
+        if event is None:
             out.append({
                 "symbol": inst.symbol, "market": inst.market,
                 "instrument_id": str(inst.instrument_id), "board": inst.board,
@@ -566,25 +583,53 @@ async def resolve_corporate_cases(
                 "factor_before": None, "factor_after": None,
             })
             continue
-        prev_d = await previous_trading_day_before(session, event_date)
-        next_d = await next_trading_day_after(session, event_date)
+        prev_d = await previous_trading_day_before(session, event["event_date"])
+        next_d = await next_trading_day_after(session, event["event_date"])
         # MOD10: hard assertion
         if prev_d is not None:
-            assert prev_d < event_date, f"prev_d {prev_d} not < event {event_date}"
+            assert prev_d < event["event_date"], (
+                f"prev_d {prev_d} not < event {event['event_date']}")
         if next_d is not None:
-            assert next_d > event_date, f"next_d {next_d} not > event {event_date}"
+            assert next_d > event["event_date"], (
+                f"next_d {next_d} not > event {event['event_date']}")
+        # MOD3: factor event 完整前后值才 RESOLVED
+        if (event["factor_before"] is None or event["factor_after"] is None
+                or event["factor_before"] == event["factor_after"]):
+            out.append({
+                "symbol": inst.symbol, "market": inst.market,
+                "instrument_id": str(inst.instrument_id), "board": inst.board,
+                "status": "FACTOR_EVENT_INCOMPLETE",
+                "event_date": event["event_date"].isoformat(),
+                "prev_trade_date": prev_d.isoformat() if prev_d else None,
+                "next_trade_date": next_d.isoformat() if next_d else None,
+                "factor_before": event["factor_before"],
+                "factor_after": event["factor_after"],
+            })
+            continue
         out.append({
             "symbol": inst.symbol, "market": inst.market,
             "instrument_id": str(inst.instrument_id), "board": inst.board,
-            "status": "RESOLVED", "event_date": event_date.isoformat(),
+            "status": "RESOLVED", "event_date": event["event_date"].isoformat(),
             "prev_trade_date": prev_d.isoformat() if prev_d else None,
             "next_trade_date": next_d.isoformat() if next_d else None,
-            "factor_before": None, "factor_after": None,
+            "factor_before": event["factor_before"],
+            "factor_after": event["factor_after"],
         })
     return out
 
 
-def _discover_event_date(df, as_of: date, lookback_days: int) -> Optional[date]:
+def _discover_event_date(df, as_of: date, lookback_days: int) -> Optional[dict]:
+    """返回 CorporateFactorEvent 结构（MOD3）：
+
+    {
+        "event_date": date,
+        "factor_before": float | None,
+        "factor_after": float | None,
+    }
+
+    仅从 authoritative factor series 中读取；不自行反推 / 重算 / 重建。
+    找不到有效的 factor-change 则返回 None。
+    """
     if df is None or len(df) == 0:
         return None
     col = "trade_date" if "trade_date" in df.columns else df.columns[0]
@@ -599,7 +644,11 @@ def _discover_event_date(df, as_of: date, lookback_days: int) -> Optional[date]:
                 d = d.date()
             delta = (as_of - d).days if isinstance(d, date) else None
             if delta is not None and delta <= lookback_days:
-                return d
+                return {
+                    "event_date": d,
+                    "factor_before": float(vals[i - 1]),
+                    "factor_after": float(vals[i]),
+                }
     return None
 
 
@@ -607,6 +656,8 @@ async def run_corporate_observation(
     mdas, adapter, session, inst: SampleInstrument,
     trade_date: date, prev_trade_date: Optional[date],
     next_trade_date: Optional[date],
+    factor_before: Optional[float] = None,
+    factor_after: Optional[float] = None,
 ) -> dict:
     obs = _build_observation_base(inst, trade_date, "corporate")
     obs["prev_trade_date"] = prev_trade_date.isoformat() if prev_trade_date else None
@@ -615,6 +666,22 @@ async def run_corporate_observation(
         assert prev_trade_date < trade_date
     if next_trade_date is not None:
         assert next_trade_date > trade_date
+
+    # MOD4: factor evidence 真正贯通 observation
+    naive_raw_gap = obs.get("lane_b", {}).get("naive_raw_gap") if obs.get("lane_b") else None
+    pit_gap = obs.get("lane_b", {}).get("pit_gap") if obs.get("lane_b") else None
+    obs["corporate"] = {
+        "event_date": trade_date.isoformat(),
+        "prev_trade_date": prev_trade_date.isoformat() if prev_trade_date else None,
+        "next_trade_date": next_trade_date.isoformat() if next_trade_date else None,
+        "factor_before": factor_before,
+        "factor_after": factor_after,
+        "naive_raw_gap": naive_raw_gap,
+        "pit_gap": pit_gap,
+        "gap_adjustment_effect": (
+            (pit_gap - naive_raw_gap)
+            if (pit_gap is not None and naive_raw_gap is not None) else None),
+    }
 
     full_day = fetch_full_day_transactions_paginated(
         adapter, inst.symbol, market_from_code(inst.symbol), trade_date)
@@ -643,6 +710,12 @@ async def run_corporate_observation(
             get_bar_for_date(qfq_res.bars, trade_date), trade_date,
             qfq_res.adj_factor_hash, none_res.data_source,
             none_res.degraded, none_res.degraded_reason)
+        # MOD4: 回填 corporate gap 字段（Lane B 可比才填）
+        if obs.get("lane_b") and obs["lane_b"].get("status") == "COMPUTED":
+            obs["corporate"]["naive_raw_gap"] = obs["lane_b"]["naive_raw_gap"]
+            obs["corporate"]["pit_gap"] = obs["lane_b"]["pit_gap"]
+            obs["corporate"]["gap_adjustment_effect"] = (
+                obs["lane_b"]["pit_gap"] - obs["lane_b"]["naive_raw_gap"])
     else:
         obs["lane_a"] = None
         obs["lane_b"] = None
@@ -1024,41 +1097,63 @@ async def run_validation(
     session, mdas, adapter, as_of: date,
     corporate_lookback_days: int = CORPORATE_LOOKBACK_DAYS,
     trade_date: Optional[date] = None,
+    adj_service: Optional[AdjustmentFactorService] = None,
+    output_dir=None,
 ):
-    trade_date = trade_date or as_of
+    """MOD9：adj_service 显式依赖；None → 真实 AdjustmentFactorService() instance。
+
+    MOD6：routine 跑最近 10 个正式交易日（每个 inst × 10 dates）。
+    MOD2：corporate 仅在各自真实 event_T 运行一次。
+    """
+    if adj_service is None:
+        adj_service = AdjustmentFactorService()
+
     samples = load_sample()
     resolved, _skipped = await resolve_sample_instruments(session, samples)
 
     resolved_routine = [x for x in resolved if x.cohort == "routine"]
     resolved_corporate = [x for x in resolved if x.cohort == "corporate"]
 
+    # MOD6：最近 10 个正式交易日（official calendar）
+    routine_dates = await previous_trading_dates(session, as_of, 10)
+
     observations = []
     pagination_rows = []
     for inst in resolved_routine:
-        obs = await run_single_observation(mdas, adapter, session, inst, trade_date)
-        observations.append(obs)
-        pagination_rows.append(_pagination_row(inst, trade_date, obs))
+        for T in routine_dates:
+            obs = await run_single_observation(mdas, adapter, session, inst, T)
+            observations.append(obs)
+            pagination_rows.append(_pagination_row(inst, T, obs))
 
     corporate_cases = await resolve_corporate_cases(
-        AdjustmentFactorService, session, resolved_corporate,
+        adj_service, session, resolved_corporate,
         as_of, corporate_lookback_days)
     for inst in resolved_corporate:
-        # corporate observation（MOD1：仅 resolved_corporate）
         cc = next((c for c in corporate_cases
                    if c["instrument_id"] == str(inst.instrument_id)), None)
-        prev_d = date.fromisoformat(cc["prev_trade_date"]) if cc and cc.get("prev_trade_date") else None
-        next_d = date.fromisoformat(cc["next_trade_date"]) if cc and cc.get("next_trade_date") else None
+        if cc is None or cc.get("event_date") is None:
+            continue
+        # MOD2：corporate observation 必须在 event_T 上运行，不得用 as_of / routine T
+        event_T = date.fromisoformat(cc["event_date"])
+        prev_d = date.fromisoformat(cc["prev_trade_date"]) if cc.get("prev_trade_date") else None
+        next_d = date.fromisoformat(cc["next_trade_date"]) if cc.get("next_trade_date") else None
         cobs = await run_corporate_observation(
-            mdas, adapter, session, inst, trade_date, prev_d, next_d)
+            mdas, adapter, session, inst, event_T, prev_d, next_d,
+            factor_before=cc.get("factor_before"),
+            factor_after=cc.get("factor_after"))
+        assert cobs["trade_date"] == cc["event_date"], (
+            f"corporate observation trade_date {cobs['trade_date']} "
+            f"!= event_date {cc['event_date']}")
         observations.append(cobs)
-        pagination_rows.append(_pagination_row(inst, trade_date, cobs))
+        pagination_rows.append(_pagination_row(inst, event_T, cobs))
 
     live_status = derive_live_status(observations, corporate_cases)
     data_quality = compute_data_quality_summary(observations)
     volume_dist = compute_volume_unit_distribution(observations)
 
+    out_dir = Path(output_dir) if output_dir else (OUTPUT_DIR / as_of.isoformat())
     write_evidence_outputs(
-        OUTPUT_DIR / as_of.isoformat(), as_of, observations, corporate_cases,
+        out_dir, as_of, observations, corporate_cases,
         live_status, data_quality, volume_dist, pagination_rows,
         len(resolved_routine), len(resolved_corporate), corporate_lookback_days)
     return {

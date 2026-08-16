@@ -4,7 +4,7 @@
 """
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -37,18 +37,36 @@ class _FakeResult:
     def all(self):
         return self._rows
 
+    def scalars(self):
+        # get_active_a_share_instruments 用 select(Instrument.id)...scalars().all()
+        # 返回每行 id（兼容 fake session 的 dict 行）
+        ids = [r["id"] if isinstance(r, dict) else r for r in self._rows]
+        return _FakeScalarResult(ids)
 
-class _FakeSession:
-    def __init__(self, instrument_rows):
-        self._rows = instrument_rows
+    def scalar(self):
+        return self._rows[0] if self._rows else None
 
-    async def execute(self, stmt, params=None):
-        return _FakeResult(self._rows)
+
+class _FakeScalarResult:
+    def __init__(self, ids):
+        self._ids = ids
+
+    def all(self):
+        return self._ids
 
 
 class _FakeSessionAsync:
     async def execute(self, *a, **k):
         return _FakeResult([])
+
+
+class _FakeSession:
+    """sync-style fake session（resolve_sample_instruments 同步使用）。"""
+    def __init__(self, instrument_rows):
+        self._rows = instrument_rows
+
+    async def execute(self, stmt, params=None):
+        return _FakeResult(self._rows)
 
 
 class _FakeMdas:
@@ -80,8 +98,11 @@ class _FakeMdas:
 class _FakeAdjService:
     def __init__(self, factors=None):
         self._factors = factors  # dict instrument_id_str -> DataFrame
+        self.captured_calls = []  # (instrument_id, as_of)
 
     async def get_factor_series(self, session, instrument_id, as_of=None, **kw):
+        # MOD1: 真实 instance，必须收到 resolved_corporate 的真实 UUID
+        self.captured_calls.append((instrument_id, as_of))
         return self._factors.get(str(instrument_id), pd.DataFrame())
 
 
@@ -326,6 +347,7 @@ def test_corporate_uuid_zero_rejected_sync():
 
 async def _impl_test_corporate_date_evidence_hard_assert():
     # MOD10: prev < event, next > event
+    # MOD3: factor_before=1.0, factor_after=1.5 真正来自 authoritative series
     df = pd.DataFrame({
         "trade_date": [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-08")],
         "adj_factor": [1.0, 1.5],
@@ -345,6 +367,34 @@ async def _impl_test_corporate_date_evidence_hard_assert():
     assert c["next_trade_date"] == "2024-01-09"
     assert c["prev_trade_date"] < c["event_date"]
     assert c["next_trade_date"] > c["event_date"]
+    # MOD1: adj service instance 收到真实 UUID
+    assert any(cid == iid for cid, _ in adj.captured_calls)
+    # MOD3: factor evidence 非 None 且不相等
+    assert c["factor_before"] is not None
+    assert c["factor_after"] is not None
+    assert c["factor_before"] != c["factor_after"]
+    assert abs(c["factor_before"] - 1.0) < 1e-9
+    assert abs(c["factor_after"] - 1.5) < 1e-9
+
+
+def test_corporate_factor_event_incomplete():
+    async def _impl():
+        # 单点 factor series 无 change → NO_EVENT_IN_LOOKBACK（不伪造 INCOMPLETE）
+        df = pd.DataFrame({
+            "trade_date": [pd.Timestamp("2024-01-08")],
+            "adj_factor": [1.0],
+        })
+        session = _FakeSessionAsync()
+        iid = uuid4()
+        adj = _FakeAdjService({str(iid): df})
+        inst = mod.SampleInstrument("600000", "SH", iid, "SH_MAIN",
+                                    "ordinary", "corporate")
+        cases = await mod.resolve_corporate_cases(adj, session, [inst],
+                                                  date(2024, 1, 8), 180)
+        assert cases[0]["status"] == "NO_EVENT_IN_LOOKBACK"
+        assert cases[0]["factor_before"] is None
+        assert cases[0]["factor_after"] is None
+    asyncio.run(_impl())
 
 
 def test_corporate_date_evidence_hard_assert_sync():
@@ -622,3 +672,297 @@ def test_one_source_fetch_per_day():
     assert ex.status == "FOUND"
     # adapter.api.call_count reflects only pagination, not a separate 09:25 call
     assert adapter.api.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# MOD7 — previous_trading_dates respects official calendar (not weekday-only)
+# ---------------------------------------------------------------------------
+def _fake_calendar(trading_dates: set):
+    async def _cal(session, d: date):
+        return d in trading_dates
+    return _cal
+
+
+def _make_10_dates(ending: date) -> list[date]:
+    # 连续 10 个 weekday（不含周末），结束于 ending，向前回溯
+    out = []
+    cur = ending
+    while len(out) < 10:
+        if cur.weekday() < 5:
+            out.append(cur)
+        cur -= timedelta(days=1)
+    return out
+
+
+def test_previous_trading_dates_includes_as_of_if_trading_day(monkeypatch):
+    # Case A: as_of = Monday trading day → includes Monday
+    as_of = date(2024, 1, 8)  # Monday
+    dates = set(_make_10_dates(as_of))
+    monkeypatch.setattr(mod, "is_trading_day_async", _fake_calendar(dates))
+    session = _FakeSessionAsync()
+    out = asyncio.run(mod.previous_trading_dates(session, as_of, 10))
+    assert len(out) == 10
+    assert out[0] == as_of  # 包含当天
+
+
+def test_previous_trading_dates_skips_non_trading_as_of(monkeypatch):
+    # Case B: as_of = Sunday → first result = previous Friday
+    sunday = date(2024, 1, 7)  # Sunday
+    friday = date(2024, 1, 5)
+    dates = set(_make_10_dates(friday))  # 向后回溯的 10 个交易日，含周五
+    monkeypatch.setattr(mod, "is_trading_day_async", _fake_calendar(dates))
+    session = _FakeSessionAsync()
+    out = asyncio.run(mod.previous_trading_dates(session, sunday, 10))
+    assert len(out) == 10
+    assert out[0] == friday  # 从最近 previous official trading day 开始
+    assert out[0] != sunday
+
+
+def test_previous_trading_dates_holiday_weekday(monkeypatch):
+    # Case C: 某个 weekday 是 holiday（非交易日）→ official calendar 决定
+    as_of = date(2024, 1, 10)  # Wednesday
+    holiday = date(2024, 1, 11)  # Thursday 作为 holiday（非交易）
+    dates = set(_make_10_dates(as_of))
+    dates.discard(holiday)  # 官方日历剔除该周三
+    monkeypatch.setattr(mod, "is_trading_day_async", _fake_calendar(dates))
+    session = _FakeSessionAsync()
+    out = asyncio.run(mod.previous_trading_dates(session, as_of, 10))
+    assert len(out) == 10
+    assert holiday not in out  # holiday weekday 不进入结果
+
+
+# ---------------------------------------------------------------------------
+# MOD5 — canonical universe membership gate
+# ---------------------------------------------------------------------------
+def test_universe_gate_skips_non_canonical(monkeypatch):
+    async def _fake_canonical(session):
+        # 只含另一支 instrument 的 UUID
+        return [uuid4()]
+    monkeypatch.setattr(mod, "get_active_a_share_instruments", _fake_canonical)
+
+    inst = {"market": "SZ", "symbol": "000002", "id": uuid4()}  # 不在 canonical
+    session = _FakeSession([inst])
+    samples = [mod.SampleInstrument("000002", "SZ", UUID_ZERO, "SZ_MAIN",
+                                    "ordinary", "routine")]
+    resolved, skipped = asyncio.run(
+        mod.resolve_sample_instruments(session, samples))
+    assert resolved == []
+    assert skipped[0]["reason"] == "SAMPLE_NOT_IN_CANONICAL_UNIVERSE"
+    assert skipped[0]["instrument_id"] == str(inst["id"])
+
+
+# ---------------------------------------------------------------------------
+# MOD2 / MOD4 — corporate observation runs on event_T with factor evidence
+# ---------------------------------------------------------------------------
+def test_run_corporate_observation_on_event_T(monkeypatch):
+    async def _fake_calendar(session, d: date):
+        return d.weekday() < 5
+    monkeypatch.setattr(mod, "is_trading_day_async", _fake_calendar)
+
+    event_T = date(2024, 1, 8)
+    prev_d = date(2024, 1, 5)
+    next_d = date(2024, 1, 9)
+    iid = uuid4()
+
+    page1 = [{"time": "09:25", "price": 10, "vol": 1, "buyorsell": 1}]
+    seq = {0: page1, 800: []}
+    adapter = _FakeAdapter(lambda *a: seq)
+    bars = _bars_from([(date(2024, 1, 8), 10.2, 10.2, 10000),
+                       (date(2024, 1, 5), 20, 20, 9000)])
+    mdas = _FakeMdas({str(iid): bars})
+
+    inst = mod.SampleInstrument("600519", "SH", iid, "SH_MAIN",
+                                "ordinary", "corporate")
+    obs = asyncio.run(mod.run_corporate_observation(
+        mdas, adapter, _FakeSessionAsync(), inst, event_T, prev_d, next_d,
+        factor_before=1.0, factor_after=2.0))
+    # MOD2: observation trade_date 必须 == event_T，不等于 as_of
+    assert obs["trade_date"] == "2024-01-08"
+    assert obs["cohort"] == "corporate"
+    # MOD4: factor evidence 贯通 observation
+    assert obs["corporate"]["event_date"] == "2024-01-08"
+    assert obs["corporate"]["prev_trade_date"] == "2024-01-05"
+    assert obs["corporate"]["next_trade_date"] == "2024-01-09"
+    assert obs["corporate"]["factor_before"] == 1.0
+    assert obs["corporate"]["factor_after"] == 2.0
+    assert obs["corporate"]["prev_trade_date"] < obs["corporate"]["event_date"]
+    assert obs["corporate"]["event_date"] < obs["corporate"]["next_trade_date"]
+
+
+# ---------------------------------------------------------------------------
+# MOD8 — FULL run_validation orchestration (no manual bypass)
+# ---------------------------------------------------------------------------
+def test_run_validation_full_orchestration(tmp_path, monkeypatch):
+    import json as _json
+
+    out = tmp_path / "full"
+    monkeypatch.setattr(mod, "OUTPUT_DIR", out)
+
+    # 1 routine + 1 corporate（controlled fixture）
+    routine_iid = uuid4()
+    corp_iid = uuid4()
+
+    def fake_sample():
+        return [
+            mod.SampleInstrument("600519", "SH", UUID_ZERO, "SH_MAIN",
+                                 "large_cap", "routine"),
+            mod.SampleInstrument("000002", "SZ", UUID_ZERO, "SZ_MAIN",
+                                 "ordinary", "corporate"),
+        ]
+    monkeypatch.setattr(mod, "load_sample", fake_sample)
+
+    async def fake_canonical(session):
+        return [routine_iid, corp_iid]
+    monkeypatch.setattr(mod, "get_active_a_share_instruments", fake_canonical)
+
+    # identity resolver via session.execute params (market, symbol) -> UUID
+    def identity_for(market, symbol):
+        if market == "SH" and symbol == "600519":
+            return [{"market": "SH", "symbol": "600519", "id": routine_iid}]
+        if market == "SZ" and symbol == "000002":
+            return [{"market": "SZ", "symbol": "000002", "id": corp_iid}]
+        return []
+
+    # official calendar: 10 个连续交易日（结束于 as_of，向后回溯）
+    as_of = date(2024, 2, 1)  # Friday
+    trading_dates = set(_make_10_dates(as_of))
+    trading_dates.update({date(2024, 1, 5), date(2024, 1, 8), date(2024, 1, 9)})
+
+    async def fake_is_trading_day(session, d: date):
+        return d in trading_dates
+    monkeypatch.setattr(mod, "is_trading_day_async", fake_is_trading_day)
+
+    # MDAS: routine + corporate bars
+    routine_bars = _bars_from([(d, 100, 100, 10000) for d in trading_dates])
+    corp_bars = _bars_from([
+        (date(2024, 1, 8), 10.2, 10.2, 10000),  # T open/close
+        (date(2024, 1, 5), 20, 20, 9000),       # T-1 raw close
+    ])
+    qfq_corp_bars = _bars_from([
+        (date(2024, 1, 8), 10.2, 10.2, 10000),  # qfq T open
+        (date(2024, 1, 5), 10, 10, 9000),       # qfq T-1 close
+    ])
+
+    class _FullMdas:
+        def __init__(self):
+            self.calls = []
+
+        async def get_bars(self, session, instrument_id, timeframe="1d",
+                           adj="none", end_date=None, limit=None,
+                           adjustment_as_of=None, **kw):
+            self.calls.append((instrument_id, adj, end_date))
+            if adj == "qfq":
+                bars = qfq_corp_bars
+            else:
+                bars = routine_bars if str(instrument_id) != str(corp_iid) else corp_bars
+            if limit and len(bars) > limit:
+                bars = bars.tail(limit)
+
+            class _R:
+                pass
+            r = _R()
+            r.bars = bars
+            r.data_source = "db"
+            r.degraded = False
+            r.degraded_reason = None
+            r.adj_factor_hash = "h" if adj == "qfq" else ""
+            return r
+    mdas = _FullMdas()
+
+    # AdjustmentFactorService instance（MOD1）
+    factor_df = pd.DataFrame({
+        "trade_date": [pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-08")],
+        "adj_factor": [1.0, 2.0],
+    })
+    adj = _FakeAdjService({str(corp_iid): factor_df})
+
+    # historical transaction source
+    page1 = [{"time": "09:25", "price": 10.2, "vol": 1, "buyorsell": 1}]
+    seq = {0: page1, 800: []}
+    adapter = _FakeAdapter(lambda *a: seq)
+
+    class _OrchSession(_FakeSessionAsync):
+        async def execute(self, stmt, params=None):
+            params = params or {}
+            market = params.get("market")
+            symbol = params.get("symbol")
+            return _FakeResult(identity_for(market, symbol) or [])
+    session = _OrchSession()
+
+    result = asyncio.run(mod.run_validation(
+        session, mdas, adapter, as_of,
+        corporate_lookback_days=180, adj_service=adj, output_dir=out))
+
+    # MOD1: adj service instance 收到 corporate 真实 UUID
+    assert any(cid == corp_iid for cid, _ in adj.captured_calls)
+
+    # ROUTINE: 1 instrument × 10 trading dates
+    routine_obs = [o for o in result["observations"] if o["cohort"] == "routine"]
+    assert len(routine_obs) == 10
+    for o in routine_obs:
+        assert o["trade_date"] in {d.isoformat() for d in trading_dates}
+        assert o["symbol"] == "600519"
+    # corporate 只运行一次
+    corp_obs = [o for o in result["observations"] if o["cohort"] == "corporate"]
+    assert len(corp_obs) == 1
+
+    # MOD2: corporate observation trade_date == event_T (2024-01-08), != as_of (2024-02-01)
+    cob = corp_obs[0]
+    assert cob["trade_date"] == "2024-01-08"
+    assert cob["trade_date"] != as_of.isoformat()
+
+    # MOD3: factor_before/factor_after evidence
+    cc = next(c for c in result["corporate_cases"]
+              if c["instrument_id"] == str(corp_iid))
+    assert cc["status"] == "RESOLVED"
+    assert cc["event_date"] == "2024-01-08"
+    assert cc["prev_trade_date"] == "2024-01-05"
+    assert cc["next_trade_date"] == "2024-01-09"
+    assert cc["factor_before"] == 1.0
+    assert cc["factor_after"] == 2.0
+    assert cc["factor_before"] != cc["factor_after"]
+    assert date.fromisoformat(cc["prev_trade_date"]) < date.fromisoformat(cc["event_date"]) < date.fromisoformat(cc["next_trade_date"])
+
+    # MOD4: factor evidence 进入 observation.corporate
+    assert cob["corporate"]["factor_before"] == 1.0
+    assert cob["corporate"]["factor_after"] == 2.0
+
+    # MOD8 PIT Gap: naive_raw_gap ≈ -0.49, pit_gap ≈ +0.02
+    lane_b = cob["lane_b"]
+    assert lane_b is not None
+    assert lane_b["status"] == "COMPUTED"
+    assert abs(lane_b["naive_raw_gap"] - (-0.49)) < 0.02
+    assert abs(lane_b["pit_gap"] - 0.02) < 0.02
+    assert cob["corporate"]["naive_raw_gap"] is not None
+    assert cob["corporate"]["pit_gap"] is not None
+
+    # WRITER: reopen 01_observations.json
+    obs_file = out / "01_observations.json"
+    assert obs_file.exists()
+    obs_data = _json.loads(obs_file.read_text())
+    assert len([o for o in obs_data if o["cohort"] == "routine"]) == 10
+    assert len([o for o in obs_data if o["cohort"] == "corporate"]) == 1
+
+    # corporate row traceable
+    crow = next(o for o in obs_data if o["cohort"] == "corporate")
+    assert crow["trade_date"] == "2024-01-08"
+    assert crow["corporate"]["factor_before"] == 1.0
+    assert crow["corporate"]["factor_after"] == 2.0
+
+    # 02 / 07 corporate cases: factor_before/after non-empty
+    for fn in ["02_corporate_action_cases.csv"]:
+        fpath = out / fn
+        if fpath.exists():
+            import csv as _csv
+            with fpath.open() as f:
+                rows = list(_csv.DictReader(f))
+            if rows:
+                assert rows[0]["factor_before"] not in (None, "")
+                assert rows[0]["factor_after"] not in (None, "")
+
+    # 11_validation_summary.json: no PASS / confirmed
+    vs = _json.loads((out / "11_validation_summary.json").read_text())
+    text = _json.dumps(vs)
+    for forbidden in ["source PASS", "volume unit confirmed", "amount confirmed",
+                      "CONFIRMED", "RUNNER_CONFIRMED"]:
+        assert forbidden.upper() not in text.upper()
