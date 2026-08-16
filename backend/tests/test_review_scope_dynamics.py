@@ -10,8 +10,10 @@ T1. TRUE CANONICAL SHAPE — input is a real canonical Scope L1 payload
 T2. MANUAL-CHAIN PARITY — manual chain (compute_position_series ->
     compute_historical_dynamics_series -> compute_dynamics_phase_series)
     equals ``compute_scope_dynamics_analysis``.
-T3. EW-ONLY OWNERSHIP — perturbing non-EW primitives (amount / volume) leaves
-    the EW Dynamics Phase series unchanged.
+T3. EW-ONLY OWNERSHIP — over a real two-member canonical payload, perturbing the
+    member amount weights genuinely changes the canonical ``amount_weighted_return``
+    input while the member universe and returns (hence ``equal_weight_return``) stay
+    identical, leaving the EW-driven Historical Dynamics / Dynamics Phase unchanged.
 T4. PREFIX INVARIANCE — appending future observations never changes the
     0:T Dynamics Phase output (no future leakage at the composition layer).
 T5. SERIES CONTRACT — non-ascending dates fail fast via the existing owner
@@ -104,24 +106,70 @@ def _real_series_item(
 def _real_series(
     days: list[date],
     rets: list[float],
-    *,
-    amounts: list[float] | None = None,
-    vol20s: list[float] | None = None,
-    vol200s: list[float] | None = None,
 ) -> list[dict[str, Any]]:
-    """A canonical series with identical returns and optional per-day amount /
-    volume perturbations (used by the EW-only ownership test)."""
+    """A canonical single-member series with identical returns per day."""
     assert len(days) == len(rets)
     return [
         _real_series_item(
             d,
             ret=r,
-            amount=(amounts[i] if amounts else 1e6),
-            vol20=(vol20s[i] if vol20s else 1.0),
-            vol200=(vol200s[i] if vol200s else 2.0),
         )
-        for i, (d, r) in enumerate(zip(days, rets, strict=True))
+        for d, r in zip(days, rets, strict=True)
     ]
+
+
+def _dual_member_series_item(
+    trade_date: date,
+    *,
+    ret: float,
+    spread: float,
+    amount_a: float,
+    amount_b: float,
+) -> dict[str, Any]:
+    """One real canonical L1 payload with two price-valid members (T3 fixture).
+
+    member A = ``ret + spread``, member B = ``ret - spread`` with amounts
+    ``amount_a`` / ``amount_b``.  Because both members are always present with
+    identical returns:
+      - ``price.equal_weight_return`` = mean(A, B) = ``ret`` — independent of
+        the amounts;
+      - ``price.amount_weighted_return`` genuinely moves when the weights move
+        (single-member would make AW == member return and hide any change).
+    """
+    member_a = MemberObservation(
+        member_id="m_a",
+        price_candidate=True,
+        return_1d=ret + spread,
+        amount=amount_a,
+        trend=Direction.UP,
+        swing=Direction.UP,
+        internal=Direction.UP,
+        momentum=MomentumDirection.EXPANDING,
+        regime_strength=0.5,
+        vol_ratio20=1.0,
+        vol_ratio200=2.0,
+    )
+    member_b = MemberObservation(
+        member_id="m_b",
+        price_candidate=True,
+        return_1d=ret - spread,
+        amount=amount_b,
+        trend=Direction.UP,
+        swing=Direction.UP,
+        internal=Direction.UP,
+        momentum=MomentumDirection.EXPANDING,
+        regime_strength=0.5,
+        vol_ratio20=1.0,
+        vol_ratio200=2.0,
+    )
+    payload = compute_scope_observation(
+        scope_type="industry",
+        scope_key="electronics",
+        trade_date=trade_date,
+        pit_member_ids=["m_a", "m_b"],
+        members=[member_a, member_b],
+    )
+    return {"trade_date": trade_date.isoformat(), "observation": payload}
 
 
 def _returns(count: int) -> list[float]:
@@ -203,29 +251,51 @@ def test_manual_chain_parity() -> None:
 
 
 def test_ew_only_ownership() -> None:
+    """T3 — EW-only ownership on a real two-member canonical payload.
+
+    BASE:    member weights (1, 1) every day  -> AW = ret.
+    VARIANT: weights (3, 1) even days / (1, 4) odd days -> AW genuinely moves,
+    while the member universe and returns (hence Equal Weight Return) are
+    byte-identical.  The Scope Dynamics chain is EW-driven, so it must not move.
+    """
     days = _trading_days(date(2026, 1, 5), 130)
     rets = _returns(len(days))
+    spread = 0.01
 
-    base = _real_series(days, rets)
-    variant = _real_series(
-        days,
-        rets,
-        amounts=[1e5 + (i % 9) * 1e4 for i in range(len(days))],
-        vol20s=[0.5 + (i % 5) * 0.2 for i in range(len(days))],
-        vol200s=[1.0 + (i % 4) * 0.5 for i in range(len(days))],
-    )
+    base = [
+        _dual_member_series_item(d, ret=r, spread=spread, amount_a=1.0, amount_b=1.0)
+        for d, r in zip(days, rets, strict=True)
+    ]
+    variant = [
+        _dual_member_series_item(
+            d,
+            ret=r,
+            spread=spread,
+            amount_a=(3.0 if i % 2 == 0 else 1.0),
+            amount_b=(1.0 if i % 2 == 0 else 4.0),
+        )
+        for i, (d, r) in enumerate(zip(days, rets, strict=True))
+    ]
 
-    # Prove the perturbation really changed a non-EW primitive's dynamics...
-    base_aw = compute_position_series(base, "amount_weighted_return")
-    variant_aw = compute_position_series(variant, "amount_weighted_return")
-    assert base_aw != variant_aw
-    # ...while leaving the EW Position series byte-identical.
-    assert compute_position_series(base, "equal_weight_return") == compute_position_series(
-        variant, "equal_weight_return"
-    )
+    # (1) Equal Weight canonical scalar identical for EVERY date.
+    for b, v in zip(base, variant, strict=True):
+        assert (
+            b["observation"]["price"]["equal_weight_return"]
+            == v["observation"]["price"]["equal_weight_return"]
+        ), "variant must NOT change the canonical EW input"
 
+    # (2) Amount Weighted canonical scalar genuinely changed on at least one date.
+    aw_changed = [
+        b["observation"]["price"]["amount_weighted_return"]
+        != v["observation"]["price"]["amount_weighted_return"]
+        for b, v in zip(base, variant, strict=True)
+    ]
+    assert any(aw_changed), "variant must perturb the canonical AW input"
+
+    # (3) The EW-driven Scope chain is invariant under the AW-only perturbation.
     base_out = compute_scope_dynamics_analysis(base)
     variant_out = compute_scope_dynamics_analysis(variant)
+    assert base_out["historical_dynamics"] == variant_out["historical_dynamics"]
     assert base_out["dynamics_phase"] == variant_out["dynamics_phase"]
 
 
