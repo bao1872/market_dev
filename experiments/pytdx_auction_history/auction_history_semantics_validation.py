@@ -307,8 +307,7 @@ def fetch_full_day_transactions_paginated(
                     source_last_time=source_last_time,
                 )
             page = adapter.api.get_history_transaction_data(
-                market=market_int, code=symbol, start=offset,
-                count=PAGE_SIZE, date_int=date_int,
+                market_int, symbol, offset, PAGE_SIZE, date_int,
             ) or []
             page_count += 1
 

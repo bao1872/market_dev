@@ -123,13 +123,23 @@ class _FakeAdapter:
 
 
 class _FakeApi:
+    """Strict contract mirroring real runtime pytdx.hq.TdxHq_API signature.
+
+    Real runtime: get_history_transaction_data(market, code, start, count, date)
+    - 5 positional args, NO ``date_int`` keyword.
+    - If runner ever calls with ``date_int=`` it must raise TypeError offline.
+    """
+
     def __init__(self, page_provider):
         self._page_provider = page_provider
         self.call_count = 0
+        # captured args from the LAST call (for signature-contract assertions)
+        self.last_args = None
 
-    def get_history_transaction_data(self, market, code, start, count, date_int):
+    def get_history_transaction_data(self, market, code, start, count, date):
         self.call_count += 1
-        pages = self._page_provider(market, code, start, count, date_int)
+        self.last_args = (market, code, start, count, date)
+        pages = self._page_provider(market, code, start, count, date)
         if isinstance(pages, Exception):
             raise pages
         return pages.get(start, [])
@@ -475,6 +485,45 @@ def test_pagination_incomplete_blocks_extraction():
     ex = mod.extract_from_full_day("600000", "SH", str(uuid4()),
                                    date(2024, 1, 8), r)
     assert ex.status == "SOURCE_PAGINATION_INCOMPLETE"
+
+
+# ---------------------------------------------------------------------------
+# ROUND 1F — strict pytdx real-signature contract regression
+# ---------------------------------------------------------------------------
+def test_pytdx_history_transaction_real_signature_contract():
+    """fetch_full_day_transactions_paginated must call pytdx exactly per the
+    real runtime contract: positional (market, code, start, count, date).
+
+    The fake must RECEIVE the date as the 5th positional arg (NOT a date_int
+    keyword). This locks the Round 1 live defect from regressing.
+    """
+    page1 = [{"time": "09:25", "price": 1, "vol": 1, "buyorsell": 0}]
+    seq = {0: page1, 800: []}
+    adapter = _FakeApi(lambda *a: seq)
+    r = mod.fetch_full_day_transactions_paginated(
+        adapter, "600000", 1, date(2024, 8, 14))
+    assert r.status == "COMPLETE"
+    assert r.record_count == 1
+    assert r.page_count == 1
+
+    # Fake captured exactly 5 positional args, no date_int keyword.
+    assert adapter.last_args is not None
+    market, code, start, count, dt = adapter.last_args
+    assert market == 1
+    assert code == "600000"
+    assert start == 0
+    assert count == 800
+    # 5th positional value == YYYYMMDD integer passed through as `date`
+    assert dt == 20240814
+
+
+def test_pytdx_history_transaction_rejects_date_int_keyword():
+    """Optional guard: a strict fake must refuse the bad keyword the live
+    runner previously used. If runner regresses to date_int=, this fails."""
+    api = _FakeApi(lambda *a: {0: []})
+    with pytest.raises(TypeError):
+        api.get_history_transaction_data(
+            market=1, code="600519", start=0, count=800, date_int=20260814)
 
 
 # ---------------------------------------------------------------------------
