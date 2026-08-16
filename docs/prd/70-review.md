@@ -604,6 +604,34 @@ L2 不是算法层，不是评分层。固定为：
 
 **Position percentile lookback**（默认历史窗口 120 observations、最低有效历史 60 observations、baseline strictly pre-T、no future leakage，§7.9 Position contract，Position Foundation 已 CLOSED）与 **EMA numerical contract** 均已在 §7.9 **FROZEN**。**Persistence**（20D Historical Position Occupancy numerical / availability contract）已冻结于 §7.9 **Persistence Numerical Contract（FROZEN）**。**Dynamics Phase / Leadership / Interpretation thresholds** 仍保持 **IMPLEMENTATION DESIGN REQUIRED**。不得把 Dynamics Phase / Leadership / Interpretation thresholds 一并标成 ready。
 
+#### 历史 Source 归属与边界（FROZEN）
+
+`ObservationSeries` / `PrimitiveSeries` / `PrimitivePoint` 是**共享数据 shape**，对上游历史 source 的物理实现保持解耦。「History Service 是所有下游分析唯一历史 source」这类表述存在潜在歧义，正式拆分如下：
+
+**1. Observation Series Shape Owner**
+
+Observation Series Builder 负责：
+
+- trading-date axis alignment；
+- snapshot gap preservation（missing trading-observation slot → `available=False / value=None` point，slot 保留不压缩）；
+- primitive extraction（经 registry）。
+
+它**不决定 membership universe**。同一份 ObservationSeries shape 可以承载不同 Analysis 各自冻结的 source 语义。
+
+**2. Source Adapter Ownership**
+
+上游 source 必须先依据**具体 Analysis 冻结的 universe contract**，提供对应的 historical snapshots。Source 语义属于 Analysis 层决策，不属于 Builder。
+
+**3. Analysis B source**
+
+Historical Dynamics（§7.9）的正式历史 source = **CURRENT STATIC reconstruction**（`review_historical_scope_reconstruction_service.py`；详见 §7.9 Historical Membership Universe Contract（FROZEN））。
+
+**4. Persisted PIT History**
+
+`review_scope_observation_facts` 仍是 **daily historical-PIT Canonical Scope Observation history**。它可以用于需要 historical-PIT 事实语义的 consumer，但**不得直接冒充 Analysis B current-static source**（直接 wire 进 Dynamics Phase 会静默改变产品语义，见 §7.9 Implementation Boundary）。
+
+不删除 History Service，只是收紧其适用边界。
+
 ### 7.8 Analysis A — Cross-sectional
 
 核心：Cross-sectional Percentile。
@@ -980,6 +1008,53 @@ Historical Dynamics 用户语言固定为：
 是否持续？（Persistence）
 ```
 
+#### Historical Membership Universe Contract（FROZEN）
+
+Analysis B Historical Dynamics 使用 **CURRENT STATIC MEMBERSHIP × historical member facts** 作为正式历史 Scope universe contract。
+
+**membership_mode = `"current_static"`**
+
+对 Scope S 和 analysis as-of date A：
+
+- `members(S, A)` = A 时点当前 canonical membership（**只 resolve 一次**）；
+- 整个 historical observation window 内 member universe **固定不变**；
+- 对每个历史交易日 T：读取 `members(S, A)` 中这些 member 在 **exact historical T 及 canonical T-1** 的真实 canonical facts，再调用 `compute_scope_observation()` 形成该 T 的 analysis-source Scope Observation。
+
+**禁止**：
+
+- 使用历史 T 的 Scope membership 替换固定成员集合（PIT(T) membership replacement）；
+- historical / ASOF membership mixing；
+- current member FACT 回填历史 T（current fact backfill）；
+- future facts（no future leakage）。
+
+**Provenance（至少）**：
+
+- `membership_mode`
+- `membership_asof_date`
+- `member_count`
+
+**Product meaning**：Historical Dynamics 回答「今天这个 Scope 的成员，过去是怎样演化到当前状态的？」它不是回答「历史上每一天当时定义下的 Scope 表现如何？」——后者由 PIT daily Scope Observation history 表达，仍是合法事实，但**不是 Dynamics Phase lifecycle owner**。
+
+**Accepted recomputation semantics**：由于 current membership 未来可能变化，同一个历史 T 的 Historical Dynamics 在不同 analysis as-of date 可以重新计算出不同结果。这是 **accepted recomputation semantics，不是数据错误**。
+
+#### Implementation Boundary
+
+当前已实现的 `review_historical_scope_reconstruction_service.py` 是 current-static semantic owner / foundation，但仍为 **shadow execution path**。
+
+下一 implementation 要解决的是：
+
+```
+Current-Static Reconstruction
+→ ObservationSeries
+→ Scope Dynamics
+```
+
+的 **application integration**。
+
+**DO NOT wire** `review_observation_history_service` 的 persisted PIT series 直接进入 Dynamics Phase。
+
+**Scale note**：current-static reconstruction 物理计算包含 Scope × member × historical trade_date，正式 runtime integration 前 **SCALE GATE REQUIRED**（具体 SLA 由 runtime / execution model 设计决定，PRD 不发明秒级 SLA；recomputation cadence / current-static result persistence 亦属后续 Scale / Execution Model Design）。
+
 #### Interpretation Input Ownership（FROZEN）
 
 Scope Dynamics Phase 的 **lifecycle primary owner = Equal-weight Return（EW）Historical Dynamics**。
@@ -1278,6 +1353,17 @@ Historical Dynamics 要求：对应 Scope Fact 必须存在连续、点时正确
 
 PRD 不要求新建 Scope history table。产品要求只是：新版 Scope Facts 必须能够形成逐交易日日序列。实现如何复用已有 daily Scope fact persistence，留给后续 Implementation Design。
 
+#### 7.15.2 Current-Static Membership 与 Historical Fact Availability（v2.3 补充）
+
+Current-static membership **不意味着** member historical fact 必须存在。
+
+某个固定 current member 在历史 T 无 canonical fact：
+
+- 该 primitive point 仍应 `unavailable`，并保留 trading observation slot；
+- **禁止** 为了保持 member universe 而 forward-fill / current-backfill 历史 member facts。
+
+（当前成员在历史 T 缺失 = 该日该 primitive 的合法 unavailable，不是 contract violation；slot 保留规则见 §7.7.5。）
+
 ### 7.16 Scope Architecture / PIT / Peer Contract
 
 保留当前已经正确的长期架构原则：
@@ -1291,6 +1377,12 @@ PRD 不要求新建 Scope history table。产品要求只是：新版 Scope Fact
 - readiness / data quality（就绪 / 数据质量）。
 
 不得因重写 §7 而丢失这些长期架构原则。
+
+**PIT membership 长期原则 vs Analysis B current-static exception（v2.3 明确）**：
+
+PIT membership 仍是 **Daily Canonical Scope Observation** 的长期架构原则，本节上述原则**不被删除**。
+
+但 **Analysis B Historical Dynamics** 是明确冻结的 **derived-analysis exception**：它使用 current-static universe，因为产品问题本身是「当前成员的历史演化」（见 §7.9 Historical Membership Universe Contract（FROZEN））。该 exception **只冻结在 Analysis B 相关 source contract**，不得无意扩展到 Cross-sectional（§7.8）/ Internal Structure（§7.10）等其他 Review 模块。
 
 ### 7.17 Legacy Supersession / Current Implementation Gap
 
