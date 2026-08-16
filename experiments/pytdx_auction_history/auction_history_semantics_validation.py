@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 import statistics
 from dataclasses import dataclass, field, asdict
@@ -73,10 +74,17 @@ AUCTION_VOLUME_VALID_MIN = 0  # strict: > AUCTION_VOLUME_VALID_MIN
 CANON_STATUS_CANONICAL = "CANONICAL"
 CANON_STATUS_NO_VOLUME_BEARING = "NO_VOLUME_BEARING_0925"
 CANON_STATUS_MULTIPLE_VOLUME_BEARING = "MULTIPLE_VOLUME_BEARING_0925"
+CANON_STATUS_INVALID_VOLUME = "INVALID_VOLUME_0925"
 
 # Amount source type
 AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME = "DERIVED_PRICE_X_NORMALIZED_VOLUME"
 AMOUNT_SOURCE_RAW_FIELD_ABSENT = "RAW_FIELD_ABSENT"
+
+# Raw volume 三态分类（MOD 2B-A closure）
+# 正式 contract owner 只认 raw volume 有效性；不得依赖 buyorsell numeric code 的业务语义。
+VOLUME_CLASS_POSITIVE = "POSITIVE"  # finite numeric > 0
+VOLUME_CLASS_ZERO = "ZERO"          # finite numeric == 0
+VOLUME_CLASS_INVALID = "INVALID"    # None / 非有限 / 负数 / 无法解析
 
 # 分页参数（沿用 pytdx 探索脚本历史可工作约定）
 PAGE_SIZE = 800
@@ -113,6 +121,7 @@ class NormalizedAuctionTransaction:
     buy_sell_raw: Optional[int]
     source_record: dict
     source_schema_keys: list
+    volume_parse_status: Optional[str] = None  # MOD 2B-A: ABSENT/OK/NON_FINITE/MALFORMED
 
 
 @dataclass
@@ -137,6 +146,9 @@ class AuctionExtractionResult:
     full_day_status: str  # 来自 FullDayTransactionResult.status
     raw_canonical_record_count: int = 0
     positive_volume_record_count: int = 0
+    zero_volume_record_count: int = 0
+    invalid_volume_record_count: int = 0
+    # 兼容字段：严格等于 valid numeric raw_vol == 0，不含 missing/invalid
     auxiliary_zero_volume_record_count: int = 0
 
 
@@ -267,7 +279,27 @@ def _normalize_raw_transaction(
     raw_time = str(rec.get("time", ""))
     raw_price = float(rec.get("price", 0.0) or 0.0)
     vol = rec.get("vol")
-    raw_volume_value = float(vol) if vol is not None else None
+    # 最小 safe normalization：malformed vol 不得让整条 source-day runner 崩；
+    # 不伪装成 0，保留原始 source_record 供 canonicalizer 判 INVALID。
+    raw_volume_value = None
+    volume_parse_status = "ABSENT"
+    if vol is None:
+        raw_volume_value = None
+        volume_parse_status = "ABSENT"
+    else:
+        try:
+            parsed = float(vol)
+            if math.isfinite(parsed):
+                raw_volume_value = parsed
+                volume_parse_status = "OK"
+            else:
+                # NaN / inf：保留 None，标记 INVALID（不进入 ZERO 也不进入 POSITIVE）
+                raw_volume_value = None
+                volume_parse_status = "NON_FINITE"
+        except (TypeError, ValueError):
+            # malformed（如字符串 "bad"）：保留 None，标记 INVALID
+            raw_volume_value = None
+            volume_parse_status = "MALFORMED"
     # 历史逐笔真实 source 无 amount 字段
     raw_amount_value = None
     bs = rec.get("buyorsell")
@@ -280,6 +312,7 @@ def _normalize_raw_transaction(
         raw_volume_value=raw_volume_value, raw_amount_value=raw_amount_value,
         buy_sell_raw=buy_sell_raw, source_record=rec,
         source_schema_keys=sorted(rec.keys()),
+        volume_parse_status=volume_parse_status,
     )
 
 
@@ -291,6 +324,10 @@ class Auction0925Canonicalization:
     canonicalization_status: str
     raw_canonical_record_count: int
     positive_volume_record_count: int
+    zero_volume_record_count: int
+    invalid_volume_record_count: int
+    # 兼容字段：auxiliary_zero_volume_record_count 严格等于 valid numeric raw_vol == 0，
+    # 不得包含 missing/invalid（MOD 2B-A closure）。
     auxiliary_zero_volume_record_count: int
     selected_record: Optional[NormalizedAuctionTransaction]
     auction_price_raw: Optional[float]
@@ -301,10 +338,24 @@ class Auction0925Canonicalization:
     reason: str
 
 
-def _is_volume_bearing(rec: NormalizedAuctionTransaction) -> bool:
-    """volume-bearing 取决于 raw_vol > 0（不依赖 buyorsell code 业务语义）。"""
-    v = rec.raw_volume_value
-    return v is not None and v > AUCTION_VOLUME_VALID_MIN
+def classify_raw_volume(raw_volume_value: Optional[float]) -> str:
+    """三态分类（MOD 2B-A closure）。
+
+    POSITIVE: finite numeric > 0
+    ZERO:     finite numeric == 0
+    INVALID:  None / 非有限 / 负数 / 无法解析
+
+    正式代码不得依赖 buyorsell numeric code 的业务语义。
+    """
+    if raw_volume_value is None:
+        return VOLUME_CLASS_INVALID
+    if not math.isfinite(raw_volume_value):
+        return VOLUME_CLASS_INVALID
+    if raw_volume_value < 0:
+        return VOLUME_CLASS_INVALID
+    if raw_volume_value > 0:
+        return VOLUME_CLASS_POSITIVE
+    return VOLUME_CLASS_ZERO
 
 
 def canonicalize_auction_0925(
@@ -314,18 +365,41 @@ def canonicalize_auction_0925(
 
     纯函数：不访问 MDAS / QFQ / DB / Pytdx / network。
 
-    Owner 是 unique positive-volume record（raw_vol > 0）。
+    三态分类：POSITIVE / ZERO / INVALID（基于 raw volume 有效性，不依赖 buyorsell）。
+
+    INVALID 优先于其它结论：只要存在任何 INVALID volume row，
+    真实 volume 未知，不能安全假定它是 zero auxiliary，
+    否则可能隐藏第二条 positive-volume record → INVALID_VOLUME_0925。
+
+    Owner 是 unique valid positive-volume record（raw_vol > 0）。
     zero-volume canonical 09:25 rows 只作为 auxiliary evidence 保留，
     不参与 price selection / volume / amount。
     """
     raw_n = len(canonical_records)
-    volume_bearing = [r for r in canonical_records if _is_volume_bearing(r)]
-    zero_vol = [r for r in canonical_records if not _is_volume_bearing(r)]
-    pos_n = len(volume_bearing)
-    aux_n = len(zero_vol)
+    classes = [classify_raw_volume(r.raw_volume_value) for r in canonical_records]
+    pos_n = sum(1 for c in classes if c == VOLUME_CLASS_POSITIVE)
+    zero_n = sum(1 for c in classes if c == VOLUME_CLASS_ZERO)
+    invalid_n = sum(1 for c in classes if c == VOLUME_CLASS_INVALID)
+
+    # INVALID 优先：真实 volume 未知，不能假设 zero auxiliary
+    if invalid_n > 0:
+        return Auction0925Canonicalization(
+            canonicalization_status=CANON_STATUS_INVALID_VOLUME,
+            raw_canonical_record_count=raw_n,
+            positive_volume_record_count=pos_n,
+            zero_volume_record_count=zero_n,
+            invalid_volume_record_count=invalid_n,
+            auxiliary_zero_volume_record_count=zero_n,
+            selected_record=None,
+            auction_price_raw=None,
+            auction_volume_raw_lots=None,
+            auction_volume_shares=None,
+            auction_amount=None,
+            amount_source_type=None,
+            reason="INVALID_CANONICAL_0925_VOLUME")
 
     if pos_n == 1:
-        sel = volume_bearing[0]
+        sel = next(r for r, c in zip(canonical_records, classes) if c == VOLUME_CLASS_POSITIVE)
         price = sel.raw_price
         raw_lots = sel.raw_volume_value
         shares = raw_lots * AUCTION_LOT_MULTIPLIER
@@ -334,7 +408,9 @@ def canonicalize_auction_0925(
             canonicalization_status=CANON_STATUS_CANONICAL,
             raw_canonical_record_count=raw_n,
             positive_volume_record_count=pos_n,
-            auxiliary_zero_volume_record_count=aux_n,
+            zero_volume_record_count=zero_n,
+            invalid_volume_record_count=0,
+            auxiliary_zero_volume_record_count=zero_n,
             selected_record=sel,
             auction_price_raw=price,
             auction_volume_raw_lots=raw_lots,
@@ -348,7 +424,9 @@ def canonicalize_auction_0925(
             canonicalization_status=CANON_STATUS_NO_VOLUME_BEARING,
             raw_canonical_record_count=raw_n,
             positive_volume_record_count=0,
-            auxiliary_zero_volume_record_count=aux_n,
+            zero_volume_record_count=zero_n,
+            invalid_volume_record_count=0,
+            auxiliary_zero_volume_record_count=zero_n,
             selected_record=None,
             auction_price_raw=None,
             auction_volume_raw_lots=None,
@@ -362,7 +440,9 @@ def canonicalize_auction_0925(
         canonicalization_status=CANON_STATUS_MULTIPLE_VOLUME_BEARING,
         raw_canonical_record_count=raw_n,
         positive_volume_record_count=pos_n,
-        auxiliary_zero_volume_record_count=aux_n,
+        zero_volume_record_count=zero_n,
+        invalid_volume_record_count=0,
+        auxiliary_zero_volume_record_count=zero_n,
         selected_record=None,
         auction_price_raw=None,
         auction_volume_raw_lots=None,
@@ -529,8 +609,10 @@ def extract_from_full_day(
             noncanonical.append(n)
 
     # raw multiplicity：区分 source 层与 business canonicalization 层
-    pos = [r for r in canonical if _is_volume_bearing(r)]
-    zero = [r for r in canonical if not _is_volume_bearing(r)]
+    # 三态分类（MOD 2B closure）：invalid 不得混入 zero auxiliary
+    pos = [r for r in canonical if classify_raw_volume(r.raw_volume_value) == VOLUME_CLASS_POSITIVE]
+    zero = [r for r in canonical if classify_raw_volume(r.raw_volume_value) == VOLUME_CLASS_ZERO]
+    invalid = [r for r in canonical if classify_raw_volume(r.raw_volume_value) == VOLUME_CLASS_INVALID]
 
     if len(canonical) == 1:
         status = "FOUND"
@@ -546,6 +628,8 @@ def extract_from_full_day(
         all_records=normalized_all, full_day_status=full_day.status,
         raw_canonical_record_count=len(canonical),
         positive_volume_record_count=len(pos),
+        zero_volume_record_count=len(zero),
+        invalid_volume_record_count=len(invalid),
         auxiliary_zero_volume_record_count=len(zero))
 
 
@@ -639,15 +723,6 @@ def compute_volume_evidence(price, volume, amount):
             "reason": "COMPUTED_PRICE_VOLUME_AMOUNT",
         }
     return {"implied_multiplier": None, "reason": "RAW_AMOUNT_FIELD_ABSENT"}
-
-
-def compute_amount_evidence():
-    """MOD9：历史逐笔无 raw amount，Amount 必须保持 unresolved。"""
-    return {
-        "amount_source_type": "RAW_FIELD_ABSENT",
-        "candidate_derived_amount": None,
-        "evidence_reason": "VOLUME_UNIT_NOT_YET_CONFIRMED",
-    }
 
 
 # ===========================================================================
@@ -829,6 +904,8 @@ async def run_corporate_observation(
     obs["noncanonical_records"] = [_raw_evidence_dict(r) for r in extraction.noncanonical_records]
     obs["raw_canonical_record_count"] = extraction.raw_canonical_record_count
     obs["positive_volume_record_count"] = extraction.positive_volume_record_count
+    obs["zero_volume_record_count"] = extraction.zero_volume_record_count
+    obs["invalid_volume_record_count"] = extraction.invalid_volume_record_count
     obs["auxiliary_zero_volume_record_count"] = extraction.auxiliary_zero_volume_record_count
 
     # Round 2B：canonicalization 独立层
@@ -900,6 +977,8 @@ async def run_single_observation(
     obs["noncanonical_record_count"] = len(obs["noncanonical_records"])
     obs["raw_canonical_record_count"] = extraction.raw_canonical_record_count
     obs["positive_volume_record_count"] = extraction.positive_volume_record_count
+    obs["zero_volume_record_count"] = extraction.zero_volume_record_count
+    obs["invalid_volume_record_count"] = extraction.invalid_volume_record_count
     obs["auxiliary_zero_volume_record_count"] = extraction.auxiliary_zero_volume_record_count
 
     # Round 2B：canonicalization 独立层（不依赖 raw row count == 1）
@@ -1128,8 +1207,13 @@ def compute_data_quality_summary(observations: list[dict]) -> dict:
     multiple_volume_bearing_count = sum(
         1 for o in observations
         if o.get("canonicalization_status") == CANON_STATUS_MULTIPLE_VOLUME_BEARING)
+    invalid_volume_count = sum(
+        1 for o in observations
+        if o.get("canonicalization_status") == CANON_STATUS_INVALID_VOLUME)
     aux_zero_count = sum(
         o.get("auxiliary_zero_volume_record_count", 0) for o in observations)
+    invalid_volume_record_count = sum(
+        o.get("invalid_volume_record_count", 0) for o in observations)
     return {
         "total_source_days_attempted": total,
         "pagination": pag,
@@ -1141,10 +1225,13 @@ def compute_data_quality_summary(observations: list[dict]) -> dict:
         "canonical_count": canonical_count,
         "no_volume_bearing_count": no_volume_bearing_count,
         "multiple_volume_bearing_count": multiple_volume_bearing_count,
+        "invalid_volume_count": invalid_volume_count,
         "auxiliary_zero_volume_record_count": aux_zero_count,
+        "invalid_volume_record_count": invalid_volume_record_count,
         "denominator_note": "pagination COMPLETE only enters auction semantics denominator; "
                              "pagination failure is SOURCE DAY INCOMPLETE, not MISSING_0925; "
-                             "raw_multiple_count != business ambiguity (canonicalization layer)",
+                             "raw_multiple_count != business ambiguity (canonicalization layer); "
+                             "INVALID volume rows are NOT counted as auxiliary zero volume",
     }
 
 
@@ -1208,11 +1295,14 @@ def write_evidence_outputs(output_dir, as_of, observations, corporate_cases,
                  "extraction_status": o.get("extraction_status"),
                  "raw_canonical_record_count": o.get("raw_canonical_record_count"),
                  "positive_volume_record_count": o.get("positive_volume_record_count"),
+                 "zero_volume_record_count": o.get("zero_volume_record_count"),
+                 "invalid_volume_record_count": o.get("invalid_volume_record_count"),
                  "auxiliary_zero_volume_record_count": o.get("auxiliary_zero_volume_record_count"),
                  "canonicalization_status": o.get("canonicalization_status")}
                 for o in observations],
                ["symbol", "market", "trade_date", "full_day_status", "extraction_status",
                 "raw_canonical_record_count", "positive_volume_record_count",
+                "zero_volume_record_count", "invalid_volume_record_count",
                 "auxiliary_zero_volume_record_count", "canonicalization_status"])
 
     # 07 corporate cases（alias of 02, kept for compatibility）
@@ -1272,6 +1362,9 @@ def write_evidence_outputs(output_dir, as_of, observations, corporate_cases,
             "MULTIPLE_VOLUME_BEARING_0925": sum(
                 1 for o in observations
                 if o.get("canonicalization_status") == CANON_STATUS_MULTIPLE_VOLUME_BEARING),
+            "INVALID_VOLUME_0925": sum(
+                1 for o in observations
+                if o.get("canonicalization_status") == CANON_STATUS_INVALID_VOLUME),
         },
         "runner_conclusion": "AUCTION_0925_CANONICAL_CONTRACT_FROZEN",
     })

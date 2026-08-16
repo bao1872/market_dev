@@ -1106,14 +1106,21 @@ def test_canonicalize_all_zero_volume():
 
 
 def test_canonicalize_invalid_missing_volume():
-    """C6: invalid/missing volume must not be silently coerced.
+    """C6 (MOD 2B-A closure): missing volume row is INVALID, not zero-volume auxiliary.
 
-    A record with vol=None is NOT volume-bearing; selection must not pick it.
+    A single record with vol=None must become INVALID_VOLUME_0925, not
+    NO_VOLUME_BEARING. INVALD volume cannot be safely assumed zero because it
+    might hide a second positive-volume record.
     """
     c = mod.canonicalize_auction_0925([_mk_rec(10, None, None)])
     assert c.positive_volume_record_count == 0
-    assert c.canonicalization_status == mod.CANON_STATUS_NO_VOLUME_BEARING
+    assert c.zero_volume_record_count == 0
+    assert c.invalid_volume_record_count == 1
+    assert c.canonicalization_status == mod.CANON_STATUS_INVALID_VOLUME
     assert c.auction_price_raw is None
+    assert c.auction_volume_shares is None
+    assert c.auction_amount is None
+    assert c.reason == "INVALID_CANONICAL_0925_VOLUME"
 
 
 def test_canonicalize_amount_contract():
@@ -1161,7 +1168,12 @@ def test_observation_blocks_lane_on_multiple_volume_bearing():
 
 
 def test_extract_two_canonical_rows_reports_multiplicity_and_counts():
-    """extract_from_full_day must expose raw multiplicity + volume-bearing counts."""
+    """extract_from_full_day must expose raw multiplicity + tri-state volume counts.
+
+    (8,0)+(2,>0) is OBSERVATIONAL ONLY: Round 2A evidence observed zero-volume
+    auxiliary rows with raw buyorsell value 8, but no business semantics are
+    assigned to that numeric code. Owner is the positive-volume row via raw_vol>0.
+    """
     records = [
         {"time": "09:25", "price": 12.94, "vol": 0, "buyorsell": 8},
         {"time": "09:25", "price": 12.94, "vol": 5, "buyorsell": 2},
@@ -1173,7 +1185,161 @@ def test_extract_two_canonical_rows_reports_multiplicity_and_counts():
     assert ex.status == "MULTIPLE_0925"
     assert ex.raw_canonical_record_count == 2
     assert ex.positive_volume_record_count == 1
+    assert ex.zero_volume_record_count == 1
+    assert ex.invalid_volume_record_count == 0
     assert ex.auxiliary_zero_volume_record_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 2B-A closure: volume tri-state classification + INVALID precedence
+# ---------------------------------------------------------------------------
+def test_classify_raw_volume_tri_state():
+    """classify_raw_volume: positive / zero / invalid three-state."""
+    assert mod.classify_raw_volume(5.0) == mod.VOLUME_CLASS_POSITIVE
+    assert mod.classify_raw_volume(0.0) == mod.VOLUME_CLASS_ZERO
+    assert mod.classify_raw_volume(None) == mod.VOLUME_CLASS_INVALID
+    assert mod.classify_raw_volume(float("nan")) == mod.VOLUME_CLASS_INVALID
+    assert mod.classify_raw_volume(float("inf")) == mod.VOLUME_CLASS_INVALID
+    assert mod.classify_raw_volume(-1.0) == mod.VOLUME_CLASS_INVALID
+    assert mod.classify_raw_volume(-0.5) == mod.VOLUME_CLASS_INVALID
+
+
+def test_canonicalize_invalid_negative_volume():
+    """negative volume is INVALID, not positive/zero."""
+    c = mod.canonicalize_auction_0925([_mk_rec(10, -1, 2)])
+    assert c.invalid_volume_record_count == 1
+    assert c.canonicalization_status == mod.CANON_STATUS_INVALID_VOLUME
+    assert c.auction_price_raw is None
+
+
+def test_canonicalize_invalid_and_positive_stays_invalid():
+    """MOD 2B-A: INVALID must win over a co-existing positive row.
+
+    A malformed/unknown volume row cannot be assumed zero auxiliary because it
+    might hide a second positive-volume record.
+    """
+    c = mod.canonicalize_auction_0925([
+        _mk_rec(12.94, None, 8),
+        _mk_rec(12.95, 5, 2),
+    ])
+    assert c.invalid_volume_record_count == 1
+    assert c.positive_volume_record_count == 1
+    assert c.canonicalization_status == mod.CANON_STATUS_INVALID_VOLUME
+    assert c.auction_volume_shares is None
+    assert c.auction_amount is None
+    assert c.reason == "INVALID_CANONICAL_0925_VOLUME"
+
+
+def test_canonicalize_malformed_source_normalized_to_invalid():
+    """malformed source vol string must not crash; final canonicalization INVALID."""
+    rec = mod._normalize_raw_transaction(
+        "600000", "SH", str(uuid4()), date(2024, 1, 8),
+        {"time": "09:25", "price": 12.94, "vol": "bad", "buyorsell": 2})
+    assert rec.raw_volume_value is None
+    assert rec.volume_parse_status == "MALFORMED"
+    c = mod.canonicalize_auction_0925([rec])
+    assert c.canonicalization_status == mod.CANON_STATUS_INVALID_VOLUME
+    assert c.invalid_volume_record_count == 1
+
+
+def test_observation_true_integration_raw_multiple_to_canonical_lane_ab():
+    """MOD 2B-A: TRUE observation integration.
+
+    Must really pass through run_single_observation → extraction →
+    canonicalization → Lane A/B → amount. Source full-day:
+      09:25 price=12.95 vol=0 ; 09:25 price=12.94 vol=5
+    """
+    session = _FakeSession([_make_inst("SH", "600000")])
+    inst = mod.SampleInstrument("600000", "SH", str(uuid4()), "SH_MAIN",
+                                "ordinary", "routine")
+    pages = {
+        "600000": [
+            {"time": "09:25", "price": 12.95, "vol": 0, "buyorsell": 8},
+            {"time": "09:25", "price": 12.94, "vol": 5, "buyorsell": 2},
+        ]
+    }
+    mdas = _FakeMdas(bars_by_id={
+        str(inst.instrument_id): _bars_from([
+            (date(2024, 1, 5), 12.0, 12.1, 1000),
+            (date(2024, 1, 8), 12.8, 12.9, 1000),
+        ])
+    })
+    adapter = _FakeAdapter(lambda m, code, start, count, d: {0: pages.get(code, [])})
+
+    obs = asyncio.run(
+        mod.run_single_observation(mdas, adapter, session, inst, date(2024, 1, 8)))
+
+    assert obs["extraction_status"] == "MULTIPLE_0925"
+    assert obs["raw_canonical_record_count"] == 2
+    assert obs["canonicalization_status"] == mod.CANON_STATUS_CANONICAL
+    assert obs["auction_price_raw"] == 12.94
+    assert obs["auction_volume_raw_lots"] == 5
+    assert obs["auction_volume_shares"] == 500
+    assert obs["auction_amount"] == 12.94 * 500
+    assert obs["lane_a"]["status"] == "COMPUTED"
+    assert obs["lane_b"]["status"] == "COMPUTED"
+    assert (obs["amount_evidence"]["amount_source_type"]
+            == mod.AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME)
+
+
+def test_observation_true_integration_multiple_positive_blocked():
+    """MOD 2B-A: two positive rows → MULTIPLE_VOLUME_BEARING, Lane A/B None."""
+    session = _FakeSession([_make_inst("SH", "600000")])
+    inst = mod.SampleInstrument("600000", "SH", str(uuid4()), "SH_MAIN",
+                                "ordinary", "routine")
+    pages = {
+        "600000": [
+            {"time": "09:25", "price": 12.93, "vol": 5, "buyorsell": 2},
+            {"time": "09:25", "price": 12.94, "vol": 6, "buyorsell": 2},
+        ]
+    }
+    mdas = _FakeMdas(bars_by_id={
+        str(inst.instrument_id): _bars_from([
+            (date(2024, 1, 5), 12.0, 12.1, 1000),
+            (date(2024, 1, 8), 12.8, 12.9, 1000),
+        ])
+    })
+    adapter = _FakeAdapter(lambda m, code, start, count, d: {0: pages.get(code, [])})
+
+    obs = asyncio.run(
+        mod.run_single_observation(mdas, adapter, session, inst, date(2024, 1, 8)))
+
+    assert obs["canonicalization_status"] == mod.CANON_STATUS_MULTIPLE_VOLUME_BEARING
+    assert obs["lane_a"] is None
+    assert obs["lane_b"] is None
+    assert obs["auction_price_raw"] is None
+    assert obs["auction_volume_shares"] is None
+    assert obs["auction_amount"] is None
+
+
+def test_observation_true_integration_invalid_volume_blocked():
+    """MOD 2B-A: row vol=None + row vol=5 → INVALID_VOLUME_0925 (not CANONICAL)."""
+    session = _FakeSession([_make_inst("SH", "600000")])
+    inst = mod.SampleInstrument("600000", "SH", str(uuid4()), "SH_MAIN",
+                                "ordinary", "routine")
+    pages = {
+        "600000": [
+            {"time": "09:25", "price": 12.95, "vol": None, "buyorsell": 8},
+            {"time": "09:25", "price": 12.94, "vol": 5, "buyorsell": 2},
+        ]
+    }
+    mdas = _FakeMdas(bars_by_id={
+        str(inst.instrument_id): _bars_from([
+            (date(2024, 1, 5), 12.0, 12.1, 1000),
+            (date(2024, 1, 8), 12.8, 12.9, 1000),
+        ])
+    })
+    adapter = _FakeAdapter(lambda m, code, start, count, d: {0: pages.get(code, [])})
+
+    obs = asyncio.run(
+        mod.run_single_observation(mdas, adapter, session, inst, date(2024, 1, 8)))
+
+    assert obs["canonicalization_status"] == mod.CANON_STATUS_INVALID_VOLUME
+    assert obs["invalid_volume_record_count"] == 1
+    assert obs["zero_volume_record_count"] == 0
+    assert obs["auction_price_raw"] is None
+    assert obs["lane_a"] is None
+    assert obs["lane_b"] is None
 
 
 def test_amount_evidence_frozen_derived_contract():
