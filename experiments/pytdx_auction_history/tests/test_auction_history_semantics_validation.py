@@ -499,20 +499,25 @@ def test_pytdx_history_transaction_real_signature_contract():
     """
     page1 = [{"time": "09:25", "price": 1, "vol": 1, "buyorsell": 0}]
     seq = {0: page1, 800: []}
-    adapter = _FakeApi(lambda *a: seq)
+    # Correct topology: fetch_full_day_transactions_paginated calls
+    # adapter.api.get_history_transaction_data(...), so the fake that owns
+    # the strict pytdx signature must be reachable via `adapter.api`.
+    adapter = _FakeAdapter(lambda *a: seq)
     r = mod.fetch_full_day_transactions_paginated(
         adapter, "600000", 1, date(2024, 8, 14))
     assert r.status == "COMPLETE"
     assert r.record_count == 1
     assert r.page_count == 1
 
-    # Fake captured exactly 5 positional args, no date_int keyword.
-    assert adapter.last_args is not None
-    market, code, start, count, dt = adapter.last_args
+    # Prove the real call chain:
+    #   fetch_full_day_transactions_paginated -> adapter.api -> strict _FakeApi
+    # NOT a direct test of _FakeApi.
+    assert adapter.api.last_args is not None
+    market, code, start, count, dt = adapter.api.last_args
     assert market == 1
     assert code == "600000"
     assert start == 0
-    assert count == 800
+    assert count == mod.PAGE_SIZE
     # 5th positional value == YYYYMMDD integer passed through as `date`
     assert dt == 20240814
 
