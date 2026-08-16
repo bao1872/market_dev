@@ -42,6 +42,7 @@ Auction = **Overnight Repricing Observation（隔夜重新定价观测）**。
 底层事实只依赖：
 
 - 竞价价格 / Gap；
+- 竞价成交量 / Volume；
 - 竞价成交额 / Amount；
 
 及其历史异常度。
@@ -68,7 +69,7 @@ First Pyramid（市场发生了什么）
 
 ### 1.1 目标
 
-- 记录每只股票 / 每个 Scope 的 9:25 竞价价格（Gap）与成交额（Amount）及其历史异常度；
+- 记录每只股票 / 每个 Scope 的 9:25 竞价价格（Gap）、竞价成交量（Volume）与成交额（Amount）及其历史异常度；
 - 在 Stock / Market / Style / Industry / Concept 之间做静态横截面对比；
 - 识别个股与 Scope 从昨日 Review 到今日 Auction 的状态迁移（NEW / PERSIST / DECAY / REVERSE / CONFLICT / QUIET）；
 - 描述市场注意力重心在 Scope 之间的再分布。
@@ -100,9 +101,11 @@ Auction 是 observation，不是：
 
 ## 3. Stock Auction Fact（AU-04）
 
-每只股票在 `T` 日 9:25 至少定义以下事实。
+每只股票在 `T` 日 9:25 至少定义以下事实。Auction canonical member fact 维度为
+**Price / Gap + Auction Volume + Auction Amount**，`auction_volume` 与 `auction_price` /
+`auction_amount` 并列属于底层原始事实，必须完整进入 canonical Stock Auction Fact。
 
-### AU-04-1 price 事实
+### AU-04-1 price / gap 事实
 
 - `auction_price`：9:25 集合竞价最终价格；
 - `previous_close`：昨收（与 `auction_price` 同复权口径）；
@@ -112,9 +115,14 @@ Auction 是 observation，不是：
 gap_pct = (auction_price / previous_close) - 1
 ```
 
-### AU-04-2 amount 事实
+### AU-04-2 participation 事实（Volume / Amount）
 
-- `auction_amount`：9:25 集合竞价成交额。
+- `auction_volume`：9:25 集合竞价成交量（参与 / 关注度强度；不代表资金方向，详见 AU-06-1）；
+- `auction_amount`：9:25 集合竞价成交额（参与 / 关注度强度；不代表资金方向，详见 AU-06-1）。
+
+> AU-04-3（本轮冻结边界）：本轮只冻结 `auction_volume` 是 canonical Auction member fact。
+> provider-specific volume unit、腾讯 / 新浪 normalization rule、lot/share 换算、具体采集实现
+> 属于后续 Data Contract / Architecture 阶段，不在本轮定义。
 
 ## 4. Historical Abnormality（AU-05 / AU-06）
 
@@ -283,29 +291,33 @@ Industry 与 Concept 为平行 Scope family。完整 Scope family 列表：
 
 ## 9. Scope Breadth Metrics（AU-11 / L1）
 
-每个 Scope P0 至少支持以下 L1 事实（分母均为 `valid member count`，见 [§16](#16-数据质量--valid-member-denominatorau-18)）：
+每个 Scope P0 至少支持以下 L1 事实。**每个 metric 的分母（denominator）按自身所需事实与历史 readiness 定义独立的 eligible member set，不共用一个 global valid member count**（见 [§16](#16-数据质量--metric-eligibility--denominatorau-18)）。下文分母标注为对应的 metric-specific eligibility：
 
 ### PRICE（方向由 Gap 提供）
 
-1. **equal-weight Gap**：Scope 成员 `gap_pct` 等权均值；
-2. **amount-weighted Gap**：Scope 成员 `gap_pct` 按 `auction_amount` 加权均值；
-3. **positive gap breadth**：正向 Gap 成员数 / valid member count；
-4. **negative gap breadth**：负向 Gap 成员数 / valid member count；
-5. **positive gap abnormal breadth**：正向 Gap 异常（`gap_percentile >= positive_gap_threshold`）成员数 / valid member count；
-6. **negative gap abnormal breadth**：负向 Gap 异常（`gap_percentile <= negative_gap_threshold`）成员数 / valid member count。
+1. **equal-weight Gap**：Scope 成员 `gap_pct` 等权均值（eligible = current Gap eligible members）；
+2. **amount-weighted Gap**：Scope 成员 `gap_pct` 按 `auction_amount` 加权均值（eligible = current Gap eligible members，权重用当前 valid amount）；
+3. **positive gap breadth**：正向 Gap 成员数 / **current Gap eligible members**；
+4. **negative gap breadth**：负向 Gap 成员数 / **current Gap eligible members**；
+5. **positive gap abnormal breadth**：正向 Gap 异常（`gap_percentile >= positive_gap_threshold`）成员数 / **Gap-history eligible members**；
+6. **negative gap abnormal breadth**：负向 Gap 异常（`gap_percentile <= negative_gap_threshold`）成员数 / **Gap-history eligible members**。
 
 ### PARTICIPATION（强度，无方向）
 
-7. **total auction volume**：Scope 成员 `auction_volume` 合计；
-8. **total auction amount**：Scope 成员 `auction_amount` 合计；
-9. **volume abnormal breadth**：Volume 异常（`volume_percentile >= volume_abnormal_threshold`）成员数 / valid member count；
-10. **amount abnormal breadth**：成交异常（`amount_percentile >= amount_abnormal_threshold`）成员数 / valid member count；
-11. **auction amount market contribution**：Scope `total auction amount` / Market `total auction amount`。
+7. **total auction volume**：Scope 成员 `auction_volume` 合计（eligible = current Volume eligible members）；
+8. **total auction amount**：Scope 成员 `auction_amount` 合计（eligible = current Amount eligible members）；
+9. **volume abnormal breadth**：Volume 异常（`volume_percentile >= volume_abnormal_threshold`）成员数 / **Volume-history eligible members**；
+10. **amount abnormal breadth**：成交异常（`amount_percentile >= amount_abnormal_threshold`）成员数 / **Amount-history eligible members**；
+11. **auction amount market contribution**：Scope `total auction amount` / Market `total auction amount`（各自使用 current Amount eligible members）。
 
 ### JOINT（方向 × 强度）
 
-12. **positive price + participation abnormal breadth**：同时满足「正向 Gap 异常 AND 成交异常」成员数 / valid member count；
-13. **negative price + participation abnormal breadth**：同时满足「负向 Gap 异常 AND 成交异常」成员数 / valid member count。
+12. **positive price + participation abnormal breadth**：同时满足「正向 Gap 异常 AND 成交异常」成员数 / **joint eligible members**（= Gap-history eligible ∩ Amount-history eligible）；
+13. **negative price + participation abnormal breadth**：同时满足「负向 Gap 异常 AND 成交异常」成员数 / **joint eligible members**（= Gap-history eligible ∩ Amount-history eligible）。
+
+> AU-11-1：上述 eligible member set 名称是业务 eligibility contract，不是实现 schema 字段名。
+> 各 eligibility 的精确条件见 [§16](#16-数据质量--metric-eligibility--denominatorau-18)。
+> 不得因为某成员 historical sample 不足，就从 current amount / volume total 中删除一只今天数据有效的股票。
 
 ### 硬规则
 
@@ -327,7 +339,7 @@ Industry 与 Concept 为平行 Scope family。完整 Scope family 列表：
 
 ```text
 AuctionAmountContribution =
-  Scope 成员 Auction Amount 总和 / Market valid Auction Amount 总和
+  Scope 成员 Auction Amount 总和（current Amount eligible members）/ Market Auction Amount 总和（current Amount eligible members）
 ```
 
 ### AU-12-2 Concentration（正式 facts）
@@ -338,7 +350,7 @@ P0 正式 concentration facts 至少包括：
 Top1 amount share   = 单一成员 Auction Amount / Scope Auction Amount 总和
 Top3 amount share   = Top3 成员 Auction Amount 合计 / Scope Auction Amount 总和
 raw HHI             = Σ (member_amount_share)^2           （member_amount_share = 成员 amount / Scope amount 总和）
-normalized HHI      = (raw_hhi - 1/N) / (1 - 1/N)         （N = valid member count；N<=1 时 unavailable）
+normalized HHI      = (raw_hhi - 1/N) / (1 - 1/N)         （N = 用于该 Scope amount-share distribution 的 eligible members 数量；N<=1 时 unavailable）
 ```
 
 > 以上公式仅作事实定义 owner 标注；公式数值实现与架构（如物理 persistence 位置）留到 Architecture Phase，本轮不实现、不锁死额外统计公式。
@@ -488,10 +500,48 @@ Auction → 调用 Review 私有 calculator → 重跑 Review
 - 版本与配置摘要必须随 run 记录（`algorithm_version` / `config_hash` / 阈值快照）；
 - 禁止把任何阈值写成不可变业务真理。
 
-## 16. 数据质量 / valid member denominator（AU-18）
+## 16. 数据质量 / Metric Eligibility / Denominator（AU-18）
 
-- `valid member` 定义：该成员具备有效 `auction_price` + `auction_amount`，且满足最低历史样本门限；
-- 剔除：停牌、缺失、异常、不满足复权口径一致性的记录；
+**核心原则：不再使用一个 global valid member count 作为全部 Scope metric 的统一分母。**
+每个 metric 根据自身所需事实与历史 readiness 定义**自己的 eligible member set**。
+`current fact eligibility`（今天数据是否有效）与 `historical abnormality eligibility`
+（是否有足够历史样本计算异常度）必须**分离**：`historical-not-ready ≠ current-invalid`。
+
+### AU-18-1 各 metric-specific eligibility 合同
+
+| Eligibility set | 包含条件 | 供哪些 metric 作 denominator |
+|---|---|---|
+| **current Gap eligible members** | 当前 `auction_price` valid + `previous_close` valid + 复权口径一致 + `gap_pct` valid | equal-weight Gap、amount-weighted Gap、positive/negative gap breadth（§9 项 1–4） |
+| **Gap-history eligible members** | current Gap eligible + 足够 valid Gap history | positive/negative gap abnormal breadth（§9 项 5–6） |
+| **current Volume eligible members** | 当前 `auction_volume` valid | total auction volume（§9 项 7） |
+| **Volume-history eligible members** | current Volume eligible + 足够 valid Volume history | volume abnormal breadth（§9 项 9） |
+| **current Amount eligible members** | 当前 `auction_amount` valid | total auction amount、amount-weighted Gap 权重、Auction Amount Contribution（§9 项 2/8/11） |
+| **Amount-history eligible members** | current Amount eligible + 足够 valid Amount history（+ 该 metric 要求的最小 amount gate，如适用） | amount abnormal breadth（§9 项 10） |
+| **joint eligible members** | Gap-history eligible ∩ Amount-history eligible | positive/negative price + participation abnormal breadth（§9 项 12–13） |
+
+### AU-18-2 Concentration 的 eligible members
+
+Top1 / Top3 / raw HHI / normalized HHI 只基于**真正进入 amount-share vector 的成员**。
+若某成员没有有效 `auction_amount`，不得进入 share vector；
+normalized HHI 中的 `N` = 用于该 Scope amount-share distribution 的 eligible members 数量（非笼统 global valid member count）。
+
+### AU-18-3 排除规则（missing ≠ zero，invalid ≠ zero）
+
+- `missing` ≠ `zero`；`invalid` ≠ `zero`；`historical-not-ready` ≠ `current-invalid`；
+- 停牌、复权不一致、数据异常等，**只在它们真正影响对应 metric 时**才从该 metric 的 eligible set 中排除；
+- 不得因为某成员 historical sample 不足，就从 current amount / volume total 中删除一只今天数据有效的股票；
+- 各 metric 的 numerator / denominator / eligibility 必须可追溯到下表语义（具体字段结构与 persistence 留 Architecture Phase 决定）：
+
+```text
+每个 breadth / ratio 必须能追溯其：
+  - numerator semantic（例如：满足 XX 条件的成员数）
+  - denominator semantic（例如：XX-history eligible members）
+  - eligibility condition（例如：current valid + sufficient history）
+```
+
+### AU-18-4 通用数据质量边界
+
+- 剔除：停牌、缺失、异常、不满足复权口径一致性的记录（仅当影响对应 metric 时）；
 - 最小有效样本 / 最小成交门 / Scope 最小有效成员数均属 **calibration / config contract**（本轮 OPEN / CALIBRATION_REQUIRED，不伪造最终值）。
 
 ## 17. Publication / lineage 基本要求（AU-19）
@@ -542,9 +592,11 @@ Conclusion 描述**当前 09:25 Auction state**，而不是未来预测。
 
 ### P0 INCLUDE
 
-- Auction raw fact
+- Auction raw fact（含 auction_price / previous_close / gap_pct / auction_volume / auction_amount）
 - Gap
 - Gap historical abnormality
+- Auction volume
+- Volume historical abnormality
 - Auction amount
 - Amount historical abnormality
 - Stock static cross-section
@@ -554,6 +606,7 @@ Conclusion 描述**当前 09:25 Auction state**，而不是未来预测。
 - Attention redistribution
 - Positive / Negative abnormal breadth
 - Amount abnormal breadth
+- Volume abnormal breadth
 - Positive / Negative joint breadth
 - Auction amount contribution
 - concentration
@@ -590,8 +643,8 @@ Conclusion 描述**当前 09:25 Auction state**，而不是未来预测。
 | Price × Amount 二维 | 保留方向与参与强度两个正交维度，禁止单分 | 合同已冻结 |
 | Static Cross-Section | Stock / Market / Style / Industry / Concept 平行覆盖，双参照系分离 | 合同已冻结 |
 | Stock State Transition | Review(t-1) → Auction(t) 六态迁移，标准化后比较 | 合同已冻结 |
-| Scope Breadth | L1 至少 13 项（PRICE 6 + PARTICIPATION 5 + JOINT 2），分母 = valid member count；Amount/Volume abnormality 为无方向参与强度 | 合同已冻结 |
-| Amount Contribution / Concentration | `AuctionAmountContribution` + Top1 / Top3 share + raw HHI / normalized HHI；Breadth/Contribution/Concentration 三者分离 | 合同已冻结 |
+| Scope Breadth | L1 至少 13 项（PRICE 6 + PARTICIPATION 5 + JOINT 2），各指标按 metric-specific eligibility 定义 denominator（非 global valid member count）；Amount/Volume abnormality 为无方向参与强度 | 合同已冻结 |
+| Amount Contribution / Concentration | `AuctionAmountContribution` + Top1 / Top3 share + raw HHI / normalized HHI；Breadth/Contribution/Concentration 三者分离；normalized HHI 的 N = amount-share distribution eligible members | 合同已冻结 |
 | Concept Overlap | overlapping membership 语义，贡献不互斥、允许 >100% | 合同已冻结 |
 | L2 Observation Groups + Analysis | Industry/Concept 平行 Scope；Historical/Cross-sectional/Internal Structure/Overnight Transition 四问题；禁止 6-phase；Industry↔Industry / Concept↔Concept 同族排名 | 合同已冻结 |
 | Member Attribution | Scope 结论可回溯 member evidence（top gap/amount/joint-abnormal contributors + 字段展示） | 合同已冻结 |
@@ -600,7 +653,7 @@ Conclusion 描述**当前 09:25 Auction state**，而不是未来预测。
 | Conclusion Contract | 由可解释事实组合形成（price direction + participation breadth + intensity + concentration + member attribution）；描述 09:25 state；禁预测/评分；固定状态枚举待 Historical Validation | 合同已冻结（组成合同）；状态枚举 OPEN |
 | Review → Auction | 只读正式 snapshot，禁调私有 calculator；缺失字段登记 GAP | 合同已冻结 |
 | 版本化 | 阈值 / 配置 versioned 且随 run 记录 | 合同已冻结 |
-| 数据质量 | valid member 分母与最小门限为 calibration contract | 合同已冻结 |
+| 数据质量 | 各 metric 按 metric-specific eligibility 定义 denominator（current eligibility 与 historical-history eligibility 分离）；最小门限为 calibration contract | 合同已冻结 |
 | Publication / lineage | 正式 pointer / PIT / 幂等 / supersede | 合同已冻结 |
 
 ## 21. 阈值合同（Calibration）
