@@ -1355,14 +1355,33 @@ PRD 不要求新建 Scope history table。产品要求只是：新版 Scope Fact
 
 #### 7.15.2 Current-Static Membership 与 Historical Fact Availability（v2.3 补充）
 
-Current-static membership **不意味着** member historical fact 必须存在。
+Current-static membership **只固定 MEMBER UNIVERSE**。它**不改变** L1 Canonical Scope Observation 已有的 **field-specific valid-universe** denominator / availability semantics。
 
-某个固定 current member 在历史 T 无 canonical fact：
+对于固定 current member 在历史 T 缺某个 canonical member fact：
 
-- 该 primitive point 仍应 `unavailable`，并保留 trading observation slot；
-- **禁止** 为了保持 member universe 而 forward-fill / current-backfill 历史 member facts。
+1. 该 member 的该字段保持 `unavailable` / missing。
+2. **禁止**：forward-fill / current-backfill / future fact / 其他日期替代。
+3. Scope aggregate 继续由 `compute_scope_observation()` 按该字段既有 canonical valid-universe semantics 计算。
+4. Member-level missing **不得自动升级**为整个 Scope snapshot unavailable 或整个 PrimitivePoint unavailable。
+5. 只有当 canonical Scope aggregate 对目标 primitive **最终得到** `None` / non-consumable value 时，ObservationSeries 对该 T 输出 `value = None, available = False`。
+6. 无论 primitive 最终 available / unavailable，canonical trading-date slot 都必须保留（slot 保留规则见 §7.7.5）。
 
-（当前成员在历史 T 缺失 = 该日该 primitive 的合法 unavailable，不是 contract violation；slot 保留规则见 §7.7.5。）
+**Member Availability → Canonical Scope Aggregation → Primitive Availability 三层分离，不得合并**：
+
+- Current-static 只决定 **WHO** is in the universe（成员集合）；
+- Canonical L1 aggregation 决定 **WHICH** members are valid for each field（field-specific valid universe / denominator）；
+- ObservationSeries 从 **resulting Scope primitive value** 决定 availability（能否经 registry extraction 得到 finite scalar）。
+
+**极短示例（仅说明，非 coverage threshold）**：
+
+假设 current-static Scope 有 100 个成员。历史 T：95 个成员有合法 1D Return，5 个成员缺 exact-T1 Return。则：
+
+- 这 5 个 member 不进入 EW Return valid universe；
+- EW Return 仍由 95 个 valid returns 计算，Scope `equal_weight_return` 仍是 finite canonical value；
+- 因此 PrimitivePoint 仍可 `available = true`；
+- 只有 valid return universe 最终为空（导致 Scope `equal_weight_return = None`）时，该 PrimitivePoint 才 `available = false`。
+
+（该示例中的 95/100 只是说明数字，**不是冻结的 coverage threshold**。）
 
 ### 7.16 Scope Architecture / PIT / Peer Contract
 
