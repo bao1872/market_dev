@@ -68,6 +68,8 @@ from full_market_member_fact_backfill import (
     RunLock,
     _partition_dir,
     _write_json,
+    _load_offset_hints,
+    _offset_hints_payload,
 )
 
 # ---------------------------------------------------------------------------
@@ -1127,7 +1129,7 @@ def test_resume_loads_offset_hints(tmp_out):
     }
     adapter = _fake_page_adapter(boundary=800)
     batch, _ = _make_fake_batch_mdas()
-    # 第一次：1 bar → kernel 写入 hint（resolved_offset=800）→ 持久化 offset_hints.json
+    # 第一次：1 bar → kernel 写入 v2 hint → 持久化 offset_hints.json
     res1 = _kernel_run(tmp_out, "t_p21", [d1], {d1: pop[d1]},
                        adapter=adapter, session=_FakeSession(),
                        batch_mdas_fn=batch)
@@ -1135,9 +1137,13 @@ def test_resume_loads_offset_hints(tmp_out):
     hints_path = tmp_out / "t_p21" / "offset_hints.json"
     assert hints_path.exists()
     hints = json.load(open(hints_path))
-    assert hints["hints"].get("600001") == 800
+    assert hints["version"] == 2
+    # v2 dict：target_page_offset（warm anchor） + boundary_offset（evidence）
+    assert hints["hints"].get("600001") == {
+        "target_page_offset": 0, "boundary_offset": 800}
 
-    # 第二次 resume：d1 SKIP，d2 新 bar 使用加载的 hint → used_hint=True
+    # 第二次 resume：d1 SKIP，d2 新 bar 使用持久化的 target_page_offset →
+    # target-page-first warm（hint=0 页整页 09:25 → BIDIRECTIONAL）。
     res2 = _kernel_run(tmp_out, "t_p21", [d1, d2], pop,
                        adapter=adapter, session=_FakeSession(),
                        batch_mdas_fn=batch)
@@ -1145,6 +1151,8 @@ def test_resume_loads_offset_hints(tmp_out):
     row = json.loads(open(tmp_out / "t_p21" / "bars" / d2.isoformat()
                           / "member_facts.jsonl").readline())
     assert row["used_hint"] is True
+    assert row["search_mode"] == "TARGET_PAGE_BIDIRECTIONAL"
+    assert row["target_page_offset"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1183,10 +1191,12 @@ def test_hint_persistence_survives_midrun_interruption(tmp_out, monkeypatch):
                     adapter=adapter, session=_FakeSession(),
                     batch_mdas_fn=batch)
 
-    # bar1 COMPLETED → per-partition atomic write 已持久化 hint（PART H）
+    # bar1 COMPLETED → per-partition atomic write 已持久化 v2 hint（PART H）
     assert hints_path.exists()
     hints = json.load(open(hints_path))
-    assert hints["hints"].get("600001") == 800
+    assert hints["version"] == 2
+    assert hints["hints"].get("600001") == {
+        "target_page_offset": 0, "boundary_offset": 800}
 
     # resume（无中断）：bar1 SKIP，bar2 新 bar 加载 hint → used_hint=True
     monkeypatch.setattr(
@@ -1229,3 +1239,85 @@ def test_resume_root_totals_identical(tmp_out):
     assert res1["canonical_status_aggregate"] == res2["canonical_status_aggregate"]
     assert res2["completed_bar_count"] == 2
     assert res2["failed_bar_count"] == 0
+
+
+# ===========================================================================
+# Round 3B-D2 PART H T9–T10 — hint v2 versioned structure + resume
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# D2-T9 — hint v1 legacy int：resume 可读（解释为 boundary hint）→ 运行后升级为 v2
+# ---------------------------------------------------------------------------
+def test_d2_t9_v1_legacy_hint_load_and_v2_upgrade(tmp_out):
+    run_dir = tmp_out / "t_d2_t9"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    hints_path = run_dir / "offset_hints.json"
+    # v1 legacy payload：symbol -> boundary int
+    hints_path.write_text(json.dumps({"version": 1, "hints": {"600001": 800}}))
+
+    # resume 读入：v1 int 解释为 boundary hint（target_page_offset=None）
+    loaded = _load_offset_hints(hints_path)
+    assert loaded == {
+        "600001": {"target_page_offset": None, "boundary_offset": 800}}
+
+    # legacy boundary hint 驱动的 warm 运行 → 完成 TARGET_WINDOW_COMPLETE，
+    # 并把 hint 升级为 v2（target_page_offset 被填充）。
+    adapter = _fake_page_adapter(boundary=800)
+    inst = _sample("600001", "SH")
+    d = date(2026, 8, 14)
+    offset_hints = loaded
+    fact = asyncio.run(run_symbol_backfill_observation(
+        adapter, _FakeSession(), inst, d, {}, {},
+        as_of=AS_OF, code_sha=_TEST_SHA, offset_hints=offset_hints))
+    assert fact["source_status"] == "TARGET_WINDOW_COMPLETE"
+    assert fact["_used_hint"] is True
+    entry = offset_hints["600001"]
+    assert entry["target_page_offset"] is not None
+    assert entry["boundary_offset"] == 800
+
+    # v2 payload：versioned + target_page_offset/boundary_offset 分离
+    payload = _offset_hints_payload("t_d2_t9", AS_OF, _TEST_SHA, offset_hints)
+    assert payload["version"] == 2
+    assert payload["run_id"] == "t_d2_t9"
+    assert payload["hints"]["600001"]["target_page_offset"] is not None
+    assert payload["hints"]["600001"]["boundary_offset"] == 800
+
+
+# ---------------------------------------------------------------------------
+# D2-T10 — mid-run resume：继续使用持久化的 target_page_offset（target-page-first）
+# ---------------------------------------------------------------------------
+def test_d2_t10_midrun_resume_uses_target_page_offset(tmp_out):
+    d1, d2 = date(2026, 2, 13), date(2026, 5, 1)
+    pop = {
+        d1: [_sample("600001", "SH")],
+        d2: [_sample("600001", "SH")],
+    }
+    adapter = _fake_page_adapter(boundary=800)
+    batch, _ = _make_fake_batch_mdas()
+    run_dir = tmp_out / "t_d2_t10"
+    hints_path = run_dir / "offset_hints.json"
+
+    # 第一次 1 bar：cold 完成并 seed target_page_offset（page 0，整页 09:25）
+    res1 = _kernel_run(tmp_out, "t_d2_t10", [d1], {d1: pop[d1]},
+                       adapter=adapter, session=_FakeSession(),
+                       batch_mdas_fn=batch)
+    assert res1["completed_bar_count"] == 1
+    persisted = json.load(open(hints_path))
+    assert persisted["hints"]["600001"]["target_page_offset"] == 0
+
+    # resume：d1 SKIP，d2 用持久化的 target_page_offset=0 → 走 target-page-first
+    res2 = _kernel_run(tmp_out, "t_d2_t10", [d1, d2], pop,
+                       adapter=adapter, session=_FakeSession(),
+                       batch_mdas_fn=batch)
+    assert res2["completed_bar_count"] == 2
+    assert res2["failed_bar_count"] == 0
+    row = json.loads(open(run_dir / "bars" / d2.isoformat()
+                          / "member_facts.jsonl").readline())
+    # 使用的就是持久化的 target_page_offset=0（非 boundary fallback）
+    assert row["used_hint"] is True
+    assert row["target_page_offset"] == 0
+    assert row["search_mode"] == "TARGET_PAGE_BIDIRECTIONAL"
+    # search_mode distribution 聚合已写入 root manifest
+    smd = res2["search_mode_distribution"]
+    assert smd.get("TARGET_PAGE_BIDIRECTIONAL", 0) == 1
+    assert smd.get("COLD", 0) == 1

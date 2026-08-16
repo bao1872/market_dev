@@ -67,6 +67,7 @@ from auction_history_semantics_validation import (
 
 from auction_member_fact_backfill_kernel import (
     BACKFILL_SOURCE_FROZEN,
+    SEARCH_MODES_FROZEN,
     SOURCE_EMPTY,
     SOURCE_ERROR,
     SOURCE_TARGET_SEARCH_LIMIT_REACHED,
@@ -75,6 +76,9 @@ from auction_member_fact_backfill_kernel import (
     build_historical_member_fact,
     fetch_auction_0925_targeted,
 )
+
+# offset_hints.json 版本（Round 3B-D2 PART F）：v2 versioned structure
+OFFSET_HINTS_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -289,13 +293,69 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 
 def _offset_hints_payload(run_id: str, as_of: date, code_sha: str,
-                          offset_hints: dict[str, int]) -> dict:
+                          offset_hints: dict) -> dict:
+    """offset_hints.json v2（Round 3B-D2 PART F）：versioned structure。
+
+    v1：{"hints": {"000001": 3200}}（symbol -> boundary int）
+    v2：{"version": 2, "hints": {"000001": {
+          "target_page_offset": 3200,   # 下一交易日 warm fast path 使用
+          "boundary_offset": 4800}}}    # 仅 fallback/debug evidence
+
+    向后兼容：读入时 v1 symbol->int 可解释为 legacy boundary hint，
+    第一次只能走 boundary fallback，完成后升级成 v2 hint。
+    """
+    hints: dict = {}
+    for k, v in sorted(offset_hints.items()):
+        if isinstance(v, dict):
+            tpo = v.get("target_page_offset")
+            bo = v.get("boundary_offset")
+            hints[str(k)] = {
+                "target_page_offset": (
+                    int(tpo) if isinstance(tpo, (int, float)) and tpo >= 0
+                    else None),
+                "boundary_offset": (
+                    int(bo) if isinstance(bo, (int, float)) and bo >= 0
+                    else None),
+            }
+        elif isinstance(v, (int, float)) and v >= 0:
+            # legacy int → boundary hint（v2 target_page_offset 留空）
+            hints[str(k)] = {
+                "target_page_offset": None,
+                "boundary_offset": int(v),
+            }
     return {
+        "version": OFFSET_HINTS_VERSION,
         "run_id": run_id,
         "as_of": as_of.isoformat(),
         "code_sha": code_sha,
-        "hints": {k: v for k, v in sorted(offset_hints.items())},
+        "hints": hints,
     }
+
+
+def _load_offset_hints(path: Path) -> dict:
+    """读取 offset_hints.json（兼容 v1 legacy int / v2 dict），失败 → {}。"""
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return {}
+    raw_hints = payload.get("hints") or {}
+    out: dict = {}
+    for k, v in raw_hints.items():
+        if isinstance(v, dict):
+            out[str(k)] = {
+                "target_page_offset": v.get("target_page_offset"),
+                "boundary_offset": v.get("boundary_offset"),
+            }
+        elif isinstance(v, (int, float)) and v >= 0:
+            # v1 legacy：symbol -> boundary int
+            out[str(k)] = {
+                "target_page_offset": None,
+                "boundary_offset": int(v),
+            }
+    return out
 
 
 def _expected_partition_metadata(trade_date: date, bar_index: int,
@@ -450,6 +510,8 @@ def _project_member_row(obs: dict, trade_date: date, bar_index: int,
         # PERFORMANCE
         "pytdx_page_requests": obs.get("_pytdx_requests"),
         "used_hint": obs.get("_used_hint"),
+        "search_mode": obs.get("_search_mode"),
+        "target_page_offset": obs.get("_target_page_offset"),
         # RUNTIME
         "code_sha": code_sha,
         "as_of": as_of.isoformat(),
@@ -531,21 +593,39 @@ async def run_symbol_backfill_observation(
     as_of: date = AS_OF,
     bar_index: int = 0,
     code_sha: str | None = None,
-    offset_hints: dict[str, int] | None = None,
+    offset_hints: dict | None = None,
 ) -> dict:
     """targeted 09:25 fetch + 纯函数 member fact builder。
 
     不 new PytdxAdapter / 不调用 MDAS / 不查 DB / 不分页全天。
-    hint cache：TARGET_WINDOW_COMPLETE 后写入 resolved offset，供下一 bar warm search。
+    hint cache（Round 3B-D2 PART F）：v2 结构
+    {target_page_offset, boundary_offset}；warm hint 优先取 target_page_offset
+    （上一交易日含 09:25 block 的 page），否则回退 legacy boundary hint。
+    TARGET_WINDOW_COMPLETE 后写回 v2 hint，供下一 bar warm fast path 使用。
     """
     offset_hints = offset_hints if offset_hints is not None else {}
-    hint = offset_hints.get(inst.symbol)
+    entry = offset_hints.get(inst.symbol)
+    target_hint: Any = None
+    legacy_hint: Any = None
+    if isinstance(entry, dict):
+        target_hint = entry.get("target_page_offset")
+        legacy_hint = entry.get("boundary_offset")
+    elif isinstance(entry, (int, float)) and entry >= 0:
+        legacy_hint = int(entry)
+    warm_hint: int | None = None
+    if isinstance(target_hint, (int, float)) and target_hint >= 0:
+        warm_hint = int(target_hint)
+    elif isinstance(legacy_hint, (int, float)) and legacy_hint >= 0:
+        warm_hint = int(legacy_hint)
+
     targeted = fetch_auction_0925_targeted(
-        adapter, inst.symbol, trade_date, offset_hint=hint
+        adapter, inst.symbol, trade_date, offset_hint=warm_hint
     )
-    if (targeted.source_status == SOURCE_TARGET_WINDOW_COMPLETE
-            and targeted.resolved_offset is not None):
-        offset_hints[inst.symbol] = targeted.resolved_offset
+    if targeted.source_status == SOURCE_TARGET_WINDOW_COMPLETE:
+        offset_hints[inst.symbol] = {
+            "target_page_offset": targeted.target_page_offset,
+            "boundary_offset": targeted.resolved_offset,
+        }
 
     raw_res = _BatchBarResult(raw_batch.get(inst.instrument_id))
     qfq_res = _BatchBarResult(qfq_batch.get(inst.instrument_id))
@@ -556,6 +636,8 @@ async def run_symbol_backfill_observation(
     )
     fact["_pytdx_requests"] = targeted.page_count
     fact["_used_hint"] = targeted.used_hint
+    fact["_search_mode"] = targeted.search_mode
+    fact["_target_page_offset"] = targeted.target_page_offset
     return fact
 
 
@@ -597,6 +679,7 @@ async def _run_bar_partition(
     pytdx_requests_total = 0
     cold_count = 0
     hint_count = 0
+    search_mode_agg: dict[str, int] = {}
     max_requests_per_symbol = 0
     current_symbol: str | None = None
 
@@ -646,6 +729,7 @@ async def _run_bar_partition(
                     "degraded_reason": str(exc),
                     "adjustment_as_of": None, "adj_factor_hash": None,
                     "pytdx_page_requests": 0, "used_hint": None,
+                    "search_mode": None, "target_page_offset": None,
                     "code_sha": code_sha,
                     "as_of": as_of.isoformat(),
                 }
@@ -683,6 +767,10 @@ async def _run_bar_partition(
                     cold_count += 1
                 if n_req > max_requests_per_symbol:
                     max_requests_per_symbol = n_req
+
+                sm = row.get("search_mode")
+                if sm is not None:
+                    search_mode_agg[sm] = search_mode_agg.get(sm, 0) + 1
 
             # progress：每 100 stocks 或 30 秒 atomic update
             now = time.monotonic()
@@ -775,6 +863,7 @@ async def _run_bar_partition(
         "pytdx_request_count": pytdx_requests_total,
         "pytdx_target_search_cold_count": cold_count,
         "pytdx_target_search_hint_count": hint_count,
+        "search_mode_distribution": search_mode_agg,
         "avg_requests_per_symbol": round(avg_requests_per_symbol, 4),
         "max_requests_per_symbol": max_requests_per_symbol,
         "successful_connect_count": successful_connect,
@@ -859,6 +948,10 @@ def _accumulate_partition_quality(root_manifest: dict, manifest: dict,
     root_manifest["pytdx_request_count"] += dq.get("pytdx_request_count", 0)
     root_manifest["pytdx_target_search_cold_count"] += dq.get("pytdx_target_search_cold_count", 0)
     root_manifest["pytdx_target_search_hint_count"] += dq.get("pytdx_target_search_hint_count", 0)
+    for k, v in (dq.get("search_mode_distribution") or {}).items():
+        root_manifest["search_mode_distribution"][k] = (
+            root_manifest["search_mode_distribution"].get(k, 0) + v
+        )
     root_manifest["max_requests_per_symbol"] = max(
         root_manifest.get("max_requests_per_symbol", 0),
         dq.get("max_requests_per_symbol", 0),
@@ -945,6 +1038,7 @@ async def run_backfill(
         "pytdx_request_count": 0,
         "pytdx_target_search_cold_count": 0,
         "pytdx_target_search_hint_count": 0,
+        "search_mode_distribution": {},
         "max_requests_per_symbol": 0,
         "successful_connect_count": 0,
         "reconnect_count": 0,
@@ -1025,21 +1119,12 @@ async def _run_backfill_impl(
 
     async def _bars_loop(sess, adapter_for_run, snapshot_or_none):
         nonlocal completed, failed
-        offset_hints: dict[str, int] = {}
-        # Round 3B-D PART C7 resume warm-start：把上一 run 持久化的 hint 载入内存
-        hints_path = _out_root / run_id / "offset_hints.json"
-        if hints_path.exists():
-            try:
-                with open(hints_path, "r", encoding="utf-8") as f:
-                    hints_payload = json.load(f)
-                hints = hints_payload.get("hints") or {}
-                if isinstance(hints, dict):
-                    offset_hints = {
-                        str(k): int(v) for k, v in hints.items()
-                        if isinstance(v, (int, float))
-                    }
-            except Exception:
-                offset_hints = {}
+        # Round 3B-D2 PART F resume warm-start：载入持久化的 v2 hints
+        # （v2 dict {target_page_offset, boundary_offset} 优先；v1 legacy int 自动
+        # 解释为 boundary hint，首次只能走 fallback，完成后升级为 v2）。
+        offset_hints: dict = _load_offset_hints(
+            _out_root / run_id / "offset_hints.json"
+        )
 
         for idx, t in enumerate(bar_dates, start=1):
             pdir = _partition_dir(run_id, t, _out_root)

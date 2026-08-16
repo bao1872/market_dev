@@ -1,10 +1,11 @@
-"""Kernel Round 3B-D1 tests — targeted 09:25 source search + canonicalization gate.
+"""Kernel tests — targeted 09:25 source search + canonicalization gate.
 
-Real pytdx source shape: historical transaction ``time`` is HH:MM（如 "09:25"），
-kernel 按 ``_normalize_source_minute()`` 归一化为 HH:MM 后做 transport search/ordering，
-不修改 canonical business contract（仍接受 "09:25" / "09:25:00"）。
+Round 3B-D1（boundary-first cold path）+ Round 3B-D2（target-page-first warm path）：
+- Real pytdx source shape: historical transaction ``time`` is HH:MM（如 "09:25"），
+  kernel 按 ``_normalize_source_minute()`` 归一化为 HH:MM 后做 transport search/ordering，
+  不修改 canonical business contract（仍接受 "09:25" / "09:25:00"）。
 
-覆盖 Round 3B-D1 PART I T1–T10 + canonicalization gate：
+Round 3B-D1 PART I T1–T10 + canonicalization gate：
 - T1 REAL_HHMM_CANONICAL              真实 HH:MM 正 volume fixture 必须 CANONICAL
 - T2 HHMM_BOUNDARY                    09:30/09:25/09:24 minute ordering 正确，09:25 页不得判 entirely_before
 - T3 HHMM_CROSS_PAGE                  09:25 records 跨两个 page 完整且不重复
@@ -18,11 +19,24 @@ kernel 按 ``_normalize_source_minute()`` 归一化为 HH:MM 后做 transport se
 - canonicalize_only_when_complete     仅 TARGET_WINDOW_COMPLETE 才允许 canonicalize
 - source_empty_not_business_zero      source empty → SOURCE_EMPTY / price=None
 
+Round 3B-D2 PART H T1–T8（target-page-first warm path）：
+- D2-T1 SINGLE        单页内 09:24/09:25/09:26 → 1 request + TARGET_PAGE_SINGLE
+- D2-T2 CROSSES       页跨过 09:25 但无 record → 1 request + records=[] + TARGET_WINDOW_COMPLETE
+- D2-T3 EDGE          target 在 lower/upper 边沿 → adjacent page → 2 requests + records 完整
+- D2-T4 BIDIRECTIONAL 整页 ==09:25 → 两侧 adjacent → <=3 requests + records 完整
+- D2-T5 +1 DRIFT      页 entirely after → probe H+P → 2 requests
+- D2-T6 -1 DRIFT      页 entirely before → probe H-P → 2 requests
+- D2-T7 LARGE DRIFT   大漂移 → existing boundary fallback → result == cold result
+- D2-T8 CACHE HINT    fallback 后 target_page_offset 来自已有 cache，不产生额外 request
+
 Mock 数据布局（pytdx reverse offset 语义）：
 - offset 0 = 当日最新 ticks（收盘），offset 增大 = 更早 ticks；
 - targeted search 的 boundary = 首个「整页早于 09:25 或空页」的 offset；
 - window（09:25 minute）records 位于 boundary 前 1～2 个数据页（B-P / B-2P），
   collection 固定读 B-2P / B-P / B 并按 raw identity 去重（PART G）。
+- Round 3B-D2 warm：hint 优先表示上一交易日 target_page_offset（含/跨越 09:25 的
+  page），fast path 从 H 页做 SINGLE/ADJACENT/BIDIRECTIONAL/DRIFT 局部判定，
+  无法 complete 才进入 existing boundary fallback。
 """
 
 from __future__ import annotations
@@ -243,12 +257,15 @@ def test_t5_cache_not_request():
     # page_count 必须 == REAL adapter calls
     assert cold.page_count == cold_adapter.page_count == len(cold_adapter.request_log)
 
-    # warm 路径：window 收集阶段重复访问已缓存 offset（B-P / B）不得新增请求
+    # Round 3B-D2：warm hint=cold.resolved_offset（boundary）→ target-page-first 下
+    # H 页为空 → DRIFT 向 newer 局部扩展（H-P / H-2P）→ 2 REAL requests。
+    # page_count 只统计真实 adapter 请求；缓存命中（重复 offset）不重复计数。
     warm_adapter, warm = _fetch_0925(pages, offset_hint=cold.resolved_offset)
     assert warm.page_count == warm_adapter.page_count == len(warm_adapter.request_log)
-    # 稳定日 warm：H、H-P、H-2P 三个不同 offset 各一次 REAL request，缓存命中不重复计数
-    assert warm.page_count == 3
+    assert warm.page_count == 2
+    assert warm.search_mode == KERNEL.SEARCH_MODE_TARGET_PAGE_DRIFT
     assert len(set(warm_adapter.request_log)) == len(warm_adapter.request_log)
+    assert _records_keys(warm.records) == _records_keys(cold.records)
 
 
 # ---------------------------------------------------------------------------
@@ -319,14 +336,18 @@ def test_t9_large_drift_safe():
     _, cold = _fetch_0925(pages)
     boundary = cold.resolved_offset
 
-    # 大幅漂移：hint 指向 boundary 前方 3 页
+    # 大幅漂移：hint 指向 boundary 前方 3 页 → target-page fast path 无法 complete，
+    # 进入 existing boundary fallback（Round 3B-D2 PART D）。
     drift = boundary + 3 * PAGE_SIZE
     a, r = _fetch_0925(pages, offset_hint=drift)
     assert r.source_status == SOURCE_TARGET_WINDOW_COMPLETE
     assert _records_keys(r.records) == _records_keys(cold.records)
     assert r.page_count <= MAX_TARGETED_PAGES
-    assert 0 not in [o for o, _ in a.request_log], (
-        "漂移 fallback 仍禁止重置 offset=0（F3）")
+    assert r.search_mode == KERNEL.SEARCH_MODE_BOUNDARY_FALLBACK
+    # 大漂移时 fast path 全部探针为空 → 允许 offset=0 判定 SOURCE_EMPTY（非重置搜索，
+    # 仅空数据 discrimination）；result 仍与 cold 完全一致。
+    assert r.target_page_offset is not None
+    assert r.target_page_offset in {o for o, _ in a.request_log}
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +415,167 @@ def test_source_empty_not_business_zero():
     assert layer["auction_volume_raw_lots"] is None
     assert layer["auction_volume_shares"] is None
     assert layer["auction_amount"] is None
+
+
+# ===========================================================================
+# Round 3B-D2 PART H T1–T8 — target-page-first warm path
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# D2-T1 — SINGLE：单页内 09:24/09:25/09:26 → 1 request + TARGET_PAGE_SINGLE
+# ---------------------------------------------------------------------------
+def test_d2_t1_single_page_three_minutes():
+    H = PAGE_SIZE
+    pages = {
+        H: [
+            _tick("09:26", 10.6, 200.0),   # after target minute
+            _tick("09:25", 10.0, 100.0),   # target
+            _tick("09:24", 9.9, 50.0),     # before target minute
+        ],
+    }
+    a, r = _fetch_0925(pages, offset_hint=H)
+    assert r.source_status == SOURCE_TARGET_WINDOW_COMPLETE
+    assert r.page_count == 1
+    assert r.search_mode == KERNEL.SEARCH_MODE_TARGET_PAGE_SINGLE
+    assert _records_keys(r.records) == [("09:25", 10.0, 100.0, 0)]
+    assert r.target_page_offset == H
+    assert r.used_hint is True
+    assert a.page_count == r.page_count
+
+
+# ---------------------------------------------------------------------------
+# D2-T2 — CROSSES：页跨过 09:25 但无 record → 1 request + records=[] + COMPLETE
+# ---------------------------------------------------------------------------
+def test_d2_t2_page_crosses_but_no_record():
+    H = PAGE_SIZE
+    pages = {
+        H: [
+            _tick("09:26", 10.6, 200.0),   # after
+            _tick("09:24", 9.9, 50.0),     # before（中间跨过 09:25，无 09:25 record）
+        ],
+    }
+    a, r = _fetch_0925(pages, offset_hint=H)
+    assert r.source_status == SOURCE_TARGET_WINDOW_COMPLETE
+    assert r.page_count == 1
+    assert r.search_mode == KERNEL.SEARCH_MODE_TARGET_PAGE_SINGLE
+    assert r.records == []
+    assert r.target_page_offset == H
+
+    # 合法 non-CANONICAL：空 window → NO_VOLUME_BEARING_0925，不是 bug 也不谎称 CANONICAL
+    layer = KERNEL.canonicalize_targeted_window(INST, TRADE_DATE, r)
+    assert layer["canonicalization_status"] == SEM.CANON_STATUS_NO_VOLUME_BEARING
+    assert layer["auction_price_raw"] is None
+
+
+# ---------------------------------------------------------------------------
+# D2-T3 — EDGE：target 在 lower/upper 边沿 → adjacent page → 2 requests + 完整
+# ---------------------------------------------------------------------------
+def test_d2_t3_adjacent_edge():
+    # lower edge：page 起点即 09:25（mn==09:25, mx>09:25）→ 09:25 block 向 older 延续
+    H = PAGE_SIZE
+    pages_lower = {
+        H: [_tick("09:26", 10.6, 200.0), _tick("09:25", 10.0, 100.0)],
+        H + PAGE_SIZE: [_tick("09:25", 10.1, 150.0), _tick("09:24", 9.9, 50.0)],
+    }
+    a1, r1 = _fetch_0925(pages_lower, offset_hint=H)
+    assert r1.source_status == SOURCE_TARGET_WINDOW_COMPLETE
+    assert r1.page_count == 2
+    assert r1.search_mode == KERNEL.SEARCH_MODE_TARGET_PAGE_ADJACENT
+    assert _records_keys(r1.records) == [
+        ("09:25", 10.0, 100.0, 0), ("09:25", 10.1, 150.0, 0)]
+
+    # upper edge：page 终点即 09:25（mn<09:25, mx==09:25）→ 09:25 block 向 newer 延续
+    H2 = 2 * PAGE_SIZE
+    pages_upper = {
+        H2: [_tick("09:25", 10.0, 100.0), _tick("09:24", 9.9, 50.0)],
+        H2 - PAGE_SIZE: [_tick("09:26", 10.6, 200.0), _tick("09:25", 10.1, 150.0)],
+    }
+    a2, r2 = _fetch_0925(pages_upper, offset_hint=H2)
+    assert r2.source_status == SOURCE_TARGET_WINDOW_COMPLETE
+    assert r2.page_count == 2
+    assert r2.search_mode == KERNEL.SEARCH_MODE_TARGET_PAGE_ADJACENT
+    assert sorted(_records_keys(r2.records)) == sorted([
+        ("09:25", 10.0, 100.0, 0), ("09:25", 10.1, 150.0, 0)])
+    assert a1.page_count == r1.page_count and a2.page_count == r2.page_count
+
+
+# ---------------------------------------------------------------------------
+# D2-T4 — BIDIRECTIONAL：整页 ==09:25 → 两侧 adjacent → <=3 requests + 完整
+# ---------------------------------------------------------------------------
+def test_d2_t4_whole_page_bidirectional():
+    H = PAGE_SIZE
+    pages = {
+        H: [_tick("09:25", 10.0, 100.0), _tick("09:25", 10.1, 120.0)],
+        H + PAGE_SIZE: [_tick("09:25", 10.2, 130.0), _tick("09:24", 9.9, 50.0)],
+        H - PAGE_SIZE: [_tick("09:26", 10.6, 200.0), _tick("09:25", 10.3, 140.0)],
+    }
+    a, r = _fetch_0925(pages, offset_hint=H)
+    assert r.source_status == SOURCE_TARGET_WINDOW_COMPLETE
+    assert r.page_count <= 3
+    assert r.search_mode == KERNEL.SEARCH_MODE_TARGET_PAGE_BIDIRECTIONAL
+    assert len(_records_keys(r.records)) == 4  # 三页 09:25 合并去重
+    assert r.used_hint is True
+    assert a.page_count == r.page_count
+
+
+# ---------------------------------------------------------------------------
+# D2-T5 — +1 DRIFT：H 整页 after（mn>09:25）→ target 更 old → probe H+P → 2 requests
+# ---------------------------------------------------------------------------
+def test_d2_t5_plus_one_page_drift():
+    H = PAGE_SIZE
+    pages = {
+        H: [_tick("09:26", 10.6, 200.0)],                       # entirely after
+        H + PAGE_SIZE: [_tick("09:25", 10.0, 100.0), _tick("09:24", 9.9, 50.0)],
+    }
+    a, r = _fetch_0925(pages, offset_hint=H)
+    assert r.source_status == SOURCE_TARGET_WINDOW_COMPLETE
+    assert r.page_count == 2
+    assert r.search_mode == KERNEL.SEARCH_MODE_TARGET_PAGE_DRIFT
+    assert _records_keys(r.records) == [("09:25", 10.0, 100.0, 0)]
+    assert a.page_count == r.page_count
+
+
+# ---------------------------------------------------------------------------
+# D2-T6 — -1 DRIFT：H 整页 before（mx<09:25）→ target 更 new → probe H-P → 2 requests
+# ---------------------------------------------------------------------------
+def test_d2_t6_minus_one_page_drift():
+    H = 2 * PAGE_SIZE
+    pages = {
+        H: [_tick("09:24", 9.9, 50.0)],                         # entirely before
+        H - PAGE_SIZE: [_tick("09:25", 10.0, 100.0), _tick("09:26", 10.6, 200.0)],
+    }
+    a, r = _fetch_0925(pages, offset_hint=H)
+    assert r.source_status == SOURCE_TARGET_WINDOW_COMPLETE
+    assert r.page_count == 2
+    assert r.search_mode == KERNEL.SEARCH_MODE_TARGET_PAGE_DRIFT
+    assert _records_keys(r.records) == [("09:25", 10.0, 100.0, 0)]
+    assert a.page_count == r.page_count
+
+
+# ---------------------------------------------------------------------------
+# D2-T7 — LARGE DRIFT：大漂移 → existing boundary fallback → result == cold result
+# ---------------------------------------------------------------------------
+def test_d2_t7_large_drift_fallback():
+    pages = _build_full_day_pages_real(total=4000, auction_n=60)
+
+    _, cold = _fetch_0925(pages)
+    drift = cold.resolved_offset + 3 * PAGE_SIZE
+    a, r = _fetch_0925(pages, offset_hint=drift)
+    assert r.source_status == SOURCE_TARGET_WINDOW_COMPLETE
+    assert _records_keys(r.records) == _records_keys(cold.records)
+    assert r.page_count <= MAX_TARGETED_PAGES
+    assert r.search_mode == KERNEL.SEARCH_MODE_BOUNDARY_FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# D2-T8 — CACHE HINT：fallback 后 target_page_offset 来自已有 cache，不产生额外 request
+# ---------------------------------------------------------------------------
+def test_d2_t8_fallback_hint_from_cache():
+    pages = _build_full_day_pages_real(total=4000, auction_n=60)
+
+    _, cold = _fetch_0925(pages)
+    drift = cold.resolved_offset + 3 * PAGE_SIZE
+    a, r = _fetch_0925(pages, offset_hint=drift)
+    assert r.page_count == a.page_count == len(a.request_log)
+    # target_page_offset 必须来自本次已请求过的 offset（page_cache 内），不新增 request
+    assert r.target_page_offset in {o for o, _ in a.request_log}

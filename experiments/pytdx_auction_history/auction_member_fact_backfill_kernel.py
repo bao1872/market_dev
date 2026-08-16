@@ -23,6 +23,14 @@ Round 3B-D1 transport fixes（不改 canonical business contract）：
 - page_count 只统计真实 adapter 请求（page_cache hit 不计数）。
 - warm hint 走 local fast path（F1/F2/F3），稳定日 REAL requests <= 3。
 
+Round 3B-D2 — TARGET-PAGE-FIRST（性能 closure，不改 canonical business contract）：
+- warm fast path 从 boundary-first 改为 target-page-first：hint 优先表示上一交易日
+  target_page_offset（含 09:25 block 的 page），不是 boundary。
+- 新增 ``target_page_offset``（下一交易日 warm anchor）与 ``search_mode``
+  （TARGET_PAGE_SINGLE / ADJACENT / BIDIRECTIONAL / DRIFT / BOUNDARY_FALLBACK / COLD）。
+- 稳定日 warm 目标降到 1~2 physical requests；fast path 无法 complete 时
+  保留 de7998b boundary algorithm 作为 fallback（不实现第二套 binary search）。
+
 source_status 冻结词表（backfill-specific，不谎称 full-day COMPLETE）：
 - TARGET_WINDOW_COMPLETE      : 09:25 target minute 已被完整 bracket/覆盖（不含全天逐笔完整语义）
 - SOURCE_EMPTY                : 全天无数据
@@ -83,6 +91,26 @@ TARGET_MINUTE = "09:25"
 MAX_TARGETED_PAGES = 24
 
 # ---------------------------------------------------------------------------
+# search_mode 冻结词表（Round 3B-D2 PART G）：只用于性能 instrumentation，
+# 不改变 canonical business contract。runner 按这些值聚合 search_mode distribution。
+# ---------------------------------------------------------------------------
+SEARCH_MODE_TARGET_PAGE_SINGLE = "TARGET_PAGE_SINGLE"
+SEARCH_MODE_TARGET_PAGE_ADJACENT = "TARGET_PAGE_ADJACENT"
+SEARCH_MODE_TARGET_PAGE_BIDIRECTIONAL = "TARGET_PAGE_BIDIRECTIONAL"
+SEARCH_MODE_TARGET_PAGE_DRIFT = "TARGET_PAGE_DRIFT"
+SEARCH_MODE_BOUNDARY_FALLBACK = "BOUNDARY_FALLBACK"
+SEARCH_MODE_COLD = "COLD"
+
+SEARCH_MODES_FROZEN = frozenset({
+    SEARCH_MODE_TARGET_PAGE_SINGLE,
+    SEARCH_MODE_TARGET_PAGE_ADJACENT,
+    SEARCH_MODE_TARGET_PAGE_BIDIRECTIONAL,
+    SEARCH_MODE_TARGET_PAGE_DRIFT,
+    SEARCH_MODE_BOUNDARY_FALLBACK,
+    SEARCH_MODE_COLD,
+})
+
+# ---------------------------------------------------------------------------
 # 内部异常（结构化错误，不进入业务 canonicalization）
 # ---------------------------------------------------------------------------
 class _SearchBudgetExceeded(RuntimeError):
@@ -114,6 +142,8 @@ class Targeted0925Result:
     records: list[dict] = field(default_factory=list)
     page_count: int = 0
     resolved_offset: Optional[int] = None
+    target_page_offset: Optional[int] = None
+    search_mode: Optional[str] = None
     source_first_time: Optional[str] = None
     source_last_time: Optional[str] = None
     error_code: Optional[str] = None
@@ -238,18 +268,29 @@ def fetch_auction_0925_targeted(
 ) -> Targeted0925Result:
     """找到并完整覆盖 09:25 target minute 的 source records。
 
-    算法（不线性扫全天）：
-      - cold（无 hint）：offset=0 探针 → exponential search → boundary binary search；
-      - warm（有 hint）：从上一交易日 resolved offset 附近做局部 bracketing
-        （F1/F2/F3），稳定日典型 <=3 次 REAL page request；hint 漂移时仅局部
-        扩展/回退，禁止重置 offset=0 全局搜索；
-      - 读取 boundary 相邻 3 页（B-2P / B-P / B）按 raw record identity 去重。
+    Round 3B-D2 — TARGET-PAGE-FIRST（warm fast path 从 boundary-first → target-page-first）：
 
-    offset_hint 只影响 transport search efficiency，不改变 source result。
+    - **cold**（无 hint）：offset=0 探针 → exponential search → boundary binary search
+      （保留 de7998b 行为），search_mode=COLD。
+    - **warm**（有 hint）：hint 现在优先表示 **上一交易日 target_page_offset**（含 09:25
+      block 的 page），而不是 boundary。warm 从 H 页开始做 **target-page-first** 局部判定：
+      - C2  SINGLE        单页完整跨 09:25（min < "09:25" < max）→ 1 request
+      - C3  ADJACENT      09:25 在页边沿 → 读相邻 1 页（必要时 2 页）→ 2~3 requests
+      - C4  BIDIRECTIONAL 整页都是 09:25 → 两侧各读 1 页 → <=3 requests（正确性优先）
+      - C5  DRIFT         H 页 entirely before/after 或为空 → 向目标方向局部扩展
+                          1~2 页 → 正常 2~3 requests
+      boundedness 判定：newer 侧由「存在 page 含 >09:25 记录」或「直达数据流起点(offset 0)」
+      界定；older 侧由「oldest 页为空」或「存在 page 含 <09:25 记录」界定。
+      fast path 无法 complete 时才进入 **existing boundary algorithm**
+      （F2/F3 local bracket + boundary binary + B-2P/B-P/B completeness，de7998b 保留）
+      → search_mode=BOUNDARY_FALLBACK。不实现第二套 binary search。
+    - **target_page_offset**（Round 3B-D2 PART B/E）：本次搜索中最适合作为下一交易日
+      warm anchor 的 page offset（含/跨越 target minute）。从已缓存 pages 中选取，
+      不为计算 hint 新增 source request。resolved_offset 保留原 boundary 语义
+      （fast path 下为 boundary estimate，仅 evidence）。
+
+    page_count 只统计 REAL adapter page calls（page_cache hit 不计数）。
     只有 source_status == TARGET_WINDOW_COMPLETE 才允许 canonicalize。
-
-    page_count 只统计 REAL adapter page calls（page_cache hit 不计数，
-    Round 3B-D1 PART E）。
     """
     counter: dict[str, int] = {"n": 0}
     page_cache: dict[int, list[dict]] = {}
@@ -310,35 +351,26 @@ def fetch_auction_0925_targeted(
         return hi
 
     def _locate_boundary_warm(hint: int) -> Optional[int]:
-        """warm：hint-first local bracketing（Round 3B-D1 PART F）。
+        """warm：hint-first local bracketing（Round 3B-D1 PART F，保留为 fallback）。
 
         F1 — 不从 offset=0 无条件探针；从 hint 页开始。
         F2 — local bracket：
           Fast path A：_before(H) 且 _before(H-P) == False → boundary = H
-                       （hint 准确；覆盖上一交易日 boundary）
           Fast path B：_before(H) == False 且 _before(H+P) → boundary = H+P
-                       （hint 少一页；本日 ticks 略多）
-          正常 REAL requests 总数 <= 3（H、H±P、window 收集新增一页）。
-        F3 — hint drift fallback：从 H 向「偏移方向」局部扩展（H±P、H±2P、
-             H±4P…），建立局部 bracket 后仅在该 bracket 内 binary search。
-            禁止一发现 hint 偏差就重置 offset=0 全局 binary search。
-            仅当 hint 页为空且 offset=0 也空（SOURCE_EMPTY → None）时才终止。
+        F3 — hint drift fallback：从 H 向「偏移方向」局部扩展（H±P、H±2P、H±4P…），
+             建立局部 bracket 后仅在该 bracket 内 binary search。
         返回 boundary；返回 None 表示当天无数据（SOURCE_EMPTY）。
         """
         H = (hint // page_size) * page_size
         P = page_size
 
-        # F2 Fast path A：hint 准确 → boundary == H
         if _before(H) and (H - P < 0 or not _before(H - P)):
             return H
 
-        # F2 Fast path B：hint 少一页 → boundary == H+P
         if not _before(H) and _before(H + P):
             return H + P
 
-        # F3 drift fallback：局部扩展，不重置 offset=0
         if _before(H):
-            # boundary 在 [0, H-P] 内（hint 偏大：本日 ticks 较少）。
             hi = H
             lo = max(0, H - P)
             step = P
@@ -347,11 +379,9 @@ def fetch_auction_0925_targeted(
                 lo = max(0, lo - step)
                 step *= 2
             if _before(lo):
-                # lo == 0 且仍 before → 全天数据都在 target 前 → boundary = 0
                 return 0
             return _locate_boundary_binary(lo, hi)
         else:
-            # boundary 在 (H+P, +∞) 内（hint 偏小：本日 ticks 明显更多）。
             lo = H
             hi = H + P
             step = P
@@ -361,7 +391,103 @@ def fetch_auction_0925_targeted(
                 step *= 2
             return _locate_boundary_binary(lo, hi)
 
-    # --- 第一步：cold 必须 offset=0 探针；warm 不探 offset=0（F1）---
+    # --- Round 3B-D2 target-page-first helpers ---
+    def _fast_path_state(offsets: list[int]) -> tuple[list[dict], bool, bool]:
+        """给定 offsets 集合：收集 09:25 records + 计算两侧 boundedness。
+
+        newer side bounded：
+          - 存在 page 其 max minute > TARGET_MINUTE（block 的 newer 侧在该 page 内）
+          - 或 newest offset == 0 且该页有数据（block 直达数据流起点）
+        older side bounded：
+          - oldest offset 页为空（数据流已耗尽）
+          - 或存在 page 其 min minute < TARGET_MINUTE（block 的 older 侧在该 page 内）
+        """
+        pages = {off: _fetch(off) for off in offsets}
+        records: list[dict] = []
+        seen: set[tuple] = set()
+        for off in sorted(offsets):
+            for r in pages[off]:
+                key = (r.get("time"), r.get("price"), r.get("vol"),
+                       r.get("buyorsell"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if _in_window(r.get("time")):
+                    records.append(r)
+        older_bounded = not pages.get(max(offsets))
+        newer_bounded = False
+        for off in offsets:
+            p = pages[off]
+            if not p:
+                continue
+            _, mx = _page_time_range(p)
+            if mx is not None and mx > TARGET_MINUTE:
+                newer_bounded = True
+                break
+        if not newer_bounded and min(offsets) == 0 and pages.get(0):
+            newer_bounded = True
+        if not older_bounded:
+            for off in offsets:
+                p = pages[off]
+                if not p:
+                    continue
+                mn, _ = _page_time_range(p)
+                if mn is not None and mn < TARGET_MINUTE:
+                    older_bounded = True
+                    break
+        return records, newer_bounded, older_bounded
+
+    def _choose_target_page(offsets: list[int], prefer: int) -> int:
+        """从已缓存 offsets 中选择 target_page_offset（PART E）。
+
+        优先级：
+          1. 含 target minute 且 page 自身跨越 target（min <= "09:25" <= max）
+          2. 含任意 09:25 record 的 page
+          3. prefer（H / boundary）
+        不为计算 hint 新增 source request（全部走 page_cache）。
+        """
+        for off in sorted(offsets):
+            p = page_cache.get(off)
+            if not p:
+                continue
+            mn, mx = _page_time_range(p)
+            if mn <= TARGET_MINUTE <= mx:
+                return off
+        for off in sorted(offsets):
+            p = page_cache.get(off)
+            if p and any(_in_window(r.get("time")) for r in p):
+                return off
+        return prefer
+
+    def _boundary_estimate(offsets: list[int]) -> int:
+        """fast path 下无真实 boundary 时的 estimate（仅 evidence）。"""
+        empties = [off for off in offsets if not page_cache.get(off)]
+        if empties:
+            return min(empties)
+        return max(off for off in offsets if page_cache.get(off)) + page_size
+
+    def _make_complete(records, offsets, mode, resolved, used_hint) -> Targeted0925Result:
+        times = sorted(str(r.get("time", "")) for r in records)
+        return Targeted0925Result(
+            source_status=SOURCE_TARGET_WINDOW_COMPLETE,
+            records=records,
+            page_count=counter["n"],
+            resolved_offset=resolved,
+            target_page_offset=_choose_target_page(offsets, offsets[0]),
+            search_mode=mode,
+            source_first_time=times[0] if times else None,
+            source_last_time=times[-1] if times else None,
+            used_hint=used_hint,
+        )
+
+    def _stall() -> Targeted0925Result:
+        return Targeted0925Result(
+            source_status=SOURCE_TARGET_SEARCH_STALLED,
+            page_count=counter["n"],
+            error_code="INVALID_OR_UNORDERABLE_SOURCE_TIME",
+            error_message="non-empty page has no parseable source time")
+
+    # --- 第一步：cold（无 hint）必须 offset=0 探针；warm 不探 offset=0（C1/F1）---
     try:
         if offset_hint is None or offset_hint < 0:
             first_page = _fetch(0)
@@ -373,13 +499,10 @@ def fetch_auction_0925_targeted(
                 return Targeted0925Result(
                     source_status=SOURCE_TARGET_WINDOW_COMPLETE,
                     records=[], page_count=counter["n"], resolved_offset=0,
+                    target_page_offset=0, search_mode=SEARCH_MODE_COLD,
                     used_hint=False)
     except _UnorderableSourceTime:
-        return Targeted0925Result(
-            source_status=SOURCE_TARGET_SEARCH_STALLED,
-            page_count=counter["n"],
-            error_code="INVALID_OR_UNORDERABLE_SOURCE_TIME",
-            error_message="non-empty page has no parseable source time")
+        return _stall()
     except _SourceError as exc:
         return Targeted0925Result(
             source_status=SOURCE_ERROR, page_count=counter["n"],
@@ -389,21 +512,76 @@ def fetch_auction_0925_targeted(
             source_status=SOURCE_TARGET_SEARCH_LIMIT_REACHED,
             page_count=counter["n"])
 
-    # --- 第二步：定位边界 B ---
+    # --- 第二步：cold 走 boundary 搜索；warm 走 target-page-first fast path ---
     try:
-        if offset_hint is not None and offset_hint >= 0:
-            boundary = _locate_boundary_warm(offset_hint)
-            if boundary is None:
+        if offset_hint is None or offset_hint < 0:
+            boundary = _locate_boundary_cold()
+            window_records = _collect_window_records(_fetch, boundary, page_size)
+            return _make_complete(
+                window_records, sorted(page_cache.keys()),
+                SEARCH_MODE_COLD, boundary, used_hint=False)
+
+        # ---- WARM：target-page-first（Round 3B-D2）----
+        H = (offset_hint // page_size) * page_size
+        page = _fetch(H)
+        mode: Optional[str] = None
+        probes: list[int] = []
+        if page:
+            mn, mx = _page_time_range(page)
+            if mn < TARGET_MINUTE < mx:
+                # C2：单页完整跨 09:25 → 1 request
+                mode = SEARCH_MODE_TARGET_PAGE_SINGLE
+                probes = []
+            elif mn == TARGET_MINUTE and mx > TARGET_MINUTE:
+                # C3：target 在 older 边沿 → 读相邻 older 页
+                mode = SEARCH_MODE_TARGET_PAGE_ADJACENT
+                probes = [H + page_size, H + 2 * page_size]
+            elif mn < TARGET_MINUTE and mx == TARGET_MINUTE:
+                # C3：target 在 newer 边沿 → 读相邻 newer 页
+                mode = SEARCH_MODE_TARGET_PAGE_ADJACENT
+                probes = [H - page_size, H - 2 * page_size]
+            elif mn == TARGET_MINUTE and mx == TARGET_MINUTE:
+                # C4：整页都是 09:25 → 两侧各读 1 页（正确性优先，<=3 requests）
+                mode = SEARCH_MODE_TARGET_PAGE_BIDIRECTIONAL
+                probes = [H + page_size, H - page_size]
+            elif mn > TARGET_MINUTE:
+                # C5：H 整页 after → 今天 target 更 old → 向 older 局部扩展
+                mode = SEARCH_MODE_TARGET_PAGE_DRIFT
+                probes = [H + page_size, H + 2 * page_size]
+            else:
+                # C5：H 整页 before → 今天 target 更 new → 向 newer 局部扩展
+                mode = SEARCH_MODE_TARGET_PAGE_DRIFT
+                probes = [H - page_size, H - 2 * page_size]
+        else:
+            # C5：H 空 → 今日数据更短 → target 更 new → 向 newer 局部扩展
+            mode = SEARCH_MODE_TARGET_PAGE_DRIFT
+            probes = [H - page_size, H - 2 * page_size]
+
+        if mode == SEARCH_MODE_TARGET_PAGE_SINGLE:
+            records, nb, ob = _fast_path_state([H])
+            assert nb and ob  # C2 由 min/max 跨 09:25 保证 bounded
+            return _make_complete(
+                records, [H], mode, _boundary_estimate([H]), used_hint=True)
+
+        offsets = [H]
+        for probe in probes:
+            if probe < 0:
+                continue
+            offsets.append(probe)
+            records, nb, ob = _fast_path_state(offsets)
+            if nb and ob:
+                return _make_complete(
+                    records, offsets, mode, _boundary_estimate(offsets),
+                    used_hint=True)
+
+        # fast path 无法 complete：若探过的页全部为空 → 用 offset=0 判定 SOURCE_EMPTY；
+        # 否则进入 existing boundary fallback。
+        if all(not page_cache.get(off) for off in offsets):
+            if not _fetch(0):
                 return Targeted0925Result(source_status=SOURCE_EMPTY,
                                           page_count=counter["n"])
-        else:
-            boundary = _locate_boundary_cold()
     except _UnorderableSourceTime:
-        return Targeted0925Result(
-            source_status=SOURCE_TARGET_SEARCH_STALLED,
-            page_count=counter["n"],
-            error_code="INVALID_OR_UNORDERABLE_SOURCE_TIME",
-            error_message="non-empty page has no parseable source time")
+        return _stall()
     except _SourceError as exc:
         return Targeted0925Result(
             source_status=SOURCE_ERROR, page_count=counter["n"],
@@ -417,10 +595,15 @@ def fetch_auction_0925_targeted(
             source_status=SOURCE_TARGET_SEARCH_STALLED,
             page_count=counter["n"])
 
-    # --- 第三步：读取 boundary 相邻 3 页（B-2P / B-P / B）去重收集 window ---
+    # --- 第三步：warm fallback = existing boundary algorithm（PART D 保留）---
     try:
-        window_records = _collect_window_records(
-            _fetch, boundary, page_size)
+        boundary = _locate_boundary_warm(offset_hint)
+        if boundary is None:
+            return Targeted0925Result(source_status=SOURCE_EMPTY,
+                                      page_count=counter["n"])
+        window_records = _collect_window_records(_fetch, boundary, page_size)
+    except _UnorderableSourceTime:
+        return _stall()
     except _SourceError as exc:
         return Targeted0925Result(
             source_status=SOURCE_ERROR, page_count=counter["n"],
@@ -434,15 +617,9 @@ def fetch_auction_0925_targeted(
             source_status=SOURCE_TARGET_SEARCH_STALLED,
             page_count=counter["n"])
 
-    times = sorted(str(r.get("time", "")) for r in window_records)
-    return Targeted0925Result(
-        source_status=SOURCE_TARGET_WINDOW_COMPLETE,
-        records=window_records,
-        page_count=counter["n"],
-        resolved_offset=boundary,
-        source_first_time=times[0] if times else None,
-        source_last_time=times[-1] if times else None,
-        used_hint=offset_hint is not None)
+    return _make_complete(
+        window_records, sorted(page_cache.keys()),
+        SEARCH_MODE_BOUNDARY_FALLBACK, boundary, used_hint=True)
 
 
 def _collect_window_records(
