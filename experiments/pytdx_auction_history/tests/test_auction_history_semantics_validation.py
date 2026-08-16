@@ -702,10 +702,12 @@ def test_end_to_end_fake_evidence(tmp_path, monkeypatch):
     dq_re = json.loads((out / "10_data_quality_summary.json").read_text())
     assert dq_re["total_source_days_attempted"] == 1
 
-    # reopen 11: no PASS / confirmed
+    # reopen 11: no PASS / confirmed; Round 2B derived amount accepted
     vs = json.loads((out / "11_validation_summary.json").read_text())
     assert vs["amount_evidence"]["DIRECT_RAW_AMOUNT"] == "UNAVAILABLE"
-    assert vs["amount_evidence"]["DERIVED_AMOUNT"] == "PENDING_VOLUME_UNIT_CONFIRMATION"
+    assert vs["amount_evidence"]["DERIVED_AMOUNT"] == "ACCEPTED"
+    assert vs["amount_evidence"]["amount_source_type"] == \
+        mod.AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME
     text = json.dumps(vs)
     for forbidden in ["source PASS", "volume unit confirmed", "amount confirmed",
                      "CONFIRMED", "RUNNER_CONFIRMED"]:
@@ -1020,3 +1022,162 @@ def test_run_validation_full_orchestration(tmp_path, monkeypatch):
     for forbidden in ["source PASS", "volume unit confirmed", "amount confirmed",
                       "CONFIRMED", "RUNNER_CONFIRMED"]:
         assert forbidden.upper() not in text.upper()
+
+
+# ---------------------------------------------------------------------------
+# ROUND 2B — Historical 09:25 Canonical Record Contract
+# ---------------------------------------------------------------------------
+def _mk_rec(price, vol, buyorsell=2, t="09:25"):
+    """Build a NormalizedAuctionTransaction for canonicalization tests only."""
+    return mod.NormalizedAuctionTransaction(
+        symbol="600000", market="SH",
+        instrument_id="00000000-0000-0000-0000-000000000001",
+        trade_date="2026-08-14", source_time=t, canonical_time="09:25",
+        raw_price=float(price),
+        raw_volume_value=float(vol) if vol is not None else None,
+        raw_amount_value=None,
+        buy_sell_raw=int(buyorsell) if buyorsell is not None else None,
+        source_record={"time": t, "price": float(price),
+                       "vol": float(vol) if vol is not None else None,
+                       "buyorsell": int(buyorsell) if buyorsell is not None else None},
+        source_schema_keys=["time", "price", "vol", "buyorsell"],
+    )
+
+
+def test_canonicalize_single_positive_row():
+    """C1: single positive row → CANONICAL, price=10, vol=500 shares."""
+    c = mod.canonicalize_auction_0925([_mk_rec(10, 5, 2)])
+    assert c.canonicalization_status == mod.CANON_STATUS_CANONICAL
+    assert c.auction_price_raw == 10
+    assert c.auction_volume_raw_lots == 5
+    assert c.auction_volume_shares == 500
+    assert c.amount_source_type == mod.AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME
+    amt = mod.compute_amount_evidence(10, 500)
+    assert amt["candidate_derived_amount"] == 5000
+
+
+def test_canonicalize_zero_volume_auxiliary_same_price():
+    """C2: zero-vol aux + positive (same price) → CANONICAL, sel row2, vol=500."""
+    c = mod.canonicalize_auction_0925([
+        _mk_rec(10, 0, 8),
+        _mk_rec(10, 5, 2),
+    ])
+    assert c.canonicalization_status == mod.CANON_STATUS_CANONICAL
+    assert c.auction_price_raw == 10
+    assert c.auction_volume_shares == 500
+    assert c.positive_volume_record_count == 1
+    assert c.auxiliary_zero_volume_record_count == 1
+    assert c.selected_record.raw_volume_value == 5
+
+
+def test_canonicalize_zero_volume_auxiliary_different_price():
+    """C3: zero-vol aux has DIFFERENT price → CANONICAL, selected = positive row price."""
+    c = mod.canonicalize_auction_0925([
+        _mk_rec(12.95, 0, 8),
+        _mk_rec(12.94, 5, 2),
+    ])
+    assert c.canonicalization_status == mod.CANON_STATUS_CANONICAL
+    assert c.auction_price_raw == 12.94  # from positive-volume row, NOT 12.95
+    assert c.auction_volume_shares == 500
+
+
+def test_canonicalize_two_positive_rows():
+    """C4: two positive rows → MULTIPLE_VOLUME_BEARING_0925, no price/vol/amount."""
+    c = mod.canonicalize_auction_0925([
+        _mk_rec(10, 5, 2),
+        _mk_rec(10, 6, 2),
+    ])
+    assert c.canonicalization_status == mod.CANON_STATUS_MULTIPLE_VOLUME_BEARING
+    assert c.auction_price_raw is None
+    assert c.auction_volume_shares is None
+    assert c.auction_amount is None
+    assert c.positive_volume_record_count == 2
+
+
+def test_canonicalize_all_zero_volume():
+    """C5: all zero volume → NO_VOLUME_BEARING_0925."""
+    c = mod.canonicalize_auction_0925([
+        _mk_rec(10, 0, 8),
+        _mk_rec(10, 0, 8),
+    ])
+    assert c.canonicalization_status == mod.CANON_STATUS_NO_VOLUME_BEARING
+    assert c.auction_price_raw is None
+    assert c.auction_volume_shares is None
+
+
+def test_canonicalize_invalid_missing_volume():
+    """C6: invalid/missing volume must not be silently coerced.
+
+    A record with vol=None is NOT volume-bearing; selection must not pick it.
+    """
+    c = mod.canonicalize_auction_0925([_mk_rec(10, None, None)])
+    assert c.positive_volume_record_count == 0
+    assert c.canonicalization_status == mod.CANON_STATUS_NO_VOLUME_BEARING
+    assert c.auction_price_raw is None
+
+
+def test_canonicalize_amount_contract():
+    """C7: amount = price × normalized volume shares (CNY)."""
+    amt = mod.compute_amount_evidence(10, 500)
+    assert amt["candidate_derived_amount"] == 5000
+    assert amt["amount_source_type"] == mod.AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME
+
+
+def test_canonicalize_exact_two_multiplicity_not_ambiguity():
+    """C8: raw multiplicity (2 rows) with 1 positive → CANONICAL (not business ambiguity)."""
+    c = mod.canonicalize_auction_0925([
+        _mk_rec(12.94, 0, 8),
+        _mk_rec(12.94, 5, 2),
+    ])
+    assert c.raw_canonical_record_count == 2
+    assert c.canonicalization_status == mod.CANON_STATUS_CANONICAL
+    assert c.auction_price_raw == 12.94
+
+
+def test_observation_lane_gate_on_canonical_status():
+    """Integration: raw MULTIPLE + 1 zero-vol aux + 1 positive → CANONICAL, Lane A/B run."""
+    extraction = mod.AuctionExtractionResult(
+        status="MULTIPLE_0925", records=[_mk_rec(12.94, 0, 8), _mk_rec(12.94, 5, 2)],
+        noncanonical_records=[], all_records=[], full_day_status="COMPLETE",
+        raw_canonical_record_count=2, positive_volume_record_count=1,
+        auxiliary_zero_volume_record_count=1)
+    canon = mod.canonicalize_auction_0925(extraction.records)
+    assert canon.canonicalization_status == mod.CANON_STATUS_CANONICAL
+    # Runner gates Lane A/B on CANONICAL (not raw FOUND)
+    assert canon.canonicalization_status == mod.CANON_STATUS_CANONICAL
+
+
+def test_observation_blocks_lane_on_multiple_volume_bearing():
+    """Integration: two positive rows must block Lane A/B/amount."""
+    extraction = mod.AuctionExtractionResult(
+        status="MULTIPLE_0925", records=[_mk_rec(10, 5, 2), _mk_rec(10, 6, 2)],
+        noncanonical_records=[], all_records=[], full_day_status="COMPLETE",
+        raw_canonical_record_count=2, positive_volume_record_count=2,
+        auxiliary_zero_volume_record_count=0)
+    canon = mod.canonicalize_auction_0925(extraction.records)
+    assert canon.canonicalization_status == mod.CANON_STATUS_MULTIPLE_VOLUME_BEARING
+    # Runner gates Lane A/B on CANONICAL → these stay None
+    assert canon.canonicalization_status != mod.CANON_STATUS_CANONICAL
+
+
+def test_extract_two_canonical_rows_reports_multiplicity_and_counts():
+    """extract_from_full_day must expose raw multiplicity + volume-bearing counts."""
+    records = [
+        {"time": "09:25", "price": 12.94, "vol": 0, "buyorsell": 8},
+        {"time": "09:25", "price": 12.94, "vol": 5, "buyorsell": 2},
+    ]
+    fdr = mod.FullDayTransactionResult(status="COMPLETE", records=records,
+                                       page_count=1, record_count=2)
+    ex = mod.extract_from_full_day("600000", "SH", str(uuid4()),
+                                   date(2024, 1, 8), fdr)
+    assert ex.status == "MULTIPLE_0925"
+    assert ex.raw_canonical_record_count == 2
+    assert ex.positive_volume_record_count == 1
+    assert ex.auxiliary_zero_volume_record_count == 1
+
+
+def test_amount_evidence_frozen_derived_contract():
+    """Round 2B: amount evidence is DERIVED_PRICE_X_NORMALIZED_VOLUME (accepted)."""
+    amt = mod.compute_amount_evidence(12.94, 500)
+    assert amt["amount_source_type"] == mod.AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME
+    assert amt["candidate_derived_amount"] == 12.94 * 500

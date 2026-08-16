@@ -124,6 +124,69 @@ gap_pct = (auction_price / previous_close) - 1
 > provider-specific volume unit、腾讯 / 新浪 normalization rule、lot/share 换算、具体采集实现
 > 属于后续 Data Contract / Architecture 阶段，不在本轮定义。
 
+### AU-04-4 Historical 09:25 Canonical Record Contract（已冻结，Round 2B）
+
+竞价历史源（`pytdx` historical transaction）在 `09:25` / `09:25:00` 可能返回**多条 canonical 09:25 rows**。
+实验证据（run_live2 + Round 2A closeout）表明：每 eligible source-day 恰好存在 **1 条 positive-volume canonical row**，
+其余为 **zero-volume auxiliary row**（`vol = 0`，`buyorsell_raw = 8` 哨兵）。因此正式 canonicalization
+**不得继续依赖 `raw canonical row count == 1`**。
+
+#### 语义原则
+
+- 正式业务规则**只基于 `raw_vol > 0`** 判定 volume-bearing owner；
+- **不得**写成 `buyorsell == 2 → auction record` 或 `buyorsell == 8 → sentinel`；当前无 authoritative source 定义这些 numeric code 的业务含义；
+- `buyorsell_raw` 仅作为 **source evidence / diagnostics** 保留。
+
+#### Canonical Record 选择
+
+对 `symbol × trade_date` 先取得所有 exact canonical `09:25` rows，再：
+
+```text
+volume_bearing_rows = [row for row in canonical_rows if valid(raw_vol) and raw_vol > 0]
+```
+
+- **CASE A — 恰好 1 条 positive-volume row** → `CANONICAL`
+  - `selected_record` = 唯一 positive-volume row
+  - `auction_price` = `selected_record.raw_price`
+  - `auction_volume_raw_lots` = `selected_record.raw_vol`
+  - `auction_volume_shares` = `raw_vol × 100`
+  - 其他 `raw_vol == 0` 的 canonical 09:25 rows 保留为 `auxiliary_zero_volume_records`，
+    **不参与** price selection / volume sum / amount calculation
+- **CASE B — 0 条 positive-volume row** → `NO_VOLUME_BEARING_0925`
+  - 不得选 first / last / zero-volume price；`auction_price = None`，`auction_volume = None`
+- **CASE C — >1 条 positive-volume row** → `MULTIPLE_VOLUME_BEARING_0925`（新的真正 ambiguity）
+  - 不得 first / last / max / sum / average；`auction_price = None`，`auction_volume = None`
+  - 必须保留全部 raw evidence
+
+#### Price 合同
+
+- 正式 historical `auction_price` = **unique positive-volume canonical row 的 `raw_price`**；
+- **不再要求**所有 canonical 09:25 raw rows 具有相同 price；
+- zero-volume auxiliary row 本来就不是 canonical price owner（这正是 601012 / 2026-08-11 出现 `12.95 vs 12.94` 1 分差异的正确解释）。
+
+#### Volume / Unit 合同
+
+- Pytdx historical transaction raw `vol` 单位 = **LOT**；`1 LOT = 100 shares`（已接受）；
+- `auction_volume_shares` = `canonical_positive_raw_vol × 100`；
+- 正式实现**不写** `max(all rows)` 也**不写** `sum(all rows)`（即使 61 cases 中 `max == sum == positive row`，也不以偶然数学等价替代业务合同）。Owner 是 unique positive-volume record。
+
+#### Amount 合同
+
+- `DIRECT_RAW_AMOUNT` = `UNAVAILABLE`；
+- `DERIVED_AUCTION_AMOUNT` = `ACCEPTED`；
+- `auction_amount` = `auction_price × auction_volume_shares`（单位 CNY）；
+- `amount_source_type` = `DERIVED_PRICE_X_NORMALIZED_VOLUME`。
+
+#### Raw Status vs Canonicalization Status（两层分离）
+
+- **RAW EXTRACTION STATUS**：`SINGLE_CANONICAL_ROW` / `MULTIPLE_CANONICAL_ROWS` / `MISSING_CANONICAL_ROWS` / `NONCANONICAL_ONLY` / `SOURCE_INCOMPLETE` —— 描述 source multiplicity；
+- **CANONICALIZATION STATUS**：`CANONICAL` / `NO_VOLUME_BEARING_0925` / `MULTIPLE_VOLUME_BEARING_0925` —— 描述业务可用性；
+- **不得**把 source multiplicity 等同于 business ambiguity。原 61 个 `MULTIPLE_0925` 仍可在 source diagnostics 中看到 `raw_canonical_record_count = 2`，但若 positive-volume row == 1，正式 business canonical status = `CANONICAL`，且**可进入 Lane A / Lane B / amount 计算**。
+
+> Data Quality 字段：`raw_single_count` / `raw_multiple_count` / `raw_missing_count` / `canonical_count` /
+> `no_volume_bearing_count` / `multiple_volume_bearing_count` / `auxiliary_zero_volume_record_count`。
+> `raw_multiple_count` 不直接算 source failure。
+
 ## 4. Historical Abnormality（AU-05 / AU-06）
 
 ### AU-05 Gap Historical Abnormality（member-first）

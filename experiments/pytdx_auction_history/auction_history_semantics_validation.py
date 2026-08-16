@@ -61,6 +61,23 @@ UUID_ZERO = UUID(int=0)
 # 竞价时间规范
 CANONICAL_AUCTION_TIMES = {"09:25", "09:25:00"}
 
+# Historical 09:25 canonical record contract（Round 2A/B 收口）
+# Pytdx historical transaction raw vol 单位 = LOT；1 LOT = 100 shares。
+AUCTION_LOT_MULTIPLIER = 100
+
+# positive-volume 有效性：raw_vol 必须 > 0 才是 volume-bearing record owner。
+# 不依赖任何 buyorsell numeric code 的权威业务解释（当前无 authoritative source）。
+AUCTION_VOLUME_VALID_MIN = 0  # strict: > AUCTION_VOLUME_VALID_MIN
+
+# Canonicalization status
+CANON_STATUS_CANONICAL = "CANONICAL"
+CANON_STATUS_NO_VOLUME_BEARING = "NO_VOLUME_BEARING_0925"
+CANON_STATUS_MULTIPLE_VOLUME_BEARING = "MULTIPLE_VOLUME_BEARING_0925"
+
+# Amount source type
+AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME = "DERIVED_PRICE_X_NORMALIZED_VOLUME"
+AMOUNT_SOURCE_RAW_FIELD_ABSENT = "RAW_FIELD_ABSENT"
+
 # 分页参数（沿用 pytdx 探索脚本历史可工作约定）
 PAGE_SIZE = 800
 MAX_PAGES = 200
@@ -118,6 +135,9 @@ class AuctionExtractionResult:
     noncanonical_records: list  # 09:25:xx noncanonical normalized records
     all_records: list  # 完整 full-day records
     full_day_status: str  # 来自 FullDayTransactionResult.status
+    raw_canonical_record_count: int = 0
+    positive_volume_record_count: int = 0
+    auxiliary_zero_volume_record_count: int = 0
 
 
 # ===========================================================================
@@ -264,6 +284,116 @@ def _normalize_raw_transaction(
 
 
 # ===========================================================================
+# Historical 09:25 Canonical Record Contract（Round 2B）
+# ===========================================================================
+@dataclass
+class Auction0925Canonicalization:
+    canonicalization_status: str
+    raw_canonical_record_count: int
+    positive_volume_record_count: int
+    auxiliary_zero_volume_record_count: int
+    selected_record: Optional[NormalizedAuctionTransaction]
+    auction_price_raw: Optional[float]
+    auction_volume_raw_lots: Optional[float]
+    auction_volume_shares: Optional[float]
+    auction_amount: Optional[float]
+    amount_source_type: Optional[str]
+    reason: str
+
+
+def _is_volume_bearing(rec: NormalizedAuctionTransaction) -> bool:
+    """volume-bearing 取决于 raw_vol > 0（不依赖 buyorsell code 业务语义）。"""
+    v = rec.raw_volume_value
+    return v is not None and v > AUCTION_VOLUME_VALID_MIN
+
+
+def canonicalize_auction_0925(
+    canonical_records: list[NormalizedAuctionTransaction],
+) -> Auction0925Canonicalization:
+    """把已提取的 exact 09:25 canonical records 规范化为单条历史竞价事实。
+
+    纯函数：不访问 MDAS / QFQ / DB / Pytdx / network。
+
+    Owner 是 unique positive-volume record（raw_vol > 0）。
+    zero-volume canonical 09:25 rows 只作为 auxiliary evidence 保留，
+    不参与 price selection / volume / amount。
+    """
+    raw_n = len(canonical_records)
+    volume_bearing = [r for r in canonical_records if _is_volume_bearing(r)]
+    zero_vol = [r for r in canonical_records if not _is_volume_bearing(r)]
+    pos_n = len(volume_bearing)
+    aux_n = len(zero_vol)
+
+    if pos_n == 1:
+        sel = volume_bearing[0]
+        price = sel.raw_price
+        raw_lots = sel.raw_volume_value
+        shares = raw_lots * AUCTION_LOT_MULTIPLIER
+        amount = price * shares
+        return Auction0925Canonicalization(
+            canonicalization_status=CANON_STATUS_CANONICAL,
+            raw_canonical_record_count=raw_n,
+            positive_volume_record_count=pos_n,
+            auxiliary_zero_volume_record_count=aux_n,
+            selected_record=sel,
+            auction_price_raw=price,
+            auction_volume_raw_lots=raw_lots,
+            auction_volume_shares=shares,
+            auction_amount=amount,
+            amount_source_type=AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME,
+            reason="UNIQUE_POSITIVE_VOLUME_RECORD_OWNS_PRICE_AND_VOLUME")
+
+    if pos_n == 0:
+        return Auction0925Canonicalization(
+            canonicalization_status=CANON_STATUS_NO_VOLUME_BEARING,
+            raw_canonical_record_count=raw_n,
+            positive_volume_record_count=0,
+            auxiliary_zero_volume_record_count=aux_n,
+            selected_record=None,
+            auction_price_raw=None,
+            auction_volume_raw_lots=None,
+            auction_volume_shares=None,
+            auction_amount=None,
+            amount_source_type=None,
+            reason="NO_POSITIVE_VOLUME_BEARING_0925_RECORD")
+
+    # pos_n > 1 → 真正的 ambiguity，保留全部 raw evidence
+    return Auction0925Canonicalization(
+        canonicalization_status=CANON_STATUS_MULTIPLE_VOLUME_BEARING,
+        raw_canonical_record_count=raw_n,
+        positive_volume_record_count=pos_n,
+        auxiliary_zero_volume_record_count=aux_n,
+        selected_record=None,
+        auction_price_raw=None,
+        auction_volume_raw_lots=None,
+        auction_volume_shares=None,
+        auction_amount=None,
+        amount_source_type=None,
+        reason="MULTIPLE_POSITIVE_VOLUME_BEARING_0925_RECORDS_AMBIGUOUS")
+
+
+def compute_amount_evidence(price: Optional[float] = None,
+                            volume_shares: Optional[float] = None):
+    """Round 2B：Volume Unit 与 Canonical Volume Owner 已关闭。
+
+    historical auction amount 定义为 price × normalized volume shares。
+    单位 CNY。DIRECT_RAW_AMOUNT 不可用；DERIVED 已接受。
+    """
+    if price is None or volume_shares is None:
+        return {
+            "amount_source_type": AMOUNT_SOURCE_RAW_FIELD_ABSENT,
+            "candidate_derived_amount": None,
+            "evidence_reason": "CANONICAL_INPUT_MISSING",
+        }
+    amount = price * volume_shares
+    return {
+        "amount_source_type": AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME,
+        "candidate_derived_amount": amount,
+        "evidence_reason": "DERIVED_PRICE_X_NORMALIZED_VOLUME",
+    }
+
+
+# ===========================================================================
 # MOD4 / MOD5 / MOD15 — 分页完整日交易抓取（单一 source truth）
 # ===========================================================================
 def _page_fingerprint(page: list[dict]) -> str:
@@ -398,6 +528,10 @@ def extract_from_full_day(
         elif cls == TransactionTimeClass.NONCANONICAL_0925:
             noncanonical.append(n)
 
+    # raw multiplicity：区分 source 层与 business canonicalization 层
+    pos = [r for r in canonical if _is_volume_bearing(r)]
+    zero = [r for r in canonical if not _is_volume_bearing(r)]
+
     if len(canonical) == 1:
         status = "FOUND"
     elif len(canonical) > 1:
@@ -409,7 +543,10 @@ def extract_from_full_day(
 
     return AuctionExtractionResult(
         status=status, records=canonical, noncanonical_records=noncanonical,
-        all_records=normalized_all, full_day_status=full_day.status)
+        all_records=normalized_all, full_day_status=full_day.status,
+        raw_canonical_record_count=len(canonical),
+        positive_volume_record_count=len(pos),
+        auxiliary_zero_volume_record_count=len(zero))
 
 
 # ===========================================================================
@@ -690,6 +827,19 @@ async def run_corporate_observation(
     obs["extraction_status"] = extraction.status
     obs["raw_records"] = [_raw_evidence_dict(r) for r in extraction.records]
     obs["noncanonical_records"] = [_raw_evidence_dict(r) for r in extraction.noncanonical_records]
+    obs["raw_canonical_record_count"] = extraction.raw_canonical_record_count
+    obs["positive_volume_record_count"] = extraction.positive_volume_record_count
+    obs["auxiliary_zero_volume_record_count"] = extraction.auxiliary_zero_volume_record_count
+
+    # Round 2B：canonicalization 独立层
+    canon = canonicalize_auction_0925(extraction.records)
+    obs["canonicalization_status"] = canon.canonicalization_status
+    obs["auction_price_raw"] = canon.auction_price_raw
+    obs["auction_volume_raw_lots"] = canon.auction_volume_raw_lots
+    obs["auction_volume_shares"] = canon.auction_volume_shares
+    obs["auction_amount"] = canon.auction_amount
+    obs["auction_amount_source_type"] = canon.amount_source_type
+    obs["canonicalization_reason"] = canon.reason
 
     # Lane A
     none_res = await mdas.get_bars(session, inst.instrument_id, adj="none",
@@ -697,8 +847,8 @@ async def run_corporate_observation(
     qfq_res = await mdas.get_bars(session, inst.instrument_id, adj="qfq",
                                   end_date=trade_date, adjustment_as_of=trade_date, limit=10)
     open_bar_T = get_bar_for_date(none_res.bars, trade_date)
-    if extraction.status == "FOUND":
-        auction_price = extraction.records[0].raw_price
+    if canon.canonicalization_status == CANON_STATUS_CANONICAL:
+        auction_price = canon.auction_price_raw
         obs["lane_a"] = compute_lane_a(
             auction_price, open_bar_T, none_res.data_source,
             none_res.degraded, none_res.degraded_reason)
@@ -719,10 +869,11 @@ async def run_corporate_observation(
         obs["lane_a"] = None
         obs["lane_b"] = None
 
-    # Volume + Amount evidence（MOD7 / MOD9）
+    # Volume + Amount evidence（MOD7 / Round 2B）
     obs["volume_evidence"] = _compute_volume_from_full_day(
         inst, trade_date, full_day, none_res)
-    obs["amount_evidence"] = compute_amount_evidence()
+    obs["amount_evidence"] = compute_amount_evidence(
+        canon.auction_price_raw, canon.auction_volume_shares)
     obs["raw_amount_value"] = None
     return obs
 
@@ -747,6 +898,19 @@ async def run_single_observation(
     obs["noncanonical_records"] = [_raw_evidence_dict(r) for r in extraction.noncanonical_records]
     obs["raw_record_count"] = len(obs["raw_records"])
     obs["noncanonical_record_count"] = len(obs["noncanonical_records"])
+    obs["raw_canonical_record_count"] = extraction.raw_canonical_record_count
+    obs["positive_volume_record_count"] = extraction.positive_volume_record_count
+    obs["auxiliary_zero_volume_record_count"] = extraction.auxiliary_zero_volume_record_count
+
+    # Round 2B：canonicalization 独立层（不依赖 raw row count == 1）
+    canon = canonicalize_auction_0925(extraction.records)
+    obs["canonicalization_status"] = canon.canonicalization_status
+    obs["auction_price_raw"] = canon.auction_price_raw
+    obs["auction_volume_raw_lots"] = canon.auction_volume_raw_lots
+    obs["auction_volume_shares"] = canon.auction_volume_shares
+    obs["auction_amount"] = canon.auction_amount
+    obs["auction_amount_source_type"] = canon.amount_source_type
+    obs["canonicalization_reason"] = canon.reason
 
     none_res = await mdas.get_bars(session, inst.instrument_id, adj="none",
                                    end_date=trade_date, limit=10)
@@ -754,8 +918,9 @@ async def run_single_observation(
                                   end_date=trade_date, adjustment_as_of=trade_date, limit=10)
     open_bar_T = get_bar_for_date(none_res.bars, trade_date)
 
-    if extraction.status == "FOUND":
-        auction_price = extraction.records[0].raw_price
+    # Lane A/B 仅当 canonicalization == CANONICAL（不是 raw FOUND）
+    if canon.canonicalization_status == CANON_STATUS_CANONICAL:
+        auction_price = canon.auction_price_raw
         obs["lane_a"] = compute_lane_a(
             auction_price, open_bar_T, none_res.data_source,
             none_res.degraded, none_res.degraded_reason)
@@ -770,10 +935,11 @@ async def run_single_observation(
         obs["lane_a"] = None
         obs["lane_b"] = None
 
-    # Volume + Amount evidence（MOD7 / MOD9）
+    # Volume + Amount evidence（MOD7 / Round 2B）
     obs["volume_evidence"] = _compute_volume_from_full_day(
         inst, trade_date, full_day, none_res)
-    obs["amount_evidence"] = compute_amount_evidence()
+    obs["amount_evidence"] = compute_amount_evidence(
+        canon.auction_price_raw, canon.auction_volume_shares)
     obs["raw_amount_value"] = None
     return obs
 
@@ -867,7 +1033,7 @@ def derive_live_status(observations: list[dict], corporate_cases: list[dict]) ->
 
     auction_src = dimension(lambda o: True, "extraction_status")
     price_open = dimension(
-        lambda o: o.get("extraction_status") == "FOUND", "lane_a")
+        lambda o: o.get("canonicalization_status") == CANON_STATUS_CANONICAL, "lane_a")
     vol_unit = dimension(
         lambda o: o.get("volume_evidence", {}).get("daily_volume_ratio") is not None,
         "volume_evidence")
@@ -948,13 +1114,37 @@ def compute_data_quality_summary(observations: list[dict]) -> dict:
     vol_eligible = sum(1 for o in observations
                        if o.get("full_day_status") == "COMPLETE"
                        and o.get("volume_evidence", {}).get("daily_volume_ratio") is not None)
+    raw_single = sum(1 for o in observations
+                     if o.get("extraction_status") == "FOUND")
+    raw_multiple = sum(1 for o in observations
+                       if o.get("extraction_status") == "MULTIPLE_0925")
+    raw_missing = sum(1 for o in observations
+                      if o.get("extraction_status") == "MISSING_0925")
+    canonical_count = sum(1 for o in observations
+                          if o.get("canonicalization_status") == CANON_STATUS_CANONICAL)
+    no_volume_bearing_count = sum(
+        1 for o in observations
+        if o.get("canonicalization_status") == CANON_STATUS_NO_VOLUME_BEARING)
+    multiple_volume_bearing_count = sum(
+        1 for o in observations
+        if o.get("canonicalization_status") == CANON_STATUS_MULTIPLE_VOLUME_BEARING)
+    aux_zero_count = sum(
+        o.get("auxiliary_zero_volume_record_count", 0) for o in observations)
     return {
         "total_source_days_attempted": total,
         "pagination": pag,
         "auction_semantics_eligible_days": auction_eligible,
         "volume_unit_eligible_days": vol_eligible,
+        "raw_single_count": raw_single,
+        "raw_multiple_count": raw_multiple,
+        "raw_missing_count": raw_missing,
+        "canonical_count": canonical_count,
+        "no_volume_bearing_count": no_volume_bearing_count,
+        "multiple_volume_bearing_count": multiple_volume_bearing_count,
+        "auxiliary_zero_volume_record_count": aux_zero_count,
         "denominator_note": "pagination COMPLETE only enters auction semantics denominator; "
-                             "pagination failure is SOURCE DAY INCOMPLETE, not MISSING_0925",
+                             "pagination failure is SOURCE DAY INCOMPLETE, not MISSING_0925; "
+                             "raw_multiple_count != business ambiguity (canonicalization layer)",
     }
 
 
@@ -1015,9 +1205,15 @@ def write_evidence_outputs(output_dir, as_of, observations, corporate_cases,
                [{"symbol": o["symbol"], "market": o["market"],
                  "trade_date": o["trade_date"],
                  "full_day_status": o.get("full_day_status"),
-                 "extraction_status": o.get("extraction_status")}
+                 "extraction_status": o.get("extraction_status"),
+                 "raw_canonical_record_count": o.get("raw_canonical_record_count"),
+                 "positive_volume_record_count": o.get("positive_volume_record_count"),
+                 "auxiliary_zero_volume_record_count": o.get("auxiliary_zero_volume_record_count"),
+                 "canonicalization_status": o.get("canonicalization_status")}
                 for o in observations],
-               ["symbol", "market", "trade_date", "full_day_status", "extraction_status"])
+               ["symbol", "market", "trade_date", "full_day_status", "extraction_status",
+                "raw_canonical_record_count", "positive_volume_record_count",
+                "auxiliary_zero_volume_record_count", "canonicalization_status"])
 
     # 07 corporate cases（alias of 02, kept for compatibility）
     _write_csv(output_dir / "07_corporate_action_cases.csv", corporate_cases, [
@@ -1064,9 +1260,20 @@ def write_evidence_outputs(output_dir, as_of, observations, corporate_cases,
         "volume_unit_distribution": volume_dist,
         "amount_evidence": {
             "DIRECT_RAW_AMOUNT": "UNAVAILABLE",
-            "DERIVED_AMOUNT": "PENDING_VOLUME_UNIT_CONFIRMATION",
+            "DERIVED_AMOUNT": "ACCEPTED",
+            "amount_source_type": AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME,
         },
-        "runner_conclusion": "NO_CONFIRMATION_IN_RUNNER",
+        "canonicalization_contract": {
+            "CANONICAL": sum(1 for o in observations
+                            if o.get("canonicalization_status") == CANON_STATUS_CANONICAL),
+            "NO_VOLUME_BEARING_0925": sum(
+                1 for o in observations
+                if o.get("canonicalization_status") == CANON_STATUS_NO_VOLUME_BEARING),
+            "MULTIPLE_VOLUME_BEARING_0925": sum(
+                1 for o in observations
+                if o.get("canonicalization_status") == CANON_STATUS_MULTIPLE_VOLUME_BEARING),
+        },
+        "runner_conclusion": "AUCTION_0925_CANONICAL_CONTRACT_FROZEN",
     })
 
 
