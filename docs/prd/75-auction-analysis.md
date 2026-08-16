@@ -763,7 +763,7 @@ Conclusion 描述**当前 09:25 Auction state**，而不是未来预测。
 
 | 项 | P0 候选 | 状态 |
 |---|---|---|
-| history window | 120 valid trading days | CALIBRATION_REQUIRED |
+| history window | 120 valid trading bars（120 个官方交易日/session，非自然日） | CALIBRATION_REQUIRED |
 | positive gap percentile | 90 | CALIBRATION_REQUIRED |
 | negative gap percentile | 10 | CALIBRATION_REQUIRED |
 | amount abnormal percentile | 90 | CALIBRATION_REQUIRED |

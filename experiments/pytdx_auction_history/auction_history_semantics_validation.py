@@ -758,6 +758,21 @@ def compute_lane_b(auction_price_raw, raw_Tm1, raw_T, qfq_Tm1, qfq_T,
     raw_close_Tm1 = float(raw_Tm1["close"])
     qfq_close_Tm1 = float(qfq_Tm1["close"])
     naive_raw_gap = (auction_price_raw / raw_close_Tm1 - 1) if raw_close_Tm1 else None
+    # Round 3B-B HARD GATE: qfq 降级时 pit_gap 不得发布为有效历史缺口。
+    # MDAS QFQ degraded → fail-closed：pit_gap = None，status 显式标记降级，
+    # 不 fallback 到 raw previous close / factor=1 / latest qfq。
+    if mdas_degraded:
+        return {
+            "status": "PIT_ADJUSTMENT_DEGRADED",
+            "naive_raw_gap": naive_raw_gap,
+            "pit_gap": None,
+            "raw_close_Tm1": raw_close_Tm1,
+            "qfq_close_Tm1": qfq_close_Tm1,
+            "adj_factor_hash": adj_factor_hash,
+            "mdas_data_source": mdas_data_source,
+            "mdas_degraded": mdas_degraded,
+            "mdas_degraded_reason": mdas_degraded_reason,
+        }
     pit_gap = (auction_price_raw / qfq_close_Tm1 - 1) if qfq_close_Tm1 else None
     return {
         "status": "COMPUTED",
@@ -1010,8 +1025,8 @@ async def run_corporate_observation(
         obs["lane_b"] = compute_lane_b(
             auction_price, raw_Tm1, open_bar_T, qfq_Tm1,
             get_bar_for_date(qfq_res.bars, trade_date), trade_date,
-            qfq_res.adj_factor_hash, none_res.data_source,
-            none_res.degraded, none_res.degraded_reason)
+            qfq_res.adj_factor_hash, qfq_res.data_source,
+            qfq_res.degraded, qfq_res.degraded_reason)
         # MOD4: 回填 corporate gap 字段（Lane B 可比才填）
         if obs.get("lane_b") and obs["lane_b"].get("status") == "COMPUTED":
             obs["corporate"]["naive_raw_gap"] = obs["lane_b"]["naive_raw_gap"]
@@ -1116,8 +1131,8 @@ async def run_single_observation(
         obs["lane_b"] = compute_lane_b(
             auction_price, raw_Tm1, open_bar_T, qfq_Tm1,
             get_bar_for_date(qfq_res.bars, trade_date), trade_date,
-            qfq_res.adj_factor_hash, none_res.data_source,
-            none_res.degraded, none_res.degraded_reason)
+            qfq_res.adj_factor_hash, qfq_res.data_source,
+            qfq_res.degraded, qfq_res.degraded_reason)
     else:
         obs["lane_a"] = None
         obs["lane_b"] = None
