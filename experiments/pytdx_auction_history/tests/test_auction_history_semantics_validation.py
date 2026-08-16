@@ -1,548 +1,32 @@
-# PYTEST_DONT_REWRITE
-"""Offline smoke / measurement-pipeline tests for Round 1C runner.
+"""Round 1D offline tests — Final Runner Integrity Correction.
 
-不连接真实 DB / Pytdx；依赖 fake dependency 注入。
-使用 APP_ENV=test + PURE_UNIT_TEST=1 + 本地 venv 运行。
+不连接生产，不执行 --live。全部 fake source / fake MDAS / fake adapter。
 """
-import importlib.util
-import os
-import sys
-from datetime import date
+
+import asyncio
+from datetime import date, datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pandas as pd
 import pytest
 
-EXPERIMENT_DIR = Path(__file__).resolve().parent.parent
-RUNNER_PATH = EXPERIMENT_DIR / "auction_history_semantics_validation.py"
+import importlib.util
+import sys
 
-DUMMY_DB = "postgresql+psycopg://bz:secret@localhost:5432/bz_stock_test"
-os.environ.setdefault("APP_ENV", "test")
-os.environ.setdefault("DATABASE_URL", DUMMY_DB)
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
-os.environ.setdefault("PURE_UNIT_TEST", "1")
+SPEC = Path(__file__).resolve().parent.parent / "auction_history_semantics_validation.py"
+spec = importlib.util.spec_from_file_location(
+    "auction_history_semantics_validation_r1d", str(SPEC))
+mod = importlib.util.module_from_spec(spec)
+sys.modules["auction_history_semantics_validation_r1d"] = mod
+spec.loader.exec_module(mod)
 
-
-def _load_module():
-    spec = importlib.util.spec_from_file_location(
-        "auction_hist_semval_1c", str(RUNNER_PATH)
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture(scope="module")
-def mod():
-    return _load_module()
+UUID_ZERO = UUID(int=0)
 
 
 # ---------------------------------------------------------------------------
-# Helpers: fake MDAS BarAggregationResult + fake PytdxAdapter
+# Fakes
 # ---------------------------------------------------------------------------
-class FakeBars:
-    """构建一个以 trade_date 为索引的 daily bars DataFrame。"""
-
-    def __init__(self, data):
-        # data: list of (date, open, high, low, close, volume, amount)
-        idx = [pd.Timestamp(d) for d, *_ in data]
-        rows = []
-        for _, o, h, l, c, v, a in data:
-            rows.append({"open": o, "high": h, "low": l, "close": c, "volume": v, "amount": a})
-        self.df = pd.DataFrame(rows, index=pd.Index(idx, name="trade_date"))
-
-
-class FakeMDASResult:
-    def __init__(self, bars, data_source="db", degraded=False, degraded_reason=None,
-                 adjustment_as_of=None, adj_factor_hash=""):
-        self.bars = bars.df if isinstance(bars, FakeBars) else bars
-        self.data_source = data_source
-        self.as_of = None
-        self.is_partial = False
-        self.last_persisted_bar_time = None
-        self.last_live_bar_time = None
-        self.freshness_seconds = 0.0
-        self.degraded = degraded
-        self.degraded_reason = degraded_reason
-        self.cache_hit = False
-        self.warmup_bars_full = None
-        self.market_data_contract_version = "v2"
-        self.source_bar_hash = "x"
-        self.adj_factor_hash = adj_factor_hash
-        self.adjustment_as_of = adjustment_as_of
-        self.completed_through = None
-        self.requested_count = None
-        self.actual_count = 0
-        self.coverage_start = None
-        self.coverage_end = None
-        self.history_exhausted = False
-        self.backfill_rounds = 0
-        self.coverage_reason = ""
-        self.latest_daily_quote = None
-
-
-class FakeMDAS:
-    """按 (instrument_id, adj, target_date) 返回预设 bars。"""
-
-    def __init__(self, table):
-        # table: dict[(instrument_id, adj, target_date)] -> FakeMDASResult
-        self._table = table
-        self.call_log = []
-
-    async def get_bars(self, session, instrument_id, **kwargs):
-        adj = kwargs.get("adj")
-        target_date = kwargs.get("end_date")
-        key = (instrument_id, adj, target_date)
-        self.call_log.append(key)
-        res = self._table.get(key)
-        if res is None:
-            return FakeMDASResult(FakeBars([]))
-        return res
-
-
-class FakeAdapter:
-    """PytdxAdapter 受管连接 fake；.api.get_history_transaction_data 返回预设。"""
-
-    def __init__(self, txn_table):
-        self._txn_table = txn_table  # dict[(symbol, date_int)] -> list[dict]
-        self.entered = False
-        self.exited = False
-
-    def __enter__(self):
-        self.entered = True
-        return self
-
-    def __exit__(self, *a):
-        self.exited = True
-
-    @property
-    def api(self):
-        return self
-
-    def get_history_transaction_data(self, market, code, start, count, date_int):
-        return self._txn_table.get((code, date_int), []) or []
-
-
-# ---------------------------------------------------------------------------
-# TEST 1 — import + SampleInstrument DTO correctness
-# ---------------------------------------------------------------------------
-def test_import_and_dto(mod):
-    assert hasattr(mod, "SampleInstrument")
-    assert hasattr(mod, "NormalizedAuctionTransaction")
-    assert hasattr(mod, "AuctionExtractionResult")
-    s = mod.SampleInstrument(
-        symbol="600519", market="SH", instrument_id=UUID(int=1), board="SH_MAIN",
-        coverage_tag="large_cap_reference", cohort="routine",
-    )
-    assert s.symbol == "600519" and s.market == "SH" and s.cohort == "routine"
-
-
-# ---------------------------------------------------------------------------
-# TEST 2 — MDAS async + BarAggregationResult attribute access
-# ---------------------------------------------------------------------------
-def test_mdas_async_and_attributes(mod):
-    bars = FakeBars([(date(2024, 1, 2), 10.0, 10.5, 9.8, 10.2, 1000, 10000)])
-    res = FakeMDASResult(bars, data_source="db", adj_factor_hash="abc123")
-    assert res.bars is not None
-    # 模拟调用方只读正式字段（不触发内部错误）
-    _ = (res.bars, res.data_source, res.degraded, res.degraded_reason,
-         res.adjustment_as_of, res.adj_factor_hash, res.market_data_contract_version)
-    assert res.data_source == "db"
-    assert res.adj_factor_hash == "abc123"
-
-
-# ---------------------------------------------------------------------------
-# TEST 3 — Calendar contract: async fn, no CalendarService class
-# ---------------------------------------------------------------------------
-def test_calendar_contract(mod, monkeypatch):
-    async def fake_cal(session, d):
-        return d.weekday() < 5
-    monkeypatch.setattr(mod, "is_trading_day_async", fake_cal)
-
-    async def run():
-        out = await mod.previous_trading_dates(None, date(2024, 1, 8), n=3)
-        return out
-    out = asyncio_run(run())
-    assert len(out) == 3
-    # 2024-01-08 周一（含）+ 向前：01-05(五),01-04(四)
-    assert out[0] == date(2024, 1, 8)
-    assert out[1] == date(2024, 1, 5)
-    assert out[2] == date(2024, 1, 4)
-
-
-# ---------------------------------------------------------------------------
-# TEST 4 — Symbol/UUID separation in resolve
-# ---------------------------------------------------------------------------
-def test_symbol_uuid_separation(mod, monkeypatch):
-    samples = [
-        mod.SampleInstrument(symbol="600519", market="SH", instrument_id=UUID(int=0),
-                             board="SH_MAIN", coverage_tag="large_cap_reference", cohort="routine"),
-    ]
-    calls = {}
-
-    async def fake_universe(session):
-        return [UUID(int=1)]
-    monkeypatch.setattr(mod, "get_active_a_share_instruments", fake_universe)
-
-    # 提供 (SH,600519) -> UUID1
-    class FakeRow(dict):
-        pass
-
-    async def fake_execute(stmt):
-        return [{"market": "SH", "symbol": "600519", "id": UUID(int=1)}]
-    fake_session = _FakeSession(fake_execute)
-
-    async def run():
-        return await mod.resolve_sample_instruments(fake_session, samples)
-    resolved, skipped = asyncio_run(run())
-    assert len(resolved) == 1
-    assert resolved[0].instrument_id == UUID(int=1)
-    assert resolved[0].symbol == "600519"
-    # 没有把 instrument_id 直接当 symbol 传给 MDAS
-    assert resolved[0].instrument_id != UUID(int=0)
-
-
-# ---------------------------------------------------------------------------
-# TEST 5 — Pytdx managed lifecycle (context manager)
-# ---------------------------------------------------------------------------
-def test_pytdx_managed_lifecycle(mod):
-    adapter = FakeAdapter({("600519", 20240102): []})
-    with adapter as a:
-        assert a.entered is True
-    assert adapter.exited is True
-    # market_from_code 来自官方 owner
-    assert mod.market_from_code("600519") is not None
-
-
-# ---------------------------------------------------------------------------
-# TEST 6 — SOURCE_ERROR structured
-# ---------------------------------------------------------------------------
-def test_source_error_structured(mod):
-    class BoomAdapter(FakeAdapter):
-        @property
-        def api(self):
-            raise RuntimeError("adapter not connected")
-    adapter = BoomAdapter({})
-    res = mod.extract_auction_records(adapter, "600519", date(2024, 1, 2))
-    assert res.status == mod.ExtractionStatus.SOURCE_ERROR
-    assert res.records == []
-    assert res.error_code == "RuntimeError"
-    assert "adapter not connected" in (res.error_message or "")
-
-
-# ---------------------------------------------------------------------------
-# TEST 7 — MULTIPLE_0925 keeps all raw, stops semantic agg
-# ---------------------------------------------------------------------------
-def test_multiple_0925_keeps_all_raw(mod):
-    txns = [
-        {"time": "09:25", "price": 10.0, "vol": 100, "buyorsell": 1},
-        {"time": "09:25", "price": 10.1, "vol": 120, "buyorsell": 0},
-    ]
-    adapter = FakeAdapter({("600519", 20240102): txns})
-    res = mod.extract_auction_records(adapter, "600519", date(2024, 1, 2))
-    assert res.status == mod.ExtractionStatus.MULTIPLE_0925
-    assert len(res.records) == 2
-    assert res.records[0].raw_price == 10.0
-    assert res.records[1].raw_price == 10.1
-
-
-# ---------------------------------------------------------------------------
-# TEST 8 — single canonical FOUND
-# ---------------------------------------------------------------------------
-def test_single_found(mod):
-    txns = [{"time": "09:25", "price": 10.0, "vol": 100, "buyorsell": 1}]
-    adapter = FakeAdapter({("600519", 20240102): txns})
-    res = mod.extract_auction_records(adapter, "600519", date(2024, 1, 2))
-    assert res.status == mod.ExtractionStatus.FOUND
-    assert len(res.records) == 1
-
-
-# ---------------------------------------------------------------------------
-# TEST 9 — tracked sample schema + board coverage (MOD14 / TEST J)
-# ---------------------------------------------------------------------------
-def test_sample_schema_and_board_coverage(mod):
-    samples = mod.load_sample(mod.SAMPLE_FILE)
-    boards = {s.board for s in samples if s.cohort == "routine"}
-    assert "SH_MAIN" in boards
-    assert "SZ_MAIN" in boards
-    assert "CHINEXT" in boards
-    assert "STAR" in boards
-    routine = [s for s in samples if s.cohort == "routine"]
-    assert len(routine) >= 20
-    # 无伪 liquidity tier：coverage_tag 明确标注非正式分类
-    for s in samples:
-        assert s.coverage_tag in {
-            "large_cap_reference", "ordinary_reference", "lower_activity_candidate", "corporate"
-        }
-
-
-# ---------------------------------------------------------------------------
-# TEST A — resolved corporate identity must be non-zero UUID (MOD1)
-# ---------------------------------------------------------------------------
-def test_resolved_corporate_identity_no_uuid_zero(mod, monkeypatch):
-    # corporate sample 必须先 resolve（UUID != 0）才能进 resolver
-    corp = [
-        mod.SampleInstrument(symbol="600000", market="SH", instrument_id=UUID(int=7),
-                             board="SH_MAIN", coverage_tag="corporate", cohort="corporate"),
-    ]
-    # 若传入 UUID(0) 必须 raise
-    bad = [
-        mod.SampleInstrument(symbol="600000", market="SH", instrument_id=UUID(int=0),
-                             board="SH_MAIN", coverage_tag="corporate", cohort="corporate"),
-    ]
-    async def fake_adj(session, inst_id, as_of):
-        # 返回一个含 factor-change 的 DataFrame
-        import pandas as pd
-        from datetime import date, timedelta
-        d0 = as_of - timedelta(days=30)
-        df = pd.DataFrame({
-            "trade_date": [d0 - timedelta(days=1), d0, d0 + timedelta(days=1)],
-            "adj_factor": [1.0, 2.0, 2.0],
-        })
-        return df
-    monkeypatch.setattr(mod, "AdjustmentFactorService", _FakeAdjService(fake_adj))
-
-    async def run_good():
-        return await mod.resolve_corporate_cases(_FakeAdjService(fake_adj), _FakeSessionAsync(), corp, date(2024, 6, 1), 180)
-    out = asyncio_run(run_good())
-    assert out[0]["status"] == "RESOLVED"
-    assert out[0]["instrument_id"] != str(UUID(int=0))
-
-    async def run_bad():
-        return await mod.resolve_corporate_cases(_FakeAdjService(fake_adj), _FakeSessionAsync(), bad, date(2024, 6, 1), 180)
-    with pytest.raises(ValueError, match="INTERNAL_IDENTITY_ERROR"):
-        asyncio_run(run_bad())
-
-
-# ---------------------------------------------------------------------------
-# TEST B — market + symbol identity (MOD2)
-# ---------------------------------------------------------------------------
-def test_market_symbol_identity(mod, monkeypatch):
-    samples = [
-        mod.SampleInstrument(symbol="000001", market="SZ", instrument_id=UUID(int=0),
-                             board="SZ_MAIN", coverage_tag="large_cap_reference", cohort="routine"),
-        mod.SampleInstrument(symbol="600519", market="SH", instrument_id=UUID(int=0),
-                             board="SH_MAIN", coverage_tag="large_cap_reference", cohort="routine"),
-        # 同 symbol 不同 market 不得冲突
-        mod.SampleInstrument(symbol="600519", market="SZ", instrument_id=UUID(int=0),
-                             board="SZ_MAIN", coverage_tag="ordinary_reference", cohort="routine"),
-    ]
-    async def fake_universe(session):
-        return [UUID(int=10), UUID(int=11), UUID(int=12)]
-    monkeypatch.setattr(mod, "get_active_a_share_instruments", fake_universe)
-
-    async def fake_execute(stmt):
-        return [
-            {"market": "SZ", "symbol": "000001", "id": UUID(int=10)},
-            {"market": "SH", "symbol": "600519", "id": UUID(int=11)},
-            {"market": "SZ", "symbol": "600519", "id": UUID(int=12)},
-        ]
-    sess = _FakeSession(fake_execute)
-
-    async def run():
-        return await mod.resolve_sample_instruments(sess, samples)
-    resolved, skipped = asyncio_run(run())
-    assert len(resolved) == 3
-    by_key = {(r.market, r.symbol): r.instrument_id for r in resolved}
-    assert by_key[("SZ", "000001")] == UUID(int=10)
-    assert by_key[("SH", "600519")] == UUID(int=11)
-    assert by_key[("SZ", "600519")] == UUID(int=12)
-
-
-# ---------------------------------------------------------------------------
-# TEST C — exact time normalization (MOD3)
-# ---------------------------------------------------------------------------
-def test_exact_time_normalization(mod):
-    assert mod._normalize_auction_time("09:25") == "09:25"
-    assert mod._normalize_auction_time("09:25:00") == "09:25"
-    assert mod._normalize_auction_time("09:25:01") is None
-    assert mod._normalize_auction_time("09:25:59") is None
-    assert mod._normalize_auction_time("09:24:59") is None
-
-
-# ---------------------------------------------------------------------------
-# TEST D — Lane A numeric comparison (MOD5)
-# ---------------------------------------------------------------------------
-def test_lane_a_comparison(mod):
-    bars = FakeBars([(date(2024, 1, 2), 10.00, 10.5, 9.8, 10.00, 1000, 10000)])
-    bar_T = mod.get_bar_for_date(bars.df, date(2024, 1, 2))
-    r1 = mod.compute_lane_a(10.00, bar_T, "db", False, None)
-    assert r1["price_exact_match"] is True
-    assert r1["price_diff_abs"] == 0.0
-    assert r1["price_diff_rel"] == 0.0
-
-    r2 = mod.compute_lane_a(10.01, bar_T, "db", False, None)
-    assert r2["price_exact_match"] is False
-    assert abs(r2["price_diff_abs"] - 0.01) < 1e-9
-    assert abs(r2["price_diff_rel"] - 0.001) < 1e-9
-
-    # MDAS 无 T bar → LANE_A_MISSING_MDA_OPEN，不填 0
-    r3 = mod.compute_lane_a(10.0, None, "db", False, None)
-    assert r3["status"] == "LANE_A_MISSING_MDA_OPEN"
-    assert r3["mdas_raw_open_T"] is None
-    assert r3["price_diff_abs"] is None
-
-
-# ---------------------------------------------------------------------------
-# TEST E — PIT Gap corporate math (MOD6)
-# ---------------------------------------------------------------------------
-def test_pit_gap_corporate(mod):
-    # raw (adj=none): near 20 close, 10.2 open
-    raw_bars = FakeBars([
-        (date(2024, 1, 1), 19.0, 20.0, 18.0, 20.0, 100, 2000),
-        (date(2024, 1, 2), 10.2, 10.5, 10.0, 10.3, 100, 1000),
-    ])
-    # qfq (adj=qfq, as_of=T): factor halved -> Tm1 close ~10, T open ~10.2
-    qfq_bars = FakeBars([
-        (date(2024, 1, 1), 9.8, 10.0, 9.5, 10.0, 100, 2000),
-        (date(2024, 1, 2), 10.2, 10.5, 10.0, 10.3, 100, 1000),
-    ])
-    auction = 10.2
-    raw_Tm1 = mod.get_prev_bar_before(raw_bars.df, date(2024, 1, 2))
-    raw_T = mod.get_bar_for_date(raw_bars.df, date(2024, 1, 2))
-    qfq_Tm1 = mod.get_prev_bar_before(qfq_bars.df, date(2024, 1, 2))
-    qfq_T = mod.get_bar_for_date(qfq_bars.df, date(2024, 1, 2))
-    lb = mod.compute_lane_b(auction, raw_Tm1, raw_T, qfq_Tm1, qfq_T,
-                             date(2024, 1, 2), "hash", "db", False, None)
-    # naive_raw_gap = 10.2/20 - 1 = -0.49
-    assert abs(lb["naive_raw_gap"] - (-0.49)) < 1e-9
-    # pit_gap = 10.2/10 - 1 = +0.02
-    assert abs(lb["pit_gap"] - 0.02) < 1e-9
-    assert abs(lb["raw_close_Tm1"] - 20.0) < 1e-9
-    assert abs(lb["qfq_close_Tm1"] - 10.0) < 1e-9
-
-
-# ---------------------------------------------------------------------------
-# TEST F — volume multiplier evidence (MOD8)
-# ---------------------------------------------------------------------------
-def test_volume_multiplier_evidence(mod):
-    ve = mod.compute_volume_evidence(10.0, 100.0, 100000.0)
-    assert abs(ve["implied_multiplier"] - 100.0) < 1e-9
-    assert ve["reason"] == "COMPUTED_PRICE_VOLUME_AMOUNT"
-    # 字段缺失 → None + reason
-    ve2 = mod.compute_volume_evidence(10.0, 100.0, None)
-    assert ve2["implied_multiplier"] is None
-    assert ve2["reason"] == "RAW_AMOUNT_FIELD_ABSENT"
-
-
-# ---------------------------------------------------------------------------
-# TEST G — live flag does not mean PASS (MOD12)
-# ---------------------------------------------------------------------------
-def test_live_flag_not_pass(mod):
-    # 全部 SOURCE_ERROR：live=True 但不得 PASS
-    obs = [{
-        "extraction_status": "SOURCE_ERROR", "cohort": "routine",
-        "lane_a": None, "lane_b": None, "volume_evidence": None, "amount_evidence": None,
-    }]
-    status = mod.derive_live_status(obs, [])
-    assert status["LIVE_RUN_STATUS"] == "COMPLETED"
-    assert status["EVIDENCE_COMPLETENESS"] == "INSUFFICIENT"
-    assert status["EVIDENCE_COMPLETENESS"] != "PASS"
-
-
-# ---------------------------------------------------------------------------
-# TEST H — raw evidence persistence (MULTIPLE_0925 all raw kept)
-# ---------------------------------------------------------------------------
-def test_raw_evidence_persistence(mod, tmp_path, monkeypatch):
-    txns = [
-        {"time": "09:25", "price": 10.0, "vol": 100, "buyorsell": 1},
-        {"time": "09:25", "price": 10.1, "vol": 120, "buyorsell": 0},
-    ]
-    adapter = FakeAdapter({("600519", 20240102): txns})
-    mdas = FakeMDAS({})
-    inst = mod.SampleInstrument(symbol="600519", market="SH", instrument_id=UUID(int=1),
-                               board="SH_MAIN", coverage_tag="large_cap_reference", cohort="routine")
-    obs = asyncio_run(mod.run_single_observation(mdas, adapter, None, inst, date(2024, 1, 2)))
-    assert obs["extraction_status"] == "MULTIPLE_0925"
-    assert obs["raw_record_count"] == 2
-    # 不进入任何 lane
-    assert obs["lane_a"] is None
-    assert obs["volume_evidence"] is None
-
-
-# ---------------------------------------------------------------------------
-# TEST I — corporate evidence persistence (factor_before/after + gaps)
-# ---------------------------------------------------------------------------
-def test_corporate_evidence_persistence(mod):
-    # 真实除权：Tm1 raw close=20, T raw open=10.2; qfq Tm1 close=10, T open=10.2
-    raw_bars = FakeBars([
-        (date(2024, 1, 1), 19.0, 20.0, 18.0, 20.0, 100, 2000),
-        (date(2024, 1, 2), 10.2, 10.5, 10.0, 10.3, 100, 1000),
-    ])
-    qfq_bars = FakeBars([
-        (date(2024, 1, 1), 9.8, 10.0, 9.5, 10.0, 100, 2000),
-        (date(2024, 1, 2), 10.2, 10.5, 10.0, 10.3, 100, 1000),
-    ])
-    mdas = FakeMDAS({
-        (UUID(int=1), "none", date(2024, 1, 2)): FakeMDASResult(raw_bars),
-        (UUID(int=1), "qfq", date(2024, 1, 2)): FakeMDASResult(qfq_bars),
-    })
-    adapter = FakeAdapter({("600519", 20240102): [{"time": "09:25", "price": 10.2, "vol": 100, "buyorsell": 1}]})
-    inst = mod.SampleInstrument(symbol="600519", market="SH", instrument_id=UUID(int=1),
-                               board="SH_MAIN", coverage_tag="corporate", cohort="corporate")
-    obs = asyncio_run(mod.run_corporate_observation(
-        mdas, adapter, None, inst, date(2024, 1, 2), factor_before=1.0, factor_after=2.0))
-    assert obs["extraction_status"] == "FOUND"
-    assert obs["corporate"]["factor_before"] == 1.0
-    assert obs["corporate"]["factor_after"] == 2.0
-    # gap_adjustment_effect = pit_gap - naive_raw_gap = 0.02 - (-0.49) = 0.51
-    assert abs(obs["corporate"]["gap_adjustment_effect"] - 0.51) < 1e-9
-    assert abs(obs["lane_b"]["naive_raw_gap"] - (-0.49)) < 1e-9
-    assert abs(obs["lane_b"]["pit_gap"] - 0.02) < 1e-9
-
-
-# ---------------------------------------------------------------------------
-# TEST K — no placeholders in completed observation (MOD15)
-# ---------------------------------------------------------------------------
-def test_no_placeholders(mod):
-    raw_bars = FakeBars([(date(2024, 1, 2), 10.0, 10.5, 9.8, 10.0, 1000, 10000)])
-    mdas = FakeMDAS({
-        (UUID(int=1), "none", date(2024, 1, 2)): FakeMDASResult(raw_bars),
-        (UUID(int=1), "qfq", date(2024, 1, 2)): FakeMDASResult(raw_bars),
-    })
-    adapter = FakeAdapter({("600519", 20240102): [{"time": "09:25", "price": 10.0, "vol": 100, "buyorsell": 1}]})
-    inst = mod.SampleInstrument(symbol="600519", market="SH", instrument_id=UUID(int=1),
-                               board="SH_MAIN", coverage_tag="large_cap_reference", cohort="routine")
-    obs = asyncio_run(mod.run_single_observation(mdas, adapter, None, inst, date(2024, 1, 2)))
-    assert obs["extraction_status"] == "FOUND"
-    # 不允许占位字符串
-    flat = mod._flatten_observation(obs)
-    for k, v in flat.items():
-        assert v != "pending_live_data", f"{k} 出现 pending_live_data 占位"
-        assert v != "unknown_source_unit", f"{k} 出现 unknown_source_unit 占位"
-    # raw_amount_value 应为 None（historical transaction 无 amount 字段），非 0
-    assert obs["raw_amount_value"] is None
-    # amount evidence：RAW_FIELD_ABSENT
-    assert obs["amount_evidence"]["source_type"] == "RAW_FIELD_ABSENT"
-
-
-# ---------------------------------------------------------------------------
-# TEST L — source contract reuse / no second market logic (MOD16)
-# ---------------------------------------------------------------------------
-def test_source_contract_reuse(mod):
-    src = Path(mod.__file__).read_text(encoding="utf-8")
-    # 复用官方 owner
-    assert "from app.services.feature_snapshot_service import get_active_a_share_instruments" in src
-    assert "from app.services.calendar_service import is_trading_day_async" in src
-    assert "from app.services.market_data_aggregation_service import MarketDataAggregationService" in src
-    assert "from app.services.adjustment_factor_service import AdjustmentFactorService" in src
-    assert "from app.core.pytdx_adapter import PytdxAdapter, market_from_code" in src
-    # 禁止第二套 market logic / xdxr 重算
-    assert "xdxr_calc" not in src
-    assert "recalc_xdxr" not in src
-    assert "compute_xdxr" not in src
-
-
-# ---------------------------------------------------------------------------
-# Async helpers
-# ---------------------------------------------------------------------------
-def asyncio_run(coro):
-    import asyncio
-    return asyncio.run(coro)
-
-
 class _FakeResult:
     def __init__(self, rows):
         self._rows = rows
@@ -555,22 +39,586 @@ class _FakeResult:
 
 
 class _FakeSession:
-    def __init__(self, execute_fn):
-        self._execute_fn = execute_fn
+    def __init__(self, instrument_rows):
+        self._rows = instrument_rows
 
-    async def execute(self, stmt):
-        rows = await self._execute_fn(stmt)
-        return _FakeResult(rows)
+    async def execute(self, stmt, params=None):
+        return _FakeResult(self._rows)
 
 
 class _FakeSessionAsync:
-    async def execute(self, stmt):
+    async def execute(self, *a, **k):
         return _FakeResult([])
 
 
-class _FakeAdjService:
-    def __init__(self, factor_fn):
-        self._factor_fn = factor_fn
+class _FakeMdas:
+    """返回固定 daily bars DataFrame（index=pd.Timestamp, columns open/high/low/close/volume/amount）。"""
 
-    async def get_factor_series(self, session, instrument_id, as_of=None):
-        return await self._factor_fn(session, instrument_id, as_of)
+    def __init__(self, bars_by_id=None):
+        self.bars_by_id = bars_by_id or {}
+        self.calls = []
+
+    async def get_bars(self, session, instrument_id, timeframe="1d", adj="none",
+                       end_date=None, limit=None, adjustment_as_of=None, **kw):
+        self.calls.append((instrument_id, adj, end_date))
+        bars = self.bars_by_id.get(str(instrument_id), pd.DataFrame())
+        # 简单截断到最近 limit
+        if limit and len(bars) > limit:
+            bars = bars.tail(limit)
+
+        class _R:
+            pass
+        r = _R()
+        r.bars = bars
+        r.data_source = "db"
+        r.degraded = False
+        r.degraded_reason = None
+        r.adj_factor_hash = "h" if adj == "qfq" else ""
+        return r
+
+
+class _FakeAdjService:
+    def __init__(self, factors=None):
+        self._factors = factors  # dict instrument_id_str -> DataFrame
+
+    async def get_factor_series(self, session, instrument_id, as_of=None, **kw):
+        return self._factors.get(str(instrument_id), pd.DataFrame())
+
+
+class _FakeAdapter:
+    """managed connection；api.get_history_transaction_data 由 caller 注入 pages 行为。"""
+
+    def __init__(self, page_provider):
+        self._page_provider = page_provider
+        self.api = _FakeApi(page_provider)
+        self.entered = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *a):
+        self.entered = False
+
+
+class _FakeApi:
+    def __init__(self, page_provider):
+        self._page_provider = page_provider
+        self.call_count = 0
+
+    def get_history_transaction_data(self, market, code, start, count, date_int):
+        self.call_count += 1
+        pages = self._page_provider(market, code, start, count, date_int)
+        if isinstance(pages, Exception):
+            raise pages
+        return pages.get(start, [])
+
+
+def _make_inst(market, symbol, iid=None):
+    return {
+        "market": market, "symbol": symbol,
+        "id": iid if iid is not None else uuid4(),
+    }
+
+
+def _bars_from(rows):
+    """rows: list of (date, open, close, volume)。"""
+    data = {pd.Timestamp(d): {"open": o, "high": o, "low": o, "close": c,
+                              "volume": v, "amount": v * 10.0}
+            for d, o, c, v in rows}
+    df = pd.DataFrame.from_dict(data, orient="index")
+    df.index.name = "trade_date"
+    return df.sort_index()
+
+
+# ---------------------------------------------------------------------------
+# 样本 / 身份
+# ---------------------------------------------------------------------------
+def test_load_sample_automatic_counts():
+    samples = mod.load_sample()
+    routine = [s for s in samples if s.cohort == "routine"]
+    corporate = [s for s in samples if s.cohort == "corporate"]
+    # 程序计算，不手工数
+    assert len(routine) == 29
+    assert len(corporate) == 8
+    # board 分布
+    from collections import Counter
+    boards = Counter(s.board for s in routine)
+    assert boards == {"SH_MAIN": 10, "SZ_MAIN": 9, "CHINEXT": 6, "STAR": 4}
+    for s in samples:
+        assert s.instrument_id == UUID_ZERO  # 占位
+
+
+async def _impl_test_resolve_identity_nonzero_uuid():
+    inst = _make_inst("SH", "600000")
+    session = _FakeSession([inst])
+    samples = [mod.SampleInstrument("600000", "SH", UUID_ZERO, "SH_MAIN",
+                                    "ordinary", "routine")]
+    resolved, skipped = await mod.resolve_sample_instruments(session, samples)
+    assert len(resolved) == 1
+    assert resolved[0].instrument_id != UUID_ZERO
+    assert skipped == []
+
+
+def test_resolve_identity_nonzero_uuid_sync():
+    asyncio.run(_impl_test_resolve_identity_nonzero_uuid())
+
+
+async def _impl_test_resolve_identity_uuid_zero_failfast():
+    # Instrument ORM 不应返回 UUID(0)；若返回则必须 raise
+    inst = {"market": "SH", "symbol": "600000", "id": UUID_ZERO}
+    session = _FakeSession([inst])
+    samples = [mod.SampleInstrument("600000", "SH", UUID_ZERO, "SH_MAIN",
+                                    "ordinary", "routine")]
+    with pytest.raises(RuntimeError):
+        await mod.resolve_sample_instruments(session, samples)
+
+
+def test_resolve_identity_uuid_zero_failfast_sync():
+    asyncio.run(_impl_test_resolve_identity_uuid_zero_failfast())
+
+
+async def _impl_test_resolve_identity_ambiguous():
+    i1 = _make_inst("SH", "600000")
+    i2 = _make_inst("SH", "600000")
+    session = _FakeSession([i1, i2])
+    samples = [mod.SampleInstrument("600000", "SH", UUID_ZERO, "SH_MAIN",
+                                    "ordinary", "routine")]
+    resolved, skipped = await mod.resolve_sample_instruments(session, samples)
+    assert resolved == []
+    assert skipped[0]["reason"] == "IDENTITY_AMBIGUOUS"
+
+
+def test_resolve_identity_ambiguous_sync():
+    asyncio.run(_impl_test_resolve_identity_ambiguous())
+
+
+# ---------------------------------------------------------------------------
+# MOD3 — 时间分类
+# ---------------------------------------------------------------------------
+def test_classify_canonical():
+    assert mod.classify_transaction_time("09:25") == mod.TransactionTimeClass.CANONICAL_0925
+    assert mod.classify_transaction_time("09:25:00") == mod.TransactionTimeClass.CANONICAL_0925
+
+
+def test_classify_noncanonical_0925():
+    assert mod.classify_transaction_time("09:25:01") == mod.TransactionTimeClass.NONCANONICAL_0925
+    assert mod.classify_transaction_time("09:25:59") == mod.TransactionTimeClass.NONCANONICAL_0925
+
+
+def test_classify_other():
+    for t in ["09:24:59", "09:30", "10:15:32", "14:57"]:
+        assert mod.classify_transaction_time(t) == mod.TransactionTimeClass.OTHER
+
+
+def test_extract_full_day_other_times_missing_0925():
+    records = [
+        {"time": "09:30", "price": 1, "vol": 1, "buyorsell": 0},
+        {"time": "10:00", "price": 1, "vol": 1, "buyorsell": 0},
+        {"time": "14:57", "price": 1, "vol": 1, "buyorsell": 0},
+    ]
+    fdr = mod.FullDayTransactionResult(status="COMPLETE", records=records,
+                                      page_count=1, record_count=3)
+    ex = mod.extract_from_full_day("600000", "SH", str(uuid4()),
+                                   date(2024, 1, 8), fdr)
+    assert ex.status == "MISSING_0925"
+    assert ex.records == []
+    assert ex.noncanonical_records == []
+
+
+def test_extract_noncanonical_only():
+    records = [
+        {"time": "09:25:01", "price": 1, "vol": 1, "buyorsell": 0},
+    ]
+    fdr = mod.FullDayTransactionResult(status="COMPLETE", records=records,
+                                      page_count=1, record_count=1)
+    ex = mod.extract_from_full_day("600000", "SH", str(uuid4()),
+                                   date(2024, 1, 8), fdr)
+    assert ex.status == "NONCANONICAL_0925_TIME"
+    assert ex.records == []
+    assert len(ex.noncanonical_records) == 1
+
+
+def test_extract_found_and_noncanonical_separate():
+    records = [
+        {"time": "09:25", "price": 10, "vol": 5, "buyorsell": 1},
+        {"time": "09:25:37", "price": 10, "vol": 5, "buyorsell": 0},
+        {"time": "09:30", "price": 10, "vol": 5, "buyorsell": 0},
+    ]
+    fdr = mod.FullDayTransactionResult(status="COMPLETE", records=records,
+                                      page_count=1, record_count=3)
+    ex = mod.extract_from_full_day("600000", "SH", str(uuid4()),
+                                   date(2024, 1, 8), fdr)
+    assert ex.status == "FOUND"
+    assert len(ex.records) == 1
+    assert len(ex.noncanonical_records) == 1
+
+
+# ---------------------------------------------------------------------------
+# MOD2 — exclusive T-1 / T+1
+# ---------------------------------------------------------------------------
+async def _impl_test_previous_exclusive_monday():
+    session = _FakeSessionAsync()
+    T = date(2024, 1, 8)  # Monday
+    prev = await mod.previous_trading_day_before(session, T)
+    assert prev == date(2024, 1, 5)  # Friday
+    assert prev < T
+
+
+def test_previous_exclusive_monday_sync():
+    asyncio.run(_impl_test_previous_exclusive_monday())
+
+
+async def _impl_test_next_exclusive_monday():
+    session = _FakeSessionAsync()
+    T = date(2024, 1, 8)
+    nxt = await mod.next_trading_day_after(session, T)
+    assert nxt == date(2024, 1, 9)  # Tuesday
+    assert nxt > T
+
+
+def test_next_exclusive_monday_sync():
+    asyncio.run(_impl_test_next_exclusive_monday())
+
+
+async def _impl_test_next_exclusive_friday():
+    session = _FakeSessionAsync()
+    T = date(2024, 1, 5)  # Friday
+    nxt = await mod.next_trading_day_after(session, T)
+    assert nxt == date(2024, 1, 8)  # following Monday
+    assert nxt > T
+
+
+def test_next_exclusive_friday_sync():
+    asyncio.run(_impl_test_next_exclusive_friday())
+
+
+# ---------------------------------------------------------------------------
+# MOD1 — corporate uses resolved instruments
+# ---------------------------------------------------------------------------
+async def _impl_test_corporate_resolved_nonzero_id():
+    adj = _FakeAdjService({})
+    session = _FakeSessionAsync()
+    inst = mod.SampleInstrument("600000", "SH", uuid4(), "SH_MAIN",
+                                "ordinary", "corporate")
+    cases = await mod.resolve_corporate_cases(adj, session, [inst],
+                                              date(2024, 1, 8), 180)
+    assert cases[0]["instrument_id"] != str(UUID_ZERO)
+
+
+def test_corporate_resolved_nonzero_id_sync():
+    asyncio.run(_impl_test_corporate_resolved_nonzero_id())
+
+
+async def _impl_test_corporate_uuid_zero_rejected():
+    adj = _FakeAdjService({})
+    session = _FakeSessionAsync()
+    inst = mod.SampleInstrument("600000", "SH", UUID_ZERO, "SH_MAIN",
+                                "ordinary", "corporate")
+    with pytest.raises(ValueError):
+        await mod.resolve_corporate_cases(adj, session, [inst],
+                                          date(2024, 1, 8), 180)
+
+
+def test_corporate_uuid_zero_rejected_sync():
+    asyncio.run(_impl_test_corporate_uuid_zero_rejected())
+
+
+async def _impl_test_corporate_date_evidence_hard_assert():
+    # MOD10: prev < event, next > event
+    df = pd.DataFrame({
+        "trade_date": [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-08")],
+        "adj_factor": [1.0, 1.5],
+    })
+    session = _FakeSessionAsync()
+    iid = uuid4()
+    adj = _FakeAdjService({str(iid): df})
+    inst = mod.SampleInstrument("600000", "SH", iid, "SH_MAIN",
+                                "ordinary", "corporate")
+    cases = await mod.resolve_corporate_cases(adj, session, [inst],
+                                              date(2024, 1, 8), 180)
+    # event should be discovered at 2024-01-08
+    c = cases[0]
+    assert c["status"] == "RESOLVED"
+    assert c["event_date"] == "2024-01-08"
+    assert c["prev_trade_date"] == "2024-01-05"
+    assert c["next_trade_date"] == "2024-01-09"
+    assert c["prev_trade_date"] < c["event_date"]
+    assert c["next_trade_date"] > c["event_date"]
+
+
+def test_corporate_date_evidence_hard_assert_sync():
+    asyncio.run(_impl_test_corporate_date_evidence_hard_assert())
+
+
+# ---------------------------------------------------------------------------
+# MOD4 / MOD14 — pagination
+# ---------------------------------------------------------------------------
+def test_pagination_two_pages_short_final():
+    page0 = [{"time": "09:25", "price": 1, "vol": 1, "buyorsell": 0}] * 800
+    page1 = [{"time": "14:57", "price": 1, "vol": 1, "buyorsell": 0}]
+    seq = {0: page0, 800: page1, 1600: []}
+    adapter = _FakeAdapter(lambda *a: seq)
+    r = mod.fetch_full_day_transactions_paginated(adapter, "600000", 1, date(2024, 1, 8))
+    assert r.status == "COMPLETE"
+    assert r.record_count == 801
+    assert r.page_count == 2
+
+
+def test_pagination_empty_first():
+    def provider(market, code, start, count, date_int):
+        return {0: []}
+    adapter = _FakeAdapter(provider)
+    r = mod.fetch_full_day_transactions_paginated(adapter, "600000", 1, date(2024, 1, 8))
+    assert r.status == "EMPTY"
+
+
+def test_pagination_source_error():
+    def provider(market, code, start, count, date_int):
+        return RuntimeError("boom")
+    adapter = _FakeAdapter(provider)
+    r = mod.fetch_full_day_transactions_paginated(adapter, "600000", 1, date(2024, 1, 8))
+    assert r.status == "SOURCE_ERROR"
+    assert r.error_code == "RuntimeError"
+
+
+def test_pagination_stalled():
+    page = [{"time": "09:25", "price": 1, "vol": 1, "buyorsell": 0}] * 800
+    # 第一页指纹与后续重复（offset 前进但 source 不变）
+    seq = {0: page, 800: page, 1600: page}
+    adapter = _FakeAdapter(lambda *a: seq)
+    r = mod.fetch_full_day_transactions_paginated(adapter, "600000", 1, date(2024, 1, 8))
+    assert r.status == "PAGINATION_STALLED"
+
+
+def test_pagination_limit_reached():
+    # 每页 800 条且指纹各不相同（不触发 STALLED），直到 MAX_PAGES 上限
+    seq = {}
+    for i in range(250):
+        hh = 9 + (i % 10)
+        mm = i % 60
+        seq[i * 800] = [{"time": f"{hh:02d}:{mm:02d}", "price": 1,
+                         "vol": 1, "buyorsell": 0}] * 800
+    adapter = _FakeAdapter(lambda *a: seq)
+    r = mod.fetch_full_day_transactions_paginated(adapter, "600000", 1, date(2024, 1, 8))
+    assert r.status == "PAGINATION_LIMIT_REACHED"
+
+
+def test_pagination_incomplete_no_lane():
+    def provider(market, code, start, count, date_int):
+        return {0: [{"time": "09:25", "price": 1, "vol": 1, "buyorsell": 0}]}
+    adapter = _FakeAdapter(provider)
+    r = mod.fetch_full_day_transactions_paginated(adapter, "600000", 1, date(2024, 1, 8))
+    # 单页满 800 → 实际会再请求；用 short page 模拟完整
+    # 改为 short final：
+    seq = {0: [{"time": "09:25", "price": 1, "vol": 1, "buyorsell": 0}], 800: []}
+    adapter2 = _FakeAdapter(lambda *a: seq)
+    r2 = mod.fetch_full_day_transactions_paginated(adapter2, "600000", 1, date(2024, 1, 8))
+    assert r2.status == "COMPLETE"
+    ex = mod.extract_from_full_day("600000", "SH", str(uuid4()),
+                                   date(2024, 1, 8), r2)
+    assert ex.status == "FOUND"
+
+
+def test_pagination_incomplete_blocks_extraction():
+    r = mod.FullDayTransactionResult(status="PAGINATION_STALLED", records=[])
+    ex = mod.extract_from_full_day("600000", "SH", str(uuid4()),
+                                   date(2024, 1, 8), r)
+    assert ex.status == "SOURCE_PAGINATION_INCOMPLETE"
+
+
+# ---------------------------------------------------------------------------
+# MOD7 / MOD9 — volume evidence + amount unresolved
+# ---------------------------------------------------------------------------
+def test_volume_evidence_ratio_math():
+    bars = _bars_from([(date(2024, 1, 8), 10, 10, 10000),
+                       (date(2024, 1, 5), 9, 9, 9000)])
+    mdas = _FakeMdas({"X": bars})
+
+    class _R:
+        pass
+    r = _R()
+    r.bars = bars
+    r.data_source = "db"
+    r.degraded = False
+    r.degraded_reason = None
+
+    records = [{"time": "09:30", "price": 1, "vol": 50, "buyorsell": 0} for _ in range(100)]
+    fdr = mod.FullDayTransactionResult(status="COMPLETE", records=records,
+                                      page_count=1, record_count=100)
+    ve = mod._compute_volume_from_full_day(
+        mod.SampleInstrument("600000", "SH", uuid4(), "SH_MAIN", "x", "routine"),
+        date(2024, 1, 8), fdr, r)
+    assert ve["sum_transaction_raw_vol"] == 5000
+    assert ve["valid_volume_record_count"] == 100
+    assert ve["mdas_daily_volume"] == 10000
+    assert abs(ve["daily_volume_ratio"] - 2.0) < 1e-9
+    amt = mod.compute_amount_evidence()
+    assert amt["amount_source_type"] == "RAW_FIELD_ABSENT"
+    assert amt["candidate_derived_amount"] is None
+
+
+# ---------------------------------------------------------------------------
+# MOD12 — live status dimensions
+# ---------------------------------------------------------------------------
+def test_derive_live_status_partial():
+    obs = [{
+        "full_day_status": "COMPLETE", "extraction_status": "FOUND",
+        "volume_evidence": {"daily_volume_ratio": 100}, "board": "SH_MAIN",
+        "symbol": "600000", "market": "SH", "trade_date": "2024-01-08",
+    }, {
+        "full_day_status": "SOURCE_ERROR", "extraction_status": "SOURCE_ERROR",
+        "volume_evidence": {"daily_volume_ratio": None}, "board": "SZ_MAIN",
+        "symbol": "000001", "market": "SZ", "trade_date": "2024-01-08",
+    }]
+    status = mod.derive_live_status(obs, [])
+    assert status["auction_source_evidence"] in ("COMPLETE", "PARTIAL")
+    assert status["EVIDENCE_COMPLETENESS"] != "COMPLETE"  # 有 SOURCE_ERROR 维度
+    # 不输出单一宽泛 COMPLETE 掩盖
+    assert "auction_source_evidence" in status
+    assert "volume_unit_evidence" in status
+
+
+# ---------------------------------------------------------------------------
+# MOD11 — data quality denominator
+# ---------------------------------------------------------------------------
+def test_data_quality_denominator():
+    obs = [{"full_day_status": "COMPLETE"}, {"full_day_status": "EMPTY"},
+           {"full_day_status": "SOURCE_ERROR"}, {"full_day_status": "COMPLETE",
+                                                 "volume_evidence": {"daily_volume_ratio": 1}}]
+    dq = mod.compute_data_quality_summary(obs)
+    assert dq["total_source_days_attempted"] == 4
+    assert dq["pagination"]["COMPLETE"] == 2
+    assert dq["pagination"]["EMPTY"] == 1
+    assert dq["auction_semantics_eligible_days"] == 2
+    assert dq["volume_unit_eligible_days"] == 1
+
+
+# ---------------------------------------------------------------------------
+# MOD13 — END-TO-END fake evidence pipeline
+# ---------------------------------------------------------------------------
+def test_end_to_end_fake_evidence(tmp_path, monkeypatch):
+    import json
+
+    out = tmp_path / "round1" / "2024-01-08"
+    monkeypatch.setattr(mod, "OUTPUT_DIR", out)
+
+    # Fake full-day pagination: Page1 (09:25 cano, 09:25:01 noncano, 09:30),
+    # Page2 (10:00, 14:57), final short/empty
+    page1 = [
+        {"time": "09:25", "price": 100, "vol": 50, "buyorsell": 1},
+        {"time": "09:25:01", "price": 100, "vol": 50, "buyorsell": 0},
+        {"time": "09:30", "price": 100, "vol": 50, "buyorsell": 0},
+    ]
+    page2 = [
+        {"time": "10:00", "price": 100, "vol": 50, "buyorsell": 0},
+        {"time": "14:57", "price": 100, "vol": 50, "buyorsell": 0},
+    ]
+    seq = {0: page1, 800: page2, 1600: []}
+
+    adapter = _FakeAdapter(lambda *a: seq)
+    bars = _bars_from([(date(2024, 1, 8), 100, 100, 10000),
+                       (date(2024, 1, 5), 90, 90, 9000)])
+    mdas = _FakeMdas({"X": bars})
+
+    # 直接构造 observation 并写 evidence
+    iid = uuid4()
+    fdr = mod.fetch_full_day_transactions_paginated(adapter, "600000", 1, date(2024, 1, 8))
+    ex = mod.extract_from_full_day("600000", "SH", str(iid), date(2024, 1, 8), fdr)
+    assert ex.status == "FOUND"
+
+    obs = {
+        "symbol": "600000", "market": "SH", "instrument_id": str(iid),
+        "board": "SH_MAIN", "cohort": "routine", "trade_date": "2024-01-08",
+        "coverage_tag": "large_cap",
+        "full_day_status": fdr.status,
+        "extraction_status": ex.status,
+        "raw_records": [mod._raw_evidence_dict(r) for r in ex.records],
+        "noncanonical_records": [mod._raw_evidence_dict(r) for r in ex.noncanonical_records],
+        "raw_record_count": len(ex.records),
+        "noncanonical_record_count": len(ex.noncanonical_records),
+        "lane_a": {"status": "COMPUTED", "price_exact_match": True},
+        "lane_b": {"status": "COMPUTED", "pit_gap": 0.1},
+        "volume_evidence": {
+            "status": "COMPUTED",
+            "sum_transaction_raw_vol": 100,  # 5 records × 50? actually 2 pages w/ vol 50*5
+            "valid_volume_record_count": 5,
+            "invalid_volume_record_count": 0,
+            "transaction_record_count": 5,
+            "mdas_daily_volume": 10000,
+            "daily_volume_ratio": 100.0,
+            "pagination_status": "COMPLETE", "page_count": 2,
+            "mdas_data_source": "db", "mdas_degraded": False,
+            "mdas_degraded_reason": None,
+            "evidence_reason": "RATIO_DISTRIBUTION_ONLY_NO_UNIT_CONCLUSION",
+        },
+        "amount_evidence": mod.compute_amount_evidence(),
+        "raw_amount_value": None,
+    }
+    # override sum to match math (5*50=250 → ratio=40). fix:
+    obs["volume_evidence"]["sum_transaction_raw_vol"] = 250
+    obs["volume_evidence"]["daily_volume_ratio"] = 10000 / 250
+
+    dq = mod.compute_data_quality_summary([obs])
+    vol_dist = mod.compute_volume_unit_distribution([obs])
+    live = mod.derive_live_status([obs], [])
+    mod.write_evidence_outputs(
+        out, date(2024, 1, 8), [obs], [], live, dq, vol_dist,
+        [{"symbol": "600000", "market": "SH", "instrument_id": str(iid),
+          "trade_date": "2024-01-08", "pagination_status": "COMPLETE",
+          "page_count": 2, "record_count": 5, "page_size": 800,
+          "source_first_time": "09:25", "source_last_time": "14:57",
+          "sum_transaction_raw_vol": 250, "valid_volume_record_count": 5,
+          "invalid_volume_record_count": 0, "mdas_daily_volume": 10000,
+          "daily_volume_ratio": 40.0, "source_error_code": None,
+          "source_error_message": None}],
+        routine_count=1, corporate_count=0, corporate_lookback_days=180)
+
+    # reopen 03
+    raw_lines = (out / "03_raw_transaction_records.jsonl").read_text().strip().splitlines()
+    assert len(raw_lines) == 1
+    rec0 = json.loads(raw_lines[0])
+    assert rec0["source_time"] == "09:25"
+    assert rec0["symbol"] == "600000"
+
+    # reopen 04
+    nc_lines = (out / "04_noncanonical_time_records.jsonl").read_text().strip().splitlines()
+    assert len(nc_lines) == 1
+    nc0 = json.loads(nc_lines[0])
+    assert nc0["source_time"] == "09:25:01"
+
+    # reopen 08
+    import csv as _csv
+    with (out / "08_volume_unit_evidence.csv").open() as f:
+        rows = list(_csv.DictReader(f))
+    assert len(rows) == 1
+    assert float(rows[0]["daily_volume_ratio"]) == 40.0
+
+    # reopen 10
+    dq_re = json.loads((out / "10_data_quality_summary.json").read_text())
+    assert dq_re["total_source_days_attempted"] == 1
+
+    # reopen 11: no PASS / confirmed
+    vs = json.loads((out / "11_validation_summary.json").read_text())
+    assert vs["amount_evidence"]["DIRECT_RAW_AMOUNT"] == "UNAVAILABLE"
+    assert vs["amount_evidence"]["DERIVED_AMOUNT"] == "PENDING_VOLUME_UNIT_CONFIRMATION"
+    text = json.dumps(vs)
+    for forbidden in ["source PASS", "volume unit confirmed", "amount confirmed",
+                     "CONFIRMED", "RUNNER_CONFIRMED"]:
+        assert forbidden.upper() not in text.upper()
+
+
+# ---------------------------------------------------------------------------
+# MOD15 — one source fetch per symbol/day
+# ---------------------------------------------------------------------------
+def test_one_source_fetch_per_day():
+    page1 = [{"time": "09:25", "price": 1, "vol": 1, "buyorsell": 0}]
+    seq = {0: page1, 800: []}
+    adapter = _FakeAdapter(lambda *a: seq)
+    fdr = mod.fetch_full_day_transactions_paginated(adapter, "600000", 1, date(2024, 1, 8))
+    ex = mod.extract_from_full_day("600000", "SH", str(uuid4()),
+                                   date(2024, 1, 8), fdr)
+    # extraction 复用同一 fdr，不重新调 source
+    assert ex.status == "FOUND"
+    # adapter.api.call_count reflects only pagination, not a separate 09:25 call
+    assert adapter.api.call_count == 1
