@@ -28,6 +28,18 @@ ordered historical canonical Scope Observation series (as produced by
 Position facts.  Position is an objective fact — never high / low / strong /
 weak / opportunity / risk / score / phase.
 
+Canonical input path (PRD §7.7.5 bridge)
+----------------------------------------
+The ONE canonical Position calculation path is
+:func:`compute_position_series_from_primitive_series` — it consumes a formal
+date-complete ``PrimitiveSeries`` (the Observation Series Builder's
+``primitives[key]`` block) whose ``PrimitivePoint`` timeline already preserves
+missing trading-observation slots.  :func:`compute_position_series` is only a
+compatibility adapter over the legacy raw canonical L1 payload series: it
+extracts values through the shared registry and delegates to the same core — so
+the raw path and the Builder path share exactly ONE percentile / window math
+owner.  No second percentile / 120-window / 60-minimum logic exists.
+
 Primitive source
 ----------------
 No payload paths are hard-coded here.  The 11 historical-ready primitives are
@@ -36,10 +48,11 @@ consumed exclusively through the shared ``OBSERVATION_PRIMITIVES`` registry
 ``momentum.bb_position`` / ``momentum.bb_width`` are CURRENT-ONLY and are never
 eligible for a historical Position.
 """
+
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
 
@@ -176,7 +189,98 @@ def compute_historical_position(
 
 
 # ---------------------------------------------------------------------------
-# Position series (single primitive over the canonical observation series)
+# Position series (canonical: formal PrimitiveSeries input)
+# ---------------------------------------------------------------------------
+
+
+def _point_date(value: Any) -> date:
+    """Normalize a PrimitivePoint ``trade_date`` (ISO string or ``date``)."""
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    return value
+
+
+def compute_position_series_from_primitive_series(
+    primitive_series: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Compute the Position series from a formal PrimitiveSeries (PRD §7.7.5).
+
+    This is the ONE canonical Position calculation path.  The input is the
+    Observation Series Builder's ``primitives[key]`` block: a date-complete,
+    availability-bearing ``PrimitivePoint`` timeline in which a missing
+    trading-observation slot is already preserved (``available=False`` /
+    ``value=None``).
+
+    Contract (frozen, PRD §7.9 + §7.7.5):
+        - ``primitive_series["key"]`` must be historical-ready, else ``KeyError``;
+        - points must be strictly ascending & unique by ``trade_date`` (fail
+          fast, never silent sort / dedupe);
+        - ``available=True`` requires a finite scalar (None / NaN / inf / bool /
+          non-numeric -> ``ValueError``); ``available=False`` requires
+          ``value=None`` (a finite value -> ``ValueError``);
+        - ``readiness`` NEVER overrides ``available`` — a ``partial`` snapshot
+          with a finite value is valid Position input;
+        - every point produces exactly one Position fact (never compressed);
+          for index ``i`` the pre-T baseline is the latest ``POSITION_WINDOW_SIZE``
+          point slots strictly before ``i`` — an unavailable slot stays in the
+          candidate window and contributes ``None`` (never reached-over);
+        - delegates the percentile / window math to the single-T owner
+          ``compute_historical_position`` — no second implementation here.
+
+    Returns:
+        One Position fact per point, date-aligned: ``{"primitive_key",
+        "trade_date", "value", "position", "history", "status"}``.
+    """
+    key = primitive_series["key"]
+    if key not in _SPECS:
+        raise KeyError(f"primitive not historical-ready: {key}")
+
+    points = primitive_series["points"]
+    dates = [_point_date(pt["trade_date"]) for pt in points]
+    for prev, cur in zip(dates, dates[1:], strict=False):
+        if not prev < cur:
+            raise ValueError(
+                "PrimitiveSeries points must be strictly ascending by trade_date; "
+                f"got {prev.isoformat()} -> {cur.isoformat()}"
+            )
+
+    # Pre-bind the per-point current value and enforce the available/value
+    # contract once (availability is decided by the Builder's registry extractor
+    # only — readiness is deliberately NOT consulted here).
+    values: list[float | None] = []
+    for idx, pt in enumerate(points):
+        if pt["available"]:
+            finite = _finite(pt["value"])
+            if finite is None:
+                raise ValueError(
+                    "available=True with non-finite / non-numeric value at "
+                    f"{dates[idx].isoformat()}: {pt['value']!r}"
+                )
+        else:
+            if pt["value"] is not None:
+                raise ValueError(
+                    "available=False with non-None value at "
+                    f"{dates[idx].isoformat()}: {pt['value']!r}"
+                )
+            finite = None
+        values.append(finite)
+
+    out: list[dict[str, Any]] = []
+    for i, (d, current_value) in enumerate(zip(dates, values, strict=True)):
+        # pre-T baseline = latest POSITION_WINDOW_SIZE point slots before i.
+        baseline = values[max(0, i - POSITION_WINDOW_SIZE) : i]
+        fact = compute_historical_position(
+            current_value,
+            baseline,
+            window_size=POSITION_WINDOW_SIZE,
+            minimum_valid_history=POSITION_MINIMUM_VALID_HISTORY,
+        )
+        out.append({"primitive_key": key, "trade_date": d.isoformat(), **fact})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Position series (legacy compatibility adapter over raw canonical payloads)
 # ---------------------------------------------------------------------------
 
 
@@ -184,7 +288,14 @@ def compute_position_series(
     observation_series: Sequence[Any],
     primitive_key: str,
 ) -> list[dict[str, Any]]:
-    """Compute the Position series for one primitive over a canonical series.
+    """Compute the Position series for one primitive — compatibility adapter.
+
+    NOT a second math owner.  This legacy raw-payload path first extracts each
+    value through the shared registry (fail-closed None on missing / non-finite)
+    into an equivalent date-complete PrimitiveSeries, then delegates to
+    :func:`compute_position_series_from_primitive_series`.  The raw path and the
+    Observation Series Builder path therefore share exactly ONE Position math
+    owner (percentile / 120-window / 60-minimum / candidate_count).
 
     Args:
         observation_series: ordered historical canonical Scope Observation
@@ -198,41 +309,25 @@ def compute_position_series(
         KeyError: primitive not historical-ready (e.g. current-only).
         ValueError: series trade dates are not strictly ascending (fail fast —
             never silently re-sort and mask a caller bug).
-
-    For index ``i`` the pre-T baseline is ``series[max(0, i-120):i]`` — it NEVER
-    includes ``i`` (no future leakage; no ``series[:i+1]`` window).
     """
     if primitive_key not in _SPECS:
         raise KeyError(f"primitive not historical-ready: {primitive_key}")
     spec = _SPECS[primitive_key]
-    pairs = [_series_pair(item) for item in observation_series]
-    for prev, cur in zip(pairs, pairs[1:], strict=False):
-        if not prev[0] < cur[0]:
-            raise ValueError(
-                "observation_series must be strictly ascending by trade_date; "
-                f"got {prev[0]} -> {cur[0]}"
-            )
-    out: list[dict[str, Any]] = []
-    for i, (td, payload) in enumerate(pairs):
-        value_t = _extract_value(spec, payload)
-        baseline = [
-            _extract_value(spec, p)
-            for _, p in pairs[max(0, i - POSITION_WINDOW_SIZE):i]
-        ]
-        fact = compute_historical_position(
-            value_t,
-            baseline,
-            window_size=POSITION_WINDOW_SIZE,
-            minimum_valid_history=POSITION_MINIMUM_VALID_HISTORY,
-        )
-        out.append(
+    points: list[dict[str, Any]] = []
+    for item in observation_series:
+        td, payload = _series_pair(item)
+        value = _extract_value(spec, payload)
+        points.append(
             {
-                "primitive_key": primitive_key,
                 "trade_date": td.isoformat(),
-                **fact,
+                "readiness": "raw_adapter",
+                "value": value,
+                "available": value is not None,
             }
         )
-    return out
+    return compute_position_series_from_primitive_series(
+        {"key": primitive_key, "l1_path": spec.path, "points": points}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +358,7 @@ __all__ = [
     "POSITION_MINIMUM_VALID_HISTORY",
     "HISTORICAL_READY_PRIMITIVE_KEYS",
     "compute_historical_position",
+    "compute_position_series_from_primitive_series",
     "compute_position_series",
     "compute_historical_positions",
 ]
