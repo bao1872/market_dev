@@ -1,63 +1,38 @@
-symbol,board,liquidity,cohort,note
-600519,SH,large,routine,茅台 高流动性蓝筹
-601318,SH,large,routine,中国平安 大盘金融
-600036,SH,large,routine,招商银行 大盘金融
-000001,SZ,large,routine,平安银行 深圳大盘
-000858,SZ,large,routine,五粮液 消费蓝筹
-300750,SZ,large,routine,宁德时代 创业板权重
-002594,SZ,large,routine,比亚迪 新能源权重
-600900,SH,large,routine,长江电力 防御蓝筹
-601012,SH,large,routine,隆基绿能 光伏权重
-600276,SH,large,routine,恒瑞医药 医药权重
-000333,SZ,large,routine,美的集团 家电权重
-600030,SH,large,routine,中信证券 券商权重
-601166,SH,large,routine,兴业银行 银行权重
-000651,SZ,large,routine,格力电器 家电权重
-600887,SH,large,routine,伊利股份 消费权重
-601899,SH,large,routine,紫金矿业 资源权重
-603259,SH,large,routine,药明康德 医药权重
-000725,SZ,large,routine,京东方A 电子权重
-600000,SH,large,routine,浦发银行 银行权重
-002415,SZ,large,routine,海康威视 科技权重
-601888,SH,large,routine,中国中免 消费权重
-600009,SH,large,routine,上海机场 交运权重
-000002,SZ,large,routine,万科A 地产权重
-601628,SH,large,routine,中国人寿 保险权重
-600048,SH,large,routine,保利发展 地产权重
-002475,SZ,large,routine,立讯精密 电子权重
-601398,SH,large,routine,工商银行 国有大行
-600028,SH,large,routine,中国石化 能源权重
-000063,SZ,large,routine,中兴通讯 通信权重
-601857,SH,large,routine,中国石油 能源权重
-600585,SH,large,routine,海螺水泥 建材权重
-000568,SZ,large,routine,泸州老窖 白酒权重
-600104,SH,large,routine,上汽集团 汽车权重
-601669,SH,large,routine,中国电建 基建权重
-600690,SH,large,routine,海尔智家 家电权重
-000776,SZ,large,routine,广发证券 券商权重
-601668,SH,large,routine,中国建筑 基建权重
-600031,SH,large,routine,三一重工 机械权重
-002142,SZ,large,routine,宁波银行 城商行
-601988,SH,large,routine,中国银行 国有大行
-600837,SH,large,routine,海通证券 券商权重
-600958,SH,large,routine,东方证券 券商权重
-000166,SZ,large,routine,申万宏源 券商权重
-601211,SH,large,routine,国泰君安 券商权重
-600999,SH,large,routine,招商证券 券商权重
-000783,SZ,large,routine,长江证券 券商权重
-601336,SH,large,routine,新华保险 保险权重
-600196,SH,large,routine,复星医药 医药权重
-000625,SZ,large,routine,长安汽车 汽车权重
-601138,SH,large,routine,工业富联 科技权重
-600588,SH,large,routine,用友网络 软件权重
-000100,SZ,large,routine,TCL科技 电子权重
-601117,SH,large,routine,中国化学 基建权重
-600011,SH,large,routine,华能国际 电力权重
-600519,SH,large,corporate,茅台 候选除权样本
-000651,SZ,large,corporate,格力电器 候选除权样本
-600887,SH,large,corporate,伊利股份 候选除权样本
-000858,SZ,large,corporate,五粮液 候选除权样本
-600036,SH,large,corporate,招商银行 候选除权样本
-002594,SZ,large,corporate,比亚迪 候选除权样本
-600276,SH,large,corporate,恒瑞医药 候选除权样本
-000333,SZ,large,corporate,美的集团 候选除权样本
+symbol,market,board,coverage_tag,cohort,note
+600519,SH,SH_MAIN,large_cap_reference,routine,白酒龙头参考
+601318,SH,SH_MAIN,large_cap_reference,routine,金融龙头参考
+600036,SH,SH_MAIN,large_cap_reference,routine,银行参考
+601166,SH,SH_MAIN,ordinary_reference,routine,银行普通
+600276,SH,SH_MAIN,ordinary_reference,routine,医药参考
+601012,SH,SH_MAIN,ordinary_reference,routine,光伏参考
+600887,SH,SH_MAIN,ordinary_reference,routine,食品参考
+601888,SH,SH_MAIN,lower_activity_candidate,routine,免税低活跃候选
+600900,SH,SH_MAIN,ordinary_reference,routine,电力参考
+601398,SH,SH_MAIN,large_cap_reference,routine,银行权重
+000001,SZ,SZ_MAIN,large_cap_reference,routine,银行龙头参考
+000333,SZ,SZ_MAIN,large_cap_reference,routine,家电参考
+000858,SZ,SZ_MAIN,large_cap_reference,routine,白酒参考
+000651,SZ,SZ_MAIN,ordinary_reference,routine,家电普通
+002594,SZ,SZ_MAIN,ordinary_reference,routine,新能源普通
+000725,SZ,SZ_MAIN,ordinary_reference,routine,面板参考
+002415,SZ,SZ_MAIN,large_cap_reference,routine,安防龙头
+000002,SZ,SZ_MAIN,lower_activity_candidate,routine,地产低活跃候选
+002475,SZ,SZ_MAIN,ordinary_reference,routine,电子参考
+300750,SZ,CHINEXT,large_cap_reference,routine,创业板权重
+300059,SZ,CHINEXT,ordinary_reference,routine,创业板金融
+300760,SZ,CHINEXT,ordinary_reference,routine,创业板医药
+300015,SZ,CHINEXT,ordinary_reference,routine,创业板医药普通
+300124,SZ,CHINEXT,lower_activity_candidate,routine,创业板低活跃候选
+300142,SZ,CHINEXT,ordinary_reference,routine,创业板医药普通
+688981,SH,STAR,ordinary_reference,routine,科创芯片
+688041,SH,STAR,ordinary_reference,routine,科创半导体
+688111,SH,STAR,lower_activity_candidate,routine,科创低活跃候选
+688599,SH,STAR,ordinary_reference,routine,科创参考
+600000,SH,SH_MAIN,corporate,corporate,历史除权候选
+000002,SZ,SZ_MAIN,corporate,corporate,历史除权候选
+601166,SH,SH_MAIN,corporate,corporate,历史除权候选
+000651,SZ,SZ_MAIN,corporate,corporate,历史除权候选
+600887,SH,SH_MAIN,corporate,corporate,历史除权候选
+002415,SZ,SZ_MAIN,corporate,corporate,历史除权候选
+300750,SZ,CHINEXT,corporate,corporate,历史除权候选
+688981,SH,STAR,corporate,corporate,历史除权候选
