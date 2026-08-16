@@ -382,3 +382,74 @@ Lane A / Lane B / qfq degraded / population / listing_date / MDAS / Review / Sco
 
 不要修改：Instrument model / Scope / Review / frontend / API；不删除
 `auction_history_semantics_validation.py` 的 source-validation functions。
+
+## 17. Round 3B-D2 — TARGET-PAGE-FIRST PERFORMANCE CLOSURE（2026-08-16）
+
+### WHY THIS ROUND EXISTS
+
+3B-D1 warm 算法即使优化到理想状态也接近 3 physical Pytdx requests / symbol 的成本下限；
+真实 canary 实测 Bar2 avg=3.04、Bar3 avg=3.22，投影 5190×120 ≈ 20h，**超过 Performance
+Contract（full 120-bar <= 12h）**。继续把 3.22 优化成 3.00 没有工程价值——**boundary-first
+的成本下限本身不足以满足 12h scale budget**。
+
+因此本轮不做 F3 微调，而是结构性改变 warm fast path：**boundary-first → target-page-first**，
+把 warm anchor 从「上一交易日 boundary」改为「上一交易日含 09:25 block 的 page
+（target_page_offset）」，稳定日 warm 目标降到 1~2 physical requests。
+
+### ARCHITECTURE（不修改 canonical business contract）
+
+- **kernel**（`auction_member_fact_backfill_kernel.py`）：
+  - warm fast path 从 H = target_page_offset 开始，按 C1-C5 局部判定：
+    - C2 SINGLE：单页完整跨 09:25（min < "09:25" < max）→ 1 request；
+    - C3 ADJACENT：09:25 在页边沿 → 读相邻 1~2 页 → 2~3 requests；
+    - C4 BIDIRECTIONAL：整页都是 09:25 → 两侧各读 1 页 → <=3 requests（正确性优先）；
+    - C5 DRIFT：H 整页 before/after 或为空 → 向目标方向局部扩展 1~2 页 → 2~3 requests。
+  - fast path 无法 complete 时才进入 **existing boundary algorithm（F2/F3 local bracket +
+    boundary binary + B-2P/B-P/B completeness）作为 fallback**（de7998b 保留，不删除）。
+  - 新增 `Targeted0925Result.target_page_offset`（下一交易日 warm anchor）+ `search_mode`
+    （TARGET_PAGE_SINGLE / ADJACENT / BIDIRECTIONAL / DRIFT / BOUNDARY_FALLBACK / COLD）；
+    `resolved_offset` 保留原 boundary 语义。`target_page_offset` 从本次已缓存 pages 中选取，
+    不为计算 hint 新增 source request。
+- **runner**（`full_market_member_fact_backfill.py`）：
+  - `offset_hints.json` 升级为 **v2 versioned structure**：
+    `{"version": 2, "hints": {"000001": {"target_page_offset": ..., "boundary_offset": ...}}}`；
+    `target_page_offset` 供下一交易日 warm fast path，`boundary_offset` 仅 fallback/debug evidence。
+  - **向后兼容**：v1 `symbol -> int` 可解释为 legacy boundary hint，第一次走 boundary fallback，
+    完成后升级成 v2 hint，不破坏 resume。
+  - runner 聚合 `search_mode_distribution`（six counts），与 `page_count`（REAL adapter calls）
+    一起作为性能 evidence。
+
+### WHY NOT 3.22 → 3.00
+
+boundary-first 无论怎么调优，warm 每 symbol 至少要先定位 boundary 再读 target 页，
+成本下限接近 3 requests；把 3.22 优化成 3.00 只省 ~7%，仍不足以把 5190×120 投影压到
+12h 以内。只有把 warm 请求数降到 1~2 量级（target-page-first）才能真正满足 scale budget。
+
+### TESTS（PART H：T1-T10，deterministic，不 ×2）
+
+- T1 SINGLE 单页 09:24/09:25/09:26 → 1 request + TARGET_PAGE_SINGLE
+- T2 CROSSES 页跨 09:25 无 record → 1 request + records=[] + TARGET_WINDOW_COMPLETE
+- T3 EDGE target 在边沿 → adjacent → 2 requests + records 完整
+- T4 BIDIRECTIONAL 整页 ==09:25 → 两侧 adjacent → <=3 requests + records 完整
+- T5/T6 +1/-1 DRIFT → 2 requests + records 完整
+- T7 LARGE DRIFT → boundary fallback → result == cold result
+- T8 fallback 后 target_page_offset 来自已有 cache，无额外 request
+- T9 hint v1 legacy int → resume 可读 → fallback → 升级成 v2 target-page hint
+- T10 mid-run resume → 继续使用 persisted target_page_offset
+
+### CHANGED FILES（Round 3B-D2）
+
+- `M experiments/pytdx_auction_history/auction_member_fact_backfill_kernel.py`
+  （target-page-first warm path C1-C5 + target_page_offset + search_mode + boundary fallback 保留）
+- `M experiments/pytdx_auction_history/full_market_member_fact_backfill.py`
+  （offset_hints v2 versioned structure + backward compat + search_mode 聚合）
+- `M experiments/pytdx_auction_history/tests/test_auction_member_fact_backfill_kernel.py`（D2-T1..T8）
+- `M experiments/pytdx_auction_history/tests/test_full_market_member_fact_backfill.py`（D2-T9..T10）
+- `M docs/changes/2026/CHANGE-20260816-003-full-market-120-bar-backfill.md`
+
+### PRD
+- **NONE**（canonical business contract 未变化；仅 transport/search layer 结构性性能优化）。
+
+### STATUS
+- Round 3B-D2 运行结果（micro / canary / projected full runtime）留在远程 evidence manifest，
+  不写入本 CHANGE。FULL 120-BAR LIVE BACKFILL = **NOT RUN**（待 ChatGPT audit）。
