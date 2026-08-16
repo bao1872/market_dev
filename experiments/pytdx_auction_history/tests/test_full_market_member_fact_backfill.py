@@ -50,6 +50,7 @@ from full_market_member_fact_backfill import (
     RESUME_BLOCK,
     RESUME_RERUN,
     RESUME_SKIP,
+    run_symbol_backfill_observation,
     _board_for_symbol,
     _to_sample_inst,
     _partition_resume_decision,
@@ -1142,6 +1143,60 @@ def test_resume_loads_offset_hints(tmp_out):
                        batch_mdas_fn=batch)
     assert res2["completed_bar_count"] == 2
     row = json.loads(open(tmp_out / "t_p21" / "bars" / d2.isoformat()
+                          / "member_facts.jsonl").readline())
+    assert row["used_hint"] is True
+
+
+# ---------------------------------------------------------------------------
+# P23 (Round 3B-D1 PART J): bar1 COMPLETED 后 bar2 中途进程中断 → bar1 hints 保留，
+# resume 加载该文件且 bar2 first symbol 使用 hint（used_hint=True）。
+# 证明 per-partition offset hint persistence 不是仅 final write。
+# ---------------------------------------------------------------------------
+def test_hint_persistence_survives_midrun_interruption(tmp_out, monkeypatch):
+    d1, d2 = date(2026, 2, 13), date(2026, 5, 1)
+    pop = {
+        d1: [_sample("600001", "SH")],
+        d2: [_sample("600001", "SH")],
+    }
+    adapter = _fake_page_adapter(boundary=800)
+    batch, _ = _make_fake_batch_mdas()
+    hints_path = tmp_out / "t_p23" / "offset_hints.json"
+
+    # 真实 kernel observer：bar1 正常完成写入 hint；bar2 首次调用模拟进程中断
+    # （BaseException，不被 runner 的 `except Exception` 捕获 → 直接向上传播）。
+    real_obs = run_symbol_backfill_observation
+
+    class _Interrupted(BaseException):
+        pass
+
+    async def _interrupting_obs(*args, **kwargs):
+        if args[3] == d2:  # inst 在 args[2]，trade_date 在 args[3]
+            raise _Interrupted("simulated process interruption at bar 2")
+        return await real_obs(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "full_market_member_fact_backfill.run_symbol_backfill_observation",
+        _interrupting_obs)
+
+    with pytest.raises(_Interrupted):
+        _kernel_run(tmp_out, "t_p23", [d1, d2], pop,
+                    adapter=adapter, session=_FakeSession(),
+                    batch_mdas_fn=batch)
+
+    # bar1 COMPLETED → per-partition atomic write 已持久化 hint（PART H）
+    assert hints_path.exists()
+    hints = json.load(open(hints_path))
+    assert hints["hints"].get("600001") == 800
+
+    # resume（无中断）：bar1 SKIP，bar2 新 bar 加载 hint → used_hint=True
+    monkeypatch.setattr(
+        "full_market_member_fact_backfill.run_symbol_backfill_observation",
+        real_obs)
+    res2 = _kernel_run(tmp_out, "t_p23", [d1, d2], pop,
+                       adapter=adapter, session=_FakeSession(),
+                       batch_mdas_fn=batch)
+    assert res2["completed_bar_count"] == 2
+    row = json.loads(open(tmp_out / "t_p23" / "bars" / d2.isoformat()
                           / "member_facts.jsonl").readline())
     assert row["used_hint"] is True
 

@@ -282,3 +282,103 @@ validation，不适合 600k+ 历史 Member Facts。正式 backfill **不再调�
 
 不要修改：Instrument model / Scope / Review / frontend / API；不删除
 `auction_history_semantics_validation.py` 的 source-validation functions。
+
+## 16. Round 3B-D1 — TARGETED SOURCE CORRECTNESS + WARM HINT CLOSURE（2026-08-16）
+
+3B-D canary FAIL 后的窄修复轮。只修 transport/search layer 正确性与性能，
+**不修改 canonical business contract**（CANONICAL_AUCTION_TIMES / LOT ×100 / amount /
+Lane A / Lane B / qfq degraded / population / listing_date / MDAS / Review / Scope / frontend 均不变）。
+
+### ROOT CAUSE 1 — REAL PYTDX TIME = HH:MM（kernel 曾假设 HH:MM:SS）
+- 真实 pytdx historical transaction `time` 是 **HH:MM**（如 "09:25"），不是 "09:25:00"。
+- 新增 transport-level `_normalize_source_minute(value) -> str | None`：只用于 search/ordering，
+  **不改写 raw source record**（raw evidence 原样保留）。
+  - `"09:25" → "09:25"`；`"09:25:00" → "09:25"`；`"09:25:37" → "09:25"`；
+    合法 HH:MM / HH:MM:SS → HH:MM；None / empty / malformed / invalid clock → None。
+- 冻结 `TARGET_MINUTE = "09:25"` 为 raw string ordering owner；废弃
+  `TARGET_WINDOW_START="09:25:00"` / `TARGET_WINDOW_END="09:25:59"` 作为 ordering owner。
+- `_page_time_range` / `_page_entirely_before` / `_page_entirely_after` / `_before`
+  全部基于 normalized minute 排序：entirely-before = max < "09:25"；entirely-after = min > "09:25"；
+  contains = min <= "09:25" <= max。
+- non-empty page 无任何可解析 source time → **fail closed** `TARGET_SEARCH_STALLED` +
+  `error_code/error_message = INVALID_OR_UNORDERABLE_SOURCE_TIME`，不得假定 before/after/empty。
+- `_collect_window_records` 按 `_normalize_source_minute(record["time"]) == TARGET_MINUTE`
+  收集整个 09:25 minute；随后仍走 existing `_normalize_raw_transaction` →
+  `classify_transaction_time` → `canonicalize_auction_0925`。kernel 不复制业务判断。
+
+### ROOT CAUSE 2 — CACHE HIT 被误计为 Pytdx request
+- `_fetch()` 原为 `counter += 1; if offset in page_cache: return` → page_cache 命中
+  错误计入 `page_count`。
+- 修正为 `if offset in page_cache: return page_cache[offset]`，然后才检查 budget / counter += 1 /
+  `adapter.get_history_transaction_page(...)`。
+- `Targeted0925Result.page_count` 现在 = **REAL adapter page calls**；`MAX_TARGETED_PAGES`
+  也只限制真实 source requests。新增断言 `page_count == len(adapter.request_log)`，
+  重复访问 cached offset 不增加两者。
+
+### ROOT CAUSE 3 — WARM HINT 无真正 local fast path
+- 删除「hint 在 before side 就 lo=0 重新 full binary search」的 warm-path 行为。
+- **F1**：`offset_hint is not None` 时不得一开始无条件 `_fetch(0)`，从 hint 页开始。
+- **F2**：`H = floor(hint/PAGE_SIZE)*PAGE_SIZE`，local bracket：
+  - Fast path A：`_before(H) and not _before(H-P)` → boundary = H；
+    收集 H-2P / H-P / H（H、H-P 已在 cache），正常 REAL requests <= 3。
+  - Fast path B：`not _before(H) and _before(H+P)` → boundary = H+P；
+    收集 H-P / H / H+P，正常 REAL requests <= 3。
+- **F3**：local bracket 不成立时按方向从 H 向外扩展（H±P、H±2P、H±4P…），建立局部
+  bracket 后只在 bracket 内 binary search。**禁止** hint 偏差即重置 offset=0 全局搜索。
+  仅 hint 完全不可用 / 越界 / 无法建立局部 bracket 才 cold fallback（offset=0 + exponential + binary）。
+  正确性优先于 <=3：大漂移允许 >3，但稳定日 warm 必须 <=3。
+- **TARGET RECORD COMPLETENESS**：boundary B = 最小 offset（page 已在 target minute 前
+  或 source exhausted）；收集 B-2P / B-P / B 并 raw identity（time/price/vol/buyorsell）去重；
+  不得找到第一条 09:25 即停。
+- **SEARCH STALL DETECTION**：内容级 SHA-1 指纹 `_page_content_fingerprint`（整页
+  (time,price,vol,buyorsell) 哈希），替换原「首尾 time + 长度」指纹——真实数据连续 page
+  可整页同分钟，首尾 time 相同造成假 TARGET_SEARCH_STALLED；内容哈希只在 adapter 对
+  不同 offset 返回字面相同内容（病态重复）时触发停滞。
+
+### ROOT CAUSE 4 — OFFSET HINT 只在整 run 结束后持久化
+- 每个 partition `status == COMPLETED` 且 reconciliation 完成后，立即 **atomic write**
+  `offset_hints.json`（含 run_id / as_of / code_sha / hints），再进入下一 bar。
+- atomic 写 = `.tmp`（fsync）→ `os.replace`，避免半写文件被 resume 读到。
+- run 最后可再写一次，但不允许只有 final write：bar 57 完成、bar 58 中途进程退出后，
+  resume 仍能加载 bar 57 最新 hint。
+
+### TESTS（PART I/J：T1-T10 + hint resume）
+- 重写 `tests/test_auction_member_fact_backfill_kernel.py` 为真实 HH:MM source shape：
+  - T1 REAL_HHMM_CANONICAL：raw `{"time":"09:25",price:10,vol:100}` → targeted.records 包含、
+    CANONICAL、`auction_volume_shares == 100*100`。
+  - T2 HHMM_BOUNDARY：09:30/09:25/09:24 minute ordering；09:25 page 不得判 entirely_before。
+  - T3 HHMM_CROSS_PAGE：09:25 raw records 跨两 page 完整且不重复（不同 price/vol）。
+  - T4 HHMMSS_COMPATIBILITY：09:25:00 仍被 existing semantics contract 接受。
+  - T5 CACHE_NOT_REQUEST：cache hit 不增加 page_count / adapter.request_log。
+  - T6 COLD_EQUALS_WARM：real-style HH:MM pages cold records == warm records。
+  - T7 EXACT_BOUNDARY_HINT：offset_hint == prior boundary → REAL adapter calls <= 3。
+  - T8 ONE_PAGE_SHIFT_HINT：hint == boundary±P → <= 3。
+  - T9 LARGE_DRIFT_SAFE：hint 漂移 >1 page 允许 >3，但 records == cold 且 <= MAX_TARGETED_PAGES。
+  - T10 CANONICALIZATION_NOT_100_PERCENT_NO_VOLUME：real-style positive 09:25 fixture 必须 CANONICAL。
+- `tests/test_full_market_member_fact_backfill.py` 新增 mid-run interruption resume 测试
+  （PART J / P23）：bar1 COMPLETED 后 per-partition atomic hint 已落盘；bar2 抛 BaseException
+  模拟进程中断 → hints 保留；resume 加载后 bar2 first symbol `used_hint == True`。
+
+### VERIFICATION（全部 PASS）
+- experiments（semantics + kernel + runner）全目录 **120 passed**；kernel tests **12 passed ×2**。
+- backend pytdx adapter + MDAS + instrument lifecycle **87 passed, 4 skipped**。
+- `git diff --check` PASS。
+- LIVE 120-BAR FULL-MARKET = **NOT RUN**（待 canary gate + ChatGPT audit）。
+
+### CHANGED FILES（Round 3B-D1）
+- `M experiments/pytdx_auction_history/auction_member_fact_backfill_kernel.py`
+  （minute normalization / page ordering / window collection / request counter / warm local
+  fast path / content fingerprint / unorderable fail-closed）
+- `M experiments/pytdx_auction_history/full_market_member_fact_backfill.py`
+  （per-partition atomic offset hint persistence）
+- `M experiments/pytdx_auction_history/tests/test_auction_member_fact_backfill_kernel.py`
+  （T1-T10 真实 HH:MM shape）
+- `M experiments/pytdx_auction_history/tests/test_full_market_member_fact_backfill.py`
+  （P23 mid-run interruption hint resume）
+- `M docs/changes/2026/CHANGE-20260816-003-full-market-120-bar-backfill.md`
+
+### PRD
+- **NONE**（canonical business contract 未变化；仅 transport/search layer 修复）。
+
+不要修改：Instrument model / Scope / Review / frontend / API；不删除
+`auction_history_semantics_validation.py` 的 source-validation functions。

@@ -277,6 +277,27 @@ def _write_json(path: Path, payload: Any) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
 
 
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """atomic write：.tmp（fsync）→ os.replace，避免半写文件被 resume 读到。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _offset_hints_payload(run_id: str, as_of: date, code_sha: str,
+                          offset_hints: dict[str, int]) -> dict:
+    return {
+        "run_id": run_id,
+        "as_of": as_of.isoformat(),
+        "code_sha": code_sha,
+        "hints": {k: v for k, v in sorted(offset_hints.items())},
+    }
+
+
 def _expected_partition_metadata(trade_date: date, bar_index: int,
                                 code_sha: str, eligible: int, as_of: date) -> dict:
     return {
@@ -1142,18 +1163,24 @@ async def _run_backfill_impl(
             _accumulate_partition_quality(root_manifest, manifest, dq)
             if manifest["status"] == PARTITION_STATUS_COMPLETED:
                 completed += 1
+                # Round 3B-D1 PART H：每个 COMPLETED partition 完成 reconciliation 后
+                # 立即 atomic 持久化 offset_hints.json（含 run_id/as_of/code_sha/hints）。
+                # 若后续 bar 中途进程退出，resume 仍能加载已完成的 bar 最新 hint。
+                if offset_hints:
+                    _write_json_atomic(
+                        _out_root / run_id / "offset_hints.json",
+                        _offset_hints_payload(run_id, as_of, code_sha, offset_hints),
+                    )
             else:
                 failed += 1
 
-        # --- 持久化 hints（PART C7）：每个 run 结束 atomic 写 offset_hints.json ---
+        # --- 持久化 hints（PART H 收尾）：run 结束再写一次（已含每个 COMPLETED bar 的写入）---
         if offset_hints:
             hints_path = _out_root / run_id / "offset_hints.json"
-            _write_json(hints_path, {
-                "run_id": run_id,
-                "as_of": as_of.isoformat(),
-                "code_sha": code_sha,
-                "hints": {k: v for k, v in sorted(offset_hints.items())},
-            })
+            _write_json_atomic(
+                hints_path,
+                _offset_hints_payload(run_id, as_of, code_sha, offset_hints),
+            )
 
     # --- 顶层 adapter/session lifecycle：ONE PytdxAdapter INSTANCE ---
     if adapter is not None:
