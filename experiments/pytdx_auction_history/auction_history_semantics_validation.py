@@ -75,6 +75,12 @@ CANON_STATUS_CANONICAL = "CANONICAL"
 CANON_STATUS_NO_VOLUME_BEARING = "NO_VOLUME_BEARING_0925"
 CANON_STATUS_MULTIPLE_VOLUME_BEARING = "MULTIPLE_VOLUME_BEARING_0925"
 CANON_STATUS_INVALID_VOLUME = "INVALID_VOLUME_0925"
+CANON_STATUS_INVALID_PRICE = "INVALID_PRICE_0925"
+
+PRICE_PARSE_STATUS_OK = "OK"
+PRICE_PARSE_STATUS_ABSENT = "ABSENT"
+PRICE_PARSE_STATUS_NON_FINITE = "NON_FINITE"
+PRICE_PARSE_STATUS_MALFORMED = "MALFORMED"
 
 # Amount source type
 AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME = "DERIVED_PRICE_X_NORMALIZED_VOLUME"
@@ -115,13 +121,14 @@ class NormalizedAuctionTransaction:
     trade_date: str
     source_time: str
     canonical_time: Optional[str]
-    raw_price: float
+    raw_price: Optional[float]
     raw_volume_value: Optional[float]
     raw_amount_value: Optional[float]
     buy_sell_raw: Optional[int]
     source_record: dict
     source_schema_keys: list
     volume_parse_status: Optional[str] = None  # MOD 2B-A: ABSENT/OK/NON_FINITE/MALFORMED
+    price_parse_status: Optional[str] = None  # MOD 3A-1: OK/ABSENT/NON_FINITE/MALFORMED
 
 
 @dataclass
@@ -150,6 +157,7 @@ class AuctionExtractionResult:
     invalid_volume_record_count: int = 0
     # 兼容字段：严格等于 valid numeric raw_vol == 0，不含 missing/invalid
     auxiliary_zero_volume_record_count: int = 0
+    invalid_price_count: int = 0  # MOD 3A-1: canonicalization_status == INVALID_PRICE_0925
 
 
 # ===========================================================================
@@ -277,7 +285,28 @@ def _normalize_raw_transaction(
     rec: dict,
 ) -> NormalizedAuctionTransaction:
     raw_time = str(rec.get("time", ""))
-    raw_price = float(rec.get("price", 0.0) or 0.0)
+    price = rec.get("price")
+    # 最小 safe normalization：missing / malformed / non-finite price 不得静默变为 0.0。
+    # 保留 None + price_parse_status，原始 source_record 不变供 canonicalizer 判 INVALID_PRICE。
+    raw_price_value = None
+    price_parse_status = PRICE_PARSE_STATUS_ABSENT
+    if price is None:
+        raw_price_value = None
+        price_parse_status = PRICE_PARSE_STATUS_ABSENT
+    else:
+        try:
+            parsed = float(price)
+            if math.isfinite(parsed):
+                raw_price_value = parsed
+                price_parse_status = PRICE_PARSE_STATUS_OK
+            else:
+                # NaN / inf：保留 None，标记 NON_FINITE
+                raw_price_value = None
+                price_parse_status = PRICE_PARSE_STATUS_NON_FINITE
+        except (TypeError, ValueError):
+            # malformed（如字符串 "bad"）：保留 None，标记 MALFORMED
+            raw_price_value = None
+            price_parse_status = PRICE_PARSE_STATUS_MALFORMED
     vol = rec.get("vol")
     # 最小 safe normalization：malformed vol 不得让整条 source-day runner 崩；
     # 不伪装成 0，保留原始 source_record 供 canonicalizer 判 INVALID。
@@ -308,11 +337,12 @@ def _normalize_raw_transaction(
     return NormalizedAuctionTransaction(
         symbol=symbol, market=market, instrument_id=instrument_id,
         trade_date=trade_date.isoformat(), source_time=raw_time,
-        canonical_time=canonical_time, raw_price=raw_price,
+        canonical_time=canonical_time, raw_price=raw_price_value,
         raw_volume_value=raw_volume_value, raw_amount_value=raw_amount_value,
         buy_sell_raw=buy_sell_raw, source_record=rec,
         source_schema_keys=sorted(rec.keys()),
         volume_parse_status=volume_parse_status,
+        price_parse_status=price_parse_status,
     )
 
 
@@ -358,6 +388,20 @@ def classify_raw_volume(raw_volume_value: Optional[float]) -> str:
     return VOLUME_CLASS_ZERO
 
 
+def is_valid_auction_price(price: Optional[float]) -> bool:
+    """Historical auction price owner validity: finite numeric AND price > 0.
+
+    Only the unique positive-volume selected row is the canonical price owner.
+    """
+    if price is None:
+        return False
+    if not math.isfinite(price):
+        return False
+    if price <= 0:
+        return False
+    return True
+
+
 def canonicalize_auction_0925(
     canonical_records: list[NormalizedAuctionTransaction],
 ) -> Auction0925Canonicalization:
@@ -401,6 +445,22 @@ def canonicalize_auction_0925(
     if pos_n == 1:
         sel = next(r for r, c in zip(canonical_records, classes) if c == VOLUME_CLASS_POSITIVE)
         price = sel.raw_price
+        # Price validity gate：只检查真正的 canonical price owner（unique positive-volume row）。
+        if not is_valid_auction_price(price):
+            return Auction0925Canonicalization(
+                canonicalization_status=CANON_STATUS_INVALID_PRICE,
+                raw_canonical_record_count=raw_n,
+                positive_volume_record_count=pos_n,
+                zero_volume_record_count=zero_n,
+                invalid_volume_record_count=0,
+                auxiliary_zero_volume_record_count=zero_n,
+                selected_record=None,
+                auction_price_raw=None,
+                auction_volume_raw_lots=None,
+                auction_volume_shares=None,
+                auction_amount=None,
+                amount_source_type=None,
+                reason="INVALID_CANONICAL_0925_PRICE")
         raw_lots = sel.raw_volume_value
         shares = raw_lots * AUCTION_LOT_MULTIPLIER
         amount = price * shares
@@ -917,6 +977,9 @@ async def run_corporate_observation(
     obs["auction_amount"] = canon.auction_amount
     obs["auction_amount_source_type"] = canon.amount_source_type
     obs["canonicalization_reason"] = canon.reason
+    # MOD 3A-1: price validity data quality（per symbol）
+    obs["invalid_price_count"] = (
+        1 if canon.canonicalization_status == CANON_STATUS_INVALID_PRICE else 0)
 
     # Lane A
     none_res = await mdas.get_bars(session, inst.instrument_id, adj="none",
@@ -924,6 +987,7 @@ async def run_corporate_observation(
     qfq_res = await mdas.get_bars(session, inst.instrument_id, adj="qfq",
                                   end_date=trade_date, adjustment_as_of=trade_date, limit=10)
     open_bar_T = get_bar_for_date(none_res.bars, trade_date)
+    # INVALID_PRICE_0925 自然落入 Lane A=None / Lane B=None / amount=None
     if canon.canonicalization_status == CANON_STATUS_CANONICAL:
         auction_price = canon.auction_price_raw
         obs["lane_a"] = compute_lane_a(
@@ -946,11 +1010,20 @@ async def run_corporate_observation(
         obs["lane_a"] = None
         obs["lane_b"] = None
 
-    # Volume + Amount evidence（MOD7 / Round 2B）
+    # Volume + Amount evidence（MOD7 / Round 2B / Round 3A-1）
     obs["volume_evidence"] = _compute_volume_from_full_day(
         inst, trade_date, full_day, none_res)
-    obs["amount_evidence"] = compute_amount_evidence(
-        canon.auction_price_raw, canon.auction_volume_shares)
+    # INVALID_VOLUME_0925 / INVALID_PRICE_0925：canon.amount_source_type == None
+    # → amount_evidence 不产生 derived amount，source_type 跟随 canon 为 None。
+    if canon.amount_source_type is None:
+        obs["amount_evidence"] = {
+            "amount_source_type": None,
+            "candidate_derived_amount": None,
+            "evidence_reason": "CANONICAL_INPUT_MISSING",
+        }
+    else:
+        obs["amount_evidence"] = compute_amount_evidence(
+            canon.auction_price_raw, canon.auction_volume_shares)
     obs["raw_amount_value"] = None
     return obs
 
@@ -990,6 +1063,9 @@ async def run_single_observation(
     obs["auction_amount"] = canon.auction_amount
     obs["auction_amount_source_type"] = canon.amount_source_type
     obs["canonicalization_reason"] = canon.reason
+    # MOD 3A-1: price validity data quality（per symbol）
+    obs["invalid_price_count"] = (
+        1 if canon.canonicalization_status == CANON_STATUS_INVALID_PRICE else 0)
 
     none_res = await mdas.get_bars(session, inst.instrument_id, adj="none",
                                    end_date=trade_date, limit=10)
@@ -998,6 +1074,7 @@ async def run_single_observation(
     open_bar_T = get_bar_for_date(none_res.bars, trade_date)
 
     # Lane A/B 仅当 canonicalization == CANONICAL（不是 raw FOUND）
+    # INVALID_PRICE_0925 自然落入 Lane A=None / Lane B=None / amount=None（不增第二套 gate）
     if canon.canonicalization_status == CANON_STATUS_CANONICAL:
         auction_price = canon.auction_price_raw
         obs["lane_a"] = compute_lane_a(
@@ -1014,11 +1091,20 @@ async def run_single_observation(
         obs["lane_a"] = None
         obs["lane_b"] = None
 
-    # Volume + Amount evidence（MOD7 / Round 2B）
+    # Volume + Amount evidence（MOD7 / Round 2B / Round 3A-1）
     obs["volume_evidence"] = _compute_volume_from_full_day(
         inst, trade_date, full_day, none_res)
-    obs["amount_evidence"] = compute_amount_evidence(
-        canon.auction_price_raw, canon.auction_volume_shares)
+    # INVALID_VOLUME_0925 / INVALID_PRICE_0925：canon.amount_source_type == None
+    # → amount_evidence 不产生 derived amount，source_type 跟随 canon 为 None。
+    if canon.amount_source_type is None:
+        obs["amount_evidence"] = {
+            "amount_source_type": None,
+            "candidate_derived_amount": None,
+            "evidence_reason": "CANONICAL_INPUT_MISSING",
+        }
+    else:
+        obs["amount_evidence"] = compute_amount_evidence(
+            canon.auction_price_raw, canon.auction_volume_shares)
     obs["raw_amount_value"] = None
     return obs
 
@@ -1210,6 +1296,9 @@ def compute_data_quality_summary(observations: list[dict]) -> dict:
     invalid_volume_count = sum(
         1 for o in observations
         if o.get("canonicalization_status") == CANON_STATUS_INVALID_VOLUME)
+    invalid_price_count = sum(
+        1 for o in observations
+        if o.get("canonicalization_status") == CANON_STATUS_INVALID_PRICE)
     aux_zero_count = sum(
         o.get("auxiliary_zero_volume_record_count", 0) for o in observations)
     invalid_volume_record_count = sum(
@@ -1226,6 +1315,7 @@ def compute_data_quality_summary(observations: list[dict]) -> dict:
         "no_volume_bearing_count": no_volume_bearing_count,
         "multiple_volume_bearing_count": multiple_volume_bearing_count,
         "invalid_volume_count": invalid_volume_count,
+        "invalid_price_count": invalid_price_count,
         "auxiliary_zero_volume_record_count": aux_zero_count,
         "invalid_volume_record_count": invalid_volume_record_count,
         "denominator_note": "pagination COMPLETE only enters auction semantics denominator; "
@@ -1298,12 +1388,14 @@ def write_evidence_outputs(output_dir, as_of, observations, corporate_cases,
                  "zero_volume_record_count": o.get("zero_volume_record_count"),
                  "invalid_volume_record_count": o.get("invalid_volume_record_count"),
                  "auxiliary_zero_volume_record_count": o.get("auxiliary_zero_volume_record_count"),
+                 "invalid_price_count": o.get("invalid_price_count"),
                  "canonicalization_status": o.get("canonicalization_status")}
                 for o in observations],
                ["symbol", "market", "trade_date", "full_day_status", "extraction_status",
                 "raw_canonical_record_count", "positive_volume_record_count",
                 "zero_volume_record_count", "invalid_volume_record_count",
-                "auxiliary_zero_volume_record_count", "canonicalization_status"])
+                "auxiliary_zero_volume_record_count", "invalid_price_count",
+                "canonicalization_status"])
 
     # 07 corporate cases（alias of 02, kept for compatibility）
     _write_csv(output_dir / "07_corporate_action_cases.csv", corporate_cases, [
@@ -1365,6 +1457,9 @@ def write_evidence_outputs(output_dir, as_of, observations, corporate_cases,
             "INVALID_VOLUME_0925": sum(
                 1 for o in observations
                 if o.get("canonicalization_status") == CANON_STATUS_INVALID_VOLUME),
+            "INVALID_PRICE_0925": sum(
+                1 for o in observations
+                if o.get("canonicalization_status") == CANON_STATUS_INVALID_PRICE),
         },
         "runner_conclusion": "AUCTION_0925_CANONICAL_CONTRACT_FROZEN",
     })

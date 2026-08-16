@@ -1347,3 +1347,138 @@ def test_amount_evidence_frozen_derived_contract():
     amt = mod.compute_amount_evidence(12.94, 500)
     assert amt["amount_source_type"] == mod.AMOUNT_SOURCE_DERIVED_PRICE_X_NORMALIZED_VOLUME
     assert amt["candidate_derived_amount"] == 12.94 * 500
+
+
+# ---------------------------------------------------------------------------
+# ROUND 3A-1 — Historical 09:25 Price Validity Contract
+# ---------------------------------------------------------------------------
+def _mk_rec_price(price_raw, vol, price_parse_status=None, t="09:25"):
+    """Build a NormalizedAuctionTransaction with explicit raw_price (may be None)."""
+    return mod.NormalizedAuctionTransaction(
+        symbol="600000", market="SH",
+        instrument_id="00000000-0000-0000-0000-000000000001",
+        trade_date="2026-08-14", source_time=t, canonical_time="09:25",
+        raw_price=price_raw,
+        raw_volume_value=float(vol) if vol is not None else None,
+        raw_amount_value=None,
+        buy_sell_raw=2,
+        source_record={"time": t, "price": price_raw,
+                       "vol": float(vol) if vol is not None else None,
+                       "buyorsell": 2},
+        source_schema_keys=["time", "price", "vol", "buyorsell"],
+        price_parse_status=price_parse_status,
+    )
+
+
+def test_is_valid_auction_price_helper():
+    """P-contract helper: None / 0 / negative / non-finite invalid; positive valid."""
+    assert mod.is_valid_auction_price(10.0) is True
+    assert mod.is_valid_auction_price(None) is False
+    assert mod.is_valid_auction_price(0.0) is False
+    assert mod.is_valid_auction_price(-1.0) is False
+    assert mod.is_valid_auction_price(float("nan")) is False
+    assert mod.is_valid_auction_price(float("inf")) is False
+
+
+def test_normalize_price_missing_does_not_become_zero():
+    """P-defect guard: missing price → raw_price=None + ABSENT, not 0.0."""
+    rec = {"time": "09:25", "vol": 5, "buyorsell": 2}  # no price key
+    n = mod._normalize_raw_transaction("600000", "SH", "0001", date(2026, 8, 14), rec)
+    assert n.raw_price is None
+    assert n.price_parse_status == mod.PRICE_PARSE_STATUS_ABSENT
+
+
+def test_normalize_price_malformed_does_not_crash():
+    """P5: source price='bad' → no crash, price_parse_status=MALFORMED."""
+    rec = {"time": "09:25", "price": "bad", "vol": 5, "buyorsell": 2}
+    n = mod._normalize_raw_transaction("600000", "SH", "0001", date(2026, 8, 14), rec)
+    assert n.raw_price is None
+    assert n.price_parse_status == mod.PRICE_PARSE_STATUS_MALFORMED
+
+
+def test_normalize_price_nan_inf_non_finite():
+    """P6: NaN / inf → price_parse_status=NON_FINITE, raw_price=None."""
+    for bad in ["nan", "inf", "-inf"]:
+        rec = {"time": "09:25", "price": bad, "vol": 5, "buyorsell": 2}
+        n = mod._normalize_raw_transaction("600000", "SH", "0001", date(2026, 8, 14), rec)
+        assert n.raw_price is None, bad
+        assert n.price_parse_status == mod.PRICE_PARSE_STATUS_NON_FINITE, bad
+
+
+def test_canonicalize_single_positive_price_none_invalid():
+    """P2: single positive row, price=None → INVALID_PRICE_0925, all facts None."""
+    c = mod.canonicalize_auction_0925([_mk_rec_price(None, 5)])
+    assert c.canonicalization_status == mod.CANON_STATUS_INVALID_PRICE
+    assert c.auction_price_raw is None
+    assert c.auction_volume_raw_lots is None
+    assert c.auction_volume_shares is None
+    assert c.auction_amount is None
+    assert c.amount_source_type is None
+
+
+def test_canonicalize_single_positive_price_zero_invalid():
+    """P3: single positive row, price=0 → INVALID_PRICE_0925."""
+    c = mod.canonicalize_auction_0925([_mk_rec_price(0.0, 5)])
+    assert c.canonicalization_status == mod.CANON_STATUS_INVALID_PRICE
+    assert c.auction_price_raw is None
+
+
+def test_canonicalize_single_positive_price_negative_invalid():
+    """P4: single positive row, price=-1 → INVALID_PRICE_0925."""
+    c = mod.canonicalize_auction_0925([_mk_rec_price(-1.0, 5)])
+    assert c.canonicalization_status == mod.CANON_STATUS_INVALID_PRICE
+    assert c.auction_price_raw is None
+
+
+def test_canonicalize_single_positive_price_malformed_invalid():
+    """P5/P6: selected price invalid (None from malformed) → INVALID_PRICE_0925."""
+    c = mod.canonicalize_auction_0925([
+        _mk_rec_price(None, 5, mod.PRICE_PARSE_STATUS_MALFORMED)])
+    assert c.canonicalization_status == mod.CANON_STATUS_INVALID_PRICE
+    assert c.auction_price_raw is None
+
+
+def test_canonicalize_aux_invalid_price_does_not_pollute():
+    """CRITICAL AUX: zero-vol aux has invalid/malformed price, positive row valid → CANONICAL 12.94."""
+    c = mod.canonicalize_auction_0925([
+        _mk_rec_price(None, 0, mod.PRICE_PARSE_STATUS_ABSENT, t="09:25:00"),
+        _mk_rec_price(12.94, 5, mod.PRICE_PARSE_STATUS_OK, t="09:25:01"),
+    ])
+    assert c.canonicalization_status == mod.CANON_STATUS_CANONICAL
+    assert c.auction_price_raw == 12.94
+    assert c.auction_volume_shares == 500
+
+
+def test_observation_true_integration_invalid_price_blocked():
+    """ROUND 3A-1: TRUE observation integration.
+
+    Single positive-volume row with malformed price → INVALID_PRICE_0925.
+    Lane A/B None, amount None, no derived amount.
+    """
+    session = _FakeSession([_make_inst("SH", "600000")])
+    inst = mod.SampleInstrument("600000", "SH", str(uuid4()), "SH_MAIN",
+                                "ordinary", "routine")
+    pages = {
+        "600000": [
+            {"time": "09:25", "price": "bad", "vol": 5, "buyorsell": 2},
+        ]
+    }
+    mdas = _FakeMdas(bars_by_id={
+        str(inst.instrument_id): _bars_from([
+            (date(2024, 1, 5), 12.0, 12.1, 1000),
+            (date(2024, 1, 8), 12.8, 12.9, 1000),
+        ])
+    })
+    adapter = _FakeAdapter(lambda m, code, start, count, d: {0: pages.get(code, [])})
+
+    obs = asyncio.run(
+        mod.run_single_observation(mdas, adapter, session, inst, date(2024, 1, 8)))
+
+    assert obs["canonicalization_status"] == mod.CANON_STATUS_INVALID_PRICE
+    assert obs["invalid_price_count"] == 1
+    assert obs["auction_price_raw"] is None
+    assert obs["auction_volume_shares"] is None
+    assert obs["auction_amount"] is None
+    assert obs["lane_a"] is None
+    assert obs["lane_b"] is None
+    assert obs["amount_evidence"]["amount_source_type"] is None

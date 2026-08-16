@@ -1,11 +1,11 @@
-# CHANGE-20260816-001 — Auction Historical 09:25 Canonicalization Contract Freeze (+ Round 2B-A Corrective Closure)
+# CHANGE-20260816-001 — Auction Historical 09:25 Canonicalization Contract Freeze (+ Round 2B-A / Round 3A-1 Corrective Closure)
 
 - **日期**: 2026-08-16
 - **类型**: contract-freeze + experiment-runner implementation（Exploration）
 - **领域**: Auction 历史竞价源 (`pytdx` historical transaction) 09:25 canonical record 归一化
 - **关联 PRD**: `docs/prd/75-auction-analysis.md`（§AU-04-4）
 - **关联实验**: `experiments/pytdx_auction_history/`（runner + tests + replay）
-- **决策证据**: run_live2（REAL ENVIRONMENT Round 1 RETRY）+ Round 2A MULTIPLE_0925 Semantics Closeout + Round 2B-A corrective closure
+- **决策证据**: run_live2（REAL ENVIRONMENT Round 1 RETRY）+ Round 2A MULTIPLE_0925 Semantics Closeout + Round 2B-A / Round 3A-1 corrective closure
 - **状态**: `implemented_unconfirmed`（代码 + 测试通过，待用户/ChatGPT 远端 SHA 审核）
 
 ## 1. Why（背景）
@@ -70,6 +70,28 @@ Raw status（source multiplicity）与 Canonicalization status（business usabil
 production backend / frontend / migration / API / scheduler / worker / 重新请求 pytdx /
 120-day backfill / threshold calibration。run_live2 原 evidence 未改。
 
-## 7. 后续
+## 7. Round 3A-1 Corrective Closure — Price Validity
+
+- **性质**: MINIMAL CONTRACT CORRECTION（仅关闭 silent missing-price→0 风险）
+- **原始 defect**: `_normalize_raw_transaction` 中 `raw_price = float(rec.get("price", 0.0) or 0.0)` 把 missing / empty / None / `""` / `0` 全部静默归一为 `0.0`，伪装成真实 auction price = 0，导致 `auction_price=0 / gap≈-100% / amount=0` 的 silent bad fact。
+- **修复合同**:
+  - raw price normalization 不再 `missing → 0.0`；`raw_price: Optional[float]`，`price_parse_status ∈ {OK, ABSENT, NON_FINITE, MALFORMED}`，原始 `source_record` 不变。
+  - 新增 `is_valid_auction_price(price)`: price is not None AND finite AND price > 0。
+  - canonicalization 第 4 步（恰好 1 positive-volume row）之后增加 price 校验：invalid → `INVALID_PRICE_0925`（price/volume/amount=None, amount_source_type=None, Lane A/B=None）；valid → `CANONICAL`。
+  - **volume precedence 不变**：INVALID_VOLUME_0925 → MULTIPLE → NO_VOLUME → 1 positive（再查 price）。
+  - **zero-volume auxiliary row price 不参与 price validity gate**：auxiliary invalid price 不阻止 canonicalization（601012 12.95 vs 12.94 场景保持 CANONICAL 12.94）。
+  - 仅区分 valid vs invalid，不另设 `ZERO_PRICE` / `NEGATIVE_PRICE` / `MALFORMED_PRICE` 业务 status。
+- **实现变更（runner）**:
+  - 新增常量 `CANON_STATUS_INVALID_PRICE="INVALID_PRICE_0925"` 与 `PRICE_PARSE_STATUS_*`
+  - `is_valid_auction_price()` helper；`_normalize_raw_transaction` price safe normalization
+  - `NormalizedAuctionTransaction`：`raw_price` 改 `Optional[float]`，新增 `price_parse_status`
+  - `canonicalize_auction_0925` 第 4 步 price gate
+  - `run_single_observation` / `run_corporate_observation` 增加 `obs["invalid_price_count"]`（per symbol）
+  - `compute_data_quality_summary` / 06 CSV / 11 `canonicalization_contract` 增加 `invalid_price_count` / `INVALID_PRICE_0925`
+- **测试（PURE）**: 新增 `is_valid_auction_price` helper、normalize missing/malformed/nan/inf、`single positive price=None/0/-1/malformed → INVALID_PRICE_0925`、aux invalid price 不污染、以及 1 个 **TRUE observation integration**（`run_single_observation` 真实穿过 → INVALID_PRICE_0925，Lane A/B/amount=None，无 derived amount）。
+- **Replay（immutable run_live2）**: 应用新 canonicalizer；INVALID_PRICE 预期可能为 0，由 replay 实际证明；601012/2026-08-11 selected price=12.94 保持。
+- 整文件 collect-only 重新记录；全量 ×2 仍 pass / exit 0。
+
+## 8. 后续
 
 经 ChatGPT 审核远端 SHA 后，再决定是否正式启动 120-day full-market historical research backfill。

@@ -184,6 +184,21 @@ invalid_rows  = [row for row in canonical_rows if classify_raw_volume(row.raw_vo
 - **不再要求**所有 canonical 09:25 raw rows 具有相同 price；
 - zero-volume auxiliary row 本来就不是 canonical price owner（这正是 601012 / 2026-08-11 出现 `12.95 vs 12.94` 1 分差异的正确解释）。
 
+#### Price Validity（Round 3A-1 corrective closure）
+
+- historical auction price 来自 **unique positive-volume selected row**；
+- 该 selected row 的 price 必须满足 **finite numeric AND price > 0**，才允许成为 `auction_price_raw`；
+- 否则 `canonicalization_status = INVALID_PRICE_0925`，并阻止：
+  - `auction_price_raw` / `auction_volume_raw_lots` / `auction_volume_shares` / `auction_amount` 全部 = `None`；
+  - `amount_source_type = None`，不产生 derived amount；
+  - Lane A / Lane B = `None`；
+  - price / volume fact publication 与 amount 发表被阻止。
+- **Price validity 只检查真正的 canonical price owner（unique positive-volume row）**；zero-volume auxiliary row 的 price 不参与 price validity gate，不得因 auxiliary invalid price 阻止 canonicalization。
+- raw price normalization：**missing / empty / malformed / NaN / inf** 不得静默变为 `0.0`；
+  `price_parse_status ∈ {OK, ABSENT, NON_FINITE, MALFORMED}`，原始 `source_record` 不变。
+- `INVALID_PRICE_0925` 仅区分 valid vs invalid；具体 parse reason 留在 `price_parse_status`，不另设 `ZERO_PRICE` / `NEGATIVE_PRICE` / `MALFORMED_PRICE` 业务 status。
+- volume precedence 不变：INVALID_VOLUME_0925 → MULTIPLE → NO_VOLUME → 1 positive（再查 price）。
+
 #### Volume / Unit 合同
 
 - Pytdx historical transaction raw `vol` 单位 = **LOT**；`1 LOT = 100 shares`（已接受）；
