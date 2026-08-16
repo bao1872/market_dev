@@ -95,3 +95,76 @@
 - RUNNER = **READY**（tests PASS；live 120-bar 未运行）。
 - DELISTING lifecycle = OUT OF SCOPE。
 - FULL 120-BAR LIVE BACKFILL = NOT RUN（下一轮经审核后启动）。
+
+## 14. Round 3B-B1 — LIVE-PATH INTEGRITY CLOSURE（2026-08-16）
+
+最小 live-wiring / evidence 修正，不重新设计 120-bar / IPO / source / canonicalization / qfq / delisting / Scope。
+
+### FIX 1 — REAL INSTRUMENT ID
+- `_to_sample_inst` 改用真实 ORM 主键 `Instrument.id`（UUID），不再用不存在的 `instrument_id`。
+- 不新增 alias/property；真实 `Instrument` ORM contract regression 覆盖。
+
+### FIX 2 — REAL PYTDX ADAPTER WIRING
+- `_bars_loop(session, adapter_for_run)` 显式接收 adapter；所有 partition 调用用它。
+- 注入路径传 injected adapter；真实路径传 `with PytdxAdapter() as real_adapter` 的 real_adapter。
+- 禁止 global adapter fallback；monkeypatch PytdxAdapter 为 sentinel context manager，
+  断言 run_single_obs 收到 sentinel，真实 branch wiring 被测试覆盖。
+
+### FIX 3 — POPULATION CONTRACT
+- 简化合同：`Backfill population(T) = CURRENT CANONICAL SH/SZ A-SHARE SET ∩ listing_date <= T`。
+- 新增 experiment-local `resolve_backfill_population_at(session, T)`：复用
+  `feature_snapshot_service.get_active_a_share_instruments`（current canonical anchor）+
+  SQL（`Instrument.id IN canonical AND market in SH/SZ AND stock_symbol_sql_filter AND
+  listing_date IS NOT NULL AND listing_date <= T`）。
+- 不修改 `instrument_lifecycle_service`；status 不作历史 lifecycle rule。
+
+### LISTING-DATE COVERAGE PRE-FLIGHT
+- 真实 live run 前 `check_listing_date_coverage`：total/present/missing；missing==0 否则
+  `STOP` + `LISTING_DATE_COVERAGE_GAP`，不自动 fallback，本轮不全市场 sync。
+
+### FIX 4 — BOARD CONTRACT
+- 冻结 labels：`SH_MAIN / SZ_MAIN / CHINEXT / STAR`；创业板 300/301/302...→`CHINEXT`（禁 `SZ_GEM`）。
+- 四类 board 测试锁定。
+
+### FIX 5 + ADJUSTMENT LINEAGE — LANE B PROJECTION
+- `previous_close_raw = lane_b["raw_close_Tm1"]`；`previous_close_pit_qfq = lane_b["qfq_close_Tm1"]`。
+- `adjustment_as_of`（= target，该 historical T 的 PIT qfq anchor）与 `adj_factor_hash` **分开**；
+  `compute_lane_b` 输出 `adjustment_as_of` + `adj_factor_hash`；runner 各自投影。
+
+### FIX 6 — QFQ DEGRADED DIRECT TEST
+- `test_auction_history_semantics_validation.py` 新增直接 `compute_lane_b` regression：
+  degraded=True → `PIT_ADJUSTMENT_DEGRADED` + `pit_gap=None` + raw/qfq close + adjustment lineage preserved；
+  healthy control → `COMPUTED` + pit_gap valid。
+
+### FIX 7 — COMPLETED RESUME SAFETY（三态）
+- `_partition_resume_decision(existing_manifest, expected_metadata)`：
+  `NO_EXISTING→RERUN`；`COMPLETED+match→SKIP`；`COMPLETED+mismatch→BLOCK`（raise
+  `CompletedPartitionMetadataMismatch`）；`RUNNING/FAILED→RERUN`。
+- runner 顺序：先 resolve population 得 expected_eligible，再读 existing manifest 决定。
+
+### FIX 8 — ROOT MANIFEST AGGREGATION
+- `_accumulate_partition_quality(root, manifest, data_quality)` 累计 eligible/member_rows/
+  source/canonical aggregate/lane counts/pit_gap counts；fresh 与 resume-skip 的 completed bar 都累计。
+- resume 后 root totals 与首次一致（regression 覆盖）。
+
+### FIX 9 — PARTITION RECONCILIATION
+- 机械 reconcile：`member_rows_written == sum(frozen source)`；`UNKNOWN source → FAILED`；
+  `COMPLETE count == sum(frozen canonical)`；source-incomplete canonicalization 必须 None；
+  `RUN_ERROR → FAILED`。不引入新业务 status。
+
+### FIX 10 — RUNTIME CODE SHA
+- 移除模块级 stale `BASELINE_SHA`；`run_backfill(code_sha=...)` 用 runtime code SHA（live = `git rev-parse HEAD`；
+  测试显式注入）。manifest/rows/resume 统一 `code_sha`。`code_sha` 改变 → existing COMPLETED 必须 BLOCK。
+
+### VERIFICATION（全部 PASS）
+- backfill 新测试 **23** collected/passed ×2；Auction semantics **71** collected/passed ×2（原 69 + 2 FIX 6）；
+  lifecycle 29 + pytdx adapter 2 = 31 passed；git diff --check PASS。
+- LIVE 120-BAR FULL-MARKET = **NOT RUN**。
+
+### CHANGED FILES（Round 3B-B1）
+- `M experiments/pytdx_auction_history/full_market_member_fact_backfill.py`
+- `M experiments/pytdx_auction_history/tests/test_full_market_member_fact_backfill.py`
+- `M experiments/pytdx_auction_history/auction_history_semantics_validation.py`（仅 adjustment_as_of lineage）
+- `M experiments/pytdx_auction_history/tests/test_auction_history_semantics_validation.py`（仅 FIX 6 direct qfq degraded regression）
+
+PRD 不再修改（120-bar wording 已正确）。

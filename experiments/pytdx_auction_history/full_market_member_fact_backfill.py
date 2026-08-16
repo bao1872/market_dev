@@ -1,4 +1,4 @@
-"""Auction Full-market 120-Bar Member Fact Backfill Runner — Round 3B-B.
+"""Auction Full-market 120-Bar Member Fact Backfill Runner — Round 3B-B / 3B-B1.
 
 职责：全市场 Auction Member Fact 历史回补的 orchestration。
 
@@ -10,27 +10,26 @@
 - 窗口中途 IPO 股票不会向上市前扩展凑满 120 条。
 - delisting lifecycle OUT OF SCOPE；Instrument.status 不得作为历史 eligibility 条件。
 
-数据来源（全部复用既有 owner，禁止第二套算法）：
-- previous_trading_dates()         official calendar
-- resolve_listed_a_share_instruments_at()   canonical SH/SZ identity + listing boundary
-- Instrument.listing_date          IPO rule
-- MarketDataAggregationService     MDAS（Lane A 开盘 / qfq previous close）
-- AdjustmentFactorService          PIT qfq
-- PytdxAdapter                     historical 09:25 transaction tape
-- run_single_observation()         canonicalization / Lane A / Lane B / corporate
-- auction canonicalization / PIT qfq / volume validity
+population（Round 3B-B1 简化合同）：
+- Backfill population(T) = CURRENT CANONICAL SH/SZ A-SHARE SET ∩ listing_date <= T。
+- current canonical anchor = feature_snapshot_service.get_active_a_share_instruments(session)。
+- resolve_backfill_population_at(session, T) 复用 get_active_a_share_instruments + SQL
+  （Instrument.id IN canonical AND market in SH/SZ AND stock_symbol_sql_filter AND
+   listing_date IS NOT NULL AND listing_date <= T）。
+- 不修改 instrument_lifecycle_service。
+
+qfq degraded fail-close：pit_gap=None + lane_b.status=PIT_ADJUSTMENT_DEGRADED（compute_lane_b）。
+adjustment_as_of = target（该 historical T 的 PIT qfq anchor）；adj_factor_hash 单独保留。
 
 输出：FILE EVIDENCE ONLY（不新建 production member-fact DB table / migration / API / frontend）。
-qfq degraded fail-close：pit_gap=None + lane_b.status=PIT_ADJUSTMENT_DEGRADED（已在
-auction_history_semantics_validation.compute_lane_b 收口）。
-
-本轮 NO FULL LIVE RUN：只实现 runner + 测试 + commit/push。
+本轮仍 NO FULL LIVE RUN：只做 live-path wiring closure + 测试 + commit/push。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import traceback
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -39,11 +38,14 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # 权威 owner（禁止第二套 market logic / calendar / qfq 重算）
 # ---------------------------------------------------------------------------
+from sqlalchemy import select
+
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.services.instrument_lifecycle_service import (
-    resolve_listed_a_share_instruments_at,
+    stock_symbol_sql_filter,
 )
+from app.services.feature_snapshot_service import get_active_a_share_instruments
 from app.core.pytdx_adapter import PytdxAdapter
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 
@@ -53,8 +55,8 @@ from auction_history_semantics_validation import (
     previous_trading_dates,
 )
 
-# 本轮 baseline：Round 3B-A1-R2A 收口 SHA（cf2b5ca）。
-BASELINE_SHA = "cf2b5ca12d23e931da5c40a3f99cf4c638d821b4"
+# 可在此覆写（live CLI / 测试显式注入）；默认不写死旧 SHA。
+DEFAULT_CODE_SHA: str | None = None
 
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = (
@@ -65,32 +67,58 @@ AS_OF = date(2026, 8, 14)
 BAR_COUNT = 120
 RUN_ID_PREFIX = "member_fact_120bar"
 
+# 冻结 source / canonical statuses（机械 reconciliation，不引入新业务 status）
+_SOURCE_FROZEN = {
+    "COMPLETE", "EMPTY", "SOURCE_ERROR",
+    "PAGINATION_STALLED", "PAGINATION_LIMIT_REACHED",
+}
+_CANONICAL_FROZEN = {
+    "CANONICAL", "NO_VOLUME_BEARING_0925", "MULTIPLE_VOLUME_BEARING_0925",
+    "INVALID_VOLUME_0925", "INVALID_PRICE_0925",
+}
+
 
 # ---------------------------------------------------------------------------
-# board 派生（Instrument 不含 board 字段，由 market + symbol 推导）
+# runtime code SHA（FIX 10）
+# ---------------------------------------------------------------------------
+def _git_head_sha() -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        )
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# board 派生（冻结 labels：SH_MAIN / SZ_MAIN / CHINEXT / STAR）— FIX 4
 # ---------------------------------------------------------------------------
 def _board_for_symbol(symbol: str, market: str) -> str:
     s = symbol.strip()
     if market == "SH":
         if s.startswith("688"):
-            return "STAR"  # 科创板
+            return "STAR"
         if s.startswith("60"):
-            return "SH_MAIN"  # 沪市主板
-        return "SH_OTHER"
+            return "SH_MAIN"
+        return "OTHER"
     if market == "SZ":
         if s.startswith("30"):
-            return "SZ_GEM"  # 创业板
+            return "CHINEXT"  # 创业板 300/301/302...（禁止 SZ_GEM）
         if s.startswith("00") or s.startswith("02"):
-            return "SZ_MAIN"  # 深市主板
-        return "SZ_OTHER"
+            return "SZ_MAIN"
+        return "OTHER"
     return "OTHER"
 
 
+# ---------------------------------------------------------------------------
+# Instrument → SampleInstrument（FIX 1：真实 ORM id）
+# ---------------------------------------------------------------------------
 def _to_sample_inst(inst: Instrument) -> SampleInstrument:
     return SampleInstrument(
         symbol=inst.symbol,
         market=inst.market,
-        instrument_id=inst.instrument_id,
+        instrument_id=inst.id,  # 真实 ORM UUID 主键（不是 instrument_id）
         board=_board_for_symbol(inst.symbol, inst.market),
         coverage_tag="all_a_share",
         cohort="routine",
@@ -98,11 +126,69 @@ def _to_sample_inst(inst: Instrument) -> SampleInstrument:
 
 
 # ---------------------------------------------------------------------------
-# partition 状态
+# population resolver（FIX 3）：current canonical ∩ listing_date<=T
+# ---------------------------------------------------------------------------
+async def resolve_backfill_population_at(
+    session,
+    trade_date: date,
+) -> list[Instrument]:
+    canonical_ids = await get_active_a_share_instruments(session)
+    if not canonical_ids:
+        return []
+    stmt = (
+        select(Instrument)
+        .where(
+            Instrument.id.in_(canonical_ids),
+            Instrument.market.in_(("SH", "SZ")),
+            stock_symbol_sql_filter(Instrument),
+            Instrument.listing_date.is_not(None),
+            Instrument.listing_date <= trade_date,
+        )
+        .order_by(Instrument.symbol)
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# listing-date coverage preflight（FIX 3 preflight）
+# ---------------------------------------------------------------------------
+async def check_listing_date_coverage(session) -> dict:
+    canonical_ids = await get_active_a_share_instruments(session)
+    if not canonical_ids:
+        return {
+            "total_current_population": 0,
+            "listing_date_present": 0,
+            "listing_date_missing": 0,
+        }
+    rows = list(
+        (await session.execute(
+            select(Instrument).where(Instrument.id.in_(canonical_ids))
+        )).scalars().all()
+    )
+    present = sum(1 for r in rows if r.listing_date is not None)
+    missing = sum(1 for r in rows if r.listing_date is None)
+    return {
+        "total_current_population": len(rows),
+        "listing_date_present": present,
+        "listing_date_missing": missing,
+    }
+
+
+# ---------------------------------------------------------------------------
+# partition 状态 / resume decision（FIX 7 三态）
 # ---------------------------------------------------------------------------
 PARTITION_STATUS_RUNNING = "RUNNING"
 PARTITION_STATUS_COMPLETED = "COMPLETED"
 PARTITION_STATUS_FAILED = "FAILED"
+
+RESUME_SKIP = "SKIP_COMPLETED_MATCH"
+RESUME_RERUN = "RERUN_INCOMPLETE"
+RESUME_BLOCK = "BLOCK_COMPLETED_MISMATCH"
+
+
+class CompletedPartitionMetadataMismatch(RuntimeError):
+    """COMPLETED partition 存在 metadata mismatch，禁止覆盖。"""
 
 
 def _now_iso() -> str:
@@ -120,11 +206,38 @@ def _write_json(path: Path, payload: Any) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
 
 
+def _expected_partition_metadata(trade_date: date, bar_index: int,
+                                code_sha: str, eligible: int) -> dict:
+    return {
+        "trade_date": trade_date.isoformat(),
+        "bar_index": bar_index,
+        "code_sha": code_sha,
+        "as_of": AS_OF.isoformat(),
+        "eligible_instruments": eligible,
+    }
+
+
+def _partition_resume_decision(existing_manifest: dict | None,
+                               expected_metadata: dict) -> str:
+    """FIX 7 三态：NO_EXISTING→RERUN；COMPLETED+match→SKIP；
+    COMPLETED+mismatch→BLOCK；RUNNING/FAILED→RERUN。"""
+    if existing_manifest is None:
+        return RESUME_RERUN
+    status = existing_manifest.get("status")
+    if status == PARTITION_STATUS_COMPLETED:
+        for k, v in expected_metadata.items():
+            if existing_manifest.get(k) != v:
+                return RESUME_BLOCK
+        return RESUME_SKIP
+    return RESUME_RERUN
+
+
 # ---------------------------------------------------------------------------
-# 单列 row 投影（机械 projection，不 invent 字段）
+# 单列 row 投影（机械 projection，不 invent 字段）— FIX 5 / ADJUSTMENT LINEAGE
 # ---------------------------------------------------------------------------
 def _project_member_row(obs: dict, trade_date: date, bar_index: int,
-                        listing_date: date | None = None) -> dict:
+                        listing_date: date | None = None,
+                        code_sha: str | None = None) -> dict:
     lane_a = obs.get("lane_a") or {}
     lane_b = obs.get("lane_b") or {}
     inst = obs.get("instrument") or {}
@@ -162,25 +275,26 @@ def _project_member_row(obs: dict, trade_date: date, bar_index: int,
         "price_exact_match": lane_a.get("price_exact_match"),
         "price_diff_abs": lane_a.get("price_diff_abs"),
         "price_diff_rel": lane_a.get("price_diff_rel"),
-        # LANE B
+        # LANE B（FIX 5：机械映射 lane_b ACTUAL keys）
         "lane_b_status": lane_b.get("status"),
-        "previous_close_raw": lane_b.get("previous_close_raw"),
-        "previous_close_pit_qfq": lane_b.get("previous_close_pit_qfq"),
+        "previous_close_raw": lane_b.get("raw_close_Tm1"),
+        "previous_close_pit_qfq": lane_b.get("qfq_close_Tm1"),
         "naive_raw_gap": lane_b.get("naive_raw_gap"),
         "pit_gap": lane_b.get("pit_gap"),
-        # LINEAGE / QUALITY
+        # LINEAGE / QUALITY（ADJUSTMENT LINEAGE：adjustment_as_of 与 adj_factor_hash 分开）
         "mdas_data_source": lane_b.get("mdas_data_source"),
         "degraded": lane_b.get("mdas_degraded"),
         "degraded_reason": lane_b.get("mdas_degraded_reason"),
-        "adjustment_as_of": lane_b.get("adj_factor_hash"),
-        "baseline_sha": BASELINE_SHA,
+        "adjustment_as_of": lane_b.get("adjustment_as_of"),
+        "adj_factor_hash": lane_b.get("adj_factor_hash"),
+        "code_sha": code_sha,
         "as_of": AS_OF.isoformat(),
     }
     return row
 
 
 # ---------------------------------------------------------------------------
-# 单 bar partition 执行 + reconcile
+# 单 bar partition 执行 + 机械 reconcile（FIX 9）
 # ---------------------------------------------------------------------------
 async def _run_bar_partition(
     run_id: str,
@@ -193,12 +307,12 @@ async def _run_bar_partition(
     session: Any = None,
     output_root: Path | None = None,
     listing_date_by_symbol: dict[str, date] | None = None,
+    code_sha: str | None = None,
 ) -> dict:
     pdir = _partition_dir(run_id, trade_date, output_root)
     pdir.mkdir(parents=True, exist_ok=True)
     listing_date_by_symbol = listing_date_by_symbol or {}
 
-    # 1) 当前 bar 的 canonical population（已在外部按 listing_date <= T 过滤）
     sample_insts = population
     eligible = len(sample_insts)
 
@@ -209,6 +323,7 @@ async def _run_bar_partition(
     lane_b_computed = 0
     pit_gap_unavailable = 0
     pit_gap_adj_degraded = 0
+    run_error = 0
 
     for inst in sample_insts:
         listing_date = listing_date_by_symbol.get(inst.symbol)
@@ -216,7 +331,7 @@ async def _run_bar_partition(
             obs = await run_single_obs(
                 mdas, adapter, session, inst, trade_date
             )
-        except Exception as exc:  # 单只失败不污染整 bar
+        except Exception as exc:  # 单只失败不污染整 bar，但整 bar 判 FAILED
             rows.append({
                 "trade_date": trade_date.isoformat(),
                 "bar_index": bar_index,
@@ -230,36 +345,67 @@ async def _run_bar_partition(
                 "canonicalization_status": None,
                 "canonicalization_reason": f"run_single_observation: {type(exc).__name__}: {exc}",
                 "error": str(exc),
-                "baseline_sha": BASELINE_SHA,
+                "code_sha": code_sha,
                 "as_of": AS_OF.isoformat(),
             })
-            source_status_agg["RUN_ERROR"] = source_status_agg.get("RUN_ERROR", 0) + 1
+            run_error += 1
             continue
 
-        row = _project_member_row(obs, trade_date, bar_index, listing_date)
+        row = _project_member_row(obs, trade_date, bar_index, listing_date, code_sha)
         rows.append(row)
 
         fds = row["full_day_status"] or "UNKNOWN"
         source_status_agg[fds] = source_status_agg.get(fds, 0) + 1
-        cstat = row["canonicalization_status"] or "UNKNOWN"
-        canonical_status_agg[cstat] = canonical_status_agg.get(cstat, 0) + 1
+        # canonicalization 只对 COMPLETE source 有意义；source-incomplete 必须 None
+        if row["full_day_status"] == "COMPLETE":
+            cstat = row["canonicalization_status"] or "UNKNOWN"
+            canonical_status_agg[cstat] = canonical_status_agg.get(cstat, 0) + 1
         if row["lane_a_status"] == "COMPUTED":
             lane_a_computed += 1
         if row["lane_b_status"] == "COMPUTED":
             lane_b_computed += 1
         if row["lane_b_status"] == "PIT_ADJUSTMENT_DEGRADED":
             pit_gap_adj_degraded += 1
-        # pit_gap unavailable：lane_b 不为 COMPUTED 且无有效 pit_gap
         if row["lane_b_status"] != "COMPUTED" or row["pit_gap"] is None:
             pit_gap_unavailable += 1
 
     written = len(rows)
 
-    # reconcile（fail-closed）
-    # - 每个 eligible instrument 必须恰好产生一行 → 否则 rows missing / FAILED (B10)
-    # - 任何 RUN_ERROR（observation 崩溃）整 bar 失败
-    run_error = source_status_agg.get("RUN_ERROR", 0)
-    reconciled = (eligible == written) and (run_error == 0)
+    # FIX 9 机械 reconcile：
+    # - member_rows_written == sum(frozen source statuses) + RUN_ERROR（若 0）
+    # - 任何 UNKNOWN source status → FAILED（不接受）
+    # - COMPLETE count == sum(frozen canonical statuses)
+    # - source-incomplete rows canonicalization_status 必须 None
+    # - 任何 RUN_ERROR → FAILED
+    non_unknown_source = sum(
+        v for k, v in source_status_agg.items() if k in _SOURCE_FROZEN
+    )
+    unknown_source = sum(
+        v for k, v in source_status_agg.items() if k not in _SOURCE_FROZEN
+    )
+    complete_count = source_status_agg.get("COMPLETE", 0)
+    canonical_complete = sum(
+        v for k, v in canonical_status_agg.items() if k in _CANONICAL_FROZEN
+    )
+    unknown_canonical = sum(
+        v for k, v in canonical_status_agg.items() if k not in _CANONICAL_FROZEN
+    )
+    source_incomplete_rows = [
+        r for r in rows
+        if r["full_day_status"] in _SOURCE_FROZEN and r["full_day_status"] != "COMPLETE"
+    ]
+    incomplete_wrong_canonical = any(
+        r["canonicalization_status"] is not None for r in source_incomplete_rows
+    )
+
+    reconciled = (
+        (run_error == 0)
+        and (written == non_unknown_source)
+        and (unknown_source == 0)
+        and (complete_count == canonical_complete)
+        and (unknown_canonical == 0)
+        and (not incomplete_wrong_canonical)
+    )
     partition_status = (
         PARTITION_STATUS_COMPLETED if reconciled else PARTITION_STATUS_FAILED
     )
@@ -287,7 +433,7 @@ async def _run_bar_partition(
     manifest = {
         "trade_date": trade_date.isoformat(),
         "bar_index": bar_index,
-        "baseline_sha": BASELINE_SHA,
+        "code_sha": code_sha,
         "as_of": AS_OF.isoformat(),
         "status": partition_status,
         "eligible_instruments": eligible,
@@ -299,27 +445,32 @@ async def _run_bar_partition(
     return manifest
 
 
-def _partition_already_completed(pdir: Path, trade_date: date, bar_index: int, output_root: Path | None = None) -> bool:
-    mpath = pdir / "partition_manifest.json"
-    if not mpath.exists():
-        return False
-    try:
-        with open(mpath, "r", encoding="utf-8") as f:
-            m = json.load(f)
-    except Exception:
-        return False
-    return (
-        m.get("status") == PARTITION_STATUS_COMPLETED
-        and m.get("trade_date") == trade_date.isoformat()
-        and m.get("bar_index") == bar_index
-        and m.get("baseline_sha") == BASELINE_SHA
-        and m.get("as_of") == AS_OF.isoformat()
-        and m.get("eligible_instruments") is not None
+# ---------------------------------------------------------------------------
+# root manifest 质量累计（FIX 8）
+# ---------------------------------------------------------------------------
+def _accumulate_partition_quality(root_manifest: dict, manifest: dict,
+                                  data_quality: dict | None) -> None:
+    root_manifest["eligible_instrument_days"] += manifest.get("eligible_instruments", 0)
+    root_manifest["member_rows"] += manifest.get("member_rows_written", 0)
+    dq = data_quality or {}
+    for k, v in (dq.get("source_status_aggregate") or {}).items():
+        root_manifest["source_status_aggregate"][k] = (
+            root_manifest["source_status_aggregate"].get(k, 0) + v
+        )
+    for k, v in (dq.get("canonical_status_aggregate") or {}).items():
+        root_manifest["canonical_status_aggregate"][k] = (
+            root_manifest["canonical_status_aggregate"].get(k, 0) + v
+        )
+    root_manifest["lane_a_computed_count"] += dq.get("lane_a_computed_count", 0)
+    root_manifest["lane_b_computed_count"] += dq.get("lane_b_computed_count", 0)
+    root_manifest["pit_gap_unavailable_count"] += dq.get("pit_gap_unavailable_count", 0)
+    root_manifest["pit_gap_adjustment_degraded_count"] += (
+        dq.get("pit_gap_adjustment_degraded_count", 0)
     )
 
 
 # ---------------------------------------------------------------------------
-# 顶层 runner（记忆友好：每 bar resolve→run→write→reconcile→release）
+# 顶层 runner
 # ---------------------------------------------------------------------------
 async def run_backfill(
     run_id: str | None = None,
@@ -331,17 +482,20 @@ async def run_backfill(
     run_single_obs=None,    # (mdas, adapter, session, inst, trade_date) -> dict
     adapter=None,           # 注入 fake adapter；None → 打开真实 PytdxAdapter
     output_root: Path | None = None,
+    code_sha: str | None = None,   # FIX 10 runtime code SHA（默认 git HEAD）
+    require_listing_coverage: bool = False,  # live preflight：missing==0 否则 STOP
 ) -> dict:
     if run_id is None:
         run_id = f"{RUN_ID_PREFIX}_{AS_OF.isoformat()}"
 
     _out_root = output_root or OUTPUT_DIR
+    _code_sha = code_sha or _git_head_sha() or "UNKNOWN"
 
     async def _default_calendar(session, T, n):
         return await previous_trading_dates(session, T, n)
 
     async def _default_population(session, trade_date):
-        return await resolve_listed_a_share_instruments_at(session, trade_date)
+        return await resolve_backfill_population_at(session, trade_date)
 
     _calendar = calendar_fn or _default_calendar
     _population = population_fn or _default_population
@@ -350,7 +504,6 @@ async def run_backfill(
     if bar_dates is None:
         async with AsyncSessionLocal() as session:
             bar_dates = await _calendar(session, AS_OF, BAR_COUNT)
-        # 真实 calendar 路径：强制 exactly 120 bars 且 latest=AS_OF
         bar_dates = sorted(set(bar_dates))
         assert len(bar_dates) == BAR_COUNT, (
             f"official bar_count must be exactly {BAR_COUNT}, got {len(bar_dates)}"
@@ -359,11 +512,10 @@ async def run_backfill(
             f"latest bar must be {AS_OF}, got {bar_dates[-1]}"
         )
     else:
-        # 注入测试路径：尊重调用者提供的 bar_dates（不强制 120）
         bar_dates = sorted(set(bar_dates))
 
     root_manifest = {
-        "baseline_sha": BASELINE_SHA,
+        "code_sha": _code_sha,
         "as_of": AS_OF.isoformat(),
         "bar_count": BAR_COUNT,
         "earliest_bar_date": bar_dates[0].isoformat(),
@@ -383,7 +535,6 @@ async def run_backfill(
     }
 
     if dry_run:
-        # 不连 pytdx，只校验 calendar + 每 bar population 计数（用只读 DB）
         async with AsyncSessionLocal() as session:
             for idx, t in enumerate(bar_dates, start=1):
                 insts = await _population(session, t)
@@ -397,33 +548,61 @@ async def run_backfill(
     failed = 0
     mdas = MarketDataAggregationService()
 
-    async def _bars_loop(session):
+    async def _bars_loop(session, adapter_for_run):
         nonlocal completed, failed
         for idx, t in enumerate(bar_dates, start=1):
             pdir = _partition_dir(run_id, t, _out_root)
-            if _partition_already_completed(pdir, t, idx, _out_root):
-                # resume skip（metadata 完全匹配）
-                completed += 1
-                continue
-            # 当前 bar 的 canonical population（listing_date <= T）
+            # FIX 3/7：先 resolve population 得 expected_eligible，再读 existing 决定
             instruments = await _population(session, t)
             population = [
                 _to_sample_inst(inst) if not isinstance(inst, SampleInstrument)
                 else inst
                 for inst in instruments
             ]
-            # listing_date 仅当 population owner 提供（Instrument model）时取
+            eligible = len(population)
             listing_date_by_symbol = {
                 inst.symbol: getattr(inst, "listing_date", None)
                 for inst in instruments
                 if getattr(inst, "listing_date", None) is not None
             }
+
+            existing = None
+            mpath = pdir / "partition_manifest.json"
+            if mpath.exists():
+                try:
+                    with open(mpath, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                except Exception:
+                    existing = None
+
+            expected_meta = _expected_partition_metadata(t, idx, _code_sha, eligible)
+            decision = _partition_resume_decision(existing, expected_meta)
+
+            if decision == RESUME_SKIP:
+                # FIX 8：resume-skip 的 completed bar 也要累计已有 quality
+                completed += 1
+                dq_path = pdir / "data_quality.json"
+                dq = None
+                if dq_path.exists():
+                    try:
+                        with open(dq_path, "r", encoding="utf-8") as f:
+                            dq = json.load(f)
+                    except Exception:
+                        dq = None
+                _accumulate_partition_quality(root_manifest, existing or {}, dq)
+                continue
+            if decision == RESUME_BLOCK:
+                raise CompletedPartitionMetadataMismatch(
+                    f"COMPLETED partition {t.isoformat()} bar_index={idx} "
+                    f"metadata mismatch (code_sha/eligible) — refuse overwrite"
+                )
+
             try:
                 manifest = await _run_bar_partition(
                     run_id, t, idx, population,
                     _run_obs,
-                    mdas, adapter, session, _out_root,
-                    listing_date_by_symbol,
+                    mdas, adapter_for_run, session, _out_root,
+                    listing_date_by_symbol, _code_sha,
                 )
             except Exception:
                 failed += 1
@@ -432,7 +611,7 @@ async def run_backfill(
                     {
                         "trade_date": t.isoformat(),
                         "bar_index": idx,
-                        "baseline_sha": BASELINE_SHA,
+                        "code_sha": _code_sha,
                         "as_of": AS_OF.isoformat(),
                         "status": PARTITION_STATUS_FAILED,
                         "error": traceback.format_exc(),
@@ -440,11 +619,8 @@ async def run_backfill(
                     },
                 )
                 continue
-            root_manifest["eligible_instrument_days"] += manifest.get(
-                "eligible_instruments", 0
-            )
-            root_manifest["member_rows"] += manifest.get(
-                "member_rows_written", 0
+            _accumulate_partition_quality(
+                root_manifest, manifest, json.load(open(pdir / "data_quality.json"))
             )
             if manifest["status"] == PARTITION_STATUS_COMPLETED:
                 completed += 1
@@ -453,11 +629,22 @@ async def run_backfill(
 
     if adapter is not None:
         # 注入路径：fake adapter（测试用），不连真实 pytdx / DB
-        await _bars_loop(None)
+        await _bars_loop(None, adapter)
     else:
         with PytdxAdapter() as real_adapter:
             async with AsyncSessionLocal() as session:
-                await _bars_loop(session)
+                # live listing-date coverage preflight（FIX 3 preflight，仅真实路径）
+                if require_listing_coverage:
+                    cov = await check_listing_date_coverage(session)
+                    root_manifest["listing_date_coverage"] = cov
+                    if cov["listing_date_missing"] != 0:
+                        root_manifest["status"] = "STOP"
+                        root_manifest["first_blocker"] = (
+                            f"LISTING_DATE_COVERAGE_GAP missing={cov['listing_date_missing']}"
+                        )
+                        _write_json(_out_root / run_id / "manifest.json", root_manifest)
+                        return root_manifest
+                await _bars_loop(session, real_adapter)  # FIX 2：用 real_adapter
 
     root_manifest.update({
         "status": "DONE" if failed == 0 else "PARTIAL",
@@ -469,7 +656,6 @@ async def run_backfill(
 
 
 if __name__ == "__main__":
-    # 仅供人工/调试调用；正式 live 120-bar 不在此轮启动。
     import sys
 
     _dry = "--dry-run" in sys.argv

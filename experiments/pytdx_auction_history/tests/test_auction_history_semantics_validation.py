@@ -1577,3 +1577,49 @@ def test_derive_live_status_price_open_requires_lane_a_computed():
     broken2["lane_a"]["status"] = "FAILED"
     s3b = mod.derive_live_status([broken2], [])
     assert s3b["price_open_evidence"] != "COMPLETE"
+
+
+# ===========================================================================
+# Round 3B-B1 — FIX 6: qfq degraded direct compute_lane_b hard gate regression
+# ===========================================================================
+def _lane_b_fixture_bar(close_val):
+    idx = pd.DatetimeIndex([pd.Timestamp("2026-08-13")])
+    df = pd.DataFrame({"open": [close_val], "close": [close_val],
+                       "high": [close_val], "low": [close_val]}, index=idx)
+    return df.loc["2026-08-13"]
+
+
+def _lane_b_args(auction_price=11.0, degraded=False):
+    raw_Tm1 = _lane_b_fixture_bar(10.0)
+    qfq_Tm1 = _lane_b_fixture_bar(9.0)
+    qfq_T = _lane_b_fixture_bar(10.0)
+    target = date(2026, 8, 14)
+    return (auction_price, raw_Tm1, None, qfq_Tm1, qfq_T, target,
+            "abc", "db", degraded, "qfq degraded" if degraded else None)
+
+
+def test_compute_lane_b_qfq_degraded_hard_gate():
+    # qfq degraded → pit_gap=None + status=PIT_ADJUSTMENT_DEGRADED
+    res = mod.compute_lane_b(*_lane_b_args(degraded=True))
+    assert res["status"] == "PIT_ADJUSTMENT_DEGRADED"
+    assert res["pit_gap"] is None
+    # raw/qfq close evidence preserved
+    assert res["raw_close_Tm1"] == 10.0
+    assert res["qfq_close_Tm1"] == 9.0
+    # adjustment lineage preserved
+    assert res["adjustment_as_of"] == "2026-08-14"
+    assert res["adj_factor_hash"] == "abc"
+    assert res["mdas_degraded"] is True
+
+
+def test_compute_lane_b_qfq_healthy_control():
+    # qfq healthy → status=COMPUTED + pit_gap valid
+    res = mod.compute_lane_b(*_lane_b_args(degraded=False))
+    assert res["status"] == "COMPUTED"
+    assert res["pit_gap"] is not None
+    # pit_gap = 11.0 / 9.0 - 1
+    assert res["pit_gap"] == pytest.approx(11.0 / 9.0 - 1)
+    assert res["raw_close_Tm1"] == 10.0
+    assert res["qfq_close_Tm1"] == 9.0
+    assert res["adjustment_as_of"] == "2026-08-14"
+    assert res["adj_factor_hash"] == "abc"
