@@ -1,7 +1,7 @@
-# 竞价分析 PRD（Auction PRD）V2.0 — Overnight Repricing Observation
+# 竞价分析 PRD（Auction PRD）V2.1 — Overnight Repricing Observation
 
 状态：已确认
-最后更新：2026-08-14
+最后更新：2026-08-15
 对应 Map：`../maps/75-auction-analysis.md`
 条款前缀：`AU`
 需求所有权：Auction（9:25 竞价重新定价观测）的目标行为、事实定义、分析定义与边界约束
@@ -9,6 +9,23 @@
 > 本文件是 Auction 的唯一需求真源。它回答：隔夜之后，9:25 当前哪里异常、昨日状态如何被重新定价、注意力重心如何变化。
 > [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义跨域依赖与 lineage 的基本要求，不替代本文件的分析合同。
 > 旧 AuctionAnchor 产品（structure/chip anchor 模型）不再是本文件 active 目标合同，见 [§23 Legacy AuctionAnchor Deprecation](#23-legacy-auctionanchor-deprecation--migration-gap)。
+
+### 0.0 正式分析链（Canonical Auction Analysis Pipeline）
+
+Auction 正式分析按以下顺序组织（见 [§10 AU-10](#10-scope-modelau-10) 展开）：
+
+```text
+Member Facts
+  → L1 Scope Facts
+  → L2 Observation Groups
+  → Analysis
+  → Interpretation / Conclusion
+  → Member Attribution
+```
+
+- Auction 正式分析输入只包括三类事实：**Gap / Price Repricing**、**Auction Volume**、**Auction Amount**。
+- Auction 使用与 Review v2.3 一致的"事实 → 观察 → 分析 → 解释"方法论，**但不继承 Review Dynamics 生命周期语义**（EMA / Velocity / Acceleration / Persistence / 6 阶段生命周期）。
+- Industry 与 Concept 为平行 Scope family；Scope family 完整列表见 [§10](#10-scope-modelau-10)。
 
 ## 0. 定位与架构前提
 
@@ -101,23 +118,29 @@ gap_pct = (auction_price / previous_close) - 1
 
 ## 4. Historical Abnormality（AU-05 / AU-06）
 
-### AU-05 Gap Historical Abnormality
+### AU-05 Gap Historical Abnormality（member-first）
 
-基于**个股自身历史有效 Auction Gap 分布**计算。
+每个 member 必须先基于**自身历史有效 Auction Gap 序列**计算：
 
 - `gap_percentile`：当日 `gap_pct` 在个股自身历史有效 Gap 分布中的百分位；
-- 正向异常：`gap_percentile >= positive_gap_threshold`；
-- 负向异常：`gap_percentile <= negative_gap_threshold`。
+- 基于 `gap_percentile` 的 gap historical abnormality（正向 / 负向）；
+
+然后 Scope 层再聚合 member abnormality distribution（见 [§11 AU-11](#11-scope-breadth-metricsau-11) / [§12 AU-12](#12-auction-amount-contribution--concentrationau-12)）。
+
+**禁止用 Scope today total / Scope historical total 替代 member-level historical abnormality。**
+
+允许另外计算 Scope 自身 historical position（Scope 今天相对 Scope 自身历史的分布位置），但必须作为**独立事实**，不得与 member-first abnormality 混为一个指标。
 
 阈值要求：
 
 - **CONFIGURABLE**；
 - **VERSIONED**（随 run 记录 `algorithm_version` / `config_hash`）；
 - **不得写成不可变业务真理**；
-- P0 默认候选（仅候选，须用真实历史数据校准）：`positive_gap_threshold = 90`，`negative_gap_threshold = 10`。
-  **REQUIRES HISTORICAL CALIBRATION**。
+- 本轮不锁死具体百分位与窗口数值，**REQUIRES HISTORICAL CALIBRATION**。
 
-### AU-06 Amount Historical Abnormality
+### AU-06 Amount Historical Abnormality（member-first）
+
+每个 member 必须先基于**自身历史有效 Auction Amount / Volume 序列**计算：
 
 - `amount_multiple`：
 
@@ -126,22 +149,33 @@ amount_multiple = auction_amount / historical_median_auction_amount
 ```
 
 - `amount_percentile`：当日 `auction_amount` 在个股自身历史有效 Auction Amount 分布中的百分位；
-- 成交异常：`amount_percentile >= amount_abnormal_threshold`。
+- 成交异常：`amount_percentile >= amount_abnormal_threshold`；
+- `volume_multiple` / `volume_percentile`：类比 Volume 历史异常度（member-first）。
 
-阈值同样要求 CONFIGURABLE / VERSIONED。P0 候选：`amount_abnormal_threshold = 90`，**REQUIRES HISTORICAL CALIBRATION**。
+然后 Scope 层聚合 member abnormality distribution。
 
-### AU-06-1 Amount 异常的核心语义
+**禁止用 Scope today total / Scope historical total 替代 member-level historical abnormality。**
 
-`auction amount abnormality = participation / attention intensity`（参与 / 注意力强度）。
+允许另外计算 Scope 自身 historical position，但必须作为**独立事实**，不与 member-first abnormality 混为一个指标。
 
-它**不是**：
+阈值同样要求 CONFIGURABLE / VERSIONED。本轮不锁死具体百分位与窗口数值，**REQUIRES HISTORICAL CALIBRATION**。
 
-- 主力资金；
+### AU-06-1 Amount / Volume 异常的核心语义（directionless）
+
+`auction amount abnormality` / `auction volume abnormality` = **participation / attention intensity**（参与 / 注意力强度）。
+
+它**没有方向**。它**不是**：
+
+- 净 inflow；
 - 买盘强度；
-- 净流入；
-- 看多程度。
+- 主力资金；
+- 看多资金流；
+- 资金方向。
 
-**成交额本身没有方向。** 任何把成交额直接解释为资金方向或看多程度的叙述，都不属于本轮 Auction 合同。
+**成交额 / 成交量本身没有方向。** 任何把成交额 / 成交量直接解释为资金方向或看多程度的叙述，都不属于本轮 Auction 合同。
+
+- **Price 提供方向**（Gap 正负）；
+- **Amount / Volume 提供参与强度**（abnormality 高低）。
 
 ### AU-06-2 最小有效成交门
 
@@ -203,76 +237,113 @@ P0 状态迁移语言与业务语义：
 
 ## 8. Scope Model（AU-10）
 
-Scope 必须支持：
+### AU-10-0 Canonical Auction Analysis Pipeline
 
-- Market
-- Style
-- Industry
-- Concept
+Auction 正式分析按以下顺序组织（与 [§0.0](#00-正式分析链canonical-auction-analysis-pipeline) 一致）：
+
+```text
+Member Facts
+  → L1 Scope Facts
+  → L2 Observation Groups
+  → Analysis
+  → Interpretation / Conclusion
+  → Member Attribution
+```
+
+- **Member Facts**：每只股票 9:25 的 Gap / Auction Volume / Auction Amount 及其历史异常度（见 §3 / §4）。
+- **L1 Scope Facts**：全市场 / 风格 / 行业的 Scope 级 breadth / participation / concentration（见 §9–§12）。
+- **L2 Observation Groups**：Industry / Concept 平行 Scope family 的观察分组（见 §13 / §15）。
+- **Analysis**：Historical Position / Cross-sectional Position / Internal Structure / Overnight Transition 四类业务问题（见 §15）。
+- **Interpretation / Conclusion**：由可解释事实组合形成的 09:25 Auction state 描述（见 §19）。
+- **Member Attribution**：任何 Scope 级结论必须能回溯到 member evidence（见 §19 / §15）。
+
+### AU-10-1 正式分析输入
+
+Auction 正式分析输入只包括：
+
+1. **Gap / Price Repricing**（方向）；
+2. **Auction Volume**（参与强度）；
+3. **Auction Amount**（参与强度）。
+
+Auction 使用与 Review v2.3 一致的"事实 → 观察 → 分析 → 解释"方法论，但**不继承 Review Dynamics 生命周期语义**（EMA / Velocity / Acceleration / Persistence / 6 阶段生命周期）。
+
+### AU-10-2 Scope Family（平行）
+
+Industry 与 Concept 为平行 Scope family。完整 Scope family 列表：
+
+- `market`
+- `major_index`
+- `style`
+- `industry_l1`
+- `industry_l2`
+- `industry_l3`
+- `concept`
 
 每个 Scope P0 至少有 §9–§12 定义的事实。Scope membership 复用既有已冻结的平行 Scope Family 与 membership 体系（`board_facts` / Review Scope Observation）。若现有 membership / amount 口径不足以支撑 Auction 所需分母，标记 **IMPLEMENTATION ALIGNMENT GAP**（见 [§14](#14-review--auction-依赖边界)），本轮不改动既有 ownership。
 
-## 9. Scope Breadth Metrics（AU-11）
+## 9. Scope Breadth Metrics（AU-11 / L1）
 
-每个 Scope P0 至少有（分母均为 `valid member count`，见 [§16](#16-数据质量--valid-member-denominatorau-18)）：
+每个 Scope P0 至少支持以下 L1 事实（分母均为 `valid member count`，见 [§16](#16-数据质量--valid-member-denominatorau-18)）：
 
-1. **正向异常 Breadth**
+### PRICE（方向由 Gap 提供）
 
-```text
-PositiveAbnormalBreadth = 正向 Gap 异常成员数 / valid member count
-```
+1. **equal-weight Gap**：Scope 成员 `gap_pct` 等权均值；
+2. **amount-weighted Gap**：Scope 成员 `gap_pct` 按 `auction_amount` 加权均值；
+3. **positive gap breadth**：正向 Gap 成员数 / valid member count；
+4. **negative gap breadth**：负向 Gap 成员数 / valid member count；
+5. **positive gap abnormal breadth**：正向 Gap 异常（`gap_percentile >= positive_gap_threshold`）成员数 / valid member count；
+6. **negative gap abnormal breadth**：负向 Gap 异常（`gap_percentile <= negative_gap_threshold`）成员数 / valid member count。
 
-2. **负向异常 Breadth**
+### PARTICIPATION（强度，无方向）
 
-```text
-NegativeAbnormalBreadth = 负向 Gap 异常成员数 / valid member count
-```
+7. **total auction volume**：Scope 成员 `auction_volume` 合计；
+8. **total auction amount**：Scope 成员 `auction_amount` 合计；
+9. **volume abnormal breadth**：Volume 异常（`volume_percentile >= volume_abnormal_threshold`）成员数 / valid member count；
+10. **amount abnormal breadth**：成交异常（`amount_percentile >= amount_abnormal_threshold`）成员数 / valid member count；
+11. **auction amount market contribution**：Scope `total auction amount` / Market `total auction amount`。
 
-3. **成交异常 Breadth**
+### JOINT（方向 × 强度）
 
-```text
-AmountAbnormalBreadth = 成交异常成员数 / valid member count
-```
+12. **positive price + participation abnormal breadth**：同时满足「正向 Gap 异常 AND 成交异常」成员数 / valid member count；
+13. **negative price + participation abnormal breadth**：同时满足「负向 Gap 异常 AND 成交异常」成员数 / valid member count。
 
-4. **正向联合异常 Breadth**
+### 硬规则
 
-```text
-PositiveJointAbnormalBreadth =
-  同时满足「正向 Gap 异常 AND 成交异常」的成员数 / valid member count
-```
-
-5. **负向联合异常 Breadth**
-
-```text
-NegativeJointAbnormalBreadth =
-  同时满足「负向 Gap 异常 AND 成交异常」的成员数 / valid member count
-```
+- **Auction Amount / Volume abnormality = participation / attention intensity（参与 / 注意力强度），它没有方向。**
+- **禁止将 Amount / Volume abnormality 解释为**：net inflow、buy pressure、main-force capital、bullish capital flow。
+- **Price 提供方向；Amount / Volume 提供参与强度。** 二者为正交维度，不得合并为单一方向性资金指标（见 [§5 AU-07](#5-price--amount-二维解释au-07) / [§4 AU-06-1](#au-06-1-amount--volume-异常的核心语义directionless)）。
 
 ## 10. Auction Amount Contribution / Concentration（AU-12）
 
-6. **竞价成交贡献**
+### AU-12-0 三者是不同的业务问题
+
+- **Breadth**：回答"有多少成员同时参与？"（见 [§9](#9-scope-breadth-metricsau-11--l1)）；
+- **Contribution**：回答"哪些成员贡献了 Scope 的竞价金额 / 重新定价？"；
+- **Concentration**：回答"参与是否集中在少数成员？"
+
+三者**不能互相替代**。
+
+### AU-12-1 Contribution
 
 ```text
 AuctionAmountContribution =
   Scope 成员 Auction Amount 总和 / Market valid Auction Amount 总和
 ```
 
-7. **Concentration**（P0 至少保留）
+### AU-12-2 Concentration（正式 facts）
+
+P0 正式 concentration facts 至少包括：
 
 ```text
-Top1 amount contribution
-Top3 amount contribution
+Top1 amount share   = 单一成员 Auction Amount / Scope Auction Amount 总和
+Top3 amount share   = Top3 成员 Auction Amount 合计 / Scope Auction Amount 总和
+raw HHI             = Σ (member_amount_share)^2           （member_amount_share = 成员 amount / Scope amount 总和）
+normalized HHI      = (raw_hhi - 1/N) / (1 - 1/N)         （N = valid member count；N<=1 时 unavailable）
 ```
 
+> 以上公式仅作事实定义 owner 标注；公式数值实现与架构（如物理 persistence 位置）留到 Architecture Phase，本轮不实现、不锁死额外统计公式。
+
 用于区分"少数大票贡献高成交"与"Scope 成员广泛参与"。
-
-### AU-12-1 Breadth / Contribution / Concentration 必须分离
-
-- **Breadth**：回答"有多少成员同时发生？"
-- **Amount Contribution**：回答"全市场有多少竞价成交发生在这个 Scope 成员中？"
-- **Concentration**：回答"Scope 内成交是否由少数成员主导？"
-
-三者**不能互相替代**。
 
 ## 11. Concept Overlap Semantics（AU-13）
 
@@ -283,7 +354,7 @@ Concept 是 **overlapping membership**：同一股票可以属于多个 Concept�
 - Concept Auction Amount Contribution 表示"**该 Concept 成员对应的全市场竞价成交贡献**"；
 - 不同 Concept contribution **不能直接相加解释为市场资金分配**；
 - **不能解释成互斥份额**；
-- **总和允许 >100%**。
+- **总和允许 >100%**（Concept amount contribution 不是互斥 market-share accounting）。
 
 ## 12. Scope State Transition（AU-14）
 
@@ -300,15 +371,91 @@ Scope 同样需要 `Review(t-1) → Auction(t)` 迁移识别（`NEW / PERSIST / 
 
 综合形成可解释状态。**P0 不做综合分数。**
 
-## 13. Attention Redistribution（AU-15）
+## 13. L2 Observation Groups + Analysis（AU-15）
 
-必须与 state transition 分开。
+### AU-15-1 L2 Observation Groups
+
+Industry 与 Concept 为平行 Scope family（见 [§10-2](#au-10-2-scope-family平行)）。L2 观察至少覆盖：
+
+- `industry_l1` / `industry_l2` / `industry_l3`
+- `concept`
+
+每个 L2 Scope 复用 §9–§12 的 L1 事实定义（breadth / participation / contribution / concentration）。
+
+### AU-15-2 Analysis：四个业务问题
+
+L2 / Analysis 至少组织为以下四个业务问题：
+
+#### 1. Historical Position（历史位置）
+
+今天相对**自身历史**处于什么位置：
+
+- 基于 member-first 历史异常度（见 [§4](#4-historical-abnormalityau-05--au-06)）；
+- Scope 自身 historical position 作为独立事实（不与 member-first abnormality 混用）。
+
+#### 2. Cross-sectional Position（横截面位置）
+
+今天相对 **same-family Scope** 处于什么位置：
+
+- **必须 same-family**：`industry ↔ industry`、`concept ↔ concept`；
+- **禁止把 Industry 与 Concept 混成同一个排名池**。
+
+#### 3. Internal Structure（内部结构）
+
+使用下列事实判断参与是**扩散还是集中**：
+
+- breadth（多少成员参与）；
+- contribution（哪些成员贡献）；
+- concentration（Top1/3 / HHI / normalized HHI）；
+- EW vs AW Gap（equal-weight vs amount-weighted，方向一致性）。
+
+#### 4. Overnight Transition（隔夜迁移）
+
+允许比较：
+
+```text
+Review(t-1) → Auction(t)
+```
+
+描述**隔夜重新定价变化**（昨日 Review state 如何被今日 Auction 重新定价）。
+
+**禁止将该比较扩展为**：
+
+- EMA；
+- Velocity；
+- Acceleration；
+- Persistence；
+- Review 6 Dynamics Phase。
+
+Auction **不跟踪 6 阶段生命周期**。
+
+### AU-15-3 Attention Redistribution（与 state transition 分离）
 
 - **State Transition**：同一个 Stock / Scope 昨天 → 今天发生什么变化；
 - **Attention Redistribution**：当前不同 Scope 之间，异常成交参与和成交贡献重心在哪里扩张 / 收缩。
 
 允许描述："竞价注意力重心向机器人扩张"。
-**禁止描述**："资金净流入机器人"——除非未来存在真正净流数据合同。
+**禁止描述**："资金净流入机器人"——除非未来存在真正净流数据合同（见 [§4 AU-06-1](#au-06-1-amount--volume-异常的核心语义directionless)）。
+
+### AU-15-4 Member Attribution（结论回溯）
+
+任何 Scope-level interpretation / conclusion 必须能回溯到 member evidence。至少支持：
+
+- top positive gap contributors；
+- top negative gap contributors；
+- top auction amount contributors；
+- top positive joint-abnormal members；
+- top negative joint-abnormal members；
+- top amount-abnormal members。
+
+member evidence 至少能够展示：
+
+- `symbol`；
+- `gap`；
+- historical position / abnormality（where available）；
+- `auction_amount`；
+- `auction_volume`；
+- contribution / share（where applicable）。
 
 ## 14. Review → Auction 依赖边界（AU-16）
 
@@ -354,6 +501,30 @@ Auction → 调用 Review 私有 calculator → 重跑 Review
 - **point-in-time**：禁止 future leakage；不得用今日快照回填历史；
 - 本轮只定义业务结果合同；具体 persistence 表 / API / 前端实现由后续 Code Alignment Round 决定。
 
+### AU-19-1 Interpretation / Conclusion Contract
+
+**不冻结固定状态枚举。** `Strong Expansion` / `Selective Concentration` / `Weakness` / `Neutral` 或任何新的固定状态枚举需要 **Historical Validation 后再决定**（见 [§21 阈值合同](#21-阈值合同calibration)）。当前 PRD 只冻结 Conclusion 的**组成合同**：
+
+Conclusion 必须由可解释事实组合形成，至少覆盖：
+
+- **price repricing direction**（Price 方向）；
+- **participation breadth**（参与广度）；
+- **participation intensity**（参与强度，Amount / Volume abnormality）；
+- **concentration**（集中度）；
+- **leading scope / member attribution**（主导 Scope / member 证据，见 [§15-4](#au-15-4-member-attribution结论回溯)）。
+
+Conclusion 描述**当前 09:25 Auction state**，而不是未来预测。
+
+**禁止**：
+
+- intraday prediction（盘中预测）；
+- return prediction（收益预测）；
+- limit-up probability（涨停概率）；
+- buy / sell recommendation（买卖建议）；
+- single composite Auction opportunity score（单一综合竞价机会评分）。
+
+> 结论语言（如候选的 Strong Expansion 等）的具体语义与阈值，待 Historical Validation 阶段以 CONFIGURABLE / VERSIONED / CALIBRATION_REQUIRED 方式确定，本轮不锁死。
+
 ## 18. API / frontend 目标合同（AU-20）
 
 本轮只定义业务结果，**不实现**：
@@ -390,12 +561,17 @@ Auction → 调用 Review 私有 calculator → 重跑 Review
 
 ### P0 EXCLUDE
 
+- AuctionAnchor product semantics（旧 structure/chip anchor 产品语义）
 - Structural relocation
 - DSA / SMC / Chip Auction interpretation
 - 撤单博弈
 - 9:15–9:20 超短行为推演
 - 主力资金叙事
 - 资金净流入推断
+- Amount / Volume directional capital interpretation（将成交额 / 成交量解释为净流向 / 买盘 / 主力 / 看多资金）
+- Review 6-phase Dynamics（EMA / Velocity / Acceleration / Persistence / 6 阶段生命周期）
+- 7-state lifecycle（旧 auction event tracking 生命周期）
+- single Auction score（单一综合竞价评分）
 - 买点
 - 收益预测
 - 涨停概率
@@ -414,11 +590,14 @@ Auction → 调用 Review 私有 calculator → 重跑 Review
 | Price × Amount 二维 | 保留方向与参与强度两个正交维度，禁止单分 | 合同已冻结 |
 | Static Cross-Section | Stock / Market / Style / Industry / Concept 平行覆盖，双参照系分离 | 合同已冻结 |
 | Stock State Transition | Review(t-1) → Auction(t) 六态迁移，标准化后比较 | 合同已冻结 |
-| Scope Breadth | 5 项 breadth（含 joint）分母 = valid member count | 合同已冻结 |
-| Amount Contribution / Concentration | `AuctionAmountContribution` + Top1 / Top3 | 合同已冻结 |
+| Scope Breadth | L1 至少 13 项（PRICE 6 + PARTICIPATION 5 + JOINT 2），分母 = valid member count；Amount/Volume abnormality 为无方向参与强度 | 合同已冻结 |
+| Amount Contribution / Concentration | `AuctionAmountContribution` + Top1 / Top3 share + raw HHI / normalized HHI；Breadth/Contribution/Concentration 三者分离 | 合同已冻结 |
 | Concept Overlap | overlapping membership 语义，贡献不互斥、允许 >100% | 合同已冻结 |
+| L2 Observation Groups + Analysis | Industry/Concept 平行 Scope；Historical/Cross-sectional/Internal Structure/Overnight Transition 四问题；禁止 6-phase；Industry↔Industry / Concept↔Concept 同族排名 | 合同已冻结 |
+| Member Attribution | Scope 结论可回溯 member evidence（top gap/amount/joint-abnormal contributors + 字段展示） | 合同已冻结 |
 | Scope State Transition | 基于 Scope 自身事实，非成员标签计数，P0 无综合分 | 合同已冻结 |
 | Attention Redistribution | 与 state transition 分离，禁止资金净流叙述 | 合同已冻结 |
+| Conclusion Contract | 由可解释事实组合形成（price direction + participation breadth + intensity + concentration + member attribution）；描述 09:25 state；禁预测/评分；固定状态枚举待 Historical Validation | 合同已冻结（组成合同）；状态枚举 OPEN |
 | Review → Auction | 只读正式 snapshot，禁调私有 calculator；缺失字段登记 GAP | 合同已冻结 |
 | 版本化 | 阈值 / 配置 versioned 且随 run 记录 | 合同已冻结 |
 | 数据质量 | valid member 分母与最小门限为 calibration contract | 合同已冻结 |
@@ -471,9 +650,10 @@ Auction → 调用 Review 私有 calculator → 重跑 Review
 - `structure_only` / `hybrid` / `composite` 批次发布模式与 `auction_mode_service` 决策；
 - 基于锚点的位置迁移（`structure_position` / `chip_position`）、7-state 事件生命周期（`formed → confirmed → continued/weakened → failed/transformed/expired`）与 `auction_event_trackings`；
 - 盘后 after-close orchestrator 中 `auction_anchor` 节点与 chip 晚到升级回调；
-- 现有 `/auction` 三级页面与 Review "竞价回流"（`AuctionBackflowPanel`）的旧产品形态。
+- 现有 `/auction` 三级页面与 Review "竞价回流"（`AuctionBackflowPanel`）的旧产品形态；
+- `auction_aggregation_service._classify_status_label` / `_classify_confidence`：若其仍基于 legacy anchor / status 语义（OB zone / dual breakout / supply-demand OB 等），只能作为 **DEPRECATED implementation gap**，**不能作为正式 Auction Conclusion authority**。
 
-**代码迁移 / 删除由后续 Code Alignment Round 处理**，本轮仅完成需求事实源对齐。
+**代码迁移 / 删除由后续 Code Alignment Round 处理**，本轮仅完成需求事实源对齐，不修改 production legacy code。
 
 全项目旧 Auction 引用已同步登记：
 
