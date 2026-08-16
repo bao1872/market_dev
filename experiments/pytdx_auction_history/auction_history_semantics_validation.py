@@ -968,18 +968,30 @@ async def run_corporate_observation(
     obs["invalid_volume_record_count"] = extraction.invalid_volume_record_count
     obs["auxiliary_zero_volume_record_count"] = extraction.auxiliary_zero_volume_record_count
 
-    # Round 2B：canonicalization 独立层
-    canon = canonicalize_auction_0925(extraction.records)
-    obs["canonicalization_status"] = canon.canonicalization_status
-    obs["auction_price_raw"] = canon.auction_price_raw
-    obs["auction_volume_raw_lots"] = canon.auction_volume_raw_lots
-    obs["auction_volume_shares"] = canon.auction_volume_shares
-    obs["auction_amount"] = canon.auction_amount
-    obs["auction_amount_source_type"] = canon.amount_source_type
-    obs["canonicalization_reason"] = canon.reason
-    # MOD 3A-1: price validity data quality（per symbol）
-    obs["invalid_price_count"] = (
-        1 if canon.canonicalization_status == CANON_STATUS_INVALID_PRICE else 0)
+    # Round 3A-2A：source-day incomplete 不得进入 business canonicalization 层。
+    # 只有 full_day_status == COMPLETE 才允许 canonicalize_auction_0925()。
+    if full_day.status != "COMPLETE":
+        obs["canonicalization_status"] = None
+        obs["auction_price_raw"] = None
+        obs["auction_volume_raw_lots"] = None
+        obs["auction_volume_shares"] = None
+        obs["auction_amount"] = None
+        obs["auction_amount_source_type"] = None
+        obs["canonicalization_reason"] = "SOURCE_DAY_INCOMPLETE"
+        obs["invalid_price_count"] = 0
+    else:
+        # Round 2B：canonicalization 独立层
+        canon = canonicalize_auction_0925(extraction.records)
+        obs["canonicalization_status"] = canon.canonicalization_status
+        obs["auction_price_raw"] = canon.auction_price_raw
+        obs["auction_volume_raw_lots"] = canon.auction_volume_raw_lots
+        obs["auction_volume_shares"] = canon.auction_volume_shares
+        obs["auction_amount"] = canon.auction_amount
+        obs["auction_amount_source_type"] = canon.amount_source_type
+        obs["canonicalization_reason"] = canon.reason
+        # MOD 3A-1: price validity data quality（per symbol）
+        obs["invalid_price_count"] = (
+            1 if canon.canonicalization_status == CANON_STATUS_INVALID_PRICE else 0)
 
     # Lane A
     none_res = await mdas.get_bars(session, inst.instrument_id, adj="none",
@@ -1013,9 +1025,10 @@ async def run_corporate_observation(
     # Volume + Amount evidence（MOD7 / Round 2B / Round 3A-1）
     obs["volume_evidence"] = _compute_volume_from_full_day(
         inst, trade_date, full_day, none_res)
-    # INVALID_VOLUME_0925 / INVALID_PRICE_0925：canon.amount_source_type == None
-    # → amount_evidence 不产生 derived amount，source_type 跟随 canon 为 None。
-    if canon.amount_source_type is None:
+    # INVALID_VOLUME_0925 / INVALID_PRICE_0925 / source-incomplete：
+    # auction_amount_source_type == None
+    # → amount_evidence 不产生 derived amount，source_type 跟随为 None。
+    if obs["auction_amount_source_type"] is None:
         obs["amount_evidence"] = {
             "amount_source_type": None,
             "candidate_derived_amount": None,
@@ -1023,7 +1036,7 @@ async def run_corporate_observation(
         }
     else:
         obs["amount_evidence"] = compute_amount_evidence(
-            canon.auction_price_raw, canon.auction_volume_shares)
+            obs["auction_price_raw"], obs["auction_volume_shares"])
     obs["raw_amount_value"] = None
     return obs
 
@@ -1054,18 +1067,35 @@ async def run_single_observation(
     obs["invalid_volume_record_count"] = extraction.invalid_volume_record_count
     obs["auxiliary_zero_volume_record_count"] = extraction.auxiliary_zero_volume_record_count
 
-    # Round 2B：canonicalization 独立层（不依赖 raw row count == 1）
-    canon = canonicalize_auction_0925(extraction.records)
-    obs["canonicalization_status"] = canon.canonicalization_status
-    obs["auction_price_raw"] = canon.auction_price_raw
-    obs["auction_volume_raw_lots"] = canon.auction_volume_raw_lots
-    obs["auction_volume_shares"] = canon.auction_volume_shares
-    obs["auction_amount"] = canon.auction_amount
-    obs["auction_amount_source_type"] = canon.amount_source_type
-    obs["canonicalization_reason"] = canon.reason
-    # MOD 3A-1: price validity data quality（per symbol）
-    obs["invalid_price_count"] = (
-        1 if canon.canonicalization_status == CANON_STATUS_INVALID_PRICE else 0)
+    # Round 3A-2A：source-day incomplete 不得进入 business canonicalization 层。
+    # 只有 full_day_status == COMPLETE 才允许 canonicalize_auction_0925()。
+    # EMPTY / SOURCE_ERROR / PAGINATION_STALLED / PAGINATION_LIMIT_REACHED
+    # → canonicalization_status = None，所有 business canonical 字段 = None，
+    # canonicalization_reason = "SOURCE_DAY_INCOMPLETE"。
+    # source truth 已经由 full_day_status 表达；不新增 SOURCE_INCOMPLETE_CANONICALIZATION_STATUS。
+    if full_day.status != "COMPLETE":
+        obs["canonicalization_status"] = None
+        obs["auction_price_raw"] = None
+        obs["auction_volume_raw_lots"] = None
+        obs["auction_volume_shares"] = None
+        obs["auction_amount"] = None
+        obs["auction_amount_source_type"] = None
+        obs["canonicalization_reason"] = "SOURCE_DAY_INCOMPLETE"
+        # Lane A / Lane B 仅当 CANONICAL 才计算（下方 else 分支已统一处理 None）
+        obs["invalid_price_count"] = 0
+    else:
+        # Round 2B：canonicalization 独立层（不依赖 raw row count == 1）
+        canon = canonicalize_auction_0925(extraction.records)
+        obs["canonicalization_status"] = canon.canonicalization_status
+        obs["auction_price_raw"] = canon.auction_price_raw
+        obs["auction_volume_raw_lots"] = canon.auction_volume_raw_lots
+        obs["auction_volume_shares"] = canon.auction_volume_shares
+        obs["auction_amount"] = canon.auction_amount
+        obs["auction_amount_source_type"] = canon.amount_source_type
+        obs["canonicalization_reason"] = canon.reason
+        # MOD 3A-1: price validity data quality（per symbol）
+        obs["invalid_price_count"] = (
+            1 if canon.canonicalization_status == CANON_STATUS_INVALID_PRICE else 0)
 
     none_res = await mdas.get_bars(session, inst.instrument_id, adj="none",
                                    end_date=trade_date, limit=10)
@@ -1075,7 +1105,8 @@ async def run_single_observation(
 
     # Lane A/B 仅当 canonicalization == CANONICAL（不是 raw FOUND）
     # INVALID_PRICE_0925 自然落入 Lane A=None / Lane B=None / amount=None（不增第二套 gate）
-    if canon.canonicalization_status == CANON_STATUS_CANONICAL:
+    # Round 3A-2A：source incomplete（canonicalization_status is None）亦落入 else。
+    if obs["canonicalization_status"] == CANON_STATUS_CANONICAL:
         auction_price = canon.auction_price_raw
         obs["lane_a"] = compute_lane_a(
             auction_price, open_bar_T, none_res.data_source,
@@ -1094,9 +1125,10 @@ async def run_single_observation(
     # Volume + Amount evidence（MOD7 / Round 2B / Round 3A-1）
     obs["volume_evidence"] = _compute_volume_from_full_day(
         inst, trade_date, full_day, none_res)
-    # INVALID_VOLUME_0925 / INVALID_PRICE_0925：canon.amount_source_type == None
-    # → amount_evidence 不产生 derived amount，source_type 跟随 canon 为 None。
-    if canon.amount_source_type is None:
+    # INVALID_VOLUME_0925 / INVALID_PRICE_0925 / source-incomplete：
+    # auction_amount_source_type == None
+    # → amount_evidence 不产生 derived amount，source_type 跟随为 None。
+    if obs["auction_amount_source_type"] is None:
         obs["amount_evidence"] = {
             "amount_source_type": None,
             "candidate_derived_amount": None,
@@ -1104,7 +1136,7 @@ async def run_single_observation(
         }
     else:
         obs["amount_evidence"] = compute_amount_evidence(
-            canon.auction_price_raw, canon.auction_volume_shares)
+            obs["auction_price_raw"], obs["auction_volume_shares"])
     obs["raw_amount_value"] = None
     return obs
 
@@ -1182,26 +1214,58 @@ def _raw_evidence_dict(r: NormalizedAuctionTransaction) -> dict:
 # Live status（MOD12：分维度）
 # ===========================================================================
 def derive_live_status(observations: list[dict], corporate_cases: list[dict]) -> dict:
-    def dimension(field_filter, status_key):
-        eligible = [o for o in observations if field_filter(o)]
+    # Round 3A-2A FIX 3：最小修正，不建立通用复杂 framework，删除无效的 status_key 参数。
+
+    # auction_source_evidence：eligible = 全部 observations；
+    # COMPLETE 仅当 source / full-day status 按当前合同完整。
+    def _auction_source_status() -> str:
+        eligible = list(observations)
+        if not eligible:
+            return "INSUFFICIENT"
         complete = [o for o in eligible
                     if o.get("full_day_status") == "COMPLETE"
                     and o.get("extraction_status") in (
                         "FOUND", "MULTIPLE_0925", "NONCANONICAL_0925_TIME", "MISSING_0925")]
-        if not eligible:
-            return "INSUFFICIENT"
         if len(complete) == len(eligible):
             return "COMPLETE"
-        if len(complete) > 0:
+        if complete:
             return "PARTIAL"
         return "INSUFFICIENT"
 
-    auction_src = dimension(lambda o: True, "extraction_status")
-    price_open = dimension(
-        lambda o: o.get("canonicalization_status") == CANON_STATUS_CANONICAL, "lane_a")
-    vol_unit = dimension(
-        lambda o: o.get("volume_evidence", {}).get("daily_volume_ratio") is not None,
-        "volume_evidence")
+    # price_open_evidence：eligible = canonicalization_status == CANONICAL；
+    # COMPLETE 要求每个 eligible 的 lane_a is not None 且 lane_a.status == "COMPUTED"。
+    def _price_open_status() -> str:
+        eligible = [o for o in observations
+                    if o.get("canonicalization_status") == CANON_STATUS_CANONICAL]
+        if not eligible:
+            return "INSUFFICIENT"
+        computed = [o for o in eligible
+                    if o.get("lane_a") is not None
+                    and isinstance(o.get("lane_a"), dict)
+                    and o["lane_a"].get("status") == "COMPUTED"]
+        if len(computed) == len(eligible):
+            return "COMPLETE"
+        if computed:
+            return "PARTIAL"
+        return "INSUFFICIENT"
+
+    # volume_unit_evidence：继续基于 daily_volume_ratio is not None。
+    def _volume_unit_status() -> str:
+        eligible = [o for o in observations
+                    if o.get("volume_evidence", {}).get("daily_volume_ratio") is not None]
+        if not eligible:
+            return "INSUFFICIENT"
+        complete = [o for o in eligible
+                    if o.get("full_day_status") == "COMPLETE"]
+        if len(complete) == len(eligible):
+            return "COMPLETE"
+        if complete:
+            return "PARTIAL"
+        return "INSUFFICIENT"
+
+    auction_src = _auction_source_status()
+    price_open = _price_open_status()
+    vol_unit = _volume_unit_status()
 
     corp = "INSUFFICIENT"
     if corporate_cases:

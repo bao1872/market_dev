@@ -223,6 +223,8 @@ invalid_rows  = [row for row in canonical_rows if classify_raw_volume(row.raw_vo
 > `auxiliary_zero_volume_record_count` / `invalid_volume_record_count`。
 > `raw_multiple_count` 不直接算 source failure；`INVALID` volume rows **不计入** auxiliary zero volume。
 
+> **Round 3A-2A boundary（source-day incomplete 不进入 business canonicalization）**：只有 `full_day_status == COMPLETE` 才允许进入 `canonicalize_auction_0925()` 业务层。对于 `EMPTY` / `SOURCE_ERROR` / `PAGINATION_STALLED` / `PAGINATION_LIMIT_REACHED`，正式合同要求 `canonicalization_status = None`、所有 business canonical 字段（`auction_price_raw` / `auction_volume_raw_lots` / `auction_volume_shares` / `auction_amount` / `auction_amount_source_type` / `lane_a` / `lane_b`）均 = `None`、`canonicalization_reason = "SOURCE_DAY_INCOMPLETE"`，**不得**产生 `NO_VOLUME_BEARING_0925` / `INVALID_PRICE` / `INVALID_VOLUME` / `MULTIPLE_VOLUME` 等任何 business canonicalization status。`source incomplete` 本身不是 canonicalization status，其 source truth 已完全由 `full_day_status` 表达，因此**不新增** `SOURCE_INCOMPLETE_CANONICALIZATION_STATUS`。必须严格区分两类：(a) `COMPLETE` + canonical 09:25 rows + 全部 zero valid volume → 真正的 business `NO_VOLUME_BEARING_0925`；(b) `EMPTY` source-day → `canonicalization_status = None`，两者不得混为一谈。Data Quality 的 canonicalization count（CANONICAL / NO_VOLUME / MULTIPLE_VOLUME / INVALID_VOLUME / INVALID_PRICE）只应自然来自 pagination `COMPLETE` observations，故 `COMPLETE == CANONICAL + NO_VOLUME + MULTIPLE_VOLUME + INVALID_VOLUME + INVALID_PRICE`（及任何其它明确 COMPLETE-but-not-canonical 状态），source-incomplete 本就不应进入该 denominator。
+
 ## 4. Historical Abnormality（AU-05 / AU-06）
 
 ### AU-05 Gap Historical Abnormality（member-first）

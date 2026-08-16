@@ -92,6 +92,33 @@ production backend / frontend / migration / API / scheduler / worker / 重新请
 - **Replay（immutable run_live2）**: 应用新 canonicalizer；INVALID_PRICE 预期可能为 0，由 replay 实际证明；601012/2026-08-11 selected price=12.94 保持。
 - 整文件 collect-only 重新记录；全量 ×2 仍 pass / exit 0。
 
-## 8. 后续
+## 8. Round 3A-2A Corrective Closure — Source-Incomplete Must Not Canonicalize
+
+- **性质**: MINIMAL WIRING CORRECTION + EXISTING EVIDENCE RE-ANALYSIS（不重新请求 source；不重跑 120-day；不开始 full-market backfill）
+- **baseline SHA**: origin/dev == f13780b8d3a5a8a042be6283cabc38f9cde00a5f（HEAD == origin/dev 已确认）
+- **原始 defect**: `run_single_observation` / `run_corporate_observation` 无论 `full_day_status` 如何，都会无条件调用 `canonicalize_auction_0925(extraction.records)`。因此 `EMPTY` / `SOURCE_ERROR` / `PAGINATION_STALLED` / `PAGINATION_LIMIT_REACHED` 的 source-incomplete observations 被错误赋予了 `NO_VOLUME_BEARING_0925` / `INVALID_PRICE` 等 business canonicalization status，污染源数据质量 denominator（temporal120 中 2 个 EMPTY 被错计为 `no_volume_bearing_count: 2`）。
+- **修复合同（FIX 1）**:
+  - 只有 `full_day_status == COMPLETE` 才允许进入 `canonicalize_auction_0925()`。
+  - 对于 `EMPTY` / `SOURCE_ERROR` / `PAGINATION_STALLED` / `PAGINATION_LIMIT_REACHED`：`canonicalization_status = None`、`auction_price_raw` / `auction_volume_raw_lots` / `auction_volume_shares` / `auction_amount` / `auction_amount_source_type` / `lane_a` / `lane_b` 全部 = `None`、`canonicalization_reason = "SOURCE_DAY_INCOMPLETE"`。
+  - **不得**产生 `NO_VOLUME_BEARING_0925` / `INVALID_PRICE` / `INVALID_VOLUME` / `MULTIPLE_VOLUME`。
+  - **不新增** `SOURCE_INCOMPLETE_CANONICALIZATION_STATUS`：`source incomplete` 不是 canonicalization status，其 source truth 已由 `full_day_status` 表达。
+  - 区分两类：(a) `COMPLETE` + canonical 09:25 rows + 全部 zero valid volume → 真正的 business `NO_VOLUME_BEARING_0925`；(b) `EMPTY` source-day → `canonicalization_status = None`。
+- **FIX 2 (Data Quality denominator)**: `compute_data_quality_summary` 的 canonicalization count 只应自然来自 pagination `COMPLETE` observations；修正 wiring 后 source-incomplete 不再进入。Reconciliation 新增：`COMPLETE == CANONICAL + NO_VOLUME + MULTIPLE_VOLUME + INVALID_VOLUME + INVALID_PRICE`（+ 任何其它明确 COMPLETE-but-not-canonical 状态）。
+- **FIX 3 (derive_live_status)**: 删除无效的 `status_key` 参数，最小修正三个 dimension：
+  - `auction_source_evidence`：eligible = 全部 observations；COMPLETE 仅当 `full_day_status == COMPLETE` 且 `extraction_status` ∈ {FOUND, MULTIPLE_0925, NONCANONICAL_0925_TIME, MISSING_0925}。
+  - `price_open_evidence`：eligible = `canonicalization_status == CANONICAL`；COMPLETE 要求每个 eligible 的 `lane_a is not None AND lane_a.status == "COMPUTED"`（all COMPUTED→COMPLETE / 部分→PARTIAL / 0→INSUFFICIENT）。
+  - `volume_unit_evidence`：继续基于 `daily_volume_ratio is not None`。
+  - Corporate 逻辑本轮不重构。
+- **FIX 4 (Tests)**: 新增 T1（EMPTY→canonicalization_status is None，非 NO_VOLUME_BEARING）、T2（SOURCE_ERROR→不 canonicalize）、T3（CANONICAL 但 lane_a=None→price_open_evidence != COMPLETE）、T4（全部 lane_a.status=COMPUTED→price_open_evidence=COMPLETE）。
+- **实现变更（runner）**: `run_single_observation` / `run_corporate_observation` 的 canonicalization 进入 `if full_day.status != "COMPLETE"` 门控（else 分支计算）；Lane A/B 与 amount_evidence 改用 `obs["canonicalization_status"]` / `obs["auction_amount_source_type"]` 等已落字段，消除 `canon` 越界；`derive_live_status` 重写三 dimension。
+- **测试**: 整文件 collect-only **69 collected**；全量 **69 passed / exit 0**；`git diff --check` PASS。
+- **TEMPORAL120 EVIDENCE RE-ANALYSIS（不改原 artifact，输出至 `output/temporal120/2026-08-14/contract_closure/`）**:
+  - routine attempts 3480 = 3478 COMPLETE + 2 EMPTY（300142/2026-03-17、300142/2026-03-18，原错计 NO_VOLUME）。
+  - COMPLETE routine：raw FOUND 2821 / MULTIPLE 657；canonicalization CANONICAL 3478 / NO_VOLUME 0 / MULTI_POSITIVE 0 / INVALID_VOLUME 0 / INVALID_PRICE 0。
+  - Reconciliation（修正后）：3478 COMPLETE == 3478 CANONICAL；2 EMPTY 不进入 canonical denominator。
+  - price/open：eligible（routine+COMPLETE+CANONICAL）3478；`lane_a.status == COMPUTED` 3478；`price_exact_match == True` 3478；exact_match_rate = 1.0；diff_abs / diff_rel median/p90/p95/max 全为 0.0；mismatch 0。
+- **结论**: source-incomplete contract 与 COMPLETE-zero-volume 已明确区分；120-day temporal stability evidence 仍 SUFFICIENT；等待 ChatGPT 审核是否进入 full-market backfill。
+
+## 9. 后续
 
 经 ChatGPT 审核远端 SHA 后，再决定是否正式启动 120-day full-market historical research backfill。

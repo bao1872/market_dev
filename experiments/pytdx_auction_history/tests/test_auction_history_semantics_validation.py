@@ -1482,3 +1482,98 @@ def test_observation_true_integration_invalid_price_blocked():
     assert obs["lane_a"] is None
     assert obs["lane_b"] is None
     assert obs["amount_evidence"]["amount_source_type"] is None
+
+
+# ---------------------------------------------------------------------------
+# Round 3A-2A T1/T2/T3/T4: source-incomplete must not enter business
+# canonicalization; derive_live_status price_open must honor lane_a.status.
+# ---------------------------------------------------------------------------
+def test_run_single_observation_empty_source_no_canonicalization():
+    """T1: full_day EMPTY → canonicalization_status is None (NOT NO_VOLUME_BEARING).
+
+    Source gap is not a business canonicalization outcome. All canonical
+    fields must be None and reason == SOURCE_DAY_INCOMPLETE.
+    """
+    session = _FakeSession([_make_inst("SH", "600000")])
+    inst = mod.SampleInstrument("600000", "SH", str(uuid4()), "SH_MAIN",
+                                "ordinary", "routine")
+    # empty first page → FullDayTransactionResult.status == "EMPTY"
+    mdas = _FakeMdas(bars_by_id={str(inst.instrument_id): _bars_from([
+        (date(2024, 1, 5), 12.0, 12.1, 1000),
+    ])})
+    adapter = _FakeAdapter(lambda m, code, start, count, d: {})
+
+    obs = asyncio.run(
+        mod.run_single_observation(mdas, adapter, session, inst, date(2024, 1, 8)))
+
+    assert obs["full_day_status"] == "EMPTY"
+    assert obs["canonicalization_status"] is None
+    assert obs["auction_price_raw"] is None
+    assert obs["auction_volume_raw_lots"] is None
+    assert obs["auction_volume_shares"] is None
+    assert obs["auction_amount"] is None
+    assert obs["auction_amount_source_type"] is None
+    assert obs["canonicalization_reason"] == "SOURCE_DAY_INCOMPLETE"
+    assert obs["lane_a"] is None
+    assert obs["lane_b"] is None
+    # regression guard: must NOT be the business zero-volume canonical outcome
+    assert obs["canonicalization_status"] != mod.CANON_STATUS_NO_VOLUME_BEARING
+
+
+def test_run_single_observation_source_error_no_canonicalization():
+    """T2: SOURCE_ERROR → must not canonicalize (source-incomplete, not business)."""
+    session = _FakeSession([_make_inst("SH", "600000")])
+    inst = mod.SampleInstrument("600000", "SH", str(uuid4()), "SH_MAIN",
+                                "ordinary", "routine")
+    mdas = _FakeMdas(bars_by_id={str(inst.instrument_id): _bars_from([
+        (date(2024, 1, 5), 12.0, 12.1, 1000),
+    ])})
+    # provider returns an Exception → fetch catches → SOURCE_ERROR
+    adapter = _FakeAdapter(lambda m, code, start, count, d: RuntimeError("boom"))
+
+    obs = asyncio.run(
+        mod.run_single_observation(mdas, adapter, session, inst, date(2024, 1, 8)))
+
+    assert obs["full_day_status"] == "SOURCE_ERROR"
+    assert obs["canonicalization_status"] is None
+    assert obs["auction_price_raw"] is None
+    assert obs["auction_volume_shares"] is None
+    assert obs["lane_a"] is None
+    assert obs["lane_b"] is None
+    assert obs["canonicalization_reason"] == "SOURCE_DAY_INCOMPLETE"
+
+
+def test_derive_live_status_price_open_requires_lane_a_computed():
+    """T3 + T4: derive_live_status price_open_evidence honors lane_a / lane_a.status.
+
+    T3: CANONICAL observation with lane_a is None → price_open_evidence != COMPLETE.
+    T4: CANONICAL observations all lane_a.status == COMPUTED → COMPLETE.
+    """
+    canon_obs = {
+        "instrument_id": "x", "symbol": "x", "trade_date": date(2024, 1, 8),
+        "cohort": "routine", "full_day_status": "COMPLETE",
+        "extraction_status": "FOUND",
+        "canonicalization_status": mod.CANON_STATUS_CANONICAL,
+        "volume_evidence": {"daily_volume_ratio": 100.0},
+        "lane_a": {"status": "COMPUTED", "mdas_raw_open_T": 12.9,
+                   "price_exact_match": True, "price_diff_abs": 0.0,
+                   "price_diff_rel": 0.0},
+        "lane_b": None,
+        "amount_evidence": {"amount_source_type": None},
+    }
+    # T4: all COMPUTED → COMPLETE
+    s4 = mod.derive_live_status([dict(canon_obs)], [])
+    assert s4["price_open_evidence"] == "COMPLETE"
+
+    # T3: CANONICAL but lane_a is None → not COMPLETE
+    broken = dict(canon_obs)
+    broken["lane_a"] = None
+    s3 = mod.derive_live_status([broken], [])
+    assert s3["price_open_evidence"] != "COMPLETE"
+
+    # T3 variant: lane_a present but status != COMPUTED → not COMPLETE
+    broken2 = dict(canon_obs)
+    broken2["lane_a"] = dict(canon_obs["lane_a"])
+    broken2["lane_a"]["status"] = "FAILED"
+    s3b = mod.derive_live_status([broken2], [])
+    assert s3b["price_open_evidence"] != "COMPLETE"
