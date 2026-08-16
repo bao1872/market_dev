@@ -27,6 +27,7 @@ CHANGE-20260816-002: Auction 120D PIT population 需要 listing boundary。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from typing import Any, Protocol
@@ -50,9 +51,13 @@ class PytdxFinanceInfoProvider(Protocol):
 
     实际实现为 app.core.pytdx_adapter.PytdxAdapter.get_finance_info，
     返回 dict 含 'ipo_date_raw': int | None（YYYYMMDD 原值）。
+
+    生产 owner 是**同步**接口（PytdxAdapter.get_finance_info 是同步 I/O）；
+    lifecycle service 通过 asyncio.to_thread 调用，不阻塞事件循环，
+    不建立第二套 adapter（与 instrument_share_sync_service 一致）。
     """
 
-    async def get_finance_info(self, symbol: str) -> dict[str, Any] | None:
+    def get_finance_info(self, symbol: str) -> dict[str, Any] | None:
         ...
 
 
@@ -252,7 +257,11 @@ async def sync_listing_dates(
     for inst in rows:
         res.scanned += 1
         try:
-            info = await finance_provider.get_finance_info(inst.symbol)
+            # 生产 owner PytdxAdapter.get_finance_info 是同步 I/O；
+            # 通过 asyncio.to_thread 调用，不阻塞事件循环，不建立第二套 adapter。
+            info = await asyncio.to_thread(
+                finance_provider.get_finance_info, inst.symbol
+            )
         except Exception:  # 网络/解析失败，计入 source_error，不中止
             res.source_error += 1
             logger.warning("sync_listing_dates finance_error symbol=%s", inst.symbol)

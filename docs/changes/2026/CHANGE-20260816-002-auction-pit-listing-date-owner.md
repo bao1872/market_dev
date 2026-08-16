@@ -122,3 +122,101 @@ DECISION（按任务 Decision Rule）：
 
 `implemented_unconfirmed`（代码+纯单元测试 PASS；真实 pytdx 拉取与 120D 窗口 resolver 计数
 待授权运行环境；无 migration、未连生产、未 120-day backfill、Auction runner 未改）。
+
+---
+
+## 14. Round 3B-A1-R2A — Runtime Contract Closure (corrective)
+
+### 14.1 DEFECT
+
+`instrument_lifecycle_service.py` 的 `PytdxFinanceInfoProvider` Protocol 与调用处
+错误地假设 `get_finance_info` 是 **async**：
+
+```python
+class PytdxFinanceInfoProvider(Protocol):
+    async def get_finance_info(self, symbol: str) -> dict[str, Any] | None: ...
+
+# 调用处
+info = await finance_provider.get_finance_info(inst.symbol)
+```
+
+但生产 owner `PytdxAdapter.get_finance_info` 是 **同步** I/O（pytdx `self.api.get_finance_info`
+阻塞调用）。真实运行时：
+
+- `await dict` → `TypeError`（dict 不是 awaitable）；
+- 该 `TypeError` 被 broad `except Exception` 吞没，伪装成 `source_error`——
+  把 **implementation contract defect** 错误标记为 source 失败。
+
+### 14.2 CORRECTED CONTRACT
+
+- `PytdxFinanceInfoProvider` Protocol 改为同步接口（`def get_finance_info`，与 `PytdxAdapter` 一致）。
+- 调用处改用 `asyncio.to_thread`，与 `instrument_share_sync_service` 调用同一 Pytdx owner 的方式一致：
+
+```python
+info = await asyncio.to_thread(
+    finance_provider.get_finance_info, inst.symbol
+)
+```
+
+- **不修改** `PytdxAdapter.get_finance_info`（同步接口已是现有 canonical owner）。
+- **不**引入 `maybe_await` / `inspect.isawaitable` / sync-async dual provider / adapter framework /
+  worker pool / semaphore。生产合同就是 `SYNC PytdxAdapter + asyncio.to_thread`。
+
+### 14.3 TEST FIX
+
+- `_FakeFinanceProvider.get_finance_info` 改为同步 `def`（与真实生产签名一致）。
+- 新增 runtime-contract regression（锁定合同，防回归成 `await provider.get_finance_info`）：
+  - **R1**：sync fake provider 返回 `{"ipo_date_raw": 19910403}` → `await sync_listing_dates(...)`
+    不抛异常、`finance_success == 1`、`listing_date_inserted == 1`、`source_error == 0`。
+  - **R2**：sync provider 对指定 symbol 抛 `RuntimeError("source failure")` → `source_error == 1`，
+    不影响其余股票继续同步。
+  - **real owner signature**：`inspect.iscoroutinefunction(PytdxAdapter.get_finance_info) is False`
+    （不联网，仅断言生产 owner 合同为同步）。
+- 删除 `_FakeSession` 重复的 `async def execute` 定义（test hygiene，仅保留最终实现）。
+
+### 14.4 REGRESSION
+
+- lifecycle 单测：**29 passed**（原 26 + R1 + R2 + signature）×2 运行一致 ✅
+- Auction 非 PG 单测：**369 passed**（覆盖历史语义回归，无回归）✅
+- pytdx adapter 单测：`test_pytdx_adapter_minute_aware/ fetch_count/ market_from_code_bj` **20 passed** ✅
+- `git diff --check`：PASS ✅
+
+### 14.5 REAL PYTDX 10-SYMBOL READ-ONLY PROOF（Round 3B-A1-R2A）
+
+代码修复后执行 READ-ONLY source proof（**不写 Instrument / 不写 production DB / 不跑全市场 sync**）：
+仅验证 `PytdxAdapter.get_finance_info` → `ipo_date_raw` → `normalize_pytdx_ipo_date`。
+
+样本 12 只（覆盖老股票 / 主板 / 创业板 / 科创板）：
+
+| symbol | market | finance | ipo_raw | normalized |
+|---|---|---|---|---|
+| 600000 | SH | YES | 19991110 | 1999-11-10 |
+| 601398 | SH | YES | 20061027 | 2006-10-27 |
+| 000001 | SZ | YES | 19910403 | 1991-04-03 |
+| 000002 | SZ | YES | 19910129 | 1991-01-29 |
+| 300001 | SZ | YES | 20091030 | 2009-10-30 |
+| 300750 | SZ | YES | 20180611 | 2018-06-11 |
+| 688001 | SH | YES | 20190722 | 2019-07-22 |
+| 688981 | SH | YES | 20200716 | 2020-07-16 |
+| 600519 | SH | YES | 20010827 | 2001-08-27 |
+| 002594 | SZ | YES | 20110630 | 2011-06-30 |
+| 688041 | SH | YES | 20220812 | 2022-08-12 |
+| 300059 | SZ | YES | 20100319 | 2010-03-19 |
+
+统计：`attempted = 12`、`finance_success = 12`、`valid_ipo_date = 12`、`missing_ipo = 0`、`source_error = 0`。
+
+证明：生产 Pytdx owner（同步 `get_finance_info` + `asyncio.to_thread`）在真实网络上可用，
+`ipo_date_raw` 全部成功归一化为合法 `listing_date`。
+
+### 14.6 CHANGED FILES（Round 3B-A1-R2A）
+
+- `backend/app/services/instrument_lifecycle_service.py`（Protocol 改同步 + `asyncio.to_thread` 调用）
+- `backend/tests/test_instrument_lifecycle_service.py`（sync fake provider + R1/R2/signature regression + 删除重复 execute）
+- `docs/changes/2026/CHANGE-20260816-002-...md`（本 §14 corrective note）
+
+INDEX 不改。
+
+### 14.7 STATUS（Round 3B-A1-R2A）
+
+`implemented_unconfirmed`（runtime contract 已修正 + 纯单测/整合回归全 PASS + 真实 pytdx READ-ONLY
+proof 全 12 样本成功；DB listing sync 与 120D 窗口 resolver 计数仍待 ChatGPT 审核后授权运行）。

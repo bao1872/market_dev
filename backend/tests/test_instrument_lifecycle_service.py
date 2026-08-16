@@ -13,11 +13,13 @@ CHANGE-20260816-002：Auction 120D PIT population listing boundary。
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import date
 from typing import Any
 
 import pytest
 
+from app.core.pytdx_adapter import PytdxAdapter
 from app.services.instrument_lifecycle_service import (
     ListingDateSyncResult,
     is_listed_a_share_at,
@@ -60,22 +62,6 @@ class _FakeSession:
     def _snapshot_row(self, inst: _FakeInstrument) -> None:
         if id(inst) not in self._snapshot:
             self._snapshot[id(inst)] = inst.listing_date
-
-    async def execute(self, stmt):
-        td = _extract_trade_date(stmt)
-        if td is not None:
-            kept = [r for r in self._rows if _matches(r, td)]
-        else:
-            from app.services.instrument_lifecycle_service import _AUCTION_A_SHARE_MARKETS
-            kept = [
-                r for r in self._rows
-                if is_listed_a_share_at(r.symbol, r.market, date(1900, 1, 1), date(2999, 1, 1))
-                and r.market in _AUCTION_A_SHARE_MARKETS
-            ]
-        # 记录将被 sync 修改的对象（仅标记，真实赋值发生在 service 内）
-        for r in kept:
-            self._snapshot_row(r)
-        return _FakeResult(kept)
 
     async def execute(self, stmt):
         td = _extract_trade_date(stmt)
@@ -165,7 +151,7 @@ class _FakeFinanceProvider:
     def __init__(self, mapping: dict[str, dict[str, Any]]) -> None:
         self._mapping = mapping
 
-    async def get_finance_info(self, symbol: str):
+    def get_finance_info(self, symbol: str):
         return self._mapping.get(symbol)
 
 
@@ -347,3 +333,71 @@ class TestSyncListingDates:
         assert res.listing_date_inserted == 1  # 仍计入 proposed
         assert sess.rolled_back is True
         assert sess.committed is False
+
+
+# ---------------------------------------------------------------------------
+# R1/R2 — runtime-contract regression：
+# 生产 owner PytdxAdapter.get_finance_info 是同步接口，
+# service 通过 asyncio.to_thread 调用。以下测试锁定该合同，
+# 禁止以后改回 `await provider.get_finance_info(...)`。
+# ---------------------------------------------------------------------------
+class TestRuntimeContractSyncProvider:
+    def test_r1_sync_provider_success(self):
+        inst = _FakeInstrument("600000", "SH", None)
+        # 同步 provider：返回真实生产签名的 dict
+        prov = _SyncSuccessProvider({"600000": {"ipo_date_raw": 19910403}})
+        sess = _FakeSession([inst])
+        res = asyncio.get_event_loop().run_until_complete(
+            sync_listing_dates(sess, prov, dry_run=False)
+        )
+        # 不因 "await dict" 抛 TypeError；不把实现缺陷伪装成 source_error
+        assert inst.listing_date == date(1991, 4, 3)
+        assert res.finance_success == 1
+        assert res.listing_date_inserted == 1
+        assert res.source_error == 0
+
+    def test_r2_sync_provider_source_error_isolated(self):
+        # 某 symbol 抛 RuntimeError，不污染其它股票
+        inst_ok = _FakeInstrument("600000", "SH", None)
+        inst_bad = _FakeInstrument("000001", "SZ", None)
+        prov = _RaiseOnSymbolProvider("000001", RuntimeError("source failure"))
+        sess = _FakeSession([inst_ok, inst_bad])
+        res = asyncio.get_event_loop().run_until_complete(
+            sync_listing_dates(sess, prov, dry_run=False)
+        )
+        assert res.source_error == 1
+        assert res.finance_success == 1
+        assert inst_ok.listing_date == date(1991, 4, 3)
+        assert inst_bad.listing_date is None
+
+
+class _SyncSuccessProvider:
+    """同步 provider，镜像生产 PytdxFinanceInfoProvider 签名（def，非 async def）。"""
+
+    def __init__(self, mapping: dict[str, dict[str, Any]]) -> None:
+        self._mapping = mapping
+
+    def get_finance_info(self, symbol: str):
+        return self._mapping.get(symbol)
+
+
+class _RaiseOnSymbolProvider:
+    """同步 provider，对指定 symbol 抛出异常（模拟真实 source failure）。"""
+
+    def __init__(self, fail_symbol: str, exc: Exception) -> None:
+        self._fail_symbol = fail_symbol
+        self._exc = exc
+
+    def get_finance_info(self, symbol: str):
+        if symbol == self._fail_symbol:
+            raise self._exc
+        return {"ipo_date_raw": 19910403}
+
+
+# ---------------------------------------------------------------------------
+# real owner signature regression：
+# 明确记录 production owner PytdxAdapter.get_finance_info 是同步合同。
+# ---------------------------------------------------------------------------
+class TestRealOwnerSignature:
+    def test_pytdx_adapter_get_finance_info_is_sync(self):
+        assert inspect.iscoroutinefunction(PytdxAdapter.get_finance_info) is False
