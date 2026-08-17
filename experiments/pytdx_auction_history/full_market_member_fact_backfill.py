@@ -277,6 +277,14 @@ class RunLockStale(RuntimeError):
     """run.lock 已存在但 owner process 不存在：必须显式 recover 才能继续。"""
 
 
+class PartialDbWriteFailure(RuntimeError):
+    """DB chunk 落库失败：立即中断当前 bar，保留已提交 chunk，整 bar 幂等重跑。
+
+    已提交的 chunk 数据保留在 DB（幂等 upsert 保证重跑收敛不重复）；剩余股票
+    不再浪费 pytdx/MDAS 请求（审查报告 P0）。
+    """
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -999,6 +1007,15 @@ async def _run_bar_partition(
                     db_written_rows += res["written"]
                     db_skipped_rows += res["skipped"]
                     db_failed_rows += res["failed"]
+                    # [CHANGE-20260817-001-FIX] DB chunk 失败立即中断当前 bar：
+                    # 已提交 chunk 保留在 DB，剩余股票不再浪费 pytdx/MDAS 请求，
+                    # 整 bar 标记 FAILED 后由幂等重跑补齐（审查报告 P0）。
+                    if res["failed"] > 0:
+                        raise PartialDbWriteFailure(
+                            f"DB chunk upsert failed trade_date={trade_date} "
+                            f"chunk_rows={len(db_facts_buffer)} failed={res['failed']} "
+                            f"— abort bar"
+                        )
                     await session.commit()
                 # chunk 结果在本循环尾部自然离开作用域（raw_batch/qfq_batch/observations
                 # 不再被引用），python GC 释放；不 merge 进 full-market 映射。
@@ -1041,6 +1058,14 @@ async def _run_bar_partition(
                     db_written_rows += res["written"]
                     db_skipped_rows += res["skipped"]
                     db_failed_rows += res["failed"]
+                    # [CHANGE-20260817-001-FIX] 单 member DB 写失败立即中断当前 bar
+                    #（审查报告 P0）。
+                    if res["failed"] > 0:
+                        raise PartialDbWriteFailure(
+                            f"DB write failed trade_date={trade_date} "
+                            f"inst={getattr(inst, 'symbol', inst)} failed={res['failed']} "
+                            f"— abort bar"
+                        )
                     await session.commit()
                 _maybe_progress(
                     progress_state, progress_path, trade_date=trade_date,
@@ -1333,6 +1358,7 @@ async def run_backfill(
     mdas_chunk_size: int = MDAS_CHUNK_SIZE,
     db_chunk_size: int = 500,
     db_writer=None,            # 注入 writer；None → 不落库（benchmark/dry 默认）
+    bar_index_offset: int = 1,  # global bar_index 起点（--bar-range 分区时 worker 间连续）
 ) -> dict:
     if run_id is None:
         run_id = f"{RUN_ID_PREFIX}_{as_of.isoformat()}"
@@ -1769,15 +1795,15 @@ def _cli_main(argv: list[str] | None = None) -> int:
 
     # [CHANGE-20260817-001-FIX] db_writer 决策：
     # - --dry-write 始终不落库（writer no-op 双保险）
-    # - benchmark 默认不落库；显式 --write-db 才落库
-    # - live 默认落库；--dry-write 可旁路
+    # - live / benchmark 均需显式 --write-db 才落库（写真实业务库必须显式授权，
+    #   禁止 live 模式默认写库；审查报告 P0）
     if args.dry_write:
         os.environ["AUCTION_BACKFILL_DRY_WRITE"] = "1"
         db_writer = None
-    elif args.mode == "benchmark":
+    elif args.mode in ("live", "benchmark"):
         db_writer = write_bar_quotes if args.write_db else None
-    else:  # live
-        db_writer = write_bar_quotes
+    else:
+        db_writer = None
 
     if args.mode == "live":
         out_manifest = asyncio.run(run_backfill(

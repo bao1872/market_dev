@@ -1,14 +1,50 @@
-# 竞价分析 PRD（Auction PRD）V2.1 — Overnight Repricing Observation
+# 竞价分析 PRD（Auction PRD）V3.1 — Overnight Repricing Observation
 
 状态：已确认
-最后更新：2026-08-15
+最后更新：2026-08-17
 对应 Map：`../maps/75-auction-analysis.md`
 条款前缀：`AU`
 需求所有权：Auction（9:25 竞价重新定价观测）的目标行为、事实定义、分析定义与边界约束
 
+> **V3.1（2026-08-17）变更**：冻结竞价数据源合同 —— pytdx 为竞价正式数据源（历史回补走
+> `get_history_transaction_data` 定向 09:25 窗口；实时走 `get_security_quotes`）；冻结
+> `provider_family = tongdaxin` 语义与 live/history 两条 lineage；明确
+> `MootdxAuctionQuoteProvider` 为 legacy 名称、实质为 pytdx/tongdaxin 实现。见下方
+> [§0.0-A Source Contract Freeze](#00-a-source-contract-freeze-v31)。
+
 > 本文件是 Auction 的唯一需求真源。它回答：隔夜之后，9:25 当前哪里异常、昨日状态如何被重新定价、注意力重心如何变化。
 > [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义跨域依赖与 lineage 的基本要求，不替代本文件的分析合同。
 > 旧 AuctionAnchor 产品（structure/chip anchor 模型）不再是本文件 active 目标合同，见 [§23 Legacy AuctionAnchor Deprecation](#23-legacy-auctionanchor-deprecation--migration-gap)。
+
+### 0.0-A Source Contract Freeze（V3.1，2026-08-17）
+
+本小节冻结竞价数据源身份与 lineage。它回答「真实源是什么、DB 里存什么名字、为何这样」，
+供未来半年 / 一年的数据审计使用。
+
+**正式源合同（FROZEN）：**
+
+```text
+acquisition source       = pytdx（通达信协议；纯 Python 实现）
+provider_family          = tongdaxin
+live endpoint            = get_security_quotes（09:25 实时批量报价）
+history endpoint         = get_history_transaction_data（定向 09:25:00~09:25:59 窗口）
+canonicalization         = 见 AU-04-4（positive-volume row 唯一 canonical；zero-volume 为 auxiliary）
+```
+
+**Lineage / 落库身份（FROZEN）：**
+
+```text
+live persistence lane    = source_id = "mootdx"  ← legacy 名称，实质 pytdx/tongdaxin
+historical persistence   = source = "historical_backfill" / test_namespace = "historical_backfill"
+provider class           = MootdxAuctionQuoteProvider（legacy 类名，实质 Pytdx 实现）
+```
+
+- `source_id = "mootdx"` 是**历史遗留命名**，不代表真实采集源；真实源恒为 pytdx/tongdaxin。
+- 禁止新代码把 `"mootdx"` 当作独立数据源语义；它是 provider abstraction 的 legacy 名称。
+- 历史回补数据进入 `historical_backfill` 隔离 namespace，不进入 live `verified_consensus` truth 链。
+- 多源验证要求：外部竞价 truth 需 ≥2 个**独立 provider family**；pytdx/mootdx 属同一供应链
+  （见 `rules/90-deprecated-forbidden.md` 与 runbook `auction-analysis.md`），不得冒充第二独立 family。
+
 
 ### 0.0 正式分析链（Canonical Auction Analysis Pipeline）
 

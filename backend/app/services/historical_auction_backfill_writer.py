@@ -152,6 +152,10 @@ async def get_or_create_historical_capture_run(
     )
     session.add(run)
     await session.flush()
+    # [CHANGE-20260817-001-FIX] CaptureRun 必须立即 commit：若随后第一 chunk upsert 失败，
+    # _upsert_chunk 会 session.rollback()，未 commit 的 CaptureRun INSERT 会被一并回滚，
+    # 后续继续用旧 capture_run.id 写 quote 将 FK 失败（审查报告 P0）。
+    await session.commit()
     return run
 
 

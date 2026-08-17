@@ -33,14 +33,18 @@ from app.services.historical_auction_backfill_writer import (
 # ---------------------------------------------------------------------------
 
 def _sample_obs(price=10.5, vol=1000, amount=10500.0, src="TARGET_WINDOW_COMPLETE",
-                canon="FINAL"):
+                canon="CANONICAL"):
+    """正式 production row 词表（对齐 _project_member_row / project_row_to_fact）。
+
+    [FIX] 旧 fixture 用 prev_close / auction_matched_volume_shares / canon=FINAL；
+    正式字段为 previous_close_raw（lane_b.raw_close_Tm1 投影）与 CANONICAL 状态。
+    """
     return {
         "auction_price_raw": price,
-        "prev_close": 10.0,
+        "previous_close_raw": 10.0,
         "auction_volume_shares": vol,
         "auction_amount": amount,
-        "auction_matched_volume_shares": vol,
-        "auction_unmatched_volume_shares": 0,
+        "auction_amount_source_type": "DERIVED_PRICE_X_NORMALIZED_VOLUME",
         "source_status": src,
         "canonicalization_status": canon,
     }
@@ -61,7 +65,7 @@ def test_project_row_to_fact_maps_fields():
     assert fact.unmatched_volume == 0
     assert fact.quality_status == "ok"
     assert "backfill_source:TARGET_WINDOW_COMPLETE" in fact.reason_codes
-    assert "backfill_canon:FINAL" in fact.reason_codes
+    assert "backfill_canon:CANONICAL" in fact.reason_codes
     assert fact.raw_payload["auction_price_raw"] == 10.5
 
 
@@ -80,7 +84,7 @@ def test_project_row_to_fact_quality_error_on_source_error():
 def test_project_row_to_fact_quality_invalid_volume_on_canon():
     inst_id = uuid.uuid4()
     fact = project_row_to_fact(
-        _sample_obs(canon="INVALID_VOLUME"), inst_id, date(2026, 8, 14))
+        _sample_obs(canon="INVALID_VOLUME_0925"), inst_id, date(2026, 8, 14))
     assert fact.quality_status == "invalid_volume"
 
 
