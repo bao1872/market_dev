@@ -127,6 +127,32 @@ class TestBuildMergedCardDtoTextContent:
         )
         assert len(dto.text_content) > len(dto.summary)
 
+    def test_smc_degraded_reason_visible_in_card(self) -> None:
+        """G1：结构监控降级原因应透传到卡片并可见。
+
+        [code-audit 2026-08-17] 当 instrument_extra_info 含 smc_degraded_reason 时，
+        卡片 text_content 应明确告知用户"结构监控暂不可用：<原因>"，避免静默缺失。
+        """
+        inst_id = uuid4()
+        event = _make_event(inst_id)
+        service = MonitorBatchService()
+
+        reason = "日线数据不足，SMC 计算未执行"
+        dto = service._build_merged_card_dto(
+            user_events=[event],
+            total_instruments=5,
+            instrument_info_cache={inst_id: ("688362", "甬矽电子")},
+            instrument_extra_info={inst_id: {"smc_degraded_reason": reason}},
+        )
+
+        # 降级提示必须出现在卡片文本中（含原因原文字）
+        assert reason in dto.text_content, (
+            f"结构监控降级原因未出现在卡片：text_content={dto.text_content!r}"
+        )
+        assert "结构监控暂不可用" in dto.text_content, (
+            "卡片缺少结构监控降级提示语"
+        )
+
 
 class TestElementsToTextHelper:
     """验证 elements_to_text 公共辅助函数。"""

@@ -436,14 +436,24 @@ class TestSmcMonitorCalculateState:
         assert state.state["smc_episode_tracker"] == {}
 
     @pytest.mark.asyncio
-    async def test_calculate_state_raises_on_insufficient_daily(
+    async def test_calculate_state_no_raise_on_short_daily(
         self, smc_monitor: SmcMonitor
     ) -> None:
-        """日线数据不足 250 根时抛 ValueError。"""
+        """[code-audit 2026-08-17] 日线不足 250 根不再抛 ValueError（已删除 warmup 硬门槛）。
+
+        原 test_calculate_state_raises_on_insufficient_daily 断言抛异常，与修复冲突，
+        改为断言：短日线下 calculate_state 正常进入 adapter 路径，返回含
+        smc_currently_touched 的状态（adapter 对短数据可正常产出结构，不再被强制降级）。
+        """
         short_bars = _generate_daily_bars(n_bars=100)
         ctx = _make_context(short_bars, None)
-        with pytest.raises(ValueError, match="daily bars 数据不足"):
-            await smc_monitor.calculate_state(ctx)
+        # 关键：不再抛 ValueError("daily bars 数据不足（需要至少 250 根...）")
+        state = await smc_monitor.calculate_state(ctx)
+        # 返回的是 MonitorState 对象（非 dict）
+        assert hasattr(state, "state")
+        assert isinstance(state.state, dict)
+        assert "smc_currently_touched" in state.state
+        assert state.state.get("smc_availability") == "available"
 
     @pytest.mark.asyncio
     async def test_calculate_state_raises_on_empty_daily(
@@ -1054,16 +1064,20 @@ class TestSmcMonitorComputeIndicators:
         assert "view" in dto
 
     @pytest.mark.asyncio
-    async def test_compute_indicators_empty_on_insufficient_data(
+    async def test_compute_indicators_no_hard_short_circuit(
         self, smc_monitor: SmcMonitor
     ) -> None:
-        """数据不足时返回空 DTO。"""
+        """[code-audit 2026-08-17] 短日线不再硬短路返回空 DTO（已删除 <250 守卫）。
+
+        删除守卫后 compute_indicators 直接走 adapter；短数据下 adapter 正常计算
+        （view.total_bars 反映真实 bars 数，不再为强制 0），事件是否非空取决于
+        数据本身而非数据量门槛。
+        """
         short_bars = _generate_daily_bars(n_bars=100)
         ctx = _make_context(short_bars)
         dto = await smc_monitor.compute_indicators(ctx)
-        assert dto["events"] == []
-        assert dto["order_blocks"] == []
-        assert dto["view"]["total_bars"] == 0
+        # 不再硬短路：total_bars 反映真实数据量，而非被强制置 0
+        assert dto["view"]["total_bars"] == 100
 
     @pytest.mark.asyncio
     async def test_compute_indicators_excludes_fvg(
@@ -1160,25 +1174,27 @@ class TestWatchlistMonitorNamespaces:
         assert "change_pct" in state.state
 
     @pytest.mark.asyncio
-    async def test_calculate_state_smc_degraded_on_short_daily(
+    async def test_calculate_state_smc_not_degraded_on_short_daily(
         self
     ) -> None:
-        """日线数据不足时 SMC 标记 degraded，node_cluster 不受影响。
+        """[code-audit 2026-08-17] 日线不足 250 根不再标记 SMC degraded（已删除 warmup 限制）。
 
-        [CHANGE-20260728-010] BB 已移除，不再检查 bb degraded 状态。
+        原 test_calculate_state_smc_degraded_on_short_daily 断言短日线触发 SMC 降级，
+        与修复冲突；改为断言：短日线（50 根）不再因数据量门槛降级，adapter 正常计算，
+        且 node_cluster 仍不因短日线降级（>= 25 根要求）。
         """
         monitor = WatchlistMonitor()
         version = _make_mock_version()
         await monitor.initialize(version)
 
-        # 50 根日线（满足 node_cluster 的 25 根要求，不满足 SMC 的 250 根要求）
+        # 50 根日线（满足 node_cluster 的 25 根要求，原不满足 SMC 的 250 根要求）
         short_bars = _generate_daily_bars(n_bars=50)
         bars_minute = _make_minute_bars(prev_close=10.0, cur_close=10.5)
         ctx = _make_context(short_bars, bars_minute)
         state = await monitor.calculate_state(ctx)
 
-        # SMC 应标记 degraded（< 250 根）
-        assert state.state["degraded"]["smc"] is True
+        # SMC 不应再因短日线降级（warmup 限制已删除）
+        assert state.state["degraded"]["smc"] is False
         # node_cluster 不应 degraded（>= 25 根）
         assert state.state["degraded"]["node_cluster"] is False
         # BB degraded 键已移除
@@ -1299,3 +1315,53 @@ class TestSmcMonitorSelfTest:
         # 负例：level 在 bar 范围外
         assert _is_eqh_touched(cur_high=9.5, cur_low=9.0, level=10.0) is False
         assert _is_eql_touched(cur_high=11.0, cur_low=10.5, level=10.0) is False
+
+
+# =============================================================================
+# 7. 修复：删除 250 根 warmup 硬门槛（G2/G3）
+# =============================================================================
+
+
+class TestSmcWarmupGateRemoved:
+    """[code-audit 2026-08-17] 删除 SMC 250 根 warmup 硬门槛后，短日线不再被
+    calculate_state / compute_indicators 静默归零（交由 adapter 优雅返回空结果）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_calculate_state_no_250_floor_raises(self) -> None:
+        """G2：日线 <250 根时 calculate_state 不应抛 ValueError（原 warmup 守卫）。
+
+        期望：正常进入 adapter 路径，返回 MonitorState（含 smc_currently_touched）。
+        实测 120 根日线即可产出完整结构（BOS/CHoCH/Active OB），证明原 250
+        根限制纯属过度保守；删除后结构事件可在更短数据下正常产出。
+        """
+        short_bars = _generate_daily_bars(n_bars=120)
+        assert len(short_bars) < 250
+
+        monitor = SmcMonitor()
+        context = _make_context(short_bars)
+        # 关键：不再抛 ValueError("daily bars 数据不足（需要至少 250 根...）")
+        state = await monitor.calculate_state(context)
+        # 返回的是 MonitorState 对象
+        assert hasattr(state, "state")
+        assert isinstance(state.state, dict)
+        # 关键字段仍存在（Adapter 已正常计算，无降级）
+        assert "smc_currently_touched" in state.state
+        assert state.state.get("smc_availability") == "available"
+
+    @pytest.mark.asyncio
+    async def test_compute_indicators_no_250_floor_short_circuit(self) -> None:
+        """G3：compute_indicators 在 <250 根时不再提前短路返回空 DTO。
+
+        期望：进入 adapter 路径（短数据下 adapter 返回真实结果，而非硬短路空 DTO）。
+        """
+        short_bars = _generate_daily_bars(n_bars=120)
+        assert len(short_bars) < 250
+
+        monitor = SmcMonitor()
+        context = _make_context(short_bars)
+        dto = await monitor.compute_indicators(context)
+        assert isinstance(dto, dict)
+        # adapter 成功返回则含 events / order_blocks 键（空数据下为空列表，非硬短路）
+        assert "events" in dto
+        assert "order_blocks" in dto

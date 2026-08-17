@@ -236,6 +236,7 @@ class MonitorBatchService:
             try:
                 events = await self._process_instrument_evaluation(
                     db, instrument_id, strategy_version, result,
+                    instrument_extra_info=instrument_extra_info,
                 )
                 all_written_events.extend(events)
             except Exception as exc:
@@ -459,6 +460,7 @@ class MonitorBatchService:
         instrument_id: uuid.UUID,
         strategy_version: StrategyVersion,
         result: MonitorCycleResult,
+        instrument_extra_info: dict[uuid.UUID, dict] | None = None,
     ) -> list[StrategyEvent]:
         """处理单个标的的监控周期（基于评估表）。
 
@@ -722,6 +724,14 @@ class MonitorBatchService:
         # daily/15m count、source hash、adj_factor_hash、availability、degraded_reason
         if isinstance(curr_state.state, dict):
             curr_state.state["node_cluster_input"] = NodeClusterInputProvider.to_dict(node_input)
+
+            # [P0 结构监控降级可见化] 把 SMC 降级原因透传给卡片构建，
+            # 让用户能感知"为何没有结构事件/图片"而不是静默缺失。
+            degraded = curr_state.state.get("degraded", {}) or {}
+            smc_reason = degraded.get("smc_degraded_reason")
+            if smc_reason and instrument_extra_info is not None:
+                extra = instrument_extra_info.setdefault(instrument_id, {})
+                extra["smc_degraded_reason"] = smc_reason
 
         # 获取 prev_state
         prev_state_orm = await monitor_state_repository.get_state(
@@ -1193,6 +1203,16 @@ class MonitorBatchService:
                 title_parts.append(f"  市值 {market_cap:.0f}亿")
             title_md = "".join(title_parts)
             elements.append({"tag": "markdown", "content": title_md})
+
+            # [P0 结构监控降级可见化] 若 SMC 计算被降级（无论是否已有 250 根
+            # warmup 之外的其他原因），明确告知用户结构监控当前不可用及原因，
+            # 避免"收不到结构事件图片"变成静默缺失。
+            smc_degraded_reason = extra_info.get("smc_degraded_reason")
+            if smc_degraded_reason:
+                elements.append({
+                    "tag": "markdown",
+                    "content": f"⚠️ 结构监控暂不可用：{smc_degraded_reason}",
+                })
 
             # hype_logic 显示（与参考脚本对齐）
             hype_logic = extra_info.get("hype_logic", "")

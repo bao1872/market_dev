@@ -270,12 +270,9 @@ class SmcMonitor(StrategyRuntime):
                 f"SmcMonitor 需要 daily bars 数据，instrument_id={context.instrument_id}"
             )
 
-        # SMC 需要足够 warmup（ATR200 + swings_length=50），最少 250 根
-        if len(bars_daily) < 250:
-            raise ValueError(
-                f"daily bars 数据不足（需要至少 250 根，实际 {len(bars_daily)}），"
-                f"instrument_id={context.instrument_id}"
-            )
+        # 注意：不再强制 250 根 warmup 硬门槛。数据量不足时交由 Canonical
+        # SMC Adapter 优雅返回空结果（底层 compute_smc_indicators 对短数据
+        # 返回空列表），不再抛 ValueError 被上层降级吞掉导致结构事件整体归零。
 
         # 调用 Canonical SMC Adapter（不裁剪，display_bars=全部）
         try:
@@ -813,7 +810,8 @@ class SmcMonitor(StrategyRuntime):
             完整 SMC DTO 字典
         """
         bars_daily = context.bars_daily
-        if bars_daily is None or len(bars_daily) < 250:
+        if bars_daily is None or bars_daily.empty:
+            # 无日线数据：返回空结果（不强制 250 根 warmup，交 adapter 自然处理）
             return {
                 "events": [],
                 "order_blocks": [],
