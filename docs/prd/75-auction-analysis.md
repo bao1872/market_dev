@@ -818,3 +818,92 @@ Conclusion 描述**当前 09:25 Auction state**，而不是未来预测。
 | `70-review.md`（§27 依赖矩阵 auction 行） | 标记 DEPRECATED（旧竞价回流依赖） |
 
 > 以上 GAP 为**显式登记**的 PRD↔代码暂时不一致，不隐藏；后续 Code Alignment Round 再处置实现。
+
+## 24. Code Alignment Architecture Contract（AU-24）
+
+> **IMPLEMENTATION ARCHITECTURE CONTRACT（AU-24）**
+> 本节是 Auction V2.1 的 **Code Alignment 架构契约**，定义 canonical 数值 owner 的代码归属。
+> 它**不修改**上文已冻结的任何产品语义（§0–§23）；任何语义冲突以上文为准。
+> 背景：截至 AU-24 基线，Auction 生产实现主体仍属旧 AuctionAnchor 架构（§23），
+> 缺少 §0.0 / §8 / §10 所要求的 **Member Facts → L1 Scope Facts** 第一层正式 production canonical computation owner。
+> AU-24 仅建立该 owner 的代码归属与计算形态契约，不实现 L2 / Transition / Conclusion / Publication / Frontend。
+
+### AU-24-1 Canonical Ownership
+
+Auction V2.1 正式分析链（§0.0）的 ownership 划分如下，每一层有唯一 owner：
+
+- **Acquisition / Truth**
+  负责获得并验证 9:25 源事实（竞价价 / 量 / 额及其历史异常度准备），
+  属于 acquisition / orchestration 层（不在本契约新增 owner）。
+- **Auction Member Fact Owner**
+  唯一负责把已准备好的：`gap` / `auction_volume` / `auction_amount` / 历史异常度事实 /
+  eligibility / readiness 表达成 **canonical Auction member input contract**
+  （`backend/app/domain/auction/member_fact.py`）。
+- **Auction L1 Scope Fact Owner**
+  唯一负责从 canonical member input 计算全部 L1 Scope 事实：
+  `breadth` / `participation` / `joint breadth` / `amount contribution` / `concentration` / `EW/AW gap`
+  （`backend/app/domain/auction/scope_fact.py`，入口 `compute_auction_l1_scope_facts`）。
+- **L2 / Transition / Interpretation**
+  只能消费 canonical L1 output，**不得重新计算同一 L1 fact**；本契约不建立这些 owner。
+
+### AU-24-2 Target Code Ownership
+
+记录当前 Code Alignment target（AU-24 基线引入）：
+
+| 路径 | 角色 |
+|---|---|
+| `backend/app/domain/auction/member_fact.py` | canonical Auction **prepared-member fact contract**（输入边界；区分 missing / zero） |
+| `backend/app/domain/auction/scope_fact.py` | canonical V2.1 **L1 Scope Fact calculation owner**（唯一 production kernel） |
+| `backend/app/services/**` | acquisition / orchestration / persistence adapters（不持有 L1 数值语义） |
+
+**禁止**把正式 L1 数值语义（breadth / contribution / HHI / concentration / EW/AW gap）重新放回
+legacy `backend/app/services/auction_aggregation_service.py` 或任何 AuctionAnchor 实现。
+L1 数值 owner 唯一在 `scope_fact.py`。
+
+### AU-24-3 Legacy Boundary
+
+以下均为 **LEGACY IMPLEMENTATION**（§23 已废止产品语义），**不是** V2.1 canonical owner：
+
+- `backend/app/services/auction_anchor_service.py`：legacy AuctionAnchor computation；
+- structure / chip interpretation、ATR anchor distance、structural relocation、old event lifecycle。
+
+当前阶段允许暂时保留 legacy 代码，但**禁止 V2.1 新代码新增对其业务语义的依赖**。
+`scope_fact.py` / `member_fact.py` 不得 import 任何 AuctionAnchor 私有 calculator 或 Review 私有 calculator。
+
+### AU-24-4 Compute Shape / Performance Contract
+
+对以下聚合：
+
+- full-market member facts（N = unique instruments）；
+- scope × member（S scopes，E membership edges）；
+- `breadth` / `contribution` / `HHI` / `concentration`；
+
+默认采用：
+
+- **columnar arrays**（NumPy ndarray / boolean masks）；
+- **batch / vector reductions**（`np.bincount`、boolean masks、`np.partition` Top-K）；
+
+**而非** Python per-member nested numerical loops。
+
+允许保留 Python 控制流：
+
+- orchestration（scope loop 外层）；
+- small outer scope loop；
+- sparse exceptional handling（如 scope_total_amount <= 0 时直接置 None）；
+- final result packaging（dataclass / typed object 构造）。
+
+**禁止在 PRD 中伪造具体 latency SLA**；性能预算先通过 benchmark 建立 evidence，由 Mentor 后续冻结。
+
+### AU-24-5 Semantic Equivalence
+
+性能优化（vectorization）**不得改变**以下已冻结语义（§4 / §9 / §10 / §11 / §16 / §23）：
+
+- PIT / point-in-time；
+- metric-specific eligibility（各 metric 独立 denominator，非 global valid count）；
+- denominator semantics（current vs history 分离）；
+- `missing != zero` / `invalid != zero`；
+- `historical-not-ready != current-invalid`；
+- concept overlap（Contribution 允许 > 100%，不归一化）；
+- amount / volume directionless semantics（无方向）；
+- same-family semantics（Industry ↔ Industry / Concept ↔ Concept）；
+- canonical ownership（L1 事实唯一 owner）。

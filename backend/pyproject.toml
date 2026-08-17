@@ -99,4 +99,5 @@ markers = [
     # 因此不进入 Fast CI 与 Release Gate 阻断路径，只在 Nightly 独立分组中运行并单独报告。
     # 必须由作者显式标注 @pytest.mark.external_data，不做源码文本自动推断。
     "external_data: 依赖外部行情数据源/网络的测试（不阻断 CI，仅 Nightly 独立分组报告）",
+    "benchmark: 微基准测试（性能 evidence；非正确性 gate，可独立运行）",
 ]
