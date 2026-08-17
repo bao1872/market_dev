@@ -1334,6 +1334,67 @@ def _accumulate_partition_quality(root_manifest: dict, manifest: dict,
 
 
 # ---------------------------------------------------------------------------
+# bar-range 解析（--bar-range + 并行 launcher 共用，避免两处日期口径漂移）
+# ---------------------------------------------------------------------------
+def parse_bar_range(spec: str, bar_count: int) -> tuple[int, int]:
+    """解析 "START:END"（1-based 全局 bar 序号，闭区间）。
+
+    Args:
+        spec: 形如 "1:30" / "31:60"。
+        bar_count: 全量 bar 数（官方 BAR_COUNT=120）。
+
+    Returns:
+        (start, end) 1-based 闭区间。
+
+    Raises:
+        ValueError: 格式错误 / START<1 / START>END / END>bar_count（fail fast）。
+    """
+    if not isinstance(spec, str) or ":" not in spec:
+        raise ValueError(
+            f"invalid --bar-range {spec!r}, expected 'START:END' (1-based inclusive)")
+    try:
+        start_s, end_s = spec.split(":")
+        start, end = int(start_s), int(end_s)
+    except ValueError:
+        raise ValueError(
+            f"invalid --bar-range {spec!r}, expected 'START:END' (1-based inclusive)") from None
+    if start < 1:
+        raise ValueError(f"--bar-range START must be >= 1, got {start}")
+    if end > bar_count:
+        raise ValueError(f"--bar-range END {end} exceeds bar_count {bar_count}")
+    if start > end:
+        raise ValueError(f"--bar-range START {start} > END {end}")
+    return start, end
+
+
+async def resolve_bar_range(
+    session,
+    as_of: date,
+    bar_range: str | None = None,
+    bar_count: int = BAR_COUNT,
+) -> tuple[list[date], int]:
+    """解析官方全量 bar 日期并可选切片为 --bar-range 子区间。
+
+    Returns:
+        (bar_dates, bar_index_offset)：bar_dates 为实际处理的日期子集（升序唯一），
+        bar_index_offset 为该子集第一根 bar 的全局 1-based 序号（未切片时为 1）。
+
+    Raises:
+        AssertionError: 官方 bar_count 校验失败（升序唯一 / 数量 / 最新日 == as_of）。
+    """
+    all_dates = await previous_trading_dates(session, as_of, bar_count)
+    all_dates = sorted(set(all_dates))
+    assert len(all_dates) == bar_count, (
+        f"official bar_count must be exactly {bar_count}, got {len(all_dates)}")
+    assert all_dates[-1] == as_of, (
+        f"latest bar must be {as_of}, got {all_dates[-1]}")
+    if bar_range is None:
+        return all_dates, 1
+    start, end = parse_bar_range(bar_range, bar_count)
+    return all_dates[start - 1:end], start
+
+
+# ---------------------------------------------------------------------------
 # 顶层 runner
 # ---------------------------------------------------------------------------
 async def run_backfill(
@@ -1441,6 +1502,7 @@ async def run_backfill(
             as_of=as_of, root_manifest=root_manifest,
             mdas_chunk_size=mdas_chunk_size,
             db_writer=db_writer,
+            bar_index_offset=bar_index_offset,
         )
     finally:
         if enable_run_lock:
@@ -1456,6 +1518,7 @@ async def _run_backfill_impl(
     mdas_chunk_size: int = MDAS_CHUNK_SIZE,
     db_chunk_size: int = 500,
     db_writer=None,
+    bar_index_offset: int = 1,  # global bar_index 起点（--bar-range 分区时 worker 间连续）
 ) -> dict:
     _out_root = output_root
     _mdas = mdas or MarketDataAggregationService()
@@ -1506,7 +1569,7 @@ async def _run_backfill_impl(
             _out_root / run_id / "offset_hints.json"
         )
 
-        for idx, t in enumerate(bar_dates, start=1):
+        for idx, t in enumerate(bar_dates, start=bar_index_offset):
             pdir = _partition_dir(run_id, t, _out_root)
 
             # --- population：load-once in-memory filter；否则 population_fn seam ---
@@ -1710,22 +1773,28 @@ async def _run_backfill_impl(
 
 
 def _as_snapshot(population: list[Instrument]) -> PopulationSnapshot:
-    """把 preloaded Instrument 列表包装为 snapshot（用于 in-memory filter）。"""
+    """把 preloaded Instrument 列表包装为 snapshot（用于 in-memory filter）。
+
+    用 getattr 读取 listing_date：真实 Instrument 与测试 SampleInstrument
+    （无 listing_date 字段）均可用。
+    """
     by_symbol: dict[str, Instrument] = {}
     present: list[Instrument] = []
     for r in population:
         by_symbol[r.symbol] = r
-        if r.listing_date is not None:
+        if getattr(r, "listing_date", None) is not None:
             present.append(r)
     return PopulationSnapshot(
         instruments=present,
         by_symbol=by_symbol,
         listing_missing_symbols=[
-            r.symbol for r in population if r.listing_date is None
+            r.symbol for r in population
+            if getattr(r, "listing_date", None) is None
         ],
         total_current_shsz=len(population),
         listing_date_present=len(present),
-        listing_date_missing=sum(1 for r in population if r.listing_date is None),
+        listing_date_missing=sum(
+            1 for r in population if getattr(r, "listing_date", None) is None),
     )
 
 
@@ -1758,6 +1827,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--mdas-chunk-size", type=int, default=MDAS_CHUNK_SIZE,
                    help="Round 3B-E1 PART 2：bounded MDAS batch chunk size "
                         f"（默认 {MDAS_CHUNK_SIZE}，禁止整市场 raw+qfq 同时常驻）")
+    p.add_argument("--bar-range", default=None,
+                   help="1-based 全局 bar 序号闭区间 'START:END'（如 '31:60'）。"
+                        "分区时由并行 launcher 传入，保证 worker 间 bar_index 连续；"
+                        "不传则处理全量官方 bars。")
     return p
 
 
@@ -1806,14 +1879,21 @@ def _cli_main(argv: list[str] | None = None) -> int:
         db_writer = None
 
     if args.mode == "live":
-        out_manifest = asyncio.run(run_backfill(
-            run_id=run_id, as_of=as_of, output_root=output_root,
-            code_sha=code_sha, enable_run_lock=True,
-            recover_stale_lock=args.recover_stale_lock,
-            require_listing_coverage=args.require_listing_coverage,
-            mdas_chunk_size=args.mdas_chunk_size,
-            db_writer=db_writer,
-        ))
+        async def _live():
+            async with AsyncSessionLocal() as session:
+                bar_dates, bar_index_offset = await resolve_bar_range(
+                    session, as_of, args.bar_range, BAR_COUNT)
+                return await run_backfill(
+                    run_id=run_id, bar_dates=bar_dates,
+                    bar_index_offset=bar_index_offset,
+                    as_of=as_of, output_root=output_root,
+                    code_sha=code_sha, enable_run_lock=True,
+                    recover_stale_lock=args.recover_stale_lock,
+                    require_listing_coverage=args.require_listing_coverage,
+                    mdas_chunk_size=args.mdas_chunk_size,
+                    db_writer=db_writer,
+                )
+        out_manifest = asyncio.run(_live())
     else:  # benchmark
         async def _benchmark():
             bar_dates = None

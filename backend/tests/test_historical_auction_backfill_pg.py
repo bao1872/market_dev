@@ -110,7 +110,8 @@ def _make_interrupt_writer(commit_before_fail: int):
 
 
 def _partition_manifest(tmp_path, run_id, t):
-    p = tmp_path / run_id / t.isoformat() / "partition_manifest.json"
+    # 路径含 bars 段（对齐 _partition_dir：root/run_id/bars/yyyy-mm-dd/partition_manifest.json）
+    p = tmp_path / run_id / "bars" / t.isoformat() / "partition_manifest.json"
     with open(p, "r", encoding="utf-8") as f:
         return json.load(f)
 
