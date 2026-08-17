@@ -198,6 +198,45 @@ def state_to_continuous(state: dict[str, Any] | None) -> dict[str, Any]:
     return {key: _number(state.get(key)) for key in _CONTINUOUS_STATE_KEYS}
 
 
+# Projection boundary (PERF-IO-1): every ``state_payload`` key the Review
+# pipeline actually consumes, i.e. the union of the keys read by
+# :func:`previous_state_to_flat` and the passthrough keys in
+# ``_CONTINUOUS_STATE_KEYS``.  This is used to build a SQL-side
+# ``jsonb_build_object`` projection so the full history JSONB is never
+# transferred to Review.  It is a BOUNDARY DOCUMENTATION constant only — it
+# must stay in sync with the two consumers above; the projection test asserts
+# that both consumers produce identical results on the full vs projected
+# payload.
+_REVIEW_STATE_KEYS: frozenset[str] = frozenset(
+    {
+        # previous_state_to_flat() categorical inputs
+        "regime_value",
+        "structure_alignment",
+        "swing_bias",
+        "internal_bias",
+        "sqzmom_val",
+        "sqzmom_delta",
+        "volume_ratio_20",
+        "volume_percentile_20",
+        "price_position_120d",
+        "review_volume_ratio20",
+        "review_amount_ratio20",
+        "review_volume_percentile20",
+        "review_amount_percentile200",
+        "latest_bos_direction",
+        "latest_bos_freshness",
+        "latest_choch_direction",
+        "latest_choch_freshness",
+        "latest_ob_direction",
+        "latest_ob_freshness",
+        "current_vs_prev_volume_mean_ratio",
+        "prev_segment_volume_mean",
+        # state_to_continuous() passthrough keys (_CONTINUOUS_STATE_KEYS)
+        *_CONTINUOUS_STATE_KEYS,
+    }
+)
+
+
 @dataclass(frozen=True)
 class DailyBarFact:
     trade_date: date

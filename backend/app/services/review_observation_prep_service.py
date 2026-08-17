@@ -23,10 +23,11 @@ from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.member_fact import (
+    _REVIEW_STATE_KEYS,
     DailyBarFact,
     previous_state_to_flat,
     state_to_continuous,
@@ -687,18 +688,34 @@ async def _load_batch_states(
     t1_by_date: dict[date, date | None],
 ) -> dict[date, dict[uuid.UUID, dict]]:
     """First Pyramid daily_state payloads for every requested T and its exact T-1
-    (one query), grouped by trade_date -> {instrument_id: state_payload}."""
+    (one query), grouped by trade_date -> {instrument_id: state_payload}.
+
+    PERF-IO-1: only the Review-consumed ``state_payload`` keys (``_REVIEW_STATE_KEYS``)
+    are projected via ``jsonb_build_object`` in SQL, so the full history JSONB is never
+    transferred / decoded.  Pure physical projection — the canonical semantic mapping
+    (``previous_state_to_flat`` / ``state_to_continuous``) stays untouched in Python,
+    and reads every missing key as ``None`` exactly like the full payload.
+    """
     if not instrument_ids or not trade_dates:
         return {}
     dates = set(trade_dates)
     dates.update(d for d in t1_by_date.values() if d is not None)
-    stmt = select(FirstPyramidHistoryDailyState).where(
+    # JSONB projection args: alternating key string + `state_payload -> 'key'`.
+    projection_args: list[Any] = []
+    for key in sorted(_REVIEW_STATE_KEYS):
+        projection_args.append(key)
+        projection_args.append(FirstPyramidHistoryDailyState.state_payload[key])
+    stmt = select(
+        FirstPyramidHistoryDailyState.instrument_id,
+        FirstPyramidHistoryDailyState.trade_date,
+        func.jsonb_build_object(*projection_args).label("state_payload"),
+    ).where(
         FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
         FirstPyramidHistoryDailyState.trade_date.in_(sorted(dates)),
         FirstPyramidHistoryDailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
     )
     out: dict[date, dict[uuid.UUID, dict]] = defaultdict(dict)
-    for row in (await session.execute(stmt)).scalars():
+    for row in (await session.execute(stmt)).all():
         out[row.trade_date][row.instrument_id] = row.state_payload
     return dict(out)
 
