@@ -40,6 +40,7 @@ from full_market_member_fact_backfill import (  # noqa: E402
 from run_backfill_parallel_launcher import (  # noqa: E402
     aggregate_worker,
     build_worker_command,
+    collect_worker_outputs,
     slice_into_ranges,
     worker_run_id,
 )
@@ -284,3 +285,32 @@ def test_aggregate_worker_sums_db_metrics():
     assert agg["db_written_rows"] == 550
     assert agg["db_failed_rows"] == 12
     assert agg["failed_bars"] == ["2026-08-03"]
+
+
+def test_collect_worker_outputs_bars_depth(tmp_path):
+    """回归护栏：worker 结构为 run_id/bars/<trade_date>/partition_manifest.json（两级深）。
+
+    glob("*/partition_manifest.json") 只匹配一级深，会漏掉全部 partition，
+    导致 launcher 聚合 manifest 出现 completed_bar_count=0 / db_written_rows=0
+    （Canary N=2 现场复现）。修复后应能读取到并正确聚合。
+    """
+    run_id = "canary_n2_4bars_worker_01"
+    (tmp_path / run_id / "bars").mkdir(parents=True)
+    (tmp_path / run_id / "manifest.json").write_text(
+        json.dumps({"status": "DONE", "run_id": run_id}), encoding="utf-8")
+    for td, written in [("2026-02-13", 5162), ("2026-02-24", 5162)]:
+        d = tmp_path / run_id / "bars" / td
+        d.mkdir(parents=True)
+        (d / "partition_manifest.json").write_text(
+            json.dumps({"status": "COMPLETED", "trade_date": td,
+                        "db_written_rows": written, "db_failed_rows": 0}),
+            encoding="utf-8")
+
+    root, partitions = collect_worker_outputs(tmp_path, run_id)
+    assert (root or {}).get("status") == "DONE"
+    assert len(partitions) == 2
+    agg = aggregate_worker(root, partitions)
+    assert agg["completed_bar_count"] == 2
+    assert agg["db_written_rows"] == 10324
+    assert agg["db_failed_rows"] == 0
+    assert agg["failed_bars"] == []

@@ -158,7 +158,9 @@ def collect_worker_outputs(output_root: Path, run_id: str) -> tuple[dict[str, An
     root = _load_json(run_dir / "manifest.json")
     partitions: list[dict[str, Any]] = []
     if run_dir.is_dir():
-        for pm_path in sorted(run_dir.glob("*/partition_manifest.json")):
+        # worker 结构：run_id/bars/<trade_date>/partition_manifest.json（两级深）
+        # 不能用 glob("*/partition_manifest.json")：只匹配一级深会漏掉全部 partition
+        for pm_path in sorted(run_dir.glob("bars/*/partition_manifest.json")):
             pm = _load_json(pm_path)
             if pm is not None:
                 partitions.append(pm)
