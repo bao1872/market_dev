@@ -68,16 +68,22 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--mode",
-        choices=["single", "measure-all-scopes"],
+        choices=["single", "measure-all-scopes", "vec1-benchmark"],
         default="single",
         help=(
             "single: 单 scope 基线测量（默认）；"
-            "measure-all-scopes: 枚举全量 scope 测物理数据量，定 batch boundary"
+            "measure-all-scopes: 枚举全量 scope 测物理数据量，定 batch boundary；"
+            "vec1-benchmark: 对重叠度最高的 concept 子集执行 batch dynamics，"
+            "报告 VEC-1 duplication_factor 等物理成本指标"
         ),
     )
     p.add_argument(
         "--sample-bar-members", type=int, default=200,
         help="measure-all-scopes 模式下抽样估算单 member 400d bar 体积的样本数",
+    )
+    p.add_argument(
+        "--benchmark-scopes", type=int, default=50,
+        help="vec1-benchmark 模式：重叠度最高的 scope 数量（默认 50）",
     )
     return p.parse_args()
 
@@ -337,6 +343,202 @@ async def _measure_all_scopes(sample_bar_members: int) -> int:
         return 0
 
 
+async def _vec1_benchmark(
+    scope_type: str,
+    history: int,
+    asof_date: date | None,
+    benchmark_scopes: int,
+) -> int:
+    """vec1-benchmark：对重叠度最高的 concept 子集执行 VEC-1 batch。
+
+    只发 SELECT，不写库。报告物理成本指标（rules/25 §8.7 纯观测）：
+      - scope_count / union_member_count / trade_date_count
+      - scope_member_day_count / unique_member_day_count / duplication_factor
+      - member build 调用次数从 scope×date（legacy）降到 date（VEC-1）
+      - member_build_ms / scope_slice_ms / scope_observation_ms / total_ms
+
+    legacy 与 vec1 两个路径都调用同一个 canonical owner
+    （``_build_member_observations`` / ``compute_scope_observation``），只是循环
+    顺序不同；本函数只计时并验证两者 PreparedScope 数量一致，不复制任何公式。
+    """
+    import time
+    import uuid
+
+    from sqlalchemy import select, text
+
+    from app.db import AsyncSessionLocal
+    from app.domain.review.scope_observation import compute_scope_observation
+    from app.models.market_board import MarketBoard, MarketBoardMembership
+    from app.services.review_observation_prep_service import (
+        _build_member_observations,
+        list_recent_trading_days,
+        prepare_scopes_from_union,
+        prepare_union_fact_context,
+    )
+
+    _build_readonly_engine()
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+        )
+        try:
+            await db.execute(
+                text(
+                    "WITH u AS (UPDATE market_boards SET name=name "
+                    "WHERE id='00000000-0000-0000-0000-000000000000' "
+                    "RETURNING 1) SELECT 1 FROM u"
+                )
+            )
+            await db.rollback()
+        except Exception as e:  # noqa: BLE001
+            await db.rollback()
+
+        if asof_date is None:
+            latest = await list_recent_trading_days(db, date.today(), 1)
+            if not latest:
+                logger.error("无法解析最新交易日（calendar 为空）")
+                return 2
+            asof_date = latest[0]
+        trade_dates = sorted(await list_recent_trading_days(db, asof_date, history))
+        if not trade_dates:
+            logger.error("trade_dates 为空（history=%d）", history)
+            return 2
+
+        # ---- 枚举 concept scope -> members（只读） ----
+        boards = (
+            await db.execute(
+                select(MarketBoard.id, MarketBoard.name)
+                .where(MarketBoard.type == "concept")
+                .where(MarketBoard.isActive.is_(True))
+            )
+        ).all()
+        memberships = (
+            await db.execute(
+                select(
+                    MarketBoardMembership.boardId,
+                    MarketBoardMembership.instrumentId,
+                )
+            )
+        ).all()
+        per_board: dict = {}
+        member_board_count: dict = {}
+        for bid, iid in memberships:
+            per_board.setdefault(str(bid), []).append(uuid.UUID(str(iid)))
+            member_board_count[str(iid)] = member_board_count.get(str(iid), 0) + 1
+        # 重叠度 = 该 scope 平均每个 member 属于的 concept 数量（用全局计数估算）
+        ranked: list[tuple[float, str, str]] = []
+        for bid, bname in boards:
+            mids = per_board.get(str(bid), [])
+            if not mids:
+                continue
+            avg_share = sum(member_board_count.get(str(m), 0) for m in mids) / len(mids)
+            ranked.append((avg_share, str(bid), str(bname) or str(bid)))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        top = ranked[:benchmark_scopes]
+        if not top:
+            logger.error("无 concept scope 可选（scope_type=%s）", scope_type)
+            return 2
+        scope_members: dict[str, tuple[list[uuid.UUID], str]] = {
+            bid: (per_board[bid], bname) for _share, bid, bname in top
+        }
+
+        union_ids: list[uuid.UUID] = []
+        seen: set = set()
+        for mids, _n in scope_members.values():
+            for m in mids:
+                if m not in seen:
+                    seen.add(m)
+                    union_ids.append(m)
+        scope_member_day_count = (
+            sum(len(m) for m, _n in scope_members.values()) * len(trade_dates)
+        )
+        unique_member_day_count = len(union_ids) * len(trade_dates)
+        duplication_factor = (
+            scope_member_day_count / unique_member_day_count
+            if unique_member_day_count
+            else 0.0
+        )
+
+        print("=== VEC-1 Union Member-Day Benchmark (read-only) ===")
+        print(f"scope_type            : {scope_type}")
+        print(f"benchmark_scopes      : {len(scope_members)}")
+        print(f"asof_date             : {asof_date.isoformat()}")
+        print(f"trade_date_count      : {len(trade_dates)}")
+        print(f"union_member_count    : {len(union_ids)}")
+        print(f"scope_member_day_count: {scope_member_day_count}")
+        print(f"unique_member_day_count: {unique_member_day_count}")
+        print(f"duplication_factor    : {duplication_factor:.2f}")
+
+        # ---- union facts 只加载一次（PERF-2） ----
+        t0 = time.perf_counter()
+        union_ctx = await prepare_union_fact_context(db, trade_dates, union_ids)
+        union_fact_load_ms = (time.perf_counter() - t0) * 1000.0
+        print(f"union_fact_load_ms    : {union_fact_load_ms:.1f}")
+
+        prep_counters: dict[str, int] = {}
+        prep_fallback: list[str] = []
+
+        # ---- legacy：scope -> date -> member（before 基线） ----
+        t0 = time.perf_counter()
+        legacy_prepared: dict[str, list] = {k: [] for k in scope_members}
+        for scope_key, (member_ids, _n) in scope_members.items():
+            for t in trade_dates:
+                t1 = union_ctx.t1_by_date.get(t)
+                states_t = union_ctx.states_by_date.get(t, {})
+                states_t1 = union_ctx.states_by_date.get(t1, {}) if t1 else {}
+                members = _build_member_observations(
+                    list(member_ids),
+                    trade_date=t, t1=t1, states_t=states_t, states_t1=states_t1,
+                    bars=union_ctx.bars, current_only_facts={},
+                    vec_volume=union_ctx.vec_volume,
+                    counters=prep_counters, fallback_reasons=prep_fallback,
+                )
+                legacy_prepared[scope_key].append(members)
+        legacy_member_build_ms = (time.perf_counter() - t0) * 1000.0
+
+        # ---- VEC-1：date -> union member -> scope slice（after） ----
+        t0 = time.perf_counter()
+        vec1_prepared = await prepare_scopes_from_union(
+            db, scope_type, trade_dates, scope_members, union_ctx,
+            prep_counters=prep_counters, prep_fallback_reasons=prep_fallback,
+        )
+        vec1_member_build_ms = (time.perf_counter() - t0) * 1000.0
+
+        # ---- scope observation（两者同 owner，计时为 VEC-1 路径） ----
+        t0 = time.perf_counter()
+        obs_count = 0
+        for scope_key, prepared_list in vec1_prepared.items():
+            for prepared in prepared_list:
+                compute_scope_observation(
+                    scope_type=scope_type,
+                    scope_key=scope_key,
+                    trade_date=prepared.trade_date,
+                    pit_member_ids=prepared.pit_member_ids,
+                    pit_member_ids_t1=prepared.pit_member_ids_t1,
+                    members=prepared.members,
+                    events=prepared.events,
+                )
+                obs_count += 1
+        scope_observation_ms = (time.perf_counter() - t0) * 1000.0
+
+        # ---- 一致性：两路径 PreparedScope 数量相同 ----
+        legacy_count = sum(len(v) for v in legacy_prepared.values())
+        vec1_count = sum(len(v) for v in vec1_prepared.values())
+        print(f"legacy_prepared_count : {legacy_count}")
+        print(f"vec1_prepared_count   : {vec1_count}")
+        print(f"member_build_calls    : legacy={len(scope_members) * len(trade_dates)} "
+              f"vec1={len(trade_dates)}")
+        print(f"member_build_ms       : legacy={legacy_member_build_ms:.1f} "
+              f"vec1={vec1_member_build_ms:.1f}")
+        print(f"scope_observation_ms  : {scope_observation_ms:.1f} (count={obs_count})")
+        print(f"rss_mb                : {_rss_mb():.1f}")
+        print(f"vec_hit={prep_counters.get('vec_hit', 0)} "
+              f"vec_fallback={prep_counters.get('vec_fallback', 0)} "
+              f"fallback_reasons={','.join(prep_fallback) or '-'}")
+        print("=== END ===")
+        return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     asof: date | None = date.fromisoformat(args.asof_date) if args.asof_date else None
     if args.dry_run:
@@ -347,6 +549,13 @@ async def _run(args: argparse.Namespace) -> int:
         return 0
     if args.mode == "measure-all-scopes":
         return await _measure_all_scopes(args.sample_bar_members)
+    if args.mode == "vec1-benchmark":
+        return await _vec1_benchmark(
+            args.scope_type or "concept",
+            args.history,
+            asof,
+            args.benchmark_scopes,
+        )
     if not args.scope_type or not args.scope_key:
         logger.error("[single] --scope-type 与 --scope-key 为必填")
         return 2

@@ -171,20 +171,11 @@ def _build_members(
     """Run the shared member-construction owner with (or without) the precomputed
     vectorized volume context.  ``vectorized=False`` is exactly the per-date
     oracle path (canonical ``build_member_observation``)."""
+    bars_series = {i: _to_series(facts) for i, facts in bars.items()}
     vec_volume = (
-        _precompute_vectorized_volume({i: _to_series(f) for i, f in bars.items()})
+        _precompute_vectorized_volume(bars_series)
         if vectorized
         else None
-    )
-    lo = t - timedelta(days=_BAR_LOOKBACK_DAYS)
-    bar_facts = {
-        i: [b for b in facts if lo <= b.trade_date <= t] for i, facts in bars.items()
-    }
-    t1_facts = (
-        {i: [b for b in f if t1 - timedelta(days=_BAR_LOOKBACK_DAYS) <= b.trade_date <= t1]
-         for i, f in bars.items()}
-        if t1
-        else {}
     )
     return _build_member_observations(
         list(bars.keys()),
@@ -192,8 +183,7 @@ def _build_members(
         t1=t1,
         states_t=states.get(t, {}),
         states_t1=states.get(t1, {}) if t1 else {},
-        bar_facts=bar_facts,
-        t1_facts=t1_facts,
+        bars=bars_series,
         current_only_facts={},
         vec_volume=vec_volume,
     )

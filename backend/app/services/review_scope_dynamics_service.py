@@ -46,6 +46,7 @@ from app.domain.review.analysis.scope_dynamics import (
 )
 from app.services.review_historical_scope_reconstruction_service import (
     reconstruct_scope_series,
+    reconstruct_scope_series_batch,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,12 +144,6 @@ async def compute_current_static_scope_dynamics(
     """
     _validate_trade_dates(trade_dates, analysis_asof_date=analysis_asof_date)
 
-    import time
-
-    reconstruction_ms = observation_series_ms = dynamics_ms = total_ms = 0.0
-    t_total = time.perf_counter()
-
-    t_recon = time.perf_counter()
     reconstruction = await reconstruct_scope_series(
         db,
         scope_type,
@@ -156,7 +151,73 @@ async def compute_current_static_scope_dynamics(
         list(trade_dates),
         asof_date=analysis_asof_date,
     )
-    reconstruction_ms = (time.perf_counter() - t_recon) * 1000.0
+    return _compose_scope_dynamics_from_reconstruction(
+        reconstruction,
+        scope_type=scope_type,
+        scope_key=scope_key,
+        trade_dates=trade_dates,
+        analysis_asof_date=analysis_asof_date,
+    )
+
+
+async def compute_current_static_scope_dynamics_batch(
+    db: AsyncSession,
+    scope_type: str,
+    scope_keys: Sequence[str],
+    trade_dates: Sequence[date],
+    *,
+    analysis_asof_date: date,
+    union_member_cap: int = 4096,
+) -> list[dict[str, Any]]:
+    """Compose current-static Scope Dynamics for a batch of scopes (shadow).
+
+    VEC-1B: routes through ``reconstruct_scope_series_batch`` so the member x
+    date window is loaded ONCE across all scopes that share a member (PERF-2)
+    and the member observation is built once per unique member-day (VEC-1).
+    The per-scope composition is EXACTLY the same helper as the single-scope
+    path — there is no second Dynamics owner.
+
+    SHADOW ONLY: never wired into API / orchestrator / persistence / frontend.
+    """
+    _validate_trade_dates(trade_dates, analysis_asof_date=analysis_asof_date)
+    if not scope_keys:
+        return []
+
+    reconstructions = await reconstruct_scope_series_batch(
+        db,
+        scope_type,
+        list(scope_keys),
+        list(trade_dates),
+        asof_date=analysis_asof_date,
+        union_member_cap=union_member_cap,
+    )
+    return [
+        _compose_scope_dynamics_from_reconstruction(
+            reconstruction,
+            scope_type=scope_type,
+            scope_key=reconstruction["scope"]["scope_key"],
+            trade_dates=trade_dates,
+            analysis_asof_date=analysis_asof_date,
+        )
+        for reconstruction in reconstructions
+    ]
+
+
+def _compose_scope_dynamics_from_reconstruction(
+    reconstruction: dict[str, Any],
+    *,
+    scope_type: str,
+    scope_key: str,
+    trade_dates: Sequence[date],
+    analysis_asof_date: date,
+) -> dict[str, Any]:
+    """Shared composition: reconstruction source -> ObservationSeries -> Dynamics.
+
+    The single owner that turns one current-static reconstruction (either a
+    single-scope series or one entry of a shared batch) into the shadow
+    ObservationSeries + Scope Dynamics result.  Both application entry points
+    delegate here so there is exactly one composition implementation.
+    """
     _guard_source_contract(
         reconstruction,
         scope_type=scope_type,
@@ -168,6 +229,11 @@ async def compute_current_static_scope_dynamics(
     # exists is always "ready" — member-level availability (provided_member_count)
     # must NOT downgrade a Scope snapshot (PRD §7.15.2).  A caller-axis date with
     # no row is simply omitted: the Builder preserves it as an unavailable slot.
+    import time
+
+    observation_series_ms = dynamics_ms = total_ms = 0.0
+    t_total = time.perf_counter()
+
     snapshot_series = [
         {
             "trade_date": row["trade_date"],
@@ -192,20 +258,19 @@ async def compute_current_static_scope_dynamics(
     t_dyn = time.perf_counter()
     scope_dynamics = compute_scope_dynamics_analysis(observation_series)
     dynamics_ms = (time.perf_counter() - t_dyn) * 1000.0
-
     total_ms = (time.perf_counter() - t_total) * 1000.0
+
     _mem = reconstruction.get("membership") or {}
     _mem_count = _mem.get("member_count") if isinstance(_mem, dict) else len(_mem)
     _prep = reconstruction.get("prep_metrics") or {}
     logger.info(
         "[scope-dynamics] scope_type=%s scope_key=%s member_count=%s "
         "trade_date_count=%d vec_hit=%d vec_fallback=%d fallback_reasons=%s "
-        "reconstruction_ms=%.1f observation_series_ms=%.1f "
-        "dynamics_ms=%.1f total_ms=%.1f",
+        "observation_series_ms=%.1f dynamics_ms=%.1f total_ms=%.1f",
         scope_type, scope_key, _mem_count, len(trade_dates),
         _prep.get("vec_hit", 0), _prep.get("vec_fallback", 0),
         ",".join(_prep.get("fallback_reasons", [])) or "-",
-        reconstruction_ms, observation_series_ms, dynamics_ms, total_ms,
+        observation_series_ms, dynamics_ms, total_ms,
     )
 
     return {
@@ -222,7 +287,6 @@ async def compute_current_static_scope_dynamics(
             "vec_hit": _prep.get("vec_hit", 0),
             "vec_fallback": _prep.get("vec_fallback", 0),
             "fallback_reasons": list(_prep.get("fallback_reasons", [])),
-            "reconstruction_ms": reconstruction_ms,
             "observation_series_ms": observation_series_ms,
             "dynamics_ms": dynamics_ms,
             "total_ms": total_ms,

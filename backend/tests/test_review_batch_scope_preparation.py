@@ -815,3 +815,378 @@ def test_reconstruct_scope_series_batch_chunks_when_union_exceeds_cap(
     out = asyncio.run(scenario())
     assert len(out) == 4
     assert calls == {"calendar": 4, "states": 4, "bars": 4, "events": 4}
+
+
+# ---------------------------------------------------------------------------
+# PERF-VEC-1 — union member-day deduplication
+#
+# Locks the VEC-1 loop-order invariant: canonical MemberObservation construction
+# drops from scope-member-date to unique-member-date.  ``prepare_scopes_from_union``
+# must build the union once per trade_date and slice per scope WITHOUT re-running
+# ``_build_member_observations``, while every PreparedScope / observation stays
+# byte-identical to the dedicated single-scope path.
+# ---------------------------------------------------------------------------
+
+
+def _install_union_mocks(
+    monkeypatch,
+    all_bars,
+    states,
+    events,
+    trading_days,
+    calls=None,
+):
+    """Shared batch-loader mocks (VEC-1 tests).  ``calls`` is optional and counts
+    bulk-reader invocations."""
+
+    def _calls(key):
+        if calls is not None:
+            calls[key] = calls.get(key, 0) + 1
+
+    async def fake_calendar(session, trade_dates):
+        _calls("calendar")
+        return {
+            t: trading_days[trading_days.index(t) - 1]
+            if trading_days.index(t) > 0 else None
+            for t in trade_dates
+        }
+
+    async def fake_states(session, instrument_ids, trade_dates, t1_by_date):
+        _calls("states")
+        return {
+            d: states.get(d, {})
+            for d in set(trade_dates) | set(t1_by_date.values())
+        }
+
+    async def fake_bars(session, instrument_ids, trade_dates):
+        _calls("bars")
+        return {
+            i: _InstrumentBarSeries(
+                facts=tuple(sorted(facts, key=lambda b: b.trade_date)),
+                dates=tuple(sorted(b.trade_date for b in facts)),
+            )
+            for i, facts in all_bars.items()
+        }
+
+    async def fake_events(session, instrument_ids, trade_dates):
+        _calls("events")
+        return {d: events.get(d, []) for d in trade_dates}
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_calendar",
+        fake_calendar,
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_states",
+        fake_states,
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_bars",
+        fake_bars,
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_events",
+        fake_events,
+    )
+
+
+def test_vec1_shared_member_built_once_per_date(monkeypatch):
+    """VEC-1 physical invariant: a member shared by N scopes is canonical-built
+    exactly once per trade_date (unique-member-day), not once per scope per date
+    (scope-member-day).  ``_build_member_observations`` remains the single
+    member-construction owner and receives the union member set each date."""
+    from app.services.review_historical_scope_reconstruction_service import (
+        CurrentStaticMembership,
+        reconstruct_scope_series_batch,
+        resolve_current_membership,
+    )
+
+    id_a, id_b, id_shared = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    members_a = [id_a, id_shared]
+    members_b = [id_b, id_shared]
+
+    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
+        mids = members_a if scope_key == "A" else members_b
+        return CurrentStaticMembership(
+            member_ids=tuple(mids), scope_name=scope_key,
+            asof_date=asof_date, member_count=len(mids),
+        )
+
+    monkeypatch.setattr(
+        "app.services.review_historical_scope_reconstruction_service."
+        "resolve_current_membership",
+        fake_resolve,
+    )
+
+    calls = {"build": 0, "union_sizes": []}
+    original = _build_member_observations
+
+    def counting(pit_ids_t, **kwargs):
+        calls["build"] += 1
+        calls["union_sizes"].append(len(pit_ids_t))
+        return original(pit_ids_t, **kwargs)
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._build_member_observations",
+        counting,
+    )
+
+    all_bars = {
+        id_a: [_bar(id_a, PREV, 9.0), _bar(id_a, T1, 10.0), _bar(id_a, T2, 11.0)],
+        id_b: [_bar(id_b, PREV, 8.0), _bar(id_b, T1, 8.5), _bar(id_b, T2, 9.0)],
+        id_shared: [
+            _bar(id_shared, PREV, 5.0),
+            _bar(id_shared, T1, 5.5),
+            _bar(id_shared, T2, 6.0),
+        ],
+    }
+    states = {
+        PREV: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+        T1: {id_a: _state(1), id_b: _state(-1), id_shared: _state(1)},
+        T2: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+    }
+    trading_days = [PREV, T1, T2]
+    _install_union_mocks(monkeypatch, all_bars, states, {}, trading_days)
+
+    async def scenario():
+        return await reconstruct_scope_series_batch(
+            _FakeSession(), "concept", ["A", "B"], [T1, T2], asof_date=T2,
+        )
+
+    out = asyncio.run(scenario())
+    # VEC-1: one union build per trade_date (2 dates), union size = 3 members —
+    # NOT 2 scopes x 2 dates = 4 builds of scope sizes [2,2,2,2].
+    assert calls["build"] == 2
+    assert calls["union_sizes"] == [3, 3]
+    assert {r["scope"]["scope_key"] for r in out} == {"A", "B"}
+
+
+def test_vec1_prepared_scope_equals_single_scope_path(monkeypatch):
+    """VEC-1: for a single scope, the shared-union slice yields a PreparedScope
+    series identical (every field) to the dedicated single-scope batch owner."""
+    from app.services.review_observation_prep_service import (
+        prepare_scopes_from_union,
+        prepare_union_fact_context,
+    )
+
+    id_a, id_shared = uuid.uuid4(), uuid.uuid4()
+    members_a = [id_a, id_shared]
+    all_bars = {
+        id_a: [_bar(id_a, PREV, 9.0), _bar(id_a, T1, 10.0), _bar(id_a, T2, 11.0)],
+        id_shared: [
+            _bar(id_shared, PREV, 5.0),
+            _bar(id_shared, T1, 5.5),
+            _bar(id_shared, T2, 6.0),
+        ],
+    }
+    states = {
+        PREV: {id_a: _state(1), id_shared: _state(1)},
+        T1: {id_a: _state(1), id_shared: _state(1)},
+        T2: {id_a: _state(1), id_shared: _state(1)},
+    }
+    trading_days = [PREV, T1, T2]
+    events = {
+        T1: [
+            StructureEvent(
+                member_id=str(id_shared), event_type="BOS", direction="bullish",
+                level=1.0, internal=False, release_volume_ratio=None,
+            )
+        ],
+        T2: [],
+    }
+    _install_union_mocks(monkeypatch, all_bars, states, events, trading_days)
+
+    async def scenario():
+        union_ctx = await prepare_union_fact_context(
+            _FakeSession(), trading_days, [id_a, id_shared]
+        )
+        prepared = await prepare_scopes_from_union(
+            _FakeSession(), "concept", trading_days,
+            {"A": (members_a, "Scope A")}, union_ctx,
+        )
+        single = await prepare_scope_series_from_member_ids(
+            _FakeSession(), "concept", "A", "Scope A", trading_days, members_a,
+            load_current_only=False,
+        )
+        return prepared["A"], single
+
+    got, expected = asyncio.run(scenario())
+    assert len(got) == len(expected) == len(trading_days)
+    for p, s in zip(got, expected, strict=True):
+        assert p.scope_type == s.scope_type
+        assert p.scope_key == s.scope_key
+        assert p.scope_name == s.scope_name
+        assert p.trade_date == s.trade_date
+        assert p.canonical_t1 == s.canonical_t1
+        assert p.pit_member_ids == s.pit_member_ids
+        assert p.pit_member_ids_t1 == s.pit_member_ids_t1
+        assert p.members == s.members
+        assert p.t1_membership_available == s.t1_membership_available
+        assert p.pit_status_t == s.pit_status_t
+        assert p.pit_status_t1 == s.pit_status_t1
+        assert p.diagnostics == s.diagnostics
+        assert p.events == s.events
+
+
+def test_vec1_scope_observation_equals_single_scope_path(monkeypatch):
+    """VEC-1: computing the canonical Scope Observation from the shared-union
+    PreparedScope yields the identical observation dict as the single-scope path
+    (same ``compute_scope_observation`` owner, unchanged algorithm)."""
+    from app.domain.review.scope_observation import compute_scope_observation
+    from app.services.review_observation_prep_service import (
+        prepare_scopes_from_union,
+        prepare_union_fact_context,
+    )
+
+    id_a, id_shared = uuid.uuid4(), uuid.uuid4()
+    members_a = [id_a, id_shared]
+    all_bars = {
+        id_a: [_bar(id_a, PREV, 9.0), _bar(id_a, T1, 10.0), _bar(id_a, T2, 11.0)],
+        id_shared: [
+            _bar(id_shared, PREV, 5.0),
+            _bar(id_shared, T1, 5.5),
+            _bar(id_shared, T2, 6.0),
+        ],
+    }
+    states = {
+        PREV: {id_a: _state(1), id_shared: _state(1)},
+        T1: {id_a: _state(1), id_shared: _state(1)},
+        T2: {id_a: _state(1), id_shared: _state(1)},
+    }
+    trading_days = [PREV, T1, T2]
+    _install_union_mocks(monkeypatch, all_bars, states, {}, trading_days)
+
+    async def scenario():
+        union_ctx = await prepare_union_fact_context(
+            _FakeSession(), trading_days, [id_a, id_shared]
+        )
+        prepared = await prepare_scopes_from_union(
+            _FakeSession(), "concept", trading_days,
+            {"A": (members_a, "Scope A")}, union_ctx,
+        )
+        single = await prepare_scope_series_from_member_ids(
+            _FakeSession(), "concept", "A", "Scope A", trading_days, members_a,
+            load_current_only=False,
+        )
+        return prepared["A"], single
+
+    got, expected = asyncio.run(scenario())
+    for p, s in zip(got, expected, strict=True):
+        obs_g = compute_scope_observation(
+            scope_type=p.scope_type, scope_key=p.scope_key,
+            trade_date=p.trade_date, pit_member_ids=p.pit_member_ids,
+            pit_member_ids_t1=p.pit_member_ids_t1, members=p.members,
+            events=p.events,
+        )
+        obs_s = compute_scope_observation(
+            scope_type=s.scope_type, scope_key=s.scope_key,
+            trade_date=s.trade_date, pit_member_ids=s.pit_member_ids,
+            pit_member_ids_t1=s.pit_member_ids_t1, members=s.members,
+            events=s.events,
+        )
+        assert obs_g == obs_s, f"observation mismatch at {p.trade_date}"
+
+
+def test_vec1_scope_isolation_missing_state_boundary(monkeypatch):
+    """VEC-1 boundary: a member with no state at T is absent from the union build
+    and therefore excluded from every scope slice; a member of scope A is never
+    leaked into scope B (scope isolation preserved)."""
+    from app.services.review_observation_prep_service import (
+        prepare_scopes_from_union,
+        prepare_union_fact_context,
+    )
+
+    id_a, id_b, id_shared = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    members_a = [id_a, id_shared]
+    members_b = [id_b, id_shared]
+    all_bars = {
+        id_a: [_bar(id_a, PREV, 9.0), _bar(id_a, T1, 10.0), _bar(id_a, T2, 11.0)],
+        id_b: [_bar(id_b, PREV, 8.0), _bar(id_b, T1, 8.5), _bar(id_b, T2, 9.0)],
+        id_shared: [
+            _bar(id_shared, PREV, 5.0),
+            _bar(id_shared, T1, 5.5),
+            _bar(id_shared, T2, 6.0),
+        ],
+    }
+    states = {
+        PREV: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+        T1: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+        # At T2 the shared member has NO valid state -> must be excluded everywhere.
+        T2: {id_a: _state(1), id_b: _state(1)},
+    }
+    trading_days = [PREV, T1, T2]
+    _install_union_mocks(monkeypatch, all_bars, states, {}, trading_days)
+
+    async def scenario():
+        union_ctx = await prepare_union_fact_context(
+            _FakeSession(), trading_days, [id_a, id_b, id_shared]
+        )
+        return await prepare_scopes_from_union(
+            _FakeSession(), "concept", trading_days,
+            {"A": (members_a, "Scope A"), "B": (members_b, "Scope B")}, union_ctx,
+        )
+
+    prepared = asyncio.run(scenario())
+    # T2 (last): shared has no state -> absent from both A and B; no cross-leak.
+    a_t2 = prepared["A"][-1]
+    b_t2 = prepared["B"][-1]
+    assert [m.member_id for m in a_t2.members] == [str(id_a)]
+    assert [m.member_id for m in b_t2.members] == [str(id_b)]
+    # Earlier dates still include the shared member in both scopes.
+    a_t1 = prepared["A"][1]
+    b_t1 = prepared["B"][1]
+    assert [m.member_id for m in a_t1.members] == [str(id_a), str(id_shared)]
+    assert [m.member_id for m in b_t1.members] == [str(id_b), str(id_shared)]
+
+
+def test_vec1_union_deterministic_repeat(monkeypatch):
+    """VEC-1 determinism: running the union batch twice with identical input
+    produces identical result dicts (order, members, observations)."""
+    from app.services.review_historical_scope_reconstruction_service import (
+        CurrentStaticMembership,
+        reconstruct_scope_series_batch,
+        resolve_current_membership,
+    )
+
+    id_a, id_shared = uuid.uuid4(), uuid.uuid4()
+    members_a = [id_a, id_shared]
+
+    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
+        return CurrentStaticMembership(
+            member_ids=tuple(members_a), scope_name="A",
+            asof_date=asof_date, member_count=len(members_a),
+        )
+
+    monkeypatch.setattr(
+        "app.services.review_historical_scope_reconstruction_service."
+        "resolve_current_membership",
+        fake_resolve,
+    )
+
+    all_bars = {
+        id_a: [_bar(id_a, PREV, 9.0), _bar(id_a, T1, 10.0), _bar(id_a, T2, 11.0)],
+        id_shared: [
+            _bar(id_shared, PREV, 5.0),
+            _bar(id_shared, T1, 5.5),
+            _bar(id_shared, T2, 6.0),
+        ],
+    }
+    states = {
+        PREV: {id_a: _state(1), id_shared: _state(1)},
+        T1: {id_a: _state(1), id_shared: _state(1)},
+        T2: {id_a: _state(1), id_shared: _state(1)},
+    }
+    trading_days = [PREV, T1, T2]
+    _install_union_mocks(monkeypatch, all_bars, states, {}, trading_days)
+
+    async def scenario():
+        first = await reconstruct_scope_series_batch(
+            _FakeSession(), "concept", ["A"], [T1, T2], asof_date=T2,
+        )
+        second = await reconstruct_scope_series_batch(
+            _FakeSession(), "concept", ["A"], [T1, T2], asof_date=T2,
+        )
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first == second

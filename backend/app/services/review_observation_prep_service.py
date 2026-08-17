@@ -979,9 +979,9 @@ async def prepare_union_fact_context(
     batch_fallback_reasons: list[str] = (
         prep_fallback_reasons if prep_fallback_reasons is not None else []
     )
-    # Feed the shared vectorized counters through one representative scope slice
-    # so the instrumentation surfaces even though the build is per-scope below.
-    _ = (batch_counters, batch_fallback_reasons)
+    # VEC-1: counters are now populated by the per-date union build in
+    # ``prepare_scopes_from_union``, not per-scope.  Feed-through is implicit
+    # via the shared dict reference.
     logger.info(
         "[union-fact-context] union_member_count=%d trade_date_count=%d "
         "cal_ms=%.1f states_ms=%.1f bars_ms=%.1f events_ms=%.1f vec_precompute_ms=%.1f",
@@ -1012,54 +1012,99 @@ async def prepare_scopes_from_union(
 ) -> dict[str, list[PreparedScope]]:
     """Build per-scope ``PreparedScope`` series by slicing a shared union fact context.
 
-    ``scope_members`` maps ``scope_key -> (member_ids, scope_name)``.  For each
-    scope the member_ids are sliced from the shared ``union_ctx`` (one bulk load)
-    and replayed per ``trade_date`` via the SAME ``_build_member_observations``
-    owner used by :func:`prepare_scope_series_from_member_ids`.  The result for a
-    single scope is therefore byte-identical to calling
-    ``prepare_scope_series_from_member_ids`` for that scope alone — only the
-    underlying bulk load is shared across scopes.
+    ``scope_members`` maps ``scope_key -> (member_ids, scope_name)``.  The loop
+    order is **date -> union member -> scope slice** (VEC-1): for every
+    trade_date the canonical ``_build_member_observations`` owner runs ONCE over
+    the union of member_ids, then each scope SELECTS the resulting immutable
+    ``MemberObservation`` by reference in its own membership order.  A member
+    shared by N scopes (e.g. one stock in many concept boards) is therefore
+    constructed once per date instead of N times, while the result for a single
+    scope stays byte-identical to calling
+    :func:`prepare_scope_series_from_member_ids` for that scope alone.
     """
     if not trade_dates or not scope_members:
         return {}
-    out: dict[str, list[PreparedScope]] = {}
+    import time
+
+    t0 = time.perf_counter()
+
+    # ---- Precompute stable scope context ONCE (out of the date loop) ----
+    # Scope member order / name / string tuples never change across the replay;
+    # building them here instead of per-T removes repeated tuple/list
+    # construction on every trade_date.
+    scope_meta: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {}
+    union_ids: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    scope_member_day_count = 0
+    for scope_key, (member_ids, scope_name) in scope_members.items():
+        ids = tuple(member_ids)
+        scope_member_day_count += len(ids)
+        scope_meta[scope_key] = (
+            scope_name,
+            tuple(str(i) for i in ids),
+            # current-static: the T-1 membership equals the T membership.
+            tuple(str(i) for i in ids),
+        )
+        for mid in ids:
+            if mid not in seen:
+                seen.add(mid)
+                union_ids.append(mid)
+    scope_member_day_count *= len(trade_dates)
+    unique_member_day_count = len(union_ids) * len(trade_dates)
+    duplication_factor = (
+        scope_member_day_count / unique_member_day_count
+        if unique_member_day_count
+        else 0.0
+    )
+
     batch_counters: dict[str, int] = (
         prep_counters if prep_counters is not None else {}
     )
     batch_fallback_reasons: list[str] = (
         prep_fallback_reasons if prep_fallback_reasons is not None else []
     )
-    for scope_key, (member_ids, scope_name) in scope_members.items():
-        pit_ids_t = list(member_ids)
-        t1_ids = list(pit_ids_t)
-        scopes: list[PreparedScope] = []
-        for t in trade_dates:
-            t1 = union_ctx.t1_by_date.get(t)
-            states_t = union_ctx.states_by_date.get(t, {})
-            states_t1 = union_ctx.states_by_date.get(t1, {}) if t1 else {}
-            structure_events = union_ctx.events_by_date.get(t, [])
-            members = _build_member_observations(
-                pit_ids_t,
-                trade_date=t,
-                t1=t1,
-                states_t=states_t,
-                states_t1=states_t1,
-                bars=union_ctx.bars,
-                current_only_facts={},
-                vec_volume=union_ctx.vec_volume,
-                counters=batch_counters,
-                fallback_reasons=batch_fallback_reasons,
+
+    out: dict[str, list[PreparedScope]] = {k: [] for k in scope_members}
+    t_loop = time.perf_counter()
+    for t in trade_dates:
+        t1 = union_ctx.t1_by_date.get(t)
+        states_t = union_ctx.states_by_date.get(t, {})
+        states_t1 = union_ctx.states_by_date.get(t1, {}) if t1 else {}
+        structure_events = union_ctx.events_by_date.get(t, [])
+
+        # VEC-1: ONE canonical member build for the whole union per trade_date.
+        # A member shared by N scopes is constructed exactly once, not N times.
+        # ``_build_member_observations`` remains the single member-construction
+        # owner; the scopes below only SELECT the resulting immutable
+        # MemberObservation by reference (scope membership order preserved).
+        union_members = _build_member_observations(
+            union_ids,
+            trade_date=t,
+            t1=t1,
+            states_t=states_t,
+            states_t1=states_t1,
+            bars=union_ctx.bars,
+            current_only_facts={},
+            vec_volume=union_ctx.vec_volume,
+            counters=batch_counters,
+            fallback_reasons=batch_fallback_reasons,
+        )
+        member_by_id = {m.member_id: m for m in union_members}
+
+        for scope_key, (scope_name, str_ids, str_ids_t1) in scope_meta.items():
+            members = tuple(
+                member_by_id[sid] for sid in str_ids if sid in member_by_id
             )
-            scopes.append(
+            out[scope_key].append(
                 PreparedScope(
                     scope_type=scope_type,
                     scope_key=scope_key,
                     scope_name=scope_name,
                     trade_date=t,
                     canonical_t1=t1,
-                    pit_member_ids=tuple(str(i) for i in pit_ids_t),
-                    pit_member_ids_t1=tuple(str(i) for i in t1_ids),
-                    members=tuple(members),
+                    pit_member_ids=str_ids,
+                    pit_member_ids_t1=str_ids_t1,
+                    members=members,
                     t1_membership_available=t1_membership_available,
                     pit_status_t=pit_status_t,
                     pit_status_t1=pit_status_t1,
@@ -1067,7 +1112,23 @@ async def prepare_scopes_from_union(
                     events=tuple(structure_events),
                 )
             )
-        out[scope_key] = scopes
+    loop_ms = (time.perf_counter() - t_loop) * 1000.0
+    total_ms = (time.perf_counter() - t0) * 1000.0
+    # rules/25 §8.7 physical-cost instrumentation (pure observability — never
+    # affects a business branch).  VEC-1 makes the vec_hit/vec_fallback counters
+    # report unique-member-day builds instead of scope-member-day builds.
+    logger.info(
+        "[scope-prep-union-vec1] scope_count=%d union_member_count=%d "
+        "trade_date_count=%d scope_member_day_count=%d unique_member_day_count=%d "
+        "duplication_factor=%.2f member_build_calls=%d vec_hit=%d vec_fallback=%d "
+        "fallback_reasons=%s replay_loop_ms=%.1f total_ms=%.1f",
+        len(scope_members), len(union_ids), len(trade_dates),
+        scope_member_day_count, unique_member_day_count, duplication_factor,
+        len(trade_dates),
+        batch_counters.get("vec_hit", 0), batch_counters.get("vec_fallback", 0),
+        ",".join(batch_fallback_reasons) or "-",
+        loop_ms, total_ms,
+    )
     return out
 
 
