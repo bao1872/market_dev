@@ -46,13 +46,13 @@ def _parse_args() -> argparse.Namespace:
         description="Scope Dynamics 只读基线测量 probe（R1）",
     )
     p.add_argument(
-        "--scope-type", required=True,
+        "--scope-type", required=False, default=None,
         choices=sorted(_KNOWN_SCOPE_TYPES),
-        help="scope 类型（industry_l1/l2/l3/concept/...）",
+        help="scope 类型（industry_l1/l2/l3/concept/...），measure-all-scopes 模式可省略",
     )
     p.add_argument(
-        "--scope-key", required=True, type=str,
-        help="scope 标识（如 银行 / 人工智能）",
+        "--scope-key", required=False, default=None, type=str,
+        help="scope 标识（如 银行 / 人工智能），measure-all-scopes 模式可省略",
     )
     p.add_argument(
         "--history", type=int, default=120,
@@ -65,6 +65,19 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dry-run", action="store_true",
         help="只校验参数与导入，不连库",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["single", "measure-all-scopes"],
+        default="single",
+        help=(
+            "single: 单 scope 基线测量（默认）；"
+            "measure-all-scopes: 枚举全量 scope 测物理数据量，定 batch boundary"
+        ),
+    )
+    p.add_argument(
+        "--sample-bar-members", type=int, default=200,
+        help="measure-all-scopes 模式下抽样估算单 member 400d bar 体积的样本数",
     )
     return p.parse_args()
 
@@ -192,14 +205,151 @@ async def _probe(
         return 0
 
 
+async def _measure_all_scopes(sample_bar_members: int) -> int:
+    """measure-all-scopes 模式：枚举全量 scope，测物理数据量定 batch boundary。
+
+    只发 SELECT，不写库。输出每 type 的板块数、unique member 总数、
+    单 member 平均所属板块数（重叠度）、抽样估算的单 member 400d bar 体积，
+    并据 union 一次加载的物理成本给出有界 batch size N 的建议。
+    """
+    from sqlalchemy import func, select, text
+
+    from app.db import AsyncSessionLocal
+    from app.models.bar import BarDaily
+    from app.models.market_board import MarketBoard, MarketBoardMembership
+
+    _build_readonly_engine()
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+        )
+        # 1) 枚举所有 board：industry(L1/L2/L3) + concept
+        boards = (
+            await db.execute(
+                select(
+                    MarketBoard.id,
+                    MarketBoard.name,
+                    MarketBoard.type,
+                    MarketBoard.hierarchyLevel,
+                ).where(MarketBoard.isActive.is_(True))
+            )
+        ).all()
+
+        # 2) 枚举所有 membership（board -> instrument）
+        memberships = (
+            await db.execute(
+                select(
+                    MarketBoardMembership.boardId,
+                    MarketBoardMembership.instrumentId,
+                )
+            )
+        ).all()
+
+        # 按 scope_type 分组（industry_l1/l2/l3, concept）
+        def _scope_type_of(b_type: str, level: str) -> str:
+            if b_type == "concept":
+                return "concept"
+            return f"industry_{level.lower()}"
+
+        # 建 board_id -> scope_type 映射
+        bid_to_st: dict = {}
+        for bid, _bname, btype, level in boards:
+            bid_to_st[bid] = _scope_type_of(btype, str(level))
+
+        # 按 board 收集 member 集合
+        per_board_members: dict = {}
+        for bid, iid in memberships:
+            st = bid_to_st.get(bid)
+            if st is None:
+                continue
+            per_board_members.setdefault(bid, set()).add(iid)
+
+        # 组织 boards_meta：每 type 的板块数、union member、重叠度
+        boards_meta: dict = {}
+        for bid, _bname, btype, level in boards:
+            st = _scope_type_of(btype, str(level))
+            boards_meta.setdefault(
+                st, {"board_count": 0, "union": set(), "member_board_count": {}}
+            )
+            boards_meta[st]["board_count"] += 1
+            mset = per_board_members.get(bid, set())
+            boards_meta[st]["union"] |= mset
+            for iid in mset:
+                boards_meta[st]["member_board_count"][iid] = (
+                    boards_meta[st]["member_board_count"].get(iid, 0) + 1
+                )
+
+        # 3) 抽样估算单 member 近 400d bar 体积
+        from datetime import timedelta
+
+        today = date.today()
+        cutoff = today - timedelta(days=400)
+        # union 全量 member（跨所有 type 合并，用于抽样代表性）
+        all_union: set = set()
+        for st in boards_meta:
+            all_union |= boards_meta[st]["union"]
+
+        sample_ids = list(all_union)[: max(1, sample_bar_members)]
+        avg_bars = 0.0
+        if sample_ids:
+            bar_counts = (
+                await db.execute(
+                    select(
+                        BarDaily.instrument_id,
+                        func.count(BarDaily.trade_date),
+                    )
+                    .where(BarDaily.instrument_id.in_(sample_ids))
+                    .where(BarDaily.trade_date >= cutoff)
+                    .group_by(BarDaily.instrument_id)
+                )
+            ).all()
+            if bar_counts:
+                avg_bars = sum(c for _, c in bar_counts) / len(bar_counts)
+
+        # 4) 输出诊断
+        print("=== Scope Physical Volume Measurement (read-only) ===")
+        print(f"sample_bar_members      : {len(sample_ids)}")
+        print(f"avg_bars_per_member_400d: {avg_bars:.1f}")
+        print()
+        print(f"{'scope_type':<12} {'boards':>7} {'union_mems':>11} "
+              f"{'avg_boards/mem':>14} {'max_boards/mem':>14}")
+        suggested_n = {}
+        for st in sorted(boards_meta):
+            info = boards_meta[st]
+            bc = info["member_board_count"]
+            avg_bm = (sum(bc.values()) / len(bc)) if bc else 0.0
+            max_bm = max(bc.values()) if bc else 0
+            n_boards = info["board_count"]
+            union_mems = len(info["union"])
+            print(f"{st:<12} {n_boards:>7} {union_mems:>11} "
+                  f"{avg_bm:>14.2f} {max_bm:>14}")
+            # 建议 batch N：使单次 union 加载的 member 总量约等于
+            # "单批 union member 上界"，这里取经验上界 4000 去反推 N。
+            mem_per_batch_cap = 4000
+            est_n = max(1, round(mem_per_batch_cap / max(1, avg_bm)))
+            suggested_n[st] = est_n
+
+        print()
+        print("batch_size suggestion (union member cap ~4000):")
+        for st in sorted(suggested_n):
+            print(f"  {st:<12} -> N ~= {suggested_n[st]}")
+        print("=== END ===")
+        return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     asof: date | None = date.fromisoformat(args.asof_date) if args.asof_date else None
     if args.dry_run:
         logger.info(
-            "[dry-run] scope_type=%s scope_key=%s history=%d asof=%s OK",
-            args.scope_type, args.scope_key, args.history, asof,
+            "[dry-run] mode=%s scope_type=%s scope_key=%s history=%d asof=%s OK",
+            args.mode, args.scope_type, args.scope_key, args.history, asof,
         )
         return 0
+    if args.mode == "measure-all-scopes":
+        return await _measure_all_scopes(args.sample_bar_members)
+    if not args.scope_type or not args.scope_key:
+        logger.error("[single] --scope-type 与 --scope-key 为必填")
+        return 2
     return await _probe(
         args.scope_type, args.scope_key, args.history, asof,
     )

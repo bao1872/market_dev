@@ -194,11 +194,15 @@ async def compute_current_static_scope_dynamics(
     total_ms = (time.perf_counter() - t_total) * 1000.0
     _mem = reconstruction.get("membership") or {}
     _mem_count = _mem.get("member_count") if isinstance(_mem, dict) else len(_mem)
+    _prep = reconstruction.get("prep_metrics") or {}
     logger.info(
         "[scope-dynamics] scope_type=%s scope_key=%s member_count=%s "
-        "trade_date_count=%d reconstruction_ms=%.1f observation_series_ms=%.1f "
+        "trade_date_count=%d vec_hit=%d vec_fallback=%d fallback_reasons=%s "
+        "reconstruction_ms=%.1f observation_series_ms=%.1f "
         "dynamics_ms=%.1f total_ms=%.1f",
         scope_type, scope_key, _mem_count, len(trade_dates),
+        _prep.get("vec_hit", 0), _prep.get("vec_fallback", 0),
+        ",".join(_prep.get("fallback_reasons", [])) or "-",
         reconstruction_ms, observation_series_ms, dynamics_ms, total_ms,
     )
 
@@ -207,4 +211,18 @@ async def compute_current_static_scope_dynamics(
         "membership": reconstruction["membership"],
         "observation_series": observation_series,
         "scope_dynamics": scope_dynamics,
+        "metrics": {
+            "scope_count": 1,
+            "member_count": _mem_count,
+            "trade_date_count": len(trade_dates),
+            "member_date_count": (_mem_count if isinstance(_mem_count, int) else 0)
+            * len(trade_dates),
+            "vec_hit": _prep.get("vec_hit", 0),
+            "vec_fallback": _prep.get("vec_fallback", 0),
+            "fallback_reasons": list(_prep.get("fallback_reasons", [])),
+            "reconstruction_ms": reconstruction_ms,
+            "observation_series_ms": observation_series_ms,
+            "dynamics_ms": dynamics_ms,
+            "total_ms": total_ms,
+        },
     }

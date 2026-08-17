@@ -19,6 +19,7 @@ Shadow only: not wired into Filter / Discovery / publication / orchestrator.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -36,6 +37,8 @@ from app.services.review_observation_prep_service import (
     PreparedScope,
     prepare_scope_from_member_ids,
     prepare_scope_series_from_member_ids,
+    prepare_scopes_from_union,
+    prepare_union_fact_context,
 )
 
 logger = logging.getLogger("review_historical_scope_reconstruction")
@@ -202,8 +205,11 @@ async def reconstruct_scope_series(
     membership = await resolve_current_membership(
         session, scope_type, scope_key, asof_date=asof_date
     )
-    import time
 
+    # rules/25 §8.7 physical-cost instrumentation: surface vectorized VolumeContext
+    # hit/fallback counts from the batch prep owner into the Composition Owner.
+    prep_counters: dict[str, int] = {}
+    prep_fallback_reasons: list[str] = []
     t_bulk = time.perf_counter()
     prepared_list = await prepare_scope_series_from_member_ids(
         session,
@@ -216,6 +222,8 @@ async def reconstruct_scope_series(
         # events.  Current-only snapshot facts stay None for historical T (PRD
         # v2.3) and the large summary_payload JSONB is never transferred.
         load_current_only=False,
+        prep_counters=prep_counters,
+        prep_fallback_reasons=prep_fallback_reasons,
     )
     bulk_ms = (time.perf_counter() - t_bulk) * 1000.0
     series: list[dict[str, Any]] = []
@@ -246,9 +254,12 @@ async def reconstruct_scope_series(
     obs_ms = (time.perf_counter() - t_obs) * 1000.0
     logger.info(
         "[scope-reconstruction] scope_type=%s scope_key=%s member_count=%d "
-        "trade_date_count=%d bulk_prep_ms=%.1f per_t_observation_ms=%.1f",
+        "trade_date_count=%d bulk_prep_ms=%.1f per_t_observation_ms=%.1f "
+        "vec_hit=%d vec_fallback=%d fallback_reasons=%s",
         scope_type, scope_key, membership.member_count, len(trade_dates),
         bulk_ms, obs_ms,
+        prep_counters.get("vec_hit", 0), prep_counters.get("vec_fallback", 0),
+        ",".join(prep_fallback_reasons) or "-",
     )
     return {
         "scope": {"scope_type": scope_type, "scope_key": scope_key},
@@ -258,4 +269,185 @@ async def reconstruct_scope_series(
             "member_count": membership.member_count,
         },
         "series": series,
+        "prep_metrics": {
+            "vec_hit": prep_counters.get("vec_hit", 0),
+            "vec_fallback": prep_counters.get("vec_fallback", 0),
+            "fallback_reasons": list(prep_fallback_reasons),
+        },
     }
+
+
+# PERF-2: bounded batch size for union-member sharing.
+# Measurement (review_scope_dynamics_probe --mode measure-all-scopes, 2026-08-17):
+#   concept: 389 boards, union 5285 members, avg 12.89 boards/member (max 67)
+#   industry_l1/l2/l3: non-overlapping (avg 1.00 board/member), union ~5286 each
+#   single member near-400d bars avg 263 rows
+# Even processing ALL 767 boards at once the union member set is only ~5286, so a
+# single batch is well within memory/transfer bounds. The constant below caps the
+# per-batch union member count; when exceeded the caller chunks scope_keys.
+_UNION_MEMBER_CAP = 4096
+
+
+async def reconstruct_scope_series_batch(
+    session: AsyncSession,
+    scope_type: str,
+    scope_keys: list[str],
+    trade_dates: list[date],
+    *,
+    asof_date: date,
+    current_only: bool = False,
+    union_member_cap: int = _UNION_MEMBER_CAP,
+) -> list[dict[str, Any]]:
+    """Reconstruct observation series for a batch of scopes, loading each member's
+    historical window exactly ONCE across all scopes that share it.
+
+    Equivalent to calling :func:`reconstruct_scope_series` per scope_key, but the
+    member x date bulk load is shared via a union of member_ids (PERF-2).  The
+    business algorithm (:func:`compute_scope_observation`) is NEVER modified — the
+    same ``PreparedScope`` per scope is produced, only the storage-layer load is
+    deduplicated.  Returns one result dict per scope_key, in input order.
+    """
+    if not scope_keys:
+        return []
+
+    # 1) Resolve membership per scope (current-static semantic owner unchanged).
+    scope_members: dict[str, tuple[list[uuid.UUID], str]] = {}
+    for scope_key in scope_keys:
+        membership = await resolve_current_membership(
+            session, scope_type, scope_key, asof_date=asof_date
+        )
+        scope_members[scope_key] = (
+            list(membership.member_ids),
+            membership.scope_name,
+        )
+
+    # 2) Chunk scope_keys so each batch's union member count stays bounded.
+    batches: list[list[str]] = []
+    current_batch: list[str] = []
+    current_union: set[uuid.UUID] = set()
+    for scope_key in scope_keys:
+        mids = set(scope_members[scope_key][0])
+        if current_batch and len(current_union | mids) > union_member_cap:
+            batches.append(current_batch)
+            current_batch = []
+            current_union = set()
+        current_batch.append(scope_key)
+        current_union |= mids
+    if current_batch:
+        batches.append(current_batch)
+
+    results: list[dict[str, Any]] | None = None
+    for batch in batches:
+        batch_result = await _reconstruct_batch_chunk(
+            session,
+            scope_type,
+            batch,
+            trade_dates,
+            asof_date=asof_date,
+            current_only=current_only,
+            scope_members=scope_members,
+        )
+        if results is None:
+            results = batch_result
+        else:
+            results.extend(batch_result)
+    return results if results is not None else []
+
+
+async def _reconstruct_batch_chunk(
+    session: AsyncSession,
+    scope_type: str,
+    scope_keys: list[str],
+    trade_dates: list[date],
+    *,
+    asof_date: date,
+    current_only: bool,
+    scope_members: dict[str, tuple[list[uuid.UUID], str]],
+) -> list[dict[str, Any]]:
+    """Shared-load one chunk of scope_keys and reconstruct per-scope series."""
+    prep_counters: dict[str, int] = {}
+    prep_fallback_reasons: list[str] = []
+
+    # 3) Union member_ids across the chunk -> ONE bulk load.
+    union_member_ids: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for scope_key in scope_keys:
+        for mid in scope_members[scope_key][0]:
+            if mid not in seen:
+                seen.add(mid)
+                union_member_ids.append(mid)
+
+    if current_only:
+        union_ctx = _UnionFactContext(t1_by_date={}, states_by_date={},
+                                      bars={}, events_by_date={}, vec_volume={})
+    else:
+        union_ctx = await prepare_union_fact_context(
+            session, trade_dates, union_member_ids,
+            prep_counters=prep_counters, prep_fallback_reasons=prep_fallback_reasons,
+        )
+
+    # 4) Slice the shared context per scope (same _build_member_observations owner).
+    prepared_map = await prepare_scopes_from_union(
+        session, scope_type, trade_dates,
+        {k: scope_members[k] for k in scope_keys}, union_ctx,
+        prep_counters=prep_counters, prep_fallback_reasons=prep_fallback_reasons,
+    )
+
+    # 5) compute_scope_observation per scope per T — UNCHANGED algorithm.
+    t_obs = time.perf_counter()
+    results: list[dict[str, Any]] = []
+    for scope_key in scope_keys:
+        membership = scope_members[scope_key]
+        series = []
+        for prepared in prepared_map[scope_key]:
+            observation = compute_scope_observation(
+                scope_type=scope_type,
+                scope_key=scope_key,
+                trade_date=prepared.trade_date,
+                pit_member_ids=prepared.pit_member_ids,
+                pit_member_ids_t1=prepared.pit_member_ids_t1,
+                members=prepared.members,
+                events=prepared.events,
+            )
+            validate_scope_observation_payload(
+                observation,
+                scope_type=scope_type,
+                scope_key=scope_key,
+                trade_date=prepared.trade_date,
+            )
+            series.append(
+                {
+                    "trade_date": prepared.trade_date.isoformat(),
+                    "provided_member_count": observation["scope"]["provided_member_count"],
+                    "observation": observation,
+                }
+            )
+        results.append(
+            {
+                "scope": {
+                    "scope_type": scope_type,
+                    "scope_key": scope_key,
+                },
+                "membership": {
+                    "mode": "current_static",
+                    "asof_date": asof_date.isoformat(),
+                    "member_count": len(membership[0]),
+                },
+                "series": series,
+                "prep_metrics": {
+                    "vec_hit": prep_counters.get("vec_hit", 0),
+                    "vec_fallback": prep_counters.get("vec_fallback", 0),
+                    "fallback_reasons": list(prep_fallback_reasons),
+                },
+            }
+        )
+    obs_ms = (time.perf_counter() - t_obs) * 1000.0
+    logger.info(
+        "[scope-reconstruction-batch] scope_type=%s chunk_size=%d "
+        "union_member_count=%d trade_date_count=%d per_scope_observation_ms=%.1f "
+        "vec_hit=%d vec_fallback=%d",
+        scope_type, len(scope_keys), len(union_member_ids), len(trade_dates),
+        obs_ms,
+        prep_counters.get("vec_hit", 0), prep_counters.get("vec_fallback", 0),
+    )
+    return results

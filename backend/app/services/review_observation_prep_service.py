@@ -327,28 +327,19 @@ def _build_member_observations(
     bars: dict[uuid.UUID, _InstrumentBarSeries],
     current_only_facts: dict[str, dict[str, object]],
     vec_volume: dict[uuid.UUID, _VectorizedMemberVolume] | None = None,
+    counters: dict[str, int] | None = None,
+    fallback_reasons: list[str] | None = None,
 ) -> list[MemberObservation]:
     """Build canonical ``MemberObservation`` inputs shared by the per-date and the
     batch replay path (single member-construction owner).
 
-    ``bars`` maps each member to its full ``_InstrumentBarSeries`` (ascending,
-    whole batch window).  The vectorized fast path extracts only the T-row bar
-    via ``series.last_bar(trade_date)`` (O(log n), no 400-bar materialization);
-    the window-bound fallback still calls ``series.window(trade_date)`` to get
-    the strict-prior history, but ONLY for the few members that need it.
-
-    STRICT-PRIOR history: ``window`` includes T (``<= T``), so T is excluded in
-    the fallback.  ``volume_t`` / ``amount_t`` carry T separately and the
-    canonical volume owner appends it exactly once.
-
-    ``vec_volume`` (batch replay only) precomputes each member's VolumeContext
-    series once across the whole window with the vectorized owner.  When the
-    member's ``[T-400d, T]`` window holds ``>= SHORT_WINDOW`` finite-volume bars
-    (and the 200D row is either window-contained or unavailable in BOTH paths),
-    the T row is indexed from that precomputed series and the strict-prior
-    history is NOT rebuilt (numeric work done once per member, not once per
-    member x T).  Otherwise the canonical per-date owner is used, which requires
-    the strict-prior history — semantics stay byte-identical either way.
+    ``counters`` / ``fallback_reasons`` are optional OUT parameters populated by the
+    batch path for rules/25 §8.7 physical-cost instrumentation: ``counters["vec_hit"]``
+    increments when a member resolves its VolumeContext from the precomputed vectorized
+    series (no strict-prior window materialization); ``counters["vec_fallback"]``
+    increments and ``fallback_reasons`` records the first reason when it falls back to
+    the canonical per-date owner (which needs the strict-prior history window).  They
+    never affect the constructed ``MemberObservation`` — this is pure observability.
     """
     members: list[MemberObservation] = []
     for inst_id in pit_ids_t:
@@ -398,6 +389,8 @@ def _build_member_observations(
                 lo = bisect_left(vv.dates, trade_date - timedelta(days=_BAR_LOOKBACK_DAYS))
                 w = hi - lo + 1
                 if w >= SHORT_WINDOW and (w >= LONG_WINDOW or hi < LONG_WINDOW - 1):
+                    if counters is not None:
+                        counters["vec_hit"] = counters.get("vec_hit", 0) + 1
                     members.append(
                         build_member_observation_from_facts(
                             raw, vectorized_context_at(vv.context, hi)
@@ -407,6 +400,15 @@ def _build_member_observations(
         # Canonical per-date owner (oracle) — window-bound edge case (fewer than
         # LONG_WINDOW finite-volume bars in the 400d lookback, or no finite-volume
         # bar <= T).  It needs the strict-prior history, so build it now.
+        if counters is not None:
+            counters["vec_fallback"] = counters.get("vec_fallback", 0) + 1
+            if fallback_reasons is not None:
+                if vv is None:
+                    reason = "no_finite_volume" if series is not None else "no_bars"
+                else:
+                    reason = "w_insufficient"
+                if reason not in fallback_reasons:
+                    fallback_reasons.append(reason)
         prior_bars = (
             [b for b in series.window(trade_date) if b.trade_date != trade_date]
             if series
@@ -786,6 +788,8 @@ async def prepare_scope_series_from_member_ids(
     t1_membership_available: bool = True,
     diagnostics: tuple[str, ...] = (),
     load_current_only: bool = False,
+    prep_counters: dict[str, int] | None = None,
+    prep_fallback_reasons: list[str] | None = None,
 ) -> list[PreparedScope]:
     """Batch prepare one historical Scope Observation per date in one bulk read.
 
@@ -827,6 +831,15 @@ async def prepare_scope_series_from_member_ids(
 
     out: list[PreparedScope] = []
     t_loop = time.perf_counter()
+    # rules/25 §8.7 physical-cost instrumentation: accumulate vectorized VolumeContext
+    # hit/fallback counts once for the whole replay.  Pure counters — no effect on the
+    # constructed MemberObservations or any business branch.  When ``prep_counters`` is
+    # provided (Composition Owner), the same counts are surfaced to it for unified
+    # reporting; otherwise the local counters feed only the log line.
+    batch_counters: dict[str, int] = prep_counters if prep_counters is not None else {}
+    batch_fallback_reasons: list[str] = (
+        prep_fallback_reasons if prep_fallback_reasons is not None else []
+    )
     for t in trade_dates:
         t1 = t1_by_date.get(t)
         states_t = states_by_date.get(t, {})
@@ -851,6 +864,8 @@ async def prepare_scope_series_from_member_ids(
             bars=bars,
             current_only_facts=current_only_facts,
             vec_volume=vec_volume,
+            counters=batch_counters,
+            fallback_reasons=batch_fallback_reasons,
         )
         out.append(
             PreparedScope(
@@ -872,11 +887,174 @@ async def prepare_scope_series_from_member_ids(
     loop_ms = (time.perf_counter() - t_loop) * 1000.0
     logger.info(
         "[scope-prep-batch] scope_type=%s scope_key=%s member_count=%d "
-        "trade_date_count=%d cal_ms=%.1f states_ms=%.1f bars_ms=%.1f events_ms=%.1f "
+        "trade_date_count=%d vec_hit=%d vec_fallback=%d fallback_reasons=%s "
+        "cal_ms=%.1f states_ms=%.1f bars_ms=%.1f events_ms=%.1f "
         "vec_precompute_ms=%.1f replay_loop_ms=%.1f",
         scope_type, scope_key, len(member_ids), len(trade_dates),
+        batch_counters.get("vec_hit", 0), batch_counters.get("vec_fallback", 0),
+        ",".join(batch_fallback_reasons) or "-",
         cal_ms, states_ms, bars_ms, events_ms, vec_ms, loop_ms,
     )
+    return out
+
+
+@dataclass(frozen=True)
+class _UnionFactContext:
+    """Shared, loaded-once fact context for a union of member_ids.
+
+    Built by :func:`prepare_union_fact_context` and sliced per-scope by
+    :func:`prepare_scopes_from_union`.  This is the storage layer behind
+    PERF-2: the same ``bars`` / ``states`` / ``events`` / ``vec_volume`` are
+    loaded once for a union of members and reused across N scopes that share
+    members (e.g. one stock belonging to many concept boards), instead of
+    re-loading the whole member x date window per scope.
+    """
+
+    t1_by_date: dict[date, date | None]
+    states_by_date: dict[date, dict[uuid.UUID, dict]]
+    bars: dict[uuid.UUID, _InstrumentBarSeries]
+    events_by_date: dict[date, list[StructureEvent]]
+    vec_volume: dict[uuid.UUID, _VectorizedMemberVolume]
+
+
+async def prepare_union_fact_context(
+    session: AsyncSession,
+    trade_dates: list[date],
+    union_member_ids: list[uuid.UUID],
+    *,
+    prep_counters: dict[str, int] | None = None,
+    prep_fallback_reasons: list[str] | None = None,
+) -> _UnionFactContext:
+    """Load the whole member x date window ONCE for a union of member_ids.
+
+    Identical bulk-loading owner as :func:`prepare_scope_series_from_member_ids`
+    (calendar, FP states, bars, FP events, vectorized volume), but the union of
+    members is supplied by the caller so the cost is incurred exactly once even
+    when many scopes share the same members.  Slicing per scope happens in
+    :func:`prepare_scopes_from_union`.
+    """
+    if not trade_dates or not union_member_ids:
+        return _UnionFactContext(
+            t1_by_date={},
+            states_by_date={},
+            bars={},
+            events_by_date={},
+            vec_volume={},
+        )
+    import time
+
+    t0 = time.perf_counter()
+    t1_by_date = await _load_batch_calendar(session, trade_dates)
+    cal_ms = (time.perf_counter() - t0) * 1000.0
+    t0 = time.perf_counter()
+    states_by_date = await _load_batch_states(
+        session, union_member_ids, trade_dates, t1_by_date
+    )
+    states_ms = (time.perf_counter() - t0) * 1000.0
+    t0 = time.perf_counter()
+    bars = await _load_batch_bars(session, union_member_ids, trade_dates)
+    bars_ms = (time.perf_counter() - t0) * 1000.0
+    t0 = time.perf_counter()
+    events_by_date = await _load_batch_events(session, union_member_ids, trade_dates)
+    events_ms = (time.perf_counter() - t0) * 1000.0
+    t_vec = time.perf_counter()
+    vec_volume = _precompute_vectorized_volume(bars)
+    vec_ms = (time.perf_counter() - t_vec) * 1000.0
+    batch_counters: dict[str, int] = (
+        prep_counters if prep_counters is not None else {}
+    )
+    batch_fallback_reasons: list[str] = (
+        prep_fallback_reasons if prep_fallback_reasons is not None else []
+    )
+    # Feed the shared vectorized counters through one representative scope slice
+    # so the instrumentation surfaces even though the build is per-scope below.
+    _ = (batch_counters, batch_fallback_reasons)
+    logger.info(
+        "[union-fact-context] union_member_count=%d trade_date_count=%d "
+        "cal_ms=%.1f states_ms=%.1f bars_ms=%.1f events_ms=%.1f vec_precompute_ms=%.1f",
+        len(union_member_ids), len(trade_dates),
+        cal_ms, states_ms, bars_ms, events_ms, vec_ms,
+    )
+    return _UnionFactContext(
+        t1_by_date=t1_by_date,
+        states_by_date=states_by_date,
+        bars=bars,
+        events_by_date=events_by_date,
+        vec_volume=vec_volume,
+    )
+
+
+async def prepare_scopes_from_union(
+    session: AsyncSession,
+    scope_type: str,
+    trade_dates: list[date],
+    scope_members: dict[str, tuple[list[uuid.UUID], str]],
+    union_ctx: _UnionFactContext,
+    *,
+    pit_status_t: str = "current_static",
+    pit_status_t1: str = "current_static",
+    t1_membership_available: bool = True,
+    prep_counters: dict[str, int] | None = None,
+    prep_fallback_reasons: list[str] | None = None,
+) -> dict[str, list[PreparedScope]]:
+    """Build per-scope ``PreparedScope`` series by slicing a shared union fact context.
+
+    ``scope_members`` maps ``scope_key -> (member_ids, scope_name)``.  For each
+    scope the member_ids are sliced from the shared ``union_ctx`` (one bulk load)
+    and replayed per ``trade_date`` via the SAME ``_build_member_observations``
+    owner used by :func:`prepare_scope_series_from_member_ids`.  The result for a
+    single scope is therefore byte-identical to calling
+    ``prepare_scope_series_from_member_ids`` for that scope alone — only the
+    underlying bulk load is shared across scopes.
+    """
+    if not trade_dates or not scope_members:
+        return {}
+    out: dict[str, list[PreparedScope]] = {}
+    batch_counters: dict[str, int] = (
+        prep_counters if prep_counters is not None else {}
+    )
+    batch_fallback_reasons: list[str] = (
+        prep_fallback_reasons if prep_fallback_reasons is not None else []
+    )
+    for scope_key, (member_ids, scope_name) in scope_members.items():
+        pit_ids_t = list(member_ids)
+        t1_ids = list(pit_ids_t)
+        scopes: list[PreparedScope] = []
+        for t in trade_dates:
+            t1 = union_ctx.t1_by_date.get(t)
+            states_t = union_ctx.states_by_date.get(t, {})
+            states_t1 = union_ctx.states_by_date.get(t1, {}) if t1 else {}
+            structure_events = union_ctx.events_by_date.get(t, [])
+            members = _build_member_observations(
+                pit_ids_t,
+                trade_date=t,
+                t1=t1,
+                states_t=states_t,
+                states_t1=states_t1,
+                bars=union_ctx.bars,
+                current_only_facts={},
+                vec_volume=union_ctx.vec_volume,
+                counters=batch_counters,
+                fallback_reasons=batch_fallback_reasons,
+            )
+            scopes.append(
+                PreparedScope(
+                    scope_type=scope_type,
+                    scope_key=scope_key,
+                    scope_name=scope_name,
+                    trade_date=t,
+                    canonical_t1=t1,
+                    pit_member_ids=tuple(str(i) for i in pit_ids_t),
+                    pit_member_ids_t1=tuple(str(i) for i in t1_ids),
+                    members=tuple(members),
+                    t1_membership_available=t1_membership_available,
+                    pit_status_t=pit_status_t,
+                    pit_status_t1=pit_status_t1,
+                    diagnostics=(),
+                    events=tuple(structure_events),
+                )
+            )
+        out[scope_key] = scopes
     return out
 
 

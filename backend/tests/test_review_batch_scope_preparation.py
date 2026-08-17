@@ -23,17 +23,23 @@ import asyncio
 import uuid
 from datetime import date, timedelta
 
+import numpy as np
+
 import pytest
+from unittest.mock import patch
 
 from app.domain.review.member_fact import DailyBarFact
 from app.domain.review.scope_observation import MemberObservation, StructureEvent
 from app.services.review_observation_prep_service import (
     _BAR_LOOKBACK_DAYS,
+    _build_member_observations,
     _build_t1_map,
     _InstrumentBarSeries,
+    _VectorizedMemberVolume,
     prepare_scope_from_member_ids,
     prepare_scope_series_from_member_ids,
 )
+from app.services.volume_context import compute_volume_context_vectorized
 
 pytestmark = pytest.mark.pure_unit
 
@@ -269,6 +275,131 @@ def test_batch_series_equals_per_date_path(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# PERF-1: lazy-window invariant + vectorized VolumeContext instrumentation
+# ---------------------------------------------------------------------------
+
+
+def _make_member_bar_series(
+    member_id: uuid.UUID, end: date, n_daily: int, volume: float = 10.0
+) -> _InstrumentBarSeries:
+    """Build a contiguous daily bar series of length ``n_daily`` ending at ``end``.
+
+    The contiguous daily grid means ``[end-400d, end]`` contains exactly ``n_daily``
+    finite-volume bars, so ``w == n_daily`` — convenient for forcing the vectorized
+    hit (``w >= SHORT_WINDOW`` and ``hi < LONG_WINDOW - 1``) vs the window-bound
+    fallback (``w < SHORT_WINDOW``).
+    """
+    bars = [
+        _bar(member_id, end - timedelta(days=n_daily - 1 - k), float(10 + k), volume=volume)
+        for k in range(n_daily)
+    ]
+    bars_sorted = sorted(bars, key=lambda b: b.trade_date)
+    return _InstrumentBarSeries(
+        facts=tuple(bars_sorted),
+        dates=tuple(b.trade_date for b in bars_sorted),
+    )
+
+
+def _make_vec_volume(member_id: uuid.UUID, series: _InstrumentBarSeries):
+    vols = np.asarray([float(f.volume) for f in series.facts if f.volume is not None])
+    return _VectorizedMemberVolume(
+        dates=tuple(f.trade_date for f in series.facts),
+        volumes=vols,
+        context=compute_volume_context_vectorized(vols),
+    )
+
+
+def test_batch_replay_does_not_materialize_window_on_vec_path():
+    """PERF-1 invariant lock: on the vectorized fast path the full strict-prior
+    history window is NOT materialized — ``_InstrumentBarSeries.window`` must be
+    called zero times because ``last_bar`` (O(log n)) is used instead.
+
+    This locks the R1 lazy-window optimization and prevents a regression back to the
+    O(dates x members x ~400) list-copy hotspot.
+    """
+    members = [uuid.uuid4() for _ in range(3)]
+    trade_dates = [date(2024, 3, 1) + timedelta(days=k) for k in range(5)]
+    states_t = {m: {"regime_value": 1, "is_suspended": False} for m in members}
+    states_t1 = dict(states_t)
+    bars = {
+        m: _make_member_bar_series(m, trade_dates[-1], n_daily=30) for m in members
+    }
+    vec_volume = {m: _make_vec_volume(m, s) for m, s in bars.items()}
+
+    window_calls = {"n": 0}
+    real_window = _InstrumentBarSeries.window
+
+    def counting_window(self, td):
+        window_calls["n"] += 1
+        return real_window(self, td)
+
+    with patch.object(_InstrumentBarSeries, "window", counting_window):
+        _build_member_observations(
+            members,
+            trade_date=trade_dates[-1],
+            t1=None,
+            states_t=states_t,
+            states_t1=states_t1,
+            bars=bars,
+            current_only_facts={},
+            vec_volume=vec_volume,
+        )
+
+    assert window_calls["n"] == 0
+
+
+def test_vectorized_volume_hit_count_and_fallback_reason():
+    """PERF-1 instrumentation lock: the batch owner must report vectorized
+    VolumeContext hit vs canonical-fallback counts and the first fallback reason,
+    without changing the constructed MemberObservations.
+
+    Member A: 30 daily bars -> vec hit.
+    Member B: 10 daily bars (``w < SHORT_WINDOW``) -> window-bound fallback.
+    Member C: absent from ``vec_volume`` but has bars -> no_finite_volume fallback.
+    """
+    m_a, m_b, m_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    members = [m_a, m_b, m_c]
+    trade_dates = [date(2024, 3, 1) + timedelta(days=k) for k in range(5)]
+    states_t = {m: {"regime_value": 1, "is_suspended": False} for m in members}
+    states_t1 = dict(states_t)
+
+    bars = {
+        m_a: _make_member_bar_series(m_a, trade_dates[-1], n_daily=30),
+        m_b: _make_member_bar_series(m_b, trade_dates[-1], n_daily=10),
+        m_c: _make_member_bar_series(m_c, trade_dates[-1], n_daily=30),
+    }
+    vec_volume = {
+        m_a: _make_vec_volume(m_a, bars[m_a]),
+        m_b: _make_vec_volume(m_b, bars[m_b]),
+        # m_c intentionally absent -> no_finite_volume fallback
+    }
+
+    counters: dict[str, int] = {}
+    fallback_reasons: list[str] = []
+    built = _build_member_observations(
+        members,
+        trade_date=trade_dates[-1],
+        t1=None,
+        states_t=states_t,
+        states_t1=states_t1,
+        bars=bars,
+        current_only_facts={},
+        vec_volume=vec_volume,
+        counters=counters,
+        fallback_reasons=fallback_reasons,
+    )
+
+    # 1 hit (A), 2 fallbacks (B window-bound, C no_finite_volume)
+    assert counters.get("vec_hit", 0) == 1
+    assert counters.get("vec_fallback", 0) == 2
+    # Both distinct fallback reasons recorded, no duplicate of the same reason.
+    assert "w_insufficient" in fallback_reasons
+    assert "no_finite_volume" in fallback_reasons
+    # Semantic output unchanged: 3 MemberObservations built.
+    assert len(built) == 3
+
+
+# ---------------------------------------------------------------------------
 # Query count: one bulk read per series, not O(N) per-date reloads
 # ---------------------------------------------------------------------------
 
@@ -372,3 +503,219 @@ def test_batch_series_never_loads_current_only_facts(monkeypatch) -> None:
     member: MemberObservation = out[0].members[0]
     assert member.bb_position is None
     assert member.release_volume_ratio is None
+
+
+# ---------------------------------------------------------------------------
+# PERF-2: bounded scope batch + unique-member shared fact context
+# ---------------------------------------------------------------------------
+
+
+def test_reconstruct_scope_series_batch_loads_union_once_and_matches_per_scope(
+    monkeypatch,
+) -> None:
+    """PERF-2 equivalence lock.
+
+    Two scopes share one member (simulating concept overlap, avg 12.89 boards/
+    member in production).  ``reconstruct_scope_series_batch`` must:
+
+    1. Load the union member set exactly ONCE (each bulk reader invoked once for
+       the shared ``prepare_union_fact_context``), not once per scope — this is
+       the storage-layer dedup that removes the redundant per-scope reload.
+    2. Produce, per scope, byte-identical results to calling
+       ``reconstruct_scope_series`` independently for that scope.
+    """
+    from app.services.review_historical_scope_reconstruction_service import (
+        CurrentStaticMembership,
+        reconstruct_scope_series,
+        reconstruct_scope_series_batch,
+        resolve_current_membership,
+    )
+
+    # Scope A: {a, shared}; Scope B: {b, shared} -> union {a, b, shared}
+    id_a, id_b, id_shared = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    members_a = [id_a, id_shared]
+    members_b = [id_b, id_shared]
+
+    # Resolve membership per scope (current-static semantic owner, unchanged).
+    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
+        if scope_key == "A":
+            return CurrentStaticMembership(
+                member_ids=tuple(members_a), scope_name="Scope A",
+                asof_date=asof_date, member_count=len(members_a),
+            )
+        return CurrentStaticMembership(
+            member_ids=tuple(members_b), scope_name="Scope B",
+            asof_date=asof_date, member_count=len(members_b),
+        )
+
+    monkeypatch.setattr(
+        "app.services.review_historical_scope_reconstruction_service."
+        "resolve_current_membership",
+        fake_resolve,
+    )
+
+    calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0}
+
+    all_bars = {
+        id_a: [_bar(id_a, PREV, 9.0), _bar(id_a, T1, 10.0), _bar(id_a, T2, 11.0)],
+        id_b: [_bar(id_b, PREV, 8.0), _bar(id_b, T1, 8.5), _bar(id_b, T2, 9.0)],
+        id_shared: [
+            _bar(id_shared, PREV, 5.0),
+            _bar(id_shared, T1, 5.5),
+            _bar(id_shared, T2, 6.0),
+        ],
+    }
+    states = {
+        PREV: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+        T1: {id_a: _state(1), id_b: _state(-1), id_shared: _state(1)},
+        T2: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+    }
+    events = {
+        T1: [StructureEvent(member_id=str(id_shared), event_type="BOS",
+                            direction="bullish", level=1.0, internal=False,
+                            release_volume_ratio=None)],
+        T2: [],
+    }
+    trading_days = [PREV, T1, T2]
+
+    async def fake_calendar(session, trade_dates):
+        calls["calendar"] = calls.get("calendar", 0) + 1
+        return {t: trading_days[trading_days.index(t) - 1]
+                if trading_days.index(t) > 0 else None for t in trade_dates}
+
+    async def fake_states(session, instrument_ids, trade_dates, t1_by_date):
+        calls["states"] = calls.get("states", 0) + 1
+        return {d: states.get(d, {}) for d in set(trade_dates) | set(t1_by_date.values())}
+
+    async def fake_bars(session, instrument_ids, trade_dates):
+        calls["bars"] = calls.get("bars", 0) + 1
+        return {
+            i: _InstrumentBarSeries(
+                facts=tuple(sorted(facts, key=lambda b: b.trade_date)),
+                dates=tuple(sorted(b.trade_date for b in facts)),
+            )
+            for i, facts in all_bars.items()
+        }
+
+    async def fake_events(session, instrument_ids, trade_dates):
+        calls["events"] = calls.get("events", 0) + 1
+        return {d: events.get(d, []) for d in trade_dates}
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_states", fake_states
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_bars", fake_bars
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_events", fake_events
+    )
+
+    async def scenario():
+        # Batch first: union of {A,B} loads each bulk reader exactly ONCE.
+        batch = await reconstruct_scope_series_batch(
+            _FakeSession(), "concept", ["A", "B"], [T1, T2],
+            asof_date=T2,
+        )
+        batch_calls = dict(calls)
+        # Reset; per-scope reconstruction reloads each scope independently (2x).
+        calls.clear()
+        per_a = await reconstruct_scope_series(
+            _FakeSession(), "concept", "A", [T1, T2], asof_date=T2,
+        )
+        per_b = await reconstruct_scope_series(
+            _FakeSession(), "concept", "B", [T1, T2], asof_date=T2,
+        )
+        per_calls = dict(calls)
+        return batch, per_a, per_b, batch_calls, per_calls
+
+    batch, per_a, per_b, batch_calls, per_calls = asyncio.run(scenario())
+
+    # 1) Batch path loads the union ONCE (shared), not once per scope.
+    assert batch_calls == {"calendar": 1, "states": 1, "bars": 1, "events": 1}
+    # Per-scope path (baseline) reloads each scope independently -> 2x.
+    assert per_calls == {"calendar": 2, "states": 2, "bars": 2, "events": 2}
+
+    # 2) Per-scope results byte-identical to independent per-scope reconstruction.
+    by_key = {r["scope"]["scope_key"]: r for r in batch}
+    assert set(by_key) == {"A", "B"}
+    for got, expected in ((by_key["A"], per_a), (by_key["B"], per_b)):
+        assert got["scope"] == expected["scope"]
+        assert got["membership"]["member_count"] == expected["membership"]["member_count"]
+        assert len(got["series"]) == len(expected["series"])
+        for g, e in zip(got["series"], expected["series"], strict=True):
+            assert g == e
+
+
+def test_reconstruct_scope_series_batch_chunks_when_union_exceeds_cap(
+    monkeypatch,
+) -> None:
+    """PERF-2 bounded-batch lock: when the union of members across a chunk exceeds
+    ``union_member_cap``, the batch entry must split scope_keys into multiple
+    chunks, each triggering its own union bulk load (readers invoked >1 time).
+    """
+    from app.services.review_historical_scope_reconstruction_service import (
+        CurrentStaticMembership,
+        reconstruct_scope_series_batch,
+        resolve_current_membership,
+    )
+
+    scopes = {f"S{i}": [uuid.uuid4()] for i in range(4)}  # disjoint members
+
+    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
+        mids = scopes[scope_key]
+        return CurrentStaticMembership(
+            member_ids=tuple(mids), scope_name=scope_key,
+            asof_date=asof_date, member_count=len(mids),
+        )
+
+    monkeypatch.setattr(
+        "app.services.review_historical_scope_reconstruction_service."
+        "resolve_current_membership",
+        fake_resolve,
+    )
+
+    calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0}
+
+    async def fake_calendar(session, trade_dates):
+        calls["calendar"] += 1
+        return dict.fromkeys(trade_dates, PREV)
+
+    async def fake_states(session, instrument_ids, trade_dates, t1_by_date):
+        calls["states"] += 1
+        return {}
+
+    async def fake_bars(session, instrument_ids, trade_dates):
+        calls["bars"] += 1
+        return {}
+
+    async def fake_events(session, instrument_ids, trade_dates):
+        calls["events"] += 1
+        return {}
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_states", fake_states
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_bars", fake_bars
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_events", fake_events
+    )
+
+    async def scenario():
+        # cap=1 -> each disjoint scope (1 member) is its own chunk -> 4 loads.
+        return await reconstruct_scope_series_batch(
+            _FakeSession(), "concept", list(scopes), [T1],
+            asof_date=T1, union_member_cap=1,
+        )
+
+    out = asyncio.run(scenario())
+    assert len(out) == 4
+    assert calls == {"calendar": 4, "states": 4, "bars": 4, "events": 4}
