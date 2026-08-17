@@ -72,6 +72,13 @@ from auction_member_fact_backfill_kernel import (
     build_historical_member_fact,
     fetch_auction_0925_targeted,
 )
+from app.services.historical_auction_backfill_writer import (
+    MemberFactProjection,
+    finalize_historical_capture_run,
+    get_or_create_historical_capture_run,
+    project_row_to_fact,
+    write_bar_quotes,
+)
 
 # offset_hints.json 版本（Round 3B-D2 PART F）：v2 versioned structure
 OFFSET_HINTS_VERSION = 2
@@ -903,6 +910,9 @@ async def _run_bar_partition(
     session=None,
     offset_hints: dict | None = None,
     chunk_size: int = MDAS_CHUNK_SIZE,
+    db_writer: Any = None,           # 可选：历史竞价落库 writer（None → 不写库）
+    db_chunk_size: int = 500,         # 落库分批事务大小
+    backfill_run_id: str | None = None,
 ) -> dict:
     pdir = _partition_dir(run_id, trade_date, output_root)
     pdir.mkdir(parents=True, exist_ok=True)
@@ -912,6 +922,17 @@ async def _run_bar_partition(
     tmp_path = pdir / "member_facts.jsonl.tmp"
     member_path = pdir / "member_facts.jsonl"
     progress_path = pdir / "progress.json"
+
+    # [CHANGE-20260817-001] 历史竞价落库：本 bar 的 DB 写入计数（无 writer 时全 0）
+    db_written_rows = 0
+    db_skipped_rows = 0
+    db_failed_rows = 0
+    capture_run = None
+    if db_writer is not None and session is not None:
+        capture_run = await get_or_create_historical_capture_run(
+            session, trade_date, expected_count=eligible,
+            code_version=code_sha,
+        )
 
     # Round 3B-E2 — 所有 per-member 聚合计数器统一进 M（production / 注入路径共用）
     M = _new_metrics_accumulator()
@@ -952,11 +973,27 @@ async def _run_bar_partition(
                 raw_queries_total += diag["raw_repository_query_count"]
                 qfq_queries_total += diag["qfq_repository_query_count"]
                 chunk_count += 1
+                db_facts_buffer: list[MemberFactProjection] = []
                 for inst, obs in zip(chunk, observations):
                     _emit_member_row(
                         f, obs, trade_date, bar_index, inst,
                         listing_date_by_symbol, code_sha, as_of, M,
                     )
+                    # [CHANGE-20260817-001] 落库投影：RUN_ERROR 不写库（提取失败）
+                    if isinstance(obs, dict) and "__run_error__" not in obs:
+                        db_facts_buffer.append(
+                            project_row_to_fact(obs, inst.instrument_id, trade_date)
+                        )
+                # [CHANGE-20260817-001] 每 chunk 结束 upsert（分批小事务，避免长事务）
+                if capture_run is not None and db_facts_buffer:
+                    res = await write_bar_quotes(
+                        session, trade_date, capture_run, db_facts_buffer,
+                        chunk_size=db_chunk_size,
+                    )
+                    db_written_rows += res["written"]
+                    db_skipped_rows += res["skipped"]
+                    db_failed_rows += res["failed"]
+                    await session.commit()
                 # chunk 结果在本循环尾部自然离开作用域（raw_batch/qfq_batch/observations
                 # 不再被引用），python GC 释放；不 merge 进 full-market 映射。
                 rss_now, _ = _read_self_mem_mb()
@@ -988,6 +1025,17 @@ async def _run_bar_partition(
                     f, obs, trade_date, bar_index, inst,
                     listing_date_by_symbol, code_sha, as_of, M,
                 )
+                # [CHANGE-20260817-001] 落库投影（注入路径）：RUN_ERROR 不写库
+                if isinstance(obs, dict) and "__run_error__" not in obs and capture_run is not None:
+                    res = await write_bar_quotes(
+                        session, trade_date, capture_run,
+                        [project_row_to_fact(obs, inst.instrument_id, trade_date)],
+                        chunk_size=db_chunk_size,
+                    )
+                    db_written_rows += res["written"]
+                    db_skipped_rows += res["skipped"]
+                    db_failed_rows += res["failed"]
+                    await session.commit()
                 _maybe_progress(
                     progress_state, progress_path, trade_date=trade_date,
                     bar_index=bar_index, eligible=eligible, processed=M["written"],
@@ -1087,6 +1135,14 @@ async def _run_bar_partition(
         "mdas_chunk_count": chunk_count,
     }
 
+    # [CHANGE-20260817-001] 历史竞价落库：bar 完成后 finalize CaptureRun
+    if capture_run is not None and session is not None:
+        await finalize_historical_capture_run(
+            session, capture_run,
+            received_count=written, valid_count=(written - run_error),
+        )
+        await session.commit()
+
     data_quality = {
         "trade_date": trade_date.isoformat(),
         "bar_index": bar_index,
@@ -1099,6 +1155,10 @@ async def _run_bar_partition(
         "pit_gap_unavailable_count": pit_gap_unavailable,
         "pit_gap_adjustment_degraded_count": pit_gap_adj_degraded,
         "reconciled": reconciled,
+        # [CHANGE-20260817-001] 落库计数
+        "db_written_rows": db_written_rows,
+        "db_skipped_rows": db_skipped_rows,
+        "db_failed_rows": db_failed_rows,
         # PART K — performance evidence（不改变业务结论）
         "pytdx_request_count": pytdx_requests_total,
         "pytdx_target_search_cold_count": cold_count,
@@ -1126,6 +1186,9 @@ async def _run_bar_partition(
         "status": partition_status,
         "eligible_instruments": eligible,
         "member_rows_written": written,
+        "db_written_rows": db_written_rows,
+        "db_skipped_rows": db_skipped_rows,
+        "db_failed_rows": db_failed_rows,
         "completed_at": _now_iso() if partition_status == PARTITION_STATUS_COMPLETED else None,
         "data_quality": data_quality,
     }
@@ -1259,6 +1322,7 @@ async def run_backfill(
     recover_stale_lock: bool = False,
     as_of: date = AS_OF,
     mdas_chunk_size: int = MDAS_CHUNK_SIZE,
+    db_chunk_size: int = 500,
 ) -> dict:
     if run_id is None:
         run_id = f"{RUN_ID_PREFIX}_{as_of.isoformat()}"
@@ -1353,6 +1417,7 @@ async def _run_backfill_impl(
     adapter, mdas, session, output_root: Path, code_sha: str,
     require_listing_coverage: bool, as_of: date, root_manifest: dict,
     mdas_chunk_size: int = MDAS_CHUNK_SIZE,
+    db_chunk_size: int = 500,
 ) -> dict:
     _out_root = output_root
     _mdas = mdas or MarketDataAggregationService()
@@ -1388,7 +1453,7 @@ async def _run_backfill_impl(
     failed = 0
     resume_skipped = 0
 
-    async def _bars_loop(sess, adapter_for_run, snapshot_or_none):
+    async def _bars_loop(sess, adapter_for_run, snapshot_or_none, *, db_chunk_size=db_chunk_size):
         nonlocal completed, failed, resume_skipped
         _mdas_chunk_size = mdas_chunk_size
         # Round 3B-E2 PART 2 — fail fast：无效 chunk size 必须在 partition 循环之前
@@ -1504,6 +1569,9 @@ async def _run_backfill_impl(
                     session=sess,
                     offset_hints=offset_hints,
                     chunk_size=_mdas_chunk_size,
+                    db_writer=write_bar_quotes,
+                    db_chunk_size=db_chunk_size,
+                    backfill_run_id=run_id,
                 )
             except Exception:
                 failed += 1
@@ -1558,7 +1626,7 @@ async def _run_backfill_impl(
         if population is None and population_fn is None:
             async with AsyncSessionLocal() as sess:
                 snap = await load_population_once(sess)
-        await _bars_loop(session, adapter, snap)
+        await _bars_loop(session, adapter, snap, db_chunk_size=db_chunk_size)
     else:
         with PytdxAdapter() as real_adapter:
             owns_session = session is None
@@ -1584,7 +1652,7 @@ async def _run_backfill_impl(
                     # listing_date_unavailable 显式记录（不 silent disappear）
                     root_manifest["listing_date_unavailable_count"] = snap.listing_date_missing
                     root_manifest["listing_date_unavailable_symbols"] = snap.listing_missing_symbols
-                await _bars_loop(sess, real_adapter, snap)
+                await _bars_loop(sess, real_adapter, snap, db_chunk_size=db_chunk_size)
             finally:
                 if owns_session:
                     await sess.close()
