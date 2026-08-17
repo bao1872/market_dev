@@ -20,7 +20,6 @@ except ImportError:  # pragma: no cover - Compose 门禁在缺少 PyYAML 时跳�
 ACTIVE_RULES = {
     "README.md",
     "00-core-governance.md",
-    "10-product-domain-invariants.md",
     "20-market-data-computation.md",
     "25-engineering-implementation.md",
     "30-security-data-safety.md",

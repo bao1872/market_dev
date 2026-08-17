@@ -66,3 +66,14 @@ Exploration 只减少与当前 hypothesis 无关的全域验证与治理完备�
 - 不得用 mock 冒充真实结果；
 - 不得用“测试通过”掩盖真实运行错误；
 - 任何与真实数据、远程验证、migration、部署相关的结论，必须有对应证据或明确标注未执行。
+
+## 9. Hypothesis 成熟度
+
+产品或算法假设可以处于：
+
+- **EXPERIMENTAL**：实现与测试可以正确，但产品价值尚未由用户确认；
+- **VALIDATED**：用户通过真实结果确认该假设值得继续；
+- **STABLE**：多轮结果稳定，接口/语义开始冻结；
+- **RELEASED**：进入正式长期兼容和发布治理。
+
+实现成功不得自动把 EXPERIMENTAL 升级为 STABLE/RELEASED。

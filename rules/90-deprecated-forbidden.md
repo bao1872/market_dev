@@ -64,7 +64,7 @@
 
 当前已废弃的多策略组合不得从历史代码/文档恢复。
 
-当前正式策略边界见 `10-product-domain-invariants.md`。
+当前正式策略边界由 `docs/prd/` 定义（量化模型见 `docs/prd/20-quant-model.md`）。
 
 ## 6. feishu_webhook
 

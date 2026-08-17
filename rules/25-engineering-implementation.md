@@ -42,7 +42,6 @@
 | 内容                                              | 权威来源                                      |
 | ----------------------------------------------- | ----------------------------------------- |
 | 产品目标、用户行为、指标定义、业务规则                             | `docs/prd/`                               |
-| 产品域长期不变量                                        | `rules/10-product-domain-invariants.md`   |
 | 行情读取、PIT、Canonical、No Future Leakage、正式计算 owner | `rules/20-market-data-computation.md`     |
 | 权限、秘密、真实数据安全                                    | `rules/30-security-data-safety.md`        |
 | 应运行哪些测试、验证层级和证据                                 | `rules/40-testing-quality.md`             |
@@ -1258,7 +1257,6 @@ Worker 的正式生命周期、测试和 long-task safety 分别由 `rules/40-*`
 任何 Core / Enhancement / readiness / retry 语义均遵循对应：
 
 * PRD；
-* `rules/10-*`；
 * `rules/20-*`；
 * `rules/40-*`；
 * `rules/80-*`。
@@ -1959,7 +1957,6 @@ RISK
 
 * `AGENTS.md` 基础安全边界；
 * PRD 已确认业务合同；
-* `rules/10-*` 产品域不变量；
 * `rules/20-*` 数据与 Canonical 不变量；
 * `rules/30-*` 安全与真实数据保护；
 * `rules/40-*` 测试和证据纪律；

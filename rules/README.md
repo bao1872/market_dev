@@ -22,7 +22,6 @@
 | 文件 | 主题 | Exploration 默认 |
 |---|---|---|
 | `00-core-governance.md` | 阶段路由、事实源、Hypothesis Slice、严重度、文档授权 | Always On |
-| `10-product-domain-invariants.md` | 产品边界、第一金字塔、Review、自选/监控、飞书 | Always On |
 | `20-market-data-computation.md` | MDAS、复权、点时、Canonical、DSA/SMC/Momentum/Chip、Chart、板块 | Always On |
 | `25-engineering-implementation.md` | 通用工程实现规范（Cross-cutting Implementation Standard，不拥有产品/安全/测试/Git/部署合同） | Always On |
 | `30-security-data-safety.md` | 账户、权限、秘密、真实业务数据安全 | Always On |
