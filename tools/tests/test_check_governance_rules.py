@@ -73,7 +73,7 @@ def test_correctness_gate_cannot_be_removed(governance_repo: Path) -> None:
 
 
 def test_compatibility_alias_cannot_become_second_authority(governance_repo: Path) -> None:
-    p = governance_repo / "rules/20-market-data-indicators.md"
+    p = governance_repo / "rules/30-access-security.md"
     p.write_text("# old authority\n" + "rule\n" * 30)
     errors = check(governance_repo)
     assert any("compatibility alias" in error for error in errors)
@@ -90,6 +90,25 @@ def test_registered_plan_set_is_required(governance_repo: Path) -> None:
     (governance_repo / "scripts/verify/plans/targeted-pg.json").unlink()
     errors = check(governance_repo)
     assert any("missing registered verification plan" in error for error in errors)
+
+
+def test_engineering_implementation_rule_routing(governance_repo: Path) -> None:
+    # 25 已注册为 Active Rule 且内容契约 marker 存在时，整体 contract 必须通过。
+    assert "25-engineering-implementation.md" in MODULE.ACTIVE_RULES
+    assert check(governance_repo) == []
+
+    # 篡改 AGENTS.md 移除 25 引用，必须被 _check_agents 检出。
+    agents = governance_repo / "AGENTS.md"
+    agents.write_text(agents.read_text().replace(
+        "rules/25-engineering-implementation.md`：通用工程实现规范", "rules/99-missing.md`：占位"))
+    errors = check(governance_repo)
+    assert any("missing active rule reference: rules/25-engineering-implementation.md" in e for e in errors)
+
+    # 篡改 25 内容移除 Two-Strike Architecture Rule marker，必须被语义闸门检出。
+    rule = governance_repo / "rules/25-engineering-implementation.md"
+    rule.write_text(rule.read_text().replace("Two-Strike Architecture Rule", "One-Strike Rule"))
+    errors = check(governance_repo)
+    assert any("25-engineering-implementation.md missing contract marker" in e for e in errors)
 
 
 def test_protected_manifest_still_guards_verification(governance_repo: Path) -> None:

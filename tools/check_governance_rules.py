@@ -22,6 +22,7 @@ ACTIVE_RULES = {
     "00-core-governance.md",
     "10-product-domain-invariants.md",
     "20-market-data-computation.md",
+    "25-engineering-implementation.md",
     "30-security-data-safety.md",
     "40-testing-quality.md",
     "50-git-development-flow.md",
@@ -32,7 +33,6 @@ ACTIVE_RULES = {
 }
 
 COMPATIBILITY_ALIASES = {
-    "20-market-data-indicators.md": "20-market-data-computation.md",
     "30-access-security.md": "30-security-data-safety.md",
     "80-deployment-data-safety.md": "80-deployment-migration.md",
     "81-remote-deployment-only.md": "80-deployment-migration.md",
@@ -177,6 +177,7 @@ def _check_rule_semantics(root: Path, errors: list[str]) -> None:
     required_markers = {
         "00-core-governance.md": ("Hypothesis Slice", "P0", "Two-Strike Architecture Rule"),
         "20-market-data-computation.md": ("future leakage", "Canonical", "daily Core 不依赖"),
+        "25-engineering-implementation.md": ("MUST", "Two-Strike Architecture Rule", "不拥有"),
         "30-security-data-safety.md": ("Exploration 不降低安全门槛", "bz_stock"),
         "40-testing-quality.md": ("Fast Iteration 不是少测试", "Modified-Scope Unit", "Full PURE_UNIT"),
         "60-runtime-frontend-acceptance.md": ("API", "frontend", "用户负责"),

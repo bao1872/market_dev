@@ -95,6 +95,7 @@ Exploration 模式下，P2/P3 的治理、标准化、通用化、文档同步�
    - `rules/00-core-governance.md`：事实源优先级、闭环、修改前最小报告。
    - `rules/10-product-domain-invariants.md`：产品边界、策略、DSA、自选与监控、飞书。
    - `rules/20-market-data-computation.md`：行情、复权、点时、Canonical、第一金字塔与板块计算不变量。
+   - `rules/25-engineering-implementation.md`：通用工程实现规范（Cross-cutting Implementation Standard，不拥有产品/安全/测试/Git/部署合同）。
    - `rules/30-security-data-safety.md`：权限、秘密、真实业务数据与不可恢复风险。
    - `rules/40-testing-quality.md`：modified-scope unit、合同/PG/真实数据、测试分层与证据纪律。
    - `rules/50-git-development-flow.md`：dev-only、提交/push、checkpoint、continue mode 与计划授权。

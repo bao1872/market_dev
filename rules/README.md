@@ -24,6 +24,7 @@
 | `00-core-governance.md` | 阶段路由、事实源、Hypothesis Slice、严重度、文档授权 | Always On |
 | `10-product-domain-invariants.md` | 产品边界、第一金字塔、Review、自选/监控、飞书 | Always On |
 | `20-market-data-computation.md` | MDAS、复权、点时、Canonical、DSA/SMC/Momentum/Chip、Chart、板块 | Always On |
+| `25-engineering-implementation.md` | 通用工程实现规范（Cross-cutting Implementation Standard，不拥有产品/安全/测试/Git/部署合同） | Always On |
 | `30-security-data-safety.md` | 账户、权限、秘密、真实业务数据安全 | Always On |
 | `40-testing-quality.md` | 单元/合同/PG/真实数据/前端技术闭环的分层验证 | Always On |
 | `50-git-development-flow.md` | dev-only、提交、推送、checkpoint、任务收尾 | Always On |
@@ -37,7 +38,6 @@
 
 为避免历史 PRD/Map/Change/Runbook 链接在一次治理迁移中全部失效，以下旧文件名暂时保留为只读跳转文件，不再承载独立规则：
 
-- `20-market-data-indicators.md` → `20-market-data-computation.md`
 - `30-access-security.md` → `30-security-data-safety.md`
 - `80-deployment-data-safety.md` → `80-deployment-migration.md`
 - `81-remote-deployment-only.md` → `80-deployment-migration.md`
