@@ -691,6 +691,197 @@ async def run_symbol_backfill_observation(
 
 
 # ---------------------------------------------------------------------------
+# 单 chunk 生产执行 owner（Round 3B-E2 Unified Development Unit）
+# ---------------------------------------------------------------------------
+# 正式且唯一的 production chunk path。禁止第二套 chunk runner
+# （test / benchmark / canary 均调用本函数，只替换 adapter/session/batch_mdas_fn）。
+#
+# 职责：
+#   1. 接收本 chunk 的有序 list[SampleInstrument]；
+#   2. 对 chunk 执行 raw MDAS batch（adj=none）；
+#   3. 对 chunk 执行 qfq MDAS batch（adj=qfq）；
+#   4. 对 chunk 内每个 member 调用既有 run_symbol_backfill_observation；
+#   5. 保持输入 member 顺序；
+#   6. 返回本 chunk observations（按输入顺序）+ physical diagnostics。
+#
+# 不 merge 上 chunk 的 MDAS result；不持有 full-market 映射。
+async def _run_member_chunk(
+    chunk: list[SampleInstrument],
+    trade_date: date,
+    bar_index: int,
+    *,
+    mdas,
+    batch_mdas_fn,
+    adapter,
+    session,
+    as_of: date,
+    code_sha: str | None,
+    offset_hints: dict,
+    listing_date_by_symbol: dict[str, date],
+) -> tuple[list[dict], dict[str, int]]:
+    """执行一个 bounded chunk 的 MDAS + per-symbol kernel，返回 (observations, diag)。
+
+    observations 顺序 == chunk 输入顺序。
+    diag 累计本 chunk 的 physical repository query（raw/qfq），由调用方累加。
+    """
+    ids = [s.instrument_id for s in chunk]
+    raw_batch, raw_diag = await batch_mdas_fn(
+        mdas, session, ids, trade_date, adj="none")
+    qfq_batch, qfq_diag = await batch_mdas_fn(
+        mdas, session, ids, trade_date, adj="qfq", adjustment_as_of=trade_date)
+    observations: list[dict] = []
+    for inst in chunk:
+        obs = await run_symbol_backfill_observation(
+            adapter, session, inst, trade_date, raw_batch, qfq_batch,
+            listing_date=listing_date_by_symbol.get(inst.symbol),
+            as_of=as_of, bar_index=bar_index, code_sha=code_sha,
+            offset_hints=offset_hints,
+        )
+        observations.append(obs)
+    diag = {
+        "raw_repository_query_count": int(
+            raw_diag.get("repository_query_count", 0) or 0),
+        "qfq_repository_query_count": int(
+            qfq_diag.get("repository_query_count", 0) or 0),
+    }
+    return observations, diag
+
+
+def _chunk_population(population: list[SampleInstrument],
+                      chunk_size: int) -> list[list[SampleInstrument]]:
+    """统一 chunk 切片：单一变量 chunk_size，禁止 step/slice 混用。
+
+    硬合同：
+      flatten(chunks) 顺序 == population 顺序
+      len(flatten(chunks)) == len(population)
+      每个 instrument exactly once
+      chunk overlap == 0 / omission == 0
+      每个 chunk len <= chunk_size
+    """
+    if chunk_size <= 0:
+        raise ValueError(
+            f"mdas_chunk_size 必须 > 0（fail fast），收到 {chunk_size}")
+    chunks: list[list[SampleInstrument]] = []
+    for start in range(0, len(population), chunk_size):
+        chunks.append(population[start:start + chunk_size])
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# member row 流式写出 + 聚合计数器（production 与注入路径共用同一逻辑）
+# ---------------------------------------------------------------------------
+def _new_metrics_accumulator() -> dict:
+    return {
+        "source_status_agg": {},
+        "canonical_status_agg": {},
+        "lane_a_computed": 0,
+        "lane_b_computed": 0,
+        "pit_gap_unavailable": 0,
+        "pit_gap_adj_degraded": 0,
+        "run_error": 0,
+        "written": 0,
+        "pytdx_requests_total": 0,
+        "cold_count": 0,
+        "hint_count": 0,
+        "search_mode_agg": {},
+        "max_requests_per_symbol": 0,
+        "current_symbol": None,
+    }
+
+
+def _emit_member_row(
+    f,                     # open text file（.tmp）
+    obs: dict,
+    trade_date: date,
+    bar_index: int,
+    inst: SampleInstrument,
+    listing_date_by_symbol: dict[str, date],
+    code_sha: str | None,
+    as_of: date,
+    M: dict,
+) -> None:
+    M["current_symbol"] = inst.symbol
+    run_error_exc = obs.get("__run_error__") if isinstance(obs, dict) else None
+    if run_error_exc is not None:
+        row = {
+            "trade_date": trade_date.isoformat(),
+            "bar_index": bar_index,
+            "instrument_id": str(inst.instrument_id),
+            "symbol": inst.symbol,
+            "market": inst.market,
+            "board": inst.board,
+            "listing_date": str(listing_date_by_symbol.get(inst.symbol))
+            if listing_date_by_symbol.get(inst.symbol) else None,
+            "source_status": "RUN_ERROR",
+            "full_day_status": None,
+            "extraction_status": None,
+            "canonicalization_status": None,
+            "canonicalization_reason": (
+                f"run_symbol_backfill_observation: {type(run_error_exc).__name__}: {run_error_exc}"),
+            "raw_canonical_record_count": 0,
+            "positive_volume_record_count": 0,
+            "zero_volume_record_count": 0,
+            "invalid_volume_record_count": 0,
+            "invalid_price_count": 0,
+            "auction_price_raw": None,
+            "auction_volume_raw_lots": None,
+            "auction_volume_shares": None,
+            "auction_amount": None,
+            "auction_amount_source_type": None,
+            "lane_a_status": None, "mdas_raw_open_T": None,
+            "price_exact_match": None, "price_diff_abs": None,
+            "price_diff_rel": None,
+            "lane_b_status": None, "previous_close_raw": None,
+            "previous_close_pit_qfq": None, "naive_raw_gap": None,
+            "pit_gap": None,
+            "mdas_data_source": None, "degraded": None,
+            "degraded_reason": str(run_error_exc),
+            "adjustment_as_of": None, "adj_factor_hash": None,
+            "pytdx_page_requests": 0, "used_hint": None,
+            "search_mode": None, "target_page_offset": None,
+            "code_sha": code_sha,
+            "as_of": as_of.isoformat(),
+        }
+        f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        M["written"] += 1
+        M["run_error"] += 1
+        M["source_status_agg"]["RUN_ERROR"] = M["source_status_agg"].get("RUN_ERROR", 0) + 1
+        return
+    row = _project_member_row(
+        obs, trade_date, bar_index,
+        listing_date_by_symbol.get(inst.symbol), code_sha, as_of,
+    )
+    f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    M["written"] += 1
+
+    ss = row["source_status"] or "UNKNOWN"
+    M["source_status_agg"][ss] = M["source_status_agg"].get(ss, 0) + 1
+    if ss == SOURCE_TARGET_WINDOW_COMPLETE:
+        cstat = row["canonicalization_status"] or "UNKNOWN"
+        M["canonical_status_agg"][cstat] = M["canonical_status_agg"].get(cstat, 0) + 1
+    if row["lane_a_status"] == "COMPUTED":
+        M["lane_a_computed"] += 1
+    if row["lane_b_status"] == "COMPUTED":
+        M["lane_b_computed"] += 1
+    if row["lane_b_status"] == "PIT_ADJUSTMENT_DEGRADED":
+        M["pit_gap_adj_degraded"] += 1
+    if row["lane_b_status"] != "COMPUTED" or row["pit_gap"] is None:
+        M["pit_gap_unavailable"] += 1
+
+    n_req = row["pytdx_page_requests"] or 0
+    M["pytdx_requests_total"] += n_req
+    if row["used_hint"] is True:
+        M["hint_count"] += 1
+    else:
+        M["cold_count"] += 1
+    M["max_requests_per_symbol"] = max(M["max_requests_per_symbol"], n_req)
+
+    sm = row.get("search_mode")
+    if sm is not None:
+        M["search_mode_agg"][sm] = M["search_mode_agg"].get(sm, 0) + 1
+
+
+# ---------------------------------------------------------------------------
 # 单 bar partition 执行（PART G）：stream tmp + progress + atomic finalize + 性能
 # ---------------------------------------------------------------------------
 async def _run_bar_partition(
@@ -705,9 +896,13 @@ async def _run_bar_partition(
     code_sha: str | None = None,
     as_of: date = AS_OF,
     adapter: Any = None,
-    raw_mdas_batch_queries: int = 0,
-    qfq_mdas_batch_queries: int = 0,
     mem_instrumentation: dict | None = None,
+    # Round 3B-E2 — production chunk deps（仅在 run_symbol_obs is None 时使用）
+    mdas=None,
+    batch_mdas_fn=None,
+    session=None,
+    offset_hints: dict | None = None,
+    chunk_size: int = MDAS_CHUNK_SIZE,
 ) -> dict:
     pdir = _partition_dir(run_id, trade_date, output_root)
     pdir.mkdir(parents=True, exist_ok=True)
@@ -718,131 +913,109 @@ async def _run_bar_partition(
     member_path = pdir / "member_facts.jsonl"
     progress_path = pdir / "progress.json"
 
-    source_status_agg: dict[str, int] = {}
-    canonical_status_agg: dict[str, int] = {}
-    lane_a_computed = 0
-    lane_b_computed = 0
-    pit_gap_unavailable = 0
-    pit_gap_adj_degraded = 0
-    run_error = 0
-    written = 0
-    pytdx_requests_total = 0
-    cold_count = 0
-    hint_count = 0
-    search_mode_agg: dict[str, int] = {}
-    max_requests_per_symbol = 0
-    current_symbol: str | None = None
+    # Round 3B-E2 — 所有 per-member 聚合计数器统一进 M（production / 注入路径共用）
+    M = _new_metrics_accumulator()
+
+    # Round 3B-E2 PART 3 — physical query 累计（跨 chunk 真实求和）
+    raw_queries_total = 0
+    qfq_queries_total = 0
+    chunk_count = 0
 
     started = time.monotonic()
-    last_progress_at = started
-    last_progress_n = 0
+    progress_state = {"last_at": started, "last_n": 0}
 
     f = open(tmp_path, "w", encoding="utf-8")
     try:
-        for inst in population:
-            current_symbol = inst.symbol
-            try:
-                obs = await run_symbol_obs(inst, trade_date)
-            except Exception as exc:
-                row = {
-                    "trade_date": trade_date.isoformat(),
-                    "bar_index": bar_index,
-                    "instrument_id": str(inst.instrument_id),
-                    "symbol": inst.symbol,
-                    "market": inst.market,
-                    "board": inst.board,
-                    "listing_date": str(listing_date_by_symbol.get(inst.symbol))
-                    if listing_date_by_symbol.get(inst.symbol) else None,
-                    "source_status": "RUN_ERROR",
-                    "full_day_status": None,
-                    "extraction_status": None,
-                    "canonicalization_status": None,
-                    "canonicalization_reason": (
-                        f"run_symbol_backfill_observation: {type(exc).__name__}: {exc}"),
-                    "raw_canonical_record_count": 0,
-                    "positive_volume_record_count": 0,
-                    "zero_volume_record_count": 0,
-                    "invalid_volume_record_count": 0,
-                    "invalid_price_count": 0,
-                    "auction_price_raw": None,
-                    "auction_volume_raw_lots": None,
-                    "auction_volume_shares": None,
-                    "auction_amount": None,
-                    "auction_amount_source_type": None,
-                    "lane_a_status": None, "mdas_raw_open_T": None,
-                    "price_exact_match": None, "price_diff_abs": None,
-                    "price_diff_rel": None,
-                    "lane_b_status": None, "previous_close_raw": None,
-                    "previous_close_pit_qfq": None, "naive_raw_gap": None,
-                    "pit_gap": None,
-                    "mdas_data_source": None, "degraded": None,
-                    "degraded_reason": str(exc),
-                    "adjustment_as_of": None, "adj_factor_hash": None,
-                    "pytdx_page_requests": 0, "used_hint": None,
-                    "search_mode": None, "target_page_offset": None,
-                    "code_sha": code_sha,
-                    "as_of": as_of.isoformat(),
-                }
-                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-                written += 1
-                run_error += 1
-                source_status_agg["RUN_ERROR"] = source_status_agg.get("RUN_ERROR", 0) + 1
-            else:
-                row = _project_member_row(
-                    obs, trade_date, bar_index,
-                    listing_date_by_symbol.get(inst.symbol), code_sha, as_of,
+        # Round 3B-E2 PART 1 — TRUE STREAMING PARTITION EXECUTION
+        # production 路径（run_symbol_obs is None）逐 chunk 消费：
+        #   raw MDAS(chunk) → qfq MDAS(chunk) → 同 kernel 逐 member → stream row → 释放 chunk
+        # 注入路径（run_symbol_obs 给定）直接逐 member 调用注入 observer（不跑 MDAS）。
+        if run_symbol_obs is None:
+            assert batch_mdas_fn is not None and mdas is not None and session is not None, (
+                "production path 需要 batch_mdas_fn/mdas/session")
+            # Round 3B-E2 PART 4 — memory instrumentation（由 production path 自身采样）
+            rss_before_bar_mb, vmhwm_before_bar_mb = _read_self_mem_mb()
+            rss_peak_samples: list[float] = [rss_before_bar_mb]
+            rss_before_first_mdas_mb: float | None = None
+            chunks = _chunk_population(population, chunk_size)
+            for ci, chunk in enumerate(chunks):
+                if ci == 0:
+                    rss_before_first_mdas_mb, _ = _read_self_mem_mb()
+                observations, diag = await _run_member_chunk(
+                    chunk, trade_date, bar_index,
+                    mdas=mdas, batch_mdas_fn=batch_mdas_fn,
+                    adapter=adapter, session=session, as_of=as_of,
+                    code_sha=code_sha,
+                    offset_hints=offset_hints if offset_hints is not None else {},
+                    listing_date_by_symbol=listing_date_by_symbol,
                 )
-                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-                written += 1
-
-                ss = row["source_status"] or "UNKNOWN"
-                source_status_agg[ss] = source_status_agg.get(ss, 0) + 1
-                if ss == SOURCE_TARGET_WINDOW_COMPLETE:
-                    cstat = row["canonicalization_status"] or "UNKNOWN"
-                    canonical_status_agg[cstat] = canonical_status_agg.get(cstat, 0) + 1
-                if row["lane_a_status"] == "COMPUTED":
-                    lane_a_computed += 1
-                if row["lane_b_status"] == "COMPUTED":
-                    lane_b_computed += 1
-                if row["lane_b_status"] == "PIT_ADJUSTMENT_DEGRADED":
-                    pit_gap_adj_degraded += 1
-                if row["lane_b_status"] != "COMPUTED" or row["pit_gap"] is None:
-                    pit_gap_unavailable += 1
-
-                n_req = row["pytdx_page_requests"] or 0
-                pytdx_requests_total += n_req
-                if row["used_hint"] is True:
-                    hint_count += 1
-                else:
-                    cold_count += 1
-                max_requests_per_symbol = max(max_requests_per_symbol, n_req)
-
-                sm = row.get("search_mode")
-                if sm is not None:
-                    search_mode_agg[sm] = search_mode_agg.get(sm, 0) + 1
-
-            # progress：每 100 stocks 或 30 秒 atomic update
-            now = time.monotonic()
-            if (written - last_progress_n >= 100
-                    or now - last_progress_at >= 30.0):
-                _write_progress(
-                    progress_path,
-                    trade_date=trade_date, bar_index=bar_index,
-                    eligible=eligible, processed=written, started=started,
-                    source_status_agg=source_status_agg,
-                    canonical_status_agg=canonical_status_agg,
-                    lane_b_computed=lane_b_computed,
-                    pit_gap_adj_degraded=pit_gap_adj_degraded,
-                    pytdx_requests_total=pytdx_requests_total,
-                    current_symbol=current_symbol,
+                raw_queries_total += diag["raw_repository_query_count"]
+                qfq_queries_total += diag["qfq_repository_query_count"]
+                chunk_count += 1
+                for inst, obs in zip(chunk, observations):
+                    _emit_member_row(
+                        f, obs, trade_date, bar_index, inst,
+                        listing_date_by_symbol, code_sha, as_of, M,
+                    )
+                # chunk 结果在本循环尾部自然离开作用域（raw_batch/qfq_batch/observations
+                # 不再被引用），python GC 释放；不 merge 进 full-market 映射。
+                rss_now, _ = _read_self_mem_mb()
+                rss_peak_samples.append(rss_now)
+                _maybe_progress(
+                    progress_state, progress_path, trade_date=trade_date,
+                    bar_index=bar_index, eligible=eligible, processed=M["written"],
+                    started=started, source_status_agg=M["source_status_agg"],
+                    canonical_status_agg=M["canonical_status_agg"],
+                    lane_b_computed=M["lane_b_computed"],
+                    pit_gap_adj_degraded=M["pit_gap_adj_degraded"],
+                    pytdx_requests_total=M["pytdx_requests_total"],
+                    current_symbol=M["current_symbol"])
+            rss_after_last_chunk_mb, _ = _read_self_mem_mb()
+            rss_peak_samples.append(rss_after_last_chunk_mb)
+        else:
+            # 注入路径（测试 / live adapter 注入 run_symbol_obs）：直接逐 member 调用注入
+            # observer，不跑 MDAS。仍走与 production 路径相同的 _emit_member_row 聚合逻辑。
+            rss_before_bar_mb, vmhwm_before_bar_mb = _read_self_mem_mb()
+            rss_peak_samples = [rss_before_bar_mb]
+            rss_before_first_mdas_mb = None
+            rss_after_last_chunk_mb = rss_before_bar_mb
+            for inst in population:
+                try:
+                    obs = await run_symbol_obs(inst, trade_date)
+                except Exception as exc:
+                    obs = {"__run_error__": exc}
+                _emit_member_row(
+                    f, obs, trade_date, bar_index, inst,
+                    listing_date_by_symbol, code_sha, as_of, M,
                 )
-                last_progress_at = now
-                last_progress_n = written
+                _maybe_progress(
+                    progress_state, progress_path, trade_date=trade_date,
+                    bar_index=bar_index, eligible=eligible, processed=M["written"],
+                    started=started, source_status_agg=M["source_status_agg"],
+                    canonical_status_agg=M["canonical_status_agg"],
+                    lane_b_computed=M["lane_b_computed"],
+                    pit_gap_adj_degraded=M["pit_gap_adj_degraded"],
+                    pytdx_requests_total=M["pytdx_requests_total"],
+                    current_symbol=M["current_symbol"])
 
         f.flush()
         os.fsync(f.fileno())
     finally:
         f.close()
+
+    written = M["written"]
+    run_error = M["run_error"]
+    source_status_agg = M["source_status_agg"]
+    canonical_status_agg = M["canonical_status_agg"]
+    lane_a_computed = M["lane_a_computed"]
+    lane_b_computed = M["lane_b_computed"]
+    pit_gap_unavailable = M["pit_gap_unavailable"]
+    pit_gap_adj_degraded = M["pit_gap_adj_degraded"]
+    pytdx_requests_total = M["pytdx_requests_total"]
+    cold_count = M["cold_count"]
+    hint_count = M["hint_count"]
+    search_mode_agg = M["search_mode_agg"]
+    max_requests_per_symbol = M["max_requests_per_symbol"]
 
     processing_seconds = time.monotonic() - started
     symbols_per_second = (written / processing_seconds) if processing_seconds > 0 else 0.0
@@ -896,6 +1069,24 @@ async def _run_bar_partition(
     successful_connect = getattr(adapter, "successful_connect_count", 0) if adapter is not None else 0
     reconnect = getattr(adapter, "reconnect_count", 0) if adapter is not None else 0
 
+    # Round 3B-E2 PART 4 — 正式 memory instrumentation（由 production path 自身记录）
+    rss_after_bar_mb, vmhwm_after_bar_mb = _read_self_mem_mb()
+    rss_peak_samples.append(rss_after_bar_mb)
+    rss_peak_sampled_bar_mb = max(rss_peak_samples) if rss_peak_samples else 0.0
+    mem = {
+        "rss_before_bar_mb": round(rss_before_bar_mb, 3),
+        "rss_before_first_mdas_mb": (
+            round(rss_before_first_mdas_mb, 3)
+            if rss_before_first_mdas_mb is not None else None),
+        "rss_peak_sampled_bar_mb": round(rss_peak_sampled_bar_mb, 3),
+        "rss_after_last_chunk_mb": round(rss_after_last_chunk_mb, 3),
+        "rss_after_bar_mb": round(rss_after_bar_mb, 3),
+        "vmhwm_before_bar_mb": round(vmhwm_before_bar_mb, 3),
+        "vmhwm_after_bar_mb": round(vmhwm_after_bar_mb, 3),
+        "mdas_chunk_size": chunk_size,
+        "mdas_chunk_count": chunk_count,
+    }
+
     data_quality = {
         "trade_date": trade_date.isoformat(),
         "bar_index": bar_index,
@@ -917,12 +1108,13 @@ async def _run_bar_partition(
         "max_requests_per_symbol": max_requests_per_symbol,
         "successful_connect_count": successful_connect,
         "reconnect_count": reconnect,
-        "raw_mdas_batch_queries": raw_mdas_batch_queries,
-        "qfq_mdas_batch_queries": qfq_mdas_batch_queries,
+        # Round 3B-E2 PART 3 — physical query 累计（跨 chunk 真实求和）
+        "raw_mdas_batch_queries": raw_queries_total,
+        "qfq_mdas_batch_queries": qfq_queries_total,
         "processing_seconds": round(processing_seconds, 3),
         "symbols_per_second": round(symbols_per_second, 3),
-        # Round 3B-E1 PART 3 — memory instrumentation（不改变业务结论）
-        "memory": mem_instrumentation or {},
+        # Round 3B-E2 PART 4 — memory instrumentation（明确区分 sampled peak 与 lifetime VmHWM）
+        "memory": mem,
     }
     _write_json(pdir / "data_quality.json", data_quality)
 
@@ -940,6 +1132,30 @@ async def _run_bar_partition(
     _write_json(pdir / "partition_manifest.json", manifest)
 
     return manifest
+
+
+def _maybe_progress(progress_state: dict, progress_path: Path, *,
+                    trade_date: date, bar_index: int, eligible: int,
+                    processed: int, started: float,
+                    source_status_agg: dict, canonical_status_agg: dict,
+                    lane_b_computed: int, pit_gap_adj_degraded: int,
+                    pytdx_requests_total: int, current_symbol: str | None) -> None:
+    """throttle：每 100 stocks 或 30 秒 atomic update（mutates progress_state）。"""
+    now = time.monotonic()
+    if (processed - progress_state["last_n"] >= 100
+            or now - progress_state["last_at"] >= 30.0):
+        _write_progress(
+            progress_path, trade_date=trade_date, bar_index=bar_index,
+            eligible=eligible, processed=processed, started=started,
+            source_status_agg=source_status_agg,
+            canonical_status_agg=canonical_status_agg,
+            lane_b_computed=lane_b_computed,
+            pit_gap_adj_degraded=pit_gap_adj_degraded,
+            pytdx_requests_total=pytdx_requests_total,
+            current_symbol=current_symbol,
+        )
+        progress_state["last_at"] = now
+        progress_state["last_n"] = processed
 
 
 def _write_progress(path: Path, *, trade_date: date, bar_index: int,
@@ -1175,6 +1391,11 @@ async def _run_backfill_impl(
     async def _bars_loop(sess, adapter_for_run, snapshot_or_none):
         nonlocal completed, failed, resume_skipped
         _mdas_chunk_size = mdas_chunk_size
+        # Round 3B-E2 PART 2 — fail fast：无效 chunk size 必须在 partition 循环之前
+        # 抛出（不得在 per-partition try/except 中被吞掉）。
+        if _mdas_chunk_size <= 0:
+            raise ValueError(
+                f"mdas_chunk_size 必须 > 0（fail fast），收到 {_mdas_chunk_size}")
         # Round 3B-D2 PART F resume warm-start：载入持久化的 v2 hints
         # （v2 dict {target_page_offset, boundary_offset} 优先；v1 legacy int 自动
         # 解释为 boundary hint，首次只能走 fallback，完成后升级为 v2）。
@@ -1261,48 +1482,13 @@ async def _run_backfill_impl(
                     f"metadata mismatch (code_sha/eligible) — refuse overwrite"
                 )
 
-            # --- RERUN path：bounded chunked MDAS (PART 2) + instrumentation (PART 3) ---
-            rss_before_bar, _ = _read_self_mem_mb()
-            raw_batch: dict = {}
-            qfq_batch: dict = {}
-            raw_diag: dict = {}
-            qfq_diag: dict = {}
-            mem_instr: dict = {}
+            # --- RERUN path：Round 3B-E2 TRUE STREAMING PARTITION EXECUTION ---
+            # production path：observer=None ⇒ _run_bar_partition 内部逐 chunk 执行
+            #   raw MDAS(chunk) → qfq MDAS(chunk) → 同 kernel 逐 member → stream → release
+            # 不预先 build full-market raw_batch/qfq_batch（O(full market) 已废除）。
+            # 内存 instrumentation 现由 _run_bar_partition 自身记录（PART 4）。
             if _run_symbol_obs is None:
-                ids = [s.instrument_id for s in population_insts]
-                if ids and sess is not None:
-                    rss_before_mdas, _ = _read_self_mem_mb()
-                    chunk_count = 0
-                    for i in range(0, len(ids), _mdas_chunk_size):
-                        chunk = ids[i:i + MDAS_CHUNK_SIZE]
-                        rb, rd = await _run_batch_mdas(
-                            _mdas, sess, chunk, t, adj="none")
-                        raw_batch.update(rb)
-                        raw_diag.update(rd)
-                        qb, qd = await _run_batch_mdas(
-                            _mdas, sess, chunk, t, adj="qfq", adjustment_as_of=t)
-                        qfq_batch.update(qb)
-                        qfq_diag.update(qd)
-                        chunk_count += 1
-                        # 释放本 chunk 大结果，避免整市场 raw+qfq 同时常驻
-                        del rb, rd, qb, qd
-                    _, peak_hwm = _read_self_mem_mb()
-                    mem_instr = {
-                        "rss_before_bar_mb": round(rss_before_bar, 2),
-                        "rss_before_mdas_mb": round(rss_before_mdas, 2),
-                        "peak_rss_bar_mb": round(peak_hwm, 2),
-                        "mdas_chunk_size": _mdas_chunk_size,
-                        "mdas_chunk_count": chunk_count,
-                    }
-
-                async def _default_obs(inst, trade_date, _raw=raw_batch, _qfq=qfq_batch):
-                    return await run_symbol_backfill_observation(
-                        adapter_for_run, sess, inst, trade_date, _raw, _qfq,
-                        listing_date=listing_date_by_symbol.get(inst.symbol),
-                        as_of=as_of, bar_index=idx, code_sha=code_sha,
-                        offset_hints=offset_hints,
-                    )
-                observer = _default_obs
+                observer = None
             else:
                 observer = _run_symbol_obs
 
@@ -1313,9 +1499,11 @@ async def _run_backfill_impl(
                     listing_date_by_symbol=listing_date_by_symbol,
                     code_sha=code_sha, as_of=as_of,
                     adapter=adapter_for_run,
-                    raw_mdas_batch_queries=raw_diag.get("repository_query_count", 0),
-                    qfq_mdas_batch_queries=qfq_diag.get("repository_query_count", 0),
-                    mem_instrumentation=mem_instr if mem_instr else None,
+                    mdas=_mdas,
+                    batch_mdas_fn=_run_batch_mdas,
+                    session=sess,
+                    offset_hints=offset_hints,
+                    chunk_size=_mdas_chunk_size,
                 )
             except Exception:
                 failed += 1

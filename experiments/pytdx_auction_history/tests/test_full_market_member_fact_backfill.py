@@ -1325,8 +1325,16 @@ def test_d2_t10_midrun_resume_uses_target_page_offset(tmp_out):
 # ============================================================
 
 def _make_pop(syms):
-    """构建单日 population dict：{date(2024,1,2): [SampleInstrument, ...]}。"""
-    return {date(2024, 1, 2): [_sample(s, m) for s, m in syms]}
+    """构建单日 population dict：{date(2024,1,2): [SampleInstrument, ...]}。
+
+    每个 member 分配唯一 instrument_id（由 symbol 派生），便于 chunk 覆盖类测试
+    断言 distinct id / no dup / no omission。
+    """
+    out = []
+    for idx, (s, m) in enumerate(syms):
+        iid = UUID(f"00000000-0000-0000-0000-{idx:012d}")
+        out.append(_sample(s, m, instrument_id=iid))
+    return {date(2024, 1, 2): out}
 
 
 def _read_member_rows(output_root, run_id, trade_date):
@@ -1570,7 +1578,7 @@ def test_e1_reconciliation_parity(tmp_path):
     assert len(rows) == 2
 
 
-# --- E1-T9: memory instrumentation 写入 data_quality（PART 3） ---
+# --- E1-T9 / Round 3B-E2 PART 4: memory instrumentation 写入 data_quality ---
 def test_e1_memory_instrumentation_recorded(tmp_path):
     pop = _make_pop([("600000", "SH"), ("600001", "SH")])
     run_dir = "e1t9"
@@ -1582,9 +1590,279 @@ def test_e1_memory_instrumentation_recorded(tmp_path):
     pdir = _partition_dir(run_dir, date(2024, 1, 2), tmp_path / "base")
     dq = json.loads((pdir / "data_quality.json").read_text())
     mem = dq.get("memory", {})
-    # Linux 下应有 RSS 证据；非 Linux 环境为 0.0 但字段必须存在
-    assert "rss_before_bar_mb" in mem
-    assert "rss_before_mdas_mb" in mem
-    assert "peak_rss_bar_mb" in mem
+    # Round 3B-E2 PART 4 — 字段必须存在（明确区分 sampled peak 与 lifetime VmHWM）
+    for field in (
+        "rss_before_bar_mb", "rss_before_first_mdas_mb",
+        "rss_peak_sampled_bar_mb", "rss_after_last_chunk_mb",
+        "rss_after_bar_mb", "vmhwm_before_bar_mb", "vmhwm_after_bar_mb",
+        "mdas_chunk_size", "mdas_chunk_count",
+    ):
+        assert field in mem, f"memory instrumentation 缺少字段 {field}"
+    # 非负采样；chunk_count 与 population/chunk_size 一致
     assert mem.get("mdas_chunk_size") == 1
     assert mem.get("mdas_chunk_count") == 2  # 2 instruments / chunk 1
+    # rss_peak_sampled_bar_mb 是生产路径自身采样样本的最大值（不得是 process VmHWM 直接命名）
+    sample_max = max(
+        mem["rss_before_bar_mb"], mem["rss_before_first_mdas_mb"] or 0.0,
+        mem["rss_after_last_chunk_mb"], mem["rss_after_bar_mb"])
+    assert mem["rss_peak_sampled_bar_mb"] == sample_max
+    # vmhwm before/after 均记录，且不冒充本 bar 独立 peak
+    assert mem["vmhwm_before_bar_mb"] >= 0.0
+    assert mem["vmhwm_after_bar_mb"] >= 0.0
+
+
+# ===========================================================================
+# Round 3B-E2 — TRUE BOUNDED-MEMORY PARTITION STREAMING
+# 测试均调用正式 production path（run_backfill → _run_bar_partition →
+# _run_member_chunk + run_symbol_backfill_observation），只替换
+# adapter / session / batch_mdas_fn / chunk size。不得重新实现 chunk 算法。
+# ===========================================================================
+
+def _raw_chunk_calls(calls):
+    """从 batch_mdas_fn 调用记录中提取 adj="none"（raw）的 chunk id 序列（str 形式）。"""
+    return [[str(i) for i in c["ids"]] for c in calls if c["adj"] == "none"]
+
+
+def _flatten(chunks):
+    out = []
+    for ch in chunks:
+        out.extend(ch)
+    return out
+
+
+def _pop_ids(pop, d):
+    """population 在某 trade_date 下的 instrument_id 有序列表（str 形式，匹配输出行）。"""
+    return [str(inst.instrument_id) for inst in pop[d]]
+
+
+def _make_query_counting_batch_mdas(raw_q: int = 2, qfq_q: int = 3):
+    """batch_mdas_fn seam：返回真实 physical repository_query_count（PART 3 累计）。"""
+    calls = []
+    async def _batch(mdas, session, instrument_ids, trade_date, *, adj,
+                     adjustment_as_of=None):
+        calls.append({
+            "adj": adj,
+            "trade_date": trade_date,
+            "adjustment_as_of": adjustment_as_of,
+            "ids": list(instrument_ids),
+        })
+        q = raw_q if adj == "none" else qfq_q
+        return {}, {"repository_query_count": q}
+    return _batch, calls
+
+
+# --- T1: EXACT CHUNK COVERAGE（10 members, chunk_size=2 => [0,1],[2,3],...） ---
+def test_e2_exact_chunk_coverage(tmp_path):
+    syms = [(f"600{i:03d}", "SH") for i in range(10)]
+    pop = _make_pop(syms)
+    ids = _pop_ids(pop, date(2024, 1, 2))
+    run_dir = "e2t1"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="e2-sha-T1", mdas_chunk_size=2)
+    raw_chunks = _raw_chunk_calls(calls)
+    assert raw_chunks == [ids[0:2], ids[2:4], ids[4:6], ids[6:8], ids[8:10]]
+    flat = _flatten(raw_chunks)
+    assert len(flat) == 10
+    assert len(set(flat)) == 10               # no duplicates
+    assert flat == ids                        # ordering + no omission
+
+
+# --- T2: LARGE CHUNK（10 members, chunk_size=1024 => single chunk） ---
+def test_e2_large_single_chunk_no_omission(tmp_path):
+    syms = [(f"600{i:03d}", "SH") for i in range(10)]
+    pop = _make_pop(syms)
+    ids = _pop_ids(pop, date(2024, 1, 2))
+    run_dir = "e2t2"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="e2-sha-T2",
+                mdas_chunk_size=1024)
+    raw_chunks = _raw_chunk_calls(calls)
+    assert len(raw_chunks) == 1
+    assert raw_chunks[0] == ids
+
+
+# --- T3: NON-DIVISIBLE（10 members, chunk_size=4 => 4+4+2） ---
+def test_e2_non_divisible_chunk_split(tmp_path):
+    syms = [(f"600{i:03d}", "SH") for i in range(10)]
+    pop = _make_pop(syms)
+    ids = _pop_ids(pop, date(2024, 1, 2))
+    run_dir = "e2t3"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="e2-sha-T3", mdas_chunk_size=4)
+    raw_chunks = _raw_chunk_calls(calls)
+    assert [len(c) for c in raw_chunks] == [4, 4, 2]
+    flat = _flatten(raw_chunks)
+    assert len(flat) == 10
+    assert len(set(flat)) == 10
+    assert flat == ids
+
+
+# --- T4: INVALID CHUNK SIZE（0 / negative => fail fast） ---
+def test_e2_invalid_chunk_size_fails_fast(tmp_path):
+    syms = [("600000", "SH"), ("600001", "SH")]
+    pop = _make_pop(syms)
+    run_dir = "e2t4"
+    batch_fn, _ = _make_fake_batch_mdas(value={})
+    for bad in (0, -1, -512):
+        with pytest.raises(ValueError):
+            _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                        adapter=_fake_page_adapter(), session=_FakeSession(),
+                        batch_mdas_fn=batch_fn, code_sha="e2-sha-T4",
+                        mdas_chunk_size=bad)
+
+
+# --- T5: TRUE SEMANTIC PARITY（chunk_size>=pop vs small chunk） ---
+def test_e2_semantic_parity_across_chunk_sizes(tmp_path):
+    syms = [(f"600{i:03d}", "SH") for i in range(7)]
+    pop = _make_pop(syms)
+    run_dir_big = "e2t5big"
+    run_dir_small = "e2t5small"
+    batch_big, _ = _make_fake_batch_mdas(value={})
+    batch_small, _ = _make_fake_batch_mdas(value={})
+    _kernel_run(tmp_path / "base", run_dir_big, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_big, code_sha="e2-sha-T5",
+                mdas_chunk_size=1024)          # 单 chunk
+    _kernel_run(tmp_path / "base", run_dir_small, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_small, code_sha="e2-sha-T5",
+                mdas_chunk_size=2)             # 多 chunk
+    big_rows = _read_member_rows(tmp_path / "base", run_dir_big, date(2024, 1, 2))
+    small_rows = _read_member_rows(tmp_path / "base", run_dir_small, date(2024, 1, 2))
+    assert len(big_rows) == 7 and len(small_rows) == 7
+    # 业务字段逐字段一致（除显式 runtime-only 字段外，此处 member_facts 行均为业务字段）
+    for big, small in zip(big_rows, small_rows):
+        assert big == small
+    # 明确断言若干业务字段非空且一致
+    for r in (big_rows,):
+        for row in r:
+            for fld in ("trade_date", "bar_index", "instrument_id", "symbol",
+                        "market", "board", "source_status",
+                        "extraction_status", "canonicalization_status",
+                        "auction_price_raw", "auction_volume_raw_lots",
+                        "auction_volume_shares", "auction_amount",
+                        "lane_a_status", "mdas_raw_open_T", "price_exact_match",
+                        "lane_b_status", "previous_close_raw",
+                        "previous_close_pit_qfq", "naive_raw_gap", "pit_gap",
+                        "mdas_data_source", "degraded", "adjustment_as_of",
+                        "adj_factor_hash", "pytdx_page_requests", "used_hint",
+                        "search_mode", "target_page_offset"):
+                assert fld in row
+
+
+# --- T6: PHYSICAL QUERY COUNT（N=10, chunk=4 => 3 chunks => raw=6, qfq=9） ---
+def test_e2_physical_query_count_accumulated(tmp_path):
+    syms = [(f"600{i:03d}", "SH") for i in range(10)]
+    pop = _make_pop(syms)
+    run_dir = "e2t6"
+    batch_fn, _ = _make_query_counting_batch_mdas(raw_q=2, qfq_q=3)
+    _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="e2-sha-T6", mdas_chunk_size=4)
+    dq = json.loads(
+        (_partition_dir(run_dir, date(2024, 1, 2), tmp_path / "base")
+         / "data_quality.json").read_text())
+    # 跨 chunk 真实求和：不得停留在单 chunk 的 2/3
+    assert dq["raw_mdas_batch_queries"] == 6      # 3 chunks * 2
+    assert dq["qfq_mdas_batch_queries"] == 9      # 3 chunks * 3
+    assert dq["memory"]["mdas_chunk_count"] == 3
+
+
+# --- T7: RESUME BEFORE MDAS（completed => SKIP => MDAS/Pytdx calls == 0） ---
+def test_e2_resume_before_mdas_zero_calls(tmp_path):
+    base = tmp_path / "base"
+    pop = _make_pop([("600000", "SH"), ("600001", "SH"), ("600519", "SH")])
+    run_dir = "e2t7"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    # 第一轮：单 bar，chunk_size=2
+    _kernel_run(base, run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="e2-sha-T7", mdas_chunk_size=2)
+    rawh = _raw_chunk_calls(calls)
+    assert len(rawh) == 2   # 3 members / chunk 2 => 2 raw chunks
+    # 第二轮 resume：COMPLETED => SKIP（硬合同 MDAS calls == 0）
+    _kernel_run(base, run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="e2-sha-T7", mdas_chunk_size=2)
+    assert len(_raw_chunk_calls(calls)) == 2   # 调用数不再增长
+    # adapter page calls 也应为 0（resume 不进入 kernel）
+    assert len(calls) == 4                       # 第一轮 4（2 raw + 2 qfq），第二轮 0
+
+
+# --- T8: OFFSET HINT PARITY（chunked run 后可 resume；跨 chunk offset hints 仍有效） ---
+def test_e2_offset_hints_persist_and_resume(tmp_path):
+    # 验证 chunked production path 完成后，已完成 partition 仍可被 SKIP resume，
+    # 即 chunked run 不破坏 run-level offset_hints / resume 契约（PART 6）。
+    base = tmp_path / "base"
+    pop = _make_pop([(f"600{i:03d}", "SH") for i in range(6)])
+    run_dir = "e2t8"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    res1 = _kernel_run(base, run_dir, [date(2024, 1, 2)], pop,
+                       adapter=_fake_page_adapter(), session=_FakeSession(),
+                       batch_mdas_fn=batch_fn, code_sha="e2-sha-T8", mdas_chunk_size=2)
+    assert res1["completed_bar_count"] == 1
+    assert res1["resume_skipped"] == 0
+    before = len(calls)
+    # 第二次 chunked run 应 SKIP（COMPLETED + 同 sha），MDAS 不重跑
+    res2 = _kernel_run(base, run_dir, [date(2024, 1, 2)], pop,
+                       adapter=_fake_page_adapter(), session=_FakeSession(),
+                       batch_mdas_fn=batch_fn, code_sha="e2-sha-T8", mdas_chunk_size=2)
+    assert len(calls) == before   # 新增 0 次 MDAS 调用
+    assert res2["resume_skipped"] == 1
+    assert res2["completed_bar_count"] == 1
+
+
+# --- T9: STREAM OUTPUT ORDER（不同 chunk size => row count 相同 + 顺序相同） ---
+def test_e2_stream_output_order_stable(tmp_path):
+    syms = [(f"600{i:03d}", "SH") for i in range(9)]
+    pop = _make_pop(syms)
+    ids = _pop_ids(pop, date(2024, 1, 2))
+    run_big = "e2t9big"
+    run_small = "e2t9small"
+    b1, _ = _make_fake_batch_mdas(value={})
+    b2, _ = _make_fake_batch_mdas(value={})
+    _kernel_run(tmp_path / "base", run_big, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=b1, code_sha="e2-sha-T9", mdas_chunk_size=1024)
+    _kernel_run(tmp_path / "base", run_small, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=b2, code_sha="e2-sha-T9", mdas_chunk_size=3)
+    big = _read_member_rows(tmp_path / "base", run_big, date(2024, 1, 2))
+    small = _read_member_rows(tmp_path / "base", run_small, date(2024, 1, 2))
+    assert len(big) == len(small) == 9
+    assert [r["instrument_id"] for r in big] == [r["instrument_id"] for r in small]
+    assert [r["instrument_id"] for r in big] == ids
+
+
+# --- T10: MEMORY OWNERSHIP STRUCTURE（bounded prep：per-chunk，非全市场 merge） ---
+def test_e2_memory_ownership_bounded_lifecycle(tmp_path):
+    # 行为证明：production path 对每个 chunk 单独调用 MDAS（prepare→consume→next），
+    # 而非一次性把全市场 raw+qfq 累积进单一 mapping 再消费。
+    # 硬指标：
+    #   - raw MDAS 调用次数 == ceil(N / chunk_size)（bounded prep）
+    #   - 单次 raw MDAS 调用携带的 id 数 <= chunk_size（O(chunk) 上界）
+    #   - 跨所有 raw 调用的 distinct id == N（无 dup / 无 omission）
+    syms = [(f"600{i:03d}", "SH") for i in range(8)]
+    pop = _make_pop(syms)
+    ids = _pop_ids(pop, date(2024, 1, 2))
+    N = len(ids)
+    chunk_size = 2
+    run_dir = "e2t10"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="e2-sha-T10", mdas_chunk_size=chunk_size)
+    raw_chunks = _raw_chunk_calls(calls)
+    # 不是一次性全市场 batch（禁止单 chunk == 全市场）
+    assert len(raw_chunks) == (N + chunk_size - 1) // chunk_size
+    assert all(len(c) <= chunk_size for c in raw_chunks)
+    distinct = set(_flatten(raw_chunks))
+    assert distinct == set(ids)                 # 无 dup / 无 omission / 全市场覆盖
+    # 不存在一个持有全市场 id 的 mega-batch
+    assert all(len(c) < N for c in raw_chunks)
