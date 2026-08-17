@@ -352,4 +352,14 @@ Real Evidence
 
 作为长期唯一证据。
 
-Stable external fact 一旦经调查确认，应通过 representative fixture + regression test 沉淀进仓库，使 repo 自身记住，而不是依赖 AI / 人工在每个 session 重复调查。
+当 Stable External Fact 满足：
+
+* 能够被确定性表达；
+* 会影响未来实现判断；
+* 存在真实回归风险；
+
+SHOULD 优先通过 representative fixture + regression / contract test 沉淀为 durable repository evidence。
+
+如果该事实不适合 fixture 表达，则应选择与其性质匹配的 test、contract、benchmark、runtime assertion 或其他正式证据（例如 provider rate limit、真实网络 latency、DB planner behavior、runtime resource limit、外部服务 availability semantics）。
+
+不得仅依赖聊天记录、IDE 报告或临时 probe 作为长期唯一事实来源。

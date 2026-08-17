@@ -290,20 +290,21 @@ None
 
 ## 2.8 开发、测试、实验与正式运行共享同一语义路径（硬规则）
 
-同一业务能力从开发到正式运行 MUST 尽量复用同一 semantic owner 与 production code path。
+同一业务能力从开发到正式运行：
 
-以下运行场景允许变化：
+* MUST 复用同一 semantic owner；
+* MUST NOT 为 Test / Experiment / Benchmark / Canary / Full Run 重新实现相同业务语义；
+* SHOULD 尽可能复用同一 production code path；
+* MAY 因运行目的不同而替换 adapter、fixture、input scale、runtime environment、execution mode、output destination 与 observability。
 
-* input scale；
-* adapter；
-* fixture；
-* sample selector；
-* runtime environment；
-* execution mode；
-* output destination；
-* observability level。
+即：
 
-以下内容 SHOULD NOT 因 Development / Test / Experiment / Benchmark / Canary / Full Run 而被重新实现：
+```text
+Semantic Owner       = MUST SAME
+Infrastructure/Adapter/Input = MAY DIFFER
+```
+
+以下内容 MUST NOT 因 Development / Test / Experiment / Benchmark / Canary / Full Run 而被重新实现（语义不可漂移）：
 
 * business classification；
 * canonicalization；
@@ -327,8 +328,6 @@ Same Semantic Owner
 same semantics
 + different input / adapter / scale / environment
 ```
-
-禁止为了测试、实验、性能验证或 Canary 创建第二套业务算法。
 
 自检问题：
 
@@ -1128,7 +1127,7 @@ for member in members:
 
 ## 8.7 性能敏感路径的观测应由正式实现产生
 
-正式代码本身在运行过程中自然产生：
+对于 scale-sensitive 或 performance-sensitive 的正式路径，正式实现 SHOULD 根据其真实物理成本暴露必要的运行指标。可包括：
 
 * physical request count；
 * repository query count；
