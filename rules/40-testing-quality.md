@@ -317,3 +317,39 @@ Exploration 不得为了证明一个局部 hypothesis 自动要求 Hardening 证
 生产代码、测试、工具、构建脚本不得运行时读取 `ref/`。
 
 正式算法 fixture 必须位于正式测试 fixture 目录。
+
+## 16. Evidence Promotion
+
+当真实 Source / Runtime 调查确认了一个：
+
+* 稳定；
+* 会影响实现正确性；
+* 未来可能回归；
+
+的外部事实时，SHOULD 将该事实升级为可持续验证证据。
+
+优先路径：
+
+```text
+Real Evidence
+→ representative fixture / regression
+→ durable repository evidence
+```
+
+例如：
+
+* provider response shape；
+* timestamp format；
+* null behavior；
+* ordering behavior；
+* API field semantics。
+
+禁止仅依赖：
+
+* 聊天记录；
+* IDE 报告；
+* 临时 probe 输出；
+
+作为长期唯一证据。
+
+Stable external fact 一旦经调查确认，应通过 representative fixture + regression test 沉淀进仓库，使 repo 自身记住，而不是依赖 AI / 人工在每个 session 重复调查。

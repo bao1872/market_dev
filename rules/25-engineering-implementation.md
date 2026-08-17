@@ -288,6 +288,57 @@ None
 
 ---
 
+## 2.8 开发、测试、实验与正式运行共享同一语义路径（硬规则）
+
+同一业务能力从开发到正式运行 MUST 尽量复用同一 semantic owner 与 production code path。
+
+以下运行场景允许变化：
+
+* input scale；
+* adapter；
+* fixture；
+* sample selector；
+* runtime environment；
+* execution mode；
+* output destination；
+* observability level。
+
+以下内容 SHOULD NOT 因 Development / Test / Experiment / Benchmark / Canary / Full Run 而被重新实现：
+
+* business classification；
+* canonicalization；
+* calculation formula；
+* status derivation；
+* lineage logic；
+* production cost semantics。
+
+推荐结构：
+
+```text
+Same Semantic Owner
+        │
+        ├── Unit / deterministic fixture
+        ├── Micro / small input
+        ├── Canary / representative real input
+        └── Full / full input
+
+即：
+
+same semantics
++ different input / adapter / scale / environment
+```
+
+禁止为了测试、实验、性能验证或 Canary 创建第二套业务算法。
+
+自检问题：
+
+> 如果无法回答“哪一段正式代码从小规模验证一直运行到完整输入？”，
+> 则应检查是否产生了 parallel implementation。
+
+具体测试层级与 Runtime 验证要求仍由 `rules/40-testing-quality.md` 与相关 Runtime 规则负责。
+
+---
+
 # 3. Python 模块与脚本规范
 
 Python 版本、lint、type-check 和工具配置以 `backend/pyproject.toml` 为准。
@@ -728,6 +779,46 @@ O(N²)
 
 ---
 
+## 5.1 Scale-sensitive 路径必须评估物理成本
+
+代码复杂度不仅看算法复杂度，还要算物理操作次数。
+
+对于以下会随输入规模明显放大的路径：
+
+* 全市场 / 大 universe；
+* 历史回补；
+* `date × symbol`；
+* `scope × member`；
+* 大批量数据库查询；
+* 外部 API / 网络分页；
+* Scheduler / Worker 主路径；
+* 大文件处理；
+
+在确定正式实现方案前 SHOULD 至少估算：
+
+```text
+input cardinality
+×
+per-item physical operations
+=
+projected physical cost
+```
+
+重点关注：
+
+* DB query count；
+* network request count；
+* serialization volume；
+* memory growth；
+* CPU complexity；
+* expected runtime。
+
+不要求为普通局部功能建立正式 Performance Contract。
+
+但如果简单规模估算已经证明完整输入下方案明显不可行，MUST NOT 以“小样本可以运行”为理由继续把该方案作为正式实现。
+
+---
+
 # 6. 数据库访问实现规范
 
 本章只规定日常代码访问方式。
@@ -1032,6 +1123,38 @@ for member in members:
 * documented before/after evidence。
 
 具体是否成为正式测试 gate 由 `rules/40-*` 决定。
+
+---
+
+## 8.7 性能敏感路径的观测应由正式实现产生
+
+正式代码本身在运行过程中自然产生：
+
+* physical request count；
+* repository query count；
+* retry / reconnect count；
+* cache hit / miss；
+* items processed；
+* elapsed time；
+* throughput；
+* fallback count；
+* progress。
+
+对于已经确认属于 scale-sensitive 或 performance-sensitive 的正式路径，性能 evidence SHOULD 尽可能由真实 production owner 自身暴露，而不是由每次实验临时重新统计。
+
+Development、Micro、Canary 和 Full Run SHOULD 尽可能复用同一指标定义。
+
+禁止：
+
+```text
+Micro 使用临时 counter A
+Canary 使用 counter B
+Full Run 再从日志推测 counter C
+```
+
+从而形成多个不一致的性能事实来源。
+
+本规则不要求所有普通代码预先建设完整 instrumentation；只有当路径具有真实规模、运行窗口或已确认性能风险时才启用。
 
 ---
 
