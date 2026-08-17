@@ -772,6 +772,10 @@ class SmcMonitor(StrategyRuntime):
             logical_entity=logical_entity,
             payload=payload,
             state_ttl_seconds=NOTIFY_COOLDOWN_SECONDS,
+            # 粗粒度冷却键：logical_entity 含 bar_index:price 易变维度，会导致 10 分钟冷却
+            # 形同虚设。改用 (instrument_id, event_type) 粗粒度冷却，使同一标的同一 SMC
+            # 结构类型在 600 秒内只触发一次（与 NOTIFY_COOLDOWN_SECONDS 对齐）。
+            cooldown_key=f"{instrument_id_str}:{event_type}",
         )
 
     @staticmethod

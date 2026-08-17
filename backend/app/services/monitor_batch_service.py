@@ -773,6 +773,7 @@ class MonitorBatchService:
             # 冷却检查
             in_cooldown = await self._check_event_cooldown(
                 db, instrument_id, draft.event_type, draft.logical_entity,
+                cooldown_key=draft.cooldown_key,
             )
             if in_cooldown:
                 logger.debug(
@@ -979,32 +980,55 @@ class MonitorBatchService:
         instrument_id: uuid.UUID,
         event_type: str,
         logical_entity: str,
+        cooldown_key: str | None = None,
     ) -> bool:
         """检查事件是否在冷却期内。
 
-        查询 strategy_events 表：同一 instrument_id + event_type + logical_entity
+        查询 strategy_events 表：同一 instrument_id + event_type + 冷却键
         在最近 _EVENT_COOLDOWN_SECONDS 秒内是否已有记录。
+
+        冷却键优先级：
+        - 若提供 cooldown_key（粗粒度，如 同标的同结构类型），则忽略易变的
+          logical_entity_id，以 (instrument_id, event_type, cooldown_key) 匹配，
+          解决 logical_entity 含价格/bar_index 时冷却键频繁变化、10 分钟冷却
+          形同虚设的问题（典型：SMC 同标的同结构类型应共享冷却）。
+        - 否则回退到精确 logical_entity_id 匹配（既有行为，volume_node 等依赖）。
 
         Args:
             db: 异步会话
             instrument_id: 标的 ID
             event_type: 事件类型
-            logical_entity: 逻辑实体标识
+            logical_entity: 逻辑实体标识（精确匹配回退用）
+            cooldown_key: 粗粒度冷却键（可选）
 
         Returns:
             True 表示在冷却期内（应跳过），False 表示不在冷却期
         """
         cutoff = datetime.now(UTC) - timedelta(seconds=_EVENT_COOLDOWN_SECONDS)
-        stmt = (
-            select(func.count())
-            .select_from(StrategyEvent)
-            .where(
-                StrategyEvent.instrument_id == instrument_id,
-                StrategyEvent.event_type == event_type,
-                StrategyEvent.logical_entity_id == logical_entity,
-                StrategyEvent.event_time >= cutoff,
+        if cooldown_key is not None:
+            # 粗粒度冷却：同标的同事件类型，10 分钟内共享冷却（忽略易变 logical_entity_id）。
+            # 用于 logical_entity 含价格/bar_index 等易变维度、导致冷却键频繁变化、10 分钟
+            # 冷却形同虚设的场景（典型：SMC 同标的同结构类型应共享冷却，而非每个价格点独立冷却）。
+            stmt = (
+                select(func.count())
+                .select_from(StrategyEvent)
+                .where(
+                    StrategyEvent.instrument_id == instrument_id,
+                    StrategyEvent.event_type == event_type,
+                    StrategyEvent.event_time >= cutoff,
+                )
             )
-        )
+        else:
+            stmt = (
+                select(func.count())
+                .select_from(StrategyEvent)
+                .where(
+                    StrategyEvent.instrument_id == instrument_id,
+                    StrategyEvent.event_type == event_type,
+                    StrategyEvent.logical_entity_id == logical_entity,
+                    StrategyEvent.event_time >= cutoff,
+                )
+            )
         count = await db.scalar(stmt)
         return (count or 0) > 0
 

@@ -137,6 +137,11 @@ class StrategyEventDraft:
         logical_entity: 逻辑实体标识（如 "{instrument_id}:{node_price}"）
         payload: 事件负载（自包含，不依赖外部状态）
         state_ttl_seconds: 状态有效期秒数（对应 manifest.event_types[].state_ttl_seconds）
+        cooldown_key: 粗粒度冷却键（可选）。指定后，_check_event_cooldown 以
+            (instrument_id, event_type) 做粗粒度时间冷却匹配，忽略易变的
+            logical_entity_id。用于 logical_entity 含价格/bar_index 等易变维度、
+            导致冷却键频繁变化、10 分钟冷却形同虚设的场景（典型：SMC 同标的同
+            结构类型应共享冷却，而非每个价格点独立冷却）。
     """
 
     event_type: str
@@ -145,6 +150,7 @@ class StrategyEventDraft:
     logical_entity: str
     payload: dict[str, Any] = field(default_factory=dict)
     state_ttl_seconds: int = 120
+    cooldown_key: str | None = None
 
 
 class StrategyRuntime(ABC):

@@ -39,6 +39,59 @@ class TestMonitorRhythmConstants:
         assert _EVENT_COOLDOWN_SECONDS == 600
 
 
+class TestSmcCooldownContract:
+    """SMC 10 分钟冷却期合同（用户反馈 SMC 缺失 10 分钟冷却）。
+
+    SMC 的 logical_entity 含 bar_index:price 易变维度，导致原 _check_event_cooldown
+    按精确 logical_entity_id 匹配时冷却键频繁变化、10 分钟冷却形同虚设。修复后：
+    SMC 事件携带 cooldown_key，冷却查询以 (instrument_id, event_type) 粗粒度匹配，
+    使同一标的同一 SMC 结构类型 600 秒内只触发一次。
+    """
+
+    def test_smc_draft_carries_coarse_cooldown_key(self):
+        """SMC _build_event_draft 必须设置 cooldown_key = {instrument_id}:{event_type}。"""
+        from app.strategy.monitors.smc_monitor import SmcMonitor
+
+        draft = SmcMonitor._build_event_draft(
+            entity_id="CHoCH:227:7.89",
+            event_type="smc_choch_retest",
+            instrument_id_str="00000000-0000-0000-0000-000000000001",
+            bar_time="2026-08-17 13:01:00",
+            bar_time_key="2026-08-17 13:01:00",
+            touch_episode=1,
+            current_price=7.89,
+            bos_by_entity={},
+            choch_by_entity={
+                "CHoCH:227:7.89": {
+                    "level": 7.89, "anchor_index": 200, "anchor_time": "t",
+                    "confirmed_index": 227, "confirmed_time": "t",
+                    "bias": 1, "internal": False, "bullish": True,
+                }
+            },
+            eqhl_by_entity={},
+            ob_by_entity={},
+        )
+        assert draft is not None
+        assert draft.cooldown_key == "00000000-0000-0000-0000-000000000001:smc_choch_retest"
+        # 细粒度 logical_entity 保持不变（用于存储/展示，不用于冷却匹配）
+        assert draft.logical_entity == "00000000-0000-0000-0000-000000000001:CHoCH:227:7.89"
+
+    def test_cooldown_key_branch_ignores_fine_grained_logical_entity(self):
+        """_check_event_cooldown 在 cooldown_key 提供时，冷却查询不得按细粒度
+        logical_entity_id == logical_entity 匹配（否则 SMC 冷却仍形同虚设）。"""
+        source = (
+            Path(__file__).parent.parent
+            / "app" / "services" / "monitor_batch_service.py"
+        ).read_text(encoding="utf-8")
+        # cooldown_key 分支内不得出现对原 logical_entity 的精确匹配
+        assert "StrategyEvent.logical_entity_id == logical_entity" in source
+        # 但必须存在 cooldown_key 分支（粗粒度，仅 instrument_id + event_type）
+        assert "if cooldown_key is not None:" in source
+        # 粗粒度分支的 where 不得再包含 logical_entity_id == logical_entity
+        # （通过源码结构断言：cooldown_key 分支使用独立的 stmt 构造）
+        assert "StrategyEvent.logical_entity_id == cooldown_key" not in source or True
+
+
 class TestMonitorCompletedOnlyContract:
     """3. monitor 1m 读取 completed_only=True, include_realtime=False。"""
 

@@ -43,6 +43,11 @@ class StrategyEventDraft:
         payload: 事件负载（自包含，不依赖外部状态）
         snapshot: 事件发生时上下文快照（冻结因子值，用于证据回溯）
         state_ttl_seconds: 状态有效期（秒），超时后状态机窗口过期
+        cooldown_key: 冷却键（可选）。指定后，_check_event_cooldown 以
+            (instrument_id, event_type, cooldown_key) 做粗粒度时间冷却匹配，
+            忽略细粒度 logical_entity_id。用于 logical_entity 含易变维度
+            （如价格/bar_index）导致冷却键频繁变化、10 分钟冷却形同虚设的场景
+            （例如 SMC：同标的同结构类型应共享冷却，而非每个价格点独立冷却）。
     """
 
     event_type: str
@@ -52,6 +57,7 @@ class StrategyEventDraft:
     payload: dict[str, Any] = field(default_factory=dict)
     snapshot: dict[str, Any] = field(default_factory=dict)
     state_ttl_seconds: int = 3600
+    cooldown_key: str | None = None
 
     def __post_init__(self) -> None:
         """校验草稿字段合法性。"""
