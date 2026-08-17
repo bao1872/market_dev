@@ -94,6 +94,7 @@ from app.domain.review.scope_observation import compute_scope_observation
 from app.services.observation_prep import check_observation_invariants
 from app.services.review_observation_prep_service import prepare_scope
 from app.services.review_observation_persistence_service import (
+    is_scope_observation_persistence_excluded,
     save_scope_observation_fact,
 )
 from app.services.review_signal_service import (
@@ -1467,7 +1468,20 @@ async def _persist_canonical_scope_observation(
     compute_scope_observation 输出经 check_observation_invariants 校验，非法
     payload 由 save_scope_observation_fact 的 validate_scope_observation_payload
     在落库前 fail-fast 拒绝（延续 Round 1C Blocker #1/#2/#3）。
+
+    A 级机制/资格/事件标签概念（融资融券/沪深股通/专精特新/次新股/ST 等）按
+    CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES 直接排除，不写 ReviewScopeObservationFact。
     """
+    if is_scope_observation_persistence_excluded(
+        scope_type=scope.scope_type,
+        scope_name=scope.scope_name,
+    ):
+        logger.info(
+            "[ReviewOrchestrator] 规范事实层跳过 A 级机制/资格/事件标签概念: "
+            "%s/%s scope_name=%s",
+            scope.scope_type, scope.scope_key, scope.scope_name,
+        )
+        return
     prep = await prepare_scope(
         session, scope.scope_type, scope.scope_key, run.trade_date,
     )

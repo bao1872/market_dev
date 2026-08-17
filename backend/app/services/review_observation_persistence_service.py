@@ -30,6 +30,54 @@ ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES: frozenset[str] = frozenset(
     {"industry_l1", "industry_l2", "industry_l3", "concept"}
 )
 
+# === A 级概念排除清单（A 步观察持久化 scope 排除）===
+# 这些 concept 是交易机制/资格/监管状态/时效性事件标签，不是持续性投资主题。
+# 对它们做 Scope Observation 无分析意义（覆盖过泛或零主题信号），A 步双写
+# ReviewScopeObservationFact 时直接排除（不写表、不参与七段事实消费）。
+# 口径（2026-08-17 扫描 5293 只活跃股票、389 个 concept 后定案）：
+#   - 机制/资格池：融资融券(68.0%)、深股通(35.4%)、沪股通(30.8%)、专精特新(20.3%)
+#   - 时效性业绩事件：2026中报预增(9.4%)、2026一季报预增(1.9%)
+#   - 事件/状态标签：股权转让(并购重组)(8.6%)、ST板块(3.8%)、摘帽(1.4%)
+#   - 上市阶段标签：新股与次新股(1.6%)、注册制次新股(1.4%)、科创次新股(0.4%)
+# 注意：这是显式确定性清单（SSOT），不使用易误伤的模糊子串匹配（如"重组"会命中
+# "重组蛋白"等真实主题）。B/C 级（覆盖过泛但确属主题 / 地区政策类）按产品决策
+# 明确不过滤。新增 A 级命名时在此追加。
+CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES: frozenset[str] = frozenset(
+    {
+        # 机制 / 资格池
+        "融资融券",
+        "深股通",
+        "沪股通",
+        "专精特新",
+        # 时效性业绩事件
+        "2026中报预增",
+        "2026一季报预增",
+        # 事件 / 状态标签
+        "股权转让(并购重组)",
+        "ST板块",
+        "摘帽",
+        # 上市阶段标签
+        "新股与次新股",
+        "注册制次新股",
+        "科创次新股",
+    }
+)
+
+
+def is_scope_observation_persistence_excluded(
+    *,
+    scope_type: str,
+    scope_name: str,
+) -> bool:
+    """判断 scope 是否应被 A 步观察持久化排除。
+
+    仅对 concept scope 生效；industry_l1/l2/l3 永不排除（板块语义稳定）。
+    排除依据：板块名为 A 级机制/资格/事件标签（显式清单，无主题语义）。
+    """
+    if scope_type != "concept":
+        return False
+    return scope_name in CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES
+
 # Market is explicitly NOT activated for historical persistence: the current
 # active universe cannot be used against a historical trade_date (prompt §16).
 MARKET_PERSISTENCE_DIAGNOSTIC = (

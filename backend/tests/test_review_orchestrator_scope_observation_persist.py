@@ -36,6 +36,8 @@ def _scope(scope_type: str, scope_key: str) -> object:
     definition = type("Scope", (), {})()
     definition.scope_type = scope_type
     definition.scope_key = scope_key
+    # A 步过滤用 scope_name；默认给一个非排除的真实主题名，避免误触发过滤。
+    definition.scope_name = "锂电池概念"
     return definition
 
 
@@ -120,6 +122,26 @@ async def test_activated_scope_persists_fact():
     assert args[1] is fake_prep
     assert args[2] is OBSERVATION
     assert kwargs["algorithm_version"] == "review-v2.3"
+
+
+@pytest.mark.asyncio
+async def test_excluded_concept_scope_returns_without_prepare_or_save():
+    """A 级机制/资格/事件标签概念：A 步持久化直接排除，连 prepare 都不调用。"""
+    run = _make_run()
+    scope = _scope("concept", str(uuid.uuid4()))
+    scope.scope_name = "融资融券"
+
+    with patch.object(
+        orch, "prepare_scope", AsyncMock(),
+    ) as mock_prepare, patch.object(
+        orch, "save_scope_observation_fact", AsyncMock(),
+    ) as mock_save:
+        await orch._persist_canonical_scope_observation(
+            _mock_session(), run, scope,  # type: ignore[arg-type]
+        )
+
+    mock_prepare.assert_not_awaited()
+    mock_save.assert_not_awaited()
 
 
 @pytest.mark.asyncio

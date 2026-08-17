@@ -16,11 +16,13 @@ from app.domain.review.scope_observation import MemberObservation, compute_scope
 from app.services.review_observation_persistence_service import (
     ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES,
     CANONICAL_TOP_LEVEL_SECTIONS,
+    CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES,
     MARKET_PERSISTENCE_DIAGNOSTIC,
     ScopeObservationPayloadValidationError,
     ScopePersistenceNotActivatedError,
     _build_fact_values,
     _snapshot_readiness,
+    is_scope_observation_persistence_excluded,
     save_scope_observation_fact,
     validate_scope_observation_payload,
 )
@@ -106,6 +108,56 @@ def test_activation_set_exact() -> None:
     assert "market" not in ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES
     assert "major_index" not in ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES
     assert "style" not in ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES
+
+
+# ── A 级机制/资格/事件标签概念过滤（A 步观察持久化 scope 排除）──
+
+def test_concept_exclude_names_exact() -> None:
+    # 排除清单必须精确锁定 12 个 A 级概念（与 DB market_boards.name 一一对应）。
+    assert CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES == frozenset(
+        {
+            "融资融券", "深股通", "沪股通", "专精特新",
+            "2026中报预增", "2026一季报预增",
+            "股权转让(并购重组)", "ST板块", "摘帽",
+            "新股与次新股", "注册制次新股", "科创次新股",
+        }
+    )
+
+
+def test_excluded_concept_is_filtered() -> None:
+    # A 级机制/资格/事件标签概念应被 A 步持久化排除。
+    for name in CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES:
+        assert is_scope_observation_persistence_excluded(
+            scope_type="concept", scope_name=name,
+        ), name
+
+
+def test_non_excluded_concept_is_kept() -> None:
+    # 非 A 级概念（真实主题）保留。
+    for name in ("锂电池概念", "光伏概念", "低空经济", "商业航天", "人形机器人"):
+        assert not is_scope_observation_persistence_excluded(
+            scope_type="concept", scope_name=name,
+        ), name
+
+
+def test_industry_scope_never_excluded() -> None:
+    # industry_l1/l2/l3 永不排除；即使板块名恰好同名。
+    for scope_type in ("industry_l1", "industry_l2", "industry_l3"):
+        assert not is_scope_observation_persistence_excluded(
+            scope_type=scope_type, scope_name="融资融券",
+        ), scope_type
+
+
+def test_b_c_scope_not_filtered_by_exclude_list() -> None:
+    # B/C 级（覆盖过泛但确属主题 / 地区政策类）按产品决策不过滤。
+    # 显式验证避免未来误把覆盖度阈值塞进排除清单。
+    for name in (
+        "国企改革", "机器人概念", "人工智能", "新能源汽车", "储能", "芯片概念",
+        "一带一路", "西部大开发", "粤港澳大湾区", "乡村振兴", "数字经济",
+    ):
+        assert not is_scope_observation_persistence_excluded(
+            scope_type="concept", scope_name=name,
+        ), name
 
 
 def test_canonical_top_level_sections_exact() -> None:
