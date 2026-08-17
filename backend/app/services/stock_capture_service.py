@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from typing import Any
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -212,7 +213,9 @@ async def capture_stock_chart(
     viewport_height: int | None = None,
     device_scale_factor: int | None = None,
     indicator_view: str | None = None,
-    focus_event: dict[str, str] | None = None,
+    # [Task 2 修复] 放宽至 dict[str, Any：结构事件携带 float/int/bool 字段，
+    # URL query 层统一 str() 转换，避免调用方 POST /capture 时出现类型合同 422。
+    focus_event: dict[str, Any] | None = None,
 ) -> CaptureResult:
     """截取个股详情页指定区域，返回 PNG bytes 与渲染元数据。
 

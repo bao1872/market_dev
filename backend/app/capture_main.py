@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from typing import Any
 from uuid import UUID
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -142,12 +143,17 @@ class CaptureRequest(BaseModel):
     )
     # [Task 2] focus_event 透传：监控事件触发时携带 focus_event_id/type/anchor_time/
     # confirmed_time/level/zone 等字段，前端据此突出本次触发事件，淡化其他历史结构
-    focus_event: dict[str, str] | None = Field(
+    # 修复（API_CONTRACT_MISMATCH P0）：原声明 dict[str, str] 会拒绝结构事件携带的
+    # float/int/bool 字段（level/bar_high/bar_low/bias/internal/bullish），导致
+    # SMC 结构事件 POST /capture 触发 Pydantic 422 → 飞书收不到结构图。
+    # 业务层保留原生类型，URL query 层由 stock_capture_service 统一 str() 转换。
+    focus_event: dict[str, Any] | None = Field(
         None,
         description=(
             "focus_event 透传 dict（监控触发事件信息）。"
             "字段：focus_event_id/focus_event_type/anchor_time/confirmed_time/"
             "level/bar_high/bar_low/bias/internal/bullish/eqhl_type/second_pivot_time。"
+            "value 可为 str/float/int/bool（URL query 层统一 str() 转换）。"
             "前端 StrategyChart 据此突出本次触发事件，淡化其他历史结构。"
         ),
     )
