@@ -98,3 +98,6 @@ backend/tests/e2e_cycle_result.json
 # config.py 入库（仅结构与加载规则）；config.local.py / config.test.py 不入库
 backend/app/config.local.py
 backend/app/config.test.py
+
+# 问财(iwencai)登录态 cookie（敏感凭据，本地/容器挂载，不进版本库）
+backend/wencai_cookie.json

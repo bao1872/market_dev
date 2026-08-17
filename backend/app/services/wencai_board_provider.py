@@ -619,32 +619,43 @@ def _fetch_wencai_sync() -> Any:
     最多 3 次有限重试，每次间隔 RETRY_WAIT_SECONDS 秒。
     不记录 Cookie 或完整原始响应。
 
+    [2026-08-17 修正] `pywencai` 第三方库已失效（封装解析不了问财新版
+    `get-robot-data` 响应，即使传入有效 cookie 也返回 None）。改为走统一
+    底层 HTTP 客户端 `wencai_client.fetch_query_table`，返回 list[dict]，
+    再包装为单 DataFrame 供下游 `_select_primary_dataframe` 消费
+    （规范化 / 门禁逻辑全部不变）。
+
     Returns:
-        pywencai 返回的原始结果（DataFrame/dict/list/tuple）
+        含板块主表的 dict（与历史 pywencai 嵌套结构兼容，供 _collect_dataframes 提取）
 
     Raises:
         WencaiFetchError: 连续 3 次查询失败
     """
-    import pywencai as wc
+    from app.services.wencai_client import (
+        fetch_query_table,
+        load_cookie,
+        PAGE_DELAY_RANGE,
+    )
 
-    _patch_wencai_headers()
-
-    cookie = os.getenv("WENCAI_COOKIE") or None
+    cookie = load_cookie()
     last_error: Exception | None = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.info("[WencaiBoard] 查询问财: query=%r (attempt %d/%d)",
                         WENCAI_QUERY, attempt, MAX_RETRIES)
-            result = wc.get(
-                query=WENCAI_QUERY,
-                loop=True,
-                sleep=2,
+            rows = fetch_query_table(
+                WENCAI_QUERY,
                 cookie=cookie,
+                perpage=100,
+                page_delay_range=PAGE_DELAY_RANGE,
             )
-            if result is None:
-                raise WencaiFetchError("问财返回 None")
-            return result
+            if not rows:
+                raise WencaiFetchError("问财返回 0 行（cookie 可能过期）")
+            # 包装为与下游兼容的 DataFrame 嵌套结构
+            import pandas as pd
+            df = pd.DataFrame(rows)
+            return {"data": df}
         except Exception as exc:
             last_error = exc
             # 脱敏：不记录 cookie 或完整响应，只记录错误类型和消息前200字符
