@@ -1190,3 +1190,113 @@ def test_vec1_union_deterministic_repeat(monkeypatch):
 
     first, second = asyncio.run(scenario())
     assert first == second
+
+
+def test_vec1_event_isolation_multi_scope(monkeypatch):
+    """VEC-1-CORRECTION: ``PreparedScope.events`` must be scope-specific.
+
+    Scope A = {A, Shared} and Scope B = {B, Shared} share the union; A has an
+    A-only BOS event, B has a B-only CHoCH event, and Shared has a SQZ_RELEASE
+    event visible in both.  VEC-1 must NOT leak the other scope's events into a
+    scope's PreparedScope, even though the canonical Scope Core would later drop
+    out-of-scope events via ``pit_set`` filtering.
+    """
+    from app.services.review_observation_prep_service import (
+        prepare_scopes_from_union,
+        prepare_union_fact_context,
+    )
+
+    id_a, id_b, id_shared = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    members_a = [id_a, id_shared]
+    members_b = [id_b, id_shared]
+    all_bars = {
+        id_a: [_bar(id_a, PREV, 9.0), _bar(id_a, T1, 10.0), _bar(id_a, T2, 11.0)],
+        id_b: [_bar(id_b, PREV, 8.0), _bar(id_b, T1, 8.5), _bar(id_b, T2, 9.0)],
+        id_shared: [
+            _bar(id_shared, PREV, 5.0),
+            _bar(id_shared, T1, 5.5),
+            _bar(id_shared, T2, 6.0),
+        ],
+    }
+    states = {
+        PREV: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+        T1: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+        T2: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
+    }
+    trading_days = [PREV, T1, T2]
+    events = {
+        T1: [
+            StructureEvent(
+                member_id=str(id_a), event_type="BOS", direction="bullish",
+                level=1.0, internal=False, release_volume_ratio=None,
+            ),
+            StructureEvent(
+                member_id=str(id_b), event_type="CHoCH", direction="bearish",
+                level=2.0, internal=True, release_volume_ratio=None,
+            ),
+            StructureEvent(
+                member_id=str(id_shared), event_type="SQZ_RELEASE",
+                direction=None, level=None, internal=None,
+                release_volume_ratio=0.5,
+            ),
+        ],
+        T2: [
+            StructureEvent(
+                member_id=str(id_a), event_type="BOS", direction="bullish",
+                level=1.0, internal=False, release_volume_ratio=None,
+            ),
+        ],
+    }
+    _install_union_mocks(monkeypatch, all_bars, states, events, trading_days)
+
+    async def scenario():
+        union_ctx = await prepare_union_fact_context(
+            _FakeSession(), trading_days, [id_a, id_b, id_shared]
+        )
+        return await prepare_scopes_from_union(
+            _FakeSession(), "concept", trading_days,
+            {"A": (members_a, "Scope A"), "B": (members_b, "Scope B")}, union_ctx,
+        )
+
+    prepared = asyncio.run(scenario())
+    a_t1 = prepared["A"][1]
+    b_t1 = prepared["B"][1]
+
+    a_t1_members = {e.member_id for e in a_t1.events}
+    b_t1_members = {e.member_id for e in b_t1.events}
+    # A carries A + Shared events, NEVER B's CHoCH.
+    assert str(id_a) in a_t1_members
+    assert str(id_shared) in a_t1_members
+    assert str(id_b) not in a_t1_members
+    # B carries B + Shared events, NEVER A's BOS.
+    assert str(id_b) in b_t1_members
+    assert str(id_shared) in b_t1_members
+    assert str(id_a) not in b_t1_members
+    # Shared event (SQZ_RELEASE) present in both scopes, unchanged.
+    shared_a = next(e for e in a_t1.events if e.member_id == str(id_shared))
+    shared_b = next(e for e in b_t1.events if e.member_id == str(id_shared))
+    assert shared_a == shared_b
+    assert shared_a.release_volume_ratio == 0.5
+    # T2 (A-only event) still does not leak into B.
+    a_t2 = prepared["A"][2]
+    b_t2 = prepared["B"][2]
+    assert [e.member_id for e in a_t2.events] == [str(id_a)]
+    assert b_t2.events == ()
+
+    # Final Scope Observation is identical whether computed from the scope-local
+    # or the (unfiltered) union events — the Core's pit_set guard is unchanged.
+    from app.domain.review.scope_observation import compute_scope_observation
+
+    obs_a_local = compute_scope_observation(
+        scope_type="concept", scope_key="A", trade_date=T1,
+        pit_member_ids=a_t1.pit_member_ids,
+        pit_member_ids_t1=a_t1.pit_member_ids_t1,
+        members=a_t1.members, events=a_t1.events,
+    )
+    obs_a_union = compute_scope_observation(
+        scope_type="concept", scope_key="A", trade_date=T1,
+        pit_member_ids=a_t1.pit_member_ids,
+        pit_member_ids_t1=a_t1.pit_member_ids_t1,
+        members=a_t1.members, events=tuple(events[T1]),
+    )
+    assert obs_a_local == obs_a_union

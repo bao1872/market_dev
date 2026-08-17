@@ -28,6 +28,7 @@ import logging
 import resource
 import sys
 from datetime import date
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +344,36 @@ async def _measure_all_scopes(sample_bar_members: int) -> int:
         return 0
 
 
+def _observations_close(a: Any, b: Any, *, rel_tol: float = 1e-9, abs_tol: float = 1e-9) -> bool:
+    """Recursive structural equivalence for two ``compute_scope_observation`` dicts.
+
+    Structural exactness for keys / lists / categorical values; float leaves use
+    ``math.isclose`` so tiny ULP differences between the legacy and VEC-1 loop
+    orders (e.g. sum order in a mean / weighted return) do not fail the check.
+    """
+    import math
+
+    if a is None or b is None:
+        return a is b
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    if isinstance(a, (int, str)) and isinstance(b, (int, str)):
+        return a == b
+    if isinstance(a, float) and isinstance(b, float):
+        if math.isnan(a) and math.isnan(b):
+            return True
+        return math.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
+    if isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            return False
+        return all(_observations_close(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return False
+        return all(_observations_close(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 async def _vec1_benchmark(
     scope_type: str,
     history: int,
@@ -370,6 +401,7 @@ async def _vec1_benchmark(
     from app.domain.review.scope_observation import compute_scope_observation
     from app.models.market_board import MarketBoard, MarketBoardMembership
     from app.services.review_observation_prep_service import (
+        PreparedScope,
         _build_member_observations,
         list_recent_trading_days,
         prepare_scopes_from_union,
@@ -478,9 +510,9 @@ async def _vec1_benchmark(
         prep_counters: dict[str, int] = {}
         prep_fallback: list[str] = []
 
-        # ---- legacy：scope -> date -> member（before 基线） ----
+        # ---- legacy：scope -> date -> member（before 基线，纯 member build 计时） ----
+        legacy_members: dict[str, list] = {k: [] for k in scope_members}
         t0 = time.perf_counter()
-        legacy_prepared: dict[str, list] = {k: [] for k in scope_members}
         for scope_key, (member_ids, _n) in scope_members.items():
             for t in trade_dates:
                 t1 = union_ctx.t1_by_date.get(t)
@@ -493,7 +525,7 @@ async def _vec1_benchmark(
                     vec_volume=union_ctx.vec_volume,
                     counters=prep_counters, fallback_reasons=prep_fallback,
                 )
-                legacy_prepared[scope_key].append(members)
+                legacy_members[scope_key].append(members)
         legacy_member_build_ms = (time.perf_counter() - t0) * 1000.0
 
         # ---- VEC-1：date -> union member -> scope slice（after） ----
@@ -502,14 +534,36 @@ async def _vec1_benchmark(
             db, scope_type, trade_dates, scope_members, union_ctx,
             prep_counters=prep_counters, prep_fallback_reasons=prep_fallback,
         )
-        vec1_member_build_ms = (time.perf_counter() - t0) * 1000.0
+        vec1_prepare_ms = (time.perf_counter() - t0) * 1000.0
 
-        # ---- scope observation（两者同 owner，计时为 VEC-1 路径） ----
+        # ---- scope observation + SEMANTIC EQUIVALENCE（审查项） ----
+        # 对每个 scope x date，用同一 canonical ``compute_scope_observation``
+        # 计算 legacy（按旧循环顺序、事件按 scope 过滤）与 VEC-1 两个 observation，
+        # 逐字段比较（结构 exact，float 用 ULP 容忍）。legacy 复用 union_ctx 数据，
+        # 仅循环顺序不同，因此能直接对比业务输出，而不是只对比 count。
         t0 = time.perf_counter()
         obs_count = 0
-        for scope_key, prepared_list in vec1_prepared.items():
-            for prepared in prepared_list:
-                compute_scope_observation(
+        mismatch_count = 0
+        checked_count = 0
+        for scope_key, (member_ids, _n) in scope_members.items():
+            member_set = {str(m) for m in member_ids}
+            for i, t in enumerate(trade_dates):
+                t1 = union_ctx.t1_by_date.get(t)
+                scope_events = tuple(
+                    e for e in union_ctx.events_by_date.get(t, [])
+                    if e.member_id in member_set
+                )
+                legacy_obs = compute_scope_observation(
+                    scope_type=scope_type,
+                    scope_key=scope_key,
+                    trade_date=t,
+                    pit_member_ids=tuple(str(m) for m in member_ids),
+                    pit_member_ids_t1=tuple(str(m) for m in member_ids),
+                    members=tuple(legacy_members[scope_key][i]),
+                    events=scope_events,
+                )
+                prepared = vec1_prepared[scope_key][i]
+                vec1_obs = compute_scope_observation(
                     scope_type=scope_type,
                     scope_key=scope_key,
                     trade_date=prepared.trade_date,
@@ -519,18 +573,47 @@ async def _vec1_benchmark(
                     events=prepared.events,
                 )
                 obs_count += 1
+                checked_count += 1
+                if not _observations_close(legacy_obs, vec1_obs):
+                    mismatch_count += 1
         scope_observation_ms = (time.perf_counter() - t0) * 1000.0
 
+        # ---- VEC-1B closure：batch dynamics vs per-scope single dynamics ----
+        from app.services.review_scope_dynamics_service import (
+            compute_current_static_scope_dynamics,
+            compute_current_static_scope_dynamics_batch,
+        )
+        first_scope = next(iter(scope_members))
+        single_result = await compute_current_static_scope_dynamics(
+            db, scope_type, first_scope, trade_dates, analysis_asof_date=asof_date,
+        )
+        batch_results = await compute_current_static_scope_dynamics_batch(
+            db, scope_type, [first_scope], trade_dates, analysis_asof_date=asof_date,
+        )
+        batch_result = batch_results[0]
+        dynamics_equal = (
+            batch_result["observation_series"] == single_result["observation_series"]
+            and batch_result["scope_dynamics"] == single_result["scope_dynamics"]
+        )
+        batch_metrics = batch_result["metrics"]
+        single_metrics = single_result["metrics"]
+
         # ---- 一致性：两路径 PreparedScope 数量相同 ----
-        legacy_count = sum(len(v) for v in legacy_prepared.values())
+        legacy_count = sum(len(v) for v in legacy_members.values())
         vec1_count = sum(len(v) for v in vec1_prepared.values())
         print(f"legacy_prepared_count : {legacy_count}")
         print(f"vec1_prepared_count   : {vec1_count}")
         print(f"member_build_calls    : legacy={len(scope_members) * len(trade_dates)} "
               f"vec1={len(trade_dates)}")
         print(f"member_build_ms       : legacy={legacy_member_build_ms:.1f} "
-              f"vec1={vec1_member_build_ms:.1f}")
+              f"vec1_prepare_and_slice_ms={vec1_prepare_ms:.1f}")
         print(f"scope_observation_ms  : {scope_observation_ms:.1f} (count={obs_count})")
+        print(f"obs_equivalent        : checked={checked_count} mismatch={mismatch_count}")
+        print(f"dynamics_batch_vs_single: equal={dynamics_equal} "
+              f"scope={first_scope} "
+              f"single_total_ms={single_metrics.get('total_ms', 0.0):.1f} "
+              f"batch_total_ms={batch_metrics.get('batch_total_ms', 0.0):.1f} "
+              f"batch_reconstruction_ms={batch_metrics.get('batch_reconstruction_ms', 0.0):.1f}")
         print(f"rss_mb                : {_rss_mb():.1f}")
         print(f"vec_hit={prep_counters.get('vec_hit', 0)} "
               f"vec_fallback={prep_counters.get('vec_fallback', 0)} "

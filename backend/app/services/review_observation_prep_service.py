@@ -1030,20 +1030,24 @@ async def prepare_scopes_from_union(
 
     # ---- Precompute stable scope context ONCE (out of the date loop) ----
     # Scope member order / name / string tuples never change across the replay;
-    # building them here instead of per-T removes repeated tuple/list
-    # construction on every trade_date.
-    scope_meta: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {}
+    # building them here instead of per-T removes repeated tuple/list/set
+    # construction on every trade_date.  ``member_set`` (VEC-1-CORRECTION) is the
+    # scope-specific membership used to filter the union's structure events so
+    # ``PreparedScope.events`` stays strictly scope-local.
+    scope_meta: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], set[str]]] = {}
     union_ids: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
     scope_member_day_count = 0
     for scope_key, (member_ids, scope_name) in scope_members.items():
         ids = tuple(member_ids)
         scope_member_day_count += len(ids)
+        str_ids = tuple(str(i) for i in ids)
         scope_meta[scope_key] = (
             scope_name,
-            tuple(str(i) for i in ids),
+            str_ids,
             # current-static: the T-1 membership equals the T membership.
-            tuple(str(i) for i in ids),
+            str_ids,
+            set(str_ids),
         )
         for mid in ids:
             if mid not in seen:
@@ -1091,9 +1095,16 @@ async def prepare_scopes_from_union(
         )
         member_by_id = {m.member_id: m for m in union_members}
 
-        for scope_key, (scope_name, str_ids, str_ids_t1) in scope_meta.items():
+        for scope_key, (scope_name, str_ids, str_ids_t1, member_set) in scope_meta.items():
             members = tuple(
                 member_by_id[sid] for sid in str_ids if sid in member_by_id
+            )
+            # VEC-1-CORRECTION: the union's events are filtered to this scope's
+            # membership so PreparedScope.events stays strictly scope-local (the
+            # Scope Core would drop out-of-scope events anyway, but the contract
+            # is that a PreparedScope carries ONLY its own members' events).
+            scope_events = tuple(
+                e for e in structure_events if e.member_id in member_set
             )
             out[scope_key].append(
                 PreparedScope(
@@ -1109,7 +1120,7 @@ async def prepare_scopes_from_union(
                     pit_status_t=pit_status_t,
                     pit_status_t1=pit_status_t1,
                     diagnostics=(),
-                    events=tuple(structure_events),
+                    events=scope_events,
                 )
             )
     loop_ms = (time.perf_counter() - t_loop) * 1000.0

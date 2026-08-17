@@ -140,10 +140,15 @@ async def compute_current_static_scope_dynamics(
     Returns (internal shadow application result — NOT a public API schema):
         ``{"scope", "membership", "observation_series", "scope_dynamics"}``.
         ``scope`` / ``membership`` are passed through unchanged from the source
-        owner; provenance is never re-derived here.
+        owner; provenance is never re-derived here.  ``metrics`` reports the
+        end-to-end timing: ``reconstruction_ms`` (source) + ``composition_ms``
+        (ObservationSeries + Dynamics), with ``total_ms`` their sum.
     """
     _validate_trade_dates(trade_dates, analysis_asof_date=analysis_asof_date)
 
+    import time
+
+    t_recon = time.perf_counter()
     reconstruction = await reconstruct_scope_series(
         db,
         scope_type,
@@ -151,12 +156,14 @@ async def compute_current_static_scope_dynamics(
         list(trade_dates),
         asof_date=analysis_asof_date,
     )
+    reconstruction_ms = (time.perf_counter() - t_recon) * 1000.0
     return _compose_scope_dynamics_from_reconstruction(
         reconstruction,
         scope_type=scope_type,
         scope_key=scope_key,
         trade_dates=trade_dates,
         analysis_asof_date=analysis_asof_date,
+        reconstruction_ms=reconstruction_ms,
     )
 
 
@@ -177,12 +184,20 @@ async def compute_current_static_scope_dynamics_batch(
     The per-scope composition is EXACTLY the same helper as the single-scope
     path — there is no second Dynamics owner.
 
+    The shared reconstruction is NOT disguised as a per-scope cost: each
+    scope's ``metrics`` reports only its ``composition_ms``; the shared batch
+    phase is reported once via ``batch_reconstruction_ms`` / ``batch_total_ms``
+    on every result (identical across the batch, labelled ``batch_*``).
+
     SHADOW ONLY: never wired into API / orchestrator / persistence / frontend.
     """
     _validate_trade_dates(trade_dates, analysis_asof_date=analysis_asof_date)
     if not scope_keys:
         return []
 
+    import time
+
+    t_recon = time.perf_counter()
     reconstructions = await reconstruct_scope_series_batch(
         db,
         scope_type,
@@ -191,7 +206,9 @@ async def compute_current_static_scope_dynamics_batch(
         asof_date=analysis_asof_date,
         union_member_cap=union_member_cap,
     )
-    return [
+    batch_reconstruction_ms = (time.perf_counter() - t_recon) * 1000.0
+
+    results = [
         _compose_scope_dynamics_from_reconstruction(
             reconstruction,
             scope_type=scope_type,
@@ -201,6 +218,15 @@ async def compute_current_static_scope_dynamics_batch(
         )
         for reconstruction in reconstructions
     ]
+    batch_composition_ms = sum(
+        r["metrics"].get("composition_ms", 0.0) for r in results
+    )
+    for r in results:
+        r["metrics"]["batch_scope_count"] = len(results)
+        r["metrics"]["batch_reconstruction_ms"] = batch_reconstruction_ms
+        r["metrics"]["batch_composition_ms"] = batch_composition_ms
+        r["metrics"]["batch_total_ms"] = batch_reconstruction_ms + batch_composition_ms
+    return results
 
 
 def _compose_scope_dynamics_from_reconstruction(
@@ -210,6 +236,7 @@ def _compose_scope_dynamics_from_reconstruction(
     scope_key: str,
     trade_dates: Sequence[date],
     analysis_asof_date: date,
+    reconstruction_ms: float = 0.0,
 ) -> dict[str, Any]:
     """Shared composition: reconstruction source -> ObservationSeries -> Dynamics.
 
@@ -217,6 +244,11 @@ def _compose_scope_dynamics_from_reconstruction(
     single-scope series or one entry of a shared batch) into the shadow
     ObservationSeries + Scope Dynamics result.  Both application entry points
     delegate here so there is exactly one composition implementation.
+
+    ``reconstruction_ms`` is the caller-measured time spent in the source phase
+    (single-scope reconstruction, or 0.0 for a shared batch entry whose cost is
+    reported once under ``batch_reconstruction_ms``).  ``total_ms`` is the
+    end-to-end ``reconstruction_ms + composition_ms``.
     """
     _guard_source_contract(
         reconstruction,
@@ -231,8 +263,8 @@ def _compose_scope_dynamics_from_reconstruction(
     # no row is simply omitted: the Builder preserves it as an unavailable slot.
     import time
 
-    observation_series_ms = dynamics_ms = total_ms = 0.0
-    t_total = time.perf_counter()
+    composition_ms = observation_series_ms = dynamics_ms = 0.0
+    t_comp = time.perf_counter()
 
     snapshot_series = [
         {
@@ -258,7 +290,8 @@ def _compose_scope_dynamics_from_reconstruction(
     t_dyn = time.perf_counter()
     scope_dynamics = compute_scope_dynamics_analysis(observation_series)
     dynamics_ms = (time.perf_counter() - t_dyn) * 1000.0
-    total_ms = (time.perf_counter() - t_total) * 1000.0
+    composition_ms = (time.perf_counter() - t_comp) * 1000.0
+    total_ms = reconstruction_ms + composition_ms
 
     _mem = reconstruction.get("membership") or {}
     _mem_count = _mem.get("member_count") if isinstance(_mem, dict) else len(_mem)
@@ -266,11 +299,13 @@ def _compose_scope_dynamics_from_reconstruction(
     logger.info(
         "[scope-dynamics] scope_type=%s scope_key=%s member_count=%s "
         "trade_date_count=%d vec_hit=%d vec_fallback=%d fallback_reasons=%s "
-        "observation_series_ms=%.1f dynamics_ms=%.1f total_ms=%.1f",
+        "reconstruction_ms=%.1f observation_series_ms=%.1f dynamics_ms=%.1f "
+        "composition_ms=%.1f total_ms=%.1f",
         scope_type, scope_key, _mem_count, len(trade_dates),
         _prep.get("vec_hit", 0), _prep.get("vec_fallback", 0),
         ",".join(_prep.get("fallback_reasons", [])) or "-",
-        observation_series_ms, dynamics_ms, total_ms,
+        reconstruction_ms, observation_series_ms, dynamics_ms,
+        composition_ms, total_ms,
     )
 
     return {
@@ -287,8 +322,10 @@ def _compose_scope_dynamics_from_reconstruction(
             "vec_hit": _prep.get("vec_hit", 0),
             "vec_fallback": _prep.get("vec_fallback", 0),
             "fallback_reasons": list(_prep.get("fallback_reasons", [])),
+            "reconstruction_ms": reconstruction_ms,
             "observation_series_ms": observation_series_ms,
             "dynamics_ms": dynamics_ms,
+            "composition_ms": composition_ms,
             "total_ms": total_ms,
         },
     }
