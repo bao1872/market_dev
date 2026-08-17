@@ -177,6 +177,7 @@ async def compute_current_static_scope_dynamics(
         for row in reconstruction["series"]
     ]
 
+    t_series = time.perf_counter()
     observation_series = build_observation_series(
         scope_type=scope_type,
         scope_key=scope_key,
@@ -186,6 +187,7 @@ async def compute_current_static_scope_dynamics(
         snapshot_series=snapshot_series,
         primitive_keys=[DYNAMICS_PHASE_PRIMITIVE_KEY],
     )
+    observation_series_ms = (time.perf_counter() - t_series) * 1000.0
 
     t_dyn = time.perf_counter()
     scope_dynamics = compute_scope_dynamics_analysis(observation_series)

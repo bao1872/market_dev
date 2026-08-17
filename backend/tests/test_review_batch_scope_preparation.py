@@ -93,6 +93,102 @@ def test_instrument_bar_series_last_bar_is_o1_and_matches_window_tail() -> None:
     assert series.last_bar(T1 - timedelta(days=_BAR_LOOKBACK_DAYS + 50)) is None
 
 
+def test_instrument_bar_series_exact_bar_requires_exact_date() -> None:
+    """``exact_bar`` must match EXACTLY: a bar whose trade_date differs from the
+    target (e.g. an earlier T-2 bar) is never returned for a missing target date.
+
+    This locks the canonical exact-T / exact-T1 contract: when the instrument is
+    suspended on the exact T-1 (no bar), ``close_t1`` must be None and callers MUST
+    NOT fall back to the T-2 bar the way ``last_bar`` (``<= hi``) would.
+    """
+    inst = uuid.uuid4()
+    # T1 has a bar; PREV (=T1's exact T-1) has NO bar; PREV - 1d has a bar.
+    bars = [
+        _bar(inst, PREV - timedelta(days=1), 9.0),
+        _bar(inst, T1, 10.0),
+        _bar(inst, T2, 11.0),
+    ]
+    series = _InstrumentBarSeries(
+        facts=tuple(sorted(bars, key=lambda b: b.trade_date)),
+        dates=tuple(sorted(b.trade_date for b in bars)),
+    )
+    # Exact hit returns the bar at that date.
+    assert series.exact_bar(T1) is not None
+    assert series.exact_bar(T1).close == 10.0
+    # Exact T-1 missing -> None, even though a T-2 (PREV-1d) bar exists (no fallback).
+    assert series.exact_bar(PREV) is None
+    # Target beyond the series -> None.
+    assert series.exact_bar(T2 + timedelta(days=5)) is None
+    # Target before the series -> None.
+    assert series.exact_bar(PREV - timedelta(days=10)) is None
+
+
+def test_member_observation_exact_t1_missing_returns_none() -> None:
+    """Boundary regression (P0 exact-bar fix): T has a bar, exact T-1 is missing
+    (suspended), but T-2 has a bar -> ``close_t1`` source is None, so the built
+    observation must have ``return_1d=None`` (NEVER ``close_T / close_T2 - 1``).
+
+    The old ``last_bar`` (``<= hi``) would have fallen back to T-2 and produced a
+    spurious 1d return; ``exact_bar`` restores the canonical contract.
+    """
+    m = uuid.uuid4()
+    TRADE = date(2026, 8, 5)
+    T_MINUS1 = date(2026, 8, 4)  # suspended: no bar
+    T_MINUS2 = date(2026, 8, 3)  # has a bar, must NOT be used as T-1
+    series = _InstrumentBarSeries(
+        facts=(_bar(m, T_MINUS2, 9.0), _bar(m, TRADE, 10.0)),
+        dates=(T_MINUS2, TRADE),
+    )
+    states_t = {m: {"regime_value": 1, "is_suspended": False}}
+    built = _build_member_observations(
+        [m],
+        trade_date=TRADE,
+        t1=T_MINUS1,
+        states_t=states_t,
+        states_t1=states_t,
+        bars={m: series},
+        current_only_facts={},
+        # No vec_volume -> canonical fallback owner, but close_t/close_t1 are still
+        # resolved by exact_bar at the top of the loop.
+    )
+    assert len(built) == 1
+    obs = built[0]
+    # close(T) exists -> candidate; exact T-1 missing -> no return_1d.
+    assert obs.price_candidate is True
+    assert obs.return_1d is None
+
+
+def test_member_observation_exact_t_missing_price_not_candidate() -> None:
+    """Boundary regression (P0 exact-bar fix): T itself has no bar (suspended), but
+    T-1 has a bar -> ``current`` must be None, so ``price_candidate`` must be False.
+
+    The old ``last_bar`` (``<= hi``) would have fallen back to the T-1 bar as the
+    "current" row and wrongly marked the member as a price candidate.
+    """
+    m = uuid.uuid4()
+    TRADE = date(2026, 8, 5)  # suspended: no bar
+    T_MINUS1 = date(2026, 8, 4)  # has a bar, must NOT be used as current
+    series = _InstrumentBarSeries(
+        facts=(_bar(m, T_MINUS1, 9.0),),
+        dates=(T_MINUS1,),
+    )
+    states_t = {m: {"regime_value": 1, "is_suspended": False}}
+    built = _build_member_observations(
+        [m],
+        trade_date=TRADE,
+        t1=None,
+        states_t=states_t,
+        states_t1={},
+        bars={m: series},
+        current_only_facts={},
+    )
+    assert len(built) == 1
+    obs = built[0]
+    # No exact T bar -> not a price candidate; no return either.
+    assert obs.price_candidate is False
+    assert obs.return_1d is None
+
+
 def test_instrument_bar_series_window_reproduces_per_date_window() -> None:
     inst = uuid.uuid4()
     # One bar before the 400d lookback (must be excluded), bars inside, and one

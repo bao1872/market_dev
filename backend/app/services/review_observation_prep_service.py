@@ -348,8 +348,8 @@ def _build_member_observations(
             # Not a valid canonical First Pyramid member/fact at T -> not provided.
             continue
         series = bars.get(inst_id)
-        current = series.last_bar(trade_date) if series else None
-        t1_bar = series.last_bar(t1) if (series and t1) else None
+        current = series.exact_bar(trade_date) if series else None
+        t1_bar = series.exact_bar(t1) if (series and t1) else None
         raw = RawMemberFacts(
             member_id=str(inst_id),
             flat_t=previous_state_to_flat(state_t),
@@ -469,7 +469,7 @@ async def prepare_scope_from_member_ids(
     t1_facts = await _load_bar_facts(session, pit_ids_t, t1) if t1 else {}
     # Wrap the per-replay-date bar lists into per-member ascending series so the
     # shared ``_build_member_observations`` owner can extract the T-row / T-1-row
-    # bar (``last_bar`` for the vec path) and the strict-prior window (only for the
+    # bar (``exact_bar`` for the vec path) and the strict-prior window (only for the
     # window-bound fallback) identically to the batch path.  ``bar_facts`` holds
     # the T-day bar(s); ``t1_facts`` holds the T-1-day bar(s) — concat keeps the
     # ascending order the series owner expects (t1 < t).
@@ -623,6 +623,19 @@ class _InstrumentBarSeries:
         start = bisect_left(self.dates, lo)
         end = bisect_right(self.dates, hi)
         return self.facts[end - 1] if end > start else None
+
+    def exact_bar(self, target: date) -> DailyBarFact | None:
+        """The single fact whose ``trade_date`` exactly equals ``target``, or None.
+
+        EXACT canonical match only: if ``target`` has no bar (e.g. the instrument is
+        suspended), None is returned and callers MUST NOT fall back to an earlier bar
+        (T-2/T-3).  This preserves the canonical exact-T / exact-T1 contract of
+        ``close_t1`` while staying O(log n) and lazy (no window materialization).
+        """
+        idx = bisect_left(self.dates, target)
+        if idx < len(self.dates) and self.dates[idx] == target:
+            return self.facts[idx]
+        return None
 
 
 def _build_t1_map(
@@ -845,7 +858,7 @@ async def prepare_scope_series_from_member_ids(
         states_t = states_by_date.get(t, {})
         states_t1 = states_by_date.get(t1, {}) if t1 else {}
         # NOTE: the full 400-bar window is NOT materialized here. ``_build_member_observations``
-        # extracts the T-row bar via ``series.last_bar(t)`` (O(log n)) for the
+        # extracts the T-row bar via ``series.exact_bar(t)`` (O(log n)) for the
         # vectorized fast path, and only calls ``series.window(t)`` inside the
         # window-bound fallback for the few members that need strict-prior history.
         # This removes the O(dates x members x ~400) list-copy hotspot.

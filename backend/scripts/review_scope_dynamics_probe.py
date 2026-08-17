@@ -195,7 +195,7 @@ async def _probe(
         print(f"asof_date         : {asof_date.isoformat()}")
         print(f"trade_date_count  : {len(trade_dates)}")
         print(f"member_count      : {member_count}")
-        print(f"member_x_days     : {len(membership) * len(trade_dates)}")
+        print(f"member_x_days     : {member_count * len(trade_dates)}")
         print(f"scope_dynamics_keys: {sorted(scope_dynamics.keys())}")
         print(f"observation_series_keys: {sorted(observation_series.keys())}")
         print(f"rss_before_mb     : {rss_before:.1f}")
