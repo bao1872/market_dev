@@ -179,7 +179,6 @@ def _build_quote_row(
         "raw_payload": fact.raw_payload,
         "source_time": _now(),
         "is_final": True,
-        "frozen_at": _now(),
     }
 
 
