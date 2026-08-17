@@ -1,0 +1,4 @@
+# Review Source Dataset 离线回放的可选依赖（DATASET-1）。
+# 独立于 dev 生产依赖（不进入 pyproject.toml）；仅在本地 dataset-validate /
+# jsonl.gz → parquet 转换分支 lazy import。
+pyarrow>=14.0

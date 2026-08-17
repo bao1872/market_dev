@@ -50,6 +50,9 @@ dist-ssr/
 *.tsbuildinfo
 .vite/
 
+# ===== 本地性能/离线数据集产物（probe 测量数据，不入库） =====
+backend/.perfdata/
+
 # ===== 数据文件 =====
 *.db
 *.sqlite
