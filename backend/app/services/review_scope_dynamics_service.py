@@ -32,6 +32,7 @@ A-share trading-date axis (non-empty, strictly ascending, unique, every date
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import date
 from typing import Any
@@ -46,6 +47,8 @@ from app.domain.review.analysis.scope_dynamics import (
 from app.services.review_historical_scope_reconstruction_service import (
     reconstruct_scope_series,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CurrentStaticDynamicsSourceContractError(RuntimeError):
@@ -140,6 +143,12 @@ async def compute_current_static_scope_dynamics(
     """
     _validate_trade_dates(trade_dates, analysis_asof_date=analysis_asof_date)
 
+    import time
+
+    reconstruction_ms = observation_series_ms = dynamics_ms = total_ms = 0.0
+    t_total = time.perf_counter()
+
+    t_recon = time.perf_counter()
     reconstruction = await reconstruct_scope_series(
         db,
         scope_type,
@@ -147,6 +156,7 @@ async def compute_current_static_scope_dynamics(
         list(trade_dates),
         asof_date=analysis_asof_date,
     )
+    reconstruction_ms = (time.perf_counter() - t_recon) * 1000.0
     _guard_source_contract(
         reconstruction,
         scope_type=scope_type,
@@ -177,7 +187,20 @@ async def compute_current_static_scope_dynamics(
         primitive_keys=[DYNAMICS_PHASE_PRIMITIVE_KEY],
     )
 
+    t_dyn = time.perf_counter()
     scope_dynamics = compute_scope_dynamics_analysis(observation_series)
+    dynamics_ms = (time.perf_counter() - t_dyn) * 1000.0
+
+    total_ms = (time.perf_counter() - t_total) * 1000.0
+    _mem = reconstruction.get("membership") or {}
+    _mem_count = _mem.get("member_count") if isinstance(_mem, dict) else len(_mem)
+    logger.info(
+        "[scope-dynamics] scope_type=%s scope_key=%s member_count=%s "
+        "trade_date_count=%d reconstruction_ms=%.1f observation_series_ms=%.1f "
+        "dynamics_ms=%.1f total_ms=%.1f",
+        scope_type, scope_key, _mem_count, len(trade_dates),
+        reconstruction_ms, observation_series_ms, dynamics_ms, total_ms,
+    )
 
     return {
         "scope": reconstruction["scope"],

@@ -67,6 +67,26 @@ def _state(regime: int = 1) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def test_instrument_bar_series_last_bar_is_o1_and_matches_window_tail() -> None:
+    """``last_bar`` must return the single T-row bar (window tail) in O(log n),
+    reproducing exactly what the vec fast path consumed via ``facts[-1]`` before."""
+    inst = uuid.uuid4()
+    early = _bar(inst, T1 - timedelta(days=_BAR_LOOKBACK_DAYS + 5), 1.0)
+    inside = [_bar(inst, T1 - timedelta(days=k), float(k + 2)) for k in range(5)]
+    inside.reverse()
+    after = _bar(inst, T2 + timedelta(days=1), 99.0)
+    series = _InstrumentBarSeries(
+        facts=tuple(sorted([early, *inside, after], key=lambda b: b.trade_date)),
+        dates=tuple(
+            sorted([early.trade_date, *(b.trade_date for b in inside), after.trade_date])
+        ),
+    )
+    assert series.last_bar(T1) == series.window(T1)[-1]
+    assert series.last_bar(PREV) == series.window(PREV)[-1]
+    # Beyond the series -> None (no bar <= hi).
+    assert series.last_bar(T1 - timedelta(days=_BAR_LOOKBACK_DAYS + 50)) is None
+
+
 def test_instrument_bar_series_window_reproduces_per_date_window() -> None:
     inst = uuid.uuid4()
     # One bar before the 400d lookback (must be excluded), bars inside, and one

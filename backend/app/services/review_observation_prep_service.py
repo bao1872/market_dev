@@ -324,20 +324,22 @@ def _build_member_observations(
     t1: date | None,
     states_t: dict[uuid.UUID, dict],
     states_t1: dict[uuid.UUID, dict],
-    bar_facts: dict[uuid.UUID, list[DailyBarFact]],
-    t1_facts: dict[uuid.UUID, list[DailyBarFact]],
+    bars: dict[uuid.UUID, _InstrumentBarSeries],
     current_only_facts: dict[str, dict[str, object]],
     vec_volume: dict[uuid.UUID, _VectorizedMemberVolume] | None = None,
 ) -> list[MemberObservation]:
     """Build canonical ``MemberObservation`` inputs shared by the per-date and the
     batch replay path (single member-construction owner).
 
-    ``bar_facts`` / ``t1_facts`` are the bar-aligned per-member lists for the
-    date's ``[T-400d, T]`` / ``[t1-400d, t1]`` windows (ascending).  STRICT-PRIOR
-    history: ``facts`` includes T (window ``<= T``), so T is excluded here —
-    ``volume_t`` / ``amount_t`` carry T separately and the canonical volume owner
-    appends it exactly once.  Both series are built from the SAME prior bars so
-    index i stays aligned to one trade_date across volume and amount.
+    ``bars`` maps each member to its full ``_InstrumentBarSeries`` (ascending,
+    whole batch window).  The vectorized fast path extracts only the T-row bar
+    via ``series.last_bar(trade_date)`` (O(log n), no 400-bar materialization);
+    the window-bound fallback still calls ``series.window(trade_date)`` to get
+    the strict-prior history, but ONLY for the few members that need it.
+
+    STRICT-PRIOR history: ``window`` includes T (``<= T``), so T is excluded in
+    the fallback.  ``volume_t`` / ``amount_t`` carry T separately and the
+    canonical volume owner appends it exactly once.
 
     ``vec_volume`` (batch replay only) precomputes each member's VolumeContext
     series once across the whole window with the vectorized owner.  When the
@@ -354,10 +356,9 @@ def _build_member_observations(
         if state_t is None:
             # Not a valid canonical First Pyramid member/fact at T -> not provided.
             continue
-        facts = bar_facts.get(inst_id, [])
-        current = facts[-1] if facts and facts[-1].trade_date == trade_date else None
-        t1_bars = t1_facts.get(inst_id, [])
-        t1_bar = t1_bars[-1] if t1_bars and t1_bars[-1].trade_date == t1 else None
+        series = bars.get(inst_id)
+        current = series.last_bar(trade_date) if series else None
+        t1_bar = series.last_bar(t1) if (series and t1) else None
         raw = RawMemberFacts(
             member_id=str(inst_id),
             flat_t=previous_state_to_flat(state_t),
@@ -406,7 +407,11 @@ def _build_member_observations(
         # Canonical per-date owner (oracle) — window-bound edge case (fewer than
         # LONG_WINDOW finite-volume bars in the 400d lookback, or no finite-volume
         # bar <= T).  It needs the strict-prior history, so build it now.
-        prior_bars = [b for b in facts if b.trade_date != trade_date]
+        prior_bars = (
+            [b for b in series.window(trade_date) if b.trade_date != trade_date]
+            if series
+            else []
+        )
         raw = replace(
             raw,
             volume_history=tuple(b.volume for b in prior_bars),
@@ -460,6 +465,27 @@ async def prepare_scope_from_member_ids(
     states_t1 = await _load_states(session, pit_ids_t, t1) if t1 else {}
     bar_facts = await _load_bar_facts(session, pit_ids_t, trade_date)
     t1_facts = await _load_bar_facts(session, pit_ids_t, t1) if t1 else {}
+    # Wrap the per-replay-date bar lists into per-member ascending series so the
+    # shared ``_build_member_observations`` owner can extract the T-row / T-1-row
+    # bar (``last_bar`` for the vec path) and the strict-prior window (only for the
+    # window-bound fallback) identically to the batch path.  ``bar_facts`` holds
+    # the T-day bar(s); ``t1_facts`` holds the T-1-day bar(s) — concat keeps the
+    # ascending order the series owner expects (t1 < t).
+    bars: dict[uuid.UUID, _InstrumentBarSeries] = {}
+    for inst_id in bar_facts:
+        # ``bar_facts`` holds the T-day bar(s); ``t1_facts`` holds the T-1-day bar(s)
+        # (t1 < t, no overlap in normal loads).  Key by trade_date so a load that
+        # returns the same bar for both dates (e.g. some test doubles) is not
+        # double-counted, and keep ascending order for the series owner.
+        merged: dict[date, DailyBarFact] = {}
+        for b in t1_facts.get(inst_id, []):
+            merged[b.trade_date] = b
+        for b in bar_facts[inst_id]:
+            merged[b.trade_date] = b
+        ordered = [merged[d] for d in sorted(merged)]
+        bars[inst_id] = _InstrumentBarSeries(
+            facts=tuple(ordered), dates=tuple(b.trade_date for b in ordered)
+        )
     # Canonical immutable structure events for T (PRD §7.4 D).
     structure_events = await _load_structure_events(session, pit_ids_t, trade_date)
     # Current-only canonical facts from the exact-T snapshot (see
@@ -479,8 +505,7 @@ async def prepare_scope_from_member_ids(
         t1=t1,
         states_t=states_t,
         states_t1=states_t1,
-        bar_facts=bar_facts,
-        t1_facts=t1_facts,
+        bars=bars,
         current_only_facts=current_only_facts,
     )
 
@@ -585,6 +610,17 @@ class _InstrumentBarSeries:
         start = bisect_left(self.dates, lo)
         end = bisect_right(self.dates, hi)
         return list(self.facts[start:end])
+
+    def last_bar(self, hi: date, lo_days: int = _BAR_LOOKBACK_DAYS) -> DailyBarFact | None:
+        """The single last fact with ``trade_date <= hi`` (or None), O(log n).
+
+        Used by the vectorized fast path so the 400-bar window is NOT materialized
+        per member per replay date — only the T-row bar is needed there.
+        """
+        lo = hi - timedelta(days=lo_days)
+        start = bisect_left(self.dates, lo)
+        end = bisect_right(self.dates, hi)
+        return self.facts[end - 1] if end > start else None
 
 
 def _build_t1_map(
@@ -766,24 +802,40 @@ async def prepare_scope_series_from_member_ids(
     """
     if not trade_dates:
         return []
+    import time
+
+    t0 = time.perf_counter()
     t1_by_date = await _load_batch_calendar(session, trade_dates)
+    cal_ms = (time.perf_counter() - t0) * 1000.0
+    t0 = time.perf_counter()
     states_by_date = await _load_batch_states(session, member_ids, trade_dates, t1_by_date)
+    states_ms = (time.perf_counter() - t0) * 1000.0
+    t0 = time.perf_counter()
     bars = await _load_batch_bars(session, member_ids, trade_dates)
+    bars_ms = (time.perf_counter() - t0) * 1000.0
+    t0 = time.perf_counter()
     events_by_date = await _load_batch_events(session, member_ids, trade_dates)
+    events_ms = (time.perf_counter() - t0) * 1000.0
     # Vectorized preprocessing: per-member VolumeContext series computed once,
     # indexed by the per-T replay (see ``_build_member_observations``).
+    t_vec = time.perf_counter()
     vec_volume = _precompute_vectorized_volume(bars)
+    vec_ms = (time.perf_counter() - t_vec) * 1000.0
 
     pit_ids_t = list(member_ids)
     t1_ids = list(pit_member_ids_t1) if pit_member_ids_t1 is not None else list(pit_ids_t)
 
     out: list[PreparedScope] = []
+    t_loop = time.perf_counter()
     for t in trade_dates:
         t1 = t1_by_date.get(t)
         states_t = states_by_date.get(t, {})
         states_t1 = states_by_date.get(t1, {}) if t1 else {}
-        bar_facts = {inst: series.window(t) for inst, series in bars.items()}
-        t1_facts = {inst: series.window(t1) for inst, series in bars.items()} if t1 else {}
+        # NOTE: the full 400-bar window is NOT materialized here. ``_build_member_observations``
+        # extracts the T-row bar via ``series.last_bar(t)`` (O(log n)) for the
+        # vectorized fast path, and only calls ``series.window(t)`` inside the
+        # window-bound fallback for the few members that need strict-prior history.
+        # This removes the O(dates x members x ~400) list-copy hotspot.
         structure_events = events_by_date.get(t, [])
         current_only_facts = (
             await _load_current_only_snapshot_facts(session, pit_ids_t, t)
@@ -796,8 +848,7 @@ async def prepare_scope_series_from_member_ids(
             t1=t1,
             states_t=states_t,
             states_t1=states_t1,
-            bar_facts=bar_facts,
-            t1_facts=t1_facts,
+            bars=bars,
             current_only_facts=current_only_facts,
             vec_volume=vec_volume,
         )
@@ -818,6 +869,14 @@ async def prepare_scope_series_from_member_ids(
                 events=tuple(structure_events),
             )
         )
+    loop_ms = (time.perf_counter() - t_loop) * 1000.0
+    logger.info(
+        "[scope-prep-batch] scope_type=%s scope_key=%s member_count=%d "
+        "trade_date_count=%d cal_ms=%.1f states_ms=%.1f bars_ms=%.1f events_ms=%.1f "
+        "vec_precompute_ms=%.1f replay_loop_ms=%.1f",
+        scope_type, scope_key, len(member_ids), len(trade_dates),
+        cal_ms, states_ms, bars_ms, events_ms, vec_ms, loop_ms,
+    )
     return out
 
 

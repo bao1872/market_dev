@@ -202,6 +202,9 @@ async def reconstruct_scope_series(
     membership = await resolve_current_membership(
         session, scope_type, scope_key, asof_date=asof_date
     )
+    import time
+
+    t_bulk = time.perf_counter()
     prepared_list = await prepare_scope_series_from_member_ids(
         session,
         scope_type,
@@ -214,7 +217,9 @@ async def reconstruct_scope_series(
         # v2.3) and the large summary_payload JSONB is never transferred.
         load_current_only=False,
     )
+    bulk_ms = (time.perf_counter() - t_bulk) * 1000.0
     series: list[dict[str, Any]] = []
+    t_obs = time.perf_counter()
     for prepared in prepared_list:
         observation = compute_scope_observation(
             scope_type=scope_type,
@@ -238,6 +243,13 @@ async def reconstruct_scope_series(
                 "observation": observation,
             }
         )
+    obs_ms = (time.perf_counter() - t_obs) * 1000.0
+    logger.info(
+        "[scope-reconstruction] scope_type=%s scope_key=%s member_count=%d "
+        "trade_date_count=%d bulk_prep_ms=%.1f per_t_observation_ms=%.1f",
+        scope_type, scope_key, membership.member_count, len(trade_dates),
+        bulk_ms, obs_ms,
+    )
     return {
         "scope": {"scope_type": scope_type, "scope_key": scope_key},
         "membership": {
