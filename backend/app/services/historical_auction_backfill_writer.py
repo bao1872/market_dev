@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -254,6 +255,16 @@ async def write_bar_quotes(
     性能：按 chunk_size 分批小事务，每 chunk 一次 execute + flush；chunk 间不累积
     大事务，避免锁表与事务内存膨胀。
     """
+    # [CHANGE-20260817-001-FIX] dry-write 开关：不触 DB，仅计数返回（本地验证用）。
+    if os.environ.get("AUCTION_BACKFILL_DRY_WRITE") == "1":
+        counted = 0
+        for fact in facts:
+            if fact is None or fact.instrument_id is None:
+                skipped += 1
+            else:
+                counted += 1
+        return {"written": 0, "skipped": skipped, "failed": 0, "dry": counted}
+
     written = 0
     skipped = 0
     failed = 0
@@ -317,13 +328,16 @@ def project_row_to_fact(
     # source_status 是回补专用词表；映射为 quality_status
     source_status = row.get("source_status")
     canonicalization_status = row.get("canonicalization_status")
+    # [CHANGE-20260817-001-FIX] 词表对齐正式 canonical vocabulary（非测试 fixture 的
+    # ZERO_VOLUME/EMPTY/INVALID_VOLUME）。SOURCE 侧：TARGET_WINDOW 系列→OK；
+    # SOURCE_EMPTY→ZERO_VOLUME；SOURCE_ERROR/STALLED/LIMIT→ERROR。
     if source_status == "SOURCE_EMPTY":
         quality_status = QUALITY_ZERO_VOLUME
     elif source_status in ("SOURCE_ERROR", "TARGET_SEARCH_STALLED", "TARGET_SEARCH_LIMIT_REACHED"):
         quality_status = QUALITY_ERROR
-    elif canonicalization_status in ("ZERO_VOLUME", "EMPTY"):
+    elif canonicalization_status in ("NO_VOLUME_BEARING_0925", "EMPTY"):
         quality_status = QUALITY_ZERO_VOLUME
-    elif canonicalization_status == "INVALID_VOLUME":
+    elif canonicalization_status == "INVALID_VOLUME_0925":
         quality_status = QUALITY_INVALID_VOLUME
     else:
         quality_status = QUALITY_OK
@@ -334,15 +348,19 @@ def project_row_to_fact(
     if canonicalization_status:
         reason_codes.append(f"backfill_canon:{canonicalization_status}")
 
+    # [CHANGE-20260817-001-FIX] 字段名对齐 _project_member_row 真实输出：
+    # - prev_close ← previous_close_raw（非 fixture 的 prev_close）
+    # - 竞价只有单一成交，全部 matched：matched_volume=auction_volume_shares, unmatched=0
+    auction_volume = _to_int(row.get("auction_volume_shares"))
     return MemberFactProjection(
         instrument_id=instrument_id,
         trade_date=trade_date,
         final_price=_to_float(row.get("auction_price_raw")),
-        prev_close=_to_float(row.get("prev_close")),
-        volume=_to_int(row.get("auction_volume_shares")),
+        prev_close=_to_float(row.get("previous_close_raw")),
+        volume=auction_volume,
         amount=_to_float(row.get("auction_amount")),
-        matched_volume=_to_int(row.get("auction_matched_volume_shares")),
-        unmatched_volume=_to_int(row.get("auction_unmatched_volume_shares")),
+        matched_volume=auction_volume,
+        unmatched_volume=0,
         quality_status=quality_status,
         reason_codes=reason_codes,
         raw_payload=dict(row),

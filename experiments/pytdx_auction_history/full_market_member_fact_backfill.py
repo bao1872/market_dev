@@ -806,7 +806,12 @@ def _emit_member_row(
     code_sha: str | None,
     as_of: date,
     M: dict,
-) -> None:
+) -> dict | None:
+    """返回投影后的正式 row（`_project_member_row` 输出）；RUN_ERROR 时返回 None。
+
+    [CHANGE-20260817-001-FIX] 返回 row，使 DB 投影复用同一份正式 row，
+    避免把 raw kernel obs 误传给 ``project_row_to_fact``（字段/词表错接 P0）。
+    """
     M["current_symbol"] = inst.symbol
     run_error_exc = obs.get("__run_error__") if isinstance(obs, dict) else None
     if run_error_exc is not None:
@@ -853,7 +858,7 @@ def _emit_member_row(
         M["written"] += 1
         M["run_error"] += 1
         M["source_status_agg"]["RUN_ERROR"] = M["source_status_agg"].get("RUN_ERROR", 0) + 1
-        return
+        return None
     row = _project_member_row(
         obs, trade_date, bar_index,
         listing_date_by_symbol.get(inst.symbol), code_sha, as_of,
@@ -886,6 +891,7 @@ def _emit_member_row(
     sm = row.get("search_mode")
     if sm is not None:
         M["search_mode_agg"][sm] = M["search_mode_agg"].get(sm, 0) + 1
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -975,14 +981,14 @@ async def _run_bar_partition(
                 chunk_count += 1
                 db_facts_buffer: list[MemberFactProjection] = []
                 for inst, obs in zip(chunk, observations):
-                    _emit_member_row(
+                    # [CHANGE-20260817-001-FIX] 复用正式 row 投影，避免 raw obs 错接
+                    projected = _emit_member_row(
                         f, obs, trade_date, bar_index, inst,
                         listing_date_by_symbol, code_sha, as_of, M,
                     )
-                    # [CHANGE-20260817-001] 落库投影：RUN_ERROR 不写库（提取失败）
-                    if isinstance(obs, dict) and "__run_error__" not in obs:
+                    if projected is not None:
                         db_facts_buffer.append(
-                            project_row_to_fact(obs, inst.instrument_id, trade_date)
+                            project_row_to_fact(projected, inst.instrument_id, trade_date)
                         )
                 # [CHANGE-20260817-001] 每 chunk 结束 upsert（分批小事务，避免长事务）
                 if capture_run is not None and db_facts_buffer:
@@ -1104,6 +1110,9 @@ async def _run_bar_partition(
         and (unknown_source == 0)
         and (complete_count == canonical_complete)
         and (unknown_canonical == 0)
+        # [CHANGE-20260817-001-FIX] DB 落库失败必须阻止 partition 判成功，
+        # 否则 resume 会跳过缺数据的 partition（P0）。
+        and (db_failed_rows == 0)
     )
     partition_status = (
         PARTITION_STATUS_COMPLETED if reconciled else PARTITION_STATUS_FAILED
@@ -1323,6 +1332,7 @@ async def run_backfill(
     as_of: date = AS_OF,
     mdas_chunk_size: int = MDAS_CHUNK_SIZE,
     db_chunk_size: int = 500,
+    db_writer=None,            # 注入 writer；None → 不落库（benchmark/dry 默认）
 ) -> dict:
     if run_id is None:
         run_id = f"{RUN_ID_PREFIX}_{as_of.isoformat()}"
@@ -1404,6 +1414,7 @@ async def run_backfill(
             require_listing_coverage=require_listing_coverage,
             as_of=as_of, root_manifest=root_manifest,
             mdas_chunk_size=mdas_chunk_size,
+            db_writer=db_writer,
         )
     finally:
         if enable_run_lock:
@@ -1418,6 +1429,7 @@ async def _run_backfill_impl(
     require_listing_coverage: bool, as_of: date, root_manifest: dict,
     mdas_chunk_size: int = MDAS_CHUNK_SIZE,
     db_chunk_size: int = 500,
+    db_writer=None,
 ) -> dict:
     _out_root = output_root
     _mdas = mdas or MarketDataAggregationService()
@@ -1453,7 +1465,7 @@ async def _run_backfill_impl(
     failed = 0
     resume_skipped = 0
 
-    async def _bars_loop(sess, adapter_for_run, snapshot_or_none, *, db_chunk_size=db_chunk_size):
+    async def _bars_loop(sess, adapter_for_run, snapshot_or_none, *, db_chunk_size=db_chunk_size, db_writer=db_writer):
         nonlocal completed, failed, resume_skipped
         _mdas_chunk_size = mdas_chunk_size
         # Round 3B-E2 PART 2 — fail fast：无效 chunk size 必须在 partition 循环之前
@@ -1569,7 +1581,7 @@ async def _run_backfill_impl(
                     session=sess,
                     offset_hints=offset_hints,
                     chunk_size=_mdas_chunk_size,
-                    db_writer=write_bar_quotes,
+                    db_writer=db_writer,
                     db_chunk_size=db_chunk_size,
                     backfill_run_id=run_id,
                 )
@@ -1710,6 +1722,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-root", default=str(OUTPUT_DIR))
     p.add_argument("--recover-stale-lock", action="store_true",
                    help="显式 recover stale run.lock（owner process 已不存在）")
+    p.add_argument("--dry-write", action="store_true",
+                   help="[CHANGE-20260817-001-FIX] 不落 PostgreSQL（writer no-op），"
+                        "用于本地验证执行路径/进度，不污染生产历史表")
+    p.add_argument("--write-db", action="store_true",
+                   help="显式启用 PostgreSQL 落库（benchmark 默认不落库；live 默认落库）")
     p.add_argument("--require-listing-coverage", action="store_true",
                    help="live preflight：listing_date missing==0 否则 STOP")
     p.add_argument("--mdas-chunk-size", type=int, default=MDAS_CHUNK_SIZE,
@@ -1750,6 +1767,18 @@ def _cli_main(argv: list[str] | None = None) -> int:
     run_id = args.run_id or f"{RUN_ID_PREFIX}_{as_of.isoformat()}"
     out_manifest: dict | None = None
 
+    # [CHANGE-20260817-001-FIX] db_writer 决策：
+    # - --dry-write 始终不落库（writer no-op 双保险）
+    # - benchmark 默认不落库；显式 --write-db 才落库
+    # - live 默认落库；--dry-write 可旁路
+    if args.dry_write:
+        os.environ["AUCTION_BACKFILL_DRY_WRITE"] = "1"
+        db_writer = None
+    elif args.mode == "benchmark":
+        db_writer = write_bar_quotes if args.write_db else None
+    else:  # live
+        db_writer = write_bar_quotes
+
     if args.mode == "live":
         out_manifest = asyncio.run(run_backfill(
             run_id=run_id, as_of=as_of, output_root=output_root,
@@ -1757,6 +1786,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
             recover_stale_lock=args.recover_stale_lock,
             require_listing_coverage=args.require_listing_coverage,
             mdas_chunk_size=args.mdas_chunk_size,
+            db_writer=db_writer,
         ))
     else:  # benchmark
         async def _benchmark():
@@ -1774,6 +1804,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
                 as_of=as_of, output_root=output_root, code_sha=code_sha,
                 enable_run_lock=True, recover_stale_lock=args.recover_stale_lock,
                 mdas_chunk_size=args.mdas_chunk_size,
+                db_writer=db_writer,
             )
         out_manifest = asyncio.run(_benchmark())
 
