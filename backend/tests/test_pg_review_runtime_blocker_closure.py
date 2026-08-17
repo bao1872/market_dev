@@ -62,7 +62,7 @@ async def _make_instruments(db_session, *, n: int) -> list[uuid.UUID]:
     ids: list[uuid.UUID] = []
     for i in range(n):
         inst_id = uuid.uuid4()
-        sym = f"T{uuid.uuid4().hex[:9]}"  # 保证唯一且合法（字母+数字，非真实 A 股代码）
+        sym = f"T{uuid.uuid4().hex[:16]}"  # 保证唯一且合法（字母+数字，非真实 A 股代码）
         db_session.add(
             Instrument(
                 id=inst_id,
