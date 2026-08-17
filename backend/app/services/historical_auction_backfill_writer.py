@@ -219,7 +219,6 @@ async def _upsert_chunk(
             "raw_payload": stmt.excluded.raw_payload,
             "source_time": stmt.excluded.source_time,
             "is_final": stmt.excluded.is_final,
-            "frozen_at": stmt.excluded.frozen_at,
         },
     )
     try:
