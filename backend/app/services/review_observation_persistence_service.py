@@ -64,19 +64,35 @@ CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES: frozenset[str] = frozenset(
 )
 
 
+# 成员数下限：concept 成员数 <= 此值时样本过小，无统计意义，A 步不持久化。
+CONCEPT_OBSERVATION_EXCLUDE_MIN_MEMBER_COUNT: int = 10
+
+
 def is_scope_observation_persistence_excluded(
     *,
     scope_type: str,
     scope_name: str,
+    member_count: int | None = None,
 ) -> bool:
     """判断 scope 是否应被 A 步观察持久化排除。
 
     仅对 concept scope 生效；industry_l1/l2/l3 永不排除（板块语义稳定）。
-    排除依据：板块名为 A 级机制/资格/事件标签（显式清单，无主题语义）。
+    排除依据（满足任一即排除）：
+      1. 板块名为 A 级机制/资格/事件标签（显式清单，无主题语义）；
+      2. member_count 非 None 且 <= CONCEPT_OBSERVATION_EXCLUDE_MIN_MEMBER_COUNT
+         （成员样本过小，无统计意义）。
+    member_count 由调用方在 prepare 后传入；prepare 前只做 name 过滤。
     """
     if scope_type != "concept":
         return False
-    return scope_name in CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES
+    if scope_name in CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES:
+        return True
+    if (
+        member_count is not None
+        and member_count <= CONCEPT_OBSERVATION_EXCLUDE_MIN_MEMBER_COUNT
+    ):
+        return True
+    return False
 
 # Market is explicitly NOT activated for historical persistence: the current
 # active universe cannot be used against a historical trade_date (prompt §16).

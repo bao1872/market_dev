@@ -1493,6 +1493,19 @@ async def _persist_canonical_scope_observation(
         )
         return
 
+    # 成员数过小（<=10）的 concept 样本无统计意义，A 步不持久化（prepare 后拿真实 count）。
+    if is_scope_observation_persistence_excluded(
+        scope_type=scope.scope_type,
+        scope_name=scope.scope_name,
+        member_count=len(prep.members),
+    ):
+        logger.info(
+            "[ReviewOrchestrator] 规范事实层跳过成员过小 concept: "
+            "%s/%s scope_name=%s member_count=%d",
+            scope.scope_type, scope.scope_key, scope.scope_name, len(prep.members),
+        )
+        return
+
     # CORRECTION: 规范事实层双写必须在 nested transaction / savepoint 内执行。
     # 若 canonical DB flush 失败，仅回滚该 savepoint，外层 legacy transaction
     # （metrics/signal）仍可继续提交，互不污染。

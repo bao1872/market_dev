@@ -145,6 +145,31 @@ async def test_excluded_concept_scope_returns_without_prepare_or_save():
 
 
 @pytest.mark.asyncio
+async def test_small_member_concept_scope_returns_without_save():
+    """成员数 <=10 的 concept：A 步持久化排除（prepare 后按真实 count 判定），不写表。"""
+    run = _make_run()
+    scope = _scope("concept", str(uuid.uuid4()))
+    scope.scope_name = "赛马概念"
+    # _prep 默认 1 个成员，满足 <=10 触发成员数排除。
+    fake_prep = _prep("concept", str(uuid.uuid4()))
+
+    with patch.object(
+        orch, "prepare_scope", AsyncMock(return_value=fake_prep),
+    ), patch.object(
+        orch, "compute_scope_observation", return_value=OBSERVATION,
+    ), patch.object(
+        orch, "check_observation_invariants", return_value=[{"ok": True, "name": "x"}],
+    ), patch.object(
+        orch, "save_scope_observation_fact", AsyncMock(),
+    ) as mock_save:
+        await orch._persist_canonical_scope_observation(
+            _mock_session(), run, scope,  # type: ignore[arg-type]
+        )
+
+    mock_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unavailable_scope_returns_without_persist():
     """market/major_index/style 或空成员：直接 return，不写表。"""
     for scope_type in ("market", "major_index", "style"):

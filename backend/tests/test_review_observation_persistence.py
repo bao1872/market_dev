@@ -160,6 +160,38 @@ def test_b_c_scope_not_filtered_by_exclude_list() -> None:
         ), name
 
 
+def test_member_count_below_or_equal_threshold_is_excluded() -> None:
+    # 成员数 <= 10 的 concept（样本过小）排除；>10 保留。
+    for n in (0, 1, 4, 8, 10):
+        assert is_scope_observation_persistence_excluded(
+            scope_type="concept", scope_name="某个小概念", member_count=n,
+        ), n
+    assert not is_scope_observation_persistence_excluded(
+        scope_type="concept", scope_name="某个小概念", member_count=11,
+    )
+    assert not is_scope_observation_persistence_excluded(
+        scope_type="concept", scope_name="某个小概念", member_count=100,
+    )
+
+
+def test_member_count_without_count_keeps_theme() -> None:
+    # member_count=None（prepare 前）时只按 name 过滤，真实主题小样本保留到 prepare 后判定。
+    assert not is_scope_observation_persistence_excluded(
+        scope_type="concept", scope_name="中船系",
+    )
+    # 带 member_count 才触发成员数排除。
+    assert is_scope_observation_persistence_excluded(
+        scope_type="concept", scope_name="中船系", member_count=10,
+    )
+
+
+def test_member_count_threshold_not_applied_to_industry() -> None:
+    # industry scope 永不受成员数阈值影响。
+    assert not is_scope_observation_persistence_excluded(
+        scope_type="industry_l1", scope_name="银行", member_count=1,
+    )
+
+
 def test_canonical_top_level_sections_exact() -> None:
     # Blocker #1: the canonical table only accepts the exact canonical set.
     assert CANONICAL_TOP_LEVEL_SECTIONS == frozenset(
