@@ -23,11 +23,10 @@ from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.member_fact import (
-    _REVIEW_STATE_KEYS,
     DailyBarFact,
     previous_state_to_flat,
     state_to_continuous,
@@ -245,11 +244,24 @@ async def _load_bar_facts(
     instrument_ids: list[uuid.UUID],
     trade_date: date,
 ) -> dict[uuid.UUID, list[DailyBarFact]]:
-    """Ascending per-instrument daily bar facts up to ``trade_date`` (window)."""
+    """Ascending per-instrument daily bar facts up to ``trade_date`` (window).
+
+    PERF-IO-2: column projection identical to ``_load_batch_bars`` — only the
+    ``DailyBarFact`` columns are selected, never the full ``BarDaily`` ORM row.
+    """
     if not instrument_ids:
         return {}
     stmt = (
-        select(BarDaily)
+        select(
+            BarDaily.instrument_id,
+            BarDaily.trade_date,
+            BarDaily.open,
+            BarDaily.high,
+            BarDaily.low,
+            BarDaily.close,
+            BarDaily.volume,
+            BarDaily.amount,
+        )
         .where(
             BarDaily.instrument_id.in_(instrument_ids),
             BarDaily.trade_date <= trade_date,
@@ -258,7 +270,7 @@ async def _load_bar_facts(
         .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
     )
     by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
-    for bar in (await session.execute(stmt)).scalars():
+    for bar in (await session.execute(stmt)).all():
         by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
     return dict(by_instrument)
 
@@ -690,25 +702,23 @@ async def _load_batch_states(
     """First Pyramid daily_state payloads for every requested T and its exact T-1
     (one query), grouped by trade_date -> {instrument_id: state_payload}.
 
-    PERF-IO-1: only the Review-consumed ``state_payload`` keys (``_REVIEW_STATE_KEYS``)
-    are projected via ``jsonb_build_object`` in SQL, so the full history JSONB is never
-    transferred / decoded.  Pure physical projection — the canonical semantic mapping
-    (``previous_state_to_flat`` / ``state_to_continuous``) stays untouched in Python,
-    and reads every missing key as ``None`` exactly like the full payload.
+    PERF-IO-1-REVERT: the SQL-side ``jsonb_build_object`` key projection is
+    removed.  On the server (where Review actually runs) there is no network
+    transfer to save, and per-row JSONB construction in SQL costs more than the
+    full payload that is already local (measured ~2.4x slower).  The loader keeps
+    a plain 3-column projection (``instrument_id`` / ``trade_date`` /
+    ``state_payload``) so ORM hydration of the full row is still avoided, while
+    the canonical semantic mapping (``previous_state_to_flat`` /
+    ``state_to_continuous``) reads the full ``state_payload`` exactly as before.
     """
     if not instrument_ids or not trade_dates:
         return {}
     dates = set(trade_dates)
     dates.update(d for d in t1_by_date.values() if d is not None)
-    # JSONB projection args: alternating key string + `state_payload -> 'key'`.
-    projection_args: list[Any] = []
-    for key in sorted(_REVIEW_STATE_KEYS):
-        projection_args.append(key)
-        projection_args.append(FirstPyramidHistoryDailyState.state_payload[key])
     stmt = select(
         FirstPyramidHistoryDailyState.instrument_id,
         FirstPyramidHistoryDailyState.trade_date,
-        func.jsonb_build_object(*projection_args).label("state_payload"),
+        FirstPyramidHistoryDailyState.state_payload,
     ).where(
         FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
         FirstPyramidHistoryDailyState.trade_date.in_(sorted(dates)),
@@ -726,12 +736,28 @@ async def _load_batch_bars(
     trade_dates: list[date],
 ) -> dict[uuid.UUID, _InstrumentBarSeries]:
     """All daily bars across ``[first-400d, last]`` once (one query), grouped per
-    instrument ascending.  Per-date windows are sliced in memory at replay."""
+    instrument ascending.  Per-date windows are sliced in memory at replay.
+
+    PERF-IO-2: only the columns ``DailyBarFact`` consumes (OHLCV + amount) are
+    selected — the full ``BarDaily`` ORM row (incl. ``adj_factor``) is never
+    hydrated, which is the largest measured I/O cost on the server.  Pure physical
+    projection: ``DailyBarFact.from_row`` reads the same fields from the projected
+    Row as from the full model.
+    """
     if not instrument_ids or not trade_dates:
         return {}
     first, last = trade_dates[0], trade_dates[-1]
     stmt = (
-        select(BarDaily)
+        select(
+            BarDaily.instrument_id,
+            BarDaily.trade_date,
+            BarDaily.open,
+            BarDaily.high,
+            BarDaily.low,
+            BarDaily.close,
+            BarDaily.volume,
+            BarDaily.amount,
+        )
         .where(
             BarDaily.instrument_id.in_(instrument_ids),
             BarDaily.trade_date >= first - timedelta(days=_BAR_LOOKBACK_DAYS),
@@ -740,7 +766,7 @@ async def _load_batch_bars(
         .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
     )
     by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
-    for bar in (await session.execute(stmt)).scalars():
+    for bar in (await session.execute(stmt)).all():
         by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
     out: dict[uuid.UUID, _InstrumentBarSeries] = {}
     for inst, facts in by_instrument.items():
