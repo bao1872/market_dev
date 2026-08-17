@@ -29,7 +29,6 @@ run_symbol_obs / batch_mdas_fn / adapter / session / output_root / code_sha 实�
 import asyncio
 import hashlib
 import json
-import os
 import shutil
 import tempfile
 from datetime import date, timedelta
@@ -37,39 +36,36 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
-
 from app.models.instrument import Instrument
 
 from auction_history_semantics_validation import SampleInstrument
 from full_market_member_fact_backfill import (
     AS_OF,
-    BAR_COUNT,
-    CompletedPartitionMetadataMismatch,
-    RunAlreadyActive,
-    RunLockStale,
+    LEGACY_RESUME_COMPATIBLE_SHA,
+    MDAS_CHUNK_SIZE,
+    PARTITION_STATUS_COMPLETED,
+    PARTITION_STATUS_FAILED,
     RESUME_BLOCK,
     RESUME_RERUN,
     RESUME_SKIP,
-    run_symbol_backfill_observation,
-    _board_for_symbol,
-    _to_sample_inst,
-    _partition_resume_decision,
-    _expected_partition_metadata,
-    _accumulate_partition_quality,
-    _run_bar_partition,
-    resolve_backfill_population_at,
-    check_listing_date_coverage,
-    run_backfill,
-    PARTITION_STATUS_COMPLETED,
-    PARTITION_STATUS_FAILED,
-    load_population_once,
-    filter_population_at,
+    CompletedPartitionMetadataMismatch,
     PopulationSnapshot,
+    RunAlreadyActive,
     RunLock,
-    _partition_dir,
-    _write_json,
+    RunLockStale,
+    _board_for_symbol,
+    _expected_partition_metadata,
     _load_offset_hints,
     _offset_hints_payload,
+    _partition_dir,
+    _partition_resume_decision,
+    _to_sample_inst,
+    _write_json,
+    filter_population_at,
+    load_population_once,
+    resolve_backfill_population_at,
+    run_backfill,
+    run_symbol_backfill_observation,
 )
 
 # ---------------------------------------------------------------------------
@@ -276,7 +272,8 @@ def _run(tmp_out, run_id, bar_dates, pop, fake, code_sha=_TEST_SHA,
 
 
 def _kernel_run(tmp_out, run_id, bar_dates, pop, *, adapter, session,
-                batch_mdas_fn, mdas=None, code_sha=_TEST_SHA):
+                batch_mdas_fn, mdas=None, code_sha=_TEST_SHA,
+                mdas_chunk_size=MDAS_CHUNK_SIZE):
     """通过真实 kernel observer 路径（run_symbol_obs=None + _batch_mdas）运行。"""
     async def _cal(session, T, n):
         return bar_dates
@@ -288,7 +285,8 @@ def _kernel_run(tmp_out, run_id, bar_dates, pop, *, adapter, session,
             calendar_fn=_cal, population_fn=_pop,
             run_symbol_obs=None, batch_mdas_fn=batch_mdas_fn,
             output_root=tmp_out, adapter=adapter, session=session,
-            mdas=mdas, code_sha=code_sha)
+            mdas=mdas, code_sha=code_sha,
+            mdas_chunk_size=mdas_chunk_size)
     return asyncio.run(_go())
 
 
@@ -704,7 +702,6 @@ def test_listing_date_coverage_preflight(tmp_out):
 
 def test_listing_coverage_summary():
     # check_listing_date_coverage 纯逻辑：present/missing 统计
-    from full_market_member_fact_backfill import get_active_a_share_instruments
     uid = UUID("11111111-2222-3333-4444-555555555555")
     rows = [
         Instrument(id=uid, symbol="600001", name="a", market="SH",
@@ -1321,3 +1318,273 @@ def test_d2_t10_midrun_resume_uses_target_page_offset(tmp_out):
     smd = res2["search_mode_distribution"]
     assert smd.get("TARGET_PAGE_BIDIRECTIONAL", 0) == 1
     assert smd.get("COLD", 0) == 1
+
+
+# ============================================================
+# Round 3B-E1 — Bounded-Memory Resume Fix
+# ============================================================
+
+def _make_pop(syms):
+    """构建单日 population dict：{date(2024,1,2): [SampleInstrument, ...]}。"""
+    return {date(2024, 1, 2): [_sample(s, m) for s, m in syms]}
+
+
+def _read_member_rows(output_root, run_id, trade_date):
+    """读取 partition 的 member_facts.jsonl（只读，用于 parity 断言）。"""
+    p = _partition_dir(run_id, trade_date, output_root) / "member_facts.jsonl"
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text().splitlines():
+        if line.strip():
+            out.append(json.loads(line))
+    return out
+
+
+def _make_chunk_aware_batch(value_factory):
+    """batch_mdas_fn：对 chunk 中每个 instrument_id 返回 value_factory(id, adj)。
+
+    用于验证 bounded chunk 拼接后，合并结果与一次性整市场调用在语义上一致。
+    """
+    calls = []
+
+    async def _batch(mdas, session, instrument_ids, trade_date, *, adj,
+                     adjustment_as_of=None):
+        calls.append({
+            "adj": adj,
+            "trade_date": trade_date,
+            "adjustment_as_of": adjustment_as_of,
+            "ids": list(instrument_ids),
+        })
+        res = {iid: value_factory(iid, adj) for iid in instrument_ids}
+        return res, {}
+
+    return _batch, calls
+
+
+def _write_completed_partition(pdir: Path, trade_date: date, bar_index: int,
+                               code_sha: str, as_of: date, eligible: int):
+    """写入一个 COMPLETED partition_manifest（模拟 crash 前已完成）。"""
+    pdir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "run_id": "fake",
+        "status": PARTITION_STATUS_COMPLETED,
+        "trade_date": trade_date.isoformat(),
+        "bar_index": bar_index,
+        "as_of": as_of.isoformat(),
+        "eligible_instruments": eligible,
+        "code_sha": code_sha,
+        "member_rows_written": eligible,
+    }
+    (pdir / "partition_manifest.json").write_text(json.dumps(manifest))
+    (pdir / "data_quality.json").write_text(json.dumps({"member_rows_written": eligible}))
+
+
+# --- E1-T1: RESUME_SKIP => MDAS calls == 0 (PART 1 hard contract) ---
+def test_e1_resume_skip_zero_mdas_calls(tmp_path):
+    base = tmp_path / "base"
+    pop = {
+        date(2024, 1, 2): [_sample("600000", "SH"), _sample("600001", "SH")],
+        date(2024, 1, 3): [_sample("600000", "SH"), _sample("600001", "SH"),
+                            _sample("600519", "SH")],
+    }
+    run_dir = "e1t1"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    # 第一轮：完整跑两个 bar（每个 bar 调用 MDAS 2 次：none + qfq）
+    res1 = _kernel_run(base, run_dir, [date(2024, 1, 2), date(2024, 1, 3)], pop,
+                       adapter=_fake_page_adapter(), session=_FakeSession(),
+                       batch_mdas_fn=batch_fn, code_sha="runner-sha-AAAA")
+    assert res1["completed_bar_count"] == 2
+    total_after_first = len(calls)
+    # 第二轮 resume：已 COMPLETED 的两个 bar 必须 SKIP（硬合同：MDAS calls == 0）
+    res2 = _kernel_run(base, run_dir, [date(2024, 1, 2), date(2024, 1, 3)], pop,
+                       adapter=_fake_page_adapter(), session=_FakeSession(),
+                       batch_mdas_fn=batch_fn, code_sha="runner-sha-AAAA")
+    assert len(calls) == total_after_first
+    assert res2["resume_skipped"] == 2
+    assert res2["completed_bar_count"] == 2
+
+
+# --- E1-T2: incomplete partition correctly reruns (RERUN path executes MDAS) ---
+def test_e1_incomplete_partition_reruns(tmp_path):
+    base = tmp_path / "base"
+    pop = _make_pop([("600000", "SH"), ("600001", "SH")])
+    run_dir = "e1t2"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    _kernel_run(base, run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="runner-sha-BBBB")
+    before = len(calls)  # 第一轮 1 bar = 2 次 MDAS 调用
+    # 模拟 incomplete：把 partition 标记为 FAILED，期望 RERUN
+    pdir = _partition_dir(run_dir, date(2024, 1, 2), base)
+    man = json.loads((pdir / "partition_manifest.json").read_text())
+    man["status"] = PARTITION_STATUS_FAILED
+    (pdir / "partition_manifest.json").write_text(json.dumps(man))
+    res2 = _kernel_run(base, run_dir, [date(2024, 1, 2)], pop,
+                       adapter=_fake_page_adapter(), session=_FakeSession(),
+                       batch_mdas_fn=batch_fn, code_sha="runner-sha-BBBB")
+    # incomplete/FAILED => RERUN => 重新执行 MDAS（+2 次调用）
+    assert len(calls) == before + 2
+    assert res2["completed_bar_count"] == 1
+
+
+# --- E1-T3: unknown SHA mismatch => BLOCK ---
+def test_e1_unknown_sha_mismatch_blocks(tmp_path):
+    base = tmp_path / "base"
+    pop = _make_pop([("600000", "SH")])
+    run_dir = "e1t3"
+    batch_fn, _ = _make_fake_batch_mdas(value={})
+    # 预先写入 COMPLETED partition，code_sha 为未知值（非兼容 SHA）
+    pdir = _partition_dir(run_dir, date(2024, 1, 2), base)
+    _write_completed_partition(pdir, date(2024, 1, 2), 1, "unknown-sha-XYZ",
+                               AS_OF, len(pop[date(2024, 1, 2)]))
+    with pytest.raises(CompletedPartitionMetadataMismatch):
+        _kernel_run(base, run_dir, [date(2024, 1, 2)], pop,
+                    adapter=_fake_page_adapter(), session=_FakeSession(),
+                    batch_mdas_fn=batch_fn, code_sha="runner-sha-CCCC")
+
+
+# --- E1-T4: cd080ad compatible predecessor => SKIP ---
+def test_e1_legacy_cd080ad_compatible_skip(tmp_path):
+    base = tmp_path / "base"
+    pop = _make_pop([("600000", "SH"), ("600001", "SH")])
+    run_dir = "e1t4"
+    batch_fn, calls = _make_fake_batch_mdas(value={})
+    # 预先写入 COMPLETED partition，code_sha = LEGACY_RESUME_COMPATIBLE_SHA
+    pdir = _partition_dir(run_dir, date(2024, 1, 2), base)
+    _write_completed_partition(pdir, date(2024, 1, 2), 1,
+                               LEGACY_RESUME_COMPATIBLE_SHA, AS_OF,
+                               len(pop[date(2024, 1, 2)]))
+    res = _kernel_run(base, run_dir, [date(2024, 1, 2)], pop,
+                      adapter=_fake_page_adapter(), session=_FakeSession(),
+                      batch_mdas_fn=batch_fn, code_sha="runner-sha-NEW-FIX")
+    # 窄兼容：当前 runner SHA != cd080ad，但属于兼容 SHA => SKIP，不执行 MDAS
+    assert len(calls) == 0
+    assert res["completed_bar_count"] == 1
+    assert res["resume_skipped"] == 1
+    # 兼容证据写入 root manifest
+    compats = res.get("resume_compatibility", [])
+    assert any(c["existing_partition_code_sha"] == LEGACY_RESUME_COMPATIBLE_SHA
+               and c["resume_compatible_from_sha"] == LEGACY_RESUME_COMPATIBLE_SHA
+               for c in compats)
+
+
+# --- E1-T5: chunk size => 输出行数/顺序一致 + 分块执行 ---
+def test_e1_chunk_size_row_order_consistency(tmp_path):
+    syms = [(f"600{i:03d}", "SH") for i in range(10)]
+    pop = _make_pop(syms)
+
+    def _val(iid, adj):
+        return {"id": iid, "adj": adj}
+
+    # chunk_size=2
+    batch_fn_a, calls_a = _make_chunk_aware_batch(_val)
+    res_a = _kernel_run(tmp_path / "base", "e1t5a", [date(2024, 1, 2)], pop,
+                        adapter=_fake_page_adapter(), session=_FakeSession(),
+                        batch_mdas_fn=batch_fn_a, code_sha="runner-sha-CHUNK",
+                        mdas_chunk_size=2)
+    assert res_a["completed_bar_count"] == 1
+    rows_a = _read_member_rows(tmp_path / "base", "e1t5a", date(2024, 1, 2))
+    # chunk_size=10（一次性）
+    batch_fn_b, calls_b = _make_chunk_aware_batch(_val)
+    _kernel_run(tmp_path / "base2", "e1t5b", [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn_b, code_sha="runner-sha-CHUNK",
+                mdas_chunk_size=10)
+    rows_b = _read_member_rows(tmp_path / "base2", "e1t5b", date(2024, 1, 2))
+    # 行数与顺序一致
+    assert len(rows_a) == len(rows_b) == 10
+    assert [r["symbol"] for r in rows_a] == [r["symbol"] for r in rows_b]
+    # 分块确实发生：chunk_size=2 应有 ceil(10/2)=5 个 none 批次
+    none_calls_a = [c for c in calls_a if c["adj"] == "none"]
+    assert len(none_calls_a) == 5
+    none_calls_b = [c for c in calls_b if c["adj"] == "none"]
+    assert len(none_calls_b) == 1
+
+
+# --- E1-T6: chunked vs original semantic fixture parity（Member Fact 行一致） ---
+def test_e1_chunked_vs_original_parity(tmp_path):
+    pop = _make_pop([("600000", "SH"), ("600001", "SH"), ("600519", "SH")])
+
+    def _val(iid, adj):
+        return {"id": iid, "adj": adj}
+
+    batch_fn_a, _ = _make_chunk_aware_batch(_val)
+    _kernel_run(tmp_path / "base", "e1t6a", [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn_a, code_sha="runner-sha-P",
+                mdas_chunk_size=1)
+    rows_a = _read_member_rows(tmp_path / "base", "e1t6a", date(2024, 1, 2))
+
+    batch_fn_b, _ = _make_chunk_aware_batch(_val)
+    _kernel_run(tmp_path / "base2", "e1t6b", [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn_b, code_sha="runner-sha-P",
+                mdas_chunk_size=MDAS_CHUNK_SIZE)
+    rows_b = _read_member_rows(tmp_path / "base2", "e1t6b", date(2024, 1, 2))
+    # Member Fact 行在 chunked vs 整市场下完全一致
+    assert len(rows_a) == len(rows_b) == 3
+    norm_a = {(r["symbol"], r["instrument_id"]) for r in rows_a}
+    norm_b = {(r["symbol"], r["instrument_id"]) for r in rows_b}
+    assert norm_a == norm_b
+
+
+# --- E1-T7: offset hints parity（chunked RERUN 后仍持久化 hints） ---
+def test_e1_offset_hints_parity_after_chunked_run(tmp_path):
+    pop = _make_pop([("600000", "SH"), ("600001", "SH")])
+    run_dir = "e1t7"
+    batch_fn, _ = _make_fake_batch_mdas(value={})
+    res = _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                      adapter=_fake_page_adapter(), session=_FakeSession(),
+                      batch_mdas_fn=batch_fn, code_sha="runner-sha-H",
+                      mdas_chunk_size=1)
+    assert res["completed_bar_count"] == 1
+    # offset_hints.json 持久化（含 version=2）；loader 归一化为 {symbol: hint}
+    hints_path = tmp_path / "base" / run_dir / "offset_hints.json"
+    raw = json.loads(hints_path.read_text())
+    assert raw["version"] == 2
+    hints = _load_offset_hints(hints_path)
+    assert len(hints) == 2
+    # RERUN 后 hints 仍可被下一轮 resume 解析
+    res2 = _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                       adapter=_fake_page_adapter(), session=_FakeSession(),
+                       batch_mdas_fn=batch_fn, code_sha="runner-sha-H",
+                       mdas_chunk_size=1)
+    assert res2["resume_skipped"] == 1
+
+
+# --- E1-T8: reconciliation parity（chunked run 仍写 reconciliation 字段） ---
+def test_e1_reconciliation_parity(tmp_path):
+    pop = _make_pop([("600000", "SH"), ("600001", "SH")])
+    run_dir = "e1t8"
+    batch_fn, _ = _make_fake_batch_mdas(value={})
+    _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="runner-sha-R",
+                mdas_chunk_size=2)
+    # reconciliation 字段存在（data_quality.reconciled 为 bool）
+    pdir = _partition_dir(run_dir, date(2024, 1, 2), tmp_path / "base")
+    dq = json.loads((pdir / "data_quality.json").read_text())
+    assert dq["reconciled"] is True
+    rows = _read_member_rows(tmp_path / "base", run_dir, date(2024, 1, 2))
+    assert len(rows) == 2
+
+
+# --- E1-T9: memory instrumentation 写入 data_quality（PART 3） ---
+def test_e1_memory_instrumentation_recorded(tmp_path):
+    pop = _make_pop([("600000", "SH"), ("600001", "SH")])
+    run_dir = "e1t9"
+    batch_fn, _ = _make_fake_batch_mdas(value={})
+    _kernel_run(tmp_path / "base", run_dir, [date(2024, 1, 2)], pop,
+                adapter=_fake_page_adapter(), session=_FakeSession(),
+                batch_mdas_fn=batch_fn, code_sha="runner-sha-M",
+                mdas_chunk_size=1)
+    pdir = _partition_dir(run_dir, date(2024, 1, 2), tmp_path / "base")
+    dq = json.loads((pdir / "data_quality.json").read_text())
+    mem = dq.get("memory", {})
+    # Linux 下应有 RSS 证据；非 Linux 环境为 0.0 但字段必须存在
+    assert "rss_before_bar_mb" in mem
+    assert "rss_before_mdas_mb" in mem
+    assert "peak_rss_bar_mb" in mem
+    assert mem.get("mdas_chunk_size") == 1
+    assert mem.get("mdas_chunk_count") == 2  # 2 instruments / chunk 1

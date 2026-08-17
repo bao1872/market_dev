@@ -46,12 +46,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
-
-# ---------------------------------------------------------------------------
-# 权威 owner（禁止第二套 market logic / calendar / qfq 重算）
-# ---------------------------------------------------------------------------
-from sqlalchemy import select
+from typing import Any
 
 from app.core.pytdx_adapter import PytdxAdapter
 from app.db import AsyncSessionLocal
@@ -60,18 +55,19 @@ from app.services.feature_snapshot_service import get_active_a_share_instruments
 from app.services.instrument_lifecycle_service import stock_symbol_sql_filter
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 
+# ---------------------------------------------------------------------------
+# 权威 owner（禁止第二套 market logic / calendar / qfq 重算）
+# ---------------------------------------------------------------------------
+from sqlalchemy import select
+
 from auction_history_semantics_validation import (
     SampleInstrument,
     previous_trading_dates,
 )
-
 from auction_member_fact_backfill_kernel import (
     BACKFILL_SOURCE_FROZEN,
-    SEARCH_MODES_FROZEN,
     SOURCE_EMPTY,
     SOURCE_ERROR,
-    SOURCE_TARGET_SEARCH_LIMIT_REACHED,
-    SOURCE_TARGET_SEARCH_STALLED,
     SOURCE_TARGET_WINDOW_COMPLETE,
     build_historical_member_fact,
     fetch_auction_0925_targeted,
@@ -79,6 +75,14 @@ from auction_member_fact_backfill_kernel import (
 
 # offset_hints.json 版本（Round 3B-D2 PART F）：v2 versioned structure
 OFFSET_HINTS_VERSION = 2
+
+# Round 3B-E1 PART 2 — bounded MDAS batch：禁止整市场 raw+qfq 同时常驻。
+# 初始默认候选 512（benchmark 在 256/512/1024 中选满足 peak RSS<=1.5GiB 的最快配置）。
+MDAS_CHUNK_SIZE = 512
+
+# Round 3B-E1 PART 4 — operational-only runner SHA 安全续用 cd080ad 已完成 partitions。
+# 仅允许该 SHA 的 COMPLETED partitions 被本次 fix skip（其余未知 code_sha mismatch 仍 BLOCK）。
+LEGACY_RESUME_COMPATIBLE_SHA = "cd080add53971bb16a59913dec85c56e35d912a2"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -270,6 +274,33 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Round 3B-E1 PART 3 — Linux process memory evidence helper (instrumentation only).
+def _read_self_mem_mb() -> tuple[float, float]:
+    """Read VmRSS / VmHWM from /proc/self/status (MB). Returns (rss_mb, hwm_mb).
+
+    Non-invasive: only parses /proc. Returns (0.0, 0.0) if /proc/self/status
+    unavailable (e.g. non-Linux). Does NOT alter business state.
+    """
+    try:
+        text = Path("/proc/self/status").read_text()
+    except Exception:
+        return (0.0, 0.0)
+    rss_kb = 0.0
+    hwm_kb = 0.0
+    for line in text.splitlines():
+        if line.startswith("VmRSS:"):
+            try:
+                rss_kb = float(line.split()[1])
+            except (IndexError, ValueError):
+                pass
+        elif line.startswith("VmHWM:"):
+            try:
+                hwm_kb = float(line.split()[1])
+            except (IndexError, ValueError):
+                pass
+    return (rss_kb / 1024.0, hwm_kb / 1024.0)
+
+
 def _partition_dir(run_id: str, trade_date: date, output_root: Path | None = None) -> Path:
     root = output_root or OUTPUT_DIR
     return root / run_id / "bars" / trade_date.isoformat()
@@ -370,17 +401,35 @@ def _expected_partition_metadata(trade_date: date, bar_index: int,
 
 
 def _partition_resume_decision(existing_manifest: dict | None,
-                               expected_metadata: dict) -> str:
+                               expected_metadata: dict,
+                               current_runner_sha: str | None = None) -> str:
     """三态：NO_EXISTING→RERUN；COMPLETED+match→SKIP；
-    COMPLETED+mismatch→BLOCK；RUNNING/FAILED→RERUN。"""
+    COMPLETED+mismatch→BLOCK；RUNNING/FAILED→RERUN。
+
+    Round 3B-E1 PART 4 — 窄兼容：当 COMPLETED partition 的 code_sha 与当前
+    runner SHA 不同，但恰好等于 LEGACY_RESUME_COMPATIBLE_SHA（且仅当
+    trade_date/bar_index/as_of/eligible_instruments 仍匹配），允许 SKIP——
+    这样 operational-only runner fix 可安全续用 cd080ad 已完成 partitions，
+    无需重跑。其他任何未知 code_sha mismatch 仍 BLOCK（保留所有 code_sha 保护）。
+    """
     if existing_manifest is None:
         return RESUME_RERUN
     status = existing_manifest.get("status")
     if status == PARTITION_STATUS_COMPLETED:
-        for k, v in expected_metadata.items():
-            if existing_manifest.get(k) != v:
+        # 业务前提字段必须先匹配（trade_date/bar_index/as_of/eligible_instruments）
+        for k in ("trade_date", "bar_index", "as_of", "eligible_instruments"):
+            if existing_manifest.get(k) != expected_metadata.get(k):
                 return RESUME_BLOCK
-        return RESUME_SKIP
+        existing_sha = existing_manifest.get("code_sha")
+        expected_sha = expected_metadata.get("code_sha")
+        if existing_sha == expected_sha:
+            return RESUME_SKIP
+        # code_sha 不同：仅允许窄兼容 SHA 续用，否则 BLOCK
+        if (current_runner_sha is not None
+                and existing_sha == LEGACY_RESUME_COMPATIBLE_SHA
+                and expected_sha == current_runner_sha):
+            return RESUME_SKIP
+        return RESUME_BLOCK
     return RESUME_RERUN
 
 
@@ -658,6 +707,7 @@ async def _run_bar_partition(
     adapter: Any = None,
     raw_mdas_batch_queries: int = 0,
     qfq_mdas_batch_queries: int = 0,
+    mem_instrumentation: dict | None = None,
 ) -> dict:
     pdir = _partition_dir(run_id, trade_date, output_root)
     pdir.mkdir(parents=True, exist_ok=True)
@@ -765,8 +815,7 @@ async def _run_bar_partition(
                     hint_count += 1
                 else:
                     cold_count += 1
-                if n_req > max_requests_per_symbol:
-                    max_requests_per_symbol = n_req
+                max_requests_per_symbol = max(max_requests_per_symbol, n_req)
 
                 sm = row.get("search_mode")
                 if sm is not None:
@@ -872,6 +921,8 @@ async def _run_bar_partition(
         "qfq_mdas_batch_queries": qfq_mdas_batch_queries,
         "processing_seconds": round(processing_seconds, 3),
         "symbols_per_second": round(symbols_per_second, 3),
+        # Round 3B-E1 PART 3 — memory instrumentation（不改变业务结论）
+        "memory": mem_instrumentation or {},
     }
     _write_json(pdir / "data_quality.json", data_quality)
 
@@ -991,6 +1042,7 @@ async def run_backfill(
     enable_run_lock: bool = False,
     recover_stale_lock: bool = False,
     as_of: date = AS_OF,
+    mdas_chunk_size: int = MDAS_CHUNK_SIZE,
 ) -> dict:
     if run_id is None:
         run_id = f"{RUN_ID_PREFIX}_{as_of.isoformat()}"
@@ -1071,6 +1123,7 @@ async def run_backfill(
             session=session, output_root=_out_root, code_sha=_code_sha,
             require_listing_coverage=require_listing_coverage,
             as_of=as_of, root_manifest=root_manifest,
+            mdas_chunk_size=mdas_chunk_size,
         )
     finally:
         if enable_run_lock:
@@ -1083,6 +1136,7 @@ async def _run_backfill_impl(
     _calendar, population, population_fn, run_symbol_obs, batch_mdas_fn,
     adapter, mdas, session, output_root: Path, code_sha: str,
     require_listing_coverage: bool, as_of: date, root_manifest: dict,
+    mdas_chunk_size: int = MDAS_CHUNK_SIZE,
 ) -> dict:
     _out_root = output_root
     _mdas = mdas or MarketDataAggregationService()
@@ -1116,9 +1170,11 @@ async def _run_backfill_impl(
 
     completed = 0
     failed = 0
+    resume_skipped = 0
 
     async def _bars_loop(sess, adapter_for_run, snapshot_or_none):
-        nonlocal completed, failed
+        nonlocal completed, failed, resume_skipped
+        _mdas_chunk_size = mdas_chunk_size
         # Round 3B-D2 PART F resume warm-start：载入持久化的 v2 hints
         # （v2 dict {target_page_offset, boundary_offset} 优先；v1 legacy int 自动
         # 解释为 boundary hint，首次只能走 fallback，完成后升级为 v2）。
@@ -1157,30 +1213,9 @@ async def _run_backfill_impl(
             ]
             eligible = len(population_insts)
 
-            # --- batch MDAS（每 bar：none ×1 / qfq ×1）---
-            raw_batch: dict = {}
-            qfq_batch: dict = {}
-            raw_diag: dict = {}
-            qfq_diag: dict = {}
-            if _run_symbol_obs is None:
-                ids = [s.instrument_id for s in population_insts]
-                if ids and sess is not None:
-                    raw_batch, raw_diag = await _run_batch_mdas(
-                        _mdas, sess, ids, t, adj="none")
-                    qfq_batch, qfq_diag = await _run_batch_mdas(
-                        _mdas, sess, ids, t, adj="qfq", adjustment_as_of=t)
-
-                async def _default_obs(inst, trade_date, _raw=raw_batch, _qfq=qfq_batch):
-                    return await run_symbol_backfill_observation(
-                        adapter_for_run, sess, inst, trade_date, _raw, _qfq,
-                        listing_date=listing_date_by_symbol.get(inst.symbol),
-                        as_of=as_of, bar_index=idx, code_sha=code_sha,
-                        offset_hints=offset_hints,
-                    )
-                observer = _default_obs
-            else:
-                observer = _run_symbol_obs
-
+            # --- RESUME GATE FIRST (Round 3B-E1 PART 1) ---
+            # 在任意 MDAS / Pytdx 调用之前先读取 existing manifest 并决定 resume。
+            # 硬合同：RESUME_SKIP => raw MDAS calls=0 / qfq MDAS calls=0 / Pytdx calls=0。
             existing = None
             mpath = pdir / "partition_manifest.json"
             if mpath.exists():
@@ -1191,10 +1226,25 @@ async def _run_backfill_impl(
                     existing = None
 
             expected_meta = _expected_partition_metadata(t, idx, code_sha, eligible, as_of)
-            decision = _partition_resume_decision(existing, expected_meta)
+            decision = _partition_resume_decision(
+                existing, expected_meta, current_runner_sha=code_sha)
 
             if decision == RESUME_SKIP:
                 completed += 1
+                resume_skipped += 1
+                # Round 3B-E1 PART 4 — 记录窄兼容 resume 证据（不改写已完成 partition 文件）
+                _existing_sha = (existing or {}).get("code_sha")
+                if _existing_sha is not None and _existing_sha != code_sha:
+                    root_manifest.setdefault("resume_compatibility", []).append({
+                        "trade_date": t.isoformat(),
+                        "bar_index": idx,
+                        "existing_partition_code_sha": _existing_sha,
+                        "current_runner_sha": code_sha,
+                        "resume_compatible_from_sha": (
+                            LEGACY_RESUME_COMPATIBLE_SHA
+                            if _existing_sha == LEGACY_RESUME_COMPATIBLE_SHA else None
+                        ),
+                    })
                 dq_path = pdir / "data_quality.json"
                 dq = None
                 if dq_path.exists():
@@ -1211,6 +1261,51 @@ async def _run_backfill_impl(
                     f"metadata mismatch (code_sha/eligible) — refuse overwrite"
                 )
 
+            # --- RERUN path：bounded chunked MDAS (PART 2) + instrumentation (PART 3) ---
+            rss_before_bar, _ = _read_self_mem_mb()
+            raw_batch: dict = {}
+            qfq_batch: dict = {}
+            raw_diag: dict = {}
+            qfq_diag: dict = {}
+            mem_instr: dict = {}
+            if _run_symbol_obs is None:
+                ids = [s.instrument_id for s in population_insts]
+                if ids and sess is not None:
+                    rss_before_mdas, _ = _read_self_mem_mb()
+                    chunk_count = 0
+                    for i in range(0, len(ids), _mdas_chunk_size):
+                        chunk = ids[i:i + MDAS_CHUNK_SIZE]
+                        rb, rd = await _run_batch_mdas(
+                            _mdas, sess, chunk, t, adj="none")
+                        raw_batch.update(rb)
+                        raw_diag.update(rd)
+                        qb, qd = await _run_batch_mdas(
+                            _mdas, sess, chunk, t, adj="qfq", adjustment_as_of=t)
+                        qfq_batch.update(qb)
+                        qfq_diag.update(qd)
+                        chunk_count += 1
+                        # 释放本 chunk 大结果，避免整市场 raw+qfq 同时常驻
+                        del rb, rd, qb, qd
+                    _, peak_hwm = _read_self_mem_mb()
+                    mem_instr = {
+                        "rss_before_bar_mb": round(rss_before_bar, 2),
+                        "rss_before_mdas_mb": round(rss_before_mdas, 2),
+                        "peak_rss_bar_mb": round(peak_hwm, 2),
+                        "mdas_chunk_size": _mdas_chunk_size,
+                        "mdas_chunk_count": chunk_count,
+                    }
+
+                async def _default_obs(inst, trade_date, _raw=raw_batch, _qfq=qfq_batch):
+                    return await run_symbol_backfill_observation(
+                        adapter_for_run, sess, inst, trade_date, _raw, _qfq,
+                        listing_date=listing_date_by_symbol.get(inst.symbol),
+                        as_of=as_of, bar_index=idx, code_sha=code_sha,
+                        offset_hints=offset_hints,
+                    )
+                observer = _default_obs
+            else:
+                observer = _run_symbol_obs
+
             try:
                 manifest = await _run_bar_partition(
                     run_id, t, idx, population_insts, observer,
@@ -1220,6 +1315,7 @@ async def _run_backfill_impl(
                     adapter=adapter_for_run,
                     raw_mdas_batch_queries=raw_diag.get("repository_query_count", 0),
                     qfq_mdas_batch_queries=qfq_diag.get("repository_query_count", 0),
+                    mem_instrumentation=mem_instr if mem_instr else None,
                 )
             except Exception:
                 failed += 1
@@ -1309,6 +1405,7 @@ async def _run_backfill_impl(
         "status": "DONE" if failed == 0 else "PARTIAL",
         "completed_bar_count": completed,
         "failed_bar_count": failed,
+        "resume_skipped": resume_skipped,
     })
     if root_manifest.get("successful_connect_count") == 0 and adapter is None:
         # 真实 adapter 诊断：取真实实例计数（单长连接健康路径应为 1）
@@ -1359,6 +1456,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="显式 recover stale run.lock（owner process 已不存在）")
     p.add_argument("--require-listing-coverage", action="store_true",
                    help="live preflight：listing_date missing==0 否则 STOP")
+    p.add_argument("--mdas-chunk-size", type=int, default=MDAS_CHUNK_SIZE,
+                   help="Round 3B-E1 PART 2：bounded MDAS batch chunk size "
+                        f"（默认 {MDAS_CHUNK_SIZE}，禁止整市场 raw+qfq 同时常驻）")
     return p
 
 
@@ -1400,6 +1500,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
             code_sha=code_sha, enable_run_lock=True,
             recover_stale_lock=args.recover_stale_lock,
             require_listing_coverage=args.require_listing_coverage,
+            mdas_chunk_size=args.mdas_chunk_size,
         ))
     else:  # benchmark
         async def _benchmark():
@@ -1416,6 +1517,7 @@ def _cli_main(argv: list[str] | None = None) -> int:
                 run_id=run_id, bar_dates=bar_dates, population=population,
                 as_of=as_of, output_root=output_root, code_sha=code_sha,
                 enable_run_lock=True, recover_stale_lock=args.recover_stale_lock,
+                mdas_chunk_size=args.mdas_chunk_size,
             )
         out_manifest = asyncio.run(_benchmark())
 
