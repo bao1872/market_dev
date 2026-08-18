@@ -3224,6 +3224,57 @@ def _load_scope_specs(dataset_dir: str, view_name: str) -> list[Any]:
     return specs
 
 
+def _load_dynamics_logic_scope_specs(
+    dataset_dir: str,
+    fixture_path: str,
+) -> list[Any]:
+    """Resolve the VERSIONED 4-scope DYNAMICS-LOGIC-CLOSURE fixture into
+    ``ScopeReplaySpec`` objects (A1-1).
+
+    The fixture is a committed validation contract (NOT the gitignored
+    ``.perfdata/.../views/logic_validation_sample.json``), so the fixed 4-scope
+    sample can be rebuilt from any checkout of the SHA.  Each fixture scope pins
+    its scope_key (UUID) and scope_family; the member_ids come from the frozen
+    Dataset membership snapshot at runtime.
+    """
+    from app.services.review_observation_prep_service import ScopeReplaySpec
+
+    with open(fixture_path, "r", encoding="utf-8") as fh:
+        fixture = json.load(fh)
+    scopes = fixture.get("scopes") or []
+    if not scopes:
+        raise RuntimeError(f"[fixture] {fixture_path} 无 scopes")
+
+    boards = {str(r["id"]): r for r in _load_parquet_rows(dataset_dir, "boards")}
+    selected_board_ids = {str(s["scope_key"]) for s in scopes}
+    by_board: dict[str, list[uuid.UUID]] = {}
+    for m in _load_parquet_rows(dataset_dir, "board_memberships_current_snapshot"):
+        bid = str(m["board_id"])
+        if bid not in selected_board_ids:
+            continue
+        by_board.setdefault(bid, []).append(uuid.UUID(str(m["instrument_id"])))
+
+    specs: list[Any] = []
+    for s in scopes:
+        bid = str(s["scope_key"])
+        board = boards.get(bid)
+        if not board:
+            raise RuntimeError(f"[fixture] board {bid} ({s.get('scope_name')}) 不在 dataset")
+        mems = tuple(by_board.get(bid, ()))
+        # scope_type from the fixture family (concept/industry) so the E2E chain
+        # carries the correct family; fall back to the board type if absent.
+        family = str(s.get("scope_family") or board.get("type") or "concept")
+        specs.append(
+            ScopeReplaySpec(
+                scope_type=family,
+                scope_key=bid,
+                scope_name=str(s.get("scope_name") or board.get("name") or bid),
+                member_ids=mems,
+            )
+        )
+    return specs
+
+
 def _replay_l1_once(
     dataset_dir: str,
     view_name: str,
@@ -3558,7 +3609,9 @@ def _run_dataset_dynamics_logic(
     """``dataset-dynamics-logic``: 4-scope frozen-Dataset full Dynamics chain E2E.
 
     Steps 11-14 of DYNAMICS-LOGIC-CLOSURE.  Runs the FINAL production chain over a
-    small frozen-Dataset sample (``logic_validation_sample`` = 4 scopes):
+    small frozen-Dataset sample.  The fixed 4-scope set comes from the VERSIONED
+    fixture ``scripts/fixtures/review_dynamics_logic_sample.json`` (A1-1), NOT the
+    gitignored ``.perfdata`` view:
 
         Frozen Dataset
           -> existing source mapper (_load_capacity_facts, shared mappers)
@@ -3597,10 +3650,10 @@ def _run_dataset_dynamics_logic(
 
     print("=== dataset-dynamics-logic (4-scope frozen Dataset, full Dynamics chain) ===")
     print(f"dataset_dir : {dataset_dir}")
-    print(f"view        : {view_name}")
     print(f"history     : {history} trading days")
 
-    # ---- Stage A: selection ----
+    # ---- Stage A: selection (A1-1: fixed scope set comes from the VERSIONED
+    # fixture, NOT the gitignored .perfdata view) ----
     if asof_lock:
         sel_asof = date.fromisoformat(asof_lock)
     else:
@@ -3610,11 +3663,21 @@ def _run_dataset_dynamics_logic(
             return 2
         sel_asof = date.fromisoformat(declared)
     selection = _build_replay_selection(dataset_dir, view_name, asof_override=sel_asof)
-    if not selection.scope_specs:
-        logger.error("[dataset-dynamics-logic] view 解析为空 scope_specs")
-        return 2
     if selection.asof_date not in selection.trading_days:
         logger.error("[dataset-dynamics-logic] asof=%s 不在交易日历", asof_lock)
+        return 2
+    # The fixed scope set comes from the VERSIONED 4-scope fixture (A1-1), NOT the
+    # gitignored .perfdata view.  Derive the scope_specs from the fixture and use
+    # them downstream (the loader takes scope_specs explicitly).
+    fixture_path = os.path.join(
+        os.path.dirname(__file__), "fixtures", "review_dynamics_logic_sample.json"
+    )
+    scope_specs = _load_dynamics_logic_scope_specs(dataset_dir, fixture_path)
+    if len(scope_specs) != 4:
+        logger.error(
+            "[dataset-dynamics-logic] fixture 必须恰好 4 scopes，实际 %d",
+            len(scope_specs),
+        )
         return 2
 
     asof_idx = bisect_left(selection.trading_days, selection.asof_date)
@@ -3627,7 +3690,7 @@ def _run_dataset_dynamics_logic(
         selection.trading_days[max(0, asof_idx - history + 1): asof_idx + 1]
     )
 
-    scope_count = len(selection.scope_specs)
+    scope_count = len(scope_specs)
     trade_date_count = len(window_dates)
     print(f"scope_count        : {scope_count}")
     print(f"trade_date_count   : {trade_date_count}")
@@ -3636,7 +3699,7 @@ def _run_dataset_dynamics_logic(
     # ---- Multi-date Dataset load + shared union prep + L1 ----
     instr: dict[str, Any] = {}
     facts = _load_capacity_facts(
-        dataset_dir, list(selection.scope_specs),
+        dataset_dir, list(scope_specs),
         window_dates=window_dates, selection=selection, instr=instr,
     )
     union_ctx = build_union_fact_context_from_loaded_facts(
@@ -3668,7 +3731,7 @@ def _run_dataset_dynamics_logic(
     all_phase_insufficient = 0
     all_phase_unavailable = 0
     per_scope = []
-    for spec in selection.scope_specs:
+    for spec in scope_specs:
         sk = spec.scope_key
         series = prepared.get(sk)
         if not series or len(series) != trade_date_count:
@@ -3715,6 +3778,17 @@ def _run_dataset_dynamics_logic(
         all_phase_insufficient += n_ins
         all_phase_unavailable += n_unavail
 
+        # A1-2 date-alignment invariant: every dynamics array shares the SAME
+        # trade_date at the SAME index as the phase series.
+        base_dates = [p["trade_date"] for p in phase]
+        aligned = all(
+            [d["trade_date"] for d in hd[k]] == base_dates
+            for k in (
+                "position", "ema5", "ema20",
+                "velocity", "acceleration", "persistence",
+            )
+        )
+
         # Pick 3 trace dates: first non-ready, first fully-ready, latest.
         first_ready_idx = next(
             (i for i, p in enumerate(phase) if p["status"] == "ready"), None
@@ -3739,6 +3813,8 @@ def _run_dataset_dynamics_logic(
                 "phase_unavailable": n_unavail,
                 "trace_indices": trace_idx,
                 "trace_dates": [window_dates[i].isoformat() for i in trace_idx],
+                "trace_count": len(trace_idx),
+                "date_aligned": aligned,
                 "phase": phase,
                 "historical_dynamics": hd,
             }
@@ -3750,14 +3826,67 @@ def _run_dataset_dynamics_logic(
         print(
             f"  {s['scope_name']} ({s['scope_type']}, n={s['member_count']}): "
             f"ready={s['phase_ready']} insufficient={s['phase_insufficient']} "
-            f"unavailable={s['phase_unavailable']} dates={s['dates']}"
+            f"unavailable={s['phase_unavailable']} dates={s['dates']} "
+            f"traces={s['trace_count']} aligned={s['date_aligned']}"
         )
-    print(f"TOTAL phase rows    : {sum(s['dates'] for s in per_scope)}")
+    total_phase_rows = sum(s["dates"] for s in per_scope)
+    total_trace_count = sum(s["trace_count"] for s in per_scope)
+    print(f"TOTAL phase rows    : {total_phase_rows}")
     print(f"TOTAL ready         : {all_phase_ready}")
     print(f"TOTAL insufficient  : {all_phase_insufficient}")
     print(f"TOTAL unavailable   : {all_phase_unavailable}")
+    print(f"TOTAL trace count   : {total_trace_count}")
     dynamics_executed = all_phase_ready > 0
     print(f"Dynamics executed   : {'YES' if dynamics_executed else 'NO'}")
+
+    # A1-2 Fixed-sample contract: every invariant must hold or exit nonzero.
+    contract_ok = True
+    if scope_count != 4:
+        logger.error("scope_count=%d != 4 (fixed-sample contract)", scope_count)
+        contract_ok = False
+    if trade_date_count != 120:
+        logger.error("trade_date_count=%d != 120 (fixed-sample contract)", trade_date_count)
+        contract_ok = False
+    if total_phase_rows != 480:
+        logger.error("phase rows=%d != 480 (4 scopes x 120D)", total_phase_rows)
+        contract_ok = False
+    for s in per_scope:
+        if s["phase_ready"] <= 0:
+            logger.error(
+                "scope %s phase_ready=%d <= 0 (every scope must have ready Dynamics)",
+                s["scope_name"], s["phase_ready"],
+            )
+            contract_ok = False
+        if s["trace_count"] != 3:
+            logger.error(
+                "scope %s trace_count=%d != 3", s["scope_name"], s["trace_count"]
+            )
+            contract_ok = False
+        if not s["date_aligned"]:
+            logger.error(
+                "scope %s dynamics arrays date-aligned invariant violated",
+                s["scope_name"],
+            )
+            contract_ok = False
+    if total_trace_count != 12:
+        logger.error("total trace_count=%d != 12 (4 scopes x 3 dates)", total_trace_count)
+        contract_ok = False
+    if not dynamics_executed:
+        logger.error("Dynamics executed = NO (no scope reached ready)")
+        contract_ok = False
+    if len(per_scope) != scope_count:
+        logger.error("per_scope=%d != scope_count=%d", len(per_scope), scope_count)
+        contract_ok = False
+
+    print("--- Fixed sample contract ---")
+    print(f"scope_count          : {'PASS' if scope_count == 4 else 'FAIL'} (4)")
+    print(f"trading dates        : {'PASS' if trade_date_count == 120 else 'FAIL'} (120)")
+    print(f"phase rows           : {'PASS' if total_phase_rows == 480 else 'FAIL'} (480)")
+    print(f"every scope ready    : {'PASS' if all(s['phase_ready'] > 0 for s in per_scope) else 'FAIL'}")
+    print(f"trace count          : {'PASS' if total_trace_count == 12 else 'FAIL'} (12)")
+    print(f"date alignment       : {'PASS' if all(s['date_aligned'] for s in per_scope) else 'FAIL'}")
+    print(f"Fixed sample contract: {'PASS' if contract_ok else 'FAIL'}")
+    print(f"Dynamics executed    : {'YES' if dynamics_executed else 'NO'}")
 
     print("--- 12 traces (4 scopes x 3 dates) ---")
     for s in per_scope:
@@ -3777,8 +3906,7 @@ def _run_dataset_dynamics_logic(
                 f"upper_occ={per.get('upper_occupancy')} lower_occ={per.get('lower_occupancy')}"
             )
 
-    ok = dynamics_executed and all_phase_ready >= 0 and len(per_scope) == scope_count
-    return 0 if ok else 1
+    return 0 if contract_ok else 1
 
 
 def _run_replay_l1(

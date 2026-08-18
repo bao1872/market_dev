@@ -1,0 +1,33 @@
+{
+  "fixture_id": "review_dynamics_logic_sample",
+  "fixture_scope": "DYNAMICS-LOGIC-CLOSURE",
+  "selection_policy": "固定 4 scopes 的版本化 validation contract；从冻结 Dataset 中按确定性规则选出，换机/换 workspace 后仅凭本 fixture 可重建同一组 scope 验证",
+  "selection_algorithm_version": "review-dynamics-logic-sample-v1",
+  "note": "青蒿素描述为 small/sparse-by-member-count（10 成员），不得声称 unavailable-featured；真实 E2E 结果 unavailable=0，只证明小成员数不证明 unavailable 特征",
+  "scopes": [
+    {
+      "scope_key": "1ee6cfc5-120e-4457-aa77-2d0888a38504",
+      "scope_name": "融资融券",
+      "scope_family": "concept",
+      "selection_reason": "max_member_concept"
+    },
+    {
+      "scope_key": "ce2f116e-2610-48cb-89ce-24b9af02f60f",
+      "scope_name": "雅下水电概念",
+      "scope_family": "concept",
+      "selection_reason": "median_member_concept"
+    },
+    {
+      "scope_key": "7962cfb0-1a51-4e86-b434-fe3ff8cba1d4",
+      "scope_name": "机械设备",
+      "scope_family": "industry",
+      "selection_reason": "max_member_industry"
+    },
+    {
+      "scope_key": "2fc1b7ca-b3b1-48d5-93e3-3438671310f5",
+      "scope_name": "青蒿素",
+      "scope_family": "concept",
+      "selection_reason": "small/sparse-by-member-count"
+    }
+  ]
+}

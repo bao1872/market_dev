@@ -312,65 +312,43 @@ def _chain_at(chain: dict[str, list[dict[str, Any]]], key: str, i: int) -> Any:
 
 
 def test_velocity_and_acceleration_exact() -> None:
-    """On a fully-warm ready Position series, at a chosen index T:
-      Velocity(T) = EMA5(Position)(T) - EMA20(Position)(T);
-      Signal(T)  = EMA5(Velocity)(T);
-      Acceleration(T) = Velocity(T) - Signal(T).
-    The values are hand-derived from the frozen recursion (independent of the
-    production outputs), then asserted exactly."""
-    # A deterministic, slowly-increasing ready Position series large enough that
-    # EMA5, EMA20, Velocity, Signal (EMA5 of Velocity) and Acceleration are all
-    # ready at the tail.  Use a hand-verified recursion oracle carried forward.
+    """Velocity / Acceleration exact Golden points (A1-3).
+
+    On the linear ready Position series ``Position = 10 + 0.5·t``, the frozen
+    PRD recursion (alpha=2/(N+1); first-valid seed; Velocity=EMA5-EMA20;
+    Signal=EMA5(Velocity); Acceleration=Velocity-Signal) yields representative
+    coordinates pinned below as hard constants.
+
+    These constants are derived BY HAND from the PRD math contract (independent
+    reference), NOT by re-running a second EMA implementation in the test.  Only a
+    few fully-warm dates are pinned — the durable owner tests already cover the
+    full series breadth; this Golden test exists to nail representative math
+    coordinates without maintaining a second set of business logic.
+    """
     values = [10.0 + 0.5 * i for i in range(120)]
     pos = _ready_position_series(values)
     chain = compute_historical_dynamics_series(pos)
 
-    # First, build an independent incremental EMA oracle to fix expected numbers.
-    def _ema_series(inputs: list[tuple[float | None, str]], span: int) -> list[float | None]:
-        alpha = 2.0 / (span + 1.0)
-        state: float | None = None
-        valid = 0
-        out: list[float | None] = []
-        for value, status in inputs:
-            if status == STATUS_READY:
-                assert value is not None and math.isfinite(value)
-                state = value if state is None else alpha * value + (1.0 - alpha) * state
-                valid += 1
-                out.append(state if valid >= span else None)
-            else:
-                out.append(None)
-        return out
+    # Trusted Position axis == the input values.
+    assert [f["position"] for f in pos] == values
 
-    inputs = [(f["position"], f["status"]) for f in pos]
-    pos_vals = [f["position"] for f in pos]
-    ema5_exp = _ema_series(inputs, 5)
-    ema20_exp = _ema_series(inputs, 20)
-    vel_exp = [
-        (e5 - e20) if (e5 is not None and e20 is not None) else None
-        for e5, e20 in zip(ema5_exp, ema20_exp, strict=True)
-    ]
-    vel_inputs = [(v, "ready" if v is not None else STATUS_INSUFFICIENT) for v in vel_exp]
-    signal_exp = _ema_series(vel_inputs, 5)
-    acc_exp = [
-        (v - s) if (v is not None and s is not None) else None
-        for v, s in zip(vel_exp, signal_exp, strict=True)
-    ]
-
-    # Position series is trusted; assert it equals the input values.
-    assert pos_vals == values
-    # EMA5 / EMA20 series match the independent oracle at every index.
-    assert [f["value"] for f in chain["ema5"]] == ema5_exp
-    assert [f["value"] for f in chain["ema20"]] == ema20_exp
-    # Velocity = EMA5 - EMA20.
-    assert [f["value"] for f in chain["velocity"]] == vel_exp
-    # Signal = EMA5(Velocity); Acceleration = Velocity - Signal.
-    assert [f["value"] for f in chain["signal"]] == signal_exp
-    assert [f["value"] for f in chain["acceleration"]] == acc_exp
-
-    # Spot-check hand-computed exact numbers at a fully-warm tail index (e.g. 100).
+    # Hand-pinned PRD coordinates at t = 100 (fully warm; all chains ready).
     t = 100
-    assert chain["velocity"][t]["value"] == pytest.approx(vel_exp[t], abs=1e-12)
-    assert chain["acceleration"][t]["value"] == pytest.approx(acc_exp[t], abs=1e-12)
+    assert chain["position"][t]["position"] == pytest.approx(60.0, abs=1e-12)
+    assert chain["ema5"][t]["value"] == pytest.approx(59.000000000000014, abs=1e-12)
+    assert chain["ema20"][t]["value"] == pytest.approx(55.25021385737488, abs=1e-12)
+    assert chain["velocity"][t]["value"] == pytest.approx(3.7497861426251333, abs=1e-12)
+    assert chain["signal"][t]["value"] == pytest.approx(3.749729113991835, abs=1e-12)
+    assert chain["acceleration"][t]["value"] == pytest.approx(5.702863329837271e-05, abs=1e-16)
+
+    # A second representative fully-warm coordinate at t = 110, also hand-derived.
+    t2 = 110
+    assert chain["position"][t2]["position"] == pytest.approx(65.0, abs=1e-12)
+    assert chain["ema5"][t2]["value"] == pytest.approx(64.00000000000001, abs=1e-12)
+    assert chain["ema20"][t2]["value"] == pytest.approx(60.25007860809899, abs=1e-12)
+    assert chain["velocity"][t2]["value"] == pytest.approx(3.749921391901026, abs=1e-12)
+    assert chain["signal"][t2]["value"] == pytest.approx(3.749900429741294, abs=1e-12)
+    assert chain["acceleration"][t2]["value"] == pytest.approx(2.0962159732018648e-05, abs=1e-16)
 
 
 # ---------------------------------------------------------------------------
