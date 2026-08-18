@@ -37,7 +37,9 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import os
+import random
 import resource
 import shutil
 import sys
@@ -58,6 +60,56 @@ _KNOWN_SCOPE_TYPES = {
     "industry_l3",
     "concept",
 }
+
+# ===========================================================================
+# Internal Structure Type Mapping（TYPE-MAPPING-R0-R1，Commit 1）常量
+# 全部为 probe research 参数，绝不新增/修改 production owner。
+#
+# Membership 语义（硬性标注）：Frozen Dataset 的 120D membership 为
+# current-static RESEARCH PROXY（manifest: membership_semantics=current_static_
+# research_proxy, threshold_freeze_eligible=false）。本轮不调查历史 membership
+# source；distributions 不得表述为严格 PIT production distributions。
+# Cross-sectional 一律 DEFERRED_FULL_FAMILY_UNIVERSE_REQUIRED（sample 内排名
+# 不得冒充 same-family percentile）。
+# ===========================================================================
+_IST_MAPPING_MIN_HIST_OBS = 20              # hist_pct 最少有效观测数
+_IST_MAPPING_BUCKET_ORDER = ("small", "medium", "large")
+_IST_MAPPING_FAMILIES = ("concept", "industry_l1", "industry_l2", "industry_l3")
+# Internal Structure Dynamics CLOSED SHA（INTERNAL_STRUCTURE_DYNAMICS_CLOSED_SHA）。
+_IST_MAPPING_SOURCE_CLOSED_SHA = "082add720abcc22d81785ae32747035d261035d3"
+
+# Mapping 数据集固定列 schema（供固定 schema 的 parquet writer 使用）。
+_IST_MAPPING_STR_COLS = (
+    "scope_type", "scope_key", "scope_name", "trade_date", "size_bucket",
+    "leadership_status", "leadership_reason",
+)
+_IST_MAPPING_INT_COLS = (
+    "member_count",
+    "leadership_previous_rankable_count", "leadership_current_rankable_count",
+    "leadership_previous_leader_count", "leadership_current_leader_count",
+    "leadership_retained_count", "leadership_entrant_count", "leadership_exit_count",
+)
+_IST_MAPPING_BOOL_COLS = (
+    "breadth_available", "capital_tilt_available", "concentration_available",
+)
+_IST_MAPPING_FLOAT_COLS = (
+    "breadth_ew_return", "breadth_advance_ratio", "breadth_decline_ratio",
+    "breadth_unchanged_ratio", "breadth_return_dispersion",
+    "capital_tilt_ew_return", "capital_tilt_aw_return", "capital_tilt",
+    "concentration_price_hhi", "concentration_amount_hhi",
+    "leadership_migration", "leadership_jaccard_stability",
+    "leadership_previous_retention", "leadership_current_leader_fraction",
+    "advance_ratio_hist_pct", "advance_ratio_delta5d",
+    "decline_ratio_hist_pct", "decline_ratio_delta5d",
+    "price_hhi_hist_pct", "price_hhi_delta5d",
+    "migration_hist_pct", "migration_delta5d",
+)
+_IST_MAPPING_RESEARCH_COLS = (
+    "advance_ratio_hist_pct", "advance_ratio_delta5d",
+    "decline_ratio_hist_pct", "decline_ratio_delta5d",
+    "price_hhi_hist_pct", "price_hhi_delta5d",
+    "migration_hist_pct", "migration_delta5d",
+)
 
 # ===========================================================================
 # REVIEW-REPLAY-DATASET-V1（DATASET-1）：Review Source Dataset 工具骨架
@@ -955,6 +1007,9 @@ def _parse_args() -> argparse.Namespace:
             "dataset-capacity-benchmark",
             "dataset-dynamics-logic",
             "internal-structure-dynamics-e2e",
+            "internal-structure-type-sample",
+            "internal-structure-type-export",
+            "internal-structure-type-distribution",
             "leadership-research",
             "export-dataset",
             "dataset-validate",
@@ -989,6 +1044,18 @@ def _parse_args() -> argparse.Namespace:
             "Snapshot→Migration→compute_internal_structure_dynamics，硬 Gate：rows80/"
             "transitions19/mismatch0/unavailable→0/future-leak，输出 12 人工抽样）；需 "
             "--dataset-dir + --history（默认 20）+ --asof-lock；"
+            "internal-structure-type-sample: TYPE-MAPPING Stage 1 — family × member_count "
+            "bucket 分层抽样（current-static research proxy，排除 member_count==0 并单独"
+            "报告），写 views/internal_structure_type_mapping_sample.json；需 source "
+            "--dataset-dir + --target-per-family + --seed；"
+            "internal-structure-type-export: TYPE-MAPPING Stage 1 — 对 sample view 跑共享"
+            "生产链导出 per-scope×date 行 + probe-only research 特征（hist_pct/delta5d，"
+            "无 cs_pct），写 review-isdtype-map-<sha12>-v1/{manifest.json,parquet}，"
+            "unavailable→None 校验=0；需 source --dataset-dir + --history（默认 120）"
+            "+ --asof-lock；"
+            "internal-structure-type-distribution: TYPE-MAPPING Stage 2 — 读 mapping 输出，"
+            "输出 scope_type 与 scope_type×size_bucket 描述性分布（all 标 unweighted "
+            "stratified sample）+ distribution_summary.json；需 mapping 输出 --dataset-dir；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -1020,6 +1087,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--scope-count", type=int, default=None,
         help="capacity-benchmark 模式：按重叠度降序选择的 scope 数量（如 285）",
+    )
+    p.add_argument(
+        "--target-per-family", type=int, default=10,
+        help="internal-structure-type-sample 模式：每 family 目标抽样数量（默认 10）",
+    )
+    p.add_argument(
+        "--seed", type=int, default=20260817,
+        help="internal-structure-type-sample 模式：确定性抽样种子（默认 20260817）",
     )
     return p.parse_args()
 
@@ -4864,6 +4939,1021 @@ def _run_internal_structure_dynamics_e2e(
     return 0 if gates_ok else 1
 
 
+# ---------------------------------------------------------------------------
+# TYPE-MAPPING R0-R1 — Internal Structure Type Mapping（Commit 1）
+#
+# 仅 probe research / 描述性 mapping 数据集能力。所有 helper 只消费已冻结输入
+# （compute_internal_structure 三 foundation facts + LeadershipMigrationFacts），
+# 绝不新增或修改 production owner；不分类、不设 threshold、不碰 Trading Context。
+#
+# Membership 语义（硬性标注）：Frozen Dataset 的 120D membership 为 current-static
+# RESEARCH PROXY（manifest: membership_semantics=current_static_research_proxy、
+# threshold_freeze_eligible=false）。本轮不调查历史 membership source；最终报告不得
+# 把本轮 distributions 表述为严格 PIT production distributions。
+# Cross-sectional 一律 DEFERRED_FULL_FAMILY_UNIVERSE_REQUIRED（sample 内排名不得
+# 冒充 same-family percentile）。
+# ---------------------------------------------------------------------------
+
+
+def _board_to_family(board: dict) -> str:
+    """Map a ``boards.parquet`` row to a canonical IST mapping family.
+
+    ``type == "concept"`` -> "concept"; ``type == "industry"`` with a valid
+    ``hierarchy_level`` (L1/L2/L3) -> "industry_l{level}"; anything else
+    (unknown type, or industry with a missing / illegal level) fails fast.
+    """
+    btype = board.get("type")
+    if btype == "concept":
+        return "concept"
+    if btype == "industry":
+        level = board.get("hierarchy_level")
+        if level in ("L1", "L2", "L3"):
+            return f"industry_{level.lower()}"
+        raise ValueError(
+            f"industry board 缺/非法 hierarchy_level={level!r} ({board.get('id')})"
+        )
+    raise ValueError(f"未知 board type={btype!r} ({board.get('id')})")
+
+
+def _percentile_sorted(sorted_vals: list[float], q: float) -> float:
+    """Deterministic linear-interpolation percentile (numpy 'linear' semantics).
+
+    ``pos = (n - 1) * q``; q=0 -> first, q=1 -> last, floor/ceil linear
+    interpolation between the two bounding values.
+    """
+    if not sorted_vals:
+        raise ValueError("percentile 需要非空升序列表")
+    if not 0.0 <= q <= 1.0:
+        raise ValueError(f"q 必须在 [0,1]: {q!r}")
+    n = len(sorted_vals)
+    if n == 1:
+        return float(sorted_vals[0])
+    pos = (n - 1) * q
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return float(sorted_vals[lo])
+    frac = pos - lo
+    return float(sorted_vals[lo]) * (1.0 - frac) + float(sorted_vals[hi]) * frac
+
+
+def _size_bucket_for_count(count: int, small_upper: float, medium_upper: float) -> str:
+    """Deterministic family-internal size-bucket assignment.
+
+    ``count <= small_upper`` -> small; ``small_upper < count <= medium_upper`` ->
+    medium; ``count > medium_upper`` -> large.  ``count <= 0`` fails fast (callers
+    exclude member_count == 0 first).
+    """
+    if count <= 0:
+        raise ValueError(f"member_count 必须 > 0: {count!r}")
+    if count <= small_upper:
+        return "small"
+    if count <= medium_upper:
+        return "medium"
+    return "large"
+
+
+def _stratified_sample_boards(
+    boards: list[dict],
+    memberships: list[dict],
+    *,
+    target_per_family: int = 10,
+    seed: int = 20260817,
+) -> dict:
+    """Deterministic family × member-count-bucket stratified sample (pure).
+
+    - member_count == 0 boards are EXCLUDED and reported (never silent backfill).
+    - each family's member counts are split into thirds via family percentiles
+      (q=1/3, 2/3) -> small / medium / large buckets.
+    - per family: bucket-coverage guarantee (first candidate of every non-empty
+      bucket) + seed-driven ``random.Random(seed).sample`` for the remaining
+      quota, round-robin over ``_IST_MAPPING_BUCKET_ORDER``.
+    """
+    by_board: dict[str, list[str]] = {}
+    for m in memberships:
+        by_board.setdefault(str(m.get("board_id")), []).append(
+            str(m.get("instrument_id"))
+        )
+
+    excluded = 0
+    excluded_by_family: dict[str, int] = {}
+    candidates: list[dict] = []
+    for b in boards:
+        bid = str(b.get("id"))
+        family = _board_to_family(b)
+        members = by_board.get(bid, [])
+        count = len(members)
+        if count == 0:
+            excluded += 1
+            excluded_by_family[family] = excluded_by_family.get(family, 0) + 1
+            continue
+        candidates.append(
+            {
+                "scope_key": bid,
+                "scope_name": str(b.get("name") or bid),
+                "scope_family": family,
+                "member_count": count,
+                "external_code": str(b.get("external_code") or ""),
+            }
+        )
+
+    by_family: dict[str, list[dict]] = {}
+    for c in candidates:
+        by_family.setdefault(c["scope_family"], []).append(c)
+
+    family_cutpoints: dict[str, dict[str, float]] = {}
+    for fam, cands in by_family.items():
+        counts = sorted(float(c["member_count"]) for c in cands)
+        family_cutpoints[fam] = {
+            "small_upper": _percentile_sorted(counts, 1 / 3),
+            "medium_upper": _percentile_sorted(counts, 2 / 3),
+        }
+        for c in cands:
+            c["size_bucket"] = _size_bucket_for_count(
+                c["member_count"],
+                family_cutpoints[fam]["small_upper"],
+                family_cutpoints[fam]["medium_upper"],
+            )
+
+    rng = random.Random(seed)
+    family_candidate_counts: dict[str, dict[str, int]] = {}
+    family_bucket_counts: dict[str, dict[str, int]] = {}
+    selected: list[dict] = []
+    for fam in sorted(by_family):
+        cands = by_family[fam]
+        cands.sort(
+            key=lambda c: (-c["member_count"], c["external_code"], c["scope_key"])
+        )
+        buckets: dict[str, list[dict]] = {}
+        for c in cands:
+            buckets.setdefault(c["size_bucket"], []).append(c)
+        family_candidate_counts[fam] = {
+            b: len(buckets.get(b, [])) for b in _IST_MAPPING_BUCKET_ORDER
+        }
+        family_bucket_counts[fam] = {b: 0 for b in _IST_MAPPING_BUCKET_ORDER}
+
+        # bucket-coverage guarantee: first candidate of every non-empty bucket.
+        picks: list[dict] = []
+        for bkt in _IST_MAPPING_BUCKET_ORDER:
+            pool = buckets.get(bkt)
+            if pool:
+                picks.append(pool[0])
+                family_bucket_counts[fam][bkt] += 1
+        pools = {
+            bkt: [c for c in buckets.get(bkt, []) if c not in picks]
+            for bkt in _IST_MAPPING_BUCKET_ORDER
+        }
+        # round-robin quota fill from the remaining pools.
+        idx = 0
+        while len(picks) < target_per_family:
+            progressed = False
+            for _ in range(len(_IST_MAPPING_BUCKET_ORDER)):
+                bkt = _IST_MAPPING_BUCKET_ORDER[idx % len(_IST_MAPPING_BUCKET_ORDER)]
+                idx += 1
+                pool = pools.get(bkt)
+                if not pool:
+                    continue
+                picked = rng.sample(pool, 1)[0]
+                pool.remove(picked)
+                picks.append(picked)
+                family_bucket_counts[fam][bkt] += 1
+                progressed = True
+                break
+            if not progressed:
+                break  # all bucket pools exhausted
+        selected.extend(picks)
+
+    selected.sort(
+        key=lambda c: (-c["member_count"], c["external_code"], c["scope_key"])
+    )
+    return {
+        "scopes": selected,
+        "family_cutpoints": family_cutpoints,
+        "family_bucket_counts": family_bucket_counts,
+        "family_candidate_counts": family_candidate_counts,
+        "excluded_zero_member_count": {
+            "total": excluded,
+            "by_family": excluded_by_family,
+        },
+        "target_per_family": target_per_family,
+    }
+
+
+def build_internal_structure_type_mapping_sample(
+    dataset_dir: str,
+    *,
+    target_per_family: int = 10,
+    seed: int = 20260817,
+) -> dict:
+    """Build the mapping core sample from a source dataset (boards + memberships).
+
+    Reads only the small metadata parquet files, applies the deterministic
+    stratified sample, then augments the union instrument count across the
+    SELECTED scopes (deduplicated).
+    """
+    boards = _load_parquet_rows(dataset_dir, "boards")
+    memberships = _load_parquet_rows(
+        dataset_dir, "board_memberships_current_snapshot"
+    )
+    sample = _stratified_sample_boards(
+        boards, memberships, target_per_family=target_per_family, seed=seed
+    )
+    selected_keys = {c["scope_key"] for c in sample["scopes"]}
+    union_ids: set[str] = set()
+    for m in memberships:
+        if str(m.get("board_id")) in selected_keys:
+            union_ids.add(str(m.get("instrument_id")))
+    sample["union_instrument_count"] = len(union_ids)
+    sample["union_instrument_ids"] = sorted(union_ids)
+    return sample
+
+
+def _run_internal_structure_type_sample(
+    dataset_dir: str,
+    *,
+    target_per_family: int = 10,
+    seed: int = 20260817,
+    dry_run: bool = False,
+) -> int:
+    """TYPE-MAPPING Stage 1 — build + persist the mapping core sample view."""
+    if dry_run:
+        print(
+            f"[dry-run] internal-structure-type-sample dataset_dir={dataset_dir} "
+            f"target_per_family={target_per_family} seed={seed} OK"
+        )
+        return 0
+
+    sample = build_internal_structure_type_mapping_sample(
+        dataset_dir, target_per_family=target_per_family, seed=seed
+    )
+    cutpoints = sample["family_cutpoints"]
+    selected_counts = sample["family_bucket_counts"]
+    candidate_counts = sample["family_candidate_counts"]
+    excluded = sample["excluded_zero_member_count"]
+
+    print("=== internal-structure-type-sample (mapping core sample) ===")
+    print(f"target_per_family           : {target_per_family}")
+    print(f"seed                        : {seed}")
+    print(f"selected scopes             : {len(sample['scopes'])}")
+    print(f"union_instrument_count      : {sample['union_instrument_count']}")
+    print(
+        f"excluded_zero_member_count  : {excluded['total']} "
+        f"by_family={excluded['by_family']}"
+    )
+    for fam in sorted(cutpoints):
+        cp = cutpoints[fam]
+        cand = candidate_counts.get(fam, {})
+        sel = selected_counts.get(fam, {})
+        print(
+            f"family={fam:<12} cut(small<={cp['small_upper']:.2f}, "
+            f"med<={cp['medium_upper']:.2f}) "
+            f"cand={{small:{cand.get('small', 0)},med:{cand.get('medium', 0)},"
+            f"large:{cand.get('large', 0)}}} "
+            f"sel={{small:{sel.get('small', 0)},med:{sel.get('medium', 0)},"
+            f"large:{sel.get('large', 0)}}}"
+        )
+
+    mpath = os.path.join(dataset_dir, "manifest.json")
+    manifest: dict = {}
+    if os.path.exists(mpath):
+        with open(mpath, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    axis = (manifest.get("date_ranges") or {}).get("analysis_axis") or []
+    date_range = [axis[0], axis[-1]] if axis else None
+
+    views_dir = os.path.join(dataset_dir, "views")
+    os.makedirs(views_dir, exist_ok=True)
+    view_path = os.path.join(
+        views_dir, "internal_structure_type_mapping_sample.json"
+    )
+    view = {
+        "view_id": "internal_structure_type_mapping_sample",
+        "selection_policy": (
+            "family × member_count bucket 分层样本（current-static research proxy，"
+            "仅 exploratory mapping；cross-sectional DEFERRED）"
+        ),
+        "selection_algorithm_version": VIEW_ALGORITHM_VERSION,
+        "scope_keys": sorted(c["scope_key"] for c in sample["scopes"]),
+        "derived_instrument_ids": sample["union_instrument_ids"],
+        "date_range": date_range,
+        "membership_usage": {"current": "available", "historical": "not_available"},
+        "membership_semantics": "current_static_research_proxy",
+        "sample": {
+            "seed": seed,
+            "target_per_family": target_per_family,
+            "family_cutpoints": sample["family_cutpoints"],
+            "family_bucket_counts": sample["family_bucket_counts"],
+            "union_instrument_count": sample["union_instrument_count"],
+            "excluded_zero_member_count": sample["excluded_zero_member_count"],
+        },
+    }
+    with open(view_path, "w", encoding="utf-8") as fh:
+        json.dump(view, fh, ensure_ascii=False, indent=2, default=_json_default)
+    print(f"view written                : {view_path}")
+    return 0
+
+
+def _load_internal_structure_type_scope_specs(
+    dataset_dir: str,
+    view_name: str,
+) -> list[Any]:
+    """Load mapping sample scope specs, mapping each board to its CANONICAL family.
+
+    Like ``_load_scope_specs`` but ``scope_type`` is derived via
+    ``_board_to_family`` (concept / industry_l1/l2/l3) so the family is one of the
+    four IST mapping families; a board missing from the dataset fails fast.
+    """
+    from app.services.review_observation_prep_service import ScopeReplaySpec
+
+    boards = {str(r["id"]): r for r in _load_parquet_rows(dataset_dir, "boards")}
+    vpath = os.path.join(dataset_dir, "views", f"{view_name}.json")
+    with open(vpath, "r", encoding="utf-8") as fh:
+        view = json.load(fh)
+    board_ids = list(view.get("scope_keys") or [])
+    selected_board_ids = {str(b) for b in board_ids}
+    by_board: dict[str, list[uuid.UUID]] = {}
+    for m in _load_parquet_rows(dataset_dir, "board_memberships_current_snapshot"):
+        bid = str(m["board_id"])
+        if bid not in selected_board_ids:
+            continue
+        by_board.setdefault(bid, []).append(uuid.UUID(str(m["instrument_id"])))
+
+    specs: list[Any] = []
+    for bid in board_ids:
+        board = boards.get(str(bid))
+        if not board:
+            raise RuntimeError(f"[ist-mapping] board {bid} 不在 dataset")
+        specs.append(
+            ScopeReplaySpec(
+                scope_type=_board_to_family(board),
+                scope_key=str(bid),
+                scope_name=str(board.get("name") or str(bid)),
+                member_ids=tuple(by_board.get(str(bid), ())),
+            )
+        )
+    return specs
+
+
+def _hist_pct(series: list[float | None], i: int) -> float | None:
+    """Deterministic historical percentile rank (mid-rank ECDF), scale [0,1].
+
+    Uses only ``series[:i+1]`` — the current and earlier observations (no
+    future-leak by construction).  ``valid`` = finite non-None values in the
+    prefix.  Returns None when ``len(valid) < _IST_MAPPING_MIN_HIST_OBS`` (20)
+    or the current value is not finite.  Ties use mid-rank ``(L + E/2) / n``
+    where ``L`` is the count strictly below and ``E`` the count equal to the
+    current value.
+    """
+    prefix = series[: i + 1]
+    valid = [x for x in prefix if x is not None and math.isfinite(x)]
+    if len(valid) < _IST_MAPPING_MIN_HIST_OBS:
+        return None
+    x = series[i]
+    if x is None or not math.isfinite(x):
+        return None
+    below = sum(1 for v in valid if v < x)
+    equal = sum(1 for v in valid if v == x)
+    return (below + equal / 2.0) / len(valid)
+
+
+def _delta5d(series: list[float | None], i: int) -> float | None:
+    """Exact trading-index difference X[T] - X[T-5].
+
+    Strictly requires both endpoints at EXACT indices (i and i-5) to be finite —
+    missing values are NEVER skipped to reach the 5th valid value.
+    """
+    if i < 5:
+        return None
+    prev = series[i - 5]
+    curr = series[i]
+    if prev is None or curr is None:
+        return None
+    if not (math.isfinite(prev) and math.isfinite(curr)):
+        return None
+    return curr - prev
+
+
+def _to_fin(v: Any) -> float | None:
+    """Coerce a scalar to a finite float, else None (unavailable)."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def build_internal_structure_type_row(
+    *,
+    scope_type: str,
+    scope_key: str,
+    scope_name: str,
+    trade_date: str,
+    member_count: int,
+    size_bucket: str,
+    foundation: dict,
+    migration_facts: Any,
+    research: dict,
+) -> dict:
+    """Pure row-builder for the IST mapping dataset (unavailable -> None, never 0).
+
+    ``foundation`` is the ``compute_internal_structure`` result dict;
+    ``migration_facts`` is a ``LeadershipMigrationFacts``; ``research`` supplies
+    the hist_pct/delta5d research features keyed as ``advance_ratio_hist_pct`` /
+    ``advance_ratio_delta5d`` / ``decline_ratio_hist_pct`` / ``decline_ratio_delta5d``
+    / ``price_hhi_hist_pct`` / ``price_hhi_delta5d`` / ``migration_hist_pct`` /
+    ``migration_delta5d``.
+    """
+    breadth = foundation["breadth"]
+    capital_tilt = foundation["capital_tilt"]
+    concentration = foundation["concentration"]
+
+    advance_ratio = _to_fin(breadth.get("advance_ratio"))
+    capital_tilt_val = _to_fin(capital_tilt.get("capital_tilt"))
+    price_hhi = _to_fin(concentration.get("price_normalized_hhi"))
+    amount_hhi = _to_fin(concentration.get("amount_normalized_hhi"))
+
+    mf = migration_facts
+    mf_ready = mf is not None and mf.status == "ready"
+    current_leader_count = mf.current_leader_count if mf_ready else None
+    current_rankable_count = mf.current_rankable_count if mf_ready else None
+    fraction = None
+    if (
+        mf_ready
+        and current_leader_count is not None
+        and current_rankable_count is not None
+        and current_rankable_count > 0
+    ):
+        fraction = current_leader_count / current_rankable_count
+
+    def _mval(getter: Callable[[], Any]) -> float | None:
+        return _to_fin(getter()) if mf_ready else None
+
+    row = {
+        "scope_type": scope_type,
+        "scope_key": scope_key,
+        "scope_name": scope_name,
+        "trade_date": trade_date,
+        "member_count": int(member_count),
+        "size_bucket": size_bucket,
+        "breadth_ew_return": _to_fin(breadth.get("equal_weight_return")),
+        "breadth_advance_ratio": advance_ratio,
+        "breadth_decline_ratio": _to_fin(breadth.get("decline_ratio")),
+        "breadth_unchanged_ratio": _to_fin(breadth.get("unchanged_ratio")),
+        "breadth_return_dispersion": _to_fin(breadth.get("return_dispersion")),
+        "breadth_available": advance_ratio is not None,
+        "capital_tilt_ew_return": _to_fin(capital_tilt.get("equal_weight_return")),
+        "capital_tilt_aw_return": _to_fin(capital_tilt.get("amount_weighted_return")),
+        "capital_tilt": capital_tilt_val,
+        "capital_tilt_available": capital_tilt_val is not None,
+        "concentration_price_hhi": price_hhi,
+        "concentration_amount_hhi": amount_hhi,
+        "concentration_available": price_hhi is not None and amount_hhi is not None,
+        "leadership_status": mf.status if mf is not None else "unavailable",
+        "leadership_reason": mf.reason if mf_ready else None,
+        "leadership_migration": _mval(lambda: mf.migration),
+        "leadership_jaccard_stability": _mval(lambda: mf.jaccard_stability),
+        "leadership_previous_retention": _mval(lambda: mf.previous_retention),
+        "leadership_previous_rankable_count": (
+            mf.previous_rankable_count if mf_ready else None
+        ),
+        "leadership_current_rankable_count": current_rankable_count,
+        "leadership_previous_leader_count": (
+            mf.previous_leader_count if mf_ready else None
+        ),
+        "leadership_current_leader_count": current_leader_count,
+        "leadership_retained_count": mf.retained_count if mf_ready else None,
+        "leadership_entrant_count": mf.entrant_count if mf_ready else None,
+        "leadership_exit_count": mf.exit_count if mf_ready else None,
+        "leadership_current_leader_fraction": fraction,
+    }
+    for key in _IST_MAPPING_RESEARCH_COLS:
+        row[key] = _to_fin(research.get(key))
+    return row
+
+
+def _write_ist_mapping_parquet(rows: list[dict], path: str) -> int:
+    """Write the IST mapping dataset with a FIXED schema (unavailable -> None).
+
+    A dedicated writer (instead of the first-row-inferred ``_rows_to_parquet``)
+    because the leading rows are day-0 unavailable -> many numeric columns are
+    None, and row[0]-type inference would mis-type float columns as strings.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    col_order = (
+        _IST_MAPPING_STR_COLS
+        + _IST_MAPPING_INT_COLS
+        + _IST_MAPPING_BOOL_COLS
+        + _IST_MAPPING_FLOAT_COLS
+    )
+    fields = []
+    for name in col_order:
+        if name in _IST_MAPPING_BOOL_COLS:
+            fields.append(pa.field(name, pa.bool_(), nullable=True))
+        elif name in _IST_MAPPING_INT_COLS:
+            fields.append(pa.field(name, pa.int64(), nullable=True))
+        elif name in _IST_MAPPING_FLOAT_COLS:
+            fields.append(pa.field(name, pa.float64(), nullable=True))
+        else:
+            fields.append(pa.field(name, pa.string(), nullable=True))
+    schema = pa.schema(fields)
+    arrays = []
+    for name in schema.names:
+        ftype = schema.field(name).type
+        if pa.types.is_floating(ftype):
+            arrays.append(pa.array([_to_fin(r.get(name)) for r in rows], type=ftype))
+        elif pa.types.is_integer(ftype):
+            arrays.append(pa.array([r.get(name) for r in rows], type=ftype))
+        elif pa.types.is_boolean(ftype):
+            arrays.append(
+                pa.array(
+                    [
+                        bool(r.get(name)) if r.get(name) is not None else None
+                        for r in rows
+                    ],
+                    type=ftype,
+                )
+            )
+        else:
+            arrays.append(pa.array([r.get(name) for r in rows], type=ftype))
+    table = pa.Table.from_arrays(arrays, schema=schema)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    pq.write_table(table, path, compression="zstd")
+    return len(rows)
+
+
+def _run_internal_structure_type_export(
+    dataset_dir: str,
+    *,
+    history: int = 120,
+    asof_lock: str | None = None,
+    dry_run: bool = False,
+) -> int:
+    """TYPE-MAPPING Stage 1 — export per-scope×date mapping dataset.
+
+    Consumes the shared production chain (PreparedScope -> canonical L1 ->
+    InternalStructure + Leadership Snapshot -> Migration) exactly like the e2e,
+    then attaches probe-only research features (hist_pct / delta5d).  Rows are
+    written as parquet + manifest under ``review-isdtype-map-<sha12>-v1``.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] internal-structure-type-export dataset_dir={dataset_dir} "
+            f"history={history} asof={asof_lock} OK"
+        )
+        return 0
+
+    from app.domain.review.analysis.internal_structure import (
+        compute_internal_structure,
+    )
+    from app.domain.review.analysis.leadership_migration import (
+        LeadershipMigrationFacts,
+        compute_leadership_migration,
+    )
+    from app.services.review_observation_prep_service import (
+        build_prepared_scopes_from_union,
+        build_union_fact_context_from_loaded_facts,
+    )
+
+    if asof_lock:
+        sel_asof = date.fromisoformat(asof_lock)
+    else:
+        declared = _dataset_asof(dataset_dir)
+        if not declared:
+            logger.error("[ist-export] 无法解析 corpus declared asof")
+            return 2
+        sel_asof = date.fromisoformat(declared)
+
+    view_name = "internal_structure_type_mapping_sample"
+    view_path = os.path.join(dataset_dir, "views", f"{view_name}.json")
+    if not os.path.exists(view_path):
+        logger.error(
+            "[ist-export] 未找到 %s — 请先跑 internal-structure-type-sample",
+            view_path,
+        )
+        return 2
+    with open(view_path, "r", encoding="utf-8") as fh:
+        view = json.load(fh)
+    sample_block = view.get("sample") or {}
+    cutpoints = sample_block.get("family_cutpoints") or {}
+
+    scope_specs = _load_internal_structure_type_scope_specs(dataset_dir, view_name)
+    if not scope_specs:
+        logger.error("[ist-export] sample view 无 scopes")
+        return 2
+
+    selection = _build_replay_selection_from_specs(
+        dataset_dir, scope_specs, asof_override=sel_asof
+    )
+    if selection.asof_date not in selection.trading_days:
+        logger.error("[ist-export] asof=%s 不在交易日历", sel_asof.isoformat())
+        return 2
+    asof_idx = bisect_left(selection.trading_days, selection.asof_date)
+    window_dates = list(
+        selection.trading_days[max(0, asof_idx - history + 1): asof_idx + 1]
+    )
+    trade_date_count = len(window_dates)
+
+    instr: dict[str, Any] = {}
+    facts = _load_capacity_facts(
+        dataset_dir, list(scope_specs),
+        window_dates=window_dates, selection=selection, instr=instr,
+    )
+    union_ctx = build_union_fact_context_from_loaded_facts(
+        t1_by_date=facts["t1_by_date"],
+        states_by_date=facts["states_by_date"],
+        bars=facts["bars"],
+        events_by_date=facts["events_by_date"],
+    )
+    prep_counters: dict[str, int] = {}
+    prepared = build_prepared_scopes_from_union(
+        trade_dates=facts["trade_dates"],
+        scope_specs=facts["scope_specs"],
+        union_ctx=union_ctx,
+        membership_t1_by_scope=None,
+        current_only_facts_by_date=None,
+        pit_status_t="current_static",
+        pit_status_t1="current_static",
+        t1_membership_available=False,
+        prep_counters=prep_counters,
+        prep_fallback_reasons=[],
+    )
+
+    # scope -> size_bucket from the persisted sample cutpoints (deterministic).
+    scope_bucket: dict[str, str] = {}
+    for spec in scope_specs:
+        cp = cutpoints.get(spec.scope_type)
+        if not cp or cp.get("small_upper") is None or cp.get("medium_upper") is None:
+            raise RuntimeError(
+                f"[ist-export] view 缺 family={spec.scope_type} cutpoints"
+            )
+        scope_bucket[spec.scope_key] = _size_bucket_for_count(
+            len(spec.member_ids), float(cp["small_upper"]), float(cp["medium_upper"])
+        )
+
+    rows: list[dict] = []
+    unavailable_to_none_violations = 0
+    for spec in scope_specs:
+        sk = spec.scope_key
+        series = prepared.get(sk)
+        if not series or len(series) != trade_date_count:
+            logger.error("[ist-export] scope %s 未对齐", sk)
+            return 1
+
+        obs_by_date: list[dict[str, Any]] = []
+        foundation_rows: list[dict[str, Any]] = []
+        snapshots: list[Any] = []
+        for ps in series:
+            obs, snapshot = _compute_scope_observation_and_snapshot(ps)
+            obs_by_date.append(obs)
+            foundation_rows.append(compute_internal_structure(obs))
+            snapshots.append(snapshot)
+
+        advance_series = [
+            _to_fin(f["breadth"]["advance_ratio"]) for f in foundation_rows
+        ]
+        decline_series = [
+            _to_fin(f["breadth"]["decline_ratio"]) for f in foundation_rows
+        ]
+        price_hhi_series = [
+            _to_fin(f["concentration"]["price_normalized_hhi"])
+            for f in foundation_rows
+        ]
+
+        migration_facts_list: list[Any] = []
+        migration_series: list[float | None] = []
+        for i in range(trade_date_count):
+            if i == 0:
+                # First day has no T-1 -> no migration comparison (unavailable).
+                mf = LeadershipMigrationFacts(
+                    trade_date=snapshots[i].trade_date,
+                    status="unavailable",
+                    reason="unavailable_snapshot",
+                    coverage=0.50,
+                    previous_direction=None,
+                    current_direction=snapshots[i].direction,
+                    previous_rankable_count=0,
+                    current_rankable_count=snapshots[i].rankable_count,
+                    previous_leader_count=None,
+                    current_leader_count=(
+                        len(snapshots[i].leader_ids)
+                        if snapshots[i].status == "ready" else None
+                    ),
+                    retained_count=None,
+                    entrant_count=None,
+                    exit_count=None,
+                    previous_retention=None,
+                    jaccard_stability=None,
+                    migration=None,
+                    previous_leader_ids=None,
+                    current_leader_ids=(
+                        snapshots[i].leader_ids
+                        if snapshots[i].status == "ready" else None
+                    ),
+                    entrant_ids=None,
+                    exit_ids=None,
+                )
+            else:
+                mf = compute_leadership_migration(
+                    previous_snapshot=snapshots[i - 1],
+                    current_snapshot=snapshots[i],
+                )
+            migration_facts_list.append(mf)
+            migration_series.append(
+                _to_fin(mf.migration) if mf.status == "ready" else None
+            )
+
+        for i in range(trade_date_count):
+            research = {
+                "advance_ratio_hist_pct": _hist_pct(advance_series, i),
+                "advance_ratio_delta5d": _delta5d(advance_series, i),
+                "decline_ratio_hist_pct": _hist_pct(decline_series, i),
+                "decline_ratio_delta5d": _delta5d(decline_series, i),
+                "price_hhi_hist_pct": _hist_pct(price_hhi_series, i),
+                "price_hhi_delta5d": _delta5d(price_hhi_series, i),
+                "migration_hist_pct": _hist_pct(migration_series, i),
+                "migration_delta5d": _delta5d(migration_series, i),
+            }
+            row = build_internal_structure_type_row(
+                scope_type=spec.scope_type,
+                scope_key=sk,
+                scope_name=spec.scope_name,
+                trade_date=window_dates[i].isoformat(),
+                member_count=len(spec.member_ids),
+                size_bucket=scope_bucket[sk],
+                foundation=foundation_rows[i],
+                migration_facts=migration_facts_list[i],
+                research=research,
+            )
+            rows.append(row)
+            if migration_facts_list[i].status == "unavailable":
+                if any(
+                    row[k] is not None
+                    for k in (
+                        "leadership_migration",
+                        "leadership_jaccard_stability",
+                        "leadership_previous_retention",
+                        "leadership_current_leader_fraction",
+                    )
+                ):
+                    unavailable_to_none_violations += 1
+
+    total_rows = len(rows)
+    print("=== internal-structure-type-export ===")
+    print(f"scopes                       : {len(scope_specs)}")
+    print(f"trade_dates                  : {trade_date_count}")
+    print(f"rows                         : {total_rows}")
+    print(
+        f"unavailable->None violations : {unavailable_to_none_violations} (0)"
+    )
+    if unavailable_to_none_violations:
+        logger.error(
+            "[ist-export] unavailable->None 语义违规=%d",
+            unavailable_to_none_violations,
+        )
+        return 1
+
+    capture_sha = ""
+    smpath = os.path.join(dataset_dir, "manifest.json")
+    if os.path.exists(smpath):
+        with open(smpath, "r", encoding="utf-8") as fh:
+            smanifest = json.load(fh)
+        capture_sha = str(smanifest.get("capture_git_sha") or "")
+    if not capture_sha:
+        logger.error("[ist-export] source manifest 缺 capture_git_sha")
+        return 2
+    out_dir_name = f"review-isdtype-map-{capture_sha[:12]}-v1"
+    out_dir = os.path.join(os.path.dirname(os.path.normpath(dataset_dir)), out_dir_name)
+    os.makedirs(out_dir, exist_ok=True)
+    parquet_path = os.path.join(out_dir, "internal_structure_type_mapping.parquet")
+    written = _write_ist_mapping_parquet(rows, parquet_path)
+    if written != total_rows:
+        logger.error("[ist-export] parquet 行数不一致: %d != %d", written, total_rows)
+        return 1
+
+    manifest = {
+        "dataset_id": f"review-isdtype-map-{capture_sha[:12]}-v1",
+        "dataset_dir_name": out_dir_name,
+        "dataset_schema_version": 1,
+        "source_dataset": os.path.basename(os.path.normpath(dataset_dir)),
+        "source_closed_sha": _IST_MAPPING_SOURCE_CLOSED_SHA,
+        "capture_git_sha": capture_sha,
+        "asof": sel_asof.isoformat(),
+        "date_range": [window_dates[0].isoformat(), window_dates[-1].isoformat()],
+        "history": trade_date_count,
+        "row_counts": {
+            "scopes": len(scope_specs),
+            "dates": trade_date_count,
+            "rows": total_rows,
+        },
+        "sample": sample_block,
+        "membership_semantics": "current_static_research_proxy",
+        "threshold_freeze_eligible": False,
+        "cross_sectional": "DEFERRED_FULL_FAMILY_UNIVERSE_REQUIRED",
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+    }
+    manifest["sha256"] = _sha256_file(parquet_path)
+    manifest_path = os.path.join(out_dir, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2, default=_json_default)
+    print(f"out_dir                      : {out_dir}")
+    print(f"parquet                      : {parquet_path} ({written} rows)")
+    print(f"manifest keys                : {sorted(manifest)}")
+    return 0
+
+
+def _run_internal_structure_type_distribution(
+    dataset_dir: str,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """TYPE-MAPPING Stage 2 — descriptive distribution of the mapping dataset.
+
+    Reads the mapping manifest + parquet and computes deterministic percentiles
+    (pure-Python ``_percentile_sorted``).  Primary grouping = scope_type and
+    scope_type × size_bucket; ``all`` is explicitly labelled as an unweighted
+    stratified sample (NOT market prevalence).  No classification / thresholds /
+    production owner; cross-sectional is DEFERRED.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] internal-structure-type-distribution "
+            f"dataset_dir={dataset_dir} OK"
+        )
+        return 0
+
+    mpath = os.path.join(dataset_dir, "manifest.json")
+    if not os.path.exists(mpath):
+        logger.error(
+            "[ist-distribution] %s 非 mapping 输出目录（缺 manifest.json）",
+            dataset_dir,
+        )
+        return 2
+    with open(mpath, "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    ppath = os.path.join(dataset_dir, "internal_structure_type_mapping.parquet")
+    if not os.path.exists(ppath):
+        logger.error("[ist-distribution] 缺 internal_structure_type_mapping.parquet")
+        return 2
+    import pyarrow.parquet as pq
+
+    rows = pq.read_table(ppath).to_pylist()
+    if not rows:
+        logger.error("[ist-distribution] mapping dataset 空")
+        return 2
+
+    numeric_vars = (
+        "breadth_advance_ratio",
+        "breadth_decline_ratio",
+        "breadth_ew_return",
+        "capital_tilt",
+        "concentration_price_hhi",
+        "concentration_amount_hhi",
+        "leadership_migration",
+        "leadership_jaccard_stability",
+        "leadership_previous_retention",
+        "leadership_current_leader_fraction",
+    ) + _IST_MAPPING_RESEARCH_COLS
+    quantiles = (0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
+
+    def _stats(vals: list[Any]) -> dict | None:
+        finite = [v for v in (_to_fin(x) for x in vals) if v is not None]
+        if not finite:
+            return None
+        fs = sorted(finite)
+        n = len(fs)
+        mean = sum(fs) / n
+        std = math.sqrt(sum((x - mean) ** 2 for x in fs) / n)
+        stats: dict[str, Any] = {
+            "count": n,
+            "total_rows": len(vals),
+            "available_pct": round(n / len(vals), 4),
+            "mean": round(mean, 6),
+            "std": round(std, 6),
+        }
+        for q in quantiles:
+            stats[f"p{int(q * 100)}"] = round(_percentile_sorted(fs, q), 6)
+        return stats
+
+    groups: dict[str, list[dict]] = {"all": rows}
+    families = sorted({r["scope_type"] for r in rows})
+    for st in families:
+        groups[st] = [r for r in rows if r["scope_type"] == st]
+        for bkt in _IST_MAPPING_BUCKET_ORDER:
+            subgroup = [r for r in groups[st] if r["size_bucket"] == bkt]
+            if subgroup:
+                groups[f"{st}__{bkt}"] = subgroup
+
+    distribution: dict[str, dict[str, dict | None]] = {}
+    for gname, gro in groups.items():
+        distribution[gname] = {
+            var: _stats([r.get(var) for r in gro]) for var in numeric_vars
+        }
+
+    size_dependence: dict[str, dict[str, float | None]] = {}
+    for var in numeric_vars:
+        size_dependence[var] = {}
+        for st in families:
+            for bkt in _IST_MAPPING_BUCKET_ORDER:
+                vals = [
+                    r.get(var)
+                    for r in rows
+                    if r["scope_type"] == st and r["size_bucket"] == bkt
+                ]
+                finite = [v for v in (_to_fin(x) for x in vals) if v is not None]
+                med: float | None = None
+                if finite:
+                    med = round(_percentile_sorted(sorted(finite), 0.5), 6)
+                size_dependence[var][f"{st}__{bkt}"] = med
+
+    abs_hist_pairs = (
+        ("breadth_advance_ratio", "advance_ratio_hist_pct"),
+        ("breadth_decline_ratio", "decline_ratio_hist_pct"),
+        ("concentration_price_hhi", "price_hhi_hist_pct"),
+        ("leadership_migration", "migration_hist_pct"),
+    )
+    absolute_vs_historical: dict[str, dict[str, Any]] = {}
+    for abs_var, hist_var in abs_hist_pairs:
+        abs_stats = _stats([r.get(abs_var) for r in rows])
+        hist_stats = _stats([r.get(hist_var) for r in rows])
+        absolute_vs_historical[abs_var] = {
+            "absolute": {
+                "p50": abs_stats["p50"] if abs_stats else None,
+                "p90": abs_stats["p90"] if abs_stats else None,
+                "available_pct": abs_stats["available_pct"] if abs_stats else 0.0,
+            },
+            "hist_pct": {
+                "p50": hist_stats["p50"] if hist_stats else None,
+                "p90": hist_stats["p90"] if hist_stats else None,
+                "available_pct": hist_stats["available_pct"] if hist_stats else 0.0,
+            },
+        }
+
+    summary = {
+        "dataset_id": manifest.get("dataset_id"),
+        "membership_semantics": manifest.get("membership_semantics"),
+        "threshold_freeze_eligible": manifest.get("threshold_freeze_eligible"),
+        "cross_sectional": "DEFERRED_FULL_FAMILY_UNIVERSE_REQUIRED",
+        "row_counts": manifest.get("row_counts"),
+        "note": "unweighted stratified sample，不代表总体市场 prevalence",
+        "groups": distribution,
+        "size_dependence_median": size_dependence,
+        "absolute_vs_historical": absolute_vs_historical,
+    }
+    summary_path = os.path.join(dataset_dir, "distribution_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as fh:
+        json.dump(summary, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    # ---- human-readable tables ----
+    print("=== internal-structure-type-distribution ===")
+    print(f"dataset_dir : {dataset_dir}")
+    print(f"rows        : {len(rows)}  groups: {len(groups)}")
+    print("NOTE: all 分组为 unweighted stratified sample，不代表总体市场 prevalence")
+    header_vars = (
+        "breadth_advance_ratio",
+        "breadth_decline_ratio",
+        "breadth_ew_return",
+        "capital_tilt",
+        "concentration_price_hhi",
+        "leadership_migration",
+        "leadership_jaccard_stability",
+        "leadership_current_leader_fraction",
+    )
+    print("--- per-family p25/p50/p75/p90 ---")
+    print(
+        f"{'group':<22} {'var':<34} {'p25':>9} {'p50':>9} {'p75':>9} "
+        f"{'p90':>9} {'n':>6}"
+    )
+    for gname in ["all"] + families:
+        for var in header_vars:
+            st = distribution[gname].get(var)
+            if not st:
+                continue
+            print(
+                f"{gname:<22} {var:<34} {st['p25']:>9.4f} {st['p50']:>9.4f} "
+                f"{st['p75']:>9.4f} {st['p90']:>9.4f} {st['count']:>6}"
+            )
+    print("--- size-dependence (family×size_bucket median) ---")
+    for var in (
+        "breadth_advance_ratio",
+        "concentration_price_hhi",
+        "leadership_migration",
+    ):
+        cells = []
+        for st in families:
+            for bkt in _IST_MAPPING_BUCKET_ORDER:
+                key = f"{st}__{bkt}"
+                val = size_dependence[var].get(key)
+                if val is not None:
+                    cells.append(f"{key}={val:.4f}")
+        print(f"{var:<32} " + "  ".join(cells))
+    print(f"summary written : {summary_path}")
+    return 0
+
+
 def _run_replay_l1(
     dataset_dir: str,
     view_name: str,
@@ -5818,6 +6908,46 @@ async def _run(args: argparse.Namespace) -> int:
             args.dataset_dir,
             history=e2e_history,
             asof_lock=args.asof_lock,
+            dry_run=args.dry_run,
+        )
+    # ---- TYPE-MAPPING Commit 1：sample / export / distribution（probe-only，不连 DB）----
+    if args.mode == "internal-structure-type-sample":
+        if not args.dataset_dir:
+            logger.error("[internal-structure-type-sample] --dataset-dir 为必填")
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error("[internal-structure-type-sample] 禁 --scope-type/--scope-key")
+            return 2
+        return _run_internal_structure_type_sample(
+            args.dataset_dir,
+            target_per_family=args.target_per_family,
+            seed=args.seed,
+            dry_run=args.dry_run,
+        )
+    if args.mode == "internal-structure-type-export":
+        if not args.dataset_dir:
+            logger.error("[internal-structure-type-export] --dataset-dir 为必填")
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error("[internal-structure-type-export] 禁 --scope-type/--scope-key")
+            return 2
+        return _run_internal_structure_type_export(
+            args.dataset_dir,
+            history=args.history or _DEFAULT_HISTORY_DAYS,
+            asof_lock=args.asof_lock,
+            dry_run=args.dry_run,
+        )
+    if args.mode == "internal-structure-type-distribution":
+        if not args.dataset_dir:
+            logger.error("[internal-structure-type-distribution] --dataset-dir 为必填")
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[internal-structure-type-distribution] 禁 --scope-type/--scope-key"
+            )
+            return 2
+        return _run_internal_structure_type_distribution(
+            args.dataset_dir,
             dry_run=args.dry_run,
         )
     # ---- replay-l1 / rtm / semantic-matrix / explore1：纯本地 Dataset corpus 回放（不连 DB）----
