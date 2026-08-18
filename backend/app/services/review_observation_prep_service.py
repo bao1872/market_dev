@@ -14,6 +14,7 @@ Shadow only: this service is never wired into Filter / Discovery / publication.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from bisect import bisect_left, bisect_right
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.member_fact import (
     DailyBarFact,
+    number as coerce_number,
     previous_state_to_flat,
     state_to_continuous,
 )
@@ -97,6 +99,103 @@ def _normalize_event_type(raw: str | None) -> str:
         return ""
     token = raw.strip().lower()
     return _EVENT_TYPE_NORMALIZATION.get(token, raw.strip().upper())
+
+
+# ----------------------------------------------------------------------------
+# SHARED Source-Fact Mappers (REVIEW-V23-PHASE1-R0-A)
+# ----------------------------------------------------------------------------
+# These pure helpers are the SINGLE mapping owner for translating source facts
+# (a SQLAlchemy row, a PG JSONB dict, or a Dataset parquet/JSON row) into the
+# internal representations consumed by ``_build_member_observations`` /
+# ``compute_scope_observation``.  Both the DB loader path and the Dataset Replay
+# Adapter path call the SAME helpers (Gate 2 Adapter contract parity): we never
+# duplicate a mapping in two places, so a semantic drift cannot appear between
+# "DB path" and "Dataset path".
+#
+# ``_decode_jsonb`` is deliberately loose on input type: PostgreSQL JSONB arrives
+# as a Python ``dict`` while a Dataset parquet row carries the same JSON as a
+# JSON ``str`` (the parquet converter writes dict/list columns as ``pa.string()``
+# + ``json.dumps``).  It accepts ``dict`` / ``str`` / ``None`` and rejects any
+# other type or invalid JSON with ``ValueError`` (fail fast, never silent
+# fallback).
+
+
+def _decode_jsonb(value: Any) -> dict:
+    """Decode a JSONB-ish value to a dict, supporting both DB dict and str.
+
+    - ``dict``     -> returned as-is (defensive shallow copy).
+    - ``str``      -> ``json.loads``; MUST decode to a dict else ValueError.
+    - ``None``     -> ``{}``.
+    - other / invalid JSON / non-dict JSON -> ``ValueError``.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"_decode_jsonb: invalid JSON string: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError(
+                f"_decode_jsonb: JSON decoded to {type(loaded).__name__}, expected dict"
+            )
+        return loaded
+    raise ValueError(f"_decode_jsonb: unsupported type {type(value).__name__}")
+
+
+def _map_daily_bar_fact(
+    *,
+    trade_date: date,
+    open: float | None,
+    high: float | None,
+    low: float | None,
+    close: float | None,
+    volume: float | None,
+    amount: float | None,
+) -> DailyBarFact:
+    """Shared DailyBarFact mapper (exact numeric coercion, no NaN injection)."""
+    return DailyBarFact(
+        trade_date=trade_date,
+        open=coerce_number(open),
+        high=coerce_number(high),
+        low=coerce_number(low),
+        close=coerce_number(close),
+        volume=coerce_number(volume),
+        amount=coerce_number(amount),
+    )
+
+
+def _map_structure_event(
+    *,
+    instrument_id: str,
+    event_type: str,
+    direction: Any,
+    level: Any,
+    internal: Any,
+    release_volume_ratio: Any,
+) -> StructureEvent:
+    """Shared immutable StructureEvent mapper (identical to the DB loaders).
+
+    Canonical boundary normalization (event_type casing), numeric level /
+    release_volume_ratio coercion, and the bool-only ``internal`` gate are all
+    applied here so the DB path and the Dataset path produce byte-identical
+    events.
+    """
+    internal_flag: bool | None = bool(internal) if isinstance(internal, bool) else None
+    return StructureEvent(
+        member_id=instrument_id,
+        event_type=_normalize_event_type(event_type),
+        direction=direction,
+        level=(float(level) if isinstance(level, (int, float)) else None),
+        internal=internal_flag,
+        release_volume_ratio=(
+            float(release_volume_ratio)
+            if isinstance(release_volume_ratio, (int, float))
+            else None
+        ),
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -304,27 +403,18 @@ async def _load_structure_events(
     events: list[StructureEvent] = []
     for row in (await session.execute(stmt)).scalars():
         payload = row.event_payload or {}
-        # Canonical boundary normalization: CHoCH casing is a storage artifact, NOT a
-        # product distinction.  Normalize case-insensitively so Scope Core never
-        # perceives "CHoCH" vs "CHOCH".  Additive-only; other known types unaffected.
-        etype = _normalize_event_type(row.event_type)
-        direction = payload.get("direction")
-        level = payload.get("level")
-        # ``internal`` is the canonical Structure Level dimension (False=Swing,
-        # True=Internal).  Stored in the event payload; NOT re-derived by Scope.
-        internal_raw = payload.get("internal")
-        internal = bool(internal_raw) if isinstance(internal_raw, bool) else None
-        release_ratio = payload.get("release_volume_ratio")
+        # Shared immutable mapper: canonical boundary normalization (CHoCH casing
+        # artifact), numeric level / release_volume_ratio coercion, and the bool-only
+        # ``internal`` gate all live in ``_map_structure_event`` — the SAME helper
+        # used by the Dataset Replay Adapter (Gate 2 mapping parity).
         events.append(
-            StructureEvent(
-                member_id=str(row.instrument_id),
-                event_type=etype,
-                direction=direction,
-                level=(float(level) if isinstance(level, (int, float)) else None),
-                internal=internal,
-                release_volume_ratio=(
-                    float(release_ratio) if isinstance(release_ratio, (int, float)) else None
-                ),
+            _map_structure_event(
+                instrument_id=str(row.instrument_id),
+                event_type=row.event_type,
+                direction=payload.get("direction"),
+                level=payload.get("level"),
+                internal=payload.get("internal"),
+                release_volume_ratio=payload.get("release_volume_ratio"),
             )
         )
     return events
@@ -356,10 +446,16 @@ def _build_member_observations(
     """
     members: list[MemberObservation] = []
     for inst_id in pit_ids_t:
+        # ROUND-2 GAP-L1-MEMBER-GATE FIX: a PIT member EXISTS by virtue of being
+        # in the PIT membership — NOT because it has a daily_state.  When the
+        # daily_state is missing (state_t is None), the member is still built; the
+        # state-derived fact families (Trend / Structure State / Momentum /
+        # state-driven Volume) become unavailable, while bars-driven Price and
+        # snapshot-driven Current-only facts stay available (they have their own
+        # independent sources).  Previously this ``continue`` dropped the whole
+        # member, so bars/snapshots that existed could never form Price /
+        # Current-only on a state-less day (proven on 2026-08-17).
         state_t = states_t.get(inst_id)
-        if state_t is None:
-            # Not a valid canonical First Pyramid member/fact at T -> not provided.
-            continue
         series = bars.get(inst_id)
         current = series.exact_bar(trade_date) if series else None
         t1_bar = series.exact_bar(t1) if (series and t1) else None
@@ -799,28 +895,19 @@ async def _load_batch_events(
     grouped: dict[str, list[StructureEvent]] = defaultdict(list)
     for row in (await session.execute(stmt)).scalars():
         payload = row.event_payload or {}
-        # Canonical boundary normalization (identical to ``_load_structure_events``).
-        etype = _normalize_event_type(row.event_type)
-        direction = payload.get("direction")
-        level = payload.get("level")
-        internal_raw = payload.get("internal")
-        internal = bool(internal_raw) if isinstance(internal_raw, bool) else None
-        release_ratio = payload.get("release_volume_ratio")
         event_time = row.event_time
         if not event_time:
             # The query bounds ``event_time`` to [first, last+1d), so a NULL here
             # would be a data anomaly; skip rather than crash or mis-group.
             continue
         grouped[event_time[:10]].append(
-            StructureEvent(
-                member_id=str(row.instrument_id),
-                event_type=etype,
-                direction=direction,
-                level=(float(level) if isinstance(level, (int, float)) else None),
-                internal=internal,
-                release_volume_ratio=(
-                    float(release_ratio) if isinstance(release_ratio, (int, float)) else None
-                ),
+            _map_structure_event(
+                instrument_id=str(row.instrument_id),
+                event_type=row.event_type,
+                direction=payload.get("direction"),
+                level=payload.get("level"),
+                internal=payload.get("internal"),
+                release_volume_ratio=payload.get("release_volume_ratio"),
             )
         )
     return {
@@ -973,6 +1060,36 @@ class _UnionFactContext:
     vec_volume: dict[uuid.UUID, _VectorizedMemberVolume]
 
 
+def build_union_fact_context_from_loaded_facts(
+    *,
+    t1_by_date: dict[date, date | None],
+    states_by_date: dict[date, dict[uuid.UUID, dict]],
+    bars: dict[uuid.UUID, _InstrumentBarSeries],
+    events_by_date: dict[date, list[StructureEvent]],
+) -> _UnionFactContext:
+    """Dataset loaded-facts -> production ``_UnionFactContext`` (R0 Replay Adapter).
+
+    This is the SINGLE entry point that turns already-loaded source facts
+    (calendar T-1 map, FP daily states, bars, FP structure events) into the same
+    ``_UnionFactContext`` consumed by :func:`prepare_scopes_from_union`.  The DB
+    path builds the same context via :func:`prepare_union_fact_context` (which
+    loads from PostgreSQL); the Dataset path builds it here from frozen source
+    facts.  Both then feed the SAME production preparation core.
+
+    The only computation performed here is the shared vectorized VolumeContext
+    precompute (``_precompute_vectorized_volume``) — the same owner the DB path
+    calls.  There is NO second set of business formulas: bars / states / events
+    are passed in already mapped by the shared source-fact mappers.
+    """
+    return _UnionFactContext(
+        t1_by_date=t1_by_date,
+        states_by_date=states_by_date,
+        bars=bars,
+        events_by_date=events_by_date,
+        vec_volume=_precompute_vectorized_volume(bars),
+    )
+
+
 async def prepare_union_fact_context(
     session: AsyncSession,
     trade_dates: list[date],
@@ -1040,56 +1157,90 @@ async def prepare_union_fact_context(
     )
 
 
-async def prepare_scopes_from_union(
-    session: AsyncSession,
-    scope_type: str,
-    trade_dates: list[date],
-    scope_members: dict[str, tuple[list[uuid.UUID], str]],
-    union_ctx: _UnionFactContext,
+@dataclass(frozen=True)
+class ScopeReplaySpec:
+    """One scope to replay from a shared union fact context (R0-B).
+
+    Carries its OWN ``scope_type`` so a single union build can serve a
+    mixed-family view (e.g. concept + industry_l1/l2/l3 in dev_500 /
+    capacity_4096), unlike the DB wrapper which is single-``scope_type``.
+    """
+
+    scope_type: str
+    scope_key: str
+    scope_name: str
+    member_ids: tuple[uuid.UUID, ...]
+
+
+def build_prepared_scopes_from_union(
     *,
+    trade_dates: list[date],
+    scope_specs: Sequence[ScopeReplaySpec],
+    union_ctx: _UnionFactContext,
+    membership_t1_by_scope: dict[str, tuple[uuid.UUID, ...]] | None = None,
+    current_only_facts_by_date: dict[date, dict[str, dict[str, object]]] | None = None,
     pit_status_t: str = "current_static",
     pit_status_t1: str = "current_static",
     t1_membership_available: bool = True,
     prep_counters: dict[str, int] | None = None,
     prep_fallback_reasons: list[str] | None = None,
 ) -> dict[str, list[PreparedScope]]:
-    """Build per-scope ``PreparedScope`` series by slicing a shared union fact context.
+    """PURE union preparation core: slice a shared ``_UnionFactContext`` into
+    per-scope ``PreparedScope`` series (R0-B single production calculation owner).
 
-    ``scope_members`` maps ``scope_key -> (member_ids, scope_name)``.  The loop
-    order is **date -> union member -> scope slice** (VEC-1): for every
+    This is the ONE owner shared by the DB path and the Dataset Replay Adapter.
+    The loop order is **date -> union member -> scope slice** (VEC-1): for every
     trade_date the canonical ``_build_member_observations`` owner runs ONCE over
     the union of member_ids, then each scope SELECTS the resulting immutable
     ``MemberObservation`` by reference in its own membership order.  A member
-    shared by N scopes (e.g. one stock in many concept boards) is therefore
-    constructed once per date instead of N times, while the result for a single
-    scope stays byte-identical to calling
-    :func:`prepare_scope_series_from_member_ids` for that scope alone.
+    shared by N scopes (e.g. one stock in many concept boards) is constructed
+    once per date instead of N times, while the result for a single scope stays
+    byte-identical to calling ``prepare_scope_series_from_member_ids`` for that
+    scope alone.
+
+    Unlike the DB wrapper (which hard-codes current-static semantics), this core
+    explicitly accepts:
+
+    - ``membership_t1_by_scope``: per-scope T-1 membership (``scope_key ->
+      member UUID tuple``).  When ``None``, T-1 == T (current-static, the
+      Historical Dynamics exception).  For Current L1 PIT(T) the caller supplies
+      the real PIT(T-1) set; T-1/Transition facts are only meaningful when this
+      is not forged.
+    - ``current_only_facts_by_date``: per-date Current-only snapshot facts
+      (``{trade_date: {member_id: {attr: value}}}``).  When ``None``, all
+      Current-only facts stay ``None`` (Historical Dynamics path).  For Current
+      L1 the caller supplies them so Release Volume Ratio / BB / VWAP / Distance
+      / Momentum-Volume Relation are populated.
     """
-    if not trade_dates or not scope_members:
+    if not trade_dates or not scope_specs:
         return {}
     import time
 
     t0 = time.perf_counter()
 
     # ---- Precompute stable scope context ONCE (out of the date loop) ----
-    # Scope member order / name / string tuples never change across the replay;
-    # building them here instead of per-T removes repeated tuple/list/set
-    # construction on every trade_date.  ``member_set`` (VEC-1-CORRECTION) is the
-    # scope-specific membership used to filter the union's structure events so
-    # ``PreparedScope.events`` stays strictly scope-local.
-    scope_meta: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], set[str]]] = {}
+    scope_meta: dict[str, tuple[str, str, tuple[str, ...], tuple[str, ...], set[str]]] = {}
     union_ids: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
     scope_member_day_count = 0
-    for scope_key, (member_ids, scope_name) in scope_members.items():
-        ids = tuple(member_ids)
+    t1_by_scope: dict[str, tuple[str, ...]] = {}
+    for spec in scope_specs:
+        ids = tuple(spec.member_ids)
         scope_member_day_count += len(ids)
         str_ids = tuple(str(i) for i in ids)
-        scope_meta[scope_key] = (
-            scope_name,
+        # T-1 membership: explicit PIT(T-1) if supplied, else current-static T==T1.
+        if membership_t1_by_scope is not None:
+            t1_ids = tuple(
+                str(i) for i in membership_t1_by_scope.get(spec.scope_key, ())
+            )
+        else:
+            t1_ids = str_ids
+        t1_by_scope[spec.scope_key] = t1_ids
+        scope_meta[spec.scope_key] = (
+            spec.scope_type,
+            spec.scope_name,
             str_ids,
-            # current-static: the T-1 membership equals the T membership.
-            str_ids,
+            t1_ids,
             set(str_ids),
         )
         for mid in ids:
@@ -1111,16 +1262,20 @@ async def prepare_scopes_from_union(
         prep_fallback_reasons if prep_fallback_reasons is not None else []
     )
 
-    out: dict[str, list[PreparedScope]] = {k: [] for k in scope_members}
+    out: dict[str, list[PreparedScope]] = {s.scope_key: [] for s in scope_specs}
     t_loop = time.perf_counter()
     for t in trade_dates:
         t1 = union_ctx.t1_by_date.get(t)
         states_t = union_ctx.states_by_date.get(t, {})
         states_t1 = union_ctx.states_by_date.get(t1, {}) if t1 else {}
         structure_events = union_ctx.events_by_date.get(t, [])
+        current_only_facts = (
+            current_only_facts_by_date.get(t, {})
+            if current_only_facts_by_date is not None
+            else {}
+        )
 
         # VEC-1: ONE canonical member build for the whole union per trade_date.
-        # A member shared by N scopes is constructed exactly once, not N times.
         # ``_build_member_observations`` remains the single member-construction
         # owner; the scopes below only SELECT the resulting immutable
         # MemberObservation by reference (scope membership order preserved).
@@ -1131,14 +1286,16 @@ async def prepare_scopes_from_union(
             states_t=states_t,
             states_t1=states_t1,
             bars=union_ctx.bars,
-            current_only_facts={},
+            current_only_facts=current_only_facts,
             vec_volume=union_ctx.vec_volume,
             counters=batch_counters,
             fallback_reasons=batch_fallback_reasons,
         )
         member_by_id = {m.member_id: m for m in union_members}
 
-        for scope_key, (scope_name, str_ids, str_ids_t1, member_set) in scope_meta.items():
+        for scope_key, (
+            scope_type, scope_name, str_ids, str_ids_t1, member_set,
+        ) in scope_meta.items():
             members = tuple(
                 member_by_id[sid] for sid in str_ids if sid in member_by_id
             )
@@ -1176,7 +1333,7 @@ async def prepare_scopes_from_union(
         "trade_date_count=%d scope_member_day_count=%d unique_member_day_count=%d "
         "duplication_factor=%.2f member_build_calls=%d vec_hit=%d vec_fallback=%d "
         "fallback_reasons=%s replay_loop_ms=%.1f total_ms=%.1f",
-        len(scope_members), len(union_ids), len(trade_dates),
+        len(scope_specs), len(union_ids), len(trade_dates),
         scope_member_day_count, unique_member_day_count, duplication_factor,
         len(trade_dates),
         batch_counters.get("vec_hit", 0), batch_counters.get("vec_fallback", 0),
@@ -1184,6 +1341,55 @@ async def prepare_scopes_from_union(
         loop_ms, total_ms,
     )
     return out
+
+
+async def prepare_scopes_from_union(
+    session: AsyncSession,
+    scope_type: str,
+    trade_dates: list[date],
+    scope_members: dict[str, tuple[list[uuid.UUID], str]],
+    union_ctx: _UnionFactContext,
+    *,
+    pit_status_t: str = "current_static",
+    pit_status_t1: str = "current_static",
+    t1_membership_available: bool = True,
+    prep_counters: dict[str, int] | None = None,
+    prep_fallback_reasons: list[str] | None = None,
+) -> dict[str, list[PreparedScope]]:
+    """DB-aware thin wrapper over the pure union preparation core.
+
+    Builds per-scope ``PreparedScope`` series by slicing a shared union fact
+    context.  This wrapper hard-codes the **Historical Dynamics current-static
+    semantics** (T-1 membership == T membership, Current-only facts unavailable)
+    that the previous inline implementation baked in; it delegates the entire
+    calculation to :func:`build_prepared_scopes_from_union` so the Dataset
+    Replay Adapter and the DB path share the SAME production calculation owner.
+
+    For Current L1 (PIT(T), Current-only snapshot facts) use
+    :func:`build_prepared_scopes_from_union` directly — do NOT route Current L1
+    through this wrapper, or the current-static exception would be smuggled in.
+    """
+    specs = [
+        ScopeReplaySpec(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            scope_name=scope_name,
+            member_ids=tuple(member_ids),
+        )
+        for scope_key, (member_ids, scope_name) in scope_members.items()
+    ]
+    return build_prepared_scopes_from_union(
+        trade_dates=trade_dates,
+        scope_specs=specs,
+        union_ctx=union_ctx,
+        membership_t1_by_scope=None,          # current-static T==T1
+        current_only_facts_by_date=None,      # Current-only unavailable
+        pit_status_t=pit_status_t,
+        pit_status_t1=pit_status_t1,
+        t1_membership_available=t1_membership_available,
+        prep_counters=prep_counters,
+        prep_fallback_reasons=prep_fallback_reasons,
+    )
 
 
 async def prepare_scope(

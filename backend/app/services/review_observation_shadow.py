@@ -90,17 +90,19 @@ async def run_shadow_scope(
         evidence = _evidence(prep, {"status": "skipped_no_members"}, [])
         return _write(evidence, out_dir, spec, trade_date)
 
-    # Transition uses the T-1 membership set only when it is a truthfully
-    # available historical PIT; otherwise empty -> transitions zero-eligible.
-    pit_t1 = prep.pit_member_ids_t1 if prep.t1_membership_available else ()
+    # Transition availability is owned by ``compute_scope_observation`` via
+    # ``t1_membership_available``: when the previous PIT membership is not
+    # truthfully available, all Transition distributions are forced unavailable
+    # (never a current-static T-1→T forgery).
     obs = compute_scope_observation(
         scope_type=spec.scope_type,
         scope_key=spec.scope_key,
         trade_date=trade_date,
         pit_member_ids=prep.pit_member_ids,
-        pit_member_ids_t1=pit_t1,
+        pit_member_ids_t1=prep.pit_member_ids_t1,
         members=prep.members,
         events=prep.events,
+        t1_membership_available=prep.t1_membership_available,
     )
     checks = check_observation_invariants(obs)
     evidence = _evidence(prep, obs, checks)

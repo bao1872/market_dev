@@ -578,8 +578,11 @@ def test_prep_carries_continuous_trend_facts() -> None:
         "available_bars": 250,
     }
     # structure_alignment_categorical 来自 raw flat_t（canonical categorical 字符串），
-    # 非 numeric continuous cast。
-    mo = build_member_observation(_raw(continuous=cont, flat_t={"structure_alignment": "aligned"}))
+    # 非 numeric continuous cast。ROUND-2.1 GAP-L1-STRUCTURE-ALIGNMENT-KEY FIX：
+    # 消费 canonical producer key ``fp_structure_alignment``（previous_state_to_flat
+    # 输出的正式 key）；旧 key ``structure_alignment`` 永不与 producer 匹配，导致
+    # member categorical 恒为 None。
+    mo = build_member_observation(_raw(continuous=cont, flat_t={"fp_structure_alignment": "aligned"}))
     assert mo.regime_strength == pytest.approx(0.7)
     assert mo.dsa_dir_bars == pytest.approx(3.0)
     assert mo.dsa_vwap_dev_pct == pytest.approx(-1.5)

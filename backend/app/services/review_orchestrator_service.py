@@ -1515,9 +1515,10 @@ async def _persist_canonical_scope_observation(
             scope_key=prep.scope_key,
             trade_date=prep.trade_date,
             pit_member_ids=prep.pit_member_ids,
-            pit_member_ids_t1=prep.pit_member_ids_t1 if prep.t1_membership_available else None,
+            pit_member_ids_t1=prep.pit_member_ids_t1,
             members=prep.members,
             events=prep.events,
+            t1_membership_available=prep.t1_membership_available,
         )
         checks = check_observation_invariants(observation)
         failed = [c for c in checks if not c["ok"]]

@@ -1088,9 +1088,12 @@ def test_vec1_scope_observation_equals_single_scope_path(monkeypatch):
 
 
 def test_vec1_scope_isolation_missing_state_boundary(monkeypatch):
-    """VEC-1 boundary: a member with no state at T is absent from the union build
-    and therefore excluded from every scope slice; a member of scope A is never
-    leaked into scope B (scope isolation preserved)."""
+    """VEC-1 boundary (ROUND-2 GAP-L1-MEMBER-GATE): a member EXISTS by PIT
+    membership, NOT by daily_state.  At T2 the shared member has no state but is
+    still built (state-derived facts unavailable); it stays in both scope slices
+    (it belongs to both PIT memberships).  Scope isolation is preserved: a member
+    of scope A is never leaked into scope B, and no member is dropped solely
+    because its state is missing."""
     from app.services.review_observation_prep_service import (
         prepare_scopes_from_union,
         prepare_union_fact_context,
@@ -1127,11 +1130,12 @@ def test_vec1_scope_isolation_missing_state_boundary(monkeypatch):
         )
 
     prepared = asyncio.run(scenario())
-    # T2 (last): shared has no state -> absent from both A and B; no cross-leak.
+    # T2 (last): shared has no state but IS a PIT member of both A and B -> still
+    # built (state-derived facts unavailable), stays in both slices; no cross-leak.
     a_t2 = prepared["A"][-1]
     b_t2 = prepared["B"][-1]
-    assert [m.member_id for m in a_t2.members] == [str(id_a)]
-    assert [m.member_id for m in b_t2.members] == [str(id_b)]
+    assert [m.member_id for m in a_t2.members] == [str(id_a), str(id_shared)]
+    assert [m.member_id for m in b_t2.members] == [str(id_b), str(id_shared)]
     # Earlier dates still include the shared member in both scopes.
     a_t1 = prepared["A"][1]
     b_t1 = prepared["B"][1]

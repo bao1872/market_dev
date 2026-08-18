@@ -767,6 +767,7 @@ def compute_scope_observation(
     pit_member_ids_t1: Iterable[str] | None = None,
     members: Iterable[MemberObservation],
     events: Iterable[StructureEvent] | None = None,
+    t1_membership_available: bool = True,
 ) -> dict[str, Any]:
     """Compute objective Canonical Scope Observation facts (PRD §7.2-§7.7).
 
@@ -776,10 +777,27 @@ def compute_scope_observation(
     ``members`` carry the current canonical facts and must all belong to PIT(T).
     ``events`` are the canonical First Pyramid immutable structure events for T
     (PRD §7.4 D); ``None`` / empty yields an empty event aggregation.
+
+    ``t1_membership_available`` is the Transition availability gate (GAP-L1-
+    TRANSITION-T1).  A Transition is only meaningful on the PIT(T)∩PIT(T-1)
+    universe.  When the previous PIT membership is NOT reliably available
+    (``False``), the PIT(T-1) set must never be proxied by the current
+    membership, so all Transition distributions are forced unavailable
+    (denominator = 0, no transition keys) — even if a ``pit_member_ids_t1`` is
+    passed.  This keeps the Current L1 from ever forging a within-T T-1→T
+    migration.  Defaults to ``True`` (Historical Dynamics current-static path),
+    which preserves the existing behavior exactly.
     """
     member_list = list(members)
     pit_set = set(pit_member_ids)
-    t1_set = set(pit_member_ids_t1) if pit_member_ids_t1 is not None else set()
+    # ROUND-2 GAP-L1-TRANSITION-T1 FIX: when the previous PIT membership is not
+    # truthfully available, the PIT(T-1) set is unusable for Transition — never
+    # fall back to the current membership (PIT(T)) to fake a T-1→T migration.
+    t1_set = (
+        set()
+        if not t1_membership_available
+        else (set(pit_member_ids_t1) if pit_member_ids_t1 is not None else set())
+    )
     _reject_if_invalid_members(member_list, pit_set)
 
     # PRICE universe — PIT(T) ∩ price candidate(T) ∩ finite exact-T1 return.

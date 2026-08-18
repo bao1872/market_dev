@@ -251,9 +251,14 @@ def build_member_observation_from_facts(
         seg_vol_mean=cont.get("current_segment_volume_mean"),
         seg_amt_mean_prev=cont.get("prev_segment_amount_mean"),
         # STRUCTURE categorical fact (PRD §7.4 B) — canonical Structure Alignment
-        # value verbatim from the raw state payload ("aligned" / "divergent" / None).
-        # NOT the numeric continuous cast.
-        structure_alignment_categorical=raw.flat_t.get("structure_alignment")
+        # value verbatim from the raw state payload ("aligned" / "divergent" /
+        # "共振" / "背离" / None).  ROUND-2.1 GAP-L1-STRUCTURE-ALIGNMENT-KEY FIX:
+        # read the canonical producer key ``fp_structure_alignment`` emitted by
+        # previous_state_to_flat (member_fact.py).  The old ``structure_alignment``
+        # key never matched the producer, so the member-level categorical was
+        # always None and scope Structure Alignment always had denominator=0 even
+        # when valid swing/internal members existed.  NOT the numeric continuous cast.
+        structure_alignment_categorical=raw.flat_t.get("fp_structure_alignment")
         if raw.flat_t
         else None,
         active_internal_ob_count=cont.get("active_internal_ob_count"),

@@ -27,6 +27,16 @@ def _number(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def number(value: Any) -> float | None:
+    """Public numeric coercion (finite float or None).  Shared mapper owner.
+
+    Same semantics as the module-private ``_number``: ``None``/non-numeric/NaN/Inf
+    all map to ``None``.  Used by the shared source-fact mappers so the DB loader
+    path and the Dataset Replay Adapter path coerce bars identically.
+    """
+    return _number(value)
+
+
 def _ratio(value: float | None, history: list[float], window: int) -> float | None:
     prior = history[-window - 1 : -1]
     if value is None or not prior:

@@ -362,8 +362,9 @@ def test_scenario_c_missing_bar_mid_series() -> None:
 
 
 def test_scenario_d_t_no_state() -> None:
-    """Scenario D: a member with bars but no state at T -> excluded from provided
-    members (identical in both paths)."""
+    """Scenario D (ROUND-2 GAP-L1-MEMBER-GATE): a member with bars but no state
+    at T is STILL a PIT member -> included in both paths (identical), with its
+    state-derived facts unavailable but price facts preserved."""
     inst_a, inst_b = uuid.uuid4(), uuid.uuid4()
     days = _trading_days(date(2026, 1, 5), 220)
     t, t1 = days[-1], days[-2]
@@ -375,10 +376,13 @@ def test_scenario_d_t_no_state() -> None:
     states[t] = {inst_a: _state(1)}  # inst_b has NO state at T
     canon = _build_members(bars, t, t1, states, vectorized=False)
     vec = _build_members(bars, t, t1, states, vectorized=True)
-    # inst_b excluded in both.
-    assert [m.member_id for m in canon] == [str(inst_a)]
-    assert [m.member_id for m in vec] == [str(inst_a)]
+    # inst_b is still included (it is a PIT member); both paths identical.
+    assert [m.member_id for m in canon] == [str(inst_a), str(inst_b)]
+    assert [m.member_id for m in vec] == [str(inst_a), str(inst_b)]
     _assert_member_equiv(canon[0], vec[0])
+    # inst_b carries bars-driven price facts; its state-derived facts are None.
+    assert canon[1].price_candidate is True
+    assert canon[1].trend is None
 
 
 def test_scenario_e_t1_no_state() -> None:
@@ -700,7 +704,7 @@ def test_current_membership_resolved_exactly_once(monkeypatch) -> None:
         )
 
     def fake_compute(scope_type, scope_key, trade_date, pit_member_ids,
-                     pit_member_ids_t1, members, events):
+                     pit_member_ids_t1, members, events, *, t1_membership_available=True):
         return {"scope": {"scope_type": scope_type, "provided_member_count": 0}}
 
     def fake_validate(payload, *, scope_type, scope_key, trade_date):

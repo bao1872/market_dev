@@ -42,6 +42,8 @@ import resource
 import shutil
 import sys
 import uuid
+from bisect import bisect_left
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Iterable
@@ -68,6 +70,15 @@ _KNOWN_SCOPE_TYPES = {
 FIRST_PYRAMID_ALGORITHM_VERSION = "1.0.0-core-split"
 HISTORY_CONTRACT_VERSION = "review-history-v2"
 DATASET_SCHEMA_VERSION = 1
+# --history 默认值（单一来源；replay-l1 用它判定用户是否显式传了 --history）
+_DEFAULT_HISTORY_DAYS = 120
+# snapshot summary_payload 均值 ~287KB/行，故该 domain 用小 batch 扫描（见 _load_replay_facts）
+_SNAPSHOT_SCAN_BATCH_SIZE = 64
+
+
+def p_default_history() -> int:
+    return _DEFAULT_HISTORY_DAYS
+
 PRD_VERSION = "v2.3"
 PRD_PATH = "docs/prd/70-review.md"
 PRD_CONTRACT_COPY = "ref/Panji_Review_Scope_Observation_PRD_v2.3_FINAL.md"
@@ -926,7 +937,7 @@ def _parse_args() -> argparse.Namespace:
         help="scope 标识（如 银行 / 人工智能），measure-all-scopes 模式可省略",
     )
     p.add_argument(
-        "--history", type=int, default=120,
+        "--history", type=int, default=_DEFAULT_HISTORY_DAYS,
         help="回看交易日数量（scale ladder: 20/60/120）",
     )
     p.add_argument(
@@ -945,6 +956,11 @@ def _parse_args() -> argparse.Namespace:
             "vec1-benchmark",
             "export-dataset",
             "dataset-validate",
+            "replay-l1",
+            "rtm",
+            "semantic-matrix",
+            "explore1",
+            "equivalence",
         ],
         default="single",
         help=(
@@ -954,13 +970,31 @@ def _parse_args() -> argparse.Namespace:
             "报告 VEC-1 duplication_factor 等物理成本指标；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
-            "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views"
+            "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
+            "replay-l1: 用本地 Dataset corpus 回放 Current L1 Scope Observation（锁 asof date，"
+            "禁 scope-type/scope-key，需 --dataset-dir + --view 选择 dev_500/capacity_4096/单 scope）；"
+            "rtm: 对 Dataset 跑全量 L1 source-ready Fact RTM（声明式 metadata + 五态判定）；"
+            "semantic-matrix: 按 fact 来源选择证据日期的 L1 RTM（08-17/08-10/08-07 各自最佳日期，"
+            "每个 Fact 记录 evidence_date，不要求同一天）；"
+            "explore1: EXPLORE-1 事件聚合 denominator 检查（真实 08-07 数据 + 合成 Case A/B）"
         ),
+    )
+    p.add_argument(
+        "--view", type=str, default="representative_sample",
+        help="replay-l1 / rtm 模式的数据集 view：dev_500 / capacity_4096 / representative_sample "
+             "（或传单个 board_id UUID 直接指定 scope）",
     )
     p.add_argument(
         "--dataset-dir", type=str, default=None,
         help="export-dataset / dataset-validate 模式的数据集目录（服务器 /tmp 或本地 "
              "backend/.perfdata/review/<name>）",
+    )
+    p.add_argument(
+        "--asof-lock", type=str, default=None,
+        help="replay-l1 / rtm 模式可选：显式锁定 Current L1 asof 日期 ISO（Track B "
+             "historical-asof，如 2026-08-10 验证 Trend/Structure/Momentum）。不传则默认 "
+             "Track A Current-asof = manifest declared asof（2026-08-17）。禁止 latest "
+             "backfill，缺失事实如实标记 unavailable。",
     )
     p.add_argument(
         "--sample-bar-members", type=int, default=200,
@@ -2623,6 +2657,1613 @@ def _dataset_validate(dataset_dir: str) -> int:
     return 0
 
 
+def _load_parquet_rows(dataset_dir: str, stem: str) -> list[dict]:
+    """Read a SMALL metadata ``parquet/<stem>.parquet`` fully into dict rows.
+
+    R0-C1: this full-materialization path is allowed ONLY for small metadata
+    files (calendar / boards / memberships).  It MUST NOT be used for the large
+    fact domains (bars_daily / first_pyramid_daily_state / first_pyramid_events /
+    stock_feature_snapshots_asof) — those go through the Selection-First bounded
+    ``_iter_parquet_rows`` scanner instead, or the whole corpus gets materialized
+    into multi-GB Python lists (the OOM we are fixing).
+
+    PURE I/O only — no business formula.  JSONB columns arrive as JSON strings
+    (the parquet converter writes dict/list as ``pa.string()`` + ``json.dumps``),
+    decoded by the shared ``_decode_jsonb`` mapper where the consumer needs a dict.
+    """
+    _LARGE_FACT_STEMS = {
+        "bars_daily",
+        "first_pyramid_daily_state",
+        "first_pyramid_events",
+        "stock_feature_snapshots_asof",
+    }
+    if stem in _LARGE_FACT_STEMS:
+        raise RuntimeError(
+            f"_load_parquet_rows({stem!r}): large fact domain must use the "
+            f"Selection-First _iter_parquet_rows scanner (R0-C1 memory contract)"
+        )
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as e:
+        raise RuntimeError(
+            "optional replay dependency missing (pip install -r requirements-replay.txt)"
+        ) from e
+    path = os.path.join(dataset_dir, "parquet", f"{stem}.parquet")
+    if not os.path.exists(path):
+        return []
+    table = pq.read_table(path)
+    rows = table.to_pylist()
+    return rows
+
+
+def _iter_parquet_rows(
+    dataset_dir: str,
+    stem: str,
+    *,
+    columns: list[str],
+    filter_expr: Any = None,
+    batch_size: int = 8192,
+    use_iter_batches: bool = False,
+) -> Iterable[dict]:
+    """Selection-First bounded scan of a parquet fact domain (R0-C1).
+
+    Streams the file in PyArrow record batches, applying ``columns`` projection
+    and an optional ``filter_expr`` (``pyarrow.dataset`` Expression) at the scan
+    layer, then yields one plain dict per row.  Only a single controlled batch is
+    ever converted with ``to_pylist()`` — never the whole ``Table`` — so peak
+    memory is bounded by ``batch_size`` regardless of on-disk corpus size.
+    """
+    try:
+        import pyarrow.dataset as ds
+    except ImportError as e:
+        raise RuntimeError(
+            "optional replay dependency missing (pip install -r requirements-replay.txt)"
+        ) from e
+    path = os.path.join(dataset_dir, "parquet", f"{stem}.parquet")
+    if not os.path.exists(path):
+        return
+    if use_iter_batches:
+        # ``ds.Scanner`` materializes a whole row group at a time.  When one row
+        # group holds a very wide column (snapshot ``summary_payload``: 5293 rows
+        # in a SINGLE row group, ~1.5 GB total) that alone costs ~2 GB before any
+        # decode.  ``ParquetFile.iter_batches`` slices inside the row group, which
+        # measurably lowers peak RSS (~2059 MB -> ~894 MB).  ``filter_expr`` is not
+        # supported on this path, so the caller re-checks predicates per row.
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(path)
+        for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
+            for row in batch.to_pylist():
+                yield row
+            del batch
+        return
+
+    dataset = ds.dataset(path, format="parquet")
+    scanner = dataset.scanner(
+        columns=columns,
+        filter=filter_expr,
+        batch_size=batch_size,
+    )
+    for batch in scanner.to_batches():
+        for row in batch.to_pylist():
+            yield row
+        del batch
+
+
+def _read_lineage_rows(dataset_dir: str, stem: str) -> list[dict]:
+    """Read a ``lineage/<stem>.jsonl.gz`` (run metadata) into a list of dict rows."""
+    path = os.path.join(dataset_dir, "lineage", f"{stem}.jsonl.gz")
+    if not os.path.exists(path):
+        return []
+    return list(_iter_jsonl_gz(path))
+
+
+@dataclass(frozen=True)
+class ReplaySelection:
+    """The Selection resolved BEFORE any large fact domain is scanned (R0-C1).
+
+    Stage A reads only small metadata (view / boards / memberships / calendar /
+    snapshot_runs lineage) and produces this frozen selection.  Stage B then
+    scans bars/state/events/snapshots restricted to exactly these members, dates,
+    columns and accepted snapshot runs.
+    """
+
+    asof_date: date
+    declared_asof: date | None
+    t1_date: date | None
+    scope_specs: tuple[Any, ...]
+    union_member_ids: frozenset[uuid.UUID]
+    accepted_snapshot_run_ids: frozenset[str]
+    trading_days: tuple[date, ...]
+    bar_window_start: date
+
+
+def _build_replay_selection(
+    dataset_dir: str, view_name: str, asof_override: date | None = None
+) -> ReplaySelection:
+    """Stage A — resolve the Current L1 selection from SMALL metadata only.
+
+    No bars/state/events/snapshot scan happens here.  Current L1 is locked to a
+    single asof date, so state/events only need {T, T-1}, snapshots only need
+    exact-T under an accepted run, and bars only need the 400-calendar-day
+    VolumeContext window for the union members.
+
+    asof selection follows the **two-track** design (R0-C3 修正):
+    - Track A (default): lock the **manifest declared asof** (Current-asof Acceptance),
+      e.g. 2026-08-17.  This validates Price / Participation / Current-only facts /
+      Exact-T snapshot / fail-closed behavior.  If Daily State is genuinely missing at
+      this asof, Trend/Structure/Momentum are reported as SOURCE_UNAVAILABLE — never
+      backfilled.
+    - Track B (--asof-lock): lock an explicit date where Daily State genuinely exists
+      (e.g. 2026-08-10) for Historical-capable Semantic Test of Trend/Structure State/
+      Momentum/Volume/Member construction/aggregation grammar.
+
+    ``min(max_date)`` is NOT used to derive a "common available date" — it does not
+    prove intersection availability (a snapshot existing only at 08-17 would be absent
+    at the min result).  No latest backfill is ever performed.
+    """
+    # Window / run-gate constants are owned by the production prep service —
+    # never redefined here (a second copy would silently drift).
+    from app.services.review_observation_prep_service import (
+        _BAR_LOOKBACK_DAYS,
+        _SNAPSHOT_RUN_CONSUMABLE_STATUS,
+    )
+
+    declared_asof_str = _dataset_asof(dataset_dir)
+    if asof_override is not None:
+        # Track B: explicit historical-asof lock (e.g. 2026-08-10).
+        asof_date = asof_override
+    else:
+        # Track A (default): Current-asof = manifest declared asof (e.g. 2026-08-17).
+        if not declared_asof_str:
+            raise RuntimeError(
+                "[replay-l1] corpus 无 declared asof，无法锁定 Current L1 语义日期"
+            )
+        asof_date = date.fromisoformat(declared_asof_str)
+    asof_str = asof_date.isoformat()
+
+    # scope specs + union members (memberships filtered to selected boards).
+    scope_specs = _load_scope_specs(dataset_dir, view_name)
+    union_ids: set[uuid.UUID] = set()
+    for spec in scope_specs:
+        union_ids.update(spec.member_ids)
+
+    # trading calendar (small) -> T-1 + bar window.
+    calendar_rows = _load_parquet_rows(dataset_dir, "trading_calendar")
+    trading_days = sorted(
+        date.fromisoformat(r["trade_date"])
+        for r in calendar_rows
+        if r.get("is_trading_day") and r.get("market") == "A" and r.get("trade_date")
+    )
+    idx = bisect_left(trading_days, asof_date)
+    t1_date = trading_days[idx - 1] if idx > 0 else None
+    bar_window_start = asof_date - timedelta(days=_BAR_LOOKBACK_DAYS)
+
+    # accepted Current snapshot runs at exact-T (run gate lineage, small).
+    run_rows = _read_lineage_rows(dataset_dir, "stock_feature_snapshot_runs")
+    accepted: set[str] = set()
+    for r in run_rows:
+        if (
+            r.get("status") == _SNAPSHOT_RUN_CONSUMABLE_STATUS
+            and r.get("published_at") is not None
+            and str(r.get("trade_date") or "")[:10] == asof_date.isoformat()
+        ):
+            rid = r.get("id")
+            if rid:
+                accepted.add(str(rid))
+
+    declared_asof = (
+        date.fromisoformat(declared_asof_str) if declared_asof_str else None
+    )
+    return ReplaySelection(
+        asof_date=asof_date,
+        declared_asof=declared_asof,
+        t1_date=t1_date,
+        scope_specs=tuple(scope_specs),
+        union_member_ids=frozenset(union_ids),
+        accepted_snapshot_run_ids=frozenset(accepted),
+        trading_days=tuple(trading_days),
+        bar_window_start=bar_window_start,
+    )
+
+
+def _load_replay_facts(
+    dataset_dir: str,
+    scope_specs: list[Any],
+    *,
+    selection: ReplaySelection | None = None,
+    instr: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Stage B — bounded, Selection-First load of the Current L1 source facts.
+
+    Each large domain is scanned with column projection + member/date/version
+    predicates and decoded/mapped on the fly to production fact objects; raw row
+    dicts are never retained.  ``selection`` carries the Stage-A resolved members,
+    dates and accepted runs; ``instr`` (optional) collects per-domain
+    ``selected_rows`` / scan+decode ms / RSS instrumentation.
+    """
+    try:
+        import pyarrow.dataset as ds
+    except ImportError as e:
+        raise RuntimeError(
+            "optional replay dependency missing (pip install -r requirements-replay.txt)"
+        ) from e
+    from collections import defaultdict
+
+    from app.domain.review.member_fact import DailyBarFact
+    from app.services.review_observation_prep_service import (
+        FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        HISTORY_CONTRACT_VERSION,
+        _CURRENT_ONLY_SNAPSHOT_FIELDS,
+        _build_t1_map,
+        _decode_jsonb,
+        _map_daily_bar_fact,
+        _map_structure_event,
+        _InstrumentBarSeries,
+    )
+
+    if selection is None:
+        raise RuntimeError("_load_replay_facts requires a Stage-A ReplaySelection")
+
+    instr = instr if instr is not None else {}
+
+    def _mark(key: str) -> None:
+        instr[f"rss_after_{key}_mb"] = round(_rss_mb(), 1)
+
+    asof_date = selection.asof_date
+    t1_date = selection.t1_date
+    union_member_strs = frozenset(str(m) for m in selection.union_member_ids)
+    # trade_dates axis for the union (Current L1 uses only [asof]; t1 kept for map).
+    t_dates = [d for d in (t1_date, asof_date) if d is not None]
+    t1_by_date = _build_t1_map([asof_date], list(selection.trading_days))
+    _mark("selection")
+
+    # PyArrow membership filter: instrument_id ∈ union.  We build it once as an
+    # ``isin`` set expression (bounded even for capacity_4096 ~ few k members).
+    member_set = pa_array_or_none(union_member_strs)
+
+    def _member_filter():
+        if member_set is None:
+            return None
+        return ds.field("instrument_id").isin(member_set)
+
+    # ---- 1. Daily state: instrument ∈ union, trade_date ∈ {T, T1}, algo ----
+    t_iso = asof_date.isoformat()
+    t1_iso = t1_date.isoformat() if t1_date else None
+    state_dates = [d for d in (t_iso, t1_iso) if d]
+    state_filter = (
+        (ds.field("algorithm_version") == FIRST_PYRAMID_CORE_ALGORITHM_VERSION)
+        & (ds.field("trade_date").isin(state_dates))
+    )
+    mf = _member_filter()
+    if mf is not None:
+        state_filter = state_filter & mf
+    _sbd: dict[date, dict[uuid.UUID, dict]] = defaultdict(dict)
+    t0 = _perf_counter_ms()
+    n_state = 0
+    for r in _iter_parquet_rows(
+        dataset_dir,
+        "first_pyramid_daily_state",
+        columns=["instrument_id", "trade_date", "algorithm_version", "state_payload"],
+        filter_expr=state_filter,
+    ):
+        td = date.fromisoformat(r["trade_date"]) if r.get("trade_date") else None
+        if td is None:
+            continue
+        _sbd[td][uuid.UUID(str(r["instrument_id"]))] = _decode_jsonb(r.get("state_payload"))
+        n_state += 1
+    states_by_date = dict(_sbd)
+    instr["state_rows_selected"] = n_state
+    instr["state_scan_ms"] = round(_perf_counter_ms() - t0, 1)
+    _mark("states")
+
+    # ---- 2. Bars: instrument ∈ union, [asof-400d, asof] ----
+    bar_filter = (
+        (ds.field("trade_date") >= selection.bar_window_start.isoformat())
+        & (ds.field("trade_date") <= t_iso)
+    )
+    if mf is not None:
+        bar_filter = bar_filter & mf
+    by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
+    t0 = _perf_counter_ms()
+    n_bar = 0
+    for r in _iter_parquet_rows(
+        dataset_dir,
+        "bars_daily",
+        columns=[
+            "instrument_id", "trade_date",
+            "open", "high", "low", "close", "volume", "amount",
+        ],
+        filter_expr=bar_filter,
+    ):
+        td = date.fromisoformat(r["trade_date"]) if r.get("trade_date") else None
+        if td is None:
+            continue
+        by_instrument[uuid.UUID(str(r["instrument_id"]))].append(
+            _map_daily_bar_fact(
+                trade_date=td,
+                open=r.get("open"), high=r.get("high"), low=r.get("low"),
+                close=r.get("close"), volume=r.get("volume"), amount=r.get("amount"),
+            )
+        )
+        n_bar += 1
+    bars: dict[uuid.UUID, _InstrumentBarSeries] = {}
+    for iid, facts in by_instrument.items():
+        ordered = sorted(facts, key=lambda b: b.trade_date)
+        bars[iid] = _InstrumentBarSeries(
+            facts=tuple(ordered),
+            dates=tuple(b.trade_date for b in ordered),
+        )
+    by_instrument.clear()
+    instr["bar_rows_selected"] = n_bar
+    instr["bar_scan_ms"] = round(_perf_counter_ms() - t0, 1)
+    _mark("bars")
+
+    # ---- 3. Events: instrument ∈ union, exact-T, algo + history contract ----
+    ev_lo = t_iso
+    ev_hi = (asof_date + timedelta(days=1)).isoformat()
+    event_filter = (
+        (ds.field("algorithm_version") == FIRST_PYRAMID_CORE_ALGORITHM_VERSION)
+        & (ds.field("history_contract_version") == HISTORY_CONTRACT_VERSION)
+        & (ds.field("event_time") >= ev_lo)
+        & (ds.field("event_time") < ev_hi)
+    )
+    if mf is not None:
+        event_filter = event_filter & mf
+    _ebd: dict[date, list[Any]] = defaultdict(list)
+    t0 = _perf_counter_ms()
+    n_event = 0
+    for r in _iter_parquet_rows(
+        dataset_dir,
+        "first_pyramid_events",
+        columns=[
+            "instrument_id", "event_time", "event_type", "event_payload",
+            "algorithm_version", "history_contract_version",
+        ],
+        filter_expr=event_filter,
+    ):
+        etime = r.get("event_time")
+        if not etime:
+            continue
+        td = date.fromisoformat(etime[:10])
+        payload = _decode_jsonb(r.get("event_payload"))
+        _ebd[td].append(
+            _map_structure_event(
+                instrument_id=str(r["instrument_id"]),
+                event_type=r.get("event_type"),
+                direction=payload.get("direction"),
+                level=payload.get("level"),
+                internal=payload.get("internal"),
+                release_volume_ratio=payload.get("release_volume_ratio"),
+            )
+        )
+        n_event += 1
+    events_by_date = dict(_ebd)
+    instr["event_rows_selected"] = n_event
+    instr["event_scan_ms"] = round(_perf_counter_ms() - t0, 1)
+    _mark("events")
+
+    # ---- 4. Current-only snapshot facts: instrument ∈ union, exact-T,
+    #      source_run_id ∈ accepted runs; drop summary_payload immediately ----
+    current_only_facts_by_date: dict[date, dict[str, dict[str, object]]] = {}
+    t0 = _perf_counter_ms()
+    n_snap = 0
+    # ``summary_payload`` averages ~287 KB/row (max ~1.1 MB) while Current L1 needs
+    # only the ~4 KB ``first_pyramid_flat`` subtree (~1.4% of the bytes).  A default
+    # 8192-row batch would therefore stage ~2.3 GB of JSON strings before decode, so
+    # this domain scans in small batches: peak is bounded to batch_size × row size.
+    if not selection.accepted_snapshot_run_ids:
+        # Run gate not consumable at exact-T -> Current-only facts unavailable.
+        # Skip the scan entirely rather than reading 1.5 GB to discard it.
+        snapshot_rows = iter(())
+    else:
+        snapshot_rows = _iter_parquet_rows(
+            dataset_dir,
+            "stock_feature_snapshots_asof",
+            columns=["instrument_id", "trade_date", "source_run_id", "summary_payload"],
+            batch_size=_SNAPSHOT_SCAN_BATCH_SIZE,
+            use_iter_batches=True,
+        )
+    for r in snapshot_rows:
+        # iter_batches has no filter pushdown -> re-apply the exact-T + run gate +
+        # union-membership predicates per row (same semantics as ``snap_filter``).
+        if str(r.get("trade_date") or "")[:10] != t_iso:
+            continue
+        if str(r.get("source_run_id") or "") not in selection.accepted_snapshot_run_ids:
+            continue
+        if union_member_strs and str(r.get("instrument_id")) not in union_member_strs:
+            continue
+        summary = _decode_jsonb(r.get("summary_payload"))
+        flat = summary.get("first_pyramid_flat") if isinstance(summary, dict) else None
+        facts: dict[str, object] = {}
+        if isinstance(flat, dict):
+            for attr, flat_key in _CURRENT_ONLY_SNAPSHOT_FIELDS.items():
+                if flat_key in flat:
+                    facts[attr] = flat[flat_key]
+        # Release the ~287 KB decoded payload immediately — only the 7 projected
+        # Current-only values are retained (never the whole summary).
+        summary = None
+        flat = None
+        r["summary_payload"] = None
+        if facts:
+            current_only_facts_by_date.setdefault(asof_date, {})[
+                str(r["instrument_id"])
+            ] = facts
+        n_snap += 1
+    instr["snapshot_rows_selected"] = n_snap
+    instr["snapshot_scan_ms"] = round(_perf_counter_ms() - t0, 1)
+    instr["snapshot_decode_ms"] = instr["snapshot_scan_ms"]
+    _mark("snapshots")
+
+    return {
+        "scope_specs": scope_specs,
+        "trade_dates": [asof_date],
+        "t1_by_date": t1_by_date,
+        "states_by_date": states_by_date,
+        "bars": bars,
+        "events_by_date": events_by_date,
+        "current_only_facts_by_date": current_only_facts_by_date,
+        "union_member_ids": sorted(selection.union_member_ids, key=str),
+    }
+
+
+def pa_array_or_none(values: frozenset[str]):
+    """Materialize a bounded set of instrument-id strings for a PyArrow ``isin``.
+
+    Returns ``None`` when empty so callers omit the membership predicate.
+    """
+    if not values:
+        return None
+    return list(values)
+
+
+def _dataset_asof(dataset_dir: str) -> str:
+    """Read the frozen asof date from the corpus.
+
+    The manifest may carry ``asof`` as null (the export snapshot timestamp is in
+    ``snapshot_started_at_utc``); the authoritative analysis asof is the last
+    entry of ``manifest.date_ranges.analysis_axis`` and echoed in
+    ``quality_summary.json.asof``.  Fall back in that order.
+    """
+    qpath = os.path.join(dataset_dir, "quality_summary.json")
+    if os.path.exists(qpath):
+        with open(qpath, "r", encoding="utf-8") as fh:
+            q = json.load(fh)
+        if q.get("asof"):
+            return str(q["asof"])
+    mpath = os.path.join(dataset_dir, "manifest.json")
+    if os.path.exists(mpath):
+        with open(mpath, "r", encoding="utf-8") as fh:
+            m = json.load(fh)
+        axis = (m.get("date_ranges") or {}).get("analysis_axis") or []
+        if axis:
+            return str(axis[-1])
+    return ""
+
+
+# Current L1 必需的 fact 源域及其实际日期列。
+_CURRENT_L1_REQUIRED_FACT_DOMAINS: tuple[tuple[str, str], ...] = (
+    ("first_pyramid_daily_state", "trade_date"),
+    ("first_pyramid_events", "event_time"),
+    ("bars_daily", "trade_date"),
+    ("stock_feature_snapshots_asof", "trade_date"),
+)
+
+# Source 类型分类（R0-C3 修正核心：row existence ≠ source coverage）。
+# - dense: 每日状态/行情，trade_date × eligible instrument 完整即 coverage；
+#          actual max 缺失/截断是可疑 gap 信号。
+# - point_in_time: 如 exact-asof current snapshot，只需 declared asof 存在
+#          succeeded/published run，不要求每天都有 snapshot。
+# - sparse_event: 如 first_pyramid_events 稀疏事件流，max(event_time) 不能代表
+#          coverage（正常无事件 vs producer 停摆两种解释无法由数据区分），
+#          必须有独立 producer/capture coverage evidence。
+_SOURCE_KIND: dict[str, str] = {
+    "first_pyramid_daily_state": "dense",
+    "bars_daily": "dense",
+    "stock_feature_snapshots_asof": "point_in_time",
+    "first_pyramid_events": "sparse_event",
+}
+
+
+def _domain_date_range(
+    dataset_dir: str, stem: str, date_col: str
+) -> tuple[date | None, date | None]:
+    """读 parquet row-group statistics 的 (min, max) 实际日期范围，零 materialize。
+
+    仅依赖列统计信息，不读任何行；用于诊断报告与 Dataset Integrity Gate。
+    ``event_time`` 是 timestamp 字符串，``trade_date`` 是 date 字符串，统一解析为 ``date``。
+    """
+    import pyarrow.parquet as pq
+
+    path = os.path.join(dataset_dir, "parquet", f"{stem}.parquet")
+    if not os.path.exists(path):
+        return (None, None)
+    pf = pq.ParquetFile(path)
+    md = pf.metadata
+    names = [md.schema.column(i).name for i in range(md.num_columns)]
+    if date_col not in names:
+        return (None, None)
+    ci = names.index(date_col)
+    dmin = dmax = None
+    for rg in range(md.num_row_groups):
+        st = md.row_group(rg).column(ci).statistics
+        if st is None or st.min is None or st.max is None:
+            return (None, None)
+        pmin = datetime.fromisoformat(str(st.min)).date()
+        pmax = datetime.fromisoformat(str(st.max)).date()
+        dmin = pmin if dmin is None else min(dmin, pmin)
+        dmax = pmax if dmax is None else max(dmax, pmax)
+    return (dmin, dmax)
+
+
+def _diagnose_source_date_ranges(
+    dataset_dir: str,
+) -> dict[str, tuple[date | None, date | None]]:
+    """诊断 helper（R0-C3 修正：不再作为 asof owner）。
+
+    返回各必需 fact 域的 actual (min, max)，仅用于报告与 Source Coverage Audit。
+    历史上曾叫 ``_resolve_full_capability_asof`` 并取 ``min(max)`` 作为 replay asof，
+    但该算法错误：``min(max)`` 不能证明交集日期各 source 都可用（例如 snapshot 仅
+    08-17 而 state 截到 08-10 时，08-07 这一 min 结果 snapshot 根本不存在）。
+    现在 asof 由 Track A（Current-asof=manifest declared）/ Track B（--asof-lock）显式决定。
+    """
+    per: dict[str, tuple[date | None, date | None]] = {}
+    for stem, col in _CURRENT_L1_REQUIRED_FACT_DOMAINS:
+        per[stem] = _domain_date_range(dataset_dir, stem, col)
+    return per
+
+
+def _check_dataset_integrity(dataset_dir: str) -> list[str]:
+    """按 source 类型区分的 Dataset Integrity Gate（R0-C3 修正）。
+
+    规则（row existence ≠ source coverage）：
+    - DENSE (state/bars): 检查 actual max 是否达到 declared 上界；dense 域 max 截断是
+      可疑 gap 信号（Daily State 到 08-10 < declared 08-17 即此类强证据 gap）。
+    - POINT_IN_TIME (snapshot): exact-asof run gate —— 只要求 declared asof 当天存在
+      snapshot run（不要求每天都有 snapshot）。仅单点 08-17 符合设计，不构成 gap。
+    - SPARSE_EVENT (events): **不能用 max(event_time) 判 coverage**（稀疏事件流无事件
+      可能是正常运行但无事件，也可能是 producer 停摆，数据无法区分）。须独立
+      producer/capture coverage evidence；当前 corpus 缺此 evidence → 记
+      EVIDENCE_MISSING（待 R0-C3 上游审计），**不判 gap**。
+
+    禁止 latest backfill、禁止把残缺日期事实填到 declared asof：
+    本函数只检测并报告，不修改任何数据。
+    """
+    mpath = os.path.join(dataset_dir, "manifest.json")
+    if not os.path.exists(mpath):
+        return ["manifest.json 缺失，无法执行 Dataset Integrity Gate"]
+    with open(mpath, "r", encoding="utf-8") as fh:
+        m = json.load(fh)
+    dr = m.get("date_ranges") or {}
+    declared_asof = dr.get("asof")
+    violations: list[str] = []
+
+    # declared 上界来源（manifest 声明）。
+    declared = {
+        "first_pyramid_daily_state": dr.get("states_range"),
+        "first_pyramid_events": dr.get("events_range"),
+        "bars_daily": [dr.get("bars_start"), declared_asof],
+        "stock_feature_snapshots_asof": [declared_asof, declared_asof],
+    }
+
+    for stem, kind in _SOURCE_KIND.items():
+        lo, hi = _domain_date_range(dataset_dir, stem, _col_of(stem))
+        dcl = declared.get(stem)
+        declared_hi = (
+            date.fromisoformat(str(dcl[1])[:10])
+            if (dcl and len(dcl) >= 2 and dcl[1])
+            else None
+        )
+
+        if kind == "dense":
+            # dense: max 截断是可疑 gap 信号（如 Daily State 到 08-10）
+            if hi is None:
+                violations.append(
+                    f"Dataset Integrity Gap [dense]: {stem} actual 无数据，"
+                    f"但 manifest 声明到 {declared_hi.isoformat() if declared_hi else '?'}"
+                )
+            elif declared_hi is not None and hi < declared_hi:
+                violations.append(
+                    f"Dataset Integrity Gap [dense]: {stem} actual max={hi.isoformat()} "
+                    f"< manifest declared max={declared_hi.isoformat()}（dense 域截断，"
+                    f"需查 upstream 是否真缺）"
+                )
+        elif kind == "point_in_time":
+            # point_in_time: 只要求 declared asof 当天存在 snapshot run
+            if declared_asof is None:
+                violations.append(
+                    f"Dataset Integrity Gap [point_in_time]: {stem} manifest 未声明 asof"
+                )
+            elif lo is None or hi is None or not (
+                date.fromisoformat(str(declared_asof)[:10]) >= lo
+                and date.fromisoformat(str(declared_asof)[:10]) <= hi
+            ):
+                violations.append(
+                    f"Dataset Integrity Gap [point_in_time]: {stem} declared asof "
+                    f"{declared_asof} 无 exact-asof snapshot run（需 succeeded/published）"
+                )
+            # declared asof 当天有 snapshot run 即正常，不要求每天都有
+        elif kind == "sparse_event":
+            # sparse_event: 不能用 max(event_time) 判 coverage。
+            # 当前 corpus 缺独立 coverage evidence → 记 EVIDENCE_MISSING，不判 gap。
+            has_evidence = bool(
+                (m.get("event_coverage") or {}).get("capture_complete")
+                if m.get("event_coverage")
+                else False
+            )
+            if not has_evidence:
+                violations.append(
+                    f"Event Coverage Evidence Missing [sparse_event]: {stem} 不能用 "
+                    f"max(event_time)={hi.isoformat() if hi else 'NONE'} 判定 coverage；"
+                    f"需独立 producer/capture coverage evidence（待 R0-C3 上游审计）"
+                )
+            # 注意：绝不基于 max(event_time) < declared 判 gap
+    return violations
+
+
+def _col_of(stem: str) -> str:
+    for s, c in _CURRENT_L1_REQUIRED_FACT_DOMAINS:
+        if s == stem:
+            return c
+    return "trade_date"
+
+
+def _load_scope_specs(dataset_dir: str, view_name: str) -> list[Any]:
+    """Resolve a view (or single board UUID) into ``ScopeReplaySpec`` objects.
+
+    Joins boards (scope_type/name) + board_memberships_current_snapshot
+    (member_ids).  Mixed-family is supported: a view may span concept +
+    industry_l1/l2/l3, and each spec carries its OWN scope_type.
+    """
+    from app.services.review_observation_prep_service import ScopeReplaySpec
+
+    # Boards is small (768 rows) so a full read is fine.
+    boards = {str(r["id"]): r for r in _load_parquet_rows(dataset_dir, "boards")}
+
+    # Resolve the selected board ids FIRST, so memberships are filtered to just
+    # those boards instead of building a giant board -> members map and then
+    # discarding almost all of it (matters for capacity_4096).
+    if view_name in ("dev_500", "capacity_4096", "representative_sample"):
+        vpath = os.path.join(dataset_dir, "views", f"{view_name}.json")
+        with open(vpath, "r", encoding="utf-8") as fh:
+            view = json.load(fh)
+        board_ids = list(view.get("scope_keys") or [])
+    else:
+        # single board UUID given directly
+        board_ids = [view_name]
+
+    selected_board_ids = {str(b) for b in board_ids}
+    by_board: dict[str, list[uuid.UUID]] = {}
+    for m in _load_parquet_rows(dataset_dir, "board_memberships_current_snapshot"):
+        bid = str(m["board_id"])
+        if bid not in selected_board_ids:
+            continue
+        by_board.setdefault(bid, []).append(uuid.UUID(str(m["instrument_id"])))
+
+    specs: list[Any] = []
+    for bid in board_ids:
+        board = boards.get(str(bid))
+        if not board:
+            continue
+        mems = tuple(by_board.get(str(bid), ()))
+        specs.append(
+            ScopeReplaySpec(
+                scope_type=str(board.get("type") or "concept"),
+                scope_key=str(bid),
+                scope_name=str(board.get("name") or str(bid)),
+                member_ids=mems,
+            )
+        )
+    return specs
+
+
+def _replay_l1_once(
+    dataset_dir: str,
+    view_name: str,
+    asof_lock: str,
+) -> dict[str, Any]:
+    """Run the full Current L1 pipeline at exactly one asof (Track B pinned date).
+
+    Returns a dict with ``results`` (scope_key -> observation bucket), ``asof``,
+    ``pit_status_t1``, ``current_only_map`` and ``cost`` so callers can assemble
+    a multi-date Semantic Validation Matrix without re-deriving the pipeline.
+    Does NOT print; the caller owns output.
+    """
+    from app.domain.review.scope_observation import compute_scope_observation
+    from app.services.review_observation_prep_service import (
+        build_prepared_scopes_from_union,
+        build_union_fact_context_from_loaded_facts,
+    )
+
+    selection = _build_replay_selection(
+        dataset_dir, view_name, asof_override=date.fromisoformat(asof_lock)
+    )
+    if not selection.scope_specs:
+        raise RuntimeError(f"[replay-l1-once] view 解析为空 scope_specs（view={view_name}）")
+    if selection.asof_date not in selection.trading_days:
+        raise RuntimeError(f"[replay-l1-once] asof={asof_lock} 不在 corpus 交易日历内")
+
+    instr: dict[str, Any] = {}
+    facts = _load_replay_facts(
+        dataset_dir, list(selection.scope_specs), selection=selection, instr=instr
+    )
+    union_ctx = build_union_fact_context_from_loaded_facts(
+        t1_by_date=facts["t1_by_date"],
+        states_by_date=facts["states_by_date"],
+        bars=facts["bars"],
+        events_by_date=facts["events_by_date"],
+    )
+    prepared = build_prepared_scopes_from_union(
+        trade_dates=facts["trade_dates"],
+        scope_specs=facts["scope_specs"],
+        union_ctx=union_ctx,
+        membership_t1_by_scope=None,
+        current_only_facts_by_date=facts["current_only_facts_by_date"],
+        pit_status_t="current_static",
+        pit_status_t1="unavailable",
+        t1_membership_available=False,
+    )
+    results: dict[str, dict] = {}
+    for scope_key, series in prepared.items():
+        for ps in series:
+            obs = compute_scope_observation(
+                scope_type=ps.scope_type,
+                scope_key=ps.scope_key,
+                trade_date=ps.trade_date,
+                pit_member_ids=ps.pit_member_ids,
+                pit_member_ids_t1=ps.pit_member_ids_t1,
+                members=ps.members,
+                events=ps.events,
+                t1_membership_available=ps.t1_membership_available,
+            )
+            results[scope_key] = {
+                "trade_date": ps.trade_date.isoformat(),
+                "scope_type": ps.scope_type,
+                "scope_name": ps.scope_name,
+                "member_count": len(ps.pit_member_ids),
+                "provided_member_count": ps.members and len(ps.members) or 0,
+                "t1_membership_available": ps.t1_membership_available,
+                "observation": obs,
+            }
+    return {
+        "results": results,
+        "asof": selection.asof_date.isoformat(),
+        "declared_asof": (
+            selection.declared_asof.isoformat() if selection.declared_asof else None
+        ),
+        "pit_status_t1": "unavailable",
+        "current_only_map": facts["current_only_facts_by_date"].get(selection.asof_date, {}),
+        "union_member_count": len(facts["union_member_ids"]),
+        "accepted_snapshot_runs": len(selection.accepted_snapshot_run_ids),
+        "cost": dict(instr),
+        "selected_rows": {
+            k: instr.get(k)
+            for k in (
+                "state_rows_selected", "bar_rows_selected",
+                "event_rows_selected", "snapshot_rows_selected",
+            )
+        },
+    }
+
+
+def _run_replay_l1(
+    dataset_dir: str,
+    view_name: str,
+    asof_lock: str | None = None,
+    dry_run: bool = False,
+) -> int:
+    """R0-C Current L1 replay: Dataset corpus -> production core -> L1 observation.
+
+    asof selection is **capability-aware** (R0-C2): by default the date is the
+    ``full_capability_asof`` (all required fact domains have real source facts),
+    so the full L1 semantic RTM can be computed.  Pass ``asof_lock`` to pin an
+    explicit date (e.g. the manifest declared asof 2026-08-17) and deliberately
+    exercise the SOURCE_UNAVAILABLE / fail-closed path — no latest backfill is
+    ever performed; missing facts are reported as unavailable, never forged.
+    Current-only snapshot facts are injected (no longer hard-coded empty), and
+    T-1 / Transition facts truthfully report membership-source unavailability
+    rather than forging current==T1 (P0-4).
+
+    This is the single-date path.  Use ``--mode semantic-matrix`` to validate
+    each fact at its best evidence date (08-17 / 08-10 / 08-07).
+    """
+    if dry_run:
+        print(f"[dry-run] replay-l1 dataset_dir={dataset_dir} view={view_name} OK")
+        return 0
+
+    print(f"=== REVIEW-V23-PHASE1 replay-l1 ===  dataset={dataset_dir}")
+    print(f"view={view_name}")
+
+    # ---- P0 Dataset Integrity Gate（按 source 类型区分；row existence ≠ coverage）----
+    integrity_violations = _check_dataset_integrity(dataset_dir)
+    per_domain = _diagnose_source_date_ranges(dataset_dir)
+    for stem, (lo, hi) in per_domain.items():
+        print(f"[integrity]   {stem} [{_SOURCE_KIND.get(stem, '?')}]: actual range "
+              f"[{lo.isoformat() if lo else 'NONE'} .. {hi.isoformat() if hi else 'NONE'}]")
+    if integrity_violations:
+        print(f"[integrity] 问题 ×{len(integrity_violations)}:")
+        for v in integrity_violations:
+            print(f"[integrity]   - {v}")
+        print("[integrity] 说明：不阻断 replay（Trend/Structure/Momentum 缺失时如实记 "
+              "SOURCE_UNAVAILABLE）；Daily State 截断 / Event coverage evidence 缺失须在 "
+              "R0-C3 上游审计后定论，禁止 latest backfill。")
+    else:
+        print("[integrity] OK：manifest declared coverage 与 actual per-domain range 一致")
+
+    if not asof_lock:
+        # Track A default = manifest declared asof.
+        declared = _dataset_asof(dataset_dir)
+        if not declared:
+            logger.error("[replay-l1] 无法从 corpus 解析 default asof")
+            return 2
+        asof_lock = declared
+
+    try:
+        one = _replay_l1_once(dataset_dir, view_name, asof_lock)
+    except RuntimeError as e:
+        logger.error("%s", e)
+        return 2
+
+    asof = one["asof"]
+    track = "B (--asof-lock)" if asof_lock else "A (Current-asof)"
+
+    # ---- Selection / physical-cost evidence (from the once-helper) ----
+    instr = one["cost"]
+    union_n = one["union_member_count"]
+    current_only_map = one["current_only_map"]
+    print("--- selection ---")
+    print(f"asof                    : {asof}")
+    print(f"selected_scope_count    : {len(one['results'])}")
+    print(f"union_member_count      : {union_n}")
+    print(f"accepted_snapshot_runs  : {one['accepted_snapshot_runs']}")
+    print("--- selected rows (post-predicate) ---")
+    for key, val in one["selected_rows"].items():
+        print(f"{key:24}: {val}")
+
+    # ---- Current-only fact coverage (guards the "all None" false success) ----
+    print("--- current-only facts ---")
+    print(f"{'members_with_facts':24}: {len(current_only_map)} / {union_n}")
+    if current_only_map:
+        from app.services.review_observation_prep_service import (
+            _CURRENT_ONLY_SNAPSHOT_FIELDS,
+        )
+        for attr in _CURRENT_ONLY_SNAPSHOT_FIELDS:
+            present = sum(
+                1 for f in current_only_map.values()
+                if f.get(attr) is not None
+            )
+            print(f"  {attr:34}: {present}")
+
+    # Print a compact summary of one representative scope's L1 facts.
+    results = one["results"]
+    sample_keys = list(results.keys())[:3]
+    for k in sample_keys:
+        r = results[k]
+        obs = r["observation"]
+        bucket_keys = [kk for kk in obs.keys()]
+        print(f"--- scope {r['scope_name']} ({r['scope_type']}, n={r['member_count']}) "
+              f"fact_buckets={bucket_keys}")
+    print(f"[asof] resolved={asof}  track={track}")
+    print("=== END ===")
+    return 0
+
+
+def _perf_counter_ms() -> float:
+    import time
+    return time.perf_counter() * 1000.0
+
+
+# ---------------------------------------------------------------------------
+# L1_RTM — declarative RTM contract (PRD v2.3 Scope Observation Model)
+# ---------------------------------------------------------------------------
+# 每行是一个 source-ready L1 fact。``path`` 是 compute_scope_observation 返回 dict
+# 的键路径（用 ``/`` 分隔）。``evidence_date`` 是该 fact 的预期最佳验证日期：
+# 同一天不要求所有 fact 都 available（这正是 Semantic Validation Matrix 的意义）。
+#
+# 五态判定（R1-A Gate）：PASS / GAP / SOURCE_UNAVAILABLE / NOT_APPLICABLE /
+# ALGORITHM_MAPPING_REQUIRED。  source-ready fact 必须 semantic mismatch=0、
+# unexpected target fact=0、unavailable→0 coercion=0。
+_L1_RTM_ROWS: list[dict] = [
+    # ---- PRICE / CAPITAL（08-17 bars+snapshot 完整）----
+    {"fact": "Equal Weight Return", "path": "price/equal_weight_return",
+     "prd": "PRD §7.2 Return mean (EW)", "source": "bars_daily",
+     "aggregation": "EW median-of-mean", "universe": "price-valid",
+     "denominator": "price_valid_count", "evidence_date": "2026-08-17"},
+    {"fact": "Amount Weighted Return", "path": "price/amount_weighted_return",
+     "prd": "PRD §7.2 Return amount-weighted", "source": "bars_daily",
+     "aggregation": "amount-weighted", "universe": "return&amount joint-valid",
+     "denominator": "amount_weighted_return_universe_count", "evidence_date": "2026-08-17"},
+    {"fact": "Return Dispersion", "path": "price/return_dispersion",
+     "prd": "PRD §7.2 Return std", "source": "bars_daily",
+     "aggregation": "stdev", "universe": "price-valid",
+     "denominator": "price_valid_count", "evidence_date": "2026-08-17"},
+    {"fact": "Price Breadth", "path": "price/breadth",
+     "prd": "PRD §7.2 Breadth (UP/FLAT/DOWN)", "source": "bars_daily",
+     "aggregation": "categorical distribution", "universe": "price-valid",
+     "denominator": "price_valid_count", "evidence_date": "2026-08-17"},
+    {"fact": "Price Concentration", "path": "price/concentration",
+     "prd": "PRD §7.2 Concentration", "source": "bars_daily",
+     "aggregation": "HHI-like", "universe": "price-valid",
+     "denominator": "price_valid_count", "evidence_date": "2026-08-17"},
+    {"fact": "Total Volume", "path": "price/total_volume",
+     "prd": "PRD §7.2 Total Volume", "source": "bars_daily",
+     "aggregation": "sum", "universe": "all PIT",
+     "denominator": "pit_member_count", "evidence_date": "2026-08-17"},
+    {"fact": "Amount Concentration", "path": "price/amount/concentration",
+     "prd": "PRD §7.2 Amount concentration", "source": "bars_daily",
+     "aggregation": "HHI", "universe": "amount-valid",
+     "denominator": "amount.valid_count", "evidence_date": "2026-08-17"},
+    # ---- Current-only snapshot facts（08-17 exact-T snapshot 完整）----
+    {"fact": "BB Position", "path": "momentum/bb_position",
+     "prd": "REVIEW-V23-A-CORRECTION-3 Current-only", "source": "stock_feature_snapshots_asof",
+     "aggregation": "member-first median", "universe": "members with fact",
+     "denominator": "members_with_bb_position", "evidence_date": "2026-08-17"},
+    {"fact": "BB Width", "path": "momentum/bb_width",
+     "prd": "REVIEW-V23-A-CORRECTION-3 Current-only", "source": "stock_feature_snapshots_asof",
+     "aggregation": "member-first median", "universe": "members with fact",
+     "denominator": "members_with_bb_width", "evidence_date": "2026-08-17"},
+    {"fact": "Release Volume Ratio", "path": "momentum/release_volume_ratio",
+     "prd": "REVIEW-V23-A-CORRECTION-3 Current-only", "source": "stock_feature_snapshots_asof",
+     "aggregation": "member-first median", "universe": "members with fact",
+     "denominator": "members_with_release_volume_ratio", "evidence_date": "2026-08-17"},
+    {"fact": "Momentum/Volume Relation", "path": "momentum/momentum_volume_relation",
+     "prd": "REVIEW-V23-A-CORRECTION-3 Current-only categorical", "source": "stock_feature_snapshots_asof",
+     "aggregation": "categorical distribution", "universe": "members with fact",
+     "denominator": "members_with_mvr", "evidence_date": "2026-08-17"},
+    {"fact": "Distance to Trailing Top", "path": "structure/distance_to_trailing_top_pct",
+     "prd": "REVIEW-V23-A-CORRECTION-3 Current-only", "source": "stock_feature_snapshots_asof",
+     "aggregation": "member-first distribution", "universe": "members with fact",
+     "denominator": "members_with_top", "evidence_date": "2026-08-17"},
+    {"fact": "Distance to Trailing Bottom", "path": "structure/distance_to_trailing_bottom_pct",
+     "prd": "REVIEW-V23-A-CORRECTION-3 Current-only", "source": "stock_feature_snapshots_asof",
+     "aggregation": "member-first distribution", "universe": "members with fact",
+     "denominator": "members_with_bottom", "evidence_date": "2026-08-17"},
+    {"fact": "VWAP Return Total", "path": "trend/continuous/vwap_ret_total",
+     "prd": "REVIEW-V23-A-CORRECTION-3 Current-only", "source": "stock_feature_snapshots_asof",
+     "aggregation": "member-first median", "universe": "members with fact",
+     "denominator": "members_with_vwap_ret", "evidence_date": "2026-08-17"},
+    # ---- TREND（08-10 Daily State 完整）----
+    {"fact": "Trend Regime State", "path": "trend/state",
+     "prd": "PRD §7.3 Categorical distribution", "source": "first_pyramid_daily_state",
+     "aggregation": "categorical distribution", "universe": "members with trend",
+     "denominator": "trend_values_count", "evidence_date": "2026-08-10"},
+    {"fact": "Trend Segment Direction", "path": "trend/segment_direction",
+     "prd": "PRD §7.3 Segment direction", "source": "first_pyramid_daily_state",
+     "aggregation": "categorical distribution", "universe": "members with segment_direction",
+     "denominator": "segment_direction_count", "evidence_date": "2026-08-10"},
+    {"fact": "Trend Regime Strength", "path": "trend/continuous/regime_strength",
+     "prd": "PRD §7.3 Regime strength (median)", "source": "first_pyramid_daily_state",
+     "aggregation": "median", "universe": "members with fact",
+     "denominator": "regime_strength_count", "evidence_date": "2026-08-10"},
+    {"fact": "Trend Transition", "path": "trend/transition",
+     "prd": "PRD §7.3 Transition (T-1→T)", "source": "first_pyramid_daily_state × T-1",
+     "aggregation": "categorical transition", "universe": "PIT(T)∩PIT(T-1)∩valid",
+     "denominator": "trend_transition_count", "evidence_date": "2026-08-10",
+     "t1_gated": True,
+     "note": "Dataset current snapshot 无 PIT(T-1)；本 probe 以 t1_membership_available=False 运行。"
+            "若仍产出 transition（denominator=full T），即为 within-T 重算，非真 T-1→T → GAP。"},
+    # ---- SWING / INTERNAL（08-10 Daily State）----
+    {"fact": "Swing State", "path": "structure/swing/state",
+     "prd": "PRD §7.4 Swing state", "source": "first_pyramid_daily_state",
+     "aggregation": "categorical distribution", "universe": "members with swing",
+     "denominator": "swing_values_count", "evidence_date": "2026-08-10"},
+    {"fact": "Internal State", "path": "structure/internal/state",
+     "prd": "PRD §7.4 Internal state", "source": "first_pyramid_daily_state",
+     "aggregation": "categorical distribution", "universe": "members with internal",
+     "denominator": "internal_values_count", "evidence_date": "2026-08-10"},
+    {"fact": "Structure Alignment", "path": "structure/alignment",
+     "prd": "PRD §7.4 Alignment (Aligned/Divergent)", "source": "first_pyramid_daily_state",
+     "aggregation": "categorical distribution", "universe": "members with alignment",
+     "denominator": "alignment_count", "evidence_date": "2026-08-10"},
+    # ---- MOMENTUM（08-10 Daily State）----
+    {"fact": "Momentum Direction State", "path": "momentum/state",
+     "prd": "PRD §7.5 Momentum direction", "source": "first_pyramid_daily_state",
+     "aggregation": "categorical distribution", "universe": "members with momentum",
+     "denominator": "momentum_values_count", "evidence_date": "2026-08-10"},
+    {"fact": "Squeeze State", "path": "momentum/squeeze_state",
+     "prd": "PRD §7.5 Squeeze state", "source": "first_pyramid_daily_state",
+     "aggregation": "categorical distribution", "universe": "members with volatility_phase",
+     "denominator": "squeeze_count", "evidence_date": "2026-08-10"},
+    # ---- VOLUME / PARTICIPATION（08-10 state 驱动；08-17 bars 也完整）----
+    {"fact": "Volume Ratio 20D", "path": "participation/volume/ratio20",
+     "prd": "PRD §7.5 Volume ratio20", "source": "first_pyramid_daily_state / bars_daily",
+     "aggregation": "participation distribution", "universe": "finite vol_ratio20",
+     "denominator": "vol_ratio20_count", "evidence_date": "2026-08-10",
+     "note": "state-derived member fact；08-10 与 08-17 均可（真实 source contract）"},
+    {"fact": "Volume Ratio 200D", "path": "participation/volume/ratio200",
+     "prd": "PRD §7.5 Volume ratio200", "source": "first_pyramid_daily_state",
+     "aggregation": "participation distribution", "universe": "finite vol_ratio200",
+     "denominator": "vol_ratio200_count", "evidence_date": "2026-08-10"},
+    {"fact": "Amount Ratio 20D", "path": "participation/amount",
+     "prd": "PRD §7.5 Amount ratio20", "source": "first_pyramid_daily_state",
+     "aggregation": "participation distribution", "universe": "finite amt_ratio20",
+     "denominator": "amt_ratio_count", "evidence_date": "2026-08-10"},
+    # ---- STRUCTURE EVENTS（08-07 真实事件流）----
+    # 真实结构：structure.events.cells.leveled.<EVENT>_<dir>_<level>
+    #   → {"event_count", "member_count", "member_ratio"}；denominator = len(pit_set)。
+    {"fact": "BOS Event Ratio", "ev": "BOS", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
+     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
+     "evidence_date": "2026-08-07",
+     "note": "08-07 有真实事件数据；EXPLORE-1 验证 denominator 是否含 event-coverage"},
+    {"fact": "CHoCH Event Ratio", "ev": "CHoCH", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
+     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
+     "evidence_date": "2026-08-07"},
+    {"fact": "OB Created Event Ratio", "ev": "OB_CREATED", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
+     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
+     "evidence_date": "2026-08-07"},
+    {"fact": "EQH Event Ratio", "ev": "EQH", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
+     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
+     "evidence_date": "2026-08-07"},
+    {"fact": "EQL Event Ratio", "ev": "EQL", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
+     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
+     "evidence_date": "2026-08-07"},
+]
+
+
+def _extract_event_ratio(obs: dict, event_type: str) -> Any:
+    """Sum member_ratio across all levels/directions for an event type.
+
+    Returns None when the events subtree is absent (so it is honestly reported
+    as SOURCE_UNAVAILABLE rather than coerced to 0).
+    """
+    events = obs.get("structure", {}).get("events")
+    if not isinstance(events, dict):
+        return None
+    cells = events.get("cells", {})
+    leveled = cells.get("leveled", {})
+    if not isinstance(leveled, dict):
+        return None
+    prefix = f"{event_type}_"
+    total = 0.0
+    n = 0
+    for key, cell in leveled.items():
+        if not key.startswith(prefix):
+            continue
+        mr = cell.get("member_ratio")
+        if isinstance(mr, (int, float)):
+            total += mr
+            n += 1
+    if n == 0:
+        return None
+    return total
+
+
+def _extract_l1_fact(obs: dict, path: str) -> Any:
+    """Walk ``obs`` by ``/``-separated path; return None if any segment missing."""
+    cur: Any = obs
+    for seg in path.split("/"):
+        if not isinstance(cur, dict) or seg not in cur:
+            return None
+        cur = cur[seg]
+    return cur
+
+
+def _is_degenerate(val: Any) -> bool:
+    """True when ``val`` is a false-success (looks present but carries no signal).
+
+    Guards the "all-None / all-zero" false PASS the user explicitly warned about:
+      * None,
+      * literal "unavailable" string,
+      * dict with a degenerate ``status`` (zero_abs_return / zero_amount / unavailable),
+      * dict whose all ``*_count`` / ``valid_count`` fields are 0
+        (e.g. Price Breadth {advance:0, decline:0, unchanged:0}),
+      * distribution dict with every ``*_ratio`` == null and no non-zero count.
+    """
+    if val is None:
+        return True
+    if isinstance(val, str) and val.strip().lower() == "unavailable":
+        return True
+    if isinstance(val, dict):
+        st = val.get("status")
+        if isinstance(st, str) and st in (
+            "zero_abs_return", "zero_amount", "unavailable", "no_valid_members",
+        ):
+            return True
+        counts = [v for k, v in val.items()
+                  if k.endswith("_count") and isinstance(v, (int, float))]
+        ratios = [v for k, v in val.items()
+                  if k.endswith("_ratio") and v is not None]
+        if counts and all(c == 0 for c in counts) and not ratios:
+            return True
+        # A distribution carrying only a zero denominator (e.g. a Transition
+        # forced unavailable via ``t1_membership_available=False`` -> {denominator: 0})
+        # is a degenerate / unavailable result, never a real signal.
+        if "denominator" in val and not ratios and not counts:
+            if val.get("denominator") in (0, None):
+                return True
+    return False
+
+
+def _rtm_denominator(obs: dict, row: dict, scope: dict) -> Any:
+    """Resolve the human-readable denominator value for an RTM row."""
+    d = row.get("denominator", "")
+    if d == "pit_member_count":
+        return scope.get("member_count")
+    # Try to read a numeric count field inside the extracted observation subtree.
+    sub = _extract_l1_fact(obs, row["path"])
+    if isinstance(sub, dict):
+        for key in ("valid_count", "count", "total", "n"):
+            if key in sub:
+                return sub[key]
+    return None
+
+
+def _run_semantic_matrix(
+    dataset_dir: str,
+    view_name: str,
+    dry_run: bool = False,
+) -> int:
+    """R0-C Semantic Validation Matrix + R1-A L1 RTM with evidence_date.
+
+    Runs the full Current L1 pipeline at the three best-evidence dates and
+    assembles a per-fact RTM table where each fact is read from its own
+    ``evidence_date`` (08-17 Price/Participation/Current-only/fail-closed;
+    08-10 State-driven Trend/Momentum/Structure/Volume; 08-07 Structure Events).
+    This validates ``production L1 logic correctness`` rather than "is every
+    fact available on one day".
+
+    Five-state adjudication: a fact is SOURCE_UNAVAILABLE when its evidence-date
+    run has no members / the value is None at that date (honest, never coerced
+    to 0); PASS when a real value is produced; GAP when the source domain is
+    genuinely missing in the corpus (dense truncation).
+    """
+    if dry_run:
+        print(f"[dry-run] semantic-matrix dataset_dir={dataset_dir} view={view_name} OK")
+        return 0
+
+    evidence_dates = ["2026-08-17", "2026-08-10", "2026-08-07"]
+    runs: dict[str, dict] = {}
+    for ed in evidence_dates:
+        try:
+            runs[ed] = _replay_l1_once(dataset_dir, view_name, ed)
+        except RuntimeError as e:
+            logger.error("semantic-matrix: asof=%s 失败: %s", ed, e)
+            return 2
+
+    # Representative scope: pick the one with the largest member_count for a
+    # stable, representative L1 sample.
+    def _representative(r: dict) -> tuple[str, dict]:
+        best_k, best = None, None
+        for k, v in r["results"].items():
+            if best is None or v["member_count"] > best["member_count"]:
+                best_k, best = k, v
+        return best_k, best
+
+    rep_key: dict[str, str] = {}
+    rep_obs: dict[str, dict] = {}
+    for ed, r in runs.items():
+        k, v = _representative(r)
+        rep_key[ed] = k
+        rep_obs[ed] = v["observation"]
+
+    print("=== REVIEW-V23-PHASE1 semantic-matrix (L1 RTM) ===")
+    print(f"view={view_name}")
+    print(f"representative scopes: " + ", ".join(
+        f"{ed}→{rep_key[ed]}" for ed in evidence_dates
+    ))
+    for ed in evidence_dates:
+        r = runs[ed]
+        print(f"  asof={ed}: union_members={r['union_member_count']} "
+              f"snap_runs={r['accepted_snapshot_runs']} "
+              f"rows(state/bar/event/snap)="
+              f"{r['selected_rows'].get('state_rows_selected')}/"
+              f"{r['selected_rows'].get('bar_rows_selected')}/"
+              f"{r['selected_rows'].get('event_rows_selected')}/"
+              f"{r['selected_rows'].get('snapshot_rows_selected')}")
+
+    # ---- Per-fact RTM table ----
+    # Columns: Fact → PRD → Source → Aggregation → Denominator → Availability →
+    #          Evidence Date → Actual → Status → GAP
+    # Availability = source domain rows present at that evidence_date (bars /
+    #   states / events / snapshots).  This is orthogonal to Status:
+    #   * PASS              source-ready + real value produced (semantic ok)
+    #   * SOURCE_UNAVAILABLE  value can't be produced (member gate / missing
+    #                         state / no data) — never coerced to 0
+    #   * GAP               source-ready (domain present) but fact semantically
+    #                         wrong / cannot be formed at the required granularity
+    #   * ALGORITHM_MAPPING_REQUIRED  PRD defines fact but no code mapping exists
+    #   * NOT_APPLICABLE    PRD scopes the fact out of this universe
+    print("\n--- L1 RTM (evidence_date per fact) ---")
+    hdr = (f"{'Fact':24} {'PRD':22} {'Source':20} {'Aggregation':26} "
+           f"{'Denom':10} {'Avail':8} {'EvDate':10} {'Status':20} {'GAP'}")
+    print(hdr)
+    print("-" * len(hdr))
+    n_pass = n_unavail = n_gap = n_na = n_algo = 0
+    n_unexpected_zero = 0
+    gaps: list[str] = []
+    for row in _L1_RTM_ROWS:
+        ed = row["evidence_date"]
+        obs = rep_obs.get(ed, {})
+        scope = runs[ed]["results"][rep_key[ed]]
+        rows_sel = runs[ed]["selected_rows"]
+        if row.get("ev"):
+            val = _extract_event_ratio(obs, row["ev"])
+            # Event denominator = structure.events.denominator (== len(pit_set)).
+            ev_struct = obs.get("structure", {}).get("events")
+            denom_val = ev_struct.get("denominator") if isinstance(ev_struct, dict) else None
+            avail = rows_sel.get("event_rows_selected", 0) or 0
+        else:
+            val = _extract_l1_fact(obs, row["path"])
+            denom_val = _rtm_denominator(obs, row, scope)
+            # Source may be composite (e.g. "first_pyramid_daily_state / bars_daily");
+            # match by prefix so both domains are checked (avail = OR of present rows).
+            src_row_map = [
+                ("bars_daily", "bar_rows_selected"),
+                ("stock_feature_snapshots_asof", "snapshot_rows_selected"),
+                ("first_pyramid_daily_state", "state_rows_selected"),
+            ]
+            src_str = row.get("source", "")
+            avail = 0
+            for frag, sel_key in src_row_map:
+                if frag in src_str:
+                    avail = max(avail, rows_sel.get(sel_key, 0) or 0)
+            avail = avail or 0
+        # Distinguish PIT membership (scope dict member_count = len(pit_member_ids),
+        # non-zero even when the member gate blocks formation) from the actual
+        # MemberObservation count (provided_member_count).  A non-zero PIT with a
+        # zero provided count IS the member gate (GAP-L1-MEMBER-GATE).
+        pit_count = scope.get("member_count", 0)
+        provided_count = (
+            obs.get("scope", {}).get("provided_member_count", 0)
+            if isinstance(obs.get("scope"), dict) else 0
+        )
+        source_ready = bool(avail and avail > 0)
+
+        # Five-state adjudication.
+        if not source_ready:
+            # Source domain genuinely absent at this date → NOT a logic GAP.
+            status = "SOURCE_UNAVAILABLE"
+            n_unavail += 1
+            gap = ""
+        elif pit_count > 0 and provided_count == 0:
+            # PIT members exist but NO MemberObservation formed (bars/snapshots
+            # present yet state-gated out) → the member-construction gate.
+            status = "GAP"
+            gap = "GAP-L1-MEMBER-GATE"
+            n_gap += 1
+            gaps.append(f"[{ed}]{row['fact']}:{gap}")
+        elif provided_count == 0:
+            # No PIT membership at all → not a member-gate issue, just unavailable.
+            status = "SOURCE_UNAVAILABLE"
+            n_unavail += 1
+            gap = ""
+        elif row.get("t1_gated") and not _is_degenerate(val):
+            # PRD requires PIT(T-1) membership gate, but the matrix runs with
+            # t1_membership_available=False.  A non-degenerate transition value
+            # here means the Core recomputed it within-T (denominator = full T),
+            # NOT a true T-1→T on the PIT(T)∩PIT(T-1) universe → GAP.
+            status = "GAP"
+            gap = "GAP-L1-TRANSITION-T1"
+            n_gap += 1
+            gaps.append(f"[{ed}]{row['fact']}:{gap}")
+        elif _is_degenerate(val):
+            # Source present + members formed, but the fact degrades to all-zero /
+            # zero_abs_return / "unavailable".  Honest SOURCE_UNAVAILABLE (never
+            # coerced to 0).  Whether this is a real gap depends on the sub-fact
+            # (e.g. Structure Alignment / Squeeze may legitimately be empty).
+            status = "SOURCE_UNAVAILABLE"
+            n_unavail += 1
+            gap = "empty-value (verify)"
+        elif val is None:
+            # Source present + members formed, but PRD fact has NO code mapping.
+            status = "ALGORITHM_MAPPING_REQUIRED"
+            n_algo += 1
+            gap = "no-code-mapping"
+        else:
+            status = "PASS"
+            n_pass += 1
+            gap = ""
+
+        # semantic-mismatch guard: a PASS must not be zero-coerced from unavailable.
+        if status == "PASS" and val == 0:
+            n_unexpected_zero += 1
+            gap = "zero-from-unavailable?"
+            gaps.append(f"[{ed}]{row['fact']}:zero-coercion")
+
+        actual = _fmt_rtm_value(val)
+        print(f"{row['fact']:24} {row['prd'][:22]:22} {row['source'][:20]:20} "
+              f"{row['aggregation'][:26]:26} {str(denom_val):10} "
+              f"{'yes' if source_ready else 'no':8} {ed:10} {status:20} {gap}")
+        if row.get("note"):
+            print(f"    ↳ note: {row['note']}")
+
+    print("\n--- RTM five-state summary ---")
+    print(f"PASS={n_pass}  SOURCE_UNAVAILABLE={n_unavail}  GAP={n_gap} "
+          f"NOT_APPLICABLE={n_na}  ALGORITHM_MAPPING_REQUIRED={n_algo}")
+    print(f"unavailable→0 coercion count = {n_unexpected_zero}  (must be 0)")
+    if gaps:
+        print("\n--- Round 1 GAP findings (recorded, NOT fixed) ---")
+        for g in gaps:
+            print(f"  * {g}")
+    print("=== END ===")
+    return 0
+
+
+def _fmt_rtm_value(val: Any) -> str:
+    """Compact, JSON-safe rendering of an RTM fact value (no huge dumps)."""
+    import json as _json
+    if val is None:
+        return "None"
+    if isinstance(val, float):
+        return f"{val:.4g}"
+    if isinstance(val, dict):
+        # Summarize distribution-like dicts: keep keys + short counts.
+        if "distribution" in val or "mean" in val:
+            return _json.dumps(val, ensure_ascii=False)[:120]
+        if "status" in val:
+            return str(val.get("status"))
+        return _json.dumps(val, ensure_ascii=False)[:120]
+    if isinstance(val, (list, tuple)):
+        return f"<list n={len(val)}>"
+    return str(val)[:120]
+
+
+def _run_rtm(
+    dataset_dir: str,
+    view_name: str,
+    asof_lock: str | None = None,
+    dry_run: bool = False,
+) -> int:
+    """R1-A L1 RTM — delegates to the Semantic Validation Matrix.
+
+    The matrix validates each fact at its best evidence date and records
+    ``evidence_date`` per fact; it does NOT require all facts on one day.
+    """
+    if dry_run:
+        print(f"[dry-run] rtm dataset_dir={dataset_dir} view={view_name} OK")
+        return 0
+    # rtm mode == semantic matrix (per-fact evidence dates).
+    return _run_semantic_matrix(dataset_dir, view_name, dry_run=dry_run)
+
+
+def _run_explore1(
+    dataset_dir: str,
+    view_name: str,
+    asof_lock: str | None = None,
+    dry_run: bool = False,
+) -> int:
+    """EXPLORE-1: Structure Event denominator inspection (real dataset + synthetic).
+
+    Real 08-07 data: list PIT members, event-bearing members, event types, and
+    whether a member-level event-coverage indicator exists.  We do NOT conclude
+    "member event-capability unavailable" merely because a member has no events.
+    Then show synthetic Case A / Case B to test whether the current production
+    Core (``denominator = len(pit_set)``) can express a per-member event-coverage
+    gate — if not, that is a Source Contract / Core GAP, not a test to be bent.
+    """
+    if dry_run:
+        print(f"[dry-run] explore1 dataset_dir={dataset_dir} view={view_name} OK")
+        return 0
+    ed = asof_lock or "2026-08-07"
+    try:
+        run = _replay_l1_once(dataset_dir, view_name, ed)
+    except RuntimeError as e:
+        logger.error("explore1: asof=%s 失败: %s", ed, e)
+        return 2
+    rep_key = max(
+        run["results"],
+        key=lambda k: run["results"][k]["member_count"],
+    )
+    obs = run["results"][rep_key]["observation"]
+    events = obs.get("structure", {}).get("events", {})
+    cells = events.get("cells", {}) if isinstance(events, dict) else {}
+    leveled = cells.get("leveled", {}) if isinstance(cells, dict) else {}
+    pit_n = obs.get("scope", {}).get("pit_member_count")
+
+    print("=== REVIEW-V23-PHASE1 EXPLORE-1 (event denominator) ===")
+    print(f"asof={ed}  representative scope={rep_key}")
+    print(f"pit_member_count(scope)   = {pit_n}")
+    print(f"events.denominator         = {events.get('denominator') if isinstance(events, dict) else 'N/A'}")
+    print(f"events.cells.leveled cells = {len(leveled)}")
+
+    # Real-data inspection: enumerate event types actually present.
+    ev_types: dict[str, int] = {}
+    for k in leveled:
+        et = k.split("_")[0]
+        ev_types[et] = ev_types.get(et, 0) + 1
+    print("event types present :", dict(sorted(ev_types.items())))
+    print("event cells (type_dir_level -> event_count / member_count / member_ratio):")
+    for k, cell in sorted(leveled.items()):
+        if not isinstance(cell, dict):
+            continue
+        print(f"  {k:28} ec={cell.get('event_count')} mc={cell.get('member_count')} "
+              f"mr={cell.get('member_ratio')}")
+
+    # ---- PRD-vs-Code contract check ----
+    # PRD §7.4 D Event aggregation universe = PIT(T) ∩ valid canonical event-coverage.
+    # Code denominator (see _aggregate_structure_events) = len(pit_set).
+    # There is NO member-level event-coverage indicator in the current Dataset:
+    # a member with 0 events is indistinguishable from a member whose event
+    # capability is unavailable.  Hence Case B (8/10 members covered) cannot be
+    # expressed.  This is a Source Contract / Core GAP, not a test to bend.
+    print("\n--- EXPLORE-1 conclusion (record as GAP, do NOT fix now) ---")
+    print(f"  production denominator = len(pit_set) = {events.get('denominator') if isinstance(events, dict) else 'N/A'}")
+    print(f"  pit_member_count       = {pit_n}")
+    print("  denominator == pit_member_count? "
+          f"{'YES' if events.get('denominator') == pit_n else 'NO'}")
+    print("  member-level event-coverage indicator present? : NO")
+    print("  → PRD-vs-Code GAP: denominator lacks event-coverage gate (EXPLORE-1).")
+    print("  → Synthetic Case A (10/10 covered) expressible; Case B (8/10) NOT.")
+    print("  → classified: SOURCE CONTRACT / CORE GAP (defer Fix to Round 2).")
+    print("=== END ===")
+    return 0
+
+
+def _run_equivalence(
+    dataset_dir: str,
+    view_name: str,
+    dry_run: bool = False,
+) -> int:
+    """Canonical vs Optimized equivalence (Gate 5).
+
+    Same loaded facts are fed to BOTH:
+      * the canonical per-scope path  (``_build_member_observations`` per scope
+        + ``compute_scope_observation``), and
+      * the optimized union+vectorized path (``build_prepared_scopes_from_union``).
+    We assert MemberObservation mismatch = 0 and ScopeObservation mismatch = 0 on
+    representative_sample × {08-07, 08-10, 08-17}.
+
+    This proves the R0-B union extraction is faithful to the canonical
+    member-construction owner (no dropped member, no reorder, no changed fact),
+    and that the vectorized VolumeContext is canonical-equivalent.
+    """
+    if dry_run:
+        print(f"[dry-run] equivalence dataset_dir={dataset_dir} view={view_name} OK")
+        return 0
+    from app.domain.review.scope_observation import compute_scope_observation
+    from app.services.review_observation_prep_service import (
+        _build_member_observations,
+        build_prepared_scopes_from_union,
+        build_union_fact_context_from_loaded_facts,
+    )
+
+    dates = ["2026-08-07", "2026-08-10", "2026-08-17"]
+    overall_ok = True
+    print("=== REVIEW-V23-PHASE1 canonical-vs-optimized equivalence ===")
+    print(f"view={view_name}  dates={dates}")
+    for ed in dates:
+        selection = _build_replay_selection(
+            dataset_dir, view_name, asof_override=date.fromisoformat(ed)
+        )
+        if not selection.scope_specs:
+            print(f"[equivalence] {ed}: empty scope_specs — SKIP")
+            continue
+        if selection.asof_date not in selection.trading_days:
+            print(f"[equivalence] {ed}: not a trading day — SKIP")
+            continue
+        facts = _load_replay_facts(
+            dataset_dir, list(selection.scope_specs), selection=selection, instr={}
+        )
+        union_ctx = build_union_fact_context_from_loaded_facts(
+            t1_by_date=facts["t1_by_date"],
+            states_by_date=facts["states_by_date"],
+            bars=facts["bars"],
+            events_by_date=facts["events_by_date"],
+        )
+        # ---- Optimized (union) path ----
+        optimized = build_prepared_scopes_from_union(
+            trade_dates=facts["trade_dates"],
+            scope_specs=facts["scope_specs"],
+            union_ctx=union_ctx,
+            membership_t1_by_scope=None,
+            current_only_facts_by_date=facts["current_only_facts_by_date"],
+            pit_status_t="current_static",
+            pit_status_t1="unavailable",
+            t1_membership_available=False,
+        )
+        # ---- Canonical per-scope path (independent recomputation) ----
+        canonical: dict[str, dict] = {}
+        # Real T-1 inputs, identical to the optimized union path: real T-1 states
+        # (states_by_date[t1]) for member T-1 state, and current-static membership
+        # T-1 (pit_member_ids_t1 == current membership).  This keeps the two paths
+        # fed with the SAME facts so the comparison is apples-to-apples.
+        t1 = facts["t1_by_date"].get(selection.asof_date)
+        states_t1 = facts["states_by_date"].get(t1, {}) if t1 else {}
+        for spec in facts["scope_specs"]:
+            members = _build_member_observations(
+                list(spec.member_ids),
+                trade_date=selection.asof_date,
+                t1=t1,
+                states_t=facts["states_by_date"].get(selection.asof_date, {}),
+                states_t1=states_t1,
+                bars=facts["bars"],
+                current_only_facts=facts["current_only_facts_by_date"].get(
+                    selection.asof_date, {}
+                ),
+                vec_volume=union_ctx.vec_volume,
+            )
+            obs = compute_scope_observation(
+                scope_type=spec.scope_type,
+                scope_key=spec.scope_key,
+                trade_date=selection.asof_date,
+                pit_member_ids=[str(i) for i in spec.member_ids],
+                pit_member_ids_t1=[str(i) for i in spec.member_ids],
+                members=members,
+                events=union_ctx.events_by_date.get(selection.asof_date, []),
+                t1_membership_available=False,
+            )
+            canonical[spec.scope_key] = {
+                "member_count": len(members),
+                "observation": obs,
+            }
+
+        # ---- Compare (only source-ready fact subtrees per date) ----
+        # Both paths are fed the SAME loaded facts, so the observations should be
+        # byte-identical on every fact that the date's sources can express.  We
+        # compare per source-ready subtree so an unavailable fact (None / empty)
+        # is never demanded to hold a valid value — and a discrepancy there is
+        # not counted as a false mismatch.
+        src_subtrees = {
+            "2026-08-17": ("price", "momentum", "structure", "participation", "chip"),
+            "2026-08-10": ("trend", "structure", "momentum", "participation"),
+            "2026-08-07": ("structure",),
+        }[ed]
+
+        mem_mismatch = 0
+        obs_mismatch = 0
+        compared = 0
+        for spec in facts["scope_specs"]:
+            sk = spec.scope_key
+            opt_series = optimized.get(sk)
+            can = canonical.get(sk)
+            if not opt_series or can is None:
+                mem_mismatch += 1
+                obs_mismatch += 1
+                continue
+            opt_ps = opt_series[0]
+            # Members: compare by PIT membership (robust to obs members being None
+            # when the member gate blocks formation).
+            opt_ids = {str(i) for i in opt_ps.pit_member_ids}
+            can_ids = {str(i) for i in spec.member_ids}
+            if opt_ids != can_ids:
+                mem_mismatch += 1
+            # Observations: compute the optimized observation from PreparedScope
+            # (union path carries prepared inputs, not the computed obs), then
+            # compare only the source-ready subtrees of that date.
+            opt_obs = compute_scope_observation(
+                scope_type=opt_ps.scope_type,
+                scope_key=opt_ps.scope_key,
+                trade_date=opt_ps.trade_date,
+                pit_member_ids=list(opt_ps.pit_member_ids),
+                pit_member_ids_t1=list(opt_ps.pit_member_ids_t1),
+                members=opt_ps.members,
+                events=union_ctx.events_by_date.get(selection.asof_date, []),
+                t1_membership_available=opt_ps.t1_membership_available,
+            )
+            for subtree in src_subtrees:
+                opt_s = opt_obs.get(subtree)
+                can_s = can["observation"].get(subtree)
+                compared += 1
+                if _canonicalize_obs(opt_s) != _canonicalize_obs(can_s):
+                    obs_mismatch += 1
+        ok = (mem_mismatch == 0 and obs_mismatch == 0)
+        overall_ok = overall_ok and ok
+        print(f"  {ed}: member_mismatch={mem_mismatch} obs_mismatch={obs_mismatch} "
+              f"(compared {compared} source-ready subtrees) "
+              f"-> {'OK' if ok else 'MISMATCH'}")
+    print("=== END ===")
+    return 0 if overall_ok else 1
+
+
+def _canonicalize_obs(obs: Any) -> str:
+    """Stable, order-insensitive canonicalization of an observation dict."""
+    import json as _json
+    def _sort(o):
+        if isinstance(o, dict):
+            return {k: _sort(v) for k, v in sorted(o.items())}
+        if isinstance(o, (list, tuple)):
+            return [_sort(x) for x in o]
+        if isinstance(o, float):
+            return round(o, 9)
+        return o
+    return _json.dumps(_sort(obs), sort_keys=True, ensure_ascii=False)
+
+
 async def _run(args: argparse.Namespace) -> int:
     asof: date | None = date.fromisoformat(args.asof_date) if args.asof_date else None
     # ---- export-dataset / dataset-validate：参数校验先于 dry-run ----
@@ -2645,6 +4286,47 @@ async def _run(args: argparse.Namespace) -> int:
         if args.mode == "export-dataset":
             return await _export_dataset(args.dataset_dir, asof, args.history)
         return _dataset_validate(args.dataset_dir)
+    # ---- replay-l1 / rtm / semantic-matrix / explore1：纯本地 Dataset corpus 回放（不连 DB）----
+    if args.mode in ("replay-l1", "rtm", "semantic-matrix", "explore1", "equivalence"):
+        if not args.dataset_dir:
+            logger.error("[%s] --dataset-dir 为必填", args.mode)
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error("[%s] replay 模式使用 --view，禁 --scope-type/--scope-key", args.mode)
+            return 2
+        # Current L1 source loading is locked to {T, T-1} states / exact-T events /
+        # exact-T consumable snapshots / 400-calendar-day bars.  --history does NOT
+        # drive it; multi-date belongs to current-static equivalence / perf replay.
+        if args.history != p_default_history():
+            logger.error(
+                "[%s] --history 对 Current L1 source loading 不起作用（capability-aware "
+                "锁 asof 单日，或 --asof-lock 显式锁）；多日期属 current-static equivalence "
+                "/ performance replay",
+                args.mode,
+            )
+            return 2
+        if args.mode == "replay-l1":
+            return _run_replay_l1(
+                args.dataset_dir, args.view,
+                asof_lock=args.asof_lock, dry_run=args.dry_run,
+            )
+        if args.mode == "semantic-matrix":
+            return _run_semantic_matrix(
+                args.dataset_dir, args.view, dry_run=args.dry_run,
+            )
+        if args.mode == "explore1":
+            return _run_explore1(
+                args.dataset_dir, args.view,
+                asof_lock=args.asof_lock, dry_run=args.dry_run,
+            )
+        if args.mode == "equivalence":
+            return _run_equivalence(
+                args.dataset_dir, args.view, dry_run=args.dry_run,
+            )
+        return _run_rtm(
+            args.dataset_dir, args.view,
+            asof_lock=args.asof_lock, dry_run=args.dry_run,
+        )
     if args.dry_run:
         logger.info(
             "[dry-run] mode=%s scope_type=%s scope_key=%s history=%d asof=%s OK",

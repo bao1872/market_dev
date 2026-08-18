@@ -403,9 +403,10 @@ def test_missing_member_historical_fact_excluded(monkeypatch) -> None:
         )
 
     out = asyncio.run(scenario())
-    # C is a current member but has no historical fact at T -> not provided, no fake 0.
+    # ROUND-2 GAP-L1-MEMBER-GATE: C is a current (PIT) member -> provided even
+    # though it has no state/bars at T; its facts are None (no fake 0).
     assert out["scope"]["pit_member_count"] == 3
-    assert out["scope"]["provided_member_count"] == 2
+    assert out["scope"]["provided_member_count"] == 3
 
 
 # ---------------------------------------------------------------------------
