@@ -4355,6 +4355,103 @@ def _run_leadership_research(
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Stage 5C validation helpers (A1-1 / A1-2)
+#
+# Pure harness helpers for the Internal Structure Dynamics E2E validation
+# gates.  They ONLY call the shared production owners — no second business
+# formula, no DB, no T+1 leakage.
+# ---------------------------------------------------------------------------
+
+
+def _compute_scope_observation_and_snapshot(
+    ps: Any,
+) -> tuple[dict[str, Any], Any]:
+    """Per-scope/date production chain: canonical L1 observation + member
+    leadership contribution (ONCE) + LeadershipSnapshot.
+
+    The call signature is IDENTICAL to the e2e main loop so both paths exercise
+    the exact same production owners.  ``ps`` is a ``PreparedScope``.
+    """
+    from app.domain.review.analysis.leadership_contribution import (
+        compute_member_leadership_contributions,
+    )
+    from app.domain.review.analysis.leadership_migration import (
+        build_leadership_snapshot,
+    )
+    from app.domain.review.scope_observation import compute_scope_observation
+
+    members = list(ps.members)
+    obs = compute_scope_observation(
+        scope_type=ps.scope_type,
+        scope_key=ps.scope_key,
+        trade_date=ps.trade_date,
+        pit_member_ids=[str(i) for i in ps.pit_member_ids],
+        pit_member_ids_t1=[str(i) for i in ps.pit_member_ids_t1],
+        members=members,
+        events=ps.events,
+        t1_membership_available=ps.t1_membership_available,
+        event_coverage_member_ids=ps.event_coverage_member_ids,
+    )
+    ew = (obs or {}).get("price", {}).get("equal_weight_return")
+    contribution_facts = compute_member_leadership_contributions(members)
+    snapshot = build_leadership_snapshot(
+        trade_date=ps.trade_date.isoformat(),
+        ew_return=ew,
+        contribution_facts=contribution_facts,
+    )
+    return obs, snapshot
+
+
+def _compute_prefix_migration_facts(
+    series: list[Any],
+    compute_through_idx: int,
+    target_idx: int,
+) -> Any:
+    """Build ``LeadershipMigrationFacts`` at ``target_idx`` bounded to a REAL
+    prefix.
+
+    The full chain (obs -> contribution -> snapshot -> migration) is REBUILT
+    from ``series[:compute_through_idx + 1]`` only.  Opening later dates (a
+    larger prefix) must not change the migration facts at ``target_idx`` —
+    this is the real-Dataset prefix future-leak proof, NOT a "the owner only
+    sees T-1/T" substitute.  Requires ``target_idx >= 1`` (a T-1 must exist).
+    """
+    from app.domain.review.analysis.leadership_migration import (
+        compute_leadership_migration,
+    )
+
+    snapshots = [
+        _compute_scope_observation_and_snapshot(ps)[1]
+        for ps in series[: compute_through_idx + 1]
+    ]
+    return compute_leadership_migration(
+        previous_snapshot=snapshots[target_idx - 1],
+        current_snapshot=snapshots[target_idx],
+    )
+
+
+def _snapshot_unavailable_coercion(snapshot: Any) -> bool:
+    """True when an unavailable snapshot violates the nullable contract.
+
+    Production contract (leadership_migration.py): ``status == "unavailable"``
+    => ``leader_set is None``.  ``leader_ids`` is DERIVED in ``__post_init__``
+    and equals ``()`` for an unavailable snapshot, so it can never be used to
+    detect a fake 0.
+    """
+    return snapshot.status == "unavailable" and snapshot.leader_set is not None
+
+
+def _prefix_migration_facts_mismatch(before: Any, after: Any) -> bool:
+    """Exact-equal comparison of two ``LeadershipMigrationFacts``.
+
+    The frozen dataclass equality covers status, leader ids / counts,
+    retention, jaccard, migration and all side evidence — a mismatch on ANY
+    field means opening T+1 changed migration(T).
+    """
+    return before != after
+
+
 def _run_internal_structure_dynamics_e2e(
     dataset_dir: str,
     *,
@@ -4399,14 +4496,9 @@ def _run_internal_structure_dynamics_e2e(
         compute_internal_structure,
         compute_internal_structure_dynamics,
     )
-    from app.domain.review.analysis.leadership_contribution import (
-        compute_member_leadership_contributions,
-    )
     from app.domain.review.analysis.leadership_migration import (
-        build_leadership_snapshot,
         compute_leadership_migration,
     )
-    from app.domain.review.scope_observation import compute_scope_observation
     from app.services.review_observation_prep_service import (
         build_prepared_scopes_from_union,
         build_union_fact_context_from_loaded_facts,
@@ -4481,34 +4573,16 @@ def _run_internal_structure_dynamics_e2e(
             logger.error("[isd-e2e] scope %s 未对齐", sk)
             return 1
 
-        # Per-date: L1 + foundation + contribution (ONCE) + snapshot.
+        # Per-date: L1 + foundation + contribution (ONCE) + snapshot via the
+        # shared production-chain helper (same owners as the prefix leak test).
         obs_by_date: list[dict[str, Any]] = []
         foundation_rows: list[dict[str, Any]] = []
         snapshots: list[Any] = []
         for ps in series:
-            members = list(ps.members)
-            obs = compute_scope_observation(
-                scope_type=ps.scope_type,
-                scope_key=ps.scope_key,
-                trade_date=ps.trade_date,
-                pit_member_ids=[str(i) for i in ps.pit_member_ids],
-                pit_member_ids_t1=[str(i) for i in ps.pit_member_ids_t1],
-                members=members,
-                events=ps.events,
-                t1_membership_available=ps.t1_membership_available,
-                event_coverage_member_ids=ps.event_coverage_member_ids,
-            )
+            obs, snapshot = _compute_scope_observation_and_snapshot(ps)
             obs_by_date.append(obs)
             foundation_rows.append(compute_internal_structure(obs))
-            ew = (obs or {}).get("price", {}).get("equal_weight_return")
-            contribution_facts = compute_member_leadership_contributions(members)  # ONCE
-            snapshots.append(
-                build_leadership_snapshot(
-                    trade_date=ps.trade_date.isoformat(),
-                    ew_return=ew,
-                    contribution_facts=contribution_facts,
-                )
-            )
+            snapshots.append(snapshot)
 
         # T-1 -> T migrations + composition.
         daily_rows: list[dict[str, Any]] = []
@@ -4591,8 +4665,10 @@ def _run_internal_structure_dynamics_e2e(
                     all_unavailable_to_zero += 1
                 if mf.previous_leader_count == 0 or mf.current_leader_count == 0:
                     all_unavailable_to_zero += 1
-            # No fake 0 on an unavailable snapshot side.
-            if row["snapshot"].status == "unavailable" and row["snapshot"].leader_ids is not None:
+            # No fake 0 on an unavailable snapshot side (contract:
+            # status=="unavailable" => leader_set is None; leader_ids is the
+            # derived empty tuple and must NOT be used to detect coercion).
+            if _snapshot_unavailable_coercion(row["snapshot"]):
                 all_unavailable_to_zero += 1
 
         total_rows += len(daily_rows)
@@ -4611,6 +4687,29 @@ def _run_internal_structure_dynamics_e2e(
               f"daily={len(daily_rows)} ready_transitions={ready_transitions} "
               f"unavailable_transitions={unavailable_transitions} "
               f"(sum={ready_transitions + unavailable_transitions})")
+
+    # ---- A1-1: real-Dataset prefix future-leak gate (per scope, 1 internal T) ----
+    # Prefix A consumes series[:T+1] (cut at T) -> full LeadershipMigrationFacts(T).
+    # Prefix B consumes series[:T+2] (T+1 open) -> RE-computes migration(T).
+    # Any field difference on the whole Facts => future-leak mismatch.
+    future_leak_mismatch = 0
+    prefix_t_idx = trade_date_count - 2   # T = window_dates[-2], T+1 = window_dates[-1]
+    if prefix_t_idx >= 1:
+        for spec in scope_specs:
+            series = prepared.get(spec.scope_key)
+            before = _compute_prefix_migration_facts(
+                series, prefix_t_idx, prefix_t_idx
+            )
+            after = _compute_prefix_migration_facts(
+                series, prefix_t_idx + 1, prefix_t_idx
+            )
+            if _prefix_migration_facts_mismatch(before, after):
+                future_leak_mismatch += 1
+                logger.error(
+                    "[isd-e2e] scope %s prefix future-leak mismatch (T=%s)",
+                    spec.scope_name,
+                    window_dates[prefix_t_idx].isoformat(),
+                )
 
     # ---- Hard Gate summary ----
     print("--- Hard Gates ---")
@@ -4641,6 +4740,11 @@ def _run_internal_structure_dynamics_e2e(
     if all_unavailable_to_zero != 0:
         gates_ok = False
         logger.error("unavailable->0 coercion=%d != 0", all_unavailable_to_zero)
+    if future_leak_mismatch != 0:
+        gates_ok = False
+        logger.error(
+            "real Dataset prefix future-leak mismatch=%d != 0", future_leak_mismatch
+        )
 
     print(f"scope_count                    : {scope_count} (4)")
     print(f"trade_date_count               : {trade_date_count} (20)")
@@ -4649,6 +4753,7 @@ def _run_internal_structure_dynamics_e2e(
     print(f"foundation mismatch            : {all_foundation_mismatch} (0)")
     print(f"leadership mismatch            : {all_leadership_mismatch} (0)")
     print(f"unavailable->0 coercion        : {all_unavailable_to_zero} (0)")
+    print(f"real Dataset prefix future-leak: {future_leak_mismatch} (0)")
     print(f"E2E hard gate                  : {'PASS' if gates_ok else 'FAIL'}")
 
     # ---- Artificial sampling: 3 transitions per scope (low/mid/high Jaccard) ----
