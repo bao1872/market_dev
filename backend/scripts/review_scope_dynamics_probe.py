@@ -2813,10 +2813,11 @@ def _load_capacity_facts(
 
     instr = instr if instr is not None else {}
 
+    _t_load_start = _perf_counter_ms()
     asof_date = selection.asof_date
     union_member_strs = frozenset(str(m) for m in selection.union_member_ids)
     t1_by_date = _build_t1_map(window_dates, list(selection.trading_days))
-    instr["selection_ms"] = round(_perf_counter_ms(), 1)
+    instr["selection_ms"] = round(_perf_counter_ms() - _t_load_start, 1)
 
     member_set = pa_array_or_none(union_member_strs)
 
@@ -2935,6 +2936,17 @@ def _load_capacity_facts(
     events_by_date = dict(_ebd)
     instr["event_rows_selected"] = n_event
     instr["event_scan_ms"] = round(_perf_counter_ms() - t0, 1)
+
+    # ``fact_mapping_ms`` = pure post-scan construction/mapping CPU (t1 map, bar
+    # series assembly, dict materialization), i.e. the loader wall minus the three
+    # parquet scan segments.  This isolates "parquet I/O" from "fact mapping" so
+    # CAP-20 can localize where time goes without conflating the two.
+    scan_ms = sum(
+        instr.get(k, 0.0)
+        for k in ("state_scan_ms", "bar_scan_ms", "event_scan_ms")
+    )
+    loader_total_ms = _perf_counter_ms() - _t_load_start
+    instr["fact_mapping_ms"] = round(max(0.0, loader_total_ms - scan_ms), 1)
 
     return {
         "scope_specs": scope_specs,
@@ -3319,7 +3331,8 @@ def _run_dataset_capacity_benchmark(
       * input scale: scope_count / union_member_count / trade_date_count / result_count
       * shared-core structural: scope_member_day_count / unique_member_day_count /
         duplication_factor / member_build_calls / vec_hit / vec_fallback / fallback_reasons
-      * timing: dataset_load_ms / scope_prepare_ms / scope_observation_ms /
+      * timing: dataset_load_ms (含 fact_mapping_ms + state/bar/event scan 细分)
+        / fact_context_ms / scope_prepare_ms / scope_observation_ms /
         dynamics_ms / total_ms
       * memory: maxrss_mb (NOT rss_before/rss_after)
     """
@@ -3492,6 +3505,10 @@ def _run_dataset_capacity_benchmark(
     print(f"fallback_reasons        : {','.join(prep_fallback_reasons) or '-'}")
     print("--- timing (ms) ---")
     print(f"dataset_load_ms         : {dataset_load_ms:.1f}")
+    print(f"  fact_mapping_ms       : {instr.get('fact_mapping_ms', 0.0):.1f}")
+    print(f"  state_scan_ms         : {instr.get('state_scan_ms', 0.0):.1f}")
+    print(f"  bar_scan_ms           : {instr.get('bar_scan_ms', 0.0):.1f}")
+    print(f"  event_scan_ms         : {instr.get('event_scan_ms', 0.0):.1f}")
     print(f"fact_context_ms         : {fact_context_ms:.1f}")
     print(f"scope_prepare_ms        : {scope_prepare_ms:.1f}")
     print(f"scope_observation_ms    : {scope_observation_ms:.1f}")
