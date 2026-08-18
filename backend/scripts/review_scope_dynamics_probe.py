@@ -7047,58 +7047,60 @@ def _spread_stability(rate_map: dict) -> dict:
     }
 
 
-def _dominated_variant(rows: list[dict], variant_keys: tuple) -> dict:
-    """For each variant, a same-class sibling whose hit set is a strict superset."""
+def _nested_variant(rows: list[dict], variant_keys: tuple) -> dict:
+    """For each variant, a same-class sibling whose hit set is a strict superset.
+
+    ``Hit(X) ⊂ Hit(Y)`` only means X is narrower / more strict than Y — a FACT
+    about coverage, never a judgment that Y is better or that X should be
+    rejected.  Selection must not auto-REJECT from this relation; semantic
+    replay decides which variant best expresses the type.
+    """
     hit = {
         k: {(r["scope_key"], r["trade_date"]) for r in rows if r.get(k)}
         for k in variant_keys
     }
     out: dict[str, str | None] = {}
     for k in variant_keys:
-        dom = None
+        nested_under = None
         for other in variant_keys:
             if other == k:
                 continue
             if hit[k] <= hit[other] and hit[k] < hit[other]:
-                dom = other
+                nested_under = other
                 break
-        out[k] = dom
+        out[k] = nested_under
     return out
 
 
-def _variant_decision(metrics: dict) -> dict:
-    """Deterministic KEEP / REJECT / NEEDS_REDESIGN suggestion.
+def _variant_evidence_flags(metrics: dict) -> dict:
+    """Evidence flags for variant selection — facts/warnings only, no verdict.
 
-    Explicit threshold rules only — no composite score:
-      * zero hits at reference                         -> NEEDS_REDESIGN
-      * strictly dominated by same-class sibling       -> REJECT
-      * hit_rate < 1% or > 25% or spiky non-persistent -> NEEDS_REDESIGN
-      * otherwise                                      -> KEEP
+    Outputs a fixed ``research_review_status`` of REQUIRES_SEMANTIC_REVIEW plus
+    boolean warning flags.  Thresholds here (1% / 25% / 95% / 50%) only flag
+    attention (rare / broad / one-day-heavy / high-overlap / nested) — they
+    never decide KEEP / REJECT / NEEDS_REDESIGN.
     """
-    if metrics["hit_count"] == 0:
-        return {"suggestion": "NEEDS_REDESIGN", "reasons": ["zero hits at reference"]}
-    hr = metrics["hit_rate"]
-    reasons: list[str] = []
-    if hr < 0.01:
-        reasons.append("hit_rate<1% (too rare to be evidence-bearing)")
-    if hr > 0.25:
-        reasons.append("hit_rate>25% (likely absorbing too much)")
-    if (
-        metrics.get("one_day_only_rate") is not None
-        and metrics["one_day_only_rate"] > 0.95
-        and metrics.get("median_run") == 1
-    ):
-        reasons.append("one-day-only>95% and median run==1 (spiky, non-persistent)")
-    dominated = metrics.get("dominated_by")
-    if dominated:
-        return {
-            "suggestion": "REJECT",
-            "reasons": reasons or [f"strictly dominated by sibling {dominated}"],
-            "dominated_by": dominated,
-        }
-    if reasons:
-        return {"suggestion": "NEEDS_REDESIGN", "reasons": reasons}
-    return {"suggestion": "KEEP", "reasons": []}
+    hit_count = metrics.get("hit_count") or 0
+    hr = metrics.get("hit_rate") or 0.0
+    mhr = None
+    if metrics.get("multi_hit_involving") is not None and hit_count:
+        mhr = metrics["multi_hit_involving"] / hit_count
+    flags = {
+        "zero_reference_hits": hit_count == 0,
+        "nested_under": metrics.get("nested_under"),
+        "rare_reference_hit": hr < 0.01,
+        "broad_reference_hit": hr > 0.25,
+        "one_day_heavy": (
+            metrics.get("one_day_only_rate") is not None
+            and metrics["one_day_only_rate"] > 0.95
+            and metrics.get("median_run") == 1
+        ),
+        "high_overlap": mhr is not None and mhr > 0.5,
+    }
+    return {
+        "evidence_flags": flags,
+        "research_review_status": "REQUIRES_SEMANTIC_REVIEW",
+    }
 
 
 def _rotate_fragment_partition(
@@ -7198,6 +7200,52 @@ def _ready_unmatched_band_distribution(
         else None,
         "band_counts": {"-".join(b): c for b, c in counts.items()},
     }
+
+
+def _central_bucket_stats(rows: list[dict], total: int) -> dict:
+    """count/rate + family×size distribution of a central-region bucket."""
+    fam_size: dict[str, int] = {}
+    for r in rows:
+        key = f"{r.get('scope_type')}|{r.get('size_bucket')}"
+        fam_size[key] = fam_size.get(key, 0) + 1
+    return {
+        "count": len(rows),
+        "rate": round(len(rows) / total, 6) if total else 0.0,
+        "family_size_distribution": dict(sorted(fam_size.items())),
+    }
+
+
+def _balanced_central_sensitivity(rows: list[dict], hist_keys: tuple) -> dict:
+    """Central-region sensitivity for the Balanced hypothesis (evidence only).
+
+    Counts ready rows whose hist_pcts sit in the central band [0.5 ± width] as
+    the width widens 0.10 → 0.15 → 0.20 (p40–60 / p35–65 / p30–70).  Reports
+    both ``four_of_four`` (all four central) and ``exactly_three`` (exactly 3
+    of 4) with count/rate and family×size distribution.  Outputs evidence only
+    — it never concludes whether an explicit Balanced state exists.
+    """
+    total = len(rows)
+    widths: dict[str, dict] = {}
+    for width in (0.10, 0.15, 0.20):
+        lower, upper = 0.5 - width, 0.5 + width
+        four, exactly_three = [], []
+        for r in rows:
+            vals = [_to_fin(r.get(k)) for k in hist_keys]
+            if any(v is None for v in vals):
+                continue
+            central = sum(1 for v in vals if lower <= v <= upper)
+            if central == len(hist_keys):
+                four.append(r)
+            elif central == len(hist_keys) - 1:
+                exactly_three.append(r)
+        widths[f"p{int((0.5 - width) * 100)}-{int((0.5 + width) * 100)}"] = {
+            "width": width,
+            "lower": round(lower, 6),
+            "upper": round(upper, 6),
+            "four_of_four": _central_bucket_stats(four, total),
+            "exactly_three": _central_bucket_stats(exactly_three, total),
+        }
+    return {"total_ready": total, "widths": widths}
 
 
 def _pick_spread_replay(rows: list[dict], limit: int) -> list[dict]:
@@ -7313,11 +7361,11 @@ def _run_internal_structure_type_selection(
         )
     variant_keys_by_class = {c: tuple(v) for c, v in variant_keys_by_class.items()}
 
-    # ---- Stage 2B-1: per-variant selection matrix + KEEP/REJECT/REDESIGN ----
+    # ---- Stage 2B-1: per-variant selection matrix (evidence-only) ----
     selection_matrix: dict[str, dict] = {}
     for cand in _IST_CANDIDATE_CLASSES:
         vkeys = variant_keys_by_class[cand]
-        dominated = _dominated_variant(rows, vkeys)
+        nested = _nested_variant(rows, vkeys)
         sens_rates = _per_variant_sensitivity_rates(summary["sensitivity"][cand])
         other_class_keys = [
             f"research_candidate_{c}" for c in _IST_CANDIDATE_CLASSES if c != cand
@@ -7338,7 +7386,8 @@ def _run_internal_structure_type_selection(
                 "hit_rate": stats["hit_rate"],
                 "one_day_only_rate": stats["one_day_only_rate"],
                 "median_run": stats["median_consecutive_run_length"],
-                "dominated_by": dominated[vk],
+                "nested_under": nested[vk],
+                "multi_hit_involving": multi_involving,
             }
             selection_matrix[cand][letter] = {
                 "full_key": vk,
@@ -7352,9 +7401,12 @@ def _run_internal_structure_type_selection(
                 "median_run": stats["median_consecutive_run_length"],
                 "one_day_only_rate": stats["one_day_only_rate"],
                 "multi_hit_involving": multi_involving,
+                "multi_hit_rate": round(multi_involving / stats["hit_count"], 6)
+                if stats["hit_count"]
+                else None,
                 "contamination_per_class": per_class_contam,
-                "dominated_by": dominated[vk],
-                "decision": _variant_decision(metrics),
+                "nested_under": nested[vk],
+                "evidence_flags": _variant_evidence_flags(metrics),
             }
 
     # ---- Stage 2B-2: Rotating vs Fragmenting P0 partition + group stats ----
@@ -7373,9 +7425,9 @@ def _run_internal_structure_type_selection(
     }
     overlap_replay = _pick_spread_replay(part["overlap"], 15)
 
-    # ---- Stage 2B-3: Fragmenting redesign signal (variant dominance/reach) ----
+    # ---- Stage 2B-3: Fragmenting redesign signal (nested/reach evidence) ----
     frag_keys = variant_keys_by_class["Fragmenting"]
-    frag_dominated = _dominated_variant(rows, frag_keys)
+    frag_nested = _nested_variant(rows, frag_keys)
     frag_overlap_reach = {
         vk.rsplit("_", 1)[-1]: sum(1 for r in part["overlap"] if r.get(vk))
         for vk in frag_keys
@@ -7385,7 +7437,7 @@ def _run_internal_structure_type_selection(
     }
     fragmenting_redesign = {
         "reference_hits_per_variant": frag_reference_hits,
-        "dominated_by": frag_dominated,
+        "nested_under": frag_nested,
         "overlap_rows_reached_per_variant": frag_overlap_reach,
         "high_evidence_count": sum(
             1
@@ -7394,9 +7446,9 @@ def _run_internal_structure_type_selection(
             and all(bool(r.get(k)) for k in frag_keys)
         ),
         "note": (
-            "B 在参考阈值 0 命中且被 A 严格包含；C 被 A 严格包含——"
-            "Fragmenting 参考行为实际由 A 单变量驱动，B/C 需 redesign"
-            "或移除（见 candidate_selection_summary）。"
+            "证据：Fragmenting 参考命中仅由某单一 variant 驱动，其余 variant "
+            "reference 命中为 0 或严格包含于前者（nested_under）。这是事实，"
+            "不自动 REJECT；是否 redesign / 移除由后续语义 replay 决定。"
         ),
     }
 
@@ -7410,20 +7462,22 @@ def _run_internal_structure_type_selection(
     )
     ready_unmatched_replay = _pick_spread_replay(strat["all_features_ready"], 15)
     balanced_hypothesis = {
-        "explicit_balanced_evidence": (
-            joint["all_mid_count"] > 0
-            and joint["all_mid_rate"] >= 0.10
-            and joint["all_mid_rate"] >= joint["top_band_rate"]
+        # 保留既有 all-mid band 参考，但不下 explicit-Balanced 结论。
+        "all_mid_reference": {
+            "ready_unmatched_total": joint["total_ready"],
+            "all_mid_count": joint["all_mid_count"],
+            "all_mid_rate": joint["all_mid_rate"],
+            "top_band": joint["top_band"],
+            "top_band_rate": joint["top_band_rate"],
+            "band_count": joint["band_count"],
+        },
+        "central_sensitivity": _balanced_central_sensitivity(
+            strat["all_features_ready"], _IST_SELECT_JOINT_HIST_KEYS
         ),
-        "ready_unmatched_total": joint["total_ready"],
-        "all_mid_count": joint["all_mid_count"],
-        "all_mid_rate": joint["all_mid_rate"],
-        "top_band": joint["top_band"],
-        "top_band_rate": joint["top_band_rate"],
-        "band_count": joint["band_count"],
-        "recommendation": (
-            "若 all-mid 占比显著且为最大单一 band，则 explicit Balanced 有证据；"
-            "否则倾向 ready-type=None（residual），禁止无条件 else=Balanced。本轮仅建议，不 Freeze。"
+        "evidence_only_note": (
+            "本轮只输出 Balanced 相关证据（all-mid band 参考 + central-region "
+            "sensitivity），不判定 explicit Balanced 是否存在，禁止无条件 "
+            "else=Balanced。"
         ),
     }
 
@@ -7537,17 +7591,23 @@ def _run_internal_structure_type_selection(
 
     # ---- console summary ----
     print(f"[internal-structure-type-selection] out_dir={out_dir}")
-    print("--- Stage 2B-1: variant selection matrix (ref) ---")
+    print("--- Stage 2B-1: variant selection matrix (evidence-only, ref) ---")
     for cand in _IST_CANDIDATE_CLASSES:
         print(f"[{cand}]")
         for letter, m in selection_matrix[cand].items():
-            d = m["decision"]
+            fl = m["evidence_flags"]["evidence_flags"]
+            warn = ",".join(
+                k for k, v in fl.items() if v and k not in ("nested_under",)
+            )
             print(
                 f"  {letter}: hit_rate={m['hit_rate']:.4f} n={m['hit_count']} "
                 f"pert={m['threshold_perturbation']['range']} "
                 f"one_day={m['one_day_only_rate']} multi={m['multi_hit_involving']} "
-                f"dom_by={m['dominated_by']} => {d['suggestion']}"
+                f"nested_under={m['nested_under']} "
+                f"status={m['evidence_flags']['research_review_status']}"
             )
+            if warn:
+                print(f"       flags: {warn}")
     print("--- Stage 2B-2: Rotating vs Fragmenting partition ---")
     for gname, cnt in summary_out["rotating_fragmenting"]["counts"].items():
         print(f"  {gname}: {cnt}")
@@ -7555,7 +7615,7 @@ def _run_internal_structure_type_selection(
     print("--- Stage 2B-3: Fragmenting ---")
     print(
         f"  ref_hits={fragmenting_redesign['reference_hits_per_variant']} "
-        f"dom={fragmenting_redesign['dominated_by']} "
+        f"nested={fragmenting_redesign['nested_under']} "
         f"overlap_reach={fragmenting_redesign['overlap_rows_reached_per_variant']} "
         f"high_evidence={fragmenting_redesign['high_evidence_count']}"
     )
@@ -7568,6 +7628,13 @@ def _run_internal_structure_type_selection(
         f"  joint all_mid_rate={joint['all_mid_rate']} top_band={joint['top_band']} "
         f"({joint['top_band_rate']}) bands={joint['band_count']}"
     )
+    cs = balanced_hypothesis["central_sensitivity"]
+    for wname, w in cs["widths"].items():
+        print(
+            f"  balanced central {wname}: 4of4={w['four_of_four']['count']} "
+            f"({w['four_of_four']['rate']:.4f}) 3of4={w['exactly_three']['count']} "
+            f"({w['exactly_three']['rate']:.4f})"
+        )
     print("--- Stage 2B-5: threshold region (research anchor) ---")
     for cand in _IST_CANDIDATE_CLASSES:
         tr = threshold_region[cand]

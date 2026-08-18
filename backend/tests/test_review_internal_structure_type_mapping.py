@@ -36,16 +36,17 @@ from scripts.review_scope_dynamics_probe import (
     _IST_THRESHOLD_GRID,
     _aligned_breadth,
     _aligned_tilt,
+    _balanced_central_sensitivity,
     _band_classify,
     _board_to_family,
     _candidate_configs,
     _compute_aligned_features,
     _consecutive_runs,
     _delta5d,
-    _dominated_variant,
     _evaluate_candidate_variant,
     _hist_pct,
     _multi_hit_and_unmatched,
+    _nested_variant,
     _numeric_group_stats,
     _pairwise_overlap,
     _percentile_sorted,
@@ -61,7 +62,7 @@ from scripts.review_scope_dynamics_probe import (
     _strict_configs,
     _threshold_perturbation,
     _unmatched_stratification,
-    _variant_decision,
+    _variant_evidence_flags,
     build_internal_structure_type_row,
 )
 
@@ -899,40 +900,77 @@ def test_spread_stability():
     assert out2["cv"] == pytest.approx(0.0)
 
 
-def test_dominated_variant():
+def test_nested_variant():
     rows = [
         {"scope_key": "s1", "trade_date": "2026-08-17", "vA": True, "vB": True, "vC": True},
         {"scope_key": "s2", "trade_date": "2026-08-17", "vA": True, "vB": True, "vC": False},
         {"scope_key": "s3", "trade_date": "2026-08-17", "vA": True, "vB": False, "vC": False},
         {"scope_key": "s4", "trade_date": "2026-08-17", "vA": False, "vB": False, "vC": False},
     ]
-    dom = _dominated_variant(rows, ("vA", "vB", "vC"))
+    nested = _nested_variant(rows, ("vA", "vB", "vC"))
     # strict superset chain: vC={s1} < vB={s1,s2} < vA={s1,s2,s3}
     # first strict superset in key order wins: vC->vA, vB->vA
-    assert dom["vC"] == "vA"
-    assert dom["vB"] == "vA"
-    assert dom["vA"] is None
+    assert nested["vC"] == "vA"
+    assert nested["vB"] == "vA"
+    assert nested["vA"] is None
 
 
-def test_variant_decision():
-    # zero hits -> NEEDS_REDESIGN
-    assert _variant_decision({"hit_count": 0, "hit_rate": 0.0})["suggestion"] == "NEEDS_REDESIGN"
-    # dominated -> REJECT regardless of good metrics
-    d = _variant_decision(
-        {"hit_count": 100, "hit_rate": 0.2, "dominated_by": "A",
-         "one_day_only_rate": 0.5, "median_run": 3}
+def test_variant_evidence_flags():
+    # zero hits -> fact flag, fixed research status, no verdict
+    out = _variant_evidence_flags({"hit_count": 0, "hit_rate": 0.0})
+    assert out["evidence_flags"]["zero_reference_hits"] is True
+    assert out["research_review_status"] == "REQUIRES_SEMANTIC_REVIEW"
+    assert "suggestion" not in out
+    # nested_under is a FACT, never a REJECT verdict
+    out2 = _variant_evidence_flags(
+        {"hit_count": 100, "hit_rate": 0.2, "nested_under": "A",
+         "one_day_only_rate": 0.5, "median_run": 3, "multi_hit_involving": 10}
     )
-    assert d["suggestion"] == "REJECT"
-    # too rare -> NEEDS_REDESIGN
-    d2 = _variant_decision(
-        {"hit_count": 3, "hit_rate": 0.006, "one_day_only_rate": 0.9, "median_run": 2}
+    assert out2["evidence_flags"]["nested_under"] == "A"
+    assert out2["evidence_flags"]["rare_reference_hit"] is False
+    assert out2["evidence_flags"]["high_overlap"] is False
+    assert out2["research_review_status"] == "REQUIRES_SEMANTIC_REVIEW"
+    # rare + one-day-heavy + high-overlap warnings still never decide
+    out3 = _variant_evidence_flags(
+        {"hit_count": 3, "hit_rate": 0.006, "one_day_only_rate": 0.98,
+         "median_run": 1, "multi_hit_involving": 3}
     )
-    assert d2["suggestion"] == "NEEDS_REDESIGN"
-    # healthy -> KEEP
-    d3 = _variant_decision(
-        {"hit_count": 500, "hit_rate": 0.10, "one_day_only_rate": 0.5, "median_run": 4}
+    assert out3["evidence_flags"]["rare_reference_hit"] is True
+    assert out3["evidence_flags"]["one_day_heavy"] is True
+    assert out3["evidence_flags"]["high_overlap"] is True
+    assert out3["research_review_status"] == "REQUIRES_SEMANTIC_REVIEW"
+    # broad hit-rate warning
+    out4 = _variant_evidence_flags(
+        {"hit_count": 500, "hit_rate": 0.30, "one_day_only_rate": 0.5,
+         "median_run": 4, "multi_hit_involving": 0}
     )
-    assert d3["suggestion"] == "KEEP"
+    assert out4["evidence_flags"]["broad_reference_hit"] is True
+
+
+def test_balanced_central_sensitivity():
+    rows = [
+        {"scope_type": "concept", "size_bucket": "large", "b": 0.5, "h": 0.5, "m": 0.5, "t": 0.5},
+        {"scope_type": "industry_l1", "size_bucket": "small", "b": 0.5, "h": 0.5, "m": 0.5, "t": 0.65},
+        {"scope_type": "concept", "size_bucket": "large", "b": 0.45, "h": 0.55, "m": 0.48, "t": 0.52},
+        {"scope_type": "industry_l1", "size_bucket": "medium", "b": 0.68, "h": 0.5, "m": 0.5, "t": 0.5},
+    ]
+    out = _balanced_central_sensitivity(rows, ("b", "h", "m", "t"))
+    assert out["total_ready"] == 4
+    # p40-60 (width .10): rows 1,3 all central; rows 2,4 exactly 3 central
+    w10 = out["widths"]["p40-60"]
+    assert w10["four_of_four"]["count"] == 2
+    assert w10["four_of_four"]["rate"] == pytest.approx(0.5)
+    assert w10["exactly_three"]["count"] == 2
+    # p35-65 (width .15): row 2 joins 4-of-4; row 4 still exactly 3
+    w15 = out["widths"]["p35-65"]
+    assert w15["four_of_four"]["count"] == 3
+    assert w15["exactly_three"]["count"] == 1
+    # p30-70 (width .20): all four 4-of-4, family×size distribution populated
+    w20 = out["widths"]["p30-70"]
+    assert w20["four_of_four"]["count"] == 4
+    assert w20["exactly_three"]["count"] == 0
+    assert w20["four_of_four"]["family_size_distribution"]["concept|large"] == 2
+    assert w20["four_of_four"]["family_size_distribution"]["industry_l1|small"] == 1
 
 
 def test_rotate_fragment_partition():
