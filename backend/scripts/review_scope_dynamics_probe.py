@@ -1144,6 +1144,7 @@ def _parse_args() -> argparse.Namespace:
             "internal-structure-type-export",
             "internal-structure-type-distribution",
             "internal-structure-type-candidates",
+            "internal-structure-type-selection",
             "leadership-research",
             "export-dataset",
             "dataset-validate",
@@ -1197,6 +1198,14 @@ def _parse_args() -> argparse.Namespace:
             "不产正式 internal_structure_type、不冻结 threshold），读 mapping 输出 "
             "--dataset-dir，写 review-isdtype-cand-<sha12>-v1/{research_candidate_results"
             ".parquet, research_candidate_summary.json}；"
+            "internal-structure-type-selection: TYPE-MAPPING Commit 2B — research-only "
+            "candidate selection + conflict resolution（每 variant selection matrix 输出 "
+            "KEEP/REJECT/NEEDS_REDESIGN 建议、Rotating↔Fragmenting P0 partition + group "
+            "stats + 10–15 案例 replay、Fragmenting redesign 信号、unmatched warmup/ready "
+            "分层 + ready-unmatched joint band、threshold region 证据；不 Freeze threshold），"
+            "读 Commit 2 candidate results --dataset-dir，join Commit 1 mapping 取 leadership "
+            "counts，写 review-isdtype-select-<sha12>-v1/{candidate_selection_summary.json, "
+            "representative_replay.json, manifest.json}；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -6929,6 +6938,646 @@ def _hit_stats_from_flags(rows: list[dict], flag_list: list[bool]) -> dict:
     }
 
 
+# ===========================================================================
+# TYPE-MAPPING Commit 2B — Candidate Selection + Conflict Resolution
+# research-only：不更新 PRD / 不写 production owner / 不进入 Trading Context /
+# 不 Freeze threshold。输入沿用 Commit 2 candidate results（不重跑 production
+# chain）。输出 candidate_selection_summary.json + representative_replay.json，
+# 保持 current_static_research_proxy / threshold_freeze_eligible=false。
+# ===========================================================================
+
+# Commit 2B 从 Commit 1 mapping parquet 补充的 leadership count facts。
+_IST_SELECT_LEADERSHIP_COUNT_FIELDS = (
+    "leadership_previous_rankable_count",
+    "leadership_current_rankable_count",
+    "leadership_previous_leader_count",
+    "leadership_current_leader_count",
+    "leadership_retained_count",
+    "leadership_entrant_count",
+    "leadership_exit_count",
+    "leadership_previous_retention",
+)
+
+# unmatched 分层（all-features-ready）所需的 hist_pct 特征键。
+_IST_SELECT_READINESS_FEATURE_KEYS = (
+    "aligned_breadth_hist_pct",
+    "aligned_tilt_hist_pct",
+    "price_hhi_hist_pct",
+    "migration_hist_pct",
+    "leader_fraction_hist_pct",
+)
+
+# ready-unmatched joint distribution 的四主 hist_pct（Breadth/HHI/Migration/Tilt）。
+_IST_SELECT_JOINT_HIST_KEYS = (
+    "aligned_breadth_hist_pct",
+    "price_hhi_hist_pct",
+    "migration_hist_pct",
+    "aligned_tilt_hist_pct",
+)
+
+# R/F 分组统计的字段（Stage 2B-2）。
+_IST_SELECT_RF_COMPARE_FIELDS = (
+    "leadership_migration",
+    "leadership_jaccard_stability",
+    "leadership_current_leader_fraction",
+    "leader_fraction_delta5d",
+    "concentration_price_hhi",
+    "price_hhi_delta5d",
+    "aligned_breadth",
+    "aligned_breadth_delta5d",
+    "leadership_retained_count",
+    "leadership_entrant_count",
+    "leadership_exit_count",
+    "leadership_previous_leader_count",
+    "leadership_current_leader_count",
+    "leadership_previous_retention",
+)
+
+
+def _std_pop(values: list[float]) -> float | None:
+    """Population standard deviation (transparent, no numpy dependency)."""
+    n = len(values)
+    if n == 0:
+        return None
+    if n == 1:
+        return 0.0
+    mean = sum(values) / n
+    return (sum((v - mean) ** 2 for v in values) / n) ** 0.5
+
+
+def _band_classify(v: Any) -> str | None:
+    """Binned hist_pct band: low (<0.40) / mid ([0.40, 0.60]) / high (>0.60)."""
+    v = _to_fin(v)
+    if v is None:
+        return None
+    if v < 0.40:
+        return "low"
+    if v > 0.60:
+        return "high"
+    return "mid"
+
+
+def _threshold_perturbation(rates: list[float]) -> dict:
+    """Perturbation of a single variant's hit rate across its threshold combos."""
+    if not rates:
+        return {"count": 0, "min": None, "max": None, "range": None, "std": None}
+    lo, hi = min(rates), max(rates)
+    return {
+        "count": len(rates),
+        "min": round(lo, 6),
+        "max": round(hi, 6),
+        "range": round(hi - lo, 6),
+        "std": round(_std_pop(rates), 6),
+    }
+
+
+def _spread_stability(rate_map: dict) -> dict:
+    """Cross-group hit-rate spread (family or size) as stability evidence."""
+    vals = [float(v) for v in rate_map.values() if v is not None]
+    if not vals:
+        return {"count": 0, "min": None, "max": None, "spread": None, "cv": None}
+    lo, hi = min(vals), max(vals)
+    mean = sum(vals) / len(vals)
+    return {
+        "count": len(vals),
+        "min": round(lo, 6),
+        "max": round(hi, 6),
+        "spread": round(hi - lo, 6),
+        "cv": round(_std_pop(vals) / mean, 6) if mean else None,
+    }
+
+
+def _dominated_variant(rows: list[dict], variant_keys: tuple) -> dict:
+    """For each variant, a same-class sibling whose hit set is a strict superset."""
+    hit = {
+        k: {(r["scope_key"], r["trade_date"]) for r in rows if r.get(k)}
+        for k in variant_keys
+    }
+    out: dict[str, str | None] = {}
+    for k in variant_keys:
+        dom = None
+        for other in variant_keys:
+            if other == k:
+                continue
+            if hit[k] <= hit[other] and hit[k] < hit[other]:
+                dom = other
+                break
+        out[k] = dom
+    return out
+
+
+def _variant_decision(metrics: dict) -> dict:
+    """Deterministic KEEP / REJECT / NEEDS_REDESIGN suggestion.
+
+    Explicit threshold rules only — no composite score:
+      * zero hits at reference                         -> NEEDS_REDESIGN
+      * strictly dominated by same-class sibling       -> REJECT
+      * hit_rate < 1% or > 25% or spiky non-persistent -> NEEDS_REDESIGN
+      * otherwise                                      -> KEEP
+    """
+    if metrics["hit_count"] == 0:
+        return {"suggestion": "NEEDS_REDESIGN", "reasons": ["zero hits at reference"]}
+    hr = metrics["hit_rate"]
+    reasons: list[str] = []
+    if hr < 0.01:
+        reasons.append("hit_rate<1% (too rare to be evidence-bearing)")
+    if hr > 0.25:
+        reasons.append("hit_rate>25% (likely absorbing too much)")
+    if (
+        metrics.get("one_day_only_rate") is not None
+        and metrics["one_day_only_rate"] > 0.95
+        and metrics.get("median_run") == 1
+    ):
+        reasons.append("one-day-only>95% and median run==1 (spiky, non-persistent)")
+    dominated = metrics.get("dominated_by")
+    if dominated:
+        return {
+            "suggestion": "REJECT",
+            "reasons": reasons or [f"strictly dominated by sibling {dominated}"],
+            "dominated_by": dominated,
+        }
+    if reasons:
+        return {"suggestion": "NEEDS_REDESIGN", "reasons": reasons}
+    return {"suggestion": "KEEP", "reasons": []}
+
+
+def _rotate_fragment_partition(
+    rows: list[dict], r_key: str, f_key: str
+) -> dict:
+    """Partition observations into R-only / F-only / R∩F / neither (reference)."""
+    r_only, f_only, overlap, neither = [], [], [], []
+    for r in rows:
+        is_r = bool(r.get(r_key))
+        is_f = bool(r.get(f_key))
+        if is_r and is_f:
+            overlap.append(r)
+        elif is_r:
+            r_only.append(r)
+        elif is_f:
+            f_only.append(r)
+        else:
+            neither.append(r)
+    return {
+        "rotating_only_count": len(r_only),
+        "fragmenting_only_count": len(f_only),
+        "overlap_count": len(overlap),
+        "neither_count": len(neither),
+        "rotating_only": r_only,
+        "fragmenting_only": f_only,
+        "overlap": overlap,
+        "neither": neither,
+    }
+
+
+def _numeric_group_stats(rows: list[dict], field: str) -> dict:
+    """Mean/median/min/max/std of a numeric field across a group (None-filtered)."""
+    vals = [_to_fin(r.get(field)) for r in rows]
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return {
+            "count": 0,
+            "mean": None,
+            "median": None,
+            "min": None,
+            "max": None,
+            "std": None,
+        }
+    s = sorted(vals)
+    return {
+        "count": len(vals),
+        "mean": round(sum(vals) / len(vals), 6),
+        "median": round(_percentile_sorted(s, 0.5), 6),
+        "min": round(min(vals), 6),
+        "max": round(max(vals), 6),
+        "std": round(_std_pop(vals), 6),
+    }
+
+
+def _unmatched_stratification(rows: list[dict], readiness_keys: tuple) -> dict:
+    """Split unmatched rows into all-features-ready vs warmup/unavailable."""
+    ready, insufficient = [], []
+    for r in rows:
+        if all(_to_fin(r.get(k)) is not None for k in readiness_keys):
+            ready.append(r)
+        else:
+            insufficient.append(r)
+    total = len(rows)
+    return {
+        "total_count": total,
+        "all_features_ready_count": len(ready),
+        "all_features_ready_rate": round(len(ready) / total, 6) if total else 0.0,
+        "warmup_unavailable_count": len(insufficient),
+        "warmup_unavailable_rate": round(len(insufficient) / total, 6)
+        if total
+        else 0.0,
+        "all_features_ready": ready,
+        "warmup_unavailable": insufficient,
+    }
+
+
+def _ready_unmatched_band_distribution(
+    rows: list[dict], hist_keys: tuple
+) -> dict:
+    """Joint band distribution (low/mid/high) over the four main hist_pcts."""
+    counts: dict[tuple, int] = {}
+    for r in rows:
+        bands = tuple(_band_classify(r.get(k)) for k in hist_keys)
+        if any(b is None for b in bands):
+            continue
+        counts[bands] = counts.get(bands, 0) + 1
+    total = sum(counts.values())
+    all_mid = counts.get(tuple(["mid"] * len(hist_keys)), 0)
+    return {
+        "total_ready": total,
+        "band_count": len(counts),
+        "all_mid_count": all_mid,
+        "all_mid_rate": round(all_mid / total, 6) if total else 0.0,
+        "top_band": "-".join(max(counts, key=counts.get)) if counts else None,
+        "top_band_rate": round(max(counts.values()) / total, 6)
+        if total
+        else None,
+        "band_counts": {"-".join(b): c for b, c in counts.items()},
+    }
+
+
+def _pick_spread_replay(rows: list[dict], limit: int) -> list[dict]:
+    """Deterministic spread-across-scope replay pick (round-robin by scope)."""
+    by_scope: dict[str, list[dict]] = {}
+    for r in rows:
+        by_scope.setdefault(str(r.get("scope_key")), []).append(r)
+    scopes = sorted(by_scope)
+    if not scopes:
+        return []
+    picked: list[dict] = []
+    depth = 0
+    while len(picked) < limit and depth < max(len(v) for v in by_scope.values()):
+        for sk in scopes:
+            if len(picked) >= limit:
+                break
+            if depth < len(by_scope[sk]):
+                picked.append(by_scope[sk][depth])
+        depth += 1
+    return picked
+
+
+def _per_variant_sensitivity_rates(sensitivity_block: dict) -> dict:
+    """{variant-letter: [hit_rate, ...]} grouped from a class sensitivity block."""
+    out: dict[str, list[float]] = {}
+    for key, st in sensitivity_block.items():
+        var = key.split("|", 1)[0]
+        out.setdefault(var, []).append(float(st["hit_rate"]))
+    return out
+
+
+def _replay_rows_compact(rows: list[dict], fields: tuple) -> list[dict]:
+    """Project replay rows to the requested fields (None-safe, deterministic)."""
+    return [{f: r.get(f) for f in fields} for r in rows]
+
+
+def _run_internal_structure_type_selection(
+    dataset_dir: str, *, dry_run: bool = False
+) -> int:
+    """TYPE-MAPPING Commit 2B — candidate selection + conflict resolution.
+
+    Reads the Commit 2 candidate results (parquet + summary) and enriches with
+    the Commit 1 mapping leadership-count facts, then writes:
+      review-isdtype-select-<sha12>-v1/candidate_selection_summary.json
+      review-isdtype-select-<sha12>-v1/representative_replay.json
+      review-isdtype-select-<sha12>-v1/manifest.json
+    """
+    cand_results_path = os.path.join(dataset_dir, "research_candidate_results.parquet")
+    cand_summary_path = os.path.join(dataset_dir, "research_candidate_summary.json")
+    if not os.path.exists(cand_results_path) or not os.path.exists(cand_summary_path):
+        logger.error(
+            "[internal-structure-type-selection] 需 Commit 2 candidate results：%s",
+            dataset_dir,
+        )
+        return 2
+    import pyarrow.parquet as pq  # lazy import（与全文件惯例一致）
+
+    # ---- load candidate rows + summary ----
+    rows = pq.read_table(cand_results_path).to_pylist()
+    with open(cand_summary_path, "r", encoding="utf-8") as fh:
+        summary = json.load(fh)
+    source_dataset = summary.get("source_dataset")
+    sha12 = str(summary.get("capture_git_sha", ""))[:12]
+    out_dir = os.path.join(
+        os.path.dirname(dataset_dir), f"review-isdtype-select-{sha12}-v1"
+    )
+    if dry_run:
+        logger.info(
+            "[internal-structure-type-selection][dry-run] rows=%d source=%s out=%s",
+            len(rows),
+            source_dataset,
+            out_dir,
+        )
+        return 0
+
+    # ---- enrich with Commit 1 leadership-count facts (join on scope_key+date) ----
+    mapping_parquet = os.path.join(
+        os.path.dirname(dataset_dir), source_dataset, "internal_structure_type_mapping.parquet"
+    )
+    if not os.path.exists(mapping_parquet):
+        logger.error(
+            "[internal-structure-type-selection] 缺 mapping parquet：%s",
+            mapping_parquet,
+        )
+        return 2
+    mapping_rows = pq.read_table(mapping_parquet).to_pylist()
+    mapping_index = {
+        (str(r.get("scope_key")), str(r.get("trade_date"))): r for r in mapping_rows
+    }
+    joined = 0
+    for r in rows:
+        src = mapping_index.get((str(r.get("scope_key")), str(r.get("trade_date"))))
+        if src is None:
+            continue
+        for f in _IST_SELECT_LEADERSHIP_COUNT_FIELDS:
+            r[f] = src.get(f)
+        joined += 1
+    if joined != len(rows):
+        logger.warning(
+            "[internal-structure-type-selection] join 覆盖 %d/%d 行",
+            joined,
+            len(rows),
+        )
+    rows.sort(key=lambda r: (str(r.get("scope_key")), str(r.get("trade_date"))))
+
+    class_keys = {
+        cand: f"research_candidate_{cand}" for cand in _IST_CANDIDATE_CLASSES
+    }
+    variant_keys_by_class: dict[str, tuple] = {}
+    for (cand, var, _slots, _conds) in _IST_CANDIDATE_VARIANTS:
+        variant_keys_by_class.setdefault(cand, []).append(
+            f"research_candidate_{cand}_{var}"
+        )
+    variant_keys_by_class = {c: tuple(v) for c, v in variant_keys_by_class.items()}
+
+    # ---- Stage 2B-1: per-variant selection matrix + KEEP/REJECT/REDESIGN ----
+    selection_matrix: dict[str, dict] = {}
+    for cand in _IST_CANDIDATE_CLASSES:
+        vkeys = variant_keys_by_class[cand]
+        dominated = _dominated_variant(rows, vkeys)
+        sens_rates = _per_variant_sensitivity_rates(summary["sensitivity"][cand])
+        other_class_keys = [
+            f"research_candidate_{c}" for c in _IST_CANDIDATE_CLASSES if c != cand
+        ]
+        selection_matrix[cand] = {}
+        for vk in vkeys:
+            letter = vk.rsplit("_", 1)[-1]
+            stats = _hit_stats(rows, vk)
+            multi_involving = sum(
+                1 for r in rows if r.get(vk) and r["research_candidate_hit_count"] >= 2
+            )
+            per_class_contam = {
+                oc: sum(1 for r in rows if r.get(vk) and r.get(oc))
+                for oc in other_class_keys
+            }
+            metrics = {
+                "hit_count": stats["hit_count"],
+                "hit_rate": stats["hit_rate"],
+                "one_day_only_rate": stats["one_day_only_rate"],
+                "median_run": stats["median_consecutive_run_length"],
+                "dominated_by": dominated[vk],
+            }
+            selection_matrix[cand][letter] = {
+                "full_key": vk,
+                "hit_count": stats["hit_count"],
+                "hit_rate": stats["hit_rate"],
+                "family_stability": _spread_stability(stats["family_hit_rate"]),
+                "size_stability": _spread_stability(stats["size_bucket_hit_rate"]),
+                "threshold_perturbation": _threshold_perturbation(
+                    sens_rates.get(letter, [])
+                ),
+                "median_run": stats["median_consecutive_run_length"],
+                "one_day_only_rate": stats["one_day_only_rate"],
+                "multi_hit_involving": multi_involving,
+                "contamination_per_class": per_class_contam,
+                "dominated_by": dominated[vk],
+                "decision": _variant_decision(metrics),
+            }
+
+    # ---- Stage 2B-2: Rotating vs Fragmenting P0 partition + group stats ----
+    part = _rotate_fragment_partition(
+        rows, class_keys["Rotating"], class_keys["Fragmenting"]
+    )
+    rf_group_names = (
+        ("rotating_only", part["rotating_only"]),
+        ("fragmenting_only", part["fragmenting_only"]),
+        ("overlap", part["overlap"]),
+        ("neither", part["neither"]),
+    )
+    rf_group_stats = {
+        gname: {f: _numeric_group_stats(grows, f) for f in _IST_SELECT_RF_COMPARE_FIELDS}
+        for gname, grows in rf_group_names
+    }
+    overlap_replay = _pick_spread_replay(part["overlap"], 15)
+
+    # ---- Stage 2B-3: Fragmenting redesign signal (variant dominance/reach) ----
+    frag_keys = variant_keys_by_class["Fragmenting"]
+    frag_dominated = _dominated_variant(rows, frag_keys)
+    frag_overlap_reach = {
+        vk.rsplit("_", 1)[-1]: sum(1 for r in part["overlap"] if r.get(vk))
+        for vk in frag_keys
+    }
+    frag_reference_hits = {
+        vk.rsplit("_", 1)[-1]: sum(1 for r in rows if r.get(vk)) for vk in frag_keys
+    }
+    fragmenting_redesign = {
+        "reference_hits_per_variant": frag_reference_hits,
+        "dominated_by": frag_dominated,
+        "overlap_rows_reached_per_variant": frag_overlap_reach,
+        "high_evidence_count": sum(
+            1
+            for r in rows
+            if r.get(class_keys["Fragmenting"])
+            and all(bool(r.get(k)) for k in frag_keys)
+        ),
+        "note": (
+            "B 在参考阈值 0 命中且被 A 严格包含；C 被 A 严格包含——"
+            "Fragmenting 参考行为实际由 A 单变量驱动，B/C 需 redesign"
+            "或移除（见 candidate_selection_summary）。"
+        ),
+    }
+
+    # ---- Stage 2B-4: unmatched stratification + ready-unmatched joint ----
+    unmatched = [
+        r for r in rows if int(r.get("research_candidate_hit_count", 0)) == 0
+    ]
+    strat = _unmatched_stratification(unmatched, _IST_SELECT_READINESS_FEATURE_KEYS)
+    joint = _ready_unmatched_band_distribution(
+        strat["all_features_ready"], _IST_SELECT_JOINT_HIST_KEYS
+    )
+    ready_unmatched_replay = _pick_spread_replay(strat["all_features_ready"], 15)
+    balanced_hypothesis = {
+        "explicit_balanced_evidence": (
+            joint["all_mid_count"] > 0
+            and joint["all_mid_rate"] >= 0.10
+            and joint["all_mid_rate"] >= joint["top_band_rate"]
+        ),
+        "ready_unmatched_total": joint["total_ready"],
+        "all_mid_count": joint["all_mid_count"],
+        "all_mid_rate": joint["all_mid_rate"],
+        "top_band": joint["top_band"],
+        "top_band_rate": joint["top_band_rate"],
+        "band_count": joint["band_count"],
+        "recommendation": (
+            "若 all-mid 占比显著且为最大单一 band，则 explicit Balanced 有证据；"
+            "否则倾向 ready-type=None（residual），禁止无条件 else=Balanced。本轮仅建议，不 Freeze。"
+        ),
+    }
+
+    # ---- Stage 2B-5: threshold-region evidence (research anchor only) ----
+    threshold_region: dict[str, dict] = {}
+    for cand in _IST_CANDIDATE_CLASSES:
+        rates = _per_variant_sensitivity_rates(summary["sensitivity"][cand])
+        threshold_region[cand] = {
+            var: _threshold_perturbation(vr) for var, vr in rates.items()
+        }
+
+    # ---- replay projections (kept small) ----
+    replay_fields = (
+        "scope_key",
+        "scope_name",
+        "trade_date",
+        "size_bucket",
+        "research_candidate_hit_count",
+        "research_candidate_Rotating",
+        "research_candidate_Fragmenting",
+        "leadership_migration",
+        "leadership_jaccard_stability",
+        "leadership_current_leader_fraction",
+        "leader_fraction_delta5d",
+        "concentration_price_hhi",
+        "price_hhi_delta5d",
+        "aligned_breadth",
+        "aligned_breadth_delta5d",
+        "leadership_retained_count",
+        "leadership_entrant_count",
+        "leadership_exit_count",
+        "leadership_previous_leader_count",
+        "leadership_current_leader_count",
+        "leadership_previous_retention",
+    )
+    representative_replay = {
+        "rotating_fragmenting_overlap": _replay_rows_compact(
+            overlap_replay, replay_fields
+        ),
+        "ready_unmatched": _replay_rows_compact(
+            ready_unmatched_replay,
+            (
+                "scope_key",
+                "scope_name",
+                "trade_date",
+                "size_bucket",
+                "aligned_breadth_hist_pct",
+                "price_hhi_hist_pct",
+                "migration_hist_pct",
+                "aligned_tilt_hist_pct",
+            ),
+        ),
+    }
+
+    # ---- summary assembly ----
+    summary_out = {
+        "type_mapping_commit": "TYPE-MAPPING-COMMIT2B-CANDIDATE-SELECTION-AND-CONFLICT-RESOLUTION",
+        "source_dataset": source_dataset,
+        "capture_git_sha": summary.get("capture_git_sha"),
+        "membership_semantics": summary.get("membership_semantics"),
+        "threshold_freeze_eligible": False,
+        "reference_thresholds": summary.get("reference_thresholds"),
+        "row_count": len(rows),
+        "selection_matrix": selection_matrix,
+        "rotating_fragmenting": {
+            "counts": {
+                "rotating_only": part["rotating_only_count"],
+                "fragmenting_only": part["fragmenting_only_count"],
+                "overlap": part["overlap_count"],
+                "neither": part["neither_count"],
+            },
+            "overlap_jaccard": _pairwise_overlap(
+                rows, class_keys["Rotating"], class_keys["Fragmenting"]
+            ),
+            "group_stats": rf_group_stats,
+        },
+        "fragmenting_redesign": fragmenting_redesign,
+        "unmatched": {
+            "total": strat["total_count"],
+            "all_features_ready_count": strat["all_features_ready_count"],
+            "all_features_ready_rate": strat["all_features_ready_rate"],
+            "warmup_unavailable_count": strat["warmup_unavailable_count"],
+            "warmup_unavailable_rate": strat["warmup_unavailable_rate"],
+            "joint_band": joint,
+            "balanced_hypothesis": balanced_hypothesis,
+        },
+        "threshold_region": threshold_region,
+    }
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "candidate_selection_summary.json"), "w", encoding="utf-8") as fh:
+        json.dump(summary_out, fh, ensure_ascii=False, indent=2, default=_json_default)
+    with open(os.path.join(out_dir, "representative_replay.json"), "w", encoding="utf-8") as fh:
+        json.dump(representative_replay, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    # ---- manifest (research-only markers preserved) ----
+    manifest = {
+        "dataset_id": f"review-isdtype-select-{sha12}-v1",
+        "source_dataset": source_dataset,
+        "source_candidate_id": summary.get("dataset_id"),
+        "capture_git_sha": summary.get("capture_git_sha"),
+        "membership_semantics": "current_static_research_proxy",
+        "threshold_freeze_eligible": False,
+        "commit": "TYPE-MAPPING-COMMIT2B-CANDIDATE-SELECTION-AND-CONFLICT-RESOLUTION",
+        "row_count": len(rows),
+        "overlap_replay_count": len(overlap_replay),
+        "ready_unmatched_replay_count": len(ready_unmatched_replay),
+    }
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    # ---- console summary ----
+    print(f"[internal-structure-type-selection] out_dir={out_dir}")
+    print("--- Stage 2B-1: variant selection matrix (ref) ---")
+    for cand in _IST_CANDIDATE_CLASSES:
+        print(f"[{cand}]")
+        for letter, m in selection_matrix[cand].items():
+            d = m["decision"]
+            print(
+                f"  {letter}: hit_rate={m['hit_rate']:.4f} n={m['hit_count']} "
+                f"pert={m['threshold_perturbation']['range']} "
+                f"one_day={m['one_day_only_rate']} multi={m['multi_hit_involving']} "
+                f"dom_by={m['dominated_by']} => {d['suggestion']}"
+            )
+    print("--- Stage 2B-2: Rotating vs Fragmenting partition ---")
+    for gname, cnt in summary_out["rotating_fragmenting"]["counts"].items():
+        print(f"  {gname}: {cnt}")
+    print(f"  overlap_jaccard={summary_out['rotating_fragmenting']['overlap_jaccard']['jaccard']}")
+    print("--- Stage 2B-3: Fragmenting ---")
+    print(
+        f"  ref_hits={fragmenting_redesign['reference_hits_per_variant']} "
+        f"dom={fragmenting_redesign['dominated_by']} "
+        f"overlap_reach={fragmenting_redesign['overlap_rows_reached_per_variant']} "
+        f"high_evidence={fragmenting_redesign['high_evidence_count']}"
+    )
+    print("--- Stage 2B-4: unmatched ---")
+    print(
+        f"  total={strat['total_count']} ready={strat['all_features_ready_count']} "
+        f"({strat['all_features_ready_rate']:.4f}) warmup={strat['warmup_unavailable_count']}"
+    )
+    print(
+        f"  joint all_mid_rate={joint['all_mid_rate']} top_band={joint['top_band']} "
+        f"({joint['top_band_rate']}) bands={joint['band_count']}"
+    )
+    print("--- Stage 2B-5: threshold region (research anchor) ---")
+    for cand in _IST_CANDIDATE_CLASSES:
+        tr = threshold_region[cand]
+        line = "  ".join(
+            f"{var}: {v['min']:.3f}~{v['max']:.3f}" for var, v in tr.items()
+        )
+        print(f"  [{cand}] {line}")
+    return 0
+
+
 def _run_replay_l1(
     dataset_dir: str,
     view_name: str,
@@ -7937,6 +8586,21 @@ async def _run(args: argparse.Namespace) -> int:
             )
             return 2
         return _run_internal_structure_type_candidates(
+            args.dataset_dir,
+            dry_run=args.dry_run,
+        )
+    if args.mode == "internal-structure-type-selection":
+        if not args.dataset_dir:
+            logger.error(
+                "[internal-structure-type-selection] --dataset-dir 为必填"
+            )
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[internal-structure-type-selection] 禁 --scope-type/--scope-key"
+            )
+            return 2
+        return _run_internal_structure_type_selection(
             args.dataset_dir,
             dry_run=args.dry_run,
         )

@@ -31,25 +31,37 @@ from scripts.review_scope_dynamics_probe import (
     _IST_CANDIDATE_VARIANTS,
     _IST_MAPPING_MIN_HIST_OBS,
     _IST_MAPPING_RESEARCH_COLS,
+    _IST_SELECT_JOINT_HIST_KEYS,
+    _IST_SELECT_READINESS_FEATURE_KEYS,
     _IST_THRESHOLD_GRID,
     _aligned_breadth,
     _aligned_tilt,
+    _band_classify,
     _board_to_family,
     _candidate_configs,
     _compute_aligned_features,
     _consecutive_runs,
     _delta5d,
+    _dominated_variant,
     _evaluate_candidate_variant,
     _hist_pct,
     _multi_hit_and_unmatched,
+    _numeric_group_stats,
     _pairwise_overlap,
     _percentile_sorted,
+    _pick_spread_replay,
+    _ready_unmatched_band_distribution,
     _reference_configs,
+    _rotate_fragment_partition,
     _select_replay_picks,
     _sign_direction,
     _size_bucket_for_count,
+    _spread_stability,
     _stratified_sample_boards,
     _strict_configs,
+    _threshold_perturbation,
+    _unmatched_stratification,
+    _variant_decision,
     build_internal_structure_type_row,
 )
 
@@ -851,3 +863,145 @@ def test_select_replay_picks_conflict_requires_multi_hit_flag():
     assert [x["scope_key"] for x in picks["boundary"]] == ["s2"]
     # conflict: only the row carrying the explicit multi-hit flag
     assert [x["scope_key"] for x in picks["conflict"]] == ["s1"]
+
+
+# ---------------------------------------------------------------------------
+# TYPE-MAPPING Commit 2B — candidate selection + conflict resolution helpers
+# ---------------------------------------------------------------------------
+
+
+def test_band_classify():
+    assert _band_classify(0.39) == "low"
+    assert _band_classify(0.40) == "mid"
+    assert _band_classify(0.60) == "mid"
+    assert _band_classify(0.61) == "high"
+    assert _band_classify(None) is None
+    assert _band_classify(float("nan")) is None
+
+
+def test_threshold_perturbation():
+    out = _threshold_perturbation([0.10, 0.12, 0.30])
+    assert out["min"] == pytest.approx(0.10)
+    assert out["max"] == pytest.approx(0.30)
+    assert out["range"] == pytest.approx(0.20)
+    assert out["count"] == 3
+    assert _threshold_perturbation([])["count"] == 0
+
+
+def test_spread_stability():
+    out = _spread_stability({"a": 0.05, "b": 0.10, "c": 0.15})
+    assert out["spread"] == pytest.approx(0.10)
+    assert out["max"] == pytest.approx(0.15)
+    assert out["min"] == pytest.approx(0.05)
+    # constant group -> cv 0
+    out2 = _spread_stability({"a": 0.1, "b": 0.1})
+    assert out2["spread"] == pytest.approx(0.0)
+    assert out2["cv"] == pytest.approx(0.0)
+
+
+def test_dominated_variant():
+    rows = [
+        {"scope_key": "s1", "trade_date": "2026-08-17", "vA": True, "vB": True, "vC": True},
+        {"scope_key": "s2", "trade_date": "2026-08-17", "vA": True, "vB": True, "vC": False},
+        {"scope_key": "s3", "trade_date": "2026-08-17", "vA": True, "vB": False, "vC": False},
+        {"scope_key": "s4", "trade_date": "2026-08-17", "vA": False, "vB": False, "vC": False},
+    ]
+    dom = _dominated_variant(rows, ("vA", "vB", "vC"))
+    # strict superset chain: vC={s1} < vB={s1,s2} < vA={s1,s2,s3}
+    # first strict superset in key order wins: vC->vA, vB->vA
+    assert dom["vC"] == "vA"
+    assert dom["vB"] == "vA"
+    assert dom["vA"] is None
+
+
+def test_variant_decision():
+    # zero hits -> NEEDS_REDESIGN
+    assert _variant_decision({"hit_count": 0, "hit_rate": 0.0})["suggestion"] == "NEEDS_REDESIGN"
+    # dominated -> REJECT regardless of good metrics
+    d = _variant_decision(
+        {"hit_count": 100, "hit_rate": 0.2, "dominated_by": "A",
+         "one_day_only_rate": 0.5, "median_run": 3}
+    )
+    assert d["suggestion"] == "REJECT"
+    # too rare -> NEEDS_REDESIGN
+    d2 = _variant_decision(
+        {"hit_count": 3, "hit_rate": 0.006, "one_day_only_rate": 0.9, "median_run": 2}
+    )
+    assert d2["suggestion"] == "NEEDS_REDESIGN"
+    # healthy -> KEEP
+    d3 = _variant_decision(
+        {"hit_count": 500, "hit_rate": 0.10, "one_day_only_rate": 0.5, "median_run": 4}
+    )
+    assert d3["suggestion"] == "KEEP"
+
+
+def test_rotate_fragment_partition():
+    rows = [
+        {"scope_key": "s1", "trade_date": "2026-08-17", "R": True, "F": False},
+        {"scope_key": "s2", "trade_date": "2026-08-17", "R": False, "F": True},
+        {"scope_key": "s3", "trade_date": "2026-08-17", "R": True, "F": True},
+        {"scope_key": "s4", "trade_date": "2026-08-17", "R": False, "F": False},
+        {"scope_key": "s5", "trade_date": "2026-08-17", "R": True, "F": True},
+    ]
+    part = _rotate_fragment_partition(rows, "R", "F")
+    assert part["rotating_only_count"] == 1
+    assert part["fragmenting_only_count"] == 1
+    assert part["overlap_count"] == 2
+    assert part["neither_count"] == 1
+    assert all(bool(r["R"]) and bool(r["F"]) for r in part["overlap"])
+
+
+def test_numeric_group_stats():
+    rows = [
+        {"v": 1.0}, {"v": 2.0}, {"v": 3.0}, {"v": None}, {"v": 4.0},
+    ]
+    out = _numeric_group_stats(rows, "v")
+    assert out["count"] == 4
+    assert out["mean"] == pytest.approx(2.5)
+    assert out["median"] == pytest.approx(2.5)
+    assert out["min"] == pytest.approx(1.0)
+    assert out["max"] == pytest.approx(4.0)
+    assert _numeric_group_stats([{"v": None}], "v")["count"] == 0
+
+
+def test_unmatched_stratification():
+    keys = ("a", "b")
+    rows = [
+        {"a": 0.5, "b": 0.5},     # ready
+        {"a": 0.5, "b": None},    # warmup/unavailable
+        {"a": None, "b": 0.5},    # warmup/unavailable
+        {"a": 0.3, "b": 0.7},     # ready
+    ]
+    out = _unmatched_stratification(rows, keys)
+    assert out["all_features_ready_count"] == 2
+    assert out["warmup_unavailable_count"] == 2
+    assert out["all_features_ready_rate"] == pytest.approx(0.5)
+
+
+def test_ready_unmatched_band_distribution():
+    keys = ("b", "h", "m", "t")
+    rows = [
+        {"b": 0.5, "h": 0.5, "m": 0.5, "t": 0.5},  # all mid
+        {"b": 0.5, "h": 0.5, "m": 0.5, "t": 0.5},  # all mid
+        {"b": 0.1, "h": 0.9, "m": 0.2, "t": 0.8},  # mixed
+        {"b": None, "h": 0.5, "m": 0.5, "t": 0.5},  # skipped (None)
+    ]
+    out = _ready_unmatched_band_distribution(rows, keys)
+    assert out["total_ready"] == 3
+    assert out["all_mid_count"] == 2
+    assert out["all_mid_rate"] == pytest.approx(2 / 3)
+    assert out["top_band"] == "mid-mid-mid-mid"
+    assert out["band_count"] == 2
+
+
+def test_pick_spread_replay_across_scopes():
+    rows = []
+    for sk in ("z-scope", "a-scope"):
+        for i in range(6):
+            rows.append({"scope_key": sk, "trade_date": f"2026-08-{i+1:02d}"})
+    picked = _pick_spread_replay(rows, 5)
+    assert len(picked) == 5
+    scopes = {p["scope_key"] for p in picked}
+    assert scopes == {"z-scope", "a-scope"}  # spread across scopes
+    assert _pick_spread_replay([], 5) == []
+
