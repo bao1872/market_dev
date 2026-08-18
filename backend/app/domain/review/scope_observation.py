@@ -828,12 +828,16 @@ def compute_scope_observation(
         if not t1_membership_available
         else (set(pit_member_ids_t1) if pit_member_ids_t1 is not None else set())
     )
-    # ROUND-2.2B: valid_event_members = PIT(T) ∩ coverage.  None -> unavailable.
-    valid_event_members = (
-        None
-        if event_coverage_member_ids is None
-        else (pit_set & set(event_coverage_member_ids))
-    )
+    # ROUND-2.2B AUDIT FIX (F2): valid_event_members = PIT(T) ∩ coverage.
+    # ``None`` (coverage source unavailable), an EMPTY coverage set, or a coverage
+    # that is entirely OUTSIDE PIT (intersection == ∅) all collapse to ``None`` so
+    # the Core never emits a fake ``ready / denominator=0``.  A non-empty
+    # intersection (even if small) is a real coverage universe -> status=ready.
+    if event_coverage_member_ids is None:
+        valid_event_members = None
+    else:
+        covered = pit_set & set(event_coverage_member_ids)
+        valid_event_members = covered if covered else None
     _reject_if_invalid_members(member_list, pit_set)
 
     # PRICE universe — PIT(T) ∩ price candidate(T) ∩ finite exact-T1 return.

@@ -1002,6 +1002,13 @@ async def _load_backfill_event_coverage_member_ids(
         .distinct()
     )
     rows = (await session.execute(stmt)).scalars().all()
+    # ROUND-2.2B AUDIT FIX (F1): 0 coverage rows == NO trusted canonical-backfill
+    # coverage source -> return ``None`` (unavailable), NOT an empty frozenset.
+    # An empty set would be misread by the Core as "valid empty coverage" and
+    # produce a fake ``ready / denominator=0``.  ``None`` -> structure-events
+    # unavailable / denominator=None.  This keeps per-date consistent with batch.
+    if not rows:
+        return None
     return frozenset(uuid.UUID(str(i)) for i in rows)
 
 

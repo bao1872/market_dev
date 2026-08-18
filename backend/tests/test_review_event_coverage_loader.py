@@ -78,11 +78,12 @@ def test_loader_member_valid_included() -> None:
     assert cov == frozenset({INSTR_A})
 
 
-def test_loader_no_match_empty_frozenset() -> None:
-    """K-02: no matching row -> empty frozenset (valid but empty coverage)."""
+def test_loader_no_match_returns_none() -> None:
+    """K-02 (AUDIT-FIX F1): no matching row -> None (coverage source unavailable),
+    NOT an empty frozenset (which would be misread as valid empty coverage)."""
     cov = asyncio.run(_load_backfill_event_coverage_member_ids(
         _FakeSession([]), [INSTR_A], T))
-    assert cov == frozenset()
+    assert cov is None
 
 
 def test_loader_no_instruments_returns_none() -> None:
@@ -117,6 +118,30 @@ def test_batch_missing_date_no_entry() -> None:
     batch = asyncio.run(_load_batch_backfill_event_coverage(
         _FakeSession([(T, INSTR_A)]), [INSTR_A, INSTR_B], [T]))
     assert batch[T] == frozenset({INSTR_A})
+
+
+def test_zero_match_negative_parity_perdate_none_eq_batch_none() -> None:
+    """L-03 (AUDIT-FIX F2/F4): 0 coverage rows -> per-date None == batch.get(T) None.
+
+    This is the exact boundary that previously drifted: per-date returned an empty
+    frozenset (ready/denom=0) while batch returned None (unavailable).  Both must
+    now agree on ``None`` (source unavailable), so the Core emits unavailable /
+    denominator=None, never a fake ready/denominator=0.
+    """
+    per_date = asyncio.run(_load_backfill_event_coverage_member_ids(
+        _FakeSession([]), [INSTR_A], T))
+    batch = asyncio.run(_load_batch_backfill_event_coverage(
+        _FakeSession([]), [INSTR_A], [T]))
+    assert per_date is None
+    assert batch.get(T) is None
+    assert (per_date is None) == (batch.get(T) is None)
+
+
+def test_batch_zero_rows_all_dates_absent() -> None:
+    """L-04: batch with no coverage rows at all -> no entries (all dates unavailable)."""
+    batch = asyncio.run(_load_batch_backfill_event_coverage(
+        _FakeSession([]), [INSTR_A, INSTR_B], [T, date(2026, 8, 11)]))
+    assert batch == {}
 
 
 # ---------------------------------------------------------------------------

@@ -138,15 +138,37 @@ def test_evt_cov_07_duplicate_raw_events() -> None:
     assert cell["member_count"] == 1  # dedupe by member
 
 
-def test_evt_cov_denominator_zero_but_ready_empty() -> None:
-    """Coverage valid but EMPTY (frozenset()) -> ready, denominator=0, empty cells.
+def test_evt_cov_empty_effective_coverage_unavailable() -> None:
+    """AUDIT-FIX F2/F3: EMPTY coverage set -> effective universe is None -> unavailable.
 
-    A legal empty-coverage day is still a real (zero-denominator) coverage result —
-    not "unavailable".  This is distinct from ``None`` (source unavailable).
+    An empty coverage set (or coverage entirely outside PIT) has NO valid event
+    universe, so the Core must emit ``status=unavailable`` / ``denominator=None`` —
+    NEVER a fake ``ready / denominator=0``.  This is the three-state correction:
+    None / empty effective universe -> unavailable.
     """
     pit = ["m0", "m1"]
     out = _events(_obs(pit, [], [_evt("m0", "BOS")]))
-    # Empty coverage -> valid_event_members = PIT∩{} = empty set (not None).
-    assert out["status"] == "ready"
-    assert out["denominator"] == 0
+    assert out["status"] == "unavailable"
+    assert out["denominator"] is None
     assert out["cells"] == {"leveled": {}, "extreme": {}}
+
+
+def test_evt_cov_coverage_outside_pit_all_unavailable() -> None:
+    """AUDIT-FIX F2/F3: coverage entirely OUTSIDE PIT -> PIT∩coverage = ∅ -> unavailable."""
+    pit = ["m0", "m1"]
+    out = _events(_obs(pit, ["m99", "m100"], [_evt("m99", "BOS")]))
+    assert out["status"] == "unavailable"
+    assert out["denominator"] is None
+    assert out["cells"] == {"leveled": {}, "extreme": {}}
+
+
+def test_evt_cov_coverage_partial_overlap_keeps_ready() -> None:
+    """Guard: coverage with SOME PIT overlap -> non-empty intersection -> ready."""
+    pit = [f"m{i}" for i in range(10)]
+    coverage = pit[:5] + ["m99", "m100"]  # 5 PIT + 2 outsiders
+    ev = [_evt("m0", "BOS")]
+    out = _events(_obs(pit, coverage, ev))
+    assert out["status"] == "ready"
+    assert out["denominator"] == 5  # PIT ∩ coverage = first 5 PIT members
+    cell = out["cells"]["leveled"]["BOS_Up_Swing"]
+    assert cell["member_count"] == 1
