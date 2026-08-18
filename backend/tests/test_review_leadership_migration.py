@@ -206,7 +206,7 @@ def test_full_stable() -> None:
     prev = _snap_from_ids("2026-01-04", ("a", "b", "c"))
     curr = _snap_from_ids("2026-01-05", ("a", "b", "c"))
     facts = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert facts.status == "ready"
     assert facts.jaccard_stability == pytest.approx(1.0)
@@ -221,7 +221,7 @@ def test_full_replacement() -> None:
     prev = _snap_from_ids("2026-01-04", ("a",))
     curr = _snap_from_ids("2026-01-05", ("z",))
     facts = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert facts.status == "ready"
     assert facts.jaccard_stability == pytest.approx(0.0)
@@ -236,7 +236,7 @@ def test_partial_overlap() -> None:
     prev = _snap_from_ids("2026-01-04", ("a", "b", "c"))
     curr = _snap_from_ids("2026-01-05", ("a", "b", "d"))
     facts = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert facts.status == "ready"
     assert facts.retained_count == 2
@@ -252,7 +252,7 @@ def test_leader_set_expansion() -> None:
     prev = _snap_from_ids("2026-01-04", ("a", "b"))
     curr = _snap_from_ids("2026-01-05", ("a", "b", "c", "d", "e", "f"))
     facts = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert facts.status == "ready"
     assert facts.previous_leader_count == 2
@@ -267,7 +267,7 @@ def test_leader_set_contraction() -> None:
     prev = _snap_from_ids("2026-01-04", ("a", "b", "c"))
     curr = _snap_from_ids("2026-01-05", ("a",))
     facts = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert facts.status == "ready"
     assert facts.jaccard_stability == pytest.approx(1 / 3)
@@ -276,39 +276,66 @@ def test_leader_set_contraction() -> None:
 
 
 def test_previous_snapshot_unavailable() -> None:
+    # prev unavailable (EW None), curr ready.  prev side -> None (not 0);
+    # curr ready side -> real evidence preserved.
     prev = _snap("2026-01-04", None, [_m("a", return_1d=0.02, amount=100.0)])
     curr = _snap("2026-01-05", 0.03, [_m("a", return_1d=0.02, amount=100.0)])
     facts = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert facts.status == "unavailable"
     assert facts.reason == "unavailable_snapshot"
     assert facts.migration is None
     assert facts.jaccard_stability is None
+    # prev side unknown -> None (NOT 0); curr ready side preserved.
+    assert facts.previous_leader_count is None
+    assert facts.previous_leader_ids is None
+    assert facts.current_leader_count == 1
+    assert facts.current_leader_ids == ("a",)
+    assert facts.retained_count is None
+    assert facts.entrant_count is None
+    assert facts.exit_count is None
 
 
 def test_current_snapshot_unavailable() -> None:
+    # prev ready, curr unavailable (EW 0).  prev preserved, curr -> None.
     prev = _snap("2026-01-04", 0.03, [_m("a", return_1d=0.02, amount=100.0)])
     curr = _snap("2026-01-05", 0.0, [_m("a", return_1d=0.02, amount=100.0)])
     facts = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert facts.status == "unavailable"
     assert facts.reason == "unavailable_snapshot"
+    assert facts.previous_leader_count == 1
+    assert facts.previous_leader_ids == ("a",)
+    assert facts.current_leader_count is None
+    assert facts.current_leader_ids is None
+    assert facts.migration is None
 
 
 def test_empty_leader_set_transition_unavailable() -> None:
-    # prev valid-empty (no aligned>0), curr normal.  Fail-closed unavailable.
+    # prev valid-empty (no aligned>0), curr normal.  Fail-closed migration, but
+    # snapshot counts/ids keep real values and set-difference is reported.
     prev = _snap("2026-01-04", -0.03, [_m("b", return_1d=0.05, amount=100.0)])
     curr = _snap("2026-01-05", 0.03, [_m("a", return_1d=0.02, amount=100.0)])
     assert prev.status == "ready"
     assert prev.leader_set == ()           # valid empty, NOT None
     facts = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert facts.status == "unavailable"
     assert facts.reason == "empty_leader_set"
     assert facts.migration is None
+    assert facts.jaccard_stability is None
+    # Snapshot facts are real: prev 0 (legitimate empty), curr 1.
+    assert facts.previous_leader_count == 0
+    assert facts.current_leader_count == 1
+    assert facts.current_leader_ids == ("a",)
+    # Set difference is transparent: prev empty -> 0 retained, 1 entrant, 0 exit.
+    assert facts.retained_count == 0
+    assert facts.entrant_count == 1
+    assert facts.exit_count == 0
+    assert facts.entrant_ids == ("a",)
 
 
 def test_deterministic_repeat() -> None:
@@ -319,10 +346,10 @@ def test_deterministic_repeat() -> None:
     snap2 = _snap("2026-01-05", 0.04, members)
     assert snap1.leader_ids == snap2.leader_ids
     facts1 = compute_leadership_migration(
-        previous_snapshot=snap1, current_snapshot=snap2, trade_date="2026-01-05"
+        previous_snapshot=snap1, current_snapshot=snap2
     )
     facts2 = compute_leadership_migration(
-        previous_snapshot=snap1, current_snapshot=snap2, trade_date="2026-01-05"
+        previous_snapshot=snap1, current_snapshot=snap2
     )
     assert facts1 == facts2
 
@@ -335,18 +362,56 @@ def test_future_leak_zero() -> None:
     curr = _snap("2026-01-05", 0.03, [_m("a", return_1d=0.05, amount=50.0),
                                       _m("c", return_1d=0.04, amount=50.0)])
     before = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     # A "T+1" snapshot (next day) must not affect the T-1/T comparison.
     future = _snap("2026-01-06", 0.03, [_m("z", return_1d=0.09, amount=100.0)])
     _ = compute_leadership_migration(
-        previous_snapshot=curr, current_snapshot=future, trade_date="2026-01-06"
+        previous_snapshot=curr, current_snapshot=future
     )
     after = compute_leadership_migration(
-        previous_snapshot=prev, current_snapshot=curr, trade_date="2026-01-05"
+        previous_snapshot=prev, current_snapshot=curr
     )
     assert before == after
 
 
 def test_coverage_constant_is_050() -> None:
     assert LEADERSHIP_COVERAGE == 0.50
+
+
+# ---------------------------------------------------------------------------
+# A1 — frozen-parameter boundary + date ownership (PRD §7.10)
+# ---------------------------------------------------------------------------
+
+
+def test_production_coverage_not_overridable_and_always_050() -> None:
+    # build_leadership_snapshot / compute_leadership_migration must NOT accept a
+    # coverage override; the output coverage is always LEADERSHIP_COVERAGE (0.50).
+    import inspect
+
+    assert "coverage" not in inspect.signature(build_leadership_snapshot).parameters
+    assert "coverage" not in inspect.signature(compute_leadership_migration).parameters
+
+    prev = _snap("2026-01-04", 0.03, [_m("a", return_1d=0.05, amount=50.0),
+                                      _m("b", return_1d=0.04, amount=50.0)])
+    curr = _snap("2026-01-05", 0.03, [_m("a", return_1d=0.05, amount=50.0),
+                                      _m("c", return_1d=0.04, amount=50.0)])
+    facts = compute_leadership_migration(
+        previous_snapshot=prev, current_snapshot=curr
+    )
+    assert facts.coverage == LEADERSHIP_COVERAGE == 0.50
+
+
+def test_migration_trade_date_comes_from_current_snapshot() -> None:
+    # The output trade_date is the SINGLE owner current_snapshot.trade_date; no
+    # separate date argument exists on the migration API.
+    import inspect
+
+    assert "trade_date" not in inspect.signature(compute_leadership_migration).parameters
+
+    prev = _snap_from_ids("2026-01-04", ("a", "b"))
+    curr = _snap_from_ids("2026-01-09", ("a", "c"))  # current is 01-09
+    facts = compute_leadership_migration(
+        previous_snapshot=prev, current_snapshot=curr
+    )
+    assert facts.trade_date == "2026-01-09"

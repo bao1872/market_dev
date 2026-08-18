@@ -114,21 +114,24 @@ class LeadershipMigrationFacts:
     previous_rankable_count: int
     current_rankable_count: int
 
-    previous_leader_count: int
-    current_leader_count: int
+    # Snapshot-level leader counts / ids: an unknown (unavailable) side is None,
+    # never 0; a known side (ready, possibly a legitimately-empty leader set) is a
+    # concrete int / tuple.
+    previous_leader_count: int | None
+    current_leader_count: int | None
 
-    retained_count: int
-    entrant_count: int
-    exit_count: int
+    retained_count: int | None
+    entrant_count: int | None
+    exit_count: int | None
 
     previous_retention: float | None
     jaccard_stability: float | None
     migration: float | None
 
-    previous_leader_ids: tuple[str, ...]
-    current_leader_ids: tuple[str, ...]
-    entrant_ids: tuple[str, ...]
-    exit_ids: tuple[str, ...]
+    previous_leader_ids: tuple[str, ...] | None
+    current_leader_ids: tuple[str, ...] | None
+    entrant_ids: tuple[str, ...] | None
+    exit_ids: tuple[str, ...] | None
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +208,16 @@ def build_leadership_snapshot(
     trade_date: str,
     ew_return: float | None,
     contribution_facts: LeadershipContributionFacts,
-    coverage: float = LEADERSHIP_COVERAGE,
 ) -> LeadershipSnapshot:
     """Build one trade-date Leadership Snapshot (Layer-1).
 
     Consumes the CANONICAL ``equal_weight_return`` (scope direction) and the
     ALREADY-computed ``LeadershipContributionFacts``.  Does NOT re-compute
     amount_share or contribution, and does NOT re-derive EW from member returns.
+
+    The frozen ``LEADERSHIP_COVERAGE = 0.50`` is used internally — the production
+    API does NOT expose a coverage override (40/50/60 belongs to the research
+    probe only).
     """
     direction, reason, status = _direction_from_ew(ew_return)
     if status == "unavailable":
@@ -225,7 +231,7 @@ def build_leadership_snapshot(
         )
     assert direction is not None
     aligned = _aligned_ranking(contribution_facts, direction)
-    leader_set = _minimal_prefix_leader_set(aligned, coverage)
+    leader_set = _minimal_prefix_leader_set(aligned, LEADERSHIP_COVERAGE)
     return LeadershipSnapshot(
         trade_date=trade_date,
         status="ready",
@@ -245,84 +251,106 @@ def compute_leadership_migration(
     *,
     previous_snapshot: LeadershipSnapshot,
     current_snapshot: LeadershipSnapshot,
-    trade_date: str,
-    coverage: float = LEADERSHIP_COVERAGE,
 ) -> LeadershipMigrationFacts:
     """Compare two leadership snapshots (T-1 vs T) into migration facts (Layer-2).
 
     Only compares the two prepared snapshots — it does NOT touch MemberObservation,
-    amount_share, contribution, or the scope direction.  Any unavailable snapshot,
-    or any legitimately-empty leader set on either side, yields an unavailable
-    migration (fail-closed); it never treats empty as stable or as 100% migration.
+    amount_share, contribution, or the scope direction.  The output ``trade_date``
+    is taken uniquely from ``current_snapshot.trade_date`` (single owner), and
+    ``coverage`` is always the frozen ``LEADERSHIP_COVERAGE`` (no override).
+
+    Availability semantics (unavailable != 0, unknown != legitimate empty):
+
+      - Either snapshot unavailable -> status=unavailable(unavailable_snapshot);
+        the UNAVAILABLE side's leader_count/ids are None, the READY side's real
+        evidence is preserved; transition-derived facts (retained/entrant/exit,
+        retention/jaccard/migration) are all None (never zero-filled).
+      - Both ready but either leader set legitimately empty -> status=unavailable(
+        empty_leader_set); snapshot counts/ids keep their real 0/() values; the
+        set-difference (retained/entrant/exit) may be reported but
+        retention/jaccard/migration remain None (fail-closed).
     """
-    # Transition availability.
-    if previous_snapshot.status == "unavailable" or current_snapshot.status == "unavailable":
+    prev = previous_snapshot
+    curr = current_snapshot
+
+    def _side_counts(snap: LeadershipSnapshot) -> tuple[int | None, tuple[str, ...] | None]:
+        """leader_count/leader_ids for one snapshot; None for unavailable side."""
+        if snap.status == "unavailable":
+            return None, None
+        return len(snap.leader_ids), snap.leader_ids
+
+    prev_count, prev_ids = _side_counts(prev)
+    curr_count, curr_ids = _side_counts(curr)
+
+    if prev.status == "unavailable" or curr.status == "unavailable":
         return LeadershipMigrationFacts(
-            trade_date=trade_date,
+            trade_date=curr.trade_date,
             status="unavailable",
             reason="unavailable_snapshot",
-            coverage=coverage,
-            previous_direction=previous_snapshot.direction,
-            current_direction=current_snapshot.direction,
-            previous_rankable_count=previous_snapshot.rankable_count,
-            current_rankable_count=current_snapshot.rankable_count,
-            previous_leader_count=0,
-            current_leader_count=0,
-            retained_count=0,
-            entrant_count=0,
-            exit_count=0,
+            coverage=LEADERSHIP_COVERAGE,
+            previous_direction=prev.direction,
+            current_direction=curr.direction,
+            previous_rankable_count=prev.rankable_count,
+            current_rankable_count=curr.rankable_count,
+            previous_leader_count=prev_count,
+            current_leader_count=curr_count,
+            retained_count=None,
+            entrant_count=None,
+            exit_count=None,
             previous_retention=None,
             jaccard_stability=None,
             migration=None,
-            previous_leader_ids=(),
-            current_leader_ids=(),
-            entrant_ids=(),
-            exit_ids=(),
+            previous_leader_ids=prev_ids,
+            current_leader_ids=curr_ids,
+            entrant_ids=None,
+            exit_ids=None,
         )
 
-    prev_ids = set(previous_snapshot.leader_ids)
-    curr_ids = set(current_snapshot.leader_ids)
+    prev_set = set(prev.leader_ids)
+    curr_set = set(curr.leader_ids)
 
-    # Legitimate empty leader set on either side -> fail-closed unavailable.
-    if not prev_ids or not curr_ids:
+    # Both ready; report real set-difference even if a side is empty.
+    retained = prev_set & curr_set
+    entrants = curr_set - prev_set
+    exits = prev_set - curr_set
+
+    # Legitimate empty leader set on either side -> Migration metrics fail-closed.
+    if not prev_set or not curr_set:
         return LeadershipMigrationFacts(
-            trade_date=trade_date,
+            trade_date=curr.trade_date,
             status="unavailable",
             reason="empty_leader_set",
-            coverage=coverage,
-            previous_direction=previous_snapshot.direction,
-            current_direction=current_snapshot.direction,
-            previous_rankable_count=previous_snapshot.rankable_count,
-            current_rankable_count=current_snapshot.rankable_count,
-            previous_leader_count=len(prev_ids),
-            current_leader_count=len(curr_ids),
-            retained_count=0,
-            entrant_count=0,
-            exit_count=0,
+            coverage=LEADERSHIP_COVERAGE,
+            previous_direction=prev.direction,
+            current_direction=curr.direction,
+            previous_rankable_count=prev.rankable_count,
+            current_rankable_count=curr.rankable_count,
+            previous_leader_count=len(prev.leader_ids),
+            current_leader_count=len(curr.leader_ids),
+            retained_count=len(retained),
+            entrant_count=len(entrants),
+            exit_count=len(exits),
             previous_retention=None,
             jaccard_stability=None,
             migration=None,
-            previous_leader_ids=previous_snapshot.leader_ids,
-            current_leader_ids=current_snapshot.leader_ids,
-            entrant_ids=(),
-            exit_ids=(),
+            previous_leader_ids=prev.leader_ids,
+            current_leader_ids=curr.leader_ids,
+            entrant_ids=tuple(sorted(entrants)),
+            exit_ids=tuple(sorted(exits)),
         )
 
-    retained = prev_ids & curr_ids
-    entrants = curr_ids - prev_ids
-    exits = prev_ids - curr_ids
-    union = prev_ids | curr_ids
+    union = prev_set | curr_set
 
     jaccard = len(retained) / len(union) if union else None
-    retention = len(retained) / len(prev_ids) if prev_ids else None
+    retention = len(retained) / len(prev_set) if prev_set else None
     migration = 1.0 - jaccard if jaccard is not None else None
 
     return LeadershipMigrationFacts(
-        trade_date=trade_date,
+        trade_date=curr.trade_date,
         status="ready",
         reason=None,
-        coverage=coverage,
-        previous_direction=previous_snapshot.direction,
+        coverage=LEADERSHIP_COVERAGE,
+        previous_direction=prev.direction,
         current_direction=current_snapshot.direction,
         previous_rankable_count=previous_snapshot.rankable_count,
         current_rankable_count=current_snapshot.rankable_count,
