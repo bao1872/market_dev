@@ -23,14 +23,33 @@ from app.domain.review.analysis.leadership_migration import (
     LeadershipMigrationFacts,
 )
 from scripts.review_scope_dynamics_probe import (
+    _IST_CANDIDATE_BOOL_COLS,
+    _IST_CANDIDATE_CLASSES,
+    _IST_CANDIDATE_FLOAT_COLS,
+    _IST_CANDIDATE_INT_COLS,
+    _IST_CANDIDATE_STR_COLS,
+    _IST_CANDIDATE_VARIANTS,
     _IST_MAPPING_MIN_HIST_OBS,
     _IST_MAPPING_RESEARCH_COLS,
+    _IST_THRESHOLD_GRID,
+    _aligned_breadth,
+    _aligned_tilt,
     _board_to_family,
+    _candidate_configs,
+    _compute_aligned_features,
+    _consecutive_runs,
     _delta5d,
+    _evaluate_candidate_variant,
     _hist_pct,
+    _multi_hit_and_unmatched,
+    _pairwise_overlap,
     _percentile_sorted,
+    _reference_configs,
+    _select_replay_picks,
+    _sign_direction,
     _size_bucket_for_count,
     _stratified_sample_boards,
+    _strict_configs,
     build_internal_structure_type_row,
 )
 
@@ -611,3 +630,224 @@ def test_row_research_cols_and_no_cs_pct():
     assert "advance_ratio_hist_pct" in row and "decline_ratio_hist_pct" in row
     assert "advance_ratio_delta5d" in row and "decline_ratio_delta5d" in row
     assert not any("cs_pct" in k for k in row)
+
+
+# ---------------------------------------------------------------------------
+# TYPE-MAPPING Commit 2 — direction-neutral features + candidate engine
+# ---------------------------------------------------------------------------
+
+
+def _mk_scope_row(ew, adv, dec, tilt=0.1, frac=0.5) -> dict:
+    """Minimal mapping-style row consumed by ``_compute_aligned_features``."""
+    return {
+        "breadth_ew_return": ew,
+        "breadth_advance_ratio": adv,
+        "breadth_decline_ratio": dec,
+        "capital_tilt": tilt,
+        "leadership_current_leader_fraction": frac,
+    }
+
+
+def _mk_scope(ew_series, adv_series, dec_series, tilt=None, frac=None) -> list[dict]:
+    n = len(ew_series)
+    tilt = tilt if tilt is not None else [0.1] * n
+    frac = frac if frac is not None else [0.5] * n
+    return [
+        _mk_scope_row(ew_series[i], adv_series[i], dec_series[i], tilt[i], frac[i])
+        for i in range(n)
+    ]
+
+
+def test_sign_direction():
+    assert _sign_direction(0.5) == 1
+    assert _sign_direction(-0.5) == -1
+    assert _sign_direction(0) is None
+    assert _sign_direction(None) is None
+    assert _sign_direction(float("nan")) is None
+    assert _sign_direction(float("inf")) is None
+
+
+def test_aligned_breadth_direction():
+    # up day -> advance ratio; down day -> decline ratio
+    assert _aligned_breadth(0.01, 0.6, 0.3) == pytest.approx(0.6)
+    assert _aligned_breadth(-0.01, 0.6, 0.3) == pytest.approx(0.3)
+    # zero / missing EW -> aligned unavailable (direction-neutral guard)
+    assert _aligned_breadth(0.0, 0.6, 0.3) is None
+    assert _aligned_breadth(None, 0.6, 0.3) is None
+    # source None stays None
+    assert _aligned_breadth(0.01, None, 0.3) is None
+
+
+def test_aligned_tilt_sign():
+    assert _aligned_tilt(0.1, 0.02) == pytest.approx(0.1)
+    assert _aligned_tilt(0.1, -0.02) == pytest.approx(-0.1)
+    assert _aligned_tilt(None, 0.02) is None
+    assert _aligned_tilt(0.1, 0.0) is None
+    assert _aligned_tilt(0.1, None) is None
+
+
+def test_compute_aligned_features_length_and_direction():
+    rows = _mk_scope(
+        [0.01] * 25, [0.6] * 25, [0.3] * 25, tilt=[0.1] * 25
+    )
+    aligned = _compute_aligned_features(rows)
+    assert len(aligned) == 25
+    assert aligned[0]["aligned_breadth"] == pytest.approx(0.6)
+    assert aligned[0]["aligned_tilt"] == pytest.approx(0.1)
+    # every hist_pct is a prefix-only ECDF value in [0, 1]
+    for a in aligned:
+        assert a["aligned_breadth_hist_pct"] is None or 0.0 <= a["aligned_breadth_hist_pct"] <= 1.0
+        assert a["aligned_tilt_hist_pct"] is None or 0.0 <= a["aligned_tilt_hist_pct"] <= 1.0
+
+
+def test_compute_aligned_features_zero_ew_unavailable():
+    rows = _mk_scope([0.01] * 24 + [0.0], [0.6] * 25, [0.3] * 25)
+    aligned = _compute_aligned_features(rows)
+    assert aligned[-1]["aligned_breadth"] is None
+    assert aligned[-1]["aligned_tilt"] is None
+
+
+def test_aligned_hist_pct_no_future_leak():
+    """hist_pct at index i must not depend on values at index > i (prefix-only)."""
+    # First 20 up-day observations identical; divergence only at index 20.
+    adv_a = [0.5] * 20 + [0.9] + [0.5] * 4
+    adv_b = [0.5] * 20 + [0.1] + [0.5] * 4
+    fa = _compute_aligned_features(_mk_scope([0.01] * 25, adv_a, [0.3] * 25))
+    fb = _compute_aligned_features(_mk_scope([0.01] * 25, adv_b, [0.3] * 25))
+    # index 19: 20-obs prefix is identical in both -> identical hist_pct/delta5d
+    assert fa[19]["aligned_breadth_hist_pct"] == fb[19]["aligned_breadth_hist_pct"]
+    assert fa[19]["aligned_breadth_delta5d"] == fb[19]["aligned_breadth_delta5d"]
+    # index 20: the divergent value is now inside the prefix -> must differ
+    assert fa[20]["aligned_breadth_hist_pct"] != fb[20]["aligned_breadth_hist_pct"]
+    assert fa[20]["aligned_breadth_delta5d"] != fb[20]["aligned_breadth_delta5d"]
+
+
+def test_evaluate_candidate_variant():
+    feats = {"a": 0.9, "b": 0.1, "c": None}
+    assert _evaluate_candidate_variant(feats, (("a", ">=", 0.8),), {"HIGH": 0.8})
+    assert not _evaluate_candidate_variant(feats, (("a", ">=", 0.95),), {"HIGH": 0.95})
+    assert not _evaluate_candidate_variant(feats, (("a", ">=", 0.8), ("b", "<=", 0.05)), {"HIGH": 0.8})
+    # None feature -> condition not met (fail-closed), never a hit
+    assert not _evaluate_candidate_variant(feats, (("c", ">=", 0.0),), {})
+    # unknown feature / unsupported op -> hard error
+    with pytest.raises(KeyError):
+        _evaluate_candidate_variant(feats, (("zz", ">=", 0.0),), {})
+    with pytest.raises(ValueError):
+        _evaluate_candidate_variant(feats, (("a", "==", 0.9),), {})
+
+
+def test_candidate_configs_four_classes_no_balanced_and_deterministic():
+    c1 = _candidate_configs()
+    c2 = _candidate_configs()
+    assert c1 == c2  # deterministic
+    classes = {c["candidate"] for c in c1}
+    assert classes == set(_IST_CANDIDATE_CLASSES)
+    assert "Balanced" not in classes
+    # every config threshold slot comes from the grid
+    for c in c1:
+        assert all(v in _IST_THRESHOLD_GRID[s] for s, v in c["thresholds"].items())
+    # every variant from the table appears (sweep covers all slots)
+    variant_labels = {c["variant"] for c in c1}
+    assert variant_labels == {"A", "B", "C"}
+
+
+def test_reference_and_strict_configs_use_fixed_sets():
+    refs = _reference_configs()
+    strict = _strict_configs()
+    assert len(refs) == len(_IST_CANDIDATE_VARIANTS) == len(strict)
+    for c in refs:
+        assert set(c["thresholds"]) == {"HIGH", "LOW", "MID"}
+    # strict thresholds are the tightest end of the grid (no freeze decision)
+    assert strict[0]["thresholds"]["HIGH"] == 0.90
+    assert strict[0]["thresholds"]["LOW"] == 0.10
+
+
+def test_no_formal_internal_structure_type_fields():
+    cols = (
+        _IST_CANDIDATE_STR_COLS
+        + _IST_CANDIDATE_INT_COLS
+        + _IST_CANDIDATE_BOOL_COLS
+        + _IST_CANDIDATE_FLOAT_COLS
+    )
+    # candidate bool columns are all research_candidate_* flags
+    for c in _IST_CANDIDATE_BOOL_COLS:
+        assert c.startswith("research_candidate_")
+    # no formal type column and no Balanced class column anywhere
+    assert not any("internal_structure_type" in c for c in cols)
+    assert not any("balanced" in c.lower() for c in cols)
+    assert not any("balanced" in cl.lower() for cl in _IST_CANDIDATE_CLASSES)
+
+
+def test_consecutive_runs():
+    assert _consecutive_runs([True, True, False, True]) == [2, 1]
+    assert _consecutive_runs([False, False]) == []
+    assert _consecutive_runs([True]) == [1]
+    assert _consecutive_runs([]) == []
+
+
+def test_pairwise_overlap_jaccard():
+    rows = [
+        {"scope_key": "s1", "trade_date": "2026-08-17", "kA": True, "kB": False},
+        {"scope_key": "s2", "trade_date": "2026-08-17", "kA": True, "kB": True},
+        {"scope_key": "s3", "trade_date": "2026-08-17", "kA": True, "kB": True},
+        {"scope_key": "s4", "trade_date": "2026-08-17", "kA": False, "kB": True},
+        {"scope_key": "s5", "trade_date": "2026-08-17", "kA": False, "kB": False},
+    ]
+    ov = _pairwise_overlap(rows, "kA", "kB")
+    assert ov["a_count"] == 3
+    assert ov["b_count"] == 3
+    assert ov["intersection"] == 2
+    assert ov["union"] == 4
+    assert ov["jaccard"] == pytest.approx(0.5)
+
+
+def test_multi_hit_and_unmatched_no_else():
+    """Unmatched is a pure complement (hit_count==0); it must never be emitted
+    as an implicit Balanced class."""
+    rows = [
+        {"scope_key": "s1", "kA": True, "kB": True, "kC": False, "kD": False},   # multi
+        {"scope_key": "s2", "kA": True, "kB": False, "kC": False, "kD": False},  # single
+        {"scope_key": "s3", "kA": False, "kB": False, "kC": False, "kD": False},  # unmatched
+        {"scope_key": "s4", "kA": False, "kB": True, "kC": True, "kD": True},    # multi
+        {"scope_key": "s5", "kA": False, "kB": False, "kC": False, "kD": False},  # unmatched
+    ]
+    out = _multi_hit_and_unmatched(rows, ("kA", "kB", "kC", "kD"))
+    assert out["multi_hit_count"] == 2
+    assert out["unmatched_count"] == 2
+    assert out["multi_hit_rate"] == pytest.approx(0.4)
+    assert out["unmatched_rate"] == pytest.approx(0.4)
+    # complement math: single + multi + unmatched == total
+    assert (5 - out["multi_hit_count"] - out["unmatched_count"]) == 1  # s2 single
+    assert "Balanced" not in out
+
+
+def test_select_replay_picks_conflict_requires_multi_hit_flag():
+    """The conflict bucket must be a true multi-class conflict (explicit flag),
+    never a bare ref hit."""
+    rows = [
+        # s1: ref hit + true multi-hit conflict flag
+        {"scope_key": "s1", "trade_date": "2026-08-17",
+         "ref": True, "strict": True, "vA": True, "vB": True, "vC": True,
+         "multi": True},
+        # s2: ref hit but single-class (no conflict flag) -> boundary only
+        {"scope_key": "s2", "trade_date": "2026-08-18",
+         "ref": True, "strict": False, "vA": True, "vB": False, "vC": False,
+         "multi": False},
+        # s3: not a ref hit at all
+        {"scope_key": "s3", "trade_date": "2026-08-19",
+         "ref": False, "strict": False, "vA": False, "vB": False, "vC": False,
+         "multi": False},
+    ]
+    picks = _select_replay_picks(
+        rows,
+        ref_key="ref",
+        strict_key="strict",
+        variant_keys=("vA", "vB", "vC"),
+        multi_hit_key="multi",
+    )
+    # high_evidence: hits ref AND all variants
+    assert [x["scope_key"] for x in picks["high_evidence"]] == ["s1"]
+    # boundary: ref hit at reference but not at strict
+    assert [x["scope_key"] for x in picks["boundary"]] == ["s2"]
+    # conflict: only the row carrying the explicit multi-hit flag
+    assert [x["scope_key"] for x in picks["conflict"]] == ["s1"]

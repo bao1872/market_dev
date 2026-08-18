@@ -35,6 +35,7 @@ import argparse
 import asyncio
 import gzip
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -110,6 +111,138 @@ _IST_MAPPING_RESEARCH_COLS = (
     "price_hhi_hist_pct", "price_hhi_delta5d",
     "migration_hist_pct", "migration_delta5d",
 )
+
+# ===========================================================================
+# Internal Structure Type Mapping — Commit 2（TYPE-MAPPING-COMMIT2-CANDIDATE-
+# EXPERIMENTS）常量
+# 全部为 probe research 参数，绝不新增/修改 production owner。
+#
+# 方向中性（direction-neutral）研究特征（probe-only derived）：
+#   D_T = sign(BreadthEWReturn_T)；EW=0/None -> aligned features unavailable。
+#   AlignedBreadth_T = AdvanceRatio_T (D>0) / DeclineRatio_T (D<0)。
+#   AlignedCapitalTilt_T = CapitalTilt_T × D_T。
+#   二者 + current_leader_fraction 使用与 Commit 1 完全相同的 hist_pct
+#   （MIN_HIST_OBS=20、mid-rank ECDF、prefix-only）与 exact delta5d。
+#
+# Candidate hypotheses（research-only）：只研究 Broadening / Core-led /
+# Rotating / Fragmenting 四类；Balanced 本轮不得定义为 else，只统计
+# unmatched_research_pool。candidate 字段一律命名为 research_candidate_*，
+# 不得输出正式 internal_structure_type。禁止用 if/elif 顺序消除 overlap。
+#
+# TYPE_MAPPING_COMMIT1_CLOSED_SHA = df65622697b296a6fc280eba83ff16350d305747
+# ===========================================================================
+_IST_CANDIDATE_SOURCE_CLOSED_SHA = (
+    "df65622697b296a6fc280eba83ff16350d305747"
+)
+# 四类候选（不含 Balanced）。机器键保留连字符以匹配审查命名。
+_IST_CANDIDATE_CLASSES = ("Broadening", "Core-led", "Rotating", "Fragmenting")
+# Threshold sensitivity 网格（historical percentile 优先）：
+#   High: p70/p80/p90；Low: p30/p20/p10；Middle: p40/p50/p60。
+_IST_THRESHOLD_GRID = {
+    "HIGH": (0.70, 0.80, 0.90),
+    "LOW": (0.30, 0.20, 0.10),
+    "MID": (0.40, 0.50, 0.60),
+}
+# 基准阈值（用于 overlap matrix / multi-hit / unmatched / representative replay）。
+_IST_THRESHOLD_REFERENCE = {"HIGH": 0.80, "LOW": 0.20, "MID": 0.50}
+# 更严格阈值（用于 boundary = threshold-sensitive replay 选择）。
+_IST_THRESHOLD_STRICT = {"HIGH": 0.90, "LOW": 0.10, "MID": 0.60}
+
+# Candidate variant 定义：
+#   (candidate, variant, slots, conditions)
+#   conditions: (feature, op, bound)   op ∈ {">=", "<="}
+#   bound 为 str 时是 threshold slot（HIGH/LOW/MID），为 float 时是字面值。
+# 每个 variant 至多 2 个 slot，避免 sensitivity grid 爆炸。
+_IST_CANDIDATE_VARIANTS = (
+    # Broadening：AlignedBreadth high/rising + Concentration 未强化。
+    ("Broadening", "A", ("HIGH",),
+     (("aligned_breadth_hist_pct", ">=", "HIGH"),
+      ("price_hhi_delta5d", "<=", 0.0))),
+    ("Broadening", "B", ("HIGH", "MID"),
+     (("aligned_breadth_hist_pct", ">=", "HIGH"),
+      ("price_hhi_hist_pct", "<=", "MID"))),
+    ("Broadening", "C", ("HIGH", "MID"),
+     (("aligned_breadth_hist_pct", ">=", "HIGH"),
+      ("aligned_breadth_delta5d", ">=", 0.0),
+      ("price_hhi_hist_pct", "<=", "MID"))),
+    # Core-led：Concentration high + AlignedCapitalTilt high + Leadership 相对稳定。
+    ("Core-led", "A", ("HIGH", "LOW"),
+     (("price_hhi_hist_pct", ">=", "HIGH"),
+      ("aligned_tilt_hist_pct", ">=", "HIGH"),
+      ("migration_hist_pct", "<=", "LOW"))),
+    ("Core-led", "B", ("HIGH", "MID"),
+     (("price_hhi_hist_pct", ">=", "HIGH"),
+      ("aligned_tilt_hist_pct", ">=", "HIGH"),
+      ("leader_fraction_hist_pct", ">=", "MID"))),
+    ("Core-led", "C", ("HIGH",),
+     (("price_hhi_hist_pct", ">=", "HIGH"),
+      ("aligned_tilt_hist_pct", ">=", "HIGH"))),
+    # Rotating：Migration high + 结构仍保持组织性。
+    ("Rotating", "A", ("HIGH", "MID"),
+     (("migration_hist_pct", ">=", "HIGH"),
+      ("leader_fraction_hist_pct", ">=", "MID"))),
+    ("Rotating", "B", ("HIGH", "MID"),
+     (("migration_hist_pct", ">=", "HIGH"),
+      ("price_hhi_hist_pct", ">=", "MID"))),
+    ("Rotating", "C", ("HIGH", "MID"),
+     (("migration_hist_pct", ">=", "HIGH"),
+      ("aligned_breadth_hist_pct", ">=", "MID"))),
+    # Fragmenting：Migration high + leadership diffuse / concentration weak +
+    # participation weak。
+    ("Fragmenting", "A", ("HIGH", "LOW"),
+     (("migration_hist_pct", ">=", "HIGH"),
+      ("leader_fraction_hist_pct", "<=", "LOW"))),
+    ("Fragmenting", "B", ("HIGH", "LOW"),
+     (("migration_hist_pct", ">=", "HIGH"),
+      ("price_hhi_hist_pct", "<=", "LOW"),
+      ("aligned_breadth_hist_pct", "<=", "LOW"))),
+    ("Fragmenting", "C", ("HIGH", "LOW"),
+     (("migration_hist_pct", ">=", "HIGH"),
+      ("leader_fraction_hist_pct", "<=", "LOW"),
+      ("aligned_breadth_hist_pct", "<=", "LOW"))),
+)
+# 结果 parquet 固定列（Commit 2 candidate experiments）。
+_IST_CANDIDATE_STR_COLS = (
+    "scope_type", "scope_key", "scope_name", "trade_date", "size_bucket",
+)
+_IST_CANDIDATE_INT_COLS = (
+    "member_count", "leadership_current_leader_count",
+    "research_candidate_hit_count",
+)
+_IST_CANDIDATE_BOOL_COLS = (
+    "research_candidate_matched",
+    "research_candidate_Broadening",
+    "research_candidate_Core-led",
+    "research_candidate_Rotating",
+    "research_candidate_Fragmenting",
+) + tuple(
+    f"research_candidate_{cand}_{var}"
+    for (cand, var, _slots, _conds) in _IST_CANDIDATE_VARIANTS
+)
+_IST_CANDIDATE_FLOAT_COLS = (
+    "breadth_ew_return", "breadth_advance_ratio", "breadth_decline_ratio",
+    "capital_tilt", "concentration_price_hhi",
+    "leadership_migration", "leadership_jaccard_stability",
+    "leadership_current_leader_fraction",
+    "aligned_breadth", "aligned_tilt",
+    "aligned_breadth_hist_pct", "aligned_breadth_delta5d",
+    "aligned_tilt_hist_pct", "aligned_tilt_delta5d",
+    "leader_fraction_hist_pct", "leader_fraction_delta5d",
+    "price_hhi_hist_pct", "price_hhi_delta5d",
+    "migration_hist_pct", "migration_delta5d",
+)
+# 候选评估消费的 feature 键（从 mapping row + aligned 派生构造）。
+_IST_CANDIDATE_FEATURE_KEYS = (
+    "ew_return", "advance_ratio", "decline_ratio", "capital_tilt",
+    "price_hhi", "migration", "leader_fraction",
+    "aligned_breadth", "aligned_tilt",
+    "aligned_breadth_hist_pct", "aligned_breadth_delta5d",
+    "aligned_tilt_hist_pct", "aligned_tilt_delta5d",
+    "leader_fraction_hist_pct", "leader_fraction_delta5d",
+    "price_hhi_hist_pct", "price_hhi_delta5d",
+    "migration_hist_pct", "migration_delta5d",
+)
+
 
 # ===========================================================================
 # REVIEW-REPLAY-DATASET-V1（DATASET-1）：Review Source Dataset 工具骨架
@@ -1010,6 +1143,7 @@ def _parse_args() -> argparse.Namespace:
             "internal-structure-type-sample",
             "internal-structure-type-export",
             "internal-structure-type-distribution",
+            "internal-structure-type-candidates",
             "leadership-research",
             "export-dataset",
             "dataset-validate",
@@ -1056,6 +1190,13 @@ def _parse_args() -> argparse.Namespace:
             "internal-structure-type-distribution: TYPE-MAPPING Stage 2 — 读 mapping 输出，"
             "输出 scope_type 与 scope_type×size_bucket 描述性分布（all 标 unweighted "
             "stratified sample）+ distribution_summary.json；需 mapping 输出 --dataset-dir；"
+            "internal-structure-type-candidates: TYPE-MAPPING Commit 2 — research-only "
+            "candidate rule experiments（Broadening/Core-led/Rotating/Fragmenting 四类，"
+            "无 Balanced else；方向中性 AlignedBreadth/AlignedCapitalTilt 特征；threshold "
+            "sensitivity 网格、pairwise Jaccard overlap、multi-hit/unmatched、代表性 replay；"
+            "不产正式 internal_structure_type、不冻结 threshold），读 mapping 输出 "
+            "--dataset-dir，写 review-isdtype-cand-<sha12>-v1/{research_candidate_results"
+            ".parquet, research_candidate_summary.json}；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -6015,6 +6156,779 @@ def _run_internal_structure_type_distribution(
     return 0
 
 
+# ===========================================================================
+# TYPE-MAPPING Commit 2 — Candidate Rule Experiments（research-only）
+# 方向中性研究特征 + candidate hypotheses + sensitivity + overlap + replay。
+# 全部为 pure helpers / probe-only；不新增 production owner、不产正式 type。
+# ===========================================================================
+
+
+def _sign_direction(ew: Any) -> int | None:
+    """D_T = sign(EW).  0 / None / non-finite -> None (aligned unavailable)."""
+    ew = _to_fin(ew)
+    if ew is None:
+        return None
+    if ew == 0:
+        return None
+    return 1 if ew > 0 else -1
+
+
+def _aligned_breadth(ew: Any, advance: Any, decline: Any) -> float | None:
+    """Direction-aligned breadth: advance on an up day, decline on a down day."""
+    d = _sign_direction(ew)
+    if d is None:
+        return None
+    src = advance if d > 0 else decline
+    return _to_fin(src)
+
+
+def _aligned_tilt(tilt: Any, ew: Any) -> float | None:
+    """Direction-aligned capital tilt: capital_tilt × D_T."""
+    d = _sign_direction(ew)
+    if d is None:
+        return None
+    t = _to_fin(tilt)
+    if t is None:
+        return None
+    return t * d
+
+
+def _ist_cond_met(feat_val: Any, op: str, bound: float) -> bool:
+    """Evaluate one numeric condition.  None/non-finite feature -> False (no
+    evidence), never silently treated as met."""
+    feat = _to_fin(feat_val)
+    if feat is None:
+        return False
+    if op == ">=":
+        return feat >= bound
+    if op == "<=":
+        return feat <= bound
+    raise ValueError(f"unsupported op={op!r}")
+
+
+def _resolve_bound(bound: Any, thresholds: dict[str, float]) -> float:
+    if isinstance(bound, str):
+        if bound not in thresholds:
+            raise KeyError(f"missing threshold slot {bound!r}")
+        return float(thresholds[bound])
+    return float(bound)
+
+
+def _evaluate_candidate_variant(
+    feats: dict[str, Any],
+    conditions: tuple,
+    thresholds: dict[str, float],
+) -> bool:
+    """Deterministic AND-of-conditions hit test for one candidate variant.
+
+    ``conditions``: iterable of ``(feature, op, bound)``; ``bound`` is a
+    threshold slot name or a literal float.  All conditions must be met.
+    """
+    for feature, op, bound in conditions:
+        if feature not in feats:
+            raise KeyError(f"unknown candidate feature {feature!r}")
+        if not _ist_cond_met(feats[feature], op, _resolve_bound(bound, thresholds)):
+            return False
+    return True
+
+
+def _candidate_configs() -> list[dict]:
+    """Expand every variant across its threshold-slot grid (sensitivity sweep).
+
+    Deterministic: slot order is ``_IST_THRESHOLD_GRID`` (HIGH/LOW/MID order),
+    product order is the variant's slot tuple order.  No Balanced config.
+    """
+    configs: list[dict] = []
+    for cand, variant, slots, conditions in _IST_CANDIDATE_VARIANTS:
+        grids = [_IST_THRESHOLD_GRID[s] for s in slots]
+        for combo in itertools.product(*grids):
+            thresholds = dict(zip(slots, combo))
+            label = " ".join(f"{s}={v:.2f}" for s, v in thresholds.items())
+            configs.append(
+                {
+                    "candidate": cand,
+                    "variant": variant,
+                    "slots": slots,
+                    "conditions": conditions,
+                    "thresholds": thresholds,
+                    "label": label,
+                }
+            )
+    return configs
+
+
+def _reference_configs() -> list[dict]:
+    """All 12 variants at the reference threshold set (for overlap / replay)."""
+    return [
+        {
+            "candidate": cand,
+            "variant": variant,
+            "slots": slots,
+            "conditions": conditions,
+            "thresholds": dict(_IST_THRESHOLD_REFERENCE),
+            "label": "ref",
+        }
+        for cand, variant, slots, conditions in _IST_CANDIDATE_VARIANTS
+    ]
+
+
+def _strict_configs() -> list[dict]:
+    """All 12 variants at the strict threshold set (for boundary replay)."""
+    return [
+        {
+            "candidate": cand,
+            "variant": variant,
+            "slots": slots,
+            "conditions": conditions,
+            "thresholds": dict(_IST_THRESHOLD_STRICT),
+            "label": "strict",
+        }
+        for cand, variant, slots, conditions in _IST_CANDIDATE_VARIANTS
+    ]
+
+
+def _build_candidate_features(row: dict, aligned: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the feature dict consumed by candidate conditions.
+
+    ``row`` is a mapping-dataset row (with the Commit-1 columns);
+    ``aligned`` supplies the probe-only direction-neutral derived features
+    (aligned_breadth / aligned_tilt + hist_pct/delta5d + leader_fraction
+    hist_pct/delta5d).
+    """
+    feats = {
+        "ew_return": row["breadth_ew_return"],
+        "advance_ratio": row["breadth_advance_ratio"],
+        "decline_ratio": row["breadth_decline_ratio"],
+        "capital_tilt": row["capital_tilt"],
+        "price_hhi": row["concentration_price_hhi"],
+        "migration": row["leadership_migration"],
+        "leader_fraction": row["leadership_current_leader_fraction"],
+        "aligned_breadth": aligned["aligned_breadth"],
+        "aligned_tilt": aligned["aligned_tilt"],
+        "aligned_breadth_hist_pct": aligned["aligned_breadth_hist_pct"],
+        "aligned_breadth_delta5d": aligned["aligned_breadth_delta5d"],
+        "aligned_tilt_hist_pct": aligned["aligned_tilt_hist_pct"],
+        "aligned_tilt_delta5d": aligned["aligned_tilt_delta5d"],
+        "leader_fraction_hist_pct": aligned["leader_fraction_hist_pct"],
+        "leader_fraction_delta5d": aligned["leader_fraction_delta5d"],
+        "price_hhi_hist_pct": row["price_hhi_hist_pct"],
+        "price_hhi_delta5d": row["price_hhi_delta5d"],
+        "migration_hist_pct": row["migration_hist_pct"],
+        "migration_delta5d": row["migration_delta5d"],
+    }
+    return feats
+
+
+def _compute_aligned_features(scope_rows: list[dict]) -> list[dict]:
+    """Per-scope direction-neutral derived features (same hist_pct/delta5d
+    semantics as Commit 1).  ``scope_rows`` must be ascending by trade_date.
+
+    Returns one aligned-feature dict per row index:
+      aligned_breadth / aligned_tilt (+ hist_pct/delta5d),
+      leader_fraction_hist_pct / leader_fraction_delta5d.
+    """
+    n = len(scope_rows)
+    ew = [_to_fin(r.get("breadth_ew_return")) for r in scope_rows]
+    adv = [_to_fin(r.get("breadth_advance_ratio")) for r in scope_rows]
+    dec = [_to_fin(r.get("breadth_decline_ratio")) for r in scope_rows]
+    tilt = [_to_fin(r.get("capital_tilt")) for r in scope_rows]
+    frac = [_to_fin(r.get("leadership_current_leader_fraction")) for r in scope_rows]
+
+    aligned_breadth = [
+        _aligned_breadth(ew[i], adv[i], dec[i]) for i in range(n)
+    ]
+    aligned_tilt = [_aligned_tilt(tilt[i], ew[i]) for i in range(n)]
+
+    out: list[dict[str, Any]] = []
+    for i in range(n):
+        out.append(
+            {
+                "aligned_breadth": aligned_breadth[i],
+                "aligned_tilt": aligned_tilt[i],
+                "aligned_breadth_hist_pct": _hist_pct(aligned_breadth, i),
+                "aligned_breadth_delta5d": _delta5d(aligned_breadth, i),
+                "aligned_tilt_hist_pct": _hist_pct(aligned_tilt, i),
+                "aligned_tilt_delta5d": _delta5d(aligned_tilt, i),
+                "leader_fraction_hist_pct": _hist_pct(frac, i),
+                "leader_fraction_delta5d": _delta5d(frac, i),
+            }
+        )
+    return out
+
+
+def _consecutive_runs(flags: list[bool]) -> list[int]:
+    """Run lengths of consecutive True (per-scope, date-ordered)."""
+    runs: list[int] = []
+    cur = 0
+    for f in flags:
+        if f:
+            cur += 1
+        elif cur:
+            runs.append(cur)
+            cur = 0
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def _hit_stats(rows: list[dict], flag_key: str) -> dict:
+    """Per-candidate hit statistics (rows sorted by scope_key, trade_date)."""
+    total = len(rows)
+    hit = [r for r in rows if r.get(flag_key)]
+    hit_count = len(hit)
+    hit_rate = hit_count / total if total else 0.0
+
+    fam_rows: dict[str, int] = {}
+    fam_hit: dict[str, int] = {}
+    bkt_rows: dict[str, int] = {}
+    bkt_hit: dict[str, int] = {}
+    for r in rows:
+        fam = r.get("scope_type")
+        bkt = r.get("size_bucket")
+        fam_rows[fam] = fam_rows.get(fam, 0) + 1
+        bkt_rows[bkt] = bkt_rows.get(bkt, 0) + 1
+        if r.get(flag_key):
+            fam_hit[fam] = fam_hit.get(fam, 0) + 1
+            bkt_hit[bkt] = bkt_hit.get(bkt, 0) + 1
+
+    family_hit_rate = {
+        fam: (fam_hit.get(fam, 0) / cnt) for fam, cnt in fam_rows.items()
+    }
+    size_bucket_hit_rate = {
+        bkt: (bkt_hit.get(bkt, 0) / cnt) for bkt, cnt in bkt_rows.items()
+    }
+
+    per_scope: dict[str, list[bool]] = {}
+    for r in rows:
+        per_scope.setdefault(r.get("scope_key"), []).append(bool(r.get(flag_key)))
+    runs: list[int] = []
+    for _sk, flags in per_scope.items():
+        runs.extend(_consecutive_runs(flags))
+    median_run = None
+    one_day_only_rate = None
+    if runs:
+        median_run = _percentile_sorted(sorted(runs), 0.5)
+        one_day_only_rate = sum(1 for x in runs if x == 1) / len(runs)
+
+    return {
+        "hit_count": hit_count,
+        "hit_rate": round(hit_rate, 6),
+        "family_hit_rate": family_hit_rate,
+        "size_bucket_hit_rate": size_bucket_hit_rate,
+        "median_consecutive_run_length": median_run,
+        "one_day_only_rate": (
+            round(one_day_only_rate, 6) if one_day_only_rate is not None else None
+        ),
+        "total_rows": total,
+    }
+
+
+def _pairwise_overlap(rows: list[dict], key_a: str, key_b: str) -> dict:
+    """Jaccard overlap between two candidate classes (no if/elif ordering)."""
+    a = [r for r in rows if r.get(key_a)]
+    b = [r for r in rows if r.get(key_b)]
+    inter = sum(1 for r in rows if r.get(key_a) and r.get(key_b))
+    union = len(a) + len(b) - inter
+    return {
+        "a_count": len(a),
+        "b_count": len(b),
+        "intersection": inter,
+        "union": union,
+        "jaccard": round(inter / union, 6) if union else None,
+    }
+
+
+def _multi_hit_and_unmatched(rows: list[dict], class_keys: tuple) -> dict:
+    """multi-hit rate (>=2 candidate classes) and unmatched rate (0 classes).
+
+    unmatched is a pure complement (matched==0), never an implicit
+    ``else: Balanced`` branch.
+    """
+    total = len(rows)
+    multi = sum(
+        1 for r in rows if sum(1 for k in class_keys if r.get(k)) >= 2
+    )
+    unmatched = sum(
+        1 for r in rows if sum(1 for k in class_keys if r.get(k)) == 0
+    )
+    return {
+        "multi_hit_count": multi,
+        "multi_hit_rate": round(multi / total, 6) if total else 0.0,
+        "unmatched_count": unmatched,
+        "unmatched_rate": round(unmatched / total, 6) if total else 0.0,
+        "total_rows": total,
+    }
+
+
+def _select_replay_picks(
+    rows: list[dict],
+    *,
+    ref_key: str,
+    strict_key: str,
+    variant_keys: tuple,
+    multi_hit_key: str,
+    limit: int = 5,
+) -> dict:
+    """Representative replay rows for one class.
+
+    - high_evidence: hits EVERY variant of the class (consistent across A/B/C);
+    - boundary:      hits at reference thresholds but not at the strict set
+                     (threshold-sensitive);
+    - conflict:      hits this class AND >=1 other class (multi-hit).
+    Deterministic: rows are pre-sorted (scope_key, trade_date); first N kept.
+    """
+    high = [
+        r for r in rows
+        if r.get(ref_key) and all(bool(r.get(k)) for k in variant_keys)
+    ][:limit]
+    boundary = [
+        r for r in rows if r.get(ref_key) and not r.get(strict_key)
+    ][:limit]
+    conflict = [
+        r for r in rows if r.get(ref_key) and r.get(multi_hit_key)
+    ][:limit]
+    return {
+        "high_evidence": high,
+        "boundary": boundary,
+        "conflict": conflict,
+    }
+
+
+def _write_ist_candidate_parquet(rows: list[dict], path: str) -> int:
+    """Write the candidate-experiment results parquet with a FIXED schema."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    col_order = (
+        _IST_CANDIDATE_STR_COLS
+        + _IST_CANDIDATE_INT_COLS
+        + _IST_CANDIDATE_BOOL_COLS
+        + _IST_CANDIDATE_FLOAT_COLS
+    )
+    fields = []
+    for name in col_order:
+        if name in _IST_CANDIDATE_BOOL_COLS:
+            fields.append(pa.field(name, pa.bool_(), nullable=True))
+        elif name in _IST_CANDIDATE_INT_COLS:
+            fields.append(pa.field(name, pa.int64(), nullable=True))
+        elif name in _IST_CANDIDATE_FLOAT_COLS:
+            fields.append(pa.field(name, pa.float64(), nullable=True))
+        else:
+            fields.append(pa.field(name, pa.string(), nullable=True))
+    schema = pa.schema(fields)
+    arrays = []
+    for name in schema.names:
+        ftype = schema.field(name).type
+        if pa.types.is_floating(ftype):
+            arrays.append(
+                pa.array([_to_fin(r.get(name)) for r in rows], type=ftype)
+            )
+        elif pa.types.is_integer(ftype):
+            arrays.append(pa.array([r.get(name) for r in rows], type=ftype))
+        elif pa.types.is_boolean(ftype):
+            arrays.append(
+                pa.array(
+                    [
+                        bool(r.get(name)) if r.get(name) is not None else None
+                        for r in rows
+                    ],
+                    type=ftype,
+                )
+            )
+        else:
+            arrays.append(
+                pa.array([r.get(name) for r in rows], type=ftype)
+            )
+    table = pa.Table.from_arrays(arrays, schema=schema)
+    pq.write_table(table, path)
+    return len(rows)
+
+
+def _run_internal_structure_type_candidates(
+    dataset_dir: str,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """TYPE-MAPPING Commit 2 — candidate rule experiments (research-only).
+
+    Reads the Commit-1 mapping dataset (40 scopes x 120D), derives the
+    probe-only direction-neutral features, then runs the 4-class candidate
+    variants (Broadening / Core-led / Rotating / Fragmenting; no Balanced)
+    across the HIGH/LOW/MID sensitivity grids, computes hit stats, pairwise
+    overlap, multi-hit / unmatched rates, and representative replay.  Writes
+    ``review-isdtype-cand-<sha12>-v1/{results.parquet,summary.json}``.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] internal-structure-type-candidates "
+            f"dataset_dir={dataset_dir} OK"
+        )
+        return 0
+
+    mpath = os.path.join(dataset_dir, "manifest.json")
+    if not os.path.exists(mpath):
+        logger.error(
+            "[ist-candidates] %s 非 mapping 输出目录（缺 manifest.json）", dataset_dir
+        )
+        return 2
+    with open(mpath, "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    ppath = os.path.join(dataset_dir, "internal_structure_type_mapping.parquet")
+    if not os.path.exists(ppath):
+        logger.error("[ist-candidates] 缺 internal_structure_type_mapping.parquet")
+        return 2
+    import pyarrow.parquet as pq
+
+    rows = pq.read_table(ppath).to_pylist()
+    if not rows:
+        logger.error("[ist-candidates] mapping dataset 空")
+        return 2
+
+    # Deterministic ordering: scope_key then trade_date (ISO = chronological).
+    rows.sort(key=lambda r: (str(r["scope_key"]), str(r["trade_date"])))
+
+    # Per-scope direction-neutral features.
+    aligned_by_scope: dict[str, list[dict]] = {}
+    for r in rows:
+        aligned_by_scope.setdefault(str(r["scope_key"]), []).append(r)
+    aligned_map: dict[tuple[str, int], dict] = {}
+    for sk, scope_rows in aligned_by_scope.items():
+        aligned_list = _compute_aligned_features(scope_rows)
+        for idx, aligned in enumerate(aligned_list):
+            aligned_map[(sk, idx)] = aligned
+
+    # Assemble per-row aligned dict by enumerating each scope's sorted rows.
+    # (aligned_map is keyed by per-scope index; rebuild a list of aligned dicts
+    #  in the same order as `rows`.)
+    aligned_ordered: list[dict] = []
+    for sk, scope_rows in aligned_by_scope.items():
+        for idx in range(len(scope_rows)):
+            aligned_ordered.append(aligned_map[(sk, idx)])
+
+    result_rows: list[dict] = []
+    for i, r in enumerate(rows):
+        aligned = aligned_ordered[i]
+        feats = _build_candidate_features(r, aligned)
+        result_rows.append(
+            {
+                "scope_type": r.get("scope_type"),
+                "scope_key": r.get("scope_key"),
+                "scope_name": r.get("scope_name"),
+                "trade_date": r.get("trade_date"),
+                "size_bucket": r.get("size_bucket"),
+                "member_count": r.get("member_count"),
+                "leadership_current_leader_count": r.get(
+                    "leadership_current_leader_count"
+                ),
+                "breadth_ew_return": _to_fin(r.get("breadth_ew_return")),
+                "breadth_advance_ratio": _to_fin(r.get("breadth_advance_ratio")),
+                "breadth_decline_ratio": _to_fin(r.get("breadth_decline_ratio")),
+                "capital_tilt": _to_fin(r.get("capital_tilt")),
+                "concentration_price_hhi": _to_fin(r.get("concentration_price_hhi")),
+                "leadership_migration": _to_fin(r.get("leadership_migration")),
+                "leadership_jaccard_stability": _to_fin(
+                    r.get("leadership_jaccard_stability")
+                ),
+                "leadership_current_leader_fraction": _to_fin(
+                    r.get("leadership_current_leader_fraction")
+                ),
+                "aligned_breadth": aligned["aligned_breadth"],
+                "aligned_tilt": aligned["aligned_tilt"],
+                "aligned_breadth_hist_pct": aligned["aligned_breadth_hist_pct"],
+                "aligned_breadth_delta5d": aligned["aligned_breadth_delta5d"],
+                "aligned_tilt_hist_pct": aligned["aligned_tilt_hist_pct"],
+                "aligned_tilt_delta5d": aligned["aligned_tilt_delta5d"],
+                "leader_fraction_hist_pct": aligned["leader_fraction_hist_pct"],
+                "leader_fraction_delta5d": aligned["leader_fraction_delta5d"],
+                "price_hhi_hist_pct": _to_fin(r.get("price_hhi_hist_pct")),
+                "price_hhi_delta5d": _to_fin(r.get("price_hhi_delta5d")),
+                "migration_hist_pct": _to_fin(r.get("migration_hist_pct")),
+                "migration_delta5d": _to_fin(r.get("migration_delta5d")),
+                # candidate flags are filled below (per row, via feats).
+                "_feats": feats,
+            }
+        )
+
+    # ---- sensitivity sweep: evaluate every (variant, threshold-combo) ----
+    sensitivity: dict[str, dict[str, dict]] = {}
+    for config in _candidate_configs():
+        flag = [
+            _evaluate_candidate_variant(
+                r["_feats"], config["conditions"], config["thresholds"]
+            )
+            for r in result_rows
+        ]
+        sensitivity.setdefault(config["candidate"], {})[
+            f"{config['variant']}|{config['label']}"
+        ] = _hit_stats_from_flags(result_rows, flag)
+
+    # ---- reference evaluation: class union + per-variant flags ----
+    ref_configs = _reference_configs()
+    ref_variant_flag_key = {}
+    for config in ref_configs:
+        key = f"research_candidate_{config['candidate']}_{config['variant']}"
+        ref_variant_flag_key[(config["candidate"], config["variant"])] = key
+        for r in result_rows:
+            r[key] = bool(
+                _evaluate_candidate_variant(
+                    r["_feats"], config["conditions"], config["thresholds"]
+                )
+            )
+    class_variant_keys: dict[str, tuple] = {
+        cand: tuple(
+            f"research_candidate_{cand}_{var}"
+            for (_c, var, _s, _co) in _IST_CANDIDATE_VARIANTS
+            if _c == cand
+        )
+        for cand in _IST_CANDIDATE_CLASSES
+    }
+    class_keys = {
+        cand: f"research_candidate_{cand}" for cand in _IST_CANDIDATE_CLASSES
+    }
+    for r in result_rows:
+        for cand in _IST_CANDIDATE_CLASSES:
+            r[class_keys[cand]] = bool(
+                any(r.get(k) for k in class_variant_keys[cand])
+            )
+        r["research_candidate_hit_count"] = sum(
+            1 for cand in _IST_CANDIDATE_CLASSES if r.get(class_keys[cand])
+        )
+        r["research_candidate_matched"] = bool(r["research_candidate_hit_count"])
+
+    # ---- strict evaluation (for boundary replay) ----
+    strict_keys: dict[str, str] = {}
+    for config in _strict_configs():
+        k = f"_strict_{config['candidate']}_{config['variant']}"
+        strict_keys[(config["candidate"], config["variant"])] = k
+        for r in result_rows:
+            r[k] = bool(
+                _evaluate_candidate_variant(
+                    r["_feats"], config["conditions"], config["thresholds"]
+                )
+            )
+    for r in result_rows:
+        for cand in _IST_CANDIDATE_CLASSES:
+            r[f"_strict_union_{cand}"] = bool(
+                any(r.get(strict_keys[(cand, var)]) for var in ("A", "B", "C"))
+            )
+
+    # ---- reference hit stats, overlap, multi-hit / unmatched ----
+    reference_hit_stats = {
+        cand: _hit_stats(result_rows, class_keys[cand])
+        for cand in _IST_CANDIDATE_CLASSES
+    }
+    overlap_pairs = (
+        ("Broadening", "Core-led"),
+        ("Broadening", "Rotating"),
+        ("Core-led", "Rotating"),
+        ("Rotating", "Fragmenting"),
+    )
+    overlap_matrix = {
+        f"{a}<->{b}": _pairwise_overlap(result_rows, class_keys[a], class_keys[b])
+        for a, b in overlap_pairs
+    }
+    multi_unmatched = _multi_hit_and_unmatched(
+        result_rows, tuple(class_keys[c] for c in _IST_CANDIDATE_CLASSES)
+    )
+
+    # ---- representative replay ----
+    # conflict = true multi-class conflict (this class AND >=1 other class),
+    # never a bare "matched" (>=1 class) flag.
+    for r in result_rows:
+        for cand in _IST_CANDIDATE_CLASSES:
+            r[f"_conflict_{cand}"] = bool(
+                r.get(class_keys[cand])
+                and r["research_candidate_hit_count"] >= 2
+            )
+    replay: dict[str, dict] = {}
+    for cand in _IST_CANDIDATE_CLASSES:
+        replay[cand] = _select_replay_picks(
+            result_rows,
+            ref_key=class_keys[cand],
+            strict_key=f"_strict_union_{cand}",
+            variant_keys=class_variant_keys[cand],
+            multi_hit_key=f"_conflict_{cand}",
+        )
+    # Drop internal temp keys from persisted rows.
+    for r in result_rows:
+        for k in [
+            k for k in list(r)
+            if k.startswith("_feats")
+            or k.startswith("_strict_")
+            or k.startswith("_conflict_")
+        ]:
+            del r[k]
+
+    # ---- write outputs ----
+    capture_sha = str(manifest.get("capture_git_sha") or "")
+    if not capture_sha:
+        logger.error("[ist-candidates] source manifest 缺 capture_git_sha")
+        return 2
+    out_dir_name = f"review-isdtype-cand-{capture_sha[:12]}-v1"
+    out_dir = os.path.join(
+        os.path.dirname(os.path.normpath(dataset_dir)), out_dir_name
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    results_path = os.path.join(out_dir, "research_candidate_results.parquet")
+    written = _write_ist_candidate_parquet(result_rows, results_path)
+    if written != len(result_rows):
+        logger.error("[ist-candidates] results parquet 行数不一致")
+        return 1
+
+    replay_compact: dict[str, dict] = {}
+    for cand in _IST_CANDIDATE_CLASSES:
+        replay_compact[cand] = {
+            kind: [
+                {
+                    "scope_key": x["scope_key"],
+                    "trade_date": x["trade_date"],
+                    "scope_type": x["scope_type"],
+                    "size_bucket": x["size_bucket"],
+                    "ew_return": x["breadth_ew_return"],
+                    "aligned_breadth_hist_pct": x["aligned_breadth_hist_pct"],
+                    "aligned_tilt_hist_pct": x["aligned_tilt_hist_pct"],
+                    "price_hhi_hist_pct": x["price_hhi_hist_pct"],
+                    "migration_hist_pct": x["migration_hist_pct"],
+                    "leader_fraction": x["leadership_current_leader_fraction"],
+                    "leader_fraction_hist_pct": x["leader_fraction_hist_pct"],
+                    "hit_count": x["research_candidate_hit_count"],
+                    "variants_hit": [
+                        v for v in class_variant_keys[cand] if x.get(v)
+                    ],
+                }
+                for x in picks
+            ]
+            for kind, picks in replay[cand].items()
+        }
+
+    summary = {
+        "dataset_id": f"review-isdtype-cand-{capture_sha[:12]}-v1",
+        "dataset_dir_name": out_dir_name,
+        "source_dataset": os.path.basename(os.path.normpath(dataset_dir)),
+        "source_closed_sha": _IST_CANDIDATE_SOURCE_CLOSED_SHA,
+        "capture_git_sha": capture_sha,
+        "membership_semantics": "current_static_research_proxy",
+        "threshold_freeze_eligible": False,
+        "cross_sectional": "DEFERRED_FULL_FAMILY_UNIVERSE_REQUIRED",
+        "research_only": True,
+        "no_formal_internal_structure_type": True,
+        "balanced_not_else": True,
+        "classes": list(_IST_CANDIDATE_CLASSES),
+        "reference_thresholds": dict(_IST_THRESHOLD_REFERENCE),
+        "threshold_grid": {k: list(v) for k, v in _IST_THRESHOLD_GRID.items()},
+        "row_counts": {
+            "scopes": len(aligned_by_scope),
+            "dates": None,
+            "rows": len(result_rows),
+        },
+        "sensitivity": sensitivity,
+        "reference_hit_stats": reference_hit_stats,
+        "overlap_matrix": overlap_matrix,
+        "multi_hit_and_unmatched": multi_unmatched,
+        "replay": replay_compact,
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+    }
+    summary["sha256"] = _sha256_file(results_path)
+    summary_path = os.path.join(out_dir, "research_candidate_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as fh:
+        json.dump(summary, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    # ---- human-readable tables ----
+    print("=== internal-structure-type-candidates (research-only) ===")
+    print(f"dataset_dir : {dataset_dir}")
+    print(f"source      : {summary['source_dataset']}  rows={len(result_rows)}")
+    print("NOTE: research-only；无正式 internal_structure_type；Balanced 仅计 unmatched")
+    print(f"reference thresholds : {_IST_THRESHOLD_REFERENCE}")
+    print("--- sensitivity (variant | threshold-combo -> hit_rate / hit_count / one-day / median-run) ---")
+    for cand in _IST_CANDIDATE_CLASSES:
+        print(f"[{cand}]")
+        for key, st in sensitivity[cand].items():
+            print(
+                f"  {key:<28} rate={st['hit_rate']:.4f} n={st['hit_count']:>4} "
+                f"one-day={st['one_day_only_rate']} med_run={st['median_consecutive_run_length']}"
+            )
+    print("--- reference hit stats (union of variants) ---")
+    for cand in _IST_CANDIDATE_CLASSES:
+        st = reference_hit_stats[cand]
+        print(
+            f"  {cand:<12} rate={st['hit_rate']:.4f} n={st['hit_count']:>4} "
+            f"one-day={st['one_day_only_rate']} med_run={st['median_consecutive_run_length']}"
+        )
+    print("--- pairwise overlap (Jaccard) ---")
+    for pair, st in overlap_matrix.items():
+        print(f"  {pair:<28} inter={st['intersection']:>4} union={st['union']:>4} jaccard={st['jaccard']}")
+    print("--- multi-hit / unmatched ---")
+    print(
+        f"  multi_hit_rate={multi_unmatched['multi_hit_rate']} "
+        f"unmatched_rate={multi_unmatched['unmatched_rate']} "
+        f"(n={multi_unmatched['total_rows']})"
+    )
+    print("--- representative replay (up to 5 each per class) ---")
+    for cand in _IST_CANDIDATE_CLASSES:
+        for kind, picks in replay_compact[cand].items():
+            print(f"  [{cand} {kind}] n={len(picks)}")
+            for p in picks:
+                print(
+                    f"    {p['scope_key'][:12]} {p['trade_date']} "
+                    f"ew={p['ew_return']} aligned_breadth_pct={p['aligned_breadth_hist_pct']} "
+                    f"tilt_pct={p['aligned_tilt_hist_pct']} hhi_pct={p['price_hhi_hist_pct']} "
+                    f"mig_pct={p['migration_hist_pct']} frac={p['leader_fraction']} "
+                    f"hits={p['hit_count']} vars={p['variants_hit']}"
+                )
+    print(f"results parquet : {results_path}")
+    print(f"summary written : {summary_path}")
+    return 0
+
+
+def _hit_stats_from_flags(rows: list[dict], flag_list: list[bool]) -> dict:
+    """Sensitivity-row hit stats; ``flag_list`` holds per-row boolean flags."""
+    total = len(rows)
+    hit = [r for r, f in zip(rows, flag_list) if f]
+    hit_count = len(hit)
+    hit_rate = hit_count / total if total else 0.0
+
+    fam_rows: dict[str, int] = {}
+    fam_hit: dict[str, int] = {}
+    bkt_rows: dict[str, int] = {}
+    bkt_hit: dict[str, int] = {}
+    for r, f in zip(rows, flag_list):
+        fam = r.get("scope_type")
+        bkt = r.get("size_bucket")
+        fam_rows[fam] = fam_rows.get(fam, 0) + 1
+        bkt_rows[bkt] = bkt_rows.get(bkt, 0) + 1
+        if f:
+            fam_hit[fam] = fam_hit.get(fam, 0) + 1
+            bkt_hit[bkt] = bkt_hit.get(bkt, 0) + 1
+
+    per_scope: dict[str, list[bool]] = {}
+    for r, f in zip(rows, flag_list):
+        per_scope.setdefault(r.get("scope_key"), []).append(f)
+    runs: list[int] = []
+    for _sk, flags in per_scope.items():
+        runs.extend(_consecutive_runs(flags))
+    median_run = None
+    one_day_only_rate = None
+    if runs:
+        median_run = _percentile_sorted(sorted(runs), 0.5)
+        one_day_only_rate = sum(1 for x in runs if x == 1) / len(runs)
+
+    return {
+        "hit_count": hit_count,
+        "hit_rate": round(hit_rate, 6),
+        "family_hit_rate": {
+            fam: (fam_hit.get(fam, 0) / cnt) for fam, cnt in fam_rows.items()
+        },
+        "size_bucket_hit_rate": {
+            bkt: (bkt_hit.get(bkt, 0) / cnt) for bkt, cnt in bkt_rows.items()
+        },
+        "median_consecutive_run_length": median_run,
+        "one_day_only_rate": (
+            round(one_day_only_rate, 6) if one_day_only_rate is not None else None
+        ),
+        "total_rows": total,
+    }
+
+
 def _run_replay_l1(
     dataset_dir: str,
     view_name: str,
@@ -7008,6 +7922,21 @@ async def _run(args: argparse.Namespace) -> int:
             )
             return 2
         return _run_internal_structure_type_distribution(
+            args.dataset_dir,
+            dry_run=args.dry_run,
+        )
+    if args.mode == "internal-structure-type-candidates":
+        if not args.dataset_dir:
+            logger.error(
+                "[internal-structure-type-candidates] --dataset-dir 为必填"
+            )
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[internal-structure-type-candidates] 禁 --scope-type/--scope-key"
+            )
+            return 2
+        return _run_internal_structure_type_candidates(
             args.dataset_dir,
             dry_run=args.dry_run,
         )
