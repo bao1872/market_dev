@@ -975,8 +975,9 @@ def _parse_args() -> argparse.Namespace:
             "--asof-lock；"
             "dataset-dynamics-logic: 4-scope frozen Dataset 全 Dynamics 链 E2E（L1 → "
             "build_observation_series → compute_scope_dynamics_analysis），确认 Dynamics "
-            "actually executed，并输出 12 traces（4 scopes x 3 dates）；需 --dataset-dir + "
-            "--view（默认 logic_validation_sample）+ --history（默认 120）+ --asof-lock；"
+            "actually executed，并输出 12 traces（4 scopes x 3 dates）；scope 固定来自版本化 "
+            "fixture（review_dynamics_logic_sample.json），不依赖任何 view，需 --dataset-dir "
+            "+ --history（默认 120）+ --asof-lock；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -2444,29 +2445,29 @@ class ReplaySelection:
     bar_window_start: date
 
 
-def _build_replay_selection(
-    dataset_dir: str, view_name: str, asof_override: date | None = None
+def _build_replay_selection_from_specs(
+    dataset_dir: str,
+    scope_specs: list[Any],
+    asof_override: date | None = None,
 ) -> ReplaySelection:
-    """Stage A — resolve the Current L1 selection from SMALL metadata only.
+    """Shared Stage-A metadata owner — resolves a ``ReplaySelection`` from a list
+    of already-resolved ``scope_specs`` (A2).
 
     No bars/state/events/snapshot scan happens here.  Current L1 is locked to a
     single asof date, so state/events only need {T, T-1}, snapshots only need
     exact-T under an accepted run, and bars only need the 400-calendar-day
-    VolumeContext window for the union members.
+    VolumeContext window for the union members.  The union member set is derived
+    from the supplied ``scope_specs`` — NOT from any view file — so the view path
+    and the fixture path share this single owner and neither needs the other.
 
     asof selection follows the **two-track** design (R0-C3 修正):
     - Track A (default): lock the **manifest declared asof** (Current-asof Acceptance),
-      e.g. 2026-08-17.  This validates Price / Participation / Current-only facts /
-      Exact-T snapshot / fail-closed behavior.  If Daily State is genuinely missing at
-      this asof, Trend/Structure/Momentum are reported as SOURCE_UNAVAILABLE — never
-      backfilled.
+      e.g. 2026-08-17.
     - Track B (--asof-lock): lock an explicit date where Daily State genuinely exists
-      (e.g. 2026-08-10) for Historical-capable Semantic Test of Trend/Structure State/
-      Momentum/Volume/Member construction/aggregation grammar.
+      (e.g. 2026-08-10) for Historical-capable Semantic Test.
 
-    ``min(max_date)`` is NOT used to derive a "common available date" — it does not
-    prove intersection availability (a snapshot existing only at 08-17 would be absent
-    at the min result).  No latest backfill is ever performed.
+    ``min(max_date)`` is NOT used to derive a "common available date".  No latest
+    backfill is ever performed.
     """
     # Window constant owned by the production prep service — never redefined here.
     # (The snapshot run-gate constant now lives solely in the shared
@@ -2475,19 +2476,16 @@ def _build_replay_selection(
 
     declared_asof_str = _dataset_asof(dataset_dir)
     if asof_override is not None:
-        # Track B: explicit historical-asof lock (e.g. 2026-08-10).
-        asof_date = asof_override
+        asof_date = asof_override  # Track B: explicit historical-asof lock.
     else:
-        # Track A (default): Current-asof = manifest declared asof (e.g. 2026-08-17).
+        # Track A (default): Current-asof = manifest declared asof.
         if not declared_asof_str:
             raise RuntimeError(
                 "[replay-l1] corpus 无 declared asof，无法锁定 Current L1 语义日期"
             )
         asof_date = date.fromisoformat(declared_asof_str)
-    asof_str = asof_date.isoformat()
 
-    # scope specs + union members (memberships filtered to selected boards).
-    scope_specs = _load_scope_specs(dataset_dir, view_name)
+    # union members derived from the supplied scope_specs (NOT a view file).
     union_ids: set[uuid.UUID] = set()
     for spec in scope_specs:
         union_ids.update(spec.member_ids)
@@ -2518,6 +2516,22 @@ def _build_replay_selection(
         accepted_snapshot_run_ids=frozenset(accepted),
         trading_days=tuple(trading_days),
         bar_window_start=bar_window_start,
+    )
+
+
+def _build_replay_selection(
+    dataset_dir: str, view_name: str, asof_override: date | None = None
+) -> ReplaySelection:
+    """Stage-A selection from a view name — thin wrapper over the shared owner.
+
+    Resolves scope_specs from the view, then delegates all metadata resolution
+    (union / calendar / T-1 / bar window / accepted runs) to
+    ``_build_replay_selection_from_specs`` so the view path and the fixture path
+    share the SAME selection owner (A2).
+    """
+    scope_specs = _load_scope_specs(dataset_dir, view_name)
+    return _build_replay_selection_from_specs(
+        dataset_dir, scope_specs, asof_override=asof_override
     )
 
 
@@ -3600,8 +3614,8 @@ def _run_dataset_capacity_benchmark(
 
 def _run_dataset_dynamics_logic(
     dataset_dir: str,
-    view_name: str,
     *,
+    fixture_path: str | None = None,
     history: int,
     asof_lock: str | None = None,
     dry_run: bool = False,
@@ -3609,11 +3623,16 @@ def _run_dataset_dynamics_logic(
     """``dataset-dynamics-logic``: 4-scope frozen-Dataset full Dynamics chain E2E.
 
     Steps 11-14 of DYNAMICS-LOGIC-CLOSURE.  Runs the FINAL production chain over a
-    small frozen-Dataset sample.  The fixed 4-scope set comes from the VERSIONED
-    fixture ``scripts/fixtures/review_dynamics_logic_sample.json`` (A1-1), NOT the
-    gitignored ``.perfdata`` view:
+    small frozen-Dataset sample.  The fixed 4-scope set comes solely from the
+    VERSIONED fixture ``scripts/fixtures/review_dynamics_logic_sample.json`` (A2),
+    and the shared Stage-A metadata owner
+    (``_build_replay_selection_from_specs``) derives union / calendar / T-1 / bar
+    window / accepted runs from those fixture scope_specs — the gitignored
+    ``.perfdata`` view is NOT consulted at all:
 
         Frozen Dataset
+          -> fixture scope_specs (4 scopes)
+          -> _build_replay_selection_from_specs (shared owner)
           -> existing source mapper (_load_capacity_facts, shared mappers)
           -> build_union_fact_context_from_loaded_facts
           -> build_prepared_scopes_from_union
@@ -3632,7 +3651,7 @@ def _run_dataset_dynamics_logic(
     if dry_run:
         print(
             f"[dry-run] dataset-dynamics-logic dataset_dir={dataset_dir} "
-            f"view={view_name} history={history} asof={asof_lock} OK"
+            f"fixture={fixture_path} history={history} asof={asof_lock} OK"
         )
         return 0
 
@@ -3652,8 +3671,9 @@ def _run_dataset_dynamics_logic(
     print(f"dataset_dir : {dataset_dir}")
     print(f"history     : {history} trading days")
 
-    # ---- Stage A: selection (A1-1: fixed scope set comes from the VERSIONED
-    # fixture, NOT the gitignored .perfdata view) ----
+    # ---- Stage A: selection (A2: derived from the VERSIONED fixture only — the
+    # shared metadata owner is fed the fixture scope_specs directly, so the
+    # gitignored .perfdata view is NOT required at all) ----
     if asof_lock:
         sel_asof = date.fromisoformat(asof_lock)
     else:
@@ -3662,22 +3682,24 @@ def _run_dataset_dynamics_logic(
             logger.error("[dataset-dynamics-logic] 无法解析 corpus declared asof")
             return 2
         sel_asof = date.fromisoformat(declared)
-    selection = _build_replay_selection(dataset_dir, view_name, asof_override=sel_asof)
-    if selection.asof_date not in selection.trading_days:
-        logger.error("[dataset-dynamics-logic] asof=%s 不在交易日历", asof_lock)
-        return 2
-    # The fixed scope set comes from the VERSIONED 4-scope fixture (A1-1), NOT the
-    # gitignored .perfdata view.  Derive the scope_specs from the fixture and use
-    # them downstream (the loader takes scope_specs explicitly).
-    fixture_path = os.path.join(
-        os.path.dirname(__file__), "fixtures", "review_dynamics_logic_sample.json"
-    )
+    if fixture_path is None:
+        fixture_path = os.path.join(
+            os.path.dirname(__file__), "fixtures", "review_dynamics_logic_sample.json"
+        )
     scope_specs = _load_dynamics_logic_scope_specs(dataset_dir, fixture_path)
     if len(scope_specs) != 4:
         logger.error(
             "[dataset-dynamics-logic] fixture 必须恰好 4 scopes，实际 %d",
             len(scope_specs),
         )
+        return 2
+    # Resolve union / calendar / T-1 / bar window / accepted runs from the fixture
+    # scope_specs via the SAME shared metadata owner the view path uses.
+    selection = _build_replay_selection_from_specs(
+        dataset_dir, scope_specs, asof_override=sel_asof
+    )
+    if selection.asof_date not in selection.trading_days:
+        logger.error("[dataset-dynamics-logic] asof=%s 不在交易日历", asof_lock)
         return 2
 
     asof_idx = bisect_left(selection.trading_days, selection.asof_date)
@@ -4822,14 +4844,13 @@ async def _run(args: argparse.Namespace) -> int:
             return 2
         if args.scope_type or args.scope_key:
             logger.error(
-                "[dataset-dynamics-logic] 使用 --view（默认 logic_validation_sample），"
-                "禁 --scope-type/--scope-key"
+                "[dataset-dynamics-logic] 禁 --scope-type/--scope-key（scope 固定来自 "
+                "版本化 fixture review_dynamics_logic_sample.json）"
             )
             return 2
-        dl_view = args.view or "logic_validation_sample"
         dl_history = args.history if args.history else 120
         return _run_dataset_dynamics_logic(
-            args.dataset_dir, dl_view,
+            args.dataset_dir,
             history=dl_history,
             asof_lock=args.asof_lock,
             dry_run=args.dry_run,
