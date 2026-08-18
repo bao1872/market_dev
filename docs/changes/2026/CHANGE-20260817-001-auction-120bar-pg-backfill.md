@@ -59,6 +59,21 @@
 - **scan 消费侧扩展（让历史窗口包含 backfill 数据）属单独一轮，不在本轮范围**，需在用户授权后扩展
   `load_history_final_quotes` 的 namespace 参数或新增历史查询函数。
 
+### 2.5 pywencai 竞价侧代码清理（阶段 7，审查 ref/竞价.md §3）
+
+数据源合同冻结为 pytdx 后（PRD V3.1 §0.0-A），清理不再使用的 pywencai 竞价侧代码：
+
+删除（`experiments/pytdx_auction_history/`）：
+- `auction_wencai_backfill.py`（git rm，已跟踪）
+- `explore_wencai_auction_probe.py` / `explore_wencai_auction_local.py` / `explore_wencai_raw.py`（未跟踪）
+- `wencai_cookie.txt`（敏感凭据）
+
+保留板块链（与竞价无关）：`wencai_client.py` / `wencai_board_provider.py` /
+`board_facts_service.py` / `board_sync_service.py` / pywencai 依赖。
+
+`.gitignore` 补防：新增 `experiments/**/wencai_cookie.txt`（审查 §3 指出原仅覆盖
+`backend/wencai_cookie.json`）。
+
 ---
 
 ## 3. 性能与资源控制（针对历史死机）
@@ -95,6 +110,7 @@
 - [ ] 行数核对：DB `auction_final_quotes WHERE source='historical_backfill'` ≈ 120 × eligible
 - [ ] 对账：每 bar `db_written_rows == member_rows_written`（RUN_ERROR 除外）
 - [ ] 远程进程 peak RSS 监控 < 内存上限，无 OOM
+- [x] 阶段 7 pywencai 竞价侧清理：5 文件删除 + `.gitignore` 补防；板块链单测 `test_wencai_board_provider.py` 70 passed
 
 ---
 
@@ -154,3 +170,13 @@
 修改：
 - `experiments/pytdx_auction_history/full_market_member_fact_backfill.py`
   （`_run_bar_partition` / `_bars_loop` / `run_backfill` / `_run_backfill_impl` 接线 + manifest DB 计数）
+
+删除（阶段 7 pywencai 竞价侧清理）：
+- `experiments/pytdx_auction_history/auction_wencai_backfill.py`（已跟踪，git rm）
+- `experiments/pytdx_auction_history/explore_wencai_auction_probe.py`
+- `experiments/pytdx_auction_history/explore_wencai_auction_local.py`
+- `experiments/pytdx_auction_history/explore_wencai_raw.py`
+- `experiments/pytdx_auction_history/wencai_cookie.txt`
+
+修改（阶段 7）：
+- `.gitignore`（新增 `experiments/**/wencai_cookie.txt`）

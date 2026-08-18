@@ -104,3 +104,4 @@ backend/app/config.test.py
 
 # 问财(iwencai)登录态 cookie（敏感凭据，本地/容器挂载，不进版本库）
 backend/wencai_cookie.json
+experiments/**/wencai_cookie.txt
