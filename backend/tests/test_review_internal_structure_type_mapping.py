@@ -248,6 +248,29 @@ def test_stratified_sample_bucket_coverage_and_exclusion():
     }
 
 
+def test_stratified_sample_coverage_not_forced_to_max():
+    """The per-bucket coverage guarantee must NOT force the bucket's max
+    member_count candidate (old ``pool[0]`` behavior biased the sample toward
+    the bucket upper edge).  With seeded-random coverage, the max candidate
+    (``con-19``, the sorted-first of the concept small bucket) is selected for
+    some seeds and skipped for others.  Fixed seeds -> deterministic, no flake.
+    """
+    boards, mems = _synthetic_dataset()
+    selected_any = False
+    skipped_any = False
+    for seed in range(1, 11):
+        out = _stratified_sample_boards(
+            boards, mems, target_per_family=10, seed=seed
+        )
+        keys = {c["scope_key"] for c in out["scopes"]}
+        if "con-19" in keys:
+            selected_any = True
+        else:
+            skipped_any = True
+    assert skipped_any, "max-member board must not be force-picked every time"
+    assert selected_any, "max-member board can still appear via the random draw"
+
+
 # ---------------------------------------------------------------------------
 # _hist_pct
 # ---------------------------------------------------------------------------
@@ -421,8 +444,129 @@ def test_row_ready_fraction_derived():
     assert row["concentration_available"] is True
 
 
-def test_row_unavailable_never_zero():
+def test_row_unavailable_snapshot_current_side_preserved():
+    """previous unavailable + current ready: transition unavailable, but the
+    current-side leader evidence (count/rankable/fraction) is fully known and
+    must be preserved; rate metrics stay None; reason is preserved."""
+    mf = _mf(
+        "unavailable",
+        reason="unavailable_snapshot",
+        previous_leader_count=None,        # previous side truly unknown
+        previous_leader_ids=None,
+        current_leader_count=3,
+        current_leader_ids=("x", "y", "z"),
+        retained_count=None,
+        entrant_count=None,
+        exit_count=None,
+        previous_retention=None,
+        jaccard_stability=None,
+        migration=None,
+    )
     row = build_internal_structure_type_row(
+        scope_type="concept",
+        scope_key="con-00",
+        scope_name="Concept 00",
+        trade_date="2026-08-17",
+        member_count=20,
+        size_bucket="medium",
+        foundation=_foundation(),
+        migration_facts=mf,
+        research={},
+    )
+    assert row["leadership_status"] == "unavailable"
+    assert row["leadership_reason"] == "unavailable_snapshot"  # preserved
+    assert row["leadership_previous_leader_count"] is None      # unknown -> None, never 0
+    assert row["leadership_previous_rankable_count"] == 20      # snapshot rankable is a real int
+    assert row["leadership_current_leader_count"] == 3          # current-side evidence preserved
+    assert row["leadership_current_rankable_count"] == 20
+    assert row["leadership_retained_count"] is None
+    assert row["leadership_entrant_count"] is None
+    assert row["leadership_exit_count"] is None
+    assert row["leadership_migration"] is None
+    assert row["leadership_jaccard_stability"] is None
+    assert row["leadership_previous_retention"] is None
+    # fraction is derived from current-side evidence only -> 3/20
+    assert row["leadership_current_leader_fraction"] == pytest.approx(3 / 20)
+
+
+def test_row_empty_leader_set_legal_zero_preserved():
+    """ready-empty -> ready-nonempty: reason=empty_leader_set, legal leader_count=0
+    and the set-change facts (retained/entrant/exit) are preserved; rate metrics
+    are None (fail-closed)."""
+    mf = _mf(
+        "unavailable",
+        reason="empty_leader_set",
+        previous_leader_count=0,
+        previous_leader_ids=(),
+        current_leader_count=3,
+        current_leader_ids=("x", "y", "z"),
+        retained_count=0,
+        entrant_count=3,
+        exit_count=0,
+        previous_retention=None,
+        jaccard_stability=None,
+        migration=None,
+    )
+    row = build_internal_structure_type_row(
+        scope_type="concept",
+        scope_key="con-00",
+        scope_name="Concept 00",
+        trade_date="2026-08-17",
+        member_count=20,
+        size_bucket="medium",
+        foundation=_foundation(),
+        migration_facts=mf,
+        research={},
+    )
+    assert row["leadership_status"] == "unavailable"
+    assert row["leadership_reason"] == "empty_leader_set"  # preserved
+    assert row["leadership_previous_leader_count"] == 0     # legal 0 preserved
+    assert row["leadership_current_leader_count"] == 3
+    assert row["leadership_retained_count"] == 0
+    assert row["leadership_entrant_count"] == 3
+    assert row["leadership_exit_count"] == 0
+    assert row["leadership_migration"] is None
+    assert row["leadership_jaccard_stability"] is None
+    assert row["leadership_previous_retention"] is None
+    assert row["leadership_current_leader_fraction"] == pytest.approx(3 / 20)
+
+
+def test_row_truly_unknown_stays_none_not_zero():
+    """A genuinely unknown side keeps None in the row (never coerced to 0):
+    here BOTH sides are unavailable -> leader evidence is None, and with no
+    current-side evidence the fraction is None too."""
+    mf = _mf(
+        "unavailable",
+        reason="unavailable_snapshot",
+        previous_leader_count=None,
+        current_leader_count=None,
+        retained_count=None,
+        entrant_count=None,
+        exit_count=None,
+        previous_retention=None,
+        jaccard_stability=None,
+        migration=None,
+    )
+    row = build_internal_structure_type_row(
+        scope_type="concept",
+        scope_key="con-00",
+        scope_name="Concept 00",
+        trade_date="2026-08-17",
+        member_count=20,
+        size_bucket="medium",
+        foundation=_foundation(),
+        migration_facts=mf,
+        research={},
+    )
+    assert row["leadership_previous_leader_count"] is None
+    assert row["leadership_current_leader_count"] is None
+    assert row["leadership_retained_count"] is None
+    assert row["leadership_entrant_count"] is None
+    assert row["leadership_exit_count"] is None
+    assert row["leadership_current_leader_fraction"] is None
+    assert row["leadership_migration"] is None
+    # foundation side unchanged (unavailable foundation -> None + flags False)
+    row2 = build_internal_structure_type_row(
         scope_type="concept",
         scope_key="con-00",
         scope_name="Concept 00",
@@ -432,38 +576,20 @@ def test_row_unavailable_never_zero():
         foundation=_foundation(
             **{
                 "breadth.advance_ratio": None,
-                "breadth.decline_ratio": None,
                 "capital_tilt.capital_tilt": None,
                 "concentration.price_normalized_hhi": None,
                 "concentration.amount_normalized_hhi": None,
             }
         ),
-        migration_facts=_mf("unavailable"),
+        migration_facts=_mf("ready"),
         research={},
     )
-    # leadership side: unavailable -> None (never 0 / never a derived value)
-    assert row["leadership_status"] == "unavailable"
-    assert row["leadership_migration"] is None
-    assert row["leadership_jaccard_stability"] is None
-    assert row["leadership_previous_retention"] is None
-    assert row["leadership_current_leader_fraction"] is None
-    assert row["leadership_current_leader_count"] is None
-    assert row["leadership_current_rankable_count"] is None
-    assert row["leadership_retained_count"] is None
-    assert row["leadership_entrant_count"] is None
-    assert row["leadership_exit_count"] is None
-    assert row["leadership_reason"] is None
-    # foundation side: unavailable -> None + available flags False
-    assert row["breadth_advance_ratio"] is None
-    assert row["breadth_available"] is False
-    assert row["capital_tilt"] is None
-    assert row["capital_tilt_available"] is False
-    assert row["concentration_price_hhi"] is None
-    assert row["concentration_available"] is False
-    # research: missing keys -> None
-    assert row["advance_ratio_hist_pct"] is None
-    assert row["advance_ratio_delta5d"] is None
-    assert row["migration_hist_pct"] is None
+    assert row2["breadth_advance_ratio"] is None
+    assert row2["breadth_available"] is False
+    assert row2["capital_tilt"] is None
+    assert row2["capital_tilt_available"] is False
+    assert row2["concentration_price_hhi"] is None
+    assert row2["concentration_available"] is False
 
 
 def test_row_research_cols_and_no_cs_pct():

@@ -5092,12 +5092,15 @@ def _stratified_sample_boards(
         }
         family_bucket_counts[fam] = {b: 0 for b in _IST_MAPPING_BUCKET_ORDER}
 
-        # bucket-coverage guarantee: first candidate of every non-empty bucket.
+        # bucket-coverage guarantee: one seeded-random draw from every non-empty
+        # bucket (NOT the sorted-first / max-member_count candidate) so the
+        # sample does not systematically bias toward the bucket upper edge.
         picks: list[dict] = []
         for bkt in _IST_MAPPING_BUCKET_ORDER:
             pool = buckets.get(bkt)
             if pool:
-                picks.append(pool[0])
+                picked = rng.sample(pool, 1)[0]
+                picks.append(picked)
                 family_bucket_counts[fam][bkt] += 1
         pools = {
             bkt: [c for c in buckets.get(bkt, []) if c not in picks]
@@ -5364,6 +5367,16 @@ def build_internal_structure_type_row(
     ``advance_ratio_delta5d`` / ``decline_ratio_hist_pct`` / ``decline_ratio_delta5d``
     / ``price_hhi_hist_pct`` / ``price_hhi_delta5d`` / ``migration_hist_pct`` /
     ``migration_delta5d``.
+
+    Leadership fields are a DIRECT pass-through of the production
+    ``LeadershipMigrationFacts`` — the probe does NOT re-derive availability.
+    Production already encodes ``unknown -> None`` and ``known-zero -> 0``
+    (transition unavailable with a ready side preserves that side's real
+    evidence, e.g. ``empty_leader_set`` keeps legal 0 / () and the set-difference
+    counts).  Only ``leadership_current_leader_fraction`` is derived, from
+    CURRENT-side evidence alone (current_leader_count / current_rankable_count)
+    — a transition unavailable with a ready current side still has a known
+    leader fraction.
     """
     breadth = foundation["breadth"]
     capital_tilt = foundation["capital_tilt"]
@@ -5375,20 +5388,15 @@ def build_internal_structure_type_row(
     amount_hhi = _to_fin(concentration.get("amount_normalized_hhi"))
 
     mf = migration_facts
-    mf_ready = mf is not None and mf.status == "ready"
-    current_leader_count = mf.current_leader_count if mf_ready else None
-    current_rankable_count = mf.current_rankable_count if mf_ready else None
+    current_leader_count = mf.current_leader_count if mf is not None else None
+    current_rankable_count = mf.current_rankable_count if mf is not None else None
     fraction = None
     if (
-        mf_ready
-        and current_leader_count is not None
+        current_leader_count is not None
         and current_rankable_count is not None
         and current_rankable_count > 0
     ):
         fraction = current_leader_count / current_rankable_count
-
-    def _mval(getter: Callable[[], Any]) -> float | None:
-        return _to_fin(getter()) if mf_ready else None
 
     row = {
         "scope_type": scope_type,
@@ -5411,26 +5419,84 @@ def build_internal_structure_type_row(
         "concentration_amount_hhi": amount_hhi,
         "concentration_available": price_hhi is not None and amount_hhi is not None,
         "leadership_status": mf.status if mf is not None else "unavailable",
-        "leadership_reason": mf.reason if mf_ready else None,
-        "leadership_migration": _mval(lambda: mf.migration),
-        "leadership_jaccard_stability": _mval(lambda: mf.jaccard_stability),
-        "leadership_previous_retention": _mval(lambda: mf.previous_retention),
+        "leadership_reason": mf.reason if mf is not None else None,
+        # --- production pass-through (unknown -> None, known-zero -> 0) ---
+        "leadership_migration": _to_fin(mf.migration) if mf is not None else None,
+        "leadership_jaccard_stability": (
+            _to_fin(mf.jaccard_stability) if mf is not None else None
+        ),
+        "leadership_previous_retention": (
+            _to_fin(mf.previous_retention) if mf is not None else None
+        ),
         "leadership_previous_rankable_count": (
-            mf.previous_rankable_count if mf_ready else None
+            mf.previous_rankable_count if mf is not None else None
         ),
         "leadership_current_rankable_count": current_rankable_count,
         "leadership_previous_leader_count": (
-            mf.previous_leader_count if mf_ready else None
+            mf.previous_leader_count if mf is not None else None
         ),
         "leadership_current_leader_count": current_leader_count,
-        "leadership_retained_count": mf.retained_count if mf_ready else None,
-        "leadership_entrant_count": mf.entrant_count if mf_ready else None,
-        "leadership_exit_count": mf.exit_count if mf_ready else None,
+        "leadership_retained_count": mf.retained_count if mf is not None else None,
+        "leadership_entrant_count": mf.entrant_count if mf is not None else None,
+        "leadership_exit_count": mf.exit_count if mf is not None else None,
         "leadership_current_leader_fraction": fraction,
     }
     for key in _IST_MAPPING_RESEARCH_COLS:
         row[key] = _to_fin(research.get(key))
     return row
+
+
+def _leadership_row_integrity_violations(row: dict, mf: Any) -> int:
+    """Count row/production ``LeadershipMigrationFacts`` mismatches (0 = clean).
+
+    The mapping row must be a faithful pass-through of production facts: rate
+    metrics (migration/jaccard/previous_retention) reproduce production values
+    (None stays None), side / set-change counts preserve production values
+    (including legal 0), status/reason match, and
+    ``leadership_current_leader_fraction`` equals the current-side derivation
+    (count/rankable when both known and rankable > 0, else None).
+    """
+    if mf is None:
+        return 0
+    v = 0
+    if row["leadership_status"] != mf.status:
+        v += 1
+    if row["leadership_reason"] != mf.reason:
+        v += 1
+    for key, src in (
+        ("leadership_migration", mf.migration),
+        ("leadership_jaccard_stability", mf.jaccard_stability),
+        ("leadership_previous_retention", mf.previous_retention),
+    ):
+        if row[key] != _to_fin(src):
+            v += 1
+    for key, src in (
+        ("leadership_previous_rankable_count", mf.previous_rankable_count),
+        ("leadership_current_rankable_count", mf.current_rankable_count),
+        ("leadership_previous_leader_count", mf.previous_leader_count),
+        ("leadership_current_leader_count", mf.current_leader_count),
+        ("leadership_retained_count", mf.retained_count),
+        ("leadership_entrant_count", mf.entrant_count),
+        ("leadership_exit_count", mf.exit_count),
+    ):
+        if row[key] != src:
+            v += 1
+    expected_fraction: float | None = None
+    if (
+        mf.current_leader_count is not None
+        and mf.current_rankable_count is not None
+        and mf.current_rankable_count > 0
+    ):
+        expected_fraction = mf.current_leader_count / mf.current_rankable_count
+    if (row["leadership_current_leader_fraction"] is None) != (
+        expected_fraction is None
+    ):
+        v += 1
+    elif expected_fraction is not None and not math.isclose(
+        row["leadership_current_leader_fraction"], expected_fraction
+    ):
+        v += 1
+    return v
 
 
 def _write_ist_mapping_parquet(rows: list[dict], path: str) -> int:
@@ -5595,7 +5661,7 @@ def _run_internal_structure_type_export(
         )
 
     rows: list[dict] = []
-    unavailable_to_none_violations = 0
+    leadership_integrity_violations = 0
     for spec in scope_specs:
         sk = spec.scope_key
         series = prepared.get(sk)
@@ -5689,17 +5755,11 @@ def _run_internal_structure_type_export(
                 research=research,
             )
             rows.append(row)
-            if migration_facts_list[i].status == "unavailable":
-                if any(
-                    row[k] is not None
-                    for k in (
-                        "leadership_migration",
-                        "leadership_jaccard_stability",
-                        "leadership_previous_retention",
-                        "leadership_current_leader_fraction",
-                    )
-                ):
-                    unavailable_to_none_violations += 1
+            # Pass-through integrity: the row must reproduce production facts
+            # exactly (None stays None, known-zero stays 0, known value matches).
+            leadership_integrity_violations += _leadership_row_integrity_violations(
+                row, migration_facts_list[i]
+            )
 
     total_rows = len(rows)
     print("=== internal-structure-type-export ===")
@@ -5707,12 +5767,13 @@ def _run_internal_structure_type_export(
     print(f"trade_dates                  : {trade_date_count}")
     print(f"rows                         : {total_rows}")
     print(
-        f"unavailable->None violations : {unavailable_to_none_violations} (0)"
+        f"leadership pass-through violations : "
+        f"{leadership_integrity_violations} (0)"
     )
-    if unavailable_to_none_violations:
+    if leadership_integrity_violations:
         logger.error(
-            "[ist-export] unavailable->None 语义违规=%d",
-            unavailable_to_none_violations,
+            "[ist-export] leadership pass-through 完整性违规=%d",
+            leadership_integrity_violations,
         )
         return 1
 
