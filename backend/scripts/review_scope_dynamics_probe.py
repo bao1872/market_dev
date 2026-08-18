@@ -953,6 +953,7 @@ def _parse_args() -> argparse.Namespace:
         choices=[
             "capacity-benchmark",
             "dataset-capacity-benchmark",
+            "dataset-dynamics-logic",
             "export-dataset",
             "dataset-validate",
             "replay-l1",
@@ -972,6 +973,10 @@ def _parse_args() -> argparse.Namespace:
             "build_prepared_scopes_from_union → compute_scope_observation），禁 DB/SSH/远程 "
             "PG/业务公式复制/parallel owner，需 --dataset-dir + --view + --history + "
             "--asof-lock；"
+            "dataset-dynamics-logic: 4-scope frozen Dataset 全 Dynamics 链 E2E（L1 → "
+            "build_observation_series → compute_scope_dynamics_analysis），确认 Dynamics "
+            "actually executed，并输出 12 traces（4 scopes x 3 dates）；需 --dataset-dir + "
+            "--view（默认 logic_validation_sample）+ --history（默认 120）+ --asof-lock；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -3178,7 +3183,14 @@ def _load_scope_specs(dataset_dir: str, view_name: str) -> list[Any]:
     # Resolve the selected board ids FIRST, so memberships are filtered to just
     # those boards instead of building a giant board -> members map and then
     # discarding almost all of it (matters for capacity_4096).
-    if view_name in ("dev_500", "capacity_4096", "representative_sample"):
+    if view_name in (
+        "dev_500",
+        "capacity_4096",
+        "representative_sample",
+        "logic_validation_sample",
+        "all_concepts",
+        "all_industries",
+    ):
         vpath = os.path.join(dataset_dir, "views", f"{view_name}.json")
         with open(vpath, "r", encoding="utf-8") as fh:
             view = json.load(fh)
@@ -3532,6 +3544,240 @@ def _run_dataset_capacity_benchmark(
     if not prepared:
         logger.error("prepared 为空（CAP 无法测量）")
         ok = False
+    return 0 if ok else 1
+
+
+def _run_dataset_dynamics_logic(
+    dataset_dir: str,
+    view_name: str,
+    *,
+    history: int,
+    asof_lock: str | None = None,
+    dry_run: bool = False,
+) -> int:
+    """``dataset-dynamics-logic``: 4-scope frozen-Dataset full Dynamics chain E2E.
+
+    Steps 11-14 of DYNAMICS-LOGIC-CLOSURE.  Runs the FINAL production chain over a
+    small frozen-Dataset sample (``logic_validation_sample`` = 4 scopes):
+
+        Frozen Dataset
+          -> existing source mapper (_load_capacity_facts, shared mappers)
+          -> build_union_fact_context_from_loaded_facts
+          -> build_prepared_scopes_from_union
+          -> compute_scope_observation            (L1 per scope-date)
+          -> build_observation_series             (per scope, 120D window)
+          -> compute_scope_dynamics_analysis      (Position -> EMA -> Velocity ->
+                                                   Acceleration -> Persistence -> Phase)
+
+    This resolves the ``dynamics_ms=0`` gap of the capacity runner by actually
+    EXECUTING the Dynamics chain.  Emits 12 traces (4 scopes x 3 dates): one before
+    the chain is ready, one at the first fully-ready date, and the latest date.
+
+    NO-MIGRATION: only calls the FINAL production shared owners; no DB, no SSH, no
+    remote PG, no business-formula copy, no parallel owner.  Pure validation tooling.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] dataset-dynamics-logic dataset_dir={dataset_dir} "
+            f"view={view_name} history={history} asof={asof_lock} OK"
+        )
+        return 0
+
+    import time
+
+    from app.domain.review.analysis.observation_series import build_observation_series
+    from app.domain.review.analysis.scope_dynamics import (
+        compute_scope_dynamics_analysis,
+    )
+    from app.domain.review.scope_observation import compute_scope_observation
+    from app.services.review_observation_prep_service import (
+        build_prepared_scopes_from_union,
+        build_union_fact_context_from_loaded_facts,
+    )
+
+    print("=== dataset-dynamics-logic (4-scope frozen Dataset, full Dynamics chain) ===")
+    print(f"dataset_dir : {dataset_dir}")
+    print(f"view        : {view_name}")
+    print(f"history     : {history} trading days")
+
+    # ---- Stage A: selection ----
+    if asof_lock:
+        sel_asof = date.fromisoformat(asof_lock)
+    else:
+        declared = _dataset_asof(dataset_dir)
+        if not declared:
+            logger.error("[dataset-dynamics-logic] 无法解析 corpus declared asof")
+            return 2
+        sel_asof = date.fromisoformat(declared)
+    selection = _build_replay_selection(dataset_dir, view_name, asof_override=sel_asof)
+    if not selection.scope_specs:
+        logger.error("[dataset-dynamics-logic] view 解析为空 scope_specs")
+        return 2
+    if selection.asof_date not in selection.trading_days:
+        logger.error("[dataset-dynamics-logic] asof=%s 不在交易日历", asof_lock)
+        return 2
+
+    asof_idx = bisect_left(selection.trading_days, selection.asof_date)
+    if asof_idx >= len(selection.trading_days) or (
+        selection.trading_days[asof_idx] != selection.asof_date
+    ):
+        logger.error("[dataset-dynamics-logic] asof=%s 不在交易日历", sel_asof.isoformat())
+        return 2
+    window_dates = list(
+        selection.trading_days[max(0, asof_idx - history + 1): asof_idx + 1]
+    )
+
+    scope_count = len(selection.scope_specs)
+    trade_date_count = len(window_dates)
+    print(f"scope_count        : {scope_count}")
+    print(f"trade_date_count   : {trade_date_count}")
+    print(f"union_member_count : {len(selection.union_member_ids)}")
+
+    # ---- Multi-date Dataset load + shared union prep + L1 ----
+    instr: dict[str, Any] = {}
+    facts = _load_capacity_facts(
+        dataset_dir, list(selection.scope_specs),
+        window_dates=window_dates, selection=selection, instr=instr,
+    )
+    union_ctx = build_union_fact_context_from_loaded_facts(
+        t1_by_date=facts["t1_by_date"],
+        states_by_date=facts["states_by_date"],
+        bars=facts["bars"],
+        events_by_date=facts["events_by_date"],
+    )
+    prep_counters: dict[str, int] = {}
+    prep_fallback_reasons: list[str] = []
+    prepared = build_prepared_scopes_from_union(
+        trade_dates=facts["trade_dates"],
+        scope_specs=facts["scope_specs"],
+        union_ctx=union_ctx,
+        membership_t1_by_scope=None,
+        current_only_facts_by_date=None,
+        pit_status_t="current_static",
+        pit_status_t1="current_static",
+        t1_membership_available=False,
+        prep_counters=prep_counters,
+        prep_fallback_reasons=prep_fallback_reasons,
+    )
+    if not prepared:
+        logger.error("[dataset-dynamics-logic] prepared 为空")
+        return 1
+
+    # ---- Per-scope full Dynamics chain + traces ----
+    all_phase_ready = 0
+    all_phase_insufficient = 0
+    all_phase_unavailable = 0
+    per_scope = []
+    for spec in selection.scope_specs:
+        sk = spec.scope_key
+        series = prepared.get(sk)
+        if not series or len(series) != trade_date_count:
+            logger.error("[dataset-dynamics-logic] scope %s prepared 未对齐", sk)
+            return 1
+        # Build per-date L1 observation dicts (the formal payload shape).
+        snapshots: list[dict[str, Any]] = []
+        for ps in series:
+            obs = compute_scope_observation(
+                scope_type=ps.scope_type,
+                scope_key=ps.scope_key,
+                trade_date=ps.trade_date,
+                pit_member_ids=[str(i) for i in ps.pit_member_ids],
+                pit_member_ids_t1=[str(i) for i in ps.pit_member_ids_t1],
+                members=ps.members,
+                events=ps.events,
+                t1_membership_available=ps.t1_membership_available,
+                event_coverage_member_ids=ps.event_coverage_member_ids,
+            )
+            snapshots.append(
+                {
+                    "trade_date": ps.trade_date.isoformat(),
+                    "readiness": "ready",
+                    "payload": obs,
+                }
+            )
+        # Formal ObservationSeries + full Dynamics chain.
+        obs_series = build_observation_series(
+            scope_type=spec.scope_type,
+            scope_key=str(sk),
+            from_date=window_dates[0],
+            to_date=window_dates[-1],
+            trading_dates=window_dates,
+            snapshot_series=snapshots,
+        )
+        dyn = compute_scope_dynamics_analysis(obs_series)
+        hd = dyn["historical_dynamics"]
+        phase = dyn["dynamics_phase"]
+
+        n_ready = sum(1 for p in phase if p["status"] == "ready")
+        n_ins = sum(1 for p in phase if p["status"] == "insufficient_history")
+        n_unavail = sum(1 for p in phase if p["status"] == "unavailable_current")
+        all_phase_ready += n_ready
+        all_phase_insufficient += n_ins
+        all_phase_unavailable += n_unavail
+
+        # Pick 3 trace dates: first non-ready, first fully-ready, latest.
+        first_ready_idx = next(
+            (i for i, p in enumerate(phase) if p["status"] == "ready"), None
+        )
+        pre_ready_idx = (
+            first_ready_idx - 1 if first_ready_idx and first_ready_idx > 0 else 0
+        )
+        latest_idx = len(phase) - 1
+        trace_idx = sorted(
+            {pre_ready_idx, first_ready_idx if first_ready_idx is not None else latest_idx, latest_idx}
+        )
+
+        per_scope.append(
+            {
+                "scope_type": spec.scope_type,
+                "scope_key": str(sk),
+                "scope_name": spec.scope_name,
+                "member_count": len(spec.member_ids),
+                "dates": len(phase),
+                "phase_ready": n_ready,
+                "phase_insufficient": n_ins,
+                "phase_unavailable": n_unavail,
+                "trace_indices": trace_idx,
+                "trace_dates": [window_dates[i].isoformat() for i in trace_idx],
+                "phase": phase,
+                "historical_dynamics": hd,
+            }
+        )
+
+    # ---- Output: execution confirmation + traces ----
+    print("--- Dynamics actually executed (per scope) ---")
+    for s in per_scope:
+        print(
+            f"  {s['scope_name']} ({s['scope_type']}, n={s['member_count']}): "
+            f"ready={s['phase_ready']} insufficient={s['phase_insufficient']} "
+            f"unavailable={s['phase_unavailable']} dates={s['dates']}"
+        )
+    print(f"TOTAL phase rows    : {sum(s['dates'] for s in per_scope)}")
+    print(f"TOTAL ready         : {all_phase_ready}")
+    print(f"TOTAL insufficient  : {all_phase_insufficient}")
+    print(f"TOTAL unavailable   : {all_phase_unavailable}")
+    dynamics_executed = all_phase_ready > 0
+    print(f"Dynamics executed   : {'YES' if dynamics_executed else 'NO'}")
+
+    print("--- 12 traces (4 scopes x 3 dates) ---")
+    for s in per_scope:
+        print(f"[trace] scope={s['scope_name']} ({s['scope_type']}, n={s['member_count']})")
+        for i, td in zip(s["trace_indices"], s["trace_dates"], strict=True):
+            p = s["phase"][i]
+            pos = s["historical_dynamics"]["position"][i]
+            e5 = s["historical_dynamics"]["ema5"][i]
+            e20 = s["historical_dynamics"]["ema20"][i]
+            vel = s["historical_dynamics"]["velocity"][i]
+            acc = s["historical_dynamics"]["acceleration"][i]
+            per = s["historical_dynamics"]["persistence"][i]
+            print(
+                f"  date={td} status={p['status']} phase={p['phase']} "
+                f"pos={pos.get('position')} ema5={e5.get('value')} ema20={e20.get('value')} "
+                f"vel={vel.get('value')} acc={acc.get('value')} "
+                f"upper_occ={per.get('upper_occupancy')} lower_occ={per.get('lower_occupancy')}"
+            )
+
+    ok = dynamics_executed and all_phase_ready >= 0 and len(per_scope) == scope_count
     return 0 if ok else 1
 
 
@@ -4438,6 +4684,25 @@ async def _run(args: argparse.Namespace) -> int:
         return _run_dataset_capacity_benchmark(
             args.dataset_dir, args.view,
             history=args.history,
+            asof_lock=args.asof_lock,
+            dry_run=args.dry_run,
+        )
+    # ---- dataset-dynamics-logic：4-scope frozen Dataset 全 Dynamics 链 E2E（不连 DB）----
+    if args.mode == "dataset-dynamics-logic":
+        if not args.dataset_dir:
+            logger.error("[dataset-dynamics-logic] --dataset-dir 为必填")
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[dataset-dynamics-logic] 使用 --view（默认 logic_validation_sample），"
+                "禁 --scope-type/--scope-key"
+            )
+            return 2
+        dl_view = args.view or "logic_validation_sample"
+        dl_history = args.history if args.history else 120
+        return _run_dataset_dynamics_logic(
+            args.dataset_dir, dl_view,
+            history=dl_history,
             asof_lock=args.asof_lock,
             dry_run=args.dry_run,
         )

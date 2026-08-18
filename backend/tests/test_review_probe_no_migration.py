@@ -170,6 +170,62 @@ def test_nm2_no_experimental_owner_function_in_runner() -> None:
         assert pat not in fn, f"dataset-capacity-benchmark must not use parallel-owner token {pat!r}"
 
 
+def _dynamics_logic_fn() -> str:
+    """Extract the ``_run_dataset_dynamics_logic`` function body only."""
+    src = _source()
+    start = src.index("def _run_dataset_dynamics_logic")
+    end = src.index("\ndef ", start)
+    return src[start:end]
+
+
+def test_nm1_dynamics_logic_calls_shared_owners_only() -> None:
+    """``_run_dataset_dynamics_logic`` (4-scope Dataset Dynamics E2E) must call only
+    the FINAL production shared owners and never the DB orchestration owners."""
+    fn = _dynamics_logic_fn()
+    for owner in [
+        "build_union_fact_context_from_loaded_facts",
+        "build_prepared_scopes_from_union",
+        "compute_scope_observation",
+        "build_observation_series",
+        "compute_scope_dynamics_analysis",
+    ]:
+        assert owner in fn, f"dynamics-logic must call shared owner {owner!r}"
+    for forbidden in [
+        "AsyncSessionLocal",
+        "asyncpg",
+        "psycopg",
+        "PGPASSWORD",
+        "SQLAlchemy",
+        "compute_current_static_scope_dynamics_batch",
+        "resolve_current_memberships_batch",
+    ]:
+        assert forbidden not in fn, (
+            f"dynamics-logic must not use DB orchestration symbol {forbidden!r}"
+        )
+
+
+def test_nm3_dynamics_logic_no_business_formula_copy() -> None:
+    """``_run_dataset_dynamics_logic`` must NOT re-derive any business math: no
+    local formula function definitions, no EMA alpha (2/(N+1)), no manual
+    percentile recursion, no persistence arithmetic.  It only calls the shared
+    owners (build_observation_series / compute_scope_dynamics_analysis).
+    """
+    fn = _dynamics_logic_fn()
+    # No local business-owner function definitions.
+    assert re.search(r"^\s+def \w+", fn, re.M) is None, (
+        "dynamics-logic must not define local business functions"
+    )
+    # No EMA alpha constant / manual recursion (PRD alpha = 2/(span+1)).
+    for pat in [r"2\s*/\s*\(", r"alpha", r"1\.0\s*-\s*alpha", r"state\s*="]:
+        assert not re.search(pat, fn), f"dynamics-logic must not re-derive EMA math ({pat!r})"
+    # No manual percentile / below_or_equal re-derivation.
+    for pat in [r"percentile", r"below_or_equal", r"\.sort\(\)"]:
+        assert not re.search(pat, fn), f"dynamics-logic must not re-derive Position ({pat!r})"
+    # No persistence upper/lower threshold arithmetic.
+    for pat in [r"upper_count", r"lower_count", r"threshold"]:
+        assert not re.search(pat, fn), f"dynamics-logic must not re-derive Persistence ({pat!r})"
+
+
 # ---------------------------------------------------------------------------
 # Gate NM-3: the Dataset runner must not copy any business formula.
 # ---------------------------------------------------------------------------
