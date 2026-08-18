@@ -1207,11 +1207,14 @@ def _parse_args() -> argparse.Namespace:
             "读 Commit 2 candidate results --dataset-dir，join Commit 1 mapping 取 leadership "
             "counts，写 review-isdtype-select-<sha12>-v1/{candidate_selection_summary.json, "
             "representative_replay.json, manifest.json}；"
-            "internal-structure-type-fragmenting-redesign: TYPE-MAPPING Commit 2C — "
-            "research-only Fragmenting redesign（研究 LeaderCount 容量保持 LCR=current/"
-            "previous、换入换出平衡 exit−entrant、留存 retention 对 Rotating/Fragmenting "
-            "分界的贡献；高 Migration 前提下 Rotating-v2=容量保持/Fragmenting-v2=收缩候选 "
-            "LCR threshold sweep + 旧类重叠 + 代表性 replay；不冻结 threshold、不写正式 "
+            "internal-structure-type-fragmenting-redesign: TYPE-MAPPING Commit 2C-A1 "
+            "（INDEPENDENT-REPLACEMENT-EVIDENCE）— research-only Fragmenting redesign "
+            "（保留 LCR=current/previous；exit−entrant 降级为 derived_identity_only + "
+            "set-identity integrity gate（Current−Previous==Entrant−Exit）；新增 "
+            "ReplacementCoverage=Entrant/Exit 作为第二个可能独立维度；输出旧 R/F/overlap/"
+            "neither 各组 LCR/RC/retention p10–p90 + LCR×RC joint bands；old overlap 的 "
+            "LCR×RC joint mapping（anchors 0.50/0.75/1.00）+ 3×3=9 二维 sweep + 4 类代表性 "
+            "replay；不定义 Rotating-v3/Fragmenting-v3、不冻结 threshold、不写正式 "
             "Fragmenting 新公式），读 Commit 2 candidate results --dataset-dir，join Commit 1 "
             "mapping 取 leadership counts，写 review-isdtype-frag2-<sha12>-v1/"
             "{fragmenting_redesign_summary.json, representative_replay.json, manifest.json}；"
@@ -7004,13 +7007,26 @@ _IST_SELECT_RF_COMPARE_FIELDS = (
 
 # TYPE-MAPPING Commit 2C — Fragmenting redesign（research-only）。
 # 核心假设（审查 §17-18）：Rotating / Fragmenting 的真正分界不是 leader
-# fraction 高低，而是 Leadership 换人后核心组织容量是否被补回：
-#   Rotating-v2    ：高 Migration + LeaderCount 容量保持（LCR 高）+ 换入可补换出
-#   Fragmenting-v2 ：高 Migration + LeaderCount 收缩（LCR 低）+ Exit > Entrant
-# 本轮只研究透明量，不冻结 threshold。
-_IST_2C_LCR_GRID = (0.5, 0.6, 0.7, 0.8)   # LCR 阈值 sweep（research 假设）
-_IST_2C_LCR_REFERENCE = 0.6               # 参考锚点（非冻结）
-_IST_2C_LCR_STRICT = 0.4                  # 更严格锚点（contraction 高证据）
+# fraction 高低，而是 Leadership 换人后核心组织容量是否被补回。
+#
+# Commit 2C-A1（INDEPENDENT-REPLACEMENT-EVIDENCE）审查修正：exit−entrant 与 LCR
+# 是同一 contraction 事实的代数等价表达（P=R+E, C=R+N ⇒ E−N=P−C，LCR=C/P），
+# 不得再当第二独立信号；真正可能独立的第二维度是 ReplacementCoverage =
+# Entrant/Exit（发生替换时新 Leadership 的补位能力）。本轮只研究透明量，
+# 不冻结 threshold，不定义 Rotating-v3/Fragmenting-v3。
+
+# 2C-A1 研究锚点（LCR / RC 共享，不冻结；禁止沿用 0.5/0.6/0.7/0.8 单向 sweep）。
+_IST_2C_ANCHORS = (0.50, 0.75, 1.00)
+_IST_2C_QUANTILES = (0.10, 0.25, 0.50, 0.75, 0.90)
+# 2C-A1 4 类 replay 的高低切分（capacity preserved / replacement strong 语义）。
+_IST_2C_REPLAY_CUT = 1.00
+
+# 历史 v2（Commit 2C 初始版）常量——仅保留为历史 experiment evidence 复现，
+# 不得再作为自然分离证据（2C-A1 审查 §2-§5）。原 v2 数据保留在 perfdata。
+_IST_2C_LCR_GRID = (0.5, 0.6, 0.7, 0.8)   # 历史 v2 LCR sweep（已废弃，禁复用）
+_IST_2C_LCR_REFERENCE = 0.6               # 历史 v2 参考锚点（已废弃）
+_IST_2C_LCR_STRICT = 0.4                  # 历史 v2 严格锚点（已废弃）
+
 _IST_2C_RF2_GROUP_FIELDS = (
     "leadership_migration",
     "leadership_jaccard_stability",
@@ -7021,6 +7037,7 @@ _IST_2C_RF2_GROUP_FIELDS = (
     "leadership_previous_retention",
     "research_leader_count_preservation",
     "research_exit_minus_entrant",
+    "research_replacement_coverage",
 )
 
 
@@ -7288,7 +7305,12 @@ def _leader_count_preservation(row: dict) -> float | None:
 
 
 def _exit_minus_entrant(row: dict) -> float | None:
-    """透明 exit−entrant 平衡（原始 exit/entrant count 也单独保留）。"""
+    """exit−entrant 透明 identity/debug fact（derived_identity_only）。
+
+    集合恒等式 P=R+E, C=R+N ⇒ E−N=P−C：exit−entrant 与 LCR=C/P 代数等价，
+    不是独立维度（2C-A1 审查 §2）。保留为数据一致性调试与身份事实，不再作为
+    independent separator；一致性由 ``_identity_gate_violations`` 校验。
+    """
     ex = _to_fin(row.get("leadership_exit_count"))
     en = _to_fin(row.get("leadership_entrant_count"))
     if ex is None or en is None:
@@ -7296,13 +7318,171 @@ def _exit_minus_entrant(row: dict) -> float | None:
     return ex - en
 
 
-def _evaluate_rf2_variant(row: dict, lcr_thr: float, frag_mode: bool) -> bool:
-    """Rotating-v2（容量保持）/ Fragmenting-v2（收缩）候选假设。
+def _replacement_coverage(row: dict) -> float | None:
+    """RC_T = entrant_count / exit_count（None-safe）。
 
-    前提：migration_hist_pct >= HIGH（参考 0.80，与 Commit 2 一致）。
-      * frag_mode=True ：LCR < lcr_thr 且 exit > entrant   → 收缩候选
-      * frag_mode=False：LCR >= lcr_thr 且 entrant >= exit → 容量保持候选
-    任一输入缺失 → False（不把 None 当 0）。阈值只做 research 假设，不冻结。
+    语义：发生替换时新 Leadership 的补位能力。≈1 退出多少基本补回；<1 补位
+    不足；>1 新核心形成速度超过退出。Exit<=0/unknown → None（不填 0/1，不除零）。
+    """
+    en = _to_fin(row.get("leadership_entrant_count"))
+    ex = _to_fin(row.get("leadership_exit_count"))
+    if en is None or ex is None or ex <= 0:
+        return None
+    return en / ex
+
+
+def _identity_gate_violations(rows: list[dict]) -> list[dict]:
+    """Set-identity integrity gate：``Current−Previous == Entrant−Exit``。
+
+    P=R+E, C=R+N ⇒ C−P=N−E。四类 leader count 均非 None 的 ready 行必须
+    exact-equal（合法 0 视为真 0）；不一致行输出为 violation，正常应为 0。
+    """
+    out = []
+    for r in rows:
+        cur = _to_fin(r.get("leadership_current_leader_count"))
+        prev = _to_fin(r.get("leadership_previous_leader_count"))
+        en = _to_fin(r.get("leadership_entrant_count"))
+        ex = _to_fin(r.get("leadership_exit_count"))
+        if cur is None or prev is None or en is None or ex is None:
+            continue
+        if cur - prev != en - ex:
+            out.append(
+                {
+                    "scope_key": r.get("scope_key"),
+                    "trade_date": r.get("trade_date"),
+                    "current_leader_count": cur,
+                    "previous_leader_count": prev,
+                    "entrant_count": en,
+                    "exit_count": ex,
+                    "current_minus_previous": cur - prev,
+                    "entrant_minus_exit": en - ex,
+                }
+            )
+    return out
+
+
+def _quantile_profile(values: list[float], quantiles: tuple) -> dict:
+    """p-quantiles of finite values（None 过滤；count 保留；空序列 p 为 None）。"""
+    vals = sorted(v for v in values if v is not None)
+    return {
+        "count": len(vals),
+        **{
+            f"p{int(q * 100):02d}": (_percentile_sorted(vals, q) if vals else None)
+            for q in quantiles
+        },
+    }
+
+
+def _anchor_band_name(v: float | None, anchors: tuple) -> str | None:
+    """3 anchors → 4 bands：lt_a0 / a0–a1 / a1–a2 / ge_a2（None → None）。"""
+    if v is None:
+        return None
+    a = list(anchors)
+    if v < a[0]:
+        return f"lt_{a[0]:.2f}"
+    if v < a[1]:
+        return f"{a[0]:.2f}_{a[1]:.2f}"
+    if v < a[2]:
+        return f"{a[1]:.2f}_{a[2]:.2f}"
+    return f"ge_{a[2]:.2f}"
+
+
+def _joint_band_counts(
+    rows: list[dict], lcr_field: str, rc_field: str, anchors: tuple
+) -> dict:
+    """LCR × RC joint band counts/rates（research bins，不自动分类）。"""
+    total = len(rows)
+    matrix: dict[tuple, int] = {}
+    for r in rows:
+        lb = _anchor_band_name(_to_fin(r.get(lcr_field)), anchors)
+        rb = _anchor_band_name(_to_fin(r.get(rc_field)), anchors)
+        if lb is None or rb is None:
+            continue
+        key = (lb, rb)
+        matrix[key] = matrix.get(key, 0) + 1
+    out: dict[str, dict] = {}
+    for (lb, rb), cnt in sorted(matrix.items()):
+        out[f"{lb} x {rb}"] = {
+            "count": cnt,
+            "rate": round(cnt / total, 6) if total else None,
+        }
+    return out
+
+
+def _sensitivity_quadrants(
+    rows: list[dict], lcr_field: str, rc_field: str, anchors: tuple
+) -> dict:
+    """3×3=9 二维 threshold sweep：每对 (t_lcr, t_rc) 输出四象限计数/率。
+
+    修复 v2 单变量 sweep 的代数冗余问题：LCR 与 RC 各取 3 个锚点构成真正二维网格，
+    每个格点独立给出 (LCR>=t_lcr) × (RC>=t_rc) 四象限分布。
+    """
+    out: dict[str, dict] = {}
+    for tl in anchors:
+        for tr in anchors:
+            hh = hl = lh = ll = 0
+            for r in rows:
+                lcr = _to_fin(r.get(lcr_field))
+                rc = _to_fin(r.get(rc_field))
+                if lcr is None or rc is None:
+                    continue
+                a = lcr >= tl
+                b = rc >= tr
+                if a and b:
+                    hh += 1
+                elif a and not b:
+                    hl += 1
+                elif not a and b:
+                    lh += 1
+                else:
+                    ll += 1
+            total = hh + hl + lh + ll
+            out[f"lcr_ge_{tl:.2f}_rc_ge_{tr:.2f}"] = {
+                "quadrant_counts": {
+                    "high_high": hh,
+                    "high_low": hl,
+                    "low_high": lh,
+                    "low_low": ll,
+                },
+                "total": total,
+                "quadrant_rates": {
+                    "high_high": round(hh / total, 6) if total else None,
+                    "high_low": round(hl / total, 6) if total else None,
+                    "low_high": round(lh / total, 6) if total else None,
+                    "low_low": round(ll / total, 6) if total else None,
+                },
+            }
+    return out
+
+
+def _pick_joint_replay(
+    rows: list[dict], lcr_cut: float, rc_cut: float, limit: int
+) -> dict:
+    """4-class representative replay：high/low LCR × high/low RC（无自动分类）。"""
+    buckets = {
+        "high_lcr_high_rc": [],
+        "high_lcr_low_rc": [],
+        "low_lcr_high_rc": [],
+        "low_lcr_low_rc": [],
+    }
+    for r in rows:
+        lcr = _to_fin(r.get("research_leader_count_preservation"))
+        rc = _to_fin(r.get("research_replacement_coverage"))
+        if lcr is None or rc is None:
+            continue
+        a = lcr >= lcr_cut
+        b = rc >= rc_cut
+        key = ("high_lcr_" if a else "low_lcr_") + ("high_rc" if b else "low_rc")
+        buckets[key].append(r)
+    return {k: _pick_spread_replay(v, limit) for k, v in buckets.items()}
+
+
+def _evaluate_rf2_variant(row: dict, lcr_thr: float, frag_mode: bool) -> bool:
+    """【历史 v2，已废弃】Rotating-v2 / Fragmenting-v2 候选假设。
+
+    2C-A1 审查确认：t<1 时 `entrant>=exit ⟺ LCR>=1`、`exit>entrant ⟺ LCR<t`，
+    两个条件代数等价，v2 低 overlap 是规则互斥/留空造成，不能作为自然分离证据。
+    本函数仅保留为历史 experiment evidence 复现，不得用于新结论。
     """
     mig = _to_fin(row.get("migration_hist_pct"))
     lcr = _to_fin(row.get("research_leader_count_preservation"))
@@ -7317,19 +7497,30 @@ def _evaluate_rf2_variant(row: dict, lcr_thr: float, frag_mode: bool) -> bool:
 
 
 def _pick_rf2_replay(rows: list[dict], frag_mode: bool, lcr_thr: float, limit: int) -> list[dict]:
-    """Deterministic spread-across-scope replay pick for a v2 hypothesis bucket."""
+    """【历史 v2，已废弃】Deterministic spread-across-scope replay pick。
+
+    显式区分 None 与合法 0：不再用 ``value or sentinel``（0.0 会被误判为缺失）。
+    """
     if frag_mode:
-        pool = [
-            r for r in rows
-            if _evaluate_rf2_variant(r, lcr_thr, True)
-            and (_to_fin(r.get("research_leader_count_preservation")) or 9.0) <= _IST_2C_LCR_STRICT
-        ]
+        pool = []
+        for r in rows:
+            lcr = _to_fin(r.get("research_leader_count_preservation"))
+            if (
+                _evaluate_rf2_variant(r, lcr_thr, True)
+                and lcr is not None
+                and lcr <= _IST_2C_LCR_STRICT
+            ):
+                pool.append(r)
     else:
-        pool = [
-            r for r in rows
-            if _evaluate_rf2_variant(r, lcr_thr, False)
-            and (_to_fin(r.get("research_leader_count_preservation")) or -1.0) >= 0.8
-        ]
+        pool = []
+        for r in rows:
+            lcr = _to_fin(r.get("research_leader_count_preservation"))
+            if (
+                _evaluate_rf2_variant(r, lcr_thr, False)
+                and lcr is not None
+                and lcr >= 0.8
+            ):
+                pool.append(r)
     return _pick_spread_replay(pool, limit)
 
 
@@ -7735,14 +7926,20 @@ def _run_internal_structure_type_fragmenting_redesign(
     *,
     dry_run: bool = False,
 ) -> int:
-    """TYPE-MAPPING Commit 2C — Fragmenting redesign（research-only）。
+    """TYPE-MAPPING Commit 2C-A1 — Independent Replacement Evidence（research-only）。
 
-    读 Commit 2 candidate results + join Commit 1 mapping leadership counts，
-    研究 LeaderCount 容量保持（LCR）、换入换出平衡、留存对 Rotating / Fragmenting
-    分界的贡献（审查 §17-18）。产出：
-      review-isdtype-frag2-<sha12>-v1/fragmenting_redesign_summary.json
-      review-isdtype-frag2-<sha12>-v1/representative_replay.json
-      review-isdtype-frag2-<sha12>-v1/manifest.json
+    2C-A1 审查修正（§1-§9）：
+      1) LCR=Current/Previous 保留为主轴；
+      2) exit−entrant 降级为 derived_identity_only，并输出集合恒等式 integrity
+         gate（Current−Previous == Entrant−Exit，ready 行 mismatch 必须为 0）；
+      3) 新增 ReplacementCoverage=Entrant/Exit 作为真正可能独立的第二维度；
+      4) 不定义 Rotating-v3/Fragmenting-v3：先输出 old R/F/overlap/neither 各组
+         LCR / RC / retention 的 p10–p90 分布 + LCR×RC joint bands；
+      5) 对 old overlap 做 LCR×RC joint mapping（anchors 0.50/0.75/1.00）+
+         3×3=9 二维 threshold sweep（四象限计数/率）；
+      6) 对 old overlap 做 4 类代表性 replay（high/low LCR × high/low RC），
+         由人工语义审阅决定哪组组合像 Rotating / Fragmenting；
+      7) 原 v2 低 overlap 仅保留为历史 experiment evidence，不再当作分离质量。
     不写 production owner、不冻结 threshold、不进入 Trading Context。
     """
     cand_results_path = os.path.join(dataset_dir, "research_candidate_results.parquet")
@@ -7806,14 +8003,29 @@ def _run_internal_structure_type_fragmenting_redesign(
         )
     rows.sort(key=lambda r: (str(r.get("scope_key")), str(r.get("trade_date"))))
 
-    # ---- Stage 2C-1: 透明研究特征（LCR / exit−entrant；retention 已有）----
+    class_keys = {cand: f"research_candidate_{cand}" for cand in _IST_CANDIDATE_CLASSES}
+
+    # ---- Stage A1-1/2/3: 透明研究特征（LCR 保留；exit−entrant identity；RC 新增）----
     for r in rows:
         r["research_leader_count_preservation"] = _leader_count_preservation(r)
         r["research_exit_minus_entrant"] = _exit_minus_entrant(r)
+        r["research_replacement_coverage"] = _replacement_coverage(r)
 
-    class_keys = {cand: f"research_candidate_{cand}" for cand in _IST_CANDIDATE_CLASSES}
+    # ---- Stage A1-2: set-identity integrity gate（ready 行 mismatch 必须为 0）----
+    identity_violations = _identity_gate_violations(rows)
+    checked = len(rows) - sum(
+        1 for r in rows if not all(
+            _to_fin(r.get(f)) is not None
+            for f in (
+                "leadership_current_leader_count",
+                "leadership_previous_leader_count",
+                "leadership_entrant_count",
+                "leadership_exit_count",
+            )
+        )
+    )
 
-    # ---- Stage 2C-2: 新特征跨旧 R/F 分组分布 ----
+    # ---- Stage A1-4: 旧 R/F 分组（含 overlap / neither）----
     part = _rotate_fragment_partition(
         rows, class_keys["Rotating"], class_keys["Fragmenting"]
     )
@@ -7823,118 +8035,169 @@ def _run_internal_structure_type_fragmenting_redesign(
         ("overlap", part["overlap"]),
         ("neither", part["neither"]),
     )
+
+    # ---- Stage A1-5: 各组 LCR / RC / retention p10–p90 + LCR×RC joint bands ----
+    profile_fields = (
+        "research_leader_count_preservation",
+        "research_replacement_coverage",
+        "leadership_previous_retention",
+    )
+    group_quantile_profiles = {
+        gname: {
+            f: _quantile_profile(
+                [_to_fin(r.get(f)) for r in grows], _IST_2C_QUANTILES
+            )
+            for f in profile_fields
+        }
+        for gname, grows in rf_group_names
+    }
+    group_joint_bands = {
+        gname: _joint_band_counts(
+            grows,
+            "research_leader_count_preservation",
+            "research_replacement_coverage",
+            _IST_2C_ANCHORS,
+        )
+        for gname, grows in rf_group_names
+    }
     group_distribution = {
         gname: {f: _numeric_group_stats(grows, f) for f in _IST_2C_RF2_GROUP_FIELDS}
         for gname, grows in rf_group_names
     }
 
-    # ---- Stage 2C-3: v2 候选 threshold sweep（透明研究）----
-    sweep: dict[str, dict[str, dict]] = {"Rotating-v2": {}, "Fragmenting-v2": {}}
-    for thr in _IST_2C_LCR_GRID:
-        for name, frag_mode in (("Rotating-v2", False), ("Fragmenting-v2", True)):
-            flags = [_evaluate_rf2_variant(r, thr, frag_mode) for r in rows]
-            sweep[name][str(thr)] = _hit_stats_from_flags(rows, flags)
-
-    # ---- Stage 2C-4: 参考 v2 + 与旧类的重叠 ----
-    lcr_ref = _IST_2C_LCR_REFERENCE
-    rot_v2 = [_evaluate_rf2_variant(r, lcr_ref, False) for r in rows]
-    frag_v2 = [_evaluate_rf2_variant(r, lcr_ref, True) for r in rows]
-    for r, rv, fv in zip(rows, rot_v2, frag_v2):
-        r["research_rf2_Rotating"] = rv
-        r["research_rf2_Fragmenting"] = fv
-
-    old_rot = [r for r in rows if r.get(class_keys["Rotating"])]
-    old_frag = [r for r in rows if r.get(class_keys["Fragmenting"])]
-    rot_v2_rows = [r for r in rows if r["research_rf2_Rotating"]]
-    frag_v2_rows = [r for r in rows if r["research_rf2_Fragmenting"]]
+    # ---- Stage A1-5/7: old overlap 的 LCR×RC joint mapping + 3×3=9 sweep ----
     overlap_rows = [
         r
         for r in rows
         if r.get(class_keys["Rotating"]) and r.get(class_keys["Fragmenting"])
     ]
-    v2_overlap_vs_old = {
-        "old_rotating_hits": len(old_rot),
-        "rotating_v2_hits": len(rot_v2_rows),
-        "old_fragmenting_hits": len(old_frag),
-        "fragmenting_v2_hits": len(frag_v2_rows),
-        "old_rotating_captured_by_rotating_v2": sum(
-            1 for r in old_rot if r["research_rf2_Rotating"]
-        ),
-        "old_fragmenting_captured_by_fragmenting_v2": sum(
-            1 for r in old_frag if r["research_rf2_Fragmenting"]
-        ),
-        "old_fragmenting_now_rotating_v2": sum(
-            1 for r in old_frag if r["research_rf2_Rotating"]
-        ),
-        "old_overlap_rows_contracting_frag_v2": sum(
-            1 for r in overlap_rows if r["research_rf2_Fragmenting"]
-        ),
-        "old_overlap_rows_preserved_rot_v2": sum(
-            1 for r in overlap_rows if r["research_rf2_Rotating"]
-        ),
-        "fragmenting_v2_only_count": sum(
-            1
-            for r in rows
-            if r["research_rf2_Fragmenting"] and not r.get(class_keys["Fragmenting"])
-        ),
-    }
+    overlap_joint_mapping = _joint_band_counts(
+        overlap_rows,
+        "research_leader_count_preservation",
+        "research_replacement_coverage",
+        _IST_2C_ANCHORS,
+    )
+    overlap_sensitivity = _sensitivity_quadrants(
+        overlap_rows,
+        "research_leader_count_preservation",
+        "research_replacement_coverage",
+        _IST_2C_ANCHORS,
+    )
 
-    # ---- Stage 2C-5: representative replay ----
+    # ---- Stage A1-6: old overlap 4 类代表性 replay（high/low LCR × high/low RC）----
     replay_fields = (
         "scope_key",
         "scope_name",
         "trade_date",
         "size_bucket",
         "leadership_migration",
+        "leadership_jaccard_stability",
         "leadership_previous_leader_count",
         "leadership_current_leader_count",
+        "leadership_retained_count",
         "leadership_entrant_count",
         "leadership_exit_count",
         "leadership_previous_retention",
         "research_leader_count_preservation",
         "research_exit_minus_entrant",
+        "research_replacement_coverage",
         "research_candidate_Rotating",
         "research_candidate_Fragmenting",
-        "research_rf2_Rotating",
-        "research_rf2_Fragmenting",
     )
-    contraction_replay = _pick_rf2_replay(rows, True, lcr_ref, 10)
-    preserved_replay = _pick_rf2_replay(rows, False, lcr_ref, 10)
+    joint_replay = _pick_joint_replay(
+        overlap_rows, _IST_2C_REPLAY_CUT, _IST_2C_REPLAY_CUT, 10
+    )
+    replay_pool_counts = {
+        "high_lcr_high_rc": 0,
+        "high_lcr_low_rc": 0,
+        "low_lcr_high_rc": 0,
+        "low_lcr_low_rc": 0,
+    }
+    for r in overlap_rows:
+        lcr = _to_fin(r.get("research_leader_count_preservation"))
+        rc = _to_fin(r.get("research_replacement_coverage"))
+        if lcr is None or rc is None:
+            continue
+        a = lcr >= _IST_2C_REPLAY_CUT
+        b = rc >= _IST_2C_REPLAY_CUT
+        key = ("high_lcr_" if a else "low_lcr_") + ("high_rc" if b else "low_rc")
+        replay_pool_counts[key] += 1
     representative_replay = {
-        "fragmenting_v2_contraction": _replay_rows_compact(
-            contraction_replay, replay_fields
+        k: _replay_rows_compact(v, replay_fields)
+        for k, v in joint_replay.items()
+    }
+
+    # ---- 历史 v2 context（仅复现，不得当作分离证据）----
+    lcr_ref = _IST_2C_LCR_REFERENCE
+    rot_v2 = [_evaluate_rf2_variant(r, lcr_ref, False) for r in rows]
+    frag_v2 = [_evaluate_rf2_variant(r, lcr_ref, True) for r in rows]
+    old_rot = [r for r in rows if r.get(class_keys["Rotating"])]
+    old_frag = [r for r in rows if r.get(class_keys["Fragmenting"])]
+    rot_v2_rows = [r for r, f in zip(rows, rot_v2) if f]
+    frag_v2_rows = [r for r, f in zip(rows, frag_v2) if f]
+    historical_v2_context = {
+        "note": (
+            "2C-A1 审查 §2-§5：v2 两个条件代数等价（t<1 时 entrant>=exit⟺LCR>=1，"
+            "exit>entrant⟺LCR<t），低 overlap 主要由规则互斥/留空造成，不作为自然分离"
+            "证据。以下仅保留历史 experiment evidence 复现。"
         ),
-        "rotating_v2_preserved": _replay_rows_compact(preserved_replay, replay_fields),
+        "old_rotating_hits": len(old_rot),
+        "rotating_v2_hits": len(rot_v2_rows),
+        "old_fragmenting_hits": len(old_frag),
+        "fragmenting_v2_hits": len(frag_v2_rows),
+        "old_rotating_captured_by_rotating_v2": sum(
+            1 for r in old_rot if _evaluate_rf2_variant(r, lcr_ref, False)
+        ),
+        "old_fragmenting_captured_by_fragmenting_v2": sum(
+            1 for r in old_frag if _evaluate_rf2_variant(r, lcr_ref, True)
+        ),
+        "old_overlap_rows_contracting_frag_v2": sum(
+            1 for r in overlap_rows if _evaluate_rf2_variant(r, lcr_ref, True)
+        ),
+        "old_overlap_rows_preserved_rot_v2": sum(
+            1 for r in overlap_rows if _evaluate_rf2_variant(r, lcr_ref, False)
+        ),
     }
 
     # ---- summary assembly ----
     summary_out = {
-        "type_mapping_commit": "TYPE-MAPPING-COMMIT2C-FRAGMENTING-REDESIGN",
+        "type_mapping_commit": "TYPE-MAPPING-COMMIT2C-A1-INDEPENDENT-REPLACEMENT-EVIDENCE",
         "source_dataset": source_dataset,
         "capture_git_sha": summary.get("capture_git_sha"),
         "membership_semantics": summary.get("membership_semantics"),
         "threshold_freeze_eligible": False,
         "row_count": len(rows),
-        "lcr_grid": list(_IST_2C_LCR_GRID),
-        "lcr_reference": lcr_ref,
-        "lcr_strict": _IST_2C_LCR_STRICT,
+        "anchors": list(_IST_2C_ANCHORS),
+        "quantiles": list(_IST_2C_QUANTILES),
+        "replay_cut": {"lcr": _IST_2C_REPLAY_CUT, "rc": _IST_2C_REPLAY_CUT},
         "old_rf_partition_counts": {
             "rotating_only": part["rotating_only_count"],
             "fragmenting_only": part["fragmenting_only_count"],
             "overlap": part["overlap_count"],
             "neither": part["neither_count"],
         },
-        "group_distribution": group_distribution,
-        "v2_candidate_sweep": sweep,
-        "v2_reference": {
-            "Rotating-v2": _hit_stats_from_flags(rows, rot_v2),
-            "Fragmenting-v2": _hit_stats_from_flags(rows, frag_v2),
+        "identity_gate": {
+            "ready_rows_checked": checked,
+            "violation_count": len(identity_violations),
+            "violation_rate": round(len(identity_violations) / checked, 6)
+            if checked
+            else None,
+            "violation_sample": identity_violations[:20],
         },
-        "v2_overlap_vs_old": v2_overlap_vs_old,
+        "group_distribution": group_distribution,
+        "group_quantile_profiles": group_quantile_profiles,
+        "group_joint_bands": group_joint_bands,
+        "overlap_joint_mapping": overlap_joint_mapping,
+        "overlap_sensitivity": overlap_sensitivity,
+        "historical_v2_context": historical_v2_context,
         "hypothesis_note": (
-            "研究假设（§17-18）：Rotating-v2 = 高 Migration + LCR>=参考 + entrant>=exit；"
-            "Fragmenting-v2 = 高 Migration + LCR<参考 + exit>entrant。本轮只输出分布/命中/"
-            "重叠/replay 证据，不冻结 threshold，不写正式 Fragmenting 新公式。"
+            "2C-A1（§17-18 + 审查修正）：Rotating/Fragmenting 分界主轴为 LeaderCapacity"
+            "Change=LCR=Current/Previous；exit−entrant 为同一事实的代数等价表达"
+            "（derived_identity_only），不再作为独立信号；新增 ReplacementCoverage="
+            "Entrant/Exit 研究第二个可能独立维度（发生替换时的补位能力）。本轮只输出 "
+            "identity gate / 分位分布 / LCR×RC joint bands / 3×3 sweep / 4 类 replay "
+            "证据，不定义 Rotating-v3/Fragmenting-v3，不冻结 threshold，不写正式 "
+            "Fragmenting 新公式。"
         ),
     }
 
@@ -7961,39 +8224,37 @@ def _run_internal_structure_type_fragmenting_redesign(
         "capture_git_sha": summary.get("capture_git_sha"),
         "membership_semantics": "current_static_research_proxy",
         "threshold_freeze_eligible": False,
-        "commit": "TYPE-MAPPING-COMMIT2C-FRAGMENTING-REDESIGN",
+        "commit": "TYPE-MAPPING-COMMIT2C-A1-INDEPENDENT-REPLACEMENT-EVIDENCE",
         "row_count": len(rows),
-        "contraction_replay_count": len(contraction_replay),
-        "preserved_replay_count": len(preserved_replay),
+        "identity_violation_count": len(identity_violations),
+        "replay_bucket_counts": {
+            k: len(v) for k, v in joint_replay.items()
+        },
+        "replay_pool_counts": replay_pool_counts,
     }
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2, default=_json_default)
 
     # ---- console summary ----
+    print(f"[internal-structure-type-fragmenting-redesign] out_dir={out_dir}")
     print(
-        f"[internal-structure-type-fragmenting-redesign] out_dir={out_dir}"
+        f"--- A1-2 identity gate: ready={checked} mismatch="
+        f"{len(identity_violations)} ---"
     )
-    print("--- Stage 2C-2: LCR / exit-entrant / retention 跨旧 R/F 分组中位数 ---")
+    print("--- A1-5 LCR / RC / retention p10-p90 跨旧 R/F 分组 ---")
     for gname, grows in rf_group_names:
-        lcr = group_distribution[gname]["research_leader_count_preservation"]["median"]
-        bal = group_distribution[gname]["research_exit_minus_entrant"]["median"]
-        ret = group_distribution[gname]["leadership_previous_retention"]["median"]
+        lp = group_quantile_profiles[gname]["research_leader_count_preservation"]
+        rp = group_quantile_profiles[gname]["research_replacement_coverage"]
         print(
-            f"  {gname}: n={len(grows)} LCR_med={lcr} "
-            f"exit-entrant_med={bal} retention_med={ret}"
+            f"  {gname}: n={len(grows)} LCR p50={lp['p50']} p25={lp['p25']} "
+            f"p75={lp['p75']} | RC p50={rp['p50']} p25={rp['p25']} p75={rp['p75']}"
         )
-    print("--- Stage 2C-3: v2 候选 sweep（hit_rate）---")
-    for name in ("Rotating-v2", "Fragmenting-v2"):
-        line = "  ".join(
-            f"LCR>{thr}:{sweep[name][str(thr)]['hit_rate']:.4f}"
-            for thr in _IST_2C_LCR_GRID
-        )
-        print(f"  {name}: {line}")
-    print("--- Stage 2C-4: v2 参考重叠 vs 旧类 ---")
-    for k, v in v2_overlap_vs_old.items():
-        print(f"  {k}={v}")
-    print("--- Stage 2C-5: replay ---")
-    print(f"  contraction={len(contraction_replay)} preserved={len(preserved_replay)}")
+    print("--- A1-5 old overlap LCR×RC joint mapping ---")
+    for k, v in overlap_joint_mapping.items():
+        print(f"  {k}: count={v['count']} rate={v['rate']}")
+    print("--- A1-6 replay bucket sizes (old overlap) ---")
+    for k, v in joint_replay.items():
+        print(f"  {k}: pool={replay_pool_counts[k]} picked={len(v)}")
     return 0
 
 

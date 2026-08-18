@@ -37,8 +37,11 @@ from scripts.review_scope_dynamics_probe import (
     _IST_2C_LCR_GRID,
     _IST_2C_LCR_REFERENCE,
     _IST_2C_LCR_STRICT,
+    _IST_2C_ANCHORS,
+    _IST_2C_QUANTILES,
     _aligned_breadth,
     _aligned_tilt,
+    _anchor_band_name,
     _balanced_central_sensitivity,
     _band_classify,
     _board_to_family,
@@ -50,18 +53,24 @@ from scripts.review_scope_dynamics_probe import (
     _evaluate_rf2_variant,
     _exit_minus_entrant,
     _hist_pct,
+    _identity_gate_violations,
+    _joint_band_counts,
     _leader_count_preservation,
     _multi_hit_and_unmatched,
     _nested_variant,
     _numeric_group_stats,
     _pairwise_overlap,
     _percentile_sorted,
+    _pick_joint_replay,
     _pick_rf2_replay,
     _pick_spread_replay,
+    _quantile_profile,
     _ready_unmatched_band_distribution,
     _reference_configs,
+    _replacement_coverage,
     _rotate_fragment_partition,
     _select_replay_picks,
+    _sensitivity_quadrants,
     _sign_direction,
     _size_bucket_for_count,
     _spread_stability,
@@ -1176,4 +1185,196 @@ def test_rf2_constants_sane():
     assert _IST_2C_LCR_GRID == (0.5, 0.6, 0.7, 0.8)
     assert 0.0 < _IST_2C_LCR_REFERENCE < 1.0
     assert _IST_2C_LCR_STRICT < _IST_2C_LCR_REFERENCE
+
+
+# ---------------------------------------------------------------------------
+# TYPE-MAPPING Commit 2C-A1 — Independent Replacement Evidence
+#   _replacement_coverage / _identity_gate_violations / _quantile_profile
+#   / _anchor_band_name / _joint_band_counts / _sensitivity_quadrants
+#   / _pick_joint_replay / 合法 0 不被 truthiness 吞掉（_pick_rf2_replay 修复）
+# ---------------------------------------------------------------------------
+
+
+def test_replacement_coverage_basic():
+    assert _replacement_coverage(_rf2_row(entrant=3, exit_=1)) == pytest.approx(3.0)
+    assert _replacement_coverage(_rf2_row(entrant=1, exit_=3)) == pytest.approx(1 / 3)
+    assert _replacement_coverage(_rf2_row(entrant=2, exit_=2)) == pytest.approx(1.0)
+
+
+def test_replacement_coverage_exit_zero_or_unknown_none():
+    # Exit<=0/unknown → None（不填 0/1，不除零）
+    assert _replacement_coverage(_rf2_row(entrant=1, exit_=0)) is None
+    assert _replacement_coverage(_rf2_row(entrant=1, exit_=None)) is None
+    assert _replacement_coverage(_rf2_row(entrant=None, exit_=1)) is None
+
+
+def test_replacement_coverage_legal_zero_entrant_is_zero():
+    # 合法 0 entrant → RC=0.0（不是 None，也不是 1）
+    assert _replacement_coverage(_rf2_row(entrant=0, exit_=2)) == pytest.approx(0.0)
+
+
+def test_identity_gate_exact_equality():
+    # P=10, R=7, E=3, N=1 → C=8；Current−Previous == Entrant−Exit == −2
+    rows = [
+        {
+            "scope_key": "s1",
+            "trade_date": "2026-08-01",
+            "leadership_current_leader_count": 8,
+            "leadership_previous_leader_count": 10,
+            "leadership_entrant_count": 1,
+            "leadership_exit_count": 3,
+        },
+        {
+            "scope_key": "s2",
+            "trade_date": "2026-08-01",
+            "leadership_current_leader_count": 10,
+            "leadership_previous_leader_count": 10,
+            "leadership_entrant_count": 2,
+            "leadership_exit_count": 2,
+        },
+    ]
+    assert _identity_gate_violations(rows) == []
+
+
+def test_identity_gate_detects_violation_and_skips_missing():
+    rows = [
+        {
+            "scope_key": "s1",
+            "trade_date": "2026-08-01",
+            "leadership_current_leader_count": 9,  # C−P=−1, E−N=+2 → mismatch
+            "leadership_previous_leader_count": 10,
+            "leadership_entrant_count": 1,
+            "leadership_exit_count": 3,
+        },
+        {
+            "scope_key": "s2",
+            "trade_date": "2026-08-01",
+            "leadership_current_leader_count": None,  # missing → skipped
+            "leadership_previous_leader_count": 10,
+            "leadership_entrant_count": 1,
+            "leadership_exit_count": 3,
+        },
+    ]
+    out = _identity_gate_violations(rows)
+    assert len(out) == 1
+    assert out[0]["scope_key"] == "s1"
+    assert out[0]["current_minus_previous"] == -1.0
+    assert out[0]["entrant_minus_exit"] == -2.0
+
+
+def test_identity_gate_legal_zero_counts_not_flagged():
+    # 合法 0 参与 identity，不因 truthiness 被当作缺失
+    rows = [
+        {
+            "scope_key": "s1",
+            "trade_date": "2026-08-01",
+            "leadership_current_leader_count": 0,
+            "leadership_previous_leader_count": 0,
+            "leadership_entrant_count": 0,
+            "leadership_exit_count": 0,
+        }
+    ]
+    assert _identity_gate_violations(rows) == []
+
+
+def test_quantile_profile():
+    vals = [float(i) for i in range(1, 101)]  # 1..100
+    out = _quantile_profile(vals, (0.10, 0.50, 0.90))
+    assert out["count"] == 100
+    assert out["p50"] == pytest.approx(50.5)
+    assert out["p10"] == pytest.approx(10.9)
+    assert out["p90"] == pytest.approx(90.1)
+
+
+def test_quantile_profile_empty_and_none_filtered():
+    out = _quantile_profile([None, None], (0.50,))
+    assert out["count"] == 0
+    assert out["p50"] is None
+    out2 = _quantile_profile([1.0, None, 3.0], (0.50,))
+    assert out2["count"] == 2
+    assert out2["p50"] == pytest.approx(2.0)
+
+
+def test_anchor_band_names_boundaries():
+    anchors = (0.50, 0.75, 1.00)
+    assert _anchor_band_name(0.49, anchors) == "lt_0.50"
+    assert _anchor_band_name(0.50, anchors) == "0.50_0.75"
+    assert _anchor_band_name(0.74, anchors) == "0.50_0.75"
+    assert _anchor_band_name(0.75, anchors) == "0.75_1.00"
+    assert _anchor_band_name(1.00, anchors) == "ge_1.00"
+    assert _anchor_band_name(1.50, anchors) == "ge_1.00"
+    assert _anchor_band_name(None, anchors) is None
+
+
+def test_joint_band_counts_matrix():
+    anchors = (0.50, 0.75, 1.00)
+    rows = [
+        {"l": 1.0, "r": 1.0},     # ge_1.00 x ge_1.00
+        {"l": 1.0, "r": 0.5},     # ge_1.00 x 0.50_0.75
+        {"l": 0.5, "r": None},    # rc None → skipped
+        {"l": 1.0, "r": 1.0},     # ge_1.00 x ge_1.00
+    ]
+    out = _joint_band_counts(rows, "l", "r", anchors)
+    assert out["ge_1.00 x ge_1.00"]["count"] == 2
+    assert out["ge_1.00 x 0.50_0.75"]["count"] == 1
+    # rate 分母 = 组内全部行（含 None 不可分类行），不是可分类行数
+    assert out["ge_1.00 x ge_1.00"]["rate"] == pytest.approx(2 / 4)
+
+
+def test_sensitivity_quadrants_3x3():
+    anchors = (0.50, 0.75, 1.00)
+    rows = [
+        {"l": 1.0, "r": 1.0},   # high/high for all thresholds
+        {"l": 1.0, "r": 0.4},   # high lcr, low rc
+        {"l": 0.4, "r": 1.0},   # low lcr, high rc
+        {"l": 0.4, "r": 0.4},   # low/low
+    ]
+    out = _sensitivity_quadrants(rows, "l", "r", anchors)
+    assert len(out) == 9  # 3×3
+    cell = out["lcr_ge_0.50_rc_ge_0.50"]
+    assert cell["quadrant_counts"]["high_high"] == 1
+    assert cell["quadrant_counts"]["high_low"] == 1
+    assert cell["quadrant_counts"]["low_high"] == 1
+    assert cell["quadrant_counts"]["low_low"] == 1
+    assert cell["total"] == 4
+    # 更高锚点：lcr_ge_1.00_rc_ge_1.00 只有 1 行同时满足
+    cell_hi = out["lcr_ge_1.00_rc_ge_1.00"]
+    assert cell_hi["quadrant_counts"]["high_high"] == 1
+
+
+def test_pick_joint_replay_four_classes():
+    rows = []
+    for i, (l, r) in enumerate(
+        [
+            (1.2, 1.5),   # high lcr / high rc
+            (1.2, 0.5),   # high lcr / low rc
+            (0.5, 1.5),   # low lcr / high rc
+            (0.5, 0.5),   # low lcr / low rc
+            (1.1, 1.1),   # high / high (dup scope)
+        ]
+    ):
+        rows.append(
+            {
+                "scope_key": f"s{i}",
+                "research_leader_count_preservation": l,
+                "research_replacement_coverage": r,
+            }
+        )
+    out = _pick_joint_replay(rows, 1.0, 1.0, 5)
+    assert out["high_lcr_high_rc"] != []
+    assert out["high_lcr_low_rc"] != []
+    assert out["low_lcr_high_rc"] != []
+    assert out["low_lcr_low_rc"] != []
+    assert _pick_joint_replay([], 1.0, 1.0, 5)["high_lcr_high_rc"] == []
+
+
+def test_pick_rf2_replay_legal_zero_not_swallowed():
+    # 修复前 ``value or 9.0`` 会把合法 LCR=0.0 当缺失；修复后显式 is None 判断。
+    # LCR=0.0（prev=6, cur=0）→ frag 命中（0.0 <= strict 0.4）应进入 pool。
+    row = _rf2_row(cur=0, prev=6, exit_=6, entrant=0, mig=0.9, scope_key="z")
+    row["research_leader_count_preservation"] = _leader_count_preservation(row)
+    row["research_exit_minus_entrant"] = _exit_minus_entrant(row)
+    picked = _pick_rf2_replay([row], True, _IST_2C_LCR_REFERENCE, 1)
+    assert len(picked) == 1
+    assert picked[0]["scope_key"] == "z"
 
