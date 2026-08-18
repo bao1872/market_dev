@@ -676,8 +676,8 @@ def test_reconstruct_scope_series_batch_loads_union_once_and_matches_per_scope(
 
     monkeypatch.setattr(
         "app.services.review_historical_scope_reconstruction_service."
-        "resolve_current_membership",
-        fake_resolve,
+        "resolve_current_memberships_batch",
+        _batch_resolve_from_single(fake_resolve),
     )
 
     calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0, "coverage": 0}
@@ -815,8 +815,8 @@ def test_reconstruct_scope_series_batch_chunks_when_union_exceeds_cap(
 
     monkeypatch.setattr(
         "app.services.review_historical_scope_reconstruction_service."
-        "resolve_current_membership",
-        fake_resolve,
+        "resolve_current_memberships_batch",
+        _batch_resolve_from_single(fake_resolve),
     )
 
     calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0, "coverage": 0}
@@ -879,6 +879,24 @@ def test_reconstruct_scope_series_batch_chunks_when_union_exceeds_cap(
 # ``_build_member_observations``, while every PreparedScope / observation stays
 # byte-identical to the dedicated single-scope path.
 # ---------------------------------------------------------------------------
+
+
+def _batch_resolve_from_single(fake_single):
+    """Wrap a single-scope resolver into the batch resolver signature
+    ``(session, scope_type, scope_keys, *, asof_date) -> dict[str, CurrentStaticMembership]``.
+
+    PERF-FIX-STRUCTURAL-1 (P0-A): ``reconstruct_scope_series_batch`` now calls
+    ``resolve_current_memberships_batch`` (not the per-scope ``resolve_current_membership``),
+    so the mocks must target the batch entry point with the same membership contract.
+    """
+
+    async def fake_batch(session, scope_type, scope_keys, *, asof_date):
+        out = {}
+        for sk in scope_keys:
+            out[sk] = await fake_single(session, scope_type, sk, asof_date=asof_date)
+        return out
+
+    return fake_batch
 
 
 def _install_union_mocks(
@@ -982,8 +1000,8 @@ def test_vec1_shared_member_built_once_per_date(monkeypatch):
 
     monkeypatch.setattr(
         "app.services.review_historical_scope_reconstruction_service."
-        "resolve_current_membership",
-        fake_resolve,
+        "resolve_current_memberships_batch",
+        _batch_resolve_from_single(fake_resolve),
     )
 
     calls = {"build": 0, "union_sizes": []}
@@ -1234,8 +1252,8 @@ def test_vec1_union_deterministic_repeat(monkeypatch):
 
     monkeypatch.setattr(
         "app.services.review_historical_scope_reconstruction_service."
-        "resolve_current_membership",
-        fake_resolve,
+        "resolve_current_memberships_batch",
+        _batch_resolve_from_single(fake_resolve),
     )
 
     all_bars = {

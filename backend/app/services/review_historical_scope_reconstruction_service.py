@@ -74,6 +74,100 @@ class CurrentStaticMembership:
     member_count: int
 
 
+def _validate_current_board(scope_type: str, scope_key: str, board: Any) -> None:
+    """Shared board-validation owner for current-static membership.
+
+    PERF-FIX-STRUCTURAL-1 (P0-A): the single resolver and the batch resolver share
+    ONE validation contract (scope_type -> board_type / hierarchy), never a copy.
+    Raises :class:`HistoricalReconstructionError` on any mismatch.
+    """
+    if scope_type not in _SUPPORTED_SCOPE_TYPES:
+        raise HistoricalReconstructionError(f"unsupported scope_type={scope_type}")
+    if board is None:
+        raise HistoricalReconstructionError(f"board_not_found: {scope_key}")
+    expected_type = _BOARD_TYPE_FROM_SCOPE[scope_type]
+    if board.type != expected_type:
+        raise HistoricalReconstructionError(
+            f"scope_type mismatch: {scope_type} board_type={board.type}"
+        )
+    expected_level = _HIERARCHY_FROM_SCOPE[scope_type]
+    if expected_level is not None and board.hierarchyLevel != expected_level:
+        raise HistoricalReconstructionError(
+            f"scope hierarchy mismatch: {scope_type} hierarchy={board.hierarchyLevel}"
+        )
+
+
+async def resolve_current_memberships_batch(
+    session: AsyncSession,
+    scope_type: str,
+    scope_keys: list[str],
+    *,
+    asof_date: date,
+) -> dict[str, CurrentStaticMembership]:
+    """Resolve CURRENT STATIC MEMBERSHIP for many scopes in exactly TWO queries.
+
+    PERF-FIX-STRUCTURAL-1 (P0-A): replaces the N+1 (one scope -> two sequential
+    SQL round-trips) with a bulk resolver:
+
+        SQL 1: SELECT all boards WHERE id IN (scope_keys)
+        SQL 2: SELECT all memberships WHERE board_id IN (those boards)
+
+    ``market_board_memberships`` PK is ``(board_id, instrument_id)`` so the
+    ``board_id`` prefix is index-friendly.  Membership semantics are IDENTICAL to
+    :func:`resolve_current_membership` (same ``_validate_current_board`` owner),
+    so single/batch parity is guaranteed by construction.
+    """
+    if scope_type not in _SUPPORTED_SCOPE_TYPES:
+        raise HistoricalReconstructionError(f"unsupported scope_type={scope_type}")
+
+    board_uuids: list[uuid.UUID] = []
+    for scope_key in scope_keys:
+        try:
+            board_uuids.append(uuid.UUID(scope_key))
+        except ValueError as exc:
+            raise HistoricalReconstructionError(
+                f"scope_key 非合法 UUID: {scope_key}"
+            ) from exc
+
+    # SQL 1: all boards for the requested scope keys.
+    boards = {
+        b.id: b
+        for b in (
+            await session.execute(
+                select(MarketBoard).where(MarketBoard.id.in_(board_uuids))
+            )
+        ).scalars()
+    }
+
+    # SQL 2: all memberships for those boards (one query).
+    members_by_board: dict[uuid.UUID, list[uuid.UUID]] = {}
+    if boards:
+        rows = (
+            await session.execute(
+                select(
+                    MarketBoardMembership.boardId,
+                    MarketBoardMembership.instrumentId,
+                ).where(MarketBoardMembership.boardId.in_(boards.keys()))
+            )
+        ).all()
+        for bid, iid in rows:
+            members_by_board.setdefault(bid, []).append(iid)
+
+    out: dict[str, CurrentStaticMembership] = {}
+    for scope_key in scope_keys:
+        buuid = uuid.UUID(scope_key)
+        board = boards.get(buuid)
+        _validate_current_board(scope_type, scope_key, board)
+        member_ids = tuple(dict.fromkeys(members_by_board.get(buuid, [])))
+        out[scope_key] = CurrentStaticMembership(
+            member_ids=member_ids,
+            scope_name=board.name,
+            asof_date=asof_date,
+            member_count=len(member_ids),
+        )
+    return out
+
+
 async def resolve_current_membership(
     session: AsyncSession,
     scope_type: str,
@@ -87,44 +181,14 @@ async def resolve_current_membership(
     ``market_board_memberships`` (current per-board instrument rows).  No
     historical / PIT / ASOF resolution is ever consulted; the board's current
     members are fixed for the whole reconstruction series.
+
+    PERF-FIX-STRUCTURAL-1 (P0-A): the single resolver delegates to the shared
+    batch resolver so the validation contract stays single-owned.
     """
-    if scope_type not in _SUPPORTED_SCOPE_TYPES:
-        raise HistoricalReconstructionError(f"unsupported scope_type={scope_type}")
-    try:
-        board_uuid = uuid.UUID(scope_key)
-    except ValueError as exc:
-        raise HistoricalReconstructionError(f"scope_key 非合法 UUID: {scope_key}") from exc
-    board = (
-        await session.execute(
-            select(MarketBoard).where(MarketBoard.id == board_uuid).limit(1),
-        )
-    ).scalar_one_or_none()
-    if board is None:
-        raise HistoricalReconstructionError(f"board_not_found: {scope_key}")
-    expected_type = _BOARD_TYPE_FROM_SCOPE[scope_type]
-    if board.type != expected_type:
-        raise HistoricalReconstructionError(
-            f"scope_type mismatch: {scope_type} board_type={board.type}"
-        )
-    expected_level = _HIERARCHY_FROM_SCOPE[scope_type]
-    if expected_level is not None and board.hierarchyLevel != expected_level:
-        raise HistoricalReconstructionError(
-            f"scope hierarchy mismatch: {scope_type} hierarchy={board.hierarchyLevel}"
-        )
-    rows = (
-        await session.execute(
-            select(MarketBoardMembership.instrumentId).where(
-                MarketBoardMembership.boardId == board.id,
-            )
-        )
-    ).scalars()
-    member_ids = tuple(dict.fromkeys(rows))  # dedupe, preserve order
-    return CurrentStaticMembership(
-        member_ids=member_ids,
-        scope_name=board.name,
-        asof_date=asof_date,
-        member_count=len(member_ids),
+    result = await resolve_current_memberships_batch(
+        session, scope_type, [scope_key], asof_date=asof_date
     )
+    return result[scope_key]
 
 
 @dataclass(frozen=True)
@@ -314,15 +378,19 @@ async def reconstruct_scope_series_batch(
     if not scope_keys:
         return []
 
-    # 1) Resolve membership per scope (current-static semantic owner unchanged).
+    # 1) Resolve membership for ALL scopes in TWO queries (PERF-FIX-STRUCTURAL-1
+    #    P0-A: replaces the former N+1 of one scope -> two sequential SQL round-trips
+    #    with a single bulk board query + a single bulk membership query).  The
+    #    current-static semantic owner is unchanged.
+    memberships = await resolve_current_memberships_batch(
+        session, scope_type, scope_keys, asof_date=asof_date
+    )
     scope_members: dict[str, tuple[list[uuid.UUID], str]] = {}
     for scope_key in scope_keys:
-        membership = await resolve_current_membership(
-            session, scope_type, scope_key, asof_date=asof_date
-        )
+        m = memberships[scope_key]
         scope_members[scope_key] = (
-            list(membership.member_ids),
-            membership.scope_name,
+            list(m.member_ids),
+            m.scope_name,
         )
 
     # 2) Chunk scope_keys so each batch's union member count stays bounded.

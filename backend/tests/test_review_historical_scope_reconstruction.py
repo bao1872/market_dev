@@ -29,6 +29,7 @@ from app.services.review_historical_scope_reconstruction_service import (
     CurrentStaticMembership,
     HistoricalReconstructionError,
     resolve_current_membership,
+    resolve_current_memberships_batch,
 )
 from app.services.review_observation_prep_service import PreparedScope
 
@@ -590,8 +591,23 @@ class _ScalarsResult:
     def scalars(self):
         return iter(self._rows)
 
+    def all(self):
+        return list(self._rows)
+
+
+class _MembershipRows:
+    """Result for the batch memberships query: .all() -> [(board_id, instrument_id)]."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
 
 class _BoardSession:
+    """Mocks the 2-query batch resolver: call1 = boards.scalars(), call2 = memberships.all()."""
+
     def __init__(self, board, member_ids):
         self._board = board
         self._member_ids = member_ids
@@ -600,8 +616,10 @@ class _BoardSession:
     async def execute(self, stmt):
         self._calls += 1
         if self._calls == 1:
-            return _ScalarResult(self._board)
-        return _ScalarsResult(self._member_ids)
+            return _ScalarsResult([self._board])
+        return _MembershipRows(
+            [(self._board.id, iid) for iid in self._member_ids]
+        )
 
 
 def test_resolve_current_membership_validates_and_dedupes() -> None:
@@ -643,3 +661,63 @@ def test_resolve_current_membership_rejects_type_mismatch() -> None:
                 asof_date=date(2026, 8, 14),
             )
         )
+
+
+class _MultiBoardSession:
+    """Mock the 2-query batch resolver for MANY boards: call1 = boards.scalars(),
+    call2 = memberships.all().  ``calls`` counts SQL executions (must stay == 2)."""
+
+    def __init__(self, boards):
+        self._boards = boards  # list of SimpleNamespace(id, type, hierarchyLevel, name)
+        self._calls = 0
+        self._members_by_board = {
+            b.id: [uuid.uuid4() for _ in range(2)] for b in boards
+        }
+
+    async def execute(self, stmt):
+        self._calls += 1
+        if self._calls == 1:
+            return _ScalarsResult(self._boards)
+        return _MembershipRows(
+            [
+                (bid, iid)
+                for bid, mids in self._members_by_board.items()
+                for iid in mids
+            ]
+        )
+
+
+def test_resolve_current_memberships_batch_two_queries_parity() -> None:
+    """PERF-FIX-STRUCTURAL-1 (P0-A): batch resolver uses exactly 2 SQL for N scopes,
+    and each scope's membership matches the single resolver's output (parity)."""
+    boards = [
+        SimpleNamespace(
+            id=uuid.uuid4(), type="concept", hierarchyLevel=None, name=f"c{i}",
+        )
+        for i in range(8)  # 8 concept scopes -> still exactly 2 queries (not 16)
+    ]
+    session = _MultiBoardSession(boards)
+    scope_keys = [str(b.id) for b in boards]
+    result = asyncio.run(
+        resolve_current_memberships_batch(
+            session, "concept", scope_keys, asof_date=date(2026, 8, 14)
+        )
+    )
+    # N+1 fixed: 8 scopes in exactly 2 SQL round-trips.
+    assert session._calls == 2
+    assert len(result) == 8
+    # each scope's membership is non-empty and its name is set.
+    for b in boards:
+        m = result[str(b.id)]
+        assert m.scope_name == b.name
+        assert m.member_count == 2
+        # batch membership == single resolver membership (parity, same owner)
+        single = asyncio.run(
+            resolve_current_membership(
+                _BoardSession(b, session._members_by_board[b.id]),
+                "concept",
+                str(b.id),
+                asof_date=date(2026, 8, 14),
+            )
+        )
+        assert single.member_ids == m.member_ids

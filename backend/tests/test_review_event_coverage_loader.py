@@ -186,3 +186,65 @@ def test_synthetic_coverage_equivalence() -> None:
     assert ev["denominator"] == 8  # PIT ∩ coverage
     cell = ev["cells"]["leveled"]["BOS_Up_Swing"]
     assert cell["member_count"] == 2  # m0 + m1; m8 dropped
+
+
+# ---------------------------------------------------------------------------
+# PERF-FIX-STRUCTURAL-1 (P0-B): scope-local coverage
+# ---------------------------------------------------------------------------
+
+def test_coverage_scope_local_not_whole_union() -> None:
+    """P0-B: a PreparedScope carries ONLY its own PIT(T) ∩ coverage members.
+
+    Union has ~1200 members, coverage covers 1000 of them; a scope whose PIT is a
+    20-member subset with 12 covered must carry exactly 12 coverage IDs — never the
+    whole 1000-member union coverage (which was the pre-fix O(D×S×U) blowup).
+    """
+    from app.domain.review.member_fact import DailyBarFact
+    from app.services.review_observation_prep_service import (
+        ScopeReplaySpec,
+        _InstrumentBarSeries,
+        _UnionFactContext,
+        build_prepared_scopes_from_union,
+    )
+
+    # union members u0..u1199
+    union_ids = [uuid.UUID(int=i + 1) for i in range(1200)]
+    # coverage covers u0..u999 (1000 members)
+    coverage_set = frozenset(union_ids[:1000])
+    # scope A PIT = u0..u11 (covered) + u1000..u1007 (NOT covered) => 12 covered / 20 PIT
+    scope_pit_ids = union_ids[:12] + union_ids[1000:1008]
+    scope_pit_str = {str(i) for i in scope_pit_ids}
+
+    # minimal bars so members build (price unavailable is fine; we only assert coverage)
+    def _series(mid: uuid.UUID) -> _InstrumentBarSeries:
+        bar = DailyBarFact(
+            trade_date=T, open=1.0, high=1.0, low=1.0, close=1.0,
+            volume=1.0, amount=1.0,
+        )
+        return _InstrumentBarSeries(facts=(bar,), dates=(T,))
+
+    ctx = _UnionFactContext(
+        t1_by_date={T: None},
+        states_by_date={},
+        bars={mid: _series(mid) for mid in union_ids},
+        events_by_date={},
+        vec_volume={},
+    )
+    spec = ScopeReplaySpec(
+        scope_type="concept", scope_key="A", scope_name="A",
+        member_ids=tuple(scope_pit_ids),
+    )
+    out = build_prepared_scopes_from_union(
+        trade_dates=[T],
+        scope_specs=[spec],
+        union_ctx=ctx,
+        coverage_by_date={T: coverage_set},
+    )
+    ps = out["A"][0]
+    assert ps.pit_member_ids == tuple(sorted(scope_pit_str))
+    # scope-local coverage = PIT(scope) ∩ coverage = 12 (NOT 1000, NOT 20)
+    cov = ps.event_coverage_member_ids
+    assert cov is not None
+    assert len(cov) == 12
+    # coverage is bounded by the scope's own PIT
+    assert set(cov) <= scope_pit_str

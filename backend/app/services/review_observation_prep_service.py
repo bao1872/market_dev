@@ -1145,10 +1145,15 @@ async def prepare_scope_series_from_member_ids(
             coverage_members = None
             structure_events: list[StructureEvent] = []
         else:
-            coverage_members = tuple(str(i) for i in coverage_t)
-            covered = {str(i) for i in coverage_t}
+            # PERF-FIX-STRUCTURAL-1 (P0-B): scope-local coverage = PIT(scope,T) ∩
+            # coverage only — bounded by this scope's own PIT membership, never a
+            # superset carrying non-PIT covered members.
+            covered_str = frozenset(str(i) for i in coverage_t)
+            coverage_members = tuple(
+                str(i) for i in pit_ids_t if str(i) in covered_str
+            )
             structure_events = [
-                e for e in events_by_date.get(t, []) if e.member_id in covered
+                e for e in events_by_date.get(t, []) if e.member_id in covered_str
             ]
         current_only_facts = (
             await _load_current_only_snapshot_facts(session, pit_ids_t, t)
@@ -1428,6 +1433,12 @@ def build_prepared_scopes_from_union(
         states_t = union_ctx.states_by_date.get(t, {})
         states_t1 = union_ctx.states_by_date.get(t1, {}) if t1 else {}
         structure_events = union_ctx.events_by_date.get(t, [])
+        # PERF-FIX-STRUCTURAL-1 (P0-C): index the union events once per date as
+        # member_id -> events, so each scope gathers ONLY its own members' events
+        # instead of scanning the whole union event stream per scope.
+        events_by_member: dict[str, list[StructureEvent]] = {}
+        for _e in structure_events:
+            events_by_member.setdefault(_e.member_id, []).append(_e)
         current_only_facts = (
             current_only_facts_by_date.get(t, {})
             if current_only_facts_by_date is not None
@@ -1435,7 +1446,15 @@ def build_prepared_scopes_from_union(
         )
         # ROUND-2.2B: per-T coverage for this union membership.  ``None`` coverage
         # source (no DB) or a date absent from the map -> coverage unavailable.
+        # PERF-FIX-STRUCTURAL-1 (P0-B): convert the union coverage UUIDs to strings
+        # EXACTLY ONCE per date (not once per scope), then each scope takes only its
+        # own PIT(T) ∩ coverage intersection (scope-local) — never copies the whole
+        # union coverage into every PreparedScope (which was O(D×S×U) string/alloc
+        # + a 4096-element set rebuild per scope in the Core).
         coverage_t = None if coverage_by_date is None else coverage_by_date.get(t)
+        covered_str = (
+            None if coverage_t is None else frozenset(str(i) for i in coverage_t)
+        )
 
         # VEC-1: ONE canonical member build for the whole union per trade_date.
         # ``_build_member_observations`` remains the single member-construction
@@ -1456,7 +1475,7 @@ def build_prepared_scopes_from_union(
         member_by_id = {m.member_id: m for m in union_members}
 
         for scope_key, (
-            scope_type, scope_name, str_ids, str_ids_t1, member_set,
+            scope_type, scope_name, str_ids, str_ids_t1, _member_set,
         ) in scope_meta.items():
             members = tuple(
                 member_by_id[sid] for sid in str_ids if sid in member_by_id
@@ -1466,15 +1485,22 @@ def build_prepared_scopes_from_union(
             # Scope Core would drop out-of-scope events anyway, but the contract
             # is that a PreparedScope carries ONLY its own members' events).
             # ROUND-2.2B: coverage-unavailable -> no events + coverage=None.
-            if coverage_t is None:
+            # PERF-FIX-STRUCTURAL-1 (P0-B): scope-local coverage = PIT(scope) ∩
+            # Coverage(union) only — never the whole union coverage.  This keeps
+            # ``event_coverage_member_ids`` bounded by the scope's own membership
+            # and lets the Core's ``set(...)`` intersect a few hundred IDs, not 4096.
+            if covered_str is None:
                 scope_coverage = None
                 scope_events: tuple[StructureEvent, ...] = ()
             else:
-                covered = {str(i) for i in coverage_t}
-                scope_coverage = tuple(str(i) for i in coverage_t)
+                scope_coverage = tuple(sid for sid in str_ids if sid in covered_str)
+                # PERF-FIX-STRUCTURAL-1 (P0-C): gather via the per-date member index,
+                # then filter to this scope's covered members.  No full union scan.
                 scope_events = tuple(
-                    e for e in structure_events
-                    if e.member_id in member_set and e.member_id in covered
+                    e
+                    for sid in str_ids
+                    if sid in covered_str
+                    for e in events_by_member.get(sid, ())
                 )
             out[scope_key].append(
                 PreparedScope(
