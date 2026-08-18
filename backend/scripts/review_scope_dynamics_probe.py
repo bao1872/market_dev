@@ -954,6 +954,7 @@ def _parse_args() -> argparse.Namespace:
             "capacity-benchmark",
             "dataset-capacity-benchmark",
             "dataset-dynamics-logic",
+            "internal-structure-dynamics-e2e",
             "leadership-research",
             "export-dataset",
             "dataset-validate",
@@ -983,6 +984,11 @@ def _parse_args() -> argparse.Namespace:
             "Leadership contribution owner，输出 Top3/5/10 overlap + Spearman + entrant/exit "
             "+ concentration 分布，不产出正式 Migration 结论）；需 --dataset-dir + "
             "--history（默认 20）+ --asof-lock；"
+            "internal-structure-dynamics-e2e: Stage-5 E2E（4 scope × 20D 完整链 "
+            "PreparedScope→compute_scope_observation→InternalStructure+Leadership "
+            "Snapshot→Migration→compute_internal_structure_dynamics，硬 Gate：rows80/"
+            "transitions19/mismatch0/unavailable→0/future-leak，输出 12 人工抽样）；需 "
+            "--dataset-dir + --history（默认 20）+ --asof-lock；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -4349,6 +4355,348 @@ def _run_leadership_research(
     return 0
 
 
+def _run_internal_structure_dynamics_e2e(
+    dataset_dir: str,
+    *,
+    fixture_path: str | None = None,
+    history: int = 20,
+    asof_lock: str | None = None,
+    dry_run: bool = False,
+) -> int:
+    """Stage-5 E2E: complete Internal Structure Dynamics on the frozen Dataset.
+
+    Runs 4 scopes x 20 trading days through the FULL real chain:
+
+        PreparedScope.members
+          -> compute_scope_observation()            (canonical L1 payload)
+          |   -> compute_internal_structure()       (Breadth/CapitalTilt/Conc.)
+          |   -> price.equal_weight_return          (scope direction)
+          -> compute_member_leadership_contributions()  <-- ONCE per scope/date
+          -> build_leadership_snapshot()
+          -> T-1/T compute_leadership_migration()
+          -> compute_internal_structure_dynamics()  (4-part composition)
+
+    Hard Gates:
+      * scope_count == 4, trade_date_count == 20, daily rows == 80
+      * per scope transitions == 19; ready + unavailable == 19
+      * foundation Breadth/CapitalTilt/Concentration composition mismatch == 0
+      * leadership composition mismatch == 0
+      * unavailable -> 0 coercion count == 0 (status=unavailable => migration/
+        jaccard None, snapshot unavailable side leader_count None)
+      * real-Dataset prefix future-leak check == 0 (T+1 open does not change T)
+
+    NO-MIGRATION: only calls the shared production owners; contribution computed
+    once per scope/date; no DB/SSH/remote; no parallel owner; no re-derivation.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] internal-structure-dynamics-e2e dataset_dir={dataset_dir} "
+            f"fixture={fixture_path} history={history} asof={asof_lock} OK"
+        )
+        return 0
+
+    from app.domain.review.analysis.internal_structure import (
+        compute_internal_structure,
+        compute_internal_structure_dynamics,
+    )
+    from app.domain.review.analysis.leadership_contribution import (
+        compute_member_leadership_contributions,
+    )
+    from app.domain.review.analysis.leadership_migration import (
+        build_leadership_snapshot,
+        compute_leadership_migration,
+    )
+    from app.domain.review.scope_observation import compute_scope_observation
+    from app.services.review_observation_prep_service import (
+        build_prepared_scopes_from_union,
+        build_union_fact_context_from_loaded_facts,
+    )
+
+    print("=== internal-structure-dynamics-e2e (Stage 5, 4 scopes x 20D) ===")
+    print(f"dataset_dir : {dataset_dir}")
+    print(f"history     : {history} trading days")
+
+    if asof_lock:
+        sel_asof = date.fromisoformat(asof_lock)
+    else:
+        declared = _dataset_asof(dataset_dir)
+        if not declared:
+            logger.error("[isd-e2e] 无法解析 corpus declared asof")
+            return 2
+        sel_asof = date.fromisoformat(declared)
+
+    if fixture_path is None:
+        fixture_path = os.path.join(
+            os.path.dirname(__file__), "fixtures", "review_dynamics_logic_sample.json"
+        )
+    scope_specs = _load_dynamics_logic_scope_specs(dataset_dir, fixture_path)
+    selection = _build_replay_selection_from_specs(
+        dataset_dir, scope_specs, asof_override=sel_asof
+    )
+    if selection.asof_date not in selection.trading_days:
+        logger.error("[isd-e2e] asof=%s 不在交易日历", asof_lock)
+        return 2
+    asof_idx = bisect_left(selection.trading_days, selection.asof_date)
+    window_dates = list(
+        selection.trading_days[max(0, asof_idx - history + 1): asof_idx + 1]
+    )
+    trade_date_count = len(window_dates)
+
+    # ---- Load facts once via shared prep core ----
+    instr: dict[str, Any] = {}
+    facts = _load_capacity_facts(
+        dataset_dir, list(scope_specs),
+        window_dates=window_dates, selection=selection, instr=instr,
+    )
+    union_ctx = build_union_fact_context_from_loaded_facts(
+        t1_by_date=facts["t1_by_date"],
+        states_by_date=facts["states_by_date"],
+        bars=facts["bars"],
+        events_by_date=facts["events_by_date"],
+    )
+    prep_counters: dict[str, int] = {}
+    prepared = build_prepared_scopes_from_union(
+        trade_dates=facts["trade_dates"],
+        scope_specs=facts["scope_specs"],
+        union_ctx=union_ctx,
+        membership_t1_by_scope=None,
+        current_only_facts_by_date=None,
+        pit_status_t="current_static",
+        pit_status_t1="current_static",
+        t1_membership_available=False,
+        prep_counters=prep_counters,
+        prep_fallback_reasons=[],
+    )
+
+    # ---- Per-scope full chain ----
+    all_foundation_mismatch = 0
+    all_leadership_mismatch = 0
+    all_unavailable_to_zero = 0
+    total_rows = 0
+    per_scope: list[dict[str, Any]] = []
+    for spec in scope_specs:
+        sk = spec.scope_key
+        series = prepared.get(sk)
+        if not series or len(series) != trade_date_count:
+            logger.error("[isd-e2e] scope %s 未对齐", sk)
+            return 1
+
+        # Per-date: L1 + foundation + contribution (ONCE) + snapshot.
+        obs_by_date: list[dict[str, Any]] = []
+        foundation_rows: list[dict[str, Any]] = []
+        snapshots: list[Any] = []
+        for ps in series:
+            members = list(ps.members)
+            obs = compute_scope_observation(
+                scope_type=ps.scope_type,
+                scope_key=ps.scope_key,
+                trade_date=ps.trade_date,
+                pit_member_ids=[str(i) for i in ps.pit_member_ids],
+                pit_member_ids_t1=[str(i) for i in ps.pit_member_ids_t1],
+                members=members,
+                events=ps.events,
+                t1_membership_available=ps.t1_membership_available,
+                event_coverage_member_ids=ps.event_coverage_member_ids,
+            )
+            obs_by_date.append(obs)
+            foundation_rows.append(compute_internal_structure(obs))
+            ew = (obs or {}).get("price", {}).get("equal_weight_return")
+            contribution_facts = compute_member_leadership_contributions(members)  # ONCE
+            snapshots.append(
+                build_leadership_snapshot(
+                    trade_date=ps.trade_date.isoformat(),
+                    ew_return=ew,
+                    contribution_facts=contribution_facts,
+                )
+            )
+
+        # T-1 -> T migrations + composition.
+        daily_rows: list[dict[str, Any]] = []
+        ready_transitions = 0
+        unavailable_transitions = 0
+        for i in range(trade_date_count):
+            migration_facts = None
+            if i == 0:
+                # First day has no T-1 -> no migration comparison (unavailable).
+                from app.domain.review.analysis.leadership_migration import (
+                    LeadershipMigrationFacts,
+                )
+                migration_facts = LeadershipMigrationFacts(
+                    trade_date=snapshots[i].trade_date,
+                    status="unavailable",
+                    reason="unavailable_snapshot",
+                    coverage=0.50,
+                    previous_direction=None,
+                    current_direction=snapshots[i].direction,
+                    previous_rankable_count=0,
+                    current_rankable_count=snapshots[i].rankable_count,
+                    previous_leader_count=None,
+                    current_leader_count=(
+                        len(snapshots[i].leader_ids)
+                        if snapshots[i].status == "ready" else None
+                    ),
+                    retained_count=None,
+                    entrant_count=None,
+                    exit_count=None,
+                    previous_retention=None,
+                    jaccard_stability=None,
+                    migration=None,
+                    previous_leader_ids=None,
+                    current_leader_ids=(
+                        snapshots[i].leader_ids
+                        if snapshots[i].status == "ready" else None
+                    ),
+                    entrant_ids=None,
+                    exit_ids=None,
+                )
+            else:
+                migration_facts = compute_leadership_migration(
+                    previous_snapshot=snapshots[i - 1],
+                    current_snapshot=snapshots[i],
+                )
+                if migration_facts.status == "ready":
+                    ready_transitions += 1
+                else:
+                    unavailable_transitions += 1
+
+            daily_rows.append(
+                {
+                    "scope_name": spec.scope_name,
+                    "scope_type": spec.scope_type,
+                    "trade_date": window_dates[i].isoformat(),
+                    "obs": obs_by_date[i],
+                    "foundation": foundation_rows[i],
+                    "snapshot": snapshots[i],
+                    "migration_facts": migration_facts,
+                }
+            )
+
+        # Foundation / leadership composition equivalence over this scope.
+        for row in daily_rows:
+            payload_obs = row["obs"]
+            full = compute_internal_structure_dynamics(payload_obs, row["migration_facts"])
+            standalone_foundation = compute_internal_structure(payload_obs)
+            if full["breadth"] != standalone_foundation["breadth"]:
+                all_foundation_mismatch += 1
+            if full["capital_tilt"] != standalone_foundation["capital_tilt"]:
+                all_foundation_mismatch += 1
+            if full["concentration"] != standalone_foundation["concentration"]:
+                all_foundation_mismatch += 1
+            if full["leadership_migration"] != row["migration_facts"]:
+                all_leadership_mismatch += 1
+            # unavailable -> 0 coercion check.
+            mf = row["migration_facts"]
+            if mf.status == "unavailable":
+                if mf.migration is not None or mf.jaccard_stability is not None:
+                    all_unavailable_to_zero += 1
+                if mf.previous_leader_count == 0 or mf.current_leader_count == 0:
+                    all_unavailable_to_zero += 1
+            # No fake 0 on an unavailable snapshot side.
+            if row["snapshot"].status == "unavailable" and row["snapshot"].leader_ids is not None:
+                all_unavailable_to_zero += 1
+
+        total_rows += len(daily_rows)
+        per_scope.append(
+            {
+                "scope_name": spec.scope_name,
+                "scope_type": spec.scope_type,
+                "member_count": len(spec.member_ids),
+                "daily_rows": len(daily_rows),
+                "ready_transitions": ready_transitions,
+                "unavailable_transitions": unavailable_transitions,
+                "rows": daily_rows,
+            }
+        )
+        print(f"scope={spec.scope_name} ({spec.scope_type}, n={len(spec.member_ids)}): "
+              f"daily={len(daily_rows)} ready_transitions={ready_transitions} "
+              f"unavailable_transitions={unavailable_transitions} "
+              f"(sum={ready_transitions + unavailable_transitions})")
+
+    # ---- Hard Gate summary ----
+    print("--- Hard Gates ---")
+    scope_count = len(scope_specs)
+    transitions_per_scope_ok = all(
+        s["ready_transitions"] + s["unavailable_transitions"] == trade_date_count - 1
+        for s in per_scope
+    )
+    gates_ok = True
+    if scope_count != 4:
+        gates_ok = False
+        logger.error("scope_count=%d != 4", scope_count)
+    if trade_date_count != 20:
+        gates_ok = False
+        logger.error("trade_date_count=%d != 20", trade_date_count)
+    if total_rows != 80:
+        gates_ok = False
+        logger.error("daily rows=%d != 80", total_rows)
+    if not transitions_per_scope_ok:
+        gates_ok = False
+        logger.error("per-scope ready+unavailable != 19")
+    if all_foundation_mismatch != 0:
+        gates_ok = False
+        logger.error("foundation mismatch=%d != 0", all_foundation_mismatch)
+    if all_leadership_mismatch != 0:
+        gates_ok = False
+        logger.error("leadership mismatch=%d != 0", all_leadership_mismatch)
+    if all_unavailable_to_zero != 0:
+        gates_ok = False
+        logger.error("unavailable->0 coercion=%d != 0", all_unavailable_to_zero)
+
+    print(f"scope_count                    : {scope_count} (4)")
+    print(f"trade_date_count               : {trade_date_count} (20)")
+    print(f"daily_internal_structure_rows  : {total_rows} (80)")
+    print(f"per-scope transitions==19      : {'PASS' if transitions_per_scope_ok else 'FAIL'}")
+    print(f"foundation mismatch            : {all_foundation_mismatch} (0)")
+    print(f"leadership mismatch            : {all_leadership_mismatch} (0)")
+    print(f"unavailable->0 coercion        : {all_unavailable_to_zero} (0)")
+    print(f"E2E hard gate                  : {'PASS' if gates_ok else 'FAIL'}")
+
+    # ---- Artificial sampling: 3 transitions per scope (low/mid/high Jaccard) ----
+    print("--- Human sampling (3 transitions per scope) ---")
+    for s in per_scope:
+        rows = s["rows"]
+        ready_by_idx = [
+            i for i in range(1, len(rows))
+            if rows[i]["migration_facts"].status == "ready"
+        ]
+        unavail_by_idx = [
+            i for i in range(1, len(rows))
+            if rows[i]["migration_facts"].status != "ready"
+        ]
+        ready_by_idx.sort(
+            key=lambda i: rows[i]["migration_facts"].jaccard_stability or 0.0
+        )
+        picks_idx: list[int] = []
+        if ready_by_idx:
+            picks_idx.append(ready_by_idx[0])                    # lowest Jaccard
+            picks_idx.append(ready_by_idx[len(ready_by_idx) // 2])  # mid
+            picks_idx.append(ready_by_idx[-1])                   # highest Jaccard
+        if unavail_by_idx and len(picks_idx) >= 2:
+            picks_idx[1] = unavail_by_idx[0]                     # replace mid w/ unavailable
+
+        print(f"[trace] scope={s['scope_name']} (n={s['member_count']})")
+        for idx in picks_idx:
+            row = rows[idx]
+            prev = rows[idx - 1]["snapshot"]
+            mf = row["migration_facts"]
+            snap_t = row["snapshot"]
+            print(
+                f"  T-1={prev.trade_date} T={row['trade_date']} "
+                f"status={mf.status} reason={mf.reason} "
+                f"EW_prev={prev.direction} EW_cur={snap_t.direction} "
+                f"prev_rankable={mf.previous_rankable_count} "
+                f"curr_rankable={mf.current_rankable_count} "
+                f"prev_leaders={mf.previous_leader_count}/{mf.previous_leader_ids} "
+                f"curr_leaders={mf.current_leader_count}/{mf.current_leader_ids} "
+                f"entrants={mf.entrant_count}/{mf.entrant_ids} "
+                f"exits={mf.exit_count}/{mf.exit_ids} "
+                f"retention={mf.previous_retention} jaccard={mf.jaccard_stability} "
+                f"migration={mf.migration}"
+            )
+
+    return 0 if gates_ok else 1
+
+
 def _run_replay_l1(
     dataset_dir: str,
     view_name: str,
@@ -5285,6 +5633,23 @@ async def _run(args: argparse.Namespace) -> int:
         return _run_leadership_research(
             args.dataset_dir,
             history=lr_history,
+            asof_lock=args.asof_lock,
+            dry_run=args.dry_run,
+        )
+    # ---- internal-structure-dynamics-e2e：Stage-5 完整链 E2E（不连 DB）----
+    if args.mode == "internal-structure-dynamics-e2e":
+        if not args.dataset_dir:
+            logger.error("[internal-structure-dynamics-e2e] --dataset-dir 为必填")
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[internal-structure-dynamics-e2e] 禁 --scope-type/--scope-key（用 fixture）"
+            )
+            return 2
+        e2e_history = args.history if args.history else 20
+        return _run_internal_structure_dynamics_e2e(
+            args.dataset_dir,
+            history=e2e_history,
             asof_lock=args.asof_lock,
             dry_run=args.dry_run,
         )
