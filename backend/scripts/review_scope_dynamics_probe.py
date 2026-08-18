@@ -4452,6 +4452,56 @@ def _prefix_migration_facts_mismatch(before: Any, after: Any) -> bool:
     return before != after
 
 
+# ---------------------------------------------------------------------------
+# Stage 5C-A2 validation helpers (A2-1 / A2-2)
+#
+# MigrationFacts availability is checked PER SNAPSHOT SIDE, never by
+# "leader_count == 0".  A ready snapshot's legitimate empty Leader Set is a real
+# 0 / (); an unavailable side must be None.  Transition metrics are a SEPARATE
+# layer and must never be judged from leader_count.
+# ---------------------------------------------------------------------------
+
+
+def _migration_facts_side_violation(
+    snapshot: Any | None,
+    leader_count: int | None,
+    leader_ids: Any,
+) -> bool:
+    """True when one snapshot side of ``LeadershipMigrationFacts`` violates the
+    frozen unavailable/empty contract.
+
+    - ``snapshot is None`` (no T-1, e.g. the window's first date) -> never a
+      violation; the harness's day-0 facts are constructed without a previous
+      side and are skipped here.
+    - ``snapshot.status == "unavailable"`` -> the corresponding
+      ``leader_count``/``leader_ids`` MUST be None (unknown != 0).
+    - ``snapshot.status == "ready"`` -> the corresponding ``leader_count``/``
+      leader_ids`` MUST exact-equal the snapshot evidence; a legitimate empty
+      leader set (0 / ()) is legal and must NOT be flagged.
+    """
+    if snapshot is None:
+        return False
+    if snapshot.status == "unavailable":
+        return leader_count is not None or leader_ids is not None
+    return leader_count != len(snapshot.leader_ids) or leader_ids != snapshot.leader_ids
+
+
+def _migration_transition_metrics_violation(mf: Any) -> bool:
+    """True when an unavailable ``LeadershipMigrationFacts`` still carries a
+    fake transition metric.
+
+    ``mf.status == "unavailable"`` => previous_retention / jaccard_stability /
+    migration must ALL be None (fail-closed, never zero-filled).  This is a
+    SEPARATE layer from snapshot-side leader evidence: retained/entrant/exit
+    counts may be real under ``empty_leader_set``, but the rate metrics must not.
+    """
+    return mf.status == "unavailable" and (
+        mf.previous_retention is not None
+        or mf.jaccard_stability is not None
+        or mf.migration is not None
+    )
+
+
 def _run_internal_structure_dynamics_e2e(
     dataset_dir: str,
     *,
@@ -4641,6 +4691,7 @@ def _run_internal_structure_dynamics_e2e(
                     "obs": obs_by_date[i],
                     "foundation": foundation_rows[i],
                     "snapshot": snapshots[i],
+                    "previous_snapshot": snapshots[i - 1] if i > 0 else None,
                     "migration_facts": migration_facts,
                 }
             )
@@ -4658,13 +4709,22 @@ def _run_internal_structure_dynamics_e2e(
                 all_foundation_mismatch += 1
             if full["leadership_migration"] != row["migration_facts"]:
                 all_leadership_mismatch += 1
-            # unavailable -> 0 coercion check.
+            # MigrationFacts availability — side-aware (A2-1) + transition
+            # metrics as a SEPARATE layer (A2-2).  A ready snapshot's legal
+            # empty Leader Set (0 / ()) is never a violation; only an
+            # unavailable side coerced to 0, or fake rate metrics on an
+            # unavailable transition, count as coercion.
             mf = row["migration_facts"]
-            if mf.status == "unavailable":
-                if mf.migration is not None or mf.jaccard_stability is not None:
-                    all_unavailable_to_zero += 1
-                if mf.previous_leader_count == 0 or mf.current_leader_count == 0:
-                    all_unavailable_to_zero += 1
+            if _migration_transition_metrics_violation(mf):
+                all_unavailable_to_zero += 1
+            if _migration_facts_side_violation(
+                row["previous_snapshot"], mf.previous_leader_count, mf.previous_leader_ids
+            ):
+                all_unavailable_to_zero += 1
+            if _migration_facts_side_violation(
+                row["snapshot"], mf.current_leader_count, mf.current_leader_ids
+            ):
+                all_unavailable_to_zero += 1
             # No fake 0 on an unavailable snapshot side (contract:
             # status=="unavailable" => leader_set is None; leader_ids is the
             # derived empty tuple and must NOT be used to detect coercion).
@@ -4739,7 +4799,9 @@ def _run_internal_structure_dynamics_e2e(
         logger.error("leadership mismatch=%d != 0", all_leadership_mismatch)
     if all_unavailable_to_zero != 0:
         gates_ok = False
-        logger.error("unavailable->0 coercion=%d != 0", all_unavailable_to_zero)
+        logger.error(
+            "unavailable semantic violation=%d != 0", all_unavailable_to_zero
+        )
     if future_leak_mismatch != 0:
         gates_ok = False
         logger.error(
@@ -4752,7 +4814,7 @@ def _run_internal_structure_dynamics_e2e(
     print(f"per-scope transitions==19      : {'PASS' if transitions_per_scope_ok else 'FAIL'}")
     print(f"foundation mismatch            : {all_foundation_mismatch} (0)")
     print(f"leadership mismatch            : {all_leadership_mismatch} (0)")
-    print(f"unavailable->0 coercion        : {all_unavailable_to_zero} (0)")
+    print(f"unavailable semantic violation : {all_unavailable_to_zero} (0)")
     print(f"real Dataset prefix future-leak: {future_leak_mismatch} (0)")
     print(f"E2E hard gate                  : {'PASS' if gates_ok else 'FAIL'}")
 

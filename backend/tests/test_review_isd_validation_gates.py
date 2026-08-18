@@ -13,6 +13,11 @@ Locks the two Stage-5C validation-gate fixes in
   3. ``_compute_prefix_migration_facts`` — REAL prefix-bound recomputation:
      opening T+1 must not change ``LeadershipMigrationFacts(T)``.
 
+A2 (side-aware MigrationFacts availability): ``_migration_facts_side_violation``
+and ``_migration_transition_metrics_violation`` lock that a ready snapshot's
+legitimate empty Leader Set (0 / ()) is legal, an unavailable side must be None,
+and rate metrics are a separate layer from snapshot-side leader evidence.
+
 Pure unit: no DB, no network.  Exercises only shared production owners plus the
 harness helpers.  ``_FakePreparedScope`` is a structural data-carrier stand-in
 for the DB-bound ``PreparedScope`` (the pure chain it feeds is the real
@@ -31,10 +36,13 @@ from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.analysis.leadership_migration import (
     AlignedLeadership,
     LeadershipSnapshot,
+    compute_leadership_migration,
 )
 from app.domain.review.scope_observation import MemberObservation
 from scripts.review_scope_dynamics_probe import (
     _compute_prefix_migration_facts,
+    _migration_facts_side_violation,
+    _migration_transition_metrics_violation,
     _prefix_migration_facts_mismatch,
     _snapshot_unavailable_coercion,
 )
@@ -195,3 +203,122 @@ def test_prefix_future_leak_stability() -> None:
     assert cut_at_t.status == "ready"
     assert cut_at_t.jaccard_stability == 1.0
     assert cut_at_t.migration == 0.0
+
+
+# ---------------------------------------------------------------------------
+# A2 — MigrationFacts availability is side-aware (unknown != legitimate 0)
+#
+# These lock the A2-1/A2-2 helpers against the FROZEN contract:
+#   unavailable snapshot side  -> leader_count / leader_ids == None
+#   ready snapshot (empty set) -> leader_count == 0 / leader_ids == ()  (legal)
+#   mf.status == "unavailable" -> previous_retention / jaccard / migration == None
+# All four build facts through the production owner compute_leadership_migration.
+# ---------------------------------------------------------------------------
+
+
+def _snap(
+    trade_date: str,
+    *,
+    status: str,
+    leader_set: tuple[AlignedLeadership, ...] | None,
+    direction: int | None = None,
+    rankable_count: int = 2,
+) -> LeadershipSnapshot:
+    return LeadershipSnapshot(
+        trade_date=trade_date,
+        status=status,
+        reason=None if status == "ready" else "ew_unavailable",
+        direction=direction,
+        rankable_count=rankable_count,
+        leader_set=leader_set,
+    )
+
+
+def _leader(mid: str) -> AlignedLeadership:
+    return AlignedLeadership(member_id=mid, contribution=1.0, aligned_score=0.5)
+
+
+def test_migration_facts_prev_unavailable_curr_ready_empty_is_legal() -> None:
+    # Test 1 (A2): previous unavailable / current ready-empty -> no coercion.
+    prev_unavailable = _snap("2026-08-13", status="unavailable", leader_set=None)
+    curr_ready_empty = _snap("2026-08-14", status="ready", leader_set=())
+    mf = compute_leadership_migration(
+        previous_snapshot=prev_unavailable, current_snapshot=curr_ready_empty
+    )
+    assert mf.status == "unavailable" and mf.reason == "unavailable_snapshot"
+    # unavailable side stays None; ready-empty side keeps its legal 0 / ().
+    assert mf.previous_leader_count is None and mf.previous_leader_ids is None
+    assert mf.current_leader_count == 0 and mf.current_leader_ids == ()
+    assert not _migration_facts_side_violation(
+        prev_unavailable, mf.previous_leader_count, mf.previous_leader_ids
+    )
+    assert not _migration_facts_side_violation(
+        curr_ready_empty, mf.current_leader_count, mf.current_leader_ids
+    )
+    assert not _migration_transition_metrics_violation(mf)
+
+
+def test_migration_facts_prev_ready_empty_curr_unavailable_is_legal() -> None:
+    # Test 2 (A2): previous ready-empty / current unavailable -> no coercion.
+    prev_ready_empty = _snap("2026-08-13", status="ready", leader_set=())
+    curr_unavailable = _snap("2026-08-14", status="unavailable", leader_set=None)
+    mf = compute_leadership_migration(
+        previous_snapshot=prev_ready_empty, current_snapshot=curr_unavailable
+    )
+    assert mf.status == "unavailable" and mf.reason == "unavailable_snapshot"
+    assert mf.previous_leader_count == 0 and mf.previous_leader_ids == ()
+    assert mf.current_leader_count is None and mf.current_leader_ids is None
+    assert not _migration_facts_side_violation(
+        prev_ready_empty, mf.previous_leader_count, mf.previous_leader_ids
+    )
+    assert not _migration_facts_side_violation(
+        curr_unavailable, mf.current_leader_count, mf.current_leader_ids
+    )
+    assert not _migration_transition_metrics_violation(mf)
+
+
+def test_migration_facts_ready_empty_to_ready_nonempty_allows_legal_zero() -> None:
+    # Test 3 (A2): previous ready-empty -> current ready-nonempty is a LEGAL
+    # empty_leader_set; count 0 / ids () must never be flagged as coercion, and
+    # the real set-difference is preserved while rate metrics stay None.
+    prev_ready_empty = _snap("2026-08-13", status="ready", leader_set=())
+    curr_ready_nonempty = _snap(
+        "2026-08-14", status="ready", leader_set=(_leader("a"),), direction=1
+    )
+    mf = compute_leadership_migration(
+        previous_snapshot=prev_ready_empty, current_snapshot=curr_ready_nonempty
+    )
+    assert mf.status == "unavailable" and mf.reason == "empty_leader_set"
+    assert mf.previous_leader_count == 0 and mf.previous_leader_ids == ()
+    assert mf.current_leader_count == 1 and mf.current_leader_ids == ("a",)
+    assert mf.retained_count == 0 and mf.entrant_count == 1 and mf.exit_count == 0
+    assert (
+        mf.previous_retention is None
+        and mf.jaccard_stability is None
+        and mf.migration is None
+    )
+    assert not _migration_facts_side_violation(
+        prev_ready_empty, mf.previous_leader_count, mf.previous_leader_ids
+    )
+    assert not _migration_facts_side_violation(
+        curr_ready_nonempty, mf.current_leader_count, mf.current_leader_ids
+    )
+    assert not _migration_transition_metrics_violation(mf)
+
+
+def test_migration_facts_unavailable_side_tampered_to_zero_detected() -> None:
+    # Test 4 (A2): deliberately coerce an unavailable side's None count to 0 —
+    # the side-aware helper MUST detect it (the Snapshot/transition layers do
+    # not cover this, proving the two layers are separate).
+    prev_unavailable = _snap("2026-08-13", status="unavailable", leader_set=None)
+    curr_ready = _snap("2026-08-14", status="ready", leader_set=(_leader("a"),), direction=1)
+    mf = compute_leadership_migration(
+        previous_snapshot=prev_unavailable, current_snapshot=curr_ready
+    )
+    assert mf.previous_leader_count is None and mf.previous_leader_ids is None
+    tampered = replace(mf, previous_leader_count=0, previous_leader_ids=())
+    assert _migration_facts_side_violation(
+        prev_unavailable, tampered.previous_leader_count, tampered.previous_leader_ids
+    ) is True
+    # rate metrics still None -> the transition-metric layer alone cannot catch it.
+    assert not _migration_transition_metrics_violation(tampered)
