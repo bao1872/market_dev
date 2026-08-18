@@ -433,7 +433,7 @@ class TestEventLifecycle:
 
         注意：此测试只证明 adapter 两次 slice 得到相同输入事件集合（deterministic），
         **不**证明 DB 层不重复插入。真正的 persistence idempotency 由
-        ``test_pg_review_lineage_contract.py::test_event_unique_contract_per_contract_version``
+        ``test_pg_review_lineage_contract.py::test_event_legacy_v2_coexistence_and_idempotency``
         （真实 PostgreSQL partial unique index + ON CONFLICT DO NOTHING，不 mock
         ``_persist_history_result``）提供证据。
         """
@@ -471,16 +471,31 @@ class TestEventLifecycle:
         # 事件也不能在 state 缺席时被凭空持久化（同一 lifecycle 原子性）
 
     async def test_failclosed_missing_timestamp_no_persistence(self):
-        """EVENT-LIFECYCLE-06 (F1): event 缺 time/anchor_time -> fail closed, persistence NOT called."""
+        """EVENT-LIFECYCLE-06 (F1): event 缺 time -> fail closed, persistence NOT called."""
         history = _history_with_events(
             [PREV, TARGET],
-            [{"type": "BOS", "bar_index": 5}],  # 无 time / anchor_time
+            [{"type": "BOS", "bar_index": 5}],  # 无 time
         )
         summary, captured, _ = await self._run(history)
 
         assert summary["failed"] == 1
         assert summary["target_state_count"] == 0
         assert captured == [], "fail-closed 时不得调用 persistence"
+
+    async def test_failclosed_anchor_time_does_not_fallback(self):
+        """EVENT-LIFECYCLE-10 (F1): event 有 anchor_time 但缺 canonical time ->
+        fail closed（anchor_time 不是 occurrence date，不允许 fallback 推断）。"""
+        history = _history_with_events(
+            [PREV, TARGET],
+            # anchor_time=08-06 只是 anchor/pivot bar 时间，不是 BOS 发生日期；
+            # canonical time 缺失 -> CONTRACT CORRUPTION，必须 fail closed。
+            [{"type": "BOS", "bar_index": 5, "anchor_time": PREV.isoformat()}],
+        )
+        summary, captured, _ = await self._run(history)
+
+        assert summary["failed"] == 1
+        assert summary["target_state_count"] == 0
+        assert captured == [], "anchor_time 不得 fallback 为 event date"
 
     async def test_failclosed_invalid_timestamp_no_persistence(self):
         """EVENT-LIFECYCLE-07 (F1): invalid event timestamp -> fail closed, persistence NOT called."""

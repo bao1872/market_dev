@@ -1309,15 +1309,17 @@ def _target_date_events(history: dict[str, Any], trade_date: date) -> list[dict[
     ROUND-2.2A-1 FAIL-CLOSED (F1): a canonical event that cannot be assigned an
     event date is a lifecycle failure, NOT a zero-event.  ``events == []`` is a legal
     zero-event (member had no event on T); but an event with missing/invalid
-    ``time``/``anchor_time``, or with a future date (> trade_date), must NOT be
-    silently dropped — otherwise a corrupted event stream would be misrepresented
-    as "a clean zero-event lifecycle", systematically lowering the event denominator.
-    These are raised so ``advance_history_to_trade_date`` fails the instrument and
-    does NOT call persistence (fail closed).  ``event_date < trade_date`` is a
-    history-window legacy event and is legitimately ignored.
+    ``time``, or with a future date (> trade_date), must NOT be silently dropped —
+    otherwise a corrupted event stream would be misrepresented as "a clean zero-event
+    lifecycle", systematically lowering the event denominator.  These are raised so
+    ``advance_history_to_trade_date`` fails the instrument and does NOT call
+    persistence (fail closed).  ``event_date < trade_date`` is a history-window
+    legacy event and is legitimately ignored.
 
-    The event ``time`` field is the canonical ``confirmed_time`` (ISO date).  Input
-    bars are hard-limited to ``max_bar_date <= trade_date``, so a future event date
+    The event ``time`` field is the canonical occurrence/confirmation date (ISO date)
+    normalized by ``compute_first_pyramid_history``; ``anchor_time`` is a different
+    semantic (anchor/pivot/OB bar) and is NEVER used as the event date.  Input bars
+    are hard-limited to ``max_bar_date <= trade_date``, so a future event date
     implies timestamp-mapping error / canonical compute leakage / date-semantics bug.
     """
     raw_events = history.get("events") or []
@@ -1326,12 +1328,22 @@ def _target_date_events(history: dict[str, Any], trade_date: date) -> list[dict[
         return []
     out: list[dict[str, Any]] = []
     for evt in raw_events:
-        time_str = evt.get("time") or evt.get("anchor_time")
+        # 2.2A-1 AUDIT FIX (F1): canonical target-date SSOT = evt["time"] ONLY.
+        # compute_first_pyramid_history normalizes every event's canonical occurrence /
+        # confirmation date into "time" (BOS/CHoCH->confirmed_time, OB_CREATED->
+        # confirmed_time, OB_ENTERED->enter_time, OB_MITIGATED->mitigated_time,
+        # EQH/EQL->confirmed_time, SQZ_RELEASE/ZERO_CROSS->times[i]).
+        # ``anchor_time`` is a DIFFERENT semantic (anchor/pivot/OB bar), NOT the
+        # event occurrence date — it must NEVER fallback-infer the event date
+        # (that would attribute an event to the wrong trade day).  Missing time =>
+        # CONTRACT CORRUPTION, fail closed.
+        time_str = evt.get("time")
         if not time_str:
             raise ValueError(
-                "event 缺少 time/anchor_time，无法确定其 event date："
+                "event 缺少 canonical time，无法确定其 event date："
                 f"type={evt.get('type') or '?'} — 这是 lifecycle failure，"
-                "不是 zero-event（不允许把损坏事件流当作合法零事件）"
+                "不是 zero-event；anchor_time 不是 event occurrence date，"
+                "不允许 fallback 推断"
             )
         try:
             evt_date = pd.to_datetime(time_str).date()
