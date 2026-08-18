@@ -1296,49 +1296,32 @@ def _max_bar_trade_date(bars: pd.DataFrame) -> date | None:
     return None
 
 
-async def _persist_target_daily_state(
-    session: AsyncSession,
-    instrument_id: uuid.UUID,
-    state: dict[str, Any],
-    algorithm_version: str,
-    *,
-    trade_date_val: date,
-    input_hash: str,
-    source_history_run_id: uuid.UUID,
-    history_contract_version: str,
-) -> None:
-    """[HISTORY-CURRENT-DATE-LIFECYCLE-01 §7] 只写单个 target-date canonical daily state。
+def _target_date_events(history: dict[str, Any], trade_date: date) -> list[dict[str, Any]]:
+    """PURE ADAPTER: slice the canonical events whose event date == ``trade_date``.
 
-    刻意**不复用** ``_persist_history_result``：后者会把整个 250-day window 全部
-    upsert（250x write amplification）并连带写 events 表。本 helper：
+    ROUND-2.2A: the exact-T canonical calculation must, in the same lifecycle, form
+    the T-day State AND the T-day Structure Event stream.  This helper only does
+    ``event_time -> date`` filtering — it does NOT re-judge BOS / re-decide Structure
+    Level / recompute Direction / aggregate member ratio / drop "less important"
+    events.  Every event whose date equals ``trade_date`` is kept with its full
+    canonical payload; zero events is a valid, provable outcome (a member with no
+    event on T is still a completed lifecycle, not "no coverage").
 
-    - 只 upsert 1 行 (instrument_id, target_trade_date, algorithm_version)
-    - 完全不触碰历史日期行（08-07 及更早 payload/lineage 保持 byte-identical）
-    - 完全不写 first_pyramid_history_events
-
-    复用既有 ON CONFLICT DO UPDATE contract（同一 unique constraint、同一 set_ 字段集），
-    保证 target-date 行与 backfill 产出的行结构/lineage 语义一致。
+    The event ``time`` field is the canonical ``confirmed_time`` (ISO date), so an
+    event with ``time`` whose calendar date equals ``trade_date`` belongs to T.
     """
-    stmt = pg_insert(FirstPyramidHistoryDailyState).values(
-        instrument_id=instrument_id,
-        trade_date=trade_date_val,
-        algorithm_version=algorithm_version,
-        input_hash=input_hash,
-        source_history_run_id=source_history_run_id,
-        history_contract_version=history_contract_version,
-        state_payload=state,
-    )
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_first_pyramid_history_daily_state_instr_date_ver",
-        set_={
-            "input_hash": stmt.excluded.input_hash,
-            "source_history_run_id": stmt.excluded.source_history_run_id,
-            "history_contract_version": stmt.excluded.history_contract_version,
-            "state_payload": stmt.excluded.state_payload,
-            "updated_at": func.now(),
-        },
-    )
-    await session.execute(stmt)
+    out: list[dict[str, Any]] = []
+    for evt in history.get("events") or []:
+        time_str = evt.get("time") or evt.get("anchor_time")
+        if not time_str:
+            continue
+        try:
+            evt_date = pd.to_datetime(time_str).date()
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if evt_date == trade_date:
+            out.append(evt)
+    return out
 
 
 async def advance_history_to_trade_date(
@@ -1358,9 +1341,15 @@ async def advance_history_to_trade_date(
       （create_history_run 幂等复用 + daily_state upsert 覆盖 lineage 共同证明），
       因此推进数据集 = 在**同一个 run id** 下补齐 target-date state，
       而不是新建 run X 全量 replay（那会把 ~1.32M 历史行 lineage 改写成 X）。
-    - 只写 target_trade_date 一行/instrument（1x write amplification，非 250x）
+    - ROUND-2.2A：exact-T State 与 exact-T Events 从**同一次** canonical calculation
+      一起持久化（复用 ``_persist_history_result`` 单一 owner：State upsert +
+      Event immutable insert + contract-aware uniqueness + lineage）。
+      target-event slicing 是纯 date adapter（``_target_date_events``），非新业务算法。
+      **零事件是一个合法、可证明的结果**（该 member T 日无事件 = 生命周期完整完成，
+      而非 "no coverage"）。
+    - 只写 target_trade_date 一行/instrument + 该日 events（1x write amplification，
+      非 250x history rewrite；events 用不可变 insert-on-conflict-nothing，重跑幂等）
     - 不 claim / 不修改任何 run item（5283 succeeded + 10 skipped 的 execution history 冻结）
-    - 不写 events 表（formal Review 不消费 FirstPyramidHistoryEvent；见 CASE A 审计）
     - PIT：bars 经 MDAS ``end_date=trade_date`` + ``adjustment_as_of=trade_date``
 
     participating set = run 现有 succeeded run-item set（§8），
@@ -1463,7 +1452,6 @@ async def advance_history_to_trade_date(
                     include_chip=False,
                 )
                 meta = history.get("meta") or {}
-                input_hash = meta.get("input_hash") or ""
 
                 target_state = None
                 for state in history.get("daily_state") or []:
@@ -1483,13 +1471,23 @@ async def advance_history_to_trade_date(
                     no_target_state += 1
                     continue
 
-                await _persist_target_daily_state(
+                # ROUND-2.2A: exact-T State + exact-T Events come from the SAME
+                # canonical calculation and are persisted TOGETHER via the single
+                # ``_persist_history_result`` owner (State upsert + Event immutable
+                # insert + contract-aware event uniqueness + lineage semantics).
+                # Only the T-date state (1 row) and the T-date events are written —
+                # no 250-day history rewrite.  target-event slicing is a pure date
+                # adapter (``_target_date_events``), NOT a new business algorithm.
+                target_result: dict[str, Any] = {
+                    "daily_state": [target_state],
+                    "events": _target_date_events(history, trade_date),
+                    "meta": meta,
+                }
+                await _persist_history_result(
                     session,
                     instrument_id,
-                    target_state,
+                    target_result,
                     algorithm_version,
-                    trade_date_val=trade_date,
-                    input_hash=input_hash,
                     source_history_run_id=history_run_id,
                     history_contract_version=HISTORY_CONTRACT_VERSION,
                 )

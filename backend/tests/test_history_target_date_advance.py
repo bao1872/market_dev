@@ -9,8 +9,8 @@
 - E: future bar 绝不进入 compute input（PIT 断言 + MDAS 参数锁定）
 - F: target eligible set 缺 1 个 state → NOT_READY
 - G: target eligible set 完整 → READY
-- H: formal Review 不消费 FirstPyramidHistoryEvent（静态证据测试）
-- I: daily advance 不写 event table
+- H: FirstPyramidHistoryEvent 是 Review formal Structure Event source（ROUND-2.2A）
+- I: daily advance 写 target-date state + target-date events（同一 canonical lifecycle）
 
 运行：
     cd backend
@@ -73,6 +73,22 @@ def _history_with_states(dates: list[date]) -> dict[str, Any]:
     }
 
 
+def _history_with_events(dates: list[date], events: list[dict[str, Any]]) -> dict[str, Any]:
+    """构造 T-date state + 指定 events 的 canonical history 结构（EVENT-LIFECYCLE 用）。"""
+    return {
+        "daily_state": [
+            {"bar_index": i, "time": d.isoformat(), "regime_value": 0.5}
+            for i, d in enumerate(dates)
+        ],
+        "events": events,
+        "meta": {"input_hash": "hash-abc", "output_bars": 250},
+    }
+
+
+def _evt(etype: str, day: date, **extra: Any) -> dict[str, Any]:
+    return {"type": etype, "bar_index": 5, "time": day.isoformat(), **extra}
+
+
 class _FakeRun:
     def __init__(
         self,
@@ -115,7 +131,8 @@ class _FakeSession:
 
 
 class TestAdvanceWritesOnlyTargetDate:
-    """§11 B / C / I：只写 target-date state，不改历史行，不写 events。"""
+    """§11 B / C / I（ROUND-2.2A）：只写 target-date state + target-date events，
+    不改历史行，不写历史日期事件。"""
 
     async def _run_advance(self, states: list[date], bars_end: str = "2026-08-10"):
         run_id = uuid.uuid4()
@@ -123,11 +140,11 @@ class TestAdvanceWritesOnlyTargetDate:
         session = _FakeSession(_FakeRun(run_id), [iid])
         persisted: list[dict[str, Any]] = []
 
-        async def fake_persist(_session, instrument_id, state, algorithm_version, **kw):
+        async def fake_persist(_session, instrument_id, target_result, algorithm_version, **kw):
             persisted.append(
                 {
                     "instrument_id": instrument_id,
-                    "state": state,
+                    "target_result": target_result,
                     "algorithm_version": algorithm_version,
                     **kw,
                 }
@@ -140,31 +157,34 @@ class TestAdvanceWritesOnlyTargetDate:
             "app.services.first_pyramid_service.compute_first_pyramid_history",
             MagicMock(return_value=_history_with_states(states)),
         ), patch(
-            "app.services.first_pyramid_history_service._persist_target_daily_state",
+            "app.services.first_pyramid_history_service._persist_history_result",
             fake_persist,
         ):
             summary = await advance_history_to_trade_date(session, run_id, TARGET)
         return summary, persisted, run_id, iid, session
 
     async def test_b_only_target_date_state_written(self):
-        """B: history 含 08-05/08-06/08-07/08-10 四天，只持久化 08-10 一行。"""
+        """B: history 含 08-05/08-06/08-07/08-10 四天，只持久化 08-10 一行 state。"""
         states = [date(2026, 8, 5), date(2026, 8, 6), PREV, TARGET]
         summary, persisted, _, _, _ = await self._run_advance(states)
 
         assert summary["target_state_count"] == 1
-        assert len(persisted) == 1, "必须最多写 1 行/instrument（1x 写放大，非 250x）"
-        assert persisted[0]["trade_date_val"] == TARGET
-        assert persisted[0]["state"]["time"] == TARGET.isoformat()
+        assert len(persisted) == 1, "必须最多写 1 次/instrument（1x 写放大，非 250x）"
+        states_in = persisted[0]["target_result"]["daily_state"]
+        assert len(states_in) == 1, "target_result 只含 target-date 1 行 state"
+        assert states_in[0]["time"] == TARGET.isoformat()
 
     async def test_c_historical_dates_never_touched(self):
         """C: 历史日期（08-07 及更早）不出现在任何持久化调用中。"""
         states = [date(2026, 8, 5), date(2026, 8, 6), PREV, TARGET]
         _, persisted, _, _, _ = await self._run_advance(states)
 
-        written_dates = {p["trade_date_val"] for p in persisted}
-        assert written_dates == {TARGET}
-        assert PREV not in written_dates
-        assert date(2026, 8, 5) not in written_dates
+        state_dates = {
+            s["time"] for p in persisted for s in p["target_result"]["daily_state"]
+        }
+        assert state_dates == {TARGET.isoformat()}
+        assert PREV.isoformat() not in state_dates
+        assert date(2026, 8, 5).isoformat() not in state_dates
 
     async def test_d_lineage_stays_on_existing_canonical_run(self):
         """D: source_history_run_id 保持为传入的 canonical run（不新建 run X）。"""
@@ -174,16 +194,22 @@ class TestAdvanceWritesOnlyTargetDate:
         assert persisted[0]["source_history_run_id"] == run_id
         assert persisted[0]["history_contract_version"] == CONTRACT
 
-    async def test_i_no_event_rows_written(self):
-        """I: Review 不消费 HistoryEvent → daily advance 完全不写 event 表。"""
-        states = [PREV, TARGET]
-        summary, _, _, _, session = await self._run_advance(states)
+    async def test_i_target_events_written(self):
+        """I（ROUND-2.2A）：daily advance 持久化 target-date events（同一 lifecycle）。
 
-        # advance 内唯一的 session.execute 是 run-item 查询（select），
-        # 不含任何 FirstPyramidHistoryEvent insert。
+        FirstPyramidHistoryEvent 是 Review formal Structure Event source；advance
+        从同一次 canonical compute 提取 exact-T events 一并持久化。仅 target-date
+        事件（SQZ_RELEASE@08-10）被保留，非 target 事件（BOS@05-01）被 date-adapter
+        过滤掉。
+        """
+        states = [PREV, TARGET]
+        summary, persisted, _, _, _ = await self._run_advance(states)
+
         assert summary["target_state_count"] == 1
-        compiled = " ".join(str(s) for s in session.executed).lower()
-        assert "first_pyramid_history_events" not in compiled
+        events = persisted[0]["target_result"]["events"]
+        # 只有 target-date 的 SQZ_RELEASE；非 target 的 BOS@05-01 被过滤。
+        assert [e["type"] for e in events] == ["SQZ_RELEASE"]
+        assert all(e["time"] == TARGET.isoformat() for e in events)
 
     async def test_missing_target_state_is_counted_not_written(self):
         """target date 无 state（停牌）→ 不写行，计入 no_target_state。"""
@@ -219,7 +245,7 @@ class TestPitBoundary:
             "app.services.first_pyramid_service.compute_first_pyramid_history",
             compute,
         ), patch(
-            "app.services.first_pyramid_history_service._persist_target_daily_state",
+            "app.services.first_pyramid_history_service._persist_history_result",
             AsyncMock(),
         ):
             summary = await advance_history_to_trade_date(session, run_id, TARGET)
@@ -273,7 +299,7 @@ class TestRunItemsFrozen:
             "app.services.first_pyramid_service.compute_first_pyramid_history",
             MagicMock(return_value=_history_with_states([TARGET])),
         ), patch(
-            "app.services.first_pyramid_history_service._persist_target_daily_state",
+            "app.services.first_pyramid_history_service._persist_history_result",
             AsyncMock(),
         ):
             await advance_history_to_trade_date(session, run_id, TARGET)
@@ -324,6 +350,120 @@ class TestRunItemsFrozen:
         session.get = AsyncMock(return_value=None)
         with pytest.raises(ValueError, match="history run not found"):
             await advance_history_to_trade_date(session, run_id, TARGET)
+
+
+class TestEventLifecycle:
+    """ROUND-2.2A EVENT-LIFECYCLE-01~05：exact-T State + Events 同一 lifecycle。
+
+    invariant: exact-T First Pyramid 可被 Review 消费 ⇔ 同一次 canonical calculation
+    同时形成完整 T-day State 与 T-day Structure Event stream；零事件也是合法可证明结果。
+    """
+
+    async def _run(self, history: dict[str, Any]):
+        """Capture the exact target_result handed to _persist_history_result."""
+        run_id = uuid.uuid4()
+        iid = uuid.uuid4()
+        session = _FakeSession(_FakeRun(run_id), [iid])
+        captured: list[dict[str, Any]] = []
+
+        async def fake_persist(_session, instrument_id, target_result, algorithm_version, **kw):
+            captured.append(target_result)
+
+        with patch(
+            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_for_target",
+            AsyncMock(return_value=_build_bars()),
+        ), patch(
+            "app.services.first_pyramid_service.compute_first_pyramid_history",
+            MagicMock(return_value=history),
+        ), patch(
+            "app.services.first_pyramid_history_service._persist_history_result",
+            fake_persist,
+        ):
+            summary = await advance_history_to_trade_date(session, run_id, TARGET)
+        return summary, captured, session
+
+    async def test_lifecycle_01_state_and_events_persisted(self):
+        """EVENT-LIFECYCLE-01: T 日 compute: 1 state + 2 events -> both persisted."""
+        history = _history_with_events(
+            [PREV, TARGET],
+            [_evt("BOS", TARGET, internal=False),
+             _evt("CHoCH", TARGET, internal=True)],
+        )
+        summary, captured, _ = await self._run(history)
+
+        assert summary["target_state_count"] == 1
+        assert len(captured) == 1
+        tr = captured[0]
+        assert len(tr["daily_state"]) == 1  # 1x target state
+        assert [e["type"] for e in tr["events"]] == ["BOS", "CHoCH"]
+        assert all(e["time"] == TARGET.isoformat() for e in tr["events"])
+
+    async def test_lifecycle_02_zero_event_is_legal_completion(self):
+        """EVENT-LIFECYCLE-02 (most important): T 成功 + 0 events -> state persisted,
+        events empty, but calculation is legitimately complete (zero-event ≠ no coverage)."""
+        history = _history_with_events([PREV, TARGET], [])
+        summary, captured, _ = await self._run(history)
+
+        assert summary["target_state_count"] == 1
+        assert summary["no_target_state"] == 0
+        assert summary["failed"] == 0
+        assert len(captured) == 1
+        tr = captured[0]
+        assert len(tr["daily_state"]) == 1
+        assert tr["events"] == [], "零事件是合法 lifecycle 结果，非 no coverage"
+
+    async def test_lifecycle_03_only_target_events_persisted(self):
+        """EVENT-LIFECYCLE-03: 历史窗口含 T-1 与 T events -> 只持久化 T events。"""
+        history = _history_with_events(
+            [PREV, TARGET],
+            [_evt("BOS", PREV),      # T-1 事件，不得持久化
+             _evt("CHoCH", TARGET),  # T 事件
+             _evt("EQH", TARGET)],
+        )
+        summary, captured, _ = await self._run(history)
+
+        assert summary["target_state_count"] == 1
+        events = captured[0]["events"]
+        assert [e["type"] for e in events] == ["CHoCH", "EQH"]
+        assert all(e["time"] == TARGET.isoformat() for e in events)
+        assert not any(e["time"] == PREV.isoformat() for e in events)
+
+    async def test_lifecycle_04_retry_idempotent_no_duplicate_events(self):
+        """EVENT-LIFECYCLE-04: 重复 advance -> _persist_history_result 收到同一 events；
+        immutability 由 _persist_history_result 的 on_conflict_do_nothing 保证。"""
+        history = _history_with_events(
+            [PREV, TARGET],
+            [_evt("BOS", TARGET), _evt("OB_CREATED", TARGET)],
+        )
+        _, captured1, _ = await self._run(history)
+        _, captured2, _ = await self._run(history)
+
+        def _event_ids(trs: list[dict[str, Any]]) -> list[str]:
+            out = []
+            for tr in trs:
+                for e in tr["events"]:
+                    eid = e.get("event_id") or e.get("id") or f"{e['type']}_{e['time']}"
+                    out.append(str(eid))
+            return out
+
+        ids1 = _event_ids(captured1)
+        ids2 = _event_ids(captured2)
+        # 两次 run 产出同一稳定事件集；_persist_history_result 以 on_conflict_do_nothing
+        # 保证第二次不重复插入（此处验证源事件集一致）。
+        assert ids1 == ids2
+        assert len(ids1) == len(set(ids1)), "同一天同类事件必须可区分（稳定 ID）"
+
+    async def test_lifecycle_05_no_target_state_no_orphan_events(self):
+        """EVENT-LIFECYCLE-05: 无 target_state -> 不得只写 orphan T events。"""
+        # 只有 PREV state，无 TARGET state（停牌）；但 history 有 TARGET 事件。
+        history = _history_with_events([PREV], [_evt("BOS", TARGET)])
+        summary, captured, _ = await self._run(history)
+
+        # target state 缺失 → 该 instrument 直接跳过，不写任何 target_result（含事件）。
+        assert summary["no_target_state"] == 1
+        assert summary["target_state_count"] == 0
+        assert captured == [], "无 target_state 时不得写 orphan T events"
+        # 事件也不能在 state 缺席时被凭空持久化（同一 lifecycle 原子性）
 
 
 class TestTargetDateReadiness:
