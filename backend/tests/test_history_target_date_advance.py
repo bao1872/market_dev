@@ -428,9 +428,15 @@ class TestEventLifecycle:
         assert all(e["time"] == TARGET.isoformat() for e in events)
         assert not any(e["time"] == PREV.isoformat() for e in events)
 
-    async def test_lifecycle_04_retry_idempotent_no_duplicate_events(self):
-        """EVENT-LIFECYCLE-04: 重复 advance -> _persist_history_result 收到同一 events；
-        immutability 由 _persist_history_result 的 on_conflict_do_nothing 保证。"""
+    async def test_lifecycle_04_retry_produces_same_target_event_set(self):
+        """EVENT-LIFECYCLE-04: 两次 advance slicing 产出同一目标事件集（deterministic）。
+
+        注意：此测试只证明 adapter 两次 slice 得到相同输入事件集合（deterministic），
+        **不**证明 DB 层不重复插入。真正的 persistence idempotency 由
+        ``test_pg_review_lineage_contract.py::test_event_unique_contract_per_contract_version``
+        （真实 PostgreSQL partial unique index + ON CONFLICT DO NOTHING，不 mock
+        ``_persist_history_result``）提供证据。
+        """
         history = _history_with_events(
             [PREV, TARGET],
             [_evt("BOS", TARGET), _evt("OB_CREATED", TARGET)],
@@ -448,8 +454,7 @@ class TestEventLifecycle:
 
         ids1 = _event_ids(captured1)
         ids2 = _event_ids(captured2)
-        # 两次 run 产出同一稳定事件集；_persist_history_result 以 on_conflict_do_nothing
-        # 保证第二次不重复插入（此处验证源事件集一致）。
+        # deterministic target event set; DB no-dup 由真实 PG 测试（F2）证明。
         assert ids1 == ids2
         assert len(ids1) == len(set(ids1)), "同一天同类事件必须可区分（稳定 ID）"
 
@@ -464,6 +469,56 @@ class TestEventLifecycle:
         assert summary["target_state_count"] == 0
         assert captured == [], "无 target_state 时不得写 orphan T events"
         # 事件也不能在 state 缺席时被凭空持久化（同一 lifecycle 原子性）
+
+    async def test_failclosed_missing_timestamp_no_persistence(self):
+        """EVENT-LIFECYCLE-06 (F1): event 缺 time/anchor_time -> fail closed, persistence NOT called."""
+        history = _history_with_events(
+            [PREV, TARGET],
+            [{"type": "BOS", "bar_index": 5}],  # 无 time / anchor_time
+        )
+        summary, captured, _ = await self._run(history)
+
+        assert summary["failed"] == 1
+        assert summary["target_state_count"] == 0
+        assert captured == [], "fail-closed 时不得调用 persistence"
+
+    async def test_failclosed_invalid_timestamp_no_persistence(self):
+        """EVENT-LIFECYCLE-07 (F1): invalid event timestamp -> fail closed, persistence NOT called."""
+        history = _history_with_events(
+            [PREV, TARGET],
+            [_evt("BOS", TARGET, time="not-a-date")],
+        )
+        summary, captured, _ = await self._run(history)
+
+        assert summary["failed"] == 1
+        assert summary["target_state_count"] == 0
+        assert captured == [], "invalid timestamp 不得当零事件持久化"
+
+    async def test_failclosed_future_timestamp_pit_violation(self):
+        """EVENT-LIFECYCLE-08 (F1): event date > T -> PIT violation, fail closed, no persistence."""
+        future = date(2026, 9, 1)  # > TARGET
+        history = _history_with_events(
+            [PREV, TARGET],
+            [_evt("BOS", future)],
+        )
+        summary, captured, _ = await self._run(history)
+
+        assert summary["failed"] == 1
+        assert summary["target_state_count"] == 0
+        assert captured == [], "future event = leakage，不得持久化"
+
+    async def test_failclosed_valid_t1_event_ignored_not_failed(self):
+        """EVENT-LIFECYCLE-09 (F1): event date < T (history-window legacy) -> ignored, NOT failed."""
+        history = _history_with_events(
+            [PREV, TARGET],
+            [_evt("BOS", PREV)],  # T-1 事件
+        )
+        summary, captured, _ = await self._run(history)
+
+        assert summary["failed"] == 0
+        assert summary["target_state_count"] == 1
+        assert len(captured) == 1
+        assert captured[0]["events"] == [], "T-1 事件被忽略，但 lifecycle 仍成功"
 
 
 class TestTargetDateReadiness:

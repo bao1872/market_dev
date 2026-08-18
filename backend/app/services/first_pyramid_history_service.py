@@ -1304,23 +1304,53 @@ def _target_date_events(history: dict[str, Any], trade_date: date) -> list[dict[
     ``event_time -> date`` filtering — it does NOT re-judge BOS / re-decide Structure
     Level / recompute Direction / aggregate member ratio / drop "less important"
     events.  Every event whose date equals ``trade_date`` is kept with its full
-    canonical payload; zero events is a valid, provable outcome (a member with no
-    event on T is still a completed lifecycle, not "no coverage").
+    canonical payload.
 
-    The event ``time`` field is the canonical ``confirmed_time`` (ISO date), so an
-    event with ``time`` whose calendar date equals ``trade_date`` belongs to T.
+    ROUND-2.2A-1 FAIL-CLOSED (F1): a canonical event that cannot be assigned an
+    event date is a lifecycle failure, NOT a zero-event.  ``events == []`` is a legal
+    zero-event (member had no event on T); but an event with missing/invalid
+    ``time``/``anchor_time``, or with a future date (> trade_date), must NOT be
+    silently dropped — otherwise a corrupted event stream would be misrepresented
+    as "a clean zero-event lifecycle", systematically lowering the event denominator.
+    These are raised so ``advance_history_to_trade_date`` fails the instrument and
+    does NOT call persistence (fail closed).  ``event_date < trade_date`` is a
+    history-window legacy event and is legitimately ignored.
+
+    The event ``time`` field is the canonical ``confirmed_time`` (ISO date).  Input
+    bars are hard-limited to ``max_bar_date <= trade_date``, so a future event date
+    implies timestamp-mapping error / canonical compute leakage / date-semantics bug.
     """
+    raw_events = history.get("events") or []
+    if not raw_events:
+        # history.events == [] -> legitimate zero-event; the lifecycle completed.
+        return []
     out: list[dict[str, Any]] = []
-    for evt in history.get("events") or []:
+    for evt in raw_events:
         time_str = evt.get("time") or evt.get("anchor_time")
         if not time_str:
-            continue
+            raise ValueError(
+                "event 缺少 time/anchor_time，无法确定其 event date："
+                f"type={evt.get('type') or '?'} — 这是 lifecycle failure，"
+                "不是 zero-event（不允许把损坏事件流当作合法零事件）"
+            )
         try:
             evt_date = pd.to_datetime(time_str).date()
-        except (ValueError, TypeError, AttributeError):
-            continue
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError(
+                f"event time 无法解析（invalid timestamp）：{time_str!r} "
+                f"type={evt.get('type') or '?'} — lifecycle failure，fail closed"
+            ) from exc
+        if evt_date > trade_date:
+            # Input bars 已限制 max_bar_date <= trade_date；未来事件 = leakage /
+            # 时间语义错误 / timestamp-mapping 错误 -> PIT violation，fail closed。
+            raise ValueError(
+                f"event date {evt_date.isoformat()} > trade_date "
+                f"{trade_date.isoformat()}（type={evt.get('type') or '?'}）— "
+                "PIT violation / canonical compute leakage，fail closed"
+            )
         if evt_date == trade_date:
             out.append(evt)
+        # evt_date < trade_date -> history-window legacy event, legitimately ignored.
     return out
 
 
