@@ -951,7 +951,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--mode",
         choices=[
-            "single",
             "capacity-benchmark",
             "export-dataset",
             "dataset-validate",
@@ -961,11 +960,11 @@ def _parse_args() -> argparse.Namespace:
             "explore1",
             "equivalence",
         ],
-        default="single",
+        required=True,
         help=(
-            "single: 单 scope 基线测量（默认）；"
-            "capacity-benchmark: 只调用 optimized production owner "
-            "compute_current_static_scope_dynamics_batch()（禁 legacy/single/手工 chunk）；"
+            "capacity-benchmark: 只调用 optimized batch owner (shadow, production-bound) "
+            "compute_current_static_scope_dynamics_batch()（禁 legacy/single/手工 chunk，"
+            "union_member_cap 用 owner default）；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -1015,126 +1014,33 @@ def _rss_mb() -> float:
 def _build_readonly_engine():
     """标记函数：本 probe 通过 AsyncSessionLocal 复用 app.db 的现有 engine。
 
-    只读守卫在 ``_probe`` 内于连接建立后立即执行
-    ``SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`` 并验证写被拒。
-    不修改共享的 app.db 源码；probe 仅调用纯 SELECT 路径，不发出任何 DDL。
+    只读守卫在 ``capacity-benchmark`` 内于连接建立后，以事务内
+    ``SET TRANSACTION READ ONLY`` 作为首条语句并 ``SHOW transaction_read_only``
+    验证为 on（fail-closed），绝不 commit。不修改共享的 app.db 源码；probe 仅
+    调用纯 SELECT 路径，不发出任何 DDL。
     """
     from app.db import AsyncSessionLocal
 
     return AsyncSessionLocal
 
 
-async def _probe(
-    scope_type: str,
-    scope_key: str,
-    history: int,
-    asof_date: date | None,
-) -> int:
-    from sqlalchemy import text
-
-    from app.db import AsyncSessionLocal
-    from app.services.review_observation_prep_service import (
-        list_recent_trading_days,
-    )
-    from app.services.review_scope_dynamics_service import (
-        compute_current_static_scope_dynamics,
-    )
-
-    _build_readonly_engine()  # 复用 app.db 的 AsyncSessionLocal
-    async with AsyncSessionLocal() as db:
-        # 只读守卫：连接建立后立即设为 read-only（对非超级用户角色生效）。
-        # 注意：bz_stock 的 bz 角色是超级用户，PostgreSQL 不会对其强制
-        # transaction_read_only，因此 DB 层只读无法由会话设置保证。
-        # 本 probe 的只读性由 **代码审计保证**：被调用的正式 path
-        # （reconstruct / prep / observation / dynamics）仅发出 SELECT，
-        # 且 probe 本身不发出任何写语句。此处 SET 为纵深防御，验证仅作信息提示。
-        await db.execute(text("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"))
-        try:
-            await db.execute(
-                text(
-                    "WITH u AS (UPDATE market_boards SET name=name "
-                    "WHERE id='00000000-0000-0000-0000-000000000000' "
-                    "RETURNING 1) SELECT 1 FROM u"
-                )
-            )
-            await db.rollback()
-            logger.warning(
-                "[readonly-check] 角色为超级用户，DB 层只读无法强制；"
-                "只读性依赖代码审计（path 仅 SELECT）。继续运行（不写）。"
-            )
-        except Exception as e:  # noqa: BLE001 - 期望被 read-only 拒绝（非超级用户时）
-            logger.info("[readonly-check] DML 被拒绝: %s", type(e).__name__)
-            await db.rollback()
-        # canonical trading-date axis（复用正式 owner，不自造时间轴）
-        if asof_date is None:
-            latest = await list_recent_trading_days(db, date.today(), 1)
-            if not latest:
-                logger.error("无法解析最新交易日（calendar 为空）")
-                return 2
-            asof_date = latest[0]
-
-        trade_dates = await list_recent_trading_days(db, asof_date, history)
-        if not trade_dates:
-            logger.error("trade_dates 为空（history=%d）", history)
-            return 2
-        # list_recent_trading_days 返回降序，正式 path 要求严格升序
-        trade_dates = sorted(trade_dates)
-
-        logger.info(
-            "[probe] scope_type=%s scope_key=%s asof_date=%s "
-            "trade_date_count=%d window=[%s, %s]",
-            scope_type, scope_key, asof_date.isoformat(),
-            len(trade_dates),
-            trade_dates[0].isoformat(), trade_dates[-1].isoformat(),
-        )
-
-        rss_before = _rss_mb()
-        result = await compute_current_static_scope_dynamics(
-            db,
-            scope_type,
-            scope_key,
-            trade_dates,
-            analysis_asof_date=asof_date,
-        )
-        rss_after = _rss_mb()
-
-        membership = result.get("membership") or {}
-        member_count = (
-            membership.get("member_count")
-            if isinstance(membership, dict)
-            else len(membership)
-        )
-        scope_dynamics = result.get("scope_dynamics") or {}
-        observation_series = result.get("observation_series") or {}
-
-        # 诊断输出（只读，不拥有算法）
-        print("=== Scope Dynamics Probe (read-only baseline) ===")
-        print(f"scope_type        : {scope_type}")
-        print(f"scope_key         : {scope_key}")
-        print(f"asof_date         : {asof_date.isoformat()}")
-        print(f"trade_date_count  : {len(trade_dates)}")
-        print(f"member_count      : {member_count}")
-        print(f"member_x_days     : {member_count * len(trade_dates)}")
-        print(f"scope_dynamics_keys: {sorted(scope_dynamics.keys())}")
-        print(f"observation_series_keys: {sorted(observation_series.keys())}")
-        print(f"rss_before_mb     : {rss_before:.1f}")
-        print(f"rss_after_mb      : {rss_after:.1f}")
-        print(f"rss_delta_mb      : {rss_after - rss_before:.1f}")
-        print("=== END ===")
-        return 0
-
-
 async def _capacity_benchmark(
     scope_type: str, scope_count: int, history: int, asof_date: str | None
 ) -> int:
-    """capacity-benchmark：只调用 optimized production owner
+    """capacity-benchmark：只调用 optimized batch owner（shadow, production-bound path）
     ``compute_current_static_scope_dynamics_batch()``。
 
+    注意：``compute_current_static_scope_dynamics_batch()`` 当前标记 SHADOW ONLY，
+    尚未 wired 到 API / orchestrator / persistence / frontend —— 它是 production-code-
+    quality 的 optimized batch owner / candidate execution path，不是线上 orchestrator
+    已实际调用的 production execution path。因此本 benchmark 测量的是该 optimized
+    batch owner 的容量，不代表"线上 Review 当前就是此耗时"。
+
     不跑 legacy A/B（Git 历史已永久保存 PERF-1/PERF-2/PERF-VEC-1 证据）；不做任何
-    union 加载、scope 切分、member 构造或 single dynamics —— 全部委托给 production
-    batch owner。本函数只负责：选择 scope_keys + trade_dates、建立 read-only
-    transaction、调用 production batch、计 wall/RSS。chunking / I/O logs / metrics
-    全部来自 production owner 自身的现有输出。
+    union 加载、scope 切分、member 构造或 single dynamics —— 全部委托给 batch owner。
+    本函数只负责：选择 scope_keys + trade_dates、建立 read-only transaction、调用
+    batch owner、计 wall/RSS。chunking / I/O logs / metrics 全部来自 batch owner 自身
+    的现有输出。union_member_cap 使用 batch owner 自身 default，probe 不复制配置。
     """
     import time
     import uuid
@@ -1177,7 +1083,7 @@ async def _capacity_benchmark(
             logger.error("trade_dates 为空（history=%d）", history)
             return 2
 
-        # ---- 枚举 concept scope -> members（只读），按重叠度降序选前 scope_count ----
+        # ---- 枚举 scope family -> members（只读），按重叠度降序选前 scope_count ----
         boards = (
             await db.execute(
                 select(MarketBoard.id, MarketBoard.name)
@@ -1185,6 +1091,10 @@ async def _capacity_benchmark(
                 .where(MarketBoard.isActive.is_(True))
             )
         ).all()
+        # Only count memberships within THIS scope_type family, so overlap ranking
+        # reflects how many same-family boards a member belongs to — not industry /
+        # other-family pollution that would corrupt the "highest overlap" sample.
+        candidate_board_ids = {str(bid) for bid, _ in boards}
         memberships = (
             await db.execute(
                 select(MarketBoardMembership.boardId, MarketBoardMembership.instrumentId)
@@ -1193,6 +1103,8 @@ async def _capacity_benchmark(
         per_board: dict = {}
         member_board_count: dict = {}
         for bid, iid in memberships:
+            if str(bid) not in candidate_board_ids:
+                continue
             per_board.setdefault(str(bid), []).append(uuid.UUID(str(iid)))
             member_board_count[str(iid)] = member_board_count.get(str(iid), 0) + 1
         ranked: list[tuple[float, str, str]] = []
@@ -1209,7 +1121,7 @@ async def _capacity_benchmark(
             return 2
         scope_keys = [bid for _share, bid, _n in top]
 
-        print("=== capacity-benchmark (optimized production batch only) ===")
+        print("=== capacity-benchmark (optimized batch owner, shadow production-bound path) ===")
         print(f"scope_type            : {scope_type}")
         print(f"scope_count           : {len(scope_keys)}")
         print(f"asof_date             : {asof_date.isoformat()}")
@@ -1217,13 +1129,15 @@ async def _capacity_benchmark(
         print(f"rss_before_mb         : {rss_before:.1f}")
 
         wall0 = time.perf_counter()
+        # Do NOT pass union_member_cap: the production batch owner's own default
+        # is the single source of truth for the cap.  The probe must not copy /
+        # override production configuration.
         results = await compute_current_static_scope_dynamics_batch(
             db,
             scope_type,
             scope_keys,
             trade_dates,
             analysis_asof_date=asof_date,
-            union_member_cap=4096,
         )
         wall_ms = (time.perf_counter() - wall0) * 1000.0
         rss_after = _rss_mb()
@@ -4131,12 +4045,12 @@ async def _run(args: argparse.Namespace) -> int:
             args.history,
             asof,
         )
-    if not args.scope_type or not args.scope_key:
-        logger.error("[single] --scope-type 与 --scope-key 为必填")
-        return 2
-    return await _probe(
-        args.scope_type, args.scope_key, args.history, asof,
-    )
+    # All other modes are dispatched above; the legacy single-scope performance
+    # probe is intentionally removed (its role is served by PURE_UNIT correctness +
+    # capacity-benchmark capacity).  If a mode falls through with no handler, it is
+    # an error.
+    logger.error("未处理的 mode: %s", args.mode)
+    return 2
 
 
 def main() -> int:

@@ -46,24 +46,39 @@ LEGACY_FORBIDDEN = [
     "vec1-benchmark",
     "--benchmark-scopes",
     "--sample-bar-members",
+    "async def _probe(",
+    "def _probe(",
 ]
 
 
 @pytest.mark.parametrize("sym", LEGACY_FORBIDDEN)
 def test_legacy_ab_symbol_removed(sym: str) -> None:
-    """PERF-PROBE-CLEANUP: legacy A/B runtime symbols are absent from the probe."""
+    """PERF-PROBE-CLEANUP-FINAL: legacy A/B + single performance probe symbols are absent."""
     src = _source()
-    assert sym not in src, f"legacy symbol still present: {sym!r}"
+    assert sym not in src, f"legacy/single symbol still present: {sym!r}"
 
 
 def test_capacity_mode_in_choices() -> None:
     """capacity-benchmark is the (only) performance mode in the CLI choices."""
     src = _source()
     assert '"capacity-benchmark"' in src
-    assert '"single"' in src
+    # single performance mode is gone
+    assert '"single"' not in src
     # legacy performance modes are gone
     assert '"vec1-benchmark"' not in src
     assert '"measure-all-scopes"' not in src
+
+
+def test_single_mode_absent() -> None:
+    """PERF-PROBE-CLEANUP-FINAL: the single performance probe is removed entirely.
+
+    (The module filename ``review_scope_dynamics_probe`` legitimately contains
+    ``_probe``; the check is on the function definition / call, not the bare
+    substring.)
+    """
+    src = _source()
+    assert "def _probe(" not in src
+    assert "_probe(" not in src
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +109,28 @@ def test_capacity_does_not_call_legacy_or_single() -> None:
         "prepare_scopes_from_union",
         "compute_current_static_scope_dynamics(",
         "compute_scope_observation",
+        "union_member_cap=",
     ]:
         assert forbidden not in fn, f"capacity-benchmark must not call {forbidden!r}"
+
+
+def test_capacity_scope_family_filtering() -> None:
+    """PERF-PROBE-CLEANUP-FINAL: membership / overlap ranking is restricted to the
+    current scope_type family (candidate_board_ids), so industry / other-family
+    membership never pollutes the concept-overlap sample."""
+    fn = _capacity_fn_source()
+    # it builds the candidate board id set and filters memberships by it
+    assert "candidate_board_ids" in fn
+    assert "not in candidate_board_ids" in fn
+    assert "continue" in fn
+
+
+def test_capacity_wording_shadow_path() -> None:
+    """PERF-PROBE-CLEANUP-FINAL: capacity-benchmark is described as an optimized
+    batch owner / shadow production-bound path, NOT a production-wired owner."""
+    fn = _capacity_fn_source()
+    assert "shadow" in fn
+    assert "production-bound" in fn
 
 
 def test_capacity_readonly_guard() -> None:
@@ -113,4 +148,5 @@ def test_capacity_passes_scope_count_and_history() -> None:
     assert "scope_count" in fn
     assert "history" in fn
     assert "scope_keys" in fn
-    assert "union_member_cap=4096" in fn
+    # union_member_cap is NOT passed — the batch owner's default is the only source.
+    assert "union_member_cap=" not in fn
