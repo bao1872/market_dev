@@ -3939,31 +3939,60 @@ def _run_dataset_dynamics_logic(
 def _spearman_rank_correlation(
     a: list[str], b: list[str]
 ) -> float | None:
-    """Spearman rank correlation over the common-ordered rank axis (research).
+    """Standard Spearman rank correlation over the COMMON-member subset (research).
 
-    Stage-2 research statistic ONLY — used to observe how leader rank changes
-    across T-1 -> T.  It is NOT a production Migration owner; if the frozen
-    Migration contract (Stage 3) chooses a rank-stability metric, the production
-    implementation will live in the formal owner, not here.
+    Corrected Stage-2B metric: instead of using absolute positions from the full
+    ranking (which is NOT valid for the closed-form 1 - 6Σd²/[n(n²-1)]), we first
+    intersect T and T-1 member sets, then re-rank within the common subset only,
+    and finally apply the standard Spearman closed form over those contiguous
+    ranks.
+
+    RESEARCH reference only — Spearman is NOT a default production Migration
+    candidate (too sensitive to the full ranking and not intuitive).  If the
+    Stage-3 contract later adopts a rank-stability metric, the production
+    implementation lives in the formal owner.
     """
     common = sorted(set(a) & set(b))
     if len(common) < 2:
         return None
     pos_a = {mid: i for i, mid in enumerate(a)}
     pos_b = {mid: i for i, mid in enumerate(b)}
-    ranks_a = [pos_a[mid] for mid in common]
-    ranks_b = [pos_b[mid] for mid in common]
+    # Re-rank common members within the common subset ONLY (contiguous 1..n).
+    order_a = sorted(common, key=lambda m: (pos_a[m], m))
+    order_b = sorted(common, key=lambda m: (pos_b[m], m))
+    rank_a = {m: i + 1 for i, m in enumerate(order_a)}
+    rank_b = {m: i + 1 for i, m in enumerate(order_b)}
     n = len(common)
-    d2 = sum((ra - rb) ** 2 for ra, rb in zip(ranks_a, ranks_b, strict=True))
+    d2 = sum((rank_a[m] - rank_b[m]) ** 2 for m in common)
     return 1.0 - (6.0 * d2) / (n * (n * n - 1.0))
 
 
-def _leadership_ranked(members: list[Any]) -> list[Any]:
-    """Deterministic per-scope/date leadership ranking by signed contribution.
+def _scope_ew_return_direction(members: list[Any]) -> float:
+    """Equal-weight scope direction for a scope/date: sign(mean(member return_1d)).
 
-    Reuses the Stage-1 single owner (``compute_member_leadership_contributions``);
-    only rankable members (contribution not None) are ordered, by contribution
-    DESC then member_id ASC (deterministic tie-break).  Pure research helper.
+    Equal-weight return of the scope = arithmetic mean of member return_1d over
+    rankable members; direction = sign.  Matches the production
+    ``equal_weight_return`` concept (Stage-2B research transform source).
+    """
+    vals = [m.return_1d for m in members if m.return_1d is not None]
+    if not vals:
+        return 0.0
+    return 1.0 if sum(vals) > 0.0 else (-1.0 if sum(vals) < 0.0 else 0.0)
+
+
+def _three_rankings(
+    members: list[Any], scope_direction: float
+) -> tuple[list[Any], list[Any], list[Any]]:
+    """Compute the three research rankings for one scope/date (Stage-2B).
+
+    R1 signed        : contribution DESC (who provides the biggest positive push).
+    R2 absolute      : |contribution| DESC (who moves the scope most, any direction).
+    R3 direction-aligned : contribution × sign(scope_ew_return) DESC (who actually
+                          drives the scope's prevailing direction today).
+
+    All three rank the SAME Stage-1 contribution facts; direction-alignment is a
+    research ranking transform ONLY and does not modify the frozen contribution
+    owner.  Deterministic tie-break: member_id ASC.
     """
     from app.domain.review.analysis.leadership_contribution import (
         compute_member_leadership_contributions,
@@ -3971,11 +4000,52 @@ def _leadership_ranked(members: list[Any]) -> list[Any]:
 
     facts = compute_member_leadership_contributions(members)
     rankable = [c for c in facts.members if c.contribution is not None]
-    ranked = sorted(
+    r1 = sorted(rankable, key=lambda c: (-(c.contribution or 0.0), c.member_id))
+    r2 = sorted(rankable, key=lambda c: (-abs(c.contribution or 0.0), c.member_id))
+    r3 = sorted(
         rankable,
-        key=lambda c: (-(c.contribution or 0.0), c.member_id),
+        key=lambda c: (-((c.contribution or 0.0) * scope_direction), c.member_id),
     )
-    return ranked
+    return r1, r2, r3
+
+
+def _coverage_leader_set(
+    ranked_dir: list[Any], coverage: float
+) -> list[Any]:
+    """Direction-aligned contribution-coverage leader set (Stage-2B Candidate B).
+
+    Sort by direction-aligned contribution DESC, then take the MINIMAL set whose
+    cumulative POSITIVE direction-aligned contribution reaches ``coverage`` (e.g.
+    the fewest members accounting for X% of the scope's direction-consistent push).
+
+    Only positive direction-aligned contributions count toward coverage (negative
+    members oppose the direction and are not "leaders").  The returned set is the
+    minimal prefix; ``coverage`` here is a RESEARCH threshold, NOT a frozen
+    production parameter.
+    """
+    pos = [c for c in ranked_dir if (c.contribution or 0.0) > 0.0]
+    total_pos = sum(c.contribution or 0.0 for c in pos)
+    if total_pos <= 0.0:
+        return []
+    cum = 0.0
+    leader_set: list[Any] = []
+    for c in pos:
+        leader_set.append(c)
+        cum += c.contribution or 0.0
+        if cum / total_pos >= coverage:
+            break
+    return leader_set
+
+
+def _retention(prev_ids: list[str], curr_ids: list[str]) -> float:
+    """Leader retention over effective overlap: |prev ∩ curr| / |prev|.
+
+    Denominator = |prev| (the previous day's leader set size), so entrant ratio =
+    1 - retention.  If prev is empty, retention is undefined (returns nan).
+    """
+    if not prev_ids:
+        return float("nan")
+    return len(set(prev_ids) & set(curr_ids)) / len(prev_ids)
 
 
 def _run_leadership_research(
@@ -4074,6 +4144,13 @@ def _run_leadership_research(
         prep_fallback_reasons=[],
     )
 
+    from statistics import mean, median
+
+    # Stage-2B: per-scope/date we build ONE set of Stage-1 contribution facts and
+    # derive R1/R2/R3 rankings + concentrations + candidates from it.  All
+    # retention/entrant/exit metrics reuse the same per-date ranked structures.
+    coverage_vals = [0.5]  # research-only coverage thresholds (not frozen).
+
     for spec in scope_specs:
         sk = spec.scope_key
         series = prepared.get(sk)
@@ -4081,90 +4158,125 @@ def _run_leadership_research(
             logger.error("[leadership-research] scope %s 未对齐", sk)
             continue
 
-        # Per-date leadership rankings (one pass over members per scope/date).
-        # concentration = Top-N |contribution| / sum(|all rankable contribution|),
-        # i.e. the share of the scope's total |move| driven by the leaders.  Uses
-        # ABS values so signed contributions (a negative leader offsetting a
-        # positive one) do not distort the share (Stage-2 research observation).
-        daily_ranked: list[list[Any]] = []
-        daily_top3_share: list[float] = []
-        daily_top5_share: list[float] = []
+        # ---- Per-date: three rankings + concentrations + candidate leader sets ----
+        r1_daily: list[list[Any]] = []
+        r2_daily: list[list[Any]] = []
+        r3_daily: list[list[Any]] = []
+        r2_top5_conc: list[float] = []      # R2 absolute concentration
+        r3_top5_conc: list[float] = []      # R3 direction-positive concentration
+        cov_leader_sets: list[list[Any]] = []  # Candidate B, per coverage val
         daily_rankable: list[int] = []
+        missing_rate: list[float] = []
         for ps in series:
-            ranked = _leadership_ranked(list(ps.members))
-            daily_ranked.append(ranked)
-            total_abs = sum(abs(c.contribution or 0.0) for c in ranked)
-            daily_top3_share.append(
-                float("nan")
-                if (not ranked or total_abs == 0.0)
-                else sum(abs(c.contribution or 0.0) for c in ranked[:3]) / total_abs
-            )
-            daily_top5_share.append(
-                float("nan")
-                if (not ranked or total_abs == 0.0)
-                else sum(abs(c.contribution or 0.0) for c in ranked[:5]) / total_abs
-            )
-            daily_rankable.append(len(ranked))
+            members = list(ps.members)
+            direction = _scope_ew_return_direction(members)
+            r1, r2, r3 = _three_rankings(members, direction)
+            r1_daily.append(r1)
+            r2_daily.append(r2)
+            r3_daily.append(r3)
+            daily_rankable.append(len(r1))
 
-        # Day-over-day metrics (T-1 -> T).
-        overlap3: list[float] = []
-        overlap5: list[float] = []
-        overlap10: list[float] = []
+            from app.domain.review.analysis.leadership_contribution import (
+                compute_member_leadership_contributions,
+            )
+            facts = compute_member_leadership_contributions(members)
+            total_all = len(facts.members)
+            daily_missing_rate = (
+                facts.missing_count / total_all if total_all else 0.0
+            )
+            missing_rate.append(daily_missing_rate)
+
+            # R2 absolute concentration: Top5 |c| / sum |all rankable c|.
+            total_abs = sum(abs(c.contribution or 0.0) for c in r2)
+            r2_top5_conc.append(
+                float("nan")
+                if (not r2 or total_abs == 0.0)
+                else sum(abs(c.contribution or 0.0) for c in r2[:5]) / total_abs
+            )
+            # R3 direction-positive concentration: Top5 max(dir_aligned,0) /
+            # sum(max(dir_aligned,0)).
+            r3_pos = [c for c in r3 if (c.contribution or 0.0) > 0.0]
+            total_dir_pos = sum(c.contribution or 0.0 for c in r3_pos)
+            r3_top5_conc.append(
+                float("nan")
+                if (not r3_pos or total_dir_pos == 0.0)
+                else sum(c.contribution or 0.0 for c in r3_pos[:5]) / total_dir_pos
+            )
+            # Candidate B leader set per research coverage threshold.
+            cov_leader_sets.append(
+                _coverage_leader_set(r3, coverage_vals[0])
+            )
+
+        # ---- Day-over-day candidate retention (T-1 -> T) ----
+        def _eff_top(ranked: list[Any], n: int) -> list[str]:
+            eff = max(1, min(n, len(ranked)))
+            return [c.member_id for c in ranked[:eff]]
+
+        r1_ret: list[float] = []
+        r2_ret: list[float] = []
+        r3_ret: list[float] = []
+        cov_ret: list[float] = []
+        cov_leader_count: list[int] = []
         spearman: list[float] = []
-        entrants: list[int] = []
-        exits: list[int] = []
-        for i in range(1, len(daily_ranked)):
-            prev = daily_ranked[i - 1]
-            curr = daily_ranked[i]
-
-            # Small-scope safety: Top-N cannot exceed the rankable pool; use the
-            # effective overlap over the smaller of N and pool size so a tiny scope
-            # (e.g. 10 members) does not saturate/divide by a fake N.
-            def _ov(n: int) -> float:
-                eff = max(1, min(n, len(prev), len(curr)))
-                sp = {c.member_id for c in prev[:eff]}
-                sc = {c.member_id for c in curr[:eff]}
-                return len(sp & sc) / eff
-
-            overlap3.append(_ov(3))
-            overlap5.append(_ov(5))
-            overlap10.append(_ov(10))
+        for i in range(1, len(r1_daily)):
+            r1_ret.append(
+                _retention(_eff_top(r1_daily[i - 1], 5), _eff_top(r1_daily[i], 5))
+            )
+            r2_ret.append(
+                _retention(_eff_top(r2_daily[i - 1], 5), _eff_top(r2_daily[i], 5))
+            )
+            r3_ret.append(
+                _retention(_eff_top(r3_daily[i - 1], 5), _eff_top(r3_daily[i], 5))
+            )
+            cov_prev = [c.member_id for c in cov_leader_sets[i - 1]]
+            cov_curr = [c.member_id for c in cov_leader_sets[i]]
+            cov_ret.append(_retention(cov_prev, cov_curr))
+            cov_leader_count.append(len(cov_curr))
             corr = _spearman_rank_correlation(
-                [c.member_id for c in prev],
-                [c.member_id for c in curr],
+                [c.member_id for c in r1_daily[i - 1]],
+                [c.member_id for c in r1_daily[i]],
             )
             if corr is not None:
                 spearman.append(corr)
-            entrants.append(
-                len({c.member_id for c in curr[:5]} - {c.member_id for c in prev[:5]})
+
+        def _stats(vals: list[float]) -> tuple[float, float, float, float, float]:
+            vs = [v for v in vals if v == v]  # drop nan
+            if not vs:
+                return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+            vs = sorted(vs)
+            n = len(vs)
+            return (
+                mean(vs), min(vs),
+                vs[n // 2] if n % 2 else (vs[n // 2 - 1] + vs[n // 2]) / 2,
+                vs[int(n * 0.75)] if n else float("nan"),
+                max(vs),
             )
-            exits.append(
-                len({c.member_id for c in prev[:5]} - {c.member_id for c in curr[:5]})
-            )
+
+        def _fmt(s: tuple[float, float, float, float, float]) -> str:
+            return (f"mean={s[0]:.3f} min={s[1]:.3f} p50={s[2]:.3f} "
+                    f"p75={s[3]:.3f} max={s[4]:.3f}")
+
+        m, p25, p50, p75, mx = _stats(cov_ret)
+        cov_ret_stats = (m, p25, p50, p75, mx)
+        cov_count_mean = mean(cov_leader_count) if cov_leader_count else float("nan")
+        cov_count_median = median(cov_leader_count) if cov_leader_count else float("nan")
 
         print(f"--- scope={spec.scope_name} ({spec.scope_type}, n={len(spec.member_ids)}) "
               f"dates={len(window_dates)} ---")
-        print(f"  rankable members      : min={min(daily_rankable) if daily_rankable else 0} "
-              f"mean={mean(daily_rankable) if daily_rankable else 0:.1f} "
-              f"max={max(daily_rankable) if daily_rankable else 0}")
-        print(f"  Top3 overlap  (T-1->T): mean={mean(overlap3):.3f} "
-              f"min={min(overlap3):.3f} max={max(overlap3):.3f}")
-        print(f"  Top5 overlap  (T-1->T): mean={mean(overlap5):.3f} "
-              f"min={min(overlap5):.3f} max={max(overlap5):.3f}")
-        print(f"  Top10 overlap (T-1->T): mean={mean(overlap10):.3f} "
-              f"min={min(overlap10):.3f} max={max(overlap10):.3f}")
-        print(f"  Spearman (T-1->T)     : mean={mean(spearman):.3f} "
-              f"min={min(spearman):.3f} max={max(spearman):.3f} "
+        print(f"  rankable members : mean={mean(daily_rankable):.1f} "
+              f"missing_rate mean={mean(missing_rate):.3f}")
+        print(f"  R1 signed     Top5 retention: {_fmt(_stats(r1_ret))}")
+        print(f"  R2 absolute   Top5 retention: {_fmt(_stats(r2_ret))}")
+        print(f"  R3 dir-align  Top5 retention: {_fmt(_stats(r3_ret))}")
+        print(f"  R3 dir-align  Top5 conc      : {_fmt(_stats(r3_top5_conc))}")
+        print(f"  R2 absolute   Top5 conc      : {_fmt(_stats(r2_top5_conc))}")
+        print(f"  Spearman (common, reference) : {_fmt(_stats(spearman))} "
               f"count={len(spearman)}")
-        print(f"  Top5 entrants/day      : mean={mean(entrants):.2f} "
-              f"max={max(entrants)}")
-        print(f"  Top5 exits/day         : mean={mean(exits):.2f} max={max(exits)}")
-        print(f"  Top3 contribution share: mean={mean(daily_top3_share):.3f} "
-              f"max={max(daily_top3_share):.3f}")
-        print(f"  Top5 contribution share: mean={mean(daily_top5_share):.3f} "
-              f"max={max(daily_top5_share):.3f}")
-        print(f"  example (latest) Top5  : "
-              f"{[c.member_id[:8] for c in daily_ranked[-1][:5]]}")
+        print(f"  Candidate B coverage={coverage_vals[0]:.0%}: "
+              f"leader_count mean={cov_count_mean:.1f} median={cov_count_median:.1f} "
+              f"retention {_fmt(cov_ret_stats)}")
+        print(f"  Candidate A (R3 Top5) retention mean={mean(r3_ret):.3f} "
+              f"vs Candidate B retention mean={mean(cov_ret):.3f}")
 
     return 0
 

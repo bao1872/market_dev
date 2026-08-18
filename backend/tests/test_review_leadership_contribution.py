@@ -63,25 +63,25 @@ def _contribs(members: list[MemberObservation]) -> dict[str, dict[str, float | N
 
 def test_contribution_formula_amount_share_times_return() -> None:
     # amounts a=30, b=20, c=10 -> total 60; shares 0.5/0.3333/0.1667.
-    # returns +5%, -4%, +2% (in %, i.e. 5.0 / -4.0 / 2.0).
+    # canonical return unit: +5% = 0.05, -4% = -0.04, +2% = 0.02.
     members = [
-        _m("a", return_1d=5.0, amount=30.0),
-        _m("b", return_1d=-4.0, amount=20.0),
-        _m("c", return_1d=2.0, amount=10.0),
+        _m("a", return_1d=0.05, amount=30.0),
+        _m("b", return_1d=-0.04, amount=20.0),
+        _m("c", return_1d=0.02, amount=10.0),
     ]
     out = _contribs(members)
     assert out["a"]["amount_share"] == pytest.approx(30 / 60)
-    assert out["a"]["contribution"] == pytest.approx((30 / 60) * 5.0)
+    assert out["a"]["contribution"] == pytest.approx((30 / 60) * 0.05)
     assert out["b"]["amount_share"] == pytest.approx(20 / 60)
-    assert out["b"]["contribution"] == pytest.approx((20 / 60) * -4.0)
-    assert out["c"]["contribution"] == pytest.approx((10 / 60) * 2.0)
+    assert out["b"]["contribution"] == pytest.approx((20 / 60) * -0.04)
+    assert out["c"]["contribution"] == pytest.approx((10 / 60) * 0.02)
 
 
 def test_contribution_negative_return() -> None:
-    out = _contribs([_m("a", return_1d=-2.0, amount=100.0)])
-    # single member -> share 1.0, contribution -2.0.
+    out = _contribs([_m("a", return_1d=-0.02, amount=100.0)])
+    # single member -> share 1.0, contribution -0.02.
     assert out["a"]["amount_share"] == pytest.approx(1.0)
-    assert out["a"]["contribution"] == pytest.approx(-2.0)
+    assert out["a"]["contribution"] == pytest.approx(-0.02)
 
 
 # ---------------------------------------------------------------------------
@@ -109,20 +109,20 @@ def test_return_nan_is_unavailable() -> None:
 
 
 def test_amount_missing_makes_contribution_unavailable() -> None:
-    out = _contribs([_m("a", return_1d=3.0, amount=None)])
+    out = _contribs([_m("a", return_1d=0.03, amount=None)])
     assert out["a"]["amount_share"] is None
     assert out["a"]["contribution"] is None
 
 
 def test_amount_negative_makes_contribution_unavailable() -> None:
-    out = _contribs([_m("a", return_1d=3.0, amount=-5.0)])
+    out = _contribs([_m("a", return_1d=0.03, amount=-5.0)])
     assert out["a"]["amount_share"] is None
     assert out["a"]["contribution"] is None
 
 
 def test_amount_zero_with_total_positive_is_real_zero() -> None:
     # a has 100 amount, b has 0 -> b share = 0.0, contribution = 0.0 (real).
-    out = _contribs([_m("a", return_1d=2.0, amount=100.0), _m("b", return_1d=1.0, amount=0.0)])
+    out = _contribs([_m("a", return_1d=0.02, amount=100.0), _m("b", return_1d=0.01, amount=0.0)])
     assert out["b"]["amount_share"] == pytest.approx(0.0)
     assert out["b"]["contribution"] == pytest.approx(0.0)
 
@@ -133,17 +133,17 @@ def test_amount_zero_with_total_positive_is_real_zero() -> None:
 
 
 def test_single_member_rankable() -> None:
-    facts = compute_member_leadership_contributions([_m("a", return_1d=1.0, amount=10.0)])
+    facts = compute_member_leadership_contributions([_m("a", return_1d=0.01, amount=10.0)])
     assert facts.rankable_count == 1
     assert facts.missing_count == 0
-    assert facts.members[0].contribution == pytest.approx(1.0)
+    assert facts.members[0].contribution == pytest.approx(0.01)
 
 
 def test_rankable_vs_missing_counts() -> None:
     members = [
-        _m("a", return_1d=1.0, amount=10.0),   # rankable
+        _m("a", return_1d=0.01, amount=10.0),   # rankable
         _m("b", return_1d=None, amount=10.0),  # missing return
-        _m("c", return_1d=1.0, amount=None),   # missing amount
+        _m("c", return_1d=0.01, amount=None),   # missing amount
     ]
     facts = compute_member_leadership_contributions(members)
     assert facts.rankable_count == 1
@@ -151,7 +151,7 @@ def test_rankable_vs_missing_counts() -> None:
 
 
 def test_missing_never_zero_when_mixed() -> None:
-    out = _contribs([_m("a", return_1d=1.0, amount=10.0), _m("b", return_1d=None, amount=10.0)])
+    out = _contribs([_m("a", return_1d=0.01, amount=10.0), _m("b", return_1d=None, amount=10.0)])
     assert out["a"]["contribution"] is not None
     assert out["b"]["contribution"] is None
 
@@ -163,9 +163,9 @@ def test_missing_never_zero_when_mixed() -> None:
 
 def test_deterministic_output_order_preserved() -> None:
     members = [
-        _m("c", return_1d=3.0, amount=10.0),
-        _m("a", return_1d=1.0, amount=20.0),
-        _m("b", return_1d=-2.0, amount=30.0),
+        _m("c", return_1d=0.03, amount=10.0),
+        _m("a", return_1d=0.01, amount=20.0),
+        _m("b", return_1d=-0.02, amount=30.0),
     ]
     first = compute_member_leadership_contributions(members)
     second = compute_member_leadership_contributions(members)

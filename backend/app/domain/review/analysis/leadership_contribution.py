@@ -16,12 +16,13 @@ Ownership boundary (single-owner principle):
 - ``contribution`` is ``None`` (unavailable) whenever EITHER ``amount_share`` or
   ``return_1d`` is missing — never coerced to 0.
 
-Missing semantics:
+Missing semantics (canonical ``MemberObservation``: ``amount >= 0`` valid,
+zero amount valid, negative invalid):
 
 - ``return_1d = 0``   -> legal member, contribution = 0.0 (a real zero move).
 - ``return_1d = None`` / NaN / inf -> contribution unavailable (None).
-- ``amount`` missing / <= 0         -> ``amount_share`` is None (from the shared
-  owner), so contribution unavailable (None).
+- ``amount`` missing / non-finite / negative -> ``amount_share`` is None (from the
+  shared owner), so contribution unavailable (None).
 - ``amount == 0`` (total > 0)       -> legal member, amount_share = 0.0, so if
   return_1d is finite, contribution = 0.0.
 

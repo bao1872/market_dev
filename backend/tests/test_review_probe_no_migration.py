@@ -212,10 +212,10 @@ def _leadership_research_fn() -> str:
     return src[start:end]
 
 
-def _leadership_ranked_fn() -> str:
-    """Extract the ``_leadership_ranked`` helper body only."""
+def _leadership_three_rankings_fn() -> str:
+    """Extract the ``_three_rankings`` helper body only."""
     src = _source()
-    start = src.index("def _leadership_ranked")
+    start = src.index("def _three_rankings")
     end = src.index("\ndef ", start)
     return src[start:end]
 
@@ -243,11 +243,11 @@ def test_nm1_leadership_research_calls_shared_prep_core() -> None:
         )
 
 
-def test_nm1_leadership_ranked_calls_single_contribution_owner() -> None:
-    """The Stage-2 ranking helper must delegate to the Stage-1 single Leadership
-    contribution owner (compute_member_leadership_contributions) — it must NOT
-    re-derive amount_share or contribution."""
-    fn = _leadership_ranked_fn()
+def test_nm1_leadership_rankings_call_single_contribution_owner() -> None:
+    """The Stage-2 ranking helper (_three_rankings) must delegate to the Stage-1
+    single Leadership contribution owner (compute_member_leadership_contributions)
+    — it must NOT re-derive amount_share or contribution."""
+    fn = _leadership_three_rankings_fn()
     assert "compute_member_leadership_contributions" in fn
     assert "amount_share * return" not in fn
     assert "amount / total" not in fn
