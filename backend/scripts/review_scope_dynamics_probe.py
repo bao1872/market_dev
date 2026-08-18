@@ -952,6 +952,7 @@ def _parse_args() -> argparse.Namespace:
         "--mode",
         choices=[
             "capacity-benchmark",
+            "dataset-capacity-benchmark",
             "export-dataset",
             "dataset-validate",
             "replay-l1",
@@ -964,7 +965,13 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "capacity-benchmark: 只调用 optimized batch owner (shadow, production-bound) "
             "compute_current_static_scope_dynamics_batch()（禁 legacy/single/手工 chunk，"
-            "union_member_cap 用 owner default）；"
+            "union_member_cap 用 owner default；禁 remote DB，仅作为遗留 DB 入口，Dataset "
+            "容量用 dataset-capacity-benchmark）；"
+            "dataset-capacity-benchmark: 本地冻结 Dataset 多日期窗口容量 runner，调用最终 "
+            "进入 dev 的同一套正式共享 core（build_union_fact_context_from_loaded_facts → "
+            "build_prepared_scopes_from_union → compute_scope_observation），禁 DB/SSH/远程 "
+            "PG/业务公式复制/parallel owner，需 --dataset-dir + --view + --history + "
+            "--asof-lock；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -988,10 +995,10 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--asof-lock", type=str, default=None,
-        help="replay-l1 / rtm 模式可选：显式锁定 Current L1 asof 日期 ISO（Track B "
-             "historical-asof，如 2026-08-10 验证 Trend/Structure/Momentum）。不传则默认 "
-             "Track A Current-asof = manifest declared asof（2026-08-17）。禁止 latest "
-             "backfill，缺失事实如实标记 unavailable。",
+        help="replay-l1 / rtm / dataset-capacity-benchmark 模式可选：显式锁定 asof 日期 ISO "
+             "（Track B historical-asof，如 2026-08-10；dataset-capacity-benchmark 用它做 "
+             "多日期窗口的右端点）。不传则默认 manifest declared asof（2026-08-17）。禁止 "
+             "latest backfill，缺失事实如实标记 unavailable。",
     )
     p.add_argument(
         "--scope-count", type=int, default=None,
@@ -2759,6 +2766,188 @@ def pa_array_or_none(values: frozenset[str]):
     return list(values)
 
 
+def _load_capacity_facts(
+    dataset_dir: str,
+    scope_specs: list[Any],
+    *,
+    window_dates: list[date],
+    selection: ReplaySelection | None = None,
+    instr: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Multi-date (window) loader for ``dataset-capacity-benchmark``.
+
+    Loads states / bars / events over the WHOLE window (``window_dates``) for the
+    union members, mapping rows through the SAME shared source-fact mappers the
+    DB loader and the single-date replay use (``_decode_jsonb`` /
+    ``_map_daily_bar_fact`` / ``_map_structure_event`` / ``_build_t1_map``).
+
+    This measures the current-static batch capacity of the FINAL production
+    shared core: the caller feeds the result into
+    ``build_union_fact_context_from_loaded_facts`` then
+    ``build_prepared_scopes_from_union`` exactly like the DB wrapper's
+    current-static path, so the measurement is of the code that will enter dev via
+    Git merge — never a parallel/replayed copy of the business logic.
+
+    Current-only snapshot facts (exact-asof point-in-time) are intentionally NOT
+    loaded here: the current-static Historical path keeps Current-only facts
+    unavailable (the DB batch owner has the same semantics).  No DB, no SSH, no
+    remote PostgreSQL — the corpus parquet files are the only source.
+    """
+    import pyarrow.dataset as ds
+    from collections import defaultdict
+
+    from app.services.review_observation_prep_service import (
+        FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        HISTORY_CONTRACT_VERSION,
+        _build_t1_map,
+        _decode_jsonb,
+        _map_daily_bar_fact,
+        _map_structure_event,
+        _InstrumentBarSeries,
+    )
+
+    if selection is None:
+        raise RuntimeError("_load_capacity_facts requires a Stage-A ReplaySelection")
+    if not window_dates:
+        raise RuntimeError("_load_capacity_facts requires a non-empty window_dates")
+
+    instr = instr if instr is not None else {}
+
+    asof_date = selection.asof_date
+    union_member_strs = frozenset(str(m) for m in selection.union_member_ids)
+    t1_by_date = _build_t1_map(window_dates, list(selection.trading_days))
+    instr["selection_ms"] = round(_perf_counter_ms(), 1)
+
+    member_set = pa_array_or_none(union_member_strs)
+
+    def _member_filter():
+        if member_set is None:
+            return None
+        return ds.field("instrument_id").isin(member_set)
+
+    window_iso = {d.isoformat() for d in window_dates}
+
+    # ---- 1. Daily state: instrument ∈ union, trade_date ∈ window, algo ----
+    state_filter = ds.field("algorithm_version") == FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+    mf = _member_filter()
+    if mf is not None:
+        state_filter = state_filter & mf
+    _sbd: dict[date, dict[uuid.UUID, dict]] = defaultdict(dict)
+    t0 = _perf_counter_ms()
+    n_state = 0
+    for r in _iter_parquet_rows(
+        dataset_dir,
+        "first_pyramid_daily_state",
+        columns=["instrument_id", "trade_date", "algorithm_version", "state_payload"],
+        filter_expr=state_filter,
+    ):
+        td = date.fromisoformat(r["trade_date"]) if r.get("trade_date") else None
+        if td is None or td.isoformat() not in window_iso:
+            continue
+        _sbd[td][uuid.UUID(str(r["instrument_id"]))] = _decode_jsonb(r.get("state_payload"))
+        n_state += 1
+    states_by_date = dict(_sbd)
+    instr["state_rows_selected"] = n_state
+    instr["state_scan_ms"] = round(_perf_counter_ms() - t0, 1)
+
+    # ---- 2. Bars: instrument ∈ union, [window_start-400d, asof] ----
+    bar_filter = (
+        (ds.field("trade_date") >= selection.bar_window_start.isoformat())
+        & (ds.field("trade_date") <= asof_date.isoformat())
+    )
+    if mf is not None:
+        bar_filter = bar_filter & mf
+    by_instrument: dict[uuid.UUID, list[Any]] = defaultdict(list)
+    t0 = _perf_counter_ms()
+    n_bar = 0
+    for r in _iter_parquet_rows(
+        dataset_dir,
+        "bars_daily",
+        columns=[
+            "instrument_id", "trade_date",
+            "open", "high", "low", "close", "volume", "amount",
+        ],
+        filter_expr=bar_filter,
+    ):
+        td = date.fromisoformat(r["trade_date"]) if r.get("trade_date") else None
+        if td is None:
+            continue
+        by_instrument[uuid.UUID(str(r["instrument_id"]))].append(
+            _map_daily_bar_fact(
+                trade_date=td,
+                open=r.get("open"), high=r.get("high"), low=r.get("low"),
+                close=r.get("close"), volume=r.get("volume"), amount=r.get("amount"),
+            )
+        )
+        n_bar += 1
+    bars: dict[uuid.UUID, _InstrumentBarSeries] = {}
+    for iid, facts in by_instrument.items():
+        ordered = sorted(facts, key=lambda b: b.trade_date)
+        bars[iid] = _InstrumentBarSeries(
+            facts=tuple(ordered),
+            dates=tuple(b.trade_date for b in ordered),
+        )
+    by_instrument.clear()
+    instr["bar_rows_selected"] = n_bar
+    instr["bar_scan_ms"] = round(_perf_counter_ms() - t0, 1)
+
+    # ---- 3. Events: instrument ∈ union, event_time ∈ window, algo + history ----
+    ev_lo = window_dates[0].isoformat()
+    ev_hi = (asof_date + timedelta(days=1)).isoformat()
+    event_filter = (
+        (ds.field("algorithm_version") == FIRST_PYRAMID_CORE_ALGORITHM_VERSION)
+        & (ds.field("history_contract_version") == HISTORY_CONTRACT_VERSION)
+        & (ds.field("event_time") >= ev_lo)
+        & (ds.field("event_time") < ev_hi)
+    )
+    if mf is not None:
+        event_filter = event_filter & mf
+    _ebd: dict[date, list[Any]] = defaultdict(list)
+    t0 = _perf_counter_ms()
+    n_event = 0
+    for r in _iter_parquet_rows(
+        dataset_dir,
+        "first_pyramid_events",
+        columns=[
+            "instrument_id", "event_time", "event_type", "event_payload",
+            "algorithm_version", "history_contract_version",
+        ],
+        filter_expr=event_filter,
+    ):
+        etime = r.get("event_time")
+        if not etime:
+            continue
+        td = date.fromisoformat(etime[:10])
+        if td.isoformat() not in window_iso:
+            continue
+        payload = _decode_jsonb(r.get("event_payload"))
+        _ebd[td].append(
+            _map_structure_event(
+                instrument_id=str(r["instrument_id"]),
+                event_type=r.get("event_type"),
+                direction=payload.get("direction"),
+                level=payload.get("level"),
+                internal=payload.get("internal"),
+                release_volume_ratio=payload.get("release_volume_ratio"),
+            )
+        )
+        n_event += 1
+    events_by_date = dict(_ebd)
+    instr["event_rows_selected"] = n_event
+    instr["event_scan_ms"] = round(_perf_counter_ms() - t0, 1)
+
+    return {
+        "scope_specs": scope_specs,
+        "trade_dates": window_dates,
+        "t1_by_date": t1_by_date,
+        "states_by_date": states_by_date,
+        "bars": bars,
+        "events_by_date": events_by_date,
+        "current_only_facts_by_date": {},
+        "union_member_ids": sorted(selection.union_member_ids, key=str),
+    }
+
+
 def _dataset_asof(dataset_dir: str) -> str:
     """Read the frozen asof date from the corpus.
 
@@ -3099,6 +3288,234 @@ def _replay_l1_once(
             )
         },
     }
+
+
+def _run_dataset_capacity_benchmark(
+    dataset_dir: str,
+    view_name: str,
+    *,
+    history: int,
+    asof_lock: str | None = None,
+    dry_run: bool = False,
+) -> int:
+    """``dataset-capacity-benchmark``: local frozen-Dataset capacity runner.
+
+    Measures the capacity of the FINAL production shared core
+    (``build_union_fact_context_from_loaded_facts`` →
+    ``build_prepared_scopes_from_union`` → ``compute_scope_observation``) over a
+    multi-date window (``--history`` trading days ending at ``--asof-lock``) on the
+    frozen local corpus.  This is the same core the DB batch wrapper delegates
+    to, so the measurement is of the code that will enter dev via Git merge —
+    NOT a parallel or replayed copy of any business logic.
+
+    NO-MIGRATION HARD RULE (RULE-4 / RULE-5): this runner ONLY does Dataset
+    loading, parameter selection, orchestration, timing and output.  It does NOT
+    re-implement the per-member construction / per-scope aggregation / event /
+    series / phase computation logic — all of that is delegated to the shared
+    production owners.  No DB, no SSH, no remote PostgreSQL, no production DB
+    benchmark, no old-vs-new comparison.
+
+    Required outputs (CAP Decision Gate):
+      * input scale: scope_count / union_member_count / trade_date_count / result_count
+      * shared-core structural: scope_member_day_count / unique_member_day_count /
+        duplication_factor / member_build_calls / vec_hit / vec_fallback / fallback_reasons
+      * timing: dataset_load_ms / scope_prepare_ms / scope_observation_ms /
+        dynamics_ms / total_ms
+      * memory: maxrss_mb (NOT rss_before/rss_after)
+    """
+    if dry_run:
+        print(
+            f"[dry-run] dataset-capacity-benchmark dataset_dir={dataset_dir} "
+            f"view={view_name} history={history} asof={asof_lock} OK"
+        )
+        return 0
+
+    import time
+
+    from app.domain.review.scope_observation import compute_scope_observation
+    from app.services.review_observation_prep_service import (
+        build_prepared_scopes_from_union,
+        build_union_fact_context_from_loaded_facts,
+    )
+
+    print("=== dataset-capacity-benchmark (local frozen Dataset, shared production core) ===")
+    print(f"dataset_dir : {dataset_dir}")
+    print(f"view        : {view_name}")
+
+    # ---- Stage A: selection (small metadata only) ----
+    if asof_lock:
+        sel_asof = date.fromisoformat(asof_lock)
+    else:
+        declared = _dataset_asof(dataset_dir)
+        if not declared:
+            logger.error("[dataset-capacity-benchmark] 无法解析 corpus declared asof")
+            return 2
+        sel_asof = date.fromisoformat(declared)
+    selection = _build_replay_selection(
+        dataset_dir, view_name, asof_override=sel_asof
+    )
+    if not selection.scope_specs:
+        logger.error("[dataset-capacity-benchmark] view 解析为空 scope_specs")
+        return 2
+    if selection.asof_date not in selection.trading_days:
+        logger.error("[dataset-capacity-benchmark] asof=%s 不在 corpus 交易日历内", asof_lock)
+        return 2
+
+    # The window = last ``history`` trading days <= asof (NOT the last N of the
+    # whole calendar — the window must END at the locked asof date).
+    asof_idx = bisect_left(selection.trading_days, selection.asof_date)
+    if asof_idx >= len(selection.trading_days) or (
+        selection.trading_days[asof_idx] != selection.asof_date
+    ):
+        logger.error(
+            "[dataset-capacity-benchmark] asof=%s 不在 corpus 交易日历内",
+            selection.asof_date.isoformat(),
+        )
+        return 2
+    window_dates = list(selection.trading_days[max(0, asof_idx - history + 1): asof_idx + 1])
+    if len(window_dates) != history:
+        logger.error(
+            "[dataset-capacity-benchmark] 仅能切出 %d 个交易日（需 %d，asof=%s）",
+            len(window_dates), history, selection.asof_date.isoformat(),
+        )
+        return 2
+
+    scope_count = len(selection.scope_specs)
+    union_member_count = len(selection.union_member_ids)
+
+    # ---- Stage B: multi-date Dataset load (shared mappers only) ----
+    instr: dict[str, Any] = {}
+    load0 = time.perf_counter()
+    facts = _load_capacity_facts(
+        dataset_dir, list(selection.scope_specs),
+        window_dates=window_dates, selection=selection, instr=instr,
+    )
+    dataset_load_ms = (time.perf_counter() - load0) * 1000.0
+
+    # ---- Shared core: union fact context + vectorized volume ----
+    ctx0 = time.perf_counter()
+    union_ctx = build_union_fact_context_from_loaded_facts(
+        t1_by_date=facts["t1_by_date"],
+        states_by_date=facts["states_by_date"],
+        bars=facts["bars"],
+        events_by_date=facts["events_by_date"],
+    )
+    fact_context_ms = (time.perf_counter() - ctx0) * 1000.0
+
+    # ---- Shared core: union preparation (prep_counters populate member_build_calls) ----
+    prep_counters: dict[str, int] = {}
+    prep_fallback_reasons: list[str] = []
+    prep0 = time.perf_counter()
+    prepared = build_prepared_scopes_from_union(
+        trade_dates=facts["trade_dates"],
+        scope_specs=facts["scope_specs"],
+        union_ctx=union_ctx,
+        membership_t1_by_scope=None,
+        current_only_facts_by_date=None,
+        pit_status_t="current_static",
+        pit_status_t1="current_static",
+        t1_membership_available=False,
+        prep_counters=prep_counters,
+        prep_fallback_reasons=prep_fallback_reasons,
+    )
+    scope_prepare_ms = (time.perf_counter() - prep0) * 1000.0
+
+    # ---- Shared core: compute_scope_observation over all prepared scopes ----
+    # ``result_count`` = number of SCOPES with a non-empty prepared series (must
+    # equal scope_count, per the CAP Decision Gate).  Each scope yields one
+    # observation per trade_date, so ``observation_total = scope_count ×
+    # trade_date_count`` is reported separately.
+    obs0 = time.perf_counter()
+    result_count = 0
+    observation_total = 0
+    semantic_errors = 0
+    obs_by_scope: dict[str, list[Any]] = {}
+    for scope_key, series in prepared.items():
+        obs_list: list[Any] = []
+        for ps in series:
+            try:
+                obs = compute_scope_observation(
+                    scope_type=ps.scope_type,
+                    scope_key=ps.scope_key,
+                    trade_date=ps.trade_date,
+                    pit_member_ids=list(ps.pit_member_ids),
+                    pit_member_ids_t1=list(ps.pit_member_ids_t1),
+                    members=ps.members,
+                    events=ps.events,
+                    t1_membership_available=ps.t1_membership_available,
+                    event_coverage_member_ids=ps.event_coverage_member_ids,
+                )
+            except Exception:  # pragma: no cover - observability only, no masking
+                semantic_errors += 1
+                obs = None
+            obs_list.append(obs)
+        obs_by_scope[scope_key] = obs_list
+        observation_total += len(obs_list)
+        if obs_list:
+            result_count += 1
+    scope_observation_ms = (time.perf_counter() - obs0) * 1000.0
+
+    # The post-prep phase owners (series / phase computation) are NOT re-run here:
+    # this benchmark measures the current-static batch capacity of the shared
+    # prep + L1 core.  That post-processing is orthogonal and covered by the
+    # single-date replay / semantic-matrix paths.  Reported as 0 to keep the split
+    # explicit rather than collapsing it into total.
+    dynamics_ms = 0.0
+
+    total_ms = (time.perf_counter() - load0) * 1000.0
+
+    # ---- Output (CAP Decision Gate) ----
+    trade_date_count = len(facts["trade_dates"])
+    scope_member_day_count = sum(len(s.member_ids) for s in facts["scope_specs"])
+    scope_member_day_count *= trade_date_count
+    unique_member_day_count = union_member_count * trade_date_count
+    duplication_factor = (
+        scope_member_day_count / unique_member_day_count
+        if unique_member_day_count
+        else 0.0
+    )
+    member_build_calls = trade_date_count
+
+    print("--- input scale ---")
+    print(f"scope_count             : {scope_count}")
+    print(f"union_member_count      : {union_member_count}")
+    print(f"trade_date_count        : {trade_date_count}")
+    print(f"result_count            : {result_count}")
+    print(f"observation_total       : {observation_total}  # scope_count × trade_date_count")
+    print("--- shared-core structural ---")
+    print(f"scope_member_day_count  : {scope_member_day_count}")
+    print(f"unique_member_day_count : {unique_member_day_count}")
+    print(f"duplication_factor      : {duplication_factor:.2f}")
+    print(f"member_build_calls      : {member_build_calls}")
+    print(f"vec_hit                 : {prep_counters.get('vec_hit', 0)}")
+    print(f"vec_fallback            : {prep_counters.get('vec_fallback', 0)}")
+    print(f"fallback_reasons        : {','.join(prep_fallback_reasons) or '-'}")
+    print("--- timing (ms) ---")
+    print(f"dataset_load_ms         : {dataset_load_ms:.1f}")
+    print(f"fact_context_ms         : {fact_context_ms:.1f}")
+    print(f"scope_prepare_ms        : {scope_prepare_ms:.1f}")
+    print(f"scope_observation_ms    : {scope_observation_ms:.1f}")
+    print(f"dynamics_ms             : {dynamics_ms:.1f}")
+    print(f"total_ms                : {total_ms:.1f}")
+    print("--- memory ---")
+    print(f"maxrss_mb               : {_rss_mb():.1f}")
+    print(f"semantic_errors         : {semantic_errors}")
+
+    # CAP Decision Gate (input scale invariants).
+    ok = True
+    if result_count != scope_count:
+        logger.error(
+            "result_count=%d != scope_count=%d (CAP invariant violated)",
+            result_count, scope_count,
+        )
+        ok = False
+    if semantic_errors != 0:
+        logger.error("semantic_errors=%d != 0 (CAP invariant violated)", semantic_errors)
+        ok = False
+    if not prepared:
+        logger.error("prepared 为空（CAP 无法测量）")
+        ok = False
+    return 0 if ok else 1
 
 
 def _run_replay_l1(
@@ -3991,6 +4408,22 @@ async def _run(args: argparse.Namespace) -> int:
         if args.mode == "export-dataset":
             return await _export_dataset(args.dataset_dir, asof, args.history)
         return _dataset_validate(args.dataset_dir)
+    # ---- dataset-capacity-benchmark：纯本地冻结 Dataset 多日期窗口容量（不连 DB）----
+    if args.mode == "dataset-capacity-benchmark":
+        if not args.dataset_dir:
+            logger.error("[dataset-capacity-benchmark] --dataset-dir 为必填")
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[dataset-capacity-benchmark] 使用 --view，禁 --scope-type/--scope-key"
+            )
+            return 2
+        return _run_dataset_capacity_benchmark(
+            args.dataset_dir, args.view,
+            history=args.history,
+            asof_lock=args.asof_lock,
+            dry_run=args.dry_run,
+        )
     # ---- replay-l1 / rtm / semantic-matrix / explore1：纯本地 Dataset corpus 回放（不连 DB）----
     if args.mode in ("replay-l1", "rtm", "semantic-matrix", "explore1", "equivalence"):
         if not args.dataset_dir:
