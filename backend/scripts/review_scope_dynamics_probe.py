@@ -1328,20 +1328,23 @@ async def _vec1_benchmark(
 
     _build_readonly_engine()
     async with AsyncSessionLocal() as db:
-        await db.execute(
-            text("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-        )
-        try:
-            await db.execute(
-                text(
-                    "WITH u AS (UPDATE market_boards SET name=name "
-                    "WHERE id='00000000-0000-0000-0000-000000000000' "
-                    "RETURNING 1) SELECT 1 FROM u"
-                )
+        # PERF-REVALIDATION SAFETY FIX: explicit read-only transaction boundary.
+        # The FIRST statement autobegins the transaction; it must be
+        # ``SET TRANSACTION READ ONLY`` (reliable in async sessions, unlike the
+        # session-level ``SET SESSION CHARACTERISTICS`` which is not enforced on
+        # every connection).  NO DML probe here — an intentional read-only
+        # violation would abort this very transaction.  We instead verify the
+        # read-only flag via ``SHOW transaction_read_only`` and fail closed if it
+        # is not ``on``.
+        await db.execute(text("SET TRANSACTION READ ONLY"))
+        ro = (await db.execute(text("SHOW transaction_read_only"))).scalar()
+        if ro != "on":
+            logger.error(
+                "read-only guard failed: transaction_read_only=%r; "
+                "refusing to run benchmark",
+                ro,
             )
-            await db.rollback()
-        except Exception as e:  # noqa: BLE001
-            await db.rollback()
+            return 3
 
         if asof_date is None:
             latest = await list_recent_trading_days(db, date.today(), 1)
@@ -1479,7 +1482,12 @@ async def _vec1_benchmark(
                     pit_member_ids_t1=tuple(str(m) for m in member_ids),
                     members=tuple(legacy_members[scope_key][i]),
                     events=scope_events,
-                    event_coverage_member_ids=None,
+                    # PERF-REVALIDATION FIX: legacy (canonical per-date) must use the
+                    # SAME event-coverage as the vec1 (batch) path — otherwise dates
+                    # inside the backfill window compare ready(vec1) vs unavailable
+                    # (legacy=None), producing a false obs mismatch.  Both paths are
+                    # fed identical coverage so the comparison is apples-to-apples.
+                    event_coverage_member_ids=vec1_prepared[scope_key][i].event_coverage_member_ids,
                 )
                 prepared = vec1_prepared[scope_key][i]
                 vec1_obs = compute_scope_observation(
@@ -1539,6 +1547,10 @@ async def _vec1_benchmark(
               f"vec_fallback={prep_counters.get('vec_fallback', 0)} "
               f"fallback_reasons={','.join(prep_fallback) or '-'}")
         print("=== END ===")
+        # Read-only transaction closes with rollback (never commit).  Early-return
+        # paths rely on the ``async with AsyncSessionLocal()`` cleanup, which also
+        # rolls back on exit.
+        await db.rollback()
         return 0
 
 
