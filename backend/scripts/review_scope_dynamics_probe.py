@@ -954,6 +954,7 @@ def _parse_args() -> argparse.Namespace:
             "capacity-benchmark",
             "dataset-capacity-benchmark",
             "dataset-dynamics-logic",
+            "leadership-research",
             "export-dataset",
             "dataset-validate",
             "replay-l1",
@@ -978,6 +979,10 @@ def _parse_args() -> argparse.Namespace:
             "actually executed，并输出 12 traces（4 scopes x 3 dates）；scope 固定来自版本化 "
             "fixture（review_dynamics_logic_sample.json），不依赖任何 view，需 --dataset-dir "
             "+ --history（默认 120）+ --asof-lock；"
+            "leadership-research: Stage-2 研究（观察真实本地数据的领导成员变化，复用阶段1 "
+            "Leadership contribution owner，输出 Top3/5/10 overlap + Spearman + entrant/exit "
+            "+ concentration 分布，不产出正式 Migration 结论）；需 --dataset-dir + "
+            "--history（默认 20）+ --asof-lock；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -3931,6 +3936,239 @@ def _run_dataset_dynamics_logic(
     return 0 if contract_ok else 1
 
 
+def _spearman_rank_correlation(
+    a: list[str], b: list[str]
+) -> float | None:
+    """Spearman rank correlation over the common-ordered rank axis (research).
+
+    Stage-2 research statistic ONLY — used to observe how leader rank changes
+    across T-1 -> T.  It is NOT a production Migration owner; if the frozen
+    Migration contract (Stage 3) chooses a rank-stability metric, the production
+    implementation will live in the formal owner, not here.
+    """
+    common = sorted(set(a) & set(b))
+    if len(common) < 2:
+        return None
+    pos_a = {mid: i for i, mid in enumerate(a)}
+    pos_b = {mid: i for i, mid in enumerate(b)}
+    ranks_a = [pos_a[mid] for mid in common]
+    ranks_b = [pos_b[mid] for mid in common]
+    n = len(common)
+    d2 = sum((ra - rb) ** 2 for ra, rb in zip(ranks_a, ranks_b, strict=True))
+    return 1.0 - (6.0 * d2) / (n * (n * n - 1.0))
+
+
+def _leadership_ranked(members: list[Any]) -> list[Any]:
+    """Deterministic per-scope/date leadership ranking by signed contribution.
+
+    Reuses the Stage-1 single owner (``compute_member_leadership_contributions``);
+    only rankable members (contribution not None) are ordered, by contribution
+    DESC then member_id ASC (deterministic tie-break).  Pure research helper.
+    """
+    from app.domain.review.analysis.leadership_contribution import (
+        compute_member_leadership_contributions,
+    )
+
+    facts = compute_member_leadership_contributions(members)
+    rankable = [c for c in facts.members if c.contribution is not None]
+    ranked = sorted(
+        rankable,
+        key=lambda c: (-(c.contribution or 0.0), c.member_id),
+    )
+    return ranked
+
+
+def _run_leadership_research(
+    dataset_dir: str,
+    *,
+    fixture_path: str | None = None,
+    history: int = 20,
+    asof_lock: str | None = None,
+    dry_run: bool = False,
+) -> int:
+    """Stage-2 research: observe real local-data Leadership dynamics.
+
+    Uses ONLY the local frozen Dataset + the Stage-1 Leadership contribution
+    owner.  NO formal Migration conclusion is produced — the goal is to see how
+    leaders change across T-1 -> T so the Stage-3 contract can pick a stable,
+    explainable metric (NOT a hardcoded Top-N / Spearman threshold).
+
+    Outputs per representative scope (from the versioned fixture):
+      * Top3/Top5/Top10 day-over-day overlap distribution
+      * Spearman rank correlation distribution
+      * Entrants / Exits distribution (into/out of Top-N)
+      * Top3/Top5 contribution concentration (what share leaders hold)
+      * missing / rankable counts
+
+    NO-MIGRATION: only loads Dataset, calls the shared contribution owner and
+    computes research statistics; no DB, no SSH, no remote PG, no parallel owner,
+    no Migration decision.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] leadership-research dataset_dir={dataset_dir} "
+            f"fixture={fixture_path} history={history} asof={asof_lock} OK"
+        )
+        return 0
+
+    import time
+    from statistics import mean
+
+    from app.services.review_observation_prep_service import (
+        build_prepared_scopes_from_union,
+        build_union_fact_context_from_loaded_facts,
+    )
+
+    print("=== leadership-research (Stage 2, local frozen Dataset) ===")
+    print(f"dataset_dir : {dataset_dir}")
+    print(f"history     : {history} trading days")
+
+    if asof_lock:
+        sel_asof = date.fromisoformat(asof_lock)
+    else:
+        declared = _dataset_asof(dataset_dir)
+        if not declared:
+            logger.error("[leadership-research] 无法解析 corpus declared asof")
+            return 2
+        sel_asof = date.fromisoformat(declared)
+
+    if fixture_path is None:
+        fixture_path = os.path.join(
+            os.path.dirname(__file__), "fixtures", "review_dynamics_logic_sample.json"
+        )
+    scope_specs = _load_dynamics_logic_scope_specs(dataset_dir, fixture_path)
+    selection = _build_replay_selection_from_specs(
+        dataset_dir, scope_specs, asof_override=sel_asof
+    )
+    if selection.asof_date not in selection.trading_days:
+        logger.error("[leadership-research] asof=%s 不在交易日历", asof_lock)
+        return 2
+    asof_idx = bisect_left(selection.trading_days, selection.asof_date)
+    window_dates = list(
+        selection.trading_days[max(0, asof_idx - history + 1): asof_idx + 1]
+    )
+
+    # ---- Multi-date Dataset load + shared union prep + L1 ----
+    instr: dict[str, Any] = {}
+    facts = _load_capacity_facts(
+        dataset_dir, list(scope_specs),
+        window_dates=window_dates, selection=selection, instr=instr,
+    )
+    union_ctx = build_union_fact_context_from_loaded_facts(
+        t1_by_date=facts["t1_by_date"],
+        states_by_date=facts["states_by_date"],
+        bars=facts["bars"],
+        events_by_date=facts["events_by_date"],
+    )
+    prep_counters: dict[str, int] = {}
+    prepared = build_prepared_scopes_from_union(
+        trade_dates=facts["trade_dates"],
+        scope_specs=facts["scope_specs"],
+        union_ctx=union_ctx,
+        membership_t1_by_scope=None,
+        current_only_facts_by_date=None,
+        pit_status_t="current_static",
+        pit_status_t1="current_static",
+        t1_membership_available=False,
+        prep_counters=prep_counters,
+        prep_fallback_reasons=[],
+    )
+
+    for spec in scope_specs:
+        sk = spec.scope_key
+        series = prepared.get(sk)
+        if not series or len(series) != len(window_dates):
+            logger.error("[leadership-research] scope %s 未对齐", sk)
+            continue
+
+        # Per-date leadership rankings (one pass over members per scope/date).
+        # concentration = Top-N |contribution| / sum(|all rankable contribution|),
+        # i.e. the share of the scope's total |move| driven by the leaders.  Uses
+        # ABS values so signed contributions (a negative leader offsetting a
+        # positive one) do not distort the share (Stage-2 research observation).
+        daily_ranked: list[list[Any]] = []
+        daily_top3_share: list[float] = []
+        daily_top5_share: list[float] = []
+        daily_rankable: list[int] = []
+        for ps in series:
+            ranked = _leadership_ranked(list(ps.members))
+            daily_ranked.append(ranked)
+            total_abs = sum(abs(c.contribution or 0.0) for c in ranked)
+            daily_top3_share.append(
+                float("nan")
+                if (not ranked or total_abs == 0.0)
+                else sum(abs(c.contribution or 0.0) for c in ranked[:3]) / total_abs
+            )
+            daily_top5_share.append(
+                float("nan")
+                if (not ranked or total_abs == 0.0)
+                else sum(abs(c.contribution or 0.0) for c in ranked[:5]) / total_abs
+            )
+            daily_rankable.append(len(ranked))
+
+        # Day-over-day metrics (T-1 -> T).
+        overlap3: list[float] = []
+        overlap5: list[float] = []
+        overlap10: list[float] = []
+        spearman: list[float] = []
+        entrants: list[int] = []
+        exits: list[int] = []
+        for i in range(1, len(daily_ranked)):
+            prev = daily_ranked[i - 1]
+            curr = daily_ranked[i]
+
+            # Small-scope safety: Top-N cannot exceed the rankable pool; use the
+            # effective overlap over the smaller of N and pool size so a tiny scope
+            # (e.g. 10 members) does not saturate/divide by a fake N.
+            def _ov(n: int) -> float:
+                eff = max(1, min(n, len(prev), len(curr)))
+                sp = {c.member_id for c in prev[:eff]}
+                sc = {c.member_id for c in curr[:eff]}
+                return len(sp & sc) / eff
+
+            overlap3.append(_ov(3))
+            overlap5.append(_ov(5))
+            overlap10.append(_ov(10))
+            corr = _spearman_rank_correlation(
+                [c.member_id for c in prev],
+                [c.member_id for c in curr],
+            )
+            if corr is not None:
+                spearman.append(corr)
+            entrants.append(
+                len({c.member_id for c in curr[:5]} - {c.member_id for c in prev[:5]})
+            )
+            exits.append(
+                len({c.member_id for c in prev[:5]} - {c.member_id for c in curr[:5]})
+            )
+
+        print(f"--- scope={spec.scope_name} ({spec.scope_type}, n={len(spec.member_ids)}) "
+              f"dates={len(window_dates)} ---")
+        print(f"  rankable members      : min={min(daily_rankable) if daily_rankable else 0} "
+              f"mean={mean(daily_rankable) if daily_rankable else 0:.1f} "
+              f"max={max(daily_rankable) if daily_rankable else 0}")
+        print(f"  Top3 overlap  (T-1->T): mean={mean(overlap3):.3f} "
+              f"min={min(overlap3):.3f} max={max(overlap3):.3f}")
+        print(f"  Top5 overlap  (T-1->T): mean={mean(overlap5):.3f} "
+              f"min={min(overlap5):.3f} max={max(overlap5):.3f}")
+        print(f"  Top10 overlap (T-1->T): mean={mean(overlap10):.3f} "
+              f"min={min(overlap10):.3f} max={max(overlap10):.3f}")
+        print(f"  Spearman (T-1->T)     : mean={mean(spearman):.3f} "
+              f"min={min(spearman):.3f} max={max(spearman):.3f} "
+              f"count={len(spearman)}")
+        print(f"  Top5 entrants/day      : mean={mean(entrants):.2f} "
+              f"max={max(entrants)}")
+        print(f"  Top5 exits/day         : mean={mean(exits):.2f} max={max(exits)}")
+        print(f"  Top3 contribution share: mean={mean(daily_top3_share):.3f} "
+              f"max={max(daily_top3_share):.3f}")
+        print(f"  Top5 contribution share: mean={mean(daily_top5_share):.3f} "
+              f"max={max(daily_top5_share):.3f}")
+        print(f"  example (latest) Top5  : "
+              f"{[c.member_id[:8] for c in daily_ranked[-1][:5]]}")
+
+    return 0
+
+
 def _run_replay_l1(
     dataset_dir: str,
     view_name: str,
@@ -4852,6 +5090,21 @@ async def _run(args: argparse.Namespace) -> int:
         return _run_dataset_dynamics_logic(
             args.dataset_dir,
             history=dl_history,
+            asof_lock=args.asof_lock,
+            dry_run=args.dry_run,
+        )
+    # ---- leadership-research：Stage-2 研究（复用共享 owner，不产出正式结论）----
+    if args.mode == "leadership-research":
+        if not args.dataset_dir:
+            logger.error("[leadership-research] --dataset-dir 为必填")
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error("[leadership-research] 禁 --scope-type/--scope-key（用 fixture）")
+            return 2
+        lr_history = args.history if args.history else 20
+        return _run_leadership_research(
+            args.dataset_dir,
+            history=lr_history,
             asof_lock=args.asof_lock,
             dry_run=args.dry_run,
         )

@@ -204,6 +204,72 @@ def test_nm1_dynamics_logic_calls_shared_owners_only() -> None:
         )
 
 
+def _leadership_research_fn() -> str:
+    """Extract the ``_run_leadership_research`` function body only."""
+    src = _source()
+    start = src.index("def _run_leadership_research")
+    end = src.index("\ndef ", start)
+    return src[start:end]
+
+
+def _leadership_ranked_fn() -> str:
+    """Extract the ``_leadership_ranked`` helper body only."""
+    src = _source()
+    start = src.index("def _leadership_ranked")
+    end = src.index("\ndef ", start)
+    return src[start:end]
+
+
+def test_nm1_leadership_research_calls_shared_prep_core() -> None:
+    """Stage-2 research must load the Dataset through the shared prep core and
+    must NOT use any DB orchestration owner."""
+    fn = _leadership_research_fn()
+    for owner in [
+        "build_union_fact_context_from_loaded_facts",
+        "build_prepared_scopes_from_union",
+    ]:
+        assert owner in fn, f"leadership-research must call shared owner {owner!r}"
+    for forbidden in [
+        "AsyncSessionLocal",
+        "asyncpg",
+        "psycopg",
+        "PGPASSWORD",
+        "SQLAlchemy",
+        "compute_current_static_scope_dynamics_batch",
+        "resolve_current_memberships_batch",
+    ]:
+        assert forbidden not in fn, (
+            f"leadership-research must not use DB orchestration symbol {forbidden!r}"
+        )
+
+
+def test_nm1_leadership_ranked_calls_single_contribution_owner() -> None:
+    """The Stage-2 ranking helper must delegate to the Stage-1 single Leadership
+    contribution owner (compute_member_leadership_contributions) — it must NOT
+    re-derive amount_share or contribution."""
+    fn = _leadership_ranked_fn()
+    assert "compute_member_leadership_contributions" in fn
+    assert "amount_share * return" not in fn
+    assert "amount / total" not in fn
+
+
+def test_nm3_leadership_research_no_business_formula_copy() -> None:
+    """The Stage-2 research runner must NOT re-derive the Leadership contribution
+    formula (amount_share / contribution = amount_share x return).  Local helpers
+    are research statistics only (overlap / concentration), NOT the formal
+    Migration owner (Stage 4).  Contribution must come exclusively from the Stage-1
+    shared owner."""
+    fn = _leadership_research_fn()
+    # No re-derivation of the contribution formula / share arithmetic.
+    for pat in [
+        r"amount_share\s*=\s*amount",
+        r"amount\s*/\s*total",
+        r"total_amount\s*=",
+        r"contribution\s*=\s*.*\*",
+    ]:
+        assert not re.search(pat, fn), f"leadership-research must not re-derive formula ({pat!r})"
+
+
 def test_nm3_dynamics_logic_no_business_formula_copy() -> None:
     """``_run_dataset_dynamics_logic`` must NOT re-derive any business math: no
     local formula function definitions, no EMA alpha (2/(N+1)), no manual
