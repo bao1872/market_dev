@@ -34,6 +34,9 @@ from scripts.review_scope_dynamics_probe import (
     _IST_SELECT_JOINT_HIST_KEYS,
     _IST_SELECT_READINESS_FEATURE_KEYS,
     _IST_THRESHOLD_GRID,
+    _IST_2C_LCR_GRID,
+    _IST_2C_LCR_REFERENCE,
+    _IST_2C_LCR_STRICT,
     _aligned_breadth,
     _aligned_tilt,
     _balanced_central_sensitivity,
@@ -44,12 +47,16 @@ from scripts.review_scope_dynamics_probe import (
     _consecutive_runs,
     _delta5d,
     _evaluate_candidate_variant,
+    _evaluate_rf2_variant,
+    _exit_minus_entrant,
     _hist_pct,
+    _leader_count_preservation,
     _multi_hit_and_unmatched,
     _nested_variant,
     _numeric_group_stats,
     _pairwise_overlap,
     _percentile_sorted,
+    _pick_rf2_replay,
     _pick_spread_replay,
     _ready_unmatched_band_distribution,
     _reference_configs,
@@ -1042,4 +1049,131 @@ def test_pick_spread_replay_across_scopes():
     scopes = {p["scope_key"] for p in picked}
     assert scopes == {"z-scope", "a-scope"}  # spread across scopes
     assert _pick_spread_replay([], 5) == []
+
+
+# ---------------------------------------------------------------------------
+# TYPE-MAPPING Commit 2C — Fragmenting redesign（research-only）
+#   _leader_count_preservation / _exit_minus_entrant / _evaluate_rf2_variant
+#   / _pick_rf2_replay
+# ---------------------------------------------------------------------------
+
+
+def _rf2_row(
+    *,
+    cur: float | None = 6,
+    prev: float | None = 6,
+    entrant: float | None = 1,
+    exit_: float | None = 1,
+    mig: float | None = 0.9,
+    scope_key: str = "s1",
+) -> dict:
+    return {
+        "leadership_current_leader_count": cur,
+        "leadership_previous_leader_count": prev,
+        "leadership_entrant_count": entrant,
+        "leadership_exit_count": exit_,
+        "migration_hist_pct": mig,
+        "scope_key": scope_key,
+        "scope_type": "concept",
+        "size_bucket": "medium",
+    }
+
+
+def test_leader_count_preservation_basic():
+    assert _leader_count_preservation(_rf2_row(cur=6, prev=6)) == pytest.approx(1.0)
+    assert _leader_count_preservation(_rf2_row(cur=3, prev=6)) == pytest.approx(0.5)
+    assert _leader_count_preservation(_rf2_row(cur=9, prev=6)) == pytest.approx(1.5)
+
+
+def test_leader_count_preservation_none_and_zero_prev():
+    # 任一输入缺失或 prev==0 → None（不把缺数据当 0）
+    assert _leader_count_preservation(_rf2_row(cur=None, prev=6)) is None
+    assert _leader_count_preservation(_rf2_row(cur=6, prev=None)) is None
+    assert _leader_count_preservation(_rf2_row(cur=6, prev=0)) is None
+
+
+def test_exit_minus_entrant_basic():
+    assert _exit_minus_entrant(_rf2_row(exit_=3, entrant=1)) == pytest.approx(2.0)
+    assert _exit_minus_entrant(_rf2_row(exit_=1, entrant=3)) == pytest.approx(-2.0)
+    assert _exit_minus_entrant(_rf2_row(exit_=2, entrant=2)) == pytest.approx(0.0)
+
+
+def test_exit_minus_entrant_none_safe():
+    assert _exit_minus_entrant(_rf2_row(exit_=None, entrant=1)) is None
+    assert _exit_minus_entrant(_rf2_row(exit_=1, entrant=None)) is None
+
+
+def test_evaluate_rf2_variant_fragmentation():
+    # 收缩：LCR < thr 且 exit > entrant
+    row = _rf2_row(cur=2, prev=6, exit_=3, entrant=1, mig=0.9)  # LCR=0.33
+    row["research_leader_count_preservation"] = _leader_count_preservation(row)
+    row["research_exit_minus_entrant"] = _exit_minus_entrant(row)
+    assert _evaluate_rf2_variant(row, _IST_2C_LCR_REFERENCE, True) is True
+    assert _evaluate_rf2_variant(row, _IST_2C_LCR_REFERENCE, False) is False
+
+
+def test_evaluate_rf2_variant_rotating():
+    # 容量保持：LCR >= thr 且 entrant >= exit
+    row = _rf2_row(cur=6, prev=6, exit_=1, entrant=2, mig=0.9)  # LCR=1.0
+    row["research_leader_count_preservation"] = _leader_count_preservation(row)
+    row["research_exit_minus_entrant"] = _exit_minus_entrant(row)
+    assert _evaluate_rf2_variant(row, _IST_2C_LCR_REFERENCE, False) is True
+    assert _evaluate_rf2_variant(row, _IST_2C_LCR_REFERENCE, True) is False
+
+
+def test_evaluate_rf2_variant_low_migration_gate():
+    # migration < HIGH（0.80）前提不满足 → False，即使 LCR/balance 都符合
+    row = _rf2_row(cur=2, prev=6, exit_=3, entrant=1, mig=0.7)
+    row["research_leader_count_preservation"] = _leader_count_preservation(row)
+    row["research_exit_minus_entrant"] = _exit_minus_entrant(row)
+    assert _evaluate_rf2_variant(row, _IST_2C_LCR_REFERENCE, True) is False
+
+
+def test_evaluate_rf2_variant_missing_inputs_false():
+    # 任一输入缺失 → False（不把 None 当 0）
+    row = _rf2_row(cur=None, prev=6, exit_=3, entrant=1, mig=0.9)
+    row["research_leader_count_preservation"] = _leader_count_preservation(row)
+    row["research_exit_minus_entrant"] = _exit_minus_entrant(row)
+    assert _evaluate_rf2_variant(row, _IST_2C_LCR_REFERENCE, True) is False
+    row2 = _rf2_row(cur=6, prev=6, exit_=None, entrant=1, mig=0.9)
+    row2["research_leader_count_preservation"] = _leader_count_preservation(row2)
+    row2["research_exit_minus_entrant"] = _exit_minus_entrant(row2)
+    assert _evaluate_rf2_variant(row2, _IST_2C_LCR_REFERENCE, False) is False
+
+
+def test_evaluate_rf2_variant_threshold_sweep_behavior():
+    # 同一行在不同 LCR 阈值下归属可翻转（研究假设，不冻结）
+    row = _rf2_row(cur=3, prev=6, exit_=2, entrant=1, mig=0.9)  # LCR=0.5
+    row["research_leader_count_preservation"] = _leader_count_preservation(row)
+    row["research_exit_minus_entrant"] = _exit_minus_entrant(row)
+    # LCR=0.5：thr=0.6 时 lcr(0.5)<0.6 → frag 命中；thr=0.4 时 lcr(0.5)>=0.4 → 不 frag
+    assert _evaluate_rf2_variant(row, 0.6, True) is True
+    assert _evaluate_rf2_variant(row, 0.4, True) is False
+
+
+def test_pick_rf2_replay_filters_and_spreads():
+    frag_rows = [
+        _rf2_row(cur=2, prev=6, exit_=3, entrant=1, mig=0.9, scope_key=f"s{i}")
+        for i in range(4)
+    ]  # LCR=0.33 → 收缩候选
+    rot_rows = [
+        _rf2_row(cur=6, prev=6, exit_=1, entrant=2, mig=0.9, scope_key=f"r{i}")
+        for i in range(4)
+    ]  # LCR=1.0 → 容量保持候选
+    for r in frag_rows + rot_rows:
+        r["research_leader_count_preservation"] = _leader_count_preservation(r)
+        r["research_exit_minus_entrant"] = _exit_minus_entrant(r)
+    picked_frag = _pick_rf2_replay(frag_rows + rot_rows, True, _IST_2C_LCR_REFERENCE, 3)
+    assert len(picked_frag) == 3
+    assert all(r["scope_key"].startswith("s") for r in picked_frag)
+    picked_rot = _pick_rf2_replay(frag_rows + rot_rows, False, _IST_2C_LCR_REFERENCE, 3)
+    assert len(picked_rot) == 3
+    assert all(r["scope_key"].startswith("r") for r in picked_rot)
+    assert _pick_rf2_replay([], True, _IST_2C_LCR_REFERENCE, 3) == []
+
+
+def test_rf2_constants_sane():
+    assert _IST_2C_LCR_GRID == (0.5, 0.6, 0.7, 0.8)
+    assert 0.0 < _IST_2C_LCR_REFERENCE < 1.0
+    assert _IST_2C_LCR_STRICT < _IST_2C_LCR_REFERENCE
 

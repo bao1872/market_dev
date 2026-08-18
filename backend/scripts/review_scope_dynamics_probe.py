@@ -1145,6 +1145,7 @@ def _parse_args() -> argparse.Namespace:
             "internal-structure-type-distribution",
             "internal-structure-type-candidates",
             "internal-structure-type-selection",
+            "internal-structure-type-fragmenting-redesign",
             "leadership-research",
             "export-dataset",
             "dataset-validate",
@@ -1206,6 +1207,14 @@ def _parse_args() -> argparse.Namespace:
             "读 Commit 2 candidate results --dataset-dir，join Commit 1 mapping 取 leadership "
             "counts，写 review-isdtype-select-<sha12>-v1/{candidate_selection_summary.json, "
             "representative_replay.json, manifest.json}；"
+            "internal-structure-type-fragmenting-redesign: TYPE-MAPPING Commit 2C — "
+            "research-only Fragmenting redesign（研究 LeaderCount 容量保持 LCR=current/"
+            "previous、换入换出平衡 exit−entrant、留存 retention 对 Rotating/Fragmenting "
+            "分界的贡献；高 Migration 前提下 Rotating-v2=容量保持/Fragmenting-v2=收缩候选 "
+            "LCR threshold sweep + 旧类重叠 + 代表性 replay；不冻结 threshold、不写正式 "
+            "Fragmenting 新公式），读 Commit 2 candidate results --dataset-dir，join Commit 1 "
+            "mapping 取 leadership counts，写 review-isdtype-frag2-<sha12>-v1/"
+            "{fragmenting_redesign_summary.json, representative_replay.json, manifest.json}；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -6993,6 +7002,27 @@ _IST_SELECT_RF_COMPARE_FIELDS = (
     "leadership_previous_retention",
 )
 
+# TYPE-MAPPING Commit 2C — Fragmenting redesign（research-only）。
+# 核心假设（审查 §17-18）：Rotating / Fragmenting 的真正分界不是 leader
+# fraction 高低，而是 Leadership 换人后核心组织容量是否被补回：
+#   Rotating-v2    ：高 Migration + LeaderCount 容量保持（LCR 高）+ 换入可补换出
+#   Fragmenting-v2 ：高 Migration + LeaderCount 收缩（LCR 低）+ Exit > Entrant
+# 本轮只研究透明量，不冻结 threshold。
+_IST_2C_LCR_GRID = (0.5, 0.6, 0.7, 0.8)   # LCR 阈值 sweep（research 假设）
+_IST_2C_LCR_REFERENCE = 0.6               # 参考锚点（非冻结）
+_IST_2C_LCR_STRICT = 0.4                  # 更严格锚点（contraction 高证据）
+_IST_2C_RF2_GROUP_FIELDS = (
+    "leadership_migration",
+    "leadership_jaccard_stability",
+    "leadership_previous_leader_count",
+    "leadership_current_leader_count",
+    "leadership_entrant_count",
+    "leadership_exit_count",
+    "leadership_previous_retention",
+    "research_leader_count_preservation",
+    "research_exit_minus_entrant",
+)
+
 
 def _std_pop(values: list[float]) -> float | None:
     """Population standard deviation (transparent, no numpy dependency)."""
@@ -7246,6 +7276,61 @@ def _balanced_central_sensitivity(rows: list[dict], hist_keys: tuple) -> dict:
             "exactly_three": _central_bucket_stats(exactly_three, total),
         }
     return {"total_ready": total, "widths": widths}
+
+
+def _leader_count_preservation(row: dict) -> float | None:
+    """LCR_T = current_leader_count / previous_leader_count（None-safe）。"""
+    cur = _to_fin(row.get("leadership_current_leader_count"))
+    prev = _to_fin(row.get("leadership_previous_leader_count"))
+    if cur is None or prev is None or prev == 0:
+        return None
+    return cur / prev
+
+
+def _exit_minus_entrant(row: dict) -> float | None:
+    """透明 exit−entrant 平衡（原始 exit/entrant count 也单独保留）。"""
+    ex = _to_fin(row.get("leadership_exit_count"))
+    en = _to_fin(row.get("leadership_entrant_count"))
+    if ex is None or en is None:
+        return None
+    return ex - en
+
+
+def _evaluate_rf2_variant(row: dict, lcr_thr: float, frag_mode: bool) -> bool:
+    """Rotating-v2（容量保持）/ Fragmenting-v2（收缩）候选假设。
+
+    前提：migration_hist_pct >= HIGH（参考 0.80，与 Commit 2 一致）。
+      * frag_mode=True ：LCR < lcr_thr 且 exit > entrant   → 收缩候选
+      * frag_mode=False：LCR >= lcr_thr 且 entrant >= exit → 容量保持候选
+    任一输入缺失 → False（不把 None 当 0）。阈值只做 research 假设，不冻结。
+    """
+    mig = _to_fin(row.get("migration_hist_pct"))
+    lcr = _to_fin(row.get("research_leader_count_preservation"))
+    bal = _to_fin(row.get("research_exit_minus_entrant"))
+    if mig is None or lcr is None or bal is None:
+        return False
+    if mig < _IST_THRESHOLD_REFERENCE["HIGH"]:
+        return False
+    if frag_mode:
+        return lcr < lcr_thr and bal > 0
+    return lcr >= lcr_thr and bal <= 0
+
+
+def _pick_rf2_replay(rows: list[dict], frag_mode: bool, lcr_thr: float, limit: int) -> list[dict]:
+    """Deterministic spread-across-scope replay pick for a v2 hypothesis bucket."""
+    if frag_mode:
+        pool = [
+            r for r in rows
+            if _evaluate_rf2_variant(r, lcr_thr, True)
+            and (_to_fin(r.get("research_leader_count_preservation")) or 9.0) <= _IST_2C_LCR_STRICT
+        ]
+    else:
+        pool = [
+            r for r in rows
+            if _evaluate_rf2_variant(r, lcr_thr, False)
+            and (_to_fin(r.get("research_leader_count_preservation")) or -1.0) >= 0.8
+        ]
+    return _pick_spread_replay(pool, limit)
 
 
 def _pick_spread_replay(rows: list[dict], limit: int) -> list[dict]:
@@ -7642,6 +7727,273 @@ def _run_internal_structure_type_selection(
             f"{var}: {v['min']:.3f}~{v['max']:.3f}" for var, v in tr.items()
         )
         print(f"  [{cand}] {line}")
+    return 0
+
+
+def _run_internal_structure_type_fragmenting_redesign(
+    dataset_dir: str,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """TYPE-MAPPING Commit 2C — Fragmenting redesign（research-only）。
+
+    读 Commit 2 candidate results + join Commit 1 mapping leadership counts，
+    研究 LeaderCount 容量保持（LCR）、换入换出平衡、留存对 Rotating / Fragmenting
+    分界的贡献（审查 §17-18）。产出：
+      review-isdtype-frag2-<sha12>-v1/fragmenting_redesign_summary.json
+      review-isdtype-frag2-<sha12>-v1/representative_replay.json
+      review-isdtype-frag2-<sha12>-v1/manifest.json
+    不写 production owner、不冻结 threshold、不进入 Trading Context。
+    """
+    cand_results_path = os.path.join(dataset_dir, "research_candidate_results.parquet")
+    cand_summary_path = os.path.join(dataset_dir, "research_candidate_summary.json")
+    if not os.path.exists(cand_results_path) or not os.path.exists(cand_summary_path):
+        logger.error(
+            "[internal-structure-type-fragmenting-redesign] 需 Commit 2 candidate "
+            "results：%s",
+            dataset_dir,
+        )
+        return 2
+    import pyarrow.parquet as pq  # lazy import（与全文件惯例一致）
+
+    rows = pq.read_table(cand_results_path).to_pylist()
+    with open(cand_summary_path, "r", encoding="utf-8") as fh:
+        summary = json.load(fh)
+    source_dataset = summary.get("source_dataset")
+    sha12 = str(summary.get("capture_git_sha", ""))[:12]
+    out_dir = os.path.join(
+        os.path.dirname(dataset_dir), f"review-isdtype-frag2-{sha12}-v1"
+    )
+    if dry_run:
+        logger.info(
+            "[internal-structure-type-fragmenting-redesign][dry-run] rows=%d "
+            "source=%s out=%s",
+            len(rows),
+            source_dataset,
+            out_dir,
+        )
+        return 0
+
+    # ---- join Commit 1 mapping leadership counts（同 selection 模式）----
+    mapping_parquet = os.path.join(
+        os.path.dirname(dataset_dir),
+        source_dataset,
+        "internal_structure_type_mapping.parquet",
+    )
+    if not os.path.exists(mapping_parquet):
+        logger.error(
+            "[internal-structure-type-fragmenting-redesign] 缺 mapping parquet：%s",
+            mapping_parquet,
+        )
+        return 2
+    mapping_rows = pq.read_table(mapping_parquet).to_pylist()
+    mapping_index = {
+        (str(r.get("scope_key")), str(r.get("trade_date"))): r for r in mapping_rows
+    }
+    joined = 0
+    for r in rows:
+        src = mapping_index.get((str(r.get("scope_key")), str(r.get("trade_date"))))
+        if src is None:
+            continue
+        for f in _IST_SELECT_LEADERSHIP_COUNT_FIELDS:
+            r[f] = src.get(f)
+        joined += 1
+    if joined != len(rows):
+        logger.warning(
+            "[internal-structure-type-fragmenting-redesign] join 覆盖 %d/%d 行",
+            joined,
+            len(rows),
+        )
+    rows.sort(key=lambda r: (str(r.get("scope_key")), str(r.get("trade_date"))))
+
+    # ---- Stage 2C-1: 透明研究特征（LCR / exit−entrant；retention 已有）----
+    for r in rows:
+        r["research_leader_count_preservation"] = _leader_count_preservation(r)
+        r["research_exit_minus_entrant"] = _exit_minus_entrant(r)
+
+    class_keys = {cand: f"research_candidate_{cand}" for cand in _IST_CANDIDATE_CLASSES}
+
+    # ---- Stage 2C-2: 新特征跨旧 R/F 分组分布 ----
+    part = _rotate_fragment_partition(
+        rows, class_keys["Rotating"], class_keys["Fragmenting"]
+    )
+    rf_group_names = (
+        ("rotating_only", part["rotating_only"]),
+        ("fragmenting_only", part["fragmenting_only"]),
+        ("overlap", part["overlap"]),
+        ("neither", part["neither"]),
+    )
+    group_distribution = {
+        gname: {f: _numeric_group_stats(grows, f) for f in _IST_2C_RF2_GROUP_FIELDS}
+        for gname, grows in rf_group_names
+    }
+
+    # ---- Stage 2C-3: v2 候选 threshold sweep（透明研究）----
+    sweep: dict[str, dict[str, dict]] = {"Rotating-v2": {}, "Fragmenting-v2": {}}
+    for thr in _IST_2C_LCR_GRID:
+        for name, frag_mode in (("Rotating-v2", False), ("Fragmenting-v2", True)):
+            flags = [_evaluate_rf2_variant(r, thr, frag_mode) for r in rows]
+            sweep[name][str(thr)] = _hit_stats_from_flags(rows, flags)
+
+    # ---- Stage 2C-4: 参考 v2 + 与旧类的重叠 ----
+    lcr_ref = _IST_2C_LCR_REFERENCE
+    rot_v2 = [_evaluate_rf2_variant(r, lcr_ref, False) for r in rows]
+    frag_v2 = [_evaluate_rf2_variant(r, lcr_ref, True) for r in rows]
+    for r, rv, fv in zip(rows, rot_v2, frag_v2):
+        r["research_rf2_Rotating"] = rv
+        r["research_rf2_Fragmenting"] = fv
+
+    old_rot = [r for r in rows if r.get(class_keys["Rotating"])]
+    old_frag = [r for r in rows if r.get(class_keys["Fragmenting"])]
+    rot_v2_rows = [r for r in rows if r["research_rf2_Rotating"]]
+    frag_v2_rows = [r for r in rows if r["research_rf2_Fragmenting"]]
+    overlap_rows = [
+        r
+        for r in rows
+        if r.get(class_keys["Rotating"]) and r.get(class_keys["Fragmenting"])
+    ]
+    v2_overlap_vs_old = {
+        "old_rotating_hits": len(old_rot),
+        "rotating_v2_hits": len(rot_v2_rows),
+        "old_fragmenting_hits": len(old_frag),
+        "fragmenting_v2_hits": len(frag_v2_rows),
+        "old_rotating_captured_by_rotating_v2": sum(
+            1 for r in old_rot if r["research_rf2_Rotating"]
+        ),
+        "old_fragmenting_captured_by_fragmenting_v2": sum(
+            1 for r in old_frag if r["research_rf2_Fragmenting"]
+        ),
+        "old_fragmenting_now_rotating_v2": sum(
+            1 for r in old_frag if r["research_rf2_Rotating"]
+        ),
+        "old_overlap_rows_contracting_frag_v2": sum(
+            1 for r in overlap_rows if r["research_rf2_Fragmenting"]
+        ),
+        "old_overlap_rows_preserved_rot_v2": sum(
+            1 for r in overlap_rows if r["research_rf2_Rotating"]
+        ),
+        "fragmenting_v2_only_count": sum(
+            1
+            for r in rows
+            if r["research_rf2_Fragmenting"] and not r.get(class_keys["Fragmenting"])
+        ),
+    }
+
+    # ---- Stage 2C-5: representative replay ----
+    replay_fields = (
+        "scope_key",
+        "scope_name",
+        "trade_date",
+        "size_bucket",
+        "leadership_migration",
+        "leadership_previous_leader_count",
+        "leadership_current_leader_count",
+        "leadership_entrant_count",
+        "leadership_exit_count",
+        "leadership_previous_retention",
+        "research_leader_count_preservation",
+        "research_exit_minus_entrant",
+        "research_candidate_Rotating",
+        "research_candidate_Fragmenting",
+        "research_rf2_Rotating",
+        "research_rf2_Fragmenting",
+    )
+    contraction_replay = _pick_rf2_replay(rows, True, lcr_ref, 10)
+    preserved_replay = _pick_rf2_replay(rows, False, lcr_ref, 10)
+    representative_replay = {
+        "fragmenting_v2_contraction": _replay_rows_compact(
+            contraction_replay, replay_fields
+        ),
+        "rotating_v2_preserved": _replay_rows_compact(preserved_replay, replay_fields),
+    }
+
+    # ---- summary assembly ----
+    summary_out = {
+        "type_mapping_commit": "TYPE-MAPPING-COMMIT2C-FRAGMENTING-REDESIGN",
+        "source_dataset": source_dataset,
+        "capture_git_sha": summary.get("capture_git_sha"),
+        "membership_semantics": summary.get("membership_semantics"),
+        "threshold_freeze_eligible": False,
+        "row_count": len(rows),
+        "lcr_grid": list(_IST_2C_LCR_GRID),
+        "lcr_reference": lcr_ref,
+        "lcr_strict": _IST_2C_LCR_STRICT,
+        "old_rf_partition_counts": {
+            "rotating_only": part["rotating_only_count"],
+            "fragmenting_only": part["fragmenting_only_count"],
+            "overlap": part["overlap_count"],
+            "neither": part["neither_count"],
+        },
+        "group_distribution": group_distribution,
+        "v2_candidate_sweep": sweep,
+        "v2_reference": {
+            "Rotating-v2": _hit_stats_from_flags(rows, rot_v2),
+            "Fragmenting-v2": _hit_stats_from_flags(rows, frag_v2),
+        },
+        "v2_overlap_vs_old": v2_overlap_vs_old,
+        "hypothesis_note": (
+            "研究假设（§17-18）：Rotating-v2 = 高 Migration + LCR>=参考 + entrant>=exit；"
+            "Fragmenting-v2 = 高 Migration + LCR<参考 + exit>entrant。本轮只输出分布/命中/"
+            "重叠/replay 证据，不冻结 threshold，不写正式 Fragmenting 新公式。"
+        ),
+    }
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(
+        os.path.join(out_dir, "fragmenting_redesign_summary.json"),
+        "w",
+        encoding="utf-8",
+    ) as fh:
+        json.dump(summary_out, fh, ensure_ascii=False, indent=2, default=_json_default)
+    with open(
+        os.path.join(out_dir, "representative_replay.json"),
+        "w",
+        encoding="utf-8",
+    ) as fh:
+        json.dump(
+            representative_replay, fh, ensure_ascii=False, indent=2, default=_json_default
+        )
+
+    manifest = {
+        "dataset_id": f"review-isdtype-frag2-{sha12}-v1",
+        "source_dataset": source_dataset,
+        "source_candidate_id": summary.get("dataset_id"),
+        "capture_git_sha": summary.get("capture_git_sha"),
+        "membership_semantics": "current_static_research_proxy",
+        "threshold_freeze_eligible": False,
+        "commit": "TYPE-MAPPING-COMMIT2C-FRAGMENTING-REDESIGN",
+        "row_count": len(rows),
+        "contraction_replay_count": len(contraction_replay),
+        "preserved_replay_count": len(preserved_replay),
+    }
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    # ---- console summary ----
+    print(
+        f"[internal-structure-type-fragmenting-redesign] out_dir={out_dir}"
+    )
+    print("--- Stage 2C-2: LCR / exit-entrant / retention 跨旧 R/F 分组中位数 ---")
+    for gname, grows in rf_group_names:
+        lcr = group_distribution[gname]["research_leader_count_preservation"]["median"]
+        bal = group_distribution[gname]["research_exit_minus_entrant"]["median"]
+        ret = group_distribution[gname]["leadership_previous_retention"]["median"]
+        print(
+            f"  {gname}: n={len(grows)} LCR_med={lcr} "
+            f"exit-entrant_med={bal} retention_med={ret}"
+        )
+    print("--- Stage 2C-3: v2 候选 sweep（hit_rate）---")
+    for name in ("Rotating-v2", "Fragmenting-v2"):
+        line = "  ".join(
+            f"LCR>{thr}:{sweep[name][str(thr)]['hit_rate']:.4f}"
+            for thr in _IST_2C_LCR_GRID
+        )
+        print(f"  {name}: {line}")
+    print("--- Stage 2C-4: v2 参考重叠 vs 旧类 ---")
+    for k, v in v2_overlap_vs_old.items():
+        print(f"  {k}={v}")
+    print("--- Stage 2C-5: replay ---")
+    print(f"  contraction={len(contraction_replay)} preserved={len(preserved_replay)}")
     return 0
 
 
@@ -8668,6 +9020,21 @@ async def _run(args: argparse.Namespace) -> int:
             )
             return 2
         return _run_internal_structure_type_selection(
+            args.dataset_dir,
+            dry_run=args.dry_run,
+        )
+    if args.mode == "internal-structure-type-fragmenting-redesign":
+        if not args.dataset_dir:
+            logger.error(
+                "[internal-structure-type-fragmenting-redesign] --dataset-dir 为必填"
+            )
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[internal-structure-type-fragmenting-redesign] 禁 --scope-type/--scope-key"
+            )
+            return 2
+        return _run_internal_structure_type_fragmenting_redesign(
             args.dataset_dir,
             dry_run=args.dry_run,
         )
