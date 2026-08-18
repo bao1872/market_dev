@@ -1146,6 +1146,7 @@ def _parse_args() -> argparse.Namespace:
             "internal-structure-type-candidates",
             "internal-structure-type-selection",
             "internal-structure-type-fragmenting-redesign",
+            "internal-structure-type-semantic-validation",
             "leadership-research",
             "export-dataset",
             "dataset-validate",
@@ -1218,6 +1219,19 @@ def _parse_args() -> argparse.Namespace:
             "Fragmenting 新公式），读 Commit 2 candidate results --dataset-dir，join Commit 1 "
             "mapping 取 leadership counts，写 review-isdtype-frag2-<sha12>-v1/"
             "{fragmenting_redesign_summary.json, representative_replay.json, manifest.json}；"
+            "internal-structure-type-semantic-validation: TYPE-MAPPING Commit 2C-B "
+            "（HIGH-MIGRATION-SEMANTIC-VALIDATION）— research-only 盲审式语义回放（P0：old "
+            "research_candidate_Rotating/Fragmenting 不作 ground truth、不参与样本选择/规则"
+            "优劣/semantic fit 判定，仅最终附注 old_candidate_note；独立抽取 "
+            "migration_hist_pct>=0.80 的 high-Migration universe，仅按 LCR research bands "
+            "（<0.50/0.50–0.75/0.75–1.00/>=1.00）分层、不产 Type label；每 band 输出 "
+            "family(scope_type)×size×previous-leader-count 分布检查小 denominator 偏置 + "
+            "structural evidence quantile/方向率（Concentration/Breadth/Tilt/LeaderFraction/"
+            "LeaderCount/Rankable）+ 低-LCR Concentration×Breadth 联合证据（LCR-alone 充分性"
+            "marker）+ 每 band 代表性 replay；不新增 ratio/score、不冻结 threshold），读 "
+            "Commit 2 candidate results --dataset-dir，join Commit 1 mapping 取 leadership "
+            "counts，写 review-isdtype-semval-<sha12>-v1/{semantic_validation_summary.json, "
+            "representative_replay.json, manifest.json}；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -8258,6 +8272,543 @@ def _run_internal_structure_type_fragmenting_redesign(
     return 0
 
 
+# ===========================================================================
+# TYPE-MAPPING Commit 2C-B — HIGH-MIGRATION SEMANTIC VALIDATION（research-only）
+#
+# 审查指令（prompt.md §5-§10 + 给 IDE 的下一步指令）：
+#   P0：old research_candidate_Rotating/Fragmenting 不得当 ground truth——
+#       不得参与样本选择 / 规则优劣判断 / semantic fit 判定；仅可作最终附注
+#       （old_candidate_note）。
+#   1) 从 Mapping Dataset 独立抽取 migration_hist_pct >= 0.80 的
+#      high-Migration universe；
+#   2) 仅按 LCR research bands 分层：<0.50 / 0.50–0.75 / 0.75–1.00 / >=1.00，
+#      不生成 Type label；
+#   3) 每 band 输出 family(scope_type)×size×previous-leader-count 分布，
+#      检查 LCR 是否受小 denominator / scope size 偏置；
+#   4) 每 band 抽代表性 cases，只消费 canonical/raw research evidence
+#      （LeaderCount / RankableCount / Retention / Jaccard / Concentration
+#      level+change / AlignedBreadth level+change / AlignedCapitalTilt /
+#      LeaderFraction），禁止未来收益；
+#   5) semantic replay 核心问题：低 LCR 是真正结构失序，还是新 Leadership
+#      更集中 / Core-led？高 LCR 是否有序换帅？0.50–1.00 是否存在自然过渡带？
+#   6) 专门输出低-LCR 的 Concentration/Breadth 联合证据，检验 LCR-alone 是否
+#      足以表达 Fragmenting；若大量低 LCR 同时 Concentration 强化，标记
+#      LCR-alone insufficient（只标记、不自动新增公式）；
+#   7) 不新增任何 Leadership ratio/score，不改 Broadening/Core-led/Balanced，
+#      不更新 PRD、不写 production owner、不进入 Trading Context。
+#      保持 current_static_research_proxy / threshold_freeze_eligible=false。
+# ===========================================================================
+
+# 2C-B high-Migration universe 门槛（research-only，不冻结）。
+_IST_2CB_MIGRATION_FLOOR = 0.80
+# LCR research bands（审查指令 #2：<0.50 / 0.50–0.75 / 0.75–1.00 / >=1.00）。
+_IST_2CB_LCR_BANDS = (0.50, 0.75, 1.00)
+# band 语义标签（transparent research bins，非正式 Type）。
+_IST_2CB_SEMANTIC_BANDS = {
+    "lt_0.50": "strong_contraction",
+    "0.50_0.75": "mild_contraction",
+    "0.75_1.00": "mild_preserve",
+    "ge_1.00": "preserved",
+}
+# band 规范输出顺序。
+_IST_2CB_BAND_ORDER = ("lt_0.50", "0.50_0.75", "0.75_1.00", "ge_1.00")
+# 每 band 代表性 replay 案例数。
+_IST_2CB_REPLAY_LIMIT = 6
+# 低-LCR Concentration 强化标记阈值（research attention marker，非 freeze）。
+_IST_2CB_CONC_STRENGTHEN_SHARE = 0.25
+# 低-LCR 联合证据只覆盖这两个 band。
+_IST_2CB_LOW_LCR_BANDS = ("lt_0.50", "0.50_0.75")
+
+# 2C-B replay 展示字段（只消费 canonical/raw research evidence，禁止未来收益）。
+_IST_2CB_REPLAY_FIELDS = (
+    "scope_key",
+    "scope_name",
+    "scope_type",
+    "trade_date",
+    "size_bucket",
+    "member_count",
+    "lcr_band",
+    "research_leader_count_preservation",
+    "migration_hist_pct",
+    "leadership_migration",
+    "leadership_previous_rankable_count",
+    "leadership_current_rankable_count",
+    "leadership_previous_leader_count",
+    "leadership_current_leader_count",
+    "leadership_previous_retention",
+    "leadership_jaccard_stability",
+    "concentration_price_hhi",
+    "price_hhi_hist_pct",
+    "price_hhi_delta5d",
+    "aligned_breadth",
+    "aligned_breadth_hist_pct",
+    "aligned_breadth_delta5d",
+    "aligned_tilt",
+    "aligned_tilt_hist_pct",
+    "aligned_tilt_delta5d",
+    "leadership_current_leader_fraction",
+    "leader_fraction_hist_pct",
+    "leader_fraction_delta5d",
+    # old candidate 仅作最终附注（NOT ground truth），绝不参与选择/判定。
+    "old_candidate_note",
+)
+
+# 2C-B band structural profile 字段（quantile + 方向率）。
+_IST_2CB_PROFILE_FIELDS = (
+    "migration_hist_pct",
+    "leadership_migration",
+    "concentration_price_hhi",
+    "price_hhi_hist_pct",
+    "price_hhi_delta5d",
+    "aligned_breadth",
+    "aligned_breadth_hist_pct",
+    "aligned_breadth_delta5d",
+    "aligned_tilt",
+    "aligned_tilt_hist_pct",
+    "aligned_tilt_delta5d",
+    "leadership_current_leader_fraction",
+    "leader_fraction_hist_pct",
+    "leader_fraction_delta5d",
+    "leadership_previous_leader_count",
+    "leadership_current_leader_count",
+    "leadership_previous_rankable_count",
+    "leadership_current_rankable_count",
+    "member_count",
+)
+
+
+def _lcr_semantic_band(v: Any, anchors: tuple = _IST_2CB_LCR_BANDS) -> str | None:
+    """LCR research band key：lt_0.50 / 0.50_0.75 / 0.75_1.00 / ge_1.00（None → None）。
+
+    只依赖 LCR 数值本身，天然与任何 Type label 无关（P0）。
+    """
+    return _anchor_band_name(_to_fin(v), anchors)
+
+
+def _semantic_band_label(band: str | None) -> str | None:
+    """band key -> semantic label（transparent research bins，非正式 Type）。"""
+    if band is None:
+        return None
+    return _IST_2CB_SEMANTIC_BANDS.get(band)
+
+
+def _previous_leader_bin(count: Any) -> str | None:
+    """previous_leader_count 分箱（检查 LCR 小 denominator 偏置）。"""
+    c = _to_fin(count)
+    if c is None:
+        return None
+    if c <= 3:
+        return f"prev_{int(c)}"
+    if c <= 5:
+        return "prev_4_5"
+    if c <= 10:
+        return "prev_6_10"
+    return "prev_11_plus"
+
+
+def _categorical_band_distribution(rows: list[dict], field: str, bin_fn=None) -> dict:
+    """{value: {count, rate}} 描述性分布；None → "unavailable"（不伪造 0）。"""
+    total = len(rows)
+    counts: dict[str, int] = {}
+    for r in rows:
+        v = r.get(field)
+        key = bin_fn(v) if bin_fn else (str(v) if v is not None else None)
+        k = "unavailable" if key is None else str(key)
+        counts[k] = counts.get(k, 0) + 1
+    return {
+        k: {"count": cnt, "rate": round(cnt / total, 6) if total else None}
+        for k, cnt in sorted(counts.items())
+    }
+
+
+def _family_size_joint(rows: list[dict]) -> dict:
+    """scope_type(family) × size_bucket joint counts/rates（research bins）。"""
+    total = len(rows)
+    matrix: dict[tuple, int] = {}
+    for r in rows:
+        fam = r.get("scope_type")
+        size = r.get("size_bucket")
+        if fam is None or size is None:
+            continue
+        key = (str(fam), str(size))
+        matrix[key] = matrix.get(key, 0) + 1
+    return {
+        f"{fam} x {size}": {
+            "count": cnt,
+            "rate": round(cnt / total, 6) if total else None,
+        }
+        for (fam, size), cnt in sorted(matrix.items())
+    }
+
+
+def _change_sign(v: Any) -> str | None:
+    """delta 方向：up / down / flat（合法 0 → flat；缺失 → None）。"""
+    f = _to_fin(v)
+    if f is None:
+        return None
+    if f > 0:
+        return "up"
+    if f < 0:
+        return "down"
+    return "flat"
+
+
+def _field_direction_summary(vals: list[float], field: str) -> dict:
+    """Quantiles + 方向率；_delta5d 加 up/down rate，_hist_pct 加 high/low rate。
+
+    None 在入口过滤（与 _quantile_profile 一致），空序列方向率为 None 而非 0。
+    """
+    vals = [v for v in vals if v is not None]
+    q = _quantile_profile(vals, _IST_2C_QUANTILES)
+    if field.endswith("_delta5d") and vals:
+        q["up_rate"] = round(sum(1 for v in vals if v > 0) / len(vals), 6)
+        q["down_rate"] = round(sum(1 for v in vals if v < 0) / len(vals), 6)
+    if field.endswith("_hist_pct") and vals:
+        q["high_rate"] = round(sum(1 for v in vals if v >= 0.60) / len(vals), 6)
+        q["low_rate"] = round(sum(1 for v in vals if v < 0.40) / len(vals), 6)
+    return q
+
+
+def _band_structural_profile(rows: list[dict]) -> dict:
+    """每 band 的 structural evidence quantile + 方向率（semantic replay 问题证据）。
+
+    只消费 canonical/raw research evidence；None 过滤；不产 Type label。
+    """
+    out: dict[str, dict] = {}
+    for f in _IST_2CB_PROFILE_FIELDS:
+        vals = [_to_fin(r.get(f)) for r in rows]
+        vals = [v for v in vals if v is not None]
+        out[f] = _field_direction_summary(vals, f)
+    return out
+
+
+def _low_lcr_concentration_breadth_evidence(
+    rows: list[dict], strengthening_share_threshold: float
+) -> dict:
+    """低-LCR 的 Concentration×Breadth 联合证据（检验 LCR-alone 充分性）。
+
+    只做描述性 joint bins：
+      - concentration level band（price_hhi_hist_pct: low/mid/high）× breadth
+        level band（aligned_breadth_hist_pct: low/mid/high）
+      - concentration change sign（price_hhi_delta5d）× breadth change sign
+        （aligned_breadth_delta5d）
+    Concentration 强化定义（transparent research marker，非 freeze）：
+      price_hhi_hist_pct >= 0.60（相对历史高水平）或 price_hhi_delta5d > 0（上升）。
+    若强化份额 >= strengthening_share_threshold，标记 "LCR-alone insufficient"；
+    否则 "LCR-alone candidate holds"；无可用数据时 "no concentration evidence"。
+    只标记、不自动新增公式。
+    """
+    total = len(rows)
+    lvl_joint: dict[tuple, int] = {}
+    chg_joint: dict[tuple, int] = {}
+    conc_strengthening = 0
+    conc_checked = 0
+    for r in rows:
+        conc_lvl = _band_classify(r.get("price_hhi_hist_pct"))
+        breadth_lvl = _band_classify(r.get("aligned_breadth_hist_pct"))
+        if conc_lvl is not None and breadth_lvl is not None:
+            key = (conc_lvl, breadth_lvl)
+            lvl_joint[key] = lvl_joint.get(key, 0) + 1
+        conc_chg = _change_sign(r.get("price_hhi_delta5d"))
+        breadth_chg = _change_sign(r.get("aligned_breadth_delta5d"))
+        if conc_chg is not None and breadth_chg is not None:
+            key = (conc_chg, breadth_chg)
+            chg_joint[key] = chg_joint.get(key, 0) + 1
+        hhi_pct = _to_fin(r.get("price_hhi_hist_pct"))
+        hhi_d5 = _to_fin(r.get("price_hhi_delta5d"))
+        if hhi_pct is not None or hhi_d5 is not None:
+            conc_checked += 1
+            strengthening = (hhi_pct is not None and hhi_pct >= 0.60) or (
+                hhi_d5 is not None and hhi_d5 > 0
+            )
+            if strengthening:
+                conc_strengthening += 1
+    rate = conc_strengthening / conc_checked if conc_checked else None
+    if conc_checked == 0:
+        marker = "no concentration evidence in low-LCR band"
+    elif rate is not None and rate >= strengthening_share_threshold:
+        marker = (
+            "LCR-alone insufficient：低LCR 案例中有显著份额同时 Concentration 强化，"
+            "需 Concentration/Breadth 等非 Leadership 结构事实联合判定"
+        )
+    else:
+        marker = "LCR-alone candidate holds：低LCR 案例中 Concentration 强化占比低"
+    return {
+        "checked": total,
+        "concentration_level_x_breadth_level": {
+            f"{a} x {b}": {
+                "count": cnt,
+                "rate": round(cnt / total, 6) if total else None,
+            }
+            for (a, b), cnt in sorted(lvl_joint.items())
+        },
+        "concentration_change_x_breadth_change": {
+            f"{a} x {b}": {
+                "count": cnt,
+                "rate": round(cnt / total, 6) if total else None,
+            }
+            for (a, b), cnt in sorted(chg_joint.items())
+        },
+        "concentration_strengthening": {
+            "checked": conc_checked,
+            "count": conc_strengthening,
+            "rate": round(rate, 6) if rate is not None else None,
+            "mark_threshold": strengthening_share_threshold,
+            "marker": marker,
+        },
+    }
+
+
+def _old_candidate_note(r: dict) -> str:
+    """old candidate 最终附注（informational only，绝不作 ground truth / 选择依据）。"""
+    flags = []
+    if r.get("research_candidate_Rotating"):
+        flags.append("old-Rotating")
+    if r.get("research_candidate_Fragmenting"):
+        flags.append("old-Fragmenting")
+    if not flags:
+        return "informational: neither old label"
+    return "informational(NOT ground truth): " + "+".join(flags)
+
+
+def _run_internal_structure_type_semantic_validation(
+    dataset_dir: str,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """TYPE-MAPPING Commit 2C-B — High-Migration Semantic Validation（research-only）。
+
+    完全不用 old research_candidate_Rotating/Fragmenting 做样本选择 / 规则优劣 /
+    semantic fit 判定（P0）；只按 migration_hist_pct >= 0.80 抽取 universe，再按
+    LCR research bands 分层，输出 family×size×previous-leader-count 分布、
+    structural evidence quantile/方向率、低-LCR Concentration×Breadth 联合证据、
+    每 band 代表性 replay。不新增 ratio/score、不冻结 threshold、不写 production
+    owner、不进入 Trading Context、不读取未来收益。
+    """
+    cand_results_path = os.path.join(dataset_dir, "research_candidate_results.parquet")
+    cand_summary_path = os.path.join(dataset_dir, "research_candidate_summary.json")
+    if not os.path.exists(cand_results_path) or not os.path.exists(cand_summary_path):
+        logger.error(
+            "[internal-structure-type-semantic-validation] 需 Commit 2 candidate "
+            "results：%s",
+            dataset_dir,
+        )
+        return 2
+    import pyarrow.parquet as pq  # lazy import（与全文件惯例一致）
+
+    rows = pq.read_table(cand_results_path).to_pylist()
+    with open(cand_summary_path, "r", encoding="utf-8") as fh:
+        summary = json.load(fh)
+    source_dataset = summary.get("source_dataset")
+    sha12 = str(summary.get("capture_git_sha", ""))[:12]
+    out_dir = os.path.join(
+        os.path.dirname(dataset_dir), f"review-isdtype-semval-{sha12}-v1"
+    )
+    if dry_run:
+        logger.info(
+            "[internal-structure-type-semantic-validation][dry-run] rows=%d "
+            "source=%s out=%s",
+            len(rows),
+            source_dataset,
+            out_dir,
+        )
+        return 0
+
+    # ---- join Commit 1 mapping leadership counts（同 selection 模式）----
+    mapping_parquet = os.path.join(
+        os.path.dirname(dataset_dir),
+        source_dataset,
+        "internal_structure_type_mapping.parquet",
+    )
+    if not os.path.exists(mapping_parquet):
+        logger.error(
+            "[internal-structure-type-semantic-validation] 缺 mapping parquet：%s",
+            mapping_parquet,
+        )
+        return 2
+    mapping_rows = pq.read_table(mapping_parquet).to_pylist()
+    mapping_index = {
+        (str(r.get("scope_key")), str(r.get("trade_date"))): r for r in mapping_rows
+    }
+    joined = 0
+    for r in rows:
+        src = mapping_index.get((str(r.get("scope_key")), str(r.get("trade_date"))))
+        if src is None:
+            continue
+        for f in _IST_SELECT_LEADERSHIP_COUNT_FIELDS:
+            r[f] = src.get(f)
+        joined += 1
+    if joined != len(rows):
+        logger.warning(
+            "[internal-structure-type-semantic-validation] join 覆盖 %d/%d 行",
+            joined,
+            len(rows),
+        )
+    rows.sort(key=lambda r: (str(r.get("scope_key")), str(r.get("trade_date"))))
+
+    # ---- Stage 2CB-1: 独立抽取 high-Migration universe（migration_hist_pct>=0.80）----
+    universe: list[dict] = []
+    excluded_count = 0
+    for r in rows:
+        mig = _to_fin(r.get("migration_hist_pct"))
+        if mig is None or mig < _IST_2CB_MIGRATION_FLOOR:
+            excluded_count += 1
+            continue
+        r["research_leader_count_preservation"] = _leader_count_preservation(r)
+        r["lcr_band"] = _lcr_semantic_band(r.get("research_leader_count_preservation"))
+        universe.append(r)
+    banded = [r for r in universe if r.get("lcr_band") is not None]
+    unbanded = [r for r in universe if r.get("lcr_band") is None]
+
+    # ---- Stage 2CB-2/3/4/5: LCR band 分层 + 分布 + structural profile + replay ----
+    bands: dict[str, list[dict]] = {}
+    for r in banded:
+        bands.setdefault(r["lcr_band"], []).append(r)
+
+    band_evidence: dict[str, dict] = {}
+    replay: dict[str, list[dict]] = {}
+    for band in _IST_2CB_BAND_ORDER:
+        grow = bands.get(band, [])
+        for r in grow:
+            r["old_candidate_note"] = _old_candidate_note(r)
+        band_evidence[band] = {
+            "n": len(grow),
+            "semantic_label": _semantic_band_label(band),
+            "family_distribution": _categorical_band_distribution(grow, "scope_type"),
+            "size_distribution": _categorical_band_distribution(grow, "size_bucket"),
+            "family_size_joint": _family_size_joint(grow),
+            "previous_leader_count_distribution": _categorical_band_distribution(
+                grow, "leadership_previous_leader_count", _previous_leader_bin
+            ),
+            "lcr_quantiles": _quantile_profile(
+                [_to_fin(r.get("research_leader_count_preservation")) for r in grow],
+                _IST_2C_QUANTILES,
+            ),
+            "structural_profile": _band_structural_profile(grow),
+        }
+        replay[band] = _replay_rows_compact(
+            _pick_spread_replay(grow, _IST_2CB_REPLAY_LIMIT), _IST_2CB_REPLAY_FIELDS
+        )
+
+    # ---- Stage 2CB-6: 低-LCR Concentration×Breadth 联合证据 ----
+    low_lcr_evidence = {
+        band: _low_lcr_concentration_breadth_evidence(
+            bands[band], _IST_2CB_CONC_STRENGTHEN_SHARE
+        )
+        for band in _IST_2CB_LOW_LCR_BANDS
+        if band in bands
+    }
+
+    # ---- summary assembly ----
+    universe_n = len(universe)
+    summary_out = {
+        "type_mapping_commit": "TYPE-MAPPING-COMMIT2C-B-HIGH-MIGRATION-SEMANTIC-VALIDATION",
+        "source_dataset": source_dataset,
+        "capture_git_sha": summary.get("capture_git_sha"),
+        "membership_semantics": summary.get("membership_semantics"),
+        "threshold_freeze_eligible": False,
+        "row_count": len(rows),
+        "migration_floor": _IST_2CB_MIGRATION_FLOOR,
+        "lcr_bands": list(_IST_2CB_LCR_BANDS),
+        "high_migration_universe": {
+            "total_rows": len(rows),
+            "universe_count": universe_n,
+            "universe_rate": round(universe_n / len(rows), 6) if rows else None,
+            "excluded_count": excluded_count,
+            "banded_count": len(banded),
+            "unbanded_lcr_none_count": len(unbanded),
+            "band_counts": {b: len(bands.get(b, [])) for b in _IST_2CB_BAND_ORDER},
+        },
+        "old_label_usage_note": (
+            "P0（prompt.md §5/§10）：old research_candidate_Rotating/Fragmenting "
+            "不参与本轮的样本选择 / 规则优劣判断 / semantic fit 判定，仅作为 replay "
+            "最终附注 old_candidate_note 供人工对照，绝不作 ground truth。"
+        ),
+        "band_evidence": band_evidence,
+        "low_lcr_joint_evidence": low_lcr_evidence,
+        "hypothesis_note": (
+            "2C-B（prompt.md §6-§10）：彻底不把 old Rotating/Fragmenting 当答案；"
+            "只抽取 migration_hist_pct>=0.80 的 high-Migration universe，仅按 LCR "
+            "research bands（<0.50 / 0.50–0.75 / 0.75–1.00 / >=1.00）分层。semantic "
+            "replay 核心问题：低 LCR 是真正结构失序（Breadth/Concentration 同时失序）"
+            "还是新 Leadership 更集中 / Core-led？高 LCR 是否有序换帅？0.50–1.00 是否"
+            "存在自然过渡带？低-LCR 的 Concentration×Breadth 联合证据用于检验 "
+            "LCR-alone 是否足以表达 Fragmenting；只输出描述性 bins 与 marker，不自动"
+            "新增公式、不冻结 threshold、不定义正式 Type。"
+        ),
+    }
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(
+        os.path.join(out_dir, "semantic_validation_summary.json"),
+        "w",
+        encoding="utf-8",
+    ) as fh:
+        json.dump(summary_out, fh, ensure_ascii=False, indent=2, default=_json_default)
+    with open(
+        os.path.join(out_dir, "representative_replay.json"),
+        "w",
+        encoding="utf-8",
+    ) as fh:
+        json.dump(replay, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    manifest = {
+        "dataset_id": f"review-isdtype-semval-{sha12}-v1",
+        "source_dataset": source_dataset,
+        "source_candidate_id": summary.get("dataset_id"),
+        "capture_git_sha": summary.get("capture_git_sha"),
+        "membership_semantics": "current_static_research_proxy",
+        "threshold_freeze_eligible": False,
+        "commit": "TYPE-MAPPING-COMMIT2C-B-HIGH-MIGRATION-SEMANTIC-VALIDATION",
+        "row_count": len(rows),
+        "high_migration_universe_count": universe_n,
+        "band_counts": {b: len(bands.get(b, [])) for b in _IST_2CB_BAND_ORDER},
+        "replay_bucket_counts": {b: len(replay.get(b, [])) for b in _IST_2CB_BAND_ORDER},
+    }
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    # ---- console summary ----
+    print(f"[internal-structure-type-semantic-validation] out_dir={out_dir}")
+    print(
+        f"--- 2CB-1 high-Migration universe: floor={_IST_2CB_MIGRATION_FLOOR} "
+        f"total={len(rows)} uni={universe_n} "
+        f"({round(universe_n / len(rows), 4) if rows else None}) "
+        f"banded={len(banded)} unbanded={len(unbanded)} ---"
+    )
+    print("--- 2CB-2/3 LCR band 分布 + 小 denominator 检查 ---")
+    for band in _IST_2CB_BAND_ORDER:
+        if band not in bands:
+            continue
+        be = band_evidence[band]
+        prev = be["previous_leader_count_distribution"]
+        lq = be["lcr_quantiles"]
+        fam = be["family_distribution"]
+        print(
+            f"  {band}: n={be['n']} LCR p25/p50/p75="
+            f"{lq['p25']}/{lq['p50']}/{lq['p75']}"
+        )
+        print(
+            "    prev-leader: "
+            + ", ".join(f"{k}={v['count']}" for k, v in prev.items())
+        )
+        print(
+            "    family: "
+            + ", ".join(f"{k}={v['count']}" for k, v in fam.items())
+        )
+    print("--- 2CB-6 低-LCR Concentration×Breadth 联合证据 ---")
+    for band, ev in low_lcr_evidence.items():
+        cs = ev["concentration_strengthening"]
+        print(
+            f"  {band}: checked={cs['checked']} strengthening rate={cs['rate']} "
+            f"marker={cs['marker']}"
+        )
+    print("--- 2CB-4 replay buckets ---")
+    for band in _IST_2CB_BAND_ORDER:
+        print(f"  {band}: picked={len(replay.get(band, []))}")
+    return 0
+
+
 def _run_replay_l1(
     dataset_dir: str,
     view_name: str,
@@ -9296,6 +9847,21 @@ async def _run(args: argparse.Namespace) -> int:
             )
             return 2
         return _run_internal_structure_type_fragmenting_redesign(
+            args.dataset_dir,
+            dry_run=args.dry_run,
+        )
+    if args.mode == "internal-structure-type-semantic-validation":
+        if not args.dataset_dir:
+            logger.error(
+                "[internal-structure-type-semantic-validation] --dataset-dir 为必填"
+            )
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[internal-structure-type-semantic-validation] 禁 --scope-type/--scope-key"
+            )
+            return 2
+        return _run_internal_structure_type_semantic_validation(
             args.dataset_dir,
             dry_run=args.dry_run,
         )

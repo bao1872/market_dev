@@ -39,31 +39,49 @@ from scripts.review_scope_dynamics_probe import (
     _IST_2C_LCR_STRICT,
     _IST_2C_ANCHORS,
     _IST_2C_QUANTILES,
+    _IST_2CB_BAND_ORDER,
+    _IST_2CB_CONC_STRENGTHEN_SHARE,
+    _IST_2CB_LCR_BANDS,
+    _IST_2CB_LOW_LCR_BANDS,
+    _IST_2CB_MIGRATION_FLOOR,
+    _IST_2CB_REPLAY_FIELDS,
+    _IST_2CB_REPLAY_LIMIT,
+    _IST_2CB_SEMANTIC_BANDS,
+    _IST_2CB_PROFILE_FIELDS,
     _aligned_breadth,
     _aligned_tilt,
     _anchor_band_name,
     _balanced_central_sensitivity,
     _band_classify,
+    _band_structural_profile,
     _board_to_family,
     _candidate_configs,
+    _categorical_band_distribution,
+    _change_sign,
     _compute_aligned_features,
     _consecutive_runs,
     _delta5d,
     _evaluate_candidate_variant,
     _evaluate_rf2_variant,
     _exit_minus_entrant,
+    _family_size_joint,
+    _field_direction_summary,
     _hist_pct,
     _identity_gate_violations,
     _joint_band_counts,
+    _lcr_semantic_band,
     _leader_count_preservation,
+    _low_lcr_concentration_breadth_evidence,
     _multi_hit_and_unmatched,
     _nested_variant,
     _numeric_group_stats,
+    _old_candidate_note,
     _pairwise_overlap,
     _percentile_sorted,
     _pick_joint_replay,
     _pick_rf2_replay,
     _pick_spread_replay,
+    _previous_leader_bin,
     _quantile_profile,
     _ready_unmatched_band_distribution,
     _reference_configs,
@@ -71,6 +89,7 @@ from scripts.review_scope_dynamics_probe import (
     _rotate_fragment_partition,
     _select_replay_picks,
     _sensitivity_quadrants,
+    _semantic_band_label,
     _sign_direction,
     _size_bucket_for_count,
     _spread_stability,
@@ -1377,4 +1396,218 @@ def test_pick_rf2_replay_legal_zero_not_swallowed():
     picked = _pick_rf2_replay([row], True, _IST_2C_LCR_REFERENCE, 1)
     assert len(picked) == 1
     assert picked[0]["scope_key"] == "z"
+
+
+# ---------------------------------------------------------------------------
+# TYPE-MAPPING Commit 2C-B — HIGH-MIGRATION SEMANTIC VALIDATION helpers
+# ---------------------------------------------------------------------------
+# P0（prompt.md §5/§10）：old research_candidate_Rotating/Fragmenting 不得当
+# ground truth——不参与样本选择 / 规则优劣 / semantic fit 判定。以下测试锁定
+# band 分层、分布、低-LCR 联合证据、old_candidate_note 附注等纯函数语义。
+
+
+def test_2cb_constants_sane():
+    assert _IST_2CB_MIGRATION_FLOOR == 0.80
+    assert _IST_2CB_LCR_BANDS == (0.50, 0.75, 1.00)
+    assert _IST_2CB_BAND_ORDER == ("lt_0.50", "0.50_0.75", "0.75_1.00", "ge_1.00")
+    assert _IST_2CB_LOW_LCR_BANDS == ("lt_0.50", "0.50_0.75")
+    assert _IST_2CB_REPLAY_LIMIT > 0
+    assert set(_IST_2CB_SEMANTIC_BANDS) == set(_IST_2CB_BAND_ORDER)
+
+
+def test_lcr_semantic_band_boundaries():
+    assert _lcr_semantic_band(0.49) == "lt_0.50"
+    assert _lcr_semantic_band(0.50) == "0.50_0.75"
+    assert _lcr_semantic_band(0.75) == "0.75_1.00"
+    assert _lcr_semantic_band(1.00) == "ge_1.00"
+    assert _lcr_semantic_band(2.5) == "ge_1.00"
+    assert _lcr_semantic_band(None) is None
+    assert _lcr_semantic_band("not-a-number") is None
+
+
+def test_lcr_semantic_band_independent_of_old_labels():
+    # P0：band 只依赖 LCR 数值本身，与 old candidate 标志完全无关。
+    for old_rot, old_frag in [(False, False), (True, False), (True, True)]:
+        row = {
+            "research_leader_count_preservation": 0.4,
+            "research_candidate_Rotating": old_rot,
+            "research_candidate_Fragmenting": old_frag,
+        }
+        assert _lcr_semantic_band(row["research_leader_count_preservation"]) == (
+            "lt_0.50"
+        )
+
+
+def test_semantic_band_label():
+    assert _semantic_band_label("lt_0.50") == "strong_contraction"
+    assert _semantic_band_label("0.50_0.75") == "mild_contraction"
+    assert _semantic_band_label("0.75_1.00") == "mild_preserve"
+    assert _semantic_band_label("ge_1.00") == "preserved"
+    assert _semantic_band_label(None) is None
+    assert _semantic_band_label("bogus") is None
+
+
+def test_previous_leader_bin_boundaries():
+    assert _previous_leader_bin(1) == "prev_1"
+    assert _previous_leader_bin(3) == "prev_3"
+    assert _previous_leader_bin(4) == "prev_4_5"
+    assert _previous_leader_bin(5) == "prev_4_5"
+    assert _previous_leader_bin(6) == "prev_6_10"
+    assert _previous_leader_bin(10) == "prev_6_10"
+    assert _previous_leader_bin(11) == "prev_11_plus"
+    assert _previous_leader_bin(50) == "prev_11_plus"
+    assert _previous_leader_bin(None) is None
+
+
+def test_categorical_band_distribution():
+    rows = [
+        {"f": "a"},
+        {"f": "a"},
+        {"f": "b"},
+        {"f": None},
+    ]
+    out = _categorical_band_distribution(rows, "f")
+    assert out["a"]["count"] == 2
+    assert out["a"]["rate"] == pytest.approx(0.5)
+    assert out["b"]["count"] == 1
+    assert out["b"]["rate"] == pytest.approx(0.25)
+    assert out["unavailable"]["count"] == 1
+    assert out["unavailable"]["rate"] == pytest.approx(0.25)
+    assert _categorical_band_distribution([], "f") == {}
+
+
+def test_family_size_joint():
+    rows = [
+        {"scope_type": "概念", "size_bucket": "small"},
+        {"scope_type": "概念", "size_bucket": "small"},
+        {"scope_type": "行业", "size_bucket": "medium"},
+        {"scope_type": "行业", "size_bucket": None},  # 缺 size → 跳过
+        {"scope_type": None, "size_bucket": "large"},  # 缺 family → 跳过
+    ]
+    out = _family_size_joint(rows)
+    assert out["概念 x small"]["count"] == 2
+    assert out["概念 x small"]["rate"] == pytest.approx(2 / 5)
+    assert out["行业 x medium"]["count"] == 1
+    assert len(out) == 2
+
+
+def test_change_sign():
+    assert _change_sign(1.5) == "up"
+    assert _change_sign(-0.2) == "down"
+    assert _change_sign(0.0) == "flat"  # 合法 0 → flat，不是缺失
+    assert _change_sign(0) == "flat"
+    assert _change_sign(None) is None
+
+
+def test_field_direction_summary_delta5d():
+    vals = [1.0, -1.0, 0.0, 2.0, -3.0, None]
+    out = _field_direction_summary(vals, "price_hhi_delta5d")
+    assert out["count"] == 5  # None 过滤
+    assert out["up_rate"] == pytest.approx(2 / 5)
+    assert out["down_rate"] == pytest.approx(2 / 5)
+    assert "high_rate" not in out  # _delta5d 不输出 hist 方向率
+
+
+def test_field_direction_summary_hist_pct():
+    vals = [0.70, 0.30, 0.50, 0.90, 0.10, None]
+    out = _field_direction_summary(vals, "price_hhi_hist_pct")
+    assert out["count"] == 5
+    assert out["high_rate"] == pytest.approx(2 / 5)  # >=0.60
+    assert out["low_rate"] == pytest.approx(2 / 5)  # <0.40
+    assert "up_rate" not in out
+
+
+def test_band_structural_profile_none_filtered():
+    rows = [
+        {"concentration_price_hhi": 0.5, "aligned_breadth": 0.3, "member_count": 5},
+        {"concentration_price_hhi": 0.9, "aligned_breadth": None, "member_count": 8},
+    ]
+    out = _band_structural_profile(rows)
+    # 全部 profile 字段都出现（空序列 p 为 None）
+    for f in _IST_2CB_PROFILE_FIELDS:
+        assert f in out
+        assert "count" in out[f]
+    assert out["concentration_price_hhi"]["count"] == 2
+    assert out["aligned_breadth"]["count"] == 1  # None 过滤
+    assert out["aligned_breadth"]["p50"] == pytest.approx(0.3)
+    assert out["member_count"]["count"] == 2
+
+
+def test_low_lcr_concentration_breadth_evidence_no_data():
+    out = _low_lcr_concentration_breadth_evidence([], 0.25)
+    assert out["checked"] == 0
+    assert out["concentration_strengthening"]["checked"] == 0
+    assert out["concentration_strengthening"]["rate"] is None
+    assert (
+        out["concentration_strengthening"]["marker"]
+        == "no concentration evidence in low-LCR band"
+    )
+
+
+def test_low_lcr_evidence_insufficient_marker():
+    # 全部 hhi_pct >= 0.60（Concentration 强化）→ LCR-alone insufficient。
+    rows = [
+        {"price_hhi_hist_pct": 0.75, "aligned_breadth_hist_pct": 0.80},
+        {"price_hhi_hist_pct": 0.90},
+    ]
+    out = _low_lcr_concentration_breadth_evidence(rows, 0.25)
+    assert out["concentration_strengthening"]["checked"] == 2
+    assert out["concentration_strengthening"]["count"] == 2
+    assert out["concentration_strengthening"]["rate"] == pytest.approx(1.0)
+    assert "LCR-alone insufficient" in out["concentration_strengthening"]["marker"]
+    # 水平联合：只有第 1 行同时有 concentration+breadth → high x high count == 1
+    # （第 2 行缺 breadth → 不参与 level joint）
+    assert out["concentration_level_x_breadth_level"]["high x high"]["count"] == 1
+
+
+def test_low_lcr_evidence_holds_marker():
+    # 强化占比低于阈值 → LCR-alone candidate holds。
+    rows = [
+        {"price_hhi_hist_pct": 0.30},  # low，不强化
+        {"price_hhi_hist_pct": 0.45},  # mid，不强化
+        {"price_hhi_delta5d": 0.01},   # 强化（delta>0）
+        {"price_hhi_delta5d": -0.1},   # 不强化
+        {"price_hhi_delta5d": 0.0},    # 合法 0 → flat，不算强化
+    ]
+    out = _low_lcr_concentration_breadth_evidence(rows, 0.25)
+    cs = out["concentration_strengthening"]
+    assert cs["checked"] == 5
+    assert cs["count"] == 1  # 只有 hhi_delta5d=0.01 强化
+    assert "LCR-alone candidate holds" in cs["marker"]
+
+
+def test_low_lcr_evidence_change_joint_skips_none():
+    rows = [
+        {"price_hhi_delta5d": 0.5, "aligned_breadth_delta5d": -0.2},
+        {"price_hhi_delta5d": None, "aligned_breadth_delta5d": 0.1},
+    ]
+    out = _low_lcr_concentration_breadth_evidence(rows, 0.25)
+    chg = out["concentration_change_x_breadth_change"]
+    assert chg["up x down"]["count"] == 1
+    assert len(chg) == 1
+
+
+def test_old_candidate_note_informational_only():
+    r_none = {"research_candidate_Rotating": False, "research_candidate_Fragmenting": False}
+    assert "neither old label" in _old_candidate_note(r_none)
+    r_rot = {"research_candidate_Rotating": True, "research_candidate_Fragmenting": False}
+    note = _old_candidate_note(r_rot)
+    assert "old-Rotating" in note
+    assert "NOT ground truth" in note
+    r_both = {"research_candidate_Rotating": True, "research_candidate_Fragmenting": True}
+    assert "old-Rotating" in _old_candidate_note(r_both)
+    assert "old-Fragmenting" in _old_candidate_note(r_both)
+
+
+def test_2cb_replay_fields_no_forbidden_cols():
+    # 2C-B replay 只消费 canonical/raw research evidence；不得包含未来收益 / Type label /
+    # 把 old candidate 作为判定列（只允许 informational 附注 old_candidate_note）。
+    assert "old_candidate_note" in _IST_2CB_REPLAY_FIELDS
+    assert "research_candidate_Rotating" not in _IST_2CB_REPLAY_FIELDS
+    assert "research_candidate_Fragmenting" not in _IST_2CB_REPLAY_FIELDS
+    for f in _IST_2CB_REPLAY_FIELDS:
+        assert "return" not in f.lower()
+        assert "future" not in f.lower()
+        assert "internal_structure_type" not in f.lower()
+
 
