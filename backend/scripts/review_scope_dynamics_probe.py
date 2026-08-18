@@ -3752,19 +3752,34 @@ def _extract_event_cells(obs: dict, event_type: str) -> dict[str, dict]:
     all directions/levels for an event type.  That was a SECOND aggregation the
     production Core never defines — a member firing BOS_up_Swing AND BOS_up_Internal
     on the same day was counted twice.  Probe only collects evidence; it must not
-    invent business formulas.  This returns the exact cells produced by the Core
-    (``structure.events.cells.leveled.<EVENT>_<dir>_<level>``) with their own
-    ``event_count`` / ``member_count`` / ``member_ratio``.
+    invent business formulas.
+
+    AUDIT-FIX-01B (P2-1): the Core stores cells in TWO formal buckets
+    (``scope_observation._aggregate_structure_events``):
+      * ``cells.leveled``  — BOS / CHoCH / OB_* with key ``<EVENT>_<dir>_<level>``
+      * ``cells.extreme``  — EQH / EQL with key ``<EVENT>`` (no dir/level)
+    The extractor mirrors BOTH, returning the exact cell dicts verbatim (no
+    aggregation).  A ``None``/absent subtree yields ``{}`` (honest, never coerced).
     """
     events = obs.get("structure", {}).get("events")
     if not isinstance(events, dict):
         return {}
     cells = events.get("cells", {})
-    leveled = cells.get("leveled", {})
-    if not isinstance(leveled, dict):
+    if not isinstance(cells, dict):
         return {}
     prefix = f"{event_type}_"
-    return {k: v for k, v in leveled.items() if k.startswith(prefix)}
+    out: dict[str, dict] = {}
+    leveled = cells.get("leveled", {})
+    if isinstance(leveled, dict):
+        for k, v in leveled.items():
+            if k.startswith(prefix):
+                out[k] = v
+    extreme = cells.get("extreme", {})
+    if isinstance(extreme, dict):
+        # extreme cells are keyed by the bare event type (EQH / EQL).
+        if event_type in extreme:
+            out[event_type] = extreme[event_type]
+    return out
 
 
 def _extract_l1_fact(obs: dict, path: str) -> Any:
@@ -3908,6 +3923,7 @@ def _run_semantic_matrix(
     print(hdr)
     print("-" * len(hdr))
     n_pass = n_unavail = n_gap = n_na = n_algo = 0
+    n_coverage_open = 0
     n_unexpected_zero = 0
     gaps: list[str] = []
     for row in _L1_RTM_ROWS:
@@ -3953,16 +3969,18 @@ def _run_semantic_matrix(
         source_ready = bool(avail and avail > 0)
 
         # Event facts: coverage contract is OPEN → COVERAGE_CONTRACT_OPEN (never
-        # final PASS).  Evidence shown is the FORMAL cells; no Σ member_ratio.
+        # final PASS).  Evidence is the FORMAL cells (leveled + extreme), shown
+        # verbatim (actual), NOT a Σ member_ratio.
         if row.get("event"):
             val = cells
             status = "COVERAGE_CONTRACT_OPEN"
-            n_algo += 1
+            n_coverage_open += 1
             gap = "event-coverage-OPEN"
             actual = _fmt_rtm_value(val)
             print(f"{row['fact']:24} {row['prd'][:22]:22} {row['source'][:20]:20} "
                   f"{row['aggregation'][:26]:26} {str(denom_val):10} "
                   f"{'n/a':8} {ed:10} {status:20} {gap}")
+            print(f"    ↳ cells: {actual}")
             if row.get("note"):
                 print(f"    ↳ note: {row['note']}")
             continue
@@ -4025,9 +4043,10 @@ def _run_semantic_matrix(
         if row.get("note"):
             print(f"    ↳ note: {row['note']}")
 
-    print("\n--- RTM five-state summary ---")
+    print("\n--- RTM status summary ---")
     print(f"PASS={n_pass}  SOURCE_UNAVAILABLE={n_unavail}  GAP={n_gap} "
-          f"NOT_APPLICABLE={n_na}  ALGORITHM_MAPPING_REQUIRED={n_algo}")
+          f"NOT_APPLICABLE={n_na}  ALGORITHM_MAPPING_REQUIRED={n_algo}  "
+          f"COVERAGE_CONTRACT_OPEN={n_coverage_open}")
     print(f"unavailable→0 coercion count = {n_unexpected_zero}  (must be 0)")
     if gaps:
         print("\n--- Round 1 GAP findings (recorded, NOT fixed) ---")

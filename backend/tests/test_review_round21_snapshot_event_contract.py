@@ -84,12 +84,12 @@ def test_snapshot_gate_no_consumable_run_returns_empty(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _obs_with_event_cells(cells: dict) -> dict:
+def _obs_with_event_cells(cells: dict, extreme: dict | None = None) -> dict:
     return {
         "structure": {
             "events": {
                 "denominator": 100,
-                "cells": {"leveled": cells},
+                "cells": {"leveled": cells, "extreme": extreme or {}},
             }
         }
     }
@@ -123,3 +123,49 @@ def test_event_rtm_absent_events_returns_empty() -> None:
     """EVENT-RTM: no events subtree -> empty cells (no fake 0, no crash)."""
     assert _extract_event_cells({}, "BOS") == {}
     assert _extract_event_cells({"structure": {}}, "BOS") == {}
+
+
+def test_event_rtm_extreme_01_eqh_reads_from_extreme() -> None:
+    """EVENT-RTM-EXTREME-01: EQH stored in cells.extreme -> extractor returns it.
+
+    AUDIT-FIX-01B (P2-1): the Core stores EQH/EQL in ``cells.extreme`` (keyed by the
+    bare event type), NOT ``cells.leveled``.  The extractor must mirror both buckets.
+    """
+    obs = _obs_with_event_cells(
+        {},  # no leveled cells
+        extreme={"EQH": {"event_count": 49, "member_count": 49, "member_ratio": 0.0136}},
+    )
+    eqh = _extract_event_cells(obs, "EQH")
+    assert eqh == {"EQH": {"event_count": 49, "member_count": 49, "member_ratio": 0.0136}}
+
+
+def test_event_rtm_extreme_02_eql_reads_from_extreme() -> None:
+    """EVENT-RTM-EXTREME-02: EQL stored in cells.extreme -> extractor returns it."""
+    obs = _obs_with_event_cells(
+        {"BOS_up_Swing": {"event_count": 1, "member_count": 1, "member_ratio": 0.01}},
+        extreme={"EQL": {"event_count": 3, "member_count": 3, "member_ratio": 0.0008}},
+    )
+    eql = _extract_event_cells(obs, "EQL")
+    assert eql == {"EQL": {"event_count": 3, "member_count": 3, "member_ratio": 0.0008}}
+    # leveled and extreme buckets are disjoint — BOS never appears in an EQH read.
+    assert "BOS_up_Swing" not in eql
+
+
+def test_event_rtm_bucket_isolation() -> None:
+    """EVENT-RTM-EXTREME-03: BOS (leveled) and EQH (extreme) never cross buckets."""
+    obs = _obs_with_event_cells(
+        {"BOS_up_Internal": {"event_count": 30, "member_count": 30, "member_ratio": 0.01}},
+        extreme={"EQH": {"event_count": 49, "member_count": 49, "member_ratio": 0.0136}},
+    )
+    assert set(_extract_event_cells(obs, "BOS").keys()) == {"BOS_up_Internal"}
+    assert set(_extract_event_cells(obs, "EQH").keys()) == {"EQH"}
+    # reading EQH must NOT include the leveled BOS cell, and vice versa
+    assert "BOS_up_Internal" not in _extract_event_cells(obs, "EQH")
+    assert "EQH" not in _extract_event_cells(obs, "BOS")
+
+
+def test_event_rtm_extreme_absent_returns_empty() -> None:
+    """EVENT-RTM-EXTREME-04: no extreme bucket -> EQH/EQL empty (no fake 0)."""
+    obs = _obs_with_event_cells({"BOS_up_Swing": {"event_count": 1, "member_count": 1}})
+    assert _extract_event_cells(obs, "EQH") == {}
+    assert _extract_event_cells(obs, "EQL") == {}
