@@ -2319,17 +2319,41 @@ def _data_quality_summary(raw_dir: str, lineage_dir: str, manifest: dict) -> dic
     )
 
     # ---- coverage_report：analysis 窗口 State T/T1 与 Bar T 覆盖率（只报告，不作 gate） ----
+    # P1-A（审查修复）：coverage 分母 = review_fact_universe（SH/SZ/BJ 全 A 股），
+    #   而非 D1 全量 instruments（D1 含非 A 股维度，会系统性低估 coverage）。
+    # P1-B（审查修复）：T-1 用 raw/trading_calendar 构造 canonical predecessor，
+    #   与 production Review `_build_t1_map()` 语义一致，替代数组位置 analysis_axis[i-1]。
     analysis_axis = list((manifest.get("date_ranges") or {}).get("analysis_axis") or [])
     analysis_set = set(analysis_axis)
     n_dates = len(analysis_axis)
+
+    fact_universe = int(
+        (
+            (manifest.get("source_readiness") or {})
+            .get("first_pyramid_history", {})
+            .get("coverage", {})
+            .get("review_fact_universe")
+        )
+        or instruments
+    )
+    calendar_dates = sorted(
+        {
+            str(r.get("trade_date"))[:10]
+            for r in _iter_jsonl_gz(os.path.join(raw_dir, "trading_calendar.jsonl.gz"))
+            if r.get("is_trading_day") is True and str(r.get("market")) == "A"
+        }
+    )
+    prev_by_date: dict[str, str | None] = {}
+    for i, d in enumerate(calendar_dates):
+        prev_by_date[d] = calendar_dates[i - 1] if i > 0 else None
 
     state_date_count: Counter = Counter()
     bar_date_count: Counter = Counter()
     state_dates_by_instrument: dict[str, set] = {}
     for r in _iter_jsonl_gz(os.path.join(raw_dir, "first_pyramid_daily_state.jsonl.gz")):
         td = str(r.get("trade_date"))[:10]
+        state_date_count[td] += 1
         if td in analysis_set:
-            state_date_count[td] += 1
             state_dates_by_instrument.setdefault(str(r["instrument_id"]), set()).add(td)
     for r in _iter_jsonl_gz(os.path.join(raw_dir, "bars_daily.jsonl.gz")):
         td = str(r.get("trade_date"))[:10]
@@ -2339,12 +2363,13 @@ def _data_quality_summary(raw_dir: str, lineage_dir: str, manifest: dict) -> dic
     def _denom(n: int, base: int) -> float:
         return float(n) / base if base else 0.0
 
-    state_t_cov = [_denom(state_date_count.get(T, 0), instruments) for T in analysis_axis]
+    state_t_cov = [_denom(state_date_count.get(T, 0), fact_universe) for T in analysis_axis]
     state_t1_cov = [
-        _denom(state_date_count.get(analysis_axis[i - 1], 0), instruments)
-        for i in range(1, len(analysis_axis))
+        _denom(state_date_count.get(prev_by_date.get(T), 0), fact_universe)
+        for T in analysis_axis
     ]
-    bar_exact_t_cov = [_denom(bar_date_count.get(T, 0), instruments) for T in analysis_axis]
+    missing_t1 = [T for T in analysis_axis if prev_by_date.get(T) is None]
+    bar_exact_t_cov = [_denom(bar_date_count.get(T, 0), fact_universe) for T in analysis_axis]
     member_state_cov = (
         [len(s) / n_dates for s in state_dates_by_instrument.values()]
         if n_dates
@@ -2362,6 +2387,7 @@ def _data_quality_summary(raw_dir: str, lineage_dir: str, manifest: dict) -> dic
 
     summary = {
         "instruments": instruments,
+        "review_fact_universe": fact_universe,
         "active_boards": len(active),
         "concept_boards": len(concept),
         "industry_boards": len(industry),
@@ -2415,6 +2441,7 @@ def _data_quality_summary(raw_dir: str, lineage_dir: str, manifest: dict) -> dic
                 "p50": _pct(sorted(bar_counts.values()), 50),
                 "p90": _pct(sorted(bar_counts.values()), 90),
             },
+            "missing_t1_analysis_dates": missing_t1,
         },
         "prd_readiness": prd_readiness,
     }
@@ -2583,6 +2610,7 @@ def _dataset_validate(dataset_dir: str) -> int:
         fh.write("\n")
     print("data quality summary:")
     print(f"  instruments            : {summary['instruments']}")
+    print(f"  review_fact_universe   : {summary['review_fact_universe']}")
     print(f"  active/concept/industry: {summary['active_boards']}/{summary['concept_boards']}/{summary['industry_boards']}")
     print(f"  union_members          : {summary['union_members']}")
     print(f"  membership_overlap     : {summary['membership_overlap']}")

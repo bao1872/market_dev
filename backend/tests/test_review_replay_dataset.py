@@ -29,6 +29,7 @@ from scripts.review_scope_dynamics_probe import (
     _write_parquet,
     _boards_select,
     _memberships_select,
+    _data_quality_summary,
     _dataset_validate,
     _rows_to_parquet,
     _sha256_file,
@@ -571,3 +572,167 @@ def test_rows_to_parquet_batch_and_decimal_stem(tmp_path):
     assert pa.types.is_decimal(fields["adj_factor"])
     t = pq.read_table(info["path"])
     assert t.num_rows == 2
+
+
+# ---------------------------------------------------------------------------
+# DATASET-2.1 回归（ref/优化.md P1-A/P1-B coverage 修复）
+# ---------------------------------------------------------------------------
+
+
+def _write_quality_summary_input(
+    dataset,
+    *,
+    instruments_n: int,
+    fact_universe: int,
+    analysis_axis: list[str],
+    calendar_rows: list[dict],
+    state_by_date: dict[str, int],
+    bar_by_date: dict[str, int],
+) -> dict:
+    """写 `_data_quality_summary` 所需的最小合成 raw 文件 + manifest。
+
+    PURE_UNIT：全部本地合成，不连库。返回 manifest（已含
+    `source_readiness.first_pyramid_history.coverage.review_fact_universe`）。
+    """
+    raw = dataset / "raw"
+    lineage = dataset / "lineage"
+    raw.mkdir(parents=True)
+    lineage.mkdir()
+
+    _write_jsonl_gz(
+        str(raw / "instruments.jsonl.gz"),
+        [
+            {
+                "id": f"i{n}", "symbol": f"{n:06d}", "name": f"n{n}", "market": "SH",
+                "pinyin_initials": "X", "status": "active", "listing_date": "2000-01-01",
+                "total_share": "1", "float_share": "1", "share_as_of": analysis_axis[0],
+            }
+            for n in range(instruments_n)
+        ],
+    )
+    _write_jsonl_gz(
+        str(raw / "boards.jsonl.gz"),
+        [
+            {
+                "id": "b1", "external_code": "C001", "name": "概念A", "type": "concept",
+                "taxonomy": "custom", "source": "qstock", "taxonomy_version": "v1",
+                "taxonomy_compatibility_key": "k1", "hierarchy_level": 1,
+                "parent_board_id": None, "is_active": True, "membership_version": "v1",
+                "updated_at": analysis_axis[0],
+            }
+        ],
+    )
+    _write_jsonl_gz(
+        str(raw / "board_memberships_current_snapshot.jsonl.gz"),
+        [{"board_id": "b1", "instrument_id": "i0", "updated_at": analysis_axis[0]}],
+    )
+    _write_jsonl_gz(str(raw / "trading_calendar.jsonl.gz"), calendar_rows)
+    state_rows = []
+    for d, n in state_by_date.items():
+        for k in range(n):
+            state_rows.append(
+                {
+                    "instrument_id": f"i{k}", "trade_date": d, "algorithm_version": "v2",
+                    "input_hash": "h", "source_history_run_id": "r1",
+                    "history_contract_version": "review-history-v2", "state_payload": {},
+                }
+            )
+    _write_jsonl_gz(str(raw / "first_pyramid_daily_state.jsonl.gz"), state_rows)
+    bar_rows = []
+    for d, n in bar_by_date.items():
+        for k in range(n):
+            bar_rows.append(
+                {
+                    "instrument_id": f"i{k}", "trade_date": d, "open": "1.0", "high": "1.0",
+                    "low": "1.0", "close": "1.0", "volume": "1", "amount": "1",
+                    "adj_factor": "1.00000000",
+                }
+            )
+    _write_jsonl_gz(str(raw / "bars_daily.jsonl.gz"), bar_rows)
+    _write_jsonl_gz(
+        str(raw / "first_pyramid_events.jsonl.gz"),
+        [{"event_type": "pyramid", "event_time": f"{analysis_axis[0]}T09:30:00+08:00"}],
+    )
+    _write_jsonl_gz(
+        str(raw / "stock_feature_snapshots_asof.jsonl.gz"),
+        [{"instrument_id": "i0", "source_run_id": None}],
+    )
+    _write_jsonl_gz(str(lineage / "stock_feature_snapshot_runs.jsonl.gz"), [])
+    _write_jsonl_gz(str(lineage / "first_pyramid_history_runs.jsonl.gz"), [{"id": "r1"}])
+
+    m = _make_manifest()
+    m["date_ranges"] = {"analysis_axis": analysis_axis}
+    fph = m["source_readiness"]["first_pyramid_history"]
+    fph["coverage"]["review_fact_universe"] = fact_universe
+    return m
+
+
+def test_data_quality_summary_p1a_denominator_uses_fact_universe(tmp_path):
+    """P1-A：coverage 分母 = review_fact_universe（≠ D1 instruments 全量）。"""
+    dataset = tmp_path / "ds"
+    analysis = ["2025-01-06", "2025-01-07", "2025-01-08"]
+    m = _write_quality_summary_input(
+        dataset,
+        instruments_n=10,          # D1 全量 = 10
+        fact_universe=5,           # review_fact_universe = 5（SH/SZ/BJ 全 A 股）
+        analysis_axis=analysis,
+        calendar_rows=[
+            {"trade_date": d, "is_trading_day": True, "market": "A",
+             "source": "manual", "status": "closed", "verified_at": d}
+            for d in ["2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08"]
+        ],
+        state_by_date={"2025-01-06": 5, "2025-01-07": 5, "2025-01-08": 0},
+        bar_by_date={"2025-01-06": 5, "2025-01-07": 0, "2025-01-08": 5},
+    )
+    s = _data_quality_summary(str(dataset / "raw"), str(dataset / "lineage"), m)
+    assert s["instruments"] == 10
+    assert s["review_fact_universe"] == 5
+    cov = s["coverage_report"]
+    # 旧 bug：分母用 instruments=10 → state p50=0.5；修复后 5/5=1.0
+    assert cov["state_t_coverage_by_date"]["p50"] == 1.0
+    assert cov["state_t_coverage_by_date"]["max"] == 1.0
+    # bar：T1=5/5、T2=0、T3=5/5 → sorted [0,1,1]，p50/max=1.0
+    assert cov["bar_exact_t_coverage"]["p50"] == 1.0
+    # 分母修复后 prd_readiness = available（旧分母下为 partial）
+    assert s["prd_readiness"] == "available"
+
+
+def test_data_quality_summary_p1b_canonical_t1_from_calendar(tmp_path):
+    """P1-B：state_t1_cov 用 calendar canonical predecessor 覆盖全部 analysis 日
+    （含首分析日的 T-1=warmup 内真实 predecessor），并忽略非 A / 非交易日行。"""
+    dataset = tmp_path / "ds"
+    analysis = ["2025-01-06", "2025-01-07", "2025-01-08"]
+    m = _write_quality_summary_input(
+        dataset,
+        instruments_n=5,
+        fact_universe=5,
+        analysis_axis=analysis,
+        # 干扰行：market=SH（非 A）、is_trading_day=False → 均不得进入 trading axis
+        calendar_rows=[
+            {"trade_date": "2025-01-03", "is_trading_day": True, "market": "A",
+             "source": "manual", "status": "closed", "verified_at": "2025-01-03"},
+            {"trade_date": "2025-01-03", "is_trading_day": True, "market": "SH",
+             "source": "manual", "status": "closed", "verified_at": "2025-01-03"},
+            {"trade_date": "2025-01-04", "is_trading_day": False, "market": "A",
+             "source": "manual", "status": "closed", "verified_at": "2025-01-04"},
+            {"trade_date": "2025-01-06", "is_trading_day": True, "market": "A",
+             "source": "manual", "status": "closed", "verified_at": "2025-01-06"},
+            {"trade_date": "2025-01-07", "is_trading_day": True, "market": "A",
+             "source": "manual", "status": "closed", "verified_at": "2025-01-07"},
+            {"trade_date": "2025-01-08", "is_trading_day": True, "market": "A",
+             "source": "manual", "status": "closed", "verified_at": "2025-01-08"},
+        ],
+        # 2025-01-06 的 canonical T-1 = 2025-01-03（在 warmup，不在 analysis_axis）
+        state_by_date={"2025-01-03": 5, "2025-01-06": 0, "2025-01-07": 3, "2025-01-08": 0},
+        bar_by_date={"2025-01-06": 5, "2025-01-07": 5, "2025-01-08": 5},
+    )
+    s = _data_quality_summary(str(dataset / "raw"), str(dataset / "lineage"), m)
+    t1 = s["coverage_report"]["state_t1_coverage_by_date"]
+    # state_t1_cov = [T06→T03=5/5=1.0, T07→T06=0, T08→T07=3/5=0.6]
+    # 旧 bug：丢弃首分析日 → max=0.6；修复后 max=1.0（首分析日 T-1 被计入）
+    assert t1["max"] == 1.0
+    assert t1["p50"] == 0.6
+    assert s["coverage_report"]["missing_t1_analysis_dates"] == []
+    # 非 A / 非交易日干扰行被正确过滤：T-1 恒为 calendar 内真实 predecessor
+    assert "2025-01-04" not in s["coverage_report"]["missing_t1_analysis_dates"]
+
