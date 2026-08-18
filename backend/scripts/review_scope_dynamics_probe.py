@@ -3967,31 +3967,62 @@ def _spearman_rank_correlation(
     return 1.0 - (6.0 * d2) / (n * (n * n - 1.0))
 
 
-def _scope_ew_return_direction(members: list[Any]) -> float:
-    """Equal-weight scope direction for a scope/date: sign(mean(member return_1d)).
+@dataclass(frozen=True)
+class _AlignedLeadership:
+    """Research-only direction-aligned leadership fact (CORRECTION-2).
 
-    Equal-weight return of the scope = arithmetic mean of member return_1d over
-    rankable members; direction = sign.  Matches the production
-    ``equal_weight_return`` concept (Stage-2B research transform source).
+    ``aligned_score = contribution × sign(scope equal_weight_return)``.  This is
+    the ONLY quantity R3 ranking / R3 concentration / Candidate B may consume —
+    never the raw contribution sign.  Contribution itself is left untouched
+    (the Stage-1 owner remains the single source of amount_share × return).
     """
-    vals = [m.return_1d for m in members if m.return_1d is not None]
-    if not vals:
-        return 0.0
-    return 1.0 if sum(vals) > 0.0 else (-1.0 if sum(vals) < 0.0 else 0.0)
+
+    member_id: str
+    contribution: float
+    aligned_score: float
+
+
+def _ew_return_direction(ew_return: float | None) -> tuple[bool, int]:
+    """Derive scope prevailing direction from the CANONICAL equal_weight_return.
+
+    Returns ``(available, direction)``:
+      - ew_return None       -> (False, 0)  unavailable (no R3 / candidates)
+      - ew_return == 0       -> (True, 0)   no prevailing direction (no R3)
+      - ew_return > 0        -> (True, +1)
+      - ew_return < 0        -> (True, -1)
+
+    unavailable and exactly-zero are DISTINCT from a nonzero signed return; neither
+    produces a direction-aligned leader ranking (no zero-fill, no member_id
+    pseudo-rank).
+    """
+    if ew_return is None:
+        return False, 0
+    if ew_return > 0.0:
+        return True, 1
+    if ew_return < 0.0:
+        return True, -1
+    return True, 0
 
 
 def _three_rankings(
-    members: list[Any], scope_direction: float
-) -> tuple[list[Any], list[Any], list[Any]]:
-    """Compute the three research rankings for one scope/date (Stage-2B).
+    members: list[Any],
+    ew_return: float | None,
+) -> tuple[list[Any], list[Any], list[Any] | None, int]:
+    """Compute the three research rankings for one scope/date (CORRECTION-2).
 
-    R1 signed        : contribution DESC (who provides the biggest positive push).
-    R2 absolute      : |contribution| DESC (who moves the scope most, any direction).
-    R3 direction-aligned : contribution × sign(scope_ew_return) DESC (who actually
-                          drives the scope's prevailing direction today).
+    R1 signed   : contribution DESC (who provides the biggest positive push).
+    R2 absolute : |contribution| DESC (who moves the scope most, any direction).
+    R3 direction-aligned : aligned_score = contribution × sign(EW) DESC.
+
+    R3 consumes ONLY the canonical ``equal_weight_return`` direction.  When
+    ``ew_return is None`` (unavailable) or == 0 (no prevailing direction), R3 is
+    returned as None and the corresponding day is flagged via ``r3_direction``:
+      +1 / -1 = prevailing direction available,
+      0      = no prevailing direction (R3 None),
+    (unavailable is reported separately by the caller from ``ew_return is None``).
 
     All three rank the SAME Stage-1 contribution facts; direction-alignment is a
-    research ranking transform ONLY and does not modify the frozen contribution
+    research ranking transform ONLY and never modifies the frozen contribution
     owner.  Deterministic tie-break: member_id ASC.
     """
     from app.domain.review.analysis.leadership_contribution import (
@@ -4002,36 +4033,45 @@ def _three_rankings(
     rankable = [c for c in facts.members if c.contribution is not None]
     r1 = sorted(rankable, key=lambda c: (-(c.contribution or 0.0), c.member_id))
     r2 = sorted(rankable, key=lambda c: (-abs(c.contribution or 0.0), c.member_id))
-    r3 = sorted(
-        rankable,
-        key=lambda c: (-((c.contribution or 0.0) * scope_direction), c.member_id),
-    )
-    return r1, r2, r3
+
+    available, direction = _ew_return_direction(ew_return)
+    if not available or direction == 0:
+        return r1, r2, None, direction
+
+    r3 = [
+        _AlignedLeadership(
+            member_id=c.member_id,
+            contribution=c.contribution or 0.0,
+            aligned_score=(c.contribution or 0.0) * direction,
+        )
+        for c in rankable
+    ]
+    r3.sort(key=lambda x: (-x.aligned_score, x.member_id))
+    return r1, r2, r3, direction
 
 
 def _coverage_leader_set(
-    ranked_dir: list[Any], coverage: float
-) -> list[Any]:
-    """Direction-aligned contribution-coverage leader set (Stage-2B Candidate B).
+    aligned_ranked: list[_AlignedLeadership] | None, coverage: float
+) -> list[_AlignedLeadership]:
+    """Direction-aligned coverage leader set (CORRECTION-2, Candidate B).
 
-    Sort by direction-aligned contribution DESC, then take the MINIMAL set whose
-    cumulative POSITIVE direction-aligned contribution reaches ``coverage`` (e.g.
-    the fewest members accounting for X% of the scope's direction-consistent push).
+    Consumes ONLY ``aligned_score`` (never raw contribution).  Members with
+    ``aligned_score > 0`` (direction-consistent contributors) sorted DESC, then the
+    MINIMAL prefix whose cumulative positive aligned_score reaches ``coverage``.
 
-    Only positive direction-aligned contributions count toward coverage (negative
-    members oppose the direction and are not "leaders").  The returned set is the
-    minimal prefix; ``coverage`` here is a RESEARCH threshold, NOT a frozen
-    production parameter.
+    ``coverage`` here is a RESEARCH parameter, NOT a frozen production contract.
     """
-    pos = [c for c in ranked_dir if (c.contribution or 0.0) > 0.0]
-    total_pos = sum(c.contribution or 0.0 for c in pos)
+    if not aligned_ranked:
+        return []
+    pos = [x for x in aligned_ranked if x.aligned_score > 0.0]
+    total_pos = sum(x.aligned_score for x in pos)
     if total_pos <= 0.0:
         return []
     cum = 0.0
-    leader_set: list[Any] = []
-    for c in pos:
-        leader_set.append(c)
-        cum += c.contribution or 0.0
+    leader_set: list[_AlignedLeadership] = []
+    for x in pos:
+        leader_set.append(x)
+        cum += x.aligned_score
         if cum / total_pos >= coverage:
             break
     return leader_set
@@ -4159,26 +4199,51 @@ def _run_leadership_research(
             continue
 
         # ---- Per-date: three rankings + concentrations + candidate leader sets ----
+        # R3 / Candidate A / Candidate B require a canonical, NONZERO equal_weight_return
+        # direction.  EW unavailable (None) and EW exactly 0 (no prevailing direction)
+        # are tracked separately and NEVER produce a direction-aligned leader ranking.
+        from app.domain.review.analysis.leadership_contribution import (
+            compute_member_leadership_contributions,
+        )
+        from app.domain.review.scope_observation import compute_scope_observation
+
         r1_daily: list[list[Any]] = []
         r2_daily: list[list[Any]] = []
-        r3_daily: list[list[Any]] = []
-        r2_top5_conc: list[float] = []      # R2 absolute concentration
-        r3_top5_conc: list[float] = []      # R3 direction-positive concentration
-        cov_leader_sets: list[list[Any]] = []  # Candidate B, per coverage val
+        r3_daily: list[list[_AlignedLeadership] | None] = []
+        r3_direction: list[int] = []          # +1/-1/0 (0 = no prevailing / unavailable)
+        ew_unavailable_days: list[date] = []
+        ew_zero_days: list[date] = []
+        r2_top5_conc: list[float] = []        # R2 absolute concentration
+        r3_top5_conc: list[float] = []        # R3 direction-positive concentration
+        cov_leader_sets: list[list[_AlignedLeadership]] = []  # Candidate B
         daily_rankable: list[int] = []
         missing_rate: list[float] = []
         for ps in series:
             members = list(ps.members)
-            direction = _scope_ew_return_direction(members)
-            r1, r2, r3 = _three_rankings(members, direction)
+            # Canonical EW return from the formal L1 owner (single source of truth).
+            obs = compute_scope_observation(
+                scope_type=ps.scope_type,
+                scope_key=ps.scope_key,
+                trade_date=ps.trade_date,
+                pit_member_ids=[str(i) for i in ps.pit_member_ids],
+                pit_member_ids_t1=[str(i) for i in ps.pit_member_ids_t1],
+                members=members,
+                events=ps.events,
+                t1_membership_available=ps.t1_membership_available,
+                event_coverage_member_ids=ps.event_coverage_member_ids,
+            )
+            ew_return = (obs or {}).get("price", {}).get("equal_weight_return")
+            r1, r2, r3, direction = _three_rankings(members, ew_return)
             r1_daily.append(r1)
             r2_daily.append(r2)
             r3_daily.append(r3)
+            r3_direction.append(direction)
+            if ew_return is None:
+                ew_unavailable_days.append(ps.trade_date)
+            elif direction == 0:
+                ew_zero_days.append(ps.trade_date)
             daily_rankable.append(len(r1))
 
-            from app.domain.review.analysis.leadership_contribution import (
-                compute_member_leadership_contributions,
-            )
             facts = compute_member_leadership_contributions(members)
             total_all = len(facts.members)
             daily_missing_rate = (
@@ -4193,16 +4258,19 @@ def _run_leadership_research(
                 if (not r2 or total_abs == 0.0)
                 else sum(abs(c.contribution or 0.0) for c in r2[:5]) / total_abs
             )
-            # R3 direction-positive concentration: Top5 max(dir_aligned,0) /
-            # sum(max(dir_aligned,0)).
-            r3_pos = [c for c in r3 if (c.contribution or 0.0) > 0.0]
-            total_dir_pos = sum(c.contribution or 0.0 for c in r3_pos)
-            r3_top5_conc.append(
-                float("nan")
-                if (not r3_pos or total_dir_pos == 0.0)
-                else sum(c.contribution or 0.0 for c in r3_pos[:5]) / total_dir_pos
-            )
-            # Candidate B leader set per research coverage threshold.
+            # R3 direction-positive concentration: Top5 max(aligned,0) /
+            # sum(max(aligned,0)) — ONLY aligned_score, never raw contribution.
+            if r3 is None:
+                r3_top5_conc.append(float("nan"))
+            else:
+                r3_pos = [x for x in r3 if x.aligned_score > 0.0]
+                total_dir_pos = sum(x.aligned_score for x in r3_pos)
+                r3_top5_conc.append(
+                    float("nan")
+                    if (not r3_pos or total_dir_pos == 0.0)
+                    else sum(x.aligned_score for x in r3_pos[:5]) / total_dir_pos
+                )
+            # Candidate B leader set (coverage on aligned_score, research-only).
             cov_leader_sets.append(
                 _coverage_leader_set(r3, coverage_vals[0])
             )
@@ -4217,6 +4285,7 @@ def _run_leadership_research(
         r3_ret: list[float] = []
         cov_ret: list[float] = []
         cov_leader_count: list[int] = []
+        cov_leader_fraction: list[float] = []
         spearman: list[float] = []
         for i in range(1, len(r1_daily)):
             r1_ret.append(
@@ -4225,13 +4294,31 @@ def _run_leadership_research(
             r2_ret.append(
                 _retention(_eff_top(r2_daily[i - 1], 5), _eff_top(r2_daily[i], 5))
             )
-            r3_ret.append(
-                _retention(_eff_top(r3_daily[i - 1], 5), _eff_top(r3_daily[i], 5))
-            )
-            cov_prev = [c.member_id for c in cov_leader_sets[i - 1]]
-            cov_curr = [c.member_id for c in cov_leader_sets[i]]
-            cov_ret.append(_retention(cov_prev, cov_curr))
-            cov_leader_count.append(len(cov_curr))
+            # R3 / Candidate A / Candidate B are only defined when BOTH T-1 and T
+            # have a prevailing direction (nonzero EW).  Otherwise mark nan.
+            if (
+                r3_daily[i - 1] is None or r3_daily[i] is None
+                or r3_direction[i - 1] == 0 or r3_direction[i] == 0
+            ):
+                r3_ret.append(float("nan"))
+                cov_ret.append(float("nan"))
+                cov_leader_count.append(0)
+                cov_leader_fraction.append(float("nan"))
+            else:
+                r3_ret.append(
+                    _retention(
+                        _eff_top(r3_daily[i - 1], 5),
+                        _eff_top(r3_daily[i], 5),
+                    )
+                )
+                cov_prev = [x.member_id for x in cov_leader_sets[i - 1]]
+                cov_curr = [x.member_id for x in cov_leader_sets[i]]
+                cov_ret.append(_retention(cov_prev, cov_curr))
+                n_curr = len(cov_curr)
+                cov_leader_count.append(n_curr)
+                cov_leader_fraction.append(
+                    n_curr / daily_rankable[i] if daily_rankable[i] else float("nan")
+                )
             corr = _spearman_rank_correlation(
                 [c.member_id for c in r1_daily[i - 1]],
                 [c.member_id for c in r1_daily[i]],
@@ -4260,11 +4347,18 @@ def _run_leadership_research(
         cov_ret_stats = (m, p25, p50, p75, mx)
         cov_count_mean = mean(cov_leader_count) if cov_leader_count else float("nan")
         cov_count_median = median(cov_leader_count) if cov_leader_count else float("nan")
+        cov_frac_stats = _stats(cov_leader_fraction)
 
+        r3_valid_days = sum(1 for d in r3_direction if d != 0)
         print(f"--- scope={spec.scope_name} ({spec.scope_type}, n={len(spec.member_ids)}) "
               f"dates={len(window_dates)} ---")
-        print(f"  rankable members : mean={mean(daily_rankable):.1f} "
+        print(f"  rankable members       : mean={mean(daily_rankable):.1f} "
               f"missing_rate mean={mean(missing_rate):.3f}")
+        print(f"  EW unavailable days    : {len(ew_unavailable_days)} "
+              f"({len(ew_unavailable_days) / len(window_dates):.1%})  "
+              f"EW zero/no-direction days: {len(ew_zero_days)}")
+        print(f"  R3-valid days          : {r3_valid_days}/{len(window_dates)} "
+              f"(nonzero-EW direction available)")
         print(f"  R1 signed     Top5 retention: {_fmt(_stats(r1_ret))}")
         print(f"  R2 absolute   Top5 retention: {_fmt(_stats(r2_ret))}")
         print(f"  R3 dir-align  Top5 retention: {_fmt(_stats(r3_ret))}")
@@ -4274,6 +4368,7 @@ def _run_leadership_research(
               f"count={len(spearman)}")
         print(f"  Candidate B coverage={coverage_vals[0]:.0%}: "
               f"leader_count mean={cov_count_mean:.1f} median={cov_count_median:.1f} "
+              f"leader_fraction {_fmt(cov_frac_stats)} "
               f"retention {_fmt(cov_ret_stats)}")
         print(f"  Candidate A (R3 Top5) retention mean={mean(r3_ret):.3f} "
               f"vs Candidate B retention mean={mean(cov_ret):.3f}")
