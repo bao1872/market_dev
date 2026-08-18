@@ -1519,6 +1519,7 @@ async def _persist_canonical_scope_observation(
             members=prep.members,
             events=prep.events,
             t1_membership_available=prep.t1_membership_available,
+            event_coverage_member_ids=prep.event_coverage_member_ids,
         )
         checks = check_observation_invariants(observation)
         failed = [c for c in checks if not c["ok"]]

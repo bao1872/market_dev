@@ -212,6 +212,7 @@ def test_t1_01_membership_t1_unavailable_transition_unavailable() -> None:
         pit_member_ids_t1=["m1"],  # caller still passes T-1 set
         members=[m],
         t1_membership_available=False,
+        event_coverage_member_ids=None,
     )
     tr = _trend_transition(obs)
     # Transition must be empty (denominator 0) — never a forged UP<-DOWN migration.
@@ -230,6 +231,7 @@ def test_t1_02_membership_t1_available_transition_normal() -> None:
         pit_member_ids_t1=["m1"],
         members=[m],
         t1_membership_available=True,
+        event_coverage_member_ids=None,
     )
     tr = _trend_transition(obs)
     assert tr.get("denominator") == 1
@@ -249,6 +251,7 @@ def test_t1_03_t1_states_but_membership_unavailable_still_unavailable() -> None:
         pit_member_ids_t1=["m1"],
         members=[m],
         t1_membership_available=False,
+        event_coverage_member_ids=None,
     )
     tr = _trend_transition(obs)
     assert tr.get("denominator") == 0
@@ -267,6 +270,7 @@ def test_t1_04_historical_dynamics_current_static_preserved() -> None:
         pit_member_ids=["m1"],
         pit_member_ids_t1=["m1"],
         members=[m],
+        event_coverage_member_ids=None,
     )
     explicit_obs = compute_scope_observation(
         scope_type="concept",
@@ -276,6 +280,7 @@ def test_t1_04_historical_dynamics_current_static_preserved() -> None:
         pit_member_ids_t1=["m1"],
         members=[m],
         t1_membership_available=True,
+        event_coverage_member_ids=None,
     )
     assert _trend_transition(default_obs) == _trend_transition(explicit_obs)
     assert _trend_transition(default_obs).get("denominator") == 1

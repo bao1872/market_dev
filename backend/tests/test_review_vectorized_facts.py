@@ -511,6 +511,13 @@ def test_batch_vectorized_path_matches_per_date(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_batch_events
     )
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
+    )
 
     # ---- PER-DATE path (canonical oracle) ----
     async def fake_prev(session, ref_date):
@@ -527,6 +534,9 @@ def test_batch_vectorized_path_matches_per_date(monkeypatch) -> None:
     async def fake_load_events(session, instrument_ids, trade_date):
         return events.get(trade_date, [])
 
+    async def fake_load_coverage(session, instrument_ids, trade_date):
+        return frozenset(instrument_ids)
+
     monkeypatch.setattr(
         "app.services.calendar_service.get_previous_trading_day_async", fake_prev
     )
@@ -539,6 +549,10 @@ def test_batch_vectorized_path_matches_per_date(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_structure_events",
         fake_load_events,
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_backfill_event_coverage_member_ids",
+        fake_load_coverage,
     )
 
     async def scenario():
@@ -617,6 +631,13 @@ def test_batch_fallback_path_byte_identical(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_batch_events
     )
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
+    )
 
     async def fake_prev(session, ref_date):
         return days[days.index(ref_date) - 1] if days.index(ref_date) > 0 else None
@@ -632,6 +653,9 @@ def test_batch_fallback_path_byte_identical(monkeypatch) -> None:
     async def fake_load_events(session, instrument_ids, trade_date):
         return []
 
+    async def fake_load_coverage(session, instrument_ids, trade_date):
+        return frozenset(instrument_ids)
+
     monkeypatch.setattr(
         "app.services.calendar_service.get_previous_trading_day_async", fake_prev
     )
@@ -644,6 +668,10 @@ def test_batch_fallback_path_byte_identical(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_structure_events",
         fake_load_events,
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_backfill_event_coverage_member_ids",
+        fake_load_coverage,
     )
 
     async def scenario():
@@ -701,10 +729,12 @@ def test_current_membership_resolved_exactly_once(monkeypatch) -> None:
             canonical_t1=None, pit_member_ids=(), pit_member_ids_t1=(),
             members=(), t1_membership_available=True, pit_status_t="current_static",
             pit_status_t1="current_static", diagnostics=(),
+            event_coverage_member_ids=None,
         )
 
     def fake_compute(scope_type, scope_key, trade_date, pit_member_ids,
-                     pit_member_ids_t1, members, events, *, t1_membership_available=True):
+                     pit_member_ids_t1, members, events, *, t1_membership_available=True,
+                     event_coverage_member_ids=None):
         return {"scope": {"scope_type": scope_type, "provided_member_count": 0}}
 
     def fake_validate(payload, *, scope_type, scope_key, trade_date):
@@ -800,6 +830,13 @@ def test_batch_deterministic_repeat(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_batch_events
+    )
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
     )
 
     async def scenario():

@@ -172,6 +172,7 @@ async def reconstruct_scope_observation(
         members=prepared.members,
         events=prepared.events,
         t1_membership_available=prepared.t1_membership_available,
+        event_coverage_member_ids=prepared.event_coverage_member_ids,
     )
     validate_scope_observation_payload(
         observation,
@@ -239,6 +240,7 @@ async def reconstruct_scope_series(
             members=prepared.members,
             events=prepared.events,
             t1_membership_available=prepared.t1_membership_available,
+            event_coverage_member_ids=prepared.event_coverage_member_ids,
         )
         validate_scope_observation_payload(
             observation,
@@ -411,6 +413,7 @@ async def _reconstruct_batch_chunk(
                 members=prepared.members,
                 events=prepared.events,
                 t1_membership_available=prepared.t1_membership_available,
+                event_coverage_member_ids=prepared.event_coverage_member_ids,
             )
             validate_scope_observation_payload(
                 observation,

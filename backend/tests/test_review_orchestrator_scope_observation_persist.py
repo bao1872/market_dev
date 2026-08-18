@@ -79,6 +79,7 @@ def _prep(scope_type: str, scope_key: str, *, unavailable: bool = False) -> Prep
         events=(type("Event", (), {"instrument_id": "600000.SH"}),)
         if not unavailable
         else (),
+        event_coverage_member_ids=("600000.SH",) if not unavailable else None,
     )
 
 

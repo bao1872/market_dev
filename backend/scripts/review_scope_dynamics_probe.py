@@ -1479,6 +1479,7 @@ async def _vec1_benchmark(
                     pit_member_ids_t1=tuple(str(m) for m in member_ids),
                     members=tuple(legacy_members[scope_key][i]),
                     events=scope_events,
+                    event_coverage_member_ids=None,
                 )
                 prepared = vec1_prepared[scope_key][i]
                 vec1_obs = compute_scope_observation(
@@ -1489,6 +1490,7 @@ async def _vec1_benchmark(
                     pit_member_ids_t1=prepared.pit_member_ids_t1,
                     members=prepared.members,
                     events=prepared.events,
+                    event_coverage_member_ids=prepared.event_coverage_member_ids,
                 )
                 obs_count += 1
                 checked_count += 1
@@ -3452,6 +3454,7 @@ def _replay_l1_once(
                 members=ps.members,
                 events=ps.events,
                 t1_membership_available=ps.t1_membership_available,
+                event_coverage_member_ids=ps.event_coverage_member_ids,
             )
             results[scope_key] = {
                 "trade_date": ps.trade_date.isoformat(),
@@ -3717,15 +3720,17 @@ _L1_RTM_ROWS: list[dict] = [
      "denominator": "amt_ratio_count", "evidence_date": "2026-08-10"},
     # ---- STRUCTURE EVENTS（08-07 真实事件流）----
     # 真实结构：structure.events.cells.leveled.<EVENT>_<dir>_<level>
-    #   → {"event_count", "member_count", "member_ratio"}；denominator = len(pit_set)。
+    #   → {"event_count", "member_count", "member_ratio"}；denominator = PIT(T) ∩ coverage。
     # AUDIT-FIX-01 (B.5/B.6): probe 只收集正式 cell evidence，不再 Σ member_ratio
-    # （那是 probe 自造的二次 aggregation）。Event coverage contract 仍 OPEN：
-    # 行存在 ≠ coverage，故这些 fact 一律标 COVERAGE_CONTRACT_OPEN，不标最终 PASS。
+    # （那是 probe 自造的二次 aggregation）。ROUND-2.2B: Event Coverage 已成为正式
+    # source-availability 判定（structure.events.status = ready/unavailable），由
+    # production owner 决定；Dataset Replay 无 RunItem lineage → coverage=None →
+    # events SOURCE_UNAVAILABLE，probe 不伪造。不再有 COVERAGE_CONTRACT_OPEN。
     {"fact": "BOS cells", "ev": "BOS", "prd": "PRD §7.4 D Event aggregation",
      "source": "first_pyramid_events", "aggregation": "formal cell evidence (event_count/member_count/member_ratio)",
-     "universe": "PIT(T)∩event-coverage", "denominator": "per-cell",
+     "universe": "PIT(T)∩coverage", "denominator": "per-cell",
      "evidence_date": "2026-08-07",
-     "event": True, "note": "cell evidence only; overall ratio needs Event Coverage Contract (OPEN)"},
+     "event": True, "note": "cell evidence only; status from production coverage decision"},
     {"fact": "CHoCH cells", "ev": "CHoCH", "prd": "PRD §7.4 D Event aggregation",
      "source": "first_pyramid_events", "aggregation": "formal cell evidence",
      "universe": "PIT(T)∩event-coverage", "denominator": "per-cell",
@@ -3923,7 +3928,6 @@ def _run_semantic_matrix(
     print(hdr)
     print("-" * len(hdr))
     n_pass = n_unavail = n_gap = n_na = n_algo = 0
-    n_coverage_open = 0
     n_unexpected_zero = 0
     gaps: list[str] = []
     for row in _L1_RTM_ROWS:
@@ -3968,14 +3972,24 @@ def _run_semantic_matrix(
         )
         source_ready = bool(avail and avail > 0)
 
-        # Event facts: coverage contract is OPEN → COVERAGE_CONTRACT_OPEN (never
-        # final PASS).  Evidence is the FORMAL cells (leveled + extreme), shown
-        # verbatim (actual), NOT a Σ member_ratio.
+        # Event facts (ROUND-2.2B): the exact-T Event Coverage source decision is now
+        # owned by production — ``structure.events.status`` is "ready" when coverage
+        # is valid (possibly empty cells = legal zero-event), "unavailable" when the
+        # coverage source is absent (corpus replay has no RunItem lineage).  The probe
+        # only reports that decision honestly; it never invents coverage from event
+        # rows.  The old COVERAGE_CONTRACT_OPEN state is removed (coverage is now a
+        # real source-availability decision, not an open contract).
         if row.get("event"):
             val = cells
-            status = "COVERAGE_CONTRACT_OPEN"
-            n_coverage_open += 1
-            gap = "event-coverage-OPEN"
+            ev_status = obs.get("structure", {}).get("events", {}).get("status")
+            if ev_status == "ready":
+                status = "PASS"
+                n_pass += 1
+                gap = ""
+            else:
+                status = "SOURCE_UNAVAILABLE"
+                n_unavail += 1
+                gap = "no-coverage-source"
             actual = _fmt_rtm_value(val)
             print(f"{row['fact']:24} {row['prd'][:22]:22} {row['source'][:20]:20} "
                   f"{row['aggregation'][:26]:26} {str(denom_val):10} "
@@ -4045,8 +4059,7 @@ def _run_semantic_matrix(
 
     print("\n--- RTM status summary ---")
     print(f"PASS={n_pass}  SOURCE_UNAVAILABLE={n_unavail}  GAP={n_gap} "
-          f"NOT_APPLICABLE={n_na}  ALGORITHM_MAPPING_REQUIRED={n_algo}  "
-          f"COVERAGE_CONTRACT_OPEN={n_coverage_open}")
+          f"NOT_APPLICABLE={n_na}  ALGORITHM_MAPPING_REQUIRED={n_algo}")
     print(f"unavailable→0 coercion count = {n_unexpected_zero}  (must be 0)")
     if gaps:
         print("\n--- Round 1 GAP findings (recorded, NOT fixed) ---")
@@ -4258,6 +4271,10 @@ def _run_equivalence(
                 members=members,
                 events=union_ctx.events_by_date.get(selection.asof_date, []),
                 t1_membership_available=False,
+                # Corpus replay has no RunItem lineage -> coverage is None
+                # (structure-events unavailable in both paths).  The synthetic
+                # coverage equivalence is a dedicated PURE_UNIT test, not here.
+                event_coverage_member_ids=None,
             )
             canonical[spec.scope_key] = {
                 "member_count": len(members),
@@ -4306,6 +4323,7 @@ def _run_equivalence(
                 members=opt_ps.members,
                 events=union_ctx.events_by_date.get(selection.asof_date, []),
                 t1_membership_available=opt_ps.t1_membership_available,
+                event_coverage_member_ids=opt_ps.event_coverage_member_ids,
             )
             for subtree in src_subtrees:
                 opt_s = opt_obs.get(subtree)

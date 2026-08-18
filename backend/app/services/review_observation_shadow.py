@@ -103,6 +103,7 @@ async def run_shadow_scope(
         members=prep.members,
         events=prep.events,
         t1_membership_available=prep.t1_membership_available,
+        event_coverage_member_ids=prep.event_coverage_member_ids,
     )
     checks = check_observation_invariants(obs)
     evidence = _evidence(prep, obs, checks)

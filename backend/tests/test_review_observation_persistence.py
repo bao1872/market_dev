@@ -65,6 +65,7 @@ def _canonical_obs(
         pit_member_ids=["m1"],
         pit_member_ids_t1=["m1"],
         members=members,
+        event_coverage_member_ids=None,
     )
 
 
@@ -98,6 +99,7 @@ def _prep(
         pit_status_t=pit_status_t,
         pit_status_t1="historical_pit",
         diagnostics=("ok",),
+        event_coverage_member_ids=None,
     )
 
 

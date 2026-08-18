@@ -75,6 +75,7 @@ def _prepared(scope_type, scope_key, trade_date, member_ids, members):
         pit_status_t="current_static",
         pit_status_t1="current_static",
         diagnostics=(),
+        event_coverage_member_ids=None,
         events=(),
     )
 
@@ -288,6 +289,10 @@ async def _install_prep_mocks(
         # at T but returns nothing (no latest-snapshot fallback).
         return current_only or {}
 
+    async def _fake_load_coverage(session, ids, trade_date):
+        # ROUND-2.2B: historical reconstruction tests carry no event lineage.
+        return None
+
     monkeypatch.setattr(
         "app.services.calendar_service.get_previous_trading_day_async",
         _fake_previous,
@@ -295,6 +300,11 @@ async def _install_prep_mocks(
     monkeypatch.setattr(prep_service, "_load_states", _fake_load_states)
     monkeypatch.setattr(prep_service, "_load_bar_facts", _fake_load_bar_facts)
     monkeypatch.setattr(prep_service, "_load_structure_events", _fake_load_structure_events)
+    monkeypatch.setattr(
+        prep_service,
+        "_load_backfill_event_coverage_member_ids",
+        _fake_load_coverage,
+    )
     monkeypatch.setattr(
         prep_service,
         "_load_current_only_snapshot_facts",
@@ -400,6 +410,7 @@ def test_missing_member_historical_fact_excluded(monkeypatch) -> None:
             pit_member_ids=prepared.pit_member_ids,
             pit_member_ids_t1=prepared.pit_member_ids_t1,
             members=prepared.members,
+            event_coverage_member_ids=prepared.event_coverage_member_ids,
         )
 
     out = asyncio.run(scenario())

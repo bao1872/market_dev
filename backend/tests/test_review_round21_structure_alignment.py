@@ -57,6 +57,7 @@ def _scope(obs_list):
         trade_date=TRADE,
         pit_member_ids=[o.member_id for o in obs_list],
         members=obs_list,
+        event_coverage_member_ids=None,
     )
 
 

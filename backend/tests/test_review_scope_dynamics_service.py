@@ -116,6 +116,7 @@ def _canonical_payload(
         trade_date=trade_date,
         pit_member_ids=[m.member_id for m in members],
         members=members,
+        event_coverage_member_ids=None,
     )
 
 

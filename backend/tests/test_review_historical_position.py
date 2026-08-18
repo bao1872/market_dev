@@ -96,6 +96,7 @@ def _series_item(
         trade_date=trade_date,
         pit_member_ids=["m1"],
         members=[member],
+        event_coverage_member_ids=None,
     )
     return {"trade_date": trade_date.isoformat(), "observation": payload}
 
@@ -150,6 +151,7 @@ def _rich_payload(trade_date: date) -> dict:
         trade_date=trade_date,
         pit_member_ids=["m1", "m2", "m3"],
         members=members,
+        event_coverage_member_ids=None,
     )
 
 

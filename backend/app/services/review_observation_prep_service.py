@@ -43,6 +43,8 @@ from app.models.first_pyramid_history import (
     FirstPyramidHistoryDailyState,
     FirstPyramidHistoryEvent,
 )
+from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
+from app.models.first_pyramid_history_run_item import FirstPyramidHistoryRunItem
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
@@ -299,6 +301,11 @@ class PreparedScope:
     pit_status_t: str
     pit_status_t1: str
     diagnostics: tuple[str, ...]
+    # ROUND-2.2B: REQUIRED (no default) — exact-T Event Coverage members for this
+    # scope/date.  ``None`` = coverage source unavailable (structure-events
+    # unavailable); ``tuple(...)`` = valid coverage (possibly empty = legal
+    # zero-event day).  Every PreparedScope constructor MUST decide explicitly.
+    event_coverage_member_ids: tuple[str, ...] | None
     events: tuple[StructureEvent, ...] = ()
 
 
@@ -600,8 +607,20 @@ async def prepare_scope_from_member_ids(
         bars[inst_id] = _InstrumentBarSeries(
             facts=tuple(ordered), dates=tuple(b.trade_date for b in ordered)
         )
-    # Canonical immutable structure events for T (PRD §7.4 D).
-    structure_events = await _load_structure_events(session, pit_ids_t, trade_date)
+    # ROUND-2.2B: exact-T Event Coverage gate (single owner).  ``None`` = coverage
+    # source unavailable -> structure-events unavailable (no fake denominator).
+    # A set (possibly empty) = valid coverage -> only covered members' events load.
+    coverage = await _load_backfill_event_coverage_member_ids(
+        session, pit_ids_t, trade_date
+    )
+    if coverage is None:
+        coverage_members = None
+        structure_events: list[StructureEvent] = []
+    else:
+        coverage_members = tuple(str(i) for i in coverage)
+        structure_events = await _load_structure_events(
+            session, [i for i in pit_ids_t if uuid.UUID(str(i)) in coverage], trade_date
+        )
     # Current-only canonical facts from the exact-T snapshot (see
     # ``_load_current_only_snapshot_facts``).  The historical reconstruction
     # passes ``load_current_only=False``: current-only facts have no FP-history
@@ -636,6 +655,7 @@ async def prepare_scope_from_member_ids(
         pit_status_t=pit_status_t,
         pit_status_t1=pit_status_t1,
         diagnostics=tuple(diagnostics),
+        event_coverage_member_ids=coverage_members,
         events=tuple(structure_events),
     )
 
@@ -920,6 +940,118 @@ async def _load_batch_events(
     }
 
 
+# ---------------------------------------------------------------------------
+# ROUND-2.2B — Conservative canonical-backfill Event Coverage (single owner)
+# ---------------------------------------------------------------------------
+# An exact-T DailyState proves Event lifecycle coverage iff (12-condition contract):
+#   1. exact-T FirstPyramidHistoryDailyState exists
+#   2. DailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+#   3. DailyState.history_contract_version == HISTORY_CONTRACT_VERSION
+#   4. DailyState.source_history_run_id IS NOT NULL
+#   5. matching FirstPyramidHistoryRun exists (source_history_run_id)
+#   6. Run.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+#   7. Run.status IN ('partial','succeeded')
+#   8. Run.completed_at IS NOT NULL
+#   9. matching FirstPyramidHistoryRunItem (run_id + instrument_id) exists
+#  10. RunItem.status == 'succeeded'
+#  11. RunItem.completed_at IS NOT NULL
+#  12. DailyState.updated_at <= Run.completed_at   (excludes post-backfill state-only
+#                                                  advancement, e.g. 08-10)
+# This is the CURRENT Review conservative canonical-backfill proof; it does NOT claim
+# to support future lifecycle modes.  NO date hardcode anywhere.
+
+
+async def _load_backfill_event_coverage_member_ids(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    trade_date: date,
+) -> frozenset[uuid.UUID] | None:
+    """Return the exact-T Event Coverage member set (or ``None`` = no trusted source).
+
+    One SQL, DailyState JOIN Run JOIN RunItem, selecting only instrument_id (no ORM
+    hydration, no JSONB).  ``None`` means the coverage source is unavailable for this
+    scope/date (the caller must NOT fabricate it); ``frozenset()`` is a valid (possibly
+    empty) coverage — a legal zero-event day still yields a real denominator.
+    """
+    if not instrument_ids or trade_date is None:
+        return None
+    stmt = (
+        select(FirstPyramidHistoryDailyState.instrument_id)
+        .join(
+            FirstPyramidHistoryRun,
+            FirstPyramidHistoryDailyState.source_history_run_id == FirstPyramidHistoryRun.id,
+        )
+        .join(
+            FirstPyramidHistoryRunItem,
+            (FirstPyramidHistoryRunItem.history_run_id == FirstPyramidHistoryRun.id)
+            & (FirstPyramidHistoryRunItem.instrument_id == FirstPyramidHistoryDailyState.instrument_id),
+        )
+        .where(
+            FirstPyramidHistoryDailyState.trade_date == trade_date,
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            FirstPyramidHistoryDailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            FirstPyramidHistoryDailyState.history_contract_version == HISTORY_CONTRACT_VERSION,
+            FirstPyramidHistoryDailyState.source_history_run_id.isnot(None),
+            FirstPyramidHistoryRun.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            FirstPyramidHistoryRun.status.in_(["partial", "succeeded"]),
+            FirstPyramidHistoryRun.completed_at.isnot(None),
+            FirstPyramidHistoryRunItem.status == "succeeded",
+            FirstPyramidHistoryRunItem.completed_at.isnot(None),
+            FirstPyramidHistoryDailyState.updated_at <= FirstPyramidHistoryRun.completed_at,
+        )
+        .distinct()
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return frozenset(uuid.UUID(str(i)) for i in rows)
+
+
+async def _load_batch_backfill_event_coverage(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    trade_dates: list[date],
+) -> dict[date, frozenset[uuid.UUID]]:
+    """Batch coverage for all ``trade_dates`` in ONE query (no per-date SQL).
+
+    Returns a dict {trade_date: frozenset[UUID]}.  A date absent from the dict has
+    NO coverage entry -> its structure-events source is unavailable (caller must not
+    fabricate it).  This avoids an N-date query explosion in the replay path.
+    """
+    if not instrument_ids or not trade_dates:
+        return {}
+    stmt = (
+        select(
+            FirstPyramidHistoryDailyState.trade_date,
+            FirstPyramidHistoryDailyState.instrument_id,
+        )
+        .join(
+            FirstPyramidHistoryRun,
+            FirstPyramidHistoryDailyState.source_history_run_id == FirstPyramidHistoryRun.id,
+        )
+        .join(
+            FirstPyramidHistoryRunItem,
+            (FirstPyramidHistoryRunItem.history_run_id == FirstPyramidHistoryRun.id)
+            & (FirstPyramidHistoryRunItem.instrument_id == FirstPyramidHistoryDailyState.instrument_id),
+        )
+        .where(
+            FirstPyramidHistoryDailyState.trade_date.in_(trade_dates),
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            FirstPyramidHistoryDailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            FirstPyramidHistoryDailyState.history_contract_version == HISTORY_CONTRACT_VERSION,
+            FirstPyramidHistoryDailyState.source_history_run_id.isnot(None),
+            FirstPyramidHistoryRun.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            FirstPyramidHistoryRun.status.in_(["partial", "succeeded"]),
+            FirstPyramidHistoryRun.completed_at.isnot(None),
+            FirstPyramidHistoryRunItem.status == "succeeded",
+            FirstPyramidHistoryRunItem.completed_at.isnot(None),
+            FirstPyramidHistoryDailyState.updated_at <= FirstPyramidHistoryRun.completed_at,
+        )
+    )
+    by_date: dict[date, set[uuid.UUID]] = defaultdict(set)
+    for d, instrument_id in (await session.execute(stmt)).all():
+        by_date[d].add(uuid.UUID(str(instrument_id)))
+    return {d: frozenset(s) for d, s in by_date.items()}
+
+
 async def prepare_scope_series_from_member_ids(
     session: AsyncSession,
     scope_type: str,
@@ -966,6 +1098,10 @@ async def prepare_scope_series_from_member_ids(
     t0 = time.perf_counter()
     events_by_date = await _load_batch_events(session, member_ids, trade_dates)
     events_ms = (time.perf_counter() - t0) * 1000.0
+    # ROUND-2.2B: bulk exact-T Event Coverage in ONE query (no per-date SQL).
+    coverage_by_date = await _load_batch_backfill_event_coverage(
+        session, member_ids, trade_dates
+    )
     # Vectorized preprocessing: per-member VolumeContext series computed once,
     # indexed by the per-T replay (see ``_build_member_observations``).
     t_vec = time.perf_counter()
@@ -995,7 +1131,18 @@ async def prepare_scope_series_from_member_ids(
         # vectorized fast path, and only calls ``series.window(t)`` inside the
         # window-bound fallback for the few members that need strict-prior history.
         # This removes the O(dates x members x ~400) list-copy hotspot.
-        structure_events = events_by_date.get(t, [])
+        # ROUND-2.2B: per-T coverage from the bulk map.  ``None`` (date absent)
+        # -> coverage source unavailable -> no events, no fake denominator.
+        coverage_t = coverage_by_date.get(t)
+        if coverage_t is None:
+            coverage_members = None
+            structure_events: list[StructureEvent] = []
+        else:
+            coverage_members = tuple(str(i) for i in coverage_t)
+            covered = {str(i) for i in coverage_t}
+            structure_events = [
+                e for e in events_by_date.get(t, []) if e.member_id in covered
+            ]
         current_only_facts = (
             await _load_current_only_snapshot_facts(session, pit_ids_t, t)
             if load_current_only
@@ -1027,6 +1174,7 @@ async def prepare_scope_series_from_member_ids(
                 pit_status_t=pit_status_t,
                 pit_status_t1=pit_status_t1,
                 diagnostics=tuple(diagnostics),
+                event_coverage_member_ids=coverage_members,
                 events=tuple(structure_events),
             )
         )
@@ -1182,6 +1330,7 @@ def build_prepared_scopes_from_union(
     union_ctx: _UnionFactContext,
     membership_t1_by_scope: dict[str, tuple[uuid.UUID, ...]] | None = None,
     current_only_facts_by_date: dict[date, dict[str, dict[str, object]]] | None = None,
+    coverage_by_date: dict[date, frozenset[uuid.UUID]] | None = None,
     pit_status_t: str = "current_static",
     pit_status_t1: str = "current_static",
     t1_membership_available: bool = True,
@@ -1277,6 +1426,9 @@ def build_prepared_scopes_from_union(
             if current_only_facts_by_date is not None
             else {}
         )
+        # ROUND-2.2B: per-T coverage for this union membership.  ``None`` coverage
+        # source (no DB) or a date absent from the map -> coverage unavailable.
+        coverage_t = None if coverage_by_date is None else coverage_by_date.get(t)
 
         # VEC-1: ONE canonical member build for the whole union per trade_date.
         # ``_build_member_observations`` remains the single member-construction
@@ -1306,9 +1458,17 @@ def build_prepared_scopes_from_union(
             # membership so PreparedScope.events stays strictly scope-local (the
             # Scope Core would drop out-of-scope events anyway, but the contract
             # is that a PreparedScope carries ONLY its own members' events).
-            scope_events = tuple(
-                e for e in structure_events if e.member_id in member_set
-            )
+            # ROUND-2.2B: coverage-unavailable -> no events + coverage=None.
+            if coverage_t is None:
+                scope_coverage = None
+                scope_events: tuple[StructureEvent, ...] = ()
+            else:
+                covered = {str(i) for i in coverage_t}
+                scope_coverage = tuple(str(i) for i in coverage_t)
+                scope_events = tuple(
+                    e for e in structure_events
+                    if e.member_id in member_set and e.member_id in covered
+                )
             out[scope_key].append(
                 PreparedScope(
                     scope_type=scope_type,
@@ -1323,6 +1483,7 @@ def build_prepared_scopes_from_union(
                     pit_status_t=pit_status_t,
                     pit_status_t1=pit_status_t1,
                     diagnostics=(),
+                    event_coverage_member_ids=scope_coverage,
                     events=scope_events,
                 )
             )
@@ -1381,12 +1542,18 @@ async def prepare_scopes_from_union(
         )
         for scope_key, (member_ids, scope_name) in scope_members.items()
     ]
+    # ROUND-2.2B: bulk exact-T Event Coverage (one query for all dates), passed
+    # into the pure core.  A date absent from the map -> coverage unavailable.
+    coverage_by_date = await _load_batch_backfill_event_coverage(
+        session, list(union_ctx.bars.keys()), trade_dates
+    )
     return build_prepared_scopes_from_union(
         trade_dates=trade_dates,
         scope_specs=specs,
         union_ctx=union_ctx,
         membership_t1_by_scope=None,          # current-static T==T1
         current_only_facts_by_date=None,      # Current-only unavailable
+        coverage_by_date=coverage_by_date,
         pit_status_t=pit_status_t,
         pit_status_t1=pit_status_t1,
         t1_membership_available=t1_membership_available,
@@ -1425,6 +1592,7 @@ async def prepare_scope(
             pit_status_t="unavailable",
             pit_status_t1="unavailable",
             diagnostics=(MARKET_SKIP_DIAGNOSTIC,),
+            event_coverage_member_ids=None,
         )
 
     # ---- PIT(T) ----
@@ -1489,6 +1657,7 @@ async def prepare_scope(
             pit_status_t=pit_status_t,
             pit_status_t1=pit_status_t1,
             diagnostics=tuple(diagnostics),
+            event_coverage_member_ids=None,
             events=(),
         )
 

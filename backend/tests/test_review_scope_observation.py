@@ -133,6 +133,7 @@ def _run(
     pit_member_ids: list[str] | None = None,
     pit_member_ids_t1: list[str] | None = None,
     events: list[StructureEvent] | None = None,
+    coverage: list[str] | None = None,
 ) -> dict[str, Any]:
     ids = pit_member_ids if pit_member_ids is not None else [m.member_id for m in members]
     return compute_scope_observation(
@@ -143,6 +144,7 @@ def _run(
         pit_member_ids_t1=pit_member_ids_t1,
         members=members,
         events=events or [],
+        event_coverage_member_ids=coverage,
     )
 
 
@@ -897,6 +899,7 @@ def test_structure_events_member_dedupe_and_cells() -> None:
         [_m("a"), _m("b"), _m("c"), _m("d"), _m("e")],
         pit_member_ids=["a", "b", "c", "d", "e"],
         events=events,
+        coverage=["a", "b", "c", "d", "e"],
     )["structure"]
     cells = structure["events"]["cells"]
     bos = cells["leveled"]["BOS_Up_Swing"]
@@ -916,7 +919,7 @@ def test_structure_events_no_level_for_extremes() -> None:
         StructureEvent("b", "EQL"),
     ]
     cells = _run(
-        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events
+        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events, coverage=["a", "b"]
     )["structure"]["events"]["cells"]
     assert "EQH" in cells["extreme"]
     assert cells["extreme"]["EQH"]["event_count"] == 1
@@ -946,6 +949,7 @@ def test_release_volume_ratio_is_member_first_not_event_weighted() -> None:
         ],
         pit_member_ids=["a", "b"],
         events=events,
+        coverage=["a", "b"],
     )
     rel = out["momentum"]["release_volume_ratio"]
     # Member-first: values = [2.0 (a), 10.0 (b)] -> median = 6.0.
@@ -1127,7 +1131,7 @@ def test_release_volume_ratio_ignores_event_stream_entirely() -> None:
         StructureEvent("b", "SQZ_RELEASE", release_volume_ratio=10.0),
     ]
     rel = _run(
-        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events
+        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events, coverage=["a", "b"]
     )["momentum"]["release_volume_ratio"]
     assert rel["status"] == "unavailable"
     assert "CURRENT_SOURCE_UNAVAILABLE" in rel["reason"]

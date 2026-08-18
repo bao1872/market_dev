@@ -651,9 +651,14 @@ def _structure_level_label(internal: bool | None) -> str | None:
 
 def _aggregate_structure_events(
     events: Sequence[StructureEvent],
-    pit_set: set[str],
+    valid_event_members: set[str] | None,
 ) -> dict[str, Any]:
     """Aggregate T-day canonical immutable events into member-ratio facts (PRD §7.4 D).
+
+    ROUND-2.2B Coverage contract: the event denominator is PIT(T) ∩ coverage, NOT
+    ``len(pit_set)``.  ``valid_event_members`` is that intersection.  ``None``
+    means Event Coverage source is unavailable (structure-events unavailable);
+    a set means coverage is valid (possibly empty -> a legal zero-event day).
 
     Cells:
     - BOS / CHoCH / OB_CREATED / OB_ENTERED / OB_MITIGATED:
@@ -675,17 +680,30 @@ def _aggregate_structure_events(
     The event stream is retained here purely as structure-event EVIDENCE.
 
     ``member_count`` dedupes by member_id (a member firing the same cell multiple
-    times in one day still counts once).  Events whose ``member_id`` is not in
-    PIT(T) are ignored.  ``event_count`` may exceed ``member_count``.
+    times in one day still counts once).  ``event_count`` may exceed ``member_count``.
+
+    ROUND-2.2B EVT-COV-05/06: an event whose ``member_id`` is NOT in
+    ``valid_event_members`` (uncovered, or outside PIT) is excluded from the
+    numerator.  ROUND-2.2B EVT-COV-07: a member firing the same cell twice still
+    counts once in ``member_count`` but the raw count is preserved in ``event_count``.
     """
+    # Coverage unavailable -> structure-events unavailable (never a fake denominator=0).
+    if valid_event_members is None:
+        return {
+            "status": "unavailable",
+            "denominator": None,
+            "cells": {"leveled": {}, "extreme": {}},
+        }
+
     cells: dict[tuple, set[str]] = {}
     cells_event_count: dict[tuple, int] = {}
 
-    # member_ratio denominator is PIT(T) member count (PRD §7.4 D grammar), not the
-    # event count.  Events whose member is not PIT(T) are ignored.
-    denominator = len(pit_set)
+    # member_ratio denominator = PIT(T) ∩ coverage (PRD §7.4 D grammar with the
+    # ROUND-2.2B coverage gate), not the event count.
+    denominator = len(valid_event_members)
     for event in events:
-        if event.member_id not in pit_set:
+        if event.member_id not in valid_event_members:
+            # PIT member without coverage / outside PIT -> NOT counted in numerator.
             continue
         etype = event.event_type
         if etype in _RELEASE_EVENTS:
@@ -736,7 +754,10 @@ def _aggregate_structure_events(
     # REVIEW-V23-A-CORRECTION-3: no ``release_volume_ratio`` key here.  The Release
     # Volume Ratio is a member-first Current fact owned by compute_scope_observation
     # (from the canonical per-member snapshot fact), never an event-weighted median.
+    # ROUND-2.2B: coverage valid -> status="ready" (possibly empty cells for a legal
+    # zero-event day).  Never pre-generate a full zero-cell grid (avoid over-design).
     return {
+        "status": "ready",
         "cells": cells_out,
         "denominator": denominator,
     }
@@ -768,6 +789,7 @@ def compute_scope_observation(
     members: Iterable[MemberObservation],
     events: Iterable[StructureEvent] | None = None,
     t1_membership_available: bool = True,
+    event_coverage_member_ids: Iterable[str] | None,
 ) -> dict[str, Any]:
     """Compute objective Canonical Scope Observation facts (PRD §7.2-§7.7).
 
@@ -787,6 +809,14 @@ def compute_scope_observation(
     passed.  This keeps the Current L1 from ever forging a within-T T-1→T
     migration.  Defaults to ``True`` (Historical Dynamics current-static path),
     which preserves the existing behavior exactly.
+
+    ``event_coverage_member_ids`` is REQUIRED (no default).  It is the set of
+    members proven to have exact-T canonical Event lifecycle coverage
+    (conservative canonical-backfill contract, ROUND-2.2B).  ``None`` means the
+    Event Coverage source is unavailable -> structure-events are unavailable
+    (denominator=None, never 0).  A set (possibly empty) means coverage is valid
+    -> denominator = PIT(T) ∩ coverage; a legal zero-event day yields empty cells
+    but a real denominator.
     """
     member_list = list(members)
     pit_set = set(pit_member_ids)
@@ -797,6 +827,12 @@ def compute_scope_observation(
         set()
         if not t1_membership_available
         else (set(pit_member_ids_t1) if pit_member_ids_t1 is not None else set())
+    )
+    # ROUND-2.2B: valid_event_members = PIT(T) ∩ coverage.  None -> unavailable.
+    valid_event_members = (
+        None
+        if event_coverage_member_ids is None
+        else (pit_set & set(event_coverage_member_ids))
     )
     _reject_if_invalid_members(member_list, pit_set)
 
@@ -942,9 +978,11 @@ def compute_scope_observation(
         if m.volatility_phase is not None
         and FirstPyramidSemanticAdapter.squeeze(m.volatility_phase) is not None
     ]
-    # STRUCTURE EVENTS (PRD §7.4 D) — canonical immutable event stream.
+    # STRUCTURE EVENTS (PRD §7.4 D) — canonical immutable event stream, gated by
+    # exact-T Event Coverage (ROUND-2.2B): denominator = PIT(T) ∩ coverage.
     event_facts = _aggregate_structure_events(
-        list(events) if events is not None else [], pit_set
+        list(events) if events is not None else [],
+        valid_event_members,
     )
 
     direction_labels = {

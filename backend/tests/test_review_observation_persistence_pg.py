@@ -104,6 +104,7 @@ def _prep(
         pit_status_t="historical_pit",
         pit_status_t1="historical_pit",
         diagnostics=diagnostics,
+        event_coverage_member_ids=None,
     )
 
 

@@ -111,6 +111,7 @@ def _real_series_item(
         trade_date=trade_date,
         pit_member_ids=["m1"],
         members=[member],
+        event_coverage_member_ids=None,
     )
     return {"trade_date": trade_date.isoformat(), "observation": payload}
 
@@ -180,6 +181,7 @@ def _dual_member_series_item(
         trade_date=trade_date,
         pit_member_ids=["m_a", "m_b"],
         members=[member_a, member_b],
+        event_coverage_member_ids=None,
     )
     return {"trade_date": trade_date.isoformat(), "observation": payload}
 

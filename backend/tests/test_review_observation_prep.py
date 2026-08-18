@@ -183,6 +183,7 @@ def test_added_member_excluded_from_transition() -> None:
         pit_member_ids=["a", "b"],
         pit_member_ids_t1=["a"],  # b added at T -> not in T-1 membership
         members=[a, added],
+        event_coverage_member_ids=None,
     )
     assert out["scope"]["pit_member_count"] == 2
     # even though b has a T-1 state, it is excluded from the transition set.
@@ -197,6 +198,7 @@ def test_removed_member_not_in_provided() -> None:
         pit_member_ids=["a"],
         pit_member_ids_t1=["a", "b"],
         members=[a],
+        event_coverage_member_ids=None,
     )
     assert out["scope"]["provided_member_count"] == 1
     assert out["scope"]["pit_member_count"] == 1
@@ -216,6 +218,7 @@ def test_invariant_checks_all_pass() -> None:
     out = compute_scope_observation(
         scope_type="industry_l1", scope_key="k", trade_date=T,
         pit_member_ids=["a", "b"], pit_member_ids_t1=["a", "b"], members=members,
+        event_coverage_member_ids=None,
     )
     checks = check_observation_invariants(out)
     assert checks, "expected non-empty checks"
@@ -271,6 +274,10 @@ async def _install_mocks(
     async def _fake_load_structure_events(session, ids, trade_date):
         return []
 
+    async def _fake_load_coverage(session, ids, trade_date):
+        # ROUND-2.2B: default coverage unavailable in pure-unit (no RunItem lineage).
+        return None
+
     async def _fake_load_current_only(session, ids, trade_date):
         return current_only or {}
 
@@ -285,6 +292,11 @@ async def _install_mocks(
     monkeypatch.setattr(prep_service, "_load_bar_facts", _fake_load_bar_facts)
     monkeypatch.setattr(
         prep_service, "_load_structure_events", _fake_load_structure_events
+    )
+    monkeypatch.setattr(
+        prep_service,
+        "_load_backfill_event_coverage_member_ids",
+        _fake_load_coverage,
     )
     monkeypatch.setattr(
         prep_service,
@@ -680,7 +692,11 @@ async def test_loader_passes_internal_as_structure_level(monkeypatch) -> None:
     assert ev.event_type == "CHoCH"  # 大小写已 normalize
 
     # 内部事件聚合为 Internal；price level 不进入 cell key。
-    agg = _aggregate_structure_events(events=events, pit_set={"INST1"})
+    # ROUND-2.2B: valid_event_members = PIT ∩ coverage = {INST1}.
+    agg = _aggregate_structure_events(
+        events=events, valid_event_members={"INST1"}
+    )
+    assert agg["status"] == "ready"
     cell = agg["cells"]["leveled"]["CHoCH_Up_Internal"]
     assert cell["member_count"] == 1
     assert "level" not in cell  # price level 已从聚合 key 移除

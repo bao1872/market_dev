@@ -290,8 +290,23 @@ def test_batch_series_equals_per_date_path(monkeypatch) -> None:
     async def fake_batch_events(session, instrument_ids, trade_dates):
         return {d: events.get(d, []) for d in trade_dates}
 
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        # ROUND-2.2B: full coverage for all members on all dates (events can aggregate).
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
+    async def fake_coverage(session, instrument_ids, trade_date):
+        return frozenset(instrument_ids)
+
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_backfill_event_coverage_member_ids",
+        fake_coverage,
     )
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_states", fake_batch_states
@@ -501,7 +516,7 @@ def test_vectorized_volume_hit_count_and_fallback_reason():
 
 
 def test_batch_series_loads_each_bulk_reader_exactly_once(monkeypatch) -> None:
-    calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0}
+    calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0, "coverage": 0}
 
     async def fake_calendar(session, trade_dates):
         calls["calendar"] += 1
@@ -519,6 +534,10 @@ def test_batch_series_loads_each_bulk_reader_exactly_once(monkeypatch) -> None:
         calls["events"] += 1
         return {}
 
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        calls["coverage"] += 1
+        return {}
+
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
     )
@@ -530,6 +549,10 @@ def test_batch_series_loads_each_bulk_reader_exactly_once(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_events
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
     )
 
     many_dates = [T1, T1 + timedelta(days=1), T1 + timedelta(days=2), T1 + timedelta(days=3)]
@@ -543,7 +566,7 @@ def test_batch_series_loads_each_bulk_reader_exactly_once(monkeypatch) -> None:
     out = asyncio.run(scenario())
     assert len(out) == len(many_dates)
     # Each bulk reader is invoked exactly once regardless of the number of dates.
-    assert calls == {"calendar": 1, "states": 1, "bars": 1, "events": 1}
+    assert calls == {"calendar": 1, "states": 1, "bars": 1, "events": 1, "coverage": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +591,9 @@ def test_batch_series_never_loads_current_only_facts(monkeypatch) -> None:
     async def fake_events(session, instrument_ids, trade_dates):
         return {}
 
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
     async def boom(session, instrument_ids, trade_date):
         raise AssertionError("current-only snapshot loader must not run for historical T")
 
@@ -582,6 +608,10 @@ def test_batch_series_never_loads_current_only_facts(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_events
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
     )
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_current_only_snapshot_facts",
@@ -650,7 +680,7 @@ def test_reconstruct_scope_series_batch_loads_union_once_and_matches_per_scope(
         fake_resolve,
     )
 
-    calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0}
+    calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0, "coverage": 0}
 
     all_bars = {
         id_a: [_bar(id_a, PREV, 9.0), _bar(id_a, T1, 10.0), _bar(id_a, T2, 11.0)],
@@ -697,6 +727,13 @@ def test_reconstruct_scope_series_batch_loads_union_once_and_matches_per_scope(
         calls["events"] = calls.get("events", 0) + 1
         return {d: events.get(d, []) for d in trade_dates}
 
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        calls["coverage"] = calls.get("coverage", 0) + 1
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
+    async def fake_coverage(session, instrument_ids, trade_date):
+        return frozenset(instrument_ids)
+
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
     )
@@ -708,6 +745,14 @@ def test_reconstruct_scope_series_batch_loads_union_once_and_matches_per_scope(
     )
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_events
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_backfill_event_coverage_member_ids",
+        fake_coverage,
     )
 
     async def scenario():
@@ -731,9 +776,9 @@ def test_reconstruct_scope_series_batch_loads_union_once_and_matches_per_scope(
     batch, per_a, per_b, batch_calls, per_calls = asyncio.run(scenario())
 
     # 1) Batch path loads the union ONCE (shared), not once per scope.
-    assert batch_calls == {"calendar": 1, "states": 1, "bars": 1, "events": 1}
-    # Per-scope path (baseline) reloads each scope independently -> 2x.
-    assert per_calls == {"calendar": 2, "states": 2, "bars": 2, "events": 2}
+    assert batch_calls == {"calendar": 1, "states": 1, "bars": 1, "events": 1, "coverage": 1}
+    # Per-scope path (baseline) reloads each scope independently -> 2x (batch coverage once per scope).
+    assert per_calls == {"calendar": 2, "states": 2, "bars": 2, "events": 2, "coverage": 2}
 
     # 2) Per-scope results byte-identical to independent per-scope reconstruction.
     by_key = {r["scope"]["scope_key"]: r for r in batch}
@@ -774,7 +819,7 @@ def test_reconstruct_scope_series_batch_chunks_when_union_exceeds_cap(
         fake_resolve,
     )
 
-    calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0}
+    calls: dict[str, int] = {"calendar": 0, "states": 0, "bars": 0, "events": 0, "coverage": 0}
 
     async def fake_calendar(session, trade_dates):
         calls["calendar"] += 1
@@ -792,6 +837,10 @@ def test_reconstruct_scope_series_batch_chunks_when_union_exceeds_cap(
         calls["events"] += 1
         return {}
 
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        calls["coverage"] += 1
+        return {}
+
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
     )
@@ -804,6 +853,10 @@ def test_reconstruct_scope_series_batch_chunks_when_union_exceeds_cap(
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_events
     )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
+    )
 
     async def scenario():
         # cap=1 -> each disjoint scope (1 member) is its own chunk -> 4 loads.
@@ -814,7 +867,7 @@ def test_reconstruct_scope_series_batch_chunks_when_union_exceeds_cap(
 
     out = asyncio.run(scenario())
     assert len(out) == 4
-    assert calls == {"calendar": 4, "states": 4, "bars": 4, "events": 4}
+    assert calls == {"calendar": 4, "states": 4, "bars": 4, "events": 4, "coverage": 4}
 
 
 # ---------------------------------------------------------------------------
@@ -872,6 +925,21 @@ def _install_union_mocks(
         _calls("events")
         return {d: events.get(d, []) for d in trade_dates}
 
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        _calls("coverage")
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
+    async def fake_coverage(session, instrument_ids, trade_date):
+        return frozenset(instrument_ids)
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_backfill_event_coverage_member_ids",
+        fake_coverage,
+    )
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_calendar",
         fake_calendar,
@@ -1076,13 +1144,13 @@ def test_vec1_scope_observation_equals_single_scope_path(monkeypatch):
             scope_type=p.scope_type, scope_key=p.scope_key,
             trade_date=p.trade_date, pit_member_ids=p.pit_member_ids,
             pit_member_ids_t1=p.pit_member_ids_t1, members=p.members,
-            events=p.events,
+            events=p.events, event_coverage_member_ids=p.event_coverage_member_ids,
         )
         obs_s = compute_scope_observation(
             scope_type=s.scope_type, scope_key=s.scope_key,
             trade_date=s.trade_date, pit_member_ids=s.pit_member_ids,
             pit_member_ids_t1=s.pit_member_ids_t1, members=s.members,
-            events=s.events,
+            events=s.events, event_coverage_member_ids=s.event_coverage_member_ids,
         )
         assert obs_g == obs_s, f"observation mismatch at {p.trade_date}"
 
@@ -1299,11 +1367,13 @@ def test_vec1_event_isolation_multi_scope(monkeypatch):
         pit_member_ids=a_t1.pit_member_ids,
         pit_member_ids_t1=a_t1.pit_member_ids_t1,
         members=a_t1.members, events=a_t1.events,
+        event_coverage_member_ids=a_t1.event_coverage_member_ids,
     )
     obs_a_union = compute_scope_observation(
         scope_type="concept", scope_key="A", trade_date=T1,
         pit_member_ids=a_t1.pit_member_ids,
         pit_member_ids_t1=a_t1.pit_member_ids_t1,
         members=a_t1.members, events=tuple(events[T1]),
+        event_coverage_member_ids=a_t1.event_coverage_member_ids,
     )
     assert obs_a_local == obs_a_union
