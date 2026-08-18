@@ -1114,7 +1114,10 @@ def test_vec1_scope_isolation_missing_state_boundary(monkeypatch):
     states = {
         PREV: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
         T1: {id_a: _state(1), id_b: _state(1), id_shared: _state(1)},
-        # At T2 the shared member has NO valid state -> must be excluded everywhere.
+        # At T2 the shared member has NO valid state, but it is STILL a PIT member
+        # of both A and B -> retained (state-derived facts unavailable).  This is
+        # the GAP-L1-MEMBER-GATE contract: member existence is by PIT membership,
+        # NOT by daily-state availability.
         T2: {id_a: _state(1), id_b: _state(1)},
     }
     trading_days = [PREV, T1, T2]

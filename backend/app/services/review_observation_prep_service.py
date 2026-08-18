@@ -22,6 +22,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from typing import Any
 
 import numpy as np
 from sqlalchemy import select
@@ -29,9 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.member_fact import (
     DailyBarFact,
-    number as coerce_number,
     previous_state_to_flat,
     state_to_continuous,
+)
+from app.domain.review.member_fact import (
+    number as coerce_number,
 )
 from app.domain.review.scope_observation import MemberObservation, StructureEvent
 from app.models.bar import BarDaily

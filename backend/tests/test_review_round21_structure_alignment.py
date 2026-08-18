@@ -118,3 +118,58 @@ def test_align_mixed_members_only_valid_counted() -> None:
     al = _scope(members).get("structure", {}).get("alignment", {})
     assert al.get("denominator") == 1
     assert al.get("aligned_count") == 1
+
+
+def _align_of(state: dict):
+    """Run the full formal chain previous_state_to_flat -> member -> scope."""
+    flat = previous_state_to_flat(state)
+    raw = RawMemberFacts(member_id="m", flat_t=flat, close_t=10.0, amount_t=100.0)
+    member = build_member_observation(raw)
+    al = _scope([member]).get("structure", {}).get("alignment", {})
+    return member.structure_alignment_categorical, al
+
+
+def test_align_missing_01_no_biases_no_alignment() -> None:
+    """ALIGN-MISSING-01: nonempty state + NO swing/internal bias -> alignment None.
+
+    AUDIT-FIX-01 (P1): a non-empty state payload with structure_alignment absent
+    AND both biases absent must NOT derive a fake 共振 (the old ``None != 0`` bug
+    made None==None -> 共振).  missing -> unavailable, not aligned.
+    """
+    cat, al = _align_of({"regime_value": 1})
+    assert cat is None
+    assert al.get("denominator") == 0
+    assert al.get("aligned_count", 0) == 0
+
+
+def test_align_missing_02_only_one_bias_no_alignment() -> None:
+    """ALIGN-MISSING-02: only ONE bias present -> alignment None (unavailable)."""
+    # only swing_bias present, internal_bias absent
+    cat, al = _align_of({"regime_value": 1, "swing_bias": 1})
+    assert cat is None
+    assert al.get("denominator") == 0
+    # only internal_bias present, swing_bias absent
+    cat2, al2 = _align_of({"regime_value": 1, "internal_bias": -1})
+    assert cat2 is None
+    assert al2.get("denominator") == 0
+
+
+def test_align_missing_03_nonnumeric_or_nan_bias_no_alignment() -> None:
+    """ALIGN-MISSING-03: non-numeric / NaN bias -> alignment None, not derived."""
+    # non-numeric bias values
+    cat, _ = _align_of({"regime_value": 1, "swing_bias": "up", "internal_bias": "down"})
+    assert cat is None
+    # NaN bias (NaN != 0 was True; must be treated as missing, not a signal)
+    cat2, _ = _align_of({"regime_value": 1, "swing_bias": float("nan"), "internal_bias": 1})
+    assert cat2 is None
+    # bool bias is not a valid numeric bias
+    cat3, _ = _align_of({"regime_value": 1, "swing_bias": True, "internal_bias": False})
+    assert cat3 is None
+
+
+def test_align_missing_04_valid_both_biases_still_derived() -> None:
+    """Guard: two valid non-zero numeric biases still derive 共振/背离 (no regression)."""
+    cat, al = _align_of({"regime_value": 1, "swing_bias": 1, "internal_bias": -1})
+    assert cat == "背离"
+    assert al.get("denominator") == 1
+    assert al.get("divergent_count") == 1

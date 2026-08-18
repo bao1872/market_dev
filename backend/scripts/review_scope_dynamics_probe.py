@@ -2758,6 +2758,43 @@ def _read_lineage_rows(dataset_dir: str, stem: str) -> list[dict]:
     return list(_iter_jsonl_gz(path))
 
 
+def _accepted_exact_t_snapshot_run_ids(
+    dataset_dir: str, asof_date: date
+) -> frozenset[str]:
+    """SINGLE owner for "accepted Current snapshot run at exact-T".
+
+    AUDIT-FIX-01 (B.4): the Snapshot readiness decision previously existed twice —
+    the Integrity Gate checked only the parquet date range, while Replay Selection
+    checked status==succeeded + published_at!=null + trade_date==asof.  That drift is
+    closed by having BOTH consumers use this one owner.
+
+    A snapshot run is consumable iff it is:
+      - a snapshot RUN lineage row (not a snapshot fact),
+      - status == succeeded,
+      - published_at is not None,
+      - trade_date == asof (exact-T, never a later backfill or earlier day).
+    """
+    # Run-gate constant owned by the production prep service — never redefined here
+    # (a second copy would silently drift).  Same single source as Replay Selection.
+    from app.services.review_observation_prep_service import (
+        _SNAPSHOT_RUN_CONSUMABLE_STATUS,
+    )
+
+    run_rows = _read_lineage_rows(dataset_dir, "stock_feature_snapshot_runs")
+    accepted: set[str] = set()
+    asof_iso = asof_date.isoformat()
+    for r in run_rows:
+        if (
+            r.get("status") == _SNAPSHOT_RUN_CONSUMABLE_STATUS
+            and r.get("published_at") is not None
+            and str(r.get("trade_date") or "")[:10] == asof_iso
+        ):
+            rid = r.get("id")
+            if rid:
+                accepted.add(str(rid))
+    return frozenset(accepted)
+
+
 @dataclass(frozen=True)
 class ReplaySelection:
     """The Selection resolved BEFORE any large fact domain is scanned (R0-C1).
@@ -2802,12 +2839,10 @@ def _build_replay_selection(
     prove intersection availability (a snapshot existing only at 08-17 would be absent
     at the min result).  No latest backfill is ever performed.
     """
-    # Window / run-gate constants are owned by the production prep service —
-    # never redefined here (a second copy would silently drift).
-    from app.services.review_observation_prep_service import (
-        _BAR_LOOKBACK_DAYS,
-        _SNAPSHOT_RUN_CONSUMABLE_STATUS,
-    )
+    # Window constant owned by the production prep service — never redefined here.
+    # (The snapshot run-gate constant now lives solely in the shared
+    # ``_accepted_exact_t_snapshot_run_ids`` owner.)
+    from app.services.review_observation_prep_service import _BAR_LOOKBACK_DAYS
 
     declared_asof_str = _dataset_asof(dataset_dir)
     if asof_override is not None:
@@ -2839,18 +2874,8 @@ def _build_replay_selection(
     t1_date = trading_days[idx - 1] if idx > 0 else None
     bar_window_start = asof_date - timedelta(days=_BAR_LOOKBACK_DAYS)
 
-    # accepted Current snapshot runs at exact-T (run gate lineage, small).
-    run_rows = _read_lineage_rows(dataset_dir, "stock_feature_snapshot_runs")
-    accepted: set[str] = set()
-    for r in run_rows:
-        if (
-            r.get("status") == _SNAPSHOT_RUN_CONSUMABLE_STATUS
-            and r.get("published_at") is not None
-            and str(r.get("trade_date") or "")[:10] == asof_date.isoformat()
-        ):
-            rid = r.get("id")
-            if rid:
-                accepted.add(str(rid))
+    # accepted Current snapshot runs at exact-T (single shared owner, AUDIT-FIX-01).
+    accepted = _accepted_exact_t_snapshot_run_ids(dataset_dir, asof_date)
 
     declared_asof = (
         date.fromisoformat(declared_asof_str) if declared_asof_str else None
@@ -3269,20 +3294,32 @@ def _check_dataset_integrity(dataset_dir: str) -> list[str]:
                     f"需查 upstream 是否真缺）"
                 )
         elif kind == "point_in_time":
-            # point_in_time: 只要求 declared asof 当天存在 snapshot run
+            # point_in_time: 只要求 declared asof 当天存在 CONSUMABLE snapshot run。
+            # AUDIT-FIX-01 (B.4): 复用唯一 shared owner
+            # ``_accepted_exact_t_snapshot_run_ids``（status==succeeded &&
+            # published_at!=null && trade_date==asof），消除与 Replay Selection 的
+            # contract drift。不再用 parquet 日期范围近似判定。
             if declared_asof is None:
                 violations.append(
                     f"Dataset Integrity Gap [point_in_time]: {stem} manifest 未声明 asof"
                 )
-            elif lo is None or hi is None or not (
-                date.fromisoformat(str(declared_asof)[:10]) >= lo
-                and date.fromisoformat(str(declared_asof)[:10]) <= hi
-            ):
-                violations.append(
-                    f"Dataset Integrity Gap [point_in_time]: {stem} declared asof "
-                    f"{declared_asof} 无 exact-asof snapshot run（需 succeeded/published）"
-                )
-            # declared asof 当天有 snapshot run 即正常，不要求每天都有
+            else:
+                try:
+                    asof_date = date.fromisoformat(str(declared_asof)[:10])
+                except ValueError:
+                    violations.append(
+                        f"Dataset Integrity Gap [point_in_time]: {stem} manifest asof "
+                        f"{declared_asof} 不是合法日期"
+                    )
+                    continue
+                accepted = _accepted_exact_t_snapshot_run_ids(dataset_dir, asof_date)
+                if not accepted:
+                    violations.append(
+                        f"Dataset Integrity Gap [point_in_time]: {stem} declared asof "
+                        f"{declared_asof} 无 CONSUMABLE exact-asof snapshot run "
+                        f"(status==succeeded && published_at!=null)"
+                    )
+                # declared asof 当天有 consumable snapshot run 即正常，不要求每天都有
         elif kind == "sparse_event":
             # sparse_event: 不能用 max(event_time) 判 coverage。
             # 当前 corpus 缺独立 coverage evidence → 记 EVIDENCE_MISSING，不判 gap。
@@ -3681,56 +3718,53 @@ _L1_RTM_ROWS: list[dict] = [
     # ---- STRUCTURE EVENTS（08-07 真实事件流）----
     # 真实结构：structure.events.cells.leveled.<EVENT>_<dir>_<level>
     #   → {"event_count", "member_count", "member_ratio"}；denominator = len(pit_set)。
-    {"fact": "BOS Event Ratio", "ev": "BOS", "prd": "PRD §7.4 D Event aggregation",
-     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
-     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
+    # AUDIT-FIX-01 (B.5/B.6): probe 只收集正式 cell evidence，不再 Σ member_ratio
+    # （那是 probe 自造的二次 aggregation）。Event coverage contract 仍 OPEN：
+    # 行存在 ≠ coverage，故这些 fact 一律标 COVERAGE_CONTRACT_OPEN，不标最终 PASS。
+    {"fact": "BOS cells", "ev": "BOS", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "formal cell evidence (event_count/member_count/member_ratio)",
+     "universe": "PIT(T)∩event-coverage", "denominator": "per-cell",
      "evidence_date": "2026-08-07",
-     "note": "08-07 有真实事件数据；EXPLORE-1 验证 denominator 是否含 event-coverage"},
-    {"fact": "CHoCH Event Ratio", "ev": "CHoCH", "prd": "PRD §7.4 D Event aggregation",
-     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
-     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
-     "evidence_date": "2026-08-07"},
-    {"fact": "OB Created Event Ratio", "ev": "OB_CREATED", "prd": "PRD §7.4 D Event aggregation",
-     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
-     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
-     "evidence_date": "2026-08-07"},
-    {"fact": "EQH Event Ratio", "ev": "EQH", "prd": "PRD §7.4 D Event aggregation",
-     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
-     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
-     "evidence_date": "2026-08-07"},
-    {"fact": "EQL Event Ratio", "ev": "EQL", "prd": "PRD §7.4 D Event aggregation",
-     "source": "first_pyramid_events", "aggregation": "Σ member_ratio over levels/dirs",
-     "universe": "PIT(T)∩event-coverage", "denominator": "pit_set_len (EXPLORE-1)",
-     "evidence_date": "2026-08-07"},
+     "event": True, "note": "cell evidence only; overall ratio needs Event Coverage Contract (OPEN)"},
+    {"fact": "CHoCH cells", "ev": "CHoCH", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "formal cell evidence",
+     "universe": "PIT(T)∩event-coverage", "denominator": "per-cell",
+     "evidence_date": "2026-08-07", "event": True},
+    {"fact": "OB Created cells", "ev": "OB_CREATED", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "formal cell evidence",
+     "universe": "PIT(T)∩event-coverage", "denominator": "per-cell",
+     "evidence_date": "2026-08-07", "event": True},
+    {"fact": "EQH cells", "ev": "EQH", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "formal cell evidence",
+     "universe": "PIT(T)∩event-coverage", "denominator": "per-cell",
+     "evidence_date": "2026-08-07", "event": True},
+    {"fact": "EQL cells", "ev": "EQL", "prd": "PRD §7.4 D Event aggregation",
+     "source": "first_pyramid_events", "aggregation": "formal cell evidence",
+     "universe": "PIT(T)∩event-coverage", "denominator": "per-cell",
+     "evidence_date": "2026-08-07", "event": True},
 ]
 
 
-def _extract_event_ratio(obs: dict, event_type: str) -> Any:
-    """Sum member_ratio across all levels/directions for an event type.
+def _extract_event_cells(obs: dict, event_type: str) -> dict[str, dict]:
+    """Return the FORMAL production event cells for ``event_type`` (cell evidence).
 
-    Returns None when the events subtree is absent (so it is honestly reported
-    as SOURCE_UNAVAILABLE rather than coerced to 0).
+    AUDIT-FIX-01 (B.5/B.6): the probe previously summed ``member_ratio`` across
+    all directions/levels for an event type.  That was a SECOND aggregation the
+    production Core never defines — a member firing BOS_up_Swing AND BOS_up_Internal
+    on the same day was counted twice.  Probe only collects evidence; it must not
+    invent business formulas.  This returns the exact cells produced by the Core
+    (``structure.events.cells.leveled.<EVENT>_<dir>_<level>``) with their own
+    ``event_count`` / ``member_count`` / ``member_ratio``.
     """
     events = obs.get("structure", {}).get("events")
     if not isinstance(events, dict):
-        return None
+        return {}
     cells = events.get("cells", {})
     leveled = cells.get("leveled", {})
     if not isinstance(leveled, dict):
-        return None
+        return {}
     prefix = f"{event_type}_"
-    total = 0.0
-    n = 0
-    for key, cell in leveled.items():
-        if not key.startswith(prefix):
-            continue
-        mr = cell.get("member_ratio")
-        if isinstance(mr, (int, float)):
-            total += mr
-            n += 1
-    if n == 0:
-        return None
-    return total
+    return {k: v for k, v in leveled.items() if k.startswith(prefix)}
 
 
 def _extract_l1_fact(obs: dict, path: str) -> Any:
@@ -3882,11 +3916,15 @@ def _run_semantic_matrix(
         scope = runs[ed]["results"][rep_key[ed]]
         rows_sel = runs[ed]["selected_rows"]
         if row.get("ev"):
-            val = _extract_event_ratio(obs, row["ev"])
-            # Event denominator = structure.events.denominator (== len(pit_set)).
+            # AUDIT-FIX-01 (B.5/B.6/B.7): inspect the FORMAL production event cells
+            # (cell evidence, no Σ member_ratio).  Event row existence (avail) is
+            # NOT coverage — the Event Coverage Contract is OPEN, so event facts are
+            # never marked final PASS.
+            cells = _extract_event_cells(obs, row["ev"])
             ev_struct = obs.get("structure", {}).get("events")
             denom_val = ev_struct.get("denominator") if isinstance(ev_struct, dict) else None
-            avail = rows_sel.get("event_rows_selected", 0) or 0
+            # Event availability is gated by the OPEN coverage contract, not rows.
+            avail = 1  # placeholder; event status is decided by the event branch below
         else:
             val = _extract_l1_fact(obs, row["path"])
             denom_val = _rtm_denominator(obs, row, scope)
@@ -3913,6 +3951,21 @@ def _run_semantic_matrix(
             if isinstance(obs.get("scope"), dict) else 0
         )
         source_ready = bool(avail and avail > 0)
+
+        # Event facts: coverage contract is OPEN → COVERAGE_CONTRACT_OPEN (never
+        # final PASS).  Evidence shown is the FORMAL cells; no Σ member_ratio.
+        if row.get("event"):
+            val = cells
+            status = "COVERAGE_CONTRACT_OPEN"
+            n_algo += 1
+            gap = "event-coverage-OPEN"
+            actual = _fmt_rtm_value(val)
+            print(f"{row['fact']:24} {row['prd'][:22]:22} {row['source'][:20]:20} "
+                  f"{row['aggregation'][:26]:26} {str(denom_val):10} "
+                  f"{'n/a':8} {ed:10} {status:20} {gap}")
+            if row.get("note"):
+                print(f"    ↳ note: {row['note']}")
+            continue
 
         # Five-state adjudication.
         if not source_ready:
