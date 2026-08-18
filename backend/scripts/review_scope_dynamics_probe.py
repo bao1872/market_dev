@@ -4052,17 +4052,23 @@ def _three_rankings(
 
 def _coverage_leader_set(
     aligned_ranked: list[_AlignedLeadership] | None, coverage: float
-) -> list[_AlignedLeadership]:
+) -> list[_AlignedLeadership] | None:
     """Direction-aligned coverage leader set (CORRECTION-2, Candidate B).
 
     Consumes ONLY ``aligned_score`` (never raw contribution).  Members with
     ``aligned_score > 0`` (direction-consistent contributors) sorted DESC, then the
     MINIMAL prefix whose cumulative positive aligned_score reaches ``coverage``.
 
+    Returns:
+      - ``None`` when ``aligned_ranked is None`` (R3 unavailable / no prevailing
+        direction) — the leader set is UNAVAILABLE, NOT an empty set.
+      - ``[]`` when ``aligned_ranked`` is valid but NO member has aligned_score>0
+        (legitimate empty leader set: no member pushes the prevailing direction).
+
     ``coverage`` here is a RESEARCH parameter, NOT a frozen production contract.
     """
-    if not aligned_ranked:
-        return []
+    if aligned_ranked is None:
+        return None
     pos = [x for x in aligned_ranked if x.aligned_score > 0.0]
     total_pos = sum(x.aligned_score for x in pos)
     if total_pos <= 0.0:
@@ -4088,6 +4094,21 @@ def _retention(prev_ids: list[str], curr_ids: list[str]) -> float:
     return len(set(prev_ids) & set(curr_ids)) / len(prev_ids)
 
 
+def _jaccard(prev_ids: list[str], curr_ids: list[str]) -> float:
+    """Jaccard stability: |prev ∩ curr| / |prev ∪ curr| (Stage Final Mapping).
+
+    Sensitive to BOTH exits (old leaders gone) and entrants (new leaders added),
+    unlike retention which is blind to expansion.  If the union is empty, undefined
+    (returns nan).  This is the Migration PRIMARY research candidate.
+    """
+    sp = set(prev_ids)
+    sc = set(curr_ids)
+    union = sp | sc
+    if not union:
+        return float("nan")
+    return len(sp & sc) / len(union)
+
+
 def _run_leadership_research(
     dataset_dir: str,
     *,
@@ -4096,23 +4117,37 @@ def _run_leadership_research(
     asof_lock: str | None = None,
     dry_run: bool = False,
 ) -> int:
-    """Stage-2 research: observe real local-data Leadership dynamics.
+    """LEADERSHIP-MAPPING-FINAL-CLOSURE research (last mapping round).
 
     Uses ONLY the local frozen Dataset + the Stage-1 Leadership contribution
-    owner.  NO formal Migration conclusion is produced — the goal is to see how
-    leaders change across T-1 -> T so the Stage-3 contract can pick a stable,
-    explainable metric (NOT a hardcoded Top-N / Spearman threshold).
+    owner + the canonical scope ``equal_weight_return`` direction.  NO formal
+    Migration conclusion and NO frozen contract is produced — the goal is to give
+    the Stage-3 contract the final data evidence on two open questions:
+      A) which coverage leader-set size (40/50/60%);
+      B) T-1 vs T leader-set comparison (Previous Retention vs Jaccard Stability).
 
-    Outputs per representative scope (from the versioned fixture):
-      * Top3/Top5/Top10 day-over-day overlap distribution
-      * Spearman rank correlation distribution
-      * Entrants / Exits distribution (into/out of Top-N)
-      * Top3/Top5 contribution concentration (what share leaders hold)
-      * missing / rankable counts
+    Per scope (from the versioned fixture) x each coverage (0.40/0.50/0.60):
+      * Leader Count        mean/p25/p50/p75
+      * Leader Fraction     (leader_count / rankable) mean/p25/p50/p75
+      * Previous Retention  mean/p25/p50/p75
+      * Jaccard Stability   mean/p25/p50/p75
+      * valid / unavailable transition counts + EW unavailable / zero-direction days
 
-    NO-MIGRATION: only loads Dataset, calls the shared contribution owner and
-    computes research statistics; no DB, no SSH, no remote PG, no parallel owner,
-    no Migration decision.
+    Per scope/date the Stage-1 contribution, canonical EW and aligned ranking are
+    computed ONCE; all three coverage leader sets reuse that same aligned ranking
+    (no per-threshold recompute).
+
+    Semantics (CORRECTION-2 + FINAL):
+      * R3 unavailable (EW None or ==0) -> leader set = None (unavailable), never 0
+        and never a member_id pseudo-rank.
+      * R3 valid but no aligned_score>0 -> leader set = [] (legitimate empty),
+        distinct from unavailable.
+      * Jaccard = |A∩B| / |A∪B|; Retention = |A∩B| / |A| (empty side -> nan).
+
+    OUT OF SCOPE (banned this round): Spearman, Top3/Top10, composite score,
+    stable/migrating classification, formal Migration owner, concept eligibility.
+    NO-MIGRATION: only loads Dataset + calls the shared owners; no DB, no SSH, no
+    remote PG, no parallel owner, no Migration decision.
     """
     if dry_run:
         print(
@@ -4184,13 +4219,6 @@ def _run_leadership_research(
         prep_fallback_reasons=[],
     )
 
-    from statistics import mean, median
-
-    # Stage-2B: per-scope/date we build ONE set of Stage-1 contribution facts and
-    # derive R1/R2/R3 rankings + concentrations + candidates from it.  All
-    # retention/entrant/exit metrics reuse the same per-date ranked structures.
-    coverage_vals = [0.5]  # research-only coverage thresholds (not frozen).
-
     for spec in scope_specs:
         sk = spec.scope_key
         series = prepared.get(sk)
@@ -4198,24 +4226,20 @@ def _run_leadership_research(
             logger.error("[leadership-research] scope %s 未对齐", sk)
             continue
 
-        # ---- Per-date: three rankings + concentrations + candidate leader sets ----
-        # R3 / Candidate A / Candidate B require a canonical, NONZERO equal_weight_return
-        # direction.  EW unavailable (None) and EW exactly 0 (no prevailing direction)
-        # are tracked separately and NEVER produce a direction-aligned leader ranking.
+        # ---- Per-date: compute contribution + canonical EW + aligned ranking ONCE,
+        # then derive leader sets for every research coverage from that SAME aligned
+        # ranking (no per-threshold recompute).  R3 / coverage leader sets require a
+        # canonical NONZERO equal_weight_return direction; EW unavailable (None) and
+        # EW exactly 0 are tracked separately and never produce a leader ranking.
         from app.domain.review.analysis.leadership_contribution import (
             compute_member_leadership_contributions,
         )
         from app.domain.review.scope_observation import compute_scope_observation
 
-        r1_daily: list[list[Any]] = []
-        r2_daily: list[list[Any]] = []
         r3_daily: list[list[_AlignedLeadership] | None] = []
-        r3_direction: list[int] = []          # +1/-1/0 (0 = no prevailing / unavailable)
+        r3_direction: list[int] = []          # +1/-1/0
         ew_unavailable_days: list[date] = []
         ew_zero_days: list[date] = []
-        r2_top5_conc: list[float] = []        # R2 absolute concentration
-        r3_top5_conc: list[float] = []        # R3 direction-positive concentration
-        cov_leader_sets: list[list[_AlignedLeadership]] = []  # Candidate B
         daily_rankable: list[int] = []
         missing_rate: list[float] = []
         for ps in series:
@@ -4233,123 +4257,34 @@ def _run_leadership_research(
                 event_coverage_member_ids=ps.event_coverage_member_ids,
             )
             ew_return = (obs or {}).get("price", {}).get("equal_weight_return")
-            r1, r2, r3, direction = _three_rankings(members, ew_return)
-            r1_daily.append(r1)
-            r2_daily.append(r2)
+            _, _, r3, direction = _three_rankings(members, ew_return)
             r3_daily.append(r3)
             r3_direction.append(direction)
             if ew_return is None:
                 ew_unavailable_days.append(ps.trade_date)
             elif direction == 0:
                 ew_zero_days.append(ps.trade_date)
-            daily_rankable.append(len(r1))
-
             facts = compute_member_leadership_contributions(members)
+            daily_rankable.append(facts.rankable_count)
             total_all = len(facts.members)
             daily_missing_rate = (
                 facts.missing_count / total_all if total_all else 0.0
             )
             missing_rate.append(daily_missing_rate)
 
-            # R2 absolute concentration: Top5 |c| / sum |all rankable c|.
-            total_abs = sum(abs(c.contribution or 0.0) for c in r2)
-            r2_top5_conc.append(
-                float("nan")
-                if (not r2 or total_abs == 0.0)
-                else sum(abs(c.contribution or 0.0) for c in r2[:5]) / total_abs
-            )
-            # R3 direction-positive concentration: Top5 max(aligned,0) /
-            # sum(max(aligned,0)) — ONLY aligned_score, never raw contribution.
-            if r3 is None:
-                r3_top5_conc.append(float("nan"))
-            else:
-                r3_pos = [x for x in r3 if x.aligned_score > 0.0]
-                total_dir_pos = sum(x.aligned_score for x in r3_pos)
-                r3_top5_conc.append(
-                    float("nan")
-                    if (not r3_pos or total_dir_pos == 0.0)
-                    else sum(x.aligned_score for x in r3_pos[:5]) / total_dir_pos
-                )
-            # Candidate B leader set (coverage on aligned_score, research-only).
-            cov_leader_sets.append(
-                _coverage_leader_set(r3, coverage_vals[0])
-            )
+        # ---- Coverage leader sets, computed ONCE per coverage from the shared
+        # per-date aligned ranking.  A day is a VALID transition iff BOTH T-1 and T
+        # have a prevailing (nonzero) EW direction AND a valid aligned ranking.  For
+        # such days the leader set may still be a legitimate empty set (no member
+        # aligned_score>0), which is DISTINCT from unavailable.
+        coverages = [0.40, 0.50, 0.60]
+        # per coverage: leader_sets[day] -> list | None
+        cov_sets: dict[float, list[list[_AlignedLeadership] | None]] = {
+            c: [_coverage_leader_set(r3, c) for r3 in r3_daily] for c in coverages
+        }
 
-        # ---- Day-over-day candidate retention (T-1 -> T) ----
-        def _eff_top(ranked: list[Any], n: int) -> list[str]:
-            eff = max(1, min(n, len(ranked)))
-            return [c.member_id for c in ranked[:eff]]
-
-        r1_ret: list[float] = []
-        r2_ret: list[float] = []
-        r3_ret: list[float] = []
-        cov_ret: list[float] = []
-        cov_leader_count: list[int] = []
-        cov_leader_fraction: list[float] = []
-        spearman: list[float] = []
-        for i in range(1, len(r1_daily)):
-            r1_ret.append(
-                _retention(_eff_top(r1_daily[i - 1], 5), _eff_top(r1_daily[i], 5))
-            )
-            r2_ret.append(
-                _retention(_eff_top(r2_daily[i - 1], 5), _eff_top(r2_daily[i], 5))
-            )
-            # R3 / Candidate A / Candidate B are only defined when BOTH T-1 and T
-            # have a prevailing direction (nonzero EW).  Otherwise mark nan.
-            if (
-                r3_daily[i - 1] is None or r3_daily[i] is None
-                or r3_direction[i - 1] == 0 or r3_direction[i] == 0
-            ):
-                r3_ret.append(float("nan"))
-                cov_ret.append(float("nan"))
-                cov_leader_count.append(0)
-                cov_leader_fraction.append(float("nan"))
-            else:
-                r3_ret.append(
-                    _retention(
-                        _eff_top(r3_daily[i - 1], 5),
-                        _eff_top(r3_daily[i], 5),
-                    )
-                )
-                cov_prev = [x.member_id for x in cov_leader_sets[i - 1]]
-                cov_curr = [x.member_id for x in cov_leader_sets[i]]
-                cov_ret.append(_retention(cov_prev, cov_curr))
-                n_curr = len(cov_curr)
-                cov_leader_count.append(n_curr)
-                cov_leader_fraction.append(
-                    n_curr / daily_rankable[i] if daily_rankable[i] else float("nan")
-                )
-            corr = _spearman_rank_correlation(
-                [c.member_id for c in r1_daily[i - 1]],
-                [c.member_id for c in r1_daily[i]],
-            )
-            if corr is not None:
-                spearman.append(corr)
-
-        def _stats(vals: list[float]) -> tuple[float, float, float, float, float]:
-            vs = [v for v in vals if v == v]  # drop nan
-            if not vs:
-                return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
-            vs = sorted(vs)
-            n = len(vs)
-            return (
-                mean(vs), min(vs),
-                vs[n // 2] if n % 2 else (vs[n // 2 - 1] + vs[n // 2]) / 2,
-                vs[int(n * 0.75)] if n else float("nan"),
-                max(vs),
-            )
-
-        def _fmt(s: tuple[float, float, float, float, float]) -> str:
-            return (f"mean={s[0]:.3f} min={s[1]:.3f} p50={s[2]:.3f} "
-                    f"p75={s[3]:.3f} max={s[4]:.3f}")
-
-        m, p25, p50, p75, mx = _stats(cov_ret)
-        cov_ret_stats = (m, p25, p50, p75, mx)
-        cov_count_mean = mean(cov_leader_count) if cov_leader_count else float("nan")
-        cov_count_median = median(cov_leader_count) if cov_leader_count else float("nan")
-        cov_frac_stats = _stats(cov_leader_fraction)
-
-        r3_valid_days = sum(1 for d in r3_direction if d != 0)
+        valid_transitions = 0
+        unavailable_transitions = 0
         print(f"--- scope={spec.scope_name} ({spec.scope_type}, n={len(spec.member_ids)}) "
               f"dates={len(window_dates)} ---")
         print(f"  rankable members       : mean={mean(daily_rankable):.1f} "
@@ -4357,21 +4292,59 @@ def _run_leadership_research(
         print(f"  EW unavailable days    : {len(ew_unavailable_days)} "
               f"({len(ew_unavailable_days) / len(window_dates):.1%})  "
               f"EW zero/no-direction days: {len(ew_zero_days)}")
-        print(f"  R3-valid days          : {r3_valid_days}/{len(window_dates)} "
-              f"(nonzero-EW direction available)")
-        print(f"  R1 signed     Top5 retention: {_fmt(_stats(r1_ret))}")
-        print(f"  R2 absolute   Top5 retention: {_fmt(_stats(r2_ret))}")
-        print(f"  R3 dir-align  Top5 retention: {_fmt(_stats(r3_ret))}")
-        print(f"  R3 dir-align  Top5 conc      : {_fmt(_stats(r3_top5_conc))}")
-        print(f"  R2 absolute   Top5 conc      : {_fmt(_stats(r2_top5_conc))}")
-        print(f"  Spearman (common, reference) : {_fmt(_stats(spearman))} "
-              f"count={len(spearman)}")
-        print(f"  Candidate B coverage={coverage_vals[0]:.0%}: "
-              f"leader_count mean={cov_count_mean:.1f} median={cov_count_median:.1f} "
-              f"leader_fraction {_fmt(cov_frac_stats)} "
-              f"retention {_fmt(cov_ret_stats)}")
-        print(f"  Candidate A (R3 Top5) retention mean={mean(r3_ret):.3f} "
-              f"vs Candidate B retention mean={mean(cov_ret):.3f}")
+
+        for coverage in coverages:
+            ls = cov_sets[coverage]
+            lcount: list[int] = []
+            lfrac: list[float] = []
+            ret: list[float] = []
+            jac: list[float] = []
+            valid = 0
+            unavailable = 0
+            for i in range(1, len(ls)):
+                prev, curr = ls[i - 1], ls[i]
+                # A transition is valid only when BOTH sides are AVAILABLE (not None).
+                # A legitimate empty leader set on either side ([] but not None) is a
+                # VALID transition with an empty side — do NOT count it as unavailable.
+                if prev is None or curr is None:
+                    unavailable += 1
+                    continue
+                valid += 1
+                prev_ids = [x.member_id for x in prev]
+                curr_ids = [x.member_id for x in curr]
+                lcount.append(len(curr_ids))
+                lfrac.append(len(curr_ids) / daily_rankable[i] if daily_rankable[i] else float("nan"))
+                ret.append(_retention(prev_ids, curr_ids))
+                jac.append(_jaccard(prev_ids, curr_ids))
+            valid_transitions += valid
+            unavailable_transitions += unavailable
+
+            def _stats(vals: list[float]) -> tuple[float, float, float, float, int]:
+                vs = [v for v in vals if v == v]  # drop nan (empty-side denominators)
+                if not vs:
+                    return (float("nan"),) * 4 + (0,)
+                vs = sorted(vs)
+                n = len(vs)
+                p25 = vs[int(n * 0.25)]
+                p50 = vs[n // 2] if n % 2 else (vs[n // 2 - 1] + vs[n // 2]) / 2
+                p75 = vs[int(n * 0.75)]
+                return mean(vs), p25, p50, p75, len(vs)
+
+            def _fmt(s: tuple[float, float, float, float, int]) -> str:
+                return (f"mean={s[0]:.3f} p25={s[1]:.3f} p50={s[2]:.3f} "
+                        f"p75={s[3]:.3f} (n={s[4]})")
+
+            print(f"  --- coverage={coverage:.0%} ---")
+            print(f"    Leader Count   : {_fmt(_stats([float(v) for v in lcount]))}")
+            print(f"    Leader Fraction: {_fmt(_stats(lfrac))}")
+            print(f"    Prev Retention : {_fmt(_stats(ret))}")
+            print(f"    Jaccard        : {_fmt(_stats(jac))}")
+            print(f"    availability   : valid_transitions={valid} "
+                  f"unavailable_transitions={unavailable}")
+
+        print(f"  TOTAL availability : valid_transitions={valid_transitions} "
+              f"unavailable_transitions={unavailable_transitions} "
+              f"(per scope, any coverage)")
 
     return 0
 

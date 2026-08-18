@@ -170,6 +170,49 @@ def test_price_candidate_false_does_not_change_ew_direction() -> None:
     assert r3[0].aligned_score < 0.0  # positive return against a down scope
 
 
+def test_price_candidate_false_excluded_from_canonical_ew() -> None:
+    # REAL synthetic case through the formal owner: member A is price_candidate=True
+    # with +2%; member B is price_candidate=False with -80%.  The canonical
+    # equal_weight_return must be +2% — B's -80% must NOT enter the EW universe.
+    from datetime import date
+
+    from app.domain.review.scope_observation import compute_scope_observation
+
+    b_member = MemberObservation(
+        member_id="b",
+        price_candidate=False,      # NOT in the price universe
+        return_1d=-0.80,            # extreme, but must be excluded from EW
+        amount=100.0,
+        trend=Direction.UP,
+        swing=Direction.UP,
+        internal=Direction.UP,
+        momentum=MomentumDirection.EXPANDING,
+    )
+    obs = compute_scope_observation(
+        scope_type="industry",
+        scope_key="electronics",
+        trade_date=date(2026, 1, 5),
+        pit_member_ids=["a", "b"],
+        members=[_m("a", return_1d=0.02, amount=100.0), b_member],
+        event_coverage_member_ids=None,
+    )
+    # Canonical EW = mean over price-valid returns ONLY = +0.02 (a), not -0.39
+    # (which would result if b's -0.80 entered the mean).
+    assert obs["price"]["equal_weight_return"] == pytest.approx(0.02, abs=1e-12)
+
+    # Feed the canonical EW into the research helper: scope is UP, so a (+2%) is
+    # the direction-aligned leader; the extreme contrarian b is NOT a leader.
+    r1, r2, r3, direction = _three_rankings(
+        [_m("a", return_1d=0.02, amount=100.0), b_member],
+        ew_return=obs["price"]["equal_weight_return"],
+    )
+    assert direction == 1
+    assert r3 is not None
+    # Both a and b are rankable for contribution, but only a is a direction leader.
+    assert r3[0].member_id == "a"
+    assert r3[0].aligned_score > 0.0
+
+
 # ---------------------------------------------------------------------------
 # EW unavailable / zero
 # ---------------------------------------------------------------------------
@@ -182,8 +225,8 @@ def test_ew_unavailable_r3_not_computed() -> None:
     assert r3 is None                     # R3 unavailable, NOT a pseudo-ranking
     assert len(r1) == 1                   # R1/R2 still available
     assert len(r2) == 1
-    # Candidate B over an unavailable R3 is empty (no direction).
-    assert _coverage_leader_set(r3, 0.5) == []
+    # Candidate B over an unavailable R3 is UNAVAILABLE (None), NOT an empty set.
+    assert _coverage_leader_set(r3, 0.5) is None
 
 
 def test_ew_zero_no_prevailing_direction() -> None:
@@ -192,4 +235,19 @@ def test_ew_zero_no_prevailing_direction() -> None:
     assert direction == 0
     assert r3 is None                     # no prevailing direction -> no R3
     # Candidate A/B unavailable; must NOT select a member_id pseudo Top5.
-    assert _coverage_leader_set(r3, 0.5) == []
+    assert _coverage_leader_set(r3, 0.5) is None
+
+
+def test_unavailable_vs_legitimate_empty_leader_set_distinct() -> None:
+    # R3 unavailable (None) -> leader set None (unavailable).
+    assert _coverage_leader_set(None, 0.5) is None
+    # R3 valid but NO member has aligned_score>0 (all oppose the direction) ->
+    # leader set is a legitimate EMPTY list, distinct from unavailable.
+    # Construct a valid R3 where every member has negative aligned_score.
+    r3_all_negative = [
+        _AlignedLeadership(member_id="a", contribution=-0.02, aligned_score=-0.02),
+        _AlignedLeadership(member_id="b", contribution=-0.01, aligned_score=-0.01),
+    ]
+    empty_set = _coverage_leader_set(r3_all_negative, 0.5)
+    assert empty_set == []
+    assert empty_set is not None  # distinct from unavailable
