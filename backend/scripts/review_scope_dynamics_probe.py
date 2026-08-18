@@ -480,6 +480,15 @@ def validate_manifest_contract(m: dict) -> list[str]:
         for key in ("rows", "compressed_sha256", "content_sha256"):
             if key not in finfo:
                 violations.append(f"raw_files.{fname}.{key} 缺失")
+
+    # derived_files：若存在，每项必须含 rows / sha256 / derived_from（DATASET-1.1 P1-1 闭环）
+    for fname, finfo in (m.get("derived_files") or {}).items():
+        if not isinstance(finfo, dict):
+            violations.append(f"derived_files.{fname} 必须为对象")
+            continue
+        for key in ("rows", "sha256", "derived_from"):
+            if key not in finfo:
+                violations.append(f"derived_files.{fname}.{key} 缺失")
     return violations
 
 
@@ -559,9 +568,21 @@ def _sorted_by_overlap(
         boards,
         key=lambda b: (
             -_board_overlap(str(b.get("id")), per_board, member_board_count),
-            str(b.get("external_code") or b.get("id")),
+            str(b.get("external_code") or ""),
+            str(b.get("id")),
         ),
     )
+
+
+def _select_5_dates(axis: list[str]) -> list[str]:
+    """从 analysis 轴确定性选取 5 个代表日期（首/1/4/中/3/4/末）。"""
+    n = len(axis)
+    if not n:
+        return []
+    if n == 1:
+        return [axis[0]]
+    idxs = sorted({0, n // 4, n // 2, 3 * n // 4, n - 1})
+    return [axis[i] for i in idxs]
 
 
 def _union_for(scope_ids: list, per_board: dict) -> list:
@@ -577,29 +598,49 @@ def _mk_view(
     scope_ids: list,
     per_board: dict,
     membership_usage: dict,
+    *,
+    date_range: str | None = None,
+    trade_dates: list[str] | None = None,
 ) -> dict:
-    return {
+    view = {
         "view_id": view_id,
         "selection_policy": policy,
         "selection_algorithm_version": VIEW_ALGORITHM_VERSION,
         "scope_keys": sorted(str(s) for s in scope_ids),
         "derived_instrument_ids": _union_for(scope_ids, per_board),
-        "date_range": "manifest.date_ranges（analysis/warmup/states/bars 范围，见 manifest）",
+        "date_range": (
+            date_range
+            if date_range is not None
+            else "manifest.date_ranges（analysis/warmup/states/bars 范围，见 manifest）"
+        ),
         "membership_usage": dict(membership_usage),
     }
+    if trade_dates is not None:
+        view["trade_dates"] = list(trade_dates)
+    return view
 
 
-def build_views(boards: list[dict], memberships: list[dict]) -> dict[str, dict]:
+def build_views(
+    boards: list[dict],
+    memberships: list[dict],
+    analysis_axis: list[str] | None = None,
+) -> dict[str, dict]:
     """生成 5 个 logical view（REVIEW-REPLAY-DATASET-V1 §7）。
 
-    完全确定性：所有 metric 排序带稳定 tie-breaker（metric DESC → external_code ASC）。
+    完全确定性：所有 metric 排序带稳定 tie-breaker（metric DESC → external_code ASC → board_id ASC）。
     ``derived_instrument_ids == union(memberships[scope_keys])`` 由 _mk_view 保证。
+    传入 ``analysis_axis`` 时每 view 的 ``date_range`` 为机器可消费的 ``[start, end]``，
+    ``representative_sample`` 额外含 ``trade_dates``（确定性 5 dates）；未传入时回退为说明字符串。
     """
     active_boards = [b for b in boards if b.get("is_active", True)]
     per_board, member_board_count = _overlap_rank(boards, memberships)
     concept = [b for b in active_boards if b.get("type") == "concept"]
     industry = [b for b in active_boards if b.get("type") == "industry"]
     usage = {"current": "available", "historical": "not_available"}
+    view_date_range = (
+        [analysis_axis[0], analysis_axis[-1]] if analysis_axis else None
+    )
+    rep_trade_dates = _select_5_dates(analysis_axis) if analysis_axis else None
 
     # dev_500：overlap 降序 + tie-breaker 取前 N 板块，union ≈ 500
     dev_ids: list = []
@@ -626,7 +667,11 @@ def build_views(boards: list[dict], memberships: list[dict]) -> dict[str, dict]:
     # representative_sample：member_count 最大 / overlap 最高 / 接近 median（带 tie-breaker）
     by_member_count = sorted(
         active_boards,
-        key=lambda b: (-len(per_board.get(str(b.get("id")), [])), str(b.get("external_code") or b.get("id"))),
+        key=lambda b: (
+            -len(per_board.get(str(b.get("id")), [])),
+            str(b.get("external_code") or ""),
+            str(b.get("id")),
+        ),
     )
     largest = by_member_count[0] if by_member_count else None
     by_overlap = (
@@ -641,7 +686,8 @@ def build_views(boards: list[dict], memberships: list[dict]) -> dict[str, dict]:
         active_boards,
         key=lambda b: (
             abs(len(per_board.get(str(b.get("id")), [])) - median),
-            str(b.get("external_code") or b.get("id")),
+            str(b.get("external_code") or ""),
+            str(b.get("id")),
         ),
         default=None,
     )
@@ -657,6 +703,7 @@ def build_views(boards: list[dict], memberships: list[dict]) -> dict[str, dict]:
             dev_ids,
             per_board,
             usage,
+            date_range=view_date_range,
         ),
         "capacity_4096": _mk_view(
             "capacity_4096",
@@ -665,6 +712,7 @@ def build_views(boards: list[dict], memberships: list[dict]) -> dict[str, dict]:
             cap_ids,
             per_board,
             usage,
+            date_range=view_date_range,
         ),
         "all_concepts": _mk_view(
             "all_concepts",
@@ -672,6 +720,7 @@ def build_views(boards: list[dict], memberships: list[dict]) -> dict[str, dict]:
             [str(b.get("id")) for b in concept],
             per_board,
             usage,
+            date_range=view_date_range,
         ),
         "all_industries": _mk_view(
             "all_industries",
@@ -679,6 +728,7 @@ def build_views(boards: list[dict], memberships: list[dict]) -> dict[str, dict]:
             [str(b.get("id")) for b in industry],
             per_board,
             usage,
+            date_range=view_date_range,
         ),
         "representative_sample": _mk_view(
             "representative_sample",
@@ -687,6 +737,8 @@ def build_views(boards: list[dict], memberships: list[dict]) -> dict[str, dict]:
             rep_ids,
             per_board,
             usage,
+            date_range=view_date_range,
+            trade_dates=rep_trade_dates,
         ),
     }
     return views
@@ -773,8 +825,15 @@ def _rows_to_parquet(
     file_stem: str,
     *,
     compression: str = "zstd",
+    batch_size: int = 10000,
 ) -> dict:
-    """把 raw/*.jsonl.gz 流式转成 parquet/*.parquet，返回 {rows, path}。"""
+    """把 raw/*.jsonl.gz 流式批量转成 parquet/*.parquet，返回 {rows, path}。
+
+    - 按 ``batch_size`` 累积行，满批 ``writer.write_batch``，末尾 flush，避免逐行写表；
+    - decimal 列按 **file_stem** 查找 ``_DECIMAL_COLUMNS``（domain key 与 stem 不一致的域，
+      例如 bars → ``bars_daily``，必须按 stem 解析才能得到 decimal128）；
+    - 空文件（0 行）不落盘，返回 ``{"rows": 0, "path": out_path}``。
+    """
     raw_path = os.path.join(raw_dir, f"{file_stem}.jsonl.gz")
     out_path = os.path.join(parquet_dir, f"{file_stem}.parquet")
     try:
@@ -784,10 +843,45 @@ def _rows_to_parquet(
         raise RuntimeError(
             "optional replay dependency missing (pip install -r requirements-replay.txt)"
         ) from e
-    dec_cols = _DECIMAL_COLUMNS.get(domain, {})
+    dec_cols = _DECIMAL_COLUMNS.get(file_stem, {})
     os.makedirs(parquet_dir, exist_ok=True)
     writer: Any = None
+    schema: Any = None
+    batch: list[dict] = []
     count = 0
+
+    def _flush() -> None:
+        nonlocal batch
+        if not batch:
+            return
+        names = list(schema.names)
+        arrays = []
+        for name in names:
+            ftype = schema.field(name).type
+            if pa.types.is_decimal(ftype):
+                arrays.append(
+                    pa.array(
+                        [Decimal(r.get(name)) if r.get(name) is not None else None for r in batch],
+                        type=ftype,
+                    )
+                )
+            elif pa.types.is_string(ftype):
+                arrays.append(
+                    pa.array(
+                        [
+                            json.dumps(r.get(name), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                            if isinstance(r.get(name), (dict, list))
+                            else r.get(name)
+                            for r in batch
+                        ],
+                        type=ftype,
+                    )
+                )
+            else:
+                arrays.append(pa.array([r.get(name) for r in batch], type=ftype))
+        writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema))
+        batch = []
+
     for row in _iter_jsonl_gz(raw_path):
         if writer is None:
             names = list(row.keys())
@@ -808,29 +902,12 @@ def _rows_to_parquet(
                     fields.append(pa.field(name, pa.string(), nullable=True))
             schema = pa.schema(fields)
             writer = pq.ParquetWriter(out_path, schema, compression=compression)
-        names = list(schema.names)
-        arrays = []
-        for name in names:
-            v = row.get(name)
-            ftype = schema.field(name).type
-            if pa.types.is_decimal(ftype):
-                arrays.append(pa.array([Decimal(v) if v is not None else None], type=ftype))
-            elif pa.types.is_string(ftype):
-                arrays.append(
-                    pa.array(
-                        [
-                            json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                            if isinstance(v, (dict, list))
-                            else v
-                        ],
-                        type=ftype,
-                    )
-                )
-            else:
-                arrays.append(pa.array([v], type=ftype))
-        writer.write_table(pa.Table.from_arrays(arrays, schema=schema))
+        batch.append(row)
         count += 1
+        if len(batch) >= batch_size:
+            _flush()
     if writer is not None:
+        _flush()
         writer.close()
     return {"rows": count, "path": out_path}
 
@@ -1451,8 +1528,16 @@ async def _phase_a_precheck(session) -> None:
     """
     from sqlalchemy import text
 
-    await session.execute(text("SELECT 1"))
+    # 会话首条（不在事务内执行）：设置后续事务默认只读
     await session.execute(text("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"))
+    # autobegin 事务首条 SQL = SET TRANSACTION READ ONLY（合法首句），避免 SELECT 1 先触发 autobegin
+    await session.execute(text("SET TRANSACTION READ ONLY"))
+    ro = (await session.execute(text("SHOW transaction_read_only"))).scalar()
+    if ro != "on":
+        logger.warning(
+            "[export-dataset][phase-a] transaction_read_only != on (%r)，继续（不写）",
+            ro,
+        )
     try:
         await session.execute(
             text(
@@ -1501,6 +1586,45 @@ async def _stream_export(
             gz.write(b"\n")
             count += 1
     return count
+
+
+def _boards_select():
+    """D2 导出语句：ORM camelCase 属性显式 label 为 Dataset snake_case 契约。
+
+    禁止在 serializer 猜 camelCase→snake_case；projection 直接符合 Dataset Contract。
+    """
+    from sqlalchemy import select
+
+    from app.models.market_board import MarketBoard
+
+    return select(
+        MarketBoard.id,
+        MarketBoard.externalCode.label("external_code"),
+        MarketBoard.name,
+        MarketBoard.type,
+        MarketBoard.taxonomy,
+        MarketBoard.source,
+        MarketBoard.taxonomyVersion.label("taxonomy_version"),
+        MarketBoard.taxonomyCompatibilityKey.label("taxonomy_compatibility_key"),
+        MarketBoard.hierarchyLevel.label("hierarchy_level"),
+        MarketBoard.parentBoardId.label("parent_board_id"),
+        MarketBoard.isActive.label("is_active"),
+        MarketBoard.membershipVersion.label("membership_version"),
+        MarketBoard.updatedAt.label("updated_at"),
+    )
+
+
+def _memberships_select():
+    """D3 导出语句：ORM camelCase 属性显式 label 为 Dataset snake_case 契约。"""
+    from sqlalchemy import select
+
+    from app.models.market_board import MarketBoardMembership
+
+    return select(
+        MarketBoardMembership.boardId.label("board_id"),
+        MarketBoardMembership.instrumentId.label("instrument_id"),
+        MarketBoardMembership.updatedAt.label("updated_at"),
+    )
 
 
 async def _export_dataset(
@@ -1628,14 +1752,7 @@ async def _export_dataset(
                 # ---- D2 boards（全量，含 inactive） ----
                 row_counts["boards.jsonl.gz"] = await _stream_export(
                     db,
-                    select(
-                        MarketBoard.id, MarketBoard.externalCode, MarketBoard.name,
-                        MarketBoard.type, MarketBoard.taxonomy, MarketBoard.source,
-                        MarketBoard.taxonomyVersion, MarketBoard.taxonomyCompatibilityKey,
-                        MarketBoard.hierarchyLevel, MarketBoard.parentBoardId,
-                        MarketBoard.isActive, MarketBoard.membershipVersion,
-                        MarketBoard.updatedAt,
-                    ),
+                    _boards_select(),
                     _serialize_row,
                     os.path.join(raw_dir, "boards.jsonl.gz"),
                 )
@@ -1643,11 +1760,7 @@ async def _export_dataset(
                 # ---- D3 board_memberships_current_snapshot（全量当前快照） ----
                 row_counts["board_memberships_current_snapshot.jsonl.gz"] = await _stream_export(
                     db,
-                    select(
-                        MarketBoardMembership.boardId,
-                        MarketBoardMembership.instrumentId,
-                        MarketBoardMembership.updatedAt,
-                    ),
+                    _memberships_select(),
                     _serialize_row,
                     os.path.join(raw_dir, "board_memberships_current_snapshot.jsonl.gz"),
                 )
@@ -1839,7 +1952,20 @@ async def _export_dataset(
                     contract_versions_observed[str(cv)] = int(c)
                 d5_count = int(row_counts["first_pyramid_daily_state.jsonl.gz"])
                 bars_count = int(row_counts["bars_daily.jsonl.gz"])
-                capture_status = "complete" if d5_count > 0 and bars_count > 0 else "partial"
+                _required_positive_stems = {
+                    "instruments", "boards", "board_memberships_current_snapshot",
+                    "trading_calendar", "first_pyramid_daily_state", "first_pyramid_events",
+                    "bars_daily", "stock_feature_snapshots_asof",
+                    "stock_feature_snapshot_runs", "first_pyramid_history_runs",
+                }
+                capture_status = (
+                    "complete"
+                    if all(
+                        row_counts.get(f"{stem}.jsonl.gz", 0) > 0
+                        for stem in _required_positive_stems
+                    )
+                    else "partial"
+                )
                 coverage = {
                     "review_fact_universe": universe_count,
                     "daily_state_rows": d5_count,
@@ -1935,8 +2061,19 @@ async def _export_dataset(
     return 0
 
 
-def _compare_raw_parquet(raw_path: str, parquet_path: str, domain: str) -> dict:
-    """Raw(jsonl.gz) ↔ Parquet 等价比对：row count / logical content / decimal roundtrip。"""
+def _compare_raw_parquet(
+    raw_path: str,
+    parquet_path: str,
+    domain: str,
+    *,
+    file_stem: str | None = None,
+    batch_size: int = 10000,
+) -> dict:
+    """Raw(jsonl.gz) ↔ Parquet 等价比对：row count / logical content / decimal roundtrip。
+
+    流式分批（``pq.ParquetFile.iter_batches`` + raw 侧逐行配对），不把全量 Raw 与全量
+    Parquet 同时放入内存。decimal 列按 **file_stem** 解析（与 ``_rows_to_parquet`` 一致）。
+    """
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -1944,41 +2081,55 @@ def _compare_raw_parquet(raw_path: str, parquet_path: str, domain: str) -> dict:
         raise RuntimeError(
             "optional replay dependency missing (pip install -r requirements-replay.txt)"
         ) from e
-    raw_rows = list(_iter_jsonl_gz(raw_path))
-    table = pq.read_table(parquet_path)
+    dec_cols = _DECIMAL_COLUMNS.get(file_stem or domain, {})
     result = {
-        "row_mismatch": len(raw_rows) != table.num_rows,
+        "row_mismatch": False,
         "content_mismatch": 0,
         "decimal_roundtrip_mismatch": 0,
     }
-    if result["row_mismatch"]:
-        return result
-    dec_cols = _DECIMAL_COLUMNS.get(domain, {})
-    cols = table.column_names
-    col_lists = {name: table.column(name).to_pylist() for name in cols}
-    schema = table.schema
-    for i, rrow in enumerate(raw_rows):
-        for name in cols:
-            pv = col_lists[name][i]
-            ftype = schema.field(name).type
-            if pa.types.is_decimal(ftype):
-                rv = Decimal(rrow.get(name)) if rrow.get(name) is not None else None
-                if rv != pv:
-                    result["decimal_roundtrip_mismatch"] += 1
-                    break
-            elif pa.types.is_boolean(ftype) or pa.types.is_integer(ftype) or pa.types.is_floating(ftype):
-                if rrow.get(name) != pv:
-                    result["content_mismatch"] += 1
-                    break
-            else:  # string（含 JSONB）
-                rv = rrow.get(name)
-                if isinstance(rv, (dict, list)):
-                    rv = json.dumps(
-                        rv, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                    )
-                if rv != pv:
-                    result["content_mismatch"] += 1
-                    break
+    raw_iter = _iter_jsonl_gz(raw_path)
+    total_rows = 0
+    parquet_file = pq.ParquetFile(parquet_path)
+
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        n = batch.num_rows
+        cols = batch.column_names
+        schema = batch.schema
+        for i in range(n):
+            rrow = next(raw_iter, None)
+            if rrow is None:
+                result["row_mismatch"] = True
+                break
+            for name in cols:
+                pv = batch.column(name)[i].as_py()
+                ftype = schema.field(name).type
+                if pa.types.is_decimal(ftype):
+                    rv = Decimal(rrow.get(name)) if rrow.get(name) is not None else None
+                    if rv != pv:
+                        result["decimal_roundtrip_mismatch"] += 1
+                        break
+                elif pa.types.is_boolean(ftype) or pa.types.is_integer(ftype) or pa.types.is_floating(ftype):
+                    if rrow.get(name) != pv:
+                        result["content_mismatch"] += 1
+                        break
+                else:  # string（含 JSONB）
+                    rv = rrow.get(name)
+                    if isinstance(rv, (dict, list)):
+                        rv = json.dumps(
+                            rv, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                        )
+                    if rv != pv:
+                        result["content_mismatch"] += 1
+                        break
+        total_rows += n
+        if result["row_mismatch"]:
+            break
+
+    # drain：raw 侧还有剩余行 → parquet 行数不足
+    if next(raw_iter, None) is not None:
+        result["row_mismatch"] = True
+    if total_rows != parquet_file.metadata.num_rows:
+        result["row_mismatch"] = True
     return result
 
 
@@ -2134,6 +2285,11 @@ def _data_quality_summary(raw_dir: str, lineage_dir: str, manifest: dict) -> dic
             return 0
         return int(arr[min(len(arr) - 1, int(len(arr) * p / 100.0))])
 
+    def _pct_f(arr: list, p: float) -> float:
+        if not arr:
+            return 0.0
+        return float(arr[min(len(arr) - 1, int(len(arr) * p / 100.0))])
+
     bar_counts: Counter = Counter()
     for r in _iter_jsonl_gz(os.path.join(raw_dir, "bars_daily.jsonl.gz")):
         bar_counts[str(r["instrument_id"])] += 1
@@ -2162,6 +2318,48 @@ def _data_quality_summary(raw_dir: str, lineage_dir: str, manifest: dict) -> dic
         if str(r.get("source_run_id")) in consumable_run_ids
     )
 
+    # ---- coverage_report：analysis 窗口 State T/T1 与 Bar T 覆盖率（只报告，不作 gate） ----
+    analysis_axis = list((manifest.get("date_ranges") or {}).get("analysis_axis") or [])
+    analysis_set = set(analysis_axis)
+    n_dates = len(analysis_axis)
+
+    state_date_count: Counter = Counter()
+    bar_date_count: Counter = Counter()
+    state_dates_by_instrument: dict[str, set] = {}
+    for r in _iter_jsonl_gz(os.path.join(raw_dir, "first_pyramid_daily_state.jsonl.gz")):
+        td = str(r.get("trade_date"))[:10]
+        if td in analysis_set:
+            state_date_count[td] += 1
+            state_dates_by_instrument.setdefault(str(r["instrument_id"]), set()).add(td)
+    for r in _iter_jsonl_gz(os.path.join(raw_dir, "bars_daily.jsonl.gz")):
+        td = str(r.get("trade_date"))[:10]
+        if td in analysis_set:
+            bar_date_count[td] += 1
+
+    def _denom(n: int, base: int) -> float:
+        return float(n) / base if base else 0.0
+
+    state_t_cov = [_denom(state_date_count.get(T, 0), instruments) for T in analysis_axis]
+    state_t1_cov = [
+        _denom(state_date_count.get(analysis_axis[i - 1], 0), instruments)
+        for i in range(1, len(analysis_axis))
+    ]
+    bar_exact_t_cov = [_denom(bar_date_count.get(T, 0), instruments) for T in analysis_axis]
+    member_state_cov = (
+        [len(s) / n_dates for s in state_dates_by_instrument.values()]
+        if n_dates
+        else []
+    )
+
+    state_t_median = _pct_f(sorted(state_t_cov), 50)
+    bar_t_median = _pct_f(sorted(bar_exact_t_cov), 50)
+    if state_t_median >= 0.9 and bar_t_median >= 0.9:
+        prd_readiness = "available"
+    elif state_t_median > 0 or bar_t_median > 0:
+        prd_readiness = "partial"
+    else:
+        prd_readiness = "unavailable"
+
     summary = {
         "instruments": instruments,
         "active_boards": len(active),
@@ -2188,12 +2386,57 @@ def _data_quality_summary(raw_dir: str, lineage_dir: str, manifest: dict) -> dic
         "snapshot_total": snapshot_total,
         "snapshot_consumable": consumable,
         "asof": manifest.get("analysis_asof_date"),
+        "coverage_report": {
+            "state_t_coverage_by_date": {
+                "p10": _pct_f(sorted(state_t_cov), 10),
+                "p50": _pct_f(sorted(state_t_cov), 50),
+                "p90": _pct_f(sorted(state_t_cov), 90),
+                "max": _pct_f(sorted(state_t_cov), 100),
+            },
+            "state_t1_coverage_by_date": {
+                "p10": _pct_f(sorted(state_t1_cov), 10),
+                "p50": _pct_f(sorted(state_t1_cov), 50),
+                "p90": _pct_f(sorted(state_t1_cov), 90),
+                "max": _pct_f(sorted(state_t1_cov), 100),
+            },
+            "member_state_coverage_p10_p50_p90": (
+                _pct_f(sorted(member_state_cov), 10),
+                _pct_f(sorted(member_state_cov), 50),
+                _pct_f(sorted(member_state_cov), 90),
+            ),
+            "bar_exact_t_coverage": {
+                "p10": _pct_f(sorted(bar_exact_t_cov), 10),
+                "p50": _pct_f(sorted(bar_exact_t_cov), 50),
+                "p90": _pct_f(sorted(bar_exact_t_cov), 90),
+                "max": _pct_f(sorted(bar_exact_t_cov), 100),
+            },
+            "bar_history_count": {
+                "p10": _pct(sorted(bar_counts.values()), 10),
+                "p50": _pct(sorted(bar_counts.values()), 50),
+                "p90": _pct(sorted(bar_counts.values()), 90),
+            },
+        },
+        "prd_readiness": prd_readiness,
     }
     return summary
 
 
 def _dataset_validate(dataset_dir: str) -> int:
-    """本地校验 manifest + Integrity KPI + jsonl.gz → parquet + 生成 views + 数据质量摘要。"""
+    """本地校验 manifest + Integrity KPI + jsonl.gz → parquet + 生成 views + 数据质量摘要。
+
+    Hard Gate（任一 FAIL → return 2；**Raw Gate PASS 之前不创建 parquet/ 与 views/**）：
+
+    ```
+    manifest contract → FAIL → STOP
+    raw_files checksum → FAIL → STOP
+    Raw Integrity KPI   → FAIL → STOP
+    （此时才 makedirs parquet/ views/）
+    Parquet 转换        → 逐域 equivalence FAIL → STOP
+    manifest.derived_files 写回
+    Views + union 校验  → FAIL → STOP
+    quality_summary → return 0
+    ```
+    """
     manifest_path = os.path.join(dataset_dir, "manifest.json")
     if not os.path.exists(manifest_path):
         logger.error("[dataset-validate] 缺少 manifest.json: %s", dataset_dir)
@@ -2210,15 +2453,13 @@ def _dataset_validate(dataset_dir: str) -> int:
     lineage_dir = os.path.join(dataset_dir, "lineage")
     parquet_dir = os.path.join(dataset_dir, "parquet")
     views_dir = os.path.join(dataset_dir, "views")
-    os.makedirs(parquet_dir, exist_ok=True)
-    os.makedirs(views_dir, exist_ok=True)
 
     print("=== REVIEW-REPLAY-DATASET validate ===")
     print(f"dataset_dir     : {dataset_dir}")
     print(f"dataset_id      : {manifest.get('dataset_id')}")
     print(f"asof            : {asof.isoformat()}")
 
-    # 1) 文件 checksum（manifest.raw_files 的 compressed/content_sha256）
+    # 1) 文件 checksum（manifest.raw_files 的 compressed/content_sha256）→ FAIL → STOP
     checksum_fail = 0
     for fname, finfo in (manifest.get("raw_files") or {}).items():
         fpath = os.path.join(raw_dir, fname)
@@ -2235,8 +2476,12 @@ def _dataset_validate(dataset_dir: str) -> int:
             print(f"  [checksum] {fname}: content_sha256 不匹配")
             checksum_fail += 1
     print(f"checksum_mismatch : {checksum_fail}")
+    # checksum gate 在 KPI 之前：缺文件/checksum 不匹配直接 STOP，避免 KPI 读缺失文件崩溃
+    if checksum_fail > 0:
+        print("[dataset-validate] CHECKSUM GATE FAILED → STOP（不生成 parquet/views）")
+        return 2
 
-    # 2) Integrity KPI
+    # 2) Raw Integrity KPI → FAIL → STOP
     kpi = _compute_integrity_kpis(raw_dir, lineage_dir, manifest, asof)
     print(f"duplicate_pk       : {kpi['duplicate_pk']}")
     print(f"orphan_instrument  : {kpi['orphan_instrument']}")
@@ -2249,32 +2494,70 @@ def _dataset_validate(dataset_dir: str) -> int:
         for m in kpi["row_count_mismatch"]:
             print(f"  - {m}")
 
-    # 3) Parquet 转换 + Raw↔Parquet 等价（DATASET-3 层；lazy pyarrow）
+    raw_gate_failed = (
+        checksum_fail > 0
+        or any(kpi["duplicate_pk"].values())
+        or kpi["orphan_instrument"] > 0
+        or kpi["orphan_board"] > 0
+        or kpi["orphan_snapshot_run"] > 0
+        or kpi["orphan_history_run"] > 0
+        or kpi["future_date"] > 0
+        or bool(kpi["row_count_mismatch"])
+    )
+    if raw_gate_failed:
+        print("[dataset-validate] RAW GATE FAILED → STOP（不生成 parquet/views）")
+        return 2
+
+    # 3) Raw Gate PASS 后才创建派生目录
+    os.makedirs(parquet_dir, exist_ok=True)
+    os.makedirs(views_dir, exist_ok=True)
+
+    # 4) Parquet 转换 + Raw↔Parquet 等价（DATASET-3 层；lazy pyarrow）→ FAIL → STOP
     row_mismatch = 0
     content_mismatch = 0
     dec_roundtrip = 0
+    manifest.setdefault("derived_files", {})
     for domain, stem in _RAW_FILE_STEMS.items():
         raw_path = os.path.join(raw_dir, f"{stem}.jsonl.gz")
         if not os.path.exists(raw_path):
             continue
         info = _rows_to_parquet(raw_dir, parquet_dir, domain, stem)
-        eq = _compare_raw_parquet(raw_path, info["path"], domain)
+        if info["rows"] == 0:
+            # 空文件域：不落 parquet，跳过 equivalence 与 derived_files 条目
+            print(f"  [parquet] {stem:<40} rows=0（空域，跳过 equivalence）")
+            continue
+        eq = _compare_raw_parquet(raw_path, info["path"], domain, file_stem=stem)
         row_mismatch += 1 if eq["row_mismatch"] else 0
         content_mismatch += eq["content_mismatch"]
         dec_roundtrip += eq["decimal_roundtrip_mismatch"]
         print(f"  [parquet] {stem:<40} rows={info['rows']} "
               f"eq(row={0 if eq['row_mismatch'] else 1}, content={eq['content_mismatch']}, "
               f"decimal={eq['decimal_roundtrip_mismatch']})")
+        # 5) derived_files 闭环（equivalence PASS 才写入）
+        manifest["derived_files"][f"{stem}.parquet"] = {
+            "rows": info["rows"],
+            "sha256": _sha256_file(info["path"]),
+            "derived_from": f"raw/{stem}.jsonl.gz",
+        }
     print(f"parquet_row_mismatch  : {row_mismatch}")
     print(f"parquet_content_mismatch: {content_mismatch}")
     print(f"decimal_roundtrip_mismatch: {dec_roundtrip}")
+    if row_mismatch or content_mismatch or dec_roundtrip:
+        print("[dataset-validate] PARQUET EQUIVALENCE FAILED → STOP")
+        return 2
 
-    # 4) 生成 views + derived_instrument_ids == union(memberships) 校验
+    # 6) 写回 manifest.derived_files（additive，幂等；raw 文件与 source_readiness 不变）
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write("\n")
+
+    # 7) 生成 views + derived_instrument_ids == union(memberships) 校验 → FAIL → STOP
     boards = list(_iter_jsonl_gz(os.path.join(raw_dir, "boards.jsonl.gz")))
     memberships = list(
         _iter_jsonl_gz(os.path.join(raw_dir, "board_memberships_current_snapshot.jsonl.gz"))
     )
-    views = build_views(boards, memberships)
+    analysis_axis = list((manifest.get("date_ranges") or {}).get("analysis_axis") or [])
+    views = build_views(boards, memberships, analysis_axis=analysis_axis or None)
     view_assert_fail = 0
     for vid, view in views.items():
         vpath = os.path.join(views_dir, f"{vid}.json")
@@ -2288,8 +2571,11 @@ def _dataset_validate(dataset_dir: str) -> int:
             print(f"  [views] {vid}: derived_instrument_ids != union(memberships)")
     print(f"views_generated : {sorted(views.keys())}")
     print(f"view_assert_fail: {view_assert_fail}")
+    if view_assert_fail:
+        print("[dataset-validate] VIEWS UNION FAILED → STOP")
+        return 2
 
-    # 5) 数据质量摘要（derived，不写回 immutable raw manifest）
+    # 8) 数据质量摘要（derived，不写回 immutable raw manifest）
     summary = _data_quality_summary(raw_dir, lineage_dir, manifest)
     summary_path = os.path.join(dataset_dir, "quality_summary.json")
     with open(summary_path, "w", encoding="utf-8") as fh:
@@ -2304,6 +2590,7 @@ def _dataset_validate(dataset_dir: str) -> int:
     print(f"  state_count p10/p50/p90: {summary['state_count_per_instrument']}")
     print(f"  snapshot_total/consumable: {summary['snapshot_total']}/{summary['snapshot_consumable']}")
     print(f"  events_by_type         : {len(summary['events_by_type'])} types")
+    print(f"  prd_readiness          : {summary['prd_readiness']}")
     print("=== END ===")
     return 0
 

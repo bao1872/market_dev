@@ -27,7 +27,15 @@ from scripts.review_scope_dynamics_probe import (
     _write_jsonl_gz,
     _iter_jsonl_gz,
     _write_parquet,
+    _boards_select,
+    _memberships_select,
+    _dataset_validate,
+    _rows_to_parquet,
+    _sha256_file,
+    _sha256_content,
     _DOMAIN_LOGICAL_PKS,
+    _LINEAGE_FILE_STEMS,
+    _RAW_FILE_STEMS,
 )
 
 
@@ -321,3 +329,245 @@ def test_parquet_decimal_roundtrip(tmp_path):
     assert df.loc[1, "open"] == Decimal("3.1000")
     assert df.loc[1, "close"] is None
     assert df.loc[0, "adj_factor"] == Decimal("1.00000000")
+
+
+# ---------------------------------------------------------------------------
+# DATASET-1.1 回归（ref/优化.md 审查 P0/P1/P2 修复）
+# ---------------------------------------------------------------------------
+
+
+def test_export_select_keys_snake_case():
+    """P0-1：D2/D3 导出 projection 必须为 snake_case 契约 key（不含 camelCase）。"""
+    b = _boards_select()
+    b_keys = {c.name for c in b.selected_columns}
+    assert {
+        "id", "external_code", "name", "type", "taxonomy", "source",
+        "taxonomy_version", "taxonomy_compatibility_key", "hierarchy_level",
+        "parent_board_id", "is_active", "membership_version", "updated_at",
+    } <= b_keys
+    camel = b_keys & {
+        "externalCode", "taxonomyVersion", "taxonomyCompatibilityKey",
+        "hierarchyLevel", "parentBoardId", "isActive", "membershipVersion", "updatedAt",
+    }
+    assert not camel, camel
+
+    m = _memberships_select()
+    m_keys = {c.name for c in m.selected_columns}
+    assert {"board_id", "instrument_id", "updated_at"} <= m_keys
+    assert not (m_keys & {"boardId", "instrumentId", "updatedAt"})
+
+
+def test_dataset_validate_raw_gate_blocks_parquet(tmp_path):
+    """P0-2 负向：raw gate FAIL 时 _dataset_validate 返回 2，且不创建 parquet/views。"""
+    m = _make_manifest()
+    dataset = tmp_path / "ds"
+    (dataset / "raw").mkdir(parents=True)
+    (dataset / "lineage").mkdir()
+    # manifest 声明了 instruments.jsonl.gz，但 raw 目录缺失该文件 → checksum gate FAIL
+    (dataset / "manifest.json").write_text(
+        json.dumps(m, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    rc = _dataset_validate(str(dataset))
+    assert rc == 2
+    assert not (dataset / "parquet").exists()
+    assert not (dataset / "views").exists()
+
+
+def _write_full_dataset(dataset):
+    """写最小合法 dataset（8 raw 域 + 2 lineage，各 ≥1 行、无重复/无孤儿/日期≤asof），
+    返回写好的 manifest（raw_files 已含正确 checksum）。"""
+    raw = dataset / "raw"
+    lineage = dataset / "lineage"
+    raw.mkdir(parents=True)
+    lineage.mkdir()
+
+    axis = _weekdays(date(2024, 1, 1), date(2025, 7, 31))
+    asof = axis[-1]
+    asof_s = asof.isoformat()
+    dr = compute_date_ranges(asof, axis, history=120, warmup=160, bar_lookback_calendar_days=400)
+
+    files = {
+        "instruments": [
+            {"id": "i1", "symbol": "600000", "name": "浦发银行", "market": "SH",
+             "pinyin_initials": "PFYH", "status": "active", "listing_date": "1999-11-10",
+             "total_share": "1000000000", "float_share": "900000000", "share_as_of": asof_s},
+        ],
+        "boards": [
+            {"id": "b1", "external_code": "C001", "name": "概念A", "type": "concept",
+             "taxonomy": "custom", "source": "qstock", "taxonomy_version": "v1",
+             "taxonomy_compatibility_key": "k1", "hierarchy_level": 1,
+             "parent_board_id": None, "is_active": True, "membership_version": "v1",
+             "updated_at": asof_s},
+        ],
+        "board_memberships_current_snapshot": [
+            {"board_id": "b1", "instrument_id": "i1", "updated_at": asof_s},
+        ],
+        "trading_calendar": [
+            {"trade_date": asof_s, "is_trading_day": True, "market": "SH",
+             "source": "manual", "status": "closed", "verified_at": asof_s},
+        ],
+        "first_pyramid_daily_state": [
+            {"instrument_id": "i1", "trade_date": asof_s, "algorithm_version": "v2",
+             "input_hash": "h1", "source_history_run_id": "r1",
+             "history_contract_version": "review-history-v2",
+             "state_payload": {"pct": 0.5}},
+        ],
+        "first_pyramid_events": [
+            {"instrument_id": "i1", "algorithm_version": "v2", "event_type": "pyramid",
+             "event_id": "e1", "event_time": f"{asof_s}T09:30:00+08:00",
+             "history_contract_version": "review-history-v2",
+             "event_payload": {"n": 1}},
+        ],
+        "bars_daily": [
+            {"instrument_id": "i1", "trade_date": asof_s, "open": "10.5000",
+             "high": "10.8000", "low": "10.2000", "close": "10.6000",
+             "volume": "1234.56", "amount": "5678.90", "adj_factor": "1.00000000"},
+        ],
+        "stock_feature_snapshots_asof": [
+            {"instrument_id": "i1", "trade_date": asof_s, "primary_timeframe": "1d",
+             "secondary_timeframe": "none", "adj": "none", "schema_version": "v1",
+             "source_run_id": "s1", "source_primary_bar_time": asof_s,
+             "source_secondary_bar_time": asof_s, "structural_payload": {},
+             "temporal_payload": {}, "summary_payload": {}, "degraded_reasons": []},
+        ],
+        "stock_feature_snapshot_runs": [
+            {"id": "s1", "trade_date": asof_s, "schema_version": "v1",
+             "primary_timeframe": "1d", "secondary_timeframe": "none", "adj": "none",
+             "run_type": "manual", "status": "succeeded", "expected_count": 1,
+             "snapshot_count": 1, "failed_count": 0, "skipped_count": 0,
+             "failure_rate": "0.0", "started_at": asof_s, "finished_at": asof_s,
+             "published_at": asof_s, "metadata_": {}},
+        ],
+        "first_pyramid_history_runs": [
+            {"id": "r1", "scheduler_job_run_id": None, "algorithm_version": "v2",
+             "parameter_hash": "ph1", "output_bars": 1, "scope": "concept:C001",
+             "expected_count": 1, "succeeded_count": 1, "failed_count": 0,
+             "skipped_count": 0, "status": "succeeded", "started_at": asof_s,
+             "completed_at": asof_s, "metadata_json": {}},
+        ],
+    }
+    raw_stems = set(_RAW_FILE_STEMS.values())
+    raw_files: dict = {}
+    row_counts: dict = {}
+    for fname, rows in files.items():
+        subdir = raw if fname in raw_stems else lineage
+        fpath = subdir / f"{fname}.jsonl.gz"
+        _write_jsonl_gz(str(fpath), rows)
+        raw_files[f"{fname}.jsonl.gz"] = {
+            "rows": len(rows),
+            "compressed_sha256": _sha256_file(str(fpath)),
+            "content_sha256": _sha256_content(str(fpath)),
+        }
+        row_counts[f"{fname}.jsonl.gz"] = len(rows)
+    assert set(raw_files) == {
+        f"{s}.jsonl.gz" for s in raw_stems | set(_LINEAGE_FILE_STEMS.values())
+    }
+    m = _make_manifest(raw_files=raw_files, row_counts=row_counts, date_ranges=dr)
+    (dataset / "manifest.json").write_text(
+        json.dumps(m, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return m
+
+
+def test_dataset_validate_full_pass(tmp_path):
+    """P0-2 正向 + P1-1：合法 dataset 全 PASS → 返回 0，生成 parquet/views，
+    manifest.derived_files 已写回且每项含 rows/sha256/derived_from。"""
+    pytest.importorskip("pyarrow")
+    dataset = tmp_path / "ds"
+    m = _write_full_dataset(dataset)
+    rc = _dataset_validate(str(dataset))
+    assert rc == 0
+    assert (dataset / "parquet").exists()
+    assert (dataset / "views").exists()
+    reloaded = load_manifest(str(dataset / "manifest.json"))
+    derived = reloaded.get("derived_files") or {}
+    assert derived, "derived_files 必须已写回"
+    for fname, finfo in derived.items():
+        assert fname.endswith(".parquet")
+        for key in ("rows", "sha256", "derived_from"):
+            assert key in finfo, f"{fname}.{key}"
+        assert finfo["rows"] == m["raw_files"][finfo["derived_from"].split("/")[-1]]["rows"]
+    # 写回后 manifest 仍满足契约
+    assert validate_manifest_contract(reloaded) == []
+
+
+def test_views_determinism_same_metric_external_code_shuffled():
+    """P1-4：metric 相同、external_code 相同、id 不同的 board，输入顺序反转 → 输出一致。"""
+    boards = [
+        {"id": "b1", "external_code": "C001", "name": "概念A", "type": "concept", "is_active": True},
+        {"id": "b2", "external_code": "C001", "name": "概念B", "type": "concept", "is_active": True},
+    ]
+    memberships = [
+        {"board_id": "b1", "instrument_id": "i1"},
+        {"board_id": "b1", "instrument_id": "i2"},
+        {"board_id": "b2", "instrument_id": "i1"},
+        {"board_id": "b2", "instrument_id": "i2"},
+    ]
+    v1 = build_views(boards, memberships)
+    v2 = build_views(list(reversed(boards)), memberships)
+    assert v1 == v2
+
+
+def test_views_analysis_axis_date_range_and_trade_dates():
+    """P1-4：传入 analysis_axis 时 date_range 为机器可消费 [start,end]，
+    representative_sample.trade_dates 为确定性 5 dates；未传时回退说明字符串。"""
+    axis = [d.isoformat() for d in _weekdays(date(2025, 6, 1), date(2025, 7, 31))]
+    boards = _sample_boards()
+    memberships = _sample_memberships()
+    views = build_views(boards, memberships, analysis_axis=axis)
+    for vid, view in views.items():
+        assert view["date_range"] == [axis[0], axis[-1]], vid
+    rep = views["representative_sample"]
+    n = len(axis)
+    expected = [axis[i] for i in sorted({0, n // 4, n // 2, 3 * n // 4, n - 1})]
+    assert len(rep["trade_dates"]) == 5
+    assert rep["trade_dates"] == expected
+    # 无 analysis_axis 兼容路径：回退为说明字符串
+    legacy = build_views(boards, memberships)
+    assert isinstance(legacy["dev_500"]["date_range"], str)
+    assert "manifest.date_ranges" in legacy["dev_500"]["date_range"]
+    assert "trade_dates" not in legacy["representative_sample"]
+
+
+def test_manifest_derived_files_contract():
+    """P1-1 契约：derived_files 条目齐全 → 无违规；条目缺字段 → 检出 violation。"""
+    m = _make_manifest(
+        derived_files={
+            "bars_daily.parquet": {
+                "rows": 2, "sha256": "a" * 64, "derived_from": "raw/bars_daily.jsonl.gz",
+            },
+            "instruments.parquet": {
+                "rows": 1, "sha256": "b" * 64, "derived_from": "raw/instruments.jsonl.gz",
+            },
+        }
+    )
+    assert validate_manifest_contract(m) == []
+    m["derived_files"]["bars_daily.parquet"].pop("sha256")
+    violations = validate_manifest_contract(m)
+    assert any("derived_files.bars_daily.parquet.sha256 缺失" in v for v in violations)
+
+
+def test_rows_to_parquet_batch_and_decimal_stem(tmp_path):
+    """P1-2 + 潜伏 decimal bug：_rows_to_parquet 按 file_stem 解析 decimal 列，
+    bars（stem=bars_daily）的 open/close/adj_factor 为 decimal128，且 rows 正确。"""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    rows = [
+        {"instrument_id": "i1", "trade_date": "2025-01-02",
+         "open": "12.3400", "close": "12.3500", "adj_factor": "1.00000000"},
+        {"instrument_id": "i2", "trade_date": "2025-01-02",
+         "open": "3.1000", "close": None, "adj_factor": "0.98000000"},
+    ]
+    _write_jsonl_gz(str(raw_dir / "bars_daily.jsonl.gz"), rows)
+    parquet_dir = tmp_path / "parquet"
+    parquet_dir.mkdir()
+    info = _rows_to_parquet(str(raw_dir), str(parquet_dir), "bars", "bars_daily", batch_size=1)
+    assert info["rows"] == 2
+    fields = {f.name: f.type for f in pq.ParquetFile(info["path"]).schema_arrow}
+    assert pa.types.is_decimal(fields["open"])
+    assert pa.types.is_decimal(fields["close"])
+    assert pa.types.is_decimal(fields["adj_factor"])
+    t = pq.read_table(info["path"])
+    assert t.num_rows == 2
