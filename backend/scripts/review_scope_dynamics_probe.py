@@ -930,11 +930,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--scope-type", required=False, default=None,
         choices=sorted(_KNOWN_SCOPE_TYPES),
-        help="scope 类型（industry_l1/l2/l3/concept/...），measure-all-scopes 模式可省略",
+        help="scope 类型（industry_l1/l2/l3/concept/...）",
     )
     p.add_argument(
         "--scope-key", required=False, default=None, type=str,
-        help="scope 标识（如 银行 / 人工智能），measure-all-scopes 模式可省略",
+        help="scope 标识（如 银行 / 人工智能）",
     )
     p.add_argument(
         "--history", type=int, default=_DEFAULT_HISTORY_DAYS,
@@ -952,8 +952,7 @@ def _parse_args() -> argparse.Namespace:
         "--mode",
         choices=[
             "single",
-            "measure-all-scopes",
-            "vec1-benchmark",
+            "capacity-benchmark",
             "export-dataset",
             "dataset-validate",
             "replay-l1",
@@ -965,9 +964,8 @@ def _parse_args() -> argparse.Namespace:
         default="single",
         help=(
             "single: 单 scope 基线测量（默认）；"
-            "measure-all-scopes: 枚举全量 scope 测物理数据量，定 batch boundary；"
-            "vec1-benchmark: 对重叠度最高的 concept 子集执行 batch dynamics，"
-            "报告 VEC-1 duplication_factor 等物理成本指标；"
+            "capacity-benchmark: 只调用 optimized production owner "
+            "compute_current_static_scope_dynamics_batch()（禁 legacy/single/手工 chunk）；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -997,12 +995,8 @@ def _parse_args() -> argparse.Namespace:
              "backfill，缺失事实如实标记 unavailable。",
     )
     p.add_argument(
-        "--sample-bar-members", type=int, default=200,
-        help="measure-all-scopes 模式下抽样估算单 member 400d bar 体积的样本数",
-    )
-    p.add_argument(
-        "--benchmark-scopes", type=int, default=50,
-        help="vec1-benchmark 模式：重叠度最高的 scope 数量（默认 50）",
+        "--scope-count", type=int, default=None,
+        help="capacity-benchmark 模式：按重叠度降序选择的 scope 数量（如 285）",
     )
     return p.parse_args()
 
@@ -1130,185 +1124,17 @@ async def _probe(
         return 0
 
 
-async def _measure_all_scopes(sample_bar_members: int) -> int:
-    """measure-all-scopes 模式：枚举全量 scope，测物理数据量定 batch boundary。
-
-    只发 SELECT，不写库。输出每 type 的板块数、unique member 总数、
-    单 member 平均所属板块数（重叠度）、抽样估算的单 member 400d bar 体积，
-    并据 union 一次加载的物理成本给出有界 batch size N 的建议。
-    """
-    from sqlalchemy import func, select, text
-
-    from app.db import AsyncSessionLocal
-    from app.models.bar import BarDaily
-    from app.models.market_board import MarketBoard, MarketBoardMembership
-
-    _build_readonly_engine()
-    async with AsyncSessionLocal() as db:
-        await db.execute(
-            text("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-        )
-        # 1) 枚举所有 board：industry(L1/L2/L3) + concept
-        boards = (
-            await db.execute(
-                select(
-                    MarketBoard.id,
-                    MarketBoard.name,
-                    MarketBoard.type,
-                    MarketBoard.hierarchyLevel,
-                ).where(MarketBoard.isActive.is_(True))
-            )
-        ).all()
-
-        # 2) 枚举所有 membership（board -> instrument）
-        memberships = (
-            await db.execute(
-                select(
-                    MarketBoardMembership.boardId,
-                    MarketBoardMembership.instrumentId,
-                )
-            )
-        ).all()
-
-        # 按 scope_type 分组（industry_l1/l2/l3, concept）
-        def _scope_type_of(b_type: str, level: str) -> str:
-            if b_type == "concept":
-                return "concept"
-            return f"industry_{level.lower()}"
-
-        # 建 board_id -> scope_type 映射
-        bid_to_st: dict = {}
-        for bid, _bname, btype, level in boards:
-            bid_to_st[bid] = _scope_type_of(btype, str(level))
-
-        # 按 board 收集 member 集合
-        per_board_members: dict = {}
-        for bid, iid in memberships:
-            st = bid_to_st.get(bid)
-            if st is None:
-                continue
-            per_board_members.setdefault(bid, set()).add(iid)
-
-        # 组织 boards_meta：每 type 的板块数、union member、重叠度
-        boards_meta: dict = {}
-        for bid, _bname, btype, level in boards:
-            st = _scope_type_of(btype, str(level))
-            boards_meta.setdefault(
-                st, {"board_count": 0, "union": set(), "member_board_count": {}}
-            )
-            boards_meta[st]["board_count"] += 1
-            mset = per_board_members.get(bid, set())
-            boards_meta[st]["union"] |= mset
-            for iid in mset:
-                boards_meta[st]["member_board_count"][iid] = (
-                    boards_meta[st]["member_board_count"].get(iid, 0) + 1
-                )
-
-        # 3) 抽样估算单 member 近 400d bar 体积
-        from datetime import timedelta
-
-        today = date.today()
-        cutoff = today - timedelta(days=400)
-        # union 全量 member（跨所有 type 合并，用于抽样代表性）
-        all_union: set = set()
-        for st in boards_meta:
-            all_union |= boards_meta[st]["union"]
-
-        sample_ids = list(all_union)[: max(1, sample_bar_members)]
-        avg_bars = 0.0
-        if sample_ids:
-            bar_counts = (
-                await db.execute(
-                    select(
-                        BarDaily.instrument_id,
-                        func.count(BarDaily.trade_date),
-                    )
-                    .where(BarDaily.instrument_id.in_(sample_ids))
-                    .where(BarDaily.trade_date >= cutoff)
-                    .group_by(BarDaily.instrument_id)
-                )
-            ).all()
-            if bar_counts:
-                avg_bars = sum(c for _, c in bar_counts) / len(bar_counts)
-
-        # 4) 输出诊断
-        print("=== Scope Physical Volume Measurement (read-only) ===")
-        print(f"sample_bar_members      : {len(sample_ids)}")
-        print(f"avg_bars_per_member_400d: {avg_bars:.1f}")
-        print()
-        print(f"{'scope_type':<12} {'boards':>7} {'union_mems':>11} "
-              f"{'avg_boards/mem':>14} {'max_boards/mem':>14}")
-        suggested_n = {}
-        for st in sorted(boards_meta):
-            info = boards_meta[st]
-            bc = info["member_board_count"]
-            avg_bm = (sum(bc.values()) / len(bc)) if bc else 0.0
-            max_bm = max(bc.values()) if bc else 0
-            n_boards = info["board_count"]
-            union_mems = len(info["union"])
-            print(f"{st:<12} {n_boards:>7} {union_mems:>11} "
-                  f"{avg_bm:>14.2f} {max_bm:>14}")
-            # 建议 batch N：使单次 union 加载的 member 总量约等于
-            # "单批 union member 上界"，这里取经验上界 4000 去反推 N。
-            mem_per_batch_cap = 4000
-            est_n = max(1, round(mem_per_batch_cap / max(1, avg_bm)))
-            suggested_n[st] = est_n
-
-        print()
-        print("batch_size suggestion (union member cap ~4000):")
-        for st in sorted(suggested_n):
-            print(f"  {st:<12} -> N ~= {suggested_n[st]}")
-        print("=== END ===")
-        return 0
-
-
-def _observations_close(a: Any, b: Any, *, rel_tol: float = 1e-9, abs_tol: float = 1e-9) -> bool:
-    """Recursive structural equivalence for two ``compute_scope_observation`` dicts.
-
-    Structural exactness for keys / lists / categorical values; float leaves use
-    ``math.isclose`` so tiny ULP differences between the legacy and VEC-1 loop
-    orders (e.g. sum order in a mean / weighted return) do not fail the check.
-    """
-    import math
-
-    if a is None or b is None:
-        return a is b
-    if isinstance(a, bool) or isinstance(b, bool):
-        return a == b
-    if isinstance(a, (int, str)) and isinstance(b, (int, str)):
-        return a == b
-    if isinstance(a, float) and isinstance(b, float):
-        if math.isnan(a) and math.isnan(b):
-            return True
-        return math.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
-    if isinstance(a, dict) and isinstance(b, dict):
-        if a.keys() != b.keys():
-            return False
-        return all(_observations_close(a[k], b[k]) for k in a)
-    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        if len(a) != len(b):
-            return False
-        return all(_observations_close(x, y) for x, y in zip(a, b))
-    return a == b
-
-
-async def _vec1_benchmark(
-    scope_type: str,
-    history: int,
-    asof_date: date | None,
-    benchmark_scopes: int,
+async def _capacity_benchmark(
+    scope_type: str, scope_count: int, history: int, asof_date: str | None
 ) -> int:
-    """vec1-benchmark：对重叠度最高的 concept 子集执行 VEC-1 batch。
+    """capacity-benchmark：只调用 optimized production owner
+    ``compute_current_static_scope_dynamics_batch()``。
 
-    只发 SELECT，不写库。报告物理成本指标（rules/25 §8.7 纯观测）：
-      - scope_count / union_member_count / trade_date_count
-      - scope_member_day_count / unique_member_day_count / duplication_factor
-      - member build 调用次数从 scope×date（legacy）降到 date（VEC-1）
-      - member_build_ms / scope_slice_ms / scope_observation_ms / total_ms
-
-    legacy 与 vec1 两个路径都调用同一个 canonical owner
-    （``_build_member_observations`` / ``compute_scope_observation``），只是循环
-    顺序不同；本函数只计时并验证两者 PreparedScope 数量一致，不复制任何公式。
+    不跑 legacy A/B（Git 历史已永久保存 PERF-1/PERF-2/PERF-VEC-1 证据）；不做任何
+    union 加载、scope 切分、member 构造或 single dynamics —— 全部委托给 production
+    batch owner。本函数只负责：选择 scope_keys + trade_dates、建立 read-only
+    transaction、调用 production batch、计 wall/RSS。chunking / I/O logs / metrics
+    全部来自 production owner 自身的现有输出。
     """
     import time
     import uuid
@@ -1316,32 +1142,24 @@ async def _vec1_benchmark(
     from sqlalchemy import select, text
 
     from app.db import AsyncSessionLocal
-    from app.domain.review.scope_observation import compute_scope_observation
     from app.models.market_board import MarketBoard, MarketBoardMembership
-    from app.services.review_observation_prep_service import (
-        PreparedScope,
-        _build_member_observations,
-        list_recent_trading_days,
-        prepare_scopes_from_union,
-        prepare_union_fact_context,
+    from app.services.review_observation_prep_service import list_recent_trading_days
+    from app.services.review_scope_dynamics_service import (
+        compute_current_static_scope_dynamics_batch,
     )
 
     _build_readonly_engine()
+    rss_before = _rss_mb()
     async with AsyncSessionLocal() as db:
-        # PERF-REVALIDATION SAFETY FIX: explicit read-only transaction boundary.
+        # PERF-REVALIDATION SAFETY: explicit read-only transaction boundary.
         # The FIRST statement autobegins the transaction; it must be
-        # ``SET TRANSACTION READ ONLY`` (reliable in async sessions, unlike the
-        # session-level ``SET SESSION CHARACTERISTICS`` which is not enforced on
-        # every connection).  NO DML probe here — an intentional read-only
-        # violation would abort this very transaction.  We instead verify the
-        # read-only flag via ``SHOW transaction_read_only`` and fail closed if it
-        # is not ``on``.
+        # ``SET TRANSACTION READ ONLY`` (reliable in async sessions).
         await db.execute(text("SET TRANSACTION READ ONLY"))
         ro = (await db.execute(text("SHOW transaction_read_only"))).scalar()
         if ro != "on":
             logger.error(
                 "read-only guard failed: transaction_read_only=%r; "
-                "refusing to run benchmark",
+                "refusing to run capacity-benchmark",
                 ro,
             )
             return 3
@@ -1352,25 +1170,24 @@ async def _vec1_benchmark(
                 logger.error("无法解析最新交易日（calendar 为空）")
                 return 2
             asof_date = latest[0]
+        else:
+            asof_date = date.fromisoformat(asof_date)
         trade_dates = sorted(await list_recent_trading_days(db, asof_date, history))
         if not trade_dates:
             logger.error("trade_dates 为空（history=%d）", history)
             return 2
 
-        # ---- 枚举 concept scope -> members（只读） ----
+        # ---- 枚举 concept scope -> members（只读），按重叠度降序选前 scope_count ----
         boards = (
             await db.execute(
                 select(MarketBoard.id, MarketBoard.name)
-                .where(MarketBoard.type == "concept")
+                .where(MarketBoard.type == scope_type)
                 .where(MarketBoard.isActive.is_(True))
             )
         ).all()
         memberships = (
             await db.execute(
-                select(
-                    MarketBoardMembership.boardId,
-                    MarketBoardMembership.instrumentId,
-                )
+                select(MarketBoardMembership.boardId, MarketBoardMembership.instrumentId)
             )
         ).all()
         per_board: dict = {}
@@ -1378,7 +1195,6 @@ async def _vec1_benchmark(
         for bid, iid in memberships:
             per_board.setdefault(str(bid), []).append(uuid.UUID(str(iid)))
             member_board_count[str(iid)] = member_board_count.get(str(iid), 0) + 1
-        # 重叠度 = 该 scope 平均每个 member 属于的 concept 数量（用全局计数估算）
         ranked: list[tuple[float, str, str]] = []
         for bid, bname in boards:
             mids = per_board.get(str(bid), [])
@@ -1387,171 +1203,44 @@ async def _vec1_benchmark(
             avg_share = sum(member_board_count.get(str(m), 0) for m in mids) / len(mids)
             ranked.append((avg_share, str(bid), str(bname) or str(bid)))
         ranked.sort(key=lambda x: x[0], reverse=True)
-        top = ranked[:benchmark_scopes]
+        top = ranked[:scope_count] if scope_count else ranked
         if not top:
-            logger.error("无 concept scope 可选（scope_type=%s）", scope_type)
+            logger.error("无 %s scope 可选", scope_type)
             return 2
-        scope_members: dict[str, tuple[list[uuid.UUID], str]] = {
-            bid: (per_board[bid], bname) for _share, bid, bname in top
-        }
+        scope_keys = [bid for _share, bid, _n in top]
 
-        union_ids: list[uuid.UUID] = []
-        seen: set = set()
-        for mids, _n in scope_members.values():
-            for m in mids:
-                if m not in seen:
-                    seen.add(m)
-                    union_ids.append(m)
-        scope_member_day_count = (
-            sum(len(m) for m, _n in scope_members.values()) * len(trade_dates)
-        )
-        unique_member_day_count = len(union_ids) * len(trade_dates)
-        duplication_factor = (
-            scope_member_day_count / unique_member_day_count
-            if unique_member_day_count
-            else 0.0
-        )
-
-        print("=== VEC-1 Union Member-Day Benchmark (read-only) ===")
+        print("=== capacity-benchmark (optimized production batch only) ===")
         print(f"scope_type            : {scope_type}")
-        print(f"benchmark_scopes      : {len(scope_members)}")
+        print(f"scope_count           : {len(scope_keys)}")
         print(f"asof_date             : {asof_date.isoformat()}")
         print(f"trade_date_count      : {len(trade_dates)}")
-        print(f"union_member_count    : {len(union_ids)}")
-        print(f"scope_member_day_count: {scope_member_day_count}")
-        print(f"unique_member_day_count: {unique_member_day_count}")
-        print(f"duplication_factor    : {duplication_factor:.2f}")
+        print(f"rss_before_mb         : {rss_before:.1f}")
 
-        # ---- union facts 只加载一次（PERF-2） ----
-        t0 = time.perf_counter()
-        union_ctx = await prepare_union_fact_context(db, trade_dates, union_ids)
-        union_fact_load_ms = (time.perf_counter() - t0) * 1000.0
-        print(f"union_fact_load_ms    : {union_fact_load_ms:.1f}")
-
-        prep_counters: dict[str, int] = {}
-        prep_fallback: list[str] = []
-
-        # ---- legacy：scope -> date -> member（before 基线，纯 member build 计时） ----
-        legacy_members: dict[str, list] = {k: [] for k in scope_members}
-        t0 = time.perf_counter()
-        for scope_key, (member_ids, _n) in scope_members.items():
-            for t in trade_dates:
-                t1 = union_ctx.t1_by_date.get(t)
-                states_t = union_ctx.states_by_date.get(t, {})
-                states_t1 = union_ctx.states_by_date.get(t1, {}) if t1 else {}
-                members = _build_member_observations(
-                    list(member_ids),
-                    trade_date=t, t1=t1, states_t=states_t, states_t1=states_t1,
-                    bars=union_ctx.bars, current_only_facts={},
-                    vec_volume=union_ctx.vec_volume,
-                    counters=prep_counters, fallback_reasons=prep_fallback,
-                )
-                legacy_members[scope_key].append(members)
-        legacy_member_build_ms = (time.perf_counter() - t0) * 1000.0
-
-        # ---- VEC-1：date -> union member -> scope slice（after） ----
-        t0 = time.perf_counter()
-        vec1_prepared = await prepare_scopes_from_union(
-            db, scope_type, trade_dates, scope_members, union_ctx,
-            prep_counters=prep_counters, prep_fallback_reasons=prep_fallback,
+        wall0 = time.perf_counter()
+        results = await compute_current_static_scope_dynamics_batch(
+            db,
+            scope_type,
+            scope_keys,
+            trade_dates,
+            analysis_asof_date=asof_date,
+            union_member_cap=4096,
         )
-        vec1_prepare_ms = (time.perf_counter() - t0) * 1000.0
+        wall_ms = (time.perf_counter() - wall0) * 1000.0
+        rss_after = _rss_mb()
 
-        # ---- scope observation + SEMANTIC EQUIVALENCE（审查项） ----
-        # 对每个 scope x date，用同一 canonical ``compute_scope_observation``
-        # 计算 legacy（按旧循环顺序、事件按 scope 过滤）与 VEC-1 两个 observation，
-        # 逐字段比较（结构 exact，float 用 ULP 容忍）。legacy 复用 union_ctx 数据，
-        # 仅循环顺序不同，因此能直接对比业务输出，而不是只对比 count。
-        t0 = time.perf_counter()
-        obs_count = 0
-        mismatch_count = 0
-        checked_count = 0
-        for scope_key, (member_ids, _n) in scope_members.items():
-            member_set = {str(m) for m in member_ids}
-            for i, t in enumerate(trade_dates):
-                t1 = union_ctx.t1_by_date.get(t)
-                scope_events = tuple(
-                    e for e in union_ctx.events_by_date.get(t, [])
-                    if e.member_id in member_set
-                )
-                legacy_obs = compute_scope_observation(
-                    scope_type=scope_type,
-                    scope_key=scope_key,
-                    trade_date=t,
-                    pit_member_ids=tuple(str(m) for m in member_ids),
-                    pit_member_ids_t1=tuple(str(m) for m in member_ids),
-                    members=tuple(legacy_members[scope_key][i]),
-                    events=scope_events,
-                    # PERF-REVALIDATION FIX: legacy (canonical per-date) must use the
-                    # SAME event-coverage as the vec1 (batch) path — otherwise dates
-                    # inside the backfill window compare ready(vec1) vs unavailable
-                    # (legacy=None), producing a false obs mismatch.  Both paths are
-                    # fed identical coverage so the comparison is apples-to-apples.
-                    event_coverage_member_ids=vec1_prepared[scope_key][i].event_coverage_member_ids,
-                )
-                prepared = vec1_prepared[scope_key][i]
-                vec1_obs = compute_scope_observation(
-                    scope_type=scope_type,
-                    scope_key=scope_key,
-                    trade_date=prepared.trade_date,
-                    pit_member_ids=prepared.pit_member_ids,
-                    pit_member_ids_t1=prepared.pit_member_ids_t1,
-                    members=prepared.members,
-                    events=prepared.events,
-                    event_coverage_member_ids=prepared.event_coverage_member_ids,
-                )
-                obs_count += 1
-                checked_count += 1
-                if not _observations_close(legacy_obs, vec1_obs):
-                    mismatch_count += 1
-        scope_observation_ms = (time.perf_counter() - t0) * 1000.0
-
-        # ---- VEC-1B closure：batch dynamics vs per-scope single dynamics ----
-        from app.services.review_scope_dynamics_service import (
-            compute_current_static_scope_dynamics,
-            compute_current_static_scope_dynamics_batch,
-        )
-        first_scope = next(iter(scope_members))
-        single_result = await compute_current_static_scope_dynamics(
-            db, scope_type, first_scope, trade_dates, analysis_asof_date=asof_date,
-        )
-        batch_results = await compute_current_static_scope_dynamics_batch(
-            db, scope_type, [first_scope], trade_dates, analysis_asof_date=asof_date,
-        )
-        batch_result = batch_results[0]
-        dynamics_equal = (
-            batch_result["observation_series"] == single_result["observation_series"]
-            and batch_result["scope_dynamics"] == single_result["scope_dynamics"]
-        )
-        batch_metrics = batch_result["metrics"]
-        single_metrics = single_result["metrics"]
-
-        # ---- 一致性：两路径 PreparedScope 数量相同 ----
-        legacy_count = sum(len(v) for v in legacy_members.values())
-        vec1_count = sum(len(v) for v in vec1_prepared.values())
-        print(f"legacy_prepared_count : {legacy_count}")
-        print(f"vec1_prepared_count   : {vec1_count}")
-        print(f"member_build_calls    : legacy={len(scope_members) * len(trade_dates)} "
-              f"vec1={len(trade_dates)}")
-        print(f"member_build_ms       : legacy={legacy_member_build_ms:.1f} "
-              f"vec1_prepare_and_slice_ms={vec1_prepare_ms:.1f}")
-        print(f"scope_observation_ms  : {scope_observation_ms:.1f} (count={obs_count})")
-        print(f"obs_equivalent        : checked={checked_count} mismatch={mismatch_count}")
-        print(f"dynamics_batch_vs_single: equal={dynamics_equal} "
-              f"scope={first_scope} "
-              f"single_total_ms={single_metrics.get('total_ms', 0.0):.1f} "
-              f"batch_total_ms={batch_metrics.get('batch_total_ms', 0.0):.1f} "
-              f"batch_reconstruction_ms={batch_metrics.get('batch_reconstruction_ms', 0.0):.1f}")
-        print(f"rss_mb                : {_rss_mb():.1f}")
-        print(f"vec_hit={prep_counters.get('vec_hit', 0)} "
-              f"vec_fallback={prep_counters.get('vec_fallback', 0)} "
-              f"fallback_reasons={','.join(prep_fallback) or '-'}")
+        print(f"wall_ms               : {wall_ms:.1f}")
+        print(f"rss_after_mb          : {rss_after:.1f}")
+        print(f"rss_delta_mb          : {rss_after - rss_before:.1f}")
+        print(f"result_count          : {len(results)}")
+        # chunk / union / I/O metrics are logged by the production batch owner itself
+        print("(chunk_size / union_member_count / cal_ms / states_ms / bars_ms / "
+              "events_ms / vec_precompute_ms / batch_* metrics from production logs)")
         print("=== END ===")
-        # Read-only transaction closes with rollback (never commit).  Early-return
-        # paths rely on the ``async with AsyncSessionLocal()`` cleanup, which also
-        # rolls back on exit.
+        # Read-only transaction closes with rollback (never commit).
         await db.rollback()
         return 0
+
+
 
 
 def _git_sha(ref: str) -> str | None:
@@ -4435,14 +4124,12 @@ async def _run(args: argparse.Namespace) -> int:
             args.mode, args.scope_type, args.scope_key, args.history, asof,
         )
         return 0
-    if args.mode == "measure-all-scopes":
-        return await _measure_all_scopes(args.sample_bar_members)
-    if args.mode == "vec1-benchmark":
-        return await _vec1_benchmark(
+    if args.mode == "capacity-benchmark":
+        return await _capacity_benchmark(
             args.scope_type or "concept",
+            args.scope_count or 0,
             args.history,
             asof,
-            args.benchmark_scopes,
         )
     if not args.scope_type or not args.scope_key:
         logger.error("[single] --scope-type 与 --scope-key 为必填")
