@@ -471,7 +471,7 @@ async def compute_scope_metrics(
 
 def _scope_family(scope_type: str) -> str | None:
     """[V2] Comparable peer cohort for cross-sectional percentile.
-    
+
     Each taxonomy level is an independent peer cohort:
     - industry_l1 ↔ industry_l1
     - industry_l2 ↔ industry_l2
@@ -742,6 +742,61 @@ def _hierarchy_level_from_scope(scope_type: str) -> str | None:
     if scope_type == "industry_l3":
         return "L3"
     return None
+
+
+# =============================================================================
+# PIT board discovery（按 board_definition_versions PIT 有效性）
+# =============================================================================
+
+
+async def discover_pit_available_boards(
+    session: AsyncSession,
+    board_type: str,
+    hierarchy_level: str | None,
+    trade_date: date,
+) -> list[ScopeDefinition]:
+    """Boards of a type that have a PIT definition version valid on ``trade_date``.
+
+    [REVIEW-EXECUTION-PATH-CONSOLIDATION] 由原 shadow runner 迁移至 scope 发现
+    服务的 canonical 位置。board_type/hierarchy -> canonical scope_type
+    （industry_l1/l2/l3 / concept），返回 ``ScopeDefinition`` 而非 shadow 专用 spec。
+    """
+    from sqlalchemy import or_
+
+    from app.models.board_taxonomy import BoardDefinitionVersion
+    from app.models.market_board import MarketBoard
+
+    if board_type == "concept":
+        scope_type = "concept"
+    else:
+        if hierarchy_level is None:
+            raise ValueError("industry board discovery requires a hierarchy_level")
+        scope_type = f"industry_{hierarchy_level.lower()}"
+
+    stmt = (
+        select(MarketBoard.id, MarketBoard.name)
+        .join(BoardDefinitionVersion, BoardDefinitionVersion.board_id == MarketBoard.id)
+        .where(
+            MarketBoard.type == board_type,
+            BoardDefinitionVersion.effective_from <= trade_date,
+            or_(
+                BoardDefinitionVersion.effective_to.is_(None),
+                BoardDefinitionVersion.effective_to > trade_date,
+            ),
+        )
+        .distinct()
+        .order_by(MarketBoard.name)
+    )
+    if hierarchy_level is not None:
+        stmt = stmt.where(MarketBoard.hierarchyLevel == hierarchy_level)
+    return [
+        ScopeDefinition(
+            scope_type=scope_type,
+            scope_key=str(row[0]),
+            scope_name=row[1],
+        )
+        for row in (await session.execute(stmt))
+    ]
 
 
 # =============================================================================

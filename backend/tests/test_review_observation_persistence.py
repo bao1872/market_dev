@@ -196,8 +196,10 @@ def test_member_count_threshold_not_applied_to_industry() -> None:
 
 def test_canonical_top_level_sections_exact() -> None:
     # Blocker #1: the canonical table only accepts the exact canonical set.
+    # ``amount`` is legacy topology (canonical amount lives under ``price.amount``)
+    # and is explicitly rejected at the top level.
     assert CANONICAL_TOP_LEVEL_SECTIONS == frozenset(
-        {"scope", "price", "amount", "trend", "structure", "momentum", "participation", "chip"}
+        {"scope", "price", "trend", "structure", "momentum", "participation", "chip"}
     )
 
 
@@ -372,59 +374,6 @@ async def test_save_rejects_identity_mismatch_payload() -> None:
     obs = _canonical_obs(scope_type="concept", scope_key="B")
     with pytest.raises(ScopeObservationPayloadValidationError):
         await save_scope_observation_fact(_FakeSession(), prep, obs)
-
-
-@pytest.mark.asyncio
-async def test_shadow_invariant_fail_does_not_persist(monkeypatch) -> None:
-    """Round 1C correction §8: when the canonical result fails an invariant, the
-    shadow write path must NOT call persistence (fail-fast)."""
-    from pathlib import Path
-
-    from app.services import review_observation_shadow as shadow
-    from app.services.review_observation_persistence_service import (
-        save_scope_observation_fact as real_save,
-    )
-
-    prep = _prep()
-    spec = shadow.ShadowScopeSpec(scope_type="concept", scope_key="A", scope_name="A")
-
-    # Stub DB-backed prepare_scope so the pure guard path is exercised.
-    async def fake_prepare(session, scope_type, scope_key, trade_date):  # noqa: ARG001
-        return prep
-
-    monkeypatch.setattr(shadow, "prepare_scope", fake_prepare)
-    # Provide a legal Core output so the only injected failure is the invariant.
-    monkeypatch.setattr(
-        shadow, "compute_scope_observation", lambda **kw: _canonical_obs()
-    )
-    # Force an invariant failure (breadth count != denominator) and prove that
-    # save_scope_observation_fact is never reached.
-    monkeypatch.setattr(
-        shadow,
-        "check_observation_invariants",
-        lambda obs: [{"name": "price_breadth_sums_denominator", "ok": False, "detail": "1 != 2"}],
-    )
-
-    class _WriteProbe:
-        def __init__(self) -> None:
-            self.saved = False
-
-        async def execute(self, *a, **k):  # pragma: no cover - must not be called
-            self.saved = True
-            raise AssertionError("persistence reached despite invariant failure")
-
-    # Even the real save would never be invoked because run_shadow_scope raises
-    # before reaching it; use a probe to be explicit.
-    def _blocked_save(*a, **k):  # pragma: no cover - must not be reached
-        raise AssertionError("save_scope_observation_fact called on invariant failure")
-
-    monkeypatch.setattr(shadow, "save_scope_observation_fact", _blocked_save)
-
-    with pytest.raises(shadow.ScopeObservationInvariantError):
-        await shadow.run_shadow_scope(
-            None, spec, T, Path("/tmp/nonexistent_out"), write_session=_WriteProbe()
-        )
-    assert real_save is not None  # sanity: reference still imported
 
 
 def test_snapshot_readiness_mapping() -> None:

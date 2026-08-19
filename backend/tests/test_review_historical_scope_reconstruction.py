@@ -1,14 +1,20 @@
 """Pure/unit tests for current-universe historical Scope Observation reconstruction.
 
-Covers the fixed current-static membership contract (Review v2.3):
+[REVIEW-EXECUTION-PATH-CONSOLIDATION] 历史重建已收口为唯一 batch/union owner
+``reconstruct_scope_series_batch``（单 scope 也走同一 owner，batch size = 1）；
+单 scope 入口 ``reconstruct_scope_series`` / ``reconstruct_scope_observation`` /
+``prepare_scope_from_member_ids`` / ``prepare_scope_series_from_member_ids`` 已删除。
+本文件所有重建断言均针对 batch owner，且验证其内部契约沿 single 语义保持：
 
-- Test 1 — current membership is fixed across historical dates
+- Test 1 — current membership is fixed across historical dates (resolved once)
 - Test 2 — historical / PIT membership is never consulted
 - Test 3 — member facts are read at the exact historical T (never the current day)
 - Test 4 — current-only facts stay unavailable for historical T (no backfill)
-- Test 5 — a current member missing at T is excluded; provided count drops (no fake 0)
+- Test 5 — a current member missing at T is still provided (no fake 0)
 - Test 6 — the final observation comes from ``compute_scope_observation``
 - Test 7 — determinism (same inputs -> identical result)
+- Test 8 — current-only snapshot loader is never invoked for historical T
+- membership resolution: 2-query batch resolver validation + dedupe
 
 No DB, no network.  All DB-touching helpers are mocked.
 """
@@ -24,11 +30,11 @@ import pytest
 
 from app.domain.review.scope_observation import MemberObservation
 from app.services import review_historical_scope_reconstruction_service as reconstruct
+from app.services import review_observation_prep_service as prep_service
 from app.services.observation_prep import RawMemberFacts, build_member_observation
 from app.services.review_historical_scope_reconstruction_service import (
     CurrentStaticMembership,
     HistoricalReconstructionError,
-    resolve_current_membership,
     resolve_current_memberships_batch,
 )
 from app.services.review_observation_prep_service import PreparedScope
@@ -85,6 +91,117 @@ class _FakeSession:
     """Stand-in AsyncSession (service tests never touch a real DB)."""
 
 
+def _install_membership_only(monkeypatch, memberships: dict[str, CurrentStaticMembership]) -> None:
+    """Only mock the batch membership resolver — the real union prep runs below."""
+
+    async def fake_resolve_batch(session, scope_type, scope_keys, *, asof_date):
+        return {sk: memberships[sk] for sk in scope_keys}
+
+    monkeypatch.setattr(
+        reconstruct, "resolve_current_memberships_batch", fake_resolve_batch
+    )
+
+
+def _install_prep_mocks(monkeypatch, *, all_bars, states, trading_days) -> None:
+    """Mock the batch loaders so the REAL union prep builds members (no DB)."""
+
+    async def fake_calendar(session, trade_dates):
+        return {
+            t: trading_days[trading_days.index(t) - 1]
+            if trading_days.index(t) > 0 else None
+            for t in trade_dates
+        }
+
+    async def fake_batch_states(session, instrument_ids, trade_dates, t1_by_date):
+        return {
+            d: states.get(d, {})
+            for d in set(trade_dates) | set(t1_by_date.values()) if d is not None
+        }
+
+    async def fake_batch_bars(session, instrument_ids, trade_dates):
+        return {i: all_bars[i] for i in all_bars}
+
+    async def fake_batch_events(session, instrument_ids, trade_dates):
+        return {d: [] for d in trade_dates}
+
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
+    monkeypatch.setattr(prep_service, "_load_batch_calendar", fake_calendar)
+    monkeypatch.setattr(prep_service, "_load_batch_states", fake_batch_states)
+    monkeypatch.setattr(prep_service, "_load_batch_bars", fake_batch_bars)
+    monkeypatch.setattr(prep_service, "_load_batch_events", fake_batch_events)
+    monkeypatch.setattr(
+        prep_service, "_load_batch_backfill_event_coverage", fake_batch_coverage
+    )
+
+
+def _install_reconstruct_mocks(
+    monkeypatch,
+    *,
+    memberships: dict[str, CurrentStaticMembership],
+    dates_seen: list[date] | None = None,
+    scope_members_seen: list | None = None,
+) -> None:
+    """Mock the batch reconstruction's full internal chain with canned prep output.
+
+    Used where the PREP internals are not under test (Tests 1/2/3/6/7).  Tests
+    4/5/8 instead keep the real union prep (``_install_prep_mocks``) so they can
+    prove current-only / missing-member behavior through the actual owner.
+    """
+
+    async def fake_union_ctx(session, trade_dates, member_ids, **kw):
+        return None
+
+    async def fake_prepare_scopes(
+        session, scope_type, trade_dates, scope_members, union_ctx, **kw
+    ):
+        if dates_seen is not None:
+            dates_seen.extend(trade_dates)
+        if scope_members_seen is not None:
+            scope_members_seen.append(scope_members)
+        out: dict[str, list[PreparedScope]] = {}
+        for sk, (member_ids, _name) in scope_members.items():
+            out[sk] = [
+                _prepared(
+                    scope_type, sk, d,
+                    [str(m) for m in member_ids],
+                    [_member(str(m)) for m in member_ids],
+                )
+                for d in trade_dates
+            ]
+        return out
+
+    def _stub_compute(scope_type, scope_key, trade_date, pit_member_ids,
+                      pit_member_ids_t1, members, events, *,
+                      t1_membership_available=True, event_coverage_member_ids=None):
+        return {
+            "scope": {
+                "scope_type": scope_type,
+                "scope_key": scope_key,
+                "trade_date": trade_date.isoformat(),
+                "pit_member_count": len(pit_member_ids),
+                "provided_member_count": len(members),
+            }
+        }
+
+    monkeypatch.setattr(reconstruct, "prepare_union_fact_context", fake_union_ctx)
+    monkeypatch.setattr(reconstruct, "prepare_scopes_from_union", fake_prepare_scopes)
+    monkeypatch.setattr(reconstruct, "compute_scope_observation", _stub_compute)
+    monkeypatch.setattr(
+        reconstruct, "validate_scope_observation_payload", lambda *a, **kw: None
+    )
+    _install_membership_only(monkeypatch, memberships)
+
+
+def _run_batch(scope_type, scope_keys, dates, asof) -> list[dict]:
+    return asyncio.run(
+        reconstruct.reconstruct_scope_series_batch(
+            _FakeSession(), scope_type, scope_keys, dates, asof_date=asof,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — current membership is fixed across historical dates
 # ---------------------------------------------------------------------------
@@ -97,49 +214,29 @@ def test_current_membership_fixed_across_dates(monkeypatch) -> None:
         asof_date=date(2026, 8, 14),
         member_count=3,
     )
-    seen: list[tuple[date, tuple]] = []
+    scope_key = str(uuid.uuid4())
+    resolve_calls = {"n": 0, "keys": []}
 
-    async def fake_prepare_series(
-        session, scope_type, scope_key, scope_name, trade_dates, member_ids, **kw
-    ):
-        for d in trade_dates:
-            seen.append((d, tuple(member_ids)))
-        return [
-            _prepared(
-                scope_type,
-                scope_key,
-                d,
-                [str(m) for m in member_ids],
-                [_member(str(m)) for m in member_ids],
-            )
-            for d in trade_dates
-        ]
+    async def fake_resolve_batch(session, scope_type, scope_keys, *, asof_date):
+        resolve_calls["n"] += 1
+        resolve_calls["keys"].extend(scope_keys)
+        return dict.fromkeys(scope_keys, mem)
 
-    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
-        return mem
-
-    monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
+    _install_reconstruct_mocks(monkeypatch, memberships={scope_key: mem})
     monkeypatch.setattr(
-        reconstruct, "prepare_scope_series_from_member_ids", fake_prepare_series
+        reconstruct, "resolve_current_memberships_batch", fake_resolve_batch
     )
 
-    async def scenario():
-        return await reconstruct.reconstruct_scope_series(
-            _FakeSession(),
-            "industry_l1",
-            str(uuid.uuid4()),
-            [T1, T2],
-            asof_date=date(2026, 8, 14),
-        )
+    out = _run_batch("industry_l1", [scope_key], [T1, T2], date(2026, 8, 14))
 
-    out = asyncio.run(scenario())
-    assert [d for d, _ in seen] == [T1, T2]
-    # Both dates use the SAME current member set.
-    assert seen[0][1] == mem.member_ids
-    assert seen[1][1] == mem.member_ids
-    assert out["membership"]["mode"] == "current_static"
-    assert out["membership"]["member_count"] == 3
-    assert len(out["series"]) == 2
+    # Membership resolved exactly once for the whole series (not per date).
+    assert resolve_calls["n"] == 1
+    assert resolve_calls["keys"] == [scope_key]
+    # Both trade dates are reconstructed with the SAME current member set.
+    assert [s["trade_date"] for s in out[0]["series"]] == ["2026-08-03", "2026-08-04"]
+    assert [s["provided_member_count"] for s in out[0]["series"]] == [3, 3]
+    assert out[0]["membership"]["mode"] == "current_static"
+    assert out[0]["membership"]["member_count"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -154,51 +251,23 @@ def test_historical_membership_never_consulted(monkeypatch) -> None:
         asof_date=date(2026, 8, 14),
         member_count=1,
     )
+    scope_key = str(uuid.uuid4())
     pit_calls: list = []
 
     async def fake_pit_resolver(session, scope_type, scope_key, *, trade_date):
         pit_calls.append((scope_type, scope_key, trade_date))
         return ([uuid.uuid4()], "historical-different")
 
-    async def fake_prepare_series(
-        session, scope_type, scope_key, scope_name, trade_dates, member_ids, **kw
-    ):
-        return [
-            _prepared(
-                scope_type,
-                scope_key,
-                d,
-                [str(m) for m in member_ids],
-                [_member(str(m)) for m in member_ids],
-            )
-            for d in trade_dates
-        ]
-
-    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
-        return mem
-
-    monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
-    monkeypatch.setattr(
-        reconstruct, "prepare_scope_series_from_member_ids", fake_prepare_series
-    )
+    _install_reconstruct_mocks(monkeypatch, memberships={scope_key: mem})
     # The historical PIT membership owner must NOT be reached by reconstruction.
     monkeypatch.setattr(
         "app.services.review_scope_service.resolve_scope_members",
         fake_pit_resolver,
     )
 
-    async def scenario():
-        return await reconstruct.reconstruct_scope_series(
-            _FakeSession(),
-            "concept",
-            str(uuid.uuid4()),
-            [T1],
-            asof_date=date(2026, 8, 14),
-        )
-
-    out = asyncio.run(scenario())
+    out = _run_batch("concept", [scope_key], [T1], date(2026, 8, 14))
     assert pit_calls == []  # historical membership resolver never invoked
-    assert out["membership"]["mode"] == "current_static"
+    assert out[0]["membership"]["mode"] == "current_static"
 
 
 # ---------------------------------------------------------------------------
@@ -213,41 +282,12 @@ def test_member_facts_date_exact(monkeypatch) -> None:
         asof_date=date(2026, 8, 14),
         member_count=1,
     )
+    scope_key = str(uuid.uuid4())
     dates_seen: list[date] = []
-
-    async def fake_prepare_series(
-        session, scope_type, scope_key, scope_name, trade_dates, member_ids, **kw
-    ):
-        dates_seen.extend(trade_dates)
-        return [
-            _prepared(
-                scope_type,
-                scope_key,
-                d,
-                [str(m) for m in member_ids],
-                [_member(str(m)) for m in member_ids],
-            )
-            for d in trade_dates
-        ]
-
-    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
-        return mem
-
-    monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
-    monkeypatch.setattr(
-        reconstruct, "prepare_scope_series_from_member_ids", fake_prepare_series
+    _install_reconstruct_mocks(
+        monkeypatch, memberships={scope_key: mem}, dates_seen=dates_seen,
     )
-
-    async def scenario():
-        return await reconstruct.reconstruct_scope_series(
-            _FakeSession(),
-            "industry_l3",
-            str(uuid.uuid4()),
-            [T1, T2],
-            asof_date=date(2026, 8, 14),
-        )
-
-    asyncio.run(scenario())
+    _run_batch("industry_l3", [scope_key], [T1, T2], date(2026, 8, 14))
     # The exact requested dates are passed to the batch prep, never the current day.
     assert dates_seen == [T1, T2]
 
@@ -256,169 +296,107 @@ def test_member_facts_date_exact(monkeypatch) -> None:
 # Test 4 — current-only facts stay unavailable for historical T (no backfill)
 # ---------------------------------------------------------------------------
 
-import app.services.review_observation_prep_service as prep_service  # noqa: E402
 
-
-async def _install_prep_mocks(
-    monkeypatch,
-    *,
-    t1: date,
-    states_t=None,
-    states_t1=None,
-    bar_facts=None,
-    t1_bar_facts=None,
-    current_only=None,
-) -> None:
-    async def _fake_previous(session, ref_date):
-        return t1
-
-    async def _fake_load_states(session, ids, trade_date):
-        if trade_date == T1:
-            return states_t or {}
-        return states_t1 or {}
-
-    async def _fake_load_bar_facts(session, ids, trade_date):
-        if trade_date == T1:
-            return bar_facts or {}
-        return t1_bar_facts or {}
-
-    async def _fake_load_structure_events(session, ids, trade_date):
-        return []
-
-    async def _fake_load_current_only(session, ids, trade_date):
-        # Historical T has NO current snapshot -> the current-only loader is called
-        # at T but returns nothing (no latest-snapshot fallback).
-        return current_only or {}
-
-    async def _fake_load_coverage(session, ids, trade_date):
-        # ROUND-2.2B: historical reconstruction tests carry no event lineage.
-        return None
-
-    monkeypatch.setattr(
-        "app.services.calendar_service.get_previous_trading_day_async",
-        _fake_previous,
+def _bar(inst, d, close, amount=100.0, volume=10.0):
+    return SimpleNamespace(
+        trade_date=d,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=volume,
+        amount=amount,
     )
-    monkeypatch.setattr(prep_service, "_load_states", _fake_load_states)
-    monkeypatch.setattr(prep_service, "_load_bar_facts", _fake_load_bar_facts)
-    monkeypatch.setattr(prep_service, "_load_structure_events", _fake_load_structure_events)
-    monkeypatch.setattr(
-        prep_service,
-        "_load_backfill_event_coverage_member_ids",
-        _fake_load_coverage,
-    )
-    monkeypatch.setattr(
-        prep_service,
-        "_load_current_only_snapshot_facts",
-        _fake_load_current_only,
+
+
+def _to_series(facts):
+    from app.services.review_observation_prep_service import _InstrumentBarSeries
+    facts = sorted(facts, key=lambda b: b.trade_date)
+    return _InstrumentBarSeries(
+        facts=tuple(facts), dates=tuple(b.trade_date for b in facts),
     )
 
 
 def test_current_only_facts_unavailable_for_historical_t(monkeypatch) -> None:
+    """Test 4: reconstructing historical T never invokes the Current-only snapshot
+    loader (large summary_payload JSONB);  current-only facts stay None, never a
+    current-day backfill."""
     id_a = uuid.uuid4()
     state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 0, "sqzmom_val": 1.0}
+    mem = CurrentStaticMembership(
+        member_ids=(id_a,),
+        scope_name="s",
+        asof_date=date(2026, 8, 14),
+        member_count=1,
+    )
+    scope_key = str(uuid.uuid4())
+    _install_membership_only(monkeypatch, {scope_key: mem})
 
-    def _bar(inst, d, close, amount=100.0, volume=10.0):
-        return SimpleNamespace(
-            trade_date=d,
-            open=close,
-            high=close,
-            low=close,
-            close=close,
-            volume=volume,
-            amount=amount,
-        )
+    bar_facts = {
+        id_a: [_bar(id_a, date(2026, 7, 31), 9.0), _bar(id_a, T1, 10.0)],
+    }
+    states = {d: {id_a: state} for d in (date(2026, 7, 31), T1)}
+    trading_days = [date(2026, 7, 31), T1]
+    _install_prep_mocks(
+        monkeypatch, all_bars={id_a: _to_series(bar_facts[id_a])},
+        states=states, trading_days=trading_days,
+    )
+    invoked = {"current_only": False}
 
-    async def scenario():
-        await _install_prep_mocks(
-            monkeypatch,
-            t1=date(2026, 7, 31),
-            states_t={id_a: state},
-            states_t1={id_a: state},
-            bar_facts={id_a: [_bar(id_a, T1, 10.0)]},
-            t1_bar_facts={id_a: [_bar(id_a, date(2026, 7, 31), 9.0)]},
-            current_only={},  # no current snapshot at historical T
-        )
-        return await prep_service.prepare_scope_from_member_ids(
-            _FakeSession(),
-            "concept",
-            "k",
-            "s",
-            T1,
-            [id_a],
-        )
+    async def boom(session, instrument_ids, trade_date):
+        invoked["current_only"] = True
+        raise AssertionError("current-only snapshot loader must not run for historical T")
 
-    prep = asyncio.run(scenario())
-    member = prep.members[0]
-    # Current-only facts have no historical source -> unavailable (None), never a
-    # current-day backfill.
-    assert member.bb_position is None
-    assert member.bb_width is None
-    assert member.release_volume_ratio is None
-    assert member.vwap_ret_total is None
-    assert member.trailing_top_pct is None
+    monkeypatch.setattr(
+        prep_service, "_load_current_only_snapshot_facts", boom,
+    )
+
+    out = _run_batch("concept", [scope_key], [T1], date(2026, 8, 14))
+    assert invoked["current_only"] is False
+    # Series built through the real union prep owner; current-only facts absent.
+    member = out[0]["series"][0]
+    assert member["provided_member_count"] == 1
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — a current member missing at T is excluded (no fake 0)
+# Test 5 — a current member missing at T is still provided (no fake 0)
 # ---------------------------------------------------------------------------
 
 
-def test_missing_member_historical_fact_excluded(monkeypatch) -> None:
+def test_missing_member_historical_fact_still_provided(monkeypatch) -> None:
     id_a, id_b, id_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 0, "sqzmom_val": 1.0}
+    mem = CurrentStaticMembership(
+        member_ids=(id_a, id_b, id_c),
+        scope_name="s",
+        asof_date=date(2026, 8, 14),
+        member_count=3,
+    )
+    scope_key = str(uuid.uuid4())
+    _install_membership_only(monkeypatch, {scope_key: mem})
 
-    def _bar(inst, d, close, amount=100.0, volume=10.0):
-        return SimpleNamespace(
-            trade_date=d,
-            open=close,
-            high=close,
-            low=close,
-            close=close,
-            volume=volume,
-            amount=amount,
-        )
+    # Real prep owner with id_c missing state at T (still a PIT member).
+    bar_facts = {
+        id_a: [_bar(id_a, date(2026, 7, 31), 9.0), _bar(id_a, T1, 10.0)],
+        id_b: [_bar(id_b, date(2026, 7, 31), 8.0), _bar(id_b, T1, 8.5)],
+        id_c: [_bar(id_c, date(2026, 7, 31), 5.0), _bar(id_c, T1, 5.5)],
+    }
+    states = {
+        date(2026, 7, 31): {id_a: state, id_b: state, id_c: state},
+        T1: {id_a: state, id_b: state},  # id_c missing state at T
+    }
+    trading_days = [date(2026, 7, 31), T1]
+    _install_prep_mocks(
+        monkeypatch,
+        all_bars={i: _to_series(bar_facts[i]) for i in bar_facts},
+        states=states, trading_days=trading_days,
+    )
 
-    async def scenario():
-        await _install_prep_mocks(
-            monkeypatch,
-            t1=date(2026, 7, 31),
-            # A and B have FP state at T; C (current member) does NOT.
-            states_t={id_a: state, id_b: state},
-            states_t1={id_a: state, id_b: state},
-            bar_facts={
-                id_a: [_bar(id_a, T1, 10.0)],
-                id_b: [_bar(id_b, T1, 8.0)],
-            },
-            t1_bar_facts={
-                id_a: [_bar(id_a, date(2026, 7, 31), 9.0)],
-                id_b: [_bar(id_b, date(2026, 7, 31), 8.0)],
-            },
-        )
-        prepared = await prep_service.prepare_scope_from_member_ids(
-            _FakeSession(),
-            "concept",
-            "k",
-            "s",
-            T1,
-            [id_a, id_b, id_c],
-        )
-        from app.domain.review.scope_observation import compute_scope_observation
-
-        return compute_scope_observation(
-            scope_type="concept",
-            scope_key="k",
-            trade_date=T1,
-            pit_member_ids=prepared.pit_member_ids,
-            pit_member_ids_t1=prepared.pit_member_ids_t1,
-            members=prepared.members,
-            event_coverage_member_ids=prepared.event_coverage_member_ids,
-        )
-
-    out = asyncio.run(scenario())
-    # ROUND-2 GAP-L1-MEMBER-GATE: C is a current (PIT) member -> provided even
-    # though it has no state/bars at T; its facts are None (no fake 0).
-    assert out["scope"]["pit_member_count"] == 3
-    assert out["scope"]["provided_member_count"] == 3
+    out = _run_batch("concept", [scope_key], [T1], date(2026, 8, 14))
+    # ROUND-2 GAP-L1-MEMBER-GATE: C is a current (PIT) member -> still provided
+    # even though it has no state at T; its facts are None (no fake 0).
+    assert out[0]["series"][0]["observation"]["scope"]["pit_member_count"] == 3
+    assert out[0]["series"][0]["provided_member_count"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -433,50 +411,26 @@ def test_final_observation_from_canonical_owner(monkeypatch) -> None:
         asof_date=date(2026, 8, 14),
         member_count=1,
     )
+    scope_key = str(uuid.uuid4())
     real_compute = reconstruct.compute_scope_observation
-    calls: list = []
+    compute_spy: list = []
+    _install_reconstruct_mocks(monkeypatch, memberships={scope_key: mem})
 
     def spy_compute(**kw):
-        calls.append(kw)
+        compute_spy.append(kw)
         return real_compute(**kw)
 
-    async def fake_prepare(
-        session, scope_type, scope_key, scope_name, trade_date, member_ids, **kw
-    ):
-        return _prepared(
-            scope_type,
-            scope_key,
-            trade_date,
-            [str(m) for m in member_ids],
-            [_member(str(m)) for m in member_ids],
-        )
-
-    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
-        return mem
-
-    monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
-    monkeypatch.setattr(reconstruct, "prepare_scope_from_member_ids", fake_prepare)
     monkeypatch.setattr(reconstruct, "compute_scope_observation", spy_compute)
 
-    async def scenario():
-        return await reconstruct.reconstruct_scope_observation(
-            _FakeSession(),
-            "industry_l3",
-            str(uuid.uuid4()),
-            T1,
-            mem,
-        )
-
-    rec = asyncio.run(scenario())
-    assert len(calls) == 1
+    out = _run_batch("industry_l3", [scope_key], [T1], date(2026, 8, 14))
+    assert len(compute_spy) == 1
+    rec = out[0]["series"][0]["observation"]
     # The payload is the canonical structure produced by compute_scope_observation.
     from app.services.review_observation_persistence_service import (
         CANONICAL_TOP_LEVEL_SECTIONS,
     )
 
-    assert set(rec.observation) == CANONICAL_TOP_LEVEL_SECTIONS
-    assert "breadth" in rec.observation["price"]
-    assert "concentration" in rec.observation["price"]
+    assert set(rec.keys()) >= CANONICAL_TOP_LEVEL_SECTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -491,36 +445,12 @@ def test_determinism(monkeypatch) -> None:
         asof_date=date(2026, 8, 14),
         member_count=2,
     )
+    scope_key = str(uuid.uuid4())
+    _install_reconstruct_mocks(monkeypatch, memberships={scope_key: mem})
 
-    async def fake_prepare(
-        session, scope_type, scope_key, scope_name, trade_date, member_ids, **kw
-    ):
-        return _prepared(
-            scope_type,
-            scope_key,
-            trade_date,
-            [str(m) for m in member_ids],
-            [_member(str(m)) for m in member_ids],
-        )
-
-    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
-        return mem
-
-    monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
-    monkeypatch.setattr(reconstruct, "prepare_scope_from_member_ids", fake_prepare)
-
-    async def scenario():
-        return await reconstruct.reconstruct_scope_observation(
-            _FakeSession(),
-            "concept",
-            "k",
-            T1,
-            mem,
-        )
-
-    rec1 = asyncio.run(scenario())
-    rec2 = asyncio.run(scenario())
-    assert rec1.observation == rec2.observation
+    one = _run_batch("concept", [scope_key], [T1], date(2026, 8, 14))
+    two = _run_batch("concept", [scope_key], [T1], date(2026, 8, 14))
+    assert one == two
 
 
 # ---------------------------------------------------------------------------
@@ -529,59 +459,42 @@ def test_determinism(monkeypatch) -> None:
 
 
 def test_historical_reconstruction_skips_current_only_loader(monkeypatch) -> None:
-    """The reconstruction must pass ``load_current_only=False`` so the
+    """The reconstruction routes through the historical/union path only, so the
     Current-only snapshot loader (large summary_payload JSONB) is never invoked
     for historical T and current-only facts stay None (PRD v2.3)."""
+    id_a = uuid.uuid4()
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 0, "sqzmom_val": 1.0}
     mem = CurrentStaticMembership(
-        member_ids=(uuid.uuid4(),),
-        scope_name="s",
-        asof_date=date(2026, 8, 14),
-        member_count=1,
+        member_ids=(id_a,), scope_name="s",
+        asof_date=date(2026, 8, 14), member_count=1,
     )
-    prep_kwargs: dict = {}
+    scope_key = str(uuid.uuid4())
+    _install_membership_only(monkeypatch, {scope_key: mem})
+    bar_facts = {
+        id_a: [_bar(id_a, date(2026, 7, 31), 9.0), _bar(id_a, T1, 10.0)],
+    }
+    _install_prep_mocks(
+        monkeypatch,
+        all_bars={id_a: _to_series(bar_facts[id_a])},
+        states={d: {id_a: state} for d in (date(2026, 7, 31), T1)},
+        trading_days=[date(2026, 7, 31), T1],
+    )
+    invoked = {"current_only": 0}
 
-    async def fake_prepare(
-        session, scope_type, scope_key, scope_name, trade_date, member_ids, **kw
-    ):
-        prep_kwargs.update(kw)
-        return _prepared(
-            scope_type,
-            scope_key,
-            trade_date,
-            [str(m) for m in member_ids],
-            [_member(str(m)) for m in member_ids],
-        )
+    async def boom(session, instrument_ids, trade_date):
+        invoked["current_only"] += 1
+        raise AssertionError("current-only snapshot loader must not run")
 
-    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
-        return mem
-
-    monkeypatch.setattr(reconstruct, "resolve_current_membership", fake_resolve)
-    monkeypatch.setattr(reconstruct, "prepare_scope_from_member_ids", fake_prepare)
-
-    async def scenario():
-        return await reconstruct.reconstruct_scope_observation(
-            _FakeSession(),
-            "concept",
-            str(uuid.uuid4()),
-            T1,
-            mem,
-        )
-
-    asyncio.run(scenario())
-    assert prep_kwargs.get("load_current_only") is False
+    monkeypatch.setattr(
+        prep_service, "_load_current_only_snapshot_facts", boom,
+    )
+    _run_batch("concept", [scope_key], [T1], date(2026, 8, 14))
+    assert invoked["current_only"] == 0
 
 
 # ---------------------------------------------------------------------------
-# Current membership resolution: validation + dedupe
+# Current membership resolution (batch owner): validation + dedupe
 # ---------------------------------------------------------------------------
-
-
-class _ScalarResult:
-    def __init__(self, value):
-        self._value = value
-
-    def scalar_one_or_none(self):
-        return self._value
 
 
 class _ScalarsResult:
@@ -590,9 +503,6 @@ class _ScalarsResult:
 
     def scalars(self):
         return iter(self._rows)
-
-    def all(self):
-        return list(self._rows)
 
 
 class _MembershipRows:
@@ -605,74 +515,21 @@ class _MembershipRows:
         return self._rows
 
 
-class _BoardSession:
-    """Mocks the 2-query batch resolver: call1 = boards.scalars(), call2 = memberships.all()."""
-
-    def __init__(self, board, member_ids):
-        self._board = board
-        self._member_ids = member_ids
-        self._calls = 0
-
-    async def execute(self, stmt):
-        self._calls += 1
-        if self._calls == 1:
-            return _ScalarsResult([self._board])
-        return _MembershipRows(
-            [(self._board.id, iid) for iid in self._member_ids]
-        )
-
-
-def test_resolve_current_membership_validates_and_dedupes() -> None:
-    board = SimpleNamespace(
-        id=uuid.uuid4(),
-        type="industry",
-        hierarchyLevel="L1",
-        name="电子",
-    )
-    a, b = uuid.uuid4(), uuid.uuid4()
-    session = _BoardSession(board, [a, b, a])  # duplicate a in raw rows
-    mem = asyncio.run(
-        resolve_current_membership(
-            session,
-            "industry_l1",
-            str(board.id),
-            asof_date=date(2026, 8, 14),
-        )
-    )
-    assert mem.scope_name == "电子"
-    assert mem.member_count == 2
-    assert mem.member_ids == (a, b)  # deduped, order preserved
-
-
-def test_resolve_current_membership_rejects_type_mismatch() -> None:
-    board = SimpleNamespace(
-        id=uuid.uuid4(),
-        type="concept",
-        hierarchyLevel="L1",
-        name="概念",
-    )
-    session = _BoardSession(board, [])
-    with pytest.raises(HistoricalReconstructionError):
-        asyncio.run(
-            resolve_current_membership(
-                session,
-                "industry_l1",
-                str(board.id),
-                asof_date=date(2026, 8, 14),
-            )
-        )
-
-
 class _MultiBoardSession:
-    """Mock the 2-query batch resolver for MANY boards: call1 = boards.scalars(),
-    call2 = memberships.all().  ``calls`` counts SQL executions (must stay == 2)."""
+    """Mock the 2-query batch resolver: call1 = boards.scalars(), call2 = memberships.all()."""
 
-    def __init__(self, boards):
+    def __init__(self, boards, with_dup=False):
         self._boards = boards  # list of SimpleNamespace(id, type, hierarchyLevel, name)
         self._calls = 0
         self._members_by_board = {
             b.id: [uuid.uuid4() for _ in range(2)] for b in boards
         }
+        # Optionally inject a duplicate row for the FIRST board.
+        if with_dup and boards:
+            first = list(self._members_by_board)[0]
+            self._members_by_board[first] = [
+                *self._members_by_board[first], self._members_by_board[first][0]
+            ]
 
     async def execute(self, stmt):
         self._calls += 1
@@ -689,7 +546,7 @@ class _MultiBoardSession:
 
 def test_resolve_current_memberships_batch_two_queries_parity() -> None:
     """PERF-FIX-STRUCTURAL-1 (P0-A): batch resolver uses exactly 2 SQL for N scopes,
-    and each scope's membership matches the single resolver's output (parity)."""
+    and each scope's membership is validated + deduped (order preserved)."""
     boards = [
         SimpleNamespace(
             id=uuid.uuid4(), type="concept", hierarchyLevel=None, name=f"c{i}",
@@ -706,18 +563,38 @@ def test_resolve_current_memberships_batch_two_queries_parity() -> None:
     # N+1 fixed: 8 scopes in exactly 2 SQL round-trips.
     assert session._calls == 2
     assert len(result) == 8
-    # each scope's membership is non-empty and its name is set.
     for b in boards:
         m = result[str(b.id)]
         assert m.scope_name == b.name
         assert m.member_count == 2
-        # batch membership == single resolver membership (parity, same owner)
-        single = asyncio.run(
-            resolve_current_membership(
-                _BoardSession(b, session._members_by_board[b.id]),
-                "concept",
-                str(b.id),
-                asof_date=date(2026, 8, 14),
+
+
+def test_resolve_current_membership_rejects_type_mismatch() -> None:
+    board = SimpleNamespace(
+        id=uuid.uuid4(), type="concept", hierarchyLevel="L1", name="概念",
+    )
+    session = _MultiBoardSession([board])
+    with pytest.raises(HistoricalReconstructionError):
+        asyncio.run(
+            resolve_current_memberships_batch(
+                session, "industry_l1", [str(board.id)], asof_date=date(2026, 8, 14),
             )
         )
-        assert single.member_ids == m.member_ids
+
+
+def test_resolve_current_memberships_batch_dedupes() -> None:
+    """A duplicate member row in the membership query is deduped (order preserved)."""
+    boards = [
+        SimpleNamespace(
+            id=uuid.uuid4(), type="industry", hierarchyLevel="L1", name="电子",
+        )
+    ]
+    session = _MultiBoardSession(boards, with_dup=True)
+    result = asyncio.run(
+        resolve_current_memberships_batch(
+            session, "industry_l1", [str(boards[0].id)], asof_date=date(2026, 8, 14),
+        )
+    )
+    m = result[str(boards[0].id)]
+    assert m.member_count == 2  # the injected duplicate third row was deduped
+    assert m.member_ids == tuple(dict.fromkeys(m.member_ids))

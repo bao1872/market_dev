@@ -3,7 +3,7 @@
 The UNIQUE Application Composition Owner that wires the frozen layers:
 
     Current-Static Reconstruction
-        (review_historical_scope_reconstruction_service.reconstruct_scope_series)
+        (review_historical_scope_reconstruction_service.reconstruct_scope_series_batch)
             -> ObservationSeries (observation_series.build_observation_series)
             -> Scope Dynamics (scope_dynamics.compute_scope_dynamics_analysis)
 
@@ -14,6 +14,12 @@ Position / EMA / Velocity / Acceleration / Persistence / Phase.  It only:
 
     validate input -> call reconstruction source -> adapt source shape ->
     build ObservationSeries -> call Scope Dynamics -> package provenance.
+
+SINGLE entry point: :func:`compute_current_static_scope_dynamics_batch` (the
+unique Dynamics composition implementation).  A single scope routes through the
+SAME batch owner with a batch size of one — there is no second single-scope
+composition path; the shared ``_compose_scope_dynamics_from_reconstruction`` is
+the one composition implementation used by the batch.
 
 Source contract (frozen, PRD §7.9 / §7.15.2): CURRENT STATIC MEMBERSHIP x
 historical member facts.  This service NEVER touches
@@ -45,7 +51,6 @@ from app.domain.review.analysis.scope_dynamics import (
     compute_scope_dynamics_analysis,
 )
 from app.services.review_historical_scope_reconstruction_service import (
-    reconstruct_scope_series,
     reconstruct_scope_series_batch,
 )
 
@@ -117,54 +122,6 @@ def _guard_source_contract(
             f"{membership.get('asof_date')!r} != analysis_asof_date "
             f"{analysis_asof_date.isoformat()!r}"
         )
-
-
-async def compute_current_static_scope_dynamics(
-    db: AsyncSession,
-    scope_type: str,
-    scope_key: str,
-    trade_dates: Sequence[date],
-    *,
-    analysis_asof_date: date,
-) -> dict[str, Any]:
-    """Compose the current-static Scope Dynamics application path (shadow).
-
-    Args:
-        db: AsyncSession (only passed through to the reconstruction source).
-        scope_type / scope_key: identify the scope.
-        trade_dates: caller-provided canonical A-share trading-date axis —
-            non-empty / unique / strictly ascending / every date
-            ``<= analysis_asof_date`` (fail fast otherwise).
-        analysis_asof_date: current-static membership as-of date.
-
-    Returns (internal shadow application result — NOT a public API schema):
-        ``{"scope", "membership", "observation_series", "scope_dynamics"}``.
-        ``scope`` / ``membership`` are passed through unchanged from the source
-        owner; provenance is never re-derived here.  ``metrics`` reports the
-        end-to-end timing: ``reconstruction_ms`` (source) + ``composition_ms``
-        (ObservationSeries + Dynamics), with ``total_ms`` their sum.
-    """
-    _validate_trade_dates(trade_dates, analysis_asof_date=analysis_asof_date)
-
-    import time
-
-    t_recon = time.perf_counter()
-    reconstruction = await reconstruct_scope_series(
-        db,
-        scope_type,
-        scope_key,
-        list(trade_dates),
-        asof_date=analysis_asof_date,
-    )
-    reconstruction_ms = (time.perf_counter() - t_recon) * 1000.0
-    return _compose_scope_dynamics_from_reconstruction(
-        reconstruction,
-        scope_type=scope_type,
-        scope_key=scope_key,
-        trade_dates=trade_dates,
-        analysis_asof_date=analysis_asof_date,
-        reconstruction_ms=reconstruction_ms,
-    )
 
 
 async def compute_current_static_scope_dynamics_batch(

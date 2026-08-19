@@ -107,7 +107,6 @@ def test_capacity_does_not_call_legacy_or_single() -> None:
         "_build_member_observations",
         "prepare_union_fact_context",
         "prepare_scopes_from_union",
-        "compute_current_static_scope_dynamics(",
         "compute_scope_observation",
         "union_member_cap=",
     ]:

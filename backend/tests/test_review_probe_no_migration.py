@@ -310,7 +310,7 @@ BUSINESS_FORMULA_SYMBOLS = [
     "Acceleration",
     "Position",
     "DynamicsPhase",
-    "compute_current_static_scope_dynamics",
+    "compute_current_static_scope_dynamics_batch",
     "member_fact",
     "raw_member",
 ]

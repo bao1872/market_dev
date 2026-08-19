@@ -6,11 +6,12 @@ Verifies the vectorized batch optimization contract:
   (:func:`compute_volume_context_series`) for the 20D/200D rolling fields,
   including missing/None mask semantics (Tests 4-6).
 - The batch replay's vectorized member construction matches the canonical
-  per-date ``build_member_observation`` field-by-field (float tolerance =
+  ``build_member_observation`` field-by-field (float tolerance =
   project convention ``abs=1e-9``, None exact), covering scenarios A-J.
-- Batch ``PreparedScope`` (vectorized path) equals the per-date path for the
-  common >=200 finite-volume-bar window and stays byte-identical on the
-  window-bound fallback (Tests 7-8).
+- The DB wrapper ``prepare_scopes_from_union`` (vectorized path) equals the
+  pure core ``build_prepared_scopes_from_union`` for the common >=200
+  finite-volume-bar window and stays byte-identical on the window-bound
+  fallback (Tests 7-8) — the single calculation owner, no per-date duplicate.
 - Membership is resolved exactly once (Test 10), no BoardMembershipHistory is
   introduced (Test 11), repeated execution is deterministic (Test 12).
 - Tests 1/2/3 (bulk query count, T-1 mapping, window slicing) and Test 9
@@ -36,11 +37,13 @@ from app.domain.review.member_fact import DailyBarFact
 from app.domain.review.scope_observation import MemberObservation, StructureEvent
 from app.services.review_observation_prep_service import (
     _BAR_LOOKBACK_DAYS,
+    ScopeReplaySpec,
     _build_member_observations,
     _InstrumentBarSeries,
     _precompute_vectorized_volume,
-    prepare_scope_from_member_ids,
-    prepare_scope_series_from_member_ids,
+    build_prepared_scopes_from_union,
+    prepare_scopes_from_union,
+    prepare_union_fact_context,
 )
 from app.services.volume_context import (
     compute_volume_context_series,
@@ -455,13 +458,14 @@ def test_scenario_j_date_window_boundary() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 8 — batch PreparedScope (vectorized path) == per-date PreparedScope
+# Test 8 — batch PreparedScope (vectorized path) == pure core owner
 # ---------------------------------------------------------------------------
 
 
-def test_batch_vectorized_path_matches_per_date(monkeypatch) -> None:
+def test_batch_vectorized_path_matches_pure_core(monkeypatch) -> None:
     """Test 8: batch replay with the vectorized volume context produces a
-    canonical-equivalent PreparedScope for every T as the per-date path."""
+    canonical-equivalent PreparedScope series for every T identical to the pure
+    core ``build_prepared_scopes_from_union`` (the single calculation owner)."""
     id_a, id_b = uuid.uuid4(), uuid.uuid4()
     days = _trading_days(date(2026, 1, 5), 220)
     dates = [days[-2], days[-1]]
@@ -484,7 +488,7 @@ def test_batch_vectorized_path_matches_per_date(monkeypatch) -> None:
         dates[0]: [],
     }
 
-    # ---- BATCH path (one bulk read each) ----
+    # ---- BATCH DB wrapper path (one bulk read each) ----
     async def fake_calendar(session, trade_dates):
         return {t: days[days.index(t) - 1] if days.index(t) > 0 else None
                 for t in trade_dates}
@@ -499,6 +503,9 @@ def test_batch_vectorized_path_matches_per_date(monkeypatch) -> None:
     async def fake_batch_events(session, instrument_ids, trade_dates):
         return {d: events.get(d, []) for d in trade_dates}
 
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
     )
@@ -511,90 +518,62 @@ def test_batch_vectorized_path_matches_per_date(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_batch_events
     )
-    async def fake_batch_coverage(session, instrument_ids, trade_dates):
-        return {d: frozenset(instrument_ids) for d in trade_dates}
-
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
         fake_batch_coverage,
     )
 
-    # ---- PER-DATE path (canonical oracle) ----
-    async def fake_prev(session, ref_date):
-        return days[days.index(ref_date) - 1] if days.index(ref_date) > 0 else None
-
-    async def fake_load_states(session, instrument_ids, trade_date):
-        return states.get(trade_date, {})
-
-    async def fake_load_bar_facts(session, instrument_ids, trade_date):
-        lo = trade_date - timedelta(days=_BAR_LOOKBACK_DAYS)
-        return {i: [b for b in facts if lo <= b.trade_date <= trade_date]
-                for i, facts in all_bars.items()}
-
-    async def fake_load_events(session, instrument_ids, trade_date):
-        return events.get(trade_date, [])
-
-    async def fake_load_coverage(session, instrument_ids, trade_date):
-        return frozenset(instrument_ids)
-
-    monkeypatch.setattr(
-        "app.services.calendar_service.get_previous_trading_day_async", fake_prev
-    )
-    monkeypatch.setattr(
-        "app.services.review_observation_prep_service._load_states", fake_load_states
-    )
-    monkeypatch.setattr(
-        "app.services.review_observation_prep_service._load_bar_facts", fake_load_bar_facts
-    )
-    monkeypatch.setattr(
-        "app.services.review_observation_prep_service._load_structure_events",
-        fake_load_events,
-    )
-    monkeypatch.setattr(
-        "app.services.review_observation_prep_service._load_backfill_event_coverage_member_ids",
-        fake_load_coverage,
-    )
-
     async def scenario():
-        batch = await prepare_scope_series_from_member_ids(
-            _FakeSession(), "industry_l3", "k", "s", dates, member_ids,
-            load_current_only=False,
+        union_ctx = await prepare_union_fact_context(_FakeSession(), dates, member_ids)
+        # DB wrapper (hard-codes current-static semantics).
+        wrapped = await prepare_scopes_from_union(
+            _FakeSession(), "industry_l3", dates,
+            {"k": (member_ids, "s")}, union_ctx,
         )
-        per_date = [
-            await prepare_scope_from_member_ids(
-                _FakeSession(), "industry_l3", "k", "s", t, member_ids,
-                load_current_only=False,
-            )
-            for t in dates
-        ]
-        return batch, per_date
+        # Pure core with the SAME current-static args the wrapper hard-codes.
+        core = build_prepared_scopes_from_union(
+            trade_dates=dates,
+            scope_specs=[
+                ScopeReplaySpec(
+                    scope_type="industry_l3", scope_key="k", scope_name="s",
+                    member_ids=tuple(member_ids),
+                )
+            ],
+            union_ctx=union_ctx,
+            coverage_by_date={d: frozenset(member_ids) for d in dates},
+            pit_status_t="current_static",
+            pit_status_t1="current_static",
+            t1_membership_available=True,
+        )
+        return wrapped["k"], core["k"]
 
-    batch, per_date = asyncio.run(scenario())
+    got, expected = asyncio.run(scenario())
 
-    assert [p.trade_date for p in batch] == dates
-    assert len(batch) == len(per_date)
-    for b, p in zip(batch, per_date, strict=True):
-        assert b.scope_type == p.scope_type
-        assert b.scope_key == p.scope_key
-        assert b.trade_date == p.trade_date
-        assert b.canonical_t1 == p.canonical_t1
-        assert b.pit_member_ids == p.pit_member_ids
-        assert b.pit_member_ids_t1 == p.pit_member_ids_t1
-        assert b.t1_membership_available == p.t1_membership_available
-        assert b.pit_status_t == p.pit_status_t
-        assert b.pit_status_t1 == p.pit_status_t1
-        assert b.diagnostics == p.diagnostics
+    assert [p.trade_date for p in got] == dates
+    assert len(got) == len(expected)
+    for b, e in zip(got, expected, strict=True):
+        assert b.scope_type == e.scope_type
+        assert b.scope_key == e.scope_key
+        assert b.trade_date == e.trade_date
+        assert b.canonical_t1 == e.canonical_t1
+        assert b.pit_member_ids == e.pit_member_ids
+        assert b.pit_member_ids_t1 == e.pit_member_ids_t1
+        assert b.t1_membership_available == e.t1_membership_available
+        assert b.pit_status_t == e.pit_status_t
+        assert b.pit_status_t1 == e.pit_status_t1
+        assert b.diagnostics == e.diagnostics
         # Events (scenario H) propagate identically.
-        assert b.events == p.events
+        assert b.events == e.events
         # Members: canonical-equivalent (vectorized floats within project tolerance).
-        assert len(b.members) == len(p.members)
-        for bm, pm in zip(b.members, p.members, strict=True):
-            _assert_member_equiv(bm, pm)
+        assert len(b.members) == len(e.members)
+        for bm, em in zip(b.members, e.members, strict=True):
+            _assert_member_equiv(bm, em)
 
 
 def test_batch_fallback_path_byte_identical(monkeypatch) -> None:
     """Window-bound fallback (< SHORT_WINDOW finite-volume bars) is byte-identical
-    to the per-date path (both sides use the canonical owner)."""
+    between the DB wrapper and the pure core (both sides use the same canonical
+    fallback owner inside ``_build_member_observations``)."""
     id_a, id_b = uuid.uuid4(), uuid.uuid4()
     days = _trading_days(date(2026, 6, 1), 15)  # 15 bars -> w < 20 -> fallback everywhere
     dates = [days[-1]]
@@ -619,6 +598,9 @@ def test_batch_fallback_path_byte_identical(monkeypatch) -> None:
     async def fake_batch_events(session, instrument_ids, trade_dates):
         return {d: [] for d in trade_dates}
 
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
     )
@@ -631,65 +613,35 @@ def test_batch_fallback_path_byte_identical(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_events", fake_batch_events
     )
-    async def fake_batch_coverage(session, instrument_ids, trade_dates):
-        return {d: frozenset(instrument_ids) for d in trade_dates}
-
     monkeypatch.setattr(
         "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
         fake_batch_coverage,
     )
 
-    async def fake_prev(session, ref_date):
-        return days[days.index(ref_date) - 1] if days.index(ref_date) > 0 else None
-
-    async def fake_load_states(session, instrument_ids, trade_date):
-        return states.get(trade_date, {})
-
-    async def fake_load_bar_facts(session, instrument_ids, trade_date):
-        lo = trade_date - timedelta(days=_BAR_LOOKBACK_DAYS)
-        return {i: [b for b in facts if lo <= b.trade_date <= trade_date]
-                for i, facts in all_bars.items()}
-
-    async def fake_load_events(session, instrument_ids, trade_date):
-        return []
-
-    async def fake_load_coverage(session, instrument_ids, trade_date):
-        return frozenset(instrument_ids)
-
-    monkeypatch.setattr(
-        "app.services.calendar_service.get_previous_trading_day_async", fake_prev
-    )
-    monkeypatch.setattr(
-        "app.services.review_observation_prep_service._load_states", fake_load_states
-    )
-    monkeypatch.setattr(
-        "app.services.review_observation_prep_service._load_bar_facts", fake_load_bar_facts
-    )
-    monkeypatch.setattr(
-        "app.services.review_observation_prep_service._load_structure_events",
-        fake_load_events,
-    )
-    monkeypatch.setattr(
-        "app.services.review_observation_prep_service._load_backfill_event_coverage_member_ids",
-        fake_load_coverage,
-    )
-
     async def scenario():
-        batch = await prepare_scope_series_from_member_ids(
-            _FakeSession(), "industry_l3", "k", "s", dates, member_ids,
-            load_current_only=False,
+        union_ctx = await prepare_union_fact_context(_FakeSession(), dates, member_ids)
+        wrapped = await prepare_scopes_from_union(
+            _FakeSession(), "industry_l3", dates,
+            {"k": (member_ids, "s")}, union_ctx,
         )
-        per_date = [
-            await prepare_scope_from_member_ids(
-                _FakeSession(), "industry_l3", "k", "s", t, member_ids,
-                load_current_only=False,
-            )
-            for t in dates
-        ]
-        return batch, per_date
+        core = build_prepared_scopes_from_union(
+            trade_dates=dates,
+            scope_specs=[
+                ScopeReplaySpec(
+                    scope_type="industry_l3", scope_key="k", scope_name="s",
+                    member_ids=tuple(member_ids),
+                )
+            ],
+            union_ctx=union_ctx,
+            coverage_by_date={d: frozenset(member_ids) for d in dates},
+            pit_status_t="current_static",
+            pit_status_t1="current_static",
+            t1_membership_available=True,
+        )
+        return wrapped["k"], core["k"]
 
-    batch, per_date = asyncio.run(scenario())
-    assert batch[0].members == per_date[0].members  # byte-identical (fallback)
+    got, expected = asyncio.run(scenario())
+    assert got[0].members == expected[0].members  # byte-identical (fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -700,73 +652,86 @@ def test_batch_fallback_path_byte_identical(monkeypatch) -> None:
 def test_current_membership_resolved_exactly_once(monkeypatch) -> None:
     from app.services.review_historical_scope_reconstruction_service import (
         CurrentStaticMembership,
-        reconstruct_scope_series,
+        reconstruct_scope_series_batch,
     )
 
     calls = {"resolve": 0}
     member_ids = [uuid.uuid4()]
+    dates = [date(2026, 8, 3), date(2026, 8, 4)]
+    trading_days = [date(2026, 7, 31), *dates]
 
-    async def fake_resolve(session, scope_type, scope_key, *, asof_date):
+    async def fake_resolve_batch(session, scope_type, scope_keys, *, asof_date):
         calls["resolve"] += 1
-        return CurrentStaticMembership(
-            member_ids=tuple(member_ids),
-            scope_name="s",
-            asof_date=asof_date,
-            member_count=len(member_ids),
-        )
-
-    async def fake_prepare(session, scope_type, scope_key, scope_name, trade_dates,
-                           member_ids_, **kwargs):
-        return [
-            _prepared(scope_type, scope_key, scope_name, t)
-            for t in trade_dates
-        ]
-
-    def _prepared(st, sk, sn, t):
-        from app.services.review_observation_prep_service import PreparedScope
-        return PreparedScope(
-            scope_type=st, scope_key=sk, scope_name=sn, trade_date=t,
-            canonical_t1=None, pit_member_ids=(), pit_member_ids_t1=(),
-            members=(), t1_membership_available=True, pit_status_t="current_static",
-            pit_status_t1="current_static", diagnostics=(),
-            event_coverage_member_ids=None,
-        )
-
-    def fake_compute(scope_type, scope_key, trade_date, pit_member_ids,
-                     pit_member_ids_t1, members, events, *, t1_membership_available=True,
-                     event_coverage_member_ids=None):
-        return {"scope": {"scope_type": scope_type, "provided_member_count": 0}}
-
-    def fake_validate(payload, *, scope_type, scope_key, trade_date):
-        return None
+        return {
+            sk: CurrentStaticMembership(
+                member_ids=tuple(member_ids),
+                scope_name="k",
+                asof_date=asof_date,
+                member_count=len(member_ids),
+            )
+            for sk in scope_keys
+        }
 
     monkeypatch.setattr(
-        "app.services.review_historical_scope_reconstruction_service.resolve_current_membership",
-        fake_resolve,
+        "app.services.review_historical_scope_reconstruction_service."
+        "resolve_current_memberships_batch",
+        fake_resolve_batch,
+    )
+
+    # The batch reconstruction path internally bulk-loads the union facts; mock
+    # the batch loaders so the full membership->prep chain runs with canned data.
+    async def fake_calendar(session, trade_dates):
+        return {t: trading_days[trading_days.index(t) - 1]
+                if trading_days.index(t) > 0 else None for t in trade_dates}
+
+    async def fake_batch_states(session, instrument_ids, trade_dates, t1_by_date):
+        return {
+            d: {m: _state(1) for m in instrument_ids}
+            for d in set(trade_dates) | {d for d in t1_by_date.values() if d is not None}
+        }
+
+    async def fake_batch_bars(session, instrument_ids, trade_dates):
+        return {
+            m: _to_series(
+                [_bar(m, td, float(10 + i), volume=float(100 + i))
+                 for i, td in enumerate(trading_days)]
+            )
+            for m in instrument_ids
+        }
+
+    async def fake_batch_events(session, instrument_ids, trade_dates):
+        return {d: [] for d in trade_dates}
+
+    async def fake_batch_coverage(session, instrument_ids, trade_dates):
+        return {d: frozenset(instrument_ids) for d in trade_dates}
+
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_calendar", fake_calendar
     )
     monkeypatch.setattr(
-        "app.services.review_historical_scope_reconstruction_service.prepare_scope_series_from_member_ids",
-        fake_prepare,
+        "app.services.review_observation_prep_service._load_batch_states", fake_batch_states
     )
     monkeypatch.setattr(
-        "app.services.review_historical_scope_reconstruction_service.compute_scope_observation",
-        fake_compute,
+        "app.services.review_observation_prep_service._load_batch_bars", fake_batch_bars
     )
     monkeypatch.setattr(
-        "app.services.review_historical_scope_reconstruction_service.validate_scope_observation_payload",
-        fake_validate,
+        "app.services.review_observation_prep_service._load_batch_events", fake_batch_events
+    )
+    monkeypatch.setattr(
+        "app.services.review_observation_prep_service._load_batch_backfill_event_coverage",
+        fake_batch_coverage,
     )
 
     async def scenario():
-        return await reconstruct_scope_series(
-            _FakeSession(), "industry_l3", "k", [date(2026, 8, 3), date(2026, 8, 4)],
-            asof_date=date(2026, 8, 4),
+        return await reconstruct_scope_series_batch(
+            _FakeSession(), "industry_l3", ["k"], dates, asof_date=dates[-1],
         )
 
     out = asyncio.run(scenario())
-    # Membership resolved exactly once for the whole series, not per date.
+    # Batch membership resolved exactly once for the whole series, not per date.
     assert calls["resolve"] == 1
-    assert len(out["series"]) == 2
+    assert len(out) == 1
+    assert len(out[0]["series"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -840,15 +805,15 @@ def test_batch_deterministic_repeat(monkeypatch) -> None:
     )
 
     async def scenario():
-        first = await prepare_scope_series_from_member_ids(
-            _FakeSession(), "concept", "k", "s", dates, member_ids,
-            load_current_only=False,
+        ctx1 = await prepare_union_fact_context(_FakeSession(), dates, member_ids)
+        first = await prepare_scopes_from_union(
+            _FakeSession(), "concept", dates, {"k": (member_ids, "s")}, ctx1,
         )
-        second = await prepare_scope_series_from_member_ids(
-            _FakeSession(), "concept", "k", "s", dates, member_ids,
-            load_current_only=False,
+        ctx2 = await prepare_union_fact_context(_FakeSession(), dates, member_ids)
+        second = await prepare_scopes_from_union(
+            _FakeSession(), "concept", dates, {"k": (member_ids, "s")}, ctx2,
         )
-        return first, second
+        return first["k"], second["k"]
 
     first, second = asyncio.run(scenario())
     assert first == second  # deterministic: identical floats, members, order

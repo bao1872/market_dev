@@ -3,7 +3,7 @@
 职责（PRD70 V2 编排顺序）：
 1. create_run: 创建或复用 MarketReviewRun（幂等：唯一键 trade_date+source_runs+版本）
 2. compute_run: 执行完整流程
-   - [V2] 解析全部 Discovery scope 列表（market / major_index / style / 
+   - [V2] 解析全部 Discovery scope 列表（market / major_index / style /
      industry_l1 / industry_l2 / industry_l3 / concept 平行独立）
    - 每个范围：metrics → signals → attribution（短事务、独立 item）
    - 一个 scope 失败不阻塞其他 scope
@@ -44,6 +44,17 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.filter_definitions import REVIEW_FILTER_VERSION
+
+# [2026-08-13 双轨并存] 规范 Scope Observation 事实层（PRD §7.2-§7.17 v2.3）。
+# 以下三者在 shadow 路径已被真实数据验证契约/invariant/readiness；
+# 此处仅把它们接入 compute 主流程写入 ReviewScopeObservationFact，
+# 供 EvidenceDrawer / scope_evidence_service 消费。Discovery/筛选器/信号管线
+# 仍走 legacy P/Q/U/C/V（本轮不动），二者双轨并存。
+#
+# [REVIEW-EXECUTION-PATH-CONSOLIDATION] 规范事实层唯一 preparation owner =
+# ``prepare_current_scope_observations_batch``（一次解析 memberships + union facts +
+# slice）；orchestrator 不再逐 scope 调用单 scope 入口。
+from app.domain.review.scope_observation import compute_scope_observation
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
 from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
 from app.models.factor_publication import (
@@ -60,12 +71,21 @@ from app.models.market_review import (
 )
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
+from app.services.observation_prep import check_observation_invariants
 from app.services.review_attribution_service import (
     compute_signal_attributions,
     compute_signal_instruments,
 )
 from app.services.review_bootstrap_service import (
     validate_canonical_history_run_readiness,
+)
+from app.services.review_observation_persistence_service import (
+    is_scope_observation_persistence_excluded,
+    save_scope_observation_fact,
+)
+from app.services.review_observation_prep_service import (
+    ScopeReplaySpec,
+    prepare_current_scope_observations_batch,
 )
 from app.services.review_publication_service import (
     REVIEW_PUBLISH_MIN_COVERAGE,
@@ -74,7 +94,6 @@ from app.services.review_publication_service import (
     publish_review,
 )
 from app.services.review_scope_service import (
-    ALL_DISCOVERY_SCOPE_TYPES,
     LEVEL1_SCOPE_TYPES,
     OptionalScopeUnavailableError,
     ScopeDefinition,
@@ -84,18 +103,6 @@ from app.services.review_scope_service import (
     fetch_member_flat_list,
     load_day_fact_maps,
     resolve_scope_members,
-)
-# [2026-08-13 双轨并存] 规范 Scope Observation 事实层（PRD §7.2-§7.17 v2.3）。
-# 以下三者在 shadow 路径已被真实数据验证契约/invariant/readiness；
-# 此处仅把它们接入 compute 主流程写入 ReviewScopeObservationFact，
-# 供 EvidenceDrawer / scope_evidence_service 消费。Discovery/筛选器/信号管线
-# 仍走 legacy P/Q/U/C/V（本轮不动），二者双轨并存。
-from app.domain.review.scope_observation import compute_scope_observation
-from app.services.observation_prep import check_observation_invariants
-from app.services.review_observation_prep_service import prepare_scope
-from app.services.review_observation_persistence_service import (
-    is_scope_observation_persistence_excluded,
-    save_scope_observation_fact,
 )
 from app.services.review_signal_service import (
     SignalGenerationError,
@@ -719,6 +726,42 @@ async def compute_run(
         canonical_source_run_id,
     )
 
+    # === 规范 Scope Observation 事实层 batch prepare（PRD §7.2-§7.17 v2.3）===
+    # [REVIEW-EXECUTION-PATH-CONSOLIDATION] 唯一 preparation owner =
+    # prepare_current_scope_observations_batch：一次解析 PIT(T)/PIT(T-1) memberships、
+    # 一次加载 union member facts、slice 成各 Scope PreparedScope。scope 循环只从
+    # 该 map SELECT 结果。双写失败（batch prepare 或落库）隔离在 try/except 内，
+    # 不影响 legacy metrics/signal 主链；这是错误隔离，不是回退到旧路径。
+    prepared_observations: dict[str, Any] | None = None
+    try:
+        eligible_specs = [
+            ScopeReplaySpec(
+                scope_type=s.scope_type,
+                scope_key=s.scope_key,
+                scope_name=s.scope_name,
+                member_ids=(),
+            )
+            for s in scopes
+            if not is_scope_observation_persistence_excluded(
+                scope_type=s.scope_type,
+                scope_name=s.scope_name,
+            )
+        ]
+        if eligible_specs:
+            prepared_observations = await prepare_current_scope_observations_batch(
+                session, run.trade_date, eligible_specs
+            )
+            logger.info(
+                "[ReviewOrchestrator] 规范事实层 batch prepare: scopes=%d prepared=%d",
+                len(eligible_specs), len(prepared_observations),
+            )
+    except Exception as exc:  # noqa: BLE001 - 隔离双写失败，不破坏 Discovery
+        prepared_observations = None
+        logger.warning(
+            "[ReviewOrchestrator] 规范事实层 batch prepare 失败（不影响 legacy signal）: %s",
+            exc,
+        )
+
     succeeded = 0
     failed = 0
     signals_total = 0
@@ -735,6 +778,7 @@ async def compute_run(
                 required_history_contract_version=canonical_contract_version,
                 required_source_history_run_id=canonical_source_run_id,
                 day_fact_map=day_fact_map,
+                prepared_observations=prepared_observations,
             )
             succeeded += 1
             if snapshot is not None:
@@ -920,7 +964,7 @@ async def _list_board_scopes_by_hierarchy(
     hierarchy_level: str | None,
 ) -> list[ScopeDefinition]:
     """从 board_analysis_snapshots 读取当日已计算的板块（通用）。
-    
+
     Args:
         session: 异步 DB 会话
         trade_date: 业务交易日
@@ -1269,6 +1313,7 @@ async def _compute_scope_metrics_phase(
     required_history_contract_version: str | None = None,
     required_source_history_run_id: uuid.UUID | None = None,
     day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
+    prepared_observations: dict[str, Any] | None = None,
 ) -> tuple[MarketReviewScopeSnapshot | None, dict[str, dict[str, list[float]]] | None]:
     """Compute and persist raw/normalized metrics for one scope.
 
@@ -1439,10 +1484,15 @@ async def _compute_scope_metrics_phase(
     # Observation 写入 ReviewScopeObservationFact，供 EvidenceDrawer /
     # scope_evidence_service 消费。双写失败不得影响 legacy metrics/signal，
     # 故隔离在 try/except 内，仅记录 diagnostic。
-    # prepare_scope 对 market/major_index/style 返回 unavailable 自动跳过，
-    # 仅 industry_l1/l2/l3 + concept（activated scope）会实际写入。
+    # 仅 industry_l1/l2/l3 + concept（activated scope）会实际写入（market/
+    # major_index/style 自动跳过）。
+    # [REVIEW-EXECUTION-PATH-CONSOLIDATION] ``prepared_observations`` 由
+    # compute_run / resume_run 一次 batch prepare 后传入，本函数只按 scope_key
+    # SELECT 对应 PreparedScope，不再逐 scope 调用任何 single-scope preparation。
     try:
-        await _persist_canonical_scope_observation(session, run, scope)
+        await _persist_canonical_scope_observation(
+            session, run, scope, prepared_observations=prepared_observations
+        )
     except Exception as exc:  # noqa: BLE001 - 隔离双写失败，不破坏 Discovery
         logger.warning(
             "[ReviewOrchestrator] 规范事实层双写失败（不影响 legacy signal）: "
@@ -1457,14 +1507,20 @@ async def _persist_canonical_scope_observation(
     session: AsyncSession,
     run: MarketReviewRun,
     scope: ScopeDefinition,
+    *,
+    prepared_observations: dict[str, Any] | None = None,
 ) -> None:
     """双写规范 Scope Observation 七段事实到 ReviewScopeObservationFact。
 
     仅对 activated scope（industry_l1/l2/l3 + concept）生效；market/major_index/
-    style 由 prepare_scope 返回 unavailable 自动跳过（不抛错、不写表）。
+    style 由 batch prepare 返回 unavailable 自动跳过（不抛错、不写表）。
 
-    不依赖本 phase 已加载的 day_fact_map——prepare_scope 内部独立加载 canonical
-    FirstPyramidHistory / structure events（与 shadow 路径一致，避免算法漂移）。
+    [REVIEW-EXECUTION-PATH-CONSOLIDATION] 本函数不拥有任何 membership 解析 /
+    SQL / fact preparation：``prepared_observations`` 由 compute_run / resume_run
+    通过唯一 owner ``prepare_current_scope_observations_batch`` 一次 batch prepare，
+    此处只按 scope_key SELECT 对应 PreparedScope 后计算并落库。missing key 表示
+    batch prepare 未包含该 scope（如 batch prepare 失败被隔离），直接跳过。
+
     compute_scope_observation 输出经 check_observation_invariants 校验，非法
     payload 由 save_scope_observation_fact 的 validate_scope_observation_payload
     在落库前 fail-fast 拒绝（延续 Round 1C Blocker #1/#2/#3）。
@@ -1482,9 +1538,18 @@ async def _persist_canonical_scope_observation(
             scope.scope_type, scope.scope_key, scope.scope_name,
         )
         return
-    prep = await prepare_scope(
-        session, scope.scope_type, scope.scope_key, run.trade_date,
+    prep = (
+        prepared_observations.get(scope.scope_key)
+        if prepared_observations is not None
+        else None
     )
+    if prep is None:
+        logger.info(
+            "[ReviewOrchestrator] 规范事实层跳过（batch prepare 未包含该 scope）: "
+            "%s/%s",
+            scope.scope_type, scope.scope_key,
+        )
+        return
     if prep.pit_status_t == "unavailable" or not prep.members:
         logger.info(
             "[ReviewOrchestrator] 规范事实层跳过 unavailable/空范围: "
@@ -1836,6 +1901,7 @@ async def _compute_scope_pipeline(
     scope: ScopeDefinition,
     *,
     day_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] | None = None,
+    prepared_observations: dict[str, Any] | None = None,
 ) -> int:
     """Resume-compatible single-scope pipeline using the same two ordered phases.
 
@@ -1882,6 +1948,7 @@ async def _compute_scope_pipeline(
         required_history_contract_version=canonical_contract_version,
         required_source_history_run_id=canonical_source_run_id,
         day_fact_map=day_fact_map,
+        prepared_observations=prepared_observations,
     )
     if snapshot is None:
         return 0
@@ -1953,6 +2020,35 @@ async def resume_run(
     # （binding 已在 _compute_scope_pipeline 内完成，重复调用会多做一次 DB 解析）。
     resume_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] = {}
 
+    # [REVIEW-EXECUTION-PATH-CONSOLIDATION] 规范事实层同样只走唯一 batch owner：
+    # 对待重算 scope 集合一次 batch prepare，_compute_scope_pipeline 按 scope_key
+    # SELECT。失败隔离（不影响 legacy resume 主链），不是回退到旧路径。
+    prepared_observations: dict[str, Any] | None = None
+    try:
+        redo_specs = [
+            ScopeReplaySpec(
+                scope_type=scope_type,
+                scope_key=scope_key,
+                scope_name=scope_key,
+                member_ids=(),
+            )
+            for scope_type, scope_key in scopes_to_redo
+            if not is_scope_observation_persistence_excluded(
+                scope_type=scope_type,
+                scope_name=scope_key,
+            )
+        ]
+        if redo_specs:
+            prepared_observations = await prepare_current_scope_observations_batch(
+                session, run.trade_date, redo_specs
+            )
+    except Exception as exc:  # noqa: BLE001 - 隔离双写失败，不破坏 Discovery
+        prepared_observations = None
+        logger.warning(
+            "[ReviewOrchestrator] resume 规范事实层 batch prepare 失败（不影响 legacy signal）: %s",
+            exc,
+        )
+
     # 对每个需要重处理的 scope，重新执行 pipeline
     succeeded = 0
     failed = 0
@@ -1964,7 +2060,8 @@ async def resume_run(
         )
         try:
             await _compute_scope_pipeline(
-                session, run, scope, day_fact_cache=resume_fact_cache
+                session, run, scope, day_fact_cache=resume_fact_cache,
+                prepared_observations=prepared_observations,
             )
             succeeded += 1
         except Exception as exc:  # noqa: BLE001

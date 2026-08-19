@@ -6,7 +6,13 @@ frozen lower-layer math (Position percentile / EMA / Velocity / Acceleration /
 Persistence / Phase thresholds / ObservationSeries registry extraction) is
 already proven by its own durable test files.
 
-T1. FORMAL CHAIN — the only mocked IO boundary is ``reconstruct_scope_series``
+[REVIEW-EXECUTION-PATH-CONSOLIDATION] 应用组合已收口为唯一 batch owner
+``compute_current_static_scope_dynamics_batch``（单 scope 也走同一 owner，
+batch size = 1）；单 scope 入口 ``compute_current_static_scope_dynamics`` 与
+其底层 mock 边界 ``reconstruct_scope_series`` 已删除。本文件所有断言均针对 batch
+owner，且唯一的 IO mock 边界是 ``reconstruct_scope_series_batch``。
+
+T1. FORMAL CHAIN — the only mocked IO boundary is ``reconstruct_scope_series_batch``
     (it returns real canonical L1 payloads); the application function really
     runs through ``build_observation_series`` + ``compute_scope_dynamics_analysis``.
 T2. SOURCE PROVENANCE PRESERVED — membership mode / asof_date / member_count
@@ -22,13 +28,13 @@ T6. WHOLE SNAPSHOT GAP — a caller-axis date with no source row is preserved by
     the Builder as value=None available=False; Scope Dynamics output length
     still matches the full trading-date axis.
 T7. NO PIT HISTORY PATH — a source spy proves the only source call is
-    ``reconstruct_scope_series``.
+    ``reconstruct_scope_series_batch``.
 T8. NO FUTURE LEAKAGE — appending future-but-<=asof dates/snapshots never
     changes the 0:T prefix Scope Dynamics output; the adapter never reorders or
     compresses dates.
 
 No DB / network: the AsyncSession is a stand-in; the only IO boundary
-(``reconstruct_scope_series``) is monkeypatched per test.
+(``reconstruct_scope_series_batch``) is monkeypatched per test.
 """
 
 from __future__ import annotations
@@ -129,10 +135,12 @@ def _make_source(
     membership_override: dict[str, Any] | None = None,
     calls: list[dict[str, Any]] | None = None,
 ):
-    """Fake ``reconstruct_scope_series`` returning real canonical L1 rows.
+    """Fake ``reconstruct_scope_series_batch`` (single-scope) returning real rows.
 
-    Rows are filtered to the dates actually requested by the caller (mirrors the
-    real source contract: one canonical row per requested historical T).
+    The single composition owner is the batch entry point; a batch of size one
+    routes through the SAME ``reconstruct_scope_series_batch`` IO boundary.  Rows
+    are filtered to the dates actually requested by the caller (mirrors the real
+    source contract: one canonical row per requested historical T).
     """
     rows: list[dict[str, Any]] = []
     for i, d in enumerate(days):
@@ -164,20 +172,24 @@ def _make_source(
     )
 
     async def fake(
-        db, scope_type: str, scope_key: str, trade_dates, *, asof_date: date
-    ) -> dict[str, Any]:
+        db, scope_type: str, scope_keys, trade_dates, *, asof_date: date,
+        union_member_cap: int = 4096,
+    ) -> list[dict[str, Any]]:
         if calls is not None:
             calls.append(
                 {
                     "scope_type": scope_type,
-                    "scope_key": scope_key,
+                    "scope_keys": list(scope_keys),
                     "trade_dates": list(trade_dates),
                     "asof_date": asof_date,
                 }
             )
         requested = {d if isinstance(d, date) else date.fromisoformat(str(d)) for d in trade_dates}
         filtered = [r for r in rows if date.fromisoformat(r["trade_date"]) in requested]
-        return {"scope": scope, "membership": membership, "series": filtered}
+        return [
+            {"scope": scope, "membership": membership, "series": filtered}
+            for _ in scope_keys
+        ]
 
     return fake
 
@@ -204,13 +216,15 @@ def _fixed_payloads(
 
 
 async def _run(days: Sequence[date], *, analysis_asof_date: date) -> dict[str, Any]:
-    return await svc.compute_current_static_scope_dynamics(
+    out = await svc.compute_current_static_scope_dynamics_batch(
         object(),
         SCOPE_TYPE,
-        SCOPE_KEY,
+        [SCOPE_KEY],
         list(days),
         analysis_asof_date=analysis_asof_date,
     )
+    # Single-scope composition routes through the SAME batch owner (batch size 1).
+    return out[0]
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +238,7 @@ def test_formal_chain_reaches_builder_and_scope_dynamics(monkeypatch) -> None:
         days, returns_per_index=lambda i: 0.02 * math.sin(i / 11) + 0.0015 * (i % 5)
     )
     monkeypatch.setattr(
-        svc, "reconstruct_scope_series", _make_source(days, payload_builder=payload_builder)
+        svc, "reconstruct_scope_series_batch", _make_source(days, payload_builder=payload_builder)
     )
 
     out = asyncio.run(_run(days, analysis_asof_date=days[-1]))
@@ -260,7 +274,7 @@ def test_source_provenance_preserved(monkeypatch) -> None:
     }
     monkeypatch.setattr(
         svc,
-        "reconstruct_scope_series",
+        "reconstruct_scope_series_batch",
         _make_source(days, payload_builder=payload_builder, membership_override=membership),
     )
 
@@ -286,7 +300,7 @@ def test_source_contract_guard_mode_mismatch(monkeypatch) -> None:
     }
     monkeypatch.setattr(
         svc,
-        "reconstruct_scope_series",
+        "reconstruct_scope_series_batch",
         _make_source(days, payload_builder=payload_builder, membership_override=membership),
     )
 
@@ -299,7 +313,7 @@ def test_source_contract_guard_scope_identity_mismatch(monkeypatch) -> None:
     payload_builder = _fixed_payloads(days, returns_per_index=lambda i: 0.01)
     monkeypatch.setattr(
         svc,
-        "reconstruct_scope_series",
+        "reconstruct_scope_series_batch",
         _make_source(
             days,
             payload_builder=payload_builder,
@@ -321,7 +335,7 @@ def test_source_contract_guard_asof_mismatch(monkeypatch) -> None:
     }
     monkeypatch.setattr(
         svc,
-        "reconstruct_scope_series",
+        "reconstruct_scope_series_batch",
         _make_source(days, payload_builder=payload_builder, membership_override=membership),
     )
 
@@ -359,7 +373,7 @@ def test_date_validation_never_calls_source(monkeypatch, days: list[date], asof:
     payload_builder = _fixed_payloads(days, returns_per_index=lambda i: 0.01)
     monkeypatch.setattr(
         svc,
-        "reconstruct_scope_series",
+        "reconstruct_scope_series_batch",
         _make_source(days, payload_builder=payload_builder, calls=calls),
     )
 
@@ -382,7 +396,7 @@ def test_member_missing_does_not_downgrade_primitive(monkeypatch) -> None:
         missing_at={2},  # T3: 3 valid returns + 2 members missing exact-T1 return
     )
     monkeypatch.setattr(
-        svc, "reconstruct_scope_series", _make_source(days, payload_builder=payload_builder)
+        svc, "reconstruct_scope_series_batch", _make_source(days, payload_builder=payload_builder)
     )
 
     out = asyncio.run(_run(days, analysis_asof_date=days[-1]))
@@ -408,7 +422,7 @@ def test_whole_snapshot_gap_preserved(monkeypatch) -> None:
     payload_builder = _fixed_payloads(days, returns_per_index=lambda i: 0.01)
     monkeypatch.setattr(
         svc,
-        "reconstruct_scope_series",
+        "reconstruct_scope_series_batch",
         _make_source(days, payload_builder=payload_builder, skip={2}),  # T3 missing
     )
 
@@ -431,13 +445,13 @@ def test_whole_snapshot_gap_preserved(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_only_source_call_is_reconstruct_scope_series(monkeypatch) -> None:
+def test_only_source_call_is_reconstruct_scope_series_batch(monkeypatch) -> None:
     days = _trading_days(date(2026, 1, 5), 30)
     payload_builder = _fixed_payloads(days, returns_per_index=lambda i: 0.01)
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         svc,
-        "reconstruct_scope_series",
+        "reconstruct_scope_series_batch",
         _make_source(days, payload_builder=payload_builder, calls=calls),
     )
 
@@ -445,7 +459,7 @@ def test_only_source_call_is_reconstruct_scope_series(monkeypatch) -> None:
 
     assert len(calls) == 1
     assert calls[0]["scope_type"] == SCOPE_TYPE
-    assert calls[0]["scope_key"] == SCOPE_KEY
+    assert calls[0]["scope_keys"] == [SCOPE_KEY]
     assert calls[0]["trade_dates"] == list(days)
     assert calls[0]["asof_date"] == days[-1]
 
@@ -462,7 +476,7 @@ def test_no_future_leakage_prefix_invariance(monkeypatch) -> None:
         days, returns_per_index=lambda i: 0.02 * math.sin(i / 11) + 0.0015 * (i % 5)
     )
     source = _make_source(days, payload_builder=payload_builder)
-    monkeypatch.setattr(svc, "reconstruct_scope_series", source)
+    monkeypatch.setattr(svc, "reconstruct_scope_series_batch", source)
 
     out_prefix = asyncio.run(_run(prefix, analysis_asof_date=days[-1]))
     out_full = asyncio.run(_run(days, analysis_asof_date=days[-1]))
@@ -476,13 +490,13 @@ def test_no_future_leakage_prefix_invariance(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# T9–T13. VEC-1B — BATCH composition shares the single composition helper
+# T9–T13. VEC-1B — BATCH composition is THE single composition owner
 # ---------------------------------------------------------------------------
 # The ONLY mocked IO boundary is ``reconstruct_scope_series_batch``; each
 # returned entry is then composed by the SAME ``_compose_scope_dynamics_from_reconstruction``
-# helper as the single-scope path.  These tests prove: batch output shape /
-# identity, per-scope equivalence with the single path, single source call,
-# empty batch fast-path, and batch contract guard.
+# helper (there is no separate single-scope path).  These tests prove: batch
+# output shape / identity, single source call, empty batch fast-path, and batch
+# contract guard.
 
 
 def _make_batch_source(
@@ -587,51 +601,11 @@ def test_batch_composes_all_scopes_in_order(monkeypatch) -> None:
     )
 
     assert [r["scope"]["scope_key"] for r in out] == scope_keys
-    for result, sk in zip(out, scope_keys):
+    for result, _sk in zip(out, scope_keys, strict=True):
         assert result["membership"]["mode"] == "current_static"
         points = result["observation_series"]["primitives"]["equal_weight_return"]["points"]
         phase = result["scope_dynamics"]["dynamics_phase"]
         assert len(points) == len(phase) == len(days)
-
-
-def test_batch_matches_single_path_for_each_scope(monkeypatch) -> None:
-    """T10. Batch composition for scope X is byte-identical to the single-scope
-    path for the same X (same helper, same canonical source)."""
-    days = _trading_days(date(2026, 1, 5), 60)
-    scope_keys = ["alpha", "beta"]
-
-    def builder(d: date, sk: str) -> dict[str, Any]:
-        return _canonical_payload(
-            d, returns=[0.01 * (1 if sk == "alpha" else -1), 0.005, 0.0]
-        )
-
-    batch_source = _make_batch_source(days, payload_builder=builder, scope_keys=scope_keys)
-    monkeypatch.setattr(svc, "reconstruct_scope_series_batch", batch_source)
-
-    async def run_batch():
-        return await svc.compute_current_static_scope_dynamics_batch(
-            object(), SCOPE_TYPE, scope_keys, list(days), analysis_asof_date=days[-1]
-        )
-
-    batch_out = asyncio.run(run_batch())
-
-    # Single-scope path against the SAME canonical payloads.
-    for result, sk in zip(batch_out, scope_keys):
-        def single_builder(d: date) -> dict[str, Any]:
-            return builder(d, sk)
-
-        single_source = _make_source(
-            days, payload_builder=single_builder, scope_override={"scope_type": SCOPE_TYPE, "scope_key": sk}
-        )
-        monkeypatch.setattr(svc, "reconstruct_scope_series", single_source)
-
-        single_out = asyncio.run(
-            svc.compute_current_static_scope_dynamics(
-                object(), SCOPE_TYPE, sk, list(days), analysis_asof_date=days[-1]
-            )
-        )
-        assert result["observation_series"] == single_out["observation_series"]
-        assert result["scope_dynamics"] == single_out["scope_dynamics"]
 
 
 def test_batch_calls_batch_source_once(monkeypatch) -> None:

@@ -46,15 +46,16 @@ import shutil
 import sys
 import uuid
 from bisect import bisect_left
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Callable, Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # 这些 scope_type 是 R1 刻意覆盖集合（见 plan scale ladder）。
-# 仅当前正式 path 支持的 type（reconstruct_scope_series 的 _SUPPORTED_SCOPE_TYPES）。
+# 仅当前正式 path 支持的 type（reconstruct_scope_series_batch 的 _SUPPORTED_SCOPE_TYPES）。
 _KNOWN_SCOPE_TYPES = {
     "industry_l1",
     "industry_l2",
@@ -1614,7 +1615,7 @@ async def _export_dataset(
     )
     from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
     from app.models.instrument import Instrument
-    from app.models.market_board import MarketBoard, MarketBoardMembership
+    from app.models.market_board import MarketBoard
     from app.models.stock_feature_snapshot import StockFeatureSnapshot
     from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
     from app.services.review_observation_prep_service import list_recent_trading_days
@@ -1959,11 +1960,9 @@ async def _export_dataset(
                     membership_versions[str(mv)] = int(c)
 
                 # raw_files 双层 checksum（compressed + content）
-                stem_to_subdir = {
-                    stem: "raw" for stem in _RAW_FILE_STEMS.values()
-                }
+                stem_to_subdir = dict.fromkeys(_RAW_FILE_STEMS.values(), "raw")
                 stem_to_subdir.update(
-                    {stem: "lineage" for stem in _LINEAGE_FILE_STEMS.values()}
+                    dict.fromkeys(_LINEAGE_FILE_STEMS.values(), "lineage")
                 )
                 for stem, subdir in stem_to_subdir.items():
                     fname = f"{stem}.jsonl.gz"
@@ -2860,14 +2859,14 @@ def _load_replay_facts(
 
     from app.domain.review.member_fact import DailyBarFact
     from app.services.review_observation_prep_service import (
+        _CURRENT_ONLY_SNAPSHOT_FIELDS,
         FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
         HISTORY_CONTRACT_VERSION,
-        _CURRENT_ONLY_SNAPSHOT_FIELDS,
         _build_t1_map,
         _decode_jsonb,
+        _InstrumentBarSeries,
         _map_daily_bar_fact,
         _map_structure_event,
-        _InstrumentBarSeries,
     )
 
     if selection is None:
@@ -3112,17 +3111,18 @@ def _load_capacity_facts(
     unavailable (the DB batch owner has the same semantics).  No DB, no SSH, no
     remote PostgreSQL — the corpus parquet files are the only source.
     """
-    import pyarrow.dataset as ds
     from collections import defaultdict
+
+    import pyarrow.dataset as ds
 
     from app.services.review_observation_prep_service import (
         FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
         HISTORY_CONTRACT_VERSION,
         _build_t1_map,
         _decode_jsonb,
+        _InstrumentBarSeries,
         _map_daily_bar_fact,
         _map_structure_event,
-        _InstrumentBarSeries,
     )
 
     if selection is None:
@@ -3289,13 +3289,13 @@ def _dataset_asof(dataset_dir: str) -> str:
     """
     qpath = os.path.join(dataset_dir, "quality_summary.json")
     if os.path.exists(qpath):
-        with open(qpath, "r", encoding="utf-8") as fh:
+        with open(qpath, encoding="utf-8") as fh:
             q = json.load(fh)
         if q.get("asof"):
             return str(q["asof"])
     mpath = os.path.join(dataset_dir, "manifest.json")
     if os.path.exists(mpath):
-        with open(mpath, "r", encoding="utf-8") as fh:
+        with open(mpath, encoding="utf-8") as fh:
             m = json.load(fh)
         axis = (m.get("date_ranges") or {}).get("analysis_axis") or []
         if axis:
@@ -3394,7 +3394,7 @@ def _check_dataset_integrity(dataset_dir: str) -> list[str]:
     mpath = os.path.join(dataset_dir, "manifest.json")
     if not os.path.exists(mpath):
         return ["manifest.json 缺失，无法执行 Dataset Integrity Gate"]
-    with open(mpath, "r", encoding="utf-8") as fh:
+    with open(mpath, encoding="utf-8") as fh:
         m = json.load(fh)
     dr = m.get("date_ranges") or {}
     declared_asof = dr.get("asof")
@@ -3506,7 +3506,7 @@ def _load_scope_specs(dataset_dir: str, view_name: str) -> list[Any]:
         "all_industries",
     ):
         vpath = os.path.join(dataset_dir, "views", f"{view_name}.json")
-        with open(vpath, "r", encoding="utf-8") as fh:
+        with open(vpath, encoding="utf-8") as fh:
             view = json.load(fh)
         board_ids = list(view.get("scope_keys") or [])
     else:
@@ -3553,7 +3553,7 @@ def _load_dynamics_logic_scope_specs(
     """
     from app.services.review_observation_prep_service import ScopeReplaySpec
 
-    with open(fixture_path, "r", encoding="utf-8") as fh:
+    with open(fixture_path, encoding="utf-8") as fh:
         fixture = json.load(fh)
     scopes = fixture.get("scopes") or []
     if not scopes:
@@ -3955,7 +3955,6 @@ def _run_dataset_dynamics_logic(
         )
         return 0
 
-    import time
 
     from app.domain.review.analysis.observation_series import build_observation_series
     from app.domain.review.analysis.scope_dynamics import (
@@ -4451,7 +4450,6 @@ def _run_leadership_research(
         )
         return 0
 
-    import time
     from statistics import mean
 
     from app.services.review_observation_prep_service import (
@@ -5304,7 +5302,7 @@ def _stratified_sample_boards(
         family_candidate_counts[fam] = {
             b: len(buckets.get(b, [])) for b in _IST_MAPPING_BUCKET_ORDER
         }
-        family_bucket_counts[fam] = {b: 0 for b in _IST_MAPPING_BUCKET_ORDER}
+        family_bucket_counts[fam] = dict.fromkeys(_IST_MAPPING_BUCKET_ORDER, 0)
 
         # bucket-coverage guarantee: one seeded-random draw from every non-empty
         # bucket (NOT the sorted-first / max-member_count candidate) so the
@@ -5396,7 +5394,7 @@ def _broad_sample_from_view(dataset_dir: str, view_name: str) -> dict:
     vpath = os.path.join(dataset_dir, "views", f"{view_name}.json")
     if not os.path.exists(vpath):
         raise RuntimeError(f"[ist-mapping] 源 view 不存在: {vpath}")
-    with open(vpath, "r", encoding="utf-8") as fh:
+    with open(vpath, encoding="utf-8") as fh:
         view = json.load(fh)
     selected_keys = {str(b) for b in (view.get("scope_keys") or [])}
 
@@ -5455,8 +5453,8 @@ def _broad_sample_from_view(dataset_dir: str, view_name: str) -> dict:
     family_bucket_counts: dict[str, dict[str, int]] = {}
     family_candidate_counts: dict[str, dict[str, int]] = {}
     for fam in sorted(by_family):
-        family_candidate_counts[fam] = {b: 0 for b in _IST_MAPPING_BUCKET_ORDER}
-        family_bucket_counts[fam] = {b: 0 for b in _IST_MAPPING_BUCKET_ORDER}
+        family_candidate_counts[fam] = dict.fromkeys(_IST_MAPPING_BUCKET_ORDER, 0)
+        family_bucket_counts[fam] = dict.fromkeys(_IST_MAPPING_BUCKET_ORDER, 0)
         for c in by_family[fam]:
             family_candidate_counts[fam][c["size_bucket"]] += 1
             family_bucket_counts[fam][c["size_bucket"]] += 1
@@ -5532,7 +5530,7 @@ def _run_internal_structure_type_sample(
         print(f"target_per_family           : {sample['target_per_family']}")
         print(f"seed                        : {seed}")
     else:
-        print(f"target_per_family           : all (broad universe)")
+        print("target_per_family           : all (broad universe)")
         print(f"seed                        : {seed} (unused for broad)")
     print(f"selected scopes             : {len(sample['scopes'])}")
     print(f"union_instrument_count      : {sample['union_instrument_count']}")
@@ -5556,7 +5554,7 @@ def _run_internal_structure_type_sample(
     mpath = os.path.join(dataset_dir, "manifest.json")
     manifest: dict = {}
     if os.path.exists(mpath):
-        with open(mpath, "r", encoding="utf-8") as fh:
+        with open(mpath, encoding="utf-8") as fh:
             manifest = json.load(fh)
     axis = (manifest.get("date_ranges") or {}).get("analysis_axis") or []
     date_range = [axis[0], axis[-1]] if axis else None
@@ -5603,7 +5601,7 @@ def _load_internal_structure_type_scope_specs(
 
     boards = {str(r["id"]): r for r in _load_parquet_rows(dataset_dir, "boards")}
     vpath = os.path.join(dataset_dir, "views", f"{view_name}.json")
-    with open(vpath, "r", encoding="utf-8") as fh:
+    with open(vpath, encoding="utf-8") as fh:
         view = json.load(fh)
     board_ids = list(view.get("scope_keys") or [])
     selected_board_ids = {str(b) for b in board_ids}
@@ -5940,7 +5938,7 @@ def _run_internal_structure_type_export(
             view_path,
         )
         return 2
-    with open(view_path, "r", encoding="utf-8") as fh:
+    with open(view_path, encoding="utf-8") as fh:
         view = json.load(fh)
     sample_block = view.get("sample") or {}
     cutpoints = sample_block.get("family_cutpoints") or {}
@@ -6119,7 +6117,7 @@ def _run_internal_structure_type_export(
     capture_sha = ""
     smpath = os.path.join(dataset_dir, "manifest.json")
     if os.path.exists(smpath):
-        with open(smpath, "r", encoding="utf-8") as fh:
+        with open(smpath, encoding="utf-8") as fh:
             smanifest = json.load(fh)
         capture_sha = str(smanifest.get("capture_git_sha") or "")
     if not capture_sha:
@@ -6193,7 +6191,7 @@ def _run_internal_structure_type_distribution(
             dataset_dir,
         )
         return 2
-    with open(mpath, "r", encoding="utf-8") as fh:
+    with open(mpath, encoding="utf-8") as fh:
         manifest = json.load(fh)
     ppath = os.path.join(dataset_dir, "internal_structure_type_mapping.parquet")
     if not os.path.exists(ppath):
@@ -6770,7 +6768,7 @@ def _run_internal_structure_type_candidates(
             "[ist-candidates] %s 非 mapping 输出目录（缺 manifest.json）", dataset_dir
         )
         return 2
-    with open(mpath, "r", encoding="utf-8") as fh:
+    with open(mpath, encoding="utf-8") as fh:
         manifest = json.load(fh)
     ppath = os.path.join(dataset_dir, "internal_structure_type_mapping.parquet")
     if not os.path.exists(ppath):
@@ -7759,7 +7757,7 @@ def _run_internal_structure_type_selection(
 
     # ---- load candidate rows + summary ----
     rows = pq.read_table(cand_results_path).to_pylist()
-    with open(cand_summary_path, "r", encoding="utf-8") as fh:
+    with open(cand_summary_path, encoding="utf-8") as fh:
         summary = json.load(fh)
     source_dataset = summary.get("source_dataset")
     sha12 = str(summary.get("capture_git_sha", ""))[:12]
@@ -8132,7 +8130,7 @@ def _run_internal_structure_type_fragmenting_redesign(
     import pyarrow.parquet as pq  # lazy import（与全文件惯例一致）
 
     rows = pq.read_table(cand_results_path).to_pylist()
-    with open(cand_summary_path, "r", encoding="utf-8") as fh:
+    with open(cand_summary_path, encoding="utf-8") as fh:
         summary = json.load(fh)
     source_dataset = summary.get("source_dataset")
     sha12 = str(summary.get("capture_git_sha", ""))[:12]
@@ -8761,7 +8759,7 @@ def _run_internal_structure_type_semantic_validation(
     import pyarrow.parquet as pq  # lazy import（与全文件惯例一致）
 
     rows = pq.read_table(cand_results_path).to_pylist()
-    with open(cand_summary_path, "r", encoding="utf-8") as fh:
+    with open(cand_summary_path, encoding="utf-8") as fh:
         summary = json.load(fh)
     source_dataset = summary.get("source_dataset")
     sha12 = str(summary.get("capture_git_sha", ""))[:12]
@@ -11105,7 +11103,7 @@ def _run_internal_structure_type_multivariate(
     if not os.path.exists(mpath):
         logger.error("[ist-mc] %s 非 mapping 输出目录（缺 manifest.json）", dataset_dir)
         return 2
-    with open(mpath, "r", encoding="utf-8") as fh:
+    with open(mpath, encoding="utf-8") as fh:
         manifest = json.load(fh)
     ppath = os.path.join(dataset_dir, "internal_structure_type_mapping.parquet")
     if not os.path.exists(ppath):
@@ -13497,7 +13495,7 @@ def _run_internal_structure_type_contract_refinement(
         if not os.path.exists(mpath):
             logger.error("[ist-cr] %s 非 mapping 输出目录（缺 manifest.json）", dirpath)
             raise FileNotFoundError(mpath)
-        with open(mpath, "r", encoding="utf-8") as fh:
+        with open(mpath, encoding="utf-8") as fh:
             mf = json.load(fh)
         ppath = os.path.join(dirpath, "internal_structure_type_mapping.parquet")
         if not os.path.exists(ppath):
@@ -13511,7 +13509,7 @@ def _run_internal_structure_type_contract_refinement(
         if not os.path.exists(fpath):
             logger.error("[ist-cr] mc-dir 缺 %s", fpath)
             raise FileNotFoundError(fpath)
-        with open(fpath, "r", encoding="utf-8") as fh:
+        with open(fpath, encoding="utf-8") as fh:
             return json.load(fh)
 
     base_manifest, base_rows = _load_mapping(dataset_dir)
@@ -14052,7 +14050,7 @@ def _run_semantic_matrix(
 
     print("=== REVIEW-V23-PHASE1 semantic-matrix (L1 RTM) ===")
     print(f"view={view_name}")
-    print(f"representative scopes: " + ", ".join(
+    print("representative scopes: " + ", ".join(
         f"{ed}→{rep_key[ed]}" for ed in evidence_dates
     ))
     for ed in evidence_dates:

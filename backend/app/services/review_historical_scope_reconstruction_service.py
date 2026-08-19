@@ -13,6 +13,13 @@ Contract: **CURRENT STATIC MEMBERSHIP x historical First Pyramid facts**.
   NEVER backfilled into a historical ``T``.
 - Provenance lives OUTSIDE the canonical payload — never a top-level L1 section.
 
+SINGLE entry point: :func:`reconstruct_scope_series_batch`.  Membership is
+resolved for ALL scopes in two queries (:func:`resolve_current_memberships_batch`)
+and the member x date window is loaded ONCE through the shared union prep owner
+(``prepare_union_fact_context`` + ``prepare_scopes_from_union``).  A single scope
+routes through this SAME batch owner with a batch size of one — there is no
+second single-scope implementation.
+
 Shadow only: not wired into Filter / Discovery / publication / orchestrator.
 """
 
@@ -34,9 +41,7 @@ from app.services.review_observation_persistence_service import (
     validate_scope_observation_payload,
 )
 from app.services.review_observation_prep_service import (
-    PreparedScope,
-    prepare_scope_from_member_ids,
-    prepare_scope_series_from_member_ids,
+    build_union_fact_context_from_loaded_facts,
     prepare_scopes_from_union,
     prepare_union_fact_context,
 )
@@ -114,8 +119,8 @@ async def resolve_current_memberships_batch(
 
     ``market_board_memberships`` PK is ``(board_id, instrument_id)`` so the
     ``board_id`` prefix is index-friendly.  Membership semantics are IDENTICAL to
-    :func:`resolve_current_membership` (same ``_validate_current_board`` owner),
-    so single/batch parity is guaranteed by construction.
+    the former :func:`resolve_current_membership` (same ``_validate_current_board``
+    owner), so a single scope routes through this SAME batch owner (batch size 1).
     """
     if scope_type not in _SUPPORTED_SCOPE_TYPES:
         raise HistoricalReconstructionError(f"unsupported scope_type={scope_type}")
@@ -158,6 +163,7 @@ async def resolve_current_memberships_batch(
         buuid = uuid.UUID(scope_key)
         board = boards.get(buuid)
         _validate_current_board(scope_type, scope_key, board)
+        assert board is not None  # _validate_current_board raises otherwise
         member_ids = tuple(dict.fromkeys(members_by_board.get(buuid, [])))
         out[scope_key] = CurrentStaticMembership(
             member_ids=member_ids,
@@ -166,183 +172,6 @@ async def resolve_current_memberships_batch(
             member_count=len(member_ids),
         )
     return out
-
-
-async def resolve_current_membership(
-    session: AsyncSession,
-    scope_type: str,
-    scope_key: str,
-    *,
-    asof_date: date,
-) -> CurrentStaticMembership:
-    """Resolve CURRENT STATIC MEMBERSHIP from the current projection owner.
-
-    Owner: ``market_boards`` (current hierarchy L1/L2/L3 + concept) joined to
-    ``market_board_memberships`` (current per-board instrument rows).  No
-    historical / PIT / ASOF resolution is ever consulted; the board's current
-    members are fixed for the whole reconstruction series.
-
-    PERF-FIX-STRUCTURAL-1 (P0-A): the single resolver delegates to the shared
-    batch resolver so the validation contract stays single-owned.
-    """
-    result = await resolve_current_memberships_batch(
-        session, scope_type, [scope_key], asof_date=asof_date
-    )
-    return result[scope_key]
-
-
-@dataclass(frozen=True)
-class ReconstructedObservation:
-    """One historical Scope Observation plus its prep metadata."""
-
-    trade_date: date
-    prepared: PreparedScope
-    observation: dict[str, Any]
-    provided_member_count: int
-
-
-async def reconstruct_scope_observation(
-    session: AsyncSession,
-    scope_type: str,
-    scope_key: str,
-    trade_date: date,
-    membership: CurrentStaticMembership,
-) -> ReconstructedObservation:
-    """Rebuild one historical Scope Observation with the FIXED current universe.
-
-    Member facts come strictly from ``trade_date`` (T) and its exact canonical
-    T-1 — never from the current day.  The canonical payload is produced by
-    ``compute_scope_observation`` and contract-validated; provenance is NOT
-    injected into the payload.
-    """
-    prepared = await prepare_scope_from_member_ids(
-        session,
-        scope_type,
-        scope_key,
-        membership.scope_name,
-        trade_date,
-        list(membership.member_ids),
-        # Historical reconstruction is built ONLY from FP history + bars + FP
-        # events.  Current-only snapshot facts stay None for historical T (PRD
-        # v2.3) and the large summary_payload JSONB is never transferred.
-        load_current_only=False,
-    )
-    observation = compute_scope_observation(
-        scope_type=scope_type,
-        scope_key=scope_key,
-        trade_date=trade_date,
-        pit_member_ids=prepared.pit_member_ids,
-        pit_member_ids_t1=prepared.pit_member_ids_t1,
-        members=prepared.members,
-        events=prepared.events,
-        t1_membership_available=prepared.t1_membership_available,
-        event_coverage_member_ids=prepared.event_coverage_member_ids,
-    )
-    validate_scope_observation_payload(
-        observation,
-        scope_type=scope_type,
-        scope_key=scope_key,
-        trade_date=trade_date,
-    )
-    return ReconstructedObservation(
-        trade_date=trade_date,
-        prepared=prepared,
-        observation=observation,
-        provided_member_count=observation["scope"]["provided_member_count"],
-    )
-
-
-async def reconstruct_scope_series(
-    session: AsyncSession,
-    scope_type: str,
-    scope_key: str,
-    trade_dates: list[date],
-    *,
-    asof_date: date,
-) -> dict[str, Any]:
-    """Rebuild an ordered historical Scope Observation series (BATCH path).
-
-    Membership is resolved once (CURRENT STATIC).  The whole member x date
-    window is read in ONE bulk pass (``prepare_scope_series_from_member_ids``)
-    and replayed per T, then each observation is produced by the single
-    canonical owner ``compute_scope_observation`` and contract-validated.
-    Provenance lives OUTSIDE the canonical payloads.
-    """
-    membership = await resolve_current_membership(
-        session, scope_type, scope_key, asof_date=asof_date
-    )
-
-    # rules/25 §8.7 physical-cost instrumentation: surface vectorized VolumeContext
-    # hit/fallback counts from the batch prep owner into the Composition Owner.
-    prep_counters: dict[str, int] = {}
-    prep_fallback_reasons: list[str] = []
-    t_bulk = time.perf_counter()
-    prepared_list = await prepare_scope_series_from_member_ids(
-        session,
-        scope_type,
-        scope_key,
-        membership.scope_name,
-        trade_dates,
-        list(membership.member_ids),
-        # Historical reconstruction is built ONLY from FP history + bars + FP
-        # events.  Current-only snapshot facts stay None for historical T (PRD
-        # v2.3) and the large summary_payload JSONB is never transferred.
-        load_current_only=False,
-        prep_counters=prep_counters,
-        prep_fallback_reasons=prep_fallback_reasons,
-    )
-    bulk_ms = (time.perf_counter() - t_bulk) * 1000.0
-    series: list[dict[str, Any]] = []
-    t_obs = time.perf_counter()
-    for prepared in prepared_list:
-        observation = compute_scope_observation(
-            scope_type=scope_type,
-            scope_key=scope_key,
-            trade_date=prepared.trade_date,
-            pit_member_ids=prepared.pit_member_ids,
-            pit_member_ids_t1=prepared.pit_member_ids_t1,
-            members=prepared.members,
-            events=prepared.events,
-            t1_membership_available=prepared.t1_membership_available,
-            event_coverage_member_ids=prepared.event_coverage_member_ids,
-        )
-        validate_scope_observation_payload(
-            observation,
-            scope_type=scope_type,
-            scope_key=scope_key,
-            trade_date=prepared.trade_date,
-        )
-        series.append(
-            {
-                "trade_date": prepared.trade_date.isoformat(),
-                "provided_member_count": observation["scope"]["provided_member_count"],
-                "observation": observation,
-            }
-        )
-    obs_ms = (time.perf_counter() - t_obs) * 1000.0
-    logger.info(
-        "[scope-reconstruction] scope_type=%s scope_key=%s member_count=%d "
-        "trade_date_count=%d bulk_prep_ms=%.1f per_t_observation_ms=%.1f "
-        "vec_hit=%d vec_fallback=%d fallback_reasons=%s",
-        scope_type, scope_key, membership.member_count, len(trade_dates),
-        bulk_ms, obs_ms,
-        prep_counters.get("vec_hit", 0), prep_counters.get("vec_fallback", 0),
-        ",".join(prep_fallback_reasons) or "-",
-    )
-    return {
-        "scope": {"scope_type": scope_type, "scope_key": scope_key},
-        "membership": {
-            "mode": "current_static",
-            "asof_date": asof_date.isoformat(),
-            "member_count": membership.member_count,
-        },
-        "series": series,
-        "prep_metrics": {
-            "vec_hit": prep_counters.get("vec_hit", 0),
-            "vec_fallback": prep_counters.get("vec_fallback", 0),
-            "fallback_reasons": list(prep_fallback_reasons),
-        },
-    }
 
 
 # PERF-2: bounded batch size for union-member sharing.
@@ -369,11 +198,12 @@ async def reconstruct_scope_series_batch(
     """Reconstruct observation series for a batch of scopes, loading each member's
     historical window exactly ONCE across all scopes that share it.
 
-    Equivalent to calling :func:`reconstruct_scope_series` per scope_key, but the
-    member x date bulk load is shared via a union of member_ids (PERF-2).  The
-    business algorithm (:func:`compute_scope_observation`) is NEVER modified — the
-    same ``PreparedScope`` per scope is produced, only the storage-layer load is
-    deduplicated.  Returns one result dict per scope_key, in input order.
+    Equivalent to running the former single-scope series reconstruction per
+    scope_key, but the member x date bulk load is shared via a union of
+    member_ids (PERF-2).  The business algorithm (:func:`compute_scope_observation`)
+    is NEVER modified — the same ``PreparedScope`` per scope is produced, only the
+    storage-layer load is deduplicated.  Returns one result dict per scope_key, in
+    input order.
     """
     if not scope_keys:
         return []
@@ -450,8 +280,11 @@ async def _reconstruct_batch_chunk(
                 union_member_ids.append(mid)
 
     if current_only:
-        union_ctx = _UnionFactContext(t1_by_date={}, states_by_date={},
-                                      bars={}, events_by_date={}, vec_volume={})
+        # Empty shared context: no DB facts loaded — Current-only is served via
+        # the exact-T snapshot facts only (built through the same pure core).
+        union_ctx = build_union_fact_context_from_loaded_facts(
+            t1_by_date={}, states_by_date={}, bars={}, events_by_date={},
+        )
     else:
         union_ctx = await prepare_union_fact_context(
             session, trade_dates, union_member_ids,

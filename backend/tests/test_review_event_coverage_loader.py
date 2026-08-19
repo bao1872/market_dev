@@ -1,4 +1,9 @@
-"""ROUND-2.2B — Coverage Loader Contract + per-date/batch parity + synthetic equivalence.
+"""ROUND-2.2B — Batch Coverage Loader Contract + synthetic equivalence.
+
+[REVIEW-EXECUTION-PATH-CONSOLIDATION] 覆盖加载路径已收口为唯一 batch/union
+canonical owner ``_load_batch_backfill_event_coverage``（一次 SQL 返回全部
+trade_date 的 coverage），per-date loader ``_load_backfill_event_coverage_member_ids``
+已删除，不再存在 per-date vs batch parity 测试。
 
 Covers the conservative canonical-backfill coverage predicate (Phase B, 12 conditions):
 
@@ -7,9 +12,9 @@ Covers the conservative canonical-backfill coverage predicate (Phase B, 12 condi
     DailyState.updated_at <= Run.completed_at.
 
 And the required wiring:
-    - per-date ``_load_backfill_event_coverage_member_ids`` == batch ``_load_batch_backfill_event_coverage``
     - PreparedScope.event_coverage_member_ids flows into compute_scope_observation
     - canonical vs batch-optimized ScopeObservation equal (synthetic coverage)
+    - coverage is scope-local (PIT(T) ∩ coverage), never the whole-union coverage
 
 All pure-unit; DB is mocked (no live PG).
 """
@@ -28,7 +33,6 @@ from app.domain.review.scope_observation import (
     compute_scope_observation,
 )
 from app.services.review_observation_prep_service import (
-    _load_backfill_event_coverage_member_ids,
     _load_batch_backfill_event_coverage,
 )
 
@@ -39,26 +43,6 @@ INSTR_A = uuid.UUID(int=1)
 INSTR_B = uuid.UUID(int=2)
 
 
-class _FakeResult:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def all(self):
-        return self._rows
-
-    def scalars(self):
-        # per-date loader: scalar instruments (one per row).
-        return _FakeScalars([r[1] if isinstance(r, tuple) else r for r in self._rows])
-
-
-class _FakeScalars:
-    def __init__(self, values):
-        self._values = values
-
-    def all(self):
-        return self._values
-
-
 class _FakeSession:
     def __init__(self, rows):
         self._rows = rows  # list of (trade_date, instrument_id)
@@ -67,50 +51,29 @@ class _FakeSession:
         return _FakeResult(self._rows)
 
 
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
 # ---------------------------------------------------------------------------
-# Loader contract
+# Batch loader contract
 # ---------------------------------------------------------------------------
 
-def test_loader_member_valid_included() -> None:
-    """K-01: matching row -> member VALID (in coverage set)."""
-    cov = asyncio.run(_load_backfill_event_coverage_member_ids(
-        _FakeSession([(T, INSTR_A)]), [INSTR_A], T))
-    assert cov == frozenset({INSTR_A})
+def test_batch_loader_valid_members_included() -> None:
+    """K-01: matching rows -> members VALID (in coverage set)."""
+    cov = asyncio.run(_load_batch_backfill_event_coverage(
+        _FakeSession([(T, INSTR_A), (T, INSTR_B)]), [INSTR_A, INSTR_B], [T]))
+    assert cov == {T: frozenset({INSTR_A, INSTR_B})}
 
 
-def test_loader_no_match_returns_none() -> None:
-    """K-02 (AUDIT-FIX F1): no matching row -> None (coverage source unavailable),
-    NOT an empty frozenset (which would be misread as valid empty coverage)."""
-    cov = asyncio.run(_load_backfill_event_coverage_member_ids(
-        _FakeSession([]), [INSTR_A], T))
-    assert cov is None
-
-
-def test_loader_no_instruments_returns_none() -> None:
-    """K-03: empty instrument_ids -> None (no trusted coverage source)."""
-    cov = asyncio.run(_load_backfill_event_coverage_member_ids(_FakeSession([]), [], T))
-    assert cov is None
-
-
-def test_loader_batch_empty_dates_returns_empty() -> None:
+def test_batch_loader_empty_dates_returns_empty() -> None:
     """K-04: empty dates -> empty dict (no per-date coverage entry)."""
     cov = asyncio.run(_load_batch_backfill_event_coverage(_FakeSession([]), [INSTR_A], []))
     assert cov == {}
-
-
-# ---------------------------------------------------------------------------
-# Per-date vs batch parity
-# ---------------------------------------------------------------------------
-
-def test_perdate_vs_batch_parity() -> None:
-    """L-01: per-date loader result == batch loader result for the same source facts."""
-    rows = [(T, INSTR_A), (T, INSTR_B)]
-    per_date = asyncio.run(_load_backfill_event_coverage_member_ids(
-        _FakeSession(rows), [INSTR_A, INSTR_B], T))
-    batch = asyncio.run(_load_batch_backfill_event_coverage(
-        _FakeSession(rows), [INSTR_A, INSTR_B], [T]))
-    assert per_date == batch[T]
-    assert per_date == frozenset({INSTR_A, INSTR_B})
 
 
 def test_batch_missing_date_no_entry() -> None:
@@ -118,23 +81,6 @@ def test_batch_missing_date_no_entry() -> None:
     batch = asyncio.run(_load_batch_backfill_event_coverage(
         _FakeSession([(T, INSTR_A)]), [INSTR_A, INSTR_B], [T]))
     assert batch[T] == frozenset({INSTR_A})
-
-
-def test_zero_match_negative_parity_perdate_none_eq_batch_none() -> None:
-    """L-03 (AUDIT-FIX F2/F4): 0 coverage rows -> per-date None == batch.get(T) None.
-
-    This is the exact boundary that previously drifted: per-date returned an empty
-    frozenset (ready/denom=0) while batch returned None (unavailable).  Both must
-    now agree on ``None`` (source unavailable), so the Core emits unavailable /
-    denominator=None, never a fake ready/denominator=0.
-    """
-    per_date = asyncio.run(_load_backfill_event_coverage_member_ids(
-        _FakeSession([]), [INSTR_A], T))
-    batch = asyncio.run(_load_batch_backfill_event_coverage(
-        _FakeSession([]), [INSTR_A], [T]))
-    assert per_date is None
-    assert batch.get(T) is None
-    assert (per_date is None) == (batch.get(T) is None)
 
 
 def test_batch_zero_rows_all_dates_absent() -> None:

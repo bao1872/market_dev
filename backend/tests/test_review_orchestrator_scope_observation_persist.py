@@ -1,11 +1,15 @@
 """A 步契约测试：review_orchestrator._persist_canonical_scope_observation。
 
 验证规范 Scope Observation 七段事实层双写（PRD §7.2-§7.17 v2.3）：
-- activated scope（industry_l1/l2/l3 + concept）调用 prepare_scope →
-  compute_scope_observation → check_observation_invariants →
+- activated scope（industry_l1/l2/l3 + concept）从 batch-prepared map 取
+  PreparedScope → compute_scope_observation → check_observation_invariants →
   save_scope_observation_fact
-- market / major_index / style：prepare_scope 返回 unavailable 时直接 return，
-  不写表（双轨并存，本轮不破坏 legacy Discovery）
+- [REVIEW-EXECUTION-PATH-CONSOLIDATION] 本函数不再调用任何 single-scope
+  preparation：PreparedScope 一律由 compute_run / resume_run 通过唯一 owner
+  ``prepare_current_scope_observations_batch`` 一次 batch prepare 后传入。
+- market / major_index / style：PreparedScope.pit_status_t == unavailable 时
+  直接 return，不写表（双轨并存，本轮不破坏 legacy Discovery）
+- batch prepare 未包含该 scope（missing key）时直接跳过
 - invariant 失败时抛 ValueError（上层 _compute_scope_metrics_phase 的
   try/except 仅 warning，不破坏 legacy signal）
 
@@ -19,10 +23,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.pure_unit
-
 from app.services import review_orchestrator_service as orch
 from app.services.review_observation_prep_service import PreparedScope
+
+pytestmark = pytest.mark.pure_unit
 
 
 def _make_run() -> object:
@@ -96,14 +100,12 @@ OBSERVATION = {
 
 @pytest.mark.asyncio
 async def test_activated_scope_persists_fact():
-    """industry_l2 activated scope：完整走 prepare→compute→invariant→save。"""
+    """industry_l2 activated scope：从 batch map 取 prep → compute → invariant → save。"""
     run = _make_run()
     scope = _scope("industry_l2", "sw_electronics")
     fake_prep = _prep("industry_l2", "sw_electronics")
 
     with patch.object(
-        orch, "prepare_scope", AsyncMock(return_value=fake_prep),
-    ) as mock_prepare, patch.object(
         orch, "compute_scope_observation", return_value=OBSERVATION,
     ) as mock_compute, patch.object(
         orch, "check_observation_invariants", return_value=[{"ok": True, "name": "x"}],
@@ -112,9 +114,9 @@ async def test_activated_scope_persists_fact():
     ) as mock_save:
         await orch._persist_canonical_scope_observation(
             _mock_session(), run, scope,  # type: ignore[arg-type]
+            prepared_observations={"sw_electronics": fake_prep},
         )
 
-    mock_prepare.assert_awaited_once()
     mock_compute.assert_called_once()
     mock_check.assert_called_once_with(OBSERVATION)
     mock_save.assert_awaited_once()
@@ -127,27 +129,25 @@ async def test_activated_scope_persists_fact():
 
 @pytest.mark.asyncio
 async def test_excluded_concept_scope_returns_without_prepare_or_save():
-    """A 级机制/资格/事件标签概念：A 步持久化直接排除，连 prepare 都不调用。"""
+    """A 级机制/资格/事件标签概念：A 步持久化直接排除，连 prep 查找都不做。"""
     run = _make_run()
     scope = _scope("concept", str(uuid.uuid4()))
     scope.scope_name = "融资融券"
 
     with patch.object(
-        orch, "prepare_scope", AsyncMock(),
-    ) as mock_prepare, patch.object(
         orch, "save_scope_observation_fact", AsyncMock(),
     ) as mock_save:
         await orch._persist_canonical_scope_observation(
             _mock_session(), run, scope,  # type: ignore[arg-type]
+            prepared_observations={},
         )
 
-    mock_prepare.assert_not_awaited()
     mock_save.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_small_member_concept_scope_returns_without_save():
-    """成员数 <=10 的 concept：A 步持久化排除（prepare 后按真实 count 判定），不写表。"""
+    """成员数 <=10 的 concept：A 步持久化排除（按 batch prep 的真实 count 判定），不写表。"""
     run = _make_run()
     scope = _scope("concept", str(uuid.uuid4()))
     scope.scope_name = "赛马概念"
@@ -155,8 +155,6 @@ async def test_small_member_concept_scope_returns_without_save():
     fake_prep = _prep("concept", str(uuid.uuid4()))
 
     with patch.object(
-        orch, "prepare_scope", AsyncMock(return_value=fake_prep),
-    ), patch.object(
         orch, "compute_scope_observation", return_value=OBSERVATION,
     ), patch.object(
         orch, "check_observation_invariants", return_value=[{"ok": True, "name": "x"}],
@@ -165,6 +163,7 @@ async def test_small_member_concept_scope_returns_without_save():
     ) as mock_save:
         await orch._persist_canonical_scope_observation(
             _mock_session(), run, scope,  # type: ignore[arg-type]
+            prepared_observations={scope.scope_key: fake_prep},
         )
 
     mock_save.assert_not_awaited()
@@ -179,28 +178,45 @@ async def test_unavailable_scope_returns_without_persist():
         fake_prep = _prep(scope_type, "x", unavailable=True)
 
         with patch.object(
-            orch, "prepare_scope", AsyncMock(return_value=fake_prep),
-        ) as mock_prepare, patch.object(
             orch, "save_scope_observation_fact", AsyncMock(),
         ) as mock_save:
             await orch._persist_canonical_scope_observation(
                 _mock_session(), run, scope,  # type: ignore[arg-type]
+                prepared_observations={"x": fake_prep},
             )
 
-        mock_prepare.assert_awaited_once()
         mock_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scope_missing_from_batch_map_returns_without_persist():
+    """[REVIEW-EXECUTION-PATH-CONSOLIDATION] batch prepare 未包含该 scope
+    （如 batch prepare 失败被隔离）：直接跳过，不写表、不抛错。"""
+    run = _make_run()
+    scope = _scope("industry_l1", "sw_electronics")
+
+    with patch.object(
+        orch, "compute_scope_observation", return_value=OBSERVATION,
+    ), patch.object(
+        orch, "save_scope_observation_fact", AsyncMock(),
+    ) as mock_save:
+        await orch._persist_canonical_scope_observation(
+            _mock_session(), run, scope,  # type: ignore[arg-type]
+            prepared_observations={},
+        )
+
+    mock_save.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_invariants_failed_raises_value_error():
     """invariant 校验失败必须抛 ValueError（上层 try/except 隔离为 warning）。"""
     run = _make_run()
-    scope = _scope("industry_l3", str(uuid.uuid4()))
-    fake_prep = _prep("industry_l3", "x")
+    scope_key = "x"
+    scope = _scope("industry_l3", scope_key)
+    fake_prep = _prep("industry_l3", scope_key)
 
     with patch.object(
-        orch, "prepare_scope", AsyncMock(return_value=fake_prep),
-    ), patch.object(
         orch, "compute_scope_observation", return_value=OBSERVATION,
     ), patch.object(
         orch, "check_observation_invariants",
@@ -211,6 +227,7 @@ async def test_invariants_failed_raises_value_error():
         with pytest.raises(ValueError, match="scope observation invariant failed"):
             await orch._persist_canonical_scope_observation(
                 _mock_session(), run, scope,  # type: ignore[arg-type]
+                prepared_observations={scope_key: fake_prep},
             )
         mock_save.assert_not_awaited()
 
@@ -224,15 +241,14 @@ async def test_canonical_db_failure_propagates_within_savepoint():
     已被进入（savepoint 隔离，外层 legacy transaction 可继续提交）。
     """
     run = _make_run()
-    scope = _scope("industry_l3", str(uuid.uuid4()))
-    fake_prep = _prep("industry_l3", "x")
+    scope_key = "x"
+    scope = _scope("industry_l3", scope_key)
+    fake_prep = _prep("industry_l3", scope_key)
 
     session = _mock_session()
     save_error = RuntimeError("psycopg2: deadlock detected")
 
     with patch.object(
-        orch, "prepare_scope", AsyncMock(return_value=fake_prep),
-    ), patch.object(
         orch, "compute_scope_observation", return_value=OBSERVATION,
     ), patch.object(
         orch, "check_observation_invariants", return_value=[{"ok": True, "name": "all"}],
@@ -240,6 +256,9 @@ async def test_canonical_db_failure_propagates_within_savepoint():
         orch, "save_scope_observation_fact", AsyncMock(side_effect=save_error),
     ):
         with pytest.raises(RuntimeError, match="deadlock detected"):
-            await orch._persist_canonical_scope_observation(session, run, scope)
+            await orch._persist_canonical_scope_observation(
+                session, run, scope,  # type: ignore[arg-type]
+                prepared_observations={scope_key: fake_prep},
+            )
         # savepoint 已建立并回滚，异常向外传播（由上层 catch 处理，不污染 legacy）。
         assert session.begin_nested.called
