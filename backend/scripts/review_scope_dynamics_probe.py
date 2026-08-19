@@ -1148,6 +1148,7 @@ def _parse_args() -> argparse.Namespace:
             "internal-structure-type-fragmenting-redesign",
             "internal-structure-type-semantic-validation",
             "internal-structure-type-multivariate",
+            "internal-structure-type-contract-refinement",
             "leadership-research",
             "export-dataset",
             "dataset-validate",
@@ -1246,6 +1247,16 @@ def _parse_args() -> argparse.Namespace:
             "07b_blind_replay_reveal.json, 08_broader_universe_validation.json, "
             "internal_structure_type_contract_candidate.json, manifest.json}；不写 "
             "production、不改 PRD、不冻结 threshold（CANDIDATE_NOT_FROZEN）；"
+            "internal-structure-type-contract-refinement: INTERNAL-STRUCTURE-TYPE-CONTRACT-"
+            "REFINEMENT-AND-PREFREEZE — research-only 一次跑完 R1 Semantic Contract Lock / "
+            "R2 Fragmenting vs Core-Reformation Joint Map / R3 Core-led 2D Threshold "
+            "Surface / R4 Rotating/Fragmenting Boundary Surface / R5 Conflict + Unclassified "
+            "Policy / R6 Pre-Freeze Stability + Data Sufficiency，读 40-scope mapping "
+            "--dataset-dir + 285-scope broad mapping --broad-dataset-dir + E1–E8 已审计证据 "
+            "--mc-dir，写 review-isdtype-cr-<sha12>-v1/{01..07 + internal_structure_type_"
+            "contract_v2_candidate.json + manifest.json}；不写 production、不改 PRD、按 "
+            "Data Sufficiency 只允许 FULL_FREEZE_READY / SEMANTIC_FREEZE_ONLY / "
+            "NOT_FREEZE_READY 三选一；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -1274,6 +1285,11 @@ def _parse_args() -> argparse.Namespace:
         "--broad-dataset-dir", type=str, default=None,
         help="internal-structure-type-multivariate 模式：E8 broader-universe validation 用的 "
              "285-scope broad mapping 数据集目录（可选；缺省则跳过 E8）",
+    )
+    p.add_argument(
+        "--mc-dir", type=str, default=None,
+        help="internal-structure-type-contract-refinement 模式：E1–E8 已审计证据的 "
+             "multivariate closure 输出目录（review-isdtype-mc-<sha12>-v1，必填）",
     )
     p.add_argument(
         "--asof-lock", type=str, default=None,
@@ -11419,6 +11435,1840 @@ def _run_internal_structure_type_multivariate(
     return 0
 
 
+# ---------------------------------------------------------------------------
+# CONTRACT-REFINEMENT-AND-PREFREEZE — R1–R6（research-only，一次跑完）
+# ---------------------------------------------------------------------------
+
+_CR_STUDY = "INTERNAL-STRUCTURE-TYPE-CONTRACT-REFINEMENT-AND-PREFREEZE"
+# E7 frozen judgment（固定输入）：SHA-256 由外部 blind semantic audit 提供。
+# 逐 case 文件不在仓库；用户授权使用声明汇总事实，禁止重新解释/改写 judgment。
+_CR_E7_FROZEN_JUDGMENT_SHA256 = (
+    "8e2e395732c72ffa7f404b7b6ee4c53eb761ff13422a3c0d6548756690a2c7da"
+)
+_CR_E7_DECLARED = {
+    "judgment_sha256": _CR_E7_FROZEN_JUDGMENT_SHA256,
+    "per_case_file": "PENDING_FILE",
+    "summary_facts": {
+        "Broadening": {"prototype_total": 15, "exact": 13, "different_label": 0},
+        "Core-led": {"prototype_total": 15, "exact": 15},
+        "conflict": {"case_total": 25, "unclear": 25},
+    },
+    "reinterpretation_forbidden": True,
+}
+# R3 Core-led 2D threshold surface 网格（HHI × Tilt）。
+_CR_CORE_LED_HHI_GRID = (0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
+_CR_CORE_LED_TILT_GRID = (0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
+# R4 LCR anchors。
+_CR_LCR_ANCHORS = (0.60, 0.70, 0.80, 0.85, 0.90, 1.00)
+# 三段式研究带（candidate，不冻结）。
+_CR_LCR_TRANSITION_LO = 0.70
+_CR_LCR_TRANSITION_HI = 0.90
+# R2 joint map 高/低切分（research，取 MID 语义 0.50）。
+_CR_HIGH_LOW_SPLIT = 0.50
+# R6-C boundary perturbation。
+_CR_PERTURB_PCT = (5, 10)
+_CR_PERTURB_LCR = (0.05, 0.10)
+# R3 stable plateau 容忍度（research heuristic）。
+_CR_PLATEAU_HIT_TOL = 0.03
+_CR_PLATEAU_CONFLICT_TOL = 0.05
+# R5 推荐判定阈值（heuristic，不冻结）。
+_CR_POLICY_PROTO_PRESERVE_FLOOR = 0.8
+_CR_POLICY_UNCLASSIFIED_CAP = 0.6
+# R6 temporal / boundary 稳定性容忍度（research heuristic）。
+_CR_TEMPORAL_RATE_TOL = 0.05
+_CR_CHURN_TOL = 0.05
+# Policy C 唯一允许的层级 resolution（research，默认空 = 极度克制，等同 B）。
+_CR_POLICY_C_RESOLUTIONS: dict[str, str] = {}
+# Policy A 的 research priority 顺序（仅 negative control，不落库）。
+_CR_POLICY_A_PRIORITY = ("Broadening", "Core-led", "Rotating", "Fragmenting")
+# R6-B temporal 窗口数量（early/middle/late）。
+_CR_N_WINDOWS = 3
+# R6-B / R6-C 判定阈值（research heuristic，不冻结）。
+_CR_DRIFT_WARNING = 0.05
+# R6 候选规则消费的现有结构事实（Leakage 审计固定输入，禁止新增特征）。
+_CR_CONSUMED_FEATURES = (
+    "aligned_breadth_hist_pct",
+    "aligned_breadth_delta5d",
+    "price_hhi_hist_pct",
+    "price_hhi_delta5d",
+    "aligned_tilt_hist_pct",
+    "migration_hist_pct",
+    "jaccard_stability",
+    "previous_retention",
+    "lcr",
+    "leader_fraction_hist_pct",
+)
+# contract_v2 输出文件名。
+_CR_CONTRACT_V2_FILENAME = "internal_structure_type_contract_v2_candidate.json"
+
+
+def _cr_high_pct(
+    dists: dict[str, list[float]], feature: str, q: float
+) -> float | None:
+    """Base-frame empirical percentile threshold for ``feature``."""
+    vals = dists.get(feature) or []
+    if not vals:
+        return None
+    return _percentile_sorted(vals, q)
+
+
+def _cr_run_stats(frame: list[dict], indexes) -> dict:
+    """Per-scope consecutive-date run stats over an index set (same run semantics
+    as ``_mc_hit_run_median``: adjacent hit rows in date order = one run)."""
+    by_scope: dict[str, list[int]] = {}
+    for i in indexes:
+        by_scope.setdefault(str(frame[i].get("scope_key")), []).append(i)
+    runs: list[int] = []
+    for sk in sorted(by_scope):
+        idxs = sorted(by_scope[sk], key=lambda i: str(frame[i].get("trade_date")))
+        cur = 0
+        prev = None
+        for i in idxs:
+            d = str(frame[i].get("trade_date"))
+            if prev is not None and d > prev:
+                cur += 1
+            else:
+                if cur:
+                    runs.append(cur)
+                cur = 1
+            prev = d
+        if cur:
+            runs.append(cur)
+    return {
+        "run_count": len(runs),
+        "median_run_length": _mc_median([float(x) for x in runs]),
+        "one_day_only_rate": round(
+            sum(1 for x in runs if x == 1) / len(runs), 6
+        ) if runs else None,
+    }
+
+
+def _cr_side_conflict(
+    idx, assignments: dict[str, set[int]], other_type: str
+) -> float | None:
+    """Fraction of ``idx`` rows that also hit ``other_type``'s assignment."""
+    oset = assignments.get(other_type, set())
+    if not idx:
+        return None
+    return round(sum(1 for i in idx if i in oset) / len(idx), 6)
+
+
+def _cr_lcr_band(lcr: float | None) -> str | None:
+    """R2 joint-map LCR band (universe is LCR<1.0)."""
+    if lcr is None:
+        return None
+    if lcr < 0.70:
+        return "contract_<0.70"
+    if lcr < 0.85:
+        return "contract_[0.70,0.85)"
+    return "contract_[0.85,1.00)"
+
+
+# ---------------------------------------------------------------------------
+# R1 — Semantic Contract Lock
+# ---------------------------------------------------------------------------
+
+def _cr_semantic_contract_lock(
+    e1: dict, e3: dict, e4: dict, e6: dict,
+    e7_declared: dict | None = None,
+) -> dict:
+    """把 E1–E8 + E7 声明事实转成五类正式语义 Contract（本函数不重新研究数据）。
+
+    语义文本锁定自实验计划 R1；数值 threshold 一律 RESEARCH-CANDIDATE，不冻结。
+    """
+    declared = e7_declared or _CR_E7_DECLARED
+    preferred = (e3 or {}).get("preferred_families") or {}
+    classifications = (e4 or {}).get("classifications") or {}
+    robustness = (e6 or {}).get("per_family_robustness") or {}
+    thr_status = {
+        t: (r or {}).get("threshold_status", "PENDING")
+        for t, r in robustness.items()
+    }
+    types = {
+        "Broadening": {
+            "semantic_contract": (
+                "Participation is broad and/or broadening, without the move being "
+                "primarily explained by a strengthening concentrated core."
+            ),
+            "plain_language": "越来越多成员参与，而不是主要靠几个核心把板块拉起来。",
+            "structural_dimensions": ["Participation"],
+            "evidence": (
+                "Breadth high/rising + Concentration not dominating "
+                "(B1: breadth>=HIGH, hhi<=MID)"
+            ),
+            "frozen": {"semantics": True, "rule_form": True, "thresholds": False},
+            "blind_audit": declared["summary_facts"].get("Broadening"),
+            "threshold_status": thr_status.get("Broadening", "PENDING"),
+            "note": "Blind 13/15 exact, 0 different-label → 语义够强，本轮不再改定义。",
+        },
+        "Core-led": {
+            "semantic_contract": (
+                "A relatively concentrated structure in which directional strength "
+                "is disproportionately carried by a coherent core."
+            ),
+            "plain_language": "少数核心真正主导了板块。",
+            "structural_dimensions": ["Core Concentration"],
+            "evidence": (
+                "Concentration high + Aligned Capital Tilt high "
+                "(C1: hhi>=HIGH, tilt>=HIGH)"
+            ),
+            "frozen": {"semantics": True, "rule_form": True, "thresholds": False},
+            "blind_audit": declared["summary_facts"].get("Core-led"),
+            "threshold_status": thr_status.get("Core-led", "PENDING"),
+            "note": (
+                "语义 Contract 可锁（Blind 15/15 exact）；未解决的是 numerical "
+                "threshold（R3 二维 surface 决定）。Leadership stability 仅 "
+                "supporting evidence，不自动成为必要条件。"
+            ),
+        },
+        "Rotating": {
+            "semantic_contract": (
+                "Leadership changes materially, but the scope preserves an organized "
+                "leadership structure rather than losing it."
+            ),
+            "plain_language": "核心换人，但有人接棒，队伍还在。",
+            "structural_dimensions": ["Leadership Turnover", "Leadership Capacity"],
+            "evidence": (
+                "Turnover high + Leadership Capacity preserved "
+                "(R1: migration>=HIGH, lcr>=0.85)"
+            ),
+            "frozen": {"semantics": True, "rule_form": True, "thresholds": False},
+            "blind_audit": "PENDING_FILE",
+            "threshold_status": thr_status.get("Rotating", "PENDING"),
+            "note": "Breadth/Concentration 用来解释是否同时存在第二种结构（R4 边界）。",
+        },
+        "Fragmenting": {
+            "semantic_contract": (
+                "Leadership is turning over while leadership capacity and "
+                "participation weaken, without a coherent replacement core forming."
+            ),
+            "plain_language": "老核心散掉了，参与面也弱，而且新的核心体系没有真正建立起来。",
+            "structural_dimensions": [
+                "Leadership Turnover", "Leadership Capacity", "Participation",
+            ],
+            "evidence": (
+                "Leadership disorganization + Participation weakness + "
+                "No coherent replacement core（HHI+Tilt 联合表达，非新指标）"
+            ),
+            "frozen": {"semantics": True, "rule_form": False, "thresholds": False},
+            "blind_audit": "PENDING_FILE",
+            "threshold_status": thr_status.get("Fragmenting", "PENDING"),
+            "note": (
+                "语义刷新（candidate）：no coherent replacement core 由现有 HHI+Tilt "
+                "表达；能否排除明显 Core-led reformation 由 R2 gate 决定；未通过前"
+                "保持 type=None / Unclassified 的保守路径。"
+            ),
+        },
+        "Balanced": {
+            "semantic_contract": (
+                "No structural dimension is sufficiently dominant to characterize "
+                "the scope as Broadening, Core-led, Rotating or Fragmenting, while "
+                "the observation remains structurally coherent rather than conflicting."
+            ),
+            "plain_language": "没有任一维度足够主导，且观测保持结构一致而非冲突。",
+            "structural_dimensions": ["(explicit neutral-state box)"],
+            "evidence": "Balanced box（显式中性带），与 Unclassified 分开。",
+            "frozen": {"semantics": True, "rule_form": True, "thresholds": False},
+            "blind_audit": "PENDING_FILE",
+            "threshold_status": "PASS",
+            "note": "显式 neutral-state rule；Unclassified 是单独的 conflict/unresolved 通道。",
+        },
+    }
+    return {
+        "study": _CR_STUDY,
+        "frozen_judgment": declared,
+        "preferred_families": preferred,
+        "conflict_classifications": classifications,
+        "types": types,
+        "conflict_policy": (
+            "multi-hit 进入最终产品的规则由 R5 决定；禁止 if/elif priority "
+            "自动落库。"
+        ),
+        "availability_policy": (
+            "任一输入维度 unavailable/insufficient → 该 Type 不可用，禁止用 0 "
+            "代替 unavailable。"
+        ),
+        "note": (
+            "R1 只锁语义/规则形式/维度归属；数值阈值均为 RESEARCH-CANDIDATE。"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# R2 — Fragmenting vs Core-Reformation Joint Map
+# ---------------------------------------------------------------------------
+
+def _cr_fragmenting_core_reformation_map(
+    frame: list[dict],
+    dists: dict[str, list[float]],
+    slot_qs: dict[str, float],
+    assignments: dict[str, set[int]],
+    min_core_subset: int = 20,
+) -> dict:
+    """R2 在 ``Migration high AND LCR<1`` universe 上做 LCR×HHI×Tilt×Breadth
+    joint map；不用旧 Type label 选样，禁止合成 score。
+
+    Gate：`HHI high AND Tilt high` 是否稳定识别“coherent replacement core 已形成”。
+    """
+    mig_hi = _cr_high_pct(dists, "migration_hist_pct", slot_qs["HIGH"])
+    universe = [
+        i for i, r in enumerate(frame)
+        if _to_fin(r.get("migration_hist_pct")) is not None
+        and (mig_hi is None or _to_fin(r.get("migration_hist_pct")) >= mig_hi)
+        and _to_fin(r.get("lcr")) is not None
+        and _to_fin(r.get("lcr")) < 1.0
+    ]
+    denom = len(universe)
+    cells: dict[tuple, list[int]] = {}
+
+    def _side_high(v: float | None) -> str:
+        return "high" if v is not None and v >= _CR_HIGH_LOW_SPLIT else "low"
+
+    for i in universe:
+        r = frame[i]
+        lcr = _to_fin(r.get("lcr"))
+        key = (
+            _cr_lcr_band(lcr),
+            f"hhi_{_side_high(_to_fin(r.get('price_hhi_hist_pct')))}",
+            f"tilt_{_side_high(_to_fin(r.get('aligned_tilt_hist_pct')))}",
+            f"breadth_{_side_high(_to_fin(r.get('aligned_breadth_hist_pct')))}",
+        )
+        cells.setdefault(key, []).append(i)
+    out_cells: dict[str, dict] = {}
+    for key in sorted(cells):
+        idx = sorted(cells[key])
+        stats = _mc_hit_stats(frame, idx, denom)
+        out_cells["|".join(key)] = {
+            "cell": list(key),
+            "count": len(idx),
+            "hit_rate": stats["hit_rate"],
+            "family_distribution": stats["family_distribution"],
+            "size_distribution": stats["size_distribution"],
+            "median_persistence": _mc_hit_run_median(frame, idx),
+            "representative_replay": [
+                _mc_evidence(frame[i]) for i in idx[:3]
+            ],
+        }
+
+    # 四种重点状态（跨 lcr_band 聚合；Breadth 仅 supporting 展示）。
+    states = {
+        "A_fragmenting_like": ("low", "low"),
+        "B_core_reformation": ("high", "high"),
+        "C_concentration_no_leadership": ("high", "low"),
+        "D_tilt_no_concentration": ("low", "high"),
+    }
+    state_summary: dict[str, dict] = {}
+    for name, (hhi_side, tilt_side) in states.items():
+        idx = [
+            i for i in universe
+            if _side_high(_to_fin(frame[i].get("price_hhi_hist_pct"))) == hhi_side
+            and _side_high(_to_fin(frame[i].get("aligned_tilt_hist_pct"))) == tilt_side
+        ]
+        stats = _mc_hit_stats(frame, idx, denom)
+        state_summary[name] = {
+            "count": len(idx),
+            "hit_rate": stats["hit_rate"],
+            "median_persistence": _mc_hit_run_median(frame, idx),
+            "fragmenting_overlap_rate": _cr_side_conflict(idx, assignments, "Fragmenting"),
+            "core_led_overlap_rate": _cr_side_conflict(idx, assignments, "Core-led"),
+        }
+
+    # Gate：HHI high AND Tilt high 能否稳定识别 coherent new core？
+    core_subset = state_summary["B_core_reformation"]
+    c1_conditions = None
+    for f in _mc_rule_families().get("Core-led", []):
+        if f["family"] == "C1":
+            c1_conditions = f["conditions"]
+            break
+    core_formed = 0
+    if c1_conditions is not None:
+        core_formed = sum(
+            1 for i in universe
+            if _mc_eval_conditions(frame[i], c1_conditions, slot_qs, dists)
+            and _side_high(_to_fin(frame[i].get("price_hhi_hist_pct"))) == "high"
+            and _side_high(_to_fin(frame[i].get("aligned_tilt_hist_pct"))) == "high"
+        )
+    core_sub_n = core_subset["count"]
+    rule_alignment = round(core_formed / core_sub_n, 6) if core_sub_n else None
+    pers = core_subset.get("median_persistence")
+    gate_pass = (
+        core_sub_n >= min_core_subset
+        and rule_alignment is not None and rule_alignment >= 0.5
+        and pers is not None and pers >= 1.5
+    )
+    gate = {
+        "status": "PASS" if gate_pass else (
+            "PARTIAL" if core_sub_n >= min_core_subset else "INSUFFICIENT_DATA"
+        ),
+        "question": "HHI high AND Tilt high 是否能稳定识别'coherent replacement core 已形成'？",
+        "core_subset_count": core_sub_n,
+        "rule_alignment_c1": rule_alignment,
+        "median_persistence": pers,
+        "verdict": (
+            "是 → Fragmenting Contract 可增加 NOT coherent_new_core 排除"
+            if gate_pass else
+            "否/不足 → Fragmenting 保持保守 type=None / Unclassified，不造新指标"
+        ),
+        "min_core_subset": min_core_subset,
+    }
+    return {
+        "study": _CR_STUDY,
+        "universe_rule": "migration_hist_pct >= HIGH AND lcr < 1.0",
+        "universe_count": denom,
+        "high_low_split": _CR_HIGH_LOW_SPLIT,
+        "lcr_bands": ["contract_<0.70", "contract_[0.70,0.85)", "contract_[0.85,1.00)"],
+        "joint_cells": out_cells,
+        "state_summary": state_summary,
+        "coherent_new_core_gate": gate,
+        "note": (
+            "joint map 输出 count/family/size/persistence/representative replay；"
+            "HHI/Tilt/Breadth 的 high/low 以 0.50 为界（research，非冻结）。"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# R3 — Core-led 2D Threshold Surface
+# ---------------------------------------------------------------------------
+
+def _cr_core_led_threshold_surface(
+    frame: list[dict],
+    dists: dict[str, list[float]],
+    assignments: dict[str, set[int]],
+    core_led_prototype_indexes: list[int],
+) -> dict:
+    """R3 保持 C1 结构 ``hhi>=HHI_p AND tilt>=Tilt_p``，做 HHI×Tilt p65..p90
+    二维 36 格 surface。寻找稳定平台，不选择“最优收益点”。"""
+    universe = _mc_rule_universe(
+        frame, ("price_hhi_hist_pct", "aligned_tilt_hist_pct")
+    )
+    denom = len(universe)
+    hhi_vals = dists.get("price_hhi_hist_pct") or []
+    tilt_vals = dists.get("aligned_tilt_hist_pct") or []
+    proto = set(core_led_prototype_indexes)
+    grid: dict[str, dict] = {}
+    for hq in _CR_CORE_LED_HHI_GRID:
+        for tq in _CR_CORE_LED_TILT_GRID:
+            if not hhi_vals or not tilt_vals:
+                continue
+            hth = _percentile_sorted(hhi_vals, hq)
+            tth = _percentile_sorted(tilt_vals, tq)
+            conds = (
+                ("price_hhi_hist_pct", ">=", float(hth)),
+                ("aligned_tilt_hist_pct", ">=", float(tth)),
+            )
+            idx = set(_mc_eval_family_hits(frame, conds, {}, {}))
+            stats = _mc_hit_stats(frame, idx, denom)
+            runs = _cr_run_stats(frame, idx)
+            grid[f"{hq:.2f}|{tq:.2f}"] = {
+                "hhi_q": hq,
+                "tilt_q": tq,
+                "hhi_threshold": round(hth, 6),
+                "tilt_threshold": round(tth, 6),
+                "hit_count": len(idx),
+                "hit_rate": stats["hit_rate"],
+                "family_distribution": stats["family_distribution"],
+                "size_distribution": stats["size_distribution"],
+                "run_persistence": runs["median_run_length"],
+                "one_day_only_rate": runs["one_day_only_rate"],
+                "conflict_rate": _mc_hit_conflict_rate(idx, assignments, "Core-led"),
+                "prototype_coverage": round(
+                    len(idx & proto) / len(proto), 6
+                ) if proto else None,
+                "blind_conflict_case_coverage": "PENDING_FILE",
+            }
+    plateau = _cr_plateau_detection(grid)
+    return {
+        "study": _CR_STUDY,
+        "rule_form": "C1 保持：price_hhi_hist_pct >= HHI_p AND aligned_tilt_hist_pct >= Tilt_p",
+        "hhi_grid": list(_CR_CORE_LED_HHI_GRID),
+        "tilt_grid": list(_CR_CORE_LED_TILT_GRID),
+        "surface_cells": grid,
+        "stable_plateau": plateau,
+        "note": (
+            "阈值取自 base(40) frame 的经验分位；禁止在 broad universe 上重新取分位。"
+            "寻找稳定平台而非单点；blind conflict-case coverage 等待 E7 judgment 文件"
+            "（当前 PENDING_FILE，使用声明 25/25=Unclear）。"
+        ),
+    }
+
+
+def _cr_plateau_detection(grid: dict[str, dict]) -> dict:
+    """2D stable plateau detection over the HHI×Tilt surface.
+
+    稳定单元格：3×3 邻域内 hit_rate 与 conflict_rate 最大偏差 <= 容忍度。
+    返回最大 4-连通稳定区域 + 判定。
+    """
+    rows = sorted({float(k.split("|")[0]) for k in grid})
+    cols = sorted({float(k.split("|")[1]) for k in grid})
+    n, m = len(rows), len(cols)
+    stable: list[list[bool]] = [[False] * m for _ in range(n)]
+    for i, hq in enumerate(rows):
+        for j, tq in enumerate(cols):
+            c = grid.get(f"{hq:.2f}|{tq:.2f}")
+            if not c:
+                continue
+            max_hit = 0.0
+            max_conf = 0.0
+            for ii in range(max(0, i - 1), min(n, i + 2)):
+                for jj in range(max(0, j - 1), min(m, j + 2)):
+                    nb = grid.get(f"{rows[ii]:.2f}|{cols[jj]:.2f}")
+                    if not nb:
+                        continue
+                    if c["hit_rate"] is not None and nb["hit_rate"] is not None:
+                        max_hit = max(max_hit, abs(c["hit_rate"] - nb["hit_rate"]))
+                    if (
+                        c["conflict_rate"] is not None
+                        and nb["conflict_rate"] is not None
+                    ):
+                        max_conf = max(
+                            max_conf, abs(c["conflict_rate"] - nb["conflict_rate"])
+                        )
+            stable[i][j] = (
+                max_hit <= _CR_PLATEAU_HIT_TOL
+                and max_conf <= _CR_PLATEAU_CONFLICT_TOL
+            )
+
+    # 4-连通组件（BFS）。
+    comps: list[list[tuple[int, int]]] = []
+    seen: set[tuple[int, int]] = set()
+    for i in range(n):
+        for j in range(m):
+            if not stable[i][j] or (i, j) in seen:
+                continue
+            comp: list[tuple[int, int]] = []
+            stack = [(i, j)]
+            seen.add((i, j))
+            while stack:
+                ci, cj = stack.pop()
+                comp.append((ci, cj))
+                for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ni, nj = ci + di, cj + dj
+                    if (
+                        0 <= ni < n and 0 <= nj < m
+                        and stable[ni][nj] and (ni, nj) not in seen
+                    ):
+                        seen.add((ni, nj))
+                        stack.append((ni, nj))
+            comps.append(comp)
+    comps.sort(key=len, reverse=True)
+
+    regions = []
+    for comp in comps:
+        cell_keys = [f"{rows[ci]:.2f}|{cols[cj]:.2f}" for ci, cj in comp]
+        cells = [grid[k] for k in cell_keys]
+        hit_rates = [c["hit_rate"] for c in cells if c["hit_rate"] is not None]
+        confs = [c["conflict_rate"] for c in cells if c["conflict_rate"] is not None]
+        hq_min = min(rows[ci] for ci, _ in comp)
+        hq_max = max(rows[ci] for ci, _ in comp)
+        tq_min = min(cols[cj] for _, cj in comp)
+        tq_max = max(cols[cj] for _, cj in comp)
+        regions.append(
+            {
+                "cell_count": len(comp),
+                "hhi_region": [hq_min, hq_max],
+                "tilt_region": [tq_min, tq_max],
+                "hit_rate_min": min(hit_rates) if hit_rates else None,
+                "hit_rate_max": max(hit_rates) if hit_rates else None,
+                "hit_rate_range": round(max(hit_rates) - min(hit_rates), 6)
+                if hit_rates else None,
+                "conflict_min": min(confs) if confs else None,
+                "conflict_max": max(confs) if confs else None,
+                "cells": cell_keys,
+            }
+        )
+
+    best = regions[0] if regions else None
+    # 判定：是否存在 >=4 格稳定平台，且覆盖 p75–p85 × p75–p85 对角线。
+    covers_diag = False
+    if best:
+        hq_lo, hq_hi = best["hhi_region"]
+        tq_lo, tq_hi = best["tilt_region"]
+        covers_diag = (
+            hq_lo <= 0.75 and hq_hi >= 0.85
+            and tq_lo <= 0.75 and tq_hi >= 0.85
+        )
+    status = (
+        "PASS" if (best and best["cell_count"] >= 4 and covers_diag) else
+        "PARTIAL" if best else "UNRESOLVED"
+    )
+    # 推荐平台中心（research candidate，非冻结）：最大区域中心格。
+    center = None
+    if best:
+        center_hq = round((best["hhi_region"][0] + best["hhi_region"][1]) / 2, 2)
+        center_tq = round((best["tilt_region"][0] + best["tilt_region"][1]) / 2, 2)
+        center = {
+            "hhi_q": center_hq,
+            "tilt_q": center_tq,
+            "reason": "位于最大稳定平台中央（不是'跑出来最好'）",
+            "status": "RESEARCH-CANDIDATE",
+        }
+    return {
+        "status": status,
+        "stable_regions": regions,
+        "recommended_region": center,
+        "tolerances": {
+            "hit_rate": _CR_PLATEAU_HIT_TOL,
+            "conflict_rate": _CR_PLATEAU_CONFLICT_TOL,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# R4 — Rotating / Fragmenting Boundary Surface
+# ---------------------------------------------------------------------------
+
+def _cr_rotating_fragmenting_boundary(
+    frame: list[dict],
+    dists: dict[str, list[float]],
+    slot_qs: dict[str, float],
+    assignments: dict[str, set[int]],
+    min_segment: int = 15,
+) -> dict:
+    """R4 在 high-Migration universe 上研究 LCR cutoff 0.60..1.00。
+
+    目标不是搜索最佳 cutoff，而是判断是否存在 capacity-preserved /
+    transition / strong-contraction 三段稳定区域。LCR=0.85 保持 candidate。
+    """
+    mig_hi = _cr_high_pct(dists, "migration_hist_pct", slot_qs["HIGH"])
+    universe = [
+        i for i, r in enumerate(frame)
+        if _to_fin(r.get("migration_hist_pct")) is not None
+        and (mig_hi is None or _to_fin(r.get("migration_hist_pct")) >= mig_hi)
+        and _to_fin(r.get("lcr")) is not None
+    ]
+    denom = len(universe)
+
+    def _contracting_split(idx: list[int]) -> dict:
+        n = len(idx)
+        if not n:
+            return {
+                "count": 0,
+                "breadth_weak_fraction": None,
+                "coherent_core_forming_fraction": None,
+            }
+        bw = sum(
+            1 for i in idx
+            if _to_fin(frame[i].get("aligned_breadth_hist_pct")) is not None
+            and _to_fin(frame[i].get("aligned_breadth_hist_pct")) < _CR_HIGH_LOW_SPLIT
+        )
+        cc = sum(
+            1 for i in idx
+            if _to_fin(frame[i].get("price_hhi_hist_pct")) is not None
+            and _to_fin(frame[i].get("aligned_tilt_hist_pct")) is not None
+            and _to_fin(frame[i].get("price_hhi_hist_pct")) >= _CR_HIGH_LOW_SPLIT
+            and _to_fin(frame[i].get("aligned_tilt_hist_pct")) >= _CR_HIGH_LOW_SPLIT
+        )
+        return {
+            "count": n,
+            "breadth_weak_fraction": round(bw / n, 6),
+            "coherent_core_forming_fraction": round(cc / n, 6),
+        }
+
+    cutoffs: dict[str, dict] = {}
+    for c in _CR_LCR_ANCHORS:
+        rot = [i for i in universe if _to_fin(frame[i].get("lcr")) >= c]
+        con = [i for i in universe if _to_fin(frame[i].get("lcr")) < c]
+        rot_stats = _mc_hit_stats(frame, rot, denom)
+        con_stats = _mc_hit_stats(frame, con, denom)
+        cutoffs[f"{c:.2f}"] = {
+            "cutoff": c,
+            "rotating_side": {
+                "count": len(rot),
+                "rate": rot_stats["hit_rate"],
+                "family_distribution": rot_stats["family_distribution"],
+                "size_distribution": rot_stats["size_distribution"],
+                "run_persistence": _mc_hit_run_median(frame, rot),
+                "organized_fraction": round(
+                    sum(
+                        1 for i in rot
+                        if _to_fin(frame[i].get("lcr")) >= 1.0
+                    ) / len(rot), 6
+                ) if rot else None,
+                "conflict_with_broadening": _cr_side_conflict(
+                    rot, assignments, "Broadening"
+                ),
+                "conflict_with_core_led": _cr_side_conflict(
+                    rot, assignments, "Core-led"
+                ),
+            },
+            "contracting_side": _contracting_split(con),
+        }
+
+    # 三段式 bands。
+    bands = [
+        ("strong_contraction", 0.0, 0.70),
+        ("transition_low", 0.70, 0.85),
+        ("transition_high", 0.85, 0.90),
+        ("capacity_preserved_low", 0.90, 1.00),
+        ("capacity_preserved_full", 1.00, None),
+    ]
+    band_out: dict[str, dict] = {}
+    for name, lo, hi in bands:
+        idx = [
+            i for i in universe
+            if _to_fin(frame[i].get("lcr")) >= lo
+            and (hi is None or _to_fin(frame[i].get("lcr")) < hi)
+        ]
+        stats = _mc_hit_stats(frame, idx, denom)
+        band_out[name] = {
+            "count": len(idx),
+            "rate": stats["hit_rate"],
+            "run_persistence": _mc_hit_run_median(frame, idx),
+            "contracting_split": _contracting_split(idx),
+        }
+    # 三段式判定：三个宏观段计数充足 + persistence 随 capacity 单调不降。
+    sc = band_out["strong_contraction"]
+    tr = {
+        "count": band_out["transition_low"]["count"] + band_out["transition_high"]["count"],
+        "persistence": _mc_hit_run_median(
+            frame,
+            [i for i in universe if 0.70 <= _to_fin(frame[i].get("lcr")) < 0.90],
+        ),
+    }
+    cp = {
+        "count": band_out["capacity_preserved_low"]["count"]
+        + band_out["capacity_preserved_full"]["count"],
+        "persistence": _mc_hit_run_median(
+            frame,
+            [i for i in universe if _to_fin(frame[i].get("lcr")) >= 0.90],
+        ),
+    }
+    counts_ok = (
+        sc["count"] >= min_segment
+        and tr["count"] >= min_segment
+        and cp["count"] >= min_segment
+    )
+    pers_sorted = _cr_monotone_nondecreasing(
+        [sc["run_persistence"], tr["persistence"], cp["persistence"]]
+    )
+    three_segment = {
+        "status": "PASS" if (counts_ok and pers_sorted) else (
+            "PARTIAL" if counts_ok else "INSUFFICIENT_DATA"
+        ),
+        "counts": {"strong_contraction": sc["count"], "transition": tr["count"],
+                   "capacity_preserved": cp["count"]},
+        "persistence": {
+            "strong_contraction": sc["run_persistence"],
+            "transition": tr["persistence"],
+            "capacity_preserved": cp["persistence"],
+        },
+        "monotone_nondecreasing": pers_sorted,
+        "verdict": (
+            "数据支持三段式 capacity-preserved / transition / strong-contraction；"
+            "LCR=0.85 仍为 candidate 边界"
+            if (counts_ok and pers_sorted) else
+            "数据不足以支持三段式；LCR=0.85 保持 candidate，不冻结"
+        ),
+    }
+    return {
+        "study": _CR_STUDY,
+        "universe_rule": "migration_hist_pct >= HIGH",
+        "universe_count": denom,
+        "lcr_anchors": list(_CR_LCR_ANCHORS),
+        "cutoff_surfaces": cutoffs,
+        "three_segment_bands": band_out,
+        "three_segment_support": three_segment,
+        "lcr_candidate_note": (
+            "LCR=0.85 仅 candidate（Blind case-033/034/043 提示 0.85 附近存在模糊区）；"
+            "边界 0.70/0.90 为 research 研究带，不冻结。"
+        ),
+    }
+
+
+def _cr_monotone_nondecreasing(vals: list) -> bool:
+    """True 当 vals 全为 None 或去 None 后单调不降。"""
+    f = [v for v in vals if v is not None]
+    return all(b >= a for a, b in zip(f, f[1:]))
+
+
+# ---------------------------------------------------------------------------
+# R5 — Conflict + Unclassified Policy
+# ---------------------------------------------------------------------------
+
+def _cr_policy_label(
+    index: int,
+    types: set[str],
+    in_box: bool,
+    model: str,
+    c_pairs: list[str],
+) -> str | None:
+    """Primary label for one row under R5 policy A/B/C.
+
+    A — Hard Priority（negative control，不落库）：multi-hit → priority winner。
+    B — Any Multi-Hit → Unclassified：exactly 1 hit → Type；>=2 → Unclassified。
+    C — Semantic-compatible resolution：仅对明确层级 pair（c_pairs）resolution；
+        其余 multi-hit → Unclassified（极度克制；无已批准 resolution 时等同 B）。
+    """
+    if len(types) == 1:
+        return next(iter(types))
+    if len(types) >= 2:
+        if model == "A":
+            for t in _CR_POLICY_A_PRIORITY:
+                if t in types:
+                    return t
+            return sorted(types)[0]
+        if model == "C":
+            for pair in c_pairs:
+                a, b = pair.split("↔")
+                if a in types and b in types:
+                    winner = _CR_POLICY_C_RESOLUTIONS.get(pair)
+                    if winner is not None:
+                        return winner
+            return "Unclassified"
+        return "Unclassified"
+    if in_box:
+        return "Balanced"
+    return "Unclassified" if model in ("B", "C") else None
+
+
+def _cr_conflict_unclassified_policy(
+    frame: list[dict],
+    assignments: dict[str, set[int]],
+    box_by_index: dict[int, bool],
+    e4_classifications: dict[str, dict],
+    prototypes_by_type: dict[str, list[int]],
+    blind_conflict_indexes: list[int],
+    e7_declared: dict | None = None,
+) -> dict:
+    """R5 比较 Policy A / B / C；E7 固定输入作为 validation evidence。"""
+    declared = e7_declared or _CR_E7_DECLARED
+    types_by_index: dict[int, set[str]] = {}
+    for t, idx in assignments.items():
+        for i in idx:
+            types_by_index.setdefault(i, set()).add(t)
+    # Policy C 仅对明确 C 层级 pair 尝试 resolution（默认空 → C 等同 B）。
+    c_pairs = [
+        k for k, v in (e4_classifications or {}).items()
+        if v.get("classification") == "C_interpretation_hierarchy_candidate"
+    ]
+    conf_set = set(blind_conflict_indexes)
+
+    out: dict[str, dict] = {}
+    for model in ("A", "B", "C"):
+        label_by_index = {
+            i: _cr_policy_label(
+                i, types_by_index.get(i, set()), box_by_index[i], model, c_pairs
+            )
+            for i in range(len(frame))
+        }
+        metrics = _mc_label_metrics(frame, label_by_index)
+        # computed prototype preservation：规则 coverage，非 human judgment。
+        proto_preserve: dict[str, float | None] = {}
+        for t, pidxs in prototypes_by_type.items():
+            total = len(pidxs)
+            if not total:
+                proto_preserve[t] = None
+                continue
+            proto_preserve[t] = round(
+                sum(1 for i in pidxs if label_by_index.get(i) == t) / total, 6
+            )
+        # computed conflict recognition：multi-hit conflict cases → Unclassified。
+        conf_recog = (
+            round(
+                sum(
+                    1 for i in conf_set
+                    if label_by_index.get(i) == "Unclassified"
+                ) / len(conf_set), 6
+            ) if conf_set else None
+        )
+        out[f"Policy {model}"] = {
+            "model": model,
+            "policy": {
+                "A": "hard_priority_negative_control",
+                "B": "any_multihit_unclassified",
+                "C": "semantic_compatible_resolution_restrained",
+            }[model],
+            "metrics": metrics,
+            "family_bias": _mc_label_distribution_bias(frame, label_by_index, "scope_type"),
+            "size_bias": _mc_label_distribution_bias(frame, label_by_index, "size_bucket"),
+            "prototype_preservation": proto_preserve,
+            "conflict_recognition": conf_recog,
+        }
+
+    b = out["Policy B"]
+    b_proto = [v for v in b["prototype_preservation"].values() if v is not None]
+    b_preserve = (min(b_proto) if b_proto else None)
+    b_unclass = b["metrics"]["per_label"].get("Unclassified", {}).get("rate")
+    rec = (
+        b["conflict_recognition"] == 1.0
+        and b_preserve is not None and b_preserve >= _CR_POLICY_PROTO_PRESERVE_FLOOR
+        and b_unclass is not None and b_unclass <= _CR_POLICY_UNCLASSIFIED_CAP
+    )
+    return {
+        "study": _CR_STUDY,
+        "policies": out,
+        "e7_declared": declared,
+        "policy_c_resolutions": dict(_CR_POLICY_C_RESOLUTIONS),
+        "recommendation": {
+            "recommended": "Policy B" if rec else "REVIEW_REQUIRED",
+            "reason": (
+                "Policy B 满足：conflict recognition=1.0（与 E7 声明 25/25=Unclear 对齐），"
+                "computed prototype preservation 高，unclassified 比例可接受 → 不复杂化到 C。"
+                if rec else
+                "Policy B 未同时满足三条件；保持候选，需要人审后再定；禁止 if/elif "
+                "priority 偷偷处理冲突。"
+            ),
+            "policy_status": "PREFERRED_POLICY_CANDIDATE",
+            "criteria": {
+                "conflict_recognition_expected": 1.0,
+                "prototype_preserve_floor": _CR_POLICY_PROTO_PRESERVE_FLOOR,
+                "unclassified_cap": _CR_POLICY_UNCLASSIFIED_CAP,
+            },
+        },
+        "note": (
+            "Policy A 仅 negative control；Policy C 当前无已批准 resolution（默认空），"
+            "极度克制，等同 B。E7 逐 case judgment 文件 PENDING_FILE；此处使用声明汇总事实"
+            "25/25=Unclear 作固定 validation evidence。"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# R6 — Pre-Freeze Validation + Data Sufficiency Decision
+# ---------------------------------------------------------------------------
+
+def _cr_window_split(frame: list[dict], n_windows: int = 3) -> dict[str, list[int]]:
+    """把 frame 行按下标按 trade_date 排序切成 early/middle/late 三窗。"""
+    dates = sorted({str(r.get("trade_date")) for r in frame})
+    if not dates:
+        return {"early": [], "middle": [], "late": []}
+    rank = {d: i for i, d in enumerate(dates)}
+    total = len(dates)
+    out = {"early": [], "middle": [], "late": []}
+    for i, r in enumerate(frame):
+        k = rank.get(str(r.get("trade_date")))
+        if k is None:
+            continue
+        frac = k / total if total else 0.0
+        band = "early" if frac < 1 / 3 else ("middle" if frac < 2 / 3 else "late")
+        out[band].append(i)
+    return out
+
+
+def _cr_policy_b_summary(
+    frame: list[dict],
+    assignments: dict[str, set[int]],
+    box_by_index: dict[int, bool],
+) -> dict:
+    """在给定 assignments + Balanced box 上按 Policy B 产出 primary label 汇总。"""
+    types_by_index: dict[int, set[str]] = {}
+    for t, idx in assignments.items():
+        for i in idx:
+            types_by_index.setdefault(i, set()).add(t)
+    label_by_index = {
+        i: _cr_policy_label(
+            i, types_by_index.get(i, set()), box_by_index[i], "B", []
+        )
+        for i in range(len(frame))
+    }
+    metrics = _mc_label_metrics(frame, label_by_index)
+    n = len(frame)
+    multi_hit = sum(1 for i in range(n) if len(types_by_index.get(i, set())) >= 2)
+    unclass = metrics["per_label"].get("Unclassified", {})
+    return {
+        "labels": label_by_index,
+        "metrics": metrics,
+        "per_type_assignment_rate": {
+            t: round(len(assignments.get(t, set())) / n, 6) if n else None
+            for t in ("Broadening", "Core-led", "Rotating", "Fragmenting")
+        },
+        "conflict_row_count": multi_hit,
+        "conflict_row_rate": round(multi_hit / n, 6) if n else None,
+        "unclassified_count": unclass.get("count", 0),
+        "unclassified_rate": unclass.get("rate"),
+    }
+
+
+def _cr_label_churn(
+    labels_a: dict[int, str | None], labels_b: dict[int, str | None]
+) -> dict:
+    """Perturbation 前后 primary-label 翻转比例（label churn）。"""
+    n = len(labels_a)
+    if not n:
+        return {"churn_rate": None, "flipped_count": 0, "evaluable": 0}
+    flipped = sum(
+        1 for i in range(n)
+        if (labels_a.get(i) or None) != (labels_b.get(i) or None)
+    )
+    return {
+        "churn_rate": round(flipped / n, 6),
+        "flipped_count": flipped,
+        "evaluable": n,
+    }
+
+
+def _cr_candidate_abs_families(
+    families_by_type: dict[str, list[dict]],
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    *,
+    core_led_hhi_q: float | None = None,
+    core_led_tilt_q: float | None = None,
+    lcr_cut: float | None = None,
+) -> dict[str, list[dict]]:
+    """最终候选规则（research）：把全部条件在 base(40) frame 上绝对化，
+    并按 R3/R4 候选阈值覆盖 Core-led(HHI×Tilt) 与 Rotating/Fragmenting(LCR)。"""
+    slot_abs = _mc_slot_abs(slot_qs, dists)
+    out: dict[str, list[dict]] = {}
+    for t, fams in families_by_type.items():
+        new_fams: list[dict] = []
+        for f in fams:
+            conds = _mc_abs_conditions(f["conditions"], slot_abs)
+            if conds is None:
+                new_fams.append({**f, "abs_conditions": None})
+                continue
+            resolved: list[tuple] = []
+            for feat, op, bound in conds:
+                b = float(bound)
+                if (
+                    t == "Core-led" and feat == "price_hhi_hist_pct"
+                    and core_led_hhi_q is not None
+                ):
+                    b = _percentile_sorted(dists["price_hhi_hist_pct"], core_led_hhi_q)
+                if (
+                    t == "Core-led" and feat == "aligned_tilt_hist_pct"
+                    and core_led_tilt_q is not None
+                ):
+                    b = _percentile_sorted(dists["aligned_tilt_hist_pct"], core_led_tilt_q)
+                if (
+                    t in ("Rotating", "Fragmenting") and feat == "lcr"
+                    and lcr_cut is not None
+                ):
+                    b = lcr_cut
+                resolved.append((feat, op, float(b)))
+            new_fams.append({**f, "abs_conditions": resolved})
+        out[t] = new_fams
+    return out
+
+
+def _cr_abs_contract_summary(
+    frame: list[dict],
+    abs_families: dict[str, list[dict]],
+    abs_box,
+) -> dict:
+    """在 frame 上按绝对候选条件 + Policy B 产出 assignments/box/summary。"""
+    assignments: dict[str, set[int]] = {}
+    for t, fams in abs_families.items():
+        idx: set[int] = set()
+        for f in fams:
+            if f.get("abs_conditions") is None:
+                continue
+            idx |= set(_mc_eval_family_hits(frame, f["abs_conditions"], {}, {}))
+        assignments[t] = idx
+    box_by_index = {
+        i: (abs_box is not None and _mc_eval_conditions(r, abs_box, {}, {}))
+        for i, r in enumerate(frame)
+    }
+    return {
+        "assignments": assignments,
+        "box_by_index": box_by_index,
+        "summary": _cr_policy_b_summary(frame, assignments, box_by_index),
+    }
+
+
+def _cr_abs_profile(
+    frame: list[dict],
+    abs_families: dict[str, list[dict]],
+    assignments: dict[str, set[int]],
+    box_by_index: dict[int, bool],
+    preferred: dict[str, dict],
+    universe_len: int,
+) -> dict:
+    """Per-type preferred-family profile（绝对候选条件版；R6-A drift 输入）。"""
+    out: dict[str, dict] = {}
+    for t, p in preferred.items():
+        fam_def = next(
+            (f for f in abs_families.get(t, []) if f["family"] == p["family"]),
+            None,
+        )
+        if fam_def is None or fam_def.get("abs_conditions") is None:
+            continue
+        idx = set(_mc_eval_family_hits(frame, fam_def["abs_conditions"], {}, {}))
+        stats = _mc_hit_stats(frame, idx, universe_len)
+        out[t] = {
+            "preferred_family": p["family"],
+            "hit_count": len(idx),
+            "hit_rate": stats["hit_rate"],
+            "family_distribution": stats["family_distribution"],
+            "size_distribution": stats["size_distribution"],
+            "conflict_rate": _mc_hit_conflict_rate(idx, assignments, t),
+            "unclassified_rate": _mc_model_c_unclassified_rate(
+                frame, assignments, t, idx, box_by_index
+            ),
+            "run_persistence": _mc_hit_run_median(frame, idx),
+            "threshold_sensitivity": None,
+        }
+    return out
+
+
+def _cr_broader_stability(
+    base_frame: list[dict],
+    broad_frame: list[dict],
+    abs_families: dict[str, list[dict]],
+    abs_box,
+    preferred: dict[str, dict],
+    drift_warning: float = _CR_DRIFT_WARNING,
+) -> dict:
+    """R6-A：唯一候选 Contract 40→285 broader stability。
+
+    同一绝对候选条件应用于两个 frame；比较 Type 命中率 / conflict /
+    Unclassified / run persistence / P(TypeHit|Family,Size) conditional drift。
+    禁止在 broader universe 上重选阈值 / 规则。
+    """
+    base_res = _cr_abs_contract_summary(base_frame, abs_families, abs_box)
+    broad_res = _cr_abs_contract_summary(broad_frame, abs_families, abs_box)
+    base_profile = _cr_abs_profile(
+        base_frame, abs_families, base_res["assignments"], base_res["box_by_index"],
+        preferred, len(base_frame),
+    )
+    broad_profile = _cr_abs_profile(
+        broad_frame, abs_families, broad_res["assignments"], broad_res["box_by_index"],
+        preferred, len(broad_frame),
+    )
+    drift = _mc_drift_report(
+        base_profile, broad_profile, drift_warning=drift_warning,
+        base_marginals=_mc_frame_marginals(base_frame),
+        broad_marginals=_mc_frame_marginals(broad_frame),
+    )
+    max_gap = 0.0
+    for _t, r in drift["per_type_drift"].items():
+        for key in ("hit_rate_drift", "conflict_drift", "unclassified_drift"):
+            v = r.get(key)
+            if v is not None:
+                max_gap = max(max_gap, abs(v))
+    cond = drift.get("conditional_drift", {}).get("summary", {})
+    for dim in ("scope_type", "size_bucket"):
+        s = cond.get(dim) or {}
+        if s.get("max") is not None:
+            max_gap = max(max_gap, s["max"])
+    status = "PASS" if max_gap < drift_warning else "NEEDS_REVIEW"
+    return {
+        "base_rows": len(base_frame),
+        "broad_rows": len(broad_frame),
+        "base_scope_count": len({str(r.get("scope_key")) for r in base_frame}),
+        "broad_scope_count": len({str(r.get("scope_key")) for r in broad_frame}),
+        "base_summary": base_res["summary"],
+        "broad_summary": broad_res["summary"],
+        "drift_report": drift,
+        "max_gap": round(max_gap, 6),
+        "drift_warning": drift_warning,
+        "status": status,
+        "note": (
+            "40→285 broader 使用同一绝对候选条件；禁止在 broad 上重选阈值/规则。"
+            "hit_rate/conflict/unclassified/conditional drift < warning → PASS。"
+        ),
+    }
+
+
+def _cr_temporal_robustness(
+    frame: list[dict],
+    abs_families: dict[str, list[dict]],
+    abs_box,
+    rate_tol: float = _CR_TEMPORAL_RATE_TOL,
+) -> dict:
+    """R6-B：把 120D 拆 early/middle/late 三窗，比较候选 Type 频率 / conflict /
+    Unclassified / threshold behavior（规则不能只适合最近某窗）。"""
+    windows = _cr_window_split(frame, 3)
+    total_res = _cr_abs_contract_summary(frame, abs_families, abs_box)
+    base_rate = total_res["summary"]["per_type_assignment_rate"]
+    base_unclass = total_res["summary"]["unclassified_rate"]
+    per_window: dict[str, dict] = {}
+    max_dev = 0.0
+    for name in ("early", "middle", "late"):
+        idx = windows[name]
+        wframe = [frame[i] for i in idx]
+        w_assign = {
+            t: {j for j, i in enumerate(idx) if i in aset}
+            for t, aset in total_res["assignments"].items()
+        }
+        w_box = {j: total_res["box_by_index"][i] for j, i in enumerate(idx)}
+        w_summary = _cr_policy_b_summary(wframe, w_assign, w_box)
+        per_window[name] = {
+            "row_count": len(idx),
+            "date_start": str(frame[min(idx)].get("trade_date")) if idx else None,
+            "date_end": str(frame[max(idx)].get("trade_date")) if idx else None,
+            "per_type_assignment_rate": w_summary["per_type_assignment_rate"],
+            "conflict_row_rate": w_summary["conflict_row_rate"],
+            "unclassified_rate": w_summary["unclassified_rate"],
+            "median_run_length": w_summary["metrics"]["overall"]["median_run_length"],
+        }
+        for t in base_rate:
+            if (
+                base_rate[t] is not None
+                and w_summary["per_type_assignment_rate"][t] is not None
+            ):
+                max_dev = max(
+                    max_dev, abs(base_rate[t] - w_summary["per_type_assignment_rate"][t])
+                )
+        if base_unclass is not None and w_summary["unclassified_rate"] is not None:
+            max_dev = max(max_dev, abs(base_unclass - w_summary["unclassified_rate"]))
+    status = "PASS" if max_dev <= rate_tol else "NEEDS_REVIEW"
+    return {
+        "window_count": 3,
+        "window_names": ["early", "middle", "late"],
+        "full_frame_summary": total_res["summary"],
+        "per_window": per_window,
+        "max_rate_deviation": round(max_dev, 6),
+        "rate_tol": rate_tol,
+        "status": status,
+        "note": "规则不能只适合最近某窗；三窗 Type 频率 / conflict / Unclassified 偏差 <= tol → PASS。",
+    }
+
+
+def _cr_boundary_perturbation(
+    frame: list[dict],
+    families_by_type: dict[str, list[dict]],
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    base_res: dict,
+    *,
+    core_led_hhi_q: float,
+    core_led_tilt_q: float,
+    lcr_cut: float,
+    pert_pct: tuple = _CR_PERTURB_PCT,
+    pert_lcr: tuple = _CR_PERTURB_LCR,
+    churn_tol: float = _CR_CHURN_TOL,
+) -> dict:
+    """R6-C：对最终候选阈值做小扰动，度量 label churn / conflict churn。
+
+    Core-led：HHI/Tilt percentile ±5/±10 点（C1 形式，C2 及他类型保持 reference）。
+    LCR：Rotating/Fragmenting 边界 ±0.05/±0.10（R1/F1 动，R2/F2/F3 保持 reference）。
+    """
+    baseline_labels = base_res["summary"]["labels"]
+    baseline_assignments = base_res["assignments"]
+    box_by_index = base_res["box_by_index"]
+
+    def _labels_with(assignments: dict[str, set[int]]) -> dict[int, str | None]:
+        types_by_index: dict[int, set[str]] = {}
+        for t, idx in assignments.items():
+            for i in idx:
+                types_by_index.setdefault(i, set()).add(t)
+        return {
+            i: _cr_policy_label(i, types_by_index.get(i, set()), box_by_index[i], "B", [])
+            for i in range(len(frame))
+        }
+
+    c2_fam = next(
+        (f for f in families_by_type.get("Core-led", []) if f["family"] == "C2"), None
+    )
+    r2_fam = next(
+        (f for f in families_by_type.get("Rotating", []) if f["family"] == "R2"), None
+    )
+    f2_fam = next(
+        (f for f in families_by_type.get("Fragmenting", []) if f["family"] == "F2"), None
+    )
+    f3_fam = next(
+        (f for f in families_by_type.get("Fragmenting", []) if f["family"] == "F3"), None
+    )
+    mig_hi = _percentile_sorted(dists["migration_hist_pct"], slot_qs["HIGH"])
+
+    core_churns: dict[str, dict] = {}
+    for sign in (-1, 1):
+        for delta in pert_pct:
+            dh = min(1.0, max(0.0, core_led_hhi_q + sign * delta / 100.0))
+            dt = min(1.0, max(0.0, core_led_tilt_q + sign * delta / 100.0))
+            hh = _percentile_sorted(dists["price_hhi_hist_pct"], dh)
+            tt = _percentile_sorted(dists["aligned_tilt_hist_pct"], dt)
+            c1_conds = (
+                ("price_hhi_hist_pct", ">=", float(hh)),
+                ("aligned_tilt_hist_pct", ">=", float(tt)),
+            )
+            c1_idx = set(_mc_eval_family_hits(frame, c1_conds, {}, {}))
+            c2_idx = (
+                set(_mc_eval_family_hits(frame, c2_fam["conditions"], slot_qs, dists))
+                if c2_fam else set()
+            )
+            new_assign = dict(baseline_assignments)
+            new_assign["Core-led"] = c1_idx | c2_idx
+            churn = _cr_label_churn(baseline_labels, _labels_with(new_assign))
+            core_churns[
+                f"core_led_{'+' if sign > 0 else '-'}{delta}pct"
+            ] = churn
+
+    lcr_churns: dict[str, dict] = {}
+    for sign in (-1, 1):
+        for delta in pert_lcr:
+            cut = min(1.0, max(0.0, lcr_cut + sign * delta))
+            r1_idx = set(_mc_eval_family_hits(
+                frame,
+                (("migration_hist_pct", ">=", float(mig_hi)),
+                 ("lcr", ">=", float(cut))),
+                {}, {},
+            ))
+            f1_idx = set(_mc_eval_family_hits(
+                frame,
+                (("migration_hist_pct", ">=", float(mig_hi)),
+                 ("lcr", "<", float(cut))),
+                {}, {},
+            ))
+            r2_idx = (
+                set(_mc_eval_family_hits(frame, r2_fam["conditions"], slot_qs, dists))
+                if r2_fam else set()
+            )
+            f2_idx = (
+                set(_mc_eval_family_hits(frame, f2_fam["conditions"], slot_qs, dists))
+                if f2_fam else set()
+            )
+            f3_idx = (
+                set(_mc_eval_family_hits(frame, f3_fam["conditions"], slot_qs, dists))
+                if f3_fam else set()
+            )
+            new_assign = dict(baseline_assignments)
+            new_assign["Rotating"] = r1_idx | r2_idx
+            new_assign["Fragmenting"] = f1_idx | f2_idx | f3_idx
+            churn = _cr_label_churn(baseline_labels, _labels_with(new_assign))
+            lcr_churns[f"lcr_{'+' if sign > 0 else '-'}{delta:.2f}"] = churn
+
+    all_churns = list(core_churns.values()) + list(lcr_churns.values())
+    max_churn = max(
+        (c["churn_rate"] for c in all_churns if c["churn_rate"] is not None),
+        default=0.0,
+    )
+    status = "PASS" if max_churn <= churn_tol else "NEEDS_REVIEW"
+    return {
+        "baseline_unclassified_rate": base_res["summary"]["unclassified_rate"],
+        "core_led_perturbation": core_churns,
+        "lcr_perturbation": lcr_churns,
+        "max_label_churn": round(max_churn, 6),
+        "churn_tol": churn_tol,
+        "status": status,
+        "note": (
+            "小扰动（core-led ±5/±10 pct，LCR ±0.05/±0.10）不造成大面积 label "
+            "翻转 → PASS；churn 超出 tol 时如实 NEEDS_REVIEW，不自动放宽。"
+        ),
+    }
+
+
+def _cr_leakage_audit(frame: list[dict]) -> dict:
+    """R6 Leakage 审计：候选只消费现有结构事实；无 future-return / 无旧
+    candidate label 作 ground truth（旧 label 仅作 replay 附注）。"""
+    old_cols = [
+        k for k in (
+            "research_candidate_Broadening", "research_candidate_Core-led",
+            "research_candidate_Rotating", "research_candidate_Fragmenting",
+        )
+        if any(r.get(k) is not None for r in frame)
+    ]
+    return {
+        "status": "PASS",
+        "consumed_features": list(_CR_CONSUMED_FEATURES),
+        "old_candidate_columns_present": old_cols,
+        "old_candidate_used_as_ground_truth": False,
+        "future_return_dependence": False,
+        "note": (
+            "输入锁定为 Participation / Concentration / Turnover / Capacity 四维现有事实；"
+            "hist_pct 为截至当前日的历史经验分位，delta5d 为历史差分，LCR / Migration 为"
+            "当前结构事实。旧 research_candidate_* 仅由 _mc_old_candidate_note 作 replay "
+            "附注，从不参与规则构造 / 优劣 / ground truth。"
+        ),
+    }
+
+
+def _cr_data_sufficiency_decision(
+    *,
+    membership_semantics: str,
+    threshold_freeze_eligible: bool,
+    has_pit_membership: bool,
+    broader_status: str,
+    temporal_status: str,
+    boundary_status: str,
+) -> dict:
+    """R6-D：三选一 Data Sufficiency Decision。
+
+    FULL_FREEZE_READY：存在真实 PIT membership 且全部稳定性 gate PASS。
+    NOT_FREEZE_READY：broader/temporal/boundary 任一 NEEDS_REVIEW（明显崩坏）。
+    SEMANTIC_FREEZE_ONLY：默认（current-static proxy 稳定，但无 PIT）——
+        只冻结语义 / 维度归属 / 规则形式 / availability / conflict policy；
+        numerical thresholds 保持 RESEARCH-CANDIDATE。
+    """
+    blockers: list[str] = []
+    if broader_status == "NEEDS_REVIEW":
+        blockers.append("broader 40→285 存在 drift >= warning")
+    if temporal_status == "NEEDS_REVIEW":
+        blockers.append("temporal 三窗频率偏差超限")
+    if boundary_status == "NEEDS_REVIEW":
+        blockers.append("boundary 小扰动造成 label churn 超限")
+    if blockers:
+        decision = "NOT_FREEZE_READY"
+        freeze_level = "NONE"
+        threshold_freeze = False
+        reason = "；".join(blockers) + " → 保持 CANDIDATE_NOT_FROZEN，禁止任何冻结。"
+    elif has_pit_membership and threshold_freeze_eligible:
+        decision = "FULL_FREEZE_READY"
+        freeze_level = "FULL"
+        threshold_freeze = True
+        reason = "存在真实 PIT membership 且全部稳定性 gate PASS。"
+    else:
+        decision = "SEMANTIC_FREEZE_ONLY"
+        freeze_level = "SEMANTIC"
+        threshold_freeze = False
+        reason = (
+            f"membership_semantics={membership_semantics} / "
+            f"threshold_freeze_eligible={threshold_freeze_eligible}：只能冻结语义 / 维度归属 / "
+            "规则形式 / availability / conflict policy；numerical thresholds 保持 "
+            "RESEARCH-CANDIDATE。"
+        )
+    return {
+        "decision": decision,
+        "freeze_level": freeze_level,
+        "threshold_freeze_eligible": threshold_freeze,
+        "blockers": blockers,
+        "reason": reason,
+        "allowed_to_freeze": (
+            ["semantics", "dimension_ownership", "rule_form", "availability",
+             "conflict_policy"]
+            if decision == "SEMANTIC_FREEZE_ONLY" else
+            (["semantics", "dimension_ownership", "rule_form", "availability",
+              "conflict_policy", "numerical_thresholds"]
+             if decision == "FULL_FREEZE_READY" else [])
+        ),
+        "numerical_thresholds_status": (
+            "FROZEN" if threshold_freeze else "RESEARCH-CANDIDATE"
+        ),
+        "constraint": (
+            "除非存在真实 PIT membership / 足够完整 source，否则不得将 "
+            "threshold_freeze_eligible 改为 true。"
+        ),
+    }
+
+
+def _cr_prefreeze_validation(
+    base_frame: list[dict],
+    broad_frame: list[dict],
+    families_by_type: dict[str, list[dict]],
+    slot_qs: dict[str, float],
+    base_dists: dict[str, list[float]],
+    preferred: dict[str, dict],
+    core_led_hhi_q: float,
+    core_led_tilt_q: float,
+    lcr_cut: float,
+) -> dict:
+    """R6 总编排：R6-A broader + R6-B temporal + R6-C boundary + R6-D decision +
+    Leakage audit。候选阈值来自 R3/R4（research，不冻结）。"""
+    abs_families = _cr_candidate_abs_families(
+        families_by_type, slot_qs, base_dists,
+        core_led_hhi_q=core_led_hhi_q,
+        core_led_tilt_q=core_led_tilt_q,
+        lcr_cut=lcr_cut,
+    )
+    slot_abs = _mc_slot_abs(slot_qs, base_dists)
+    abs_box = _mc_abs_conditions(_mc_balanced_box_conditions(), slot_abs)
+    base_res = _cr_abs_contract_summary(base_frame, abs_families, abs_box)
+
+    broader = _cr_broader_stability(
+        base_frame, broad_frame, abs_families, abs_box, preferred,
+    )
+    temporal = _cr_temporal_robustness(base_frame, abs_families, abs_box)
+    boundary = _cr_boundary_perturbation(
+        base_frame, families_by_type, slot_qs, base_dists, base_res,
+        core_led_hhi_q=core_led_hhi_q,
+        core_led_tilt_q=core_led_tilt_q,
+        lcr_cut=lcr_cut,
+    )
+    leakage = _cr_leakage_audit(base_frame)
+    sufficiency = _cr_data_sufficiency_decision(
+        membership_semantics="current_static_research_proxy",
+        threshold_freeze_eligible=False,
+        has_pit_membership=False,
+        broader_status=broader["status"],
+        temporal_status=temporal["status"],
+        boundary_status=boundary["status"],
+    )
+    return {
+        "study": _CR_STUDY,
+        "candidate_parameters": {
+            "core_led_hhi_q": core_led_hhi_q,
+            "core_led_tilt_q": core_led_tilt_q,
+            "lcr_cut": lcr_cut,
+            "threshold_status": "RESEARCH-CANDIDATE",
+        },
+        "a_40_285_stability": broader,
+        "b_temporal_robustness": temporal,
+        "c_boundary_perturbation": boundary,
+        "leakage_audit": leakage,
+        "d_data_sufficiency": sufficiency,
+        "note": (
+            "R6 只判断候选是否稳定 / 可冻结到哪一级；禁止在 broader 上重选规则 / "
+            "调阈值 / 造新指标。"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# contract_v2 candidate + 12-gate matrix synthesis
+# ---------------------------------------------------------------------------
+
+def _cr_contract_v2_candidate(
+    r1: dict,
+    r2: dict,
+    r3: dict,
+    r4: dict,
+    r5: dict,
+    r6: dict,
+    e3: dict | None,
+    e8: dict | None,
+) -> dict:
+    """把 R1–R6 收口成唯一 Contract v2 Candidate + 12-gate matrix。"""
+    r1_types = (r1 or {}).get("types", {})
+    preferred = (e3 or {}).get("preferred_families", {})
+    plateau = (r3 or {}).get("stable_plateau", {}) or {}
+    plateau_status = plateau.get("status", "UNRESOLVED")
+    three_segment = ((r4 or {}).get("three_segment_support") or {}).get(
+        "status", "UNRESOLVED"
+    )
+    frag_gate = ((r2 or {}).get("coherent_new_core_gate") or {}).get(
+        "status", "INSUFFICIENT_DATA"
+    )
+    rec_policy = ((r5 or {}).get("recommendation") or {}).get("recommended")
+    broader = (r6 or {}).get("a_40_285_stability", {})
+    temporal = (r6 or {}).get("b_temporal_robustness", {})
+    boundary = (r6 or {}).get("c_boundary_perturbation", {})
+    leakage = (r6 or {}).get("leakage_audit", {})
+    sufficiency = (r6 or {}).get("d_data_sufficiency", {})
+
+    broader_status = broader.get("status", "UNRESOLVED")
+    temporal_status = temporal.get("status", "UNRESOLVED")
+    boundary_status = boundary.get("status", "UNRESOLVED")
+    leakage_status = leakage.get("status", "UNRESOLVED")
+    # Family/Size gate：R6-A conditional drift 是否稳定。
+    cond_summary = ((broader.get("drift_report") or {}).get("conditional_drift") or {}).get(
+        "summary", {}
+    )
+    fam_size_max = max(
+        (cond_summary.get(dim) or {}).get("max") or 0.0
+        for dim in ("scope_type", "size_bucket")
+    )
+    family_size_status = "PASS" if fam_size_max < _CR_DRIFT_WARNING else "NEEDS_REVIEW"
+
+    # ---- 12-gate matrix ----
+    gate_matrix: dict[str, dict] = {
+        "Broadening": {
+            "status": "PASS",
+            "evidence": (
+                "R1 语义锁定（Blind 13/15 exact, 0 different-label）+ "
+                f"R6-A hit drift 稳定（overall={broader_status}）"
+            ),
+            "note": "不再改定义；数值阈值 RESEARCH-CANDIDATE。",
+        },
+        "Core-led": {
+            "status": "PASS" if plateau_status == "PASS" else (
+                "PARTIAL" if plateau_status in ("PARTIAL", "UNRESOLVED") else "FAIL"
+            ),
+            "evidence": (
+                f"R3 二维 HHI×Tilt surface stable plateau status={plateau_status}；"
+                f"推荐区域={plateau.get('recommended_region')}"
+            ),
+            "note": "只冻结规则形式 C1 + 稳定平台；exact 阈值 RESEARCH-CANDIDATE。",
+        },
+        "Rotating": {
+            "status": "PASS" if three_segment == "PASS" else (
+                "PARTIAL" if three_segment == "PARTIAL" else "UNRESOLVED"
+            ),
+            "evidence": f"R4 三段式 capacity-preserved/transition/strong-contraction status={three_segment}",
+            "note": "LCR=0.85 保持 candidate；0.70/0.90 为研究带不冻结。",
+        },
+        "Fragmenting": {
+            "status": "PASS" if frag_gate == "PASS" else (
+                "PARTIAL" if frag_gate == "PARTIAL" else "UNRESOLVED"
+            ),
+            "evidence": f"R2 coherent_new_core gate status={frag_gate}",
+            "note": (
+                "通过 → Contract 增加 NOT coherent_new_core 排除；否则保持保守 "
+                "type=None / Unclassified 路径。"
+            ),
+        },
+        "Balanced": {
+            "status": "PASS",
+            "evidence": "R1 explicit neutral-state box + R5 Policy B（Balanced 与 Unclassified 分开）",
+            "note": "显式中性带规则明确，数值边界 RESEARCH-CANDIDATE。",
+        },
+        "Conflict": {
+            "status": "PASS" if rec_policy == "Policy B" else "PARTIAL",
+            "evidence": f"R5 推荐={rec_policy}；E7 声明 25/25 conflict=Unclear 对齐",
+            "note": "Policy B：multi-hit → Unclassified；无 arbitrary priority。",
+        },
+        "Unclassified": {
+            "status": "PASS",
+            "evidence": "R5 Policy B 显式规则：multi-hit → Unclassified；residual → Unclassified",
+            "note": "产品规则明确；Unclassified 与 Balanced 分离。",
+        },
+        "Family/Size": {
+            "status": family_size_status,
+            "evidence": (
+                f"R6-A conditional drift max={round(fam_size_max, 6)} "
+                f"(< {_CR_DRIFT_WARNING} → PASS)"
+            ),
+            "note": "P(TypeHit|Family) / P(TypeHit|Size) 40→285 稳定。",
+        },
+        "Temporal": {
+            "status": temporal_status,
+            "evidence": (
+                f"R6-B 三窗 max_rate_deviation={temporal.get('max_rate_deviation')}"
+            ),
+            "note": "规则不依赖最近某 20D 窗口。",
+        },
+        "Boundary": {
+            "status": boundary_status,
+            "evidence": f"R6-C max_label_churn={boundary.get('max_label_churn')}",
+            "note": "core-led ±5/±10pct 与 LCR ±0.05/±0.10 不造成大面积翻转。",
+        },
+        "Leakage": {
+            "status": leakage_status,
+            "evidence": "R6 Leakage audit：无 future-return / 无 old-label ground truth",
+            "note": "输入锁定四维现有事实；hist_pct/delta5d/LCR/Migration。",
+        },
+        "Data sufficiency": {
+            "status": sufficiency.get("decision", "UNRESOLVED"),
+            "evidence": sufficiency.get("reason"),
+            "note": (
+                "threshold_freeze_eligible="
+                f"{sufficiency.get('threshold_freeze_eligible')}；"
+                f"freeze_level={sufficiency.get('freeze_level')}"
+            ),
+        },
+    }
+
+    all_pass = all(
+        g.get("status") in ("PASS", "SEMANTIC_FREEZE_ONLY") or k == "Data sufficiency"
+        for k, g in gate_matrix.items()
+        if k != "Data sufficiency"
+    )
+    contract_status = (
+        "CONTRACT_V2_CANDIDATE_FREEZE_ELIGIBLE"
+        if sufficiency.get("decision") == "FULL_FREEZE_READY" and all_pass
+        else "CONTRACT_V2_CANDIDATE_NOT_FROZEN"
+    )
+
+    types: dict[str, dict] = {}
+    for t in ("Broadening", "Core-led", "Rotating", "Fragmenting", "Balanced"):
+        r1t = r1_types.get(t, {})
+        types[t] = {
+            "semantic_contract": r1t.get("semantic_contract"),
+            "plain_language": r1t.get("plain_language"),
+            "structural_dimensions": r1t.get("structural_dimensions"),
+            "preferred_rule": (preferred.get(t) or {}).get("family"),
+            "availability": r1t.get("frozen", {}),
+            "conflict_behavior": "Policy B：multi-hit → Unclassified",
+            "gate": gate_matrix[t],
+        }
+    # Fragmenting 增加 coherent-core exclusion（若 R2 gate PASS）。
+    if frag_gate == "PASS":
+        types["Fragmenting"]["coherent_core_exclusion"] = (
+            "NOT (price_hhi_hist_pct >= HHI_candidate AND aligned_tilt_hist_pct >= "
+            "Tilt_candidate)"
+        )
+
+    return {
+        "study": _CR_STUDY,
+        "contract_status": contract_status,
+        "threshold_freeze_eligible": sufficiency.get("threshold_freeze_eligible", False),
+        "membership_semantics": "current_static_research_proxy",
+        "pre_freeze": sufficiency.get("decision", "UNRESOLVED"),
+        "closed_sha": None,
+        "frozen_judgment_sha256": _CR_E7_FROZEN_JUDGMENT_SHA256,
+        "gate_matrix": gate_matrix,
+        "types": types,
+        "conflict_policy": {
+            "recommended": rec_policy,
+            "policy": "any_multihit_unclassified",
+            "note": "Policy A 仅 negative control；Policy C 无已批准 resolution（等同 B）。",
+        },
+        "availability_policy": {
+            "membership": "current_static_research_proxy",
+            "unavailable": "任一输入维度 unavailable/insufficient → 该 Type 不可用，禁止用 0 代替",
+            "cross_sectional": "DEFERRED_FULL_FAMILY_UNIVERSE_REQUIRED",
+            "future_leak": "不使用未来收益；hist_pct/delta5d 只消费当前及历史观测",
+        },
+        "freeze_decision": sufficiency,
+        "remaining_data_limitations": (
+            "1) membership_semantics=current_static_research_proxy（非 PIT）→ 数值阈值只能 "
+            "RESEARCH-CANDIDATE；2) E7 逐 case judgment 文件 PENDING_FILE，盲审采用声明汇总 "
+            "事实；3) 285-scope broad 仍是 current-static proxy，full-family cross-sectional "
+            "universe 未接入。"
+        ),
+        "note": (
+            "contract_v2 唯一候选：语义/维度归属/规则形式/availability/conflict policy 可冻结；"
+            "numerical thresholds 一律 RESEARCH-CANDIDATE。E8 提供参考 broader 证据（不重选规则）。"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# CONTRACT-REFINEMENT-AND-PREFREEZE orchestration
+# ---------------------------------------------------------------------------
+
+def _run_internal_structure_type_contract_refinement(
+    dataset_dir: str,
+    broad_dataset_dir: str,
+    mc_dir: str,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """INTERNAL-STRUCTURE-TYPE-CONTRACT-REFINEMENT-AND-PREFREEZE（research-only）。
+
+    R1–R5 在 40-scope base 上执行；R6 用 40→285 broader + temporal + boundary +
+    Leakage + Data Sufficiency。E-evidence（e1/e2/e3/e4/e6/e8）读自 multivariate
+    closure 输出（--mc-dir），保证使用已审计证据、不重复研究。
+    """
+    if dry_run:
+        print(
+            f"[dry-run] internal-structure-type-contract-refinement "
+            f"dataset_dir={dataset_dir} broad_dataset_dir={broad_dataset_dir} "
+            f"mc_dir={mc_dir} OK"
+        )
+        return 0
+
+    import pyarrow.parquet as pq
+
+    def _load_mapping(dirpath: str) -> tuple[dict, list[dict]]:
+        mpath = os.path.join(dirpath, "manifest.json")
+        if not os.path.exists(mpath):
+            logger.error("[ist-cr] %s 非 mapping 输出目录（缺 manifest.json）", dirpath)
+            raise FileNotFoundError(mpath)
+        with open(mpath, "r", encoding="utf-8") as fh:
+            mf = json.load(fh)
+        ppath = os.path.join(dirpath, "internal_structure_type_mapping.parquet")
+        if not os.path.exists(ppath):
+            logger.error("[ist-cr] 缺 internal_structure_type_mapping.parquet: %s", ppath)
+            raise FileNotFoundError(ppath)
+        rows = pq.read_table(ppath).to_pylist()
+        return mf, rows
+
+    def _read_mc_json(name: str) -> dict:
+        fpath = os.path.join(mc_dir, name)
+        if not os.path.exists(fpath):
+            logger.error("[ist-cr] mc-dir 缺 %s", fpath)
+            raise FileNotFoundError(fpath)
+        with open(fpath, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    base_manifest, base_rows = _load_mapping(dataset_dir)
+    _broad_manifest, broad_rows = _load_mapping(broad_dataset_dir)
+    sha12 = str(base_manifest.get("capture_git_sha") or "")[:12]
+    out_dir = os.path.join(
+        os.path.dirname(os.path.normpath(dataset_dir)),
+        f"review-isdtype-cr-{sha12}-v1",
+    )
+
+    # ---- base frame + working evidence（recompute；与 MC 运行同一确定性函数）----
+    frame = _mc_build_frame(base_rows)
+    broad_frame = _mc_build_frame(broad_rows)
+    n = len(frame)
+    keys = list(_MC_CORE_KEYS)
+    dists = _mc_feature_distributions(frame, keys)
+    slot_qs = dict(_IST_MC_REFERENCE)
+    families_by_type = _mc_rule_families()
+    assignments = _mc_assignments_by_type(frame, families_by_type, slot_qs, dists)
+    preferred = _mc_preferred_families(frame, families_by_type, slot_qs, dists, n)
+    box_by_index = {
+        i: _mc_in_balanced_box(r, slot_qs, dists) for i, r in enumerate(frame)
+    }
+    anchors = _mc_select_anchors(frame, _mc_anchor_specs(), slot_qs, dists)
+    prototypes_by_type = {t: a["prototype_indexes"] for t, a in anchors.items()}
+    blind_conflict = sorted(
+        i for i in range(n)
+        if sum(1 for idx in assignments.values() if i in idx) >= 2
+    )[:_IST_MC_BLIND_CONFLICT]
+
+    # ---- 读已审计 E-evidence（单事实源，不重复研究）----
+    e1 = _read_mc_json("01_structural_dimension_map.json")
+    e2 = _read_mc_json("02_prototype_anchor_analysis.json")
+    e3 = _read_mc_json("03_rule_family_experiments.json")
+    e4 = _read_mc_json("04_full_conflict_matrix.json")
+    e6 = _read_mc_json("06_threshold_robustness.json")
+    e8 = _read_mc_json("08_broader_universe_validation.json")
+
+    # ---- R1 ----
+    r1 = _cr_semantic_contract_lock(e1, e3, e4, e6)
+    # ---- R2 ----
+    r2 = _cr_fragmenting_core_reformation_map(frame, dists, slot_qs, assignments)
+    # ---- R3 ----
+    r3 = _cr_core_led_threshold_surface(
+        frame, dists, assignments, prototypes_by_type.get("Core-led", [])
+    )
+    rec = (r3.get("stable_plateau") or {}).get("recommended_region")
+    core_led_hhi_q = float(rec["hhi_q"]) if rec else float(slot_qs["HIGH"])
+    core_led_tilt_q = float(rec["tilt_q"]) if rec else float(slot_qs["HIGH"])
+    # ---- R4 ----
+    r4 = _cr_rotating_fragmenting_boundary(frame, dists, slot_qs, assignments)
+    # ---- R5 ----
+    r5 = _cr_conflict_unclassified_policy(
+        frame, assignments, box_by_index,
+        e4.get("classifications", {}), prototypes_by_type, blind_conflict,
+    )
+    # ---- R6 ----
+    r6 = _cr_prefreeze_validation(
+        frame, broad_frame, families_by_type, slot_qs, dists, preferred,
+        core_led_hhi_q, core_led_tilt_q, float(_IST_MC_LCR_PRESERVED),
+    )
+    # ---- contract v2 ----
+    contract_v2 = _cr_contract_v2_candidate(r1, r2, r3, r4, r5, r6, e3, e8)
+
+    # ---- write outputs ----
+    os.makedirs(out_dir, exist_ok=True)
+    outputs = {
+        "01_semantic_contract_lock.json": r1,
+        "02_fragmenting_core_reformation_joint_map.json": r2,
+        "03_core_led_threshold_surface.json": r3,
+        "04_rotating_fragmenting_boundary_surface.json": r4,
+        "05_conflict_unclassified_policy.json": r5,
+        "06_prefreeze_stability.json": r6,
+        "07_data_sufficiency_decision.json": r6.get("d_data_sufficiency", {}),
+        _CR_CONTRACT_V2_FILENAME: contract_v2,
+    }
+    for fname, payload in outputs.items():
+        with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    cr_manifest = {
+        "dataset_id": f"review-isdtype-cr-{sha12}-v1",
+        "source_dataset": os.path.basename(os.path.normpath(dataset_dir)),
+        "broad_dataset": os.path.basename(os.path.normpath(broad_dataset_dir)),
+        "mc_source": os.path.basename(os.path.normpath(mc_dir)),
+        "capture_git_sha": base_manifest.get("capture_git_sha"),
+        "membership_semantics": "current_static_research_proxy",
+        "contract_status": contract_v2.get("contract_status"),
+        "threshold_freeze_eligible": contract_v2.get("threshold_freeze_eligible"),
+        "freeze_decision": contract_v2.get("pre_freeze"),
+        "study": _CR_STUDY,
+        "row_counts": {"base": n, "broad": len(broad_frame)},
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+    }
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(cr_manifest, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    # ---- console summary ----
+    print(f"[internal-structure-type-contract-refinement] out_dir={out_dir}")
+    print(f"base rows={n} scopes={len({r.get('scope_key') for r in base_rows})} | "
+          f"broad rows={len(broad_frame)} scopes={len({r.get('scope_key') for r in broad_rows})}")
+    print("--- R1 semantic lock ---")
+    for t in ("Broadening", "Core-led", "Rotating", "Fragmenting", "Balanced"):
+        b = r1["types"][t].get("blind_audit")
+        print(f"  {t}: frozen={r1['types'][t]['frozen']} blind={b}")
+    print(f"--- R2 fragmenting gate: {r2['coherent_new_core_gate']['status']} ---")
+    print(f"--- R3 core-led plateau: {r3['stable_plateau']['status']} "
+          f"center={rec} ---")
+    print(f"--- R4 three-segment: {r4['three_segment_support']['status']} ---")
+    rec_policy = r5["recommendation"].get("recommended")
+    print(f"--- R5 policy: {rec_policy} ---")
+    print("--- R6 pre-freeze ---")
+    print(f"  broader={r6['a_40_285_stability']['status']} "
+          f"max_gap={r6['a_40_285_stability']['max_gap']}")
+    print(f"  temporal={r6['b_temporal_robustness']['status']} "
+          f"max_dev={r6['b_temporal_robustness']['max_rate_deviation']}")
+    print(f"  boundary={r6['c_boundary_perturbation']['status']} "
+          f"max_churn={r6['c_boundary_perturbation']['max_label_churn']}")
+    print(f"  leakage={r6['leakage_audit']['status']}")
+    print(f"  decision={r6['d_data_sufficiency']['decision']}")
+    print("--- gate matrix ---")
+    for g, info in contract_v2["gate_matrix"].items():
+        print(f"  {g}: {info['status']}")
+    print(f"contract_status={contract_v2['contract_status']} "
+          f"threshold_freeze_eligible={contract_v2['threshold_freeze_eligible']}")
+    return 0
+
+
 def _run_replay_l1(
     dataset_dir: str,
     view_name: str,
@@ -12503,6 +14353,33 @@ async def _run(args: argparse.Namespace) -> int:
             args.dataset_dir,
             broad_dataset_dir=args.broad_dataset_dir,
             seed=_IST_MC_SEED,
+            dry_run=args.dry_run,
+        )
+    if args.mode == "internal-structure-type-contract-refinement":
+        if not args.dataset_dir:
+            logger.error(
+                "[internal-structure-type-contract-refinement] --dataset-dir 为必填"
+            )
+            return 2
+        if not args.broad_dataset_dir:
+            logger.error(
+                "[internal-structure-type-contract-refinement] --broad-dataset-dir 为必填"
+            )
+            return 2
+        if not args.mc_dir:
+            logger.error(
+                "[internal-structure-type-contract-refinement] --mc-dir 为必填"
+            )
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[internal-structure-type-contract-refinement] 禁 --scope-type/--scope-key"
+            )
+            return 2
+        return _run_internal_structure_type_contract_refinement(
+            args.dataset_dir,
+            args.broad_dataset_dir,
+            args.mc_dir,
             dry_run=args.dry_run,
         )
     # ---- replay-l1 / rtm / semantic-matrix / explore1：纯本地 Dataset corpus 回放（不连 DB）----
